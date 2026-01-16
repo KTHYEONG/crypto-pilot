@@ -10,20 +10,35 @@ from dotenv import load_dotenv
 # Project Root Setup
 sys.path.append(os.path.join(os.path.dirname(__file__), '../../'))
 
+from datetime import datetime
+import pandas as pd
+import numpy as np
+import logging
+from logging.handlers import RotatingFileHandler # [추가] 로그 회전 핸들러
+
 from config.settings import BINANCE_API_KEY, BINANCE_SECRET
 from src.data.binance_client import BinanceClient
 from src.strategy.strategies import UltimateStrategy
 
-# 로깅 설정
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler("real_trader.log", encoding='utf-8'),
-        logging.StreamHandler()
-    ]
-)
+# --- 로깅 설정 (자동 회전 적용) ---
 logger = logging.getLogger("RealTrader")
+logger.setLevel(logging.INFO)
+
+# 파일 핸들러 (10MB마다 새 파일, 최대 5개 유지 -> 최대 50MB 사용)
+file_handler = RotatingFileHandler(
+    "real_trader.log", 
+    maxBytes=10*1024*1024, # 10MB
+    backupCount=5,
+    encoding='utf-8'
+)
+file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+
+# 콘솔 핸들러
+stream_handler = logging.StreamHandler()
+stream_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+
+logger.addHandler(file_handler)
+logger.addHandler(stream_handler)
 
 # --- 🏆 BTC UNIVERSAL STRATEGY PARAMETERS (VERIFIED) ---
 # 2026-01-16 검증 완료: Sharpe 2.56, MDD -20.5%, p-value 0.01 (PASSED)
