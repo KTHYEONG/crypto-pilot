@@ -123,9 +123,13 @@ def objective(trial, strategy_cls, strategy_name, data_maps, base_search_space, 
             score -= 200
             
         # 2. Trade Count (Statistical Significance)
-        if trades < 30: 
+        # Relax requirement for Daily (1d) timeframe as it naturally has fewer trades
+        min_trades_strict = 15 if selected_tf == '1d' else 30
+        min_trades_soft = 25 if selected_tf == '1d' else 50
+        
+        if trades < min_trades_strict: 
             score -= 2000
-        elif trades < 50:
+        elif trades < min_trades_soft:
             score -= 500
         elif trades >= 120:
             score += 150
@@ -197,7 +201,8 @@ def main():
     logging.getLogger('src.backtest.engine').setLevel(logging.WARNING)
     
     # Load Data for ALL symbols
-    timeframes = ['3m', '5m', '15m', '30m', '1h', '2h', '4h']
+    # Added '1d' for Swing Strategy support
+    timeframes = ['3m', '5m', '15m', '30m', '1h', '2h', '4h', '1d']
     print(f"Loading data for timeframes: {timeframes}")
     
     data_maps = {}
@@ -210,7 +215,17 @@ def main():
         print(f"Loading {symbol}...")
         data_maps[symbol] = load_all_timeframes(symbol, BACKTEST_START_DATE, BACKTEST_END_DATE, timeframes)
     
-    study_name = "optimize_Ultimate_Universal"
+    # [UPDATE] Dynamic Study Name Generation
+    if len(symbols) == 1:
+        # Asset-Specific Optimization
+        clean_symbol = symbols[0].replace('/', '_')
+        study_name = f"optimize_Ultimate_{clean_symbol}_v1"
+        print(f"🎯 Single Asset Optimization Mode: {symbols[0]}")
+    else:
+        # Universal Optimization (Existing)
+        study_name = "optimize_Ultimate_Universal_v2"
+        print(f"🌌 Universal Optimization Mode: {len(symbols)} symbols")
+
     storage_name = f"sqlite:///{study_name}.db"
     
     # [CRITICAL UPDATE] DB Locking Fix
@@ -230,16 +245,15 @@ def main():
             conn.execute("PRAGMA journal_mode=WAL;")
             conn.execute("PRAGMA synchronous=NORMAL;")
             conn.execute("PRAGMA busy_timeout=120000;")
-        print("✅ SQLite WAL mode & Tuning applied.")
+        print(f"✅ SQLite WAL mode applied to {db_path}")
     except Exception as e:
         print(f"⚠️ Warning: Could not tune SQLite: {e}")
     
     study = optuna.create_study(study_name=study_name, storage=storage, direction="maximize", load_if_exists=True)
     
     print(f"\n{'='*70}")
-    print(f"🚀 UNIVERSAL STRATEGY DISCOVERY STARTING")
-    print(f"🌌 Multi-Symbol Optimization: {', '.join(symbols)}")
-    print(f"📊 Target: Find strategy that works across ALL symbols")
+    print(f"🚀 STRATEGY DISCOVERY STARTING for {study_name}")
+    print(f"📊 Target Symbols: {', '.join(symbols)}")
     print(f"💻 Parallel Jobs: {args.jobs}")
     print(f"📈 Total Trials: {args.trials}")
     print(f"{'='*70}\n")
