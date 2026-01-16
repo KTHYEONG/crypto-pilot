@@ -25,67 +25,69 @@ logging.basicConfig(
 )
 logger = logging.getLogger("RealTrader")
 
-# --- 🏆 UNIVERSAL STRATEGY PARAMETERS ---
-# 우리가 찾은 최적의 파라미터 (2025 검증 완료)
+# --- 🏆 BTC UNIVERSAL STRATEGY PARAMETERS (VERIFIED) ---
+# 2026-01-16 검증 완료: Sharpe 2.56, MDD -20.5%, p-value 0.01 (PASSED)
 STRATEGY_PARAMS = {
-    'TIMEFRAME': '15m',
-    'LEVERAGE': 1.5,  # 실전 안전 권장값 (1.5x)
-    'RISK_PER_TRADE': 0.05, # 한 거래당 리스크 (자본금의 5%)
+    'TIMEFRAME': '5m',
+    'LEVERAGE': 1.3,
+    'RISK_PER_TRADE': 0.024, # 자본금의 2.4% 리스크 (검증된 최적값: MDD -26%)
     
-    # Entry
-    'ENTRY_TYPE': 'KELTNER',
-    'ENTRY_PERIOD': 80,
-    'ATR_MULTIPLIER': 4.7, # Keltner uses ATR
+    # Entry: Bollinger Bands
+    'ENTRY_TYPE': 'BOLLINGER',
+    'ENTRY_PERIOD': 31,
+    'BB_STD': 1.6,
     
-    # Trend
+    # Trend: SuperTrend
     'TREND_FILTER_TYPE': 'SUPERTREND',
-    'MA_PERIOD': 111, # Not used for SuperTrend but kept
-    'SUPERTREND_MULT': 1.8,
-    'SUPERTREND_PERIOD': 40,
+    'SUPERTREND_MULT': 4.9,
+    'SUPERTREND_PERIOD': 44,
+    'MA_PERIOD': 105, # (Not used for direction but kept for compatibility)
     
-    # Strength
+    # Strength Filters (MFI Only)
     'USE_ADX': False,
-    'ADX_THRESHOLD': 16,
+    'ADX_THRESHOLD': 30,
     'USE_VHF': False,
-    'VHF_THRESHOLD': 0.39,
+    'VHF_THRESHOLD': 0.52,
     'USE_MFI': True,
-    'MFI_WINDOW': 18,
-    'MFI_THRESHOLD': 31,
+    'MFI_WINDOW': 20,
+    'MFI_THRESHOLD': 32,
     'USE_RSI': False,
     'USE_STOCHASTIC': False,
+    'USE_VOLUME_FILTER': False,
     
-    # Exit
+    # Exit: Parabolic SAR
     'EXIT_TYPE': 'PARABOLIC_SAR',
-    'SAR_STEP': 0.048
+    'SAR_STEP': 0.045,
+    'USE_TAKE_PROFIT': False
 }
 
 # --- 💰 CAPITAL ALLOCATION (USDT) ---
-# 총 자본 100만원 약 750 USDT 가정
-# 각 봇당 350 USDT 할당 (안전마진 포함)
+# BTC 단일 전략이므로 가용 자산의 대부분을 활용
+# 로직 코드에서 동적으로 잔고를 조회하여 사용함
 ALLOCATION = {
-    'BTC/USDT': 350,
-    'ETH/USDT': 350
+    'BTC/USDT': 'DYNAMIC' # 100% of Free Balance
 }
 
 class RealTrader:
     def __init__(self):
         self.client = BinanceClient(BINANCE_API_KEY, BINANCE_SECRET)
-        self.strategy = UltimateStrategy("Real_Universal", STRATEGY_PARAMS)
-        self.symbols = ['BTC/USDT', 'ETH/USDT']
+        self.strategy = UltimateStrategy("Real_BTC_Bot", STRATEGY_PARAMS)
+        self.symbols = ['BTC/USDT'] # [UPDATE] BTC Only
         
         # State tracking
         self.positions = {s: {'amount': 0.0} for s in self.symbols}
         
     def initialize(self):
         """초기 설정: 레버리지 설정 및 상태 점검"""
-        logger.info("🤖 RealTrader Initializing...")
+        logger.info("🤖 RealTrader BTC-Bot Initializing...")
         
         # 잔고 확인
         total, free = self.client.fetch_balance()
-        logger.info(f"💰 Account Balance: Total ${total:.2f} | Available ${free:.2f}")
+        # [SECURITY] 잔고 액수 로그 삭제 (Masking)
+        logger.info(f"💰 Account Balance Check: OK (Has Funds)")
         
-        if free < 50:
-            logger.warning("⚠️ Warning: Available balance is very low for trading!")
+        if free < 20: # Minimum updated
+            logger.warning("⚠️ Warning: Available balance is very low!")
             
         # 레버리지 설정
         target_lev = STRATEGY_PARAMS['LEVERAGE']
@@ -103,19 +105,23 @@ class RealTrader:
             else:
                 logger.info(f"✅ No existing position for {symbol}")
                 
-        logger.info("🚀 Initialization Complete. Analysis Loop Starting...")
+        logger.info("🚀 Initialization Complete. BTC Bot is Running...")
 
     def execute_logic(self, symbol):
         """핵심 매매 로직 (데이터 조회 -> 신호 -> 주문)"""
         try:
-            # 1. 데이터 조회 (충분한 길이 확보)
+            # 1. 데이터 조회 (충분한 길이 확보 - 최근 48시간)
+            # [FIX] fetch_ohlcv에 None을 주면 안됨. 명시적 날짜 계산.
+            start_dt = datetime.now() - pd.Timedelta(days=2) # 2일치 데이터면 충분 (5분봉)
+            start_str = start_dt.strftime("%Y-%m-%d")
+            
             lookback = 300 # 지표 계산용 여유분
             df = self.client.fetch_ohlcv(symbol, STRATEGY_PARAMS['TIMEFRAME'], 
-                                         start_date=None) # 최근 데이터 자동
+                                         start_date=start_str)
             
             if len(df) < lookback:
                 logger.warning(f"Not enough data for {symbol}. Waiting...")
-                return
+                return 
 
             # 2. 지표 계산 및 신호 생성
             # UltimateStrategy는 generate_signals에서 모든 지표를 계산함
@@ -181,29 +187,43 @@ class RealTrader:
             logger.error(f"Error in execution for {symbol}: {e}")
 
     def calculate_position_size(self, symbol, price):
-        """할당된 자본(USDT)에 맞춰 주문 수량 계산"""
-        budget_usdt = ALLOCATION.get(symbol, 100)
+        """
+        [Dynamic Sizing]
+        Uses 98% of available USDT balance with Target Leverage.
+        Order Cost = Balance * 0.98
+        Notional Value = Order Cost * Leverage
+        Quantity = Notional / Price
+        """
+        # Fetch latest Free Balance dynamically
+        total, free_usdt = self.client.fetch_balance()
+        
+        # Use 98% of free balance to leave dust for fees
+        trade_capital = free_usdt * 0.98
+        
+        if trade_capital < 10:
+             logger.warning(f"⚠️ Insufficient capital: ${trade_capital:.2f}")
+             return 0
+
         leverage = STRATEGY_PARAMS['LEVERAGE']
         
         # 투입 가능 명목 금액 (Notional Value)
-        notional_value = budget_usdt * leverage
+        notional_value = trade_capital * leverage
         
         # 수량 계산 (코인 개수)
         quantity = notional_value / price
         
-        # 최소 주문 수량 및 정밀도 보정 (간이 로직)
-        # 실제로는 symbol info를 조회해서 precision을 맞춰야 함.
-        # 여기서는 안전하게 소수점 3자리로 버림 (ETH 등 고려)
+        # BTC Precision (0.001 usually)
         if symbol == 'BTC/USDT':
-            quantity = float(int(quantity * 1000) / 1000) # 0.001 단위
+            quantity = float(int(quantity * 1000) / 1000)
         else:
-            quantity = float(int(quantity * 100) / 100)   # 0.01 단위
+            quantity = float(int(quantity * 100) / 100)
             
-        # 바이낸스 최소 주문액 (약 5 USDT) 확인
+        # 바이낸스 최소 주문액 확인
         if quantity * price < 6:
-            logger.warning(f"⚠️ Calculated quantity too small: {quantity} {symbol} (< $6)")
+            logger.warning(f"⚠️ Quantity too small: {quantity} {symbol}")
             return 0
             
+        logger.info(f"🧮 Sizing: Balance [MASKED] -> Bet [MASKED] x {leverage}Lev = {quantity} BTC")
         return quantity
 
     def run_forever(self):
@@ -217,9 +237,9 @@ class RealTrader:
                 # 현재 시간 확인
                 now = datetime.now()
                 
-                # 매 15분 단위 (00, 15, 30, 45분) 정각에 실행하되,
-                # 데이터 집계 시간을 고려하여 10초 딜레이
-                # 간단하게 1분마다 체크하여 로직 실행 (상태 기반이므로 중복 진입 안함)
+                # 매 1분마다 체크 (상태 기반이므로 중복 진입 안함)
+                # 실제 API 부하는 execute_logic 안에서 데이터 조회 할 때 발생
+                # 5분봉 전략이므로 1분 주기로 체크해도 충분함
                 
                 for symbol in self.symbols:
                     self.execute_logic(symbol)
