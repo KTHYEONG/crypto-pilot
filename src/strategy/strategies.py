@@ -215,6 +215,15 @@ class UltimateStrategy(Strategy):
             sar_line, _ = calculate_parabolic_sar(df, step=step)
             df['parabolic_sar'] = sar_line
             
+        # --- 6. Volume Filter (Ratio) ---
+        if self.params.get('USE_VOLUME_FILTER', False):
+            vol_ma_period = self.params.get('VOLUME_MA_PERIOD', 20)
+            # Avoid division by zero
+            vol_ma = df['volume'].rolling(window=vol_ma_period).mean()
+            df['volume_ratio'] = df['volume'] / vol_ma.replace(0, 1)
+        else:
+            df['volume_ratio'] = 100.0 # Default Pass (High ratio)
+            
         return df
 
 # --- Legacy Strategies ---
