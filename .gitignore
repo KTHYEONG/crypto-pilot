@@ -140,6 +140,10 @@ celerybeat.pid
 # SageMath parsed files
 *.sage.py
 
+# .db
+spot_strategy.db
+futures_strategy.db
+
 # agent
 .agent/
 
