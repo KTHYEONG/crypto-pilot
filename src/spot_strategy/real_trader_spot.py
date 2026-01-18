@@ -63,7 +63,12 @@ class SpotTrader:
             return {
                 'TIMEFRAME': '1h',
                 'ENTRY_TYPE': 'BOLLINGER', # Fallback defaults
-                # ... Add minimal defaults if needed
+                'ATR_PERIOD': 14,
+                'STRENGTH_FILTER_PERIOD': 14,
+                'EXIT_TYPE': 'ATR',
+                'STOP_LOSS_TYPE': 'FIXED',
+                'STOP_LOSS_PCT': 0.02,
+                'RISK_PER_TRADE': 0.02
             }
 
     def run(self):
@@ -71,6 +76,8 @@ class SpotTrader:
         try:
             while True:
                 try:
+                    # Update Balance Cap dynamically
+                    # ...
                     for symbol in self.symbols:
                         self._process_symbol(symbol)
                     
@@ -121,7 +128,7 @@ class SpotTrader:
         entry_price = symbol_state.get('entry_price', 0.0)
         
         # 1. Fetch Data
-        df = self.client.fetch_ohlcv(symbol, self.timeframe, count=200)
+        df = self.client.fetch_ohlcv(symbol, self.timeframe, limit=200)
         if df is None or len(df) < 50:
             logger.warning(f"⚠️ Insufficient data for {symbol}")
             return
@@ -155,9 +162,8 @@ class SpotTrader:
             state[symbol] = symbol_state
             self._save_state(state)
         
-        # 4. Trading Logic
+        # 4. Trading Logic (EXIT LOGIC SKIPPED, ALREADY REPLACED ABOVE)
         
-        # A. Exit Logic
         if in_position:
             should_sell = False
             reason = ""
@@ -166,32 +172,62 @@ class SpotTrader:
             trend_dir = curr['trend_direction']
             atr_val = curr['atr']
             
+            # Load Entry ATR for Consistent Exit
+            entry_atr = symbol_state.get('entry_atr', atr_val) # Fallback to current if missing
+            
             # Params
             sl_pct = self.params.get('STOP_LOSS_PCT', 0.02)
             atr_sl_mult = self.params.get('ATR_STOP_LOSS_MULT', 1.0)
             use_tp = self.params.get('USE_TAKE_PROFIT', False)
             tp_mult = self.params.get('TAKE_PROFIT_ATR_MULT', 2.0)
             sl_type = self.params.get('STOP_LOSS_TYPE', 'FIXED')
+            exit_type = self.params.get('EXIT_TYPE', 'ATR')
+            atr_mult = self.params.get('ATR_MULTIPLIER', 3.0)
+            
+            # --- State Management for Trailing Stop ---
+            highest_high = symbol_state.get('highest_high', entry_price)
+            current_high = max(curr['high'], last_price)
+            if current_high > highest_high:
+                highest_high = current_high
+                symbol_state['highest_high'] = highest_high
+                self._save_state(state) # Persist updates
 
-            # 1. Trend Reversal
-            if trend_dir == -1:
-                should_sell = True
-                reason = "Trend Reversal (Down)"
-                
+            # 1. Main Trend Exit (ATR Trailing or SAR)
+            if exit_type == 'ATR':
+                # ATR Trailing Stop Logic using ENTRY ATR (Snapshot)
+                trailing_stop = highest_high - (entry_atr * atr_mult)
+                if last_price < trailing_stop:
+                    should_sell = True
+                    reason = f"ATR Trailing Stop (Hit {trailing_stop:,.0f})"
+                    
+            elif exit_type == 'PARABOLIC_SAR':
+                # Parabolic SAR Exit
+                p_sar = curr.get('parabolic_sar', 0)
+                if p_sar > 0 and last_price < p_sar:
+                    should_sell = True
+                    reason = f"Parabolic SAR Exit (Hit {p_sar:,.0f})"
+
             # 2. Stop Loss Check
             stop_price = 0.0
             if sl_type == 'ATR':
-                stop_price = entry_price - (atr_val * atr_sl_mult)
+                # Use Entry ATR for fixed SL distance
+                stop_price = entry_price - (entry_atr * atr_sl_mult)  
             else:
                 stop_price = entry_price * (1 - sl_pct)
             
-            if last_price < stop_price:
+            if not should_sell and last_price < stop_price:
                 should_sell = True
-                reason = f"Stop Loss (Hit {stop_price:,.0f})"
+                reason = f"Safety Stop Loss (Hit {stop_price:,.0f})"
+
+            # 3. Trend Reversal
+            if not should_sell and trend_dir == -1:
+                should_sell = True
+                reason = "Trend Reversal (Down)"
                 
-            # 3. Take Profit Check
-            if use_tp:
-                target_price = entry_price + (atr_val * tp_mult)
+            # 4. Take Profit Check
+            if not should_sell and use_tp:
+                # Use Entry ATR for TP distance
+                target_price = entry_price + (entry_atr * tp_mult)
                 if last_price > target_price:
                     should_sell = True
                     reason = f"Take Profit (Hit {target_price:,.0f})"
@@ -201,7 +237,6 @@ class SpotTrader:
                 res = self.client.place_order(symbol, 'sell', amount=balance_coin)
                 if res and 'uuid' in res:
                     self._send_telegram(f"🔻 SELL {symbol}\nPrice: {last_price:,.0f}\nReason: {reason}")
-                    # Clear State
                     state[symbol] = {}
                     self._save_state(state)
                 else:
@@ -225,17 +260,11 @@ class SpotTrader:
             if is_uptrend and breakout and strong_momentum and vol_ok:
                 total_krw, free_krw = self.client.fetch_balance()
                 
-                # Dynamic Position Sizing
-                # If we track N symbols, we allocate 1/N of Total Capital to each.
-                # Or we can just use free_krw if we want to be aggressive but sequentially limited.
-                # Safer: Target Allocation = Total Equity / len(self.symbols)
-                
                 num_symbols = len(self.symbols)
                 target_allocation = total_krw / num_symbols if num_symbols > 0 else 0
                 
-                # Check if we already have exposure (although 'in_position' check above should handle strictly)
-                # We use free_krw but cap it at target_allocation
-                invest_amount = min(free_krw * 0.99, target_allocation)
+                max_cap = 100_000_000.0
+                invest_amount = min(free_krw * 0.99, target_allocation, max_cap)
                 
                 if invest_amount > 5000:
                     logger.info(f"🟢 BUY SIGNAL for {symbol} | Price: {last_price:,.0f} | Invest: {invest_amount:,.0f} KRW")
@@ -244,11 +273,13 @@ class SpotTrader:
                     if res and 'uuid' in res:
                         self._send_telegram(f"🚀 BUY {symbol}\nPrice: {last_price:,.0f}\nAmt: {invest_amount:,.0f}")
                         
-                        # Save State immediately
+                        # Save State immediately including ATR Snapshot
                         state[symbol] = {
                             'entry_price': last_price,
                             'entry_time': datetime.now().isoformat(),
-                            'amount': invest_amount # approx
+                            'amount': invest_amount,
+                            'entry_atr': curr['atr'], # SAVE ATR SNAPSHOT
+                            'highest_high': last_price # Init Highest High
                         }
                         self._save_state(state)
                     else:
