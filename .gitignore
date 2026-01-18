@@ -147,6 +147,9 @@ futures_strategy.db
 # logs
 logs/
 
+# Explain
+Explain/
+
 # agent
 .agent/
 
