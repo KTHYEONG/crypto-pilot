@@ -1,7 +1,8 @@
+
 from abc import ABC, abstractmethod
 import pandas as pd
 import numpy as np
-from .indicators import add_common_indicators
+from .indicators_futures import add_common_indicators
 
 class Strategy(ABC):
     def __init__(self, name, params):
@@ -49,7 +50,7 @@ class MasterStrategy(Strategy):
             
         return df
 
-from .indicators_advanced import (
+from .indicators_advanced_futures import (
     calculate_sma, calculate_ema, calculate_hma, calculate_dema, calculate_tema,
     calculate_supertrend, calculate_atr, calculate_bollinger_bands,
     calculate_keltner_channel, calculate_adx, calculate_vhf, calculate_parabolic_sar,
@@ -59,6 +60,7 @@ from .indicators_advanced import (
 class UltimateStrategy(Strategy):
     """
     The Ultimate Strategy: Dynamic combinations of all major indicators.
+    (Aligned with Spot V2 Logic)
     """
     def generate_signals(self, df):
         # --- 1. Basic Indicators ---
@@ -92,7 +94,6 @@ class UltimateStrategy(Strategy):
             # CCI Breakout (Realistic Implementation)
             # Entry when CCI crosses above 100 (Long) or below -100 (Short)
             # Use PREVIOUS candle's high/low as realistic entry trigger
-            # This prevents look-ahead bias (using current close for entry decision)
             
             df['cci'] = calculate_cci(df, window=entry_period)
             
@@ -100,7 +101,6 @@ class UltimateStrategy(Strategy):
             cci_prev = df['cci'].shift(1)
             
             # LONG Trigger: If previous CCI > 100, enter at breakout above previous high
-            # This simulates "CCI confirmed bullish, now waiting for price breakout"
             prev_high = df['high'].shift(1)
             df['entry_upper'] = np.where(cci_prev > 100, prev_high, np.inf)
             
@@ -187,7 +187,8 @@ class UltimateStrategy(Strategy):
             df.loc[df['mfi'] < mfi_thresh, 'strength_filter'] = 0
             
         elif strength_type == 'RSI':
-            rsi_overbought = self.params.get('RSI_OVERBOUGHT', 75)
+            # Use Futures specific parameter if available, else default to standard
+            rsi_overbought = self.params.get('RSI_OVERBOUGHT_FUTURES', self.params.get('RSI_OVERBOUGHT', 75))
             rsi_oversold = self.params.get('RSI_OVERSOLD', 25)
             strength_period = self.params.get('STRENGTH_FILTER_PERIOD', 14)
             df['rsi'] = calculate_rsi(df['close'], window=strength_period)
@@ -222,5 +223,3 @@ class UltimateStrategy(Strategy):
             df['volume_ratio'] = 100.0 # Default Pass (High ratio)
             
         return df
-
-# --- Legacy Strategies ---
