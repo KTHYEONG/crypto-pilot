@@ -89,11 +89,21 @@ ULTIMATE_SEARCH_SPACE = {
     'ATR_MULTIPLIER': {'type': 'float', 'low': 2.0, 'high': 6.0, 'step': 0.5},
     
     # Position Sizing Risk (Split by Market Type)
-    # FUTURES: 0.05% ~ 5% (Leverage assumed)
-    'RISK_PER_TRADE_FUTURES': {'type': 'float', 'low': 0.0005, 'high': 0.05, 'step': 0.0005},
+    # FUTURES: 0.5% ~ 5% (Leverage assumed) for realistic sizing with small capital
+    'RISK_PER_TRADE_FUTURES': {'type': 'float', 'low': 0.005, 'high': 0.05, 'step': 0.005},
     
     # SPOT: 30% ~ 100% (No Leverage)
     'RISK_PER_TRADE_SPOT': {'type': 'float', 'low': 0.3, 'high': 1.0, 'step': 0.1},
+
+    # === FUTURES SPECIFIC OVERRIDES (Improving Search Efficiency) ===
+    # Optimized Leverage Step for Futures
+    'LEVERAGE': {'type': 'float', 'low': 0.5, 'high': 3.0, 'step': 0.5},
+    
+    # Optimized TP for Futures (Allow shorter profits)
+    'TAKE_PROFIT_ATR_MULT_FUTURES': {'type': 'float', 'low': 1.5, 'high': 6.0, 'step': 0.5},
+    
+    # Optimized RSI for Futures (Allow stronger trend extremes)
+    'RSI_OVERBOUGHT_FUTURES': {'type': 'int', 'low': 65, 'high': 90, 'step': 5},
 }
 
 COMMON_SEARCH_SPACE = {} # For compatibility with existing loader
