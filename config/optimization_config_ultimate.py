@@ -31,68 +31,69 @@ ULTIMATE_SEARCH_SPACE = {
     # Range extended down to 5 to allow short-term trend detection
     'MA_PERIOD': {'type': 'int', 'low': 5, 'high': 200, 'step': 1},  # 5 → 1
     
-    # SuperTrend specific parameters
-    'SUPERTREND_MULT': {'type': 'float', 'low': 1.0, 'high': 5.0, 'step': 0.1},  # 0.5 → 0.1
-    'SUPERTREND_PERIOD': {'type': 'int', 'low': 5, 'high': 50, 'step': 1},  # 5 → 1
+    'SUPERTREND_MULT': {'type': 'float', 'low': 1.0, 'high': 5.0, 'step': 0.1},
+    'SUPERTREND_PERIOD': {'type': 'int', 'low': 5, 'high': 50, 'step': 1},
     
-    # === STRENGTH FILTERS (Optional / Combinable) ===
-    # These can be turned ON/OFF independently
-    'USE_ADX': {'type': 'categorical', 'choices': [True, False]},
-    'ADX_THRESHOLD': {'type': 'int', 'low': 10, 'high': 30, 'step': 1},  # 2 → 1
+    # MACD-specific [NEW]
+    'MACD_FAST': {'type': 'int', 'low': 5, 'high': 30, 'step': 1},
+    'MACD_SLOW': {'type': 'int', 'low': 20, 'high': 100, 'step': 1},
+    'MACD_SIGNAL': {'type': 'int', 'low': 5, 'high': 20, 'step': 1},
     
-    'USE_VHF': {'type': 'categorical', 'choices': [True, False]},
-    'VHF_THRESHOLD': {'type': 'float', 'low': 0.3, 'high': 0.6, 'step': 0.01},  # 0.05 → 0.01
+    # Ichimoku-specific [NEW]
+    'ICHIMOKU_TENKAN': {'type': 'int', 'low': 7, 'high': 20, 'step': 1},
+    'ICHIMOKU_KIJUN': {'type': 'int', 'low': 20, 'high': 60, 'step': 1},
+    'ICHIMOKU_SENKOU_B': {'type': 'int', 'low': 40, 'high': 120, 'step': 1},
     
-    # MFI (Money Flow Index) Filter
-    'USE_MFI': {'type': 'categorical', 'choices': [True, False]},
-    'MFI_WINDOW': {'type': 'int', 'low': 10, 'high': 21, 'step': 1},
-    'MFI_THRESHOLD': {'type': 'int', 'low': 15, 'high': 35, 'step': 1},
+    # === STRENGTH FILTERS (Mutually Exclusive) ===
+    # Selects ONE filter to confirm trend strength
+    'STRENGTH_FILTER_TYPE': {'type': 'categorical', 'choices': ['NONE', 'ADX', 'VHF', 'MFI', 'RSI', 'STOCHASTIC']},
     
-    # RSI (Relative Strength Index) Filter
-    'USE_RSI': {'type': 'categorical', 'choices': [True, False]},
-    'RSI_WINDOW': {'type': 'int', 'low': 10, 'high': 21, 'step': 1},  # Already 1
-    'RSI_OVERBOUGHT': {'type': 'int', 'low': 65, 'high': 80, 'step': 1},  # 5 → 1
-    'RSI_OVERSOLD': {'type': 'int', 'low': 20, 'high': 35, 'step': 1},  # 5 → 1
+    # Shared Period for Strength Filters [NEW]
+    'STRENGTH_FILTER_PERIOD': {'type': 'int', 'low': 7, 'high': 50, 'step': 1},
     
-    # Stochastic Oscillator Filter
-    'USE_STOCHASTIC': {'type': 'categorical', 'choices': [True, False]},
-    'STOCH_WINDOW': {'type': 'int', 'low': 10, 'high': 21, 'step': 1},  # Already 1
-    'STOCH_OVERBOUGHT': {'type': 'int', 'low': 75, 'high': 90, 'step': 1},  # 5 → 1
-    'STOCH_OVERSOLD': {'type': 'int', 'low': 10, 'high': 25, 'step': 1},  # 5 → 1
+    # Filter-Specific Parameters (Used only when corresponding type is selected)
+    # Refined steps (1) and broader ranges for theoretical optimum
+    'ADX_THRESHOLD': {'type': 'int', 'low': 15, 'high': 40, 'step': 1},
+    'VHF_THRESHOLD': {'type': 'float', 'low': 0.2, 'high': 0.6, 'step': 0.01},
+    'MFI_THRESHOLD': {'type': 'int', 'low': 10, 'high': 50, 'step': 1},
+    'RSI_OVERBOUGHT': {'type': 'int', 'low': 65, 'high': 85, 'step': 1},
+    'RSI_OVERSOLD': {'type': 'int', 'low': 15, 'high': 35, 'step': 1},
+    'STOCH_OVERBOUGHT': {'type': 'int', 'low': 75, 'high': 95, 'step': 1},
+    'STOCH_OVERSOLD': {'type': 'int', 'low': 5, 'high': 25, 'step': 1},
     
     # Volume Filter [NEW]
-    # Only enter if current volume is significantly higher than average
     'USE_VOLUME_FILTER': {'type': 'categorical', 'choices': [True, False]},
-    'VOLUME_MA_PERIOD': {'type': 'int', 'low': 10, 'high': 60, 'step': 5},
-    'VOLUME_THRESHOLD_MULT': {'type': 'float', 'low': 1.0, 'high': 4.0, 'step': 0.2},
+    'VOLUME_MA_PERIOD': {'type': 'int', 'low': 10, 'high': 50, 'step': 10},
+    'VOLUME_THRESHOLD_MULT': {'type': 'float', 'low': 1.0, 'high': 3.0, 'step': 0.1},
+    
+    # ATR Period [NEW]
+    'ATR_PERIOD': {'type': 'int', 'low': 7, 'high': 30, 'step': 1},
     
     # === EXIT & RISK MANAGEMENT ===
-    # ATR Exit vs Parabolic SAR Exit
+    # ATR Exit vs Parabolic SAR Exit (Main Trend Following Exit)
     'EXIT_TYPE': {'type': 'categorical', 'choices': ['ATR', 'PARABOLIC_SAR']},
     
-    # Take Profit [NEW]
-    # Force exit when reaching N times ATR profit
-    'USE_TAKE_PROFIT': {'type': 'categorical', 'choices': [True, False]},
-    'TAKE_PROFIT_ATR_MULT': {'type': 'float', 'low': 2.0, 'high': 10.0, 'step': 0.5},
-    
-    # Dynamic Stop Loss (New Feature)
-    # Switches between Fixed % (original) and ATR-based dynamic stop loss
-    'STOP_LOSS_TYPE': {'type': 'categorical', 'choices': ['FIXED', 'ATR']},
-    'STOP_LOSS_PCT': {'type': 'float', 'low': 0.01, 'high': 0.05, 'step': 0.001}, # For FIXED
-    'ATR_STOP_LOSS_MULT': {'type': 'float', 'low': 1.0, 'high': 4.0, 'step': 0.1}, # For ATR
-    
-    # ATR Multiplier (Used for Trailing Stop)
-    'ATR_MULTIPLIER': {'type': 'float', 'low': 1.5, 'high': 6.0, 'step': 0.1},  # 0.5 → 0.1
-    
     # Parabolic SAR Step (Acceleration Factor)
-    'SAR_STEP': {'type': 'float', 'low': 0.01, 'high': 0.05, 'step': 0.001},  # 0.01 → 0.001
+    'SAR_STEP': {'type': 'float', 'low': 0.01, 'high': 0.05, 'step': 0.005},
     
-    # Position Sizing Risk: Complete exploration range (0.05% ~ 5%)
-    # 0.05~0.5%: Ultra conservative (Long-term compounding)
-    # 0.5~1.5%: Standard balanced
-    # 1.5~3%: Aggressive (Professional trader level)
-    # 3~5%: Very aggressive (High risk)
-    'RISK_PER_TRADE': {'type': 'float', 'low': 0.0005, 'high': 0.05, 'step': 0.0005},
+    # Take Profit
+    'USE_TAKE_PROFIT': {'type': 'categorical', 'choices': [True, False]},
+    'TAKE_PROFIT_ATR_MULT': {'type': 'float', 'low': 2.0, 'high': 8.0, 'step': 1.0},
+    
+    # Dynamic Stop Loss
+    'STOP_LOSS_TYPE': {'type': 'categorical', 'choices': ['FIXED', 'ATR']},
+    'STOP_LOSS_PCT': {'type': 'float', 'low': 0.01, 'high': 0.1, 'step': 0.005}, # For FIXED
+    'ATR_STOP_LOSS_MULT': {'type': 'float', 'low': 1.0, 'high': 6.0, 'step': 0.5}, # For ATR
+    
+    # Trailing Stop (ATR) - Used only if EXIT_TYPE == 'ATR'
+    'ATR_MULTIPLIER': {'type': 'float', 'low': 2.0, 'high': 6.0, 'step': 0.5},
+    
+    # Position Sizing Risk (Split by Market Type)
+    # FUTURES: 0.05% ~ 5% (Leverage assumed)
+    'RISK_PER_TRADE_FUTURES': {'type': 'float', 'low': 0.0005, 'high': 0.05, 'step': 0.0005},
+    
+    # SPOT: 30% ~ 100% (No Leverage)
+    'RISK_PER_TRADE_SPOT': {'type': 'float', 'low': 0.3, 'high': 1.0, 'step': 0.1},
 }
 
 COMMON_SEARCH_SPACE = {} # For compatibility with existing loader
