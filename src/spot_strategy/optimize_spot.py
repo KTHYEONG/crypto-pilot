@@ -22,6 +22,7 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '../../'))
 from src.spot_strategy.upbit_client import UpbitClient
 from src.strategy.strategies import UltimateStrategy
 from config.optimization_config_ultimate import ULTIMATE_SEARCH_SPACE
+from config.settings import TRAIN_CUTOFF_DATE
 
 # Setup Logging
 logging.basicConfig(level=logging.INFO)
@@ -216,8 +217,9 @@ def fetch_all_data_parallel(symbols, timeframes):
 def backtest_loop_spot_numba(
     close, high, low,
     entry_upper,
-    trend_dir, strength_filter, volume_ratio, atr,
+    trend_dir, strength_filter, volume_ratio, atr, parabolic_sar,
     initial_balance, fee_rate, slippage_rate,
+    exit_type, # 0: ATR, 1: SAR
     stop_loss_type, stop_loss_pct, atr_sl_mult,
     atr_mult, risk_per_trade,
     use_volume_filter, vol_threshold,
@@ -237,7 +239,7 @@ def backtest_loop_spot_numba(
     stop_price = 0.0
     tp_price = 0.0
     
-    max_trades = 2000
+    max_trades = 30000
     trades = np.zeros((max_trades, 3)) # [pnl_pct, duration, dummy]
     trade_count = 0
     
@@ -253,30 +255,44 @@ def backtest_loop_spot_numba(
             exit_triggered = False
             exit_price = 0.0
             
-            if c_high > highest:
-                highest = c_high
-                # Trailing Stop Update
-                new_stop = highest - (pos_atr * atr_mult)
-                if new_stop > stop_price:
-                    stop_price = new_stop
+            # --- 1. Main Trend Exit (ATR Trailing or SAR) ---
+            if exit_type == 0: # ATR Trailing Stop
+                if c_high > highest:
+                    highest = c_high
+                    new_stop = highest - (pos_atr * atr_mult)
+                    if new_stop > stop_price:
+                        stop_price = new_stop
+                
+                if c_low <= stop_price:
+                    exit_price = stop_price if stop_price > c_low else c_low
+                    exit_triggered = True
+            else: # Parabolic SAR Exit
+                # Ensure SAR is valid (> 0)
+                current_sar = parabolic_sar[i]
+                if current_sar > 0:
+                    if c_low <= current_sar:
+                        exit_price = current_sar if current_sar > c_low else c_low
+                        exit_triggered = True
+                
+                # Safety Stop (Static Initial SL)
+                if not exit_triggered and c_low <= stop_price:
+                    exit_price = stop_price if stop_price > c_low else c_low
+                    exit_triggered = True
             
-            # 1. Stop Loss
-            if c_low <= stop_price:
-                exit_price = stop_price if stop_price > c_low else c_low
-                exit_triggered = True
-            # 2. Take Profit
-            elif use_take_profit and tp_price > 0 and c_high >= tp_price:
+            # --- 2. Take Profit (Safety Net) ---
+            if not exit_triggered and use_take_profit and tp_price > 0 and c_high >= tp_price:
                 exit_price = tp_price
                 exit_triggered = True
-            # 3. Trend Reversal (Optional but common in trend following)
-            elif i > 0 and trend_dir[i-1] == -1:
+                
+            # --- 3. Trend Reversal (Emergency Exit) ---
+            if not exit_triggered and i > 0 and trend_dir[i-1] == -1:
                 exit_price = c_price
                 exit_triggered = True
                 
             if exit_triggered:
                 # Sell All
                 revenue = coin * exit_price * (1 - fee_rate)
-                balance = revenue
+                balance += revenue  # Corrected: Add revenue back to remaining balance
                 coin = 0.0
                 in_position = False
                 
@@ -297,22 +313,22 @@ def backtest_loop_spot_numba(
                 fill_price = c_price * (1 + slippage_rate)
                 entry_price = fill_price
                 
-                # SL Calc
+                # Initial SL Calc (Safety Net)
                 if stop_loss_type == 1: # ATR
                     stop_price = fill_price - (atr[i] * atr_sl_mult)
                 else: # Fixed
                     stop_price = fill_price * (1 - stop_loss_pct)
                 
-                # TP Calc
+                # TP Calc (Safety Net)
                 if use_take_profit:
                     tp_price = fill_price + (atr[i] * tp_atr_mult)
                 else:
                     tp_price = 0.0
                 
-                # Sizing (For spot, we just use 99% of balance)
-                # Note: Risk_per_trade could be used to limit size, but usually spot uses full capital
-                # We'll use full capital for simplicity as 'leverage' is effectively 1.0
-                cost = balance * 0.99
+                # Sizing based on Risk Per Trade with 100M cap
+                cost = balance * risk_per_trade
+                max_position_value = 100_000_000.0  # 1억 KRW cap for realistic sizing
+                cost = min(cost, max_position_value)
                 coin = (cost * (1 - fee_rate)) / fill_price
                 balance -= cost
                 
@@ -336,49 +352,73 @@ def suggest_params(trial, search_space):
             params[key] = trial.suggest_categorical(key, spec['choices'])
     return params
 
-def calculate_score(ret, mdd, num_trades, win_rate):
+def calculate_score(ret, mdd, num_trades, win_rate, pf):
     """
-    Atomic scoring logic to reduce objective function mass (!Clean).
+    Advanced Professional Scoring:
+    Focuses on Robustness (300+ trades), Safety (Exp. MDD), and Quality (Profit Factor).
     """
     if np.isnan(ret) or np.isnan(mdd):
         return -10000
 
-    # Base Score (Profitability Adjusted for MDD)
+    # 1. Statistical Floor (8-year significance)
+    # 300 trades ensures ~3 trades/month to filter out 'lucky' strategies.
+    if num_trades < 300:
+        return -5000 + num_trades 
+    
+    # 2. Risk Adjustment: Exponential MDD Penalty
+    # -15% is the pivot point for 'pain'. Beyond that, we penalize exponentially.
     abs_mdd = abs(mdd)
-    efficiency = ret / (abs_mdd + 5.0) 
-    score = (efficiency * 50) + (ret * 0.5)
+    mdd_penalty = 0
+    if abs_mdd > 15:
+        # Penalize hard for deeper drawdowns (e.g., -30% is significantly worse than -15%)
+        mdd_penalty = ((abs_mdd - 15) ** 2.2) * 5.0
     
-    # Penalties (Ruin Prevention)
-    if mdd < -30: score -= 1000
-    elif mdd < -20: score -= 200
-    elif mdd < -15: score -= 50
+    # 3. Efficiency & Quality (Profit Factor & Ret)
+    # Profit Factor (PF) is the gold standard for reliable strategies.
+    # PF 1.2 is baseline, 1.5+ is high quality.
+    pf_bonus = 0
+    if pf > 1.05:
+        pf_bonus = (pf - 1.0) * 1500 
     
-    # Trade Count (Statistical Significance)
-    if num_trades < 15: score -= 2000
-    elif num_trades < 30: score -= 500
-    elif num_trades >= 100: score += 150
-    elif num_trades >= 70: score += 100
-    elif num_trades >= 40: score += 50
+    # 4. Base Equity Performance
+    # Return adjusted by MDD and PF
+    efficiency = ret / (abs_mdd + 5.0) * 50
     
-    # Win Rate Buffer
-    if win_rate < 35: score -= 300
-    elif win_rate >= 55: score += 50
+    score = (ret * 0.2) + efficiency + pf_bonus - mdd_penalty
     
-    return max(score, -5000)
+    # 5. Over-trading Ceiling
+    # Beyond 1500 trades, slippage/fees usually make the strategy unstable in live.
+    if num_trades > 1500:
+        score -= (num_trades - 1500) * 2.0
+        
+    return max(score, -10000)
 
 def objective(trial, symbols_data):
-    # 0. Custom Search Space for Spot (Exclude 2h)
+    # 0. Custom Search Space for Spot (Exclude 2h and LEVERAGE)
     search_space = ULTIMATE_SEARCH_SPACE.copy()
-    original_choices = search_space['TIMEFRAME']['choices']
-    search_space['TIMEFRAME'] = {
-        'type': 'categorical', 
-        'choices': [c for c in original_choices if c != '2h']
-    }
+    
+    # Narrow down Timeframes to ['15m', '30m', '1h', '4h']
+    if 'TIMEFRAME' in search_space:
+        search_space['TIMEFRAME'] = {
+            'type': 'categorical', 
+            'choices': ['15m', '30m', '1h', '4h']
+        }
+    
+    # Spot does not use leverage
+    if 'LEVERAGE' in search_space:
+        del search_space['LEVERAGE']
 
     params = suggest_params(trial, search_space)
+    
+    # [VALIDATION] Enforce Logical Constraints
+    if params.get('TREND_FILTER_TYPE') == 'MACD':
+        if params.get('MACD_FAST', 12) >= params.get('MACD_SLOW', 26):
+            return -10000 # Invalid trial penalty
+            
     tf = params['TIMEFRAME']
     symbol_scores = []
     
+    # [UNIVERSAL] Loop through all symbols to find Robust Params
     for symbol, data_map in symbols_data.items():
         if tf not in data_map: continue
             
@@ -387,15 +427,20 @@ def objective(trial, symbols_data):
         df = strategy.generate_signals(df)
         
         # Run Backtest
+        # Slippage 0.07% (0.0007)
+        risk_per_trade = params.get('RISK_PER_TRADE_SPOT', 0.99)
+        
         trades, equity, final_bal = backtest_loop_spot_numba(
             df['close'].values, df['high'].values, df['low'].values, df['entry_upper'].values,
             df['trend_direction'].values, df['strength_filter'].values, 
             df.get('volume_ratio', pd.Series([1.0]*len(df))).fillna(1.0).values, 
             df['atr'].fillna(0.0).values,
-            10000000.0, 0.0005, 0.0002,
+            df.get('parabolic_sar', pd.Series([0.0]*len(df))).fillna(0.0).values,
+            10000000.0, 0.001, 0.001,  # fee 0.1%, slippage 0.1% (total 0.2%)
+            (1 if params.get('EXIT_TYPE') == 'PARABOLIC_SAR' else 0),
             (1 if params.get('STOP_LOSS_TYPE') == 'ATR' else 0), 
             params['STOP_LOSS_PCT'], params['ATR_STOP_LOSS_MULT'],
-            params['ATR_MULTIPLIER'], params['RISK_PER_TRADE'],
+            params['ATR_MULTIPLIER'], risk_per_trade,
             params['USE_VOLUME_FILTER'], params['VOLUME_THRESHOLD_MULT'],
             params['USE_TAKE_PROFIT'], params['TAKE_PROFIT_ATR_MULT']
         )
@@ -403,31 +448,38 @@ def objective(trial, symbols_data):
         ret = (final_bal - 10000000.0) / 10000000.0 * 100
         peak = np.maximum.accumulate(equity)
         
-        # Safe MDD calculation to avoid RuntimeWarning: invalid value encountered in divide
+        # Safe MDD calculation
         with np.errstate(divide='ignore', invalid='ignore'):
             mdd_series = np.where(peak > 0, (equity - peak) / peak * 100, 0.0)
             mdd = np.min(mdd_series)
             if np.isnan(mdd):
                 mdd = 0.0
+        
         num_trades = len(trades)
         win_rate = (len(trades[trades[:, 0] > 0]) / num_trades * 100) if num_trades > 0 else 0
         
-        # [!Clean] Use extracted scoring function
-        score = calculate_score(ret, mdd, num_trades, win_rate)
+        # Calculate Profit Factor (PF)
+        pnl_pcts = trades[:, 0]
+        gross_profit = np.sum(pnl_pcts[pnl_pcts > 0])
+        gross_loss = np.abs(np.sum(pnl_pcts[pnl_pcts < 0]))
+        pf = gross_profit / gross_loss if gross_loss > 0 else (gross_profit if gross_profit > 0 else 0.0)
+        
+        # Calculate Score per Symbol
+        score = calculate_score(ret, mdd, num_trades, win_rate, pf)
         symbol_scores.append(score)
         
-        # Set user attrs
+        # Set user attrs for analysis
         trial.set_user_attr(f"ret_{symbol}", float(ret))
         trial.set_user_attr(f"mdd_{symbol}", float(mdd))
         trial.set_user_attr(f"trades_{symbol}", int(num_trades))
         trial.set_user_attr(f"winrate_{symbol}", float(win_rate))
+        trial.set_user_attr(f"pf_{symbol}", float(pf))
 
     if not symbol_scores: return -10000
     
-    # 2. Combine scores using HARMONIC MEAN (For Universal Robustness)
-    # Allows finding params that work well on BOTH BTC and ETH
-    
-    offset = 6000  # Shift to make scores positive
+    # [UNIVERSAL] Combine using Harmonic Mean for Robustness
+    # Formula: n / (1/x1 + 1/x2 + ... + 1/xn)
+    offset = 6000
     shifted_scores = [s + offset for s in symbol_scores]
     
     if any(s <= 0 for s in shifted_scores):
@@ -442,64 +494,73 @@ def objective(trial, symbols_data):
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument("--trials", type=int, default=2000)
-    parser.add_argument("--symbols", type=str, default="KRW-BTC,KRW-ETH") # Updated default
-    parser.add_argument("--jobs", type=int, default=6)
+    parser.add_argument("--trials", type=int, default=3000)
+    parser.add_argument("--symbols", type=str, default="KRW-BTC,KRW-ETH") 
+    parser.add_argument("--jobs", type=int, default=4)
     args = parser.parse_args()
     
     symbols = [s.strip() for s in args.symbols.split(',')]
-    
-    # [UPDATE] Use ALL timeframes like futures optimization
-    # [UPDATE] Use ALL timeframes for optimization (Removed '2h' as it is not supported by Upbit)
-    timeframes = ['3m', '5m', '15m', '30m', '1h', '4h', '1d']
-    # If 2h is excluded in optimize, we can still fetch it or just sync with SEARCH_SPACE
-    # But usually more data is fine.
+    timeframes = ['15m', '30m', '1h', '4h']
     
     print(f"🚀 Loading FULL HISTORY ({SPOT_START_DATE} ~ Now) for {symbols}...")
     try:
         symbols_data = fetch_all_data_parallel(symbols, timeframes)
         
+        # Apply Train/Test Split
+        print(f"✂️  Splitting Data for Optimization (Train Period: ~ {TRAIN_CUTOFF_DATE})")
+        train_data = {}
+        cutoff_ts = pd.Timestamp(TRAIN_CUTOFF_DATE)
+        
+        for sym, tf_map in symbols_data.items():
+            train_data[sym] = {}
+            for tf, df_ in tf_map.items():
+                if 'datetime' not in df_.columns:
+                    df_['datetime'] = pd.to_datetime(df_['timestamp'], unit='ms')
+                
+                # Filter for TRAINING data only
+                train_df = df_[df_['datetime'] < cutoff_ts].copy()
+                if not train_df.empty:
+                    train_data[sym][tf] = train_df
+                else:
+                    logger.warning(f"⚠️  No training data for {sym}-{tf}")
+
+        # [UNIVERSAL] Single Optimization for ALL symbols
+        print(f"\n" + "="*60)
+        print(f"🎯 OPTIMIZING UNIVERSAL STRATEGY FOR: {symbols}")
+        print(f"="*60)
+        
         study_name = "spot_strategy"
         db_file = f"{study_name}.db"
         storage_name = f"sqlite:///{db_file}"
         
-        # [CRITICAL] Delete existing DB for a fresh start
         if os.path.exists(db_file):
             logger.info(f"🗑️ Deleting existing database: {db_file} for a fresh start...")
             try:
                 os.remove(db_file)
-                # Also remove WAL files if they exist
                 for ext in ['-wal', '-shm']:
                     if os.path.exists(db_file + ext):
                         os.remove(db_file + ext)
-            except Exception as e:
-                logger.error(f"Failed to delete old DB: {e}")
-        
-        # [CRITICAL UPDATE] DB Locking Fix & Storage Setup
+            except Exception: pass
+
         storage = optuna.storages.RDBStorage(
             url=storage_name,
-            engine_kwargs={
-                "connect_args": {"timeout": 120},
-                "pool_size": 20,
-                "max_overflow": 0,
-            }
+            engine_kwargs={"connect_args": {"timeout": 120}}
         )
         
-        study = optuna.create_study(study_name=study_name, storage=storage, direction="maximize", load_if_exists=False)
+        study = optuna.create_study(study_name=study_name, storage=storage, direction="maximize")
         
-        print(f"🔥 Starting Universal Strategy Discovery ({args.trials} trials, {args.jobs} jobs)...")
-        study.optimize(lambda t: objective(t, symbols_data), n_trials=args.trials, n_jobs=args.jobs)
+        print(f"🔥 Starting Universal Discovery ({args.trials} trials)...")
+        study.optimize(lambda t: objective(t, train_data), n_trials=args.trials, n_jobs=args.jobs)
+        
+        print("\n" + "-"*50)
+        print(f"🏆 BEST UNIVERSAL STRATEGY")
+        print(f"Score : {study.best_value:.4f}")
+        print(f"Params: {study.best_params}")
+        print("-"*50)
         
     except KeyboardInterrupt:
-        print("\n" + "="*50)
-        print("🛑 STOPPED BY USER. Exiting gracefully...")
-        print("="*50)
+        print("\n🛑 STOPPED BY USER.")
         sys.exit(0)
     
-    print("\n" + "="*50)
-    print("🏆 BEST UNIVERSAL STRATEGY FOUND")
-    print("="*50)
-    print(f"Best Score : {study.best_value:.4f}")
-    print(f"Best Params: {study.best_params}")
-    print("="*50)
+    print("\n✅ Optimization Complete.")
 

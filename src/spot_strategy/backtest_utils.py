@@ -17,14 +17,17 @@ def run_backtest_segment(df, params, initial_balance=10000000.0, return_series=F
     tp_price = 0.0
     
     # Params
-    fee_rate = 0.0005
-    slippage = 0.0002
+    fee_rate = 0.001  # 0.1%
+    slippage = 0.001  # 0.1% (total cost 0.2%)
     atr_mult = params.get('ATR_MULTIPLIER', 3.0)
+    exit_type = params.get('EXIT_TYPE', 'ATR')
     sl_type = params.get('STOP_LOSS_TYPE', 'FIXED')
     sl_pct = params.get('STOP_LOSS_PCT', 0.03)
     atr_sl_mult = params.get('ATR_STOP_LOSS_MULT', 1.5)
     use_tp = params.get('USE_TAKE_PROFIT', False)
     tp_atr_mult = params.get('TAKE_PROFIT_ATR_MULT', 3.0)
+    # Use the spot-specific key
+    risk_per_trade = params.get('RISK_PER_TRADE_SPOT', 0.99)
     
     trades_log = [] # Holds % returns
     detailed_log = [] # Holds dicts with details
@@ -43,6 +46,7 @@ def run_backtest_segment(df, params, initial_balance=10000000.0, return_series=F
     trend_dir = np.nan_to_num(df['trend_direction'].values, nan=0).astype(int)
     strength = np.nan_to_num(df['strength_filter'].values, nan=0).astype(int)
     atr = np.nan_to_num(df['atr'].values, nan=0.0)
+    sar = np.nan_to_num(df.get('parabolic_sar', pd.Series([0.0]*len(df))).values, nan=0.0)
     
     for i in range(1, len(df)):
         price = close[i]
@@ -51,23 +55,38 @@ def run_backtest_segment(df, params, initial_balance=10000000.0, return_series=F
             exit_triggered = False
             reason = ""
             
-            # Trailing Stop Update
-            if high[i] > highest:
-                highest = high[i]
-                new_stop = highest - (pos_atr * atr_mult)
-                if new_stop > stop_price:
-                    stop_price = new_stop
-                    
-            # Check Exits
-            if low[i] <= stop_price:
-                exit_price = stop_price if stop_price > low[i] else low[i]
-                exit_triggered = True
-                reason = "Stop Loss"
-            elif use_tp and tp_price > 0 and high[i] >= tp_price:
+            # --- 1. Main Trend Exit (ATR Trailing or SAR) ---
+            if exit_type == 'ATR':
+                # Trailing Stop Update
+                if high[i] > highest:
+                    highest = high[i]
+                    new_stop = highest - (pos_atr * atr_mult)
+                    if new_stop > stop_price:
+                        stop_price = new_stop
+                
+                if low[i] <= stop_price:
+                    exit_price = stop_price if stop_price > low[i] else low[i]
+                    exit_triggered = True
+                    reason = "ATR Trailing Stop"
+            else: # PARABOLIC_SAR
+                current_sar = sar[i]
+                if current_sar > 0 and low[i] <= current_sar:
+                    exit_price = current_sar if current_sar > low[i] else low[i]
+                    exit_triggered = True
+                    reason = "Parabolic SAR"
+                elif low[i] <= stop_price: # Safety Stop
+                    exit_price = stop_price if stop_price > low[i] else low[i]
+                    exit_triggered = True
+                    reason = "Safety Stop Loss"
+            
+            # --- 2. Take Profit (Safety Net) ---
+            if not exit_triggered and use_tp and tp_price > 0 and high[i] >= tp_price:
                 exit_price = tp_price
                 exit_triggered = True
                 reason = "Take Profit"
-            elif i > 0 and trend_dir[i-1] == -1:
+            
+            # --- 3. Trend Reversal (Emergency) ---
+            if not exit_triggered and trend_dir[i-1] == -1:
                 exit_price = price
                 exit_triggered = True
                 reason = "Trend Reversal"
@@ -75,7 +94,7 @@ def run_backtest_segment(df, params, initial_balance=10000000.0, return_series=F
             if exit_triggered:
                 # Sell
                 revenue = coin * exit_price * (1 - fee_rate)
-                balance = revenue
+                balance += revenue  # Corrected: Add revenue back to remaining balance
                 coin = 0.0
                 in_pos = False
                 
@@ -98,8 +117,10 @@ def run_backtest_segment(df, params, initial_balance=10000000.0, return_series=F
                 fill_price = price * (1 + slippage)
                 entry_price = fill_price
                 
-                # Sizing (99% of Balance)
-                cost = balance * 0.99
+                # Sizing based on Risk Per Trade with 100M cap
+                cost = balance * risk_per_trade
+                max_position_value = 100_000_000.0  # 1억 KRW cap
+                cost = min(cost, max_position_value)
                 coin = (cost * (1 - fee_rate)) / fill_price
                 balance -= cost
                 
