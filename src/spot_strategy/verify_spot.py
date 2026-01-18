@@ -35,13 +35,13 @@ def detailed_backtest_spot(df, params):
         df, params, initial_balance=initial_balance, return_series=True
     )
     
-    # Print Logs
-    for log in detailed_log:
-        t_str = log['time']
-        if log['type'] == 'BUY':
-            print(f"[{t_str}] 🟢 BUY  @ {log['price']:,.0f} | SL: {log['stop_loss']:,.0f} | TP: {log['take_profit']:,.0f}")
-        elif log['type'] == 'SELL':
-            print(f"[{t_str}] 🔴 SELL @ {log['price']:,.0f} | Ret: {log['return']:.2f}% | Bal: {log['balance']:,.0f} | {log['reason']}")
+    # Print Logs (Disabled per user request)
+    # for log in detailed_log:
+    #     t_str = log['time']
+    #     if log['type'] == 'BUY':
+    #         print(f"[{t_str}] 🟢 BUY  @ {log['price']:,.0f} | SL: {log['stop_loss']:,.0f} | TP: {log['take_profit']:,.0f}")
+    #     elif log['type'] == 'SELL':
+    #         print(f"[{t_str}] 🔴 SELL @ {log['price']:,.0f} | Ret: {log['return']:.2f}% | Bal: {log['balance']:,.0f} | {log['reason']}")
 
     final_val = initial_balance * (1 + ret_pct/100)
     
@@ -52,8 +52,14 @@ def detailed_backtest_spot(df, params):
     print(f"Total Return : {ret_pct:.2f}%")
     print(f"Trade Count  : {len(trades_log)}")
     if trades_log:
-        print(f"Win Rate     : {len([t for t in trades_log if t > 0])/len(trades_log)*100:.2f}%")
-        print(f"Max drawdown : {mdd:.2f}%")
+        win_rate = len([t for t in trades_log if t > 0])/len(trades_log)*100
+        gross_profit = sum([t for t in trades_log if t > 0])
+        gross_loss = abs(sum([t for t in trades_log if t < 0]))
+        pf = gross_profit / gross_loss if gross_loss > 0 else (gross_profit if gross_profit > 0 else 0.0)
+        
+        print(f"Win Rate      : {win_rate:.2f}%")
+        print(f"Profit Factor : {pf:.2f}")
+        print(f"Max drawdown  : {mdd:.2f}%")
     print("="*50)
     
     # --- 2. Walk Forward Analysis (Robustness) ---
@@ -65,12 +71,15 @@ def detailed_backtest_spot(df, params):
     print(f"{'='*50}")
     print(f"WALK FORWARD ANALYSIS RESULT")
     print(f"{'='*50}")
-    print(wfa_results.to_markdown(index=False, floatfmt=".2f"))
-    
-    avg_wfa_ret = wfa_results['Return'].mean()
-    print(f"\nAverage Return per Split: {avg_wfa_ret:.2f}%")
-    consistency = len(wfa_results[wfa_results['Return'] > 0]) / len(wfa_results) * 100
-    print(f"Consistency (Positive Segments): {consistency:.0f}%")
+    if wfa_results.empty:
+        print("⚠️ Not enough data to run Walk-Forward Analysis (Segments too short).")
+    else:
+        print(wfa_results.to_markdown(index=False, floatfmt=".2f"))
+        
+        avg_wfa_ret = wfa_results['Return'].mean()
+        print(f"\nAverage Return per Split: {avg_wfa_ret:.2f}%")
+        consistency = len(wfa_results[wfa_results['Return'] > 0]) / len(wfa_results) * 100
+        print(f"Consistency (Positive Segments): {consistency:.0f}%")
 
     # --- 3. Monte Carlo Simulation (Probability) ---
     from src.spot_strategy.monte_carlo_spot import SpotMonteCarloSimulator
@@ -103,32 +112,30 @@ if __name__ == "__main__":
     
     symbols = [s.strip() for s in args.symbols.split(',')]
     
-    # 1. Load Best Params from DB
-    db_path = args.db
-    study_name = db_path.replace(".db", "")
-    storage = f"sqlite:///{db_path}"
-    
-    try:
-        study = optuna.load_study(study_name=study_name, storage=storage)
-        best_params = study.best_params
-        print(f"✅ Best Params Loaded from {db_path} (Score: {study.best_value:.4f})")
-        print(json.dumps(best_params, indent=2))
-    except Exception as e:
-        print(f"⚠️ Failed to load study '{study_name}' from {db_path}: {e}")
-        print("Using fallback default params...")
-        best_params = {
-            'TIMEFRAME': '1h',
-            # Add other necessary defaults if needed
-        }
+
 
     # 2. Run Verification
     print("\n" + "="*70)
-    print(f"🚀 VERIFYING FULL HISTORY (2018 ~ Now) ON: {symbols}")
+    print(f"🚀 VERIFYING UNIVERSAL STRATEGY ON: {symbols}")
     print("="*70)
     
+    # 2-1. Load Universal Best Params
+    db_path = "spot_strategy.db"
+    storage = f"sqlite:///{db_path}"
+    study_name = "spot_strategy"
+    
+    best_params = {}
+    try:
+        study = optuna.load_study(study_name=study_name, storage=storage)
+        best_params = study.best_params
+        print(f"✅ Loaded Universal Params (Score: {study.best_value:.4f})")
+    except Exception as e:
+        print(f"❌ Failed to load Universal DB ({db_path}): {e}")
+        sys.exit(1)
+        
     for symbol in symbols:
         print(f"\n👉 Analyzing {symbol}...")
-        
+
         # Load from Full History Cache
         tf = best_params.get('TIMEFRAME', '1h')
         # Reuse the logic: check data folder for CSV
@@ -141,7 +148,21 @@ if __name__ == "__main__":
             df['datetime'] = pd.to_datetime(df['datetime'])
             
             # Run Detailed Backtest
-            detailed_backtest_spot(df, best_params)
+            from config.settings import TRAIN_CUTOFF_DATE
+            cutoff_ts = pd.Timestamp(TRAIN_CUTOFF_DATE)
+            
+            train_df = df[df['datetime'] < cutoff_ts].copy()
+            test_df = df[df['datetime'] >= cutoff_ts].copy()
+            
+            print(f"\n[DATA SPLIT] Train: {len(train_df)} candles | Test (OOS): {len(test_df)} candles (Cutoff: {TRAIN_CUTOFF_DATE})")
+            
+            if not test_df.empty:
+                print(f"\n🔵 >>> Running Verification on TEST DATA (Out-of-Sample: {TRAIN_CUTOFF_DATE} ~ Now) <<<")
+                detailed_backtest_spot(test_df, best_params)
+            else:
+                print(f"⚠️ No Test Data found after {TRAIN_CUTOFF_DATE}! Check your data files.")
+                print("Running on Full Data as fallback...")
+                detailed_backtest_spot(df, best_params)
         else:
             print(f"❌ Full history cache not found at {filepath}")
             print("Please run optimize_spot.py first to collect full data.")
