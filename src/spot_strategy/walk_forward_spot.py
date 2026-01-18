@@ -45,5 +45,8 @@ class SpotWalkForwardAnalyzer:
                 'MDD': mdd
             })
             
+        if not results:
+            return pd.DataFrame(columns=['Split', 'Period', 'Return', 'MDD'])
+            
         return pd.DataFrame(results)
 
