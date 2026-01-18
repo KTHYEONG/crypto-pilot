@@ -142,7 +142,7 @@ celerybeat.pid
 
 # .db
 spot_strategy.db
-futures_strategy.db
+future_strategy.db
 
 # agent
 .agent/
