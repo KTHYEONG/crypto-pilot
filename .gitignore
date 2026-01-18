@@ -144,6 +144,9 @@ celerybeat.pid
 spot_strategy.db
 futures_strategy.db
 
+# logs
+logs/
+
 # agent
 .agent/
 
