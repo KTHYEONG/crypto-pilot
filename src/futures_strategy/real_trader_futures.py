@@ -179,30 +179,8 @@ class RealTraderFutures:
     @api_retry
     def _fetch_balance_safe(self) -> tuple:
         """안전한 잔고 조회 (Total, Free 반환)"""
-        ret = self.client.fetch_balance()
-        
-        # Parse Balance (USDT)
-        usdt_total = 0.0
-        usdt_free = 0.0
-        
-        # CCXT Standard Structure
-        if isinstance(ret, dict):
-            if 'USDT' in ret:
-                val = ret['USDT']
-                # {'free': 100, 'used': 0, 'total': 100}
-                if isinstance(val, dict):
-                    usdt_free = float(val.get('free', 0.0))
-                    usdt_total = float(val.get('total', 0.0))
-                else:
-                    usdt_free = float(val)
-                    usdt_total = float(val)  # fallback
-            
-            # Alternative Structure ('free': {'USDT': ...})
-            elif 'free' in ret and isinstance(ret['free'], dict):
-                usdt_free = float(ret['free'].get('USDT', 0.0))
-                usdt_total = float(ret['total'].get('USDT', 0.0)) if 'total' in ret else usdt_free
-
-        return (usdt_total, usdt_free)
+        # BinanceClient.fetch_balance() already returns (total, free)
+        return self.client.fetch_balance()
     
     @api_retry
     def _fetch_ohlcv_safe(self, symbol: str, timeframe: str, start_str: str):
