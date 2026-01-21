@@ -347,6 +347,8 @@ class RealTraderFutures:
                                 reason=f"Price > Upper ({entry_upper:.2f})",
                                 params={'timeframe': timeframe, 'atr': atr}
                             )
+                        else:
+                            logger.error(f"❌ Order placement failed for {symbol} (LONG, Qty: {qty})")
                 
                 # SHORT 진입
                 elif trend_dir == -1 and current_price < entry_lower:
@@ -367,6 +369,8 @@ class RealTraderFutures:
                                 reason=f"Price < Lower ({entry_lower:.2f})",
                                 params={'timeframe': timeframe, 'atr': atr}
                             )
+                        else:
+                            logger.error(f"❌ Order placement failed for {symbol} (SHORT, Qty: {qty})")
         
         except Exception as e:
             logger.error(f"🚨 Error executing logic for {symbol}: {e}")
