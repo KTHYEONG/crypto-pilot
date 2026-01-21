@@ -54,7 +54,8 @@ from .indicators_advanced_futures import (
     calculate_sma, calculate_ema, calculate_hma, calculate_dema, calculate_tema,
     calculate_supertrend, calculate_atr, calculate_bollinger_bands,
     calculate_keltner_channel, calculate_adx, calculate_vhf, calculate_parabolic_sar,
-    calculate_rsi, calculate_stochastic, calculate_macd, calculate_ichimoku, calculate_cci, calculate_mfi
+    calculate_rsi, calculate_stochastic, calculate_stoch_rsi, calculate_macd, calculate_ichimoku, calculate_cci, calculate_mfi,
+    calculate_vwap, calculate_cmf, calculate_hurst_exponent
 )
 
 class UltimateStrategy(Strategy):
@@ -162,6 +163,18 @@ class UltimateStrategy(Strategy):
             df['trend_direction'] = np.where(df['close'] > cloud_top, 1, df['trend_direction'])
             df['trend_direction'] = np.where(df['close'] < cloud_bottom, -1, df['trend_direction'])
             
+        elif filter_type == 'VWAP':
+            # [NEW] VWAP Trend Filter
+            # Price > VWAP: Long Only (1), Price < VWAP: Short Only (-1)
+            # Institutional algorithm benchmark
+            std_mult = self.params.get('VWAP_STD_MULT', 1.5)
+            # Use rolling VWAP for consistency (use MA_PERIOD as window)
+            vwap, vwap_upper, vwap_lower = calculate_vwap(df, window=ma_period, std_mult=std_mult)
+            df['vwap'] = vwap
+            df['vwap_upper'] = vwap_upper
+            df['vwap_lower'] = vwap_lower
+            df['trend_direction'] = np.where(df['close'] > df['vwap'], 1, -1)
+            
         # --- 4. Strength Filter ---
         # Initialize as Pass(1)
         df['strength_filter'] = 1
@@ -204,6 +217,43 @@ class UltimateStrategy(Strategy):
             # Block extremes
             df.loc[(df['stoch_k'] > stoch_overbought) | (df['stoch_k'] < stoch_oversold), 'strength_filter'] = 0
 
+        elif strength_type == 'STOCH_RSI':
+            stoch_rsi_overbought = self.params.get('STOCH_RSI_OVERBOUGHT', 80)
+            stoch_rsi_oversold = self.params.get('STOCH_RSI_OVERSOLD', 20)
+            strength_period = self.params.get('STRENGTH_FILTER_PERIOD', 14)
+            stoch_rsi_k, _ = calculate_stoch_rsi(df['close'], window=strength_period)
+            df['stoch_rsi_k'] = stoch_rsi_k
+            # Block extremes
+            df.loc[(df['stoch_rsi_k'] > stoch_rsi_overbought) | (df['stoch_rsi_k'] < stoch_rsi_oversold), 'strength_filter'] = 0
+
+        elif strength_type == 'CMF':
+            # [NEW] Chaikin Money Flow - Institutional Accumulation/Distribution
+            # 추세 추종: CMF > Threshold일 때만 진입 (양수 자금 유입 확인)
+            # CMF < Threshold: 매도 압력 또는 낮은 매수 압력 -> Block Entry
+            cmf_thresh = self.params.get('CMF_THRESHOLD', 0.05)
+            cmf_period = self.params.get('CMF_PERIOD', 20)
+            df['cmf'] = calculate_cmf(df, window=cmf_period)
+            # Block when CMF is below threshold (insufficient buying pressure)
+            df.loc[df['cmf'] < cmf_thresh, 'strength_filter'] = 0
+
+            
+        elif strength_type == 'HURST':
+            # [NEW] Hurst Exponent - Market Regime Filter
+            # H > Trend_Threshold: Trending -> Allow Trend Following
+            # H < Random_Threshold: Random Walk -> Block Entry
+            # 0.45 < H < 0.55: Random -> Block
+            hurst_period = self.params.get('HURST_PERIOD', 100)
+            hurst_trend_thresh = self.params.get('HURST_TREND_THRESHOLD', 0.60)
+            hurst_random_thresh = self.params.get('HURST_RANDOM_THRESHOLD', 0.50)
+            
+            df['hurst'] = calculate_hurst_exponent(df['close'], window=hurst_period)
+            
+            # Block if Random Walk (H near 0.5) or Mean-Reverting (H < 0.5)
+            df.loc[df['hurst'] < hurst_random_thresh, 'strength_filter'] = 0
+            # Only allow strong trending (H > trend_threshold)
+            # Optional: You can also require H > trend_threshold explicitly
+            # df.loc[df['hurst'] < hurst_trend_thresh, 'strength_filter'] = 0
+
         # --- 5. Exit Logic (Parabolic SAR) ---
         # Calculated here so it's available for the backtest engine
         if self.params.get('EXIT_TYPE') == 'PARABOLIC_SAR':
@@ -222,4 +272,17 @@ class UltimateStrategy(Strategy):
         else:
             df['volume_ratio'] = 100.0 # Default Pass (High ratio)
             
+        # [OPTIMIZATION] Ensure all required columns exist for Engine
+        # This removes the need for slow df.get() calls
+        if 'entry_upper' not in df.columns:
+            df['entry_upper'] = np.nan
+        if 'entry_lower' not in df.columns:
+            df['entry_lower'] = np.nan
+        if 'trend_direction' not in df.columns:
+            df['trend_direction'] = 0
+        if 'strength_filter' not in df.columns:
+            df['strength_filter'] = 1
+        if 'atr' not in df.columns:
+            df['atr'] = df['close'] * 0.01
+
         return df

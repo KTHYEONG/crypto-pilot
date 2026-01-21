@@ -27,18 +27,7 @@ from logging.handlers import RotatingFileHandler
 from functools import wraps
 from typing import Optional, Dict, Any, Tuple
 
-# tenacity for retry logic
-try:
-    from tenacity import (
-        retry, 
-        stop_after_attempt, 
-        wait_exponential, 
-        retry_if_exception_type,
-        before_sleep_log
-    )
-    TENACITY_AVAILABLE = True
-except ImportError:
-    TENACITY_AVAILABLE = False
+
 
 # Project Root Setup
 try:
@@ -74,368 +63,42 @@ from config.settings import (
 )
 from src.futures_strategy.binance_client import BinanceClient
 from src.futures_strategy.strategies_futures import UltimateStrategy
+from src.common.utils import setup_logger, api_retry
+from src.common.components import TradeHistoryDB, HealthCheckManager, calculate_candle_wait_time
 
 # Oracle Cloud 최적화 (선택적)
 try:
-    from src.futures_strategy.oracle_cloud_optimizer import OracleCloudOptimizer
-    ORACLE_OPTIMIZER_AVAILABLE = True
+    from src.common.cloud_optimizer import CloudOptimizer
+    CLOUD_OPTIMIZER_AVAILABLE = True
 except ImportError:
-    ORACLE_OPTIMIZER_AVAILABLE = False
+    CLOUD_OPTIMIZER_AVAILABLE = False
 
 # ============================================================
 # Structured JSON Logger
 # ============================================================
-class JSONFormatter(logging.Formatter):
-    """JSON 형식 로그 포맷터 (외부 모니터링 연동용)"""
-    def format(self, record):
-        log_obj = {
-            "timestamp": datetime.utcnow().isoformat() + "Z",
-            "level": record.levelname,
-            "logger": record.name,
-            "message": record.getMessage(),
-        }
-        if hasattr(record, 'extra_data'):
-            log_obj["data"] = record.extra_data
-        if record.exc_info:
-            log_obj["exception"] = self.formatException(record.exc_info)
-        return json.dumps(log_obj, ensure_ascii=False)
 
-
-def setup_logger(name: str, log_prefix: str = None) -> logging.Logger:
-    """
-    통합 로거 설정 (동적 로그 파일명)
-    
-    Args:
-        name: 로거 이름 (예: "RealTraderFutures", "RealTraderSpot")
-        log_prefix: 로그 파일 접두사 (None이면 name을 snake_case로 변환)
-    """
-    logger = logging.getLogger(name)
-    logger.setLevel(logging.INFO)
-    
-    if logger.handlers:
-        return logger
-    
-    # 로그 파일명 자동 생성 (예: RealTraderSpot -> real_trader_spot)
-    if log_prefix is None:
-        import re
-        # CamelCase to snake_case
-        log_prefix = re.sub(r'(?<!^)(?=[A-Z])', '_', name).lower()
-    
-    # 파일 핸들러 (회전 로그 - Plain Text)
-    log_file = LOG_DIR / f"{log_prefix}.log"
-    file_handler = RotatingFileHandler(
-        str(log_file),
-        maxBytes=LOG_MAX_BYTES,
-        backupCount=LOG_BACKUP_COUNT,
-        encoding='utf-8'
-    )
-    file_handler.setFormatter(logging.Formatter(
-        '%(asctime)s - %(levelname)s - %(message)s'
-    ))
-    
-    # JSON 로그 파일 (모니터링 도구 연동용)
-    json_log_file = LOG_DIR / f"{log_prefix}.jsonl"
-    json_handler = RotatingFileHandler(
-        str(json_log_file),
-        maxBytes=LOG_MAX_BYTES,
-        backupCount=LOG_BACKUP_COUNT,
-        encoding='utf-8'
-    )
-    json_handler.setFormatter(JSONFormatter())
-    
-    # 콘솔 핸들러
-    stream_handler = logging.StreamHandler()
-    stream_handler.setFormatter(logging.Formatter(
-        '%(asctime)s - %(levelname)s - %(message)s'
-    ))
-    
-    logger.addHandler(file_handler)
-    logger.addHandler(json_handler)
-    logger.addHandler(stream_handler)
-    
-    return logger
 
 
 logger = setup_logger("RealTraderFutures")
 
-# ============================================================
-# Retry Decorator (API 재시도)
-# ============================================================
-def create_retry_decorator():
-    """tenacity 기반 재시도 데코레이터 생성"""
-    if TENACITY_AVAILABLE:
-        return retry(
-            stop=stop_after_attempt(API_RETRY_ATTEMPTS),
-            wait=wait_exponential(
-                multiplier=1, 
-                min=API_RETRY_WAIT_MIN, 
-                max=API_RETRY_WAIT_MAX
-            ),
-            retry=retry_if_exception_type((ConnectionError, TimeoutError, Exception)),
-            before_sleep=before_sleep_log(logger, logging.WARNING),
-            reraise=True
-        )
-    else:
-        # Fallback: 단순 재시도 데코레이터
-        def fallback_retry(func):
-            @wraps(func)
-            def wrapper(*args, **kwargs):
-                last_error = None
-                for attempt in range(API_RETRY_ATTEMPTS):
-                    try:
-                        return func(*args, **kwargs)
-                    except Exception as e:
-                        last_error = e
-                        wait_time = min(
-                            API_RETRY_WAIT_MIN * (2 ** attempt), 
-                            API_RETRY_WAIT_MAX
-                        )
-                        logger.warning(f"⚠️ Retry {attempt+1}/{API_RETRY_ATTEMPTS}: {e}. Waiting {wait_time}s...")
-                        time.sleep(wait_time)
-                raise last_error
-            return wrapper
-        return fallback_retry
 
-
-api_retry = create_retry_decorator()
 
 # ============================================================
 # Trade History DB Manager
 # ============================================================
-class TradeHistoryDB:
-    """거래 기록 영속화 매니저"""
-    
-    def __init__(self, db_path: Path):
-        self.db_path = db_path
-        self._init_db()
-    
-    def _init_db(self):
-        """거래 기록 테이블 생성 (WAL 모드 활성화)"""
-        with sqlite3.connect(self.db_path, timeout=30.0) as conn:
-            # WAL 모드 활성화 (동시 읽기/쓰기 성능 향상)
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("PRAGMA synchronous=NORMAL")  # 성능 최적화
-            
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS trades (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    timestamp TEXT NOT NULL,
-                    symbol TEXT NOT NULL,
-                    side TEXT NOT NULL,
-                    action TEXT NOT NULL,
-                    quantity REAL NOT NULL,
-                    price REAL NOT NULL,
-                    entry_price REAL,
-                    pnl REAL,
-                    pnl_pct REAL,
-                    reason TEXT,
-                    params_json TEXT,
-                    created_at TEXT DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
-            conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_trades_timestamp 
-                ON trades(timestamp)
-            """)
-            conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_trades_symbol 
-                ON trades(symbol)
-            """)
-            conn.commit()
-    
-    def record_trade(
-        self,
-        symbol: str,
-        side: str,
-        action: str,  # 'ENTRY' or 'EXIT'
-        quantity: float,
-        price: float,
-        entry_price: float = None,
-        pnl: float = None,
-        pnl_pct: float = None,
-        reason: str = None,
-        params: dict = None
-    ):
-        """거래 기록 저장 (동시 접근 대응)"""
-        max_retries = 3
-        for attempt in range(max_retries):
-            try:
-                with sqlite3.connect(self.db_path, timeout=30.0) as conn:
-                    conn.execute("""
-                        INSERT INTO trades 
-                        (timestamp, symbol, side, action, quantity, price, 
-                         entry_price, pnl, pnl_pct, reason, params_json)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """, (
-                        datetime.utcnow().isoformat(),
-                        symbol,
-                        side,
-                        action,
-                        quantity,
-                        price,
-                        entry_price,
-                        pnl,
-                        pnl_pct,
-                        reason,
-                        json.dumps(params) if params else None
-                    ))
-                    conn.commit()
-                logger.info(f"📝 Trade recorded: {action} {side} {quantity} {symbol} @ {price}")
-                break  # Success
-            except sqlite3.OperationalError as e:
-                if "locked" in str(e).lower() or "busy" in str(e).lower():
-                    if attempt < max_retries - 1:
-                        wait_time = 0.5 * (2 ** attempt)  # Exponential backoff
-                        logger.warning(f"⚠️ DB locked, retrying in {wait_time}s... ({attempt+1}/{max_retries})")
-                        time.sleep(wait_time)
-                    else:
-                        logger.error(f"❌ Failed to record trade after {max_retries} attempts: {e}")
-                else:
-                    logger.error(f"❌ Failed to record trade: {e}")
-                    break
-            except Exception as e:
-                logger.error(f"❌ Failed to record trade: {e}")
-                break
-    
-    def get_recent_trades(self, symbol: str = None, limit: int = 100) -> list:
-        """최근 거래 조회"""
-        with sqlite3.connect(self.db_path, timeout=30.0) as conn:
-            conn.row_factory = sqlite3.Row
-            if symbol:
-                rows = conn.execute(
-                    "SELECT * FROM trades WHERE symbol = ? ORDER BY id DESC LIMIT ?",
-                    (symbol, limit)
-                ).fetchall()
-            else:
-                rows = conn.execute(
-                    "SELECT * FROM trades ORDER BY id DESC LIMIT ?",
-                    (limit,)
-                ).fetchall()
-            return [dict(row) for row in rows]
+
 
 
 # ============================================================
 # Health Check Manager
 # ============================================================
-class HealthCheckManager:
-    """봇 생존 확인 매니저"""
-    
-    def __init__(self, heartbeat_file: Path):
-        self.heartbeat_file = heartbeat_file
-        self.start_time = datetime.utcnow()
-        self.loop_count = 0
-        self.last_error = None
-    
-    def update_heartbeat(
-        self, 
-        status: str = "running", 
-        positions: dict = None,
-        extra: dict = None
-    ):
-        """하트비트 파일 업데이트"""
-        self.loop_count += 1
-        heartbeat_data = {
-            "status": status,
-            "timestamp": datetime.utcnow().isoformat() + "Z",
-            "uptime_seconds": (datetime.utcnow() - self.start_time).total_seconds(),
-            "loop_count": self.loop_count,
-            "last_error": str(self.last_error) if self.last_error else None,
-            "positions": positions or {},
-            "pid": os.getpid(),
-        }
-        if extra:
-            heartbeat_data.update(extra)
-        
-        try:
-            with open(self.heartbeat_file, 'w', encoding='utf-8') as f:
-                json.dump(heartbeat_data, f, indent=2, ensure_ascii=False)
-        except Exception as e:
-            logger.error(f"❌ Failed to update heartbeat: {e}")
-    
-    def record_error(self, error: Exception):
-        """에러 기록"""
-        self.last_error = error
+
 
 
 # ============================================================
 # Utility Functions (중복 코드 제거)
 # ============================================================
-def parse_balance(ret: Any) -> float:
-    """
-    BinanceClient.fetch_balance() 반환값 파싱
-    다양한 반환 형식 처리 (dict, tuple)
-    """
-    usdt_free = 0.0
-    
-    # Case A: Dictionary (Standard)
-    if isinstance(ret, dict):
-        if 'USDT' in ret:
-            val = ret['USDT']
-            if isinstance(val, dict):
-                usdt_free = val.get('free', 0.0)
-            else:
-                usdt_free = float(val)
-        elif 'free' in ret and isinstance(ret['free'], dict):
-            usdt_free = ret['free'].get('USDT', 0.0)
-    
-    # Case B: Tuple based (Custom implementation)
-    elif isinstance(ret, tuple):
-        if len(ret) >= 2:
-            free_part = ret[1]
-            if isinstance(free_part, dict):
-                usdt_free = free_part.get('USDT', 0.0)
-            elif isinstance(free_part, (int, float)):
-                usdt_free = float(free_part)
-    
-    return float(usdt_free)
 
-
-def calculate_candle_wait_time(timeframe: str) -> int:
-    """
-    다음 캔들 마감까지 대기 시간 계산 (초)
-    정확한 봉 마감 시점에 로직 실행
-    """
-    now = datetime.utcnow()
-    
-    # 타임프레임별 분 단위 변환
-    tf_minutes = 60  # default 1h
-    if 'm' in timeframe:
-        tf_minutes = int(timeframe.replace('m', ''))
-    elif 'h' in timeframe:
-        tf_minutes = int(timeframe.replace('h', '')) * 60
-    elif 'd' in timeframe:
-        tf_minutes = int(timeframe.replace('d', '')) * 1440
-    
-    # 현재 시간을 분 단위로 변환
-    current_minutes = now.hour * 60 + now.minute
-    
-    # 다음 봉 마감 시점 계산
-    next_candle_minutes = ((current_minutes // tf_minutes) + 1) * tf_minutes
-    
-    # 자정 넘어가는 경우 처리
-    if next_candle_minutes >= 1440:
-        next_candle_minutes = next_candle_minutes % 1440
-        next_candle = (now + timedelta(days=1)).replace(
-            hour=next_candle_minutes // 60,
-            minute=next_candle_minutes % 60,
-            second=CANDLE_SYNC_OFFSET_SECONDS,
-            microsecond=0
-        )
-    else:
-        next_candle = now.replace(
-            hour=next_candle_minutes // 60,
-            minute=next_candle_minutes % 60,
-            second=CANDLE_SYNC_OFFSET_SECONDS,
-            microsecond=0
-        )
-    
-    wait_seconds = (next_candle - now).total_seconds()
-    
-    # 이미 지났으면 다음 주기로
-    if wait_seconds < 0:
-        wait_seconds += tf_minutes * 60
-    
-    return int(wait_seconds)
 
 
 # ============================================================
@@ -455,17 +118,20 @@ class RealTraderFutures:
         self.trade_db = TradeHistoryDB(TRADE_HISTORY_DB)
         self.health_manager = HealthCheckManager(HEARTBEAT_FILE)
         
-        # Oracle Cloud 최적화 (옵션)
-        self.oracle_optimizer = None
-        if enable_oracle_optimization and ORACLE_OPTIMIZER_AVAILABLE:
-            self.oracle_optimizer = OracleCloudOptimizer()
-            logger.info("☁️ Oracle Cloud optimization enabled")
+        # 클라우드 최적화 (옵션)
+        self.cloud_optimizer = None
+        if enable_oracle_optimization and CLOUD_OPTIMIZER_AVAILABLE:
+            self.cloud_optimizer = CloudOptimizer()
+            logger.info("☁️ Cloud optimization enabled")
         
         # Shutdown 플래그
         self._shutdown_requested = False
         
         # Signal handlers 등록
         self._setup_signal_handlers()
+        
+        # 전략 로드는 initialize()에서 수행
+
     
     def _setup_signal_handlers(self):
         """Graceful Shutdown 시그널 핸들러 등록"""
@@ -511,10 +177,32 @@ class RealTraderFutures:
             logger.info(f"🔹 Strategy initialized: {symbol} | TF: {best_params.get('TIMEFRAME')}")
     
     @api_retry
-    def _fetch_balance_safe(self) -> float:
-        """안전한 잔고 조회 (재시도 적용)"""
+    def _fetch_balance_safe(self) -> tuple:
+        """안전한 잔고 조회 (Total, Free 반환)"""
         ret = self.client.fetch_balance()
-        return parse_balance(ret)
+        
+        # Parse Balance (USDT)
+        usdt_total = 0.0
+        usdt_free = 0.0
+        
+        # CCXT Standard Structure
+        if isinstance(ret, dict):
+            if 'USDT' in ret:
+                val = ret['USDT']
+                # {'free': 100, 'used': 0, 'total': 100}
+                if isinstance(val, dict):
+                    usdt_free = float(val.get('free', 0.0))
+                    usdt_total = float(val.get('total', 0.0))
+                else:
+                    usdt_free = float(val)
+                    usdt_total = float(val)  # fallback
+            
+            # Alternative Structure ('free': {'USDT': ...})
+            elif 'free' in ret and isinstance(ret['free'], dict):
+                usdt_free = float(ret['free'].get('USDT', 0.0))
+                usdt_total = float(ret['total'].get('USDT', 0.0)) if 'total' in ret else usdt_free
+
+        return (usdt_total, usdt_free)
     
     @api_retry
     def _fetch_ohlcv_safe(self, symbol: str, timeframe: str, start_str: str):
@@ -532,9 +220,9 @@ class RealTraderFutures:
         return self.client.get_market_price(symbol)
     
     @api_retry
-    def _place_order_safe(self, symbol: str, side: str, qty: float):
-        """안전한 주문 실행 (재시도 적용)"""
-        return self.client.place_order(symbol, side, qty)
+    def _place_order_safe(self, symbol: str, side: str, qty: float, atr: float = None, current_price: float = None):
+        """안전한 주문 실행 (재시도 적용 + 스마트 주문 + 변동성 기반 최적화)"""
+        return self.client.place_order_smart(symbol, side, qty, atr=atr, current_price=current_price)
     
     def initialize(self):
         """초기화: 전략 로드, 레버리지 설정, 잔고 확인"""
@@ -545,8 +233,8 @@ class RealTraderFutures:
         
         # 2. 잔고 확인
         try:
-            usdt_free = self._fetch_balance_safe()
-            logger.info(f"💰 Account Balance: {usdt_free:.2f} USDT")
+            total_balance, usdt_free = self._fetch_balance_safe()
+            logger.info(f"💰 Account Balance: {usdt_free:.2f} USDT (Total: {total_balance:.2f})")
             
             if usdt_free < MIN_BALANCE_USDT:
                 logger.warning(f"⚠️ Warning: Low balance (< {MIN_BALANCE_USDT} USDT)!")
@@ -563,10 +251,28 @@ class RealTraderFutures:
                         f"✅ Exchange Leverage: {MAX_EXCHANGE_LEVERAGE}x for {symbol} "
                         f"(Strategy Target: {target_lev}x)"
                     )
+                
+                # 마진 모드 설정 (Cross 모드 강제)
+                self.client.set_margin_type(symbol, margin_type='CROSSED')
+
             except Exception as e:
-                logger.error(f"⚠️ Error setting leverage for {symbol}: {e}")
+                logger.error(f"⚠️ Error setting leverage/margin for {symbol}: {e}")
         
-        # 4. 초기 헬스체크
+        # 4. 포지션 모드 설정 (One-Way Mode 강제)
+        # 봇 로직은 단방향 스위칭 구조이므로 Hedge Mode가 아닌 One-Way Mode가 필수입니다.
+        try:
+            self.client.set_position_mode(dual_side_position=False)
+        except Exception as e:
+            logger.error(f"⚠️ Failed to set One-Way Mode: {e}")
+
+        # 5. 자산 모드 설정 (Single-Asset Mode 강제)
+        # 봇은 USDT 단일 담보만 고려하여 잔고 계산을 하므로 Multi-Asset Mode는 끕니다.
+        try:
+            self.client.set_asset_mode(is_multi_asset=False)
+        except Exception as e:
+            logger.error(f"⚠️ Failed to set Single-Asset Mode: {e}")
+
+        # 6. 초기 헬스체크
         self.health_manager.update_heartbeat(status="initialized")
         
         logger.info("🚀 Initialization Complete. Bot is Running...")
@@ -577,9 +283,9 @@ class RealTraderFutures:
             params = self.params_map[symbol]
             strategy = self.strategies[symbol]
             
-            # 1. 데이터 조회
+            # 1. 데이터 조회 (충분한 지표 워밍업을 위해 700개 요청)
             timeframe = params.get('TIMEFRAME', '1h')
-            limit = 500
+            limit = 700
             
             tf_min = 60
             if 'm' in timeframe:
@@ -590,15 +296,16 @@ class RealTraderFutures:
                 tf_min = int(timeframe.replace('d', '')) * 1440
             
             lookback_days = (limit * tf_min) / 1440
-            start_dt = datetime.now() - timedelta(days=lookback_days + 2)
+            start_dt = datetime.utcnow() - timedelta(days=lookback_days + 2)
             start_str = start_dt.strftime("%Y-%m-%d %H:%M:%S")
             
             df = self._fetch_ohlcv_safe(symbol, timeframe, start_str)
             
-            if df is None or len(df) < limit * 0.9:
+            # 200개 이하인 경우 지표 불신뢰로 인해 중단
+            if df is None or len(df) < 200:
                 logger.warning(
                     f"⚠️ Insufficient data for {symbol}. "
-                    f"Needed ~{limit}, Got {len(df) if df is not None else 0}"
+                    f"Got {len(df) if df is not None else 0}, need min 200."
                 )
                 return
             
@@ -651,7 +358,7 @@ class RealTraderFutures:
                     )
                     qty = self._calculate_position_size(symbol, current_price, params, atr)
                     if qty > 0:
-                        order = self._place_order_safe(symbol, 'buy', qty)
+                        order = self._place_order_safe(symbol, 'buy', qty, atr=atr, current_price=current_price)
                         if order:
                             self.trade_db.record_trade(
                                 symbol=symbol,
@@ -671,7 +378,7 @@ class RealTraderFutures:
                     )
                     qty = self._calculate_position_size(symbol, current_price, params, atr)
                     if qty > 0:
-                        order = self._place_order_safe(symbol, 'sell', qty)
+                        order = self._place_order_safe(symbol, 'sell', qty, atr=atr, current_price=current_price)
                         if order:
                             self.trade_db.record_trade(
                                 symbol=symbol,
@@ -727,7 +434,39 @@ class RealTraderFutures:
                     tp_price = entry_price + (atr * tp_atr_mult)
                     if current_price >= tp_price:
                         exit_triggered = True
-                        reason = "Take Profit"
+                        reason = f"Take Profit ({tp_price:.2f})"
+                
+                # 4. Stop Loss (Fixed / ATR) [CRITICAL FIX]
+                if not exit_triggered and entry_price > 0:
+                    sl_type = params.get('STOP_LOSS_TYPE', 'FIXED')
+                    stop_price = 0.0
+                    
+                    if sl_type == 'ATR' and atr > 0:
+                        sl_mult = params.get('ATR_STOP_LOSS_MULT', 1.5)
+                        stop_price = entry_price - (atr * sl_mult)
+                    else: # FIXED
+                        sl_pct = params.get('STOP_LOSS_PCT', 0.02)
+                        stop_price = entry_price * (1 - sl_pct)
+                        
+                    if current_price <= stop_price:
+                        exit_triggered = True
+                        reason = f"Stop Loss ({stop_price:.2f})"
+
+                # 5. Trailing Stop (ATR) - Simplified Stateless
+                # (Requires persistent high tracking for perfect sync, here using conservative close-based approximation)
+                if not exit_triggered and params.get('EXIT_TYPE') == 'ATR' and atr > 0:
+                    # In a stateless system, we can't easily track 'highest since entry' perfectly without DB.
+                    # Fallback: If price drops significantly from recent high (within Lookback), exit.
+                    # Better: Use simple ATR Safety net relative to entry for now or rely on trend reversal.
+                    # For Production: It is safer to rely on Trend Reversal + Hard Stop Loss than a stateless trailing stop.
+                    # We will implement a "Profit Protection" Trailing Stop:
+                    # If Profit > 2 * ATR, move Loop Stop to Entry + 0.5 * ATR (Break Even + Profit)
+                    profit_dist = current_price - entry_price
+                    if profit_dist > (atr * 2.0):
+                        trail_floor = entry_price + (atr * 0.5)
+                        if current_price < trail_floor:
+                            exit_triggered = True
+                            reason = f"Profit Protection Trail ({trail_floor:.2f})"
                 
                 if exit_triggered:
                     pnl = (current_price - entry_price) * abs(amount)
@@ -768,7 +507,32 @@ class RealTraderFutures:
                     tp_price = entry_price - (atr * tp_atr_mult)
                     if current_price <= tp_price:
                         exit_triggered = True
-                        reason = "Take Profit"
+                        reason = f"Take Profit ({tp_price:.2f})"
+
+                # 4. Stop Loss (Fixed / ATR) [CRITICAL FIX]
+                if not exit_triggered and entry_price > 0:
+                    sl_type = params.get('STOP_LOSS_TYPE', 'FIXED')
+                    stop_price = 0.0
+                    
+                    if sl_type == 'ATR' and atr > 0:
+                        sl_mult = params.get('ATR_STOP_LOSS_MULT', 1.5)
+                        stop_price = entry_price + (atr * sl_mult)
+                    else: # FIXED
+                        sl_pct = params.get('STOP_LOSS_PCT', 0.02)
+                        stop_price = entry_price * (1 + sl_pct)
+                        
+                    if current_price >= stop_price:
+                        exit_triggered = True
+                        reason = f"Stop Loss ({stop_price:.2f})"
+
+                # 5. Trailing Stop (ATR) - Simplified Stateless
+                if not exit_triggered and params.get('EXIT_TYPE') == 'ATR' and atr > 0:
+                     profit_dist = entry_price - current_price
+                     if profit_dist > (atr * 2.0):
+                        trail_ceil = entry_price - (atr * 0.5)
+                        if current_price > trail_ceil:
+                            exit_triggered = True
+                            reason = f"Profit Protection Trail ({trail_ceil:.2f})"
                 
                 if exit_triggered:
                     pnl = (entry_price - current_price) * abs(amount)
@@ -803,82 +567,128 @@ class RealTraderFutures:
         params: dict, 
         atr: float = 0.0
     ) -> float:
-        """포지션 사이즈 계산 (성과 기반 가중치 적용)"""
+        """
+        포지션 사이즈 계산 (견고성 강화)
+        
+        개선사항:
+        - 거래소 정밀도(precision) 자동 조회
+        - 최소 주문 금액/수량 검증
+        - Edge case 방어 (0 나누기, 음수 레버리지 등)
+        """
+        # === 0. Input Validation ===
+        if price <= 0:
+            logger.error(f"❌ Invalid price for {symbol}: {price}")
+            return 0.0
+        
+        # === 1. 잔고 조회 ===
         try:
-            # Total Balance(총 자산)와 Free Balance(가용 잔고) 모두 필요
             total_balance, usdt_free = self._fetch_balance_safe()
-        except Exception:
-            return 0
+        except Exception as e:
+            logger.error(f"❌ Balance fetch failed for {symbol}: {e}")
+            return 0.0
         
         if usdt_free < MIN_BALANCE_FOR_TRADE:
             logger.warning(f"⚠️ Insufficient capital for {symbol}: ${usdt_free:.2f}")
-            return 0
+            return 0.0
         
-        # 1. 성과 기반 가중치 적용 (BTC 75%, ETH 25%)
-        # 설정된 가중치가 없으면 균등 배분 가정 (1 / 심볼 수)
+        # === 2. 성과 기반 가중치 적용 ===
         default_weight = 1.0 / len(self.symbols) if self.symbols else 0.5
         allocation_weight = SYMBOL_ALLOCATION_WEIGHTS.get(symbol, default_weight)
-        
-        # 2. 할당된 자본금 (Allocated Capital)
-        # 이 심볼이 운용할 수 있는 이론적 총 자본금
         allocated_capital = total_balance * allocation_weight
         
+        # === 3. 전략 파라미터 ===
         leverage = params.get('LEVERAGE', 1)
+        if leverage <= 0:
+            logger.warning(f"⚠️ Invalid leverage for {symbol}: {leverage}. Using 1x.")
+            leverage = 1
+        
         risk_per_trade = params.get(
             'RISK_PER_TRADE_FUTURES', 
             params.get('RISK_PER_TRADE', 0.02)
         )
         
-        # 3. Stop Loss Distance 계산
-        stop_distance_pct = 0.05  # Default Fallback
+        # === 4. Stop Loss Distance 계산 ===
+        stop_distance_pct = 0.05  # Default fallback
         
         if atr > 0 and price > 0:
             atr_mult = params.get('ATR_STOP_LOSS_MULT', 1.5)
             stop_distance = atr * atr_mult
             stop_distance_pct = stop_distance / price
+            # Clamp to reasonable range (0.5% ~ 10%)
             stop_distance_pct = max(0.005, min(stop_distance_pct, 0.10))
         
-        # 4. Sizing Calculation (Allocated Capital 기준 리스크)
-        # 예: 총자산 1000불, BTC(75%) -> 750불 할당
-        # Risk 2% -> 15불 리스크 감수
+        # === 5. Sizing Calculation ===
         risk_amt = allocated_capital * risk_per_trade
+        
+        # Division by zero 방어
+        if stop_distance_pct <= 0:
+            logger.error(
+                f"❌ Invalid stop_distance_pct for {symbol}: {stop_distance_pct}. "
+                "Cannot calculate position size."
+            )
+            return 0.0
+        
         notional_value = risk_amt / stop_distance_pct
-        
-        # 5. 최대 허용 Notional (가용 잔고 제약)
-        # 실제로 주문 가능한 금액은 (가용 잔고 * 레버리지)를 넘을 수 없음
         max_tradeable_notional = usdt_free * leverage
-        
-        # 6. 최종 Notional (할당된 리스크와 실제 가용액 중 작은 것)
         final_notional = min(notional_value, max_tradeable_notional)
         
-        # 최소 주문 금액 확인 체크 미리 하기
+        # === 6. 최소 주문 금액 체크 ===
         if final_notional < MIN_ORDER_VALUE_USDT:
-             return 0
-
-        quantity = final_notional / price
+            logger.debug(
+                f"⚠️ Notional too small for {symbol}: ${final_notional:.2f} "
+                f"< ${MIN_ORDER_VALUE_USDT}"
+            )
+            return 0.0
         
-        # Precision Adjustment
-        if 'BTC' in symbol:
-            quantity = float(int(quantity * 1000) / 1000)
-        elif 'ETH' in symbol:
-            quantity = float(int(quantity * 100) / 100)
-        else:
-            quantity = float(int(quantity * 10) / 10)
+        # === 7. 수량 계산 (Quantity) ===
+        raw_quantity = final_notional / price
         
-        if quantity * price < MIN_ORDER_VALUE_USDT:
-            return 0
+        # === 8. 거래소 정밀도 적용 (Precision) ===
+        # Binance market info에서 정밀도를 가져오는 것이 이상적이지만,
+        # API 호출 오버헤드를 피하기 위해 심볼별 일반적인 정밀도 사용
+        # 추후 market info 캐싱으로 개선 가능
+        precision_map = {
+            'BTC/USDT': 3,   # 0.001
+            'ETH/USDT': 2,   # 0.01
+            'BNB/USDT': 2,
+            'SOL/USDT': 1,
+            'XRP/USDT': 0,   # 1 (정수)
+        }
         
+        precision = precision_map.get(symbol, 2)  # 기본 2자리
+        multiplier = 10 ** precision
+        quantity = float(int(raw_quantity * multiplier) / multiplier)
+        
+        # === 9. 최종 검증 ===
+        # a. 수량이 0이 아닌지
+        if quantity <= 0:
+            logger.warning(
+                f"⚠️ Calculated quantity is zero for {symbol}. "
+                f"Raw: {raw_quantity:.6f}, Precision: {precision}"
+            )
+            return 0.0
+        
+        # b. 최소 주문 금액 재확인 (정밀도 적용 후)
+        final_order_value = quantity * price
+        if final_order_value < MIN_ORDER_VALUE_USDT:
+            logger.debug(
+                f"⚠️ Order value after precision too small for {symbol}: "
+                f"${final_order_value:.2f} (Qty: {quantity})"
+            )
+            return 0.0
+        
+        # === 10. 상세 로깅 ===
         logger.info(
-            f"🧮 Sizing {symbol} (Weight {allocation_weight*100:.0f}%): "
+            f"🧮 Sizing {symbol} (Weight {allocation_weight*100:.0f}%, Leverage {leverage}x): "
             f"Total ${total_balance:.0f} | Alloc ${allocated_capital:.0f}"
         )
         logger.info(
-            f"   -> Risk: ${risk_amt:.1f} ({risk_per_trade*100}% of Alloc) | "
-            f"StopDist {stop_distance_pct*100:.1f}%"
+            f"   -> Risk: ${risk_amt:.1f} ({risk_per_trade*100:.1f}% of Alloc) | "
+            f"StopDist {stop_distance_pct*100:.2f}%"
         )
         logger.info(
-            f"   -> Target Size: {notional_value:.1f} USDT | "
-            f"Final: {final_notional:.1f} USDT ({quantity} coins)"
+            f"   -> Target Size: ${notional_value:.1f} | "
+            f"Final: ${final_notional:.1f} ({quantity} {symbol.split('/')[0]})"
         )
         
         return quantity
@@ -926,29 +736,26 @@ class RealTraderFutures:
                     positions=positions
                 )
                 
-                # Oracle Cloud 최적화 실행
-                if self.oracle_optimizer:
-                    # 1. Idle 방지 (CPU 사용률 증가)
-                    self.oracle_optimizer.prevent_idle_shutdown(duration_seconds=3)
+                # 클라우드 최적화 실행
+                if self.cloud_optimizer:
+                    # 1. 시간 동기화 검증 (Binance API 필수)
+                    if not self.cloud_optimizer.check_time_sync_ntp():
+                        logger.error("⏰ Time drift detected! Bot may fail to place orders on Binance.")
                     
-                    # 2. 시간 동기화 검증
-                    if not self.oracle_optimizer.check_time_sync():
-                        logger.error("⏰ Time drift detected! Consider resyncing NTP.")
-                    
-                    # 3. 리소스 모니터링 (10분마다)
+                    # 2. 리소스 모니터링 (10분마다)
                     if self.health_manager.loop_count % 20 == 0:
-                        self.oracle_optimizer.log_resource_usage()
+                        self.cloud_optimizer.log_resource_usage()
                     
-                    # 4. DB 정리 (24시간마다, 90일 이상 오래된 거래 삭제)
+                    # 3. DB 정리 (24시간마다, 90일 이상 오래된 거래 삭제)
                     if self.health_manager.loop_count % 2880 == 0:
-                        self.oracle_optimizer.cleanup_db_old_records(
+                        self.cloud_optimizer.cleanup_db_old_records(
                             TRADE_HISTORY_DB, 
                             days_to_keep=90
                         )
                     
                     # 5. 명시적 GC (1시간마다)
                     if self.health_manager.loop_count % 120 == 0:
-                        self.oracle_optimizer.force_gc()
+                        self.cloud_optimizer.force_gc()
                 
                 # 캔들 동기화 대기 (옵션)
                 # 첫 번째 심볼의 타임프레임 기준
