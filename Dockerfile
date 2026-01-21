@@ -21,11 +21,14 @@ RUN wget http://prdownloads.sourceforge.net/ta-lib/ta-lib-0.4.0-src.tar.gz && \
     ./configure --prefix=/usr && \
     make && \
     make install && \
+    ldconfig && \
     cd .. && \
     rm -rf ta-lib ta-lib-0.4.0-src.tar.gz
 
 # 패키지 설치
 COPY requirements.txt .
+# TA-Lib 빌드 시 numpy 헤더가 필요한 경우가 많으므로 선행 설치
+RUN pip install --no-cache-dir numpy
 RUN pip install --no-cache-dir -r requirements.txt
 
 # 소스 코드 복사 (이때 .dockerignore가 적용되어 CSV 등은 복사 안됨)
