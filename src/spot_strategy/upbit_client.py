@@ -4,10 +4,11 @@ import time
 import logging
 from datetime import datetime
 from config.settings import API_READ_TIMEOUT
+from src.common.utils import setup_logger
 
 class UpbitClient:
     def __init__(self, access_key=None, secret_key=None):
-        self.logger = logging.getLogger("UpbitClient")
+        self.logger = setup_logger("UpbitClient")
         
         try:
             self.exchange = ccxt.upbit({
@@ -116,6 +117,12 @@ class UpbitClient:
             # Upbit KRW
             total_krw = balance['total'].get('KRW', 0.0)
             free_krw = balance['free'].get('KRW', 0.0)
+            
+            if total_krw == 0 and free_krw == 0:
+                self.logger.debug(f"ℹ️ Balance fetched but KRW is 0. Available assets: {list(balance['total'].keys())}")
+            else:
+                self.logger.info(f"💰 KRW Balance: Total {total_krw:,.0f} | Free {free_krw:,.0f}")
+                
             return total_krw, free_krw
         except Exception as e:
             self.logger.error(f"Error fetching KRW balance: {e}")
