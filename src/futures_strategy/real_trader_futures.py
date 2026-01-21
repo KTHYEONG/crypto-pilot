@@ -616,9 +616,9 @@ class RealTraderFutures:
         
         # === 6. 최소 주문 금액 체크 ===
         if final_notional < MIN_ORDER_VALUE_USDT:
-            logger.debug(
-                f"⚠️ Notional too small for {symbol}: ${final_notional:.2f} "
-                f"< ${MIN_ORDER_VALUE_USDT}"
+            logger.warning(
+                f"⚠️ Calculated size too small for {symbol}: ${final_notional:.2f} "
+                f"< Min ${MIN_ORDER_VALUE_USDT}. Increase weight or balance."
             )
             return 0.0
         
@@ -653,9 +653,10 @@ class RealTraderFutures:
         # b. 최소 주문 금액 재확인 (정밀도 적용 후)
         final_order_value = quantity * price
         if final_order_value < MIN_ORDER_VALUE_USDT:
-            logger.debug(
-                f"⚠️ Order value after precision too small for {symbol}: "
-                f"${final_order_value:.2f} (Qty: {quantity})"
+            logger.warning(
+                f"⚠️ Final order value too small for {symbol}: "
+                f"${final_order_value:.2f} (Qty: {quantity}). "
+                f"Min ${MIN_ORDER_VALUE_USDT} required."
             )
             return 0.0
         
