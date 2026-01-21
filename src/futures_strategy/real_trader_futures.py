@@ -328,6 +328,28 @@ class RealTraderFutures:
                 if pd.isna(entry_upper) or pd.isna(entry_lower):
                     return
                 
+                # [Optimization] Staleness Check: 봉 마감 후 너무 오래 지났으면 진입 방지 (재시작 시 이상 진입 방어)
+                last_candle_time = last_candle.name # DataFrame index is timestamp
+                if not isinstance(last_candle_time, datetime):
+                     last_candle_time = pd.to_datetime(last_candle_time)
+                
+                # 다음 봉 시작 시간 (즉, last_candle의 마감 시간)
+                candle_end_time = last_candle_time + timedelta(minutes=tf_min)
+                now_utc = datetime.utcnow()
+                delay_seconds = (now_utc - candle_end_time).total_seconds()
+                
+                # 허용 오차: 타임프레임의 5% (최대 30분)
+                max_delay = min(tf_min * 60 * 0.05, 1800) 
+                
+                if delay_seconds > max_delay:
+                    # 매 루프마다 나오면 시끄러우므로, 봉 마감 직후가 아닌 경우에만 경고
+                    if delay_seconds < (tf_min * 60 * 0.8): 
+                        logger.warning(
+                            f"⏰ Signal is stale for {symbol}. "
+                            f"Passed {delay_seconds/60:.1f}m since close. Skipping entry."
+                        )
+                    return
+
                 # LONG 진입
                 if trend_dir == 1 and current_price > entry_upper:
                     logger.info(
