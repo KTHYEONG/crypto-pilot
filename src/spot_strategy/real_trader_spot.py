@@ -25,17 +25,7 @@ from logging.handlers import RotatingFileHandler
 from typing import Optional, Dict, Any
 
 # tenacity for retry logic
-try:
-    from tenacity import (
-        retry,
-        stop_after_attempt,
-        wait_exponential,
-        retry_if_exception_type,
-        before_sleep_log
-    )
-    TENACITY_AVAILABLE = True
-except ImportError:
-    TENACITY_AVAILABLE = False
+
 
 # Project Root Setup
 try:
@@ -72,13 +62,12 @@ from config.settings import (
 )
 
 # 재사용 모듈 (Futures에서 구현한 공통 컴포넌트)
-from src.futures_strategy.real_trader_futures import (
-    JSONFormatter,
-    setup_logger,
-    create_retry_decorator,
-    TradeHistoryDB,
-    HealthCheckManager,
-    calculate_candle_wait_time,
+# 공통 유틸리티 및 컴포넌트
+from src.common.utils import setup_logger, api_retry
+from src.common.components import (
+    TradeHistoryDB, 
+    HealthCheckManager, 
+    calculate_candle_wait_time
 )
 
 # Upbit 클라이언트
@@ -87,16 +76,13 @@ from src.strategy.strategies import UltimateStrategy
 
 # Oracle Cloud 최적화 (선택적)
 try:
-    from src.futures_strategy.oracle_cloud_optimizer import OracleCloudOptimizer
-    ORACLE_OPTIMIZER_AVAILABLE = True
+    from src.common.cloud_optimizer import CloudOptimizer
+    CLOUD_OPTIMIZER_AVAILABLE = True
 except ImportError:
-    ORACLE_OPTIMIZER_AVAILABLE = False
+    CLOUD_OPTIMIZER_AVAILABLE = False
 
 # 로거 설정
 logger = setup_logger("RealTraderSpot")
-
-# API 재시도 데코레이터
-api_retry = create_retry_decorator()
 
 
 # ============================================================
@@ -173,11 +159,11 @@ class RealTraderSpot:
         self.health_manager = HealthCheckManager(SPOT_HEARTBEAT_FILE)
         self.state_manager = StateManager(SPOT_STATE_FILE)
 
-        # Oracle Cloud 최적화 (옵션)
-        self.oracle_optimizer = None
-        if enable_oracle_optimization and ORACLE_OPTIMIZER_AVAILABLE:
-            self.oracle_optimizer = OracleCloudOptimizer()
-            logger.info("☁️ Oracle Cloud optimization enabled")
+        # 클라우드 최적화 (옵션)
+        self.cloud_optimizer = None
+        if enable_oracle_optimization and CLOUD_OPTIMIZER_AVAILABLE:
+            self.cloud_optimizer = CloudOptimizer()
+            logger.info("☁️ Cloud optimization enabled")
 
         # Shutdown 플래그
         self._shutdown_requested = False
@@ -297,11 +283,15 @@ class RealTraderSpot:
             strategy = self.strategies[symbol]
             timeframe = params.get('TIMEFRAME', '1h')
 
-            # 1. 데이터 조회
-            df = self._fetch_ohlcv_safe(symbol, timeframe, limit=200)
+            # 1. 데이터 조회 (충분한 지표 계산을 위해 600개 이상 요청)
+            df = self._fetch_ohlcv_safe(symbol, timeframe, limit=600)
 
-            if df is None or len(df) < 50:
-                logger.warning(f"⚠️ Insufficient data for {symbol}")
+            # 전략 지표(EMA 200, Ichimoku 등) 계산을 위해 최소 200개 이상 필요
+            if df is None or len(df) < 200:
+                logger.warning(
+                    f"⚠️ Insufficient data for {symbol}: "
+                    f"Got {len(df) if df is not None else 0}, need min 200 for indicators."
+                )
                 return
 
             # 2. 지표 계산
@@ -330,12 +320,27 @@ class RealTraderSpot:
                 state = {}
 
             elif in_position and entry_price == 0:
-                logger.info(f"⚠️ Position found without state for {symbol}. Using avg_buy_price.")
-                entry_price = pos.get('avg_buy_price', last_price)
-                state['entry_price'] = entry_price
-                state['entry_atr'] = confirmed_candle.get('atr', 0.0)
-                state['highest_high'] = last_price
-                self.state_manager.update_symbol_state(symbol, state)
+                # 포지션은 있는데 봇 상태가 없는 경우 (재시작 등)
+                exchange_avg_price = pos.get('entryPrice', 0.0)
+                
+                if exchange_avg_price > 0:
+                    logger.info(
+                        f"⚠️ Position found without state for {symbol}. "
+                        f"Recovering from exchange avg_buy_price: {exchange_avg_price:,.0f} KRW"
+                    )
+                    entry_price = exchange_avg_price
+                    state['entry_price'] = entry_price
+                    state['entry_atr'] = confirmed_candle.get('atr', 0.0)
+                    state['highest_high'] = max(last_price, exchange_avg_price)
+                    state['invest_amount'] = balance_coin * exchange_avg_price  # 원금 추정
+                    self.state_manager.update_symbol_state(symbol, state)
+                else:
+                    logger.error(
+                        f"🚨 CRITICAL: Position exists for {symbol} but CANNOT determine "
+                        f"entry price! Amount: {balance_coin}, Value: {current_value:,.0f} KRW. "
+                        f"Skipping all actions until manual verification."
+                    )
+                    return  # 안전을 위해 해당 심볼은 이번 루프 스킵
 
             # --- EXIT LOGIC ---
             if in_position:
@@ -371,7 +376,13 @@ class RealTraderSpot:
 
             # 파라미터
             entry_price = state.get('entry_price', 0.0)
-            entry_atr = state.get('entry_atr', candle.get('atr', 0.0))
+            # [Fix] Fallback to current candle ATR if state is missing (Critical for Safety)
+            entry_atr = state.get('entry_atr', 0.0)
+            if entry_atr == 0:
+                entry_atr = candle.get('atr', 0.0)
+                if entry_atr > 0:
+                    logger.warning(f"⚠️ Recovered entry_atr from current candle for {symbol}: {entry_atr}")
+
             highest_high = state.get('highest_high', entry_price)
 
             trend_dir = candle.get('trend_direction', 0)
@@ -481,6 +492,12 @@ class RealTraderSpot:
                 
                 if s == symbol:
                     this_symbol_invested = invest_amt
+            
+            # [CRITICAL UPDATE] Single Entry Enforcement (Match Backtest)
+            if this_symbol_invested > MIN_POSITION_VALUE_KRW:
+                logger.info(f"⏭️ Skipping entry for {symbol}: Position already exists ({this_symbol_invested:,.0f} KRW).")
+                return 0
+
 
             # 총 자산 (추정치) = KRW 현금 잔고 + 현재 투자 중인 원금 총액
             # (수익/손실은 무시하고 원금 기준으로 보수적 접근)
@@ -628,29 +645,26 @@ class RealTraderSpot:
                     positions=positions
                 )
 
-                # Oracle Cloud 최적화 실행
-                if self.oracle_optimizer:
-                    # 1. Idle 방지 (CPU 사용률 증가)
-                    self.oracle_optimizer.prevent_idle_shutdown(duration_seconds=3)
-
-                    # 2. 시간 동기화 검증
-                    if not self.oracle_optimizer.check_time_sync():
-                        logger.error("⏰ Time drift detected! Consider resyncing NTP.")
-
-                    # 3. 리소스 모니터링 (10분마다)
-                    if self.health_manager.loop_count % 10 == 0:
-                        self.oracle_optimizer.log_resource_usage()
-
-                    # 4. DB 정리 (24시간마다, 90일 이상 오래된 거래 삭제)
-                    if self.health_manager.loop_count % 1440 == 0:
-                        self.oracle_optimizer.cleanup_db_old_records(
-                            TRADE_HISTORY_DB,
+                # 클라우드 최적화 실행
+                if self.cloud_optimizer:
+                    # 1. 시간 동기화 검증 (거래소 API 필수)
+                    if not self.cloud_optimizer.check_time_sync_ntp():
+                        logger.error("⏰ Time drift detected! Bot may encounter API errors.")
+                    
+                    # 2. 리소스 모니터링 (10분마다)
+                    if self.health_manager.loop_count % 20 == 0:
+                        self.cloud_optimizer.log_resource_usage()
+                    
+                    # 3. DB 정리 (24시간마다, 90일 이상 오래된 거래 삭제)
+                    if self.health_manager.loop_count % 2880 == 0:
+                        self.cloud_optimizer.cleanup_db_old_records(
+                            TRADE_HISTORY_DB, 
                             days_to_keep=90
                         )
 
                     # 5. 명시적 GC (2시간마다)
                     if self.health_manager.loop_count % 120 == 0:
-                        self.oracle_optimizer.force_gc()
+                        self.cloud_optimizer.force_gc()
 
                 # 캔들 동기화 대기
                 if self.symbols and self.params_map:
