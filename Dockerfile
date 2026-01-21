@@ -11,7 +11,18 @@ WORKDIR /app
 # 시스템 의존성 설치 (필요시)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
+    wget \
     && rm -rf /var/lib/apt/lists/*
+
+# TA-Lib C 라이브러리 설치 (pip install ta-lib 선행조건)
+RUN wget http://prdownloads.sourceforge.net/ta-lib/ta-lib-0.4.0-src.tar.gz && \
+    tar -xzf ta-lib-0.4.0-src.tar.gz && \
+    cd ta-lib && \
+    ./configure --prefix=/usr && \
+    make && \
+    make install && \
+    cd .. && \
+    rm -rf ta-lib ta-lib-0.4.0-src.tar.gz
 
 # 패키지 설치
 COPY requirements.txt .
