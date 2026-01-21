@@ -1,0 +1,29 @@
+version: '3.8'
+
+services:
+  # 현물 트레이딩 봇 (Upbit)
+  spot-bot:
+    build: .
+    container_name: coin-trader-spot
+    restart: always
+    env_file: .env
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      # DB 파일도 호스트와 동기화하여 데이터 영속성 유지
+      - ./spot_strategy.db:/app/spot_strategy.db
+      - ./trade_history.db:/app/trade_history.db
+    command: python src/spot_strategy/real_trader_spot.py
+
+  # 선물 트레이딩 봇 (Binance)
+  futures-bot:
+    build: .
+    container_name: coin-trader-futures
+    restart: always
+    env_file: .env
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./futures_strategy.db:/app/futures_strategy.db
+      - ./trade_history.db:/app/trade_history.db
+    command: python src/futures_strategy/real_trader_futures.py
