@@ -520,6 +520,11 @@ class RealTraderSpot:
             
             # 너무 작은 주문 방지
             if buy_amount < MIN_ORDER_VALUE_KRW:
+                logger.warning(
+                    f"⚠️ Calculated buy_amount too small for {symbol}: {buy_amount:,.0f} KRW "
+                    f"< Min {MIN_ORDER_VALUE_KRW:,.0f} KRW. "
+                    f"Equity: {estimated_total_equity:,.0f} KRW, Weight: {weight*100:.0f}%"
+                )
                 return 0
                 
             logger.info(
@@ -591,7 +596,8 @@ class RealTraderSpot:
                         logger.error(f"❌ Buy order failed: {res}")
                 else:
                     logger.warning(
-                        f"⚠️ Insufficient funds or allocation full for {symbol}. "
+                        f"⚠️ Order skipped for {symbol}: Calculated amount {invest_amount:,.0f} KRW "
+                        f"is less than minimum {MIN_ORDER_VALUE_KRW:,.0f} KRW."
                     )
 
         except Exception as e:
