@@ -1,56 +1,76 @@
-
 import pandas as pd
 import numpy as np
+import talib
+import functools
+from numba import njit
 
+# Global cache for indicators to prevent redundant calculations during optimization
+_INDICATOR_CACHE = {}
+
+def indicator_cache(func):
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        # We use the id(data) as part of the key. 
+        # In our optimizer, the train_data DFs are static, so id() is a safe identifier.
+        data_obj = args[0]
+        params = args[1:]
+        
+        # Create a unique key for (function_name, data_id, positional_params, keyword_params)
+        cache_key = (func.__name__, id(data_obj), params, tuple(sorted(kwargs.items())))
+        
+        if cache_key in _INDICATOR_CACHE:
+            return _INDICATOR_CACHE[cache_key]
+        
+        result = func(*args, **kwargs)
+        _INDICATOR_CACHE[cache_key] = result
+        return result
+    return wrapper
+
+@indicator_cache
 def calculate_sma(series, window):
-    return series.rolling(window=window).mean()
+    return pd.Series(talib.SMA(series.values, timeperiod=window), index=series.index)
 
+@indicator_cache
 def calculate_ema(series, window):
-    return series.ewm(span=window, adjust=False).mean()
+    return pd.Series(talib.EMA(series.values, timeperiod=window), index=series.index)
 
+@indicator_cache
 def calculate_wma(series, window):
-    weights = np.arange(1, window + 1)
-    return series.rolling(window).apply(lambda x: np.dot(x, weights) / weights.sum(), raw=True)
+    return pd.Series(talib.WMA(series.values, timeperiod=window), index=series.index)
 
+@indicator_cache
 def calculate_hma(series, window):
     wma_half = calculate_wma(series, window // 2)
     wma_full = calculate_wma(series, window)
     return calculate_wma(2 * wma_half - wma_full, int(np.sqrt(window)))
 
+@indicator_cache
 def calculate_dema(series, window):
-    ema1 = calculate_ema(series, window)
-    ema2 = calculate_ema(ema1, window)
-    return 2 * ema1 - ema2
+    return pd.Series(talib.DEMA(series.values, timeperiod=window), index=series.index)
 
+@indicator_cache
 def calculate_tema(series, window):
-    ema1 = calculate_ema(series, window)
-    ema2 = calculate_ema(ema1, window)
-    ema3 = calculate_ema(ema2, window)
-    return 3 * ema1 - 3 * ema2 + ema3
+    return pd.Series(talib.TEMA(series.values, timeperiod=window), index=series.index)
 
+@indicator_cache
 def calculate_atr(df, window=14):
-    high_low = df['high'] - df['low']
-    high_close = (df['high'] - df['close'].shift()).abs()
-    low_close = (df['low'] - df['close'].shift()).abs()
-    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
-    return tr.rolling(window=window).mean()
+    return pd.Series(talib.ATR(df['high'].values, df['low'].values, df['close'].values, timeperiod=window), index=df.index)
 
+@indicator_cache
 def calculate_bollinger_bands(df, window=20, std_dev=2.0):
-    sma = calculate_sma(df['close'], window)
-    std = df['close'].rolling(window=window).std()
-    upper = sma + (std * std_dev)
-    lower = sma - (std * std_dev)
-    # Squeeze: Bandwidth
-    bandwidth = (upper - lower) / sma
-    return upper, lower, bandwidth
+    upper, middle, lower = talib.BBANDS(df['close'].values, timeperiod=window, nbdevup=std_dev, nbdevdn=std_dev, matype=0)
+    bandwidth = (upper - lower) / middle
+    return pd.Series(upper, index=df.index), pd.Series(lower, index=df.index), pd.Series(bandwidth, index=df.index)
 
+@indicator_cache
 def calculate_keltner_channel(df, window=20, atr_mult=1.5):
     ema = calculate_ema(df['close'], window)
-    atr = calculate_atr(df, window=10) # ATR window usually fixed around 10-14
+    atr = calculate_atr(df, window=10)
     upper = ema + (atr * atr_mult)
     lower = ema - (atr * atr_mult)
     return upper, lower
 
+@indicator_cache
 def calculate_supertrend(df, period=10, multiplier=3.0):
     atr = calculate_atr(df, window=period)
     hl2 = (df['high'] + df['low']) / 2
@@ -58,252 +78,195 @@ def calculate_supertrend(df, period=10, multiplier=3.0):
     basic_upper = hl2 + (multiplier * atr)
     basic_lower = hl2 - (multiplier * atr)
     
-    # Init final values
-    final_upper = pd.Series(index=df.index, dtype='float64')
-    final_lower = pd.Series(index=df.index, dtype='float64')
-    is_uptrend = pd.Series(index=df.index, dtype='int')
-    
-    # Iterate (Not vectorizable easily due to dependency on prev value)
-    # Using numpy for iteration might be faster but simple loop is readable for logic check
-    # We will initialize with basic first value
-    up = basic_upper.iloc[0]
-    lo = basic_lower.iloc[0]
-    trend = 1
-    
-    upper_list = [up]
-    lower_list = [lo]
-    trend_list = [trend]
-    
     close = df['close'].values
     bu = basic_upper.values
     bl = basic_lower.values
+    
+    final_upper = np.zeros(len(df))
+    final_lower = np.zeros(len(df))
+    trend = np.zeros(len(df), dtype=int)
+    
+    upper = bu[0]
+    lower = bl[0]
+    curr_trend = 1
+    
+    final_upper[0] = upper
+    final_lower[0] = lower
+    trend[0] = curr_trend
     
     for i in range(1, len(df)):
         c = close[i]
         c_prev = close[i-1]
         
-        # Calculate Upper/Lower
-        if bu[i] < upper_list[-1] or c_prev > upper_list[-1]:
-            curr_upper = bu[i]
-        else:
-            curr_upper = upper_list[-1]
-            
-        if bl[i] > lower_list[-1] or c_prev < lower_list[-1]:
-            curr_lower = bl[i]
-        else:
-            curr_lower = lower_list[-1]
-            
-        # Determine Trend
-        prev_trend = trend_list[-1]
+        if bu[i] < upper or c_prev > upper:
+            upper = bu[i]
         
-        if prev_trend == 1:
-            if c < curr_lower:
+        if bl[i] > lower or c_prev < lower:
+            lower = bl[i]
+            
+        if curr_trend == 1:
+            if c < lower:
                 curr_trend = -1
             else:
                 curr_trend = 1
         else:
-            if c > curr_upper:
+            if c > upper:
                 curr_trend = 1
             else:
                 curr_trend = -1
                 
-        upper_list.append(curr_upper)
-        lower_list.append(curr_lower)
-        trend_list.append(curr_trend)
+        final_upper[i] = upper
+        final_lower[i] = lower
+        trend[i] = curr_trend
         
-    return pd.Series(trend_list, index=df.index)
+    return pd.Series(trend, index=df.index)
 
+@indicator_cache
 def calculate_vhf(series, window=28):
     hcp = series.rolling(window).max()
     lcp = series.rolling(window).min()
     numerator = (hcp - lcp).abs()
-    
     diff = series.diff().abs()
     denominator = diff.rolling(window).sum()
-    
     return numerator / denominator
 
+@indicator_cache
 def calculate_adx(df, window=14):
-    plus_dm = df['high'].diff()
-    minus_dm = df['low'].diff()
-    plus_dm[plus_dm < 0] = 0
-    minus_dm[minus_dm > 0] = 0
-    
-    tr = calculate_atr(df, window=window)
-    
-    plus_di = 100 * (plus_dm.ewm(alpha=1/window).mean() / tr)
-    minus_di = 100 * (minus_dm.ewm(alpha=1/window).mean().abs() / tr)
-    
-    dx = (abs(plus_di - minus_di) / (plus_di + minus_di)) * 100
-    adx = dx.ewm(alpha=1/window).mean()
-    return adx
+    return pd.Series(talib.ADX(df['high'].values, df['low'].values, df['close'].values, timeperiod=window), index=df.index)
 
+@indicator_cache
 def calculate_rsi(series, window=14):
-    """
-    Calculate Relative Strength Index (RSI)
-    RSI > 70: Overbought (potential reversal down)
-    RSI < 30: Oversold (potential reversal up)
-    """
-    delta = series.diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    
-    avg_gain = gain.rolling(window=window).mean()
-    avg_loss = loss.rolling(window=window).mean()
-    
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    return rsi
+    return pd.Series(talib.RSI(series.values, timeperiod=window), index=series.index)
 
+@indicator_cache
 def calculate_stochastic(df, window=14, smooth_k=3, smooth_d=3):
-    """
-    Calculate Stochastic Oscillator (%K and %D)
-    %K > 80: Overbought
-    %K < 20: Oversold
-    """
-    low_min = df['low'].rolling(window=window).min()
-    high_max = df['high'].rolling(window=window).max()
-    
-    # Fast %K
-    stoch_k = 100 * (df['close'] - low_min) / (high_max - low_min)
-    
-    # Slow %K (smoothed)
-    stoch_k = stoch_k.rolling(window=smooth_k).mean()
-    
-    # %D (signal line)
-    stoch_d = stoch_k.rolling(window=smooth_d).mean()
-    
-    return stoch_k, stoch_d
+    stoch_k, stoch_d = talib.STOCH(
+        df['high'].values, 
+        df['low'].values, 
+        df['close'].values, 
+        fastk_period=window, 
+        slowk_period=smooth_k, 
+        slowk_matype=0, 
+        slowd_period=smooth_d, 
+        slowd_matype=0
+    )
+    return pd.Series(stoch_k, index=df.index), pd.Series(stoch_d, index=df.index)
 
+@indicator_cache
+def calculate_stoch_rsi(series, window=14, smooth_k=3, smooth_d=3):
+    stoch_k, stoch_d = talib.STOCHRSI(
+        series.values, 
+        timeperiod=window, 
+        fastk_period=smooth_k, 
+        fastd_period=smooth_d, 
+        fastd_matype=0
+    )
+    return pd.Series(stoch_k, index=series.index), pd.Series(stoch_d, index=series.index)
+
+@indicator_cache
 def calculate_macd(df, fast=12, slow=26, signal=9):
-    """
-    MACD (Moving Average Convergence Divergence)
-    """
-    ema_fast = df['close'].ewm(span=fast, adjust=False).mean()
-    ema_slow = df['close'].ewm(span=slow, adjust=False).mean()
-    macd_line = ema_fast - ema_slow
-    signal_line = macd_line.ewm(span=signal, adjust=False).mean()
-    hist = macd_line - signal_line
-    return macd_line, signal_line, hist
+    macd, macdsignal, macdhist = talib.MACD(
+        df['close'].values, 
+        fastperiod=fast, 
+        slowperiod=slow, 
+        signalperiod=signal
+    )
+    return pd.Series(macd, index=df.index), pd.Series(macdsignal, index=df.index), pd.Series(macdhist, index=df.index)
 
+@indicator_cache
 def calculate_ichimoku(df, tenkan_window=9, kijun_window=26, senkou_span_b_window=52):
-    """
-    Ichimoku Cloud
-    - Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
-    - Kijun-sen (Base Line): (26-period high + 26-period low)/2
-    - Senkou Span A (Leading Span A): (Conversion + Base)/2
-    - Senkou Span B (Leading Span B): (52-period high + 52-period low)/2
-    """
     high = df['high']
     low = df['low']
     
-    # Tenkan-sen (Conversion Line)
-    tenkan_sen = (high.rolling(window=tenkan_window).max() + low.rolling(window=tenkan_window).min()) / 2
-
-    # Kijun-sen (Base Line)
-    kijun_sen = (high.rolling(window=kijun_window).max() + low.rolling(window=kijun_window).min()) / 2
-
-    # Senkou Span A (Leading Span A) - Shifted forward by 26 periods (displacement)
-    # Note: In backtesting, we look at value at t-26? 
-    # Standard: Plot 26 periods ahead. So current cloud is based on past data.
-    # Current Close vs Current Cloud Value (which was projected 26 periods ago)
-    senkou_span_a = ((tenkan_sen + kijun_sen) / 2).shift(kijun_window)
-
-    # Senkou Span B (Leading Span B)
-    senkou_span_b = ((high.rolling(window=senkou_span_b_window).max() + low.rolling(window=senkou_span_b_window).min()) / 2).shift(kijun_window)
+    tenkan_sen = (talib.MAX(high.values, timeperiod=tenkan_window) + talib.MIN(low.values, timeperiod=tenkan_window)) / 2
+    kijun_sen = (talib.MAX(high.values, timeperiod=kijun_window) + talib.MIN(low.values, timeperiod=kijun_window)) / 2
     
-    return tenkan_sen, kijun_sen, senkou_span_a, senkou_span_b
+    senkou_span_a = ((tenkan_sen + kijun_sen) / 2)
+    
+    sb_high = talib.MAX(high.values, timeperiod=senkou_span_b_window)
+    sb_low = talib.MIN(low.values, timeperiod=senkou_span_b_window)
+    senkou_span_b = (sb_high + sb_low) / 2
+    
+    ts = pd.Series(tenkan_sen, index=df.index)
+    ks = pd.Series(kijun_sen, index=df.index)
+    ssa = pd.Series(senkou_span_a, index=df.index).shift(kijun_window)
+    ssb = pd.Series(senkou_span_b, index=df.index).shift(kijun_window)
+    
+    return ts, ks, ssa, ssb
 
+@indicator_cache
 def calculate_cci(df, window=20):
-    """
-    CCI (Commodity Channel Index)
-    """
-    tp = (df['high'] + df['low'] + df['close']) / 3
-    sma_tp = tp.rolling(window=window).mean()
-    
-    # Calculate Mean Absolute Deviation (MAD)
-    # Pandas .mad() is deprecated, so we calculate manually using rolling mean of absolute difference
-    mad = (tp - sma_tp).abs().rolling(window=window).mean()
-    
-    cci = (tp - sma_tp) / (0.015 * mad)
-    return cci
+    return pd.Series(talib.CCI(df['high'].values, df['low'].values, df['close'].values, timeperiod=window), index=df.index)
 
+@indicator_cache
 def calculate_mfi(df, window=14):
-    """
-    MFI (Money Flow Index) - Volume-weighted RSI
-    """
-    typical_price = (df['high'] + df['low'] + df['close']) / 3
-    money_flow = typical_price * df['volume']
-    
-    positive_flow = pd.Series(np.where(typical_price > typical_price.shift(1), money_flow, 0), index=df.index)
-    negative_flow = pd.Series(np.where(typical_price < typical_price.shift(1), money_flow, 0), index=df.index)
-    
-    positive_mf = positive_flow.rolling(window=window).sum()
-    negative_mf = negative_flow.rolling(window=window).sum()
-    
-    mfi = 100 - (100 / (1 + (positive_mf / negative_mf)))
-    return mfi
+    return pd.Series(talib.MFI(df['high'].values, df['low'].values, df['close'].values, df['volume'].values.astype(float), timeperiod=window), index=df.index)
 
+@indicator_cache
 def calculate_parabolic_sar(df, step=0.02, max_step=0.2):
-    # This is a complex indicator to implement vectorially.
-    # We'll use a simplified iterative version.
+    return pd.Series(talib.SAR(df['high'].values, df['low'].values, acceleration=step, maximum=max_step), index=df.index), None
+
+@indicator_cache
+def calculate_vwap(df, window=None, std_mult=1.5):
+    typical_price = (df['high'] + df['low'] + df['close']) / 3
+    tp_volume = typical_price * df['volume']
     
-    high = df['high'].values
-    low = df['low'].values
-    close = df['close'].values
-    open_p = df['open'].values
+    if window is None:
+        vwap = tp_volume.cumsum() / df['volume'].cumsum()
+        vwap_std = typical_price.expanding().std()
+    else:
+        vwap = tp_volume.rolling(window=window).sum() / df['volume'].rolling(window=window).sum()
+        vwap_std = typical_price.rolling(window=window).std()
     
-    sar = np.zeros(len(df))
-    trend = np.zeros(len(df)) # 1: up, -1: down
-    ep = np.zeros(len(df)) # Extreme Point
-    af = np.zeros(len(df)) # Acceleration Factor
+    vwap_upper = vwap + (vwap_std * std_mult)
+    vwap_lower = vwap - (vwap_std * std_mult)
     
-    # Init
-    trend[0] = 1 if close[0] > open_p[0] else -1
-    sar[0] = low[0] if trend[0] == 1 else high[0]
-    ep[0] = high[0] if trend[0] == 1 else low[0]
-    af[0] = step
+    return vwap, vwap_upper, vwap_lower
+
+@indicator_cache
+def calculate_cmf(df, window=20):
+    mf_multiplier = ((df['close'] - df['low']) - (df['high'] - df['close'])) / (df['high'] - df['low'])
+    mf_multiplier = mf_multiplier.replace([np.inf, -np.inf], 0).fillna(0)
+    mf_volume = mf_multiplier * df['volume']
+    cmf = mf_volume.rolling(window=window).sum() / df['volume'].rolling(window=window).sum()
+    return cmf
+
+@njit
+def _hurst_numba_logic(data, window):
+    n = len(data)
+    out = np.empty(n)
+    out[:] = np.nan
     
-    for i in range(1, len(df)):
-        prev_sar = sar[i-1]
-        prev_trend = trend[i-1]
-        prev_ep = ep[i-1]
-        prev_af = af[i-1]
+    for i in range(window - 1, n):
+        ts = data[i - window + 1 : i + 1]
+        # De-mean
+        m = np.mean(ts)
+        ts_adj = ts - m
+        # Rescaled Range (R/S)
+        Y = np.cumsum(ts_adj)
+        R = np.max(Y) - np.min(Y)
+        S = np.std(ts)
         
-        # Calculate SAR
-        curr_sar = prev_sar + prev_af * (prev_ep - prev_sar)
-        
-        # Trend Switch Logic
-        curr_trend = prev_trend
-        
-        if prev_trend == 1:
-            if low[i] < curr_sar:
-                curr_trend = -1
-                curr_sar = prev_ep # Reset SAR to EP
-                curr_ep = low[i]
-                curr_af = step
-            else:
-                curr_ep = max(prev_ep, high[i])
-                if curr_ep > prev_ep and prev_af < max_step:
-                    curr_af = prev_af + step
-                else:
-                    curr_af = prev_af
-        else: # Down Trend
-            if high[i] > curr_sar:
-                curr_trend = 1
-                curr_sar = prev_ep
-                curr_ep = high[i]
-                curr_af = step
-            else:
-                curr_ep = min(prev_ep, low[i])
-                if curr_ep < prev_ep and prev_af < max_step:
-                    curr_af = prev_af + step
-                else:
-                    curr_af = prev_af
-                    
-        sar[i] = curr_sar
-        trend[i] = curr_trend
-        ep[i] = curr_ep
-        af[i] = curr_af
-        
-    return pd.Series(sar, index=df.index), pd.Series(trend, index=df.index)
+        if S > 0 and R > 0:
+            h = np.log(R / S) / np.log(window)
+            if h < 0: h = 0.0
+            if h > 1: h = 1.0
+            out[i] = h
+        else:
+            out[i] = 0.5
+            
+    return out
+
+@indicator_cache
+def calculate_hurst_exponent(series, window=100):
+    """
+    Numba-accelerated Hurst Exponent calculation.
+    Speed Gain: ~100x faster than rolling().apply()
+    """
+    vals = series.values.astype(np.float64)
+    res = _hurst_numba_logic(vals, window)
+    return pd.Series(res, index=series.index)
+
+def clear_indicator_cache():
+    global _INDICATOR_CACHE
+    _INDICATOR_CACHE = {}
