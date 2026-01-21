@@ -103,66 +103,191 @@ def detailed_backtest_spot(df, params):
 if __name__ == "__main__":
     import argparse
     import optuna
+    import shutil
+    from config.settings import TRAIN_CUTOFF_DATE
     
     parser = argparse.ArgumentParser()
-    # Default matches the new optimize_spot.py output
-    parser.add_argument("--db", type=str, default="spot_strategy.db")
     parser.add_argument("--symbols", type=str, default="KRW-BTC,KRW-ETH")
     args = parser.parse_args()
     
     symbols = [s.strip() for s in args.symbols.split(',')]
     
-
-
-    # 2. Run Verification
-    print("\n" + "="*70)
-    print(f"🚀 VERIFYING UNIVERSAL STRATEGY ON: {symbols}")
-    print("="*70)
+    # Modes to check
+    MODES = ['SCALP', 'DAY', 'SWING']
+    results = []
     
-    # 2-1. Load Universal Best Params
-    db_path = "spot_strategy.db"
-    storage = f"sqlite:///{db_path}"
-    study_name = "spot_strategy"
+    print("\n" + "="*80)
+    print(f"🚀 INTEGRATED STRATEGY VERIFICATION (Spot)")
+    print(f"   Searching for optimized strategies: {MODES}")
+    print("="*80)
     
-    best_params = {}
-    try:
-        study = optuna.load_study(study_name=study_name, storage=storage)
-        best_params = study.best_params
-        print(f"✅ Loaded Universal Params (Score: {study.best_value:.4f})")
-    except Exception as e:
-        print(f"❌ Failed to load Universal DB ({db_path}): {e}")
+    # MySQL Setup
+    from dotenv import load_dotenv
+    from urllib.parse import quote_plus
+    load_dotenv()
+    
+    db_user = os.getenv("DB_USER")
+    db_pass = os.getenv("DB_PASS")
+    db_host = os.getenv("DB_HOST", "localhost")
+    db_port = os.getenv("DB_PORT", "3306")
+    db_name = os.getenv("DB_NAME", "trading_optuna")
+    
+    if not all([db_user, db_pass, db_name]):
+        print("❌ Error: Missing DB credentials in .env")
         sys.exit(1)
         
-    for symbol in symbols:
-        print(f"\n👉 Analyzing {symbol}...")
-
-        # Load from Full History Cache
-        tf = best_params.get('TIMEFRAME', '1h')
-        # Reuse the logic: check data folder for CSV
-        filename = f"{symbol}_{tf}_20180101_spot.csv"
-        filepath = os.path.join(os.path.dirname(__file__), '../../data', filename)
+    safe_pass = quote_plus(db_pass)
+    storage_url = f"mysql+pymysql://{db_user}:{safe_pass}@{db_host}:{db_port}/{db_name}"
+    
+    best_overall_score = -float('inf')
+    best_mode = None
+    best_study_name = None
+    
+    for mode in MODES:
+        study_name = f"spot_{mode.lower()}_strategy"
         
-        if os.path.exists(filepath):
-            logger.info(f"📂 Loading cached full history: {filename}")
-            df = pd.read_csv(filepath)
-            df['datetime'] = pd.to_datetime(df['datetime'])
+        print(f"\n🔎 Verifying {mode} Mode Strategy (from MySQL)...")
+        
+        try:
+            # Check if study exists
+            try:
+                optuna.load_study(study_name=study_name, storage=storage_url)
+            except KeyError:
+                print(f"⚠️  {mode} strategy not found in MySQL. Skipping...")
+                continue
+                
+            study = optuna.load_study(study_name=study_name, storage=storage_url)
+            best_params = study.best_params
+            train_score = study.best_value
             
-            # Run Detailed Backtest
-            from config.settings import TRAIN_CUTOFF_DATE
-            cutoff_ts = pd.Timestamp(TRAIN_CUTOFF_DATE)
+            print(f"   ✅ Loaded Params (Train Score: {train_score:.4f})")
             
-            train_df = df[df['datetime'] < cutoff_ts].copy()
-            test_df = df[df['datetime'] >= cutoff_ts].copy()
+            # --- OOS Verification Loop ---
+            total_ret = 0
+            count = 0
             
-            print(f"\n[DATA SPLIT] Train: {len(train_df)} candles | Test (OOS): {len(test_df)} candles (Cutoff: {TRAIN_CUTOFF_DATE})")
+            for symbol in symbols:
+                tf = best_params.get('TIMEFRAME', '1h')
+                
+                # Load Full History Cache
+                # In optimize_spot.py, naming is: f"{symbol.replace('/', '_')}_{tf}_{start_date.replace('-','')}_{end_date.replace('-','')}_spot.csv"
+                # But here we search generic cache or standard data dir
+                # Let's try to find the file dynamically or use strict naming from optimize_spot
+                
+                # Simplification: Assume data exists in ../../data/ 
+                # (You might need to adjust filename pattern if optimize_spot saves uniquely)
+                # Looking at optimize_spot logic:
+                # filename = f"{symbol.replace('/', '_')}_{tf}_{start_date.replace('-','')}_{end_date.replace('-','')}_spot.csv"
+                # Fixed range: 2018-01-01 to 2026-01-16
+                filename = f"{symbol}_{tf}_20180101_20260116_spot.csv" 
+                # Fallback for earlier logic
+                filepath = os.path.join(os.path.dirname(__file__), '../../data', filename)
+                
+                # If exact file not found, try to find any matching symbol+tf
+                if not os.path.exists(filepath):
+                     import glob
+                     pattern = os.path.join(os.path.dirname(__file__), '../../data', f"{symbol}_{tf}_*_spot.csv")
+                     matches = glob.glob(pattern)
+                     if matches:
+                         filepath = matches[0]
+                
+                if not os.path.exists(filepath):
+                    print(f"   ⚠️ Cache not found for {symbol}-{tf}. Skipping.")
+                    continue
+                    
+                df = pd.read_csv(filepath)
+                df['datetime'] = pd.to_datetime(df['datetime'])
+                
+                # Slice for OOS
+                cutoff_ts = pd.Timestamp(TRAIN_CUTOFF_DATE)
+                test_df = df[df['datetime'] >= cutoff_ts].copy()
+                
+                if test_df.empty:
+                    print(f"   ⚠️ No OOS data for {symbol}. Skipping.")
+                    continue
+                
+                # Run Backtest
+                strategy = UltimateStrategy("Verify", best_params)
+                test_df = strategy.generate_signals(test_df)
+                
+                ret_pct, mdd, _, _, _ = run_backtest_segment(
+                    test_df, best_params, initial_balance=10000000.0, return_series=True
+                )
+                
+                total_ret += ret_pct
+                count += 1
+                print(f"   - {symbol}: Return {ret_pct:.2f}% | MDD {mdd:.2f}%")
             
-            if not test_df.empty:
-                print(f"\n🔵 >>> Running Verification on TEST DATA (Out-of-Sample: {TRAIN_CUTOFF_DATE} ~ Now) <<<")
-                detailed_backtest_spot(test_df, best_params)
-            else:
-                print(f"⚠️ No Test Data found after {TRAIN_CUTOFF_DATE}! Check your data files.")
-                print("Running on Full Data as fallback...")
-                detailed_backtest_spot(df, best_params)
-        else:
-            print(f"❌ Full history cache not found at {filepath}")
-            print("Please run optimize_spot.py first to collect full data.")
+            if count > 0:
+                avg_ret = total_ret / count
+                print(f"   👉 {mode} Mode Avg OOS Return: {avg_ret:.2f}%")
+                
+                results.append({
+                    'mode': mode,
+                    'study_name': study_name,
+                    'return': avg_ret,
+                    'score': train_score
+                })
+                
+                if avg_ret > best_overall_score:
+                    best_overall_score = avg_ret
+                    best_mode = mode
+                    best_study_name = study_name
+                    
+        except Exception as e:
+            print(f"   ❌ Error processing {mode}: {e}")
+
+    print("\n" + "="*80)
+    print("🏆 FINAL RESULTS (Spot)")
+    print("="*80)
+    
+    if not results:
+        print("❌ No valid strategies found/verified.")
+        sys.exit(1)
+        
+    results.sort(key=lambda x: x['return'], reverse=True)
+    
+    for res in results:
+        mark = "👑" if res['mode'] == best_mode else "  "
+        print(f"{mark} {res['mode']:<6} | OOS Return: {res['return']:>7.2f}% | Train Score: {res['score']:.4f}")
+        
+    print("-" * 80)
+    
+    target_db = "spot_strategy.db"
+    target_study_name = "spot_strategy"
+    
+    if best_study_name:
+        print(f"💾 Saving Best Strategy ({best_mode}) from MySQL to '{target_db}'...")
+        
+        try:
+            # 1. Remove old target
+            if os.path.exists(target_db):
+                os.remove(target_db)
+            
+            # 2. Load Source Study (MySQL)
+            src_study = optuna.load_study(study_name=best_study_name, storage=storage_url)
+            best_trial = src_study.best_trial
+            
+            # 3. Create Target Storage (Local SQLite)
+            target_storage = f"sqlite:///{target_db}"
+            
+            # 4. Create Standard Study
+            print(f"   ⚙️  Migrating best params to standard '{target_study_name}' study...")
+            optuna.create_study(study_name=target_study_name, storage=target_storage, direction="maximize", load_if_exists=True)
+            study_dest = optuna.load_study(study_name=target_study_name, storage=target_storage)
+            
+            # 5. Create & Add Frozen Trial
+            frozen_trial = optuna.trial.create_trial(
+                params=best_trial.params,
+                distributions=src_study.trials[best_trial.number].distributions, # Load distributions from source
+                value=best_trial.value,
+            )
+            study_dest.add_trial(frozen_trial)
+            
+            print(f"✅ SUCCESSFULLY DEPLOYED {best_mode} STRATEGY!")
+            print(f"   The bot will now use the OOS-verified best strategy from '{target_db}'.")
+            
+        except Exception as e:
+            print(f"❌ Error Saving Strategy: {e}")
+    else:
+        print("❌ No best strategy selected.")
