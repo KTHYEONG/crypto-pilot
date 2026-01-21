@@ -351,6 +351,28 @@ class RealTraderSpot:
 
             # --- ENTRY LOGIC ---
             else:
+                # [Optimization] Staleness Check: 봉 마감 후 너무 오래 지났으면 진입 방지
+                tf_min = 60
+                if 'm' in timeframe: tf_min = int(timeframe.replace('m', ''))
+                elif 'h' in timeframe: tf_min = int(timeframe.replace('h', '')) * 60
+                elif 'd' in timeframe: tf_min = int(timeframe.replace('d', '')) * 1440
+                
+                # Upbit OHLCV 'datetime' column contains starting time
+                candle_start_time = confirmed_candle['datetime']
+                candle_end_time = candle_start_time + timedelta(minutes=tf_min)
+                now_utc = datetime.utcnow()
+                
+                delay_seconds = (now_utc - candle_end_time).total_seconds()
+                max_delay = min(tf_min * 60 * 0.05, 1800) # 5% limit
+                
+                if delay_seconds > max_delay:
+                    if delay_seconds < (tf_min * 60 * 0.8):
+                        logger.warning(
+                            f"⏰ Signal is stale for {symbol}. "
+                            f"Passed {delay_seconds/60:.1f}m since close. Skipping entry."
+                        )
+                    return
+
                 self._check_entry(
                     symbol, last_price, params,
                     confirmed_candle
