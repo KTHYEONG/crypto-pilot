@@ -106,7 +106,9 @@ class BinanceClient:
             },
             'timeout': API_READ_TIMEOUT * 1000  # 밀리초 단위 (20초)
         })
-        self.logger = logging.getLogger(__name__)
+        # self.logger = logging.getLogger(__name__)
+        from src.common.utils import setup_logger
+        self.logger = setup_logger("BinanceClient")
         
         # Order Rate Limiter (바이낸스 10초당 주문 제한 방어)
         self.rate_limiter = OrderRateLimiter(max_orders_per_10s=40)
