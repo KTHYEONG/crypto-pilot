@@ -29,9 +29,26 @@ BINANCE_SECRET = os.getenv("BINANCE_SECRET", "")
 UPBIT_ACCESS_KEY = os.getenv("UPBIT_ACCESS_KEY", "")
 UPBIT_SECRET_KEY = os.getenv("UPBIT_SECRET_KEY", "")
 
-# 거래 수수료 및 슬리피지 설정 (보수적 적용 - 스트레스 테스트용 강화)
-TRADING_FEE_RATE = 0.001       # 0.1% (매수/매도 각각)
-SLIPPAGE_RATE = 0.001          # 0.1% (진입/청산 각각, 노이즈 대응용)
+# 거래 수수료 및 슬리피지 설정 (바이낸스 선물 실제 수수료 반영)
+# Binance Futures Fee Structure (VIP 0 기준):
+# - Maker (지정가): 0.02%
+# - Taker (시장가): 0.05%
+# 백테스트는 보수적으로 Taker 수수료 기준 적용
+TRADING_FEE_RATE = 0.0005      # 0.05% (Taker 기준, 진입/청산 각각)
+SLIPPAGE_RATE = 0.0005         # 0.05% (시장가 주문 시 예상 슬리피지)
+
+# 스마트 주문 설정
+MAKER_FEE_RATE = 0.0002        # 0.02% (지정가 주문 성공 시)
+TAKER_FEE_RATE = 0.0005        # 0.05% (시장가 주문 시)
+SMART_ORDER_OFFSET = 0.0003    # 0.03% (공격적 지정가 오프셋 - Maker 수수료 절감 목적)
+SMART_ORDER_TIMEOUT = 10       # 10초 (지정가 체결 대기 시간)
+
+# 선물 펀딩비 설정 (Perpetual Futures Funding Fee)
+# 바이낸스 USDT-M 선물: 8시간마다(00:00, 08:00, 16:00 UTC) 발생
+# 평균 펀딩비율: 0.01% per 8h (연환산 약 10.95%)
+# 변동성 높은 시기: 0.03~0.10% 이상 가능
+FUNDING_FEE_RATE = 0.0001      # 0.01% per 8h (보수적 평균값)
+FUNDING_INTERVAL_HOURS = 8     # 펀딩비 발생 주기 (시간)
 
 # 백테스팅 기본 기간
 BACKTEST_START_DATE = "2020-01-01"  # 전체 데이터 시작일
@@ -53,11 +70,13 @@ TRADE_HISTORY_DB = DATA_DIR / "trade_history.db"
 # 헬스체크 파일 (봇 생존 확인용)
 HEARTBEAT_FILE = LOG_DIR / "trader_heartbeat.json"
 
-# --- API 재시도 정책 ---
-API_RETRY_ATTEMPTS = 5          # 최대 재시도 횟수
+# --- API 재시도 및 타임아웃 정책 ---
+API_READ_TIMEOUT = 20       # 데이터 조회 (OHLCV, 잔고 등)
+API_ORDER_TIMEOUT = 10      # 주문 제출/취소
+API_CHECK_TIMEOUT = 5       # 주문 상태 확인/조회
+API_RETRY_ATTEMPTS = 3      # 최대 재시도 횟수
 API_RETRY_WAIT_MIN = 1          # 최소 대기 시간 (초)
 API_RETRY_WAIT_MAX = 30         # 최대 대기 시간 (초)
-API_TIMEOUT_SECONDS = 30        # API 타임아웃
 
 # --- 포지션 사이징 임계값 ---
 MIN_BALANCE_USDT = 50           # 최소 운영 잔고 (USDT)
