@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 import logging
 from numba import njit
-from config.settings import TRADING_FEE_RATE, SLIPPAGE_RATE
+from config.settings import TRADING_FEE_RATE, SLIPPAGE_RATE, FUNDING_FEE_RATE, FUNDING_INTERVAL_HOURS
 
 class BacktestEngineFast:
     """
@@ -28,32 +28,44 @@ class BacktestEngineFast:
         self._prepare_data()
     
     def _prepare_data(self):
-        # 0. Ensure daily_df has date_key
+        # [OPTIMIZATION] 1. Pre-calculated keys check
+        # 'date_key' generation is expensive. Assume it exists from loader if possible.
         if 'date_key' not in self.daily_df.columns:
              self.daily_df['date_key'] = pd.to_datetime(self.daily_df['datetime']).dt.strftime('%Y-%m-%d')
-
-        # Apply Strategy Indicators
+        
+        # Apply Strategy Indicators (Calculates Daily Indicators)
         self.daily_df = self.strategy.generate_signals(self.daily_df)
         
-        # Re-ensure date_key exists (in case strategy dropped it)
-        if 'date_key' not in self.daily_df.columns:
-             self.daily_df['date_key'] = pd.to_datetime(self.daily_df['datetime']).dt.strftime('%Y-%m-%d')
+        # [OPTIMIZATION] 2. Fast Shift & Rename
+        # Filter essential columns only to reduce copy overhead
+        exclude_cols = {'date_key', 'datetime', 'date', 'open', 'high', 'low', 'close', 'volume'}
+        indicator_cols = [c for c in self.daily_df.columns if c not in exclude_cols]
         
-        # Shift daily indicators forward by 1 day (prevent lookahead)
-        shifted_cols = [col for col in self.daily_df.columns if col not in ['date_key', 'datetime', 'date']]
-        shifted_daily = self.daily_df[['date_key'] + shifted_cols].copy()
-        for col in shifted_cols:
-            shifted_daily[col] = shifted_daily[col].shift(1)
-        shifted_daily.columns = ['date_key'] + [f'daily_{col}' for col in shifted_cols]
+        # Use simple dictionary for rename to leverage C-speed
+        # Shift(1) to prevent lookahead
+        shifted_daily = self.daily_df[indicator_cols].shift(1)
+        shifted_daily.columns = [f'daily_{c}' for c in indicator_cols]
+        shifted_daily['date_key'] = self.daily_df['date_key'] # Restore key matching
         
-        # Merge hourly with daily
-        self.hourly_df['date_key'] = pd.to_datetime(self.hourly_df['datetime']).dt.strftime('%Y-%m-%d')
-        daily_open = self.daily_df[['date_key', 'open']].rename(columns={'open': 'daily_open'})
+        # [OPTIMIZATION] 3. Efficient Merge
+        # Extract 'daily_open' separately (needed for logic?) - If not needed, skip. 
+        # Assuming we just need mapped daily open?
+        # daily_open = self.daily_df[['date_key', 'open']].rename(columns={'open': 'daily_open'})
         
+        if 'date_key' not in self.hourly_df.columns:
+            self.hourly_df['date_key'] = pd.to_datetime(self.hourly_df['datetime']).dt.strftime('%Y-%m-%d')
+            
+        # Left Join: Hourly <- Daily
+        # Using suffix to avoid collisions if any
         self.merged_df = pd.merge(self.hourly_df, shifted_daily, on='date_key', how='left')
-        self.merged_df = pd.merge(self.merged_df, daily_open, on='date_key', how='left')
-        self.merged_df.sort_values('datetime', inplace=True)
-        self.merged_df.reset_index(drop=True, inplace=True)
+        
+        # If daily_open is strictly needed (for some reason not covered by standard OHLC from hourly)
+        # But usually hourly data has its own context. Daily open is mostly for references.
+        # self.merged_df = pd.merge(self.merged_df, daily_open, on='date_key', how='left')
+        
+        # Sort & Reset (Only if needed - usually data comes sorted)
+        # self.merged_df.sort_values('datetime', inplace=True) 
+        # self.merged_df.reset_index(drop=True, inplace=True)
     
     def run(self):
         self.logger.info(f"Running FAST backtest for {self.strategy.name}...")
@@ -69,20 +81,21 @@ class BacktestEngineFast:
         # volume = df['volume'].values # Not needed for daily ratio check
         
         # Entry signals (Donchian or other)
-        entry_upper = df.get('daily_entry_upper', df.get('daily_donchian_high', pd.Series([np.nan]*n))).values
-        entry_lower = df.get('daily_entry_lower', df.get('daily_donchian_low', pd.Series([np.nan]*n))).values
+        # Columns guaranteed by strategy.generate_signals
+        entry_upper = df['daily_entry_upper'].values
+        entry_lower = df['daily_entry_lower'].values
         
         # Trend filter
-        trend_dir = df.get('daily_trend_direction', pd.Series([1]*n)).values
+        trend_dir = df['daily_trend_direction'].values
         
         # Strength filter
-        strength_filter = df.get('daily_strength_filter', pd.Series([1]*n)).values
+        strength_filter = df['daily_strength_filter'].values
         
         # Volume Filter (Ratio)
-        volume_ratio = df.get('daily_volume_ratio', pd.Series([100.0]*n)).values
+        volume_ratio = df['daily_volume_ratio'].values
         
         # ATR for risk
-        atr = df.get('daily_atr', close * 0.01).values
+        atr = df['daily_atr'].values
         
         # Strategy params
         stop_loss_type = 1 if self.strategy.params.get('STOP_LOSS_TYPE', 'FIXED') == 'ATR' else 0 # 0: FIXED, 1: ATR
@@ -100,6 +113,13 @@ class BacktestEngineFast:
         # Use Futures specific TP if available
         tp_atr_mult = self.strategy.params.get('TAKE_PROFIT_ATR_MULT_FUTURES', self.strategy.params.get('TAKE_PROFIT_ATR_MULT', 3.0))
         
+        # Extract timestamps for funding fee calculation
+        timestamps = df['timestamp'].values  # milliseconds
+        
+        # [NEW] Time-Based Exit \u0026 Trailing Activation
+        max_holding_bars = self.strategy.params.get('MAX_HOLDING_BARS', 999999)  # Default: No limit
+        trailing_activation_atr = self.strategy.params.get('TRAILING_ACTIVATION_ATR', 0.0)  # Default: Immediate activation
+        
         # Run Numba-accelerated loop
         trades, final_balance = backtest_loop_numba(
             close, high, low, volume_ratio,
@@ -113,7 +133,9 @@ class BacktestEngineFast:
             atr_mult,
             self.risk_per_trade,
             use_volume_filter, vol_threshold,
-            use_take_profit, tp_atr_mult
+            use_take_profit, tp_atr_mult,
+            timestamps, FUNDING_FEE_RATE, FUNDING_INTERVAL_HOURS,
+            max_holding_bars, trailing_activation_atr  # [NEW]
         )
         
         self.balance = final_balance
@@ -151,6 +173,13 @@ class BacktestEngineFast:
             }
         
         trades_df = pd.DataFrame(self.trades)
+        
+        # ✅ ADD: Calculate pnl_pct (percentage return per trade)
+        # pnl_pct = (pnl / position_size) * 100
+        # position_size approximated as: entry_price * amount (we don't have amount, so use entry_price as proxy)
+        # Since we use risk-based sizing, we normalize by initial balance instead
+        trades_df['pnl_pct'] = (trades_df['pnl'] / self.initial_balance) * 100
+        
         win_trades = len(trades_df[trades_df['pnl'] > 0])
         loss_trades = len(trades_df[trades_df['pnl'] <= 0])
         win_rate = (win_trades / len(trades_df)) * 100 if len(trades_df) > 0 else 0
@@ -177,20 +206,26 @@ class BacktestEngineFast:
         }
 
 
-@njit
+
+@njit(nogil=True, cache=True)
 def backtest_loop_numba(
-    close, high, low, volume_ratio,  # Changed from volume, volume_ma to volume_ratio
+    close, high, low, volume_ratio,
     entry_upper, entry_lower,
     trend_dir, strength_filter, atr,
     initial_balance, leverage, fee_rate, slippage_rate,
     stop_loss_type, stop_loss_pct, atr_sl_mult,
     atr_mult,
     risk_per_trade,
-    use_volume_filter, vol_threshold,  # Volume Params
-    use_take_profit, tp_atr_mult       # Take Profit Params
+    use_volume_filter, vol_threshold,
+    use_take_profit, tp_atr_mult,
+    timestamps, funding_fee_rate, funding_interval_hours,
+    max_holding_bars, trailing_activation_atr  # [NEW] Time-based exit & Trailing activation threshold
 ):
     """
     Numba JIT-compiled backtest loop for maximum speed.
+    펀딩비(Funding Fee) 반영: 8시간마다 포지션 가치의 0.01% 차감
+    [NEW] MAX_HOLDING_BARS: 일정 시간 후 강제 청산 (기회비용 관리)
+    [NEW] TRAILING_ACTIVATION_ATR: 일정 이익 이상일 때만 trailing stop 활성화 (이익 보호)
     """
     n = len(close)
     balance = initial_balance
@@ -207,7 +242,10 @@ def backtest_loop_numba(
     stop_price = 0.0 # Initial Stop Loss
     tp_price = 0.0 
     
-    # Trades storage (max 1000 trades)
+    # Funding Fee Tracking (UTC-based: 00:00, 08:00, 16:00)
+    last_funding_hour = -1  # 마지막 펀딩비 적용 시간 (UTC hour: 0, 8, or 16)
+    
+    # Trades storage (max 30000 trades)
     max_trades = 30000
     trades = np.zeros((max_trades, 6))  # [entry_idx, exit_idx, side, entry_p, exit_p, pnl]
     trade_count = 0
@@ -225,45 +263,101 @@ def backtest_loop_numba(
         c_high = high[i]
         c_low = low[i]
         current_atr = atr[i]
+        current_timestamp = timestamps[i]
+        # --- FUNDING FEE DEDUCTION (UTC 00:00, 08:00, 16:00에만 적용) ---
+        if in_position:
+            # Convert timestamp (ms) to UTC hour (0-23)
+            # Binance funding time: 00:00, 08:00, 16:00 UTC
+            current_hour_utc = int((current_timestamp // 1000) % 86400 // 3600)  # 0-23
+            
+            # Check if current time is a funding hour (0, 8, 16)
+            is_funding_hour = (current_hour_utc in (0, 8, 16))
+            
+            # Apply funding fee only once per funding period
+            if is_funding_hour and last_funding_hour != current_hour_utc:
+                # 펀딩비 = 포지션 가치(notional value) * funding_fee_rate
+                notional_value = amount * c_price
+                funding_cost = notional_value * funding_fee_rate
+                balance -= funding_cost
+                
+                # 이번 펀딩 시간 기록 (중복 차감 방지)
+                last_funding_hour = current_hour_utc
+                
+                # [SAFETY] 펀딩비로 인한 파산 체크
+                if balance <= 0:
+                    # 강제 청산 처리
+                    exit_price = c_price
+                    if pos_side == 1:
+                        pnl = (exit_price - entry_price) * amount
+                    else:
+                        pnl = (entry_price - exit_price) * amount
+                    
+                    exit_fee = amount * exit_price * fee_rate
+                    pnl -= exit_fee
+                    
+                    margin = (amount * entry_price) / leverage
+                    balance += margin + pnl
+                    
+                    trades[trade_count] = [entry_idx, i, pos_side, entry_price, exit_price, pnl]
+                    trade_count += 1
+                    in_position = False
+                    break
         
         # --- POSITION MANAGEMENT ---
         if in_position:
             exit_triggered = False
             exit_price = 0.0
             
+            # [NEW] Time-Based Exit (Opportunity Cost Management)
+            bars_held = i - entry_idx
+            if bars_held >= max_holding_bars:
+                exit_price = c_price  # Exit at current close
+                exit_triggered = True
+            
             # Update extremes and TP check
             if pos_side == 1: # LONG
                 if c_high > highest:
                     highest = c_high
-                    # Update Stop Price (Trailing)
-                    new_stop = highest - (pos_atr * atr_mult)
-                    if new_stop > stop_price:
-                        stop_price = new_stop
+                    
+                    # [NEW] Conditional Trailing Stop Activation
+                    # Only activate trailing if profit exceeds activation threshold
+                    unrealized_profit_atr = (highest - entry_price) / pos_atr
+                    
+                    if unrealized_profit_atr >= trailing_activation_atr:
+                        # Update Stop Price (Trailing) - ONLY when activation condition met
+                        new_stop = highest - (pos_atr * atr_mult)
+                        if new_stop > stop_price:
+                            stop_price = new_stop
 
                 # 1. Check Stop Loss FIRST
-                if c_low <= stop_price:
+                if not exit_triggered and c_low <= stop_price:
                     exit_price = min(c_low, stop_price)
                     exit_triggered = True
                 
                 # 2. Then Check Take Profit
-                elif use_take_profit and tp_price > 0 and c_high >= tp_price:
+                elif not exit_triggered and use_take_profit and tp_price > 0 and c_high >= tp_price:
                     exit_price = tp_price
                     exit_triggered = True
                     
             elif pos_side == -1: # SHORT
                 if c_low < lowest:
                     lowest = c_low
-                    new_stop = lowest + (pos_atr * atr_mult)
-                    if new_stop < stop_price:
-                        stop_price = new_stop
+                    
+                    # [NEW] Conditional Trailing Stop Activation
+                    unrealized_profit_atr = (entry_price - lowest) / pos_atr
+                    
+                    if unrealized_profit_atr >= trailing_activation_atr:
+                        new_stop = lowest + (pos_atr * atr_mult)
+                        if new_stop < stop_price:
+                            stop_price = new_stop
                 
                 # 1. Check Stop Loss FIRST
-                if c_high >= stop_price:
+                if not exit_triggered and c_high >= stop_price:
                     exit_price = max(c_high, stop_price)
                     exit_triggered = True
                 
                 # 2. Then Check Take Profit
-                elif use_take_profit and tp_price > 0 and c_low <= tp_price:
+                elif not exit_triggered and use_take_profit and tp_price > 0 and c_low <= tp_price:
                     exit_price = tp_price
                     exit_triggered = True
             
