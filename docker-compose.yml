@@ -14,6 +14,11 @@ services:
       - ./spot_strategy.db:/app/spot_strategy.db
       - ./trade_history.db:/app/trade_history.db
     command: python src/spot_strategy/real_trader_spot.py
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   # 선물 트레이딩 봇 (Binance)
   futures-bot:
@@ -27,3 +32,8 @@ services:
       - ./futures_strategy.db:/app/futures_strategy.db
       - ./trade_history.db:/app/trade_history.db
     command: python src/futures_strategy/real_trader_futures.py
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
