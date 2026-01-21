@@ -153,58 +153,176 @@ def detailed_backtest_futures(hourly_df, daily_df, params):
 if __name__ == "__main__":
     import argparse
     import optuna
+    import shutil
     
     parser = argparse.ArgumentParser()
-    # Matches the default DB name and symbols in optimize_futures.py
-    parser.add_argument("--db", type=str, default="futures_strategy")
     parser.add_argument("--symbols", type=str, default="BTC/USDT,ETH/USDT")
     args = parser.parse_args()
     
     symbols = [s.strip() for s in args.symbols.split(',')]
     
-    # 1. Load Universal Best Params
-    db_name = args.db
-    db_path = f"{db_name}.db"
-    storage = f"sqlite:///{db_path}"
-    study_name = "futures_strategy"
+    # Modes to check
+    MODES = ['SCALP', 'DAY', 'SWING']
+    results = []
     
-    best_params = {}
-    try:
-        study = optuna.load_study(study_name=study_name, storage=storage)
-        best_params = study.best_params
-        print("\n" + "="*70)
-        print(f"🚀 VERIFYING UNIVERSAL STRATEGY (Score: {study.best_value:.4f})")
-        print(f"Params: {best_params}")
-        print("="*70)
-    except Exception as e:
-        print(f"❌ Failed to load Universal DB ({db_path}): {e}")
-        print("Please run optimize_futures.py first.")
+    print("\n" + "="*80)
+    print(f"🚀 INTEGRATED STRATEGY VERIFICATION (Futures)")
+    print(f"   Searching for optimized strategies: {MODES}")
+    print("="*80)
+    
+    best_overall_score = -float('inf')
+    best_mode = None
+    # MySQL Setup
+    from dotenv import load_dotenv
+    from urllib.parse import quote_plus
+    load_dotenv()
+    
+    db_user = os.getenv("DB_USER")
+    db_pass = os.getenv("DB_PASS")
+    db_host = os.getenv("DB_HOST", "localhost")
+    db_port = os.getenv("DB_PORT", "3306")
+    db_name = os.getenv("DB_NAME", "trading_optuna")
+    
+    if not all([db_user, db_pass, db_name]):
+        print("❌ Error: Missing DB credentials in .env")
         sys.exit(1)
         
-    for symbol in symbols:
-        print(f"\n👉 Analyzing {symbol}...")
-
-        # Load from History using optimized timeframe
-        tf = best_params.get('TIMEFRAME', '1h')
+    safe_pass = quote_plus(db_pass)
+    storage_url = f"mysql+pymysql://{db_user}:{safe_pass}@{db_host}:{db_port}/{db_name}"
+    
+    best_overall_score = -float('inf')
+    best_mode = None
+    best_study_name = None
+    
+    for mode in MODES:
+        study_name = f"futures_{mode.lower()}_strategy"
+        
+        print(f"\n🔎 Verifying {mode} Mode Strategy (from MySQL)...")
         
         try:
-            hourly_df, daily_df = load_data(symbol, BACKTEST_START_DATE, BACKTEST_END_DATE, tf)
-            
-            # Apply Split (Verification must be on Out-of-Sample data)
-            cutoff_ts = pd.Timestamp(TRAIN_CUTOFF_DATE)
-            
-            test_hourly = hourly_df[hourly_df['datetime'] >= cutoff_ts].copy()
-            test_daily = daily_df[daily_df['datetime'] >= cutoff_ts].copy()
-            
-            if not test_hourly.empty:
-                print(f"\n🔵 >>> Running Verification on TEST DATA (OOS: {TRAIN_CUTOFF_DATE} ~ Now) <<<")
-                detailed_backtest_futures(test_hourly, test_daily, best_params)
-            else:
-                print(f"⚠️ No Test Data found after {TRAIN_CUTOFF_DATE}! Check settings.py.")
-                print("Running on Full Data as fallback...")
-                detailed_backtest_futures(hourly_df, daily_df, best_params)
+            # Check if study exists
+            try:
+                optuna.load_study(study_name=study_name, storage=storage_url)
+            except KeyError:
+                print(f"⚠️  {mode} strategy not found in MySQL. Skipping...")
+                continue
                 
+            study = optuna.load_study(study_name=study_name, storage=storage_url)
+            best_params = study.best_params
+            train_score = study.best_value
+            
+            print(f"   ✅ Loaded Params (Train Score: {train_score:.4f})")
+            print(f"   Timeframe: {best_params.get('TIMEFRAME')}")
+            
+            # --- OOS Verification Loop ---
+            total_ret = 0
+            count = 0
+            
+            for symbol in symbols:
+                tf = best_params.get('TIMEFRAME', '1h')
+                
+                # Load Data
+                try:
+                    hourly_df, daily_df = load_data(symbol, BACKTEST_START_DATE, BACKTEST_END_DATE, tf)
+                except Exception as e:
+                    print(f"   ❌ Data load error for {symbol}: {e}")
+                    continue
+                
+                # Slice for OOS (Test Data)
+                cutoff_ts = pd.Timestamp(TRAIN_CUTOFF_DATE)
+                test_hourly = hourly_df[hourly_df['datetime'] >= cutoff_ts].copy()
+                test_daily = daily_df[daily_df['datetime'] >= cutoff_ts].copy()
+                
+                if test_hourly.empty:
+                    print(f"   ⚠️ No OOS data for {symbol}. Skipping verification.")
+                    continue
+                
+                # Run Backtest
+                strategy = UltimateStrategy("Verify", best_params)
+                df = prepare_futures_data(test_hourly, test_daily, strategy)
+                ret_pct, mdd, _, _, _ = run_backtest_segment_futures(
+                    df, best_params, initial_balance=750.0, return_series=True
+                )
+                
+                total_ret += ret_pct
+                count += 1
+                print(f"   - {symbol}: Return {ret_pct:.2f}% | MDD {mdd:.2f}%")
+            
+            if count > 0:
+                avg_ret = total_ret / count
+                print(f"   👉 {mode} Mode Avg OOS Return: {avg_ret:.2f}%")
+                
+                results.append({
+                    'mode': mode,
+                    'study_name': study_name,
+                    'return': avg_ret,
+                    'score': train_score
+                })
+                
+                if avg_ret > best_overall_score:
+                    best_overall_score = avg_ret
+                    best_mode = mode
+                    best_study_name = study_name
+            
         except Exception as e:
-            print(f"❌ Error verifying {symbol}: {e}")
+            print(f"   ❌ Error processing {mode}: {e}")
             import traceback
             traceback.print_exc()
+
+    print("\n" + "="*80)
+    print("🏆 FINAL RESULTS")
+    print("="*80)
+    
+    if not results:
+        print("❌ No valid strategies found/verified.")
+        sys.exit(1)
+        
+    results.sort(key=lambda x: x['return'], reverse=True)
+    
+    for res in results:
+        mark = "👑" if res['mode'] == best_mode else "  "
+        print(f"{mark} {res['mode']:<6} | OOS Return: {res['return']:>7.2f}% | Train Score: {res['score']:.4f}")
+        
+    print("-" * 80)
+    
+    target_db = "futures_strategy.db"
+    
+    if best_study_name:
+        print(f"💾 Saving Best Strategy ({best_mode}) from MySQL to '{target_db}'...")
+        
+        try:
+            # 1. Remove old target
+            if os.path.exists(target_db):
+                os.remove(target_db)
+            
+            # 2. Rename study inside the new DB to 'futures_strategy' for standard access
+            target_storage = f"sqlite:///{target_db}"
+            
+            print(f"   ⚙️  Migrating best params to standard 'futures_strategy' study...")
+            
+            # 3. Load Source (MySQL)
+            src_study = optuna.load_study(study_name=best_study_name, storage=storage_url)
+            best_trial = src_study.best_trial
+            
+            # 4. Create Target (Local)
+            # Create new standard study "futures_strategy"
+            optuna.create_study(study_name="futures_strategy", storage=target_storage, direction="maximize", load_if_exists=True)
+            study_dest = optuna.load_study(study_name="futures_strategy", storage=target_storage)
+            
+            # 5. Create Frozen Trial matching the best trial
+            frozen_trial = optuna.trial.create_trial(
+                params=best_trial.params,
+                distributions=best_trial.distributions,
+                value=best_trial.value,
+            )
+            
+            # 6. Add trial directly to destination study
+            study_dest.add_trial(frozen_trial)
+            
+            print(f"✅ SUCCESSFULLY DEPLOYED {best_mode} STRATEGY!")
+            print(f"   The bot will now use the OOS-verified best strategy from '{target_db}'.")
+            
+        except Exception as e:
+            print(f"❌ Error Saving Strategy: {e}")
+    else:
+        print("❌ No best strategy selected.")
