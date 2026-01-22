@@ -87,27 +87,28 @@ class UltimateStrategy(Strategy):
             
         elif entry_type == 'KELTNER':
             # Keltner usually uses ATR as width
-            up, lo = calculate_keltner_channel(df, window=entry_period, atr_mult=1.5)
+            k_mult = self.params.get('KELTNER_ATR_MULT', 1.5)
+            up, lo = calculate_keltner_channel(df, window=entry_period, atr_mult=k_mult)
             df['entry_upper'] = up
             df['entry_lower'] = lo
             
         elif entry_type == 'CCI':
             # CCI Breakout (Realistic Implementation)
-            # Entry when CCI crosses above 100 (Long) or below -100 (Short)
-            # Use PREVIOUS candle's high/low as realistic entry trigger
+            # Entry when CCI crosses above threshold (Long) or below -threshold (Short)
             
             df['cci'] = calculate_cci(df, window=entry_period)
             
             # Shift CCI by 1 to avoid look-ahead bias
             cci_prev = df['cci'].shift(1)
+            cci_thresh = self.params.get('CCI_THRESHOLD', 100)
             
-            # LONG Trigger: If previous CCI > 100, enter at breakout above previous high
+            # LONG Trigger: If previous CCI > threshold, enter at breakout above previous high
             prev_high = df['high'].shift(1)
-            df['entry_upper'] = np.where(cci_prev > 100, prev_high, np.inf)
+            df['entry_upper'] = np.where(cci_prev > cci_thresh, prev_high, np.inf)
             
-            # SHORT Trigger: If previous CCI < -100, enter at breakdown below previous low
+            # SHORT Trigger: If previous CCI < -threshold, enter at breakdown below previous low
             prev_low = df['low'].shift(1)
-            df['entry_lower'] = np.where(cci_prev < -100, prev_low, -np.inf)
+            df['entry_lower'] = np.where(cci_prev < -cci_thresh, prev_low, -np.inf)
             
         # --- 3. Trend Direction Filter ---
         filter_type = self.params.get('TREND_FILTER_TYPE', 'EMA')
