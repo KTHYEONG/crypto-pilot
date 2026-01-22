@@ -34,6 +34,7 @@ from src.futures_strategy.engine_fast_futures import (
     BacktestEngineFast,
     backtest_loop_numba,
 )
+from src.optimization.opt_utils import suggest_params, calculate_score
 
 
 def load_all_timeframes(symbol, start_date, end_date, timeframes):
@@ -70,492 +71,66 @@ def load_all_timeframes(symbol, start_date, end_date, timeframes):
     return data_map
 
 
-class CheckpointCallback:
+def compute_merge_indices(data_maps):
     """
-    Hybrid Storage Callback for Futures:
-    Saves in-memory study to SQLite database every `interval` trials.
+    Pre-compute merge index mappings for all symbols and timeframes.
+    
+    This eliminates the need for pd.merge on every trial by creating a lookup table
+    that maps each hourly bar to its corresponding daily bar index.
+    
+    Returns:
+        dict: {symbol: {timeframe: merge_index_array}}
     """
-
-    def __init__(self, db_url, interval=100):
-        self.db_url = db_url
-        self.interval = interval
-        self._lock = threading.Lock()
-
-    def __call__(self, study: optuna.study.Study, trial: optuna.trial.FrozenTrial):
-        # Save every interval trials
-        if trial.number > 0 and trial.number % self.interval == 0:
-            with self._lock:  # Prevent parallel checkpointing
-                db_path = self.db_url.replace("sqlite:///", "")
-                temp_path = db_path + ".tmp"
-
-                try:
-                    # Cleanup old temp
-                    for f in [temp_path, temp_path + "-wal", temp_path + "-shm"]:
-                        if os.path.exists(f):
-                            try:
-                                os.remove(f)
-                            except:
-                                pass
-
-                    # Copy to temp storage
-                    temp_storage = optuna.storages.RDBStorage(
-                        url=f"sqlite:///{temp_path}"
-                    )
-                    optuna.copy_study(
-                        from_study_name=study.study_name,
-                        from_storage=study._storage,
-                        to_storage=temp_storage,
-                        to_study_name=study.study_name,
-                    )
-
-                    # [CRITICAL] Dispose engine to release file handle on Windows
-                    if hasattr(temp_storage, "_engine"):
-                        temp_storage._engine.dispose()
-                    del temp_storage
-
-                    time.sleep(1.0)  # Grace period for OS
-
-                    # Move temp to actual (simulating atomic overwrite)
-                    if os.path.exists(db_path):
-                        try:
-                            os.remove(db_path)
-                            for ext in ["-wal", "-shm"]:
-                                if os.path.exists(db_path + ext):
-                                    os.remove(db_path + ext)
-                        except PermissionError:
-                            return
-
-                    os.rename(temp_path, db_path)
-                    print(
-                        f"💾 Checkpoint: Progress saved to {db_path} (Trial {trial.number})"
-                    )
-                except Exception as e:
-                    if "already exists" not in str(e).lower():
-                        print(f"⚠️ Checkpoint failed: {e}")
+    merge_indices = {}
+    
+    for symbol, data_map in data_maps.items():
+        merge_indices[symbol] = {}
+        
+        # Get daily date_key mapping
+        daily_df = data_map['1d']
+        daily_date_keys = daily_df['date_key'].values
+        
+        # Create a lookup dict: date_key -> daily_index
+        date_to_daily_idx = {date_key: idx for idx, date_key in enumerate(daily_date_keys)}
+        
+        # For each timeframe, create the merge index
+        for tf, tf_df in data_map.items():
+            if tf == '1d':
+                continue  # Skip daily itself
+            
+            # Map each hourly bar's date_key to its daily index
+            hourly_date_keys = tf_df['date_key'].values
+            merge_index = np.array([
+                date_to_daily_idx.get(date_key, -1) 
+                for date_key in hourly_date_keys
+            ], dtype=np.int32)
+            
+            # Handle missing mappings (shouldn't happen with proper data)
+            # Replace -1 with 0 and issue warning if found
+            if np.any(merge_index == -1):
+                print(f"⚠️  Warning: {symbol}-{tf} has unmapped date_keys. Using fallback index 0.")
+                merge_index[merge_index == -1] = 0
+            
+            merge_indices[symbol][tf] = merge_index
+    
+    return merge_indices
 
 
-def suggest_params(trial, search_space):
-    """
-    Generate trial parameters from search space with conditional dependency pruning.
-    Only suggests parameters that are actually used by the selected strategy configuration.
-
-    Efficiency Gain: 60~70% reduction in search space by skipping irrelevant parameters.
-    """
-    params = {}
-
-    # === Phase 1: Core Strategy Selection ===
-    for key in [
-        "ENTRY_TYPE",
-        "TREND_FILTER_TYPE",
-        "STRENGTH_FILTER_TYPE",
-        "EXIT_TYPE",
-        "STOP_LOSS_TYPE",
-        "USE_TAKE_PROFIT",
-        "USE_VOLUME_FILTER",
-        "TIMEFRAME",
-    ]:
-        if key in search_space:
-            spec = search_space[key]
-            if spec["type"] == "categorical":
-                params[key] = trial.suggest_categorical(key, spec["choices"])
-
-    # === Phase 2: Entry-Type Dependent Parameters ===
-    entry_type = params.get("ENTRY_TYPE", "DONCHIAN")
-
-    if entry_type == "BOLLINGER":
-        if "BB_STD" in search_space:
-            spec = search_space["BB_STD"]
-            params["BB_STD"] = trial.suggest_float(
-                "BB_STD", spec["low"], spec["high"], step=spec.get("step")
-            )
-
-    elif entry_type == "KELTNER":
-        if "KELTNER_ATR_MULT" in search_space:
-            spec = search_space["KELTNER_ATR_MULT"]
-            params["KELTNER_ATR_MULT"] = trial.suggest_float(
-                "KELTNER_ATR_MULT", spec["low"], spec["high"], step=spec.get("step")
-            )
-
-    elif entry_type == "CCI":
-        if "CCI_THRESHOLD" in search_space:
-            spec = search_space["CCI_THRESHOLD"]
-            params["CCI_THRESHOLD"] = trial.suggest_int(
-                "CCI_THRESHOLD", spec["low"], spec["high"], step=spec.get("step")
-            )
-
-    # === Phase 3: Trend-Filter Dependent Parameters ===
-    trend_filter = params.get("TREND_FILTER_TYPE", "EMA")
-
-    if trend_filter == "SUPERTREND":
-        for key in ["SUPERTREND_MULT", "SUPERTREND_PERIOD"]:
-            if key in search_space:
-                spec = search_space[key]
-                use_log = spec.get("log", False)
-                if spec["type"] == "float":
-                    params[key] = (
-                        trial.suggest_float(key, spec["low"], spec["high"], log=use_log)
-                        if use_log
-                        else trial.suggest_float(
-                            key, spec["low"], spec["high"], step=spec.get("step")
-                        )
-                    )
-                elif spec["type"] == "int":
-                    params[key] = (
-                        trial.suggest_int(key, spec["low"], spec["high"], log=use_log)
-                        if use_log
-                        else trial.suggest_int(
-                            key, spec["low"], spec["high"], step=spec.get("step")
-                        )
-                    )
-
-    elif trend_filter == "MACD":
-        for key in ["MACD_FAST", "MACD_SLOW", "MACD_SIGNAL"]:
-            if key in search_space:
-                spec = search_space[key]
-                use_log = spec.get("log", False)
-                params[key] = (
-                    trial.suggest_int(key, spec["low"], spec["high"], log=use_log)
-                    if use_log
-                    else trial.suggest_int(
-                        key, spec["low"], spec["high"], step=spec.get("step")
-                    )
-                )
-
-    elif trend_filter == "ICHIMOKU":
-        for key in ["ICHIMOKU_TENKAN", "ICHIMOKU_KIJUN", "ICHIMOKU_SENKOU_B"]:
-            if key in search_space:
-                spec = search_space[key]
-                use_log = spec.get("log", False)
-                params[key] = (
-                    trial.suggest_int(key, spec["low"], spec["high"], log=use_log)
-                    if use_log
-                    else trial.suggest_int(
-                        key, spec["low"], spec["high"], step=spec.get("step")
-                    )
-                )
-
-    elif trend_filter == "VWAP":
-        if "VWAP_STD_MULT" in search_space:
-            spec = search_space["VWAP_STD_MULT"]
-            params["VWAP_STD_MULT"] = trial.suggest_float(
-                "VWAP_STD_MULT", spec["low"], spec["high"], step=spec.get("step")
-            )
-
-    # SMA, EMA, HMA, DEMA, TEMA는 공통 MA_PERIOD 사용 (아래에서 처리)
-
-    # === Phase 4: Strength-Filter Dependent Parameters ===
-    strength_filter = params.get("STRENGTH_FILTER_TYPE", "NONE")
-
-    if strength_filter in ["ADX", "VHF", "MFI", "RSI", "STOCHASTIC", "STOCH_RSI"]:
-        # STRENGTH_FILTER_PERIOD는 공통 사용
-        if "STRENGTH_FILTER_PERIOD" in search_space:
-            spec = search_space["STRENGTH_FILTER_PERIOD"]
-            use_log = spec.get("log", False)
-            params["STRENGTH_FILTER_PERIOD"] = (
-                trial.suggest_int(
-                    "STRENGTH_FILTER_PERIOD", spec["low"], spec["high"], log=use_log
-                )
-                if use_log
-                else trial.suggest_int(
-                    "STRENGTH_FILTER_PERIOD",
-                    spec["low"],
-                    spec["high"],
-                    step=spec.get("step"),
-                )
-            )
-
-    if strength_filter == "VHF":
-        if "VHF_THRESHOLD" in search_space:
-            spec = search_space["VHF_THRESHOLD"]
-            params["VHF_THRESHOLD"] = trial.suggest_float(
-                "VHF_THRESHOLD", spec["low"], spec["high"], step=spec.get("step")
-            )
-
-    elif strength_filter == "MFI":
-        if "MFI_THRESHOLD" in search_space:
-            spec = search_space["MFI_THRESHOLD"]
-            params["MFI_THRESHOLD"] = trial.suggest_int(
-                "MFI_THRESHOLD", spec["low"], spec["high"], step=spec.get("step")
-            )
-
-    elif strength_filter == "RSI":
-        for key in ["RSI_OVERBOUGHT", "RSI_OVERSOLD"]:
-            if key in search_space:
-                spec = search_space[key]
-                params[key] = trial.suggest_int(
-                    key, spec["low"], spec["high"], step=spec.get("step")
-                )
-
-    elif strength_filter == "STOCHASTIC":
-        for key in ["STOCH_OVERBOUGHT", "STOCH_OVERSOLD"]:
-            if key in search_space:
-                spec = search_space[key]
-                params[key] = trial.suggest_int(
-                    key, spec["low"], spec["high"], step=spec.get("step")
-                )
-
-    elif strength_filter == "STOCH_RSI":
-        for key in ["STOCH_RSI_OVERBOUGHT", "STOCH_RSI_OVERSOLD"]:
-            if key in search_space:
-                spec = search_space[key]
-                params[key] = trial.suggest_int(
-                    key, spec["low"], spec["high"], step=spec.get("step")
-                )
-
-    elif strength_filter == "CMF":
-        for key in ["CMF_PERIOD", "CMF_THRESHOLD"]:
-            if key in search_space:
-                spec = search_space[key]
-                use_log = spec.get("log", False)
-                if spec["type"] == "int":
-                    params[key] = (
-                        trial.suggest_int(key, spec["low"], spec["high"], log=use_log)
-                        if use_log
-                        else trial.suggest_int(
-                            key, spec["low"], spec["high"], step=spec.get("step")
-                        )
-                    )
-                else:
-                    params[key] = trial.suggest_float(
-                        key, spec["low"], spec["high"], step=spec.get("step")
-                    )
-
-    elif strength_filter == "HURST":
-        for key in ["HURST_PERIOD", "HURST_TREND_THRESHOLD", "HURST_RANDOM_THRESHOLD"]:
-            if key in search_space:
-                spec = search_space[key]
-                use_log = spec.get("log", False)
-                if spec["type"] == "int":
-                    params[key] = (
-                        trial.suggest_int(key, spec["low"], spec["high"], log=use_log)
-                        if use_log
-                        else trial.suggest_int(
-                            key, spec["low"], spec["high"], step=spec.get("step")
-                        )
-                    )
-                else:
-                    params[key] = trial.suggest_float(
-                        key, spec["low"], spec["high"], step=spec.get("step")
-                    )
-
-    # ADX는 threshold만 필요 (아래에서 처리)
-
-    # === Phase 5: Exit-Type Dependent Parameters ===
-    exit_type = params.get("EXIT_TYPE", "ATR")
-
-    if exit_type == "PARABOLIC_SAR":
-        if "SAR_STEP" in search_space:
-            spec = search_space["SAR_STEP"]
-            params["SAR_STEP"] = trial.suggest_float(
-                "SAR_STEP", spec["low"], spec["high"], step=spec.get("step")
-            )
-
-    # === Phase 6: Common Parameters (Always Used) ===
-    # [CRITICAL] Handle STOP_LOSS_TYPE logical conflict first
-    stop_loss_type = params.get("STOP_LOSS_TYPE", "FIXED")
-
-    if stop_loss_type == "FIXED":
-        # FIXED: Use percentage-based stop loss
-        if "STOP_LOSS_PCT" in search_space:
-            spec = search_space["STOP_LOSS_PCT"]
-            params["STOP_LOSS_PCT"] = trial.suggest_float(
-                "STOP_LOSS_PCT", spec["low"], spec["high"], step=spec.get("step")
-            )
-        # ATR_STOP_LOSS_MULT is NOT suggested (would be ignored by engine)
-
-    elif stop_loss_type == "ATR":
-        # ATR: Use ATR-based stop loss
-        if "ATR_STOP_LOSS_MULT" in search_space:
-            spec = search_space["ATR_STOP_LOSS_MULT"]
-            use_log = spec.get("log", False)
-            if use_log:
-                params["ATR_STOP_LOSS_MULT"] = trial.suggest_float(
-                    "ATR_STOP_LOSS_MULT", spec["low"], spec["high"], log=True
-                )
-            else:
-                params["ATR_STOP_LOSS_MULT"] = trial.suggest_float(
-                    "ATR_STOP_LOSS_MULT",
-                    spec["low"],
-                    spec["high"],
-                    step=spec.get("step"),
-                )
-        # STOP_LOSS_PCT is NOT suggested (would be ignored by engine)
-
-    # [CRITICAL] Handle USE_TAKE_PROFIT logical conflict
-    use_take_profit = params.get("USE_TAKE_PROFIT", False)
-
-    if use_take_profit:
-        # TP enabled: suggest TP parameters
-        if "TAKE_PROFIT_ATR_MULT" in search_space:
-            spec = search_space["TAKE_PROFIT_ATR_MULT"]
-            use_log = spec.get("log", False)
-            if use_log:
-                params["TAKE_PROFIT_ATR_MULT"] = trial.suggest_float(
-                    "TAKE_PROFIT_ATR_MULT", spec["low"], spec["high"], log=True
-                )
-            else:
-                params["TAKE_PROFIT_ATR_MULT"] = trial.suggest_float(
-                    "TAKE_PROFIT_ATR_MULT",
-                    spec["low"],
-                    spec["high"],
-                    step=spec.get("step"),
-                )
-    # else: TAKE_PROFIT_ATR_MULT is NOT suggested (would be ignored)
-
-    # [CRITICAL] Handle USE_VOLUME_FILTER logical conflict
-    use_volume_filter = params.get("USE_VOLUME_FILTER", False)
-
-    if use_volume_filter:
-        # Volume filter enabled: suggest volume parameters
-        for key in ["VOLUME_THRESHOLD_MULT", "VOLUME_MA_PERIOD"]:
-            if key in search_space:
-                spec = search_space[key]
-                use_log = spec.get("log", False)
-                if spec["type"] == "float":
-                    if use_log:
-                        params[key] = trial.suggest_float(
-                            key, spec["low"], spec["high"], log=True
-                        )
-                    else:
-                        params[key] = trial.suggest_float(
-                            key, spec["low"], spec["high"], step=spec.get("step")
-                        )
-                elif spec["type"] == "int":
-                    if use_log:
-                        params[key] = trial.suggest_int(
-                            key, spec["low"], spec["high"], log=True
-                        )
-                    else:
-                        params[key] = trial.suggest_int(
-                            key, spec["low"], spec["high"], step=spec.get("step")
-                        )
-    # else: VOLUME params are NOT suggested
-
-    # Other common parameters (no conflicts)
-    common_keys = [
-        "ENTRY_PERIOD",
-        "MA_PERIOD",
-        "ATR_PERIOD",
-        "ATR_MULTIPLIER",  # Trailing stop multiplier (always used)
-        "ADX_THRESHOLD",
-        "RISK_PER_TRADE",
-        "LEVERAGE",
-        "MAX_HOLDING_BARS",
-        "TRAILING_ACTIVATION_ATR",
-        "RISK_PER_TRADE_SPOT",  # Spot 전용
-    ]
-
-    for key in common_keys:
-        if key in search_space:
-            spec = search_space[key]
-            use_log = spec.get("log", False)
-
-            if spec["type"] == "float":
-                if use_log:
-                    params[key] = trial.suggest_float(
-                        key, spec["low"], spec["high"], log=True
-                    )
-                else:
-                    params[key] = trial.suggest_float(
-                        key, spec["low"], spec["high"], step=spec.get("step")
-                    )
-            elif spec["type"] == "int":
-                if use_log:
-                    params[key] = trial.suggest_int(
-                        key, spec["low"], spec["high"], log=True
-                    )
-                else:
-                    params[key] = trial.suggest_int(
-                        key, spec["low"], spec["high"], step=spec.get("step")
-                    )
-
-    return params
 
 
-def calculate_score(ret, mdd, trades_df, mode="DAY"):
-    """
-    SQN Hybrid Objective v3 (Futures-Optimized)
 
-    Futures 특화 조정사항:
-    - Calmar 기대치 상향: 레버리지를 통한 높은 수익률 추구
-    - MDD 허용치 확대: 레버리지 변동성을 감안한 현실적 기준
-    - Profit Factor 강화: 펀딩비와 높은 수수료 극복을 위한 더 높은 PF 요구
-    - SQN 기준 상향: 레버리지 리스크를 상쇄할 높은 일관성 필요
-    """
-    import numpy as np
 
-    if trades_df.empty:
-        return -10000
 
-    N = len(trades_df)
-
-    # 1. Individual Trade Returns (%)
-    if "pnl_pct" not in trades_df.columns:
-        raise ValueError("trades_df must contain 'pnl_pct' column for SQN calculation.")
-
-    returns = trades_df["pnl_pct"].values
-
-    r_avg = np.mean(returns)
-    r_std = np.std(returns) if len(returns) > 1 else 100.0
-    if r_std == 0:
-        r_std = 0.001
-
-    # --- Helper: Soft Sigmoid Normalization ---
-    def soft_sigmoid(x, center, steepness):
-        z = -steepness * (x - center)
-        z = np.clip(z, -500, 500)  # Overflow prevention
-        return 1 / (1 + np.exp(z))
-
-    # --- Component 1: SQN (Consistency) ---
-    # [FUTURES] Higher bar: 3.0 (vs Spot 2.5)
-    # 레버리지 사용 시 더 높은 일관성 요구
-    sqn = (np.sqrt(N) * r_avg) / r_std
-    sqn_score = soft_sigmoid(sqn, center=3.0, steepness=0.5)
-
-    # --- Component 2: Calmar Ratio (ROI Efficiency) ---
-    # [FUTURES] Higher expectation: 5.0 (vs Spot 2.5)
-    # 레버리지를 통해 더 높은 수익률 추구 (예: 5배 레버시 250% ROI with 50% MDD = Calmar 5.0)
-    abs_mdd = abs(mdd) if mdd != 0 else 0.01
-    calmar = ret / abs_mdd
-    calmar_score = soft_sigmoid(calmar, center=5.0, steepness=0.4)
-
-    # --- Component 3: Profit Factor ---
-    # [FUTURES] Higher bar: 1.8 (vs Spot 1.3)
-    # 펀딩비(0.01%) + 수수료(0.05% 양방향) = 매 거래당 0.11% 추가 비용 극복 필요
-    pos_sum = np.sum(returns[returns > 0])
-    neg_sum = abs(np.sum(returns[returns < 0]))
-    pf = pos_sum / neg_sum if neg_sum > 0 else 3.0
-    pf_score = soft_sigmoid(pf, center=1.8, steepness=1.0)
-
-    # --- Component 4: Smooth MDD Penalty ---
-    # [FUTURES] More tolerant: -30% center (vs Spot -20%)
-    # 레버리지 3~5배 사용 시 -30% MDD는 실질적으로 감당 가능한 수준
-    # Steepness 0.25 (vs Spot 0.25): 완만한 곡선으로 공격적 전략 허용
-    mdd_penalty = soft_sigmoid(-abs_mdd, center=-30, steepness=0.25)
-
-    # --- Component 5: Soft Trade Count Penalty ---
-    MIN_TRADES_MAP = {"SCALP": 500, "DAY": 80, "SWING": 30, "ALL": 100}
-    min_trades = MIN_TRADES_MAP.get(mode.upper(), 100)
-    trade_penalty = soft_sigmoid(N, center=min_trades, steepness=0.1)
-
-    # Hard floor for statistical significance
-    if N < 10:
-        return -10000
-
-    # --- Final Score: Multiplicative ---
-    # 모든 요소가 균형있게 우수해야 높은 점수 획득
-    final_score = (
-        sqn_score * calmar_score * pf_score * mdd_penalty * trade_penalty * 1000
-    )
-
-    return final_score
 
 
 def objective(
-    trial, strategy_cls, strategy_name, data_maps, search_space, common_search_space
+    trial, strategy_cls, strategy_name, data_maps, search_space, common_search_space, merge_indices=None
 ):
     """
     Multi-symbol objective function.
+    
+    Args:
+        merge_indices: Pre-computed merge index mappings (optional, for optimization)
     """
     # 1. Generate Params
     strategy_params = suggest_params(trial, search_space)
@@ -589,6 +164,10 @@ def objective(
 
         # Engine Execution
         engine = BacktestEngineFast(hourly_df, daily_df, strategy, initial_balance=750)
+        
+        # [OPTIMIZATION] Inject pre-computed merge index if available
+        if merge_indices and symbol in merge_indices and selected_tf in merge_indices[symbol]:
+            engine._merge_index_map = merge_indices[symbol][selected_tf]
 
         # Inject Leverage/Risk
         engine.leverage = full_params.get("LEVERAGE", 1)
@@ -678,7 +257,7 @@ def main():
         help="Number of optimization trials (default: auto-set by mode)",
     )
     parser.add_argument("--symbols", type=str, default="BTC/USDT,ETH/USDT")
-    parser.add_argument("--jobs", type=int, default=12)
+    parser.add_argument("--jobs", type=int, default=10)
     parser.add_argument(
         "--mode",
         type=str,
@@ -697,10 +276,10 @@ def main():
     # All modes have 3 timeframes, adjusted by backtest speed and trade frequency
     # [UPDATED] Trials adjusted based on search space complexity and data volume analysis
     MODE_TRIALS_MAP = {
-        "SCALP": 3300,  # 3 timeframes (5m,15m,30m), high data volume but narrow param range
-        "DAY": 3800,  # 3 timeframes (1h,2h,4h), balanced - most commonly used mode
-        "SWING": 4700,  # 3 timeframes (4h,1d,3d), wide param range + low data volume (overfitting risk)
-        "ALL": 4000,  # Catch-all (highest complexity)
+        "SCALP": 3600,  # 3 timeframes (5m,15m,30m), high data volume but narrow param range
+        "DAY": 4200,    # 3 timeframes (1h,2h,4h), balanced - most commonly used mode
+        "SWING": 5000,  # 3 timeframes (4h,1d,3d), wide param range + low data volume (overfitting risk)
+        "ALL": 4500,    # Catch-all (highest complexity)
     }
 
     if args.trials is None:
@@ -735,19 +314,53 @@ def main():
             symbol, BACKTEST_START_DATE, BACKTEST_END_DATE, timeframes
         )
 
-    # [CRITICAL] Slice Data for Optimization (Train Set)
+    # [CRITICAL] Slice Data for Optimization (Train Set) with Warmup Buffer
     print(f"✂️  Trimming Data for Optimization (Train Period: ~ {TRAIN_CUTOFF_DATE})")
     cutoff_ts = pd.Timestamp(TRAIN_CUTOFF_DATE)
+    
+    # [WARMUP OPTIMIZATION] Include buffer period before cutoff for indicator calculation
+    # This prevents NaN values at the start of training period
+    WARMUP_BUFFER_BARS = {
+        '5m': 500,   # ~42 hours of data for warmup
+        '15m': 400,  # ~100 hours
+        '30m': 350,  # ~220 hours
+        '1h': 300,   # ~12.5 days
+        '2h': 250,   # ~20 days
+        '4h': 200,   # ~33 days
+        '1d': 150,   # ~5 months
+        '3d': 100,   # ~10 months
+    }
 
     for sym in data_maps:
         for tf in data_maps[sym]:
-            original_len = len(data_maps[sym][tf])
-            data_maps[sym][tf] = data_maps[sym][tf][
-                data_maps[sym][tf]["datetime"] < cutoff_ts
-            ].copy()
+            df = data_maps[sym][tf]
+            original_len = len(df)
+            
+            # Find cutoff index (end of training period)
+            cutoff_mask = df["datetime"] < cutoff_ts
+            train_end_idx = cutoff_mask.sum()
+            
+            if train_end_idx == 0:
+                print(f"⚠️  Warning: {sym}-{tf} has no data before cutoff date.")
+                continue
+            
+            # Desired warmup period
+            desired_warmup = WARMUP_BUFFER_BARS.get(tf, 200)
+            
+            # Slice from start to cutoff (entire training period)
+            data_maps[sym][tf] = df.iloc[:train_end_idx].copy()
+            
+            # Set warmup: first N bars are for indicator warmup, trading starts after
+            data_maps[sym][tf].attrs['warmup_bars'] = min(desired_warmup, train_end_idx)
+            
             new_len = len(data_maps[sym][tf])
             # if tf == timeframes[0]:
-            #     print(f"  [{sym}] Train Size: {new_len} (Original: {original_len})")
+            #     print(f"  [{sym}] Train Size: {new_len} (Original: {original_len}, Warmup: {desired_warmup})")
+
+    # [OPTIMIZATION] Pre-compute merge indices to eliminate pd.merge overhead
+    print(f"🔗 Pre-computing merge indices for fast data alignment...")
+    merge_indices = compute_merge_indices(data_maps)
+    print(f"✅ Merge indices computed for {len(merge_indices)} symbols")
 
     # DB Setup (MySQL)
     from dotenv import load_dotenv
@@ -845,6 +458,7 @@ def main():
             8,  # Funding params
             1000,
             0.0,  # Max Hold, Trailing Act
+            0 # [WARMUP] Missing argument fixed
         )
         print(" Done!")
     except Exception as e:
@@ -853,7 +467,7 @@ def main():
     try:
         study.optimize(
             lambda trial: objective(
-                trial, UltimateStrategy, f"Ultimate_{mode}", data_maps, search_space, {}
+                trial, UltimateStrategy, f"Ultimate_{mode}", data_maps, search_space, {}, merge_indices
             ),
             n_trials=trials,
             n_jobs=args.jobs,

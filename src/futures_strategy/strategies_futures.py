@@ -64,10 +64,19 @@ class UltimateStrategy(Strategy):
     (Aligned with Spot V2 Logic)
     """
     def generate_signals(self, df):
-        # --- 1. Basic Indicators ---
-        # (ATR is always essential for risk management)
-        atr_period = self.params.get('ATR_PERIOD', 14)
-        df['atr'] = calculate_atr(df, window=atr_period)
+        # [ROBUSTNESS] Clean column assignment (data copied at loader level)
+        
+        # --- 1. Basic Indicators (Lazy ATR) ---
+        # ATR is needed only for certain exit/SL/sizing types
+        use_tp = self.params.get('USE_TAKE_PROFIT', False)
+        use_atr_sl = self.params.get('STOP_LOSS_TYPE') == 'ATR'
+        use_trailing = self.params.get('EXIT_TYPE') == 'ATR' or self.params.get('TRAILING_ACTIVATION_ATR', 0) > 0
+        
+        if use_tp or use_atr_sl or use_trailing:
+            atr_period = self.params.get('ATR_PERIOD', 14)
+            df.loc[:, 'atr'] = calculate_atr(df, window=atr_period)
+        else:
+            df.loc[:, 'atr'] = 0.0  # Not used, skip expensive calculation
         
         # --- 2. Entry Signal Setup ---
         entry_type = self.params.get('ENTRY_TYPE', 'DONCHIAN')
@@ -247,7 +256,7 @@ class UltimateStrategy(Strategy):
             hurst_trend_thresh = self.params.get('HURST_TREND_THRESHOLD', 0.60)
             hurst_random_thresh = self.params.get('HURST_RANDOM_THRESHOLD', 0.50)
             
-            df['hurst'] = calculate_hurst_exponent(df['close'], window=hurst_period)
+            df.loc[:, 'hurst'] = calculate_hurst_exponent(df['close'], window=hurst_period)
             
             # Block if Random Walk (H near 0.5) or Mean-Reverting (H < 0.5)
             df.loc[df['hurst'] < hurst_random_thresh, 'strength_filter'] = 0
@@ -260,18 +269,18 @@ class UltimateStrategy(Strategy):
         if self.params.get('EXIT_TYPE') == 'PARABOLIC_SAR':
             sar_step = self.params.get('SAR_STEP', 0.02)
             sar_line, _ = calculate_parabolic_sar(df, step=sar_step)
-            df['parabolic_sar'] = sar_line
+            df.loc[:, 'parabolic_sar'] = sar_line
         else:
-            df['parabolic_sar'] = 0.0 # Default
+            df.loc[:, 'parabolic_sar'] = 0.0 # Default
             
         # --- 6. Volume Filter (Ratio) ---
         if self.params.get('USE_VOLUME_FILTER', False):
             vol_ma_period = self.params.get('VOLUME_MA_PERIOD', 20)
             # Avoid division by zero
             vol_ma = df['volume'].rolling(window=vol_ma_period).mean()
-            df['volume_ratio'] = df['volume'] / vol_ma.replace(0, 1)
+            df.loc[:, 'volume_ratio'] = df['volume'] / vol_ma.replace(0, 1)
         else:
-            df['volume_ratio'] = 100.0 # Default Pass (High ratio)
+            df.loc[:, 'volume_ratio'] = 100.0 # Default Pass (High ratio)
             
         # [OPTIMIZATION] Ensure all required columns exist for Engine
         # This removes the need for slow df.get() calls

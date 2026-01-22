@@ -9,7 +9,8 @@ class BacktestEngineFastSpot:
     Reuses architecture from BacktestEngineFast (Futures) for consistency.
     """
     def __init__(self, df, strategy, backtest_func, initial_balance=10_000_000, fee_rate=0.0005, slippage_rate=0.0003):
-        self.df = df
+        # [MEMORY] Use shallow copy to prevent contaminating the global cached dataframe with trial-specific columns
+        self.df = df.copy(deep=False)
         self.strategy = strategy
         self.backtest_func = backtest_func  # Injected from outside to avoid circular import
         self.initial_balance = initial_balance
@@ -18,6 +19,9 @@ class BacktestEngineFastSpot:
         
         # Injected by optimization script
         self.risk_per_trade = 0.99  # Spot default
+        
+        # [WARMUP] Extract warmup_bars from DataFrame attrs before preparing data
+        self._warmup_bars = getattr(df, 'attrs', {}).get('warmup_bars', 0)
         
         self.logger = logging.getLogger(__name__)
         self._prepare_data()
@@ -53,6 +57,10 @@ class BacktestEngineFastSpot:
         
         # Parabolic SAR (optional)
         self.parabolic_sar = self.df['parabolic_sar'].values
+
+        # [MEMORY] Release DataFrame reference to free memory
+        self.df = None
+        # self.strategy = None # Strategy might be needed for params access in run()
     
     def run(self):
         """
@@ -75,6 +83,12 @@ class BacktestEngineFastSpot:
         max_holding_bars = self.strategy.params.get('MAX_HOLDING_BARS', 999999)
         trailing_activation_atr = self.strategy.params.get('TRAILING_ACTIVATION_ATR', 0.0)
         
+        # [WARMUP OPTIMIZATION] Extract warmup period if available
+        # Note: self.df was set to None after data extraction, so we need to get it from original df
+        # Actually, we need to pass this through __init__ or store it before clearing
+        # For now, use a safe default of 0 (no warmup) - will be set by optimize script
+        warmup_bars = getattr(self, '_warmup_bars', 0)
+        
         # Run Numba loop (using injected function)
         trades, equity, final_bal = self.backtest_func(
             self.close, self.high, self.low, self.entry_upper,
@@ -86,7 +100,8 @@ class BacktestEngineFastSpot:
             atr_mult, self.risk_per_trade,
             use_volume_filter, vol_threshold,
             use_take_profit, tp_atr_mult,
-            max_holding_bars, trailing_activation_atr  # [NEW]
+            max_holding_bars, trailing_activation_atr,  # [NEW]
+            warmup_bars  # [WARMUP]
         )
         
         # Calculate metrics
