@@ -46,27 +46,40 @@ def load_all_timeframes(symbol, start_date, end_date, timeframes):
     # Even for SCALP mode, daily context is often useful (e.g., trend alignment)
     daily_file = DATA_DIR / f"{symbol.replace('/', '_')}_1d_{start_date}_{end_date}.csv"
     if not daily_file.exists():
-        collector.collect_and_save(symbol, "1d", start_date, end_date)
+        try:
+            collector.collect_and_save(symbol, "1d", start_date, end_date)
+        except Exception as e:
+            print(f"❌ Error: Failed to download {symbol}-1d data: {e}")
+            sys.exit(1)
 
-    df = pd.read_csv(daily_file)
-    df["datetime"] = pd.to_datetime(df["timestamp"], unit="ms")
-    # [OPTIMIZATION] Pre-calculate date_key for merging
-    df["date_key"] = df["datetime"].dt.strftime("%Y-%m-%d")
-    data_map["1d"] = df
+    try:
+        df = pd.read_csv(daily_file)
+        df["datetime"] = pd.to_datetime(df["timestamp"], unit="ms")
+        df["date_key"] = df["datetime"].dt.strftime("%Y-%m-%d")
+        data_map["1d"] = df
+    except Exception as e:
+        print(f"❌ Error: Failed to load {daily_file}: {e}")
+        sys.exit(1)
 
     for tf in timeframes:
-        tf_file = (
-            DATA_DIR / f"{symbol.replace('/', '_')}_{tf}_{start_date}_{end_date}.csv"
-        )
+        tf_file = DATA_DIR / f"{symbol.replace('/', '_')}_{tf}_{start_date}_{end_date}.csv"
+        
         if not tf_file.exists():
             print(f"Downloading {tf} data...")
-            collector.collect_and_save(symbol, tf, start_date, end_date)
+            try:
+                collector.collect_and_save(symbol, tf, start_date, end_date)
+            except Exception as e:
+                print(f"❌ Error: Failed to download {symbol}-{tf} data: {e}")
+                sys.exit(1)
 
-        df = pd.read_csv(tf_file)
-        df["datetime"] = pd.to_datetime(df["timestamp"], unit="ms")
-        # [OPTIMIZATION] Pre-calculate date_key
-        df["date_key"] = df["datetime"].dt.strftime("%Y-%m-%d")
-        data_map[tf] = df
+        try:
+            df = pd.read_csv(tf_file)
+            df["datetime"] = pd.to_datetime(df["timestamp"], unit="ms")
+            df["date_key"] = df["datetime"].dt.strftime("%Y-%m-%d")
+            data_map[tf] = df
+        except Exception as e:
+            print(f"❌ Error: Failed to load {tf_file}: {e}")
+            sys.exit(1)
 
     return data_map
 
@@ -132,6 +145,8 @@ def objective(
     Args:
         merge_indices: Pre-computed merge index mappings (optional, for optimization)
     """
+    import gc
+    
     # 1. Generate Params
     strategy_params = suggest_params(trial, search_space)
     # Merge common search space if it has unique keys, or ignore if fully handled by search_space
@@ -179,8 +194,11 @@ def objective(
             # [DEBUG] Log backtest failure
             print(f"⚠️ Backtest failed for {symbol}: {e}")
             import traceback
-
             traceback.print_exc()
+            
+            # [MEMORY] Cleanup on error
+            del engine, strategy
+            gc.collect()
             return -10000
 
         # Extract Metrics
@@ -217,6 +235,9 @@ def objective(
         # [SPEED UP] Short-circuit: If any symbol performs poorly, fail the trial immediately
         # One bad apple spoils the bunch (Harmonic Mean logic)
         if score < 5:  # Low score threshold for soft penalty
+            # [MEMORY] Cleanup before early return
+            del engine, result, strategy, trades_df
+            gc.collect()
             return -10000
 
         symbol_scores.append(score)
@@ -225,6 +246,9 @@ def objective(
         trial.set_user_attr(f"ret_{symbol.replace('/', '_')}", float(ret))
         trial.set_user_attr(f"mdd_{symbol.replace('/', '_')}", float(mdd))
         trial.set_user_attr(f"pf_{symbol.replace('/', '_')}", float(pf))
+        
+        # [MEMORY] Explicit cleanup per symbol
+        del engine, result, strategy, trades_df
 
     # 4. Combine scores using HARMONIC MEAN
     offset = 6000
@@ -244,6 +268,9 @@ def objective(
     trial.set_user_attr("return_avg", avg_ret)
     trial.set_user_attr("mdd_avg", avg_mdd)
     trial.set_user_attr("pf_avg", avg_pf)
+    
+    # [MEMORY] Force garbage collection after processing all symbols
+    gc.collect()
 
     return final_score
 
@@ -296,8 +323,13 @@ def main():
     )
 
     # Get Search Space & Timeframes
-    search_space = GET_SEARCH_SPACE(mode, market_type="futures")
-    timeframes = search_space["TIMEFRAME"]["choices"]
+    try:
+        search_space = GET_SEARCH_SPACE(mode, market_type="futures")
+        timeframes = search_space["TIMEFRAME"]["choices"]
+    except Exception as e:
+        print(f"❌ Error: Failed to load search space for mode '{mode}'")
+        print(f"   Details: {e}")
+        sys.exit(1)
 
     print(f"\n{'='*70}")
     print(f"🚀 MODE: {mode} OPRIMIZATION")
@@ -313,6 +345,16 @@ def main():
         data_maps[symbol] = load_all_timeframes(
             symbol, BACKTEST_START_DATE, BACKTEST_END_DATE, timeframes
         )
+        
+        # [VALIDATION] Ensure all required data is loaded
+        if not data_maps[symbol] or '1d' not in data_maps[symbol]:
+            print(f"❌ Error: Failed to load data for {symbol}")
+            sys.exit(1)
+        for tf in timeframes:
+            if tf not in data_maps[symbol] or data_maps[symbol][tf].empty:
+                print(f"❌ Error: Failed to load {symbol}-{tf} data")
+                sys.exit(1)
+    print(f"✅ Data loaded successfully for all symbols")
 
     # [CRITICAL] Slice Data for Optimization (Train Set) with Warmup Buffer
     print(f"✂️  Trimming Data for Optimization (Train Period: ~ {TRAIN_CUTOFF_DATE})")
@@ -385,6 +427,17 @@ def main():
 
     # [Clean Start] Intead of deleting file, delete study from DB
     print(f"🔄 Preparing study: {study_name}")
+    
+    # [VALIDATION] Test DB connection before proceeding
+    try:
+        test_storage = optuna.storages.RDBStorage(url=storage_url)
+        print(f"✅ DB connection successful")
+    except Exception as e:
+        print(f"❌ Error: Failed to connect to MySQL database")
+        print(f"   Details: {e}")
+        print(f"   Please check your .env credentials and ensure MySQL is running")
+        sys.exit(1)
+    
     try:
         optuna.delete_study(study_name=study_name, storage=storage_url)
         print(f"🗑️  Deleted old study: {study_name}")
@@ -462,7 +515,8 @@ def main():
         )
         print(" Done!")
     except Exception as e:
-        print(f" Skipped ({e})")
+        print(f"\n⚠️  Warning: Numba warmup failed: {e}")
+        print(f"   First trial will be slower due to JIT compilation")
 
     try:
         study.optimize(
@@ -476,6 +530,12 @@ def main():
 
     except KeyboardInterrupt:
         print("\n🛑 Optimization Interrupted by User")
+        print(f"💾 Progress saved: {len(study.trials)} trials completed")
+    except Exception as e:
+        print(f"\n❌ Optimization failed with error: {e}")
+        print(f"💾 Progress saved: {len(study.trials)} trials completed before failure")
+        import traceback
+        traceback.print_exc()
 
     print(f"\n{'='*70}")
     print(f"✅ {mode} Optimization Complete!")
