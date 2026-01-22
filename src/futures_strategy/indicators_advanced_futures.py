@@ -15,8 +15,8 @@ def indicator_cache(func):
         data_obj = args[0]
         params = args[1:]
         
-        # Create a unique key for (function_name, data_id, positional_params, keyword_params)
-        cache_key = (func.__name__, id(data_obj), params, tuple(sorted(kwargs.items())))
+        # Create a unique key for (function_name, data_id, data_len, positional_params, keyword_params)
+        cache_key = (func.__name__, id(data_obj), len(data_obj), params, tuple(sorted(kwargs.items())))
         
         if cache_key in _INDICATOR_CACHE:
             return _INDICATOR_CACHE[cache_key]
