@@ -11,6 +11,7 @@ from datetime import datetime
 sys.path.append(os.path.join(os.path.dirname(__file__), '../../'))
 
 from src.strategy.strategies import UltimateStrategy
+from src.data.collector import DataCollector
 
 # Setup Logging
 logging.basicConfig(level=logging.INFO)
@@ -190,6 +191,46 @@ if __name__ == "__main__":
                      matches = glob.glob(pattern)
                      if matches:
                          filepath = matches[0]
+                
+                # If still not found, download data automatically
+                if not os.path.exists(filepath):
+                    logger.info(f"   📥 Cache not found for {symbol}-{tf}. Downloading data...")
+                    try:
+                        from config.settings import BACKTEST_START_DATE, BACKTEST_END_DATE
+                        collector = DataCollector()
+                        
+                        # Download data with standard naming convention
+                        # Note: DataCollector saves as: {symbol}_{tf}_{start}_{end}.csv
+                        # We need to match optimize_spot naming: {symbol}_{tf}_{start}_{end}_spot.csv
+                        # So we'll download first, then rename
+                        
+                        df_downloaded = collector.collect_and_save(
+                            symbol, tf, BACKTEST_START_DATE, BACKTEST_END_DATE
+                        )
+                        
+                        if df_downloaded is None or df_downloaded.empty:
+                            print(f"   ❌ Failed to download data for {symbol}-{tf}. Skipping.")
+                            continue
+                        
+                        # Rename to match optimize_spot convention
+                        standard_filename = f"{symbol}_{tf}_{BACKTEST_START_DATE}_{BACKTEST_END_DATE}.csv"
+                        standard_filepath = os.path.join(os.path.dirname(__file__), '../../data', standard_filename)
+                        
+                        spot_filename = f"{symbol}_{tf}_{BACKTEST_START_DATE.replace('-','')}_{BACKTEST_END_DATE.replace('-','')}_spot.csv"
+                        spot_filepath = os.path.join(os.path.dirname(__file__), '../../data', spot_filename)
+                        
+                        # If collector saved with standard name, rename it
+                        if os.path.exists(standard_filepath) and not os.path.exists(spot_filepath):
+                            import shutil
+                            shutil.move(standard_filepath, spot_filepath)
+                            filepath = spot_filepath
+                            logger.info(f"   ✅ Data downloaded and saved to {spot_filepath}")
+                        else:
+                            filepath = spot_filepath
+                            
+                    except Exception as e:
+                        print(f"   ❌ Error downloading data for {symbol}: {e}")
+                        continue
                 
                 if not os.path.exists(filepath):
                     print(f"   ⚠️ Cache not found for {symbol}-{tf}. Skipping.")
