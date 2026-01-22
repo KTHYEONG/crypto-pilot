@@ -597,8 +597,12 @@ if __name__ == "__main__":
     symbols = [s.strip() for s in args.symbols.split(',')]
     mode = args.mode.upper()
     
+    # [UPDATED] Trials adjusted based on search space complexity and data volume analysis
     MODE_TRIALS_MAP = {
-        'SCALP': 3000, 'DAY': 2500, 'SWING': 2700, 'ALL': 3000
+        'SCALP': 3300,  # High data volume but narrow param range
+        'DAY': 3800,    # Balanced - most commonly used mode
+        'SWING': 4700,  # Wide param range + low data volume (overfitting risk)
+        'ALL': 4000     # Catch-all (highest complexity)
     }
     
     trials = args.trials if args.trials is not None else MODE_TRIALS_MAP.get(mode, 2500)
