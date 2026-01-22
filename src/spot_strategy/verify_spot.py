@@ -113,6 +113,9 @@ if __name__ == "__main__":
     
     symbols = [s.strip() for s in args.symbols.split(',')]
     
+    # PRIMARY SYMBOLS: Only these affect final strategy selection
+    PRIMARY_SYMBOLS = ['KRW-BTC', 'KRW-ETH']
+    
     # Modes to check
     MODES = ['SCALP', 'DAY', 'SWING']
     results = []
@@ -164,8 +167,10 @@ if __name__ == "__main__":
             print(f"   ✅ Loaded Params (Train Score: {train_score:.4f})")
             
             # --- OOS Verification Loop ---
-            total_ret = 0
-            count = 0
+            # Separate tracking for PRIMARY (affects strategy selection) and ALL (display only)
+            primary_total_ret = 0
+            primary_count = 0
+            all_results = []  # Store all symbol results for display
             
             for symbol in symbols:
                 tf = best_params.get('TIMEFRAME', '1h')
@@ -255,19 +260,41 @@ if __name__ == "__main__":
                     test_df, best_params, initial_balance=10000000.0, return_series=True
                 )
                 
-                total_ret += ret_pct
-                count += 1
-                print(f"   - {symbol}: Return {ret_pct:.2f}% | MDD {mdd:.2f}%")
+                # Track for PRIMARY symbols (strategy selection)
+                is_primary = symbol in PRIMARY_SYMBOLS
+                if is_primary:
+                    primary_total_ret += ret_pct
+                    primary_count += 1
+                
+                # Store all results for display
+                all_results.append({
+                    'symbol': symbol,
+                    'return': ret_pct,
+                    'mdd': mdd,
+                    'is_primary': is_primary
+                })
+                
+                # Display with PRIMARY/REFERENCE indicator
+                indicator = "🎯 PRIMARY" if is_primary else "📊 REFERENCE"
+                print(f"   - {symbol} [{indicator}]: Return {ret_pct:.2f}% | MDD {mdd:.2f}%")
             
-            if count > 0:
-                avg_ret = total_ret / count
-                print(f"   👉 {mode} Mode Avg OOS Return: {avg_ret:.2f}%")
+            # Calculate average using PRIMARY symbols only
+            if primary_count > 0:
+                avg_ret = primary_total_ret / primary_count
+                print(f"\n   📊 Results Summary:")
+                print(f"   - PRIMARY Avg Return (BTC/ETH): {avg_ret:.2f}%")
+                if len(all_results) > primary_count:
+                    ref_total = sum([r['return'] for r in all_results if not r['is_primary']])
+                    ref_count = len([r for r in all_results if not r['is_primary']])
+                    ref_avg = ref_total / ref_count if ref_count > 0 else 0
+                    print(f"   - REFERENCE Avg Return (Alts): {ref_avg:.2f}%")
                 
                 results.append({
                     'mode': mode,
                     'study_name': study_name,
-                    'return': avg_ret,
-                    'score': train_score
+                    'return': avg_ret,  # Only PRIMARY symbols affect this
+                    'score': train_score,
+                    'all_results': all_results  # Keep for detailed view
                 })
                 
                 if avg_ret > best_overall_score:
