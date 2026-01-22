@@ -108,10 +108,25 @@ if __name__ == "__main__":
     from config.settings import TRAIN_CUTOFF_DATE
     
     parser = argparse.ArgumentParser()
-    parser.add_argument("--symbols", type=str, default="KRW-BTC,KRW-ETH")
+    parser.add_argument("--symbols", type=str, default="KRW-BTC,KRW-ETH", 
+                        help="Comma-separated list of symbols to verify")
+    parser.add_argument("--alt", type=int, default=0, choices=[0, 1],
+                        help="Include altcoins for validation (1=yes, 0=no). Adds SOL, XRP, DOGE, ADA")
     args = parser.parse_args()
     
-    symbols = [s.strip() for s in args.symbols.split(',')]
+    # Build symbol list
+    base_symbols = [s.strip() for s in args.symbols.split(',')]
+    
+    # Add altcoins if requested
+    if args.alt == 1:
+        alt_symbols = ['KRW-SOL', 'KRW-XRP', 'KRW-DOGE', 'KRW-ADA']
+        # Add only if not already in base_symbols
+        for alt in alt_symbols:
+            if alt not in base_symbols:
+                base_symbols.append(alt)
+        print(f"📊 Altcoin validation enabled. Added: {', '.join(alt_symbols)}")
+    
+    symbols = base_symbols
     
     # PRIMARY SYMBOLS: Only these affect final strategy selection
     PRIMARY_SYMBOLS = ['KRW-BTC', 'KRW-ETH']
