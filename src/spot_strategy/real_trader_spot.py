@@ -351,26 +351,9 @@ class RealTraderSpot:
 
             # --- ENTRY LOGIC ---
             else:
-                # [Optimization] Staleness Check: 봉 마감 후 너무 오래 지났으면 진입 방지
-                tf_min = 60
-                if 'm' in timeframe: tf_min = int(timeframe.replace('m', ''))
-                elif 'h' in timeframe: tf_min = int(timeframe.replace('h', '')) * 60
-                elif 'd' in timeframe: tf_min = int(timeframe.replace('d', '')) * 1440
-                
-                # Upbit OHLCV 'datetime' column contains starting time
-                candle_start_time = confirmed_candle['datetime']
-                candle_end_time = candle_start_time + timedelta(minutes=tf_min)
-                now_utc = datetime.utcnow()
-                
-                delay_seconds = (now_utc - candle_end_time).total_seconds()
-                max_delay = min(tf_min * 60 * 0.05, 1800) # 5% limit
-                
-                if delay_seconds > max_delay:
-                    if delay_seconds < (tf_min * 60 * 0.2):
-                        logger.warning(
-                            f"⏰ Signal is stale for {symbol}. "
-                            f"Passed {delay_seconds/60:.1f}m since close. Skipping entry."
-                        )
+                # [Optimization] 정해진 타임프레임 마감 직후에만 진입 로직 수행
+                if not self._is_entry_time(timeframe):
+                    # 진입 시점이 아니면 조용히 패스 (Log Spam 방지)
                     return
 
                 self._check_entry(
@@ -646,6 +629,31 @@ class RealTraderSpot:
                 pass
         return positions
 
+    def _is_entry_time(self, timeframe: str) -> bool:
+        """
+        현재 시간이 타임프레임별 진입(봉 마감) 시점인지 확인
+        예: 4h봉 -> 00, 04, 08, 12, 16, 20시의 0분~5분 사이인지
+        """
+        now = datetime.utcnow()
+        minutes = now.minute
+
+        # 허용 범위: 정시 ~ +5분 (데이터 수집 지연 고려)
+        if minutes > 5:
+            return False
+
+        if timeframe.endswith('m'):
+            interval = int(timeframe[:-1])
+            return (now.minute % interval) <= 5
+        
+        elif timeframe.endswith('h'):
+            interval = int(timeframe[:-1])
+            return (now.hour % interval) == 0
+        
+        elif timeframe.endswith('d'):
+            return now.hour == 0  # 00:00 UTC 기준
+        
+        return False
+
     def run_forever(self):
         """메인 무한 루프 (Graceful Shutdown 지원)"""
         try:
@@ -663,7 +671,25 @@ class RealTraderSpot:
                 for symbol in self.symbols:
                     if self._shutdown_requested:
                         break
-                    self.execute_logic(symbol)
+                    
+                    # 1. 상태 및 파라미터 로드
+                    params = self.params_map[symbol]
+                    timeframe = params.get('TIMEFRAME', '1h')
+                    
+                    # 2. 실시간 가격 및 잔고 등 필수 데이터 경량 조회
+                    try:
+                        # [Optimization] 매번 전체 캔들을 부르지 않고 Ticker/Position만 빠르게 조회
+                        # 단, 여기서는 구조상 execute_logic 안에서 처리하므로
+                        # 진입/이탈 로직을 분리하는 것이 최적임.
+                        
+                        # 현재 구조 유지를 위해 execute_logic 내부를 수정하는 대신
+                        # 여기서 분기 처리를 하지 않고, execute_logic 안에서
+                        # "진입 타임이 아니면 Exit 로직만 돌고 리턴"하게 변경하는 것이 안전함.
+                        self.execute_logic(symbol)
+                        
+                    except Exception as e:
+                        logger.error(f"⚠️ Error processing {symbol}: {e}")
+
                     time.sleep(SPOT_SYMBOL_DELAY_SECONDS)
 
                 # 헬스체크 업데이트
@@ -675,49 +701,37 @@ class RealTraderSpot:
 
                 # 클라우드 최적화 실행
                 if self.cloud_optimizer:
-                    # 1. 시간 동기화 검증 (거래소 API 필수)
+                    # 1. 시간 동기화 검증
                     if not self.cloud_optimizer.check_time_sync_ntp():
                         logger.error("⏰ Time drift detected! Bot may encounter API errors.")
                     
                     # 2. 리소스 모니터링 (10분마다) & 메모리 보호 (AWS Free Tier)
-                    if self.health_manager.loop_count % 20 == 0:
+                    if self.health_manager.loop_count % 10 == 0:  # 60s * 10 = 10분
                         usage = self.cloud_optimizer.log_resource_usage()
                         if usage.get('memory_percent', 0) > 75.0:
                             logger.warning(f"⚠️ High Memory ({usage.get('memory_percent')}%) detected. Forcing GC...")
                             self.cloud_optimizer.force_gc()
                     
-                    # 3. DB 정리 (24시간마다, 90일 이상 오래된 거래 삭제)
-                    if self.health_manager.loop_count % 2880 == 0:
+                    # 3. DB 정리 (24시간마다: 1440분)
+                    if self.health_manager.loop_count % 1440 == 0:
                         self.cloud_optimizer.cleanup_db_old_records(
                             TRADE_HISTORY_DB, 
                             days_to_keep=90
                         )
 
-                    # 5. 명시적 GC (2시간마다)
+                    # 5. 명시적 GC (2시간마다: 120분)
                     if self.health_manager.loop_count % 120 == 0:
                         self.cloud_optimizer.force_gc()
 
-                # 캔들 동기화 대기
-                if self.symbols and self.params_map:
-                    tf = self.params_map[self.symbols[0]].get('TIMEFRAME', '1h')
-                    wait_time = calculate_candle_wait_time(tf)
-
-                    # 최소 대기 시간 적용
-                    if wait_time < SPOT_LOOP_INTERVAL_SECONDS:
-                        wait_time = SPOT_LOOP_INTERVAL_SECONDS
-
-                    # 최대 대기 시간 제한 (1시간)
-                    wait_time = min(wait_time, 3600)
-
-                    logger.info(f"💤 Next execution in {wait_time}s...")
-
-                    # Shutdown 체크하면서 대기
-                    for _ in range(int(wait_time)):
-                        if self._shutdown_requested:
-                            break
-                        time.sleep(1)
-                else:
-                    time.sleep(SPOT_LOOP_INTERVAL_SECONDS)
+                # [Dual Loop] 1분(60초) 대기
+                # 이제 3600초를 통으로 기다리지 않고 짧게 끊어갑니다.
+                wait_time = SPOT_LOOP_INTERVAL_SECONDS  # 기본 60초
+                
+                # Shutdown 체크하면서 대기
+                for _ in range(int(wait_time)):
+                    if self._shutdown_requested:
+                        break
+                    time.sleep(1)
 
             except Exception as e:
                 logger.error(f"🚨 Critical Error in Main Loop: {e}")
