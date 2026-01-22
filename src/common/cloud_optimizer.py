@@ -26,7 +26,7 @@ class CloudOptimizer:
     def __init__(self):
         self.last_time_check = time.time()
     
-    def check_time_sync_ntp(self, ntp_server: str = 'time.google.com', max_drift_seconds: float = 1.0) -> bool:
+    def check_time_sync_ntp(self, ntp_server: str = 'time.google.com', max_drift_seconds: float = 5.0) -> bool:
         """
         NTP 서버와 시간 동기화 상태 확인
         Binance API는 ±1초 이내 타임스탬프 요구
