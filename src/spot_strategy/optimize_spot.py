@@ -45,6 +45,13 @@ def load_all_timeframes(symbols, start_date, end_date, timeframes):
     """
     access = os.getenv("UPBIT_ACCESS_KEY")
     secret = os.getenv("UPBIT_SECRET_KEY")
+    
+    # [VALIDATION] Check API credentials
+    if not access or not secret:
+        print("❌ Error: UPBIT API credentials not found in .env")
+        print("   Please set UPBIT_ACCESS_KEY and UPBIT_SECRET_KEY")
+        sys.exit(1)
+    
     client = UpbitClient(access, secret)
     
     symbols_data = {s: {} for s in symbols}
@@ -57,27 +64,48 @@ def load_all_timeframes(symbols, start_date, end_date, timeframes):
             filepath = os.path.join(DATA_DIR, filename)
             
             if os.path.exists(filepath):
-                df = pd.read_csv(filepath)
-                df['datetime'] = pd.to_datetime(df['timestamp'], unit='ms')
-                symbols_data[symbol][tf] = df
-            else:
+                try:
+                    df = pd.read_csv(filepath)
+                    df['datetime'] = pd.to_datetime(df['timestamp'], unit='ms')
+                    symbols_data[symbol][tf] = df
+                except Exception as e:
+                    print(f"⚠️  Warning: Failed to load {filepath}: {e}")
+                    print(f"   Will attempt to re-download...")
+                    # Fall through to download logic
+            
+            if tf not in symbols_data[symbol] or symbols_data[symbol][tf].empty:
                 print(f"  ⬇️ Downloading {symbol}-{tf}...")
                 all_data = []
                 since = start_ts
-                while since < end_ts:
-                    df_batch = client.fetch_ohlcv(symbol, tf, since=since, limit=200)
-                    if df_batch is None or df_batch.empty: break
-                    all_data.append(df_batch)
-                    since = int(df_batch.iloc[-1]['timestamp']) + 1
-                    time.sleep(0.1)
+                
+                try:
+                    while since < end_ts:
+                        df_batch = client.fetch_ohlcv(symbol, tf, since=since, limit=200)
+                        if df_batch is None or df_batch.empty: break
+                        all_data.append(df_batch)
+                        since = int(df_batch.iloc[-1]['timestamp']) + 1
+                        time.sleep(0.1)
+                except Exception as e:
+                    print(f"❌ Error: Failed to download {symbol}-{tf}: {e}")
+                    print(f"   Please check your API credentials and network connection")
+                    sys.exit(1)
                 
                 if all_data:
                     df = pd.concat(all_data, ignore_index=True)
                     df = df.drop_duplicates(subset=['timestamp']).sort_values('timestamp').reset_index(drop=True)
                     df['datetime'] = pd.to_datetime(df['timestamp'], unit='ms')
                     df = df[(df['timestamp'] >= start_ts) & (df['timestamp'] <= end_ts)]
-                    df.to_csv(filepath, index=False)
+                    
+                    try:
+                        df.to_csv(filepath, index=False)
+                    except Exception as e:
+                        print(f"⚠️  Warning: Failed to save {filepath}: {e}")
+                        print(f"   Continuing with in-memory data...")
+                    
                     symbols_data[symbol][tf] = df
+                else:
+                    print(f"❌ Error: No data downloaded for {symbol}-{tf}")
+                    sys.exit(1)
                     
     return symbols_data
 
@@ -277,9 +305,14 @@ def objective(trial, symbols_data, search_space, mode="DAY"):
         try:
             result = engine.run()
         except MemoryError as e:
+            # [MEMORY] Cleanup on OOM
+            del engine, strategy
             gc.collect()
             return -10000
         except Exception as e:
+            # [MEMORY] Cleanup on error
+            del engine, strategy
+            gc.collect()
             return -10000
         
         # Extract metrics
@@ -302,6 +335,9 @@ def objective(trial, symbols_data, search_space, mode="DAY"):
         # [SPEED UP] Short-circuit: If any symbol performs poorly, fail the trial immediately
         # No need to test other symbols if this one failed
         if score < 5:
+            # [MEMORY] Cleanup before early return
+            del engine, result, strategy, trades_df
+            gc.collect()
             return -10000
 
         symbol_scores.append(score)
@@ -314,7 +350,7 @@ def objective(trial, symbols_data, search_space, mode="DAY"):
         trial.set_user_attr(f"pf_{symbol}", float(pf))
         
         # [MEMORY] Explicit cleanup per symbol
-        del engine, result, strategy
+        del engine, result, strategy, trades_df
 
     if not symbol_scores:
         gc.collect()
@@ -326,12 +362,17 @@ def objective(trial, symbols_data, search_space, mode="DAY"):
     shifted_scores = [s + offset for s in symbol_scores]
     
     if any(s <= 0 for s in shifted_scores):
+        gc.collect()
         return -10000
         
     harmonic_mean = len(shifted_scores) / sum(1/s for s in shifted_scores)
     final_score = harmonic_mean - offset
     
     trial.set_user_attr("score_avg", final_score)
+    
+    # [MEMORY] Force garbage collection after processing all symbols
+    gc.collect()
+    
     return final_score
 
 if __name__ == "__main__":
@@ -361,8 +402,13 @@ if __name__ == "__main__":
     logging.getLogger("SpotOptimizer").setLevel(logging.WARNING)
     
     # Get Search Space & Timeframes
-    search_space = GET_SEARCH_SPACE(mode, market_type='spot')
-    timeframes = search_space['TIMEFRAME']['choices']
+    try:
+        search_space = GET_SEARCH_SPACE(mode, market_type='spot')
+        timeframes = search_space['TIMEFRAME']['choices']
+    except Exception as e:
+        print(f"❌ Error: Failed to load search space for mode '{mode}'")
+        print(f"   Details: {e}")
+        sys.exit(1)
     
     print(f"\n{'='*70}")
     print(f"🚀 MODE: {mode} SPOT OPTIMIZATION")
@@ -374,6 +420,17 @@ if __name__ == "__main__":
     print(f" Loading data for symbols: {', '.join(symbols)}")
     
     symbols_data = load_all_timeframes(symbols, SPOT_START_DATE, SPOT_END_DATE, timeframes)
+    
+    # [VALIDATION] Ensure all required data is loaded
+    for sym in symbols:
+        if sym not in symbols_data or not symbols_data[sym]:
+            print(f"❌ Error: Failed to load data for {sym}")
+            sys.exit(1)
+        for tf in timeframes:
+            if tf not in symbols_data[sym] or symbols_data[sym][tf].empty:
+                print(f"❌ Error: Failed to load {sym}-{tf} data")
+                sys.exit(1)
+    print(f"✅ Data loaded successfully for all symbols")
     
     print(f"✂️  Trimming Data for Optimization (Train Period: ~ {TRAIN_CUTOFF_DATE})")
     train_data = {}
@@ -436,6 +493,17 @@ if __name__ == "__main__":
     
     # [Clean Start] Intead of deleting file, delete study from DB
     print(f"🔄 Preparing study: {study_name}")
+    
+    # [VALIDATION] Test DB connection before proceeding
+    try:
+        test_storage = optuna.storages.RDBStorage(url=storage_url)
+        print(f"✅ DB connection successful")
+    except Exception as e:
+        print(f"❌ Error: Failed to connect to MySQL database")
+        print(f"   Details: {e}")
+        print(f"   Please check your .env credentials and ensure MySQL is running")
+        sys.exit(1)
+    
     try:
         optuna.delete_study(study_name=study_name, storage=storage_url)
         print(f"🗑️  Deleted old study: {study_name}")
@@ -497,7 +565,8 @@ if __name__ == "__main__":
         )
         print(" Done!")
     except Exception as e:
-        print(f" Skipped ({e})")
+        print(f"\n⚠️  Warning: Numba warmup failed: {e}")
+        print(f"   First trial will be slower due to JIT compilation")
 
     try:
         study.optimize(lambda t: objective(t, train_data, search_space, mode=mode), 
@@ -507,6 +576,12 @@ if __name__ == "__main__":
                        
     except KeyboardInterrupt:
         print("\n🛑 Optimization Interrupted by User")
+        print(f"💾 Progress saved: {len(study.trials)} trials completed")
+    except Exception as e:
+        print(f"\n❌ Optimization failed with error: {e}")
+        print(f"💾 Progress saved: {len(study.trials)} trials completed before failure")
+        import traceback
+        traceback.print_exc()
     
     print(f"\n{'='*70}")
     print(f"✅ {mode} Optimization Complete!")
