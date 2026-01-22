@@ -8,22 +8,15 @@ from numba import njit
 _INDICATOR_CACHE = {}
 
 def indicator_cache(func):
+    """
+    [DISABLED] Cache is disabled to prevent MemoryError and ID collisions during optimization.
+    Since BacktestEngineFastSpot creates a new shallow copy of the DataFrame for every trial,
+    id(df) changes, causing the cache to grow infinitely (Memory Leak) and potentially 
+    causing collisions if IDs are reused (ValueError: shape mismatch).
+    """
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
-        # We use the id(data) as part of the key. 
-        # In our optimizer, the train_data DFs are static, so id() is a safe and fast identifier.
-        data_obj = args[0]
-        params = args[1:]
-        
-        # Create a unique key for (function_name, data_id, positional_params, keyword_params)
-        cache_key = (func.__name__, id(data_obj), params, tuple(sorted(kwargs.items())))
-        
-        if cache_key in _INDICATOR_CACHE:
-            return _INDICATOR_CACHE[cache_key]
-        
-        result = func(*args, **kwargs)
-        _INDICATOR_CACHE[cache_key] = result
-        return result
+        return func(*args, **kwargs)
     return wrapper
 
 @indicator_cache

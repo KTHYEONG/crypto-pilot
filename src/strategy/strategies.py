@@ -62,8 +62,8 @@ class UltimateStrategy(Strategy):
     The Ultimate Strategy: Dynamic combinations of all major indicators.
     """
     def generate_signals(self, df):
-        # [OPTIMIZATION] Avoid modifying shared dataframe in place for multi-threading
-        df = df.copy()
+        # [ROBUSTNESS] Ensure clean column assignment
+        # Data is already copied at loading stage (optimize/verify scripts)
         
         # --- 1. Basic Indicators (Lazy ATR) ---
         # ATR is needed only for certain exit/SL/sizing types
@@ -73,9 +73,9 @@ class UltimateStrategy(Strategy):
         
         if use_tp or use_atr_sl or use_trailing:
             atr_period = self.params.get('ATR_PERIOD', 14)
-            df['atr'] = calculate_atr(df, window=atr_period)
+            df['atr'] = calculate_atr(df, window=atr_period).astype(np.float32)
         else:
-            df['atr'] = 0.0 # Not used
+            df['atr'] = np.float32(0.0) # Not used
         
         # --- 2. Entry Signal Setup ---
         entry_type = self.params.get('ENTRY_TYPE', 'DONCHIAN')
@@ -142,8 +142,9 @@ class UltimateStrategy(Strategy):
             cloud_top = np.maximum(sa, sb)
             cloud_bottom = np.minimum(sa, sb)
             df['trend_direction'] = 0
-            df['trend_direction'] = np.where(df['close'] > cloud_top, 1, df['trend_direction'])
-            df['trend_direction'] = np.where(df['close'] < cloud_bottom, -1, df['trend_direction'])
+            # [FIX] Use .values to avoid index mismatch from shifted Ichimoku series
+            df['trend_direction'] = np.where(df['close'].values > cloud_top.values, 1, df['trend_direction'].values)
+            df['trend_direction'] = np.where(df['close'].values < cloud_bottom.values, -1, df['trend_direction'].values)
         elif filter_type == 'VWAP':
             vwap, _, _ = calculate_vwap(df, window=ma_period, std_mult=self.params.get('VWAP_STD_MULT', 1.5))
             df['trend_direction'] = np.where(df['close'] > vwap, 1, -1)
@@ -175,22 +176,22 @@ class UltimateStrategy(Strategy):
             df['cmf'] = calculate_cmf(df, window=self.params.get('CMF_PERIOD', 20))
             df.loc[df['cmf'] < self.params.get('CMF_THRESHOLD', 0.05), 'strength_filter'] = 0
         elif strength_type == 'HURST':
-            df['hurst'] = calculate_hurst_exponent(df['close'], window=self.params.get('HURST_PERIOD', 100))
+            df.loc[:, 'hurst'] = calculate_hurst_exponent(df['close'], window=self.params.get('HURST_PERIOD', 100))
             df.loc[df['hurst'] < self.params.get('HURST_RANDOM_THRESHOLD', 0.50), 'strength_filter'] = 0
 
         # --- 5. Exit Logic (Parabolic SAR) ---
         if self.params.get('EXIT_TYPE') == 'PARABOLIC_SAR':
             sar_line, _ = calculate_parabolic_sar(df, step=self.params.get('SAR_STEP', 0.02))
-            df['parabolic_sar'] = sar_line
+            df.loc[:, 'parabolic_sar'] = sar_line
         else:
-            df['parabolic_sar'] = 0.0
+            df.loc[:, 'parabolic_sar'] = 0.0
             
         # --- 6. Volume Filter ---
         if self.params.get('USE_VOLUME_FILTER', False):
             vol_ma = df['volume'].rolling(window=self.params.get('VOLUME_MA_PERIOD', 20)).mean()
-            df['volume_ratio'] = df['volume'] / vol_ma.replace(0, 1)
+            df.loc[:, 'volume_ratio'] = df['volume'] / vol_ma.replace(0, 1)
         else:
-            df['volume_ratio'] = 1.0
+            df.loc[:, 'volume_ratio'] = 100.0  # High ratio to pass filter (aligned with Futures)
             
         return df
 

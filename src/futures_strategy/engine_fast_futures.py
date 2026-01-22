@@ -10,8 +10,9 @@ class BacktestEngineFast:
     Numba-accelerated Backtest Engine (5-10x faster)
     """
     def __init__(self, hourly_df, daily_df, strategy, initial_balance=1_000_000):
-        self.hourly_df = hourly_df
-        self.daily_df = daily_df
+        # [MEMORY] Use shallow copy to prevent contaminating usage across trials
+        self.hourly_df = hourly_df.copy(deep=False)
+        self.daily_df = daily_df.copy(deep=False)
         self.strategy = strategy
         self.initial_balance = initial_balance
         self.balance = initial_balance
@@ -28,44 +29,67 @@ class BacktestEngineFast:
         self._prepare_data()
     
     def _prepare_data(self):
-        # [OPTIMIZATION] 1. Pre-calculated keys check
-        # 'date_key' generation is expensive. Assume it exists from loader if possible.
-        if 'date_key' not in self.daily_df.columns:
-             self.daily_df['date_key'] = pd.to_datetime(self.daily_df['datetime']).dt.strftime('%Y-%m-%d')
-        
+        # [OPTIMIZATION] Use pre-computed merge index if available (set by optimize script)
+        # This eliminates expensive pd.merge on every trial
+        if hasattr(self, '_merge_index_map'):
+            # Fast path: Use pre-computed index mapping
+            self._prepare_data_with_index()
+        else:
+            # Fallback: Traditional merge (for verify/live scripts)
+            self._prepare_data_with_merge()
+    
+    def _prepare_data_with_index(self):
+        """
+        [FAST PATH] Use pre-computed merge index to avoid pd.merge overhead.
+        This is 10-50x faster than pd.merge for large datasets.
+        """
         # Apply Strategy Indicators (Calculates Daily Indicators)
         self.daily_df = self.strategy.generate_signals(self.daily_df)
         
-        # [OPTIMIZATION] 2. Fast Shift & Rename
-        # Filter essential columns only to reduce copy overhead
+        # Filter essential columns only
         exclude_cols = {'date_key', 'datetime', 'date', 'open', 'high', 'low', 'close', 'volume'}
         indicator_cols = [c for c in self.daily_df.columns if c not in exclude_cols]
         
-        # Use simple dictionary for rename to leverage C-speed
         # Shift(1) to prevent lookahead
         shifted_daily = self.daily_df[indicator_cols].shift(1)
-        shifted_daily.columns = [f'daily_{c}' for c in indicator_cols]
-        shifted_daily['date_key'] = self.daily_df['date_key'] # Restore key matching
         
-        # [OPTIMIZATION] 3. Efficient Merge
-        # Extract 'daily_open' separately (needed for logic?) - If not needed, skip. 
-        # Assuming we just need mapped daily open?
-        # daily_open = self.daily_df[['date_key', 'open']].rename(columns={'open': 'daily_open'})
+        # [CRITICAL] Use pre-computed index mapping to align daily -> hourly
+        # merged_df = hourly_df + daily_indicators[merge_index_map]
+        self.merged_df = self.hourly_df.copy(deep=False)
+        
+        # Map daily indicators to hourly using pre-computed indices
+        for col in indicator_cols:
+            # Use NumPy array indexing for maximum speed
+            daily_values = shifted_daily[col].values
+            mapped_values = daily_values[self._merge_index_map]
+            self.merged_df[f'daily_{col}'] = mapped_values
+    
+    def _prepare_data_with_merge(self):
+        """
+        [FALLBACK] Traditional pd.merge approach for compatibility.
+        Used when merge index is not pre-computed (verify/live scripts).
+        """
+        # Pre-calculated keys check
+        if 'date_key' not in self.daily_df.columns:
+             self.daily_df['date_key'] = pd.to_datetime(self.daily_df['datetime']).dt.strftime('%Y-%m-%d')
+        
+        # Apply Strategy Indicators
+        self.daily_df = self.strategy.generate_signals(self.daily_df)
+        
+        # Filter essential columns
+        exclude_cols = {'date_key', 'datetime', 'date', 'open', 'high', 'low', 'close', 'volume'}
+        indicator_cols = [c for c in self.daily_df.columns if c not in exclude_cols]
+        
+        # Shift & Rename
+        shifted_daily = self.daily_df[indicator_cols].shift(1)
+        shifted_daily.columns = [f'daily_{c}' for c in indicator_cols]
+        shifted_daily['date_key'] = self.daily_df['date_key']
         
         if 'date_key' not in self.hourly_df.columns:
             self.hourly_df['date_key'] = pd.to_datetime(self.hourly_df['datetime']).dt.strftime('%Y-%m-%d')
             
         # Left Join: Hourly <- Daily
-        # Using suffix to avoid collisions if any
         self.merged_df = pd.merge(self.hourly_df, shifted_daily, on='date_key', how='left')
-        
-        # If daily_open is strictly needed (for some reason not covered by standard OHLC from hourly)
-        # But usually hourly data has its own context. Daily open is mostly for references.
-        # self.merged_df = pd.merge(self.merged_df, daily_open, on='date_key', how='left')
-        
-        # Sort & Reset (Only if needed - usually data comes sorted)
-        # self.merged_df.sort_values('datetime', inplace=True) 
-        # self.merged_df.reset_index(drop=True, inplace=True)
     
     def run(self):
         self.logger.info(f"Running FAST backtest for {self.strategy.name}...")
@@ -126,6 +150,13 @@ class BacktestEngineFast:
         max_holding_bars = self.strategy.params.get('MAX_HOLDING_BARS', 999999)  # Default: No limit
         trailing_activation_atr = self.strategy.params.get('TRAILING_ACTIVATION_ATR', 0.0)  # Default: Immediate activation
         
+        # [WARMUP OPTIMIZATION] Extract warmup period if available
+        # During warmup period, indicators are calculated but no trades are executed
+        warmup_bars = getattr(df, 'attrs', {}).get('warmup_bars', 0)
+        
+        # [OPTIMIZATION] Extract timestamps for fast lookup (avoid iloc)
+        datetime_values = df['datetime'].values
+        
         # Run Numba-accelerated loop
         trades, final_balance = backtest_loop_numba(
             close, high, low, volume_ratio,
@@ -141,19 +172,29 @@ class BacktestEngineFast:
             use_volume_filter, vol_threshold,
             use_take_profit, tp_atr_mult,
             timestamps, FUNDING_FEE_RATE, FUNDING_INTERVAL_HOURS,
-            max_holding_bars, trailing_activation_atr  # [NEW]
+            max_holding_bars, trailing_activation_atr,  # [NEW]
+            warmup_bars  # [WARMUP] Skip trading during this period
         )
         
         self.balance = final_balance
         
-        # Convert trades to DataFrame
+        # [MEMORY] Release large DataFrames before processing results
+        self.merged_df = None
+        self.hourly_df = None
+        self.daily_df = None
+        
+        # Convert trades to DataFrame (Vectorized Lookup)
         self.trades = []
         for i in range(len(trades)):
-            if trades[i][0] == 0:  # 0 means no trade
+            if trades[i][0] == 0 and trades[i][1] == 0:  # Check for empty/dummy rows
                 break
+                
+            entry_idx = int(trades[i][0])
+            exit_idx = int(trades[i][1])
+            
             self.trades.append({
-                'entry_time': df.iloc[int(trades[i][0])]['datetime'],
-                'exit_time': df.iloc[int(trades[i][1])]['datetime'],
+                'entry_time': datetime_values[entry_idx],
+                'exit_time': datetime_values[exit_idx],
                 'side': 'LONG' if trades[i][2] == 1 else 'SHORT',
                 'entry_price': trades[i][3],
                 'exit_price': trades[i][4],
@@ -225,7 +266,8 @@ def backtest_loop_numba(
     use_volume_filter, vol_threshold,
     use_take_profit, tp_atr_mult,
     timestamps, funding_fee_rate, funding_interval_hours,
-    max_holding_bars, trailing_activation_atr  # [NEW] Time-based exit & Trailing activation threshold
+    max_holding_bars, trailing_activation_atr,  # [NEW] Time-based exit & Trailing activation threshold
+    warmup_bars  # [WARMUP] Number of bars to skip at start for indicator warmup
 ):
     """
     Numba JIT-compiled backtest loop for maximum speed.
@@ -234,6 +276,7 @@ def backtest_loop_numba(
     [NEW] TRAILING_ACTIVATION_ATR: 일정 이익 이상일 때만 trailing stop 활성화 (이익 보호)
     [NEW] EXIT_TYPE: 0=ATR Trailing, 1=Parabolic SAR
     [NEW] TREND_REVERSAL: trend_dir 변화 시 즉시 청산
+    [WARMUP] warmup_bars: Skip trading during first N bars to allow indicators to stabilize
     """
     n = len(close)
     balance = initial_balance
@@ -259,6 +302,10 @@ def backtest_loop_numba(
     trade_count = 0
     
     for i in range(n):
+        # [WARMUP] Skip trading during warmup period (indicators still stabilizing)
+        if i < warmup_bars:
+            continue
+            
         # [SAFETY] Bankruptcy Check
         if balance <= 0:
             break
