@@ -16,7 +16,7 @@ SCALP_CONFIG = {
     'MA_PERIOD':    {'low': 5,  'high': 40, 'log': True},         # Log: 5→7→10→14→20→28→40
     'ATR_PERIOD':   {'low': 10, 'high': 20, 'log': True},         # Log: 10→14→20 (안정적 변동성 측정)
     'SL_PCT':       {'low': 0.005, 'high': 0.015,  'step': 0.001}, # Linear (비율) - 스캘핑: 타이트한 손절 (레버리지 10배 시 ROE -5% ~ -15%)
-    'TP_ATR_MULT':  {'low': 0.8,   'high': 2.0,   'log': True},   # Log (배수) - 스캘핑: 작은 수익 목표
+    'TP_ATR_MULT':  {'low': 0.8,   'high': 4.0,   'log': True},   # 최소값 복구(0.8), 최대값 확장 유지(4.0)
     'ADX_THRESH':   {'low': 25,    'high': 45,    'step': 1},     # Linear (임계값)
     'VOL_THRESHOLD': {'low': 1.5,  'high': 5.0,   'log': True},   # Log (배수)
     'MAX_HOLDING_BARS': {'low': 10, 'high': 50,   'log': True}    # Log (기간)
@@ -28,7 +28,7 @@ DAY_CONFIG = {
     'MA_PERIOD':    {'low': 10, 'high': 100, 'log': True},        # Log: 10→14→20→28→40→56→80→100
     'ATR_PERIOD':   {'low': 10, 'high': 20,  'log': True},        # Log: 10→14→20
     'SL_PCT':       {'low': 0.015, 'high': 0.06, 'step': 0.005},  # Linear (비율)
-    'TP_ATR_MULT':  {'low': 2.0,  'high': 6.0,  'log': True},     # Log (배수)
+    'TP_ATR_MULT':  {'low': 2.0,  'high': 12.0,  'log': True},    # 최소값 복구(2.0), 최대값 확장 유지(12.0)
     'ADX_THRESH':   {'low': 20,   'high': 35,   'step': 1},       # Linear (임계값)
     'VOL_THRESHOLD': {'low': 1.2,  'high': 3.0,  'log': True},    # Log (배수)
     'MAX_HOLDING_BARS': {'low': 20, 'high': 100, 'log': True}     # Log (기간)
@@ -40,7 +40,7 @@ SWING_CONFIG = {
     'MA_PERIOD':    {'low': 50, 'high': 200, 'log': True},         # Log: 50→71→100→141→200
     'ATR_PERIOD':   {'low': 14, 'high': 30,  'log': True},         # Log: 14→17→21→26→30
     'SL_PCT':       {'low': 0.06, 'high': 0.20, 'step': 0.01},     # Linear (비율)
-    'TP_ATR_MULT':  {'low': 5.0,  'high': 20.0, 'log': True},      # Log (배수)
+    'TP_ATR_MULT':  {'low': 5.0,  'high': 25.0, 'log': True},      # 최소값 복구(5.0), 최대값 확장 유지(25.0)
     'ADX_THRESH':   {'low': 15,   'high': 30,   'step': 1},        # Linear (임계값)
     'VOL_THRESHOLD': {'low': 1.1,  'high': 2.5,  'log': True},     # Log (배수)
     'MAX_HOLDING_BARS': {'low': 50, 'high': 300, 'log': True},     # Log (기간)
@@ -182,10 +182,10 @@ def GET_SEARCH_SPACE(mode, market_type='futures'):
 
     # === MARKET TYPE OVERRIDES ===
     if market_type == 'futures':
-        # [Futures] Risk & Leverage
-        space['RISK_PER_TRADE'] = {'type': 'float', 'low': 0.005, 'high': 0.03, 'step': 0.005} # Max 3% risk per trade
-        # Expanded Leverage for small capital efficiency (1x ~ 5x)
-        space['LEVERAGE'] = {'type': 'float', 'low': 1.0, 'high': 5.0, 'step': 0.5}
+        # [Futures] Risk & Leverage - Aggressive Growth (안정성 60% : 수익률 40%)
+        space['RISK_PER_TRADE'] = {'type': 'float', 'low': 0.005, 'high': 0.05, 'step': 0.005} # 0.5% ~ 5% (보수~공격 전범위)
+        # Leverage 1x (현물 수준) ~ 10x (공격적 추세 추종)
+        space['LEVERAGE'] = {'type': 'float', 'low': 1.0, 'high': 10.0, 'step': 0.5}
         
     else: 
         # [Spot] No Leverage, Higher Allocation per trade
