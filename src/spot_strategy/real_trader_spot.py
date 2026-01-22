@@ -19,6 +19,7 @@ import time
 import signal
 import json
 import logging
+import pandas as pd
 from datetime import datetime, timedelta
 from pathlib import Path
 from logging.handlers import RotatingFileHandler
@@ -277,89 +278,89 @@ class RealTraderSpot:
         logger.info("🚀 Initialization Complete. Bot is Running...")
 
     def execute_logic(self, symbol: str):
-        """핵심 매매 로직 실행"""
+        """핵심 매매 로직 실행 (메모리 최적화)"""
         try:
             params = self.params_map[symbol]
             strategy = self.strategies[symbol]
             timeframe = params.get('TIMEFRAME', '1h')
 
-            # 1. 데이터 조회 (충분한 지표 계산을 위해 600개 이상 요청)
-            df = self._fetch_ohlcv_safe(symbol, timeframe, limit=600)
-
-            # 전략 지표(EMA 200, Ichimoku 등) 계산을 위해 최소 200개 이상 필요
-            if df is None or len(df) < 200:
-                logger.warning(
-                    f"⚠️ Insufficient data for {symbol}: "
-                    f"Got {len(df) if df is not None else 0}, need min 200 for indicators."
-                )
-                return
-
-            # 2. 지표 계산
-            df = strategy.generate_signals(df)
-
-            # 3. 신호 확인 (-2: 확정된 마지막 봉, -1: 현재가)
-            confirmed_candle = df.iloc[-2]
-            last_price = df.iloc[-1]['close']
-
-            # 4. 현재 포지션 조회
+            # [MEMORY OPTIMIZATION] 진입 시점 여부 확인
+            is_entry_time = self._is_entry_time(timeframe)
+            
+            # 현재 포지션 조회 (가벼운 API)
             pos = self._fetch_position_safe(symbol)
             balance_coin = pos.get('amount', 0.0)
-            current_value = balance_coin * last_price
-
-            in_position = current_value > MIN_POSITION_VALUE_KRW
-
-            # 5. 상태 동기화
+            
+            # 상태 조회 (State Manager)
             state = self.state_manager.get_symbol_state(symbol)
             entry_price = state.get('entry_price', 0.0)
+            
+            # --- Case 1: 정시 (4h 마감) - 무거운 데이터 로드 및 지표 캐싱 ---
+            if is_entry_time:
+                df = self._fetch_ohlcv_safe(symbol, timeframe, limit=600)
+                if df is not None and len(df) >= 200:
+                    df = strategy.generate_signals(df)
+                    last_candle = df.iloc[-2]
+                    
+                    # 지표값 캐싱 (4시간 동안 재사용)
+                    self._cache_indicators(symbol, {
+                        'trend_direction': int(last_candle.get('trend_direction', 0)),
+                        'atr': float(last_candle.get('atr', 0.0)),
+                        'parabolic_sar': float(last_candle.get('parabolic_sar', 0.0)),
+                        'entry_upper': float(last_candle.get('entry_upper', 0.0)),
+                        'entry_lower': float(last_candle.get('entry_lower', 0.0)),
+                        'strength_filter': int(last_candle.get('strength_filter', 1)),
+                        'cached_at': datetime.utcnow().isoformat()
+                    })
+            
+            # --- Case 2: 공통 처리 (정시/1분 체크 모두) ---
+            # 캐시된 지표값 로드
+            cached = self._get_cached_indicators(symbol)
+            trend_dir = cached.get('trend_direction', 0)
+            atr = cached.get('atr', 0.0)
+            sar = cached.get('parabolic_sar', 0.0)
+            
+            # 현재가 조회 (Ticker)
+            last_price = self._get_market_price_safe(symbol)
+            if last_price is None: return
 
-            # 상태 불일치 처리
-            if not in_position and entry_price > 0:
-                logger.info(f"⚠️ Position mismatch for {symbol} (Empty on exchange). Clearing state.")
-                self.state_manager.clear_symbol_state(symbol)
-                entry_price = 0.0
-                state = {}
-
-            elif in_position and entry_price == 0:
-                # 포지션은 있는데 봇 상태가 없는 경우 (재시작 등)
-                exchange_avg_price = pos.get('entryPrice', 0.0)
-                
-                if exchange_avg_price > 0:
-                    logger.info(
-                        f"⚠️ Position found without state for {symbol}. "
-                        f"Recovering from exchange avg_buy_price: {exchange_avg_price:,.0f} KRW"
-                    )
-                    entry_price = exchange_avg_price
-                    state['entry_price'] = entry_price
-                    state['entry_atr'] = confirmed_candle.get('atr', 0.0)
-                    state['highest_high'] = max(last_price, exchange_avg_price)
-                    state['invest_amount'] = balance_coin * exchange_avg_price  # 원금 추정
-                    self.state_manager.update_symbol_state(symbol, state)
-                else:
-                    logger.error(
-                        f"🚨 CRITICAL: Position exists for {symbol} but CANNOT determine "
-                        f"entry price! Amount: {balance_coin}, Value: {current_value:,.0f} KRW. "
-                        f"Skipping all actions until manual verification."
-                    )
-                    return  # 안전을 위해 해당 심볼은 이번 루프 스킵
-
-            # --- EXIT LOGIC ---
+            current_value = balance_coin * last_price
+            in_position = current_value > MIN_POSITION_VALUE_KRW
+            
+            # --- EXIT LOGIC (1분마다 수행) ---
             if in_position:
+                # _check_exit 내부에서 사용할 confirmed_candle 대용 객체 생성
+                mock_candle = {'atr': atr, 'parabolic_sar': sar, 'trend_direction': trend_dir}
+                
+                # 상태 불일치 복구 로직 (생략 가능하나 안전을 위해 유지)
+                if entry_price == 0:
+                    exchange_avg_price = pos.get('entryPrice', 0.0)
+                    if exchange_avg_price > 0:
+                        entry_price = exchange_avg_price
+                        state.update({
+                            'entry_price': entry_price,
+                            'entry_atr': atr,
+                            'highest_high': max(last_price, exchange_avg_price),
+                            'invest_amount': balance_coin * exchange_avg_price
+                        })
+                        self.state_manager.update_symbol_state(symbol, state)
+                
                 self._check_exit(
                     symbol, balance_coin, last_price, params,
-                    confirmed_candle, state
+                    mock_candle, state
                 )
-
-            # --- ENTRY LOGIC ---
-            else:
-                # [Optimization] 정해진 타임프레임 마감 직후에만 진입 로직 수행
-                if not self._is_entry_time(timeframe):
-                    # 진입 시점이 아니면 조용히 패스 (Log Spam 방지)
-                    return
-
-                self._check_entry(
-                    symbol, last_price, params,
-                    confirmed_candle
-                )
+            
+            # --- ENTRY LOGIC (정시에만 수행) ---
+            elif not in_position and is_entry_time:
+                entry_upper = cached.get('entry_upper', 0.0)
+                entry_lower = cached.get('entry_lower', 0.0)
+                strength_ok = (cached.get('strength_filter', 1) == 1)
+                
+                if strength_ok and not pd.isna(entry_upper):
+                    self._check_entry(
+                        symbol, last_price, params,
+                        {'entry_upper': entry_upper, 'entry_lower': entry_lower, 'atr': atr}
+                    )
 
         except Exception as e:
             logger.error(f"🚨 Error executing logic for {symbol}: {e}")
@@ -758,6 +759,18 @@ class RealTraderSpot:
         )
 
         logger.info("✅ Shutdown complete.")
+
+    def _cache_indicators(self, symbol: str, indicators: dict):
+        """지표값을 메모리에 캐싱 (4시간 재사용)"""
+        if not hasattr(self, '_indicator_cache'):
+            self._indicator_cache = {}
+        self._indicator_cache[symbol] = indicators
+    
+    def _get_cached_indicators(self, symbol: str) -> dict:
+        """캐시된 지표값 조회"""
+        if not hasattr(self, '_indicator_cache'):
+            self._indicator_cache = {}
+        return self._indicator_cache.get(symbol, {})
 
 
 # ============================================================
