@@ -366,7 +366,7 @@ class RealTraderSpot:
                 max_delay = min(tf_min * 60 * 0.05, 1800) # 5% limit
                 
                 if delay_seconds > max_delay:
-                    if delay_seconds < (tf_min * 60 * 0.8):
+                    if delay_seconds < (tf_min * 60 * 0.2):
                         logger.warning(
                             f"⏰ Signal is stale for {symbol}. "
                             f"Passed {delay_seconds/60:.1f}m since close. Skipping entry."
@@ -679,9 +679,12 @@ class RealTraderSpot:
                     if not self.cloud_optimizer.check_time_sync_ntp():
                         logger.error("⏰ Time drift detected! Bot may encounter API errors.")
                     
-                    # 2. 리소스 모니터링 (10분마다)
+                    # 2. 리소스 모니터링 (10분마다) & 메모리 보호 (AWS Free Tier)
                     if self.health_manager.loop_count % 20 == 0:
-                        self.cloud_optimizer.log_resource_usage()
+                        usage = self.cloud_optimizer.log_resource_usage()
+                        if usage.get('memory_percent', 0) > 75.0:
+                            logger.warning(f"⚠️ High Memory ({usage.get('memory_percent')}%) detected. Forcing GC...")
+                            self.cloud_optimizer.force_gc()
                     
                     # 3. DB 정리 (24시간마다, 90일 이상 오래된 거래 삭제)
                     if self.health_manager.loop_count % 2880 == 0:
