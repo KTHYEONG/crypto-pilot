@@ -61,6 +61,8 @@ BASE_SEARCH_SPACE = {
     
     # Common Indicator Parameters
     'BB_STD': {'type': 'float', 'low': 1.5, 'high': 3.0, 'step': 0.1},  # Linear (표준편차)
+    'KELTNER_ATR_MULT': {'type': 'float', 'low': 1.0, 'high': 2.5, 'step': 0.1}, # [NEW] Keltner 너비
+    'CCI_THRESHOLD': {'type': 'int', 'low': 50, 'high': 150, 'step': 10},         # [NEW] CCI 돌파 기준
     'SUPERTREND_MULT': {'type': 'float', 'low': 1.0, 'high': 5.0, 'log': True},  # Log (배수)
     'SUPERTREND_PERIOD': {'type': 'int', 'low': 5, 'high': 50, 'log': True},     # Log (기간)
     'MACD_FAST': {'type': 'int', 'low': 5, 'high': 30, 'log': True},             # Log (기간)

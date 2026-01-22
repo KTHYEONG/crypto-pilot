@@ -98,6 +98,9 @@ class BacktestEngineFast:
         atr = df['daily_atr'].values
         
         # Strategy params
+        exit_type_str = self.strategy.params.get('EXIT_TYPE', 'ATR')  # 'ATR', 'PARABOLIC_SAR'
+        exit_type = 1 if exit_type_str == 'PARABOLIC_SAR' else 0  # 0: ATR, 1: SAR
+        
         stop_loss_type = 1 if self.strategy.params.get('STOP_LOSS_TYPE', 'FIXED') == 'ATR' else 0 # 0: FIXED, 1: ATR
         stop_loss_pct = self.strategy.params.get('STOP_LOSS_PCT', 0.03)
         atr_sl_mult = self.strategy.params.get('ATR_STOP_LOSS_MULT', 1.5)
@@ -113,10 +116,13 @@ class BacktestEngineFast:
         # Use Futures specific TP if available
         tp_atr_mult = self.strategy.params.get('TAKE_PROFIT_ATR_MULT_FUTURES', self.strategy.params.get('TAKE_PROFIT_ATR_MULT', 3.0))
         
+        # Parabolic SAR (optional exit signal)
+        parabolic_sar = df['daily_parabolic_sar'].values
+        
         # Extract timestamps for funding fee calculation
         timestamps = df['timestamp'].values  # milliseconds
         
-        # [NEW] Time-Based Exit \u0026 Trailing Activation
+        # [NEW] Time-Based Exit & Trailing Activation
         max_holding_bars = self.strategy.params.get('MAX_HOLDING_BARS', 999999)  # Default: No limit
         trailing_activation_atr = self.strategy.params.get('TRAILING_ACTIVATION_ATR', 0.0)  # Default: Immediate activation
         
@@ -124,12 +130,12 @@ class BacktestEngineFast:
         trades, final_balance = backtest_loop_numba(
             close, high, low, volume_ratio,
             entry_upper, entry_lower,
-            trend_dir, strength_filter, atr,
+            trend_dir, strength_filter, atr, parabolic_sar,
             self.initial_balance,
             leverage,
             self.fee_rate,
             self.slippage_rate,
-            stop_loss_type, stop_loss_pct, atr_sl_mult,
+            exit_type, stop_loss_type, stop_loss_pct, atr_sl_mult,
             atr_mult,
             self.risk_per_trade,
             use_volume_filter, vol_threshold,
@@ -211,9 +217,9 @@ class BacktestEngineFast:
 def backtest_loop_numba(
     close, high, low, volume_ratio,
     entry_upper, entry_lower,
-    trend_dir, strength_filter, atr,
+    trend_dir, strength_filter, atr, parabolic_sar,
     initial_balance, leverage, fee_rate, slippage_rate,
-    stop_loss_type, stop_loss_pct, atr_sl_mult,
+    exit_type, stop_loss_type, stop_loss_pct, atr_sl_mult,
     atr_mult,
     risk_per_trade,
     use_volume_filter, vol_threshold,
@@ -226,6 +232,8 @@ def backtest_loop_numba(
     펀딩비(Funding Fee) 반영: 8시간마다 포지션 가치의 0.01% 차감
     [NEW] MAX_HOLDING_BARS: 일정 시간 후 강제 청산 (기회비용 관리)
     [NEW] TRAILING_ACTIVATION_ATR: 일정 이익 이상일 때만 trailing stop 활성화 (이익 보호)
+    [NEW] EXIT_TYPE: 0=ATR Trailing, 1=Parabolic SAR
+    [NEW] TREND_REVERSAL: trend_dir 변화 시 즉시 청산
     """
     n = len(close)
     balance = initial_balance
@@ -321,20 +329,33 @@ def backtest_loop_numba(
                     
                     # [NEW] Conditional Trailing Stop Activation
                     # Only activate trailing if profit exceeds activation threshold
-                    unrealized_profit_atr = (highest - entry_price) / pos_atr
-                    
-                    if unrealized_profit_atr >= trailing_activation_atr:
-                        # Update Stop Price (Trailing) - ONLY when activation condition met
-                        new_stop = highest - (pos_atr * atr_mult)
-                        if new_stop > stop_price:
-                            stop_price = new_stop
+                    if exit_type == 0:  # ATR Trailing mode only
+                        unrealized_profit_atr = (highest - entry_price) / pos_atr if pos_atr > 0 else 0
+                        
+                        if unrealized_profit_atr >= trailing_activation_atr:
+                            # Update Stop Price (Trailing) - ONLY when activation condition met
+                            new_stop = highest - (pos_atr * atr_mult)
+                            if new_stop > stop_price:
+                                stop_price = new_stop
+                
+                # [NEW] 1. Parabolic SAR Exit (if enabled)
+                if not exit_triggered and exit_type == 1:  # SAR mode
+                    current_sar = parabolic_sar[i]
+                    if current_sar > 0 and c_price < current_sar:
+                        exit_price = c_price
+                        exit_triggered = True
+                
+                # [NEW] 2. Trend Reversal Exit
+                if not exit_triggered and trend_dir[i] == -1:
+                    exit_price = c_price
+                    exit_triggered = True
 
-                # 1. Check Stop Loss FIRST
+                # 3. Check Stop Loss
                 if not exit_triggered and c_low <= stop_price:
                     exit_price = min(c_low, stop_price)
                     exit_triggered = True
                 
-                # 2. Then Check Take Profit
+                # 4. Then Check Take Profit
                 elif not exit_triggered and use_take_profit and tp_price > 0 and c_high >= tp_price:
                     exit_price = tp_price
                     exit_triggered = True
@@ -344,19 +365,32 @@ def backtest_loop_numba(
                     lowest = c_low
                     
                     # [NEW] Conditional Trailing Stop Activation
-                    unrealized_profit_atr = (entry_price - lowest) / pos_atr
-                    
-                    if unrealized_profit_atr >= trailing_activation_atr:
-                        new_stop = lowest + (pos_atr * atr_mult)
-                        if new_stop < stop_price:
-                            stop_price = new_stop
+                    if exit_type == 0:  # ATR Trailing mode only
+                        unrealized_profit_atr = (entry_price - lowest) / pos_atr if pos_atr > 0 else 0
+                        
+                        if unrealized_profit_atr >= trailing_activation_atr:
+                            new_stop = lowest + (pos_atr * atr_mult)
+                            if new_stop < stop_price:
+                                stop_price = new_stop
                 
-                # 1. Check Stop Loss FIRST
+                # [NEW] 1. Parabolic SAR Exit (if enabled)
+                if not exit_triggered and exit_type == 1:  # SAR mode
+                    current_sar = parabolic_sar[i]
+                    if current_sar > 0 and c_price > current_sar:
+                        exit_price = c_price
+                        exit_triggered = True
+                
+                # [NEW] 2. Trend Reversal Exit
+                if not exit_triggered and trend_dir[i] == 1:
+                    exit_price = c_price
+                    exit_triggered = True
+                
+                # 3. Check Stop Loss
                 if not exit_triggered and c_high >= stop_price:
                     exit_price = max(c_high, stop_price)
                     exit_triggered = True
                 
-                # 2. Then Check Take Profit
+                # 4. Then Check Take Profit
                 elif not exit_triggered and use_take_profit and tp_price > 0 and c_low <= tp_price:
                     exit_price = tp_price
                     exit_triggered = True

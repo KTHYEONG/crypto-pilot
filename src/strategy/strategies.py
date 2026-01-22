@@ -96,17 +96,19 @@ class UltimateStrategy(Strategy):
             df['entry_lower'] = lo
             
         elif entry_type == 'KELTNER':
-            up, lo = calculate_keltner_channel(df, window=entry_period, atr_mult=1.5)
+            k_mult = self.params.get('KELTNER_ATR_MULT', 1.5)
+            up, lo = calculate_keltner_channel(df, window=entry_period, atr_mult=k_mult)
             df['entry_upper'] = up
             df['entry_lower'] = lo
             
         elif entry_type == 'CCI':
             df['cci'] = calculate_cci(df, window=entry_period)
             cci_prev = df['cci'].shift(1)
+            cci_thresh = self.params.get('CCI_THRESHOLD', 100)
             prev_high = df['high'].shift(1)
-            df['entry_upper'] = np.where(cci_prev > 100, prev_high, np.inf)
+            df['entry_upper'] = np.where(cci_prev > cci_thresh, prev_high, np.inf)
             prev_low = df['low'].shift(1)
-            df['entry_lower'] = np.where(cci_prev < -100, prev_low, -np.inf)
+            df['entry_lower'] = np.where(cci_prev < -cci_thresh, prev_low, -np.inf)
             
         # --- 3. Trend Direction Filter ---
         filter_type = self.params.get('TREND_FILTER_TYPE', 'EMA')

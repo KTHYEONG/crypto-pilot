@@ -131,8 +131,15 @@ def suggest_params(trial, search_space):
             spec = search_space['BB_STD']
             params['BB_STD'] = trial.suggest_float('BB_STD', spec['low'], spec['high'], step=spec.get('step'))
     
-    # CCI는 ENTRY_TYPE에서도 사용되고, 다른 곳에서도 사용 가능하므로 조건부 처리
-    # 하지만 ENTRY_TYPE이 CCI가 아니면 불필요
+    elif entry_type == 'KELTNER':
+        if 'KELTNER_ATR_MULT' in search_space:
+            spec = search_space['KELTNER_ATR_MULT']
+            params['KELTNER_ATR_MULT'] = trial.suggest_float('KELTNER_ATR_MULT', spec['low'], spec['high'], step=spec.get('step'))
+            
+    elif entry_type == 'CCI':
+        if 'CCI_THRESHOLD' in search_space:
+            spec = search_space['CCI_THRESHOLD']
+            params['CCI_THRESHOLD'] = trial.suggest_int('CCI_THRESHOLD', spec['low'], spec['high'], step=spec.get('step'))
     
     # === Phase 3: Trend-Filter Dependent Parameters ===
     trend_filter = params.get('TREND_FILTER_TYPE', 'EMA')
@@ -639,11 +646,13 @@ def main():
     _dummy_ts = np.zeros(dummy_len, dtype=np.int64) # Timestamps
     try:
         backtest_loop_numba(
-            _dummy_arr, _dummy_arr, _dummy_arr, # OHLC
+            _dummy_arr, _dummy_arr, _dummy_arr, # OHLC (close, high, low)
             _dummy_arr, # Volume Ratio
             _dummy_arr, _dummy_arr, # Entry Upper/Lower
             _dummy_int, _dummy_int, _dummy_arr, # Trend, Strength, ATR
+            _dummy_arr, # Parabolic SAR (New)
             10000.0, 1.0, 0.001, 0.001, # Bal, Lev, Fee, Slip
+            0, # Exit Type (New: 0=Trailing, 1=SAR)
             0, 0.01, 1.5, # SL Type, Pct, Mult
             3.0, # ATR Mult
             0.02, # Risk

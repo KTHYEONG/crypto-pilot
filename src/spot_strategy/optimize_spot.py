@@ -248,6 +248,16 @@ def suggest_params(trial, search_space):
         if 'BB_STD' in search_space:
             spec = search_space['BB_STD']
             params['BB_STD'] = trial.suggest_float('BB_STD', spec['low'], spec['high'], step=spec.get('step'))
+            
+    elif entry_type == 'KELTNER':
+        if 'KELTNER_ATR_MULT' in search_space:
+            spec = search_space['KELTNER_ATR_MULT']
+            params['KELTNER_ATR_MULT'] = trial.suggest_float('KELTNER_ATR_MULT', spec['low'], spec['high'], step=spec.get('step'))
+            
+    elif entry_type == 'CCI':
+        if 'CCI_THRESHOLD' in search_space:
+            spec = search_space['CCI_THRESHOLD']
+            params['CCI_THRESHOLD'] = trial.suggest_int('CCI_THRESHOLD', spec['low'], spec['high'], step=spec.get('step'))
     
     # === Phase 3: Trend-Filter Dependent Parameters ===
     trend_filter = params.get('TREND_FILTER_TYPE', 'EMA')
@@ -689,13 +699,14 @@ if __name__ == "__main__":
     _dummy_int = np.zeros(dummy_len, dtype=np.int64)
     try:
         backtest_loop_spot_numba(
-            _dummy_arr, _dummy_arr, _dummy_arr, # OHLC
+            _dummy_arr, _dummy_arr, _dummy_arr, # OHLC (close, high, low)
             _dummy_arr, # Entry Upper
             _dummy_int, _dummy_int, _dummy_arr, _dummy_arr, _dummy_arr, # Trend, Strength, Vol, ATR, SAR
             10000.0, 0.001, 0.001, # Bal, Fee, Slip
-            0, # Exit type
-            0, 0.01, 1.5, # SL params
-            3.0, 0.99, # ATR Mult, Risk
+            0, # Exit type (New: 0=Trailing, 1=SAR)
+            0, 0.01, 1.5, # SL Type, Pct, Mult
+            3.0, # ATR Mult
+            0.99, # Risk
             False, 1.0, # Vol Filter
             False, 3.0, # TP
             1000, 0.0 # Max Hold, Trailing Act
