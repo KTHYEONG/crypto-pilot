@@ -256,81 +256,114 @@ class RealTraderFutures:
         logger.info("🚀 Initialization Complete. Bot is Running...")
     
     def execute_logic(self, symbol: str):
-        """핵심 매매 로직 실행"""
+        """핵심 매매 로직 실행 (메모리 최적화)"""
         try:
             params = self.params_map[symbol]
             strategy = self.strategies[symbol]
-            
-            # 1. 데이터 조회 (충분한 지표 워밍업을 위해 700개 요청)
             timeframe = params.get('TIMEFRAME', '1h')
-            limit = 700
-            
-            tf_min = 60
-            if 'm' in timeframe:
-                tf_min = int(timeframe.replace('m', ''))
-            elif 'h' in timeframe:
-                tf_min = int(timeframe.replace('h', '')) * 60
-            elif 'd' in timeframe:
-                tf_min = int(timeframe.replace('d', '')) * 1440
-            
-            lookback_days = (limit * tf_min) / 1440
-            start_dt = datetime.utcnow() - timedelta(days=lookback_days + 2)
-            start_str = start_dt.strftime("%Y-%m-%d %H:%M:%S")
-            
-            df = self._fetch_ohlcv_safe(symbol, timeframe, start_str)
-            
-            # 200개 이하인 경우 지표 불신뢰로 인해 중단
-            if df is None or len(df) < 200:
-                logger.warning(
-                    f"⚠️ Insufficient data for {symbol}. "
-                    f"Got {len(df) if df is not None else 0}, need min 200."
-                )
-                return
-            
-            # 2. 지표 계산
-            df = strategy.generate_signals(df)
-            
-            # 3. 신호 확인 (-2: 확정된 마지막 봉)
-            last_candle = df.iloc[-2]
-            current_price = self._get_market_price_safe(symbol)
-            
-            if current_price is None:
-                logger.warning(f"⚠️ Failed to get price for {symbol}")
-                return
-            
-            entry_upper = last_candle.get('entry_upper')
-            entry_lower = last_candle.get('entry_lower')
-            trend_dir = last_candle.get('trend_direction', 0)
-            strength_ok = (last_candle.get('strength_filter', 1) == 1)
-            atr = last_candle.get('atr', 0.0)
-            sar = last_candle.get('parabolic_sar', 0.0)
-            
-            # NaN 체크 강화
-            if pd.isna(atr):
-                atr = 0.0
-            if pd.isna(sar):
-                sar = 0.0
-            
-            # 4. 현재 포지션
+
+            # 현재 포지션 확인 (가벼운 API)
             pos = self._fetch_position_safe(symbol)
             amount = float(pos['amount'])
             in_position = abs(amount) > 0
             
-            # --- EXIT LOGIC ---
+            # [MEMORY OPTIMIZATION] 진입 시점 여부 확인
+            is_entry_time = self._is_entry_time(timeframe)
+            
+            # --- Case 1: 진입 시점 (4h 정시) - 무거운 데이터 로드 ---
+            if is_entry_time:
+                # 전체 캔들 데이터 조회 (지표 계산용)
+                tf_min = 60
+                if 'm' in timeframe:
+                    tf_min = int(timeframe.replace('m', ''))
+                elif 'h' in timeframe:
+                    tf_min = int(timeframe.replace('h', '')) * 60
+                elif 'd' in timeframe:
+                    tf_min = int(timeframe.replace('d', '')) * 1440
+                
+                limit = 700
+                lookback_days = (limit * tf_min) / 1440
+                start_dt = datetime.utcnow() - timedelta(days=lookback_days + 2)
+                start_str = start_dt.strftime("%Y-%m-%d %H:%M:%S")
+                
+                df = self._fetch_ohlcv_safe(symbol, timeframe, start_str)
+                
+                if df is None or len(df) < 200:
+                    logger.warning(
+                        f"⚠️ Insufficient data for {symbol}. "
+                        f"Got {len(df) if df is not None else 0}, need min 200."
+                    )
+                    return
+                
+                # 지표 계산
+                df = strategy.generate_signals(df)
+                last_candle = df.iloc[-2]
+                
+                # 지표값 추출 및 캐싱
+                entry_upper = last_candle.get('entry_upper')
+                entry_lower = last_candle.get('entry_lower')
+                trend_dir = last_candle.get('trend_direction', 0)
+                strength_ok = (last_candle.get('strength_filter', 1) == 1)
+                atr = last_candle.get('atr', 0.0)
+                sar = last_candle.get('parabolic_sar', 0.0)
+                vol_ratio = last_candle.get('volume_ratio', 1.0)
+                
+                if pd.isna(atr): atr = 0.0
+                if pd.isna(sar): sar = 0.0
+                if pd.isna(vol_ratio): vol_ratio = 1.0
+                
+                # [CACHE] 다음 4시간 동안 재사용할 지표값 저장
+                self._cache_indicators(symbol, {
+                    'trend_direction': int(trend_dir),
+                    'atr': float(atr),
+                    'parabolic_sar': float(sar),
+                    'entry_upper': float(entry_upper) if entry_upper is not None else None,
+                    'entry_lower': float(entry_lower) if entry_lower is not None else None,
+                    'strength_filter': int(strength_ok),
+                    'volume_ratio': float(vol_ratio),
+                    'cached_at': datetime.utcnow().isoformat()
+                })
+                
+            # --- Case 2: 비진입 시점 (1분 체크) - 가벼운 Ticker만 ---
+            else:
+                # 캐시된 지표값 로드 (4시간 전에 계산한 값)
+                cached = self._get_cached_indicators(symbol)
+                trend_dir = cached.get('trend_direction', 0)
+                atr = cached.get('atr', 0.0)
+                sar = cached.get('parabolic_sar', 0.0)
+                
+                # 진입 조건은 체크 안 함 (시간이 안 맞으므로)
+                entry_upper = cached.get('entry_upper')
+                entry_lower = cached.get('entry_lower')
+                strength_ok = bool(cached.get('strength_filter', False))
+            
+            # 현재가 조회 (가벼운 API - 항상 필요)
+            current_price = self._get_market_price_safe(symbol)
+            if current_price is None:
+                logger.warning(f"⚠️ Failed to get price for {symbol}")
+                return
+            
+            # --- EXIT LOGIC (항상 실행) ---
             if in_position:
                 self._check_exit(
                     symbol, amount, current_price, params, pos, 
                     trend_dir, atr, sar
                 )
             
-            # --- ENTRY LOGIC ---
-            elif not in_position and strength_ok:
+            # --- ENTRY LOGIC (진입 시점에만 실행) ---
+            elif not in_position and is_entry_time and strength_ok:
                 if pd.isna(entry_upper) or pd.isna(entry_lower):
                     return
                 
-                # [Optimization] 정해진 타임프레임 마감 직후에만 진입 로직 수행
-                if not self._is_entry_time(timeframe):
-                    # 진입 시점이 아니면 조용히 패스 (Log Spam 방지, 불필요 API 방지)
+                # Volume Filter Check
+                cached = self._get_cached_indicators(symbol)
+                vol_ratio = cached.get('volume_ratio', 1.0)
+                use_vol_filter = params.get('USE_VOLUME_FILTER', False)
+                vol_threshold = params.get('VOLUME_THRESHOLD_MULT', 1.0)
+                
+                vol_ok = (not use_vol_filter) or (vol_ratio >= vol_threshold)
+                if not vol_ok:
+                    logger.debug(f"⏭️ {symbol} - Volume filter not passed (Ratio: {vol_ratio:.2f} < {vol_threshold})")
                     return
 
                 # LONG 진입
@@ -721,6 +754,18 @@ class RealTraderFutures:
             return now.hour == 0  # 00:00 UTC 기준
         
         return False
+    
+    def _cache_indicators(self, symbol: str, indicators: dict):
+        """지표값을 메모리에 캐싱 (4시간 재사용)"""
+        if not hasattr(self, '_indicator_cache'):
+            self._indicator_cache = {}
+        self._indicator_cache[symbol] = indicators
+    
+    def _get_cached_indicators(self, symbol: str) -> dict:
+        """캐시된 지표값 조회"""
+        if not hasattr(self, '_indicator_cache'):
+            self._indicator_cache = {}
+        return self._indicator_cache.get(symbol, {})
 
     def run_forever(self):
         """메인 무한 루프 (Graceful Shutdown 지원)"""
