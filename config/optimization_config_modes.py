@@ -16,7 +16,7 @@ SCALP_CONFIG = {
     'MA_PERIOD':    {'low': 5,  'high': 40, 'log': True},         # Log: 5→7→10→14→20→28→40
     'ATR_PERIOD':   {'low': 10, 'high': 20, 'log': True},         # Log: 10→14→20 (안정적 변동성 측정)
     'SL_PCT':       {'low': 0.005, 'high': 0.015,  'step': 0.001}, # Linear (비율) - 스캘핑: 타이트한 손절 (레버리지 10배 시 ROE -5% ~ -15%)
-    'TP_ATR_MULT':  {'low': 0.8,   'high': 4.0,   'log': True},   # 최소값 복구(0.8), 최대값 확장 유지(4.0)
+    'TP_ATR_MULT':  {'low': 1.2,   'high': 4.5,   'log': True},   # [Hybrid] Min 1.2(Fee Safety), Max 4.5(Quick Ops)
     'ADX_THRESH':   {'low': 25,    'high': 45,    'step': 1},     # Linear (임계값)
     'VOL_THRESHOLD': {'low': 1.5,  'high': 5.0,   'log': True},   # Log (배수)
     'MAX_HOLDING_BARS': {'low': 10, 'high': 50,   'log': True}    # Log (기간)
@@ -28,7 +28,7 @@ DAY_CONFIG = {
     'MA_PERIOD':    {'low': 10, 'high': 100, 'log': True},        # Log: 10→14→20→28→40→56→80→100
     'ATR_PERIOD':   {'low': 10, 'high': 20,  'log': True},        # Log: 10→14→20
     'SL_PCT':       {'low': 0.015, 'high': 0.06, 'step': 0.005},  # Linear (비율)
-    'TP_ATR_MULT':  {'low': 2.0,  'high': 12.0,  'log': True},    # 최소값 복구(2.0), 최대값 확장 유지(12.0)
+    'TP_ATR_MULT':  {'low': 1.5,  'high': 12.0,  'log': True},    # [Hybrid] Min 1.5(Flexibility), Max 12.0(Trend)
     'ADX_THRESH':   {'low': 20,   'high': 35,   'step': 1},       # Linear (임계값)
     'VOL_THRESHOLD': {'low': 1.2,  'high': 3.0,  'log': True},    # Log (배수)
     'MAX_HOLDING_BARS': {'low': 20, 'high': 100, 'log': True}     # Log (기간)
@@ -40,7 +40,7 @@ SWING_CONFIG = {
     'MA_PERIOD':    {'low': 50, 'high': 200, 'log': True},         # Log: 50→71→100→141→200
     'ATR_PERIOD':   {'low': 14, 'high': 30,  'log': True},         # Log: 14→17→21→26→30
     'SL_PCT':       {'low': 0.06, 'high': 0.20, 'step': 0.01},     # Linear (비율)
-    'TP_ATR_MULT':  {'low': 5.0,  'high': 25.0, 'log': True},      # 최소값 복구(5.0), 최대값 확장 유지(25.0)
+    'TP_ATR_MULT':  {'low': 3.0,  'high': 30.0, 'log': True},     # [Hybrid] Min 3.0(Active Swing), Max 30.0(Moon Shot)
     'ADX_THRESH':   {'low': 15,   'high': 30,   'step': 1},        # Linear (임계값)
     'VOL_THRESHOLD': {'low': 1.1,  'high': 2.5,  'log': True},     # Log (배수)
     'MAX_HOLDING_BARS': {'low': 50, 'high': 300, 'log': True},     # Log (기간)
@@ -183,7 +183,9 @@ def GET_SEARCH_SPACE(mode, market_type='futures'):
     # === MARKET TYPE OVERRIDES ===
     if market_type == 'futures':
         # [Futures] Risk & Leverage - Aggressive Growth (안정성 60% : 수익률 40%)
-        space['RISK_PER_TRADE'] = {'type': 'float', 'low': 0.005, 'high': 0.05, 'step': 0.005} # 0.5% ~ 5% (보수~공격 전범위)
+        # Risk Per Trade: 1.0% ~ 15.0% (Expanded to allow Empirical Kelly Optimal)
+        # We rely on MDD penalty in objective function to curb excessive risk.
+        space['RISK_PER_TRADE'] = {'type': 'float', 'low': 0.01, 'high': 0.15, 'step': 0.01} 
         # Leverage 1x (현물 수준) ~ 10x (공격적 추세 추종)
         space['LEVERAGE'] = {'type': 'float', 'low': 1.0, 'high': 10.0, 'step': 0.5}
         
@@ -196,6 +198,18 @@ def GET_SEARCH_SPACE(mode, market_type='futures'):
         space['RISK_PER_TRADE_SPOT'] = {'type': 'float', 'low': 0.3, 'high': 1.0, 'step': 0.1}
         
         # Spot needs looser TP to catch big pumps
-        space['TAKE_PROFIT_ATR_MULT']['high'] = max(space['TAKE_PROFIT_ATR_MULT']['high'], 8.0)
+        if 'TAKE_PROFIT_ATR_MULT' in space:
+            space['TAKE_PROFIT_ATR_MULT']['high'] = max(space['TAKE_PROFIT_ATR_MULT']['high'], 8.0)
+            
+        # [SPOT UPDATE] Mode-Specific Opportunity Cost Management
+        if mode == 'SCALP':
+            # Scalp (5m~30m): 500 bars @ 5m = ~41 hours (Max holding)
+            space['MAX_HOLDING_BARS'] = {'type': 'int', 'low': 100, 'high': 500, 'log': True}
+        elif mode == 'DAY':
+             # Day (1h): 200 bars = ~8 days (Swing-like Day)
+            space['MAX_HOLDING_BARS'] = {'type': 'int', 'low': 50, 'high': 200, 'log': True}
+        else: # SWING
+            # Swing (4h): 1000 bars = ~166 days (Long Trend)
+            space['MAX_HOLDING_BARS'] = {'type': 'int', 'low': 100, 'high': 1000, 'log': True}
 
     return space
