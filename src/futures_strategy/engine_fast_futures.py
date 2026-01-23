@@ -150,9 +150,9 @@ class BacktestEngineFast:
         max_holding_bars = self.strategy.params.get('MAX_HOLDING_BARS', 999999)  # Default: No limit
         trailing_activation_atr = self.strategy.params.get('TRAILING_ACTIVATION_ATR', 0.0)  # Default: Immediate activation
         
-        # [WARMUP OPTIMIZATION] Extract warmup period if available
-        # During warmup period, indicators are calculated but no trades are executed
-        warmup_bars = getattr(df, 'attrs', {}).get('warmup_bars', 0)
+        # [WARMUP OPTIMIZATION] Calculate required warmup based on strategy indicators
+        # Strategy analyzes its own parameters to determine minimum stable period
+        warmup_bars = getattr(df, 'attrs', {}).get('warmup_bars', self.strategy.get_required_warmup())
         
         # [OPTIMIZATION] Extract timestamps for fast lookup (avoid iloc)
         datetime_values = df['datetime'].values
@@ -221,11 +221,16 @@ class BacktestEngineFast:
         
         trades_df = pd.DataFrame(self.trades)
         
-        # ✅ ADD: Calculate pnl_pct (percentage return per trade)
-        # pnl_pct = (pnl / position_size) * 100
-        # position_size approximated as: entry_price * amount (we don't have amount, so use entry_price as proxy)
-        # Since we use risk-based sizing, we normalize by initial balance instead
-        trades_df['pnl_pct'] = (trades_df['pnl'] / self.initial_balance) * 100
+        # [FIX] Calculate pnl_pct relative to the RUNNING BALANCE at entry time.
+        # Dividing by initial_balance ignores compounding effects and distorts SQN/Kelly stats.
+        # balance_before = initial + cumulative_sum_of_prev_pnls
+        pnl_cumsum = trades_df['pnl'].cumsum().shift(1).fillna(0)
+        trades_df['balance_before'] = self.initial_balance + pnl_cumsum
+        
+        # Avoid division by zero (bankruptcy case)
+        trades_df['balance_before'] = trades_df['balance_before'].replace(0, 1e-9)
+        
+        trades_df['pnl_pct'] = (trades_df['pnl'] / trades_df['balance_before']) * 100
         
         win_trades = len(trades_df[trades_df['pnl'] > 0])
         loss_trades = len(trades_df[trades_df['pnl'] <= 0])
@@ -503,15 +508,20 @@ def backtest_loop_numba(
                 else:
                     tp_price = 0.0
 
-                # 2. Risk Sizing
+                # 2. Risk Sizing (Corrected Volatility Sizing)
+                # Formula: Size = (Balance * Risk_Pct) / Stop_Distance
+                # Leverage is Max Cap, not Multiplier
                 stop_distance = abs(fill_price - stop_price)
+                
                 if stop_distance > 0:
                     risk_amount = balance * risk_per_trade 
-                    amount = (risk_amount / stop_distance) * leverage
+                    amount = risk_amount / stop_distance
                 else:
-                    amount = (balance * 0.01 * leverage) / fill_price
+                    # Fallback if stop_distance is 0 (should not happen)
+                    amount = (balance * 0.01) / fill_price
                 
-                # [SAFETY] Cap amount to max leverage
+                # [SAFETY] Cap amount to Max Leverage
+                # Max Position Value = Balance * Leverage
                 max_amount = (balance * leverage) / fill_price
                 if amount > max_amount:
                     amount = max_amount
@@ -548,15 +558,16 @@ def backtest_loop_numba(
                 else:
                     tp_price = 0.0
                 
-                # 2. Risk Sizing
+                # 2. Risk Sizing (Corrected Volatility Sizing)
                 stop_distance = abs(stop_price - fill_price)
+                
                 if stop_distance > 0:
                     risk_amount = balance * risk_per_trade 
-                    amount = (risk_amount / stop_distance) * leverage
+                    amount = risk_amount / stop_distance
                 else:
-                    amount = (balance * 0.01 * leverage) / fill_price
+                    amount = (balance * 0.01) / fill_price
                 
-                # [SAFETY] Cap amount to max leverage
+                # [SAFETY] Cap amount to Max Leverage
                 max_amount = (balance * leverage) / fill_price
                 if amount > max_amount:
                     amount = max_amount
