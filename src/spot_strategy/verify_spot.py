@@ -101,6 +101,111 @@ def detailed_backtest_spot(df, params):
     else:
         print("Not enough trades for Monte Carlo.")
 
+def load_best_params_from_mysql(mode, storage_url):
+    """MySQL에서 최적 파라미터 로드"""
+    study_name = f"spot_{mode.lower()}_strategy"
+    try:
+        study = optuna.load_study(study_name=study_name, storage=storage_url)
+        return study_name, study.best_params, study.best_value
+    except KeyError:
+        return None, None, None
+
+def load_symbol_data(symbol, tf):
+    """심볼 데이터 로드 (캐시 우선, 없으면 다운로드)"""
+    filename = f"{symbol}_{tf}_20180101_20260116_spot.csv"
+    filepath = os.path.join(os.path.dirname(__file__), '../../data', filename)
+    
+    # 파일 검색
+    if not os.path.exists(filepath):
+        import glob
+        pattern = os.path.join(os.path.dirname(__file__), '../../data', f"{symbol}_{tf}_*_spot.csv")
+        matches = glob.glob(pattern)
+        if matches:
+            filepath = matches[0]
+    
+    # 다운로드
+    if not os.path.exists(filepath):
+        logger.info(f"   📥 Cache not found for {symbol}-{tf}. Downloading...")
+        try:
+            from config.settings import BACKTEST_START_DATE, BACKTEST_END_DATE
+            collector = DataCollector()
+            df_downloaded = collector.collect_and_save(symbol, tf, BACKTEST_START_DATE, BACKTEST_END_DATE)
+            
+            if df_downloaded is None or df_downloaded.empty:
+                return None
+            
+            # 파일명 변환
+            standard_filename = f"{symbol}_{tf}_{BACKTEST_START_DATE}_{BACKTEST_END_DATE}.csv"
+            standard_filepath = os.path.join(os.path.dirname(__file__), '../../data', standard_filename)
+            spot_filename = f"{symbol}_{tf}_{BACKTEST_START_DATE.replace('-','')}_{BACKTEST_END_DATE.replace('-','')}_spot.csv"
+            spot_filepath = os.path.join(os.path.dirname(__file__), '../../data', spot_filename)
+            
+            if os.path.exists(standard_filepath) and not os.path.exists(spot_filepath):
+                import shutil
+                shutil.move(standard_filepath, spot_filepath)
+                filepath = spot_filepath
+            else:
+                filepath = spot_filepath
+        except Exception as e:
+            print(f"   ❌ Error downloading {symbol}: {e}")
+            return None
+    
+    if not os.path.exists(filepath):
+        return None
+    
+    df = pd.read_csv(filepath)
+    df['datetime'] = pd.to_datetime(df['datetime'])
+    return df
+
+def verify_single_symbol(symbol, best_params, primary_symbols):
+    """단일 심볼 백테스트 실행"""
+    from config.settings import TRAIN_CUTOFF_DATE
+    
+    tf = best_params.get('TIMEFRAME', '1h')
+    df = load_symbol_data(symbol, tf)
+    
+    if df is None:
+        print(f"   ⚠️ Cache not found for {symbol}-{tf}. Skipping.")
+        return None
+    
+    # OOS 슬라이싱
+    cutoff_ts = pd.Timestamp(TRAIN_CUTOFF_DATE)
+    test_df = df[df['datetime'] >= cutoff_ts].copy()
+    
+    if test_df.empty:
+        print(f"   ⚠️ No OOS data for {symbol}. Skipping.")
+        return None
+    
+    # 백테스트
+    strategy = UltimateStrategy("Verify", best_params)
+    test_df = strategy.generate_signals(test_df)
+    ret_pct, mdd, _, _, _ = run_backtest_segment(
+        test_df, best_params, initial_balance=10000000.0, return_series=True
+    )
+    
+    is_primary = symbol in primary_symbols
+    indicator = "🎯 PRIMARY" if is_primary else "📊 REFERENCE"
+    print(f"   - {symbol} [{indicator}]: Return {ret_pct:.2f}% | MDD {mdd:.2f}%")
+    
+    return {'symbol': symbol, 'return': ret_pct, 'mdd': mdd, 'is_primary': is_primary}
+
+def calculate_mode_performance(all_results):
+    """PRIMARY/REFERENCE 성능 계산"""
+    primary_results = [r for r in all_results if r['is_primary']]
+    if not primary_results:
+        return None
+    
+    avg_ret = sum(r['return'] for r in primary_results) / len(primary_results)
+    print(f"\n   📊 Results Summary:")
+    print(f"   - PRIMARY Avg Return (BTC/ETH): {avg_ret:.2f}%")
+    
+    ref_results = [r for r in all_results if not r['is_primary']]
+    if ref_results:
+        ref_avg = sum(r['return'] for r in ref_results) / len(ref_results)
+        print(f"   - REFERENCE Avg Return (Alts): {ref_avg:.2f}%")
+    
+    return avg_ret
+
 if __name__ == "__main__":
     import argparse
     import optuna
@@ -114,24 +219,17 @@ if __name__ == "__main__":
                         help="Include altcoins for validation (1=yes, 0=no). Adds SOL, XRP, DOGE, ADA")
     args = parser.parse_args()
     
-    # Build symbol list
+    # 심볼 목록 빌드
     base_symbols = [s.strip() for s in args.symbols.split(',')]
-    
-    # Add altcoins if requested
     if args.alt == 1:
         alt_symbols = ['KRW-SOL', 'KRW-XRP', 'KRW-DOGE', 'KRW-ADA']
-        # Add only if not already in base_symbols
         for alt in alt_symbols:
             if alt not in base_symbols:
                 base_symbols.append(alt)
         print(f"📊 Altcoin validation enabled. Added: {', '.join(alt_symbols)}")
     
     symbols = base_symbols
-    
-    # PRIMARY SYMBOLS: Only these affect final strategy selection
     PRIMARY_SYMBOLS = ['KRW-BTC', 'KRW-ETH']
-    
-    # Modes to check
     MODES = ['SCALP', 'DAY', 'SWING']
     results = []
     
@@ -140,7 +238,7 @@ if __name__ == "__main__":
     print(f"   Searching for optimized strategies: {MODES}")
     print("="*80)
     
-    # MySQL Setup
+    # MySQL 설정
     from dotenv import load_dotenv
     from urllib.parse import quote_plus
     load_dotenv()
@@ -163,159 +261,40 @@ if __name__ == "__main__":
     best_study_name = None
     
     for mode in MODES:
-        study_name = f"spot_{mode.lower()}_strategy"
-        
         print(f"\n🔎 Verifying {mode} Mode Strategy (from MySQL)...")
         
         try:
-            # Check if study exists
-            try:
-                optuna.load_study(study_name=study_name, storage=storage_url)
-            except KeyError:
+            study_name, best_params, train_score = load_best_params_from_mysql(mode, storage_url)
+            if study_name is None:
                 print(f"⚠️  {mode} strategy not found in MySQL. Skipping...")
                 continue
-                
-            study = optuna.load_study(study_name=study_name, storage=storage_url)
-            best_params = study.best_params
-            train_score = study.best_value
             
             print(f"   ✅ Loaded Params (Train Score: {train_score:.4f})")
+            print(f"   Timeframe: {best_params.get('TIMEFRAME', '1h')}")
             
-            # --- OOS Verification Loop ---
-            # Separate tracking for PRIMARY (affects strategy selection) and ALL (display only)
-            primary_total_ret = 0
-            primary_count = 0
-            all_results = []  # Store all symbol results for display
-            
+            # OOS 검증
+            all_results = []
             for symbol in symbols:
-                tf = best_params.get('TIMEFRAME', '1h')
-                
-                # Load Full History Cache
-                # In optimize_spot.py, naming is: f"{symbol.replace('/', '_')}_{tf}_{start_date.replace('-','')}_{end_date.replace('-','')}_spot.csv"
-                # But here we search generic cache or standard data dir
-                # Let's try to find the file dynamically or use strict naming from optimize_spot
-                
-                # Simplification: Assume data exists in ../../data/ 
-                # (You might need to adjust filename pattern if optimize_spot saves uniquely)
-                # Looking at optimize_spot logic:
-                # filename = f"{symbol.replace('/', '_')}_{tf}_{start_date.replace('-','')}_{end_date.replace('-','')}_spot.csv"
-                # Fixed range: 2018-01-01 to 2026-01-16
-                filename = f"{symbol}_{tf}_20180101_20260116_spot.csv" 
-                # Fallback for earlier logic
-                filepath = os.path.join(os.path.dirname(__file__), '../../data', filename)
-                
-                # If exact file not found, try to find any matching symbol+tf
-                if not os.path.exists(filepath):
-                     import glob
-                     pattern = os.path.join(os.path.dirname(__file__), '../../data', f"{symbol}_{tf}_*_spot.csv")
-                     matches = glob.glob(pattern)
-                     if matches:
-                         filepath = matches[0]
-                
-                # If still not found, download data automatically
-                if not os.path.exists(filepath):
-                    logger.info(f"   📥 Cache not found for {symbol}-{tf}. Downloading data...")
-                    try:
-                        from config.settings import BACKTEST_START_DATE, BACKTEST_END_DATE
-                        collector = DataCollector()
-                        
-                        # Download data with standard naming convention
-                        # Note: DataCollector saves as: {symbol}_{tf}_{start}_{end}.csv
-                        # We need to match optimize_spot naming: {symbol}_{tf}_{start}_{end}_spot.csv
-                        # So we'll download first, then rename
-                        
-                        df_downloaded = collector.collect_and_save(
-                            symbol, tf, BACKTEST_START_DATE, BACKTEST_END_DATE
-                        )
-                        
-                        if df_downloaded is None or df_downloaded.empty:
-                            print(f"   ❌ Failed to download data for {symbol}-{tf}. Skipping.")
-                            continue
-                        
-                        # Rename to match optimize_spot convention
-                        standard_filename = f"{symbol}_{tf}_{BACKTEST_START_DATE}_{BACKTEST_END_DATE}.csv"
-                        standard_filepath = os.path.join(os.path.dirname(__file__), '../../data', standard_filename)
-                        
-                        spot_filename = f"{symbol}_{tf}_{BACKTEST_START_DATE.replace('-','')}_{BACKTEST_END_DATE.replace('-','')}_spot.csv"
-                        spot_filepath = os.path.join(os.path.dirname(__file__), '../../data', spot_filename)
-                        
-                        # If collector saved with standard name, rename it
-                        if os.path.exists(standard_filepath) and not os.path.exists(spot_filepath):
-                            import shutil
-                            shutil.move(standard_filepath, spot_filepath)
-                            filepath = spot_filepath
-                            logger.info(f"   ✅ Data downloaded and saved to {spot_filepath}")
-                        else:
-                            filepath = spot_filepath
-                            
-                    except Exception as e:
-                        print(f"   ❌ Error downloading data for {symbol}: {e}")
-                        continue
-                
-                if not os.path.exists(filepath):
-                    print(f"   ⚠️ Cache not found for {symbol}-{tf}. Skipping.")
-                    continue
-                    
-                df = pd.read_csv(filepath)
-                df['datetime'] = pd.to_datetime(df['datetime'])
-                
-                # Slice for OOS
-                cutoff_ts = pd.Timestamp(TRAIN_CUTOFF_DATE)
-                test_df = df[df['datetime'] >= cutoff_ts].copy()
-                
-                if test_df.empty:
-                    print(f"   ⚠️ No OOS data for {symbol}. Skipping.")
-                    continue
-                
-                # Run Backtest
-                strategy = UltimateStrategy("Verify", best_params)
-                test_df = strategy.generate_signals(test_df)
-                
-                ret_pct, mdd, _, _, _ = run_backtest_segment(
-                    test_df, best_params, initial_balance=10000000.0, return_series=True
-                )
-                
-                # Track for PRIMARY symbols (strategy selection)
-                is_primary = symbol in PRIMARY_SYMBOLS
-                if is_primary:
-                    primary_total_ret += ret_pct
-                    primary_count += 1
-                
-                # Store all results for display
-                all_results.append({
-                    'symbol': symbol,
-                    'return': ret_pct,
-                    'mdd': mdd,
-                    'is_primary': is_primary
-                })
-                
-                # Display with PRIMARY/REFERENCE indicator
-                indicator = "🎯 PRIMARY" if is_primary else "📊 REFERENCE"
-                print(f"   - {symbol} [{indicator}]: Return {ret_pct:.2f}% | MDD {mdd:.2f}%")
+                result = verify_single_symbol(symbol, best_params, PRIMARY_SYMBOLS)
+                if result:
+                    all_results.append(result)
             
-            # Calculate average using PRIMARY symbols only
-            if primary_count > 0:
-                avg_ret = primary_total_ret / primary_count
-                print(f"\n   📊 Results Summary:")
-                print(f"   - PRIMARY Avg Return (BTC/ETH): {avg_ret:.2f}%")
-                if len(all_results) > primary_count:
-                    ref_total = sum([r['return'] for r in all_results if not r['is_primary']])
-                    ref_count = len([r for r in all_results if not r['is_primary']])
-                    ref_avg = ref_total / ref_count if ref_count > 0 else 0
-                    print(f"   - REFERENCE Avg Return (Alts): {ref_avg:.2f}%")
-                
-                results.append({
-                    'mode': mode,
-                    'study_name': study_name,
-                    'return': avg_ret,  # Only PRIMARY symbols affect this
-                    'score': train_score,
-                    'all_results': all_results  # Keep for detailed view
-                })
-                
-                if avg_ret > best_overall_score:
-                    best_overall_score = avg_ret
-                    best_mode = mode
-                    best_study_name = study_name
+            avg_ret = calculate_mode_performance(all_results)
+            if avg_ret is None:
+                continue
+            
+            results.append({
+                'mode': mode,
+                'study_name': study_name,
+                'return': avg_ret,
+                'score': train_score,
+                'all_results': all_results
+            })
+            
+            if avg_ret > best_overall_score:
+                best_overall_score = avg_ret
+                best_mode = mode
+                best_study_name = study_name
                     
         except Exception as e:
             print(f"   ❌ Error processing {mode}: {e}")
