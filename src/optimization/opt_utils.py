@@ -118,14 +118,31 @@ def suggest_params(trial, search_space):
                     params[key] = trial.suggest_float(key, spec['low'], spec['high'], step=spec.get('step'))
     
     elif strength_filter == 'HURST':
-        for key in ['HURST_PERIOD', 'HURST_TREND_THRESHOLD', 'HURST_RANDOM_THRESHOLD']:
-            if key in search_space:
-                spec = search_space[key]
-                use_log = spec.get('log', False)
-                if spec['type'] == 'int':
-                    params[key] = trial.suggest_int(key, spec['low'], spec['high'], log=use_log) if use_log else trial.suggest_int(key, spec['low'], spec['high'], step=spec.get('step'))
-                else:
-                    params[key] = trial.suggest_float(key, spec['low'], spec['high'], step=spec.get('step'))
+        # 1. Period (Independent)
+        if 'HURST_PERIOD' in search_space:
+            spec = search_space['HURST_PERIOD']
+            use_log = spec.get('log', False)
+            params['HURST_PERIOD'] = trial.suggest_int('HURST_PERIOD', spec['low'], spec['high'], log=use_log)
+
+        # 2. Random Threshold (Independent Base)
+        random_thresh = 0.5 # Default fallback
+        if 'HURST_RANDOM_THRESHOLD' in search_space:
+            spec = search_space['HURST_RANDOM_THRESHOLD']
+            params['HURST_RANDOM_THRESHOLD'] = trial.suggest_float('HURST_RANDOM_THRESHOLD', spec['low'], spec['high'], step=spec.get('step'))
+            random_thresh = params['HURST_RANDOM_THRESHOLD']
+            
+        # 3. Trend Threshold (Dependent: Must be > Random)
+        if 'HURST_TREND_THRESHOLD' in search_space:
+            spec = search_space['HURST_TREND_THRESHOLD']
+            # Enforce Logical Safety: Trend > Random + Buffer (0.01)
+            # This prevents logical contradictions even if search ranges overlap
+            safe_low = max(spec['low'], random_thresh + 0.01)
+            
+            if safe_low < spec['high']:
+                params['HURST_TREND_THRESHOLD'] = trial.suggest_float('HURST_TREND_THRESHOLD', safe_low, spec['high'], step=spec.get('step'))
+            else:
+                # If constraint pushes low above high, clip to safe_low logic
+                params['HURST_TREND_THRESHOLD'] = safe_low
     
     # === Phase 5: Exit-Type Dependent Parameters ===
     exit_type = params.get('EXIT_TYPE', 'ATR')
@@ -213,69 +230,82 @@ def suggest_params(trial, search_space):
     
     return params
 
-def calculate_score(ret, mdd, trades_df, mode="DAY"):
+def calculate_score(ret, mdd, trades_df, mode="DAY", market_type="spot"):
     """
-    SQN Hybrid Objective v4 (Final) - Unified for Spot & Futures
+    Objective Function v6: Weighted Sum with Soft Barriers
+    - Replaces fragile multiplication logic with robust linear utility.
+    - Removes heuristic sigmoids constraints.
+    - Prevents 'Zero Collapse' where one weak metric zeroes out the entire score.
     """
     if trades_df.empty:
-        return -10000
+        return -10000.0
 
     N = len(trades_df)
-    
-    # 1. Individual Trade Returns (%)
+    if N < 10: return -10000.0 # Insufficient sample size
+
     if 'pnl_pct' not in trades_df.columns:
-        # Try to calculate if pnl and initial_balance present? No simple way here.
-        # Assume caller ensures pnl_pct
-        if 'pnl' in trades_df.columns: 
-             # Fallback if pnl is present but not pct (approximate? no, unsafe)
-             return -10000
-        raise ValueError("trades_df must contain 'pnl_pct' column for SQN calculation.")
+        return -10000.0
     
     returns = trades_df['pnl_pct'].values
 
+    # --- Metrics Calculation ---
     r_avg = np.mean(returns)
-    r_std = np.std(returns) if len(returns) > 1 else 100.0
+    # Use Sample Standard Deviation (ddof=1) as backtest is a sample of future distribution
+    # Default np.std uses ddof=0 (Population), which underestimates risk for small N
+    r_std = np.std(returns, ddof=1) if len(returns) > 1 else 100.0
     if r_std == 0: r_std = 0.001
     
-    # --- Helper: Soft Sigmoid Normalization ---
-    def soft_sigmoid(x, center, steepness):
-        z = -steepness * (x - center)
-        z = np.clip(z, -500, 500)
-        return 1 / (1 + np.exp(z))
-
-    # --- Component 1: SQN ---
+    # 1. SQN (System Quality Number)
+    # Reflects the statistical significance of the trading system
     sqn = (np.sqrt(N) * r_avg) / r_std
-    sqn_score = soft_sigmoid(sqn, center=2.0, steepness=0.5)
-
-    # --- Component 2: Calmar Ratio ---
-    abs_mdd = abs(mdd) if mdd != 0 else 0.01
-    calmar = ret / abs_mdd
-    # Slightly different settings for Spot vs Futures?
-    # Use Futures settings (more aggressive) as baseline, or Spot?
-    # Spot used 3.5, Futures used 4.0. Let's use 3.5 for broad compatibility.
-    calmar_score = soft_sigmoid(calmar, center=3.5, steepness=0.4)
-
-    # --- Component 3: Profit Factor ---
+    
+    # 2. Profit Factor
+    # Efficiency metric (Win/Loss ratio)
     pos_sum = np.sum(returns[returns > 0])
     neg_sum = abs(np.sum(returns[returns < 0]))
     pf = pos_sum / neg_sum if neg_sum > 0 else 3.0
-    pf_score = soft_sigmoid(pf, center=1.5, steepness=1.0) # Using 1.5 (Spot) vs 1.8 (Futures). Low 1.5 is safer.
+    # Soft cap PF to avoid skewing optimization with unrealistic outlier values
+    pf = min(pf, 5.0) 
 
-    # --- Component 4: Smooth MDD Penalty ---
-    # Spot: -30, Futures: -35. Use -33? or depend on mode?
-    mdd_center = -35.0 if mode in ['SCALP', 'DAY'] else -30.0
-    mdd_penalty = soft_sigmoid(-abs_mdd, center=mdd_center, steepness=0.2)
-
-    # --- Component 5: Soft Trade Count Penalty ---
-    MIN_TRADES_MAP = {'SCALP': 500, 'DAY': 100, 'SWING': 30, 'ALL': 100}
-    min_trades = MIN_TRADES_MAP.get(mode.upper(), 100)
-    trade_penalty = soft_sigmoid(N, center=min_trades, steepness=0.1)
+    # 3. Calmar Ratio
+    # Risk-Adjusted Return (Aggressive focus)
+    abs_mdd = abs(mdd) if mdd != 0 else 0.01
+    calmar = ret / abs_mdd
     
-    # Hard floor
-    if N < 10:
-        return -10000
-
-    # --- Final Score: Multiplicative ---
-    final_score = sqn_score * calmar_score * pf_score * mdd_penalty * trade_penalty * 1000
+    # --- Weights & Penalties Configuration ---
+    score = 0.0
     
-    return final_score
+    if market_type == "futures":
+        # [Futures] Risk-Adjusted Return is King
+        # MDD Hard Limit ~35% (Liquidation Risk Management)
+        target_mdd = 35.0
+        min_trades = 50 if mode != 'SCALP' else 300
+        
+        # Weights (Sum = 1.0 approx) - Prioritize Calmar & SQN
+        # Scaling factors (e.g. *20) bring components to roughly similar magnitude (0~100 range)
+        score = (calmar * 10.0) + (sqn * 5.0) + (pf * 5.0)
+        
+    else:
+        # [Spot] Stability & Consistency is King
+        target_mdd = 30.0
+        min_trades = 30
+        
+        # Weights - Prioritize SQN (Robustness)
+        score = (sqn * 8.0) + (calmar * 6.0) + (pf * 4.0)
+
+    # --- Barrier Penalties (Subtractive) ---
+    
+    # 1. MDD Penalty (Linear penalty beyond threshold)
+    # Instead of *0, we subtract points to guide optimizer back to safe zone
+    if abs_mdd > target_mdd:
+        excess = abs_mdd - target_mdd
+        # Heavy penalty: -5 score per 1% excess MDD
+        score -= (excess * 5.0)
+        
+    # 2. Trade Count Penalty
+    if N < min_trades:
+        shortfall = min_trades - N
+        # Penalty: -1 score per missing trade
+        score -= (shortfall * 1.0)
+        
+    return float(score)
