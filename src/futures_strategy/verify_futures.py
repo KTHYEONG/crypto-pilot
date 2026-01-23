@@ -150,6 +150,63 @@ def detailed_backtest_futures(hourly_df, daily_df, params):
     
     return
     
+def load_best_params_from_mysql(mode, storage_url):
+    """MySQL에서 최적 파라미터 로드"""
+    study_name = f"futures_{mode.lower()}_strategy"
+    try:
+        study = optuna.load_study(study_name=study_name, storage=storage_url)
+        return study_name, study.best_params, study.best_value
+    except KeyError:
+        return None, None, None
+
+def verify_single_symbol_futures(symbol, best_params, primary_symbols):
+    """단일 심볼 백테스트 실행 (Futures)"""
+    try:
+        tf = best_params.get('TIMEFRAME', '1h')
+        hourly_df, daily_df = load_data(symbol, BACKTEST_START_DATE, BACKTEST_END_DATE, tf)
+    except Exception as e:
+        print(f"   ❌ Data load error for {symbol}: {e}")
+        return None
+    
+    # OOS 슬라이싱
+    cutoff_ts = pd.Timestamp(TRAIN_CUTOFF_DATE)
+    test_hourly = hourly_df[hourly_df['datetime'] >= cutoff_ts].copy()
+    test_daily = daily_df[daily_df['datetime'] >= cutoff_ts].copy()
+    
+    if test_hourly.empty:
+        print(f"   ⚠️ No OOS data for {symbol}. Skipping verification.")
+        return None
+    
+    # 백테스트
+    strategy = UltimateStrategy("Verify", best_params)
+    df = prepare_futures_data(test_hourly, test_daily, strategy)
+    ret_pct, mdd, _, _, _ = run_backtest_segment_futures(
+        df, best_params, initial_balance=750.0, return_series=True
+    )
+    
+    is_primary = symbol in primary_symbols
+    indicator = "🎯 PRIMARY" if is_primary else "📊 REFERENCE"
+    print(f"   - {symbol} [{indicator}]: Return {ret_pct:.2f}% | MDD {mdd:.2f}%")
+    
+    return {'symbol': symbol, 'return': ret_pct, 'mdd': mdd, 'is_primary': is_primary}
+
+def calculate_mode_performance(all_results):
+    """PRIMARY/REFERENCE 성능 계산"""
+    primary_results = [r for r in all_results if r['is_primary']]
+    if not primary_results:
+        return None
+    
+    avg_ret = sum(r['return'] for r in primary_results) / len(primary_results)
+    print(f"\n   📊 Results Summary:")
+    print(f"   - PRIMARY Avg Return (BTC/ETH): {avg_ret:.2f}%")
+    
+    ref_results = [r for r in all_results if not r['is_primary']]
+    if ref_results:
+        ref_avg = sum(r['return'] for r in ref_results) / len(ref_results)
+        print(f"   - REFERENCE Avg Return (Alts): {ref_avg:.2f}%")
+    
+    return avg_ret
+
 if __name__ == "__main__":
     import argparse
     import optuna
@@ -162,24 +219,17 @@ if __name__ == "__main__":
                         help="Include altcoins for validation (1=yes, 0=no). Adds SOL, XRP, DOGE, BNB")
     args = parser.parse_args()
     
-    # Build symbol list
+    # 심볼 목록 빌드
     base_symbols = [s.strip() for s in args.symbols.split(',')]
-    
-    # Add altcoins if requested
     if args.alt == 1:
         alt_symbols = ['SOL/USDT', 'XRP/USDT', 'DOGE/USDT', 'BNB/USDT']
-        # Add only if not already in base_symbols
         for alt in alt_symbols:
             if alt not in base_symbols:
                 base_symbols.append(alt)
         print(f"📊 Altcoin validation enabled. Added: {', '.join(alt_symbols)}")
     
     symbols = base_symbols
-    
-    # PRIMARY SYMBOLS: Only these affect final strategy selection
     PRIMARY_SYMBOLS = ['BTC/USDT', 'ETH/USDT']
-    
-    # Modes to check
     MODES = ['SCALP', 'DAY', 'SWING']
     results = []
     
@@ -188,9 +238,7 @@ if __name__ == "__main__":
     print(f"   Searching for optimized strategies: {MODES}")
     print("="*80)
     
-    best_overall_score = -float('inf')
-    best_mode = None
-    # MySQL Setup
+    # MySQL 설정
     from dotenv import load_dotenv
     from urllib.parse import quote_plus
     load_dotenv()
@@ -213,98 +261,40 @@ if __name__ == "__main__":
     best_study_name = None
     
     for mode in MODES:
-        study_name = f"futures_{mode.lower()}_strategy"
-        
         print(f"\n🔎 Verifying {mode} Mode Strategy (from MySQL)...")
         
         try:
-            # Check if study exists
-            try:
-                optuna.load_study(study_name=study_name, storage=storage_url)
-            except KeyError:
+            study_name, best_params, train_score = load_best_params_from_mysql(mode, storage_url)
+            if study_name is None:
                 print(f"⚠️  {mode} strategy not found in MySQL. Skipping...")
                 continue
-                
-            study = optuna.load_study(study_name=study_name, storage=storage_url)
-            best_params = study.best_params
-            train_score = study.best_value
             
             print(f"   ✅ Loaded Params (Train Score: {train_score:.4f})")
             print(f"   Timeframe: {best_params.get('TIMEFRAME')}")
             
-            # --- OOS Verification Loop ---
-            # Separate tracking for PRIMARY (affects strategy selection) and ALL (display only)
-            primary_total_ret = 0
-            primary_count = 0
-            all_results = []  # Store all symbol results for display
-            
+            # OOS 검증
+            all_results = []
             for symbol in symbols:
-                tf = best_params.get('TIMEFRAME', '1h')
-                
-                # Load Data
-                try:
-                    hourly_df, daily_df = load_data(symbol, BACKTEST_START_DATE, BACKTEST_END_DATE, tf)
-                except Exception as e:
-                    print(f"   ❌ Data load error for {symbol}: {e}")
-                    continue
-                
-                # Slice for OOS (Test Data)
-                cutoff_ts = pd.Timestamp(TRAIN_CUTOFF_DATE)
-                test_hourly = hourly_df[hourly_df['datetime'] >= cutoff_ts].copy()
-                test_daily = daily_df[daily_df['datetime'] >= cutoff_ts].copy()
-                
-                if test_hourly.empty:
-                    print(f"   ⚠️ No OOS data for {symbol}. Skipping verification.")
-                    continue
-                
-                # Run Backtest
-                strategy = UltimateStrategy("Verify", best_params)
-                df = prepare_futures_data(test_hourly, test_daily, strategy)
-                ret_pct, mdd, _, _, _ = run_backtest_segment_futures(
-                    df, best_params, initial_balance=750.0, return_series=True
-                )
-                
-                # Track for PRIMARY symbols (strategy selection)
-                is_primary = symbol in PRIMARY_SYMBOLS
-                if is_primary:
-                    primary_total_ret += ret_pct
-                    primary_count += 1
-                
-                # Store all results for display
-                all_results.append({
-                    'symbol': symbol,
-                    'return': ret_pct,
-                    'mdd': mdd,
-                    'is_primary': is_primary
-                })
-                
-                # Display with PRIMARY/REFERENCE indicator
-                indicator = "🎯 PRIMARY" if is_primary else "📊 REFERENCE"
-                print(f"   - {symbol} [{indicator}]: Return {ret_pct:.2f}% | MDD {mdd:.2f}%")
+                result = verify_single_symbol_futures(symbol, best_params, PRIMARY_SYMBOLS)
+                if result:
+                    all_results.append(result)
             
-            # Calculate average using PRIMARY symbols only
-            if primary_count > 0:
-                avg_ret = primary_total_ret / primary_count
-                print(f"\n   � Results Summary:")
-                print(f"   - PRIMARY Avg Return (BTC/ETH): {avg_ret:.2f}%")
-                if len(all_results) > primary_count:
-                    ref_total = sum([r['return'] for r in all_results if not r['is_primary']])
-                    ref_count = len([r for r in all_results if not r['is_primary']])
-                    ref_avg = ref_total / ref_count if ref_count > 0 else 0
-                    print(f"   - REFERENCE Avg Return (Alts): {ref_avg:.2f}%")
-                
-                results.append({
-                    'mode': mode,
-                    'study_name': study_name,
-                    'return': avg_ret,  # Only PRIMARY symbols affect this
-                    'score': train_score,
-                    'all_results': all_results  # Keep for detailed view
-                })
-                
-                if avg_ret > best_overall_score:
-                    best_overall_score = avg_ret
-                    best_mode = mode
-                    best_study_name = study_name
+            avg_ret = calculate_mode_performance(all_results)
+            if avg_ret is None:
+                continue
+            
+            results.append({
+                'mode': mode,
+                'study_name': study_name,
+                'return': avg_ret,
+                'score': train_score,
+                'all_results': all_results
+            })
+            
+            if avg_ret > best_overall_score:
+                best_overall_score = avg_ret
+                best_mode = mode
+                best_study_name = study_name
             
         except Exception as e:
             print(f"   ❌ Error processing {mode}: {e}")
