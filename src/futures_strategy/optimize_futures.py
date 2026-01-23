@@ -230,7 +230,7 @@ def objective(
         # Calculate Score
         # Extract mode from strategy_name (e.g., Ultimate_DAY)
         mode_str = strategy_name.split("_")[-1]
-        score = calculate_score(ret, mdd, trades_df, mode=mode_str)
+        score = calculate_score(ret, mdd, trades_df, mode=mode_str, market_type="futures")
 
         # [SPEED UP] Short-circuit: If any symbol performs poorly, fail the trial immediately
         # One bad apple spoils the bunch (Harmonic Mean logic)

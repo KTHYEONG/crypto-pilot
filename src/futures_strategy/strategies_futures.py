@@ -17,6 +17,36 @@ class Strategy(ABC):
         """공통 데이터 전처리 및 지표 계산"""
         # params에 있는 지표 설정값들이 add_common_indicators로 전달됨
         return add_common_indicators(df, self.params)
+    
+    def get_required_warmup(self):
+        """
+        Calculate minimum warmup bars required based on strategy parameters.
+        Analyzes all period-based parameters and returns max lookback with safety factor.
+        
+        Returns:
+            int: Minimum number of bars to skip at start of backtest
+        """
+        # List of all period-related parameter keys
+        period_keys = [
+            'ENTRY_PERIOD', 'MA_PERIOD', 'ATR_PERIOD',
+            'SUPERTREND_PERIOD', 'MACD_SLOW', 'ICHIMOKU_SENKOU_B',
+            'STRENGTH_FILTER_PERIOD', 'VOLUME_MA_PERIOD',
+            'CMF_PERIOD', 'HURST_PERIOD'
+        ]
+        
+        max_period = 0
+        for key in period_keys:
+            if key in self.params:
+                period = self.params[key]
+                if period > max_period:
+                    max_period = period
+        
+        # Safety Factor: 3x for EMA/ATR convergence
+        # EMA needs ~3*period bars to reach 95% accuracy
+        warmup = max_period * 3
+        
+        # Absolute minimum: 50 bars (even if no periods found)
+        return max(warmup, 50)
 
 class MasterStrategy(Strategy):
     """
@@ -67,16 +97,10 @@ class UltimateStrategy(Strategy):
         # [ROBUSTNESS] Clean column assignment (data copied at loader level)
         
         # --- 1. Basic Indicators (Lazy ATR) ---
-        # ATR is needed only for certain exit/SL/sizing types
-        use_tp = self.params.get('USE_TAKE_PROFIT', False)
-        use_atr_sl = self.params.get('STOP_LOSS_TYPE') == 'ATR'
-        use_trailing = self.params.get('EXIT_TYPE') == 'ATR' or self.params.get('TRAILING_ACTIVATION_ATR', 0) > 0
-        
-        if use_tp or use_atr_sl or use_trailing:
-            atr_period = self.params.get('ATR_PERIOD', 14)
-            df.loc[:, 'atr'] = calculate_atr(df, window=atr_period)
-        else:
-            df.loc[:, 'atr'] = 0.0  # Not used, skip expensive calculation
+        # --- 1. Basic Indicators (Always calculate ATR) ---
+        # ATR is fundamental for volatility normalization, even if not used for Entry
+        atr_period = self.params.get('ATR_PERIOD', 14)
+        df.loc[:, 'atr'] = calculate_atr(df, window=atr_period)
         
         # --- 2. Entry Signal Setup ---
         entry_type = self.params.get('ENTRY_TYPE', 'DONCHIAN')
@@ -276,9 +300,20 @@ class UltimateStrategy(Strategy):
         # --- 6. Volume Filter (Ratio) ---
         if self.params.get('USE_VOLUME_FILTER', False):
             vol_ma_period = self.params.get('VOLUME_MA_PERIOD', 20)
-            # Avoid division by zero
-            vol_ma = df['volume'].rolling(window=vol_ma_period).mean()
-            df.loc[:, 'volume_ratio'] = df['volume'] / vol_ma.replace(0, 1)
+            # [Statistical Upgrade] Log Z-Score Method
+            # 1. Log-transform volume to normalize distribution (Log-Normal -> Normal)
+            log_vol = np.log1p(df['volume'])
+            
+            # 2. Calculate Rolling Mean & Std of Log Volume
+            log_vol_mean = log_vol.rolling(window=vol_ma_period).mean()
+            log_vol_std = log_vol.rolling(window=vol_ma_period).std()
+            
+            # 3. Calculate Z-Score (Standardized Volume)
+            # Z = (Current - Mean) / Std
+            # This accounts for volume volatility, differentiating between noise and signal better than simple ratios.
+            # Z-score is stored in 'volume_ratio' to maintain compatibility with Engine logic
+            z_score = (log_vol - log_vol_mean) / log_vol_std.replace(0, 1)
+            df.loc[:, 'volume_ratio'] = z_score.fillna(0)
         else:
             df.loc[:, 'volume_ratio'] = 100.0 # Default Pass (High ratio)
             
