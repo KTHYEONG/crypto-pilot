@@ -48,36 +48,70 @@ def run_backtest_segment(df, params, initial_balance=10000000.0, return_series=F
     atr = np.nan_to_num(df['atr'].values, nan=0.0)
     sar = np.nan_to_num(df.get('parabolic_sar', pd.Series([0.0]*len(df))).values, nan=0.0)
     
+    # [NEW] Regime Indicators
+    hurst = np.nan_to_num(df.get('hurst', pd.Series([0.5]*len(df))).values, nan=0.5)
+    natr = np.nan_to_num(df.get('natr', pd.Series([0.0]*len(df))).values, nan=0.0)
+    rsi = np.nan_to_num(df.get('rsi', pd.Series([50.0]*len(df))).values, nan=50.0)
+    
+    # [REGIME PARAMS]
+    hurst_threshold = params.get('STRONG_REGIME_HURST', 0.6)
+    natr_panic_threshold = params.get('PANIC_REGIME_NATR', 4.5)
+    rsi_panic_threshold = params.get('RSI_EXIT_THRESHOLD', 94.0)
+    
+    strong_regime_multiplier = params.get('STRONG_REGIME_MULTIPLIER', 1.3)
+    panic_regime_multiplier = params.get('PANIC_REGIME_MULTIPLIER', 0.15)
+    
+    max_holding_bars = params.get('MAX_HOLDING_BARS', 999999)
+    
+    entry_idx = 0
+
     for i in range(1, len(df)):
         price = close[i]
         
         if in_pos:
             exit_triggered = False
             reason = ""
+            pnl_pct_current = (price - entry_price) / entry_price * 100
+            
+            # [NEW] Panic Exit (RSI Cut)
+            if rsi[i] > rsi_panic_threshold:
+                exit_price = price
+                exit_triggered = True
+                reason = "Panic Exit (RSI)"
+            
+            # [NEW] Time-Based Exit (Conditional)
+            if not exit_triggered:
+                bars_held = i - entry_idx
+                if bars_held >= max_holding_bars:
+                    if pnl_pct_current <= 0.2: # Exit if not profitable
+                        exit_price = price
+                        exit_triggered = True
+                        reason = "Time Cut (No Profit)"
             
             # --- 1. Main Trend Exit (ATR Trailing or SAR) ---
-            if exit_type == 'ATR':
-                # Trailing Stop Update
-                if high[i] > highest:
-                    highest = high[i]
-                    new_stop = highest - (pos_atr * atr_mult)
-                    if new_stop > stop_price:
-                        stop_price = new_stop
-                
-                if low[i] <= stop_price:
-                    exit_price = stop_price if stop_price > low[i] else low[i]
-                    exit_triggered = True
-                    reason = "ATR Trailing Stop"
-            else: # PARABOLIC_SAR
-                current_sar = sar[i]
-                if current_sar > 0 and low[i] <= current_sar:
-                    exit_price = current_sar if current_sar > low[i] else low[i]
-                    exit_triggered = True
-                    reason = "Parabolic SAR"
-                elif low[i] <= stop_price: # Safety Stop
-                    exit_price = stop_price if stop_price > low[i] else low[i]
-                    exit_triggered = True
-                    reason = "Safety Stop Loss"
+            if not exit_triggered:
+                if exit_type == 'ATR':
+                    # Trailing Stop Update
+                    if high[i] > highest:
+                        highest = high[i]
+                        new_stop = highest - (pos_atr * atr_mult)
+                        if new_stop > stop_price:
+                            stop_price = new_stop
+                    
+                    if low[i] <= stop_price:
+                        exit_price = stop_price if stop_price > low[i] else low[i]
+                        exit_triggered = True
+                        reason = "ATR Trailing Stop"
+                else: # PARABOLIC_SAR
+                    current_sar = sar[i]
+                    if current_sar > 0 and low[i] <= current_sar:
+                        exit_price = current_sar if current_sar > low[i] else low[i]
+                        exit_triggered = True
+                        reason = "Parabolic SAR"
+                    elif low[i] <= stop_price: # Safety Stop
+                        exit_price = stop_price if stop_price > low[i] else low[i]
+                        exit_triggered = True
+                        reason = "Safety Stop Loss"
             
             # --- 2. Take Profit (Safety Net) ---
             if not exit_triggered and use_tp and tp_price > 0 and high[i] >= tp_price:
@@ -94,7 +128,7 @@ def run_backtest_segment(df, params, initial_balance=10000000.0, return_series=F
             if exit_triggered:
                 # Sell
                 revenue = coin * exit_price * (1 - fee_rate)
-                balance += revenue  # Corrected: Add revenue back to remaining balance
+                balance += revenue 
                 coin = 0.0
                 in_pos = False
                 
@@ -114,17 +148,28 @@ def run_backtest_segment(df, params, initial_balance=10000000.0, return_series=F
             if strength[i] == 0: continue
             
             if trend_dir[i] == 1 and price > entry_upper[i]:
+                # [NEW] Regime Detection (Position Sizing)
+                regime_mult = 1.0
+                if hurst[i] > hurst_threshold:
+                    regime_mult = strong_regime_multiplier
+                if natr[i] > natr_panic_threshold:
+                    regime_mult = panic_regime_multiplier
+                
                 fill_price = price * (1 + slippage)
                 entry_price = fill_price
                 
                 # Sizing based on Risk Per Trade with 100M cap
-                cost = balance * risk_per_trade
+                target_risk = risk_per_trade * regime_mult
+                if target_risk > 0.99: target_risk = 0.99
+                
+                cost = balance * target_risk
                 max_position_value = 100_000_000.0  # 1억 KRW cap
                 cost = min(cost, max_position_value)
                 coin = (cost * (1 - fee_rate)) / fill_price
                 balance -= cost
                 
                 in_pos = True
+                entry_idx = i
                 highest = fill_price
                 pos_atr = atr[i]
                 

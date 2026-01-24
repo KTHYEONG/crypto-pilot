@@ -262,6 +262,10 @@ def calculate_hurst_exponent(series, window=100):
     res = _hurst_numba_logic(vals, window)
     return pd.Series(res, index=series.index)
 
+@indicator_cache
+def calculate_natr(df, window=14):
+    return pd.Series(talib.NATR(df['high'].values, df['low'].values, df['close'].values, timeperiod=window), index=df.index)
+
 def clear_indicator_cache():
     global _INDICATOR_CACHE
     _INDICATOR_CACHE = {}
