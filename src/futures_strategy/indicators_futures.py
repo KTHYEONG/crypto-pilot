@@ -1,14 +1,16 @@
+# LEGACY MODULE: 이 파일의 함수들은 더 이상 사용되지 않습니다.
+# indicators_advanced_futures.py의 @indicator_cache 최적화 버전을 사용하세요.
 
 import pandas as pd
 import numpy as np
 
-def calculate_sma(series, window):
+def _legacy_calculate_sma(series, window):
     return series.rolling(window=window).mean()
 
-def calculate_ema(series, window):
+def _legacy_calculate_ema(series, window):
     return series.ewm(span=window, adjust=False).mean()
 
-def calculate_atr(high, low, close, window=14):
+def _legacy_calculate_atr(high, low, close, window=14):
     """Average True Range 계산"""
     tr1 = high - low
     tr2 = abs(high - close.shift(1))
@@ -40,7 +42,7 @@ def calculate_range(high, low):
 
 # --- New Indicators ---
 
-def calculate_rsi(close, window=14):
+def _legacy_calculate_rsi(close, window=14):
     """Relative Strength Index (RSI)"""
     delta = close.diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=window).mean()
@@ -49,7 +51,7 @@ def calculate_rsi(close, window=14):
     rs = gain / loss
     return 100 - (100 / (1 + rs))
 
-def calculate_bollinger_bands(close, window=20, num_std=2):
+def _legacy_calculate_bollinger_bands(close, window=20, num_std=2):
     """Bollinger Bands"""
     sma = close.rolling(window=window).mean()
     std = close.rolling(window=window).std()
@@ -57,7 +59,7 @@ def calculate_bollinger_bands(close, window=20, num_std=2):
     lower = sma - (std * num_std)
     return upper, lower
 
-def calculate_macd(close, fast=12, slow=26, signal=9):
+def _legacy_calculate_macd(close, fast=12, slow=26, signal=9):
     """MACD (Moving Average Convergence Divergence)"""
     ema_fast = close.ewm(span=fast, adjust=False).mean()
     ema_slow = close.ewm(span=slow, adjust=False).mean()
@@ -74,23 +76,23 @@ def calculate_donchian_channels(high, low, window=20):
     donchian_low = low.shift(1).rolling(window=window).min()
     return donchian_high, donchian_low
 
-def calculate_wma(series, window):
+def _legacy_calculate_wma(series, window):
     """Weighted Moving Average"""
     weights = np.arange(1, window + 1)
     return series.rolling(window).apply(lambda x: np.dot(x, weights) / weights.sum(), raw=True)
 
-def calculate_hma(series, window):
+def _legacy_calculate_hma(series, window):
     """Hull Moving Average"""
     half_length = int(window / 2)
     sqrt_length = int(np.sqrt(window))
     
-    wma_half = calculate_wma(series, half_length)
-    wma_full = calculate_wma(series, window)
+    wma_half = _legacy_calculate_wma(series, half_length)
+    wma_full = _legacy_calculate_wma(series, window)
     
     raw_hma = 2 * wma_half - wma_full
-    return calculate_wma(raw_hma, sqrt_length)
+    return _legacy_calculate_wma(raw_hma, sqrt_length)
 
-def calculate_adx(high, low, close, window=14):
+def _legacy_calculate_adx(high, low, close, window=14):
     """Average Directional Index"""
     # True Range
     tr1 = high - low
@@ -120,7 +122,16 @@ def calculate_adx(high, low, close, window=14):
     return adx
 
 def add_common_indicators(df, params):
-    """전략에 필요한 모든 공통 지표를 DataFrame에 추가"""
+    """⚠️ DEPRECATED: 이 함수는 더 이상 사용되지 않습니다.
+    indicators_advanced_futures.py의 최적화된 함수들을 직접 사용하세요.
+    """
+    import warnings
+    warnings.warn(
+        "add_common_indicators는 deprecated되었습니다. "
+        "indicators_advanced_futures의 함수들을 직접 사용하세요.",
+        DeprecationWarning,
+        stacklevel=2
+    )
     df = df.copy()
     
     # 기본 지표
@@ -128,11 +139,11 @@ def add_common_indicators(df, params):
     df['noise'] = calculate_noise_ratio(df['open'], df['high'], df['low'], df['close'])
     
     # 이동평균 (Legacy)
-    df['ma50'] = calculate_sma(df['close'], 50) 
-    df['ema20'] = calculate_ema(df['close'], 20)
+    df['ma50'] = _legacy_calculate_sma(df['close'], 50) 
+    df['ema20'] = _legacy_calculate_ema(df['close'], 20)
     
     # ATR
-    df['atr'] = calculate_atr(df['high'], df['low'], df['close'], params.get('ATR_PERIOD', 14))
+    df['atr'] = _legacy_calculate_atr(df['high'], df['low'], df['close'], params.get('ATR_PERIOD', 14))
     
     # --- New Indicators (Conditional Calculation based on params) ---
     
@@ -149,11 +160,11 @@ def add_common_indicators(df, params):
     # [NEW] Hull MA (Fast Trend)
     if params.get('REGIME_FILTER') == 'HMA' or 'HMA_WINDOW' in params:
         window = params.get('HMA_WINDOW', 50)
-        df['hma'] = calculate_hma(df['close'], window)
+        df['hma'] = _legacy_calculate_hma(df['close'], window)
 
     # [NEW] ADX (Trend Strength)
     if params.get('USE_ADX', False) or 'ADX_THRESHOLD' in params:
-        df['adx'] = calculate_adx(df['high'], df['low'], df['close'], window=14)
+        df['adx'] = _legacy_calculate_adx(df['high'], df['low'], df['close'], window=14)
     
     # 3. Volatility Indicator (Legacy Strategy A)
     if 'VOL_SHORT_WINDOW' in params:
@@ -166,13 +177,13 @@ def add_common_indicators(df, params):
     # 4. RSI
     if params.get('USE_RSI', False) or 'RSI_PERIOD' in params:
         rsi_window = params.get('RSI_PERIOD', 14)
-        df['rsi'] = calculate_rsi(df['close'], rsi_window)
+        df['rsi'] = _legacy_calculate_rsi(df['close'], rsi_window)
         
     # 5. Bollinger Bands
     if params.get('USE_BOLLINGER', False) or 'BB_WINDOW' in params:
         bb_window = params.get('BB_WINDOW', 20)
         bb_std = params.get('BB_STD', 2.0)
-        df['bb_upper'], df['bb_lower'] = calculate_bollinger_bands(df['close'], bb_window, bb_std)
+        df['bb_upper'], df['bb_lower'] = _legacy_calculate_bollinger_bands(df['close'], bb_window, bb_std)
         df['bb_width'] = (df['bb_upper'] - df['bb_lower']) / df['ma50'] 
 
     # 6. MACD
@@ -180,11 +191,11 @@ def add_common_indicators(df, params):
         macd_fast = params.get('MACD_FAST', 12)
         macd_slow = params.get('MACD_SLOW', 26)
         macd_sig = params.get('MACD_SIGNAL', 9)
-        df['macd'], df['macd_signal'], df['macd_hist'] = calculate_macd(df['close'], macd_fast, macd_slow, macd_sig)
+        df['macd'], df['macd_signal'], df['macd_hist'] = _legacy_calculate_macd(df['close'], macd_fast, macd_slow, macd_sig)
 
     # 7. MA Window for Strategy A
     if 'MA_WINDOW' in params:
         ma_window = params['MA_WINDOW']
-        df[f'ma{ma_window}'] = calculate_sma(df['close'], ma_window)
+        df[f'ma{ma_window}'] = _legacy_calculate_sma(df['close'], ma_window)
 
     return df
