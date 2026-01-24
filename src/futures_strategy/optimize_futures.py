@@ -230,7 +230,7 @@ def objective(
         # Calculate Score
         # Extract mode from strategy_name (e.g., Ultimate_DAY)
         mode_str = strategy_name.split("_")[-1]
-        score = calculate_score(ret, mdd, trades_df, mode=mode_str, market_type="futures")
+        score = calculate_score(ret, mdd, trades_df, mode=mode_str, market_type="futures", timeframe=selected_tf)
 
         # [SPEED UP] Short-circuit: If any symbol performs poorly, fail the trial immediately
         # One bad apple spoils the bunch (Harmonic Mean logic)
@@ -288,9 +288,9 @@ def main():
     parser.add_argument(
         "--mode",
         type=str,
-        default="DAY",
-        choices=["SCALP", "DAY", "SWING", "ALL"],
-        help="Trading Mode: SCALP, DAY, SWING",
+        default="UNIFIED",
+        choices=["SCALP", "DAY", "SWING", "UNIFIED", "ALL"],
+        help="Trading Mode: SCALP, DAY, SWING, or UNIFIED (recommended - auto-selects best timeframe)",
     )
     args = parser.parse_args()
 
@@ -306,7 +306,8 @@ def main():
         "SCALP": 3600,  # 3 timeframes (5m,15m,30m), high data volume but narrow param range
         "DAY": 4200,    # 3 timeframes (1h,2h,4h), balanced - most commonly used mode
         "SWING": 5000,  # 3 timeframes (4h,1d,3d), wide param range + low data volume (overfitting risk)
-        "ALL": 4500,    # Catch-all (highest complexity)
+        "UNIFIED": 2000, # 3 timeframes (1h, 4h, 1d), robust trend following - Sweet Spot trials
+        "ALL": 2000,     # Alias for UNIFIED
     }
 
     if args.trials is None:
@@ -340,10 +341,13 @@ def main():
     data_maps = {}
     print(f"📡 Loading data for symbols: {', '.join(symbols)}")
 
+    # [CRITICAL] Ensure '1d' is loaded for HTF Trend Filter, even if not optimizing on it
+    loading_timeframes = list(set(timeframes + ['1d']))
+    
     for symbol in symbols:
         print(f"Loading {symbol}...")
         data_maps[symbol] = load_all_timeframes(
-            symbol, BACKTEST_START_DATE, BACKTEST_END_DATE, timeframes
+            symbol, BACKTEST_START_DATE, BACKTEST_END_DATE, loading_timeframes
         )
         
         # [VALIDATION] Ensure all required data is loaded
@@ -485,18 +489,22 @@ def main():
             _dummy_arr,
             _dummy_arr,
             _dummy_arr,  # OHLC (close, high, low)
+            _dummy_arr,  # Open Prices [NEW]
             _dummy_arr,  # Volume Ratio
             _dummy_arr,
             _dummy_arr,  # Entry Upper/Lower
             _dummy_int,
             _dummy_int,
             _dummy_arr,  # Trend, Strength, ATR
-            _dummy_arr,  # Parabolic SAR (New)
+            _dummy_arr,  # Parabolic SAR
+            _dummy_arr,  # RSI
+            _dummy_arr,  # [NEW] Hurst
+            _dummy_arr,  # [NEW] NATR
             10000.0,
             1.0,
             0.001,
             0.001,  # Bal, Lev, Fee, Slip
-            0,  # Exit Type (New: 0=Trailing, 1=SAR)
+            0,  # Exit Type (0=Trailing, 1=SAR)
             0,
             0.01,
             1.5,  # SL Type, Pct, Mult
@@ -511,7 +519,17 @@ def main():
             8,  # Funding params
             1000,
             0.0,  # Max Hold, Trailing Act
-            0 # [WARMUP] Missing argument fixed
+            0.5,  # Time-based Exit Profit Threshold
+            80.0, # RSI Exit Threshold
+            False, # [NEW] Use Dynamic Risk
+            0.6,   # Strong Hurst
+            1.5,   # Strong NATR
+            1.5,   # Strong Multiplier
+            0.55,  # Weak Hurst
+            0.5,   # Weak Multiplier
+            4.0,   # Panic NATR
+            0.25,  # Panic Multiplier
+            0      # Warmup bars
         )
         print(" Done!")
     except Exception as e:
@@ -543,6 +561,55 @@ def main():
     if len(study.trials) > 0:
         print(f"🏆 Best Score: {study.best_value:.2f}")
         print(f"✨ Best Params: {study.best_params}")
+        
+        # [NEW] Detailed Report for TRAIN Period
+        print(f"\n{'='*70}")
+        print(f"📊 TRAIN PERIOD PERFORMANCE (Best Strategy)")
+        print(f"{'='*70}")
+        
+        best_params = study.best_params
+        # Merge fixed params if any (handled inside objective but good to be safe)
+        
+        selected_tf = best_params.get('TIMEFRAME', '1h')
+        
+        for symbol in symbols:
+            if selected_tf not in data_maps[symbol]:
+                continue
+                
+            hourly_df = data_maps[symbol][selected_tf]
+            daily_df = data_maps[symbol]['1d']
+            
+            # Re-create Strategy & Engine
+            strategy = UltimateStrategy(f"Best_{symbol}", best_params)
+            engine = BacktestEngineFast(hourly_df, daily_df, strategy, initial_balance=750)
+            
+            # Inject pre-computed merge index
+            if merge_indices and symbol in merge_indices and selected_tf in merge_indices[symbol]:
+                engine._merge_index_map = merge_indices[symbol][selected_tf]
+                
+            engine.leverage = best_params.get('LEVERAGE', 1)
+            engine.risk_per_trade = best_params.get('RISK_PER_TRADE', 0.02)
+            
+            try:
+                res = engine.run()
+                
+                ret = res['total_return_pct']
+                mdd = res['mdd_pct']
+                cnt = res['total_trades']
+                win = res['win_rate']
+                
+                trades_df = res['trades_df']
+                pf = 0.0
+                if not trades_df.empty and 'pnl' in trades_df.columns:
+                    gross_profit = trades_df[trades_df['pnl'] > 0]['pnl'].sum()
+                    gross_loss = abs(trades_df[trades_df['pnl'] < 0]['pnl'].sum())
+                    pf = gross_profit / gross_loss if gross_loss > 0 else (gross_profit if gross_profit > 0 else 0.0)
+                
+                print(f"   - {symbol:<9} : Return {ret:>7.2f}% | MDD {mdd:>6.2f}% | Trades {cnt:>3} | Win {win:>5.1f}% | PF {pf:.2f}")
+                
+            except Exception as e:
+                print(f"   - {symbol:<9} : Error calculating performance: {e}")
+
     print(f"{'='*70}")
 
 

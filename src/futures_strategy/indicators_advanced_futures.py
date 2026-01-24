@@ -267,6 +267,40 @@ def calculate_hurst_exponent(series, window=100):
     res = _hurst_numba_logic(vals, window)
     return pd.Series(res, index=series.index)
 
+@indicator_cache
+def calculate_efficiency_ratio(series, window=10):
+    """
+    Kaufman Efficiency Ratio (ER)
+    ER = Total Displacement / Total Absolute Change
+    ER ranges from 0 to 1. Higher value means stronger trend with less noise.
+    """
+    direction = (series - series.shift(window)).abs()
+    volatility = (series - series.shift(1)).abs().rolling(window=window).sum()
+    return direction / volatility.replace(0, 0.001)
+
+@indicator_cache
+def calculate_natr(df, window=14):
+    """
+    Normalized Average True Range (NATR)
+    NATR = (ATR / Close) * 100
+    Useful for comparing volatility across different assets or price levels.
+    """
+    atr = calculate_atr(df, window=window)
+    return (atr / df['close']) * 100
+
+@indicator_cache
+def calculate_garman_klass_vol(df, window=30):
+    """
+    Garman-Klass Volatility
+    Uses Open, High, Low, Close for more efficient volatility estimation.
+    """
+    log_hl = np.log(df['high'] / df['low'])
+    log_cc = np.log(df['close'] / df['open'])
+    
+    # 0.5 * (ln(H/L))^2 - (2*ln(2)-1) * (ln(C/O))^2
+    gk = 0.5 * (log_hl**2) - (2 * np.log(2) - 1) * (log_cc**2)
+    return np.sqrt(gk.rolling(window=window).mean())
+
 def clear_indicator_cache():
     global _INDICATOR_CACHE
     _INDICATOR_CACHE = {}
