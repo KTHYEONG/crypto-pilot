@@ -11,7 +11,7 @@ from datetime import datetime
 sys.path.append(os.path.join(os.path.dirname(__file__), '../../'))
 
 from src.strategy.strategies import UltimateStrategy
-from src.data.collector import DataCollector
+from src.spot_strategy.upbit_client import UpbitClient
 
 # Setup Logging
 logging.basicConfig(level=logging.INFO)
@@ -110,85 +110,191 @@ def load_best_params_from_mysql(mode, storage_url):
     except KeyError:
         return None, None, None
 
-def load_symbol_data(symbol, tf):
-    """심볼 데이터 로드 (캐시 우선, 없으면 다운로드)"""
-    filename = f"{symbol}_{tf}_20180101_20260116_spot.csv"
-    filepath = os.path.join(os.path.dirname(__file__), '../../data', filename)
+def load_data_spot(symbol, tf):
+    """
+    Load Hourly and Daily data for Multi-Timeframe Verification using UpbitClient.
+    [IMPROVED] Search for existing files with glob pattern to maximize cache usage.
+    """
+    from config.settings import BACKTEST_START_DATE, BACKTEST_END_DATE
+    import glob
     
-    # 파일 검색
-    if not os.path.exists(filepath):
-        import glob
-        pattern = os.path.join(os.path.dirname(__file__), '../../data', f"{symbol}_{tf}_*_spot.csv")
-        matches = glob.glob(pattern)
-        if matches:
-            filepath = matches[0]
+    # Setup Upbit Client
+    access = os.getenv("UPBIT_ACCESS_KEY")
+    secret = os.getenv("UPBIT_SECRET_KEY")
+    client = UpbitClient(access, secret)
     
-    # 다운로드
-    if not os.path.exists(filepath):
-        logger.info(f"   📥 Cache not found for {symbol}-{tf}. Downloading...")
-        try:
-            from config.settings import BACKTEST_START_DATE, BACKTEST_END_DATE
-            collector = DataCollector()
-            df_downloaded = collector.collect_and_save(symbol, tf, BACKTEST_START_DATE, BACKTEST_END_DATE)
+    start_ts = int(pd.Timestamp(BACKTEST_START_DATE).timestamp() * 1000)
+    end_ts = int(pd.Timestamp(BACKTEST_END_DATE).timestamp() * 1000)
+    data_dir = os.path.join(os.path.dirname(__file__), '../../data')
+    if not os.path.exists(data_dir):
+        os.makedirs(data_dir, exist_ok=True)
+    
+    def get_or_download(timeframe, start_cfg, end_cfg):
+        sym_clean = symbol.replace('/', '_')
+        # Target exact filename
+        target_name = f"{sym_clean}_{timeframe}_{start_cfg.replace('-','')}_{end_cfg.replace('-','')}_spot.csv"
+        target_path = os.path.join(data_dir, target_name)
+        
+        # 1. Try to find EXISTING files (Pattern Match)
+        # Pattern: KRW-BTC_1h_*_spot.csv
+        pattern = os.path.join(data_dir, f"{sym_clean}_{timeframe}_*_spot.csv")
+        candidates = glob.glob(pattern)
+        
+        df = None
+        loaded_path = None
+        
+        if candidates:
+            # Sort by size (assume larger file has more data) or creation time
+            # Let's pick the largest file
+            candidates.sort(key=lambda x: os.path.getsize(x), reverse=True)
+            best_candidate = candidates[0]
             
-            if df_downloaded is None or df_downloaded.empty:
-                return None
+            try:
+                temp_df = pd.read_csv(best_candidate)
+                if 'timestamp' in temp_df.columns:
+                    # Check coverage
+                    min_ts = temp_df['timestamp'].min()
+                    max_ts = temp_df['timestamp'].max()
+                    
+                    if max_ts >= (end_ts - 86400000 * 5): # Allow 5 days lag for end date (e.g. recent weekend)
+                        # Check start date
+                        if min_ts <= (start_ts + 86400000 * 30): # 30 days tolerance
+                            # logger.info(f"   ✅ Found compatible cached data: {os.path.basename(best_candidate)}")
+                            df = temp_df
+                            loaded_path = best_candidate
+                        else:
+                            # Start date is later than requested -> Likely Listing Date issue
+                            # Accept it silently per user request
+                            # logger.info(f"   ⚠️ Cached data starts later ({pd.to_datetime(min_ts, unit='ms').strftime('%Y-%m-%d')}) than requested. Using cached file.")
+                            df = temp_df
+                            loaded_path = best_candidate
+                    else:
+                        file_end_str = pd.to_datetime(max_ts, unit='ms').strftime('%Y-%m-%d')
+                        logger.info(f"   ⚠️ Cached data too old (Ends {file_end_str}). Downloading fresh...")
+            except Exception as e:
+                logger.error(f"Error reading candidate {best_candidate}: {e}")
+        
+        # 2. If not found or insufficient, Download
+        if df is None:
+            start_str = pd.to_datetime(start_ts, unit='ms').strftime('%Y-%m-%d')
+            end_str = pd.to_datetime(end_ts, unit='ms').strftime('%Y-%m-%d')
+            logger.info(f"   📥 [API START] Downloading {timeframe} data for {symbol} ({start_str} ~ {end_str})... This may take a while.")
             
-            # 파일명 변환
-            standard_filename = f"{symbol}_{tf}_{BACKTEST_START_DATE}_{BACKTEST_END_DATE}.csv"
-            standard_filepath = os.path.join(os.path.dirname(__file__), '../../data', standard_filename)
-            spot_filename = f"{symbol}_{tf}_{BACKTEST_START_DATE.replace('-','')}_{BACKTEST_END_DATE.replace('-','')}_spot.csv"
-            spot_filepath = os.path.join(os.path.dirname(__file__), '../../data', spot_filename)
+            try:
+                import time
+                t0 = time.time()
+                df = client.fetch_ohlcv(symbol, timeframe, since=start_ts, end=end_ts)
+                elapsed = time.time() - t0
+                
+                if df is not None and not df.empty:
+                    try:
+                        df.to_csv(target_path, index=False)
+                        loaded_path = target_path
+                        logger.info(f"   ✅ [API DONE] Downloaded {len(df)} rows in {elapsed:.1f}s. Saved to: {os.path.basename(target_path)}")
+                    except Exception as save_err:
+                        logger.error(f"   ❌ Failed to save file {target_path}: {save_err}")
+                else:
+                    logger.warning(f"   ⚠️ Download returned empty/None for {symbol} {timeframe}")
+            except Exception as e:
+                logger.error(f"   ❌ Failed to download {timeframe} data: {e}")
+                
+        if df is not None:
+            df['datetime'] = pd.to_datetime(df['timestamp'], unit='ms')
             
-            if os.path.exists(standard_filepath) and not os.path.exists(spot_filepath):
-                import shutil
-                shutil.move(standard_filepath, spot_filepath)
-                filepath = spot_filepath
-            else:
-                filepath = spot_filepath
-        except Exception as e:
-            print(f"   ❌ Error downloading {symbol}: {e}")
-            return None
+        return df
+
+    # Load Daily
+    daily_df = get_or_download('1d', BACKTEST_START_DATE, BACKTEST_END_DATE)
     
-    if not os.path.exists(filepath):
-        return None
+    # Load Hourly
+    hourly_df = get_or_download(tf, BACKTEST_START_DATE, BACKTEST_END_DATE)
     
-    df = pd.read_csv(filepath)
-    df['datetime'] = pd.to_datetime(df['datetime'])
-    return df
+    return hourly_df, daily_df
+
+def prepare_spot_data(hourly_df, daily_df, strategy):
+    """
+    Merge Daily indicators into Hourly data for backtesting.
+    Simulates what EngineFastSpot does.
+    """
+    # 1. Calculate Indicators
+    daily_df = strategy.generate_signals(daily_df.copy())
+    hourly_df = strategy.generate_signals(hourly_df.copy())
+    
+    # 2. Prepare Merge Keys
+    daily_df['date_key'] = daily_df['datetime'].dt.strftime('%Y-%m-%d')
+    hourly_df['date_key'] = hourly_df['datetime'].dt.strftime('%Y-%m-%d')
+    
+    # 3. Select Daily Columns to Merge
+    exclude_cols = {'date_key', 'datetime', 'date', 'open', 'high', 'low', 'close', 'volume'}
+    daily_cols = [c for c in daily_df.columns if c not in exclude_cols]
+    
+    # 4. Shift Daily Data (Avoid Lookahead) & Rename
+    shifted_daily = daily_df[daily_cols + ['date_key']].copy()
+    shifted_daily[daily_cols] = shifted_daily[daily_cols].shift(1)
+    shifted_daily = shifted_daily.rename(columns={c: f'daily_{c}' for c in daily_cols})
+    
+    # 5. Merge
+    merged_df = pd.merge(hourly_df, shifted_daily, on='date_key', how='left')
+    
+    # 6. Apply Logic Merge (Trend Alignment)
+    # Spot Engine Logic: Trend is LONG(1) only if both Hourly and Daily agree
+    if 'daily_trend_direction' in merged_df.columns:
+        h_trend = merged_df['trend_direction'].fillna(0).values
+        d_trend = merged_df['daily_trend_direction'].fillna(0).values
+        merged_df['trend_direction'] = np.where((h_trend == 1) & (d_trend == 1), 1, 0)
+        
+    return merged_df
 
 def verify_single_symbol(symbol, best_params, primary_symbols):
-    """단일 심볼 백테스트 실행"""
+    """단일 심볼 백테스트 실행 (Multi-Timeframe)"""
     from config.settings import TRAIN_CUTOFF_DATE
     
     tf = best_params.get('TIMEFRAME', '1h')
-    df = load_symbol_data(symbol, tf)
     
-    if df is None:
-        print(f"   ⚠️ Cache not found for {symbol}-{tf}. Skipping.")
+    # Load BOTH Hourly and Daily
+    hourly_df, daily_df = load_data_spot(symbol, tf)
+    
+    if hourly_df is None or daily_df is None:
+        print(f"   ⚠️ Data missing for {symbol}. Skipping.")
         return None
     
     # OOS 슬라이싱
     cutoff_ts = pd.Timestamp(TRAIN_CUTOFF_DATE)
-    test_df = df[df['datetime'] >= cutoff_ts].copy()
+    test_hourly = hourly_df[hourly_df['datetime'] >= cutoff_ts].copy()
+    test_daily = daily_df[daily_df['datetime'] >= cutoff_ts].copy()
     
-    if test_df.empty:
+    if test_hourly.empty:
         print(f"   ⚠️ No OOS data for {symbol}. Skipping.")
         return None
     
-    # 백테스트
+    # 전략 준비 및 데이터 병합
     strategy = UltimateStrategy("Verify", best_params)
-    test_df = strategy.generate_signals(test_df)
-    ret_pct, mdd, _, _, _ = run_backtest_segment(
+    test_df = prepare_spot_data(test_hourly, test_daily, strategy)
+    
+    # 백테스트 실행
+    ret_pct, mdd, trades_log, _, _ = run_backtest_segment(
         test_df, best_params, initial_balance=10000000.0, return_series=True
     )
     
+    trade_count = len(trades_log) if trades_log else 0
+    win_rate = 0.0
+    pf = 0.0
+    if trade_count > 0:
+        wins = [t for t in trades_log if t > 0]
+        # Spot trades_log contains Profit amounts, not %? 
+        # run_backtest_segment returns trades_log as list of PnL amounts (based on code context)
+        # Let's verify backtest_utils return. Usually it returns PnL amounts.
+        losses = [t for t in trades_log if t <= 0]
+        win_rate = len(wins) / trade_count * 100
+        gross_profit = sum(wins)
+        gross_loss = abs(sum(losses))
+        pf = gross_profit / gross_loss if gross_loss > 0 else (gross_profit if gross_profit > 0 else 0.0)
+
     is_primary = symbol in primary_symbols
     indicator = "🎯 PRIMARY" if is_primary else "📊 REFERENCE"
-    print(f"   - {symbol} [{indicator}]: Return {ret_pct:.2f}% | MDD {mdd:.2f}%")
+    print(f"   - {symbol} [{indicator}]: Return {ret_pct:.2f}% | MDD {mdd:.2f}% | Trades {trade_count} | Win {win_rate:.1f}% | PF {pf:.2f}")
     
-    return {'symbol': symbol, 'return': ret_pct, 'mdd': mdd, 'is_primary': is_primary}
-
+    return {'symbol': symbol, 'return': ret_pct, 'mdd': mdd, 'trades': trade_count, 'win_rate': win_rate, 'pf': pf, 'is_primary': is_primary}
 def calculate_mode_performance(all_results):
     """PRIMARY/REFERENCE 성능 계산"""
     primary_results = [r for r in all_results if r['is_primary']]
@@ -217,6 +323,8 @@ if __name__ == "__main__":
                         help="Comma-separated list of symbols to verify")
     parser.add_argument("--alt", type=int, default=0, choices=[0, 1],
                         help="Include altcoins for validation (1=yes, 0=no). Adds SOL, XRP, DOGE, ADA")
+    parser.add_argument("--all-modes", action="store_true",
+                        help="Verify all modes (SCALP, DAY, SWING, UNIFIED). Default: UNIFIED only")
     args = parser.parse_args()
     
     # 심볼 목록 빌드
@@ -230,7 +338,16 @@ if __name__ == "__main__":
     
     symbols = base_symbols
     PRIMARY_SYMBOLS = ['KRW-BTC', 'KRW-ETH']
-    MODES = ['SCALP', 'DAY', 'SWING']
+    
+    # [DEFAULT] Verify UNIFIED only (fastest, most flexible)
+    # Use --all-modes to compare all strategies
+    if args.all_modes:
+        MODES = ['SCALP', 'DAY', 'SWING', 'UNIFIED']
+        print(f"🔍 All-Modes Verification enabled. Testing: {MODES}")
+    else:
+        MODES = ['UNIFIED']
+        print(f"⚡ Quick Verification: UNIFIED mode only (use --all-modes to compare all strategies)")
+    
     results = []
     
     print("\n" + "="*80)

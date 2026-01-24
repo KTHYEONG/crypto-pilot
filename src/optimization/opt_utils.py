@@ -143,6 +143,16 @@ def suggest_params(trial, search_space):
             else:
                 # If constraint pushes low above high, clip to safe_low logic
                 params['HURST_TREND_THRESHOLD'] = safe_low
+
+    elif strength_filter == 'ER':
+        if 'ER_THRESHOLD' in search_space:
+            spec = search_space['ER_THRESHOLD']
+            params['ER_THRESHOLD'] = trial.suggest_float('ER_THRESHOLD', spec['low'], spec['high'], step=spec.get('step'))
+            
+    elif strength_filter == 'NATR':
+        if 'NATR_THRESHOLD' in search_space:
+            spec = search_space['NATR_THRESHOLD']
+            params['NATR_THRESHOLD'] = trial.suggest_float('NATR_THRESHOLD', spec['low'], spec['high'], step=spec.get('step'))
     
     # === Phase 5: Exit-Type Dependent Parameters ===
     exit_type = params.get('EXIT_TYPE', 'ATR')
@@ -209,6 +219,13 @@ def suggest_params(trial, search_space):
         'ADX_THRESHOLD',
         'RISK_PER_TRADE', 'LEVERAGE',
         'MAX_HOLDING_BARS', 'TRAILING_ACTIVATION_ATR',
+        'TIME_EXIT_PROFIT_THRESHOLD',  # [NEW] Conditional time exit
+        'RSI_EXIT_THRESHOLD', # [NEW] Panic exit
+        'RSI_ENTRY_MAX', 'NATR_ENTRY_MIN', # [NEW] Entry Safety Filters
+        'USE_DYNAMIC_RISK',
+        'STRONG_REGIME_HURST', 'STRONG_REGIME_NATR', 'STRONG_REGIME_MULTIPLIER',
+        'WEAK_REGIME_HURST', 'WEAK_REGIME_MULTIPLIER',
+        'PANIC_REGIME_NATR', 'PANIC_REGIME_MULTIPLIER',
         'RISK_PER_TRADE_SPOT'
     ]
     
@@ -230,82 +247,184 @@ def suggest_params(trial, search_space):
     
     return params
 
-def calculate_score(ret, mdd, trades_df, mode="DAY", market_type="spot"):
+def soft_sigmoid(x, L, k, x0):
     """
-    Objective Function v6: Weighted Sum with Soft Barriers
-    - Replaces fragile multiplication logic with robust linear utility.
-    - Removes heuristic sigmoids constraints.
-    - Prevents 'Zero Collapse' where one weak metric zeroes out the entire score.
+    Soft-Sigmoid mapping to handle diminishing returns without hard caps.
+    L: Maximum value (Asymptote)
+    k: Steepness
+    x0: Midpoint (Center of the S-curve)
+    
+    Numerically stable implementation with overflow protection.
+    """
+    # Prevent overflow: clip exp argument to safe range [-500, 500]
+    z = -k * (x - x0)
+    z_safe = np.clip(z, -500, 500)
+    return L / (1 + np.exp(z_safe))
+
+def calculate_score(ret, mdd, trades_df, mode="DAY", market_type="spot", timeframe=None):
+    """
+    Objective Function v14: Semantic Robustness Optimization
+    
+    Improvements:
+    1. Added SQN (System Quality Number): Rewards statistical significance and smoothness.
+    2. Added Consistency Score (R^2): Penalizes volatile equity curves even if end return is high.
+    3. Tighter Expectancy: Raised min avg profit to 0.20% (20bps) to guarantee slippage coverage.
+    4. Market-Specific Weights: 
+       - Spot: Prioritizes Consistency & Safety (Sortino/Calmar).
+       - Futures: Prioritizes Survivability (Kelly/Ulcer).
     """
     if trades_df.empty:
         return -10000.0
 
     N = len(trades_df)
-    if N < 10: return -10000.0 # Insufficient sample size
-
-    if 'pnl_pct' not in trades_df.columns:
+    if 'pnl' not in trades_df.columns or 'pnl_pct' not in trades_df.columns:
         return -10000.0
     
     returns = trades_df['pnl_pct'].values
+    pnl_raw = trades_df['pnl'].values
 
-    # --- Metrics Calculation ---
+    # --- 1. Core Efficiency Metrics ---
     r_avg = np.mean(returns)
-    # Use Sample Standard Deviation (ddof=1) as backtest is a sample of future distribution
-    # Default np.std uses ddof=0 (Population), which underestimates risk for small N
-    r_std = np.std(returns, ddof=1) if len(returns) > 1 else 100.0
-    if r_std == 0: r_std = 0.001
+    r_std = np.std(returns, ddof=1) if len(returns) > 1 else 0.001
     
-    # 1. SQN (System Quality Number)
-    # Reflects the statistical significance of the trading system
-    sqn = (np.sqrt(N) * r_avg) / r_std
+    # [METRIC] SQN (System Quality Number)
+    # SQN = sqrt(N) * (Mean / Std)
+    # < 1.6: Poor, 1.6-2.0: Average, 2.0-3.0: Good, 3.0-5.0: Excellent, > 7.0: Holy Grail
+    sqn_raw = np.sqrt(N) * (r_avg / r_std) if r_std > 0 else 0
+    sqn = np.clip(sqn_raw, 0, 10)
+
+    downside_returns = returns[returns < 0]
+    downside_std = np.std(downside_returns, ddof=1) if len(downside_returns) > 1 else 0.001
     
-    # 2. Profit Factor
-    # Efficiency metric (Win/Loss ratio)
+    # [METRIC] Sortino
+    sortino_raw = r_avg / max(downside_std, 0.0001)
+    sortino = np.clip(sortino_raw, -20, 20)
+    
     pos_sum = np.sum(returns[returns > 0])
     neg_sum = abs(np.sum(returns[returns < 0]))
     pf = pos_sum / neg_sum if neg_sum > 0 else 3.0
-    # Soft cap PF to avoid skewing optimization with unrealistic outlier values
-    pf = min(pf, 5.0) 
-
-    # 3. Calmar Ratio
-    # Risk-Adjusted Return (Aggressive focus)
-    abs_mdd = abs(mdd) if mdd != 0 else 0.01
-    calmar = ret / abs_mdd
     
-    # --- Weights & Penalties Configuration ---
+    abs_mdd = abs(mdd) if mdd != 0 else 0.01
+    # [METRIC] Calmar
+    calmar_raw = ret / abs_mdd
+    calmar = np.clip(calmar_raw, -10, 20)
+
+    # --- 2. Financial Safety: Kelly Criterion ---
+    win_rate = len(returns[returns > 0]) / N
+    avg_win = np.mean(returns[returns > 0]) if any(returns > 0) else 0.001
+    avg_loss = abs(np.mean(returns[returns < 0])) if any(returns < 0) else 0.001
+    win_loss_ratio = max(avg_win / avg_loss, 0.001)
+    
+    kelly_f = win_rate - ((1 - win_rate) / win_loss_ratio)
+    
+    # --- 3. Ulcer & Consistency (Linearity) ---
+    equity_curve = np.cumsum(returns)
+    
+    # [METRIC] Consistency (R^2)
+    # Measures how close the equity curve is to a straight line (perfect steady growth)
+    if N > 5:
+        x = np.arange(len(equity_curve))
+        y = equity_curve
+        correlation_matrix = np.corrcoef(x, y)
+        correlation_xy = correlation_matrix[0,1]
+        r_squared = correlation_xy**2 if not np.isnan(correlation_xy) else 0
+    else:
+        r_squared = 0.5
+
+    hwm = np.maximum.accumulate(equity_curve)
+    drawdowns = hwm - equity_curve
+    ulcer_proxy = np.sqrt(np.mean(np.square(drawdowns))) if len(drawdowns) > 0 else 0
+    
+    if not np.isfinite(ulcer_proxy) or not np.isfinite(sortino) or not np.isfinite(calmar):
+        return -10000.0
+
+    # --- 4. Scoring Logic ---
     score = 0.0
     
     if market_type == "futures":
-        # [Futures] Risk-Adjusted Return is King
-        # MDD Hard Limit ~35% (Liquidation Risk Management)
-        target_mdd = 35.0
-        min_trades = 50 if mode != 'SCALP' else 300
+        # [FUTURES] Theme: "ROBUST SURVIVABILITY"
+        target_mdd = 20.0
+        min_trades = 100 if mode != 'SCALP' else 300
         
-        # Weights (Sum = 1.0 approx) - Prioritize Calmar & SQN
-        # Scaling factors (e.g. *20) bring components to roughly similar magnitude (0~100 range)
-        score = (calmar * 10.0) + (sqn * 5.0) + (pf * 5.0)
+        # Sigmoids
+        s_calmar = soft_sigmoid(calmar, L=10.0, k=0.8, x0=3.0)
+        s_sortino = soft_sigmoid(sortino, L=8.0, k=1.0, x0=2.0)
+        s_pf = soft_sigmoid(pf, L=6.0, k=1.5, x0=1.8)
+        s_sqn = soft_sigmoid(sqn, L=8.0, k=0.8, x0=2.5) # Prefer SQN > 2.5
         
-    else:
-        # [Spot] Stability & Consistency is King
-        target_mdd = 30.0
-        min_trades = 30
+        score = (s_calmar * 10.0) + (s_sortino * 8.0) + (s_pf * 6.0) + (s_sqn * 8.0)
+        score += (s_pf * s_sqn) * 2.0 # High Pf + High SQN = Stable Winner
         
-        # Weights - Prioritize SQN (Robustness)
-        score = (sqn * 8.0) + (calmar * 6.0) + (pf * 4.0)
+        if kelly_f <= 0: return -10000.0
+        
+        # Penalties
+        score -= (ulcer_proxy * 6.0)
+        if r_squared < 0.85: score -= (0.85 - r_squared) * 20.0 # Heavy penalty for instability
+        
+        if abs_mdd > target_mdd:
+            score -= (abs_mdd - target_mdd) ** 1.8 * 15.0
 
-    # --- Barrier Penalties (Subtractive) ---
+        # [ANTI-OVERFIT] Futures Only Penalties
+        if win_rate > 0.85:
+            excess_win = (win_rate - 0.85) * 100
+            score -= (excess_win * 5.0) 
+            
+        if avg_loss > (avg_win * 3.0):
+            score -= 50.0
+
+    else:
+        # [SPOT] Theme: "COMPOUNDING EFFICIENCY"
+        # Objective: Maximize Geometric Growth (Kelly-Optimal) while minimizing volatility tax.
+        target_mdd = 28.0 
+        min_trades = 60
+        
+        # [CRITICAL] Kelly Check for Spot
+        # Even without leverage, negative Kelly means negative geometric growth.
+        if kelly_f <= 0: return -10000.0
+
+        # Spot needs higher Return/Risk efficiency (no leverage helper)
+        # Adjusted Centers for "Unleveraged Realism":
+        # - Calmar: 2.5 (Ex: 50% Ret / 20% MDD) - 4.0 was too high
+        # - PF: 1.5 (Trend Followers usually 1.5~2.0)
+        # - Sortino: 2.0 (Solid downside control)
+        
+        s_calmar = soft_sigmoid(calmar, L=15.0, k=0.7, x0=2.5)
+        s_sortino = soft_sigmoid(sortino, L=10.0, k=1.0, x0=2.0)
+        s_pf = soft_sigmoid(pf, L=8.0, k=1.2, x0=1.5)
+        s_sqn = soft_sigmoid(sqn, L=10.0, k=0.8, x0=2.0)
+        
+        score = (s_calmar * 12.0) + (s_sqn * 10.0) + (s_pf * 8.0) + (s_sortino * 6.0)
+        
+        # Bonus for Consistency (Relaxed to 0.90 for Crypto Reality)
+        if r_squared > 0.90: score += 10.0
+        
+        score -= (ulcer_proxy * 5.0) # Increased penalty for volatility tax
+        
+        if abs_mdd > 15.0:
+            score -= (abs_mdd - 15.0) * 1.5
+        if abs_mdd > target_mdd:
+            score -= (abs_mdd - target_mdd) * 10.0
+
+    # --- 5. Common Penalties ---
+
+    # Trade Count (Logarithmic Penalty - harsh on very low numbers)
+    min_trades = 150 if market_type == 'futures' else 60
     
-    # 1. MDD Penalty (Linear penalty beyond threshold)
-    # Instead of *0, we subtract points to guide optimizer back to safe zone
-    if abs_mdd > target_mdd:
-        excess = abs_mdd - target_mdd
-        # Heavy penalty: -5 score per 1% excess MDD
-        score -= (excess * 5.0)
-        
-    # 2. Trade Count Penalty
     if N < min_trades:
+        if market_type == 'futures':
+             if N < (min_trades * 0.5): return -10000.0
+        else:
+             if N < (min_trades * 0.4): return -10000.0
+             
         shortfall = min_trades - N
-        # Penalty: -1 score per missing trade
-        score -= (shortfall * 1.0)
+        score -= (shortfall * 4.0) 
         
+    # Expectancy Check (Slippage Safety)
+    # Raised to 0.20% (20bps) - ensures we cover 5bps fee + 5bps slippage + buffer
+    avg_profit_pct = r_avg
+    if avg_profit_pct < 0.15: 
+        return -10000.0
+    elif avg_profit_pct < 0.30: 
+        score -= (0.30 - avg_profit_pct) * 200.0 # Steep penalty between 0.15% and 0.30%
+
     return float(score)

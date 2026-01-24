@@ -47,13 +47,28 @@ SWING_CONFIG = {
     'TRAILING_ACTIVATION_ATR': {'low': 3.0, 'high': 8.0, 'log': True}  # Log (배수)
 }
 
+# UNIFIED: All-in-one strategy (모든 범위 병합)
+# 타임프레임: 1h, 4h, 1d 고정 (노이즈 제거)
+# 파라미터: 각 지표의 최솟값 ~ 최댓값 사용
+UNIFIED_CONFIG = {
+    'ENTRY_PERIOD': {'low': 10, 'high': 200, 'log': True},         # 전체 범위: 10 (SCALP) ~ 200 (SWING)
+    'MA_PERIOD':    {'low': 5,  'high': 200, 'log': True},         # 전체 범위: 5 (SCALP) ~ 200 (SWING)
+    'ATR_PERIOD':   {'low': 10, 'high': 30,  'log': True},         # 전체 범위: 10 (SCALP/DAY) ~ 30 (SWING)
+    'SL_PCT':       {'low': 0.005, 'high': 0.20, 'step': 0.005},   # 전체 범위: 0.5% ~ 20%
+    'TP_ATR_MULT':  {'low': 1.5,  'high': 15.0, 'log': True},      # [Optimized] Max 30->15 (Realistic Big Win)
+    'ADX_THRESH':   {'low': 15,   'high': 45,   'step': 1},        # 전체 범위: 15 (SWING) ~ 45 (SCALP)
+    'VOL_THRESHOLD': {'low': 1.1,  'high': 5.0,  'log': True},     # 전체 범위: 1.1 (SWING) ~ 5.0 (SCALP)
+    'MAX_HOLDING_BARS': {'low': 5, 'high': 200, 'log': True},      # [Optimized] Min 10->5 (Quick Scalp), Max 300->200 (Rotation)
+    'TRAILING_ACTIVATION_ATR': {'low': 0.5, 'high': 8.0, 'log': False, 'step': 0.5}  # [Optimized] Min 0.0->0.5 (Avoid immediate whipsaw)
+}
+
 # =========================================================
 # 2. BASE SEARCH SPACE
 # =========================================================
 BASE_SEARCH_SPACE = {
     'ENTRY_TYPE': {'type': 'categorical', 'choices': ['DONCHIAN', 'BOLLINGER', 'KELTNER', 'CCI']},
     'TREND_FILTER_TYPE': {'type': 'categorical', 'choices': ['SMA', 'EMA', 'HMA', 'DEMA', 'TEMA', 'SUPERTREND', 'MACD', 'ICHIMOKU', 'VWAP']},
-    'STRENGTH_FILTER_TYPE': {'type': 'categorical', 'choices': ['NONE', 'ADX', 'VHF', 'MFI', 'RSI', 'STOCHASTIC', 'STOCH_RSI', 'CMF', 'HURST']},
+    'STRENGTH_FILTER_TYPE': {'type': 'categorical', 'choices': ['NONE', 'ADX', 'VHF', 'MFI', 'RSI', 'STOCHASTIC', 'STOCH_RSI', 'CMF', 'HURST', 'ER', 'NATR']},
     'EXIT_TYPE': {'type': 'categorical', 'choices': ['ATR', 'PARABOLIC_SAR']},
     'USE_TAKE_PROFIT': {'type': 'categorical', 'choices': [True, False]},
     'STOP_LOSS_TYPE': {'type': 'categorical', 'choices': ['FIXED', 'ATR']},
@@ -89,8 +104,33 @@ BASE_SEARCH_SPACE = {
     # CMF Parameters
     'CMF_PERIOD': {'type': 'int', 'low': 10, 'high': 40, 'log': True},           # Log (기간)
     'CMF_THRESHOLD': {'type': 'float', 'low': 0.0, 'high': 0.15, 'step': 0.01},  # Linear (임계값) - 추세 추종: 양수 자금 유입만 허용
-
     
+    # ER (Kaufman Efficiency Ratio) Parameters
+    'ER_THRESHOLD': {'type': 'float', 'low': 0.3, 'high': 0.8, 'step': 0.05},    # H > 임계값: Trending
+    
+    # NATR (Normalized ATR) Parameters
+    'NATR_THRESHOLD': {'type': 'float', 'low': 0.5, 'high': 2.0, 'step': 0.1},   # 최소 변동성 기준
+    
+    # Time-Based Exit Parameters
+    'TIME_EXIT_PROFIT_THRESHOLD': {'type': 'float', 'low': 0.0, 'high': 2.0, 'step': 0.1},  # ATR 단위 최소 수익 (0 = 무조건 청산, 2 = 2 ATR 이상 수익일 때만 보유)
+    
+    # [NEW] Panic Exit Parameters
+    'RSI_EXIT_THRESHOLD': {'type': 'int', 'low': 75, 'high': 95, 'step': 1}, # 75~95 (Long Exit), 25~5 (Short Exit)
+
+    # [NEW] Safe Entry Filters
+    'RSI_ENTRY_MAX': {'type': 'int', 'low': 70, 'high': 85, 'step': 2},        # Don't buy if RSI > X (Overbought Top)
+    'NATR_ENTRY_MIN': {'type': 'float', 'low': 0.2, 'high': 1.5, 'step': 0.1}, # Don't buy if Volatility < X (Dead Market)
+
+    # [NEW] Dynamic Risk Sizing Parameters (Relaxed for Stability)
+    'USE_DYNAMIC_RISK': {'type': 'categorical', 'choices': [False, True]},
+    'STRONG_REGIME_HURST': {'type': 'float', 'low': 0.52, 'high': 0.62, 'step': 0.01},    # 0.52만 넘어도 추세로 인정
+    'STRONG_REGIME_NATR': {'type': 'float', 'low': 0.7, 'high': 1.6, 'step': 0.1},      # 낮은 변동성에서도 공격적 진입
+    'STRONG_REGIME_MULTIPLIER': {'type': 'float', 'low': 1.2, 'high': 1.8, 'step': 0.1},
+    'WEAK_REGIME_HURST': {'type': 'float', 'low': 0.40, 'high': 0.50, 'step': 0.01},     # 진짜 역추세일 때만 감액
+    'WEAK_REGIME_MULTIPLIER': {'type': 'float', 'low': 0.5, 'high': 0.9, 'step': 0.1},   # 감액 폭을 완화 (최소 0.5배 유지)
+    'PANIC_REGIME_NATR': {'type': 'float', 'low': 4.5, 'high': 7.5, 'step': 0.5},       # 진짜 패닉일 때만 방어
+    'PANIC_REGIME_MULTIPLIER': {'type': 'float', 'low': 0.1, 'high': 0.4, 'step': 0.05},
+
     # Hurst Exponent Parameters
     'HURST_PERIOD': {'type': 'int', 'low': 100, 'high': 300, 'log': True},       # Log (기간) - 통계적 신뢰도를 위한 최소 100
     'HURST_TREND_THRESHOLD': {'type': 'float', 'low': 0.52, 'high': 0.65, 'step': 0.01},    # H > 임계값: Trending (금융 시계열 현실 반영)
@@ -150,6 +190,15 @@ def GET_SEARCH_SPACE(mode, market_type='futures'):
         space['ATR_STOP_LOSS_MULT'] = {'type': 'float', 'low': 3.0, 'high': 6.0, 'step': 0.5}
         space['ATR_MULTIPLIER'] = {'type': 'float', 'low': 3.0, 'high': 8.0, 'step': 0.5}
 
+    elif mode == 'UNIFIED' or mode == 'ALL':
+        cfg = UNIFIED_CONFIG
+        # [UNIFIED] Supports both Futures and Spot with stable timeframes
+        # 1h, 4h, 1d - Robust trend following (Removed noisy 5m, 15m)
+        space['TIMEFRAME'] = {'type': 'categorical', 'choices': ['1h', '4h', '1d']}
+        # Wide ATR range to accommodate all strategies
+        space['ATR_STOP_LOSS_MULT'] = {'type': 'float', 'low': 1.0, 'high': 6.0, 'step': 0.5}
+        space['ATR_MULTIPLIER'] = {'type': 'float', 'low': 1.5, 'high': 8.0, 'step': 0.5}
+
     else:
         # Fallback to DAY config
         cfg = DAY_CONFIG
@@ -182,24 +231,47 @@ def GET_SEARCH_SPACE(mode, market_type='futures'):
 
     # === MARKET TYPE OVERRIDES ===
     if market_type == 'futures':
-        # [Futures] Risk & Leverage - Aggressive Growth (안정성 60% : 수익률 40%)
-        # Risk Per Trade: 1.0% ~ 15.0% (Expanded to allow Empirical Kelly Optimal)
-        # We rely on MDD penalty in objective function to curb excessive risk.
-        space['RISK_PER_TRADE'] = {'type': 'float', 'low': 0.01, 'high': 0.15, 'step': 0.01} 
-        # Leverage 1x (현물 수준) ~ 10x (공격적 추세 추종)
-        space['LEVERAGE'] = {'type': 'float', 'low': 1.0, 'high': 10.0, 'step': 0.5}
+        # [Futures] Risk & Leverage - Aggressive Growth (수익성 65% : 안정성 35%)
+        # Risk Per Trade: 2.5% ~ 5.0% (Optimized for Stability)
+        # Lowered max risk to 5% to prevent lucky huge bets
+        space['RISK_PER_TRADE'] = {'type': 'float', 'low': 0.02, 'high': 0.05, 'step': 0.005} 
+        # Leverage 1x ~ 4x (Balanced Aggression: -20% drawdown tolerance)
+        space['LEVERAGE'] = {'type': 'float', 'low': 1.0, 'high': 4.0, 'step': 0.5}
+        
+        # [ANTI-OVERFIT] Tighten UNIFIED limits for Futures Only
+        if mode == 'UNIFIED' or mode == 'ALL':
+            space['ATR_STOP_LOSS_MULT']['high'] = 4.0
+            space['ATR_MULTIPLIER']['high'] = 6.0
+            space['TAKE_PROFIT_ATR_MULT']['high'] = 10.0
+        
+        
+        # [ISOLATION] Remove Spot-only safety filters to prevent ghost parameters in Futures
+        if 'RSI_ENTRY_MAX' in space: del space['RSI_ENTRY_MAX']
+        if 'NATR_ENTRY_MIN' in space: del space['NATR_ENTRY_MIN']
         
     else: 
-        # [Spot] No Leverage, Higher Allocation per trade
+        # [Spot] No Leverage, Aggressive Allocation for Small Capital
         if 'LEVERAGE' in space: 
             del space['LEVERAGE']
         
-        # Spot typically uses larger allocation per trade (e.g. 30% ~ 100% of cash)
-        space['RISK_PER_TRADE_SPOT'] = {'type': 'float', 'low': 0.3, 'high': 1.0, 'step': 0.1}
+        # [CRITICAL FIX] Spot Regime Sizing Logic
+        # 평시 비중을 50~80%로 낮춰야 "Regime Multiplier (1.3x)"가 작동하여 100% 비중까지 확대 가능.
+        # 기존(0.8~1.0)은 평시에도 풀비중이라 강세장 로직이 무용지물이었음.
+        space['RISK_PER_TRADE_SPOT'] = {'type': 'float', 'low': 0.5, 'high': 0.8, 'step': 0.05}
+        
+        # [CRITICAL FIX] Spot Panic Exit Thresholds
+        # Spot Altcoins have extreme volatility. Raise thresholds to avoid premature exit.
+        space['RSI_EXIT_THRESHOLD'] = {'type': 'int', 'low': 88, 'high': 99, 'step': 1}
+        
+        # [NEW] Spot Entry Safety Filters
+        space['RSI_ENTRY_MAX'] = {'type': 'int', 'low': 75, 'high': 95, 'step': 2} # Allow FOMO somewhat but cap it
+        space['NATR_ENTRY_MIN'] = {'type': 'float', 'low': 0.2, 'high': 2.0, 'step': 0.2} # Wide range for spot
+        
+        space['PANIC_REGIME_NATR'] = {'type': 'float', 'low': 5.0, 'high': 12.0, 'step': 0.5}
         
         # Spot needs looser TP to catch big pumps
         if 'TAKE_PROFIT_ATR_MULT' in space:
-            space['TAKE_PROFIT_ATR_MULT']['high'] = max(space['TAKE_PROFIT_ATR_MULT']['high'], 8.0)
+            space['TAKE_PROFIT_ATR_MULT']['high'] = max(space['TAKE_PROFIT_ATR_MULT']['high'], 15.0)
             
         # [SPOT UPDATE] Mode-Specific Opportunity Cost Management
         if mode == 'SCALP':

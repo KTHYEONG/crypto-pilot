@@ -19,6 +19,7 @@ import signal
 import json
 import sqlite3
 import logging
+import gc
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
@@ -60,6 +61,7 @@ from config.settings import (
     FUTURES_TARGET_SYMBOLS,
     OPTUNA_STUDY_NAMES,
     SYMBOL_ALLOCATION_WEIGHTS,
+    FUTURES_STATE_FILE,
 )
 from src.futures_strategy.binance_client import BinanceClient
 from src.futures_strategy.strategies_futures import UltimateStrategy
@@ -102,6 +104,57 @@ logger = setup_logger("RealTraderFutures")
 
 
 # ============================================================
+# State Manager (JSON 파일 기반 - Futures 진입 시간 추적)
+# ============================================================
+class StateManager:
+    """거래 상태 관리 (진입 시간, 진입가 등 로컬 저장)"""
+
+    def __init__(self, state_file: Path):
+        self.state_file = state_file
+        self._ensure_file_exists()
+
+    def _ensure_file_exists(self):
+        """상태 파일이 없으면 생성"""
+        if not self.state_file.exists():
+            self.state_file.parent.mkdir(parents=True, exist_ok=True)
+            self._save({})
+
+    def _load(self) -> dict:
+        """상태 로드"""
+        try:
+            with open(self.state_file, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception as e:
+            logger.error(f"⚠️ State load error: {e}")
+            return {}
+
+    def _save(self, state: dict):
+        """상태 저장"""
+        try:
+            with open(self.state_file, 'w', encoding='utf-8') as f:
+                json.dump(state, f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            logger.error(f"⚠️ State save error: {e}")
+
+    def get_symbol_state(self, symbol: str) -> dict:
+        """특정 심볼의 상태 조회"""
+        state = self._load()
+        return state.get(symbol, {})
+
+    def update_symbol_state(self, symbol: str, data: dict):
+        """특정 심볼의 상태 업데이트"""
+        state = self._load()
+        if symbol not in state:
+            state[symbol] = {}
+        state[symbol].update(data)
+        self._save(state)
+
+    def clear_symbol_state(self, symbol: str):
+        """특정 심볼의 상태 초기화"""
+        state = self._load()
+        if symbol in state:
+            state[symbol] = {}
+            self._save(state)
 # Main Trader Class
 # ============================================================
 class RealTraderFutures:
@@ -117,6 +170,7 @@ class RealTraderFutures:
         # 신규 컴포넌트
         self.trade_db = TradeHistoryDB(TRADE_HISTORY_DB)
         self.health_manager = HealthCheckManager(HEARTBEAT_FILE)
+        self.state_manager = StateManager(FUTURES_STATE_FILE)
         
         # 클라우드 최적화 (옵션)
         self.cloud_optimizer = None
@@ -126,6 +180,9 @@ class RealTraderFutures:
         
         # Shutdown 플래그
         self._shutdown_requested = False
+        
+        # [Optimization] 중복 계산 방지용 캐시
+        self.last_calc_candle: Dict[str, str] = {}
         
         # Signal handlers 등록
         self._setup_signal_handlers()
@@ -152,6 +209,7 @@ class RealTraderFutures:
         if not os.path.exists(self.db_path):
             raise FileNotFoundError(f"DB file not found: {self.db_path}")
         
+        # [Lazy Loading] optuna is heavy, load only when needed
         import optuna
         storage = f"sqlite:///{self.db_path}"
         
@@ -201,6 +259,16 @@ class RealTraderFutures:
     def _place_order_safe(self, symbol: str, side: str, qty: float, atr: float = None, current_price: float = None):
         """안전한 주문 실행 (재시도 적용 + 스마트 주문 + 변동성 기반 최적화)"""
         return self.client.place_order_smart(symbol, side, qty, atr=atr, current_price=current_price)
+
+    @api_retry
+    def _place_stop_loss_safe(self, symbol: str, side: str, qty: float, stop_price: float):
+        """안전한 서버 사이드 Stop Loss 실행 (재시도 적용)"""
+        return self.client.place_stop_market_order(symbol, side, qty, stop_price)
+
+    @api_retry
+    def _cancel_all_orders_safe(self, symbol: str):
+        """안전한 모든 주문 취소 (재시도 적용)"""
+        return self.client.cancel_all_orders(symbol)
     
     def initialize(self):
         """초기화: 전략 로드, 레버리지 설정, 잔고 확인"""
@@ -208,6 +276,7 @@ class RealTraderFutures:
         
         # 1. 전략 로드
         self.load_strategies_from_db()
+        gc.collect() # 전략 객체 생성 후 메모리 정리
         
         # 2. 잔고 확인
         try:
@@ -267,11 +336,15 @@ class RealTraderFutures:
             amount = float(pos['amount'])
             in_position = abs(amount) > 0
             
-            # [MEMORY OPTIMIZATION] 진입 시점 여부 확인
-            is_entry_time = self._is_entry_time(timeframe)
+            # [Optimization] 중복 계산 방지 체크
+            current_slot = self._get_candle_slot_id(timeframe)
+            already_calculated = self.last_calc_candle.get(symbol) == current_slot
             
-            # --- Case 1: 진입 시점 (4h 정시) - 무거운 데이터 로드 ---
-            if is_entry_time:
+            # 진입 시점 확인
+            is_entry_time = self._is_entry_time(timeframe)
+
+            # --- Case 1: 진입 시점(정시) && 아직 계산 안 함 -> 무거운 데이터 로드 ---
+            if is_entry_time and not already_calculated:
                 # 전체 캔들 데이터 조회 (지표 계산용)
                 tf_min = 60
                 if 'm' in timeframe:
@@ -294,6 +367,10 @@ class RealTraderFutures:
                         f"Got {len(df) if df is not None else 0}, need min 200."
                     )
                     return
+                
+                # [Optimization] Downcast to float32 to save 50% memory
+                float_cols = ['open', 'high', 'low', 'close', 'volume']
+                df[float_cols] = df[float_cols].astype(np.float32)
                 
                 # 지표 계산
                 df = strategy.generate_signals(df)
@@ -321,10 +398,17 @@ class RealTraderFutures:
                     'entry_lower': float(entry_lower) if entry_lower is not None else None,
                     'strength_filter': int(strength_ok),
                     'volume_ratio': float(vol_ratio),
+                    'rsi': float(last_candle.get('rsi', 50.0)),
+                    'hurst': float(last_candle.get('hurst', 0.5)),
+                    'natr': float(last_candle.get('natr', 0.0)),
                     'cached_at': datetime.utcnow().isoformat()
                 })
                 
-            # --- Case 2: 비진입 시점 (1분 체크) - 가벼운 Ticker만 ---
+                # 계산 완료 기록
+                self.last_calc_candle[symbol] = current_slot
+                logger.debug(f"📊 Indicators calculated and cached for {symbol} (Slot: {current_slot})")
+                
+            # --- Case 2: 비진입 시점이거나 이미 계산됨 -> 캐시된 지표 사용 ---
             else:
                 # 캐시된 지표값 로드 (4시간 전에 계산한 값)
                 cached = self._get_cached_indicators(symbol)
@@ -372,10 +456,29 @@ class RealTraderFutures:
                         f"🟢 ENTRY LONG Signal {symbol} | "
                         f"Price {current_price} > Upper {entry_upper:.2f}"
                     )
-                    qty = self._calculate_position_size(symbol, current_price, params, atr)
+
+                    qty = self._calculate_position_size(
+                        symbol, current_price, params, atr,
+                        hurst=cached.get('hurst', 0.5), natr=cached.get('natr', 0.0)
+                    )
                     if qty > 0:
                         order = self._place_order_safe(symbol, 'buy', qty, atr=atr, current_price=current_price)
                         if order:
+                            # [HARD STOP LOSS] 서버 사이드 SL 즉시 설정
+                            sl_type = params.get('STOP_LOSS_TYPE', 'FIXED')
+                            stop_price = 0.0
+                            if sl_type == 'ATR' and atr > 0:
+                                sl_mult = params.get('ATR_STOP_LOSS_MULT', 1.5)
+                                stop_price = current_price - (atr * sl_mult)
+                            else:
+                                sl_pct = params.get('STOP_LOSS_PCT', 0.02)
+                                stop_price = current_price * (1 - sl_pct)
+                            
+                            # 주문 가격 정밀도 보정 (보통 가격 정밀도와 동일)
+                            stop_price = round(stop_price, 2) if 'BTC' not in symbol else round(stop_price, 1)
+                            
+                            self._place_stop_loss_safe(symbol, 'sell', qty, stop_price)
+
                             self.trade_db.record_trade(
                                 symbol=symbol,
                                 side='LONG',
@@ -383,8 +486,15 @@ class RealTraderFutures:
                                 quantity=qty,
                                 price=current_price,
                                 reason=f"Price > Upper ({entry_upper:.2f})",
-                                params={'timeframe': timeframe, 'atr': atr}
+                                params={'timeframe': timeframe, 'atr': atr, 'sl': stop_price}
                             )
+                            
+                            # [STATE] 진입 상태 저장 (Time Cut용)
+                            self.state_manager.update_symbol_state(symbol, {
+                                'entry_time': datetime.utcnow().isoformat(),
+                                'entry_price': current_price,
+                                'side': 'LONG'
+                            })
                         else:
                             logger.error(f"❌ Order placement failed for {symbol} (LONG, Qty: {qty})")
                 
@@ -394,10 +504,28 @@ class RealTraderFutures:
                         f"🔴 ENTRY SHORT Signal {symbol} | "
                         f"Price {current_price} < Lower {entry_lower:.2f}"
                     )
-                    qty = self._calculate_position_size(symbol, current_price, params, atr)
+
+                    qty = self._calculate_position_size(
+                        symbol, current_price, params, atr,
+                        hurst=cached.get('hurst', 0.5), natr=cached.get('natr', 0.0)
+                    )
                     if qty > 0:
                         order = self._place_order_safe(symbol, 'sell', qty, atr=atr, current_price=current_price)
                         if order:
+                            # [HARD STOP LOSS] 서버 사이드 SL 즉시 설정
+                            sl_type = params.get('STOP_LOSS_TYPE', 'FIXED')
+                            stop_price = 0.0
+                            if sl_type == 'ATR' and atr > 0:
+                                sl_mult = params.get('ATR_STOP_LOSS_MULT', 1.5)
+                                stop_price = current_price + (atr * sl_mult)
+                            else:
+                                sl_pct = params.get('STOP_LOSS_PCT', 0.02)
+                                stop_price = current_price * (1 + sl_pct)
+                            
+                            stop_price = round(stop_price, 2) if 'BTC' not in symbol else round(stop_price, 1)
+                            
+                            self._place_stop_loss_safe(symbol, 'buy', qty, stop_price)
+
                             self.trade_db.record_trade(
                                 symbol=symbol,
                                 side='SHORT',
@@ -405,10 +533,21 @@ class RealTraderFutures:
                                 quantity=qty,
                                 price=current_price,
                                 reason=f"Price < Lower ({entry_lower:.2f})",
-                                params={'timeframe': timeframe, 'atr': atr}
+                                params={'timeframe': timeframe, 'atr': atr, 'sl': stop_price}
                             )
+                            
+                            # [STATE] 진입 상태 저장 (Time Cut용)
+                            self.state_manager.update_symbol_state(symbol, {
+                                'entry_time': datetime.utcnow().isoformat(),
+                                'entry_price': current_price,
+                                'side': 'SHORT'
+                            })
                         else:
                             logger.error(f"❌ Order placement failed for {symbol} (SHORT, Qty: {qty})")
+                
+                # [Optimization] 대규모 데이터프레임 제거 및 메모리 강제 회수
+                del df
+                gc.collect()
         
         except Exception as e:
             logger.error(f"🚨 Error executing logic for {symbol}: {e}")
@@ -425,167 +564,108 @@ class RealTraderFutures:
         atr: float, 
         sar: float
     ):
-        """청산 로직"""
+        """청산 로직 (정밀화)"""
         try:
             exit_triggered = False
             reason = ""
             
             use_tp = params.get('USE_TAKE_PROFIT', False)
-            tp_atr_mult = params.get(
-                'TAKE_PROFIT_ATR_MULT_FUTURES', 
-                params.get('TAKE_PROFIT_ATR_MULT', 3.0)
-            )
+            tp_atr_mult = params.get('TAKE_PROFIT_ATR_MULT_FUTURES', params.get('TAKE_PROFIT_ATR_MULT', 3.0))
             entry_price = float(pos.get('entryPrice', 0))
-            
+            if entry_price <= 0: return
+
+            # 1. 포지션별 기본 로깅 및 SL/TP/SAR/Trend 체크
             if amount > 0:  # LONG
-                # 1. Parabolic SAR Exit
-                if params.get('EXIT_TYPE') == 'PARABOLIC_SAR':
-                    if sar > 0 and current_price < sar:
-                        exit_triggered = True
-                        reason = "Parabolic SAR Cross"
+                # [SL/TP/SAR]
+                if params.get('EXIT_TYPE') == 'PARABOLIC_SAR' and sar > 0 and current_price < sar:
+                    exit_triggered, reason = True, "Parabolic SAR Cross"
+                elif trend_dir == -1:
+                    exit_triggered, reason = True, "Trend Reversal"
+                elif use_tp and current_price >= (entry_price + (atr * tp_atr_mult)):
+                    exit_triggered, reason = True, f"Take Profit ({entry_price + (atr * tp_atr_mult):.2f})"
                 
-                # 2. Trend Reversal
-                if trend_dir == -1:
-                    exit_triggered = True
-                    reason = "Trend Reversal"
-                
-                # 3. Take Profit
-                if use_tp and entry_price > 0 and atr > 0:
-                    tp_price = entry_price + (atr * tp_atr_mult)
-                    if current_price >= tp_price:
-                        exit_triggered = True
-                        reason = f"Take Profit ({tp_price:.2f})"
-                
-                # 4. Stop Loss (Fixed / ATR) [CRITICAL FIX]
-                if not exit_triggered and entry_price > 0:
+                # [Stop Loss]
+                if not exit_triggered:
                     sl_type = params.get('STOP_LOSS_TYPE', 'FIXED')
-                    stop_price = 0.0
-                    
-                    if sl_type == 'ATR' and atr > 0:
-                        sl_mult = params.get('ATR_STOP_LOSS_MULT', 1.5)
-                        stop_price = entry_price - (atr * sl_mult)
-                    else: # FIXED
-                        sl_pct = params.get('STOP_LOSS_PCT', 0.02)
-                        stop_price = entry_price * (1 - sl_pct)
-                        
+                    stop_price = (entry_price - (atr * params.get('ATR_STOP_LOSS_MULT', 1.5))) if sl_type == 'ATR' else (entry_price * (1 - params.get('STOP_LOSS_PCT', 0.02)))
                     if current_price <= stop_price:
-                        exit_triggered = True
-                        reason = f"Stop Loss ({stop_price:.2f})"
+                        exit_triggered, reason = True, f"Stop Loss ({stop_price:.2f})"
 
-                # 5. Trailing Stop (ATR) - Simplified Stateless
-                # (Requires persistent high tracking for perfect sync, here using conservative close-based approximation)
-                if not exit_triggered and params.get('EXIT_TYPE') == 'ATR' and atr > 0:
-                    # In a stateless system, we can't easily track 'highest since entry' perfectly without DB.
-                    # Fallback: If price drops significantly from recent high (within Lookback), exit.
-                    # Better: Use simple ATR Safety net relative to entry for now or rely on trend reversal.
-                    # For Production: It is safer to rely on Trend Reversal + Hard Stop Loss than a stateless trailing stop.
-                    # We will implement a "Profit Protection" Trailing Stop:
-                    # If Profit > 2 * ATR, move Loop Stop to Entry + 0.5 * ATR (Break Even + Profit)
-                    profit_dist = current_price - entry_price
-                    if profit_dist > (atr * 2.0):
-                        trail_floor = entry_price + (atr * 0.5)
-                        if current_price < trail_floor:
-                            exit_triggered = True
-                            reason = f"Profit Protection Trail ({trail_floor:.2f})"
-                
-                if exit_triggered:
-                    pnl = (current_price - entry_price) * abs(amount)
-                    pnl_pct = ((current_price / entry_price) - 1) * 100 if entry_price > 0 else 0
-                    
-                    logger.info(
-                        f"🛑 EXIT LONG {symbol} | Price: {current_price} | "
-                        f"PnL: ${pnl:.2f} ({pnl_pct:.2f}%) | Reason: {reason}"
-                    )
-                    order = self._place_order_safe(symbol, 'sell', abs(amount))
-                    if order:
-                        self.trade_db.record_trade(
-                            symbol=symbol,
-                            side='LONG',
-                            action='EXIT',
-                            quantity=abs(amount),
-                            price=current_price,
-                            entry_price=entry_price,
-                            pnl=pnl,
-                            pnl_pct=pnl_pct,
-                            reason=reason
-                        )
-            
             elif amount < 0:  # SHORT
-                # 1. Parabolic SAR Exit
-                if params.get('EXIT_TYPE') == 'PARABOLIC_SAR':
-                    if sar > 0 and current_price > sar:
-                        exit_triggered = True
-                        reason = "Parabolic SAR Cross"
-                
-                # 2. Trend Reversal
-                if trend_dir == 1:
-                    exit_triggered = True
-                    reason = "Trend Reversal"
-                
-                # 3. Take Profit
-                if use_tp and entry_price > 0 and atr > 0:
-                    tp_price = entry_price - (atr * tp_atr_mult)
-                    if current_price <= tp_price:
-                        exit_triggered = True
-                        reason = f"Take Profit ({tp_price:.2f})"
+                # [SL/TP/SAR]
+                if params.get('EXIT_TYPE') == 'PARABOLIC_SAR' and sar > 0 and current_price > sar:
+                    exit_triggered, reason = True, "Parabolic SAR Cross"
+                elif trend_dir == 1:
+                    exit_triggered, reason = True, "Trend Reversal"
+                elif use_tp and current_price <= (entry_price - (atr * tp_atr_mult)):
+                    exit_triggered, reason = True, f"Take Profit ({entry_price - (atr * tp_atr_mult):.2f})"
 
-                # 4. Stop Loss (Fixed / ATR) [CRITICAL FIX]
-                if not exit_triggered and entry_price > 0:
+                # [Stop Loss]
+                if not exit_triggered:
                     sl_type = params.get('STOP_LOSS_TYPE', 'FIXED')
-                    stop_price = 0.0
-                    
-                    if sl_type == 'ATR' and atr > 0:
-                        sl_mult = params.get('ATR_STOP_LOSS_MULT', 1.5)
-                        stop_price = entry_price + (atr * sl_mult)
-                    else: # FIXED
-                        sl_pct = params.get('STOP_LOSS_PCT', 0.02)
-                        stop_price = entry_price * (1 + sl_pct)
-                        
+                    stop_price = (entry_price + (atr * params.get('ATR_STOP_LOSS_MULT', 1.5))) if sl_type == 'ATR' else (entry_price * (1 + params.get('STOP_LOSS_PCT', 0.02)))
                     if current_price >= stop_price:
-                        exit_triggered = True
-                        reason = f"Stop Loss ({stop_price:.2f})"
+                        exit_triggered, reason = True, f"Stop Loss ({stop_price:.2f})"
 
-                # 5. Trailing Stop (ATR) - Simplified Stateless
-                if not exit_triggered and params.get('EXIT_TYPE') == 'ATR' and atr > 0:
-                     profit_dist = entry_price - current_price
-                     if profit_dist > (atr * 2.0):
-                        trail_ceil = entry_price - (atr * 0.5)
-                        if current_price > trail_ceil:
-                            exit_triggered = True
-                            reason = f"Profit Protection Trail ({trail_ceil:.2f})"
+            # 2. 공통 청산 로직 (Panic Exit & Time Cut)
+            if not exit_triggered:
+                # [Panic Exit]
+                cached = self._get_cached_indicators(symbol)
+                rsi = cached.get('rsi', 50.0)
+                rsi_exit_thresh = params.get('RSI_EXIT_THRESHOLD', 80)
+                if (rsi > rsi_exit_thresh and amount > 0) or (rsi < (100 - rsi_exit_thresh) and amount < 0):
+                    exit_triggered, reason = True, f"Panic Exit (RSI {rsi:.1f})"
                 
-                if exit_triggered:
-                    pnl = (entry_price - current_price) * abs(amount)
-                    pnl_pct = ((entry_price / current_price) - 1) * 100 if current_price > 0 else 0
-                    
-                    logger.info(
-                        f"🛑 EXIT SHORT {symbol} | Price: {current_price} | "
-                        f"PnL: ${pnl:.2f} ({pnl_pct:.2f}%) | Reason: {reason}"
+                # [Time Cut]
+                if not exit_triggered:
+                    max_holding_bars = params.get('MAX_HOLDING_BARS', 9999)
+                    state = self.state_manager.get_symbol_state(symbol)
+                    entry_time_str = state.get('entry_time')
+                    if entry_time_str:
+                        entry_dt = datetime.fromisoformat(entry_time_str)
+                        tf = params.get('TIMEFRAME', '1h')
+                        interval_min = 60
+                        if tf.endswith('h'): interval_min = int(tf[:-1]) * 60
+                        elif tf.endswith('m'): interval_min = int(tf[:-1])
+                        elif tf.endswith('d'): interval_min = int(tf[:-1]) * 1440
+                        
+                        bars_held = ((datetime.utcnow() - entry_dt).total_seconds() / 60) / interval_min
+                        if bars_held >= max_holding_bars:
+                            pnl_pct = (((current_price / entry_price) - 1) * 100) if amount > 0 else (((entry_price / current_price) - 1) * 100)
+                            if pnl_pct <= params.get('TIME_EXIT_PROFIT_THRESHOLD', 1.4):
+                                exit_triggered, reason = True, f"Time Cut (Held {bars_held:.1f} bars, PnL {pnl_pct:.2f}%)"
+
+            # 3. 실제 주문 실행
+            if exit_triggered:
+                pnl = ((current_price - entry_price) * abs(amount)) if amount > 0 else ((entry_price - current_price) * abs(amount))
+                pnl_pct = (((current_price / entry_price) - 1) * 100) if amount > 0 else (((entry_price / current_price) - 1) * 100)
+                
+                side_str = "LONG" if amount > 0 else "SHORT"
+                order_side = 'sell' if amount > 0 else 'buy'
+                
+                logger.info(f"🛑 EXIT {side_str} {symbol} | Price: {current_price} | PnL: ${pnl:.2f} ({pnl_pct:.2f}%) | Reason: {reason}")
+                
+                if self._place_order_safe(symbol, order_side, abs(amount)):
+                    self._cancel_all_orders_safe(symbol)
+                    self.trade_db.record_trade(
+                        symbol=symbol, side=side_str, action='EXIT', quantity=abs(amount),
+                        price=current_price, entry_price=entry_price, pnl=pnl, pnl_pct=pnl_pct, reason=reason
                     )
-                    order = self._place_order_safe(symbol, 'buy', abs(amount))
-                    if order:
-                        self.trade_db.record_trade(
-                            symbol=symbol,
-                            side='SHORT',
-                            action='EXIT',
-                            quantity=abs(amount),
-                            price=current_price,
-                            entry_price=entry_price,
-                            pnl=pnl,
-                            pnl_pct=pnl_pct,
-                            reason=reason
-                        )
+                    self.state_manager.clear_symbol_state(symbol)
         
         except Exception as e:
-            logger.error(f"⚠️ Error in _check_exit: {e}")
+            logger.error(f"⚠️ Error in _check_exit for {symbol}: {e}")
             self.health_manager.record_error(e)
     
+
     def _calculate_position_size(
         self, 
         symbol: str, 
         price: float, 
         params: dict, 
-        atr: float = 0.0
+        atr: float = 0.0,
+        hurst: float = 0.5,
+        natr: float = 0.0
     ) -> float:
         """
         포지션 사이즈 계산 (견고성 강화)
@@ -614,6 +694,24 @@ class RealTraderFutures:
         # === 2. 성과 기반 가중치 적용 ===
         default_weight = 1.0 / len(self.symbols) if self.symbols else 0.5
         allocation_weight = SYMBOL_ALLOCATION_WEIGHTS.get(symbol, default_weight)
+        
+        # [NEW] Regime-based Multiplier (Dynamic Sizing)
+        regime_mult = 1.0
+        strong_hurst = params.get('STRONG_REGIME_HURST', 0.56)
+        panic_natr = params.get('PANIC_REGIME_NATR', 6.0)
+        strong_mult = params.get('STRONG_REGIME_MULTIPLIER', 1.4)
+        panic_mult = params.get('PANIC_REGIME_MULTIPLIER', 0.25)
+        
+        if hurst > strong_hurst:
+            regime_mult = strong_mult
+            logger.info(f"💪 Strong Regime detected (Hurst {hurst:.2f}). Mult: {strong_mult}")
+            
+        if natr > panic_natr:
+            regime_mult = panic_mult
+            logger.info(f"😱 Panic Regime detected (NATR {natr:.2f}). Mult: {panic_mult}")
+            
+        allocation_weight *= regime_mult
+        
         allocated_capital = total_balance * allocation_weight
         
         # === 3. 전략 파라미터 ===
@@ -738,8 +836,9 @@ class RealTraderFutures:
         now = datetime.utcnow()
         minutes = now.minute
 
-        # 허용 범위: 정시 ~ +5분
-        if minutes > 5:
+        # [TIGHT SYNC] 허용 범위: 정시 ~ +2분
+        # 백테스트(시가 진입)와 최대한 일치시키기 위해 5분에서 2분으로 단축
+        if minutes > 2:
             return False
 
         if timeframe.endswith('m'):
@@ -766,6 +865,21 @@ class RealTraderFutures:
         if not hasattr(self, '_indicator_cache'):
             self._indicator_cache = {}
         return self._indicator_cache.get(symbol, {})
+
+    def _get_candle_slot_id(self, timeframe: str) -> str:
+        """현재 타임프레임 기준의 고유 캔들 ID 생성 (중복 계산 방지용)"""
+        now = datetime.utcnow()
+        if timeframe.endswith('m'):
+            interval = int(timeframe[:-1])
+            slot = (now.minute // interval) * interval
+            return now.strftime(f"%Y%m%d%H{slot:02d}")
+        elif timeframe.endswith('h'):
+            interval = int(timeframe[:-1])
+            slot = (now.hour // interval) * interval
+            return now.strftime(f"%Y%m%d{slot:02d}00")
+        elif timeframe.endswith('d'):
+            return now.strftime("%Y%m%d0000")
+        return now.strftime("%Y%m%d%H%M")
 
     def run_forever(self):
         """메인 무한 루프 (Graceful Shutdown 지원)"""
@@ -828,20 +942,24 @@ class RealTraderFutures:
                     if self.health_manager.loop_count % 120 == 0:
                         self.cloud_optimizer.force_gc()
                 
-                # [Dual Loop] 1분(60초) 대기
-                wait_time = LOOP_INTERVAL_SECONDS # 60s
+                # [High-Frequency Monitoring] 청산 감시를 위해 10초(LOOP_INTERVAL_SECONDS)마다 반복
+                # 진입은 _is_entry_time 로직에 의해 정시에만 수행됨
+                wait_seconds = float(LOOP_INTERVAL_SECONDS)
+                
+                logger.debug(f"💤 Sleeping {wait_seconds:.1f}s until next monitoring cycle...")
                 
                 # Shutdown 체크하면서 대기
-                for _ in range(int(wait_time)):
+                start_wait = time.time()
+                while time.time() - start_wait < wait_seconds:
                     if self._shutdown_requested:
                         break
-                    time.sleep(1)
+                    time.sleep(0.5)
             
             except Exception as e:
                 logger.error(f"🚨 Critical Error in Main Loop: {e}")
                 self.health_manager.record_error(e)
                 self.health_manager.update_heartbeat(status="error")
-                time.sleep(ERROR_SLEEP_SECONDS)
+                time.sleep(10) # 에러 시 10초 대기 후 재시도
         
         # Graceful Shutdown 처리
         self._shutdown()

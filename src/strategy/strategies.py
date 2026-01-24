@@ -1,7 +1,6 @@
 from abc import ABC, abstractmethod
 import pandas as pd
 import numpy as np
-from .indicators import add_common_indicators
 
 class Strategy(ABC):
     def __init__(self, name, params):
@@ -12,11 +11,6 @@ class Strategy(ABC):
     def generate_signals(self, df):
         pass
 
-    def prepare_data(self, df):
-        """공통 데이터 전처리 및 지표 계산"""
-        # params에 있는 지표 설정값들이 add_common_indicators로 전달됨
-        return add_common_indicators(df, self.params)
-
 class MasterStrategy(Strategy):
     """
     Adaptive Regime Trend Follower (Master Strategy)
@@ -25,7 +19,8 @@ class MasterStrategy(Strategy):
     - Dynamic Risk: Volatility Targeting (Engine handles this using ATR)
     """
     def generate_signals(self, df):
-        df = self.prepare_data(df)
+        # Note: 이 전략은 더 이상 사용되지 않음 (UNIFIED 전략으로 통합됨)
+        # Legacy compatibility 유지용
         
         # 1. Regime Filter Line (Trend Direction)
         # EMA 또는 HMA 중 선택된 것을 'regime_line'으로 통일시켜 엔진이 읽게 함
@@ -54,7 +49,7 @@ from .indicators_advanced import (
     calculate_supertrend, calculate_atr, calculate_bollinger_bands,
     calculate_keltner_channel, calculate_adx, calculate_vhf, calculate_parabolic_sar,
     calculate_rsi, calculate_stochastic, calculate_stoch_rsi, calculate_macd, calculate_ichimoku, calculate_cci, calculate_mfi,
-    calculate_vwap, calculate_cmf, calculate_hurst_exponent
+    calculate_vwap, calculate_cmf, calculate_hurst_exponent, calculate_natr
 )
 
 class UltimateStrategy(Strategy):
@@ -77,6 +72,19 @@ class UltimateStrategy(Strategy):
         else:
             df['atr'] = np.float32(0.0) # Not used
         
+        # [NEW] Always calculate Regime Indicators (Hurst, NATR, RSI)
+        # 1. Hurst Exponent (Trend Strength/Regime)
+        hurst_period = self.params.get('HURST_PERIOD', 200)
+        df['hurst'] = calculate_hurst_exponent(df['close'], window=hurst_period)
+        
+        # 2. NATR (Volatility Regime)
+        natr_period = self.params.get('STRENGTH_FILTER_PERIOD', 14) # Reuse existing period or default
+        df['natr'] = calculate_natr(df, window=natr_period)
+        
+        # 3. RSI (Panic Exit)
+        rsi_period = self.params.get('STRENGTH_FILTER_PERIOD', 14) 
+        df['rsi'] = calculate_rsi(df['close'], window=rsi_period)
+
         # --- 2. Entry Signal Setup ---
         entry_type = self.params.get('ENTRY_TYPE', 'DONCHIAN')
         entry_period = self.params.get('ENTRY_PERIOD', 20)
@@ -92,14 +100,14 @@ class UltimateStrategy(Strategy):
         elif entry_type == 'BOLLINGER':
             std_dev = self.params.get('BB_STD', 2.0)
             up, lo, _ = calculate_bollinger_bands(df, window=entry_period, std_dev=std_dev)
-            df['entry_upper'] = up
-            df['entry_lower'] = lo
+            df['entry_upper'] = up.shift(1)
+            df['entry_lower'] = lo.shift(1)
             
         elif entry_type == 'KELTNER':
             k_mult = self.params.get('KELTNER_ATR_MULT', 1.5)
             up, lo = calculate_keltner_channel(df, window=entry_period, atr_mult=k_mult)
-            df['entry_upper'] = up
-            df['entry_lower'] = lo
+            df['entry_upper'] = up.shift(1)
+            df['entry_lower'] = lo.shift(1)
             
         elif entry_type == 'CCI':
             df['cci'] = calculate_cci(df, window=entry_period)
@@ -164,8 +172,10 @@ class UltimateStrategy(Strategy):
             df['mfi'] = calculate_mfi(df, window=strength_period)
             df.loc[df['mfi'] < self.params.get('MFI_THRESHOLD', 25), 'strength_filter'] = 0
         elif strength_type == 'RSI':
-            df['rsi'] = calculate_rsi(df['close'], window=strength_period)
-            df.loc[(df['rsi'] > self.params.get('RSI_OVERBOUGHT', 75)) | (df['rsi'] < self.params.get('RSI_OVERSOLD', 25)), 'strength_filter'] = 0
+            # Use pre-calculated RSI
+            rsi_upper = self.params.get('RSI_OVERBOUGHT', 75)
+            rsi_lower = self.params.get('RSI_OVERSOLD', 25)
+            df.loc[(df['rsi'] > rsi_upper) | (df['rsi'] < rsi_lower), 'strength_filter'] = 0
         elif strength_type == 'STOCHASTIC':
             stoch_k, _ = calculate_stochastic(df, window=strength_period)
             df.loc[(stoch_k > self.params.get('STOCH_OVERBOUGHT', 85)) | (stoch_k < self.params.get('STOCH_OVERSOLD', 15)), 'strength_filter'] = 0
@@ -176,8 +186,13 @@ class UltimateStrategy(Strategy):
             df['cmf'] = calculate_cmf(df, window=self.params.get('CMF_PERIOD', 20))
             df.loc[df['cmf'] < self.params.get('CMF_THRESHOLD', 0.05), 'strength_filter'] = 0
         elif strength_type == 'HURST':
-            df.loc[:, 'hurst'] = calculate_hurst_exponent(df['close'], window=self.params.get('HURST_PERIOD', 100))
+            # Use pre-calculated Hurst
             df.loc[df['hurst'] < self.params.get('HURST_RANDOM_THRESHOLD', 0.50), 'strength_filter'] = 0
+        elif strength_type == 'NATR':
+             # Use pre-calculated NATR
+             # NATR < Threshold: Low volatility -> Block Entry
+             natr_thresh = self.params.get('NATR_THRESHOLD', 1.0)
+             df.loc[df['natr'] < natr_thresh, 'strength_filter'] = 0
 
         # --- 5. Exit Logic (Parabolic SAR) ---
         if self.params.get('EXIT_TYPE') == 'PARABOLIC_SAR':

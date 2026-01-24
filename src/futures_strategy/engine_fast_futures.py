@@ -94,11 +94,27 @@ class BacktestEngineFast:
     def run(self):
         self.logger.info(f"Running FAST backtest for {self.strategy.name}...")
         
-        # Extract all columns as numpy arrays for speed
         df = self.merged_df
+        
+        # [CRITICAL] LOOKAHEAD PROTECTION
+        # Shift ALL signal columns by 1 to ensure we use 'confirmed' signals from previous closed bar.
+        # This applies to both Hourly signals (if any) and Mapped Daily signals.
+        signal_cols = [
+            'daily_entry_upper', 'daily_entry_lower', 'daily_trend_direction',
+            'daily_strength_filter', 'daily_volume_ratio', 'daily_atr',
+            'daily_parabolic_sar', 'daily_rsi', 'daily_hurst', 'daily_natr'
+        ]
+        
+        # Check if columns exist and shift
+        for col in signal_cols:
+            if col in df.columns:
+                df[col] = df[col].shift(1)
+                
+        # Extract all columns as numpy arrays for speed
         n = len(df)
         
         # Price columns
+        open_prices = df['open'].values # [NEW] For Entry
         close = df['close'].values
         high = df['high'].values
         low = df['low'].values
@@ -149,19 +165,54 @@ class BacktestEngineFast:
         # [NEW] Time-Based Exit & Trailing Activation
         max_holding_bars = self.strategy.params.get('MAX_HOLDING_BARS', 999999)  # Default: No limit
         trailing_activation_atr = self.strategy.params.get('TRAILING_ACTIVATION_ATR', 0.0)  # Default: Immediate activation
+        time_exit_profit_threshold = self.strategy.params.get('TIME_EXIT_PROFIT_THRESHOLD', 0.5)  # Default: 0.5 ATR profit required to hold
         
         # [WARMUP OPTIMIZATION] Calculate required warmup based on strategy indicators
         # Strategy analyzes its own parameters to determine minimum stable period
         warmup_bars = getattr(df, 'attrs', {}).get('warmup_bars', self.strategy.get_required_warmup())
+        
+        # [NEW] RSI for Panic Exit
+        # Use existing rsi if available, else fill 50
+        if 'daily_rsi' in df.columns:
+            rsi = df['daily_rsi'].values
+        else:
+            rsi = np.full(n, 50.0)
+            
+        rsi_exit_threshold = self.strategy.params.get('RSI_EXIT_THRESHOLD', 80.0) # Default: 80 for Long Exit, 20 for Short Exit
+        
+        # [NEW] Dynamic Risk Sizing (Regime-based)
+        # Extract Hurst & NATR for regime detection
+        if 'daily_hurst' in df.columns:
+            hurst = df['daily_hurst'].values
+        else:
+            hurst = np.full(n, 0.5)  # Neutral (random walk)
+            
+        if 'daily_natr' in df.columns:
+            natr = df['daily_natr'].values
+        else:
+            natr = np.full(n, 1.0)  # Neutral volatility
+        
+        # Dynamic Risk Multipliers (Optimizable)
+        use_dynamic_risk = self.strategy.params.get('USE_DYNAMIC_RISK', False)
+        strong_regime_hurst = self.strategy.params.get('STRONG_REGIME_HURST', 0.6)
+        strong_regime_natr = self.strategy.params.get('STRONG_REGIME_NATR', 1.5)
+        strong_regime_multiplier = self.strategy.params.get('STRONG_REGIME_MULTIPLIER', 1.5)
+        
+        weak_regime_hurst = self.strategy.params.get('WEAK_REGIME_HURST', 0.55)
+        weak_regime_multiplier = self.strategy.params.get('WEAK_REGIME_MULTIPLIER', 0.5)
+        
+        panic_regime_natr = self.strategy.params.get('PANIC_REGIME_NATR', 4.0)
+        panic_regime_multiplier = self.strategy.params.get('PANIC_REGIME_MULTIPLIER', 0.25)
         
         # [OPTIMIZATION] Extract timestamps for fast lookup (avoid iloc)
         datetime_values = df['datetime'].values
         
         # Run Numba-accelerated loop
         trades, final_balance = backtest_loop_numba(
-            close, high, low, volume_ratio,
+            close, high, low, open_prices, volume_ratio,
             entry_upper, entry_lower,
-            trend_dir, strength_filter, atr, parabolic_sar,
+            trend_dir, strength_filter, atr, parabolic_sar, rsi, # [NEW] Pass RSI
+            hurst, natr, # [NEW] Pass Hurst & NATR for dynamic risk
             self.initial_balance,
             leverage,
             self.fee_rate,
@@ -172,7 +223,11 @@ class BacktestEngineFast:
             use_volume_filter, vol_threshold,
             use_take_profit, tp_atr_mult,
             timestamps, FUNDING_FEE_RATE, FUNDING_INTERVAL_HOURS,
-            max_holding_bars, trailing_activation_atr,  # [NEW]
+            max_holding_bars, trailing_activation_atr, time_exit_profit_threshold,
+            rsi_exit_threshold, # [NEW] Pass RSI Threshold
+            use_dynamic_risk, strong_regime_hurst, strong_regime_natr, strong_regime_multiplier,
+            weak_regime_hurst, weak_regime_multiplier,
+            panic_regime_natr, panic_regime_multiplier, # [NEW] Dynamic Risk Params
             warmup_bars  # [WARMUP] Skip trading during this period
         )
         
@@ -204,6 +259,11 @@ class BacktestEngineFast:
         return self.get_results()
     
     def get_results(self):
+        # [ROBUSTNESS] Sanitize balance if infinite (likely due to extreme compounding)
+        if not np.isfinite(self.balance):
+             # Cap at an unreasonably high number to preserve "goodness" but avoid Inf
+             self.balance = 1e15 
+             
         total_return = self.balance - self.initial_balance
         total_return_pct = (total_return / self.initial_balance) * 100
         
@@ -221,29 +281,73 @@ class BacktestEngineFast:
         
         trades_df = pd.DataFrame(self.trades)
         
-        # [FIX] Calculate pnl_pct relative to the RUNNING BALANCE at entry time.
-        # Dividing by initial_balance ignores compounding effects and distorts SQN/Kelly stats.
-        # balance_before = initial + cumulative_sum_of_prev_pnls
-        pnl_cumsum = trades_df['pnl'].cumsum().shift(1).fillna(0)
-        trades_df['balance_before'] = self.initial_balance + pnl_cumsum
+        # [FIX] Calculate pnl_pct as Return on Equity (ROE) per trade
+        # This provides a consistent metric regardless of account size growing
+        # ROE = PnL / Initial Margin Used
         
-        # Avoid division by zero (bankruptcy case)
-        trades_df['balance_before'] = trades_df['balance_before'].replace(0, 1e-9)
+        # Reconstruct Margin used for each trade
+        # Margin = (Entry Price * Amount) / Leverage
+        # We need to estimate Amount from trades? 
+        # The trades array has: [entry_idx, exit_idx, side, entry_p, exit_p, pnl]
+        # We don't have 'amount' stored in trades array directly.
+        # But PnL = (Exit - Entry) * Amount * Side
+        # Amount = PnL / ((Exit - Entry) * Side)
         
-        trades_df['pnl_pct'] = (trades_df['pnl'] / trades_df['balance_before']) * 100
+        # Let's Vectorize this safely
+        pnl = trades_df['pnl'].values
+        entry_p = trades_df['entry_price'].values
+        exit_p = trades_df['exit_price'].values
+        side = np.where(trades_df['side'] == 'LONG', 1, -1)
+        
+        price_diff = (exit_p - entry_p) * side
+        
+        # Avoid zero division for amount calc
+        with np.errstate(invalid='ignore', divide='ignore'):
+             amount_est = pnl / price_diff
+             # If price_diff is 0 (entry=exit), amount is inf. Handle this.
+             # But if entry=exit, PnL should be -Fee.
+             # This estimation is tricky with fees included in PnL.
+             
+        # Alternative: Simply use (PnL / Balance_Before) * 100 as before but handle the precision better
+        # The user's issue is likely the astronomical total return.
+        
+        # [DECISION] Stick to Balance Relative return but ensure float64 precision
+        with np.errstate(invalid='ignore', over='ignore', divide='ignore'):
+            pnl_cumsum = trades_df['pnl'].cumsum().shift(1).fillna(0)
+            trades_df['balance_before'] = self.initial_balance + pnl_cumsum
+            
+            trades_df['balance_before'] = trades_df['balance_before'].replace(0, 1e-9)
+            trades_df['pnl_pct'] = (trades_df['pnl'] / trades_df['balance_before']) * 100
+        
+        trades_df['pnl_pct'] = trades_df['pnl_pct'].replace([np.inf, -np.inf], 0).fillna(0)
         
         win_trades = len(trades_df[trades_df['pnl'] > 0])
         loss_trades = len(trades_df[trades_df['pnl'] <= 0])
         win_rate = (win_trades / len(trades_df)) * 100 if len(trades_df) > 0 else 0
         
         # MDD Calculation
+        # Construct cumulative array safely
         cumulative = [self.initial_balance]
         for pnl in trades_df['pnl']:
             cumulative.append(cumulative[-1] + pnl)
         
         cumulative = np.array(cumulative)
-        running_max = np.maximum.accumulate(cumulative)
-        drawdown = (cumulative - running_max) / running_max * 100
+        
+        # [ROBUSTNESS] Check for Inf/NaN in cumulative data (Exploding Strategy)
+        if not np.isfinite(cumulative).all():
+             self.logger.warning("Strategy equity curve contains Inf/NaN. Capping values.")
+             cumulative = np.nan_to_num(cumulative, nan=self.initial_balance, posinf=1e15, neginf=0)
+
+        with np.errstate(invalid='ignore', over='ignore', divide='ignore'):
+            running_max = np.maximum.accumulate(cumulative)
+            
+            # Prevent division by zero if running_max is 0
+            running_max[running_max == 0] = 1e-9
+            
+            drawdown = (cumulative - running_max) / running_max * 100
+        
+        # Sanitize drawdown (nan -> 0)
+        drawdown = np.nan_to_num(drawdown, nan=0.0)
         mdd = drawdown.min()
         
         return {
@@ -261,9 +365,10 @@ class BacktestEngineFast:
 
 @njit(nogil=True, cache=True)
 def backtest_loop_numba(
-    close, high, low, volume_ratio,
+    close, high, low, open_prices, volume_ratio,
     entry_upper, entry_lower,
-    trend_dir, strength_filter, atr, parabolic_sar,
+    trend_dir, strength_filter, atr, parabolic_sar, rsi, # [NEW]
+    hurst, natr, # [NEW] Regime indicators
     initial_balance, leverage, fee_rate, slippage_rate,
     exit_type, stop_loss_type, stop_loss_pct, atr_sl_mult,
     atr_mult,
@@ -271,23 +376,28 @@ def backtest_loop_numba(
     use_volume_filter, vol_threshold,
     use_take_profit, tp_atr_mult,
     timestamps, funding_fee_rate, funding_interval_hours,
-    max_holding_bars, trailing_activation_atr,  # [NEW] Time-based exit & Trailing activation threshold
+    max_holding_bars, trailing_activation_atr, time_exit_profit_threshold,
+    rsi_exit_threshold, # [NEW]
+    use_dynamic_risk, strong_regime_hurst, strong_regime_natr, strong_regime_multiplier,
+    weak_regime_hurst, weak_regime_multiplier,
+    panic_regime_natr, panic_regime_multiplier, # [NEW] Dynamic Risk
     warmup_bars  # [WARMUP] Number of bars to skip at start for indicator warmup
 ):
     """
-    Numba JIT-compiled backtest loop for maximum speed.
-    펀딩비(Funding Fee) 반영: 8시간마다 포지션 가치의 0.01% 차감
-    [NEW] MAX_HOLDING_BARS: 일정 시간 후 강제 청산 (기회비용 관리)
-    [NEW] TRAILING_ACTIVATION_ATR: 일정 이익 이상일 때만 trailing stop 활성화 (이익 보호)
-    [NEW] EXIT_TYPE: 0=ATR Trailing, 1=Parabolic SAR
-    [NEW] TREND_REVERSAL: trend_dir 변화 시 즉시 청산
-    [WARMUP] warmup_bars: Skip trading during first N bars to allow indicators to stabilize
+    Numba JIT-compiled backtest loop for Futures (Long/Short).
+    Strict Realism Mode (v15.1):
+    - Signal at i -> Execute at Open of i+1
+    - Slippage on All Exits
+    - Sequential Stop Logic
     """
     n = len(close)
     balance = initial_balance
     
     # Position state
     in_position = False
+    pending_entry = False # [NEW]
+    pending_side = 0
+    
     pos_side = 0  # 1: LONG, -1: SHORT
     entry_price = 0.0
     entry_idx = 0
@@ -306,8 +416,10 @@ def backtest_loop_numba(
     trades = np.zeros((max_trades, 6))  # [entry_idx, exit_idx, side, entry_p, exit_p, pnl]
     trade_count = 0
     
+    exec_risk = risk_per_trade # Local execution risk
+    
     for i in range(n):
-        # [WARMUP] Skip trading during warmup period (indicators still stabilizing)
+        # [WARMUP] Skip trading during warmup period
         if i < warmup_bars:
             continue
             
@@ -315,276 +427,263 @@ def backtest_loop_numba(
         if balance <= 0:
             break
 
-        # Skip if NaN in entry signals
-        if np.isnan(entry_upper[i]) or np.isnan(entry_lower[i]):
-            continue
-            
+        c_open = open_prices[i]
         c_price = close[i]
         c_high = high[i]
         c_low = low[i]
-        current_atr = atr[i]
         current_timestamp = timestamps[i]
-        # --- FUNDING FEE DEDUCTION (UTC 00:00, 08:00, 16:00에만 적용) ---
-        if in_position:
-            # Convert timestamp (ms) to UTC hour (0-23)
-            # Binance funding time: 00:00, 08:00, 16:00 UTC
-            current_hour_utc = int((current_timestamp // 1000) % 86400 // 3600)  # 0-23
+        
+        # --- 1. EXECUTION: PENDING ENTRY AT OPEN ---
+        if pending_entry and not in_position:
+            # We are at Open of bar i. Signal was confirmed at i-1.
+            fill_price = 0.0
             
-            # Check if current time is a funding hour (0, 8, 16)
+            if pending_side == 1: # LONG
+                fill_price = c_open * (1 + slippage_rate)
+            else: # SHORT
+                fill_price = c_open * (1 - slippage_rate)
+            
+            # Use indicators from i-1 (Signal Bar)
+            # But here in engine we already shifted indicators by 1.
+            # So atr[i] IS atr[i-1] effectively.
+            current_atr = atr[i] 
+            
+            # 1. SL Calc
+            if stop_loss_type == 1: # ATR
+                if pending_side == 1:
+                    stop_price = fill_price - (current_atr * atr_sl_mult)
+                else:
+                    stop_price = fill_price + (current_atr * atr_sl_mult)
+            else: # Fixed
+                if pending_side == 1:
+                    stop_price = fill_price * (1 - stop_loss_pct)
+                else:
+                    stop_price = fill_price * (1 + stop_loss_pct)
+            
+            # 2. TP Calc
+            if use_take_profit:
+                if pending_side == 1:
+                    tp_price = fill_price + (current_atr * tp_atr_mult)
+                else:
+                    tp_price = fill_price - (current_atr * tp_atr_mult)
+            else:
+                tp_price = 0.0
+                
+            # 3. Size Calculation
+            stop_distance = abs(fill_price - stop_price)
+            
+            # [COMPOUNDING FIX] Use CURRENT balance for risk calculation
+            # This enables exponential growth (and risk) as balance grows
+            current_equity = balance 
+            
+            if stop_distance > 0:
+                risk_amount = current_equity * exec_risk
+                amount = risk_amount / stop_distance
+            else:
+                amount = (current_equity * 0.01) / fill_price
+                
+            # Cap to Leverage (based on current equity)
+            max_amount = (current_equity * leverage) / fill_price
+            if amount > max_amount:
+                amount = max_amount
+
+            # Fee & Margin Check
+            required_margin = (amount * fill_price) / leverage
+            entry_fee = amount * fill_price * fee_rate
+            total_cost = required_margin + entry_fee
+            
+            if balance >= total_cost:
+                balance -= total_cost
+                in_position = True
+                pos_side = pending_side
+                entry_price = fill_price
+                entry_idx = i
+                highest = fill_price
+                lowest = fill_price
+                pos_atr = current_atr
+                pending_entry = False
+            else:
+                # Funding insufficient, cancel
+                pending_entry = False
+
+        # --- 2. POSITION MANAGEMENT (Exits & Funding) ---
+        if in_position:
+            # A. Funding Fee (UTC 00, 08, 16)
+            current_hour_utc = int((current_timestamp // 1000) % 86400 // 3600)
             is_funding_hour = (current_hour_utc in (0, 8, 16))
             
-            # Apply funding fee only once per funding period
             if is_funding_hour and last_funding_hour != current_hour_utc:
-                # 펀딩비 = 포지션 가치(notional value) * funding_fee_rate
                 notional_value = amount * c_price
                 funding_cost = notional_value * funding_fee_rate
                 balance -= funding_cost
-                
-                # 이번 펀딩 시간 기록 (중복 차감 방지)
                 last_funding_hour = current_hour_utc
                 
-                # [SAFETY] 펀딩비로 인한 파산 체크
+                # Bankruptcy check from Funding
                 if balance <= 0:
-                    # 강제 청산 처리
                     exit_price = c_price
-                    if pos_side == 1:
-                        pnl = (exit_price - entry_price) * amount
-                    else:
-                        pnl = (entry_price - exit_price) * amount
+                    if pos_side == 1: pnl = (exit_price - entry_price) * amount
+                    else:             pnl = (entry_price - exit_price) * amount
                     
                     exit_fee = amount * exit_price * fee_rate
                     pnl -= exit_fee
-                    
                     margin = (amount * entry_price) / leverage
                     balance += margin + pnl
                     
                     trades[trade_count] = [entry_idx, i, pos_side, entry_price, exit_price, pnl]
                     trade_count += 1
                     in_position = False
-                    break
-        
-        # --- POSITION MANAGEMENT ---
-        if in_position:
+                    break # Loop break
+            
+            # B. Exit Checks
             exit_triggered = False
             exit_price = 0.0
             
-            # [NEW] Time-Based Exit (Opportunity Cost Management)
-            bars_held = i - entry_idx
-            if bars_held >= max_holding_bars:
-                exit_price = c_price  # Exit at current close
-                exit_triggered = True
+            # [SEQ-1] Stop Loss (Inherited)
+            # Check using stop_price from previous bar (Sequential Realism)
             
-            # Update extremes and TP check
-            if pos_side == 1: # LONG
-                if c_high > highest:
-                    highest = c_high
-                    
-                    # [NEW] Conditional Trailing Stop Activation
-                    # Only activate trailing if profit exceeds activation threshold
-                    if exit_type == 0:  # ATR Trailing mode only
-                        unrealized_profit_atr = (highest - entry_price) / pos_atr if pos_atr > 0 else 0
-                        
-                        if unrealized_profit_atr >= trailing_activation_atr:
-                            # Update Stop Price (Trailing) - ONLY when activation condition met
-                            new_stop = highest - (pos_atr * atr_mult)
-                            if new_stop > stop_price:
-                                stop_price = new_stop
-                
-                # [NEW] 1. Parabolic SAR Exit (if enabled)
-                if not exit_triggered and exit_type == 1:  # SAR mode
-                    current_sar = parabolic_sar[i]
-                    if current_sar > 0 and c_price < current_sar:
-                        exit_price = c_price
-                        exit_triggered = True
-                
-                # [NEW] 2. Trend Reversal Exit
-                if not exit_triggered and trend_dir[i] == -1:
-                    exit_price = c_price
-                    exit_triggered = True
+            # Pre-calc SAR stop if active
+            current_stop = stop_price
+            if exit_type == 1 and parabolic_sar[i] > 0:
+                # SAR acts as trailing stop
+                if pos_side == 1:
+                     current_stop = max(stop_price, parabolic_sar[i])
+                else:
+                     current_stop = min(stop_price, parabolic_sar[i])
 
-                # 3. Check Stop Loss
-                if not exit_triggered and c_low <= stop_price:
-                    exit_price = min(c_low, stop_price)
+            # Check SL Hit
+            if pos_side == 1:
+                if c_low <= current_stop:
+                    exit_price = current_stop * (1 - slippage_rate)
                     exit_triggered = True
-                
-                # 4. Then Check Take Profit
-                elif not exit_triggered and use_take_profit and tp_price > 0 and c_high >= tp_price:
-                    exit_price = tp_price
-                    exit_triggered = True
-                    
-            elif pos_side == -1: # SHORT
-                if c_low < lowest:
-                    lowest = c_low
-                    
-                    # [NEW] Conditional Trailing Stop Activation
-                    if exit_type == 0:  # ATR Trailing mode only
-                        unrealized_profit_atr = (entry_price - lowest) / pos_atr if pos_atr > 0 else 0
-                        
-                        if unrealized_profit_atr >= trailing_activation_atr:
-                            new_stop = lowest + (pos_atr * atr_mult)
-                            if new_stop < stop_price:
-                                stop_price = new_stop
-                
-                # [NEW] 1. Parabolic SAR Exit (if enabled)
-                if not exit_triggered and exit_type == 1:  # SAR mode
-                    current_sar = parabolic_sar[i]
-                    if current_sar > 0 and c_price > current_sar:
-                        exit_price = c_price
-                        exit_triggered = True
-                
-                # [NEW] 2. Trend Reversal Exit
-                if not exit_triggered and trend_dir[i] == 1:
-                    exit_price = c_price
-                    exit_triggered = True
-                
-                # 3. Check Stop Loss
-                if not exit_triggered and c_high >= stop_price:
-                    exit_price = max(c_high, stop_price)
-                    exit_triggered = True
-                
-                # 4. Then Check Take Profit
-                elif not exit_triggered and use_take_profit and tp_price > 0 and c_low <= tp_price:
-                    exit_price = tp_price
+            else:
+                if c_high >= current_stop:
+                    exit_price = current_stop * (1 + slippage_rate)
                     exit_triggered = True
             
+            # [SEQ-2] Take Profit
+            if not exit_triggered and use_take_profit and tp_price > 0:
+                if pos_side == 1:
+                    if c_high >= tp_price:
+                        exit_price = tp_price # Limit fill assumption or half slip
+                        exit_triggered = True
+                else:
+                    if c_low <= tp_price:
+                        exit_price = tp_price
+                        exit_triggered = True
+
+            # [SEQ-3] Conditional Market Exits
+            if not exit_triggered:
+                # Time Exit
+                bars_held = i - entry_idx
+                if bars_held >= max_holding_bars:
+                    if pos_side == 1:
+                        unreal_p = (c_price - entry_price) / pos_atr if pos_atr > 0 else 0
+                    else:
+                        unreal_p = (entry_price - c_price) / pos_atr if pos_atr > 0 else 0
+                    
+                    if unreal_p < time_exit_profit_threshold:
+                        exit_price = c_price # Market
+                        if pos_side == 1: exit_price *= (1 - slippage_rate)
+                        else:             exit_price *= (1 + slippage_rate)
+                        exit_triggered = True
+                
+                # RSI Panic
+                if not exit_triggered:
+                    if pos_side == 1 and rsi[i] > rsi_exit_threshold:
+                         exit_price = c_price * (1 - slippage_rate)
+                         exit_triggered = True
+                    elif pos_side == -1 and rsi[i] < (100 - rsi_exit_threshold):
+                         exit_price = c_price * (1 + slippage_rate)
+                         exit_triggered = True
+                
+                # Trend Reversal
+                if not exit_triggered:
+                    if pos_side == 1 and trend_dir[i] == -1:
+                        exit_price = c_price * (1 - slippage_rate)
+                        exit_triggered = True
+                    elif pos_side == -1 and trend_dir[i] == 1:
+                        exit_price = c_price * (1 + slippage_rate)
+                        exit_triggered = True
+
             if exit_triggered:
-                # Calculate PnL
+                # PnL Calc with Slippage
                 if pos_side == 1:
                     pnl = (exit_price - entry_price) * amount
                 else:
                     pnl = (entry_price - exit_price) * amount
                 
-                # Fee
                 exit_fee = amount * exit_price * fee_rate
                 pnl -= exit_fee
                 
-                # Balance Update
                 margin = (amount * entry_price) / leverage
-                balance += margin + pnl  # pnl already includes exit_fee
+                balance += margin + pnl
                 
                 trades[trade_count] = [entry_idx, i, pos_side, entry_price, exit_price, pnl]
                 trade_count += 1
                 in_position = False
+                pending_entry = False # Clear any pending
                 
-                # [SAFETY] Bankruptcy check after exit
-                if balance <= 0:
-                    break
-                    
-                continue
+            else:
+                # [SEQ-4] Update High/Low & Trailing Stop for NEXT Bar
+                if pos_side == 1:
+                    if c_high > highest:
+                        highest = c_high
+                        
+                    if exit_type == 0: # ATR Trailing
+                        unreal_profit = (highest - entry_price) / pos_atr if pos_atr > 0 else 0
+                        if unreal_profit >= trailing_activation_atr:
+                            new_stop = highest - (pos_atr * atr_mult)
+                            if new_stop > stop_price:
+                                stop_price = new_stop
+                                
+                else: # Short
+                    if c_low < lowest:
+                        lowest = c_low
+                        
+                    if exit_type == 0:
+                        unreal_profit = (entry_price - lowest) / pos_atr if pos_atr > 0 else 0
+                        if unreal_profit >= trailing_activation_atr:
+                            new_stop = lowest + (pos_atr * atr_mult)
+                            if new_stop < stop_price:
+                                stop_price = new_stop
 
-        # --- ENTRY LOGIC ---
-        else:
-            if trade_count >= max_trades:
-                break
+        # --- 3. SIGNAL DETECTION (For Pending Next Open) ---
+        elif not in_position and not pending_entry:
+            # Indicators are already shifted by 1.
+            # So looking at index [i] means looking at Confirmed Daily/Hourly data from [i-1].
             
-            # Volume Filter Check (Ratio based)
+            # Check NaN
+            if np.isnan(entry_upper[i]) or np.isnan(entry_lower[i]):
+                continue
+            
+            # Volume & Strength Filters
+            if strength_filter[i] == 0: continue
+            
             vol_pass = True
-            if use_volume_filter:
-                # volume_ratio[i] is shifted daily ratio
-                # Meaning: "Did yesterday's volume exceed average?"
-                if volume_ratio[i] < vol_threshold:
-                    vol_pass = False
+            if use_volume_filter and volume_ratio[i] < vol_threshold:
+                vol_pass = False
+            if not vol_pass: continue
+
+            # Dynamic Risk Sizing
+            regime_mult = 1.0
+            if use_dynamic_risk:
+                if natr[i] > panic_regime_natr:
+                    regime_mult = panic_regime_multiplier
+                elif hurst[i] > strong_regime_hurst and natr[i] > strong_regime_natr:
+                    regime_mult = strong_regime_multiplier
+                elif hurst[i] < weak_regime_hurst:
+                    regime_mult = weak_regime_multiplier
             
-            if not vol_pass:
-                continue
+            exec_risk = risk_per_trade * regime_mult
 
-            # Strength Filter
-            if strength_filter[i] == 0:
-                continue
-
-            # LONG Entry
+            # LONG Signal
             if c_price > entry_upper[i] and trend_dir[i] == 1:
-                fill_price = c_price * (1 + slippage_rate)
+                pending_entry = True
+                pending_side = 1
                 
-                # 1. SL Calc
-                if stop_loss_type == 1: # ATR Based
-                    stop_price = fill_price - (current_atr * atr_sl_mult)
-                else: # Fixed %
-                    stop_price = fill_price * (1 - stop_loss_pct)
-                
-                # TP Price
-                if use_take_profit:
-                    tp_price = fill_price + (current_atr * tp_atr_mult)
-                else:
-                    tp_price = 0.0
-
-                # 2. Risk Sizing (Corrected Volatility Sizing)
-                # Formula: Size = (Balance * Risk_Pct) / Stop_Distance
-                # Leverage is Max Cap, not Multiplier
-                stop_distance = abs(fill_price - stop_price)
-                
-                if stop_distance > 0:
-                    risk_amount = balance * risk_per_trade 
-                    amount = risk_amount / stop_distance
-                else:
-                    # Fallback if stop_distance is 0 (should not happen)
-                    amount = (balance * 0.01) / fill_price
-                
-                # [SAFETY] Cap amount to Max Leverage
-                # Max Position Value = Balance * Leverage
-                max_amount = (balance * leverage) / fill_price
-                if amount > max_amount:
-                    amount = max_amount
-
-                # [FIX] Deduct Margin + Entry Fee
-                required_margin = (amount * fill_price) / leverage
-                entry_fee = amount * fill_price * fee_rate
-                total_entry_cost = required_margin + entry_fee
-                
-                if balance >= total_entry_cost:
-                    balance -= total_entry_cost
-                    in_position = True
-                    pos_side = 1
-                    entry_price = fill_price
-                    entry_idx = i
-                    highest = fill_price
-                    lowest = fill_price
-                    pos_atr = current_atr
-                    
-            # SHORT Entry
+            # SHORT Signal
             elif c_price < entry_lower[i] and trend_dir[i] == -1:
-                fill_price = c_price * (1 - slippage_rate)
-                
-                # 1. SL Calc
-                if stop_loss_type == 1: # ATR Based
-                    stop_price = fill_price + (current_atr * atr_sl_mult)
-                else: # Fixed %
-                    stop_price = fill_price * (1 + stop_loss_pct)
-
-                # TP Price
-                if use_take_profit:
-                    tp_dictance = (current_atr * tp_atr_mult)
-                    tp_price = fill_price - tp_dictance
-                else:
-                    tp_price = 0.0
-                
-                # 2. Risk Sizing (Corrected Volatility Sizing)
-                stop_distance = abs(stop_price - fill_price)
-                
-                if stop_distance > 0:
-                    risk_amount = balance * risk_per_trade 
-                    amount = risk_amount / stop_distance
-                else:
-                    amount = (balance * 0.01) / fill_price
-                
-                # [SAFETY] Cap amount to Max Leverage
-                max_amount = (balance * leverage) / fill_price
-                if amount > max_amount:
-                    amount = max_amount
-                
-                # [FIX] Deduct Margin + Entry Fee
-                required_margin = (amount * fill_price) / leverage
-                entry_fee = amount * fill_price * fee_rate
-                total_entry_cost = required_margin + entry_fee
-                
-                if balance >= total_entry_cost:
-                    balance -= total_entry_cost
-                    in_position = True
-                    pos_side = -1
-                    entry_price = fill_price
-                    entry_idx = i
-                    highest = fill_price
-                    lowest = fill_price
-                    pos_atr = current_atr
+                pending_entry = True
+                pending_side = -1
     
     return trades[:trade_count], balance

@@ -180,15 +180,26 @@ def verify_single_symbol_futures(symbol, best_params, primary_symbols):
     # 백테스트
     strategy = UltimateStrategy("Verify", best_params)
     df = prepare_futures_data(test_hourly, test_daily, strategy)
-    ret_pct, mdd, _, _, _ = run_backtest_segment_futures(
+    ret_pct, mdd, trades_log, _, _ = run_backtest_segment_futures(
         df, best_params, initial_balance=750.0, return_series=True
     )
     
+    trade_count = len(trades_log) if trades_log else 0
+    win_rate = 0.0
+    pf = 0.0
+    if trade_count > 0:
+        wins = [t for t in trades_log if t > 0]
+        losses = [t for t in trades_log if t <= 0]
+        win_rate = len(wins) / trade_count * 100
+        gross_profit = sum(wins)
+        gross_loss = abs(sum(losses))
+        pf = gross_profit / gross_loss if gross_loss > 0 else (gross_profit if gross_profit > 0 else 0.0)
+
     is_primary = symbol in primary_symbols
     indicator = "🎯 PRIMARY" if is_primary else "📊 REFERENCE"
-    print(f"   - {symbol} [{indicator}]: Return {ret_pct:.2f}% | MDD {mdd:.2f}%")
+    print(f"   - {symbol} [{indicator}]: Return {ret_pct:.2f}% | MDD {mdd:.2f}% | Trades {trade_count} | Win {win_rate:.1f}% | PF {pf:.2f}")
     
-    return {'symbol': symbol, 'return': ret_pct, 'mdd': mdd, 'is_primary': is_primary}
+    return {'symbol': symbol, 'return': ret_pct, 'mdd': mdd, 'trades': trade_count, 'win_rate': win_rate, 'pf': pf, 'is_primary': is_primary}
 
 def calculate_mode_performance(all_results):
     """PRIMARY/REFERENCE 성능 계산"""
@@ -217,6 +228,8 @@ if __name__ == "__main__":
                         help="Comma-separated list of symbols to verify")
     parser.add_argument("--alt", type=int, default=0, choices=[0, 1],
                         help="Include altcoins for validation (1=yes, 0=no). Adds SOL, XRP, DOGE, BNB")
+    parser.add_argument("--all-modes", action="store_true",
+                        help="Verify all modes (SCALP, DAY, SWING, UNIFIED). Default: UNIFIED only")
     args = parser.parse_args()
     
     # 심볼 목록 빌드
@@ -230,7 +243,16 @@ if __name__ == "__main__":
     
     symbols = base_symbols
     PRIMARY_SYMBOLS = ['BTC/USDT', 'ETH/USDT']
-    MODES = ['SCALP', 'DAY', 'SWING']
+    
+    # [DEFAULT] Verify UNIFIED only (fastest, most flexible)
+    # Use --all-modes to compare all strategies
+    if args.all_modes:
+        MODES = ['SCALP', 'DAY', 'SWING', 'UNIFIED']
+        print(f"🔍 All-Modes Verification enabled. Testing: {MODES}")
+    else:
+        MODES = ['UNIFIED']
+        print(f"⚡ Quick Verification: UNIFIED mode only (use --all-modes to compare all strategies)")
+    
     results = []
     
     print("\n" + "="*80)
