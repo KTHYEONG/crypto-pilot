@@ -2,7 +2,6 @@
 from abc import ABC, abstractmethod
 import pandas as pd
 import numpy as np
-from .indicators_futures import add_common_indicators
 
 class Strategy(ABC):
     def __init__(self, name, params):
@@ -12,11 +11,6 @@ class Strategy(ABC):
     @abstractmethod
     def generate_signals(self, df):
         pass
-
-    def prepare_data(self, df):
-        """공통 데이터 전처리 및 지표 계산"""
-        # params에 있는 지표 설정값들이 add_common_indicators로 전달됨
-        return add_common_indicators(df, self.params)
     
     def get_required_warmup(self):
         """
@@ -56,7 +50,8 @@ class MasterStrategy(Strategy):
     - Dynamic Risk: Volatility Targeting (Engine handles this using ATR)
     """
     def generate_signals(self, df):
-        df = self.prepare_data(df)
+        # Note: 이 전략은 더 이상 사용되지 않음 (UNIFIED 전략으로 통합됨)
+        # Legacy compatibility 유지용
         
         # 1. Regime Filter Line (Trend Direction)
         # EMA 또는 HMA 중 선택된 것을 'regime_line'으로 통일시켜 엔진이 읽게 함
@@ -85,7 +80,8 @@ from .indicators_advanced_futures import (
     calculate_supertrend, calculate_atr, calculate_bollinger_bands,
     calculate_keltner_channel, calculate_adx, calculate_vhf, calculate_parabolic_sar,
     calculate_rsi, calculate_stochastic, calculate_stoch_rsi, calculate_macd, calculate_ichimoku, calculate_cci, calculate_mfi,
-    calculate_vwap, calculate_cmf, calculate_hurst_exponent
+    calculate_vwap, calculate_cmf, calculate_hurst_exponent,
+    calculate_efficiency_ratio, calculate_natr, calculate_garman_klass_vol
 )
 
 class UltimateStrategy(Strategy):
@@ -96,11 +92,22 @@ class UltimateStrategy(Strategy):
     def generate_signals(self, df):
         # [ROBUSTNESS] Clean column assignment (data copied at loader level)
         
-        # --- 1. Basic Indicators (Lazy ATR) ---
         # --- 1. Basic Indicators (Always calculate ATR) ---
         # ATR is fundamental for volatility normalization, even if not used for Entry
         atr_period = self.params.get('ATR_PERIOD', 14)
         df.loc[:, 'atr'] = calculate_atr(df, window=atr_period)
+        
+        # [NEW] Always calculate RSI for Engine's Panic Exit checking
+        # Even if strength_filter='NONE', engine might need RSI for exits
+        rsi_period = self.params.get('STRENGTH_FILTER_PERIOD', 14) 
+        df.loc[:, 'rsi'] = calculate_rsi(df['close'], window=rsi_period)
+        
+        # [NEW] Always calculate Hurst & NATR for Dynamic Risk Sizing (Regime Detection)
+        hurst_period = self.params.get('HURST_PERIOD', 200)
+        df.loc[:, 'hurst'] = calculate_hurst_exponent(df['close'], window=hurst_period)
+        
+        natr_period = self.params.get('STRENGTH_FILTER_PERIOD', 14)
+        df.loc[:, 'natr'] = calculate_natr(df, window=natr_period)
         
         # --- 2. Entry Signal Setup ---
         entry_type = self.params.get('ENTRY_TYPE', 'DONCHIAN')
@@ -250,7 +257,7 @@ class UltimateStrategy(Strategy):
             df['stoch_k'] = stoch_k
             # Block extremes
             df.loc[(df['stoch_k'] > stoch_overbought) | (df['stoch_k'] < stoch_oversold), 'strength_filter'] = 0
-
+ 
         elif strength_type == 'STOCH_RSI':
             stoch_rsi_overbought = self.params.get('STOCH_RSI_OVERBOUGHT', 80)
             stoch_rsi_oversold = self.params.get('STOCH_RSI_OVERSOLD', 20)
@@ -259,7 +266,7 @@ class UltimateStrategy(Strategy):
             df['stoch_rsi_k'] = stoch_rsi_k
             # Block extremes
             df.loc[(df['stoch_rsi_k'] > stoch_rsi_overbought) | (df['stoch_rsi_k'] < stoch_rsi_oversold), 'strength_filter'] = 0
-
+ 
         elif strength_type == 'CMF':
             # [NEW] Chaikin Money Flow - Institutional Accumulation/Distribution
             # 추세 추종: CMF > Threshold일 때만 진입 (양수 자금 유입 확인)
@@ -269,7 +276,7 @@ class UltimateStrategy(Strategy):
             df['cmf'] = calculate_cmf(df, window=cmf_period)
             # Block when CMF is below threshold (insufficient buying pressure)
             df.loc[df['cmf'] < cmf_thresh, 'strength_filter'] = 0
-
+ 
             
         elif strength_type == 'HURST':
             # [NEW] Hurst Exponent - Market Regime Filter
@@ -287,6 +294,23 @@ class UltimateStrategy(Strategy):
             # Only allow strong trending (H > trend_threshold)
             # Optional: You can also require H > trend_threshold explicitly
             # df.loc[df['hurst'] < hurst_trend_thresh, 'strength_filter'] = 0
+            
+        elif strength_type == 'ER':
+            # [NEW] Kaufman Efficiency Ratio
+            # ER > Threshold: Strong trend / low noise -> Allow Entry
+            er_thresh = self.params.get('ER_THRESHOLD', 0.6)
+            er_period = self.params.get('STRENGTH_FILTER_PERIOD', 10)
+            df['er'] = calculate_efficiency_ratio(df['close'], window=er_period)
+            df.loc[df['er'] < er_thresh, 'strength_filter'] = 0
+            
+        elif strength_type == 'NATR':
+            # [NEW] Normalized ATR Filter
+            # NATR < Threshold: Low volatility environment -> Block Entry (Optional logic)
+            # NATR > Threshold: Sufficient volatility for profit
+            natr_thresh = self.params.get('NATR_THRESHOLD', 1.0)
+            natr_period = self.params.get('STRENGTH_FILTER_PERIOD', 14)
+            df['natr'] = calculate_natr(df, window=natr_period)
+            df.loc[df['natr'] < natr_thresh, 'strength_filter'] = 0
 
         # --- 5. Exit Logic (Parabolic SAR) ---
         # Calculated here so it's available for the backtest engine
@@ -312,8 +336,10 @@ class UltimateStrategy(Strategy):
             # Z = (Current - Mean) / Std
             # This accounts for volume volatility, differentiating between noise and signal better than simple ratios.
             # Z-score is stored in 'volume_ratio' to maintain compatibility with Engine logic
-            z_score = (log_vol - log_vol_mean) / log_vol_std.replace(0, 1)
-            df.loc[:, 'volume_ratio'] = z_score.fillna(0)
+            # [FIX] Safer division: handle NaN std and 0 std
+            log_vol_std_safe = log_vol_std.replace(0, 1).fillna(1)
+            z_score = (log_vol - log_vol_mean) / log_vol_std_safe
+            df.loc[:, 'volume_ratio'] = z_score.fillna(-10.0) # Undefined -> Very low Z-score (Block trade)
         else:
             df.loc[:, 'volume_ratio'] = 100.0 # Default Pass (High ratio)
             
@@ -325,9 +351,29 @@ class UltimateStrategy(Strategy):
             df['entry_lower'] = np.nan
         if 'trend_direction' not in df.columns:
             df['trend_direction'] = 0
-        if 'strength_filter' not in df.columns:
-            df['strength_filter'] = 1
-        if 'atr' not in df.columns:
-            df['atr'] = df['close'] * 0.01
+            
+        # [ROBUSTNESS] Final Cleanup & Sanitization
+        # Fill NaNs in critical indicators to prevent Numba errors or Logical fails
+        # Strategy usually has warmup phase, but clean data prevents edge-case crashes.
+        
+        # 1. Indicators: ffill first, then default defaults
+        df['atr'] = df['atr'].ffill().bfill().fillna(df['close'] * 0.01)
+        
+        if 'natr' in df.columns:
+            df['natr'] = df['natr'].ffill().fillna(1.0)
+            
+        if 'rsi' in df.columns:
+            df['rsi'] = df['rsi'].ffill().fillna(50.0)
+            
+        if 'hurst' in df.columns:
+            df['hurst'] = df['hurst'].ffill().fillna(0.5) # Neutral
+            
+        # 2. Signals
+        df['strength_filter'] = df['strength_filter'].fillna(0).astype(int)
+        df['trend_direction'] = df['trend_direction'].fillna(0).astype(int)
+        
+        # 3. Entry Bands (Keep NaN intact as they mean "No Signal", but ensure float type)
+        df['entry_upper'] = df['entry_upper'].astype(float)
+        df['entry_lower'] = df['entry_lower'].astype(float)
 
         return df

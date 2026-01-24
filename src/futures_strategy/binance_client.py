@@ -328,10 +328,35 @@ class BinanceClient:
                 price=price,
                 params=params
             )
-            self.logger.info(f"⚡ Order Placed: {side} {amount} {symbol} @ {price if price else 'Market'}")
+            self.logger.info(f"⚡ Order Placed: {order_type} {side} {amount} {symbol} @ {price if price else 'Market'}")
             return order
         except Exception as e:
             self.logger.error(f"❌ Order Failed: {e}")
+            return None
+
+    def place_stop_market_order(self, symbol, side, amount, stop_price):
+        """
+        서버 사이드 Stop Market 주문 (손절용)
+        side: 'buy' (숏 손절용) or 'sell' (롱 손절용)
+        stop_price: 트리거 가격
+        """
+        try:
+            # 바이낸스 선물 STOP_MARKET 주문은 stopPrice를 params에 넣어야 함
+            params = {
+                'stopPrice': stop_price,
+                'reduceOnly': True  # 포지션 축소 전용
+            }
+            order = self.exchange.create_order(
+                symbol=symbol,
+                type='STOP_MARKET',
+                side=side,
+                amount=amount,
+                params=params
+            )
+            self.logger.info(f"🛡️ Server SL Placed: {symbol} {side} {amount} @ Stop {stop_price}")
+            return order
+        except Exception as e:
+            self.logger.error(f"❌ Failed to place Server SL for {symbol}: {e}")
             return None
 
     def place_order_smart(self, symbol, side, amount, atr=None, current_price=None):
