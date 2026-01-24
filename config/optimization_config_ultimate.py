@@ -18,7 +18,7 @@ ULTIMATE_SEARCH_SPACE = {
     # 3. KELTNER: ATR-based channel breakout
     # 4. CCI: Momentum Breakout
     'ENTRY_TYPE': {'type': 'categorical', 'choices': ['DONCHIAN', 'BOLLINGER', 'KELTNER', 'CCI']},
-    'ENTRY_PERIOD': {'type': 'int', 'low': 10, 'high': 150, 'step': 1},  # 5 → 1
+    'ENTRY_PERIOD': {'type': 'int', 'low': 5, 'high': 150, 'step': 1},  # 5 → 1
     
     # Bollinger-specific (Standard Deviation)
     'BB_STD': {'type': 'float', 'low': 1.5, 'high': 3.0, 'step': 0.1},  # 0.5 → 0.1
@@ -29,7 +29,7 @@ ULTIMATE_SEARCH_SPACE = {
     
     # Shared Period for MA-based filters (SMA, EMA, HMA, DEMA, TEMA)
     # Range extended down to 5 to allow short-term trend detection
-    'MA_PERIOD': {'type': 'int', 'low': 5, 'high': 200, 'step': 1},  # 5 → 1
+    'MA_PERIOD': {'type': 'int', 'low': 3, 'high': 200, 'step': 1},  # 5 → 1
     
     'SUPERTREND_MULT': {'type': 'float', 'low': 1.0, 'high': 5.0, 'step': 0.1},
     'SUPERTREND_PERIOD': {'type': 'int', 'low': 5, 'high': 50, 'step': 1},
@@ -49,11 +49,11 @@ ULTIMATE_SEARCH_SPACE = {
     'STRENGTH_FILTER_TYPE': {'type': 'categorical', 'choices': ['NONE', 'ADX', 'VHF', 'MFI', 'RSI', 'STOCHASTIC']},
     
     # Shared Period for Strength Filters [NEW]
-    'STRENGTH_FILTER_PERIOD': {'type': 'int', 'low': 7, 'high': 50, 'step': 1},
+    'STRENGTH_FILTER_PERIOD': {'type': 'int', 'low': 5, 'high': 50, 'step': 1},
     
     # Filter-Specific Parameters (Used only when corresponding type is selected)
     # Refined steps (1) and broader ranges for theoretical optimum
-    'ADX_THRESHOLD': {'type': 'int', 'low': 15, 'high': 40, 'step': 1},
+    'ADX_THRESHOLD': {'type': 'int', 'low': 10, 'high': 40, 'step': 1},
     'VHF_THRESHOLD': {'type': 'float', 'low': 0.2, 'high': 0.6, 'step': 0.01},
     'MFI_THRESHOLD': {'type': 'int', 'low': 10, 'high': 50, 'step': 1},
     'RSI_OVERBOUGHT': {'type': 'int', 'low': 65, 'high': 85, 'step': 1},

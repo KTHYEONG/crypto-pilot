@@ -69,6 +69,7 @@ TRADE_HISTORY_DB = DATA_DIR / "trade_history.db"
 
 # 헬스체크 파일 (봇 생존 확인용)
 HEARTBEAT_FILE = LOG_DIR / "trader_heartbeat.json"
+FUTURES_STATE_FILE = DATA_DIR / "futures_trading_state.json"
 
 # --- API 재시도 및 타임아웃 정책 ---
 API_READ_TIMEOUT = 20       # 데이터 조회 (OHLCV, 잔고 등)
@@ -85,7 +86,7 @@ MIN_ORDER_VALUE_USDT = 100      # Binance 최소 주문 금액 (BTC는 0.001단�
 MAX_EXCHANGE_LEVERAGE = 5       # 거래소 설정 레버리지 (버퍼)
 
 # --- 타이밍 설정 ---
-LOOP_INTERVAL_SECONDS = 30      # 메인 루프 간격
+LOOP_INTERVAL_SECONDS = 10      # 메인 루프 간격 (청산 감시 기능 강화)
 SYMBOL_DELAY_SECONDS = 2        # 심볼 간 딜레이
 ERROR_SLEEP_SECONDS = 60        # 에러 발생 시 대기
 
@@ -98,18 +99,20 @@ LOG_MAX_BYTES = 10 * 1024 * 1024  # 10MB
 LOG_BACKUP_COUNT = 5
 
 # --- 대상 심볼 ---
-FUTURES_TARGET_SYMBOLS = ['BTC/USDT', 'ETH/USDT']
+FUTURES_TARGET_SYMBOLS = ['ETH/USDT', 'SOL/USDT', 'DOGE/USDT']
 
 # --- 스터디 이름 (Optuna) ---
-OPTUNA_STUDY_NAMES = ['futures_strategy', 'future_strategy']
+OPTUNA_STUDY_NAMES = ['futures_strategy', 'future_strategy', 'UNIFIED']
 
 # --- 포지션 사이징 가중치 (성과 기반) ---
-# 근거: 2025-2026 백테스트 결과
-# BTC: Return 103%, PF 11.53, WinRate 90% (압도적 성과)
-# ETH: Return 31%, PF 2.69, WinRate 76% (보조)
+# 근거: 2026-01-24 UNIFIED 모드 검증 결과 (OOS Return: 828.62%)
+# ETH: 40% (안정적 수익/변동성 조화, MDD -18%)
+# SOL: 30% (알트 대장주 움직임, MDD -14%)
+# DOGE: 30% (폭발적 수익률, MDD -20%)
 SYMBOL_ALLOCATION_WEIGHTS = {
-    'BTC/USDT': 0.75,
-    'ETH/USDT': 0.25
+    'ETH/USDT': 0.40,
+    'SOL/USDT': 0.30,
+    'DOGE/USDT': 0.30
 }
 
 # ============================================================
@@ -128,19 +131,22 @@ MAX_INVEST_CAP_KRW = 100_000_000        # 심볼당 최대 투자 금액 (1억�
 MAX_TOTAL_BALANCE_KRW = 500_000_000     # 총 운영 자금 상한 (5억원)
 
 # --- Spot 타이밍 설정 ---
-SPOT_LOOP_INTERVAL_SECONDS = 60         # 메인 루프 간격 (1분)
+SPOT_LOOP_INTERVAL_SECONDS = 10         # 메인 루프 간격 (10초)
 SPOT_SYMBOL_DELAY_SECONDS = 2           # 심볼 간 딜레이
 
 # --- 대상 심볼 (Upbit) ---
-SPOT_TARGET_SYMBOLS = ['KRW-BTC', 'KRW-ETH']
+# --- 대상 심볼 (Upbit) ---
+SPOT_TARGET_SYMBOLS = ['KRW-ETH', 'KRW-SOL', 'KRW-BTC']
 
 # --- 포지션 사이징 가중치 (성과 기반 - Spot) ---
-# 근거: 2025-2026 백테스트 결과 (Spot)
-# ETH: Return 6328%, PF 119801, WinRate 99.59% (최고 성과) -> 70% 할당
-# BTC: Return 2236%, PF 5385, WinRate 99.32% (우수) -> 30% 할당
+# 근거: 2026-01-24 UNIFIED 검증 결과 (50만원 소액 투자 최적화)
+# KRW-SOL: Return 804% (압도적 성장성) -> 40%
+# KRW-ETH: Return 530% (최고의 밸런스) -> 40%
+# KRW-BTC: Return 85% (계좌 안정성 방어) -> 20%
 SPOT_ALLOCATION_WEIGHTS = {
-    'KRW-BTC': 0.30,
-    'KRW-ETH': 0.70
+    'KRW-ETH': 0.40,
+    'KRW-SOL': 0.40,
+    'KRW-BTC': 0.20
 }
 
 # --- Optuna Study ---
