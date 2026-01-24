@@ -67,6 +67,8 @@ def load_all_timeframes(symbols, start_date, end_date, timeframes):
                 try:
                     df = pd.read_csv(filepath)
                     df['datetime'] = pd.to_datetime(df['timestamp'], unit='ms')
+                    df.sort_values('datetime', inplace=True) # [CRITICAL] Enforce Order
+                    df.reset_index(drop=True, inplace=True)
                     symbols_data[symbol][tf] = df
                 except Exception as e:
                     print(f"⚠️  Warning: Failed to load {filepath}: {e}")
@@ -75,206 +77,82 @@ def load_all_timeframes(symbols, start_date, end_date, timeframes):
             
             if tf not in symbols_data[symbol] or symbols_data[symbol][tf].empty:
                 print(f"  ⬇️ Downloading {symbol}-{tf}...")
-                all_data = []
-                since = start_ts
                 
                 try:
-                    while since < end_ts:
-                        df_batch = client.fetch_ohlcv(symbol, tf, since=since, limit=200)
-                        if df_batch is None or df_batch.empty: break
-                        all_data.append(df_batch)
-                        since = int(df_batch.iloc[-1]['timestamp']) + 1
-                        time.sleep(0.1)
+                    df = client.fetch_ohlcv(symbol, tf, since=start_ts, end=end_ts)
+                    
+                    if df is not None and not df.empty:
+                        try:
+                            df.sort_values('timestamp', inplace=True) # [CRITICAL] Enforce Order
+                            df.to_csv(filepath, index=False)
+                        except Exception as e:
+                            print(f"⚠️  Warning: Failed to save {filepath}: {e}")
+                            print(f"   Continuing with in-memory data...")
+                        
+                        symbols_data[symbol][tf] = df
+                    else:
+                         print(f"❌ Error: No data downloaded for {symbol}-{tf}")
+                         sys.exit(1)
                 except Exception as e:
                     print(f"❌ Error: Failed to download {symbol}-{tf}: {e}")
                     print(f"   Please check your API credentials and network connection")
                     sys.exit(1)
-                
-                if all_data:
-                    df = pd.concat(all_data, ignore_index=True)
-                    df = df.drop_duplicates(subset=['timestamp']).sort_values('timestamp').reset_index(drop=True)
-                    df['datetime'] = pd.to_datetime(df['timestamp'], unit='ms')
-                    df = df[(df['timestamp'] >= start_ts) & (df['timestamp'] <= end_ts)]
-                    
-                    try:
-                        df.to_csv(filepath, index=False)
-                    except Exception as e:
-                        print(f"⚠️  Warning: Failed to save {filepath}: {e}")
-                        print(f"   Continuing with in-memory data...")
-                    
-                    symbols_data[symbol][tf] = df
-                else:
-                    print(f"❌ Error: No data downloaded for {symbol}-{tf}")
-                    sys.exit(1)
                     
     return symbols_data
 
-@njit(nogil=True, cache=True)
-def backtest_loop_spot_numba(
-    close, high, low,
-    entry_upper,
-    trend_dir, strength_filter, volume_ratio, atr, parabolic_sar,
-    initial_balance, fee_rate, slippage_rate,
-    exit_type, # 0: ATR, 1: SAR
-    stop_loss_type, stop_loss_pct, atr_sl_mult,
-    atr_mult, risk_per_trade,
-    use_volume_filter, vol_threshold,
-    use_take_profit, tp_atr_mult,
-    max_holding_bars, trailing_activation_atr,  # [NEW]
-    warmup_bars  # [WARMUP] Skip trading during this period
-):
+def compute_merge_indices(data_maps):
     """
-    Numba JIT-compiled backtest loop for Spot (Long-Only).
+    Pre-compute merge index mappings matches optimize_futures.py
     """
-    n = len(close)
-    balance = initial_balance
-    coin = 0.0
-    in_position = False
-    entry_price = 0.0
-    entry_idx = 0
-    highest = 0.0
-    pos_atr = 0.0
-    stop_price = 0.0
-    tp_price = 0.0
+    merge_indices = {}
     
-    max_trades = 30000
-    trades = np.zeros((max_trades, 3)) # [pnl_pct, duration, dummy]
-    trade_count = 0
-    
-    equity_curve = np.zeros(n)
-    
-    for i in range(n):
-        # [WARMUP] Skip trading during warmup period
-        if i < warmup_bars:
-            equity_curve[i] = balance
+    for symbol, data_map in data_maps.items():
+        merge_indices[symbol] = {}
+        
+        if '1d' not in data_map:
             continue
             
-        c_price = close[i]
-        c_high = high[i]
-        c_low = low[i]
+        daily_df = data_map['1d']
+        # Ensure date_key exists
+        if 'date_key' not in daily_df.columns:
+            daily_df['date_key'] = pd.to_datetime(daily_df['datetime']).dt.strftime('%Y-%m-%d')
+            
+        daily_date_keys = daily_df['date_key'].values
+        date_to_daily_idx = {date_key: idx for idx, date_key in enumerate(daily_date_keys)}
         
-        # --- POSITION MANAGEMENT ---
-        if in_position:
-            exit_triggered = False
-            exit_price = 0.0
+        for tf, tf_df in data_map.items():
+            if tf == '1d': continue
             
-            # [NEW] Time-Based Exit
-            bars_held = i - entry_idx
-            if bars_held >= max_holding_bars:
-                exit_price = c_price
-                exit_triggered = True
+            if 'date_key' not in tf_df.columns:
+                tf_df['date_key'] = pd.to_datetime(tf_df['datetime']).dt.strftime('%Y-%m-%d')
             
-            # --- 1. Main Trend Exit (ATR Trailing or SAR) ---
-            if not exit_triggered:
-                if exit_type == 0: # ATR Trailing Stop
-                    if c_high > highest:
-                        highest = c_high
-                        
-                        # [NEW] Conditional Trailing Activation
-                        # Only activate if profit exceeds threshold (e.g., 3 ATR)
-                        unrealized_profit_atr = 0.0
-                        if pos_atr > 0:
-                            unrealized_profit_atr = (highest - entry_price) / pos_atr
-                        
-                        if unrealized_profit_atr >= trailing_activation_atr:
-                            new_stop = highest - (pos_atr * atr_mult)
-                            if new_stop > stop_price:
-                                stop_price = new_stop
-                    
-                    if c_low <= stop_price:
-                        exit_price = stop_price if stop_price > c_low else c_low
-                        exit_triggered = True
-                else: # Parabolic SAR Exit
-                    # Ensure SAR is valid (> 0)
-                    current_sar = parabolic_sar[i]
-                    if current_sar > 0:
-                        if c_low <= current_sar:
-                            exit_price = current_sar if current_sar > c_low else c_low
-                            exit_triggered = True
-                    
-                    # Safety Stop (Static Initial SL)
-                    if not exit_triggered and c_low <= stop_price:
-                        exit_price = stop_price if stop_price > c_low else c_low
-                        exit_triggered = True
+            hourly_date_keys = tf_df['date_key'].values
             
-            # --- 2. Take Profit (Safety Net) ---
-            if not exit_triggered and use_take_profit and tp_price > 0 and c_high >= tp_price:
-                exit_price = tp_price
-                exit_triggered = True
-                
-            # --- 3. Trend Reversal (Emergency Exit) ---
-            if not exit_triggered and i > 0 and trend_dir[i-1] == -1:
-                exit_price = c_price
-                exit_triggered = True
-                
-            if exit_triggered:
-                # Sell All
-                revenue = coin * exit_price * (1 - fee_rate)
-                balance += revenue  # Corrected: Add revenue back to remaining balance
-                coin = 0.0
-                in_position = False
-                
-                pnl_pct = (exit_price - entry_price) / entry_price * 100
-                if trade_count < max_trades:
-                    trades[trade_count] = [pnl_pct, float(i - entry_idx), 0.0]
-                    trade_count += 1
-        
-        # --- ENTRY LOGIC ---
-        else:
-            # Filters
-            if np.isnan(entry_upper[i]): continue
-            if strength_filter[i] == 0: continue
-            if use_volume_filter and volume_ratio[i] < vol_threshold: continue
+            merge_index = np.array([
+                date_to_daily_idx.get(date_key, -1) 
+                for date_key in hourly_date_keys
+            ], dtype=np.int32)
             
-            # Long Entry
-            if trend_dir[i] == 1 and c_price > entry_upper[i]:
-                fill_price = c_price * (1 + slippage_rate)
-                entry_price = fill_price
+            if np.any(merge_index == -1):
+                # Fallback to 0 to prevent crash, but warn
+                merge_index[merge_index == -1] = 0
                 
-                # Initial SL Calc (Safety Net)
-                if stop_loss_type == 1: # ATR
-                    stop_price = fill_price - (atr[i] * atr_sl_mult)
-                else: # Fixed
-                    stop_price = fill_price * (1 - stop_loss_pct)
-                
-                # TP Calc (Safety Net)
-                if use_take_profit:
-                    tp_price = fill_price + (atr[i] * tp_atr_mult)
-                else:
-                    tp_price = 0.0
-                
-                # Sizing based on Risk Per Trade with 100M cap
-                cost = balance * risk_per_trade
-                max_position_value = 100_000_000.0  # 1억 KRW cap for realistic sizing
-                cost = min(cost, max_position_value)
-                coin = (cost * (1 - fee_rate)) / fill_price
-                balance -= cost
-                
-                in_position = True
-                entry_idx = i
-                highest = fill_price
-                pos_atr = atr[i]
-        
-        equity_curve[i] = balance + (coin * c_price)
+            merge_indices[symbol][tf] = merge_index
+            
+    return merge_indices
 
-    return trades[:trade_count], equity_curve, balance + (coin * close[-1])
-
-
-
-
-def objective(trial, symbols_data, search_space, mode="DAY"):
+def objective(trial, symbols_data, search_space, mode="DAY", merge_indices=None):
     import gc
     params = suggest_params(trial, search_space)
     
-    # [FUTURE-PROOF] Merge common search space (currently empty, but prepared for future use)
-    # This ensures consistency with Futures optimization structure
-    common_params = {}  # Reserved for future common parameters
+    # [FUTURE-PROOF] Merge common search space 
+    common_params = {} 
     full_params = {**params, **common_params}
     
     # [VALIDATION] Enforce Logical Constraints
     if full_params.get('TREND_FILTER_TYPE') == 'MACD':
         if full_params.get('MACD_FAST', 12) >= full_params.get('MACD_SLOW', 26):
-            return -10000 # Invalid trial penalty
+            return -10000 
             
     tf = full_params['TIMEFRAME']
     symbol_scores = []
@@ -283,27 +161,40 @@ def objective(trial, symbols_data, search_space, mode="DAY"):
     for symbol, data_map in symbols_data.items():
         if tf not in data_map: continue
         
-        # Get data (no need to copy - Engine doesn't modify it)
+        # Get data 
         df = data_map[tf]
+        daily_df = data_map.get('1d') # Need this now
         
         # Create Strategy
         strategy = UltimateStrategy(f"Opt_{symbol}", full_params)
         
-        # Create Engine (signals generated inside _prepare_data)
+        # Prepare merge index
+        current_merge_index = None
+        if merge_indices and symbol in merge_indices and tf in merge_indices[symbol]:
+            current_merge_index = merge_indices[symbol][tf]
+
+        # Create Engine 
         engine = BacktestEngineFastSpot(
-            df, 
+            df, daily_df,  # Pass both DFs
             strategy,
-            backtest_loop_spot_numba,  # Inject backtest function
+            backtest_loop_spot_numba,  
             initial_balance=10_000_000,
-            fee_rate=0.0005,      # Upbit: 0.05%
-            slippage_rate=0.0003  # Upbit: 0.03%
+            fee_rate=0.0005,      
+            slippage_rate=0.0003,
+            merge_index_map=current_merge_index
         )
+            
         # Inject risk parameter
         engine.risk_per_trade = full_params.get('RISK_PER_TRADE_SPOT', 0.99)
         
         # Run backtest
         try:
             result = engine.run()
+            
+            # [DEBUG] Diagnose Score Issue (Print on First Trial Only)
+            if trial.number == 0:
+                print(f"\n🔍 [DEBUG] Symbol: {symbol}, Timeframe: {tf}")
+                print(f"   - Trades: {result['total_trades']}, Return: {result['total_return_pct']:.2f}%, MDD: {result['mdd_pct']:.2f}%")
         except MemoryError as e:
             # [MEMORY] Cleanup on OOM
             del engine, strategy
@@ -330,12 +221,14 @@ def objective(trial, symbols_data, search_space, mode="DAY"):
             pf = gross_profit / gross_loss if gross_loss > 0 else (gross_profit if gross_profit > 0 else 0.0)
         
         # Calculate Score per Symbol
-        score = calculate_score(ret, mdd, trades_df, mode=mode)
+        score = calculate_score(ret, mdd, trades_df, mode=mode, market_type="spot", timeframe=tf)
         
-        # [SPEED UP] Short-circuit: If any symbol performs poorly, fail the trial immediately
-        # No need to test other symbols if this one failed
-        if score < 5:
-            # [MEMORY] Cleanup before early return
+        # [DEBUG] Check Score Value
+        if trial.number == 0:
+             print(f"   - Calculated Score: {score:.2f}")
+
+        # [SPEED UP] Short-circuit (Relaxed threshold)
+        if score < 0:
             del engine, result, strategy, trades_df
             gc.collect()
             return -10000
@@ -345,19 +238,14 @@ def objective(trial, symbols_data, search_space, mode="DAY"):
         # Set user attrs for analysis
         trial.set_user_attr(f"ret_{symbol}", float(ret))
         trial.set_user_attr(f"mdd_{symbol}", float(mdd))
-        trial.set_user_attr(f"trades_{symbol}", int(num_trades))
-        trial.set_user_attr(f"winrate_{symbol}", float(win_rate))
-        trial.set_user_attr(f"pf_{symbol}", float(pf))
         
-        # [MEMORY] Explicit cleanup per symbol
         del engine, result, strategy, trades_df
 
     if not symbol_scores:
         gc.collect()
         return -10000
     
-    # [UNIVERSAL] Combine using Harmonic Mean for Robustness
-    # Formula: n / (1/x1 + 1/x2 + ... + 1/xn)
+    # [UNIVERSAL] Combine using Harmonic Mean
     offset = 6000
     shifted_scores = [s + offset for s in symbol_scores]
     
@@ -369,11 +257,183 @@ def objective(trial, symbols_data, search_space, mode="DAY"):
     final_score = harmonic_mean - offset
     
     trial.set_user_attr("score_avg", final_score)
-    
-    # [MEMORY] Force garbage collection after processing all symbols
     gc.collect()
     
     return final_score
+
+@njit(nogil=True, cache=True)
+def backtest_loop_spot_numba(
+    close, high, low, open_prices,
+    entry_upper,
+    trend_dir, strength_filter, volume_ratio, atr, parabolic_sar,
+    hurst, natr, rsi,
+    initial_balance, fee_rate, slippage_rate,
+    exit_type,
+    stop_loss_type, stop_loss_pct, atr_sl_mult,
+    atr_mult, risk_per_trade,
+    use_volume_filter, vol_threshold,
+    use_take_profit, tp_atr_mult,
+    max_holding_bars, trailing_activation_atr,
+    hurst_threshold, natr_panic_threshold, rsi_panic_threshold,
+    strong_regime_multiplier, panic_regime_multiplier,
+    rsi_entry_max, natr_entry_min,
+    warmup_bars
+):
+    """
+    Numba Backtest Loop v15.1: Strict Realism & Slippage Enforcement
+    """
+    n = len(close)
+    balance = initial_balance
+    coin = 0.0
+    in_position = False
+    pending_entry = False
+    entry_price = 0.0
+    entry_idx = 0
+    highest = 0.0
+    pos_atr = 0.0
+    stop_price = 0.0
+    tp_price = 0.0
+    
+    max_trades = 30000
+    trades = np.zeros((max_trades, 3))
+    trade_count = 0
+    
+    equity_curve = np.zeros(n)
+    exec_risk = risk_per_trade 
+    
+    for i in range(n):
+        if i < warmup_bars:
+            equity_curve[i] = balance
+            continue
+            
+        c_open = open_prices[i]
+        c_price = close[i]
+        c_high = high[i]
+        c_low = low[i]
+        
+        # --- 1. EXECUTION: BUY AT OPEN (If signaled at i-1) ---
+        if pending_entry and not in_position:
+            fill_price = c_open * (1 + slippage_rate)
+            
+            # Use ATR from signal bar (i-1)
+            sig_atr = atr[i-1] if i > 0 else atr[i]
+            
+            # SL/TP Setup
+            if stop_loss_type == 1:
+                stop_price = fill_price - (sig_atr * atr_sl_mult)
+            else:
+                stop_price = fill_price * (1 - stop_loss_pct)
+            
+            tp_price = fill_price + (sig_atr * tp_atr_mult) if use_take_profit else 0.0
+            
+            target_risk = exec_risk
+            if target_risk > 0.99: target_risk = 0.99
+            
+            cost = balance * target_risk
+            cost = min(cost, 100_000_000.0)
+            
+            coin = (cost * (1 - fee_rate)) / fill_price
+            balance -= cost
+            
+            in_position = True
+            pending_entry = False
+            entry_price = fill_price
+            entry_idx = i
+            highest = fill_price
+            pos_atr = sig_atr
+        
+        # --- 2. EXECUTION: EXIT CHECKS (During Bar i) ---
+        if in_position:
+            exit_triggered = False
+            exit_price = 0.0
+            
+            # [SEQ-1] Check Stop Loss Hierarchy FIRST
+            # Using stop_price inherited from bar i-1 (Sequential Realism)
+            
+            # Use pre-calculated SAR if mode enabled
+            current_stop = stop_price
+            if exit_type == 1 and parabolic_sar[i] > 0:
+                current_stop = max(stop_price, parabolic_sar[i])
+
+            if c_low <= current_stop:
+                # Market Exit Slip
+                exit_price = current_stop * (1 - slippage_rate)
+                exit_triggered = True
+            
+            # [SEQ-2] Check Take Profit
+            elif not exit_triggered and use_take_profit and tp_price > 0 and c_high >= tp_price:
+                # Limit Exit (Treated as No Slip for TP usually, or apply half)
+                exit_price = tp_price 
+                exit_triggered = True
+
+            # [SEQ-3] Conditional Market Exits (RSI, Trend, Time)
+            elif not exit_triggered:
+                # RSI Panic
+                if rsi[i] > rsi_panic_threshold:
+                    exit_price = c_price * (1 - slippage_rate)
+                    exit_triggered = True
+                
+                # Trend Reversal
+                elif i > 0 and trend_dir[i] == -1: # Already shifted, so this is confirmed i-1
+                    exit_price = c_price * (1 - slippage_rate)
+                    exit_triggered = True
+                
+                # Max Holding
+                elif (i - entry_idx) >= max_holding_bars:
+                    unrealized_pct = (c_price - entry_price) / entry_price * 100
+                    if unrealized_pct < 0.2:
+                        exit_price = c_price * (1 - slippage_rate)
+                        exit_triggered = True
+
+            if exit_triggered:
+                revenue = coin * exit_price * (1 - fee_rate)
+                balance += revenue 
+                
+                pnl_pct = (exit_price - entry_price) / entry_price * 100
+                if trade_count < max_trades:
+                    trades[trade_count] = [pnl_pct, float(i - entry_idx), 0.0]
+                    trade_count += 1
+                
+                coin = 0.0
+                in_position = False
+            else:
+                # [SEQ-4] Update High and Trailing Stop for NEXT Bar (i+1)
+                if c_high > highest:
+                    highest = c_high
+                
+                if exit_type == 0: # ATR Trailing
+                    unrealized_profit_atr = (highest - entry_price) / pos_atr if pos_atr > 0 else 0
+                    if unrealized_profit_atr >= trailing_activation_atr:
+                        new_stop = highest - (pos_atr * atr_mult)
+                        if new_stop > stop_price:
+                            stop_price = new_stop
+
+        # --- 3. SIGNAL: ENTRY DETECTION (At Close of i, for Open of i+1) ---
+        elif not in_position and not pending_entry:
+            # Indicators are already shifted by 1 in Engine
+            # So trend_dir[i] is actually trend at i-1
+            
+            can_signal = True
+            if np.isnan(entry_upper[i]): can_signal = False
+            elif strength_filter[i] == 0: can_signal = False
+            elif use_volume_filter and volume_ratio[i] < vol_threshold: can_signal = False
+            elif rsi[i] >= rsi_entry_max: can_signal = False
+            elif natr[i] < natr_entry_min: can_signal = False
+            
+            if can_signal and trend_dir[i] == 1 and c_price > entry_upper[i]:
+                regime_mult = 1.0
+                if hurst[i] > hurst_threshold: regime_mult = strong_regime_multiplier
+                if natr[i] > natr_panic_threshold: regime_mult = panic_regime_multiplier
+                
+                exec_risk = risk_per_trade * regime_mult
+                if i < n - 1:
+                    pending_entry = True
+        
+        equity_curve[i] = balance + (coin * c_price)
+
+    return trades[:trade_count], equity_curve, balance + (coin * close[-1])
+
+
 
 if __name__ == "__main__":
     import argparse
@@ -381,23 +441,26 @@ if __name__ == "__main__":
     parser.add_argument("--trials", type=int, default=None, help="Number of optimization trials")
     parser.add_argument("--symbols", type=str, default="KRW-BTC,KRW-ETH") 
     parser.add_argument("--jobs", type=int, default=10) 
-    parser.add_argument("--mode", type=str, default="DAY", choices=["SCALP", "DAY", "SWING", "ALL"])
+    parser.add_argument("--mode", type=str, default="UNIFIED", choices=["SCALP", "DAY", "SWING", "UNIFIED", "ALL"],
+                        help="Trading Mode: SCALP, DAY, SWING, or UNIFIED (recommended - auto-selects best timeframe)")
     args = parser.parse_args()
     
     symbols = [s.strip() for s in args.symbols.split(',')]
     mode = args.mode.upper()
     
-    # [UPDATED] Trials adjusted based on search space complexity and data volume analysis
+    # [TRIALS CONFIGURATION]
+    # You can modify the search attempts here for each mode.
     MODE_TRIALS_MAP = {
-        'SCALP': 3600,  # High data volume but narrow param range
-        'DAY': 4200,    # Balanced - most commonly used mode
-        'SWING': 5000,  # Wide param range + low data volume (overfitting risk)
-        'ALL': 4500     # Catch-all (highest complexity)
+        'SCALP': 3600,
+        'DAY': 4200,
+        'SWING': 5000,
+        'UNIFIED': 2000,
+        'ALL': 6000
     }
     
     trials = args.trials if args.trials is not None else MODE_TRIALS_MAP.get(mode, 2500)
     
-    # Adjust Logging (Quiet Optuna)
+    # Adjust Logging
     optuna.logging.set_verbosity(optuna.logging.WARNING)
     logging.getLogger("SpotOptimizer").setLevel(logging.WARNING)
     
@@ -417,59 +480,37 @@ if __name__ == "__main__":
     
     SPOT_END_DATE = "2026-01-16"
     
-    print(f" Loading data for symbols: {', '.join(symbols)}")
+    # [FIX] Always include '1d' for MTF (Multi-Timeframe) Logic
+    # BacktestEngineFastSpot requires '1d' data for daily trend filtering.
+    load_tfs = list(set(timeframes + ['1d']))
     
-    symbols_data = load_all_timeframes(symbols, SPOT_START_DATE, SPOT_END_DATE, timeframes)
+    symbols_data = load_all_timeframes(symbols, SPOT_START_DATE, SPOT_END_DATE, load_tfs)
     
-    # [VALIDATION] Ensure all required data is loaded
-    for sym in symbols:
-        if sym not in symbols_data or not symbols_data[sym]:
-            print(f"❌ Error: Failed to load data for {sym}")
-            sys.exit(1)
-        for tf in timeframes:
-            if tf not in symbols_data[sym] or symbols_data[sym][tf].empty:
-                print(f"❌ Error: Failed to load {sym}-{tf} data")
-                sys.exit(1)
-    print(f"✅ Data loaded successfully for all symbols")
+    # [WARMUP OPTIMIZATION]
+    WARMUP_BUFFER_BARS = {
+        '1h': 300, '4h': 200, '1d': 150,
+    }
     
     print(f"✂️  Trimming Data for Optimization (Train Period: ~ {TRAIN_CUTOFF_DATE})")
     train_data = {}
     cutoff_ts = pd.Timestamp(TRAIN_CUTOFF_DATE)
     
-    # [WARMUP OPTIMIZATION] Include buffer period for indicator calculation
-    WARMUP_BUFFER_BARS = {
-        '1m': 600,   # ~10 hours
-        '3m': 500,   # ~25 hours
-        '5m': 500,   # ~42 hours
-        '15m': 400,  # ~100 hours
-        '30m': 350,  # ~220 hours
-        '1h': 300,   # ~12.5 days
-        '4h': 200,   # ~33 days
-        '1d': 150,   # ~5 months
-    }
-    
     for sym, tf_map in symbols_data.items():
         train_data[sym] = {}
         for tf, df_ in tf_map.items():
-            # Find the end of training period (data before TRAIN_CUTOFF_DATE)
             cutoff_mask = df_['datetime'] < cutoff_ts
             train_end_idx = cutoff_mask.sum()
+            if train_end_idx == 0: continue
             
-            if train_end_idx == 0:
-                print(f"⚠️  Warning: {sym}-{tf} has no data before cutoff date. Skipping.")
-                continue
-            
-            # Get desired warmup period for this timeframe
             desired_warmup = WARMUP_BUFFER_BARS.get(tf, 200)
-            
-            # Slice all data from start to cutoff (entire training period)
             sliced_df = df_.iloc[:train_end_idx].copy()
-            
-            # Set warmup_bars: first N bars are for indicator warmup only
-            # Trading will start after these warmup bars
             sliced_df.attrs['warmup_bars'] = min(desired_warmup, train_end_idx)
-            
             train_data[sym][tf] = sliced_df
+    
+    # [OPTIMIZATION] Pre-compute merge indices to eliminate pd.merge overhead
+    print(f"🔗 Pre-computing merge indices for fast data alignment...")
+    merge_indices = compute_merge_indices(train_data)
+    print(f"✅ Merge indices computed for {len(merge_indices)} symbols")
 
     # DB Setup (MySQL)
     from dotenv import load_dotenv
@@ -487,53 +528,33 @@ if __name__ == "__main__":
         sys.exit(1)
         
     study_name = f"spot_{mode.lower()}_strategy"
-    # [CRITICAL] Encode password to handle special characters like '@'
     safe_pass = quote_plus(db_pass)
     storage_url = f"mysql+pymysql://{db_user}:{safe_pass}@{db_host}:{db_port}/{db_name}"
     
-    # [Clean Start] Intead of deleting file, delete study from DB
     print(f"🔄 Preparing study: {study_name}")
-    
-    # [VALIDATION] Test DB connection before proceeding
-    try:
-        test_storage = optuna.storages.RDBStorage(url=storage_url)
-        print(f"✅ DB connection successful")
-    except Exception as e:
-        print(f"❌ Error: Failed to connect to MySQL database")
-        print(f"   Details: {e}")
-        print(f"   Please check your .env credentials and ensure MySQL is running")
-        sys.exit(1)
     
     try:
         optuna.delete_study(study_name=study_name, storage=storage_url)
         print(f"🗑️  Deleted old study: {study_name}")
     except Exception:
-        pass # Study might not exist
+        pass
 
-    # [Performance] Optimize for parallel MySQL access
     storage = optuna.storages.RDBStorage(
         url=storage_url,
         engine_kwargs={
-            "pool_size": max(30, args.jobs * 2),  # Scale with jobs
-            "max_overflow": 10,                    # Allow burst connections
+            "pool_size": max(30, args.jobs * 2),
+            "max_overflow": 10,
             "pool_recycle": 3600,
-            "pool_pre_ping": True,                 # Validate connections
+            "pool_pre_ping": True,
         }
     )
     
-    # [Performance] Use ConstantLiar for parallel efficiency
     sampler = optuna.samplers.TPESampler(
-        n_startup_trials=100,     # Random exploration first
-        multivariate=True,        # Consider param dependencies
-        constant_liar=True,       # Avoid duplicate proposals
-        warn_independent_sampling=False,
+        n_startup_trials=100, multivariate=True, constant_liar=True, warn_independent_sampling=False,
     )
     
     study = optuna.create_study(
-        study_name=study_name, 
-        storage=storage, 
-        direction="maximize",
-        sampler=sampler
+        study_name=study_name, storage=storage, direction="maximize", sampler=sampler
     )
     
     print(f"\n{'='*70}")
@@ -543,33 +564,19 @@ if __name__ == "__main__":
     print(f"💻 Parallel Jobs: {args.jobs}")
     print(f"{'='*70}\n")
     
-    # [Performance] Numba JIT Warmup
+    # Numba Warmup
     print("🔥 Warming up Numba JIT...", end="", flush=True)
-    dummy_len = 10
-    _dummy_arr = np.ones(dummy_len, dtype=np.float64)
-    _dummy_int = np.zeros(dummy_len, dtype=np.int64)
     try:
-        backtest_loop_spot_numba(
-            _dummy_arr, _dummy_arr, _dummy_arr, # OHLC (close, high, low)
-            _dummy_arr, # Entry Upper
-            _dummy_int, _dummy_int, _dummy_arr, _dummy_arr, _dummy_arr, # Trend, Strength, Vol, ATR, SAR
-            10000.0, 0.001, 0.001, # Bal, Fee, Slip
-            0, # Exit type (New: 0=Trailing, 1=SAR)
-            0, 0.01, 1.5, # SL Type, Pct, Mult
-            3.0, # ATR Mult
-            0.99, # Risk
-            False, 1.0, # Vol Filter
-            False, 3.0, # TP
-            1000, 0.0, # Max Hold, Trailing Act
-            0 # [WARMUP] Missing argument fixed
-        )
+        dummy_len = 10
+        _dummy_arr = np.ones(dummy_len, dtype=np.float64)
+        _dummy_int = np.zeros(dummy_len, dtype=np.int64)
+        backtest_loop_spot_numba(_dummy_arr, _dummy_arr, _dummy_arr, _dummy_arr, _dummy_arr, _dummy_int, _dummy_int, _dummy_arr, _dummy_arr, _dummy_arr, _dummy_arr, _dummy_arr, _dummy_arr, 10000.0, 0.001, 0.001, 0, 0, 0.01, 1.5, 3.0, 0.99, False, 1.0, False, 3.0, 1000, 0.0, 0.6, 4.5, 94.0, 1.3, 0.15, 90, 0.1, 0)
         print(" Done!")
     except Exception as e:
-        print(f"\n⚠️  Warning: Numba warmup failed: {e}")
-        print(f"   First trial will be slower due to JIT compilation")
+        print(f"\n⚠️  Numba warmup failed: {e}")
 
     try:
-        study.optimize(lambda t: objective(t, train_data, search_space, mode=mode), 
+        study.optimize(lambda t: objective(t, train_data, search_space, mode, merge_indices), 
                        n_trials=trials,
                        n_jobs=args.jobs,
                        show_progress_bar=True)
@@ -589,6 +596,58 @@ if __name__ == "__main__":
     if len(study.trials) > 0:
         print(f"🏆 Best Score: {study.best_value:.2f}")
         print(f"✨ Best Params: {study.best_params}")
+        
+        # [NEW] Detailed Report for TRAIN Period
+        print(f"\n{'='*70}")
+        print(f"📊 TRAIN PERIOD PERFORMANCE (Best Strategy)")
+        print(f"{'='*70}")
+        
+        best_params = study.best_params
+        tf = best_params.get('TIMEFRAME', '1d')
+        
+        for symbol, data_map in train_data.items():
+            if tf not in data_map: continue
+            
+            df = data_map[tf]
+            daily_df = data_map.get('1d') # Get Daily Data
+            
+            # Re-create Strategy & Engine
+            strategy = UltimateStrategy(f"Best_{symbol}", best_params)
+            
+            # Pass daily_df and check if merge_indices available
+            engine = BacktestEngineFastSpot(
+                df, daily_df, strategy, backtest_loop_spot_numba,
+                initial_balance=10_000_000,
+                fee_rate=0.0005,
+                slippage_rate=0.0003
+            )
+            
+            # Inject merge index manually for best result view if needed
+            if symbol in merge_indices and tf in merge_indices[symbol]:
+                engine._merge_index_map = merge_indices[symbol][tf]
+            
+            engine.risk_per_trade = best_params.get('RISK_PER_TRADE_SPOT', 0.99)
+            
+            try:
+                res = engine.run()
+                
+                ret = res['total_return_pct']
+                mdd = res['mdd_pct']
+                cnt = res['total_trades']
+                win = res['win_rate']
+                
+                trades_df = res['trades_df']
+                pf = 0.0
+                if not trades_df.empty and 'pnl_pct' in trades_df.columns:
+                    gross_profit = trades_df[trades_df['pnl_pct'] > 0]['pnl_pct'].sum()
+                    gross_loss = abs(trades_df[trades_df['pnl_pct'] < 0]['pnl_pct'].sum())
+                    pf = gross_profit / gross_loss if gross_loss > 0 else 0.0
+                
+                print(f"   - {symbol:<9} : Return {ret:>7.2f}% | MDD {mdd:>6.2f}% | Trades {cnt:>3} | Win {win:>5.1f}% | PF {pf:.2f}")
+            
+            except Exception as e:
+                print(f"   - {symbol:<9} : Error calculating performance: {e}")
+                
     print(f"{'='*70}")
     
     print("\n✅ Optimization Complete.")

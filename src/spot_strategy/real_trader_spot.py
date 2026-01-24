@@ -19,6 +19,8 @@ import time
 import signal
 import json
 import logging
+import gc
+import numpy as np
 import pandas as pd
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -175,6 +177,7 @@ class RealTraderSpot:
         # 전략 로드
         self.params_map: Dict[str, dict] = {}
         self.strategies: Dict[str, UltimateStrategy] = {}
+        self.last_calc_candle: Dict[str, str] = {}
         self.load_strategies_from_db()
 
     def _setup_signal_handlers(self):
@@ -198,6 +201,7 @@ class RealTraderSpot:
             return
 
         try:
+            # [Lazy Loading]
             import optuna
             storage = f"sqlite:///{self.db_path}"
             study = optuna.load_study(study_name=SPOT_OPTUNA_STUDY_NAME, storage=storage)
@@ -255,9 +259,14 @@ class RealTraderSpot:
         return self.client.fetch_balance()
 
     @api_retry
+    def _get_market_price_safe(self, symbol: str) -> float:
+        """안전한 시장가 조회 (재시도 적용)"""
+        return self.client.get_market_price(symbol)
+
+    @api_retry
     def _place_order_safe(self, symbol: str, side: str, **kwargs):
-        """안전한 주문 실행 (재시도 적용)"""
-        return self.client.place_order(symbol, side, **kwargs)
+        """안전한 주문 실행 (재시도 적용 + 스마트 지정가)"""
+        return self.client.place_order_smart(symbol, side, **kwargs)
 
     def initialize(self):
         """초기화: 잔고 확인"""
@@ -295,10 +304,18 @@ class RealTraderSpot:
             state = self.state_manager.get_symbol_state(symbol)
             entry_price = state.get('entry_price', 0.0)
             
+            # [Optimization] 중복 계산 방지 체크
+            current_slot = self._get_candle_slot_id(timeframe)
+            already_calculated = self.last_calc_candle.get(symbol) == current_slot
+            
             # --- Case 1: 정시 (4h 마감) - 무거운 데이터 로드 및 지표 캐싱 ---
-            if is_entry_time:
+            if is_entry_time and not already_calculated:
                 df = self._fetch_ohlcv_safe(symbol, timeframe, limit=600)
                 if df is not None and len(df) >= 200:
+                    # [Optimization] Downcast to float32
+                    float_cols = ['open', 'high', 'low', 'close', 'volume']
+                    df[float_cols] = df[float_cols].astype(np.float32)
+
                     df = strategy.generate_signals(df)
                     last_candle = df.iloc[-2]
                     
@@ -310,8 +327,19 @@ class RealTraderSpot:
                         'entry_upper': float(last_candle.get('entry_upper', 0.0)),
                         'entry_lower': float(last_candle.get('entry_lower', 0.0)),
                         'strength_filter': int(last_candle.get('strength_filter', 1)),
+                        'volume_ratio': float(last_candle.get('volume_ratio', 100.0)),
+                        'rsi': float(last_candle.get('rsi', 50.0)),
+                        'hurst': float(last_candle.get('hurst', 0.5)),
+                        'natr': float(last_candle.get('natr', 0.0)),
                         'cached_at': datetime.utcnow().isoformat()
                     })
+                    
+                    self.last_calc_candle[symbol] = current_slot
+                    logger.debug(f"📊 Indicators calculated for {symbol} (Slot: {current_slot})")
+                
+                # [Optimization] 메모리 정리
+                del df
+                gc.collect()
             
             # --- Case 2: 공통 처리 (정시/1분 체크 모두) ---
             # 캐시된 지표값 로드
@@ -330,7 +358,12 @@ class RealTraderSpot:
             # --- EXIT LOGIC (1분마다 수행) ---
             if in_position:
                 # _check_exit 내부에서 사용할 confirmed_candle 대용 객체 생성
-                mock_candle = {'atr': atr, 'parabolic_sar': sar, 'trend_direction': trend_dir}
+                mock_candle = {
+                    'atr': atr, 
+                    'parabolic_sar': sar, 
+                    'trend_direction': trend_dir,
+                    'rsi': cached.get('rsi', 50.0) # RSI for Panic Exit
+                }
                 
                 # 상태 불일치 복구 로직 (생략 가능하나 안전을 위해 유지)
                 if entry_price == 0:
@@ -359,7 +392,16 @@ class RealTraderSpot:
                 if strength_ok and not pd.isna(entry_upper):
                     self._check_entry(
                         symbol, last_price, params,
-                        {'entry_upper': entry_upper, 'entry_lower': entry_lower, 'atr': atr}
+                        {
+                            'entry_upper': entry_upper, 
+                            'entry_lower': entry_lower, 
+                            'atr': atr,
+                            'trend_direction': trend_dir,
+                            'strength_filter': cached.get('strength_filter', 1),
+                            'volume_ratio': cached.get('volume_ratio', 100.0),
+                            'hurst': cached.get('hurst', 0.5),
+                            'natr': cached.get('natr', 0.0)
+                        }
                     )
 
         except Exception as e:
@@ -443,6 +485,34 @@ class RealTraderSpot:
                 if last_price > target_price:
                     should_sell = True
                     reason = f"Take Profit ({target_price:,.0f})"
+            
+            # 5. Panic Exit (RSI) [NEW]
+            rsi = candle.get('rsi', 0)  # Need to pass RSI in execute_logic or candle dict
+            rsi_exit_thresh = params.get('RSI_EXIT_THRESHOLD', 93)
+            if not should_sell and rsi > rsi_exit_thresh:
+                should_sell = True
+                reason = f"Panic Exit (RSI {rsi:.1f})"
+
+            # 6. Time Cut (Profit Check) [NEW]
+            max_holding_bars = params.get('MAX_HOLDING_BARS', 9999)
+            entry_time_str = state.get('entry_time')
+            if not should_sell and entry_time_str:
+                entry_dt = datetime.fromisoformat(entry_time_str)
+                # 봉 개수 근사 계산 (현재시간 - 진입시간) / timeframe interval
+                tf = params.get('TIMEFRAME', '4h')
+                interval_min = 240 # Default 4h
+                if tf.endswith('h'): interval_min = int(tf[:-1]) * 60
+                elif tf.endswith('m'): interval_min = int(tf[:-1])
+                
+                elapsed_min = (datetime.utcnow() - entry_dt).total_seconds() / 60
+                bars_held = elapsed_min / interval_min
+                
+                if bars_held >= max_holding_bars:
+                    pnl_pct_current = ((last_price / entry_price) - 1) * 100
+                    profit_thresh = params.get('TIME_EXIT_PROFIT_THRESHOLD', 1.4)
+                    if pnl_pct_current <= profit_thresh:
+                        should_sell = True
+                        reason = f"Time Cut (Held {bars_held:.1f} bars, PnL {pnl_pct_current:.2f}%)"
 
             if should_sell:
                 pnl = (last_price - entry_price) * balance_coin
@@ -479,7 +549,9 @@ class RealTraderSpot:
         self,
         symbol: str,
         current_price: float,
-        params: dict
+        params: dict,
+        hurst: float = 0.5,
+        natr: float = 0.0
     ) -> float:
         """포지션 사이즈 계산 (성과 기반 가중치, 리스크 관리 적용)"""
         try:
@@ -510,10 +582,31 @@ class RealTraderSpot:
             estimated_total_equity = total_krw + current_invested_total
             
             # 2. 할당량 계산 (성과 기반 가중치 적용)
-            # 예: ETH 70%, BTC 30%
             default_weight = 1.0 / len(self.symbols) if self.symbols else 0.5
-            weight = SPOT_ALLOCATION_WEIGHTS.get(symbol, default_weight)
-            target_amount = estimated_total_equity * weight
+            base_weight = SPOT_ALLOCATION_WEIGHTS.get(symbol, default_weight)
+            
+            # [NEW] Regime-based Multiplier (Dynamic Sizing)
+            regime_mult = 1.0
+            
+            # 파라미터에서 임계값 로드
+            strong_hurst = params.get('STRONG_REGIME_HURST', 0.56)
+            panic_natr = params.get('PANIC_REGIME_NATR', 9.5)
+            strong_mult = params.get('STRONG_REGIME_MULTIPLIER', 1.6)
+            panic_mult = params.get('PANIC_REGIME_MULTIPLIER', 0.35)
+            
+            if hurst > strong_hurst:
+                regime_mult = strong_mult
+                logger.info(f"💪 Strong Regime detected for {symbol} (Hurst {hurst:.2f}). Mult: {strong_mult}")
+                
+            if natr > panic_natr:
+                regime_mult = panic_mult
+                logger.info(f"😱 Panic Regime detected for {symbol} (NATR {natr:.2f}). Mult: {panic_mult}")
+            
+            # 최종 가중치 = 기본 비중 * 레짐 멀티플라이어
+            final_weight = base_weight * regime_mult
+            
+            # 예산 계산
+            target_amount = estimated_total_equity * final_weight
             
             # 3. 추가 매수 가능액 계산
             # 목표 금액 - 현재 투자 금액 (이미 진입해 있다면 추가 진입은 자제, 혹은 물타기?)
@@ -569,8 +662,12 @@ class RealTraderSpot:
             vol_ok = (not use_vol) or (vol_ratio >= vol_thresh)
 
             if is_uptrend and breakout and strong_momentum and vol_ok:
-                # 가중치 기반 동적 사이징 계산
-                invest_amount = self._calculate_position_size(symbol, last_price, params)
+                # 가중치 기반 동적 사이징 계산 (Hurst, NATR 연동)
+                invest_amount = self._calculate_position_size(
+                    symbol, last_price, params, 
+                    hurst=candle.get('hurst', 0.5), 
+                    natr=candle.get('natr', 0.0)
+                )
 
                 if invest_amount > MIN_ORDER_VALUE_KRW:
                     logger.info(
@@ -638,22 +735,37 @@ class RealTraderSpot:
         now = datetime.utcnow()
         minutes = now.minute
 
-        # 허용 범위: 정시 ~ +5분 (데이터 수집 지연 고려)
-        if minutes > 5:
+        # [TIGHT SYNC] 허용 범위: 정시 ~ +2분 (백테스트 일치)
+        if minutes > 2:
             return False
 
         if timeframe.endswith('m'):
             interval = int(timeframe[:-1])
-            return (now.minute % interval) <= 5
+            return (now.minute % interval) <= 2
         
         elif timeframe.endswith('h'):
             interval = int(timeframe[:-1])
-            return (now.hour % interval) == 0
+            return (now.hour % interval) == 0 and minutes <= 2
         
         elif timeframe.endswith('d'):
-            return now.hour == 0  # 00:00 UTC 기준
+            return now.hour == 0 and minutes <= 2
         
         return False
+
+    def _get_candle_slot_id(self, timeframe: str) -> str:
+        """현재 타임프레임 기준의 고유 캔들 ID 생성 (중복 계산 방지용)"""
+        now = datetime.utcnow()
+        if timeframe.endswith('m'):
+            interval = int(timeframe[:-1])
+            slot = (now.minute // interval) * interval
+            return now.strftime(f"%Y%m%d%H{slot:02d}")
+        elif timeframe.endswith('h'):
+            interval = int(timeframe[:-1])
+            slot = (now.hour // interval) * interval
+            return now.strftime(f"%Y%m%d{slot:02d}00")
+        elif timeframe.endswith('d'):
+            return now.strftime("%Y%m%d0000")
+        return now.strftime("%Y%m%d%H%M")
 
     def run_forever(self):
         """메인 무한 루프 (Graceful Shutdown 지원)"""
@@ -724,21 +836,24 @@ class RealTraderSpot:
                     if self.health_manager.loop_count % 120 == 0:
                         self.cloud_optimizer.force_gc()
 
-                # [Dual Loop] 1분(60초) 대기
-                # 이제 3600초를 통으로 기다리지 않고 짧게 끊어갑니다.
-                wait_time = SPOT_LOOP_INTERVAL_SECONDS  # 기본 60초
+                # [High-Frequency Monitoring] 청산 감시를 위해 10초(SPOT_LOOP_INTERVAL_SECONDS)마다 반복
+                # 업비트 예약주문 수수료(0.139%)를 피하기 위해 빠른 루프로 감시
+                wait_seconds = float(SPOT_LOOP_INTERVAL_SECONDS)
+                
+                logger.debug(f"💤 Sleeping {wait_seconds:.1f}s until next monitoring cycle...")
                 
                 # Shutdown 체크하면서 대기
-                for _ in range(int(wait_time)):
+                start_wait = time.time()
+                while time.time() - start_wait < wait_seconds:
                     if self._shutdown_requested:
                         break
-                    time.sleep(1)
+                    time.sleep(0.5)
 
             except Exception as e:
                 logger.error(f"🚨 Critical Error in Main Loop: {e}")
                 self.health_manager.record_error(e)
                 self.health_manager.update_heartbeat(status="error")
-                time.sleep(ERROR_SLEEP_SECONDS)
+                time.sleep(10) # 에러 시 짧게 대기
 
         # Graceful Shutdown 처리
         self._shutdown()

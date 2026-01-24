@@ -31,82 +31,128 @@ class UpbitClient:
         if not self.exchange: return None
         try:
             ticker = self.exchange.fetch_ticker(symbol)
+            if ticker is None:
+                return None
             return ticker['last']
         except Exception as e:
             self.logger.error(f"Error fetching price for {symbol}: {e}")
             return None
 
-    def fetch_ohlcv(self, symbol, timeframe, since=None, limit=200):
+    def fetch_ohlcv(self, symbol, timeframe, since=None, limit=None, end=None):
         """
-        OHLCV 데이터 조회 (Pagination 지원)
-        - Upbit API의 200개 제한을 극복하기 위해 반복 조회
-        - '4h' -> 'minutes/240' 매핑 등 타임프레임 보정
+        OHLCV 데이터 조회 (Historical Data Download)
+        - Upbit는 'to' 파라미터만 지원하므로, end 시점부터 역순으로 조회하여 since까지 도달해야 함.
+        - since: 시작 타임스탬프 (ms)
+        - end: 종료 타임스탬프 (ms) - 생략 시 현재시간
+        - limit: 가져올 최대 개수 (생략 시 since~end 기간 전체)
         """
         if not self.exchange: return None
 
-        # 1. 타임프레임 및 심볼 보정
-        # 업비트 CCXT는 '4h'를 지원하지만, 명시적으로 분단위 매핑 확인
-        tf_map = {
-            '1m': '1', '3m': '3', '5m': '5', '10m': '10', '15m': '15', '30m': '30',
-            '1h': '60', '4h': '240', '1d': 'day', '1w': 'week', '1M': 'month'
-        }
-        
-        # CCXT 내부 매핑을 믿되, 혹시 모를 오류 방지를 위해 TF 확인
+        # 1. 타임프레임 보정
+        tf_map = {'1h': '60', '4h': '240', '1d': 'day'} # 참고용
         target_tf = timeframe
         
         all_ohlcv = []
-        current_limit = limit
-        to_datetime = None
-
+        
+        # 종료 시점 설정 (ms -> datetime string for API)
+        # Upbit API 'to' parameter usually expects KST (UTC+9) in 'YYYY-MM-DD HH:MM:SS' format
+        # If we send UTC string, it might be interpreted as KST (9 hours past).
+        # To get the absolute LATEST data, we should align with KST or use explicit ISO with +09:00,
+        # but simplify by shifting UTC to KST for the string representation.
+        from datetime import timedelta
+        
+        if end:
+            cursor_dt = datetime.utcfromtimestamp(end / 1000) + timedelta(hours=9)
+        else:
+            cursor_dt = datetime.utcnow() + timedelta(hours=9)
+            
+        cursor_str = cursor_dt.strftime('%Y-%m-%d %H:%M:%S')
+        
+        # since가 없으면 기본적으로 최근 200개만 가져오도록 (Safety)
+        if since is None and limit is None:
+            limit = 200
+            
         try:
-            while current_limit > 0:
-                batch_size = min(current_limit, 200)
-                params = {}
-                if to_datetime:
-                    params['to'] = to_datetime
-
-                # CCXT fetch_ohlcv 호출
-                ohlcv = self.exchange.fetch_ohlcv(symbol, target_tf, limit=batch_size, params=params)
-
+            # Loop Safety & Progress
+            loop_count = 0
+            last_oldest_ts = float('inf')
+            
+            while True:
+                loop_count += 1
+                if loop_count > 10000: # Safety Break
+                    self.logger.warning(f"⚠️ Limit loop count exceeded ({loop_count}) for {symbol}")
+                    break
+                    
+                params = {'to': cursor_str}
+                req_limit = 200
+                
+                # Fetch candles
+                ohlcv = self.exchange.fetch_ohlcv(symbol, target_tf, limit=req_limit, params=params)
+                
                 if not ohlcv or len(ohlcv) == 0:
-                    if len(all_ohlcv) == 0:
-                        self.logger.warning(
-                            f"⚠️ fetch_ohlcv returned empty for {symbol} (TF: {target_tf}). "
-                            f"Params: {params}. Server might be rejecting request or no data available."
-                        )
+                    self.logger.debug(f"   ℹ️ Reached end of data (Empty) at {cursor_str}")
                     break
-
-                # 최신 데이터가 뒤에 오도록 병합 (prepend)
+                    
+                # Prepend to list
                 all_ohlcv = ohlcv + all_ohlcv
-                current_limit -= len(ohlcv)
-
-                # 다음 요청을 위한 'to' 시간 설정 (가장 과거 시간 기준)
-                first_timestamp = ohlcv[0][0]
-                dt = datetime.utcfromtimestamp(first_timestamp / 1000)
-                to_datetime = dt.strftime('%Y-%m-%d %H:%M:%S')
-
-                if len(ohlcv) < batch_size:
+                
+                # Get oldest timestamp in this batch
+                oldest_ts = ohlcv[0][0]
+                first_date_str = pd.to_datetime(oldest_ts, unit='ms').strftime('%Y-%m-%d %H:%M')
+                
+                # Progress Log (every 5 requests or if 1d)
+                if target_tf == 'day' or loop_count % 5 == 0:
+                     self.logger.info(f"   ... fetched batch {loop_count}: oldest {first_date_str} (Total {len(all_ohlcv)} rows)")
+                
+                # [CRITICAL] Loop Protection: Ensure we are moving backwards
+                if oldest_ts >= last_oldest_ts:
+                     self.logger.warning(f"⚠️ Detected Infinite Loop: Timestamp failed to decrease. {oldest_ts} >= {last_oldest_ts}. Stopping.")
+                     break
+                last_oldest_ts = oldest_ts
+                
+                # Update Cursor for next batch
+                # Subtract 1 second from oldest_ts
+                next_cursor_dt = datetime.utcfromtimestamp((oldest_ts / 1000) - 1) + timedelta(hours=9)
+                cursor_str = next_cursor_dt.strftime('%Y-%m-%d %H:%M:%S')
+                
+                # Break Conditions
+                # 1. Reached 'since'
+                if since is not None and oldest_ts <= since:
+                    self.logger.debug(f"   ✅ Reached start date: {first_date_str}")
                     break
-
-                time.sleep(0.1)  # API 과부하 방지
-
+                    
+                # 2. Reached 'limit' count
+                if limit is not None and len(all_ohlcv) >= limit:
+                    all_ohlcv = all_ohlcv[-limit:] 
+                    break
+                    
+                # Rate Limit Safety
+                time.sleep(0.12)
+                
             if not all_ohlcv:
                 self.logger.warning(f"⚠️ No OHLCV data returned for {symbol} ({target_tf})")
                 return None
-
-            # DataFrame 변환 및 정제
+                
+            # DataFrame 변환
             df = pd.DataFrame(all_ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            
+            # [CRITICAL] Remove duplicates caused by overlapping fetches
             df.drop_duplicates(subset=['timestamp'], inplace=True)
             df.sort_values('timestamp', inplace=True)
             df['datetime'] = pd.to_datetime(df['timestamp'], unit='ms')
-
-            if len(df) > limit:
-                df = df.iloc[-limit:]
-
+            
+            # Final slicing by time (precise trim)
+            if since:
+                df = df[df['timestamp'] >= since]
+            if end:
+                df = df[df['timestamp'] <= end]
+                
             return df[['datetime', 'open', 'high', 'low', 'close', 'volume', 'timestamp']]
-
+            
         except Exception as e:
-            self.logger.error(f"❌ Error fetching OHLCV for {symbol}: {e}", exc_info=True)
+            self.logger.error(f"❌ Error fetching OHLCV for {symbol}: {e}")
+            import traceback
+            self.logger.error(traceback.format_exc())
             return None
 
     def fetch_balance(self):
@@ -204,43 +250,61 @@ class UpbitClient:
             return {'amount': 0.0, 'entryPrice': 0.0, 'unrealizedPnL': 0.0}
 
     def place_order(self, symbol, side, amount=None, price=None, order_type='market'):
-        """
-        주문 실행 (CCXT)
-        Market Buy: price arg is Cost in KRW (Upbit special)
-        Market Sell: amount arg is Volume
-        """
+        """기본 주문 실행 (시장가/지정가)"""
         if not self.exchange: return None
         try:
-            # CCXT Upbit implementation details:
-            # create_order(symbol, type, side, amount, price)
-            
             if order_type == 'market':
                 if side == 'buy':
-                    # For Upbit Market Buy, 'cost' (total quote currency) is passed.
-                    # CCXT maps the 4th arg 'amount' to cost if type is market and side is buy (check ccxt docs/code)
-                    # BUT Upbit is tricky. safest is using params={'cost': price} or similar depending on CCXT version.
-                    # Looking at recent CCXT: for upbit, create_order(symbol, 'market', 'buy', cost) uses cost as price/total.
-                    
-                    # user passed 'price' as KRW amount.
-                    # We pass 'price' as the 4th argument 'amount' in CCXT signature for Upbit Market Buy usually,
-                    # OR we use 'cost' param.
-                    
-                    # Safer approach for Upbit Market Buy in CCXT:
-                    # exchange.create_order(symbol, 'market', 'buy', amount, price)
-                    # if amount is provided, it tries to buy that amount? No market buy is by cost usually.
-                    
-                    # Let's rely on 'price' being the COST (KRW).
-                    # We pass it as 'amount' argument because CCXT upbit treats 1st numeric arg as cost for market buys often,
-                    # OR we pass explicitly via params.
+                    # Upbit Market Buy: 'price' is the KRW cost
                     return self.exchange.create_order(symbol, 'market', 'buy', price, params={'ord_type': 'price'}) 
-                    
                 else:
                     return self.exchange.create_order(symbol, 'market', 'sell', amount)
-            
             elif order_type == 'limit':
                 return self.exchange.create_order(symbol, 'limit', side, amount, price)
-
         except Exception as e:
             self.logger.error(f"❌ Order Failed: {e}")
             return None
+
+    def place_order_smart(self, symbol, side, amount=None, price=None):
+        """
+        Upbit 전용 Smart Aggressive Limit 주문
+        - 수수료가 동일한 점을 활용, 시장가처럼 즉시 체결되되 호가 공백(슬리피지)을 1%로 제한.
+        - Buy: price(KRW 예산)를 받아 '현재가 + 1%' 가격으로 계산된 수량만큼 지정가 매수.
+        - Sell: amount(코인 수량)를 받아 '현재가 - 1%' 가격으로 지정가 매도.
+        """
+        if not self.exchange: return None
+        
+        try:
+            # 1. 현재가 조회 (Ticker)
+            ticker = self.exchange.fetch_ticker(symbol)
+            if ticker is None:
+                return None
+            cur_price = ticker['last']
+            
+            if side == 'buy':
+                # 예산(KRW) 기반 매수
+                cost = price
+                # 현재가보다 1.0% 높은 가격으로 지정가 설정 (Slippage Cap)
+                limit_price = self.exchange.price_to_precision(symbol, cur_price * 1.01)
+                # 예산 내에서 살 수 있는 수량 계산 (수수료 0.05% 고려)
+                qty = self.exchange.amount_to_precision(symbol, (cost * 0.9995) / float(limit_price))
+                
+                self.logger.info(f"⚡ Smart Buy {symbol} | Budget: {cost:,.0f} KRW | Target Limit: {limit_price:,.0f} (+1%)")
+                return self.exchange.create_order(symbol, 'limit', 'buy', qty, limit_price)
+                
+            else:
+                # 수량(Coin) 기반 매도
+                qty = amount
+                # 현재가보다 1.0% 낮은 가격으로 지정가 설정
+                limit_price = self.exchange.price_to_precision(symbol, cur_price * 0.99)
+                
+                self.logger.info(f"⚡ Smart Sell {symbol} | Qty: {qty} | Target Limit: {limit_price:,.0f} (-1%)")
+                return self.exchange.create_order(symbol, 'limit', 'sell', qty, limit_price)
+
+        except Exception as e:
+            self.logger.error(f"❌ Smart Order Failed for {symbol}: {e}")
+            # [Fallback] 에러 발생 시 최후의 수단으로 일반 시장가 주문 시도
+            self.logger.warning(f"⚠️ Falling back to Market Order for {symbol}")
+            return self.place_order(symbol, side, amount=amount, price=price, order_type='market')
+
 
