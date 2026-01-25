@@ -345,6 +345,7 @@ class RealTraderFutures:
 
             # --- Case 1: 진입 시점(정시) && 아직 계산 안 함 -> 무거운 데이터 로드 ---
             if is_entry_time and not already_calculated:
+                logger.info(f"🔍 [{symbol}] Checking for entry signals ({timeframe} candle closure)...")
                 # 전체 캔들 데이터 조회 (지표 계산용)
                 tf_min = 60
                 if 'm' in timeframe:
@@ -926,9 +927,9 @@ class RealTraderFutures:
                         logger.error("⏰ Time drift detected! Bot may fail to place orders on Binance.")
                     
                     # 2. 리소스 모니터링 (10분마다) & 메모리 보호 (AWS Free Tier)
-                    if self.health_manager.loop_count % 10 == 0: # 60s * 10
+                    if self.health_manager.loop_count % 60 == 0: # 10s * 60 = 10분
                         usage = self.cloud_optimizer.log_resource_usage()
-                        if usage.get('memory_percent', 0) > 75.0:
+                        if usage.get('memory_percent', 0) > 85.0:
                             logger.warning(f"⚠️ High Memory ({usage.get('memory_percent')}%) detected. Forcing GC...")
                             self.cloud_optimizer.force_gc()
                     
