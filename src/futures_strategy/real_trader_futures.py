@@ -387,6 +387,7 @@ class RealTraderFutures:
                 
                 if pd.isna(atr): atr = 0.0
                 if pd.isna(sar): sar = 0.0
+                if pd.isna(trend_dir): trend_dir = 0
                 if pd.isna(vol_ratio): vol_ratio = 1.0
                 
                 # [CACHE] 다음 4시간 동안 재사용할 지표값 저장
