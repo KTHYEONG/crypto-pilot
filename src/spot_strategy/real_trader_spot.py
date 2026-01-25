@@ -310,7 +310,7 @@ class RealTraderSpot:
             
             # --- Case 1: 정시 (4h 마감) - 무거운 데이터 로드 및 지표 캐싱 ---
             if is_entry_time and not already_calculated:
-                logger.info(f"🔍 [{symbol}] Checking for entry signals ({timeframe} candle closure)...")
+                logger.info(f"🔍 [{symbol}] Entry Search")
                 df = self._fetch_ohlcv_safe(symbol, timeframe, limit=600)
                 if df is not None and len(df) >= 200:
                     # [Correction] Ensure float64 for TA-Lib compatibility
@@ -534,7 +534,7 @@ class RealTraderSpot:
 
                 logger.info(
                     f"🛑 EXIT {symbol} | Price: {last_price:,.0f} | "
-                    f"PnL: {pnl:,.0f} KRW ({pnl_pct:.2f}%) | Reason: {reason}"
+                    f"PnL: {pnl_pct:+.2f}% ({pnl:,.0f} KRW) | Reason: {reason}"
                 )
 
                 res = self._place_order_safe(symbol, 'sell', amount=balance_coin)
@@ -686,6 +686,7 @@ class RealTraderSpot:
                 if invest_amount > MIN_ORDER_VALUE_KRW:
                     logger.info(
                         f"🟢 ENTRY {symbol} | Price: {last_price:,.0f} | "
+                        f"Cond: Trend(↑), Breakout(UP), Strength(OK), Vol(OK) | "
                         f"Invest: {invest_amount:,.0f} KRW"
                     )
 
@@ -698,7 +699,7 @@ class RealTraderSpot:
                             action='ENTRY',
                             quantity=invest_amount / last_price,
                             price=last_price,
-                            reason=f"Price > Upper ({entry_upper:,.0f})"
+                            reason=f"Trend(↑) & Breakout(>{entry_upper:,.0f})"
                         )
 
                         # 상태 저장
@@ -716,6 +717,14 @@ class RealTraderSpot:
                         f"⚠️ Order skipped for {symbol}: Calculated amount {invest_amount:,.0f} KRW "
                         f"is less than minimum {MIN_ORDER_VALUE_KRW:,.0f} KRW."
                     )
+            else:
+                # Skip Reason Logging
+                reasons = []
+                if not is_uptrend: reasons.append(f"Trend({'↓' if trend_dir == -1 else '─'})")
+                if not breakout: reasons.append(f"Price(≤{entry_upper:,.0f})")
+                if not strong_momentum: reasons.append("Weak")
+                if not vol_ok: reasons.append(f"Vol({vol_ratio:.1f}x)")
+                logger.info(f"⏭️ [{symbol}] Skip: {', '.join(reasons)}")
 
         except Exception as e:
             logger.error(f"⚠️ Error in _check_entry: {e}")
