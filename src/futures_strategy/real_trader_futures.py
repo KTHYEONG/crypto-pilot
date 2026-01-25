@@ -368,9 +368,9 @@ class RealTraderFutures:
                     )
                     return
                 
-                # [Optimization] Downcast to float32 to save 50% memory
+                # [Correction] Ensure float64 for TA-Lib compatibility
                 float_cols = ['open', 'high', 'low', 'close', 'volume']
-                df[float_cols] = df[float_cols].astype(np.float32)
+                df[float_cols] = df[float_cols].astype(np.float64)
                 
                 # 지표 계산
                 df = strategy.generate_signals(df)
