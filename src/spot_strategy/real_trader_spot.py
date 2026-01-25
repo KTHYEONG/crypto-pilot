@@ -319,15 +319,28 @@ class RealTraderSpot:
                     df = strategy.generate_signals(df)
                     last_candle = df.iloc[-2]
                     
+                    # [Safety] Data validation & NaN handling
+                    trend_dir = last_candle.get('trend_direction', 0)
+                    atr = last_candle.get('atr', 0.0)
+                    sar = last_candle.get('parabolic_sar', 0.0)
+                    vol_ratio = last_candle.get('volume_ratio', 100.0)
+                    entry_upper = last_candle.get('entry_upper', 0.0)
+                    entry_lower = last_candle.get('entry_lower', 0.0)
+                    
+                    if pd.isna(trend_dir): trend_dir = 0
+                    if pd.isna(atr): atr = 0.0
+                    if pd.isna(sar): sar = 0.0
+                    if pd.isna(vol_ratio): vol_ratio = 100.0
+                    
                     # 지표값 캐싱 (4시간 동안 재사용)
                     self._cache_indicators(symbol, {
-                        'trend_direction': int(last_candle.get('trend_direction', 0)),
-                        'atr': float(last_candle.get('atr', 0.0)),
-                        'parabolic_sar': float(last_candle.get('parabolic_sar', 0.0)),
-                        'entry_upper': float(last_candle.get('entry_upper', 0.0)),
-                        'entry_lower': float(last_candle.get('entry_lower', 0.0)),
-                        'strength_filter': int(last_candle.get('strength_filter', 1)),
-                        'volume_ratio': float(last_candle.get('volume_ratio', 100.0)),
+                        'trend_direction': int(trend_dir),
+                        'atr': float(atr),
+                        'parabolic_sar': float(sar),
+                        'entry_upper': float(entry_upper) if not pd.isna(entry_upper) else 0.0,
+                        'entry_lower': float(entry_lower) if not pd.isna(entry_lower) else 0.0,
+                        'strength_filter': int(last_candle.get('strength_filter', 1)) if not pd.isna(last_candle.get('strength_filter', 1)) else 1,
+                        'volume_ratio': float(vol_ratio),
                         'rsi': float(last_candle.get('rsi', 50.0)),
                         'hurst': float(last_candle.get('hurst', 0.5)),
                         'natr': float(last_candle.get('natr', 0.0)),
