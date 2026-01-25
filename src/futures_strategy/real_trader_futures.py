@@ -437,26 +437,29 @@ class RealTraderFutures:
                 )
             
             # --- ENTRY LOGIC (진입 시점에만 실행) ---
-            elif not in_position and is_entry_time and strength_ok:
+            # --- ENTRY LOGIC (진입 시점에만 실행) ---
+            elif not in_position and is_entry_time:
                 if pd.isna(entry_upper) or pd.isna(entry_lower):
                     return
                 
-                # Volume Filter Check
+                # Indicators from cache
                 cached = self._get_cached_indicators(symbol)
                 vol_ratio = cached.get('volume_ratio', 1.0)
                 use_vol_filter = params.get('USE_VOLUME_FILTER', False)
                 vol_threshold = params.get('VOLUME_THRESHOLD_MULT', 1.0)
                 
+                # Condition Check
+                is_uptrend = (trend_dir == 1)
+                is_downtrend = (trend_dir == -1)
+                long_breakout = (current_price > entry_upper)
+                short_breakout = (current_price < entry_lower)
                 vol_ok = (not use_vol_filter) or (vol_ratio >= vol_threshold)
-                if not vol_ok:
-                    logger.debug(f"⏭️ {symbol} - Volume filter not passed (Ratio: {vol_ratio:.2f} < {vol_threshold})")
-                    return
 
-                # LONG 진입
-                if trend_dir == 1 and current_price > entry_upper:
+                # Entry Execution
+                if is_uptrend and long_breakout and strength_ok and vol_ok:
                     logger.info(
-                        f"🟢 ENTRY LONG Signal {symbol} | "
-                        f"Price {current_price} > Upper {entry_upper:.2f}"
+                        f"🟢 LONG {symbol} | Price: {current_price} | "
+                        f"Cond: Trend(↑), Breakout(UP), Strength(OK), Vol(OK)"
                     )
 
                     qty = self._calculate_position_size(
@@ -487,7 +490,7 @@ class RealTraderFutures:
                                 action='ENTRY',
                                 quantity=qty,
                                 price=current_price,
-                                reason=f"Price > Upper ({entry_upper:.2f})",
+                                reason=f"Trend(↑) & Breakout(>{entry_upper:.2f})",
                                 params={'timeframe': timeframe, 'atr': atr, 'sl': stop_price}
                             )
                             
@@ -499,12 +502,11 @@ class RealTraderFutures:
                             })
                         else:
                             logger.error(f"❌ Order placement failed for {symbol} (LONG, Qty: {qty})")
-                
-                # SHORT 진입
-                elif trend_dir == -1 and current_price < entry_lower:
+
+                elif is_downtrend and short_breakout and strength_ok and vol_ok:
                     logger.info(
-                        f"🔴 ENTRY SHORT Signal {symbol} | "
-                        f"Price {current_price} < Lower {entry_lower:.2f}"
+                        f"🔴 SHORT {symbol} | Price: {current_price} | "
+                        f"Cond: Trend(↓), Breakout(DN), Strength(OK), Vol(OK)"
                     )
 
                     qty = self._calculate_position_size(
@@ -534,7 +536,7 @@ class RealTraderFutures:
                                 action='ENTRY',
                                 quantity=qty,
                                 price=current_price,
-                                reason=f"Price < Lower ({entry_lower:.2f})",
+                                reason=f"Trend(↓) & Breakout(<{entry_lower:.2f})",
                                 params={'timeframe': timeframe, 'atr': atr, 'sl': stop_price}
                             )
                             
@@ -546,6 +548,16 @@ class RealTraderFutures:
                             })
                         else:
                             logger.error(f"❌ Order placement failed for {symbol} (SHORT, Qty: {qty})")
+                
+                else:
+                    # Skip Reason Logging
+                    reasons = []
+                    if not (is_uptrend or is_downtrend): reasons.append(f"Trend({'─' if trend_dir == 0 else '?'})")
+                    if is_uptrend and not long_breakout: reasons.append(f"Price(≤{entry_upper:.2f})")
+                    if is_downtrend and not short_breakout: reasons.append(f"Price(≥{entry_lower:.2f})")
+                    if not strength_ok: reasons.append("Weak")
+                    if not vol_ok: reasons.append(f"Vol({vol_ratio:.1f}x)")
+                    logger.info(f"⏭️ [{symbol}] Skip: {', '.join(reasons)}")
                 
                 # [Optimization] 대규모 데이터프레임 제거 및 메모리 강제 회수
                 del df
@@ -645,7 +657,7 @@ class RealTraderFutures:
                 side_str = "LONG" if amount > 0 else "SHORT"
                 order_side = 'sell' if amount > 0 else 'buy'
                 
-                logger.info(f"🛑 EXIT {side_str} {symbol} | Price: {current_price} | PnL: ${pnl:.2f} ({pnl_pct:.2f}%) | Reason: {reason}")
+                logger.info(f"🛑 EXIT {side_str} {symbol} | Price: {current_price} | PnL: {pnl_pct:+.2f}% (${pnl:.2f}) | Reason: {reason}")
                 
                 if self._place_order_safe(symbol, order_side, abs(amount)):
                     self._cancel_all_orders_safe(symbol)
