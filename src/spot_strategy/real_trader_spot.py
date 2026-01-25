@@ -312,9 +312,9 @@ class RealTraderSpot:
             if is_entry_time and not already_calculated:
                 df = self._fetch_ohlcv_safe(symbol, timeframe, limit=600)
                 if df is not None and len(df) >= 200:
-                    # [Optimization] Downcast to float32
+                    # [Correction] Ensure float64 for TA-Lib compatibility
                     float_cols = ['open', 'high', 'low', 'close', 'volume']
-                    df[float_cols] = df[float_cols].astype(np.float32)
+                    df[float_cols] = df[float_cols].astype(np.float64)
 
                     df = strategy.generate_signals(df)
                     last_candle = df.iloc[-2]
