@@ -345,7 +345,7 @@ class RealTraderFutures:
 
             # --- Case 1: 진입 시점(정시) && 아직 계산 안 함 -> 무거운 데이터 로드 ---
             if is_entry_time and not already_calculated:
-                logger.info(f"🔍 [{symbol}] Checking for entry signals ({timeframe} candle closure)...")
+                logger.info(f"🔍 [{symbol}] Entry Search")
                 # 전체 캔들 데이터 조회 (지표 계산용)
                 tf_min = 60
                 if 'm' in timeframe:

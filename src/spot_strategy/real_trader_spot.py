@@ -401,22 +401,21 @@ class RealTraderSpot:
             elif not in_position and is_entry_time:
                 entry_upper = cached.get('entry_upper', 0.0)
                 entry_lower = cached.get('entry_lower', 0.0)
-                strength_ok = (cached.get('strength_filter', 1) == 1)
                 
-                if strength_ok and not pd.isna(entry_upper):
-                    self._check_entry(
-                        symbol, last_price, params,
-                        {
-                            'entry_upper': entry_upper, 
-                            'entry_lower': entry_lower, 
-                            'atr': atr,
-                            'trend_direction': trend_dir,
-                            'strength_filter': cached.get('strength_filter', 1),
-                            'volume_ratio': cached.get('volume_ratio', 100.0),
-                            'hurst': cached.get('hurst', 0.5),
-                            'natr': cached.get('natr', 0.0)
-                        }
-                    )
+                # Unconditional call to allow for "Skip" logging inside _check_entry
+                self._check_entry(
+                    symbol, last_price, params,
+                    {
+                        'entry_upper': entry_upper, 
+                        'entry_lower': entry_lower, 
+                        'atr': atr,
+                        'trend_direction': trend_dir,
+                        'strength_filter': cached.get('strength_filter', 1),
+                        'volume_ratio': cached.get('volume_ratio', 100.0),
+                        'hurst': cached.get('hurst', 0.5),
+                        'natr': cached.get('natr', 0.0)
+                    }
+                )
 
         except Exception as e:
             logger.error(f"🚨 Error executing logic for {symbol}: {e}")
@@ -675,7 +674,7 @@ class RealTraderSpot:
             strong_momentum = strength == 1
             vol_ok = (not use_vol) or (vol_ratio >= vol_thresh)
 
-            if is_uptrend and breakout and strong_momentum and vol_ok:
+            if is_uptrend and breakout and strong_momentum and vol_ok and (entry_upper > 0):
                 # 가중치 기반 동적 사이징 계산 (Hurst, NATR 연동)
                 invest_amount = self._calculate_position_size(
                     symbol, last_price, params, 
@@ -720,11 +719,16 @@ class RealTraderSpot:
             else:
                 # Skip Reason Logging
                 reasons = []
-                if not is_uptrend: reasons.append(f"Trend({'↓' if trend_dir == -1 else '─'})")
-                if not breakout: reasons.append(f"Price(≤{entry_upper:,.0f})")
-                if not strong_momentum: reasons.append("Weak")
-                if not vol_ok: reasons.append(f"Vol({vol_ratio:.1f}x)")
-                logger.info(f"⏭️ [{symbol}] Skip: {', '.join(reasons)}")
+                if pd.isna(entry_upper) or entry_upper <= 0:
+                    reasons.append("Waiting Data")
+                else:
+                    if not is_uptrend: reasons.append(f"Trend({'↓' if trend_dir == -1 else '─'})")
+                    if not breakout: reasons.append(f"Price(≤{entry_upper:,.0f})")
+                    if not strong_momentum: reasons.append("Weak")
+                    if not vol_ok: reasons.append(f"Vol({vol_ratio:.1f}x)")
+                
+                if reasons:
+                    logger.info(f"⏭️ [{symbol}] Skip: {', '.join(reasons)}")
 
         except Exception as e:
             logger.error(f"⚠️ Error in _check_entry: {e}")
