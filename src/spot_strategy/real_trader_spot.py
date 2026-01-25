@@ -310,6 +310,7 @@ class RealTraderSpot:
             
             # --- Case 1: 정시 (4h 마감) - 무거운 데이터 로드 및 지표 캐싱 ---
             if is_entry_time and not already_calculated:
+                logger.info(f"🔍 [{symbol}] Checking for entry signals ({timeframe} candle closure)...")
                 df = self._fetch_ohlcv_safe(symbol, timeframe, limit=600)
                 if df is not None and len(df) >= 200:
                     # [Correction] Ensure float64 for TA-Lib compatibility
@@ -832,9 +833,9 @@ class RealTraderSpot:
                         logger.error("⏰ Time drift detected! Bot may encounter API errors.")
                     
                     # 2. 리소스 모니터링 (10분마다) & 메모리 보호 (AWS Free Tier)
-                    if self.health_manager.loop_count % 10 == 0:  # 60s * 10 = 10분
+                    if self.health_manager.loop_count % 60 == 0:  # 10s * 60 = 10분
                         usage = self.cloud_optimizer.log_resource_usage()
-                        if usage.get('memory_percent', 0) > 75.0:
+                        if usage.get('memory_percent', 0) > 85.0:
                             logger.warning(f"⚠️ High Memory ({usage.get('memory_percent')}%) detected. Forcing GC...")
                             self.cloud_optimizer.force_gc()
                     
