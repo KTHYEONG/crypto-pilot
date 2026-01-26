@@ -349,7 +349,7 @@ class RealTraderSpot:
                     })
                     
                     self.last_calc_candle[symbol] = current_slot
-                    logger.debug(f"📊 Indicators calculated for {symbol} (Slot: {current_slot})")
+                    logger.info(f"📊 Indicators calculated for {symbol}")
                 
                 # [Optimization] 메모리 정리
                 del df
@@ -403,6 +403,7 @@ class RealTraderSpot:
                 entry_lower = cached.get('entry_lower', 0.0)
                 
                 # Unconditional call to allow for "Skip" logging inside _check_entry
+                logger.info(f"🔎 [{symbol}] Checking Entry Conditions...")
                 self._check_entry(
                     symbol, last_price, params,
                     {
@@ -635,12 +636,12 @@ class RealTraderSpot:
                 logger.warning(
                     f"⚠️ Calculated buy_amount too small for {symbol}: {buy_amount:,.0f} KRW "
                     f"< Min {MIN_ORDER_VALUE_KRW:,.0f} KRW. "
-                    f"Equity: {estimated_total_equity:,.0f} KRW, Weight: {weight*100:.0f}%"
+                    f"Equity: {estimated_total_equity:,.0f} KRW, Weight: {final_weight*100:.0f}%"
                 )
                 return 0
                 
             logger.info(
-                f"🧮 Sizing {symbol} (Weight {weight*100:.0f}%): "
+                f"🧮 Sizing {symbol} (Weight {final_weight*100:.0f}%): "
                 f"Equity ≈ {estimated_total_equity:,.0f} KRW | "
                 f"Target {target_amount:,.0f} | Buy {buy_amount:,.0f}"
             )
