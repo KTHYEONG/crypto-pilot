@@ -346,6 +346,7 @@ class RealTraderFutures:
             # --- Case 1: 진입 시점(정시) && 아직 계산 안 함 -> 무거운 데이터 로드 ---
             if is_entry_time and not already_calculated:
                 logger.info(f"🔍 [{symbol}] Entry Search")
+                df = None  # Ensure initialization
                 # 전체 캔들 데이터 조회 (지표 계산용)
                 tf_min = 60
                 if 'm' in timeframe:
@@ -552,12 +553,21 @@ class RealTraderFutures:
                 else:
                     # Skip Reason Logging
                     reasons = []
-                    if not (is_uptrend or is_downtrend): reasons.append(f"Trend({'─' if trend_dir == 0 else '?'})")
-                    if is_uptrend and not long_breakout: reasons.append(f"Price(≤{entry_upper:.2f})")
-                    if is_downtrend and not short_breakout: reasons.append(f"Price(≥{entry_lower:.2f})")
+                    side_label = ""
+                    if trend_dir == 1:
+                        side_label = "LONG"
+                        if not long_breakout: reasons.append(f"Price(≤{entry_upper:.2f})")
+                    elif trend_dir == -1:
+                        side_label = "SHORT"
+                        if not short_breakout: reasons.append(f"Price(≥{entry_lower:.2f})")
+                    else:
+                        reasons.append(f"Trend({'─' if trend_dir == 0 else '?'})")
+                    
                     if not strength_ok: reasons.append("Weak")
                     if not vol_ok: reasons.append(f"Vol({vol_ratio:.1f}x)")
-                    logger.info(f"⏭️ [{symbol}] Skip: {', '.join(reasons)}")
+                    
+                    if reasons:
+                        logger.info(f"⏭️ [{symbol}] Skip {side_label}: {', '.join(reasons)}")
                 
                 # [Optimization] 대규모 데이터프레임 제거 및 메모리 강제 회수
                 del df
