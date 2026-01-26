@@ -261,7 +261,10 @@ class RealTraderSpot:
     @api_retry
     def _get_market_price_safe(self, symbol: str) -> float:
         """안전한 시장가 조회 (재시도 적용)"""
-        return self.client.get_market_price(symbol)
+        price = self.client.get_market_price(symbol)
+        if price is None:
+            raise ValueError(f"Failed to fetch market price for {symbol}")
+        return price
 
     @api_retry
     def _place_order_safe(self, symbol: str, side: str, **kwargs):
@@ -280,6 +283,11 @@ class RealTraderSpot:
                 logger.warning(f"⚠️ Warning: Low balance (< {MIN_ORDER_VALUE_KRW:,} KRW)!")
         except Exception as e:
             logger.error(f"❌ Failed to fetch balance: {e}")
+
+        # Exchange Client Status Check
+        if not self.client.exchange:
+            logger.error("❌ Upbit Client is NOT initialized. Check API keys or Network.")
+
 
         # 초기 헬스체크
         self.health_manager.update_heartbeat(status="initialized")
