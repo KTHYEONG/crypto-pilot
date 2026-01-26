@@ -34,8 +34,14 @@ class UpbitClient:
             if ticker is None:
                 return None
             return ticker['last']
+        except ccxt.NetworkError as e:
+            self.logger.warning(f"⚠️ Network error fetching price for {symbol}: {e}")
+            return None
+        except ccxt.ExchangeError as e:
+            self.logger.warning(f"⚠️ Exchange error fetching price for {symbol}: {e}")
+            return None
         except Exception as e:
-            self.logger.error(f"Error fetching price for {symbol}: {e}")
+            self.logger.error(f"❌ Unexpected error fetching price for {symbol}: {e}")
             return None
 
     def fetch_ohlcv(self, symbol, timeframe, since=None, limit=None, end=None):
