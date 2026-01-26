@@ -28,21 +28,41 @@ class UpbitClient:
 
     def get_market_price(self, symbol):
         """현재 시장가 조회"""
-        if not self.exchange: return None
+        if not self.exchange:
+            self.logger.warning(f"⚠️ Exchange client is not initialized. Cannot fetch price for {symbol}.")
+            return None
         try:
             ticker = self.exchange.fetch_ticker(symbol)
-            if ticker is None:
-                return None
-            return ticker['last']
-        except ccxt.NetworkError as e:
-            self.logger.warning(f"⚠️ Network error fetching price for {symbol}: {e}")
-            return None
-        except ccxt.ExchangeError as e:
-            self.logger.warning(f"⚠️ Exchange error fetching price for {symbol}: {e}")
-            return None
-        except Exception as e:
-            self.logger.error(f"❌ Unexpected error fetching price for {symbol}: {e}")
-            return None
+            if ticker is not None:
+                return ticker['last']
+        except Exception:
+            pass
+            
+        # [Fallback] Try alt symbol format (BTC/KRW) via CCXT
+        if '-' in symbol:
+            try:
+                alt_symbol = symbol.split('-')[1] + "/" + symbol.split('-')[0]
+                ticker = self.exchange.fetch_ticker(alt_symbol)
+                if ticker is not None:
+                     return ticker['last']
+            except Exception:
+                pass
+            
+        # [Final Fallback] Direct REST API Call
+        try:
+            import requests
+            url = f"https://api.upbit.com/v1/ticker?markets={symbol}"
+            headers = {"accept": "application/json"}
+            response = requests.get(url, headers=headers, timeout=5)
+            data = response.json()
+            if isinstance(data, list) and len(data) > 0:
+                price = float(data[0]['trade_price'])
+                self.logger.info(f"✅ Recovered price via REST API for {symbol}: {price}")
+                return price
+        except Exception as e_rest:
+             self.logger.error(f"❌ REST API Fallback failed for {symbol}: {e_rest}")
+             
+        return None
 
     def fetch_ohlcv(self, symbol, timeframe, since=None, limit=None, end=None):
         """
