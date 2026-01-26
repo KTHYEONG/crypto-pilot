@@ -409,7 +409,7 @@ class RealTraderFutures:
                 
                 # 계산 완료 기록
                 self.last_calc_candle[symbol] = current_slot
-                logger.debug(f"📊 Indicators calculated and cached for {symbol} (Slot: {current_slot})")
+                logger.info(f"📊 Indicators calculated for {symbol}")
                 
             # --- Case 2: 비진입 시점이거나 이미 계산됨 -> 캐시된 지표 사용 ---
             else:
@@ -438,9 +438,10 @@ class RealTraderFutures:
                 )
             
             # --- ENTRY LOGIC (진입 시점에만 실행) ---
-            # --- ENTRY LOGIC (진입 시점에만 실행) ---
             elif not in_position and is_entry_time:
+                logger.info(f"🔎 [{symbol}] Checking Entry Conditions...")
                 if pd.isna(entry_upper) or pd.isna(entry_lower):
+                    logger.info(f"⏭️ [{symbol}] Skip: Waiting Data")
                     return
                 
                 # Indicators from cache
