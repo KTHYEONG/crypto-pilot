@@ -429,8 +429,11 @@ class RealTraderFutures:
             if current_price is None:
                 logger.warning(f"⚠️ Failed to get price for {symbol}")
                 return
-            
-            # --- EXIT LOGIC (항상 실행) ---
+
+            if in_position:
+                logger.info(f"ℹ️ [{symbol}] Position exists ({amount} {symbol.split('/')[0]}). Checking exit...")
+            elif is_entry_time:
+                logger.info(f"ℹ️ [{symbol}] No position. Entry window open.")
             if in_position:
                 self._check_exit(
                     symbol, amount, current_price, params, pos, 
