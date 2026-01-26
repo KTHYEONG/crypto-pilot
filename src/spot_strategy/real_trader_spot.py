@@ -364,12 +364,17 @@ class RealTraderSpot:
             
             # 현재가 조회 (Ticker)
             last_price = self._get_market_price_safe(symbol)
-            if last_price is None: return
+            if last_price is None:
+                logger.warning(f"⚠️ [{symbol}] Could not fetch market price. Skipping cycle.")
+                return
 
             current_value = balance_coin * last_price
             in_position = current_value > MIN_POSITION_VALUE_KRW
             
-            # --- EXIT LOGIC (1분마다 수행) ---
+            if in_position:
+                logger.info(f"ℹ️ [{symbol}] Position exists ({current_value:,.0f} KRW). Checking exit...")
+            elif is_entry_time:
+                logger.info(f"ℹ️ [{symbol}] No position. Entry window open.")
             if in_position:
                 # _check_exit 내부에서 사용할 confirmed_candle 대용 객체 생성
                 mock_candle = {
