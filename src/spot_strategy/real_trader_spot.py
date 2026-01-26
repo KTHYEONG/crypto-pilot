@@ -661,6 +661,8 @@ class RealTraderSpot:
         """진입 로직"""
         try:
             entry_upper = candle.get('entry_upper', 0)
+            if pd.isna(entry_upper): entry_upper = 0.0
+            
             trend_dir = candle.get('trend_direction', 0)
             strength = candle.get('strength_filter', 0)
             vol_ratio = candle.get('volume_ratio', 1.0)
@@ -728,7 +730,7 @@ class RealTraderSpot:
                     if not vol_ok: reasons.append(f"Vol({vol_ratio:.1f}x)")
                 
                 if reasons:
-                    logger.info(f"⏭️ [{symbol}] Skip: {', '.join(reasons)}")
+                    logger.info(f"⏭️ [{symbol}] Skip LONG: {', '.join(reasons)}")
 
         except Exception as e:
             logger.error(f"⚠️ Error in _check_entry: {e}")
