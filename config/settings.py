@@ -82,7 +82,7 @@ API_RETRY_WAIT_MAX = 30         # 최대 대기 시간 (초)
 # --- 포지션 사이징 임계값 ---
 MIN_BALANCE_USDT = 50           # 최소 운영 잔고 (USDT)
 MIN_BALANCE_FOR_TRADE = 10      # 최소 거래 가능 잔고
-MIN_ORDER_VALUE_USDT = 100      # Binance 최소 주문 금액 (BTC는 0.001단위라 약 90달러 이상 필요)
+MIN_ORDER_VALUE_USDT = 50      # Binance 최소 주문 금액 (BTC는 0.001단위라 약 90달러 이상 필요)
 MAX_EXCHANGE_LEVERAGE = 5       # 거래소 설정 레버리지 (버퍼)
 
 # --- 타이밍 설정 ---
