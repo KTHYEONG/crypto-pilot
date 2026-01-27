@@ -330,6 +330,7 @@ class RealTraderFutures:
             params = self.params_map[symbol]
             strategy = self.strategies[symbol]
             timeframe = params.get('TIMEFRAME', '1h')
+            df = None  # Ensure initialization for cleanup in finally/error block
 
             # 현재 포지션 확인 (가벼운 API)
             pos = self._fetch_position_safe(symbol)
@@ -574,7 +575,8 @@ class RealTraderFutures:
                         logger.info(f"⏭️ [{symbol}] Skip {side_label}: {', '.join(reasons)}")
                 
                 # [Optimization] 대규모 데이터프레임 제거 및 메모리 강제 회수
-                del df
+                if df is not None:
+                    del df
                 gc.collect()
         
         except Exception as e:
