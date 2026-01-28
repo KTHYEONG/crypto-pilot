@@ -287,11 +287,13 @@ class BinanceClient:
             self.logger.error(f"⚠️ Failed to set margin type for {symbol}: {e}")
             return False
 
+
+
     def fetch_position(self, symbol):
         """
         현재 포지션 조회
         Returns: {
-            'amount': 0.0, # 양수면 롱, 음수면 숏
+            'amount': 0.0,
             'entryPrice': 0.0,
             'unrealizedPnL': 0.0,
             'leverage': 1
@@ -300,9 +302,17 @@ class BinanceClient:
         try:
             positions = self.exchange.fetch_positions([symbol])
             for pos in positions:
-                if pos['symbol'] == symbol:
+                # Symbol Matching: Handle 'ETH/USDT:USDT' vs 'ETH/USDT'
+                # CCXT often returns 'BASE/QUOTE:SETTLE' for futures
+                p_symbol = pos['symbol']
+                if p_symbol == symbol or p_symbol.split(':')[0] == symbol:
+                    contracts = float(pos['contracts'])
+                    # 0인 포지션 데이터는 건너뜀 (Binance는 모든 페어의 0포지션을 리턴하기도 함)
+                    if contracts == 0:
+                        continue
+
                     return {
-                        'amount': float(pos['contracts']) * (1 if pos['side'] == 'long' else -1), # contracts가 수량, side로 부호 결정
+                        'amount': contracts * (1 if pos['side'] == 'long' else -1), 
                         'entryPrice': float(pos['entryPrice'] or 0),
                         'unrealizedPnL': float(pos['unrealizedPnl'] or 0),
                         'leverage': int(pos['leverage'])
