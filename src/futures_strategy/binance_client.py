@@ -323,6 +323,14 @@ class BinanceClient:
         # 포지션 없으면 기본 0 반환
         return {'amount': 0.0, 'entryPrice': 0.0, 'unrealizedPnL': 0.0, 'leverage': 1}
 
+    def fetch_open_orders(self, symbol):
+        """미체결 주문 조회"""
+        try:
+            return self.exchange.fetch_open_orders(symbol)
+        except Exception as e:
+            self.logger.error(f"Error fetching open orders for {symbol}: {e}")
+            return []
+
     def place_order(self, symbol, side, amount, order_type='market', price=None, params={}):
         """
         기본 주문 실행 (내부 사용)
