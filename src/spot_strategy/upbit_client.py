@@ -275,6 +275,15 @@ class UpbitClient:
             traceback.print_exc()
             return {'amount': 0.0, 'entryPrice': 0.0, 'unrealizedPnL': 0.0}
 
+    def fetch_open_orders(self, symbol):
+        """미체결 주문 조회"""
+        if not self.exchange: return []
+        try:
+            return self.exchange.fetch_open_orders(symbol)
+        except Exception as e:
+            self.logger.error(f"Error fetching open orders for {symbol}: {e}")
+            return []
+
     def place_order(self, symbol, side, amount=None, price=None, order_type='market'):
         """기본 주문 실행 (시장가/지정가)"""
         if not self.exchange: return None
