@@ -443,6 +443,23 @@ class RealTraderFutures:
             
             # --- ENTRY LOGIC (진입 시점에만 실행) ---
             elif not in_position and is_entry_time:
+                # [Safety] 최근 진입 기록 확인 (Double Entry Prevention)
+                state = self.state_manager.get_symbol_state(symbol)
+                last_entry_str = state.get('entry_time')
+                if last_entry_str:
+                    last_entry_dt = datetime.fromisoformat(last_entry_str)
+                    # 3분 이내 진입 기록이 있으면 중복 진입 방지 (API 반영 지연 대응)
+                    if (datetime.utcnow() - last_entry_dt).total_seconds() < 180:
+                        logger.info(f"⏳ Recent entry detected ({last_entry_str}). Skipping to prevent duplicate.")
+                        return
+
+                # [Safety] 미체결 주문 확인 (Pending Orders) - 펜딩된 진입 주문이 있으면 스킵
+                open_orders = self.client.fetch_open_orders(symbol)
+                entry_orders = [o for o in open_orders if o.get('type') != 'STOP_MARKET']
+                if len(entry_orders) > 0:
+                    logger.warning(f"⚠️ Open entry orders exist {len(entry_orders)} for {symbol}. Skipping.")
+                    return
+
                 logger.info(f"🔎 [{symbol}] Checking Entry Conditions...")
                 if pd.isna(entry_upper) or pd.isna(entry_lower):
                     logger.info(f"⏭️ [{symbol}] Skip: Waiting Data")
