@@ -433,6 +433,48 @@ class RealTraderFutures:
 
             if in_position:
                 logger.info(f"ℹ️ [{symbol}] Position exists ({amount} {symbol.split('/')[0]}). Checking exit...")
+
+                # [Watchdog] Stop Loss 주문 누락 감지 및 복구
+                try:
+                    # SL 주문이 없는 경우 복구 (사용자가 취소했거나 오류로 누락된 경우)
+                    open_orders = self.client.fetch_open_orders(symbol)
+                    sl_orders = [o for o in open_orders if o.get('type') == 'STOP_MARKET']
+                    
+                    if not sl_orders:
+                        logger.warning(f"🛡️ NO Stop Loss found for {symbol}! Restoring safety net...")
+                        
+                        entry_price = float(pos.get('entryPrice', current_price))
+                        sl_qty = abs(amount)
+                        sl_type = params.get('STOP_LOSS_TYPE', 'FIXED')
+                        stop_price = 0.0
+
+                        # SL Price Calculation (Entry Logic과 동일하게 유지)
+                        if amount > 0: # LONG -> Sell SL
+                            sl_side = 'sell'
+                            if sl_type == 'ATR' and atr > 0:
+                                sl_mult = params.get('ATR_STOP_LOSS_MULT', 1.5)
+                                stop_price = entry_price - (atr * sl_mult)
+                            else:
+                                sl_pct = params.get('STOP_LOSS_PCT', 0.02)
+                                stop_price = entry_price * (1 - sl_pct)
+                        else: # SHORT -> Buy SL
+                            sl_side = 'buy'
+                            if sl_type == 'ATR' and atr > 0:
+                                sl_mult = params.get('ATR_STOP_LOSS_MULT', 1.5)
+                                stop_price = entry_price + (atr * sl_mult)
+                            else:
+                                sl_pct = params.get('STOP_LOSS_PCT', 0.02)
+                                stop_price = entry_price * (1 + sl_pct)
+                        
+                        # 정밀도 보정
+                        stop_price = round(stop_price, 2) if 'BTC' not in symbol else round(stop_price, 1)
+                        
+                        # SL 주문 실행
+                        self._place_stop_loss_safe(symbol, sl_side, sl_qty, stop_price)
+                        logger.info(f"✅ Restored Stop Loss for {symbol} @ {stop_price}")
+
+                except Exception as e:
+                    logger.error(f"⚠️ SL Watchdog Failed: {e}")
             elif is_entry_time:
                 logger.info(f"ℹ️ [{symbol}] No position. Entry window open.")
             if in_position:
