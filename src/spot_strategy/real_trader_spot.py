@@ -412,6 +412,12 @@ class RealTraderSpot:
             
             # --- ENTRY LOGIC (정시에만 수행) ---
             elif not in_position and is_entry_time:
+                # [Safety] 미체결 주문 확인 (Pending Orders) - 매수 대기 주문이 있으면 스킵
+                open_orders = self.client.fetch_open_orders(symbol)
+                if open_orders and len(open_orders) > 0:
+                    logger.warning(f"⚠️ Open orders exist ({len(open_orders)}) for {symbol}. Skipping entry to prevent accumulation.")
+                    return
+
                 entry_upper = cached.get('entry_upper', 0.0)
                 entry_lower = cached.get('entry_lower', 0.0)
                 
