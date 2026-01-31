@@ -160,7 +160,7 @@ def load_best_params_from_mysql(mode, storage_url):
         return None, None, None
 
 def verify_single_symbol_futures(symbol, best_params, primary_symbols):
-    """단일 심볼 백테스트 실행 (Futures)"""
+    """단일 심볼 백테스트 실행 (Futures) + 상세 분석 (모든 심볼)"""
     try:
         tf = best_params.get('TIMEFRAME', '1h')
         hourly_df, daily_df = load_data(symbol, BACKTEST_START_DATE, BACKTEST_END_DATE, tf)
@@ -199,10 +199,60 @@ def verify_single_symbol_futures(symbol, best_params, primary_symbols):
     indicator = "🎯 PRIMARY" if is_primary else "📊 REFERENCE"
     print(f"   - {symbol} [{indicator}]: Return {ret_pct:.2f}% | MDD {mdd:.2f}% | Trades {trade_count} | Win {win_rate:.1f}% | PF {pf:.2f}")
     
-    return {'symbol': symbol, 'return': ret_pct, 'mdd': mdd, 'trades': trade_count, 'win_rate': win_rate, 'pf': pf, 'is_primary': is_primary}
+    result = {
+        'symbol': symbol, 
+        'return': ret_pct, 
+        'mdd': mdd, 
+        'trades': trade_count, 
+        'win_rate': win_rate, 
+        'pf': pf, 
+        'is_primary': is_primary,
+        'wfa_results': None,
+        'mc_results': None
+    }
+    
+    # [상세 분석] 모든 심볼에 대해 WFA + MC 수행 (거래 수 10개 이상)
+    if trade_count >= 10:
+        print(f"      🔬 Running detailed analysis for {symbol}...")
+        
+        # Walk-Forward Analysis
+        try:
+            from src.futures_strategy.walk_forward_futures import FuturesWalkForwardAnalyzer
+            wfa = FuturesWalkForwardAnalyzer(test_hourly, test_daily, best_params)
+            wfa_results = wfa.run(n_splits=5)
+            
+            if not wfa_results.empty:
+                avg_wfa_ret = wfa_results['Return'].mean()
+                consistency = len(wfa_results[wfa_results['Return'] > 0]) / len(wfa_results) * 100
+                result['wfa_results'] = {
+                    'avg_return': avg_wfa_ret,
+                    'consistency': consistency,
+                    'splits': len(wfa_results)
+                }
+                print(f"         └─ WFA: Avg {avg_wfa_ret:.1f}% | Consistency {consistency:.0f}%")
+        except Exception as e:
+            logger.warning(f"      ⚠️ WFA failed for {symbol}: {e}")
+        
+        # Monte Carlo Simulation
+        try:
+            from src.futures_strategy.monte_carlo_futures import FuturesMonteCarloSimulator
+            mc = FuturesMonteCarloSimulator(trades_log)
+            mc_res = mc.run(n_simulations=10000, initial_balance=750.0)
+            
+            result['mc_results'] = {
+                'prob_profit': mc_res['prob_profit'],
+                'mean_return': mc_res['mean_return_pct'],
+                'worst_mdd_95': mc_res['worst_case_mdd'],
+                'lower_bound_95': mc_res['lower_bound_95']
+            }
+            print(f"         └─ MC: Profit Prob {mc_res['prob_profit']:.1f}% | Worst MDD(95%) {mc_res['worst_case_mdd']:.1f}%")
+        except Exception as e:
+            logger.warning(f"      ⚠️ MC failed for {symbol}: {e}")
+    
+    return result
 
 def calculate_mode_performance(all_results):
-    """PRIMARY/REFERENCE 성능 계산"""
+    """PRIMARY/REFERENCE 성능 계산 + 상세 분석 요약 (모든 심볼)"""
     primary_results = [r for r in all_results if r['is_primary']]
     if not primary_results:
         return None
@@ -215,6 +265,38 @@ def calculate_mode_performance(all_results):
     if ref_results:
         ref_avg = sum(r['return'] for r in ref_results) / len(ref_results)
         print(f"   - REFERENCE Avg Return (Alts): {ref_avg:.2f}%")
+    
+    # [상세 분석 요약] WFA & MC 결과 (PRIMARY)
+    primary_wfa = [r for r in primary_results if r.get('wfa_results')]
+    primary_mc = [r for r in primary_results if r.get('mc_results')]
+    
+    if primary_wfa:
+        print(f"\n   🔬 Walk-Forward Analysis - PRIMARY (Robustness):")
+        for r in primary_wfa:
+            wfa = r['wfa_results']
+            print(f"      {r['symbol']}: Avg {wfa['avg_return']:.1f}% | Consistency {wfa['consistency']:.0f}% ({wfa['splits']} splits)")
+    
+    if primary_mc:
+        print(f"\n   🎲 Monte Carlo Simulation - PRIMARY (Risk Assessment):")
+        for r in primary_mc:
+            mc = r['mc_results']
+            print(f"      {r['symbol']}: Profit Prob {mc['prob_profit']:.1f}% | Worst MDD(95%) {mc['worst_mdd_95']:.1f}%")
+    
+    # [상세 분석 요약] WFA & MC 결과 (REFERENCE)
+    ref_wfa = [r for r in ref_results if r.get('wfa_results')]
+    ref_mc = [r for r in ref_results if r.get('mc_results')]
+    
+    if ref_wfa:
+        print(f"\n   🔬 Walk-Forward Analysis - REFERENCE (Robustness):")
+        for r in ref_wfa:
+            wfa = r['wfa_results']
+            print(f"      {r['symbol']}: Avg {wfa['avg_return']:.1f}% | Consistency {wfa['consistency']:.0f}% ({wfa['splits']} splits)")
+    
+    if ref_mc:
+        print(f"\n   🎲 Monte Carlo Simulation - REFERENCE (Risk Assessment):")
+        for r in ref_mc:
+            mc = r['mc_results']
+            print(f"      {r['symbol']}: Profit Prob {mc['prob_profit']:.1f}% | Worst MDD(95%) {mc['worst_mdd_95']:.1f}%")
     
     return avg_ret
 
