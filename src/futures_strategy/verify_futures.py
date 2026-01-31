@@ -230,6 +230,8 @@ if __name__ == "__main__":
                         help="Include altcoins for validation (1=yes, 0=no). Adds SOL, XRP, DOGE, BNB")
     parser.add_argument("--all-modes", action="store_true",
                         help="Verify all modes (SCALP, DAY, SWING, UNIFIED). Default: UNIFIED only")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Verify current deployed strategy (futures_strategy.db) without saving. Skips MySQL and deployment.")
     args = parser.parse_args()
     
     # 심볼 목록 빌드
@@ -253,12 +255,60 @@ if __name__ == "__main__":
         MODES = ['UNIFIED']
         print(f"⚡ Quick Verification: UNIFIED mode only (use --all-modes to compare all strategies)")
     
-    results = []
     
+    # [DRY-RUN MODE] 현재 배포된 전략 검증만 수행 (저장 안 함)
+    if args.dry_run:
+        print("\n" + "="*80)
+        print(f"🔍 DRY-RUN MODE: Verifying Current Deployed Strategy")
+        print(f"   Source: futures_strategy.db (Local)")
+        print("="*80)
+        
+        target_db = "futures_strategy.db"
+        if not os.path.exists(target_db):
+            print(f"❌ Error: {target_db} not found. Deploy a strategy first.")
+            sys.exit(1)
+        
+        try:
+            # 로컬 DB에서 현재 전략 로드
+            local_storage = f"sqlite:///{target_db}"
+            study = optuna.load_study(study_name="futures_strategy", storage=local_storage)
+            best_params = study.best_params
+            train_score = study.best_value
+            
+            print(f"   ✅ Loaded Current Strategy (Train Score: {train_score:.4f})")
+            print(f"   Timeframe: {best_params.get('TIMEFRAME')}")
+            print(f"   Leverage: {best_params.get('LEVERAGE', 1)}x")
+            
+            # OOS 검증
+            all_results = []
+            for symbol in symbols:
+                result = verify_single_symbol_futures(symbol, best_params, PRIMARY_SYMBOLS)
+                if result:
+                    all_results.append(result)
+            
+            avg_ret = calculate_mode_performance(all_results)
+            
+            print("\n" + "="*80)
+            print("🏁 DRY-RUN COMPLETE (No changes saved)")
+            print("="*80)
+            if avg_ret is not None:
+                print(f"📊 Current Strategy OOS Performance: {avg_ret:.2f}%")
+            
+            sys.exit(0)
+            
+        except Exception as e:
+            print(f"❌ Error loading deployed strategy: {e}")
+            import traceback
+            traceback.print_exc()
+            sys.exit(1)
+    
+    # [NORMAL MODE] MySQL에서 전략 검증 후 최적 전략 배포
     print("\n" + "="*80)
     print(f"🚀 INTEGRATED STRATEGY VERIFICATION (Futures)")
     print(f"   Searching for optimized strategies: {MODES}")
     print("="*80)
+    
+    results = []
     
     # MySQL 설정
     from dotenv import load_dotenv
