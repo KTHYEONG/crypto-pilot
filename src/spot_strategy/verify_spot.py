@@ -246,7 +246,7 @@ def prepare_spot_data(hourly_df, daily_df, strategy):
     return merged_df
 
 def verify_single_symbol(symbol, best_params, primary_symbols):
-    """단일 심볼 백테스트 실행 (Multi-Timeframe)"""
+    """단일 심볼 백테스트 실행 (Multi-Timeframe) + 상세 분석 (모든 심볼)"""
     from config.settings import TRAIN_CUTOFF_DATE
     
     tf = best_params.get('TIMEFRAME', '1h')
@@ -281,9 +281,6 @@ def verify_single_symbol(symbol, best_params, primary_symbols):
     pf = 0.0
     if trade_count > 0:
         wins = [t for t in trades_log if t > 0]
-        # Spot trades_log contains Profit amounts, not %? 
-        # run_backtest_segment returns trades_log as list of PnL amounts (based on code context)
-        # Let's verify backtest_utils return. Usually it returns PnL amounts.
         losses = [t for t in trades_log if t <= 0]
         win_rate = len(wins) / trade_count * 100
         gross_profit = sum(wins)
@@ -294,9 +291,59 @@ def verify_single_symbol(symbol, best_params, primary_symbols):
     indicator = "🎯 PRIMARY" if is_primary else "📊 REFERENCE"
     print(f"   - {symbol} [{indicator}]: Return {ret_pct:.2f}% | MDD {mdd:.2f}% | Trades {trade_count} | Win {win_rate:.1f}% | PF {pf:.2f}")
     
-    return {'symbol': symbol, 'return': ret_pct, 'mdd': mdd, 'trades': trade_count, 'win_rate': win_rate, 'pf': pf, 'is_primary': is_primary}
+    result = {
+        'symbol': symbol, 
+        'return': ret_pct, 
+        'mdd': mdd, 
+        'trades': trade_count, 
+        'win_rate': win_rate, 
+        'pf': pf, 
+        'is_primary': is_primary,
+        'wfa_results': None,
+        'mc_results': None
+    }
+    
+    # [상세 분석] 모든 심볼에 대해 WFA + MC 수행 (거래 수 10개 이상)
+    if trade_count >= 10:
+        print(f"      🔬 Running detailed analysis for {symbol}...")
+        
+        # Walk-Forward Analysis
+        try:
+            from src.spot_strategy.walk_forward_spot import SpotWalkForwardAnalyzer
+            wfa = SpotWalkForwardAnalyzer(test_df, best_params)
+            wfa_results = wfa.run(n_splits=5)
+            
+            if not wfa_results.empty:
+                avg_wfa_ret = wfa_results['Return'].mean()
+                consistency = len(wfa_results[wfa_results['Return'] > 0]) / len(wfa_results) * 100
+                result['wfa_results'] = {
+                    'avg_return': avg_wfa_ret,
+                    'consistency': consistency,
+                    'splits': len(wfa_results)
+                }
+                print(f"         └─ WFA: Avg {avg_wfa_ret:.1f}% | Consistency {consistency:.0f}%")
+        except Exception as e:
+            logger.warning(f"      ⚠️ WFA failed for {symbol}: {e}")
+        
+        # Monte Carlo Simulation
+        try:
+            from src.spot_strategy.monte_carlo_spot import SpotMonteCarloSimulator
+            mc = SpotMonteCarloSimulator(trades_log)
+            mc_res = mc.run(n_simulations=10000, initial_balance=10000000.0)
+            
+            result['mc_results'] = {
+                'prob_profit': mc_res['prob_profit'],
+                'mean_return': mc_res['mean_return_pct'],
+                'worst_mdd_95': mc_res['worst_case_mdd'],
+                'lower_bound_95': mc_res['lower_bound_95']
+            }
+            print(f"         └─ MC: Profit Prob {mc_res['prob_profit']:.1f}% | Worst MDD(95%) {mc_res['worst_case_mdd']:.1f}%")
+        except Exception as e:
+            logger.warning(f"      ⚠️ MC failed for {symbol}: {e}")
+    
+    return result
 def calculate_mode_performance(all_results):
-    """PRIMARY/REFERENCE 성능 계산"""
+    """PRIMARY/REFERENCE 성능 계산 + 상세 분석 요약 (모든 심볼)"""
     primary_results = [r for r in all_results if r['is_primary']]
     if not primary_results:
         return None
@@ -309,6 +356,38 @@ def calculate_mode_performance(all_results):
     if ref_results:
         ref_avg = sum(r['return'] for r in ref_results) / len(ref_results)
         print(f"   - REFERENCE Avg Return (Alts): {ref_avg:.2f}%")
+    
+    # [상세 분석 요약] WFA & MC 결과 (PRIMARY)
+    primary_wfa = [r for r in primary_results if r.get('wfa_results')]
+    primary_mc = [r for r in primary_results if r.get('mc_results')]
+    
+    if primary_wfa:
+        print(f"\n   🔬 Walk-Forward Analysis - PRIMARY (Robustness):")
+        for r in primary_wfa:
+            wfa = r['wfa_results']
+            print(f"      {r['symbol']}: Avg {wfa['avg_return']:.1f}% | Consistency {wfa['consistency']:.0f}% ({wfa['splits']} splits)")
+    
+    if primary_mc:
+        print(f"\n   🎲 Monte Carlo Simulation - PRIMARY (Risk Assessment):")
+        for r in primary_mc:
+            mc = r['mc_results']
+            print(f"      {r['symbol']}: Profit Prob {mc['prob_profit']:.1f}% | Worst MDD(95%) {mc['worst_mdd_95']:.1f}%")
+    
+    # [상세 분석 요약] WFA & MC 결과 (REFERENCE)
+    ref_wfa = [r for r in ref_results if r.get('wfa_results')]
+    ref_mc = [r for r in ref_results if r.get('mc_results')]
+    
+    if ref_wfa:
+        print(f"\n   🔬 Walk-Forward Analysis - REFERENCE (Robustness):")
+        for r in ref_wfa:
+            wfa = r['wfa_results']
+            print(f"      {r['symbol']}: Avg {wfa['avg_return']:.1f}% | Consistency {wfa['consistency']:.0f}% ({wfa['splits']} splits)")
+    
+    if ref_mc:
+        print(f"\n   🎲 Monte Carlo Simulation - REFERENCE (Risk Assessment):")
+        for r in ref_mc:
+            mc = r['mc_results']
+            print(f"      {r['symbol']}: Profit Prob {mc['prob_profit']:.1f}% | Worst MDD(95%) {mc['worst_mdd_95']:.1f}%")
     
     return avg_ret
 
@@ -325,6 +404,8 @@ if __name__ == "__main__":
                         help="Include altcoins for validation (1=yes, 0=no). Adds SOL, XRP, DOGE, ADA")
     parser.add_argument("--all-modes", action="store_true",
                         help="Verify all modes (SCALP, DAY, SWING, UNIFIED). Default: UNIFIED only")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Verify current deployed strategy (spot_strategy.db) without saving. Skips MySQL and deployment.")
     args = parser.parse_args()
     
     # 심볼 목록 빌드
@@ -348,6 +429,53 @@ if __name__ == "__main__":
         MODES = ['UNIFIED']
         print(f"⚡ Quick Verification: UNIFIED mode only (use --all-modes to compare all strategies)")
     
+    
+    # [DRY-RUN MODE] 현재 배포된 전략 검증만 수행 (저장 안 함)
+    if args.dry_run:
+        print("\n" + "="*80)
+        print(f"🔍 DRY-RUN MODE: Verifying Current Deployed Strategy")
+        print(f"   Source: spot_strategy.db (Local)")
+        print("="*80)
+        
+        target_db = "spot_strategy.db"
+        if not os.path.exists(target_db):
+            print(f"❌ Error: {target_db} not found. Deploy a strategy first.")
+            sys.exit(1)
+        
+        try:
+            # 로컬 DB에서 현재 전략 로드
+            local_storage = f"sqlite:///{target_db}"
+            study = optuna.load_study(study_name="spot_strategy", storage=local_storage)
+            best_params = study.best_params
+            train_score = study.best_value
+            
+            print(f"   ✅ Loaded Current Strategy (Train Score: {train_score:.4f})")
+            print(f"   Timeframe: {best_params.get('TIMEFRAME', '1h')}")
+            
+            # OOS 검증
+            all_results = []
+            for symbol in symbols:
+                result = verify_single_symbol(symbol, best_params, PRIMARY_SYMBOLS)
+                if result:
+                    all_results.append(result)
+            
+            avg_ret = calculate_mode_performance(all_results)
+            
+            print("\n" + "="*80)
+            print("🏁 DRY-RUN COMPLETE (No changes saved)")
+            print("="*80)
+            if avg_ret is not None:
+                print(f"📊 Current Strategy OOS Performance: {avg_ret:.2f}%")
+            
+            sys.exit(0)
+            
+        except Exception as e:
+            print(f"❌ Error loading deployed strategy: {e}")
+            import traceback
+            traceback.print_exc()
+            sys.exit(1)
+    
+    # [NORMAL MODE] MySQL에서 전략 검증 후 최적 전략 배포
     results = []
     
     print("\n" + "="*80)
