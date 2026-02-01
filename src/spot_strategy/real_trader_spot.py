@@ -381,9 +381,7 @@ class RealTraderSpot:
             
             if in_position:
                 logger.info(f"ℹ️ [{symbol}] Position exists ({current_value:,.0f} KRW). Checking exit...")
-            elif is_entry_time:
-                logger.info(f"ℹ️ [{symbol}] No position. Entry window open.")
-            if in_position:
+                
                 # _check_exit 내부에서 사용할 confirmed_candle 대용 객체 생성
                 mock_candle = {
                     'atr': atr, 
@@ -392,14 +390,15 @@ class RealTraderSpot:
                     'rsi': cached.get('rsi', 50.0) # RSI for Panic Exit
                 }
                 
-                # 상태 불일치 복구 로직 (생략 가능하나 안전을 위해 유지)
+                # [ISSUE #7 FIX] 상태 불일치 복구 로직 개선 (ATR 덮어쓰기 방지)
                 if entry_price == 0:
                     exchange_avg_price = pos.get('entryPrice', 0.0)
                     if exchange_avg_price > 0:
+                        logger.warning(f"⚠️ [{symbol}] Recovered entry_price from exchange. ATR data may be inaccurate.")
                         entry_price = exchange_avg_price
                         state.update({
                             'entry_price': entry_price,
-                            'entry_atr': atr,
+                            # entry_atr는 알 수 없으므로 0 유지 (Fixed Stop Loss만 사용)
                             'highest_high': max(last_price, exchange_avg_price),
                             'invest_amount': balance_coin * exchange_avg_price
                         })
@@ -411,7 +410,10 @@ class RealTraderSpot:
                 )
             
             # --- ENTRY LOGIC (정시에만 수행) ---
+            # [ISSUE #1 FIX] 중복 elif 제거 - 포지션 없고 진입 시점일 때만 실행
             elif not in_position and is_entry_time:
+                logger.info(f"ℹ️ [{symbol}] No position. Entry window open. Checking conditions...")
+                
                 # [Safety] 미체결 주문 확인 (Pending Orders) - 매수 대기 주문이 있으면 스킵
                 open_orders = self.client.fetch_open_orders(symbol)
                 if open_orders and len(open_orders) > 0:
@@ -483,29 +485,33 @@ class RealTraderSpot:
             use_tp = params.get('USE_TAKE_PROFIT', False)
             tp_mult = params.get('TAKE_PROFIT_ATR_MULT', 2.0)
 
-            # 1. Main Exit (ATR Trailing or SAR)
-            if exit_type == 'ATR':
-                trailing_stop = highest_high - (entry_atr * atr_mult)
-                if last_price < trailing_stop:
-                    should_sell = True
-                    reason = f"ATR Trailing Stop ({trailing_stop:,.0f})"
+            # [ISSUE #4 FIX] Stop Loss를 최우선 안전장치로 순서 조정
+            # 1. Stop Loss (최우선)
+            if sl_type == 'ATR' and entry_atr > 0:
+                stop_price = entry_price - (entry_atr * atr_sl_mult)
+            else:
+                stop_price = entry_price * (1 - sl_pct)
 
-            elif exit_type == 'PARABOLIC_SAR':
-                p_sar = candle.get('parabolic_sar', 0)
-                if p_sar > 0 and last_price < p_sar:
-                    should_sell = True
-                    reason = f"Parabolic SAR Exit ({p_sar:,.0f})"
+            if last_price < stop_price:
+                should_sell = True
+                reason = f"Stop Loss ({stop_price:,.0f})"
 
-            # 2. Stop Loss
+            # 2. Main Exit (ATR Trailing or SAR)
             if not should_sell:
-                if sl_type == 'ATR':
-                    stop_price = entry_price - (entry_atr * atr_sl_mult)
-                else:
-                    stop_price = entry_price * (1 - sl_pct)
+                if exit_type == 'ATR' and entry_atr > 0:
+                    trailing_stop = highest_high - (entry_atr * atr_mult)
+                    if last_price < trailing_stop:
+                        should_sell = True
+                        reason = f"ATR Trailing Stop ({trailing_stop:,.0f})"
 
-                if last_price < stop_price:
-                    should_sell = True
-                    reason = f"Stop Loss ({stop_price:,.0f})"
+                elif exit_type == 'PARABOLIC_SAR':
+                    # [ISSUE #3 FIX] SAR 유효성 검증
+                    p_sar = candle.get('parabolic_sar', 0)
+                    if p_sar <= 0:
+                        logger.warning(f"⚠️ [{symbol}] SAR exit enabled but SAR value invalid ({p_sar:.2f}). Skipping SAR check.")
+                    elif last_price < p_sar:
+                        should_sell = True
+                        reason = f"Parabolic SAR Exit ({p_sar:,.0f})"
 
             # 3. Trend Reversal
             if not should_sell and trend_dir == -1:
@@ -513,7 +519,7 @@ class RealTraderSpot:
                 reason = "Trend Reversal"
 
             # 4. Take Profit
-            if not should_sell and use_tp:
+            if not should_sell and use_tp and entry_atr > 0:
                 target_price = entry_price + (entry_atr * tp_mult)
                 if last_price > target_price:
                     should_sell = True
@@ -689,12 +695,17 @@ class RealTraderSpot:
             atr = candle.get('atr', 0.0)
 
             use_vol = params.get('USE_VOLUME_FILTER', False)
-            vol_thresh = params.get('VOLUME_THRESHOLD_MULT', 1.0)
+            
+            # [ISSUE #2 FIX] Volume Filter: Z-Score 기준으로 명확화
+            # 전략 파일은 Z-Score를 반환 (평균=0, 표준편차=1)
+            # Z-Score 해석: 0 = 평균, 1 = 평균+1σ (상위 16%), 2 = 평균+2σ (상위 2.5%)
+            # 기본값 0.0: 평균 이상 거래량이면 진입 허용 (보수적 필터링)
+            vol_z_threshold = params.get('VOLUME_Z_THRESHOLD', params.get('VOLUME_THRESHOLD_MULT', 0.0))
 
             is_uptrend = trend_dir == 1
             breakout = last_price > entry_upper
             strong_momentum = strength == 1
-            vol_ok = (not use_vol) or (vol_ratio >= vol_thresh)
+            vol_ok = (not use_vol) or (vol_ratio >= vol_z_threshold)
 
             if is_uptrend and breakout and strong_momentum and vol_ok and (entry_upper > 0):
                 # 가중치 기반 동적 사이징 계산 (Hurst, NATR 연동)
