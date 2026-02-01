@@ -432,7 +432,10 @@ class RealTraderFutures:
                 return
 
             if in_position:
-                logger.info(f"ℹ️ [{symbol}] Position exists ({amount} {symbol.split('/')[0]}). Checking exit...")
+                logger.info(
+                    f"📊 [{symbol}] Position: {amount:+.4f} @ Entry {pos.get('entryPrice'):.2f} | "
+                    f"Current: {current_price:.2f} | Checking exit conditions..."
+                )
 
                 # [Watchdog] Stop Loss 주문 누락 감지 및 복구
                 try:
