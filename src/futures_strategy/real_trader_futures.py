@@ -349,9 +349,9 @@ class RealTraderFutures:
             # 진입 시점 확인
             is_entry_time = self._is_entry_time(timeframe)
 
-            # --- Case 1: 진입 시점(정시) && 아직 계산 안 함 -> 무거운 데이터 로드 ---
-            if is_entry_time and not already_calculated:
-                logger.info(f"🔍 [{symbol}] Entry Search")
+            # --- Case 1: 진입 시점(정시) OR 첫 실행(캐시 없음) -> 무거운 데이터 로드 ---
+            if (is_entry_time and not already_calculated) or not self._get_cached_indicators(symbol):
+                logger.info(f"🔍 [{symbol}] Calculating indicators (Reason: {'Entry Window' if is_entry_time else 'Initial Boot'})")
                 # 전체 캔들 데이터 조회 (지표 계산용)
                 tf_min = 60
                 if 'm' in timeframe:
@@ -770,47 +770,51 @@ class RealTraderFutures:
             # [목표가 계산 및 로깅]
             sl_type = params.get('STOP_LOSS_TYPE', 'FIXED')
             
+            # 수익률 계산
+            pnl_pct = ((current_price / entry_price) - 1) * 100 if amount > 0 else ((entry_price / current_price) - 1) * 100
+            
+            # [지표 및 로그 구성]
+            log_parts = [f"📊 [{symbol}] {'LONG' if amount > 0 else 'SHORT'}", f"Entry: {entry_price:.2f} → Current: {current_price:.2f} ({pnl_pct:+.2f}%)"]
+            
+            # SL은 항상 포함
+            sl_price = (entry_price - (atr * params.get('ATR_STOP_LOSS_MULT', 1.5))) if amount > 0 else (entry_price + (atr * params.get('ATR_STOP_LOSS_MULT', 1.5)))
+            if sl_type != 'ATR':
+                sl_price = (entry_price * (1 - params.get('STOP_LOSS_PCT', 0.02))) if amount > 0 else (entry_price * (1 + params.get('STOP_LOSS_PCT', 0.02)))
+            log_parts.append(f"SL: {sl_price:.2f}")
+
+            # TP (사용 시에만 표시)
+            tp_price_val = None
+            if use_tp:
+                tp_price_val = entry_price + (atr * tp_atr_mult) if amount > 0 else entry_price - (atr * tp_atr_mult)
+                log_parts.append(f"TP: {tp_price_val:.2f}")
+            
+            # SAR (사용 시에만 표시)
+            if params.get('EXIT_TYPE') == 'PARABOLIC_SAR' and sar > 0:
+                log_parts.append(f"SAR: {sar:.2f}")
+            
+            # 최종 로그 출력
+            logger.info(" | ".join(log_parts))
+
+            # ------------------------------------------------------------
+            # 청산 조건 체크
+            # ------------------------------------------------------------
             if amount > 0:  # LONG
-                # 목표가 계산
-                tp_price = entry_price + (atr * tp_atr_mult) if use_tp else None
-                sl_price = (entry_price - (atr * params.get('ATR_STOP_LOSS_MULT', 1.5))) if sl_type == 'ATR' else (entry_price * (1 - params.get('STOP_LOSS_PCT', 0.02)))
-                
-                # 상세 로깅
-                pnl_pct = ((current_price / entry_price) - 1) * 100
-                logger.info(
-                    f"📊 [{symbol}] LONG | Entry: {entry_price:.2f} → Current: {current_price:.2f} ({pnl_pct:+.2f}%) | "
-                    f"TP: {tp_price:.2f if tp_price else 'N/A'} | SL: {sl_price:.2f} | SAR: {sar:.2f if sar > 0 else 'N/A'}"
-                )
-                
-                # 청산 조건 체크
                 if params.get('EXIT_TYPE') == 'PARABOLIC_SAR' and sar > 0 and current_price < sar:
                     exit_triggered, reason = True, "Parabolic SAR Cross"
                 elif trend_dir == -1:
                     exit_triggered, reason = True, "Trend Reversal"
-                elif use_tp and tp_price is not None and current_price >= tp_price:
-                    exit_triggered, reason = True, f"Take Profit ({tp_price:.2f})"
+                elif use_tp and tp_price_val is not None and current_price >= tp_price_val:
+                    exit_triggered, reason = True, f"Take Profit ({tp_price_val:.2f})"
                 elif current_price <= sl_price:
                     exit_triggered, reason = True, f"Stop Loss ({sl_price:.2f})"
 
-            elif amount < 0:  # SHORT
-                # 목표가 계산
-                tp_price = entry_price - (atr * tp_atr_mult) if use_tp else None
-                sl_price = (entry_price + (atr * params.get('ATR_STOP_LOSS_MULT', 1.5))) if sl_type == 'ATR' else (entry_price * (1 + params.get('STOP_LOSS_PCT', 0.02)))
-
-                # 상세 로깅
-                pnl_pct = ((entry_price / current_price) - 1) * 100
-                logger.info(
-                    f"📊 [{symbol}] SHORT | Entry: {entry_price:.2f} → Current: {current_price:.2f} ({pnl_pct:+.2f}%) | "
-                    f"TP: {tp_price:.2f if tp_price else 'N/A'} | SL: {sl_price:.2f} | SAR: {sar:.2f if sar > 0 else 'N/A'}"
-                )
-
-                # 청산 조건 체크
+            else:  # SHORT
                 if params.get('EXIT_TYPE') == 'PARABOLIC_SAR' and sar > 0 and current_price > sar:
                     exit_triggered, reason = True, "Parabolic SAR Cross"
                 elif trend_dir == 1:
                     exit_triggered, reason = True, "Trend Reversal"
-                elif use_tp and tp_price is not None and current_price <= tp_price:
-                    exit_triggered, reason = True, f"Take Profit ({tp_price:.2f})"
+                elif use_tp and tp_price_val is not None and current_price <= tp_price_val:
+                    exit_triggered, reason = True, f"Take Profit ({tp_price_val:.2f})"
                 elif current_price >= sl_price:
                     exit_triggered, reason = True, f"Stop Loss ({sl_price:.2f})"
 
