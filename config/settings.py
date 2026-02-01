@@ -57,7 +57,7 @@ TRAIN_CUTOFF_DATE = "2025-01-01"    # [중요] 최적화(Train)와 검증(Test) 
 TIMEFRAME = "1h"               # 1시간봉 기준
 
 # 로깅 설정
-LOG_LEVEL = "INFO"
+LOG_LEVEL = "DEBUG"
 
 # ============================================================
 # RealTrader Futures 설정
