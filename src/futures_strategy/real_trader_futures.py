@@ -472,11 +472,13 @@ class RealTraderFutures:
 
                 except Exception as e:
                     # [FIX] 에러 메시지에 -4130(이미 존재함)이 포함된 경우 성공으로 처리하여 쿨다운 적용
+                    # [ISSUE #2 FIX] 실패해도 쿨다운 기록 (무한 재시도 방지)
+                    self.state_manager.update_symbol_state(symbol, {
+                        'last_sl_order_time': datetime.utcnow().isoformat()
+                    })
+                    
                     if "-4130" in str(e):
                         logger.info(f"ℹ️ Stop Loss already exists on server for {symbol}. Synchronizing state...")
-                        self.state_manager.update_symbol_state(symbol, {
-                            'last_sl_order_time': datetime.utcnow().isoformat()
-                        })
                     else:
                         logger.error(f"⚠️ SL Watchdog Failed: {e}")
                 
@@ -485,11 +487,12 @@ class RealTraderFutures:
                     symbol, amount, current_price, params, pos, 
                     trend_dir, atr, sar
                 )
-            elif is_entry_time:
-                logger.info(f"ℹ️ [{symbol}] No position. Entry window open.")
             
             # --- ENTRY LOGIC (진입 시점에만 실행) ---
+            # [ISSUE #1 FIX] 중복 elif 제거 - 포지션 없고 진입 시점일 때만 실행
             elif not in_position and is_entry_time:
+                logger.info(f"ℹ️ [{symbol}] No position. Entry window open. Checking conditions...")
+                
                 # [Safety] 최근 진입 기록 확인 (Double Entry Prevention)
                 state = self.state_manager.get_symbol_state(symbol)
                 last_entry_str = state.get('entry_time')
@@ -797,6 +800,8 @@ class RealTraderFutures:
 
             # ------------------------------------------------------------
             # 청산 조건 체크
+            # [ISSUE #3 FIX] 서버 사이드 Stop Loss가 이미 설정되어 있으므로 클라이언트 중복 체크 제거
+            # 서버 SL은 진입 시 자동으로 설정되며, 가격 도달 시 자동 청산됨 (중복 청산 방지)
             # ------------------------------------------------------------
             if amount > 0:  # LONG
                 if params.get('EXIT_TYPE') == 'PARABOLIC_SAR' and sar > 0 and current_price < sar:
@@ -805,8 +810,7 @@ class RealTraderFutures:
                     exit_triggered, reason = True, "Trend Reversal"
                 elif use_tp and tp_price_val is not None and current_price >= tp_price_val:
                     exit_triggered, reason = True, f"Take Profit ({tp_price_val:.2f})"
-                elif current_price <= sl_price:
-                    exit_triggered, reason = True, f"Stop Loss ({sl_price:.2f})"
+                # [REMOVED] 클라이언트 사이드 SL 체크 제거 (서버 SL이 자동 처리)
 
             else:  # SHORT
                 if params.get('EXIT_TYPE') == 'PARABOLIC_SAR' and sar > 0 and current_price > sar:
@@ -815,8 +819,7 @@ class RealTraderFutures:
                     exit_triggered, reason = True, "Trend Reversal"
                 elif use_tp and tp_price_val is not None and current_price <= tp_price_val:
                     exit_triggered, reason = True, f"Take Profit ({tp_price_val:.2f})"
-                elif current_price >= sl_price:
-                    exit_triggered, reason = True, f"Stop Loss ({sl_price:.2f})"
+                # [REMOVED] 클라이언트 사이드 SL 체크 제거 (서버 SL이 자동 처리)
 
 
             # 2. 공통 청산 로직 (Panic Exit & Time Cut)
