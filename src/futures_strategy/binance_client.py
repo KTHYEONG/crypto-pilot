@@ -301,26 +301,43 @@ class BinanceClient:
         """
         try:
             positions = self.exchange.fetch_positions([symbol])
+            
+            # [DEBUG] 모든 반환된 포지션 로깅
+            self.logger.debug(f"[{symbol}] API returned {len(positions)} position(s)")
+            
             for pos in positions:
                 # Symbol Matching: Handle 'ETH/USDT:USDT' vs 'ETH/USDT'
                 # CCXT often returns 'BASE/QUOTE:SETTLE' for futures
                 p_symbol = pos['symbol']
+                contracts = float(pos['contracts'] or 0)
+                
+                # [DEBUG] 각 포지션 상세 로깅
+                self.logger.debug(
+                    f"  → Symbol: {p_symbol}, Contracts: {contracts}, "
+                    f"Side: {pos.get('side')}, Entry: {pos.get('entryPrice')}"
+                )
+                
                 if p_symbol == symbol or p_symbol.split(':')[0] == symbol:
-                    contracts = float(pos['contracts'])
                     # 0인 포지션 데이터는 건너뜀 (Binance는 모든 페어의 0포지션을 리턴하기도 함)
                     if contracts == 0:
                         continue
 
-                    return {
+                    result = {
                         'amount': contracts * (1 if pos['side'] == 'long' else -1), 
                         'entryPrice': float(pos['entryPrice'] or 0),
                         'unrealizedPnL': float(pos['unrealizedPnl'] or 0),
                         'leverage': int(pos['leverage'])
                     }
+                    self.logger.info(
+                        f"✅ [{symbol}] Position Found: {result['amount']} contracts "
+                        f"@ {result['entryPrice']} (PnL: {result['unrealizedPnL']:.2f})"
+                    )
+                    return result
         except Exception as e:
             self.logger.error(f"Error fetching position for {symbol}: {e}")
         
         # 포지션 없으면 기본 0 반환
+        self.logger.debug(f"[{symbol}] No active position found")
         return {'amount': 0.0, 'entryPrice': 0.0, 'unrealizedPnL': 0.0, 'leverage': 1}
 
     def fetch_open_orders(self, symbol):
