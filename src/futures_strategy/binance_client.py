@@ -529,11 +529,22 @@ class BinanceClient:
                 params={'timeInForce': 'IOC'}
             )
             
-            # IOC는 부분 체결(partial fill) 가능성 있음 -> filled > 0 확인
+            # [ISSUE #5 FIX] IOC는 부분 체결(partial fill) 가능성 있음 -> filled 확인
             if order['filled'] > 0:
                 avg_price = order.get('average', limit_price)
-                self.logger.info(f"✅ Tier 2 Filled ({order['filled']}/{amount}) @ {avg_price}")
-                return order
+                
+                # 전체 체결 확인 (허용 오차: 0.1%)
+                fill_ratio = order['filled'] / amount
+                if fill_ratio >= 0.999:  # 99.9% 이상 체결 시 성공으로 처리
+                    self.logger.info(f"✅ Tier 2 Filled ({order['filled']}/{amount}) @ {avg_price}")
+                    return order
+                else:
+                    # 부분 체결 시 Tier 3로 진행 (남은 수량을 Market으로 처리)
+                    self.logger.warning(
+                        f"⚠️ Tier 2 Partial Fill: {order['filled']}/{amount} "
+                        f"({fill_ratio*100:.1f}%) @ {avg_price}. Tier 3로 진행..."
+                    )
+                    # Tier 3에서 전체 수량을 다시 주문 (이미 체결된 부분은 거래소에서 자동 조정됨)
                 
         except Exception as e:
             self.logger.error(f"❌ Tier 2 Failed: {e}")
