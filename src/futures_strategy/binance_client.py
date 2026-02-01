@@ -322,15 +322,20 @@ class BinanceClient:
                     if contracts == 0:
                         continue
 
+                    # [FIX] None-safe 처리 (API가 null을 반환하는 경우 대비)
+                    entry_price = float(pos.get('entryPrice') or 0)
+                    unrealized_pnl = float(pos.get('unrealizedPnl') or 0)
+                    leverage = int(pos.get('leverage') or 1)  # None이면 1로 기본값 설정
+                    
                     result = {
                         'amount': contracts * (1 if pos['side'] == 'long' else -1), 
-                        'entryPrice': float(pos['entryPrice'] or 0),
-                        'unrealizedPnL': float(pos['unrealizedPnl'] or 0),
-                        'leverage': int(pos['leverage'])
+                        'entryPrice': entry_price,
+                        'unrealizedPnL': unrealized_pnl,
+                        'leverage': leverage
                     }
                     self.logger.info(
                         f"✅ [{symbol}] Position Found: {result['amount']} contracts "
-                        f"@ {result['entryPrice']} (PnL: {result['unrealizedPnL']:.2f})"
+                        f"@ {result['entryPrice']:.2f} (PnL: {result['unrealizedPnL']:.2f} USDT, Lev: {leverage}x)"
                     )
                     return result
         except Exception as e:
