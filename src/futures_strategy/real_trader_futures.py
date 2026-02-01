@@ -184,6 +184,11 @@ class RealTraderFutures:
         # [Optimization] 중복 계산 방지용 캐시
         self.last_calc_candle: Dict[str, str] = {}
         
+        # [Cloud Optimization] 시간 기반 작업 추적 (loop_count 대신 사용)
+        self._last_resource_check = datetime.utcnow()
+        self._last_db_cleanup = datetime.utcnow()
+        self._last_gc = datetime.utcnow()
+        
         # Signal handlers 등록
         self._setup_signal_handlers()
         
@@ -347,7 +352,6 @@ class RealTraderFutures:
             # --- Case 1: 진입 시점(정시) && 아직 계산 안 함 -> 무거운 데이터 로드 ---
             if is_entry_time and not already_calculated:
                 logger.info(f"🔍 [{symbol}] Entry Search")
-                df = None  # Ensure initialization
                 # 전체 캔들 데이터 조회 (지표 계산용)
                 tf_min = 60
                 if 'm' in timeframe:
@@ -439,52 +443,50 @@ class RealTraderFutures:
 
                 # [Watchdog] Stop Loss 주문 누락 감지 및 복구
                 try:
-                    # SL 주문이 없는 경우 복구 (사용자가 취소했거나 오류로 누락된 경우)
-                    open_orders = self.client.fetch_open_orders(symbol)
-                    sl_orders = [o for o in open_orders if o.get('type') == 'STOP_MARKET']
+                    # 중복 주문 방지: 최근 2시간 이내 주문한 기록이 있으면 스킵
+                    state = self.state_manager.get_symbol_state(symbol)
+                    last_sl_time_str = state.get('last_sl_order_time')
                     
-                    if not sl_orders:
-                        logger.warning(f"🛡️ NO Stop Loss found for {symbol}! Restoring safety net...")
+                    # 쿨다운 체크
+                    should_check = True
+                    if last_sl_time_str:
+                        last_sl_time = datetime.fromisoformat(last_sl_time_str)
+                        cooldown = 7200  # 2시간 쿨다운 (로그 도배 방지)
+                        elapsed = (datetime.utcnow() - last_sl_time).total_seconds()
+                        if elapsed < cooldown:
+                            logger.debug(f"[{symbol}] SL order cooldown active ({elapsed:.0f}s/{cooldown}s). Skipping check.")
+                            should_check = False
+                    
+                    # SL Watchdog 실행
+                    if should_check:
+                        # 1. SL 주문 감지
+                        sl_orders = self._detect_stop_loss_orders(symbol)
                         
-                        entry_price = float(pos.get('entryPrice', current_price))
-                        sl_qty = abs(amount)
-                        sl_type = params.get('STOP_LOSS_TYPE', 'FIXED')
-                        stop_price = 0.0
-
-                        # SL Price Calculation (Entry Logic과 동일하게 유지)
-                        if amount > 0: # LONG -> Sell SL
-                            sl_side = 'sell'
-                            if sl_type == 'ATR' and atr > 0:
-                                sl_mult = params.get('ATR_STOP_LOSS_MULT', 1.5)
-                                stop_price = entry_price - (atr * sl_mult)
-                            else:
-                                sl_pct = params.get('STOP_LOSS_PCT', 0.02)
-                                stop_price = entry_price * (1 - sl_pct)
-                        else: # SHORT -> Buy SL
-                            sl_side = 'buy'
-                            if sl_type == 'ATR' and atr > 0:
-                                sl_mult = params.get('ATR_STOP_LOSS_MULT', 1.5)
-                                stop_price = entry_price + (atr * sl_mult)
-                            else:
-                                sl_pct = params.get('STOP_LOSS_PCT', 0.02)
-                                stop_price = entry_price * (1 + sl_pct)
+                        # 2. 중복 주문 정리
+                        sl_orders = self._cleanup_duplicate_sl_orders(symbol, sl_orders)
                         
-                        # 정밀도 보정
-                        stop_price = round(stop_price, 2) if 'BTC' not in symbol else round(stop_price, 1)
-                        
-                        # SL 주문 실행
-                        self._place_stop_loss_safe(symbol, sl_side, sl_qty, stop_price)
-                        logger.info(f"✅ Restored Stop Loss for {symbol} @ {stop_price}")
+                        # 3. 주문 없으면 복구
+                        if not sl_orders:
+                            entry_price = float(pos.get('entryPrice', current_price))
+                            self._restore_stop_loss(symbol, amount, entry_price, current_price, params, atr)
 
                 except Exception as e:
-                    logger.error(f"⚠️ SL Watchdog Failed: {e}")
-            elif is_entry_time:
-                logger.info(f"ℹ️ [{symbol}] No position. Entry window open.")
-            if in_position:
+                    # [FIX] 에러 메시지에 -4130(이미 존재함)이 포함된 경우 성공으로 처리하여 쿨다운 적용
+                    if "-4130" in str(e):
+                        logger.info(f"ℹ️ Stop Loss already exists on server for {symbol}. Synchronizing state...")
+                        self.state_manager.update_symbol_state(symbol, {
+                            'last_sl_order_time': datetime.utcnow().isoformat()
+                        })
+                    else:
+                        logger.error(f"⚠️ SL Watchdog Failed: {e}")
+                
+                # [EXIT CHECK] 포지션 보유 중이라면 청산 조건 검토
                 self._check_exit(
                     symbol, amount, current_price, params, pos, 
                     trend_dir, atr, sar
                 )
+            elif is_entry_time:
+                logger.info(f"ℹ️ [{symbol}] No position. Entry window open.")
             
             # --- ENTRY LOGIC (진입 시점에만 실행) ---
             elif not in_position and is_entry_time:
@@ -635,16 +637,115 @@ class RealTraderFutures:
                     
                     if reasons:
                         logger.info(f"⏭️ [{symbol}] Skip {side_label}: {', '.join(reasons)}")
-                
-                # [Optimization] 대규모 데이터프레임 제거 및 메모리 강제 회수
-                if df is not None:
-                    del df
+            
+            # [Optimization] 대규모 데이터프레임 제거 (진입 시점에만 생성됨)
+            if is_entry_time and not already_calculated and df is not None:
+                del df
                 gc.collect()
         
         except Exception as e:
             logger.error(f"🚨 Error executing logic for {symbol}: {e}")
             self.health_manager.record_error(e)
     
+    def _detect_stop_loss_orders(self, symbol: str) -> list:
+        """
+        Stop Loss 주문 감지 (모든 조건부 주문 포함)
+        Returns: 감지된 SL 주문 리스트
+        """
+        open_orders = self.client.fetch_open_orders(symbol)
+        # [FIX] 모든 종류의 조건부 주문(STOP/TP)을 감지하도록 필터 확장
+        sl_orders = [
+            o for o in open_orders 
+            if ('STOP' in o.get('type', '').upper()) or 
+               (o.get('stopPrice') is not None and float(o.get('stopPrice', 0)) > 0)
+        ]
+        return sl_orders
+    
+    def _cleanup_duplicate_sl_orders(self, symbol: str, sl_orders: list) -> list:
+        """
+        중복 SL 주문 자동 정리 (최신 주문만 유지)
+        Returns: 정리 후 남은 SL 주문 리스트
+        """
+        if len(sl_orders) > 1:
+            logger.warning(f"⚠️ Multiple Stop Loss orders detected ({len(sl_orders)}) for {symbol}! Cleaning up...")
+            # 가장 최신 주문만 남기고 나머지 취소
+            sorted_orders = sorted(sl_orders, key=lambda x: x.get('timestamp', 0), reverse=True)
+            for old_order in sorted_orders[1:]:  # 첫 번째(최신) 제외
+                try:
+                    self.client.exchange.cancel_order(old_order['id'], symbol)
+                    logger.info(f"🗑️ Canceled duplicate SL order: {old_order['id']}")
+                except:
+                    pass
+            # 정리 후 1개만 남았으므로 반환
+            return [sorted_orders[0]]
+        return sl_orders
+    
+    def _restore_stop_loss(
+        self, 
+        symbol: str, 
+        amount: float, 
+        entry_price: float, 
+        current_price: float,
+        params: dict, 
+        atr: float
+    ) -> bool:
+        """
+        Stop Loss 주문 복구 (Watchdog)
+        Returns: 복구 성공 여부
+        """
+        logger.warning(f"🛡️ NO Stop Loss found for {symbol}! Restoring safety net...")
+        
+        sl_qty = abs(amount)
+        sl_type = params.get('STOP_LOSS_TYPE', 'FIXED')
+        stop_price = 0.0
+
+        # SL Price Calculation
+        if amount > 0:  # LONG -> Sell SL
+            sl_side = 'sell'
+            if sl_type == 'ATR' and atr > 0:
+                sl_mult = params.get('ATR_STOP_LOSS_MULT', 1.5)
+                stop_price = entry_price - (atr * sl_mult)
+            else:
+                sl_pct = params.get('STOP_LOSS_PCT', 0.02)
+                stop_price = entry_price * (1 - sl_pct)
+        else:  # SHORT -> Buy SL
+            sl_side = 'buy'
+            if sl_type == 'ATR' and atr > 0:
+                sl_mult = params.get('ATR_STOP_LOSS_MULT', 1.5)
+                stop_price = entry_price + (atr * sl_mult)
+            else:
+                sl_pct = params.get('STOP_LOSS_PCT', 0.02)
+                stop_price = entry_price * (1 + sl_pct)
+        
+        # 정밀도 보정 및 최소 틱 사이즈 보장
+        tick_size = 0.01 if 'BTC' not in symbol else 0.1
+        stop_price = round(stop_price, 2) if 'BTC' not in symbol else round(stop_price, 1)
+        
+        # [FIX] 진입가와 동일한 손절가 방지 (최소 2틱 이상 강제)
+        if amount > 0:  # LONG
+            if stop_price >= entry_price:
+                stop_price = entry_price - (tick_size * 2)
+        else:  # SHORT
+            if stop_price <= entry_price:
+                stop_price = entry_price + (tick_size * 2)
+        
+        # SL 주문 실행
+        sl_result = self._place_stop_loss_safe(symbol, sl_side, sl_qty, stop_price)
+        
+        if sl_result:
+            logger.info(f"✅ Restored Stop Loss for {symbol} @ {stop_price}")
+            
+            # 주문 성공 시 타임스탬프 기록 (쿨다운 시작)
+            self.state_manager.update_symbol_state(symbol, {
+                'last_sl_order_time': datetime.utcnow().isoformat()
+            })
+            
+            # API 반영 대기
+            time.sleep(0.5)
+            return True
+        
+        return False
+
     def _check_exit(
         self, 
         symbol: str, 
@@ -1010,29 +1111,34 @@ class RealTraderFutures:
                     positions=positions
                 )
                 
-                # 클라우드 최적화 실행
+                # 클라우드 최적화 실행 (시간 기반 체크)
                 if self.cloud_optimizer:
-                    # 1. 시간 동기화 검증
+                    now = datetime.utcnow()
+                    
+                    # 1. 시간 동기화 검증 (매 루프)
                     if not self.cloud_optimizer.check_time_sync_ntp():
                         logger.error("⏰ Time drift detected! Bot may fail to place orders on Binance.")
                     
-                    # 2. 리소스 모니터링 (10분마다) & 메모리 보호 (AWS Free Tier)
-                    if self.health_manager.loop_count % 60 == 0: # 10s * 60 = 10분
+                    # 2. 리소스 모니터링 (10분마다) & 메모리 보호
+                    if (now - self._last_resource_check).total_seconds() >= 600:  # 10분 = 600초
                         usage = self.cloud_optimizer.log_resource_usage()
                         if usage.get('memory_percent', 0) > 85.0:
                             logger.warning(f"⚠️ High Memory ({usage.get('memory_percent')}%) detected. Forcing GC...")
                             self.cloud_optimizer.force_gc()
+                        self._last_resource_check = now
                     
-                    # 3. DB 정리 (24시간마다: 1440분)
-                    if self.health_manager.loop_count % 1440 == 0:
+                    # 3. DB 정리 (24시간마다)
+                    if (now - self._last_db_cleanup).total_seconds() >= 86400:  # 24시간 = 86400초
                         self.cloud_optimizer.cleanup_db_old_records(
                             TRADE_HISTORY_DB, 
                             days_to_keep=90
                         )
+                        self._last_db_cleanup = now
                     
-                    # 5. 명시적 GC (2시간마다: 120분)
-                    if self.health_manager.loop_count % 120 == 0:
+                    # 4. 명시적 GC (2시간마다)
+                    if (now - self._last_gc).total_seconds() >= 7200:  # 2시간 = 7200초
                         self.cloud_optimizer.force_gc()
+                        self._last_gc = now
                 
                 # [High-Frequency Monitoring] 청산 감시를 위해 10초(LOOP_INTERVAL_SECONDS)마다 반복
                 # 진입은 _is_entry_time 로직에 의해 정시에만 수행됨
