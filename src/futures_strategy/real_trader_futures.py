@@ -519,14 +519,19 @@ class RealTraderFutures:
                 cached = self._get_cached_indicators(symbol)
                 vol_ratio = cached.get('volume_ratio', 1.0)
                 use_vol_filter = params.get('USE_VOLUME_FILTER', False)
-                vol_threshold = params.get('VOLUME_THRESHOLD_MULT', 1.0)
+                
+                # [ISSUE #6 FIX] Volume Filter: Z-Score 기준으로 명확화
+                # 전략 파일은 Z-Score를 반환 (평균=0, 표준편차=1)
+                # Z-Score 해석: 0 = 평균, 1 = 평균+1σ (상위 16%), 2 = 평균+2σ (상위 2.5%)
+                # 기본값 0.0: 평균 이상 거래량이면 진입 허용 (보수적 필터링)
+                vol_z_threshold = params.get('VOLUME_Z_THRESHOLD', params.get('VOLUME_THRESHOLD_MULT', 0.0))
                 
                 # Condition Check
                 is_uptrend = (trend_dir == 1)
                 is_downtrend = (trend_dir == -1)
                 long_breakout = (current_price > entry_upper)
                 short_breakout = (current_price < entry_lower)
-                vol_ok = (not use_vol_filter) or (vol_ratio >= vol_threshold)
+                vol_ok = (not use_vol_filter) or (vol_ratio >= vol_z_threshold)
 
                 # Entry Execution
                 if is_uptrend and long_breakout and strength_ok and vol_ok:
@@ -803,9 +808,22 @@ class RealTraderFutures:
             # [ISSUE #3 FIX] 서버 사이드 Stop Loss가 이미 설정되어 있으므로 클라이언트 중복 체크 제거
             # 서버 SL은 진입 시 자동으로 설정되며, 가격 도달 시 자동 청산됨 (중복 청산 방지)
             # ------------------------------------------------------------
+            
+            # [ISSUE #7 FIX] Parabolic SAR 유효성 검증
+            exit_type = params.get('EXIT_TYPE')
+            use_sar_exit = (exit_type == 'PARABOLIC_SAR')
+            
+            # SAR 사용 시 유효성 검증 (sar=0이면 지표 계산 실패 또는 미사용)
+            if use_sar_exit and sar <= 0:
+                logger.warning(
+                    f"⚠️ [{symbol}] SAR exit enabled but SAR value invalid ({sar:.2f}). "
+                    "Falling back to Trend Reversal exit."
+                )
+                use_sar_exit = False  # SAR 청산 비활성화
+            
             if amount > 0:  # LONG
-                if params.get('EXIT_TYPE') == 'PARABOLIC_SAR' and sar > 0 and current_price < sar:
-                    exit_triggered, reason = True, "Parabolic SAR Cross"
+                if use_sar_exit and current_price < sar:
+                    exit_triggered, reason = True, f"Parabolic SAR Cross ({sar:.2f})"
                 elif trend_dir == -1:
                     exit_triggered, reason = True, "Trend Reversal"
                 elif use_tp and tp_price_val is not None and current_price >= tp_price_val:
@@ -813,8 +831,8 @@ class RealTraderFutures:
                 # [REMOVED] 클라이언트 사이드 SL 체크 제거 (서버 SL이 자동 처리)
 
             else:  # SHORT
-                if params.get('EXIT_TYPE') == 'PARABOLIC_SAR' and sar > 0 and current_price > sar:
-                    exit_triggered, reason = True, "Parabolic SAR Cross"
+                if use_sar_exit and current_price > sar:
+                    exit_triggered, reason = True, f"Parabolic SAR Cross ({sar:.2f})"
                 elif trend_dir == 1:
                     exit_triggered, reason = True, "Trend Reversal"
                 elif use_tp and tp_price_val is not None and current_price <= tp_price_val:
