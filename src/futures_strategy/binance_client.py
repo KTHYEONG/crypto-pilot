@@ -106,7 +106,6 @@ class BinanceClient:
             },
             'timeout': API_READ_TIMEOUT * 1000  # 밀리초 단위 (20초)
         })
-        # self.logger = logging.getLogger(__name__)
         from src.common.utils import setup_logger
         self.logger = setup_logger("BinanceClient")
         
@@ -384,15 +383,11 @@ class BinanceClient:
             # 바이낸스 선물 STOP_MARKET 주문은 stopPrice를 params에 넣어야 함
             params = {
                 'stopPrice': stop_price,
-                'reduceOnly': True  # 포지션 축소 전용
+                'closePosition': True  # [One-Way Mode 권장] reduceOnly보다 안정적
             }
             
-            # [FIX] Hedge Mode 대응: positionSide 명시
-            # side가 'buy'면 SHORT 포지션 청산, 'sell'이면 LONG 포지션 청산
-            if side == 'buy':
-                params['positionSide'] = 'SHORT'  # SHORT 포지션의 손절
-            else:
-                params['positionSide'] = 'LONG'   # LONG 포지션의 손절
+            # [NOTE] One-Way Mode에서는 closePosition=True가 바이낸스 공식 권장 파라미터
+            # reduceOnly는 포지션 수량과 맞지 않을 경우 주문이 자동 취소될 수 있음
             
             order = self.exchange.create_order(
                 symbol=symbol,
@@ -401,9 +396,21 @@ class BinanceClient:
                 amount=amount,
                 params=params
             )
-            self.logger.info(f"🛡️ Server SL Placed: {symbol} {side} {amount} @ Stop {stop_price} (PositionSide: {params['positionSide']})")
+            self.logger.info(f"🛡️ Server SL Placed: {symbol} {side} {amount} @ Stop {stop_price}")
             return order
         except Exception as e:
+            error_msg = str(e)
+            
+            # -4130: 이미 동일한 방향의 closePosition 주문이 존재함 (성공으로 간주)
+            if "-4130" in error_msg:
+                self.logger.info(f"ℹ️ Stop Loss already exists for {symbol}. Skipping duplicate.")
+                return True
+            
+            # -2021: Order would immediately trigger (현재가가 이미 손절가 도달)
+            if "-2021" in error_msg:
+                self.logger.warning(f"⚠️ Stop Loss trigger price is immediate! Skipping SL for {symbol}")
+                return None
+            
             self.logger.error(f"❌ Failed to place Server SL for {symbol}: {e}")
             return None
 
@@ -476,10 +483,13 @@ class BinanceClient:
                     self.logger.info(f"✅ Tier 1 Filled @ {order.get('average', target_price)}")
                     return order
                 
-                # 타임아웃도 아니고, 거부도 아닌데(open) 체결 안 된 경우
-                # Post-Only는 즉시 거부되거나 체결되어야 함. Open 상태면 취소 필요.
+                # Post-Only는 즉시 거부되거나 체결되어야 함. Open 상태면 취소 후 Tier 2로 진행
                 if order['status'] == 'open':
-                    self.exchange.cancel_order(order['id'], symbol)
+                    try:
+                        self.exchange.cancel_order(order['id'], symbol)
+                        self.logger.info(f"⚠️ Tier 1 Post-Only 체결 실패 (open 상태) → 취소 후 Tier 2로")
+                    except Exception as cancel_err:
+                        self.logger.warning(f"🗑️ 취소 실패: {cancel_err}. Tier 2로 진행...")
 
             except Exception as e:
                 # 타임아웃 의심 시 Reconciliation (좀비 주문 방지)
