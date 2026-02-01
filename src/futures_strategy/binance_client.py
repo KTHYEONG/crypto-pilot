@@ -386,6 +386,14 @@ class BinanceClient:
                 'stopPrice': stop_price,
                 'reduceOnly': True  # 포지션 축소 전용
             }
+            
+            # [FIX] Hedge Mode 대응: positionSide 명시
+            # side가 'buy'면 SHORT 포지션 청산, 'sell'이면 LONG 포지션 청산
+            if side == 'buy':
+                params['positionSide'] = 'SHORT'  # SHORT 포지션의 손절
+            else:
+                params['positionSide'] = 'LONG'   # LONG 포지션의 손절
+            
             order = self.exchange.create_order(
                 symbol=symbol,
                 type='STOP_MARKET',
@@ -393,7 +401,7 @@ class BinanceClient:
                 amount=amount,
                 params=params
             )
-            self.logger.info(f"🛡️ Server SL Placed: {symbol} {side} {amount} @ Stop {stop_price}")
+            self.logger.info(f"🛡️ Server SL Placed: {symbol} {side} {amount} @ Stop {stop_price} (PositionSide: {params['positionSide']})")
             return order
         except Exception as e:
             self.logger.error(f"❌ Failed to place Server SL for {symbol}: {e}")
