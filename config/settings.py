@@ -99,20 +99,18 @@ LOG_MAX_BYTES = 10 * 1024 * 1024  # 10MB
 LOG_BACKUP_COUNT = 5
 
 # --- 대상 심볼 ---
-FUTURES_TARGET_SYMBOLS = ['ETH/USDT', 'SOL/USDT', 'DOGE/USDT']
+FUTURES_TARGET_SYMBOLS = ['ETH/USDT', 'DOGE/USDT']
 
 # --- 스터디 이름 (Optuna) ---
 OPTUNA_STUDY_NAMES = ['futures_strategy', 'future_strategy', 'UNIFIED']
 
 # --- 포지션 사이징 가중치 (성과 기반) ---
-# 근거: 2026-01-24 UNIFIED 모드 검증 결과 (OOS Return: 828.62%)
-# ETH: 40% (안정적 수익/변동성 조화, MDD -18%)
-# SOL: 30% (알트 대장주 움직임, MDD -14%)
-# DOGE: 30% (폭발적 수익률, MDD -20%)
+# 근거: 2026-02-01 시뮬레이션 결과 (ETH: PF 8.23 / DOGE: PF 8.77)
+# ETH: 60% (계좌 안정성 및 높은 승률 75%)
+# DOGE: 40% (폭발적 수익률 10113% 및 추세 추종 적합성)
 SYMBOL_ALLOCATION_WEIGHTS = {
-    'ETH/USDT': 0.40,
-    'SOL/USDT': 0.30,
-    'DOGE/USDT': 0.30
+    'ETH/USDT': 0.60,
+    'DOGE/USDT': 0.40
 }
 
 # ============================================================
