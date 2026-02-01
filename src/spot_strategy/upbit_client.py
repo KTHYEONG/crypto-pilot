@@ -303,9 +303,11 @@ class UpbitClient:
     def place_order_smart(self, symbol, side, amount=None, price=None):
         """
         Upbit 전용 Smart Aggressive Limit 주문
-        - 수수료가 동일한 점을 활용, 시장가처럼 즉시 체결되되 호가 공백(슬리피지)을 1%로 제한.
-        - Buy: price(KRW 예산)를 받아 '현재가 + 1%' 가격으로 계산된 수량만큼 지정가 매수.
-        - Sell: amount(코인 수량)를 받아 '현재가 - 1%' 가격으로 지정가 매도.
+        - 수수료가 동일한 점을 활용, 시장가처럼 즉시 체결되되 호가 공백(슬리피지)을 제한.
+        - Buy: price(KRW 예산)를 받아 '현재가 + 0.1%' 가격으로 계산된 수량만큼 지정가 매수.
+        - Sell: amount(코인 수량)를 받아 '현재가 - 0.1%' 가격으로 지정가 매도.
+        
+        [ISSUE #5 FIX] 슬리피지 1% → 0.1%로 축소 (Binance Futures 수준)
         """
         if not self.exchange: return None
         
@@ -319,21 +321,21 @@ class UpbitClient:
             if side == 'buy':
                 # 예산(KRW) 기반 매수
                 cost = price
-                # 현재가보다 1.0% 높은 가격으로 지정가 설정 (Slippage Cap)
-                limit_price = self.exchange.price_to_precision(symbol, cur_price * 1.01)
+                # [ISSUE #5 FIX] 현재가보다 0.1% 높은 가격으로 지정가 설정 (Slippage Cap: 1% → 0.1%)
+                limit_price = self.exchange.price_to_precision(symbol, cur_price * 1.001)
                 # 예산 내에서 살 수 있는 수량 계산 (수수료 0.05% 고려)
                 qty = self.exchange.amount_to_precision(symbol, (cost * 0.9995) / float(limit_price))
                 
-                self.logger.info(f"⚡ Smart Buy {symbol} | Budget: {cost:,.0f} KRW | Target Limit: {limit_price:,.0f} (+1%)")
+                self.logger.info(f"⚡ Smart Buy {symbol} | Budget: {cost:,.0f} KRW | Target Limit: {limit_price:,.0f} (+0.1%)")
                 return self.exchange.create_order(symbol, 'limit', 'buy', qty, limit_price)
                 
             else:
                 # 수량(Coin) 기반 매도
                 qty = amount
-                # 현재가보다 1.0% 낮은 가격으로 지정가 설정
-                limit_price = self.exchange.price_to_precision(symbol, cur_price * 0.99)
+                # [ISSUE #5 FIX] 현재가보다 0.1% 낮은 가격으로 지정가 설정 (Slippage Cap: 1% → 0.1%)
+                limit_price = self.exchange.price_to_precision(symbol, cur_price * 0.999)
                 
-                self.logger.info(f"⚡ Smart Sell {symbol} | Qty: {qty} | Target Limit: {limit_price:,.0f} (-1%)")
+                self.logger.info(f"⚡ Smart Sell {symbol} | Qty: {qty} | Target Limit: {limit_price:,.0f} (-0.1%)")
                 return self.exchange.create_order(symbol, 'limit', 'sell', qty, limit_price)
 
         except Exception as e:
