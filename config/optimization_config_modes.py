@@ -53,12 +53,12 @@ SWING_CONFIG = {
 UNIFIED_CONFIG = {
     'ENTRY_PERIOD': {'low': 10, 'high': 200, 'log': True},         # 전체 범위: 10 (SCALP) ~ 200 (SWING)
     'MA_PERIOD':    {'low': 5,  'high': 200, 'log': True},         # 전체 범위: 5 (SCALP) ~ 200 (SWING)
-    'ATR_PERIOD':   {'low': 10, 'high': 30,  'log': True},         # 전체 범위: 10 (SCALP/DAY) ~ 30 (SWING)
-    'SL_PCT':       {'low': 0.005, 'high': 0.20, 'step': 0.005},   # 전체 범위: 0.5% ~ 20%
+    'ATR_PERIOD':   {'low': 5,  'high': 60,  'log': True},         # [Optimized] 10~30 -> 5~60 (민감~둔감 다양한 변동성 대응)
+    'SL_PCT':       {'low': 0.005, 'high': 0.05, 'step': 0.005},   # [Optimized] Max 20% -> 5% (고배율 선물에서 5% 이상 손절은 의미 없음)
     'TP_ATR_MULT':  {'low': 1.5,  'high': 15.0, 'log': True},      # [Optimized] Max 30->15 (Realistic Big Win)
     'ADX_THRESH':   {'low': 15,   'high': 45,   'step': 1},        # 전체 범위: 15 (SWING) ~ 45 (SCALP)
-    'VOL_THRESHOLD': {'low': 1.1,  'high': 5.0,  'log': True},     # 전체 범위: 1.1 (SWING) ~ 5.0 (SCALP)
-    'MAX_HOLDING_BARS': {'low': 5, 'high': 200, 'log': True},      # [Optimized] Min 10->5 (Quick Scalp), Max 300->200 (Rotation)
+    'VOL_THRESHOLD': {'low': 1.1,  'high': 3.0,  'log': True},     # [Optimized] Max 5.0 -> 3.0 (현실적인 거래량 돌파 기준)
+    'MAX_HOLDING_BARS': {'low': 5, 'high': 500, 'log': True},      # [Max Profit] 200->500 (Catch Monster Trend)
     'TRAILING_ACTIVATION_ATR': {'low': 0.5, 'high': 8.0, 'log': False, 'step': 0.5}  # [Optimized] Min 0.0->0.5 (Avoid immediate whipsaw)
 }
 
@@ -118,7 +118,7 @@ BASE_SEARCH_SPACE = {
     'RSI_EXIT_THRESHOLD': {'type': 'int', 'low': 75, 'high': 95, 'step': 1}, # 75~95 (Long Exit), 25~5 (Short Exit)
 
     # [NEW] Safe Entry Filters
-    'RSI_ENTRY_MAX': {'type': 'int', 'low': 70, 'high': 85, 'step': 2},        # Don't buy if RSI > X (Overbought Top)
+    'RSI_ENTRY_MAX': {'type': 'categorical', 'choices': [None, 70, 75, 80, 85]}, # Don't buy if RSI > X (Overbought Top)
     'NATR_ENTRY_MIN': {'type': 'float', 'low': 0.2, 'high': 1.5, 'step': 0.1}, # Don't buy if Volatility < X (Dead Market)
 
     # [NEW] Dynamic Risk Sizing Parameters (Relaxed for Stability)
@@ -193,8 +193,8 @@ def GET_SEARCH_SPACE(mode, market_type='futures'):
     elif mode == 'UNIFIED' or mode == 'ALL':
         cfg = UNIFIED_CONFIG
         # [UNIFIED] Supports both Futures and Spot with stable timeframes
-        # 1h, 4h, 1d - Robust trend following (Removed noisy 5m, 15m)
-        space['TIMEFRAME'] = {'type': 'categorical', 'choices': ['1h', '4h', '1d']}
+        # 15m, 30m added for Small Capital Rotation
+        space['TIMEFRAME'] = {'type': 'categorical', 'choices': ['15m', '30m', '1h', '4h', '1d']}
         # Wide ATR range to accommodate all strategies
         space['ATR_STOP_LOSS_MULT'] = {'type': 'float', 'low': 1.0, 'high': 6.0, 'step': 0.5}
         space['ATR_MULTIPLIER'] = {'type': 'float', 'low': 1.5, 'high': 8.0, 'step': 0.5}
@@ -232,21 +232,24 @@ def GET_SEARCH_SPACE(mode, market_type='futures'):
     # === MARKET TYPE OVERRIDES ===
     if market_type == 'futures':
         # [Futures] Risk & Leverage - Aggressive Growth (수익성 65% : 안정성 35%)
-        # Risk Per Trade: 2.5% ~ 5.0% (Optimized for Stability)
-        # Lowered max risk to 5% to prevent lucky huge bets
-        space['RISK_PER_TRADE'] = {'type': 'float', 'low': 0.02, 'high': 0.05, 'step': 0.005} 
-        # Leverage 1x ~ 4x (Balanced Aggression: -20% drawdown tolerance)
-        space['LEVERAGE'] = {'type': 'float', 'low': 1.0, 'high': 4.0, 'step': 0.5}
+        # Risk Per Trade: 5.0% ~ 10.0% (Revised for Small Capital Growth)
+        # 소액($600) 기준 유의미한 수익금을 위해 리스크 허용 범위를 대폭 상향
+        space['RISK_PER_TRADE'] = {'type': 'float', 'low': 0.05, 'high': 0.10, 'step': 0.01} 
+        # Leverage 1x ~ 10x (Wide Range)
+        # 1~4배: 안정성 선호 시 선택 / 5~10배: 타이트한 손절로 수익금 극대화 시 선택
+        # AI가 상황에 맞춰 최적의 배율을 찾도록 범위를 넓혀줌
+        space['LEVERAGE'] = {'type': 'float', 'low': 1.0, 'high': 10.0, 'step': 1.0}
         
         # [ANTI-OVERFIT] Tighten UNIFIED limits for Futures Only
         if mode == 'UNIFIED' or mode == 'ALL':
-            space['ATR_STOP_LOSS_MULT']['high'] = 4.0
-            space['ATR_MULTIPLIER']['high'] = 6.0
-            space['TAKE_PROFIT_ATR_MULT']['high'] = 10.0
+            # [Trend Following] 인위적 제약 해제 -> AI가 최적의 손익비를 찾도록 허용
+            # 손절은 넉넉하게(Max 5.0), 익절은 길게(Max 20.0)
+            space['ATR_STOP_LOSS_MULT']['high'] = 5.0
+            space['ATR_MULTIPLIER']['high'] = 8.0
+            space['TAKE_PROFIT_ATR_MULT']['high'] = 20.0
         
         
         # [ISOLATION] Remove Spot-only safety filters to prevent ghost parameters in Futures
-        if 'RSI_ENTRY_MAX' in space: del space['RSI_ENTRY_MAX']
         if 'NATR_ENTRY_MIN' in space: del space['NATR_ENTRY_MIN']
         
     else: 
