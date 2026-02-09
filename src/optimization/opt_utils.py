@@ -342,35 +342,43 @@ def calculate_score(ret, mdd, trades_df, mode="DAY", market_type="spot", timefra
     score = 0.0
     
     if market_type == "futures":
-        # [FUTURES] Theme: "ROBUST SURVIVABILITY"
-        target_mdd = 20.0
+        # [FUTURES] Theme: "AGGRESSIVE GROWTH" (Small Capital Optimized)
+        # Target MDD raised to 50% to accommodate high leverage (10x) strategies
+        target_mdd = 40.0 # [STRICTER] Reduced from 50% for stability
         min_trades = 100 if mode != 'SCALP' else 300
         
         # Sigmoids
         s_calmar = soft_sigmoid(calmar, L=10.0, k=0.8, x0=3.0)
         s_sortino = soft_sigmoid(sortino, L=8.0, k=1.0, x0=2.0)
         s_pf = soft_sigmoid(pf, L=6.0, k=1.5, x0=1.8)
-        s_sqn = soft_sigmoid(sqn, L=8.0, k=0.8, x0=2.5) # Prefer SQN > 2.5
+        s_sqn = soft_sigmoid(sqn, L=8.0, k=0.8, x0=2.5)
         
-        score = (s_calmar * 10.0) + (s_sortino * 8.0) + (s_pf * 6.0) + (s_sqn * 8.0)
+        # [NEW] Direct Return Bonus: Reward absolute profit growth
+        # Adjusted for SIMPLE INTEREST scale (Non-Compounding)
+        # Log scale to prevent infinite explosion but still reward high returns
+        # Coefficient increased 20.0 -> 50.0 to compensate for lower raw return numbers
+        return_bonus = np.log1p(max(ret, 0)) * 50.0 
+        
+        score = (s_calmar * 10.0) + (s_sortino * 8.0) + (s_pf * 6.0) + (s_sqn * 8.0) + return_bonus
         score += (s_pf * s_sqn) * 2.0 # High Pf + High SQN = Stable Winner
         
         if kelly_f <= 0: return -10000.0
         
-        # Penalties
-        score -= (ulcer_proxy * 6.0)
-        if r_squared < 0.85: score -= (0.85 - r_squared) * 20.0 # Heavy penalty for instability
+        # Penalties (Relaxed for Small Capital)
+        score -= (ulcer_proxy * 3.0)  # Reduced from 6.0 (volatility is acceptable)
+        if r_squared < 0.60: score -= (0.60 - r_squared) * 10.0  # Relaxed from 0.85 (crypto reality)
         
+        # MDD Penalty: Linear instead of exponential (softer)
         if abs_mdd > target_mdd:
-            score -= (abs_mdd - target_mdd) ** 1.8 * 15.0
+            score -= (abs_mdd - target_mdd) * 4.0  # [STRICTER] Increased from 2.0
 
-        # [ANTI-OVERFIT] Futures Only Penalties
-        if win_rate > 0.85:
-            excess_win = (win_rate - 0.85) * 100
-            score -= (excess_win * 5.0) 
+        # [ANTI-OVERFIT] Futures Only Penalties (Relaxed)
+        if win_rate > 0.90:  # Raised from 0.85 (allow more wins)
+            excess_win = (win_rate - 0.90) * 100
+            score -= (excess_win * 3.0)  # Reduced from 5.0
             
-        if avg_loss > (avg_win * 3.0):
-            score -= 50.0
+        if avg_loss > (avg_win * 4.0):  # Raised from 3.0 (allow bigger losses if wins are huge)
+            score -= 30.0  # Reduced from 50.0
 
     else:
         # [SPOT] Theme: "COMPOUNDING EFFICIENCY"
