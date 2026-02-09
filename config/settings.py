@@ -99,18 +99,20 @@ LOG_MAX_BYTES = 10 * 1024 * 1024  # 10MB
 LOG_BACKUP_COUNT = 5
 
 # --- 대상 심볼 ---
-FUTURES_TARGET_SYMBOLS = ['ETH/USDT', 'DOGE/USDT']
+# [Verified Portfolio] 2026-02-09 검증 기반 (OOS Return: 43645%)
+FUTURES_TARGET_SYMBOLS = ['BTC/USDT', 'ETH/USDT', 'BNB/USDT']
 
 # --- 스터디 이름 (Optuna) ---
 OPTUNA_STUDY_NAMES = ['futures_strategy', 'future_strategy', 'UNIFIED']
 
 # --- 포지션 사이징 가중치 (성과 기반) ---
-# 근거: 2026-02-01 시뮬레이션 결과 (ETH: PF 8.23 / DOGE: PF 8.77)
-# ETH: 60% (계좌 안정성 및 높은 승률 75%)
-# DOGE: 40% (폭발적 수익률 10113% 및 추세 추종 적합성)
+# 근거: 2026-02-09 UNIFIED 최적화 검증 (공격적 설정: Lev 10x, Risk 8%)
+# BTC/ETH: 안정성과 수익성의 균형 (각 40%)
+# BNB: 알트코인 중 압도적 퍼포먼스 (20%)
 SYMBOL_ALLOCATION_WEIGHTS = {
-    'ETH/USDT': 0.60,
-    'DOGE/USDT': 0.40
+    'BTC/USDT': 0.40,
+    'ETH/USDT': 0.40,
+    'BNB/USDT': 0.20
 }
 
 # ============================================================
