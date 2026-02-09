@@ -24,6 +24,8 @@ from src.futures_strategy.backtest_utils_futures import run_backtest_segment_fut
 # Setup Logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("FuturesVerifier")
+# [LOGGING] 엔진 로그 레벨 상향 (INFO -> WARNING)하여 불필요한 출력 억제
+logging.getLogger("src.futures_strategy.engine_fast_futures").setLevel(logging.WARNING)
 
 def load_data(symbol, start_date, end_date, timeframe):
     """Load Data Helper"""
@@ -168,32 +170,64 @@ def verify_single_symbol_futures(symbol, best_params, primary_symbols):
         print(f"   ❌ Data load error for {symbol}: {e}")
         return None
     
-    # OOS 슬라이싱
+    # [FIX] OOS 슬라이싱 with Warmup Buffer
+    # Daily indicator shift(1)로 인한 NaN 방지를 위해 앞에 warmup 기간 추가
     cutoff_ts = pd.Timestamp(TRAIN_CUTOFF_DATE)
-    test_hourly = hourly_df[hourly_df['datetime'] >= cutoff_ts].copy()
-    test_daily = daily_df[daily_df['datetime'] >= cutoff_ts].copy()
+    
+    # Warmup: Daily indicator 계산을 위한 최소 기간 (일별 60일 = 약 2개월 버퍼)
+    WARMUP_DAYS = 60
+    warmup_cutoff = cutoff_ts - pd.Timedelta(days=WARMUP_DAYS)
+    
+    # Warmup 기간을 포함하여 슬라이싱
+    test_hourly = hourly_df[hourly_df['datetime'] >= warmup_cutoff].copy()
+    test_daily = daily_df[daily_df['datetime'] >= warmup_cutoff].copy()
     
     if test_hourly.empty:
         print(f"   ⚠️ No OOS data for {symbol}. Skipping verification.")
         return None
     
-    # 백테스트
-    strategy = UltimateStrategy("Verify", best_params)
-    df = prepare_futures_data(test_hourly, test_daily, strategy)
-    ret_pct, mdd, trades_log, _, _ = run_backtest_segment_futures(
-        df, best_params, initial_balance=750.0, return_series=True
-    )
+    # [FIX] 최적화 엔진(BacktestEngineFast)을 직접 사용하여 검증 일관성 확보
+    from src.futures_strategy.engine_fast_futures import BacktestEngineFast
     
-    trade_count = len(trades_log) if trades_log else 0
-    win_rate = 0.0
-    pf = 0.0
+    strategy = UltimateStrategy(f"Verify_{symbol}", best_params)
+    # 전체 데이터를 넣되, 엔진 내부에서 cutoff_ts 이전은 warmup으로 처리되도록 유도하거나 
+    # 실행 후 OOS 기간만 별도 집계합니다.
+    engine = BacktestEngineFast(test_hourly, test_daily, strategy, initial_balance=750.0)
+    engine.leverage = best_params.get('LEVERAGE', 1)
+    engine.risk_per_trade = best_params.get('RISK_PER_TRADE', 0.02)
+    
+    # 실행
+    res = engine.run()
+    
+    trades_df = res['trades_df']
+    
+    # [중요] OOS 기간(cutoff_ts 이후)의 거래만 필터링하여 성과 재계산
+    if not trades_df.empty:
+        trades_df['exit_time'] = pd.to_datetime(trades_df['exit_time'])
+        oos_trades = trades_df[trades_df['exit_time'] >= cutoff_ts].copy()
+    else:
+        oos_trades = pd.DataFrame()
+
+    trade_count = len(oos_trades)
     if trade_count > 0:
-        wins = [t for t in trades_log if t > 0]
-        losses = [t for t in trades_log if t <= 0]
-        win_rate = len(wins) / trade_count * 100
-        gross_profit = sum(wins)
-        gross_loss = abs(sum(losses))
-        pf = gross_profit / gross_loss if gross_loss > 0 else (gross_profit if gross_profit > 0 else 0.0)
+        # OOS 수익률 계산 (OOS 기간의 PnL 합계 / 초기 자본)
+        oos_pnl = oos_trades['pnl'].sum()
+        ret_pct = (oos_pnl / 750.0) * 100
+        
+        # OOS MDD는 간소화하여 전체 MDD 사용하거나 재계산 가능 (여기선 전체 MDD 활용)
+        mdd = res['mdd_pct'] 
+        
+        win_trades = oos_trades[oos_trades['pnl'] > 0]
+        win_rate = len(win_trades) / trade_count * 100
+        
+        pos_pnl = win_trades['pnl'].sum()
+        neg_pnl = abs(oos_trades[oos_trades['pnl'] < 0]['pnl'].sum())
+        pf = pos_pnl / neg_pnl if neg_pnl > 0 else (pos_pnl if pos_pnl > 0 else 0.0)
+    else:
+        ret_pct = 0.0
+        mdd = 0.0
+        win_rate = 0.0
+        pf = 0.0
 
     is_primary = symbol in primary_symbols
     indicator = "🎯 PRIMARY" if is_primary else "📊 REFERENCE"
@@ -208,16 +242,23 @@ def verify_single_symbol_futures(symbol, best_params, primary_symbols):
         'pf': pf, 
         'is_primary': is_primary,
         'wfa_results': None,
-        'mc_results': None
+        'mc_results': None,
+        'trades_log': oos_trades['pnl'].tolist() if not oos_trades.empty else []
     }
     
     # [상세 분석] 모든 심볼에 대해 WFA + MC 수행 (거래 수 10개 이상)
     if trade_count >= 10:
+        from src.futures_strategy.monte_carlo_futures import FuturesMonteCarloSimulator
+        trades_log = result['trades_log'] # ROI 대신 PnL 기반이나 MC 수정 필요할 수 있음
+        # 기존 MC는 ROI(%)를 기대하므로 변환
+        roi_log = [(pnl / 750.0) * 100 for pnl in trades_log]
+
         print(f"      🔬 Running detailed analysis for {symbol}...")
         
         # Walk-Forward Analysis
         try:
             from src.futures_strategy.walk_forward_futures import FuturesWalkForwardAnalyzer
+            # [FIX] WFA에 Warmup 포함 데이터 전달 (Indicator 계산 안정화)
             wfa = FuturesWalkForwardAnalyzer(test_hourly, test_daily, best_params)
             wfa_results = wfa.run(n_splits=5)
             
@@ -236,7 +277,8 @@ def verify_single_symbol_futures(symbol, best_params, primary_symbols):
         # Monte Carlo Simulation
         try:
             from src.futures_strategy.monte_carlo_futures import FuturesMonteCarloSimulator
-            mc = FuturesMonteCarloSimulator(trades_log)
+            # roi_log는 [(pnl / 750) * 100]으로 이미 계산됨
+            mc = FuturesMonteCarloSimulator(roi_log)
             mc_res = mc.run(n_simulations=10000, initial_balance=750.0)
             
             result['mc_results'] = {

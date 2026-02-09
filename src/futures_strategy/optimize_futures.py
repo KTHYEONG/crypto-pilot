@@ -178,7 +178,7 @@ def objective(
         strategy = strategy_cls(f"{strategy_name}_{symbol}", full_params)
 
         # Engine Execution
-        engine = BacktestEngineFast(hourly_df, daily_df, strategy, initial_balance=750)
+        engine = BacktestEngineFast(hourly_df, daily_df, strategy, initial_balance=600)
         
         # [OPTIMIZATION] Inject pre-computed merge index if available
         if merge_indices and symbol in merge_indices and selected_tf in merge_indices[symbol]:
@@ -234,7 +234,8 @@ def objective(
 
         # [SPEED UP] Short-circuit: If any symbol performs poorly, fail the trial immediately
         # One bad apple spoils the bunch (Harmonic Mean logic)
-        if score < 5:  # Low score threshold for soft penalty
+        # [ADJUSTED] Threshold lowered from 5 to -50 for Simple Interest scale
+        if score < -50:
             # [MEMORY] Cleanup before early return
             del engine, result, strategy, trades_df
             gc.collect()
@@ -251,7 +252,7 @@ def objective(
         del engine, result, strategy, trades_df
 
     # 4. Combine scores using HARMONIC MEAN
-    offset = 6000
+    offset = 200  # [ADJUSTED] Reduced from 6000 for Simple Interest scale
     shifted_scores = [s + offset for s in symbol_scores]
 
     if any(s <= 0 for s in shifted_scores):
@@ -306,8 +307,8 @@ def main():
         "SCALP": 3600,  # 3 timeframes (5m,15m,30m), high data volume but narrow param range
         "DAY": 4200,    # 3 timeframes (1h,2h,4h), balanced - most commonly used mode
         "SWING": 5000,  # 3 timeframes (4h,1d,3d), wide param range + low data volume (overfitting risk)
-        "UNIFIED": 2000, # 3 timeframes (1h, 4h, 1d), robust trend following - Sweet Spot trials
-        "ALL": 2000,     # Alias for UNIFIED
+        "UNIFIED": 8000, # Increased for 55+ parameters and more timeframes (15m, 30m)
+        "ALL": 8000,     # Alias for UNIFIED
     }
 
     if args.trials is None:
@@ -461,7 +462,7 @@ def main():
 
     # [Performance] Use ConstantLiar for parallel efficiency
     sampler = optuna.samplers.TPESampler(
-        n_startup_trials=100,  # Random exploration first
+        n_startup_trials=2000,  # 25% of 8000 trials for thorough random exploration
         multivariate=True,  # Consider param dependencies
         constant_liar=True,  # Avoid duplicate proposals
         warn_independent_sampling=False,
@@ -529,7 +530,9 @@ def main():
             0.5,   # Weak Multiplier
             4.0,   # Panic NATR
             0.25,  # Panic Multiplier
-            0      # Warmup bars
+            0,     # Warmup bars
+            False, # [NEW] use_compounding
+            1000000.0 # [NEW] max_capital_usage
         )
         print(" Done!")
     except Exception as e:
@@ -539,7 +542,7 @@ def main():
     try:
         study.optimize(
             lambda trial: objective(
-                trial, UltimateStrategy, f"Ultimate_{mode}", data_maps, search_space, {}, merge_indices
+                trial, UltimateStrategy, f"Ultimate_{mode}", data_maps, search_space, {}, merge_indices  # common_search_space={} (handled by GET_SEARCH_SPACE)
             ),
             n_trials=trials,
             n_jobs=args.jobs,
@@ -581,7 +584,7 @@ def main():
             
             # Re-create Strategy & Engine
             strategy = UltimateStrategy(f"Best_{symbol}", best_params)
-            engine = BacktestEngineFast(hourly_df, daily_df, strategy, initial_balance=750)
+            engine = BacktestEngineFast(hourly_df, daily_df, strategy, initial_balance=600)
             
             # Inject pre-computed merge index
             if merge_indices and symbol in merge_indices and selected_tf in merge_indices[symbol]:
