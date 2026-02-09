@@ -207,12 +207,16 @@ class BacktestEngineFast:
         # [OPTIMIZATION] Extract timestamps for fast lookup (avoid iloc)
         datetime_values = df['datetime'].values
         
+        # [NEW] Compounding Control
+        use_compounding = self.strategy.params.get('USE_COMPOUNDING', False)
+        max_capital_usage = self.strategy.params.get('MAX_CAPITAL_USAGE', 1_000_000)
+        
         # Run Numba-accelerated loop
         trades, final_balance = backtest_loop_numba(
             close, high, low, open_prices, volume_ratio,
             entry_upper, entry_lower,
-            trend_dir, strength_filter, atr, parabolic_sar, rsi, # [NEW] Pass RSI
-            hurst, natr, # [NEW] Pass Hurst & NATR for dynamic risk
+            trend_dir, strength_filter, atr, parabolic_sar, rsi,
+            hurst, natr,
             self.initial_balance,
             leverage,
             self.fee_rate,
@@ -224,11 +228,13 @@ class BacktestEngineFast:
             use_take_profit, tp_atr_mult,
             timestamps, FUNDING_FEE_RATE, FUNDING_INTERVAL_HOURS,
             max_holding_bars, trailing_activation_atr, time_exit_profit_threshold,
-            rsi_exit_threshold, # [NEW] Pass RSI Threshold
+            rsi_exit_threshold,
             use_dynamic_risk, strong_regime_hurst, strong_regime_natr, strong_regime_multiplier,
             weak_regime_hurst, weak_regime_multiplier,
-            panic_regime_natr, panic_regime_multiplier, # [NEW] Dynamic Risk Params
-            warmup_bars  # [WARMUP] Skip trading during this period
+            panic_regime_natr, panic_regime_multiplier,
+            warmup_bars,
+            use_compounding,    # [NEW]
+            max_capital_usage   # [NEW]
         )
         
         self.balance = final_balance
@@ -335,8 +341,18 @@ class BacktestEngineFast:
         
         # [ROBUSTNESS] Check for Inf/NaN in cumulative data (Exploding Strategy)
         if not np.isfinite(cumulative).all():
-             self.logger.warning("Strategy equity curve contains Inf/NaN. Capping values.")
-             cumulative = np.nan_to_num(cumulative, nan=self.initial_balance, posinf=1e15, neginf=0)
+             self.logger.warning("Strategy equity curve contains Inf/NaN. Marking as invalid.")
+             # Return invalid result to trigger -10000 score in objective function
+             return {
+                 'total_trades': 0,
+                 'win_trades': 0,
+                 'loss_trades': 0,
+                 'win_rate': 0,
+                 'total_return_pct': 0,
+                 'final_balance': self.initial_balance,
+                 'mdd_pct': 0,
+                 'trades_df': pd.DataFrame()
+             }
 
         with np.errstate(invalid='ignore', over='ignore', divide='ignore'):
             running_max = np.maximum.accumulate(cumulative)
@@ -381,7 +397,9 @@ def backtest_loop_numba(
     use_dynamic_risk, strong_regime_hurst, strong_regime_natr, strong_regime_multiplier,
     weak_regime_hurst, weak_regime_multiplier,
     panic_regime_natr, panic_regime_multiplier, # [NEW] Dynamic Risk
-    warmup_bars  # [WARMUP] Number of bars to skip at start for indicator warmup
+    warmup_bars,  # [WARMUP] Number of bars to skip at start for indicator warmup
+    use_compounding,   # [NEW] Bool
+    max_capital_usage  # [NEW] Float
 ):
     """
     Numba JIT-compiled backtest loop for Futures (Long/Short).
@@ -389,13 +407,14 @@ def backtest_loop_numba(
     - Signal at i -> Execute at Open of i+1
     - Slippage on All Exits
     - Sequential Stop Logic
+    - [v16] Compounding Control & Capital Caps
     """
     n = len(close)
     balance = initial_balance
     
     # Position state
     in_position = False
-    pending_entry = False # [NEW]
+    pending_entry = False 
     pending_side = 0
     
     pos_side = 0  # 1: LONG, -1: SHORT
@@ -409,7 +428,7 @@ def backtest_loop_numba(
     tp_price = 0.0 
     
     # Funding Fee Tracking (UTC-based: 00:00, 08:00, 16:00)
-    last_funding_hour = -1  # 마지막 펀딩비 적용 시간 (UTC hour: 0, 8, or 16)
+    last_funding_hour = -1
     
     # Trades storage (max 30000 trades)
     max_trades = 30000
@@ -444,8 +463,6 @@ def backtest_loop_numba(
                 fill_price = c_open * (1 - slippage_rate)
             
             # Use indicators from i-1 (Signal Bar)
-            # But here in engine we already shifted indicators by 1.
-            # So atr[i] IS atr[i-1] effectively.
             current_atr = atr[i] 
             
             # 1. SL Calc
@@ -472,9 +489,17 @@ def backtest_loop_numba(
             # 3. Size Calculation
             stop_distance = abs(fill_price - stop_price)
             
-            # [COMPOUNDING FIX] Use CURRENT balance for risk calculation
-            # This enables exponential growth (and risk) as balance grows
-            current_equity = balance 
+            # [REALISM FIX] Capital Management
+            if use_compounding:
+                # Use balance but cap it to simulate liquidity limits
+                if balance > max_capital_usage:
+                    current_equity = max_capital_usage
+                else:
+                    current_equity = balance
+            else:
+                # Fixed Fractional (Risk based on Initial Balance only)
+                # Most statistically robust for optimization
+                current_equity = initial_balance
             
             if stop_distance > 0:
                 risk_amount = current_equity * exec_risk

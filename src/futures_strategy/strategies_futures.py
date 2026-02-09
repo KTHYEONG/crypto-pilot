@@ -312,6 +312,19 @@ class UltimateStrategy(Strategy):
             df['natr'] = calculate_natr(df, window=natr_period)
             df.loc[df['natr'] < natr_thresh, 'strength_filter'] = 0
 
+        # --- 4.1 Global Entry Filters (e.g. RSI_ENTRY_MAX) ---
+        rsi_entry_max = self.params.get('RSI_ENTRY_MAX')
+        if rsi_entry_max is not None:
+            # RSI must be calculated (ensure it exists)
+            if 'rsi' not in df.columns:
+                rsi_period = self.params.get('STRENGTH_FILTER_PERIOD', 14) 
+                df.loc[:, 'rsi'] = calculate_rsi(df['close'], window=rsi_period)
+            
+            # LONG Filter: Block if RSI > threshold
+            df.loc[(df['trend_direction'] > 0) & (df['rsi'] > rsi_entry_max), 'strength_filter'] = 0
+            # SHORT Filter: Block if RSI < (100 - threshold)
+            df.loc[(df['trend_direction'] < 0) & (df['rsi'] < (100 - rsi_entry_max)), 'strength_filter'] = 0
+
         # --- 5. Exit Logic (Parabolic SAR) ---
         # Calculated here so it's available for the backtest engine
         if self.params.get('EXIT_TYPE') == 'PARABOLIC_SAR':
