@@ -197,12 +197,14 @@ class UltimateStrategy(Strategy):
             s_win = self.params.get('ICHIMOKU_SENKOU_B', 52)
             t, k, sa, sb = calculate_ichimoku(df, tenkan_window=t_win, kijun_window=k_win, senkou_span_b_window=s_win)
             # Cloud Top/Bottom
-            cloud_top = np.maximum(sa, sb)
-            cloud_bottom = np.minimum(sa, sb)
-            
-            df['trend_direction'] = 0
-            df['trend_direction'] = np.where(df['close'] > cloud_top, 1, df['trend_direction'])
-            df['trend_direction'] = np.where(df['close'] < cloud_bottom, -1, df['trend_direction'])
+            cloud_top = np.maximum(sa.to_numpy(), sb.to_numpy())
+            cloud_bottom = np.minimum(sa.to_numpy(), sb.to_numpy())
+
+            close_np = df['close'].to_numpy()
+            trend = np.zeros(len(df), dtype=np.int8)
+            trend[close_np > cloud_top] = 1
+            trend[close_np < cloud_bottom] = -1
+            df['trend_direction'] = trend
             
         elif filter_type == 'VWAP':
             # [NEW] VWAP Trend Filter
