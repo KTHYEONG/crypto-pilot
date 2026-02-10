@@ -16,7 +16,13 @@ try:
 except IndexError:
     sys.path.append(os.getcwd())
 
-from config.settings import DATA_DIR, BACKTEST_START_DATE, BACKTEST_END_DATE, TRAIN_CUTOFF_DATE
+from config.settings import (
+    DATA_DIR,
+    BACKTEST_START_DATE,
+    BACKTEST_END_DATE,
+    TRAIN_CUTOFF_DATE,
+    FUTURES_INITIAL_BALANCE,
+)
 from src.data.collector import DataCollector
 from src.futures_strategy.strategies_futures import UltimateStrategy
 from src.futures_strategy.backtest_utils_futures import run_backtest_segment_futures, prepare_futures_data
@@ -71,7 +77,7 @@ def detailed_backtest_futures(hourly_df, daily_df, params):
     # Prepare Data (Merge signals)
     df = prepare_futures_data(hourly_df, daily_df, strategy)
     
-    initial_balance = 750.0
+    initial_balance = FUTURES_INITIAL_BALANCE
     
     # Run Shared Backtest
     ret_pct, mdd, trades_log, detailed_log, equity_curve = run_backtest_segment_futures(
@@ -192,7 +198,9 @@ def verify_single_symbol_futures(symbol, best_params, primary_symbols):
     strategy = UltimateStrategy(f"Verify_{symbol}", best_params)
     # 전체 데이터를 넣되, 엔진 내부에서 cutoff_ts 이전은 warmup으로 처리되도록 유도하거나 
     # 실행 후 OOS 기간만 별도 집계합니다.
-    engine = BacktestEngineFast(test_hourly, test_daily, strategy, initial_balance=750.0)
+    engine = BacktestEngineFast(
+        test_hourly, test_daily, strategy, initial_balance=FUTURES_INITIAL_BALANCE
+    )
     engine.leverage = best_params.get('LEVERAGE', 1)
     engine.risk_per_trade = best_params.get('RISK_PER_TRADE', 0.02)
     
@@ -212,7 +220,7 @@ def verify_single_symbol_futures(symbol, best_params, primary_symbols):
     if trade_count > 0:
         # OOS 수익률 계산 (OOS 기간의 PnL 합계 / 초기 자본)
         oos_pnl = oos_trades['pnl'].sum()
-        ret_pct = (oos_pnl / 750.0) * 100
+        ret_pct = (oos_pnl / FUTURES_INITIAL_BALANCE) * 100
         
         # OOS MDD는 간소화하여 전체 MDD 사용하거나 재계산 가능 (여기선 전체 MDD 활용)
         mdd = res['mdd_pct'] 
@@ -251,7 +259,7 @@ def verify_single_symbol_futures(symbol, best_params, primary_symbols):
         from src.futures_strategy.monte_carlo_futures import FuturesMonteCarloSimulator
         trades_log = result['trades_log'] # ROI 대신 PnL 기반이나 MC 수정 필요할 수 있음
         # 기존 MC는 ROI(%)를 기대하므로 변환
-        roi_log = [(pnl / 750.0) * 100 for pnl in trades_log]
+        roi_log = [(pnl / FUTURES_INITIAL_BALANCE) * 100 for pnl in trades_log]
 
         print(f"      🔬 Running detailed analysis for {symbol}...")
         
@@ -277,9 +285,11 @@ def verify_single_symbol_futures(symbol, best_params, primary_symbols):
         # Monte Carlo Simulation
         try:
             from src.futures_strategy.monte_carlo_futures import FuturesMonteCarloSimulator
-            # roi_log는 [(pnl / 750) * 100]으로 이미 계산됨
+            # roi_log는 [(pnl / FUTURES_INITIAL_BALANCE) * 100]으로 이미 계산됨
             mc = FuturesMonteCarloSimulator(roi_log)
-            mc_res = mc.run(n_simulations=10000, initial_balance=750.0)
+            mc_res = mc.run(
+                n_simulations=10000, initial_balance=FUTURES_INITIAL_BALANCE
+            )
             
             result['mc_results'] = {
                 'prob_profit': mc_res['prob_profit'],
