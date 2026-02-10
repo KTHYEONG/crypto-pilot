@@ -1,6 +1,14 @@
 
+import os
 import optuna
 import numpy as np
+
+
+def _env_float(name, default):
+    try:
+        return float(os.getenv(name, default))
+    except (TypeError, ValueError):
+        return float(default)
 
 def suggest_params(trial, search_space):
     """
@@ -338,6 +346,15 @@ def calculate_score(ret, mdd, trades_df, mode="DAY", market_type="spot", timefra
     if not np.isfinite(ulcer_proxy) or not np.isfinite(sortino) or not np.isfinite(calmar):
         return -10000.0
 
+    # Bonus coefficients can be overridden via environment variables.
+    fut_growth_coef = _env_float("FUT_GROWTH_BONUS_COEF", 30.0)
+    fut_risk_drag_coef = _env_float("FUT_RISK_DRAG_COEF", 8.0)
+    fut_tail_drag_coef = _env_float("FUT_TAIL_DRAG_COEF", 12.0)
+
+    spot_growth_coef = _env_float("SPOT_GROWTH_BONUS_COEF", 18.0)
+    spot_risk_drag_coef = _env_float("SPOT_RISK_DRAG_COEF", 10.0)
+    spot_tail_drag_coef = _env_float("SPOT_TAIL_DRAG_COEF", 10.0)
+
     # --- 4. Scoring Logic ---
     # [RISK-ADJUSTED BONUS] Approximate geometric growth:
     # g ~= mu - 0.5 * sigma^2
@@ -364,10 +381,10 @@ def calculate_score(ret, mdd, trades_df, mode="DAY", market_type="spot", timefra
         s_sqn = soft_sigmoid(sqn, L=8.0, k=0.8, x0=2.5)
         
         # Risk-adjusted growth bonus (bounded to prevent score explosion)
-        growth_bonus = 30.0 * np.tanh(120.0 * geom_growth)
-        risk_drag = 8.0 * np.tanh(ulcer_proxy / 8.0)
+        growth_bonus = fut_growth_coef * np.tanh(120.0 * geom_growth)
+        risk_drag = fut_risk_drag_coef * np.tanh(ulcer_proxy / 8.0)
         tail_excess = max(abs_mdd - target_mdd, 0.0)
-        tail_drag = 12.0 * np.tanh(tail_excess / 12.0)
+        tail_drag = fut_tail_drag_coef * np.tanh(tail_excess / 12.0)
         risk_adjusted_bonus = (growth_bonus - risk_drag - tail_drag) * confidence
         
         score = (s_calmar * 10.0) + (s_sortino * 8.0) + (s_pf * 6.0) + (s_sqn * 8.0) + risk_adjusted_bonus
@@ -413,10 +430,10 @@ def calculate_score(ret, mdd, trades_df, mode="DAY", market_type="spot", timefra
         s_sqn = soft_sigmoid(sqn, L=10.0, k=0.8, x0=2.0)
         
         # Spot also needs a smaller growth bonus, but risk should dominate.
-        growth_bonus = 18.0 * np.tanh(120.0 * geom_growth)
-        risk_drag = 10.0 * np.tanh(ulcer_proxy / 6.0)
+        growth_bonus = spot_growth_coef * np.tanh(120.0 * geom_growth)
+        risk_drag = spot_risk_drag_coef * np.tanh(ulcer_proxy / 6.0)
         tail_excess = max(abs_mdd - target_mdd, 0.0)
-        tail_drag = 10.0 * np.tanh(tail_excess / 10.0)
+        tail_drag = spot_tail_drag_coef * np.tanh(tail_excess / 10.0)
         risk_adjusted_bonus = (growth_bonus - risk_drag - tail_drag) * confidence
 
         score = (s_calmar * 12.0) + (s_sqn * 10.0) + (s_pf * 8.0) + (s_sortino * 6.0) + risk_adjusted_bonus
