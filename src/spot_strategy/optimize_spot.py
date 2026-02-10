@@ -22,7 +22,7 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '../../'))
 
 from src.spot_strategy.upbit_client import UpbitClient
 from src.strategy.strategies import UltimateStrategy
-from src.spot_strategy.engine_fast_spot import BacktestEngineFastSpot
+from src.spot_strategy.engine_fast_spot import BacktestEngineFastSpot, backtest_loop_spot_numba
 from config.optimization_config_modes import GET_SEARCH_SPACE, BASE_SEARCH_SPACE
 from config.settings import TRAIN_CUTOFF_DATE
 from src.optimization.opt_utils import suggest_params, calculate_score
@@ -145,21 +145,24 @@ def objective(trial, symbols_data, search_space, mode="DAY", merge_indices=None)
     import gc
     params = suggest_params(trial, search_space)
     
-    # [FUTURE-PROOF] Merge common search space 
-    common_params = {} 
-    full_params = {**params, **common_params}
+    full_params = params.copy()
+    tf = full_params['TIMEFRAME']
     
     # [VALIDATION] Enforce Logical Constraints
     if full_params.get('TREND_FILTER_TYPE') == 'MACD':
         if full_params.get('MACD_FAST', 12) >= full_params.get('MACD_SLOW', 26):
             return -10000 
             
-    tf = full_params['TIMEFRAME']
     symbol_scores = []
     
     # [UNIVERSAL] Loop through all symbols to find Robust Params
     for symbol, data_map in symbols_data.items():
         if tf not in data_map: continue
+
+        # [CAPITAL MGMT] Symbol-Specific Max Capital Usage
+        is_major = any(m in symbol for m in ["BTC", "ETH"])
+        max_capital = 100_000_000_000.0 if is_major else 20_000_000.0
+        full_params['MAX_CAPITAL_USAGE'] = max_capital
         
         # Get data 
         df = data_map[tf]
@@ -178,7 +181,7 @@ def objective(trial, symbols_data, search_space, mode="DAY", merge_indices=None)
             df, daily_df,  # Pass both DFs
             strategy,
             backtest_loop_spot_numba,  
-            initial_balance=10_000_000,
+            initial_balance=1_000_000,
             fee_rate=0.0005,      
             slippage_rate=0.0003,
             merge_index_map=current_merge_index
@@ -241,197 +244,30 @@ def objective(trial, symbols_data, search_space, mode="DAY", merge_indices=None)
         
         del engine, result, strategy, trades_df
 
+    # [MEMORY] Explicit cleanup per symbol
     if not symbol_scores:
         gc.collect()
         return -10000
     
-    # [UNIVERSAL] Combine using Harmonic Mean
-    offset = 6000
+    # 4. Combine scores using HARMONIC MEAN
+    offset = 200  # [ADJUSTED] Reduced from 6000 for Simple Interest scale (matches Futures)
     shifted_scores = [s + offset for s in symbol_scores]
     
     if any(s <= 0 for s in shifted_scores):
-        gc.collect()
-        return -10000
-        
-    harmonic_mean = len(shifted_scores) / sum(1/s for s in shifted_scores)
-    final_score = harmonic_mean - offset
+        final_score = -10000
+    else:
+        harmonic_mean = len(shifted_scores) / sum(1 / s for s in shifted_scores)
+        final_score = harmonic_mean - offset
     
+    # Record Average Attributes (for analysis)
     trial.set_user_attr("score_avg", final_score)
+    
+    # [MEMORY] Force garbage collection after processing all symbols
     gc.collect()
     
     return final_score
 
-@njit(nogil=True, cache=True)
-def backtest_loop_spot_numba(
-    close, high, low, open_prices,
-    entry_upper,
-    trend_dir, strength_filter, volume_ratio, atr, parabolic_sar,
-    hurst, natr, rsi,
-    initial_balance, fee_rate, slippage_rate,
-    exit_type,
-    stop_loss_type, stop_loss_pct, atr_sl_mult,
-    atr_mult, risk_per_trade,
-    use_volume_filter, vol_threshold,
-    use_take_profit, tp_atr_mult,
-    max_holding_bars, trailing_activation_atr,
-    hurst_threshold, natr_panic_threshold, rsi_panic_threshold,
-    strong_regime_multiplier, panic_regime_multiplier,
-    rsi_entry_max, natr_entry_min,
-    warmup_bars
-):
-    """
-    Numba Backtest Loop v15.1: Strict Realism & Slippage Enforcement
-    """
-    n = len(close)
-    balance = initial_balance
-    coin = 0.0
-    in_position = False
-    pending_entry = False
-    entry_price = 0.0
-    entry_idx = 0
-    highest = 0.0
-    pos_atr = 0.0
-    stop_price = 0.0
-    tp_price = 0.0
-    
-    max_trades = 30000
-    trades = np.zeros((max_trades, 3))
-    trade_count = 0
-    
-    equity_curve = np.zeros(n)
-    exec_risk = risk_per_trade 
-    
-    for i in range(n):
-        if i < warmup_bars:
-            equity_curve[i] = balance
-            continue
-            
-        c_open = open_prices[i]
-        c_price = close[i]
-        c_high = high[i]
-        c_low = low[i]
-        
-        # --- 1. EXECUTION: BUY AT OPEN (If signaled at i-1) ---
-        if pending_entry and not in_position:
-            fill_price = c_open * (1 + slippage_rate)
-            
-            # Use ATR from signal bar (i-1)
-            sig_atr = atr[i-1] if i > 0 else atr[i]
-            
-            # SL/TP Setup
-            if stop_loss_type == 1:
-                stop_price = fill_price - (sig_atr * atr_sl_mult)
-            else:
-                stop_price = fill_price * (1 - stop_loss_pct)
-            
-            tp_price = fill_price + (sig_atr * tp_atr_mult) if use_take_profit else 0.0
-            
-            target_risk = exec_risk
-            if target_risk > 0.99: target_risk = 0.99
-            
-            cost = balance * target_risk
-            cost = min(cost, 100_000_000.0)
-            
-            coin = (cost * (1 - fee_rate)) / fill_price
-            balance -= cost
-            
-            in_position = True
-            pending_entry = False
-            entry_price = fill_price
-            entry_idx = i
-            highest = fill_price
-            pos_atr = sig_atr
-        
-        # --- 2. EXECUTION: EXIT CHECKS (During Bar i) ---
-        if in_position:
-            exit_triggered = False
-            exit_price = 0.0
-            
-            # [SEQ-1] Check Stop Loss Hierarchy FIRST
-            # Using stop_price inherited from bar i-1 (Sequential Realism)
-            
-            # Use pre-calculated SAR if mode enabled
-            current_stop = stop_price
-            if exit_type == 1 and parabolic_sar[i] > 0:
-                current_stop = max(stop_price, parabolic_sar[i])
 
-            if c_low <= current_stop:
-                # Market Exit Slip
-                exit_price = current_stop * (1 - slippage_rate)
-                exit_triggered = True
-            
-            # [SEQ-2] Check Take Profit
-            elif not exit_triggered and use_take_profit and tp_price > 0 and c_high >= tp_price:
-                # Limit Exit (Treated as No Slip for TP usually, or apply half)
-                exit_price = tp_price 
-                exit_triggered = True
-
-            # [SEQ-3] Conditional Market Exits (RSI, Trend, Time)
-            elif not exit_triggered:
-                # RSI Panic
-                if rsi[i] > rsi_panic_threshold:
-                    exit_price = c_price * (1 - slippage_rate)
-                    exit_triggered = True
-                
-                # Trend Reversal
-                elif i > 0 and trend_dir[i] == -1: # Already shifted, so this is confirmed i-1
-                    exit_price = c_price * (1 - slippage_rate)
-                    exit_triggered = True
-                
-                # Max Holding
-                elif (i - entry_idx) >= max_holding_bars:
-                    unrealized_pct = (c_price - entry_price) / entry_price * 100
-                    if unrealized_pct < 0.2:
-                        exit_price = c_price * (1 - slippage_rate)
-                        exit_triggered = True
-
-            if exit_triggered:
-                revenue = coin * exit_price * (1 - fee_rate)
-                balance += revenue 
-                
-                pnl_pct = (exit_price - entry_price) / entry_price * 100
-                if trade_count < max_trades:
-                    trades[trade_count] = [pnl_pct, float(i - entry_idx), 0.0]
-                    trade_count += 1
-                
-                coin = 0.0
-                in_position = False
-            else:
-                # [SEQ-4] Update High and Trailing Stop for NEXT Bar (i+1)
-                if c_high > highest:
-                    highest = c_high
-                
-                if exit_type == 0: # ATR Trailing
-                    unrealized_profit_atr = (highest - entry_price) / pos_atr if pos_atr > 0 else 0
-                    if unrealized_profit_atr >= trailing_activation_atr:
-                        new_stop = highest - (pos_atr * atr_mult)
-                        if new_stop > stop_price:
-                            stop_price = new_stop
-
-        # --- 3. SIGNAL: ENTRY DETECTION (At Close of i, for Open of i+1) ---
-        elif not in_position and not pending_entry:
-            # Indicators are already shifted by 1 in Engine
-            # So trend_dir[i] is actually trend at i-1
-            
-            can_signal = True
-            if np.isnan(entry_upper[i]): can_signal = False
-            elif strength_filter[i] == 0: can_signal = False
-            elif use_volume_filter and volume_ratio[i] < vol_threshold: can_signal = False
-            elif rsi[i] >= rsi_entry_max: can_signal = False
-            elif natr[i] < natr_entry_min: can_signal = False
-            
-            if can_signal and trend_dir[i] == 1 and c_price > entry_upper[i]:
-                regime_mult = 1.0
-                if hurst[i] > hurst_threshold: regime_mult = strong_regime_multiplier
-                if natr[i] > natr_panic_threshold: regime_mult = panic_regime_multiplier
-                
-                exec_risk = risk_per_trade * regime_mult
-                if i < n - 1:
-                    pending_entry = True
-        
-        equity_curve[i] = balance + (coin * c_price)
-
-    return trades[:trade_count], equity_curve, balance + (coin * close[-1])
 
 
 
@@ -448,17 +284,24 @@ if __name__ == "__main__":
     symbols = [s.strip() for s in args.symbols.split(',')]
     mode = args.mode.upper()
     
-    # [TRIALS CONFIGURATION]
-    # You can modify the search attempts here for each mode.
+    # Auto-set trials based on mode if not specified
+    # Formula: Parameters × 150 (TPE rule of thumb)
+    # All modes have 3 timeframes, adjusted by backtest speed and trade frequency
+    # [UPDATED] Trials adjusted based on search space complexity and data volume analysis
     MODE_TRIALS_MAP = {
-        'SCALP': 3600,
-        'DAY': 4200,
-        'SWING': 5000,
-        'UNIFIED': 2000,
-        'ALL': 6000
+        'SCALP': 3600,   # 3 timeframes (5m,15m,30m), high data volume but narrow param range
+        'DAY': 4200,     # 3 timeframes (30m,1h,4h), balanced - most commonly used mode
+        'SWING': 5000,   # 3 timeframes (4h,1d,1w), wide param range + low data volume (overfitting risk)
+        'UNIFIED': 8000, # Increased for 55+ parameters and more timeframes (15m, 30m)
+        'ALL': 8000      # Alias for UNIFIED
     }
     
-    trials = args.trials if args.trials is not None else MODE_TRIALS_MAP.get(mode, 2500)
+    if args.trials is None:
+        trials = MODE_TRIALS_MAP.get(mode, 2500)
+        print(f"ℹ️  Auto-setting trials for {mode} mode: {trials}")
+    else:
+        trials = args.trials
+        print(f"ℹ️  Using custom trials: {trials}")
     
     # Adjust Logging
     optuna.logging.set_verbosity(optuna.logging.WARNING)
@@ -549,8 +392,13 @@ if __name__ == "__main__":
         }
     )
     
+    
+    # [Performance] Use ConstantLiar for parallel efficiency
     sampler = optuna.samplers.TPESampler(
-        n_startup_trials=100, multivariate=True, constant_liar=True, warn_independent_sampling=False,
+        n_startup_trials=2000,  # 25% of 8000 trials for thorough random exploration (matches Futures)
+        multivariate=True,  # Consider param dependencies
+        constant_liar=True,  # Avoid duplicate proposals
+        warn_independent_sampling=False,
     )
     
     study = optuna.create_study(
@@ -570,7 +418,21 @@ if __name__ == "__main__":
         dummy_len = 10
         _dummy_arr = np.ones(dummy_len, dtype=np.float64)
         _dummy_int = np.zeros(dummy_len, dtype=np.int64)
-        backtest_loop_spot_numba(_dummy_arr, _dummy_arr, _dummy_arr, _dummy_arr, _dummy_arr, _dummy_int, _dummy_int, _dummy_arr, _dummy_arr, _dummy_arr, _dummy_arr, _dummy_arr, _dummy_arr, 10000.0, 0.001, 0.001, 0, 0, 0.01, 1.5, 3.0, 0.99, False, 1.0, False, 3.0, 1000, 0.0, 0.6, 4.5, 94.0, 1.3, 0.15, 90, 0.1, 0)
+        backtest_loop_spot_numba(
+            _dummy_arr, _dummy_arr, _dummy_arr, _dummy_arr, 
+            _dummy_arr, # entry_upper
+            _dummy_int, _dummy_int, _dummy_arr, # trend, strength, vol
+            _dummy_arr, _dummy_arr, # atr, sar
+            _dummy_arr, _dummy_arr, _dummy_arr, # regime: hurst, natr, rsi
+            10000.0, 0.001, 0.001, 
+            0, 0, 0.01, 1.5, 3.0, 0.99, # exit, sl, risk
+            False, 1.0, False, 3.0, # vol, tp
+            1000, 0.0, # hold, trailing
+            0.6, 4.5, 94.0, 1.3, 0.15, # regime params (strong/panic)
+            0.45, 0.6, # [NEW] Weak regime
+            90, 0.1, 0, # entry filters, warmup
+            False, 1000000.0 # [NEW] compounding
+        )
         print(" Done!")
     except Exception as e:
         print(f"\n⚠️  Numba warmup failed: {e}")
@@ -617,7 +479,7 @@ if __name__ == "__main__":
             # Pass daily_df and check if merge_indices available
             engine = BacktestEngineFastSpot(
                 df, daily_df, strategy, backtest_loop_spot_numba,
-                initial_balance=10_000_000,
+                initial_balance=1_000_000,
                 fee_rate=0.0005,
                 slippage_rate=0.0003
             )
