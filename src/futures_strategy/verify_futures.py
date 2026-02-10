@@ -17,7 +17,6 @@ except IndexError:
     sys.path.append(os.getcwd())
 
 from config.settings import (
-    DATA_DIR,
     BACKTEST_START_DATE,
     BACKTEST_END_DATE,
     TRAIN_CUTOFF_DATE,
@@ -36,21 +35,13 @@ logging.getLogger("src.futures_strategy.engine_fast_futures").setLevel(logging.W
 def load_data(symbol, start_date, end_date, timeframe):
     """Load Data Helper"""
     collector = DataCollector()
-    
-    # Daily Data
-    daily_file = DATA_DIR / f"{symbol.replace('/', '_')}_1d_{start_date}_{end_date}.csv"
-    if not daily_file.exists():
-         logger.info("Downloading Daily data...")
-         collector.collect_and_save(symbol, '1d', start_date, end_date)
-    daily_df = pd.read_csv(daily_file)
+
+    # Daily Data (Parquet range cache + incremental fetch)
+    daily_df = collector.ensure_data(symbol, "1d", start_date, end_date)
     daily_df['datetime'] = pd.to_datetime(daily_df['timestamp'], unit='ms')
 
-    # Timeframe Data
-    tf_file = DATA_DIR / f"{symbol.replace('/', '_')}_{timeframe}_{start_date}_{end_date}.csv"
-    if not tf_file.exists():
-        logger.info(f"Downloading {timeframe} data...")
-        collector.collect_and_save(symbol, timeframe, start_date, end_date)
-    hourly_df = pd.read_csv(tf_file)
+    # Timeframe Data (Parquet range cache + incremental fetch)
+    hourly_df = collector.ensure_data(symbol, timeframe, start_date, end_date)
     hourly_df['datetime'] = pd.to_datetime(hourly_df['timestamp'], unit='ms')
     
     # Merge for Strategy Signals
