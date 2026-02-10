@@ -261,7 +261,7 @@ def soft_sigmoid(x, L, k, x0):
     z_safe = np.clip(z, -500, 500)
     return L / (1 + np.exp(z_safe))
 
-def calculate_score(ret, mdd, trades_df, mode="DAY", market_type="spot", timeframe=None):
+def calculate_score(ret, mdd, trades_df, mode="DAY", market_type="spot", timeframe=None, min_trades_override=None):
     """
     Objective Function v14: Semantic Robustness Optimization
     
@@ -416,7 +416,11 @@ def calculate_score(ret, mdd, trades_df, mode="DAY", market_type="spot", timefra
     # --- 5. Common Penalties ---
 
     # Trade Count (Logarithmic Penalty - harsh on very low numbers)
-    min_trades = 150 if market_type == 'futures' else 60
+    # Allow override for split validation (e.g., yearly segments)
+    if min_trades_override is not None:
+        min_trades = min_trades_override
+    else:
+        min_trades = 150 if market_type == 'futures' else 60
     
     if N < min_trades:
         if market_type == 'futures':
