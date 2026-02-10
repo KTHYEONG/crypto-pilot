@@ -23,6 +23,7 @@ from config.settings import (
     BACKTEST_START_DATE,
     BACKTEST_END_DATE,
     TRAIN_CUTOFF_DATE,
+    FUTURES_INITIAL_BALANCE,
 )
 from config.optimization_config_modes import GET_SEARCH_SPACE, BASE_SEARCH_SPACE
 from config.optimization_config_ultimate import (
@@ -37,7 +38,6 @@ from src.futures_strategy.engine_fast_futures import (
 from src.optimization.opt_utils import suggest_params, calculate_score
 
 # Shared constants
-FUTURES_INITIAL_BALANCE = 600.0
 DAILY_BUFFER_DAYS = 200
 
 WARMUP_BUFFER_BARS = {
