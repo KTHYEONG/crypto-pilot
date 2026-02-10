@@ -177,7 +177,14 @@ class RealTraderSpot:
         # 전략 로드
         self.params_map: Dict[str, dict] = {}
         self.strategies: Dict[str, UltimateStrategy] = {}
+        # [Optimization] 중복 계산 방지용 캐시
         self.last_calc_candle: Dict[str, str] = {}
+        
+        # [Cloud Optimization] 시간 기반 작업 추적 (loop_count 대신 사용)
+        self._last_resource_check = datetime.utcnow()
+        self._last_db_cleanup = datetime.utcnow()
+        self._last_gc = datetime.utcnow()
+        
         self.load_strategies_from_db()
 
     def _setup_signal_handlers(self):
@@ -300,10 +307,8 @@ class RealTraderSpot:
             params = self.params_map[symbol]
             strategy = self.strategies[symbol]
             timeframe = params.get('TIMEFRAME', '1h')
+            df = None  # Ensure initialization for cleanup
 
-            # [MEMORY OPTIMIZATION] 진입 시점 여부 확인
-            is_entry_time = self._is_entry_time(timeframe)
-            
             # 현재 포지션 조회 (가벼운 API)
             pos = self._fetch_position_safe(symbol)
             balance_coin = pos.get('amount', 0.0)
@@ -316,61 +321,87 @@ class RealTraderSpot:
             current_slot = self._get_candle_slot_id(timeframe)
             already_calculated = self.last_calc_candle.get(symbol) == current_slot
             
-            # --- Case 1: 정시 (4h 마감) - 무거운 데이터 로드 및 지표 캐싱 ---
-            if is_entry_time and not already_calculated:
-                logger.info(f"🔍 [{symbol}] Entry Search")
+            # 진입 시점 확인
+            is_entry_time = self._is_entry_time(timeframe)
+            
+            # [P0 FIX] 캐시 미존재 시 무한 재계산 방지
+            # 캐시가 없으면 무조건 계산 (초기화), 이후에는 진입 시점에만 계산
+            cached = self._get_cached_indicators(symbol)
+            need_calculation = False
+            
+            if not cached:
+                need_calculation = True
+                logger.info(f"🔍 [{symbol}] Initial calculation (no cache)")
+            elif is_entry_time and not already_calculated:
+                need_calculation = True
+                logger.info(f"🔍 [{symbol}] Entry window calculation")
+            
+            # --- Case 1: 지표 계산이 필요한 경우 -> 무거운 데이터 로드 ---
+            if need_calculation:
                 df = self._fetch_ohlcv_safe(symbol, timeframe, limit=600)
-                if df is not None and len(df) >= 200:
-                    # [Correction] Ensure float64 for TA-Lib compatibility
-                    float_cols = ['open', 'high', 'low', 'close', 'volume']
-                    df[float_cols] = df[float_cols].astype(np.float64)
-
-                    df = strategy.generate_signals(df)
-                    last_candle = df.iloc[-2]
-                    
-                    # [Safety] Data validation & NaN handling
-                    trend_dir = last_candle.get('trend_direction', 0)
-                    atr = last_candle.get('atr', 0.0)
-                    sar = last_candle.get('parabolic_sar', 0.0)
-                    vol_ratio = last_candle.get('volume_ratio', 100.0)
-                    entry_upper = last_candle.get('entry_upper', 0.0)
-                    entry_lower = last_candle.get('entry_lower', 0.0)
-                    
-                    if pd.isna(trend_dir): trend_dir = 0
-                    if pd.isna(atr): atr = 0.0
-                    if pd.isna(sar): sar = 0.0
-                    if pd.isna(vol_ratio): vol_ratio = 100.0
-                    
-                    # 지표값 캐싱 (4시간 동안 재사용)
-                    self._cache_indicators(symbol, {
-                        'trend_direction': int(trend_dir),
-                        'atr': float(atr),
-                        'parabolic_sar': float(sar),
-                        'entry_upper': float(entry_upper) if not pd.isna(entry_upper) else 0.0,
-                        'entry_lower': float(entry_lower) if not pd.isna(entry_lower) else 0.0,
-                        'strength_filter': int(last_candle.get('strength_filter', 1)) if not pd.isna(last_candle.get('strength_filter', 1)) else 1,
-                        'volume_ratio': float(vol_ratio),
-                        'rsi': float(last_candle.get('rsi', 50.0)),
-                        'hurst': float(last_candle.get('hurst', 0.5)),
-                        'natr': float(last_candle.get('natr', 0.0)),
-                        'cached_at': datetime.utcnow().isoformat()
-                    })
-                    
+                
+                if df is None or len(df) < 200:
+                    logger.warning(
+                        f"⚠️ Insufficient data for {symbol}. "
+                        f"Got {len(df) if df is not None else 0}, need min 200."
+                    )
+                    # [P0 FIX] 계산 실패해도 슬롯 기록하여 무한 재시도 방지
                     self.last_calc_candle[symbol] = current_slot
-                    logger.info(f"📊 Indicators calculated for {symbol}")
+                    return
+                
+                logger.info(f"🔍 [{symbol}] Entry Search")
+                # [Correction] Ensure float64 for TA-Lib compatibility
+                float_cols = ['open', 'high', 'low', 'close', 'volume']
+                df[float_cols] = df[float_cols].astype(np.float64)
+
+                df = strategy.generate_signals(df)
+                last_candle = df.iloc[-2]
+                
+                # [Safety] Data validation & NaN handling
+                trend_dir = last_candle.get('trend_direction', 0)
+                atr = last_candle.get('atr', 0.0)
+                sar = last_candle.get('parabolic_sar', 0.0)
+                vol_ratio = last_candle.get('volume_ratio', 100.0)
+                entry_upper = last_candle.get('entry_upper', 0.0)
+                entry_lower = last_candle.get('entry_lower', 0.0)
+                
+                if pd.isna(trend_dir): trend_dir = 0
+                if pd.isna(atr): atr = 0.0
+                if pd.isna(sar): sar = 0.0
+                if pd.isna(vol_ratio): vol_ratio = 100.0
+                
+                # [CACHE] 다음 4시간 동안 재사용할 지표값 저장
+                self._cache_indicators(symbol, {
+                    'trend_direction': int(trend_dir),
+                    'atr': float(atr),
+                    'parabolic_sar': float(sar),
+                    'entry_upper': float(entry_upper) if not pd.isna(entry_upper) else None,
+                    'entry_lower': float(entry_lower) if not pd.isna(entry_lower) else None,
+                    'strength_filter': int(last_candle.get('strength_filter', 1)) if not pd.isna(last_candle.get('strength_filter', 1)) else 1,
+                    'volume_ratio': float(vol_ratio),
+                    'rsi': float(last_candle.get('rsi', 50.0)),
+                    'hurst': float(last_candle.get('hurst', 0.5)),
+                    'natr': float(last_candle.get('natr', 0.0)),
+                    'cached_at': datetime.utcnow().isoformat()
+                })
+                
+                # 계산 완료 기록
+                self.last_calc_candle[symbol] = current_slot
+                logger.info(f"📊 Indicators calculated for {symbol}")
                 
                 # [Optimization] 메모리 정리
                 del df
                 gc.collect()
             
-            # --- Case 2: 공통 처리 (정시/1분 체크 모두) ---
-            # 캐시된 지표값 로드
-            cached = self._get_cached_indicators(symbol)
-            trend_dir = cached.get('trend_direction', 0)
-            atr = cached.get('atr', 0.0)
-            sar = cached.get('parabolic_sar', 0.0)
+            # --- Case 2: 비진입 시점이거나 이미 계산됨 -> 캐시된 지표 사용 ---
+            else:
+                # 캐시된 지표값 로드
+                cached = self._get_cached_indicators(symbol)
+                trend_dir = cached.get('trend_direction', 0)
+                atr = cached.get('atr', 0.0)
+                sar = cached.get('parabolic_sar', 0.0)
             
-            # 현재가 조회 (Ticker)
+            # 현재가 조회 (가벼운 API - 항상 필요)
             last_price = self._get_market_price_safe(symbol)
             if last_price is None:
                 logger.warning(f"⚠️ [{symbol}] Could not fetch market price. Skipping cycle.")
@@ -409,10 +440,20 @@ class RealTraderSpot:
                     mock_candle, state
                 )
             
-            # --- ENTRY LOGIC (정시에만 수행) ---
+            # --- ENTRY LOGIC (진입 시점에만 실행) ---
             # [ISSUE #1 FIX] 중복 elif 제거 - 포지션 없고 진입 시점일 때만 실행
             elif not in_position and is_entry_time:
                 logger.info(f"ℹ️ [{symbol}] No position. Entry window open. Checking conditions...")
+                
+                # [Safety] 최근 진입 기록 확인 (Double Entry Prevention)
+                state = self.state_manager.get_symbol_state(symbol)
+                last_entry_str = state.get('entry_time')
+                if last_entry_str:
+                    last_entry_dt = datetime.fromisoformat(last_entry_str)
+                    # 3분 이내 진입 기록이 있으면 중복 진입 방지 (API 반영 지연 대응)
+                    if (datetime.utcnow() - last_entry_dt).total_seconds() < 180:
+                        logger.info(f"⏳ Recent entry detected ({last_entry_str}). Skipping to prevent duplicate.")
+                        return
                 
                 # [Safety] 미체결 주문 확인 (Pending Orders) - 매수 대기 주문이 있으면 스킵
                 open_orders = self.client.fetch_open_orders(symbol)
@@ -420,11 +461,19 @@ class RealTraderSpot:
                     logger.warning(f"⚠️ Open orders exist ({len(open_orders)}) for {symbol}. Skipping entry to prevent accumulation.")
                     return
 
-                entry_upper = cached.get('entry_upper', 0.0)
-                entry_lower = cached.get('entry_lower', 0.0)
-                
-                # Unconditional call to allow for "Skip" logging inside _check_entry
                 logger.info(f"🔎 [{symbol}] Checking Entry Conditions...")
+                
+                # [P2 FIX] Entry Level 유효성 검증 강화 (None/Inf 체크 추가)
+                cached = self._get_cached_indicators(symbol)
+                entry_upper = cached.get('entry_upper')
+                entry_lower = cached.get('entry_lower')
+                
+                if (pd.isna(entry_upper) or pd.isna(entry_lower) or 
+                    entry_upper is None or entry_lower is None or
+                    not np.isfinite(entry_upper) or not np.isfinite(entry_lower)):
+                    logger.info(f"⏭️ [{symbol}] Skip: Invalid Entry Levels")
+                    return
+                
                 self._check_entry(
                     symbol, last_price, params,
                     {
@@ -438,6 +487,11 @@ class RealTraderSpot:
                         'natr': cached.get('natr', 0.0)
                     }
                 )
+            
+            # [Optimization] 대규모 데이터프레임 제거 (진입 시점에만 생성됨)
+            if need_calculation and df is not None:
+                del df
+                gc.collect()
 
         except Exception as e:
             logger.error(f"🚨 Error executing logic for {symbol}: {e}")
@@ -734,10 +788,10 @@ class RealTraderSpot:
                             reason=f"Trend(↑) & Breakout(>{entry_upper:,.0f})"
                         )
 
-                        # 상태 저장
+                        # 상태 저장 (UTC 기준 시간 사용)
                         self.state_manager.update_symbol_state(symbol, {
                             'entry_price': last_price,
-                            'entry_time': datetime.now().isoformat(),
+                            'entry_time': datetime.utcnow().isoformat(),
                             'entry_atr': atr,
                             'highest_high': last_price,
                             'invest_amount': invest_amount
@@ -840,6 +894,9 @@ class RealTraderSpot:
 
         while not self._shutdown_requested:
             try:
+                # [FIX] 루프 시작 시간 기록 (정확한 주기 유지)
+                loop_start_time = time.time()
+                
                 # 각 심볼 처리
                 for symbol in self.symbols:
                     if self._shutdown_requested:
@@ -851,13 +908,6 @@ class RealTraderSpot:
                     
                     # 2. 실시간 가격 및 잔고 등 필수 데이터 경량 조회
                     try:
-                        # [Optimization] 매번 전체 캔들을 부르지 않고 Ticker/Position만 빠르게 조회
-                        # 단, 여기서는 구조상 execute_logic 안에서 처리하므로
-                        # 진입/이탈 로직을 분리하는 것이 최적임.
-                        
-                        # 현재 구조 유지를 위해 execute_logic 내부를 수정하는 대신
-                        # 여기서 분기 처리를 하지 않고, execute_logic 안에서
-                        # "진입 타임이 아니면 Exit 로직만 돌고 리턴"하게 변경하는 것이 안전함.
                         self.execute_logic(symbol)
                         
                     except Exception as e:
@@ -872,39 +922,49 @@ class RealTraderSpot:
                     positions=positions
                 )
 
-                # 클라우드 최적화 실행
+                # 클라우드 최적화 실행 (시간 기반 체크)
                 if self.cloud_optimizer:
-                    # 1. 시간 동기화 검증
+                    now = datetime.utcnow()
+                    
+                    # 1. 시간 동기화 검증 (매 루프)
                     if not self.cloud_optimizer.check_time_sync_ntp():
                         logger.error("⏰ Time drift detected! Bot may encounter API errors.")
                     
-                    # 2. 리소스 모니터링 (10분마다) & 메모리 보호 (AWS Free Tier)
-                    if self.health_manager.loop_count % 60 == 0:  # 10s * 60 = 10분
+                    # 2. 리소스 모니터링 (10분마다) & 메모리 보호
+                    if (now - self._last_resource_check).total_seconds() >= 600:  # 10분 = 600초
                         usage = self.cloud_optimizer.log_resource_usage()
                         if usage.get('memory_percent', 0) > 85.0:
                             logger.warning(f"⚠️ High Memory ({usage.get('memory_percent')}%) detected. Forcing GC...")
                             self.cloud_optimizer.force_gc()
+                        self._last_resource_check = now
                     
-                    # 3. DB 정리 (24시간마다: 1440분)
-                    if self.health_manager.loop_count % 1440 == 0:
+                    # 3. DB 정리 (24시간마다)
+                    if (now - self._last_db_cleanup).total_seconds() >= 86400:  # 24시간 = 86400초
                         self.cloud_optimizer.cleanup_db_old_records(
                             TRADE_HISTORY_DB, 
                             days_to_keep=90
                         )
-
-                    # 5. 명시적 GC (2시간마다: 120분)
-                    if self.health_manager.loop_count % 120 == 0:
+                        self._last_db_cleanup = now
+                    
+                    # 4. 명시적 GC (2시간마다)
+                    if (now - self._last_gc).total_seconds() >= 7200:  # 2시간 = 7200초
                         self.cloud_optimizer.force_gc()
+                        self._last_gc = now
 
-                # [High-Frequency Monitoring] 청산 감시를 위해 10초(SPOT_LOOP_INTERVAL_SECONDS)마다 반복
-                # 업비트 예약주문 수수료(0.139%)를 피하기 위해 빠른 루프로 감시
-                wait_seconds = float(SPOT_LOOP_INTERVAL_SECONDS)
+                # [FIX] 심볼 처리 시간을 고려한 동적 대기 시간 계산
+                # 목표: 전체 루프 주기를 정확히 SPOT_LOOP_INTERVAL_SECONDS(10초)로 유지
+                elapsed_processing = time.time() - loop_start_time
+                target_interval = float(SPOT_LOOP_INTERVAL_SECONDS)
+                adjusted_wait = max(0.5, target_interval - elapsed_processing)  # 최소 0.5초 대기
                 
-                logger.debug(f"💤 Sleeping {wait_seconds:.1f}s until next monitoring cycle...")
+                logger.debug(
+                    f"💤 Loop took {elapsed_processing:.2f}s. "
+                    f"Sleeping {adjusted_wait:.2f}s (Target: {target_interval:.1f}s cycle)"
+                )
                 
                 # Shutdown 체크하면서 대기
                 start_wait = time.time()
-                while time.time() - start_wait < wait_seconds:
+                while time.time() - start_wait < adjusted_wait:
                     if self._shutdown_requested:
                         break
                     time.sleep(0.5)
