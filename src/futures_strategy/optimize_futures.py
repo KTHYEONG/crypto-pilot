@@ -135,24 +135,16 @@ def compute_segment_merge_index(hourly_df, daily_df):
     """
     Build merge index for a sliced segment so engine can use fast index mapping.
     """
-    if "date_key" not in hourly_df.columns:
-        hourly_keys = pd.to_datetime(hourly_df["datetime"]).dt.strftime("%Y-%m-%d").values
-    else:
-        hourly_keys = hourly_df["date_key"].values
+    hourly_days = pd.to_datetime(hourly_df["datetime"]).dt.normalize().values.astype("datetime64[ns]")
+    daily_days = pd.to_datetime(daily_df["datetime"]).dt.normalize().values.astype("datetime64[ns]")
+    if len(daily_days) == 0:
+        return np.zeros(len(hourly_days), dtype=np.int32)
 
-    if "date_key" not in daily_df.columns:
-        daily_keys = pd.to_datetime(daily_df["datetime"]).dt.strftime("%Y-%m-%d").values
-    else:
-        daily_keys = daily_df["date_key"].values
-
-    date_to_daily_idx = {date_key: idx for idx, date_key in enumerate(daily_keys)}
-    merge_index = np.array(
-        [date_to_daily_idx.get(date_key, -1) for date_key in hourly_keys],
-        dtype=np.int32,
-    )
-    if np.any(merge_index == -1):
-        merge_index[merge_index == -1] = 0
-    return merge_index
+    # As-of backward mapping: use the most recent available daily bar for each intraday bar.
+    # This is safer than forcing missing keys to index 0.
+    pos = np.searchsorted(daily_days, hourly_days, side="right") - 1
+    pos = np.clip(pos, 0, len(daily_days) - 1).astype(np.int32)
+    return pos
 
 
 def calculate_oos_mdd_pct(pnl_series, initial_balance):
@@ -311,31 +303,33 @@ def compute_merge_indices(data_maps):
     for symbol, data_map in data_maps.items():
         merge_indices[symbol] = {}
         
-        # Get daily date_key mapping
-        daily_df = data_map['1d']
-        daily_date_keys = daily_df['date_key'].values
-        
-        # Create a lookup dict: date_key -> daily_index
-        date_to_daily_idx = {date_key: idx for idx, date_key in enumerate(daily_date_keys)}
+        # Get normalized daily timestamps for fast as-of mapping
+        daily_df = data_map["1d"]
+        daily_days = pd.to_datetime(daily_df["datetime"]).dt.normalize().values.astype("datetime64[ns]")
+        if len(daily_days) == 0:
+            print(f"⚠️  Warning: {symbol}-1d is empty. Using fallback index 0 for all timeframes.")
+            for tf, tf_df in data_map.items():
+                if tf == "1d":
+                    continue
+                merge_indices[symbol][tf] = np.zeros(len(tf_df), dtype=np.int32)
+            continue
         
         # For each timeframe, create the merge index
         for tf, tf_df in data_map.items():
             if tf == '1d':
                 continue  # Skip daily itself
             
-            # Map each hourly bar's date_key to its daily index
-            hourly_date_keys = tf_df['date_key'].values
-            merge_index = np.array([
-                date_to_daily_idx.get(date_key, -1) 
-                for date_key in hourly_date_keys
-            ], dtype=np.int32)
-            
-            # Handle missing mappings (shouldn't happen with proper data)
-            # Replace -1 with 0 and issue warning if found
-            if np.any(merge_index == -1):
-                print(f"⚠️  Warning: {symbol}-{tf} has unmapped date_keys. Using fallback index 0.")
-                merge_index[merge_index == -1] = 0
-            
+            # As-of backward mapping (hourly day -> latest daily day <= hourly day)
+            hourly_days = pd.to_datetime(tf_df["datetime"]).dt.normalize().values.astype("datetime64[ns]")
+            pos = np.searchsorted(daily_days, hourly_days, side="right") - 1
+            before_first = int(np.sum(pos < 0))
+            after_last = int(np.sum(hourly_days > daily_days[-1]))
+            if before_first > 0 or after_last > 0:
+                print(
+                    f"ℹ️  Info: {symbol}-{tf} as-of mapped out-of-range bars "
+                    f"(before_first={before_first}, after_last={after_last})."
+                )
+            merge_index = np.clip(pos, 0, len(daily_days) - 1).astype(np.int32)
             merge_indices[symbol][tf] = merge_index
     
     return merge_indices
