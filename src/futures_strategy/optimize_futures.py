@@ -702,6 +702,44 @@ def run_optuna_study(
     return study, n_startup_trials
 
 
+def publish_best_trial_alias(storage, target_study_name, source_study, source_label=""):
+    """Publish best trial from source study into canonical target study."""
+    if source_study is None:
+        return None
+
+    complete_trials = [
+        tr for tr in source_study.trials if tr.state == optuna.trial.TrialState.COMPLETE
+    ]
+    if not complete_trials:
+        return None
+
+    try:
+        optuna.delete_study(study_name=target_study_name, storage=storage)
+    except Exception:
+        pass
+
+    published = optuna.create_study(
+        study_name=target_study_name,
+        storage=storage,
+        direction="maximize",
+        sampler=optuna.samplers.TPESampler(n_startup_trials=1),
+    )
+
+    best_trial = source_study.best_trial
+    user_attrs = dict(best_trial.user_attrs) if best_trial.user_attrs else {}
+    if source_label:
+        user_attrs["published_from"] = source_label
+
+    frozen_trial = optuna.trial.create_trial(
+        params=best_trial.params,
+        distributions=best_trial.distributions,
+        value=best_trial.value,
+        user_attrs=user_attrs,
+    )
+    published.add_trial(frozen_trial)
+    return published
+
+
 def main():
     exit_code = 0
     parser = argparse.ArgumentParser()
@@ -957,6 +995,9 @@ def main():
 
     study = None
     is_two_stage_mode = mode in {"UNIFIED", "ALL"}
+    best_candidate_study = None
+    best_candidate_value = -float("inf")
+    best_candidate_label = ""
 
     try:
         if is_two_stage_mode:
@@ -1034,6 +1075,10 @@ def main():
                     f"   ✅ Stage1-{fidelity['name']} done | startup={step_startup} "
                     f"| best={step_study.best_value:.2f}"
                 )
+                if np.isfinite(step_study.best_value) and step_study.best_value > best_candidate_value:
+                    best_candidate_value = float(step_study.best_value)
+                    best_candidate_study = step_study
+                    best_candidate_label = step_study_name
 
                 completed = [
                     tr for tr in step_study.trials
@@ -1120,6 +1165,10 @@ def main():
                 print(
                     f"   ✅ Stage2-{i} done | startup={s2_startup} | best={s2_study.best_value:.2f}"
                 )
+                if np.isfinite(s2_study.best_value) and s2_study.best_value > best_candidate_value:
+                    best_candidate_value = float(s2_study.best_value)
+                    best_candidate_study = s2_study
+                    best_candidate_label = step_study_name
 
                 if s2_study.best_value > best_stage2_value:
                     best_stage2_value = s2_study.best_value
@@ -1128,25 +1177,15 @@ def main():
             if best_stage2_study is None:
                 raise RuntimeError("2-Stage optimization failed to produce any complete Stage2 study.")
 
-            # Publish final winner into standard study name for deployment compatibility.
-            try:
-                optuna.delete_study(study_name=study_name, storage=storage)
-            except Exception:
-                pass
-            study = optuna.create_study(
-                study_name=study_name,
+            # Publish final winner into standard study name for downstream compatibility.
+            study = publish_best_trial_alias(
                 storage=storage,
-                direction="maximize",
-                sampler=optuna.samplers.TPESampler(n_startup_trials=1),
+                target_study_name=study_name,
+                source_study=best_stage2_study,
+                source_label="stage2_winner",
             )
-            best_trial = best_stage2_study.best_trial
-            frozen_trial = optuna.trial.create_trial(
-                params=best_trial.params,
-                distributions=best_trial.distributions,
-                value=best_trial.value,
-                user_attrs=best_trial.user_attrs,
-            )
-            study.add_trial(frozen_trial)
+            if study is None:
+                raise RuntimeError("Failed to publish final stage2 winner to canonical study.")
 
         else:
             startup_ratio = 0.22 if awfo_enabled else 0.20
@@ -1178,6 +1217,24 @@ def main():
     except Exception as e:
         print(f"\n❌ Optimization failed with error: {e}")
         exit_code = 1
+        # Safety net for 2-stage runs: publish best completed intermediate study
+        # to canonical name so verify can still find a usable result.
+        if study is None and best_candidate_study is not None:
+            try:
+                published = publish_best_trial_alias(
+                    storage=storage,
+                    target_study_name=study_name,
+                    source_study=best_candidate_study,
+                    source_label=f"fallback:{best_candidate_label}",
+                )
+                if published is not None:
+                    study = published
+                    print(
+                        f"🛟 Fallback published to '{study_name}' from "
+                        f"'{best_candidate_label}' (best={study.best_value:.2f})"
+                    )
+            except Exception as pub_e:
+                print(f"⚠️ Fallback publish failed: {pub_e}")
         if study is not None:
             print(f"💾 Progress saved: {len(study.trials)} trials completed before failure")
         import traceback
