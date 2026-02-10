@@ -703,6 +703,7 @@ def run_optuna_study(
 
 
 def main():
+    exit_code = 0
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--trials",
@@ -1171,17 +1172,24 @@ def main():
 
     except KeyboardInterrupt:
         print("\n🛑 Optimization Interrupted by User")
+        exit_code = 130
         if study is not None:
             print(f"💾 Progress saved: {len(study.trials)} trials completed")
     except Exception as e:
         print(f"\n❌ Optimization failed with error: {e}")
+        exit_code = 1
         if study is not None:
             print(f"💾 Progress saved: {len(study.trials)} trials completed before failure")
         import traceback
         traceback.print_exc()
 
     print(f"\n{'='*70}")
-    print(f"✅ {mode} Optimization Complete!")
+    if exit_code == 0:
+        print(f"✅ {mode} Optimization Complete!")
+    elif exit_code == 130:
+        print(f"⏸️ {mode} Optimization Interrupted.")
+    else:
+        print(f"❌ {mode} Optimization Failed.")
 
     if study is not None and len(study.trials) > 0:
         print(f"🏆 Best Score: {study.best_value:.2f}")
@@ -1241,7 +1249,8 @@ def main():
                 print(f"   - {symbol:<9} : Error calculating performance: {e}")
 
     print(f"{'='*70}")
+    return exit_code
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
