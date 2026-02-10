@@ -349,9 +349,21 @@ class RealTraderFutures:
             # 진입 시점 확인
             is_entry_time = self._is_entry_time(timeframe)
 
-            # --- Case 1: 진입 시점(정시) OR 첫 실행(캐시 없음) -> 무거운 데이터 로드 ---
-            if (is_entry_time and not already_calculated) or not self._get_cached_indicators(symbol):
-                logger.info(f"🔍 [{symbol}] Calculating indicators (Reason: {'Entry Window' if is_entry_time else 'Initial Boot'})")
+            # [P0 FIX] 캐시 미존재 시 무한 재계산 방지
+            # 캐시가 없으면 무조건 계산 (초기화), 이후에는 진입 시점에만 계산
+            cached = self._get_cached_indicators(symbol)
+            need_calculation = False
+            
+            if not cached:
+                need_calculation = True
+                logger.info(f"🔍 [{symbol}] Initial calculation (no cache)")
+            elif is_entry_time and not already_calculated:
+                need_calculation = True
+                logger.info(f"🔍 [{symbol}] Entry window calculation")
+
+            # --- Case 1: 지표 계산이 필요한 경우 -> 무거운 데이터 로드 ---
+            if need_calculation:
+
                 # 전체 캔들 데이터 조회 (지표 계산용)
                 tf_min = 60
                 if 'm' in timeframe:
@@ -373,6 +385,8 @@ class RealTraderFutures:
                         f"⚠️ Insufficient data for {symbol}. "
                         f"Got {len(df) if df is not None else 0}, need min 200."
                     )
+                    # [P0 FIX] 계산 실패해도 슬롯 기록하여 무한 재시도 방지
+                    self.last_calc_candle[symbol] = current_slot
                     return
                 
                 # [Correction] Ensure float64 for TA-Lib compatibility
@@ -511,8 +525,11 @@ class RealTraderFutures:
                     return
 
                 logger.info(f"🔎 [{symbol}] Checking Entry Conditions...")
-                if pd.isna(entry_upper) or pd.isna(entry_lower):
-                    logger.info(f"⏭️ [{symbol}] Skip: Waiting Data")
+                # [P2 FIX] Entry Level 유효성 검증 강화 (None/Inf 체크 추가)
+                if (pd.isna(entry_upper) or pd.isna(entry_lower) or 
+                    entry_upper is None or entry_lower is None or
+                    not np.isfinite(entry_upper) or not np.isfinite(entry_lower)):
+                    logger.info(f"⏭️ [{symbol}] Skip: Invalid Entry Levels")
                     return
                 
                 # Indicators from cache
@@ -813,10 +830,10 @@ class RealTraderFutures:
             exit_type = params.get('EXIT_TYPE')
             use_sar_exit = (exit_type == 'PARABOLIC_SAR')
             
-            # SAR 사용 시 유효성 검증 (sar=0이면 지표 계산 실패 또는 미사용)
-            if use_sar_exit and sar <= 0:
+            # [P1 FIX] SAR 사용 시 유효성 검증 강화 (NaN/Inf 체크 추가)
+            if use_sar_exit and (sar <= 0 or not np.isfinite(sar)):
                 logger.warning(
-                    f"⚠️ [{symbol}] SAR exit enabled but SAR value invalid ({sar:.2f}). "
+                    f"⚠️ [{symbol}] SAR exit enabled but SAR value invalid ({sar}). "
                     "Falling back to Trend Reversal exit."
                 )
                 use_sar_exit = False  # SAR 청산 비활성화
