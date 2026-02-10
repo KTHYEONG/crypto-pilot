@@ -36,6 +36,112 @@ from src.futures_strategy.engine_fast_futures import (
 )
 from src.optimization.opt_utils import suggest_params, calculate_score
 
+# Shared constants
+FUTURES_INITIAL_BALANCE = 600.0
+DAILY_BUFFER_DAYS = 200
+
+WARMUP_BUFFER_BARS = {
+    "5m": 500,
+    "15m": 400,
+    "30m": 350,
+    "1h": 300,
+    "2h": 250,
+    "4h": 200,
+    "1d": 150,
+    "3d": 100,
+}
+
+# AWFO defaults (pragmatic runtime vs robustness)
+AWFO_DEFAULTS = {
+    "enabled_modes": {"UNIFIED", "ALL"},
+    "folds": 3,
+    "min_trades_per_fold": 40,
+    "min_test_bars": {
+        "15m": 1200,
+        "30m": 900,
+        "1h": 600,
+        "2h": 420,
+        "4h": 240,
+        "1d": 120,
+        "3d": 60,
+    },
+    "embargo_bars": {
+        "15m": 32,
+        "30m": 24,
+        "1h": 24,
+        "2h": 16,
+        "4h": 12,
+        "1d": 5,
+        "3d": 2,
+    },
+}
+
+
+def build_anchored_splits(n_bars, n_folds, embargo_bars=0, min_test_bars=120):
+    """
+    Build anchored walk-forward splits:
+    Fold i uses [0..train_end_i] as anchor context and next block as OOS.
+    """
+    if n_folds < 1 or n_bars < (n_folds + 1):
+        return []
+
+    block = n_bars // (n_folds + 1)
+    if block < 2:
+        return []
+
+    splits = []
+    for i in range(1, n_folds + 1):
+        train_end = block * i
+        test_start = train_end + max(embargo_bars, 0)
+        test_end = (block * (i + 1)) if i < n_folds else n_bars
+
+        if test_start >= test_end:
+            continue
+        if (test_end - test_start) < min_test_bars:
+            continue
+
+        splits.append((test_start, test_end))
+
+    return splits
+
+
+def compute_segment_merge_index(hourly_df, daily_df):
+    """
+    Build merge index for a sliced segment so engine can use fast index mapping.
+    """
+    if "date_key" not in hourly_df.columns:
+        hourly_keys = pd.to_datetime(hourly_df["datetime"]).dt.strftime("%Y-%m-%d").values
+    else:
+        hourly_keys = hourly_df["date_key"].values
+
+    if "date_key" not in daily_df.columns:
+        daily_keys = pd.to_datetime(daily_df["datetime"]).dt.strftime("%Y-%m-%d").values
+    else:
+        daily_keys = daily_df["date_key"].values
+
+    date_to_daily_idx = {date_key: idx for idx, date_key in enumerate(daily_keys)}
+    merge_index = np.array(
+        [date_to_daily_idx.get(date_key, -1) for date_key in hourly_keys],
+        dtype=np.int32,
+    )
+    if np.any(merge_index == -1):
+        merge_index[merge_index == -1] = 0
+    return merge_index
+
+
+def calculate_oos_mdd_pct(pnl_series, initial_balance):
+    """
+    Compute MDD (%) from realized trade PnL sequence in OOS window.
+    """
+    if pnl_series.empty:
+        return 0.0
+
+    equity = initial_balance + pnl_series.cumsum().values
+    running_max = np.maximum.accumulate(equity)
+    running_max[running_max == 0] = 1e-9
+    drawdown = (equity - running_max) / running_max * 100.0
+    return float(np.min(drawdown)) if len(drawdown) else 0.0
+
 
 def load_all_timeframes(symbol, start_date, end_date, timeframes):
     """Load all necessary timeframe data into memory"""
@@ -137,142 +243,275 @@ def compute_merge_indices(data_maps):
 
 
 def objective(
-    trial, strategy_cls, strategy_name, data_maps, search_space, common_search_space, merge_indices=None
+    trial,
+    strategy_cls,
+    strategy_name,
+    data_maps,
+    search_space,
+    common_search_space,
+    merge_indices=None,
+    awfo_plan=None,
 ):
     """
     Multi-symbol objective function.
-    
+
     Args:
-        merge_indices: Pre-computed merge index mappings (optional, for optimization)
+        merge_indices: Pre-computed merge index mappings for full-run path.
+        awfo_plan: Dict containing AWFO settings and pre-built splits.
     """
     import gc
-    
+
     # 1. Generate Params
     strategy_params = suggest_params(trial, search_space)
-    # Merge common search space if it has unique keys, or ignore if fully handled by search_space
-    # In this new design, GET_SEARCH_SPACE returns almost everything.
     common_params = suggest_params(trial, common_search_space)
     full_params = {**strategy_params, **common_params}
 
     # [VALIDATION] Enforce Logical Constraints
     if full_params.get("TREND_FILTER_TYPE") == "MACD":
         if full_params.get("MACD_FAST", 12) >= full_params.get("MACD_SLOW", 26):
-            return -10000  # Invalid trial penalty
+            return -10000
 
-    # 2. Select Timeframe
     selected_tf = full_params.get("TIMEFRAME", "1h")
+    mode_str = strategy_name.split("_")[-1]
 
-    # 3. Run backtest for EACH symbol
+    awfo_enabled = bool(awfo_plan and awfo_plan.get("enabled", False))
+    awfo_splits_by_symbol = awfo_plan.get("splits", {}) if awfo_enabled else {}
+    awfo_min_trades = awfo_plan.get("min_trades_per_fold", 40) if awfo_enabled else None
+
     symbol_scores = []
     symbol_results = {}
+    report_step = 0
 
     for symbol, data_map in data_maps.items():
-        # Ensure timeframe exists
         if selected_tf not in data_map:
             return -10000
 
-        hourly_df = data_map[selected_tf]  # Read-only reference (engine will copy)
-        daily_df = data_map["1d"]  # Read-only reference (engine will copy)
+        hourly_df = data_map[selected_tf]
+        daily_df = data_map["1d"]
 
-        # Create Strategy
-        strategy = strategy_cls(f"{strategy_name}_{symbol}", full_params)
+        # ===== Path A: AWFO (anchored OOS folds) =====
+        if awfo_enabled:
+            awfo_splits = awfo_splits_by_symbol.get(symbol, {}).get(selected_tf, [])
+            if len(awfo_splits) < 2:
+                return -10000
 
-        # Engine Execution
-        engine = BacktestEngineFast(hourly_df, daily_df, strategy, initial_balance=600)
-        
-        # [OPTIMIZATION] Inject pre-computed merge index if available
-        if merge_indices and symbol in merge_indices and selected_tf in merge_indices[symbol]:
-            engine._merge_index_map = merge_indices[symbol][selected_tf]
+            fold_scores = []
+            fold_returns = []
+            fold_mdds = []
+            fold_pfs = []
+            warmup_buffer = WARMUP_BUFFER_BARS.get(selected_tf, 200)
 
-        # Inject Leverage/Risk
-        engine.leverage = full_params.get("LEVERAGE", 1)
-        engine.risk_per_trade = full_params.get("RISK_PER_TRADE", 0.02)
+            for fold_idx, (test_start, test_end) in enumerate(awfo_splits):
+                seg_start = max(0, test_start - warmup_buffer)
+                segment_hourly = hourly_df.iloc[seg_start:test_end].copy()
+                if len(segment_hourly) < 100:
+                    continue
 
-        try:
-            result = engine.run()
-        except Exception as e:
-            # [DEBUG] Log backtest failure
-            print(f"⚠️ Backtest failed for {symbol}: {e}")
-            import traceback
-            traceback.print_exc()
-            
-            # [MEMORY] Cleanup on error
-            del engine, strategy
-            gc.collect()
-            return -10000
+                warmup_bars = test_start - seg_start
+                segment_hourly.attrs["warmup_bars"] = warmup_bars
 
-        # Extract Metrics
-        ret = result["total_return_pct"]
-        mdd = result["mdd_pct"]
-        trades = result["total_trades"]
-        win_rate = result["win_rate"]
+                actual_start_time = hourly_df.iloc[test_start]["datetime"]
+                actual_end_time = hourly_df.iloc[test_end - 1]["datetime"]
 
-        # Calculate Profit Factor (PF)
-        trades_df = result["trades_df"]
-        pf = 0.0
-        if not trades_df.empty and "pnl" in trades_df.columns:
-            gross_profit = trades_df[trades_df["pnl"] > 0]["pnl"].sum()
-            gross_loss = abs(trades_df[trades_df["pnl"] < 0]["pnl"].sum())
-            pf = (
-                gross_profit / gross_loss
-                if gross_loss > 0
-                else (gross_profit if gross_profit > 0 else 0.0)
+                start_time_buffered = segment_hourly["datetime"].iloc[0]
+                end_time = segment_hourly["datetime"].iloc[-1]
+                daily_buffer_start = start_time_buffered - pd.Timedelta(days=DAILY_BUFFER_DAYS)
+                segment_daily = daily_df[
+                    (daily_df["datetime"] >= daily_buffer_start)
+                    & (daily_df["datetime"] <= end_time)
+                ].copy()
+                if segment_daily.empty:
+                    continue
+
+                strategy = strategy_cls(f"{strategy_name}_{symbol}_F{fold_idx+1}", full_params)
+                segment_merge_index = compute_segment_merge_index(segment_hourly, segment_daily)
+                engine = BacktestEngineFast(
+                    segment_hourly,
+                    segment_daily,
+                    strategy,
+                    initial_balance=FUTURES_INITIAL_BALANCE,
+                    merge_index_map=segment_merge_index,
+                )
+                engine.leverage = full_params.get("LEVERAGE", 1)
+                engine.risk_per_trade = full_params.get("RISK_PER_TRADE", 0.02)
+
+                try:
+                    result = engine.run()
+                except Exception as e:
+                    print(f"⚠️ AWFO fold backtest failed for {symbol} (fold {fold_idx+1}): {e}")
+                    import traceback
+                    traceback.print_exc()
+                    del engine, strategy
+                    gc.collect()
+                    return -10000
+
+                trades_df = result["trades_df"]
+                fold_score = -10000.0
+
+                if not trades_df.empty and "exit_time" in trades_df.columns:
+                    trades_df["exit_time"] = pd.to_datetime(trades_df["exit_time"])
+                    oos_trades = trades_df[
+                        (trades_df["exit_time"] >= actual_start_time)
+                        & (trades_df["exit_time"] <= actual_end_time)
+                    ].copy()
+
+                    if not oos_trades.empty and "pnl" in oos_trades.columns:
+                        pnl_cumsum = oos_trades["pnl"].cumsum().shift(1).fillna(0)
+                        oos_trades["balance_before"] = FUTURES_INITIAL_BALANCE + pnl_cumsum
+                        oos_trades["balance_before"] = oos_trades["balance_before"].replace(0, 1e-9)
+                        oos_trades["pnl_pct"] = (
+                            oos_trades["pnl"] / oos_trades["balance_before"]
+                        ) * 100.0
+                        oos_trades["pnl_pct"] = oos_trades["pnl_pct"].replace(
+                            [np.inf, -np.inf], 0
+                        ).fillna(0)
+
+                        fold_ret = (oos_trades["pnl"].sum() / FUTURES_INITIAL_BALANCE) * 100.0
+                        fold_mdd = calculate_oos_mdd_pct(oos_trades["pnl"], FUTURES_INITIAL_BALANCE)
+                        fold_score = calculate_score(
+                            fold_ret,
+                            fold_mdd,
+                            oos_trades,
+                            mode=mode_str,
+                            market_type="futures",
+                            timeframe=selected_tf,
+                            min_trades_override=awfo_min_trades,
+                        )
+
+                        if np.isfinite(fold_score):
+                            fold_returns.append(float(fold_ret))
+                            fold_mdds.append(float(fold_mdd))
+                            gross_profit = oos_trades[oos_trades["pnl"] > 0]["pnl"].sum()
+                            gross_loss = abs(oos_trades[oos_trades["pnl"] < 0]["pnl"].sum())
+                            fold_pf = (
+                                gross_profit / gross_loss
+                                if gross_loss > 0
+                                else (gross_profit if gross_profit > 0 else 0.0)
+                            )
+                            fold_pfs.append(float(fold_pf))
+
+                fold_scores.append(float(fold_score) if np.isfinite(fold_score) else -10000.0)
+
+                del engine, result, strategy, trades_df
+                report_step += 1
+                running_fold_score = float(np.mean(fold_scores))
+                trial.report(running_fold_score, report_step)
+                if trial.should_prune():
+                    raise optuna.TrialPruned()
+
+            if len(fold_scores) < 2:
+                return -10000
+
+            avg_fold_score = float(np.mean(fold_scores))
+            worst_fold_score = float(np.min(fold_scores))
+            consistency = (
+                sum(score > 0 for score in fold_scores) / len(fold_scores)
+                if fold_scores
+                else 0.0
             )
 
-        symbol_results[symbol] = {
-            "return": ret,
-            "mdd": mdd,
-            "trades": trades,
-            "win_rate": win_rate,
-            "pf": pf,
-        }
+            final_symbol_score = (avg_fold_score * 0.7) + (worst_fold_score * 0.3)
+            if consistency < 0.5:
+                final_symbol_score -= (0.5 - consistency) * 80.0
+            if fold_returns and min(fold_returns) < -20.0:
+                final_symbol_score -= 150.0
 
-        # Calculate Score
-        # Extract mode from strategy_name (e.g., Ultimate_DAY)
-        mode_str = strategy_name.split("_")[-1]
-        score = calculate_score(ret, mdd, trades_df, mode=mode_str, market_type="futures", timeframe=selected_tf)
+            symbol_scores.append(final_symbol_score)
+            symbol_results[symbol] = {
+                "return": float(np.mean(fold_returns)) if fold_returns else -100.0,
+                "mdd": float(np.mean(fold_mdds)) if fold_mdds else 0.0,
+                "trades": 0,
+                "win_rate": 0.0,
+                "pf": float(np.mean(fold_pfs)) if fold_pfs else 0.0,
+            }
 
-        # [SPEED UP] Short-circuit: If any symbol performs poorly, fail the trial immediately
-        # One bad apple spoils the bunch (Harmonic Mean logic)
-        # [ADJUSTED] Threshold lowered from 5 to -50 for Simple Interest scale
-        if score < -50:
-            # [MEMORY] Cleanup before early return
+        # ===== Path B: Single full-run (legacy / non-AWFO) =====
+        else:
+            strategy = strategy_cls(f"{strategy_name}_{symbol}", full_params)
+            current_merge_index = None
+            if merge_indices and symbol in merge_indices and selected_tf in merge_indices[symbol]:
+                current_merge_index = merge_indices[symbol][selected_tf]
+
+            engine = BacktestEngineFast(
+                hourly_df,
+                daily_df,
+                strategy,
+                initial_balance=FUTURES_INITIAL_BALANCE,
+                merge_index_map=current_merge_index,
+            )
+            engine.leverage = full_params.get("LEVERAGE", 1)
+            engine.risk_per_trade = full_params.get("RISK_PER_TRADE", 0.02)
+
+            try:
+                result = engine.run()
+            except Exception as e:
+                print(f"⚠️ Backtest failed for {symbol}: {e}")
+                import traceback
+                traceback.print_exc()
+                del engine, strategy
+                gc.collect()
+                return -10000
+
+            ret = result["total_return_pct"]
+            mdd = result["mdd_pct"]
+            trades = result["total_trades"]
+            win_rate = result["win_rate"]
+            trades_df = result["trades_df"]
+
+            pf = 0.0
+            if not trades_df.empty and "pnl" in trades_df.columns:
+                gross_profit = trades_df[trades_df["pnl"] > 0]["pnl"].sum()
+                gross_loss = abs(trades_df[trades_df["pnl"] < 0]["pnl"].sum())
+                pf = (
+                    gross_profit / gross_loss
+                    if gross_loss > 0
+                    else (gross_profit if gross_profit > 0 else 0.0)
+                )
+
+            score = calculate_score(
+                ret, mdd, trades_df, mode=mode_str, market_type="futures", timeframe=selected_tf
+            )
+            if score < -50:
+                del engine, result, strategy, trades_df
+                gc.collect()
+                return -10000
+
+            symbol_scores.append(score)
+            symbol_results[symbol] = {
+                "return": ret,
+                "mdd": mdd,
+                "trades": trades,
+                "win_rate": win_rate,
+                "pf": pf,
+            }
+
             del engine, result, strategy, trades_df
-            gc.collect()
-            return -10000
 
-        symbol_scores.append(score)
+        trial.set_user_attr(f"ret_{symbol.replace('/', '_')}", float(symbol_results[symbol]["return"]))
+        trial.set_user_attr(f"mdd_{symbol.replace('/', '_')}", float(symbol_results[symbol]["mdd"]))
+        trial.set_user_attr(f"pf_{symbol.replace('/', '_')}", float(symbol_results[symbol]["pf"]))
 
-        # Set individual attrs
-        trial.set_user_attr(f"ret_{symbol.replace('/', '_')}", float(ret))
-        trial.set_user_attr(f"mdd_{symbol.replace('/', '_')}", float(mdd))
-        trial.set_user_attr(f"pf_{symbol.replace('/', '_')}", float(pf))
-        
-        # [MEMORY] Explicit cleanup per symbol
-        del engine, result, strategy, trades_df
+    # Combine scores using harmonic mean
+    if not symbol_scores:
+        gc.collect()
+        return -10000
 
-    # 4. Combine scores using HARMONIC MEAN
-    offset = 200  # [ADJUSTED] Reduced from 6000 for Simple Interest scale
+    offset = 200
     shifted_scores = [s + offset for s in symbol_scores]
-
     if any(s <= 0 for s in shifted_scores):
         final_score = -10000
     else:
         harmonic_mean = len(shifted_scores) / sum(1 / s for s in shifted_scores)
         final_score = harmonic_mean - offset
 
-    # Record Average Attributes
     avg_ret = np.mean([r["return"] for r in symbol_results.values()])
     avg_mdd = np.mean([r["mdd"] for r in symbol_results.values()])
     avg_pf = np.mean([r["pf"] for r in symbol_results.values()])
-
     trial.set_user_attr("return_avg", avg_ret)
     trial.set_user_attr("mdd_avg", avg_mdd)
     trial.set_user_attr("pf_avg", avg_pf)
-    
-    # [MEMORY] Force garbage collection after processing all symbols
-    gc.collect()
 
+    gc.collect()
     return final_score
 
 
@@ -298,17 +537,16 @@ def main():
     # Parse symbols
     symbols = [s.strip() for s in args.symbols.split(",")]
     mode = args.mode.upper()
+    awfo_enabled = mode in AWFO_DEFAULTS["enabled_modes"]
 
     # Auto-set trials based on mode if not specified
-    # Formula: Parameters × 150 (TPE rule of thumb)
-    # All modes have 3 timeframes, adjusted by backtest speed and trade frequency
-    # [UPDATED] Trials adjusted based on search space complexity and data volume analysis
+    # AWFO-enabled UNIFIED defaults are reduced to keep runtime practical.
     MODE_TRIALS_MAP = {
         "SCALP": 3600,  # 3 timeframes (5m,15m,30m), high data volume but narrow param range
         "DAY": 4200,    # 3 timeframes (1h,2h,4h), balanced - most commonly used mode
         "SWING": 5000,  # 3 timeframes (4h,1d,3d), wide param range + low data volume (overfitting risk)
-        "UNIFIED": 8000, # Increased for 55+ parameters and more timeframes (15m, 30m)
-        "ALL": 8000,     # Alias for UNIFIED
+        "UNIFIED": 2800, # AWFO(3 folds) 기준 시간/탐색 균형
+        "ALL": 2800,     # Alias for UNIFIED
     }
 
     if args.trials is None:
@@ -364,19 +602,6 @@ def main():
     # [CRITICAL] Slice Data for Optimization (Train Set) with Warmup Buffer
     print(f"✂️  Trimming Data for Optimization (Train Period: ~ {TRAIN_CUTOFF_DATE})")
     cutoff_ts = pd.Timestamp(TRAIN_CUTOFF_DATE)
-    
-    # [WARMUP OPTIMIZATION] Include buffer period before cutoff for indicator calculation
-    # This prevents NaN values at the start of training period
-    WARMUP_BUFFER_BARS = {
-        '5m': 500,   # ~42 hours of data for warmup
-        '15m': 400,  # ~100 hours
-        '30m': 350,  # ~220 hours
-        '1h': 300,   # ~12.5 days
-        '2h': 250,   # ~20 days
-        '4h': 200,   # ~33 days
-        '1d': 150,   # ~5 months
-        '3d': 100,   # ~10 months
-    }
 
     for sym in data_maps:
         for tf in data_maps[sym]:
@@ -403,6 +628,38 @@ def main():
             new_len = len(data_maps[sym][tf])
             # if tf == timeframes[0]:
             #     print(f"  [{sym}] Train Size: {new_len} (Original: {original_len}, Warmup: {desired_warmup})")
+
+    # [AWFO] Build anchored OOS folds once (reused by all trials)
+    awfo_plan = {"enabled": False, "splits": {}, "min_trades_per_fold": None}
+    if awfo_enabled:
+        awfo_folds = AWFO_DEFAULTS["folds"]
+        awfo_plan["enabled"] = True
+        awfo_plan["min_trades_per_fold"] = AWFO_DEFAULTS["min_trades_per_fold"]
+        print(f"🧭 AWFO enabled: {awfo_folds} anchored folds (UNIFIED runtime-balanced mode)")
+
+        for sym, tf_map in data_maps.items():
+            awfo_plan["splits"][sym] = {}
+            for tf in timeframes:
+                if tf not in tf_map or tf_map[tf].empty:
+                    awfo_plan["splits"][sym][tf] = []
+                    continue
+
+                n_bars = len(tf_map[tf])
+                min_test_bars = AWFO_DEFAULTS["min_test_bars"].get(tf, 120)
+                embargo_bars = AWFO_DEFAULTS["embargo_bars"].get(tf, 0)
+                splits = build_anchored_splits(
+                    n_bars=n_bars,
+                    n_folds=awfo_folds,
+                    embargo_bars=embargo_bars,
+                    min_test_bars=min_test_bars,
+                )
+                awfo_plan["splits"][sym][tf] = splits
+
+                if len(splits) < 2:
+                    print(
+                        f"⚠️  AWFO splits 부족: {sym}-{tf} "
+                        f"(bars={n_bars}, splits={len(splits)})."
+                    )
 
     # [OPTIMIZATION] Pre-compute merge indices to eliminate pd.merge overhead
     print(f"🔗 Pre-computing merge indices for fast data alignment...")
@@ -460,22 +717,42 @@ def main():
         },
     )
 
+    # [Sampler] Keep broad exploration while preserving enough TPE exploitation.
+    startup_ratio = 0.22 if awfo_enabled else 0.20
+    n_startup_trials = int(trials * startup_ratio)
+    n_startup_trials = max(500, n_startup_trials)
+    n_startup_trials = min(n_startup_trials, max(500, trials - 200))
+    n_startup_trials = min(n_startup_trials, max(1, trials - 1))
+
     # [Performance] Use ConstantLiar for parallel efficiency
     sampler = optuna.samplers.TPESampler(
-        n_startup_trials=2000,  # 25% of 8000 trials for thorough random exploration
+        n_startup_trials=n_startup_trials,
         multivariate=True,  # Consider param dependencies
         constant_liar=True,  # Avoid duplicate proposals
         warn_independent_sampling=False,
     )
 
+    # [Pruning] AWFO folds report intermediate scores, so we can prune weak trials early.
+    pruner = optuna.pruners.MedianPruner(
+        n_startup_trials=max(100, n_startup_trials // 2),
+        n_warmup_steps=2,
+        interval_steps=1,
+    )
+
     study = optuna.create_study(
-        study_name=study_name, storage=storage, direction="maximize", sampler=sampler
+        study_name=study_name,
+        storage=storage,
+        direction="maximize",
+        sampler=sampler,
+        pruner=pruner,
     )
 
     print(f"\n{'='*70}")
     print(f"🔥 STARTING OPTIMIZATION for {study_name}")
     print(f"🛢️  Storage: MySQL ({db_host}/{db_name})")
     print(f"📈 Total Trials: {trials}")
+    print(f"🧪 Startup Trials: {n_startup_trials}")
+    print(f"🧭 AWFO: {'ON' if awfo_enabled else 'OFF'}")
     print(f"💻 Parallel Jobs: {args.jobs}")
     print(f"{'='*70}\n")
 
@@ -542,7 +819,14 @@ def main():
     try:
         study.optimize(
             lambda trial: objective(
-                trial, UltimateStrategy, f"Ultimate_{mode}", data_maps, search_space, {}, merge_indices  # common_search_space={} (handled by GET_SEARCH_SPACE)
+                trial,
+                UltimateStrategy,
+                f"Ultimate_{mode}",
+                data_maps,
+                search_space,
+                {},
+                merge_indices,
+                awfo_plan,
             ),
             n_trials=trials,
             n_jobs=args.jobs,
@@ -584,11 +868,16 @@ def main():
             
             # Re-create Strategy & Engine
             strategy = UltimateStrategy(f"Best_{symbol}", best_params)
-            engine = BacktestEngineFast(hourly_df, daily_df, strategy, initial_balance=600)
-            
-            # Inject pre-computed merge index
+            current_merge_index = None
             if merge_indices and symbol in merge_indices and selected_tf in merge_indices[symbol]:
-                engine._merge_index_map = merge_indices[symbol][selected_tf]
+                current_merge_index = merge_indices[symbol][selected_tf]
+            engine = BacktestEngineFast(
+                hourly_df,
+                daily_df,
+                strategy,
+                initial_balance=FUTURES_INITIAL_BALANCE,
+                merge_index_map=current_merge_index,
+            )
                 
             engine.leverage = best_params.get('LEVERAGE', 1)
             engine.risk_per_trade = best_params.get('RISK_PER_TRADE', 0.02)
