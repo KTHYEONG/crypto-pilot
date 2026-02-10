@@ -35,7 +35,7 @@ class FuturesMonteCarloSimulator:
         block_size = max(3, block_size)
         block_size = min(block_size, 20)
 
-        # Ensure enough blocks remain in one path
+        # Ensure enough blocks remain in one path (at least ~8 blocks)
         block_size = min(block_size, max(3, n_trades // 8))
         return int(block_size)
 
@@ -57,7 +57,8 @@ class FuturesMonteCarloSimulator:
 
     def _stationary_bootstrap_sample(self, trades_arr, n_trades, avg_block_size, rng):
         """
-        Stationary Bootstrap (Politis & Romano, 1994): random-length contiguous blocks.
+        Non-circular Stationary Bootstrap:
+        random-length contiguous blocks, but no wrap-around seam from tail->head.
         """
         p = 1.0 / max(avg_block_size, 1)
         sample = np.empty(n_trades, dtype=np.float64)
@@ -67,7 +68,11 @@ class FuturesMonteCarloSimulator:
             if i == 0 or rng.random() < p:
                 idx = rng.integers(0, n_trades)
             else:
-                idx = (idx + 1) % n_trades
+                # Avoid circular seam; restart when reaching the end.
+                if idx >= n_trades - 1:
+                    idx = rng.integers(0, n_trades)
+                else:
+                    idx += 1
             sample[i] = trades_arr[idx]
 
         return sample
@@ -122,7 +127,8 @@ class FuturesMonteCarloSimulator:
                 block_size_used = self._calculate_optimal_block_size(n_trades)
             else:
                 block_size_used = int(block_size)
-            block_size_used = max(3, min(block_size_used, max(3, n_trades // 5)))
+            # Hard cap keeps enough effective blocks for diversity.
+            block_size_used = max(3, min(block_size_used, max(3, n_trades // 8)))
 
         rng = np.random.default_rng(random_state)
 
