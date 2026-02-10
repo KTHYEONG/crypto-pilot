@@ -135,18 +135,19 @@ SPOT_LOOP_INTERVAL_SECONDS = 10         # 메인 루프 간격 (10초)
 SPOT_SYMBOL_DELAY_SECONDS = 2           # 심볼 간 딜레이
 
 # --- 대상 심볼 (Upbit) ---
-# --- 대상 심볼 (Upbit) ---
-SPOT_TARGET_SYMBOLS = ['KRW-ETH', 'KRW-SOL', 'KRW-BTC']
+# [Verified Portfolio] 2026-02-10 UNIFIED OOS 검증 기반
+# 비트코인(BTC)을 제외하고 알파가 높은 알트코인 3종에 집중 (50만원 소액 투자 최적화)
+SPOT_TARGET_SYMBOLS = ['KRW-SOL', 'KRW-DOGE', 'KRW-ETH']
 
 # --- 포지션 사이징 가중치 (성과 기반 - Spot) ---
-# 근거: 2026-01-24 UNIFIED 검증 결과 (50만원 소액 투자 최적화)
-# KRW-SOL: Return 804% (압도적 성장성) -> 40%
-# KRW-ETH: Return 530% (최고의 밸런스) -> 40%
-# KRW-BTC: Return 85% (계좌 안정성 방어) -> 20%
+# 근거: 2026-02-10 UNIFIED 검증 결과
+# KRW-SOL: 40% (압도적 추세 추종력, Consistency 100%)
+# KRW-DOGE: 30% (극강의 변동성 수익, OOS 226% 기록)
+# KRW-ETH: 30% (안정성과 수익률의 최적 밸런스)
 SPOT_ALLOCATION_WEIGHTS = {
-    'KRW-ETH': 0.40,
     'KRW-SOL': 0.40,
-    'KRW-BTC': 0.20
+    'KRW-DOGE': 0.30,
+    'KRW-ETH': 0.30
 }
 
 # --- Optuna Study ---
