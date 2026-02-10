@@ -339,6 +339,16 @@ def calculate_score(ret, mdd, trades_df, mode="DAY", market_type="spot", timefra
         return -10000.0
 
     # --- 4. Scoring Logic ---
+    # [RISK-ADJUSTED BONUS] Approximate geometric growth:
+    # g ~= mu - 0.5 * sigma^2
+    # where mu/sigma are per-trade decimal returns.
+    mu = r_avg / 100.0
+    sigma = max(r_std, 1e-6) / 100.0
+    geom_growth = mu - 0.5 * (sigma ** 2)
+
+    # Confidence scaling to reduce over-reward on low trade counts
+    confidence = min(1.0, np.sqrt(N / 200.0))
+
     score = 0.0
     
     if market_type == "futures":
@@ -353,13 +363,14 @@ def calculate_score(ret, mdd, trades_df, mode="DAY", market_type="spot", timefra
         s_pf = soft_sigmoid(pf, L=6.0, k=1.5, x0=1.8)
         s_sqn = soft_sigmoid(sqn, L=8.0, k=0.8, x0=2.5)
         
-        # [NEW] Direct Return Bonus: Reward absolute profit growth
-        # Adjusted for SIMPLE INTEREST scale (Non-Compounding)
-        # Log scale to prevent infinite explosion but still reward high returns
-        # Coefficient increased 20.0 -> 50.0 to compensate for lower raw return numbers
-        return_bonus = np.log1p(max(ret, 0)) * 50.0 
+        # Risk-adjusted growth bonus (bounded to prevent score explosion)
+        growth_bonus = 30.0 * np.tanh(120.0 * geom_growth)
+        risk_drag = 8.0 * np.tanh(ulcer_proxy / 8.0)
+        tail_excess = max(abs_mdd - target_mdd, 0.0)
+        tail_drag = 12.0 * np.tanh(tail_excess / 12.0)
+        risk_adjusted_bonus = (growth_bonus - risk_drag - tail_drag) * confidence
         
-        score = (s_calmar * 10.0) + (s_sortino * 8.0) + (s_pf * 6.0) + (s_sqn * 8.0) + return_bonus
+        score = (s_calmar * 10.0) + (s_sortino * 8.0) + (s_pf * 6.0) + (s_sqn * 8.0) + risk_adjusted_bonus
         score += (s_pf * s_sqn) * 2.0 # High Pf + High SQN = Stable Winner
         
         if kelly_f <= 0: return -10000.0
@@ -401,7 +412,14 @@ def calculate_score(ret, mdd, trades_df, mode="DAY", market_type="spot", timefra
         s_pf = soft_sigmoid(pf, L=8.0, k=1.2, x0=1.5)
         s_sqn = soft_sigmoid(sqn, L=10.0, k=0.8, x0=2.0)
         
-        score = (s_calmar * 12.0) + (s_sqn * 10.0) + (s_pf * 8.0) + (s_sortino * 6.0)
+        # Spot also needs a smaller growth bonus, but risk should dominate.
+        growth_bonus = 18.0 * np.tanh(120.0 * geom_growth)
+        risk_drag = 10.0 * np.tanh(ulcer_proxy / 6.0)
+        tail_excess = max(abs_mdd - target_mdd, 0.0)
+        tail_drag = 10.0 * np.tanh(tail_excess / 10.0)
+        risk_adjusted_bonus = (growth_bonus - risk_drag - tail_drag) * confidence
+
+        score = (s_calmar * 12.0) + (s_sqn * 10.0) + (s_pf * 8.0) + (s_sortino * 6.0) + risk_adjusted_bonus
         
         # Bonus for Consistency (Relaxed to 0.90 for Crypto Reality)
         if r_squared > 0.90: score += 10.0
