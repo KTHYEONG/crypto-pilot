@@ -14,6 +14,7 @@ except IndexError:
     sys.path.append(os.getcwd())
 
 from .strategies_futures import UltimateStrategy
+from config.settings import FUTURES_INITIAL_BALANCE
 
 class FuturesWalkForwardAnalyzer:
     def __init__(self, hourly_df, daily_df, params):
@@ -32,7 +33,12 @@ class FuturesWalkForwardAnalyzer:
         strategy = UltimateStrategy("WFA_Segment", self.params)
         
         # Use BacktestEngineFast with buffered data
-        engine = BacktestEngineFast(segment_hourly, segment_daily, strategy, initial_balance=750.0)
+        engine = BacktestEngineFast(
+            segment_hourly,
+            segment_daily,
+            strategy,
+            initial_balance=FUTURES_INITIAL_BALANCE,
+        )
         engine.leverage = self.params.get('LEVERAGE', 1)
         engine.risk_per_trade = self.params.get('RISK_PER_TRADE', 0.02)
         
@@ -52,7 +58,7 @@ class FuturesWalkForwardAnalyzer:
                 # Re-calculate Return from valid trades PnL
                 # Return = (Sum of PnL) / Initial Balance
                 total_pnl = valid_trades['pnl'].sum()
-                ret_pct = (total_pnl / 750.0) * 100
+                ret_pct = (total_pnl / FUTURES_INITIAL_BALANCE) * 100
                 mdd = res['mdd_pct'] # Use conservative MDD (could overlap, but simpler)
                 return ret_pct, mdd
         
