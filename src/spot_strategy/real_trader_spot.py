@@ -389,9 +389,9 @@ class RealTraderSpot:
                 self.last_calc_candle[symbol] = current_slot
                 logger.info(f"📊 Indicators calculated for {symbol}")
                 
-                # [Optimization] 메모리 정리
-                del df
-                gc.collect()
+                # [Optimization] 메모리 정리 (함수 종료 시 일괄 처리)
+                # del df  <-- 제거: 하단에서 처리
+                # gc.collect()
             
             # --- Case 2: 비진입 시점이거나 이미 계산됨 -> 캐시된 지표 사용 ---
             else:
