@@ -1144,6 +1144,9 @@ class RealTraderFutures:
         
         while not self._shutdown_requested:
             try:
+                # [FIX] 루프 시작 시간 기록 (정확한 주기 유지)
+                loop_start_time = time.time()
+                
                 # 각 심볼 처리
                 for symbol in self.symbols:
                     if self._shutdown_requested:
@@ -1197,15 +1200,21 @@ class RealTraderFutures:
                         self.cloud_optimizer.force_gc()
                         self._last_gc = now
                 
-                # [High-Frequency Monitoring] 청산 감시를 위해 10초(LOOP_INTERVAL_SECONDS)마다 반복
-                # 진입은 _is_entry_time 로직에 의해 정시에만 수행됨
-                wait_seconds = float(LOOP_INTERVAL_SECONDS)
+                # [FIX] 심볼 처리 시간을 고려한 동적 대기 시간 계산
+                # 목표: 전체 루프 주기를 정확히 LOOP_INTERVAL_SECONDS(10초)로 유지
+                elapsed_processing = time.time() - loop_start_time
+                target_interval = float(LOOP_INTERVAL_SECONDS)
+                # 처리 시간이 길어지더라도 최소 0.5초는 대기하여 CPU 과부하 방지
+                adjusted_wait = max(0.5, target_interval - elapsed_processing)
                 
-                logger.debug(f"💤 Sleeping {wait_seconds:.1f}s until next monitoring cycle...")
+                logger.debug(
+                    f"💤 Loop took {elapsed_processing:.2f}s. "
+                    f"Sleeping {adjusted_wait:.2f}s (Target: {target_interval:.1f}s cycle)"
+                )
                 
                 # Shutdown 체크하면서 대기
                 start_wait = time.time()
-                while time.time() - start_wait < wait_seconds:
+                while time.time() - start_wait < adjusted_wait:
                     if self._shutdown_requested:
                         break
                     time.sleep(0.5)
