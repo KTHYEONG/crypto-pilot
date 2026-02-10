@@ -151,6 +151,7 @@ Explain/
 
 # agent
 .agent/
+AGENTS.md
 
 # Environments
 .env
