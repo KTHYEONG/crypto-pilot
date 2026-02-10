@@ -7,16 +7,54 @@ from numba import njit
 # Global cache for indicators to prevent redundant calculations during optimization
 _INDICATOR_CACHE = {}
 
+
+def _safe_scalar(v):
+    if isinstance(v, np.generic):
+        return v.item()
+    return v
+
+
+def _data_signature(data_obj):
+    """
+    Lightweight signature for cache-key stability.
+    Avoids id-only collisions when Python reuses object ids across trials.
+    """
+    if isinstance(data_obj, pd.DataFrame):
+        n = len(data_obj)
+        if n == 0:
+            return ("df", 0, None, None, None, None)
+        idx0 = _safe_scalar(data_obj.index[0])
+        idxn = _safe_scalar(data_obj.index[-1])
+        if "timestamp" in data_obj.columns:
+            t0 = int(data_obj["timestamp"].iloc[0])
+            tn = int(data_obj["timestamp"].iloc[-1])
+        else:
+            t0 = _safe_scalar(data_obj["datetime"].iloc[0]) if "datetime" in data_obj.columns else idx0
+            tn = _safe_scalar(data_obj["datetime"].iloc[-1]) if "datetime" in data_obj.columns else idxn
+        c0 = float(data_obj["close"].iloc[0]) if "close" in data_obj.columns else 0.0
+        cn = float(data_obj["close"].iloc[-1]) if "close" in data_obj.columns else 0.0
+        return ("df", n, idx0, idxn, t0, tn, c0, cn)
+
+    if isinstance(data_obj, pd.Series):
+        n = len(data_obj)
+        if n == 0:
+            return ("sr", 0, None, None, None, None)
+        idx0 = _safe_scalar(data_obj.index[0])
+        idxn = _safe_scalar(data_obj.index[-1])
+        v0 = _safe_scalar(data_obj.iloc[0])
+        vn = _safe_scalar(data_obj.iloc[-1])
+        return ("sr", n, idx0, idxn, v0, vn)
+
+    return (type(data_obj).__name__, id(data_obj), len(data_obj) if hasattr(data_obj, "__len__") else None)
+
 def indicator_cache(func):
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
-        # We use the id(data) as part of the key. 
-        # In our optimizer, the train_data DFs are static, so id() is a safe identifier.
+        # Use a stable data signature to avoid cache collisions from id() reuse.
         data_obj = args[0]
         params = args[1:]
         
-        # Create a unique key for (function_name, data_id, data_len, positional_params, keyword_params)
-        cache_key = (func.__name__, id(data_obj), len(data_obj), params, tuple(sorted(kwargs.items())))
+        cache_key = (func.__name__, _data_signature(data_obj), params, tuple(sorted(kwargs.items())))
         
         if cache_key in _INDICATOR_CACHE:
             return _INDICATOR_CACHE[cache_key]
