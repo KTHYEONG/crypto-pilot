@@ -89,6 +89,9 @@ def main():
             print(f"Unknown profile key: {key}. Available: {', '.join(PROFILE_PRESETS)}")
             return 2
         run_list.append((key, PROFILE_PRESETS[key]))
+    if not run_list:
+        print("No profiles selected. Use --profiles with at least one of: A,B,C")
+        return 2
 
     summary = []
     for key, profile in run_list:
