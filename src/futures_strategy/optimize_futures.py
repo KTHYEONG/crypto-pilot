@@ -616,24 +616,64 @@ def objective(
         trial.set_user_attr(f"mdd_{symbol.replace('/', '_')}", float(symbol_results[symbol]["mdd"]))
         trial.set_user_attr(f"pf_{symbol.replace('/', '_')}", float(symbol_results[symbol]["pf"]))
 
-    # Combine scores using harmonic mean
+    # Combine scores across symbols:
+    # - Keep safety via hard MDD guard
+    # - Use geometric-dominant blend for better return-efficiency exploration
+    # - Penalize high cross-symbol dispersion for long-term stability
     if not symbol_scores:
         gc.collect()
         return -10000
 
-    offset = 200
-    shifted_scores = [s + offset for s in symbol_scores]
-    if any(s <= 0 for s in shifted_scores):
+    ret_values = [float(r["return"]) for r in symbol_results.values()]
+    mdd_values_raw = [float(r["mdd"]) for r in symbol_results.values()]
+    mdd_values_abs = [abs(v) for v in mdd_values_raw]
+    pf_values = [float(r["pf"]) for r in symbol_results.values()]
+
+    avg_ret = float(np.mean(ret_values))
+    avg_mdd_raw = float(np.mean(mdd_values_raw))
+    avg_mdd_abs = float(np.mean(mdd_values_abs))
+    max_mdd_abs = float(np.max(mdd_values_abs))
+    avg_pf = float(np.mean(pf_values))
+
+    # Hard safety guard: reject pathological drawdown profiles.
+    if max_mdd_abs > 65.0 or avg_mdd_abs > 52.0:
+        gc.collect()
+        return -10000
+
+    offset = 240.0
+    shifted_scores = np.array(symbol_scores, dtype=np.float64) + offset
+    if np.any(shifted_scores <= 1e-9):
         final_score = -10000
     else:
-        harmonic_mean = len(shifted_scores) / sum(1 / s for s in shifted_scores)
-        final_score = harmonic_mean - offset
+        harmonic_mean = float(len(shifted_scores) / np.sum(1.0 / shifted_scores))
+        geometric_mean = float(np.exp(np.mean(np.log(shifted_scores))))
+        log_dispersion = float(np.std(np.log(shifted_scores)))
+        dispersion_penalty = float(np.exp(-0.22 * log_dispersion))
 
-    avg_ret = np.mean([r["return"] for r in symbol_results.values()])
-    avg_mdd = np.mean([r["mdd"] for r in symbol_results.values()])
-    avg_pf = np.mean([r["pf"] for r in symbol_results.values()])
+        # Geometric-first blend: keeps downside discipline while reducing over-conservatism.
+        blended_shifted = (0.35 * harmonic_mean) + (0.65 * geometric_mean)
+
+        # Mild efficiency encouragement with bounded transforms.
+        efficiency_boost = (
+            10.0 * np.tanh(avg_ret / 45.0)
+            + 4.0 * np.tanh((avg_pf - 1.1) / 0.9)
+        )
+
+        # Soft drawdown penalty on top of hard guard.
+        soft_mdd_penalty = (
+            max(0.0, avg_mdd_abs - 32.0) * 1.4
+            + max(0.0, max_mdd_abs - 45.0) * 2.2
+        )
+
+        final_score = (blended_shifted * dispersion_penalty) - offset
+        final_score += efficiency_boost
+        final_score -= soft_mdd_penalty
+        if not np.isfinite(final_score):
+            final_score = -10000
+
     trial.set_user_attr("return_avg", avg_ret)
-    trial.set_user_attr("mdd_avg", avg_mdd)
+    trial.set_user_attr("mdd_avg", avg_mdd_raw)
+    trial.set_user_attr("mdd_avg_abs", avg_mdd_abs)
     trial.set_user_attr("pf_avg", avg_pf)
 
     gc.collect()
