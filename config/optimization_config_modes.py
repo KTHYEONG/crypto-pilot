@@ -257,18 +257,24 @@ def GET_SEARCH_SPACE(mode, market_type='futures'):
         if 'LEVERAGE' in space: 
             del space['LEVERAGE']
         
-        # [CRITICAL FIX] Spot Regime Sizing Logic
-        # 평시 비중을 50~80%로 낮춰야 "Regime Multiplier (1.3x)"가 작동하여 100% 비중까지 확대 가능.
-        # 기존(0.8~1.0)은 평시에도 풀비중이라 강세장 로직이 무용지물이었음.
-        space['RISK_PER_TRADE_SPOT'] = {'type': 'float', 'low': 0.5, 'high': 0.8, 'step': 0.05}
+        # [REVISED] Spot Allocation: Since there's no leverage, we use most of the capital.
+        # AI will finding the best buffer (0.8 ~ 0.98).
+        space['RISK_PER_TRADE_SPOT'] = {'type': 'float', 'low': 0.8, 'high': 0.98, 'step': 0.02}
         
+        # [REVISED] Regime Multipliers for Spot
+        # Strong: No room to grow beyond 1.0 if base risk is high.
+        space['STRONG_REGIME_MULTIPLIER'] = {'type': 'float', 'low': 1.0, 'high': 1.0, 'step': 0.1}
+        # Weak & Panic: Aggressive reduction to save seed.
+        space['WEAK_REGIME_MULTIPLIER'] = {'type': 'float', 'low': 0.4, 'high': 0.6, 'step': 0.1}
+        space['PANIC_REGIME_MULTIPLIER'] = {'type': 'float', 'low': 0.1, 'high': 0.3, 'step': 0.1}
+
         # [CRITICAL FIX] Spot Panic Exit Thresholds
         # Spot Altcoins have extreme volatility. Raise thresholds to avoid premature exit.
         space['RSI_EXIT_THRESHOLD'] = {'type': 'int', 'low': 88, 'high': 99, 'step': 1}
         
         # [NEW] Spot Entry Safety Filters
-        space['RSI_ENTRY_MAX'] = {'type': 'int', 'low': 75, 'high': 95, 'step': 2} # Allow FOMO somewhat but cap it
-        space['NATR_ENTRY_MIN'] = {'type': 'float', 'low': 0.2, 'high': 2.0, 'step': 0.2} # Wide range for spot
+        space['RSI_ENTRY_MAX'] = {'type': 'int', 'low': 75, 'high': 95, 'step': 2} 
+        space['NATR_ENTRY_MIN'] = {'type': 'float', 'low': 0.2, 'high': 2.0, 'step': 0.2} 
         
         space['PANIC_REGIME_NATR'] = {'type': 'float', 'low': 5.0, 'high': 12.0, 'step': 0.5}
         
