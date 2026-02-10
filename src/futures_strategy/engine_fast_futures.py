@@ -9,7 +9,7 @@ class BacktestEngineFast:
     """
     Numba-accelerated Backtest Engine (5-10x faster)
     """
-    def __init__(self, hourly_df, daily_df, strategy, initial_balance=1_000_000):
+    def __init__(self, hourly_df, daily_df, strategy, initial_balance=1_000_000, merge_index_map=None):
         # [MEMORY] Use shallow copy to prevent contaminating usage across trials
         self.hourly_df = hourly_df.copy(deep=False)
         self.daily_df = daily_df.copy(deep=False)
@@ -23,6 +23,10 @@ class BacktestEngineFast:
         
         self.fee_rate = TRADING_FEE_RATE
         self.slippage_rate = SLIPPAGE_RATE
+
+        # Optional fast merge index injection (must be set before _prepare_data call)
+        if merge_index_map is not None:
+            self._merge_index_map = merge_index_map
         
         self.risk_limits = {'max_daily_loss': 0.05}
         self.logger = logging.getLogger(__name__)
