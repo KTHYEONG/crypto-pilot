@@ -423,25 +423,27 @@ def objective(
                 if segment_daily.empty:
                     continue
 
-                strategy = strategy_cls(f"{strategy_name}_{symbol}_F{fold_idx+1}", full_params)
-                segment_merge_index = compute_segment_merge_index(segment_hourly, segment_daily)
-                engine = BacktestEngineFast(
-                    segment_hourly,
-                    segment_daily,
-                    strategy,
-                    initial_balance=FUTURES_INITIAL_BALANCE,
-                    merge_index_map=segment_merge_index,
-                )
-                engine.leverage = full_params.get("LEVERAGE", 1)
-                engine.risk_per_trade = full_params.get("RISK_PER_TRADE", 0.02)
-
                 try:
+                    strategy = strategy_cls(f"{strategy_name}_{symbol}_F{fold_idx+1}", full_params)
+                    segment_merge_index = compute_segment_merge_index(segment_hourly, segment_daily)
+                    engine = BacktestEngineFast(
+                        segment_hourly,
+                        segment_daily,
+                        strategy,
+                        initial_balance=FUTURES_INITIAL_BALANCE,
+                        merge_index_map=segment_merge_index,
+                    )
+                    engine.leverage = full_params.get("LEVERAGE", 1)
+                    engine.risk_per_trade = full_params.get("RISK_PER_TRADE", 0.02)
                     result = engine.run()
                 except Exception as e:
                     print(f"⚠️ AWFO fold backtest failed for {symbol} (fold {fold_idx+1}): {e}")
                     import traceback
                     traceback.print_exc()
-                    del engine, strategy
+                    if "engine" in locals():
+                        del engine
+                    if "strategy" in locals():
+                        del strategy
                     gc.collect()
                     return -10000
 
@@ -527,28 +529,30 @@ def objective(
 
         # ===== Path B: Single full-run (legacy / non-AWFO) =====
         else:
-            strategy = strategy_cls(f"{strategy_name}_{symbol}", full_params)
-            current_merge_index = None
-            if merge_indices and symbol in merge_indices and selected_tf in merge_indices[symbol]:
-                current_merge_index = merge_indices[symbol][selected_tf]
-
-            engine = BacktestEngineFast(
-                hourly_df,
-                daily_df,
-                strategy,
-                initial_balance=FUTURES_INITIAL_BALANCE,
-                merge_index_map=current_merge_index,
-            )
-            engine.leverage = full_params.get("LEVERAGE", 1)
-            engine.risk_per_trade = full_params.get("RISK_PER_TRADE", 0.02)
-
             try:
+                strategy = strategy_cls(f"{strategy_name}_{symbol}", full_params)
+                current_merge_index = None
+                if merge_indices and symbol in merge_indices and selected_tf in merge_indices[symbol]:
+                    current_merge_index = merge_indices[symbol][selected_tf]
+
+                engine = BacktestEngineFast(
+                    hourly_df,
+                    daily_df,
+                    strategy,
+                    initial_balance=FUTURES_INITIAL_BALANCE,
+                    merge_index_map=current_merge_index,
+                )
+                engine.leverage = full_params.get("LEVERAGE", 1)
+                engine.risk_per_trade = full_params.get("RISK_PER_TRADE", 0.02)
                 result = engine.run()
             except Exception as e:
                 print(f"⚠️ Backtest failed for {symbol}: {e}")
                 import traceback
                 traceback.print_exc()
-                del engine, strategy
+                if "engine" in locals():
+                    del engine
+                if "strategy" in locals():
+                    del strategy
                 gc.collect()
                 return -10000
 
