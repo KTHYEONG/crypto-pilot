@@ -76,6 +76,33 @@ AWFO_DEFAULTS = {
     },
 }
 
+STRUCTURE_PARAM_KEYS = [
+    "ENTRY_TYPE",
+    "TREND_FILTER_TYPE",
+    "STRENGTH_FILTER_TYPE",
+    "EXIT_TYPE",
+    "STOP_LOSS_TYPE",
+    "USE_TAKE_PROFIT",
+    "USE_VOLUME_FILTER",
+    "TIMEFRAME",
+    "USE_DYNAMIC_RISK",
+]
+
+TWO_STAGE_UNIFIED_DEFAULTS = {
+    "stage1_total_trials": 1200,
+    "stage1_fidelity_steps": [
+        {"name": "low", "ratio": 0.55, "symbols": 1, "data_ratio": 0.45, "folds": 2, "min_trades": 25, "startup_ratio": 0.35},
+        {"name": "mid", "ratio": 0.30, "symbols": 2, "data_ratio": 0.70, "folds": 3, "min_trades": 35, "startup_ratio": 0.28},
+        {"name": "high", "ratio": 0.15, "symbols": 2, "data_ratio": 1.00, "folds": 3, "min_trades": 40, "startup_ratio": 0.22},
+    ],
+    "promotion_ratio": 0.35,
+    "stage2_top_structures": 6,
+    "stage2_trials_per_structure": 140,
+    "stage2_folds": 3,
+    "stage2_min_trades": 40,
+    "stage2_startup_ratio": 0.18,
+}
+
 
 def build_anchored_splits(n_bars, n_folds, embargo_bars=0, min_test_bars=120):
     """
@@ -141,6 +168,104 @@ def calculate_oos_mdd_pct(pnl_series, initial_balance):
     running_max[running_max == 0] = 1e-9
     drawdown = (equity - running_max) / running_max * 100.0
     return float(np.min(drawdown)) if len(drawdown) else 0.0
+
+
+def build_awfo_plan(data_maps, timeframes, folds, min_trades):
+    """Build AWFO split plan for the provided data maps."""
+    awfo_plan = {"enabled": True, "splits": {}, "min_trades_per_fold": int(min_trades)}
+    for sym, tf_map in data_maps.items():
+        awfo_plan["splits"][sym] = {}
+        for tf in timeframes:
+            if tf not in tf_map or tf_map[tf].empty:
+                awfo_plan["splits"][sym][tf] = []
+                continue
+
+            n_bars = len(tf_map[tf])
+            min_test_bars = AWFO_DEFAULTS["min_test_bars"].get(tf, 120)
+            embargo_bars = AWFO_DEFAULTS["embargo_bars"].get(tf, 0)
+            splits = build_anchored_splits(
+                n_bars=n_bars,
+                n_folds=int(folds),
+                embargo_bars=embargo_bars,
+                min_test_bars=min_test_bars,
+            )
+            awfo_plan["splits"][sym][tf] = splits
+    return awfo_plan
+
+
+def subset_data_maps(base_data_maps, ordered_symbols, n_symbols, data_ratio):
+    """
+    Create a smaller fidelity dataset:
+    - only first N symbols
+    - optionally use tail portion of each timeframe (recent data)
+    """
+    n_symbols = max(1, min(int(n_symbols), len(ordered_symbols)))
+    selected_symbols = ordered_symbols[:n_symbols]
+    ratio = float(max(0.1, min(data_ratio, 1.0)))
+
+    subset = {}
+    for sym in selected_symbols:
+        subset[sym] = {}
+        for tf, df in base_data_maps[sym].items():
+            if ratio >= 0.999:
+                sliced = df.copy()
+            else:
+                take_n = max(200, int(len(df) * ratio))
+                sliced = df.iloc[-take_n:].copy()
+
+            warm = getattr(df, "attrs", {}).get("warmup_bars", 0)
+            sliced.attrs["warmup_bars"] = min(int(warm), len(sliced))
+            subset[sym][tf] = sliced
+    return subset
+
+
+def build_stage1_search_space(full_search_space):
+    """
+    Stage-1 only explores structural/categorical choices.
+    """
+    stage1 = {}
+    for key in STRUCTURE_PARAM_KEYS:
+        if key in full_search_space:
+            stage1[key] = full_search_space[key].copy()
+    return stage1
+
+
+def freeze_structure_in_space(full_search_space, structure_params):
+    """
+    Build Stage-2 search space by freezing structure keys to one value.
+    """
+    stage2 = {}
+    for key, spec in full_search_space.items():
+        stage2[key] = spec.copy()
+        if key in structure_params and spec.get("type") == "categorical":
+            stage2[key]["choices"] = [structure_params[key]]
+    return stage2
+
+
+def extract_structure_signature(params):
+    """Extract structure-only params from an Optuna params dict."""
+    sig = {}
+    for key in STRUCTURE_PARAM_KEYS:
+        if key in params:
+            sig[key] = params[key]
+    return sig
+
+
+def restrict_stage1_space_by_candidates(stage1_space, candidate_structures):
+    """
+    Restrict categorical choices to values observed in promoted structures.
+    """
+    if not candidate_structures:
+        return stage1_space
+
+    restricted = {}
+    for key, spec in stage1_space.items():
+        restricted[key] = spec.copy()
+        if spec.get("type") == "categorical":
+            values = sorted({c[key] for c in candidate_structures if key in c})
+            if values:
+                restricted[key]["choices"] = values
+    return restricted
 
 
 def load_all_timeframes(symbol, start_date, end_date, timeframes):
@@ -515,6 +640,49 @@ def objective(
     return final_score
 
 
+def run_optuna_study(
+    study_name,
+    storage,
+    n_trials,
+    n_jobs,
+    startup_ratio,
+    objective_fn,
+):
+    """
+    Utility runner with dynamic sampler/pruner settings.
+    """
+    n_trials = int(max(1, n_trials))
+    n_startup_trials = int(max(50, round(n_trials * startup_ratio)))
+    n_startup_trials = min(n_startup_trials, max(1, n_trials - 1))
+
+    sampler = optuna.samplers.TPESampler(
+        n_startup_trials=n_startup_trials,
+        multivariate=True,
+        constant_liar=True,
+        warn_independent_sampling=False,
+    )
+    pruner = optuna.pruners.MedianPruner(
+        n_startup_trials=max(30, n_startup_trials // 2),
+        n_warmup_steps=2,
+        interval_steps=1,
+    )
+
+    study = optuna.create_study(
+        study_name=study_name,
+        storage=storage,
+        direction="maximize",
+        sampler=sampler,
+        pruner=pruner,
+    )
+    study.optimize(
+        objective_fn,
+        n_trials=n_trials,
+        n_jobs=n_jobs,
+        show_progress_bar=True,
+    )
+    return study, n_startup_trials
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -629,37 +797,19 @@ def main():
             # if tf == timeframes[0]:
             #     print(f"  [{sym}] Train Size: {new_len} (Original: {original_len}, Warmup: {desired_warmup})")
 
-    # [AWFO] Build anchored OOS folds once (reused by all trials)
+    # [AWFO] Build baseline plan
     awfo_plan = {"enabled": False, "splits": {}, "min_trades_per_fold": None}
     if awfo_enabled:
-        awfo_folds = AWFO_DEFAULTS["folds"]
-        awfo_plan["enabled"] = True
-        awfo_plan["min_trades_per_fold"] = AWFO_DEFAULTS["min_trades_per_fold"]
-        print(f"🧭 AWFO enabled: {awfo_folds} anchored folds (UNIFIED runtime-balanced mode)")
-
-        for sym, tf_map in data_maps.items():
-            awfo_plan["splits"][sym] = {}
-            for tf in timeframes:
-                if tf not in tf_map or tf_map[tf].empty:
-                    awfo_plan["splits"][sym][tf] = []
-                    continue
-
-                n_bars = len(tf_map[tf])
-                min_test_bars = AWFO_DEFAULTS["min_test_bars"].get(tf, 120)
-                embargo_bars = AWFO_DEFAULTS["embargo_bars"].get(tf, 0)
-                splits = build_anchored_splits(
-                    n_bars=n_bars,
-                    n_folds=awfo_folds,
-                    embargo_bars=embargo_bars,
-                    min_test_bars=min_test_bars,
-                )
-                awfo_plan["splits"][sym][tf] = splits
-
-                if len(splits) < 2:
-                    print(
-                        f"⚠️  AWFO splits 부족: {sym}-{tf} "
-                        f"(bars={n_bars}, splits={len(splits)})."
-                    )
+        awfo_plan = build_awfo_plan(
+            data_maps,
+            timeframes,
+            folds=AWFO_DEFAULTS["folds"],
+            min_trades=AWFO_DEFAULTS["min_trades_per_fold"],
+        )
+        print(
+            f"🧭 AWFO enabled: {AWFO_DEFAULTS['folds']} anchored folds "
+            f"(min trades per fold={AWFO_DEFAULTS['min_trades_per_fold']})"
+        )
 
     # [OPTIMIZATION] Pre-compute merge indices to eliminate pd.merge overhead
     print(f"🔗 Pre-computing merge indices for fast data alignment...")
@@ -717,41 +867,10 @@ def main():
         },
     )
 
-    # [Sampler] Keep broad exploration while preserving enough TPE exploitation.
-    startup_ratio = 0.22 if awfo_enabled else 0.20
-    n_startup_trials = int(trials * startup_ratio)
-    n_startup_trials = max(500, n_startup_trials)
-    n_startup_trials = min(n_startup_trials, max(500, trials - 200))
-    n_startup_trials = min(n_startup_trials, max(1, trials - 1))
-
-    # [Performance] Use ConstantLiar for parallel efficiency
-    sampler = optuna.samplers.TPESampler(
-        n_startup_trials=n_startup_trials,
-        multivariate=True,  # Consider param dependencies
-        constant_liar=True,  # Avoid duplicate proposals
-        warn_independent_sampling=False,
-    )
-
-    # [Pruning] AWFO folds report intermediate scores, so we can prune weak trials early.
-    pruner = optuna.pruners.MedianPruner(
-        n_startup_trials=max(100, n_startup_trials // 2),
-        n_warmup_steps=2,
-        interval_steps=1,
-    )
-
-    study = optuna.create_study(
-        study_name=study_name,
-        storage=storage,
-        direction="maximize",
-        sampler=sampler,
-        pruner=pruner,
-    )
-
     print(f"\n{'='*70}")
     print(f"🔥 STARTING OPTIMIZATION for {study_name}")
     print(f"🛢️  Storage: MySQL ({db_host}/{db_name})")
     print(f"📈 Total Trials: {trials}")
-    print(f"🧪 Startup Trials: {n_startup_trials}")
     print(f"🧭 AWFO: {'ON' if awfo_enabled else 'OFF'}")
     print(f"💻 Parallel Jobs: {args.jobs}")
     print(f"{'='*70}\n")
@@ -816,36 +935,236 @@ def main():
         print(f"\n⚠️  Warning: Numba warmup failed: {e}")
         print(f"   First trial will be slower due to JIT compilation")
 
+    study = None
+    is_two_stage_mode = mode in {"UNIFIED", "ALL"}
+
     try:
-        study.optimize(
-            lambda trial: objective(
-                trial,
-                UltimateStrategy,
-                f"Ultimate_{mode}",
+        if is_two_stage_mode:
+            print("🧠 2-Stage + Multi-Fidelity mode enabled (UNIFIED)")
+            cfg = TWO_STAGE_UNIFIED_DEFAULTS.copy()
+            scale = max(0.4, trials / 2800.0)
+
+            stage1_total = int(cfg["stage1_total_trials"] * scale)
+            stage1_total = max(300, min(stage1_total, max(400, int(trials * 0.6))))
+            stage2_total_budget = max(200, trials - stage1_total)
+
+            promoted_structures = []
+            stage1_space_base = build_stage1_search_space(search_space)
+            top_pool_limit = max(12, cfg["stage2_top_structures"] * 3)
+
+            print(
+                f"   Stage1 trials: {stage1_total}, Stage2 budget: {stage2_total_budget}, "
+                f"Target structures: {cfg['stage2_top_structures']}"
+            )
+
+            for fidelity in cfg["stage1_fidelity_steps"]:
+                step_trials = int(stage1_total * fidelity["ratio"])
+                if step_trials < 50:
+                    continue
+
+                step_symbols = max(1, min(fidelity["symbols"], len(symbols)))
+                step_data = subset_data_maps(
+                    data_maps,
+                    symbols,
+                    n_symbols=step_symbols,
+                    data_ratio=fidelity["data_ratio"],
+                )
+                step_merge_indices = compute_merge_indices(step_data)
+                step_awfo = build_awfo_plan(
+                    step_data,
+                    timeframes,
+                    folds=fidelity["folds"],
+                    min_trades=fidelity["min_trades"],
+                )
+
+                step_space = restrict_stage1_space_by_candidates(
+                    stage1_space_base, promoted_structures
+                )
+                step_study_name = (
+                    f"{study_name}__s1_{fidelity['name']}_{int(time.time())}"
+                )
+                try:
+                    optuna.delete_study(study_name=step_study_name, storage=storage)
+                except Exception:
+                    pass
+
+                print(
+                    f"\n🧪 Stage1-{fidelity['name'].upper()} | "
+                    f"trials={step_trials}, symbols={step_symbols}, "
+                    f"data_ratio={fidelity['data_ratio']}, folds={fidelity['folds']}"
+                )
+                step_study, step_startup = run_optuna_study(
+                    study_name=step_study_name,
+                    storage=storage,
+                    n_trials=step_trials,
+                    n_jobs=args.jobs,
+                    startup_ratio=fidelity["startup_ratio"],
+                    objective_fn=lambda t: objective(
+                        t,
+                        UltimateStrategy,
+                        f"Ultimate_{mode}",
+                        step_data,
+                        step_space,
+                        {},
+                        step_merge_indices,
+                        step_awfo,
+                    ),
+                )
+                print(
+                    f"   ✅ Stage1-{fidelity['name']} done | startup={step_startup} "
+                    f"| best={step_study.best_value:.2f}"
+                )
+
+                completed = [
+                    tr for tr in step_study.trials
+                    if tr.state == optuna.trial.TrialState.COMPLETE
+                ]
+                if not completed:
+                    continue
+
+                completed.sort(key=lambda tr: tr.value, reverse=True)
+                top_k = max(
+                    cfg["stage2_top_structures"],
+                    int(len(completed) * cfg["promotion_ratio"]),
+                )
+                top_k = min(top_k, top_pool_limit, len(completed))
+
+                promoted = []
+                seen = set()
+                for tr in completed[:top_k]:
+                    sig = extract_structure_signature(tr.params)
+                    sig_key = tuple((k, sig.get(k)) for k in STRUCTURE_PARAM_KEYS)
+                    if sig_key in seen or not sig:
+                        continue
+                    seen.add(sig_key)
+                    promoted.append(sig)
+
+                promoted_structures = promoted
+                print(
+                    f"   🔼 Promoted structures: {len(promoted_structures)} "
+                    f"(top {top_k} trials)"
+                )
+
+            if not promoted_structures:
+                print("⚠️ Stage1 produced no promoted structures; falling back to global search space.")
+                promoted_structures = [extract_structure_signature({k: v["choices"][0] for k, v in stage1_space_base.items()})]
+
+            promoted_structures = promoted_structures[:cfg["stage2_top_structures"]]
+
+            per_structure_trials = max(
+                80,
+                min(
+                    cfg["stage2_trials_per_structure"],
+                    int(stage2_total_budget / max(1, len(promoted_structures))),
+                ),
+            )
+            stage2_awfo = build_awfo_plan(
                 data_maps,
-                search_space,
-                {},
-                merge_indices,
-                awfo_plan,
-            ),
-            n_trials=trials,
-            n_jobs=args.jobs,
-            show_progress_bar=True,
-        )
+                timeframes,
+                folds=cfg["stage2_folds"],
+                min_trades=cfg["stage2_min_trades"],
+            )
+
+            best_stage2_study = None
+            best_stage2_value = -float("inf")
+
+            for i, struct_sig in enumerate(promoted_structures, start=1):
+                stage2_space = freeze_structure_in_space(search_space, struct_sig)
+                step_study_name = f"{study_name}__s2_{i}_{int(time.time())}"
+                try:
+                    optuna.delete_study(study_name=step_study_name, storage=storage)
+                except Exception:
+                    pass
+
+                print(
+                    f"\n🎯 Stage2-{i}/{len(promoted_structures)} | trials={per_structure_trials} | "
+                    f"structure={struct_sig}"
+                )
+                s2_study, s2_startup = run_optuna_study(
+                    study_name=step_study_name,
+                    storage=storage,
+                    n_trials=per_structure_trials,
+                    n_jobs=args.jobs,
+                    startup_ratio=cfg["stage2_startup_ratio"],
+                    objective_fn=lambda t: objective(
+                        t,
+                        UltimateStrategy,
+                        f"Ultimate_{mode}",
+                        data_maps,
+                        stage2_space,
+                        {},
+                        merge_indices,
+                        stage2_awfo,
+                    ),
+                )
+                print(
+                    f"   ✅ Stage2-{i} done | startup={s2_startup} | best={s2_study.best_value:.2f}"
+                )
+
+                if s2_study.best_value > best_stage2_value:
+                    best_stage2_value = s2_study.best_value
+                    best_stage2_study = s2_study
+
+            if best_stage2_study is None:
+                raise RuntimeError("2-Stage optimization failed to produce any complete Stage2 study.")
+
+            # Publish final winner into standard study name for deployment compatibility.
+            try:
+                optuna.delete_study(study_name=study_name, storage=storage)
+            except Exception:
+                pass
+            study = optuna.create_study(
+                study_name=study_name,
+                storage=storage,
+                direction="maximize",
+                sampler=optuna.samplers.TPESampler(n_startup_trials=1),
+            )
+            best_trial = best_stage2_study.best_trial
+            frozen_trial = optuna.trial.create_trial(
+                params=best_trial.params,
+                distributions=best_trial.distributions,
+                value=best_trial.value,
+                user_attrs=best_trial.user_attrs,
+            )
+            study.add_trial(frozen_trial)
+
+        else:
+            startup_ratio = 0.22 if awfo_enabled else 0.20
+            print(f"🧪 Single-stage startup ratio: {startup_ratio:.2f}")
+            study, n_startup_trials = run_optuna_study(
+                study_name=study_name,
+                storage=storage,
+                n_trials=trials,
+                n_jobs=args.jobs,
+                startup_ratio=startup_ratio,
+                objective_fn=lambda t: objective(
+                    t,
+                    UltimateStrategy,
+                    f"Ultimate_{mode}",
+                    data_maps,
+                    search_space,
+                    {},
+                    merge_indices,
+                    awfo_plan,
+                ),
+            )
+            print(f"✅ Single-stage done | startup={n_startup_trials} | best={study.best_value:.2f}")
 
     except KeyboardInterrupt:
         print("\n🛑 Optimization Interrupted by User")
-        print(f"💾 Progress saved: {len(study.trials)} trials completed")
+        if study is not None:
+            print(f"💾 Progress saved: {len(study.trials)} trials completed")
     except Exception as e:
         print(f"\n❌ Optimization failed with error: {e}")
-        print(f"💾 Progress saved: {len(study.trials)} trials completed before failure")
+        if study is not None:
+            print(f"💾 Progress saved: {len(study.trials)} trials completed before failure")
         import traceback
         traceback.print_exc()
 
     print(f"\n{'='*70}")
     print(f"✅ {mode} Optimization Complete!")
 
-    if len(study.trials) > 0:
+    if study is not None and len(study.trials) > 0:
         print(f"🏆 Best Score: {study.best_value:.2f}")
         print(f"✨ Best Params: {study.best_params}")
         
