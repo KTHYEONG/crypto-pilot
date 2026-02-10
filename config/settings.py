@@ -56,6 +56,9 @@ BACKTEST_END_DATE = "2026-01-16"    # 전체 데이터 종료일
 TRAIN_CUTOFF_DATE = "2025-01-01"    # [중요] 최적화(Train)와 검증(Test) 분리 기준일
 TIMEFRAME = "1h"               # 1시간봉 기준
 
+# 선물 최적화/검증 공통 초기 자본 (P3-8 정합성)
+FUTURES_INITIAL_BALANCE = 1_000_000.0
+
 # 로깅 설정
 LOG_LEVEL = "DEBUG"
 
