@@ -19,7 +19,6 @@ except IndexError:
     sys.path.append(os.getcwd())
 
 from config.settings import (
-    DATA_DIR,
     BACKTEST_START_DATE,
     BACKTEST_END_DATE,
     TRAIN_CUTOFF_DATE,
@@ -275,41 +274,23 @@ def load_all_timeframes(symbol, start_date, end_date, timeframes):
 
     # Daily Data (Required for Indicators)
     # Even for SCALP mode, daily context is often useful (e.g., trend alignment)
-    daily_file = DATA_DIR / f"{symbol.replace('/', '_')}_1d_{start_date}_{end_date}.csv"
-    if not daily_file.exists():
-        try:
-            collector.collect_and_save(symbol, "1d", start_date, end_date)
-        except Exception as e:
-            print(f"❌ Error: Failed to download {symbol}-1d data: {e}")
-            sys.exit(1)
-
     try:
-        df = pd.read_csv(daily_file)
+        df = collector.ensure_data(symbol, "1d", start_date, end_date)
         df["datetime"] = pd.to_datetime(df["timestamp"], unit="ms")
         df["date_key"] = df["datetime"].dt.strftime("%Y-%m-%d")
         data_map["1d"] = df
     except Exception as e:
-        print(f"❌ Error: Failed to load {daily_file}: {e}")
+        print(f"❌ Error: Failed to load {symbol}-1d data: {e}")
         sys.exit(1)
 
     for tf in timeframes:
-        tf_file = DATA_DIR / f"{symbol.replace('/', '_')}_{tf}_{start_date}_{end_date}.csv"
-        
-        if not tf_file.exists():
-            print(f"Downloading {tf} data...")
-            try:
-                collector.collect_and_save(symbol, tf, start_date, end_date)
-            except Exception as e:
-                print(f"❌ Error: Failed to download {symbol}-{tf} data: {e}")
-                sys.exit(1)
-
         try:
-            df = pd.read_csv(tf_file)
+            df = collector.ensure_data(symbol, tf, start_date, end_date)
             df["datetime"] = pd.to_datetime(df["timestamp"], unit="ms")
             df["date_key"] = df["datetime"].dt.strftime("%Y-%m-%d")
             data_map[tf] = df
         except Exception as e:
-            print(f"❌ Error: Failed to load {tf_file}: {e}")
+            print(f"❌ Error: Failed to load {symbol}-{tf} data: {e}")
             sys.exit(1)
 
     return data_map
