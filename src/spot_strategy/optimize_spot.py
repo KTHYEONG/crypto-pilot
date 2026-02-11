@@ -3,8 +3,9 @@ import gc
 import logging
 import os
 import sys
+import time
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import optuna
@@ -50,6 +51,88 @@ def _env_float(name: str, default: float) -> float:
         return float(os.getenv(name, default))
     except (TypeError, ValueError):
         return float(default)
+
+
+def _parse_seed_list(seed_arg: Optional[str]) -> List[int]:
+    if seed_arg is None:
+        return []
+    raw = [s.strip() for s in str(seed_arg).split(",") if s.strip()]
+    seeds: List[int] = []
+    for x in raw:
+        try:
+            seeds.append(int(x))
+        except ValueError:
+            continue
+    uniq: List[int] = []
+    seen = set()
+    for s in seeds:
+        if s in seen:
+            continue
+        seen.add(s)
+        uniq.append(s)
+    return uniq
+
+
+def _allocate_seed_trials(total_trials: int, seeds: Sequence[int], min_trials_per_seed: int = 80) -> List[Tuple[int, int]]:
+    total_trials = int(max(1, total_trials))
+    if not seeds:
+        return [(13, total_trials)]
+    seeds = list(seeds)
+    max_seed_count = max(1, total_trials // max(1, int(min_trials_per_seed)))
+    active = seeds[:max_seed_count]
+    base = total_trials // len(active)
+    rem = total_trials % len(active)
+    out: List[Tuple[int, int]] = []
+    for i, seed in enumerate(active):
+        n = base + (1 if i < rem else 0)
+        if n > 0:
+            out.append((int(seed), int(n)))
+    return out or [(int(seeds[0]), total_trials)]
+
+
+def _study_complete_trials(study: optuna.study.Study) -> List[optuna.trial.FrozenTrial]:
+    completed = [tr for tr in study.trials if tr.state == optuna.trial.TrialState.COMPLETE]
+    completed.sort(key=lambda tr: float(tr.value), reverse=True)
+    return completed
+
+
+def _robust_value_from_trials(completed: Sequence[optuna.trial.FrozenTrial]) -> float:
+    if not completed:
+        return -float("inf")
+    vals = np.array([float(tr.value) for tr in completed], dtype=np.float64)
+    top = vals[: max(3, min(12, len(vals)))]
+    return (0.65 * float(np.mean(top))) + (0.35 * float(np.percentile(top, 25)))
+
+
+def _publish_best_trial_alias(
+    storage_url: str,
+    alias_study_name: str,
+    source_study_name: str,
+    source_trial: optuna.trial.FrozenTrial,
+    metadata: Optional[Dict] = None,
+) -> None:
+    try:
+        optuna.delete_study(study_name=alias_study_name, storage=storage_url)
+    except Exception:
+        pass
+    optuna.create_study(
+        study_name=alias_study_name,
+        storage=storage_url,
+        direction="maximize",
+        load_if_exists=True,
+    )
+    alias = optuna.load_study(study_name=alias_study_name, storage=storage_url)
+    user_attrs = dict(getattr(source_trial, "user_attrs", {}) or {})
+    if metadata:
+        user_attrs.update(metadata)
+    frozen = optuna.trial.create_trial(
+        params=source_trial.params,
+        distributions=source_trial.distributions,
+        value=float(source_trial.value),
+        user_attrs=user_attrs,
+    )
+    alias.add_trial(frozen)
+    print(f"[INFO] Published alias study '{alias_study_name}' from source '{source_study_name}'")
 
 
 SPOT_ROBUST = {
@@ -426,13 +509,20 @@ def main() -> None:
     parser.add_argument("--symbols", type=str, default="KRW-BTC,KRW-ETH")
     parser.add_argument("--jobs", type=int, default=10)
     parser.add_argument("--mode", type=str, default="UNIFIED", choices=["SCALP", "DAY", "SWING", "UNIFIED", "ALL"])
+    parser.add_argument("--seeds", type=str, default=None, help="Comma-separated sampler seeds, e.g. 13,37,73")
     args = parser.parse_args()
 
     mode = args.mode.upper()
     symbols = [s.strip() for s in args.symbols.split(",")]
     awfo_enabled = mode in AWFO_DEFAULTS["enabled_modes"]
     trials = args.trials if args.trials is not None else {"SCALP": 3600, "DAY": 4200, "SWING": 5000, "UNIFIED": 8000, "ALL": 8000}.get(mode, 2500)
-    print(f"[INFO] mode={mode}, trials={trials}, awfo={'ON' if awfo_enabled else 'OFF'}")
+    seed_arg = args.seeds if args.seeds is not None else os.getenv("OPTUNA_SEEDS", "13,37,73" if mode in {"UNIFIED", "ALL"} else "13")
+    seed_list = _parse_seed_list(seed_arg) or [13]
+    seed_alloc = _allocate_seed_trials(trials, seed_list, min_trials_per_seed=80)
+    print(
+        f"[INFO] mode={mode}, trials={trials}, awfo={'ON' if awfo_enabled else 'OFF'}, "
+        f"seeds={seed_list}, alloc={seed_alloc}"
+    )
 
     optuna.logging.set_verbosity(optuna.logging.WARNING)
     search_space = GET_SEARCH_SPACE(mode, market_type="spot")
@@ -479,14 +569,6 @@ def main() -> None:
         url=storage_url,
         engine_kwargs={"pool_size": max(30, args.jobs * 2), "max_overflow": 10, "pool_recycle": 3600, "pool_pre_ping": True},
     )
-    sampler = optuna.samplers.TPESampler(
-        n_startup_trials=max(200, int(trials * 0.18)),
-        multivariate=True,
-        constant_liar=True,
-        warn_independent_sampling=False,
-    )
-    study = optuna.create_study(study_name=study_name, storage=storage, direction="maximize", sampler=sampler)
-
     try:
         backtest_loop_spot_numba(
             np.ones(10, dtype=np.float64), np.ones(10, dtype=np.float64), np.ones(10, dtype=np.float64), np.ones(10, dtype=np.float64),
@@ -498,15 +580,67 @@ def main() -> None:
     except Exception:
         pass
 
-    study.optimize(
-        lambda t: objective(t, train_data, search_space, mode, merge_indices, awfo_plan),
-        n_trials=trials,
-        n_jobs=args.jobs,
-        show_progress_bar=True,
+    best_seed_study: Optional[optuna.study.Study] = None
+    best_seed_name: Optional[str] = None
+    best_seed_trial: Optional[optuna.trial.FrozenTrial] = None
+    best_seed_robust = -float("inf")
+
+    for seed, seed_trials in seed_alloc:
+        seed_name = f"{study_name}__seed_{seed}_{int(time.time())}"
+        try:
+            optuna.delete_study(study_name=seed_name, storage=storage_url)
+        except Exception:
+            pass
+        sampler = optuna.samplers.TPESampler(
+            seed=int(seed),
+            n_startup_trials=max(80, int(seed_trials * 0.18)),
+            multivariate=True,
+            constant_liar=True,
+            warn_independent_sampling=False,
+        )
+        seed_study = optuna.create_study(
+            study_name=seed_name,
+            storage=storage,
+            direction="maximize",
+            sampler=sampler,
+        )
+        print(f"[SEED] start seed={seed}, trials={seed_trials}, study={seed_name}")
+        seed_study.optimize(
+            lambda t: objective(t, train_data, search_space, mode, merge_indices, awfo_plan),
+            n_trials=seed_trials,
+            n_jobs=args.jobs,
+            show_progress_bar=True,
+        )
+        completed = _study_complete_trials(seed_study)
+        robust = _robust_value_from_trials(completed)
+        best_value = float(seed_study.best_value) if len(seed_study.trials) > 0 else -float("inf")
+        print(f"[SEED] done seed={seed} | best={best_value:.2f} | robust={robust:.2f}")
+        if completed and robust > best_seed_robust:
+            best_seed_robust = robust
+            best_seed_study = seed_study
+            best_seed_name = seed_name
+            best_seed_trial = completed[0]
+
+    if best_seed_study is None or best_seed_trial is None or best_seed_name is None:
+        print("[ERROR] No completed seeded study. Optimization failed.")
+        sys.exit(1)
+
+    _publish_best_trial_alias(
+        storage_url=storage_url,
+        alias_study_name=study_name,
+        source_study_name=best_seed_name,
+        source_trial=best_seed_trial,
+        metadata={
+            "optimizer_version": "SPOT_AWFO_MULTI_SEED_V1",
+            "seed_source": best_seed_name,
+            "seed_robust_value": float(best_seed_robust),
+            "seed_list": ",".join(str(s) for s in seed_list),
+            "awfo_enabled": bool(awfo_enabled),
+        },
     )
 
-    print(f"[DONE] best_score={study.best_value:.2f}")
-    print(f"[DONE] best_params={study.best_params}")
+    print(f"[DONE] best_score={float(best_seed_trial.value):.2f}")
+    print(f"[DONE] best_params={best_seed_trial.params}")
 
 
 if __name__ == "__main__":
