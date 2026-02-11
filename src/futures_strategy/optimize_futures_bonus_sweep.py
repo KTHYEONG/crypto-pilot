@@ -1,4 +1,5 @@
 import argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import os
 import subprocess
 import sys
@@ -45,6 +46,8 @@ def build_env(base_env, profile):
     env["SPOT_GROWTH_BONUS_COEF"] = str(profile["spot_growth"])
     env["SPOT_RISK_DRAG_COEF"] = str(profile["spot_risk"])
     env["SPOT_TAIL_DRAG_COEF"] = str(profile["spot_tail"])
+    # Force UTF-8 encoding for subprocess output to avoid korean text corruption
+    env["PYTHONIOENCODING"] = "utf-8"
     return env
 
 
@@ -71,6 +74,11 @@ def run_profile(profile_key, profile, forwarded_args):
 
 
 def main():
+    # Force UTF-8 encoding for parent process output on Windows
+    if sys.platform == "win32":
+        sys.stdout.reconfigure(encoding='utf-8')
+        sys.stderr.reconfigure(encoding='utf-8')
+
     parser = argparse.ArgumentParser(
         description="Run futures optimization with bonus coefficient sweep across 3 DBs."
     )
@@ -79,6 +87,12 @@ def main():
         type=str,
         default="A,B,C",
         help="Comma-separated profile keys (default: A,B,C)",
+    )
+    parser.add_argument(
+        "--max-concurrent",
+        type=int,
+        default=1,
+        help="Max number of profiles to run concurrently (default: 1)",
     )
     args, forwarded_args = parser.parse_known_args()
 
@@ -93,13 +107,36 @@ def main():
         print("No profiles selected. Use --profiles with at least one of: A,B,C")
         return 2
 
+    max_concurrent = max(1, min(args.max_concurrent, len(run_list)))
+    summary_map = {}
+    if max_concurrent == 1:
+        for key, profile in run_list:
+            code = run_profile(key, profile, forwarded_args)
+            summary_map[key] = code
+            if code != 0:
+                print(f"\n[{key}] failed with exit code={code}. stopping sweep.")
+                break
+    else:
+        print(
+            f"\nRunning sweep in parallel (max_concurrent={max_concurrent}, "
+            f"profiles={','.join(k for k, _ in run_list)})"
+        )
+        with ThreadPoolExecutor(max_workers=max_concurrent) as pool:
+            futures = {
+                pool.submit(run_profile, key, profile, forwarded_args): (key, profile)
+                for key, profile in run_list
+            }
+            for fut in as_completed(futures):
+                key, profile = futures[fut]
+                code = fut.result()
+                summary_map[key] = code
+                status = "OK" if code == 0 else f"FAIL({code})"
+                print(f"[{key}] finished -> {status}")
+
     summary = []
     for key, profile in run_list:
-        code = run_profile(key, profile, forwarded_args)
-        summary.append((key, profile["db_name"], code))
-        if code != 0:
-            print(f"\n[{key}] failed with exit code={code}. stopping sweep.")
-            break
+        if key in summary_map:
+            summary.append((key, profile["db_name"], summary_map[key]))
 
     print("\n" + "-" * 72)
     print("Sweep summary")
@@ -108,7 +145,7 @@ def main():
         print(f"- {key}: {db_name} -> {status}")
     print("-" * 72)
 
-    final_code = 0 if all(code == 0 for _, _, code in summary) else 1
+    final_code = 0 if summary and all(code == 0 for _, _, code in summary) else 1
     return final_code
 
 
