@@ -52,7 +52,7 @@ FUNDING_INTERVAL_HOURS = 8     # 펀딩비 발생 주기 (시간)
 
 # 백테스팅 기본 기간
 BACKTEST_START_DATE = "2020-01-01"  # 전체 데이터 시작일
-BACKTEST_END_DATE = "2025-12-31"    # 전체 데이터 종료일
+BACKTEST_END_DATE = "2026-02-10"    # 전체 데이터 종료일
 TRAIN_CUTOFF_DATE = "2025-01-01"    # [중요] 최적화(Train)와 검증(Test) 분리 기준일
 TIMEFRAME = "1h"               # 1시간봉 기준
 
