@@ -131,6 +131,7 @@ class BacktestEngineFastSpot:
         self.high = self.df['high'].values
         self.low = self.df['low'].values
         self.open_prices = self.df['open'].values # Standard open prices
+        self.datetime_values = pd.to_datetime(self.hourly_df['datetime']).values
         
         # [CRITICAL] LOOKAHEAD PROTECTION
         # All indicators used for ENTRY/EXIT decisions must be based on CLOSED bars.
@@ -246,16 +247,29 @@ class BacktestEngineFastSpot:
         # Trade statistics
         num_trades = len(trades)
         if num_trades > 0:
-            pnl_pcts = trades[:, 0]
+            pnl_pcts = trades[:, 4]
             win_rate = (len(pnl_pcts[pnl_pcts > 0]) / num_trades * 100)
         else:
             win_rate = 0.0
         
         # Convert trades to DataFrame
         if num_trades > 0:
-            trades_df = pd.DataFrame(trades, columns=['pnl_pct', 'duration', 'dummy'])
-            # [FIX] calculate_score expects 'pnl' column. Add dummy since we optimize on % anyway.
-            trades_df['pnl'] = trades_df['pnl_pct'] 
+            entry_idx = np.clip(trades[:, 0].astype(np.int64), 0, len(self.datetime_values) - 1)
+            exit_idx = np.clip(trades[:, 1].astype(np.int64), 0, len(self.datetime_values) - 1)
+
+            trades_df = pd.DataFrame(
+                {
+                    'entry_idx': entry_idx,
+                    'exit_idx': exit_idx,
+                    'entry_time': pd.to_datetime(self.datetime_values[entry_idx]),
+                    'exit_time': pd.to_datetime(self.datetime_values[exit_idx]),
+                    'entry_price': trades[:, 2],
+                    'exit_price': trades[:, 3],
+                    'pnl_pct': trades[:, 4],
+                    'pnl': trades[:, 5],
+                    'duration_bars': trades[:, 6].astype(np.int64),
+                }
+            )
         else:
             trades_df = pd.DataFrame()
         
@@ -304,9 +318,11 @@ def backtest_loop_spot_numba(
     pos_atr = 0.0
     stop_price = 0.0
     tp_price = 0.0
+    entry_cost = 0.0
     
     max_trades = 30000
-    trades = np.zeros((max_trades, 3))
+    # [entry_idx, exit_idx, entry_price, exit_price, pnl_pct, pnl, duration_bars]
+    trades = np.zeros((max_trades, 7))
     trade_count = 0
     
     equity_curve = np.zeros(n)
@@ -356,6 +372,7 @@ def backtest_loop_spot_numba(
             if cost > 0:
                 coin = (cost * (1 - fee_rate)) / fill_price
                 balance -= cost
+                entry_cost = cost
                 
                 in_position = True
                 pending_entry = False
@@ -409,13 +426,24 @@ def backtest_loop_spot_numba(
                 revenue = coin * exit_price * (1 - fee_rate)
                 balance += revenue 
                 
-                pnl_pct = (exit_price - entry_price) / entry_price * 100
+                pnl = revenue - entry_cost
+                base_cost = entry_cost if entry_cost > 1e-9 else 1e-9
+                pnl_pct = (pnl / base_cost) * 100.0
                 if trade_count < max_trades:
-                    trades[trade_count] = [pnl_pct, float(i - entry_idx), 0.0]
+                    trades[trade_count] = [
+                        float(entry_idx),
+                        float(i),
+                        entry_price,
+                        exit_price,
+                        pnl_pct,
+                        pnl,
+                        float(i - entry_idx),
+                    ]
                     trade_count += 1
                 
                 coin = 0.0
                 in_position = False
+                entry_cost = 0.0
             else:
                 # [SEQ-4] Update High and Trailing Stop for NEXT Bar (i+1)
                 if c_high > highest:
