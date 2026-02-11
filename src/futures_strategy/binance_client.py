@@ -1,4 +1,4 @@
-
+﻿
 
 import ccxt
 import time
@@ -115,16 +115,100 @@ class BinanceClient:
         # Order Book Cache (0.3초 TTL - API 호출 60% 감소)
         self.orderbook_cache = OrderBookCache(ttl_seconds=0.3)
 
+    def _ensure_markets_loaded(self):
+        """Load market metadata once for precision/limits helpers."""
+        try:
+            if not getattr(self.exchange, 'markets', None):
+                self.exchange.load_markets()
+        except Exception as e:
+            self.logger.warning(f"⚠️ Failed to load markets metadata: {e}")
+
+    def get_symbol_constraints(self, symbol):
+        """
+        Return exchange precision/limit constraints for a symbol.
+        """
+        self._ensure_markets_loaded()
+        constraints = {
+            'min_amount': 0.0,
+            'min_cost': 0.0,
+            'tick_size': 0.0,
+        }
+
+        try:
+            market = self.exchange.market(symbol)
+        except Exception:
+            return constraints
+
+        limits = market.get('limits', {}) or {}
+        amount_limits = limits.get('amount', {}) or {}
+        cost_limits = limits.get('cost', {}) or {}
+        constraints['min_amount'] = float(amount_limits.get('min') or 0.0)
+        constraints['min_cost'] = float(cost_limits.get('min') or 0.0)
+
+        try:
+            filters = (market.get('info') or {}).get('filters', [])
+            for f in filters:
+                if f.get('filterType') == 'PRICE_FILTER':
+                    constraints['tick_size'] = float(f.get('tickSize') or 0.0)
+                    break
+        except Exception:
+            pass
+
+        return constraints
+
+    def get_price_tick_size(self, symbol, fallback=0.01):
+        """Return symbol tick size if available, else fallback."""
+        constraints = self.get_symbol_constraints(symbol)
+        tick = float(constraints.get('tick_size') or 0.0)
+        return tick if tick > 0 else float(fallback)
+
+    def round_price(self, symbol, price):
+        """Round price to exchange precision."""
+        try:
+            rounded = self.exchange.price_to_precision(symbol, price)
+            return float(rounded)
+        except Exception:
+            tick = self.get_price_tick_size(symbol, fallback=0.01)
+            return round(float(price) / tick) * tick
+
+    def round_amount(self, symbol, amount):
+        """Round quantity to exchange precision."""
+        try:
+            rounded = self.exchange.amount_to_precision(symbol, amount)
+            return float(rounded)
+        except Exception:
+            return float(amount)
+
     def fetch_ohlcv(self, symbol, timeframe, start_date, end_date=None):
         """
         지정된 기간의 OHLCV 데이터를 수집합니다.
         Binance API 제한(limit=1000)을 고려하여 반복 호출합니다.
         """
         limit = 1000
-        since = self.exchange.parse8601(f"{start_date}T00:00:00Z")
+        if isinstance(start_date, datetime):
+            start_iso = start_date.strftime("%Y-%m-%dT%H:%M:%SZ")
+        else:
+            start_str = str(start_date).strip()
+            if "T" in start_str or " " in start_str:
+                start_iso = start_str.replace(" ", "T")
+                if not start_iso.endswith("Z"):
+                    start_iso += "Z"
+            else:
+                start_iso = f"{start_str}T00:00:00Z"
+        since = self.exchange.parse8601(start_iso)
         
         if end_date:
-            end_timestamp = self.exchange.parse8601(f"{end_date}T23:59:59Z")
+            if isinstance(end_date, datetime):
+                end_iso = end_date.strftime("%Y-%m-%dT%H:%M:%SZ")
+            else:
+                end_str = str(end_date).strip()
+                if "T" in end_str or " " in end_str:
+                    end_iso = end_str.replace(" ", "T")
+                    if not end_iso.endswith("Z"):
+                        end_iso += "Z"
+                else:
+                    end_iso = f"{end_str}T23:59:59Z"
+            end_timestamp = self.exchange.parse8601(end_iso)
         else:
             end_timestamp = self.exchange.milliseconds()
 
@@ -170,6 +254,19 @@ class BinanceClient:
         
         return df
 
+    def fetch_recent_ohlcv(self, symbol, timeframe, limit=3):
+        """Fetch small recent OHLCV window for live signal timing."""
+        try:
+            rows = self.exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
+            if not rows:
+                return pd.DataFrame(columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'datetime'])
+            df = pd.DataFrame(rows, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            df['datetime'] = pd.to_datetime(df['timestamp'], unit='ms')
+            return df
+        except Exception as e:
+            self.logger.error(f"Error fetching recent OHLCV for {symbol} {timeframe}: {e}")
+            return pd.DataFrame(columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'datetime'])
+
     def get_market_price(self, symbol):
         """현재 시장가 조회"""
         try:
@@ -179,6 +276,17 @@ class BinanceClient:
             self.logger.error(f"Error fetching ticker: {e}")
             return None
     
+
+    def fetch_server_time_ms(self):
+        """Exchange server time in milliseconds."""
+        try:
+            server_ms = self.exchange.fetch_time()
+            if server_ms is not None:
+                return int(server_ms)
+        except Exception as e:
+            self.logger.warning(f"Failed to fetch exchange server time: {e}")
+        return int(time.time() * 1000)
+
     def fetch_balance(self):
         """USDT 선물 지갑 잔고 조회"""
         try:
@@ -187,7 +295,7 @@ class BinanceClient:
             return balance['total']['USDT'], balance['free']['USDT']
         except Exception as e:
             self.logger.error(f"Error fetching balance: {e}")
-            return 0.0, 0.0
+            raise RuntimeError("fetch_balance_failed") from e
 
     def set_leverage(self, symbol, leverage):
         """레버리지 설정"""
@@ -339,7 +447,8 @@ class BinanceClient:
                     return result
         except Exception as e:
             self.logger.error(f"Error fetching position for {symbol}: {e}")
-        
+            raise RuntimeError(f"fetch_position_failed:{symbol}") from e
+
         # 포지션 없으면 기본 0 반환
         self.logger.debug(f"[{symbol}] No active position found")
         return {'amount': 0.0, 'entryPrice': 0.0, 'unrealizedPnL': 0.0, 'leverage': 1}
@@ -350,9 +459,9 @@ class BinanceClient:
             return self.exchange.fetch_open_orders(symbol)
         except Exception as e:
             self.logger.error(f"Error fetching open orders for {symbol}: {e}")
-            return []
+            raise RuntimeError(f"fetch_open_orders_failed:{symbol}") from e
 
-    def place_order(self, symbol, side, amount, order_type='market', price=None, params={}):
+    def place_order(self, symbol, side, amount, order_type='market', price=None, params=None):
         """
         기본 주문 실행 (내부 사용)
         side: 'buy' or 'sell'
@@ -365,7 +474,7 @@ class BinanceClient:
                 side=side,
                 amount=amount,
                 price=price,
-                params=params
+                params=(params or {})
             )
             self.logger.info(f"⚡ Order Placed: {order_type} {side} {amount} {symbol} @ {price if price else 'Market'}")
             return order
@@ -413,160 +522,345 @@ class BinanceClient:
             
             self.logger.error(f"❌ Failed to place Server SL for {symbol}: {e}")
             return None
-
-    def place_order_smart(self, symbol, side, amount, atr=None, current_price=None):
+    def place_order_smart(
+        self,
+        symbol,
+        side,
+        amount,
+        atr=None,
+        current_price=None,
+        reduce_only=False,
+        allow_market_fallback=True,
+        order_deadline_ms=None,
+        post_only_wait_seconds=1.2,
+        post_only_requote_max=2,
+    ):
         """
-        프로덕션 최적화 V3 - Robust Waterfall Execution
-        
-        개선사항:
-        1. Zombie Order 방지: 타임아웃 시 Reconciliation 수행
-        2. API Weight 절감: 루프 확인 제거, 응답값 의존
-        3. Tier 2 최적화: IOC(Immediate-Or-Cancel) 도입으로 자동 취소
+        Production waterfall order executor.
+        - Tier 1: Post-only limit
+        - Tier 2: IOC aggressive limit
+        - Tier 3: Market fallback
         """
         from config.settings import SMART_ORDER_OFFSET
-        
-        # 틱 사이즈 & 라운딩
-        def get_tick_size(symbol):
-            if 'BTC' in symbol: return 0.1
-            return 0.01
-        
-        tick_size = get_tick_size(symbol)
-        
+
+        tick_size = self.get_price_tick_size(symbol, fallback=(0.1 if 'BTC' in symbol else 0.01))
+
         def round_to_tick(price, tick):
-            return round(price / tick) * tick
-            
+            if tick <= 0:
+                return float(price)
+            return round(float(price) / tick) * tick
+
         def get_best_price_fresh():
             try:
                 orderbook = self.exchange.fetch_order_book(symbol, limit=1)
                 best_bid = orderbook['bids'][0][0] if orderbook['bids'] else None
                 best_ask = orderbook['asks'][0][0] if orderbook['asks'] else None
-                if not best_bid: best_bid = current_price
-                if not best_ask: best_ask = current_price
+                if not best_bid:
+                    best_bid = current_price
+                if not best_ask:
+                    best_ask = current_price
                 return best_bid, best_ask
-            except:
+            except Exception:
                 return current_price, current_price
 
-        # 현재가 초기화
         if not current_price:
             current_price = self.get_market_price(symbol)
-            
-        # [Pre-flight] 변동성 체크
+        if not current_price:
+            self.logger.error(f"❌ Unable to fetch market price for smart order: {symbol}")
+            return None
+
+        requested_total = float(amount)
+        remaining_amount = requested_total
+        if remaining_amount <= 0:
+            self.logger.error(f"❌ Invalid order amount: {amount}")
+            return None
+
+        total_filled = 0.0
+        last_order = None
+        order_fill_tracker = {}
+
+        def build_params(base_params=None):
+            params = dict(base_params or {})
+            if reduce_only:
+                params['reduceOnly'] = True
+            return params
+
+        def deadline_reached():
+            if order_deadline_ms is None:
+                return False
+            try:
+                return int(time.time() * 1000) >= int(order_deadline_ms)
+            except Exception:
+                return False
+
+        def register_fill(order_obj, request_amount):
+            nonlocal remaining_amount, total_filled, last_order
+            if not order_obj:
+                return 0.0
+            last_order = order_obj
+            filled = float(order_obj.get('filled') or 0.0)
+            if request_amount > 0:
+                filled = min(filled, request_amount)
+            order_id = str(order_obj.get('id') or '')
+            if order_id:
+                prev_filled = float(order_fill_tracker.get(order_id, 0.0))
+                delta = max(0.0, filled - prev_filled)
+                order_fill_tracker[order_id] = max(prev_filled, filled)
+            else:
+                delta = max(0.0, filled)
+
+            if delta > 0:
+                total_filled += delta
+                remaining_amount = max(0.0, requested_total - total_filled)
+            return delta
+
+        def refresh_order(order_obj):
+            if not isinstance(order_obj, dict):
+                return order_obj
+            order_id = order_obj.get('id')
+            if not order_id:
+                return order_obj
+            try:
+                return self.exchange.fetch_order(order_id, symbol)
+            except Exception:
+                try:
+                    open_orders = self.exchange.fetch_open_orders(symbol)
+                    for o in open_orders:
+                        if str(o.get('id')) == str(order_id):
+                            return o
+                except Exception:
+                    pass
+            return order_obj
+
+        def wait_post_only_fill(order_obj, request_amount):
+            wait_seconds = max(0.0, float(post_only_wait_seconds or 0.0))
+            if wait_seconds <= 0:
+                return order_obj
+            poll_seconds = 0.2
+            wait_deadline = time.time() + wait_seconds
+            latest = order_obj
+            while time.time() < wait_deadline and remaining_amount > 0:
+                if deadline_reached():
+                    break
+                time.sleep(poll_seconds)
+                latest = refresh_order(latest)
+                register_fill(latest, request_amount)
+                status = str(latest.get('status', '')).lower()
+                if status in ('closed', 'filled', 'canceled', 'cancelled') or remaining_amount <= 0:
+                    break
+            return latest
+
+        def build_partial_result(status='partial'):
+            result = {
+                'symbol': symbol,
+                'side': side,
+                'type': 'multi_tier',
+                'status': status,
+                'requested': requested_total,
+                'filled': total_filled,
+                'remaining': max(0.0, requested_total - total_filled),
+                'reduceOnly': bool(reduce_only),
+            }
+            if isinstance(last_order, dict):
+                result['last_order_id'] = last_order.get('id')
+                result['average'] = last_order.get('average')
+            return result
+
         high_volatility = False
         if atr and current_price:
             volatility_pct = (atr / current_price) * 100
             if volatility_pct > 1.0:
                 high_volatility = True
-                self.logger.info(f"🔥 High Volatility ({volatility_pct:.2f}%) → Aggressive Mode")
+                self.logger.info(f"🔥 High Volatility ({volatility_pct:.2f}%) -> Aggressive Mode")
 
-        # ========================================
-        # 🌊 TIER 1: Single-Shot Post-Only (Normal Only)
-        # ========================================
-        if not high_volatility:
+        # Tier 1: Post-only limit
+        if not high_volatility and remaining_amount > 0:
+            max_requotes = max(0, int(post_only_requote_max or 0))
+            for requote_idx in range(max_requotes + 1):
+                if remaining_amount <= 0:
+                    break
+                if deadline_reached():
+                    self.logger.warning("⏱️ Entry deadline reached during Tier 1. Stop escalating.")
+                    break
+                try:
+                    self.rate_limiter.wait_if_needed()
+                    best_bid, best_ask = get_best_price_fresh()
+
+                    if side == 'buy':
+                        target_price = round_to_tick(best_bid + tick_size, tick_size)
+                    else:
+                        target_price = round_to_tick(best_ask - tick_size, tick_size)
+
+                    self.logger.info(
+                        f"📦 Tier 1: Post-Only {side} @ {target_price} "
+                        f"(requote {requote_idx + 1}/{max_requotes + 1})"
+                    )
+
+                    request_amount = remaining_amount
+                    filled_before_round = total_filled
+                    order = self.exchange.create_order(
+                        symbol=symbol,
+                        type='limit',
+                        side=side,
+                        amount=request_amount,
+                        price=target_price,
+                        params=build_params({'postOnly': True}),
+                    )
+                    register_fill(order, request_amount)
+                    order = wait_post_only_fill(order, request_amount)
+                    status = str(order.get('status', '')).lower()
+                    filled_this_round = max(0.0, total_filled - filled_before_round)
+
+                    if status in ('closed', 'filled') or remaining_amount <= 0:
+                        self.logger.info(
+                            f"✅ Tier 1 Filled ({filled_this_round}/{request_amount}) @ "
+                            f"{order.get('average', target_price)}"
+                        )
+                        return order
+
+                    if filled_this_round > 0:
+                        self.logger.warning(
+                            f"⚠️ Tier 1 Partial Fill: {filled_this_round}/{request_amount}. "
+                            f"Remaining {remaining_amount}"
+                        )
+                        if remaining_amount <= 0:
+                            return order
+
+                    if status in ('open', 'new'):
+                        try:
+                            self.exchange.cancel_order(order['id'], symbol)
+                            if requote_idx < max_requotes and not deadline_reached():
+                                self.logger.info("🔁 Tier 1 open order canceled. Requoting post-only.")
+                                continue
+                            self.logger.info("⚠️ Tier 1 open order canceled. Escalating to Tier 2.")
+                        except Exception as cancel_err:
+                            self.logger.warning(
+                                f"🗑️ Tier 1 cancel failed: {cancel_err}. Forcing cancel_all reconciliation..."
+                            )
+                            try:
+                                self.exchange.cancel_all_orders(symbol)
+                                lingering = self.exchange.fetch_open_orders(symbol)
+                                if lingering:
+                                    self.logger.error(
+                                        f"❌ Tier 1 cancel reconciliation failed: {len(lingering)} open orders remain. "
+                                        "Abort escalation to prevent orphan orders."
+                                    )
+                                    return build_partial_result(status='cancel_failed_open')
+                            except Exception as cleanup_err:
+                                self.logger.error(
+                                    f"❌ Tier 1 cancel reconciliation exception: {cleanup_err}. "
+                                    "Abort escalation to prevent orphan orders."
+                                )
+                                return build_partial_result(status='cancel_failed_open')
+                        break
+
+                except Exception as e:
+                    if 'timeout' in str(e).lower():
+                        self.logger.warning("⚠️ Tier 1 Timeout -> Reconciling...")
+                        try:
+                            open_orders = self.exchange.fetch_open_orders(symbol)
+                            if open_orders:
+                                self.exchange.cancel_all_orders(symbol)
+                                self.logger.info("🗑️ Zombie Order Canceled")
+                                lingering = self.exchange.fetch_open_orders(symbol)
+                                if lingering:
+                                    self.logger.error(
+                                        f"❌ Tier 1 timeout reconciliation incomplete: {len(lingering)} open orders remain."
+                                    )
+                                    return build_partial_result(status='timeout_open_orders')
+                        except Exception:
+                            pass
+                    else:
+                        self.logger.info(f"❌ Tier 1 Skipped ({e}) -> Tier 2")
+                    break
+
+        if remaining_amount > 0 and deadline_reached():
+            self.logger.warning("⏱️ Entry deadline reached before Tier 2. Skip further escalation.")
+            if total_filled > 0:
+                return build_partial_result(status='deadline_partial')
+            return None
+
+        # Tier 2: IOC aggressive limit
+        if remaining_amount > 0:
             try:
                 self.rate_limiter.wait_if_needed()
                 best_bid, best_ask = get_best_price_fresh()
-                
+
+                offset = 0.001 if high_volatility else SMART_ORDER_OFFSET
                 if side == 'buy':
-                    target_price = round_to_tick(best_bid + tick_size, tick_size)
+                    limit_price = round_to_tick(best_ask * (1 + offset), tick_size)
                 else:
-                    target_price = round_to_tick(best_ask - tick_size, tick_size)
-                
-                self.logger.info(f"📌 Tier 1: Post-Only {side} @ {target_price}")
-                
+                    limit_price = round_to_tick(best_bid * (1 - offset), tick_size)
+
+                self.logger.info(f"📦 Tier 2: IOC Limit {side} @ {limit_price}")
+
+                request_amount = remaining_amount
                 order = self.exchange.create_order(
-                    symbol=symbol, type='limit', side=side, amount=amount, price=target_price,
-                    params={'postOnly': True}
+                    symbol=symbol,
+                    type='limit',
+                    side=side,
+                    amount=request_amount,
+                    price=limit_price,
+                    params=build_params({'timeInForce': 'IOC'}),
                 )
-                
-                # 즉시 체결 확인
-                if order['status'] == 'closed':
-                    self.logger.info(f"✅ Tier 1 Filled @ {order.get('average', target_price)}")
-                    return order
-                
-                # Post-Only는 즉시 거부되거나 체결되어야 함. Open 상태면 취소 후 Tier 2로 진행
-                if order['status'] == 'open':
-                    try:
-                        self.exchange.cancel_order(order['id'], symbol)
-                        self.logger.info(f"⚠️ Tier 1 Post-Only 체결 실패 (open 상태) → 취소 후 Tier 2로")
-                    except Exception as cancel_err:
-                        self.logger.warning(f"🗑️ 취소 실패: {cancel_err}. Tier 2로 진행...")
+                filled = register_fill(order, request_amount)
+
+                if filled > 0:
+                    fill_ratio = filled / request_amount if request_amount > 0 else 0.0
+                    if remaining_amount <= 0 or fill_ratio >= 0.999:
+                        self.logger.info(f"✅ Tier 2 Filled ({filled}/{request_amount}) @ {order.get('average', limit_price)}")
+                        return order
+
+                    self.logger.warning(
+                        f"⚠️ Tier 2 Partial Fill: {filled}/{request_amount} "
+                        f"({fill_ratio*100:.1f}%). Remaining {remaining_amount}"
+                    )
 
             except Exception as e:
-                # 타임아웃 의심 시 Reconciliation (좀비 주문 방지)
+                self.logger.error(f"❌ Tier 2 Failed: {e}")
                 if 'timeout' in str(e).lower():
-                    self.logger.warning("⚠️ Tier 1 Timeout → Reconciling...")
                     try:
-                        open_orders = self.exchange.fetch_open_orders(symbol)
-                        if open_orders:
-                            self.exchange.cancel_all_orders(symbol)
-                            self.logger.info("🗑️ Zombie Order Canceled")
-                    except:
+                        self.exchange.cancel_all_orders(symbol)
+                    except Exception:
                         pass
-                else:
-                    self.logger.info(f"⏩ Tier 1 Skipped ({e}) → Tier 2")
-        
-        # ========================================
-        # ⚡ TIER 2: Adaptive IOC (Aggressive Limit)
-        # IOC: 즉시 체결 가능한 물량만 체결하고 나머지는 자동 취소
-        # ========================================
-        try:
-            self.rate_limiter.wait_if_needed()
-            best_bid, best_ask = get_best_price_fresh()
-            
-            # 오프셋: 고변동성 0.1%, 일반 0.03%
-            offset = 0.001 if high_volatility else SMART_ORDER_OFFSET
-            
-            if side == 'buy':
-                limit_price = round_to_tick(best_ask * (1 + offset), tick_size)
-            else:
-                limit_price = round_to_tick(best_bid * (1 - offset), tick_size)
-            
-            self.logger.info(f"📌 Tier 2: IOC Limit {side} @ {limit_price}")
-            
-            # IOC 주문: 루프 확인 불필요, 자동 만료됨
-            order = self.exchange.create_order(
-                symbol=symbol, type='limit', side=side, amount=amount, price=limit_price,
-                params={'timeInForce': 'IOC'}
-            )
-            
-            # [ISSUE #5 FIX] IOC는 부분 체결(partial fill) 가능성 있음 -> filled 확인
-            if order['filled'] > 0:
-                avg_price = order.get('average', limit_price)
-                
-                # 전체 체결 확인 (허용 오차: 0.1%)
-                fill_ratio = order['filled'] / amount
-                if fill_ratio >= 0.999:  # 99.9% 이상 체결 시 성공으로 처리
-                    self.logger.info(f"✅ Tier 2 Filled ({order['filled']}/{amount}) @ {avg_price}")
-                    return order
-                else:
-                    # 부분 체결 시 Tier 3로 진행 (남은 수량을 Market으로 처리)
-                    self.logger.warning(
-                        f"⚠️ Tier 2 Partial Fill: {order['filled']}/{amount} "
-                        f"({fill_ratio*100:.1f}%) @ {avg_price}. Tier 3로 진행..."
-                    )
-                    # Tier 3에서 전체 수량을 다시 주문 (이미 체결된 부분은 거래소에서 자동 조정됨)
-                
-        except Exception as e:
-            self.logger.error(f"❌ Tier 2 Failed: {e}")
-            if 'timeout' in str(e).lower():
-                # IOC라도 타임아웃 시에는 상태 확인 필요할 수 있음 (잔존 가능성 희박하나 안전장치)
-                try:
-                    self.exchange.cancel_all_orders(symbol) 
-                except:
-                    pass
-        
-        # ========================================
-        # 🛡️ TIER 3: Market Fallback
-        # ========================================
-        try:
-            self.rate_limiter.wait_if_needed()
-            self.logger.warning(f"⚡ Tier 3: Market Order {side}")
-            return self.exchange.create_order(symbol=symbol, type='market', side=side, amount=amount)
-        except Exception as e:
-            self.logger.error(f"❌ All Tiers Failed: {e}")
+
+        if remaining_amount > 0 and deadline_reached():
+            self.logger.warning("⏱️ Entry deadline reached before Tier 3. Skip market fallback.")
+            if total_filled > 0:
+                return build_partial_result(status='deadline_partial')
             return None
 
-
+        # Tier 3: market fallback for remaining qty
+        try:
+            if remaining_amount <= 0:
+                return last_order if last_order else build_partial_result(status='filled')
+            if not allow_market_fallback:
+                self.logger.warning(
+                    f"⚠️ Market fallback disabled for {symbol} {side}. Remaining unfilled: {remaining_amount}"
+                )
+                if total_filled > 0:
+                    return build_partial_result(status='partial_no_market')
+                return None
+            self.rate_limiter.wait_if_needed()
+            self.logger.warning(f"🚨 Tier 3: Market Order {side} (remaining: {remaining_amount})")
+            order = self.exchange.create_order(
+                symbol=symbol,
+                type='market',
+                side=side,
+                amount=remaining_amount,
+                params=build_params(),
+            )
+            register_fill(order, remaining_amount)
+            return order
+        except Exception as e:
+            self.logger.error(f"❌ All Tiers Failed: {e}")
+            if total_filled > 0:
+                self.logger.warning(
+                    f"⚠️ Partial fill preserved despite final failure: "
+                    f"{total_filled}/{requested_total} {symbol}"
+                )
+                return build_partial_result(status='partial_failed')
+            return None
 
 
     def cancel_all_orders(self, symbol):
@@ -576,3 +870,5 @@ class BinanceClient:
             self.logger.info(f"🗑️ Canceled all open orders for {symbol}")
         except Exception as e:
             self.logger.error(f"Error canceling orders: {e}")
+
+
