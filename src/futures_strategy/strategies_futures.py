@@ -116,8 +116,9 @@ class UltimateStrategy(Strategy):
         if entry_type == 'DONCHIAN':
             # Donchian logic is traditionally handled in Engine using rolling max/min
             # We prepare the bands here for Engine to use
-            df['entry_upper'] = df['high'].rolling(window=entry_period).max().shift(1)
-            df['entry_lower'] = df['low'].rolling(window=entry_period).min().shift(1)
+            # Keep strategy-level signals unshifted; temporal alignment is handled once in engine.
+            df['entry_upper'] = df['high'].rolling(window=entry_period).max()
+            df['entry_lower'] = df['low'].rolling(window=entry_period).min()
             
         elif entry_type == 'BOLLINGER':
             std_dev = self.params.get('BB_STD', 2.0)
@@ -137,18 +138,12 @@ class UltimateStrategy(Strategy):
             # Entry when CCI crosses above threshold (Long) or below -threshold (Short)
             
             df['cci'] = calculate_cci(df, window=entry_period)
-            
-            # Shift CCI by 1 to avoid look-ahead bias
-            cci_prev = df['cci'].shift(1)
             cci_thresh = self.params.get('CCI_THRESHOLD', 100)
             
-            # LONG Trigger: If previous CCI > threshold, enter at breakout above previous high
-            prev_high = df['high'].shift(1)
-            df['entry_upper'] = np.where(cci_prev > cci_thresh, prev_high, np.inf)
+            # Keep strategy-level signals unshifted; engine handles temporal alignment.
+            df['entry_upper'] = np.where(df['cci'] > cci_thresh, df['high'], np.inf)
             
-            # SHORT Trigger: If previous CCI < -threshold, enter at breakdown below previous low
-            prev_low = df['low'].shift(1)
-            df['entry_lower'] = np.where(cci_prev < -cci_thresh, prev_low, -np.inf)
+            df['entry_lower'] = np.where(df['cci'] < -cci_thresh, df['low'], -np.inf)
             
         # --- 3. Trend Direction Filter ---
         filter_type = self.params.get('TREND_FILTER_TYPE', 'EMA')
@@ -372,7 +367,8 @@ class UltimateStrategy(Strategy):
         # Strategy usually has warmup phase, but clean data prevents edge-case crashes.
         
         # 1. Indicators: ffill first, then default defaults
-        df['atr'] = df['atr'].ffill().bfill().fillna(df['close'] * 0.01)
+        # Do not back-fill ATR to avoid leaking future information into early bars.
+        df['atr'] = df['atr'].ffill().fillna(df['close'] * 0.01)
         
         if 'natr' in df.columns:
             df['natr'] = df['natr'].ffill().fillna(1.0)

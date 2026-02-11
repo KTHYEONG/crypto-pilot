@@ -69,6 +69,7 @@ def run_backtest_segment_futures(df, params, initial_balance=1000000.0, return_s
     
     # Data extraction
     close = df['close'].values
+    open_prices = df['open'].values
     high = df['high'].values
     low = df['low'].values
     times = df['datetime'].values
@@ -88,6 +89,8 @@ def run_backtest_segment_futures(df, params, initial_balance=1000000.0, return_s
     equity_curve = []
     
     for i in range(1, len(df)):
+        prev_price = close[i - 1]
+        c_open = open_prices[i]
         price = close[i]
         c_high = high[i]
         c_low = low[i]
@@ -133,7 +136,7 @@ def run_backtest_segment_futures(df, params, initial_balance=1000000.0, return_s
                     
                 # Trend Reversal
                 if not exit_triggered and trend_dir[i-1] == -1:
-                    exit_price = price
+                    exit_price = c_open
                     exit_triggered = True
                     reason = "Trend Reversal"
             
@@ -172,7 +175,7 @@ def run_backtest_segment_futures(df, params, initial_balance=1000000.0, return_s
 
                 # Trend Reversal
                 if not exit_triggered and trend_dir[i-1] == 1:
-                    exit_price = price
+                    exit_price = c_open
                     exit_triggered = True
                     reason = "Trend Reversal"
 
@@ -211,22 +214,24 @@ def run_backtest_segment_futures(df, params, initial_balance=1000000.0, return_s
                 
         else:
             # --- Entry Logic ---
-            if np.isnan(entry_upper[i]) or np.isnan(entry_lower[i]): continue
-            if strength[i] == 0: continue
+            # Signal is decided on previous closed bar, execution happens on current bar.
+            if np.isnan(entry_upper[i - 1]) or np.isnan(entry_lower[i - 1]): continue
+            if strength[i - 1] == 0: continue
+            signal_atr = atr[i - 1]
             
             # LONG
-            if trend_dir[i] == 1 and price > entry_upper[i]:
-                fill_price = price * (1 + slippage)
+            if trend_dir[i - 1] == 1 and prev_price > entry_upper[i - 1]:
+                fill_price = c_open * (1 + slippage)
                 
                 # SL Calc
                 if sl_type == 'ATR':
-                    stop_price = fill_price - (atr[i] * atr_sl_mult)
+                    stop_price = fill_price - (signal_atr * atr_sl_mult)
                 else:
                     stop_price = fill_price * (1 - sl_pct)
                 
                 # TP Calc
                 if use_tp:
-                    tp_price = fill_price + (atr[i] * tp_atr_mult)
+                    tp_price = fill_price + (signal_atr * tp_atr_mult)
                 else:
                     tp_price = 0.0
 
@@ -255,7 +260,7 @@ def run_backtest_segment_futures(df, params, initial_balance=1000000.0, return_s
                     in_pos = True
                     highest = fill_price
                     lowest = fill_price
-                    pos_atr = atr[i]
+                    pos_atr = signal_atr
                     
                     detailed_log.append({
                         'time': times[i],
@@ -267,18 +272,18 @@ def run_backtest_segment_futures(df, params, initial_balance=1000000.0, return_s
                     })
 
             # SHORT
-            elif trend_dir[i] == -1 and price < entry_lower[i]:
-                fill_price = price * (1 - slippage)
+            elif trend_dir[i - 1] == -1 and prev_price < entry_lower[i - 1]:
+                fill_price = c_open * (1 - slippage)
                 
                 # SL Calc
                 if sl_type == 'ATR':
-                    stop_price = fill_price + (atr[i] * atr_sl_mult)
+                    stop_price = fill_price + (signal_atr * atr_sl_mult)
                 else:
                     stop_price = fill_price * (1 + sl_pct)
                     
                 # TP Calc
                 if use_tp:
-                    tp_price = fill_price - (atr[i] * tp_atr_mult)
+                    tp_price = fill_price - (signal_atr * tp_atr_mult)
                 else:
                     tp_price = 0.0
                 
@@ -307,7 +312,7 @@ def run_backtest_segment_futures(df, params, initial_balance=1000000.0, return_s
                     in_pos = True
                     highest = fill_price
                     lowest = fill_price
-                    pos_atr = atr[i]
+                    pos_atr = signal_atr
                     
                     detailed_log.append({
                         'time': times[i],
