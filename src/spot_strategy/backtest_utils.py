@@ -54,14 +54,23 @@ def run_backtest_segment(df, params, initial_balance=10000000.0, return_series=F
     rsi = np.nan_to_num(df.get('rsi', pd.Series([50.0]*len(df))).values, nan=50.0)
     
     # [REGIME PARAMS]
-    hurst_threshold = params.get('STRONG_REGIME_HURST', 0.6)
+    hurst_threshold = params.get('HURST_TREND_THRESHOLD', params.get('STRONG_REGIME_HURST', 0.6))
+    strong_regime_natr = params.get('STRONG_REGIME_NATR', 1.0)
     natr_panic_threshold = params.get('PANIC_REGIME_NATR', 4.5)
     rsi_panic_threshold = params.get('RSI_EXIT_THRESHOLD', 94.0)
+    use_dynamic_risk = params.get('USE_DYNAMIC_RISK', True)
     
     strong_regime_multiplier = params.get('STRONG_REGIME_MULTIPLIER', 1.3)
     panic_regime_multiplier = params.get('PANIC_REGIME_MULTIPLIER', 0.15)
+    weak_regime_hurst = params.get('WEAK_REGIME_HURST', 0.45)
+    weak_regime_multiplier = params.get('WEAK_REGIME_MULTIPLIER', 0.6)
     
     max_holding_bars = params.get('MAX_HOLDING_BARS', 999999)
+    time_exit_profit_threshold = params.get('TIME_EXIT_PROFIT_THRESHOLD', 1.4)
+    rsi_entry_max = params.get('RSI_ENTRY_MAX', 100.0)
+    natr_entry_min = params.get('NATR_ENTRY_MIN', 0.0)
+    use_compounding = params.get('USE_COMPOUNDING', False)
+    max_capital_usage = params.get('MAX_CAPITAL_USAGE', 100_000_000.0)
     
     entry_idx = 0
 
@@ -83,7 +92,8 @@ def run_backtest_segment(df, params, initial_balance=10000000.0, return_series=F
             if not exit_triggered:
                 bars_held = i - entry_idx
                 if bars_held >= max_holding_bars:
-                    if pnl_pct_current <= 0.2: # Exit if not profitable
+                    unrealized_profit_atr = (price - entry_price) / pos_atr if pos_atr > 0 else 0.0
+                    if unrealized_profit_atr <= time_exit_profit_threshold:
                         exit_price = price
                         exit_triggered = True
                         reason = "Time Cut (No Profit)"
@@ -148,12 +158,19 @@ def run_backtest_segment(df, params, initial_balance=10000000.0, return_series=F
             if strength[i] == 0: continue
             
             if trend_dir[i] == 1 and price > entry_upper[i]:
+                if rsi[i] >= rsi_entry_max:
+                    continue
+                if natr[i] < natr_entry_min:
+                    continue
                 # [NEW] Regime Detection (Position Sizing)
                 regime_mult = 1.0
-                if hurst[i] > hurst_threshold:
-                    regime_mult = strong_regime_multiplier
-                if natr[i] > natr_panic_threshold:
-                    regime_mult = panic_regime_multiplier
+                if use_dynamic_risk:
+                    if natr[i] > natr_panic_threshold:
+                        regime_mult = panic_regime_multiplier
+                    elif hurst[i] > hurst_threshold and natr[i] > strong_regime_natr:
+                        regime_mult = strong_regime_multiplier
+                    elif hurst[i] < weak_regime_hurst:
+                        regime_mult = weak_regime_multiplier
                 
                 fill_price = price * (1 + slippage)
                 entry_price = fill_price
@@ -162,9 +179,10 @@ def run_backtest_segment(df, params, initial_balance=10000000.0, return_series=F
                 target_risk = risk_per_trade * regime_mult
                 if target_risk > 0.99: target_risk = 0.99
                 
-                cost = balance * target_risk
-                max_position_value = 100_000_000.0  # 1억 KRW cap
-                cost = min(cost, max_position_value)
+                current_capital = balance if use_compounding else min(balance, initial_balance)
+                cost = current_capital * target_risk
+                cost = min(cost, max_capital_usage)
+                cost = min(cost, balance)
                 coin = (cost * (1 - fee_rate)) / fill_price
                 balance -= cost
                 

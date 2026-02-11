@@ -2,6 +2,8 @@ import argparse
 import gc
 import logging
 import os
+import re
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -12,6 +14,8 @@ import optuna
 import pandas as pd
 from dotenv import load_dotenv
 from urllib.parse import quote_plus
+from sqlalchemy import create_engine, text
+from sqlalchemy.engine.url import make_url
 
 try:
     project_root = str(Path(__file__).resolve().parents[2])
@@ -34,6 +38,7 @@ SPOT_START_DATE = "2018-01-01"
 SPOT_INITIAL_BALANCE = 1_000_000.0
 DATA_DIR = os.path.join(os.path.dirname(__file__), "../../data")
 os.makedirs(DATA_DIR, exist_ok=True)
+GAP_FILL_MAX_RANGES = int(os.getenv("SPOT_GAP_FILL_MAX_RANGES", "8"))
 
 DAILY_BUFFER_DAYS = 200
 WARMUP_BUFFER_BARS = {"5m": 500, "15m": 420, "30m": 350, "1h": 300, "2h": 250, "4h": 200, "1d": 150, "1w": 80}
@@ -45,12 +50,224 @@ AWFO_DEFAULTS = {
     "embargo_bars": {"5m": 40, "15m": 32, "30m": 24, "1h": 24, "2h": 16, "4h": 12, "1d": 5, "1w": 2},
 }
 
+STRUCTURE_PARAM_KEYS = [
+    "ENTRY_TYPE",
+    "TREND_FILTER_TYPE",
+    "STRENGTH_FILTER_TYPE",
+    "EXIT_TYPE",
+    "STOP_LOSS_TYPE",
+    "USE_TAKE_PROFIT",
+    "USE_VOLUME_FILTER",
+    "TIMEFRAME",
+    "USE_DYNAMIC_RISK",
+]
+
+# Spot (long-only, no leverage) tuned defaults.
+SPOT_TWO_STAGE_UNIFIED_DEFAULTS = {
+    "stage1_total_trials": 1400,
+    "stage1_fidelity_steps": [
+        {"name": "low", "ratio": 0.50, "symbols": 1, "data_ratio": 0.45, "folds": 2, "min_trades": 24, "startup_ratio": 0.34},
+        {"name": "mid", "ratio": 0.32, "symbols": 2, "data_ratio": 0.72, "folds": 3, "min_trades": 30, "startup_ratio": 0.27},
+        {"name": "high", "ratio": 0.18, "symbols": 3, "data_ratio": 1.00, "folds": 3, "min_trades": 35, "startup_ratio": 0.22},
+    ],
+    "promotion_ratio": 0.35,
+    "stage2_top_structures": 7,
+    "stage2_trials_per_structure": 170,
+    "stage2_folds": 3,
+    "stage2_min_trades": 30,
+    "stage2_startup_ratio": 0.18,
+    "stage2_refine_ratio": 0.45,
+    "stage2_refine_top_quantile": 0.24,
+    "stage2_refine_min_width_ratio": 0.25,
+    "stage2_refine_min_samples": 28,
+    "stage2_refine_step_span": 4,
+}
+
 
 def _env_float(name: str, default: float) -> float:
     try:
         return float(os.getenv(name, default))
     except (TypeError, ValueError):
         return float(default)
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, default))
+    except (TypeError, ValueError):
+        return int(default)
+
+
+
+def ensure_database_exists(db_url: str) -> None:
+    try:
+        url = make_url(db_url)
+        db_name = url.database
+        if not db_name:
+            return
+
+        # Connect to 'mysql' system database to check/create target DB
+        admin_url = url.set(database="mysql")
+        engine = create_engine(admin_url)
+        
+        with engine.connect() as conn:
+            # Use backticks for safety against special characters in db_name
+            conn.execute(text(f"CREATE DATABASE IF NOT EXISTS `{db_name}`"))
+            # Explicit commit is required for DDL in some configurations/drivers
+            conn.commit()
+    except Exception as e:
+        print(f"[WARN] Failed to ensure database exists: {e}")
+
+
+def _safe_spot_symbol(symbol: str) -> str:
+    return re.sub(r"[^A-Za-z0-9]+", "_", str(symbol).strip())
+
+
+def _spot_symbol_to_cache_token(symbol: str) -> str:
+    s = str(symbol).strip().upper()
+    if "-" in s:
+        parts = [p for p in s.split("-") if p]
+        if len(parts) == 2:
+            quote, base = parts[0], parts[1]
+            return f"{base}_{quote}"
+    if "/" in s:
+        parts = [p for p in s.split("/") if p]
+        if len(parts) == 2:
+            base, quote = parts[0], parts[1]
+            return f"{base}_{quote}"
+    return _safe_spot_symbol(s)
+
+
+def _spot_single_cache_path(symbol: str, timeframe: str) -> str:
+    safe_symbol = _spot_symbol_to_cache_token(symbol)
+    safe_tf = re.sub(r"[^A-Za-z0-9]+", "_", str(timeframe).strip())
+    return os.path.join(DATA_DIR, f"{safe_symbol}_{safe_tf}.parquet")
+
+
+def _seed_spot_cache_from_legacy(symbol: str, timeframe: str) -> Optional[pd.DataFrame]:
+    safe_symbol = symbol.replace("/", "_")
+    pattern_parquet = re.compile(
+        rf"^{re.escape(safe_symbol)}_{re.escape(timeframe)}_\d{{8}}_\d{{8}}_spot\.parquet$"
+    )
+    pattern_csv = re.compile(
+        rf"^{re.escape(safe_symbol)}_{re.escape(timeframe)}_\d{{8}}_\d{{8}}_spot\.csv$"
+    )
+    frames: List[pd.DataFrame] = []
+    try:
+        for name in os.listdir(DATA_DIR):
+            fp = os.path.join(DATA_DIR, name)
+            if not os.path.isfile(fp):
+                continue
+            if pattern_parquet.match(name):
+                try:
+                    part = pd.read_parquet(fp)
+                    if not part.empty:
+                        frames.append(part)
+                except Exception:
+                    continue
+            elif pattern_csv.match(name):
+                try:
+                    part = pd.read_csv(fp)
+                    if not part.empty:
+                        frames.append(part)
+                except Exception:
+                    continue
+    except Exception:
+        return None
+
+    if not frames:
+        return None
+    merged = pd.concat(frames, ignore_index=True)
+    if "timestamp" not in merged.columns:
+        return None
+    merged = merged.drop_duplicates(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
+    merged["datetime"] = pd.to_datetime(merged["timestamp"], unit="ms")
+    return merged
+
+
+def _spot_timeframe_to_ms(timeframe: str) -> Optional[int]:
+    tf = str(timeframe).strip().lower()
+    fixed = {
+        "1m": 60_000,
+        "3m": 180_000,
+        "5m": 300_000,
+        "10m": 600_000,
+        "15m": 900_000,
+        "30m": 1_800_000,
+        "1h": 3_600_000,
+        "2h": 7_200_000,
+        "4h": 14_400_000,
+        "1d": 86_400_000,
+        "1w": 604_800_000,
+    }
+    if tf in fixed:
+        return fixed[tf]
+    m = re.fullmatch(r"(\d+)m", tf)
+    if m:
+        return int(m.group(1)) * 60_000
+    h = re.fullmatch(r"(\d+)h", tf)
+    if h:
+        return int(h.group(1)) * 3_600_000
+    return None
+
+
+def _find_internal_gap_ranges(df: pd.DataFrame, start_ts: int, end_ts: int, step_ms: int) -> List[Tuple[int, int]]:
+    if df is None or df.empty or "timestamp" not in df.columns or step_ms <= 0:
+        return []
+    ts = pd.to_numeric(df["timestamp"], errors="coerce").dropna().astype("int64")
+    ts = ts[(ts >= int(start_ts)) & (ts <= int(end_ts))]
+    if ts.empty:
+        return []
+    arr = np.sort(ts.unique())
+    if arr.size < 2:
+        return []
+    diffs = np.diff(arr)
+    gap_idx = np.where(diffs > step_ms)[0]
+    ranges: List[Tuple[int, int]] = []
+    for idx in gap_idx:
+        gap_start = int(arr[idx] + step_ms)
+        gap_end = int(arr[idx + 1] - step_ms)
+        if gap_start <= gap_end:
+            ranges.append((gap_start, gap_end))
+    return ranges
+
+
+def _fill_internal_gaps_spot(
+    client: UpbitClient,
+    symbol: str,
+    timeframe: str,
+    df: pd.DataFrame,
+    start_ts: int,
+    end_ts: int,
+    max_ranges: int = GAP_FILL_MAX_RANGES,
+) -> pd.DataFrame:
+    step_ms = _spot_timeframe_to_ms(timeframe)
+    if step_ms is None or df is None or df.empty:
+        return df
+    gaps = _find_internal_gap_ranges(df, start_ts, end_ts, step_ms)
+    if not gaps:
+        return df
+    selected = gaps[: max(1, int(max_ranges))]
+    logger.info(
+        f"[INFO] Detected {len(gaps)} internal gap(s) for {symbol}-{timeframe}; "
+        f"filling {len(selected)} range(s)."
+    )
+    parts: List[pd.DataFrame] = [df]
+    added_rows = 0
+    for gap_start, gap_end in selected:
+        fetched = client.fetch_ohlcv(symbol, timeframe, since=int(gap_start), end=int(gap_end))
+        if fetched is None or fetched.empty:
+            continue
+        fetched = fetched.drop_duplicates(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
+        fetched["datetime"] = pd.to_datetime(fetched["timestamp"], unit="ms")
+        added_rows += len(fetched)
+        parts.append(fetched)
+    if len(parts) == 1:
+        return df
+    merged = pd.concat(parts, ignore_index=True)
+    merged = merged.drop_duplicates(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
+    logger.info(f"[INFO] Gap fill merged {added_rows} row(s) for {symbol}-{timeframe}.")
+    return merged
 
 
 def _parse_seed_list(seed_arg: Optional[str]) -> List[int]:
@@ -104,6 +321,235 @@ def _robust_value_from_trials(completed: Sequence[optuna.trial.FrozenTrial]) -> 
     return (0.65 * float(np.mean(top))) + (0.35 * float(np.percentile(top, 25)))
 
 
+def _robust_value_from_study(study: optuna.study.Study) -> float:
+    return _robust_value_from_trials(_study_complete_trials(study))
+
+
+def _align_to_step(value: float, base: float, step: float, mode: str = "round") -> float:
+    if step <= 0:
+        return float(value)
+    pos = (value - base) / step
+    if mode == "ceil":
+        snapped = np.ceil(pos) * step + base
+    elif mode == "floor":
+        snapped = np.floor(pos) * step + base
+    else:
+        snapped = np.round(pos) * step + base
+    return float(snapped)
+
+
+def build_adaptive_numeric_space(
+    base_space: Dict[str, dict],
+    completed_trials: Sequence[optuna.trial.FrozenTrial],
+    top_quantile: float = 0.24,
+    min_width_ratio: float = 0.25,
+    min_samples: int = 24,
+    min_step_span: int = 4,
+) -> Dict[str, dict]:
+    if not completed_trials:
+        return base_space
+
+    narrowed: Dict[str, dict] = {k: v.copy() for k, v in base_space.items()}
+    top_quantile = float(np.clip(top_quantile, 0.05, 0.50))
+    min_width_ratio = float(np.clip(min_width_ratio, 0.05, 0.85))
+    min_samples = int(max(10, min_samples))
+    min_step_span = int(max(2, min_step_span))
+
+    top_n = max(1, int(len(completed_trials) * top_quantile))
+    elite = list(completed_trials[:top_n])
+
+    for key, spec in narrowed.items():
+        if spec.get("type") not in {"float", "int"}:
+            continue
+        if "low" not in spec or "high" not in spec:
+            continue
+
+        vals: List[float] = []
+        for tr in elite:
+            if key in tr.params:
+                try:
+                    vals.append(float(tr.params[key]))
+                except (TypeError, ValueError):
+                    continue
+        if len(vals) < min_samples:
+            continue
+
+        base_low = float(spec["low"])
+        base_high = float(spec["high"])
+        if base_high <= base_low:
+            continue
+
+        q20, q50, q80 = np.percentile(vals, [20, 50, 80])
+        elite_span = max(float(q80 - q20), 1e-12)
+        base_span = base_high - base_low
+        min_span = base_span * min_width_ratio
+        target_span = max(min_span, elite_span * 1.6)
+
+        if spec.get("type") == "int":
+            target_span = max(target_span, float(min_step_span))
+        elif "step" in spec:
+            step = float(spec["step"])
+            target_span = max(target_span, step * float(min_step_span))
+
+        new_low = max(base_low, float(q50) - (target_span / 2.0))
+        new_high = min(base_high, float(q50) + (target_span / 2.0))
+        if new_high <= new_low:
+            continue
+
+        if "step" in spec:
+            step = float(spec["step"])
+            new_low = _align_to_step(new_low, base_low, step, mode="ceil")
+            new_high = _align_to_step(new_high, base_low, step, mode="floor")
+            if new_high <= new_low:
+                continue
+            span_steps = int(np.floor((new_high - new_low) / max(step, 1e-12)))
+            if span_steps < min_step_span:
+                continue
+
+        if spec.get("type") == "int":
+            new_low = int(np.floor(new_low))
+            new_high = int(np.ceil(new_high))
+            if new_high <= new_low:
+                continue
+            if (new_high - new_low) < min_step_span:
+                continue
+            spec["low"] = int(max(int(base_low), new_low))
+            spec["high"] = int(min(int(base_high), new_high))
+        else:
+            spec["low"] = float(max(base_low, new_low))
+            spec["high"] = float(min(base_high, new_high))
+
+    return narrowed
+
+
+def subset_data_maps(
+    base_data_maps: Dict[str, Dict[str, pd.DataFrame]],
+    ordered_symbols: Sequence[str],
+    n_symbols: int,
+    data_ratio: float,
+) -> Dict[str, Dict[str, pd.DataFrame]]:
+    n_symbols = max(1, min(int(n_symbols), len(ordered_symbols)))
+    ratio = float(max(0.10, min(data_ratio, 1.0)))
+    selected_symbols = list(ordered_symbols[:n_symbols])
+
+    subset: Dict[str, Dict[str, pd.DataFrame]] = {}
+    for sym in selected_symbols:
+        subset[sym] = {}
+        for tf, df in base_data_maps[sym].items():
+            if ratio >= 0.999:
+                sliced = df.copy()
+            else:
+                take_n = max(200, int(len(df) * ratio))
+                sliced = df.iloc[-take_n:].copy()
+            warm = int(getattr(df, "attrs", {}).get("warmup_bars", 0))
+            sliced.attrs["warmup_bars"] = min(warm, len(sliced))
+            subset[sym][tf] = sliced
+    return subset
+
+
+def build_stage1_search_space(full_search_space: Dict[str, dict]) -> Dict[str, dict]:
+    stage1: Dict[str, dict] = {}
+    for key in STRUCTURE_PARAM_KEYS:
+        if key not in full_search_space:
+            continue
+        spec = full_search_space[key].copy()
+        if spec.get("type") == "categorical":
+            stage1[key] = spec
+    return stage1
+
+
+def freeze_structure_in_space(full_search_space: Dict[str, dict], structure_params: Dict[str, object]) -> Dict[str, dict]:
+    stage2: Dict[str, dict] = {}
+    for key, spec in full_search_space.items():
+        stage2[key] = spec.copy()
+        if key in structure_params and stage2[key].get("type") == "categorical":
+            stage2[key]["choices"] = [structure_params[key]]
+    return stage2
+
+
+def extract_structure_signature(params: Dict[str, object]) -> Dict[str, object]:
+    sig: Dict[str, object] = {}
+    for key in STRUCTURE_PARAM_KEYS:
+        if key in params:
+            sig[key] = params[key]
+    return sig
+
+
+def restrict_stage1_space_by_candidates(stage1_space: Dict[str, dict], candidate_structures: Sequence[Dict[str, object]]) -> Dict[str, dict]:
+    if not candidate_structures:
+        return stage1_space
+    restricted: Dict[str, dict] = {}
+    for key, spec in stage1_space.items():
+        restricted[key] = spec.copy()
+        if spec.get("type") == "categorical":
+            values = sorted({c[key] for c in candidate_structures if key in c})
+            if values:
+                restricted[key]["choices"] = values
+    return restricted
+
+
+def _default_structure_signature(stage1_space: Dict[str, dict]) -> Dict[str, object]:
+    sig: Dict[str, object] = {}
+    for key, spec in stage1_space.items():
+        choices = list(spec.get("choices", []))
+        if choices:
+            sig[key] = choices[0]
+    return sig
+
+
+def run_seeded_studies(
+    study_name_prefix: str,
+    storage_url: str,
+    storage: optuna.storages.RDBStorage,
+    n_trials: int,
+    n_jobs: int,
+    startup_ratio: float,
+    objective_fn,
+    seeds: Sequence[int],
+) -> List[Tuple[int, int, optuna.study.Study, int]]:
+    allocations = _allocate_seed_trials(
+        total_trials=int(max(1, n_trials)),
+        seeds=seeds,
+        min_trials_per_seed=_env_int("SPOT_SEED_MIN_TRIALS", 70),
+    )
+    seed_runs: List[Tuple[int, int, optuna.study.Study, int]] = []
+    for seed, seed_trials in allocations:
+        seed_study_name = f"{study_name_prefix}__seed_{seed}_{int(time.time()*1000)}"
+        try:
+            optuna.delete_study(study_name=seed_study_name, storage=storage_url)
+        except Exception:
+            pass
+
+        startup = max(20, int(seed_trials * max(0.10, startup_ratio)))
+        sampler = optuna.samplers.TPESampler(
+            seed=int(seed),
+            n_startup_trials=startup,
+            multivariate=True,
+            constant_liar=True,
+            warn_independent_sampling=False,
+        )
+        pruner = optuna.pruners.MedianPruner(
+            n_startup_trials=max(12, startup // 2),
+            n_warmup_steps=2,
+            interval_steps=1,
+        )
+        study = optuna.create_study(
+            study_name=seed_study_name,
+            storage=storage,
+            direction="maximize",
+            sampler=sampler,
+            pruner=pruner,
+        )
+        study.optimize(
+            objective_fn,
+            n_trials=seed_trials,
+            n_jobs=n_jobs,
+            show_progress_bar=True,
+        )
+        seed_runs.append((seed, seed_trials, study, startup))
+    return seed_runs
+
+
 def _publish_best_trial_alias(
     storage_url: str,
     alias_study_name: str,
@@ -145,6 +591,13 @@ SPOT_ROBUST = {
     "cost_stress_w": _env_float("SPOT_COST_STRESS_WEIGHT", 0.06),
     "ret_p25_w": _env_float("SPOT_FOLD_RET_P25_WEIGHT", 0.20),
     "ret_p25_clip": _env_float("SPOT_FOLD_RET_P25_CLIP", 60.0),
+    # Recent-regime alignment: emphasize latest folds to reduce holdout collapse.
+    "recent_score_w": _env_float("SPOT_RECENT_FOLD_SCORE_WEIGHT", 0.16),
+    "recent_ret_w": _env_float("SPOT_RECENT_FOLD_RET_WEIGHT", 0.06),
+    # Trade-density control: penalize low-activity candidates even if return is high.
+    "trade_target_min": _env_int("SPOT_FOLD_TRADE_TARGET_MIN", 22),
+    "trade_shortfall_penalty": _env_float("SPOT_FOLD_TRADE_SHORTFALL_PENALTY", 85.0),
+    "trade_min_shortfall_penalty": _env_float("SPOT_FOLD_TRADE_MIN_SHORTFALL_PENALTY", 110.0),
 }
 
 
@@ -161,33 +614,94 @@ def load_all_timeframes(symbols: List[str], start_date: str, end_date: str, time
 
     for symbol in symbols:
         for tf in timeframes:
-            fp = os.path.join(
-                DATA_DIR,
-                f"{symbol.replace('/', '_')}_{tf}_{start_date.replace('-', '')}_{end_date.replace('-', '')}_spot.csv",
-            )
+            parquet_fp = _spot_single_cache_path(symbol, tf)
             df: Optional[pd.DataFrame] = None
-            if os.path.exists(fp):
+            if os.path.exists(parquet_fp):
                 try:
-                    df = pd.read_csv(fp)
-                    df["datetime"] = pd.to_datetime(df["timestamp"], unit="ms")
-                    df.sort_values("datetime", inplace=True)
-                    df.reset_index(drop=True, inplace=True)
+                    df = pd.read_parquet(parquet_fp)
+                    if "timestamp" in df.columns:
+                        df["datetime"] = pd.to_datetime(df["timestamp"], unit="ms")
+                        df.sort_values("timestamp", inplace=True)
+                        df.drop_duplicates(subset=["timestamp"], inplace=True)
+                        df.reset_index(drop=True, inplace=True)
+                    else:
+                        df = None
                 except Exception:
                     df = None
-
             if df is None or df.empty:
+                df = _seed_spot_cache_from_legacy(symbol, tf)
+                if df is not None and not df.empty:
+                    try:
+                        df.to_parquet(parquet_fp, index=False)
+                    except Exception:
+                        pass
+
+            need_fetch = False
+            fetch_start = start_ts
+            fetch_end = end_ts
+            if df is None or df.empty:
+                need_fetch = True
+            else:
+                cached_start = int(df["timestamp"].min())
+                cached_end = int(df["timestamp"].max())
+                # Spot symbols may list after requested start_date.
+                # Avoid repeated backward refetch for pre-listing gaps; only fetch missing tail.
+                if cached_end < end_ts:
+                    need_fetch = True
+                    fetch_start = max(start_ts, cached_end + 1)
+
+            if need_fetch:
                 print(f"[INFO] Downloading {symbol}-{tf}...")
-                df = client.fetch_ohlcv(symbol, tf, since=start_ts, end=end_ts)
-                if df is None or df.empty:
+                fetched = client.fetch_ohlcv(symbol, tf, since=fetch_start, end=fetch_end)
+                if fetched is None or fetched.empty:
                     print(f"[ERROR] Empty data: {symbol}-{tf}")
                     sys.exit(1)
-                df.sort_values("timestamp", inplace=True)
-                df["datetime"] = pd.to_datetime(df["timestamp"], unit="ms")
-                df.reset_index(drop=True, inplace=True)
+                fetched.sort_values("timestamp", inplace=True)
+                fetched["datetime"] = pd.to_datetime(fetched["timestamp"], unit="ms")
+                fetched.reset_index(drop=True, inplace=True)
+                if df is not None and not df.empty:
+                    df = pd.concat([df, fetched], ignore_index=True)
+                    df = df.drop_duplicates(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
+                else:
+                    df = fetched
                 try:
-                    df.to_csv(fp, index=False)
+                    df.to_parquet(parquet_fp, index=False)
                 except Exception:
-                    pass
+                    try:
+                        fallback_csv = parquet_fp.replace(".parquet", ".csv")
+                        df.to_csv(fallback_csv, index=False)
+                    except Exception:
+                        pass
+
+            # Internal gap backfill (middle missing candles)
+            if df is not None and not df.empty:
+                step_ms = _spot_timeframe_to_ms(tf)
+                if step_ms is not None:
+                    gaps = _find_internal_gap_ranges(df, start_ts, end_ts, step_ms)
+                    if gaps:
+                        df = _fill_internal_gaps_spot(
+                            client=client,
+                            symbol=symbol,
+                            timeframe=tf,
+                            df=df,
+                            start_ts=start_ts,
+                            end_ts=end_ts,
+                        )
+                        try:
+                            df.to_parquet(parquet_fp, index=False)
+                        except Exception:
+                            try:
+                                fallback_csv = parquet_fp.replace(".parquet", ".csv")
+                                df.to_csv(fallback_csv, index=False)
+                            except Exception:
+                                pass
+
+            if df is None or df.empty:
+                print(f"[ERROR] Empty cache after fetch: {symbol}-{tf}")
+                sys.exit(1)
+            df["datetime"] = pd.to_datetime(df["timestamp"], unit="ms")
+            df = df[(df["datetime"] >= pd.Timestamp(start_date)) & (df["datetime"] <= pd.Timestamp(end_date) + pd.Timedelta(days=1) - pd.Timedelta(milliseconds=1))].copy()
+            df.reset_index(drop=True, inplace=True)
             symbols_data[symbol][tf] = df
     return symbols_data
 
@@ -362,6 +876,7 @@ def objective(
             fold_mdds: List[float] = []
             fold_pfs: List[float] = []
             fold_stress: List[float] = []
+            fold_trade_counts: List[int] = []
             invalid = 0
             for idx, ctx in enumerate(fold_ctxs):
                 try:
@@ -406,6 +921,7 @@ def objective(
                         fold_scores.append(float(fold_score))
                         fold_returns.append(float(fold_ret))
                         fold_mdds.append(float(fold_mdd))
+                        fold_trade_counts.append(int(len(oos_trades)))
                         gross_profit = float(oos_trades[oos_trades["pnl"] > 0]["pnl"].sum())
                         gross_loss = abs(float(oos_trades[oos_trades["pnl"] < 0]["pnl"].sum()))
                         fold_pfs.append(gross_profit / gross_loss if gross_loss > 0 else (gross_profit if gross_profit > 0 else 0.0))
@@ -435,8 +951,25 @@ def objective(
             score = (SPOT_ROBUST["w_avg"] * avg) + (SPOT_ROBUST["w_p25"] * p25) + (SPOT_ROBUST["w_worst"] * worst)
             score += SPOT_ROBUST["ret_p25_w"] * np.clip(p25_ret, -SPOT_ROBUST["ret_p25_clip"], SPOT_ROBUST["ret_p25_clip"])
             score += SPOT_ROBUST["cost_stress_w"] * np.clip(p25_stress, -60.0, 60.0)
+            # Recency-weighted fold score/return (later folds are closer to holdout regime).
+            if len(fold_scores) >= 2:
+                w = np.arange(1, len(fold_scores) + 1, dtype=np.float64)
+                w = w / np.sum(w)
+                recent_score = float(np.dot(np.asarray(fold_scores, dtype=np.float64), w))
+                recent_ret = float(np.dot(np.asarray(fold_returns, dtype=np.float64), w))
+                score += SPOT_ROBUST["recent_score_w"] * recent_score
+                score += SPOT_ROBUST["recent_ret_w"] * np.clip(recent_ret, -80.0, 120.0)
             if consistency < SPOT_ROBUST["cons_target"]:
                 score -= (SPOT_ROBUST["cons_target"] - consistency) * SPOT_ROBUST["cons_penalty"]
+            # Trade-density penalty to avoid "few-trade overfit winners" that fail holdout gate.
+            if fold_trade_counts:
+                target = max(1.0, float(max(int(awfo_min_trades or 0), int(SPOT_ROBUST["trade_target_min"]))))
+                avg_trades = float(np.mean(fold_trade_counts))
+                min_trades = float(np.min(fold_trade_counts))
+                avg_shortfall = max(0.0, (target - avg_trades) / target)
+                min_shortfall = max(0.0, (target - min_trades) / target)
+                score -= avg_shortfall * SPOT_ROBUST["trade_shortfall_penalty"]
+                score -= min_shortfall * SPOT_ROBUST["trade_min_shortfall_penalty"]
             score -= invalid * 12.0
 
             symbol_scores.append(float(score))
@@ -503,25 +1036,51 @@ def objective(
     return float(final_score)
 
 
-def main() -> None:
+def _run_default_bonus_sweep() -> int:
+    sweep_script = Path(__file__).resolve().with_name("optimize_spot_bonus_sweep.py")
+    cmd = [sys.executable, str(sweep_script)]
+    print("[INFO] No arguments provided. Running spot bonus sweep orchestrator.")
+    return int(subprocess.run(cmd).returncode)
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    if sys.platform == "win32":
+        try:
+            sys.stdout.reconfigure(encoding="utf-8")
+            sys.stderr.reconfigure(encoding="utf-8")
+        except Exception:
+            pass
+
+    effective_argv = list(sys.argv[1:] if argv is None else argv)
+    if not effective_argv and os.getenv("SPOT_SWEEP_CHILD", "0") != "1":
+        return _run_default_bonus_sweep()
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--trials", type=int, default=None)
     parser.add_argument("--symbols", type=str, default="KRW-BTC,KRW-ETH")
     parser.add_argument("--jobs", type=int, default=10)
     parser.add_argument("--mode", type=str, default="UNIFIED", choices=["SCALP", "DAY", "SWING", "UNIFIED", "ALL"])
     parser.add_argument("--seeds", type=str, default=None, help="Comma-separated sampler seeds, e.g. 13,37,73")
-    args = parser.parse_args()
+    args = parser.parse_args(effective_argv)
 
     mode = args.mode.upper()
     symbols = [s.strip() for s in args.symbols.split(",")]
     awfo_enabled = mode in AWFO_DEFAULTS["enabled_modes"]
-    trials = args.trials if args.trials is not None else {"SCALP": 3600, "DAY": 4200, "SWING": 5000, "UNIFIED": 8000, "ALL": 8000}.get(mode, 2500)
-    seed_arg = args.seeds if args.seeds is not None else os.getenv("OPTUNA_SEEDS", "13,37,73" if mode in {"UNIFIED", "ALL"} else "13")
+    is_two_stage_mode = mode in {"UNIFIED", "ALL"}
+    trials = args.trials if args.trials is not None else {"SCALP": 3600, "DAY": 4200, "SWING": 5000, "UNIFIED": 5600, "ALL": 5600}.get(mode, 2500)
+    seed_arg = args.seeds if args.seeds is not None else os.getenv("OPTUNA_SEEDS")
+    if seed_arg is None:
+        seed_arg = "13,37,73" if is_two_stage_mode else "13"
     seed_list = _parse_seed_list(seed_arg) or [13]
-    seed_alloc = _allocate_seed_trials(trials, seed_list, min_trials_per_seed=80)
+    seed_alloc = _allocate_seed_trials(trials, seed_list, min_trials_per_seed=_env_int("SPOT_SEED_MIN_TRIALS", 70))
+    spot_growth_coef = _env_float("SPOT_GROWTH_BONUS_COEF", 18.0)
+    spot_risk_coef = _env_float("SPOT_RISK_DRAG_COEF", 10.0)
+    spot_tail_coef = _env_float("SPOT_TAIL_DRAG_COEF", 10.0)
+    profile_key = os.getenv("SPOT_BONUS_PROFILE", "BASE").strip() or "BASE"
     print(
-        f"[INFO] mode={mode}, trials={trials}, awfo={'ON' if awfo_enabled else 'OFF'}, "
-        f"seeds={seed_list}, alloc={seed_alloc}"
+        f"[INFO] mode={mode}, trials={trials}, awfo={'ON' if awfo_enabled else 'OFF'}, two_stage={'ON' if is_two_stage_mode else 'OFF'}, "
+        f"seeds={seed_list}, alloc={seed_alloc}, profile={profile_key}, "
+        f"bonus(g={spot_growth_coef},r={spot_risk_coef},t={spot_tail_coef})"
     )
 
     optuna.logging.set_verbosity(optuna.logging.WARNING)
@@ -556,10 +1115,13 @@ def main() -> None:
     db_name = os.getenv("DB_NAME", "trading_optuna")
     if not all([db_user, db_pass, db_name]):
         print("[ERROR] Missing DB credentials in .env")
-        sys.exit(1)
+        return 1
 
     study_name = f"spot_{mode.lower()}_strategy"
     storage_url = f"mysql+pymysql://{db_user}:{quote_plus(db_pass)}@{db_host}:{db_port}/{db_name}"
+    
+    ensure_database_exists(storage_url)
+
     try:
         optuna.delete_study(study_name=study_name, storage=storage_url)
     except Exception:
@@ -575,73 +1137,336 @@ def main() -> None:
             np.ones(10, dtype=np.float64), np.zeros(10, dtype=np.int64), np.zeros(10, dtype=np.int64), np.ones(10, dtype=np.float64),
             np.ones(10, dtype=np.float64), np.ones(10, dtype=np.float64), np.ones(10, dtype=np.float64), np.ones(10, dtype=np.float64),
             np.ones(10, dtype=np.float64), 10_000.0, 0.001, 0.001, 0, 0, 0.01, 1.5, 3.0, 0.99, False, 1.0, False, 3.0, 1000, 0.0,
-            0.6, 4.5, 94.0, 1.3, 0.15, 0.45, 0.6, 90.0, 0.1, 0, False, 1_000_000.0
+            1.4, True, 0.6, 1.0, 4.5, 94.0, 1.3, 0.15, 0.45, 0.6, 90.0, 0.1, 0, False, 1_000_000.0
         )
     except Exception:
         pass
 
-    best_seed_study: Optional[optuna.study.Study] = None
-    best_seed_name: Optional[str] = None
-    best_seed_trial: Optional[optuna.trial.FrozenTrial] = None
-    best_seed_robust = -float("inf")
+    final_best_trial: Optional[optuna.trial.FrozenTrial] = None
+    final_source_name = ""
+    final_robust = -float("inf")
 
-    for seed, seed_trials in seed_alloc:
-        seed_name = f"{study_name}__seed_{seed}_{int(time.time())}"
-        try:
-            optuna.delete_study(study_name=seed_name, storage=storage_url)
-        except Exception:
-            pass
-        sampler = optuna.samplers.TPESampler(
-            seed=int(seed),
-            n_startup_trials=max(80, int(seed_trials * 0.18)),
-            multivariate=True,
-            constant_liar=True,
-            warn_independent_sampling=False,
-        )
-        seed_study = optuna.create_study(
-            study_name=seed_name,
-            storage=storage,
-            direction="maximize",
-            sampler=sampler,
-        )
-        print(f"[SEED] start seed={seed}, trials={seed_trials}, study={seed_name}")
-        seed_study.optimize(
-            lambda t: objective(t, train_data, search_space, mode, merge_indices, awfo_plan),
-            n_trials=seed_trials,
-            n_jobs=args.jobs,
-            show_progress_bar=True,
-        )
-        completed = _study_complete_trials(seed_study)
-        robust = _robust_value_from_trials(completed)
-        best_value = float(seed_study.best_value) if len(seed_study.trials) > 0 else -float("inf")
-        print(f"[SEED] done seed={seed} | best={best_value:.2f} | robust={robust:.2f}")
-        if completed and robust > best_seed_robust:
-            best_seed_robust = robust
-            best_seed_study = seed_study
-            best_seed_name = seed_name
-            best_seed_trial = completed[0]
+    best_candidate_study: Optional[optuna.study.Study] = None
+    best_candidate_label = ""
+    best_candidate_value = -float("inf")
 
-    if best_seed_study is None or best_seed_trial is None or best_seed_name is None:
-        print("[ERROR] No completed seeded study. Optimization failed.")
-        sys.exit(1)
+    try:
+        if is_two_stage_mode:
+            print("[2STAGE] Spot 2-Stage + Multi-Fidelity + Adaptive Refine enabled")
+            cfg = SPOT_TWO_STAGE_UNIFIED_DEFAULTS.copy()
+            scale = max(0.45, trials / 2800.0)
+            stage1_total = int(cfg["stage1_total_trials"] * scale)
+            stage1_total = max(260, min(stage1_total, max(360, int(trials * 0.58))))
+            stage2_total_budget = max(180, trials - stage1_total)
 
+            promoted_structures: List[Dict[str, object]] = []
+            stage1_space_base = build_stage1_search_space(search_space)
+            top_pool_limit = max(10, cfg["stage2_top_structures"] * 3)
+
+            print(
+                f"[2STAGE] Stage1 trials={stage1_total}, Stage2 budget={stage2_total_budget}, "
+                f"target_structures={cfg['stage2_top_structures']}"
+            )
+
+            for fidelity in cfg["stage1_fidelity_steps"]:
+                step_trials = int(stage1_total * fidelity["ratio"])
+                if step_trials < 40:
+                    continue
+
+                step_symbols = max(1, min(int(fidelity["symbols"]), len(symbols)))
+                step_data = subset_data_maps(
+                    train_data,
+                    symbols,
+                    n_symbols=step_symbols,
+                    data_ratio=float(fidelity["data_ratio"]),
+                )
+                step_merge_indices = compute_merge_indices(step_data)
+                step_awfo = build_awfo_plan(
+                    step_data,
+                    timeframes,
+                    folds=int(fidelity["folds"]),
+                    min_trades=int(fidelity["min_trades"]),
+                )
+                step_awfo["cache"] = build_awfo_runtime_cache(step_data, timeframes, step_awfo)
+
+                step_space = restrict_stage1_space_by_candidates(stage1_space_base, promoted_structures)
+                step_study_name = f"{study_name}__s1_{fidelity['name']}_{int(time.time())}"
+
+                print(
+                    f"[STAGE1] {fidelity['name'].upper()} | trials={step_trials}, symbols={step_symbols}, "
+                    f"data_ratio={fidelity['data_ratio']}, folds={fidelity['folds']}, seeds={seed_list}"
+                )
+                seed_runs = run_seeded_studies(
+                    study_name_prefix=step_study_name,
+                    storage_url=storage_url,
+                    storage=storage,
+                    n_trials=step_trials,
+                    n_jobs=args.jobs,
+                    startup_ratio=float(fidelity["startup_ratio"]),
+                    objective_fn=lambda t, _data=step_data, _space=step_space, _merge=step_merge_indices, _awfo=step_awfo: objective(
+                        t,
+                        _data,
+                        _space,
+                        mode,
+                        _merge,
+                        _awfo,
+                    ),
+                    seeds=seed_list,
+                )
+
+                completed: List[optuna.trial.FrozenTrial] = []
+                for seed, seed_trials, seed_study, step_startup in seed_runs:
+                    seed_best = float(seed_study.best_value) if len(seed_study.trials) > 0 else -float("inf")
+                    seed_robust = _robust_value_from_study(seed_study)
+                    print(
+                        f"   [INFO] Stage1-{fidelity['name']} seed={seed} | trials={seed_trials} | startup={step_startup} "
+                        f"| best={seed_best:.2f} | robust={seed_robust:.2f}"
+                    )
+                    if np.isfinite(seed_robust) and seed_robust > best_candidate_value:
+                        best_candidate_value = float(seed_robust)
+                        best_candidate_study = seed_study
+                        best_candidate_label = f"{step_study_name}:seed{seed}"
+                    completed.extend(_study_complete_trials(seed_study))
+
+                if not completed:
+                    continue
+                completed.sort(key=lambda tr: float(tr.value), reverse=True)
+                top_k = max(cfg["stage2_top_structures"], int(len(completed) * cfg["promotion_ratio"]))
+                top_k = min(top_k, top_pool_limit, len(completed))
+
+                promoted: List[Dict[str, object]] = []
+                seen = set()
+                for tr in completed[:top_k]:
+                    sig = extract_structure_signature(tr.params)
+                    sig_key = tuple((k, sig.get(k)) for k in STRUCTURE_PARAM_KEYS)
+                    if sig_key in seen or not sig:
+                        continue
+                    seen.add(sig_key)
+                    promoted.append(sig)
+                promoted_structures = promoted
+                print(f"   [PROMOTE] structures={len(promoted_structures)} (top={top_k})")
+
+            if not promoted_structures:
+                fallback_sig = _default_structure_signature(stage1_space_base)
+                if fallback_sig:
+                    promoted_structures = [fallback_sig]
+                else:
+                    promoted_structures = [{}]
+
+            promoted_structures = promoted_structures[: cfg["stage2_top_structures"]]
+            per_structure_trials = max(
+                60,
+                min(
+                    cfg["stage2_trials_per_structure"],
+                    int(stage2_total_budget / max(1, len(promoted_structures))),
+                ),
+            )
+            stage2_awfo = build_awfo_plan(
+                train_data,
+                timeframes,
+                folds=cfg["stage2_folds"],
+                min_trades=cfg["stage2_min_trades"],
+            )
+            stage2_awfo["cache"] = build_awfo_runtime_cache(train_data, timeframes, stage2_awfo)
+
+            best_stage2_study: Optional[optuna.study.Study] = None
+            best_stage2_label = ""
+            best_stage2_value = -float("inf")
+
+            for i, struct_sig in enumerate(promoted_structures, start=1):
+                stage2_space = freeze_structure_in_space(search_space, struct_sig)
+                step_study_name = f"{study_name}__s2_{i}_{int(time.time())}"
+                print(
+                    f"[STAGE2] {i}/{len(promoted_structures)} | total_trials={per_structure_trials} | "
+                    f"structure={struct_sig}"
+                )
+
+                pass1_trials = max(35, int(per_structure_trials * cfg["stage2_refine_ratio"]))
+                pass2_trials = max(0, per_structure_trials - pass1_trials)
+
+                stage2_completed: List[optuna.trial.FrozenTrial] = []
+                struct_best_study: Optional[optuna.study.Study] = None
+                struct_best_robust = -float("inf")
+                struct_best_label = ""
+
+                p1_runs = run_seeded_studies(
+                    study_name_prefix=f"{step_study_name}_p1",
+                    storage_url=storage_url,
+                    storage=storage,
+                    n_trials=pass1_trials,
+                    n_jobs=args.jobs,
+                    startup_ratio=float(cfg["stage2_startup_ratio"]),
+                    objective_fn=lambda t, _space=stage2_space: objective(
+                        t,
+                        train_data,
+                        _space,
+                        mode,
+                        merge_indices,
+                        stage2_awfo,
+                    ),
+                    seeds=seed_list,
+                )
+                for seed, seed_trials, seed_study, seed_startup in p1_runs:
+                    seed_best = float(seed_study.best_value) if len(seed_study.trials) > 0 else -float("inf")
+                    seed_robust = _robust_value_from_study(seed_study)
+                    print(
+                        f"   [INFO] Stage2-{i} pass1 seed={seed} | trials={seed_trials} | startup={seed_startup} "
+                        f"| best={seed_best:.2f} | robust={seed_robust:.2f}"
+                    )
+                    stage2_completed.extend(_study_complete_trials(seed_study))
+                    if np.isfinite(seed_robust) and seed_robust > struct_best_robust:
+                        struct_best_robust = float(seed_robust)
+                        struct_best_study = seed_study
+                        struct_best_label = f"{step_study_name}_p1:seed{seed}"
+
+                if stage2_completed and pass2_trials >= 25:
+                    refined_space = build_adaptive_numeric_space(
+                        stage2_space,
+                        stage2_completed,
+                        top_quantile=cfg["stage2_refine_top_quantile"],
+                        min_width_ratio=cfg["stage2_refine_min_width_ratio"],
+                        min_samples=cfg["stage2_refine_min_samples"],
+                        min_step_span=cfg["stage2_refine_step_span"],
+                    )
+                    p2_runs = run_seeded_studies(
+                        study_name_prefix=f"{step_study_name}_p2",
+                        storage_url=storage_url,
+                        storage=storage,
+                        n_trials=pass2_trials,
+                        n_jobs=args.jobs,
+                        startup_ratio=float(cfg["stage2_startup_ratio"]),
+                        objective_fn=lambda t, _space=refined_space: objective(
+                            t,
+                            train_data,
+                            _space,
+                            mode,
+                            merge_indices,
+                            stage2_awfo,
+                        ),
+                        seeds=seed_list,
+                    )
+                    for seed, seed_trials, seed_study, seed_startup in p2_runs:
+                        seed_best = float(seed_study.best_value) if len(seed_study.trials) > 0 else -float("inf")
+                        seed_robust = _robust_value_from_study(seed_study)
+                        print(
+                            f"   [INFO] Stage2-{i} pass2 seed={seed} | trials={seed_trials} | startup={seed_startup} "
+                            f"| best={seed_best:.2f} | robust={seed_robust:.2f}"
+                        )
+                        stage2_completed.extend(_study_complete_trials(seed_study))
+                        if np.isfinite(seed_robust) and seed_robust > struct_best_robust:
+                            struct_best_robust = float(seed_robust)
+                            struct_best_study = seed_study
+                            struct_best_label = f"{step_study_name}_p2:seed{seed}"
+
+                if not stage2_completed or struct_best_study is None:
+                    continue
+
+                structure_robust = _robust_value_from_trials(stage2_completed)
+                print(f"   [INFO] Stage2-{i} summary | robust={structure_robust:.2f} | complete_trials={len(stage2_completed)}")
+                if np.isfinite(structure_robust) and structure_robust > best_candidate_value:
+                    best_candidate_value = float(structure_robust)
+                    best_candidate_study = struct_best_study
+                    best_candidate_label = f"{step_study_name}:robust"
+
+                if structure_robust > best_stage2_value:
+                    best_stage2_value = float(structure_robust)
+                    best_stage2_study = struct_best_study
+                    best_stage2_label = struct_best_label
+
+            if best_stage2_study is None:
+                raise RuntimeError("2-stage optimization failed to produce complete stage2 studies.")
+
+            completed_final = _study_complete_trials(best_stage2_study)
+            if not completed_final:
+                raise RuntimeError("2-stage winner has no completed trials.")
+            final_best_trial = completed_final[0]
+            final_source_name = best_stage2_label or "stage2_winner"
+            final_robust = float(best_stage2_value)
+
+        else:
+            startup_ratio = 0.22 if awfo_enabled else 0.20
+            seed_runs = run_seeded_studies(
+                study_name_prefix=f"{study_name}__single",
+                storage_url=storage_url,
+                storage=storage,
+                n_trials=trials,
+                n_jobs=args.jobs,
+                startup_ratio=startup_ratio,
+                objective_fn=lambda t: objective(
+                    t,
+                    train_data,
+                    search_space,
+                    mode,
+                    merge_indices,
+                    awfo_plan,
+                ),
+                seeds=seed_list,
+            )
+            single_best_study: Optional[optuna.study.Study] = None
+            single_best_seed: Optional[int] = None
+            single_best_robust = -float("inf")
+            for seed, seed_trials, seed_study, seed_startup in seed_runs:
+                seed_best = float(seed_study.best_value) if len(seed_study.trials) > 0 else -float("inf")
+                seed_robust = _robust_value_from_study(seed_study)
+                print(
+                    f"[INFO] single seed={seed} | trials={seed_trials} | startup={seed_startup} "
+                    f"| best={seed_best:.2f} | robust={seed_robust:.2f}"
+                )
+                if np.isfinite(seed_robust) and seed_robust > single_best_robust:
+                    single_best_robust = float(seed_robust)
+                    single_best_study = seed_study
+                    single_best_seed = seed
+            if single_best_study is None:
+                raise RuntimeError("single-stage optimization failed to produce any completed seed study.")
+
+            completed_final = _study_complete_trials(single_best_study)
+            if not completed_final:
+                raise RuntimeError("single-stage winner has no completed trials.")
+            final_best_trial = completed_final[0]
+            final_source_name = f"single_seed_{single_best_seed}"
+            final_robust = float(single_best_robust)
+
+    except Exception as e:
+        print(f"[ERROR] optimization failed: {e}")
+        if best_candidate_study is not None:
+            completed_fallback = _study_complete_trials(best_candidate_study)
+            if completed_fallback:
+                final_best_trial = completed_fallback[0]
+                final_source_name = f"fallback:{best_candidate_label}"
+                final_robust = _robust_value_from_trials(completed_fallback)
+                print(f"[FALLBACK] publishing best intermediate result from {best_candidate_label}")
+        if final_best_trial is None:
+            return 1
+
+    if final_best_trial is None:
+        print("[ERROR] No completed trial to publish.")
+        return 1
+
+    optimizer_version = "SPOT_AWFO_2STAGE_MF_ADAPT_V1" if is_two_stage_mode else "SPOT_AWFO_MULTI_SEED_V2"
     _publish_best_trial_alias(
         storage_url=storage_url,
         alias_study_name=study_name,
-        source_study_name=best_seed_name,
-        source_trial=best_seed_trial,
+        source_study_name=final_source_name,
+        source_trial=final_best_trial,
         metadata={
-            "optimizer_version": "SPOT_AWFO_MULTI_SEED_V1",
-            "seed_source": best_seed_name,
-            "seed_robust_value": float(best_seed_robust),
+            "optimizer_version": optimizer_version,
+            "seed_source": final_source_name,
+            "seed_robust_value": float(final_robust),
             "seed_list": ",".join(str(s) for s in seed_list),
             "awfo_enabled": bool(awfo_enabled),
+            "two_stage_enabled": bool(is_two_stage_mode),
+            "bonus_profile": profile_key,
+            "spot_growth_bonus_coef": float(spot_growth_coef),
+            "spot_risk_drag_coef": float(spot_risk_coef),
+            "spot_tail_drag_coef": float(spot_tail_coef),
+            "db_name": str(db_name),
         },
     )
 
-    print(f"[DONE] best_score={float(best_seed_trial.value):.2f}")
-    print(f"[DONE] best_params={best_seed_trial.params}")
+    print(f"[DONE] best_score={float(final_best_trial.value):.2f}")
+    print(f"[DONE] best_params={final_best_trial.params}")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
