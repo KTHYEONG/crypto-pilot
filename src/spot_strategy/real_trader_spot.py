@@ -1,16 +1,13 @@
 """
-RealTrader Spot - 24시간 자동 현물 트레이딩 봇 (Production Grade - Upbit)
-==========================================================================
-P0/P1 개선사항 적용:
-- 거래 기록 DB 영속화
-- API 재시도 데코레이터 (tenacity)
-- Health Check 메커니즘
-- Graceful Shutdown (SIGTERM)
-- 중복 코드 제거 (유틸 함수)
-- 매직 넘버 → settings 이동
-- 캔들 마감 동기화
-- Structured JSON 로깅
-- Oracle Cloud 최적화 (옵션)
+RealTrader Spot - production-grade spot trading bot (Upbit).
+Core improvements:
+- trade history persistence
+- API retry wrapper
+- health-check heartbeat
+- graceful shutdown
+- duplicate-logic cleanup
+- settings-based constants
+- candle close sync
 """
 
 import os
@@ -20,6 +17,7 @@ import signal
 import json
 import logging
 import gc
+from decimal import Decimal, InvalidOperation, ROUND_DOWN
 import numpy as np
 import pandas as pd
 from datetime import datetime, timedelta
@@ -64,8 +62,7 @@ from config.settings import (
     MAX_TOTAL_BALANCE_KRW,
 )
 
-# 재사용 모듈 (Futures에서 구현한 공통 컴포넌트)
-# 공통 유틸리티 및 컴포넌트
+# Shared utilities/components
 from src.common.utils import setup_logger, api_retry
 from src.common.components import (
     TradeHistoryDB, 
@@ -73,61 +70,63 @@ from src.common.components import (
     calculate_candle_wait_time
 )
 
-# Upbit 클라이언트
+# Upbit client
 from src.spot_strategy.upbit_client import UpbitClient
 from src.strategy.strategies import UltimateStrategy
 
-# Oracle Cloud 최적화 (선택적)
+# Optional cloud optimizer
 try:
     from src.common.cloud_optimizer import CloudOptimizer
     CLOUD_OPTIMIZER_AVAILABLE = True
 except ImportError:
     CLOUD_OPTIMIZER_AVAILABLE = False
 
-# 로거 설정
 logger = setup_logger("RealTraderSpot")
+EXPECTED_SPOT_POLICY_VERSION = os.getenv("SPOT_POLICY_VERSION", "SPOT_SELECTION_POLICY_V1")
+SPOT_ALLOWED_MODES = {"SCALP", "DAY", "SWING", "UNIFIED", "ALL"}
+SPOT_ALLOW_FALLBACK = os.getenv("SPOT_ALLOW_FALLBACK", "false").lower() == "true"
 
 
 # ============================================================
-# State Manager (JSON 파일 기반 - Upbit 현물 특성)
+# State Manager (JSON file)
 # ============================================================
 class StateManager:
-    """거래 상태 관리 (진입가, ATR 스냅샷 등)"""
+    """Trade state manager (entry price, ATR snapshot, etc.)."""
 
     def __init__(self, state_file: Path):
         self.state_file = state_file
         self._ensure_file_exists()
 
     def _ensure_file_exists(self):
-        """상태 파일이 없으면 생성"""
+        """Create state file if absent."""
         if not self.state_file.exists():
             self.state_file.parent.mkdir(parents=True, exist_ok=True)
             self._save({})
 
     def _load(self) -> dict:
-        """상태 로드"""
+        """Load state dictionary."""
         try:
             with open(self.state_file, 'r', encoding='utf-8') as f:
                 return json.load(f)
         except Exception as e:
-            logger.error(f"⚠️ State load error: {e}")
+            logger.error(f"State load error: {e}")
             return {}
 
     def _save(self, state: dict):
-        """상태 저장"""
+        """Persist state dictionary."""
         try:
             with open(self.state_file, 'w', encoding='utf-8') as f:
                 json.dump(state, f, indent=2, ensure_ascii=False)
         except Exception as e:
-            logger.error(f"⚠️ State save error: {e}")
+            logger.error(f"State save error: {e}")
 
     def get_symbol_state(self, symbol: str) -> dict:
-        """특정 심볼의 상태 조회"""
+        """Get state for a symbol."""
         state = self._load()
         return state.get(symbol, {})
 
     def update_symbol_state(self, symbol: str, data: dict):
-        """특정 심볼의 상태 업데이트"""
+        """Update state for a symbol."""
         state = self._load()
         if symbol not in state:
             state[symbol] = {}
@@ -135,7 +134,7 @@ class StateManager:
         self._save(state)
 
     def clear_symbol_state(self, symbol: str):
-        """특정 심볼의 상태 초기화"""
+        """Clear state for a symbol."""
         state = self._load()
         if symbol in state:
             state[symbol] = {}
@@ -146,7 +145,7 @@ class StateManager:
 # Main Trader Class
 # ============================================================
 class RealTraderSpot:
-    """Production-grade 현물 트레이딩 봇 (Upbit)"""
+    """Production-grade spot trading bot (Upbit)."""
 
     def __init__(
         self,
@@ -157,40 +156,79 @@ class RealTraderSpot:
         self.db_path = db_path or str(SPOT_STRATEGY_DB)
         self.symbols = SPOT_TARGET_SYMBOLS.copy()
 
-        # 신규 컴포넌트
+        # Core components
         self.trade_db = TradeHistoryDB(TRADE_HISTORY_DB)
         self.health_manager = HealthCheckManager(SPOT_HEARTBEAT_FILE)
         self.state_manager = StateManager(SPOT_STATE_FILE)
 
-        # 클라우드 최적화 (옵션)
+        # Cloud optimizer (optional)
         self.cloud_optimizer = None
         if enable_oracle_optimization and CLOUD_OPTIMIZER_AVAILABLE:
             self.cloud_optimizer = CloudOptimizer()
-            logger.info("☁️ Cloud optimization enabled")
+            logger.info("Cloud optimization enabled")
 
-        # Shutdown 플래그
+        # Shutdown flag
         self._shutdown_requested = False
 
-        # Signal handlers 등록
+        # Signal handlers
         self._setup_signal_handlers()
 
-        # 전략 로드
+        # Strategy maps
         self.params_map: Dict[str, dict] = {}
         self.strategies: Dict[str, UltimateStrategy] = {}
-        # [Optimization] 중복 계산 방지용 캐시
+        self.strategy_meta_map: Dict[str, dict] = {}
+        # Cache for duplicate signal calculation prevention
         self.last_calc_candle: Dict[str, str] = {}
         
-        # [Cloud Optimization] 시간 기반 작업 추적 (loop_count 대신 사용)
+        # Cloud maintenance timestamps
         self._last_resource_check = datetime.utcnow()
         self._last_db_cleanup = datetime.utcnow()
         self._last_gc = datetime.utcnow()
         
         self.load_strategies_from_db()
 
+    @staticmethod
+    def _to_decimal(value: Any, default: str = "0") -> Decimal:
+        try:
+            if isinstance(value, Decimal):
+                return value
+            return Decimal(str(value))
+        except (InvalidOperation, ValueError, TypeError):
+            return Decimal(default)
+
+    @staticmethod
+    def _to_krw(value: Any) -> Decimal:
+        dec = RealTraderSpot._to_decimal(value)
+        return dec.quantize(Decimal("1"), rounding=ROUND_DOWN)
+
+    def _validate_deployment_metadata(self) -> None:
+        errors = []
+        for symbol in self.symbols:
+            meta = self.strategy_meta_map.get(symbol, {}) or {}
+            policy_version = str(meta.get("policy_version", "")).strip()
+            selected_mode = str(meta.get("selected_mode", "")).strip().upper()
+
+            if policy_version == "DEFAULT_FALLBACK":
+                if SPOT_ALLOW_FALLBACK:
+                    logger.warning(f"[{symbol}] Fallback policy allowed by SPOT_ALLOW_FALLBACK=true")
+                    continue
+                errors.append(f"{symbol}: fallback policy active")
+                continue
+
+            if policy_version != EXPECTED_SPOT_POLICY_VERSION:
+                errors.append(
+                    f"{symbol}: policy_version='{policy_version}' != '{EXPECTED_SPOT_POLICY_VERSION}'"
+                )
+            if selected_mode not in SPOT_ALLOWED_MODES:
+                errors.append(f"{symbol}: invalid selected_mode='{selected_mode}'")
+
+        if errors:
+            raise RuntimeError("Deployment metadata guard failed: " + " | ".join(errors))
+
     def _setup_signal_handlers(self):
-        """Graceful Shutdown 시그널 핸들러 등록"""
+        """Register graceful shutdown signal handlers."""
         def signal_handler(signum, frame):
-            logger.info(f"🛑 Received signal {signum}. Initiating graceful shutdown...")
+            logger.info(f"Received signal {signum}. Initiating graceful shutdown.")
             self._shutdown_requested = True
 
         signal.signal(signal.SIGINT, signal_handler)
@@ -199,11 +237,11 @@ class RealTraderSpot:
             signal.signal(signal.SIGBREAK, signal_handler)
 
     def load_strategies_from_db(self):
-        """Optuna DB에서 최적화된 파라미터 로드"""
-        logger.info(f"📂 Loading strategies from {self.db_path}...")
+        """Load optimized params from Optuna DB."""
+        logger.info(f"Loading strategies from {self.db_path}...")
 
         if not os.path.exists(self.db_path):
-            logger.warning(f"⚠️ DB file not found: {self.db_path}, using defaults")
+            logger.warning(f"DB file not found: {self.db_path}, using defaults")
             self._use_default_params()
             return
 
@@ -212,23 +250,34 @@ class RealTraderSpot:
             import optuna
             storage = f"sqlite:///{self.db_path}"
             study = optuna.load_study(study_name=SPOT_OPTUNA_STUDY_NAME, storage=storage)
-            logger.info(f"✅ Loaded Study: '{SPOT_OPTUNA_STUDY_NAME}' (Score: {study.best_value:.4f})")
+            logger.info(f"Loaded study '{SPOT_OPTUNA_STUDY_NAME}' (score={study.best_value:.4f})")
 
             best_params = study.best_params
+            try:
+                best_trial = study.best_trial
+                user_meta = dict(getattr(best_trial, "user_attrs", {}) or {})
+            except Exception:
+                user_meta = {}
 
             for symbol in self.symbols:
                 self.params_map[symbol] = best_params.copy()
                 strategy_name = f"RealSpot_{symbol.replace('KRW-', '')}"
                 self.strategies[symbol] = UltimateStrategy(strategy_name, best_params)
-                logger.info(f"🔹 Strategy initialized: {symbol} | TF: {best_params.get('TIMEFRAME')}")
+                self.strategy_meta_map[symbol] = user_meta.copy()
+                logger.info(f"Strategy initialized: {symbol} | TF: {best_params.get('TIMEFRAME')}")
+                if user_meta:
+                    logger.info(
+                        f"   policy={user_meta.get('policy_version', 'n/a')} "
+                        f"| selected_mode={user_meta.get('selected_mode', 'n/a')}"
+                    )
 
         except Exception as e:
-            logger.error(f"❌ Failed to load strategies: {e}")
+            logger.error(f"Failed to load strategies: {e}")
             logger.warning("Using default fallback parameters.")
             self._use_default_params()
 
     def _use_default_params(self):
-        """Fallback 기본 파라미터 사용"""
+        """Use fallback default params."""
         default_params = {
             'TIMEFRAME': '1h',
             'ENTRY_TYPE': 'BOLLINGER',
@@ -248,26 +297,32 @@ class RealTraderSpot:
             self.params_map[symbol] = default_params.copy()
             strategy_name = f"RealSpot_{symbol.replace('KRW-', '')}"
             self.strategies[symbol] = UltimateStrategy(strategy_name, default_params)
-            logger.info(f"🔹 Default strategy for {symbol}")
+            self.strategy_meta_map[symbol] = {"policy_version": "DEFAULT_FALLBACK"}
+            logger.info(f"Default strategy for {symbol}")
 
     @api_retry
     def _fetch_ohlcv_safe(self, symbol: str, timeframe: str, limit: int):
-        """안전한 OHLCV 조회 (재시도 적용)"""
+        """Fetch OHLCV with retry."""
         return self.client.fetch_ohlcv(symbol, timeframe, limit=limit)
 
     @api_retry
+    def _fetch_daily_ohlcv_safe(self, symbol: str, limit: int = 260):
+        """Fetch daily OHLCV for MTF filter with retry."""
+        return self.client.fetch_ohlcv(symbol, "1d", limit=limit)
+
+    @api_retry
     def _fetch_position_safe(self, symbol: str) -> dict:
-        """안전한 포지션 조회 (재시도 적용)"""
+        """Fetch position with retry."""
         return self.client.fetch_position(symbol)
 
     @api_retry
     def _fetch_balance_safe(self) -> tuple:
-        """안전한 잔고 조회 (재시도 적용)"""
+        """Fetch balance with retry."""
         return self.client.fetch_balance()
 
     @api_retry
     def _get_market_price_safe(self, symbol: str) -> float:
-        """안전한 시장가 조회 (재시도 적용)"""
+        """Fetch market price with retry."""
         price = self.client.get_market_price(symbol)
         if price is None:
             raise ValueError(f"Failed to fetch market price for {symbol}")
@@ -275,226 +330,265 @@ class RealTraderSpot:
 
     @api_retry
     def _place_order_safe(self, symbol: str, side: str, **kwargs):
-        """안전한 주문 실행 (재시도 적용 + 스마트 지정가)"""
+        """Place order with retry and minimum-order handling."""
         return self.client.place_order_smart(symbol, side, **kwargs)
 
+    def _build_mtf_confirmed_candle(
+        self,
+        strategy: UltimateStrategy,
+        hourly_df: pd.DataFrame,
+        daily_df: pd.DataFrame,
+    ) -> Optional[dict]:
+        """
+        Build live MTF-confirmed candle aligned with backtest semantics:
+        - generate hourly/daily signals
+        - map shifted daily trend onto hourly bars by as-of backward join
+        - final trend = (hourly trend == 1) and (daily trend == 1)
+        - return confirmed bar fields from i-1 (iloc[-2])
+        """
+        if hourly_df is None or daily_df is None:
+            return None
+        if len(hourly_df) < 220 or len(daily_df) < 40:
+            return None
+
+        hourly_sig = strategy.generate_signals(hourly_df.copy())
+        daily_sig = strategy.generate_signals(daily_df.copy())
+
+        if "trend_direction" not in hourly_sig.columns or "trend_direction" not in daily_sig.columns:
+            return None
+        if len(hourly_sig) < 3:
+            return None
+
+        hourly_days = pd.to_datetime(hourly_sig["datetime"]).dt.normalize().values.astype("datetime64[ns]")
+        daily_days = pd.to_datetime(daily_sig["datetime"]).dt.normalize().values.astype("datetime64[ns]")
+        if len(daily_days) == 0:
+            return None
+
+        daily_trend_shifted = daily_sig["trend_direction"].shift(1).fillna(0).values
+        pos = np.searchsorted(daily_days, hourly_days, side="right") - 1
+        pos = np.clip(pos, 0, len(daily_days) - 1).astype(np.int32)
+        mapped_daily_trend = daily_trend_shifted[pos]
+
+        hourly_trend = np.nan_to_num(hourly_sig["trend_direction"].values, nan=0).astype(int)
+        aligned_trend = np.where((hourly_trend == 1) & (mapped_daily_trend == 1), 1, 0)
+        hourly_sig["trend_direction"] = aligned_trend
+        hourly_sig["daily_trend_direction"] = mapped_daily_trend
+
+        confirmed = hourly_sig.iloc[-2]
+        return {
+            "signal_time": pd.Timestamp(confirmed["datetime"]).isoformat(),
+            "signal_close": float(confirmed.get("close", np.nan)),
+            "entry_upper": float(confirmed.get("entry_upper", np.nan)),
+            "entry_lower": float(confirmed.get("entry_lower", np.nan)),
+            "trend_direction": int(confirmed.get("trend_direction", 0)) if not pd.isna(confirmed.get("trend_direction", 0)) else 0,
+            "daily_trend_direction": int(confirmed.get("daily_trend_direction", 0)) if not pd.isna(confirmed.get("daily_trend_direction", 0)) else 0,
+            "strength_filter": int(confirmed.get("strength_filter", 0)) if not pd.isna(confirmed.get("strength_filter", 0)) else 0,
+            "volume_ratio": float(confirmed.get("volume_ratio", np.nan)),
+            "atr": float(confirmed.get("atr", 0.0)) if not pd.isna(confirmed.get("atr", 0.0)) else 0.0,
+            "parabolic_sar": float(confirmed.get("parabolic_sar", 0.0)) if not pd.isna(confirmed.get("parabolic_sar", 0.0)) else 0.0,
+            "rsi": float(confirmed.get("rsi", 50.0)) if not pd.isna(confirmed.get("rsi", 50.0)) else 50.0,
+            "hurst": float(confirmed.get("hurst", 0.5)) if not pd.isna(confirmed.get("hurst", 0.5)) else 0.5,
+            "natr": float(confirmed.get("natr", 0.0)) if not pd.isna(confirmed.get("natr", 0.0)) else 0.0,
+        }
+
     def initialize(self):
-        """초기화: 잔고 확인"""
-        logger.info("🤖 RealTrader Spot Bot Initializing...")
+        """Initialize bot and verify deployment metadata."""
+        logger.info("RealTrader Spot bot initializing...")
 
         try:
+            self._validate_deployment_metadata()
+            logger.info("Deployment metadata guard passed.")
             total_krw, free_krw = self._fetch_balance_safe()
-            logger.info(f"💰 Account Balance: Total {total_krw:,.0f} KRW | Free {free_krw:,.0f} KRW")
+            logger.info(f"Account balance: total={total_krw:,.0f} KRW | free={free_krw:,.0f} KRW")
 
             if free_krw < MIN_ORDER_VALUE_KRW:
-                logger.warning(f"⚠️ Warning: Low balance (< {MIN_ORDER_VALUE_KRW:,} KRW)!")
+                logger.warning(f"Low balance (< {MIN_ORDER_VALUE_KRW:,} KRW)")
         except Exception as e:
-            logger.error(f"❌ Failed to fetch balance: {e}")
+            logger.error(f"Initialization failed: {e}")
+            raise
 
         # Exchange Client Status Check
         if not self.client.exchange:
-            logger.error("❌ Upbit Client is NOT initialized. Check API keys or Network.")
+            logger.error("Upbit client is not initialized. Check API keys and network.")
 
 
-        # 초기 헬스체크
+        # Initial heartbeat
         self.health_manager.update_heartbeat(status="initialized")
 
-        logger.info("🚀 Initialization Complete. Bot is Running...")
+        logger.info("Initialization complete. Bot is running.")
 
     def execute_logic(self, symbol: str):
-        """핵심 매매 로직 실행 (메모리 최적화)"""
+        """Run per-symbol logic (confirmed signal at i-1, execution near i open)."""
         try:
             params = self.params_map[symbol]
             strategy = self.strategies[symbol]
-            timeframe = params.get('TIMEFRAME', '1h')
-            df = None  # Ensure initialization for cleanup
+            timeframe = params.get("TIMEFRAME", "1h")
+            hourly_df = None
+            daily_df = None
 
-            # 현재 포지션 조회 (가벼운 API)
             pos = self._fetch_position_safe(symbol)
-            balance_coin = pos.get('amount', 0.0)
-            
-            # 상태 조회 (State Manager)
+            balance_coin = pos.get("amount", 0.0)
+
             state = self.state_manager.get_symbol_state(symbol)
-            entry_price = state.get('entry_price', 0.0)
-            
-            # [Optimization] 중복 계산 방지 체크
+            entry_price = state.get("entry_price", 0.0)
+
             current_slot = self._get_candle_slot_id(timeframe)
             already_calculated = self.last_calc_candle.get(symbol) == current_slot
-            
-            # 진입 시점 확인
             is_entry_time = self._is_entry_time(timeframe)
-            
-            # [P0 FIX] 캐시 미존재 시 무한 재계산 방지
-            # 캐시가 없으면 무조건 계산 (초기화), 이후에는 진입 시점에만 계산
+
             cached = self._get_cached_indicators(symbol)
-            need_calculation = False
-            
-            if not cached:
-                need_calculation = True
-                logger.info(f"🔍 [{symbol}] Initial calculation (no cache)")
-            elif is_entry_time and not already_calculated:
-                need_calculation = True
-                logger.info(f"🔍 [{symbol}] Entry window calculation")
-            
-            # --- Case 1: 지표 계산이 필요한 경우 -> 무거운 데이터 로드 ---
+            need_calculation = (not cached) or (is_entry_time and not already_calculated)
             if need_calculation:
-                df = self._fetch_ohlcv_safe(symbol, timeframe, limit=600)
-                
-                if df is None or len(df) < 200:
+                logger.info(f"[{symbol}] Signal refresh for slot={current_slot}")
+
+                hourly_df = self._fetch_ohlcv_safe(symbol, timeframe, limit=600)
+                daily_df = self._fetch_daily_ohlcv_safe(symbol, limit=300)
+
+                if hourly_df is None or len(hourly_df) < 220:
                     logger.warning(
-                        f"⚠️ Insufficient data for {symbol}. "
-                        f"Got {len(df) if df is not None else 0}, need min 200."
+                        f"Insufficient hourly data for {symbol}: "
+                        f"{len(hourly_df) if hourly_df is not None else 0} < 220"
                     )
-                    # [P0 FIX] 계산 실패해도 슬롯 기록하여 무한 재시도 방지
                     self.last_calc_candle[symbol] = current_slot
                     return
-                
-                logger.info(f"🔍 [{symbol}] Entry Search")
-                # [Correction] Ensure float64 for TA-Lib compatibility
-                float_cols = ['open', 'high', 'low', 'close', 'volume']
-                df[float_cols] = df[float_cols].astype(np.float64)
+                if daily_df is None or len(daily_df) < 40:
+                    logger.warning(
+                        f"Insufficient daily data for {symbol}: "
+                        f"{len(daily_df) if daily_df is not None else 0} < 40"
+                    )
+                    self.last_calc_candle[symbol] = current_slot
+                    return
 
-                df = strategy.generate_signals(df)
-                last_candle = df.iloc[-2]
-                
-                # [Safety] Data validation & NaN handling
-                trend_dir = last_candle.get('trend_direction', 0)
-                atr = last_candle.get('atr', 0.0)
-                sar = last_candle.get('parabolic_sar', 0.0)
-                vol_ratio = last_candle.get('volume_ratio', 100.0)
-                entry_upper = last_candle.get('entry_upper', 0.0)
-                entry_lower = last_candle.get('entry_lower', 0.0)
-                
-                if pd.isna(trend_dir): trend_dir = 0
-                if pd.isna(atr): atr = 0.0
-                if pd.isna(sar): sar = 0.0
-                if pd.isna(vol_ratio): vol_ratio = 100.0
-                
-                # [CACHE] 다음 4시간 동안 재사용할 지표값 저장
-                self._cache_indicators(symbol, {
-                    'trend_direction': int(trend_dir),
-                    'atr': float(atr),
-                    'parabolic_sar': float(sar),
-                    'entry_upper': float(entry_upper) if not pd.isna(entry_upper) else None,
-                    'entry_lower': float(entry_lower) if not pd.isna(entry_lower) else None,
-                    'strength_filter': int(last_candle.get('strength_filter', 1)) if not pd.isna(last_candle.get('strength_filter', 1)) else 1,
-                    'volume_ratio': float(vol_ratio),
-                    'rsi': float(last_candle.get('rsi', 50.0)),
-                    'hurst': float(last_candle.get('hurst', 0.5)),
-                    'natr': float(last_candle.get('natr', 0.0)),
-                    'cached_at': datetime.utcnow().isoformat()
-                })
-                
-                # 계산 완료 기록
+                float_cols = ["open", "high", "low", "close", "volume"]
+                hourly_df[float_cols] = hourly_df[float_cols].astype(np.float64)
+                daily_df[float_cols] = daily_df[float_cols].astype(np.float64)
+
+                confirmed = self._build_mtf_confirmed_candle(strategy, hourly_df, daily_df)
+                if not confirmed:
+                    logger.warning(f"Failed to build MTF confirmed signal for {symbol}")
+                    self.last_calc_candle[symbol] = current_slot
+                    return
+
+                self._cache_indicators(
+                    symbol,
+                    {
+                        "trend_direction": int(confirmed.get("trend_direction", 0)),
+                        "daily_trend_direction": int(confirmed.get("daily_trend_direction", 0)),
+                        "atr": float(confirmed.get("atr", 0.0)),
+                        "parabolic_sar": float(confirmed.get("parabolic_sar", 0.0)),
+                        "entry_upper": float(confirmed.get("entry_upper")) if np.isfinite(confirmed.get("entry_upper", np.nan)) else None,
+                        "entry_lower": float(confirmed.get("entry_lower")) if np.isfinite(confirmed.get("entry_lower", np.nan)) else None,
+                        "strength_filter": int(confirmed.get("strength_filter", 0)),
+                        "volume_ratio": float(confirmed.get("volume_ratio", np.nan)),
+                        "rsi": float(confirmed.get("rsi", 50.0)),
+                        "hurst": float(confirmed.get("hurst", 0.5)),
+                        "natr": float(confirmed.get("natr", 0.0)),
+                        "signal_close": float(confirmed.get("signal_close", np.nan)),
+                        "signal_time": confirmed.get("signal_time"),
+                        "signal_slot": current_slot,
+                        "cached_at": datetime.utcnow().isoformat(),
+                    },
+                )
                 self.last_calc_candle[symbol] = current_slot
-                logger.info(f"📊 Indicators calculated for {symbol}")
-                
-                # [Optimization] 메모리 정리 (함수 종료 시 일괄 처리)
-                # del df  <-- 제거: 하단에서 처리
-                # gc.collect()
-            
-            # --- Case 2: 비진입 시점이거나 이미 계산됨 -> 캐시된 지표 사용 ---
-            else:
-                # 캐시된 지표값 로드
                 cached = self._get_cached_indicators(symbol)
-                trend_dir = cached.get('trend_direction', 0)
-                atr = cached.get('atr', 0.0)
-                sar = cached.get('parabolic_sar', 0.0)
-            
-            # 현재가 조회 (가벼운 API - 항상 필요)
+                logger.info(
+                    f"[{symbol}] Cached signal: trend={cached.get('trend_direction')} "
+                    f"(daily={cached.get('daily_trend_direction')}), close={cached.get('signal_close')}"
+                )
+
+            trend_dir = cached.get("trend_direction", 0)
+            atr = cached.get("atr", 0.0)
+            sar = cached.get("parabolic_sar", 0.0)
+
             last_price = self._get_market_price_safe(symbol)
             if last_price is None:
-                logger.warning(f"⚠️ [{symbol}] Could not fetch market price. Skipping cycle.")
+                logger.warning(f"[{symbol}] Could not fetch market price. Skipping cycle.")
                 return
 
-            current_value = balance_coin * last_price
-            in_position = current_value > MIN_POSITION_VALUE_KRW
-            
+            current_value_d = self._to_decimal(balance_coin) * self._to_decimal(last_price)
+            in_position = current_value_d > self._to_decimal(MIN_POSITION_VALUE_KRW)
+
             if in_position:
-                logger.info(f"ℹ️ [{symbol}] Position exists ({current_value:,.0f} KRW). Checking exit...")
-                
-                # _check_exit 내부에서 사용할 confirmed_candle 대용 객체 생성
+                logger.info(f"[{symbol}] Position exists ({float(current_value_d):,.0f} KRW). Checking exit...")
                 mock_candle = {
-                    'atr': atr, 
-                    'parabolic_sar': sar, 
-                    'trend_direction': trend_dir,
-                    'rsi': cached.get('rsi', 50.0) # RSI for Panic Exit
+                    "atr": atr,
+                    "parabolic_sar": sar,
+                    "trend_direction": trend_dir,
+                    "rsi": cached.get("rsi", 50.0),
                 }
-                
-                # [ISSUE #7 FIX] 상태 불일치 복구 로직 개선 (ATR 덮어쓰기 방지)
+
                 if entry_price == 0:
-                    exchange_avg_price = pos.get('entryPrice', 0.0)
+                    exchange_avg_price = pos.get("entryPrice", 0.0)
                     if exchange_avg_price > 0:
-                        logger.warning(f"⚠️ [{symbol}] Recovered entry_price from exchange. ATR data may be inaccurate.")
+                        logger.warning(f"[{symbol}] Recovered entry_price from exchange: {exchange_avg_price}")
                         entry_price = exchange_avg_price
-                        state.update({
-                            'entry_price': entry_price,
-                            # entry_atr는 알 수 없으므로 0 유지 (Fixed Stop Loss만 사용)
-                            'highest_high': max(last_price, exchange_avg_price),
-                            'invest_amount': balance_coin * exchange_avg_price
-                        })
+                        state.update(
+                            {
+                                "entry_price": entry_price,
+                                "highest_high": max(last_price, exchange_avg_price),
+                                "invest_amount": balance_coin * exchange_avg_price,
+                            }
+                        )
                         self.state_manager.update_symbol_state(symbol, state)
-                
-                self._check_exit(
-                    symbol, balance_coin, last_price, params,
-                    mock_candle, state
-                )
-            
-            # --- ENTRY LOGIC (진입 시점에만 실행) ---
-            # [ISSUE #1 FIX] 중복 elif 제거 - 포지션 없고 진입 시점일 때만 실행
+
+                self._check_exit(symbol, balance_coin, last_price, params, mock_candle, state)
+
             elif not in_position and is_entry_time:
-                logger.info(f"ℹ️ [{symbol}] No position. Entry window open. Checking conditions...")
-                
-                # [Safety] 최근 진입 기록 확인 (Double Entry Prevention)
+                logger.info(f"[{symbol}] Entry window open. Checking entry conditions...")
+
                 state = self.state_manager.get_symbol_state(symbol)
-                last_entry_str = state.get('entry_time')
+                last_entry_str = state.get("entry_time")
                 if last_entry_str:
                     last_entry_dt = datetime.fromisoformat(last_entry_str)
-                    # 3분 이내 진입 기록이 있으면 중복 진입 방지 (API 반영 지연 대응)
                     if (datetime.utcnow() - last_entry_dt).total_seconds() < 180:
-                        logger.info(f"⏳ Recent entry detected ({last_entry_str}). Skipping to prevent duplicate.")
+                        logger.info(f"[{symbol}] Recent entry detected ({last_entry_str}). Skip duplicate entry.")
                         return
-                
-                # [Safety] 미체결 주문 확인 (Pending Orders) - 매수 대기 주문이 있으면 스킵
+
                 open_orders = self.client.fetch_open_orders(symbol)
                 if open_orders and len(open_orders) > 0:
-                    logger.warning(f"⚠️ Open orders exist ({len(open_orders)}) for {symbol}. Skipping entry to prevent accumulation.")
+                    logger.warning(f"[{symbol}] Open orders exist ({len(open_orders)}). Skip entry.")
                     return
 
-                logger.info(f"🔎 [{symbol}] Checking Entry Conditions...")
-                
-                # [P2 FIX] Entry Level 유효성 검증 강화 (None/Inf 체크 추가)
-                cached = self._get_cached_indicators(symbol)
-                entry_upper = cached.get('entry_upper')
-                entry_lower = cached.get('entry_lower')
-                
-                if (pd.isna(entry_upper) or pd.isna(entry_lower) or 
-                    entry_upper is None or entry_lower is None or
-                    not np.isfinite(entry_upper) or not np.isfinite(entry_lower)):
-                    logger.info(f"⏭️ [{symbol}] Skip: Invalid Entry Levels")
+                entry_upper = cached.get("entry_upper")
+                entry_lower = cached.get("entry_lower")
+                if (
+                    pd.isna(entry_upper)
+                    or pd.isna(entry_lower)
+                    or entry_upper is None
+                    or entry_lower is None
+                    or not np.isfinite(entry_upper)
+                    or not np.isfinite(entry_lower)
+                ):
+                    logger.info(f"[{symbol}] Skip entry: invalid entry levels")
                     return
-                
+
                 self._check_entry(
-                    symbol, last_price, params,
+                    symbol,
+                    last_price,
+                    params,
                     {
-                        'entry_upper': entry_upper, 
-                        'entry_lower': entry_lower, 
-                        'atr': atr,
-                        'trend_direction': trend_dir,
-                        'strength_filter': cached.get('strength_filter', 1),
-                        'volume_ratio': cached.get('volume_ratio', 100.0),
-                        'hurst': cached.get('hurst', 0.5),
-                        'natr': cached.get('natr', 0.0)
-                    }
+                        "entry_upper": entry_upper,
+                        "entry_lower": entry_lower,
+                        "atr": atr,
+                        "trend_direction": trend_dir,
+                        "strength_filter": cached.get("strength_filter", 1),
+                        "volume_ratio": cached.get("volume_ratio", 100.0),
+                        "hurst": cached.get("hurst", 0.5),
+                        "natr": cached.get("natr", 0.0),
+                        "signal_close": cached.get("signal_close", np.nan),
+                        "signal_time": cached.get("signal_time"),
+                        "signal_slot": cached.get("signal_slot"),
+                    },
                 )
-            
-            # [Optimization] 대규모 데이터프레임 제거 (진입 시점에만 생성됨)
-            if need_calculation and df is not None:
-                del df
+
+            if need_calculation and hourly_df is not None:
+                del hourly_df
+                if daily_df is not None:
+                    del daily_df
                 gc.collect()
 
         except Exception as e:
-            logger.error(f"🚨 Error executing logic for {symbol}: {e}")
+            logger.error(f"Error executing logic for {symbol}: {e}")
             self.health_manager.record_error(e)
 
     def _check_exit(
@@ -506,136 +600,139 @@ class RealTraderSpot:
         candle: dict,
         state: dict
     ):
-        """청산 로직"""
+        """Exit logic for long-only spot positions."""
         try:
             should_sell = False
             reason = ""
 
-            # 파라미터
-            entry_price = state.get('entry_price', 0.0)
-            # [Fix] Fallback to current candle ATR if state is missing (Critical for Safety)
-            entry_atr = state.get('entry_atr', 0.0)
+            entry_price = state.get("entry_price", 0.0)
+            entry_price_d = self._to_decimal(entry_price)
+            last_price_d = self._to_decimal(last_price)
+            balance_coin_d = self._to_decimal(balance_coin)
+
+            # Fallback to current candle ATR if state is missing
+            entry_atr = state.get("entry_atr", 0.0)
             if entry_atr == 0:
-                entry_atr = candle.get('atr', 0.0)
+                entry_atr = candle.get("atr", 0.0)
                 if entry_atr > 0:
-                    logger.warning(f"⚠️ Recovered entry_atr from current candle for {symbol}: {entry_atr}")
+                    logger.warning(f"Recovered entry_atr from current candle for {symbol}: {entry_atr}")
+            entry_atr_d = self._to_decimal(entry_atr)
 
-            highest_high = state.get('highest_high', entry_price)
+            highest_high_d = self._to_decimal(state.get("highest_high", entry_price))
 
-            trend_dir = candle.get('trend_direction', 0)
-            current_high = max(candle.get('high', last_price), last_price)
+            trend_dir = candle.get("trend_direction", 0)
+            current_high_d = max(self._to_decimal(candle.get("high", last_price)), last_price_d)
 
-            # Highest High 업데이트
-            if current_high > highest_high:
-                highest_high = current_high
-                state['highest_high'] = highest_high
+            # Update highest high
+            if current_high_d > highest_high_d:
+                highest_high_d = current_high_d
+                state["highest_high"] = float(highest_high_d)
                 self.state_manager.update_symbol_state(symbol, state)
 
-            exit_type = params.get('EXIT_TYPE', 'ATR')
-            atr_mult = params.get('ATR_MULTIPLIER', 3.0)
-            sl_type = params.get('STOP_LOSS_TYPE', 'FIXED')
-            sl_pct = params.get('STOP_LOSS_PCT', 0.02)
-            atr_sl_mult = params.get('ATR_STOP_LOSS_MULT', 1.0)
-            use_tp = params.get('USE_TAKE_PROFIT', False)
-            tp_mult = params.get('TAKE_PROFIT_ATR_MULT', 2.0)
+            exit_type = params.get("EXIT_TYPE", "ATR")
+            atr_mult_d = self._to_decimal(params.get("ATR_MULTIPLIER", 3.0))
+            sl_type = params.get("STOP_LOSS_TYPE", "FIXED")
+            sl_pct_d = self._to_decimal(params.get("STOP_LOSS_PCT", 0.02))
+            atr_sl_mult_d = self._to_decimal(params.get("ATR_STOP_LOSS_MULT", 1.0))
+            use_tp = params.get("USE_TAKE_PROFIT", False)
+            tp_mult_d = self._to_decimal(params.get("TAKE_PROFIT_ATR_MULT", 2.0))
 
-            # [ISSUE #4 FIX] Stop Loss를 최우선 안전장치로 순서 조정
-            # 1. Stop Loss (최우선)
-            if sl_type == 'ATR' and entry_atr > 0:
-                stop_price = entry_price - (entry_atr * atr_sl_mult)
+            # 1) Stop loss
+            if sl_type == "ATR" and entry_atr_d > 0:
+                stop_price_d = entry_price_d - (entry_atr_d * atr_sl_mult_d)
             else:
-                stop_price = entry_price * (1 - sl_pct)
+                stop_price_d = entry_price_d * (Decimal("1") - sl_pct_d)
 
-            if last_price < stop_price:
+            if last_price_d < stop_price_d:
                 should_sell = True
-                reason = f"Stop Loss ({stop_price:,.0f})"
+                reason = f"Stop Loss ({float(stop_price_d):,.0f})"
 
-            # 2. Main Exit (ATR Trailing or SAR)
+            # 2) Main exit (ATR trailing / SAR)
             if not should_sell:
-                if exit_type == 'ATR' and entry_atr > 0:
-                    trailing_stop = highest_high - (entry_atr * atr_mult)
-                    if last_price < trailing_stop:
+                if exit_type == "ATR" and entry_atr_d > 0:
+                    trailing_stop_d = highest_high_d - (entry_atr_d * atr_mult_d)
+                    if last_price_d < trailing_stop_d:
                         should_sell = True
-                        reason = f"ATR Trailing Stop ({trailing_stop:,.0f})"
+                        reason = f"ATR Trailing Stop ({float(trailing_stop_d):,.0f})"
 
-                elif exit_type == 'PARABOLIC_SAR':
-                    # [ISSUE #3 FIX] SAR 유효성 검증
-                    p_sar = candle.get('parabolic_sar', 0)
+                elif exit_type == "PARABOLIC_SAR":
+                    p_sar = candle.get("parabolic_sar", 0)
                     if p_sar <= 0:
-                        logger.warning(f"⚠️ [{symbol}] SAR exit enabled but SAR value invalid ({p_sar:.2f}). Skipping SAR check.")
-                    elif last_price < p_sar:
+                        logger.warning(f"[{symbol}] SAR enabled but value invalid ({p_sar:.2f}).")
+                    elif last_price_d < self._to_decimal(p_sar):
                         should_sell = True
                         reason = f"Parabolic SAR Exit ({p_sar:,.0f})"
 
-            # 3. Trend Reversal
+            # 3) Trend reversal
             if not should_sell and trend_dir == -1:
                 should_sell = True
                 reason = "Trend Reversal"
 
-            # 4. Take Profit
-            if not should_sell and use_tp and entry_atr > 0:
-                target_price = entry_price + (entry_atr * tp_mult)
-                if last_price > target_price:
+            # 4) Take profit
+            if not should_sell and use_tp and entry_atr_d > 0:
+                target_price_d = entry_price_d + (entry_atr_d * tp_mult_d)
+                if last_price_d > target_price_d:
                     should_sell = True
-                    reason = f"Take Profit ({target_price:,.0f})"
+                    reason = f"Take Profit ({float(target_price_d):,.0f})"
             
-            # 5. Panic Exit (RSI) [NEW]
-            rsi = candle.get('rsi', 0)  # Need to pass RSI in execute_logic or candle dict
-            rsi_exit_thresh = params.get('RSI_EXIT_THRESHOLD', 93)
+            # 5) Panic exit (RSI)
+            rsi = candle.get("rsi", 0)
+            rsi_exit_thresh = params.get("RSI_EXIT_THRESHOLD", 93)
             if not should_sell and rsi > rsi_exit_thresh:
                 should_sell = True
                 reason = f"Panic Exit (RSI {rsi:.1f})"
 
-            # 6. Time Cut (Profit Check) [NEW]
-            max_holding_bars = params.get('MAX_HOLDING_BARS', 9999)
-            entry_time_str = state.get('entry_time')
+            # 6) Time cut (profit check)
+            max_holding_bars = params.get("MAX_HOLDING_BARS", 9999)
+            entry_time_str = state.get("entry_time")
             if not should_sell and entry_time_str:
                 entry_dt = datetime.fromisoformat(entry_time_str)
-                # 봉 개수 근사 계산 (현재시간 - 진입시간) / timeframe interval
-                tf = params.get('TIMEFRAME', '4h')
-                interval_min = 240 # Default 4h
-                if tf.endswith('h'): interval_min = int(tf[:-1]) * 60
-                elif tf.endswith('m'): interval_min = int(tf[:-1])
+                tf = params.get("TIMEFRAME", "4h")
+                interval_min = 240
+                if tf.endswith("h"):
+                    interval_min = int(tf[:-1]) * 60
+                elif tf.endswith("m"):
+                    interval_min = int(tf[:-1])
                 
                 elapsed_min = (datetime.utcnow() - entry_dt).total_seconds() / 60
                 bars_held = elapsed_min / interval_min
                 
                 if bars_held >= max_holding_bars:
-                    pnl_pct_current = ((last_price / entry_price) - 1) * 100
-                    profit_thresh = params.get('TIME_EXIT_PROFIT_THRESHOLD', 1.4)
+                    pnl_pct_current = float(((last_price_d / entry_price_d) - Decimal("1")) * Decimal("100")) if entry_price_d > 0 else 0.0
+                    profit_thresh = params.get("TIME_EXIT_PROFIT_THRESHOLD", 1.4)
                     if pnl_pct_current <= profit_thresh:
                         should_sell = True
                         reason = f"Time Cut (Held {bars_held:.1f} bars, PnL {pnl_pct_current:.2f}%)"
 
             if should_sell:
-                pnl = (last_price - entry_price) * balance_coin
-                pnl_pct = ((last_price / entry_price) - 1) * 100 if entry_price > 0 else 0
+                pnl_d = (last_price_d - entry_price_d) * balance_coin_d
+                pnl_pct = float(((last_price_d / entry_price_d) - Decimal("1")) * Decimal("100")) if entry_price_d > 0 else 0.0
 
                 logger.info(
-                    f"🛑 EXIT {symbol} | Price: {last_price:,.0f} | "
-                    f"PnL: {pnl_pct:+.2f}% ({pnl:,.0f} KRW) | Reason: {reason}"
+                    f"EXIT {symbol} | Price: {last_price:,.0f} | "
+                    f"PnL: {pnl_pct:+.2f}% ({float(pnl_d):,.0f} KRW) | Reason: {reason}"
                 )
 
-                res = self._place_order_safe(symbol, 'sell', amount=balance_coin)
+                res = self._place_order_safe(symbol, "sell", amount=float(balance_coin_d))
 
-                if res and 'uuid' in res:
+                if res and "uuid" in res:
                     self.trade_db.record_trade(
                         symbol=symbol,
-                        side='LONG',
-                        action='EXIT',
-                        quantity=balance_coin,
-                        price=last_price,
-                        entry_price=entry_price,
-                        pnl=pnl,
+                        side="LONG",
+                        action="EXIT",
+                        quantity=float(balance_coin_d),
+                        price=float(last_price_d),
+                        entry_price=float(entry_price_d),
+                        pnl=float(pnl_d),
                         pnl_pct=pnl_pct,
-                        reason=reason
+                        reason=reason,
                     )
                     self.state_manager.clear_symbol_state(symbol)
                 else:
-                    logger.error(f"❌ Sell order failed: {res}")
+                    logger.error(f"Sell order failed: {res}")
 
         except Exception as e:
-            logger.error(f"⚠️ Error in _check_exit: {e}")
+            logger.error(f"Error in _check_exit: {e}")
             self.health_manager.record_error(e)
 
     def _calculate_position_size(
@@ -646,86 +743,79 @@ class RealTraderSpot:
         hurst: float = 0.5,
         natr: float = 0.0
     ) -> float:
-        """포지션 사이즈 계산 (성과 기반 가중치, 리스크 관리 적용)"""
+        """Calculate KRW position size with Decimal precision."""
         try:
             total_krw, free_krw = self._fetch_balance_safe()
-            
-            # 1. 포트폴리오 총 가치 추정 (현금 + 투자원금 합계)
-            # Upbit API는 total_krw에 코인 평가금을 포함하지 않으므로 직접 계산 필요
-            current_invested_total = 0
-            this_symbol_invested = 0
+            total_krw_d = self._to_decimal(total_krw)
+            free_krw_d = self._to_decimal(free_krw)
+            min_position_d = self._to_decimal(MIN_POSITION_VALUE_KRW)
+            min_order_d = self._to_decimal(MIN_ORDER_VALUE_KRW)
+            max_cap_d = self._to_decimal(MAX_INVEST_CAP_KRW)
+            current_invested_total_d = Decimal("0")
+            this_symbol_invested_d = Decimal("0")
             
             state_map = self.state_manager._load()
             for s in self.symbols:
                 st = state_map.get(s, {})
-                invest_amt = st.get('invest_amount', 0)
-                current_invested_total += invest_amt
+                invest_amt_d = self._to_decimal(st.get("invest_amount", 0))
+                current_invested_total_d += invest_amt_d
                 
                 if s == symbol:
-                    this_symbol_invested = invest_amt
+                    this_symbol_invested_d = invest_amt_d
             
-            # [CRITICAL UPDATE] Single Entry Enforcement (Match Backtest)
-            if this_symbol_invested > MIN_POSITION_VALUE_KRW:
-                logger.info(f"⏭️ Skipping entry for {symbol}: Position already exists ({this_symbol_invested:,.0f} KRW).")
+            # Single-entry enforcement for spot long-only
+            if this_symbol_invested_d > min_position_d:
+                logger.info(
+                    f"Skipping entry for {symbol}: position already exists "
+                    f"({float(this_symbol_invested_d):,.0f} KRW)."
+                )
                 return 0
 
-
-            # 총 자산 (추정치) = KRW 현금 잔고 + 현재 투자 중인 원금 총액
-            # (수익/손실은 무시하고 원금 기준으로 보수적 접근)
-            estimated_total_equity = total_krw + current_invested_total
+            estimated_total_equity_d = total_krw_d + current_invested_total_d
             
-            # 2. 할당량 계산 (성과 기반 가중치 적용)
-            default_weight = 1.0 / len(self.symbols) if self.symbols else 0.5
-            base_weight = SPOT_ALLOCATION_WEIGHTS.get(symbol, default_weight)
+            default_weight_d = (Decimal("1") / Decimal(str(len(self.symbols)))) if self.symbols else Decimal("0.5")
+            base_weight_d = self._to_decimal(SPOT_ALLOCATION_WEIGHTS.get(symbol, float(default_weight_d)))
             
-            # [NEW] Regime-based Multiplier (Dynamic Sizing)
-            regime_mult = 1.0
+            regime_mult_d = Decimal("1")
             
-            # 파라미터에서 임계값 로드
             strong_hurst = params.get('STRONG_REGIME_HURST', 0.56)
             panic_natr = params.get('PANIC_REGIME_NATR', 9.5)
-            strong_mult = params.get('STRONG_REGIME_MULTIPLIER', 1.6)
-            panic_mult = params.get('PANIC_REGIME_MULTIPLIER', 0.35)
+            strong_mult_d = self._to_decimal(params.get('STRONG_REGIME_MULTIPLIER', 1.6))
+            panic_mult_d = self._to_decimal(params.get('PANIC_REGIME_MULTIPLIER', 0.35))
             
             if hurst > strong_hurst:
-                regime_mult = strong_mult
-                logger.info(f"💪 Strong Regime detected for {symbol} (Hurst {hurst:.2f}). Mult: {strong_mult}")
+                regime_mult_d = strong_mult_d
+                logger.info(f"Strong regime detected for {symbol} (Hurst {hurst:.2f}). Mult: {float(strong_mult_d):.2f}")
                 
             if natr > panic_natr:
-                regime_mult = panic_mult
-                logger.info(f"😱 Panic Regime detected for {symbol} (NATR {natr:.2f}). Mult: {panic_mult}")
+                regime_mult_d = panic_mult_d
+                logger.info(f"Panic regime detected for {symbol} (NATR {natr:.2f}). Mult: {float(panic_mult_d):.2f}")
             
-            # 최종 가중치 = 기본 비중 * 레짐 멀티플라이어
-            final_weight = base_weight * regime_mult
+            final_weight_d = base_weight_d * regime_mult_d
             
-            # 예산 계산
-            target_amount = estimated_total_equity * final_weight
+            target_amount_d = estimated_total_equity_d * final_weight_d
             
-            # 3. 추가 매수 가능액 계산
-            # 목표 금액 - 현재 투자 금액 (이미 진입해 있다면 추가 진입은 자제, 혹은 물타기?)
-            # 여기서는 '신규 진입' 또는 '불타기' 관점
-            buy_amount = target_amount - this_symbol_invested
+            buy_amount_d = target_amount_d - this_symbol_invested_d
             
-            # 제약 조건 적용
-            buy_amount = min(buy_amount, free_krw)            # 가용 현금 한도
-            buy_amount = min(buy_amount, MAX_INVEST_CAP_KRW)  # 심볼당 최대 한도
+            buy_amount_d = min(buy_amount_d, free_krw_d)
+            buy_amount_d = min(buy_amount_d, max_cap_d)
+            buy_amount_d = self._to_krw(buy_amount_d)
             
-            # 너무 작은 주문 방지
-            if buy_amount < MIN_ORDER_VALUE_KRW:
+            if buy_amount_d < min_order_d:
                 logger.warning(
-                    f"⚠️ Calculated buy_amount too small for {symbol}: {buy_amount:,.0f} KRW "
+                    f"Calculated buy_amount too small for {symbol}: {float(buy_amount_d):,.0f} KRW "
                     f"< Min {MIN_ORDER_VALUE_KRW:,.0f} KRW. "
-                    f"Equity: {estimated_total_equity:,.0f} KRW, Weight: {final_weight*100:.0f}%"
+                    f"Equity: {float(estimated_total_equity_d):,.0f} KRW, Weight: {float(final_weight_d*Decimal('100')):.0f}%"
                 )
                 return 0
                 
             logger.info(
-                f"🧮 Sizing {symbol} (Weight {final_weight*100:.0f}%): "
-                f"Equity ≈ {estimated_total_equity:,.0f} KRW | "
-                f"Target {target_amount:,.0f} | Buy {buy_amount:,.0f}"
+                f"Sizing {symbol} (Weight {float(final_weight_d*Decimal('100')):.0f}%): "
+                f"Equity {float(estimated_total_equity_d):,.0f} KRW | "
+                f"Target {float(target_amount_d):,.0f} | Buy {float(buy_amount_d):,.0f}"
             )
             
-            return buy_amount
+            return float(buy_amount_d)
             
         except Exception as e:
             logger.error(f"Sizing Error: {e}")
@@ -738,91 +828,113 @@ class RealTraderSpot:
         params: dict,
         candle: dict
     ):
-        """진입 로직"""
+        """Entry logic based on confirmed candle signal."""
         try:
-            entry_upper = candle.get('entry_upper', 0)
-            if pd.isna(entry_upper): entry_upper = 0.0
-            
-            trend_dir = candle.get('trend_direction', 0)
-            strength = candle.get('strength_filter', 0)
-            vol_ratio = candle.get('volume_ratio', 1.0)
-            atr = candle.get('atr', 0.0)
+            entry_upper = candle.get("entry_upper", 0.0)
+            if pd.isna(entry_upper):
+                entry_upper = 0.0
 
-            use_vol = params.get('USE_VOLUME_FILTER', False)
-            
-            # [ISSUE #2 FIX] Volume Filter: Z-Score 기준으로 명확화
-            # 전략 파일은 Z-Score를 반환 (평균=0, 표준편차=1)
-            # Z-Score 해석: 0 = 평균, 1 = 평균+1σ (상위 16%), 2 = 평균+2σ (상위 2.5%)
-            # 기본값 0.0: 평균 이상 거래량이면 진입 허용 (보수적 필터링)
-            vol_z_threshold = params.get('VOLUME_Z_THRESHOLD', params.get('VOLUME_THRESHOLD_MULT', 0.0))
+            signal_close = candle.get("signal_close", np.nan)
+            signal_slot = candle.get("signal_slot")
+            signal_time = candle.get("signal_time")
+
+            trend_dir = candle.get("trend_direction", 0)
+            strength = candle.get("strength_filter", 0)
+            vol_ratio = candle.get("volume_ratio", 1.0)
+            atr = candle.get("atr", 0.0)
+
+            use_vol = params.get("USE_VOLUME_FILTER", False)
+            vol_z_threshold = params.get("VOLUME_Z_THRESHOLD", params.get("VOLUME_THRESHOLD_MULT", 0.0))
 
             is_uptrend = trend_dir == 1
-            breakout = last_price > entry_upper
+            entry_upper_d = self._to_decimal(entry_upper)
+            signal_close_d = self._to_decimal(signal_close)
+            breakout = np.isfinite(signal_close) and np.isfinite(entry_upper) and (signal_close_d > entry_upper_d)
             strong_momentum = strength == 1
             vol_ok = (not use_vol) or (vol_ratio >= vol_z_threshold)
+            min_order_d = self._to_decimal(MIN_ORDER_VALUE_KRW)
+
+            # Prevent duplicate entry in same signal slot
+            state = self.state_manager.get_symbol_state(symbol)
+            if signal_slot and state.get("entry_slot") == signal_slot:
+                logger.info(f"[{symbol}] Skip duplicate entry for slot={signal_slot}")
+                return
 
             if is_uptrend and breakout and strong_momentum and vol_ok and (entry_upper > 0):
-                # 가중치 기반 동적 사이징 계산 (Hurst, NATR 연동)
                 invest_amount = self._calculate_position_size(
-                    symbol, last_price, params, 
-                    hurst=candle.get('hurst', 0.5), 
-                    natr=candle.get('natr', 0.0)
+                    symbol,
+                    last_price,
+                    params,
+                    hurst=candle.get("hurst", 0.5),
+                    natr=candle.get("natr", 0.0),
                 )
+                invest_amount_d = self._to_decimal(invest_amount)
+                last_price_d = self._to_decimal(last_price)
 
-                if invest_amount > MIN_ORDER_VALUE_KRW:
+                if invest_amount_d > min_order_d:
                     logger.info(
-                        f"🟢 ENTRY {symbol} | Price: {last_price:,.0f} | "
-                        f"Cond: Trend(↑), Breakout(UP), Strength(OK), Vol(OK) | "
-                        f"Invest: {invest_amount:,.0f} KRW"
+                        f"ENTRY {symbol} | FillPrice~{last_price:,.0f} | SignalClose={signal_close:,.0f} "
+                        f"| Cond: Trend(UP), Breakout(>{entry_upper:,.0f}), Strength(OK), Vol(OK) "
+                        f"| Invest: {float(invest_amount_d):,.0f} KRW"
                     )
 
-                    res = self._place_order_safe(symbol, 'buy', price=invest_amount)
-
-                    if res and 'uuid' in res:
+                    res = self._place_order_safe(symbol, "buy", price=float(invest_amount_d))
+                    if res and "uuid" in res:
+                        quantity_d = (invest_amount_d / last_price_d) if last_price_d > 0 else Decimal("0")
                         self.trade_db.record_trade(
                             symbol=symbol,
-                            side='LONG',
-                            action='ENTRY',
-                            quantity=invest_amount / last_price,
-                            price=last_price,
-                            reason=f"Trend(↑) & Breakout(>{entry_upper:,.0f})"
+                            side="LONG",
+                            action="ENTRY",
+                            quantity=float(quantity_d),
+                            price=float(last_price_d),
+                            reason=(
+                                f"SignalClose({signal_close:,.0f}) > EntryUpper({entry_upper:,.0f}) "
+                                f"@slot={signal_slot}"
+                            ),
                         )
 
-                        # 상태 저장 (UTC 기준 시간 사용)
-                        self.state_manager.update_symbol_state(symbol, {
-                            'entry_price': last_price,
-                            'entry_time': datetime.utcnow().isoformat(),
-                            'entry_atr': atr,
-                            'highest_high': last_price,
-                            'invest_amount': invest_amount
-                        })
+                        self.state_manager.update_symbol_state(
+                            symbol,
+                            {
+                                "entry_price": float(last_price_d),
+                                "entry_time": datetime.utcnow().isoformat(),
+                                "entry_atr": atr,
+                                "highest_high": float(last_price_d),
+                                "invest_amount": float(invest_amount_d),
+                                "entry_slot": signal_slot,
+                                "entry_signal_close": float(signal_close_d) if np.isfinite(signal_close) else None,
+                                "entry_signal_time": signal_time,
+                            },
+                        )
                     else:
-                        logger.error(f"❌ Buy order failed: {res}")
+                        logger.error(f"Buy order failed: {res}")
                 else:
                     logger.warning(
-                        f"⚠️ Order skipped for {symbol}: Calculated amount {invest_amount:,.0f} KRW "
-                        f"is less than minimum {MIN_ORDER_VALUE_KRW:,.0f} KRW."
+                        f"Order skipped for {symbol}: amount {float(invest_amount_d):,.0f} KRW "
+                        f"< minimum {MIN_ORDER_VALUE_KRW:,.0f} KRW."
                     )
             else:
-                # Skip Reason Logging
                 reasons = []
                 if pd.isna(entry_upper) or entry_upper <= 0:
-                    reasons.append("Waiting Data")
+                    reasons.append("WaitingData")
                 else:
-                    if not is_uptrend: reasons.append(f"Trend({'↓' if trend_dir == -1 else '─'})")
-                    if not breakout: reasons.append(f"Price(≤{entry_upper:,.0f})")
-                    if not strong_momentum: reasons.append("Weak")
-                    if not vol_ok: reasons.append(f"Vol({vol_ratio:.1f}x)")
-                
+                    if not is_uptrend:
+                        reasons.append("TrendNotUp")
+                    if not breakout:
+                        reasons.append(f"NoBreakout(close={signal_close}, upper={entry_upper:,.0f})")
+                    if not strong_momentum:
+                        reasons.append("WeakStrength")
+                    if not vol_ok:
+                        reasons.append(f"VolumeLow({vol_ratio:.2f})")
                 if reasons:
-                    logger.info(f"⏭️ [{symbol}] Skip LONG: {', '.join(reasons)}")
+                    logger.info(f"[{symbol}] Skip LONG: {', '.join(reasons)}")
 
         except Exception as e:
-            logger.error(f"⚠️ Error in _check_entry: {e}")
+            logger.error(f"Error in _check_entry: {e}")
             self.health_manager.record_error(e)
 
     def _get_current_positions(self) -> dict:
-        """현재 포지션 상태 조회 (헬스체크용)"""
+        """Fetch current position summary for heartbeat."""
         positions = {}
         for symbol in self.symbols:
             try:
@@ -843,13 +955,13 @@ class RealTraderSpot:
 
     def _is_entry_time(self, timeframe: str) -> bool:
         """
-        현재 시간이 타임프레임별 진입(봉 마감) 시점인지 확인
-        예: 4h봉 -> 00, 04, 08, 12, 16, 20시의 0분~5분 사이인지
+        Check whether now is an entry window for timeframe.
+        Example: 4h candle -> hour 00/04/08/12/16/20 and minute <= 2.
         """
         now = datetime.utcnow()
         minutes = now.minute
 
-        # [TIGHT SYNC] 허용 범위: 정시 ~ +2분 (백테스트 일치)
+        # Keep strict sync with backtest entry timing
         if minutes > 2:
             return False
 
@@ -867,7 +979,7 @@ class RealTraderSpot:
         return False
 
     def _get_candle_slot_id(self, timeframe: str) -> str:
-        """현재 타임프레임 기준의 고유 캔들 ID 생성 (중복 계산 방지용)"""
+        """Build unique candle slot ID for duplicate-calc prevention."""
         now = datetime.utcnow()
         if timeframe.endswith('m'):
             interval = int(timeframe[:-1])
@@ -882,87 +994,86 @@ class RealTraderSpot:
         return now.strftime("%Y%m%d%H%M")
 
     def run_forever(self):
-        """메인 무한 루프 (Graceful Shutdown 지원)"""
+        """Main loop with graceful shutdown support."""
         try:
             self.initialize()
         except Exception as e:
-            logger.error(f"🚨 Initialization failed: {e}")
+            logger.error(f"Initialization failed: {e}")
             self.health_manager.update_heartbeat(status="init_failed")
             raise
 
-        logger.info("⏳ Waiting for next candle close...")
+        logger.info("Waiting for next candle close...")
 
         while not self._shutdown_requested:
             try:
-                # [FIX] 루프 시작 시간 기록 (정확한 주기 유지)
+                # Track loop start for stable cycle time
                 loop_start_time = time.time()
                 
-                # 각 심볼 처리
+                # Process each symbol
                 for symbol in self.symbols:
                     if self._shutdown_requested:
                         break
                     
-                    # 1. 상태 및 파라미터 로드
+                    # 1) Load state and params
                     params = self.params_map[symbol]
                     timeframe = params.get('TIMEFRAME', '1h')
                     
-                    # 2. 실시간 가격 및 잔고 등 필수 데이터 경량 조회
+                    # 2) Run symbol logic
                     try:
                         self.execute_logic(symbol)
                         
                     except Exception as e:
-                        logger.error(f"⚠️ Error processing {symbol}: {e}")
+                        logger.error(f"Error processing {symbol}: {e}")
 
                     time.sleep(SPOT_SYMBOL_DELAY_SECONDS)
 
-                # 헬스체크 업데이트
+                # Heartbeat update
                 positions = self._get_current_positions()
                 self.health_manager.update_heartbeat(
                     status="running",
                     positions=positions
                 )
 
-                # 클라우드 최적화 실행 (시간 기반 체크)
+                # Cloud maintenance
                 if self.cloud_optimizer:
                     now = datetime.utcnow()
                     
-                    # 1. 시간 동기화 검증 (매 루프)
+                    # 1) time sync
                     if not self.cloud_optimizer.check_time_sync_ntp():
-                        logger.error("⏰ Time drift detected! Bot may encounter API errors.")
+                        logger.error("Time drift detected. API errors may occur.")
                     
-                    # 2. 리소스 모니터링 (10분마다) & 메모리 보호
-                    if (now - self._last_resource_check).total_seconds() >= 600:  # 10분 = 600초
+                    # 2) resource monitoring every 10m
+                    if (now - self._last_resource_check).total_seconds() >= 600:
                         usage = self.cloud_optimizer.log_resource_usage()
                         if usage.get('memory_percent', 0) > 85.0:
-                            logger.warning(f"⚠️ High Memory ({usage.get('memory_percent')}%) detected. Forcing GC...")
+                            logger.warning(f"High memory ({usage.get('memory_percent')}%). Forcing GC.")
                             self.cloud_optimizer.force_gc()
                         self._last_resource_check = now
                     
-                    # 3. DB 정리 (24시간마다)
-                    if (now - self._last_db_cleanup).total_seconds() >= 86400:  # 24시간 = 86400초
+                    # 3) DB cleanup every 24h
+                    if (now - self._last_db_cleanup).total_seconds() >= 86400:
                         self.cloud_optimizer.cleanup_db_old_records(
                             TRADE_HISTORY_DB, 
                             days_to_keep=90
                         )
                         self._last_db_cleanup = now
                     
-                    # 4. 명시적 GC (2시간마다)
-                    if (now - self._last_gc).total_seconds() >= 7200:  # 2시간 = 7200초
+                    # 4) explicit GC every 2h
+                    if (now - self._last_gc).total_seconds() >= 7200:
                         self.cloud_optimizer.force_gc()
                         self._last_gc = now
 
-                # [FIX] 심볼 처리 시간을 고려한 동적 대기 시간 계산
-                # 목표: 전체 루프 주기를 정확히 SPOT_LOOP_INTERVAL_SECONDS(10초)로 유지
+                # Dynamic sleep to keep target loop interval
                 elapsed_processing = time.time() - loop_start_time
                 target_interval = float(SPOT_LOOP_INTERVAL_SECONDS)
-                adjusted_wait = max(0.5, target_interval - elapsed_processing)  # 최소 0.5초 대기
+                adjusted_wait = max(0.5, target_interval - elapsed_processing)
                 
                 logger.debug(
-                    f"💤 Loop took {elapsed_processing:.2f}s. "
+                    f"Loop took {elapsed_processing:.2f}s. "
                     f"Sleeping {adjusted_wait:.2f}s (Target: {target_interval:.1f}s cycle)"
                 )
                 
-                # Shutdown 체크하면서 대기
+                # Sleep with shutdown checks
                 start_wait = time.time()
                 while time.time() - start_wait < adjusted_wait:
                     if self._shutdown_requested:
@@ -970,22 +1081,22 @@ class RealTraderSpot:
                     time.sleep(0.5)
 
             except Exception as e:
-                logger.error(f"🚨 Critical Error in Main Loop: {e}")
+                logger.error(f"Critical error in main loop: {e}")
                 self.health_manager.record_error(e)
                 self.health_manager.update_heartbeat(status="error")
-                time.sleep(10) # 에러 시 짧게 대기
+                time.sleep(10)
 
-        # Graceful Shutdown 처리
+        # Graceful shutdown
         self._shutdown()
 
     def _shutdown(self):
-        """Graceful Shutdown 처리"""
-        logger.info("🛑 Shutting down gracefully...")
+        """Handle graceful shutdown."""
+        logger.info("Shutting down gracefully...")
 
-        # 현재 포지션 상태 기록
+        # Snapshot open positions on shutdown
         positions = self._get_current_positions()
         if positions:
-            logger.warning(f"⚠️ Open positions at shutdown: {positions}")
+            logger.warning(f"Open positions at shutdown: {positions}")
 
         self.health_manager.update_heartbeat(
             status="stopped",
@@ -993,16 +1104,16 @@ class RealTraderSpot:
             extra={"shutdown_time": datetime.utcnow().isoformat()}
         )
 
-        logger.info("✅ Shutdown complete.")
+        logger.info("Shutdown complete.")
 
     def _cache_indicators(self, symbol: str, indicators: dict):
-        """지표값을 메모리에 캐싱 (4시간 재사용)"""
+        """Cache indicators in memory."""
         if not hasattr(self, '_indicator_cache'):
             self._indicator_cache = {}
         self._indicator_cache[symbol] = indicators
     
     def _get_cached_indicators(self, symbol: str) -> dict:
-        """캐시된 지표값 조회"""
+        """Get cached indicators."""
         if not hasattr(self, '_indicator_cache'):
             self._indicator_cache = {}
         return self._indicator_cache.get(symbol, {})
@@ -1013,11 +1124,13 @@ class RealTraderSpot:
 # ============================================================
 if __name__ == "__main__":
     logger.info("=" * 60)
-    logger.info("🚀 RealTrader Spot - Production Grade Bot (Upbit)")
+    logger.info("RealTrader Spot - Production Grade Bot (Upbit)")
     logger.info("=" * 60)
 
-    # Oracle Cloud 환경 변수로 활성화 결정 (기본값: True)
+    # Controlled by environment variable (default: true)
     enable_oracle_opt = os.getenv("ENABLE_ORACLE_OPTIMIZATION", "true").lower() == "true"
 
     bot = RealTraderSpot(enable_oracle_optimization=enable_oracle_opt)
     bot.run_forever()
+
+
