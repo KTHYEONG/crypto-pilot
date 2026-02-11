@@ -17,12 +17,25 @@ from .strategies_futures import UltimateStrategy
 from config.settings import FUTURES_INITIAL_BALANCE
 
 class FuturesWalkForwardAnalyzer:
-    def __init__(self, hourly_df, daily_df, params):
+    def __init__(self, hourly_df, daily_df, params, eval_start_time=None):
         self.hourly_df = hourly_df
         self.daily_df = daily_df
         self.params = params
+        self.eval_start_time = (
+            pd.Timestamp(eval_start_time) if eval_start_time is not None else None
+        )
+
+    @staticmethod
+    def _calculate_mdd_from_pnl(pnl_series):
+        if pnl_series is None or len(pnl_series) == 0:
+            return 0.0
+        equity = FUTURES_INITIAL_BALANCE + pd.Series(pnl_series).cumsum().values
+        running_max = np.maximum.accumulate(equity)
+        running_max[running_max == 0] = 1e-9
+        drawdown = (equity - running_max) / running_max * 100.0
+        return float(np.min(drawdown)) if len(drawdown) else 0.0
         
-    def run_backtest_segment(self, segment_hourly, segment_daily, actual_start_time):
+    def run_backtest_segment(self, segment_hourly, segment_daily, actual_start_time, actual_end_time):
         """
         Run backtest on a single WFA segment using BacktestEngineFast.
         Uses overlap buffer for warmup, then filters trades for actual period.
@@ -50,16 +63,23 @@ class FuturesWalkForwardAnalyzer:
         
         if not trades_df.empty:
             trades_df['entry_time'] = pd.to_datetime(trades_df['entry_time'])
+            segment_end = pd.Timestamp(actual_end_time)
+            eval_start = actual_start_time
+            if self.eval_start_time is not None:
+                eval_start = max(pd.Timestamp(actual_start_time), self.eval_start_time)
             
             # Filter trades that started within the actual test segment
-            valid_trades = trades_df[trades_df['entry_time'] >= actual_start_time].copy()
+            valid_trades = trades_df[
+                (trades_df['entry_time'] >= eval_start)
+                & (trades_df['entry_time'] <= segment_end)
+            ].copy()
             
             if not valid_trades.empty:
                 # Re-calculate Return from valid trades PnL
                 # Return = (Sum of PnL) / Initial Balance
                 total_pnl = valid_trades['pnl'].sum()
                 ret_pct = (total_pnl / FUTURES_INITIAL_BALANCE) * 100
-                mdd = res['mdd_pct'] # Use conservative MDD (could overlap, but simpler)
+                mdd = self._calculate_mdd_from_pnl(valid_trades['pnl'])
                 return ret_pct, mdd
         
         return 0.0, 0.0
@@ -80,7 +100,7 @@ class FuturesWalkForwardAnalyzer:
         
         for i in range(n_splits):
             start_idx = i * segment_size
-            end_idx = start_idx + segment_size
+            end_idx = n if i == (n_splits - 1) else (start_idx + segment_size)
             
             # Slice Hourly Data with Buffer (Overlapping Window)
             buf_start_idx = max(0, start_idx - HOURLY_BUFFER)
@@ -91,6 +111,8 @@ class FuturesWalkForwardAnalyzer:
             # Determine ACTUAL start time of this segment (without buffer)
             actual_start_time = self.hourly_df.iloc[start_idx]['datetime']
             actual_end_time = self.hourly_df.iloc[end_idx-1]['datetime'] if end_idx < n else self.hourly_df.iloc[-1]['datetime']
+            if self.eval_start_time is not None and pd.Timestamp(actual_end_time) < self.eval_start_time:
+                continue
             
             # Slice Daily Data (Include 200 days of buffer for indicators)
             start_time_buffered = segment_hourly['datetime'].iloc[0] # Time including hourly buffer
@@ -101,8 +123,10 @@ class FuturesWalkForwardAnalyzer:
             
             period_str = f"{actual_start_time} ~ {actual_end_time}"
             
-            # Pass actual_start_time for filtering
-            ret, mdd = self.run_backtest_segment(segment_hourly, segment_daily, actual_start_time)
+            # Pass segment boundaries for strict in-segment filtering.
+            ret, mdd = self.run_backtest_segment(
+                segment_hourly, segment_daily, actual_start_time, actual_end_time
+            )
             
             results.append({
                 'Split': i+1,

@@ -2,6 +2,7 @@
 import os
 import optuna
 import numpy as np
+from dataclasses import dataclass
 
 
 def _env_float(name, default):
@@ -9,6 +10,134 @@ def _env_float(name, default):
         return float(os.getenv(name, default))
     except (TypeError, ValueError):
         return float(default)
+
+
+def _env_int(name, default):
+    try:
+        return int(os.getenv(name, default))
+    except (TypeError, ValueError):
+        return int(default)
+
+
+@dataclass(frozen=True)
+class ObjectiveConfig:
+    # Core composition
+    base_score_multiplier: float = 160.0
+    gate_floor: float = 0.25
+    gate_weight_activity: float = 0.35
+    gate_weight_consistency: float = 0.25
+    gate_weight_kelly: float = 0.20
+    gate_weight_side: float = 0.30
+
+    # Baselines
+    min_trades_futures: int = 120
+    min_trades_scalp_futures: int = 300
+    min_trades_spot: int = 60
+    target_mdd_futures: float = 38.0
+    target_mdd_spot: float = 28.0
+    min_side_ratio_futures: float = 0.15
+    consistency_center_futures: float = 0.55
+    consistency_center_spot: float = 0.65
+    kelly_center_futures: float = 0.02
+    kelly_center_spot: float = 0.01
+
+    # Gates
+    gate_scale_activity_ratio: float = 0.25
+    gate_scale_consistency: float = 0.08
+    gate_scale_kelly: float = 0.03
+    gate_scale_side: float = 0.04
+
+    # Penalties / bonuses
+    expectancy_threshold_pct: float = 0.10
+    expectancy_penalty_mult: float = 160.0
+    negative_expectancy_penalty_mult: float = 120.0
+    bonus_ret_weight: float = 18.0
+    bonus_pf_weight: float = 8.0
+    bonus_ret_scale: float = 40.0
+    bonus_pf_scale: float = 0.6
+    bonus_pf_center: float = 1.2
+
+    # Composition weights
+    w_growth_signal: float = 1.10
+    w_quality_signal: float = 0.90
+    w_risk_signal: float = 1.25
+    w_tail_signal: float = 0.60
+    w_quality_sortino: float = 0.35
+    w_quality_sqn: float = 0.25
+    w_quality_pf: float = 0.25
+    w_quality_calmar: float = 0.15
+    w_risk_mdd: float = 0.45
+    w_risk_cvar: float = 0.35
+    w_risk_ulcer: float = 0.20
+
+    # ASINH transform scales (anti-saturation)
+    asinh_growth_scale: float = 0.002
+    asinh_sortino_scale: float = 2.0
+    asinh_sqn_scale: float = 1.8
+    asinh_pf_scale: float = 0.8
+    asinh_calmar_scale: float = 2.0
+    asinh_mdd_scale_ratio: float = 1.0
+    asinh_cvar_scale: float = 1.0
+    asinh_ulcer_scale: float = 4.0
+    asinh_tail_scale_base: float = 6.0
+    asinh_clip: float = 4.5
+
+
+def _load_objective_config():
+    return ObjectiveConfig(
+        base_score_multiplier=_env_float("OBJ_BASE_SCORE_MULT", 160.0),
+        gate_floor=_env_float("OBJ_GATE_FLOOR", 0.25),
+        gate_weight_activity=_env_float("OBJ_GATE_W_ACTIVITY", 0.35),
+        gate_weight_consistency=_env_float("OBJ_GATE_W_CONSISTENCY", 0.25),
+        gate_weight_kelly=_env_float("OBJ_GATE_W_KELLY", 0.20),
+        gate_weight_side=_env_float("OBJ_GATE_W_SIDE", 0.30),
+        min_trades_futures=_env_int("OBJ_MIN_TRADES_FUTURES", 120),
+        min_trades_scalp_futures=_env_int("OBJ_MIN_TRADES_SCALP_FUTURES", 300),
+        min_trades_spot=_env_int("OBJ_MIN_TRADES_SPOT", 60),
+        target_mdd_futures=_env_float("OBJ_TARGET_MDD_FUTURES", 38.0),
+        target_mdd_spot=_env_float("OBJ_TARGET_MDD_SPOT", 28.0),
+        min_side_ratio_futures=_env_float("OBJ_MIN_SIDE_RATIO_FUTURES", 0.15),
+        consistency_center_futures=_env_float("OBJ_CONSISTENCY_CENTER_FUTURES", 0.55),
+        consistency_center_spot=_env_float("OBJ_CONSISTENCY_CENTER_SPOT", 0.65),
+        kelly_center_futures=_env_float("OBJ_KELLY_CENTER_FUTURES", 0.02),
+        kelly_center_spot=_env_float("OBJ_KELLY_CENTER_SPOT", 0.01),
+        gate_scale_activity_ratio=_env_float("OBJ_GATE_SCALE_ACTIVITY_RATIO", 0.25),
+        gate_scale_consistency=_env_float("OBJ_GATE_SCALE_CONSISTENCY", 0.08),
+        gate_scale_kelly=_env_float("OBJ_GATE_SCALE_KELLY", 0.03),
+        gate_scale_side=_env_float("OBJ_GATE_SCALE_SIDE", 0.04),
+        expectancy_threshold_pct=_env_float("OBJ_EXPECTANCY_THRESHOLD_PCT", 0.10),
+        expectancy_penalty_mult=_env_float("OBJ_EXPECTANCY_PENALTY_MULT", 160.0),
+        negative_expectancy_penalty_mult=_env_float("OBJ_NEG_EXPECTANCY_PENALTY_MULT", 120.0),
+        bonus_ret_weight=_env_float("OBJ_BONUS_RET_WEIGHT", 18.0),
+        bonus_pf_weight=_env_float("OBJ_BONUS_PF_WEIGHT", 8.0),
+        bonus_ret_scale=_env_float("OBJ_BONUS_RET_SCALE", 40.0),
+        bonus_pf_scale=_env_float("OBJ_BONUS_PF_SCALE", 0.6),
+        bonus_pf_center=_env_float("OBJ_BONUS_PF_CENTER", 1.2),
+        w_growth_signal=_env_float("OBJ_W_GROWTH_SIGNAL", 1.10),
+        w_quality_signal=_env_float("OBJ_W_QUALITY_SIGNAL", 0.90),
+        w_risk_signal=_env_float("OBJ_W_RISK_SIGNAL", 1.25),
+        w_tail_signal=_env_float("OBJ_W_TAIL_SIGNAL", 0.60),
+        w_quality_sortino=_env_float("OBJ_W_QUALITY_SORTINO", 0.35),
+        w_quality_sqn=_env_float("OBJ_W_QUALITY_SQN", 0.25),
+        w_quality_pf=_env_float("OBJ_W_QUALITY_PF", 0.25),
+        w_quality_calmar=_env_float("OBJ_W_QUALITY_CALMAR", 0.15),
+        w_risk_mdd=_env_float("OBJ_W_RISK_MDD", 0.45),
+        w_risk_cvar=_env_float("OBJ_W_RISK_CVAR", 0.35),
+        w_risk_ulcer=_env_float("OBJ_W_RISK_ULCER", 0.20),
+        asinh_growth_scale=_env_float("OBJ_ASINH_GROWTH_SCALE", 0.002),
+        asinh_sortino_scale=_env_float("OBJ_ASINH_SORTINO_SCALE", 2.0),
+        asinh_sqn_scale=_env_float("OBJ_ASINH_SQN_SCALE", 1.8),
+        asinh_pf_scale=_env_float("OBJ_ASINH_PF_SCALE", 0.8),
+        asinh_calmar_scale=_env_float("OBJ_ASINH_CALMAR_SCALE", 2.0),
+        asinh_mdd_scale_ratio=_env_float("OBJ_ASINH_MDD_SCALE_RATIO", 1.0),
+        asinh_cvar_scale=_env_float("OBJ_ASINH_CVAR_SCALE", 1.0),
+        asinh_ulcer_scale=_env_float("OBJ_ASINH_ULCER_SCALE", 4.0),
+        asinh_tail_scale_base=_env_float("OBJ_ASINH_TAIL_SCALE_BASE", 6.0),
+        asinh_clip=_env_float("OBJ_ASINH_CLIP", 4.5),
+    )
+
+
+OBJECTIVE_CFG = _load_objective_config()
 
 def suggest_params(trial, search_space):
     """
@@ -269,17 +398,52 @@ def soft_sigmoid(x, L, k, x0):
     z_safe = np.clip(z, -500, 500)
     return L / (1 + np.exp(z_safe))
 
+
+def _smooth_gate(value, center, scale):
+    """
+    Smooth gate in [0, 1] to avoid hard discontinuities in optimization landscape.
+    """
+    safe_scale = max(float(scale), 1e-9)
+    z = (float(value) - float(center)) / safe_scale
+    z = np.clip(z, -60.0, 60.0)
+    return 1.0 / (1.0 + np.exp(-z))
+
+
+def _asinh_score(value, scale, clip_abs):
+    """
+    Anti-saturation transform: slower saturation than tanh, better rank resolution in tails.
+    """
+    safe_scale = max(float(scale), 1e-9)
+    transformed = np.arcsinh(float(value) / safe_scale)
+    return float(np.clip(transformed, -abs(float(clip_abs)), abs(float(clip_abs))))
+
+
+def _blend_gates_with_floor(gates, weights, gate_floor):
+    """
+    Conservative-bias mitigation:
+    Instead of multiplicative collapse, use floor + weighted average.
+    """
+    g = np.array(gates, dtype=np.float64)
+    w = np.array(weights, dtype=np.float64)
+    w_sum = float(np.sum(w))
+    if w_sum <= 0:
+        weighted = float(np.mean(g)) if len(g) > 0 else 0.0
+    else:
+        weighted = float(np.sum(g * w) / w_sum)
+    floor = float(np.clip(gate_floor, 0.0, 0.95))
+    return floor + (1.0 - floor) * weighted
+
+
 def calculate_score(ret, mdd, trades_df, mode="DAY", market_type="spot", timeframe=None, min_trades_override=None):
     """
-    Objective Function v14: Semantic Robustness Optimization
-    
-    Improvements:
-    1. Added SQN (System Quality Number): Rewards statistical significance and smoothness.
-    2. Added Consistency Score (R^2): Penalizes volatile equity curves even if end return is high.
-    3. Tighter Expectancy: Raised min avg profit to 0.20% (20bps) to guarantee slippage coverage.
-    4. Market-Specific Weights: 
-       - Spot: Prioritizes Consistency & Safety (Sortino/Calmar).
-       - Futures: Prioritizes Survivability (Kelly/Ulcer).
+    Overfitting-resistant objective (continuous-form):
+    score = C(activity, consistency, Kelly, side-coverage) * (Growth + Quality - Risk)
+
+    Design goals:
+    1) Avoid hard cliff (-10000) except for truly invalid inputs.
+    2) Reward geometric growth and statistical quality.
+    3) Penalize tail risk (MDD/CVaR/Ulcer) and one-sided futures behavior.
+    4) Keep bonus sweep coefficients effective via growth/risk/tail multipliers.
     """
     if trades_df.empty:
         return -10000.0
@@ -287,191 +451,200 @@ def calculate_score(ret, mdd, trades_df, mode="DAY", market_type="spot", timefra
     N = len(trades_df)
     if 'pnl' not in trades_df.columns or 'pnl_pct' not in trades_df.columns:
         return -10000.0
-    
-    returns = trades_df['pnl_pct'].values
-    pnl_raw = trades_df['pnl'].values
 
-    # --- 1. Core Efficiency Metrics ---
-    r_avg = np.mean(returns)
-    r_std = np.std(returns, ddof=1) if len(returns) > 1 else 0.001
-    
-    # [METRIC] SQN (System Quality Number)
-    # SQN = sqrt(N) * (Mean / Std)
-    # < 1.6: Poor, 1.6-2.0: Average, 2.0-3.0: Good, 3.0-5.0: Excellent, > 7.0: Holy Grail
-    sqn_raw = np.sqrt(N) * (r_avg / r_std) if r_std > 0 else 0
-    sqn = np.clip(sqn_raw, 0, 10)
+    returns = trades_df['pnl_pct'].values.astype(np.float64)
+
+    # --- 1) Base statistics ---
+    r_avg = float(np.mean(returns))
+    r_std = float(np.std(returns, ddof=1)) if len(returns) > 1 else 0.001
+    r_std = max(r_std, 1e-6)
 
     downside_returns = returns[returns < 0]
-    downside_std = np.std(downside_returns, ddof=1) if len(downside_returns) > 1 else 0.001
-    
-    # [METRIC] Sortino
-    sortino_raw = r_avg / max(downside_std, 0.0001)
-    sortino = np.clip(sortino_raw, -20, 20)
-    
-    pos_sum = np.sum(returns[returns > 0])
-    neg_sum = abs(np.sum(returns[returns < 0]))
-    pf = pos_sum / neg_sum if neg_sum > 0 else 3.0
-    
-    abs_mdd = abs(mdd) if mdd != 0 else 0.01
-    # [METRIC] Calmar
-    calmar_raw = ret / abs_mdd
-    calmar = np.clip(calmar_raw, -10, 20)
+    downside_std = float(np.std(downside_returns, ddof=1)) if len(downside_returns) > 1 else 0.001
+    downside_std = max(downside_std, 1e-6)
 
-    # --- 2. Financial Safety: Kelly Criterion ---
-    win_rate = len(returns[returns > 0]) / N
-    avg_win = np.mean(returns[returns > 0]) if any(returns > 0) else 0.001
-    avg_loss = abs(np.mean(returns[returns < 0])) if any(returns < 0) else 0.001
-    win_loss_ratio = max(avg_win / avg_loss, 0.001)
-    
-    kelly_f = win_rate - ((1 - win_rate) / win_loss_ratio)
-    
-    # --- 3. Ulcer & Consistency (Linearity) ---
+    sortino = np.clip(r_avg / downside_std, -20.0, 20.0)
+    sqn_raw = np.sqrt(N) * (r_avg / r_std)
+    sqn = np.clip(sqn_raw, -10.0, 10.0)
+
+    pos_sum = float(np.sum(returns[returns > 0]))
+    neg_sum = abs(float(np.sum(returns[returns < 0])))
+    pf = pos_sum / neg_sum if neg_sum > 0 else (4.0 if pos_sum > 0 else 0.0)
+
+    abs_mdd = max(abs(float(mdd)), 1e-6)
+    calmar = np.clip(float(ret) / abs_mdd, -15.0, 25.0)
+
+    win_rate = float(np.mean(returns > 0))
+    avg_win = float(np.mean(returns[returns > 0])) if np.any(returns > 0) else 0.001
+    avg_loss = abs(float(np.mean(returns[returns < 0]))) if np.any(returns < 0) else 0.001
+    win_loss_ratio = max(avg_win / max(avg_loss, 1e-9), 1e-6)
+    kelly_f = win_rate - ((1.0 - win_rate) / win_loss_ratio)
+
+    # Equity linearity / ulcer
     equity_curve = np.cumsum(returns)
-    
-    # [METRIC] Consistency (R^2)
-    # Measures how close the equity curve is to a straight line (perfect steady growth)
     if N > 5:
-        x = np.arange(len(equity_curve))
-        y = equity_curve
-        correlation_matrix = np.corrcoef(x, y)
-        correlation_xy = correlation_matrix[0,1]
-        r_squared = correlation_xy**2 if not np.isnan(correlation_xy) else 0
+        x = np.arange(N)
+        corr = np.corrcoef(x, equity_curve)[0, 1]
+        r_squared = float(corr**2) if np.isfinite(corr) else 0.0
     else:
-        r_squared = 0.5
+        r_squared = 0.4
 
     hwm = np.maximum.accumulate(equity_curve)
     drawdowns = hwm - equity_curve
-    ulcer_proxy = np.sqrt(np.mean(np.square(drawdowns))) if len(drawdowns) > 0 else 0
-    
+    ulcer_proxy = float(np.sqrt(np.mean(np.square(drawdowns)))) if len(drawdowns) > 0 else 0.0
+
+    # CVaR on tail losses (in pnl_pct units)
+    loss_returns = returns[returns < 0]
+    if len(loss_returns) > 0:
+        alpha = 0.10 if N >= 30 else 0.20
+        var_alpha = float(np.quantile(loss_returns, alpha))
+        tail = loss_returns[loss_returns <= var_alpha]
+        cvar_abs = abs(float(np.mean(tail))) if len(tail) > 0 else abs(var_alpha)
+    else:
+        cvar_abs = 0.0
+
     if not np.isfinite(ulcer_proxy) or not np.isfinite(sortino) or not np.isfinite(calmar):
         return -10000.0
 
-    # Bonus coefficients can be overridden via environment variables.
+    # Bonus coefficients (A/B/C sweep compatibility)
     fut_growth_coef = _env_float("FUT_GROWTH_BONUS_COEF", 30.0)
     fut_risk_drag_coef = _env_float("FUT_RISK_DRAG_COEF", 8.0)
     fut_tail_drag_coef = _env_float("FUT_TAIL_DRAG_COEF", 12.0)
-
     spot_growth_coef = _env_float("SPOT_GROWTH_BONUS_COEF", 18.0)
     spot_risk_drag_coef = _env_float("SPOT_RISK_DRAG_COEF", 10.0)
     spot_tail_drag_coef = _env_float("SPOT_TAIL_DRAG_COEF", 10.0)
 
-    # --- 4. Scoring Logic ---
-    # [RISK-ADJUSTED BONUS] Approximate geometric growth:
-    # g ~= mu - 0.5 * sigma^2
-    # where mu/sigma are per-trade decimal returns.
+    cfg = OBJECTIVE_CFG
+
+    # --- 2) Market baselines ---
+    if market_type == "futures":
+        min_trades = cfg.min_trades_futures if mode != "SCALP" else cfg.min_trades_scalp_futures
+        target_mdd = cfg.target_mdd_futures
+        min_side_ratio = cfg.min_side_ratio_futures
+        growth_scale = fut_growth_coef / 30.0
+        risk_scale = fut_risk_drag_coef / 8.0
+        tail_scale = fut_tail_drag_coef / 12.0
+        consistency_center = cfg.consistency_center_futures
+        kelly_center = cfg.kelly_center_futures
+    else:
+        min_trades = cfg.min_trades_spot
+        target_mdd = cfg.target_mdd_spot
+        min_side_ratio = 0.00
+        growth_scale = spot_growth_coef / 18.0
+        risk_scale = spot_risk_drag_coef / 10.0
+        tail_scale = spot_tail_drag_coef / 10.0
+        consistency_center = cfg.consistency_center_spot
+        kelly_center = cfg.kelly_center_spot
+
+    if min_trades_override is not None:
+        min_trades = int(min_trades_override)
+    else:
+        min_trades = int(min_trades)
+
+    # --- 3) Growth/Quality/Risk components ---
     mu = r_avg / 100.0
-    sigma = max(r_std, 1e-6) / 100.0
+    sigma = r_std / 100.0
     geom_growth = mu - 0.5 * (sigma ** 2)
 
-    # Confidence scaling to reduce over-reward on low trade counts
-    confidence = min(1.0, np.sqrt(N / 200.0))
+    growth_signal = _asinh_score(geom_growth, cfg.asinh_growth_scale, cfg.asinh_clip)
 
-    score = 0.0
-    
+    q_sortino = _asinh_score(sortino, cfg.asinh_sortino_scale, cfg.asinh_clip)
+    q_sqn = _asinh_score(sqn, cfg.asinh_sqn_scale, cfg.asinh_clip)
+    q_pf = _asinh_score((pf - 1.0), cfg.asinh_pf_scale, cfg.asinh_clip)
+    q_calmar = _asinh_score(calmar, cfg.asinh_calmar_scale, cfg.asinh_clip)
+    quality_signal = (
+        (cfg.w_quality_sortino * q_sortino)
+        + (cfg.w_quality_sqn * q_sqn)
+        + (cfg.w_quality_pf * q_pf)
+        + (cfg.w_quality_calmar * q_calmar)
+    )
+
+    d_mdd = _asinh_score(abs_mdd, max(target_mdd * cfg.asinh_mdd_scale_ratio, 1e-6), cfg.asinh_clip)
+    d_cvar = _asinh_score(cvar_abs, cfg.asinh_cvar_scale, cfg.asinh_clip)
+    d_ulcer = _asinh_score(ulcer_proxy, cfg.asinh_ulcer_scale, cfg.asinh_clip)
+    risk_signal = (
+        (cfg.w_risk_mdd * d_mdd)
+        + (cfg.w_risk_cvar * d_cvar)
+        + (cfg.w_risk_ulcer * d_ulcer)
+    )
+
+    tail_excess = max(abs_mdd - target_mdd, 0.0)
+    tail_signal = _asinh_score(
+        tail_excess,
+        max(cfg.asinh_tail_scale_base, target_mdd * 0.25),
+        cfg.asinh_clip,
+    )
+
+    base_signal = (
+        (cfg.w_growth_signal * growth_scale * growth_signal)
+        + (cfg.w_quality_signal * quality_signal)
+        - (cfg.w_risk_signal * risk_scale * risk_signal)
+        - (cfg.w_tail_signal * tail_scale * tail_signal)
+    )
+
+    # --- 4) Continuous gates (activity / consistency / Kelly / side coverage) ---
+    activity_gate = _smooth_gate(
+        N,
+        center=min_trades,
+        scale=max(4.0, min_trades * cfg.gate_scale_activity_ratio),
+    )
+    consistency_gate = _smooth_gate(
+        r_squared,
+        center=consistency_center,
+        scale=cfg.gate_scale_consistency,
+    )
+    kelly_gate = _smooth_gate(
+        kelly_f,
+        center=kelly_center,
+        scale=cfg.gate_scale_kelly,
+    )
+
+    side_gate = 1.0
+    short_ratio = 0.0
     if market_type == "futures":
-        # [FUTURES] Theme: "AGGRESSIVE GROWTH" (Small Capital Optimized)
-        # Target MDD raised to 50% to accommodate high leverage (10x) strategies
-        target_mdd = 40.0 # [STRICTER] Reduced from 50% for stability
-        min_trades = 100 if mode != 'SCALP' else 300
-        
-        # Sigmoids
-        s_calmar = soft_sigmoid(calmar, L=10.0, k=0.8, x0=3.0)
-        s_sortino = soft_sigmoid(sortino, L=8.0, k=1.0, x0=2.0)
-        s_pf = soft_sigmoid(pf, L=6.0, k=1.5, x0=1.8)
-        s_sqn = soft_sigmoid(sqn, L=8.0, k=0.8, x0=2.5)
-        
-        # Risk-adjusted growth bonus (bounded to prevent score explosion)
-        growth_bonus = fut_growth_coef * np.tanh(120.0 * geom_growth)
-        risk_drag = fut_risk_drag_coef * np.tanh(ulcer_proxy / 8.0)
-        tail_excess = max(abs_mdd - target_mdd, 0.0)
-        tail_drag = fut_tail_drag_coef * np.tanh(tail_excess / 12.0)
-        risk_adjusted_bonus = (growth_bonus - risk_drag - tail_drag) * confidence
-        
-        score = (s_calmar * 10.0) + (s_sortino * 8.0) + (s_pf * 6.0) + (s_sqn * 8.0) + risk_adjusted_bonus
-        score += (s_pf * s_sqn) * 2.0 # High Pf + High SQN = Stable Winner
-        
-        if kelly_f <= 0: return -10000.0
-        
-        # Penalties (Relaxed for Small Capital)
-        score -= (ulcer_proxy * 3.0)  # Reduced from 6.0 (volatility is acceptable)
-        if r_squared < 0.60: score -= (0.60 - r_squared) * 10.0  # Relaxed from 0.85 (crypto reality)
-        
-        # MDD Penalty: Linear instead of exponential (softer)
-        if abs_mdd > target_mdd:
-            score -= (abs_mdd - target_mdd) * 4.0  # [STRICTER] Increased from 2.0
-
-        # [ANTI-OVERFIT] Futures Only Penalties (Relaxed)
-        if win_rate > 0.90:  # Raised from 0.85 (allow more wins)
-            excess_win = (win_rate - 0.90) * 100
-            score -= (excess_win * 3.0)  # Reduced from 5.0
-            
-        if avg_loss > (avg_win * 4.0):  # Raised from 3.0 (allow bigger losses if wins are huge)
-            score -= 30.0  # Reduced from 50.0
-
-    else:
-        # [SPOT] Theme: "COMPOUNDING EFFICIENCY"
-        # Objective: Maximize Geometric Growth (Kelly-Optimal) while minimizing volatility tax.
-        target_mdd = 28.0 
-        min_trades = 60
-        
-        # [CRITICAL] Kelly Check for Spot
-        # Even without leverage, negative Kelly means negative geometric growth.
-        if kelly_f <= 0: return -10000.0
-
-        # Spot needs higher Return/Risk efficiency (no leverage helper)
-        # Adjusted Centers for "Unleveraged Realism":
-        # - Calmar: 2.5 (Ex: 50% Ret / 20% MDD) - 4.0 was too high
-        # - PF: 1.5 (Trend Followers usually 1.5~2.0)
-        # - Sortino: 2.0 (Solid downside control)
-        
-        s_calmar = soft_sigmoid(calmar, L=15.0, k=0.7, x0=2.5)
-        s_sortino = soft_sigmoid(sortino, L=10.0, k=1.0, x0=2.0)
-        s_pf = soft_sigmoid(pf, L=8.0, k=1.2, x0=1.5)
-        s_sqn = soft_sigmoid(sqn, L=10.0, k=0.8, x0=2.0)
-        
-        # Spot also needs a smaller growth bonus, but risk should dominate.
-        growth_bonus = spot_growth_coef * np.tanh(120.0 * geom_growth)
-        risk_drag = spot_risk_drag_coef * np.tanh(ulcer_proxy / 6.0)
-        tail_excess = max(abs_mdd - target_mdd, 0.0)
-        tail_drag = spot_tail_drag_coef * np.tanh(tail_excess / 10.0)
-        risk_adjusted_bonus = (growth_bonus - risk_drag - tail_drag) * confidence
-
-        score = (s_calmar * 12.0) + (s_sqn * 10.0) + (s_pf * 8.0) + (s_sortino * 6.0) + risk_adjusted_bonus
-        
-        # Bonus for Consistency (Relaxed to 0.90 for Crypto Reality)
-        if r_squared > 0.90: score += 10.0
-        
-        score -= (ulcer_proxy * 5.0) # Increased penalty for volatility tax
-        
-        if abs_mdd > 15.0:
-            score -= (abs_mdd - 15.0) * 1.5
-        if abs_mdd > target_mdd:
-            score -= (abs_mdd - target_mdd) * 10.0
-
-    # --- 5. Common Penalties ---
-
-    # Trade Count (Logarithmic Penalty - harsh on very low numbers)
-    # Allow override for split validation (e.g., yearly segments)
-    if min_trades_override is not None:
-        min_trades = min_trades_override
-    else:
-        min_trades = 150 if market_type == 'futures' else 60
-    
-    if N < min_trades:
-        if market_type == 'futures':
-             if N < (min_trades * 0.5): return -10000.0
+        if "side" in trades_df.columns:
+            side_vals = trades_df["side"].astype(str).str.upper().values
+            long_count = int(np.sum(side_vals == "LONG"))
+            short_count = int(np.sum(side_vals == "SHORT"))
+            long_ratio = long_count / max(N, 1)
+            short_ratio = short_count / max(N, 1)
+            long_gate = _smooth_gate(long_ratio, center=min_side_ratio, scale=cfg.gate_scale_side)
+            short_gate = _smooth_gate(short_ratio, center=min_side_ratio, scale=cfg.gate_scale_side)
+            side_gate = 0.5 * (long_gate + short_gate)
         else:
-             if N < (min_trades * 0.4): return -10000.0
-             
-        shortfall = min_trades - N
-        score -= (shortfall * 4.0) 
-        
-    # Expectancy Check (Slippage Safety)
-    # Raised to 0.20% (20bps) - ensures we cover 5bps fee + 5bps slippage + buffer
-    avg_profit_pct = r_avg
-    if avg_profit_pct < 0.15: 
-        return -10000.0
-    elif avg_profit_pct < 0.30: 
-        score -= (0.30 - avg_profit_pct) * 200.0 # Steep penalty between 0.15% and 0.30%
+            # Missing side column means direction-diversity evidence is unavailable.
+            side_gate = cfg.gate_floor
 
+    confidence = min(1.0, np.sqrt(N / 220.0))
+    if market_type == "futures":
+        gates = [activity_gate, consistency_gate, kelly_gate, side_gate]
+        weights = [
+            cfg.gate_weight_activity,
+            cfg.gate_weight_consistency,
+            cfg.gate_weight_kelly,
+            cfg.gate_weight_side,
+        ]
+    else:
+        gates = [activity_gate, consistency_gate, kelly_gate]
+        weights = [
+            cfg.gate_weight_activity,
+            cfg.gate_weight_consistency,
+            cfg.gate_weight_kelly,
+        ]
+    combined_gate = _blend_gates_with_floor(gates, weights, cfg.gate_floor)
+
+    score = cfg.base_score_multiplier * confidence * combined_gate * base_signal
+
+    # --- 5) Smooth penalties/bonuses ---
+    expectancy_gap = max(cfg.expectancy_threshold_pct - r_avg, 0.0)
+    score -= expectancy_gap * cfg.expectancy_penalty_mult
+    score -= max(-r_avg, 0.0) * cfg.negative_expectancy_penalty_mult
+
+    score += confidence * (
+        cfg.bonus_ret_weight * _asinh_score(float(ret), cfg.bonus_ret_scale, cfg.asinh_clip)
+        + cfg.bonus_pf_weight * _asinh_score((pf - cfg.bonus_pf_center), cfg.bonus_pf_scale, cfg.asinh_clip)
+    )
+
+    if not np.isfinite(score):
+        return -10000.0
     return float(score)

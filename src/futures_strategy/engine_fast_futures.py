@@ -100,19 +100,8 @@ class BacktestEngineFast:
         
         df = self.merged_df
         
-        # [CRITICAL] LOOKAHEAD PROTECTION
-        # Shift ALL signal columns by 1 to ensure we use 'confirmed' signals from previous closed bar.
-        # This applies to both Hourly signals (if any) and Mapped Daily signals.
-        signal_cols = [
-            'daily_entry_upper', 'daily_entry_lower', 'daily_trend_direction',
-            'daily_strength_filter', 'daily_volume_ratio', 'daily_atr',
-            'daily_parabolic_sar', 'daily_rsi', 'daily_hurst', 'daily_natr'
-        ]
-        
-        # Check if columns exist and shift
-        for col in signal_cols:
-            if col in df.columns:
-                df[col] = df[col].shift(1)
+        # Daily signals are already aligned to prior day in _prepare_data_* via shift(1).
+        # Do not shift again here to avoid extra 1-bar latency.
                 
         # Extract all columns as numpy arrays for speed
         n = len(df)
@@ -466,8 +455,9 @@ def backtest_loop_numba(
             else: # SHORT
                 fill_price = c_open * (1 - slippage_rate)
             
-            # Use indicators from i-1 (Signal Bar)
-            current_atr = atr[i] 
+            # Use indicators from i-1 (signal bar) to keep timing strictly causal.
+            signal_idx = i - 1 if i > 0 else i
+            current_atr = atr[signal_idx]
             
             # 1. SL Calc
             if stop_loss_type == 1: # ATR
@@ -611,7 +601,7 @@ def backtest_loop_numba(
                         unreal_p = (entry_price - c_price) / pos_atr if pos_atr > 0 else 0
                     
                     if unreal_p < time_exit_profit_threshold:
-                        exit_price = c_price # Market
+                        exit_price = c_open # Market at bar open
                         if pos_side == 1: exit_price *= (1 - slippage_rate)
                         else:             exit_price *= (1 + slippage_rate)
                         exit_triggered = True
@@ -619,19 +609,19 @@ def backtest_loop_numba(
                 # RSI Panic
                 if not exit_triggered:
                     if pos_side == 1 and rsi[i] > rsi_exit_threshold:
-                         exit_price = c_price * (1 - slippage_rate)
+                         exit_price = c_open * (1 - slippage_rate)
                          exit_triggered = True
                     elif pos_side == -1 and rsi[i] < (100 - rsi_exit_threshold):
-                         exit_price = c_price * (1 + slippage_rate)
+                         exit_price = c_open * (1 + slippage_rate)
                          exit_triggered = True
                 
                 # Trend Reversal
                 if not exit_triggered:
                     if pos_side == 1 and trend_dir[i] == -1:
-                        exit_price = c_price * (1 - slippage_rate)
+                        exit_price = c_open * (1 - slippage_rate)
                         exit_triggered = True
                     elif pos_side == -1 and trend_dir[i] == 1:
-                        exit_price = c_price * (1 + slippage_rate)
+                        exit_price = c_open * (1 + slippage_rate)
                         exit_triggered = True
 
             if exit_triggered:
@@ -715,4 +705,26 @@ def backtest_loop_numba(
                 pending_entry = True
                 pending_side = -1
     
+    # --- 4. END-OF-DATA FORCED LIQUIDATION ---
+    # Realize remaining position at the final bar close to avoid hidden unrealized PnL.
+    if in_position and n > 0:
+        last_idx = n - 1
+        last_close = close[last_idx]
+        if pos_side == 1:
+            exit_price = last_close * (1 - slippage_rate)
+            pnl = (exit_price - entry_price) * amount
+        else:
+            exit_price = last_close * (1 + slippage_rate)
+            pnl = (entry_price - exit_price) * amount
+
+        exit_fee = amount * exit_price * fee_rate
+        pnl -= exit_fee
+
+        margin = (amount * entry_price) / leverage
+        balance += margin + pnl
+
+        if trade_count < max_trades:
+            trades[trade_count] = [entry_idx, last_idx, pos_side, entry_price, exit_price, pnl]
+            trade_count += 1
+
     return trades[:trade_count], balance
