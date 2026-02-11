@@ -178,6 +178,7 @@ class BacktestEngineFastSpot:
         # [NEW] Time-Based Exit & Trailing Activation
         max_holding_bars = self.strategy.params.get('MAX_HOLDING_BARS', 999999)
         trailing_activation_atr = self.strategy.params.get('TRAILING_ACTIVATION_ATR', 0.0)
+        time_exit_profit_threshold = self.strategy.params.get('TIME_EXIT_PROFIT_THRESHOLD', 1.4)
         
         # [WARMUP OPTIMIZATION] Extract warmup period if available
         # Note: self.df was set to None after data extraction, so we need to get it from original df
@@ -187,9 +188,14 @@ class BacktestEngineFastSpot:
         
         # [NEW] Extract Regime Params from Strategy
         # Defaults are set broad if not optimized
-        hurst_threshold = self.strategy.params.get('STRONG_REGIME_HURST', 0.6)
+        hurst_threshold = self.strategy.params.get(
+            'HURST_TREND_THRESHOLD',
+            self.strategy.params.get('STRONG_REGIME_HURST', 0.6)
+        )
+        strong_regime_natr = self.strategy.params.get('STRONG_REGIME_NATR', 1.0)
         natr_panic_threshold = self.strategy.params.get('PANIC_REGIME_NATR', 4.5)
         rsi_panic_threshold = self.strategy.params.get('RSI_EXIT_THRESHOLD', 94) # Changed key to match config
+        use_dynamic_risk = self.strategy.params.get('USE_DYNAMIC_RISK', True)
         
         strong_regime_multiplier = self.strategy.params.get('STRONG_REGIME_MULTIPLIER', 1.3)
         panic_regime_multiplier = self.strategy.params.get('PANIC_REGIME_MULTIPLIER', 0.15)
@@ -220,9 +226,10 @@ class BacktestEngineFastSpot:
             atr_mult, self.risk_per_trade,
             use_volume_filter, vol_threshold,
             use_take_profit, tp_atr_mult,
-            max_holding_bars, trailing_activation_atr,
+            max_holding_bars, trailing_activation_atr, time_exit_profit_threshold,
+            use_dynamic_risk,
             # [NEW] Regime optimization params
-            hurst_threshold, natr_panic_threshold, rsi_panic_threshold,
+            hurst_threshold, strong_regime_natr, natr_panic_threshold, rsi_panic_threshold,
             strong_regime_multiplier, panic_regime_multiplier,
             # [NEW] Weak Regime
             hurst_weak_threshold, weak_regime_multiplier,
@@ -296,8 +303,9 @@ def backtest_loop_spot_numba(
     atr_mult, risk_per_trade,
     use_volume_filter, vol_threshold,
     use_take_profit, tp_atr_mult,
-    max_holding_bars, trailing_activation_atr,
-    hurst_threshold, natr_panic_threshold, rsi_panic_threshold,
+    max_holding_bars, trailing_activation_atr, time_exit_profit_threshold,
+    use_dynamic_risk,
+    hurst_threshold, strong_regime_natr, natr_panic_threshold, rsi_panic_threshold,
     strong_regime_multiplier, panic_regime_multiplier,
     hurst_weak_threshold, weak_regime_multiplier, # [NEW] Weak Regime
     rsi_entry_max, natr_entry_min,
@@ -416,9 +424,9 @@ def backtest_loop_spot_numba(
                 
                 # Max Holding
                 elif (i - entry_idx) >= max_holding_bars:
-                    unrealized_pct = (c_price - entry_price) / entry_price * 100
-                    # Only exit if profit is small (stagnant) or negative
-                    if unrealized_pct < 0.2:
+                    unrealized_profit_atr = (c_price - entry_price) / pos_atr if pos_atr > 0 else 0.0
+                    # TIME_EXIT_PROFIT_THRESHOLD is ATR-multiple based.
+                    if unrealized_profit_atr <= time_exit_profit_threshold:
                         exit_price = c_price * (1 - slippage_rate)
                         exit_triggered = True
 
@@ -468,18 +476,16 @@ def backtest_loop_spot_numba(
             if can_signal and trend_dir[i] == 1 and c_price > entry_upper[i]:
                 # [DYNAMIC RISK SIZING]
                 regime_mult = 1.0
-                
-                # Strong Trend Regime
-                if hurst[i] > hurst_threshold: 
-                    regime_mult = strong_regime_multiplier
-                
-                # Panic Regime
-                if natr[i] > natr_panic_threshold: 
-                    regime_mult = panic_regime_multiplier
-                    
-                # Weak/Choppy Regime (Low Hurst)
-                elif hurst[i] < hurst_weak_threshold:
-                    regime_mult = weak_regime_multiplier
+                if use_dynamic_risk:
+                    # Panic overrides all
+                    if natr[i] > natr_panic_threshold:
+                        regime_mult = panic_regime_multiplier
+                    # Strong regime requires trend persistence + enough volatility
+                    elif hurst[i] > hurst_threshold and natr[i] > strong_regime_natr:
+                        regime_mult = strong_regime_multiplier
+                    # Weak/choppy market
+                    elif hurst[i] < hurst_weak_threshold:
+                        regime_mult = weak_regime_multiplier
                 
                 exec_risk = risk_per_trade * regime_mult
                 
