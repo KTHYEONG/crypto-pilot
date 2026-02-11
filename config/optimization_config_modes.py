@@ -231,22 +231,65 @@ def GET_SEARCH_SPACE(mode, market_type='futures'):
 
     # === MARKET TYPE OVERRIDES ===
     if market_type == 'futures':
-        # [Futures] Risk & Leverage - Aggressive Growth (수익성 65% : 안정성 35%)
-        # Risk Per Trade: 5.0% ~ 10.0% (Revised for Small Capital Growth)
-        # 소액($600) 기준 유의미한 수익금을 위해 리스크 허용 범위를 대폭 상향
-        space['RISK_PER_TRADE'] = {'type': 'float', 'low': 0.05, 'high': 0.10, 'step': 0.01} 
-        # Leverage 1x ~ 10x (Wide Range)
-        # 1~4배: 안정성 선호 시 선택 / 5~10배: 타이트한 손절로 수익금 극대화 시 선택
-        # AI가 상황에 맞춰 최적의 배율을 찾도록 범위를 넓혀줌
-        space['LEVERAGE'] = {'type': 'float', 'low': 1.0, 'high': 10.0, 'step': 1.0}
+        # [Futures] Baseline for small-cap realism:
+        # keep enough upside, but avoid immediate account volatility explosion.
+        space['RISK_PER_TRADE'] = {'type': 'float', 'low': 0.012, 'high': 0.05, 'step': 0.001}
+        space['LEVERAGE'] = {'type': 'float', 'low': 1.0, 'high': 8.0, 'step': 1.0}
         
-        # [ANTI-OVERFIT] Tighten UNIFIED limits for Futures Only
+        # [UNIFIED-FUTURES] Small-cap production profile (about 0.8M KRW account)
         if mode == 'UNIFIED' or mode == 'ALL':
-            # [Trend Following] 인위적 제약 해제 -> AI가 최적의 손익비를 찾도록 허용
-            # 손절은 넉넉하게(Max 5.0), 익절은 길게(Max 20.0)
-            space['ATR_STOP_LOSS_MULT']['high'] = 5.0
-            space['ATR_MULTIPLIER']['high'] = 8.0
-            space['TAKE_PROFIT_ATR_MULT']['high'] = 20.0
+            # Structure choices: reduce combinatorial explosion and overfit risk.
+            space['ENTRY_TYPE'] = {'type': 'categorical', 'choices': ['DONCHIAN', 'BOLLINGER', 'KELTNER']}
+            space['TREND_FILTER_TYPE'] = {'type': 'categorical', 'choices': ['EMA', 'SUPERTREND', 'ICHIMOKU']}
+            space['STRENGTH_FILTER_TYPE'] = {'type': 'categorical', 'choices': ['NONE', 'ADX', 'RSI', 'NATR', 'HURST', 'VHF']}
+            space['USE_TAKE_PROFIT'] = {'type': 'categorical', 'choices': [True, False]}
+            space['USE_VOLUME_FILTER'] = {'type': 'categorical', 'choices': [True, False]}
+
+            # Timeframes: reduce fee/slippage tax while preserving responsiveness.
+            space['TIMEFRAME'] = {'type': 'categorical', 'choices': ['30m', '1h', '4h']}
+
+            # Risk / leverage: keep return potential but control drawdown speed.
+            space['RISK_PER_TRADE'] = {'type': 'float', 'low': 0.012, 'high': 0.035, 'step': 0.001}
+            space['LEVERAGE'] = {'type': 'float', 'low': 2.0, 'high': 6.0, 'step': 1.0}
+
+            # Core execution bounds
+            space['ENTRY_PERIOD'] = {'type': 'int', 'low': 12, 'high': 140, 'log': True}
+            space['MA_PERIOD'] = {'type': 'int', 'low': 10, 'high': 170, 'log': True}
+            space['ATR_PERIOD'] = {'type': 'int', 'low': 10, 'high': 40, 'log': True}
+            space['STOP_LOSS_PCT'] = {'type': 'float', 'low': 0.008, 'high': 0.03, 'step': 0.002}
+            space['ATR_STOP_LOSS_MULT'] = {'type': 'float', 'low': 1.5, 'high': 3.5, 'step': 0.25}
+            space['TAKE_PROFIT_ATR_MULT'] = {'type': 'float', 'low': 1.8, 'high': 8.0, 'log': True}
+            space['ATR_MULTIPLIER'] = {'type': 'float', 'low': 2.0, 'high': 5.0, 'step': 0.5}
+            space['MAX_HOLDING_BARS'] = {'type': 'int', 'low': 40, 'high': 220, 'log': True}
+            space['TRAILING_ACTIVATION_ATR'] = {'type': 'float', 'low': 1.0, 'high': 4.0, 'step': 0.5}
+            space['TIME_EXIT_PROFIT_THRESHOLD'] = {'type': 'float', 'low': 0.2, 'high': 1.0, 'step': 0.1}
+            space['RSI_EXIT_THRESHOLD'] = {'type': 'int', 'low': 82, 'high': 92, 'step': 1}
+
+            # Indicator/detail bounds
+            space['KELTNER_ATR_MULT'] = {'type': 'float', 'low': 1.2, 'high': 2.2, 'step': 0.1}
+            space['BB_STD'] = {'type': 'float', 'low': 1.8, 'high': 2.6, 'step': 0.1}
+            space['SUPERTREND_MULT'] = {'type': 'float', 'low': 1.2, 'high': 3.2, 'log': True}
+            space['SUPERTREND_PERIOD'] = {'type': 'int', 'low': 7, 'high': 34, 'log': True}
+            space['ICHIMOKU_TENKAN'] = {'type': 'int', 'low': 9, 'high': 18, 'log': True}
+            space['ICHIMOKU_KIJUN'] = {'type': 'int', 'low': 24, 'high': 42, 'log': True}
+            space['ICHIMOKU_SENKOU_B'] = {'type': 'int', 'low': 52, 'high': 90, 'log': True}
+            space['STRENGTH_FILTER_PERIOD'] = {'type': 'int', 'low': 10, 'high': 35, 'log': True}
+            space['ADX_THRESHOLD'] = {'type': 'int', 'low': 18, 'high': 35, 'step': 1}
+            space['RSI_OVERBOUGHT'] = {'type': 'int', 'low': 68, 'high': 82, 'step': 1}
+            space['RSI_OVERSOLD'] = {'type': 'int', 'low': 20, 'high': 32, 'step': 1}
+            space['VOLUME_THRESHOLD_MULT'] = {'type': 'float', 'low': 1.2, 'high': 2.2, 'log': True}
+            space['VOLUME_MA_PERIOD'] = {'type': 'int', 'low': 12, 'high': 30, 'log': True}
+            space['SAR_STEP'] = {'type': 'float', 'low': 0.01, 'high': 0.03, 'step': 0.005}
+
+            # Dynamic risk: keep enabled/usable with moderate multipliers.
+            space['USE_DYNAMIC_RISK'] = {'type': 'categorical', 'choices': [False, True]}
+            space['STRONG_REGIME_HURST'] = {'type': 'float', 'low': 0.53, 'high': 0.60, 'step': 0.01}
+            space['STRONG_REGIME_NATR'] = {'type': 'float', 'low': 0.8, 'high': 1.5, 'step': 0.1}
+            space['STRONG_REGIME_MULTIPLIER'] = {'type': 'float', 'low': 1.1, 'high': 1.4, 'step': 0.1}
+            space['WEAK_REGIME_HURST'] = {'type': 'float', 'low': 0.43, 'high': 0.49, 'step': 0.01}
+            space['WEAK_REGIME_MULTIPLIER'] = {'type': 'float', 'low': 0.6, 'high': 0.9, 'step': 0.1}
+            space['PANIC_REGIME_NATR'] = {'type': 'float', 'low': 4.5, 'high': 7.0, 'step': 0.5}
+            space['PANIC_REGIME_MULTIPLIER'] = {'type': 'float', 'low': 0.15, 'high': 0.35, 'step': 0.05}
         
         
         # [ISOLATION] Remove Spot-only safety filters to prevent ghost parameters in Futures
