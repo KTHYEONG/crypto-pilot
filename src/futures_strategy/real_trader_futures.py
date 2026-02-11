@@ -83,6 +83,14 @@ except ImportError:
 
 logger = setup_logger("RealTraderFutures")
 
+# Recommended live portfolio (core + satellites)
+RECOMMENDED_SYMBOL_ALLOCATION_WEIGHTS: Dict[str, float] = {
+    "ETH/USDT": 0.35,
+    "BTC/USDT": 0.30,
+    "XRP/USDT": 0.20,
+    "DOGE/USDT": 0.15,
+}
+
 
 
 # ============================================================
@@ -166,6 +174,7 @@ class RealTraderFutures:
         self.strategies: Dict[str, UltimateStrategy] = {}
         self.params_map: Dict[str, dict] = {}
         self.symbols: list = []
+        self.symbol_allocation_weights: Dict[str, float] = {}
         
         # 신규 컴포넌트
         self.trade_db = TradeHistoryDB(TRADE_HISTORY_DB)
@@ -231,13 +240,44 @@ class RealTraderFutures:
             raise ValueError(f"No valid study found in DB. Tried: {OPTUNA_STUDY_NAMES}")
         
         best_params = study.best_params
-        self.symbols = FUTURES_TARGET_SYMBOLS.copy()
+        preferred_symbols = list(RECOMMENDED_SYMBOL_ALLOCATION_WEIGHTS.keys())
+        self.symbols = preferred_symbols.copy()
+
+        self.symbol_allocation_weights = self._build_symbol_allocation_weights(self.symbols)
+        logger.info(
+            "📌 Live symbol allocation applied: %s",
+            ", ".join(f"{s}={self.symbol_allocation_weights.get(s, 0.0):.2f}" for s in self.symbols),
+        )
         
         for symbol in self.symbols:
             self.params_map[symbol] = best_params.copy()
             strategy_name = f"Real_{symbol.replace('/', '_')}"
             self.strategies[symbol] = UltimateStrategy(strategy_name, best_params)
             logger.info(f"🔹 Strategy initialized: {symbol} | TF: {best_params.get('TIMEFRAME')}")
+
+    def _build_symbol_allocation_weights(self, symbols: list) -> Dict[str, float]:
+        """Build normalized allocation map for active symbols."""
+        if not symbols:
+            return {}
+
+        weights: Dict[str, float] = {}
+        for symbol in symbols:
+            if symbol in RECOMMENDED_SYMBOL_ALLOCATION_WEIGHTS:
+                weights[symbol] = float(RECOMMENDED_SYMBOL_ALLOCATION_WEIGHTS[symbol])
+            elif symbol in SYMBOL_ALLOCATION_WEIGHTS:
+                weights[symbol] = float(SYMBOL_ALLOCATION_WEIGHTS[symbol])
+            else:
+                weights[symbol] = 0.0
+
+        total_weight = sum(w for w in weights.values() if w > 0.0)
+        if total_weight <= 0.0:
+            equal_weight = 1.0 / len(symbols)
+            return {symbol: equal_weight for symbol in symbols}
+
+        return {
+            symbol: (weight / total_weight if weight > 0.0 else 0.0)
+            for symbol, weight in weights.items()
+        }
     
     @api_retry
     def _fetch_balance_safe(self) -> tuple:
@@ -296,12 +336,13 @@ class RealTraderFutures:
         # 3. 레버리지 설정
         for symbol in self.symbols:
             try:
-                success = self.client.set_leverage(symbol, MAX_EXCHANGE_LEVERAGE)
                 target_lev = self.params_map[symbol].get('LEVERAGE', 1)
+                applied_lev = int(max(1, min(float(target_lev), float(MAX_EXCHANGE_LEVERAGE))))
+                success = self.client.set_leverage(symbol, applied_lev)
                 if success:
                     logger.info(
-                        f"✅ Exchange Leverage: {MAX_EXCHANGE_LEVERAGE}x for {symbol} "
-                        f"(Strategy Target: {target_lev}x)"
+                        f"✅ Exchange Leverage: {applied_lev}x for {symbol} "
+                        f"(Strategy Target: {target_lev}x, Max Allowed: {MAX_EXCHANGE_LEVERAGE}x)"
                     )
                 
                 # 마진 모드 설정 (Cross 모드 강제)
@@ -943,7 +984,7 @@ class RealTraderFutures:
         
         # === 2. 성과 기반 가중치 적용 ===
         default_weight = 1.0 / len(self.symbols) if self.symbols else 0.5
-        allocation_weight = SYMBOL_ALLOCATION_WEIGHTS.get(symbol, default_weight)
+        allocation_weight = self.symbol_allocation_weights.get(symbol, default_weight)
         
         # [NEW] Regime-based Multiplier (Dynamic Sizing)
         regime_mult = 1.0
