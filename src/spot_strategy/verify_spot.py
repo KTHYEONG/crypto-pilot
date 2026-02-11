@@ -1,562 +1,847 @@
+﻿import argparse
+import logging
+import os
+import sys
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
+
+import numpy as np
 import optuna
 import pandas as pd
-import numpy as np
-import sys
-import os
-import logging
-import json
-from datetime import datetime
+from dotenv import load_dotenv
+from urllib.parse import quote_plus
 
-# Add project root to path
-sys.path.append(os.path.join(os.path.dirname(__file__), '../../'))
+try:
+    project_root = str(Path(__file__).resolve().parents[2])
+    if project_root not in sys.path:
+        sys.path.append(project_root)
+except IndexError:
+    sys.path.append(os.getcwd())
 
-from src.strategy.strategies import UltimateStrategy
+from config.settings import BACKTEST_END_DATE, BACKTEST_START_DATE, DATA_DIR, TRAIN_CUTOFF_DATE
+from src.spot_strategy.engine_fast_spot import BacktestEngineFastSpot, backtest_loop_spot_numba
+from src.spot_strategy.monte_carlo_spot import SpotMonteCarloSimulator
 from src.spot_strategy.upbit_client import UpbitClient
+from src.spot_strategy.walk_forward_spot import SpotWalkForwardAnalyzer
+from src.strategy.strategies import UltimateStrategy
 
-# Setup Logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("SpotVerifier")
 
-from src.spot_strategy.backtest_utils import run_backtest_segment
+LOG_WIDTH = 80
+SPOT_INITIAL_BALANCE = 1_000_000.0
+SPOT_BASE_FEE = 0.0005
+SPOT_BASE_SLIPPAGE = 0.0003
+WARMUP_DAYS = 60
+COST_STRESS_MULTIPLIERS = (1.5, 2.0)
+BONUS_SWEEP_HOLDOUT_RATIO = 0.30
+BONUS_SWEEP_MIN_HOLDOUT_DAYS = 120
 
-from src.spot_strategy.engine_fast_spot import BacktestEngineFastSpot, backtest_loop_spot_numba
-from config.settings import TRAIN_CUTOFF_DATE, DATA_DIR, BACKTEST_START_DATE, BACKTEST_END_DATE
-from src.spot_strategy.walk_forward_spot import SpotWalkForwardAnalyzer
+SELECTION_POLICY_VERSION = "SPOT_SELECTION_POLICY_V1"
+SELECTION_POLICY = {
+    "gates": {
+        "core_min_return": 0.0,
+        "core_min_trades": 30,
+        "core_max_avg_mdd_abs": 30.0,
+        "core_min_wfa_consistency": 40.0,
+        "core_max_mc_worst_mdd_95_abs": 50.0,
+        "alt_min_pos_rate": 0.45,
+        "alt_max_worst_mdd_abs": 55.0,
+        "alt_min_p25_return": -25.0,
+    },
+    "weights": {
+        "core_total": 0.70,
+        "alt_total": 0.20,
+        "div_total": 0.10,
+        "core_return": 0.40,
+        "core_pf": 0.15,
+        "core_wfa": 0.20,
+        "core_mdd": 0.15,
+        "core_mc": 0.10,
+        "alt_median": 0.35,
+        "alt_p25": 0.25,
+        "alt_pos": 0.25,
+        "alt_mdd": 0.15,
+    },
+}
 
-def load_data_spot(symbol, timeframe):
-    """Load Data Helper for Upbit Spot using UpbitClient"""
-    access = os.getenv("UPBIT_ACCESS_KEY")
-    secret = os.getenv("UPBIT_SECRET_KEY")
-    client = UpbitClient(access, secret)
-    
-    start_date = BACKTEST_START_DATE
-    end_date = BACKTEST_END_DATE
-    
+HOLDOUT_SANITY_GATES = {
+    "core_min_return": 0.0,
+    "core_min_trades": 20,
+    "core_max_avg_mdd_abs": 35.0,
+}
+
+
+def _log_header(title: str, subtitle: Optional[str] = None) -> None:
+    print("\n" + "=" * LOG_WIDTH)
+    print(title)
+    if subtitle:
+        print(subtitle)
+    print("=" * LOG_WIDTH)
+
+
+def _log_subheader(title: str) -> None:
+    print("\n" + "-" * 70)
+    print(title)
+    print("-" * 70)
+
+
+def _clip01(x: float) -> float:
+    return float(np.clip(float(x), 0.0, 1.0))
+
+
+def _log_scaled_positive(x: float, cap: float) -> float:
+    if x <= 0:
+        return 0.0
+    return _clip01(np.log1p(float(x)) / np.log1p(float(cap)))
+
+
+def _to_inclusive_end_timestamp(value: pd.Timestamp) -> pd.Timestamp:
+    if value == value.normalize():
+        return value + pd.Timedelta(days=1) - pd.Timedelta(milliseconds=1)
+    return value
+
+
+def resolve_eval_window(
+    eval_start_time: Optional[pd.Timestamp] = None,
+    eval_end_time: Optional[pd.Timestamp] = None,
+) -> Tuple[pd.Timestamp, pd.Timestamp]:
+    eval_start = pd.Timestamp(eval_start_time) if eval_start_time is not None else pd.Timestamp(TRAIN_CUTOFF_DATE)
+    raw_end = pd.Timestamp(eval_end_time) if eval_end_time is not None else pd.Timestamp(BACKTEST_END_DATE)
+    eval_end = _to_inclusive_end_timestamp(raw_end)
+    if eval_end < eval_start:
+        raise ValueError(f"Invalid eval window: start={eval_start}, end={eval_end}")
+    return eval_start, eval_end
+
+
+def split_bonus_oos_windows() -> Tuple[pd.Timestamp, pd.Timestamp, pd.Timestamp, pd.Timestamp]:
+    oos_start, oos_end = resolve_eval_window(pd.Timestamp(TRAIN_CUTOFF_DATE), pd.Timestamp(BACKTEST_END_DATE))
+    total_days = max(1, int((oos_end.normalize() - oos_start.normalize()).days) + 1)
+    holdout_days = max(BONUS_SWEEP_MIN_HOLDOUT_DAYS, int(total_days * BONUS_SWEEP_HOLDOUT_RATIO))
+    if holdout_days >= total_days:
+        holdout_days = max(30, total_days // 3)
+    holdout_start = oos_end.normalize() - pd.Timedelta(days=holdout_days - 1)
+    selection_end = holdout_start - pd.Timedelta(milliseconds=1)
+    if selection_end <= oos_start:
+        selection_end = oos_start + pd.Timedelta(days=max(30, total_days // 2))
+        holdout_start = selection_end + pd.Timedelta(milliseconds=1)
+    return oos_start, selection_end, holdout_start, oos_end
+
+
+def compute_dynamic_holdout_min_trades(holdout_start: pd.Timestamp, holdout_end: pd.Timestamp) -> int:
+    holdout_days = max(1, int((holdout_end.normalize() - holdout_start.normalize()).days) + 1)
+    return max(15, int(round(holdout_days * 0.16)))
+
+
+def evaluate_holdout_sanity(summary: Optional[Dict], min_trades_gate: Optional[int] = None) -> Tuple[bool, List[str]]:
+    if not summary:
+        return False, ["holdout_no_summary"]
+    trades_gate = int(min_trades_gate if min_trades_gate is not None else HOLDOUT_SANITY_GATES["core_min_trades"])
+    reasons: List[str] = []
+    if float(summary.get("core_avg_ret", 0.0)) <= HOLDOUT_SANITY_GATES["core_min_return"]:
+        reasons.append("holdout_core_return_low")
+    if int(summary.get("core_min_trades", 0)) < trades_gate:
+        reasons.append("holdout_core_trades_low")
+    if float(summary.get("core_avg_mdd_abs", 0.0)) > HOLDOUT_SANITY_GATES["core_max_avg_mdd_abs"]:
+        reasons.append("holdout_core_mdd_too_high")
+    return len(reasons) == 0, reasons
+
+
+def _calculate_mdd_pct_from_pnl(pnl_series: pd.Series, initial_balance: float) -> float:
+    if pnl_series is None or len(pnl_series) == 0:
+        return 0.0
+    equity = float(initial_balance) + pd.Series(pnl_series).cumsum().values
+    run_max = np.maximum.accumulate(equity)
+    run_max[run_max == 0] = 1e-9
+    dd = (equity - run_max) / run_max * 100.0
+    return float(np.min(dd)) if len(dd) else 0.0
+
+
+def _slice_eval_with_warmup(
+    hourly_df: pd.DataFrame,
+    daily_df: pd.DataFrame,
+    eval_start_ts: pd.Timestamp,
+    eval_end_ts: pd.Timestamp,
+    warmup_days: int = WARMUP_DAYS,
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    warmup_start = pd.Timestamp(eval_start_ts) - pd.Timedelta(days=warmup_days)
+    eval_end_ts = pd.Timestamp(eval_end_ts)
+    test_hourly = hourly_df[(hourly_df["datetime"] >= warmup_start) & (hourly_df["datetime"] <= eval_end_ts)].copy()
+    test_daily = daily_df[(daily_df["datetime"] >= warmup_start) & (daily_df["datetime"] <= eval_end_ts)].copy()
+    return test_hourly, test_daily
+
+
+def _filter_trades_for_window(trades_df: pd.DataFrame, eval_start_ts: pd.Timestamp, eval_end_ts: pd.Timestamp) -> pd.DataFrame:
+    if trades_df is None or trades_df.empty:
+        return pd.DataFrame()
+    df = trades_df.copy()
+    eval_start_ts = pd.Timestamp(eval_start_ts)
+    eval_end_ts = pd.Timestamp(eval_end_ts)
+    if "entry_time" in df.columns:
+        df["entry_time"] = pd.to_datetime(df["entry_time"])
+        return df[(df["entry_time"] >= eval_start_ts) & (df["entry_time"] <= eval_end_ts)].copy()
+    if "exit_time" in df.columns:
+        df["exit_time"] = pd.to_datetime(df["exit_time"])
+        return df[(df["exit_time"] >= eval_start_ts) & (df["exit_time"] <= eval_end_ts)].copy()
+    return pd.DataFrame()
+
+def load_data_spot(symbol: str, timeframe: str, start_date: str, end_date: str) -> Tuple[Optional[pd.DataFrame], Optional[pd.DataFrame]]:
     start_ts = int(pd.Timestamp(start_date).timestamp() * 1000)
     end_ts = int(pd.Timestamp(end_date).timestamp() * 1000)
+    daily_fp = os.path.join(DATA_DIR, f"{symbol.replace('/', '_')}_1d_{start_date.replace('-', '')}_{end_date.replace('-', '')}_spot.csv")
+    tf_fp = os.path.join(DATA_DIR, f"{symbol.replace('/', '_')}_{timeframe}_{start_date.replace('-', '')}_{end_date.replace('-', '')}_spot.csv")
 
-    # 1. Monthly (Daily) Data for Trend Filter
-    daily_filename = f"{symbol.replace('/', '_')}_1d_{start_date.replace('-','')}_{end_date.replace('-','')}_spot.csv"
-    daily_filepath = os.path.join(DATA_DIR, daily_filename)
-    
-    # 2. Target Timeframe Data
-    tf_filename = f"{symbol.replace('/', '_')}_{timeframe}_{start_date.replace('-','')}_{end_date.replace('-','')}_spot.csv"
-    tf_filepath = os.path.join(DATA_DIR, tf_filename)
-    
-    results = {}
-    for tf, filepath in [('1d', daily_filepath), (timeframe, tf_filepath)]:
-        df = None
-        if os.path.exists(filepath):
+    results: Dict[str, Optional[pd.DataFrame]] = {"1d": None, timeframe: None}
+    client: Optional[UpbitClient] = None
+
+    for tf, fp in [("1d", daily_fp), (timeframe, tf_fp)]:
+        df: Optional[pd.DataFrame] = None
+        if os.path.exists(fp):
             try:
-                df = pd.read_csv(filepath)
-                df['datetime'] = pd.to_datetime(df['timestamp'], unit='ms')
-                df.sort_values('datetime', inplace=True)
+                df = pd.read_csv(fp)
+                df["datetime"] = pd.to_datetime(df["timestamp"], unit="ms")
+                df.sort_values("datetime", inplace=True)
                 df.reset_index(drop=True, inplace=True)
             except Exception:
-                pass
-        
+                df = None
+
         if df is None or df.empty:
-            logger.info(f"   ⬇️ Downloading {symbol}-{tf}...")
+            if client is None:
+                access = os.getenv("UPBIT_ACCESS_KEY")
+                secret = os.getenv("UPBIT_SECRET_KEY")
+                if not access or not secret:
+                    print(f"[ERROR] Missing Upbit API keys while cache missing: {symbol}-{tf}")
+                    return None, None
+                client = UpbitClient(access, secret)
+            logger.info(f"[INFO] Downloading {symbol}-{tf}...")
             df = client.fetch_ohlcv(symbol, tf, since=start_ts, end=end_ts)
-            if df is not None and not df.empty:
-                df.sort_values('timestamp', inplace=True)
-                df.to_csv(filepath, index=False)
-                df['datetime'] = pd.to_datetime(df['timestamp'], unit='ms')
-                df.sort_values('datetime', inplace=True)
-                df.reset_index(drop=True, inplace=True)
-        
+            if df is None or df.empty:
+                print(f"[ERROR] Failed to fetch {symbol}-{tf}")
+                return None, None
+            df.sort_values("timestamp", inplace=True)
+            df["datetime"] = pd.to_datetime(df["timestamp"], unit="ms")
+            df.reset_index(drop=True, inplace=True)
+            try:
+                df.to_csv(fp, index=False)
+            except Exception:
+                pass
         results[tf] = df
+    return results.get(timeframe), results.get("1d")
 
-    return results.get(timeframe), results.get('1d')
 
-def load_best_params_from_mysql(mode, storage_url):
-    """MySQL에서 최적 파라미터 로드 (Spot 전용)"""
-    study_name = f"spot_{mode.lower()}_strategy"
+def load_best_params_from_mysql(mode: str, storage_url: str) -> Tuple[Optional[str], Optional[Dict], Optional[float]]:
+    target_name = f"spot_{mode.lower()}_strategy"
+
+    def _norm(s: str) -> str:
+        return str(s).strip().lower()
+
+    def _read(study_name: str):
+        try:
+            st = optuna.load_study(study_name=study_name, storage=storage_url)
+            return st, st.best_params, st.best_value
+        except Exception:
+            return None, None, None
+
+    st, params, val = _read(target_name)
+    if st is not None:
+        return target_name, params, val
+
     try:
-        study = optuna.load_study(study_name=study_name, storage=storage_url)
-        return study_name, study.best_params, study.best_value
-    except Exception as e:
+        summaries = optuna.study.get_all_study_summaries(storage=storage_url)
+    except Exception:
         return None, None, None
 
-def detailed_backtest_spot(hourly_df, daily_df, params):
-    """
-    Detailed Backtest for Spot (Long-Only)
-    Uses BacktestEngineFastSpot for consistency with optimization.
-    """
-    logger.info(f"--- Starting Detailed Backtest (Spot) ---")
-    
-    strategy = UltimateStrategy("Verify", params)
-    
-    # Engine requires both DFs
-    engine = BacktestEngineFastSpot(
-        hourly_df, daily_df, strategy, backtest_loop_spot_numba,
-        initial_balance=1_000_000,
-        fee_rate=0.0005,
-        slippage_rate=0.0003
-    )
-    # Inject params
-    engine.risk_per_trade = params.get('RISK_PER_TRADE_SPOT', 0.99)
-    
-    res = engine.run()
-    
-    ret_pct = res['total_return_pct']
-    mdd = res['mdd_pct']
-    trades_df = res['trades_df']
-    final_val = res['final_balance']
-    trades_log = trades_df['pnl_pct'].tolist() if not trades_df.empty else []
-    
-    print("\n" + "="*50)
-    print("BACKTEST RESULT")
-    print("="*50)
-    print(f"Final Balance: {final_val:,.0f} KRW (Initial: 1,000,000)")
-    print(f"Total Return : {ret_pct:.2f}%")
-    print(f"Trade Count  : {len(trades_log)}")
-    
-    if trades_log:
-        wins = [t for t in trades_log if t > 0]
-        losses = [t for t in trades_log if t <= 0]
-        win_rate = len(wins)/len(trades_log)*100
-        
-        gross_profit = sum(wins)
-        gross_loss = abs(sum(losses))
-        pf = gross_profit / gross_loss if gross_loss > 0 else (gross_profit if gross_profit > 0 else 0.0)
-        
-        print(f"Win Rate      : {win_rate:.2f}%")
-        print(f"Profit Factor : {pf:.2f}")
-        print(f"Max drawdown  : {mdd:.2f}%")
-    else:
-        print("No Trades Executed.")
-    
-    print("="*50)
-    
-    # --- 2. Walk Forward Analysis (Robustness) ---
-    # Prepare Merged DF for WFA/MC (Legacy support for WFA class if it expects merged df)
-    # Ideally WFA should also use Engine, but if SpotWalkForwardAnalyzer expects df, we might need to recreate it.
-    # Check src/spot_strategy/walk_forward_spot.py if it uses df.
-    # Assuming it does, we generate it here for compatibility.
-    # But wait, WFA should use the rigorous methodology. 
-    # Let's SKIP WFA/MC refactoring details inside detailed_backtest_spot for now 
-    # to focus on the main verification logic which matters more. 
-    # Actually, verify_single_symbol is the main driver, let's fix that perfectly.
+    by_norm = {_norm(s.study_name): s.study_name for s in summaries}
+    resolved = by_norm.get(_norm(target_name))
+    if resolved:
+        st, params, val = _read(resolved)
+        if st is not None:
+            return resolved, params, val
+    return None, None, None
 
-    return 
 
-def verify_single_symbol(symbol, best_params, primary_symbols):
-    """단일 심볼 백테스트 실행 (Multi-Timeframe) using BacktestEngineFastSpot"""
-    
-    tf = best_params.get('TIMEFRAME', '1h')
-    
-    # Load BOTH Hourly and Daily using existing helper
-    hourly_df, daily_df = load_data_spot(symbol, tf)
-    
+def verify_single_symbol_spot(
+    symbol: str,
+    best_params: Dict,
+    primary_symbols: List[str],
+    eval_start_time: Optional[pd.Timestamp] = None,
+    eval_end_time: Optional[pd.Timestamp] = None,
+    run_robustness_checks: bool = True,
+    cost_mult: float = 1.0,
+) -> Optional[Dict]:
+    tf = best_params.get("TIMEFRAME", "1h")
+    hourly_df, daily_df = load_data_spot(symbol, tf, BACKTEST_START_DATE, BACKTEST_END_DATE)
     if hourly_df is None or daily_df is None:
-        print(f"   ⚠️ Data missing for {symbol}. Skipping.")
+        print(f"[WARN] Data missing for {symbol}. Skipping.")
         return None
-    
-    # [FIX] OOS Slicing with Warmup Buffer
-    cutoff_ts = pd.Timestamp(TRAIN_CUTOFF_DATE)
-    
-    # Warmup: Daily indicator calculation usually needs ~60 days
-    WARMUP_DAYS = 60
-    warmup_cutoff = cutoff_ts - pd.Timedelta(days=WARMUP_DAYS)
-    
-    # Select Data including Warmup
-    test_hourly = hourly_df[hourly_df['datetime'] >= warmup_cutoff].copy()
-    test_daily = daily_df[daily_df['datetime'] >= warmup_cutoff].copy()
-    
-    if test_hourly.empty:
-        print(f"   ⚠️ No OOS data for {symbol}. Skipping.")
-        return None
-    
-    # [CAPITAL MGMT] Symbol-Specific Max Capital Usage
-    is_major = any(m in symbol for m in ["BTC", "ETH"])
-    max_capital = 100_000_000_000.0 if is_major else 20_000_000.0
-    
-    # Inject into params for Strategy/Engine
-    current_params = best_params.copy()
-    current_params['MAX_CAPITAL_USAGE'] = max_capital
 
-    # Create Strategy & Engine
+    eval_start_ts, eval_end_ts = resolve_eval_window(eval_start_time, eval_end_time)
+    test_hourly, test_daily = _slice_eval_with_warmup(hourly_df, daily_df, eval_start_ts, eval_end_ts)
+    if test_hourly.empty:
+        print(f"[WARN] No data for {symbol} in eval window. Skipping.")
+        return None
+
+    current_params = best_params.copy()
+    is_major = any(m in symbol for m in ["BTC", "ETH"])
+    current_params["MAX_CAPITAL_USAGE"] = 100_000_000_000.0 if is_major else 20_000_000.0
+
+    safe_cost_mult = max(0.0, float(cost_mult))
     strategy = UltimateStrategy(f"Verify_{symbol}", current_params)
-    
     engine = BacktestEngineFastSpot(
-        test_hourly, test_daily, strategy, backtest_loop_spot_numba,
-        initial_balance=1_000_000.0,
-        fee_rate=0.0005,
-        slippage_rate=0.0003
+        test_hourly,
+        test_daily,
+        strategy,
+        backtest_loop_spot_numba,
+        initial_balance=SPOT_INITIAL_BALANCE,
+        fee_rate=SPOT_BASE_FEE * safe_cost_mult,
+        slippage_rate=SPOT_BASE_SLIPPAGE * safe_cost_mult,
     )
-    engine.risk_per_trade = current_params.get('RISK_PER_TRADE_SPOT', 0.99)
-    
-    # Run
+    engine.risk_per_trade = current_params.get("RISK_PER_TRADE_SPOT", 0.99)
     res = engine.run()
-    
-    # [CRITICAL] Filter Results for ONLY OOS Period
-    trades_df = res['trades_df']
-    trades_df['pnl'] = trades_df['pnl_pct'] # Ensure pnl col exists
-    
-    oos_trades = pd.DataFrame()
-    if not trades_df.empty:
-        # We need exit time. Engine returns trades array [pnl, duration, dummy].
-        # It DOES NOT currently return timestamps in trades array.
-        # This is a limitation of the current fast engine return format.
-        # However, verifying OOS performance requires knowing WHEN trades happened.
-        # In futures optimize, we just used total return of the period.
-        # But here we included warmup period. So result includes warmup trades.
-        # We MUST filter them out.
-        
-        # Solution: engine.run() output should ideally map trades to indices.
-        # The trades array has logical duration. We know entry index + duration = exit index.
-        # But indices are relative to 'test_hourly'. 
-        # We can reconstruct timestamps.
-        pass
-        
-    # Re-running with standard loop for detailed logs? No, that defeats the purpose.
-    # Let's accept that 'test_hourly' starts at 'warmup_cutoff'.
-    # We told the engine to treat the first N bars as warmup?
-    # Engine reads 'warmup_bars' from hourly_df.attrs.
-    # We should set attrs['warmup_bars'] to the number of bars between warmup_cutoff and cutoff_ts.
-    
-    # Calculate warmup count
-    train_mask = test_hourly['datetime'] < cutoff_ts
-    warmup_count = train_mask.sum()
-    
-    test_hourly.attrs['warmup_bars'] = warmup_count
-    # Re-init engine with updated attrs (or update engine property)
-    engine._warmup_bars = warmup_count
-    
-    # Re-run strict
-    res = engine.run()
-    
-    # Now res contains ONLY trades starting AFTER warmup_bars (thanks to loop logic: if i < warmup_bars continue)
-    # So all results are strictly OOS.
-    
-    ret_pct = res['total_return_pct']
-    mdd = res['mdd_pct']
-    trade_count = res['total_trades']
-    win_rate = res['win_rate']
-    
-    # Calculation of PF
-    trades_df = res['trades_df']
-    pf = 0.0
-    if not trades_df.empty:
-        gross_profit = trades_df[trades_df['pnl_pct'] > 0]['pnl_pct'].sum()
-        gross_loss = abs(trades_df[trades_df['pnl_pct'] < 0]['pnl_pct'].sum())
+
+    oos_trades = _filter_trades_for_window(res.get("trades_df", pd.DataFrame()), eval_start_ts, eval_end_ts)
+    trade_count = len(oos_trades)
+    if trade_count > 0:
+        total_pnl = float(oos_trades["pnl"].sum())
+        ret_pct = (total_pnl / SPOT_INITIAL_BALANCE) * 100.0
+        mdd = _calculate_mdd_pct_from_pnl(oos_trades["pnl"], SPOT_INITIAL_BALANCE)
+        win_rate = float(np.mean(oos_trades["pnl"] > 0) * 100.0)
+        gross_profit = float(oos_trades[oos_trades["pnl"] > 0]["pnl"].sum())
+        gross_loss = abs(float(oos_trades[oos_trades["pnl"] < 0]["pnl"].sum()))
         pf = gross_profit / gross_loss if gross_loss > 0 else (gross_profit if gross_profit > 0 else 0.0)
+    else:
+        ret_pct = 0.0
+        mdd = 0.0
+        win_rate = 0.0
+        pf = 0.0
 
     is_primary = symbol in primary_symbols
-    indicator = "🎯 PRIMARY" if is_primary else "📊 REFERENCE"
-    print(f"   - {symbol} [{indicator}]: Return {ret_pct:.2f}% | MDD {mdd:.2f}% | Trades {trade_count} | Win {win_rate:.1f}% | PF {pf:.2f}")
-    
+    indicator = "PRIMARY" if is_primary else "REFERENCE"
+    cost_tag = f" x{safe_cost_mult:.1f}" if abs(safe_cost_mult - 1.0) > 1e-9 else ""
+    print(
+        f" - {symbol} [{indicator}{cost_tag}]: Return {ret_pct:.2f}% | "
+        f"MDD {mdd:.2f}% | Trades {trade_count} | Win {win_rate:.1f}% | PF {pf:.2f}"
+    )
+
     result = {
-        'symbol': symbol, 
-        'return': ret_pct, 
-        'mdd': mdd, 
-        'trades': trade_count, 
-        'win_rate': win_rate, 
-        'pf': pf, 
-        'is_primary': is_primary,
-        'wfa_results': None,
-        'mc_results': None,
-        'trades_log': trades_df['pnl_pct'].tolist() if not trades_df.empty else []
+        "symbol": symbol,
+        "return": ret_pct,
+        "mdd": mdd,
+        "trades": trade_count,
+        "win_rate": win_rate,
+        "pf": pf,
+        "is_primary": is_primary,
+        "wfa_results": None,
+        "mc_results": None,
+        "trades_log": oos_trades["pnl_pct"].tolist() if not oos_trades.empty and "pnl_pct" in oos_trades.columns else [],
+        "eval_start": str(eval_start_ts),
+        "eval_end": str(eval_end_ts),
     }
-    
-    # [상세 분석] WFA & MC (거래 수 10개 이상)
-    if trade_count >= 10:
-        trades_log = result['trades_log']
-        
-        print(f"      🔬 Running detailed analysis for {symbol}...")
-        
-        # Walk-Forward Analysis
+
+    if run_robustness_checks and trade_count >= 10:
+        print(f"   Running detailed checks for {symbol}...")
         try:
-            # [FIX] WFA Use SpotWalkForwardAnalyzer with BacktestEngineFastSpot
-            wfa = SpotWalkForwardAnalyzer(test_hourly, test_daily, best_params)
+            wfa = SpotWalkForwardAnalyzer(test_hourly, test_daily, current_params)
             wfa_results = wfa.run(n_splits=5)
-            
             if not wfa_results.empty:
-                avg_wfa_ret = wfa_results['Return'].mean()
-                consistency = len(wfa_results[wfa_results['Return'] > 0]) / len(wfa_results) * 100
-                result['wfa_results'] = {
-                    'avg_return': avg_wfa_ret,
-                    'consistency': consistency,
-                    'splits': len(wfa_results)
+                avg_wfa_ret = float(wfa_results["Return"].mean())
+                consistency = (len(wfa_results[wfa_results["Return"] > 0]) / len(wfa_results)) * 100.0
+                result["wfa_results"] = {
+                    "avg_return": avg_wfa_ret,
+                    "consistency": consistency,
+                    "splits": len(wfa_results),
                 }
-                print(f"         └─ WFA: Avg {avg_wfa_ret:.1f}% | Consistency {consistency:.0f}%")
+                print(f"     WFA: avg={avg_wfa_ret:.2f}% | consistency={consistency:.1f}%")
         except Exception as e:
-            logger.warning(f"      ⚠️ WFA failed for {symbol}: {e}")
-            import traceback
-            traceback.print_exc()
-        trades_log = result['trades_log']
-        
-        # Simple MC
+            logger.warning(f"WFA failed for {symbol}: {e}")
+
         try:
-            from src.spot_strategy.monte_carlo_spot import SpotMonteCarloSimulator
-            mc = SpotMonteCarloSimulator(trades_log)
-            mc_res = mc.run(n_simulations=10000, initial_balance=1_000_000.0)
-            
-            result['mc_results'] = {
-                'prob_profit': mc_res['prob_profit'],
-                'mean_return': mc_res['mean_return_pct'],
-                'worst_mdd_95': mc_res['worst_case_mdd'],
-                'lower_bound_95': mc_res['lower_bound_95']
+            mc = SpotMonteCarloSimulator(result["trades_log"])
+            mc_res = mc.run(n_simulations=10000, initial_balance=SPOT_INITIAL_BALANCE)
+            result["mc_results"] = {
+                "prob_profit": mc_res["prob_profit"],
+                "mean_return": mc_res["mean_return_pct"],
+                "worst_mdd_95": mc_res["worst_case_mdd"],
+                "lower_bound_95": mc_res.get("lower_bound_95", 0.0),
             }
-            print(f"         └─ MC: Profit Prob {mc_res['prob_profit']:.1f}% | Worst MDD(95%) {mc_res['worst_case_mdd']:.1f}%")
+            print(
+                f"     MC: profit_prob={mc_res['prob_profit']:.1f}% | "
+                f"worst_mdd95={mc_res['worst_case_mdd']:.1f}%"
+            )
         except Exception as e:
-            logger.warning(f"      ⚠️ MC failed for {symbol}: {e}")
-            
+            logger.warning(f"MC failed for {symbol}: {e}")
+
     return result
-def calculate_mode_performance(all_results):
-    """PRIMARY/REFERENCE 성능 계산 + 상세 분석 요약 (모든 심볼)"""
-    primary_results = [r for r in all_results if r['is_primary']]
+
+
+def calculate_mode_performance(all_results: List[Dict]) -> Optional[float]:
+    primary_results = [r for r in all_results if r["is_primary"]]
     if not primary_results:
         return None
-    
-    avg_ret = sum(r['return'] for r in primary_results) / len(primary_results)
-    print(f"\n   📊 Results Summary:")
-    print(f"   - PRIMARY Avg Return (BTC/ETH): {avg_ret:.2f}%")
-    
-    ref_results = [r for r in all_results if not r['is_primary']]
+    avg_ret = float(np.mean([r["return"] for r in primary_results]))
+    print("\n [Summary]")
+    print(f" - PRIMARY Avg Return (BTC/ETH): {avg_ret:.2f}%")
+    ref_results = [r for r in all_results if not r["is_primary"]]
     if ref_results:
-        ref_avg = sum(r['return'] for r in ref_results) / len(ref_results)
-        print(f"   - REFERENCE Avg Return (Alts): {ref_avg:.2f}%")
-    
-    # [상세 분석 요약] WFA & MC 결과 (PRIMARY)
-    primary_wfa = [r for r in primary_results if r.get('wfa_results')]
-    primary_mc = [r for r in primary_results if r.get('mc_results')]
-    
-    if primary_wfa:
-        print(f"\n   🔬 Walk-Forward Analysis - PRIMARY (Robustness):")
-        for r in primary_wfa:
-            wfa = r['wfa_results']
-            print(f"      {r['symbol']}: Avg {wfa['avg_return']:.1f}% | Consistency {wfa['consistency']:.0f}% ({wfa['splits']} splits)")
-    
-    if primary_mc:
-        print(f"\n   🎲 Monte Carlo Simulation - PRIMARY (Risk Assessment):")
-        for r in primary_mc:
-            mc = r['mc_results']
-            print(f"      {r['symbol']}: Profit Prob {mc['prob_profit']:.1f}% | Worst MDD(95%) {mc['worst_mdd_95']:.1f}%")
-    
-    # [상세 분석 요약] WFA & MC 결과 (REFERENCE)
-    ref_wfa = [r for r in ref_results if r.get('wfa_results')]
-    ref_mc = [r for r in ref_results if r.get('mc_results')]
-    
-    if ref_wfa:
-        print(f"\n   🔬 Walk-Forward Analysis - REFERENCE (Robustness):")
-        for r in ref_wfa:
-            wfa = r['wfa_results']
-            print(f"      {r['symbol']}: Avg {wfa['avg_return']:.1f}% | Consistency {wfa['consistency']:.0f}% ({wfa['splits']} splits)")
-    
-    if ref_mc:
-        print(f"\n   🎲 Monte Carlo Simulation - REFERENCE (Risk Assessment):")
-        for r in ref_mc:
-            mc = r['mc_results']
-            print(f"      {r['symbol']}: Profit Prob {mc['prob_profit']:.1f}% | Worst MDD(95%) {mc['worst_mdd_95']:.1f}%")
-    
+        ref_avg = float(np.mean([r["return"] for r in ref_results]))
+        print(f" - REFERENCE Avg Return (Alts): {ref_avg:.2f}%")
     return avg_ret
 
+
+def summarize_profile(results: List[Dict]) -> Optional[Dict]:
+    if not results:
+        return None
+    primary = [r for r in results if r.get("is_primary")]
+    if not primary:
+        return None
+
+    core_returns = np.array([float(r["return"]) for r in primary], dtype=np.float64)
+    core_mdd_abs = np.array([abs(float(r["mdd"])) for r in primary], dtype=np.float64)
+    core_pf = np.array([float(r["pf"]) for r in primary], dtype=np.float64)
+    core_trades = np.array([int(r["trades"]) for r in primary], dtype=np.int64)
+
+    wfa_cons = [r["wfa_results"]["consistency"] for r in primary if r.get("wfa_results")]
+    mc_worst_abs = [abs(float(r["mc_results"]["worst_mdd_95"])) for r in primary if r.get("mc_results")]
+    core_wfa_consistency = float(np.mean(wfa_cons)) if wfa_cons else 0.0
+    core_mc_worst_mdd_abs = float(np.mean(mc_worst_abs)) if mc_worst_abs else 0.0
+
+    alts = [r for r in results if not r.get("is_primary")]
+    alt_returns = np.array([float(r["return"]) for r in alts], dtype=np.float64) if alts else np.array([], dtype=np.float64)
+    alt_mdd_abs = np.array([abs(float(r["mdd"])) for r in alts], dtype=np.float64) if alts else np.array([], dtype=np.float64)
+    alt_median_ret = float(np.median(alt_returns)) if alt_returns.size else 0.0
+    alt_p25_ret = float(np.percentile(alt_returns, 25)) if alt_returns.size else 0.0
+    alt_pos_rate = float(np.mean(alt_returns > 0)) if alt_returns.size else 0.0
+    alt_worst_mdd = float(np.max(alt_mdd_abs)) if alt_mdd_abs.size else 0.0
+
+    all_returns = np.array([float(r["return"]) for r in results], dtype=np.float64)
+    mean_abs = max(abs(float(np.mean(all_returns))), 1e-9)
+    dispersion = float(np.std(all_returns) / mean_abs)
+
+    gates = SELECTION_POLICY["gates"]
+    reasons: List[str] = []
+    if np.any(core_returns <= gates["core_min_return"]):
+        reasons.append("core_negative_return")
+    if int(np.min(core_trades)) < int(gates["core_min_trades"]):
+        reasons.append("core_trade_count_low")
+    if float(np.mean(core_mdd_abs)) > gates["core_max_avg_mdd_abs"]:
+        reasons.append("core_mdd_too_high")
+    if core_wfa_consistency < gates["core_min_wfa_consistency"]:
+        reasons.append("core_wfa_low")
+    if core_mc_worst_mdd_abs > gates["core_max_mc_worst_mdd_95_abs"]:
+        reasons.append("core_mc_mdd_too_high")
+    if alt_returns.size:
+        if alt_pos_rate < gates["alt_min_pos_rate"]:
+            reasons.append("alt_pos_rate_low")
+        if alt_worst_mdd > gates["alt_max_worst_mdd_abs"]:
+            reasons.append("alt_worst_mdd_too_high")
+        if alt_p25_ret < gates["alt_min_p25_return"]:
+            reasons.append("alt_tail_return_too_low")
+
+    return {
+        "policy_version": SELECTION_POLICY_VERSION,
+        "core_avg_ret": float(np.mean(core_returns)),
+        "core_avg_mdd_abs": float(np.mean(core_mdd_abs)),
+        "core_avg_pf": float(np.mean(core_pf)),
+        "core_min_trades": int(np.min(core_trades)),
+        "core_avg_trades": float(np.mean(core_trades)),
+        "core_wfa_consistency": core_wfa_consistency,
+        "core_mc_worst_mdd_95": core_mc_worst_mdd_abs,
+        "alt_median_ret": alt_median_ret,
+        "alt_p25_ret": alt_p25_ret,
+        "alt_pos_rate": alt_pos_rate,
+        "alt_worst_mdd_abs": alt_worst_mdd,
+        "dispersion": dispersion,
+        "gates_passed": len(reasons) == 0,
+        "gate_reasons": reasons,
+    }
+
+
+def rank_profiles(profile_summaries: Dict[str, Dict]) -> List[Tuple[str, float, Dict]]:
+    w = SELECTION_POLICY["weights"]
+    ranked: List[Tuple[str, float, Dict]] = []
+    for key, s in profile_summaries.items():
+        if not s or not s.get("gates_passed", False):
+            continue
+        core_score = (
+            w["core_return"] * _log_scaled_positive(s["core_avg_ret"], 1200.0)
+            + w["core_pf"] * _log_scaled_positive(s["core_avg_pf"], 12.0)
+            + w["core_wfa"] * _clip01(s["core_wfa_consistency"] / 100.0)
+            + w["core_mdd"] * (1.0 - _clip01(s["core_avg_mdd_abs"] / 35.0))
+            + w["core_mc"] * (1.0 - _clip01(s["core_mc_worst_mdd_95"] / 70.0))
+        )
+        alt_score = (
+            w["alt_median"] * _log_scaled_positive(s["alt_median_ret"], 400.0)
+            + w["alt_p25"] * _clip01((s["alt_p25_ret"] + 40.0) / 140.0)
+            + w["alt_pos"] * _clip01(s["alt_pos_rate"])
+            + w["alt_mdd"] * (1.0 - _clip01(s["alt_worst_mdd_abs"] / 70.0))
+        )
+        div_score = 1.0 - _clip01(s["dispersion"] / 3.0)
+        score = (w["core_total"] * core_score) + (w["alt_total"] * alt_score) + (w["div_total"] * div_score)
+        ranked.append((key, score, s))
+    ranked.sort(key=lambda x: x[1], reverse=True)
+    return ranked
+
+def build_rolling_oos_windows(
+    eval_start: pd.Timestamp,
+    eval_end: pd.Timestamp,
+    window_days: int = 120,
+    step_days: int = 30,
+    max_windows: int = 6,
+) -> List[Tuple[pd.Timestamp, pd.Timestamp]]:
+    start = pd.Timestamp(eval_start).normalize()
+    end = pd.Timestamp(eval_end)
+    window_days = int(max(30, window_days))
+    step_days = int(max(7, step_days))
+    max_windows = int(max(1, max_windows))
+
+    windows: List[Tuple[pd.Timestamp, pd.Timestamp]] = []
+    cursor = start
+    while cursor <= end and len(windows) < max_windows:
+        w_start = cursor
+        w_end = _to_inclusive_end_timestamp(cursor + pd.Timedelta(days=window_days - 1))
+        if w_start > end:
+            break
+        if w_end > end:
+            w_end = end
+        if w_end >= w_start:
+            windows.append((w_start, w_end))
+        cursor = cursor + pd.Timedelta(days=step_days)
+        if w_end >= end:
+            break
+    return windows
+
+
+def run_rolling_oos_verification(
+    best_params: Dict,
+    symbols: List[str],
+    primary_symbols: List[str],
+    eval_start_time: pd.Timestamp,
+    eval_end_time: pd.Timestamp,
+    window_days: int = 120,
+    step_days: int = 30,
+    max_windows: int = 6,
+) -> List[Dict]:
+    windows = build_rolling_oos_windows(eval_start_time, eval_end_time, window_days, step_days, max_windows)
+    if not windows:
+        print("[WARN] Rolling OOS skipped: no valid windows.")
+        return []
+
+    _log_subheader(
+        f"Rolling OOS (window_days={window_days}, step_days={step_days}, max_windows={max_windows})"
+    )
+    roll_summaries: List[Dict] = []
+    for idx, (w_start, w_end) in enumerate(windows, start=1):
+        print(f"[ROLL-{idx}] Window: {w_start} ~ {w_end}")
+        roll_results: List[Dict] = []
+        for symbol in symbols:
+            r = verify_single_symbol_spot(
+                symbol,
+                best_params,
+                primary_symbols,
+                eval_start_time=w_start,
+                eval_end_time=w_end,
+                run_robustness_checks=False,
+            )
+            if r:
+                roll_results.append(r)
+        calculate_mode_performance(roll_results)
+        s = summarize_profile(roll_results)
+        if not s:
+            print(f"[ROLL-{idx}] Summary unavailable.")
+            continue
+        print(
+            f"[ROLL-{idx}] core_ret={s['core_avg_ret']:.2f}% | core_mdd={s['core_avg_mdd_abs']:.2f}% | "
+            f"core_pf={s['core_avg_pf']:.2f} | core_min_trades={s['core_min_trades']}"
+        )
+        s["window_start"] = str(w_start)
+        s["window_end"] = str(w_end)
+        roll_summaries.append(s)
+
+    if roll_summaries:
+        core_ret = np.array([float(s["core_avg_ret"]) for s in roll_summaries], dtype=np.float64)
+        core_mdd = np.array([float(s["core_avg_mdd_abs"]) for s in roll_summaries], dtype=np.float64)
+        core_pf = np.array([float(s["core_avg_pf"]) for s in roll_summaries], dtype=np.float64)
+        pass_rate = float(np.mean(core_ret > 0.0) * 100.0)
+        print(
+            f"[ROLL] windows={len(roll_summaries)} | pass_rate(ret>0)={pass_rate:.1f}% | "
+            f"ret_median={float(np.median(core_ret)):.2f}% | ret_p25={float(np.percentile(core_ret, 25)):.2f}% | "
+            f"mdd_worst={float(np.max(core_mdd)):.2f}% | pf_median={float(np.median(core_pf)):.2f}"
+        )
+    else:
+        print("[WARN] Rolling OOS produced no usable summaries.")
+    return roll_summaries
+
+
+def run_cost_stress_verification(
+    best_params: Dict,
+    symbols: List[str],
+    primary_symbols: List[str],
+    eval_start_time: pd.Timestamp,
+    eval_end_time: pd.Timestamp,
+    multipliers: Tuple[float, ...] = COST_STRESS_MULTIPLIERS,
+) -> Dict[float, Optional[Dict]]:
+    stress_summaries: Dict[float, Optional[Dict]] = {}
+    for mult in multipliers:
+        _log_subheader(f"Cost Stress x{mult:.1f} (fee/slippage)")
+        print(f"Window: {eval_start_time} ~ {eval_end_time}")
+        stress_results: List[Dict] = []
+        for symbol in symbols:
+            r = verify_single_symbol_spot(
+                symbol,
+                best_params,
+                primary_symbols,
+                eval_start_time=eval_start_time,
+                eval_end_time=eval_end_time,
+                run_robustness_checks=False,
+                cost_mult=float(mult),
+            )
+            if r:
+                stress_results.append(r)
+        calculate_mode_performance(stress_results)
+        s = summarize_profile(stress_results)
+        stress_summaries[float(mult)] = s
+        if s:
+            print(
+                f"Cost Stress x{mult:.1f}: core_ret={s['core_avg_ret']:.2f}% | "
+                f"core_mdd={s['core_avg_mdd_abs']:.2f}% | core_pf={s['core_avg_pf']:.2f} | "
+                f"core_min_trades={s['core_min_trades']}"
+            )
+        else:
+            print(f"[WARN] Cost Stress x{mult:.1f} summary unavailable.")
+    return stress_summaries
+
+
+def deploy_best_to_local(source_storage_url: str, source_study_name: str, mode_label: str, target_db: str = "spot_strategy.db") -> bool:
+    try:
+        if os.path.exists(target_db):
+            os.remove(target_db)
+        target_storage = f"sqlite:///{target_db}"
+        src_study = optuna.load_study(study_name=source_study_name, storage=source_storage_url)
+        best_trial = src_study.best_trial
+        optuna.create_study(study_name="spot_strategy", storage=target_storage, direction="maximize", load_if_exists=True)
+        study_dest = optuna.load_study(study_name="spot_strategy", storage=target_storage)
+        frozen_trial = optuna.trial.create_trial(
+            params=best_trial.params,
+            distributions=best_trial.distributions,
+            value=best_trial.value,
+        )
+        study_dest.add_trial(frozen_trial)
+        print(f"[OK] Deployed spot strategy: {mode_label} -> {target_db}")
+        return True
+    except Exception as e:
+        print(f"[ERROR] Failed to deploy strategy: {e}")
+        return False
+
+
+def _run_mode_eval(
+    mode: str,
+    storage_url: str,
+    symbols: List[str],
+    primary_symbols: List[str],
+    eval_start: pd.Timestamp,
+    eval_end: pd.Timestamp,
+) -> Optional[Dict]:
+    study_name, best_params, train_score = load_best_params_from_mysql(mode, storage_url)
+    if study_name is None or best_params is None:
+        print(f"[WARN] {mode} strategy not found. Skipping.")
+        return None
+    print(f"[INFO] Loaded {mode}: train_score={float(train_score):.4f}, timeframe={best_params.get('TIMEFRAME', '1h')}")
+    all_results: List[Dict] = []
+    for symbol in symbols:
+        r = verify_single_symbol_spot(
+            symbol,
+            best_params,
+            primary_symbols,
+            eval_start_time=eval_start,
+            eval_end_time=eval_end,
+            run_robustness_checks=True,
+        )
+        if r:
+            all_results.append(r)
+    calculate_mode_performance(all_results)
+    profile = summarize_profile(all_results)
+    if profile:
+        reasons = profile.get("gate_reasons", [])
+        gate_state = "PASS" if profile.get("gates_passed") else f"FAIL({','.join(reasons)})"
+        print(
+            f"[PROFILE] {mode}: gate={gate_state} | core_ret={profile['core_avg_ret']:.2f}% | "
+            f"core_mdd={profile['core_avg_mdd_abs']:.2f}% | core_pf={profile['core_avg_pf']:.2f} | "
+            f"core_min_trades={profile['core_min_trades']}"
+        )
+    return {
+        "mode": mode,
+        "study_name": study_name,
+        "best_params": best_params,
+        "train_score": float(train_score),
+        "results": all_results,
+        "profile": profile,
+    }
+
+
 if __name__ == "__main__":
-    import argparse
-    import optuna
-    import shutil
-    from config.settings import TRAIN_CUTOFF_DATE
-    
     parser = argparse.ArgumentParser()
-    parser.add_argument("--symbols", type=str, default="KRW-BTC,KRW-ETH", 
-                        help="Comma-separated list of symbols to verify")
-    parser.add_argument("--alt", type=int, default=0, choices=[0, 1],
-                        help="Include altcoins for validation (1=yes, 0=no). Adds SOL, XRP, DOGE, ADA")
-    parser.add_argument("--all-modes", action="store_true",
-                        help="Verify all modes (SCALP, DAY, SWING, UNIFIED). Default: UNIFIED only")
-    parser.add_argument("--dry-run", action="store_true",
-                        help="Verify current deployed strategy (spot_strategy.db) without saving. Skips MySQL and deployment.")
+    parser.add_argument("--symbols", type=str, default="KRW-BTC,KRW-ETH")
+    parser.add_argument("--alt", type=int, default=0, choices=[0, 1], help="Include altcoins: SOL, XRP, DOGE, ADA")
+    parser.add_argument("--all-modes", action="store_true", help="Verify SCALP, DAY, SWING, UNIFIED")
+    parser.add_argument("--dry-run", action="store_true", help="Verify currently deployed spot_strategy.db only")
+    parser.add_argument("--rolling-oos", dest="rolling_oos", action="store_true", help="Enable rolling OOS (default)")
+    parser.add_argument("--no-rolling-oos", dest="rolling_oos", action="store_false", help="Disable rolling OOS")
+    parser.add_argument("--roll-window-days", type=int, default=120)
+    parser.add_argument("--roll-step-days", type=int, default=30)
+    parser.add_argument("--roll-max-windows", type=int, default=6)
+    parser.set_defaults(rolling_oos=True)
     args = parser.parse_args()
-    
-    # 심볼 목록 빌드
-    base_symbols = [s.strip() for s in args.symbols.split(',')]
+
+    base_symbols = [s.strip() for s in args.symbols.split(",")]
     if args.alt == 1:
-        alt_symbols = ['KRW-SOL', 'KRW-XRP', 'KRW-DOGE', 'KRW-ADA']
-        for alt in alt_symbols:
+        for alt in ["KRW-SOL", "KRW-XRP", "KRW-DOGE", "KRW-ADA"]:
             if alt not in base_symbols:
                 base_symbols.append(alt)
-        print(f"📊 Altcoin validation enabled. Added: {', '.join(alt_symbols)}")
-    
     symbols = base_symbols
-    PRIMARY_SYMBOLS = ['KRW-BTC', 'KRW-ETH']
-    
-    # [DEFAULT] Verify UNIFIED only (fastest, most flexible)
-    # Use --all-modes to compare all strategies
-    if args.all_modes:
-        MODES = ['SCALP', 'DAY', 'SWING', 'UNIFIED']
-        print(f"🔍 All-Modes Verification enabled. Testing: {MODES}")
-    else:
-        MODES = ['UNIFIED']
-        print(f"⚡ Quick Verification: UNIFIED mode only (use --all-modes to compare all strategies)")
-    
-    
-    # [DRY-RUN MODE] 현재 배포된 전략 검증만 수행 (저장 안 함)
+    PRIMARY_SYMBOLS = ["KRW-BTC", "KRW-ETH"]
+    MODES = ["SCALP", "DAY", "SWING", "UNIFIED"] if args.all_modes else ["UNIFIED"]
+
     if args.dry_run:
-        print("\n" + "="*80)
-        print(f"🔍 DRY-RUN MODE: Verifying Current Deployed Strategy")
-        print(f"   Source: spot_strategy.db (Local)")
-        print("="*80)
-        
+        _log_header("DRY-RUN: Verify Deployed Spot Strategy", "Source: spot_strategy.db")
         target_db = "spot_strategy.db"
         if not os.path.exists(target_db):
-            print(f"❌ Error: {target_db} not found. Deploy a strategy first.")
+            print(f"[ERROR] {target_db} not found.")
             sys.exit(1)
-        
         try:
-            # 로컬 DB에서 현재 전략 로드
             local_storage = f"sqlite:///{target_db}"
             study = optuna.load_study(study_name="spot_strategy", storage=local_storage)
             best_params = study.best_params
-            train_score = study.best_value
-            
-            print(f"   ✅ Loaded Current Strategy (Train Score: {train_score:.4f})")
-            print(f"   Timeframe: {best_params.get('TIMEFRAME', '1h')}")
-            
-            # OOS 검증
-            all_results = []
+            print(f"[INFO] Loaded deployed params | train_score={study.best_value:.4f} | timeframe={best_params.get('TIMEFRAME', '1h')}")
+            eval_start, eval_end = resolve_eval_window()
+            all_results: List[Dict] = []
             for symbol in symbols:
-                result = verify_single_symbol(symbol, best_params, PRIMARY_SYMBOLS)
-                if result:
-                    all_results.append(result)
-            
-            avg_ret = calculate_mode_performance(all_results)
-            
-            print("\n" + "="*80)
-            print("🏁 DRY-RUN COMPLETE (No changes saved)")
-            print("="*80)
-            if avg_ret is not None:
-                print(f"📊 Current Strategy OOS Performance: {avg_ret:.2f}%")
-            
+                r = verify_single_symbol_spot(symbol, best_params, PRIMARY_SYMBOLS, eval_start, eval_end)
+                if r:
+                    all_results.append(r)
+            calculate_mode_performance(all_results)
+            summary = summarize_profile(all_results)
+            if summary:
+                print(
+                    f"[DRY-RUN] core_ret={summary['core_avg_ret']:.2f}% | core_mdd={summary['core_avg_mdd_abs']:.2f}% | "
+                    f"core_pf={summary['core_avg_pf']:.2f} | core_min_trades={summary['core_min_trades']}"
+                )
             sys.exit(0)
-            
         except Exception as e:
-            print(f"❌ Error loading deployed strategy: {e}")
-            import traceback
-            traceback.print_exc()
+            print(f"[ERROR] Dry-run failed: {e}")
             sys.exit(1)
-    
-    # [NORMAL MODE] MySQL에서 전략 검증 후 최적 전략 배포
-    results = []
-    
-    print("\n" + "="*80)
-    print(f"🚀 INTEGRATED STRATEGY VERIFICATION (Spot)")
-    print(f"   Searching for optimized strategies: {MODES}")
-    print("="*80)
-    
-    # MySQL 설정
-    from dotenv import load_dotenv
-    from urllib.parse import quote_plus
+
+    _log_header("INTEGRATED STRATEGY VERIFICATION (Spot)", f"Modes: {MODES}")
     load_dotenv()
-    
     db_user = os.getenv("DB_USER")
     db_pass = os.getenv("DB_PASS")
     db_host = os.getenv("DB_HOST", "localhost")
     db_port = os.getenv("DB_PORT", "3306")
     db_name = os.getenv("DB_NAME", "trading_optuna")
-    
     if not all([db_user, db_pass, db_name]):
-        print("❌ Error: Missing DB credentials in .env")
+        print("[ERROR] Missing DB credentials in .env")
         sys.exit(1)
-        
-    safe_pass = quote_plus(db_pass)
-    storage_url = f"mysql+pymysql://{db_user}:{safe_pass}@{db_host}:{db_port}/{db_name}"
-    
-    best_overall_score = -float('inf')
-    best_mode = None
-    best_study_name = None
-    
-    for mode in MODES:
-        print(f"\n🔎 Verifying {mode} Mode Strategy (from MySQL)...")
-        
-        try:
-            study_name, best_params, train_score = load_best_params_from_mysql(mode, storage_url)
-            if study_name is None:
-                print(f"⚠️  {mode} strategy not found in MySQL. Skipping...")
-                continue
-            
-            print(f"   ✅ Loaded Params (Train Score: {train_score:.4f})")
-            print(f"   Timeframe: {best_params.get('TIMEFRAME', '1h')}")
-            
-            # OOS 검증
-            all_results = []
-            for symbol in symbols:
-                result = verify_single_symbol(symbol, best_params, PRIMARY_SYMBOLS)
-                if result:
-                    all_results.append(result)
-            
-            avg_ret = calculate_mode_performance(all_results)
-            if avg_ret is None:
-                continue
-            
-            results.append({
-                'mode': mode,
-                'study_name': study_name,
-                'return': avg_ret,
-                'score': train_score,
-                'all_results': all_results
-            })
-            
-            if avg_ret > best_overall_score:
-                best_overall_score = avg_ret
-                best_mode = mode
-                best_study_name = study_name
-                    
-        except Exception as e:
-            print(f"   ❌ Error processing {mode}: {e}")
+    storage_url = f"mysql+pymysql://{db_user}:{quote_plus(db_pass)}@{db_host}:{db_port}/{db_name}"
 
-    print("\n" + "="*80)
-    print("🏆 FINAL RESULTS (Spot)")
-    print("="*80)
-    
-    if not results:
-        print("❌ No valid strategies found/verified.")
+    oos_start, selection_end, holdout_start, holdout_end = split_bonus_oos_windows()
+    _log_header(
+        "Selection / Holdout Split",
+        f"Selection: {oos_start} ~ {selection_end}\nHoldout:   {holdout_start} ~ {holdout_end}",
+    )
+
+    candidates: Dict[str, Dict] = {}
+    for mode in MODES:
+        _log_subheader(f"[SELECTION] {mode}")
+        ev = _run_mode_eval(mode, storage_url, symbols, PRIMARY_SYMBOLS, oos_start, selection_end)
+        if ev:
+            candidates[mode] = ev
+
+    if not candidates:
+        print("[ERROR] No valid candidates found in MySQL.")
         sys.exit(1)
-        
-    results.sort(key=lambda x: x['return'], reverse=True)
-    
-    for res in results:
-        mark = "👑" if res['mode'] == best_mode else "  "
-        print(f"{mark} {res['mode']:<6} | OOS Return: {res['return']:>7.2f}% | Train Score: {res['score']:.4f}")
-        
-    print("-" * 80)
-    
-    target_db = "spot_strategy.db"
-    target_study_name = "spot_strategy"
-    
-    if best_study_name:
-        print(f"💾 Saving Best Strategy ({best_mode}) from MySQL to '{target_db}'...")
-        
-        try:
-            # 1. Remove old target
-            if os.path.exists(target_db):
-                os.remove(target_db)
-            
-            # 2. Load Source Study (MySQL)
-            src_study = optuna.load_study(study_name=best_study_name, storage=storage_url)
-            best_trial = src_study.best_trial
-            
-            # 3. Create Target Storage (Local SQLite)
-            target_storage = f"sqlite:///{target_db}"
-            
-            # 4. Create Standard Study
-            print(f"   ⚙️  Migrating best params to standard '{target_study_name}' study...")
-            optuna.create_study(study_name=target_study_name, storage=target_storage, direction="maximize", load_if_exists=True)
-            study_dest = optuna.load_study(study_name=target_study_name, storage=target_storage)
-            
-            # 5. Create & Add Frozen Trial
-            frozen_trial = optuna.trial.create_trial(
-                params=best_trial.params,
-                distributions=src_study.trials[best_trial.number].distributions, # Load distributions from source
-                value=best_trial.value,
+
+    profile_summaries = {k: v["profile"] for k, v in candidates.items() if v.get("profile")}
+    ranked = rank_profiles(profile_summaries)
+    print("\n" + "=" * LOG_WIDTH)
+    print("Selection Ranking")
+    print("=" * LOG_WIDTH)
+    if ranked:
+        for i, (mode, score, prof) in enumerate(ranked, start=1):
+            print(
+                f"{i}. {mode:<7} | rank_score={score:.4f} | core_ret={prof['core_avg_ret']:.2f}% | "
+                f"core_mdd={prof['core_avg_mdd_abs']:.2f}% | core_pf={prof['core_avg_pf']:.2f} | "
+                f"core_min_trades={prof['core_min_trades']}"
             )
-            study_dest.add_trial(frozen_trial)
-            
-            print(f"✅ SUCCESSFULLY DEPLOYED {best_mode} STRATEGY!")
-            print(f"   The bot will now use the OOS-verified best strategy from '{target_db}'.")
-            
-        except Exception as e:
-            print(f"❌ Error Saving Strategy: {e}")
     else:
-        print("❌ No best strategy selected.")
+        print("[WARN] No gate-passed candidate in selection window.")
+
+    holdout_min_trades = compute_dynamic_holdout_min_trades(holdout_start, holdout_end)
+    print(f"[INFO] Holdout dynamic trade gate: min_trades>={holdout_min_trades}")
+
+    holdout_passed_mode: Optional[str] = None
+    holdout_passed_candidate: Optional[Dict] = None
+
+    check_order = [r[0] for r in ranked] if ranked else list(candidates.keys())
+    for mode in check_order:
+        c = candidates[mode]
+        _log_subheader(f"[HOLDOUT] {mode}")
+        holdout_results: List[Dict] = []
+        for symbol in symbols:
+            r = verify_single_symbol_spot(
+                symbol,
+                c["best_params"],
+                PRIMARY_SYMBOLS,
+                eval_start_time=holdout_start,
+                eval_end_time=holdout_end,
+                run_robustness_checks=False,
+            )
+            if r:
+                holdout_results.append(r)
+        calculate_mode_performance(holdout_results)
+        holdout_summary = summarize_profile(holdout_results)
+        passed, reasons = evaluate_holdout_sanity(holdout_summary, min_trades_gate=holdout_min_trades)
+        if holdout_summary:
+            print(
+                f"[HOLDOUT] {mode}: core_ret={holdout_summary['core_avg_ret']:.2f}% | "
+                f"core_mdd={holdout_summary['core_avg_mdd_abs']:.2f}% | core_pf={holdout_summary['core_avg_pf']:.2f} | "
+                f"core_min_trades={holdout_summary['core_min_trades']}"
+            )
+        gate_txt = "PASS" if passed else f"FAIL({','.join(reasons)})"
+        print(f"[HOLDOUT] Gate: {gate_txt}")
+        if passed:
+            holdout_passed_mode = mode
+            holdout_passed_candidate = c
+            break
+
+    if not holdout_passed_candidate or not holdout_passed_mode:
+        print("[WARN] No holdout-passed candidate found. Deployment skipped.")
+        sys.exit(1)
+
+    _log_header("Final Winner", f"Mode: {holdout_passed_mode}")
+    best_params = holdout_passed_candidate["best_params"]
+    run_cost_stress_verification(
+        best_params=best_params,
+        symbols=symbols,
+        primary_symbols=PRIMARY_SYMBOLS,
+        eval_start_time=holdout_start,
+        eval_end_time=holdout_end,
+    )
+    if args.rolling_oos:
+        run_rolling_oos_verification(
+            best_params=best_params,
+            symbols=symbols,
+            primary_symbols=PRIMARY_SYMBOLS,
+            eval_start_time=oos_start,
+            eval_end_time=holdout_end,
+            window_days=args.roll_window_days,
+            step_days=args.roll_step_days,
+            max_windows=args.roll_max_windows,
+        )
+
+    ok = deploy_best_to_local(
+        source_storage_url=storage_url,
+        source_study_name=holdout_passed_candidate["study_name"],
+        mode_label=holdout_passed_mode,
+        target_db="spot_strategy.db",
+    )
+    if not ok:
+        sys.exit(1)
