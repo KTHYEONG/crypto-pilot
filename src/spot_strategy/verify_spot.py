@@ -1,4 +1,4 @@
-﻿import argparse
+import argparse
 import logging
 import os
 import sys
@@ -611,7 +611,13 @@ def run_cost_stress_verification(
     return stress_summaries
 
 
-def deploy_best_to_local(source_storage_url: str, source_study_name: str, mode_label: str, target_db: str = "spot_strategy.db") -> bool:
+def deploy_best_to_local(
+    source_storage_url: str,
+    source_study_name: str,
+    mode_label: str,
+    target_db: str = "spot_strategy.db",
+    deploy_metadata: Optional[Dict] = None,
+) -> bool:
     try:
         if os.path.exists(target_db):
             os.remove(target_db)
@@ -620,10 +626,14 @@ def deploy_best_to_local(source_storage_url: str, source_study_name: str, mode_l
         best_trial = src_study.best_trial
         optuna.create_study(study_name="spot_strategy", storage=target_storage, direction="maximize", load_if_exists=True)
         study_dest = optuna.load_study(study_name="spot_strategy", storage=target_storage)
+        user_attrs = dict(getattr(best_trial, "user_attrs", {}) or {})
+        if deploy_metadata:
+            user_attrs.update(deploy_metadata)
         frozen_trial = optuna.trial.create_trial(
             params=best_trial.params,
             distributions=best_trial.distributions,
             value=best_trial.value,
+            user_attrs=user_attrs,
         )
         study_dest.add_trial(frozen_trial)
         print(f"[OK] Deployed spot strategy: {mode_label} -> {target_db}")
@@ -818,15 +828,16 @@ if __name__ == "__main__":
 
     _log_header("Final Winner", f"Mode: {holdout_passed_mode}")
     best_params = holdout_passed_candidate["best_params"]
-    run_cost_stress_verification(
+    stress_summary = run_cost_stress_verification(
         best_params=best_params,
         symbols=symbols,
         primary_symbols=PRIMARY_SYMBOLS,
         eval_start_time=holdout_start,
         eval_end_time=holdout_end,
     )
+    rolling_summary = []
     if args.rolling_oos:
-        run_rolling_oos_verification(
+        rolling_summary = run_rolling_oos_verification(
             best_params=best_params,
             symbols=symbols,
             primary_symbols=PRIMARY_SYMBOLS,
@@ -842,6 +853,19 @@ if __name__ == "__main__":
         source_study_name=holdout_passed_candidate["study_name"],
         mode_label=holdout_passed_mode,
         target_db="spot_strategy.db",
+        deploy_metadata={
+            "policy_version": SELECTION_POLICY_VERSION,
+            "selected_mode": holdout_passed_mode,
+            "selection_window_start": str(oos_start),
+            "selection_window_end": str(selection_end),
+            "holdout_window_start": str(holdout_start),
+            "holdout_window_end": str(holdout_end),
+            "holdout_dynamic_min_trades": int(holdout_min_trades),
+            "cost_stress_multipliers": ",".join(str(x) for x in COST_STRESS_MULTIPLIERS),
+            "cost_stress_summary": str(stress_summary),
+            "rolling_oos_enabled": bool(args.rolling_oos),
+            "rolling_oos_summary": str(rolling_summary),
+        },
     )
     if not ok:
         sys.exit(1)
