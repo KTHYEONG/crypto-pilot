@@ -80,7 +80,10 @@ except ImportError:
     CLOUD_OPTIMIZER_AVAILABLE = False
 
 logger = setup_logger("RealTraderSpot")
-EXPECTED_SPOT_POLICY_VERSION = os.getenv("SPOT_POLICY_VERSION", "SPOT_SELECTION_POLICY_V1")
+_default_policy_versions = "SPOT_SELECTION_POLICY_V7_PARITY,SPOT_SELECTION_POLICY_V1"
+SPOT_ALLOWED_POLICY_VERSIONS = {
+    v.strip() for v in os.getenv("SPOT_POLICY_VERSIONS", _default_policy_versions).split(",") if v.strip()
+}
 SPOT_ALLOWED_MODES = {"SCALP", "DAY", "SWING", "UNIFIED", "ALL"}
 SPOT_ALLOW_FALLBACK = os.getenv("SPOT_ALLOW_FALLBACK", "false").lower() == "true"
 SPOT_FEE_RATE_D = Decimal("0.0005")
@@ -436,9 +439,9 @@ class RealTraderSpot:
                 errors.append(f"{symbol}: fallback policy active")
                 continue
 
-            if policy_version != EXPECTED_SPOT_POLICY_VERSION:
+            if policy_version not in SPOT_ALLOWED_POLICY_VERSIONS:
                 errors.append(
-                    f"{symbol}: policy_version='{policy_version}' != '{EXPECTED_SPOT_POLICY_VERSION}'"
+                    f"{symbol}: policy_version='{policy_version}' not in {sorted(SPOT_ALLOWED_POLICY_VERSIONS)}"
                 )
             if selected_mode not in SPOT_ALLOWED_MODES:
                 errors.append(f"{symbol}: invalid selected_mode='{selected_mode}'")
