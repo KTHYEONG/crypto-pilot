@@ -3,6 +3,7 @@ import os
 import optuna
 import numpy as np
 from dataclasses import dataclass
+from decimal import Decimal, ROUND_FLOOR
 
 
 def _env_float(name, default):
@@ -147,6 +148,87 @@ def suggest_params(trial, search_space):
     Efficiency Gain: 60~70% reduction in search space by skipping irrelevant parameters.
     """
     params = {}
+
+    def _sanitize_float_step_bounds(low, high, step):
+        """Sanitize float-step bounds to avoid Optuna range/step divisibility warnings."""
+        d_step = Decimal(str(step))
+        if d_step <= 0:
+            return float(low), float(high)
+        places = max(0, -d_step.as_tuple().exponent)
+        quant = Decimal(1).scaleb(-places)
+        d_low = Decimal(str(low)).quantize(quant)
+        d_high = Decimal(str(high)).quantize(quant)
+        if d_high < d_low:
+            d_high = d_low
+        steps = ((d_high - d_low) / d_step).to_integral_value(rounding=ROUND_FLOOR)
+        safe_high = (d_low + (steps * d_step)).quantize(quant)
+        if safe_high < d_low:
+            safe_high = d_low
+        return float(d_low), float(safe_high)
+
+    def _suggest_value(key, spec):
+        typ = spec.get("type")
+        use_log = bool(spec.get("log", False))
+
+        if typ == "categorical":
+            return trial.suggest_categorical(key, spec["choices"])
+        if typ == "int":
+            if use_log:
+                return trial.suggest_int(key, spec["low"], spec["high"], log=True)
+            return trial.suggest_int(key, spec["low"], spec["high"], step=spec.get("step"))
+        if typ == "float":
+            if use_log:
+                return trial.suggest_float(key, spec["low"], spec["high"], log=True)
+            step = spec.get("step")
+            if step is None:
+                return trial.suggest_float(key, spec["low"], spec["high"])
+            low, high = _sanitize_float_step_bounds(spec["low"], spec["high"], step)
+            if high <= low:
+                return float(low)
+            return trial.suggest_float(key, low, high, step=step)
+        raise ValueError(f"Unsupported spec type: {typ} for {key}")
+
+    def _suggest_timeframe_bounded_holding(spec):
+        """
+        Conditionally bound MAX_HOLDING_BARS by timeframe.
+        This prevents structurally-low-frequency combinations from dominating spot search.
+        """
+        # Suggest from a single static distribution first (warning-safe),
+        # then clamp by timeframe. Avoids per-trial distribution mismatch warnings.
+        sampled = _suggest_value("MAX_HOLDING_BARS", spec)
+        selected_tf = str(params.get("TIMEFRAME", "")).strip().lower()
+        tf_bounds = {
+            "15m": (36, 320),
+            "30m": (30, 260),
+            "1h": (24, 180),
+            "2h": (18, 140),
+            "4h": (12, 96),
+            "1d": (8, 60),
+            "1w": (4, 24),
+        }
+        if selected_tf not in tf_bounds:
+            return int(sampled)
+
+        tf_low, tf_high = tf_bounds[selected_tf]
+        low = int(max(int(spec.get("low", tf_low)), int(tf_low)))
+        high = int(min(int(spec.get("high", tf_high)), int(tf_high)))
+        if high <= low:
+            return int(low)
+        return int(max(low, min(high, int(sampled))))
+
+    def _set_inactive_default(key):
+        if key not in search_space:
+            return
+        spec = search_space[key]
+        typ = spec.get("type")
+        if typ == "categorical":
+            choices = list(spec.get("choices", []))
+            if choices:
+                params[key] = choices[0]
+        elif typ == "int":
+            params[key] = int(spec.get("low", 0))
+        elif typ == "float":
+            params[key] = float(spec.get("low", 0.0))
     
     # === Phase 1: Core Strategy Selection ===
     for key in ['ENTRY_TYPE', 'TREND_FILTER_TYPE', 'STRENGTH_FILTER_TYPE', 'EXIT_TYPE', 
@@ -155,25 +237,22 @@ def suggest_params(trial, search_space):
         if key in search_space:
             spec = search_space[key]
             if spec['type'] == 'categorical':
-                params[key] = trial.suggest_categorical(key, spec['choices'])
+                params[key] = _suggest_value(key, spec)
     
     # === Phase 2: Entry-Type Dependent Parameters ===
     entry_type = params.get('ENTRY_TYPE', 'DONCHIAN')
     
     if entry_type == 'BOLLINGER':
         if 'BB_STD' in search_space:
-            spec = search_space['BB_STD']
-            params['BB_STD'] = trial.suggest_float('BB_STD', spec['low'], spec['high'], step=spec.get('step'))
+            params['BB_STD'] = _suggest_value('BB_STD', search_space['BB_STD'])
             
     elif entry_type == 'KELTNER':
         if 'KELTNER_ATR_MULT' in search_space:
-            spec = search_space['KELTNER_ATR_MULT']
-            params['KELTNER_ATR_MULT'] = trial.suggest_float('KELTNER_ATR_MULT', spec['low'], spec['high'], step=spec.get('step'))
+            params['KELTNER_ATR_MULT'] = _suggest_value('KELTNER_ATR_MULT', search_space['KELTNER_ATR_MULT'])
             
     elif entry_type == 'CCI':
         if 'CCI_THRESHOLD' in search_space:
-            spec = search_space['CCI_THRESHOLD']
-            params['CCI_THRESHOLD'] = trial.suggest_int('CCI_THRESHOLD', spec['low'], spec['high'], step=spec.get('step'))
+            params['CCI_THRESHOLD'] = _suggest_value('CCI_THRESHOLD', search_space['CCI_THRESHOLD'])
     
     # === Phase 3: Trend-Filter Dependent Parameters ===
     trend_filter = params.get('TREND_FILTER_TYPE', 'EMA')
@@ -181,91 +260,66 @@ def suggest_params(trial, search_space):
     if trend_filter == 'SUPERTREND':
         for key in ['SUPERTREND_MULT', 'SUPERTREND_PERIOD']:
             if key in search_space:
-                spec = search_space[key]
-                use_log = spec.get('log', False)
-                if spec['type'] == 'float':
-                    params[key] = trial.suggest_float(key, spec['low'], spec['high'], log=use_log) if use_log else trial.suggest_float(key, spec['low'], spec['high'], step=spec.get('step'))
-                elif spec['type'] == 'int':
-                    params[key] = trial.suggest_int(key, spec['low'], spec['high'], log=use_log) if use_log else trial.suggest_int(key, spec['low'], spec['high'], step=spec.get('step'))
+                params[key] = _suggest_value(key, search_space[key])
     
     elif trend_filter == 'MACD':
         for key in ['MACD_FAST', 'MACD_SLOW', 'MACD_SIGNAL']:
             if key in search_space:
-                spec = search_space[key]
-                use_log = spec.get('log', False)
-                params[key] = trial.suggest_int(key, spec['low'], spec['high'], log=use_log) if use_log else trial.suggest_int(key, spec['low'], spec['high'], step=spec.get('step'))
+                params[key] = _suggest_value(key, search_space[key])
     
     elif trend_filter == 'ICHIMOKU':
         for key in ['ICHIMOKU_TENKAN', 'ICHIMOKU_KIJUN', 'ICHIMOKU_SENKOU_B']:
             if key in search_space:
-                spec = search_space[key]
-                use_log = spec.get('log', False)
-                params[key] = trial.suggest_int(key, spec['low'], spec['high'], log=use_log) if use_log else trial.suggest_int(key, spec['low'], spec['high'], step=spec.get('step'))
+                params[key] = _suggest_value(key, search_space[key])
     
     elif trend_filter == 'VWAP':
         if 'VWAP_STD_MULT' in search_space:
-            spec = search_space['VWAP_STD_MULT']
-            params['VWAP_STD_MULT'] = trial.suggest_float('VWAP_STD_MULT', spec['low'], spec['high'], step=spec.get('step'))
+            params['VWAP_STD_MULT'] = _suggest_value('VWAP_STD_MULT', search_space['VWAP_STD_MULT'])
     
     # === Phase 4: Strength-Filter Dependent Parameters ===
     strength_filter = params.get('STRENGTH_FILTER_TYPE', 'NONE')
     
     if strength_filter in ['ADX', 'VHF', 'MFI', 'RSI', 'STOCHASTIC', 'STOCH_RSI']:
         if 'STRENGTH_FILTER_PERIOD' in search_space:
-            spec = search_space['STRENGTH_FILTER_PERIOD']
-            use_log = spec.get('log', False)
-            params['STRENGTH_FILTER_PERIOD'] = trial.suggest_int('STRENGTH_FILTER_PERIOD', spec['low'], spec['high'], log=use_log) if use_log else trial.suggest_int('STRENGTH_FILTER_PERIOD', spec['low'], spec['high'], step=spec.get('step'))
+            params['STRENGTH_FILTER_PERIOD'] = _suggest_value('STRENGTH_FILTER_PERIOD', search_space['STRENGTH_FILTER_PERIOD'])
     
     if strength_filter == 'VHF':
         if 'VHF_THRESHOLD' in search_space:
-            spec = search_space['VHF_THRESHOLD']
-            params['VHF_THRESHOLD'] = trial.suggest_float('VHF_THRESHOLD', spec['low'], spec['high'], step=spec.get('step'))
+            params['VHF_THRESHOLD'] = _suggest_value('VHF_THRESHOLD', search_space['VHF_THRESHOLD'])
     
     elif strength_filter == 'MFI':
         if 'MFI_THRESHOLD' in search_space:
-            spec = search_space['MFI_THRESHOLD']
-            params['MFI_THRESHOLD'] = trial.suggest_int('MFI_THRESHOLD', spec['low'], spec['high'], step=spec.get('step'))
+            params['MFI_THRESHOLD'] = _suggest_value('MFI_THRESHOLD', search_space['MFI_THRESHOLD'])
     
     elif strength_filter == 'RSI':
         for key in ['RSI_OVERBOUGHT', 'RSI_OVERSOLD', 'RSI_OVERBOUGHT_FUTURES']:
             if key in search_space:
-                spec = search_space[key]
-                params[key] = trial.suggest_int(key, spec['low'], spec['high'], step=spec.get('step'))
+                params[key] = _suggest_value(key, search_space[key])
     
     elif strength_filter == 'STOCHASTIC':
         for key in ['STOCH_OVERBOUGHT', 'STOCH_OVERSOLD']:
             if key in search_space:
-                spec = search_space[key]
-                params[key] = trial.suggest_int(key, spec['low'], spec['high'], step=spec.get('step'))
+                params[key] = _suggest_value(key, search_space[key])
     
     elif strength_filter == 'STOCH_RSI':
         for key in ['STOCH_RSI_OVERBOUGHT', 'STOCH_RSI_OVERSOLD']:
             if key in search_space:
-                spec = search_space[key]
-                params[key] = trial.suggest_int(key, spec['low'], spec['high'], step=spec.get('step'))
+                params[key] = _suggest_value(key, search_space[key])
     
     elif strength_filter == 'CMF':
         for key in ['CMF_PERIOD', 'CMF_THRESHOLD']:
             if key in search_space:
-                spec = search_space[key]
-                use_log = spec.get('log', False)
-                if spec['type'] == 'int':
-                    params[key] = trial.suggest_int(key, spec['low'], spec['high'], log=use_log) if use_log else trial.suggest_int(key, spec['low'], spec['high'], step=spec.get('step'))
-                else:
-                    params[key] = trial.suggest_float(key, spec['low'], spec['high'], step=spec.get('step'))
+                params[key] = _suggest_value(key, search_space[key])
     
     elif strength_filter == 'HURST':
         # 1. Period (Independent)
         if 'HURST_PERIOD' in search_space:
-            spec = search_space['HURST_PERIOD']
-            use_log = spec.get('log', False)
-            params['HURST_PERIOD'] = trial.suggest_int('HURST_PERIOD', spec['low'], spec['high'], log=use_log)
+            params['HURST_PERIOD'] = _suggest_value('HURST_PERIOD', search_space['HURST_PERIOD'])
 
         # 2. Random Threshold (Independent Base)
         random_thresh = 0.5 # Default fallback
         if 'HURST_RANDOM_THRESHOLD' in search_space:
-            spec = search_space['HURST_RANDOM_THRESHOLD']
-            params['HURST_RANDOM_THRESHOLD'] = trial.suggest_float('HURST_RANDOM_THRESHOLD', spec['low'], spec['high'], step=spec.get('step'))
+            params['HURST_RANDOM_THRESHOLD'] = _suggest_value('HURST_RANDOM_THRESHOLD', search_space['HURST_RANDOM_THRESHOLD'])
             random_thresh = params['HURST_RANDOM_THRESHOLD']
             
         # 3. Trend Threshold (Dependent: Must be > Random)
@@ -274,30 +328,35 @@ def suggest_params(trial, search_space):
             # Enforce Logical Safety: Trend > Random + Buffer (0.01)
             # This prevents logical contradictions even if search ranges overlap
             safe_low = max(spec['low'], random_thresh + 0.01)
-            
+            raw_trend = _suggest_value('HURST_TREND_THRESHOLD', spec)
+            step = spec.get("step")
             if safe_low < spec['high']:
-                params['HURST_TREND_THRESHOLD'] = trial.suggest_float('HURST_TREND_THRESHOLD', safe_low, spec['high'], step=spec.get('step'))
+                if step is None:
+                    params['HURST_TREND_THRESHOLD'] = float(max(safe_low, min(spec['high'], raw_trend)))
+                else:
+                    low, high = _sanitize_float_step_bounds(safe_low, spec['high'], step)
+                    if high <= low:
+                        params['HURST_TREND_THRESHOLD'] = float(low)
+                    else:
+                        snapped = low + round((float(raw_trend) - low) / float(step)) * float(step)
+                        params['HURST_TREND_THRESHOLD'] = float(max(low, min(high, snapped)))
             else:
-                # If constraint pushes low above high, clip to safe_low logic
-                params['HURST_TREND_THRESHOLD'] = safe_low
+                params['HURST_TREND_THRESHOLD'] = float(safe_low)
 
     elif strength_filter == 'ER':
         if 'ER_THRESHOLD' in search_space:
-            spec = search_space['ER_THRESHOLD']
-            params['ER_THRESHOLD'] = trial.suggest_float('ER_THRESHOLD', spec['low'], spec['high'], step=spec.get('step'))
+            params['ER_THRESHOLD'] = _suggest_value('ER_THRESHOLD', search_space['ER_THRESHOLD'])
             
     elif strength_filter == 'NATR':
         if 'NATR_THRESHOLD' in search_space:
-            spec = search_space['NATR_THRESHOLD']
-            params['NATR_THRESHOLD'] = trial.suggest_float('NATR_THRESHOLD', spec['low'], spec['high'], step=spec.get('step'))
+            params['NATR_THRESHOLD'] = _suggest_value('NATR_THRESHOLD', search_space['NATR_THRESHOLD'])
     
     # === Phase 5: Exit-Type Dependent Parameters ===
     exit_type = params.get('EXIT_TYPE', 'ATR')
     
     if exit_type == 'PARABOLIC_SAR':
         if 'SAR_STEP' in search_space:
-            spec = search_space['SAR_STEP']
-            params['SAR_STEP'] = trial.suggest_float('SAR_STEP', spec['low'], spec['high'], step=spec.get('step'))
+            params['SAR_STEP'] = _suggest_value('SAR_STEP', search_space['SAR_STEP'])
     
     # === Phase 6: Common Parameters (Always Used) ===
     # [CRITICAL] Handle STOP_LOSS_TYPE logical conflict first
@@ -305,17 +364,11 @@ def suggest_params(trial, search_space):
     
     if stop_loss_type == 'FIXED':
         if 'STOP_LOSS_PCT' in search_space:
-            spec = search_space['STOP_LOSS_PCT']
-            params['STOP_LOSS_PCT'] = trial.suggest_float('STOP_LOSS_PCT', spec['low'], spec['high'], step=spec.get('step'))
+            params['STOP_LOSS_PCT'] = _suggest_value('STOP_LOSS_PCT', search_space['STOP_LOSS_PCT'])
     
     elif stop_loss_type == 'ATR':
         if 'ATR_STOP_LOSS_MULT' in search_space:
-            spec = search_space['ATR_STOP_LOSS_MULT']
-            use_log = spec.get('log', False)
-            if use_log:
-                params['ATR_STOP_LOSS_MULT'] = trial.suggest_float('ATR_STOP_LOSS_MULT', spec['low'], spec['high'], log=True)
-            else:
-                params['ATR_STOP_LOSS_MULT'] = trial.suggest_float('ATR_STOP_LOSS_MULT', spec['low'], spec['high'], step=spec.get('step'))
+            params['ATR_STOP_LOSS_MULT'] = _suggest_value('ATR_STOP_LOSS_MULT', search_space['ATR_STOP_LOSS_MULT'])
     
     # [CRITICAL] Handle USE_TAKE_PROFIT logical conflict
     use_take_profit = params.get('USE_TAKE_PROFIT', False)
@@ -323,12 +376,7 @@ def suggest_params(trial, search_space):
     if use_take_profit:
         for key in ['TAKE_PROFIT_ATR_MULT', 'TAKE_PROFIT_ATR_MULT_FUTURES']:
             if key in search_space:
-                spec = search_space[key]
-                use_log = spec.get('log', False)
-                if use_log:
-                    params[key] = trial.suggest_float(key, spec['low'], spec['high'], log=True)
-                else:
-                    params[key] = trial.suggest_float(key, spec['low'], spec['high'], step=spec.get('step'))
+                params[key] = _suggest_value(key, search_space[key])
     
     # [CRITICAL] Handle USE_VOLUME_FILTER logical conflict
     use_volume_filter = params.get('USE_VOLUME_FILTER', False)
@@ -336,18 +384,7 @@ def suggest_params(trial, search_space):
     if use_volume_filter:
         for key in ['VOLUME_THRESHOLD_MULT', 'VOLUME_MA_PERIOD']:
             if key in search_space:
-                spec = search_space[key]
-                use_log = spec.get('log', False)
-                if spec['type'] == 'float':
-                    if use_log:
-                        params[key] = trial.suggest_float(key, spec['low'], spec['high'], log=True)
-                    else:
-                        params[key] = trial.suggest_float(key, spec['low'], spec['high'], step=spec.get('step'))
-                elif spec['type'] == 'int':
-                    if use_log:
-                        params[key] = trial.suggest_int(key, spec['low'], spec['high'], log=True)
-                    else:
-                        params[key] = trial.suggest_int(key, spec['low'], spec['high'], step=spec.get('step'))
+                params[key] = _suggest_value(key, search_space[key])
     
     # Other common parameters (no conflicts)
     common_keys = [
@@ -359,28 +396,62 @@ def suggest_params(trial, search_space):
         'TIME_EXIT_PROFIT_THRESHOLD',  # [NEW] Conditional time exit
         'RSI_EXIT_THRESHOLD', # [NEW] Panic exit
         'RSI_ENTRY_MAX', 'NATR_ENTRY_MIN', # [NEW] Entry Safety Filters
+        'ENABLE_SCALE_OUT',
+        'ENABLE_BREAKEVEN',
+        'ENABLE_PYRAMIDING',
         'USE_DYNAMIC_RISK',
-        'STRONG_REGIME_HURST', 'STRONG_REGIME_NATR', 'STRONG_REGIME_MULTIPLIER',
-        'WEAK_REGIME_HURST', 'WEAK_REGIME_MULTIPLIER',
-        'PANIC_REGIME_NATR', 'PANIC_REGIME_MULTIPLIER',
         'RISK_PER_TRADE_SPOT'
     ]
     
     for key in common_keys:
         if key in search_space:
-            spec = search_space[key]
-            use_log = spec.get('log', False)
-            
-            if spec['type'] == 'float':
-                if use_log:
-                    params[key] = trial.suggest_float(key, spec['low'], spec['high'], log=True)
-                else:
-                    params[key] = trial.suggest_float(key, spec['low'], spec['high'], step=spec.get('step'))
-            elif spec['type'] == 'int':
-                if use_log:
-                    params[key] = trial.suggest_int(key, spec['low'], spec['high'], log=True)
-                else:
-                    params[key] = trial.suggest_int(key, spec['low'], spec['high'], step=spec.get('step'))
+            if key == 'MAX_HOLDING_BARS':
+                params[key] = _suggest_timeframe_bounded_holding(search_space[key])
+            else:
+                params[key] = _suggest_value(key, search_space[key])
+
+    # [CRITICAL] Active position management dependencies
+    if params.get('ENABLE_SCALE_OUT', False):
+        for key in ['SCALE_OUT_TRIGGER_ATR', 'SCALE_OUT_RATIO']:
+            if key in search_space:
+                params[key] = _suggest_value(key, search_space[key])
+    else:
+        _set_inactive_default('SCALE_OUT_TRIGGER_ATR')
+        _set_inactive_default('SCALE_OUT_RATIO')
+
+    if params.get('ENABLE_BREAKEVEN', False):
+        if 'BREAKEVEN_BUFFER_PCT' in search_space:
+            params['BREAKEVEN_BUFFER_PCT'] = _suggest_value('BREAKEVEN_BUFFER_PCT', search_space['BREAKEVEN_BUFFER_PCT'])
+    else:
+        _set_inactive_default('BREAKEVEN_BUFFER_PCT')
+
+    if params.get('ENABLE_PYRAMIDING', False):
+        for key in ['PYRAMID_TRIGGER_ATR', 'PYRAMID_STEP_ATR', 'PYRAMID_RISK_RATIO', 'PYRAMID_MAX_ADDS']:
+            if key in search_space:
+                params[key] = _suggest_value(key, search_space[key])
+    else:
+        _set_inactive_default('PYRAMID_TRIGGER_ATR')
+        _set_inactive_default('PYRAMID_STEP_ATR')
+        _set_inactive_default('PYRAMID_RISK_RATIO')
+        _set_inactive_default('PYRAMID_MAX_ADDS')
+
+    # [CRITICAL] Dynamic-risk dependencies
+    if params.get('USE_DYNAMIC_RISK', False):
+        for key in [
+            'STRONG_REGIME_HURST', 'STRONG_REGIME_NATR', 'STRONG_REGIME_MULTIPLIER',
+            'WEAK_REGIME_HURST', 'WEAK_REGIME_MULTIPLIER',
+            'PANIC_REGIME_NATR', 'PANIC_REGIME_MULTIPLIER',
+        ]:
+            if key in search_space:
+                params[key] = _suggest_value(key, search_space[key])
+    else:
+        _set_inactive_default('STRONG_REGIME_HURST')
+        _set_inactive_default('STRONG_REGIME_NATR')
+        _set_inactive_default('STRONG_REGIME_MULTIPLIER')
+        _set_inactive_default('WEAK_REGIME_HURST')
+        _set_inactive_default('WEAK_REGIME_MULTIPLIER')
+        _set_inactive_default('PANIC_REGIME_NATR')
+        _set_inactive_default('PANIC_REGIME_MULTIPLIER')
     
     return params
 

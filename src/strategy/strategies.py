@@ -1,6 +1,10 @@
 from abc import ABC, abstractmethod
 import pandas as pd
 import numpy as np
+import os
+import threading
+from collections import OrderedDict
+from typing import Callable, Hashable, Tuple
 
 class Strategy(ABC):
     def __init__(self, name, params):
@@ -52,6 +56,68 @@ from .indicators_advanced import (
     calculate_vwap, calculate_cmf, calculate_hurst_exponent, calculate_natr
 )
 
+# Default tuned for current spot optimizer shape:
+# UNIFIED(30m/1h/4h) + AWFO(3 folds) + STRENGTH_FILTER_PERIOD sweep.
+_SPOT_INDICATOR_CACHE_MAX = max(32, int(os.getenv("SPOT_INDICATOR_CACHE_MAX", "512")))
+_SPOT_INDICATOR_CACHE: "OrderedDict[Tuple[Hashable, ...], np.ndarray]" = OrderedDict()
+_SPOT_INDICATOR_CACHE_LOCK = threading.Lock()
+
+
+def _series_data_key(series: pd.Series) -> Tuple[Hashable, ...]:
+    arr = np.asarray(series.to_numpy(copy=False))
+    data_ptr = int(arr.__array_interface__["data"][0])
+    strides = tuple(int(s) for s in (arr.strides or ()))
+    return (data_ptr, int(arr.size), str(arr.dtype), strides)
+
+
+def _cache_get_or_compute(
+    key: Tuple[Hashable, ...],
+    compute_fn: Callable[[], np.ndarray],
+) -> np.ndarray:
+    with _SPOT_INDICATOR_CACHE_LOCK:
+        cached = _SPOT_INDICATOR_CACHE.get(key)
+        if cached is not None:
+            _SPOT_INDICATOR_CACHE.move_to_end(key)
+            return cached
+
+    values = compute_fn()
+    with _SPOT_INDICATOR_CACHE_LOCK:
+        _SPOT_INDICATOR_CACHE[key] = values
+        _SPOT_INDICATOR_CACHE.move_to_end(key)
+        while len(_SPOT_INDICATOR_CACHE) > _SPOT_INDICATOR_CACHE_MAX:
+            _SPOT_INDICATOR_CACHE.popitem(last=False)
+    return values
+
+
+def _cached_hurst_values(close: pd.Series, window: int) -> np.ndarray:
+    key = ("hurst", int(window), *_series_data_key(close))
+    return _cache_get_or_compute(
+        key,
+        lambda: np.asarray(calculate_hurst_exponent(close, window=int(window)).to_numpy(copy=False), dtype=np.float64),
+    )
+
+
+def _cached_rsi_values(close: pd.Series, window: int) -> np.ndarray:
+    key = ("rsi", int(window), *_series_data_key(close))
+    return _cache_get_or_compute(
+        key,
+        lambda: np.asarray(calculate_rsi(close, window=int(window)).to_numpy(copy=False), dtype=np.float64),
+    )
+
+
+def _cached_natr_values(df: pd.DataFrame, window: int) -> np.ndarray:
+    key = (
+        "natr",
+        int(window),
+        *_series_data_key(df["high"]),
+        *_series_data_key(df["low"]),
+        *_series_data_key(df["close"]),
+    )
+    return _cache_get_or_compute(
+        key,
+        lambda: np.asarray(calculate_natr(df, window=int(window)).to_numpy(copy=False), dtype=np.float64),
+    )
+
 class UltimateStrategy(Strategy):
     """
     The Ultimate Strategy: Dynamic combinations of all major indicators.
@@ -75,15 +141,15 @@ class UltimateStrategy(Strategy):
         # [NEW] Always calculate Regime Indicators (Hurst, NATR, RSI)
         # 1. Hurst Exponent (Trend Strength/Regime)
         hurst_period = self.params.get('HURST_PERIOD', 200)
-        df['hurst'] = calculate_hurst_exponent(df['close'], window=hurst_period)
+        df['hurst'] = _cached_hurst_values(df['close'], int(hurst_period))
         
         # 2. NATR (Volatility Regime)
         natr_period = self.params.get('STRENGTH_FILTER_PERIOD', 14) # Reuse existing period or default
-        df['natr'] = calculate_natr(df, window=natr_period)
+        df['natr'] = _cached_natr_values(df, int(natr_period))
         
         # 3. RSI (Panic Exit)
         rsi_period = self.params.get('STRENGTH_FILTER_PERIOD', 14) 
-        df['rsi'] = calculate_rsi(df['close'], window=rsi_period)
+        df['rsi'] = _cached_rsi_values(df['close'], int(rsi_period))
 
         # --- 2. Entry Signal Setup ---
         entry_type = self.params.get('ENTRY_TYPE', 'DONCHIAN')

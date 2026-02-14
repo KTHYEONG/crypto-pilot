@@ -31,6 +31,12 @@ class BacktestEngineFastSpot:
         
         self.logger = logging.getLogger(__name__)
         self._prepare_data()
+
+    def _resolve_trend_gate_mode(self):
+        mode = str(self.strategy.params.get("TREND_GATE_MODE", "STRICT")).strip().upper()
+        if mode not in {"STRICT", "SOFT", "OFF"}:
+            mode = "STRICT"
+        return mode
     
     def _prepare_data(self):
         """
@@ -72,24 +78,20 @@ class BacktestEngineFastSpot:
             mapped_vals = daily_vals[self._merge_index_map]
             self.df[f'daily_{col}'] = mapped_vals
             
-        # [LOGIC MERGE] Combine Hourly Trend with Daily Trend
-        # Final Trend = 1 if (Hourly Trend == 1 AND Daily Trend == 1) else ...
-        # Actually, let's keep them separate and handle logic in Numba or here.
-        # For simplicity and speed, let's update 'trend_direction' here.
-        
-        # Strategy: "Trend Alignment"
-        # If Daily Trend is Uptrend (1), allow Long Entry.
-        # If Daily Trend is Downtrend/Neutral, block Long Entry.
-        # (Spot is Long-Only, so this is critical)
-        
+        # Trend gate mode:
+        # - STRICT: hourly AND daily (legacy)
+        # - SOFT  : hourly OR daily
+        # - OFF   : hourly only
+        trend_gate_mode = self._resolve_trend_gate_mode()
         if 'daily_trend_direction' in self.df.columns:
-            # Overwrite hourly trend_direction to enforce Daily Filter
-            # 1 (Long) only if both are 1.
-            h_trend = self.df['trend_direction'].values
-            d_trend = self.df['daily_trend_direction'].values
-            
-            # Vectorized AND logic: Both must be positive 1
-            final_trend = np.where((h_trend == 1) & (d_trend == 1), 1, 0)
+            h_trend = np.nan_to_num(self.df['trend_direction'].values, nan=0.0)
+            d_trend = np.nan_to_num(self.df['daily_trend_direction'].values, nan=0.0)
+            if trend_gate_mode == "OFF":
+                final_trend = np.where(h_trend == 1, 1, 0)
+            elif trend_gate_mode == "SOFT":
+                final_trend = np.where((h_trend == 1) | (d_trend == 1), 1, 0)
+            else:
+                final_trend = np.where((h_trend == 1) & (d_trend == 1), 1, 0)
             self.df['trend_direction'] = final_trend
             
         # Extract Arrays for Numba
@@ -117,11 +119,17 @@ class BacktestEngineFastSpot:
         # Merge
         self.df = pd.merge(self.hourly_df, shifted_daily, on='date_key', how='left')
         
-        # Apply Logic Merge (Trend Alignment)
+        # Apply trend gate mode (STRICT/SOFT/OFF)
+        trend_gate_mode = self._resolve_trend_gate_mode()
         if 'daily_trend_direction' in self.df.columns:
             h_trend = self.df['trend_direction'].fillna(0).values
             d_trend = self.df['daily_trend_direction'].fillna(0).values
-            self.df['trend_direction'] = np.where((h_trend == 1) & (d_trend == 1), 1, 0)
+            if trend_gate_mode == "OFF":
+                self.df['trend_direction'] = np.where(h_trend == 1, 1, 0)
+            elif trend_gate_mode == "SOFT":
+                self.df['trend_direction'] = np.where((h_trend == 1) | (d_trend == 1), 1, 0)
+            else:
+                self.df['trend_direction'] = np.where((h_trend == 1) & (d_trend == 1), 1, 0)
             
         self._extract_arrays()
 
@@ -201,13 +209,28 @@ class BacktestEngineFastSpot:
         panic_regime_multiplier = self.strategy.params.get('PANIC_REGIME_MULTIPLIER', 0.15)
         
         # [NEW] Entry Filters (Safety)
-        rsi_entry_max = self.strategy.params.get('RSI_ENTRY_MAX', 100) # Default: No max limit
-        natr_entry_min = self.strategy.params.get('NATR_ENTRY_MIN', 0.0) # Default: No min limit
-        
+        rsi_entry_max_raw = self.strategy.params.get('RSI_ENTRY_MAX', 100)
+        rsi_entry_max = 100.0 if rsi_entry_max_raw is None else float(rsi_entry_max_raw)
+        natr_entry_min = float(self.strategy.params.get('NATR_ENTRY_MIN', 0.0)) # Default: No min limit
+
+        # [NEW] Position management upgrades
+        enable_scale_out = bool(self.strategy.params.get('ENABLE_SCALE_OUT', False))
+        scale_out_trigger_atr = float(self.strategy.params.get('SCALE_OUT_TRIGGER_ATR', 1.2))
+        scale_out_ratio = float(self.strategy.params.get('SCALE_OUT_RATIO', 0.5))
+        enable_breakeven = bool(self.strategy.params.get('ENABLE_BREAKEVEN', False))
+        breakeven_buffer_pct = float(self.strategy.params.get('BREAKEVEN_BUFFER_PCT', 0.001))
+        enable_pyramiding = bool(self.strategy.params.get('ENABLE_PYRAMIDING', False))
+        pyramid_trigger_atr = float(self.strategy.params.get('PYRAMID_TRIGGER_ATR', 1.8))
+        pyramid_step_atr = float(self.strategy.params.get('PYRAMID_STEP_ATR', 1.0))
+        pyramid_risk_ratio = float(self.strategy.params.get('PYRAMID_RISK_RATIO', 0.30))
+        pyramid_max_adds = int(self.strategy.params.get('PYRAMID_MAX_ADDS', 1))
 
         # [NEW] Weak Regime (Choppy/Correction)
         hurst_weak_threshold = self.strategy.params.get('WEAK_REGIME_HURST', 0.45)
         weak_regime_multiplier = self.strategy.params.get('WEAK_REGIME_MULTIPLIER', 0.6)
+        enable_risk_off_hard_gate = bool(self.strategy.params.get('ENABLE_RISK_OFF_HARD_GATE', False))
+        risk_off_exit_on_trigger = bool(self.strategy.params.get('RISK_OFF_EXIT_ON_TRIGGER', False))
+        risk_off_cooldown_bars = int(self.strategy.params.get('RISK_OFF_COOLDOWN_BARS', 2))
 
         # [NEW] Capital Management
         use_compounding = self.strategy.params.get('USE_COMPOUNDING', False)
@@ -233,8 +256,14 @@ class BacktestEngineFastSpot:
             strong_regime_multiplier, panic_regime_multiplier,
             # [NEW] Weak Regime
             hurst_weak_threshold, weak_regime_multiplier,
+            # [NEW] Risk-Off hard gate
+            enable_risk_off_hard_gate, risk_off_exit_on_trigger, risk_off_cooldown_bars,
             # [NEW] Entry Filters
             rsi_entry_max, natr_entry_min,
+            # [NEW] Scale-out / Breakeven / Pyramiding
+            enable_scale_out, scale_out_trigger_atr, scale_out_ratio,
+            enable_breakeven, breakeven_buffer_pct,
+            enable_pyramiding, pyramid_trigger_atr, pyramid_step_atr, pyramid_risk_ratio, pyramid_max_adds,
             warmup_bars,
             # [NEW] Capital Mgmt
             use_compounding, max_capital_usage
@@ -308,7 +337,11 @@ def backtest_loop_spot_numba(
     hurst_threshold, strong_regime_natr, natr_panic_threshold, rsi_panic_threshold,
     strong_regime_multiplier, panic_regime_multiplier,
     hurst_weak_threshold, weak_regime_multiplier, # [NEW] Weak Regime
+    enable_risk_off_hard_gate, risk_off_exit_on_trigger, risk_off_cooldown_bars,
     rsi_entry_max, natr_entry_min,
+    enable_scale_out, scale_out_trigger_atr, scale_out_ratio,
+    enable_breakeven, breakeven_buffer_pct,
+    enable_pyramiding, pyramid_trigger_atr, pyramid_step_atr, pyramid_risk_ratio, pyramid_max_adds,
     warmup_bars,
     use_compounding, max_capital_usage # [NEW] Capital Mgmt
 ):
@@ -327,6 +360,13 @@ def backtest_loop_spot_numba(
     stop_price = 0.0
     tp_price = 0.0
     entry_cost = 0.0
+    realized_revenue = 0.0
+    scale_out_done = False
+    pending_pyramid = False
+    pending_pyramid_risk = 0.0
+    next_pyramid_trigger = 0.0
+    pyramid_add_count = 0
+    risk_off_cooldown_remaining = 0
     
     max_trades = 30000
     # [entry_idx, exit_idx, entry_price, exit_price, pnl_pct, pnl, duration_bars]
@@ -335,6 +375,22 @@ def backtest_loop_spot_numba(
     
     equity_curve = np.zeros(n)
     exec_risk = risk_per_trade 
+    if scale_out_ratio < 0.0:
+        scale_out_ratio = 0.0
+    if scale_out_ratio > 0.95:
+        scale_out_ratio = 0.95
+    if pyramid_max_adds < 0:
+        pyramid_max_adds = 0
+    if pyramid_risk_ratio < 0.0:
+        pyramid_risk_ratio = 0.0
+    if pyramid_risk_ratio > 0.95:
+        pyramid_risk_ratio = 0.95
+    if pyramid_step_atr < 0.1:
+        pyramid_step_atr = 0.1
+    if scale_out_trigger_atr < 0.1:
+        scale_out_trigger_atr = 0.1
+    if pyramid_trigger_atr < 0.1:
+        pyramid_trigger_atr = 0.1
     
     for i in range(n):
         # [WARMUP] Skip trading during warmup period
@@ -346,6 +402,20 @@ def backtest_loop_spot_numba(
         c_price = close[i]
         c_high = high[i]
         c_low = low[i]
+        risk_off = False
+        if enable_risk_off_hard_gate:
+            if trend_dir[i] != 1:
+                risk_off = True
+            elif natr[i] > natr_panic_threshold:
+                risk_off = True
+            elif hurst[i] < hurst_weak_threshold:
+                risk_off = True
+        if risk_off:
+            if risk_off_cooldown_bars > risk_off_cooldown_remaining:
+                risk_off_cooldown_remaining = risk_off_cooldown_bars
+        elif risk_off_cooldown_remaining > 0:
+            risk_off_cooldown_remaining -= 1
+        risk_blocked = risk_off or (risk_off_cooldown_remaining > 0)
         
         # --- 1. EXECUTION: BUY AT OPEN (If signaled at i-1) ---
         if pending_entry and not in_position:
@@ -372,7 +442,10 @@ def backtest_loop_spot_numba(
                 current_capital = min(balance, initial_balance)
                 
             cost = current_capital * target_risk
-            cost = min(cost, max_capital_usage) # Cap max usage
+            # Cap total notional usage for long-only spot.
+            current_exposure = coin * fill_price
+            remaining_cap = max(0.0, max_capital_usage - current_exposure)
+            cost = min(cost, remaining_cap)
             
             # Ensure we have enough balance
             cost = min(cost, balance)
@@ -381,13 +454,67 @@ def backtest_loop_spot_numba(
                 coin = (cost * (1 - fee_rate)) / fill_price
                 balance -= cost
                 entry_cost = cost
+                realized_revenue = 0.0
                 
                 in_position = True
                 pending_entry = False
+                pending_pyramid = False
                 entry_price = fill_price
                 entry_idx = i
                 highest = fill_price
                 pos_atr = sig_atr
+                scale_out_done = False
+                pyramid_add_count = 0
+                next_pyramid_trigger = entry_price + (max(pos_atr, 1e-9) * pyramid_trigger_atr)
+            else:
+                pending_entry = False
+
+        # --- 1b. EXECUTION: PYRAMID ADD AT OPEN (If signaled at i-1) ---
+        if pending_pyramid and in_position:
+            fill_price = c_open * (1 + slippage_rate)
+            sig_atr = atr[i-1] if i > 0 else atr[i]
+
+            target_risk = pending_pyramid_risk
+            if target_risk > 0.99:
+                target_risk = 0.99
+            if target_risk < 0.0:
+                target_risk = 0.0
+
+            current_capital = balance
+            if not use_compounding:
+                current_capital = min(balance, initial_balance)
+
+            cost = current_capital * target_risk
+            current_exposure = coin * fill_price
+            remaining_cap = max(0.0, max_capital_usage - current_exposure)
+            cost = min(cost, remaining_cap)
+            cost = min(cost, balance)
+
+            if cost > 0:
+                add_qty = (cost * (1 - fee_rate)) / fill_price
+                if add_qty > 0:
+                    prev_coin = coin
+                    coin = prev_coin + add_qty
+                    balance -= cost
+                    entry_cost += cost
+                    entry_price = ((entry_price * prev_coin) + (fill_price * add_qty)) / max(coin, 1e-12)
+                    pos_atr = ((pos_atr * prev_coin) + (sig_atr * add_qty)) / max(coin, 1e-12)
+                    if fill_price > highest:
+                        highest = fill_price
+                    if stop_loss_type == 1:
+                        base_stop = entry_price - (pos_atr * atr_sl_mult)
+                    else:
+                        base_stop = entry_price * (1 - stop_loss_pct)
+                    if base_stop > stop_price:
+                        stop_price = base_stop
+                    if use_take_profit:
+                        tp_price = entry_price + (pos_atr * tp_atr_mult)
+                    pyramid_add_count += 1
+                    next_pyramid_trigger = entry_price + (
+                        max(pos_atr, 1e-9)
+                        * (pyramid_trigger_atr + (float(pyramid_add_count) * pyramid_step_atr))
+                    )
+            pending_pyramid = False
         
         # --- 2. EXECUTION: EXIT CHECKS (During Bar i) ---
         if in_position:
@@ -400,25 +527,62 @@ def backtest_loop_spot_numba(
                 current_stop = max(stop_price, parabolic_sar[i])
 
             if c_low <= current_stop:
-                # Market Exit Slip
-                exit_price = current_stop * (1 - slippage_rate)
+                # Gap-aware stop fill: if bar opens below stop, fill at open-side worse price.
+                stop_fill = current_stop
+                if c_open < current_stop:
+                    stop_fill = c_open
+                exit_price = stop_fill * (1 - slippage_rate)
                 exit_triggered = True
             
-            # [SEQ-2] Check Take Profit
-            elif not exit_triggered and use_take_profit and tp_price > 0 and c_high >= tp_price:
+            # [SEQ-2] Scale-out on favorable move (optional)
+            elif (
+                not exit_triggered
+                and enable_scale_out
+                and (not scale_out_done)
+                and coin > 0
+                and pos_atr > 0
+            ):
+                scale_out_price = entry_price + (pos_atr * scale_out_trigger_atr)
+                if c_high >= scale_out_price:
+                    scale_qty = coin * scale_out_ratio
+                    if scale_qty > coin:
+                        scale_qty = coin
+                    remain_qty = coin - scale_qty
+                    if scale_qty > 0 and remain_qty >= 1e-12:
+                        scale_revenue = scale_qty * scale_out_price * (1 - fee_rate)
+                        balance += scale_revenue
+                        realized_revenue += scale_revenue
+                        coin = remain_qty
+                        scale_out_done = True
+                        if enable_breakeven:
+                            breakeven_price = entry_price * (
+                                1.0 + (2.0 * fee_rate) + slippage_rate + breakeven_buffer_pct
+                            )
+                            if breakeven_price > stop_price:
+                                stop_price = breakeven_price
+                        if use_take_profit and tp_price > 0 and tp_price <= scale_out_price:
+                            tp_price = scale_out_price + (pos_atr * 0.25)
+
+            # [SEQ-3] Check Take Profit
+            if not exit_triggered and use_take_profit and tp_price > 0 and c_high >= tp_price:
                 # Limit Exit (No Slip for TP usually)
-                exit_price = tp_price 
+                exit_price = tp_price
                 exit_triggered = True
 
-            # [SEQ-3] Conditional Market Exits (RSI, Trend, Time)
+            # [SEQ-4] Conditional Market Exits (RSI, Trend, Time)
             elif not exit_triggered:
+                # Hard risk-off exit: keep behavior deterministic in hostile regime.
+                if enable_risk_off_hard_gate and risk_off_exit_on_trigger and risk_blocked:
+                    exit_price = c_price * (1 - slippage_rate)
+                    exit_triggered = True
+
                 # RSI Panic
-                if rsi[i] > rsi_panic_threshold:
+                elif rsi[i] > rsi_panic_threshold:
                     exit_price = c_price * (1 - slippage_rate)
                     exit_triggered = True
                 
                 # Trend Reversal
-                elif i > 0 and trend_dir[i] == -1: 
+                elif i > 0 and trend_dir[i] <= 0:
                     exit_price = c_price * (1 - slippage_rate)
                     exit_triggered = True
                 
@@ -433,8 +597,9 @@ def backtest_loop_spot_numba(
             if exit_triggered:
                 revenue = coin * exit_price * (1 - fee_rate)
                 balance += revenue 
+                realized_revenue += revenue
                 
-                pnl = revenue - entry_cost
+                pnl = realized_revenue - entry_cost
                 base_cost = entry_cost if entry_cost > 1e-9 else 1e-9
                 pnl_pct = (pnl / base_cost) * 100.0
                 if trade_count < max_trades:
@@ -452,6 +617,12 @@ def backtest_loop_spot_numba(
                 coin = 0.0
                 in_position = False
                 entry_cost = 0.0
+                realized_revenue = 0.0
+                scale_out_done = False
+                pending_pyramid = False
+                pending_pyramid_risk = 0.0
+                next_pyramid_trigger = 0.0
+                pyramid_add_count = 0
             else:
                 # [SEQ-4] Update High and Trailing Stop for NEXT Bar (i+1)
                 if c_high > highest:
@@ -464,6 +635,39 @@ def backtest_loop_spot_numba(
                         if new_stop > stop_price:
                             stop_price = new_stop
 
+                # [SEQ-5] Pyramiding signal at close i -> execute at open i+1.
+                if (
+                    enable_pyramiding
+                    and (not pending_pyramid)
+                    and pyramid_add_count < pyramid_max_adds
+                    and i < n - 1
+                ):
+                    can_add = True
+                    if strength_filter[i] == 0:
+                        can_add = False
+                    elif use_volume_filter and volume_ratio[i] < vol_threshold:
+                        can_add = False
+                    elif rsi[i] >= rsi_entry_max:
+                        can_add = False
+                    elif natr[i] < natr_entry_min:
+                        can_add = False
+                    elif trend_dir[i] != 1:
+                        can_add = False
+                    elif risk_blocked:
+                        can_add = False
+
+                    if can_add and c_price > next_pyramid_trigger:
+                        regime_mult = 1.0
+                        if use_dynamic_risk:
+                            if natr[i] > natr_panic_threshold:
+                                regime_mult = panic_regime_multiplier
+                            elif hurst[i] > hurst_threshold and natr[i] > strong_regime_natr:
+                                regime_mult = strong_regime_multiplier
+                            elif hurst[i] < hurst_weak_threshold:
+                                regime_mult = weak_regime_multiplier
+                        pending_pyramid_risk = risk_per_trade * regime_mult * pyramid_risk_ratio
+                        pending_pyramid = True
+
         # --- 3. SIGNAL: ENTRY DETECTION (At Close of i, for Open of i+1) ---
         elif not in_position and not pending_entry:
             can_signal = True
@@ -472,6 +676,7 @@ def backtest_loop_spot_numba(
             elif use_volume_filter and volume_ratio[i] < vol_threshold: can_signal = False
             elif rsi[i] >= rsi_entry_max: can_signal = False
             elif natr[i] < natr_entry_min: can_signal = False
+            elif risk_blocked: can_signal = False
             
             if can_signal and trend_dir[i] == 1 and c_price > entry_upper[i]:
                 # [DYNAMIC RISK SIZING]
