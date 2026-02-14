@@ -5,6 +5,71 @@ Refactored to separate Period constraints and enhance market-specific logic.
 """
 
 from copy import deepcopy
+from typing import Any, Dict
+
+# =========================================================
+# Spot Trade Gate Policy (single source of truth)
+# =========================================================
+SPOT_TRADE_GATE_POLICY: Dict[str, Any] = {
+    "statistical": {
+        "confidence": 0.80,
+        "margin_error": 0.25,
+        "reference_days": 120,
+        "day_scale_exp": 0.5,
+        "min_day_scale": 0.6,
+    },
+    "selection": {
+        "use_stat_min_trades": True,
+        "stat_min_trades_cap": 60,
+        "total_trades_multiplier": 1.0,
+        "pf_shrink_ref_trades": 30.0,
+        "tf_min_gates": {
+            "30m": {"core_min_trades": 12, "core_min_total_trades": 24},
+            "1h": {"core_min_trades": 10, "core_min_total_trades": 20},
+            "4h": {"core_min_trades": 8, "core_min_total_trades": 16},
+        },
+    },
+    "holdout": {
+        "use_stat_min_trades": True,
+        "sanity_gates": {
+            "core_min_return": 0.0,
+            "core_min_excess_ret": 2.0,
+            "core_dual_return_mode": True,
+            "core_min_pf": 1.05,
+            "core_min_trades": 8,
+            "core_min_symbol_trades": 6,
+            "core_min_total_trades": 14,
+            "core_total_trades_gate_mult": 1.5,
+            "low_activity_neutralize_ratio": 0.75,
+            "low_activity_severe_min_return": -1.0,
+            "low_activity_severe_min_pf": 0.90,
+            "core_max_avg_mdd_abs": 2.5,
+            "min_symbol_coverage": 0.67,
+        },
+        "trades_per_30d": {
+            "30m": 2.8,
+            "1h": 1.8,
+            "4h": 0.9,
+            "default": 1.8,
+        },
+        "min_trades_floor": {
+            "30m": 10,
+            "1h": 8,
+            "4h": 5,
+            "default": 8,
+        },
+        "min_trades_cap": {
+            "30m": 32,
+            "1h": 20,
+            "4h": 12,
+            "default": 20,
+        },
+    },
+}
+
+
+def GET_SPOT_TRADE_GATE_POLICY() -> Dict[str, Any]:
+    return deepcopy(SPOT_TRADE_GATE_POLICY)
 
 # =========================================================
 # 1. PERIOD & THRESHOLD CONSTANTS (User Configurable)
@@ -116,6 +181,18 @@ BASE_SEARCH_SPACE = {
     
     # [NEW] Panic Exit Parameters
     'RSI_EXIT_THRESHOLD': {'type': 'int', 'low': 75, 'high': 95, 'step': 1}, # 75~95 (Long Exit), 25~5 (Short Exit)
+
+    # [NEW] Active Position Management (Spot)
+    'ENABLE_SCALE_OUT': {'type': 'categorical', 'choices': [False, True]},
+    'SCALE_OUT_TRIGGER_ATR': {'type': 'float', 'low': 0.8, 'high': 3.0, 'step': 0.1},
+    'SCALE_OUT_RATIO': {'type': 'float', 'low': 0.30, 'high': 0.70, 'step': 0.05},
+    'ENABLE_BREAKEVEN': {'type': 'categorical', 'choices': [False, True]},
+    'BREAKEVEN_BUFFER_PCT': {'type': 'float', 'low': 0.0, 'high': 0.005, 'step': 0.001},
+    'ENABLE_PYRAMIDING': {'type': 'categorical', 'choices': [False, True]},
+    'PYRAMID_TRIGGER_ATR': {'type': 'float', 'low': 1.0, 'high': 3.5, 'step': 0.1},
+    'PYRAMID_STEP_ATR': {'type': 'float', 'low': 0.5, 'high': 2.0, 'step': 0.1},
+    'PYRAMID_RISK_RATIO': {'type': 'float', 'low': 0.15, 'high': 0.50, 'step': 0.05},
+    'PYRAMID_MAX_ADDS': {'type': 'int', 'low': 1, 'high': 2, 'step': 1},
 
     # [NEW] Safe Entry Filters
     'RSI_ENTRY_MAX': {'type': 'categorical', 'choices': [None, 70, 75, 80, 85]}, # Don't buy if RSI > X (Overbought Top)
@@ -292,28 +369,48 @@ def GET_SEARCH_SPACE(mode, market_type='futures'):
             space['PANIC_REGIME_MULTIPLIER'] = {'type': 'float', 'low': 0.15, 'high': 0.35, 'step': 0.05}
         
         
-        # [ISOLATION] Remove Spot-only safety filters to prevent ghost parameters in Futures
-        if 'NATR_ENTRY_MIN' in space: del space['NATR_ENTRY_MIN']
+        # [ISOLATION] Remove Spot-only parameters to prevent ghost dimensions in Futures
+        for key in (
+            'NATR_ENTRY_MIN',
+            'ENABLE_SCALE_OUT',
+            'SCALE_OUT_TRIGGER_ATR',
+            'SCALE_OUT_RATIO',
+            'ENABLE_BREAKEVEN',
+            'BREAKEVEN_BUFFER_PCT',
+            'ENABLE_PYRAMIDING',
+            'PYRAMID_TRIGGER_ATR',
+            'PYRAMID_STEP_ATR',
+            'PYRAMID_RISK_RATIO',
+            'PYRAMID_MAX_ADDS',
+        ):
+            if key in space:
+                del space[key]
         
     else:
         # [Spot] Long-only, no leverage
         if 'LEVERAGE' in space:
             del space['LEVERAGE']
 
-        # Mode-aware spot sizing range (long-only: keep aggressive upside while preserving exploration of safer sizing)
+        # Mode-aware spot sizing range (long-only): bias toward survival and PF stability.
         if mode == 'SCALP':
-            space['RISK_PER_TRADE_SPOT'] = {'type': 'float', 'low': 0.35, 'high': 0.90, 'step': 0.05}
+            space['RISK_PER_TRADE_SPOT'] = {'type': 'float', 'low': 0.20, 'high': 0.55, 'step': 0.05}
         elif mode == 'DAY':
-            space['RISK_PER_TRADE_SPOT'] = {'type': 'float', 'low': 0.30, 'high': 0.85, 'step': 0.05}
+            space['RISK_PER_TRADE_SPOT'] = {'type': 'float', 'low': 0.16, 'high': 0.50, 'step': 0.02}
         elif mode == 'SWING':
-            space['RISK_PER_TRADE_SPOT'] = {'type': 'float', 'low': 0.25, 'high': 0.75, 'step': 0.05}
+            space['RISK_PER_TRADE_SPOT'] = {'type': 'float', 'low': 0.12, 'high': 0.46, 'step': 0.02}
         else:  # UNIFIED / ALL
-            space['RISK_PER_TRADE_SPOT'] = {'type': 'float', 'low': 0.18, 'high': 0.98, 'step': 0.02}
+            # Long-only spot: avoid aggressive sizing that tends to collapse holdout PF.
+            space['RISK_PER_TRADE_SPOT'] = {'type': 'float', 'low': 0.10, 'high': 0.56, 'step': 0.02}
 
         # Spot-specific safety filters
         # Keep safety available, but broaden to include near-disabled region for high-return exploration.
-        space['RSI_ENTRY_MAX'] = {'type': 'int', 'low': 66, 'high': 100, 'step': 2}
-        space['NATR_ENTRY_MIN'] = {'type': 'float', 'low': 0.0, 'high': 1.2, 'step': 0.1}
+        # Prevent over-restrictive entry filters that frequently collapse to zero-trade candidates.
+        space['RSI_ENTRY_MAX'] = {'type': 'int', 'low': 72, 'high': 94, 'step': 2}
+        space['NATR_ENTRY_MIN'] = {'type': 'float', 'low': 0.0, 'high': 0.5, 'step': 0.1}
+        # Trend gate policy for long-only spot:
+        # STRICT=hourly&daily, SOFT=hourly|daily, OFF=hourly only.
+        # LONG-only spot: STRICT often over-filters in risk-off/chop regimes.
+        space['TREND_GATE_MODE'] = {'type': 'categorical', 'choices': ['SOFT', 'OFF']}
 
         # Keep dynamic-risk family fully searchable for spot
         space['USE_DYNAMIC_RISK'] = {'type': 'categorical', 'choices': [False, True]}
@@ -341,47 +438,65 @@ def GET_SEARCH_SPACE(mode, market_type='futures'):
             space['USE_TAKE_PROFIT'] = {'type': 'categorical', 'choices': [True, False]}
             space['USE_VOLUME_FILTER'] = {'type': 'categorical', 'choices': [True, False]}
 
-            # Timeframes aligned with futures unified runtime profile
+            # Long-only spot unified set: medium/slow anchors for stability.
             space['TIMEFRAME'] = {'type': 'categorical', 'choices': ['30m', '1h', '4h']}
 
-            # Core execution bounds (spot: no leverage, broader trend-capture + aggressive profile candidates)
-            space['ENTRY_PERIOD'] = {'type': 'int', 'low': 10, 'high': 220, 'log': True}
-            space['MA_PERIOD'] = {'type': 'int', 'low': 8, 'high': 240, 'log': True}
-            space['ATR_PERIOD'] = {'type': 'int', 'low': 8, 'high': 60, 'log': True}
-            space['STOP_LOSS_PCT'] = {'type': 'float', 'low': 0.006, 'high': 0.080, 'step': 0.002}
-            space['ATR_STOP_LOSS_MULT'] = {'type': 'float', 'low': 1.0, 'high': 5.5, 'step': 0.25}
-            space['TAKE_PROFIT_ATR_MULT'] = {'type': 'float', 'low': 1.5, 'high': 18.0, 'log': True}
-            space['ATR_MULTIPLIER'] = {'type': 'float', 'low': 1.5, 'high': 7.0, 'step': 0.5}
-            space['MAX_HOLDING_BARS'] = {'type': 'int', 'low': 40, 'high': 520, 'log': True}
-            # Step-aligned range (avoid Optuna warning while widening activation exploration)
-            space['TRAILING_ACTIVATION_ATR'] = {'type': 'float', 'low': 0.3, 'high': 4.8, 'step': 0.5}
-            space['TIME_EXIT_PROFIT_THRESHOLD'] = {'type': 'float', 'low': -0.5, 'high': 2.0, 'step': 0.1}
+            # Core execution bounds (spot UNIFIED): avoid ultra-slow windows that cause trade starvation.
+            space['ENTRY_PERIOD'] = {'type': 'int', 'low': 8, 'high': 96, 'log': True}
+            space['MA_PERIOD'] = {'type': 'int', 'low': 8, 'high': 120, 'log': True}
+            space['ATR_PERIOD'] = {'type': 'int', 'low': 7, 'high': 28, 'log': True}
+            # Step-divisible bounds to avoid distribution warning and suppress ultra-wide stops.
+            space['STOP_LOSS_PCT'] = {'type': 'float', 'low': 0.008, 'high': 0.042, 'step': 0.002}
+            space['ATR_STOP_LOSS_MULT'] = {'type': 'float', 'low': 1.2, 'high': 4.6, 'step': 0.2}
+            space['TAKE_PROFIT_ATR_MULT'] = {'type': 'float', 'low': 1.6, 'high': 12.0, 'log': True}
+            space['ATR_MULTIPLIER'] = {'type': 'float', 'low': 1.5, 'high': 4.8, 'step': 0.3}
+            space['MAX_HOLDING_BARS'] = {'type': 'int', 'low': 20, 'high': 260, 'log': True}
+            space['TRAILING_ACTIVATION_ATR'] = {'type': 'float', 'low': 0.5, 'high': 4.5, 'step': 0.5}
+            space['TIME_EXIT_PROFIT_THRESHOLD'] = {'type': 'float', 'low': 0.0, 'high': 1.8, 'step': 0.1}
             space['RSI_EXIT_THRESHOLD'] = {'type': 'int', 'low': 78, 'high': 98, 'step': 1}
 
-            # Indicator/detail bounds (expanded)
+            # Indicator/detail bounds: reduce over-smoothing and over-filtering in bear/choppy regimes.
             space['KELTNER_ATR_MULT'] = {'type': 'float', 'low': 1.0, 'high': 2.8, 'step': 0.1}
             space['BB_STD'] = {'type': 'float', 'low': 1.6, 'high': 3.2, 'step': 0.1}
-            space['SUPERTREND_MULT'] = {'type': 'float', 'low': 1.0, 'high': 4.2, 'log': True}
-            space['SUPERTREND_PERIOD'] = {'type': 'int', 'low': 5, 'high': 50, 'log': True}
+            space['SUPERTREND_MULT'] = {'type': 'float', 'low': 1.0, 'high': 2.8, 'log': True}
+            space['SUPERTREND_PERIOD'] = {'type': 'int', 'low': 5, 'high': 24, 'log': True}
             space['ICHIMOKU_TENKAN'] = {'type': 'int', 'low': 7, 'high': 24, 'log': True}
-            space['ICHIMOKU_KIJUN'] = {'type': 'int', 'low': 20, 'high': 60, 'log': True}
-            space['ICHIMOKU_SENKOU_B'] = {'type': 'int', 'low': 40, 'high': 120, 'log': True}
-            space['STRENGTH_FILTER_PERIOD'] = {'type': 'int', 'low': 8, 'high': 55, 'log': True}
-            space['ADX_THRESHOLD'] = {'type': 'int', 'low': 15, 'high': 40, 'step': 1}
+            space['ICHIMOKU_KIJUN'] = {'type': 'int', 'low': 20, 'high': 42, 'log': True}
+            space['ICHIMOKU_SENKOU_B'] = {'type': 'int', 'low': 40, 'high': 78, 'log': True}
+            space['STRENGTH_FILTER_PERIOD'] = {'type': 'int', 'low': 8, 'high': 28, 'log': True}
+            space['ADX_THRESHOLD'] = {'type': 'int', 'low': 10, 'high': 26, 'step': 1}
             space['RSI_OVERBOUGHT'] = {'type': 'int', 'low': 65, 'high': 90, 'step': 1}
             space['RSI_OVERSOLD'] = {'type': 'int', 'low': 10, 'high': 35, 'step': 1}
-            space['VOLUME_THRESHOLD_MULT'] = {'type': 'float', 'low': 1.0, 'high': 3.0, 'log': True}
-            space['VOLUME_MA_PERIOD'] = {'type': 'int', 'low': 8, 'high': 50, 'log': True}
+            space['VOLUME_THRESHOLD_MULT'] = {'type': 'float', 'low': 0.80, 'high': 1.30, 'log': True}
+            space['VOLUME_MA_PERIOD'] = {'type': 'int', 'low': 8, 'high': 30, 'log': True}
             space['SAR_STEP'] = {'type': 'float', 'low': 0.005, 'high': 0.04, 'step': 0.005}
 
-            # Dynamic-risk bounds (expanded for higher-upside exploration in strong trends)
+            # Dynamic-risk bounds: reduce extreme sensitivity and keep robust regimes.
             space['STRONG_REGIME_HURST'] = {'type': 'float', 'low': 0.50, 'high': 0.65, 'step': 0.01}
-            space['STRONG_REGIME_NATR'] = {'type': 'float', 'low': 0.5, 'high': 2.2, 'step': 0.1}
-            space['STRONG_REGIME_MULTIPLIER'] = {'type': 'float', 'low': 1.00, 'high': 1.80, 'step': 0.05}
+            space['STRONG_REGIME_NATR'] = {'type': 'float', 'low': 0.6, 'high': 1.8, 'step': 0.1}
+            space['STRONG_REGIME_MULTIPLIER'] = {'type': 'float', 'low': 1.00, 'high': 1.35, 'step': 0.05}
             space['WEAK_REGIME_HURST'] = {'type': 'float', 'low': 0.40, 'high': 0.50, 'step': 0.01}
-            space['WEAK_REGIME_MULTIPLIER'] = {'type': 'float', 'low': 0.30, 'high': 1.00, 'step': 0.05}
-            space['PANIC_REGIME_NATR'] = {'type': 'float', 'low': 2.5, 'high': 9.5, 'step': 0.5}
-            space['PANIC_REGIME_MULTIPLIER'] = {'type': 'float', 'low': 0.05, 'high': 0.60, 'step': 0.05}
+            space['WEAK_REGIME_MULTIPLIER'] = {'type': 'float', 'low': 0.50, 'high': 0.85, 'step': 0.05}
+            space['PANIC_REGIME_NATR'] = {'type': 'float', 'low': 3.0, 'high': 8.5, 'step': 0.5}
+            space['PANIC_REGIME_MULTIPLIER'] = {'type': 'float', 'low': 0.10, 'high': 0.30, 'step': 0.05}
+            # Risk-off gate controls (previously fixed in engine defaults): make them searchable.
+            space['ENABLE_RISK_OFF_HARD_GATE'] = {'type': 'categorical', 'choices': [False, True]}
+            space['RISK_OFF_EXIT_ON_TRIGGER'] = {'type': 'categorical', 'choices': [False, True]}
+            space['RISK_OFF_COOLDOWN_BARS'] = {'type': 'int', 'low': 0, 'high': 4, 'step': 1}
+
+            # Active position management: avoid excessively aggressive add-on behavior.
+            space['ENABLE_SCALE_OUT'] = {'type': 'categorical', 'choices': [False]}
+            # Delay partial take-profit to avoid cutting trend winners too early.
+            space['SCALE_OUT_TRIGGER_ATR'] = {'type': 'float', 'low': 1.4, 'high': 3.2, 'step': 0.1}
+            space['SCALE_OUT_RATIO'] = {'type': 'float', 'low': 0.15, 'high': 0.35, 'step': 0.05}
+            space['ENABLE_BREAKEVEN'] = {'type': 'categorical', 'choices': [False]}
+            # Keep some room after break-even move to reduce micro-stop churn.
+            space['BREAKEVEN_BUFFER_PCT'] = {'type': 'float', 'low': 0.001, 'high': 0.008, 'step': 0.001}
+            space['ENABLE_PYRAMIDING'] = {'type': 'categorical', 'choices': [False]}
+            space['PYRAMID_TRIGGER_ATR'] = {'type': 'float', 'low': 1.4, 'high': 3.0, 'step': 0.1}
+            space['PYRAMID_STEP_ATR'] = {'type': 'float', 'low': 0.8, 'high': 1.6, 'step': 0.1}
+            space['PYRAMID_RISK_RATIO'] = {'type': 'float', 'low': 0.10, 'high': 0.35, 'step': 0.05}
+            space['PYRAMID_MAX_ADDS'] = {'type': 'int', 'low': 1, 'high': 2, 'step': 1}
         elif mode == 'SCALP':
             # Scalp (5m~30m): avoid extreme stagnation windows
             space['MAX_HOLDING_BARS'] = {'type': 'int', 'low': 80, 'high': 420, 'log': True}
