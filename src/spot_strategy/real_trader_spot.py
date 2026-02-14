@@ -23,7 +23,7 @@ import pandas as pd
 from datetime import datetime, timedelta
 from pathlib import Path
 from logging.handlers import RotatingFileHandler
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List, Tuple
 
 # tenacity for retry logic
 
@@ -56,9 +56,7 @@ from config.settings import (
     CANDLE_SYNC_OFFSET_SECONDS,
     LOG_MAX_BYTES,
     LOG_BACKUP_COUNT,
-    SPOT_TARGET_SYMBOLS,
     SPOT_OPTUNA_STUDY_NAME,
-    SPOT_ALLOCATION_WEIGHTS,
     MAX_TOTAL_BALANCE_KRW,
 )
 
@@ -91,6 +89,15 @@ SPOT_ORDER_FILL_TIMEOUT_SEC = float(os.getenv("SPOT_ORDER_FILL_TIMEOUT_SEC", "20
 SPOT_ORDER_POLL_INTERVAL_SEC = float(os.getenv("SPOT_ORDER_POLL_INTERVAL_SEC", "1.0"))
 SPOT_ENTRY_MIN_FILL_RATIO_DEFAULT = float(os.getenv("SPOT_ENTRY_MIN_FILL_RATIO", "0.60"))
 SPOT_TIME_SYNC_INTERVAL_SEC = int(os.getenv("SPOT_TIME_SYNC_INTERVAL_SEC", "60"))
+
+# Fixed deployment portfolio (small-account optimized):
+# - KRW-ETH: 65%
+# - KRW-BTC: 35%
+SPOT_FIXED_TARGET_SYMBOLS = ["KRW-ETH", "KRW-BTC"]
+SPOT_FIXED_ALLOCATION_WEIGHTS_D = {
+    "KRW-ETH": Decimal("0.65"),
+    "KRW-BTC": Decimal("0.35"),
+}
 
 
 # ============================================================
@@ -160,7 +167,8 @@ class RealTraderSpot:
     ):
         self.client = UpbitClient(UPBIT_ACCESS_KEY, UPBIT_SECRET_KEY)
         self.db_path = db_path or str(SPOT_STRATEGY_DB)
-        self.symbols = SPOT_TARGET_SYMBOLS.copy()
+        self.symbols = list(SPOT_FIXED_TARGET_SYMBOLS)
+        self.symbol_weights = self._build_fixed_symbol_weights(self.symbols)
 
         # Core components
         self.trade_db = TradeHistoryDB(TRADE_HISTORY_DB)
@@ -194,6 +202,10 @@ class RealTraderSpot:
         self._last_server_time_sync = datetime.min
         
         self.load_strategies_from_db()
+        logger.info(
+            "Fixed spot portfolio active: "
+            + ", ".join(f"{s}={float(self.symbol_weights.get(s, Decimal('0'))*Decimal('100')):.0f}%" for s in self.symbols)
+        )
 
     @staticmethod
     def _to_decimal(value: Any, default: str = "0") -> Decimal:
@@ -209,25 +221,79 @@ class RealTraderSpot:
         dec = RealTraderSpot._to_decimal(value)
         return dec.quantize(Decimal("1"), rounding=ROUND_DOWN)
 
+    @staticmethod
+    def _build_fixed_symbol_weights(symbols: List[str]) -> Dict[str, Decimal]:
+        weights: Dict[str, Decimal] = {}
+        total = Decimal("0")
+        for symbol in symbols:
+            w = RealTraderSpot._to_decimal(SPOT_FIXED_ALLOCATION_WEIGHTS_D.get(symbol, Decimal("0")))
+            if w < Decimal("0"):
+                w = Decimal("0")
+            weights[symbol] = w
+            total += w
+
+        if total <= Decimal("0"):
+            equal = Decimal("1") / Decimal(str(max(1, len(symbols))))
+            return {symbol: equal for symbol in symbols}
+
+        return {symbol: (weights.get(symbol, Decimal("0")) / total) for symbol in symbols}
+
+    @staticmethod
+    def _resolve_trend_gate_mode(params: dict) -> str:
+        mode = str((params or {}).get("TREND_GATE_MODE", "STRICT")).strip().upper()
+        if mode not in {"STRICT", "SOFT", "OFF"}:
+            mode = "STRICT"
+        return mode
+
+    @staticmethod
+    def _compute_risk_off_state(
+        params: dict,
+        trend_direction: int,
+        hurst: float,
+        natr: float,
+        prev_cooldown: int = 0,
+    ) -> Tuple[bool, bool, int]:
+        enable_risk_off_hard_gate = bool((params or {}).get("ENABLE_RISK_OFF_HARD_GATE", False))
+        risk_off_cooldown_bars = max(0, int((params or {}).get("RISK_OFF_COOLDOWN_BARS", 2)))
+        panic_natr = float((params or {}).get("PANIC_REGIME_NATR", 4.5))
+        weak_hurst = float((params or {}).get("WEAK_REGIME_HURST", 0.45))
+
+        risk_off = False
+        if enable_risk_off_hard_gate:
+            if int(trend_direction) != 1:
+                risk_off = True
+            elif float(natr) > panic_natr:
+                risk_off = True
+            elif float(hurst) < weak_hurst:
+                risk_off = True
+
+        cooldown_remaining = max(0, int(prev_cooldown))
+        if risk_off:
+            cooldown_remaining = max(cooldown_remaining, risk_off_cooldown_bars)
+        elif cooldown_remaining > 0:
+            cooldown_remaining -= 1
+
+        risk_blocked = risk_off or (cooldown_remaining > 0)
+        return risk_off, risk_blocked, cooldown_remaining
+
     def _get_effective_risk_weight(self, symbol: str, params: dict, hurst: float = 0.5, natr: float = 0.0) -> Decimal:
         default_weight_d = (Decimal("1") / Decimal(str(len(self.symbols)))) if self.symbols else Decimal("0.5")
-        base_weight_cfg_d = self._to_decimal(SPOT_ALLOCATION_WEIGHTS.get(symbol, float(default_weight_d)))
-        risk_per_trade_d = self._to_decimal(params.get("RISK_PER_TRADE_SPOT", float(base_weight_cfg_d)))
-        if risk_per_trade_d <= Decimal("0"):
-            risk_per_trade_d = base_weight_cfg_d
-        if risk_per_trade_d > Decimal("0.99"):
-            risk_per_trade_d = Decimal("0.99")
-        base_weight_d = risk_per_trade_d
+        base_weight_d = self._to_decimal(self.symbol_weights.get(symbol, default_weight_d))
+        if base_weight_d <= Decimal("0"):
+            base_weight_d = default_weight_d
+        if base_weight_d > Decimal("0.99"):
+            base_weight_d = Decimal("0.99")
 
         regime_mult_d = Decimal("1")
-        use_dynamic_risk = bool(params.get("USE_DYNAMIC_RISK", True))
-        strong_hurst = params.get("HURST_TREND_THRESHOLD", params.get("STRONG_REGIME_HURST", 0.56))
+        # Keep fixed portfolio weights as baseline, but apply regime multiplier when enabled.
+        use_dynamic_risk = bool(params.get("USE_DYNAMIC_RISK", False))
+        strong_hurst = params.get("HURST_TREND_THRESHOLD", params.get("STRONG_REGIME_HURST", 0.60))
         strong_natr = params.get("STRONG_REGIME_NATR", 1.0)
         weak_hurst = params.get("WEAK_REGIME_HURST", 0.45)
-        panic_natr = params.get("PANIC_REGIME_NATR", 9.5)
-        strong_mult_d = self._to_decimal(params.get("STRONG_REGIME_MULTIPLIER", 1.6))
+        panic_natr = params.get("PANIC_REGIME_NATR", 4.5)
+        strong_mult_d = self._to_decimal(params.get("STRONG_REGIME_MULTIPLIER", 1.3))
         weak_mult_d = self._to_decimal(params.get("WEAK_REGIME_MULTIPLIER", 0.6))
-        panic_mult_d = self._to_decimal(params.get("PANIC_REGIME_MULTIPLIER", 0.35))
+        panic_mult_d = self._to_decimal(params.get("PANIC_REGIME_MULTIPLIER", 0.15))
 
         if use_dynamic_risk:
             if natr > panic_natr:
@@ -635,6 +701,7 @@ class RealTraderSpot:
                 "stop_price_override": float(self._to_decimal((prev_state or {}).get("stop_price_override", 0.0))),
                 "pyramid_add_count": int((prev_state or {}).get("pyramid_add_count", 0)),
                 "next_pyramid_trigger": float(self._to_decimal((prev_state or {}).get("next_pyramid_trigger", 0.0))),
+                "risk_off_cooldown_remaining": int((prev_state or {}).get("risk_off_cooldown_remaining", 0)),
             }
             self.state_manager.update_symbol_state(symbol, new_state)
             logger.warning(
@@ -651,12 +718,13 @@ class RealTraderSpot:
         strategy: UltimateStrategy,
         hourly_df: pd.DataFrame,
         daily_df: pd.DataFrame,
+        params: Optional[dict] = None,
     ) -> Optional[dict]:
         """
         Build live MTF-confirmed candle aligned with backtest semantics:
         - generate hourly/daily signals
         - map shifted daily trend onto hourly bars by as-of backward join
-        - final trend = (hourly trend == 1) and (daily trend == 1)
+        - final trend applies TREND_GATE_MODE (STRICT/SOFT/OFF)
         - return confirmed bar fields from i-1 (iloc[-2])
         """
         if hourly_df is None or daily_df is None:
@@ -683,7 +751,13 @@ class RealTraderSpot:
         mapped_daily_trend = daily_trend_shifted[pos]
 
         hourly_trend = np.nan_to_num(hourly_sig["trend_direction"].values, nan=0).astype(int)
-        aligned_trend = np.where((hourly_trend == 1) & (mapped_daily_trend == 1), 1, 0)
+        trend_gate_mode = self._resolve_trend_gate_mode(params if params is not None else strategy.params)
+        if trend_gate_mode == "OFF":
+            aligned_trend = np.where(hourly_trend == 1, 1, 0)
+        elif trend_gate_mode == "SOFT":
+            aligned_trend = np.where((hourly_trend == 1) | (mapped_daily_trend == 1), 1, 0)
+        else:
+            aligned_trend = np.where((hourly_trend == 1) & (mapped_daily_trend == 1), 1, 0)
         hourly_sig["trend_direction"] = aligned_trend
         hourly_sig["daily_trend_direction"] = mapped_daily_trend
 
@@ -780,11 +854,26 @@ class RealTraderSpot:
                 hourly_df[float_cols] = hourly_df[float_cols].astype(np.float64)
                 daily_df[float_cols] = daily_df[float_cols].astype(np.float64)
 
-                confirmed = self._build_mtf_confirmed_candle(strategy, hourly_df, daily_df)
+                confirmed = self._build_mtf_confirmed_candle(strategy, hourly_df, daily_df, params=params)
                 if not confirmed:
                     logger.warning(f"Failed to build MTF confirmed signal for {symbol}")
                     self.last_calc_candle[symbol] = current_slot
                     return
+
+                prev_cooldown = int(state.get("risk_off_cooldown_remaining", 0))
+                risk_off, risk_blocked, risk_off_cooldown_remaining = self._compute_risk_off_state(
+                    params=params,
+                    trend_direction=int(confirmed.get("trend_direction", 0)),
+                    hurst=float(confirmed.get("hurst", 0.5)),
+                    natr=float(confirmed.get("natr", 0.0)),
+                    prev_cooldown=prev_cooldown,
+                )
+                if prev_cooldown != int(risk_off_cooldown_remaining):
+                    self.state_manager.update_symbol_state(
+                        symbol,
+                        {"risk_off_cooldown_remaining": int(risk_off_cooldown_remaining)},
+                    )
+                    state = self.state_manager.get_symbol_state(symbol)
 
                 self._cache_indicators(
                     symbol,
@@ -806,6 +895,9 @@ class RealTraderSpot:
                         "signal_close": float(confirmed.get("signal_close", np.nan)),
                         "signal_time": confirmed.get("signal_time"),
                         "signal_slot": current_slot,
+                        "risk_off": bool(risk_off),
+                        "risk_blocked": bool(risk_blocked),
+                        "risk_off_cooldown_remaining": int(risk_off_cooldown_remaining),
                         "cached_at": datetime.utcnow().isoformat(),
                     },
                 )
@@ -813,12 +905,14 @@ class RealTraderSpot:
                 cached = self._get_cached_indicators(symbol)
                 logger.info(
                     f"[{symbol}] Cached signal: trend={cached.get('trend_direction')} "
-                    f"(daily={cached.get('daily_trend_direction')}), close={cached.get('signal_close')}"
+                    f"(daily={cached.get('daily_trend_direction')}), close={cached.get('signal_close')} "
+                    f"| risk_blocked={cached.get('risk_blocked')} cooldown={cached.get('risk_off_cooldown_remaining')}"
                 )
 
             trend_dir = cached.get("trend_direction", 0)
             atr = cached.get("atr", 0.0)
             sar = cached.get("parabolic_sar", 0.0)
+            risk_blocked = bool(cached.get("risk_blocked", False))
 
             last_price = self._get_market_price_safe(symbol)
             if last_price is None:
@@ -862,6 +956,8 @@ class RealTraderSpot:
                     "entry_upper": cached.get("entry_upper"),
                     "signal_close": cached.get("signal_close", np.nan),
                     "signal_slot": cached.get("signal_slot"),
+                    "risk_off": bool(cached.get("risk_off", False)),
+                    "risk_blocked": risk_blocked,
                 }
 
                 if entry_price == 0:
@@ -888,6 +984,7 @@ class RealTraderSpot:
                     (not position_closed)
                     and is_entry_time
                     and bool(params.get("ENABLE_PYRAMIDING", False))
+                    and (not risk_blocked)
                 ):
                     refreshed_state = self.state_manager.get_symbol_state(symbol)
                     last_scale_out_time = refreshed_state.get("last_scale_out_time")
@@ -923,6 +1020,13 @@ class RealTraderSpot:
                     logger.warning(f"[{symbol}] Open orders exist ({len(open_orders)}). Skip entry.")
                     return
 
+                if risk_blocked:
+                    logger.info(
+                        f"[{symbol}] Skip entry: risk-off gate active "
+                        f"(cooldown={int(cached.get('risk_off_cooldown_remaining', 0))})."
+                    )
+                    return
+
                 entry_upper = cached.get("entry_upper")
                 entry_lower = cached.get("entry_lower")
                 if (
@@ -949,6 +1053,8 @@ class RealTraderSpot:
                         "volume_ratio": cached.get("volume_ratio", 100.0),
                         "hurst": cached.get("hurst", 0.5),
                         "natr": cached.get("natr", 0.0),
+                        "risk_off": bool(cached.get("risk_off", False)),
+                        "risk_blocked": risk_blocked,
                         "signal_close": cached.get("signal_close", np.nan),
                         "signal_time": cached.get("signal_time"),
                         "signal_slot": cached.get("signal_slot"),
@@ -1009,7 +1115,13 @@ class RealTraderSpot:
             atr_sl_mult_d = self._to_decimal(params.get("ATR_STOP_LOSS_MULT", 1.0))
             use_tp = bool(params.get("USE_TAKE_PROFIT", False))
             tp_mult_d = self._to_decimal(params.get("TAKE_PROFIT_ATR_MULT", 2.0))
+            trailing_activation_atr_d = self._to_decimal(params.get("TRAILING_ACTIVATION_ATR", 0.0))
+            if trailing_activation_atr_d < Decimal("0"):
+                trailing_activation_atr_d = Decimal("0")
             trend_dir = int(candle.get("trend_direction", 0))
+            enable_risk_off_hard_gate = bool(params.get("ENABLE_RISK_OFF_HARD_GATE", False))
+            risk_off_exit_on_trigger = bool(params.get("RISK_OFF_EXIT_ON_TRIGGER", False))
+            risk_blocked = bool(candle.get("risk_blocked", False))
 
             # 1) Base stop loss with breakeven override (if enabled/armed)
             if sl_type == "ATR" and entry_atr_d > 0:
@@ -1128,10 +1240,12 @@ class RealTraderSpot:
             # 2) Main exit (ATR trailing / SAR)
             if not should_sell:
                 if exit_type == "ATR" and entry_atr_d > 0:
-                    trailing_stop_d = highest_high_d - (entry_atr_d * atr_mult_d)
-                    if current_low_d <= trailing_stop_d:
-                        should_sell = True
-                        reason = f"ATR Trailing Stop ({float(trailing_stop_d):,.0f})"
+                    unrealized_profit_atr_d = (highest_high_d - entry_price_d) / entry_atr_d
+                    if unrealized_profit_atr_d >= trailing_activation_atr_d:
+                        trailing_stop_d = highest_high_d - (entry_atr_d * atr_mult_d)
+                        if current_low_d <= trailing_stop_d:
+                            should_sell = True
+                            reason = f"ATR Trailing Stop ({float(trailing_stop_d):,.0f})"
                 elif exit_type == "PARABOLIC_SAR":
                     p_sar = candle.get("parabolic_sar", 0)
                     if p_sar <= 0:
@@ -1140,17 +1254,22 @@ class RealTraderSpot:
                         should_sell = True
                         reason = f"Parabolic SAR Exit ({p_sar:,.0f})"
 
-            # 3) Trend reversal
-            if not should_sell and trend_dir == -1:
-                should_sell = True
-                reason = "Trend Reversal"
-
-            # 4) Take profit
+            # 3) Take profit
             if not should_sell and use_tp and entry_atr_d > 0:
                 target_price_d = entry_price_d + (entry_atr_d * tp_mult_d)
                 if current_high_d >= target_price_d:
                     should_sell = True
                     reason = f"Take Profit ({float(target_price_d):,.0f})"
+
+            # 4) Hard risk-off exit
+            if (
+                (not should_sell)
+                and enable_risk_off_hard_gate
+                and risk_off_exit_on_trigger
+                and risk_blocked
+            ):
+                should_sell = True
+                reason = "Risk-Off Hard Exit"
 
             # 5) Panic exit (RSI)
             rsi = candle.get("rsi", 0)
@@ -1159,7 +1278,12 @@ class RealTraderSpot:
                 should_sell = True
                 reason = f"Panic Exit (RSI {rsi:.1f})"
 
-            # 6) Time cut (profit check)
+            # 6) Trend reversal
+            if not should_sell and trend_dir <= 0:
+                should_sell = True
+                reason = "Trend Reversal"
+
+            # 7) Time cut (profit check)
             max_holding_bars = params.get("MAX_HOLDING_BARS", 9999)
             entry_time_str = state.get("entry_time")
             if not should_sell and entry_time_str:
@@ -1384,6 +1508,7 @@ class RealTraderSpot:
             vol_ratio = float(candle.get("volume_ratio", 1.0))
             rsi_value = candle.get("rsi", np.nan)
             natr_value = candle.get("natr", np.nan)
+            risk_blocked = bool(candle.get("risk_blocked", False))
 
             use_vol = bool(params.get("USE_VOLUME_FILTER", False))
             vol_z_threshold = float(params.get("VOLUME_Z_THRESHOLD", params.get("VOLUME_THRESHOLD_MULT", 0.0)))
@@ -1408,6 +1533,8 @@ class RealTraderSpot:
             vol_ok = (not use_vol) or (vol_ratio >= vol_z_threshold)
             rsi_ok = np.isfinite(rsi_float) and (rsi_float < rsi_entry_max)
             natr_ok = np.isfinite(natr_float) and (natr_float >= natr_entry_min)
+            if risk_blocked:
+                return
             if not (trend_dir == 1 and strength == 1 and breakout and vol_ok and rsi_ok and natr_ok):
                 return
 
@@ -1672,6 +1799,7 @@ class RealTraderSpot:
             atr = candle.get("atr", 0.0)
             rsi_value = candle.get("rsi", np.nan)
             natr_value = candle.get("natr", np.nan)
+            risk_blocked = bool(candle.get("risk_blocked", False))
 
             use_vol = params.get("USE_VOLUME_FILTER", False)
             vol_z_threshold = params.get("VOLUME_Z_THRESHOLD", params.get("VOLUME_THRESHOLD_MULT", 0.0))
@@ -1703,7 +1831,16 @@ class RealTraderSpot:
                 logger.info(f"[{symbol}] Skip duplicate entry for slot={signal_slot}")
                 return
 
-            if is_uptrend and breakout and strong_momentum and vol_ok and rsi_ok and natr_ok and (entry_upper > 0):
+            if (
+                is_uptrend
+                and breakout
+                and strong_momentum
+                and vol_ok
+                and rsi_ok
+                and natr_ok
+                and (not risk_blocked)
+                and (entry_upper > 0)
+            ):
                 invest_amount = self._calculate_position_size(
                     symbol,
                     last_price,
@@ -1850,6 +1987,8 @@ class RealTraderSpot:
                         reasons.append(f"RSIHigh({rsi_float:.2f})")
                     if not natr_ok:
                         reasons.append(f"NATRLow({natr_float:.2f})")
+                    if risk_blocked:
+                        reasons.append("RiskOffBlocked")
                 if reasons:
                     logger.info(f"[{symbol}] Skip LONG: {', '.join(reasons)}")
 
