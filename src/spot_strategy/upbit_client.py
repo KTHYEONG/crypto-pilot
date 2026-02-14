@@ -2,6 +2,8 @@ import ccxt
 import pandas as pd
 import time
 import logging
+import os
+import random
 from datetime import datetime
 from config.settings import API_READ_TIMEOUT
 from src.common.utils import setup_logger
@@ -66,119 +68,154 @@ class UpbitClient:
 
     def fetch_ohlcv(self, symbol, timeframe, since=None, limit=None, end=None):
         """
-        OHLCV 데이터 조회 (Historical Data Download)
-        - Upbit는 'to' 파라미터만 지원하므로, end 시점부터 역순으로 조회하여 since까지 도달해야 함.
-        - since: 시작 타임스탬프 (ms)
-        - end: 종료 타임스탬프 (ms) - 생략 시 현재시간
-        - limit: 가져올 최대 개수 (생략 시 since~end 기간 전체)
+        Robust OHLCV downloader for Upbit.
+        - Uses reverse pagination with `to`.
+        - Adds retry/backoff for rate-limit/network errors.
+        - Returns partial data if some batches succeeded before failure.
         """
-        if not self.exchange: return None
+        if not self.exchange:
+            return None
 
-        # 1. 타임프레임 보정
-        tf_map = {'1h': '60', '4h': '240', '1d': 'day'} # 참고용
         target_tf = timeframe
-        
         all_ohlcv = []
-        
-        # 종료 시점 설정 (ms -> datetime string for API)
-        # Upbit API 'to' parameter usually expects KST (UTC+9) in 'YYYY-MM-DD HH:MM:SS' format
-        # If we send UTC string, it might be interpreted as KST (9 hours past).
-        # To get the absolute LATEST data, we should align with KST or use explicit ISO with +09:00,
-        # but simplify by shifting UTC to KST for the string representation.
+
         from datetime import timedelta
-        
+
         if end:
             cursor_dt = datetime.utcfromtimestamp(end / 1000) + timedelta(hours=9)
         else:
             cursor_dt = datetime.utcnow() + timedelta(hours=9)
-            
-        cursor_str = cursor_dt.strftime('%Y-%m-%d %H:%M:%S')
-        
-        # since가 없으면 기본적으로 최근 200개만 가져오도록 (Safety)
+        cursor_str = cursor_dt.strftime("%Y-%m-%d %H:%M:%S")
+
         if since is None and limit is None:
             limit = 200
-            
+
+        max_retries = max(0, int(os.getenv("UPBIT_OHLCV_MAX_RETRIES", "6")))
+        retry_base_sec = max(0.1, float(os.getenv("UPBIT_OHLCV_RETRY_BASE_SEC", "0.8")))
+        retry_max_sec = max(1.0, float(os.getenv("UPBIT_OHLCV_RETRY_MAX_SEC", "12.0")))
+        loop_sleep_sec = max(0.05, float(os.getenv("UPBIT_OHLCV_LOOP_SLEEP_SEC", "0.25")))
+
+        def is_retryable_error(exc):
+            retryable_types = (
+                ccxt.RateLimitExceeded,
+                ccxt.DDoSProtection,
+                ccxt.ExchangeNotAvailable,
+                ccxt.RequestTimeout,
+                ccxt.NetworkError,
+            )
+            if isinstance(exc, retryable_types):
+                return True
+            msg = str(exc).lower()
+            return ("429" in msg) or ("too many requests" in msg) or ("rate limit" in msg)
+
+        def retry_sleep(attempt_idx):
+            exp = min(retry_max_sec, retry_base_sec * (2 ** attempt_idx))
+            jitter = random.uniform(0.85, 1.20)
+            return max(0.1, exp * jitter)
+
         try:
-            # Loop Safety & Progress
             loop_count = 0
-            last_oldest_ts = float('inf')
-            
+            last_oldest_ts = float("inf")
+
             while True:
                 loop_count += 1
-                if loop_count > 10000: # Safety Break
-                    self.logger.warning(f"⚠️ Limit loop count exceeded ({loop_count}) for {symbol}")
+                if loop_count > 10000:
+                    self.logger.warning(f"?? Limit loop count exceeded ({loop_count}) for {symbol}")
                     break
-                    
-                params = {'to': cursor_str}
+
+                params = {"to": cursor_str}
                 req_limit = 200
-                
-                # Fetch candles
-                ohlcv = self.exchange.fetch_ohlcv(symbol, target_tf, limit=req_limit, params=params)
-                
-                if not ohlcv or len(ohlcv) == 0:
-                    self.logger.debug(f"   ℹ️ Reached end of data (Empty) at {cursor_str}")
+
+                ohlcv = None
+                last_err = None
+                for attempt in range(max_retries + 1):
+                    try:
+                        ohlcv = self.exchange.fetch_ohlcv(symbol, target_tf, limit=req_limit, params=params)
+                        last_err = None
+                        break
+                    except Exception as e_fetch:
+                        last_err = e_fetch
+                        if (not is_retryable_error(e_fetch)) or (attempt >= max_retries):
+                            break
+                        wait_s = retry_sleep(attempt)
+                        self.logger.warning(
+                            f"?? OHLCV retry {attempt + 1}/{max_retries} for {symbol}-{target_tf} "
+                            f"(to={cursor_str}) after error: {e_fetch}. sleeping {wait_s:.2f}s"
+                        )
+                        time.sleep(wait_s)
+
+                if last_err is not None:
+                    raise last_err
+
+                if not ohlcv:
+                    self.logger.debug(f"   ?? Reached end of data (Empty) at {cursor_str}")
                     break
-                    
-                # Prepend to list
+
                 all_ohlcv = ohlcv + all_ohlcv
-                
-                # Get oldest timestamp in this batch
                 oldest_ts = ohlcv[0][0]
-                first_date_str = pd.to_datetime(oldest_ts, unit='ms').strftime('%Y-%m-%d %H:%M')
-                
-                # Progress Log (every 5 requests or if 1d)
-                if target_tf == 'day' or loop_count % 5 == 0:
-                     self.logger.info(f"   ... fetched batch {loop_count}: oldest {first_date_str} (Total {len(all_ohlcv)} rows)")
-                
-                # [CRITICAL] Loop Protection: Ensure we are moving backwards
+                first_date_str = pd.to_datetime(oldest_ts, unit="ms").strftime("%Y-%m-%d %H:%M")
+
+                if target_tf == "day" or loop_count % 5 == 0:
+                    self.logger.info(
+                        f"   ... fetched batch {loop_count}: oldest {first_date_str} "
+                        f"(Total {len(all_ohlcv)} rows)"
+                    )
+
                 if oldest_ts >= last_oldest_ts:
-                     self.logger.warning(f"⚠️ Detected Infinite Loop: Timestamp failed to decrease. {oldest_ts} >= {last_oldest_ts}. Stopping.")
-                     break
+                    self.logger.warning(
+                        f"?? Detected Infinite Loop: Timestamp failed to decrease. "
+                        f"{oldest_ts} >= {last_oldest_ts}. Stopping."
+                    )
+                    break
                 last_oldest_ts = oldest_ts
-                
-                # Update Cursor for next batch
-                # Subtract 1 second from oldest_ts
+
                 next_cursor_dt = datetime.utcfromtimestamp((oldest_ts / 1000) - 1) + timedelta(hours=9)
-                cursor_str = next_cursor_dt.strftime('%Y-%m-%d %H:%M:%S')
-                
-                # Break Conditions
-                # 1. Reached 'since'
+                cursor_str = next_cursor_dt.strftime("%Y-%m-%d %H:%M:%S")
+
                 if since is not None and oldest_ts <= since:
-                    self.logger.debug(f"   ✅ Reached start date: {first_date_str}")
+                    self.logger.debug(f"   ? Reached start date: {first_date_str}")
                     break
-                    
-                # 2. Reached 'limit' count
+
                 if limit is not None and len(all_ohlcv) >= limit:
-                    all_ohlcv = all_ohlcv[-limit:] 
+                    all_ohlcv = all_ohlcv[-limit:]
                     break
-                    
-                # Rate Limit Safety
-                time.sleep(0.12)
-                
+
+                time.sleep(loop_sleep_sec)
+
             if not all_ohlcv:
-                self.logger.warning(f"⚠️ No OHLCV data returned for {symbol} ({target_tf})")
+                self.logger.warning(f"?? No OHLCV data returned for {symbol} ({target_tf})")
                 return None
-                
-            # DataFrame 변환
-            df = pd.DataFrame(all_ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-            
-            # [CRITICAL] Remove duplicates caused by overlapping fetches
-            df.drop_duplicates(subset=['timestamp'], inplace=True)
-            df.sort_values('timestamp', inplace=True)
-            df['datetime'] = pd.to_datetime(df['timestamp'], unit='ms')
-            
-            # Final slicing by time (precise trim)
+
+            df = pd.DataFrame(all_ohlcv, columns=["timestamp", "open", "high", "low", "close", "volume"])
+            df.drop_duplicates(subset=["timestamp"], inplace=True)
+            df.sort_values("timestamp", inplace=True)
+            df["datetime"] = pd.to_datetime(df["timestamp"], unit="ms")
             if since:
-                df = df[df['timestamp'] >= since]
+                df = df[df["timestamp"] >= since]
             if end:
-                df = df[df['timestamp'] <= end]
-                
-            return df[['datetime', 'open', 'high', 'low', 'close', 'volume', 'timestamp']]
-            
+                df = df[df["timestamp"] <= end]
+            return df[["datetime", "open", "high", "low", "close", "volume", "timestamp"]]
+
         except Exception as e:
-            self.logger.error(f"❌ Error fetching OHLCV for {symbol}: {e}")
-            import traceback
-            self.logger.error(traceback.format_exc())
+            self.logger.error(f"?Error fetching OHLCV for {symbol}: {e}")
+            if all_ohlcv:
+                self.logger.warning(
+                    f"?? Returning partial OHLCV for {symbol}-{target_tf} "
+                    f"({len(all_ohlcv)} rows) after error."
+                )
+                df = pd.DataFrame(all_ohlcv, columns=["timestamp", "open", "high", "low", "close", "volume"])
+                df.drop_duplicates(subset=["timestamp"], inplace=True)
+                df.sort_values("timestamp", inplace=True)
+                df["datetime"] = pd.to_datetime(df["timestamp"], unit="ms")
+                if since:
+                    df = df[df["timestamp"] >= since]
+                if end:
+                    df = df[df["timestamp"] <= end]
+                return df[["datetime", "open", "high", "low", "close", "volume", "timestamp"]]
+            # Avoid noisy full traceback spam for common rate-limit/network failures.
+            if not is_retryable_error(e):
+                import traceback
+                self.logger.error(traceback.format_exc())
             return None
 
     def fetch_balance(self):
@@ -283,6 +320,39 @@ class UpbitClient:
         except Exception as e:
             self.logger.error(f"Error fetching open orders for {symbol}: {e}")
             return []
+
+    def fetch_server_time_ms(self):
+        """Fetch exchange server time in milliseconds."""
+        if not self.exchange:
+            return None
+        try:
+            if hasattr(self.exchange, "fetch_time"):
+                server_ms = self.exchange.fetch_time()
+                if server_ms is not None:
+                    return int(server_ms)
+        except Exception as e:
+            self.logger.debug(f"Server time fetch failed. Fallback to local clock: {e}")
+        return int(time.time() * 1000)
+
+    def fetch_order(self, order_id, symbol):
+        """단일 주문 상태 조회"""
+        if not self.exchange:
+            return None
+        try:
+            return self.exchange.fetch_order(order_id, symbol)
+        except Exception as e:
+            self.logger.error(f"Error fetching order {order_id} for {symbol}: {e}")
+            return None
+
+    def cancel_order(self, order_id, symbol):
+        """주문 취소"""
+        if not self.exchange:
+            return None
+        try:
+            return self.exchange.cancel_order(order_id, symbol)
+        except Exception as e:
+            self.logger.error(f"Error canceling order {order_id} for {symbol}: {e}")
+            return None
 
     def place_order(self, symbol, side, amount=None, price=None, order_type='market'):
         """기본 주문 실행 (시장가/지정가)"""
