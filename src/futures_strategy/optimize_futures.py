@@ -1146,11 +1146,25 @@ def run_optuna_study(
         sampler=sampler,
         pruner=pruner,
     )
+
+    no_progress = os.environ.get("OPTUNA_NO_PROGRESS", "0") == "1"
+    callbacks = []
+    if no_progress:
+        def status_callback(study, trial):
+            completed = len([t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE])
+            try:
+                best_val = study.best_value
+            except ValueError:
+                best_val = -float("inf")
+            print(f"[STATUS] {study_name} | Trial {completed}/{n_trials} | Best: {best_val:.4f}", flush=True)
+        callbacks.append(status_callback)
+
     study.optimize(
         objective_fn,
         n_trials=n_trials,
         n_jobs=n_jobs,
-        show_progress_bar=True,
+        show_progress_bar=not no_progress,
+        callbacks=callbacks,
     )
     return study, n_startup_trials
 
@@ -1266,7 +1280,20 @@ def main():
         default=None,
         help="Comma-separated Optuna sampler seeds for multi-seed robustness (e.g., 13,37,73).",
     )
+    parser.add_argument(
+        "--no-progress",
+        action="store_true",
+        help="Disable Optuna progress bar and print compact status lines instead.",
+    )
+    parser.add_argument(
+        "--prepare-data-only",
+        action="store_true",
+        help="Load/refresh futures OHLCV cache only, then exit without optimization.",
+    )
     args = parser.parse_args()
+
+    if args.no_progress:
+        os.environ["OPTUNA_NO_PROGRESS"] = "1"
 
     # Parse symbols
     symbols = [s.strip() for s in args.symbols.split(",")]
@@ -1340,6 +1367,12 @@ def main():
                 print(f"[ERROR]: Failed to load {symbol}-{tf} data")
                 sys.exit(1)
     print(f"[INFO] Data loaded successfully for all symbols")
+
+    if args.prepare_data_only:
+        print(
+            f"[INFO] Data preload completed for {len(symbols)} symbols x {len(loading_timeframes)} timeframes."
+        )
+        return 0
 
     # [CRITICAL] Slice Data for Optimization (Train Set) with Warmup Buffer
     print(f"[INFO] Trimming Data for Optimization (Train Period: ~ {TRAIN_CUTOFF_DATE})")
