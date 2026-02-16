@@ -1486,7 +1486,7 @@ def objective(
     trial: optuna.trial.Trial,
     symbols_data: Dict[str, Dict[str, pd.DataFrame]],
     search_space: Dict,
-    mode: str = "DAY",
+    mode: str = "UNIFIED",
     merge_indices: Optional[Dict[str, Dict[str, np.ndarray]]] = None,
     awfo_plan: Optional[Dict] = None,
 ) -> float:
@@ -2223,7 +2223,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--trials", type=int, default=None)
     parser.add_argument("--symbols", type=str, default="KRW-BTC,KRW-ETH")
     parser.add_argument("--jobs", type=int, default=10)
-    parser.add_argument("--mode", type=str, default="UNIFIED", choices=["SCALP", "DAY", "SWING", "UNIFIED", "ALL"])
+    parser.add_argument("--mode", type=str, default="UNIFIED", choices=["UNIFIED", "ALL"])
     parser.add_argument("--seeds", type=str, default=None, help="Comma-separated sampler seeds, e.g. 13,37,73")
     parser.add_argument(
         "--prepare-data-only",
@@ -2239,7 +2239,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 1
     awfo_enabled = mode in AWFO_DEFAULTS["enabled_modes"]
     is_two_stage_mode = mode in {"UNIFIED", "ALL"}
-    trials = args.trials if args.trials is not None else {"SCALP": 3600, "DAY": 4200, "SWING": 5000, "UNIFIED": 6000, "ALL": 6000}.get(mode, 2500)
+    trials = args.trials if args.trials is not None else {"UNIFIED": 6000, "ALL": 6000}.get(mode, 2500)
     seed_arg = args.seeds if args.seeds is not None else os.getenv("OPTUNA_SEEDS")
     if seed_arg is None:
         seed_arg = "13,37,73" if is_two_stage_mode else "13"
