@@ -978,8 +978,6 @@ if __name__ == "__main__":
                         help="Comma-separated list of symbols to verify")
     parser.add_argument("--alt", type=int, default=0, choices=[0, 1],
                         help="Include altcoins for validation (default: 0). Adds SOL, XRP, DOGE, BNB")
-    parser.add_argument("--all-modes", action="store_true",
-                        help="Verify all modes (SCALP, DAY, SWING, UNIFIED). Default: UNIFIED only")
     parser.add_argument("--dry-run", action="store_true",
                         help="Verify current deployed strategy (futures_strategy.db) without saving. Skips MySQL and deployment.")
     parser.add_argument("--bonus-sweep", dest="bonus_sweep", action="store_true",
@@ -1012,14 +1010,9 @@ if __name__ == "__main__":
     symbols = base_symbols
     PRIMARY_SYMBOLS = ['BTC/USDT', 'ETH/USDT']
     
-    # [DEFAULT] Verify UNIFIED only (fastest, most flexible)
-    # Use --all-modes to compare all strategies
-    if args.all_modes:
-        MODES = ['SCALP', 'DAY', 'SWING', 'UNIFIED']
-        print(f"[INFO] All-modes verification enabled: {MODES}")
-    else:
-        MODES = ['UNIFIED']
-        print("[INFO] Quick verification: UNIFIED only (use --all-modes for full comparison)")
+    # UNIFIED-only verification
+    MODES = ['UNIFIED']
+    print("[INFO] Verification mode: UNIFIED only")
     
     
     # Dry-run: verify deployed local strategy only.

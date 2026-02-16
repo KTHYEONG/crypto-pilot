@@ -1556,7 +1556,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--symbols", type=str, default="KRW-BTC,KRW-ETH")
     parser.add_argument("--alt", type=int, default=0, choices=[0, 1], help="Include altcoins: SOL, XRP, DOGE, ADA")
-    parser.add_argument("--all-modes", action="store_true", help="Verify SCALP, DAY, SWING, UNIFIED")
     parser.add_argument("--dry-run", action="store_true", help="Verify currently deployed spot_strategy.db only")
     parser.add_argument(
         "--bonus-sweep",
@@ -1598,7 +1597,7 @@ if __name__ == "__main__":
                 base_symbols.append(alt)
     symbols = base_symbols
     PRIMARY_SYMBOLS = ["KRW-BTC", "KRW-ETH"]
-    MODES = ["SCALP", "DAY", "SWING", "UNIFIED"] if args.all_modes else ["UNIFIED"]
+    MODES = ["UNIFIED"]
 
     if args.dry_run:
         _log_header("DRY-RUN: Verify Deployed Spot Strategy", "Source: spot_strategy.db")

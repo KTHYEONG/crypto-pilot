@@ -84,7 +84,7 @@ _default_policy_versions = "SPOT_SELECTION_POLICY_V7_PARITY,SPOT_SELECTION_POLIC
 SPOT_ALLOWED_POLICY_VERSIONS = {
     v.strip() for v in os.getenv("SPOT_POLICY_VERSIONS", _default_policy_versions).split(",") if v.strip()
 }
-SPOT_ALLOWED_MODES = {"SCALP", "DAY", "SWING", "UNIFIED", "ALL"}
+SPOT_ALLOWED_MODES = {"UNIFIED", "ALL"}
 SPOT_ALLOW_FALLBACK = os.getenv("SPOT_ALLOW_FALLBACK", "false").lower() == "true"
 SPOT_FEE_RATE_D = Decimal("0.0005")
 SPOT_SLIPPAGE_RATE_D = Decimal("0.0003")
