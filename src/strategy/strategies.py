@@ -11,6 +11,7 @@ from .indicators_advanced import (
     calculate_dema,
     calculate_efficiency_ratio,
     calculate_ema,
+    calculate_garman_klass_vol,
     calculate_hma,
     calculate_hurst_exponent,
     calculate_ichimoku,
@@ -63,6 +64,7 @@ _SPOT_INDICATORS = SimpleNamespace(
     calculate_hurst_exponent=calculate_hurst_exponent,
     calculate_efficiency_ratio=calculate_efficiency_ratio,
     calculate_natr=calculate_natr,
+    calculate_garman_klass_vol=calculate_garman_klass_vol,
 )
 
 

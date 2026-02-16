@@ -66,6 +66,21 @@ def run_backtest_segment_futures(df, params, initial_balance=1000000.0, return_s
     tp_atr_mult = params.get('TAKE_PROFIT_ATR_MULT_FUTURES', params.get('TAKE_PROFIT_ATR_MULT', 3.0))
     
     risk_per_trade = params.get('RISK_PER_TRADE_FUTURES', params.get('RISK_PER_TRADE', 0.02))
+    use_dynamic_risk = params.get('USE_DYNAMIC_RISK', False)
+    strong_regime_hurst = params.get('STRONG_REGIME_HURST', 0.6)
+    strong_regime_natr = params.get('STRONG_REGIME_NATR', 1.5)
+    strong_regime_multiplier = params.get('STRONG_REGIME_MULTIPLIER', 1.5)
+    weak_regime_hurst = params.get('WEAK_REGIME_HURST', 0.55)
+    weak_regime_multiplier = params.get('WEAK_REGIME_MULTIPLIER', 0.5)
+    panic_regime_natr = params.get('PANIC_REGIME_NATR', 4.0)
+    panic_regime_multiplier = params.get('PANIC_REGIME_MULTIPLIER', 0.25)
+    rsi_exit_threshold = params.get('RSI_EXIT_THRESHOLD', 80.0)
+    max_holding_bars = params.get('MAX_HOLDING_BARS', 999999)
+    time_exit_profit_threshold = params.get('TIME_EXIT_PROFIT_THRESHOLD', 0.5)
+    use_compounding = params.get('USE_COMPOUNDING', False)
+    max_capital_usage = params.get('MAX_CAPITAL_USAGE', 1_000_000.0)
+    use_volume_filter = params.get('USE_VOLUME_FILTER', False)
+    vol_threshold = params.get('VOLUME_THRESHOLD_MULT', 1.0)
     
     # Data extraction
     close = df['close'].values
@@ -82,11 +97,16 @@ def run_backtest_segment_futures(df, params, initial_balance=1000000.0, return_s
     strength = np.nan_to_num(df.get('strength_filter', pd.Series([1]*len(df))).values, nan=0).astype(int)
     atr = np.nan_to_num(df.get('atr', pd.Series([0.0]*len(df))).values, nan=0.0)
     sar = np.nan_to_num(df.get('parabolic_sar', pd.Series([0.0]*len(df))).values, nan=0.0)
+    hurst = np.nan_to_num(df.get('hurst', pd.Series([0.5]*len(df))).values, nan=0.5)
+    natr = np.nan_to_num(df.get('natr', pd.Series([0.0]*len(df))).values, nan=0.0)
+    rsi = np.nan_to_num(df.get('rsi', pd.Series([50.0]*len(df))).values, nan=50.0)
+    volume_ratio = np.nan_to_num(df.get('volume_ratio', pd.Series([100.0]*len(df))).values, nan=0.0)
     
     # Logs
     trades_log = [] # Returns in %
     detailed_log = []
     equity_curve = []
+    entry_idx = 0
     
     for i in range(1, len(df)):
         prev_price = close[i - 1]
@@ -133,6 +153,22 @@ def run_backtest_segment_futures(df, params, initial_balance=1000000.0, return_s
                     exit_price = tp_price
                     exit_triggered = True
                     reason = "Take Profit"
+
+                # Time Exit (insufficient ATR profit)
+                if not exit_triggered:
+                    bars_held = i - entry_idx
+                    if bars_held >= max_holding_bars:
+                        unreal_p = (price - entry_price) / pos_atr if pos_atr > 0 else 0.0
+                        if unreal_p < time_exit_profit_threshold:
+                            exit_price = c_open
+                            exit_triggered = True
+                            reason = "Time Cut (No Profit)"
+
+                # RSI Panic Exit
+                if not exit_triggered and rsi[i] > rsi_exit_threshold:
+                    exit_price = c_open
+                    exit_triggered = True
+                    reason = "Panic Exit (RSI)"
                     
                 # Trend Reversal
                 if not exit_triggered and trend_dir[i-1] == -1:
@@ -172,6 +208,22 @@ def run_backtest_segment_futures(df, params, initial_balance=1000000.0, return_s
                     exit_price = tp_price
                     exit_triggered = True
                     reason = "Take Profit"
+
+                # Time Exit (insufficient ATR profit)
+                if not exit_triggered:
+                    bars_held = i - entry_idx
+                    if bars_held >= max_holding_bars:
+                        unreal_p = (entry_price - price) / pos_atr if pos_atr > 0 else 0.0
+                        if unreal_p < time_exit_profit_threshold:
+                            exit_price = c_open
+                            exit_triggered = True
+                            reason = "Time Cut (No Profit)"
+
+                # RSI Panic Exit (short side)
+                if not exit_triggered and rsi[i] < (100 - rsi_exit_threshold):
+                    exit_price = c_open
+                    exit_triggered = True
+                    reason = "Panic Exit (RSI)"
 
                 # Trend Reversal
                 if not exit_triggered and trend_dir[i-1] == 1:
@@ -217,7 +269,20 @@ def run_backtest_segment_futures(df, params, initial_balance=1000000.0, return_s
             # Signal is decided on previous closed bar, execution happens on current bar.
             if np.isnan(entry_upper[i - 1]) or np.isnan(entry_lower[i - 1]): continue
             if strength[i - 1] == 0: continue
+            if use_volume_filter and volume_ratio[i - 1] < vol_threshold: continue
             signal_atr = atr[i - 1]
+            
+            regime_mult = 1.0
+            if use_dynamic_risk:
+                if natr[i - 1] > panic_regime_natr:
+                    regime_mult = panic_regime_multiplier
+                elif hurst[i - 1] > strong_regime_hurst and natr[i - 1] > strong_regime_natr:
+                    regime_mult = strong_regime_multiplier
+                elif hurst[i - 1] < weak_regime_hurst:
+                    regime_mult = weak_regime_multiplier
+            exec_risk = risk_per_trade * regime_mult
+            if exec_risk > 0.99:
+                exec_risk = 0.99
             
             # LONG
             if trend_dir[i - 1] == 1 and prev_price > entry_upper[i - 1]:
@@ -238,7 +303,9 @@ def run_backtest_segment_futures(df, params, initial_balance=1000000.0, return_s
                 # Sizing
                 dist = abs(fill_price - stop_price)
                 if dist > 0:
-                    risk_amt = balance * risk_per_trade
+                    base_capital = balance if use_compounding else min(balance, initial_balance)
+                    risk_amt = base_capital * exec_risk
+                    risk_amt = min(risk_amt, max_capital_usage, balance)
                     qty = (risk_amt / dist) * leverage
                 else:
                     qty = (balance * 0.01 * leverage) / fill_price
@@ -258,6 +325,7 @@ def run_backtest_segment_futures(df, params, initial_balance=1000000.0, return_s
                     entry_fee = fee
                     pos_side = 1
                     in_pos = True
+                    entry_idx = i
                     highest = fill_price
                     lowest = fill_price
                     pos_atr = signal_atr
@@ -290,7 +358,9 @@ def run_backtest_segment_futures(df, params, initial_balance=1000000.0, return_s
                 # Sizing
                 dist = abs(stop_price - fill_price)
                 if dist > 0:
-                    risk_amt = balance * risk_per_trade
+                    base_capital = balance if use_compounding else min(balance, initial_balance)
+                    risk_amt = base_capital * exec_risk
+                    risk_amt = min(risk_amt, max_capital_usage, balance)
                     qty = (risk_amt / dist) * leverage
                 else:
                     qty = (balance * 0.01 * leverage) / fill_price
@@ -310,6 +380,7 @@ def run_backtest_segment_futures(df, params, initial_balance=1000000.0, return_s
                     entry_fee = fee
                     pos_side = -1 
                     in_pos = True
+                    entry_idx = i
                     highest = fill_price
                     lowest = fill_price
                     pos_atr = signal_atr
