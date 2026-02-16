@@ -1,11 +1,33 @@
-import pandas as pd
-import numpy as np
-import os
-import threading
-from collections import OrderedDict
-from typing import Callable, Hashable, Tuple
+from types import SimpleNamespace
 
-from src.strategy.base import MasterStrategyBase, StrategyBase
+from src.strategy.base import MasterStrategyBase, StrategyBase, UltimateStrategyBase
+
+from .indicators_advanced import (
+    calculate_adx,
+    calculate_atr,
+    calculate_bollinger_bands,
+    calculate_cci,
+    calculate_cmf,
+    calculate_dema,
+    calculate_efficiency_ratio,
+    calculate_ema,
+    calculate_hma,
+    calculate_hurst_exponent,
+    calculate_ichimoku,
+    calculate_keltner_channel,
+    calculate_macd,
+    calculate_mfi,
+    calculate_natr,
+    calculate_parabolic_sar,
+    calculate_rsi,
+    calculate_sma,
+    calculate_stoch_rsi,
+    calculate_stochastic,
+    calculate_supertrend,
+    calculate_tema,
+    calculate_vhf,
+    calculate_vwap,
+)
 
 
 class Strategy(StrategyBase):
@@ -15,232 +37,42 @@ class Strategy(StrategyBase):
 class MasterStrategy(MasterStrategyBase):
     pass
 
-from .indicators_advanced import (
-    calculate_sma, calculate_ema, calculate_hma, calculate_dema, calculate_tema,
-    calculate_supertrend, calculate_atr, calculate_bollinger_bands,
-    calculate_keltner_channel, calculate_adx, calculate_vhf, calculate_parabolic_sar,
-    calculate_rsi, calculate_stochastic, calculate_stoch_rsi, calculate_macd, calculate_ichimoku, calculate_cci, calculate_mfi,
-    calculate_vwap, calculate_cmf, calculate_hurst_exponent, calculate_natr
+
+_SPOT_INDICATORS = SimpleNamespace(
+    calculate_sma=calculate_sma,
+    calculate_ema=calculate_ema,
+    calculate_hma=calculate_hma,
+    calculate_dema=calculate_dema,
+    calculate_tema=calculate_tema,
+    calculate_supertrend=calculate_supertrend,
+    calculate_atr=calculate_atr,
+    calculate_bollinger_bands=calculate_bollinger_bands,
+    calculate_keltner_channel=calculate_keltner_channel,
+    calculate_adx=calculate_adx,
+    calculate_vhf=calculate_vhf,
+    calculate_parabolic_sar=calculate_parabolic_sar,
+    calculate_rsi=calculate_rsi,
+    calculate_stochastic=calculate_stochastic,
+    calculate_stoch_rsi=calculate_stoch_rsi,
+    calculate_macd=calculate_macd,
+    calculate_ichimoku=calculate_ichimoku,
+    calculate_cci=calculate_cci,
+    calculate_mfi=calculate_mfi,
+    calculate_vwap=calculate_vwap,
+    calculate_cmf=calculate_cmf,
+    calculate_hurst_exponent=calculate_hurst_exponent,
+    calculate_efficiency_ratio=calculate_efficiency_ratio,
+    calculate_natr=calculate_natr,
 )
 
-# Default tuned for current spot optimizer shape:
-# UNIFIED(30m/1h/4h) + AWFO(3 folds) + STRENGTH_FILTER_PERIOD sweep.
-_SPOT_INDICATOR_CACHE_MAX = max(32, int(os.getenv("SPOT_INDICATOR_CACHE_MAX", "512")))
-_SPOT_INDICATOR_CACHE: "OrderedDict[Tuple[Hashable, ...], np.ndarray]" = OrderedDict()
-_SPOT_INDICATOR_CACHE_LOCK = threading.Lock()
 
-
-def _series_data_key(series: pd.Series) -> Tuple[Hashable, ...]:
-    arr = np.asarray(series.to_numpy(copy=False))
-    data_ptr = int(arr.__array_interface__["data"][0])
-    strides = tuple(int(s) for s in (arr.strides or ()))
-    return (data_ptr, int(arr.size), str(arr.dtype), strides)
-
-
-def _cache_get_or_compute(
-    key: Tuple[Hashable, ...],
-    compute_fn: Callable[[], np.ndarray],
-) -> np.ndarray:
-    with _SPOT_INDICATOR_CACHE_LOCK:
-        cached = _SPOT_INDICATOR_CACHE.get(key)
-        if cached is not None:
-            _SPOT_INDICATOR_CACHE.move_to_end(key)
-            return cached
-
-    values = compute_fn()
-    with _SPOT_INDICATOR_CACHE_LOCK:
-        _SPOT_INDICATOR_CACHE[key] = values
-        _SPOT_INDICATOR_CACHE.move_to_end(key)
-        while len(_SPOT_INDICATOR_CACHE) > _SPOT_INDICATOR_CACHE_MAX:
-            _SPOT_INDICATOR_CACHE.popitem(last=False)
-    return values
-
-
-def _cached_hurst_values(close: pd.Series, window: int) -> np.ndarray:
-    key = ("hurst", int(window), *_series_data_key(close))
-    return _cache_get_or_compute(
-        key,
-        lambda: np.asarray(calculate_hurst_exponent(close, window=int(window)).to_numpy(copy=False), dtype=np.float64),
-    )
-
-
-def _cached_rsi_values(close: pd.Series, window: int) -> np.ndarray:
-    key = ("rsi", int(window), *_series_data_key(close))
-    return _cache_get_or_compute(
-        key,
-        lambda: np.asarray(calculate_rsi(close, window=int(window)).to_numpy(copy=False), dtype=np.float64),
-    )
-
-
-def _cached_natr_values(df: pd.DataFrame, window: int) -> np.ndarray:
-    key = (
-        "natr",
-        int(window),
-        *_series_data_key(df["high"]),
-        *_series_data_key(df["low"]),
-        *_series_data_key(df["close"]),
-    )
-    return _cache_get_or_compute(
-        key,
-        lambda: np.asarray(calculate_natr(df, window=int(window)).to_numpy(copy=False), dtype=np.float64),
-    )
-
-class UltimateStrategy(Strategy):
+class UltimateStrategy(UltimateStrategyBase):
     """
     The Ultimate Strategy: Dynamic combinations of all major indicators.
+    Spot profile: shifted entry bands + conditional ATR base line.
     """
-    def generate_signals(self, df):
-        # [ROBUSTNESS] Ensure clean column assignment
-        # Data is already copied at loading stage (optimize/verify scripts)
-        
-        # --- 1. Basic Indicators (Lazy ATR) ---
-        # ATR is needed only for certain exit/SL/sizing types
-        use_tp = self.params.get('USE_TAKE_PROFIT', False)
-        use_atr_sl = self.params.get('STOP_LOSS_TYPE') == 'ATR'
-        use_trailing = self.params.get('EXIT_TYPE') == 'ATR' or self.params.get('TRAILING_ACTIVATION_ATR', 0) > 0
-        
-        if use_tp or use_atr_sl or use_trailing:
-            atr_period = self.params.get('ATR_PERIOD', 14)
-            df['atr'] = calculate_atr(df, window=atr_period).astype(np.float32)
-        else:
-            df['atr'] = np.float32(0.0) # Not used
-        
-        # [NEW] Always calculate Regime Indicators (Hurst, NATR, RSI)
-        # 1. Hurst Exponent (Trend Strength/Regime)
-        hurst_period = self.params.get('HURST_PERIOD', 200)
-        df['hurst'] = _cached_hurst_values(df['close'], int(hurst_period))
-        
-        # 2. NATR (Volatility Regime)
-        natr_period = self.params.get('STRENGTH_FILTER_PERIOD', 14) # Reuse existing period or default
-        df['natr'] = _cached_natr_values(df, int(natr_period))
-        
-        # 3. RSI (Panic Exit)
-        rsi_period = self.params.get('STRENGTH_FILTER_PERIOD', 14) 
-        df['rsi'] = _cached_rsi_values(df['close'], int(rsi_period))
 
-        # --- 2. Entry Signal Setup ---
-        entry_type = self.params.get('ENTRY_TYPE', 'DONCHIAN')
-        entry_period = self.params.get('ENTRY_PERIOD', 20)
-        
-        # Initialize defaults to avoid Engine .get() defaults
-        df['entry_upper'] = np.nan
-        df['entry_lower'] = np.nan
-        
-        if entry_type == 'DONCHIAN':
-            df['entry_upper'] = df['high'].rolling(window=entry_period).max().shift(1)
-            df['entry_lower'] = df['low'].rolling(window=entry_period).min().shift(1)
-            
-        elif entry_type == 'BOLLINGER':
-            std_dev = self.params.get('BB_STD', 2.0)
-            up, lo, _ = calculate_bollinger_bands(df, window=entry_period, std_dev=std_dev)
-            df['entry_upper'] = up.shift(1)
-            df['entry_lower'] = lo.shift(1)
-            
-        elif entry_type == 'KELTNER':
-            k_mult = self.params.get('KELTNER_ATR_MULT', 1.5)
-            up, lo = calculate_keltner_channel(df, window=entry_period, atr_mult=k_mult)
-            df['entry_upper'] = up.shift(1)
-            df['entry_lower'] = lo.shift(1)
-            
-        elif entry_type == 'CCI':
-            df['cci'] = calculate_cci(df, window=entry_period)
-            cci_prev = df['cci'].shift(1)
-            cci_thresh = self.params.get('CCI_THRESHOLD', 100)
-            prev_high = df['high'].shift(1)
-            df['entry_upper'] = np.where(cci_prev > cci_thresh, prev_high, np.inf)
-            prev_low = df['low'].shift(1)
-            df['entry_lower'] = np.where(cci_prev < -cci_thresh, prev_low, -np.inf)
-            
-        # --- 3. Trend Direction Filter ---
-        filter_type = self.params.get('TREND_FILTER_TYPE', 'EMA')
-        ma_period = self.params.get('MA_PERIOD', 50)
-        df['trend_direction'] = 0
-            
-        if filter_type == 'SMA':
-            df['trend_line'] = calculate_sma(df['close'], ma_period)
-            df['trend_direction'] = np.where(df['close'] > df['trend_line'], 1, -1)
-        elif filter_type == 'EMA':
-            df['trend_line'] = calculate_ema(df['close'], ma_period)
-            df['trend_direction'] = np.where(df['close'] > df['trend_line'], 1, -1)
-        elif filter_type == 'HMA':
-            df['trend_line'] = calculate_hma(df['close'], ma_period)
-            df['trend_direction'] = np.where(df['close'] > df['trend_line'], 1, -1)
-        elif filter_type == 'DEMA':
-            df['trend_line'] = calculate_dema(df['close'], ma_period)
-            df['trend_direction'] = np.where(df['close'] > df['trend_line'], 1, -1)
-        elif filter_type == 'TEMA':
-            df['trend_line'] = calculate_tema(df['close'], ma_period)
-            df['trend_direction'] = np.where(df['close'] > df['trend_line'], 1, -1)
-        elif filter_type == 'SUPERTREND':
-            mul = self.params.get('SUPERTREND_MULT', 3.0)
-            per = self.params.get('SUPERTREND_PERIOD', 10)
-            df['trend_direction'] = calculate_supertrend(df, period=per, multiplier=mul)
-        elif filter_type == 'MACD':
-            macd_line, signal_line, _ = calculate_macd(df, fast=self.params.get('MACD_FAST', 12), slow=self.params.get('MACD_SLOW', 26), signal=self.params.get('MACD_SIGNAL', 9))
-            df['trend_direction'] = np.where(macd_line > signal_line, 1, -1)
-        elif filter_type == 'ICHIMOKU':
-            t, k, sa, sb = calculate_ichimoku(df, tenkan_window=self.params.get('ICHIMOKU_TENKAN', 9), kijun_window=self.params.get('ICHIMOKU_KIJUN', 26), senkou_span_b_window=self.params.get('ICHIMOKU_SENKOU_B', 52))
-            cloud_top = np.maximum(sa, sb)
-            cloud_bottom = np.minimum(sa, sb)
-            df['trend_direction'] = 0
-            # [FIX] Use .values to avoid index mismatch from shifted Ichimoku series
-            df['trend_direction'] = np.where(df['close'].values > cloud_top.values, 1, df['trend_direction'].values)
-            df['trend_direction'] = np.where(df['close'].values < cloud_bottom.values, -1, df['trend_direction'].values)
-        elif filter_type == 'VWAP':
-            vwap, _, _ = calculate_vwap(df, window=ma_period, std_mult=self.params.get('VWAP_STD_MULT', 1.5))
-            df['trend_direction'] = np.where(df['close'] > vwap, 1, -1)
-            
-        # --- 4. Strength Filter ---
-        df['strength_filter'] = 1
-        strength_type = self.params.get('STRENGTH_FILTER_TYPE', 'NONE')
-        strength_period = self.params.get('STRENGTH_FILTER_PERIOD', 14)
-        
-        if strength_type == 'ADX':
-            df['adx'] = calculate_adx(df, window=strength_period)
-            df.loc[df['adx'] < self.params.get('ADX_THRESHOLD', 20), 'strength_filter'] = 0
-        elif strength_type == 'VHF':
-            df['vhf'] = calculate_vhf(df['close'], window=strength_period)
-            df.loc[df['vhf'] < self.params.get('VHF_THRESHOLD', 0.4), 'strength_filter'] = 0
-        elif strength_type == 'MFI':
-            df['mfi'] = calculate_mfi(df, window=strength_period)
-            df.loc[df['mfi'] < self.params.get('MFI_THRESHOLD', 25), 'strength_filter'] = 0
-        elif strength_type == 'RSI':
-            # Use pre-calculated RSI
-            rsi_upper = self.params.get('RSI_OVERBOUGHT', 75)
-            rsi_lower = self.params.get('RSI_OVERSOLD', 25)
-            df.loc[(df['rsi'] > rsi_upper) | (df['rsi'] < rsi_lower), 'strength_filter'] = 0
-        elif strength_type == 'STOCHASTIC':
-            stoch_k, _ = calculate_stochastic(df, window=strength_period)
-            df.loc[(stoch_k > self.params.get('STOCH_OVERBOUGHT', 85)) | (stoch_k < self.params.get('STOCH_OVERSOLD', 15)), 'strength_filter'] = 0
-        elif strength_type == 'STOCH_RSI':
-            stoch_rsi_k, _ = calculate_stoch_rsi(df['close'], window=strength_period)
-            df.loc[(stoch_rsi_k > self.params.get('STOCH_RSI_OVERBOUGHT', 80)) | (stoch_rsi_k < self.params.get('STOCH_RSI_OVERSOLD', 20)), 'strength_filter'] = 0
-        elif strength_type == 'CMF':
-            df['cmf'] = calculate_cmf(df, window=self.params.get('CMF_PERIOD', 20))
-            df.loc[df['cmf'] < self.params.get('CMF_THRESHOLD', 0.05), 'strength_filter'] = 0
-        elif strength_type == 'HURST':
-            # Use pre-calculated Hurst
-            df.loc[df['hurst'] < self.params.get('HURST_RANDOM_THRESHOLD', 0.50), 'strength_filter'] = 0
-        elif strength_type == 'NATR':
-             # Use pre-calculated NATR
-             # NATR < Threshold: Low volatility -> Block Entry
-             natr_thresh = self.params.get('NATR_THRESHOLD', 1.0)
-             df.loc[df['natr'] < natr_thresh, 'strength_filter'] = 0
-
-        # --- 5. Exit Logic (Parabolic SAR) ---
-        if self.params.get('EXIT_TYPE') == 'PARABOLIC_SAR':
-            sar_line, _ = calculate_parabolic_sar(df, step=self.params.get('SAR_STEP', 0.02))
-            df.loc[:, 'parabolic_sar'] = sar_line
-        else:
-            df.loc[:, 'parabolic_sar'] = 0.0
-            
-        # --- 6. Volume Filter ---
-        if self.params.get('USE_VOLUME_FILTER', False):
-            vol_ma = df['volume'].rolling(window=self.params.get('VOLUME_MA_PERIOD', 20)).mean()
-            df.loc[:, 'volume_ratio'] = df['volume'] / vol_ma.replace(0, 1)
-        else:
-            df.loc[:, 'volume_ratio'] = 100.0  # High ratio to pass filter (aligned with Futures)
-            
-        return df
-
-# --- Legacy Strategies ---
+    INDICATORS = _SPOT_INDICATORS
+    ENTRY_SHIFT = True
+    ATR_ALWAYS_ON = False
+    RSI_OVERBOUGHT_KEYS = ("RSI_OVERBOUGHT",)
