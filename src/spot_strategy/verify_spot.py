@@ -23,14 +23,15 @@ except IndexError:
 
 from config.optimization_config_modes import GET_SPOT_TRADE_GATE_POLICY
 from config.settings import BACKTEST_END_DATE, BACKTEST_START_DATE, DATA_DIR, TRAIN_CUTOFF_DATE
+from src.common.utils import setup_logger
 from src.spot_strategy.engine_fast_spot import BacktestEngineFastSpot, backtest_loop_spot_numba
 from src.spot_strategy.monte_carlo_spot import SpotMonteCarloSimulator
 from src.spot_strategy.upbit_client import UpbitClient
 from src.spot_strategy.walk_forward_spot import SpotWalkForwardAnalyzer
 from src.strategy.strategies import UltimateStrategy
 
-logging.basicConfig(level=logging.WARNING)
-logger = logging.getLogger("SpotVerifier")
+logger = setup_logger("SpotVerifier")
+logger.setLevel(logging.WARNING)
 
 LOG_WIDTH = 80
 SPOT_INITIAL_BALANCE = 1_000_000.0

@@ -27,7 +27,7 @@ from config.settings import (
     FUTURES_INITIAL_BALANCE,
 )
 from config.optimization_config_modes import GET_SEARCH_SPACE, BASE_SEARCH_SPACE
-from src.data.collector import DataCollector
+from src.futures_strategy.data_collector import DataCollector
 from src.futures_strategy.strategies_futures import UltimateStrategy
 from src.futures_strategy.engine_fast_futures import (
     BacktestEngineFast,

@@ -28,13 +28,13 @@ except IndexError:
 
 from config.optimization_config_modes import GET_SEARCH_SPACE, GET_SPOT_TRADE_GATE_POLICY
 from config.settings import BACKTEST_END_DATE, TRAIN_CUTOFF_DATE
+from src.common.utils import setup_logger
 from src.optimization.opt_utils import calculate_score, suggest_params
 from src.spot_strategy.engine_fast_spot import BacktestEngineFastSpot, backtest_loop_spot_numba
 from src.spot_strategy.upbit_client import UpbitClient
 from src.strategy.strategies import UltimateStrategy
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("SpotOptimizer")
+logger = setup_logger("SpotOptimizer")
 SHOW_OPTUNA_PROGRESS_BAR = os.getenv("SPOT_SHOW_OPTUNA_PROGRESS_BAR", "0") == "1"
 
 # Use a more recent optimization window to reduce regime drift and stale-history overfit.
