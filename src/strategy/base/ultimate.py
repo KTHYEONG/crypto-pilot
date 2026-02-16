@@ -212,13 +212,6 @@ class UltimateStrategyBase(StrategyBase):
         else:
             df["volume_ratio"] = 100.0
 
-        if "entry_upper" not in df.columns:
-            df["entry_upper"] = np.nan
-        if "entry_lower" not in df.columns:
-            df["entry_lower"] = np.nan
-        if "trend_direction" not in df.columns:
-            df["trend_direction"] = 0
-
         df["atr"] = df["atr"].ffill().fillna(df["close"] * 0.01)
         df["natr"] = df["natr"].ffill().fillna(1.0)
         df["rsi"] = df["rsi"].ffill().fillna(50.0)
