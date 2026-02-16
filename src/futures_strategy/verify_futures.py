@@ -23,12 +23,12 @@ from config.settings import (
     TRAIN_CUTOFF_DATE,
     FUTURES_INITIAL_BALANCE,
 )
-from src.data.collector import DataCollector
+from src.common.utils import setup_logger
+from src.futures_strategy.data_collector import DataCollector
 from src.futures_strategy.strategies_futures import UltimateStrategy
 
 # Setup Logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("FuturesVerifier")
+logger = setup_logger("FuturesVerifier")
 # Reduce engine logs to keep verify output readable.
 logging.getLogger("src.futures_strategy.engine_fast_futures").setLevel(logging.WARNING)
 
