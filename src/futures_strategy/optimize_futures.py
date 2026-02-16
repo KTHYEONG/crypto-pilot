@@ -27,9 +27,6 @@ from config.settings import (
     FUTURES_INITIAL_BALANCE,
 )
 from config.optimization_config_modes import GET_SEARCH_SPACE, BASE_SEARCH_SPACE
-from config.optimization_config_ultimate import (
-    COMMON_SEARCH_SPACE,
-)  # Keep for potential shared usage
 from src.data.collector import DataCollector
 from src.futures_strategy.strategies_futures import UltimateStrategy
 from src.futures_strategy.engine_fast_futures import (
@@ -590,7 +587,7 @@ def load_all_timeframes(symbol, start_date, end_date, timeframes):
     collector = DataCollector()
 
     # Daily Data (Required for Indicators)
-    # Even for SCALP mode, daily context is often useful (e.g., trend alignment)
+    # Even for intraday execution, daily context is useful (e.g., trend alignment)
     try:
         df = collector.ensure_data(symbol, "1d", start_date, end_date)
         df["datetime"] = pd.to_datetime(df["timestamp"], unit="ms")
@@ -673,7 +670,6 @@ def objective(
     strategy_name,
     data_maps,
     search_space,
-    common_search_space,
     merge_indices=None,
     awfo_plan=None,
 ):
@@ -685,9 +681,7 @@ def objective(
         awfo_plan: Dict containing AWFO settings and pre-built splits.
     """
     # 1. Generate Params
-    strategy_params = suggest_params(trial, search_space)
-    common_params = suggest_params(trial, common_search_space)
-    full_params = {**strategy_params, **common_params}
+    full_params = suggest_params(trial, search_space)
 
     # [VALIDATION] Enforce Logical Constraints
     if full_params.get("TREND_FILTER_TYPE") == "MACD":
@@ -1271,8 +1265,8 @@ def main():
         "--mode",
         type=str,
         default="UNIFIED",
-        choices=["SCALP", "DAY", "SWING", "UNIFIED", "ALL"],
-        help="Trading Mode: SCALP, DAY, SWING, or UNIFIED (recommended - auto-selects best timeframe)",
+        choices=["UNIFIED", "ALL"],
+        help="Trading Mode: UNIFIED (ALL is alias)",
     )
     parser.add_argument(
         "--seeds",
@@ -1311,11 +1305,8 @@ def main():
     # Auto-set trials based on mode if not specified
     # AWFO-enabled UNIFIED defaults are reduced to keep runtime practical.
     MODE_TRIALS_MAP = {
-        "SCALP": 3600,  # 3 timeframes (5m,15m,30m), high data volume but narrow param range
-        "DAY": 4200,    # 3 timeframes (1h,2h,4h), balanced - most commonly used mode
-        "SWING": 5000,  # 3 timeframes (4h,1d,3d), wide param range + low data volume (overfitting risk)
-        "UNIFIED": 5600, # Multi-seed(3) + 2-stage robust search baseline
-        "ALL": 5600,     # Alias for UNIFIED
+        "UNIFIED": 5600,  # Multi-seed(3) + 2-stage robust search baseline
+        "ALL": 5600,      # Alias for UNIFIED
     }
 
     if args.trials is None:
@@ -1642,7 +1633,6 @@ def main():
                         f"Ultimate_{mode}",
                         _data,
                         _space,
-                        {},
                         _merge,
                         _awfo,
                     ),
@@ -1738,7 +1728,6 @@ def main():
                         f"Ultimate_{mode}",
                         data_maps,
                         _space,
-                        {},
                         merge_indices,
                         stage2_awfo,
                     ),
@@ -1786,7 +1775,6 @@ def main():
                             f"Ultimate_{mode}",
                             data_maps,
                             _space,
-                            {},
                             merge_indices,
                             stage2_awfo,
                         ),
@@ -1853,7 +1841,6 @@ def main():
                     f"Ultimate_{mode}",
                     data_maps,
                     search_space,
-                    {},
                     merge_indices,
                     awfo_plan,
                 ),
