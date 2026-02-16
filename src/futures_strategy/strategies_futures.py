@@ -1,79 +1,16 @@
-
-from abc import ABC, abstractmethod
 import pandas as pd
 import numpy as np
 
-class Strategy(ABC):
-    def __init__(self, name, params):
-        self.name = name
-        self.params = params
+from src.strategy.base import MasterStrategyBase, StrategyBase, calculate_required_warmup_bars
 
-    @abstractmethod
-    def generate_signals(self, df):
-        pass
-    
+
+class Strategy(StrategyBase):
     def get_required_warmup(self):
-        """
-        Calculate minimum warmup bars required based on strategy parameters.
-        Analyzes all period-based parameters and returns max lookback with safety factor.
-        
-        Returns:
-            int: Minimum number of bars to skip at start of backtest
-        """
-        # List of all period-related parameter keys
-        period_keys = [
-            'ENTRY_PERIOD', 'MA_PERIOD', 'ATR_PERIOD',
-            'SUPERTREND_PERIOD', 'MACD_SLOW', 'ICHIMOKU_SENKOU_B',
-            'STRENGTH_FILTER_PERIOD', 'VOLUME_MA_PERIOD',
-            'CMF_PERIOD', 'HURST_PERIOD'
-        ]
-        
-        max_period = 0
-        for key in period_keys:
-            if key in self.params:
-                period = self.params[key]
-                if period > max_period:
-                    max_period = period
-        
-        # Safety Factor: 3x for EMA/ATR convergence
-        # EMA needs ~3*period bars to reach 95% accuracy
-        warmup = max_period * 3
-        
-        # Absolute minimum: 50 bars (even if no periods found)
-        return max(warmup, 50)
+        return calculate_required_warmup_bars(self.params)
 
-class MasterStrategy(Strategy):
-    """
-    Adaptive Regime Trend Follower (Master Strategy)
-    - Regime Filter: ADX (Trend Strength) + HMA/EMA (Trend Direction)
-    - Entry: Donchian or Bollinger Breakout (Engine handles Donchian, here we prepare indicators)
-    - Dynamic Risk: Volatility Targeting (Engine handles this using ATR)
-    """
-    def generate_signals(self, df):
-        # Note: 이 전략은 더 이상 사용되지 않음 (UNIFIED 전략으로 통합됨)
-        # Legacy compatibility 유지용
-        
-        # 1. Regime Filter Line (Trend Direction)
-        # EMA 또는 HMA 중 선택된 것을 'regime_line'으로 통일시켜 엔진이 읽게 함
-        filter_type = self.params.get('REGIME_FILTER', 'EMA')
-        
-        if filter_type == 'HMA' and 'hma' in df.columns:
-            df['regime_line'] = df['hma']
-        elif 'ema_trend' in df.columns:
-            df['regime_line'] = df['ema_trend']
-        else:
-            df['regime_line'] = df['ma50'] # Fallback
-            
-        # 2. ADX Filter (Trend Strength)
-        # ADX가 특정 값보다 낮으면 횡보장으로 간주하여 진입 금지
-        if self.params.get('USE_ADX', False) and 'adx' in df.columns:
-            adx_threshold = self.params.get('ADX_THRESHOLD', 20)
-            # ADX > Threshold 일 때만 1 (True)
-            df['adx_filter'] = np.where(df['adx'] > adx_threshold, 1, 0)
-        else:
-            df['adx_filter'] = 1 # 기본 Pass
-            
-        return df
+
+class MasterStrategy(MasterStrategyBase):
+    pass
 
 from .indicators_advanced_futures import (
     calculate_sma, calculate_ema, calculate_hma, calculate_dema, calculate_tema,
