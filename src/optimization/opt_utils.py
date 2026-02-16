@@ -32,7 +32,6 @@ class ObjectiveConfig:
 
     # Baselines
     min_trades_futures: int = 120
-    min_trades_scalp_futures: int = 300
     min_trades_spot: int = 60
     target_mdd_futures: float = 38.0
     target_mdd_spot: float = 28.0
@@ -93,7 +92,6 @@ def _load_objective_config():
         gate_weight_kelly=_env_float("OBJ_GATE_W_KELLY", 0.20),
         gate_weight_side=_env_float("OBJ_GATE_W_SIDE", 0.30),
         min_trades_futures=_env_int("OBJ_MIN_TRADES_FUTURES", 120),
-        min_trades_scalp_futures=_env_int("OBJ_MIN_TRADES_SCALP_FUTURES", 300),
         min_trades_spot=_env_int("OBJ_MIN_TRADES_SPOT", 60),
         target_mdd_futures=_env_float("OBJ_TARGET_MDD_FUTURES", 38.0),
         target_mdd_spot=_env_float("OBJ_TARGET_MDD_SPOT", 28.0),
@@ -505,7 +503,7 @@ def _blend_gates_with_floor(gates, weights, gate_floor):
     return floor + (1.0 - floor) * weighted
 
 
-def calculate_score(ret, mdd, trades_df, mode="DAY", market_type="spot", timeframe=None, min_trades_override=None):
+def calculate_score(ret, mdd, trades_df, mode="UNIFIED", market_type="spot", timeframe=None, min_trades_override=None):
     """
     Overfitting-resistant objective (continuous-form):
     score = C(activity, consistency, Kelly, side-coverage) * (Growth + Quality - Risk)
@@ -589,7 +587,7 @@ def calculate_score(ret, mdd, trades_df, mode="DAY", market_type="spot", timefra
 
     # --- 2) Market baselines ---
     if market_type == "futures":
-        min_trades = cfg.min_trades_futures if mode != "SCALP" else cfg.min_trades_scalp_futures
+        min_trades = cfg.min_trades_futures
         target_mdd = cfg.target_mdd_futures
         min_side_ratio = cfg.min_side_ratio_futures
         growth_scale = fut_growth_coef / 30.0

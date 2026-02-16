@@ -1,7 +1,5 @@
 """
-Optimization Configuration for Distinct Trading Modes
-Defines specialized search spaces for SCALP, DAY, and SWING strategies.
-Refactored to separate Period constraints and enhance market-specific logic.
+Optimization configuration for UNIFIED/ALL modes.
 """
 
 from copy import deepcopy
@@ -75,53 +73,16 @@ def GET_SPOT_TRADE_GATE_POLICY() -> Dict[str, Any]:
 # 1. PERIOD & THRESHOLD CONSTANTS (User Configurable)
 # =========================================================
 
-# Scalping: Fast reaction, tight ranges
-SCALP_CONFIG = {
-    'ENTRY_PERIOD': {'low': 10, 'high': 40, 'log': True},         # Log: 10→14→20→28→40
-    'MA_PERIOD':    {'low': 5,  'high': 40, 'log': True},         # Log: 5→7→10→14→20→28→40
-    'ATR_PERIOD':   {'low': 10, 'high': 20, 'log': True},         # Log: 10→14→20 (안정적 변동성 측정)
-    'SL_PCT':       {'low': 0.005, 'high': 0.015,  'step': 0.001}, # Linear (비율) - 스캘핑: 타이트한 손절 (레버리지 10배 시 ROE -5% ~ -15%)
-    'TP_ATR_MULT':  {'low': 1.2,   'high': 4.5,   'log': True},   # [Hybrid] Min 1.2(Fee Safety), Max 4.5(Quick Ops)
-    'ADX_THRESH':   {'low': 25,    'high': 45,    'step': 1},     # Linear (임계값)
-    'VOL_THRESHOLD': {'low': 1.5,  'high': 5.0,   'log': True},   # Log (배수)
-    'MAX_HOLDING_BARS': {'low': 10, 'high': 50,   'log': True}    # Log (기간)
-}
-
-# Day Trading: Balanced approach (Standard)
-DAY_CONFIG = {
-    'ENTRY_PERIOD': {'low': 20, 'high': 100, 'log': True},        # Log: 20→28→40→56→80→100
-    'MA_PERIOD':    {'low': 10, 'high': 100, 'log': True},        # Log: 10→14→20→28→40→56→80→100
-    'ATR_PERIOD':   {'low': 10, 'high': 20,  'log': True},        # Log: 10→14→20
-    'SL_PCT':       {'low': 0.015, 'high': 0.06, 'step': 0.005},  # Linear (비율)
-    'TP_ATR_MULT':  {'low': 1.5,  'high': 12.0,  'log': True},    # [Hybrid] Min 1.5(Flexibility), Max 12.0(Trend)
-    'ADX_THRESH':   {'low': 20,   'high': 35,   'step': 1},       # Linear (임계값)
-    'VOL_THRESHOLD': {'low': 1.2,  'high': 3.0,  'log': True},    # Log (배수)
-    'MAX_HOLDING_BARS': {'low': 20, 'high': 100, 'log': True}     # Log (기간)
-}
-
-# Swing Trading: Long-term trend following
-SWING_CONFIG = {
-    'ENTRY_PERIOD': {'low': 40, 'high': 200, 'log': True},         # Log: 40→56→80→113→160→200
-    'MA_PERIOD':    {'low': 50, 'high': 200, 'log': True},         # Log: 50→71→100→141→200
-    'ATR_PERIOD':   {'low': 14, 'high': 30,  'log': True},         # Log: 14→17→21→26→30
-    'SL_PCT':       {'low': 0.06, 'high': 0.20, 'step': 0.01},     # Linear (비율)
-    'TP_ATR_MULT':  {'low': 3.0,  'high': 30.0, 'log': True},     # [Hybrid] Min 3.0(Active Swing), Max 30.0(Moon Shot)
-    'ADX_THRESH':   {'low': 15,   'high': 30,   'step': 1},        # Linear (임계값)
-    'VOL_THRESHOLD': {'low': 1.1,  'high': 2.5,  'log': True},     # Log (배수)
-    'MAX_HOLDING_BARS': {'low': 50, 'high': 300, 'log': True},     # Log (기간)
-    'TRAILING_ACTIVATION_ATR': {'low': 3.0, 'high': 8.0, 'log': True}  # Log (배수)
-}
-
 # UNIFIED: All-in-one strategy (모든 범위 병합)
 # 타임프레임: 1h, 4h, 1d 고정 (노이즈 제거)
 # 파라미터: 각 지표의 최솟값 ~ 최댓값 사용
 UNIFIED_CONFIG = {
-    'ENTRY_PERIOD': {'low': 10, 'high': 200, 'log': True},         # 전체 범위: 10 (SCALP) ~ 200 (SWING)
-    'MA_PERIOD':    {'low': 5,  'high': 200, 'log': True},         # 전체 범위: 5 (SCALP) ~ 200 (SWING)
+    'ENTRY_PERIOD': {'low': 10, 'high': 200, 'log': True},         # 통합 탐색 범위
+    'MA_PERIOD':    {'low': 5,  'high': 200, 'log': True},         # 통합 탐색 범위
     'ATR_PERIOD':   {'low': 5,  'high': 60,  'log': True},         # [Optimized] 10~30 -> 5~60 (민감~둔감 다양한 변동성 대응)
     'SL_PCT':       {'low': 0.005, 'high': 0.05, 'step': 0.005},   # [Optimized] Max 20% -> 5% (고배율 선물에서 5% 이상 손절은 의미 없음)
     'TP_ATR_MULT':  {'low': 1.5,  'high': 15.0, 'log': True},      # [Optimized] Max 30->15 (Realistic Big Win)
-    'ADX_THRESH':   {'low': 15,   'high': 45,   'step': 1},        # 전체 범위: 15 (SWING) ~ 45 (SCALP)
+    'ADX_THRESH':   {'low': 15,   'high': 45,   'step': 1},        # 통합 탐색 범위
     'VOL_THRESHOLD': {'low': 1.1,  'high': 3.0,  'log': True},     # [Optimized] Max 5.0 -> 3.0 (현실적인 거래량 돌파 기준)
     'MAX_HOLDING_BARS': {'low': 5, 'high': 500, 'log': True},      # [Max Profit] 200->500 (Catch Monster Trend)
     'TRAILING_ACTIVATION_ATR': {'low': 0.5, 'high': 8.0, 'log': False, 'step': 0.5}  # [Optimized] Min 0.0->0.5 (Avoid immediate whipsaw)
@@ -218,73 +179,23 @@ BASE_SEARCH_SPACE = {
 
 def GET_SEARCH_SPACE(mode, market_type='futures'):
     """
-    Returns the search space for a specific mode and market type.
-    mode: 'SCALP', 'DAY', 'SWING'
+    Returns the search space for UNIFIED/ALL mode and market type.
+    mode: 'UNIFIED', 'ALL'
     market_type: 'futures', 'spot'
     """
     space = deepcopy(BASE_SEARCH_SPACE)
     mode = mode.upper()
     market_type = market_type.lower()
-    
-    # Select Config based on Mode
-    if mode == 'SCALP':
-        cfg = SCALP_CONFIG
-        # Timeframe: Spot vs Futures 분리
-        if market_type == 'spot':
-            # Upbit (CCXT): 1m, 3m, 5m, 10m, 15m, 30m, 1h, 4h, 1d, 1w, 1M
-            # 5m (ultra-fast), 15m (standard), 30m (low-freq scalping) - matches Futures
-            space['TIMEFRAME'] = {'type': 'categorical', 'choices': ['5m', '15m', '30m']}
-        else:
-            # Futures: All standard timeframes available
-            space['TIMEFRAME'] = {'type': 'categorical', 'choices': ['5m', '15m', '30m']}
-        # Scalping specific: Tight ATR Multipliers
-        space['ATR_STOP_LOSS_MULT'] = {'type': 'float', 'low': 1.0, 'high': 3.0, 'step': 0.2}
-        space['ATR_MULTIPLIER'] = {'type': 'float', 'low': 1.5, 'high': 3.9, 'step': 0.2}
+    if mode not in {'UNIFIED', 'ALL'}:
+        mode = 'UNIFIED'
+    cfg = UNIFIED_CONFIG
 
-    elif mode == 'DAY':
-        cfg = DAY_CONFIG
-        # Timeframe: Spot vs Futures 분리
-        if market_type == 'spot':
-            # Upbit: 30m, 1h, 4h supported (2h not available in CCXT Upbit)
-            space['TIMEFRAME'] = {'type': 'categorical', 'choices': ['30m', '1h', '4h']}
-        else:
-            # Futures: 1h, 2h, 4h available
-            space['TIMEFRAME'] = {'type': 'categorical', 'choices': ['1h', '2h', '4h']}
-        # Day Trading: Balanced
-        space['ATR_STOP_LOSS_MULT'] = {'type': 'float', 'low': 1.5, 'high': 4.0, 'step': 0.5}
-        space['ATR_MULTIPLIER'] = {'type': 'float', 'low': 2.0, 'high': 5.0, 'step': 0.5}
-
-    elif mode == 'SWING':
-        cfg = SWING_CONFIG
-        # Timeframe: Spot vs Futures 분리
-        if market_type == 'spot':
-            # Upbit: 4h, 1d, 1w, 1M available (3d not supported)
-            space['TIMEFRAME'] = {'type': 'categorical', 'choices': ['4h', '1d', '1w']}
-        else:
-            # Futures: 4h, 1d, 3d available
-            space['TIMEFRAME'] = {'type': 'categorical', 'choices': ['4h', '1d', '3d']}
-        # Swing: Loose stops
-        space['ATR_STOP_LOSS_MULT'] = {'type': 'float', 'low': 3.0, 'high': 6.0, 'step': 0.5}
-        space['ATR_MULTIPLIER'] = {'type': 'float', 'low': 3.0, 'high': 8.0, 'step': 0.5}
-
-    elif mode == 'UNIFIED' or mode == 'ALL':
-        cfg = UNIFIED_CONFIG
-        # [UNIFIED] Supports both Futures and Spot with stable timeframes
-        # 15m, 30m added for Small Capital Rotation
-        space['TIMEFRAME'] = {'type': 'categorical', 'choices': ['15m', '30m', '1h', '4h', '1d']}
-        # Wide ATR range to accommodate all strategies
-        space['ATR_STOP_LOSS_MULT'] = {'type': 'float', 'low': 1.0, 'high': 6.0, 'step': 0.5}
-        space['ATR_MULTIPLIER'] = {'type': 'float', 'low': 1.5, 'high': 8.0, 'step': 0.5}
-
-    else:
-        # Fallback to DAY config
-        cfg = DAY_CONFIG
-        if market_type == 'spot':
-            space['TIMEFRAME'] = {'type': 'categorical', 'choices': ['30m', '1h', '4h']}
-        else:
-            space['TIMEFRAME'] = {'type': 'categorical', 'choices': ['1h', '2h', '4h']}
-        space['ATR_STOP_LOSS_MULT'] = {'type': 'float', 'low': 2.0, 'high': 4.0, 'step': 0.5}
-        space['ATR_MULTIPLIER'] = {'type': 'float', 'low': 2.0, 'high': 5.0, 'step': 0.5}
+    # [UNIFIED] Supports both Futures and Spot with stable timeframes
+    # 15m, 30m added for Small Capital Rotation
+    space['TIMEFRAME'] = {'type': 'categorical', 'choices': ['15m', '30m', '1h', '4h', '1d']}
+    # Wide ATR range to accommodate all strategies
+    space['ATR_STOP_LOSS_MULT'] = {'type': 'float', 'low': 1.0, 'high': 6.0, 'step': 0.5}
+    space['ATR_MULTIPLIER'] = {'type': 'float', 'low': 1.5, 'high': 8.0, 'step': 0.5}
 
     # Apply Mode-Specific Configs
     space['ENTRY_PERIOD'] = {'type': 'int', **cfg['ENTRY_PERIOD']}
@@ -302,7 +213,7 @@ def GET_SEARCH_SPACE(mode, market_type='futures'):
     if 'MAX_HOLDING_BARS' in cfg:
         space['MAX_HOLDING_BARS'] = {'type': 'int', **cfg['MAX_HOLDING_BARS']}
     
-    # Trailing Stop Activation (Profit Protection for Swing)
+    # Trailing stop activation (profit-protection)
     if 'TRAILING_ACTIVATION_ATR' in cfg:
         space['TRAILING_ACTIVATION_ATR'] = {'type': 'float', **cfg['TRAILING_ACTIVATION_ATR']}
 
@@ -391,16 +302,8 @@ def GET_SEARCH_SPACE(mode, market_type='futures'):
         if 'LEVERAGE' in space:
             del space['LEVERAGE']
 
-        # Mode-aware spot sizing range (long-only): bias toward survival and PF stability.
-        if mode == 'SCALP':
-            space['RISK_PER_TRADE_SPOT'] = {'type': 'float', 'low': 0.20, 'high': 0.55, 'step': 0.05}
-        elif mode == 'DAY':
-            space['RISK_PER_TRADE_SPOT'] = {'type': 'float', 'low': 0.16, 'high': 0.50, 'step': 0.02}
-        elif mode == 'SWING':
-            space['RISK_PER_TRADE_SPOT'] = {'type': 'float', 'low': 0.12, 'high': 0.46, 'step': 0.02}
-        else:  # UNIFIED / ALL
-            # Long-only spot: avoid aggressive sizing that tends to collapse holdout PF.
-            space['RISK_PER_TRADE_SPOT'] = {'type': 'float', 'low': 0.10, 'high': 0.56, 'step': 0.02}
+        # Long-only spot: avoid aggressive sizing that tends to collapse holdout PF.
+        space['RISK_PER_TRADE_SPOT'] = {'type': 'float', 'low': 0.10, 'high': 0.56, 'step': 0.02}
 
         # Spot-specific safety filters
         # Keep safety available, but broaden to include near-disabled region for high-return exploration.
@@ -430,81 +333,71 @@ def GET_SEARCH_SPACE(mode, market_type='futures'):
             space['TAKE_PROFIT_ATR_MULT']['high'] = max(space['TAKE_PROFIT_ATR_MULT']['high'], 15.0)
 
         # [UNIFIED-SPOT] Keep parity with futures-style parameter coverage, with broader upside exploration
-        if mode == 'UNIFIED' or mode == 'ALL':
-            # Structure choices: same family as futures unified (minus leverage dimension)
-            space['ENTRY_TYPE'] = {'type': 'categorical', 'choices': ['DONCHIAN', 'BOLLINGER', 'KELTNER']}
-            space['TREND_FILTER_TYPE'] = {'type': 'categorical', 'choices': ['EMA', 'SUPERTREND', 'ICHIMOKU']}
-            space['STRENGTH_FILTER_TYPE'] = {'type': 'categorical', 'choices': ['NONE', 'ADX', 'RSI', 'NATR', 'HURST', 'VHF']}
-            space['USE_TAKE_PROFIT'] = {'type': 'categorical', 'choices': [True, False]}
-            space['USE_VOLUME_FILTER'] = {'type': 'categorical', 'choices': [True, False]}
+        # Structure choices: same family as futures unified (minus leverage dimension)
+        space['ENTRY_TYPE'] = {'type': 'categorical', 'choices': ['DONCHIAN', 'BOLLINGER', 'KELTNER']}
+        space['TREND_FILTER_TYPE'] = {'type': 'categorical', 'choices': ['EMA', 'SUPERTREND', 'ICHIMOKU']}
+        space['STRENGTH_FILTER_TYPE'] = {'type': 'categorical', 'choices': ['NONE', 'ADX', 'RSI', 'NATR', 'HURST', 'VHF']}
+        space['USE_TAKE_PROFIT'] = {'type': 'categorical', 'choices': [True, False]}
+        space['USE_VOLUME_FILTER'] = {'type': 'categorical', 'choices': [True, False]}
 
-            # Long-only spot unified set: medium/slow anchors for stability.
-            space['TIMEFRAME'] = {'type': 'categorical', 'choices': ['30m', '1h', '4h']}
+        # Long-only spot unified set: medium/slow anchors for stability.
+        space['TIMEFRAME'] = {'type': 'categorical', 'choices': ['30m', '1h', '4h']}
 
-            # Core execution bounds (spot UNIFIED): avoid ultra-slow windows that cause trade starvation.
-            space['ENTRY_PERIOD'] = {'type': 'int', 'low': 8, 'high': 96, 'log': True}
-            space['MA_PERIOD'] = {'type': 'int', 'low': 8, 'high': 120, 'log': True}
-            space['ATR_PERIOD'] = {'type': 'int', 'low': 7, 'high': 28, 'log': True}
-            # Step-divisible bounds to avoid distribution warning and suppress ultra-wide stops.
-            space['STOP_LOSS_PCT'] = {'type': 'float', 'low': 0.008, 'high': 0.042, 'step': 0.002}
-            space['ATR_STOP_LOSS_MULT'] = {'type': 'float', 'low': 1.2, 'high': 4.6, 'step': 0.2}
-            space['TAKE_PROFIT_ATR_MULT'] = {'type': 'float', 'low': 1.6, 'high': 12.0, 'log': True}
-            space['ATR_MULTIPLIER'] = {'type': 'float', 'low': 1.5, 'high': 4.8, 'step': 0.3}
-            space['MAX_HOLDING_BARS'] = {'type': 'int', 'low': 20, 'high': 260, 'log': True}
-            space['TRAILING_ACTIVATION_ATR'] = {'type': 'float', 'low': 0.5, 'high': 4.5, 'step': 0.5}
-            space['TIME_EXIT_PROFIT_THRESHOLD'] = {'type': 'float', 'low': 0.0, 'high': 1.8, 'step': 0.1}
-            space['RSI_EXIT_THRESHOLD'] = {'type': 'int', 'low': 78, 'high': 98, 'step': 1}
+        # Core execution bounds (spot UNIFIED): avoid ultra-slow windows that cause trade starvation.
+        space['ENTRY_PERIOD'] = {'type': 'int', 'low': 8, 'high': 96, 'log': True}
+        space['MA_PERIOD'] = {'type': 'int', 'low': 8, 'high': 120, 'log': True}
+        space['ATR_PERIOD'] = {'type': 'int', 'low': 7, 'high': 28, 'log': True}
+        # Step-divisible bounds to avoid distribution warning and suppress ultra-wide stops.
+        space['STOP_LOSS_PCT'] = {'type': 'float', 'low': 0.008, 'high': 0.042, 'step': 0.002}
+        space['ATR_STOP_LOSS_MULT'] = {'type': 'float', 'low': 1.2, 'high': 4.6, 'step': 0.2}
+        space['TAKE_PROFIT_ATR_MULT'] = {'type': 'float', 'low': 1.6, 'high': 12.0, 'log': True}
+        space['ATR_MULTIPLIER'] = {'type': 'float', 'low': 1.5, 'high': 4.8, 'step': 0.3}
+        space['MAX_HOLDING_BARS'] = {'type': 'int', 'low': 20, 'high': 260, 'log': True}
+        space['TRAILING_ACTIVATION_ATR'] = {'type': 'float', 'low': 0.5, 'high': 4.5, 'step': 0.5}
+        space['TIME_EXIT_PROFIT_THRESHOLD'] = {'type': 'float', 'low': 0.0, 'high': 1.8, 'step': 0.1}
+        space['RSI_EXIT_THRESHOLD'] = {'type': 'int', 'low': 78, 'high': 98, 'step': 1}
 
-            # Indicator/detail bounds: reduce over-smoothing and over-filtering in bear/choppy regimes.
-            space['KELTNER_ATR_MULT'] = {'type': 'float', 'low': 1.0, 'high': 2.8, 'step': 0.1}
-            space['BB_STD'] = {'type': 'float', 'low': 1.6, 'high': 3.2, 'step': 0.1}
-            space['SUPERTREND_MULT'] = {'type': 'float', 'low': 1.0, 'high': 2.8, 'log': True}
-            space['SUPERTREND_PERIOD'] = {'type': 'int', 'low': 5, 'high': 24, 'log': True}
-            space['ICHIMOKU_TENKAN'] = {'type': 'int', 'low': 7, 'high': 24, 'log': True}
-            space['ICHIMOKU_KIJUN'] = {'type': 'int', 'low': 20, 'high': 42, 'log': True}
-            space['ICHIMOKU_SENKOU_B'] = {'type': 'int', 'low': 40, 'high': 78, 'log': True}
-            space['STRENGTH_FILTER_PERIOD'] = {'type': 'int', 'low': 8, 'high': 28, 'log': True}
-            space['ADX_THRESHOLD'] = {'type': 'int', 'low': 10, 'high': 26, 'step': 1}
-            space['RSI_OVERBOUGHT'] = {'type': 'int', 'low': 65, 'high': 90, 'step': 1}
-            space['RSI_OVERSOLD'] = {'type': 'int', 'low': 10, 'high': 35, 'step': 1}
-            space['VOLUME_THRESHOLD_MULT'] = {'type': 'float', 'low': 0.80, 'high': 1.30, 'log': True}
-            space['VOLUME_MA_PERIOD'] = {'type': 'int', 'low': 8, 'high': 30, 'log': True}
-            space['SAR_STEP'] = {'type': 'float', 'low': 0.005, 'high': 0.04, 'step': 0.005}
+        # Indicator/detail bounds: reduce over-smoothing and over-filtering in bear/choppy regimes.
+        space['KELTNER_ATR_MULT'] = {'type': 'float', 'low': 1.0, 'high': 2.8, 'step': 0.1}
+        space['BB_STD'] = {'type': 'float', 'low': 1.6, 'high': 3.2, 'step': 0.1}
+        space['SUPERTREND_MULT'] = {'type': 'float', 'low': 1.0, 'high': 2.8, 'log': True}
+        space['SUPERTREND_PERIOD'] = {'type': 'int', 'low': 5, 'high': 24, 'log': True}
+        space['ICHIMOKU_TENKAN'] = {'type': 'int', 'low': 7, 'high': 24, 'log': True}
+        space['ICHIMOKU_KIJUN'] = {'type': 'int', 'low': 20, 'high': 42, 'log': True}
+        space['ICHIMOKU_SENKOU_B'] = {'type': 'int', 'low': 40, 'high': 78, 'log': True}
+        space['STRENGTH_FILTER_PERIOD'] = {'type': 'int', 'low': 8, 'high': 28, 'log': True}
+        space['ADX_THRESHOLD'] = {'type': 'int', 'low': 10, 'high': 26, 'step': 1}
+        space['RSI_OVERBOUGHT'] = {'type': 'int', 'low': 65, 'high': 90, 'step': 1}
+        space['RSI_OVERSOLD'] = {'type': 'int', 'low': 10, 'high': 35, 'step': 1}
+        space['VOLUME_THRESHOLD_MULT'] = {'type': 'float', 'low': 0.80, 'high': 1.30, 'log': True}
+        space['VOLUME_MA_PERIOD'] = {'type': 'int', 'low': 8, 'high': 30, 'log': True}
+        space['SAR_STEP'] = {'type': 'float', 'low': 0.005, 'high': 0.04, 'step': 0.005}
 
-            # Dynamic-risk bounds: reduce extreme sensitivity and keep robust regimes.
-            space['STRONG_REGIME_HURST'] = {'type': 'float', 'low': 0.50, 'high': 0.65, 'step': 0.01}
-            space['STRONG_REGIME_NATR'] = {'type': 'float', 'low': 0.6, 'high': 1.8, 'step': 0.1}
-            space['STRONG_REGIME_MULTIPLIER'] = {'type': 'float', 'low': 1.00, 'high': 1.35, 'step': 0.05}
-            space['WEAK_REGIME_HURST'] = {'type': 'float', 'low': 0.40, 'high': 0.50, 'step': 0.01}
-            space['WEAK_REGIME_MULTIPLIER'] = {'type': 'float', 'low': 0.50, 'high': 0.85, 'step': 0.05}
-            space['PANIC_REGIME_NATR'] = {'type': 'float', 'low': 3.0, 'high': 8.5, 'step': 0.5}
-            space['PANIC_REGIME_MULTIPLIER'] = {'type': 'float', 'low': 0.10, 'high': 0.30, 'step': 0.05}
-            # Risk-off gate controls (previously fixed in engine defaults): make them searchable.
-            space['ENABLE_RISK_OFF_HARD_GATE'] = {'type': 'categorical', 'choices': [False, True]}
-            space['RISK_OFF_EXIT_ON_TRIGGER'] = {'type': 'categorical', 'choices': [False, True]}
-            space['RISK_OFF_COOLDOWN_BARS'] = {'type': 'int', 'low': 0, 'high': 4, 'step': 1}
+        # Dynamic-risk bounds: reduce extreme sensitivity and keep robust regimes.
+        space['STRONG_REGIME_HURST'] = {'type': 'float', 'low': 0.50, 'high': 0.65, 'step': 0.01}
+        space['STRONG_REGIME_NATR'] = {'type': 'float', 'low': 0.6, 'high': 1.8, 'step': 0.1}
+        space['STRONG_REGIME_MULTIPLIER'] = {'type': 'float', 'low': 1.00, 'high': 1.35, 'step': 0.05}
+        space['WEAK_REGIME_HURST'] = {'type': 'float', 'low': 0.40, 'high': 0.50, 'step': 0.01}
+        space['WEAK_REGIME_MULTIPLIER'] = {'type': 'float', 'low': 0.50, 'high': 0.85, 'step': 0.05}
+        space['PANIC_REGIME_NATR'] = {'type': 'float', 'low': 3.0, 'high': 8.5, 'step': 0.5}
+        space['PANIC_REGIME_MULTIPLIER'] = {'type': 'float', 'low': 0.10, 'high': 0.30, 'step': 0.05}
+        # Risk-off gate controls (previously fixed in engine defaults): make them searchable.
+        space['ENABLE_RISK_OFF_HARD_GATE'] = {'type': 'categorical', 'choices': [False, True]}
+        space['RISK_OFF_EXIT_ON_TRIGGER'] = {'type': 'categorical', 'choices': [False, True]}
+        space['RISK_OFF_COOLDOWN_BARS'] = {'type': 'int', 'low': 0, 'high': 4, 'step': 1}
 
-            # Active position management: avoid excessively aggressive add-on behavior.
-            space['ENABLE_SCALE_OUT'] = {'type': 'categorical', 'choices': [False]}
-            # Delay partial take-profit to avoid cutting trend winners too early.
-            space['SCALE_OUT_TRIGGER_ATR'] = {'type': 'float', 'low': 1.4, 'high': 3.2, 'step': 0.1}
-            space['SCALE_OUT_RATIO'] = {'type': 'float', 'low': 0.15, 'high': 0.35, 'step': 0.05}
-            space['ENABLE_BREAKEVEN'] = {'type': 'categorical', 'choices': [False]}
-            # Keep some room after break-even move to reduce micro-stop churn.
-            space['BREAKEVEN_BUFFER_PCT'] = {'type': 'float', 'low': 0.001, 'high': 0.008, 'step': 0.001}
-            space['ENABLE_PYRAMIDING'] = {'type': 'categorical', 'choices': [False]}
-            space['PYRAMID_TRIGGER_ATR'] = {'type': 'float', 'low': 1.4, 'high': 3.0, 'step': 0.1}
-            space['PYRAMID_STEP_ATR'] = {'type': 'float', 'low': 0.8, 'high': 1.6, 'step': 0.1}
-            space['PYRAMID_RISK_RATIO'] = {'type': 'float', 'low': 0.10, 'high': 0.35, 'step': 0.05}
-            space['PYRAMID_MAX_ADDS'] = {'type': 'int', 'low': 1, 'high': 2, 'step': 1}
-        elif mode == 'SCALP':
-            # Scalp (5m~30m): avoid extreme stagnation windows
-            space['MAX_HOLDING_BARS'] = {'type': 'int', 'low': 80, 'high': 420, 'log': True}
-        elif mode == 'DAY':
-            # Day (30m~4h): medium holding band
-            space['MAX_HOLDING_BARS'] = {'type': 'int', 'low': 40, 'high': 220, 'log': True}
-        else:  # SWING
-            # Swing (4h~1w): long holding allowed
-            space['MAX_HOLDING_BARS'] = {'type': 'int', 'low': 80, 'high': 900, 'log': True}
+        # Active position management: avoid excessively aggressive add-on behavior.
+        space['ENABLE_SCALE_OUT'] = {'type': 'categorical', 'choices': [False]}
+        # Delay partial take-profit to avoid cutting trend winners too early.
+        space['SCALE_OUT_TRIGGER_ATR'] = {'type': 'float', 'low': 1.4, 'high': 3.2, 'step': 0.1}
+        space['SCALE_OUT_RATIO'] = {'type': 'float', 'low': 0.15, 'high': 0.35, 'step': 0.05}
+        space['ENABLE_BREAKEVEN'] = {'type': 'categorical', 'choices': [False]}
+        # Keep some room after break-even move to reduce micro-stop churn.
+        space['BREAKEVEN_BUFFER_PCT'] = {'type': 'float', 'low': 0.001, 'high': 0.008, 'step': 0.001}
+        space['ENABLE_PYRAMIDING'] = {'type': 'categorical', 'choices': [False]}
+        space['PYRAMID_TRIGGER_ATR'] = {'type': 'float', 'low': 1.4, 'high': 3.0, 'step': 0.1}
+        space['PYRAMID_STEP_ATR'] = {'type': 'float', 'low': 0.8, 'high': 1.6, 'step': 0.1}
+        space['PYRAMID_RISK_RATIO'] = {'type': 'float', 'low': 0.10, 'high': 0.35, 'step': 0.05}
+        space['PYRAMID_MAX_ADDS'] = {'type': 'int', 'low': 1, 'high': 2, 'step': 1}
 
     return space
