@@ -273,11 +273,59 @@ class RealTraderFutures:
         self._last_resource_check = datetime.utcnow()
         self._last_db_cleanup = datetime.utcnow()
         self._last_gc = datetime.utcnow()
+        self._log_last_emit_ts: Dict[str, float] = {}
+        self._log_last_message: Dict[str, str] = {}
         
         # Signal handlers 등록
         self._setup_signal_handlers()
         
         # 전략 로드는 initialize()에서 수행
+
+    def _should_emit_log(
+        self,
+        key: str,
+        interval_seconds: float = 0.0,
+        message: Optional[str] = None,
+        emit_on_change: bool = False,
+    ) -> bool:
+        """
+        Log emission gate.
+        - interval_seconds: minimum interval between logs for same key.
+        - emit_on_change: if True, allow immediate emit when message text changed.
+        """
+        now_ts = time.time()
+        last_ts = float(self._log_last_emit_ts.get(key, 0.0) or 0.0)
+        if emit_on_change and message is not None:
+            last_message = self._log_last_message.get(key)
+            if last_message != message:
+                self._log_last_message[key] = message
+                self._log_last_emit_ts[key] = now_ts
+                return True
+        if now_ts - last_ts >= max(0.0, float(interval_seconds)):
+            if message is not None:
+                self._log_last_message[key] = message
+            self._log_last_emit_ts[key] = now_ts
+            return True
+        return False
+
+    def _log_throttled(
+        self,
+        level: str,
+        key: str,
+        message: str,
+        interval_seconds: float,
+        emit_on_change: bool = False,
+    ) -> None:
+        """Rate-limited log wrapper to reduce repetitive operational logs."""
+        if not self._should_emit_log(
+            key=key,
+            interval_seconds=interval_seconds,
+            message=message,
+            emit_on_change=emit_on_change,
+        ):
+            return
+        log_fn = getattr(logger, level, logger.info)
+        log_fn(message)
 
     
     def _setup_signal_handlers(self):
@@ -1138,9 +1186,14 @@ class RealTraderFutures:
 
             if in_position:
                 entry_px_for_log = float(pos.get('entryPrice', 0.0) or 0.0)
-                logger.info(
-                    f"📊 [{symbol}] Position: {amount:+.4f} @ Entry {entry_px_for_log:.2f} | "
-                    f"Current: {current_price:.2f} | Checking exit conditions..."
+                self._log_throttled(
+                    level="info",
+                    key=f"{symbol}:position-monitor",
+                    message=(
+                        f"📊 [{symbol}] Position: {amount:+.4f} @ Entry {entry_px_for_log:.2f} | "
+                        f"Current: {current_price:.2f} | Checking exit conditions..."
+                    ),
+                    interval_seconds=120.0,
                 )
 
                 # Backtest parity: 청산 지표(trend/atr/sar/rsi)는 indicator TF 캐시값 유지.
@@ -1219,7 +1272,12 @@ class RealTraderFutures:
             # Backtest parity 우선: 포지션 없으면 항상 최신 마감캔들을 확인하고,
             # 실제 진입 허용 여부는 target_entry_open_ts 게이트에서 결정.
             elif not in_position:
-                logger.info(f"ℹ️ [{symbol}] No position. Checking entry conditions...")
+                self._log_throttled(
+                    level="info",
+                    key=f"{symbol}:entry-scan",
+                    message=f"ℹ️ [{symbol}] No position. Checking entry conditions...",
+                    interval_seconds=180.0,
+                )
                 state = self.state_manager.get_symbol_state(symbol)
 
                 # [Safety] 미체결 주문 확인 (Pending Orders) - 펜딩된 진입 주문이 있으면 스킵
@@ -1229,7 +1287,12 @@ class RealTraderFutures:
                     logger.warning(f"⚠️ Open entry orders exist {len(entry_orders)} for {symbol}. Skipping.")
                     return
 
-                logger.info(f"🔎 [{symbol}] Checking Entry Conditions...")
+                self._log_throttled(
+                    level="debug",
+                    key=f"{symbol}:entry-check-detail",
+                    message=f"🔎 [{symbol}] Checking Entry Conditions...",
+                    interval_seconds=120.0,
+                )
                 # [P2 FIX] Entry Level 유효성 검증 강화 (None/Inf 체크 추가)
                 if (pd.isna(entry_upper) or pd.isna(entry_lower) or 
                     entry_upper is None or entry_lower is None or
@@ -1281,9 +1344,14 @@ class RealTraderFutures:
                     )
                     return
                 if now_ref_ms > late_bound_ms:
-                    logger.info(
-                        f"⏭️ [{symbol}] Stale entry skipped. "
-                        f"lag={(now_ref_ms - target_entry_open_ts)/1000:.1f}s > grace {entry_grace_sec:.1f}s"
+                    self._log_throttled(
+                        level="info",
+                        key=f"{symbol}:stale-entry-skip",
+                        message=(
+                            f"⏭️ [{symbol}] Stale entry skipped. "
+                            f"lag={(now_ref_ms - target_entry_open_ts)/1000:.1f}s > grace {entry_grace_sec:.1f}s"
+                        ),
+                        interval_seconds=120.0,
                     )
                     return
 
@@ -1593,7 +1661,14 @@ class RealTraderFutures:
                     if not vol_ok: reasons.append(f"VolZ({vol_ratio:.2f})")
                     
                     if reasons:
-                        logger.info(f"⏭️ [{symbol}] Skip {side_label}: {', '.join(reasons)}")
+                        skip_message = f"⏭️ [{symbol}] Skip {side_label}: {', '.join(reasons)}"
+                        self._log_throttled(
+                            level="info",
+                            key=f"{symbol}:entry-skip-reasons",
+                            message=skip_message,
+                            interval_seconds=180.0,
+                            emit_on_change=True,
+                        )
             
             # [Optimization] 대규모 데이터프레임 제거 (진입 시점에만 생성됨)
             if df is not None:
@@ -1817,9 +1892,14 @@ class RealTraderFutures:
                 self.state_manager.update_symbol_state(symbol, {
                     'last_exit_fallback_eval_ms': int(now_ref_ms),
                 })
-                logger.warning(
-                    f"⚠️ [{symbol}] Exit fallback mode activated (no closed candle for {execution_tf}). "
-                    "Evaluating conditional exits only (no trailing update)."
+                self._log_throttled(
+                    level="warning",
+                    key=f"{symbol}:exit-fallback",
+                    message=(
+                        f"⚠️ [{symbol}] Exit fallback mode activated (no closed candle for {execution_tf}). "
+                        "Evaluating conditional exits only (no trailing update)."
+                    ),
+                    interval_seconds=180.0,
                 )
 
             if candle_ts > 0 and candle_ts == last_processed_candle_ts and not exit_pending:
