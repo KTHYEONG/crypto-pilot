@@ -29,7 +29,7 @@ except IndexError:
 from config.optimization_config_modes import GET_SEARCH_SPACE, GET_SPOT_TRADE_GATE_POLICY
 from config.settings import BACKTEST_END_DATE, TRAIN_CUTOFF_DATE
 from src.common.utils import setup_logger
-from src.optimization.opt_utils import calculate_score, suggest_params
+from src.optimization.opt_utils import calculate_score, suggest_params, OBJECTIVE_CFG, soft_sigmoid
 from src.spot_strategy.engine_fast_spot import BacktestEngineFastSpot, backtest_loop_spot_numba
 from src.spot_strategy.upbit_client import UpbitClient
 from src.strategy.strategies import UltimateStrategy
@@ -745,6 +745,27 @@ SPOT_ROBUST = {
     "cross_ret_p25_weight": _env_float("SPOT_CROSS_RET_P25_WEIGHT", 10.0),
     "cross_pf_p25_weight": _env_float("SPOT_CROSS_PF_P25_WEIGHT", 4.0),
     "cross_score_p25_weight": _env_float("SPOT_CROSS_SCORE_P25_WEIGHT", 0.08),
+    # Futures-inspired AWFO CV gate (fold dispersion control).
+    "awfo_cv_target": _env_float("SPOT_AWFO_CV_TARGET", 0.55),
+    "awfo_cv_gate_k": _env_float("SPOT_AWFO_CV_GATE_K", 8.5),
+    "awfo_cv_gate_floor": _env_float("SPOT_AWFO_CV_GATE_FLOOR", 0.45),
+    "awfo_cv_penalty_mult": _env_float("SPOT_AWFO_CV_PENALTY_MULT", 90.0),
+    "awfo_cv_weight_score": _env_float("SPOT_AWFO_CV_WEIGHT_SCORE", 0.70),
+    "awfo_cv_weight_return": _env_float("SPOT_AWFO_CV_WEIGHT_RETURN", 0.30),
+    # Futures-inspired fold-level Calmar distribution scoring.
+    "symbol_legacy_mix_weight": _env_float("SPOT_SYMBOL_LEGACY_MIX_WEIGHT", 0.75),
+    "symbol_calmar_mix_weight": _env_float("SPOT_SYMBOL_CALMAR_MIX_WEIGHT", 0.25),
+    "fold_calmar_w_avg": _env_float("SPOT_FOLD_CALMAR_W_AVG", 0.30),
+    "fold_calmar_w_p25": _env_float("SPOT_FOLD_CALMAR_W_P25", 0.40),
+    "fold_calmar_w_worst": _env_float("SPOT_FOLD_CALMAR_W_WORST", 0.30),
+    "fold_calmar_score_mult": _env_float("SPOT_FOLD_CALMAR_SCORE_MULT", 42.0),
+    # Futures-inspired soft-sigmoid cross-symbol MDD guard.
+    "mdd_soft_guard_ratio": _env_float("SPOT_MDD_SOFT_GUARD_RATIO", 1.7),
+    "mdd_soft_guard_avg_ratio": _env_float("SPOT_MDD_SOFT_GUARD_AVG_RATIO", 1.45),
+    "mdd_soft_guard_k": _env_float("SPOT_MDD_SOFT_GUARD_K", 0.35),
+    "mdd_soft_guard_penalty": _env_float("SPOT_MDD_SOFT_GUARD_PENALTY", 180.0),
+    "mdd_soft_guard_max_weight": _env_float("SPOT_MDD_SOFT_GUARD_MAX_WEIGHT", 0.65),
+    "mdd_soft_guard_avg_weight": _env_float("SPOT_MDD_SOFT_GUARD_AVG_WEIGHT", 0.35),
     "cross_stress_p25_weight": _env_float("SPOT_CROSS_STRESS_P25_WEIGHT", 0.10),
     "excess_ret_p25_w": _env_float("SPOT_EXCESS_RET_P25_WEIGHT", 0.00),
     "bear_excess_w": _env_float("SPOT_BEAR_EXCESS_WEIGHT", 0.00),
@@ -1523,6 +1544,11 @@ def objective(
             "loss_trades": 0,
             "win_trades": 0,
             "max_win_pnl": 0.0,
+            "awfo_cv": float("nan"),
+            "awfo_cv_gate": float("nan"),
+            "fold_calmar_avg": float("nan"),
+            "fold_calmar_p25": float("nan"),
+            "fold_calmar_worst": float("nan"),
         }
 
     for symbol, data_map in symbols_data.items():
@@ -1548,6 +1574,7 @@ def objective(
             fold_returns: List[float] = []
             fold_mdds: List[float] = []
             fold_pfs: List[float] = []
+            fold_calmars: List[float] = []
             fold_stress: List[float] = []
             fold_trade_counts: List[int] = []
             fold_trade_density: List[float] = []
@@ -1644,6 +1671,14 @@ def objective(
                             )
                         fold_pf = gross_profit / gross_loss if gross_loss > 0 else (gross_profit if gross_profit > 0 else 0.0)
                         fold_pfs.append(float(np.clip(fold_pf, 0.0, float(SPOT_ROBUST["pf_clip_per_symbol"]))))
+                        fold_calmar = float(
+                            np.clip(
+                                fold_ret / max(abs(float(fold_mdd)), 1e-6),
+                                -20.0,
+                                30.0,
+                            )
+                        )
+                        fold_calmars.append(fold_calmar)
                         fold_gross_profit_sum += gross_profit
                         fold_gross_loss_sum += gross_loss
                         fold_stress.append(fold_ret - (len(oos_trades) * SPOT_ROBUST["cost_stress_per_trade"]))
@@ -1747,8 +1782,49 @@ def objective(
                     SPOT_ROBUST["primary_p25_ret_penalty_mult"]
                 )
             score -= invalid * 12.0
+            # Futures-inspired AWFO CV gate: penalize fold dispersion continuously.
+            fold_score_std = float(np.std(fold_scores)) if fold_scores else 0.0
+            fold_ret_std = float(np.std(fold_returns)) if fold_returns else 0.0
+            fold_score_cv = fold_score_std / max(abs(avg), 20.0)
+            fold_ret_cv = fold_ret_std / max(abs(float(np.mean(fold_returns))), 1.5)
+            awfo_cv = (
+                (float(SPOT_ROBUST["awfo_cv_weight_score"]) * fold_score_cv)
+                + (float(SPOT_ROBUST["awfo_cv_weight_return"]) * fold_ret_cv)
+            )
+            cv_gate_raw = 1.0 - soft_sigmoid(
+                awfo_cv,
+                L=1.0,
+                k=float(SPOT_ROBUST["awfo_cv_gate_k"]),
+                x0=float(SPOT_ROBUST["awfo_cv_target"]),
+            )
+            cv_gate = float(np.clip(cv_gate_raw, 0.0, 1.0))
+            cv_gate_floor = float(np.clip(float(SPOT_ROBUST["awfo_cv_gate_floor"]), 0.0, 0.95))
+            cv_gate_blended = cv_gate_floor + ((1.0 - cv_gate_floor) * cv_gate)
+            cv_gate_penalty = (1.0 - cv_gate) * float(SPOT_ROBUST["awfo_cv_penalty_mult"])
 
-            symbol_scores.append(float(score))
+            # Futures-inspired fold-level Calmar distribution score.
+            avg_fold_calmar = float(np.mean(fold_calmars)) if fold_calmars else -4.0
+            p25_fold_calmar = float(np.percentile(fold_calmars, 25)) if fold_calmars else -5.0
+            worst_fold_calmar = float(np.min(fold_calmars)) if fold_calmars else -6.0
+            avg_fold_calmar_signal = float(np.clip(np.arcsinh(avg_fold_calmar / 2.0), -3.0, 3.0))
+            p25_fold_calmar_signal = float(np.clip(np.arcsinh(p25_fold_calmar / 2.0), -3.0, 3.0))
+            worst_fold_calmar_signal = float(np.clip(np.arcsinh(worst_fold_calmar / 2.0), -3.0, 3.0))
+            calmar_distribution_score = float(SPOT_ROBUST["fold_calmar_score_mult"]) * (
+                (float(SPOT_ROBUST["fold_calmar_w_avg"]) * avg_fold_calmar_signal)
+                + (float(SPOT_ROBUST["fold_calmar_w_p25"]) * p25_fold_calmar_signal)
+                + (float(SPOT_ROBUST["fold_calmar_w_worst"]) * worst_fold_calmar_signal)
+            )
+
+            legacy_mix_w = max(0.0, float(SPOT_ROBUST["symbol_legacy_mix_weight"]))
+            calmar_mix_w = max(0.0, float(SPOT_ROBUST["symbol_calmar_mix_weight"]))
+            mix_w_sum = max(1e-9, legacy_mix_w + calmar_mix_w)
+            mixed_symbol_score = (
+                ((legacy_mix_w / mix_w_sum) * float(score))
+                + ((calmar_mix_w / mix_w_sum) * calmar_distribution_score)
+            )
+            final_symbol_score = (mixed_symbol_score * cv_gate_blended) - cv_gate_penalty
+
+            symbol_scores.append(float(final_symbol_score))
             symbol_results[symbol] = {
                 "return": float(np.mean(fold_returns)),
                 "mdd": float(np.mean(fold_mdds)),
@@ -1762,6 +1838,11 @@ def objective(
                 "loss_trades": int(fold_loss_trades_sum),
                 "win_trades": int(fold_win_trades_sum),
                 "max_win_pnl": float(fold_max_win_pnl),
+                "awfo_cv": float(awfo_cv),
+                "awfo_cv_gate": float(cv_gate),
+                "fold_calmar_avg": float(avg_fold_calmar),
+                "fold_calmar_p25": float(p25_fold_calmar),
+                "fold_calmar_worst": float(worst_fold_calmar),
             }
         else:
             try:
@@ -1827,6 +1908,11 @@ def objective(
                 "loss_trades": int(loss_trades),
                 "win_trades": int(win_trades),
                 "max_win_pnl": float(max_win_pnl),
+                "awfo_cv": float("nan"),
+                "awfo_cv_gate": float("nan"),
+                "fold_calmar_avg": float("nan"),
+                "fold_calmar_p25": float("nan"),
+                "fold_calmar_worst": float("nan"),
             }
 
         trial.set_user_attr(f"ret_{key}", float(symbol_results[symbol]["return"]))
@@ -1872,6 +1958,18 @@ def objective(
         [float(v.get("excess_ret", v["return"])) for v in symbol_results.values()],
         dtype=np.float64,
     )
+    awfo_cv_values = np.array(
+        [float(v.get("awfo_cv", np.nan)) for v in symbol_results.values()],
+        dtype=np.float64,
+    )
+    awfo_cv_gate_values = np.array(
+        [float(v.get("awfo_cv_gate", np.nan)) for v in symbol_results.values()],
+        dtype=np.float64,
+    )
+    fold_calmar_p25_values = np.array(
+        [float(v.get("fold_calmar_p25", np.nan)) for v in symbol_results.values()],
+        dtype=np.float64,
+    )
 
     ret_p25 = float(np.percentile(ret_values, 25))
     excess_p25 = float(np.percentile(excess_ret_values, 25))
@@ -1883,6 +1981,16 @@ def objective(
     avg_pf = float(np.mean(pf_values))
     avg_mdd_abs = float(np.mean(mdd_abs)) if mdd_abs else 0.0
     max_mdd_abs = float(np.max(mdd_abs)) if mdd_abs else 0.0
+    awfo_cv_finite = awfo_cv_values[np.isfinite(awfo_cv_values)]
+    awfo_cv_gate_finite = awfo_cv_gate_values[np.isfinite(awfo_cv_gate_values)]
+    fold_calmar_p25_finite = fold_calmar_p25_values[np.isfinite(fold_calmar_p25_values)]
+    awfo_cv_avg = float(np.mean(awfo_cv_finite)) if awfo_cv_finite.size else float("nan")
+    awfo_cv_gate_avg = float(np.mean(awfo_cv_gate_finite)) if awfo_cv_gate_finite.size else float("nan")
+    fold_calmar_p25_cross = (
+        float(np.percentile(fold_calmar_p25_finite, 25))
+        if fold_calmar_p25_finite.size
+        else float("nan")
+    )
     primary_ret_values = np.array(
         [float(v["return"]) for s, v in symbol_results.items() if str(s).strip().upper() in primary_symbol_set],
         dtype=np.float64,
@@ -1998,6 +2106,23 @@ def objective(
         max(0.0, avg_mdd_abs - float(SPOT_ROBUST["soft_mdd_avg_center"])) * float(SPOT_ROBUST["soft_mdd_avg_mult"])
         + max(0.0, max_mdd_abs - float(SPOT_ROBUST["soft_mdd_max_center"])) * float(SPOT_ROBUST["soft_mdd_max_mult"])
     )
+    target_mdd = float(OBJECTIVE_CFG.target_mdd_spot)
+    mdd_guard_max = soft_sigmoid(
+        max_mdd_abs,
+        L=1.0,
+        k=float(SPOT_ROBUST["mdd_soft_guard_k"]),
+        x0=max(1.0, target_mdd * float(SPOT_ROBUST["mdd_soft_guard_ratio"])),
+    )
+    mdd_guard_avg = soft_sigmoid(
+        avg_mdd_abs,
+        L=1.0,
+        k=float(SPOT_ROBUST["mdd_soft_guard_k"]),
+        x0=max(1.0, target_mdd * float(SPOT_ROBUST["mdd_soft_guard_avg_ratio"])),
+    )
+    mdd_soft_guard_penalty = float(SPOT_ROBUST["mdd_soft_guard_penalty"]) * (
+        (float(SPOT_ROBUST["mdd_soft_guard_max_weight"]) * mdd_guard_max)
+        + (float(SPOT_ROBUST["mdd_soft_guard_avg_weight"]) * mdd_guard_avg)
+    )
 
     feature_scale_out = bool(params.get("ENABLE_SCALE_OUT", False))
     feature_breakeven = bool(params.get("ENABLE_BREAKEVEN", False))
@@ -2079,6 +2204,7 @@ def objective(
     all_trade_shortfall = max(0.0, (float(all_trade_target) - float(total_trades_all)) / float(all_trade_target))
     primary_guard_penalty += all_trade_shortfall * float(SPOT_ROBUST["all_total_trade_penalty_mult"])
     legacy_score -= soft_mdd_penalty
+    legacy_score -= mdd_soft_guard_penalty
     legacy_score -= primary_guard_penalty
     legacy_score -= complexity_penalty
     legacy_score -= collapsed_symbol_count * float(SPOT_ROBUST["collapsed_symbol_penalty"])
@@ -2170,6 +2296,7 @@ def objective(
     trial.set_user_attr("pf_p25", float(pf_p25))
     trial.set_user_attr("mdd_avg_abs", float(avg_mdd_abs))
     trial.set_user_attr("mdd_max_abs", float(max_mdd_abs))
+    trial.set_user_attr("mdd_soft_guard_penalty", float(mdd_soft_guard_penalty))
     trial.set_user_attr("complexity_penalty", float(complexity_penalty))
     trial.set_user_attr("primary_guard_penalty", float(primary_guard_penalty))
     trial.set_user_attr("primary_avg_ret", float(primary_avg_ret))
@@ -2197,6 +2324,12 @@ def objective(
     trial.set_user_attr("active_mgmt_features", int(active_feature_count))
     trial.set_user_attr("fallback_count", int(fallback_count))
     trial.set_user_attr("symbol_success_ratio", float(success_ratio))
+    if np.isfinite(awfo_cv_avg):
+        trial.set_user_attr("awfo_cv_avg", float(awfo_cv_avg))
+    if np.isfinite(awfo_cv_gate_avg):
+        trial.set_user_attr("awfo_cv_gate_avg", float(awfo_cv_gate_avg))
+    if np.isfinite(fold_calmar_p25_cross):
+        trial.set_user_attr("fold_calmar_p25_cross", float(fold_calmar_p25_cross))
     return float(final_score)
 
 
