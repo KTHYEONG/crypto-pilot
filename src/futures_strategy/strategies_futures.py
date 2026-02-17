@@ -4,7 +4,6 @@ from src.strategy.base import (
     MasterStrategyBase,
     StrategyBase,
     UltimateStrategyBase,
-    calculate_required_warmup_bars,
 )
 
 from .indicators_advanced_futures import (
@@ -37,8 +36,7 @@ from .indicators_advanced_futures import (
 
 
 class Strategy(StrategyBase):
-    def get_required_warmup(self) -> int:
-        return calculate_required_warmup_bars(self.params)
+    pass
 
 
 class MasterStrategy(MasterStrategyBase):
