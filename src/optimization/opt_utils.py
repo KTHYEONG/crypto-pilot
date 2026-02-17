@@ -358,15 +358,21 @@ def suggest_params(trial, search_space):
     
     # === Phase 6: Common Parameters (Always Used) ===
     # [CRITICAL] Handle STOP_LOSS_TYPE logical conflict first
-    stop_loss_type = params.get('STOP_LOSS_TYPE', 'FIXED')
+    stop_loss_type = str(params.get('STOP_LOSS_TYPE', 'FIXED')).upper()
     
     if stop_loss_type == 'FIXED':
         if 'STOP_LOSS_PCT' in search_space:
             params['STOP_LOSS_PCT'] = _suggest_value('STOP_LOSS_PCT', search_space['STOP_LOSS_PCT'])
+        elif 'SL_PCT' in search_space:
+            # Legacy alias support: always normalize to engine key STOP_LOSS_PCT.
+            params['STOP_LOSS_PCT'] = _suggest_value('SL_PCT', search_space['SL_PCT'])
+        params.pop('ATR_STOP_LOSS_MULT', None)
     
     elif stop_loss_type == 'ATR':
         if 'ATR_STOP_LOSS_MULT' in search_space:
             params['ATR_STOP_LOSS_MULT'] = _suggest_value('ATR_STOP_LOSS_MULT', search_space['ATR_STOP_LOSS_MULT'])
+        params.pop('STOP_LOSS_PCT', None)
+        params.pop('SL_PCT', None)
     
     # [CRITICAL] Handle USE_TAKE_PROFIT logical conflict
     use_take_profit = params.get('USE_TAKE_PROFIT', False)

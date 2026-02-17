@@ -33,7 +33,7 @@ from src.futures_strategy.engine_fast_futures import (
     BacktestEngineFast,
     backtest_loop_numba,
 )
-from src.optimization.opt_utils import suggest_params, calculate_score, OBJECTIVE_CFG
+from src.optimization.opt_utils import suggest_params, calculate_score, OBJECTIVE_CFG, soft_sigmoid
 
 # Shared constants
 DAILY_BUFFER_DAYS = 200
@@ -75,6 +75,15 @@ AWFO_DEFAULTS = {
         "1d": 5,
         "3d": 2,
     },
+}
+
+AWFO_ADAPTIVE_FOLDS = {
+    # Normalize fold count by timeframe opportunity density (shorter TF -> more folds).
+    "enabled": True,
+    "reference_tf_minutes": 60,  # 1h baseline
+    "min_folds": 2,
+    "max_folds": 6,
+    "density_ratio_clip": (0.65, 2.0),
 }
 
 STRUCTURE_PARAM_KEYS = [
@@ -140,6 +149,27 @@ ROBUST_OBJECTIVE_DEFAULTS = {
     "cross_ret_p25_weight": _env_float("OPTUNA_CROSS_RET_P25_WEIGHT", 10.0),
     "cross_pf_p25_weight": _env_float("OPTUNA_CROSS_PF_P25_WEIGHT", 4.0),
     "cross_score_p25_weight": _env_float("OPTUNA_CROSS_SCORE_P25_WEIGHT", 0.08),
+    # Independent AWFO CV gate (fold-to-fold stability control)
+    "awfo_cv_target": _env_float("OPTUNA_AWFO_CV_TARGET", 0.55),
+    "awfo_cv_gate_k": _env_float("OPTUNA_AWFO_CV_GATE_K", 8.5),
+    "awfo_cv_gate_floor": _env_float("OPTUNA_AWFO_CV_GATE_FLOOR", 0.45),
+    "awfo_cv_penalty_mult": _env_float("OPTUNA_AWFO_CV_PENALTY_MULT", 90.0),
+    "awfo_cv_weight_score": _env_float("OPTUNA_AWFO_CV_WEIGHT_SCORE", 0.70),
+    "awfo_cv_weight_return": _env_float("OPTUNA_AWFO_CV_WEIGHT_RETURN", 0.30),
+    # Fold-level Calmar promotion
+    "symbol_legacy_mix_weight": _env_float("OPTUNA_SYMBOL_LEGACY_MIX_WEIGHT", 0.60),
+    "symbol_calmar_mix_weight": _env_float("OPTUNA_SYMBOL_CALMAR_MIX_WEIGHT", 0.40),
+    "fold_calmar_w_avg": _env_float("OPTUNA_FOLD_CALMAR_W_AVG", 0.30),
+    "fold_calmar_w_p25": _env_float("OPTUNA_FOLD_CALMAR_W_P25", 0.40),
+    "fold_calmar_w_worst": _env_float("OPTUNA_FOLD_CALMAR_W_WORST", 0.30),
+    "fold_calmar_score_mult": _env_float("OPTUNA_FOLD_CALMAR_SCORE_MULT", 42.0),
+    # Cross-symbol soft MDD guard (replaces hard cliff)
+    "mdd_soft_guard_ratio": _env_float("OPTUNA_MDD_SOFT_GUARD_RATIO", 1.7),
+    "mdd_soft_guard_avg_ratio": _env_float("OPTUNA_MDD_SOFT_GUARD_AVG_RATIO", 1.45),
+    "mdd_soft_guard_k": _env_float("OPTUNA_MDD_SOFT_GUARD_K", 0.35),
+    "mdd_soft_guard_penalty": _env_float("OPTUNA_MDD_SOFT_GUARD_PENALTY", 180.0),
+    "mdd_soft_guard_max_weight": _env_float("OPTUNA_MDD_SOFT_GUARD_MAX_WEIGHT", 0.65),
+    "mdd_soft_guard_avg_weight": _env_float("OPTUNA_MDD_SOFT_GUARD_AVG_WEIGHT", 0.35),
     "seed_min_trials": _env_int("OPTUNA_SEED_MIN_TRIALS", 80),
 }
 
@@ -233,6 +263,69 @@ def build_anchored_splits(n_bars, n_folds, embargo_bars=0, min_test_bars=120):
     return splits
 
 
+def _timeframe_to_minutes(tf: str) -> Optional[int]:
+    match = re.fullmatch(r"(\d+)([mhd])", str(tf).strip().lower())
+    if not match:
+        return None
+    value = int(match.group(1))
+    unit = match.group(2)
+    if unit == "m":
+        return value
+    if unit == "h":
+        return value * 60
+    if unit == "d":
+        return value * 1440
+    return None
+
+
+def resolve_awfo_fold_count(
+    tf: str,
+    n_bars: int,
+    base_folds: int,
+    min_test_bars: int,
+    embargo_bars: int,
+) -> int:
+    base = max(1, int(base_folds))
+    resolved = base
+
+    if AWFO_ADAPTIVE_FOLDS["enabled"]:
+        tf_minutes = _timeframe_to_minutes(tf)
+        if tf_minutes and tf_minutes > 0:
+            ref_minutes = max(1, int(AWFO_ADAPTIVE_FOLDS["reference_tf_minutes"]))
+            density_ratio = np.sqrt(ref_minutes / float(tf_minutes))
+            clip_low, clip_high = AWFO_ADAPTIVE_FOLDS["density_ratio_clip"]
+            density_ratio = float(np.clip(density_ratio, clip_low, clip_high))
+            resolved = int(np.rint(base * density_ratio))
+        min_folds = max(1, int(AWFO_ADAPTIVE_FOLDS["min_folds"]))
+        max_folds = max(min_folds, int(AWFO_ADAPTIVE_FOLDS["max_folds"]))
+        resolved = int(np.clip(resolved, min_folds, max_folds))
+
+    # Feasibility guard: keep fold count compatible with min test window + embargo.
+    required_block = max(2, int(min_test_bars) + max(0, int(embargo_bars)))
+    feasible_max = max(1, int(np.floor(n_bars / float(required_block))) - 1)
+    return max(1, min(resolved, feasible_max))
+
+
+def summarize_awfo_folds(awfo_plan: dict, timeframes: Sequence[str]) -> str:
+    fold_map = awfo_plan.get("folds_per_tf", {})
+    if not fold_map:
+        return ""
+    aggregate: Dict[str, List[int]] = {str(tf): [] for tf in timeframes}
+    for sym_map in fold_map.values():
+        for tf in timeframes:
+            if tf in sym_map:
+                aggregate[tf].append(int(sym_map[tf]))
+    parts = []
+    for tf in timeframes:
+        vals = aggregate.get(tf, [])
+        if not vals:
+            continue
+        uniq = sorted(set(vals))
+        label = str(uniq[0]) if len(uniq) == 1 else f"{uniq[0]}~{uniq[-1]}"
+        parts.append(f"{tf}:{label}")
+    return ", ".join(parts)
+
+
 def compute_segment_merge_index(hourly_df, daily_df):
     """
     Build merge index for a sliced segment so engine can use fast index mapping.
@@ -265,24 +358,41 @@ def calculate_oos_mdd_pct(pnl_series, initial_balance):
 
 def build_awfo_plan(data_maps, timeframes, folds, min_trades):
     """Build AWFO split plan for the provided data maps."""
-    awfo_plan = {"enabled": True, "splits": {}, "min_trades_per_fold": int(min_trades)}
+    awfo_plan = {
+        "enabled": True,
+        "splits": {},
+        "min_trades_per_fold": int(min_trades),
+        "base_folds": int(folds),
+        "adaptive_folds": bool(AWFO_ADAPTIVE_FOLDS["enabled"]),
+        "folds_per_tf": {},
+    }
     for sym, tf_map in data_maps.items():
         awfo_plan["splits"][sym] = {}
+        awfo_plan["folds_per_tf"][sym] = {}
         for tf in timeframes:
             if tf not in tf_map or tf_map[tf].empty:
                 awfo_plan["splits"][sym][tf] = []
+                awfo_plan["folds_per_tf"][sym][tf] = 0
                 continue
 
             n_bars = len(tf_map[tf])
             min_test_bars = AWFO_DEFAULTS["min_test_bars"].get(tf, 120)
             embargo_bars = AWFO_DEFAULTS["embargo_bars"].get(tf, 0)
+            effective_folds = resolve_awfo_fold_count(
+                tf=tf,
+                n_bars=n_bars,
+                base_folds=int(folds),
+                min_test_bars=int(min_test_bars),
+                embargo_bars=int(embargo_bars),
+            )
             splits = build_anchored_splits(
                 n_bars=n_bars,
-                n_folds=int(folds),
+                n_folds=effective_folds,
                 embargo_bars=embargo_bars,
                 min_test_bars=min_test_bars,
             )
             awfo_plan["splits"][sym][tf] = splits
+            awfo_plan["folds_per_tf"][sym][tf] = int(effective_folds)
     return awfo_plan
 
 
@@ -738,6 +848,7 @@ def objective(
             fold_returns = []
             fold_mdds = []
             fold_pfs = []
+            fold_calmars = []
             fold_stress_returns = []
             fold_trade_counts = []
             long_trades = 0
@@ -832,6 +943,14 @@ def objective(
                                 else (gross_profit if gross_profit > 0 else 0.0)
                             )
                             fold_pfs.append(float(fold_pf))
+                            fold_calmar = float(
+                                np.clip(
+                                    fold_ret / max(abs(float(fold_mdd)), 1e-6),
+                                    -20.0,
+                                    30.0,
+                                )
+                            )
+                            fold_calmars.append(fold_calmar)
                         else:
                             invalid_fold_count += 1
                 else:
@@ -880,12 +999,12 @@ def objective(
                 else 0.0
             )
 
-            final_symbol_score = (
+            legacy_symbol_score = (
                 (ROBUST_OBJECTIVE_DEFAULTS["fold_score_w_avg"] * avg_fold_score)
                 + (ROBUST_OBJECTIVE_DEFAULTS["fold_score_w_p25"] * p25_fold_score)
                 + (ROBUST_OBJECTIVE_DEFAULTS["fold_score_w_worst"] * worst_fold_score)
             )
-            final_symbol_score += (
+            legacy_symbol_score += (
                 ROBUST_OBJECTIVE_DEFAULTS["fold_ret_p25_weight"]
                 * np.clip(
                     p25_fold_ret,
@@ -893,28 +1012,69 @@ def objective(
                     ROBUST_OBJECTIVE_DEFAULTS["fold_ret_p25_clip"],
                 )
             )
-            final_symbol_score += (
+            legacy_symbol_score += (
                 ROBUST_OBJECTIVE_DEFAULTS["cost_stress_weight"]
                 * np.clip(p25_stress_ret, -60.0, 60.0)
             )
             consistency_target = ROBUST_OBJECTIVE_DEFAULTS["fold_consistency_target"]
             if consistency < consistency_target:
-                final_symbol_score -= (
+                legacy_symbol_score -= (
                     (consistency_target - consistency)
                     * ROBUST_OBJECTIVE_DEFAULTS["fold_consistency_penalty"]
                 )
             if fold_returns and min(fold_returns) < -20.0:
-                final_symbol_score -= 150.0
+                legacy_symbol_score -= 150.0
             side_shortfall = max(
                 0.0,
                 ROBUST_OBJECTIVE_DEFAULTS["side_min_ratio_target"] - side_min_ratio,
             )
-            final_symbol_score -= (
+            legacy_symbol_score -= (
                 side_shortfall * ROBUST_OBJECTIVE_DEFAULTS["side_imbalance_penalty_mult"]
             )
             if long_trades == 0 or short_trades == 0:
-                final_symbol_score -= ROBUST_OBJECTIVE_DEFAULTS["side_single_penalty"]
-            final_symbol_score -= invalid_fold_count * 15.0
+                legacy_symbol_score -= ROBUST_OBJECTIVE_DEFAULTS["side_single_penalty"]
+            legacy_symbol_score -= invalid_fold_count * 15.0
+
+            # [3.2-1] Independent AWFO CV gate: controls fold-to-fold dispersion directly.
+            fold_score_std = float(np.std(fold_scores)) if fold_scores else 0.0
+            fold_ret_std = float(np.std(fold_returns)) if fold_returns else 0.0
+            fold_score_cv = fold_score_std / max(abs(avg_fold_score), 20.0)
+            fold_ret_cv = fold_ret_std / max(abs(float(np.mean(fold_returns))), 1.5)
+            awfo_cv = (
+                (ROBUST_OBJECTIVE_DEFAULTS["awfo_cv_weight_score"] * fold_score_cv)
+                + (ROBUST_OBJECTIVE_DEFAULTS["awfo_cv_weight_return"] * fold_ret_cv)
+            )
+            cv_gate_raw = 1.0 - soft_sigmoid(
+                awfo_cv,
+                L=1.0,
+                k=ROBUST_OBJECTIVE_DEFAULTS["awfo_cv_gate_k"],
+                x0=ROBUST_OBJECTIVE_DEFAULTS["awfo_cv_target"],
+            )
+            cv_gate = float(np.clip(cv_gate_raw, 0.0, 1.0))
+            cv_gate_floor = float(np.clip(ROBUST_OBJECTIVE_DEFAULTS["awfo_cv_gate_floor"], 0.0, 0.95))
+            cv_gate_blended = cv_gate_floor + ((1.0 - cv_gate_floor) * cv_gate)
+            cv_gate_penalty = (1.0 - cv_gate) * ROBUST_OBJECTIVE_DEFAULTS["awfo_cv_penalty_mult"]
+
+            # [3.2-3] Fold-level Calmar promotion: objective main factor (legacy 60% + calmar 40%).
+            avg_fold_calmar = float(np.mean(fold_calmars)) if fold_calmars else -4.0
+            p25_fold_calmar = float(np.percentile(fold_calmars, 25)) if fold_calmars else -5.0
+            worst_fold_calmar = float(np.min(fold_calmars)) if fold_calmars else -6.0
+            avg_fold_calmar_signal = float(np.clip(np.arcsinh(avg_fold_calmar / 2.0), -3.0, 3.0))
+            p25_fold_calmar_signal = float(np.clip(np.arcsinh(p25_fold_calmar / 2.0), -3.0, 3.0))
+            worst_fold_calmar_signal = float(np.clip(np.arcsinh(worst_fold_calmar / 2.0), -3.0, 3.0))
+            calmar_distribution_score = ROBUST_OBJECTIVE_DEFAULTS["fold_calmar_score_mult"] * (
+                (ROBUST_OBJECTIVE_DEFAULTS["fold_calmar_w_avg"] * avg_fold_calmar_signal)
+                + (ROBUST_OBJECTIVE_DEFAULTS["fold_calmar_w_p25"] * p25_fold_calmar_signal)
+                + (ROBUST_OBJECTIVE_DEFAULTS["fold_calmar_w_worst"] * worst_fold_calmar_signal)
+            )
+            legacy_mix_w = max(0.0, ROBUST_OBJECTIVE_DEFAULTS["symbol_legacy_mix_weight"])
+            calmar_mix_w = max(0.0, ROBUST_OBJECTIVE_DEFAULTS["symbol_calmar_mix_weight"])
+            mix_w_sum = max(1e-9, legacy_mix_w + calmar_mix_w)
+            mixed_symbol_score = (
+                ((legacy_mix_w / mix_w_sum) * legacy_symbol_score)
+                + ((calmar_mix_w / mix_w_sum) * calmar_distribution_score)
+            )
+            final_symbol_score = (mixed_symbol_score * cv_gate_blended) - cv_gate_penalty
 
             symbol_scores.append(final_symbol_score)
             symbol_results[symbol] = {
@@ -928,6 +1088,11 @@ def objective(
                 "long_trades": int(long_trades),
                 "short_trades": int(short_trades),
                 "side_min_ratio": float(side_min_ratio),
+                "awfo_cv": float(awfo_cv),
+                "awfo_cv_gate": float(cv_gate),
+                "fold_calmar_avg": float(avg_fold_calmar),
+                "fold_calmar_p25": float(p25_fold_calmar),
+                "fold_calmar_worst": float(worst_fold_calmar),
             }
 
         # ===== Path B: Single full-run (legacy / non-AWFO) =====
@@ -1014,9 +1179,9 @@ def objective(
         trial.set_user_attr(f"pf_{symbol.replace('/', '_')}", float(symbol_results[symbol]["pf"]))
 
     # Combine scores across symbols:
-    # - Keep safety via hard MDD guard
-    # - Use geometric-dominant blend for better return-efficiency exploration
-    # - Penalize high cross-symbol dispersion for long-term stability
+    # - Geometric-dominant blend for return-efficiency exploration
+    # - Cross-symbol dispersion penalty for long-term stability
+    # - Soft-sigmoid MDD guard (continuous; no hard cliff)
     if not symbol_scores:
         maybe_collect_gc()
         return -10000
@@ -1029,6 +1194,12 @@ def objective(
         float(r.get("stress_ret_p25", r["return"])) for r in symbol_results.values()
     ]
     side_min_ratios = [float(r.get("side_min_ratio", 0.0)) for r in symbol_results.values()]
+    awfo_cv_values = [float(r.get("awfo_cv", np.nan)) for r in symbol_results.values()]
+    awfo_cv_gate_values = [float(r.get("awfo_cv_gate", np.nan)) for r in symbol_results.values()]
+    fold_calmar_p25_values = [float(r.get("fold_calmar_p25", np.nan)) for r in symbol_results.values()]
+    awfo_cv_finite = [v for v in awfo_cv_values if np.isfinite(v)]
+    awfo_cv_gate_finite = [v for v in awfo_cv_gate_values if np.isfinite(v)]
+    fold_calmar_p25_finite = [v for v in fold_calmar_p25_values if np.isfinite(v)]
 
     avg_ret = float(np.mean(ret_values))
     ret_p25 = float(np.percentile(ret_values, 25))
@@ -1040,11 +1211,13 @@ def objective(
     pf_p25 = float(np.percentile(pf_values, 25))
     score_p25 = float(np.percentile(symbol_scores, 25))
     side_ratio_p25 = float(np.percentile(side_min_ratios, 25)) if side_min_ratios else 0.0
-
-    # Hard safety guard: reject pathological drawdown profiles.
-    if max_mdd_abs > 65.0 or avg_mdd_abs > 52.0:
-        maybe_collect_gc()
-        return -10000
+    awfo_cv_avg = float(np.mean(awfo_cv_finite)) if awfo_cv_finite else np.nan
+    awfo_cv_gate_avg = float(np.mean(awfo_cv_gate_finite)) if awfo_cv_gate_finite else np.nan
+    fold_calmar_p25_cross = (
+        float(np.percentile(fold_calmar_p25_finite, 25))
+        if fold_calmar_p25_finite
+        else np.nan
+    )
 
     offset = 240.0
     raw_shifted_scores = np.array(symbol_scores, dtype=np.float64) + offset
@@ -1064,10 +1237,28 @@ def objective(
         + 4.0 * np.clip(np.arcsinh((avg_pf - 1.1) / 0.9), -2.4, 2.4)
     )
 
-    # Soft drawdown penalty on top of hard guard.
+    # Baseline smooth drawdown drag.
     soft_mdd_penalty = (
         max(0.0, avg_mdd_abs - 32.0) * 1.4
         + max(0.0, max_mdd_abs - 45.0) * 2.2
+    )
+    # [3.2-2] Soft MDD guard around ~1.7x target MDD (continuous transition).
+    target_mdd = float(OBJECTIVE_CFG.target_mdd_futures)
+    mdd_guard_max = soft_sigmoid(
+        max_mdd_abs,
+        L=1.0,
+        k=ROBUST_OBJECTIVE_DEFAULTS["mdd_soft_guard_k"],
+        x0=max(1.0, target_mdd * ROBUST_OBJECTIVE_DEFAULTS["mdd_soft_guard_ratio"]),
+    )
+    mdd_guard_avg = soft_sigmoid(
+        avg_mdd_abs,
+        L=1.0,
+        k=ROBUST_OBJECTIVE_DEFAULTS["mdd_soft_guard_k"],
+        x0=max(1.0, target_mdd * ROBUST_OBJECTIVE_DEFAULTS["mdd_soft_guard_avg_ratio"]),
+    )
+    mdd_soft_guard_penalty = ROBUST_OBJECTIVE_DEFAULTS["mdd_soft_guard_penalty"] * (
+        (ROBUST_OBJECTIVE_DEFAULTS["mdd_soft_guard_max_weight"] * mdd_guard_max)
+        + (ROBUST_OBJECTIVE_DEFAULTS["mdd_soft_guard_avg_weight"] * mdd_guard_avg)
     )
 
     final_score = (blended_shifted * dispersion_penalty) - offset
@@ -1083,6 +1274,7 @@ def objective(
     final_score += ROBUST_OBJECTIVE_DEFAULTS["cross_score_p25_weight"] * score_p25
     final_score += 0.08 * np.clip(stress_ret_p25, -80.0, 80.0)
     final_score -= soft_mdd_penalty
+    final_score -= mdd_soft_guard_penalty
     if side_ratio_p25 < ROBUST_OBJECTIVE_DEFAULTS["side_min_ratio_target"]:
         final_score -= (
             ROBUST_OBJECTIVE_DEFAULTS["side_min_ratio_target"] - side_ratio_p25
@@ -1096,9 +1288,17 @@ def objective(
     trial.set_user_attr("stress_return_p25", stress_ret_p25)
     trial.set_user_attr("mdd_avg", avg_mdd_raw)
     trial.set_user_attr("mdd_avg_abs", avg_mdd_abs)
+    trial.set_user_attr("mdd_max_abs", max_mdd_abs)
+    trial.set_user_attr("mdd_soft_guard_penalty", float(mdd_soft_guard_penalty))
     trial.set_user_attr("pf_avg", avg_pf)
     trial.set_user_attr("pf_p25", pf_p25)
     trial.set_user_attr("side_ratio_p25", side_ratio_p25)
+    if np.isfinite(awfo_cv_avg):
+        trial.set_user_attr("awfo_cv_avg", awfo_cv_avg)
+    if np.isfinite(awfo_cv_gate_avg):
+        trial.set_user_attr("awfo_cv_gate_avg", awfo_cv_gate_avg)
+    if np.isfinite(fold_calmar_p25_cross):
+        trial.set_user_attr("fold_calmar_p25_cross", fold_calmar_p25_cross)
 
     maybe_collect_gc()
     return final_score
@@ -1410,10 +1610,13 @@ def main():
             for sym_map in awfo_plan["cache"].values()
             for tf_folds in sym_map.values()
         )
+        fold_summary = summarize_awfo_folds(awfo_plan, timeframes)
         print(
-            f"[AWFO] AWFO enabled: {AWFO_DEFAULTS['folds']} anchored folds "
+            f"[AWFO] AWFO enabled: base={AWFO_DEFAULTS['folds']} anchored folds "
             f"(min trades per fold={AWFO_DEFAULTS['min_trades_per_fold']})"
         )
+        if fold_summary:
+            print(f"[AWFO] Adaptive folds by TF: {fold_summary}")
         print(f"[INFO] AWFO runtime cache prepared: {total_cached_folds} fold segments")
 
     # [OPTIMIZATION] Pre-compute merge indices to eliminate pd.merge overhead
@@ -1496,7 +1699,11 @@ def main():
         "[ROBUST] "
         f"fold_consistency_target={ROBUST_OBJECTIVE_DEFAULTS['fold_consistency_target']:.2f}, "
         f"side_target={ROBUST_OBJECTIVE_DEFAULTS['side_min_ratio_target']:.2f}, "
-        f"cost_stress_per_trade={ROBUST_OBJECTIVE_DEFAULTS['cost_stress_per_trade_pct']:.3f}%"
+        f"cost_stress_per_trade={ROBUST_OBJECTIVE_DEFAULTS['cost_stress_per_trade_pct']:.3f}%, "
+        f"cv_target={ROBUST_OBJECTIVE_DEFAULTS['awfo_cv_target']:.2f}, "
+        f"calmar_mix={ROBUST_OBJECTIVE_DEFAULTS['symbol_legacy_mix_weight']:.2f}/"
+        f"{ROBUST_OBJECTIVE_DEFAULTS['symbol_calmar_mix_weight']:.2f}, "
+        f"mdd_soft_ratio={ROBUST_OBJECTIVE_DEFAULTS['mdd_soft_guard_ratio']:.2f}"
     )
     print(f"{'='*70}\n")
 

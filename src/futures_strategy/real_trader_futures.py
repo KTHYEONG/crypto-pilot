@@ -15,6 +15,7 @@ P0/P1 개선사항 적용:
 import os
 import sys
 import time
+import math
 import signal
 import json
 import sqlite3
@@ -339,6 +340,18 @@ class RealTraderFutures:
         # Windows에서는 SIGBREAK도 처리
         if hasattr(signal, 'SIGBREAK'):
             signal.signal(signal.SIGBREAK, signal_handler)
+
+    def _resolve_exchange_leverage(self, leverage_value: Any) -> int:
+        """
+        Resolve strategy leverage to exchange-acceptable integer leverage.
+        Use ceil to prevent under-allocation versus optimized target leverage.
+        """
+        try:
+            target_lev = float(leverage_value)
+        except (TypeError, ValueError):
+            target_lev = 1.0
+        target_lev = max(1.0, min(target_lev, float(MAX_EXCHANGE_LEVERAGE)))
+        return int(math.ceil(target_lev))
     
     def load_strategies_from_db(self):
         """Optuna DB에서 최적화된 파라미터 로드"""
@@ -988,7 +1001,7 @@ class RealTraderFutures:
         for symbol in self.symbols:
             try:
                 target_lev = self.params_map[symbol].get('LEVERAGE', 1)
-                applied_lev = int(max(1, min(float(target_lev), float(MAX_EXCHANGE_LEVERAGE))))
+                applied_lev = self._resolve_exchange_leverage(target_lev)
                 success = self.client.set_leverage(symbol, applied_lev)
                 if success:
                     logger.info(
@@ -2289,10 +2302,7 @@ class RealTraderFutures:
         allocated_capital = total_balance * allocation_weight
         
         # === 3. 전략 파라미터 ===
-        leverage = params.get('LEVERAGE', 1)
-        if leverage <= 0:
-            logger.warning(f"⚠️ Invalid leverage for {symbol}: {leverage}. Using 1x.")
-            leverage = 1
+        leverage = self._resolve_exchange_leverage(params.get('LEVERAGE', 1))
         
         risk_per_trade = params.get(
             'RISK_PER_TRADE_FUTURES', 
