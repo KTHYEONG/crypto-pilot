@@ -50,11 +50,11 @@ def _log_subheader(title: str) -> None:
 
 
 # Selection policy for long-term stable operation + high return.
-SELECTION_POLICY_VERSION = "SELECTION_POLICY_V2"
+SELECTION_POLICY_VERSION = "SELECTION_POLICY_V3"
 SELECTION_POLICY = {
     "gates": {
         "core_min_return": 0.0,
-        "core_min_trades": 40,
+        "core_min_trades": 30,
         "core_max_avg_mdd_abs": 25.0,
         "core_min_wfa_consistency": 45.0,
         "core_max_mc_worst_mdd_95_abs": 45.0,
@@ -959,11 +959,16 @@ def rank_profiles(profile_summaries):
         )
 
         diversification_score = 1.0 - _clip01(s["dispersion"] / 3.0)
-        score = (
+        base_score = (
             (w["core_total"] * core_score)
             + (w["alt_total"] * alt_score)
             + (w["div_total"] * diversification_score)
         )
+        # Trade frequency soft penalty:
+        # keep low-trade strategies viable, but gently prefer richer sample sizes.
+        min_trades = int(s.get("core_min_trades", 0))
+        trade_penalty = 1.0 / (1.0 + np.exp(-0.3 * (float(min_trades) - 25.0)))
+        score = float(base_score * trade_penalty)
         ranked.append((key, score, s))
     ranked.sort(key=lambda x: x[1], reverse=True)
     return ranked

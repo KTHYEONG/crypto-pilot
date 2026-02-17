@@ -56,7 +56,7 @@ WARMUP_BUFFER_BARS = {
 AWFO_DEFAULTS = {
     "enabled_modes": {"UNIFIED", "ALL"},
     "folds": 3,
-    "min_trades_per_fold": 40,
+    "min_trades_per_fold": 20,
     "min_test_bars": {
         "15m": 1200,
         "30m": 900,
@@ -94,6 +94,7 @@ STRUCTURE_PARAM_KEYS = [
     "STOP_LOSS_TYPE",
     "USE_TAKE_PROFIT",
     "USE_VOLUME_FILTER",
+    "ENABLE_TREND_EXIT",
     "TIMEFRAME",
     "USE_DYNAMIC_RISK",
 ]
@@ -101,15 +102,15 @@ STRUCTURE_PARAM_KEYS = [
 TWO_STAGE_UNIFIED_DEFAULTS = {
     "stage1_total_trials": 1200,
     "stage1_fidelity_steps": [
-        {"name": "low", "ratio": 0.55, "symbols": 1, "data_ratio": 0.45, "folds": 2, "min_trades": 25, "startup_ratio": 0.35},
-        {"name": "mid", "ratio": 0.30, "symbols": 2, "data_ratio": 0.70, "folds": 3, "min_trades": 35, "startup_ratio": 0.28},
-        {"name": "high", "ratio": 0.15, "symbols": 2, "data_ratio": 1.00, "folds": 3, "min_trades": 40, "startup_ratio": 0.22},
+        {"name": "low", "ratio": 0.55, "symbols": 1, "data_ratio": 0.45, "folds": 2, "min_trades": 20, "startup_ratio": 0.35},
+        {"name": "mid", "ratio": 0.30, "symbols": 2, "data_ratio": 0.70, "folds": 3, "min_trades": 25, "startup_ratio": 0.28},
+        {"name": "high", "ratio": 0.15, "symbols": 2, "data_ratio": 1.00, "folds": 3, "min_trades": 30, "startup_ratio": 0.22},
     ],
     "promotion_ratio": 0.35,
     "stage2_top_structures": 6,
     "stage2_trials_per_structure": 140,
     "stage2_folds": 3,
-    "stage2_min_trades": 40,
+    "stage2_min_trades": 20,
     "stage2_startup_ratio": 0.18,
     "stage2_refine_ratio": 0.45,
     "stage2_refine_top_quantile": 0.22,
@@ -157,8 +158,8 @@ ROBUST_OBJECTIVE_DEFAULTS = {
     "awfo_cv_weight_score": _env_float("OPTUNA_AWFO_CV_WEIGHT_SCORE", 0.70),
     "awfo_cv_weight_return": _env_float("OPTUNA_AWFO_CV_WEIGHT_RETURN", 0.30),
     # Fold-level Calmar promotion
-    "symbol_legacy_mix_weight": _env_float("OPTUNA_SYMBOL_LEGACY_MIX_WEIGHT", 0.60),
-    "symbol_calmar_mix_weight": _env_float("OPTUNA_SYMBOL_CALMAR_MIX_WEIGHT", 0.40),
+    "symbol_legacy_mix_weight": _env_float("OPTUNA_SYMBOL_LEGACY_MIX_WEIGHT", 0.75),
+    "symbol_calmar_mix_weight": _env_float("OPTUNA_SYMBOL_CALMAR_MIX_WEIGHT", 0.25),
     "fold_calmar_w_avg": _env_float("OPTUNA_FOLD_CALMAR_W_AVG", 0.30),
     "fold_calmar_w_p25": _env_float("OPTUNA_FOLD_CALMAR_W_P25", 0.40),
     "fold_calmar_w_worst": _env_float("OPTUNA_FOLD_CALMAR_W_WORST", 0.30),
@@ -804,7 +805,11 @@ def objective(
     awfo_enabled = bool(awfo_plan and awfo_plan.get("enabled", False))
     awfo_splits_by_symbol = awfo_plan.get("splits", {}) if awfo_enabled else {}
     awfo_cache_by_symbol = awfo_plan.get("cache", {}) if awfo_enabled else {}
-    awfo_min_trades = awfo_plan.get("min_trades_per_fold", 40) if awfo_enabled else None
+    awfo_min_trades = (
+        awfo_plan.get("min_trades_per_fold", AWFO_DEFAULTS["min_trades_per_fold"])
+        if awfo_enabled
+        else None
+    )
 
     symbol_scores = []
     symbol_results = {}
@@ -1033,7 +1038,7 @@ def objective(
             )
             if long_trades == 0 or short_trades == 0:
                 legacy_symbol_score -= ROBUST_OBJECTIVE_DEFAULTS["side_single_penalty"]
-            legacy_symbol_score -= invalid_fold_count * 15.0
+            legacy_symbol_score -= invalid_fold_count * 10.0
 
             # [3.2-1] Independent AWFO CV gate: controls fold-to-fold dispersion directly.
             fold_score_std = float(np.std(fold_scores)) if fold_scores else 0.0
@@ -1055,7 +1060,7 @@ def objective(
             cv_gate_blended = cv_gate_floor + ((1.0 - cv_gate_floor) * cv_gate)
             cv_gate_penalty = (1.0 - cv_gate) * ROBUST_OBJECTIVE_DEFAULTS["awfo_cv_penalty_mult"]
 
-            # [3.2-3] Fold-level Calmar promotion: objective main factor (legacy 60% + calmar 40%).
+            # [3.2-3] Fold-level Calmar promotion: objective main factor (legacy 75% + calmar 25%).
             avg_fold_calmar = float(np.mean(fold_calmars)) if fold_calmars else -4.0
             p25_fold_calmar = float(np.percentile(fold_calmars, 25)) if fold_calmars else -5.0
             worst_fold_calmar = float(np.min(fold_calmars)) if fold_calmars else -6.0
@@ -1749,6 +1754,7 @@ def main():
             1000,
             0.0,  # Max Hold, Trailing Act
             0.5,  # Time-based Exit Profit Threshold
+            True, # Enable trend reversal exit
             80.0, # RSI Exit Threshold
             False, # [NEW] Use Dynamic Risk
             0.6,   # Strong Hurst

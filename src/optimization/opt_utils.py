@@ -31,7 +31,7 @@ class ObjectiveConfig:
     gate_weight_side: float = 0.30
 
     # Baselines
-    min_trades_futures: int = 120
+    min_trades_futures: int = 80
     min_trades_spot: int = 60
     target_mdd_futures: float = 38.0
     target_mdd_spot: float = 28.0
@@ -91,7 +91,7 @@ def _load_objective_config():
         gate_weight_consistency=_env_float("OBJ_GATE_W_CONSISTENCY", 0.25),
         gate_weight_kelly=_env_float("OBJ_GATE_W_KELLY", 0.20),
         gate_weight_side=_env_float("OBJ_GATE_W_SIDE", 0.30),
-        min_trades_futures=_env_int("OBJ_MIN_TRADES_FUTURES", 120),
+        min_trades_futures=_env_int("OBJ_MIN_TRADES_FUTURES", 80),
         min_trades_spot=_env_int("OBJ_MIN_TRADES_SPOT", 60),
         target_mdd_futures=_env_float("OBJ_TARGET_MDD_FUTURES", 38.0),
         target_mdd_spot=_env_float("OBJ_TARGET_MDD_SPOT", 28.0),
@@ -231,7 +231,7 @@ def suggest_params(trial, search_space):
     # === Phase 1: Core Strategy Selection ===
     for key in ['ENTRY_TYPE', 'TREND_FILTER_TYPE', 'STRENGTH_FILTER_TYPE', 'EXIT_TYPE', 
                 'STOP_LOSS_TYPE', 'USE_TAKE_PROFIT', 'USE_VOLUME_FILTER', 'TIMEFRAME',
-                'REGIME_FILTER', 'USE_ADX']: # Added missing keys from strategies
+                'ENABLE_TREND_EXIT', 'REGIME_FILTER', 'USE_ADX']: # Added missing keys from strategies
         if key in search_space:
             spec = search_space[key]
             if spec['type'] == 'categorical':
@@ -592,6 +592,12 @@ def calculate_score(ret, mdd, trades_df, mode="UNIFIED", market_type="spot", tim
     cfg = OBJECTIVE_CFG
 
     # --- 2) Market baselines ---
+    tf_trade_density = {
+        "30m": 1.00,
+        "1h": 0.70,
+        "4h": 0.30,
+    }
+
     if market_type == "futures":
         min_trades = cfg.min_trades_futures
         target_mdd = cfg.target_mdd_futures
@@ -615,6 +621,10 @@ def calculate_score(ret, mdd, trades_df, mode="UNIFIED", market_type="spot", tim
         min_trades = int(min_trades_override)
     else:
         min_trades = int(min_trades)
+        if market_type == "futures" and timeframe is not None:
+            tf_key = str(timeframe).strip().lower()
+            density = float(tf_trade_density.get(tf_key, 0.70))
+            min_trades = int(max(12, round(min_trades * density)))
 
     # --- 3) Growth/Quality/Risk components ---
     mu = r_avg / 100.0
