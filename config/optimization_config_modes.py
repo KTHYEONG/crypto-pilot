@@ -142,6 +142,7 @@ BASE_SEARCH_SPACE = {
     
     # [NEW] Panic Exit Parameters
     'RSI_EXIT_THRESHOLD': {'type': 'int', 'low': 75, 'high': 95, 'step': 1}, # 75~95 (Long Exit), 25~5 (Short Exit)
+    'ENABLE_TREND_EXIT': {'type': 'categorical', 'choices': [True, False]},
 
     # [NEW] Active Position Management (Spot)
     'ENABLE_SCALE_OUT': {'type': 'categorical', 'choices': [False, True]},
@@ -234,6 +235,7 @@ def GET_SEARCH_SPACE(mode, market_type='futures'):
             space['STRENGTH_FILTER_TYPE'] = {'type': 'categorical', 'choices': ['NONE', 'ADX', 'RSI', 'NATR', 'HURST', 'VHF']}
             space['USE_TAKE_PROFIT'] = {'type': 'categorical', 'choices': [True, False]}
             space['USE_VOLUME_FILTER'] = {'type': 'categorical', 'choices': [True, False]}
+            space['ENABLE_TREND_EXIT'] = {'type': 'categorical', 'choices': [True, False]}
 
             # Timeframes: reduce fee/slippage tax while preserving responsiveness.
             space['TIMEFRAME'] = {'type': 'categorical', 'choices': ['30m', '1h', '4h']}
@@ -250,10 +252,10 @@ def GET_SEARCH_SPACE(mode, market_type='futures'):
             space['ATR_STOP_LOSS_MULT'] = {'type': 'float', 'low': 1.5, 'high': 3.5, 'step': 0.25}
             space['TAKE_PROFIT_ATR_MULT'] = {'type': 'float', 'low': 1.8, 'high': 8.0, 'log': True}
             space['ATR_MULTIPLIER'] = {'type': 'float', 'low': 2.0, 'high': 5.0, 'step': 0.5}
-            space['MAX_HOLDING_BARS'] = {'type': 'int', 'low': 40, 'high': 220, 'log': True}
+            space['MAX_HOLDING_BARS'] = {'type': 'int', 'low': 24, 'high': 300, 'log': True}
             space['TRAILING_ACTIVATION_ATR'] = {'type': 'float', 'low': 1.0, 'high': 4.0, 'step': 0.5}
             space['TIME_EXIT_PROFIT_THRESHOLD'] = {'type': 'float', 'low': 0.2, 'high': 1.0, 'step': 0.1}
-            space['RSI_EXIT_THRESHOLD'] = {'type': 'int', 'low': 82, 'high': 92, 'step': 1}
+            space['RSI_EXIT_THRESHOLD'] = {'type': 'int', 'low': 85, 'high': 98, 'step': 1}
 
             # Indicator/detail bounds
             space['KELTNER_ATR_MULT'] = {'type': 'float', 'low': 1.2, 'high': 2.2, 'step': 0.1}
@@ -267,7 +269,7 @@ def GET_SEARCH_SPACE(mode, market_type='futures'):
             space['ADX_THRESHOLD'] = {'type': 'int', 'low': 18, 'high': 35, 'step': 1}
             space['RSI_OVERBOUGHT'] = {'type': 'int', 'low': 68, 'high': 82, 'step': 1}
             space['RSI_OVERSOLD'] = {'type': 'int', 'low': 20, 'high': 32, 'step': 1}
-            space['VOLUME_THRESHOLD_MULT'] = {'type': 'float', 'low': 1.2, 'high': 2.2, 'log': True}
+            space['VOLUME_THRESHOLD_MULT'] = {'type': 'float', 'low': 1.0, 'high': 1.6, 'log': True}
             space['VOLUME_MA_PERIOD'] = {'type': 'int', 'low': 12, 'high': 30, 'log': True}
             space['SAR_STEP'] = {'type': 'float', 'low': 0.01, 'high': 0.03, 'step': 0.005}
 
@@ -303,6 +305,8 @@ def GET_SEARCH_SPACE(mode, market_type='futures'):
         # [Spot] Long-only, no leverage
         if 'LEVERAGE' in space:
             del space['LEVERAGE']
+        if 'ENABLE_TREND_EXIT' in space:
+            del space['ENABLE_TREND_EXIT']
 
         # Long-only spot: avoid aggressive sizing that tends to collapse holdout PF.
         space['RISK_PER_TRADE_SPOT'] = {'type': 'float', 'low': 0.10, 'high': 0.56, 'step': 0.02}
