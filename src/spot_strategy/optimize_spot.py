@@ -9,7 +9,7 @@ import sys
 import time
 from pathlib import Path
 from statistics import NormalDist
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import optuna
@@ -99,15 +99,15 @@ SPOT_STAGE1_STRUCTURE_KEYS = tuple(
 SPOT_TWO_STAGE_UNIFIED_DEFAULTS = {
     "stage1_total_trials": 2000,
     "stage1_fidelity_steps": [
-        {"name": "low", "ratio": 0.45, "symbols": 2, "data_ratio": 0.65, "folds": 2, "min_trades": 12, "startup_ratio": 0.32},
-        {"name": "mid", "ratio": 0.33, "symbols": 2, "data_ratio": 0.82, "folds": 3, "min_trades": 14, "startup_ratio": 0.27},
-        {"name": "high", "ratio": 0.22, "symbols": 2, "data_ratio": 1.00, "folds": 3, "min_trades": 16, "startup_ratio": 0.22},
+        {"name": "low", "ratio": 0.45, "symbols": 2, "data_ratio": 0.65, "folds": 2, "min_trades": 16, "startup_ratio": 0.32},
+        {"name": "mid", "ratio": 0.33, "symbols": 2, "data_ratio": 0.82, "folds": 3, "min_trades": 20, "startup_ratio": 0.27},
+        {"name": "high", "ratio": 0.22, "symbols": 2, "data_ratio": 1.00, "folds": 3, "min_trades": 24, "startup_ratio": 0.22},
     ],
     "promotion_ratio": 0.35,
     "stage2_top_structures": 4,
     "stage2_min_trials_per_structure": 120,
     "stage2_folds": 3,
-    "stage2_min_trades": 16,
+    "stage2_min_trades": 20,
     "stage2_startup_ratio": 0.18,
     "stage2_refine_ratio": 0.45,
     "stage2_refine_top_quantile": 0.22,
@@ -115,6 +115,41 @@ SPOT_TWO_STAGE_UNIFIED_DEFAULTS = {
     "stage2_refine_min_samples": 28,
     "stage2_refine_step_span": 5,
 }
+
+
+# Global indicator cache to speed up trials with identical signal-generation params
+_INDICATOR_CACHE = {}
+
+def get_signal_params_hash(params: Dict[str, Any]) -> int:
+    """Extract and hash only params that affect indicator calculation."""
+    indicator_keys = {
+        "ATR_PERIOD", "STRENGTH_FILTER_PERIOD", "HURST_PERIOD",
+        "ENTRY_TYPE", "ENTRY_PERIOD", "BB_STD", "KELTNER_ATR_MULT", "CCI_THRESHOLD",
+        "TREND_FILTER_TYPE", "MA_PERIOD", "MACD_FAST", "MACD_SLOW", "MACD_SIGNAL",
+        "SUPERTREND_PERIOD", "SUPERTREND_MULT", "VHF_PERIOD", "ER_PERIOD",
+        "ICHIMOKU_TENKAN", "ICHIMOKU_KIJUN", "ICHIMOKU_SENKOU_B", "SAR_STEP", "SAR_MAX",
+        "TIMEFRAME"
+    }
+    # Create a stable tuple of items for hashing
+    sig_params = {k: params[k] for k in indicator_keys if k in params}
+    return hash(frozenset(sig_params.items()))
+
+def cached_generate_signals(strategy: UltimateStrategy, df: pd.DataFrame, timeframe: str, symbol: str) -> pd.DataFrame:
+    """Wrapper to cache generate_signals results."""
+    if df is None or df.empty:
+        return df
+    
+    # We use (symbol, timeframe, params_hash, len(df)) as key to be safe
+    p_hash = get_signal_params_hash(strategy.params)
+    cache_key = (symbol, timeframe, p_hash, len(df))
+    
+    if cache_key in _INDICATOR_CACHE:
+        return _INDICATOR_CACHE[cache_key]
+    
+    # Calculate and store
+    result = strategy.generate_signals(df.copy())
+    _INDICATOR_CACHE[cache_key] = result
+    return result
 
 
 def _env_float(name: str, default: float) -> float:
@@ -725,9 +760,6 @@ SPOT_ROBUST = {
     "cost_stress_w": _env_float("SPOT_COST_STRESS_WEIGHT", 0.08),
     "ret_p25_w": _env_float("SPOT_FOLD_RET_P25_WEIGHT", 0.20),
     "ret_p25_clip": _env_float("SPOT_FOLD_RET_P25_CLIP", 80.0),
-    # Recent-regime alignment: keep some recency signal but avoid overfitting to one phase.
-    "recent_score_w": _env_float("SPOT_RECENT_FOLD_SCORE_WEIGHT", 0.00),
-    "recent_ret_w": _env_float("SPOT_RECENT_FOLD_RET_WEIGHT", 0.00),
     # Trade-density control: penalize low-activity candidates even if return is high.
     "trade_target_min": _env_int("SPOT_FOLD_TRADE_TARGET_MIN", 12),
     "trade_shortfall_penalty": _env_float("SPOT_FOLD_TRADE_SHORTFALL_PENALTY", 50.0),
@@ -746,10 +778,10 @@ SPOT_ROBUST = {
     "cross_pf_p25_weight": _env_float("SPOT_CROSS_PF_P25_WEIGHT", 4.0),
     "cross_score_p25_weight": _env_float("SPOT_CROSS_SCORE_P25_WEIGHT", 0.08),
     # Futures-inspired AWFO CV gate (fold dispersion control).
-    "awfo_cv_target": _env_float("SPOT_AWFO_CV_TARGET", 0.55),
-    "awfo_cv_gate_k": _env_float("SPOT_AWFO_CV_GATE_K", 8.5),
+    "awfo_cv_target": _env_float("SPOT_AWFO_CV_TARGET", 0.70),
+    "awfo_cv_gate_k": _env_float("SPOT_AWFO_CV_GATE_K", 6.5),
     "awfo_cv_gate_floor": _env_float("SPOT_AWFO_CV_GATE_FLOOR", 0.45),
-    "awfo_cv_penalty_mult": _env_float("SPOT_AWFO_CV_PENALTY_MULT", 90.0),
+    "awfo_cv_penalty_mult": _env_float("SPOT_AWFO_CV_PENALTY_MULT", 70.0),
     "awfo_cv_weight_score": _env_float("SPOT_AWFO_CV_WEIGHT_SCORE", 0.70),
     "awfo_cv_weight_return": _env_float("SPOT_AWFO_CV_WEIGHT_RETURN", 0.30),
     # Futures-inspired fold-level Calmar distribution scoring.
@@ -767,8 +799,8 @@ SPOT_ROBUST = {
     "mdd_soft_guard_max_weight": _env_float("SPOT_MDD_SOFT_GUARD_MAX_WEIGHT", 0.65),
     "mdd_soft_guard_avg_weight": _env_float("SPOT_MDD_SOFT_GUARD_AVG_WEIGHT", 0.35),
     "cross_stress_p25_weight": _env_float("SPOT_CROSS_STRESS_P25_WEIGHT", 0.10),
-    "excess_ret_p25_w": _env_float("SPOT_EXCESS_RET_P25_WEIGHT", 0.00),
-    "bear_excess_w": _env_float("SPOT_BEAR_EXCESS_WEIGHT", 0.00),
+    "excess_ret_p25_w": _env_float("SPOT_EXCESS_RET_P25_WEIGHT", 0.12),
+    "bear_excess_w": _env_float("SPOT_BEAR_EXCESS_WEIGHT", 0.08),
     "cross_excess_p25_weight": _env_float("SPOT_CROSS_EXCESS_P25_WEIGHT", 0.00),
     "cross_excess_avg_weight": _env_float("SPOT_CROSS_EXCESS_AVG_WEIGHT", 0.00),
     # PRIMARY guardrails: avoid selecting "less bad" but negative expectancy candidates.
@@ -777,12 +809,10 @@ SPOT_ROBUST = {
     "primary_p25_pf_floor": _env_float("SPOT_PRIMARY_P25_PF_FLOOR", 0.90),
     "primary_avg_ret_floor": _env_float("SPOT_PRIMARY_AVG_RET_FLOOR", -0.30),
     "primary_p25_ret_floor": _env_float("SPOT_PRIMARY_P25_RET_FLOOR", -1.20),
-    "primary_avg_pf_penalty_mult": _env_float("SPOT_PRIMARY_AVG_PF_PENALTY_MULT", 50.0),
     "primary_p25_pf_penalty_mult": _env_float("SPOT_PRIMARY_P25_PF_PENALTY_MULT", 35.0),
-    "primary_avg_ret_penalty_mult": _env_float("SPOT_PRIMARY_AVG_RET_PENALTY_MULT", 8.0),
     "primary_p25_ret_penalty_mult": _env_float("SPOT_PRIMARY_P25_RET_PENALTY_MULT", 6.0),
-    "primary_final_pf_penalty_mult": _env_float("SPOT_PRIMARY_FINAL_PF_PENALTY_MULT", 80.0),
-    "primary_final_ret_penalty_mult": _env_float("SPOT_PRIMARY_FINAL_RET_PENALTY_MULT", 12.0),
+    "primary_final_pf_penalty_mult": _env_float("SPOT_PRIMARY_FINAL_PF_PENALTY_MULT", 60.0),
+    "primary_final_ret_penalty_mult": _env_float("SPOT_PRIMARY_FINAL_RET_PENALTY_MULT", 10.0),
     "primary_hard_avg_pf_floor": _env_float("SPOT_PRIMARY_HARD_AVG_PF_FLOOR", 0.95),
     "primary_hard_p25_pf_floor": _env_float("SPOT_PRIMARY_HARD_P25_PF_FLOOR", 0.75),
     "primary_hard_avg_ret_floor": _env_float("SPOT_PRIMARY_HARD_AVG_RET_FLOOR", -1.50),
@@ -820,15 +850,15 @@ SPOT_ROBUST = {
     "core_score_mix": _env_float("SPOT_CORE_SCORE_MIX", 0.85),
     # Risk-budget objective: maximize return while staying near a practical MDD budget.
     "risk_budget_mix": _env_float("SPOT_RISK_BUDGET_MIX", 0.30),
-    "risk_budget_target_mdd": _env_float("SPOT_RISK_BUDGET_TARGET_MDD", 5.5),
+    "risk_budget_target_mdd": _env_float("SPOT_RISK_BUDGET_TARGET_MDD", 18.5),
     "risk_budget_target_band": _env_float("SPOT_RISK_BUDGET_TARGET_BAND", 0.35),
     "risk_budget_low_util_floor": _env_float("SPOT_RISK_BUDGET_LOW_UTIL_FLOOR", 0.55),
     "risk_budget_ret_weight": _env_float("SPOT_RISK_BUDGET_RET_WEIGHT", 14.0),
     "risk_budget_pf_weight": _env_float("SPOT_RISK_BUDGET_PF_WEIGHT", 12.0),
     "risk_budget_center_bonus": _env_float("SPOT_RISK_BUDGET_CENTER_BONUS", 6.0),
     "risk_budget_under_penalty_mult": _env_float("SPOT_RISK_BUDGET_UNDER_PENALTY_MULT", 14.0),
-    "risk_budget_over_penalty_mult": _env_float("SPOT_RISK_BUDGET_OVER_PENALTY_MULT", 90.0),
-    "risk_budget_hard_mdd_cap": _env_float("SPOT_RISK_BUDGET_HARD_MDD_CAP", 12.0),
+    "risk_budget_over_penalty_mult": _env_float("SPOT_RISK_BUDGET_OVER_PENALTY_MULT", 36.0),
+    "risk_budget_hard_mdd_cap": _env_float("SPOT_RISK_BUDGET_HARD_MDD_CAP", 28.0),
     "core_pf_activity_ref_primary_trades": _env_float("SPOT_CORE_PF_ACTIVITY_REF_PRIMARY_TRADES", 36.0),
     "core_pf_activity_ref_all_trades": _env_float("SPOT_CORE_PF_ACTIVITY_REF_ALL_TRADES", 80.0),
     "core_pf_p25_activity_ref_min_trades": _env_float("SPOT_CORE_PF_P25_ACTIVITY_REF_MIN_TRADES", 18.0),
@@ -840,14 +870,12 @@ SPOT_ROBUST = {
     "loss_trade_shortfall_penalty_primary": _env_float("SPOT_LOSS_TRADE_SHORTFALL_PENALTY_PRIMARY", 190.0),
     "single_win_share_cap": _env_float("SPOT_SINGLE_WIN_SHARE_CAP", 0.55),
     "single_win_share_penalty_mult": _env_float("SPOT_SINGLE_WIN_SHARE_PENALTY_MULT", 200.0),
-    # Regime-balance control: avoid candidates trained only on one-sided (mostly up) folds.
+    # Regime coverage control: require minimal up/down samples when configured.
     "regime_up_bh_threshold": _env_float("SPOT_REGIME_UP_BH_THRESHOLD", 5.0),
     "regime_down_bh_threshold": _env_float("SPOT_REGIME_DOWN_BH_THRESHOLD", -5.0),
     "regime_min_up_samples": _env_int("SPOT_REGIME_MIN_UP_SAMPLES", 0),
     "regime_min_down_samples": _env_int("SPOT_REGIME_MIN_DOWN_SAMPLES", 0),
     "regime_missing_penalty": _env_float("SPOT_REGIME_MISSING_PENALTY", 0.0),
-    "regime_imbalance_penalty": _env_float("SPOT_REGIME_IMBALANCE_PENALTY", 0.0),
-    "regime_imbalance_tolerance": _env_float("SPOT_REGIME_IMBALANCE_TOLERANCE", 0.60),
 }
 
 SPOT_PRIMARY_SYMBOLS = tuple(
@@ -1060,6 +1088,12 @@ def load_all_timeframes(symbols: List[str], start_date: str, end_date: str, time
                     fetch_start = max(start_ts, cached_end + 1)
 
             if need_fetch:
+                # [SECURITY] Optimization trials must NOT fetch data to avoid 429 and latency.
+                # Data must be pre-loaded during the serial preparation step.
+                if not GAP_FILL_ENABLED:
+                    print(f"[ERROR] Data missing for {symbol}-{tf} and GAP_FILL_ENABLED=0. Run with --preload first.")
+                    sys.exit(1)
+
                 print(f"[INFO] Downloading {symbol}-{tf}...")
                 fetched = client.fetch_ohlcv(symbol, tf, since=fetch_start, end=fetch_end)
                 if fetched is None or fetched.empty:
@@ -1552,7 +1586,6 @@ def objective(
         }
 
     for symbol, data_map in symbols_data.items():
-        is_primary_symbol = str(symbol).strip().upper() in primary_symbol_set
         key = symbol.replace("/", "_").replace("-", "_")
         if tf not in data_map or "1d" not in data_map:
             fallback(symbol, "missing timeframe")
@@ -1590,9 +1623,14 @@ def objective(
             for idx, ctx in enumerate(fold_ctxs):
                 try:
                     strategy = UltimateStrategy(f"Opt_{symbol}_F{idx + 1}", params)
+                    
+                    # [OPTIMIZATION] Use cached signals to avoid redundant heavy indicator calculations
+                    h_df = cached_generate_signals(strategy, ctx["hourly"], tf, symbol)
+                    d_df = cached_generate_signals(strategy, ctx["daily"], "1d", symbol)
+
                     engine = BacktestEngineFastSpot(
-                        ctx["hourly"],
-                        ctx["daily"],
+                        h_df,
+                        d_df,
                         strategy,
                         backtest_loop_spot_numba,
                         initial_balance=SPOT_INITIAL_BALANCE,
@@ -1711,14 +1749,6 @@ def objective(
             score += SPOT_ROBUST["cost_stress_w"] * np.clip(p25_stress, -60.0, 60.0)
             score += SPOT_ROBUST["excess_ret_p25_w"] * np.clip(p25_excess, -70.0, 90.0)
             score += SPOT_ROBUST["bear_excess_w"] * np.clip(bear_excess, -60.0, 80.0)
-            # Recency-weighted fold score/return (later folds are closer to holdout regime).
-            if len(fold_scores) >= 2:
-                w = np.arange(1, len(fold_scores) + 1, dtype=np.float64)
-                w = w / np.sum(w)
-                recent_score = float(np.dot(np.asarray(fold_scores, dtype=np.float64), w))
-                recent_ret = float(np.dot(np.asarray(fold_returns, dtype=np.float64), w))
-                score += SPOT_ROBUST["recent_score_w"] * recent_score
-                score += SPOT_ROBUST["recent_ret_w"] * np.clip(recent_ret, -80.0, 120.0)
             if consistency < SPOT_ROBUST["cons_target"]:
                 score -= (SPOT_ROBUST["cons_target"] - consistency) * SPOT_ROBUST["cons_penalty"]
             if fold_returns and min(fold_returns) < SPOT_ROBUST["single_fold_loss_threshold"]:
@@ -1758,29 +1788,6 @@ def objective(
                 missing_down = max(0, min_down - down_count)
                 if (missing_up + missing_down) > 0:
                     score -= float(SPOT_ROBUST["regime_missing_penalty"]) * float(missing_up + missing_down)
-                regime_total = max(1, up_count + down_count)
-                if up_count > 0 and down_count > 0:
-                    imbalance = abs(float(up_count - down_count)) / float(regime_total)
-                    tol = float(SPOT_ROBUST["regime_imbalance_tolerance"])
-                    if imbalance > tol:
-                        score -= (imbalance - tol) * float(SPOT_ROBUST["regime_imbalance_penalty"]) * 10.0
-            if is_primary_symbol and fold_pfs and fold_returns:
-                avg_pf_sym = float(np.mean(fold_pfs))
-                p25_pf_sym = float(np.percentile(np.asarray(fold_pfs, dtype=np.float64), 25))
-                avg_ret_sym = float(np.mean(fold_returns))
-                p25_ret_sym = float(np.percentile(np.asarray(fold_returns, dtype=np.float64), 25))
-                score -= max(0.0, float(SPOT_ROBUST["primary_avg_pf_floor"]) - avg_pf_sym) * float(
-                    SPOT_ROBUST["primary_avg_pf_penalty_mult"]
-                )
-                score -= max(0.0, float(SPOT_ROBUST["primary_p25_pf_floor"]) - p25_pf_sym) * float(
-                    SPOT_ROBUST["primary_p25_pf_penalty_mult"]
-                )
-                score -= max(0.0, float(SPOT_ROBUST["primary_avg_ret_floor"]) - avg_ret_sym) * float(
-                    SPOT_ROBUST["primary_avg_ret_penalty_mult"]
-                )
-                score -= max(0.0, float(SPOT_ROBUST["primary_p25_ret_floor"]) - p25_ret_sym) * float(
-                    SPOT_ROBUST["primary_p25_ret_penalty_mult"]
-                )
             score -= invalid * 12.0
             # Futures-inspired AWFO CV gate: penalize fold dispersion continuously.
             fold_score_std = float(np.std(fold_scores)) if fold_scores else 0.0
@@ -1886,13 +1893,6 @@ def objective(
                 pf = gp / gl if gl > 0 else (gp if gp > 0 else 0.0)
             pf = float(np.clip(pf, 0.0, float(SPOT_ROBUST["pf_clip_per_symbol"])))
             score = calculate_score(ret, mdd, trades_df, mode=mode, market_type="spot", timeframe=tf)
-            if is_primary_symbol:
-                score -= max(0.0, float(SPOT_ROBUST["primary_avg_pf_floor"]) - float(pf)) * float(
-                    SPOT_ROBUST["primary_avg_pf_penalty_mult"]
-                )
-                score -= max(0.0, float(SPOT_ROBUST["primary_avg_ret_floor"]) - float(ret)) * float(
-                    SPOT_ROBUST["primary_avg_ret_penalty_mult"]
-                )
             symbol_scores.append(float(score if np.isfinite(score) and score > -9000 else -220.0))
             bh_ret = calculate_oos_benchmark_return_pct(data_map.get(tf), 0, len(data_map.get(tf, pd.DataFrame())) - 1)
             symbol_results[symbol] = {
@@ -2129,21 +2129,34 @@ def objective(
     feature_pyramiding = bool(params.get("ENABLE_PYRAMIDING", False))
     feature_dynamic_risk = bool(params.get("USE_DYNAMIC_RISK", False))
     active_feature_count = int(feature_scale_out) + int(feature_breakeven) + int(feature_pyramiding) + int(feature_dynamic_risk)
-    complexity_penalty = active_feature_count * float(SPOT_ROBUST["complexity_feature_penalty"])
-    if feature_scale_out:
-        scale_out_ratio = float(params.get("SCALE_OUT_RATIO", 0.0))
-        complexity_penalty += (
-            max(0.0, scale_out_ratio - float(SPOT_ROBUST["complexity_scale_out_ratio_center"]))
-            * float(SPOT_ROBUST["complexity_scale_out_ratio_mult"])
-        )
-    if feature_pyramiding:
-        pyramid_max_adds = int(max(1, params.get("PYRAMID_MAX_ADDS", 1)))
-        pyramid_risk_ratio = float(params.get("PYRAMID_RISK_RATIO", 0.0))
-        complexity_penalty += max(0, pyramid_max_adds - 1) * float(SPOT_ROBUST["complexity_pyramid_add_penalty"])
-        complexity_penalty += (
-            max(0.0, pyramid_risk_ratio - float(SPOT_ROBUST["complexity_pyramid_risk_center"]))
-            * float(SPOT_ROBUST["complexity_pyramid_risk_mult"])
-        )
+
+    complexity_feature_penalty = float(SPOT_ROBUST["complexity_feature_penalty"])
+    complexity_scale_out_ratio_mult = float(SPOT_ROBUST["complexity_scale_out_ratio_mult"])
+    complexity_pyramid_add_penalty = float(SPOT_ROBUST["complexity_pyramid_add_penalty"])
+    complexity_pyramid_risk_mult = float(SPOT_ROBUST["complexity_pyramid_risk_mult"])
+
+    complexity_penalty = 0.0
+    if (
+        complexity_feature_penalty > 0.0
+        or complexity_scale_out_ratio_mult > 0.0
+        or complexity_pyramid_add_penalty > 0.0
+        or complexity_pyramid_risk_mult > 0.0
+    ):
+        complexity_penalty = active_feature_count * complexity_feature_penalty
+        if feature_scale_out and complexity_scale_out_ratio_mult > 0.0:
+            scale_out_ratio = float(params.get("SCALE_OUT_RATIO", 0.0))
+            complexity_penalty += (
+                max(0.0, scale_out_ratio - float(SPOT_ROBUST["complexity_scale_out_ratio_center"]))
+                * complexity_scale_out_ratio_mult
+            )
+        if feature_pyramiding and (complexity_pyramid_add_penalty > 0.0 or complexity_pyramid_risk_mult > 0.0):
+            pyramid_max_adds = int(max(1, params.get("PYRAMID_MAX_ADDS", 1)))
+            pyramid_risk_ratio = float(params.get("PYRAMID_RISK_RATIO", 0.0))
+            complexity_penalty += max(0, pyramid_max_adds - 1) * complexity_pyramid_add_penalty
+            complexity_penalty += (
+                max(0.0, pyramid_risk_ratio - float(SPOT_ROBUST["complexity_pyramid_risk_center"]))
+                * complexity_pyramid_risk_mult
+            )
 
     legacy_score = (blended_shifted * dispersion_penalty) - offset
     legacy_score += efficiency_boost
