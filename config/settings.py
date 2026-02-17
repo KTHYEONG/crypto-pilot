@@ -102,20 +102,20 @@ LOG_MAX_BYTES = 10 * 1024 * 1024  # 10MB
 LOG_BACKUP_COUNT = 5
 
 # --- 대상 심볼 ---
-# [Verified Portfolio] 2026-02-09 검증 기반 (OOS Return: 43645%)
-FUTURES_TARGET_SYMBOLS = ['BTC/USDT', 'ETH/USDT', 'BNB/USDT']
+# [Verified Portfolio] 2026-02-17 Holdout OOS 권장안
+# 80만원 소액 선물 포트폴리오: BTC(안정), DOGE(수익), XRP(고승률)
+FUTURES_TARGET_SYMBOLS = ['BTC/USDT', 'DOGE/USDT', 'XRP/USDT']
 
 # --- 스터디 이름 (Optuna) ---
 OPTUNA_STUDY_NAMES = ['futures_strategy', 'future_strategy', 'UNIFIED']
 
 # --- 포지션 사이징 가중치 (성과 기반) ---
-# 근거: 2026-02-09 UNIFIED 최적화 검증 (공격적 설정: Lev 10x, Risk 8%)
-# BTC/ETH: 안정성과 수익성의 균형 (각 40%)
-# BNB: 알트코인 중 압도적 퍼포먼스 (20%)
+# 근거: 2026-02-17 Holdout OOS 추천안
+# BTC: 35%, DOGE: 40%, XRP: 25%
 SYMBOL_ALLOCATION_WEIGHTS = {
-    'BTC/USDT': 0.40,
-    'ETH/USDT': 0.40,
-    'BNB/USDT': 0.20
+    'BTC/USDT': 0.35,
+    'DOGE/USDT': 0.40,
+    'XRP/USDT': 0.25
 }
 
 # ============================================================
