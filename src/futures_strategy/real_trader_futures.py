@@ -3,7 +3,7 @@ RealTrader Futures - 24시간 자동 선물 트레이딩 봇 (Production Grade)
 ===================================================================
 P0/P1 개선사항 적용:
 - 거래 기록 DB 영속화
-- API 재시도 데코레이터 (tenacity)
+- 네트워크 전용 API 재시도 데코레이터
 - Health Check 메커니즘
 - Graceful Shutdown (SIGTERM)
 - 중복 코드 제거 (유틸 함수)
@@ -28,6 +28,11 @@ from pathlib import Path
 from logging.handlers import RotatingFileHandler
 from functools import wraps
 from typing import Optional, Dict, Any, Tuple
+
+try:
+    import ccxt
+except ImportError:  # pragma: no cover - optional dependency at import time
+    ccxt = None
 
 try:
     import msvcrt  # Windows file lock
@@ -77,7 +82,7 @@ from config.settings import (
 )
 from src.futures_strategy.binance_client import BinanceClient
 from src.futures_strategy.strategies_futures import UltimateStrategy
-from src.common.utils import setup_logger, api_retry
+from src.common.utils import setup_logger
 from src.common.components import TradeHistoryDB, HealthCheckManager, calculate_candle_wait_time
 
 # Oracle Cloud 최적화 (선택적)
@@ -94,6 +99,60 @@ except ImportError:
 
 
 logger = setup_logger("RealTraderFutures")
+
+_CCXT_TRANSIENT_ERRORS: Tuple[type, ...] = ()
+if ccxt is not None:
+    _CCXT_TRANSIENT_ERRORS = tuple(
+        err
+        for err in (
+            getattr(ccxt, "NetworkError", None),
+            getattr(ccxt, "ExchangeNotAvailable", None),
+            getattr(ccxt, "RequestTimeout", None),
+            getattr(ccxt, "DDoSProtection", None),
+            getattr(ccxt, "RateLimitExceeded", None),
+        )
+        if isinstance(err, type)
+    )
+
+
+def _is_retryable_api_exception(exc: Exception) -> bool:
+    """Retry only transient network/exchange availability failures."""
+    if isinstance(exc, (ConnectionError, TimeoutError)):
+        return True
+    if _CCXT_TRANSIENT_ERRORS and isinstance(exc, _CCXT_TRANSIENT_ERRORS):
+        return True
+    return False
+
+
+def network_api_retry(func):
+    """
+    Local retry decorator for exchange I/O.
+    Intentionally excludes business logic errors (e.g. InvalidOrder, InsufficientBalance).
+    """
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        last_error: Optional[Exception] = None
+        max_attempts = max(1, int(API_RETRY_ATTEMPTS))
+        for attempt in range(max_attempts):
+            try:
+                return func(*args, **kwargs)
+            except Exception as e:
+                if not _is_retryable_api_exception(e):
+                    raise
+                last_error = e
+                if attempt >= (max_attempts - 1):
+                    break
+                wait_time = min(
+                    float(API_RETRY_WAIT_MIN) * (2 ** attempt),
+                    float(API_RETRY_WAIT_MAX),
+                )
+                logger.warning(
+                    f"⚠️ API transient error in {func.__name__} "
+                    f"(attempt {attempt+1}/{max_attempts}): {e}. Waiting {wait_time:.1f}s"
+                )
+                time.sleep(max(0.0, wait_time))
+        raise last_error if last_error is not None else RuntimeError("retry wrapper reached unexpected state")
+    return wrapper
 
 
 
@@ -149,7 +208,7 @@ class StateManager:
             elif fcntl is not None:  # pragma: no cover
                 fcntl.flock(lock_fp.fileno(), fcntl.LOCK_EX)
             return lock_fp
-        except Exception:
+        except BaseException:
             try:
                 lock_fp.close()
             except Exception:
@@ -381,7 +440,6 @@ class RealTraderFutures:
         if not preferred_symbols:
             raise ValueError("No live futures symbols configured. Check FUTURES_TARGET_SYMBOLS in config/settings.py")
         self.symbols = preferred_symbols.copy()
-
         self.symbol_allocation_weights = self._build_symbol_allocation_weights(self.symbols)
         logger.info(
             "📌 Live symbol allocation applied: %s",
@@ -420,32 +478,32 @@ class RealTraderFutures:
             for symbol, weight in weights.items()
         }
     
-    @api_retry
+    @network_api_retry
     def _fetch_balance_safe(self) -> tuple:
         """안전한 잔고 조회 (Total, Free 반환)"""
         # BinanceClient.fetch_balance() already returns (total, free)
         return self.client.fetch_balance()
     
-    @api_retry
+    @network_api_retry
     def _fetch_ohlcv_safe(self, symbol: str, timeframe: str, start_str: str):
         """안전한 OHLCV 조회 (재시도 적용)"""
         return self.client.fetch_ohlcv(symbol, timeframe, start_date=start_str)
 
-    @api_retry
+    @network_api_retry
     def _fetch_recent_ohlcv_safe(self, symbol: str, timeframe: str, limit: int = 3):
         """Lightweight OHLCV fetch for signal timing checks."""
         return self.client.fetch_recent_ohlcv(symbol, timeframe, limit=limit)
-    @api_retry
+    @network_api_retry
     def _fetch_position_safe(self, symbol: str) -> dict:
         """안전한 포지션 조회 (재시도 적용)"""
         return self.client.fetch_position(symbol)
     
-    @api_retry
+    @network_api_retry
     def _get_market_price_safe(self, symbol: str) -> float:
         """안전한 시장가 조회 (재시도 적용)"""
         return self.client.get_market_price(symbol)
 
-    @api_retry
+    @network_api_retry
     def _fetch_server_time_ms_safe(self) -> int:
         """Exchange server time(ms) 조회."""
         return int(self.client.fetch_server_time_ms())
@@ -744,7 +802,7 @@ class RealTraderFutures:
             logger.debug(f"[{symbol}] Entry timestamp inference from trades failed: {e}")
             return 0
     
-    @api_retry
+    @network_api_retry
     def _place_order_safe(
         self,
         symbol: str,
@@ -772,12 +830,12 @@ class RealTraderFutures:
             post_only_requote_max=post_only_requote_max,
         )
 
-    @api_retry
+    @network_api_retry
     def _place_stop_loss_safe(self, symbol: str, side: str, qty: float, stop_price: float):
         """안전한 서버 사이드 Stop Loss 실행 (재시도 적용)"""
         return self.client.place_stop_market_order(symbol, side, qty, stop_price)
 
-    @api_retry
+    @network_api_retry
     def _cancel_all_orders_safe(self, symbol: str):
         """안전한 모든 주문 취소 (재시도 적용)"""
         return self.client.cancel_all_orders(symbol)
@@ -1033,6 +1091,197 @@ class RealTraderFutures:
         self.health_manager.update_heartbeat(status="initialized")
         
         logger.info("🚀 Initialization Complete. Bot is Running...")
+
+    def _execute_entry(
+        self,
+        symbol: str,
+        side: str,
+        signal_price: float,
+        current_price: float,
+        params: dict,
+        atr: float,
+        hurst_value: float,
+        natr_value: float,
+        signal_candle_ts: int,
+        next_attempt_count: int,
+        late_bound_ms: int,
+        entry_post_only_wait_seconds: float,
+        entry_post_only_requote_max: int,
+        entry_allow_market_fallback: bool,
+        target_entry_open_ts: int,
+        entry_lag_sec: float,
+        execution_tf: str,
+        entry_upper: float,
+        entry_lower: float,
+    ) -> bool:
+        """
+        공통 진입 실행기 (LONG/SHORT).
+        Returns:
+            True  -> 즉시 상위 execute_logic를 종료해야 함(오류/미확인 체결 등)
+            False -> 정상 진행(성공 또는 비진입)
+        """
+        is_long = (side == 'LONG')
+        order_side = 'buy' if is_long else 'sell'
+        expected_side = 'LONG' if is_long else 'SHORT'
+        close_sl_side = 'sell' if is_long else 'buy'
+        side_emoji = "🟢" if is_long else "🔴"
+        trend_label = "↑" if is_long else "↓"
+        breakout_label = "UP" if is_long else "DN"
+
+        logger.info(
+            f"{side_emoji} {expected_side} {symbol} | SignalClose: {signal_price:.4f}, ExecPx: {current_price:.4f} | "
+            f"Cond: Trend({trend_label}), Breakout({breakout_label}), Strength(OK), Vol(OK)"
+        )
+
+        qty = self._calculate_position_size(
+            symbol,
+            current_price,
+            params,
+            atr,
+            hurst=hurst_value,
+            natr=natr_value,
+        )
+        if qty <= 0:
+            return False
+
+        self.state_manager.update_symbol_state(symbol, {
+            'last_entry_attempt_signal_candle_ts': int(signal_candle_ts),
+            'entry_attempt_count_for_signal': int(next_attempt_count),
+            'last_entry_attempt_at': datetime.utcnow().isoformat(),
+        })
+
+        order = self._place_order_safe(
+            symbol,
+            order_side,
+            qty,
+            atr=atr,
+            current_price=current_price,
+            reduce_only=False,
+            allow_market_fallback=entry_allow_market_fallback,
+            order_deadline_ms=int(late_bound_ms),
+            post_only_wait_seconds=entry_post_only_wait_seconds,
+            post_only_requote_max=entry_post_only_requote_max,
+        )
+        confirmed_pos = self._confirm_position(symbol, expected_side=expected_side, retries=10, sleep_seconds=0.5)
+        confirmed_amount = float(confirmed_pos.get('amount', 0.0) or 0.0)
+
+        invalid_confirmation = (confirmed_amount <= 0) if is_long else (confirmed_amount >= 0)
+        if invalid_confirmation:
+            self._cancel_all_orders_safe(symbol)
+            logger.error(
+                f"❌ [{symbol}] {expected_side} entry not confirmed on exchange. "
+                f"Requested {qty}, position amount={confirmed_amount}"
+            )
+            return True
+
+        if not self._enforce_min_fill_ratio(
+            symbol=symbol,
+            expected_qty=qty,
+            confirmed_amount=confirmed_amount,
+            side=expected_side,
+            params=params,
+            current_price=current_price,
+            atr=atr,
+        ):
+            return True
+
+        if not order:
+            logger.warning(
+                f"⚠️ [{symbol}] Entry response missing, but {expected_side} position detected. "
+                "Proceeding with confirmed position data."
+            )
+
+        filled_qty = self.client.round_amount(symbol, abs(confirmed_amount))
+        if filled_qty <= 0:
+            logger.error(f"❌ [{symbol}] Invalid confirmed {expected_side} quantity: {filled_qty}")
+            return True
+
+        confirmed_entry_price = float(confirmed_pos.get('entryPrice', current_price) or current_price)
+        sl_type = params.get('STOP_LOSS_TYPE', 'FIXED')
+        if sl_type == 'ATR' and atr > 0:
+            sl_mult = params.get('ATR_STOP_LOSS_MULT', 1.5)
+            stop_price = (
+                confirmed_entry_price - (atr * sl_mult)
+                if is_long else
+                confirmed_entry_price + (atr * sl_mult)
+            )
+        else:
+            sl_pct = params.get('STOP_LOSS_PCT', 0.02)
+            stop_price = (
+                confirmed_entry_price * (1 - sl_pct)
+                if is_long else
+                confirmed_entry_price * (1 + sl_pct)
+            )
+        stop_price = self.client.round_price(symbol, stop_price)
+
+        use_tp_entry = bool(params.get('USE_TAKE_PROFIT', False))
+        tp_atr_mult_entry = float(
+            params.get('TAKE_PROFIT_ATR_MULT_FUTURES', params.get('TAKE_PROFIT_ATR_MULT', 3.0))
+        )
+        entry_atr = float(max(0.0, atr))
+        tp_price = 0.0
+        if use_tp_entry and entry_atr > 0:
+            raw_tp = (
+                confirmed_entry_price + (entry_atr * tp_atr_mult_entry)
+                if is_long else
+                confirmed_entry_price - (entry_atr * tp_atr_mult_entry)
+            )
+            tp_price = self.client.round_price(symbol, raw_tp)
+
+        sl_result = self._place_stop_loss_safe(symbol, close_sl_side, filled_qty, stop_price)
+        sl_active = bool(sl_result)
+        if not sl_active:
+            logger.error(f"❌ [{symbol}] {expected_side} entry SL placement failed. Trying immediate restore.")
+            sl_active = bool(
+                self._restore_stop_loss(
+                    symbol=symbol,
+                    amount=confirmed_amount,
+                    entry_price=confirmed_entry_price,
+                    current_price=current_price,
+                    params=params,
+                    atr=atr,
+                )
+            )
+
+        reason = (
+            f"Trend(↑) & Breakout(>{entry_upper:.2f})"
+            if is_long else
+            f"Trend(↓) & Breakout(<{entry_lower:.2f})"
+        )
+        self.trade_db.record_trade(
+            symbol=symbol,
+            side=expected_side,
+            action='ENTRY',
+            quantity=filled_qty,
+            price=confirmed_entry_price,
+            reason=reason,
+            params={'timeframe': execution_tf, 'atr': atr, 'sl': stop_price, 'sl_active': sl_active},
+        )
+
+        self.state_manager.update_symbol_state(symbol, {
+            'entry_time': datetime.utcfromtimestamp(target_entry_open_ts / 1000.0).isoformat(),
+            'entry_fill_time': datetime.utcnow().isoformat(),
+            'entry_price': confirmed_entry_price,
+            'entry_atr': entry_atr,
+            'side': expected_side,
+            'sl_required': (not sl_active),
+            'last_sl_order_time': datetime.utcnow().isoformat() if sl_active else None,
+            'active_stop_price': float(stop_price),
+            'tp_price': float(tp_price),
+            'pos_atr': entry_atr,
+            'highest_price': float(confirmed_entry_price),
+            'lowest_price': float(confirmed_entry_price),
+            'last_processed_candle_ts': 0,
+            'last_entry_signal_candle_ts': int(signal_candle_ts),
+            'last_entry_attempt_signal_candle_ts': int(signal_candle_ts),
+            'entry_attempt_count_for_signal': int(next_attempt_count),
+            'entry_target_open_ts': int(target_entry_open_ts),
+            'entry_exec_lag_sec': float(entry_lag_sec),
+            'entry_market_fallback_used': bool(entry_allow_market_fallback),
+            'recovery_mode': False,
+            'last_exit_fallback_eval_ms': 0,
+        })
+        return False
     
     def execute_logic(self, symbol: str):
         """핵심 매매 로직 실행 (메모리 최적화)"""
@@ -1226,10 +1475,26 @@ class RealTraderFutures:
                         atr=atr,
                         execution_tf=execution_tf,
                     )
+                    state_snapshot = self.state_manager.get_symbol_state(symbol)
+
+                # [P0] 청산 미완료 상태는 다음 루프에서 최우선으로 강제 재청산
+                if bool(state_snapshot.get('exit_pending', False)):
+                    recovered = self._recover_pending_exit(
+                        symbol=symbol,
+                        amount=amount,
+                        current_price=current_price,
+                        params=params,
+                        pos=pos,
+                        state=state_snapshot,
+                    )
+                    if recovered:
+                        return
+                    # recovery 시도 실패/쿨다운 중에는 일반 로직으로 진입하지 않고 다음 루프에서 재시도
+                    return
 
                 # [Watchdog] Stop Loss 주문 누락 감지 및 복구
                 try:
-                    # 중복 주문 방지: 최근 2시간 이내 주문한 기록이 있으면 스킵
+                    # 중복 주문 방지: 복구 직후 단기 쿨다운 동안 재체크 스킵
                     state = self.state_manager.get_symbol_state(symbol)
                     last_sl_time_str = state.get('last_sl_order_time')
                     sl_required = bool(state.get('sl_required', False))
@@ -1238,7 +1503,8 @@ class RealTraderFutures:
                     should_check = True
                     if last_sl_time_str and not sl_required:
                         last_sl_time = datetime.fromisoformat(last_sl_time_str)
-                        cooldown = 7200  # 2시간 쿨다운 (로그 도배 방지)
+                        cooldown = float(params.get('SL_WATCHDOG_COOLDOWN_SECONDS', 600))
+                        cooldown = max(300.0, min(1800.0, cooldown))
                         elapsed = (datetime.utcnow() - last_sl_time).total_seconds()
                         if elapsed < cooldown:
                             logger.debug(f"[{symbol}] SL order cooldown active ({elapsed:.0f}s/{cooldown}s). Skipping check.")
@@ -1405,257 +1671,54 @@ class RealTraderFutures:
 
                 # Entry Execution
                 if is_uptrend and long_breakout and strength_ok and vol_ok:
-                    logger.info(
-                        f"🟢 LONG {symbol} | SignalClose: {signal_price:.4f}, ExecPx: {current_price:.4f} | "
-                        f"Cond: Trend(↑), Breakout(UP), Strength(OK), Vol(OK)"
+                    should_abort = self._execute_entry(
+                        symbol=symbol,
+                        side='LONG',
+                        signal_price=signal_price,
+                        current_price=current_price,
+                        params=params,
+                        atr=atr,
+                        hurst_value=hurst_value,
+                        natr_value=natr_value,
+                        signal_candle_ts=int(signal_candle_ts),
+                        next_attempt_count=int(next_attempt_count),
+                        late_bound_ms=int(late_bound_ms),
+                        entry_post_only_wait_seconds=entry_post_only_wait_seconds,
+                        entry_post_only_requote_max=entry_post_only_requote_max,
+                        entry_allow_market_fallback=entry_allow_market_fallback,
+                        target_entry_open_ts=int(target_entry_open_ts),
+                        entry_lag_sec=float(entry_lag_sec),
+                        execution_tf=execution_tf,
+                        entry_upper=float(entry_upper),
+                        entry_lower=float(entry_lower),
                     )
-
-                    qty = self._calculate_position_size(
-                        symbol, current_price, params, atr,
-                        hurst=hurst_value, natr=natr_value
-                    )
-                    if qty > 0:
-                        self.state_manager.update_symbol_state(symbol, {
-                            'last_entry_attempt_signal_candle_ts': int(signal_candle_ts),
-                            'entry_attempt_count_for_signal': int(next_attempt_count),
-                            'last_entry_attempt_at': datetime.utcnow().isoformat(),
-                        })
-                        order = self._place_order_safe(
-                            symbol, 'buy', qty, atr=atr, current_price=current_price,
-                            reduce_only=False,
-                            allow_market_fallback=entry_allow_market_fallback,
-                            order_deadline_ms=int(late_bound_ms),
-                            post_only_wait_seconds=entry_post_only_wait_seconds,
-                            post_only_requote_max=entry_post_only_requote_max,
-                        )
-                        confirmed_pos = self._confirm_position(symbol, expected_side='LONG', retries=10, sleep_seconds=0.5)
-                        confirmed_amount = float(confirmed_pos.get('amount', 0.0) or 0.0)
-                        if confirmed_amount <= 0:
-                            self._cancel_all_orders_safe(symbol)
-                            logger.error(
-                                f"❌ [{symbol}] LONG entry not confirmed on exchange. "
-                                f"Requested {qty}, position amount={confirmed_amount}"
-                            )
-                            return
-                        if not self._enforce_min_fill_ratio(
-                            symbol=symbol,
-                            expected_qty=qty,
-                            confirmed_amount=confirmed_amount,
-                            side='LONG',
-                            params=params,
-                            current_price=current_price,
-                            atr=atr,
-                        ):
-                            return
-                        if not order:
-                            logger.warning(
-                                f"⚠️ [{symbol}] Entry response missing, but LONG position detected. "
-                                "Proceeding with confirmed position data."
-                            )
-
-                        filled_qty = self.client.round_amount(symbol, abs(confirmed_amount))
-                        if filled_qty <= 0:
-                            logger.error(f"❌ [{symbol}] Invalid confirmed LONG quantity: {filled_qty}")
-                            return
-                        confirmed_entry_price = float(confirmed_pos.get('entryPrice', current_price) or current_price)
-
-                        sl_type = params.get('STOP_LOSS_TYPE', 'FIXED')
-                        stop_price = 0.0
-                        if sl_type == 'ATR' and atr > 0:
-                            sl_mult = params.get('ATR_STOP_LOSS_MULT', 1.5)
-                            stop_price = confirmed_entry_price - (atr * sl_mult)
-                        else:
-                            sl_pct = params.get('STOP_LOSS_PCT', 0.02)
-                            stop_price = confirmed_entry_price * (1 - sl_pct)
-                        stop_price = self.client.round_price(symbol, stop_price)
-
-                        use_tp_entry = bool(params.get('USE_TAKE_PROFIT', False))
-                        tp_atr_mult_entry = float(
-                            params.get('TAKE_PROFIT_ATR_MULT_FUTURES', params.get('TAKE_PROFIT_ATR_MULT', 3.0))
-                        )
-                        entry_atr = float(max(0.0, atr))
-                        tp_price = 0.0
-                        if use_tp_entry and entry_atr > 0:
-                            tp_price = self.client.round_price(
-                                symbol,
-                                confirmed_entry_price + (entry_atr * tp_atr_mult_entry),
-                            )
-
-                        sl_result = self._place_stop_loss_safe(symbol, 'sell', filled_qty, stop_price)
-                        sl_active = bool(sl_result)
-                        if not sl_active:
-                            logger.error(f"❌ [{symbol}] LONG entry SL placement failed. Trying immediate restore.")
-                            sl_active = bool(
-                                self._restore_stop_loss(
-                                    symbol=symbol,
-                                    amount=confirmed_amount,
-                                    entry_price=confirmed_entry_price,
-                                    current_price=current_price,
-                                    params=params,
-                                    atr=atr,
-                                )
-                            )
-
-                        self.trade_db.record_trade(
-                            symbol=symbol,
-                            side='LONG',
-                            action='ENTRY',
-                            quantity=filled_qty,
-                            price=confirmed_entry_price,
-                            reason=f"Trend(↑) & Breakout(>{entry_upper:.2f})",
-                            params={'timeframe': execution_tf, 'atr': atr, 'sl': stop_price, 'sl_active': sl_active}
-                        )
-
-                        self.state_manager.update_symbol_state(symbol, {
-                            'entry_time': datetime.utcfromtimestamp(target_entry_open_ts / 1000.0).isoformat(),
-                            'entry_fill_time': datetime.utcnow().isoformat(),
-                            'entry_price': confirmed_entry_price,
-                            'entry_atr': entry_atr,
-                            'side': 'LONG',
-                            'sl_required': (not sl_active),
-                            'last_sl_order_time': datetime.utcnow().isoformat() if sl_active else None,
-                            'active_stop_price': float(stop_price),
-                            'tp_price': float(tp_price),
-                            'pos_atr': entry_atr,
-                            'highest_price': float(confirmed_entry_price),
-                            'lowest_price': float(confirmed_entry_price),
-                            'last_processed_candle_ts': 0,
-                            'last_entry_signal_candle_ts': int(signal_candle_ts),
-                            'last_entry_attempt_signal_candle_ts': int(signal_candle_ts),
-                            'entry_attempt_count_for_signal': int(next_attempt_count),
-                            'entry_target_open_ts': int(target_entry_open_ts),
-                            'entry_exec_lag_sec': float(entry_lag_sec),
-                            'entry_market_fallback_used': bool(entry_allow_market_fallback),
-                            'recovery_mode': False,
-                            'last_exit_fallback_eval_ms': 0,
-                        })
+                    if should_abort:
+                        return
 
                 elif is_downtrend and short_breakout and strength_ok and vol_ok:
-                    logger.info(
-                        f"🔴 SHORT {symbol} | SignalClose: {signal_price:.4f}, ExecPx: {current_price:.4f} | "
-                        f"Cond: Trend(↓), Breakout(DN), Strength(OK), Vol(OK)"
+                    should_abort = self._execute_entry(
+                        symbol=symbol,
+                        side='SHORT',
+                        signal_price=signal_price,
+                        current_price=current_price,
+                        params=params,
+                        atr=atr,
+                        hurst_value=hurst_value,
+                        natr_value=natr_value,
+                        signal_candle_ts=int(signal_candle_ts),
+                        next_attempt_count=int(next_attempt_count),
+                        late_bound_ms=int(late_bound_ms),
+                        entry_post_only_wait_seconds=entry_post_only_wait_seconds,
+                        entry_post_only_requote_max=entry_post_only_requote_max,
+                        entry_allow_market_fallback=entry_allow_market_fallback,
+                        target_entry_open_ts=int(target_entry_open_ts),
+                        entry_lag_sec=float(entry_lag_sec),
+                        execution_tf=execution_tf,
+                        entry_upper=float(entry_upper),
+                        entry_lower=float(entry_lower),
                     )
-
-                    qty = self._calculate_position_size(
-                        symbol, current_price, params, atr,
-                        hurst=hurst_value, natr=natr_value
-                    )
-                    if qty > 0:
-                        self.state_manager.update_symbol_state(symbol, {
-                            'last_entry_attempt_signal_candle_ts': int(signal_candle_ts),
-                            'entry_attempt_count_for_signal': int(next_attempt_count),
-                            'last_entry_attempt_at': datetime.utcnow().isoformat(),
-                        })
-                        order = self._place_order_safe(
-                            symbol, 'sell', qty, atr=atr, current_price=current_price,
-                            reduce_only=False,
-                            allow_market_fallback=entry_allow_market_fallback,
-                            order_deadline_ms=int(late_bound_ms),
-                            post_only_wait_seconds=entry_post_only_wait_seconds,
-                            post_only_requote_max=entry_post_only_requote_max,
-                        )
-                        confirmed_pos = self._confirm_position(symbol, expected_side='SHORT', retries=10, sleep_seconds=0.5)
-                        confirmed_amount = float(confirmed_pos.get('amount', 0.0) or 0.0)
-                        if confirmed_amount >= 0:
-                            self._cancel_all_orders_safe(symbol)
-                            logger.error(
-                                f"❌ [{symbol}] SHORT entry not confirmed on exchange. "
-                                f"Requested {qty}, position amount={confirmed_amount}"
-                            )
-                            return
-                        if not self._enforce_min_fill_ratio(
-                            symbol=symbol,
-                            expected_qty=qty,
-                            confirmed_amount=confirmed_amount,
-                            side='SHORT',
-                            params=params,
-                            current_price=current_price,
-                            atr=atr,
-                        ):
-                            return
-                        if not order:
-                            logger.warning(
-                                f"⚠️ [{symbol}] Entry response missing, but SHORT position detected. "
-                                "Proceeding with confirmed position data."
-                            )
-
-                        filled_qty = self.client.round_amount(symbol, abs(confirmed_amount))
-                        if filled_qty <= 0:
-                            logger.error(f"❌ [{symbol}] Invalid confirmed SHORT quantity: {filled_qty}")
-                            return
-                        confirmed_entry_price = float(confirmed_pos.get('entryPrice', current_price) or current_price)
-
-                        sl_type = params.get('STOP_LOSS_TYPE', 'FIXED')
-                        stop_price = 0.0
-                        if sl_type == 'ATR' and atr > 0:
-                            sl_mult = params.get('ATR_STOP_LOSS_MULT', 1.5)
-                            stop_price = confirmed_entry_price + (atr * sl_mult)
-                        else:
-                            sl_pct = params.get('STOP_LOSS_PCT', 0.02)
-                            stop_price = confirmed_entry_price * (1 + sl_pct)
-
-                        stop_price = self.client.round_price(symbol, stop_price)
-
-                        use_tp_entry = bool(params.get('USE_TAKE_PROFIT', False))
-                        tp_atr_mult_entry = float(
-                            params.get('TAKE_PROFIT_ATR_MULT_FUTURES', params.get('TAKE_PROFIT_ATR_MULT', 3.0))
-                        )
-                        entry_atr = float(max(0.0, atr))
-                        tp_price = 0.0
-                        if use_tp_entry and entry_atr > 0:
-                            tp_price = self.client.round_price(
-                                symbol,
-                                confirmed_entry_price - (entry_atr * tp_atr_mult_entry),
-                            )
-
-                        sl_result = self._place_stop_loss_safe(symbol, 'buy', filled_qty, stop_price)
-                        sl_active = bool(sl_result)
-                        if not sl_active:
-                            logger.error(f"❌ [{symbol}] SHORT entry SL placement failed. Trying immediate restore.")
-                            sl_active = bool(
-                                self._restore_stop_loss(
-                                    symbol=symbol,
-                                    amount=confirmed_amount,
-                                    entry_price=confirmed_entry_price,
-                                    current_price=current_price,
-                                    params=params,
-                                    atr=atr,
-                                )
-                            )
-
-                        self.trade_db.record_trade(
-                            symbol=symbol,
-                            side='SHORT',
-                            action='ENTRY',
-                            quantity=filled_qty,
-                            price=confirmed_entry_price,
-                            reason=f"Trend(↓) & Breakout(<{entry_lower:.2f})",
-                            params={'timeframe': execution_tf, 'atr': atr, 'sl': stop_price, 'sl_active': sl_active}
-                        )
-
-                        self.state_manager.update_symbol_state(symbol, {
-                            'entry_time': datetime.utcfromtimestamp(target_entry_open_ts / 1000.0).isoformat(),
-                            'entry_fill_time': datetime.utcnow().isoformat(),
-                            'entry_price': confirmed_entry_price,
-                            'entry_atr': entry_atr,
-                            'side': 'SHORT',
-                            'sl_required': (not sl_active),
-                            'last_sl_order_time': datetime.utcnow().isoformat() if sl_active else None,
-                            'active_stop_price': float(stop_price),
-                            'tp_price': float(tp_price),
-                            'pos_atr': entry_atr,
-                            'highest_price': float(confirmed_entry_price),
-                            'lowest_price': float(confirmed_entry_price),
-                            'last_processed_candle_ts': 0,
-                            'last_entry_signal_candle_ts': int(signal_candle_ts),
-                            'last_entry_attempt_signal_candle_ts': int(signal_candle_ts),
-                            'entry_attempt_count_for_signal': int(next_attempt_count),
-                            'entry_target_open_ts': int(target_entry_open_ts),
-                            'entry_exec_lag_sec': float(entry_lag_sec),
-                            'entry_market_fallback_used': bool(entry_allow_market_fallback),
-                            'recovery_mode': False,
-                            'last_exit_fallback_eval_ms': 0,
-                        })
+                    if should_abort:
+                        return
                 
                 else:
                     # Skip Reason Logging
@@ -1833,6 +1896,148 @@ class RealTraderFutures:
             return True
         
         return False
+
+    def _recover_pending_exit(
+        self,
+        symbol: str,
+        amount: float,
+        current_price: float,
+        params: dict,
+        pos: dict,
+        state: Optional[dict] = None,
+    ) -> bool:
+        """
+        Exit recovery state machine.
+        When exit_pending is set, force reduce-only close with highest priority.
+        """
+        state = state or self.state_manager.get_symbol_state(symbol)
+        if not state or not bool(state.get('exit_pending', False)):
+            return False
+
+        if abs(float(amount)) <= 0:
+            self.state_manager.clear_symbol_state(symbol)
+            return True
+
+        now = datetime.utcnow()
+        retry_cooldown = float(params.get('EXIT_RECOVERY_RETRY_COOLDOWN_SECONDS', 2.0))
+        retry_cooldown = max(0.5, min(30.0, retry_cooldown))
+        last_attempt_at = str(state.get('exit_attempt_at') or "")
+        if last_attempt_at:
+            try:
+                elapsed = (now - datetime.fromisoformat(last_attempt_at)).total_seconds()
+                if elapsed < retry_cooldown:
+                    return False
+            except Exception:
+                pass
+
+        side_str = "LONG" if amount > 0 else "SHORT"
+        order_side = 'sell' if amount > 0 else 'buy'
+        exit_qty = self.client.round_amount(symbol, abs(amount))
+        if exit_qty <= 0:
+            exit_qty = abs(amount)
+        if exit_qty <= 0:
+            logger.error(f"❌ [{symbol}] Exit recovery failed: invalid qty={exit_qty}")
+            return False
+
+        recovery_attempts = int(state.get('exit_recovery_attempt_count', 0) or 0) + 1
+        reason = str(state.get('exit_reason') or 'Pending Exit Recovery')
+        self.state_manager.update_symbol_state(symbol, {
+            'exit_pending': True,
+            'exit_attempt_at': now.isoformat(),
+            'exit_requested_qty': float(abs(amount)),
+            'exit_recovery_attempt_count': int(recovery_attempts),
+            'exit_error': None,
+        })
+        self._log_throttled(
+            level="warning",
+            key=f"{symbol}:exit-recovery",
+            message=(
+                f"⚠️ [{symbol}] exit_pending recovery attempt #{recovery_attempts} "
+                f"(side={side_str}, qty={exit_qty:.8f})"
+            ),
+            interval_seconds=10.0,
+            emit_on_change=True,
+        )
+
+        try:
+            self._cancel_all_orders_safe(symbol)
+        except Exception as e:
+            logger.warning(f"⚠️ [{symbol}] Exit recovery pre-cancel failed: {e}")
+
+        order_result = self._place_order_safe(
+            symbol=symbol,
+            side=order_side,
+            qty=exit_qty,
+            atr=None,
+            current_price=current_price,
+            reduce_only=True,
+            allow_market_fallback=True,
+        )
+        if not order_result:
+            self.state_manager.update_symbol_state(symbol, {
+                'exit_error': "recovery_order_submit_failed_or_unknown",
+                'exit_attempt_at': datetime.utcnow().isoformat(),
+            })
+
+        timeout_seconds = float(params.get('EXIT_RECOVERY_TIMEOUT_SECONDS', 8.0))
+        timeout_seconds = max(3.0, min(20.0, timeout_seconds))
+        is_flat, remaining_amount = self._wait_until_position_flat(
+            symbol,
+            timeout_seconds=timeout_seconds,
+            poll_seconds=0.3,
+        )
+        if not is_flat:
+            self.state_manager.update_symbol_state(symbol, {
+                'exit_pending': True,
+                'exit_error': f"not_flat_after_recovery_attempt:{remaining_amount:+.8f}",
+                'exit_remaining_amount': float(remaining_amount),
+                'exit_attempt_at': datetime.utcnow().isoformat(),
+            })
+            logger.error(
+                f"❌ [{symbol}] Exit recovery failed. Remaining position: {remaining_amount:+.8f}"
+            )
+            return False
+
+        try:
+            self._cancel_all_orders_safe(symbol)
+        except Exception as cancel_err:
+            logger.warning(f"[{symbol}] Post-recovery cancel_all_orders failed: {cancel_err}")
+
+        entry_price = float(
+            state.get('entry_price', 0.0)
+            or pos.get('entryPrice', 0.0)
+            or 0.0
+        )
+        exit_price = float(current_price)
+        pnl = None
+        pnl_pct = None
+        if entry_price > 0 and exit_price > 0:
+            pnl = (
+                (exit_price - entry_price) * abs(amount)
+                if amount > 0 else
+                (entry_price - exit_price) * abs(amount)
+            )
+            pnl_pct = (
+                ((exit_price / entry_price) - 1) * 100
+                if amount > 0 else
+                ((entry_price / exit_price) - 1) * 100
+            )
+
+        self.trade_db.record_trade(
+            symbol=symbol,
+            side=side_str,
+            action='EXIT',
+            quantity=abs(amount),
+            price=exit_price,
+            entry_price=(entry_price if entry_price > 0 else None),
+            pnl=pnl,
+            pnl_pct=pnl_pct,
+            reason=f"Exit Recovery: {reason}",
+            params={'recovery_attempt_count': int(recovery_attempts)},
+        )
+        self.state_manager.clear_symbol_state(symbol)
+        logger.info(f"✅ [{symbol}] Exit recovery completed. Position closed.")
+        return True
 
     def _check_exit(
         self,
