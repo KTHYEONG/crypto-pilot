@@ -159,6 +159,7 @@ class BacktestEngineFast:
         max_holding_bars = self.strategy.params.get('MAX_HOLDING_BARS', 999999)  # Default: No limit
         trailing_activation_atr = self.strategy.params.get('TRAILING_ACTIVATION_ATR', 0.0)  # Default: Immediate activation
         time_exit_profit_threshold = self.strategy.params.get('TIME_EXIT_PROFIT_THRESHOLD', 0.5)  # Default: 0.5 ATR profit required to hold
+        enable_trend_exit = self.strategy.params.get('ENABLE_TREND_EXIT', True)
         
         # [WARMUP OPTIMIZATION] Calculate required warmup based on strategy indicators
         # Strategy analyzes its own parameters to determine minimum stable period
@@ -221,6 +222,7 @@ class BacktestEngineFast:
             use_take_profit, tp_atr_mult,
             timestamps, FUNDING_FEE_RATE, FUNDING_INTERVAL_HOURS,
             max_holding_bars, trailing_activation_atr, time_exit_profit_threshold,
+            enable_trend_exit,
             rsi_exit_threshold,
             use_dynamic_risk, strong_regime_hurst, strong_regime_natr, strong_regime_multiplier,
             weak_regime_hurst, weak_regime_multiplier,
@@ -386,6 +388,7 @@ def backtest_loop_numba(
     use_take_profit, tp_atr_mult,
     timestamps, funding_fee_rate, funding_interval_hours,
     max_holding_bars, trailing_activation_atr, time_exit_profit_threshold,
+    enable_trend_exit,
     rsi_exit_threshold, # [NEW]
     use_dynamic_risk, strong_regime_hurst, strong_regime_natr, strong_regime_multiplier,
     weak_regime_hurst, weak_regime_multiplier,
@@ -615,14 +618,23 @@ def backtest_loop_numba(
                          exit_price = c_open * (1 + slippage_rate)
                          exit_triggered = True
                 
-                # Trend Reversal
-                if not exit_triggered:
+                # Trend Reversal (optional to avoid over-filtered early exits)
+                if not exit_triggered and enable_trend_exit:
+                    unrealized_atr = 0.0
+                    if pos_atr > 0:
+                        if pos_side == 1:
+                            unrealized_atr = (c_price - entry_price) / pos_atr
+                        else:
+                            unrealized_atr = (entry_price - c_price) / pos_atr
                     if pos_side == 1 and trend_dir[i] == -1:
-                        exit_price = c_open * (1 - slippage_rate)
-                        exit_triggered = True
+                        # Ignore reversal exits on strong trend winners.
+                        if unrealized_atr < 1.0:
+                            exit_price = c_open * (1 - slippage_rate)
+                            exit_triggered = True
                     elif pos_side == -1 and trend_dir[i] == 1:
-                        exit_price = c_open * (1 + slippage_rate)
-                        exit_triggered = True
+                        if unrealized_atr < 1.0:
+                            exit_price = c_open * (1 + slippage_rate)
+                            exit_triggered = True
 
             if exit_triggered:
                 # PnL Calc with Slippage
