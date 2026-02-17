@@ -222,7 +222,9 @@ def GET_SEARCH_SPACE(mode, market_type='futures'):
         # [Futures] Baseline for small-cap realism:
         # keep enough upside, but avoid immediate account volatility explosion.
         space['RISK_PER_TRADE'] = {'type': 'float', 'low': 0.012, 'high': 0.05, 'step': 0.001}
-        space['LEVERAGE'] = {'type': 'float', 'low': 1.0, 'high': 8.0, 'step': 1.0}
+        # Leverage resolution upgrade:
+        # search in finer half-step granularity and cover full exchange-safe range.
+        space['LEVERAGE'] = {'type': 'float', 'low': 1.0, 'high': 10.0, 'step': 0.5}
         
         # [UNIFIED-FUTURES] Small-cap production profile (about 0.8M KRW account)
         if mode == 'UNIFIED' or mode == 'ALL':
@@ -238,7 +240,7 @@ def GET_SEARCH_SPACE(mode, market_type='futures'):
 
             # Risk / leverage: keep return potential but control drawdown speed.
             space['RISK_PER_TRADE'] = {'type': 'float', 'low': 0.012, 'high': 0.035, 'step': 0.001}
-            space['LEVERAGE'] = {'type': 'float', 'low': 2.0, 'high': 6.0, 'step': 1.0}
+            space['LEVERAGE'] = {'type': 'float', 'low': 1.0, 'high': 10.0, 'step': 0.5}
 
             # Core execution bounds
             space['ENTRY_PERIOD'] = {'type': 'int', 'low': 12, 'high': 140, 'log': True}
