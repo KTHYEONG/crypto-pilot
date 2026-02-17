@@ -16,6 +16,10 @@ class StrategyBase(ABC):
     def generate_signals(self, df: pd.DataFrame) -> pd.DataFrame:
         raise NotImplementedError
 
+    def get_required_warmup(self) -> int:
+        """Calculate required warmup bars based on strategy parameters."""
+        return calculate_required_warmup_bars(self.params)
+
 
 def calculate_required_warmup_bars(
     params: dict[str, Any],
