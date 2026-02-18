@@ -1,6 +1,9 @@
 # data
 data/
 
+# cursor
+.cursor/
+
 # legacy
 legacy/
 
