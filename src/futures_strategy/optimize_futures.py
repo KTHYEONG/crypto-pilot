@@ -97,17 +97,19 @@ def cached_generate_signals_futures(
     dt_last = daily_df["datetime"].iloc[-1]
     cache_key = (symbol, dt_first, dt_last, p_hash)
 
-    if cache_key in _FUTURES_INDICATOR_CACHE:
+    cache_hit = cache_key in _FUTURES_INDICATOR_CACHE
+    
+    if cache_hit:
         _FUTURES_INDICATOR_CACHE.move_to_end(cache_key)
-        return _FUTURES_INDICATOR_CACHE[cache_key]
+        result = _FUTURES_INDICATOR_CACHE[cache_key]
+    else:
+        result = strategy.generate_signals(daily_df.copy())
+        _FUTURES_INDICATOR_CACHE[cache_key] = result
+        _FUTURES_INDICATOR_CACHE.move_to_end(cache_key)
 
-    result = strategy.generate_signals(daily_df.copy())
-    _FUTURES_INDICATOR_CACHE[cache_key] = result
-    _FUTURES_INDICATOR_CACHE.move_to_end(cache_key)
-
-    if len(_FUTURES_INDICATOR_CACHE) > _MAX_FUTURES_CACHE_SIZE:
-        evicted_key, _ = _FUTURES_INDICATOR_CACHE.popitem(last=False)
-        _logger_cache.debug("futures indicator cache eviction: key=%s size=%d", evicted_key, len(_FUTURES_INDICATOR_CACHE))
+        if len(_FUTURES_INDICATOR_CACHE) > _MAX_FUTURES_CACHE_SIZE:
+            evicted_key, _ = _FUTURES_INDICATOR_CACHE.popitem(last=False)
+            _logger_cache.debug("futures indicator cache eviction: key=%s size=%d", evicted_key, len(_FUTURES_INDICATOR_CACHE))
 
     return result
 
