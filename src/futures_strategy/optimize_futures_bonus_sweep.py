@@ -9,6 +9,7 @@ import re
 import subprocess
 import sys
 import time
+import json
 from typing import Dict, List, Optional, Tuple, Union
 from urllib.parse import quote_plus
 
@@ -113,7 +114,18 @@ def _run_child_with_status(
         if process.stdout is None:
             return 1
 
+        last_line: Optional[str] = None
+        error_lines: List[str] = []
+        all_lines: List[str] = []
+
         for line in process.stdout:
+            stripped = line.rstrip("\n")
+            last_line = stripped
+            all_lines.append(stripped)
+            
+            if any(keyword in stripped for keyword in ["[ERROR]", "Traceback", "Exception", "Error:", "failed", "Failed"]):
+                error_lines.append(stripped)
+            
             if "[STATUS]" in line:
                 match = status_pattern.search(line)
                 if match and pbar:
@@ -138,7 +150,34 @@ def _run_child_with_status(
                     pass
                 return 124
 
-        return int(process.wait())
+        code = int(process.wait())
+
+        if code != 0:
+            # region agent log
+            try:
+                log_path = Path("debug-2e3aee.log")
+                payload = {
+                    "sessionId": "2e3aee",
+                    "runId": "pre-fix",
+                    "hypothesisId": "H1",
+                    "location": "optimize_futures_bonus_sweep.py:_run_child_with_status",
+                    "message": "child_exit_nonzero",
+                    "data": {
+                        "stream_prefix": stream_prefix,
+                        "exit_code": code,
+                        "last_line": last_line,
+                        "error_lines": error_lines[-10:] if error_lines else [],
+                        "last_20_lines": all_lines[-20:] if all_lines else [],
+                    },
+                    "timestamp": int(time.time() * 1000),
+                }
+                with log_path.open("a", encoding="utf-8") as f:
+                    f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+            except Exception:
+                pass
+            # endregion
+
+        return code
     except Exception:
         return 1
 
@@ -160,6 +199,29 @@ def run_profile(
     env = build_env(os.environ, env_profile, preload=False)
     attempts = max(1, int(retry_count) + 1)
     stream_prefix = f"{profile_key}:single"
+
+    # region agent log
+    try:
+        log_path = Path("debug-2e3aee.log")
+        payload = {
+            "sessionId": "2e3aee",
+            "runId": "pre-fix",
+            "hypothesisId": "H2",
+            "location": "optimize_futures_bonus_sweep.py:run_profile",
+            "message": "profile_env_snapshot",
+            "data": {
+                "profile_key": profile_key,
+                "db_name": env.get("DB_NAME"),
+                "futures_bonus_profile": env.get("FUTURES_BONUS_PROFILE"),
+                "futures_sweep_child": env.get("FUTURES_SWEEP_CHILD"),
+            },
+            "timestamp": int(time.time() * 1000),
+        }
+        with log_path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+    # endregion
 
     for attempt in range(1, attempts + 1):
         code = _run_child_with_status(
