@@ -1,4 +1,8 @@
 
+from __future__ import annotations
+
+from typing import Optional
+
 import pandas as pd
 import numpy as np
 import logging
@@ -9,14 +13,23 @@ class BacktestEngineFast:
     """
     Numba-accelerated Backtest Engine (5-10x faster)
     """
-    def __init__(self, hourly_df, daily_df, strategy, initial_balance=1_000_000, merge_index_map=None):
+    def __init__(
+        self,
+        hourly_df: pd.DataFrame,
+        daily_df: pd.DataFrame,
+        strategy,
+        initial_balance: float = 1_000_000,
+        merge_index_map=None,
+        precomputed_daily_df: Optional[pd.DataFrame] = None,
+    ):
         # [MEMORY] Use shallow copy to prevent contaminating usage across trials
         self.hourly_df = hourly_df.copy(deep=False)
         self.daily_df = daily_df.copy(deep=False)
         self.strategy = strategy
         self.initial_balance = initial_balance
         self.balance = initial_balance
-        
+        self._precomputed_daily_df = precomputed_daily_df
+
         # injected by optimization script
         self.leverage = 1
         self.risk_per_trade = 0.02
@@ -47,8 +60,11 @@ class BacktestEngineFast:
         [FAST PATH] Use pre-computed merge index to avoid pd.merge overhead.
         This is 10-50x faster than pd.merge for large datasets.
         """
-        # Apply Strategy Indicators (Calculates Daily Indicators)
-        self.daily_df = self.strategy.generate_signals(self.daily_df)
+        # Use pre-computed signals if available (cache hit path), otherwise compute
+        if self._precomputed_daily_df is not None:
+            self.daily_df = self._precomputed_daily_df
+        else:
+            self.daily_df = self.strategy.generate_signals(self.daily_df)
         
         # Filter essential columns only
         exclude_cols = {'date_key', 'datetime', 'date', 'open', 'high', 'low', 'close', 'volume'}
@@ -77,8 +93,11 @@ class BacktestEngineFast:
         if 'date_key' not in self.daily_df.columns:
              self.daily_df['date_key'] = pd.to_datetime(self.daily_df['datetime']).dt.strftime('%Y-%m-%d')
         
-        # Apply Strategy Indicators
-        self.daily_df = self.strategy.generate_signals(self.daily_df)
+        # Use pre-computed signals if available (cache hit path), otherwise compute
+        if self._precomputed_daily_df is not None:
+            self.daily_df = self._precomputed_daily_df
+        else:
+            self.daily_df = self.strategy.generate_signals(self.daily_df)
         
         # Filter essential columns
         exclude_cols = {'date_key', 'datetime', 'date', 'open', 'high', 'low', 'close', 'volume'}

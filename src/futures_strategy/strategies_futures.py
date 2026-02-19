@@ -8,13 +8,16 @@ from src.strategy.base import (
 
 from .indicators_advanced_futures import (
     calculate_adx,
+    calculate_aroon,
     calculate_atr,
     calculate_bollinger_bands,
     calculate_cci,
     calculate_cmf,
     calculate_dema,
+    calculate_dmi,
     calculate_efficiency_ratio,
     calculate_ema,
+    calculate_force_index,
     calculate_garman_klass_vol,
     calculate_hma,
     calculate_hurst_exponent,
@@ -23,6 +26,7 @@ from .indicators_advanced_futures import (
     calculate_macd,
     calculate_mfi,
     calculate_natr,
+    calculate_obv,
     calculate_parabolic_sar,
     calculate_rsi,
     calculate_sma,
@@ -32,6 +36,7 @@ from .indicators_advanced_futures import (
     calculate_tema,
     calculate_vhf,
     calculate_vwap,
+    calculate_williams_r,
 )
 
 
@@ -69,6 +74,11 @@ _FUTURES_INDICATORS = SimpleNamespace(
     calculate_efficiency_ratio=calculate_efficiency_ratio,
     calculate_natr=calculate_natr,
     calculate_garman_klass_vol=calculate_garman_klass_vol,
+    calculate_dmi=calculate_dmi,
+    calculate_aroon=calculate_aroon,
+    calculate_force_index=calculate_force_index,
+    calculate_williams_r=calculate_williams_r,
+    calculate_obv=calculate_obv,
 )
 
 
