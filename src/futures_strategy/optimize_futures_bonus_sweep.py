@@ -1,5 +1,8 @@
+from __future__ import annotations
+
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import logging
 import os
 from pathlib import Path
 import re
@@ -7,8 +10,11 @@ import subprocess
 import sys
 import time
 from typing import Dict, List, Optional, Tuple, Union
+from urllib.parse import quote_plus
 
 from tqdm import tqdm
+
+_logger = logging.getLogger(__name__)
 
 
 PROFILE_PRESETS = {
@@ -84,22 +90,11 @@ def _run_child_with_status(
     env: Dict[str, str],
     timeout_sec: int,
     pbar: Optional[tqdm] = None,
-    log_file: Optional[str] = None,
     stream_prefix: str = "",
 ) -> int:
     start_ts = time.time()
-    log_f = None
-    if log_file:
-        try:
-            log_f = open(log_file, "a", encoding="utf-8")
-        except Exception:
-            log_f = None
 
     try:
-        if log_f:
-            log_f.write(f"\n[{stream_prefix}] START: {' '.join(cmd)}\n")
-            log_f.flush()
-
         process = subprocess.Popen(
             cmd,
             env=env,
@@ -116,15 +111,9 @@ def _run_child_with_status(
             pbar.set_description(f"[{stream_prefix}] Starting...")
 
         if process.stdout is None:
-            if log_f:
-                log_f.write(f"\n[{stream_prefix}] ERROR: child stdout is None\n")
             return 1
 
         for line in process.stdout:
-            if log_f:
-                log_f.write(line)
-                log_f.flush()
-
             if "[STATUS]" in line:
                 match = status_pattern.search(line)
                 if match and pbar:
@@ -147,21 +136,11 @@ def _run_child_with_status(
                     process.wait(timeout=5)
                 except Exception:
                     pass
-                if log_f:
-                    log_f.write(f"\n[{stream_prefix}] KILLED (timeout)\n")
                 return 124
 
-        code = int(process.wait())
-        if log_f:
-            log_f.write(f"\n[{stream_prefix}] FINISHED (code={code})\n")
-        return code
-    except Exception as e:
-        if log_f:
-            log_f.write(f"\n[{stream_prefix}] EXCEPTION: {e}\n")
+        return int(process.wait())
+    except Exception:
         return 1
-    finally:
-        if log_f:
-            log_f.close()
 
 
 def run_profile(
@@ -173,7 +152,6 @@ def run_profile(
     retry_backoff_sec: float,
     timeout_sec: int,
     pbar: Optional[tqdm] = None,
-    log_file: Optional[str] = None,
 ) -> int:
     optimize_script = Path(__file__).resolve().with_name("optimize_futures.py")
     base_cmd = [sys.executable, str(optimize_script)] + _with_child_jobs(forwarded_args, child_jobs)
@@ -189,7 +167,6 @@ def run_profile(
             env=env,
             timeout_sec=int(timeout_sec),
             pbar=pbar,
-            log_file=log_file,
             stream_prefix=stream_prefix,
         )
         if code == 0:
@@ -203,9 +180,6 @@ def run_profile(
             )
             if pbar:
                 pbar.write(msg)
-            if log_file:
-                with open(log_file, "a", encoding="utf-8") as f:
-                    f.write(f"\n{msg}\n")
             time.sleep(wait_s)
             continue
         return code
@@ -233,6 +207,71 @@ def run_preload(
     print(f"[PRELOAD] RUN: {' '.join(cmd)}")
     print("=" * 72)
     return int(subprocess.run(cmd, env=env).returncode)
+
+
+def _run_pre_sweep_cleanup(
+    run_list: List[Tuple[str, Profile]],
+    study_suffix: str = "futures_unified_strategy",
+) -> None:
+    """Connect to each profile DB and remove orphan studies + reclaim InnoDB space.
+
+    Requires ``DB_USER``, ``DB_PASS``, ``DB_HOST``, ``DB_PORT`` env vars (loaded from .env).
+    Skips silently if credentials are missing.
+    """
+    try:
+        from dotenv import load_dotenv  # noqa: PLC0415
+        load_dotenv()
+    except ImportError:
+        pass
+
+    db_user = os.getenv("DB_USER")
+    db_pass = os.getenv("DB_PASS")
+    db_host = os.getenv("DB_HOST", "localhost")
+    db_port = os.getenv("DB_PORT", "3306")
+
+    if not all([db_user, db_pass]):
+        _logger.warning("[CLEANUP] Missing DB credentials — skipping pre-sweep cleanup")
+        return
+
+    try:
+        import optuna  # noqa: PLC0415
+
+        project_root = str(Path(__file__).resolve().parents[2])
+        if project_root not in sys.path:
+            sys.path.insert(0, project_root)
+        from src.optimization.opt_utils import (  # noqa: PLC0415
+            cleanup_orphan_studies,
+            get_db_size_mb,
+            reclaim_mysql_space,
+        )
+    except Exception as exc:
+        _logger.warning("[CLEANUP] Import failed — skipping pre-sweep cleanup: %s", exc)
+        return
+
+    print("\n" + "=" * 72)
+    print("[PRE-SWEEP CLEANUP] Removing orphan studies and reclaiming InnoDB space...")
+    print("=" * 72)
+
+    for key, profile in run_list:
+        db_name = str(profile["db_name"])
+        storage_url = f"mysql+pymysql://{db_user}:{quote_plus(str(db_pass))}@{db_host}:{db_port}/{db_name}"
+        try:
+            storage = optuna.storages.RDBStorage(url=storage_url, engine_kwargs={"pool_pre_ping": True})
+        except Exception as exc:
+            _logger.warning("[CLEANUP] %s: cannot connect to %s: %s", key, db_name, exc)
+            continue
+
+        size_before = get_db_size_mb(storage_url, db_name)
+        print(f"[CLEANUP] {key}: {db_name} ({size_before:.2f} MB)")
+
+        orphan_keep = int(os.getenv("OPTUNA_ORPHAN_KEEP_RECENT", "0"))
+        cleanup_orphan_studies(storage, study_suffix, "__", keep_recent=orphan_keep)
+
+        reclaim_mysql_space(storage_url)
+        size_after = get_db_size_mb(storage_url, db_name)
+        print(f"[CLEANUP] {key}: {db_name} → {size_after:.2f} MB (freed ~{max(0.0, size_before - size_after):.2f} MB)")
+
+    print("=" * 72 + "\n")
 
 
 def main() -> int:
@@ -291,6 +330,16 @@ def main() -> int:
         default=0,
         help="Timeout seconds per profile child process (default: 0=disabled)",
     )
+    parser.add_argument(
+        "--cleanup-db",
+        dest="cleanup_db",
+        action="store_true",
+        default=False,
+        help=(
+            "Run pre-sweep DB maintenance: delete orphan studies and OPTIMIZE TABLE "
+            "on each profile DB before starting optimization (default: disabled)."
+        ),
+    )
     parser.set_defaults(skip_preload=False)
     args, forwarded_args = parser.parse_known_args()
 
@@ -306,13 +355,11 @@ def main() -> int:
         return 2
 
     max_concurrent = max(1, min(args.max_concurrent, len(run_list)))
-    
-    # Setup logs dir
-    logs_dir = Path("logs")
-    logs_dir.mkdir(exist_ok=True)
+
+    if args.cleanup_db:
+        _run_pre_sweep_cleanup(run_list, study_suffix="futures_unified_strategy")
 
     print(f"Starting sweep for profiles: {', '.join(k for k, _ in run_list)}")
-    print(f"Logs will be written to: {logs_dir.absolute()}")
     print("-" * 60)
 
     summary_map: Dict[str, int] = {}
@@ -332,7 +379,6 @@ def main() -> int:
     with ThreadPoolExecutor(max_workers=max_concurrent) as pool:
         futures = {}
         for key, profile in run_list:
-            log_file = logs_dir / f"sweep_{key.lower()}.log"
             fut = pool.submit(
                 run_profile,
                 key,
@@ -343,7 +389,6 @@ def main() -> int:
                 args.retry_backoff_sec,
                 args.profile_timeout_sec,
                 pbars[key],
-                str(log_file),
             )
             futures[fut] = (key, profile)
 

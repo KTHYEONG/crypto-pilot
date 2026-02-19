@@ -1,4 +1,6 @@
-﻿import argparse
+from __future__ import annotations
+
+import argparse
 import pandas as pd
 import os
 import sys
@@ -6,11 +8,13 @@ import optuna
 import logging
 import sqlite3
 import numpy as np
+from collections import OrderedDict
 from pathlib import Path
 import threading
 import time
 import re
-from typing import Dict, List, Optional, Sequence, Tuple
+from collections import OrderedDict
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 # Project Root Setup
 try:
@@ -21,9 +25,9 @@ except IndexError:
     sys.path.append(os.getcwd())
 
 from config.settings import (
-    BACKTEST_START_DATE,
-    BACKTEST_END_DATE,
-    TRAIN_CUTOFF_DATE,
+    FUTURES_BACKTEST_START_DATE,
+    FUTURES_BACKTEST_END_DATE,
+    FUTURES_TRAIN_CUTOFF_DATE,
     FUTURES_INITIAL_BALANCE,
 )
 from config.optimization_config_modes import GET_SEARCH_SPACE, BASE_SEARCH_SPACE
@@ -33,7 +37,80 @@ from src.futures_strategy.engine_fast_futures import (
     BacktestEngineFast,
     backtest_loop_numba,
 )
-from src.optimization.opt_utils import suggest_params, calculate_score, OBJECTIVE_CFG, soft_sigmoid
+from src.optimization.opt_utils import (
+    calculate_score,
+    cleanup_orphan_studies,
+    get_db_size_mb,
+    reclaim_mysql_space,
+    suggest_params,
+    OBJECTIVE_CFG,
+    soft_sigmoid,
+)
+
+# ---------------------------------------------------------------------------
+# Indicator signal cache: avoids recomputing generate_signals() for same
+# data-range + indicator params.  OrderedDict preserves insertion order for
+# O(1) LRU eviction.  Capacity tunable via FUTURES_INDICATOR_CACHE_SIZE env.
+# ---------------------------------------------------------------------------
+_MAX_FUTURES_CACHE_SIZE: int = max(1, int(os.getenv("FUTURES_INDICATOR_CACHE_SIZE", "512")))
+_FUTURES_INDICATOR_CACHE: OrderedDict[tuple, pd.DataFrame] = OrderedDict()
+
+_logger_cache: logging.Logger = logging.getLogger(__name__ + ".cache")
+_logger: logging.Logger = logging.getLogger(__name__)
+
+# All params consumed by UltimateStrategyBase.generate_signals()
+_FUTURES_INDICATOR_KEYS: frozenset[str] = frozenset({
+    "ATR_PERIOD", "STRENGTH_FILTER_PERIOD", "HURST_PERIOD",
+    "ENTRY_TYPE", "ENTRY_PERIOD", "BB_STD", "KELTNER_ATR_MULT", "CCI_THRESHOLD",
+    "TREND_FILTER_TYPE", "MA_PERIOD", "MACD_FAST", "MACD_SLOW", "MACD_SIGNAL",
+    "SUPERTREND_PERIOD", "SUPERTREND_MULT", "VHF_PERIOD", "ER_PERIOD",
+    "ICHIMOKU_TENKAN", "ICHIMOKU_KIJUN", "ICHIMOKU_SENKOU_B",
+    "SAR_STEP", "SAR_MAX", "EXIT_TYPE",
+    "USE_VOLUME_FILTER", "VOLUME_MA_PERIOD",
+    "STRENGTH_FILTER_TYPE",
+    "ADX_THRESHOLD", "VHF_THRESHOLD", "MFI_THRESHOLD",
+    "RSI_OVERBOUGHT", "RSI_OVERSOLD", "RSI_ENTRY_MAX",
+    "STOCH_OVERBOUGHT", "STOCH_OVERSOLD",
+    "STOCH_RSI_OVERBOUGHT", "STOCH_RSI_OVERSOLD",
+    "CMF_PERIOD", "CMF_THRESHOLD",
+    "HURST_RANDOM_THRESHOLD", "HURST_TREND_THRESHOLD",
+    "ER_THRESHOLD", "NATR_THRESHOLD", "VWAP_STD_MULT",
+})
+
+
+def _get_futures_signal_params_hash(params: Dict[str, Any]) -> int:
+    sig_params = {k: params[k] for k in _FUTURES_INDICATOR_KEYS if k in params}
+    return hash(frozenset(sig_params.items()))
+
+
+def cached_generate_signals_futures(
+    strategy: UltimateStrategy,
+    daily_df: pd.DataFrame,
+    symbol: str,
+) -> pd.DataFrame:
+    """Compute generate_signals() with LRU-eviction caching keyed by data range + params."""
+    if daily_df is None or daily_df.empty:
+        return daily_df
+
+    p_hash = _get_futures_signal_params_hash(strategy.params)
+    dt_first = daily_df["datetime"].iloc[0]
+    dt_last = daily_df["datetime"].iloc[-1]
+    cache_key = (symbol, dt_first, dt_last, p_hash)
+
+    if cache_key in _FUTURES_INDICATOR_CACHE:
+        _FUTURES_INDICATOR_CACHE.move_to_end(cache_key)
+        return _FUTURES_INDICATOR_CACHE[cache_key]
+
+    result = strategy.generate_signals(daily_df.copy())
+    _FUTURES_INDICATOR_CACHE[cache_key] = result
+    _FUTURES_INDICATOR_CACHE.move_to_end(cache_key)
+
+    if len(_FUTURES_INDICATOR_CACHE) > _MAX_FUTURES_CACHE_SIZE:
+        evicted_key, _ = _FUTURES_INDICATOR_CACHE.popitem(last=False)
+        _logger_cache.debug("futures indicator cache eviction: key=%s size=%d", evicted_key, len(_FUTURES_INDICATOR_CACHE))
+
+    return result
+
 
 # Shared constants
 DAILY_BUFFER_DAYS = 200
@@ -106,9 +183,17 @@ TWO_STAGE_UNIFIED_DEFAULTS = {
         {"name": "mid", "ratio": 0.30, "symbols": 2, "data_ratio": 0.70, "folds": 3, "min_trades": 25, "startup_ratio": 0.28},
         {"name": "high", "ratio": 0.15, "symbols": 2, "data_ratio": 1.00, "folds": 3, "min_trades": 30, "startup_ratio": 0.22},
     ],
+    "stage1_use_hyperband": True,
+    "stage1_hyperband_n_trials": 1200,  # ~10+ samples per (TREND, STRENGTH) over 117 pairs; sweet spot vs 1500
+    "stage1_hyperband_rungs": [
+        {"data_ratio": 0.45, "symbols": 1, "folds": 2, "min_trades": 20},
+        {"data_ratio": 0.70, "symbols": 2, "folds": 3, "min_trades": 25},
+        {"data_ratio": 1.00, "symbols": 2, "folds": 3, "min_trades": 30},
+    ],
+    "stage1_hyperband_reduction_factor": 2,
     "promotion_ratio": 0.35,
     "stage2_top_structures": 6,
-    "stage2_trials_per_structure": 140,
+    "stage2_trials_per_structure": 200,  # ~4.4× dims per structure; sweet spot vs 140
     "stage2_folds": 3,
     "stage2_min_trades": 20,
     "stage2_startup_ratio": 0.18,
@@ -504,6 +589,35 @@ def subset_data_maps(base_data_maps, ordered_symbols, n_symbols, data_ratio):
     return subset
 
 
+def build_rung_artifacts(
+    data_maps: Dict[str, Dict[str, pd.DataFrame]],
+    symbols: List[str],
+    timeframes: Sequence[str],
+    rung_configs: List[Dict[str, Any]],
+) -> List[Tuple[Dict[str, Dict[str, pd.DataFrame]], Dict[str, Dict[str, np.ndarray]], Dict[str, Any]]]:
+    """
+    Precompute per-rung data subset, merge indices, and AWFO plan+cache for Hyperband/ASHA Stage1.
+    """
+    out: List[Tuple[Dict, Dict, Dict]] = []
+    for config in rung_configs:
+        step_data = subset_data_maps(
+            data_maps,
+            symbols,
+            n_symbols=config["symbols"],
+            data_ratio=config["data_ratio"],
+        )
+        step_merge_indices = compute_merge_indices(step_data)
+        step_awfo = build_awfo_plan(
+            step_data,
+            timeframes,
+            folds=config["folds"],
+            min_trades=config["min_trades"],
+        )
+        step_awfo["cache"] = build_awfo_runtime_cache(step_data, timeframes, step_awfo)
+        out.append((step_data, step_merge_indices, step_awfo))
+    return out
+
+
 def build_stage1_search_space(full_search_space):
     """
     Stage-1 only explores structural/categorical choices.
@@ -662,6 +776,7 @@ def run_seeded_studies(
     startup_ratio: float,
     objective_fn,
     seeds: Sequence[int],
+    pruner: Optional[optuna.pruners.BasePruner] = None,
 ) -> List[Tuple[int, int, optuna.study.Study, int]]:
     """
     Run multiple studies with different TPE seeds and return (seed, trials, study, startup).
@@ -687,6 +802,7 @@ def run_seeded_studies(
             startup_ratio=startup_ratio,
             objective_fn=objective_fn,
             seed=seed,
+            pruner=pruner,
         )
         seed_runs.append((seed, seed_trials, study, startup))
     return seed_runs
@@ -768,56 +884,35 @@ def compute_merge_indices(data_maps):
     return merge_indices
 
 
-
-
-
-
-
-
-
-def objective(
-    trial,
-    strategy_cls,
-    strategy_name,
-    data_maps,
-    search_space,
-    merge_indices=None,
-    awfo_plan=None,
-):
+def evaluate_one_fidelity(
+    params: Dict[str, Any],
+    strategy_cls: type,
+    strategy_name: str,
+    data_maps: Dict[str, Dict[str, pd.DataFrame]],
+    merge_indices: Optional[Dict[str, Dict[str, np.ndarray]]],
+    awfo_plan: Optional[Dict[str, Any]],
+) -> Tuple[float, Dict[str, Any], Dict[str, Any]]:
     """
-    Multi-symbol objective function.
-
-    Args:
-        merge_indices: Pre-computed merge index mappings for full-run path.
-        awfo_plan: Dict containing AWFO settings and pre-built splits.
+    Single-fidelity evaluation: run backtest and scoring for fixed params.
+    No trial; returns (final_score, symbol_results, end_user_attrs).
     """
-    # 1. Generate Params
-    full_params = suggest_params(trial, search_space)
-
-    # [VALIDATION] Enforce Logical Constraints
-    if full_params.get("TREND_FILTER_TYPE") == "MACD":
-        if full_params.get("MACD_FAST", 12) >= full_params.get("MACD_SLOW", 26):
-            return -10000
-
-    selected_tf = full_params.get("TIMEFRAME", "1h")
+    selected_tf = params.get("TIMEFRAME", "1h")
     mode_str = strategy_name.split("_")[-1]
 
     awfo_enabled = bool(awfo_plan and awfo_plan.get("enabled", False))
-    awfo_splits_by_symbol = awfo_plan.get("splits", {}) if awfo_enabled else {}
-    awfo_cache_by_symbol = awfo_plan.get("cache", {}) if awfo_enabled else {}
+    awfo_splits_by_symbol = awfo_plan.get("splits", {}) if awfo_plan else {}
+    awfo_cache_by_symbol = awfo_plan.get("cache", {}) if awfo_plan else {}
     awfo_min_trades = (
         awfo_plan.get("min_trades_per_fold", AWFO_DEFAULTS["min_trades_per_fold"])
-        if awfo_enabled
+        if awfo_enabled and awfo_plan
         else None
     )
 
-    symbol_scores = []
-    symbol_results = {}
-    report_step = 0
+    symbol_scores: List[float] = []
+    symbol_results: Dict[str, Any] = {}
 
-    def append_symbol_fallback(sym, reason):
-        # Keep trial alive with a conservative finite score instead of global collapse.
-        print(f"[WARN] Symbol fallback applied: {sym} ({reason})")
+    def append_symbol_fallback(sym: str, reason: str) -> None:
+        _logger.warning("Symbol fallback applied: %s (%s)", sym, reason)
         symbol_scores.append(-180.0)
         symbol_results[sym] = {
             "return": -20.0,
@@ -830,32 +925,25 @@ def objective(
     for symbol, data_map in data_maps.items():
         if selected_tf not in data_map:
             append_symbol_fallback(symbol, f"missing timeframe={selected_tf}")
-            trial.set_user_attr(f"ret_{symbol.replace('/', '_')}", float(symbol_results[symbol]["return"]))
-            trial.set_user_attr(f"mdd_{symbol.replace('/', '_')}", float(symbol_results[symbol]["mdd"]))
-            trial.set_user_attr(f"pf_{symbol.replace('/', '_')}", float(symbol_results[symbol]["pf"]))
             continue
 
         hourly_df = data_map[selected_tf]
         daily_df = data_map["1d"]
 
-        # ===== Path A: AWFO (anchored OOS folds) =====
         if awfo_enabled:
             awfo_splits = awfo_splits_by_symbol.get(symbol, {}).get(selected_tf, [])
             awfo_cached_folds = awfo_cache_by_symbol.get(symbol, {}).get(selected_tf, [])
             if len(awfo_splits) < 2 or len(awfo_cached_folds) < 2:
                 append_symbol_fallback(symbol, "insufficient awfo folds")
-                trial.set_user_attr(f"ret_{symbol.replace('/', '_')}", float(symbol_results[symbol]["return"]))
-                trial.set_user_attr(f"mdd_{symbol.replace('/', '_')}", float(symbol_results[symbol]["mdd"]))
-                trial.set_user_attr(f"pf_{symbol.replace('/', '_')}", float(symbol_results[symbol]["pf"]))
                 continue
 
-            fold_scores = []
-            fold_returns = []
-            fold_mdds = []
-            fold_pfs = []
-            fold_calmars = []
-            fold_stress_returns = []
-            fold_trade_counts = []
+            fold_scores: List[float] = []
+            fold_returns: List[float] = []
+            fold_mdds: List[float] = []
+            fold_pfs: List[float] = []
+            fold_calmars: List[float] = []
+            fold_stress_returns: List[float] = []
+            fold_trade_counts: List[int] = []
             long_trades = 0
             short_trades = 0
             invalid_fold_count = 0
@@ -868,21 +956,27 @@ def objective(
                 actual_end_time = fold_ctx["actual_end_time"]
                 fold_score = None
                 try:
-                    strategy = strategy_cls(f"{strategy_name}_{symbol}_F{fold_idx+1}", full_params)
+                    strategy = strategy_cls(f"{strategy_name}_{symbol}_F{fold_idx+1}", params)
+                    precomputed_daily = cached_generate_signals_futures(strategy, segment_daily, symbol)
                     engine = BacktestEngineFast(
                         segment_hourly,
                         segment_daily,
                         strategy,
                         initial_balance=FUTURES_INITIAL_BALANCE,
                         merge_index_map=segment_merge_index,
+                        precomputed_daily_df=precomputed_daily,
                     )
-                    engine.leverage = full_params.get("LEVERAGE", 1)
-                    engine.risk_per_trade = full_params.get("RISK_PER_TRADE", 0.02)
+                    engine.leverage = params.get("LEVERAGE", 1)
+                    engine.risk_per_trade = params.get("RISK_PER_TRADE", 0.02)
                     result = engine.run()
                 except Exception as e:
-                    print(f"[WARN] AWFO fold backtest failed for {symbol} (fold {fold_idx+1}): {e}")
-                    import traceback
-                    traceback.print_exc()
+                    _logger.warning(
+                        "AWFO fold backtest failed for %s (fold %s): %s",
+                        symbol,
+                        fold_idx + 1,
+                        e,
+                        exc_info=True,
+                    )
                     if "engine" in locals():
                         del engine
                     if "strategy" in locals():
@@ -962,15 +1056,6 @@ def objective(
                     invalid_fold_count += 1
 
                 del engine, result, strategy, trades_df
-                report_step += 1
-                running_fold_score = (
-                    float(np.percentile(fold_scores, 25)) - (invalid_fold_count * 20.0)
-                    if fold_scores
-                    else (-220.0 - (invalid_fold_count * 10.0))
-                )
-                trial.report(running_fold_score, report_step)
-                if trial.should_prune():
-                    raise optuna.TrialPruned()
 
             required_valid_folds = max(2, int(np.ceil(len(awfo_cached_folds) * 0.6)))
             if len(fold_scores) < required_valid_folds:
@@ -978,9 +1063,6 @@ def objective(
                     symbol,
                     f"valid_folds={len(fold_scores)} < required={required_valid_folds}",
                 )
-                trial.set_user_attr(f"ret_{symbol.replace('/', '_')}", float(symbol_results[symbol]["return"]))
-                trial.set_user_attr(f"mdd_{symbol.replace('/', '_')}", float(symbol_results[symbol]["mdd"]))
-                trial.set_user_attr(f"pf_{symbol.replace('/', '_')}", float(symbol_results[symbol]["pf"]))
                 continue
 
             avg_fold_score = float(np.mean(fold_scores))
@@ -1040,7 +1122,6 @@ def objective(
                 legacy_symbol_score -= ROBUST_OBJECTIVE_DEFAULTS["side_single_penalty"]
             legacy_symbol_score -= invalid_fold_count * 10.0
 
-            # [3.2-1] Independent AWFO CV gate: controls fold-to-fold dispersion directly.
             fold_score_std = float(np.std(fold_scores)) if fold_scores else 0.0
             fold_ret_std = float(np.std(fold_returns)) if fold_returns else 0.0
             fold_score_cv = fold_score_std / max(abs(avg_fold_score), 20.0)
@@ -1060,7 +1141,6 @@ def objective(
             cv_gate_blended = cv_gate_floor + ((1.0 - cv_gate_floor) * cv_gate)
             cv_gate_penalty = (1.0 - cv_gate) * ROBUST_OBJECTIVE_DEFAULTS["awfo_cv_penalty_mult"]
 
-            # [3.2-3] Fold-level Calmar promotion: objective main factor (legacy 75% + calmar 25%).
             avg_fold_calmar = float(np.mean(fold_calmars)) if fold_calmars else -4.0
             p25_fold_calmar = float(np.percentile(fold_calmars, 25)) if fold_calmars else -5.0
             worst_fold_calmar = float(np.min(fold_calmars)) if fold_calmars else -6.0
@@ -1100,37 +1180,38 @@ def objective(
                 "fold_calmar_worst": float(worst_fold_calmar),
             }
 
-        # ===== Path B: Single full-run (legacy / non-AWFO) =====
         else:
             try:
-                strategy = strategy_cls(f"{strategy_name}_{symbol}", full_params)
+                strategy = strategy_cls(f"{strategy_name}_{symbol}", params)
                 current_merge_index = None
                 if merge_indices and symbol in merge_indices and selected_tf in merge_indices[symbol]:
                     current_merge_index = merge_indices[symbol][selected_tf]
 
+                precomputed_daily = cached_generate_signals_futures(strategy, daily_df, symbol)
                 engine = BacktestEngineFast(
                     hourly_df,
                     daily_df,
                     strategy,
                     initial_balance=FUTURES_INITIAL_BALANCE,
                     merge_index_map=current_merge_index,
+                    precomputed_daily_df=precomputed_daily,
                 )
-                engine.leverage = full_params.get("LEVERAGE", 1)
-                engine.risk_per_trade = full_params.get("RISK_PER_TRADE", 0.02)
+                engine.leverage = params.get("LEVERAGE", 1)
+                engine.risk_per_trade = params.get("RISK_PER_TRADE", 0.02)
                 result = engine.run()
             except Exception as e:
-                print(f"[WARN] Backtest failed for {symbol}: {e}")
-                import traceback
-                traceback.print_exc()
+                _logger.warning(
+                    "Backtest failed for %s: %s",
+                    symbol,
+                    e,
+                    exc_info=True,
+                )
                 if "engine" in locals():
                     del engine
                 if "strategy" in locals():
                     del strategy
                 maybe_collect_gc(force=True)
                 append_symbol_fallback(symbol, "non-awfo backtest exception")
-                trial.set_user_attr(f"ret_{symbol.replace('/', '_')}", float(symbol_results[symbol]["return"]))
-                trial.set_user_attr(f"mdd_{symbol.replace('/', '_')}", float(symbol_results[symbol]["mdd"]))
-                trial.set_user_attr(f"pf_{symbol.replace('/', '_')}", float(symbol_results[symbol]["pf"]))
                 continue
 
             ret = result["total_return_pct"]
@@ -1179,17 +1260,8 @@ def objective(
 
             del engine, result, strategy, trades_df
 
-        trial.set_user_attr(f"ret_{symbol.replace('/', '_')}", float(symbol_results[symbol]["return"]))
-        trial.set_user_attr(f"mdd_{symbol.replace('/', '_')}", float(symbol_results[symbol]["mdd"]))
-        trial.set_user_attr(f"pf_{symbol.replace('/', '_')}", float(symbol_results[symbol]["pf"]))
-
-    # Combine scores across symbols:
-    # - Geometric-dominant blend for return-efficiency exploration
-    # - Cross-symbol dispersion penalty for long-term stability
-    # - Soft-sigmoid MDD guard (continuous; no hard cliff)
     if not symbol_scores:
-        maybe_collect_gc()
-        return -10000
+        return (-10000.0, {}, {})
 
     ret_values = [float(r["return"]) for r in symbol_results.values()]
     mdd_values_raw = [float(r["mdd"]) for r in symbol_results.values()]
@@ -1233,21 +1305,17 @@ def objective(
     log_dispersion = float(np.std(np.log(shifted_scores)))
     dispersion_penalty = float(np.exp(-0.22 * log_dispersion))
 
-    # Geometric-first blend: keeps downside discipline while reducing over-conservatism.
     blended_shifted = (0.35 * harmonic_mean) + (0.65 * geometric_mean)
 
-    # Mild efficiency encouragement (asinh to reduce early saturation).
     efficiency_boost = (
         10.0 * np.clip(np.arcsinh(avg_ret / 45.0), -2.8, 2.8)
         + 4.0 * np.clip(np.arcsinh((avg_pf - 1.1) / 0.9), -2.4, 2.4)
     )
 
-    # Baseline smooth drawdown drag.
     soft_mdd_penalty = (
         max(0.0, avg_mdd_abs - 32.0) * 1.4
         + max(0.0, max_mdd_abs - 45.0) * 2.2
     )
-    # [3.2-2] Soft MDD guard around ~1.7x target MDD (continuous transition).
     target_mdd = float(OBJECTIVE_CFG.target_mdd_futures)
     mdd_guard_max = soft_sigmoid(
         max_mdd_abs,
@@ -1286,27 +1354,104 @@ def objective(
         ) * 160.0
     final_score -= collapsed_symbol_count * 120.0
     if not np.isfinite(final_score):
-        final_score = -10000
+        final_score = -10000.0
 
-    trial.set_user_attr("return_avg", avg_ret)
-    trial.set_user_attr("return_p25", ret_p25)
-    trial.set_user_attr("stress_return_p25", stress_ret_p25)
-    trial.set_user_attr("mdd_avg", avg_mdd_raw)
-    trial.set_user_attr("mdd_avg_abs", avg_mdd_abs)
-    trial.set_user_attr("mdd_max_abs", max_mdd_abs)
-    trial.set_user_attr("mdd_soft_guard_penalty", float(mdd_soft_guard_penalty))
-    trial.set_user_attr("pf_avg", avg_pf)
-    trial.set_user_attr("pf_p25", pf_p25)
-    trial.set_user_attr("side_ratio_p25", side_ratio_p25)
+    end_user_attrs: Dict[str, Any] = {
+        "return_avg": avg_ret,
+        "return_p25": ret_p25,
+        "stress_return_p25": stress_ret_p25,
+        "mdd_avg": avg_mdd_raw,
+        "mdd_avg_abs": avg_mdd_abs,
+        "mdd_max_abs": max_mdd_abs,
+        "mdd_soft_guard_penalty": float(mdd_soft_guard_penalty),
+        "pf_avg": avg_pf,
+        "pf_p25": pf_p25,
+        "side_ratio_p25": side_ratio_p25,
+    }
     if np.isfinite(awfo_cv_avg):
-        trial.set_user_attr("awfo_cv_avg", awfo_cv_avg)
+        end_user_attrs["awfo_cv_avg"] = awfo_cv_avg
     if np.isfinite(awfo_cv_gate_avg):
-        trial.set_user_attr("awfo_cv_gate_avg", awfo_cv_gate_avg)
+        end_user_attrs["awfo_cv_gate_avg"] = awfo_cv_gate_avg
     if np.isfinite(fold_calmar_p25_cross):
-        trial.set_user_attr("fold_calmar_p25_cross", fold_calmar_p25_cross)
+        end_user_attrs["fold_calmar_p25_cross"] = fold_calmar_p25_cross
 
+    return (float(final_score), symbol_results, end_user_attrs)
+
+
+
+
+
+
+def objective(
+    trial,
+    strategy_cls,
+    strategy_name,
+    data_maps,
+    search_space,
+    merge_indices=None,
+    awfo_plan=None,
+):
+    """
+    Multi-symbol objective function.
+
+    Args:
+        merge_indices: Pre-computed merge index mappings for full-run path.
+        awfo_plan: Dict containing AWFO settings and pre-built splits.
+    """
+    # 1. Generate Params
+    full_params = suggest_params(trial, search_space)
+
+    # [VALIDATION] Enforce Logical Constraints
+    if full_params.get("TREND_FILTER_TYPE") == "MACD":
+        if full_params.get("MACD_FAST", 12) >= full_params.get("MACD_SLOW", 26):
+            return -10000
+
+    score, symbol_results, end_attrs = evaluate_one_fidelity(
+        full_params, strategy_cls, strategy_name, data_maps, merge_indices, awfo_plan
+    )
+    if not symbol_results:
+        maybe_collect_gc()
+        return -10000
+    for sym, r in symbol_results.items():
+        key = sym.replace("/", "_")
+        trial.set_user_attr(f"ret_{key}", float(r["return"]))
+        trial.set_user_attr(f"mdd_{key}", float(r["mdd"]))
+        trial.set_user_attr(f"pf_{key}", float(r["pf"]))
+    for k, v in end_attrs.items():
+        trial.set_user_attr(k, v)
     maybe_collect_gc()
-    return final_score
+    return score
+
+
+def objective_hyperband(
+    trial: optuna.Trial,
+    strategy_cls: type,
+    strategy_name: str,
+    search_space: Dict[str, Any],
+    rung_artifacts: List[Tuple[Dict[str, Dict[str, pd.DataFrame]], Dict[str, Dict[str, np.ndarray]], Dict[str, Any]]],
+    mode: str,
+) -> float:
+    """
+    Hyperband/ASHA-style objective: evaluate on rung 0..max_rung, report(score, rung_idx), prune; only rung_reached attr.
+    """
+    full_params = suggest_params(trial, search_space)
+    if full_params.get("TREND_FILTER_TYPE") == "MACD":
+        if full_params.get("MACD_FAST", 12) >= full_params.get("MACD_SLOW", 26):
+            return -10000.0
+    max_rung = len(rung_artifacts) - 1
+    score = -10000.0
+    for rung_idx in range(len(rung_artifacts)):
+        step_data, step_merge, step_awfo = rung_artifacts[rung_idx]
+        score, _, _ = evaluate_one_fidelity(
+            full_params, strategy_cls, strategy_name, step_data, step_merge, step_awfo
+        )
+        trial.report(score, rung_idx)
+        if trial.should_prune():
+            trial.set_user_attr("rung_reached", rung_idx)
+            return score
+    trial.set_user_attr("rung_reached", max_rung)
+    maybe_collect_gc()
+    return score
 
 
 def run_optuna_study(
@@ -1317,6 +1462,7 @@ def run_optuna_study(
     startup_ratio,
     objective_fn,
     seed=None,
+    pruner: Optional[optuna.pruners.BasePruner] = None,
 ):
     """
     Utility runner with dynamic sampler/pruner settings.
@@ -1332,11 +1478,12 @@ def run_optuna_study(
         warn_independent_sampling=False,
         seed=seed,
     )
-    pruner = optuna.pruners.MedianPruner(
-        n_startup_trials=max(30, n_startup_trials // 2),
-        n_warmup_steps=2,
-        interval_steps=1,
-    )
+    if pruner is None:
+        pruner = optuna.pruners.MedianPruner(
+            n_startup_trials=max(30, n_startup_trials // 2),
+            n_warmup_steps=2,
+            interval_steps=1,
+        )
 
     study = optuna.create_study(
         study_name=study_name,
@@ -1551,7 +1698,7 @@ def main():
     for symbol in symbols:
         print(f"Loading {symbol}...")
         data_maps[symbol] = load_all_timeframes(
-            symbol, BACKTEST_START_DATE, BACKTEST_END_DATE, loading_timeframes
+            symbol, FUTURES_BACKTEST_START_DATE, FUTURES_BACKTEST_END_DATE, loading_timeframes
         )
         
         # [VALIDATION] Ensure all required data is loaded
@@ -1571,8 +1718,8 @@ def main():
         return 0
 
     # [CRITICAL] Slice Data for Optimization (Train Set) with Warmup Buffer
-    print(f"[INFO] Trimming Data for Optimization (Train Period: ~ {TRAIN_CUTOFF_DATE})")
-    cutoff_ts = pd.Timestamp(TRAIN_CUTOFF_DATE)
+    print(f"[INFO] Trimming Data for Optimization (Train Period: ~ {FUTURES_TRAIN_CUTOFF_DATE})")
+    cutoff_ts = pd.Timestamp(FUTURES_TRAIN_CUTOFF_DATE)
 
     for sym in data_maps:
         for tf in data_maps[sym]:
@@ -1782,11 +1929,16 @@ def main():
         if is_two_stage_mode:
             print("[2STAGE] 2-Stage + Multi-Fidelity mode enabled (UNIFIED)")
             cfg = TWO_STAGE_UNIFIED_DEFAULTS.copy()
-            scale = max(0.4, trials / 2800.0)
-
-            stage1_total = int(cfg["stage1_total_trials"] * scale)
-            stage1_total = max(300, min(stage1_total, max(400, int(trials * 0.6))))
-            stage2_total_budget = max(200, trials - stage1_total)
+            use_hyperband = bool(cfg.get("stage1_use_hyperband", False))
+            if use_hyperband:
+                n_trials_s1 = int(cfg.get("stage1_hyperband_n_trials", 1200))
+                stage2_total_budget = max(200, trials - n_trials_s1)
+                stage1_total = n_trials_s1  # for print only
+            else:
+                scale = max(0.4, trials / 2800.0)
+                stage1_total = int(cfg["stage1_total_trials"] * scale)
+                stage1_total = max(300, min(stage1_total, max(400, int(trials * 0.6))))
+                stage2_total_budget = max(200, trials - stage1_total)
 
             promoted_structures = []
             stage1_space_base = build_stage1_search_space(search_space)
@@ -1797,102 +1949,179 @@ def main():
                 f"Target structures: {cfg['stage2_top_structures']}"
             )
 
-            for fidelity in cfg["stage1_fidelity_steps"]:
-                step_trials = int(stage1_total * fidelity["ratio"])
-                if step_trials < 50:
-                    continue
-
-                step_symbols = max(1, min(fidelity["symbols"], len(symbols)))
-                step_data = subset_data_maps(
-                    data_maps,
-                    symbols,
-                    n_symbols=step_symbols,
-                    data_ratio=fidelity["data_ratio"],
+            if use_hyperband:
+                rung_configs = cfg.get("stage1_hyperband_rungs", cfg["stage1_fidelity_steps"])
+                rung_configs = [
+                    {
+                        "data_ratio": c.get("data_ratio", 0.45),
+                        "symbols": c.get("symbols", 1),
+                        "folds": c.get("folds", 2),
+                        "min_trades": c.get("min_trades", 20),
+                    }
+                    for c in rung_configs
+                ]
+                rung_artifacts = build_rung_artifacts(data_maps, symbols, timeframes, rung_configs)
+                n_trials_s1 = int(cfg.get("stage1_hyperband_n_trials", 1200))
+                reduction_factor = int(cfg.get("stage1_hyperband_reduction_factor", 2))
+                pruner = optuna.pruners.SuccessiveHalvingPruner(
+                    reduction_factor=reduction_factor,
+                    min_early_stopping_rate=0,
                 )
-                step_merge_indices = compute_merge_indices(step_data)
-                step_awfo = build_awfo_plan(
-                    step_data,
-                    timeframes,
-                    folds=fidelity["folds"],
-                    min_trades=fidelity["min_trades"],
-                )
-                step_awfo["cache"] = build_awfo_runtime_cache(step_data, timeframes, step_awfo)
-
-                step_space = restrict_stage1_space_by_candidates(
-                    stage1_space_base, promoted_structures
-                )
-                step_study_name = (
-                    f"{study_name}__s1_{fidelity['name']}_{int(time.time())}"
-                )
-                try:
-                    optuna.delete_study(study_name=step_study_name, storage=storage)
-                except Exception:
-                    pass
-
-                print(
-                    f"\n[STAGE1] {fidelity['name'].upper()} | "
-                    f"trials={step_trials}, symbols={step_symbols}, "
-                    f"data_ratio={fidelity['data_ratio']}, folds={fidelity['folds']}, seeds={seed_list}"
+                startup_ratio_hyperband = 0.25
+                if cfg.get("stage1_fidelity_steps") and isinstance(cfg["stage1_fidelity_steps"][0], dict):
+                    startup_ratio_hyperband = float(cfg["stage1_fidelity_steps"][0].get("startup_ratio", 0.25))
+                _logger.info(
+                    "Stage1 Hyperband: n_trials=%s, rungs=%s, reduction_factor=%s",
+                    n_trials_s1,
+                    len(rung_artifacts),
+                    reduction_factor,
                 )
                 seed_runs = run_seeded_studies(
-                    study_name_prefix=step_study_name,
+                    study_name_prefix=f"{study_name}__s1_hyperband_{int(time.time())}",
                     storage=storage,
-                    n_trials=step_trials,
+                    n_trials=n_trials_s1,
                     n_jobs=args.jobs,
-                    startup_ratio=fidelity["startup_ratio"],
-                    objective_fn=lambda t, _data=step_data, _space=step_space, _merge=step_merge_indices, _awfo=step_awfo: objective(
+                    startup_ratio=startup_ratio_hyperband,
+                    objective_fn=lambda t, _artifacts=rung_artifacts: objective_hyperband(
                         t,
                         UltimateStrategy,
                         f"Ultimate_{mode}",
-                        _data,
-                        _space,
-                        _merge,
-                        _awfo,
+                        search_space,
+                        _artifacts,
+                        mode,
                     ),
                     seeds=seed_list,
+                    pruner=pruner,
                 )
                 completed = []
-                for seed, seed_trials, seed_study, step_startup in seed_runs:
-                    seed_best = (
-                        float(seed_study.best_value)
-                        if len(seed_study.trials) > 0
-                        else -float("inf")
-                    )
-                    seed_robust = _robust_value_from_study(seed_study)
-                    print(
-                        f"   [INFO] Stage1-{fidelity['name']} seed={seed} "
-                        f"| trials={seed_trials} | startup={step_startup} "
-                        f"| best={seed_best:.2f} | robust={seed_robust:.2f}"
-                    )
-                    if np.isfinite(seed_robust) and seed_robust > best_candidate_value:
-                        best_candidate_value = float(seed_robust)
-                        best_candidate_study = seed_study
-                        best_candidate_label = f"{step_study_name}:seed{seed}"
+                for _seed, _seed_trials, seed_study, _step_startup in seed_runs:
                     completed.extend(_study_complete_trials(seed_study))
-                if not completed:
-                    continue
-                completed.sort(key=lambda tr: float(tr.value), reverse=True)
+                max_rung = len(rung_artifacts) - 1
+                completed_max_rung = [t for t in completed if t.user_attrs.get("rung_reached") == max_rung]
+                pool = completed_max_rung if completed_max_rung else completed
+                if not pool:
+                    pool = completed
+                pool.sort(key=lambda tr: float(tr.value), reverse=True)
                 top_k = max(
                     cfg["stage2_top_structures"],
-                    int(len(completed) * cfg["promotion_ratio"]),
+                    int(len(pool) * cfg["promotion_ratio"]),
                 )
-                top_k = min(top_k, top_pool_limit, len(completed))
-
+                top_k = min(top_k, top_pool_limit, len(pool))
                 promoted = []
                 seen = set()
-                for tr in completed[:top_k]:
+                for tr in pool[:top_k]:
                     sig = extract_structure_signature(tr.params)
                     sig_key = tuple((k, sig.get(k)) for k in STRUCTURE_PARAM_KEYS)
                     if sig_key in seen or not sig:
                         continue
                     seen.add(sig_key)
                     promoted.append(sig)
-
-                promoted_structures = promoted
+                promoted_structures = promoted[: cfg["stage2_top_structures"]]
+                if not promoted_structures:
+                    promoted_structures = [
+                        extract_structure_signature({k: v["choices"][0] for k, v in stage1_space_base.items()})
+                    ]
                 print(
-                    f"   [PROMOTE] Promoted structures: {len(promoted_structures)} "
-                    f"(top {top_k} trials)"
+                    f"   [PROMOTE] Hyperband promoted structures: {len(promoted_structures)} "
+                    f"(from {len(pool)} trials, max_rung={max_rung})"
                 )
+            else:
+                for fidelity in cfg["stage1_fidelity_steps"]:
+                    step_trials = int(stage1_total * fidelity["ratio"])
+                    if step_trials < 50:
+                        continue
+
+                    step_symbols = max(1, min(fidelity["symbols"], len(symbols)))
+                    step_data = subset_data_maps(
+                        data_maps,
+                        symbols,
+                        n_symbols=step_symbols,
+                        data_ratio=fidelity["data_ratio"],
+                    )
+                    step_merge_indices = compute_merge_indices(step_data)
+                    step_awfo = build_awfo_plan(
+                        step_data,
+                        timeframes,
+                        folds=fidelity["folds"],
+                        min_trades=fidelity["min_trades"],
+                    )
+                    step_awfo["cache"] = build_awfo_runtime_cache(step_data, timeframes, step_awfo)
+
+                    step_space = restrict_stage1_space_by_candidates(
+                        stage1_space_base, promoted_structures
+                    )
+                    step_study_name = (
+                        f"{study_name}__s1_{fidelity['name']}_{int(time.time())}"
+                    )
+                    try:
+                        optuna.delete_study(study_name=step_study_name, storage=storage)
+                    except Exception:
+                        pass
+
+                    print(
+                        f"\n[STAGE1] {fidelity['name'].upper()} | "
+                        f"trials={step_trials}, symbols={step_symbols}, "
+                        f"data_ratio={fidelity['data_ratio']}, folds={fidelity['folds']}, seeds={seed_list}"
+                    )
+                    seed_runs = run_seeded_studies(
+                        study_name_prefix=step_study_name,
+                        storage=storage,
+                        n_trials=step_trials,
+                        n_jobs=args.jobs,
+                        startup_ratio=fidelity["startup_ratio"],
+                        objective_fn=lambda t, _data=step_data, _space=step_space, _merge=step_merge_indices, _awfo=step_awfo: objective(
+                            t,
+                            UltimateStrategy,
+                            f"Ultimate_{mode}",
+                            _data,
+                            _space,
+                            _merge,
+                            _awfo,
+                        ),
+                        seeds=seed_list,
+                    )
+                    completed = []
+                    for seed, seed_trials, seed_study, step_startup in seed_runs:
+                        seed_best = (
+                            float(seed_study.best_value)
+                            if len(seed_study.trials) > 0
+                            else -float("inf")
+                        )
+                        seed_robust = _robust_value_from_study(seed_study)
+                        print(
+                            f"   [INFO] Stage1-{fidelity['name']} seed={seed} "
+                            f"| trials={seed_trials} | startup={step_startup} "
+                            f"| best={seed_best:.2f} | robust={seed_robust:.2f}"
+                        )
+                        if np.isfinite(seed_robust) and seed_robust > best_candidate_value:
+                            best_candidate_value = float(seed_robust)
+                            best_candidate_study = seed_study
+                            best_candidate_label = f"{step_study_name}:seed{seed}"
+                        completed.extend(_study_complete_trials(seed_study))
+                    if not completed:
+                        continue
+                    completed.sort(key=lambda tr: float(tr.value), reverse=True)
+                    top_k = max(
+                        cfg["stage2_top_structures"],
+                        int(len(completed) * cfg["promotion_ratio"]),
+                    )
+                    top_k = min(top_k, top_pool_limit, len(completed))
+
+                    promoted = []
+                    seen = set()
+                    for tr in completed[:top_k]:
+                        sig = extract_structure_signature(tr.params)
+                        sig_key = tuple((k, sig.get(k)) for k in STRUCTURE_PARAM_KEYS)
+                        if sig_key in seen or not sig:
+                            continue
+                        seen.add(sig_key)
+                        promoted.append(sig)
+
+                    promoted_structures = promoted
+                    print(
+                        f"   [PROMOTE] Promoted structures: {len(promoted_structures)} "
+                        f"(top {top_k} trials)"
+                    )
 
             if not promoted_structures:
                 print("[WARN] Stage1 produced no promoted structures; falling back to global search space.")
@@ -2163,12 +2392,14 @@ def main():
             current_merge_index = None
             if merge_indices and symbol in merge_indices and selected_tf in merge_indices[symbol]:
                 current_merge_index = merge_indices[symbol][selected_tf]
+            precomputed_daily = cached_generate_signals_futures(strategy, daily_df, symbol)
             engine = BacktestEngineFast(
                 hourly_df,
                 daily_df,
                 strategy,
                 initial_balance=FUTURES_INITIAL_BALANCE,
                 merge_index_map=current_merge_index,
+                precomputed_daily_df=precomputed_daily,
             )
                 
             engine.leverage = best_params.get('LEVERAGE', 1)
@@ -2194,13 +2425,20 @@ def main():
             except Exception as e:
                 print(f"   - {symbol:<9} : Error calculating performance: {e}")
 
-    # Housekeeping: keep DB compact by pruning old 2-stage temporary studies.
-    if is_two_stage_mode:
-        cleanup_old_stage_studies(
-            storage=storage,
-            base_study_name=study_name,
-            keep_recent=stage_keep_recent,
-        )
+    # Housekeeping: remove all temporary studies (study_name__*) created during this run.
+    # All temporary study names share the prefix "{study_name}__" while the canonical alias
+    # is exactly study_name (no "__" suffix), so the prefix match is collision-free.
+    # Best trial is already published to alias before this point, so keep_recent=0 is safe.
+    orphan_keep_recent = int(os.getenv("OPTUNA_ORPHAN_KEEP_RECENT", "0"))
+    size_before = get_db_size_mb(storage_url, db_name)
+    print(f"[CLEANUP] DB size before housekeeping: {size_before:.2f} MB")
+
+    cleanup_orphan_studies(storage, study_name, "__", keep_recent=orphan_keep_recent)
+
+    reclaim_mysql_space(storage_url)
+
+    size_after = get_db_size_mb(storage_url, db_name)
+    print(f"[CLEANUP] DB size after housekeeping: {size_after:.2f} MB (freed ~{max(0.0, size_before - size_after):.2f} MB)")
 
     print(f"{'='*70}")
     return exit_code
