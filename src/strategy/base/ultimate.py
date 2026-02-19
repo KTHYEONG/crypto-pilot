@@ -140,6 +140,14 @@ class UltimateStrategyBase(StrategyBase):
             df["vwap_upper"] = vwap_upper
             df["vwap_lower"] = vwap_lower
             df["trend_direction"] = np.where(df["close"] > df["vwap"], 1, -1)
+        elif filter_type == "DMI":
+            dmi_period = int(self.params.get("DMI_PERIOD", 14))
+            plus_di, minus_di = ind.calculate_dmi(df, window=dmi_period)
+            df["trend_direction"] = np.where(plus_di > minus_di, 1, -1)
+        elif filter_type == "AROON":
+            aroon_period = int(self.params.get("AROON_PERIOD", 14))
+            aroon_up, aroon_down = ind.calculate_aroon(df, window=aroon_period)
+            df["trend_direction"] = np.where(aroon_up > aroon_down, 1, -1)
 
         df["strength_filter"] = 1
         strength_type = self.params.get("STRENGTH_FILTER_TYPE", "NONE")
@@ -189,6 +197,45 @@ class UltimateStrategyBase(StrategyBase):
             df.loc[df["er"] < float(self.params.get("ER_THRESHOLD", 0.6)), "strength_filter"] = 0
         elif strength_type == "NATR":
             df.loc[df["natr"] < float(self.params.get("NATR_THRESHOLD", 1.0)), "strength_filter"] = 0
+        elif strength_type == "GARMAN_KLASS":
+            gk_period = int(self.params.get("GK_PERIOD", 30))
+            df["gk_vol"] = ind.calculate_garman_klass_vol(df, window=gk_period)
+            df.loc[
+                df["gk_vol"] < float(self.params.get("GK_THRESHOLD", 0.0001)),
+                "strength_filter",
+            ] = 0
+        elif strength_type == "FORCE_INDEX":
+            fi_period = int(self.params.get("FORCE_INDEX_PERIOD", 2))
+            df["force_index"] = ind.calculate_force_index(df, smooth_period=fi_period)
+            fi_thresh = float(self.params.get("FORCE_INDEX_THRESHOLD", 0.0))
+            df.loc[
+                (df["trend_direction"] > 0) & (df["force_index"] < fi_thresh),
+                "strength_filter",
+            ] = 0
+            df.loc[
+                (df["trend_direction"] < 0) & (df["force_index"] > -fi_thresh),
+                "strength_filter",
+            ] = 0
+        elif strength_type == "WILLIAMS_R":
+            df["willr"] = ind.calculate_williams_r(df, window=strength_period)
+            willr_ob = float(self.params.get("WILLR_OVERBOUGHT", -20.0))
+            willr_os = float(self.params.get("WILLR_OVERSOLD", -80.0))
+            df.loc[
+                (df["willr"] > willr_ob) | (df["willr"] < willr_os),
+                "strength_filter",
+            ] = 0
+        elif strength_type == "OBV":
+            df["obv"] = ind.calculate_obv(df)
+            obv_ma_period = int(self.params.get("OBV_MA_PERIOD", 20))
+            obv_ma = df["obv"].rolling(window=obv_ma_period).mean()
+            df.loc[
+                (df["trend_direction"] > 0) & (df["obv"] < obv_ma) & obv_ma.notna(),
+                "strength_filter",
+            ] = 0
+            df.loc[
+                (df["trend_direction"] < 0) & (df["obv"] > obv_ma) & obv_ma.notna(),
+                "strength_filter",
+            ] = 0
 
         rsi_entry_max = self.params.get("RSI_ENTRY_MAX")
         if rsi_entry_max is not None:
@@ -216,6 +263,14 @@ class UltimateStrategyBase(StrategyBase):
         df["natr"] = df["natr"].ffill().fillna(1.0)
         df["rsi"] = df["rsi"].ffill().fillna(50.0)
         df["hurst"] = df["hurst"].ffill().fillna(0.5)
+        if "gk_vol" in df.columns:
+            df["gk_vol"] = df["gk_vol"].ffill().fillna(1e-6)
+        if "force_index" in df.columns:
+            df["force_index"] = df["force_index"].ffill().fillna(0.0)
+        if "willr" in df.columns:
+            df["willr"] = df["willr"].ffill().fillna(-50.0)
+        if "obv" in df.columns:
+            df["obv"] = df["obv"].ffill().fillna(0.0)
         df["strength_filter"] = df["strength_filter"].fillna(0).astype(int)
         df["trend_direction"] = df["trend_direction"].fillna(0).astype(int)
         df["entry_upper"] = df["entry_upper"].astype(float)

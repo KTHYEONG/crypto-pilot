@@ -60,66 +60,60 @@ class JSONFormatter(logging.Formatter):
         return json.dumps(log_obj, ensure_ascii=False)
 
 
-def setup_logger(name: str, log_prefix: str = None) -> logging.Logger:
+def setup_logger(
+    name: str,
+    log_prefix: str | None = None,
+    write_file: bool = True,
+) -> logging.Logger:
     """
     통합 로거 설정 (동적 로그 파일명)
-    
+
     Args:
         name: 로거 이름 (예: "RealTraderFutures", "RealTraderSpot")
         log_prefix: 로그 파일 접두사 (None이면 name을 snake_case로 변환하여 사용)
+        write_file: True이면 .jsonl 파일 핸들러를 추가함.
+                    False이면 콘솔(StreamHandler)만 사용 — 최적화/검증 프로세스 전용.
     """
+    import re
+
     logger = logging.getLogger(name)
     logger.setLevel(logging.INFO)
-    
+
     # 이미 핸들러가 설정되어 있으면 중복 설정 방지
     if logger.handlers:
         return logger
-    
-    # 로그 디렉토리 생성
-    if not os.path.exists(LOG_DIR):
-        os.makedirs(LOG_DIR, exist_ok=True)
-    
-    # 로그 파일명 자동 생성 (CamelCase -> snake_case)
-    if log_prefix is None:
-        import re
-        log_prefix = re.sub(r'(?<!^)(?=[A-Z])', '_', name).lower()
-    
-    # 1. 일반 텍스트 로그 (Rotating)
-    log_file = LOG_DIR / f"{log_prefix}.log"
-    file_handler = RotatingFileHandler(
-        str(log_file),
-        maxBytes=LOG_MAX_BYTES,
-        backupCount=LOG_BACKUP_COUNT,
-        encoding='utf-8'
-    )
-    file_handler.setFormatter(logging.Formatter(
+
+    stream_handler = logging.StreamHandler()
+    stream_handler.setFormatter(logging.Formatter(
         '%(asctime)s - %(levelname)s - %(message)s'
     ))
-    
-    # 2. JSON 로그 (모니터링 연동용)
+    logger.addHandler(stream_handler)
+
+    if not write_file:
+        return logger
+
+    # 로그 디렉토리 생성
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+    # 로그 파일명 자동 생성 (CamelCase -> snake_case)
+    if log_prefix is None:
+        log_prefix = re.sub(r'(?<!^)(?=[A-Z])', '_', name).lower()
+
+    # JSON 로그 (모니터링 연동용) — 단일 파일만 유지
     json_log_file = LOG_DIR / f"{log_prefix}.jsonl"
     json_handler = RotatingFileHandler(
         str(json_log_file),
         maxBytes=LOG_MAX_BYTES,
         backupCount=LOG_BACKUP_COUNT,
-        encoding='utf-8'
+        encoding='utf-8',
     )
     json_handler.setFormatter(JSONFormatter())
-    
-    # 3. 콘솔 출력
-    stream_handler = logging.StreamHandler()
-    stream_handler.setFormatter(logging.Formatter(
-        '%(asctime)s - %(levelname)s - %(message)s'
-    ))
-    
-    logger.addHandler(file_handler)
     logger.addHandler(json_handler)
-    logger.addHandler(stream_handler)
-    
+
     return logger
 
-# 내부 로거 (Retry 로직용)
-_internal_logger = setup_logger("CommonUtils")
+# 내부 로거 (Retry 로직용) — 파일 로그 불필요
+_internal_logger = setup_logger("CommonUtils", write_file=False)
 
 # ============================================================
 # Retry Decorator (API 재시도)
