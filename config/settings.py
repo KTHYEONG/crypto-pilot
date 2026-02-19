@@ -34,32 +34,19 @@ UPBIT_SECRET_KEY = os.getenv("UPBIT_SECRET_KEY", "")
 # - Maker (지정가): 0.02%
 # - Taker (시장가): 0.05%
 # 백테스트는 보수적으로 Taker 수수료 기준 적용
-TRADING_FEE_RATE = 0.0005      # 0.05% (Taker 기준, 진입/청산 각각)
-SLIPPAGE_RATE = 0.0005         # 0.05% (시장가 주문 시 예상 슬리피지)
+TRADING_FEE_RATE = 0.0005  # 0.05% (Taker 기준, 진입/청산 각각)
+SLIPPAGE_RATE = 0.0005  # 0.05% (시장가 주문 시 예상 슬리피지)
 
 # 스마트 주문 설정
-MAKER_FEE_RATE = 0.0002        # 0.02% (지정가 주문 성공 시)
-TAKER_FEE_RATE = 0.0005        # 0.05% (시장가 주문 시)
-SMART_ORDER_OFFSET = 0.0003    # 0.03% (공격적 지정가 오프셋 - Maker 수수료 절감 목적)
-SMART_ORDER_TIMEOUT = 10       # 10초 (지정가 체결 대기 시간)
+MAKER_FEE_RATE = 0.0002  # 0.02% (지정가 주문 성공 시)
+TAKER_FEE_RATE = 0.0005  # 0.05% (시장가 주문 시)
+SMART_ORDER_OFFSET = 0.0003  # 0.03% (공격적 지정가 오프셋 - Maker 수수료 절감 목적)
+SMART_ORDER_TIMEOUT = 10  # 10초 (지정가 체결 대기 시간)
 
 # 선물 펀딩비 설정 (Perpetual Futures Funding Fee)
-# 바이낸스 USDT-M 선물: 8시간마다(00:00, 08:00, 16:00 UTC) 발생
-# 평균 펀딩비율: 0.01% per 8h (연환산 약 10.95%)
-# 변동성 높은 시기: 0.03~0.10% 이상 가능
-FUNDING_FEE_RATE = 0.0001      # 0.01% per 8h (보수적 평균값)
-FUNDING_INTERVAL_HOURS = 8     # 펀딩비 발생 주기 (시간)
+FUNDING_FEE_RATE = 0.0001  # 0.01% (8시간 마다, Binance Default)
+FUNDING_INTERVAL_HOURS = 8
 
-# 백테스팅 기본 기간
-BACKTEST_START_DATE = "2020-01-01"  # 전체 데이터 시작일
-BACKTEST_END_DATE = "2026-02-10"    # 전체 데이터 종료일
-TRAIN_CUTOFF_DATE = "2025-01-01"    # [중요] 최적화(Train)와 검증(Test) 분리 기준일
-TIMEFRAME = "1h"               # 1시간봉 기준
-
-# 선물 최적화/검증 공통 초기 자본 (P3-8 정합성)
-FUTURES_INITIAL_BALANCE = 1_000_000.0
-
-# 로깅 설정
 LOG_LEVEL = "DEBUG"
 
 # ============================================================
@@ -75,23 +62,23 @@ HEARTBEAT_FILE = LOG_DIR / "trader_heartbeat.json"
 FUTURES_STATE_FILE = DATA_DIR / "futures_trading_state.json"
 
 # --- API 재시도 및 타임아웃 정책 ---
-API_READ_TIMEOUT = 20       # 데이터 조회 (OHLCV, 잔고 등)
-API_ORDER_TIMEOUT = 10      # 주문 제출/취소
-API_CHECK_TIMEOUT = 5       # 주문 상태 확인/조회
-API_RETRY_ATTEMPTS = 3      # 최대 재시도 횟수
-API_RETRY_WAIT_MIN = 1          # 최소 대기 시간 (초)
-API_RETRY_WAIT_MAX = 30         # 최대 대기 시간 (초)
+API_READ_TIMEOUT = 20  # 데이터 조회 (OHLCV, 잔고 등)
+API_ORDER_TIMEOUT = 10  # 주문 제출/취소
+API_CHECK_TIMEOUT = 5  # 주문 상태 확인/조회
+API_RETRY_ATTEMPTS = 3  # 최대 재시도 횟수
+API_RETRY_WAIT_MIN = 1  # 최소 대기 시간 (초)
+API_RETRY_WAIT_MAX = 30  # 최대 대기 시간 (초)
 
 # --- 포지션 사이징 임계값 ---
-MIN_BALANCE_USDT = 10.0         # 최소 운영 잔고 (USDT)
-MIN_BALANCE_FOR_TRADE = 5.0     # 최소 거래 가능 잔고
-MIN_ORDER_VALUE_USDT = 5.0      # Binance 최소 주문 금액 (바이낸스 규정 기반)
-MAX_EXCHANGE_LEVERAGE = 10       # 거래소 설정 레버리지 (전략 목표 반영)
+MIN_BALANCE_USDT = 10.0  # 최소 운영 잔고 (USDT)
+MIN_BALANCE_FOR_TRADE = 5.0  # 최소 거래 가능 잔고
+MIN_ORDER_VALUE_USDT = 5.0  # Binance 최소 주문 금액 (바이낸스 규정 기반)
+MAX_EXCHANGE_LEVERAGE = 10  # 거래소 설정 레버리지 (전략 목표 반영)
 
 # --- 타이밍 설정 ---
-LOOP_INTERVAL_SECONDS = 10      # 메인 루프 간격 (청산 감시 기능 강화)
-SYMBOL_DELAY_SECONDS = 2        # 심볼 간 딜레이
-ERROR_SLEEP_SECONDS = 60        # 에러 발생 시 대기
+LOOP_INTERVAL_SECONDS = 10  # 메인 루프 간격 (청산 감시 기능 강화)
+SYMBOL_DELAY_SECONDS = 2  # 심볼 간 딜레이
+ERROR_SLEEP_SECONDS = 60  # 에러 발생 시 대기
 
 # --- 캔들 동기화 오프셋 (분) ---
 # 정시 봉 마감 후 N초 뒤에 실행하여 데이터 안정성 확보
@@ -101,22 +88,17 @@ CANDLE_SYNC_OFFSET_SECONDS = 15
 LOG_MAX_BYTES = 10 * 1024 * 1024  # 10MB
 LOG_BACKUP_COUNT = 5
 
-# --- 대상 심볼 ---
-# [Verified Portfolio] 2026-02-17 Holdout OOS 권장안
-# 80만원 소액 선물 포트폴리오: BTC(안정), DOGE(수익), XRP(고승률)
-FUTURES_TARGET_SYMBOLS = ['BTC/USDT', 'DOGE/USDT', 'XRP/USDT']
+# --- 대상 심볼 (Futures) ---
+# [Verified Portfolio] B 1h lev3.0 Holdout 권장안 — 3종목 집중
+# 80만원 합리적 자산증식: Core(BTC/ETH) + DOGE
+FUTURES_TARGET_SYMBOLS = ["BTC/USDT", "ETH/USDT", "DOGE/USDT"]
 
 # --- 스터디 이름 (Optuna) ---
-OPTUNA_STUDY_NAMES = ['futures_strategy', 'future_strategy', 'UNIFIED']
+OPTUNA_STUDY_NAMES = ["futures_strategy", "future_strategy", "UNIFIED"]
 
-# --- 포지션 사이징 가중치 (성과 기반) ---
-# 근거: 2026-02-17 Holdout OOS 추천안
-# BTC: 35%, DOGE: 40%, XRP: 25%
-SYMBOL_ALLOCATION_WEIGHTS = {
-    'BTC/USDT': 0.35,
-    'DOGE/USDT': 0.40,
-    'XRP/USDT': 0.25
-}
+# --- 포지션 사이징 가중치 (Futures) ---
+# BTC 40% + ETH 40% + DOGE 20% — real_trader_futures.py에서 이 비중으로 매매
+SYMBOL_ALLOCATION_WEIGHTS = {"BTC/USDT": 0.40, "ETH/USDT": 0.40, "DOGE/USDT": 0.20}
 
 # ============================================================
 # RealTrader Spot 설정 (Upbit)
@@ -128,30 +110,40 @@ SPOT_HEARTBEAT_FILE = LOG_DIR / "spot_trader_heartbeat.json"
 SPOT_STATE_FILE = DATA_DIR / "spot_trading_state.json"
 
 # --- Upbit KRW 기준 포지션 사이징 ---
-MIN_POSITION_VALUE_KRW = 10_000         # 최소 포지션 인식 금액 (10,000원)
-MIN_ORDER_VALUE_KRW = 5_000             # 최소 주문 금액 (5,000원)
-MAX_INVEST_CAP_KRW = 100_000_000        # 심볼당 최대 투자 금액 (1억원)
-MAX_TOTAL_BALANCE_KRW = 500_000_000     # 총 운영 자금 상한 (5억원)
+MIN_POSITION_VALUE_KRW = 10_000  # 최소 포지션 인식 금액 (10,000원)
+MIN_ORDER_VALUE_KRW = 5_000  # 최소 주문 금액 (5,000원)
+MAX_INVEST_CAP_KRW = 100_000_000  # 심볼당 최대 투자 금액 (1억원)
+MAX_TOTAL_BALANCE_KRW = 500_000_000  # 총 운영 자금 상한 (5억원)
 
 # --- Spot 타이밍 설정 ---
-SPOT_LOOP_INTERVAL_SECONDS = 10         # 메인 루프 간격 (10초)
-SPOT_SYMBOL_DELAY_SECONDS = 2           # 심볼 간 딜레이
+SPOT_LOOP_INTERVAL_SECONDS = 10  # 메인 루프 간격 (10초)
+SPOT_SYMBOL_DELAY_SECONDS = 2  # 심볼 간 딜레이
 
 # --- 대상 심볼 (Upbit) ---
 # [Verified Portfolio] 2026-02-12 최신 분석 기반
 # 50만원 소액 투자 최적화: ETH(안정성+수익), DOGE(폭발력), SOL(추세)
-SPOT_TARGET_SYMBOLS = ['KRW-ETH', 'KRW-DOGE', 'KRW-SOL']
+SPOT_TARGET_SYMBOLS = ["KRW-ETH", "KRW-DOGE", "KRW-SOL"]
 
 # --- 포지션 사이징 가중치 (성과 기반 - Spot) ---
 # 근거: 2026-02-12 Candidate B 롤링 검증 결과
 # KRW-ETH: 40% (안정성과 수익률의 최적 밸런스, Roll-5 기준 376% 수익)
 # KRW-DOGE: 30% (전략 최대 수혜주, Roll-4 기준 427% 수익)
 # KRW-SOL: 30% (꾸준한 우상향, 높은 PF 유지)
-SPOT_ALLOCATION_WEIGHTS = {
-    'KRW-ETH': 0.40,
-    'KRW-DOGE': 0.30,
-    'KRW-SOL': 0.30
-}
+SPOT_ALLOCATION_WEIGHTS = {"KRW-ETH": 0.40, "KRW-DOGE": 0.30, "KRW-SOL": 0.30}
 
 # --- Optuna Study ---
-SPOT_OPTUNA_STUDY_NAME = 'spot_strategy'
+SPOT_OPTUNA_STUDY_NAME = "spot_strategy"
+
+# --- 백테스트 초기 잔고 (Futures) ---
+FUTURES_INITIAL_BALANCE = 800.0  # USDT, backtest/optimize/verify 공통
+
+# --- 데이터 기간 설정 (Backtest & Optimization) ---
+# Futures 전용 설정
+FUTURES_BACKTEST_START_DATE = "2021-01-01"
+FUTURES_BACKTEST_END_DATE = "2026-02-17"
+FUTURES_TRAIN_CUTOFF_DATE = "2024-04-01"
+
+# Spot 전용 데이터 기간 (최적화: start~cutoff, 검증: cutoff~end)
+SPOT_BACKTEST_START_DATE = "2021-01-01"
+SPOT_BACKTEST_END_DATE = "2026-02-17"
+SPOT_TRAIN_CUTOFF_DATE = "2024-04-01"
