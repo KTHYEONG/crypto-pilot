@@ -1,4 +1,4 @@
-﻿
+
 import argparse
 import pandas as pd
 import sys
@@ -7,20 +7,22 @@ import logging
 import json
 from pathlib import Path
 import numpy as np
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 # Project Root Setup
+project_root = os.getcwd()
 try:
     project_root = str(Path(__file__).resolve().parents[2])
     if project_root not in sys.path:
         sys.path.append(project_root)
 except IndexError:
-    sys.path.append(os.getcwd())
+    if project_root not in sys.path:
+        sys.path.append(project_root)
 
 from config.settings import (
-    BACKTEST_START_DATE,
-    BACKTEST_END_DATE,
-    TRAIN_CUTOFF_DATE,
+    FUTURES_BACKTEST_START_DATE,
+    FUTURES_BACKTEST_END_DATE,
+    FUTURES_TRAIN_CUTOFF_DATE,
     FUTURES_INITIAL_BALANCE,
 )
 from src.common.utils import setup_logger
@@ -28,11 +30,35 @@ from src.futures_strategy.data_collector import DataCollector
 from src.futures_strategy.strategies_futures import UltimateStrategy
 
 # Setup Logging
-logger = setup_logger("FuturesVerifier")
+logger = setup_logger("FuturesVerifier", write_file=False)
 # Reduce engine logs to keep verify output readable.
 logging.getLogger("src.futures_strategy.engine_fast_futures").setLevel(logging.WARNING)
 
 LOG_WIDTH = 80
+FUTURES_VERIFY_LOG_PATH = Path(project_root) / "logs" / "futures_verify_comparison.jsonl"
+FUTURES_COMPARISON_METRICS: Tuple[str, ...] = (
+    "core_avg_ret",
+    "core_avg_mdd_abs",
+    "core_avg_pf",
+    "core_min_trades",
+    "core_total_trades",
+    "core_wfa_consistency",
+    "core_mc_worst_mdd_95",
+    "alt_median_ret",
+    "alt_p25_ret",
+    "alt_pos_rate",
+    "alt_worst_mdd_abs",
+    "dispersion",
+    "avg_ret",
+    "train_score",
+    "selection_rank_score",
+)
+FUTURES_LOWER_IS_BETTER_METRICS = {
+    "core_avg_mdd_abs",
+    "core_mc_worst_mdd_95",
+    "alt_worst_mdd_abs",
+    "dispersion",
+}
 
 
 def _log_header(title: str, subtitle: Optional[str] = None) -> None:
@@ -49,14 +75,161 @@ def _log_subheader(title: str) -> None:
     print("-" * 70)
 
 
+def _safe_float(value: Any) -> Optional[float]:
+    try:
+        converted = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not np.isfinite(converted):
+        return None
+    return float(converted)
+
+
+def _sanitize_for_json(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(k): _sanitize_for_json(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_sanitize_for_json(v) for v in value]
+    if isinstance(value, pd.Timestamp):
+        return value.isoformat()
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, np.generic):
+        return value.item()
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return str(value)
+
+
+def _extract_numeric_metrics(raw_metrics: Any) -> Dict[str, float]:
+    if not isinstance(raw_metrics, dict):
+        return {}
+    metrics: Dict[str, float] = {}
+    for key, raw_value in raw_metrics.items():
+        converted = _safe_float(raw_value)
+        if converted is not None:
+            metrics[str(key)] = converted
+    return metrics
+
+
+def _extract_summary_metrics(
+    summary: Optional[Dict[str, Any]],
+    extra_metrics: Optional[Dict[str, Any]] = None,
+) -> Dict[str, float]:
+    metrics: Dict[str, float] = {}
+    summary_dict = summary if isinstance(summary, dict) else {}
+    for key in FUTURES_COMPARISON_METRICS:
+        converted = _safe_float(summary_dict.get(key))
+        if converted is not None:
+            metrics[key] = converted
+    if extra_metrics:
+        metrics.update(_extract_numeric_metrics(extra_metrics))
+    return metrics
+
+
+def _read_latest_comparison_entry(log_path: Path) -> Optional[Dict[str, Any]]:
+    if not log_path.exists():
+        return None
+    try:
+        latest_line: Optional[str] = None
+        with log_path.open("r", encoding="utf-8") as file_handle:
+            for raw_line in file_handle:
+                line = raw_line.strip()
+                if line:
+                    latest_line = line
+        if not latest_line:
+            return None
+        loaded = json.loads(latest_line)
+        return loaded if isinstance(loaded, dict) else None
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning(f"[WARN] Failed to read previous futures comparison log: {exc}")
+        return None
+
+
+def _build_metric_comparison(
+    previous_metrics: Dict[str, float],
+    current_metrics: Dict[str, float],
+) -> Dict[str, Any]:
+    metric_deltas: Dict[str, Dict[str, float]] = {}
+    improved_metrics: List[str] = []
+    degraded_metrics: List[str] = []
+
+    for metric in sorted(set(previous_metrics) | set(current_metrics)):
+        prev_value = previous_metrics.get(metric)
+        curr_value = current_metrics.get(metric)
+        if prev_value is None or curr_value is None:
+            continue
+        delta = float(curr_value - prev_value)
+        metric_deltas[metric] = {
+            "previous": float(prev_value),
+            "current": float(curr_value),
+            "delta": delta,
+        }
+        if np.isclose(delta, 0.0):
+            continue
+        lower_is_better = metric in FUTURES_LOWER_IS_BETTER_METRICS
+        is_improved = (delta < 0.0) if lower_is_better else (delta > 0.0)
+        if is_improved:
+            improved_metrics.append(metric)
+        else:
+            degraded_metrics.append(metric)
+
+    return {
+        "metric_deltas": metric_deltas,
+        "improved_metrics": improved_metrics,
+        "degraded_metrics": degraded_metrics,
+    }
+
+
+def _record_verification_comparison(
+    *,
+    log_path: Path,
+    run_type: str,
+    current_best: Dict[str, Any],
+    context: Optional[Dict[str, Any]] = None,
+) -> None:
+    previous_entry = _read_latest_comparison_entry(log_path)
+    previous_best = previous_entry.get("current_best") if isinstance(previous_entry, dict) else None
+    previous_metrics = _extract_numeric_metrics(
+        previous_best.get("metrics") if isinstance(previous_best, dict) else None
+    )
+    current_metrics = _extract_numeric_metrics(current_best.get("metrics"))
+    comparison = _build_metric_comparison(previous_metrics, current_metrics)
+
+    entry = {
+        "logged_at_utc": pd.Timestamp.now(tz="UTC").isoformat(),
+        "strategy_type": "futures",
+        "run_type": str(run_type),
+        "context": context or {},
+        "current_best": current_best,
+        "previous_latest": previous_best,
+        "comparison": comparison,
+    }
+    try:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with log_path.open("a", encoding="utf-8") as file_handle:
+            file_handle.write(json.dumps(_sanitize_for_json(entry), ensure_ascii=False) + "\n")
+        print(f"[INFO] Comparison log appended: {log_path}")
+    except OSError as exc:
+        logger.warning(f"[WARN] Failed to write futures comparison log: {exc}")
+
+
 # Selection policy for long-term stable operation + high return.
 SELECTION_POLICY_VERSION = "SELECTION_POLICY_V3"
+# Timeframe-specific min trades for selection gate (lower TF = more bars → higher min; 4h needs fewer).
+FUTURES_TF_SELECTION_MIN_TRADES: Dict[str, int] = {
+    "1h": 30,
+    "4h": 15,
+}
+FUTURES_SELECTION_MIN_TRADES_DEFAULT = 30
+
 SELECTION_POLICY = {
     "gates": {
         "core_min_return": 0.0,
         "core_min_trades": 30,
         "core_max_avg_mdd_abs": 25.0,
-        "core_min_wfa_consistency": 45.0,
+        # With n_splits=5, 40% explicitly allows 2/5 positive WFA segments (reliable threshold).
+        "core_min_wfa_consistency": 40.0,
         "core_max_mc_worst_mdd_95_abs": 45.0,
         "alt_min_pos_rate": 0.50,
         "alt_max_worst_mdd_abs": 50.0,
@@ -77,6 +250,15 @@ SELECTION_POLICY = {
         "alt_mdd": 0.15,
     },
 }
+
+
+def futures_selection_min_trades_for_timeframe(timeframe: Optional[str]) -> int:
+    """Return selection gate min trades for the given timeframe; default if unknown."""
+    if not timeframe:
+        return FUTURES_SELECTION_MIN_TRADES_DEFAULT
+    tf = str(timeframe).strip().lower()
+    return int(FUTURES_TF_SELECTION_MIN_TRADES.get(tf, FUTURES_SELECTION_MIN_TRADES_DEFAULT))
+
 
 # Bonus sweep anti-overfitting defaults:
 # Rank on selection OOS window, then run a separate holdout sanity check.
@@ -122,8 +304,8 @@ def resolve_eval_window(
     eval_start_time: Optional[pd.Timestamp] = None,
     eval_end_time: Optional[pd.Timestamp] = None,
 ) -> Tuple[pd.Timestamp, pd.Timestamp]:
-    eval_start = pd.Timestamp(eval_start_time) if eval_start_time is not None else pd.Timestamp(TRAIN_CUTOFF_DATE)
-    raw_end = pd.Timestamp(eval_end_time) if eval_end_time is not None else pd.Timestamp(BACKTEST_END_DATE)
+    eval_start = pd.Timestamp(eval_start_time) if eval_start_time is not None else pd.Timestamp(FUTURES_TRAIN_CUTOFF_DATE)
+    raw_end = pd.Timestamp(eval_end_time) if eval_end_time is not None else pd.Timestamp(FUTURES_BACKTEST_END_DATE)
     eval_end = _to_inclusive_end_timestamp(raw_end)
     if eval_end < eval_start:
         raise ValueError(f"Invalid eval window: start={eval_start}, end={eval_end}")
@@ -134,7 +316,7 @@ def split_bonus_oos_windows() -> Tuple[pd.Timestamp, pd.Timestamp, pd.Timestamp,
     """
     Split OOS into selection + holdout windows to reduce meta-overfitting in bonus sweep.
     """
-    oos_start, oos_end = resolve_eval_window(pd.Timestamp(TRAIN_CUTOFF_DATE), pd.Timestamp(BACKTEST_END_DATE))
+    oos_start, oos_end = resolve_eval_window(pd.Timestamp(FUTURES_TRAIN_CUTOFF_DATE), pd.Timestamp(FUTURES_BACKTEST_END_DATE))
     total_days = max(1, int((oos_end.normalize() - oos_start.normalize()).days) + 1)
     holdout_days = max(BONUS_SWEEP_MIN_HOLDOUT_DAYS, int(total_days * BONUS_SWEEP_HOLDOUT_RATIO))
     if holdout_days >= total_days:
@@ -201,7 +383,7 @@ def run_cost_stress_verification(
                 stress_results.append(result)
 
         calculate_mode_performance(stress_results)
-        stress_summary = summarize_profile(stress_results)
+        stress_summary = summarize_profile(stress_results, timeframe=best_params.get("TIMEFRAME"))
         stress_summaries[float(mult)] = stress_summary
         if stress_summary:
             print(
@@ -293,7 +475,7 @@ def run_rolling_oos_verification(
                 roll_results.append(result)
 
         calculate_mode_performance(roll_results)
-        roll_summary = summarize_profile(roll_results)
+        roll_summary = summarize_profile(roll_results, timeframe=best_params.get("TIMEFRAME"))
         if not roll_summary:
             print(f"[ROLL-{idx}] Summary unavailable.")
             continue
@@ -660,8 +842,8 @@ def verify_single_symbol_futures(
 ):
     """Single-symbol OOS verification using the same engine execution model."""
     try:
-        tf = best_params.get('TIMEFRAME', '1h')
-        hourly_df, daily_df = load_data(symbol, BACKTEST_START_DATE, BACKTEST_END_DATE, tf)
+        tf = best_params.get('TIMEFRAME', '1h') # Data Loading
+        hourly_df, daily_df = load_data(symbol, FUTURES_BACKTEST_START_DATE, FUTURES_BACKTEST_END_DATE, tf)
     except Exception as e:
         print(f"   Data load error for {symbol}: {e}")
         return None
@@ -844,7 +1026,7 @@ def calculate_mode_performance(all_results):
     return avg_ret
 
 
-def summarize_profile(results):
+def summarize_profile(results: List[Dict[str, Any]], timeframe: Optional[str] = None) -> Optional[Dict[str, Any]]:
     if not results:
         return None
     primary = [r for r in results if r.get("is_primary")]
@@ -882,11 +1064,12 @@ def summarize_profile(results):
     dispersion = float(np.std(all_returns) / mean_abs)
 
     gates = SELECTION_POLICY["gates"]
+    gate_core_min_trades = futures_selection_min_trades_for_timeframe(timeframe)
     # Hard gates: survival first.
     gate_reasons = []
     if np.any(core_returns <= gates["core_min_return"]):
         gate_reasons.append("core_negative_return")
-    if int(np.min(core_trades)) < int(gates["core_min_trades"]):
+    if int(np.min(core_trades)) < int(gate_core_min_trades):
         gate_reasons.append("core_trade_count_low")
     if float(np.mean(core_mdd_abs)) > gates["core_max_avg_mdd_abs"]:
         gate_reasons.append("core_mdd_too_high")
@@ -910,6 +1093,7 @@ def summarize_profile(results):
         "core_avg_mdd_abs": float(np.mean(core_mdd_abs)),
         "core_avg_pf": float(np.mean(core_pf)),
         "core_min_trades": int(np.min(core_trades)),
+        "gate_core_min_trades": gate_core_min_trades,
         "core_avg_trades": float(np.mean(core_trades)),
         "core_wfa_consistency": core_wfa_consistency,
         "core_mc_worst_mdd_95": core_mc_worst_mdd_abs,
@@ -1048,6 +1232,30 @@ if __name__ == "__main__":
                     all_results.append(result)
             
             avg_ret = calculate_mode_performance(all_results)
+            dry_run_summary = summarize_profile(all_results, timeframe=best_params.get("TIMEFRAME"))
+            _record_verification_comparison(
+                log_path=FUTURES_VERIFY_LOG_PATH,
+                run_type="dry_run",
+                current_best={
+                    "label": "deployed_local_strategy",
+                    "source_db_name": "futures_strategy.db",
+                    "study_name": "futures_strategy",
+                    "timeframe": str(best_params.get("TIMEFRAME", "1h")),
+                    "leverage": _safe_float(best_params.get("LEVERAGE")),
+                    "metrics": _extract_summary_metrics(
+                        dry_run_summary,
+                        {
+                            "avg_ret": avg_ret,
+                            "train_score": train_score,
+                        },
+                    ),
+                    "summary": dry_run_summary,
+                },
+                context={
+                    "symbols": list(symbols),
+                    "deployed": False,
+                },
+            )
             
             _log_header("DRY-RUN COMPLETE", "No changes saved")
             if avg_ret is not None:
@@ -1142,7 +1350,7 @@ if __name__ == "__main__":
                         all_results.append(result)
 
                 avg_ret = calculate_mode_performance(all_results)
-                summary = summarize_profile(all_results)
+                summary = summarize_profile(all_results, timeframe=best_params.get("TIMEFRAME"))
                 profile_summary[mode] = {
                     "avg_ret": avg_ret,
                     "summary": summary,
@@ -1153,6 +1361,7 @@ if __name__ == "__main__":
                         "study_name": study_name,
                         "db_name": db,
                         "best_params": best_params,
+                        "train_score": train_score,
                     }
 
             profile_results[key] = profile_summary
@@ -1230,7 +1439,10 @@ if __name__ == "__main__":
                     holdout_results.append(result)
 
             calculate_mode_performance(holdout_results)
-            holdout_summary = summarize_profile(holdout_results)
+            holdout_summary = summarize_profile(
+                holdout_results,
+                timeframe=candidate_src.get("best_params", {}).get("TIMEFRAME"),
+            )
             holdout_passed, holdout_reasons = evaluate_holdout_sanity(
                 holdout_summary,
                 min_trades_gate=holdout_min_trades_gate,
@@ -1273,6 +1485,8 @@ if __name__ == "__main__":
             holdout_passed = False
             print("[WARN] No holdout-passed candidate found. Deployment skipped.")
 
+        deployment_attempted = False
+        deployment_ok = False
         if winner_src and holdout_passed:
             # Additional durability check: keep base selection/holdout unchanged,
             # and run stressed-cost scenarios for practical execution robustness.
@@ -1299,13 +1513,77 @@ if __name__ == "__main__":
                 f"Saving Winner ({winner}) from MySQL "
                 f"[{winner_src['db_name']}/{winner_src['study_name']}] to 'futures_strategy.db'..."
             )
-            deploy_best_to_local(
+            deployment_attempted = True
+            deployment_ok = deploy_best_to_local(
                 source_storage_url=winner_src["storage_url"],
                 source_study_name=winner_src["study_name"],
                 mode_label=f"UNIFIED/{winner}",
             )
         else:
             print("[WARN] Skip deployment due to failed/missing holdout sanity check.")
+        selected_eval = holdout_evals.get(winner, {}) if isinstance(holdout_evals, dict) else {}
+        selected_holdout_summary = (
+            selected_eval.get("summary") if isinstance(selected_eval, dict) else None
+        )
+        selected_selection_summary = unified_summaries.get(winner)
+        selected_summary = selected_holdout_summary or selected_selection_summary
+        selected_source = (
+            selected_eval.get("source") if isinstance(selected_eval, dict) else None
+        ) or winner_src or unified_source.get(winner)
+        selected_rank_score = next(
+            (float(rank_score) for key, rank_score, _ in ranked if key == winner),
+            None,
+        )
+        _record_verification_comparison(
+            log_path=FUTURES_VERIFY_LOG_PATH,
+            run_type="bonus_sweep",
+            current_best={
+                "label": str(winner),
+                "selected_mode": "UNIFIED",
+                "study_name": selected_source.get("study_name") if isinstance(selected_source, dict) else None,
+                "source_db_name": selected_source.get("db_name") if isinstance(selected_source, dict) else None,
+                "timeframe": str(
+                    (selected_source.get("best_params", {}) if isinstance(selected_source, dict) else {}).get(
+                        "TIMEFRAME",
+                        "1h",
+                    )
+                ),
+                "leverage": _safe_float(
+                    (selected_source.get("best_params", {}) if isinstance(selected_source, dict) else {}).get(
+                        "LEVERAGE"
+                    )
+                ),
+                "holdout_gate_state": "PASS" if holdout_passed else "FAIL",
+                "holdout_gate_reasons": (
+                    selected_eval.get("reasons", [])
+                    if isinstance(selected_eval, dict)
+                    else ["holdout_not_evaluated"]
+                ),
+                "metrics": _extract_summary_metrics(
+                    selected_summary,
+                    {
+                        "selection_rank_score": selected_rank_score,
+                        "train_score": selected_source.get("train_score")
+                        if isinstance(selected_source, dict)
+                        else None,
+                    },
+                ),
+                "selection_summary": selected_selection_summary,
+                "holdout_summary": selected_holdout_summary,
+            },
+            context={
+                "symbols": list(symbols),
+                "selection_window_start": str(oos_start),
+                "selection_window_end": str(selection_end),
+                "holdout_window_start": str(holdout_start),
+                "holdout_window_end": str(holdout_end),
+                "holdout_passed": bool(holdout_passed),
+                "deployment_attempted": bool(deployment_attempted),
+                "deployment_ok": bool(deployment_ok),
+            },
+        )
+        if deployment_attempted and not deployment_ok:
+            sys.exit(1)
 
         print("=" * LOG_WIDTH)
         sys.exit(0)
@@ -1333,12 +1611,15 @@ if __name__ == "__main__":
                 if avg_ret is None:
                     continue
                 
+                summary = summarize_profile(all_results, timeframe=best_params.get("TIMEFRAME"))
                 results.append({
                     'mode': mode,
                     'study_name': study_name,
                     'return': avg_ret,
                     'score': train_score,
-                    'all_results': all_results
+                    'all_results': all_results,
+                    'summary': summary,
+                    'best_params': best_params,
                 })
                 
                 if avg_ret > best_overall_score:
@@ -1367,10 +1648,14 @@ if __name__ == "__main__":
     
     target_db = "futures_strategy.db"
     
+    selected_result = next((res for res in results if res['mode'] == best_mode), results[0])
+    deployment_attempted = False
+    deployment_ok = False
     if best_study_name:
         print(f"[INFO] Saving best strategy ({best_mode}) from MySQL to '{target_db}'...")
         print("       Migrating best params to standard 'futures_strategy' study...")
-        deploy_best_to_local(
+        deployment_attempted = True
+        deployment_ok = deploy_best_to_local(
             source_storage_url=storage_url,
             source_study_name=best_study_name,
             mode_label=str(best_mode),
@@ -1378,6 +1663,35 @@ if __name__ == "__main__":
         )
     else:
         print("[WARN] No best strategy selected.")
+    _record_verification_comparison(
+        log_path=FUTURES_VERIFY_LOG_PATH,
+        run_type="single_mode",
+        current_best={
+            "label": str(selected_result.get("mode")),
+            "selected_mode": str(selected_result.get("mode")),
+            "study_name": selected_result.get("study_name"),
+            "source_db_name": db_name,
+            "timeframe": str(selected_result.get("best_params", {}).get("TIMEFRAME", "1h")),
+            "leverage": _safe_float(selected_result.get("best_params", {}).get("LEVERAGE")),
+            "holdout_gate_state": "SKIPPED",
+            "holdout_gate_reasons": ["bonus_sweep_disabled"],
+            "metrics": _extract_summary_metrics(
+                selected_result.get("summary"),
+                {
+                    "avg_ret": selected_result.get("return"),
+                    "train_score": selected_result.get("score"),
+                },
+            ),
+            "summary": selected_result.get("summary"),
+        },
+        context={
+            "symbols": list(symbols),
+            "deployment_attempted": bool(deployment_attempted),
+            "deployment_ok": bool(deployment_ok),
+        },
+    )
+    if deployment_attempted and not deployment_ok:
+        sys.exit(1)
 
 
 
