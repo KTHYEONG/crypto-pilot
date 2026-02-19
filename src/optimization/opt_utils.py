@@ -1,16 +1,190 @@
+from __future__ import annotations
 
+import logging
 import os
-import optuna
+import re
+from typing import Optional
+
 import numpy as np
+import optuna
+import pandas as pd
 from dataclasses import dataclass
 from decimal import Decimal, ROUND_FLOOR
 
+_logger = logging.getLogger(__name__)
 
-def _env_float(name, default):
+_OPTUNA_MYSQL_TABLES: tuple[str, ...] = (
+    "alembic_version",
+    "studies",
+    "study_directions",
+    "study_system_attributes",
+    "study_user_attributes",
+    "trials",
+    "trial_heartbeats",
+    "trial_intermediate_values",
+    "trial_params",
+    "trial_system_attributes",
+    "trial_user_attributes",
+    "trial_values",
+    "version_info",
+)
+
+
+def cleanup_orphan_studies(
+    storage: optuna.storages.RDBStorage,
+    base_study_name: str,
+    suffix_prefix: str,
+    keep_recent: int = 5,
+) -> None:
+    """Delete old orphaned studies whose names match ``{base_study_name}{suffix_prefix}*``.
+
+    Keeps the ``keep_recent`` most-recent by numeric timestamp suffix.
+    ``suffix_prefix`` should start with the delimiter used in the naming scheme,
+    e.g. ``"__seed_"`` or ``"__s1_"``.
+    """
+    keep_recent = int(max(0, keep_recent))
+    full_prefix = f"{base_study_name}{suffix_prefix}"
+    try:
+        summaries = optuna.study.get_all_study_summaries(storage=storage)
+    except Exception as exc:
+        _logger.warning("cleanup_orphan_studies: list failed for prefix=%s: %s", full_prefix, exc)
+        return
+
+    ts_re = re.compile(r".*_(\d+)$")
+    matched: list[tuple[str, int]] = []
+    for s in summaries:
+        name = s.study_name
+        if not name.startswith(full_prefix):
+            continue
+        m = ts_re.match(name)
+        ts = int(m.group(1)) if m else 0
+        matched.append((name, ts))
+
+    total = len(matched)
+    if total <= keep_recent:
+        _logger.info(
+            "cleanup_orphan_studies: nothing to delete (prefix=%s found=%d keep=%d)",
+            full_prefix, total, keep_recent,
+        )
+        return
+
+    matched.sort(key=lambda x: (x[1], x[0]), reverse=True)
+    to_delete = [name for name, _ in matched[keep_recent:]]
+
+    deleted = 0
+    for name in to_delete:
+        try:
+            optuna.delete_study(study_name=name, storage=storage)
+            deleted += 1
+        except Exception as exc:
+            _logger.warning("cleanup_orphan_studies: delete '%s' failed: %s", name, exc)
+
+    _logger.info(
+        "cleanup_orphan_studies: prefix=%s deleted=%d kept=%d total_before=%d",
+        full_prefix, deleted, total - deleted, total,
+    )
+
+
+def reclaim_mysql_space(storage_url: str) -> None:
+    """Run ``OPTIMIZE TABLE`` on all known Optuna tables to reclaim InnoDB fragmented space.
+
+    Safe to call after ``optuna.delete_study()`` to physically free disk space
+    that InnoDB does not release automatically on logical deletes.
+    Silently skips tables that do not exist in the target DB.
+    """
+    if not storage_url.startswith("mysql"):
+        _logger.info("reclaim_mysql_space: non-MySQL storage, skipping OPTIMIZE TABLE")
+        return
+    try:
+        from sqlalchemy import create_engine, text  # noqa: PLC0415
+    except ImportError:
+        _logger.warning("reclaim_mysql_space: sqlalchemy unavailable, skipping OPTIMIZE TABLE")
+        return
+
+    try:
+        engine = create_engine(storage_url, pool_pre_ping=True)
+        with engine.connect() as conn:
+            for table in _OPTUNA_MYSQL_TABLES:
+                try:
+                    conn.execute(text(f"OPTIMIZE TABLE `{table}`"))
+                    _logger.info("reclaim_mysql_space: OPTIMIZE TABLE `%s` OK", table)
+                except Exception as tbl_exc:
+                    _logger.debug("reclaim_mysql_space: OPTIMIZE TABLE `%s` skipped: %s", table, tbl_exc)
+    except Exception as exc:
+        _logger.warning("reclaim_mysql_space: connection failed: %s", exc)
+
+
+def get_db_size_mb(storage_url: str, db_name: Optional[str] = None) -> float:
+    """Return current MySQL schema size in MB from ``information_schema``.
+
+    Args:
+        storage_url: SQLAlchemy MySQL URL.
+        db_name: Schema name to query. If ``None``, extracted from ``storage_url``.
+
+    Returns:
+        Size in MB, or ``0.0`` on error.
+    """
+    if not storage_url.startswith("mysql"):
+        return 0.0
+    try:
+        from sqlalchemy import create_engine, text  # noqa: PLC0415
+        from sqlalchemy.engine.url import make_url  # noqa: PLC0415
+    except ImportError:
+        return 0.0
+
+    if db_name is None:
+        try:
+            db_name = make_url(storage_url).database or ""
+        except Exception:
+            return 0.0
+
+    try:
+        engine = create_engine(storage_url, pool_pre_ping=True)
+        with engine.connect() as conn:
+            result = conn.execute(
+                text(
+                    "SELECT ROUND(SUM(data_length + index_length) / 1024 / 1024, 2) "
+                    "FROM information_schema.tables "
+                    "WHERE table_schema = :db"
+                ),
+                {"db": db_name},
+            )
+            row = result.fetchone()
+            if row and row[0] is not None:
+                return float(row[0])
+    except Exception as exc:
+        _logger.warning("get_db_size_mb: failed for db=%s: %s", db_name, exc)
+    return 0.0
+
+
+def _env_float(name: str, default: float) -> float:
     try:
         return float(os.getenv(name, default))
     except (TypeError, ValueError):
         return float(default)
+
+
+# Module-level cache for bonus sweep coefficients used in calculate_score().
+# Reads env vars once at import time; restart process to pick up changes.
+_SCORE_COEF_FUT_GROWTH: float = _env_float("FUT_GROWTH_BONUS_COEF", 30.0)
+_SCORE_COEF_FUT_RISK: float = _env_float("FUT_RISK_DRAG_COEF", 8.0)
+_SCORE_COEF_FUT_TAIL: float = _env_float("FUT_TAIL_DRAG_COEF", 12.0)
+_SCORE_COEF_SPOT_GROWTH: float = _env_float("SPOT_GROWTH_BONUS_COEF", 18.0)
+_SCORE_COEF_SPOT_RISK: float = _env_float("SPOT_RISK_DRAG_COEF", 10.0)
+_SCORE_COEF_SPOT_TAIL: float = _env_float("SPOT_TAIL_DRAG_COEF", 10.0)
+_SCORE_COEF_SPOT_COST_DRAG_PENALTY: float = _env_float("SPOT_COST_DRAG_PENALTY", 25.0)
+_SCORE_COEF_SPOT_EXCESS_RETURN_BONUS_WEIGHT: float = _env_float("SPOT_EXCESS_RETURN_BONUS_WEIGHT", 12.0)
+_SCORE_COEF_SPOT_BEAR_REGIME_PENALTY: float = max(0.0, _env_float("SPOT_BEAR_REGIME_PENALTY_COEF", 0.0))
+_SPOT_BEAR_REGIME_START_RAW: str = str(os.getenv("SPOT_BEAR_REGIME_START", "2025-10-01"))
+try:
+    _SPOT_BEAR_REGIME_START_TS: pd.Timestamp = pd.Timestamp(_SPOT_BEAR_REGIME_START_RAW)
+except (TypeError, ValueError):
+    _SPOT_BEAR_REGIME_START_TS = pd.Timestamp("2025-10-01")
+_TF_TRADE_DENSITY: dict[str, float] = {
+    "30m": 1.00,
+    "1h": 0.70,
+    "4h": 0.40,
+}
 
 
 def _env_int(name, default):
@@ -32,12 +206,12 @@ class ObjectiveConfig:
 
     # Baselines
     min_trades_futures: int = 80
-    min_trades_spot: int = 60
+    min_trades_spot: int = 45  # Reduced from 60 for long-only limited opportunities
     target_mdd_futures: float = 38.0
-    target_mdd_spot: float = 28.0
+    target_mdd_spot: float = 22.0
     min_side_ratio_futures: float = 0.15
     consistency_center_futures: float = 0.55
-    consistency_center_spot: float = 0.65
+    consistency_center_spot: float = 0.50  # Relaxed from 0.70 for long-only flat periods
     kelly_center_futures: float = 0.02
     kelly_center_spot: float = 0.01
 
@@ -51,9 +225,9 @@ class ObjectiveConfig:
     expectancy_threshold_pct: float = 0.10
     expectancy_penalty_mult: float = 160.0
     negative_expectancy_penalty_mult: float = 120.0
-    bonus_ret_weight: float = 18.0
+    bonus_ret_weight: float = 28.0
     bonus_pf_weight: float = 8.0
-    bonus_ret_scale: float = 40.0
+    bonus_ret_scale: float = 10.0  # Reduced from 25.0 for better resolution in small return differences
     bonus_pf_scale: float = 0.6
     bonus_pf_center: float = 1.2
 
@@ -71,7 +245,7 @@ class ObjectiveConfig:
     w_risk_ulcer: float = 0.20
 
     # ASINH transform scales (anti-saturation)
-    asinh_growth_scale: float = 0.002
+    asinh_growth_scale: float = 0.0006
     asinh_sortino_scale: float = 2.0
     asinh_sqn_scale: float = 1.8
     asinh_pf_scale: float = 0.8
@@ -92,12 +266,12 @@ def _load_objective_config():
         gate_weight_kelly=_env_float("OBJ_GATE_W_KELLY", 0.20),
         gate_weight_side=_env_float("OBJ_GATE_W_SIDE", 0.30),
         min_trades_futures=_env_int("OBJ_MIN_TRADES_FUTURES", 80),
-        min_trades_spot=_env_int("OBJ_MIN_TRADES_SPOT", 60),
+        min_trades_spot=_env_int("OBJ_MIN_TRADES_SPOT", 45),
         target_mdd_futures=_env_float("OBJ_TARGET_MDD_FUTURES", 38.0),
-        target_mdd_spot=_env_float("OBJ_TARGET_MDD_SPOT", 28.0),
+        target_mdd_spot=_env_float("OBJ_TARGET_MDD_SPOT", 22.0),
         min_side_ratio_futures=_env_float("OBJ_MIN_SIDE_RATIO_FUTURES", 0.15),
         consistency_center_futures=_env_float("OBJ_CONSISTENCY_CENTER_FUTURES", 0.55),
-        consistency_center_spot=_env_float("OBJ_CONSISTENCY_CENTER_SPOT", 0.65),
+        consistency_center_spot=_env_float("OBJ_CONSISTENCY_CENTER_SPOT", 0.50),
         kelly_center_futures=_env_float("OBJ_KELLY_CENTER_FUTURES", 0.02),
         kelly_center_spot=_env_float("OBJ_KELLY_CENTER_SPOT", 0.01),
         gate_scale_activity_ratio=_env_float("OBJ_GATE_SCALE_ACTIVITY_RATIO", 0.25),
@@ -107,9 +281,9 @@ def _load_objective_config():
         expectancy_threshold_pct=_env_float("OBJ_EXPECTANCY_THRESHOLD_PCT", 0.10),
         expectancy_penalty_mult=_env_float("OBJ_EXPECTANCY_PENALTY_MULT", 160.0),
         negative_expectancy_penalty_mult=_env_float("OBJ_NEG_EXPECTANCY_PENALTY_MULT", 120.0),
-        bonus_ret_weight=_env_float("OBJ_BONUS_RET_WEIGHT", 18.0),
+        bonus_ret_weight=_env_float("OBJ_BONUS_RET_WEIGHT", 28.0),
         bonus_pf_weight=_env_float("OBJ_BONUS_PF_WEIGHT", 8.0),
-        bonus_ret_scale=_env_float("OBJ_BONUS_RET_SCALE", 40.0),
+        bonus_ret_scale=_env_float("OBJ_BONUS_RET_SCALE", 10.0),
         bonus_pf_scale=_env_float("OBJ_BONUS_PF_SCALE", 0.6),
         bonus_pf_center=_env_float("OBJ_BONUS_PF_CENTER", 1.2),
         w_growth_signal=_env_float("OBJ_W_GROWTH_SIGNAL", 1.10),
@@ -123,7 +297,7 @@ def _load_objective_config():
         w_risk_mdd=_env_float("OBJ_W_RISK_MDD", 0.45),
         w_risk_cvar=_env_float("OBJ_W_RISK_CVAR", 0.35),
         w_risk_ulcer=_env_float("OBJ_W_RISK_ULCER", 0.20),
-        asinh_growth_scale=_env_float("OBJ_ASINH_GROWTH_SCALE", 0.002),
+        asinh_growth_scale=_env_float("OBJ_ASINH_GROWTH_SCALE", 0.0006),
         asinh_sortino_scale=_env_float("OBJ_ASINH_SORTINO_SCALE", 2.0),
         asinh_sqn_scale=_env_float("OBJ_ASINH_SQN_SCALE", 1.8),
         asinh_pf_scale=_env_float("OBJ_ASINH_PF_SCALE", 0.8),
@@ -172,11 +346,15 @@ def suggest_params(trial, search_space):
             return trial.suggest_categorical(key, spec["choices"])
         if typ == "int":
             if use_log:
-                return trial.suggest_int(key, spec["low"], spec["high"], log=True)
+                low = max(1, spec["low"])
+                high = max(low, spec["high"])
+                return trial.suggest_int(key, low, high, log=True)
             return trial.suggest_int(key, spec["low"], spec["high"], step=spec.get("step"))
         if typ == "float":
             if use_log:
-                return trial.suggest_float(key, spec["low"], spec["high"], log=True)
+                low = max(1e-10, spec["low"])
+                high = max(low, spec["high"])
+                return trial.suggest_float(key, low, high, log=True)
             step = spec.get("step")
             if step is None:
                 return trial.suggest_float(key, spec["low"], spec["high"])
@@ -200,7 +378,7 @@ def suggest_params(trial, search_space):
             "30m": (30, 260),
             "1h": (24, 180),
             "2h": (18, 140),
-            "4h": (12, 96),
+            "4h": (12, 120),  # TODO #4: timeframe-bounded holding cap
             "1d": (8, 60),
             "1w": (4, 24),
         }
@@ -273,11 +451,17 @@ def suggest_params(trial, search_space):
     elif trend_filter == 'VWAP':
         if 'VWAP_STD_MULT' in search_space:
             params['VWAP_STD_MULT'] = _suggest_value('VWAP_STD_MULT', search_space['VWAP_STD_MULT'])
+    elif trend_filter == 'DMI':
+        if 'DMI_PERIOD' in search_space:
+            params['DMI_PERIOD'] = _suggest_value('DMI_PERIOD', search_space['DMI_PERIOD'])
+    elif trend_filter == 'AROON':
+        if 'AROON_PERIOD' in search_space:
+            params['AROON_PERIOD'] = _suggest_value('AROON_PERIOD', search_space['AROON_PERIOD'])
     
     # === Phase 4: Strength-Filter Dependent Parameters ===
     strength_filter = params.get('STRENGTH_FILTER_TYPE', 'NONE')
     
-    if strength_filter in ['ADX', 'VHF', 'MFI', 'RSI', 'STOCHASTIC', 'STOCH_RSI']:
+    if strength_filter in ['ADX', 'VHF', 'MFI', 'RSI', 'STOCHASTIC', 'STOCH_RSI', 'ER', 'WILLIAMS_R']:
         if 'STRENGTH_FILTER_PERIOD' in search_space:
             params['STRENGTH_FILTER_PERIOD'] = _suggest_value('STRENGTH_FILTER_PERIOD', search_space['STRENGTH_FILTER_PERIOD'])
     
@@ -348,6 +532,21 @@ def suggest_params(trial, search_space):
     elif strength_filter == 'NATR':
         if 'NATR_THRESHOLD' in search_space:
             params['NATR_THRESHOLD'] = _suggest_value('NATR_THRESHOLD', search_space['NATR_THRESHOLD'])
+    elif strength_filter == 'GARMAN_KLASS':
+        for key in ['GK_PERIOD', 'GK_THRESHOLD']:
+            if key in search_space:
+                params[key] = _suggest_value(key, search_space[key])
+    elif strength_filter == 'FORCE_INDEX':
+        for key in ['FORCE_INDEX_PERIOD', 'FORCE_INDEX_THRESHOLD']:
+            if key in search_space:
+                params[key] = _suggest_value(key, search_space[key])
+    elif strength_filter == 'WILLIAMS_R':
+        for key in ['WILLR_OVERBOUGHT', 'WILLR_OVERSOLD']:
+            if key in search_space:
+                params[key] = _suggest_value(key, search_space[key])
+    elif strength_filter == 'OBV':
+        if 'OBV_MA_PERIOD' in search_space:
+            params['OBV_MA_PERIOD'] = _suggest_value('OBV_MA_PERIOD', search_space['OBV_MA_PERIOD'])
     
     # === Phase 5: Exit-Type Dependent Parameters ===
     exit_type = params.get('EXIT_TYPE', 'ATR')
@@ -509,6 +708,38 @@ def _blend_gates_with_floor(gates, weights, gate_floor):
     return floor + (1.0 - floor) * weighted
 
 
+def _compute_bear_regime_subwindow_mdd_abs(
+    trades_df: pd.DataFrame,
+    bear_start: pd.Timestamp,
+) -> float:
+    if trades_df.empty or "pnl_pct" not in trades_df.columns:
+        return 0.0
+
+    time_col: Optional[str] = None
+    if "exit_time" in trades_df.columns:
+        time_col = "exit_time"
+    elif "entry_time" in trades_df.columns:
+        time_col = "entry_time"
+    if time_col is None:
+        return 0.0
+
+    ts = pd.to_datetime(trades_df[time_col], errors="coerce")
+    valid_mask = ts.notna() & (ts >= pd.Timestamp(bear_start))
+    if not bool(valid_mask.any()):
+        return 0.0
+
+    sub_returns = pd.to_numeric(trades_df.loc[valid_mask, "pnl_pct"], errors="coerce").dropna().values.astype(np.float64)
+    if sub_returns.size < 3:
+        return 0.0
+
+    sub_equity = np.cumsum(sub_returns)
+    sub_hwm = np.maximum.accumulate(sub_equity)
+    sub_drawdown = sub_hwm - sub_equity
+    if sub_drawdown.size == 0:
+        return 0.0
+    return float(np.max(sub_drawdown))
+
+
 def calculate_score(ret, mdd, trades_df, mode="UNIFIED", market_type="spot", timeframe=None, min_trades_override=None):
     """
     Overfitting-resistant objective (continuous-form):
@@ -543,7 +774,7 @@ def calculate_score(ret, mdd, trades_df, mode="UNIFIED", market_type="spot", tim
     sqn = np.clip(sqn_raw, -10.0, 10.0)
 
     pos_sum = float(np.sum(returns[returns > 0]))
-    neg_sum = abs(float(np.sum(returns[returns < 0])))
+    neg_sum = abs(float(np.sum(downside_returns)))
     pf = pos_sum / neg_sum if neg_sum > 0 else (4.0 if pos_sum > 0 else 0.0)
 
     abs_mdd = max(abs(float(mdd)), 1e-6)
@@ -551,7 +782,7 @@ def calculate_score(ret, mdd, trades_df, mode="UNIFIED", market_type="spot", tim
 
     win_rate = float(np.mean(returns > 0))
     avg_win = float(np.mean(returns[returns > 0])) if np.any(returns > 0) else 0.001
-    avg_loss = abs(float(np.mean(returns[returns < 0]))) if np.any(returns < 0) else 0.001
+    avg_loss = abs(float(np.mean(downside_returns))) if len(downside_returns) > 0 else 0.001
     win_loss_ratio = max(avg_win / max(avg_loss, 1e-9), 1e-6)
     kelly_f = win_rate - ((1.0 - win_rate) / win_loss_ratio)
 
@@ -569,11 +800,10 @@ def calculate_score(ret, mdd, trades_df, mode="UNIFIED", market_type="spot", tim
     ulcer_proxy = float(np.sqrt(np.mean(np.square(drawdowns)))) if len(drawdowns) > 0 else 0.0
 
     # CVaR on tail losses (in pnl_pct units)
-    loss_returns = returns[returns < 0]
-    if len(loss_returns) > 0:
+    if len(downside_returns) > 0:
         alpha = 0.10 if N >= 30 else 0.20
-        var_alpha = float(np.quantile(loss_returns, alpha))
-        tail = loss_returns[loss_returns <= var_alpha]
+        var_alpha = float(np.quantile(downside_returns, alpha))
+        tail = downside_returns[downside_returns <= var_alpha]
         cvar_abs = abs(float(np.mean(tail))) if len(tail) > 0 else abs(var_alpha)
     else:
         cvar_abs = 0.0
@@ -581,23 +811,17 @@ def calculate_score(ret, mdd, trades_df, mode="UNIFIED", market_type="spot", tim
     if not np.isfinite(ulcer_proxy) or not np.isfinite(sortino) or not np.isfinite(calmar):
         return -10000.0
 
-    # Bonus coefficients (A/B/C sweep compatibility)
-    fut_growth_coef = _env_float("FUT_GROWTH_BONUS_COEF", 30.0)
-    fut_risk_drag_coef = _env_float("FUT_RISK_DRAG_COEF", 8.0)
-    fut_tail_drag_coef = _env_float("FUT_TAIL_DRAG_COEF", 12.0)
-    spot_growth_coef = _env_float("SPOT_GROWTH_BONUS_COEF", 18.0)
-    spot_risk_drag_coef = _env_float("SPOT_RISK_DRAG_COEF", 10.0)
-    spot_tail_drag_coef = _env_float("SPOT_TAIL_DRAG_COEF", 10.0)
+    # Bonus coefficients — read from module-level cache (set at import time).
+    fut_growth_coef = _SCORE_COEF_FUT_GROWTH
+    fut_risk_drag_coef = _SCORE_COEF_FUT_RISK
+    fut_tail_drag_coef = _SCORE_COEF_FUT_TAIL
+    spot_growth_coef = _SCORE_COEF_SPOT_GROWTH
+    spot_risk_drag_coef = _SCORE_COEF_SPOT_RISK
+    spot_tail_drag_coef = _SCORE_COEF_SPOT_TAIL
 
     cfg = OBJECTIVE_CFG
 
     # --- 2) Market baselines ---
-    tf_trade_density = {
-        "30m": 1.00,
-        "1h": 0.70,
-        "4h": 0.30,
-    }
-
     if market_type == "futures":
         min_trades = cfg.min_trades_futures
         target_mdd = cfg.target_mdd_futures
@@ -621,9 +845,12 @@ def calculate_score(ret, mdd, trades_df, mode="UNIFIED", market_type="spot", tim
         min_trades = int(min_trades_override)
     else:
         min_trades = int(min_trades)
-        if market_type == "futures" and timeframe is not None:
+        if market_type in {"futures", "spot"} and timeframe is not None:
             tf_key = str(timeframe).strip().lower()
-            density = float(tf_trade_density.get(tf_key, 0.70))
+            density = float(_TF_TRADE_DENSITY.get(tf_key, 0.70))
+            # Spot: 소폭 완화된 밀도 적용 (Futures 대비 +10%p)
+            if market_type == "spot":
+                density = min(1.0, density + 0.10)
             min_trades = int(max(12, round(min_trades * density)))
 
     # --- 3) Growth/Quality/Risk components ---
@@ -660,10 +887,20 @@ def calculate_score(ret, mdd, trades_df, mode="UNIFIED", market_type="spot", tim
         cfg.asinh_clip,
     )
 
+    # Spot-specific weight adjustment for long-only characteristics
+    if market_type == "spot":
+        # Long-only spot: balanced growth/risk emphasis
+        w_growth = 1.25
+        w_risk = 1.00
+    else:
+        # Futures: use default balanced weights
+        w_growth = cfg.w_growth_signal
+        w_risk = cfg.w_risk_signal
+    
     base_signal = (
-        (cfg.w_growth_signal * growth_scale * growth_signal)
+        (w_growth * growth_scale * growth_signal)
         + (cfg.w_quality_signal * quality_signal)
-        - (cfg.w_risk_signal * risk_scale * risk_signal)
+        - (w_risk * risk_scale * risk_signal)
         - (cfg.w_tail_signal * tail_scale * tail_signal)
     )
 
@@ -721,14 +958,54 @@ def calculate_score(ret, mdd, trades_df, mode="UNIFIED", market_type="spot", tim
     score = cfg.base_score_multiplier * confidence * combined_gate * base_signal
 
     # --- 5) Smooth penalties/bonuses ---
-    expectancy_gap = max(cfg.expectancy_threshold_pct - r_avg, 0.0)
-    score -= expectancy_gap * cfg.expectancy_penalty_mult
-    score -= max(-r_avg, 0.0) * cfg.negative_expectancy_penalty_mult
+    # Spot: long-only has NO short-side hedge, so negative expectancy is more destructive.
+    # Threshold raised (0.12→0.18) and penalty increased (180→220) to align
+    # with verify_spot per-symbol positive-return gate (core_symbol_negative_return).
+    if market_type == "spot":
+        expectancy_threshold = 0.18
+        expectancy_penalty = 220.0
+        negative_expectancy_penalty = 150.0
+    else:
+        expectancy_threshold = cfg.expectancy_threshold_pct
+        expectancy_penalty = cfg.expectancy_penalty_mult
+        negative_expectancy_penalty = cfg.negative_expectancy_penalty_mult
+    
+    expectancy_gap = max(expectancy_threshold - r_avg, 0.0)
+    score -= expectancy_gap * expectancy_penalty
+    score -= max(-r_avg, 0.0) * negative_expectancy_penalty
 
+    # Spot-only: cost-drag penalty when fees+slippage exceed half of absolute return
+    if market_type == "spot":
+        round_trip_cost_pct = 0.16
+        total_cost_drag = N * round_trip_cost_pct
+        cost_excess = max(total_cost_drag - (0.5 * abs(float(ret))), 0.0)
+        score -= cost_excess * _SCORE_COEF_SPOT_COST_DRAG_PENALTY
+        bear_penalty_coef = _SCORE_COEF_SPOT_BEAR_REGIME_PENALTY
+        if bear_penalty_coef > 0.0:
+            bear_mdd_abs = _compute_bear_regime_subwindow_mdd_abs(trades_df, _SPOT_BEAR_REGIME_START_TS)
+            if bear_mdd_abs > 0.0:
+                bear_mdd_signal = _asinh_score(
+                    bear_mdd_abs,
+                    max(target_mdd * 0.30, 1e-6),
+                    cfg.asinh_clip,
+                )
+                score -= bear_penalty_coef * bear_mdd_signal
+        # Spot-only PF floor penalty: penalize low profit factor
+        if pf < 1.15:
+            score -= (1.15 - pf) * 180.0
+
+    # Base bonus for return and profit factor
     score += confidence * (
         cfg.bonus_ret_weight * _asinh_score(float(ret), cfg.bonus_ret_scale, cfg.asinh_clip)
         + cfg.bonus_pf_weight * _asinh_score((pf - cfg.bonus_pf_center), cfg.bonus_pf_scale, cfg.asinh_clip)
     )
+    
+    # Spot-specific: per-trade return quality bonus (replaces calmar/abs_mdd proxy)
+    if market_type == "spot":
+        ret_per_trade = float(ret) / max(float(N), 1.0)
+        excess_bonus = _SCORE_COEF_SPOT_EXCESS_RETURN_BONUS_WEIGHT
+        score += confidence * excess_bonus * _asinh_score(ret_per_trade, 0.08, cfg.asinh_clip)
+
 
     if not np.isfinite(score):
         return -10000.0
