@@ -276,7 +276,8 @@ class BacktestEngineFast:
                 'pnl': trades[i][5]
             })
         
-        return self.get_results()
+        result = self.get_results()
+        return result
     
     def get_results(self):
         # [ROBUSTNESS] Sanitize balance if infinite (likely due to extreme compounding)
