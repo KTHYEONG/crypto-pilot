@@ -1,4 +1,4 @@
-﻿"""
+"""
 RealTrader Futures - 24시간 자동 선물 트레이딩 봇 (Production Grade)
 ===================================================================
 P0/P1 개선사항 적용:
@@ -2268,12 +2268,19 @@ class RealTraderFutures:
                     reason = f"Panic Exit (RSI {rsi:.1f})"
                     exit_price_for_calc = candle_open * (1 + slippage)
 
-            if not exit_triggered:
-                if amount > 0 and trend_dir == -1:
+            # Trend Reversal (backtest parity: ENABLE_TREND_EXIT + unrealized_atr < 1.0)
+            if not exit_triggered and bool(params.get('ENABLE_TREND_EXIT', True)):
+                unrealized_atr = 0.0
+                if pos_atr > 0:
+                    if amount > 0:
+                        unrealized_atr = (candle_close - entry_price) / pos_atr
+                    else:
+                        unrealized_atr = (entry_price - candle_close) / pos_atr
+                if amount > 0 and trend_dir == -1 and unrealized_atr < 1.0:
                     exit_triggered = True
                     reason = "Trend Reversal"
                     exit_price_for_calc = candle_open * (1 - slippage)
-                elif amount < 0 and trend_dir == 1:
+                elif amount < 0 and trend_dir == 1 and unrealized_atr < 1.0:
                     exit_triggered = True
                     reason = "Trend Reversal"
                     exit_price_for_calc = candle_open * (1 + slippage)
