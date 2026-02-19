@@ -8,7 +8,7 @@ import json
 # 프로젝트 루트 경로 추가 (모듈 import 문제 해결)
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
-from config.settings import DATA_DIR, BACKTEST_START_DATE, BACKTEST_END_DATE
+from config.settings import DATA_DIR, FUTURES_BACKTEST_START_DATE, FUTURES_BACKTEST_END_DATE
 from src.common.utils import setup_logger
 
 class DataValidator:
@@ -227,8 +227,8 @@ class DataCollector:
         - cache file: data/{symbol}_{timeframe}.parquet
         - only missing front/back date ranges are fetched from API
         """
-        start = start_date or BACKTEST_START_DATE
-        end = end_date or BACKTEST_END_DATE
+        start = start_date or FUTURES_BACKTEST_START_DATE
+        end = end_date or FUTURES_BACKTEST_END_DATE
         req_start = pd.Timestamp(start).normalize()
         req_end = pd.Timestamp(end).normalize()
 
