@@ -89,6 +89,24 @@ def _hurst_numba_logic(data: np.ndarray, window: int) -> np.ndarray:
     return out
 
 
+@njit
+def _aroon_numba(high: np.ndarray, low: np.ndarray, window: int) -> tuple[np.ndarray, np.ndarray]:
+    """Aroon Up/Down: 100 * (period - periods_since_high/low) / period. Causal."""
+    n = len(high)
+    aroon_up = np.empty(n)
+    aroon_down = np.empty(n)
+    aroon_up[:] = np.nan
+    aroon_down[:] = np.nan
+    for i in range(window - 1, n):
+        win_high = high[i - window + 1 : i + 1]
+        win_low = low[i - window + 1 : i + 1]
+        idx_max = np.argmax(win_high)
+        idx_min = np.argmin(win_low)
+        aroon_up[i] = 100.0 * (idx_max + 1) / window
+        aroon_down[i] = 100.0 * (idx_min + 1) / window
+    return aroon_up, aroon_down
+
+
 class IndicatorEngine:
     def __init__(self, cache_mode: str = "disabled") -> None:
         self.cache_mode: CacheMode = _normalize_cache_mode(cache_mode)
@@ -240,8 +258,8 @@ class IndicatorEngine:
             (int(window), float(atr_mult)),
             {},
             lambda: (
-                self.calculate_ema(df["close"], window) + (self.calculate_atr(df, window=10) * atr_mult),
-                self.calculate_ema(df["close"], window) - (self.calculate_atr(df, window=10) * atr_mult),
+                self.calculate_ema(df["close"], window) + (self.calculate_atr(df, window=window) * atr_mult),
+                self.calculate_ema(df["close"], window) - (self.calculate_atr(df, window=window) * atr_mult),
             ),
         )
 
@@ -317,6 +335,43 @@ class IndicatorEngine:
                 index=df.index,
             ),
         )
+
+    def calculate_dmi(
+        self, df: pd.DataFrame, window: int = 14
+    ) -> tuple[pd.Series, pd.Series]:
+        """Directional Movement: +DI and -DI. Causal (Wilder smoothing uses past only)."""
+
+        def _compute() -> tuple[pd.Series, pd.Series]:
+            plus_di = talib.PLUS_DI(
+                df["high"].values, df["low"].values, df["close"].values, timeperiod=window
+            )
+            minus_di = talib.MINUS_DI(
+                df["high"].values, df["low"].values, df["close"].values, timeperiod=window
+            )
+            return (
+                pd.Series(plus_di, index=df.index),
+                pd.Series(minus_di, index=df.index),
+            )
+
+        return self._cached_call("calculate_dmi", df, (int(window),), {}, _compute)
+
+    def calculate_aroon(
+        self, df: pd.DataFrame, window: int = 14
+    ) -> tuple[pd.Series, pd.Series]:
+        """Aroon Up/Down. Causal (rolling window uses only past and current bar)."""
+
+        def _compute() -> tuple[pd.Series, pd.Series]:
+            aup, adown = _aroon_numba(
+                df["high"].values.astype(np.float64),
+                df["low"].values.astype(np.float64),
+                window,
+            )
+            return (
+                pd.Series(aup, index=df.index),
+                pd.Series(adown, index=df.index),
+            )
+
+        return self._cached_call("calculate_aroon", df, (int(window),), {}, _compute)
 
     def calculate_rsi(self, series: pd.Series, window: int = 14) -> pd.Series:
         return self._cached_call(
@@ -579,3 +634,51 @@ class IndicatorEngine:
             {},
             _compute,
         )
+
+    def calculate_force_index(
+        self, df: pd.DataFrame, smooth_period: int = 2
+    ) -> pd.Series:
+        """Force Index: (close - prev_close) * volume, then EMA smoothed. Causal."""
+
+        def _compute() -> pd.Series:
+            raw = df["close"].diff() * df["volume"]
+            raw = raw.fillna(0.0)
+            smoothed = pd.Series(
+                talib.EMA(raw.values.astype(np.float64), timeperiod=smooth_period),
+                index=df.index,
+            )
+            return smoothed
+
+        return self._cached_call(
+            "calculate_force_index", df, (int(smooth_period),), {}, _compute
+        )
+
+    def calculate_williams_r(self, df: pd.DataFrame, window: int = 14) -> pd.Series:
+        """Williams %%R: -100 * (HH - Close) / (HH - LL). Range [-100, 0]. Causal. Div-by-zero -> -50."""
+
+        def _compute() -> pd.Series:
+            out = pd.Series(
+                talib.WILLR(
+                    df["high"].values,
+                    df["low"].values,
+                    df["close"].values,
+                    timeperiod=window,
+                ),
+                index=df.index,
+            )
+            out = out.replace([np.inf, -np.inf], np.nan).fillna(-50.0)
+            return out.clip(-100.0, 0.0)
+
+        return self._cached_call(
+            "calculate_williams_r", df, (int(window),), {}, _compute
+        )
+
+    def calculate_obv(self, df: pd.DataFrame) -> pd.Series:
+        """On Balance Volume: cumulative signed volume by close direction. Causal, no division."""
+
+        def _compute() -> pd.Series:
+            delta = np.sign(df["close"].diff())
+            delta = delta.fillna(0.0)
+            return (delta * df["volume"]).cumsum()
+
+        return self._cached_call("calculate_obv", df, (), {}, _compute)
