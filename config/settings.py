@@ -1,4 +1,3 @@
-import json
 import os
 import sys
 from pathlib import Path
@@ -27,16 +26,6 @@ LOG_DIR = BASE_DIR / "logs"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 LOG_DIR.mkdir(parents=True, exist_ok=True)
-
-# #region agent log
-try:
-    _debug_path = BASE_DIR / "debug-33072f.log"
-    _payload = {"sessionId": "33072f", "hypothesisId": "H1", "location": "config/settings.py", "message": "LOG_DIR resolved", "data": {"BASE_DIR": str(BASE_DIR), "LOG_DIR": str(LOG_DIR), "LOG_DIR_exists": LOG_DIR.exists(), "LOG_DIR_is_dir": LOG_DIR.is_dir()}, "timestamp": __import__("time").time() * 1000}
-    with open(_debug_path, "a", encoding="utf-8") as _f:
-        _f.write(json.dumps(_payload, ensure_ascii=False) + "\n")
-except Exception as _e:
-    pass
-# #endregion
 
 # 데이터베이스 파일 경로 (SQLite)
 DB_PATH = DATA_DIR / "trading_data.db"
