@@ -44,6 +44,14 @@ from config.settings import (
 # ============================================================
 # Structured JSON Logger
 # ============================================================
+class FlushingStreamHandler(logging.StreamHandler):
+    """StreamHandler that flushes after every emit (Docker/non-TTY visibility)."""
+    def emit(self, record: logging.LogRecord) -> None:
+        super().emit(record)
+        if self.stream and hasattr(self.stream, "flush"):
+            self.stream.flush()
+
+
 class JSONFormatter(logging.Formatter):
     """JSON 형식 로그 포맷터 (외부 모니터링 연동용)"""
     def format(self, record):
@@ -94,7 +102,7 @@ def setup_logger(
     if logger.handlers:
         return logger
 
-    stream_handler = logging.StreamHandler()
+    stream_handler = FlushingStreamHandler(sys.stdout)
     stream_handler.setFormatter(logging.Formatter(
         '%(asctime)s - %(levelname)s - %(message)s'
     ))
@@ -109,6 +117,17 @@ def setup_logger(
     # 로그 파일명 자동 생성 (CamelCase -> snake_case)
     if log_prefix is None:
         log_prefix = re.sub(r'(?<!^)(?=[A-Z])', '_', name).lower()
+
+    # Human-readable .log (IDE/호스트에서 확인용)
+    text_log_file = LOG_DIR / f"{log_prefix}.log"
+    text_handler = RotatingFileHandler(
+        str(text_log_file),
+        maxBytes=LOG_MAX_BYTES,
+        backupCount=LOG_BACKUP_COUNT,
+        encoding='utf-8',
+    )
+    text_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(name)s - %(message)s'))
+    logger.addHandler(text_handler)
 
     # JSON 로그 (모니터링 연동용) — 단일 파일만 유지
     json_log_file = LOG_DIR / f"{log_prefix}.jsonl"
