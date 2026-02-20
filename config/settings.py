@@ -89,16 +89,16 @@ LOG_MAX_BYTES = 10 * 1024 * 1024  # 10MB
 LOG_BACKUP_COUNT = 5
 
 # --- 대상 심볼 (Futures) ---
-# [Verified Portfolio] B 1h lev3.0 Holdout 권장안 — 3종목 집중
-# 80만원 합리적 자산증식: Core(BTC/ETH) + DOGE
-FUTURES_TARGET_SYMBOLS = ["BTC/USDT", "ETH/USDT", "DOGE/USDT"]
+# [Verified Portfolio] B 1h Holdout OOS 기준 — Core(BTC/ETH) + 알트 1종(XRP)
+# 80만원 자산증식: OOS 수익·MDD·PF 기준 선정
+FUTURES_TARGET_SYMBOLS = ["BTC/USDT", "ETH/USDT", "XRP/USDT"]
 
 # --- 스터디 이름 (Optuna) ---
 OPTUNA_STUDY_NAMES = ["futures_strategy", "future_strategy", "UNIFIED"]
 
 # --- 포지션 사이징 가중치 (Futures) ---
-# BTC 40% + ETH 40% + DOGE 20% — real_trader_futures.py에서 이 비중으로 매매
-SYMBOL_ALLOCATION_WEIGHTS = {"BTC/USDT": 0.40, "ETH/USDT": 0.40, "DOGE/USDT": 0.20}
+# BTC 35% + ETH 45% + XRP 20% — OOS(holdout) 기준 ETH 우선, 알트 XRP
+SYMBOL_ALLOCATION_WEIGHTS = {"BTC/USDT": 0.35, "ETH/USDT": 0.45, "XRP/USDT": 0.20}
 
 # ============================================================
 # RealTrader Spot 설정 (Upbit)
