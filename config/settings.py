@@ -129,13 +129,13 @@ SPOT_LOOP_INTERVAL_SECONDS = 10  # 메인 루프 간격 (10초)
 SPOT_SYMBOL_DELAY_SECONDS = 2  # 심볼 간 딜레이
 
 # --- 대상 심볼 (Upbit) ---
-# [Option B] Holdout C OOS (2024-04 ~ 2026-02): BTC + DOGE + SOL 균형
-# 50만원 소액: 자산증식·분산 균형 (BTC 40% / DOGE 35% / SOL 25%)
+# [Option A] 공용 풀(Shared Pool) 100% 자산 활용 (자산 증식형 모델)
+# OOS 성과 최상위 3종목. 빠른 자본 회전율과 백테스트(68% 룰) 완전 연동
 SPOT_TARGET_SYMBOLS = ["KRW-BTC", "KRW-DOGE", "KRW-SOL"]
 
-# --- 포지션 사이징 가중치 (Option B - Spot) ---
-# OOS: BTC 34.5% ret / DOGE 43.8% ret / SOL 33.6% ret — 수익·리스크 균형
-SPOT_ALLOCATION_WEIGHTS = {"KRW-BTC": 0.40, "KRW-DOGE": 0.35, "KRW-SOL": 0.25}
+# --- 포지션 사이징 가중치 (Option A - Spot) ---
+# 모든 코인이 전체 자금을 공유하여 기회가 올 때마다 백테스트 최적화 비중인 RISK_PER_TRADE_SPOT(약 68%)을 확보함.
+SPOT_ALLOCATION_WEIGHTS = {"KRW-BTC": 1.0, "KRW-DOGE": 1.0, "KRW-SOL": 1.0}
 
 # --- Optuna Study ---
 SPOT_OPTUNA_STUDY_NAME = "spot_strategy"
