@@ -282,6 +282,15 @@ class RealTraderSpot:
         base_weight_d = self._to_decimal(self.symbol_weights.get(symbol, default_weight_d))
         if base_weight_d <= Decimal("0"):
             base_weight_d = default_weight_d
+            
+        # [ISSUE FIX] 라이브 봇-백테스트 간 Sizing 불일치 해결
+        # Options의 할당량(base_weight)에 옵티마이저가 도출한 RISK_PER_TRADE_SPOT(리스크 웨이트) 적용
+        risk_per_trade_d = self._to_decimal(params.get("RISK_PER_TRADE_SPOT", 0.99))
+        if risk_per_trade_d <= Decimal("0") or risk_per_trade_d > Decimal("1.0"):
+            risk_per_trade_d = Decimal("0.99")
+            
+        base_weight_d = base_weight_d * risk_per_trade_d
+        
         if base_weight_d > Decimal("0.99"):
             base_weight_d = Decimal("0.99")
 
