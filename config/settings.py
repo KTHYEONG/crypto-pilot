@@ -1,7 +1,16 @@
 import json
 import os
+import sys
 from pathlib import Path
 from dotenv import load_dotenv
+
+# Non-TTY (e.g. Docker -d)에서 stdout/stderr 블록 버퍼링 방지 → docker logs 즉시 반영
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+        sys.stderr.reconfigure(line_buffering=True)
+    except Exception:
+        pass
 
 # 로컬 환경 변수 로드 (.env 파일이 있다면)
 load_dotenv()
