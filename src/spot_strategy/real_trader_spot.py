@@ -58,6 +58,8 @@ from config.settings import (
     LOG_BACKUP_COUNT,
     SPOT_OPTUNA_STUDY_NAME,
     MAX_TOTAL_BALANCE_KRW,
+    SPOT_TARGET_SYMBOLS,
+    SPOT_ALLOCATION_WEIGHTS,
 )
 
 # Shared utilities/components
@@ -93,13 +95,9 @@ SPOT_ORDER_POLL_INTERVAL_SEC = float(os.getenv("SPOT_ORDER_POLL_INTERVAL_SEC", "
 SPOT_ENTRY_MIN_FILL_RATIO_DEFAULT = float(os.getenv("SPOT_ENTRY_MIN_FILL_RATIO", "0.60"))
 SPOT_TIME_SYNC_INTERVAL_SEC = int(os.getenv("SPOT_TIME_SYNC_INTERVAL_SEC", "60"))
 
-# Fixed deployment portfolio (small-account optimized):
-# - KRW-ETH: 65%
-# - KRW-BTC: 35%
-SPOT_FIXED_TARGET_SYMBOLS = ["KRW-ETH", "KRW-BTC"]
-SPOT_FIXED_ALLOCATION_WEIGHTS_D = {
-    "KRW-ETH": Decimal("0.65"),
-    "KRW-BTC": Decimal("0.35"),
+# Portfolio from config/settings (Option B: BTC 40% / DOGE 35% / SOL 25%)
+SPOT_ALLOCATION_WEIGHTS_D: Dict[str, Decimal] = {
+    k: Decimal(str(v)) for k, v in SPOT_ALLOCATION_WEIGHTS.items()
 }
 
 
@@ -170,7 +168,7 @@ class RealTraderSpot:
     ):
         self.client = UpbitClient(UPBIT_ACCESS_KEY, UPBIT_SECRET_KEY)
         self.db_path = db_path or str(SPOT_STRATEGY_DB)
-        self.symbols = list(SPOT_FIXED_TARGET_SYMBOLS)
+        self.symbols = list(SPOT_TARGET_SYMBOLS)
         self.symbol_weights = self._build_fixed_symbol_weights(self.symbols)
 
         # Core components
@@ -206,7 +204,7 @@ class RealTraderSpot:
         
         self.load_strategies_from_db()
         logger.info(
-            "Fixed spot portfolio active: "
+            "Spot portfolio (settings): "
             + ", ".join(f"{s}={float(self.symbol_weights.get(s, Decimal('0'))*Decimal('100')):.0f}%" for s in self.symbols)
         )
 
@@ -229,7 +227,7 @@ class RealTraderSpot:
         weights: Dict[str, Decimal] = {}
         total = Decimal("0")
         for symbol in symbols:
-            w = RealTraderSpot._to_decimal(SPOT_FIXED_ALLOCATION_WEIGHTS_D.get(symbol, Decimal("0")))
+            w = RealTraderSpot._to_decimal(SPOT_ALLOCATION_WEIGHTS_D.get(symbol, Decimal("0")))
             if w < Decimal("0"):
                 w = Decimal("0")
             weights[symbol] = w
