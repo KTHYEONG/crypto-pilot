@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import argparse
 import gc
 import json
@@ -6,9 +8,10 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time
+from collections import OrderedDict
 from pathlib import Path
-from statistics import NormalDist
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -26,19 +29,30 @@ try:
 except IndexError:
     sys.path.append(os.getcwd())
 
-from config.optimization_config_modes import GET_SEARCH_SPACE, GET_SPOT_TRADE_GATE_POLICY
-from config.settings import BACKTEST_END_DATE, TRAIN_CUTOFF_DATE
+from config.optimization_config_modes import GET_SEARCH_SPACE
+from config.settings import (
+    SPOT_BACKTEST_START_DATE,
+    SPOT_BACKTEST_END_DATE,
+    SPOT_TRAIN_CUTOFF_DATE,
+)
 from src.common.utils import setup_logger
-from src.optimization.opt_utils import calculate_score, suggest_params, OBJECTIVE_CFG, soft_sigmoid
+from src.optimization.opt_utils import (
+    calculate_score,
+    cleanup_orphan_studies,
+    get_db_size_mb,
+    reclaim_mysql_space,
+    suggest_params,
+    OBJECTIVE_CFG,
+    soft_sigmoid,
+)
 from src.spot_strategy.engine_fast_spot import BacktestEngineFastSpot, backtest_loop_spot_numba
 from src.spot_strategy.upbit_client import UpbitClient
 from src.strategy.strategies import UltimateStrategy
 
-logger = setup_logger("SpotOptimizer")
+logger = setup_logger("SpotOptimizer", write_file=False)
 SHOW_OPTUNA_PROGRESS_BAR = os.getenv("SPOT_SHOW_OPTUNA_PROGRESS_BAR", "0") == "1"
+SPOT_VERBOSE_TRIAL_ATTRS = os.getenv("SPOT_VERBOSE_TRIAL_ATTRS", "0") == "1"
 
-# Use a more recent optimization window to reduce regime drift and stale-history overfit.
-SPOT_START_DATE = os.getenv("SPOT_START_DATE", "2020-01-01")
 SPOT_INITIAL_BALANCE = 1_000_000.0
 DATA_DIR = os.path.join(os.path.dirname(__file__), "../../data")
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -50,10 +64,24 @@ WARMUP_BUFFER_BARS = {"5m": 500, "15m": 420, "30m": 350, "1h": 300, "2h": 250, "
 AWFO_DEFAULTS = {
     "enabled_modes": {"UNIFIED", "ALL"},
     "folds": 3,
-    "min_trades_per_fold": 16,
+    "min_trades_per_fold": 18,
     "min_test_bars": {"5m": 1800, "15m": 1000, "30m": 800, "1h": 560, "2h": 420, "4h": 260, "1d": 140, "1w": 70},
     "embargo_bars": {"5m": 40, "15m": 32, "30m": 24, "1h": 24, "2h": 16, "4h": 12, "1d": 5, "1w": 2},
 }
+# Aligned with futures: shorter TF -> more folds (better alignment with verify 5-split WFA).
+AWFO_ADAPTIVE_FOLDS = {
+    "enabled": os.getenv("SPOT_AWFO_ADAPTIVE_FOLDS", "1") == "1",
+    "reference_tf_minutes": 60,
+    "min_folds": 2,
+    "max_folds": 6,
+    "density_ratio_clip": (0.65, 2.0),
+}
+
+GC_TRIAL_INTERVAL: int = int(
+    os.getenv("SPOT_GC_TRIAL_INTERVAL", os.getenv("OPTUNA_GC_TRIAL_INTERVAL", "25"))
+)
+_gc_trial_counter: int = 0
+_gc_trial_lock = threading.Lock()
 
 STRUCTURE_PARAM_KEYS = [
     "ENTRY_TYPE",
@@ -67,8 +95,6 @@ STRUCTURE_PARAM_KEYS = [
     "TIMEFRAME",
     "USE_DYNAMIC_RISK",
     "ENABLE_SCALE_OUT",
-    "ENABLE_BREAKEVEN",
-    "ENABLE_PYRAMIDING",
 ]
 
 # Keep Stage1 simple: explore only core market-structure dimensions.
@@ -96,16 +122,17 @@ SPOT_STAGE1_STRUCTURE_KEYS = tuple(
 )
 
 # Spot (long-only, no leverage) tuned defaults.
+# Aligned with futures for speed: fewer folds/trials per fidelity step.
 SPOT_TWO_STAGE_UNIFIED_DEFAULTS = {
-    "stage1_total_trials": 2000,
+    "stage1_total_trials": 1200,
     "stage1_fidelity_steps": [
-        {"name": "low", "ratio": 0.45, "symbols": 2, "data_ratio": 0.65, "folds": 2, "min_trades": 16, "startup_ratio": 0.32},
-        {"name": "mid", "ratio": 0.33, "symbols": 2, "data_ratio": 0.82, "folds": 3, "min_trades": 20, "startup_ratio": 0.27},
-        {"name": "high", "ratio": 0.22, "symbols": 2, "data_ratio": 1.00, "folds": 3, "min_trades": 24, "startup_ratio": 0.22},
+        {"name": "low", "ratio": 0.55, "symbols": 1, "data_ratio": 0.45, "folds": 2, "min_trades": 20, "startup_ratio": 0.35},
+        {"name": "mid", "ratio": 0.30, "symbols": 2, "data_ratio": 0.70, "folds": 3, "min_trades": 25, "startup_ratio": 0.28},
+        {"name": "high", "ratio": 0.15, "symbols": 2, "data_ratio": 1.00, "folds": 3, "min_trades": 30, "startup_ratio": 0.22},
     ],
     "promotion_ratio": 0.35,
-    "stage2_top_structures": 4,
-    "stage2_min_trials_per_structure": 120,
+    "stage2_top_structures": 6,
+    "stage2_min_trials_per_structure": 200,
     "stage2_folds": 3,
     "stage2_min_trades": 20,
     "stage2_startup_ratio": 0.18,
@@ -114,11 +141,43 @@ SPOT_TWO_STAGE_UNIFIED_DEFAULTS = {
     "stage2_refine_min_width_ratio": 0.22,
     "stage2_refine_min_samples": 28,
     "stage2_refine_step_span": 5,
+    "stage1_use_hyperband": True,
+    "stage1_hyperband_n_trials": 1200,
+    "stage1_hyperband_rungs": [
+        {"data_ratio": 0.45, "symbols": 1, "folds": 2, "min_trades": 20},
+        {"data_ratio": 0.70, "symbols": 2, "folds": 3, "min_trades": 25},
+        {"data_ratio": 1.00, "symbols": 2, "folds": 3, "min_trades": 30},
+    ],
+    "stage1_hyperband_reduction_factor": 2,
 }
 
+_stage1_steps = SPOT_TWO_STAGE_UNIFIED_DEFAULTS["stage1_fidelity_steps"]
+AWFO_DEFAULTS["folds"] = max(s["folds"] for s in _stage1_steps)
+AWFO_DEFAULTS["min_trades_per_fold"] = min(s["min_trades"] for s in _stage1_steps)
 
-# Global indicator cache to speed up trials with identical signal-generation params
-_INDICATOR_CACHE = {}
+
+# Global indicator cache to speed up trials with identical signal-generation params.
+# Uses OrderedDict for O(1) LRU eviction; capacity controlled via INDICATOR_CACHE_MAXSIZE env var.
+_CACHE_MAXSIZE: int = max(1, int(os.getenv("INDICATOR_CACHE_MAXSIZE", "512")))
+_INDICATOR_CACHE: OrderedDict[tuple, pd.DataFrame] = OrderedDict()
+
+_logger_cache = logging.getLogger(__name__ + ".cache")
+
+
+def maybe_collect_gc(force: bool = False) -> None:
+    if force:
+        gc.collect()
+        return
+    if GC_TRIAL_INTERVAL <= 0:
+        return
+
+    global _gc_trial_counter
+    with _gc_trial_lock:
+        _gc_trial_counter += 1
+        should_collect = (_gc_trial_counter % GC_TRIAL_INTERVAL) == 0
+    if should_collect:
+        gc.collect()
+
 
 def get_signal_params_hash(params: Dict[str, Any]) -> int:
     """Extract and hash only params that affect indicator calculation."""
@@ -130,25 +189,38 @@ def get_signal_params_hash(params: Dict[str, Any]) -> int:
         "ICHIMOKU_TENKAN", "ICHIMOKU_KIJUN", "ICHIMOKU_SENKOU_B", "SAR_STEP", "SAR_MAX",
         "TIMEFRAME"
     }
-    # Create a stable tuple of items for hashing
     sig_params = {k: params[k] for k in indicator_keys if k in params}
     return hash(frozenset(sig_params.items()))
 
+
 def cached_generate_signals(strategy: UltimateStrategy, df: pd.DataFrame, timeframe: str, symbol: str) -> pd.DataFrame:
-    """Wrapper to cache generate_signals results."""
+    """Cache generate_signals results with LRU eviction bounded by _CACHE_MAXSIZE."""
     if df is None or df.empty:
         return df
-    
-    # We use (symbol, timeframe, params_hash, len(df)) as key to be safe
+
     p_hash = get_signal_params_hash(strategy.params)
-    cache_key = (symbol, timeframe, p_hash, len(df))
+    if "datetime" in df.columns:
+        range_start = df["datetime"].iloc[0]
+        range_end = df["datetime"].iloc[-1]
+    else:
+        range_start = df.index[0]
+        range_end = df.index[-1]
+    cache_key = (symbol, timeframe, p_hash, range_start, range_end)
+
+    cache_hit = cache_key in _INDICATOR_CACHE
     
-    if cache_key in _INDICATOR_CACHE:
-        return _INDICATOR_CACHE[cache_key]
-    
-    # Calculate and store
-    result = strategy.generate_signals(df.copy())
-    _INDICATOR_CACHE[cache_key] = result
+    if cache_hit:
+        _INDICATOR_CACHE.move_to_end(cache_key)
+        result = _INDICATOR_CACHE[cache_key]
+    else:
+        result = strategy.generate_signals(df.copy())
+        _INDICATOR_CACHE[cache_key] = result
+        _INDICATOR_CACHE.move_to_end(cache_key)
+
+        if len(_INDICATOR_CACHE) > _CACHE_MAXSIZE:
+            evicted_key, _ = _INDICATOR_CACHE.popitem(last=False)
+            _logger_cache.debug("indicator cache eviction: key=%s size=%d", evicted_key, len(_INDICATOR_CACHE))
+
     return result
 
 
@@ -166,25 +238,12 @@ def _env_int(name: str, default: int) -> int:
         return int(default)
 
 
-SPOT_GATE_POLICY = GET_SPOT_TRADE_GATE_POLICY()
-SPOT_GATE_STAT = dict(SPOT_GATE_POLICY.get("statistical", {}))
-SPOT_GATE_HOLDOUT = dict(SPOT_GATE_POLICY.get("holdout", {}))
-SPOT_GATE_HOLDOUT_SANITY = dict(SPOT_GATE_HOLDOUT.get("sanity_gates", {}))
+# Holdout gates aligned with verify_spot / futures: 3 keys only.
 HOLDOUT_SANITY_GATES = {
-    "core_min_return": float(SPOT_GATE_HOLDOUT_SANITY.get("core_min_return", 0.0)),
-    "core_min_trades": int(SPOT_GATE_HOLDOUT_SANITY.get("core_min_trades", 8)),
-    "core_max_avg_mdd_abs": float(SPOT_GATE_HOLDOUT_SANITY.get("core_max_avg_mdd_abs", 30.0)),
+    "core_min_return": 0.0,
+    "core_min_trades": 30,
+    "core_max_avg_mdd_abs": 35.0,
 }
-HOLDOUT_MIN_SYMBOL_COVERAGE = float(SPOT_GATE_HOLDOUT_SANITY.get("min_symbol_coverage", 0.67))
-SPOT_TF_HOLDOUT_TRADES_PER_30D = dict(SPOT_GATE_HOLDOUT.get("trades_per_30d", {}))
-SPOT_TF_HOLDOUT_MIN_TRADES_FLOOR = dict(SPOT_GATE_HOLDOUT.get("min_trades_floor", {}))
-SPOT_TF_HOLDOUT_MIN_TRADES_CAP = dict(SPOT_GATE_HOLDOUT.get("min_trades_cap", {}))
-SPOT_HOLDOUT_USE_STAT_MIN_TRADES = bool(SPOT_GATE_HOLDOUT.get("use_stat_min_trades", True))
-SPOT_STAT_TRADE_CONFIDENCE = float(SPOT_GATE_STAT.get("confidence", 0.80))
-SPOT_STAT_TRADE_MARGIN_ERROR = float(SPOT_GATE_STAT.get("margin_error", 0.25))
-SPOT_STAT_TRADE_REFERENCE_DAYS = int(SPOT_GATE_STAT.get("reference_days", 120))
-SPOT_STAT_TRADE_DAY_SCALE_EXP = float(SPOT_GATE_STAT.get("day_scale_exp", 0.5))
-SPOT_STAT_TRADE_MIN_DAY_SCALE = float(SPOT_GATE_STAT.get("min_day_scale", 0.6))
 
 
 
@@ -551,14 +610,40 @@ def subset_data_maps(
         subset[sym] = {}
         for tf, df in base_data_maps[sym].items():
             if ratio >= 0.999:
-                sliced = df.copy()
+                sliced = df.copy(deep=False)
             else:
                 take_n = max(200, int(len(df) * ratio))
-                sliced = df.iloc[-take_n:].copy()
+                sliced = df.iloc[-take_n:].copy(deep=False)
             warm = int(getattr(df, "attrs", {}).get("warmup_bars", 0))
             sliced.attrs["warmup_bars"] = min(warm, len(sliced))
             subset[sym][tf] = sliced
     return subset
+
+
+def build_rung_artifacts(
+    data_maps: Dict[str, Dict[str, pd.DataFrame]],
+    symbols: Sequence[str],
+    timeframes: List[str],
+    rung_configs: List[Dict[str, Any]],
+) -> List[Tuple[Dict[str, Dict[str, pd.DataFrame]], Dict[str, Dict[str, np.ndarray]], Dict[str, Any]]]:
+    result: List[Tuple[Dict[str, Dict[str, pd.DataFrame]], Dict[str, Dict[str, np.ndarray]], Dict[str, Any]]] = []
+    for config in rung_configs:
+        step_data = subset_data_maps(
+            data_maps,
+            symbols,
+            n_symbols=config["symbols"],
+            data_ratio=config["data_ratio"],
+        )
+        step_merge_indices = compute_merge_indices(step_data)
+        step_awfo = build_awfo_plan(
+            step_data,
+            timeframes,
+            folds=config["folds"],
+            min_trades=config["min_trades"],
+        )
+        step_awfo["cache"] = build_awfo_runtime_cache(step_data, timeframes, step_awfo)
+        result.append((step_data, step_merge_indices, step_awfo))
+    return result
 
 
 def build_stage1_search_space(full_search_space: Dict[str, dict]) -> Dict[str, dict]:
@@ -622,6 +707,7 @@ def run_seeded_studies(
     objective_fn,
     seeds: Sequence[int],
     min_trials_per_seed: Optional[int] = None,
+    pruner: Optional[optuna.pruners.BasePruner] = None,
 ) -> List[Tuple[int, int, optuna.study.Study, int]]:
     seed_min_trials = int(
         max(
@@ -652,29 +738,53 @@ def run_seeded_studies(
             constant_liar=True,
             warn_independent_sampling=False,
         )
-        pruner = optuna.pruners.MedianPruner(
-            n_startup_trials=max(12, startup // 2),
-            n_warmup_steps=2,
-            interval_steps=1,
+        study_pruner = (
+            pruner
+            if pruner is not None
+            else optuna.pruners.MedianPruner(
+                n_startup_trials=max(12, startup // 2),
+                n_warmup_steps=2,
+                interval_steps=1,
+            )
         )
         study = optuna.create_study(
             study_name=seed_study_name,
             storage=storage,
             direction="maximize",
             sampler=sampler,
-            pruner=pruner,
+            pruner=study_pruner,
         )
 
         no_progress = os.environ.get("OPTUNA_NO_PROGRESS", "0") == "1"
         callbacks = []
         if no_progress:
-            def status_callback(study, trial):
-                completed = len([t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE])
+            status_emit_every = max(1, _env_int("SPOT_STATUS_EMIT_EVERY", 5))
+            status_emit_min_sec = max(0.0, _env_float("SPOT_STATUS_EMIT_MIN_SEC", 1.0))
+            status_state: Dict[str, float] = {"processed": 0.0, "last_emit_ts": 0.0}
+
+            def status_callback(study: optuna.study.Study, trial: optuna.trial.FrozenTrial) -> None:
+                status_state["processed"] += 1.0
+                processed = min(seed_trials, int(status_state["processed"]))
+                now_ts = time.time()
+                last_emit_ts = float(status_state["last_emit_ts"])
+                should_emit = (
+                    processed <= 3
+                    or processed >= seed_trials
+                    or (processed % status_emit_every == 0)
+                    or ((now_ts - last_emit_ts) >= status_emit_min_sec)
+                )
+                if not should_emit:
+                    return
+                status_state["last_emit_ts"] = now_ts
                 try:
-                    best_val = study.best_value
+                    best_val = float(study.best_value)
                 except ValueError:
                     best_val = -float("inf")
-                print(f"[STATUS] {seed_study_name} | Trial {completed}/{seed_trials} | Best: {best_val:.4f}", flush=True)
+                print(
+                    f"[STATUS] {seed_study_name} | Trial {processed}/{seed_trials} | Best: {best_val:.4f}",
+                    flush=True,
+                )
+
             callbacks.append(status_callback)
 
         study.optimize(
@@ -686,6 +796,41 @@ def run_seeded_studies(
         )
         seed_runs.append((seed, seed_trials, study, startup))
     return seed_runs
+
+
+def _snap_params_to_distributions(
+    params: Dict[str, object],
+    distributions: Dict[str, optuna.distributions.BaseDistribution],
+) -> Dict[str, object]:
+    """Snap each param value to the nearest valid grid point in its stored distribution.
+
+    Required when params are re-clipped by SPOT_TF_PARAM_LIMITS after a distribution
+    range change: the clipped value may no longer satisfy the old stored distribution's
+    step/low/high, causing optuna.trial.create_trial to raise ValueError on _validate().
+    """
+    out = dict(params)
+    for key, dist in distributions.items():
+        if key not in out:
+            continue
+        raw = out[key]
+        if isinstance(dist, optuna.distributions.IntDistribution):
+            low, high, step = dist.low, dist.high, max(1, dist.step)
+            v = int(round(float(raw)))
+            v = max(low, min(high, v))
+            v = low + int(round((v - low) / step)) * step
+            out[key] = max(low, min(high, v))
+        elif isinstance(dist, optuna.distributions.FloatDistribution):
+            low, high = dist.low, dist.high
+            v = max(float(low), min(float(high), float(raw)))
+            step = dist.step
+            if step is not None and float(step) > 0.0:
+                v = low + round((v - low) / float(step)) * float(step)
+                v = max(float(low), min(float(high), v))
+            out[key] = v
+        elif isinstance(dist, optuna.distributions.CategoricalDistribution):
+            if raw not in dist.choices and dist.choices:
+                out[key] = dist.choices[0]
+    return out
 
 
 def _publish_best_trial_alias(
@@ -710,6 +855,7 @@ def _publish_best_trial_alias(
     if metadata:
         user_attrs.update(metadata)
     effective_params = apply_spot_tf_param_limits(dict(source_trial.params))
+    effective_params = _snap_params_to_distributions(effective_params, source_trial.distributions)
     frozen = optuna.trial.create_trial(
         params=effective_params,
         distributions=source_trial.distributions,
@@ -728,6 +874,10 @@ def _trial_attr_float(trial: optuna.trial.FrozenTrial, key: str, default: float 
 
 
 def _select_representative_trial(completed: Sequence[optuna.trial.FrozenTrial]) -> optuna.trial.FrozenTrial:
+    """
+    Select trial by value-centric robust score. Value dominates; MDD penalty is capped
+    so high-return trials are not over-penalized (financial: avoid favoring low-return low-MDD).
+    """
     if not completed:
         raise ValueError("completed trials is empty")
     pool_n = max(5, min(24, len(completed)))
@@ -741,9 +891,9 @@ def _select_representative_trial(completed: Sequence[optuna.trial.FrozenTrial]) 
         excess_p25 = _trial_attr_float(tr, "excess_return_p25", ret_p25)
         mdd_avg = _trial_attr_float(tr, "mdd_avg_abs", 0.0)
         mdd_max = _trial_attr_float(tr, "mdd_max_abs", mdd_avg)
-        robust = (0.50 * value) + (0.25 * score_p25) + (0.15 * ret_p25) + (0.10 * excess_p25)
-        robust -= max(0.0, mdd_avg - 20.0) * 0.90
-        robust -= max(0.0, mdd_max - 32.0) * 1.20
+        robust = (0.62 * value) + (0.22 * score_p25) + (0.10 * ret_p25) + (0.06 * excess_p25)
+        mdd_penalty = max(0.0, mdd_avg - 25.0) * 0.40 + max(0.0, mdd_max - 38.0) * 0.60
+        robust -= min(12.0, mdd_penalty)
         if robust > best_score:
             best_score = robust
             best_trial = tr
@@ -754,34 +904,39 @@ SPOT_ROBUST = {
     "w_avg": _env_float("SPOT_FOLD_W_AVG", 0.30),
     "w_p25": _env_float("SPOT_FOLD_W_P25", 0.40),
     "w_worst": _env_float("SPOT_FOLD_W_WORST", 0.30),
-    "cons_target": _env_float("SPOT_FOLD_CONSISTENCY_TARGET", 0.50),
-    "cons_penalty": _env_float("SPOT_FOLD_CONSISTENCY_PENALTY", 55.0),
+    "cons_target": _env_float("SPOT_FOLD_CONSISTENCY_TARGET", 0.55),
+    "cons_penalty": _env_float("SPOT_FOLD_CONSISTENCY_PENALTY", 70.0),
     "cost_stress_per_trade": _env_float("SPOT_COST_STRESS_PER_TRADE_PCT", 0.015),
     "cost_stress_w": _env_float("SPOT_COST_STRESS_WEIGHT", 0.08),
-    "ret_p25_w": _env_float("SPOT_FOLD_RET_P25_WEIGHT", 0.20),
+    # Fold ret p25: futures-aligned (0.25) for fold-level return consistency; spot default 0.18.
+    "ret_p25_w": _env_float("SPOT_FOLD_RET_P25_WEIGHT", 0.18),
     "ret_p25_clip": _env_float("SPOT_FOLD_RET_P25_CLIP", 80.0),
     # Trade-density control: penalize low-activity candidates even if return is high.
     "trade_target_min": _env_int("SPOT_FOLD_TRADE_TARGET_MIN", 12),
     "trade_shortfall_penalty": _env_float("SPOT_FOLD_TRADE_SHORTFALL_PENALTY", 50.0),
     "trade_min_shortfall_penalty": _env_float("SPOT_FOLD_TRADE_MIN_SHORTFALL_PENALTY", 80.0),
-    # Penalize single-fold collapses to improve downside robustness in long-only regimes.
-    "single_fold_loss_threshold": _env_float("SPOT_SINGLE_FOLD_LOSS_THRESHOLD", -18.0),
-    "single_fold_loss_penalty": _env_float("SPOT_SINGLE_FOLD_LOSS_PENALTY", 95.0),
+    # Penalize single-fold collapses (futures-aligned: -150 for min(fold_ret)<-20); spot 140.
+    "single_fold_loss_threshold": _env_float("SPOT_SINGLE_FOLD_LOSS_THRESHOLD", -20.0),
+    "single_fold_loss_penalty": _env_float("SPOT_SINGLE_FOLD_LOSS_PENALTY", 140.0),
     # Cross-symbol blend (futures-inspired, spot-tailored; no long/short balance term).
     "cross_offset": _env_float("SPOT_CROSS_OFFSET", 240.0),
     "cross_hm_weight": _env_float("SPOT_CROSS_HM_WEIGHT", 0.35),
     "cross_gm_weight": _env_float("SPOT_CROSS_GM_WEIGHT", 0.65),
-    "cross_log_dispersion_scale": _env_float("SPOT_CROSS_LOG_DISPERSION_SCALE", 0.22),
-    "cross_eff_ret_weight": _env_float("SPOT_CROSS_EFF_RET_WEIGHT", 11.0),
+    "cross_log_dispersion_scale": _env_float("SPOT_CROSS_LOG_DISPERSION_SCALE", 0.18),
+    # Efficiency boost scales (futures-aligned: ret/45, (pf-1.1)/0.9); spot ret/45, (pf-1.05)/0.85.
+    "cross_eff_ret_scale": _env_float("SPOT_CROSS_EFF_RET_SCALE", 45.0),
+    "cross_eff_pf_center": _env_float("SPOT_CROSS_EFF_PF_CENTER", 1.05),
+    "cross_eff_pf_scale": _env_float("SPOT_CROSS_EFF_PF_SCALE", 0.85),
+    "cross_eff_ret_weight": _env_float("SPOT_CROSS_EFF_RET_WEIGHT", 12.0),
     "cross_eff_pf_weight": _env_float("SPOT_CROSS_EFF_PF_WEIGHT", 4.0),
-    "cross_ret_p25_weight": _env_float("SPOT_CROSS_RET_P25_WEIGHT", 10.0),
+    "cross_ret_p25_weight": _env_float("SPOT_CROSS_RET_P25_WEIGHT", 11.0),
     "cross_pf_p25_weight": _env_float("SPOT_CROSS_PF_P25_WEIGHT", 4.0),
     "cross_score_p25_weight": _env_float("SPOT_CROSS_SCORE_P25_WEIGHT", 0.08),
-    # Futures-inspired AWFO CV gate (fold dispersion control).
-    "awfo_cv_target": _env_float("SPOT_AWFO_CV_TARGET", 0.70),
-    "awfo_cv_gate_k": _env_float("SPOT_AWFO_CV_GATE_K", 6.5),
+    # Futures-inspired AWFO CV gate (fold dispersion control); aligned with futures.
+    "awfo_cv_target": _env_float("SPOT_AWFO_CV_TARGET", 0.55),
+    "awfo_cv_gate_k": _env_float("SPOT_AWFO_CV_GATE_K", 8.5),
     "awfo_cv_gate_floor": _env_float("SPOT_AWFO_CV_GATE_FLOOR", 0.45),
-    "awfo_cv_penalty_mult": _env_float("SPOT_AWFO_CV_PENALTY_MULT", 70.0),
+    "awfo_cv_penalty_mult": _env_float("SPOT_AWFO_CV_PENALTY_MULT", 90.0),
     "awfo_cv_weight_score": _env_float("SPOT_AWFO_CV_WEIGHT_SCORE", 0.70),
     "awfo_cv_weight_return": _env_float("SPOT_AWFO_CV_WEIGHT_RETURN", 0.30),
     # Futures-inspired fold-level Calmar distribution scoring.
@@ -792,90 +947,29 @@ SPOT_ROBUST = {
     "fold_calmar_w_worst": _env_float("SPOT_FOLD_CALMAR_W_WORST", 0.30),
     "fold_calmar_score_mult": _env_float("SPOT_FOLD_CALMAR_SCORE_MULT", 42.0),
     # Futures-inspired soft-sigmoid cross-symbol MDD guard.
-    "mdd_soft_guard_ratio": _env_float("SPOT_MDD_SOFT_GUARD_RATIO", 1.7),
-    "mdd_soft_guard_avg_ratio": _env_float("SPOT_MDD_SOFT_GUARD_AVG_RATIO", 1.45),
+    "mdd_soft_guard_ratio": _env_float("SPOT_MDD_SOFT_GUARD_RATIO", 1.5),
+    "mdd_soft_guard_avg_ratio": _env_float("SPOT_MDD_SOFT_GUARD_AVG_RATIO", 1.35),
     "mdd_soft_guard_k": _env_float("SPOT_MDD_SOFT_GUARD_K", 0.35),
-    "mdd_soft_guard_penalty": _env_float("SPOT_MDD_SOFT_GUARD_PENALTY", 180.0),
+    "mdd_soft_guard_penalty": _env_float("SPOT_MDD_SOFT_GUARD_PENALTY", 240.0),
     "mdd_soft_guard_max_weight": _env_float("SPOT_MDD_SOFT_GUARD_MAX_WEIGHT", 0.65),
     "mdd_soft_guard_avg_weight": _env_float("SPOT_MDD_SOFT_GUARD_AVG_WEIGHT", 0.35),
     "cross_stress_p25_weight": _env_float("SPOT_CROSS_STRESS_P25_WEIGHT", 0.10),
-    "excess_ret_p25_w": _env_float("SPOT_EXCESS_RET_P25_WEIGHT", 0.12),
-    "bear_excess_w": _env_float("SPOT_BEAR_EXCESS_WEIGHT", 0.08),
-    "cross_excess_p25_weight": _env_float("SPOT_CROSS_EXCESS_P25_WEIGHT", 0.00),
-    "cross_excess_avg_weight": _env_float("SPOT_CROSS_EXCESS_AVG_WEIGHT", 0.00),
-    # PRIMARY guardrails: avoid selecting "less bad" but negative expectancy candidates.
+    # Fold-level excess return weight (simplified: single weight only)
+    "excess_ret_p25_w": _env_float("SPOT_EXCESS_RET_P25_WEIGHT", 0.20),
+    # Cross-level excess return weight (simplified: single weight only)
+    "cross_excess_p25_weight": _env_float("SPOT_CROSS_EXCESS_P25_WEIGHT", 8.0),
+    # PRIMARY gate: require non-negative core (BTC/ETH) avg return in train (financial: positive expectancy).
     "primary_require_symbols": _env_int("SPOT_PRIMARY_REQUIRE_SYMBOLS", 1),
-    "primary_avg_pf_floor": _env_float("SPOT_PRIMARY_AVG_PF_FLOOR", 1.00),
-    "primary_p25_pf_floor": _env_float("SPOT_PRIMARY_P25_PF_FLOOR", 0.90),
-    "primary_avg_ret_floor": _env_float("SPOT_PRIMARY_AVG_RET_FLOOR", -0.30),
-    "primary_p25_ret_floor": _env_float("SPOT_PRIMARY_P25_RET_FLOOR", -1.20),
-    "primary_p25_pf_penalty_mult": _env_float("SPOT_PRIMARY_P25_PF_PENALTY_MULT", 35.0),
-    "primary_p25_ret_penalty_mult": _env_float("SPOT_PRIMARY_P25_RET_PENALTY_MULT", 6.0),
-    "primary_final_pf_penalty_mult": _env_float("SPOT_PRIMARY_FINAL_PF_PENALTY_MULT", 60.0),
-    "primary_final_ret_penalty_mult": _env_float("SPOT_PRIMARY_FINAL_RET_PENALTY_MULT", 10.0),
-    "primary_hard_avg_pf_floor": _env_float("SPOT_PRIMARY_HARD_AVG_PF_FLOOR", 0.95),
-    "primary_hard_p25_pf_floor": _env_float("SPOT_PRIMARY_HARD_P25_PF_FLOOR", 0.75),
-    "primary_hard_avg_ret_floor": _env_float("SPOT_PRIMARY_HARD_AVG_RET_FLOOR", -1.50),
-    "primary_hard_p25_ret_floor": _env_float("SPOT_PRIMARY_HARD_P25_RET_FLOOR", -3.00),
-    "soft_mdd_avg_center": _env_float("SPOT_SOFT_MDD_AVG_CENTER", 24.0),
+    "primary_avg_ret_floor": _env_float("SPOT_PRIMARY_AVG_RET_FLOOR", 0.0),
+    "soft_mdd_avg_center": _env_float("SPOT_SOFT_MDD_AVG_CENTER", 16.0),
     "soft_mdd_avg_mult": _env_float("SPOT_SOFT_MDD_AVG_MULT", 1.4),
     "soft_mdd_max_center": _env_float("SPOT_SOFT_MDD_MAX_CENTER", 36.0),
     "soft_mdd_max_mult": _env_float("SPOT_SOFT_MDD_MAX_MULT", 2.0),
-    "collapsed_symbol_penalty": _env_float("SPOT_COLLAPSED_SYMBOL_PENALTY", 90.0),
-    # Complexity control: discourage fragile over-engineered parameter sets.
-    "complexity_feature_penalty": _env_float("SPOT_COMPLEXITY_FEATURE_PENALTY", 0.0),
-    "complexity_scale_out_ratio_center": _env_float("SPOT_COMPLEXITY_SCALE_OUT_RATIO_CENTER", 0.50),
-    "complexity_scale_out_ratio_mult": _env_float("SPOT_COMPLEXITY_SCALE_OUT_RATIO_MULT", 0.0),
-    "complexity_pyramid_add_penalty": _env_float("SPOT_COMPLEXITY_PYRAMID_ADD_PENALTY", 0.0),
-    "complexity_pyramid_risk_center": _env_float("SPOT_COMPLEXITY_PYRAMID_RISK_CENTER", 0.30),
-    "complexity_pyramid_risk_mult": _env_float("SPOT_COMPLEXITY_PYRAMID_RISK_MULT", 0.0),
-    "trade_density_shortfall_penalty": _env_float("SPOT_TRADE_DENSITY_SHORTFALL_PENALTY", 40.0),
-    "trade_density_min_shortfall_penalty": _env_float("SPOT_TRADE_DENSITY_MIN_SHORTFALL_PENALTY", 65.0),
+    # Futures-aligned: stronger penalty for any symbol with near-zero score (long-only risk).
+    "collapsed_symbol_penalty": _env_float("SPOT_COLLAPSED_SYMBOL_PENALTY", 120.0),
     # P0: prevent low-sample PF explosions and inactive winners.
     "pf_clip_per_symbol": _env_float("SPOT_PF_CLIP_PER_SYMBOL", 6.0),
-    "cross_pooled_pf_weight": _env_float("SPOT_CROSS_POOLED_PF_WEIGHT", 5.5),
-    "primary_pooled_pf_floor": _env_float("SPOT_PRIMARY_POOLED_PF_FLOOR", 1.00),
-    "primary_pooled_pf_hard_floor": _env_float("SPOT_PRIMARY_POOLED_PF_HARD_FLOOR", 0.90),
-    "primary_pooled_pf_penalty_mult": _env_float("SPOT_PRIMARY_POOLED_PF_PENALTY_MULT", 75.0),
     "primary_total_trade_target": _env_int("SPOT_PRIMARY_TOTAL_TRADE_TARGET", 44),
-    "primary_total_trade_hard_floor": _env_int("SPOT_PRIMARY_TOTAL_TRADE_HARD_FLOOR", 20),
-    "primary_total_trade_penalty_mult": _env_float("SPOT_PRIMARY_TOTAL_TRADE_PENALTY_MULT", 150.0),
-    "all_total_trade_target": _env_int("SPOT_ALL_TOTAL_TRADE_TARGET", 96),
-    "all_total_trade_penalty_mult": _env_float("SPOT_ALL_TOTAL_TRADE_PENALTY_MULT", 60.0),
-    # Core objective alignment (P0): absolute return/PF/MDD/trade sufficiency.
-    "core_weight_ret": _env_float("SPOT_CORE_WEIGHT_RET", 6.5),
-    "core_weight_pooled_pf": _env_float("SPOT_CORE_WEIGHT_POOLED_PF", 70.0),
-    "core_weight_pf_p25": _env_float("SPOT_CORE_WEIGHT_PF_P25", 36.0),
-    "core_mdd_penalty_mult": _env_float("SPOT_CORE_MDD_PENALTY_MULT", 2.8),
-    "core_score_mix": _env_float("SPOT_CORE_SCORE_MIX", 0.85),
-    # Risk-budget objective: maximize return while staying near a practical MDD budget.
-    "risk_budget_mix": _env_float("SPOT_RISK_BUDGET_MIX", 0.30),
-    "risk_budget_target_mdd": _env_float("SPOT_RISK_BUDGET_TARGET_MDD", 18.5),
-    "risk_budget_target_band": _env_float("SPOT_RISK_BUDGET_TARGET_BAND", 0.35),
-    "risk_budget_low_util_floor": _env_float("SPOT_RISK_BUDGET_LOW_UTIL_FLOOR", 0.55),
-    "risk_budget_ret_weight": _env_float("SPOT_RISK_BUDGET_RET_WEIGHT", 14.0),
-    "risk_budget_pf_weight": _env_float("SPOT_RISK_BUDGET_PF_WEIGHT", 12.0),
-    "risk_budget_center_bonus": _env_float("SPOT_RISK_BUDGET_CENTER_BONUS", 6.0),
-    "risk_budget_under_penalty_mult": _env_float("SPOT_RISK_BUDGET_UNDER_PENALTY_MULT", 14.0),
-    "risk_budget_over_penalty_mult": _env_float("SPOT_RISK_BUDGET_OVER_PENALTY_MULT", 36.0),
-    "risk_budget_hard_mdd_cap": _env_float("SPOT_RISK_BUDGET_HARD_MDD_CAP", 28.0),
-    "core_pf_activity_ref_primary_trades": _env_float("SPOT_CORE_PF_ACTIVITY_REF_PRIMARY_TRADES", 36.0),
-    "core_pf_activity_ref_all_trades": _env_float("SPOT_CORE_PF_ACTIVITY_REF_ALL_TRADES", 80.0),
-    "core_pf_p25_activity_ref_min_trades": _env_float("SPOT_CORE_PF_P25_ACTIVITY_REF_MIN_TRADES", 18.0),
-    "core_activity_floor": _env_float("SPOT_CORE_ACTIVITY_FLOOR", 0.05),
-    # Low-sample/fake-PF suppression.
-    "loss_trade_floor_all": _env_int("SPOT_LOSS_TRADE_FLOOR_ALL", 20),
-    "loss_trade_floor_primary": _env_int("SPOT_LOSS_TRADE_FLOOR_PRIMARY", 12),
-    "loss_trade_shortfall_penalty_all": _env_float("SPOT_LOSS_TRADE_SHORTFALL_PENALTY_ALL", 140.0),
-    "loss_trade_shortfall_penalty_primary": _env_float("SPOT_LOSS_TRADE_SHORTFALL_PENALTY_PRIMARY", 190.0),
-    "single_win_share_cap": _env_float("SPOT_SINGLE_WIN_SHARE_CAP", 0.55),
-    "single_win_share_penalty_mult": _env_float("SPOT_SINGLE_WIN_SHARE_PENALTY_MULT", 200.0),
-    # Regime coverage control: require minimal up/down samples when configured.
-    "regime_up_bh_threshold": _env_float("SPOT_REGIME_UP_BH_THRESHOLD", 5.0),
-    "regime_down_bh_threshold": _env_float("SPOT_REGIME_DOWN_BH_THRESHOLD", -5.0),
-    "regime_min_up_samples": _env_int("SPOT_REGIME_MIN_UP_SAMPLES", 0),
-    "regime_min_down_samples": _env_int("SPOT_REGIME_MIN_DOWN_SAMPLES", 0),
-    "regime_missing_penalty": _env_float("SPOT_REGIME_MISSING_PENALTY", 0.0),
 }
 
 SPOT_PRIMARY_SYMBOLS = tuple(
@@ -951,7 +1045,7 @@ SPOT_TF_PARAM_LIMITS = {
         "SAR_STEP": {"type": "float", "low": 0.005, "high": 0.040, "step": 0.005},
     },
     "4h": {
-        "ENTRY_PERIOD": {"type": "int", "low": 14, "high": 140, "step": 1},
+        "ENTRY_PERIOD": {"type": "int", "low": 14, "high": 80, "step": 1},
         "MA_PERIOD": {"type": "int", "low": 16, "high": 170, "step": 1},
         "ATR_PERIOD": {"type": "int", "low": 10, "high": 28, "step": 1},
         "STOP_LOSS_PCT": {"type": "float", "low": 0.010, "high": 0.036, "step": 0.002},
@@ -1172,6 +1266,47 @@ def compute_merge_indices(data_maps: Dict[str, Dict[str, pd.DataFrame]]) -> Dict
     return merge_indices
 
 
+def _timeframe_to_minutes(tf: str) -> Optional[int]:
+    """Parse timeframe string to minutes (e.g. 30m -> 30, 1h -> 60)."""
+    match = re.fullmatch(r"(\d+)([mhd])", str(tf).strip().lower())
+    if not match:
+        return None
+    value = int(match.group(1))
+    unit = match.group(2)
+    if unit == "m":
+        return value
+    if unit == "h":
+        return value * 60
+    if unit == "d":
+        return value * 1440
+    return None
+
+
+def resolve_awfo_fold_count(
+    tf: str,
+    n_bars: int,
+    base_folds: int,
+    min_test_bars: int,
+    embargo_bars: int,
+) -> int:
+    """Resolve fold count per TF; shorter TF -> more folds (aligned with futures)."""
+    resolved = max(1, int(base_folds))
+    if AWFO_ADAPTIVE_FOLDS["enabled"]:
+        tf_minutes = _timeframe_to_minutes(tf)
+        if tf_minutes and tf_minutes > 0:
+            ref_minutes = max(1, int(AWFO_ADAPTIVE_FOLDS["reference_tf_minutes"]))
+            density_ratio = np.sqrt(ref_minutes / float(tf_minutes))
+            clip_low, clip_high = AWFO_ADAPTIVE_FOLDS["density_ratio_clip"]
+            density_ratio = float(np.clip(density_ratio, clip_low, clip_high))
+            resolved = int(np.rint(base_folds * density_ratio))
+        min_folds = max(1, int(AWFO_ADAPTIVE_FOLDS["min_folds"]))
+        max_folds = max(min_folds, int(AWFO_ADAPTIVE_FOLDS["max_folds"]))
+        resolved = int(np.clip(resolved, min_folds, max_folds))
+    required_block = max(2, int(min_test_bars) + max(0, int(embargo_bars)))
+    feasible_max = max(1, int(np.floor(n_bars / float(required_block))) - 1)
+    return max(1, min(resolved, feasible_max))
+
+
 def build_anchored_splits(n_bars: int, n_folds: int, embargo_bars: int = 0, min_test_bars: int = 120) -> List[Tuple[int, int]]:
     if n_folds < 1 or n_bars < (n_folds + 1):
         return []
@@ -1188,19 +1323,41 @@ def build_anchored_splits(n_bars: int, n_folds: int, embargo_bars: int = 0, min_
 
 
 def build_awfo_plan(data_maps: Dict[str, Dict[str, pd.DataFrame]], timeframes: List[str], folds: int, min_trades: int) -> Dict:
-    plan = {"enabled": True, "splits": {}, "min_trades_per_fold": int(min_trades)}
+    """Build AWFO split plan; fold count resolved per TF when adaptive enabled (aligned with futures)."""
+    plan: Dict[str, Any] = {
+        "enabled": True,
+        "splits": {},
+        "min_trades_per_fold": int(min_trades),
+        "base_folds": int(folds),
+        "adaptive_folds": bool(AWFO_ADAPTIVE_FOLDS["enabled"]),
+        "folds_per_tf": {},
+    }
     for sym, tf_map in data_maps.items():
         plan["splits"][sym] = {}
+        plan["folds_per_tf"][sym] = {}
         for tf in timeframes:
             if tf not in tf_map or tf_map[tf].empty:
                 plan["splits"][sym][tf] = []
+                plan["folds_per_tf"][sym][tf] = 0
                 continue
-            plan["splits"][sym][tf] = build_anchored_splits(
-                n_bars=len(tf_map[tf]),
-                n_folds=int(folds),
-                embargo_bars=AWFO_DEFAULTS["embargo_bars"].get(tf, 0),
-                min_test_bars=AWFO_DEFAULTS["min_test_bars"].get(tf, 120),
+            n_bars = len(tf_map[tf])
+            min_test_bars = AWFO_DEFAULTS["min_test_bars"].get(tf, 120)
+            embargo_bars = AWFO_DEFAULTS["embargo_bars"].get(tf, 0)
+            effective_folds = resolve_awfo_fold_count(
+                tf=tf,
+                n_bars=n_bars,
+                base_folds=int(folds),
+                min_test_bars=int(min_test_bars),
+                embargo_bars=int(embargo_bars),
             )
+            splits = build_anchored_splits(
+                n_bars=n_bars,
+                n_folds=effective_folds,
+                embargo_bars=embargo_bars,
+                min_test_bars=min_test_bars,
+            )
+            plan["splits"][sym][tf] = splits
+            plan["folds_per_tf"][sym][tf] = int(effective_folds)
     return plan
 
 
@@ -1224,7 +1381,7 @@ def build_awfo_runtime_cache(data_maps: Dict[str, Dict[str, pd.DataFrame]], time
             folds_ctx: List[Dict] = []
             for test_start, test_end in splits_by_symbol.get(symbol, {}).get(tf, []):
                 seg_start = max(0, test_start - WARMUP_BUFFER_BARS.get(tf, 200))
-                segment_hourly = hourly_df.iloc[seg_start:test_end].copy()
+                segment_hourly = hourly_df.iloc[seg_start:test_end].copy(deep=False)
                 if len(segment_hourly) < 100:
                     continue
                 segment_hourly.attrs["warmup_bars"] = int(test_start - seg_start)
@@ -1232,7 +1389,9 @@ def build_awfo_runtime_cache(data_maps: Dict[str, Dict[str, pd.DataFrame]], time
                 actual_end_time = pd.Timestamp(hourly_df.iloc[test_end - 1]["datetime"])
                 end_time = pd.Timestamp(segment_hourly["datetime"].iloc[-1])
                 daily_start = pd.Timestamp(segment_hourly["datetime"].iloc[0]) - pd.Timedelta(days=DAILY_BUFFER_DAYS)
-                segment_daily = daily_df[(daily_df["datetime"] >= daily_start) & (daily_df["datetime"] <= end_time)].copy()
+                segment_daily = daily_df[
+                    (daily_df["datetime"] >= daily_start) & (daily_df["datetime"] <= end_time)
+                ].copy(deep=False)
                 if segment_daily.empty:
                     continue
                 folds_ctx.append(
@@ -1281,6 +1440,38 @@ def calculate_oos_mdd_pct(pnl_series: pd.Series, initial_balance: float) -> floa
     return float(np.min(dd)) if len(dd) else 0.0
 
 
+def calculate_oos_metrics_from_trades(
+    trades_df: pd.DataFrame,
+    start_time: pd.Timestamp,
+    end_time: pd.Timestamp,
+    initial_balance: float,
+) -> Optional[Tuple[float, float]]:
+    """Compute OOS return and MDD from trades only (no equity array)."""
+    if trades_df is None or trades_df.empty or "exit_time" not in trades_df.columns or "pnl" not in trades_df.columns:
+        return None
+    start_time = pd.Timestamp(start_time)
+    end_time = pd.Timestamp(end_time)
+    df = trades_df.copy()
+    df["exit_time"] = pd.to_datetime(df["exit_time"])
+    mask = (df["exit_time"] >= start_time) & (df["exit_time"] <= end_time)
+    window = df.loc[mask].sort_values("exit_time")
+    if window.empty:
+        return None
+    pnl = pd.to_numeric(window["pnl"], errors="coerce").to_numpy(dtype=np.float64)
+    pnl = pnl[np.isfinite(pnl)]
+    if pnl.size == 0:
+        return None
+    start_equity = float(initial_balance)
+    equity = start_equity + np.cumsum(pnl)
+    end_equity = float(equity[-1])
+    ret_pct = float((end_equity - start_equity) / float(initial_balance) * 100.0)
+    run_max = np.maximum.accumulate(equity)
+    run_max[run_max <= 0.0] = 1e-9
+    dd = (equity - run_max) / run_max * 100.0
+    mdd_pct = float(np.min(dd)) if dd.size else 0.0
+    return (ret_pct, mdd_pct)
+
+
 def calculate_oos_metrics_from_equity(
     equity_curve: Optional[Sequence[float]],
     start_idx: int,
@@ -1326,54 +1517,27 @@ def calculate_oos_benchmark_return_pct(
     return float(((end_px / start_px) - 1.0) * 100.0)
 
 
-def _normalize_holdout_tf_key(timeframe: Optional[str]) -> str:
-    tf = str(timeframe or "").strip().lower()
-    return tf if tf in SPOT_TF_HOLDOUT_TRADES_PER_30D else "default"
-
-
-def _compute_statistical_trade_min_trades(window_days: int) -> int:
-    days = max(1, int(window_days))
-    confidence = float(np.clip(SPOT_STAT_TRADE_CONFIDENCE, 0.50, 0.99))
-    margin_error = float(np.clip(SPOT_STAT_TRADE_MARGIN_ERROR, 0.05, 0.45))
-    ref_days = max(1, int(SPOT_STAT_TRADE_REFERENCE_DAYS))
-    scale_exp = float(np.clip(SPOT_STAT_TRADE_DAY_SCALE_EXP, 0.25, 1.00))
-    min_day_scale = float(np.clip(SPOT_STAT_TRADE_MIN_DAY_SCALE, 0.25, 1.00))
-
-    z = float(NormalDist().inv_cdf(0.5 + (confidence / 2.0)))
-    base_samples = int(np.ceil((z * z * 0.25) / (margin_error * margin_error)))
-    day_ratio = max(1e-9, float(days) / float(ref_days))
-    day_scale = max(min_day_scale, float(day_ratio ** scale_exp))
-    scaled_samples = int(np.ceil(float(base_samples) * day_scale))
-    return int(max(1, scaled_samples))
-
-
 def compute_dynamic_holdout_min_trades(
     holdout_start: pd.Timestamp,
     holdout_end: pd.Timestamp,
-    timeframe: Optional[str] = None,
 ) -> int:
-    days = max(1, int((holdout_end.normalize() - holdout_start.normalize()).days) + 1)
-    tf_key = _normalize_holdout_tf_key(timeframe)
-    per_30d = float(SPOT_TF_HOLDOUT_TRADES_PER_30D.get(tf_key, SPOT_TF_HOLDOUT_TRADES_PER_30D["default"]))
-    floor = int(SPOT_TF_HOLDOUT_MIN_TRADES_FLOOR.get(tf_key, SPOT_TF_HOLDOUT_MIN_TRADES_FLOOR["default"]))
-    cap = int(SPOT_TF_HOLDOUT_MIN_TRADES_CAP.get(tf_key, SPOT_TF_HOLDOUT_MIN_TRADES_CAP["default"]))
-    scaled = int(round((days / 30.0) * max(0.1, per_30d)))
-    activity_gate = int(max(1, min(max(floor, scaled), max(floor, cap))))
-    if not SPOT_HOLDOUT_USE_STAT_MIN_TRADES:
-        return activity_gate
-    stat_gate = int(min(_compute_statistical_trade_min_trades(days), max(floor, cap)))
-    return int(max(activity_gate, stat_gate))
+    """Same formula as futures / verify_spot: days * 0.18, min 20."""
+    holdout_days = max(1, int((holdout_end.normalize() - holdout_start.normalize()).days) + 1)
+    dynamic_floor = int(round(holdout_days * 0.18))
+    return max(20, dynamic_floor)
 
 
 def evaluate_holdout_sanity(summary: Optional[Dict], min_trades_gate: Optional[int] = None) -> Tuple[bool, List[str]]:
+    """Three checks only (aligned with futures / verify_spot): return, min_trades, mdd."""
     if not summary:
         return False, ["holdout_no_summary"]
-    trades_gate = int(min_trades_gate if min_trades_gate is not None else HOLDOUT_SANITY_GATES["core_min_trades"])
+    trades_gate = int(
+        min_trades_gate
+        if min_trades_gate is not None
+        else HOLDOUT_SANITY_GATES["core_min_trades"]
+    )
     reasons: List[str] = []
-    symbols_total = int(summary.get("symbols_total", 0))
-    symbols_evaluated = int(summary.get("symbols_evaluated", 0))
-    coverage = float(symbols_evaluated) / float(max(1, symbols_total))
-    if float(summary.get("core_avg_ret", 0.0)) <= float(HOLDOUT_SANITY_GATES["core_min_return"]):
+    if float(summary.get("core_avg_ret", 0.0)) <= HOLDOUT_SANITY_GATES["core_min_return"]:
         reasons.append("holdout_core_return_low")
     core_trade_count = int(
         summary.get(
@@ -1383,10 +1547,8 @@ def evaluate_holdout_sanity(summary: Optional[Dict], min_trades_gate: Optional[i
     )
     if core_trade_count < trades_gate:
         reasons.append("holdout_core_trades_low")
-    if float(summary.get("core_avg_mdd_abs", 0.0)) > float(HOLDOUT_SANITY_GATES["core_max_avg_mdd_abs"]):
+    if float(summary.get("core_avg_mdd_abs", 0.0)) > HOLDOUT_SANITY_GATES["core_max_avg_mdd_abs"]:
         reasons.append("holdout_core_mdd_too_high")
-    if coverage < float(HOLDOUT_MIN_SYMBOL_COVERAGE):
-        reasons.append("holdout_symbol_coverage_low")
     return len(reasons) == 0, reasons
 
 
@@ -1400,24 +1562,9 @@ def classify_holdout_outcome(
         return "PASS", []
     if not summary:
         return "FAIL", list(reasons)
-
     core_total_trades = int(summary.get("core_total_trades", summary.get("core_min_trades", 0)))
-    core_ret = float(summary.get("core_avg_ret", 0.0))
-    reason_set = set(reasons)
-    trade_reason_set = {"holdout_core_trades_low", "holdout_core_total_trades_low"}
-    neutral_reason_set = {"holdout_core_return_low"} | trade_reason_set
-
     if core_total_trades <= 0:
         return "INACTIVE", ["holdout_no_trades"]
-    if reason_set and reason_set.issubset(trade_reason_set):
-        return "INACTIVE", ["holdout_low_activity"]
-    if (
-        core_total_trades < int(max(1, min_trades_gate))
-        and reason_set
-        and reason_set.issubset(neutral_reason_set)
-        and abs(core_ret) <= 0.20
-    ):
-        return "INACTIVE", ["holdout_low_activity_near_flat"]
     return "FAIL", list(reasons)
 
 
@@ -1465,6 +1612,8 @@ def run_holdout_gate(
 
         try:
             strategy = UltimateStrategy(f"Holdout_{symbol}", best_params)
+            merge_idx = compute_segment_merge_index(segment_hourly, segment_daily)
+            precomputed_daily = cached_generate_signals(strategy, segment_daily, "1d", symbol)
             engine = BacktestEngineFastSpot(
                 segment_hourly,
                 segment_daily,
@@ -1473,17 +1622,20 @@ def run_holdout_gate(
                 initial_balance=SPOT_INITIAL_BALANCE,
                 fee_rate=0.0005,
                 slippage_rate=0.0003,
-                merge_index_map=compute_segment_merge_index(segment_hourly, segment_daily),
+                merge_index_map=merge_idx,
+                precomputed_daily_df=precomputed_daily,
             )
             engine.risk_per_trade = best_params.get("RISK_PER_TRADE_SPOT", 0.99)
-            result = engine.run()
+            result = engine.run(return_equity=False)
         except Exception:
             continue
 
-        oos_metrics = calculate_oos_metrics_from_equity(
-            result.get("equity_curve"),
-            oos_start_idx,
-            oos_end_idx,
+        actual_start_time = pd.Timestamp(cutoff_ts)
+        actual_end_time = seg_end_time
+        oos_metrics = calculate_oos_metrics_from_trades(
+            result["trades_df"],
+            actual_start_time,
+            actual_end_time,
             SPOT_INITIAL_BALANCE,
         )
         if oos_metrics is None:
@@ -1515,11 +1667,10 @@ def run_holdout_gate(
     if not returns:
         return False, {}, ["holdout_no_valid_symbols"]
 
-    holdout_end_ts = max(holdout_end_candidates) if holdout_end_candidates else pd.Timestamp(BACKTEST_END_DATE)
+    holdout_end_ts = max(holdout_end_candidates) if holdout_end_candidates else pd.Timestamp(SPOT_BACKTEST_END_DATE)
     dynamic_min_trades = compute_dynamic_holdout_min_trades(
         pd.Timestamp(cutoff_ts),
         holdout_end_ts,
-        timeframe=tf,
     )
     summary = {
         "core_avg_ret": float(np.mean(returns)),
@@ -1537,32 +1688,35 @@ def run_holdout_gate(
     return passed, summary, reasons
 
 
-def objective(
-    trial: optuna.trial.Trial,
+def evaluate_one_fidelity_spot(
+    params: Dict[str, Any],
     symbols_data: Dict[str, Dict[str, pd.DataFrame]],
-    search_space: Dict,
-    mode: str = "UNIFIED",
-    merge_indices: Optional[Dict[str, Dict[str, np.ndarray]]] = None,
-    awfo_plan: Optional[Dict] = None,
-) -> float:
-    params = suggest_params(trial, search_space)
-    params = apply_spot_tf_param_limits(params)
-    tf = params.get("TIMEFRAME", "1h")
-    if params.get("TREND_FILTER_TYPE") == "MACD" and params.get("MACD_FAST", 12) >= params.get("MACD_SLOW", 26):
-        return -10000.0
-
+    merge_indices: Optional[Dict[str, Dict[str, np.ndarray]]],
+    awfo_plan: Optional[Dict[str, Any]],
+    mode: str,
+) -> Tuple[float, Dict[str, Dict[str, float]], Dict[str, Any]]:
+    """
+    Single-fidelity evaluation: run backtest and scoring for fixed params.
+    No trial; returns (final_score, symbol_results, end_attrs).
+    """
     awfo_enabled = bool(awfo_plan and awfo_plan.get("enabled"))
     awfo_cache = awfo_plan.get("cache", {}) if awfo_enabled else {}
     awfo_min_trades = awfo_plan.get("min_trades_per_fold", AWFO_DEFAULTS["min_trades_per_fold"]) if awfo_enabled else None
     symbol_scores: List[float] = []
     symbol_results: Dict[str, Dict[str, float]] = {}
-    report_step = 0
     fallback_count = 0
     primary_symbol_set = set(SPOT_PRIMARY_SYMBOLS)
+    end_attrs: Dict[str, Any] = {}
+    tf = params.get("TIMEFRAME", "1h")
+
+    def _add_attr(name: str, value: Any, verbose_only: bool = False) -> None:
+        if verbose_only and not SPOT_VERBOSE_TRIAL_ATTRS:
+            return
+        end_attrs[name] = value
 
     def fallback(sym: str, reason: str) -> None:
         nonlocal fallback_count
-        print(f"[WARN] Spot fallback: {sym} ({reason})")
+        logger.warning("Spot fallback: %s (%s)", sym, reason)
         fallback_count += 1
         symbol_scores.append(-260.0)
         symbol_results[sym] = {
@@ -1587,20 +1741,21 @@ def objective(
 
     for symbol, data_map in symbols_data.items():
         key = symbol.replace("/", "_").replace("-", "_")
+        
         if tf not in data_map or "1d" not in data_map:
             fallback(symbol, "missing timeframe")
-            trial.set_user_attr(f"ret_{key}", float(symbol_results[symbol]["return"]))
-            trial.set_user_attr(f"mdd_{key}", float(symbol_results[symbol]["mdd"]))
-            trial.set_user_attr(f"pf_{key}", float(symbol_results[symbol]["pf"]))
+            _add_attr(f"ret_{key}", float(symbol_results[symbol]["return"]), verbose_only=True)
+            _add_attr(f"mdd_{key}", float(symbol_results[symbol]["mdd"]), verbose_only=True)
+            _add_attr(f"pf_{key}", float(symbol_results[symbol]["pf"]), verbose_only=True)
             continue
 
         if awfo_enabled:
             fold_ctxs = awfo_cache.get(symbol, {}).get(tf, [])
             if len(fold_ctxs) < 2:
                 fallback(symbol, "insufficient awfo folds")
-                trial.set_user_attr(f"ret_{key}", float(symbol_results[symbol]["return"]))
-                trial.set_user_attr(f"mdd_{key}", float(symbol_results[symbol]["mdd"]))
-                trial.set_user_attr(f"pf_{key}", float(symbol_results[symbol]["pf"]))
+                _add_attr(f"ret_{key}", float(symbol_results[symbol]["return"]), verbose_only=True)
+                _add_attr(f"mdd_{key}", float(symbol_results[symbol]["mdd"]), verbose_only=True)
+                _add_attr(f"pf_{key}", float(symbol_results[symbol]["pf"]), verbose_only=True)
                 continue
 
             fold_scores: List[float] = []
@@ -1613,36 +1768,42 @@ def objective(
             fold_trade_density: List[float] = []
             fold_bh_returns: List[float] = []
             fold_excess_returns: List[float] = []
-            fold_bear_excess: List[float] = []
             fold_gross_profit_sum = 0.0
             fold_gross_loss_sum = 0.0
             fold_loss_trades_sum = 0
             fold_win_trades_sum = 0
             fold_max_win_pnl = 0.0
             invalid = 0
+            # One generate_signals(daily) per symbol; slice per fold to match ctx["daily"] range
+            strategy_for_daily = UltimateStrategy(f"Opt_{symbol}_F0", params)
+            precomputed_full_daily = cached_generate_signals(
+                strategy_for_daily, data_map["1d"], "1d", symbol
+            )
             for idx, ctx in enumerate(fold_ctxs):
                 try:
                     strategy = UltimateStrategy(f"Opt_{symbol}_F{idx + 1}", params)
-                    
-                    # [OPTIMIZATION] Use cached signals to avoid redundant heavy indicator calculations
-                    h_df = cached_generate_signals(strategy, ctx["hourly"], tf, symbol)
-                    d_df = cached_generate_signals(strategy, ctx["daily"], "1d", symbol)
-
+                    seg_start = ctx["daily"]["datetime"].min()
+                    seg_end = ctx["daily"]["datetime"].max()
+                    segment_daily = precomputed_full_daily[
+                        (precomputed_full_daily["datetime"] >= seg_start)
+                        & (precomputed_full_daily["datetime"] <= seg_end)
+                    ].copy(deep=False)
                     engine = BacktestEngineFastSpot(
-                        h_df,
-                        d_df,
+                        ctx["hourly"],
+                        segment_daily,
                         strategy,
                         backtest_loop_spot_numba,
                         initial_balance=SPOT_INITIAL_BALANCE,
                         fee_rate=0.0005,
                         slippage_rate=0.0003,
                         merge_index_map=ctx["merge_index"],
+                        precomputed_daily_df=segment_daily,
                     )
                     engine.risk_per_trade = params.get("RISK_PER_TRADE_SPOT", 0.99)
-                    result = engine.run()
-                except Exception:
+                    result = engine.run(return_equity=False)
+                except Exception as e:
                     invalid += 1
-                    gc.collect()
+                    maybe_collect_gc()
                     continue
 
                 oos_trades = _filter_trades_for_window(
@@ -1650,10 +1811,10 @@ def objective(
                     pd.Timestamp(ctx["actual_start_time"]),
                     pd.Timestamp(ctx["actual_end_time"]),
                 )
-                oos_metrics = calculate_oos_metrics_from_equity(
-                    result.get("equity_curve"),
-                    int(ctx.get("oos_start_idx", 0)),
-                    int(ctx.get("oos_end_idx", len(ctx["hourly"]) - 1)),
+                oos_metrics = calculate_oos_metrics_from_trades(
+                    result.get("trades_df", pd.DataFrame()),
+                    pd.Timestamp(ctx["actual_start_time"]),
+                    pd.Timestamp(ctx["actual_end_time"]),
                     SPOT_INITIAL_BALANCE,
                 )
                 if oos_metrics is None or oos_trades.empty or "pnl" not in oos_trades.columns:
@@ -1694,8 +1855,6 @@ def objective(
                         fold_bh_returns.append(float(bh_ret))
                         fold_excess = float(fold_ret - bh_ret)
                         fold_excess_returns.append(fold_excess)
-                        if bh_ret < 0.0:
-                            fold_bear_excess.append(fold_excess)
                         gross_profit = float(oos_trades[oos_trades["pnl"] > 0]["pnl"].sum())
                         gross_loss = abs(float(oos_trades[oos_trades["pnl"] < 0]["pnl"].sum()))
                         win_trades = int((oos_trades["pnl"] > 0).sum())
@@ -1723,17 +1882,12 @@ def objective(
                     else:
                         invalid += 1
 
-                report_step += 1
-                trial.report(float(np.percentile(fold_scores, 25)) if fold_scores else -220.0, report_step)
-                if trial.should_prune():
-                    raise optuna.TrialPruned()
-
             required = max(2, int(np.ceil(len(fold_ctxs) * 0.6)))
             if len(fold_scores) < required:
                 fallback(symbol, f"valid_folds={len(fold_scores)} < required={required}")
-                trial.set_user_attr(f"ret_{key}", float(symbol_results[symbol]["return"]))
-                trial.set_user_attr(f"mdd_{key}", float(symbol_results[symbol]["mdd"]))
-                trial.set_user_attr(f"pf_{key}", float(symbol_results[symbol]["pf"]))
+                _add_attr(f"ret_{key}", float(symbol_results[symbol]["return"]), verbose_only=True)
+                _add_attr(f"mdd_{key}", float(symbol_results[symbol]["mdd"]), verbose_only=True)
+                _add_attr(f"pf_{key}", float(symbol_results[symbol]["pf"]), verbose_only=True)
                 continue
 
             avg = float(np.mean(fold_scores))
@@ -1742,13 +1896,11 @@ def objective(
             p25_ret = float(np.percentile(fold_returns, 25)) if fold_returns else -100.0
             p25_stress = float(np.percentile(fold_stress, 25)) if fold_stress else p25_ret
             p25_excess = float(np.percentile(fold_excess_returns, 25)) if fold_excess_returns else p25_ret
-            bear_excess = float(np.mean(fold_bear_excess)) if fold_bear_excess else p25_excess
             consistency = float(np.mean(np.array(fold_scores) > 0))
             score = (SPOT_ROBUST["w_avg"] * avg) + (SPOT_ROBUST["w_p25"] * p25) + (SPOT_ROBUST["w_worst"] * worst)
             score += SPOT_ROBUST["ret_p25_w"] * np.clip(p25_ret, -SPOT_ROBUST["ret_p25_clip"], SPOT_ROBUST["ret_p25_clip"])
             score += SPOT_ROBUST["cost_stress_w"] * np.clip(p25_stress, -60.0, 60.0)
             score += SPOT_ROBUST["excess_ret_p25_w"] * np.clip(p25_excess, -70.0, 90.0)
-            score += SPOT_ROBUST["bear_excess_w"] * np.clip(bear_excess, -60.0, 80.0)
             if consistency < SPOT_ROBUST["cons_target"]:
                 score -= (SPOT_ROBUST["cons_target"] - consistency) * SPOT_ROBUST["cons_penalty"]
             if fold_returns and min(fold_returns) < SPOT_ROBUST["single_fold_loss_threshold"]:
@@ -1762,32 +1914,6 @@ def objective(
                 min_shortfall = max(0.0, (target - min_trades) / target)
                 score -= avg_shortfall * SPOT_ROBUST["trade_shortfall_penalty"]
                 score -= min_shortfall * SPOT_ROBUST["trade_min_shortfall_penalty"]
-            if fold_trade_density:
-                density_target = float(
-                    SPOT_TF_TRADE_DENSITY_TARGET_PER30D.get(
-                        str(tf),
-                        SPOT_TF_TRADE_DENSITY_TARGET_PER30D["default"],
-                    )
-                )
-                density_target = max(0.5, density_target)
-                avg_density = float(np.mean(fold_trade_density))
-                min_density = float(np.min(fold_trade_density))
-                avg_density_shortfall = max(0.0, (density_target - avg_density) / density_target)
-                min_density_floor = max(0.5, density_target * 0.7)
-                min_density_shortfall = max(0.0, (min_density_floor - min_density) / min_density_floor)
-                score -= avg_density_shortfall * float(SPOT_ROBUST["trade_density_shortfall_penalty"])
-                score -= min_density_shortfall * float(SPOT_ROBUST["trade_density_min_shortfall_penalty"])
-            if fold_bh_returns:
-                up_thr = float(SPOT_ROBUST["regime_up_bh_threshold"])
-                down_thr = float(SPOT_ROBUST["regime_down_bh_threshold"])
-                up_count = int(np.sum(np.asarray(fold_bh_returns, dtype=np.float64) >= up_thr))
-                down_count = int(np.sum(np.asarray(fold_bh_returns, dtype=np.float64) <= down_thr))
-                min_up = int(SPOT_ROBUST["regime_min_up_samples"])
-                min_down = int(SPOT_ROBUST["regime_min_down_samples"])
-                missing_up = max(0, min_up - up_count)
-                missing_down = max(0, min_down - down_count)
-                if (missing_up + missing_down) > 0:
-                    score -= float(SPOT_ROBUST["regime_missing_penalty"]) * float(missing_up + missing_down)
             score -= invalid * 12.0
             # Futures-inspired AWFO CV gate: penalize fold dispersion continuously.
             fold_score_std = float(np.std(fold_scores)) if fold_scores else 0.0
@@ -1855,23 +1981,38 @@ def objective(
             try:
                 strategy = UltimateStrategy(f"Opt_{symbol}", params)
                 current_merge = merge_indices.get(symbol, {}).get(tf) if merge_indices else None
-                engine = BacktestEngineFastSpot(
-                    data_map[tf],
-                    data_map["1d"],
-                    strategy,
-                    backtest_loop_spot_numba,
-                    initial_balance=SPOT_INITIAL_BALANCE,
-                    fee_rate=0.0005,
-                    slippage_rate=0.0003,
-                    merge_index_map=current_merge,
-                )
+                if current_merge is not None:
+                    precomputed_daily = cached_generate_signals(strategy, data_map["1d"], "1d", symbol)
+                    engine = BacktestEngineFastSpot(
+                        data_map[tf],
+                        data_map["1d"],
+                        strategy,
+                        backtest_loop_spot_numba,
+                        initial_balance=SPOT_INITIAL_BALANCE,
+                        fee_rate=0.0005,
+                        slippage_rate=0.0003,
+                        merge_index_map=current_merge,
+                        precomputed_daily_df=precomputed_daily,
+                    )
+                else:
+                    h_df = cached_generate_signals(strategy, data_map[tf], tf, symbol)
+                    d_df = cached_generate_signals(strategy, data_map["1d"], "1d", symbol)
+                    engine = BacktestEngineFastSpot(
+                        h_df,
+                        d_df,
+                        strategy,
+                        backtest_loop_spot_numba,
+                        initial_balance=SPOT_INITIAL_BALANCE,
+                        fee_rate=0.0005,
+                        slippage_rate=0.0003,
+                    )
                 engine.risk_per_trade = params.get("RISK_PER_TRADE_SPOT", 0.99)
-                result = engine.run()
+                result = engine.run(return_equity=False)
             except Exception:
                 fallback(symbol, "single run failed")
-                trial.set_user_attr(f"ret_{key}", float(symbol_results[symbol]["return"]))
-                trial.set_user_attr(f"mdd_{key}", float(symbol_results[symbol]["mdd"]))
-                trial.set_user_attr(f"pf_{key}", float(symbol_results[symbol]["pf"]))
+                _add_attr(f"ret_{key}", float(symbol_results[symbol]["return"]), verbose_only=True)
+                _add_attr(f"mdd_{key}", float(symbol_results[symbol]["mdd"]), verbose_only=True)
+                _add_attr(f"pf_{key}", float(symbol_results[symbol]["pf"]), verbose_only=True)
                 continue
 
             trades_df = result.get("trades_df", pd.DataFrame())
@@ -1915,25 +2056,25 @@ def objective(
                 "fold_calmar_worst": float("nan"),
             }
 
-        trial.set_user_attr(f"ret_{key}", float(symbol_results[symbol]["return"]))
-        trial.set_user_attr(f"mdd_{key}", float(symbol_results[symbol]["mdd"]))
-        trial.set_user_attr(f"pf_{key}", float(symbol_results[symbol]["pf"]))
+        _add_attr(f"ret_{key}", float(symbol_results[symbol]["return"]), verbose_only=True)
+        _add_attr(f"mdd_{key}", float(symbol_results[symbol]["mdd"]), verbose_only=True)
+        _add_attr(f"pf_{key}", float(symbol_results[symbol]["pf"]), verbose_only=True)
 
     if not symbol_scores:
-        return -10000.0
+        return (-10000.0, symbol_results, {})
     min_success_ratio = float(np.clip(_env_float("SPOT_MIN_SYMBOL_SUCCESS_RATIO", 0.67), 0.5, 1.0))
     success_ratio = float(len(symbol_scores) - fallback_count) / float(max(1, len(symbol_scores)))
     if success_ratio < min_success_ratio:
-        return -10000.0
+        return (-10000.0, symbol_results, {})
     mdd_abs = [abs(float(v["mdd"])) for v in symbol_results.values()]
     if mdd_abs and (max(mdd_abs) > 70.0 or float(np.mean(mdd_abs)) > 55.0):
-        return -10000.0
+        return (-10000.0, symbol_results, {})
 
     offset = float(SPOT_ROBUST["cross_offset"])
     raw_shifted = np.array(symbol_scores, dtype=np.float64) + offset
     collapsed_symbol_count = int(np.sum(raw_shifted <= 1e-9))
     if len(symbol_scores) <= 2 and collapsed_symbol_count > 0:
-        return -10000.0
+        return (-10000.0, symbol_results, {})
     shifted = np.clip(raw_shifted, 1e-6, None)
 
     hm_shifted = float(len(shifted) / np.sum(1.0 / shifted))
@@ -1973,7 +2114,6 @@ def objective(
 
     ret_p25 = float(np.percentile(ret_values, 25))
     excess_p25 = float(np.percentile(excess_ret_values, 25))
-    excess_avg = float(np.mean(excess_ret_values))
     pf_p25 = float(np.percentile(pf_values, 25))
     stress_ret_p25 = float(np.percentile(stress_ret_values, 25))
     score_p25 = float(np.percentile(symbol_scores, 25))
@@ -2001,7 +2141,6 @@ def objective(
     )
     all_trade_counts = np.array([int(v.get("trades_total", 0)) for v in symbol_results.values()], dtype=np.int64)
     total_trades_all = int(np.sum(all_trade_counts))
-    all_min_trades_obs = int(np.min(all_trade_counts)) if all_trade_counts.size else 0
     total_loss_trades_all = int(np.sum(np.array([int(v.get("loss_trades", 0)) for v in symbol_results.values()], dtype=np.int64)))
     total_win_trades_all = int(np.sum(np.array([int(v.get("win_trades", 0)) for v in symbol_results.values()], dtype=np.int64)))
     primary_trade_counts = np.array(
@@ -2038,9 +2177,6 @@ def objective(
             )
         )
     )
-    max_single_win_pnl = float(
-        np.max(np.array([float(v.get("max_win_pnl", 0.0)) for v in symbol_results.values()], dtype=np.float64))
-    ) if symbol_results else 0.0
     gross_profit_all = float(np.sum(np.array([float(v.get("gross_profit", 0.0)) for v in symbol_results.values()], dtype=np.float64)))
     gross_loss_all = float(np.sum(np.array([float(v.get("gross_loss", 0.0)) for v in symbol_results.values()], dtype=np.float64)))
     pooled_pf_all = float(
@@ -2048,58 +2184,24 @@ def objective(
         if gross_loss_all > 0.0
         else (gross_profit_all if gross_profit_all > 0.0 else 0.0)
     )
-    primary_gross_profit = float(
-        np.sum(
-            np.array(
-                [
-                    float(v.get("gross_profit", 0.0))
-                    for s, v in symbol_results.items()
-                    if str(s).strip().upper() in primary_symbol_set
-                ],
-                dtype=np.float64,
-            )
-        )
-    )
-    primary_gross_loss = float(
-        np.sum(
-            np.array(
-                [
-                    float(v.get("gross_loss", 0.0))
-                    for s, v in symbol_results.items()
-                    if str(s).strip().upper() in primary_symbol_set
-                ],
-                dtype=np.float64,
-            )
-        )
-    )
-    primary_pooled_pf = float(
-        primary_gross_profit / primary_gross_loss
-        if primary_gross_loss > 0.0
-        else (primary_gross_profit if primary_gross_profit > 0.0 else 0.0)
-    )
     if int(SPOT_ROBUST["primary_require_symbols"]) == 1 and primary_ret_values.size == 0:
-        return -10000.0
-    if primary_ret_values.size > 0 and primary_pf_values.size > 0:
-        primary_avg_pf_hard = float(np.mean(primary_pf_values))
-        primary_p25_pf_hard = float(np.percentile(primary_pf_values, 25))
-        primary_avg_ret_hard = float(np.mean(primary_ret_values))
-        primary_p25_ret_hard = float(np.percentile(primary_ret_values, 25))
-        if primary_avg_pf_hard < float(SPOT_ROBUST["primary_hard_avg_pf_floor"]):
-            return -10000.0
-        if primary_p25_pf_hard < float(SPOT_ROBUST["primary_hard_p25_pf_floor"]):
-            return -10000.0
-        if primary_avg_ret_hard < float(SPOT_ROBUST["primary_hard_avg_ret_floor"]):
-            return -10000.0
-        if primary_p25_ret_hard < float(SPOT_ROBUST["primary_hard_p25_ret_floor"]):
-            return -10000.0
-    if primary_total_trades < int(SPOT_ROBUST["primary_total_trade_hard_floor"]):
-        return -10000.0
-    if primary_pooled_pf < float(SPOT_ROBUST["primary_pooled_pf_hard_floor"]):
-        return -10000.0
+        return (-10000.0, symbol_results, {})
+    primary_avg_ret = 0.0
+    if primary_ret_values.size > 0:
+        primary_avg_ret = float(np.mean(primary_ret_values))
+        if primary_avg_ret < float(SPOT_ROBUST["primary_avg_ret_floor"]):
+            return (-10000.0, symbol_results, {})
+    if primary_total_trades < int(SPOT_ROBUST["primary_total_trade_target"]):
+        return (-10000.0, symbol_results, {})
 
+    eff_ret_scale = float(SPOT_ROBUST["cross_eff_ret_scale"])
+    eff_pf_center = float(SPOT_ROBUST["cross_eff_pf_center"])
+    eff_pf_scale = float(SPOT_ROBUST["cross_eff_pf_scale"])
     efficiency_boost = (
-        float(SPOT_ROBUST["cross_eff_ret_weight"]) * np.clip(np.arcsinh(avg_ret / 40.0), -2.8, 2.8)
-        + float(SPOT_ROBUST["cross_eff_pf_weight"]) * np.clip(np.arcsinh((avg_pf - 1.0) / 0.8), -2.4, 2.4)
+        float(SPOT_ROBUST["cross_eff_ret_weight"])
+        * np.clip(np.arcsinh(avg_ret / eff_ret_scale), -2.8, 2.8)
+        + float(SPOT_ROBUST["cross_eff_pf_weight"])
+        * np.clip(np.arcsinh((avg_pf - eff_pf_center) / eff_pf_scale), -2.4, 2.4)
     )
 
     soft_mdd_penalty = (
@@ -2125,38 +2227,8 @@ def objective(
     )
 
     feature_scale_out = bool(params.get("ENABLE_SCALE_OUT", False))
-    feature_breakeven = bool(params.get("ENABLE_BREAKEVEN", False))
-    feature_pyramiding = bool(params.get("ENABLE_PYRAMIDING", False))
     feature_dynamic_risk = bool(params.get("USE_DYNAMIC_RISK", False))
-    active_feature_count = int(feature_scale_out) + int(feature_breakeven) + int(feature_pyramiding) + int(feature_dynamic_risk)
-
-    complexity_feature_penalty = float(SPOT_ROBUST["complexity_feature_penalty"])
-    complexity_scale_out_ratio_mult = float(SPOT_ROBUST["complexity_scale_out_ratio_mult"])
-    complexity_pyramid_add_penalty = float(SPOT_ROBUST["complexity_pyramid_add_penalty"])
-    complexity_pyramid_risk_mult = float(SPOT_ROBUST["complexity_pyramid_risk_mult"])
-
-    complexity_penalty = 0.0
-    if (
-        complexity_feature_penalty > 0.0
-        or complexity_scale_out_ratio_mult > 0.0
-        or complexity_pyramid_add_penalty > 0.0
-        or complexity_pyramid_risk_mult > 0.0
-    ):
-        complexity_penalty = active_feature_count * complexity_feature_penalty
-        if feature_scale_out and complexity_scale_out_ratio_mult > 0.0:
-            scale_out_ratio = float(params.get("SCALE_OUT_RATIO", 0.0))
-            complexity_penalty += (
-                max(0.0, scale_out_ratio - float(SPOT_ROBUST["complexity_scale_out_ratio_center"]))
-                * complexity_scale_out_ratio_mult
-            )
-        if feature_pyramiding and (complexity_pyramid_add_penalty > 0.0 or complexity_pyramid_risk_mult > 0.0):
-            pyramid_max_adds = int(max(1, params.get("PYRAMID_MAX_ADDS", 1)))
-            pyramid_risk_ratio = float(params.get("PYRAMID_RISK_RATIO", 0.0))
-            complexity_penalty += max(0, pyramid_max_adds - 1) * complexity_pyramid_add_penalty
-            complexity_penalty += (
-                max(0.0, pyramid_risk_ratio - float(SPOT_ROBUST["complexity_pyramid_risk_center"]))
-                * complexity_pyramid_risk_mult
-            )
+    active_feature_count = int(feature_scale_out) + int(feature_dynamic_risk)
 
     legacy_score = (blended_shifted * dispersion_penalty) - offset
     legacy_score += efficiency_boost
@@ -2177,173 +2249,94 @@ def objective(
         float(SPOT_ROBUST["cross_excess_p25_weight"])
         * np.clip(np.arcsinh(excess_p25 / 30.0), -2.4, 2.4)
     )
-    legacy_score += (
-        float(SPOT_ROBUST["cross_excess_avg_weight"])
-        * np.clip(np.arcsinh(excess_avg / 35.0), -2.4, 2.4)
-    )
-    legacy_score += (
-        float(SPOT_ROBUST["cross_pooled_pf_weight"])
-        * np.clip(np.arcsinh((min(float(SPOT_ROBUST["pf_clip_per_symbol"]), pooled_pf_all) - 1.0) / 0.8), -2.2, 2.2)
-    )
-    primary_guard_penalty = 0.0
-    primary_avg_ret = 0.0
-    primary_avg_pf = 0.0
-    primary_p25_ret = 0.0
-    primary_p25_pf = 0.0
-    if primary_ret_values.size > 0 and primary_pf_values.size > 0:
-        primary_avg_ret = float(np.mean(primary_ret_values))
-        primary_avg_pf = float(np.mean(primary_pf_values))
-        primary_p25_ret = float(np.percentile(primary_ret_values, 25))
-        primary_p25_pf = float(np.percentile(primary_pf_values, 25))
-        primary_guard_penalty += max(
-            0.0, float(SPOT_ROBUST["primary_avg_pf_floor"]) - primary_avg_pf
-        ) * float(SPOT_ROBUST["primary_final_pf_penalty_mult"])
-        primary_guard_penalty += max(
-            0.0, float(SPOT_ROBUST["primary_p25_pf_floor"]) - primary_p25_pf
-        ) * float(SPOT_ROBUST["primary_p25_pf_penalty_mult"])
-        primary_guard_penalty += max(
-            0.0, float(SPOT_ROBUST["primary_avg_ret_floor"]) - primary_avg_ret
-        ) * float(SPOT_ROBUST["primary_final_ret_penalty_mult"])
-        primary_guard_penalty += max(
-            0.0, float(SPOT_ROBUST["primary_p25_ret_floor"]) - primary_p25_ret
-        ) * float(SPOT_ROBUST["primary_p25_ret_penalty_mult"])
-    primary_guard_penalty += max(
-        0.0, float(SPOT_ROBUST["primary_pooled_pf_floor"]) - primary_pooled_pf
-    ) * float(SPOT_ROBUST["primary_pooled_pf_penalty_mult"])
-    primary_trade_target = max(1, int(SPOT_ROBUST["primary_total_trade_target"]))
-    primary_trade_shortfall = max(0.0, (float(primary_trade_target) - float(primary_total_trades)) / float(primary_trade_target))
-    primary_guard_penalty += primary_trade_shortfall * float(SPOT_ROBUST["primary_total_trade_penalty_mult"])
-    all_trade_target = max(1, int(SPOT_ROBUST["all_total_trade_target"]))
-    all_trade_shortfall = max(0.0, (float(all_trade_target) - float(total_trades_all)) / float(all_trade_target))
-    primary_guard_penalty += all_trade_shortfall * float(SPOT_ROBUST["all_total_trade_penalty_mult"])
     legacy_score -= soft_mdd_penalty
     legacy_score -= mdd_soft_guard_penalty
-    legacy_score -= primary_guard_penalty
-    legacy_score -= complexity_penalty
     legacy_score -= collapsed_symbol_count * float(SPOT_ROBUST["collapsed_symbol_penalty"])
-    core_ret_ref = float(np.mean(primary_ret_values)) if primary_ret_values.size > 0 else float(avg_ret)
-    core_pf_ref = float(primary_pooled_pf) if primary_ret_values.size > 0 else float(pooled_pf_all)
-    core_pf_ref = float(min(float(SPOT_ROBUST["pf_clip_per_symbol"]), core_pf_ref))
-    core_pf_p25_ref = float(primary_p25_pf) if primary_pf_values.size > 0 else float(pf_p25)
-    core_activity_floor = float(np.clip(float(SPOT_ROBUST["core_activity_floor"]), 0.0, 1.0))
-    core_pf_ref_primary_trades = max(1.0, float(SPOT_ROBUST["core_pf_activity_ref_primary_trades"]))
-    core_pf_ref_all_trades = max(1.0, float(SPOT_ROBUST["core_pf_activity_ref_all_trades"]))
-    core_pf_p25_ref_min_trades = max(1.0, float(SPOT_ROBUST["core_pf_p25_activity_ref_min_trades"]))
 
-    if primary_ret_values.size > 0:
-        pooled_activity_raw = float(primary_total_trades) / core_pf_ref_primary_trades
-        min_trade_activity_raw = float(primary_min_trades_obs) / core_pf_p25_ref_min_trades
-    else:
-        pooled_activity_raw = float(total_trades_all) / core_pf_ref_all_trades
-        min_trade_activity_raw = float(all_min_trades_obs) / core_pf_p25_ref_min_trades
-    pooled_activity = float(np.clip(max(core_activity_floor, pooled_activity_raw), 0.0, 1.0))
-    min_trade_activity = float(np.clip(max(core_activity_floor, min_trade_activity_raw), 0.0, 1.0))
-
-    pooled_pf_edge = float(core_pf_ref - 1.0)
-    pf_p25_edge = float(core_pf_p25_ref - 1.0)
-    pooled_pf_edge_eff = pooled_pf_edge * pooled_activity if pooled_pf_edge > 0.0 else pooled_pf_edge
-    pf_p25_edge_eff = pf_p25_edge * min_trade_activity if pf_p25_edge > 0.0 else pf_p25_edge
-
-    core_score = (
-        (float(SPOT_ROBUST["core_weight_ret"]) * core_ret_ref)
-        + (float(SPOT_ROBUST["core_weight_pooled_pf"]) * pooled_pf_edge_eff)
-        + (float(SPOT_ROBUST["core_weight_pf_p25"]) * pf_p25_edge_eff)
-        - (float(SPOT_ROBUST["core_mdd_penalty_mult"]) * float(avg_mdd_abs))
-    )
-    risk_budget_target_mdd = max(1e-6, float(SPOT_ROBUST["risk_budget_target_mdd"]))
-    risk_budget_target_band = max(0.10, float(SPOT_ROBUST["risk_budget_target_band"]))
-    risk_budget_low_util_floor = float(np.clip(float(SPOT_ROBUST["risk_budget_low_util_floor"]), 0.20, 1.20))
-    risk_budget_mdd_util = float(avg_mdd_abs) / risk_budget_target_mdd
-    risk_budget_ret_term = (
-        float(SPOT_ROBUST["risk_budget_ret_weight"])
-        * np.clip(np.arcsinh(core_ret_ref / 22.0), -2.8, 2.8)
-    )
-    risk_budget_pf_term = (
-        float(SPOT_ROBUST["risk_budget_pf_weight"])
-        * np.clip(np.arcsinh((core_pf_ref - 1.0) / 0.9), -2.5, 2.5)
-    )
-    risk_budget_center_bonus = max(
-        0.0,
-        1.0 - (abs(risk_budget_mdd_util - 1.0) / max(1e-6, risk_budget_target_band)),
-    )
-    risk_budget_under_shortfall = max(0.0, risk_budget_low_util_floor - risk_budget_mdd_util)
-    risk_budget_over_excess = max(0.0, risk_budget_mdd_util - (1.0 + risk_budget_target_band))
-    risk_budget_score = (
-        risk_budget_ret_term
-        + risk_budget_pf_term
-        + (risk_budget_center_bonus * float(SPOT_ROBUST["risk_budget_center_bonus"]))
-        - (risk_budget_under_shortfall * float(SPOT_ROBUST["risk_budget_under_penalty_mult"]))
-        - (risk_budget_over_excess * float(SPOT_ROBUST["risk_budget_over_penalty_mult"]))
-    )
-    if float(avg_mdd_abs) > float(SPOT_ROBUST["risk_budget_hard_mdd_cap"]):
-        return -10000.0
-    fake_pf_penalty = 0.0
-    loss_floor_all = max(1, int(SPOT_ROBUST["loss_trade_floor_all"]))
-    loss_floor_primary = max(1, int(SPOT_ROBUST["loss_trade_floor_primary"]))
-    loss_shortfall_all = max(0.0, (float(loss_floor_all) - float(total_loss_trades_all)) / float(loss_floor_all))
-    loss_shortfall_primary = max(
-        0.0, (float(loss_floor_primary) - float(primary_loss_trades)) / float(loss_floor_primary)
-    )
-    fake_pf_penalty += loss_shortfall_all * float(SPOT_ROBUST["loss_trade_shortfall_penalty_all"])
-    fake_pf_penalty += loss_shortfall_primary * float(SPOT_ROBUST["loss_trade_shortfall_penalty_primary"])
-    single_win_share = (max_single_win_pnl / gross_profit_all) if gross_profit_all > 0.0 else 0.0
-    single_win_cap = float(SPOT_ROBUST["single_win_share_cap"])
-    if single_win_share > single_win_cap:
-        fake_pf_penalty += (single_win_share - single_win_cap) * float(SPOT_ROBUST["single_win_share_penalty_mult"])
-    mix = float(np.clip(float(SPOT_ROBUST["core_score_mix"]), 0.0, 1.0))
-    base_score = (mix * core_score) + ((1.0 - mix) * legacy_score)
-    risk_budget_mix = float(np.clip(float(SPOT_ROBUST["risk_budget_mix"]), 0.0, 1.0))
-    final_score = ((1.0 - risk_budget_mix) * base_score) + (risk_budget_mix * risk_budget_score) - fake_pf_penalty
+    final_score = legacy_score
     if not np.isfinite(final_score):
-        return -10000.0
+        return (-10000.0, symbol_results, {})
 
-    trial.set_user_attr("score_avg", float(final_score))
-    trial.set_user_attr("score_p25", float(score_p25))
-    trial.set_user_attr("return_avg", float(avg_ret))
-    trial.set_user_attr("return_p25", float(ret_p25))
-    trial.set_user_attr("stress_return_p25", float(stress_ret_p25))
-    trial.set_user_attr("excess_return_p25", float(excess_p25))
-    trial.set_user_attr("excess_return_avg", float(excess_avg))
-    trial.set_user_attr("pf_avg", float(avg_pf))
-    trial.set_user_attr("pf_pooled", float(pooled_pf_all))
-    trial.set_user_attr("pf_p25", float(pf_p25))
-    trial.set_user_attr("mdd_avg_abs", float(avg_mdd_abs))
-    trial.set_user_attr("mdd_max_abs", float(max_mdd_abs))
-    trial.set_user_attr("mdd_soft_guard_penalty", float(mdd_soft_guard_penalty))
-    trial.set_user_attr("complexity_penalty", float(complexity_penalty))
-    trial.set_user_attr("primary_guard_penalty", float(primary_guard_penalty))
-    trial.set_user_attr("primary_avg_ret", float(primary_avg_ret))
-    trial.set_user_attr("primary_avg_pf", float(primary_avg_pf))
-    trial.set_user_attr("primary_pooled_pf", float(primary_pooled_pf))
-    trial.set_user_attr("primary_total_trades", int(primary_total_trades))
-    trial.set_user_attr("all_total_trades", int(total_trades_all))
-    trial.set_user_attr("primary_p25_ret", float(primary_p25_ret))
-    trial.set_user_attr("primary_p25_pf", float(primary_p25_pf))
-    trial.set_user_attr("total_loss_trades_all", int(total_loss_trades_all))
-    trial.set_user_attr("total_win_trades_all", int(total_win_trades_all))
-    trial.set_user_attr("primary_loss_trades", int(primary_loss_trades))
-    trial.set_user_attr("primary_win_trades", int(primary_win_trades))
-    trial.set_user_attr("single_win_share", float(single_win_share))
-    trial.set_user_attr("fake_pf_penalty", float(fake_pf_penalty))
-    trial.set_user_attr("legacy_score", float(legacy_score))
-    trial.set_user_attr("core_score", float(core_score))
-    trial.set_user_attr("risk_budget_score", float(risk_budget_score))
-    trial.set_user_attr("risk_budget_mdd_util", float(risk_budget_mdd_util))
-    trial.set_user_attr("risk_budget_target_mdd", float(risk_budget_target_mdd))
-    trial.set_user_attr("risk_budget_mix", float(risk_budget_mix))
-    trial.set_user_attr("core_pf_activity", float(pooled_activity))
-    trial.set_user_attr("core_pf_p25_activity", float(min_trade_activity))
-    trial.set_user_attr("core_primary_min_trades_obs", int(primary_min_trades_obs))
-    trial.set_user_attr("active_mgmt_features", int(active_feature_count))
-    trial.set_user_attr("fallback_count", int(fallback_count))
-    trial.set_user_attr("symbol_success_ratio", float(success_ratio))
+    # Minimal always-on attrs for representative-trial selection and sweep snapshot publishing.
+    _add_attr("score_p25", float(score_p25))
+    _add_attr("return_avg", float(avg_ret))
+    _add_attr("return_p25", float(ret_p25))
+    _add_attr("excess_return_p25", float(excess_p25))
+    _add_attr("pf_avg", float(avg_pf))
+    _add_attr("mdd_avg_abs", float(avg_mdd_abs))
+    _add_attr("mdd_max_abs", float(max_mdd_abs))
+    _add_attr("all_total_trades", int(total_trades_all))
+    _add_attr("total_win_trades_all", int(total_win_trades_all))
+    # Verbose-only attrs preserve deep diagnostics while avoiding default per-trial DB bloat.
+    _add_attr("score_avg", float(final_score), verbose_only=True)
+    _add_attr("stress_return_p25", float(stress_ret_p25), verbose_only=True)
+    _add_attr("pf_pooled", float(pooled_pf_all), verbose_only=True)
+    _add_attr("pf_p25", float(pf_p25), verbose_only=True)
+    _add_attr("mdd_soft_guard_penalty", float(mdd_soft_guard_penalty), verbose_only=True)
+    _add_attr("mdd_budget_target", float(target_mdd), verbose_only=True)
+    _add_attr("mdd_budget_util", float(avg_mdd_abs / max(target_mdd, 1e-6)), verbose_only=True)
+    _add_attr("primary_avg_ret", float(primary_avg_ret), verbose_only=True)
+    _add_attr("primary_total_trades", int(primary_total_trades), verbose_only=True)
+    _add_attr("total_loss_trades_all", int(total_loss_trades_all), verbose_only=True)
+    _add_attr("primary_loss_trades", int(primary_loss_trades), verbose_only=True)
+    _add_attr("primary_win_trades", int(primary_win_trades), verbose_only=True)
+    _add_attr("core_primary_min_trades_obs", int(primary_min_trades_obs), verbose_only=True)
+    _add_attr("active_mgmt_features", int(active_feature_count), verbose_only=True)
+    _add_attr("fallback_count", int(fallback_count), verbose_only=True)
+    _add_attr("symbol_success_ratio", float(success_ratio), verbose_only=True)
     if np.isfinite(awfo_cv_avg):
-        trial.set_user_attr("awfo_cv_avg", float(awfo_cv_avg))
+        _add_attr("awfo_cv_avg", float(awfo_cv_avg), verbose_only=True)
     if np.isfinite(awfo_cv_gate_avg):
-        trial.set_user_attr("awfo_cv_gate_avg", float(awfo_cv_gate_avg))
+        _add_attr("awfo_cv_gate_avg", float(awfo_cv_gate_avg), verbose_only=True)
     if np.isfinite(fold_calmar_p25_cross):
-        trial.set_user_attr("fold_calmar_p25_cross", float(fold_calmar_p25_cross))
-    return float(final_score)
+        _add_attr("fold_calmar_p25_cross", float(fold_calmar_p25_cross), verbose_only=True)
+    
+    return (float(final_score), symbol_results, end_attrs)
+
+
+def objective_hyperband_spot(
+    trial: optuna.trial.Trial,
+    search_space: Dict[str, Any],
+    rung_artifacts: List[Tuple[Dict[str, Dict[str, pd.DataFrame]], Dict[str, Dict[str, np.ndarray]], Dict[str, Any]]],
+    mode: str,
+) -> float:
+    full_params = suggest_params(trial, search_space)
+    full_params = apply_spot_tf_param_limits(full_params)
+    if full_params.get("TREND_FILTER_TYPE") == "MACD" and full_params.get("MACD_FAST", 12) >= full_params.get("MACD_SLOW", 26):
+        return -10000.0
+    score = -10000.0
+    for rung_idx in range(len(rung_artifacts)):
+        step_data, step_merge, step_awfo = rung_artifacts[rung_idx]
+        score, _, _ = evaluate_one_fidelity_spot(
+            full_params, step_data, step_merge, step_awfo, mode
+        )
+        trial.report(float(score), rung_idx)
+        if trial.should_prune():
+            trial.set_user_attr("rung_reached", rung_idx)
+            return float(score)
+    trial.set_user_attr("rung_reached", len(rung_artifacts) - 1)
+    return float(score)
+
+
+def objective(
+    trial: optuna.trial.Trial,
+    symbols_data: Dict[str, Dict[str, pd.DataFrame]],
+    search_space: Dict,
+    mode: str = "UNIFIED",
+    merge_indices: Optional[Dict[str, Dict[str, np.ndarray]]] = None,
+    awfo_plan: Optional[Dict] = None,
+) -> float:
+    params = suggest_params(trial, search_space)
+    params = apply_spot_tf_param_limits(params)
+    if params.get("TREND_FILTER_TYPE") == "MACD" and params.get("MACD_FAST", 12) >= params.get("MACD_SLOW", 26):
+        return -10000.0
+    score, symbol_results, end_attrs = evaluate_one_fidelity_spot(
+        params, symbols_data, merge_indices, awfo_plan, mode
+    )
+    for k, v in end_attrs.items():
+        trial.set_user_attr(k, v)
+    maybe_collect_gc()
+    return float(score)
 
 
 def _run_default_bonus_sweep() -> int:
@@ -2407,7 +2400,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     search_space = GET_SEARCH_SPACE(mode, market_type="spot")
     timeframes = search_space["TIMEFRAME"]["choices"]
     load_tfs = sorted(set(timeframes + ["1d"]))
-    symbols_data = load_all_timeframes(symbols, SPOT_START_DATE, BACKTEST_END_DATE, load_tfs)
+    symbols_data = load_all_timeframes(symbols, SPOT_BACKTEST_START_DATE, SPOT_BACKTEST_END_DATE, load_tfs)
     if args.prepare_data_only:
         print(
             f"[INFO] Data preload completed for {len(symbols)} symbols x {len(load_tfs)} timeframes. "
@@ -2415,7 +2408,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         )
         return 0
 
-    cutoff_ts = pd.Timestamp(TRAIN_CUTOFF_DATE)
+    cutoff_ts = pd.Timestamp(SPOT_TRAIN_CUTOFF_DATE)
     train_data: Dict[str, Dict[str, pd.DataFrame]] = {}
     for sym, tf_map in symbols_data.items():
         train_data[sym] = {}
@@ -2423,7 +2416,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             end_idx = int((df["datetime"] < cutoff_ts).sum())
             if end_idx <= 0:
                 continue
-            sliced = df.iloc[:end_idx].copy()
+            sliced = df.iloc[:end_idx].copy(deep=False)
             sliced.attrs["warmup_bars"] = min(WARMUP_BUFFER_BARS.get(tf, 200), len(sliced))
             train_data[sym][tf] = sliced
 
@@ -2482,90 +2475,66 @@ def main(argv: Optional[List[str]] = None) -> int:
         if is_two_stage_mode:
             print("[2STAGE] Spot 2-Stage + Multi-Fidelity + Adaptive Refine enabled")
             cfg = SPOT_TWO_STAGE_UNIFIED_DEFAULTS.copy()
-            scale = max(0.45, trials / 2800.0)
-            stage1_total = int(cfg["stage1_total_trials"] * scale)
-            stage1_total = max(260, min(stage1_total, max(360, int(trials * 0.52))))
-            stage2_total_budget = max(180, trials - stage1_total)
-
+            use_hyperband = bool(cfg.get("stage1_use_hyperband", False))
             promoted_structures: List[Dict[str, object]] = []
             stage1_space_base = build_stage1_search_space(search_space)
             top_pool_limit = max(10, cfg["stage2_top_structures"] * 3)
 
-            print(
-                f"[2STAGE] Stage1 trials={stage1_total}, Stage2 budget={stage2_total_budget}, "
-                f"target_structures={cfg['stage2_top_structures']}"
-            )
-
-            for fidelity in cfg["stage1_fidelity_steps"]:
-                step_trials = int(stage1_total * fidelity["ratio"])
-                if step_trials < 40:
-                    continue
-
-                step_symbols = max(1, min(int(fidelity["symbols"]), len(symbols)))
-                step_data = subset_data_maps(
-                    train_data,
-                    symbols,
-                    n_symbols=step_symbols,
-                    data_ratio=float(fidelity["data_ratio"]),
-                )
-                step_merge_indices = compute_merge_indices(step_data)
-                step_awfo = build_awfo_plan(
-                    step_data,
-                    timeframes,
-                    folds=int(fidelity["folds"]),
-                    min_trades=int(fidelity["min_trades"]),
-                )
-                step_awfo["cache"] = build_awfo_runtime_cache(step_data, timeframes, step_awfo)
-
-                step_space = restrict_stage1_space_by_candidates(stage1_space_base, promoted_structures)
-                step_study_name = f"{study_name}__s1_{fidelity['name']}_{int(time.time())}"
-
+            # 2.5 2-Stage 진입점 분기: Hyperband vs fidelity-steps (only one runs)
+            if use_hyperband:
+                n_trials_s1 = int(cfg.get("stage1_hyperband_n_trials", 1200))
+                stage2_total_budget = max(180, trials - n_trials_s1)
+                stage1_total = n_trials_s1
                 print(
-                    f"[STAGE1] {fidelity['name'].upper()} | trials={step_trials}, symbols={step_symbols}, "
-                    f"data_ratio={fidelity['data_ratio']}, folds={fidelity['folds']}, seeds={seed_list}"
+                    f"[2STAGE] Stage1 trials={stage1_total}, Stage2 budget={stage2_total_budget}, "
+                    f"target_structures={cfg['stage2_top_structures']}"
                 )
+                rung_configs_raw = cfg.get("stage1_hyperband_rungs", cfg["stage1_fidelity_steps"])
+                rung_configs = [
+                    {
+                        "data_ratio": c.get("data_ratio", 0.45),
+                        "symbols": c.get("symbols", 1),
+                        "folds": c.get("folds", 3),
+                        "min_trades": c.get("min_trades", 20),
+                    }
+                    for c in rung_configs_raw
+                ]
+                rung_artifacts = build_rung_artifacts(train_data, symbols, timeframes, rung_configs)
+                pruner = optuna.pruners.SuccessiveHalvingPruner(
+                    reduction_factor=int(cfg.get("stage1_hyperband_reduction_factor", 2)),
+                    min_early_stopping_rate=0,
+                )
+                first_step = rung_configs_raw[0] if rung_configs_raw else {}
+                startup_ratio_hyperband = float(first_step.get("startup_ratio", 0.25))
                 seed_runs = run_seeded_studies(
-                    study_name_prefix=step_study_name,
+                    study_name_prefix=f"{study_name}__s1_hyperband_{int(time.time())}",
                     storage_url=storage_url,
                     storage=storage,
-                    n_trials=step_trials,
+                    n_trials=n_trials_s1,
                     n_jobs=args.jobs,
-                    startup_ratio=float(fidelity["startup_ratio"]),
-                    objective_fn=lambda t, _data=step_data, _space=step_space, _merge=step_merge_indices, _awfo=step_awfo: objective(
-                        t,
-                        _data,
-                        _space,
-                        mode,
-                        _merge,
-                        _awfo,
+                    startup_ratio=startup_ratio_hyperband,
+                    objective_fn=lambda t, _artifacts=rung_artifacts: objective_hyperband_spot(
+                        t, search_space, _artifacts, mode
                     ),
                     seeds=seed_list,
                     min_trials_per_seed=_env_int("SPOT_STAGE1_SEED_MIN_TRIALS", seed_min_trials_global),
+                    pruner=pruner,
                 )
-
                 completed: List[optuna.trial.FrozenTrial] = []
-                for seed, seed_trials, seed_study, step_startup in seed_runs:
-                    seed_best = float(seed_study.best_value) if len(seed_study.trials) > 0 else -float("inf")
-                    seed_robust = _robust_value_from_study(seed_study)
-                    print(
-                        f"   [INFO] Stage1-{fidelity['name']} seed={seed} | trials={seed_trials} | startup={step_startup} "
-                        f"| best={seed_best:.2f} | robust={seed_robust:.2f}"
-                    )
-                    if np.isfinite(seed_robust) and seed_robust > best_candidate_value:
-                        best_candidate_value = float(seed_robust)
-                        best_candidate_study = seed_study
-                        best_candidate_label = f"{step_study_name}:seed{seed}"
+                for _seed, _seed_trials, seed_study, _step_startup in seed_runs:
                     completed.extend(_study_complete_trials(seed_study))
-
-                if not completed:
-                    continue
-                completed.sort(key=lambda tr: float(tr.value), reverse=True)
-                top_k = max(cfg["stage2_top_structures"], int(len(completed) * cfg["promotion_ratio"]))
-                top_k = min(top_k, top_pool_limit, len(completed))
-
+                full_rung = len(rung_artifacts) - 1
+                completed_full = [t for t in completed if t.user_attrs.get("rung_reached") == full_rung]
+                completed_sorted = sorted(
+                    completed_full if completed_full else completed,
+                    key=lambda t: float(t.value if t.value is not None else -float("inf")),
+                    reverse=True,
+                )
+                top_k = max(cfg["stage2_top_structures"], int(len(completed_sorted) * cfg["promotion_ratio"]))
+                top_k = min(top_k, top_pool_limit, len(completed_sorted))
                 promoted: List[Dict[str, object]] = []
                 seen = set()
-                for tr in completed[:top_k]:
+                for tr in completed_sorted[:top_k]:
                     sig = extract_structure_signature(tr.params)
                     sig_key = tuple((k, sig.get(k)) for k in STRUCTURE_PARAM_KEYS)
                     if sig_key in seen or not sig:
@@ -2573,8 +2542,100 @@ def main(argv: Optional[List[str]] = None) -> int:
                     seen.add(sig_key)
                     promoted.append(sig)
                 promoted_structures = promoted
-                print(f"   [PROMOTE] structures={len(promoted_structures)} (top={top_k})")
+                print(
+                    f"[PROMOTE] Hyperband promoted structures: {len(promoted_structures)} "
+                    f"(from {len(completed_sorted)} trials, max_rung={full_rung})"
+                )
+            else:
+                scale = max(0.45, trials / 2800.0)
+                stage1_total = int(cfg["stage1_total_trials"] * scale)
+                stage1_total = max(260, min(stage1_total, max(360, int(trials * 0.52))))
+                stage2_total_budget = max(180, trials - stage1_total)
+                print(
+                    f"[2STAGE] Stage1 trials={stage1_total}, Stage2 budget={stage2_total_budget}, "
+                    f"target_structures={cfg['stage2_top_structures']}"
+                )
 
+                for fidelity in cfg["stage1_fidelity_steps"]:
+                    step_trials = int(stage1_total * fidelity["ratio"])
+                    if step_trials < 40:
+                        continue
+
+                    step_symbols = max(1, min(int(fidelity["symbols"]), len(symbols)))
+                    step_data = subset_data_maps(
+                        train_data,
+                        symbols,
+                        n_symbols=step_symbols,
+                        data_ratio=float(fidelity["data_ratio"]),
+                    )
+                    step_merge_indices = compute_merge_indices(step_data)
+                    step_awfo = build_awfo_plan(
+                        step_data,
+                        timeframes,
+                        folds=int(fidelity["folds"]),
+                        min_trades=int(fidelity["min_trades"]),
+                    )
+                    step_awfo["cache"] = build_awfo_runtime_cache(step_data, timeframes, step_awfo)
+
+                    step_space = restrict_stage1_space_by_candidates(stage1_space_base, promoted_structures)
+                    step_study_name = f"{study_name}__s1_{fidelity['name']}_{int(time.time())}"
+
+                    print(
+                        f"[STAGE1] {fidelity['name'].upper()} | trials={step_trials}, symbols={step_symbols}, "
+                        f"data_ratio={fidelity['data_ratio']}, folds={fidelity['folds']}, seeds={seed_list}"
+                    )
+                    seed_runs = run_seeded_studies(
+                        study_name_prefix=step_study_name,
+                        storage_url=storage_url,
+                        storage=storage,
+                        n_trials=step_trials,
+                        n_jobs=args.jobs,
+                        startup_ratio=float(fidelity["startup_ratio"]),
+                        objective_fn=lambda t, _data=step_data, _space=step_space, _merge=step_merge_indices, _awfo=step_awfo: objective(
+                            t,
+                            _data,
+                            _space,
+                            mode,
+                            _merge,
+                            _awfo,
+                        ),
+                        seeds=seed_list,
+                        min_trials_per_seed=_env_int("SPOT_STAGE1_SEED_MIN_TRIALS", seed_min_trials_global),
+                    )
+
+                    completed_f: List[optuna.trial.FrozenTrial] = []
+                    for seed, seed_trials, seed_study, step_startup in seed_runs:
+                        seed_best = float(seed_study.best_value) if len(seed_study.trials) > 0 else -float("inf")
+                        seed_robust = _robust_value_from_study(seed_study)
+                        print(
+                            f"   [INFO] Stage1-{fidelity['name']} seed={seed} | trials={seed_trials} | startup={step_startup} "
+                            f"| best={seed_best:.2f} | robust={seed_robust:.2f}"
+                        )
+                        if np.isfinite(seed_robust) and seed_robust > best_candidate_value:
+                            best_candidate_value = float(seed_robust)
+                            best_candidate_study = seed_study
+                            best_candidate_label = f"{step_study_name}:seed{seed}"
+                        completed_f.extend(_study_complete_trials(seed_study))
+
+                    if not completed_f:
+                        continue
+                    completed_f.sort(key=lambda tr: float(tr.value), reverse=True)
+                    top_k = max(cfg["stage2_top_structures"], int(len(completed_f) * cfg["promotion_ratio"]))
+                    top_k = min(top_k, top_pool_limit, len(completed_f))
+
+                    promoted = []
+                    seen = set()
+                    for tr in completed_f[:top_k]:
+                        sig = extract_structure_signature(tr.params)
+                        sig_key = tuple((k, sig.get(k)) for k in STRUCTURE_PARAM_KEYS)
+                        if sig_key in seen or not sig:
+                            continue
+                        seen.add(sig_key)
+                        promoted.append(sig)
+                    promoted_structures = promoted
+                    print(f"   [PROMOTE] structures={len(promoted_structures)} (top={top_k})")
+
+            # 2.6 Stage2: fallback if no promoted structures, then run Stage2 per structure
             if not promoted_structures:
                 fallback_sig = _default_structure_signature(stage1_space_base)
                 if fallback_sig:
@@ -2590,10 +2651,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                 min(len(promoted_structures), int(cfg["stage2_top_structures"]), max_structures_by_budget),
             )
             promoted_structures = promoted_structures[:effective_structure_count]
-            per_structure_trials = max(
-                min_stage2_trials,
-                int(stage2_total_budget / max(1, len(promoted_structures))),
-            )
+            # Guarantee 200 trials per structure: fixed per_structure_trials (do not divide budget).
+            per_structure_trials = min_stage2_trials
             stage2_awfo = build_awfo_plan(
                 train_data,
                 timeframes,
@@ -2653,7 +2712,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                         struct_best_study = seed_study
                         struct_best_label = f"{step_study_name}_p1:seed{seed}"
 
-                if stage2_completed and pass2_trials >= 25:
+                if stage2_completed and pass2_trials >= 30:
                     refined_space = build_adaptive_numeric_space(
                         stage2_space,
                         stage2_completed,
@@ -2814,7 +2873,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             )
             print(
                 "[HOLDOUT] "
-                f"window={TRAIN_CUTOFF_DATE}~{BACKTEST_END_DATE} | "
+                f"window={SPOT_TRAIN_CUTOFF_DATE}~{SPOT_BACKTEST_END_DATE} | "
                 f"ret={holdout_summary.get('core_avg_ret', 0.0):.2f}% | "
                 f"mdd_abs={holdout_summary.get('core_avg_mdd_abs', 0.0):.2f}% | "
                 f"min_trades={int(holdout_summary.get('core_min_trades', 0))} | "
@@ -2864,7 +2923,6 @@ def main(argv: Optional[List[str]] = None) -> int:
             "holdout_dynamic_min_trades_gate": int(holdout_summary.get("dynamic_min_trades_gate", 0)),
             "holdout_symbols_evaluated": int(holdout_summary.get("symbols_evaluated", 0)),
             "holdout_symbols_total": int(holdout_summary.get("symbols_total", 0)),
-            "holdout_min_symbol_coverage": float(HOLDOUT_MIN_SYMBOL_COVERAGE),
         },
     )
 
@@ -2887,6 +2945,22 @@ def main(argv: Optional[List[str]] = None) -> int:
         "source": str(final_source_name),
     }
     print(f"[SNAPSHOT] {json.dumps(snapshot, ensure_ascii=True, separators=(',', ':'))}")
+
+    # Housekeeping: remove all temporary studies (study_name__*) created during this run.
+    # All temporary study names share the prefix "{study_name}__" while the canonical alias
+    # is exactly study_name (no "__" suffix), so the prefix match is collision-free.
+    # Best trial is already published to alias before this point, so keep_recent=0 is safe.
+    orphan_keep_recent = int(os.getenv("OPTUNA_ORPHAN_KEEP_RECENT", "0"))
+    size_before = get_db_size_mb(storage_url, db_name)
+    logger.info("[CLEANUP] DB size before housekeeping: %.2f MB", size_before)
+
+    cleanup_orphan_studies(storage, study_name, "__", keep_recent=orphan_keep_recent)
+
+    reclaim_mysql_space(storage_url)
+
+    size_after = get_db_size_mb(storage_url, db_name)
+    logger.info("[CLEANUP] DB size after housekeeping: %.2f MB (freed ~%.2f MB)", size_after, max(0.0, size_before - size_after))
+
     return 0
 
 
