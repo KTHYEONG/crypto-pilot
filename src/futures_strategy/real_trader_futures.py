@@ -2797,10 +2797,25 @@ class RealTraderFutures:
 # Entry Point
 # ============================================================
 if __name__ == "__main__":
+    # #region agent log
+    _debug_path = Path(__file__).resolve().parents[2] / "debug-33072f.log"
+    try:
+        with open(_debug_path, "a", encoding="utf-8") as _f:
+            _f.write(json.dumps({"sessionId": "33072f", "hypothesisId": "H2", "location": "real_trader_futures.__main__", "message": "main_entered", "data": {}, "timestamp": int(time.time() * 1000)}, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+    # #endregion
     logger.info("=" * 60)
     logger.info("🚀 RealTrader Futures - Production Grade Bot")
     logger.info("=" * 60)
-    
+    # #region agent log
+    try:
+        with open(_debug_path, "a", encoding="utf-8") as _f:
+            _f.write(json.dumps({"sessionId": "33072f", "hypothesisId": "H2", "location": "real_trader_futures.__main__", "message": "first_log_done", "data": {}, "timestamp": int(time.time() * 1000)}, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+    # #endregion
+
     # Oracle Cloud 환경 변수로 활성화 결정 (기본값: True)
     import os
     enable_oracle_opt = os.getenv("ENABLE_ORACLE_OPTIMIZATION", "true").lower() == "true"
