@@ -120,16 +120,13 @@ SPOT_LOOP_INTERVAL_SECONDS = 10  # 메인 루프 간격 (10초)
 SPOT_SYMBOL_DELAY_SECONDS = 2  # 심볼 간 딜레이
 
 # --- 대상 심볼 (Upbit) ---
-# [Verified Portfolio] 2026-02-12 최신 분석 기반
-# 50만원 소액 투자 최적화: ETH(안정성+수익), DOGE(폭발력), SOL(추세)
-SPOT_TARGET_SYMBOLS = ["KRW-ETH", "KRW-DOGE", "KRW-SOL"]
+# [Option B] Holdout C OOS (2024-04 ~ 2026-02): BTC + DOGE + SOL 균형
+# 50만원 소액: 자산증식·분산 균형 (BTC 40% / DOGE 35% / SOL 25%)
+SPOT_TARGET_SYMBOLS = ["KRW-BTC", "KRW-DOGE", "KRW-SOL"]
 
-# --- 포지션 사이징 가중치 (성과 기반 - Spot) ---
-# 근거: 2026-02-12 Candidate B 롤링 검증 결과
-# KRW-ETH: 40% (안정성과 수익률의 최적 밸런스, Roll-5 기준 376% 수익)
-# KRW-DOGE: 30% (전략 최대 수혜주, Roll-4 기준 427% 수익)
-# KRW-SOL: 30% (꾸준한 우상향, 높은 PF 유지)
-SPOT_ALLOCATION_WEIGHTS = {"KRW-ETH": 0.40, "KRW-DOGE": 0.30, "KRW-SOL": 0.30}
+# --- 포지션 사이징 가중치 (Option B - Spot) ---
+# OOS: BTC 34.5% ret / DOGE 43.8% ret / SOL 33.6% ret — 수익·리스크 균형
+SPOT_ALLOCATION_WEIGHTS = {"KRW-BTC": 0.40, "KRW-DOGE": 0.35, "KRW-SOL": 0.25}
 
 # --- Optuna Study ---
 SPOT_OPTUNA_STUDY_NAME = "spot_strategy"
