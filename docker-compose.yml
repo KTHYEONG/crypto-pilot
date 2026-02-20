@@ -13,7 +13,7 @@ services:
       # DB 파일도 호스트와 동기화하여 데이터 영속성 유지
       - ./spot_strategy.db:/app/spot_strategy.db
       - ./trade_history.db:/app/trade_history.db
-    command: python src/spot_strategy/real_trader_spot.py
+    command: python -u src/spot_strategy/real_trader_spot.py
     logging:
       driver: "json-file"
       options:
@@ -31,7 +31,7 @@ services:
       - ./logs:/app/logs
       - ./futures_strategy.db:/app/futures_strategy.db
       - ./trade_history.db:/app/trade_history.db
-    command: python src/futures_strategy/real_trader_futures.py
+    command: python -u src/futures_strategy/real_trader_futures.py
     logging:
       driver: "json-file"
       options:
