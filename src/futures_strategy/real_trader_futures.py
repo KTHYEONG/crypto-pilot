@@ -836,6 +836,15 @@ class RealTraderFutures:
         return self.client.place_stop_market_order(symbol, side, qty, stop_price)
 
     @network_api_retry
+    def _place_take_profit_safe(self, symbol: str, side: str, qty: float, tp_price: float):
+        """안전한 서버 사이드 Take Profit 실행 (재시도 적용)"""
+        if hasattr(self.client, 'place_take_profit_market_order'):
+            return self.client.place_take_profit_market_order(symbol, side, qty, tp_price)
+        else:
+            logger.warning(f"⚠️ [{symbol}] API client lacks place_take_profit_market_order. Skipping TP.")
+            return None
+
+    @network_api_retry
     def _cancel_all_orders_safe(self, symbol: str):
         """안전한 모든 주문 취소 (재시도 적용)"""
         return self.client.cancel_all_orders(symbol)
@@ -1230,6 +1239,14 @@ class RealTraderFutures:
 
         sl_result = self._place_stop_loss_safe(symbol, close_sl_side, filled_qty, stop_price)
         sl_active = bool(sl_result)
+        
+        tp_active = False
+        if use_tp_entry and tp_price > 0:
+            tp_result = self._place_take_profit_safe(symbol, close_sl_side, filled_qty, tp_price)
+            tp_active = bool(tp_result)
+            if not tp_active:
+                logger.warning(f"⚠️ [{symbol}] TP order placement failed on server. Soft tracking will be used.")
+
         if not sl_active:
             logger.error(f"❌ [{symbol}] {expected_side} entry SL placement failed. Trying immediate restore.")
             sl_active = bool(
@@ -1255,7 +1272,14 @@ class RealTraderFutures:
             quantity=filled_qty,
             price=confirmed_entry_price,
             reason=reason,
-            params={'timeframe': execution_tf, 'atr': atr, 'sl': stop_price, 'sl_active': sl_active},
+            params={
+                'timeframe': execution_tf, 
+                'atr': atr, 
+                'sl': stop_price, 
+                'sl_active': sl_active,
+                'tp': tp_price if use_tp_entry else 0.0,
+                'tp_active': tp_active
+            },
         )
 
         self.state_manager.update_symbol_state(symbol, {
@@ -2511,7 +2535,17 @@ class RealTraderFutures:
             
         allocation_weight *= regime_mult
         
-        allocated_capital = total_balance * allocation_weight
+        # === 2.1 자본 할당 (Compounding & Cap 반영) ===
+        use_compounding = bool(params.get('USE_COMPOUNDING', False))
+        max_capital_usage = float(params.get('MAX_CAPITAL_USAGE', 1_000_000.0))
+        
+        trading_equity = total_balance
+        if use_compounding:
+            trading_equity = min(total_balance, max_capital_usage)
+        else:
+            trading_equity = min(total_balance, max_capital_usage) 
+            
+        allocated_capital = trading_equity * allocation_weight
         
         # === 3. 전략 파라미터 ===
         leverage = self._resolve_exchange_leverage(params.get('LEVERAGE', 1))
@@ -2523,13 +2557,17 @@ class RealTraderFutures:
         
         # === 4. Stop Loss Distance 계산 ===
         stop_distance_pct = 0.05  # Default fallback
+        sl_type = str(params.get('STOP_LOSS_TYPE', 'FIXED')).upper()
         
-        if atr > 0 and price > 0:
-            atr_mult = params.get('ATR_STOP_LOSS_MULT', 1.5)
+        if sl_type == 'ATR' and atr > 0 and price > 0:
+            atr_mult = float(params.get('ATR_STOP_LOSS_MULT', 1.5))
             stop_distance = atr * atr_mult
             stop_distance_pct = stop_distance / price
-            # Clamp to reasonable range (0.5% ~ 10%)
-            stop_distance_pct = max(0.005, min(stop_distance_pct, 0.10))
+        else:
+            stop_distance_pct = float(params.get('STOP_LOSS_PCT', 0.02))
+            
+        # Clamp to reasonable range (0.5% ~ 10%)
+        stop_distance_pct = max(0.005, min(stop_distance_pct, 0.10))
         
         # === 5. Sizing Calculation ===
         risk_amt = allocated_capital * risk_per_trade
