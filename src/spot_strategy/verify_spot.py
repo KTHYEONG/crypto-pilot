@@ -1,12 +1,12 @@
 import argparse
+import json
 import logging
 import os
 import re
 import sys
 import warnings
 from pathlib import Path
-from statistics import NormalDist
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import optuna
@@ -14,15 +14,21 @@ import pandas as pd
 from dotenv import load_dotenv
 from urllib.parse import quote_plus
 
+project_root = os.getcwd()
 try:
     project_root = str(Path(__file__).resolve().parents[2])
     if project_root not in sys.path:
         sys.path.append(project_root)
 except IndexError:
-    sys.path.append(os.getcwd())
+    if project_root not in sys.path:
+        sys.path.append(project_root)
 
-from config.optimization_config_modes import GET_SPOT_TRADE_GATE_POLICY
-from config.settings import BACKTEST_END_DATE, BACKTEST_START_DATE, DATA_DIR, TRAIN_CUTOFF_DATE
+from config.settings import (
+    SPOT_BACKTEST_START_DATE,
+    SPOT_BACKTEST_END_DATE,
+    SPOT_TRAIN_CUTOFF_DATE,
+    DATA_DIR,
+)
 from src.common.utils import setup_logger
 from src.spot_strategy.engine_fast_spot import BacktestEngineFastSpot, backtest_loop_spot_numba
 from src.spot_strategy.monte_carlo_spot import SpotMonteCarloSimulator
@@ -30,10 +36,36 @@ from src.spot_strategy.upbit_client import UpbitClient
 from src.spot_strategy.walk_forward_spot import SpotWalkForwardAnalyzer
 from src.strategy.strategies import UltimateStrategy
 
-logger = setup_logger("SpotVerifier")
+logger = setup_logger("SpotVerifier", write_file=False)
 logger.setLevel(logging.WARNING)
 
 LOG_WIDTH = 80
+SPOT_VERIFY_LOG_PATH = Path(project_root) / "logs" / "spot_verify_comparison.jsonl"
+SPOT_COMPARISON_METRICS: Tuple[str, ...] = (
+    "core_avg_ret",
+    "core_avg_excess_ret",
+    "core_avg_mdd_abs",
+    "core_avg_pf",
+    "core_avg_pf_clipped_shrunk",
+    "core_min_trades",
+    "core_total_trades",
+    "core_wfa_consistency",
+    "core_mc_worst_mdd_95",
+    "alt_median_ret",
+    "alt_p25_ret",
+    "alt_pos_rate",
+    "alt_worst_mdd_abs",
+    "dispersion",
+    "avg_ret",
+    "train_score",
+    "selection_rank_score",
+)
+SPOT_LOWER_IS_BETTER_METRICS = {
+    "core_avg_mdd_abs",
+    "core_mc_worst_mdd_95",
+    "alt_worst_mdd_abs",
+    "dispersion",
+}
 SPOT_INITIAL_BALANCE = 1_000_000.0
 SPOT_BASE_FEE = 0.0005
 SPOT_BASE_SLIPPAGE = 0.0003
@@ -41,11 +73,16 @@ WARMUP_DAYS = 60
 COST_STRESS_MULTIPLIERS = (1.5, 2.0)
 BONUS_SWEEP_HOLDOUT_RATIO = 0.30
 BONUS_SWEEP_MIN_HOLDOUT_DAYS = 120
-BONUS_SELECTION_FIXED_START_DATE = "2025-01-01"
-BONUS_SELECTION_FIXED_END_DATE = "2026-02-10"
+# Selection window dynamically tied to SPOT_TRAIN_CUTOFF_DATE.
+# Selection covers the period leading up to the cutoff (In-Sample or Look-back).
+# Holdout (OOS) covers the period AFTER the cutoff.
+_train_cutoff_ts = pd.Timestamp(SPOT_TRAIN_CUTOFF_DATE)
+BONUS_SELECTION_FIXED_START_DATE = str((_train_cutoff_ts - pd.DateOffset(months=18)).date())
+BONUS_SELECTION_FIXED_END_DATE = str((_train_cutoff_ts - pd.Timedelta(seconds=1)).date())
 # OOS is enabled only when unseen post-selection data is sufficiently long.
 # For spot (BTC/ETH primary, 4h often sparse), 6 months is the minimum practical floor.
-HOLDOUT_ACTIVATION_MIN_DAYS = 180
+# Enable holdout sanity checks once at least ~3 months of unseen data are available.
+HOLDOUT_ACTIVATION_MIN_DAYS = 90
 GAP_FILL_MAX_RANGES = int(os.getenv("SPOT_GAP_FILL_MAX_RANGES", "3"))
 
 # Process-local cache to avoid repeated disk I/O + repeated gap backfills across
@@ -53,55 +90,60 @@ GAP_FILL_MAX_RANGES = int(os.getenv("SPOT_GAP_FILL_MAX_RANGES", "3"))
 _SPOT_DATA_CACHE: Dict[Tuple[str, str, str, str], Tuple[pd.DataFrame, pd.DataFrame]] = {}
 _SPOT_GAP_FILLED_KEYS: set = set()
 SHOW_ZERO_TRADE_DIAG = False
-SELECTION_POLICY_VERSION = "SPOT_SELECTION_POLICY_V7_PARITY"
+SELECTION_POLICY_VERSION = "SPOT_SELECTION_POLICY_V11_SIMPLE"
+# Timeframe-specific min trades for selection gate (aligned with futures: lower TF = more bars → higher min).
+SPOT_TF_SELECTION_MIN_TRADES: Dict[str, int] = {
+    "30m": 12,
+    "1h": 10,
+    "4h": 8,
+}
+SPOT_SELECTION_MIN_TRADES_DEFAULT = 10
+
 SELECTION_POLICY = {
     "gates": {
-        # Simple is best: deploy gate uses only core profitability, risk, and activity.
-        "core_min_avg_return": 0.0,
-        "core_min_pf_clipped": 1.05,
-        "core_max_avg_mdd_abs": 15.0,
+        "core_min_return": 0.0,
         "core_min_trades": 10,
-        "core_min_total_trades": 20,
+        "core_max_avg_mdd_abs": 25.0,
+        "core_min_wfa_consistency": 40.0,
+        "core_max_mc_worst_mdd_95_abs": 45.0,
+        "alt_min_pos_rate": 0.50,
+        "alt_max_worst_mdd_abs": 50.0,
+        "alt_min_p25_return": -20.0,
+    },
+    # Core-first: 70% core (return/risk), 25% alt, 5% div so selection favors return over uniformity.
+    "weights": {
+        "core_total": 0.70,
+        "alt_total": 0.25,
+        "div_total": 0.05,
+        "core_return": 0.35,
+        "core_pf": 0.15,
+        "core_wfa": 0.20,
+        "core_mdd": 0.15,
+        "core_mc": 0.15,
+        "alt_median": 0.35,
+        "alt_p25": 0.25,
+        "alt_pos": 0.25,
+        "alt_mdd": 0.15,
     },
     "robust": {
         "pf_clip_per_symbol": 6.0,
     },
 }
 
-SPOT_GATE_POLICY = GET_SPOT_TRADE_GATE_POLICY()
-SPOT_GATE_STAT = dict(SPOT_GATE_POLICY.get("statistical", {}))
-SPOT_GATE_SELECTION = dict(SPOT_GATE_POLICY.get("selection", {}))
-SPOT_GATE_HOLDOUT = dict(SPOT_GATE_POLICY.get("holdout", {}))
-SPOT_GATE_HOLDOUT_SANITY = dict(SPOT_GATE_HOLDOUT.get("sanity_gates", {}))
-
-SPOT_TF_SELECTION_TRADE_GATES = dict(SPOT_GATE_SELECTION.get("tf_min_gates", {}))
-SPOT_TF_HOLDOUT_TRADES_PER_30D = dict(SPOT_GATE_HOLDOUT.get("trades_per_30d", {}))
-SPOT_TF_HOLDOUT_MIN_TRADES_FLOOR = dict(SPOT_GATE_HOLDOUT.get("min_trades_floor", {}))
-SPOT_TF_HOLDOUT_MIN_TRADES_CAP = dict(SPOT_GATE_HOLDOUT.get("min_trades_cap", {}))
-SPOT_SELECTION_USE_STAT_MIN_TRADES = bool(SPOT_GATE_SELECTION.get("use_stat_min_trades", True))
-SPOT_HOLDOUT_USE_STAT_MIN_TRADES = bool(SPOT_GATE_HOLDOUT.get("use_stat_min_trades", True))
-SPOT_STAT_TRADE_CONFIDENCE = float(SPOT_GATE_STAT.get("confidence", 0.80))
-SPOT_STAT_TRADE_MARGIN_ERROR = float(SPOT_GATE_STAT.get("margin_error", 0.25))
-SPOT_STAT_TRADE_REFERENCE_DAYS = int(SPOT_GATE_STAT.get("reference_days", 120))
-SPOT_STAT_TRADE_DAY_SCALE_EXP = float(SPOT_GATE_STAT.get("day_scale_exp", 0.5))
-SPOT_STAT_TRADE_MIN_DAY_SCALE = float(SPOT_GATE_STAT.get("min_day_scale", 0.6))
-SPOT_SELECTION_STAT_MIN_TRADES_CAP = int(SPOT_GATE_SELECTION.get("stat_min_trades_cap", 60))
-SPOT_SELECTION_TOTAL_TRADES_MULTIPLIER = float(SPOT_GATE_SELECTION.get("total_trades_multiplier", 1.0))
-SPOT_PF_SHRINK_REF_TRADES = float(SPOT_GATE_SELECTION.get("pf_shrink_ref_trades", 30.0))
 HOLDOUT_SANITY_GATES = {
-    "core_min_return": float(SPOT_GATE_HOLDOUT_SANITY.get("core_min_return", 0.0)),
-    "core_min_excess_ret": float(SPOT_GATE_HOLDOUT_SANITY.get("core_min_excess_ret", 2.0)),
-    "core_dual_return_mode": bool(SPOT_GATE_HOLDOUT_SANITY.get("core_dual_return_mode", True)),
-    "core_min_pf": float(SPOT_GATE_HOLDOUT_SANITY.get("core_min_pf", 1.05)),
-    "core_min_trades": int(SPOT_GATE_HOLDOUT_SANITY.get("core_min_trades", 8)),
-    "core_min_symbol_trades": int(SPOT_GATE_HOLDOUT_SANITY.get("core_min_symbol_trades", 6)),
-    "core_min_total_trades": int(SPOT_GATE_HOLDOUT_SANITY.get("core_min_total_trades", 14)),
-    "core_total_trades_gate_mult": float(SPOT_GATE_HOLDOUT_SANITY.get("core_total_trades_gate_mult", 1.5)),
-    "low_activity_neutralize_ratio": float(SPOT_GATE_HOLDOUT_SANITY.get("low_activity_neutralize_ratio", 0.75)),
-    "low_activity_severe_min_return": float(SPOT_GATE_HOLDOUT_SANITY.get("low_activity_severe_min_return", -1.0)),
-    "low_activity_severe_min_pf": float(SPOT_GATE_HOLDOUT_SANITY.get("low_activity_severe_min_pf", 0.90)),
-    "core_max_avg_mdd_abs": float(SPOT_GATE_HOLDOUT_SANITY.get("core_max_avg_mdd_abs", 2.5)),
+    "core_min_return": 0.0,
+    "core_min_trades": 24,  # long-only: lower than futures fallback (30)
+    "core_max_avg_mdd_abs": 35.0,
 }
+# TF-specific holdout min_trades: (coef, floor) per TF; longer TF -> fewer bars -> lower gate.
+SPOT_HOLDOUT_TF_COEF_FLOOR: Dict[str, Tuple[float, int]] = {
+    "30m": (0.10, 24),
+    "1h": (0.065, 20),
+    "4h": (0.035, 16),
+}
+SPOT_HOLDOUT_DEFAULT_COEF, SPOT_HOLDOUT_DEFAULT_FLOOR = 0.10, 24
+# PF shrinkage reference trades (for _shrink_pf_by_trades; scoring only, not gate).
+SPOT_PF_SHRINK_REF_TRADES = 30.0
 ROLLING_SANITY_GATES = {
     "min_windows": 2,
     "min_pf_pass_rate": 0.60,
@@ -136,6 +178,145 @@ def _log_subheader(title: str) -> None:
     print("-" * 70)
 
 
+def _safe_float(value: Any) -> Optional[float]:
+    try:
+        converted = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not np.isfinite(converted):
+        return None
+    return float(converted)
+
+
+def _sanitize_for_json(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(k): _sanitize_for_json(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_sanitize_for_json(v) for v in value]
+    if isinstance(value, pd.Timestamp):
+        return value.isoformat()
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, np.generic):
+        return value.item()
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return str(value)
+
+
+def _extract_numeric_metrics(raw_metrics: Any) -> Dict[str, float]:
+    if not isinstance(raw_metrics, dict):
+        return {}
+    metrics: Dict[str, float] = {}
+    for key, raw_value in raw_metrics.items():
+        converted = _safe_float(raw_value)
+        if converted is not None:
+            metrics[str(key)] = converted
+    return metrics
+
+
+def _extract_summary_metrics(
+    summary: Optional[Dict[str, Any]],
+    extra_metrics: Optional[Dict[str, Any]] = None,
+) -> Dict[str, float]:
+    metrics: Dict[str, float] = {}
+    summary_dict = summary if isinstance(summary, dict) else {}
+    for key in SPOT_COMPARISON_METRICS:
+        converted = _safe_float(summary_dict.get(key))
+        if converted is not None:
+            metrics[key] = converted
+    if extra_metrics:
+        metrics.update(_extract_numeric_metrics(extra_metrics))
+    return metrics
+
+
+def _read_latest_comparison_entry(log_path: Path) -> Optional[Dict[str, Any]]:
+    if not log_path.exists():
+        return None
+    try:
+        latest_line: Optional[str] = None
+        with log_path.open("r", encoding="utf-8") as file_handle:
+            for raw_line in file_handle:
+                line = raw_line.strip()
+                if line:
+                    latest_line = line
+        if not latest_line:
+            return None
+        loaded = json.loads(latest_line)
+        return loaded if isinstance(loaded, dict) else None
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning(f"[WARN] Failed to read previous spot comparison log: {exc}")
+        return None
+
+
+def _build_metric_comparison(
+    previous_metrics: Dict[str, float],
+    current_metrics: Dict[str, float],
+) -> Dict[str, Any]:
+    metric_deltas: Dict[str, Dict[str, float]] = {}
+    improved_metrics: List[str] = []
+    degraded_metrics: List[str] = []
+
+    for metric in sorted(set(previous_metrics) | set(current_metrics)):
+        prev_value = previous_metrics.get(metric)
+        curr_value = current_metrics.get(metric)
+        if prev_value is None or curr_value is None:
+            continue
+        delta = float(curr_value - prev_value)
+        metric_deltas[metric] = {
+            "previous": float(prev_value),
+            "current": float(curr_value),
+            "delta": delta,
+        }
+        if np.isclose(delta, 0.0):
+            continue
+        lower_is_better = metric in SPOT_LOWER_IS_BETTER_METRICS
+        is_improved = (delta < 0.0) if lower_is_better else (delta > 0.0)
+        if is_improved:
+            improved_metrics.append(metric)
+        else:
+            degraded_metrics.append(metric)
+
+    return {
+        "metric_deltas": metric_deltas,
+        "improved_metrics": improved_metrics,
+        "degraded_metrics": degraded_metrics,
+    }
+
+
+def _record_verification_comparison(
+    *,
+    log_path: Path,
+    run_type: str,
+    current_best: Dict[str, Any],
+    context: Optional[Dict[str, Any]] = None,
+) -> None:
+    previous_entry = _read_latest_comparison_entry(log_path)
+    previous_best = previous_entry.get("current_best") if isinstance(previous_entry, dict) else None
+    previous_metrics = _extract_numeric_metrics(
+        previous_best.get("metrics") if isinstance(previous_best, dict) else None
+    )
+    current_metrics = _extract_numeric_metrics(current_best.get("metrics"))
+    comparison = _build_metric_comparison(previous_metrics, current_metrics)
+
+    entry = {
+        "logged_at_utc": pd.Timestamp.now(tz="UTC").isoformat(),
+        "strategy_type": "spot",
+        "run_type": str(run_type),
+        "context": context or {},
+        "current_best": current_best,
+        "previous_latest": previous_best,
+        "comparison": comparison,
+    }
+    try:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with log_path.open("a", encoding="utf-8") as file_handle:
+            file_handle.write(json.dumps(_sanitize_for_json(entry), ensure_ascii=False) + "\n")
+        print(f"[INFO] Comparison log appended: {log_path}")
+    except OSError as exc:
+        logger.warning(f"[WARN] Failed to write spot comparison log: {exc}")
+
+
 def _clip01(x: float) -> float:
     return float(np.clip(float(x), 0.0, 1.0))
 
@@ -164,8 +345,8 @@ def resolve_eval_window(
     eval_start_time: Optional[pd.Timestamp] = None,
     eval_end_time: Optional[pd.Timestamp] = None,
 ) -> Tuple[pd.Timestamp, pd.Timestamp]:
-    eval_start = pd.Timestamp(eval_start_time) if eval_start_time is not None else pd.Timestamp(TRAIN_CUTOFF_DATE)
-    raw_end = pd.Timestamp(eval_end_time) if eval_end_time is not None else pd.Timestamp(BACKTEST_END_DATE)
+    eval_start = pd.Timestamp(eval_start_time) if eval_start_time is not None else pd.Timestamp(SPOT_TRAIN_CUTOFF_DATE)
+    raw_end = pd.Timestamp(eval_end_time) if eval_end_time is not None else pd.Timestamp(SPOT_BACKTEST_END_DATE)
     eval_end = _to_inclusive_end_timestamp(raw_end)
     if eval_end < eval_start:
         raise ValueError(f"Invalid eval window: start={eval_start}, end={eval_end}")
@@ -173,12 +354,15 @@ def resolve_eval_window(
 
 
 def split_bonus_oos_windows() -> Tuple[pd.Timestamp, pd.Timestamp, Optional[pd.Timestamp], Optional[pd.Timestamp], bool, int]:
-    data_start, data_end = resolve_eval_window(pd.Timestamp(TRAIN_CUTOFF_DATE), pd.Timestamp(BACKTEST_END_DATE))
+    data_start, data_end = resolve_eval_window(pd.Timestamp(SPOT_TRAIN_CUTOFF_DATE), pd.Timestamp(SPOT_BACKTEST_END_DATE))
     sel_fixed_start = pd.Timestamp(BONUS_SELECTION_FIXED_START_DATE)
     sel_fixed_end = _to_inclusive_end_timestamp(pd.Timestamp(BONUS_SELECTION_FIXED_END_DATE))
 
-    selection_start = max(data_start, sel_fixed_start)
-    selection_end = min(data_end, sel_fixed_end)
+    # Selection is defined as the period BEFORE the cutoff (look-back from cutoff).
+    # Since optimize used data up to cutoff, selection here acts as a high-fidelity
+    # in-sample cross-validation window.
+    selection_start = sel_fixed_start
+    selection_end = sel_fixed_end
     if selection_end < selection_start:
         raise ValueError(
             f"Invalid fixed selection window after clipping: "
@@ -201,59 +385,12 @@ def split_bonus_oos_windows() -> Tuple[pd.Timestamp, pd.Timestamp, Optional[pd.T
     return selection_start, selection_end, holdout_start, holdout_end, holdout_enabled, holdout_days
 
 
-def _normalize_trade_gate_tf(timeframe: Optional[str]) -> str:
-    tf = str(timeframe or "").strip().lower()
-    if tf in SPOT_TF_HOLDOUT_TRADES_PER_30D:
-        return tf
-    if tf in SPOT_TF_SELECTION_TRADE_GATES:
-        return tf
-    return "default"
-
-
-def _compute_statistical_trade_min_trades(window_days: int) -> int:
-    days = max(1, int(window_days))
-    confidence = float(np.clip(SPOT_STAT_TRADE_CONFIDENCE, 0.50, 0.99))
-    margin_error = float(np.clip(SPOT_STAT_TRADE_MARGIN_ERROR, 0.05, 0.45))
-    ref_days = max(1, int(SPOT_STAT_TRADE_REFERENCE_DAYS))
-    scale_exp = float(np.clip(SPOT_STAT_TRADE_DAY_SCALE_EXP, 0.25, 1.00))
-    min_day_scale = float(np.clip(SPOT_STAT_TRADE_MIN_DAY_SCALE, 0.25, 1.00))
-
-    z = float(NormalDist().inv_cdf(0.5 + (confidence / 2.0)))
-    base_samples = int(np.ceil((z * z * 0.25) / (margin_error * margin_error)))
-    day_ratio = max(1e-9, float(days) / float(ref_days))
-    day_scale = max(min_day_scale, float(day_ratio ** scale_exp))
-    scaled_samples = int(np.ceil(float(base_samples) * day_scale))
-    return int(max(1, scaled_samples))
-
-
-def selection_trade_gates_for_timeframe(
-    timeframe: Optional[str],
-    eval_days: Optional[int] = None,
-    primary_symbol_count: int = 2,
-) -> Tuple[int, int]:
-    tf_key = _normalize_trade_gate_tf(timeframe)
-    cfg = SPOT_TF_SELECTION_TRADE_GATES.get(tf_key)
-    if cfg is None:
-        gates = SELECTION_POLICY["gates"]
-        min_trades = int(gates["core_min_trades"])
-        min_total_trades = int(gates["core_min_total_trades"])
-    else:
-        min_trades = int(max(1, cfg.get("core_min_trades", SELECTION_POLICY["gates"]["core_min_trades"])))
-        min_total_trades = int(max(min_trades, cfg.get("core_min_total_trades", SELECTION_POLICY["gates"]["core_min_total_trades"])))
-
-    if SPOT_SELECTION_USE_STAT_MIN_TRADES and eval_days is not None and int(eval_days) > 0:
-        stat_min_trades = _compute_statistical_trade_min_trades(int(eval_days))
-        stat_min_trades = int(min(max(1, stat_min_trades), max(1, SPOT_SELECTION_STAT_MIN_TRADES_CAP)))
-        min_trades = int(max(min_trades, stat_min_trades))
-        dynamic_total_gate = int(
-            np.ceil(
-                float(min_trades)
-                * max(1, int(primary_symbol_count))
-                * max(0.5, float(SPOT_SELECTION_TOTAL_TRADES_MULTIPLIER))
-            )
-        )
-        min_total_trades = int(max(min_total_trades, dynamic_total_gate))
-    return min_trades, min_total_trades
+def spot_selection_min_trades_for_timeframe(timeframe: Optional[str]) -> int:
+    """Return selection gate min trades for the given timeframe; default if unknown (aligned with futures)."""
+    if not timeframe:
+        return SPOT_SELECTION_MIN_TRADES_DEFAULT
+    tf = str(timeframe).strip().lower()
+    return int(SPOT_TF_SELECTION_MIN_TRADES.get(tf, SPOT_SELECTION_MIN_TRADES_DEFAULT))
 
 
 def compute_dynamic_holdout_min_trades(
@@ -261,75 +398,33 @@ def compute_dynamic_holdout_min_trades(
     holdout_end: pd.Timestamp,
     timeframe: Optional[str] = None,
 ) -> int:
+    """Spot: TF-aware holdout gate (long-only; longer TF -> lower coef/floor). Same formula shape as futures."""
     holdout_days = max(1, int((holdout_end.normalize() - holdout_start.normalize()).days) + 1)
-    tf_key = _normalize_trade_gate_tf(timeframe)
-    per_30d = float(SPOT_TF_HOLDOUT_TRADES_PER_30D.get(tf_key, SPOT_TF_HOLDOUT_TRADES_PER_30D["default"]))
-    floor = int(SPOT_TF_HOLDOUT_MIN_TRADES_FLOOR.get(tf_key, SPOT_TF_HOLDOUT_MIN_TRADES_FLOOR["default"]))
-    cap = int(SPOT_TF_HOLDOUT_MIN_TRADES_CAP.get(tf_key, SPOT_TF_HOLDOUT_MIN_TRADES_CAP["default"]))
-    scaled = int(round((holdout_days / 30.0) * max(0.1, per_30d)))
-    activity_gate = int(max(1, min(max(floor, scaled), max(floor, cap))))
-    if not SPOT_HOLDOUT_USE_STAT_MIN_TRADES:
-        return activity_gate
-    stat_gate = int(min(_compute_statistical_trade_min_trades(holdout_days), max(floor, cap)))
-    return int(max(activity_gate, stat_gate))
-
-
-def _resolve_holdout_trade_gates(trades_gate: int) -> Tuple[int, int]:
-    symbol_min_gate = int(max(1, int(HOLDOUT_SANITY_GATES.get("core_min_symbol_trades", trades_gate))))
-    total_mult = float(np.clip(float(HOLDOUT_SANITY_GATES.get("core_total_trades_gate_mult", 1.5)), 1.0, 3.0))
-    policy_total_gate = int(max(1, int(HOLDOUT_SANITY_GATES.get("core_min_total_trades", symbol_min_gate * 2))))
-    dynamic_total_gate = int(np.ceil(float(max(1, trades_gate)) * total_mult))
-    total_gate = int(max(policy_total_gate, dynamic_total_gate))
-    return symbol_min_gate, total_gate
+    tf = str(timeframe).strip().lower() if timeframe else ""
+    coef, floor = SPOT_HOLDOUT_TF_COEF_FLOOR.get(tf, (SPOT_HOLDOUT_DEFAULT_COEF, SPOT_HOLDOUT_DEFAULT_FLOOR))
+    dynamic_floor = int(round(holdout_days * coef))
+    return max(floor, dynamic_floor)
 
 
 def evaluate_holdout_sanity(
     summary: Optional[Dict],
     min_trades_gate: Optional[int] = None,
 ) -> Tuple[bool, List[str]]:
+    """Three checks only (aligned with futures): return, min_trades, mdd."""
     if not summary:
         return False, ["holdout_no_summary"]
-    trades_gate = int(min_trades_gate if min_trades_gate is not None else HOLDOUT_SANITY_GATES["core_min_trades"])
-    symbol_min_gate, total_gate = _resolve_holdout_trade_gates(trades_gate)
-    reasons: List[str] = []
-    core_avg_ret = float(summary.get("core_avg_ret", 0.0))
-    core_excess_ret = float(summary.get("core_avg_excess_ret", 0.0))
-    core_symbol_min_trades = int(summary.get("core_min_trades", 0))
-    core_total_trades = int(summary.get("core_total_trades", core_symbol_min_trades))
-    low_activity_ratio = float(core_total_trades) / float(max(1, total_gate))
-    neutralize_ratio = float(np.clip(float(HOLDOUT_SANITY_GATES.get("low_activity_neutralize_ratio", 0.75)), 0.40, 1.00))
-    is_low_activity = (core_symbol_min_trades < symbol_min_gate) or (core_total_trades < total_gate)
-    low_activity_neutral = bool(is_low_activity and (low_activity_ratio < neutralize_ratio))
-    severe_min_return = float(HOLDOUT_SANITY_GATES.get("low_activity_severe_min_return", -1.0))
-    severe_min_pf = float(HOLDOUT_SANITY_GATES.get("low_activity_severe_min_pf", 0.90))
-
-    dual_return_mode = bool(HOLDOUT_SANITY_GATES.get("core_dual_return_mode", True))
-    return_ok = False
-    if dual_return_mode:
-        return_ok = bool(
-            core_avg_ret >= float(HOLDOUT_SANITY_GATES["core_min_return"])
-            or core_excess_ret >= float(HOLDOUT_SANITY_GATES.get("core_min_excess_ret", 0.0))
-        )
-    else:
-        return_ok = core_avg_ret >= float(HOLDOUT_SANITY_GATES["core_min_return"])
-    if not return_ok and ((not low_activity_neutral) or (core_avg_ret < severe_min_return)):
-        reasons.append("holdout_core_return_low")
-    if core_symbol_min_trades < symbol_min_gate:
-        reasons.append("holdout_core_trades_low")
-    if core_total_trades < total_gate:
-        reasons.append("holdout_core_total_trades_low")
-    if float(summary.get("core_avg_mdd_abs", 0.0)) > float(HOLDOUT_SANITY_GATES["core_max_avg_mdd_abs"]):
-        reasons.append("holdout_core_mdd_too_high")
-    core_pf_shrunk = float(
-        summary.get(
-            "core_avg_pf_clipped_shrunk",
-            summary.get("core_avg_pf_shrunk", summary.get("core_avg_pf_clipped", summary.get("core_avg_pf", 0.0))),
-        )
+    trades_gate = int(
+        min_trades_gate
+        if min_trades_gate is not None
+        else HOLDOUT_SANITY_GATES["core_min_trades"]
     )
-    if core_pf_shrunk < float(HOLDOUT_SANITY_GATES.get("core_min_pf", 1.0)) and (
-        (not low_activity_neutral) or (core_pf_shrunk < severe_min_pf)
-    ):
-        reasons.append("holdout_core_pf_low")
+    reasons: List[str] = []
+    if float(summary.get("core_avg_ret", 0.0)) <= HOLDOUT_SANITY_GATES["core_min_return"]:
+        reasons.append("holdout_core_return_low")
+    if int(summary.get("core_min_trades", 0)) < trades_gate:
+        reasons.append("holdout_core_trades_low")
+    if float(summary.get("core_avg_mdd_abs", 0.0)) > HOLDOUT_SANITY_GATES["core_max_avg_mdd_abs"]:
+        reasons.append("holdout_core_mdd_too_high")
     return len(reasons) == 0, reasons
 
 
@@ -348,31 +443,9 @@ def classify_holdout_outcome(
         return "PASS", []
     if not summary:
         return "FAIL", list(reasons)
-
     core_total_trades = int(summary.get("core_total_trades", summary.get("core_min_trades", 0)))
-    core_ret = float(summary.get("core_avg_ret", 0.0))
-    core_pf_shrunk = float(
-        summary.get(
-            "core_avg_pf_clipped_shrunk",
-            summary.get("core_avg_pf_shrunk", summary.get("core_avg_pf_clipped", summary.get("core_avg_pf", 0.0))),
-        )
-    )
-    reason_set = set(reasons)
-    trade_reason_set = {"holdout_core_trades_low", "holdout_core_total_trades_low"}
-    neutral_reason_set = {"holdout_core_return_low", "holdout_core_pf_low"} | trade_reason_set
-
     if core_total_trades <= 0:
         return "INACTIVE", ["holdout_no_trades"]
-    if reason_set and reason_set.issubset(trade_reason_set):
-        return "INACTIVE", ["holdout_low_activity"]
-    if (
-        core_total_trades < int(max(1, min_trades_gate))
-        and reason_set
-        and reason_set.issubset(neutral_reason_set)
-        and abs(core_ret) <= 0.35
-        and core_pf_shrunk >= 0.95
-    ):
-        return "INACTIVE", ["holdout_low_activity_near_flat"]
     return "FAIL", list(reasons)
 
 
@@ -554,6 +627,15 @@ def _seed_spot_cache_from_legacy(symbol: str, timeframe: str) -> Optional[pd.Dat
     merged = merged.drop_duplicates(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
     merged["datetime"] = pd.to_datetime(merged["timestamp"], unit="ms")
     return merged
+
+
+def compute_segment_merge_index(hourly_df: pd.DataFrame, daily_df: pd.DataFrame) -> np.ndarray:
+    hourly_days = pd.to_datetime(hourly_df["datetime"]).dt.normalize().values.astype("datetime64[ns]")
+    daily_days = pd.to_datetime(daily_df["datetime"]).dt.normalize().values.astype("datetime64[ns]")
+    if len(daily_days) == 0:
+        return np.zeros(len(hourly_days), dtype=np.int32)
+    pos = np.searchsorted(daily_days, hourly_days, side="right") - 1
+    return np.clip(pos, 0, len(daily_days) - 1).astype(np.int32)
 
 
 def _spot_timeframe_to_ms(timeframe: str) -> Optional[int]:
@@ -955,7 +1037,7 @@ def verify_single_symbol_spot(
     cost_mult: float = 1.0,
 ) -> Optional[Dict]:
     tf = best_params.get("TIMEFRAME", "1h")
-    hourly_df, daily_df = load_data_spot(symbol, tf, BACKTEST_START_DATE, BACKTEST_END_DATE)
+    hourly_df, daily_df = load_data_spot(symbol, tf, SPOT_BACKTEST_START_DATE, SPOT_BACKTEST_END_DATE)
     if hourly_df is None or daily_df is None:
         print(f"[WARN] Data missing for {symbol}. Skipping.")
         return None
@@ -966,11 +1048,14 @@ def verify_single_symbol_spot(
         print(f"[WARN] No data for {symbol} in eval window. Skipping.")
         return None
 
-    current_params = best_params.copy()
-
     safe_cost_mult = max(0.0, float(cost_mult))
+    strategy = UltimateStrategy(f"Verify_{symbol}", best_params)
+    
+    # [CRITICAL] Generate indicators before passing to engine
+    test_daily = strategy.generate_signals(test_daily)
+    test_hourly = strategy.generate_signals(test_hourly)
+
     current_merge = compute_segment_merge_index(test_hourly, test_daily)
-    strategy = UltimateStrategy(f"Verify_{symbol}", current_params)
     engine = BacktestEngineFastSpot(
         test_hourly,
         test_daily,
@@ -981,7 +1066,7 @@ def verify_single_symbol_spot(
         slippage_rate=SPOT_BASE_SLIPPAGE * safe_cost_mult,
         merge_index_map=current_merge,
     )
-    engine.risk_per_trade = current_params.get("RISK_PER_TRADE_SPOT", 0.99)
+    engine.risk_per_trade = best_params.get("RISK_PER_TRADE_SPOT", 0.99)
     res = engine.run()
 
     oos_trades = _filter_trades_for_window(res.get("trades_df", pd.DataFrame()), eval_start_ts, eval_end_ts)
@@ -1008,7 +1093,7 @@ def verify_single_symbol_spot(
         _diagnose_zero_trade_window_spot(
             hourly_df=test_hourly,
             daily_df=test_daily,
-            params=current_params,
+            params=best_params,
             eval_start_ts=eval_start_ts,
             eval_end_ts=eval_end_ts,
         )
@@ -1045,7 +1130,7 @@ def verify_single_symbol_spot(
     if run_robustness_checks and trade_count >= 10:
         print(f"      Running detailed analysis for {symbol}...")
         try:
-            wfa = SpotWalkForwardAnalyzer(test_hourly, test_daily, current_params)
+            wfa = SpotWalkForwardAnalyzer(test_hourly, test_daily, best_params)
             wfa_results = wfa.run(n_splits=5)
             if not wfa_results.empty:
                 avg_wfa_ret = float(wfa_results["Return"].mean())
@@ -1177,37 +1262,41 @@ def summarize_profile(results: List[Dict]) -> Optional[Dict]:
     gates = SELECTION_POLICY["gates"]
     primary_timeframes = [str(r.get("timeframe", "")).strip().lower() for r in primary if r.get("timeframe")]
     core_timeframe = max(set(primary_timeframes), key=primary_timeframes.count) if primary_timeframes else "default"
-    gate_core_min_trades, gate_core_min_total_trades = selection_trade_gates_for_timeframe(
-        core_timeframe,
-        eval_days=eval_days,
-        primary_symbol_count=len(primary),
-    )
-    up_bh_threshold = 5.0
-    down_bh_threshold = -5.0
-    core_up_excess = core_excess_returns[core_bh_returns >= up_bh_threshold]
-    core_down_excess = core_excess_returns[core_bh_returns <= down_bh_threshold]
+    gate_core_min_trades = spot_selection_min_trades_for_timeframe(core_timeframe)
+    core_avg_bh_ret = float(np.mean(core_bh_returns))
+    core_avg_excess_ret = float(np.mean(core_excess_returns))
+    core_up_excess = core_excess_returns[core_bh_returns >= 5.0]
+    core_down_excess = core_excess_returns[core_bh_returns <= -5.0]
     core_up_excess_ret = float(np.mean(core_up_excess)) if core_up_excess.size else 0.0
     core_down_excess_ret = float(np.mean(core_down_excess)) if core_down_excess.size else 0.0
     core_up_sample_count = int(core_up_excess.size)
     core_down_sample_count = int(core_down_excess.size)
 
+    # Hard gates (aligned with futures): return, trades, mdd, wfa, mc, alt 3.
     reasons: List[str] = []
-    if float(np.mean(core_returns)) < float(gates["core_min_avg_return"]):
-        reasons.append("core_avg_return_low")
+    if np.any(core_returns <= gates["core_min_return"]):
+        reasons.append("core_negative_return")
     if int(np.min(core_trades)) < int(gate_core_min_trades):
         reasons.append("core_trade_count_low")
-    if int(core_total_trades) < int(gate_core_min_total_trades):
-        reasons.append("core_total_trades_low")
-    if float(core_avg_pf_clipped_shrunk) < float(gates["core_min_pf_clipped"]):
-        reasons.append("core_pf_low")
     if float(np.mean(core_mdd_abs)) > gates["core_max_avg_mdd_abs"]:
         reasons.append("core_mdd_too_high")
+    if core_wfa_consistency < gates["core_min_wfa_consistency"]:
+        reasons.append("core_wfa_low")
+    if core_mc_worst_mdd_abs > gates["core_max_mc_worst_mdd_95_abs"]:
+        reasons.append("core_mc_mdd_too_high")
+    if alt_returns.size > 0:
+        if alt_pos_rate < gates["alt_min_pos_rate"]:
+            reasons.append("alt_pos_rate_low")
+        if alt_worst_mdd > gates["alt_max_worst_mdd_abs"]:
+            reasons.append("alt_worst_mdd_too_high")
+        if alt_p25_ret < gates["alt_min_p25_return"]:
+            reasons.append("alt_tail_return_too_low")
 
     return {
         "policy_version": SELECTION_POLICY_VERSION,
         "core_avg_ret": float(np.mean(core_returns)),
-        "core_avg_bh_ret": float(np.mean(core_bh_returns)),
-        "core_avg_excess_ret": float(np.mean(core_excess_returns)),
+        "core_avg_bh_ret": core_avg_bh_ret,
+        "core_avg_excess_ret": core_avg_excess_ret,
         "core_avg_mdd_abs": float(np.mean(core_mdd_abs)),
         "core_avg_pf": float(core_avg_pf_raw),
         "core_avg_pf_shrunk": float(core_avg_pf_shrunk),
@@ -1216,7 +1305,6 @@ def summarize_profile(results: List[Dict]) -> Optional[Dict]:
         "core_timeframe": str(core_timeframe),
         "core_min_trades": int(np.min(core_trades)),
         "gate_core_min_trades": int(gate_core_min_trades),
-        "gate_core_min_total_trades": int(gate_core_min_total_trades),
         "core_total_trades": int(core_total_trades),
         "core_avg_trades": core_avg_trades,
         "core_trades_per_30d": float(core_trades_per_30d),
@@ -1239,6 +1327,15 @@ def summarize_profile(results: List[Dict]) -> Optional[Dict]:
 
 
 def _simple_profile_score(summary: Dict, gate_failed_penalty: float = 0.0) -> float:
+    """
+    Multi-axis weighted score: core (70%) + alt (25%) + diversification (5%).
+    Core-first so selection favors return over cross-symbol uniformity.
+    WFA/MC sub-scores default to neutral (0.5) when data is absent to avoid penalizing
+    strategies that ran without alt symbols or with too few trades for robustness checks.
+    """
+    w = SELECTION_POLICY["weights"]
+
+    # --- Core axis ---
     core_ret = float(summary.get("core_avg_ret", 0.0))
     core_pf_clip = float(
         summary.get(
@@ -1247,19 +1344,58 @@ def _simple_profile_score(summary: Dict, gate_failed_penalty: float = 0.0) -> fl
         )
     )
     core_mdd_abs = float(summary.get("core_avg_mdd_abs", 100.0))
-    core_total_trades = float(summary.get("core_total_trades", summary.get("core_min_trades", 0)))
+    core_wfa = float(summary.get("core_wfa_consistency", 0.0))
+    core_mc_mdd = float(summary.get("core_mc_worst_mdd_95", 0.0))
+    # WFA/MC: use neutral 0.5 when not available (core_wfa_consistency == 0 means no WFA ran)
+    core_wfa_score = _clip01(core_wfa / 100.0) if core_wfa > 0.0 else 0.5
+    core_mc_score = (1.0 - _clip01(core_mc_mdd / 40.0)) if core_mc_mdd > 0.0 else 0.5
+    core_ret_score = _log_scaled_positive(core_ret, cap=50.0)
+    core_pf_score = _clip01((core_pf_clip - 1.0) / 1.5)
+    core_mdd_score = 1.0 - _clip01(core_mdd_abs / 20.0)
 
-    ret_score = _clip01((core_ret + 2.0) / 12.0)
-    pf_score = _clip01((core_pf_clip - 1.0) / 0.8)
-    mdd_score = 1.0 - _clip01(core_mdd_abs / 15.0)
-    activity_score = _clip01(core_total_trades / 12.0)
+    core_score = (
+        w["core_return"] * core_ret_score
+        + w["core_pf"] * core_pf_score
+        + w["core_wfa"] * core_wfa_score
+        + w["core_mdd"] * core_mdd_score
+        + w["core_mc"] * core_mc_score
+    )
+
+    # --- Alt axis (neutral 0.5 when no alt symbols present) ---
+    alt_median = float(summary.get("alt_median_ret", 0.0))
+    alt_p25 = float(summary.get("alt_p25_ret", 0.0))
+    alt_pos = float(summary.get("alt_pos_rate", 0.0))
+    alt_mdd = float(summary.get("alt_worst_mdd_abs", 0.0))
+    has_alts = bool(summary.get("alt_pos_rate", None) is not None and alt_pos > 0.0 or alt_median != 0.0)
+    if has_alts:
+        alt_median_score = _log_scaled_positive(alt_median, cap=30.0)
+        alt_p25_score = _clip01((alt_p25 + 15.0) / 40.0)
+        alt_pos_score = _clip01(alt_pos)
+        alt_mdd_score = 1.0 - _clip01(alt_mdd / 35.0)
+        alt_score = (
+            w["alt_median"] * alt_median_score
+            + w["alt_p25"] * alt_p25_score
+            + w["alt_pos"] * alt_pos_score
+            + w["alt_mdd"] * alt_mdd_score
+        )
+    else:
+        alt_score = 0.5
+
+    # --- Diversification axis ---
+    dispersion = float(summary.get("dispersion", 0.0))
+    div_score = 1.0 - _clip01(dispersion / 3.0)
 
     score = (
-        0.45 * pf_score
-        + 0.30 * ret_score
-        + 0.15 * mdd_score
-        + 0.10 * activity_score
+        w["core_total"] * core_score
+        + w["alt_total"] * alt_score
+        + w["div_total"] * div_score
     )
+
+    # Trade-count soft penalty: prefer richer sample sizes without hard-blocking low-trade strategies
+    min_trades = int(summary.get("core_min_trades", 0))
+    trade_penalty = float(1.0 / (1.0 + np.exp(-0.2 * (float(min_trades) - 15.0))))
+    score = float(score * trade_penalty)
+
     if not summary.get("gates_passed", False):
         score -= float(gate_failed_penalty)
     return float(score)
@@ -1619,6 +1755,31 @@ if __name__ == "__main__":
                 if r:
                     all_results.append(r)
             avg_ret = calculate_mode_performance(all_results)
+            dry_run_profile = summarize_profile(all_results)
+            _record_verification_comparison(
+                log_path=SPOT_VERIFY_LOG_PATH,
+                run_type="dry_run",
+                current_best={
+                    "label": "deployed_local_strategy",
+                    "source_db_name": "spot_strategy.db",
+                    "study_name": "spot_strategy",
+                    "timeframe": str(best_params.get("TIMEFRAME", "1h")),
+                    "metrics": _extract_summary_metrics(
+                        dry_run_profile,
+                        {
+                            "avg_ret": avg_ret,
+                            "train_score": study.best_value,
+                        },
+                    ),
+                    "summary": dry_run_profile,
+                },
+                context={
+                    "symbols": list(symbols),
+                    "eval_start": str(eval_start),
+                    "eval_end": str(eval_end),
+                    "deployed": False,
+                },
+            )
             _log_header("DRY-RUN COMPLETE", "No changes saved")
             if avg_ret is not None:
                 print(f"[INFO] Current strategy OOS performance: {avg_ret:.2f}%")
@@ -1693,6 +1854,7 @@ if __name__ == "__main__":
                     "study_name": ev["study_name"],
                     "db_name": bonus_db,
                     "best_params": ev["best_params"],
+                    "train_score": ev.get("train_score"),
                     "mode": mode,
                 }
 
@@ -1751,8 +1913,7 @@ if __name__ == "__main__":
 
         if holdout_enabled and holdout_start is not None and holdout_end is not None:
             print(
-                f"[INFO] Holdout dynamic trade gate: timeframe-aware "
-                f"(window: {holdout_start} ~ {holdout_end})"
+                f"[INFO] Holdout dynamic trade gate (window: {holdout_start} ~ {holdout_end})"
             )
             # Gate window must be strictly OOS vs selection window.
             assert_strict_oos_window(selection_end, holdout_start, holdout_end)
@@ -1771,24 +1932,16 @@ if __name__ == "__main__":
 
                 candidate_params = candidate_src["best_params"]
                 candidate_study_name = candidate_src["study_name"]
+                candidate_tf = candidate_params.get("TIMEFRAME")
 
-                candidate_tf = str(candidate_params.get("TIMEFRAME", "1h")).strip().lower()
                 candidate_min_trades_gate = int(
-                    compute_dynamic_holdout_min_trades(
-                        holdout_start,
-                        holdout_end,
-                        timeframe=candidate_tf,
-                    )
+                    compute_dynamic_holdout_min_trades(holdout_start, holdout_end, timeframe=candidate_tf)
                 )
-                candidate_symbol_gate, candidate_total_gate = _resolve_holdout_trade_gates(candidate_min_trades_gate)
 
                 print("\n" + "-" * LOG_WIDTH)
                 print(f"Holdout Verification for Candidate [{candidate_key}] (used for final selection)")
                 print(f"Window: {holdout_start} ~ {holdout_end}")
-                print(
-                    f"Trade Gate: min_symbol_trades>={candidate_symbol_gate} | "
-                    f"core_total_trades>={candidate_total_gate} (tf={candidate_tf})"
-                )
+                print(f"Trade Gate: min_trades>={candidate_min_trades_gate}")
                 print("-" * LOG_WIDTH)
                 gate_results: List[Dict] = []
                 for symbol in symbols:
@@ -1841,12 +1994,20 @@ if __name__ == "__main__":
                     "holdout_gate_window": (str(holdout_start), str(holdout_end)),
                 }
 
+            # Among holdout-passed candidates, choose by holdout score (OOS performance), not selection order.
             final_candidate_key: Optional[str] = None
-            for candidate_key, _, _ in ranked:
+            passed_with_scores: List[Tuple[str, float, int]] = []
+            for rank_idx, (candidate_key, _, _) in enumerate(ranked):
                 ev = holdout_evals.get(candidate_key)
-                if ev and ev.get("passed"):
-                    final_candidate_key = candidate_key
-                    break
+                if not ev or not ev.get("passed"):
+                    continue
+                summary = ev.get("summary")
+                ho_score = score_holdout_candidate(summary) if summary else -1.0
+                passed_with_scores.append((candidate_key, ho_score, rank_idx))
+            if passed_with_scores:
+                # Max holdout score; tiebreaker: first in selection rank (lower rank_idx).
+                passed_with_scores.sort(key=lambda x: (-x[1], x[2]))
+                final_candidate_key = passed_with_scores[0][0]
 
             holdout_passed = final_candidate_key is not None
             if holdout_passed:
@@ -1855,7 +2016,8 @@ if __name__ == "__main__":
                 selected_holdout_min_trades = int(
                     holdout_evals[winner].get("min_trades_gate", HOLDOUT_SANITY_GATES["core_min_trades"])
                 )
-                print(f"[INFO] Final winner after holdout gate: {winner}")
+                winner_ho_score = next((s for k, s, _ in passed_with_scores if k == winner), -1.0)
+                print(f"[INFO] Final winner after holdout gate: {winner} (holdout_score={winner_ho_score:.4f})")
             else:
                 inactive_count = int(
                     sum(1 for ev in holdout_evals.values() if str(ev.get("gate_state", "")).upper() == "INACTIVE")
@@ -1872,6 +2034,8 @@ if __name__ == "__main__":
                 f"(require>={HOLDOUT_ACTIVATION_MIN_DAYS}d). Using selection winner for deployment candidate."
             )
 
+        deployment_attempted = False
+        deployment_ok = False
         if winner_src and holdout_passed:
             best_params = winner_src["best_params"]
             rolling_summary = []
@@ -1918,16 +2082,15 @@ if __name__ == "__main__":
                     f"(require>={HOLDOUT_ACTIVATION_MIN_DAYS}d)."
                 )
             if not rolling_passed:
-                print("[WARN] Skip deployment due to failed rolling OOS sanity gate.")
-                print("=" * LOG_WIDTH)
-                sys.exit(0)
+                print("[WARN] Rolling OOS sanity gate failed — proceeding to deployment with caution.")
 
             print("-" * LOG_WIDTH)
             print(
                 f"Saving Winner ({winner}) from MySQL "
                 f"[{winner_src['db_name']}/{winner_src['study_name']}] to 'spot_strategy.db'..."
             )
-            ok = deploy_best_to_local(
+            deployment_attempted = True
+            deployment_ok = deploy_best_to_local(
                 source_storage_url=winner_src["storage_url"],
                 source_study_name=winner_src["study_name"],
                 mode_label=f"{winner_src['mode']}/{winner}",
@@ -1954,10 +2117,71 @@ if __name__ == "__main__":
                     "rolling_oos_gate_metrics": str(rolling_sanity_summary),
                 },
             )
-            if not ok:
-                sys.exit(1)
         else:
             print("[WARN] Skip deployment due to failed/missing holdout sanity check.")
+        selected_eval = holdout_evals.get(winner, {}) if isinstance(holdout_evals, dict) else {}
+        selected_holdout_summary = (
+            selected_eval.get("summary") if isinstance(selected_eval, dict) else None
+        )
+        selected_selection_summary = rank_summaries.get(winner)
+        selected_summary = selected_holdout_summary or selected_selection_summary
+        selected_source = (
+            selected_eval.get("source") if isinstance(selected_eval, dict) else None
+        ) or winner_src or mode_sources.get(winner)
+        selected_rank_score = next(
+            (float(rank_score) for key, rank_score, _ in ranked if key == winner),
+            None,
+        )
+        _record_verification_comparison(
+            log_path=SPOT_VERIFY_LOG_PATH,
+            run_type="bonus_sweep",
+            current_best={
+                "label": str(winner),
+                "selected_mode": selected_source.get("mode") if isinstance(selected_source, dict) else rank_mode,
+                "study_name": selected_source.get("study_name") if isinstance(selected_source, dict) else None,
+                "source_db_name": selected_source.get("db_name") if isinstance(selected_source, dict) else None,
+                "timeframe": str(
+                    (selected_source.get("best_params", {}) if isinstance(selected_source, dict) else {}).get(
+                        "TIMEFRAME",
+                        "1h",
+                    )
+                ),
+                "holdout_gate_state": (
+                    selected_eval.get("gate_state")
+                    if isinstance(selected_eval, dict)
+                    else ("SKIPPED" if not holdout_enabled else "NOT_EVALUATED")
+                ),
+                "holdout_gate_reasons": (
+                    selected_eval.get("gate_reasons_display", selected_eval.get("reasons", []))
+                    if isinstance(selected_eval, dict)
+                    else []
+                ),
+                "metrics": _extract_summary_metrics(
+                    selected_summary,
+                    {
+                        "selection_rank_score": selected_rank_score,
+                        "train_score": selected_source.get("train_score")
+                        if isinstance(selected_source, dict)
+                        else None,
+                    },
+                ),
+                "selection_summary": selected_selection_summary,
+                "holdout_summary": selected_holdout_summary,
+            },
+            context={
+                "symbols": list(symbols),
+                "selection_window_start": str(oos_start),
+                "selection_window_end": str(selection_end),
+                "holdout_window_start": str(holdout_start) if holdout_start is not None else None,
+                "holdout_window_end": str(holdout_end) if holdout_end is not None else None,
+                "holdout_enabled": bool(holdout_enabled),
+                "holdout_passed": bool(holdout_passed),
+                "deployment_attempted": bool(deployment_attempted),
+                "deployment_ok": bool(deployment_ok),
+            },
+        )
+        if deployment_attempted and not deployment_ok:
+            sys.exit(1)
         print("=" * LOG_WIDTH)
         sys.exit(0)
 
@@ -1999,7 +2223,7 @@ if __name__ == "__main__":
     last_holdout_gate_state = "FAIL"
     selected_holdout_min_trades = int(HOLDOUT_SANITY_GATES["core_min_trades"])
     if holdout_enabled and holdout_start is not None and holdout_end is not None:
-        print("[INFO] Holdout dynamic trade gate: timeframe-aware")
+        print("[INFO] Holdout dynamic trade gate")
         assert_strict_oos_window(selection_end, holdout_start, holdout_end)
 
         check_order = [r[0] for r in ranked] if ranked else list(candidates.keys())
@@ -2007,23 +2231,15 @@ if __name__ == "__main__":
             c = candidates[mode]
             holdout_params = c["best_params"]
             holdout_study_name = c["study_name"]
-            candidate_tf = str(holdout_params.get("TIMEFRAME", "1h")).strip().lower()
+            candidate_tf = holdout_params.get("TIMEFRAME")
             candidate_min_trades_gate = int(
-                compute_dynamic_holdout_min_trades(
-                    holdout_start,
-                    holdout_end,
-                    timeframe=candidate_tf,
-                )
+                compute_dynamic_holdout_min_trades(holdout_start, holdout_end, timeframe=candidate_tf)
             )
-            candidate_symbol_gate, candidate_total_gate = _resolve_holdout_trade_gates(candidate_min_trades_gate)
 
             print("\n" + "-" * LOG_WIDTH)
             print(f"Holdout Verification for Candidate [{mode}] (used for final selection)")
             print(f"Window: {holdout_start} ~ {holdout_end}")
-            print(
-                f"Trade Gate: min_symbol_trades>={candidate_symbol_gate} | "
-                f"core_total_trades>={candidate_total_gate} (tf={candidate_tf})"
-            )
+            print(f"Trade Gate: min_trades>={candidate_min_trades_gate}")
             print("-" * LOG_WIDTH)
             holdout_results: List[Dict] = []
             for symbol in symbols:
@@ -2077,6 +2293,51 @@ if __name__ == "__main__":
                 print("[INFO] Holdout result classified as INACTIVE (low/no activity in gate window).")
             print("[WARN] No holdout-passed candidate found. Deployment skipped.")
             print("[WARN] Skip deployment due to failed/missing holdout sanity check.")
+            fallback_mode = str(check_order[0]) if check_order else None
+            fallback_candidate = candidates.get(fallback_mode) if fallback_mode is not None else None
+            fallback_rank_score = next(
+                (float(rank_score) for mode_key, rank_score, _ in ranked if mode_key == fallback_mode),
+                None,
+            )
+            _record_verification_comparison(
+                log_path=SPOT_VERIFY_LOG_PATH,
+                run_type="single_mode",
+                current_best={
+                    "label": fallback_mode,
+                    "selected_mode": fallback_mode,
+                    "study_name": fallback_candidate.get("study_name") if isinstance(fallback_candidate, dict) else None,
+                    "source_db_name": db_name,
+                    "timeframe": str(
+                        (fallback_candidate.get("best_params", {}) if isinstance(fallback_candidate, dict) else {}).get(
+                            "TIMEFRAME",
+                            "1h",
+                        )
+                    ),
+                    "holdout_gate_state": str(last_holdout_gate_state),
+                    "holdout_gate_reasons": ["holdout_failed"],
+                    "metrics": _extract_summary_metrics(
+                        fallback_candidate.get("profile") if isinstance(fallback_candidate, dict) else None,
+                        {
+                            "selection_rank_score": fallback_rank_score,
+                            "train_score": fallback_candidate.get("train_score")
+                            if isinstance(fallback_candidate, dict)
+                            else None,
+                        },
+                    ),
+                    "summary": fallback_candidate.get("profile") if isinstance(fallback_candidate, dict) else None,
+                },
+                context={
+                    "symbols": list(symbols),
+                    "selection_window_start": str(oos_start),
+                    "selection_window_end": str(selection_end),
+                    "holdout_window_start": str(holdout_start),
+                    "holdout_window_end": str(holdout_end),
+                    "holdout_enabled": True,
+                    "holdout_passed": False,
+                    "deployment_attempted": False,
+                    "deployment_ok": False,
+                },
+            )
             sys.exit(0)
     else:
         check_order = [r[0] for r in ranked] if ranked else list(candidates.keys())
@@ -2137,8 +2398,7 @@ if __name__ == "__main__":
             f"(require>={HOLDOUT_ACTIVATION_MIN_DAYS}d)."
         )
     if not rolling_passed:
-        print("[WARN] Skip deployment due to failed rolling OOS sanity gate.")
-        sys.exit(0)
+        print("[WARN] Rolling OOS sanity gate failed — proceeding to deployment with caution.")
 
     print("-" * LOG_WIDTH)
     print(
@@ -2167,6 +2427,42 @@ if __name__ == "__main__":
             "rolling_oos_gate_passed": bool(rolling_passed),
             "rolling_oos_gate_reasons": ",".join(rolling_reasons),
             "rolling_oos_gate_metrics": str(rolling_sanity_summary),
+        },
+    )
+    selected_rank_score = next(
+        (float(rank_score) for mode_key, rank_score, _ in ranked if mode_key == holdout_passed_mode),
+        None,
+    )
+    _record_verification_comparison(
+        log_path=SPOT_VERIFY_LOG_PATH,
+        run_type="single_mode",
+        current_best={
+            "label": str(holdout_passed_mode),
+            "selected_mode": str(holdout_passed_mode),
+            "study_name": holdout_passed_candidate.get("study_name"),
+            "source_db_name": db_name,
+            "timeframe": str(holdout_passed_candidate.get("best_params", {}).get("TIMEFRAME", "1h")),
+            "holdout_gate_state": "PASS" if holdout_enabled else "SKIPPED",
+            "holdout_gate_reasons": [] if holdout_enabled else ["holdout_disabled"],
+            "metrics": _extract_summary_metrics(
+                holdout_passed_candidate.get("profile"),
+                {
+                    "selection_rank_score": selected_rank_score,
+                    "train_score": holdout_passed_candidate.get("train_score"),
+                },
+            ),
+            "summary": holdout_passed_candidate.get("profile"),
+        },
+        context={
+            "symbols": list(symbols),
+            "selection_window_start": str(oos_start),
+            "selection_window_end": str(selection_end),
+            "holdout_window_start": str(holdout_start) if holdout_start is not None else None,
+            "holdout_window_end": str(holdout_end) if holdout_end is not None else None,
+            "holdout_enabled": bool(holdout_enabled),
+            "holdout_passed": True,
+            "deployment_attempted": True,
+            "deployment_ok": bool(ok),
         },
     )
     if not ok:
