@@ -79,6 +79,17 @@ def setup_logger(
     logger = logging.getLogger(name)
     logger.setLevel(logging.INFO)
 
+    # #region agent log
+    try:
+        _proj = Path(__file__).resolve().parents[2]
+        _debug_path = _proj / "debug-33072f.log"
+        _payload = {"sessionId": "33072f", "hypothesisId": "H3", "location": "utils.setup_logger", "message": "setup_logger entry", "data": {"name": name, "write_file": write_file, "handlers_count": len(logger.handlers)}, "timestamp": int(time.time() * 1000)}
+        with open(_debug_path, "a", encoding="utf-8") as _f:
+            _f.write(json.dumps(_payload, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+    # #endregion
+
     # 이미 핸들러가 설정되어 있으면 중복 설정 방지
     if logger.handlers:
         return logger
@@ -109,6 +120,15 @@ def setup_logger(
     )
     json_handler.setFormatter(JSONFormatter())
     logger.addHandler(json_handler)
+
+    # #region agent log
+    try:
+        _payload2 = {"sessionId": "33072f", "hypothesisId": "H3", "location": "utils.setup_logger", "message": "file handler added", "data": {"json_log_file": str(json_log_file), "handlers_count": len(logger.handlers)}, "timestamp": int(time.time() * 1000)}
+        with open(_debug_path, "a", encoding="utf-8") as _f:
+            _f.write(json.dumps(_payload2, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+    # #endregion
 
     return logger
 
