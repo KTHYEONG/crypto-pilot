@@ -235,10 +235,11 @@ SELECTION_POLICY = {
         "alt_max_worst_mdd_abs": 50.0,
         "alt_min_p25_return": -20.0,
     },
+    # Core-first: 70% core, 25% alt, 5% div (align with spot; favor return over uniformity).
     "weights": {
-        "core_total": 0.65,
+        "core_total": 0.70,
         "alt_total": 0.25,
-        "div_total": 0.10,
+        "div_total": 0.05,
         "core_return": 0.35,
         "core_pf": 0.15,
         "core_wfa": 0.20,
@@ -333,6 +334,31 @@ def compute_dynamic_holdout_min_trades(holdout_start: pd.Timestamp, holdout_end:
     holdout_days = max(1, int((holdout_end.normalize() - holdout_start.normalize()).days) + 1)
     dynamic_floor = int(round(holdout_days * 0.18))
     return max(20, dynamic_floor)
+
+
+def score_holdout_candidate(summary: Optional[Dict]) -> float:
+    """
+    Score holdout-passed candidates by OOS return quality + robustness.
+    Used to choose winner among passers (avoids order-dependent selection).
+    """
+    if not summary:
+        return -1.0
+    core_ret = float(summary.get("core_avg_ret", 0.0))
+    core_pf = float(summary.get("core_avg_pf", 0.0))
+    core_mdd_abs = float(summary.get("core_avg_mdd_abs", 100.0))
+    core_trades = float(summary.get("core_min_trades", summary.get("core_avg_trades", 0)))
+
+    ret_score = _clip01((core_ret + 2.0) / 12.0)
+    pf_score = _clip01((core_pf - 1.0) / 0.8)
+    mdd_score = 1.0 - _clip01(core_mdd_abs / 15.0)
+    activity_score = _clip01(core_trades / 12.0)
+
+    return float(
+        0.45 * pf_score
+        + 0.30 * ret_score
+        + 0.15 * mdd_score
+        + 0.10 * activity_score
+    )
 
 
 def evaluate_holdout_sanity(summary, min_trades_gate: Optional[int] = None):
@@ -1468,17 +1494,25 @@ if __name__ == "__main__":
                 "source": candidate_src,
             }
 
+        # Among holdout-passed candidates, choose by holdout score (OOS performance), not selection order.
         deployment_candidate = None
-        for candidate_key, _, _ in ranked:
+        passed_with_scores: List[Tuple[str, float, int]] = []
+        for rank_idx, (candidate_key, _, _) in enumerate(ranked):
             ev = holdout_evals.get(candidate_key)
-            if ev and ev.get("passed"):
-                deployment_candidate = candidate_key
-                break
+            if not ev or not ev.get("passed"):
+                continue
+            summary = ev.get("summary")
+            ho_score = score_holdout_candidate(summary) if summary else -1.0
+            passed_with_scores.append((candidate_key, ho_score, rank_idx))
+        if passed_with_scores:
+            passed_with_scores.sort(key=lambda x: (-x[1], x[2]))
+            deployment_candidate = passed_with_scores[0][0]
 
         if deployment_candidate:
             winner = deployment_candidate
             winner_src = holdout_evals[winner]["source"]
-            print(f"[INFO] Final winner after holdout gate: {winner}")
+            winner_ho_score = next((s for k, s, _ in passed_with_scores if k == winner), -1.0)
+            print(f"[INFO] Final winner after holdout gate: {winner} (holdout_score={winner_ho_score:.4f})")
             holdout_passed = True
         else:
             winner_src = unified_source.get(winner)
