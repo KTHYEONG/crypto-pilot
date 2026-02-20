@@ -82,7 +82,7 @@ except ImportError:
     CLOUD_OPTIMIZER_AVAILABLE = False
 
 logger = setup_logger("RealTraderSpot")
-_default_policy_versions = "SPOT_SELECTION_POLICY_V7_PARITY,SPOT_SELECTION_POLICY_V1"
+_default_policy_versions = "SPOT_SELECTION_POLICY_V7_PARITY,SPOT_SELECTION_POLICY_V1,SPOT_SELECTION_POLICY_V11_SIMPLE"
 SPOT_ALLOWED_POLICY_VERSIONS = {
     v.strip() for v in os.getenv("SPOT_POLICY_VERSIONS", _default_policy_versions).split(",") if v.strip()
 }
