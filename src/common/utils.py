@@ -62,7 +62,7 @@ class JSONFormatter(logging.Formatter):
 
 def setup_logger(
     name: str,
-    log_prefix: str | None = None,
+    log_prefix: Optional[str] = None,
     write_file: bool = True,
 ) -> logging.Logger:
     """

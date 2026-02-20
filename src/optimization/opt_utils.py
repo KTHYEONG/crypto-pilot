@@ -172,14 +172,7 @@ _SCORE_COEF_FUT_TAIL: float = _env_float("FUT_TAIL_DRAG_COEF", 12.0)
 _SCORE_COEF_SPOT_GROWTH: float = _env_float("SPOT_GROWTH_BONUS_COEF", 18.0)
 _SCORE_COEF_SPOT_RISK: float = _env_float("SPOT_RISK_DRAG_COEF", 10.0)
 _SCORE_COEF_SPOT_TAIL: float = _env_float("SPOT_TAIL_DRAG_COEF", 10.0)
-_SCORE_COEF_SPOT_COST_DRAG_PENALTY: float = _env_float("SPOT_COST_DRAG_PENALTY", 25.0)
 _SCORE_COEF_SPOT_EXCESS_RETURN_BONUS_WEIGHT: float = _env_float("SPOT_EXCESS_RETURN_BONUS_WEIGHT", 12.0)
-_SCORE_COEF_SPOT_BEAR_REGIME_PENALTY: float = max(0.0, _env_float("SPOT_BEAR_REGIME_PENALTY_COEF", 0.0))
-_SPOT_BEAR_REGIME_START_RAW: str = str(os.getenv("SPOT_BEAR_REGIME_START", "2025-10-01"))
-try:
-    _SPOT_BEAR_REGIME_START_TS: pd.Timestamp = pd.Timestamp(_SPOT_BEAR_REGIME_START_RAW)
-except (TypeError, ValueError):
-    _SPOT_BEAR_REGIME_START_TS = pd.Timestamp("2025-10-01")
 _TF_TRADE_DENSITY: dict[str, float] = {
     "30m": 1.00,
     "1h": 0.70,
@@ -708,38 +701,6 @@ def _blend_gates_with_floor(gates, weights, gate_floor):
     return floor + (1.0 - floor) * weighted
 
 
-def _compute_bear_regime_subwindow_mdd_abs(
-    trades_df: pd.DataFrame,
-    bear_start: pd.Timestamp,
-) -> float:
-    if trades_df.empty or "pnl_pct" not in trades_df.columns:
-        return 0.0
-
-    time_col: Optional[str] = None
-    if "exit_time" in trades_df.columns:
-        time_col = "exit_time"
-    elif "entry_time" in trades_df.columns:
-        time_col = "entry_time"
-    if time_col is None:
-        return 0.0
-
-    ts = pd.to_datetime(trades_df[time_col], errors="coerce")
-    valid_mask = ts.notna() & (ts >= pd.Timestamp(bear_start))
-    if not bool(valid_mask.any()):
-        return 0.0
-
-    sub_returns = pd.to_numeric(trades_df.loc[valid_mask, "pnl_pct"], errors="coerce").dropna().values.astype(np.float64)
-    if sub_returns.size < 3:
-        return 0.0
-
-    sub_equity = np.cumsum(sub_returns)
-    sub_hwm = np.maximum.accumulate(sub_equity)
-    sub_drawdown = sub_hwm - sub_equity
-    if sub_drawdown.size == 0:
-        return 0.0
-    return float(np.max(sub_drawdown))
-
-
 def calculate_score(ret, mdd, trades_df, mode="UNIFIED", market_type="spot", timeframe=None, min_trades_override=None):
     """
     Overfitting-resistant objective (continuous-form):
@@ -973,26 +934,6 @@ def calculate_score(ret, mdd, trades_df, mode="UNIFIED", market_type="spot", tim
     expectancy_gap = max(expectancy_threshold - r_avg, 0.0)
     score -= expectancy_gap * expectancy_penalty
     score -= max(-r_avg, 0.0) * negative_expectancy_penalty
-
-    # Spot-only: cost-drag penalty when fees+slippage exceed half of absolute return
-    if market_type == "spot":
-        round_trip_cost_pct = 0.16
-        total_cost_drag = N * round_trip_cost_pct
-        cost_excess = max(total_cost_drag - (0.5 * abs(float(ret))), 0.0)
-        score -= cost_excess * _SCORE_COEF_SPOT_COST_DRAG_PENALTY
-        bear_penalty_coef = _SCORE_COEF_SPOT_BEAR_REGIME_PENALTY
-        if bear_penalty_coef > 0.0:
-            bear_mdd_abs = _compute_bear_regime_subwindow_mdd_abs(trades_df, _SPOT_BEAR_REGIME_START_TS)
-            if bear_mdd_abs > 0.0:
-                bear_mdd_signal = _asinh_score(
-                    bear_mdd_abs,
-                    max(target_mdd * 0.30, 1e-6),
-                    cfg.asinh_clip,
-                )
-                score -= bear_penalty_coef * bear_mdd_signal
-        # Spot-only PF floor penalty: penalize low profit factor
-        if pf < 1.15:
-            score -= (1.15 - pf) * 180.0
 
     # Base bonus for return and profit factor
     score += confidence * (
