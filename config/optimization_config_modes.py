@@ -791,8 +791,8 @@ def GET_SEARCH_SPACE(mode, market_type="futures"):
         # Long-only spot: allow broader sizing exploration for bull-alpha capture.
         space["RISK_PER_TRADE_SPOT"] = {
             "type": "float",
-            "low": 0.10,
-            "high": 0.35,
+            "low": 0.50,
+            "high": 0.85,
             "step": 0.02,
         }
 
@@ -831,15 +831,15 @@ def GET_SEARCH_SPACE(mode, market_type="futures"):
         # Structure choices: same family as futures unified (minus leverage dimension)
         space["ENTRY_TYPE"] = {
             "type": "categorical",
-            "choices": ["DONCHIAN", "BOLLINGER", "KELTNER"],
+            "choices": ["DONCHIAN", "BOLLINGER", "KELTNER", "CCI"],
         }
         space["TREND_FILTER_TYPE"] = {
             "type": "categorical",
-            "choices": ["EMA", "SUPERTREND", "ICHIMOKU"],
+            "choices": ["SMA", "EMA", "HMA", "SUPERTREND", "ICHIMOKU", "MACD", "VWAP", "DMI", "AROON"],
         }
         space["STRENGTH_FILTER_TYPE"] = {
             "type": "categorical",
-            "choices": ["NONE", "ADX", "RSI", "NATR", "HURST", "VHF"],
+            "choices": ["NONE", "ADX", "RSI", "NATR", "HURST", "VHF", "MFI", "STOCH_RSI", "STOCHASTIC", "CMF", "ER", "GARMAN_KLASS", "FORCE_INDEX", "WILLIAMS_R", "OBV"],
         }
         space["USE_TAKE_PROFIT"] = {"type": "categorical", "choices": [True, False]}
         space["USE_VOLUME_FILTER"] = {"type": "categorical", "choices": [True, False]}
@@ -854,24 +854,24 @@ def GET_SEARCH_SPACE(mode, market_type="futures"):
             "high": 140,
             "log": True,
         }  # Expanded upper bound for longer trend capture
-        space["MA_PERIOD"] = {"type": "int", "low": 10, "high": 120, "log": True}
-        space["ATR_PERIOD"] = {"type": "int", "low": 8, "high": 28, "log": True}
-        # Range tightened to cap excessive downside tails in long-only spot.
+        space["MA_PERIOD"] = {"type": "int", "low": 10, "high": 140, "log": True}
+        space["ATR_PERIOD"] = {"type": "int", "low": 8, "high": 32, "log": True}
+        # Range tightened to cap excessive downside tails in long-only spot (max 4%, step 0.002).
         space["STOP_LOSS_PCT"] = {
             "type": "float",
-            "low": 0.010,
-            "high": 0.050,
-            "step": 0.003,
+            "low": 0.008,
+            "high": 0.040,
+            "step": 0.002,
         }
         space["ATR_STOP_LOSS_MULT"] = {
             "type": "float",
             "low": 1.2,
             "high": 3.2,
-            "step": 0.2,
+            "step": 0.25,
         }  # Reduced from 4.6 (realistic max)
         space["TAKE_PROFIT_ATR_MULT"] = {
             "type": "float",
-            "low": 2.0,
+            "low": 1.8,
             "high": 12.0,
             "log": True,
         }  # TODO #4
@@ -879,9 +879,9 @@ def GET_SEARCH_SPACE(mode, market_type="futures"):
             "type": "float",
             "low": 1.5,
             "high": 4.5,
-            "step": 0.3,
+            "step": 0.25,
         }
-        space["MAX_HOLDING_BARS"] = {"type": "int", "low": 20, "high": 180, "log": True}
+        space["MAX_HOLDING_BARS"] = {"type": "int", "low": 20, "high": 200, "log": True}
         space["TRAILING_ACTIVATION_ATR"] = {
             "type": "float",
             "low": 0.5,
@@ -890,10 +890,10 @@ def GET_SEARCH_SPACE(mode, market_type="futures"):
         }
         space["TIME_EXIT_PROFIT_THRESHOLD"] = {
             "type": "float",
-            "low": 0.0,
+            "low": 0.2,
             "high": 1.8,
             "step": 0.1,
-        }
+        }  # Min 0.2 to avoid exiting at flat (long-only)
         space["RSI_EXIT_THRESHOLD"] = {"type": "int", "low": 78, "high": 98, "step": 1}
 
         # Indicator/detail bounds: reduce over-smoothing and over-filtering in bear/choppy regimes.
@@ -904,13 +904,90 @@ def GET_SEARCH_SPACE(mode, market_type="futures"):
             "step": 0.1,
         }
         space["BB_STD"] = {"type": "float", "low": 1.6, "high": 3.2, "step": 0.1}
+        space["CCI_THRESHOLD"] = {"type": "int", "low": 80, "high": 140, "step": 10}
+        space["MACD_FAST"] = {"type": "int", "low": 8, "high": 18, "log": True}
+        space["MACD_SLOW"] = {"type": "int", "low": 22, "high": 45, "log": True}
+        space["MACD_SIGNAL"] = {"type": "int", "low": 6, "high": 14, "log": True}
+        space["VWAP_STD_MULT"] = {
+            "type": "float",
+            "low": 1.0,
+            "high": 2.2,
+            "step": 0.1,
+        }
+        space["DMI_PERIOD"] = {"type": "int", "low": 10, "high": 28, "log": True}
+        space["AROON_PERIOD"] = {"type": "int", "low": 10, "high": 28, "log": True}
+        space["MFI_THRESHOLD"] = {"type": "int", "low": 20, "high": 45, "step": 5}
+        space["STOCH_RSI_OVERBOUGHT"] = {
+            "type": "int",
+            "low": 75,
+            "high": 90,
+            "step": 1,
+        }
+        space["STOCH_RSI_OVERSOLD"] = {
+            "type": "int",
+            "low": 10,
+            "high": 25,
+            "step": 1,
+        }
+        space["STOCH_OVERBOUGHT"] = {
+            "type": "int",
+            "low": 78,
+            "high": 92,
+            "step": 1,
+        }
+        space["STOCH_OVERSOLD"] = {"type": "int", "low": 8, "high": 22, "step": 1}
+        space["CMF_PERIOD"] = {"type": "int", "low": 14, "high": 35, "log": True}
+        space["CMF_THRESHOLD"] = {
+            "type": "float",
+            "low": 0.0,
+            "high": 0.12,
+            "step": 0.01,
+        }
+        space["ER_THRESHOLD"] = {
+            "type": "float",
+            "low": 0.35,
+            "high": 0.75,
+            "step": 0.05,
+        }
+        space["GK_PERIOD"] = {"type": "int", "low": 14, "high": 45, "log": True}
+        space["GK_THRESHOLD"] = {
+            "type": "float",
+            "low": 1e-5,
+            "high": 0.005,
+            "log": True,
+        }
+        space["FORCE_INDEX_PERIOD"] = {
+            "type": "int",
+            "low": 2,
+            "high": 10,
+            "log": True,
+        }
+        space["FORCE_INDEX_THRESHOLD"] = {
+            "type": "float",
+            "low": 0.0,
+            "high": 1e5,
+            "log": True,
+        }
+        space["WILLR_OVERBOUGHT"] = {
+            "type": "float",
+            "low": -28.0,
+            "high": -12.0,
+            "step": 1.0,
+        }
+        space["WILLR_OVERSOLD"] = {
+            "type": "float",
+            "low": -88.0,
+            "high": -72.0,
+            "step": 1.0,
+        }
+        space["OBV_MA_PERIOD"] = {"type": "int", "low": 12, "high": 40, "log": True}
         space["SUPERTREND_MULT"] = {
             "type": "float",
             "low": 1.0,
             "high": 3.2,
             "log": True,
         }
-        space["SUPERTREND_PERIOD"] = {"type": "int", "low": 7, "high": 24, "log": True}
+        space["SUPERTREND_PERIOD"] = {"type": "int", "low": 7, "high": 28, "log": True}
         space["ICHIMOKU_TENKAN"] = {"type": "int", "low": 7, "high": 24, "log": True}
         space["ICHIMOKU_KIJUN"] = {"type": "int", "low": 20, "high": 42, "log": True}
         space["ICHIMOKU_SENKOU_B"] = {"type": "int", "low": 40, "high": 78, "log": True}
@@ -936,9 +1013,9 @@ def GET_SEARCH_SPACE(mode, market_type="futures"):
         space["VOLUME_THRESHOLD_MULT"] = {
             "type": "float",
             "low": 1.0,
-            "high": 1.30,
+            "high": 1.5,
             "log": True,
-        }
+        }  # Relaxed for spot liquidity / volume variety
         space["VOLUME_MA_PERIOD"] = {"type": "int", "low": 8, "high": 30, "log": True}
         space["SAR_STEP"] = {"type": "float", "low": 0.005, "high": 0.04, "step": 0.005}
 
