@@ -522,6 +522,41 @@ class BinanceClient:
             
             self.logger.error(f"❌ Failed to place Server SL for {symbol}: {e}")
             return None
+    def place_take_profit_market_order(self, symbol, side, amount, tp_price):
+        """
+        서버 사이드 Take Profit Market 주문 (익절용)
+        side: 'buy' (숏 익절용) or 'sell' (롱 익절용)
+        tp_price: 트리거 가격
+        """
+        try:
+            params = {
+                'stopPrice': tp_price,
+                'closePosition': True
+            }
+            
+            order = self.exchange.create_order(
+                symbol=symbol,
+                type='TAKE_PROFIT_MARKET',
+                side=side,
+                amount=amount,
+                params=params
+            )
+            self.logger.info(f"🎯 Server TP Placed: {symbol} {side} {amount} @ TP {tp_price}")
+            return order
+        except Exception as e:
+            error_msg = str(e)
+            
+            if "-4130" in error_msg:
+                self.logger.info(f"ℹ️ Take Profit already exists for {symbol}. Skipping duplicate.")
+                return True
+            
+            if "-2021" in error_msg:
+                self.logger.warning(f"⚠️ Take Profit trigger price is immediate! Skipping TP for {symbol}")
+                return None
+            
+            self.logger.error(f"❌ Failed to place Server TP for {symbol}: {e}")
+            return None
+
     def place_order_smart(
         self,
         symbol,
