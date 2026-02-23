@@ -56,12 +56,7 @@ def calc_romad(pnl_series: pd.Series, n_trades: int, tf: str) -> Tuple[float, fl
     Returns: (romad_score, return_pct, mdd_pct)
     """
     if pnl_series.empty or n_trades == 0:
-        return -100.0, 0.0, 0.0
-
-    # Phase 1: Hard gate for minimum trades to filter out low-trade noise
-    min_trades_hard: int = 20 if tf == "4h" else 10
-    if n_trades < min_trades_hard:
-        return -200.0, 0.0, 0.0
+        return -20.0, 0.0, 0.0
 
     # 1. Equity curve & Return
     equity = FUTURES_INITIAL_BALANCE + pnl_series.cumsum()
@@ -84,12 +79,12 @@ def calc_romad(pnl_series: pd.Series, n_trades: int, tf: str) -> Tuple[float, fl
     # 4. RoMaD Core (Floor MDD at 5% to avoid div-by-zero or excessive score on low-trade flat curves)
     romad = annual_return / max(mdd_pct, 5.0)
 
-    # 5. Penalties
-    min_trades = 20 if tf == "4h" else 10
-    trade_penalty = max(0, min_trades - n_trades) * 0.5
-    mdd_penalty = max(0, mdd_pct - 40.0) * 0.3
+    # 5. Penalties (Soft quadratic penalty for low trade counts)
+    min_trades_target: int = 20 if tf == "4h" else 10
+    trade_ratio: float = min(float(n_trades) / min_trades_target, 1.0)
+    penalty_multiplier: float = trade_ratio ** 2
 
-    final_score = romad - trade_penalty - mdd_penalty
+    final_score = (romad * penalty_multiplier) - max(0, mdd_pct - 40.0) * 0.3
     return final_score, ret_pct, mdd_pct
 
 
