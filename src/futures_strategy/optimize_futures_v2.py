@@ -43,7 +43,7 @@ _logger = logging.getLogger("opt_v2")
 # Constants
 START_DATE = "2022-01-01"
 END_DATE = "2025-11-01"
-WARMUP_BARS = {"4h": 200, "1d": 200}
+WARMUP_BARS = {"4h": 400, "1d": 400}
 EMBARGO_BARS = {"4h": 6, "1d": 2}
 
 
@@ -57,6 +57,11 @@ def calc_romad(pnl_series: pd.Series, n_trades: int, tf: str) -> Tuple[float, fl
     """
     if pnl_series.empty or n_trades == 0:
         return -100.0, 0.0, 0.0
+
+    # Phase 1: Hard gate for minimum trades to filter out low-trade noise
+    min_trades_hard: int = 20 if tf == "4h" else 10
+    if n_trades < min_trades_hard:
+        return -200.0, 0.0, 0.0
 
     # 1. Equity curve & Return
     equity = FUTURES_INITIAL_BALANCE + pnl_series.cumsum()
@@ -298,11 +303,6 @@ def objective_v2(trial: optuna.Trial, data_maps: Dict[str, Dict[str, pd.DataFram
         fold_trades.append(float(np.mean(sym_trades_fold)))
         fold_wins.append(float(np.mean(sym_wins_fold)))
 
-        # Report intermediate fold result to Pruner
-        trial.report(avg_fold_sym_score, f_idx)
-        if trial.should_prune():
-            gc.collect()
-            raise optuna.TrialPruned()
 
     # Aggregate Fold Scores using Harmonic-like mean to punish the worst fold
     # Shift by 10 to handle negatives up to -9
@@ -406,11 +406,7 @@ def main():
         seed=q_seeds[0], # Use primary seed
     )
 
-    pruner = optuna.pruners.HyperbandPruner(
-        min_resource=1,
-        max_resource=3, # 3 folds max
-        reduction_factor=2
-    )
+
 
     try:
         optuna.delete_study(study_name=study_name, storage=storage_url)
@@ -423,7 +419,6 @@ def main():
         storage=storage_url,
         direction="maximize",
         sampler=sampler,
-        pruner=pruner,
         load_if_exists=False,
     )
 
