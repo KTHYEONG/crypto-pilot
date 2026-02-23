@@ -1,0 +1,463 @@
+import argparse
+import logging
+import os
+import sys
+import gc
+import optuna
+import pandas as pd
+import numpy as np
+from pathlib import Path
+from typing import Dict, List, Tuple, Any
+
+# Project Root Setup
+project_root = str(Path(__file__).resolve().parents[2])
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+
+from src.futures_strategy.data_collector import DataCollector
+from src.futures_strategy.strategies_futures import UltimateStrategy
+from src.futures_strategy.engine_fast_futures import BacktestEngineFast, backtest_loop_numba
+from config.settings import (
+    FUTURES_INITIAL_BALANCE,
+    TRADING_FEE_RATE,
+    SLIPPAGE_RATE,
+    DATA_DIR,
+)
+from config.opt_config import OPT_V2_CONFIG, SEARCH_SPACE_V2
+
+# Reuse existing complex cache & merge utils from v1
+from src.futures_strategy.optimize_futures import (
+    cached_generate_signals_futures,
+    compute_segment_merge_index,
+)
+
+# --------------------------------------------------------------------------
+# Logger setup
+# --------------------------------------------------------------------------
+# Set Optuna logging level to WARNING to hide default per-trial logs
+optuna.logging.set_verbosity(optuna.logging.WARNING)
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(message)s")
+_logger = logging.getLogger("opt_v2")
+
+# Constants
+START_DATE = "2022-01-01"
+END_DATE = "2025-11-01"
+WARMUP_BARS = {"4h": 200, "1d": 200}
+EMBARGO_BARS = {"4h": 6, "1d": 2}
+
+
+# --------------------------------------------------------------------------
+# Metric Calculation
+# --------------------------------------------------------------------------
+def calc_romad(pnl_series: pd.Series, n_trades: int, tf: str) -> Tuple[float, float, float]:
+    """
+    Calculate Return on Max Drawdown (RoMaD) as the primary risk-adjusted metric.
+    Returns: (romad_score, return_pct, mdd_pct)
+    """
+    if pnl_series.empty or n_trades == 0:
+        return -100.0, 0.0, 0.0
+
+    # 1. Equity curve & Return
+    equity = FUTURES_INITIAL_BALANCE + pnl_series.cumsum()
+    end_equity = equity.iloc[-1]
+    ret_pct = ((end_equity / FUTURES_INITIAL_BALANCE) - 1.0) * 100.0
+
+    # 2. Maximum Drawdown (MDD)
+    running_max = np.maximum.accumulate(equity.values)
+    running_max[running_max == 0] = 1e-9
+    drawdown = (equity.values - running_max) / running_max * 100.0
+    mdd_pct = abs(float(np.min(drawdown))) if len(drawdown) > 0 else 0.0
+
+    # 3. Annualized Return
+    # Calculate span in days
+    span_days = (pnl_series.index[-1] - pnl_series.index[0]).total_seconds() / 86400.0
+    if span_days < 1.0:
+        span_days = 1.0
+    annual_return = ret_pct * (365.0 / span_days)
+
+    # 4. RoMaD Core (Floor MDD at 5% to avoid div-by-zero or excessive score on low-trade flat curves)
+    romad = annual_return / max(mdd_pct, 5.0)
+
+    # 5. Penalties
+    min_trades = 20 if tf == "4h" else 10
+    trade_penalty = max(0, min_trades - n_trades) * 0.5
+    mdd_penalty = max(0, mdd_pct - 40.0) * 0.3
+
+    final_score = romad - trade_penalty - mdd_penalty
+    return final_score, ret_pct, mdd_pct
+
+
+# --------------------------------------------------------------------------
+# Validation Folds Setup
+# --------------------------------------------------------------------------
+def build_anchored_folds(df: pd.DataFrame, n_folds: int = 3, embargo: int = 0) -> List[Tuple[int, int]]:
+    """Build train(0~idx) -> OOS(idx~idx_next) splits."""
+    n_bars = len(df)
+    if n_bars < 500:
+        return []
+
+    block = n_bars // (n_folds + 1)
+    splits = []
+    for i in range(1, n_folds + 1):
+        train_end = block * i
+        test_start = train_end + embargo
+        test_end = (block * (i + 1)) if i < n_folds else n_bars
+
+        if test_start < test_end:
+            splits.append((test_start, test_end))
+
+    return splits
+
+
+# --------------------------------------------------------------------------
+# Optuna Suggestion Logic
+# --------------------------------------------------------------------------
+def suggest_params_v2(trial: optuna.Trial, space: Dict[str, Any]) -> Dict[str, Any]:
+    params = {}
+    for k, spec in space.items():
+        if spec["type"] == "categorical":
+            params[k] = trial.suggest_categorical(k, spec["choices"])
+        elif spec["type"] == "int":
+            log = spec.get("log", False)
+            step = spec.get("step", 1)
+            params[k] = trial.suggest_int(k, spec["low"], spec["high"], step=step, log=log)
+        elif spec["type"] == "float":
+            log = spec.get("log", False)
+            step = spec.get("step", None)
+            params[k] = trial.suggest_float(k, spec["low"], spec["high"], step=step, log=log)
+
+    # Dimensionality conditional pruning: If parameter isn't used by the structure, remove it
+    entry = params["ENTRY_TYPE"]
+    if entry != "BOLLINGER":
+        params.pop("BB_STD", None)
+    if entry != "KELTNER":
+        params.pop("KELTNER_ATR_MULT", None)
+
+    trend = params["TREND_FILTER_TYPE"]
+    if trend != "SUPERTREND":
+        params.pop("SUPERTREND_MULT", None)
+        params.pop("SUPERTREND_PERIOD", None)
+    if trend != "MACD":
+        params.pop("MACD_FAST", None)
+        params.pop("MACD_SLOW", None)
+        params.pop("MACD_SIGNAL", None)
+    if trend != "VWAP":
+        params.pop("VWAP_STD_MULT", None)
+
+    strength = params["STRENGTH_FILTER_TYPE"]
+    if strength != "ADX":
+        params.pop("ADX_THRESHOLD", None)
+    if strength != "HURST":
+        params.pop("HURST_PERIOD", None)
+        params.pop("HURST_TREND_THRESHOLD", None)
+    if strength != "NATR":
+        params.pop("NATR_THRESHOLD", None)
+
+    # Sanity constraints
+    if trend == "MACD" and params.get("MACD_FAST", 12) >= params.get("MACD_SLOW", 26):
+        raise optuna.TrialPruned()
+
+    return params
+
+
+# --------------------------------------------------------------------------
+# Objective Evaluation
+# --------------------------------------------------------------------------
+def evaluate_symbol_fold(
+    params: Dict[str, Any],
+    symbol: str,
+    tf: str,
+    target_df: pd.DataFrame,
+    daily_df: pd.DataFrame,
+    test_start: int,
+    test_end: int,
+) -> Tuple[float, float, float, int, float]:
+    warmup = WARMUP_BARS.get(tf, 200)
+    seg_start = max(0, test_start - warmup)
+
+    # Slice and add dummy attributes for cache key generator compatibility
+    segment_hourly = target_df.iloc[seg_start:test_end].copy()
+    segment_hourly.attrs = {"warmup_bars": test_start - seg_start}
+
+    # Generate signals using the cached v1 function
+    strategy = UltimateStrategy(name="FuturesV2", params=params)
+    try:
+        sig_df = cached_generate_signals_futures(strategy, segment_hourly, symbol)
+    except Exception as e:
+        _logger.warning("Error generating signals: %s", e)
+        return -100.0, 0.0, 0.0, 0, 0.0
+
+    # Build Merge Index
+    merge_idx = compute_segment_merge_index(segment_hourly, daily_df)
+
+    # Filter to OOS period
+    oos_start = test_start - seg_start
+    sig_oos = sig_df.iloc[oos_start:].copy()
+    merge_oos = merge_idx[oos_start:]
+
+    engine = BacktestEngineFast(
+        hourly_df=sig_oos,
+        daily_df=daily_df,
+        strategy=strategy,
+        initial_balance=FUTURES_INITIAL_BALANCE,
+        merge_index_map=merge_oos,
+    )
+
+    try:
+        result = engine.run()
+        trades_df = result.get("trades_df")
+    except Exception as e:
+        _logger.warning("Backtest engine error: %s", e)
+        return -100.0, 0.0, 0.0, 0, 0.0
+
+    if trades_df is None or trades_df.empty:
+        return -100.0, 0.0, 0.0, 0, 0.0
+
+    long_count = len(trades_df[trades_df["side"] == "LONG"])
+    short_count = len(trades_df[trades_df["side"] == "SHORT"])
+
+    # Map PnL with exit_time
+    pnl_series = trades_df.set_index("exit_time")["pnl"]
+
+    # Calculate win rate
+    win_rate = (len(trades_df[trades_df["pnl"] > 0]) / len(trades_df)) * 100 if len(trades_df) > 0 else 0.0
+
+    # Calculate RoMaD
+    score, ret_pct, mdd_pct = calc_romad(pnl_series, len(trades_df), tf)
+
+    # Direction penalty
+    if long_count == 0 or short_count == 0:
+        score -= 5.0
+
+    return score, ret_pct, mdd_pct, len(trades_df), win_rate
+
+
+def objective_v2(trial: optuna.Trial, data_maps: Dict[str, Dict[str, pd.DataFrame]]) -> float:
+    params = suggest_params_v2(trial, SEARCH_SPACE_V2)
+    tf = params["TIMEFRAME"]
+    symbols = list(data_maps.keys())
+
+    # Build folds based on the first symbol's target timeframe length
+    base_sym = symbols[0]
+    if tf not in data_maps[base_sym]:
+        return -10000.0
+    folds = build_anchored_folds(data_maps[base_sym][tf], n_folds=3, embargo=EMBARGO_BARS.get(tf, 0))
+
+    if not folds:
+        return -10000.0
+
+    # Evaluate fold by fold to allow Hyperband Pruning
+    fold_scores = []
+    fold_rets = []
+    fold_mdds = []
+    fold_trades = []
+    fold_wins = []
+    
+    # Track per-symbol cumulative metrics across folds
+    sym_total_rets = {sym: [] for sym in symbols}
+    sym_total_mdds = {sym: [] for sym in symbols}
+    sym_total_scores = {sym: [] for sym in symbols}
+    sym_total_trades = {sym: [] for sym in symbols}
+    sym_total_wins = {sym: [] for sym in symbols}
+    
+    for f_idx, (test_start, test_end) in enumerate(folds):
+        sym_scores = []
+        sym_rets = []
+        sym_mdds = []
+        sym_trades_fold = []
+        sym_wins_fold = []
+        for sym in symbols:
+            target_df = data_maps[sym].get(tf)
+            daily_df = data_maps[sym].get("1d")
+            if target_df is None or daily_df is None:
+                continue
+            
+            s, r, m, t, w = evaluate_symbol_fold(params, sym, tf, target_df, daily_df, test_start, test_end)
+            sym_scores.append(s)
+            sym_rets.append(r)
+            sym_mdds.append(m)
+            sym_trades_fold.append(t)
+            sym_wins_fold.append(w)
+            
+            # Store per-symbol metrics
+            sym_total_scores[sym].append(s)
+            sym_total_rets[sym].append(r)
+            sym_total_mdds[sym].append(m)
+            sym_total_trades[sym].append(t)
+            sym_total_wins[sym].append(w)
+
+        if not sym_scores:
+            return -10000.0
+
+        # Mean across symbols for this fold
+        avg_fold_sym_score = float(np.mean(sym_scores))
+        fold_scores.append(avg_fold_sym_score)
+        fold_rets.append(float(np.mean(sym_rets)))
+        fold_mdds.append(float(np.mean(sym_mdds)))
+        fold_trades.append(float(np.mean(sym_trades_fold)))
+        fold_wins.append(float(np.mean(sym_wins_fold)))
+
+        # Report intermediate fold result to Pruner
+        trial.report(avg_fold_sym_score, f_idx)
+        if trial.should_prune():
+            gc.collect()
+            raise optuna.TrialPruned()
+
+    # Aggregate Fold Scores using Harmonic-like mean to punish the worst fold
+    # Shift by 10 to handle negatives up to -9
+    shifted = [s + 10.0 for s in fold_scores]
+    if any(s <= 0 for s in shifted):
+        final_score = np.mean(fold_scores) - 20.0 # Heavy penalty if any fold strongly negative
+    else:
+        hm = len(shifted) / sum(1.0 / s for s in shifted)
+        final_score = hm - 10.0
+
+    trial.set_user_attr("avg_score", float(np.mean(fold_scores)))
+    trial.set_user_attr("avg_ret", float(np.mean(fold_rets)))
+    trial.set_user_attr("avg_mdd", float(np.mean(fold_mdds)))
+    trial.set_user_attr("avg_trades", float(np.mean(fold_trades)))
+    trial.set_user_attr("avg_win_rate", float(np.mean(fold_wins)))
+    
+    # Store per-symbol averages in user_attrs
+    sym_log_msgs = []
+    for sym in symbols:
+        if len(sym_total_scores[sym]) > 0:
+            s_score = float(np.mean(sym_total_scores[sym]))
+            s_ret = float(np.mean(sym_total_rets[sym]))
+            s_mdd = float(np.mean(sym_total_mdds[sym]))
+            s_trades = float(np.mean(sym_total_trades[sym]))
+            s_wins = float(np.mean(sym_total_wins[sym]))
+        else:
+            s_score, s_ret, s_mdd, s_trades, s_wins = -100.0, 0.0, 0.0, 0, 0.0
+            
+        trial.set_user_attr(f"{sym}_score", s_score)
+        trial.set_user_attr(f"{sym}_ret", s_ret)
+        trial.set_user_attr(f"{sym}_mdd", s_mdd)
+        trial.set_user_attr(f"{sym}_trades", s_trades)
+        trial.set_user_attr(f"{sym}_win_rate", s_wins)
+        sym_log_msgs.append(f"[{sym} R:{s_ret:5.1f}% M:{s_mdd:4.1f}%]")
+        
+    
+    # Progress handled by Optuna's UI internally now
+    
+    gc.collect()
+    return float(final_score)
+
+
+# --------------------------------------------------------------------------
+# Execution Main
+# --------------------------------------------------------------------------
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--symbols", type=str, default="BTC/USDT,ETH/USDT")
+    parser.add_argument("--trials", type=int, default=OPT_V2_CONFIG["total_trials"])
+    parser.add_argument("--jobs", type=int, default=OPT_V2_CONFIG["n_jobs"])
+    args = parser.parse_args()
+
+    symbols = [s.strip() for s in args.symbols.split(",")]
+    collector = DataCollector()
+    data_maps = {}
+
+    _logger.info("Loading futures database (%s to %s)...", START_DATE, END_DATE)
+    for sym in symbols:
+        data_maps[sym] = {}
+        for tf in ["1d", "4h"]:
+            df = collector.collect_and_save(sym, tf, START_DATE, END_DATE)
+            if df.empty:
+                _logger.error("Failed to load %s %s data", sym, tf)
+                sys.exit(1)
+            data_maps[sym][tf] = df
+    _logger.info("Data load complete.")
+
+    study_name = "futures_v2_romad_opt"
+    
+    # DB connection setup matching v1
+    db_user = os.getenv("DB_USER", "root")
+    db_pass = os.getenv("DB_PASS", "1234")
+    db_host = os.getenv("DB_HOST", "localhost")
+    db_port = os.getenv("DB_PORT", "3306")
+    db_name = os.getenv("DB_NAME", "trading_optuna")
+    from urllib.parse import quote_plus
+    safe_pass = quote_plus(db_pass)
+    storage_url = f"mysql+pymysql://{db_user}:{safe_pass}@{db_host}:{db_port}/{db_name}"
+
+    # Setup 2-seed queue logic
+    seeds = OPT_V2_CONFIG["seeds"]
+    n_trials = args.trials
+
+    # Custom sampler with deterministic seeds split
+    if n_trials <= len(seeds):
+        q_seeds = seeds[:n_trials]
+        base_trials = n_trials
+    else:
+        q_seeds = seeds
+        base_trials = n_trials
+
+    _logger.info("Starting V2 Optimization. Total Trials: %d, Seeds: %s, Workers: %d", base_trials, q_seeds, args.jobs)
+
+    # Note: ConstantLiar is handled implicitly by optuna when running concurrent jobs
+    # But for a clear mathematical approach, we use TPESampler with a fixed seed across the board
+    sampler = optuna.samplers.TPESampler(
+        n_startup_trials=OPT_V2_CONFIG["n_startup_trials"],
+        multivariate=True,
+        constant_liar=True,
+        warn_independent_sampling=False,
+        seed=q_seeds[0], # Use primary seed
+    )
+
+    pruner = optuna.pruners.HyperbandPruner(
+        min_resource=1,
+        max_resource=3, # 3 folds max
+        reduction_factor=2
+    )
+
+    try:
+        optuna.delete_study(study_name=study_name, storage=storage_url)
+        _logger.info(f"Deleted existing study '{study_name}' for a fresh start.")
+    except KeyError:
+        pass  # Study does not exist yet
+
+    study = optuna.create_study(
+        study_name=study_name,
+        storage=storage_url,
+        direction="maximize",
+        sampler=sampler,
+        pruner=pruner,
+        load_if_exists=False,
+    )
+
+    study.optimize(
+        lambda t: objective_v2(t, data_maps),
+        n_trials=base_trials,
+        n_jobs=args.jobs,
+        catch=(Exception,),
+        show_progress_bar=True,  # Enables tqdm progress bar natively
+    )
+
+    _logger.info("=" * 60)
+    _logger.info("Optimization Complete.")
+    best_trial = study.best_trial
+    _logger.info(f"Best Score: {best_trial.value:.4f}")
+    _logger.info(f"  - Avg Return (FoldxSym): {best_trial.user_attrs.get('avg_ret', 0):.2f}%")
+    _logger.info(f"  - Avg MDD    (FoldxSym): {best_trial.user_attrs.get('avg_mdd', 0):.2f}%")
+    _logger.info(f"  - Avg Trades (FoldxSym): {best_trial.user_attrs.get('avg_trades', 0):.1f}")
+    _logger.info(f"  - Avg WinRate(FoldxSym): {best_trial.user_attrs.get('avg_win_rate', 0):.2f}%")
+    
+    _logger.info("  [Per-Symbol Performance]")
+    for sym in symbols:
+        r = best_trial.user_attrs.get(f"{sym}_ret", 0)
+        m = best_trial.user_attrs.get(f"{sym}_mdd", 0)
+        s = best_trial.user_attrs.get(f"{sym}_score", 0)
+        t = best_trial.user_attrs.get(f"{sym}_trades", 0)
+        w = best_trial.user_attrs.get(f"{sym}_win_rate", 0)
+        _logger.info(f"    - {sym:10s} | Score: {s:7.2f} | Return: {r:6.2f}% | MDD: {m:5.2f}% | Trades: {t:4.1f} | WinRate: {w:5.2f}%")
+        
+    _logger.info("Best Params:")
+    for k, v in best_trial.params.items():
+        _logger.info(f"  - {k:25s}: {v}")
+    _logger.info("=" * 60)
+
+
+if __name__ == "__main__":
+    main()
