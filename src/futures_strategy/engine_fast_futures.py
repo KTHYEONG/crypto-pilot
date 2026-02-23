@@ -115,7 +115,7 @@ class BacktestEngineFast:
         self.merged_df = pd.merge(self.hourly_df, shifted_daily, on='date_key', how='left')
     
     def run(self):
-        self.logger.info(f"Running FAST backtest for {self.strategy.name}...")
+        self.logger.debug(f"Running FAST backtest for {self.strategy.name}...")
         
         df = self.merged_df
         
