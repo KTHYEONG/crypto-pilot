@@ -182,9 +182,11 @@ class BacktestEngineFast:
         time_exit_profit_threshold = self.strategy.params.get('TIME_EXIT_PROFIT_THRESHOLD', 0.5)  # Default: 0.5 ATR profit required to hold
         enable_trend_exit = self.strategy.params.get('ENABLE_TREND_EXIT', True)
         
-        # [WARMUP OPTIMIZATION] Calculate required warmup based on strategy indicators
-        # Strategy analyzes its own parameters to determine minimum stable period
-        warmup_bars = getattr(df, 'attrs', {}).get('warmup_bars', self.strategy.get_required_warmup())
+        # [WARMUP OPTIMIZATION] Warmup in execution (hourly) bar count; fallback converts daily bars to hourly
+        warmup_bars = getattr(df, "attrs", {}).get(
+            "warmup_bars",
+            self.strategy.get_required_warmup(freq="hourly"),
+        )
         
         # [NEW] RSI for Panic Exit
         # Use existing rsi if available, else fill 50
