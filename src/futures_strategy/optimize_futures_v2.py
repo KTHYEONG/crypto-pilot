@@ -188,34 +188,20 @@ def suggest_params_v2(trial: optuna.Trial, space: Dict[str, Any]) -> Dict[str, A
 # Objective Evaluation
 # --------------------------------------------------------------------------
 def evaluate_symbol_fold(
+    strategy: UltimateStrategy,
     params: Dict[str, Any],
     symbol: str,
     tf: str,
     target_df: pd.DataFrame,
     daily_df: pd.DataFrame,
+    full_merge_idx: np.ndarray,
+    precomputed_daily_df: pd.DataFrame,
     test_start: int,
     test_end: int,
 ) -> Tuple[float, float, float, int, float]:
-    warmup = WARMUP_BARS.get(tf, 200)
-    seg_start = max(0, test_start - warmup)
-
-    # Segment hourly: OHLCV only (no strategy signals; those come from full daily below)
-    segment_hourly = target_df.iloc[seg_start:test_end].copy()
-    segment_hourly.attrs = {"warmup_bars": test_start - seg_start}
-
-    strategy = UltimateStrategy(name="FuturesV2", params=params)
-    try:
-        precomputed_daily_df = strategy.generate_signals(daily_df)
-    except Exception as e:
-        _logger.warning("Error generating signals: %s", e)
-        return -100.0, 0.0, 0.0, 0, 0.0
-
-    merge_idx = compute_segment_merge_index(segment_hourly, daily_df)
-    oos_start = test_start - seg_start
-    sig_oos = segment_hourly.iloc[oos_start:].copy()
-    sig_oos = merge_funding_into_ohlcv(symbol, sig_oos, DATA_DIR)
-    sig_oos.attrs = {"warmup_bars": 0}  # OOS: engine trades from bar 0; set once after any df replacement
-    merge_oos = merge_idx[oos_start:]
+    sig_oos = target_df.iloc[test_start:test_end].copy()
+    sig_oos.attrs = {"warmup_bars": 0}
+    merge_oos = full_merge_idx[test_start:test_end]
 
     engine = BacktestEngineFast(
         hourly_df=sig_oos,
@@ -270,6 +256,18 @@ def objective_v2(trial: optuna.Trial, data_maps: Dict[str, Dict[str, pd.DataFram
     tf = params["TIMEFRAME"]
     symbols = list(data_maps.keys())
 
+    strategy = UltimateStrategy(name="FuturesV2", params=params)
+
+    precomputed_signals = {}
+    for sym in symbols:
+        daily_df = data_maps[sym].get("1d")
+        if daily_df is not None:
+            try:
+                precomputed_signals[sym] = strategy.generate_signals(daily_df)
+            except Exception as e:
+                _logger.warning("Error generating signals for %s: %s", sym, e)
+                return -100.0
+
     # Build folds using min length across all symbols so every symbol has valid OOS segments
     lengths = [len(data_maps[sym][tf]) for sym in symbols if tf in data_maps.get(sym, {})]
     if not lengths:
@@ -304,10 +302,15 @@ def objective_v2(trial: optuna.Trial, data_maps: Dict[str, Dict[str, pd.DataFram
         for sym in symbols:
             target_df = data_maps[sym].get(tf)
             daily_df = data_maps[sym].get("1d")
-            if target_df is None or daily_df is None:
+            full_merge_idx = data_maps[sym].get(f"merge_idx_{tf}")
+            precomputed_daily_df = precomputed_signals.get(sym)
+            if target_df is None or daily_df is None or full_merge_idx is None or precomputed_daily_df is None:
                 continue
             
-            s, r, m, t, w = evaluate_symbol_fold(params, sym, tf, target_df, daily_df, test_start, test_end)
+            s, r, m, t, w = evaluate_symbol_fold(
+                strategy, params, sym, tf, target_df, daily_df, 
+                full_merge_idx, precomputed_daily_df, test_start, test_end
+            )
             sym_scores.append(s)
             sym_rets.append(r)
             sym_mdds.append(m)
@@ -370,7 +373,6 @@ def objective_v2(trial: optuna.Trial, data_maps: Dict[str, Dict[str, pd.DataFram
     
     # Progress handled by Optuna's UI internally now
     
-    gc.collect()
     return float(final_score)
 
 
@@ -396,7 +398,11 @@ def main():
             if df.empty:
                 _logger.error("Failed to load %s %s data", sym, tf)
                 sys.exit(1)
+            df = merge_funding_into_ohlcv(sym, df, DATA_DIR)
             data_maps[sym][tf] = df
+            
+        data_maps[sym]["merge_idx_1d"] = compute_segment_merge_index(data_maps[sym]["1d"], data_maps[sym]["1d"])
+        data_maps[sym]["merge_idx_4h"] = compute_segment_merge_index(data_maps[sym]["4h"], data_maps[sym]["1d"])
     _logger.info("Data load complete.")
 
     study_name = "futures_v2_romad_opt"
