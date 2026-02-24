@@ -1221,6 +1221,26 @@ def evaluate_one_fidelity(
             trades = result["total_trades"]
             win_rate = result["win_rate"]
             trades_df = result["trades_df"]
+            final_balance = result.get("final_balance", 0.0)
+
+            # Defense: treat exploded / absurd results as invalid (engine may have legacy caps)
+            if not np.isfinite(ret) or ret > 1e6 or final_balance > 1e14:
+                score = -220.0
+                symbol_scores.append(score)
+                symbol_results[symbol] = {
+                    "return": ret,
+                    "mdd": mdd,
+                    "trades": trades,
+                    "win_rate": win_rate,
+                    "pf": 0.0,
+                    "ret_p25": ret,
+                    "stress_ret_p25": ret,
+                    "long_trades": 0,
+                    "short_trades": 0,
+                    "side_min_ratio": 0.0,
+                }
+                del engine, result, strategy, trades_df
+                continue
 
             pf = 0.0
             if not trades_df.empty and "pnl" in trades_df.columns:
