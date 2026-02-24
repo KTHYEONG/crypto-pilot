@@ -203,7 +203,10 @@ class BacktestEngineFast:
         else:
             rsi = np.full(n, 50.0)
             
-        rsi_exit_threshold = self.strategy.params.get('RSI_EXIT_THRESHOLD', 80.0) # Default: 80 for Long Exit, 20 for Short Exit
+        # Long/short independent; fallback to legacy RSI_EXIT_THRESHOLD (long=K, short=100-K)
+        _legacy = self.strategy.params.get("RSI_EXIT_THRESHOLD", 80.0)
+        rsi_long_exit = self.strategy.params.get("RSI_LONG_EXIT_THRESHOLD", _legacy)
+        rsi_short_exit = self.strategy.params.get("RSI_SHORT_EXIT_THRESHOLD", 100.0 - _legacy)
         
         # [NEW] Dynamic Risk Sizing (Regime-based)
         # Extract Hurst & NATR for regime detection
@@ -254,7 +257,7 @@ class BacktestEngineFast:
             timestamps, funding_rates,
             max_holding_bars, trailing_activation_atr, time_exit_profit_threshold,
             enable_trend_exit,
-            rsi_exit_threshold,
+            rsi_long_exit, rsi_short_exit,
             use_dynamic_risk, strong_regime_hurst, strong_regime_natr, strong_regime_multiplier,
             weak_regime_hurst, weak_regime_multiplier,
             panic_regime_natr, panic_regime_multiplier,
@@ -397,7 +400,7 @@ def backtest_loop_numba(
     timestamps, funding_rates,
     max_holding_bars, trailing_activation_atr, time_exit_profit_threshold,
     enable_trend_exit,
-    rsi_exit_threshold, # [NEW]
+    rsi_long_exit, rsi_short_exit,
     use_dynamic_risk, strong_regime_hurst, strong_regime_natr, strong_regime_multiplier,
     weak_regime_hurst, weak_regime_multiplier,
     panic_regime_natr, panic_regime_multiplier, # [NEW] Dynamic Risk
@@ -526,11 +529,13 @@ def backtest_loop_numba(
             
             # [SEQ-2] Stop Loss (Gap-Adjusted Realism)
             current_stop = start_of_bar_stop
+            # SAR valid only when on correct side of price (bullish: SAR below price; bearish: SAR above)
             if exit_type == 1 and parabolic_sar[i] > 0:
-                if pos_side == 1:
+                if pos_side == 1 and parabolic_sar[i] < c_open:
                     current_stop = max(start_of_bar_stop, parabolic_sar[i])
-                else:
+                elif pos_side == -1 and parabolic_sar[i] > c_open:
                     current_stop = min(start_of_bar_stop, parabolic_sar[i])
+                # else: wrong side → keep ATR stop only
 
             if pos_side == 1:  # Long exit
                 if c_open < current_stop:
@@ -587,12 +592,12 @@ def backtest_loop_numba(
                 
                 # RSI Panic (rsi[i] is shift(1) daily → prior day; no future reference)
                 if not exit_triggered:
-                    if pos_side == 1 and rsi[i] > rsi_exit_threshold:
-                         exit_price = c_open * (1 - slippage_rate)
-                         exit_triggered = True
-                    elif pos_side == -1 and rsi[i] < (100 - rsi_exit_threshold):
-                         exit_price = c_open * (1 + slippage_rate)
-                         exit_triggered = True
+                    if pos_side == 1 and rsi[i] > rsi_long_exit:
+                        exit_price = c_open * (1 - slippage_rate)
+                        exit_triggered = True
+                    elif pos_side == -1 and rsi[i] < rsi_short_exit:
+                        exit_price = c_open * (1 + slippage_rate)
+                        exit_triggered = True
                 
                 # Trend Reversal (optional to avoid over-filtered early exits)
                 if not exit_triggered and enable_trend_exit:
