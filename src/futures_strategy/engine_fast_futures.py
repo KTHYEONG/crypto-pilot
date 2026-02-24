@@ -419,11 +419,13 @@ def backtest_loop_numba(
 ):
     """
     Numba JIT-compiled backtest loop for Futures (Long/Short).
-    Strict Realism Mode (v15.1):
-    - Signal at i -> Execute at Open of i+1
-    - Slippage on All Exits
-    - Sequential Stop Logic
-    - [v16] Compounding Control & Capital Caps
+    Simulation premise:
+    - Entry: Intra-bar breakout allowed. At bar i we use high[i]/low[i] to detect
+      breakout and fill at max(open, level) (long) or min(open, level) (short).
+      Real-time: you would not know bar high/low until bar close; this assumes
+      tick-level touch within the bar is observable at bar processing time.
+    - Exit: Slippage on all exits. Sequential stop logic. Funding at UTC 0/8/16.
+    - [v16] Compounding control & capital caps.
     """
     n = len(close)
     balance = initial_balance
@@ -637,7 +639,7 @@ def backtest_loop_numba(
                 pending_entry = False  # Clear any pending
                 bar_processed = True   # No re-entry on this bar (Zombie/Phantom fix)
 
-        # --- 2. SIGNAL DETECTION & IMMEDIATE EXECUTION (Intra-bar breakout) ---
+        # --- 2. ENTRY: Intra-bar breakout (simulation premise: bar i high/low known at bar i) ---
         # Only check entry when no position AND this bar did not just exit (Zombie fix)
         elif not in_position and not bar_processed:
             if np.isnan(entry_upper[i]) or np.isnan(entry_lower[i]):
@@ -662,6 +664,7 @@ def backtest_loop_numba(
 
             do_entry = False
             fill_price = 0.0
+            # Breakout: use bar i high/low (intra-bar premise); fill at first touch (open or level)
             if c_high > entry_upper[i] and trend_dir[i] == 1:
                 fill_price = max(c_open, entry_upper[i]) * (1 + slippage_rate)
                 pending_side = 1
