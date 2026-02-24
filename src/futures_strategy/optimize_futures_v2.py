@@ -232,6 +232,8 @@ def evaluate_symbol_fold(
         initial_balance=FUTURES_INITIAL_BALANCE,
         merge_index_map=merge_oos,
     )
+    engine.leverage = params.get("LEVERAGE", 1)
+    engine.risk_per_trade = params.get("RISK_PER_TRADE", 0.02)
 
     try:
         result = engine.run()
