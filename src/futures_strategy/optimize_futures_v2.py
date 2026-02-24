@@ -228,6 +228,7 @@ def evaluate_symbol_fold(
     )
     engine.leverage = params.get("LEVERAGE", 1)
     engine.risk_per_trade = params.get("RISK_PER_TRADE", 0.02)
+    engine.funding_events_per_bar = 3 if params.get("TIMEFRAME") == "1d" else 1
 
     try:
         result = engine.run()
