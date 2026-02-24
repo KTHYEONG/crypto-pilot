@@ -48,6 +48,7 @@ class FuturesWalkForwardAnalyzer(BaseWalkForwardAnalyzer):
         )
         engine.leverage = self.params.get("LEVERAGE", 1)
         engine.risk_per_trade = self.params.get("RISK_PER_TRADE", 0.02)
+        engine.funding_events_per_bar = 3 if self.params.get("TIMEFRAME") == "1d" else 1
         res = engine.run()
 
         trades_df = res["trades_df"]
