@@ -493,8 +493,9 @@ def backtest_loop_numba(
                     pnl -= exit_fee
                     balance = 0.0
                     
-                    trades[trade_count] = [entry_idx, i, pos_side, entry_price, exit_price, pnl]
-                    trade_count += 1
+                    if trade_count < max_trades:
+                        trades[trade_count] = [entry_idx, i, pos_side, entry_price, exit_price, pnl]
+                        trade_count += 1
                     in_position = False
                     break
             
@@ -627,8 +628,9 @@ def backtest_loop_numba(
                 margin = (amount * entry_price) / leverage
                 balance += margin + pnl
                 
-                trades[trade_count] = [entry_idx, i, pos_side, entry_price, exit_price, pnl]
-                trade_count += 1
+                if trade_count < max_trades:
+                    trades[trade_count] = [entry_idx, i, pos_side, entry_price, exit_price, pnl]
+                    trade_count += 1
                 in_position = False
                 pending_entry = False  # Clear any pending
                 bar_processed = True   # No re-entry on this bar (Zombie/Phantom fix)
