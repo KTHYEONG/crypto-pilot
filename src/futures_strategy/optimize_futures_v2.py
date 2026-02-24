@@ -213,9 +213,8 @@ def evaluate_symbol_fold(
     merge_idx = compute_segment_merge_index(segment_hourly, daily_df)
     oos_start = test_start - seg_start
     sig_oos = segment_hourly.iloc[oos_start:].copy()
-    sig_oos.attrs = {"warmup_bars": 0}
     sig_oos = merge_funding_into_ohlcv(symbol, sig_oos, DATA_DIR)
-    sig_oos.attrs = {"warmup_bars": 0}
+    sig_oos.attrs = {"warmup_bars": 0}  # OOS: engine trades from bar 0; set once after any df replacement
     merge_oos = merge_idx[oos_start:]
 
     engine = BacktestEngineFast(
