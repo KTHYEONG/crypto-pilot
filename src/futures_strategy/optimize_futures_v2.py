@@ -25,11 +25,8 @@ from config.settings import (
 )
 from config.opt_config import OPT_V2_CONFIG, SEARCH_SPACE_V2
 
-# Reuse existing complex cache & merge utils from v1
-from src.futures_strategy.optimize_futures import (
-    cached_generate_signals_futures,
-    compute_segment_merge_index,
-)
+# Reuse merge index util from v1 (no cached signals: v2 uses full daily signals once)
+from src.futures_strategy.optimize_futures import compute_segment_merge_index
 from src.futures_strategy.funding_utils import merge_funding_into_ohlcv
 
 # --------------------------------------------------------------------------
@@ -202,27 +199,23 @@ def evaluate_symbol_fold(
     warmup = WARMUP_BARS.get(tf, 200)
     seg_start = max(0, test_start - warmup)
 
-    # Slice and add dummy attributes for cache key generator compatibility
+    # Segment hourly: OHLCV only (no strategy signals; those come from full daily below)
     segment_hourly = target_df.iloc[seg_start:test_end].copy()
     segment_hourly.attrs = {"warmup_bars": test_start - seg_start}
 
-    # Generate signals using the cached v1 function
     strategy = UltimateStrategy(name="FuturesV2", params=params)
     try:
-        sig_df = cached_generate_signals_futures(strategy, segment_hourly, symbol)
+        precomputed_daily_df = strategy.generate_signals(daily_df)
     except Exception as e:
         _logger.warning("Error generating signals: %s", e)
         return -100.0, 0.0, 0.0, 0, 0.0
 
-    # Build Merge Index
     merge_idx = compute_segment_merge_index(segment_hourly, daily_df)
-
-    # Filter to OOS period
     oos_start = test_start - seg_start
-    sig_oos = sig_df.iloc[oos_start:].copy()
-    sig_oos.attrs = {"warmup_bars": 0}  # OOS: no extra warmup; engine must trade from bar 0
+    sig_oos = segment_hourly.iloc[oos_start:].copy()
+    sig_oos.attrs = {"warmup_bars": 0}
     sig_oos = merge_funding_into_ohlcv(symbol, sig_oos, DATA_DIR)
-    sig_oos.attrs = {"warmup_bars": 0}  # Ensure engine does not skip OOS bars
+    sig_oos.attrs = {"warmup_bars": 0}
     merge_oos = merge_idx[oos_start:]
 
     engine = BacktestEngineFast(
@@ -231,6 +224,7 @@ def evaluate_symbol_fold(
         strategy=strategy,
         initial_balance=FUTURES_INITIAL_BALANCE,
         merge_index_map=merge_oos,
+        precomputed_daily_df=precomputed_daily_df,
     )
     engine.leverage = params.get("LEVERAGE", 1)
     engine.risk_per_trade = params.get("RISK_PER_TRADE", 0.02)
