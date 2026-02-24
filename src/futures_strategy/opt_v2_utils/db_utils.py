@@ -8,33 +8,38 @@ import logging
 
 _logger: logging.Logger = logging.getLogger("opt_v2")
 
-def save_study_to_sqlite(study_name: str, source_url: str, project_root: str) -> bool:
+def save_study_to_sqlite(study: optuna.Study, project_root: str) -> bool:
     """
-    Export optimized Optuna study from MySQL/Remote to local SQLite for production.
-    Returns True if successful, False otherwise.
+    Export ONLY the best trial from the current study to local SQLite for production.
+    This avoids the bottleneck of copying thousands of trials.
     """
+    study_name: str = study.study_name
     sqlite_path: str = os.path.join(project_root, "futures_strategy.db")
     sqlite_storage_url: str = f"sqlite:///{sqlite_path}"
     
-    _logger.info(f"  💾 Exporting optimized study '{study_name}' to local SQLite...")
-    _logger.info(f"     Path: {sqlite_path}")
+    _logger.info(f"  💾 Exporting BEST trial of '{study_name}' to local SQLite...")
     
     try:
+        # 1. Delete existing local study to ensure fresh best trial
         try:
             optuna.delete_study(study_name=study_name, storage=sqlite_storage_url)
-            _logger.debug("Existing SQLite study deleted.")
-        except KeyError:
+        except (KeyError, Exception):
             pass
             
-        optuna.copy_study(
-            from_study_name=study_name,
-            from_storage=source_url,
-            to_storage=sqlite_storage_url,
-            to_study_name=study_name
+        # 2. Create new local study
+        local_study: optuna.Study = optuna.create_study(
+            study_name=study_name,
+            storage=sqlite_storage_url,
+            direction=study.direction,
+            load_if_exists=False
         )
-        _logger.info("✅ SQLite persistence complete.")
+        
+        # 3. Add only the best trial
+        local_study.add_trial(study.best_trial)
+        
+        _logger.info("✅ SQLite persistence (Best Trial Only) complete.")
         return True
         
     except Exception as e:
-        _logger.error(f"❌ Failed to persist study to SQLite: {e}")
+        _logger.error(f"❌ Failed to persist best trial to SQLite: {e}")
         return False
