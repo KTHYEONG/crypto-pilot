@@ -222,7 +222,7 @@ def main() -> None:
     _logger.info("=" * SEP_WIDTH)
 
     # 4. Save to SQLite
-    save_study_to_sqlite(study_name, storage_url, project_root)
+    save_study_to_sqlite(study, project_root)
 
 if __name__ == "__main__":
     main()
