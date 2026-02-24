@@ -195,7 +195,7 @@ class BacktestEngineFast:
             funding_rates = np.nan_to_num(_fr[:n], nan=0.0, posinf=0.0, neginf=0.0)
         else:
             funding_rates = np.full(n, FUNDING_FEE_RATE, dtype=np.float64)
-            self.logger.info("funding_rate column not found in hourly_df; using constant fallback.")
+            self.logger.debug("funding_rate column not found in hourly_df; using constant fallback.")
         
         # [NEW] Time-Based Exit & Trailing Activation
         max_holding_bars = self.strategy.params.get('MAX_HOLDING_BARS', 999999)  # Default: No limit
