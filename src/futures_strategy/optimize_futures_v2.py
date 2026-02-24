@@ -198,6 +198,16 @@ def suggest_params_v2(trial: optuna.Trial, space: Dict[str, Any]) -> Dict[str, A
         params.pop("VOLUME_MA_PERIOD", None)
         params.pop("VOLUME_Z_THRESHOLD", None)
 
+    # Dynamic Risk conditional pruning
+    if not params.get("USE_DYNAMIC_RISK", False):
+        params.pop("STRONG_REGIME_HURST", None)
+        params.pop("STRONG_REGIME_NATR", None)
+        params.pop("STRONG_REGIME_MULTIPLIER", None)
+        params.pop("WEAK_REGIME_HURST", None)
+        params.pop("WEAK_REGIME_MULTIPLIER", None)
+        params.pop("PANIC_REGIME_NATR", None)
+        params.pop("PANIC_REGIME_MULTIPLIER", None)
+
     return params
 
 
