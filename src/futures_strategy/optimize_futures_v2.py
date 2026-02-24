@@ -404,6 +404,43 @@ def objective_v2(trial: optuna.Trial, data_maps: Dict[str, Dict[str, pd.DataFram
 
 
 # --------------------------------------------------------------------------
+# Persistence Logic
+# --------------------------------------------------------------------------
+def save_study_to_sqlite(study_name: str, source_url: str, project_root: str) -> bool:
+    """
+    Export optimized Optuna study from MySQL/Remote to local SQLite for production.
+    Returns True if successful, False otherwise.
+    """
+    sqlite_path: str = os.path.join(project_root, "futures_strategy.db")
+    sqlite_storage_url: str = f"sqlite:///{sqlite_path}"
+    
+    _logger.info("=" * 60)
+    _logger.info(f"💾 Saving optimized study '{study_name}' to SQLite: {sqlite_path}")
+    
+    try:
+        # 1. Clean up existing study in SQLite to ensure fresh overwrite
+        try:
+            optuna.delete_study(study_name=study_name, storage=sqlite_storage_url)
+            _logger.debug("Existing SQLite study deleted.")
+        except KeyError:
+            pass
+            
+        # 2. Copy study across storage backends
+        optuna.copy_study(
+            from_study_name=study_name,
+            from_storage=source_url,
+            to_storage=sqlite_storage_url,
+            to_study_name=study_name
+        )
+        _logger.info("✅ SQLite persistence complete.")
+        return True
+        
+    except Exception as e:
+        _logger.error(f"❌ Failed to persist study to SQLite: {e}")
+        return False
+
+
+# --------------------------------------------------------------------------
 # Execution Main
 # --------------------------------------------------------------------------
 def main() -> None:
@@ -516,6 +553,9 @@ def main() -> None:
     for k, v in best_trial.params.items():
         _logger.info(f"  - {k:25s}: {v}")
     _logger.info("=" * 60)
+
+    # Persistence to SQLite for Real Trader
+    save_study_to_sqlite(study_name, storage_url, project_root)
 
     # ---------------------------------------------------------
     # OOS Cross-Symbol Verification
