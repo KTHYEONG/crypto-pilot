@@ -29,6 +29,7 @@ from config.settings import (
     FUTURES_BACKTEST_END_DATE,
     FUTURES_TRAIN_CUTOFF_DATE,
     FUTURES_INITIAL_BALANCE,
+    DATA_DIR,
 )
 from config.optimization_config_modes import GET_SEARCH_SPACE, BASE_SEARCH_SPACE
 from src.futures_strategy.data_collector import DataCollector
@@ -37,6 +38,7 @@ from src.futures_strategy.engine_fast_futures import (
     BacktestEngineFast,
     backtest_loop_numba,
 )
+from src.futures_strategy.funding_utils import merge_funding_into_ohlcv
 from src.optimization.opt_utils import (
     calculate_score,
     cleanup_orphan_studies,
@@ -960,8 +962,9 @@ def evaluate_one_fidelity(
                 try:
                     strategy = strategy_cls(f"{strategy_name}_{symbol}_F{fold_idx+1}", params)
                     precomputed_daily = cached_generate_signals_futures(strategy, segment_daily, symbol)
+                    segment_hourly_with_fr = merge_funding_into_ohlcv(symbol, segment_hourly, DATA_DIR)
                     engine = BacktestEngineFast(
-                        segment_hourly,
+                        segment_hourly_with_fr,
                         segment_daily,
                         strategy,
                         initial_balance=FUTURES_INITIAL_BALANCE,
@@ -1190,8 +1193,9 @@ def evaluate_one_fidelity(
                     current_merge_index = merge_indices[symbol][selected_tf]
 
                 precomputed_daily = cached_generate_signals_futures(strategy, daily_df, symbol)
+                hourly_df_with_fr = merge_funding_into_ohlcv(symbol, hourly_df, DATA_DIR)
                 engine = BacktestEngineFast(
-                    hourly_df,
+                    hourly_df_with_fr,
                     daily_df,
                     strategy,
                     initial_balance=FUTURES_INITIAL_BALANCE,
@@ -2415,8 +2419,9 @@ def main():
             if merge_indices and symbol in merge_indices and selected_tf in merge_indices[symbol]:
                 current_merge_index = merge_indices[symbol][selected_tf]
             precomputed_daily = cached_generate_signals_futures(strategy, daily_df, symbol)
+            hourly_df_with_fr = merge_funding_into_ohlcv(symbol, hourly_df, DATA_DIR)
             engine = BacktestEngineFast(
-                hourly_df,
+                hourly_df_with_fr,
                 daily_df,
                 strategy,
                 initial_balance=FUTURES_INITIAL_BALANCE,
