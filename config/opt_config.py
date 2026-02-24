@@ -10,8 +10,8 @@ from typing import Any, Dict
 
 # Meta-parameters for Optuna TPE optimization
 OPT_V2_CONFIG = {
-    "total_trials": 2500,
-    "n_startup_trials": 250,
+    "total_trials": 5000,
+    "n_startup_trials": 500,
     "seeds": [42, 137],  # Dual-seed approach for robust GP prior
     "n_jobs": 10,         # Default parallel workers
 }
@@ -20,7 +20,7 @@ OPT_V2_CONFIG = {
 SEARCH_SPACE_V2: Dict[str, Dict[str, Any]] = {
     # --------------------------------------------------------------------------
     # 1. STRUCTURAL COMBINATIONS (Categorical)
-    # Total nominal combinations: 2 * 3 * 4 * 4 * 2 * 2 * 1 = 384
+    # Total nominal combinations: 2 * 3 * 4 * 4 * 2 * 2 * 2 = 768
     # --------------------------------------------------------------------------
     "TIMEFRAME": {"type": "categorical", "choices": ["4h", "1d"]},
     "ENTRY_TYPE": {
@@ -60,6 +60,8 @@ SEARCH_SPACE_V2: Dict[str, Dict[str, Any]] = {
     "TAKE_PROFIT_ATR_MULT": {"type": "float", "low": 2.5, "high": 8.0, "log": True},
     "ATR_MULTIPLIER": {"type": "float", "low": 2.0, "high": 5.0, "step": 0.25},
     "TRAILING_ACTIVATION_ATR": {"type": "float", "low": 1.0, "high": 3.0, "step": 0.5},
+    "PSAR_STEP": {"type": "float", "low": 0.01, "high": 0.05, "step": 0.01},
+    "PSAR_MAX": {"type": "float", "low": 0.1, "high": 0.3, "step": 0.05},
 
     # --------------------------------------------------------------------------
     # 4. CONDITIONAL INDICATOR THRESHOLDS
