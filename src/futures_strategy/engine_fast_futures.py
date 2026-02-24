@@ -583,7 +583,7 @@ def backtest_loop_numba(
 
             # [SEQ-4] Conditional Market Exits
             if not exit_triggered:
-                # Time Exit
+                # Time Exit: after MAX_HOLDING_BARS, exit if profit below threshold; hard cap at 2x bars
                 bars_held = i - entry_idx
                 if bars_held >= max_holding_bars:
                     # [FIX] Evaluate unrealized PnL at open; exit is at open → no look-ahead
@@ -591,11 +591,13 @@ def backtest_loop_numba(
                         unreal_p = (c_open - entry_price) / pos_atr if pos_atr > 0 else 0
                     else:
                         unreal_p = (entry_price - c_open) / pos_atr if pos_atr > 0 else 0
-                    
-                    if unreal_p < time_exit_profit_threshold:
+
+                    if unreal_p < time_exit_profit_threshold or bars_held >= max_holding_bars * 2:
                         exit_price = c_open  # Market at bar open
-                        if pos_side == 1: exit_price *= (1 - slippage_rate)
-                        else:             exit_price *= (1 + slippage_rate)
+                        if pos_side == 1:
+                            exit_price *= (1 - slippage_rate)
+                        else:
+                            exit_price *= (1 + slippage_rate)
                         exit_triggered = True
                 
                 # RSI Panic (rsi[i] is shift(1) daily → prior day; no future reference)
