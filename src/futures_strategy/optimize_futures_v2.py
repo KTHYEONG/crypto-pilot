@@ -89,6 +89,31 @@ def calc_romad(pnl_series: pd.Series, n_trades: int, tf: str) -> Tuple[float, fl
     return final_score, ret_pct, mdd_pct
 
 
+def calc_romad_from_metrics(
+    ret_pct: float,
+    mdd_pct: float,
+    n_trades: int,
+    tf: str,
+    span_days: float,
+) -> Tuple[float, float, float]:
+    """
+    RoMaD score from precomputed return and MDD (e.g. engine bar-level metrics).
+    Returns: (romad_score, return_pct, mdd_pct). Use when MDD/return come from
+    bar-level equity to avoid risk understatement vs trade-exit-only.
+    """
+    if n_trades == 0:
+        return -20.0, ret_pct, mdd_pct
+    mdd_abs = abs(mdd_pct)
+    days = max(float(span_days), 1.0)
+    annual_return = ret_pct * (365.0 / days)
+    romad = annual_return / max(mdd_abs, 5.0)
+    min_trades_target: int = 20 if tf == "4h" else 10
+    trade_ratio: float = min(float(n_trades) / min_trades_target, 1.0)
+    penalty_multiplier: float = trade_ratio ** 2
+    final_score = (romad * penalty_multiplier) - max(0, mdd_abs - 40.0) * 0.3
+    return final_score, ret_pct, mdd_abs
+
+
 # --------------------------------------------------------------------------
 # Validation Folds Setup
 # --------------------------------------------------------------------------
@@ -195,7 +220,9 @@ def evaluate_symbol_fold(
     # Filter to OOS period
     oos_start = test_start - seg_start
     sig_oos = sig_df.iloc[oos_start:].copy()
+    sig_oos.attrs = {"warmup_bars": 0}  # OOS: no extra warmup; engine must trade from bar 0
     sig_oos = merge_funding_into_ohlcv(symbol, sig_oos, DATA_DIR)
+    sig_oos.attrs = {"warmup_bars": 0}  # Ensure engine does not skip OOS bars
     merge_oos = merge_idx[oos_start:]
 
     engine = BacktestEngineFast(
@@ -219,16 +246,19 @@ def evaluate_symbol_fold(
     long_count = len(trades_df[trades_df["side"] == "LONG"])
     short_count = len(trades_df[trades_df["side"] == "SHORT"])
 
-    # Map PnL with exit_time
-    pnl_series = trades_df.set_index("exit_time")["pnl"]
+    # Use engine bar-level MDD and return (includes unrealized P&L) to avoid risk understatement
+    mdd_pct = abs(result.get("mdd_pct", 0.0))
+    ret_pct = result.get("total_return_pct", 0.0)
 
-    # Calculate win rate
+    # Span for annualization (OOS segment)
+    if "datetime" in sig_oos.columns:
+        span_days = (sig_oos["datetime"].iloc[-1] - sig_oos["datetime"].iloc[0]).total_seconds() / 86400.0
+    else:
+        span_days = (trades_df["exit_time"].max() - trades_df["exit_time"].min()).total_seconds() / 86400.0
+
     win_rate = (len(trades_df[trades_df["pnl"] > 0]) / len(trades_df)) * 100 if len(trades_df) > 0 else 0.0
+    score, ret_pct, mdd_pct = calc_romad_from_metrics(ret_pct, mdd_pct, len(trades_df), tf, span_days)
 
-    # Calculate RoMaD
-    score, ret_pct, mdd_pct = calc_romad(pnl_series, len(trades_df), tf)
-
-    # Direction penalty
     if long_count == 0 or short_count == 0:
         score -= 5.0
 
