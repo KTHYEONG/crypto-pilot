@@ -114,7 +114,7 @@ def calc_romad_from_metrics(
 # --------------------------------------------------------------------------
 # Validation Folds Setup
 # --------------------------------------------------------------------------
-def build_anchored_folds(df: pd.DataFrame, n_folds: int = 3, embargo: int = 0) -> List[Tuple[int, int]]:
+def build_anchored_folds(df: pd.DataFrame, n_folds: int = 3, embargo: int = 0) -> List[Tuple[int, int, int]]:
     """Build train(0~idx) -> OOS(idx~idx_next) splits."""
     n_bars = len(df)
     if n_bars < 500:
@@ -128,7 +128,7 @@ def build_anchored_folds(df: pd.DataFrame, n_folds: int = 3, embargo: int = 0) -
         test_end = (block * (i + 1)) if i < n_folds else n_bars
 
         if test_start < test_end:
-            splits.append((test_start, test_end))
+            splits.append((train_end, test_start, test_end))
 
     return splits
 
@@ -179,7 +179,7 @@ def suggest_params_v2(trial: optuna.Trial, space: Dict[str, Any]) -> Dict[str, A
 
     # Sanity constraints
     if trend == "MACD" and params.get("MACD_FAST", 12) >= params.get("MACD_SLOW", 26):
-        raise optuna.TrialPruned()
+        params["_INVALID_CONSTRAINT"] = True
 
     return params
 
@@ -232,13 +232,8 @@ def evaluate_symbol_fold(
     mdd_pct = abs(result.get("mdd_pct", 0.0))
     ret_pct = result.get("total_return_pct", 0.0)
 
-    # Span for annualization: active trading period (first entry to last exit) to avoid understating annual return
-    if len(trades_df) > 1:
-        span_days = (trades_df["exit_time"].max() - trades_df["entry_time"].min()).total_seconds() / 86400.0
-    elif len(trades_df) == 1:
-        span_days = (trades_df["exit_time"].iloc[0] - trades_df["entry_time"].iloc[0]).total_seconds() / 86400.0
-    else:
-        span_days = (sig_oos["datetime"].iloc[-1] - sig_oos["datetime"].iloc[0]).total_seconds() / 86400.0 if "datetime" in sig_oos.columns else 1.0
+    # Span for annualization: fixed length of OOS
+    span_days = (sig_oos["datetime"].iloc[-1] - sig_oos["datetime"].iloc[0]).total_seconds() / 86400.0 if "datetime" in sig_oos.columns else 1.0
     span_days = max(float(span_days), 1.0)
 
     true_pnl = trades_df["pnl"] - trades_df["entry_fee"]
@@ -253,20 +248,13 @@ def evaluate_symbol_fold(
 
 def objective_v2(trial: optuna.Trial, data_maps: Dict[str, Dict[str, pd.DataFrame]]) -> float:
     params = suggest_params_v2(trial, SEARCH_SPACE_V2)
+    if params.pop("_INVALID_CONSTRAINT", False):
+        return -100.0
+
     tf = params["TIMEFRAME"]
     symbols = list(data_maps.keys())
 
     strategy = UltimateStrategy(name="FuturesV2", params=params)
-
-    precomputed_signals = {}
-    for sym in symbols:
-        daily_df = data_maps[sym].get("1d")
-        if daily_df is not None:
-            try:
-                precomputed_signals[sym] = strategy.generate_signals(daily_df)
-            except Exception as e:
-                _logger.warning("Error generating signals for %s: %s", sym, e)
-                return -100.0
 
     # Build folds using min length across all symbols so every symbol has valid OOS segments
     lengths = [len(data_maps[sym][tf]) for sym in symbols if tf in data_maps.get(sym, {})]
@@ -293,7 +281,7 @@ def objective_v2(trial: optuna.Trial, data_maps: Dict[str, Dict[str, pd.DataFram
     sym_total_trades = {sym: [] for sym in symbols}
     sym_total_wins = {sym: [] for sym in symbols}
     
-    for f_idx, (test_start, test_end) in enumerate(folds):
+    for f_idx, (train_end, test_start, test_end) in enumerate(folds):
         sym_scores = []
         sym_rets = []
         sym_mdds = []
@@ -303,12 +291,21 @@ def objective_v2(trial: optuna.Trial, data_maps: Dict[str, Dict[str, pd.DataFram
             target_df = data_maps[sym].get(tf)
             daily_df = data_maps[sym].get("1d")
             full_merge_idx = data_maps[sym].get(f"merge_idx_{tf}")
-            precomputed_daily_df = precomputed_signals.get(sym)
-            if target_df is None or daily_df is None or full_merge_idx is None or precomputed_daily_df is None:
+            if target_df is None or daily_df is None or full_merge_idx is None:
+                continue
+
+            # Prevent look-ahead bias by truncating data up to test_end
+            tf_idx_test_end_minus_1 = test_end - 1
+            daily_end_idx = full_merge_idx[tf_idx_test_end_minus_1] if tf_idx_test_end_minus_1 < len(full_merge_idx) else len(daily_df) - 1
+            daily_df_trunc = daily_df.iloc[:daily_end_idx + 1].copy()
+
+            try:
+                precomputed_daily_df = strategy.generate_signals(daily_df_trunc)
+            except Exception as e:
                 continue
             
             s, r, m, t, w = evaluate_symbol_fold(
-                strategy, params, sym, tf, target_df, daily_df, 
+                strategy, params, sym, tf, target_df, daily_df_trunc, 
                 full_merge_idx, precomputed_daily_df, test_start, test_end
             )
             sym_scores.append(s)
@@ -327,8 +324,12 @@ def objective_v2(trial: optuna.Trial, data_maps: Dict[str, Dict[str, pd.DataFram
         if not sym_scores:
             return -10000.0
 
-        # Mean across symbols for this fold
-        avg_fold_sym_score = float(np.mean(sym_scores))
+        # Mean across symbols with penalty for worst performer
+        mean_score = float(np.mean(sym_scores))
+        min_score = float(np.min(sym_scores))
+        penalty = max(0.0, 0.0 - min_score) * 1.5
+        avg_fold_sym_score = mean_score - penalty
+
         fold_scores.append(avg_fold_sym_score)
         fold_rets.append(float(np.mean(sym_rets)))
         fold_mdds.append(float(np.mean(sym_mdds)))
