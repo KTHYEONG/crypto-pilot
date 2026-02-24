@@ -574,18 +574,19 @@ def backtest_loop_numba(
                 # Time Exit
                 bars_held = i - entry_idx
                 if bars_held >= max_holding_bars:
+                    # [FIX] Evaluate unrealized PnL at open; exit is at open → no look-ahead
                     if pos_side == 1:
-                        unreal_p = (c_price - entry_price) / pos_atr if pos_atr > 0 else 0
+                        unreal_p = (c_open - entry_price) / pos_atr if pos_atr > 0 else 0
                     else:
-                        unreal_p = (entry_price - c_price) / pos_atr if pos_atr > 0 else 0
+                        unreal_p = (entry_price - c_open) / pos_atr if pos_atr > 0 else 0
                     
                     if unreal_p < time_exit_profit_threshold:
-                        exit_price = c_open # Market at bar open
+                        exit_price = c_open  # Market at bar open
                         if pos_side == 1: exit_price *= (1 - slippage_rate)
                         else:             exit_price *= (1 + slippage_rate)
                         exit_triggered = True
                 
-                # RSI Panic
+                # RSI Panic (rsi[i] is shift(1) daily → prior day; no future reference)
                 if not exit_triggered:
                     if pos_side == 1 and rsi[i] > rsi_exit_threshold:
                          exit_price = c_open * (1 - slippage_rate)
@@ -596,12 +597,13 @@ def backtest_loop_numba(
                 
                 # Trend Reversal (optional to avoid over-filtered early exits)
                 if not exit_triggered and enable_trend_exit:
+                    # [FIX] Evaluate unrealized PnL at open; exit is at open → no look-ahead
                     unrealized_atr = 0.0
                     if pos_atr > 0:
                         if pos_side == 1:
-                            unrealized_atr = (c_price - entry_price) / pos_atr
+                            unrealized_atr = (c_open - entry_price) / pos_atr
                         else:
-                            unrealized_atr = (entry_price - c_price) / pos_atr
+                            unrealized_atr = (entry_price - c_open) / pos_atr
                     if pos_side == 1 and trend_dir[i] == -1:
                         # Ignore reversal exits on strong trend winners.
                         if unrealized_atr < 1.0:
