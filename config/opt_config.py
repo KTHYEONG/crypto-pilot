@@ -42,6 +42,7 @@ SEARCH_SPACE_V2: Dict[str, Dict[str, Any]] = {
     "USE_TAKE_PROFIT": {"type": "categorical", "choices": [True, False]},
     "USE_VOLUME_FILTER": {"type": "categorical", "choices": [True, False]},
     "EXIT_TYPE": {"type": "categorical", "choices": ["ATR", "PSAR"]},
+    "USE_DYNAMIC_RISK": {"type": "categorical", "choices": [True, False]},
 
     # --------------------------------------------------------------------------
     # 2. CORE SYSTEM PARAMETERS (Numeric Limits)
@@ -81,4 +82,15 @@ SEARCH_SPACE_V2: Dict[str, Dict[str, Any]] = {
     "SUPERTREND_PERIOD": {"type": "int", "low": 7, "high": 30, "step": 1},
     "DMI_PERIOD": {"type": "int", "low": 14, "high": 45, "step": 1},
     "VWAP_STD_MULT": {"type": "float", "low": 1.0, "high": 2.5, "step": 0.1},
+
+    # --------------------------------------------------------------------------
+    # 5. DYNAMIC RISK ALLOCATION (Volatility Targeting)
+    # --------------------------------------------------------------------------
+    "STRONG_REGIME_HURST": {"type": "float", "low": 0.55, "high": 0.70, "step": 0.05},
+    "STRONG_REGIME_NATR": {"type": "float", "low": 1.0, "high": 3.0, "step": 0.25},
+    "STRONG_REGIME_MULTIPLIER": {"type": "float", "low": 1.0, "high": 2.0, "step": 0.25},
+    "WEAK_REGIME_HURST": {"type": "float", "low": 0.40, "high": 0.55, "step": 0.05},
+    "WEAK_REGIME_MULTIPLIER": {"type": "float", "low": 0.25, "high": 0.75, "step": 0.25},
+    "PANIC_REGIME_NATR": {"type": "float", "low": 3.0, "high": 6.0, "step": 0.5},
+    "PANIC_REGIME_MULTIPLIER": {"type": "float", "low": 0.1, "high": 0.5, "step": 0.1},
 }
