@@ -20,7 +20,7 @@ OPT_V2_CONFIG = {
 SEARCH_SPACE_V2: Dict[str, Dict[str, Any]] = {
     # --------------------------------------------------------------------------
     # 1. STRUCTURAL COMBINATIONS (Categorical)
-    # Total nominal combinations: 2 * 3 * 4 * 4 * 2 * 2 * 2 = 768
+    # Total nominal combinations: 2 * 3 * 4 * 4 * 2 * 2 * 2 * 2 = 1536
     # --------------------------------------------------------------------------
     "TIMEFRAME": {"type": "categorical", "choices": ["4h", "1d"]},
     "ENTRY_TYPE": {
@@ -40,6 +40,7 @@ SEARCH_SPACE_V2: Dict[str, Dict[str, Any]] = {
         "choices": ["FIXED", "ATR"],
     },
     "USE_TAKE_PROFIT": {"type": "categorical", "choices": [True, False]},
+    "USE_VOLUME_FILTER": {"type": "categorical", "choices": [True, False]},
     "EXIT_TYPE": {"type": "categorical", "choices": ["ATR", "PSAR"]},
 
     # --------------------------------------------------------------------------
@@ -67,6 +68,8 @@ SEARCH_SPACE_V2: Dict[str, Dict[str, Any]] = {
     # --------------------------------------------------------------------------
     # 4. CONDITIONAL INDICATOR THRESHOLDS
     # --------------------------------------------------------------------------
+    "VOLUME_MA_PERIOD": {"type": "int", "low": 10, "high": 40, "step": 1},
+    "VOLUME_Z_THRESHOLD": {"type": "float", "low": 0.5, "high": 2.0, "step": 0.1},
     "ADX_THRESHOLD": {"type": "int", "low": 20, "high": 35, "step": 1},
     "NATR_THRESHOLD": {"type": "float", "low": 1.0, "high": 3.5, "step": 0.1},
     "ER_THRESHOLD": {"type": "float", "low": 0.4, "high": 0.65, "step": 0.05},

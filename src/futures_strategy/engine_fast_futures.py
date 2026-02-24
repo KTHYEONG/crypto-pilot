@@ -173,7 +173,7 @@ class BacktestEngineFast:
         
         # New Params for Volume & TP
         use_volume_filter = self.strategy.params.get('USE_VOLUME_FILTER', False)
-        vol_threshold = self.strategy.params.get('VOLUME_THRESHOLD_MULT', 1.0)
+        vol_threshold = self.strategy.params.get('VOLUME_Z_THRESHOLD', self.strategy.params.get('VOLUME_THRESHOLD_MULT', 1.0))
         
         use_take_profit = self.strategy.params.get('USE_TAKE_PROFIT', False)
         # Use Futures specific TP if available
