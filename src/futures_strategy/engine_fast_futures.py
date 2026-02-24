@@ -498,18 +498,40 @@ def backtest_loop_numba(
                     in_position = False
                     break
             
-            # B. Exit Checks
+            # Start-of-bar stop for same-bar exit (guard: no intra-bar time-order assumption)
+            start_of_bar_stop = stop_price
+            
+            # [SEQ-1] Update High/Low & Trailing Stop in real time (exit_triggered-agnostic)
+            if pos_side == 1:
+                if c_high > highest:
+                    highest = c_high
+                if exit_type == 0:
+                    unreal_profit = (highest - entry_price) / pos_atr if pos_atr > 0 else 0
+                    if unreal_profit >= trailing_activation_atr:
+                        new_stop = highest - (pos_atr * atr_mult)
+                        if new_stop > stop_price:
+                            stop_price = new_stop
+            else:
+                if c_low < lowest:
+                    lowest = c_low
+                if exit_type == 0:
+                    unreal_profit = (entry_price - lowest) / pos_atr if pos_atr > 0 else 0
+                    if unreal_profit >= trailing_activation_atr:
+                        new_stop = lowest + (pos_atr * atr_mult)
+                        if new_stop < stop_price:
+                            stop_price = new_stop
+            
+            # B. Exit Checks (use start_of_bar_stop so same-bar exit does not use same-bar-updated stop)
             exit_triggered = False
             exit_price = 0.0
             
-            # [SEQ-1] Stop Loss (Gap-Adjusted Realism)
-            # SAR trailing stop applied
-            current_stop = stop_price
+            # [SEQ-2] Stop Loss (Gap-Adjusted Realism)
+            current_stop = start_of_bar_stop
             if exit_type == 1 and parabolic_sar[i] > 0:
                 if pos_side == 1:
-                    current_stop = max(stop_price, parabolic_sar[i])
+                    current_stop = max(start_of_bar_stop, parabolic_sar[i])
                 else:
-                    current_stop = min(stop_price, parabolic_sar[i])
+                    current_stop = min(start_of_bar_stop, parabolic_sar[i])
 
             if pos_side == 1:  # Long exit
                 if c_open < current_stop:
@@ -529,7 +551,7 @@ def backtest_loop_numba(
                     exit_price = current_stop * (1 + slippage_rate)
                     exit_triggered = True
 
-            # [SEQ-2] Take Profit (Gap-Adjusted)
+            # [SEQ-3] Take Profit (Gap-Adjusted)
             if not exit_triggered and use_take_profit and tp_price > 0:
                 if pos_side == 1:
                     if c_open > tp_price:
@@ -547,7 +569,7 @@ def backtest_loop_numba(
                         exit_price = tp_price
                         exit_triggered = True
 
-            # [SEQ-3] Conditional Market Exits
+            # [SEQ-4] Conditional Market Exits
             if not exit_triggered:
                 # Time Exit
                 bars_held = i - entry_idx
@@ -608,30 +630,6 @@ def backtest_loop_numba(
                 in_position = False
                 pending_entry = False  # Clear any pending
                 bar_processed = True   # No re-entry on this bar (Zombie/Phantom fix)
-
-            else:
-                # [SEQ-4] Update High/Low & Trailing Stop for NEXT Bar
-                if pos_side == 1:
-                    if c_high > highest:
-                        highest = c_high
-                        
-                    if exit_type == 0: # ATR Trailing
-                        unreal_profit = (highest - entry_price) / pos_atr if pos_atr > 0 else 0
-                        if unreal_profit >= trailing_activation_atr:
-                            new_stop = highest - (pos_atr * atr_mult)
-                            if new_stop > stop_price:
-                                stop_price = new_stop
-                                
-                else: # Short
-                    if c_low < lowest:
-                        lowest = c_low
-                        
-                    if exit_type == 0:
-                        unreal_profit = (entry_price - lowest) / pos_atr if pos_atr > 0 else 0
-                        if unreal_profit >= trailing_activation_atr:
-                            new_stop = lowest + (pos_atr * atr_mult)
-                            if new_stop < stop_price:
-                                stop_price = new_stop
 
         # --- 2. SIGNAL DETECTION & IMMEDIATE EXECUTION (Intra-bar breakout) ---
         # Only check entry when no position AND this bar did not just exit (Zombie fix)
