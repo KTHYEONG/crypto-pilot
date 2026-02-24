@@ -207,7 +207,8 @@ class BacktestEngineFast:
             "warmup_bars",
             self.strategy.get_required_warmup(freq="hourly"),
         )
-        
+        self._warmup_bars = warmup_bars  # for get_results() MDD exclusion
+
         # [NEW] RSI for Panic Exit
         # Use existing rsi if available, else fill 50
         if 'daily_rsi' in df.columns:
@@ -338,11 +339,17 @@ class BacktestEngineFast:
         trades_df = pd.DataFrame(self.trades)
 
         # MDD from bar-level equity (includes unrealized P&L during open positions)
+        # Exclude warmup segment so MDD is computed on actual trading period only
         equity = getattr(self, "_equity_curve", None)
+        warmup_bars = getattr(self, "_warmup_bars", 0)
         if equity is not None and len(equity) > 0 and np.isfinite(equity).all():
-            running_max = np.maximum.accumulate(equity)
+            if len(equity) > warmup_bars:
+                equity_for_mdd = equity[warmup_bars:]
+            else:
+                equity_for_mdd = equity
+            running_max = np.maximum.accumulate(equity_for_mdd)
             running_max[running_max == 0] = 1e-9
-            drawdown = (equity - running_max) / running_max * 100
+            drawdown = (equity_for_mdd - running_max) / running_max * 100
             drawdown = np.nan_to_num(drawdown, nan=0.0)
             mdd = float(drawdown.min())
         else:
