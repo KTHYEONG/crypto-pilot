@@ -168,25 +168,23 @@ def suggest_params_v2(trial: optuna.Trial, space: Dict[str, Any]) -> Dict[str, A
     if trend != "SUPERTREND":
         params.pop("SUPERTREND_MULT", None)
         params.pop("SUPERTREND_PERIOD", None)
-    if trend != "MACD":
-        params.pop("MACD_FAST", None)
-        params.pop("MACD_SLOW", None)
-        params.pop("MACD_SIGNAL", None)
+    if trend != "DMI":
+        params.pop("DMI_PERIOD", None)
     if trend != "VWAP":
         params.pop("VWAP_STD_MULT", None)
 
     strength = params["STRENGTH_FILTER_TYPE"]
+    if strength == "NONE":
+        params.pop("STRENGTH_FILTER_PERIOD", None)
     if strength != "ADX":
         params.pop("ADX_THRESHOLD", None)
-    if strength != "HURST":
-        params.pop("HURST_PERIOD", None)
-        params.pop("HURST_TREND_THRESHOLD", None)
     if strength != "NATR":
         params.pop("NATR_THRESHOLD", None)
+    if strength != "ER":
+        params.pop("ER_THRESHOLD", None)
 
     # Sanity constraints
-    if trend == "MACD" and params.get("MACD_FAST", 12) >= params.get("MACD_SLOW", 26):
-        params["_INVALID_CONSTRAINT"] = True
+    # (MACD constraint removed as indicator was swapped for DMI)
 
     return params
 
