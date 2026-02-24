@@ -580,36 +580,48 @@ def backtest_loop_numba(
             exit_triggered = False
             exit_price = 0.0
             
-            # [SEQ-1] Stop Loss (Inherited)
-            # Check using stop_price from previous bar (Sequential Realism)
-            
-            # Pre-calc SAR stop if active
+            # [SEQ-1] Stop Loss (Gap-Adjusted Realism)
+            # SAR trailing stop applied
             current_stop = stop_price
             if exit_type == 1 and parabolic_sar[i] > 0:
-                # SAR acts as trailing stop
                 if pos_side == 1:
-                     current_stop = max(stop_price, parabolic_sar[i])
+                    current_stop = max(stop_price, parabolic_sar[i])
                 else:
-                     current_stop = min(stop_price, parabolic_sar[i])
+                    current_stop = min(stop_price, parabolic_sar[i])
 
-            # Check SL Hit
-            if pos_side == 1:
-                if c_low <= current_stop:
+            if pos_side == 1:  # Long exit
+                if c_open < current_stop:
+                    # Gap down: liquidate at open (worst fill)
+                    exit_price = c_open * (1 - slippage_rate)
+                    exit_triggered = True
+                elif c_low <= current_stop:
+                    # Intraday touch: fill at stop level
                     exit_price = current_stop * (1 - slippage_rate)
                     exit_triggered = True
-            else:
-                if c_high >= current_stop:
+            else:  # Short exit
+                if c_open > current_stop:
+                    # Gap up: cover at open (worst fill)
+                    exit_price = c_open * (1 + slippage_rate)
+                    exit_triggered = True
+                elif c_high >= current_stop:
                     exit_price = current_stop * (1 + slippage_rate)
                     exit_triggered = True
-            
-            # [SEQ-2] Take Profit
+
+            # [SEQ-2] Take Profit (Gap-Adjusted)
             if not exit_triggered and use_take_profit and tp_price > 0:
                 if pos_side == 1:
-                    if c_high >= tp_price:
-                        exit_price = tp_price # Limit fill assumption or half slip
+                    if c_open > tp_price:
+                        # Gap up through TP: conservative fill at open with slippage
+                        exit_price = c_open * (1 - slippage_rate)
+                        exit_triggered = True
+                    elif c_high >= tp_price:
+                        exit_price = tp_price
                         exit_triggered = True
                 else:
-                    if c_low <= tp_price:
+                    if c_open < tp_price:
+                        exit_price = c_open * (1 + slippage_rate)
+                        exit_triggered = True
+                    elif c_low <= tp_price:
                         exit_price = tp_price
                         exit_triggered = True
 
