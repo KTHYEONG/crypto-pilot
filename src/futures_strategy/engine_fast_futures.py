@@ -482,7 +482,8 @@ def backtest_loop_numba(
                 balance -= funding_cost
                 last_funding_hour = current_hour_utc
                 
-                # Bankruptcy check from Funding
+                # Bankruptcy check from Funding (forced liquidation)
+                # On liquidation do NOT add margin+pnl back: balance must go to 0 (or stay <= 0).
                 if balance <= 0:
                     exit_price = c_price
                     if pos_side == 1: pnl = (exit_price - entry_price) * amount
@@ -490,13 +491,12 @@ def backtest_loop_numba(
                     
                     exit_fee = amount * exit_price * fee_rate
                     pnl -= exit_fee
-                    margin = (amount * entry_price) / leverage
-                    balance += margin + pnl
+                    balance = 0.0
                     
                     trades[trade_count] = [entry_idx, i, pos_side, entry_price, exit_price, pnl]
                     trade_count += 1
                     in_position = False
-                    break # Loop break
+                    break
             
             # B. Exit Checks
             exit_triggered = False
