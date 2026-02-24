@@ -282,6 +282,7 @@ class BacktestEngineFast:
                 "entry_price": trades[i][3],
                 "exit_price": trades[i][4],
                 "pnl": trades[i][5],
+                "amount": trades[i][6],
             })
         
         result = self.get_results()
@@ -318,35 +319,27 @@ class BacktestEngineFast:
             }
         
         trades_df = pd.DataFrame(self.trades)
-        
-        # ROE per trade = PnL / Margin Used (capital actually at risk). Aligns with Numba loop (balance -= margin + fee).
-        # Estimate amount from PnL and price diff; margin_est = amount * entry_price / leverage.
-        pnl = trades_df['pnl'].values
-        entry_p = trades_df['entry_price'].values
-        exit_p = trades_df['exit_price'].values
-        side = np.where(trades_df['side'] == 'LONG', 1, -1)
-        price_diff = (exit_p - entry_p) * side
 
-        with np.errstate(invalid='ignore', divide='ignore'):
-            amount_est = pnl / price_diff
-            amount_est = np.abs(amount_est)  # Size is positive; price_diff sign can flip for shorts
-            leverage = float(self.leverage)
-            margin_est = amount_est * entry_p / leverage
-            margin_est = np.where(np.isfinite(margin_est) & (margin_est > 0), margin_est, np.nan)
+        # ROE per trade = PnL / Margin Used. Use actual amount from Numba (avoids fee-distorted inverse estimate).
+        pnl = trades_df["pnl"].values
+        entry_p = trades_df["entry_price"].values
+        amount_arr = trades_df["amount"].values
+        leverage = float(self.leverage)
+        margin_used = amount_arr * entry_p / leverage
+        margin_used = np.where(np.isfinite(margin_used) & (margin_used > 0), margin_used, np.nan)
 
-        pnl_cumsum = trades_df['pnl'].cumsum().shift(1).fillna(0)
-        trades_df['balance_before'] = (self.initial_balance + pnl_cumsum).replace(0, 1e-9)
-        balance_before = trades_df['balance_before'].values
+        pnl_cumsum = trades_df["pnl"].cumsum().shift(1).fillna(0)
+        trades_df["balance_before"] = (self.initial_balance + pnl_cumsum).replace(0, 1e-9)
+        balance_before = trades_df["balance_before"].values
 
-        # Use margin_est as denominator when valid; else fallback to balance_before (e.g. price_diff ~0)
         denom = np.where(
-            np.isfinite(margin_est) & (margin_est > 0),
-            margin_est,
+            np.isfinite(margin_used) & (margin_used > 0),
+            margin_used,
             np.asarray(balance_before, dtype=np.float64),
         )
-        with np.errstate(invalid='ignore', divide='ignore'):
-            trades_df['pnl_pct'] = (pnl / denom) * 100
-        trades_df['pnl_pct'] = trades_df['pnl_pct'].replace([np.inf, -np.inf], 0).fillna(0)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            trades_df["pnl_pct"] = (pnl / denom) * 100
+        trades_df["pnl_pct"] = trades_df["pnl_pct"].replace([np.inf, -np.inf], 0).fillna(0)
         
         win_trades = len(trades_df[trades_df['pnl'] > 0])
         loss_trades = len(trades_df[trades_df['pnl'] <= 0])
@@ -456,7 +449,7 @@ def backtest_loop_numba(
     
     # Trades storage (max 30000 trades)
     max_trades = 30000
-    trades = np.zeros((max_trades, 6))  # [entry_idx, exit_idx, side, entry_p, exit_p, pnl]
+    trades = np.zeros((max_trades, 7))  # [entry_idx, exit_idx, side, entry_p, exit_p, pnl, amount]
     trade_count = 0
     
     exec_risk = risk_per_trade # Local execution risk
@@ -506,7 +499,7 @@ def backtest_loop_numba(
                     balance = 0.0
                     
                     if trade_count < max_trades:
-                        trades[trade_count] = [entry_idx, i, pos_side, entry_price, exit_price, pnl]
+                        trades[trade_count] = [entry_idx, i, pos_side, entry_price, exit_price, pnl, amount]
                         trade_count += 1
                     in_position = False
                     last_funding_hour = -1  # Reset so next position can be charged in same funding hour
@@ -642,7 +635,7 @@ def backtest_loop_numba(
                 balance += margin + pnl
                 
                 if trade_count < max_trades:
-                    trades[trade_count] = [entry_idx, i, pos_side, entry_price, exit_price, pnl]
+                    trades[trade_count] = [entry_idx, i, pos_side, entry_price, exit_price, pnl, amount]
                     trade_count += 1
                 in_position = False
                 last_funding_hour = -1  # Reset so next position can be charged in same funding hour
@@ -759,7 +752,7 @@ def backtest_loop_numba(
                 margin = (amount * entry_price) / leverage
                 balance += margin + pnl
                 if trade_count < max_trades:
-                    trades[trade_count] = [entry_idx, i, pos_side, entry_price, intra_exit_price, pnl]
+                    trades[trade_count] = [entry_idx, i, pos_side, entry_price, intra_exit_price, pnl, amount]
                     trade_count += 1
                 in_position = False
                 last_funding_hour = -1  # Reset so next position can be charged in same funding hour
@@ -785,7 +778,7 @@ def backtest_loop_numba(
         balance += margin + pnl
 
         if trade_count < max_trades:
-            trades[trade_count] = [entry_idx, last_idx, pos_side, entry_price, exit_price, pnl]
+            trades[trade_count] = [entry_idx, last_idx, pos_side, entry_price, exit_price, pnl, amount]
             trade_count += 1
 
     return trades[:trade_count], balance
