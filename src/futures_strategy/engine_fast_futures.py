@@ -22,7 +22,9 @@ class BacktestEngineFast:
         merge_index_map=None,
         precomputed_daily_df: Optional[pd.DataFrame] = None,
     ):
-        # [MEMORY] Use shallow copy to prevent contaminating usage across trials
+        # Shallow copy (deep=False): new DataFrame object so _prepare_data can add columns without
+        # mutating the caller's DataFrame (e.g. same df reused across optimization trials).
+        # Underlying array data is shared—do not mutate existing columns in place.
         self.hourly_df = hourly_df.copy(deep=False)
         self.daily_df = daily_df.copy(deep=False)
         self.strategy = strategy
@@ -73,8 +75,8 @@ class BacktestEngineFast:
         # Shift(1) to prevent lookahead
         shifted_daily = self.daily_df[indicator_cols].shift(1)
         
-        # [CRITICAL] Use pre-computed index mapping to align daily -> hourly
-        # merged_df = hourly_df + daily_indicators[merge_index_map]
+        # Shallow copy (deep=False): new object so we add daily_* columns to merged_df only;
+        # underlying data shared with hourly_df for memory/speed. Align daily -> hourly via index map.
         self.merged_df = self.hourly_df.copy(deep=False)
         
         # Map daily indicators to hourly using pre-computed indices
