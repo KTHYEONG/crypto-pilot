@@ -76,10 +76,11 @@ class BacktestEngineFast:
         shifted_daily = self.daily_df[indicator_cols].shift(1)
 
         max_valid_idx = len(shifted_daily) - 1
-        if np.any(self._merge_index_map > max_valid_idx):
+        if np.any(self._merge_index_map < 0) or np.any(self._merge_index_map > max_valid_idx):
             raise ValueError(
-                f"merge_index_map contains out-of-bounds index "
-                f"(max={self._merge_index_map.max()}, valid<={max_valid_idx})"
+                f"merge_index_map out of bounds: "
+                f"min={self._merge_index_map.min()}, max={self._merge_index_map.max()}, "
+                f"valid=[0, {max_valid_idx}]"
             )
 
         # Shallow copy (deep=False): new object so we add daily_* columns to merged_df only;
