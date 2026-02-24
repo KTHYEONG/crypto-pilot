@@ -78,9 +78,9 @@ def calc_romad(pnl_series: pd.Series, n_trades: int, tf: str) -> Tuple[float, fl
     romad = annual_return / max(mdd_pct, 5.0)
 
     # 5. Penalties (Soft quadratic penalty for low trade counts)
-    min_trades_target: int = 20 if tf == "4h" else 10
-    trade_ratio: float = min(float(n_trades) / min_trades_target, 1.0)
-    penalty_multiplier: float = trade_ratio ** 2
+    min_trades_target: int = 60 if tf == "4h" else 30
+    trade_ratio: float = float(n_trades) / min_trades_target
+    penalty_multiplier: float = min(trade_ratio ** 0.5, 1.2)
 
     final_score = (romad * penalty_multiplier) - max(0, mdd_pct - 40.0) * 0.3
     return final_score, ret_pct, mdd_pct
@@ -104,9 +104,9 @@ def calc_romad_from_metrics(
     days = max(float(span_days), 1.0)
     annual_return = ret_pct * (365.0 / days)
     romad = annual_return / max(mdd_abs, 5.0)
-    min_trades_target: int = 20 if tf == "4h" else 10
-    trade_ratio: float = min(float(n_trades) / min_trades_target, 1.0)
-    penalty_multiplier: float = trade_ratio ** 2
+    min_trades_target: int = 60 if tf == "4h" else 30
+    trade_ratio: float = float(n_trades) / min_trades_target
+    penalty_multiplier: float = min(trade_ratio ** 0.5, 1.2)
     final_score = (romad * penalty_multiplier) - max(0, mdd_abs - 40.0) * 0.3
     return final_score, ret_pct, mdd_abs
 
