@@ -7,7 +7,7 @@ import pandas as pd
 import numpy as np
 import logging
 from numba import njit
-from config.settings import TRADING_FEE_RATE, SLIPPAGE_RATE, FUNDING_FEE_RATE, FUNDING_INTERVAL_HOURS
+from config.settings import TRADING_FEE_RATE, SLIPPAGE_RATE, FUNDING_FEE_RATE
 
 class BacktestEngineFast:
     """
@@ -174,7 +174,15 @@ class BacktestEngineFast:
         parabolic_sar = df['daily_parabolic_sar'].values
         
         # Extract timestamps for funding fee calculation
-        timestamps = df['timestamp'].values  # milliseconds
+        timestamps = df["timestamp"].values  # milliseconds
+
+        # Funding rate: time-series if column exists (direction applied in Numba via pos_side), else constant fallback
+        if "funding_rate" in df.columns:
+            funding_rates = np.asarray(df["funding_rate"].values, dtype=np.float64)
+            # NaN at funding hour -> treat as 0 (no payment)
+            funding_rates = np.nan_to_num(funding_rates, nan=0.0, posinf=0.0, neginf=0.0)
+        else:
+            funding_rates = np.full(n, FUNDING_FEE_RATE, dtype=np.float64)
         
         # [NEW] Time-Based Exit & Trailing Activation
         max_holding_bars = self.strategy.params.get('MAX_HOLDING_BARS', 999999)  # Default: No limit
@@ -243,7 +251,7 @@ class BacktestEngineFast:
             self.risk_per_trade,
             use_volume_filter, vol_threshold,
             use_take_profit, tp_atr_mult,
-            timestamps, FUNDING_FEE_RATE, FUNDING_INTERVAL_HOURS,
+            timestamps, funding_rates,
             max_holding_bars, trailing_activation_atr, time_exit_profit_threshold,
             enable_trend_exit,
             rsi_exit_threshold,
@@ -404,7 +412,7 @@ def backtest_loop_numba(
     risk_per_trade,
     use_volume_filter, vol_threshold,
     use_take_profit, tp_atr_mult,
-    timestamps, funding_fee_rate, funding_interval_hours,
+    timestamps, funding_rates,
     max_holding_bars, trailing_activation_atr, time_exit_profit_threshold,
     enable_trend_exit,
     rsi_exit_threshold, # [NEW]
@@ -478,7 +486,11 @@ def backtest_loop_numba(
             
             if is_funding_hour and last_funding_hour != current_hour_utc:
                 notional_value = amount * c_price
-                funding_cost = notional_value * funding_fee_rate
+                rate = funding_rates[i]
+                if np.isnan(rate):
+                    rate = 0.0
+                # Exchange convention: rate = what longs pay; long pays when rate>0, short receives
+                funding_cost = notional_value * rate * pos_side
                 balance -= funding_cost
                 last_funding_hour = current_hour_utc
                 
