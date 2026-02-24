@@ -91,16 +91,16 @@ class BacktestEngineFast:
         [FALLBACK] Traditional pd.merge approach for compatibility.
         Used when merge index is not pre-computed (verify/live scripts).
         """
-        # Pre-calculated keys check
-        if 'date_key' not in self.daily_df.columns:
-             self.daily_df['date_key'] = pd.to_datetime(self.daily_df['datetime']).dt.strftime('%Y-%m-%d')
-        
         # Use pre-computed signals if available (cache hit path), otherwise compute
         if self._precomputed_daily_df is not None:
             self.daily_df = self._precomputed_daily_df
         else:
             self.daily_df = self.strategy.generate_signals(self.daily_df)
-        
+
+        # Ensure date_key after replace (precomputed/generate_signals may omit it)
+        if 'date_key' not in self.daily_df.columns:
+            self.daily_df['date_key'] = pd.to_datetime(self.daily_df['datetime']).dt.strftime('%Y-%m-%d')
+
         # Filter essential columns
         exclude_cols = {'date_key', 'datetime', 'date', 'open', 'high', 'low', 'close', 'volume'}
         indicator_cols = [c for c in self.daily_df.columns if c not in exclude_cols]
