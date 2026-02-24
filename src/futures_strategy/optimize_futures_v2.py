@@ -29,13 +29,16 @@ from config.opt_config import OPT_V2_CONFIG, SEARCH_SPACE_V2
 from src.futures_strategy.optimize_futures import compute_segment_merge_index
 from src.futures_strategy.funding_utils import merge_funding_into_ohlcv
 
+import warnings
+warnings.filterwarnings("ignore")
+
 # --------------------------------------------------------------------------
 # Logger setup
 # --------------------------------------------------------------------------
 # Set Optuna logging level to WARNING to hide default per-trial logs
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(message)s")
+logging.basicConfig(level=logging.INFO, format="%(message)s", force=True)
 _logger = logging.getLogger("opt_v2")
 
 # Constants
@@ -414,7 +417,7 @@ def save_study_to_sqlite(study_name: str, source_url: str, project_root: str) ->
     sqlite_path: str = os.path.join(project_root, "futures_strategy.db")
     sqlite_storage_url: str = f"sqlite:///{sqlite_path}"
     
-    _logger.info("=" * 60)
+    _logger.info("=" * 72)
     _logger.info(f"💾 Saving optimized study '{study_name}' to SQLite: {sqlite_path}")
     
     try:
@@ -492,7 +495,7 @@ def main() -> None:
         q_seeds: List[int] = seeds
         base_trials: int = n_trials
 
-    _logger.info("Starting V2 Optimization. Total Trials: %d, Seeds: %s, Workers: %d", base_trials, q_seeds, args.jobs)
+
 
     sampler: optuna.samplers.TPESampler = optuna.samplers.TPESampler(
         n_startup_trials=OPT_V2_CONFIG["n_startup_trials"],
@@ -524,24 +527,11 @@ def main() -> None:
         show_progress_bar=True,  
     )
 
-    _logger.info("=" * 60)
+    _logger.info("=" * 72)
     _logger.info("Optimization Complete.")
     best_trial: optuna.trial.FrozenTrial = study.best_trial
-    _logger.info(f"Best Score: {best_trial.value:.4f}")
-    _logger.info(f"  - Avg Return (FoldxSym): {best_trial.user_attrs.get('avg_ret', 0):.2f}%")
-    _logger.info(f"  - Avg MDD    (FoldxSym): {best_trial.user_attrs.get('avg_mdd', 0):.2f}%")
-    _logger.info(f"  - Avg Trades (FoldxSym): {best_trial.user_attrs.get('avg_trades', 0):.1f}")
-    _logger.info(f"  - Avg WinRate(FoldxSym): {best_trial.user_attrs.get('avg_win_rate', 0):.2f}%")
     
-    _logger.info("  [Per-Symbol Performance]")
-    for sym in symbols:
-        r: float = best_trial.user_attrs.get(f"{sym}_ret", 0)
-        m: float = best_trial.user_attrs.get(f"{sym}_mdd", 0)
-        s: float = best_trial.user_attrs.get(f"{sym}_score", 0)
-        t: float = best_trial.user_attrs.get(f"{sym}_trades", 0)
-        w: float = best_trial.user_attrs.get(f"{sym}_win_rate", 0)
-        _logger.info(f"    - {sym:10s} | Score: {s:7.2f} | Return: {r:6.2f}% | MDD: {m:5.2f}% | Trades: {t:4.1f} | WinRate: {w:5.2f}%")
-        
+    # 2. 최적화로 결정된 전략 파라미터를 제일 먼저 출력
     _logger.info("Best Params:")
     best_params: Dict[str, Any] = best_trial.params.copy()
     tf_val: str = str(best_params.get("TIMEFRAME", "4h"))
@@ -552,16 +542,25 @@ def main() -> None:
 
     for k, v in best_trial.params.items():
         _logger.info(f"  - {k:25s}: {v}")
-    _logger.info("=" * 60)
-
-    # Persistence to SQLite for Real Trader
-    save_study_to_sqlite(study_name, storage_url, project_root)
+    
+    _logger.info("-" * 72)
+    _logger.info(f"Best Score: {best_trial.value:.4f}")
+    
+    _logger.info("  [Per-Symbol Performance (Target)]")
+    _logger.info(f"| {'Symbol':<10} | {'Return(%)':>10} | {'MDD(%)':>10} | {'Trades':>8} | {'WinRate(%)':>10} | {'Score':>8} |")
+    _logger.info(f"|{'-'*12}|{'-'*12}|{'-'*12}|{'-'*10}|{'-'*12}|{'-'*10}|")
+    for sym in symbols:
+        r: float = best_trial.user_attrs.get(f"{sym}_ret", 0)
+        m: float = best_trial.user_attrs.get(f"{sym}_mdd", 0)
+        s: float = best_trial.user_attrs.get(f"{sym}_score", 0)
+        t: float = best_trial.user_attrs.get(f"{sym}_trades", 0)
+        w: float = best_trial.user_attrs.get(f"{sym}_win_rate", 0)
+        _logger.info(f"| {sym:<10} | {r:10.2f} | {m:10.2f} | {int(t):8d} | {w:10.2f} | {s:8.2f} |")
+    _logger.info("=" * 72)
 
     # ---------------------------------------------------------
     # OOS Cross-Symbol Verification
     # ---------------------------------------------------------
-    _logger.info("")
-    _logger.info("=" * 60)
     _logger.info("Loading OOS symbols data...")
     for sym in oos_symbols:
         if sym in data_maps:
@@ -576,12 +575,11 @@ def main() -> None:
             data_maps[sym][f"merge_idx_{tf_val}"] = compute_segment_merge_index(data_maps[sym][tf_val], data_maps[sym]["1d"])
 
     _logger.info("[OOS Cross-Symbol Verification Summary]")
-    _logger.info("=" * 60)
     
     strategy_oos: UltimateStrategy = UltimateStrategy(name="FuturesV2_OOS", params=best_params)
     
-    _logger.info(f"| {'Symbol':<10} | {'Return(%)':>10} | {'MDD(%)':>8} | {'Trades':>6} | {'WinRate(%)':>10} | {'RoMaD':>6} |")
-    _logger.info(f"|{'-'*12}|{'-'*12}|{'-'*10}|{'-'*8}|{'-'*12}|{'-'*8}|")
+    _logger.info(f"| {'Symbol':<10} | {'Return(%)':>10} | {'MDD(%)':>10} | {'Trades':>8} | {'WinRate(%)':>10} | {'RoMaD':>8} |")
+    _logger.info(f"|{'-'*12}|{'-'*12}|{'-'*12}|{'-'*10}|{'-'*12}|{'-'*10}|")
 
     for sym in oos_symbols:
         target_df: Any = data_maps[sym].get(tf_val)
@@ -589,7 +587,7 @@ def main() -> None:
         full_merge_idx: Any = data_maps[sym].get(f"merge_idx_{tf_val}")
         
         if target_df is None or daily_df is None or full_merge_idx is None:
-            _logger.info(f"| {sym:<10} | {'N/A':>10} | {'N/A':>8} | {'N/A':>6} | {'N/A':>10} | {'N/A':>6} |")
+            _logger.info(f"| {sym:<10} | {'N/A':>10} | {'N/A':>10} | {'N/A':>8} | {'N/A':>10} | {'N/A':>8} |")
             continue
             
         try:
@@ -598,12 +596,15 @@ def main() -> None:
                 strategy_oos, best_params, sym, tf_val, target_df, daily_df,
                 full_merge_idx, precomputed_daily, 0, len(target_df)
             )
-            _logger.info(f"| {sym:<10} | {r_oos:10.2f} | {m_oos:8.2f} | {t_oos:6d} | {w_oos:10.2f} | {s_oos:6.2f} |")
+            _logger.info(f"| {sym:<10} | {r_oos:10.2f} | {m_oos:10.2f} | {t_oos:8d} | {w_oos:10.2f} | {s_oos:8.2f} |")
         except Exception as e:
             _logger.warning(f"OOS Error for {sym}: {e}")
-            _logger.info(f"| {sym:<10} | {'ERR':>10} | {'ERR':>8} | {'ERR':>6} | {'ERR':>10} | {'ERR':>6} |")
+            _logger.info(f"| {sym:<10} | {'ERR':>10} | {'ERR':>10} | {'ERR':>8} | {'ERR':>10} | {'ERR':>8} |")
             
-    _logger.info("=" * 60)
+    _logger.info("=" * 72)
+
+    # 4. db 저장 로그는 제일 마지막에 출력
+    save_study_to_sqlite(study_name, storage_url, project_root)
 
 if __name__ == "__main__":
     main()
