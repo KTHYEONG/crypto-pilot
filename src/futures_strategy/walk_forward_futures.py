@@ -5,9 +5,10 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from config.settings import FUTURES_INITIAL_BALANCE
+from config.settings import FUTURES_INITIAL_BALANCE, DATA_DIR
 from src.common.walk_forward_base import BaseWalkForwardAnalyzer
 from src.futures_strategy.strategies_futures import UltimateStrategy
+from src.futures_strategy.funding_utils import merge_funding_into_ohlcv
 
 
 try:
@@ -19,8 +20,9 @@ except IndexError:
 
 
 class FuturesWalkForwardAnalyzer(BaseWalkForwardAnalyzer):
-    def __init__(self, hourly_df, daily_df, params, eval_start_time=None):
+    def __init__(self, hourly_df, daily_df, params, eval_start_time=None, symbol=None):
         super().__init__(hourly_df, daily_df, params, eval_start_time=eval_start_time)
+        self.symbol = symbol
 
     @staticmethod
     def _calculate_mdd_from_pnl(pnl_series):
@@ -35,6 +37,8 @@ class FuturesWalkForwardAnalyzer(BaseWalkForwardAnalyzer):
     def run_backtest_segment(self, segment_hourly, segment_daily, actual_start_time, actual_end_time, warmup_bars):
         from .engine_fast_futures import BacktestEngineFast
 
+        if getattr(self, "symbol", None):
+            segment_hourly = merge_funding_into_ohlcv(self.symbol, segment_hourly, DATA_DIR)
         strategy = UltimateStrategy("WFA_Segment", self.params)
         engine = BacktestEngineFast(
             segment_hourly,
