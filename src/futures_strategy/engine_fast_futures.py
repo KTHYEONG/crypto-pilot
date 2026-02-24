@@ -468,6 +468,7 @@ def backtest_loop_numba(
         c_low = low[i]
         current_timestamp = timestamps[i]
         execute_intra_bar = False
+        bar_processed = False  # No re-entry on same bar after exit (Zombie fix)
 
         # --- 1. POSITION MANAGEMENT (Exits & Funding) ---
         if in_position:
@@ -605,8 +606,9 @@ def backtest_loop_numba(
                 trades[trade_count] = [entry_idx, i, pos_side, entry_price, exit_price, pnl]
                 trade_count += 1
                 in_position = False
-                pending_entry = False # Clear any pending
-                
+                pending_entry = False  # Clear any pending
+                bar_processed = True   # No re-entry on this bar (Zombie/Phantom fix)
+
             else:
                 # [SEQ-4] Update High/Low & Trailing Stop for NEXT Bar
                 if pos_side == 1:
@@ -632,7 +634,8 @@ def backtest_loop_numba(
                                 stop_price = new_stop
 
         # --- 2. SIGNAL DETECTION & IMMEDIATE EXECUTION (Intra-bar breakout) ---
-        elif not in_position:
+        # Only check entry when no position AND this bar did not just exit (Zombie fix)
+        elif not in_position and not bar_processed:
             if np.isnan(entry_upper[i]) or np.isnan(entry_lower[i]):
                 continue
             if strength_filter[i] == 0:
