@@ -371,8 +371,9 @@ class BacktestEngineFast:
             trades_df["pnl_pct"] = (true_pnl / denom) * 100
         trades_df["pnl_pct"] = trades_df["pnl_pct"].replace([np.inf, -np.inf], 0).fillna(0)
         
-        win_trades = len(trades_df[trades_df["pnl"] > 0])
-        loss_trades = len(trades_df[trades_df["pnl"] <= 0])
+        true_pnl_arr = trades_df["pnl"] - trades_df["entry_fee"]
+        win_trades = len(trades_df[true_pnl_arr > 0])
+        loss_trades = len(trades_df[true_pnl_arr <= 0])
         win_rate = (win_trades / len(trades_df)) * 100 if len(trades_df) > 0 else 0
 
         return {
