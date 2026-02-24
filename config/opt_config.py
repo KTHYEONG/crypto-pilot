@@ -13,7 +13,7 @@ OPT_V2_CONFIG = {
     "total_trials": 5000,
     "n_startup_trials": 500,
     "seeds": [42, 137],  # Dual-seed approach for robust GP prior
-    "n_jobs": 10,         # Default parallel workers
+    "n_jobs": 8,         # Default parallel workers
 }
 
 # The heavily refined and strictly typed search space
