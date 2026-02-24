@@ -497,6 +497,7 @@ def backtest_loop_numba(
                         trades[trade_count] = [entry_idx, i, pos_side, entry_price, exit_price, pnl]
                         trade_count += 1
                     in_position = False
+                    last_funding_hour = -1  # Reset so next position can be charged in same funding hour
                     break
             
             # Start-of-bar stop for same-bar exit (guard: no intra-bar time-order assumption)
@@ -632,6 +633,7 @@ def backtest_loop_numba(
                     trades[trade_count] = [entry_idx, i, pos_side, entry_price, exit_price, pnl]
                     trade_count += 1
                 in_position = False
+                last_funding_hour = -1  # Reset so next position can be charged in same funding hour
                 pending_entry = False  # Clear any pending
                 bar_processed = True   # No re-entry on this bar (Zombie/Phantom fix)
 
@@ -747,6 +749,7 @@ def backtest_loop_numba(
                     trades[trade_count] = [entry_idx, i, pos_side, entry_price, intra_exit_price, pnl]
                     trade_count += 1
                 in_position = False
+                last_funding_hour = -1  # Reset so next position can be charged in same funding hour
                 pos_side = 0
                 execute_intra_bar = False
 
