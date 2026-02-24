@@ -247,11 +247,14 @@ def evaluate_symbol_fold(
     mdd_pct = abs(result.get("mdd_pct", 0.0))
     ret_pct = result.get("total_return_pct", 0.0)
 
-    # Span for annualization (OOS segment)
-    if "datetime" in sig_oos.columns:
-        span_days = (sig_oos["datetime"].iloc[-1] - sig_oos["datetime"].iloc[0]).total_seconds() / 86400.0
+    # Span for annualization: active trading period (first entry to last exit) to avoid understating annual return
+    if len(trades_df) > 1:
+        span_days = (trades_df["exit_time"].max() - trades_df["entry_time"].min()).total_seconds() / 86400.0
+    elif len(trades_df) == 1:
+        span_days = (trades_df["exit_time"].iloc[0] - trades_df["entry_time"].iloc[0]).total_seconds() / 86400.0
     else:
-        span_days = (trades_df["exit_time"].max() - trades_df["exit_time"].min()).total_seconds() / 86400.0
+        span_days = (sig_oos["datetime"].iloc[-1] - sig_oos["datetime"].iloc[0]).total_seconds() / 86400.0 if "datetime" in sig_oos.columns else 1.0
+    span_days = max(float(span_days), 1.0)
 
     true_pnl = trades_df["pnl"] - trades_df["entry_fee"]
     win_rate = (len(trades_df[true_pnl > 0]) / len(trades_df)) * 100 if len(trades_df) > 0 else 0.0
