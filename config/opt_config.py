@@ -11,7 +11,7 @@ from typing import Any, Dict
 # Meta-parameters for Optuna TPE optimization
 OPT_V2_CONFIG = {
     "total_trials": 2500,
-    "n_startup_trials": 500,
+    "n_startup_trials": 250,
     "seeds": [42, 137],  # Dual-seed approach for robust GP prior
     "n_jobs": 10,         # Default parallel workers
 }
@@ -40,7 +40,7 @@ SEARCH_SPACE_V2: Dict[str, Dict[str, Any]] = {
         "choices": ["FIXED", "ATR"],
     },
     "USE_TAKE_PROFIT": {"type": "categorical", "choices": [True, False]},
-    "EXIT_TYPE": {"type": "categorical", "choices": ["ATR"]},  # Fixed constraint
+    "EXIT_TYPE": {"type": "categorical", "choices": ["ATR", "PSAR"]},
 
     # --------------------------------------------------------------------------
     # 2. CORE SYSTEM PARAMETERS (Numeric Limits)
@@ -50,7 +50,7 @@ SEARCH_SPACE_V2: Dict[str, Dict[str, Any]] = {
     "ATR_PERIOD": {"type": "int", "low": 14, "high": 28, "step": 1},
     "MAX_HOLDING_BARS": {"type": "int", "low": 5, "high": 60, "log": True},
     "RISK_PER_TRADE": {"type": "float", "low": 0.01, "high": 0.05, "step": 0.005},
-    "LEVERAGE": {"type": "float", "low": 2.0, "high": 10.0, "step": 1.0},
+    "LEVERAGE": {"type": "int", "low": 2, "high": 10},
 
     # --------------------------------------------------------------------------
     # 3. STOP/EXIT PARAMETERS
