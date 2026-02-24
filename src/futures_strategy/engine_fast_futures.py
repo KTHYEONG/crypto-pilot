@@ -176,13 +176,14 @@ class BacktestEngineFast:
         # Extract timestamps for funding fee calculation
         timestamps = df["timestamp"].values  # milliseconds
 
-        # Funding rate: time-series if column exists (direction applied in Numba via pos_side), else constant fallback
-        if "funding_rate" in df.columns:
-            funding_rates = np.asarray(df["funding_rate"].values, dtype=np.float64)
-            # NaN at funding hour -> treat as 0 (no payment)
+        # Funding rate: trust only when present on hourly_df (true hourly series). Else constant + log.
+        # merged_df may carry daily-mapped funding_rate (shift(1) daily → 24 identical values/day), which is unreliable.
+        if "funding_rate" in self.hourly_df.columns:
+            funding_rates = np.asarray(self.hourly_df["funding_rate"].values, dtype=np.float64)
             funding_rates = np.nan_to_num(funding_rates, nan=0.0, posinf=0.0, neginf=0.0)
         else:
             funding_rates = np.full(n, FUNDING_FEE_RATE, dtype=np.float64)
+            self.logger.info("funding_rate column not found in hourly_df; using constant fallback.")
         
         # [NEW] Time-Based Exit & Trailing Activation
         max_holding_bars = self.strategy.params.get('MAX_HOLDING_BARS', 999999)  # Default: No limit
