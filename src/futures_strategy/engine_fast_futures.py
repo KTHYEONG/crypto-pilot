@@ -35,7 +35,8 @@ class BacktestEngineFast:
         # injected by optimization script
         self.leverage = 1
         self.risk_per_trade = 0.02
-        
+        self.funding_events_per_bar = 1  # 1 for 4h/hourly; 3 for 1d (UTC 00, 08, 16 per day)
+
         self.fee_rate = TRADING_FEE_RATE
         self.slippage_rate = SLIPPAGE_RATE
 
@@ -276,7 +277,8 @@ class BacktestEngineFast:
             panic_regime_natr, panic_regime_multiplier,
             warmup_bars,
             use_compounding,    # [NEW]
-            max_capital_usage   # [NEW]
+            max_capital_usage,  # [NEW]
+            self.funding_events_per_bar,
         )
         
         self.balance = final_balance
@@ -431,7 +433,8 @@ def backtest_loop_numba(
     panic_regime_natr, panic_regime_multiplier, # [NEW] Dynamic Risk
     warmup_bars,  # [WARMUP] Number of bars to skip at start for indicator warmup
     use_compounding,   # [NEW] Bool
-    max_capital_usage  # [NEW] Float
+    max_capital_usage,  # [NEW] Float
+    funding_events_per_bar,  # 1 for 4h/hourly; 3 for 1d (UTC 00, 08, 16 per bar)
 ):
     """
     Numba JIT-compiled backtest loop for Futures (Long/Short).
@@ -502,8 +505,9 @@ def backtest_loop_numba(
                 rate = funding_rates[i]
                 if np.isnan(rate):
                     rate = 0.0
-                # Exchange convention: rate = what longs pay; long pays when rate>0, short receives
-                funding_cost = notional_value * rate * pos_side
+                # Exchange convention: rate = what longs pay; long pays when rate>0, short receives.
+                # funding_events_per_bar: 1 for 4h/hourly; 3 for 1d (one bar = one day = 3 UTC events).
+                funding_cost = notional_value * rate * pos_side * funding_events_per_bar
                 balance -= funding_cost
                 last_funding_hour = current_hour_utc
                 
