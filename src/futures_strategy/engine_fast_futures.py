@@ -185,9 +185,12 @@ class BacktestEngineFast:
 
         # Funding rate: trust only when present on hourly_df (true hourly series). Else constant + log.
         # merged_df may carry daily-mapped funding_rate (shift(1) daily → 24 identical values/day), which is unreliable.
+        # Align length to n to avoid IndexError when merged_df is longer than hourly_df (e.g. after merge).
         if "funding_rate" in self.hourly_df.columns:
-            funding_rates = np.asarray(self.hourly_df["funding_rate"].values, dtype=np.float64)
-            funding_rates = np.nan_to_num(funding_rates, nan=0.0, posinf=0.0, neginf=0.0)
+            _fr = np.asarray(self.hourly_df["funding_rate"].values, dtype=np.float64)
+            if len(_fr) < n:
+                _fr = np.pad(_fr, (0, n - len(_fr)), constant_values=_fr[-1] if len(_fr) > 0 else FUNDING_FEE_RATE)
+            funding_rates = np.nan_to_num(_fr[:n], nan=0.0, posinf=0.0, neginf=0.0)
         else:
             funding_rates = np.full(n, FUNDING_FEE_RATE, dtype=np.float64)
             self.logger.info("funding_rate column not found in hourly_df; using constant fallback.")
