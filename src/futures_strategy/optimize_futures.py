@@ -973,6 +973,7 @@ def evaluate_one_fidelity(
                     )
                     engine.leverage = params.get("LEVERAGE", 1)
                     engine.risk_per_trade = params.get("RISK_PER_TRADE", 0.02)
+                    engine.funding_events_per_bar = 3 if selected_tf == "1d" else 1
                     result = engine.run()
                 except Exception as e:
                     _logger.warning(
@@ -1204,6 +1205,7 @@ def evaluate_one_fidelity(
                 )
                 engine.leverage = params.get("LEVERAGE", 1)
                 engine.risk_per_trade = params.get("RISK_PER_TRADE", 0.02)
+                engine.funding_events_per_bar = 3 if selected_tf == "1d" else 1
                 result = engine.run()
             except Exception as e:
                 _logger.warning(
@@ -2431,7 +2433,8 @@ def main():
                 
             engine.leverage = best_params.get('LEVERAGE', 1)
             engine.risk_per_trade = best_params.get('RISK_PER_TRADE', 0.02)
-            
+            engine.funding_events_per_bar = 3 if selected_tf == "1d" else 1
+
             try:
                 res = engine.run()
                 

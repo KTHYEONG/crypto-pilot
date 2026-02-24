@@ -683,6 +683,7 @@ def detailed_backtest_futures(hourly_df, daily_df, params):
     engine = BacktestEngineFast(test_hourly, test_daily, strategy, initial_balance=FUTURES_INITIAL_BALANCE)
     engine.leverage = params.get('LEVERAGE', 1)
     engine.risk_per_trade = params.get('RISK_PER_TRADE', 0.02)
+    engine.funding_events_per_bar = 3 if params.get('TIMEFRAME') == '1d' else 1
     res = engine.run()
 
     oos_trades = _filter_trades_for_window(res.get('trades_df', pd.DataFrame()), eval_start_ts, eval_end_ts)
@@ -892,6 +893,7 @@ def verify_single_symbol_futures(
     )
     engine.leverage = best_params.get('LEVERAGE', 1)
     engine.risk_per_trade = best_params.get('RISK_PER_TRADE', 0.02)
+    engine.funding_events_per_bar = 3 if best_params.get('TIMEFRAME') == '1d' else 1
     safe_cost_mult = max(0.0, float(cost_mult))
     engine.fee_rate = float(engine.fee_rate) * safe_cost_mult
     engine.slippage_rate = float(engine.slippage_rate) * safe_cost_mult
