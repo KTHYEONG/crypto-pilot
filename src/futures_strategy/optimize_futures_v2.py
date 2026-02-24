@@ -157,6 +157,15 @@ def suggest_params_v2(trial: optuna.Trial, space: Dict[str, Any]) -> Dict[str, A
             step = spec.get("step", None)
             params[k] = trial.suggest_float(k, spec["low"], spec["high"], step=step, log=log)
 
+    tf = params.get("TIMEFRAME", "4h")
+    if "MAX_HOLDING_BARS_4H" in params and "MAX_HOLDING_BARS_1D" in params:
+        if tf == "4h":
+            params["MAX_HOLDING_BARS"] = params["MAX_HOLDING_BARS_4H"]
+        else:
+            params["MAX_HOLDING_BARS"] = params["MAX_HOLDING_BARS_1D"]
+        params.pop("MAX_HOLDING_BARS_4H", None)
+        params.pop("MAX_HOLDING_BARS_1D", None)
+
     # Dimensionality conditional pruning: If parameter isn't used by the structure, remove it
     entry = params["ENTRY_TYPE"]
     if entry != "BOLLINGER":
