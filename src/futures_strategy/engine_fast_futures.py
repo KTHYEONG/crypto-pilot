@@ -358,8 +358,11 @@ class BacktestEngineFast:
         margin_used = amount_arr * entry_p / leverage
         margin_used = np.where(np.isfinite(margin_used) & (margin_used > 0), margin_used, np.nan)
 
+        entry_fee_cumsum = trades_df["entry_fee"].cumsum().shift(1).fillna(0)
         pnl_cumsum = trades_df["pnl"].cumsum().shift(1).fillna(0)
-        trades_df["balance_before"] = (self.initial_balance + pnl_cumsum).replace(0, 1e-9)
+        trades_df["balance_before"] = (
+            self.initial_balance - entry_fee_cumsum + pnl_cumsum
+        ).replace(0, 1e-9)
         balance_before = trades_df["balance_before"].values
 
         denom = np.where(
