@@ -31,11 +31,21 @@ def calc_romad(pnl_series: pd.Series, n_trades: int, tf: str) -> Tuple[float, fl
 
     romad: float = annual_return / max(mdd_pct, 5.0)
 
-    min_trades_target: int = 60 if tf == "4h" else 30
+    # Statistical Significance Parameters
+    min_trades_target: int = 120 if tf == "4h" else 40
     trade_ratio: float = float(n_trades) / float(min_trades_target)
-    penalty_multiplier: float = min(trade_ratio ** 0.5, 1.2)
+    
+    # Financial Engineering Penalty: Deflated Sharpe/RoMaD Logic
+    penalty_multiplier: float
+    if trade_ratio < 1.0:
+        penalty_multiplier = max(trade_ratio ** 2.0, 0.05)
+    else:
+        penalty_multiplier = min(trade_ratio ** 0.5, 1.2)
 
-    final_score: float = (romad * penalty_multiplier) - max(0.0, mdd_pct - 40.0) * 0.3
+    # Adjust base score protecting against negative bias
+    adjusted_romad: float = (romad * penalty_multiplier) if romad > 0.0 else (romad / penalty_multiplier)
+    final_score: float = adjusted_romad - max(0.0, mdd_pct - 40.0) * 0.3
+    
     return final_score, ret_pct, mdd_pct
 
 def calc_romad_from_metrics(
@@ -57,9 +67,19 @@ def calc_romad_from_metrics(
     annual_return: float = ret_pct * (365.0 / days)
     romad: float = annual_return / max(mdd_abs, 5.0)
     
-    min_trades_target: int = 60 if tf == "4h" else 30
+    # Statistical Significance Parameters
+    min_trades_target: int = 120 if tf == "4h" else 40
     trade_ratio: float = float(n_trades) / float(min_trades_target)
-    penalty_multiplier: float = min(trade_ratio ** 0.5, 1.2)
     
-    final_score: float = (romad * penalty_multiplier) - max(0.0, mdd_abs - 40.0) * 0.3
+    # Financial Engineering Penalty: Deflated Sharpe/RoMaD Logic
+    penalty_multiplier: float
+    if trade_ratio < 1.0:
+        penalty_multiplier = max(trade_ratio ** 2.0, 0.05)
+    else:
+        penalty_multiplier = min(trade_ratio ** 0.5, 1.2)
+    
+    # Adjust base score protecting against negative bias
+    adjusted_romad: float = (romad * penalty_multiplier) if romad > 0.0 else (romad / penalty_multiplier)
+    final_score: float = adjusted_romad - max(0.0, mdd_abs - 40.0) * 0.3
+    
     return final_score, ret_pct, mdd_abs
