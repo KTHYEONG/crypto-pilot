@@ -668,8 +668,12 @@ def backtest_loop_numba(
                 do_entry = True
 
             if do_entry:
-                signal_idx = i - 1 if i > 0 else 0
-                current_atr = atr[signal_idx]
+                # Use atr[i]: daily_atr is already shift(1) in _prepare_data (prior day). No extra i-1.
+                current_atr = atr[i]
+                if np.isnan(current_atr) or current_atr <= 0.0:
+                    current_atr = atr[i - 1] if i > 0 else 0.0
+                if np.isnan(current_atr) or current_atr <= 0.0:
+                    current_atr = 0.0
                 if stop_loss_type == 1:
                     if pending_side == 1:
                         stop_price = fill_price - (current_atr * atr_sl_mult)
