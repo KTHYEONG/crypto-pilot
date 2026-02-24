@@ -237,7 +237,7 @@ class BacktestEngineFast:
         
         # [NEW] Compounding Control
         use_compounding = self.strategy.params.get('USE_COMPOUNDING', False)
-        max_capital_usage = self.strategy.params.get('MAX_CAPITAL_USAGE', 1_000_000)
+        max_capital_usage = self.strategy.params.get('MAX_CAPITAL_USAGE', self.initial_balance)
         
         # Run Numba-accelerated loop
         trades, final_balance, equity_curve = backtest_loop_numba(
