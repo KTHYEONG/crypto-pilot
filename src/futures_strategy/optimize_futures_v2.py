@@ -406,25 +406,24 @@ def objective_v2(trial: optuna.Trial, data_maps: Dict[str, Dict[str, pd.DataFram
 # --------------------------------------------------------------------------
 # Execution Main
 # --------------------------------------------------------------------------
-def main():
-    parser = argparse.ArgumentParser()
+def main() -> None:
+    parser: argparse.ArgumentParser = argparse.ArgumentParser()
     parser.add_argument("--symbols", type=str, default="BTC/USDT")
     parser.add_argument("--trials", type=int, default=OPT_V2_CONFIG["total_trials"])
     parser.add_argument("--jobs", type=int, default=OPT_V2_CONFIG["n_jobs"])
-    args = parser.parse_args()
+    args: argparse.Namespace = parser.parse_args()
 
-    symbols = [s.strip() for s in args.symbols.split(",")]
-    oos_symbols = ["ETH/USDT", "SOL/USDT", "BNB/USDT", "XRP/USDT"]
-    all_symbols = list(set(symbols + oos_symbols))
+    symbols: List[str] = [s.strip() for s in args.symbols.split(",")]
+    oos_symbols: List[str] = ["ETH/USDT", "SOL/USDT", "BNB/USDT", "XRP/USDT"]
 
-    collector = DataCollector()
-    data_maps = {}
+    collector: DataCollector = DataCollector()
+    data_maps: Dict[str, Dict[str, Any]] = {}
 
-    _logger.info("Loading futures database (%s to %s)...", START_DATE, END_DATE)
-    for sym in all_symbols:
+    _logger.info("Loading target futures database (%s to %s)...", START_DATE, END_DATE)
+    for sym in symbols:
         data_maps[sym] = {}
         for tf in ["1d", "4h"]:
-            df = collector.collect_and_save(sym, tf, START_DATE, END_DATE)
+            df: pd.DataFrame = collector.collect_and_save(sym, tf, START_DATE, END_DATE)
             if df.empty:
                 _logger.error("Failed to load %s %s data", sym, tf)
                 sys.exit(1)
@@ -433,53 +432,46 @@ def main():
             
         data_maps[sym]["merge_idx_1d"] = compute_segment_merge_index(data_maps[sym]["1d"], data_maps[sym]["1d"])
         data_maps[sym]["merge_idx_4h"] = compute_segment_merge_index(data_maps[sym]["4h"], data_maps[sym]["1d"])
-    _logger.info("Data load complete.")
+    _logger.info("Target Data load complete.")
 
-    study_name = "futures_v2_romad_opt"
+    study_name: str = "futures_v2_romad_opt"
     
-    # DB connection setup matching v1
-    db_user = os.getenv("DB_USER", "root")
-    db_pass = os.getenv("DB_PASS", "1234")
-    db_host = os.getenv("DB_HOST", "localhost")
-    db_port = os.getenv("DB_PORT", "3306")
-    db_name = os.getenv("DB_NAME", "trading_optuna")
+    db_user: str = os.getenv("DB_USER", "root")
+    db_pass: str = os.getenv("DB_PASS", "1234")
+    db_host: str = os.getenv("DB_HOST", "localhost")
+    db_port: str = os.getenv("DB_PORT", "3306")
+    db_name: str = os.getenv("DB_NAME", "trading_optuna")
     from urllib.parse import quote_plus
-    safe_pass = quote_plus(db_pass)
-    storage_url = f"mysql+pymysql://{db_user}:{safe_pass}@{db_host}:{db_port}/{db_name}"
+    safe_pass: str = quote_plus(db_pass)
+    storage_url: str = f"mysql+pymysql://{db_user}:{safe_pass}@{db_host}:{db_port}/{db_name}"
 
-    # Setup 2-seed queue logic
-    seeds = OPT_V2_CONFIG["seeds"]
-    n_trials = args.trials
+    seeds: List[int] = OPT_V2_CONFIG["seeds"]
+    n_trials: int = args.trials
 
-    # Custom sampler with deterministic seeds split
     if n_trials <= len(seeds):
-        q_seeds = seeds[:n_trials]
-        base_trials = n_trials
+        q_seeds: List[int] = seeds[:n_trials]
+        base_trials: int = n_trials
     else:
-        q_seeds = seeds
-        base_trials = n_trials
+        q_seeds: List[int] = seeds
+        base_trials: int = n_trials
 
     _logger.info("Starting V2 Optimization. Total Trials: %d, Seeds: %s, Workers: %d", base_trials, q_seeds, args.jobs)
 
-    # Note: ConstantLiar is handled implicitly by optuna when running concurrent jobs
-    # But for a clear mathematical approach, we use TPESampler with a fixed seed across the board
-    sampler = optuna.samplers.TPESampler(
+    sampler: optuna.samplers.TPESampler = optuna.samplers.TPESampler(
         n_startup_trials=OPT_V2_CONFIG["n_startup_trials"],
         multivariate=True,
         constant_liar=True,
         warn_independent_sampling=False,
-        seed=q_seeds[0], # Use primary seed
+        seed=q_seeds[0],
     )
-
-
 
     try:
         optuna.delete_study(study_name=study_name, storage=storage_url)
         _logger.info(f"Deleted existing study '{study_name}' for a fresh start.")
     except KeyError:
-        pass  # Study does not exist yet
+        pass  
 
-    study = optuna.create_study(
+    study: optuna.Study = optuna.create_study(
         study_name=study_name,
         storage=storage_url,
         direction="maximize",
@@ -492,12 +484,12 @@ def main():
         n_trials=base_trials,
         n_jobs=args.jobs,
         catch=(Exception,),
-        show_progress_bar=True,  # Enables tqdm progress bar natively
+        show_progress_bar=True,  
     )
 
     _logger.info("=" * 60)
     _logger.info("Optimization Complete.")
-    best_trial = study.best_trial
+    best_trial: optuna.trial.FrozenTrial = study.best_trial
     _logger.info(f"Best Score: {best_trial.value:.4f}")
     _logger.info(f"  - Avg Return (FoldxSym): {best_trial.user_attrs.get('avg_ret', 0):.2f}%")
     _logger.info(f"  - Avg MDD    (FoldxSym): {best_trial.user_attrs.get('avg_mdd', 0):.2f}%")
@@ -506,16 +498,16 @@ def main():
     
     _logger.info("  [Per-Symbol Performance]")
     for sym in symbols:
-        r = best_trial.user_attrs.get(f"{sym}_ret", 0)
-        m = best_trial.user_attrs.get(f"{sym}_mdd", 0)
-        s = best_trial.user_attrs.get(f"{sym}_score", 0)
-        t = best_trial.user_attrs.get(f"{sym}_trades", 0)
-        w = best_trial.user_attrs.get(f"{sym}_win_rate", 0)
+        r: float = best_trial.user_attrs.get(f"{sym}_ret", 0)
+        m: float = best_trial.user_attrs.get(f"{sym}_mdd", 0)
+        s: float = best_trial.user_attrs.get(f"{sym}_score", 0)
+        t: float = best_trial.user_attrs.get(f"{sym}_trades", 0)
+        w: float = best_trial.user_attrs.get(f"{sym}_win_rate", 0)
         _logger.info(f"    - {sym:10s} | Score: {s:7.2f} | Return: {r:6.2f}% | MDD: {m:5.2f}% | Trades: {t:4.1f} | WinRate: {w:5.2f}%")
         
     _logger.info("Best Params:")
-    best_params = best_trial.params.copy()
-    tf_val = best_params.get("TIMEFRAME", "4h")
+    best_params: Dict[str, Any] = best_trial.params.copy()
+    tf_val: str = str(best_params.get("TIMEFRAME", "4h"))
     if "MAX_HOLDING_BARS_4H" in best_params and "MAX_HOLDING_BARS_1D" in best_params:
         best_params["MAX_HOLDING_BARS"] = best_params["MAX_HOLDING_BARS_4H"] if tf_val == "4h" else best_params["MAX_HOLDING_BARS_1D"]
         best_params.pop("MAX_HOLDING_BARS_4H", None)
@@ -530,36 +522,48 @@ def main():
     # ---------------------------------------------------------
     _logger.info("")
     _logger.info("=" * 60)
+    _logger.info("Loading OOS symbols data...")
+    for sym in oos_symbols:
+        if sym in data_maps:
+            continue
+        data_maps[sym] = {}
+        for tf in list(set(["1d", tf_val])):
+            oos_df: pd.DataFrame = collector.collect_and_save(sym, tf, START_DATE, END_DATE)
+            if not oos_df.empty:
+                oos_df = merge_funding_into_ohlcv(sym, oos_df, DATA_DIR)
+                data_maps[sym][tf] = oos_df
+        if "1d" in data_maps[sym] and tf_val in data_maps[sym]:
+            data_maps[sym][f"merge_idx_{tf_val}"] = compute_segment_merge_index(data_maps[sym][tf_val], data_maps[sym]["1d"])
+
     _logger.info("[OOS Cross-Symbol Verification Summary]")
     _logger.info("=" * 60)
     
-    strategy_oos = UltimateStrategy(name="FuturesV2_OOS", params=best_params)
+    strategy_oos: UltimateStrategy = UltimateStrategy(name="FuturesV2_OOS", params=best_params)
     
     _logger.info(f"| {'Symbol':<10} | {'Return(%)':>10} | {'MDD(%)':>8} | {'Trades':>6} | {'WinRate(%)':>10} | {'RoMaD':>6} |")
     _logger.info(f"|{'-'*12}|{'-'*12}|{'-'*10}|{'-'*8}|{'-'*12}|{'-'*8}|")
 
     for sym in oos_symbols:
-        target_df = data_maps[sym].get(tf_val)
-        daily_df = data_maps[sym].get("1d")
-        full_merge_idx = data_maps[sym].get(f"merge_idx_{tf_val}")
+        target_df: Any = data_maps[sym].get(tf_val)
+        daily_df: Any = data_maps[sym].get("1d")
+        full_merge_idx: Any = data_maps[sym].get(f"merge_idx_{tf_val}")
         
         if target_df is None or daily_df is None or full_merge_idx is None:
             _logger.info(f"| {sym:<10} | {'N/A':>10} | {'N/A':>8} | {'N/A':>6} | {'N/A':>10} | {'N/A':>6} |")
             continue
             
         try:
-            precomputed_daily = strategy_oos.generate_signals(daily_df)
-            s, r, m, t, w = evaluate_symbol_fold(
+            precomputed_daily: pd.DataFrame = strategy_oos.generate_signals(daily_df)
+            s_oos, r_oos, m_oos, t_oos, w_oos = evaluate_symbol_fold(
                 strategy_oos, best_params, sym, tf_val, target_df, daily_df,
                 full_merge_idx, precomputed_daily, 0, len(target_df)
             )
-            _logger.info(f"| {sym:<10} | {r:10.2f} | {m:8.2f} | {t:6d} | {w:10.2f} | {s:6.2f} |")
+            _logger.info(f"| {sym:<10} | {r_oos:10.2f} | {m_oos:8.2f} | {t_oos:6d} | {w_oos:10.2f} | {s_oos:6.2f} |")
         except Exception as e:
             _logger.warning(f"OOS Error for {sym}: {e}")
             _logger.info(f"| {sym:<10} | {'ERR':>10} | {'ERR':>8} | {'ERR':>6} | {'ERR':>10} | {'ERR':>6} |")
             
     _logger.info("=" * 60)
-
 
 if __name__ == "__main__":
     main()
