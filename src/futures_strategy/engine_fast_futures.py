@@ -562,15 +562,16 @@ def backtest_loop_numba(
             if not exit_triggered and use_take_profit and tp_price > 0:
                 if pos_side == 1:
                     if c_open > tp_price:
-                        # Gap up through TP: conservative fill at open with slippage
-                        exit_price = c_open * (1 - slippage_rate)
+                        # Gap up through TP: fill at open (favorable; slippage would wrongly worsen it)
+                        exit_price = c_open
                         exit_triggered = True
                     elif c_high >= tp_price:
                         exit_price = tp_price
                         exit_triggered = True
                 else:
                     if c_open < tp_price:
-                        exit_price = c_open * (1 + slippage_rate)
+                        # Gap down through TP: fill at open (favorable for short; slippage would wrongly worsen it)
+                        exit_price = c_open
                         exit_triggered = True
                     elif c_low <= tp_price:
                         exit_price = tp_price
