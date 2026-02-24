@@ -262,22 +262,18 @@ class BacktestEngineFast:
         self.hourly_df = None
         self.daily_df = None
         
-        # Convert trades to DataFrame (Vectorized Lookup)
+        # Convert trades to list of dicts; Numba returns trades[:trade_count] so no padding rows
         self.trades = []
         for i in range(len(trades)):
-            if trades[i][0] == 0 and trades[i][1] == 0:  # Check for empty/dummy rows
-                break
-                
             entry_idx = int(trades[i][0])
             exit_idx = int(trades[i][1])
-            
             self.trades.append({
-                'entry_time': datetime_values[entry_idx],
-                'exit_time': datetime_values[exit_idx],
-                'side': 'LONG' if trades[i][2] == 1 else 'SHORT',
-                'entry_price': trades[i][3],
-                'exit_price': trades[i][4],
-                'pnl': trades[i][5]
+                "entry_time": datetime_values[entry_idx],
+                "exit_time": datetime_values[exit_idx],
+                "side": "LONG" if trades[i][2] == 1 else "SHORT",
+                "entry_price": trades[i][3],
+                "exit_price": trades[i][4],
+                "pnl": trades[i][5],
             })
         
         result = self.get_results()
