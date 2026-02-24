@@ -287,6 +287,7 @@ class BacktestEngineFast:
                 "exit_price": trades[i][4],
                 "pnl": trades[i][5],
                 "amount": trades[i][6],
+                "entry_fee": trades[i][7],
             })
         
         result = self.get_results()
@@ -347,8 +348,9 @@ class BacktestEngineFast:
                 drawdown = np.nan_to_num(drawdown, nan=0.0)
                 mdd = float(drawdown.min())
 
-        # ROE per trade = PnL / Margin Used. Use actual amount from Numba (avoids fee-distorted inverse estimate).
-        pnl = trades_df["pnl"].values
+        # ROE per trade = (PnL - entry_fee) / Margin Used. entry_fee is deducted at entry but not in pnl.
+        entry_fee_arr = trades_df["entry_fee"].values
+        true_pnl = trades_df["pnl"].values - entry_fee_arr
         entry_p = trades_df["entry_price"].values
         amount_arr = trades_df["amount"].values
         leverage = float(self.leverage)
@@ -365,7 +367,7 @@ class BacktestEngineFast:
             np.asarray(balance_before, dtype=np.float64),
         )
         with np.errstate(invalid="ignore", divide="ignore"):
-            trades_df["pnl_pct"] = (pnl / denom) * 100
+            trades_df["pnl_pct"] = (true_pnl / denom) * 100
         trades_df["pnl_pct"] = trades_df["pnl_pct"].replace([np.inf, -np.inf], 0).fillna(0)
         
         win_trades = len(trades_df[trades_df["pnl"] > 0])
@@ -431,6 +433,7 @@ def backtest_loop_numba(
     entry_price = 0.0
     entry_idx = 0
     amount = 0.0
+    entry_fee_stored = 0.0
     highest = 0.0
     lowest = 0.0
     pos_atr = 0.0
@@ -442,7 +445,7 @@ def backtest_loop_numba(
     
     # Trades storage (max 30000 trades)
     max_trades = 30000
-    trades = np.zeros((max_trades, 7))  # [entry_idx, exit_idx, side, entry_p, exit_p, pnl, amount]
+    trades = np.zeros((max_trades, 8))  # [entry_idx, exit_idx, side, entry_p, exit_p, pnl, amount, entry_fee]
     trade_count = 0
     
     exec_risk = risk_per_trade # Local execution risk
@@ -494,7 +497,7 @@ def backtest_loop_numba(
                     balance = 0.0
                     
                     if trade_count < max_trades:
-                        trades[trade_count] = [entry_idx, i, pos_side, entry_price, exit_price, pnl, amount]
+                        trades[trade_count] = [entry_idx, i, pos_side, entry_price, exit_price, pnl, amount, entry_fee_stored]
                         trade_count += 1
                     in_position = False
                     last_funding_hour = -1  # Reset so next position can be charged in same funding hour
@@ -632,7 +635,7 @@ def backtest_loop_numba(
                 balance += margin + pnl
                 
                 if trade_count < max_trades:
-                    trades[trade_count] = [entry_idx, i, pos_side, entry_price, exit_price, pnl, amount]
+                    trades[trade_count] = [entry_idx, i, pos_side, entry_price, exit_price, pnl, amount, entry_fee_stored]
                     trade_count += 1
                 in_position = False
                 last_funding_hour = -1  # Reset so next position can be charged in same funding hour
@@ -716,6 +719,7 @@ def backtest_loop_numba(
                 entry_fee = amount * fill_price * fee_rate
                 if balance >= required_margin + entry_fee:
                     balance -= (required_margin + entry_fee)
+                    entry_fee_stored = entry_fee
                     in_position = True
                     pos_side = pending_side
                     entry_price = fill_price
@@ -752,7 +756,7 @@ def backtest_loop_numba(
                 margin = (amount * entry_price) / leverage
                 balance += margin + pnl
                 if trade_count < max_trades:
-                    trades[trade_count] = [entry_idx, i, pos_side, entry_price, intra_exit_price, pnl, amount]
+                    trades[trade_count] = [entry_idx, i, pos_side, entry_price, intra_exit_price, pnl, amount, entry_fee_stored]
                     trade_count += 1
                 in_position = False
                 last_funding_hour = -1  # Reset so next position can be charged in same funding hour
@@ -786,7 +790,7 @@ def backtest_loop_numba(
         balance += margin + pnl
 
         if trade_count < max_trades:
-            trades[trade_count] = [entry_idx, last_idx, pos_side, entry_price, exit_price, pnl, amount]
+            trades[trade_count] = [entry_idx, last_idx, pos_side, entry_price, exit_price, pnl, amount, entry_fee_stored]
             trade_count += 1
 
     return trades[:trade_count], balance, equity_curve
