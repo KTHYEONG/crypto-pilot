@@ -273,13 +273,12 @@ def evaluate_symbol_fold(
     return score, ret_pct, mdd_pct, len(trades_df), win_rate
 
 
-def objective_v2(trial: optuna.Trial, data_maps: Dict[str, Dict[str, pd.DataFrame]]) -> float:
+def objective_v2(trial: optuna.Trial, data_maps: Dict[str, Dict[str, pd.DataFrame]], symbols: List[str]) -> float:
     params = suggest_params_v2(trial, SEARCH_SPACE_V2)
     if params.pop("_INVALID_CONSTRAINT", False):
         return -100.0
 
     tf = params["TIMEFRAME"]
-    symbols = list(data_maps.keys())
 
     strategy = UltimateStrategy(name="FuturesV2", params=params)
 
@@ -409,17 +408,20 @@ def objective_v2(trial: optuna.Trial, data_maps: Dict[str, Dict[str, pd.DataFram
 # --------------------------------------------------------------------------
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--symbols", type=str, default="BTC/USDT,ETH/USDT")
+    parser.add_argument("--symbols", type=str, default="BTC/USDT")
     parser.add_argument("--trials", type=int, default=OPT_V2_CONFIG["total_trials"])
     parser.add_argument("--jobs", type=int, default=OPT_V2_CONFIG["n_jobs"])
     args = parser.parse_args()
 
     symbols = [s.strip() for s in args.symbols.split(",")]
+    oos_symbols = ["ETH/USDT", "SOL/USDT", "BNB/USDT", "XRP/USDT"]
+    all_symbols = list(set(symbols + oos_symbols))
+
     collector = DataCollector()
     data_maps = {}
 
     _logger.info("Loading futures database (%s to %s)...", START_DATE, END_DATE)
-    for sym in symbols:
+    for sym in all_symbols:
         data_maps[sym] = {}
         for tf in ["1d", "4h"]:
             df = collector.collect_and_save(sym, tf, START_DATE, END_DATE)
@@ -486,7 +488,7 @@ def main():
     )
 
     study.optimize(
-        lambda t: objective_v2(t, data_maps),
+        lambda t: objective_v2(t, data_maps, symbols),
         n_trials=base_trials,
         n_jobs=args.jobs,
         catch=(Exception,),
@@ -512,8 +514,50 @@ def main():
         _logger.info(f"    - {sym:10s} | Score: {s:7.2f} | Return: {r:6.2f}% | MDD: {m:5.2f}% | Trades: {t:4.1f} | WinRate: {w:5.2f}%")
         
     _logger.info("Best Params:")
+    best_params = best_trial.params.copy()
+    tf_val = best_params.get("TIMEFRAME", "4h")
+    if "MAX_HOLDING_BARS_4H" in best_params and "MAX_HOLDING_BARS_1D" in best_params:
+        best_params["MAX_HOLDING_BARS"] = best_params["MAX_HOLDING_BARS_4H"] if tf_val == "4h" else best_params["MAX_HOLDING_BARS_1D"]
+        best_params.pop("MAX_HOLDING_BARS_4H", None)
+        best_params.pop("MAX_HOLDING_BARS_1D", None)
+
     for k, v in best_trial.params.items():
         _logger.info(f"  - {k:25s}: {v}")
+    _logger.info("=" * 60)
+
+    # ---------------------------------------------------------
+    # OOS Cross-Symbol Verification
+    # ---------------------------------------------------------
+    _logger.info("")
+    _logger.info("=" * 60)
+    _logger.info("[OOS Cross-Symbol Verification Summary]")
+    _logger.info("=" * 60)
+    
+    strategy_oos = UltimateStrategy(name="FuturesV2_OOS", params=best_params)
+    
+    _logger.info(f"| {'Symbol':<10} | {'Return(%)':>10} | {'MDD(%)':>8} | {'Trades':>6} | {'WinRate(%)':>10} | {'RoMaD':>6} |")
+    _logger.info(f"|{'-'*12}|{'-'*12}|{'-'*10}|{'-'*8}|{'-'*12}|{'-'*8}|")
+
+    for sym in oos_symbols:
+        target_df = data_maps[sym].get(tf_val)
+        daily_df = data_maps[sym].get("1d")
+        full_merge_idx = data_maps[sym].get(f"merge_idx_{tf_val}")
+        
+        if target_df is None or daily_df is None or full_merge_idx is None:
+            _logger.info(f"| {sym:<10} | {'N/A':>10} | {'N/A':>8} | {'N/A':>6} | {'N/A':>10} | {'N/A':>6} |")
+            continue
+            
+        try:
+            precomputed_daily = strategy_oos.generate_signals(daily_df)
+            s, r, m, t, w = evaluate_symbol_fold(
+                strategy_oos, best_params, sym, tf_val, target_df, daily_df,
+                full_merge_idx, precomputed_daily, 0, len(target_df)
+            )
+            _logger.info(f"| {sym:<10} | {r:10.2f} | {m:8.2f} | {t:6d} | {w:10.2f} | {s:6.2f} |")
+        except Exception as e:
+            _logger.warning(f"OOS Error for {sym}: {e}")
+            _logger.info(f"| {sym:<10} | {'ERR':>10} | {'ERR':>8} | {'ERR':>6} | {'ERR':>10} | {'ERR':>6} |")
+            
     _logger.info("=" * 60)
 
 
