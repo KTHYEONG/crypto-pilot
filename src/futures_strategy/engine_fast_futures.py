@@ -237,7 +237,7 @@ class BacktestEngineFast:
         max_capital_usage = self.strategy.params.get('MAX_CAPITAL_USAGE', 1_000_000)
         
         # Run Numba-accelerated loop
-        trades, final_balance = backtest_loop_numba(
+        trades, final_balance, equity_curve = backtest_loop_numba(
             close, high, low, open_prices, volume_ratio,
             entry_upper, entry_lower,
             trend_dir, strength_filter, atr, parabolic_sar, rsi,
@@ -264,7 +264,8 @@ class BacktestEngineFast:
         )
         
         self.balance = final_balance
-        
+        self._equity_curve = equity_curve
+
         # [MEMORY] Release large DataFrames before processing results
         self.merged_df = None
         self.hourly_df = None
@@ -320,6 +321,29 @@ class BacktestEngineFast:
         
         trades_df = pd.DataFrame(self.trades)
 
+        # MDD from bar-level equity (includes unrealized P&L during open positions)
+        equity = getattr(self, "_equity_curve", None)
+        if equity is not None and len(equity) > 0 and np.isfinite(equity).all():
+            running_max = np.maximum.accumulate(equity)
+            running_max[running_max == 0] = 1e-9
+            drawdown = (equity - running_max) / running_max * 100
+            drawdown = np.nan_to_num(drawdown, nan=0.0)
+            mdd = float(drawdown.min())
+        else:
+            # Fallback: trade-level cumulative (no unrealized)
+            cumulative = [self.initial_balance]
+            for pnl in trades_df["pnl"]:
+                cumulative.append(cumulative[-1] + pnl)
+            cumulative = np.array(cumulative)
+            if not np.isfinite(cumulative).all():
+                mdd = 0.0
+            else:
+                running_max = np.maximum.accumulate(cumulative)
+                running_max[running_max == 0] = 1e-9
+                drawdown = (cumulative - running_max) / running_max * 100
+                drawdown = np.nan_to_num(drawdown, nan=0.0)
+                mdd = float(drawdown.min())
+
         # ROE per trade = PnL / Margin Used. Use actual amount from Numba (avoids fee-distorted inverse estimate).
         pnl = trades_df["pnl"].values
         entry_p = trades_df["entry_price"].values
@@ -341,45 +365,10 @@ class BacktestEngineFast:
             trades_df["pnl_pct"] = (pnl / denom) * 100
         trades_df["pnl_pct"] = trades_df["pnl_pct"].replace([np.inf, -np.inf], 0).fillna(0)
         
-        win_trades = len(trades_df[trades_df['pnl'] > 0])
-        loss_trades = len(trades_df[trades_df['pnl'] <= 0])
+        win_trades = len(trades_df[trades_df["pnl"] > 0])
+        loss_trades = len(trades_df[trades_df["pnl"] <= 0])
         win_rate = (win_trades / len(trades_df)) * 100 if len(trades_df) > 0 else 0
-        
-        # MDD Calculation
-        # Construct cumulative array safely
-        cumulative = [self.initial_balance]
-        for pnl in trades_df['pnl']:
-            cumulative.append(cumulative[-1] + pnl)
-        
-        cumulative = np.array(cumulative)
-        
-        # [ROBUSTNESS] Check for Inf/NaN in cumulative data (Exploding Strategy)
-        if not np.isfinite(cumulative).all():
-             self.logger.warning("Strategy equity curve contains Inf/NaN. Marking as invalid.")
-             # Return invalid result to trigger -10000 score in objective function
-             return {
-                 'total_trades': 0,
-                 'win_trades': 0,
-                 'loss_trades': 0,
-                 'win_rate': 0,
-                 'total_return_pct': 0,
-                 'final_balance': self.initial_balance,
-                 'mdd_pct': 0,
-                 'trades_df': pd.DataFrame()
-             }
 
-        with np.errstate(invalid='ignore', over='ignore', divide='ignore'):
-            running_max = np.maximum.accumulate(cumulative)
-            
-            # Prevent division by zero if running_max is 0
-            running_max[running_max == 0] = 1e-9
-            
-            drawdown = (cumulative - running_max) / running_max * 100
-        
-        # Sanitize drawdown (nan -> 0)
-        drawdown = np.nan_to_num(drawdown, nan=0.0)
-        mdd = drawdown.min()
-        
         return {
             'total_trades': len(trades_df),
             'win_trades': win_trades,
@@ -428,7 +417,8 @@ def backtest_loop_numba(
     """
     n = len(close)
     balance = initial_balance
-    
+    equity_curve = np.zeros(n)
+
     # Position state
     in_position = False
     pending_entry = False 
@@ -457,10 +447,12 @@ def backtest_loop_numba(
     for i in range(n):
         # [WARMUP] Skip trading during warmup period
         if i < warmup_bars:
+            equity_curve[i] = initial_balance
             continue
-            
+
         # [SAFETY] Bankruptcy Check
         if balance <= 0:
+            equity_curve[i] = balance
             break
 
         c_open = open_prices[i]
@@ -646,13 +638,16 @@ def backtest_loop_numba(
         # Only check entry when no position AND this bar did not just exit (Zombie fix)
         elif not in_position and not bar_processed:
             if np.isnan(entry_upper[i]) or np.isnan(entry_lower[i]):
+                equity_curve[i] = balance
                 continue
             if strength_filter[i] == 0:
+                equity_curve[i] = balance
                 continue
             vol_pass = True
             if use_volume_filter and volume_ratio[i] < vol_threshold:
                 vol_pass = False
             if not vol_pass:
+                equity_curve[i] = balance
                 continue
 
             regime_mult = 1.0
@@ -759,6 +754,14 @@ def backtest_loop_numba(
                 pos_side = 0
                 execute_intra_bar = False
 
+        # [EQUITY] Bar-end equity for MDD (includes unrealized when in position)
+        if in_position:
+            margin = (amount * entry_price) / leverage
+            unrealized = (c_price - entry_price) * amount * pos_side
+            equity_curve[i] = balance + margin + unrealized
+        else:
+            equity_curve[i] = balance
+
     # --- 4. END-OF-DATA FORCED LIQUIDATION ---
     # Realize remaining position at the final bar close to avoid hidden unrealized PnL.
     if in_position and n > 0:
@@ -781,4 +784,4 @@ def backtest_loop_numba(
             trades[trade_count] = [entry_idx, last_idx, pos_side, entry_price, exit_price, pnl, amount]
             trade_count += 1
 
-    return trades[:trade_count], balance
+    return trades[:trade_count], balance, equity_curve
