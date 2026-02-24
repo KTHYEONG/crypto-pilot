@@ -69,7 +69,7 @@ class BacktestEngineFast:
             self.daily_df = self.strategy.generate_signals(self.daily_df)
         
         # Filter essential columns only
-        exclude_cols = {'date_key', 'datetime', 'date', 'open', 'high', 'low', 'close', 'volume'}
+        exclude_cols = {'date_key', 'datetime', 'date', 'open', 'high', 'low', 'close', 'volume', 'timestamp'}
         indicator_cols = [c for c in self.daily_df.columns if c not in exclude_cols]
         
         # Shift(1) to prevent lookahead
@@ -110,7 +110,7 @@ class BacktestEngineFast:
             self.daily_df['date_key'] = pd.to_datetime(self.daily_df['datetime']).dt.strftime('%Y-%m-%d')
 
         # Filter essential columns
-        exclude_cols = {'date_key', 'datetime', 'date', 'open', 'high', 'low', 'close', 'volume'}
+        exclude_cols = {'date_key', 'datetime', 'date', 'open', 'high', 'low', 'close', 'volume', 'timestamp'}
         indicator_cols = [c for c in self.daily_df.columns if c not in exclude_cols]
         
         # Shift & Rename
@@ -528,7 +528,7 @@ def backtest_loop_numba(
                 if exit_type == 0:
                     unreal_profit = (highest - entry_price) / pos_atr if pos_atr > 0 else 0
                     if unreal_profit >= trailing_activation_atr:
-                        new_stop = highest - (pos_atr * atr_mult)
+                        new_stop = max(highest - (pos_atr * atr_mult), entry_price * 0.01)
                         if new_stop > stop_price:
                             stop_price = new_stop
             else:
@@ -537,7 +537,7 @@ def backtest_loop_numba(
                 if exit_type == 0:
                     unreal_profit = (entry_price - lowest) / pos_atr if pos_atr > 0 else 0
                     if unreal_profit >= trailing_activation_atr:
-                        new_stop = lowest + (pos_atr * atr_mult)
+                        new_stop = min(lowest + (pos_atr * atr_mult), entry_price * 1.99)
                         if new_stop < stop_price:
                             stop_price = new_stop
             
@@ -665,7 +665,7 @@ def backtest_loop_numba(
             if np.isnan(entry_upper[i]) or np.isnan(entry_lower[i]):
                 equity_curve[i] = balance
                 continue
-            if strength_filter[i] == 0:
+            if strength_filter[i] == 0 or np.isnan(strength_filter[i]):
                 equity_curve[i] = balance
                 continue
             vol_pass = True
@@ -710,9 +710,11 @@ def backtest_loop_numba(
                     continue
                 if stop_loss_type == 1:
                     if pending_side == 1:
-                        stop_price = fill_price - (current_atr * atr_sl_mult)
+                        # Floor at 1% of fill_price so stop_price is never negative (SL stays enforceable)
+                        stop_price = max(fill_price - (current_atr * atr_sl_mult), fill_price * 0.01)
                     else:
-                        stop_price = fill_price + (current_atr * atr_sl_mult)
+                        # Cap at 199% of fill_price so short stop remains finite and enforceable
+                        stop_price = min(fill_price + (current_atr * atr_sl_mult), fill_price * 1.99)
                 else:
                     if pending_side == 1:
                         stop_price = fill_price * (1 - stop_loss_pct)
