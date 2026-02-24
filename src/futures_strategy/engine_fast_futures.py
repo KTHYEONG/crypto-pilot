@@ -467,88 +467,9 @@ def backtest_loop_numba(
         c_high = high[i]
         c_low = low[i]
         current_timestamp = timestamps[i]
-        
-        # --- 1. EXECUTION: PENDING ENTRY AT OPEN ---
-        if pending_entry and not in_position:
-            # We are at Open of bar i. Signal was confirmed at i-1.
-            fill_price = 0.0
-            
-            if pending_side == 1: # LONG
-                fill_price = c_open * (1 + slippage_rate)
-            else: # SHORT
-                fill_price = c_open * (1 - slippage_rate)
-            
-            # Use indicators from i-1 (signal bar) to keep timing strictly causal.
-            signal_idx = i - 1 if i > 0 else i
-            current_atr = atr[signal_idx]
-            
-            # 1. SL Calc
-            if stop_loss_type == 1: # ATR
-                if pending_side == 1:
-                    stop_price = fill_price - (current_atr * atr_sl_mult)
-                else:
-                    stop_price = fill_price + (current_atr * atr_sl_mult)
-            else: # Fixed
-                if pending_side == 1:
-                    stop_price = fill_price * (1 - stop_loss_pct)
-                else:
-                    stop_price = fill_price * (1 + stop_loss_pct)
-            
-            # 2. TP Calc
-            if use_take_profit:
-                if pending_side == 1:
-                    tp_price = fill_price + (current_atr * tp_atr_mult)
-                else:
-                    tp_price = fill_price - (current_atr * tp_atr_mult)
-            else:
-                tp_price = 0.0
-                
-            # 3. Size Calculation
-            stop_distance = abs(fill_price - stop_price)
-            
-            # [REALISM FIX] Capital Management
-            if use_compounding:
-                # Use balance but cap it to simulate liquidity limits
-                if balance > max_capital_usage:
-                    current_equity = max_capital_usage
-                else:
-                    current_equity = balance
-            else:
-                # Fixed Fractional (Risk based on Initial Balance only)
-                # Most statistically robust for optimization
-                current_equity = initial_balance
-            
-            if stop_distance > 0:
-                risk_amount = current_equity * exec_risk
-                amount = risk_amount / stop_distance
-            else:
-                amount = (current_equity * 0.01) / fill_price
-                
-            # Cap to Leverage (based on current equity)
-            max_amount = (current_equity * leverage) / fill_price
-            if amount > max_amount:
-                amount = max_amount
+        execute_intra_bar = False
 
-            # Fee & Margin Check
-            required_margin = (amount * fill_price) / leverage
-            entry_fee = amount * fill_price * fee_rate
-            total_cost = required_margin + entry_fee
-            
-            if balance >= total_cost:
-                balance -= total_cost
-                in_position = True
-                pos_side = pending_side
-                entry_price = fill_price
-                entry_idx = i
-                highest = fill_price
-                lowest = fill_price
-                pos_atr = current_atr
-                pending_entry = False
-            else:
-                # Funding insufficient, cancel
-                pending_entry = False
-
-        # --- 2. POSITION MANAGEMENT (Exits & Funding) ---
+        # --- 1. POSITION MANAGEMENT (Exits & Funding) ---
         if in_position:
             # A. Funding Fee (UTC 00, 08, 16)
             current_hour_utc = int((current_timestamp // 1000) % 86400 // 3600)
@@ -710,24 +631,18 @@ def backtest_loop_numba(
                             if new_stop < stop_price:
                                 stop_price = new_stop
 
-        # --- 3. SIGNAL DETECTION (For Pending Next Open) ---
-        elif not in_position and not pending_entry:
-            # Indicators are already shifted by 1.
-            # So looking at index [i] means looking at Confirmed Daily/Hourly data from [i-1].
-            
-            # Check NaN
+        # --- 2. SIGNAL DETECTION & IMMEDIATE EXECUTION (Intra-bar breakout) ---
+        elif not in_position:
             if np.isnan(entry_upper[i]) or np.isnan(entry_lower[i]):
                 continue
-            
-            # Volume & Strength Filters
-            if strength_filter[i] == 0: continue
-            
+            if strength_filter[i] == 0:
+                continue
             vol_pass = True
             if use_volume_filter and volume_ratio[i] < vol_threshold:
                 vol_pass = False
-            if not vol_pass: continue
+            if not vol_pass:
+                continue
 
-            # Dynamic Risk Sizing
             regime_mult = 1.0
             if use_dynamic_risk:
                 if natr[i] > panic_regime_natr:
@@ -736,19 +651,96 @@ def backtest_loop_numba(
                     regime_mult = strong_regime_multiplier
                 elif hurst[i] < weak_regime_hurst:
                     regime_mult = weak_regime_multiplier
-            
             exec_risk = risk_per_trade * regime_mult
 
-            # LONG Signal
-            if c_price > entry_upper[i] and trend_dir[i] == 1:
-                pending_entry = True
+            do_entry = False
+            fill_price = 0.0
+            if c_high > entry_upper[i] and trend_dir[i] == 1:
+                fill_price = max(c_open, entry_upper[i]) * (1 + slippage_rate)
                 pending_side = 1
-                
-            # SHORT Signal
-            elif c_price < entry_lower[i] and trend_dir[i] == -1:
-                pending_entry = True
+                do_entry = True
+            elif c_low < entry_lower[i] and trend_dir[i] == -1:
+                fill_price = min(c_open, entry_lower[i]) * (1 - slippage_rate)
                 pending_side = -1
-    
+                do_entry = True
+
+            if do_entry:
+                signal_idx = i - 1 if i > 0 else 0
+                current_atr = atr[signal_idx]
+                if stop_loss_type == 1:
+                    if pending_side == 1:
+                        stop_price = fill_price - (current_atr * atr_sl_mult)
+                    else:
+                        stop_price = fill_price + (current_atr * atr_sl_mult)
+                else:
+                    if pending_side == 1:
+                        stop_price = fill_price * (1 - stop_loss_pct)
+                    else:
+                        stop_price = fill_price * (1 + stop_loss_pct)
+                tp_price = 0.0
+                if use_take_profit:
+                    if pending_side == 1:
+                        tp_price = fill_price + (current_atr * tp_atr_mult)
+                    else:
+                        tp_price = fill_price - (current_atr * tp_atr_mult)
+                stop_distance = abs(fill_price - stop_price)
+                if use_compounding:
+                    current_equity = max_capital_usage if balance > max_capital_usage else balance
+                else:
+                    current_equity = initial_balance
+                if stop_distance > 0:
+                    amount = (current_equity * exec_risk) / stop_distance
+                else:
+                    amount = (current_equity * 0.01) / fill_price
+                max_amount = (current_equity * leverage) / fill_price
+                if amount > max_amount:
+                    amount = max_amount
+                required_margin = (amount * fill_price) / leverage
+                entry_fee = amount * fill_price * fee_rate
+                if balance >= required_margin + entry_fee:
+                    balance -= (required_margin + entry_fee)
+                    in_position = True
+                    pos_side = pending_side
+                    entry_price = fill_price
+                    entry_idx = i
+                    highest = fill_price
+                    lowest = fill_price
+                    pos_atr = current_atr
+                    execute_intra_bar = True
+
+        # --- 3. INTRA-BAR SL/TP CHECK (same-bar exit after intra-bar entry; SL priority) ---
+        if in_position and execute_intra_bar:
+            intra_exit_triggered = False
+            intra_exit_price = 0.0
+            if pos_side == 1 and c_low <= stop_price:
+                intra_exit_price = stop_price * (1 - slippage_rate)
+                intra_exit_triggered = True
+            elif pos_side == -1 and c_high >= stop_price:
+                intra_exit_price = stop_price * (1 + slippage_rate)
+                intra_exit_triggered = True
+            elif use_take_profit and tp_price > 0:
+                if pos_side == 1 and c_high >= tp_price:
+                    intra_exit_price = tp_price
+                    intra_exit_triggered = True
+                elif pos_side == -1 and c_low <= tp_price:
+                    intra_exit_price = tp_price
+                    intra_exit_triggered = True
+            if intra_exit_triggered:
+                if pos_side == 1:
+                    pnl = (intra_exit_price - entry_price) * amount
+                else:
+                    pnl = (entry_price - intra_exit_price) * amount
+                exit_fee = amount * intra_exit_price * fee_rate
+                pnl -= exit_fee
+                margin = (amount * entry_price) / leverage
+                balance += margin + pnl
+                if trade_count < max_trades:
+                    trades[trade_count] = [entry_idx, i, pos_side, entry_price, intra_exit_price, pnl]
+                    trade_count += 1
+                in_position = False
+                pos_side = 0
+                execute_intra_bar = False
+
     # --- 4. END-OF-DATA FORCED LIQUIDATION ---
     # Realize remaining position at the final bar close to avoid hidden unrealized PnL.
     if in_position and n > 0:
