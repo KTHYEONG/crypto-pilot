@@ -16,8 +16,19 @@ class StrategyBase(ABC):
     def generate_signals(self, df: pd.DataFrame) -> pd.DataFrame:
         raise NotImplementedError
 
-    def get_required_warmup(self) -> int:
-        """Calculate required warmup bars based on strategy parameters."""
+    def get_required_warmup(self, freq: str = "daily") -> int:
+        """
+        Return required warmup bar count in the requested timeframe.
+        freq='daily': daily-bar count (for strategies that run on daily data).
+        freq='hourly': hourly-bar count so that warmup duration matches daily (daily_bars * 24).
+        """
+        daily_bars = self._compute_warmup_bars()
+        if freq == "hourly":
+            return daily_bars * 24
+        return daily_bars
+
+    def _compute_warmup_bars(self) -> int:
+        """Daily-bar warmup from strategy params (used by get_required_warmup)."""
         return calculate_required_warmup_bars(self.params)
 
 
