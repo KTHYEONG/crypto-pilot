@@ -302,44 +302,33 @@ class BacktestEngineFast:
         
         trades_df = pd.DataFrame(self.trades)
         
-        # [FIX] Calculate pnl_pct as Return on Equity (ROE) per trade
-        # This provides a consistent metric regardless of account size growing
-        # ROE = PnL / Initial Margin Used
-        
-        # Reconstruct Margin used for each trade
-        # Margin = (Entry Price * Amount) / Leverage
-        # We need to estimate Amount from trades? 
-        # The trades array has: [entry_idx, exit_idx, side, entry_p, exit_p, pnl]
-        # We don't have 'amount' stored in trades array directly.
-        # But PnL = (Exit - Entry) * Amount * Side
-        # Amount = PnL / ((Exit - Entry) * Side)
-        
-        # Let's Vectorize this safely
+        # ROE per trade = PnL / Margin Used (capital actually at risk). Aligns with Numba loop (balance -= margin + fee).
+        # Estimate amount from PnL and price diff; margin_est = amount * entry_price / leverage.
         pnl = trades_df['pnl'].values
         entry_p = trades_df['entry_price'].values
         exit_p = trades_df['exit_price'].values
         side = np.where(trades_df['side'] == 'LONG', 1, -1)
-        
         price_diff = (exit_p - entry_p) * side
-        
-        # Avoid zero division for amount calc
+
         with np.errstate(invalid='ignore', divide='ignore'):
-             amount_est = pnl / price_diff
-             # If price_diff is 0 (entry=exit), amount is inf. Handle this.
-             # But if entry=exit, PnL should be -Fee.
-             # This estimation is tricky with fees included in PnL.
-             
-        # Alternative: Simply use (PnL / Balance_Before) * 100 as before but handle the precision better
-        # The user's issue is likely the astronomical total return.
-        
-        # [DECISION] Stick to Balance Relative return but ensure float64 precision
-        with np.errstate(invalid='ignore', over='ignore', divide='ignore'):
-            pnl_cumsum = trades_df['pnl'].cumsum().shift(1).fillna(0)
-            trades_df['balance_before'] = self.initial_balance + pnl_cumsum
-            
-            trades_df['balance_before'] = trades_df['balance_before'].replace(0, 1e-9)
-            trades_df['pnl_pct'] = (trades_df['pnl'] / trades_df['balance_before']) * 100
-        
+            amount_est = pnl / price_diff
+            amount_est = np.abs(amount_est)  # Size is positive; price_diff sign can flip for shorts
+            leverage = float(self.leverage)
+            margin_est = amount_est * entry_p / leverage
+            margin_est = np.where(np.isfinite(margin_est) & (margin_est > 0), margin_est, np.nan)
+
+        pnl_cumsum = trades_df['pnl'].cumsum().shift(1).fillna(0)
+        trades_df['balance_before'] = (self.initial_balance + pnl_cumsum).replace(0, 1e-9)
+        balance_before = trades_df['balance_before'].values
+
+        # Use margin_est as denominator when valid; else fallback to balance_before (e.g. price_diff ~0)
+        denom = np.where(
+            np.isfinite(margin_est) & (margin_est > 0),
+            margin_est,
+            np.asarray(balance_before, dtype=np.float64),
+        )
+        with np.errstate(invalid='ignore', divide='ignore'):
+            trades_df['pnl_pct'] = (pnl / denom) * 100
         trades_df['pnl_pct'] = trades_df['pnl_pct'].replace([np.inf, -np.inf], 0).fillna(0)
         
         win_trades = len(trades_df[trades_df['pnl'] > 0])
