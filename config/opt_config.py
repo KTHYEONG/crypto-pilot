@@ -29,11 +29,11 @@ SEARCH_SPACE_V2: Dict[str, Dict[str, Any]] = {
     },
     "TREND_FILTER_TYPE": {
         "type": "categorical",
-        "choices": ["EMA", "SUPERTREND", "MACD", "VWAP"],
+        "choices": ["EMA", "SUPERTREND", "VWAP", "DMI"],
     },
     "STRENGTH_FILTER_TYPE": {
         "type": "categorical",
-        "choices": ["NONE", "ADX", "HURST", "NATR"],
+        "choices": ["NONE", "ADX", "NATR", "ER"],
     },
     "STOP_LOSS_TYPE": {
         "type": "categorical",
@@ -46,9 +46,10 @@ SEARCH_SPACE_V2: Dict[str, Dict[str, Any]] = {
     # 2. CORE SYSTEM PARAMETERS (Numeric Limits)
     # --------------------------------------------------------------------------
     "ENTRY_PERIOD": {"type": "int", "low": 14, "high": 120, "log": True},
-    "MA_PERIOD": {"type": "int", "low": 20, "high": 150, "log": True},
+    "MA_PERIOD": {"type": "int", "low": 14, "high": 150, "log": True},
     "ATR_PERIOD": {"type": "int", "low": 14, "high": 28, "step": 1},
-    "MAX_HOLDING_BARS": {"type": "int", "low": 5, "high": 60, "log": True},
+    "STRENGTH_FILTER_PERIOD": {"type": "int", "low": 10, "high": 28, "log": True},
+    "MAX_HOLDING_BARS": {"type": "int", "low": 8, "high": 80, "log": True},
     "RISK_PER_TRADE": {"type": "float", "low": 0.01, "high": 0.05, "step": 0.005},
     "LEVERAGE": {"type": "int", "low": 2, "high": 10},
 
@@ -57,9 +58,9 @@ SEARCH_SPACE_V2: Dict[str, Dict[str, Any]] = {
     # --------------------------------------------------------------------------
     "STOP_LOSS_PCT": {"type": "float", "low": 0.01, "high": 0.05, "step": 0.005},
     "ATR_STOP_LOSS_MULT": {"type": "float", "low": 1.5, "high": 4.0, "step": 0.25},
-    "TAKE_PROFIT_ATR_MULT": {"type": "float", "low": 2.5, "high": 8.0, "log": True},
+    "TAKE_PROFIT_ATR_MULT": {"type": "float", "low": 1.5, "high": 6.0, "log": True},
     "ATR_MULTIPLIER": {"type": "float", "low": 2.0, "high": 5.0, "step": 0.25},
-    "TRAILING_ACTIVATION_ATR": {"type": "float", "low": 1.0, "high": 3.0, "step": 0.5},
+    "TRAILING_ACTIVATION_ATR": {"type": "float", "low": 1.0, "high": 3.0, "step": 0.25},
     "PSAR_STEP": {"type": "float", "low": 0.01, "high": 0.05, "step": 0.01},
     "PSAR_MAX": {"type": "float", "low": 0.1, "high": 0.3, "step": 0.05},
 
@@ -67,15 +68,12 @@ SEARCH_SPACE_V2: Dict[str, Dict[str, Any]] = {
     # 4. CONDITIONAL INDICATOR THRESHOLDS
     # --------------------------------------------------------------------------
     "ADX_THRESHOLD": {"type": "int", "low": 20, "high": 35, "step": 1},
-    "HURST_PERIOD": {"type": "int", "low": 100, "high": 300, "log": True},
-    "HURST_TREND_THRESHOLD": {"type": "float", "low": 0.53, "high": 0.60, "step": 0.01},
-    "NATR_THRESHOLD": {"type": "float", "low": 0.5, "high": 2.0, "step": 0.1},
+    "NATR_THRESHOLD": {"type": "float", "low": 1.0, "high": 3.5, "step": 0.1},
+    "ER_THRESHOLD": {"type": "float", "low": 0.4, "high": 0.65, "step": 0.05},
     "BB_STD": {"type": "float", "low": 1.8, "high": 2.8, "step": 0.1},
     "KELTNER_ATR_MULT": {"type": "float", "low": 1.2, "high": 2.5, "step": 0.1},
     "SUPERTREND_MULT": {"type": "float", "low": 1.5, "high": 3.0, "step": 0.1},
     "SUPERTREND_PERIOD": {"type": "int", "low": 7, "high": 30, "step": 1},
-    "MACD_FAST": {"type": "int", "low": 8, "high": 18, "step": 1},
-    "MACD_SLOW": {"type": "int", "low": 21, "high": 45, "step": 1},
-    "MACD_SIGNAL": {"type": "int", "low": 6, "high": 14, "step": 1},
+    "DMI_PERIOD": {"type": "int", "low": 14, "high": 45, "step": 1},
     "VWAP_STD_MULT": {"type": "float", "low": 1.0, "high": 2.5, "step": 0.1},
 }
