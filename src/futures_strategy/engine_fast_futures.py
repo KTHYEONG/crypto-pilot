@@ -74,7 +74,14 @@ class BacktestEngineFast:
         
         # Shift(1) to prevent lookahead
         shifted_daily = self.daily_df[indicator_cols].shift(1)
-        
+
+        max_valid_idx = len(shifted_daily) - 1
+        if np.any(self._merge_index_map > max_valid_idx):
+            raise ValueError(
+                f"merge_index_map contains out-of-bounds index "
+                f"(max={self._merge_index_map.max()}, valid<={max_valid_idx})"
+            )
+
         # Shallow copy (deep=False): new object so we add daily_* columns to merged_df only;
         # underlying data shared with hourly_df for memory/speed. Align daily -> hourly via index map.
         self.merged_df = self.hourly_df.copy(deep=False)
