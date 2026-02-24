@@ -256,7 +256,8 @@ def evaluate_symbol_fold(
     else:
         span_days = (trades_df["exit_time"].max() - trades_df["exit_time"].min()).total_seconds() / 86400.0
 
-    win_rate = (len(trades_df[trades_df["pnl"] > 0]) / len(trades_df)) * 100 if len(trades_df) > 0 else 0.0
+    true_pnl = trades_df["pnl"] - trades_df["entry_fee"]
+    win_rate = (len(trades_df[true_pnl > 0]) / len(trades_df)) * 100 if len(trades_df) > 0 else 0.0
     score, ret_pct, mdd_pct = calc_romad_from_metrics(ret_pct, mdd_pct, len(trades_df), tf, span_days)
 
     if long_count == 0 or short_count == 0:
@@ -270,11 +271,13 @@ def objective_v2(trial: optuna.Trial, data_maps: Dict[str, Dict[str, pd.DataFram
     tf = params["TIMEFRAME"]
     symbols = list(data_maps.keys())
 
-    # Build folds based on the first symbol's target timeframe length
-    base_sym = symbols[0]
-    if tf not in data_maps[base_sym]:
+    # Build folds using min length across all symbols so every symbol has valid OOS segments
+    lengths = [len(data_maps[sym][tf]) for sym in symbols if tf in data_maps.get(sym, {})]
+    if not lengths:
         return -10000.0
-    folds = build_anchored_folds(data_maps[base_sym][tf], n_folds=3, embargo=EMBARGO_BARS.get(tf, 0))
+    min_len = min(lengths)
+    base_df_for_folds = pd.DataFrame(index=range(min_len))
+    folds = build_anchored_folds(base_df_for_folds, n_folds=3, embargo=EMBARGO_BARS.get(tf, 0))
 
     if not folds:
         return -10000.0
