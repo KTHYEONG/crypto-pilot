@@ -50,7 +50,9 @@ SEARCH_SPACE_V2: Dict[str, Dict[str, Any]] = {
     "MA_PERIOD": {"type": "int", "low": 14, "high": 150, "log": True},
     "ATR_PERIOD": {"type": "int", "low": 14, "high": 28, "step": 1},
     "STRENGTH_FILTER_PERIOD": {"type": "int", "low": 10, "high": 28, "log": True},
-    "MAX_HOLDING_BARS": {"type": "int", "low": 8, "high": 80, "log": True},
+    "MAX_HOLDING_BARS_4H": {"type": "int", "low": 8, "high": 48, "log": True},   
+    "MAX_HOLDING_BARS_1D": {"type": "int", "low": 5, "high": 25, "log": True},   
+    "TIME_EXIT_PROFIT_THRESHOLD": {"type": "float", "low": 0.0, "high": 1.5, "step": 0.1},
     "RISK_PER_TRADE": {"type": "float", "low": 0.01, "high": 0.05, "step": 0.005},
     "LEVERAGE": {"type": "int", "low": 2, "high": 10},
 
