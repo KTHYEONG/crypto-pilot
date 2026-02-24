@@ -30,6 +30,7 @@ from src.futures_strategy.optimize_futures import (
     cached_generate_signals_futures,
     compute_segment_merge_index,
 )
+from src.futures_strategy.funding_utils import merge_funding_into_ohlcv
 
 # --------------------------------------------------------------------------
 # Logger setup
@@ -194,6 +195,7 @@ def evaluate_symbol_fold(
     # Filter to OOS period
     oos_start = test_start - seg_start
     sig_oos = sig_df.iloc[oos_start:].copy()
+    sig_oos = merge_funding_into_ohlcv(symbol, sig_oos, DATA_DIR)
     merge_oos = merge_idx[oos_start:]
 
     engine = BacktestEngineFast(

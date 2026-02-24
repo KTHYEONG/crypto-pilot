@@ -24,10 +24,12 @@ from config.settings import (
     FUTURES_BACKTEST_END_DATE,
     FUTURES_TRAIN_CUTOFF_DATE,
     FUTURES_INITIAL_BALANCE,
+    DATA_DIR,
 )
 from src.common.utils import setup_logger
 from src.futures_strategy.data_collector import DataCollector
 from src.futures_strategy.strategies_futures import UltimateStrategy
+from src.futures_strategy.funding_utils import merge_funding_into_ohlcv
 
 # Setup Logging
 logger = setup_logger("FuturesVerifier", write_file=False)
@@ -543,7 +545,8 @@ def load_data(symbol, start_date, end_date, timeframe):
     # Timeframe Data (Parquet range cache + incremental fetch)
     hourly_df = collector.ensure_data(symbol, timeframe, start_date, end_date)
     hourly_df['datetime'] = pd.to_datetime(hourly_df['timestamp'], unit='ms')
-    
+    hourly_df = merge_funding_into_ohlcv(symbol, hourly_df, DATA_DIR)
+
     # Engine performs signal generation/merge internally.
     return hourly_df, daily_df
 
