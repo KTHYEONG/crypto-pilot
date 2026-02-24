@@ -185,6 +185,9 @@ def suggest_params_v2(trial: optuna.Trial, space: Dict[str, Any]) -> Dict[str, A
 
     # Sanity constraints
     # (MACD constraint removed as indicator was swapped for DMI)
+    if not params.get("USE_VOLUME_FILTER", False):
+        params.pop("VOLUME_MA_PERIOD", None)
+        params.pop("VOLUME_Z_THRESHOLD", None)
 
     return params
 
