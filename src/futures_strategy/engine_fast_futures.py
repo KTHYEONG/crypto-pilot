@@ -282,14 +282,23 @@ class BacktestEngineFast:
         return result
     
     def get_results(self):
-        # [ROBUSTNESS] Sanitize balance if infinite (likely due to extreme compounding)
+        # [ROBUSTNESS] Exploded strategy (inf/nan balance): return invalid result so optimizer penalizes it
         if not np.isfinite(self.balance):
-             # Cap at an unreasonably high number to preserve "goodness" but avoid Inf
-             self.balance = 1e15 
-             
+            self.logger.warning("Balance is non-finite (exploded strategy). Returning invalid result.")
+            return {
+                'total_trades': 0,
+                'win_trades': 0,
+                'loss_trades': 0,
+                'win_rate': 0,
+                'total_return_pct': 0,
+                'final_balance': self.initial_balance,
+                'mdd_pct': 0,
+                'trades_df': pd.DataFrame()
+            }
+
         total_return = self.balance - self.initial_balance
         total_return_pct = (total_return / self.initial_balance) * 100
-        
+
         if not self.trades:
             return {
                 'total_trades': 0,
