@@ -427,7 +427,6 @@ def backtest_loop_numba(
 
     # Position state
     in_position = False
-    pending_entry = False 
     pending_side = 0
     
     pos_side = 0  # 1: LONG, -1: SHORT
@@ -640,7 +639,6 @@ def backtest_loop_numba(
                     trade_count += 1
                 in_position = False
                 last_funding_hour = -1  # Reset so next position can be charged in same funding hour
-                pending_entry = False  # Clear any pending
                 bar_processed = True   # No re-entry on this bar (Zombie/Phantom fix)
 
         # --- 2. ENTRY: Intra-bar breakout (simulation premise: bar i high/low known at bar i) ---
