@@ -46,6 +46,13 @@ EMBARGO_BARS = {"4h": 6, "1d": 2}
 
 
 # --------------------------------------------------------------------------
+# Score Grade Definitions (Theoretic)
+# - S (Platinum) [8.0+]: Extreme performance with consistent equity growth across all folds.
+# - A (Gold) [4.0~8.0]: Strong risk-adjusted returns, production-ready robustness.
+# - B (Silver) [1.5~4.0]: Reliable strategy with good market-beating potential.
+# - C (Bronze) [0.5~1.5]: Profitable but low efficiency or high volatility sensitivity.
+# - D (Fail) [<0.5]: Inconsistent performance or excessive risk (MDD > 40%).
+# --------------------------------------------------------------------------
 # Metric Calculation
 # --------------------------------------------------------------------------
 def calc_romad(pnl_series: pd.Series, n_trades: int, tf: str) -> Tuple[float, float, float]:
