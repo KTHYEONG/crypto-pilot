@@ -283,7 +283,8 @@ def main() -> None:
             continue
             
         try:
-            folds_oos: List[Tuple[int, int, int]] = build_anchored_folds(target_df, n_folds=3, embargo=EMBARGO_BARS.get(tf_val, 0))
+            cv_folds, holdout_fold = build_anchored_folds(target_df, n_folds=3, holdout_ratio=0.25, embargo=EMBARGO_BARS.get(tf_val, 0))
+            folds_oos = cv_folds + ([holdout_fold] if holdout_fold[2] > holdout_fold[1] else [])
             if not folds_oos:
                 _logger.info(f"| {sym:<10} | {'NOFOLD':>8} | {'NOFOLD':>8} | {'NOFOLD':>5} | {'NOFOLD':>8} | {'NOFOLD':>7} |")
                 continue
