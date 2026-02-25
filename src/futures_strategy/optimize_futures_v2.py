@@ -61,6 +61,7 @@ def main() -> None:
     parser.add_argument("--symbols", type=str, default="BTC/USDT")
     parser.add_argument("--trials", type=int, default=OPT_V2_CONFIG["total_trials"])
     parser.add_argument("--jobs", type=int, default=OPT_V2_CONFIG["n_jobs"])
+    parser.add_argument("--test", action="store_true", help="Load best study from DB and evaluate without optimizing")
     args: argparse.Namespace = parser.parse_args()
 
     symbols: List[str] = [s.strip() for s in args.symbols.split(",")]
@@ -117,27 +118,35 @@ def main() -> None:
         seed=q_seeds[0],
     )
 
-    try:
-        optuna.delete_study(study_name=study_name, storage=storage_url)
-        _logger.info(f"Deleted existing study '{study_name}' for a fresh start.")
-    except KeyError:
-        pass  
+    if args.test:
+        try:
+            study = optuna.load_study(study_name=study_name, storage=storage_url)
+            _logger.info(f"Loaded existing study '{study_name}' for testing.")
+        except Exception as e:
+            _logger.error(f"Failed to load study '{study_name}': {e}")
+            sys.exit(1)
+    else:
+        try:
+            optuna.delete_study(study_name=study_name, storage=storage_url)
+            _logger.info(f"Deleted existing study '{study_name}' for a fresh start.")
+        except KeyError:
+            pass  
 
-    study: optuna.Study = optuna.create_study(
-        study_name=study_name,
-        storage=storage_url,
-        direction="maximize",
-        sampler=sampler,
-        load_if_exists=False,
-    )
+        study = optuna.create_study(
+            study_name=study_name,
+            storage=storage_url,
+            direction="maximize",
+            sampler=sampler,
+            load_if_exists=False,
+        )
 
-    study.optimize(
-        lambda t: objective_v2(t, data_maps, symbols),
-        n_trials=base_trials,
-        n_jobs=args.jobs,
-        catch=(Exception,),
-        show_progress_bar=True,  
-    )
+        study.optimize(
+            lambda t: objective_v2(t, data_maps, symbols),
+            n_trials=base_trials,
+            n_jobs=args.jobs,
+            catch=(Exception,),
+            show_progress_bar=True,  
+        )
 
     SEP_WIDTH: int = 70
     _logger.info("=" * SEP_WIDTH)
@@ -248,8 +257,9 @@ def main() -> None:
             
     _logger.info("=" * SEP_WIDTH)
 
-    # 4. Save to SQLite
-    save_study_to_sqlite(study, project_root)
+    # 4. Save to SQLite (Only during optimization)
+    if not args.test:
+        save_study_to_sqlite(study, project_root)
 
 if __name__ == "__main__":
     main()
