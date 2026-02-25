@@ -10,8 +10,8 @@ from typing import Any, Dict
 
 # Meta-parameters for Optuna TPE optimization
 OPT_V2_CONFIG = {
-    "total_trials": 5000,
-    "n_startup_trials": 500,
+    "total_trials": 1750,
+    "n_startup_trials": 250,
     "seeds": [42, 137],  # Dual-seed approach for robust GP prior
     "n_jobs": 8,         # Default parallel workers
 }
