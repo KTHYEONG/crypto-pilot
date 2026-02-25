@@ -2198,7 +2198,10 @@ class RealTraderFutures:
             # [SEQ-1] Stop Loss (SAR is merged as stop boundary, same as backtest)
             current_stop = float(active_stop)
             if use_sar_exit and np.isfinite(sar) and sar > 0:
-                current_stop = max(current_stop, float(sar)) if amount > 0 else min(current_stop, float(sar))
+                if amount > 0 and sar < candle_open:
+                    current_stop = max(current_stop, float(sar))
+                elif amount < 0 and sar > candle_open:
+                    current_stop = min(current_stop, float(sar))
                 current_stop = self.client.round_price(symbol, current_stop)
 
             exit_triggered = False
@@ -2265,7 +2268,10 @@ class RealTraderFutures:
                         )
 
                 max_holding_bars = float(params.get('MAX_HOLDING_BARS', 9999))
-                if bars_held >= max_holding_bars:
+                hard_exit = (bars_held >= max_holding_bars * 2.0)
+                soft_check = (bars_held >= max_holding_bars)
+                
+                if soft_check or hard_exit:
                     if pos_atr > 0:
                         if amount > 0:
                             unreal_p = (candle_close - entry_price) / pos_atr
@@ -2275,9 +2281,9 @@ class RealTraderFutures:
                         unreal_p = 0.0
 
                     time_exit_profit_threshold = float(params.get('TIME_EXIT_PROFIT_THRESHOLD', 0.5))
-                    if unreal_p < time_exit_profit_threshold:
+                    if unreal_p < time_exit_profit_threshold or hard_exit:
                         exit_triggered = True
-                        reason = f"Time Cut (Held {bars_held:.1f} bars, UnrealATR {unreal_p:.2f})"
+                        reason = f"Time Cut (Held {bars_held:.1f} bars, UnrealATR {unreal_p:.2f}{', Hard' if hard_exit else ''})"
                         exit_price_for_calc = candle_open * (1 - slippage if amount > 0 else 1 + slippage)
 
             if not exit_triggered:
