@@ -52,6 +52,7 @@ def evaluate_symbol_fold(
         initial_balance=FUTURES_INITIAL_BALANCE,
         merge_index_map=merge_oos,
         precomputed_daily_df=precomputed_daily_df,
+        warmup_bars=0,
     )
     engine.leverage = params.get("LEVERAGE", 1)
     engine.risk_per_trade = params.get("RISK_PER_TRADE", 0.02)
@@ -61,11 +62,11 @@ def evaluate_symbol_fold(
         result: Dict[str, Any] = engine.run()
         trades_df: pd.DataFrame = result.get("trades_df")
     except Exception as e:
-        _logger.warning("Backtest engine error: %s", e)
-        return -100.0, 0.0, 0.0, 0, 0.0, 0.0
+        _logger.warning("Backtest engine error: %s", e, exc_info=True)
+        return -10.0, 0.0, 0.0, 0, 0.0, 0.0
 
     if trades_df is None or trades_df.empty:
-        return -100.0, 0.0, 0.0, 0, 0.0, 0.0
+        return -10.0, 0.0, 0.0, 0, 0.0, 0.0
 
     long_count: int = len(trades_df[trades_df["side"] == "LONG"])
     short_count: int = len(trades_df[trades_df["side"] == "SHORT"])
@@ -81,14 +82,20 @@ def evaluate_symbol_fold(
     
     score: float
     ret_pct, mdd_pct = float(ret_pct), float(mdd_pct)
-    score, ret_pct, mdd_pct = calc_romad_from_metrics(ret_pct, mdd_pct, len(trades_df), tf, span_days, n_trials)
+    score, ret_pct, mdd_pct = calc_romad_from_metrics(
+        ret_pct, mdd_pct, len(trades_df), tf, span_days, n_trials, win_rate=win_rate
+    )
 
     pf: float = calc_profit_factor(trades_df)
-    if pf < 1.3:
-        score -= 3.0
+    
+    # Mild structural penalties to guide TPE softly rather than destroying scores
+    if pf < 1.0:
+        score -= 0.5
+    elif pf < 1.3:
+        score -= 0.2
 
     if long_count == 0 or short_count == 0:
-        score -= 5.0
+        score -= 0.2
 
     return score, ret_pct, mdd_pct, len(trades_df), win_rate, pf
 
@@ -101,15 +108,15 @@ def objective_v2(trial: optuna.Trial, data_maps: Dict[str, Dict[str, Any]], symb
     tf: str = str(params["TIMEFRAME"])
     strategy: UltimateStrategy = UltimateStrategy(name="FuturesV2", params=params)
 
-    lengths: List[int] = [len(data_maps[sym][tf]) for sym in symbols if tf in data_maps.get(sym, {})]
+    lengths: List[int] = [len(data_maps[sym][tf]) - data_maps[sym].get(f"is_start_idx_{tf}", 0) for sym in symbols if tf in data_maps.get(sym, {})]
     if not lengths:
-        return -10000.0
+        return -5.0
     min_len: int = min(lengths)
     base_df_for_folds: pd.DataFrame = pd.DataFrame(index=range(min_len))
     cv_folds, holdout_fold = build_anchored_folds(base_df_for_folds, n_folds=3, holdout_ratio=0.25, embargo=EMBARGO_BARS.get(tf, 0))
 
     if not cv_folds:
-        return -10000.0
+        return -5.0
 
     all_folds = cv_folds + ([holdout_fold] if holdout_fold[2] > holdout_fold[1] else [])
 
@@ -142,19 +149,24 @@ def objective_v2(trial: optuna.Trial, data_maps: Dict[str, Dict[str, Any]], symb
             if target_df is None or daily_df is None or full_merge_idx is None:
                 continue
 
-            tf_idx_test_end_minus_1: int = test_end - 1
+            is_start_idx = data_maps[sym].get(f"is_start_idx_{tf}", 0)
+            adj_test_start = test_start + is_start_idx
+            adj_test_end = test_end + is_start_idx
+
+            tf_idx_test_end_minus_1: int = adj_test_end - 1
             daily_end_idx: int = int(full_merge_idx[tf_idx_test_end_minus_1]) if tf_idx_test_end_minus_1 < len(full_merge_idx) else len(daily_df) - 1
             daily_df_trunc: pd.DataFrame = daily_df.iloc[:daily_end_idx + 1].copy()
 
             try:
                 precomputed_daily_df: pd.DataFrame = strategy.generate_signals(daily_df_trunc)
             except Exception as e:
+                _logger.error(f"Generate_signals failed for {sym}: {e}", exc_info=True)
                 continue
             
             s: float; r: float; m: float; t: int; w: float; pf: float
             s, r, m, t, w, pf = evaluate_symbol_fold(
                 strategy, params, sym, tf, target_df, daily_df_trunc, 
-                full_merge_idx, precomputed_daily_df, test_start, test_end, n_trials_completed
+                full_merge_idx, precomputed_daily_df, adj_test_start, adj_test_end, n_trials_completed
             )
             sym_scores.append(s)
             sym_rets.append(r)
@@ -171,22 +183,30 @@ def objective_v2(trial: optuna.Trial, data_maps: Dict[str, Dict[str, Any]], symb
             sym_total_pfs[sym].append(pf)
 
         if not sym_scores:
-            return -10000.0
+            return -5.0
 
         mean_score: float = float(np.mean(sym_scores))
         min_score: float = float(np.min(sym_scores))
-        penalty: float = max(0.0, 0.0 - min_score) * 1.5
+        
+        # Soft penalty for fold high variance
+        penalty: float = max(0.0, 0.0 - min_score) * 0.5
         avg_fold_sym_score: float = mean_score - penalty
         
         mean_trades_fold: float = float(np.mean(sym_trades_fold))
-        min_trades_per_fold: float = 50.0 if tf == "4h" else 15.0
+        min_trades_per_fold: float = 30.0 if tf == "4h" else 8.0
         
+        # Trade count soft penalty
         if mean_trades_fold < min_trades_per_fold:
-            trade_fold_penalty_factor: float = (mean_trades_fold / min_trades_per_fold) ** 2.0
-            if avg_fold_sym_score > 0.0:
+            trade_fold_penalty_factor: float = (mean_trades_fold / min_trades_per_fold) ** 0.5
+            if avg_fold_sym_score > 0:
                 avg_fold_sym_score *= trade_fold_penalty_factor
             else:
-                avg_fold_sym_score /= max(trade_fold_penalty_factor, 0.01)
+                # If already negative, making trades zero should carry a steep penalty, not a reward
+                if mean_trades_fold == 0:
+                    avg_fold_sym_score -= 20.0
+                else:
+                    # Make negative score more negative by dividing by the factor (bounded to avoid div by zero)
+                    avg_fold_sym_score *= (1.0 / max(trade_fold_penalty_factor, 0.1))
 
         fold_scores.append(avg_fold_sym_score)
         fold_rets.append(float(np.mean(sym_rets)))
@@ -199,19 +219,22 @@ def objective_v2(trial: optuna.Trial, data_maps: Dict[str, Dict[str, Any]], symb
     cv_scores = fold_scores[:-1] if has_holdout else fold_scores
     holdout_score = fold_scores[-1] if has_holdout else 0.0
 
-    shifted: List[float] = [s + 10.0 for s in cv_scores]
-    final_score: float
-    if any(s <= 0 for s in shifted):
-        final_score = float(np.mean(cv_scores)) - 20.0
-    else:
-        hm: float = len(shifted) / sum(1.0 / s for s in shifted)
-        final_score = hm - 10.0
+    # Robust CV aggregation: weighted mean with a mild consistency bonus.
+    # Avoids harmonic-mean cliff that collapses the entire TPE search space
+    # whenever a single fold has a negative score.
+    cv_mean: float = float(np.mean(cv_scores)) if cv_scores else -5.0
+    cv_min: float = float(np.min(cv_scores)) if cv_scores else -5.0
+
+    # Consistency bonus: reward strategies where all folds are profitable
+    all_positive: bool = all(s > 0 for s in cv_scores)
+    consistency_bonus: float = 0.5 if all_positive else 0.0
+
+    # Worst-fold penalty: 10% blend of the worst fold to encourage absolute growth
+    final_score: float = (cv_mean * 0.9) + (cv_min * 0.1) + consistency_bonus
 
     if has_holdout:
-        if holdout_score < 0.0:
-            final_score -= abs(holdout_score) * 2.0
-        else:
-            final_score = (final_score * 0.7) + (holdout_score * 0.3)
+        # Simple robust blending to avoid discontinuous gradient space in TPE
+        final_score = (final_score * 0.7) + (holdout_score * 0.3)
 
     trial.set_user_attr("avg_score", float(np.mean(fold_scores)))
     trial.set_user_attr("avg_ret", float(np.mean(fold_rets)))
