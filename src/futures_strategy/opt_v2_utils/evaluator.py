@@ -190,8 +190,8 @@ def objective_v2(trial: optuna.Trial, data_maps: Dict[str, Dict[str, Any]], symb
         if len(sym_total_scores[sym]) > 0:
             s_score: float = float(np.mean(sym_total_scores[sym]))
             s_ret: float = float(np.mean(sym_total_rets[sym]))
-            s_mdd: float = float(np.mean(sym_total_mdds[sym]))
-            s_trades: float = float(np.mean(sym_total_trades[sym]))
+            s_mdd: float = float(np.max(sym_total_mdds[sym]))
+            s_trades: float = float(np.sum(sym_total_trades[sym]))
             s_wins: float = float(np.mean(sym_total_wins[sym]))
         else:
             s_score, s_ret, s_mdd, s_trades, s_wins = -100.0, 0.0, 0.0, 0.0, 0.0
