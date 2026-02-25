@@ -50,7 +50,8 @@ _logger: logging.Logger = logging.getLogger("opt_v2")
 
 # Constants
 START_DATE: str = "2022-01-01"
-END_DATE: str = "2025-11-01"
+IS_END_DATE: str = "2025-03-01"
+END_DATE: str = "2026-02-24"
 
 
 # --------------------------------------------------------------------------
@@ -69,21 +70,35 @@ def main() -> None:
 
     collector: DataCollector = DataCollector()
     data_maps: Dict[str, Dict[str, Any]] = {}
+    oos_data_maps: Dict[str, Dict[str, Any]] = {}
 
-    _logger.info("Loading target futures database (%s to %s)...", START_DATE, END_DATE)
+    _logger.info("Loading target futures database (IS: %s to %s, OOS: %s to %s)...", START_DATE, IS_END_DATE, IS_END_DATE, END_DATE)
     for sym in symbols:
         data_maps[sym] = {}
+        oos_data_maps[sym] = {}
         for tf in ["1d", "4h"]:
-            df: pd.DataFrame = collector.collect_and_save(sym, tf, START_DATE, END_DATE)
-            if df.empty:
+            # Load full data first to ensure technical indicators (like EMA) have enough history, 
+            # but we will slice it immediately for engine usage.
+            full_df: pd.DataFrame = collector.collect_and_save(sym, tf, START_DATE, END_DATE)
+            if full_df.empty:
                 _logger.error("Failed to load %s %s data", sym, tf)
                 sys.exit(1)
-            df = merge_funding_into_ohlcv(sym, df, DATA_DIR)
-            data_maps[sym][tf] = df
+            full_df = merge_funding_into_ohlcv(sym, full_df, DATA_DIR)
+            
+            # Split into IS and OOS
+            is_mask = full_df["datetime"] < pd.to_datetime(IS_END_DATE).tz_localize(full_df["datetime"].dt.tz)
+            oos_mask = (full_df["datetime"] >= pd.to_datetime(IS_END_DATE).tz_localize(full_df["datetime"].dt.tz)) & \
+                       (full_df["datetime"] <= pd.to_datetime(END_DATE).tz_localize(full_df["datetime"].dt.tz))
+            
+            data_maps[sym][tf] = full_df[is_mask].reset_index(drop=True)
+            oos_data_maps[sym][tf] = full_df[oos_mask].reset_index(drop=True)
             
         data_maps[sym]["merge_idx_1d"] = compute_segment_merge_index(data_maps[sym]["1d"], data_maps[sym]["1d"])
         data_maps[sym]["merge_idx_4h"] = compute_segment_merge_index(data_maps[sym]["4h"], data_maps[sym]["1d"])
-    _logger.info("Target Data load complete.")
+        
+        oos_data_maps[sym]["merge_idx_1d"] = compute_segment_merge_index(oos_data_maps[sym]["1d"], oos_data_maps[sym]["1d"])
+        oos_data_maps[sym]["merge_idx_4h"] = compute_segment_merge_index(oos_data_maps[sym]["4h"], oos_data_maps[sym]["1d"])
+    _logger.info("Target Data load complete (IS and OOS).")
 
     study_name: str = "futures_v2_romad_opt"
     
@@ -201,8 +216,42 @@ def main() -> None:
         _logger.info(f"| {sym:<10} | {r:8.2f} | {m:9.2f} | {int(t):6d} | {w:8.2f} | {s_val:7.2f} |")
     _logger.info("-" * SEP_WIDTH)
 
-    # 3. OOS Verification
-    _logger.info("  🔍 Running OOS Cross-Symbol Verification (CV-Fold Mode)...")
+    # 3. True OOS Verification (On Target Symbols)
+    _logger.info("  🚀 Running True OOS Forward-Testing (IS_END to END_DATE)...")
+    _logger.info("  [True OOS Target Performance: %s]", ", ".join(symbols))
+    header_oos: str = f"| {'Symbol':<10} | {'M.Ret(%)':>8} | {'MaxMDD(%)':>9} | {'TotTrd':>6} | {'M.Win(%)':>8} | {'RoMaD':>7} |"
+    _logger.info(header_oos)
+    _logger.info("|" + "-" * (len(header_oos)-2) + "|")
+
+    # Strategy object for OOS/Cross-Symbol testing
+    strategy_oos: UltimateStrategy = UltimateStrategy(name="FuturesV2_OOS", params=best_params)
+
+    for sym in symbols:
+        target_df_oos: pd.DataFrame = oos_data_maps.get(sym, {}).get(tf_val)
+        daily_df_oos: pd.DataFrame = oos_data_maps.get(sym, {}).get("1d")
+        full_merge_idx_oos: np.ndarray = oos_data_maps.get(sym, {}).get(f"merge_idx_{tf_val}")
+        
+        if target_df_oos is None or target_df_oos.empty or daily_df_oos is None or daily_df_oos.empty or full_merge_idx_oos is None:
+            _logger.info(f"| {sym:<10} | {'N/A':>8} | {'N/A':>8} | {'N/A':>5} | {'N/A':>8} | {'N/A':>7} |")
+            continue
+            
+        try:
+            n_oos_bars = len(target_df_oos)
+            precomputed_daily_oos: pd.DataFrame = strategy_oos.generate_signals(daily_df_oos)
+            
+            s_f, r_f, m_f, t_f, w_f = evaluate_symbol_fold(
+                strategy_oos, best_params, sym, tf_val, target_df_oos, daily_df_oos,
+                full_merge_idx_oos, precomputed_daily_oos, 0, n_oos_bars
+            )
+            
+            _logger.info(f"| {sym:<10} | {r_f:8.2f} | {m_f:9.2f} | {int(t_f):6d} | {w_f:8.2f} | {s_f:7.2f} |")
+        except Exception as e:
+            _logger.info(f"| {sym:<10} | {'ERR':>8} | {'ERR':>8} | {'ERR':>5} | {'ERR':>8} | {'ERR':>7} |")
+
+    _logger.info("-" * SEP_WIDTH)
+
+    # 4. Cross-Symbol Verification (CV-Fold Mode)
+    _logger.info("  🔍 Running Cross-Symbol Verification (CV-Fold Mode)...")
     from src.futures_strategy.opt_v2_utils.evaluator import EMBARGO_BARS
 
     for sym in oos_symbols:
@@ -218,9 +267,7 @@ def main() -> None:
         if "1d" in data_maps[sym] and tf_val in data_maps[sym]:
             data_maps[sym][f"merge_idx_{tf_val}"] = compute_segment_merge_index(data_maps[sym][tf_val], data_maps[sym]["1d"])
 
-    _logger.info("  [OOS Verification Summary (Averaged Over Folds)]")
-    strategy_oos: UltimateStrategy = UltimateStrategy(name="FuturesV2_OOS", params=best_params)
-    
+    _logger.info("  [Cross-Symbol Verification Summary (Averaged Over Folds)]")
     _logger.info(header.replace("Score", "RoMaD"))
     _logger.info("|" + "-" * (len(header)-2) + "|")
 
@@ -246,7 +293,6 @@ def main() -> None:
             f_scrs: List[float] = []
 
             for train_end, test_start, test_end in folds_oos:
-                # Truncate daily_df for current fold
                 tf_idx_test_end_minus_1: int = test_end - 1
                 daily_end_idx: int = int(full_merge_idx[tf_idx_test_end_minus_1]) if tf_idx_test_end_minus_1 < len(full_merge_idx) else len(daily_df) - 1
                 daily_trunc: pd.DataFrame = daily_df.iloc[:daily_end_idx + 1].copy()
@@ -268,7 +314,7 @@ def main() -> None:
             )
         except Exception as e:
             _logger.info(f"| {sym:<10} | {'ERR':>8} | {'ERR':>8} | {'ERR':>5} | {'ERR':>8} | {'ERR':>7} |")
-            
+
     _logger.info("=" * SEP_WIDTH)
 
     # 4. Save to SQLite (Only during optimization)
