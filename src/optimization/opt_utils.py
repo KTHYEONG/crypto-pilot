@@ -253,7 +253,7 @@ class ObjectiveConfig:
 def _load_objective_config():
     return ObjectiveConfig(
         base_score_multiplier=_env_float("OBJ_BASE_SCORE_MULT", 160.0),
-        gate_floor=_env_float("OBJ_GATE_FLOOR", 0.25),
+        gate_floor=_env_float("OBJ_GATE_FLOOR", 0.10),
         gate_weight_activity=_env_float("OBJ_GATE_W_ACTIVITY", 0.35),
         gate_weight_consistency=_env_float("OBJ_GATE_W_CONSISTENCY", 0.25),
         gate_weight_kelly=_env_float("OBJ_GATE_W_KELLY", 0.20),
@@ -898,7 +898,9 @@ def calculate_score(ret, mdd, trades_df, mode="UNIFIED", market_type="spot", tim
             # Missing side column means direction-diversity evidence is unavailable.
             side_gate = cfg.gate_floor
 
-    confidence = min(1.0, np.sqrt(N / 220.0))
+    tf_key = str(timeframe).strip().lower() if timeframe else ""
+    target_trades_per_year = 60.0 if tf_key in ["1d", "1w"] else 220.0
+    confidence = min(1.0, np.sqrt(N / target_trades_per_year))
     if market_type == "futures":
         gates = [activity_gate, consistency_gate, kelly_gate, side_gate]
         weights = [
@@ -917,6 +919,14 @@ def calculate_score(ret, mdd, trades_df, mode="UNIFIED", market_type="spot", tim
     combined_gate = _blend_gates_with_floor(gates, weights, cfg.gate_floor)
 
     score = cfg.base_score_multiplier * confidence * combined_gate * base_signal
+
+    # Risk Penalty (Leverage & MDD exposure)
+    leverage = float(trades_df['leverage'].iloc[0]) if 'leverage' in trades_df.columns and len(trades_df) > 0 else 1.0
+    risk_penalty = 0.0
+    if leverage > 5.0 and abs_mdd > 15.0:
+        risk_penalty = (leverage * abs_mdd) / 100.0
+        
+    score -= risk_penalty * 50.0
 
     # --- 5) Smooth penalties/bonuses ---
     # Spot: long-only has NO short-side hedge, so negative expectancy is more destructive.
