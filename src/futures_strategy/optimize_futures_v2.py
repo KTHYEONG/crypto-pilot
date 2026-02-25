@@ -33,7 +33,7 @@ from src.futures_strategy.funding_utils import merge_funding_into_ohlcv
 from src.futures_strategy.opt_v2_utils.metrics import calc_romad, calc_romad_from_metrics
 from src.futures_strategy.opt_v2_utils.cv_utils import build_anchored_folds
 from src.futures_strategy.opt_v2_utils.opt_params import suggest_params_v2
-from src.futures_strategy.opt_v2_utils.db_utils import save_study_to_sqlite
+from src.futures_strategy.opt_v2_utils.db_utils import save_study_to_sqlite, fast_reset_study
 from src.futures_strategy.opt_v2_utils.evaluator import objective_v2, evaluate_symbol_fold
 
 import warnings
@@ -126,11 +126,22 @@ def main() -> None:
             _logger.error(f"Failed to load study '{study_name}': {e}")
             sys.exit(1)
     else:
-        try:
-            optuna.delete_study(study_name=study_name, storage=storage_url)
-            _logger.info(f"Deleted existing study '{study_name}' for a fresh start.")
-        except KeyError:
-            pass  
+        # Fast-path: bypass Optuna's slow ORM cascade deletion via direct raw SQL.
+        # Falls back to optuna.delete_study() automatically if direct SQL fails.
+        deleted_fast: bool = fast_reset_study(
+            study_name=study_name,
+            db_user=db_user,
+            db_pass=db_pass,
+            db_host=db_host,
+            db_port=db_port,
+            db_name=db_name,
+        )
+        if not deleted_fast:
+            try:
+                optuna.delete_study(study_name=study_name, storage=storage_url)
+                _logger.info(f"Deleted existing study '{study_name}' for a fresh start (ORM fallback).")
+            except KeyError:
+                pass
 
         study = optuna.create_study(
             study_name=study_name,
