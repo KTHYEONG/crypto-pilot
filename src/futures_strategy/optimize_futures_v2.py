@@ -100,7 +100,9 @@ def main() -> None:
         oos_data_maps[sym]["merge_idx_4h"] = compute_segment_merge_index(oos_data_maps[sym]["4h"], oos_data_maps[sym]["1d"])
     _logger.info("Target Data load complete (IS and OOS).")
 
-    study_name: str = "futures_v2_romad_opt"
+    # Dynamic study name based on symbols to support per-coin storage
+    clean_symbol: str = args.symbols.replace("/", "").replace(",", "_").replace(" ", "")
+    study_name: str = f"futures_strategy_{clean_symbol}"
     
     db_user: str = os.getenv("DB_USER", "root")
     db_pass: str = os.getenv("DB_PASS", "1234")
