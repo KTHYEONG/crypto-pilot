@@ -85,6 +85,15 @@ def calc_romad_from_metrics(
     """
     RoMaD score from precomputed return and MDD.
     Returns: (romad_score, return_pct, mdd_pct).
+    
+    [Theoretical Score Grades (n_trials=1750 기준)]
+    - S (Elite)    : 8.0+ (금융공학적 상위 0.1%, 압도적 강건성 및 수익성)
+    - A (Excellent): 4.0 ~ 8.0 (실전 투입 적극 권장, 높은 리스크 대비 수익)
+    - B (Good)     : 1.5 ~ 4.0 (실전 투입 가능, 안정적 운용 기대)
+    - C (Poor)     : 0.5 ~ 1.5 (낮은 통계적 유의성, 과적합 경계 필요)
+    - D (Failing)  : < 0.5 (실전 투입 불가, 전략 재수립 필요)
+    
+    ※ Multiple Testing Correction(MTC) 및 Profit Factor Gate 페널티가 반영된 수치임.
     """
     if n_trades == 0:
         return -20.0, ret_pct, mdd_pct
