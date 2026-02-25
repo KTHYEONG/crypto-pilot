@@ -35,6 +35,8 @@ from src.futures_strategy.opt_v2_utils.cv_utils import build_anchored_folds
 from src.futures_strategy.opt_v2_utils.opt_params import suggest_params_v2
 from src.futures_strategy.opt_v2_utils.db_utils import save_study_to_sqlite, fast_reset_study
 from src.futures_strategy.opt_v2_utils.evaluator import objective_v2, evaluate_symbol_fold
+from src.futures_strategy.opt_v2_utils.go_nogo import run_go_nogo_check, GoNoGoResult
+from config.opt_config import get_quarterly_window
 
 import warnings
 warnings.filterwarnings("ignore")
@@ -48,12 +50,6 @@ optuna.logging.set_verbosity(optuna.logging.WARNING)
 logging.basicConfig(level=logging.INFO, format="%(message)s", force=True)
 _logger: logging.Logger = logging.getLogger("opt_v2")
 
-# Constants
-START_DATE: str = "2022-01-01"
-IS_END_DATE: str = "2025-03-01"
-END_DATE: str = "2026-02-24"
-
-
 # --------------------------------------------------------------------------
 # Execution Main
 # --------------------------------------------------------------------------
@@ -63,7 +59,10 @@ def main() -> None:
     parser.add_argument("--trials", type=int, default=OPT_V2_CONFIG["total_trials"])
     parser.add_argument("--jobs", type=int, default=OPT_V2_CONFIG["n_jobs"])
     parser.add_argument("--test", action="store_true", help="Load best study from DB and evaluate without optimizing")
+    parser.add_argument("--reference-date", type=str, default=None, help="Reference date for quarterly window (YYYY-MM-DD)")
     args: argparse.Namespace = parser.parse_args()
+
+    START_DATE, IS_END_DATE, END_DATE = get_quarterly_window(args.reference_date)
 
     symbols: List[str] = [s.strip() for s in args.symbols.split(",")]
     oos_symbols: List[str] = ["ETH/USDT", "SOL/USDT", "BNB/USDT", "XRP/USDT"]
@@ -227,6 +226,9 @@ def main() -> None:
 
     # Strategy object for OOS/Cross-Symbol testing
     strategy_oos: UltimateStrategy = UltimateStrategy(name="FuturesV2_OOS", params=best_params)
+    oos_romad_scores: List[float] = []
+    oos_pfs: List[float] = []
+    oos_trades: int = 0
 
     for sym in symbols:
         target_df_oos: pd.DataFrame = oos_data_maps.get(sym, {}).get(tf_val)
@@ -241,10 +243,13 @@ def main() -> None:
             n_oos_bars = len(target_df_oos)
             precomputed_daily_oos: pd.DataFrame = strategy_oos.generate_signals(daily_df_oos)
             
-            s_f, r_f, m_f, t_f, w_f = evaluate_symbol_fold(
+            s_f, r_f, m_f, t_f, w_f, pf_f = evaluate_symbol_fold(
                 strategy_oos, best_params, sym, tf_val, target_df_oos, daily_df_oos,
-                full_merge_idx_oos, precomputed_daily_oos, 0, n_oos_bars
+                full_merge_idx_oos, precomputed_daily_oos, 0, n_oos_bars, n_trials=1
             )
+            oos_romad_scores.append(s_f)
+            oos_pfs.append(pf_f)
+            oos_trades += int(t_f)
             
             _logger.info(f"| {sym:<10} | {r_f:8.2f} | {m_f:9.2f} | {int(t_f):6d} | {w_f:8.2f} | {s_f:7.2f} |")
         except Exception as e:
@@ -273,6 +278,10 @@ def main() -> None:
     _logger.info(header.replace("Score", "RoMaD"))
     _logger.info("|" + "-" * (len(header)-2) + "|")
 
+    cross_sym_scores: List[float] = []
+    cross_pfs: List[float] = []
+    cross_trades: int = 0
+
     for sym in oos_symbols:
         target_df: Any = data_maps[sym].get(tf_val)
         daily_df: Any = data_maps[sym].get("1d")
@@ -294,6 +303,7 @@ def main() -> None:
             f_trds: List[float] = []
             f_wins: List[float] = []
             f_scrs: List[float] = []
+            f_pfs: List[float] = []
 
             for train_end, test_start, test_end in folds_oos:
                 tf_idx_test_end_minus_1: int = test_end - 1
@@ -301,28 +311,58 @@ def main() -> None:
                 daily_trunc: pd.DataFrame = daily_df.iloc[:daily_end_idx + 1].copy()
                 
                 precomputed_daily: pd.DataFrame = strategy_oos.generate_signals(daily_trunc)
-                s_f, r_f, m_f, t_f, w_f = evaluate_symbol_fold(
+                s_f, r_f, m_f, t_f, w_f, pf_f = evaluate_symbol_fold(
                     strategy_oos, best_params, sym, tf_val, target_df, daily_trunc,
-                    full_merge_idx, precomputed_daily, test_start, test_end
+                    full_merge_idx, precomputed_daily, test_start, test_end, n_trials=1
                 )
                 f_scrs.append(s_f)
                 f_rets.append(r_f)
                 f_mdds.append(m_f)
                 f_trds.append(float(t_f))
                 f_wins.append(w_f)
+                f_pfs.append(pf_f)
 
+            avg_score = float(np.mean(f_scrs))
+            cross_sym_scores.append(avg_score)
+            cross_pfs.append(float(np.mean(f_pfs)))
+            cross_trades += int(np.sum(f_trds))
+            
             _logger.info(
                 f"| {sym:<10} | {np.mean(f_rets):8.2f} | {np.max(f_mdds):9.2f} | "
-                f"{int(np.sum(f_trds)):6d} | {np.mean(f_wins):8.2f} | {np.mean(f_scrs):7.2f} |"
+                f"{int(np.sum(f_trds)):6d} | {np.mean(f_wins):8.2f} | {avg_score:7.2f} |"
             )
         except Exception as e:
             _logger.info(f"| {sym:<10} | {'ERR':>8} | {'ERR':>8} | {'ERR':>5} | {'ERR':>8} | {'ERR':>7} |")
 
     _logger.info("=" * SEP_WIDTH)
 
-    # 4. Save to SQLite (Only during optimization)
+    # 5. Go/No-Go Checklist
+    _logger.info("  ✅ Running Go/No-Go Checklist...")
+    cv_scores = best_trial.user_attrs.get("cv_scores", [])
+    holdout_score = best_trial.user_attrs.get("holdout_score", 0.0)
+    max_mdd = best_trial.user_attrs.get("avg_mdd", 0.0)
+    avg_pf = float(np.mean(oos_pfs + cross_pfs)) if (oos_pfs or cross_pfs) else best_trial.user_attrs.get("avg_pf", 1.0)
+    total_trades = oos_trades + cross_trades
+    
+    go_nogo: GoNoGoResult = run_go_nogo_check(
+        cv_fold_scores=cv_scores,
+        holdout_score=holdout_score,
+        oos_romad_scores=oos_romad_scores,
+        cross_sym_romad_scores=cross_sym_scores,
+        max_mdd_pct=max_mdd,
+        profit_factor=avg_pf,
+        long_count=total_trades // 2,
+        short_count=total_trades // 2,
+    )
+    
+    _logger.info(go_nogo.summary)
+    
     if not args.test:
-        save_study_to_sqlite(study, project_root)
+        best_trial.set_user_attr("go_nogo_passed", go_nogo.passed)
+        if go_nogo.passed:
+            save_study_to_sqlite(study, project_root)
+        else:
+            _logger.warning("  ❌ Go/No-Go FAIL: Skipping SQLite DB storage.")
 
 if __name__ == "__main__":
     main()
