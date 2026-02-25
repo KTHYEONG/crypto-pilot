@@ -108,7 +108,7 @@ def main() -> None:
     db_pass: str = os.getenv("DB_PASS", "1234")
     db_host: str = os.getenv("DB_HOST", "localhost")
     db_port: str = os.getenv("DB_PORT", "3306")
-    db_name: str = os.getenv("DB_NAME", "trading_optuna")
+    db_name: str = os.getenv("DB_NAME", "optuna_crypto")
     from urllib.parse import quote_plus
     safe_pass: str = quote_plus(db_pass)
     storage_url: str = f"mysql+pymysql://{db_user}:{safe_pass}@{db_host}:{db_port}/{db_name}"
