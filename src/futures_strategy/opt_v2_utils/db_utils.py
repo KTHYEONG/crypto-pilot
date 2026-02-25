@@ -77,24 +77,28 @@ def fast_reset_study(
         )
         trial_ids = [r[0] for r in cursor.fetchall()]
 
-        # 3. Delete child tables in dependency order (no FK constraint violation)
+        # 3. Delete child tables in chunks to avoid huge query and handle potential locking
         if trial_ids:
-            fmt = ",".join(["%s"] * len(trial_ids))
+            chunk_size = 500
             child_tables = [
                 "trial_heartbeats",
                 "trial_intermediate_values",
                 "trial_system_attributes",
                 "trial_user_attributes",
                 "trial_params",
+                "trial_values",  # Required for Optuna 3.x to avoid FK violation
             ]
-            for table in child_tables:
-                try:
-                    cursor.execute(
-                        f"DELETE FROM {table} WHERE trial_id IN ({fmt})",  # noqa: S608
-                        trial_ids,
-                    )
-                except Exception:  # table may not exist in older optuna versions
-                    pass
+            for i in range(0, len(trial_ids), chunk_size):
+                chunk = trial_ids[i : i + chunk_size]
+                fmt = ",".join(["%s"] * len(chunk))
+                for table in child_tables:
+                    try:
+                        cursor.execute(
+                            f"DELETE FROM {table} WHERE trial_id IN ({fmt})",
+                            chunk,
+                        )
+                    except Exception as e:
+                        _logger.debug("Table '%s' skip or error: %s", table, e)
 
         # 4. Delete trials
         cursor.execute(
@@ -113,8 +117,8 @@ def fast_reset_study(
                     f"DELETE FROM {table} WHERE study_id = %s",  # noqa: S608
                     (study_id,),
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                _logger.debug("Study table '%s' skip or error: %s", table, e)
 
         cursor.execute(
             "DELETE FROM studies WHERE study_id = %s",
@@ -137,7 +141,7 @@ def fast_reset_study(
             except Exception:
                 pass
         _logger.warning(
-            "fast_reset_study: direct SQL deletion failed (%s); caller should fallback.", exc
+            "fast_reset_study: direct SQL deletion failed. Error: %s", exc
         )
         return False
     finally:
