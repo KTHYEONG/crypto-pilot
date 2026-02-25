@@ -179,7 +179,9 @@ def main() -> None:
     _logger.info("-" * SEP_WIDTH)
 
     # 3. OOS Verification
-    _logger.info("  🔍 Running OOS Cross-Symbol Verification...")
+    _logger.info("  🔍 Running OOS Cross-Symbol Verification (CV-Fold Mode)...")
+    from src.futures_strategy.opt_v2_utils.evaluator import EMBARGO_BARS
+
     for sym in oos_symbols:
         if sym in data_maps:
             continue
@@ -193,7 +195,7 @@ def main() -> None:
         if "1d" in data_maps[sym] and tf_val in data_maps[sym]:
             data_maps[sym][f"merge_idx_{tf_val}"] = compute_segment_merge_index(data_maps[sym][tf_val], data_maps[sym]["1d"])
 
-    _logger.info("  [OOS Verification Summary]")
+    _logger.info("  [OOS Verification Summary (Averaged Over Folds)]")
     strategy_oos: UltimateStrategy = UltimateStrategy(name="FuturesV2_OOS", params=best_params)
     
     _logger.info(header.replace("Score", "RoMaD"))
@@ -209,13 +211,38 @@ def main() -> None:
             continue
             
         try:
-            precomputed_daily: pd.DataFrame = strategy_oos.generate_signals(daily_df)
-            s_oos: float; r_oos: float; m_oos: float; t_oos: int; w_oos: float
-            s_oos, r_oos, m_oos, t_oos, w_oos = evaluate_symbol_fold(
-                strategy_oos, best_params, sym, tf_val, target_df, daily_df,
-                full_merge_idx, precomputed_daily, 0, len(target_df)
+            folds_oos: List[Tuple[int, int, int]] = build_anchored_folds(target_df, n_folds=3, embargo=EMBARGO_BARS.get(tf_val, 0))
+            if not folds_oos:
+                _logger.info(f"| {sym:<10} | {'NOFOLD':>8} | {'NOFOLD':>8} | {'NOFOLD':>5} | {'NOFOLD':>8} | {'NOFOLD':>7} |")
+                continue
+
+            f_rets: List[float] = []
+            f_mdds: List[float] = []
+            f_trds: List[float] = []
+            f_wins: List[float] = []
+            f_scrs: List[float] = []
+
+            for train_end, test_start, test_end in folds_oos:
+                # Truncate daily_df for current fold
+                tf_idx_test_end_minus_1: int = test_end - 1
+                daily_end_idx: int = int(full_merge_idx[tf_idx_test_end_minus_1]) if tf_idx_test_end_minus_1 < len(full_merge_idx) else len(daily_df) - 1
+                daily_trunc: pd.DataFrame = daily_df.iloc[:daily_end_idx + 1].copy()
+                
+                precomputed_daily: pd.DataFrame = strategy_oos.generate_signals(daily_trunc)
+                s_f, r_f, m_f, t_f, w_f = evaluate_symbol_fold(
+                    strategy_oos, best_params, sym, tf_val, target_df, daily_trunc,
+                    full_merge_idx, precomputed_daily, test_start, test_end
+                )
+                f_scrs.append(s_f)
+                f_rets.append(r_f)
+                f_mdds.append(m_f)
+                f_trds.append(float(t_f))
+                f_wins.append(w_f)
+
+            _logger.info(
+                f"| {sym:<10} | {np.mean(f_rets):8.2f} | {np.mean(f_mdds):8.2f} | "
+                f"{int(np.sum(f_trds)):5d} | {np.mean(f_wins):8.2f} | {np.mean(f_scrs):7.2f} |"
             )
-            _logger.info(f"| {sym:<10} | {r_oos:8.2f} | {m_oos:8.2f} | {t_oos:5d} | {w_oos:8.2f} | {s_oos:7.2f} |")
         except Exception as e:
             _logger.info(f"| {sym:<10} | {'ERR':>8} | {'ERR':>8} | {'ERR':>5} | {'ERR':>8} | {'ERR':>7} |")
             
