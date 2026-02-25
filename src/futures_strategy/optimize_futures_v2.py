@@ -185,7 +185,7 @@ def main() -> None:
     
     # 2. Target Symbol Performance
     _logger.info("  [Target Performance: %s]", ", ".join(symbols))
-    header: str = f"| {'Symbol':<10} | {'Ret(%)':>8} | {'MDD(%)':>8} | {'Trd':>5} | {'Win(%)':>8} | {'Score':>7} |"
+    header: str = f"| {'Symbol':<10} | {'M.Ret(%)':>8} | {'MaxMDD(%)':>9} | {'TotTrd':>6} | {'M.Win(%)':>8} | {'Score':>7} |"
     _logger.info(header)
     _logger.info("|" + "-" * (len(header)-2) + "|")
     
@@ -195,7 +195,7 @@ def main() -> None:
         s_val: float = float(best_trial.user_attrs.get(f"{sym}_score", 0.0))
         t: float = float(best_trial.user_attrs.get(f"{sym}_trades", 0.0))
         w: float = float(best_trial.user_attrs.get(f"{sym}_win_rate", 0.0))
-        _logger.info(f"| {sym:<10} | {r:8.2f} | {m:8.2f} | {int(t):5d} | {w:8.2f} | {s_val:7.2f} |")
+        _logger.info(f"| {sym:<10} | {r:8.2f} | {m:9.2f} | {int(t):6d} | {w:8.2f} | {s_val:7.2f} |")
     _logger.info("-" * SEP_WIDTH)
 
     # 3. OOS Verification
@@ -260,8 +260,8 @@ def main() -> None:
                 f_wins.append(w_f)
 
             _logger.info(
-                f"| {sym:<10} | {np.mean(f_rets):8.2f} | {np.mean(f_mdds):8.2f} | "
-                f"{int(np.sum(f_trds)):5d} | {np.mean(f_wins):8.2f} | {np.mean(f_scrs):7.2f} |"
+                f"| {sym:<10} | {np.mean(f_rets):8.2f} | {np.max(f_mdds):9.2f} | "
+                f"{int(np.sum(f_trds)):6d} | {np.mean(f_wins):8.2f} | {np.mean(f_scrs):7.2f} |"
             )
         except Exception as e:
             _logger.info(f"| {sym:<10} | {'ERR':>8} | {'ERR':>8} | {'ERR':>5} | {'ERR':>8} | {'ERR':>7} |")
