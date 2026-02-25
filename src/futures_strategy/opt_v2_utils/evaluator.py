@@ -12,12 +12,21 @@ from config.settings import FUTURES_INITIAL_BALANCE
 from config.opt_config import SEARCH_SPACE_V2
 from src.futures_strategy.strategies_futures import UltimateStrategy
 from src.futures_strategy.engine_fast_futures import BacktestEngineFast
-from src.futures_strategy.opt_v2_utils.metrics import calc_romad_from_metrics
+from src.futures_strategy.opt_v2_utils.metrics import calc_romad_from_metrics, calc_profit_factor
 from src.futures_strategy.opt_v2_utils.cv_utils import build_anchored_folds
 from src.futures_strategy.opt_v2_utils.opt_params import suggest_params_v2
 
 _logger: logging.Logger = logging.getLogger("opt_v2")
-EMBARGO_BARS: Dict[str, int] = {"4h": 6, "1d": 2}
+
+def compute_embargo_bars(tf: str, longest_indicator_period: int = 150) -> int:
+    fixed_min: Dict[str, int] = {"4h": 6, "1d": 2}
+    ratio: float = 0.05 if tf == "4h" else 0.03
+    return max(fixed_min.get(tf, 2), int(longest_indicator_period * ratio))
+
+EMBARGO_BARS: Dict[str, int] = {
+    "4h": compute_embargo_bars("4h"),
+    "1d": compute_embargo_bars("1d"),
+}
 
 def evaluate_symbol_fold(
     strategy: UltimateStrategy,
@@ -30,7 +39,8 @@ def evaluate_symbol_fold(
     precomputed_daily_df: pd.DataFrame,
     test_start: int,
     test_end: int,
-) -> Tuple[float, float, float, int, float]:
+    n_trials: int = 1,
+) -> Tuple[float, float, float, int, float, float]:
     sig_oos: pd.DataFrame = target_df.iloc[test_start:test_end].copy()
     sig_oos.attrs = {"warmup_bars": 0}
     merge_oos: np.ndarray = full_merge_idx[test_start:test_end]
@@ -52,10 +62,10 @@ def evaluate_symbol_fold(
         trades_df: pd.DataFrame = result.get("trades_df")
     except Exception as e:
         _logger.warning("Backtest engine error: %s", e)
-        return -100.0, 0.0, 0.0, 0, 0.0
+        return -100.0, 0.0, 0.0, 0, 0.0, 0.0
 
     if trades_df is None or trades_df.empty:
-        return -100.0, 0.0, 0.0, 0, 0.0
+        return -100.0, 0.0, 0.0, 0, 0.0, 0.0
 
     long_count: int = len(trades_df[trades_df["side"] == "LONG"])
     short_count: int = len(trades_df[trades_df["side"] == "SHORT"])
@@ -71,14 +81,19 @@ def evaluate_symbol_fold(
     
     score: float
     ret_pct, mdd_pct = float(ret_pct), float(mdd_pct)
-    score, ret_pct, mdd_pct = calc_romad_from_metrics(ret_pct, mdd_pct, len(trades_df), tf, span_days)
+    score, ret_pct, mdd_pct = calc_romad_from_metrics(ret_pct, mdd_pct, len(trades_df), tf, span_days, n_trials)
+
+    pf: float = calc_profit_factor(trades_df)
+    if pf < 1.3:
+        score -= 3.0
 
     if long_count == 0 or short_count == 0:
         score -= 5.0
 
-    return score, ret_pct, mdd_pct, len(trades_df), win_rate
+    return score, ret_pct, mdd_pct, len(trades_df), win_rate, pf
 
 def objective_v2(trial: optuna.Trial, data_maps: Dict[str, Dict[str, Any]], symbols: List[str]) -> float:
+    n_trials_completed = trial.number + 1
     params: Dict[str, Any] = suggest_params_v2(trial, SEARCH_SPACE_V2)
     if params.pop("_INVALID_CONSTRAINT", False):
         return -100.0
@@ -103,12 +118,14 @@ def objective_v2(trial: optuna.Trial, data_maps: Dict[str, Dict[str, Any]], symb
     fold_mdds: List[float] = []
     fold_trades: List[float] = []
     fold_wins: List[float] = []
+    fold_pfs: List[float] = []
     
     sym_total_rets: Dict[str, List[float]] = {sym: [] for sym in symbols}
     sym_total_mdds: Dict[str, List[float]] = {sym: [] for sym in symbols}
     sym_total_scores: Dict[str, List[float]] = {sym: [] for sym in symbols}
     sym_total_trades: Dict[str, List[float]] = {sym: [] for sym in symbols}
     sym_total_wins: Dict[str, List[float]] = {sym: [] for sym in symbols}
+    sym_total_pfs: Dict[str, List[float]] = {sym: [] for sym in symbols}
     
     for f_idx, (train_end, test_start, test_end) in enumerate(all_folds):
         sym_scores: List[float] = []
@@ -116,6 +133,7 @@ def objective_v2(trial: optuna.Trial, data_maps: Dict[str, Dict[str, Any]], symb
         sym_mdds: List[float] = []
         sym_trades_fold: List[float] = []
         sym_wins_fold: List[float] = []
+        sym_pfs_fold: List[float] = []
         
         for sym in symbols:
             target_df: pd.DataFrame = data_maps[sym].get(tf)
@@ -133,22 +151,24 @@ def objective_v2(trial: optuna.Trial, data_maps: Dict[str, Dict[str, Any]], symb
             except Exception as e:
                 continue
             
-            s: float; r: float; m: float; t: int; w: float
-            s, r, m, t, w = evaluate_symbol_fold(
+            s: float; r: float; m: float; t: int; w: float; pf: float
+            s, r, m, t, w, pf = evaluate_symbol_fold(
                 strategy, params, sym, tf, target_df, daily_df_trunc, 
-                full_merge_idx, precomputed_daily_df, test_start, test_end
+                full_merge_idx, precomputed_daily_df, test_start, test_end, n_trials_completed
             )
             sym_scores.append(s)
             sym_rets.append(r)
             sym_mdds.append(m)
             sym_trades_fold.append(float(t))
             sym_wins_fold.append(w)
+            sym_pfs_fold.append(pf)
             
             sym_total_scores[sym].append(s)
             sym_total_rets[sym].append(r)
             sym_total_mdds[sym].append(m)
             sym_total_trades[sym].append(float(t))
             sym_total_wins[sym].append(w)
+            sym_total_pfs[sym].append(pf)
 
         if not sym_scores:
             return -10000.0
@@ -173,6 +193,7 @@ def objective_v2(trial: optuna.Trial, data_maps: Dict[str, Dict[str, Any]], symb
         fold_mdds.append(float(np.mean(sym_mdds)))
         fold_trades.append(mean_trades_fold)
         fold_wins.append(float(np.mean(sym_wins_fold)))
+        fold_pfs.append(float(np.mean(sym_pfs_fold)))
 
     has_holdout = len(all_folds) > len(cv_folds)
     cv_scores = fold_scores[:-1] if has_holdout else fold_scores
@@ -197,6 +218,9 @@ def objective_v2(trial: optuna.Trial, data_maps: Dict[str, Dict[str, Any]], symb
     trial.set_user_attr("avg_mdd", float(np.mean(fold_mdds)))
     trial.set_user_attr("avg_trades", float(np.mean(fold_trades)))
     trial.set_user_attr("avg_win_rate", float(np.mean(fold_wins)))
+    trial.set_user_attr("avg_pf", float(np.mean(fold_pfs)))
+    trial.set_user_attr("holdout_score", holdout_score)
+    trial.set_user_attr("cv_scores", cv_scores)
     
     for sym in symbols:
         if len(sym_total_scores[sym]) > 0:
@@ -205,13 +229,15 @@ def objective_v2(trial: optuna.Trial, data_maps: Dict[str, Dict[str, Any]], symb
             s_mdd: float = float(np.max(sym_total_mdds[sym]))
             s_trades: float = float(np.sum(sym_total_trades[sym]))
             s_wins: float = float(np.mean(sym_total_wins[sym]))
+            s_pf: float = float(np.mean(sym_total_pfs[sym]))
         else:
-            s_score, s_ret, s_mdd, s_trades, s_wins = -100.0, 0.0, 0.0, 0.0, 0.0
+            s_score, s_ret, s_mdd, s_trades, s_wins, s_pf = -100.0, 0.0, 0.0, 0.0, 0.0, 0.0
             
         trial.set_user_attr(f"{sym}_score", s_score)
         trial.set_user_attr(f"{sym}_ret", s_ret)
         trial.set_user_attr(f"{sym}_mdd", s_mdd)
         trial.set_user_attr(f"{sym}_trades", s_trades)
         trial.set_user_attr(f"{sym}_win_rate", s_wins)
+        trial.set_user_attr(f"{sym}_pf", s_pf)
         
     return float(final_score)

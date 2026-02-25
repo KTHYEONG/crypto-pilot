@@ -58,12 +58,29 @@ def calc_romad(pnl_series: pd.Series, n_trades: int, tf: str) -> Tuple[float, fl
     
     return final_score, ret_pct, mdd_abs
 
+def calc_profit_factor(trades_df: pd.DataFrame) -> float:
+    """Calculate Profit Factor (Gross Profit / Gross Loss)."""
+    if trades_df.empty:
+        return 1.0
+        
+    gains: pd.Series = trades_df["pnl"][trades_df["pnl"] > 0]
+    losses: pd.Series = trades_df["pnl"][trades_df["pnl"] < 0]
+    
+    gross_profit: float = float(gains.sum()) if not gains.empty else 0.0
+    gross_loss: float = abs(float(losses.sum())) if not losses.empty else 0.0
+    
+    if gross_loss == 0.0:
+        return 999.0 if gross_profit > 0 else 1.0
+        
+    return gross_profit / gross_loss
+
 def calc_romad_from_metrics(
     ret_pct: float,
     mdd_pct: float,
     n_trades: int,
     tf: str,
     span_days: float,
+    n_trials: int = 1,
 ) -> Tuple[float, float, float]:
     """
     RoMaD score from precomputed return and MDD.
@@ -100,6 +117,12 @@ def calc_romad_from_metrics(
     deflation_factor: float = 1.0 - (1.0 / float(np.sqrt(max(float(n_trades), 1.0))))
     adjusted_romad *= deflation_factor
     
+    # Multiple Testing Correction (Bailey & López de Prado)
+    # n_trials가 늘어나면 스코어 패널티를 줌 (우연적 과적합 방지)
+    mt_correction: float = 1.0 - (float(np.log(n_trials)) / (2.0 * max(float(n_trades), 1.0)))
+    mt_correction = max(mt_correction, 0.5)
+    adjusted_romad *= mt_correction
+
     final_score: float = adjusted_romad - max(0.0, mdd_abs - 40.0) * 0.3
     
     return final_score, ret_pct, mdd_abs

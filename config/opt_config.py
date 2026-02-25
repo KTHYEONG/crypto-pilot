@@ -94,3 +94,40 @@ SEARCH_SPACE_V2: Dict[str, Dict[str, Any]] = {
     "PANIC_REGIME_NATR": {"type": "float", "low": 3.0, "high": 6.0, "step": 0.5},
     "PANIC_REGIME_MULTIPLIER": {"type": "float", "low": 0.1, "high": 0.5, "step": 0.1},
 }
+
+def get_quarterly_window(reference_date=None) -> tuple[str, str, str]:
+    """
+    Calculate dynamic IS/OOS windows based on the start of the quarter.
+    
+    OOS: The entire previous quarter (3 months).
+    IS: 18 months prior to the start of the OOS window.
+    """
+    import datetime
+    from dateutil.relativedelta import relativedelta
+    
+    if reference_date is None:
+        reference_date = datetime.date.today()
+    elif isinstance(reference_date, str):
+        reference_date = datetime.datetime.strptime(reference_date, "%Y-%m-%d").date()
+    elif isinstance(reference_date, datetime.datetime):
+        reference_date = reference_date.date()
+        
+    # Find the start of the *current* quarter based on the reference date
+    current_month: int = reference_date.month
+    current_quarter_start_month: int = ((current_month - 1) // 3) * 3 + 1
+    current_quarter_start: datetime.date = datetime.date(reference_date.year, current_quarter_start_month, 1)
+    
+    # OOS window is the previous quarter
+    oos_end: datetime.date = current_quarter_start - datetime.timedelta(days=1)
+    oos_start: datetime.date = current_quarter_start - relativedelta(months=3)
+    
+    # IS window is 18 months before the OOS start
+    is_start: datetime.date = oos_start - relativedelta(months=18)
+    
+    # Format to YYYY-MM-DD
+    return (
+        is_start.strftime("%Y-%m-%d"),
+        oos_start.strftime("%Y-%m-%d"),
+        oos_end.strftime("%Y-%m-%d")
+    )
+
