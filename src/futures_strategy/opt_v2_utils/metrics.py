@@ -27,12 +27,18 @@ def calc_romad(pnl_series: pd.Series, n_trades: int, tf: str) -> Tuple[float, fl
     span_days: float = float((pnl_series.index[-1] - pnl_series.index[0]).total_seconds() / 86400.0)
     if span_days < 1.0:
         span_days = 1.0
-    annual_return: float = ret_pct * (365.0 / span_days)
+        
+    total_ret_ratio: float = 1.0 + (ret_pct / 100.0)
+    if total_ret_ratio <= 0:
+        annual_return: float = -100.0
+    else:
+        annual_return = (pow(total_ret_ratio, 365.0 / span_days) - 1.0) * 100.0
 
-    romad: float = annual_return / max(mdd_pct, 5.0)
+    mdd_abs: float = max(abs(mdd_pct), 1.0)
+    romad: float = annual_return / mdd_abs
 
     # Dynamic Statistical Significance Parameters
-    trades_per_year_floor: float = 120.0 if tf == "4h" else 30.0
+    trades_per_year_floor: float = 120.0 if tf == "4h" else 60.0
     dynamic_min_trades: float = max(trades_per_year_floor * (span_days / 365.0), 20.0)
     trade_ratio: float = float(n_trades) / dynamic_min_trades
     
@@ -48,9 +54,9 @@ def calc_romad(pnl_series: pd.Series, n_trades: int, tf: str) -> Tuple[float, fl
     deflation_factor: float = 1.0 - (1.0 / float(np.sqrt(max(float(n_trades), 1.0))))
     adjusted_romad *= deflation_factor
 
-    final_score: float = adjusted_romad - max(0.0, mdd_pct - 40.0) * 0.3
+    final_score: float = adjusted_romad - max(0.0, mdd_abs - 40.0) * 0.3
     
-    return final_score, ret_pct, mdd_pct
+    return final_score, ret_pct, mdd_abs
 
 def calc_romad_from_metrics(
     ret_pct: float,
@@ -66,14 +72,20 @@ def calc_romad_from_metrics(
     if n_trades == 0:
         return -20.0, ret_pct, mdd_pct
         
-    mdd_abs: float = abs(mdd_pct)
+    mdd_abs: float = max(abs(mdd_pct), 1.0)
     days: float = max(float(span_days), 1.0)
-    annual_return: float = ret_pct * (365.0 / days)
-    romad: float = annual_return / max(mdd_abs, 5.0)
+
+    total_ret_ratio: float = 1.0 + (ret_pct / 100.0)
+    if total_ret_ratio <= 0:
+        annual_return: float = -100.0
+    else:
+        annual_return = (pow(total_ret_ratio, 365.0 / days) - 1.0) * 100.0
+
+    romad: float = annual_return / mdd_abs
     
     # Dynamic Statistical Significance Parameters
-    trades_per_year_floor: float = 120.0 if tf == "4h" else 30.0
-    dynamic_min_trades: float = max(trades_per_year_floor * (span_days / 365.0), 20.0)
+    trades_per_year_floor: float = 120.0 if tf == "4h" else 60.0
+    dynamic_min_trades: float = max(trades_per_year_floor * (days / 365.0), 20.0)
     trade_ratio: float = float(n_trades) / dynamic_min_trades
     
     # Sigmoid Penalty Function
