@@ -31,19 +31,23 @@ def calc_romad(pnl_series: pd.Series, n_trades: int, tf: str) -> Tuple[float, fl
 
     romad: float = annual_return / max(mdd_pct, 5.0)
 
-    # Statistical Significance Parameters
-    min_trades_target: int = 120 if tf == "4h" else 40
-    trade_ratio: float = float(n_trades) / float(min_trades_target)
+    # Dynamic Statistical Significance Parameters
+    trades_per_year_floor: float = 120.0 if tf == "4h" else 30.0
+    dynamic_min_trades: float = max(trades_per_year_floor * (span_days / 365.0), 20.0)
+    trade_ratio: float = float(n_trades) / dynamic_min_trades
     
-    # Financial Engineering Penalty: Deflated Sharpe/RoMaD Logic
-    penalty_multiplier: float
-    if trade_ratio < 1.0:
-        penalty_multiplier = max(trade_ratio ** 2.0, 0.05)
-    else:
-        penalty_multiplier = min(trade_ratio ** 0.5, 1.2)
-
+    # Sigmoid Penalty Function
+    k: float = 6.0
+    penalty_multiplier: float = 1.0 / (1.0 + float(np.exp(-k * (trade_ratio - 1.0))))
+    penalty_multiplier = min(penalty_multiplier, 1.0)
+    
     # Adjust base score protecting against negative bias
     adjusted_romad: float = (romad * penalty_multiplier) if romad > 0.0 else (romad / penalty_multiplier)
+    
+    # Deflated RoMaD Logic
+    deflation_factor: float = 1.0 - (1.0 / float(np.sqrt(max(float(n_trades), 1.0))))
+    adjusted_romad *= deflation_factor
+
     final_score: float = adjusted_romad - max(0.0, mdd_pct - 40.0) * 0.3
     
     return final_score, ret_pct, mdd_pct
@@ -67,19 +71,23 @@ def calc_romad_from_metrics(
     annual_return: float = ret_pct * (365.0 / days)
     romad: float = annual_return / max(mdd_abs, 5.0)
     
-    # Statistical Significance Parameters
-    min_trades_target: int = 120 if tf == "4h" else 40
-    trade_ratio: float = float(n_trades) / float(min_trades_target)
+    # Dynamic Statistical Significance Parameters
+    trades_per_year_floor: float = 120.0 if tf == "4h" else 30.0
+    dynamic_min_trades: float = max(trades_per_year_floor * (span_days / 365.0), 20.0)
+    trade_ratio: float = float(n_trades) / dynamic_min_trades
     
-    # Financial Engineering Penalty: Deflated Sharpe/RoMaD Logic
-    penalty_multiplier: float
-    if trade_ratio < 1.0:
-        penalty_multiplier = max(trade_ratio ** 2.0, 0.05)
-    else:
-        penalty_multiplier = min(trade_ratio ** 0.5, 1.2)
+    # Sigmoid Penalty Function
+    k: float = 6.0
+    penalty_multiplier: float = 1.0 / (1.0 + float(np.exp(-k * (trade_ratio - 1.0))))
+    penalty_multiplier = min(penalty_multiplier, 1.0)
     
     # Adjust base score protecting against negative bias
     adjusted_romad: float = (romad * penalty_multiplier) if romad > 0.0 else (romad / penalty_multiplier)
+    
+    # Deflated RoMaD Logic
+    deflation_factor: float = 1.0 - (1.0 / float(np.sqrt(max(float(n_trades), 1.0))))
+    adjusted_romad *= deflation_factor
+    
     final_score: float = adjusted_romad - max(0.0, mdd_abs - 40.0) * 0.3
     
     return final_score, ret_pct, mdd_abs
