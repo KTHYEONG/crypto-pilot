@@ -21,6 +21,7 @@ class BacktestEngineFast:
         initial_balance: float = 1_000_000,
         merge_index_map=None,
         precomputed_daily_df: Optional[pd.DataFrame] = None,
+        warmup_bars: Optional[int] = None,
     ):
         # Shallow copy (deep=False): new DataFrame object so _prepare_data can add columns without
         # mutating the caller's DataFrame (e.g. same df reused across optimization trials).
@@ -31,6 +32,7 @@ class BacktestEngineFast:
         self.initial_balance = initial_balance
         self.balance = initial_balance
         self._precomputed_daily_df = precomputed_daily_df
+        self._warmup_bars_override = warmup_bars
 
         # injected by optimization script
         self.leverage = 1
@@ -204,10 +206,13 @@ class BacktestEngineFast:
         enable_trend_exit = self.strategy.params.get('ENABLE_TREND_EXIT', True)
         
         # [WARMUP OPTIMIZATION] Warmup in execution (hourly) bar count; fallback converts daily bars to hourly
-        warmup_bars = getattr(df, "attrs", {}).get(
-            "warmup_bars",
-            self.strategy.get_required_warmup(freq="hourly"),
-        )
+        if getattr(self, "_warmup_bars_override", None) is not None:
+            warmup_bars = self._warmup_bars_override
+        else:
+            warmup_bars = getattr(df, "attrs", {}).get(
+                "warmup_bars",
+                self.strategy.get_required_warmup(freq="hourly"),
+            )
         self._warmup_bars = warmup_bars  # for get_results() MDD exclusion
 
         # [NEW] RSI for Panic Exit
