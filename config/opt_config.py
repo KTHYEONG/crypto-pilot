@@ -51,19 +51,19 @@ SEARCH_SPACE_V2: Dict[str, Dict[str, Any]] = {
     "MA_PERIOD": {"type": "int", "low": 14, "high": 150, "log": True},
     "ATR_PERIOD": {"type": "int", "low": 14, "high": 28, "step": 1},
     "STRENGTH_FILTER_PERIOD": {"type": "int", "low": 10, "high": 28, "log": True},
-    "MAX_HOLDING_BARS_4H": {"type": "int", "low": 8, "high": 48, "log": True},   
-    "MAX_HOLDING_BARS_1D": {"type": "int", "low": 5, "high": 25, "log": True},   
-    "TIME_EXIT_PROFIT_THRESHOLD": {"type": "float", "low": 0.0, "high": 1.5, "step": 0.1},
+    "MAX_HOLDING_BARS_4H": {"type": "int", "low": 12, "high": 240, "log": True},
+    "MAX_HOLDING_BARS_1D": {"type": "int", "low": 5, "high": 90, "log": True},
+    "TIME_EXIT_PROFIT_THRESHOLD": {"type": "float", "low": 0.0, "high": 3.0, "step": 0.1},
     "RISK_PER_TRADE": {"type": "float", "low": 0.01, "high": 0.05, "step": 0.005},
-    "LEVERAGE": {"type": "int", "low": 2, "high": 10},
+    "LEVERAGE": {"type": "int", "low": 1, "high": 10},
 
     # --------------------------------------------------------------------------
     # 3. STOP/EXIT PARAMETERS
     # --------------------------------------------------------------------------
-    "STOP_LOSS_PCT": {"type": "float", "low": 0.01, "high": 0.05, "step": 0.005},
+    "STOP_LOSS_PCT": {"type": "float", "low": 0.02, "high": 0.10, "step": 0.01},
     "ATR_STOP_LOSS_MULT": {"type": "float", "low": 1.5, "high": 4.0, "step": 0.25},
-    "TAKE_PROFIT_ATR_MULT": {"type": "float", "low": 1.5, "high": 6.0, "log": True},
-    "ATR_MULTIPLIER": {"type": "float", "low": 2.0, "high": 5.0, "step": 0.25},
+    "TAKE_PROFIT_ATR_MULT": {"type": "float", "low": 2.0, "high": 8.0, "log": True},
+    "ATR_MULTIPLIER": {"type": "float", "low": 1.5, "high": 4.0, "step": 0.25},
     "TRAILING_ACTIVATION_ATR": {"type": "float", "low": 1.0, "high": 3.0, "step": 0.25},
     "PSAR_STEP": {"type": "float", "low": 0.01, "high": 0.05, "step": 0.01},
     "PSAR_MAX": {"type": "float", "low": 0.1, "high": 0.3, "step": 0.05},
@@ -73,9 +73,9 @@ SEARCH_SPACE_V2: Dict[str, Dict[str, Any]] = {
     # --------------------------------------------------------------------------
     "VOLUME_MA_PERIOD": {"type": "int", "low": 10, "high": 40, "step": 1},
     "VOLUME_Z_THRESHOLD": {"type": "float", "low": 0.5, "high": 2.0, "step": 0.1},
-    "ADX_THRESHOLD": {"type": "int", "low": 20, "high": 35, "step": 1},
-    "NATR_THRESHOLD": {"type": "float", "low": 1.0, "high": 3.5, "step": 0.1},
-    "ER_THRESHOLD": {"type": "float", "low": 0.4, "high": 0.65, "step": 0.05},
+    "ADX_THRESHOLD": {"type": "int", "low": 15, "high": 30, "step": 1},
+    "NATR_THRESHOLD": {"type": "float", "low": 1.0, "high": 4.0, "step": 0.25},
+    "ER_THRESHOLD": {"type": "float", "low": 0.3, "high": 0.7, "step": 0.05},
     "BB_STD": {"type": "float", "low": 1.8, "high": 2.8, "step": 0.1},
     "KELTNER_ATR_MULT": {"type": "float", "low": 1.2, "high": 2.5, "step": 0.1},
     "SUPERTREND_MULT": {"type": "float", "low": 1.5, "high": 3.0, "step": 0.1},
@@ -95,12 +95,13 @@ SEARCH_SPACE_V2: Dict[str, Dict[str, Any]] = {
     "PANIC_REGIME_MULTIPLIER": {"type": "float", "low": 0.1, "high": 0.5, "step": 0.1},
 }
 
-def get_quarterly_window(reference_date=None) -> tuple[str, str, str]:
+def get_quarterly_window(reference_date=None) -> tuple[str, str, str, str]:
     """
     Calculate dynamic IS/OOS windows based on the start of the quarter.
     
     OOS: The entire previous quarter (3 months).
     IS: 18 months prior to the start of the OOS window.
+    FETCH: 300 days prior to IS to warm up technical indicators.
     """
     import datetime
     from dateutil.relativedelta import relativedelta
@@ -124,8 +125,12 @@ def get_quarterly_window(reference_date=None) -> tuple[str, str, str]:
     # IS window is 18 months before the OOS start
     is_start: datetime.date = oos_start - relativedelta(months=18)
     
+    # Fetch window is 300 days before the IS start
+    fetch_start: datetime.date = is_start - relativedelta(days=300)
+    
     # Format to YYYY-MM-DD
     return (
+        fetch_start.strftime("%Y-%m-%d"),
         is_start.strftime("%Y-%m-%d"),
         oos_start.strftime("%Y-%m-%d"),
         oos_end.strftime("%Y-%m-%d")
