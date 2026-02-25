@@ -62,7 +62,7 @@ def main() -> None:
     parser.add_argument("--reference-date", type=str, default=None, help="Reference date for quarterly window (YYYY-MM-DD)")
     args: argparse.Namespace = parser.parse_args()
 
-    START_DATE, IS_END_DATE, END_DATE = get_quarterly_window(args.reference_date)
+    FETCH_START_DATE, START_DATE, IS_END_DATE, END_DATE = get_quarterly_window(args.reference_date)
 
     symbols: List[str] = [s.strip() for s in args.symbols.split(",")]
     oos_symbols: List[str] = ["ETH/USDT", "SOL/USDT", "BNB/USDT", "XRP/USDT"]
@@ -71,26 +71,49 @@ def main() -> None:
     data_maps: Dict[str, Dict[str, Any]] = {}
     oos_data_maps: Dict[str, Dict[str, Any]] = {}
 
-    _logger.info("Loading target futures database (IS: %s to %s, OOS: %s to %s)...", START_DATE, IS_END_DATE, IS_END_DATE, END_DATE)
+    _logger.info("Loading target futures database (Fetch: %s, IS: %s to %s, OOS: %s to %s)...", FETCH_START_DATE, START_DATE, IS_END_DATE, IS_END_DATE, END_DATE)
     for sym in symbols:
         data_maps[sym] = {}
         oos_data_maps[sym] = {}
         for tf in ["1d", "4h"]:
             # Load full data first to ensure technical indicators (like EMA) have enough history, 
             # but we will slice it immediately for engine usage.
-            full_df: pd.DataFrame = collector.collect_and_save(sym, tf, START_DATE, END_DATE)
+            full_df: pd.DataFrame = collector.collect_and_save(sym, tf, FETCH_START_DATE, END_DATE)
             if full_df.empty:
                 _logger.error("Failed to load %s %s data", sym, tf)
                 sys.exit(1)
             full_df = merge_funding_into_ohlcv(sym, full_df, DATA_DIR)
             
             # Split into IS and OOS
-            is_mask = full_df["datetime"] < pd.to_datetime(IS_END_DATE).tz_localize(full_df["datetime"].dt.tz)
-            oos_mask = (full_df["datetime"] >= pd.to_datetime(IS_END_DATE).tz_localize(full_df["datetime"].dt.tz)) & \
-                       (full_df["datetime"] <= pd.to_datetime(END_DATE).tz_localize(full_df["datetime"].dt.tz))
-            
-            data_maps[sym][tf] = full_df[is_mask].reset_index(drop=True)
-            oos_data_maps[sym][tf] = full_df[oos_mask].reset_index(drop=True)
+            if full_df["datetime"].dt.tz is None:
+                is_start_dt = pd.to_datetime(START_DATE)
+                is_end_dt = pd.to_datetime(IS_END_DATE)
+            else:
+                is_start_dt = pd.to_datetime(START_DATE).tz_localize(full_df["datetime"].dt.tz)
+                is_end_dt = pd.to_datetime(IS_END_DATE).tz_localize(full_df["datetime"].dt.tz)
+
+            is_mask = full_df["datetime"] < is_end_dt
+
+            # Store full_df up to IS_END in data_maps to keep historical data for indicator warmup
+            is_df: pd.DataFrame = full_df[is_mask].reset_index(drop=True)
+            data_maps[sym][tf] = is_df
+
+            # Compute IS start index as POSITION within the sliced IS dataframe
+            is_mask_for_idx: pd.Series = is_df["datetime"] >= is_start_dt
+            if is_mask_for_idx.any():
+                data_maps[sym][f"is_start_idx_{tf}"] = int(is_mask_for_idx.to_numpy().argmax())
+            else:
+                data_maps[sym][f"is_start_idx_{tf}"] = len(is_df)
+
+            # Store full_df in oos_data_maps to keep historical data for indicator warmup
+            oos_data_maps[sym][tf] = full_df.copy()
+
+            # Compute OOS start index as POSITION for iloc slicing
+            oos_mask_for_idx: pd.Series = full_df["datetime"] >= is_end_dt
+            if oos_mask_for_idx.any():
+                oos_data_maps[sym][f"oos_start_idx_{tf}"] = int(oos_mask_for_idx.to_numpy().argmax())
+            else:
+                oos_data_maps[sym][f"oos_start_idx_{tf}"] = len(full_df)
             
         data_maps[sym]["merge_idx_1d"] = compute_segment_merge_index(data_maps[sym]["1d"], data_maps[sym]["1d"])
         data_maps[sym]["merge_idx_4h"] = compute_segment_merge_index(data_maps[sym]["4h"], data_maps[sym]["1d"])
@@ -241,11 +264,12 @@ def main() -> None:
             
         try:
             n_oos_bars = len(target_df_oos)
+            oos_start_idx = oos_data_maps.get(sym, {}).get(f"oos_start_idx_{tf_val}", 0)
             precomputed_daily_oos: pd.DataFrame = strategy_oos.generate_signals(daily_df_oos)
             
             s_f, r_f, m_f, t_f, w_f, pf_f = evaluate_symbol_fold(
                 strategy_oos, best_params, sym, tf_val, target_df_oos, daily_df_oos,
-                full_merge_idx_oos, precomputed_daily_oos, 0, n_oos_bars, n_trials=1
+                full_merge_idx_oos, precomputed_daily_oos, test_start=oos_start_idx, test_end=n_oos_bars, n_trials=1
             )
             oos_romad_scores.append(s_f)
             oos_pfs.append(pf_f)
@@ -267,12 +291,27 @@ def main() -> None:
         data_maps[sym] = {}
         tf_list: List[str] = list(set(["1d", tf_val]))
         for tf in tf_list:
-            oos_df: pd.DataFrame = collector.collect_and_save(sym, tf, START_DATE, END_DATE)
+            oos_df: pd.DataFrame = collector.collect_and_save(sym, tf, FETCH_START_DATE, END_DATE)
             if not oos_df.empty:
                 oos_df = merge_funding_into_ohlcv(sym, oos_df, DATA_DIR)
-                data_maps[sym][tf] = oos_df
+                data_maps[sym][tf] = oos_df.reset_index(drop=True)
+
+                # Cross-symbol IS 시작 인덱스는 reset_index 이후의 "포지션" 기준으로 계산해야 함
+                is_start_dt = (
+                    pd.to_datetime(START_DATE).tz_localize(oos_df["datetime"].dt.tz)
+                    if oos_df["datetime"].dt.tz
+                    else pd.to_datetime(START_DATE)
+                )
+                tf_df: pd.DataFrame = data_maps[sym][tf]
+                is_mask_for_idx: pd.Series = tf_df["datetime"] >= is_start_dt
+                data_maps[sym][f"is_start_idx_{tf}"] = (
+                    int(is_mask_for_idx.to_numpy().argmax()) if is_mask_for_idx.any() else 0
+                )
+
         if "1d" in data_maps[sym] and tf_val in data_maps[sym]:
-            data_maps[sym][f"merge_idx_{tf_val}"] = compute_segment_merge_index(data_maps[sym][tf_val], data_maps[sym]["1d"])
+            data_maps[sym][f"merge_idx_{tf_val}"] = compute_segment_merge_index(
+                data_maps[sym][tf_val], data_maps[sym]["1d"]
+            )
 
     _logger.info("  [Cross-Symbol Verification Summary (Averaged Over Folds)]")
     _logger.info(header.replace("Score", "RoMaD"))
@@ -292,7 +331,15 @@ def main() -> None:
             continue
             
         try:
-            cv_folds, holdout_fold = build_anchored_folds(target_df, n_folds=3, holdout_ratio=0.25, embargo=EMBARGO_BARS.get(tf_val, 0))
+            is_start_idx = data_maps[sym].get(f"is_start_idx_{tf_val}", 0)
+            n_eval_bars = len(target_df) - is_start_idx
+
+            if n_eval_bars < 500:
+                _logger.info(f"| {sym:<10} | {'SHORT':>8} | {'SHORT':>8} | {'SHORT':>5} | {'SHORT':>8} | {'SHORT':>7} |")
+                continue
+
+            base_df_for_folds = pd.DataFrame(index=range(n_eval_bars))
+            cv_folds, holdout_fold = build_anchored_folds(base_df_for_folds, n_folds=3, holdout_ratio=0.25, embargo=EMBARGO_BARS.get(tf_val, 0))
             folds_oos = cv_folds + ([holdout_fold] if holdout_fold[2] > holdout_fold[1] else [])
             if not folds_oos:
                 _logger.info(f"| {sym:<10} | {'NOFOLD':>8} | {'NOFOLD':>8} | {'NOFOLD':>5} | {'NOFOLD':>8} | {'NOFOLD':>7} |")
@@ -306,14 +353,17 @@ def main() -> None:
             f_pfs: List[float] = []
 
             for train_end, test_start, test_end in folds_oos:
-                tf_idx_test_end_minus_1: int = test_end - 1
+                adj_test_start = test_start + is_start_idx
+                adj_test_end = test_end + is_start_idx
+                
+                tf_idx_test_end_minus_1: int = adj_test_end - 1
                 daily_end_idx: int = int(full_merge_idx[tf_idx_test_end_minus_1]) if tf_idx_test_end_minus_1 < len(full_merge_idx) else len(daily_df) - 1
                 daily_trunc: pd.DataFrame = daily_df.iloc[:daily_end_idx + 1].copy()
                 
                 precomputed_daily: pd.DataFrame = strategy_oos.generate_signals(daily_trunc)
                 s_f, r_f, m_f, t_f, w_f, pf_f = evaluate_symbol_fold(
                     strategy_oos, best_params, sym, tf_val, target_df, daily_trunc,
-                    full_merge_idx, precomputed_daily, test_start, test_end, n_trials=1
+                    full_merge_idx, precomputed_daily, adj_test_start, adj_test_end, n_trials=1
                 )
                 f_scrs.append(s_f)
                 f_rets.append(r_f)
