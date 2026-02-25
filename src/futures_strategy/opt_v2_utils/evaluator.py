@@ -155,11 +155,21 @@ def objective_v2(trial: optuna.Trial, data_maps: Dict[str, Dict[str, Any]], symb
         min_score: float = float(np.min(sym_scores))
         penalty: float = max(0.0, 0.0 - min_score) * 1.5
         avg_fold_sym_score: float = mean_score - penalty
+        
+        mean_trades_fold: float = float(np.mean(sym_trades_fold))
+        min_trades_per_fold: float = 50.0 if tf == "4h" else 15.0
+        
+        if mean_trades_fold < min_trades_per_fold:
+            trade_fold_penalty_factor: float = (mean_trades_fold / min_trades_per_fold) ** 2.0
+            if avg_fold_sym_score > 0.0:
+                avg_fold_sym_score *= trade_fold_penalty_factor
+            else:
+                avg_fold_sym_score /= max(trade_fold_penalty_factor, 0.01)
 
         fold_scores.append(avg_fold_sym_score)
         fold_rets.append(float(np.mean(sym_rets)))
         fold_mdds.append(float(np.mean(sym_mdds)))
-        fold_trades.append(float(np.mean(sym_trades_fold)))
+        fold_trades.append(mean_trades_fold)
         fold_wins.append(float(np.mean(sym_wins_fold)))
 
     shifted: List[float] = [s + 10.0 for s in fold_scores]
