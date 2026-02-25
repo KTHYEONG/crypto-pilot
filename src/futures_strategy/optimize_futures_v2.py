@@ -138,10 +138,13 @@ def main() -> None:
         )
         if not deleted_fast:
             try:
+                _logger.info(f"Fast reset failed; falling back to slow ORM deletion for '{study_name}'...")
                 optuna.delete_study(study_name=study_name, storage=storage_url)
-                _logger.info(f"Deleted existing study '{study_name}' for a fresh start (ORM fallback).")
+                _logger.info(f"Deleted existing study '{study_name}' (ORM fallback complete).")
             except KeyError:
                 pass
+            except Exception as e:
+                _logger.error(f"Failed to delete study '{study_name}': {e}")
 
         study = optuna.create_study(
             study_name=study_name,
