@@ -91,10 +91,12 @@ def objective_v2(trial: optuna.Trial, data_maps: Dict[str, Dict[str, Any]], symb
         return -10000.0
     min_len: int = min(lengths)
     base_df_for_folds: pd.DataFrame = pd.DataFrame(index=range(min_len))
-    folds: List[Tuple[int, int, int]] = build_anchored_folds(base_df_for_folds, n_folds=3, embargo=EMBARGO_BARS.get(tf, 0))
+    cv_folds, holdout_fold = build_anchored_folds(base_df_for_folds, n_folds=3, holdout_ratio=0.25, embargo=EMBARGO_BARS.get(tf, 0))
 
-    if not folds:
+    if not cv_folds:
         return -10000.0
+
+    all_folds = cv_folds + ([holdout_fold] if holdout_fold[2] > holdout_fold[1] else [])
 
     fold_scores: List[float] = []
     fold_rets: List[float] = []
@@ -108,7 +110,7 @@ def objective_v2(trial: optuna.Trial, data_maps: Dict[str, Dict[str, Any]], symb
     sym_total_trades: Dict[str, List[float]] = {sym: [] for sym in symbols}
     sym_total_wins: Dict[str, List[float]] = {sym: [] for sym in symbols}
     
-    for f_idx, (train_end, test_start, test_end) in enumerate(folds):
+    for f_idx, (train_end, test_start, test_end) in enumerate(all_folds):
         sym_scores: List[float] = []
         sym_rets: List[float] = []
         sym_mdds: List[float] = []
@@ -172,13 +174,23 @@ def objective_v2(trial: optuna.Trial, data_maps: Dict[str, Dict[str, Any]], symb
         fold_trades.append(mean_trades_fold)
         fold_wins.append(float(np.mean(sym_wins_fold)))
 
-    shifted: List[float] = [s + 10.0 for s in fold_scores]
+    has_holdout = len(all_folds) > len(cv_folds)
+    cv_scores = fold_scores[:-1] if has_holdout else fold_scores
+    holdout_score = fold_scores[-1] if has_holdout else 0.0
+
+    shifted: List[float] = [s + 10.0 for s in cv_scores]
     final_score: float
     if any(s <= 0 for s in shifted):
-        final_score = float(np.mean(fold_scores)) - 20.0
+        final_score = float(np.mean(cv_scores)) - 20.0
     else:
         hm: float = len(shifted) / sum(1.0 / s for s in shifted)
         final_score = hm - 10.0
+
+    if has_holdout:
+        if holdout_score < 0.0:
+            final_score -= abs(holdout_score) * 2.0
+        else:
+            final_score = (final_score * 0.7) + (holdout_score * 0.3)
 
     trial.set_user_attr("avg_score", float(np.mean(fold_scores)))
     trial.set_user_attr("avg_ret", float(np.mean(fold_rets)))
