@@ -17,7 +17,7 @@ HoldoutFold = Tuple[int, int, int]
 def build_purged_walk_forward_folds(
     df: pd.DataFrame,
     n_folds: int = 3,
-    holdout_ratio: float = 0.25,
+    holdout_ratio: float = 0.30,
     embargo: int = 0,
 ) -> Tuple[List[CVFold], HoldoutFold]:
     """Build Purged Walk-Forward (PWF) splits for CV, and one OOS Hold-out split.
@@ -42,37 +42,35 @@ def build_purged_walk_forward_folds(
     # Holdout test_end is the full dataset end (n_bars), not train_bars_total.
     holdout_fold: HoldoutFold = (train_bars_total, holdout_start, n_bars)
 
-    # Calculate block sizes
-    # e.g. n_folds=3 → total_chunks=6. Train window occupies 3 chunks, test 1 chunk (sliding).
-    total_chunks: int = n_folds * 2
-    chunk_size: int = train_bars_total // total_chunks
+    # [NEW] Priority 4: Rolling Window (Non-Expanding) Purged Walk-Forward
+    # 확장형(Expanding)의 치명적 단점인 '과거 레짐 편향(Memory Bias)'을 제거하기 위해,
+    # 훈련 윈도우의 크기를 고정하고 슬라이딩(Sliding)시켜 항상 '최근 장세'에만 적응하도록 강제합니다.
+    # [INSTITUTIONAL] 분기별 롤링(Quarterly Rolling)을 위한 훈련/테스트 황금비율
+    # 전체 CV 구간의 60%(약 1년)를 훈련에 사용하고, 나머지 40%를 N개의 테스트(분기)로 분할합니다.
+    train_size_ratio = 0.6
+    train_size: int = int(train_bars_total * train_size_ratio)
+    test_size: int = (train_bars_total - train_size) // n_folds
+    stride: int = test_size
 
-    if chunk_size == 0:
+    if test_size == 0 or train_size == 0:
         _logger.warning(
-            "chunk_size==0: train_bars_total=%d, total_chunks=%d. Skipping CV folds.",
-            train_bars_total, total_chunks,
+            "Data too small: train_bars_total=%d, n_folds=%d. Skipping CV folds.",
+            train_bars_total, n_folds,
         )
         return [], holdout_fold
-
-    # Sliding window indices
-    # Fold k: Train C[k]..C[k+train_chunks_per_fold-1], Test C[k+train_chunks_per_fold]
-    train_chunks_per_fold: int = total_chunks - n_folds
 
     splits: List[CVFold] = []
 
     for i in range(n_folds):
-        train_start: int = i * chunk_size
-        train_end: int = (i + train_chunks_per_fold) * chunk_size
+        # 훈련 시작점을 계속 전진시켜 오래된 데이터를 망각(Forgetting)함
+        train_start: int = i * stride
+        train_end: int = train_start + train_size
         test_start: int = train_end + embargo
-        # Last CV fold's test_end is train_bars_total (immediately before hold-out region).
-        test_end: int = (
-            (i + train_chunks_per_fold + 1) * chunk_size
-            if i < n_folds - 1
-            else train_bars_total
-        )
+
+        # 마지막 폴드는 남은 자투리 데이터를 모두 포함하도록 보정
+        test_end: int = train_end + test_size if i < n_folds - 1 else train_bars_total
 
         # Guard: skip degenerate folds where embargo collapses the test window.
         if test_start < test_end:
-            splits.append((train_start, train_end, test_start, test_end))
-
+            splits.append((train_start, train_end, test_start, test_end))   
     return splits, holdout_fold

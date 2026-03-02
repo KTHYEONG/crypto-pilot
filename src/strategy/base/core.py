@@ -35,7 +35,7 @@ class StrategyBase(ABC):
 def calculate_required_warmup_bars(
     params: dict[str, Any],
     *,
-    min_bars: int = 50,
+    min_bars: int = 300,  # [FIX] Hurst(200) + Regime Z-Score(100) = Minimum 300 bars guaranteed
     safety_factor: int = 3,
 ) -> int:
     period_keys = (
