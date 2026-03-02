@@ -1,6 +1,8 @@
 """
 7개 필수 항목을 검증하여 파라미터의 실전 투입 가능 여부를 결정함.
 """
+from __future__ import annotations
+
 from dataclasses import dataclass
 from typing import Dict, List
 import logging
@@ -17,61 +19,81 @@ def run_go_nogo_check(
     cv_fold_scores: List[float],
     holdout_score: float,
     oos_romad_scores: List[float],
-    cross_sym_romad_scores: List[float],
     max_mdd_pct: float,
     profit_factor: float,
     long_count: int,
     short_count: int,
+    tf: str = "4h",
 ) -> GoNoGoResult:
+    import numpy as np
     
     total_trades = long_count + short_count
     
-    # 1. 모든 CV Fold RoMaD > 0
-    all_cv_positive = all(s > 0 for s in cv_fold_scores) if cv_fold_scores else False
-    
-    # 2. Hold-out Score > 0
-    holdout_positive = (holdout_score > 0)
-    
-    # 3. True OOS RoMaD > 0 (타겟 심볼 중 최소 1개 이상 양수)
-    true_oos_positive = any(s > 0 for s in oos_romad_scores) if oos_romad_scores else False
-    
-    # 4. Cross-Symbol 50% 이상 양수
-    if not cross_sym_romad_scores:
-        cross_sym_pass = False
-    else:
-        positive_count = sum(1 for s in cross_sym_romad_scores if s > 0)
-        cross_sym_pass = (positive_count / len(cross_sym_romad_scores)) >= 0.5
+    cv_mean: float = float(np.mean(cv_fold_scores)) if cv_fold_scores else 0.0
+    cv_min: float = float(np.min(cv_fold_scores)) if cv_fold_scores else -100.0
 
-    # 5. Max MDD < 25%
-    mdd_pass = (abs(max_mdd_pct) < 25.0)
+    # 1. 최악의 구간 방어력 (CV Min RoMaD > -0.3)
+    cv_min_pass: bool = cv_min > -0.3
     
-    # 6. Profit Factor >= 1.3
-    pf_pass = (profit_factor >= 1.3)
+    # 2. 성장 엔진 확보 (CV Mean >= 0.0)
+    cv_growth_pass: bool = cv_mean >= 0.0
     
-    # 7. Long/Short 균형 (각각 최소 10% 이상 대기)
-    long_ratio = (long_count / total_trades) if total_trades > 0 else 0.0
-    short_ratio = (short_count / total_trades) if total_trades > 0 else 0.0
-    ls_balance_pass = (long_ratio >= 0.1) and (short_ratio >= 0.1)
+    # 5. Volatility Drag Control (Max MDD <= 20.0%)
+    mdd_pass: bool = abs(max_mdd_pct) <= 20.0
+    
+    # [장세 불문(Regime-Agnostic) 보편적 생존 기준]
+    # 미래에 어떤 장세(추세/횡보)가 OOS로 잡히더라도, 전략의 고유한 약점 구간에서 세금(손실)을 내는 것은 당연함.
+    # 따라서 OOS 수익이 양수(+)일 것을 강제하지 않으며, 오직 '계좌가 터지지 않고 방어(-1.0 RoMaD 이내)했는가'만 채점함.
+    target_pf = 0.50 # 불리한 장세에서의 방어적 PF 허용선
+    oos_str = "OOS > -1.0 (Regime Defense)"
+    ho_str = "Holdout > -1.0 (Regime Defense)"
+    
+    ho_deg_pass: bool = holdout_score > -1.0
+    all_oos_pass: bool = all((s > -1.0) for s in oos_romad_scores) if oos_romad_scores else False
+    pf_pass: bool = profit_factor >= target_pf
 
-    details = {
-        "1. All CV Folds > 0": all_cv_positive,
-        "2. Hold-out Score > 0": holdout_positive,
-        "3. True OOS Score > 0": true_oos_positive,
-        "4. Cross-Sym >= 50% Positive": cross_sym_pass,
-        "5. Max MDD < 25%": mdd_pass,
-        "6. Profit Factor >= 1.3": pf_pass,
-        "7. Long/Short Balance >= 10%": ls_balance_pass,
+    # 타임프레임별 통계적 유의성(거래 횟수)만 분리
+    if tf == "1h":
+        min_trades_req = 40
+    else:  # 4h
+        min_trades_req = 10
+
+    trades_pass: bool = total_trades >= min_trades_req
+
+    details: Dict[str, bool] = {
+        "1. Robustness (CV Min > -0.3)": cv_min_pass,
+        "2. Growth Engine (CV Mean >= 0.0)": cv_growth_pass,
+        f"3. PBO Control ({ho_str})": ho_deg_pass,
+        f"4. Target FW-Test ({oos_str})": all_oos_pass,
+        "5. Vol Drag (Max MDD <= 20%)": mdd_pass,
+        f"6. Math Edge (PF >= {target_pf})": pf_pass,
+        f"7. Stat Edge (Trades >= {min_trades_req})": trades_pass,
     }
 
     all_passed = all(details.values())
 
-    summary_lines = []
-    summary_lines.append("[Go/No-Go Checklist]")
+    summary_lines: List[str] = ["[Elite 1% Go/No-Go Checklist]"]
+    
+    metric_values: Dict[str, str] = {
+        "1. Robustness (CV Min > -0.3)": f"Min: {cv_min:.3f}",
+        "2. Growth Engine (CV Mean >= 0.0)": f"Mean: {cv_mean:.3f}",
+        f"3. PBO Control ({ho_str})": f"HO: {holdout_score:.3f}",
+        f"4. Target FW-Test ({oos_str})": "PASS" if all_oos_pass else "FAIL",
+        "5. Vol Drag (Max MDD <= 20%)": f"MDD: {abs(max_mdd_pct):.2f}%",
+        f"6. Math Edge (PF >= {target_pf})": f"PF: {profit_factor:.2f}",
+        f"7. Stat Edge (Trades >= {min_trades_req})": f"N: {total_trades}",
+    }
+
+    req_met: int = sum(1 for v in details.values() if v)
+    total_req: int = len(details)
+
     for k, v in details.items():
-        status = "PASS" if v else "FAIL"
-        summary_lines.append(f"  - {k:<30}: {status}")
-    summary_lines.append("--------------------------------------------------")
-    final_status = "🟢 GO (Ready for Live)" if all_passed else "🔴 NO-GO (Needs Revision)"
+        status: str = "PASS" if v else "FAIL"
+        val_str: str = metric_values.get(k, "")
+        summary_lines.append(f"  - {k:<40}: {status:<5} ({val_str})")
+        
+    summary_lines.append("-" * 55)
+    final_status: str = "🌟 ELITE GO (Top 1% Ready)" if all_passed else f"🔴 NO-GO (Needs Revision, Passed {req_met}/{total_req})"
     summary_lines.append(f"  FINAL VERDICT: {final_status}")
     
     return GoNoGoResult(

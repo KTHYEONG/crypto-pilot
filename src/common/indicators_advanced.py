@@ -682,3 +682,21 @@ class IndicatorEngine:
             return (delta * df["volume"]).cumsum()
 
         return self._cached_call("calculate_obv", df, (), {}, _compute)
+
+    def calculate_roc(self, series: pd.Series, window: int = 10) -> pd.Series:
+        """Rate of Change: (price / prev_price - 1) * 100. Pure momentum without smoothing."""
+        return self._cached_call(
+            "calculate_roc",
+            series,
+            (int(window),),
+            {},
+            lambda: pd.Series(talib.ROC(series.values, timeperiod=window), index=series.index),
+        )
+
+    def calculate_vwma(self, df: pd.DataFrame, window: int = 20) -> pd.Series:
+        """Volume Weighted Moving Average: sum(price * volume) / sum(volume) over rolling window."""
+        def _compute() -> pd.Series:
+            pv = df["close"] * df["volume"]
+            return pv.rolling(window=window).sum() / df["volume"].rolling(window=window).sum()
+
+        return self._cached_call("calculate_vwma", df, (int(window),), {}, _compute)
