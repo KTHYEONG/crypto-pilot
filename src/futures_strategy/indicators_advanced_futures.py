@@ -37,4 +37,6 @@ calculate_aroon = _ENGINE.calculate_aroon
 calculate_force_index = _ENGINE.calculate_force_index
 calculate_williams_r = _ENGINE.calculate_williams_r
 calculate_obv = _ENGINE.calculate_obv
+calculate_roc = _ENGINE.calculate_roc
+calculate_vwma = _ENGINE.calculate_vwma
 clear_indicator_cache = _ENGINE.clear_indicator_cache

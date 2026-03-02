@@ -45,234 +45,218 @@ class UltimateStrategyBase(StrategyBase):
     def generate_signals(self, df: pd.DataFrame) -> pd.DataFrame:
         ind = self._ind()
 
+        # --- 0. Baseline Indicators (ATR, RSI, Hurst) ---
         atr_period = int(self.params.get("ATR_PERIOD", 14))
+        
+        tf = self.params.get("TIMEFRAME", "1h")
+        bars_per_day = {"1h": 24, "4h": 6}.get(tf, 24)
+
         if self._should_compute_atr():
             df["atr"] = ind.calculate_atr(df, window=atr_period)
         else:
             df["atr"] = np.float32(0.0)
 
+        # Baseline Momentum & Volatility for Regimes
         strength_period = int(self.params.get("STRENGTH_FILTER_PERIOD", 14))
         df["rsi"] = ind.calculate_rsi(df["close"], window=strength_period)
-        df["hurst"] = ind.calculate_hurst_exponent(df["close"], window=int(self.params.get("HURST_PERIOD", 200)))
-        df["natr"] = ind.calculate_natr(df, window=strength_period)
+        raw_hurst = ind.calculate_hurst_exponent(df["close"], window=int(self.params.get("HURST_PERIOD", 200)))
+        log_ret = np.log(df["close"] / df["close"].shift(1))
 
-        entry_type = self.params.get("ENTRY_TYPE", "DONCHIAN")
+        # --- [NEW] Kaufman Efficiency Ratio (ER) - The Institutional Chop Filter ---
+        # ER = (Net Change over N days) / (Sum of Absolute Daily Changes over N days)
+        # Using a fixed 14-day window (Kaufman's standard) to evaluate crypto market noise.
+        er_period = int(14 * bars_per_day)
+        net_change = (df["close"] - df["close"].shift(er_period)).abs()
+        abs_change = (df["close"] - df["close"].shift(1)).abs()
+        sum_abs_change = abs_change.rolling(window=er_period).sum().replace(0, 1e-9).fillna(1e-9)
+        df["er"] = (net_change / sum_abs_change).fillna(0.0)
+        
+        # [REMOVED] ER-Based Risk Scalar (구속복 해체)
+        # 횡보장 끝자락(가장 ER이 낮은 시점)에서 터지는 극초기 대추세 돌파 때, 
+        # 비중이 10%로 줄어드는 치명적 모순을 방지하기 위해 1.0으로 고정.
+        # 비중 조절은 오직 엔진의 ATR 기반 Vol-Targeting에 100% 위임함.
+        df["risk_scalar"] = 1.0
+        
+        # [REMOVED] Dynamic Exit Scalar: 횡보장에서 방패를 이중으로 조이는 치명적 자해(Double-Tightening) 현상 방지를 위해 1.0 고정
+        df["exit_scalar"] = 1.0
+
+        # --- 1. Factor Families (Independent Scales) ---
+        n_bars = 7 * bars_per_day
+        atr_ma = df["atr"].rolling(window=n_bars).mean().replace(0, 1e-9).fillna(1e-9)
+
+        # 1-1. Breakout Family (Donchian, BB, KC, SuperTrend)
         entry_period = int(self.params.get("ENTRY_PERIOD", 20))
-        df["entry_upper"] = np.nan
-        df["entry_lower"] = np.nan
+        scale_breakout = (atr_ma / np.sqrt(bars_per_day)) * np.sqrt(entry_period)
+        
+        donchian_upper = df["high"].rolling(window=entry_period).max()
+        donchian_lower = df["low"].rolling(window=entry_period).min()
+        donchian_mid = (donchian_upper + donchian_lower) / 2
+        donchian_z = (df["close"] - donchian_mid) / scale_breakout
+        donchian_score = np.tanh(donchian_z)
 
-        if entry_type == "DONCHIAN":
-            upper = df["high"].rolling(window=entry_period).max()
-            lower = df["low"].rolling(window=entry_period).min()
-            df["entry_upper"] = self._shift_if_needed(upper)
-            df["entry_lower"] = self._shift_if_needed(lower)
-        elif entry_type == "BOLLINGER":
-            std_dev = float(self.params.get("BB_STD", 2.0))
-            upper, lower, _ = ind.calculate_bollinger_bands(df, window=entry_period, std_dev=std_dev)
-            df["entry_upper"] = self._shift_if_needed(upper)
-            df["entry_lower"] = self._shift_if_needed(lower)
-        elif entry_type == "KELTNER":
-            atr_mult = float(self.params.get("KELTNER_ATR_MULT", 1.5))
-            upper, lower = ind.calculate_keltner_channel(df, window=entry_period, atr_mult=atr_mult)
-            df["entry_upper"] = self._shift_if_needed(upper)
-            df["entry_lower"] = self._shift_if_needed(lower)
-        elif entry_type == "CCI":
-            cci = ind.calculate_cci(df, window=entry_period)
-            cci_ref = cci.shift(1) if self.ENTRY_SHIFT else cci
-            high_ref = df["high"].shift(1) if self.ENTRY_SHIFT else df["high"]
-            low_ref = df["low"].shift(1) if self.ENTRY_SHIFT else df["low"]
-            cci_thresh = float(self.params.get("CCI_THRESHOLD", 100))
-            df["entry_upper"] = np.where(cci_ref > cci_thresh, high_ref, np.inf)
-            df["entry_lower"] = np.where(cci_ref < -cci_thresh, low_ref, -np.inf)
+        bb_std = float(self.params.get("BB_STD", 2.0))
+        bb_upper, bb_lower, _ = ind.calculate_bollinger_bands(df, window=entry_period, std_dev=bb_std)
+        bb_mid = (bb_upper + bb_lower) / 2.0
+        bb_z = (df["close"] - bb_mid) / scale_breakout
+        bb_score = np.tanh(bb_z)
 
-        filter_type = self.params.get("TREND_FILTER_TYPE", "EMA")
-        ma_period = int(self.params.get("MA_PERIOD", 50))
-        df["trend_direction"] = 0
+        kc_mult = float(self.params.get("KC_MULT", 1.5))
+        _, _ = ind.calculate_keltner_channel(df, window=entry_period, atr_mult=kc_mult)
+        kc_mid = ind.calculate_sma(df["close"], entry_period)
+        kc_z = (df["close"] - kc_mid) / scale_breakout
+        kc_score = np.tanh(kc_z)
 
-        if filter_type == "SMA":
-            df["trend_line"] = ind.calculate_sma(df["close"], ma_period)
-            df["trend_direction"] = np.where(df["close"] > df["trend_line"], 1, -1)
-        elif filter_type == "EMA":
-            df["trend_line"] = ind.calculate_ema(df["close"], ma_period)
-            df["trend_direction"] = np.where(df["close"] > df["trend_line"], 1, -1)
-        elif filter_type == "HMA":
-            df["trend_line"] = ind.calculate_hma(df["close"], ma_period)
-            df["trend_direction"] = np.where(df["close"] > df["trend_line"], 1, -1)
-        elif filter_type == "DEMA":
-            df["trend_line"] = ind.calculate_dema(df["close"], ma_period)
-            df["trend_direction"] = np.where(df["close"] > df["trend_line"], 1, -1)
-        elif filter_type == "TEMA":
-            df["trend_line"] = ind.calculate_tema(df["close"], ma_period)
-            df["trend_direction"] = np.where(df["close"] > df["trend_line"], 1, -1)
-        elif filter_type == "SUPERTREND":
-            df["trend_direction"] = ind.calculate_supertrend(
-                df,
-                period=int(self.params.get("SUPERTREND_PERIOD", 10)),
-                multiplier=float(self.params.get("SUPERTREND_MULT", 3.0)),
-            )
-        elif filter_type == "MACD":
-            macd_line, signal_line, _ = ind.calculate_macd(
-                df,
-                fast=int(self.params.get("MACD_FAST", 12)),
-                slow=int(self.params.get("MACD_SLOW", 26)),
-                signal=int(self.params.get("MACD_SIGNAL", 9)),
-            )
-            df["trend_direction"] = np.where(macd_line > signal_line, 1, -1)
-        elif filter_type == "ICHIMOKU":
-            _, _, senkou_a, senkou_b = ind.calculate_ichimoku(
-                df,
-                tenkan_window=int(self.params.get("ICHIMOKU_TENKAN", 9)),
-                kijun_window=int(self.params.get("ICHIMOKU_KIJUN", 26)),
-                senkou_span_b_window=int(self.params.get("ICHIMOKU_SENKOU_B", 52)),
-            )
-            cloud_top = np.maximum(senkou_a.to_numpy(), senkou_b.to_numpy())
-            cloud_bottom = np.minimum(senkou_a.to_numpy(), senkou_b.to_numpy())
-            close_np = df["close"].to_numpy()
-            trend = np.zeros(len(df), dtype=np.int8)
-            trend[close_np > cloud_top] = 1
-            trend[close_np < cloud_bottom] = -1
-            df["trend_direction"] = trend
-        elif filter_type == "VWAP":
-            vwap, vwap_upper, vwap_lower = ind.calculate_vwap(
-                df, window=ma_period, std_mult=float(self.params.get("VWAP_STD_MULT", 1.5))
-            )
-            df["vwap"] = vwap
-            df["vwap_upper"] = vwap_upper
-            df["vwap_lower"] = vwap_lower
-            df["trend_direction"] = np.where(df["close"] > df["vwap"], 1, -1)
-        elif filter_type == "DMI":
-            dmi_period = int(self.params.get("DMI_PERIOD", 14))
-            plus_di, minus_di = ind.calculate_dmi(df, window=dmi_period)
-            df["trend_direction"] = np.where(plus_di > minus_di, 1, -1)
-        elif filter_type == "AROON":
-            aroon_period = int(self.params.get("AROON_PERIOD", 14))
-            aroon_up, aroon_down = ind.calculate_aroon(df, window=aroon_period)
-            df["trend_direction"] = np.where(aroon_up > aroon_down, 1, -1)
+        st_mult = float(self.params.get("SUPERTREND_MULTIPLIER", 3.0))
+        st_dir = ind.calculate_supertrend(df, period=10, multiplier=st_mult)
+        st_score = st_dir.fillna(0)
 
-        df["strength_filter"] = 1
-        strength_type = self.params.get("STRENGTH_FILTER_TYPE", "NONE")
+        # 1-2. Trend Family (EMA, HMA, VWMA, MACD, ADX)
+        trend_p = int(self.params.get("TREND_PERIOD", 50))
+        ema_line = ind.calculate_ema(df["close"], trend_p)
+        ema_z = np.log(df["close"] / ema_line) / (log_ret.rolling(window=trend_p).std() * np.sqrt(trend_p))
+        ema_score = np.tanh(ema_z.fillna(0))
 
-        if strength_type == "ADX":
-            df["adx"] = ind.calculate_adx(df, window=strength_period)
-            df.loc[df["adx"] < float(self.params.get("ADX_THRESHOLD", 20)), "strength_filter"] = 0
-        elif strength_type == "VHF":
-            df["vhf"] = ind.calculate_vhf(df["close"], window=strength_period)
-            df.loc[df["vhf"] < float(self.params.get("VHF_THRESHOLD", 0.4)), "strength_filter"] = 0
-        elif strength_type == "MFI":
-            df["mfi"] = ind.calculate_mfi(df, window=strength_period)
-            df.loc[df["mfi"] < float(self.params.get("MFI_THRESHOLD", 25)), "strength_filter"] = 0
-        elif strength_type == "RSI":
-            rsi_overbought = self._get_rsi_overbought()
-            rsi_oversold = float(self.params.get("RSI_OVERSOLD", 25))
-            df.loc[(df["rsi"] > rsi_overbought) | (df["rsi"] < rsi_oversold), "strength_filter"] = 0
-        elif strength_type == "STOCHASTIC":
-            stoch_k, _ = ind.calculate_stochastic(df, window=strength_period)
-            df["stoch_k"] = stoch_k
-            df.loc[
-                (df["stoch_k"] > float(self.params.get("STOCH_OVERBOUGHT", 85)))
-                | (df["stoch_k"] < float(self.params.get("STOCH_OVERSOLD", 15))),
-                "strength_filter",
-            ] = 0
-        elif strength_type == "STOCH_RSI":
-            stoch_rsi_k, _ = ind.calculate_stoch_rsi(df["close"], window=strength_period)
-            df["stoch_rsi_k"] = stoch_rsi_k
-            df.loc[
-                (df["stoch_rsi_k"] > float(self.params.get("STOCH_RSI_OVERBOUGHT", 80)))
-                | (df["stoch_rsi_k"] < float(self.params.get("STOCH_RSI_OVERSOLD", 20))),
-                "strength_filter",
-            ] = 0
-        elif strength_type == "CMF":
-            cmf_period = int(self.params.get("CMF_PERIOD", 20))
-            df["cmf"] = ind.calculate_cmf(df, window=cmf_period)
-            df.loc[df["cmf"] < float(self.params.get("CMF_THRESHOLD", 0.05)), "strength_filter"] = 0
-        elif strength_type == "HURST":
-            random_threshold = float(self.params.get("HURST_RANDOM_THRESHOLD", 0.50))
-            df.loc[df["hurst"] < random_threshold, "strength_filter"] = 0
-            trend_threshold = self.params.get("HURST_TREND_THRESHOLD")
-            if trend_threshold is not None:
-                df.loc[df["hurst"] < float(trend_threshold), "strength_filter"] = 0
-        elif strength_type == "ER":
-            er_period = int(self.params.get("STRENGTH_FILTER_PERIOD", 10))
-            df["er"] = ind.calculate_efficiency_ratio(df["close"], window=er_period)
-            df.loc[df["er"] < float(self.params.get("ER_THRESHOLD", 0.6)), "strength_filter"] = 0
-        elif strength_type == "NATR":
-            df.loc[df["natr"] < float(self.params.get("NATR_THRESHOLD", 1.0)), "strength_filter"] = 0
-        elif strength_type == "GARMAN_KLASS":
-            gk_period = int(self.params.get("GK_PERIOD", 30))
-            df["gk_vol"] = ind.calculate_garman_klass_vol(df, window=gk_period)
-            df.loc[
-                df["gk_vol"] < float(self.params.get("GK_THRESHOLD", 0.0001)),
-                "strength_filter",
-            ] = 0
-        elif strength_type == "FORCE_INDEX":
-            fi_period = int(self.params.get("FORCE_INDEX_PERIOD", 2))
-            df["force_index"] = ind.calculate_force_index(df, smooth_period=fi_period)
-            fi_thresh = float(self.params.get("FORCE_INDEX_THRESHOLD", 0.0))
-            df.loc[
-                (df["trend_direction"] > 0) & (df["force_index"] < fi_thresh),
-                "strength_filter",
-            ] = 0
-            df.loc[
-                (df["trend_direction"] < 0) & (df["force_index"] > -fi_thresh),
-                "strength_filter",
-            ] = 0
-        elif strength_type == "WILLIAMS_R":
-            df["willr"] = ind.calculate_williams_r(df, window=strength_period)
-            willr_ob = float(self.params.get("WILLR_OVERBOUGHT", -20.0))
-            willr_os = float(self.params.get("WILLR_OVERSOLD", -80.0))
-            df.loc[
-                (df["willr"] > willr_ob) | (df["willr"] < willr_os),
-                "strength_filter",
-            ] = 0
-        elif strength_type == "OBV":
-            df["obv"] = ind.calculate_obv(df)
-            obv_ma_period = int(self.params.get("OBV_MA_PERIOD", 20))
-            obv_ma = df["obv"].rolling(window=obv_ma_period).mean()
-            df.loc[
-                (df["trend_direction"] > 0) & (df["obv"] < obv_ma) & obv_ma.notna(),
-                "strength_filter",
-            ] = 0
-            df.loc[
-                (df["trend_direction"] < 0) & (df["obv"] > obv_ma) & obv_ma.notna(),
-                "strength_filter",
-            ] = 0
+        hma_line = ind.calculate_hma(df["close"], window=trend_p)
+        hma_z = np.log(df["close"] / hma_line) / (log_ret.rolling(window=trend_p).std() * np.sqrt(trend_p))
+        hma_score = np.tanh(hma_z.fillna(0))
 
-        rsi_entry_max = self.params.get("RSI_ENTRY_MAX")
-        if rsi_entry_max is not None:
-            rsi_entry_max = float(rsi_entry_max)
-            df.loc[(df["trend_direction"] > 0) & (df["rsi"] > rsi_entry_max), "strength_filter"] = 0
-            df.loc[(df["trend_direction"] < 0) & (df["rsi"] < (100.0 - rsi_entry_max)), "strength_filter"] = 0
+        vwma_line = ind.calculate_vwma(df, window=trend_p)
+        vwma_z = np.log(df["close"] / vwma_line) / (log_ret.rolling(window=trend_p).std() * np.sqrt(trend_p))
+        vwma_score = np.tanh(vwma_z.fillna(0))
 
+        adx_thresh = float(self.params.get("ADX_THRESHOLD", 25))
+        df["adx"] = ind.calculate_adx(df, window=14)
+        df["plus_di"], df["minus_di"] = ind.calculate_dmi(df, window=14)
+        adx_filter = np.where(df["adx"] > adx_thresh, 1.0, 0.0)
+        adx_dir = np.where(df["plus_di"] > df["minus_di"], 1.0, -1.0)
+
+        macd_f = int(self.params.get("MACD_FAST", 12))
+        macd_s = int(self.params.get("MACD_SLOW", 26))
+        _, _, macd_hist = ind.calculate_macd(df, fast=macd_f, slow=macd_s)
+        macd_score = np.tanh(macd_hist / (df["close"] * 0.001))
+
+        # 1-3. Volume Family (Vol-Z, CMF)
+        vol_p = int(self.params.get("VOL_WINDOW", 20))
+        log_vol = np.log1p(df["volume"])
+        vol_z = (log_vol - log_vol.rolling(window=vol_p).mean()) / log_vol.rolling(window=vol_p).std().replace(0, 1e-9)
+        
+        cmf_period = int(self.params.get("CMF_PERIOD", 20))
+        df["cmf"] = ind.calculate_cmf(df, window=cmf_period)
+        cmf_score = np.tanh(df["cmf"] / 0.15)
+        
+        vol_combined = (vol_z + cmf_score) / 2.0
+
+        # 1-4. Mean Reversion Family (VWAP, StochRSI, RSI, Inv-BB)
+        # [IMPROVEMENT] Rolling VWAP (24h) to fix lifetime cumulative divergence bug.
+        # 24h represents one complete institutional liquidity cycle in 24/7 crypto markets.
+        typical_price = (df["high"] + df["low"] + df["close"]) / 3.0
+        rolling_vol_price = (typical_price * df["volume"]).rolling(window=24).sum()
+        rolling_vol = df["volume"].rolling(window=24).sum().replace(0, 1e-9)
+        df["vwap"] = rolling_vol_price / rolling_vol
+        
+        # [IMPROVEMENT] Use ATR for volatility normalization instead of raw standard deviation
+        # This prevents the Z-score from exploding to infinity during tight consolidation (low vol)
+        vwap_atr_ma = df["atr"].rolling(window=24).mean().replace(0, 1e-9).fillna(1e-9)
+        vwap_z = (df["close"] - df["vwap"]) / vwap_atr_ma
+        vwap_mult = float(self.params.get("VWAP_STD_MULT", 2.5))
+        vwap_mr_score = np.where(vwap_z > vwap_mult, -1.0, np.where(vwap_z < -vwap_mult, 1.0, 0.0))
+
+        stoch_rsi_p = int(self.params.get("STOCH_RSI_PERIOD", 14))
+        stoch_rsi_ext = float(self.params.get("STOCH_RSI_EXTREME", 20)) / 100.0
+        stoch_k, _ = ind.calculate_stoch_rsi(df["close"], window=stoch_rsi_p)
+        df["stoch_rsi"] = stoch_k
+        stoch_rsi_score = np.where(df["stoch_rsi"] < stoch_rsi_ext, 1.0, 
+                                   np.where(df["stoch_rsi"] > (1.0 - stoch_rsi_ext), -1.0, 0.0))
+        
+        # [IMPROVEMENT] Digital threshold for RSI to prevent weak continuous alpha accumulation
+        rsi_mr_score = np.where(df["rsi"] < 30.0, 1.0, np.where(df["rsi"] > 70.0, -1.0, 0.0))
+        
+        # [IMPROVEMENT] Digital threshold for Bollinger Bands (Price completely outside band)
+        bb_mr_score = np.where(df["close"] < bb_lower, 1.0, np.where(df["close"] > bb_upper, -1.0, 0.0))
+
+        # --- 2. Ensemble Alpha Aggregation (Pure Trend Following) ---
+        eps = 1e-9
+        
+        # Style Factor 1: Breakout Team
+        # [NEW] Priority 5: Factor Combination (Single Indicator Dependency 타파)
+        # 켈트너(변동성)와 돈치안(가격) 돌파를 5:5로 섞어 알파 점수의 신뢰도를 높임.
+        breakout_alpha = (kc_score + donchian_score) / 2.0
+
+        # Style Factor 2: Trend Team (Multi-Timeframe TSMOM)
+        def calc_tsmom_z(p: int) -> pd.Series:
+            ret = np.log(df["close"] / df["close"].shift(p).replace(0, np.nan))
+            vol = ret.rolling(window=p).std().replace(0, 1e-9).fillna(1e-9) * np.sqrt(p)
+            return ret / vol
+
+        tsmom_z_combined = (calc_tsmom_z(20) + calc_tsmom_z(60) + calc_tsmom_z(120)) / 3.0
+        trend_alpha = np.tanh(tsmom_z_combined.fillna(0))
+
+        # [REMOVED] Structural Macro Gatekeeper (Hard Boolean Gate)
+        # 낡고 후행성이 심한 200일선 차단기를 완전히 철거하여, 
+        # 다중 시계열 모멘텀(tsmom_z_combined)과 돈치안 돌파 로직이 가진 본연의 엣지를 100% 해방함.
+
+        # Style Factor 3: Mean Reversion Team
+        mean_reversion_alpha = (rsi_mr_score + bb_mr_score + vwap_mr_score + stoch_rsi_score) / 4.0
+
+        # Layer 3: Strategic Macro Weights
+        w_breakout = float(self.params.get("W_BREAKOUT", 1.0))
+        w_trend = float(self.params.get("W_TREND", 1.0))
+        w_volume = float(self.params.get("W_VOLUME", 1.0))
+        w_mean_rev = float(self.params.get("W_MEAN_REVERSION", 0.0))
+
+        # Style Factor 4: Volume Team
+        price_consensus = (w_breakout * breakout_alpha) + (w_trend * trend_alpha) + (w_mean_rev * mean_reversion_alpha)
+        volume_alpha = vol_combined * np.sign(price_consensus)
+        
+        tot_w = w_breakout + w_trend + w_volume + w_mean_rev + eps
+        total_alpha = (w_breakout*breakout_alpha + w_trend*trend_alpha + w_volume*volume_alpha + w_mean_rev*mean_reversion_alpha) / tot_w
+        total_alpha = np.nan_to_num(total_alpha, nan=0.0)
+
+        # --- [NEW] Priority 1: Adaptive Threshold (Rolling Percentile) ---
+        # Instead of a static threshold (e.g., > 0.5), we normalize the signal by recent market history.
+        # We only enter if the current alpha is in the top/bottom X percentile of the lookback window.
+        lookback_bars = int(self.params.get("THRESHOLD_LOOKBACK", 180)) # Default 30 days on 4H
+        q_val = float(self.params.get("THRESHOLD_QUANTILE", 0.85)) # e.g., Top 15%
+        
+        alpha_series = pd.Series(total_alpha, index=df.index)
+        
+        # Calculate rolling quantiles. Fillna with 1.0/-1.0 to prevent early accidental triggers during warmup.
+        roll_q_long = alpha_series.rolling(window=lookback_bars).quantile(q_val).fillna(1.0)
+        roll_q_short = alpha_series.rolling(window=lookback_bars).quantile(1.0 - q_val).fillna(-1.0)
+
+        ensemble_dir = np.zeros(len(df))
+        # Trigger only if alpha exceeds the dynamic percentile AND is directionally correct (>0 or <0)
+        ensemble_dir[(total_alpha > roll_q_long) & (total_alpha > 0)] = 1
+        ensemble_dir[(total_alpha < roll_q_short) & (total_alpha < 0)] = -1
+
+        df["trend_direction"] = self._shift_if_needed(pd.Series(ensemble_dir, index=df.index))
+        
+        # --- [NEW] Priority 2: Price Confirmation Gate (Liquidity Sweep) ---
+        # 4H(추세추종)는 실제 가격이 전고/전저점을 물리적으로 뚫을 때만 진입하도록 방어막을 침.
+        # 1H(역추세)는 과매도/과매수 신호 발생 즉시(Buy the Dip) 시장가로 진입해야 하므로 방어막을 현재가로 해제함.
+        if tf == "4h":
+            df["entry_upper"] = donchian_upper
+            df["entry_lower"] = donchian_lower
+        else:
+            df["entry_upper"] = df["close"]
+            df["entry_lower"] = df["close"]
+        
+        df["strength_filter"] = np.where(df["trend_direction"] != 0, 1, 0)
+        
+        # --- 4. Special Logic ---
         if self.params.get("EXIT_TYPE") == "PARABOLIC_SAR":
-            sar_line, _ = ind.calculate_parabolic_sar(df, step=float(self.params.get("SAR_STEP", 0.02)))
-            df["parabolic_sar"] = sar_line
+            sar_step = float(self.params.get("PSAR_STEP", 0.02))
+            sar_max = float(self.params.get("PSAR_MAX", 0.2))
+            df["parabolic_sar"], _ = ind.calculate_parabolic_sar(df, step=sar_step, max_step=sar_max)
         else:
             df["parabolic_sar"] = 0.0
 
-        if self.params.get("USE_VOLUME_FILTER", False):
-            vol_ma_period = int(self.params.get("VOLUME_MA_PERIOD", 20))
-            log_vol = np.log1p(df["volume"])
-            log_vol_mean = log_vol.rolling(window=vol_ma_period).mean()
-            log_vol_std = log_vol.rolling(window=vol_ma_period).std()
-            z_score = (log_vol - log_vol_mean) / log_vol_std.replace(0, 1).fillna(1)
-            df["volume_ratio"] = z_score.fillna(-10.0)
-        else:
-            df["volume_ratio"] = 100.0
+        df["volume_ratio"] = 100.0 # Standard override
 
+        # --- 5. Cleanup ---
         df["atr"] = df["atr"].ffill().fillna(df["close"] * 0.01)
-        df["natr"] = df["natr"].ffill().fillna(1.0)
         df["rsi"] = df["rsi"].ffill().fillna(50.0)
-        df["hurst"] = df["hurst"].ffill().fillna(0.5)
-        if "gk_vol" in df.columns:
-            df["gk_vol"] = df["gk_vol"].ffill().fillna(1e-6)
-        if "force_index" in df.columns:
-            df["force_index"] = df["force_index"].ffill().fillna(0.0)
-        if "willr" in df.columns:
-            df["willr"] = df["willr"].ffill().fillna(-50.0)
-        if "obv" in df.columns:
-            df["obv"] = df["obv"].ffill().fillna(0.0)
         df["strength_filter"] = df["strength_filter"].fillna(0).astype(int)
         df["trend_direction"] = df["trend_direction"].fillna(0).astype(int)
-        df["entry_upper"] = df["entry_upper"].astype(float)
-        df["entry_lower"] = df["entry_lower"].astype(float)
+        
         return df
