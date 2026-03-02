@@ -1,13 +1,25 @@
+from __future__ import annotations
+
 import argparse
 import logging
 import os
 import sys
 import gc
+import threading
+import traceback
 import optuna
+from optuna.trial import TrialState
+from optuna.storages import JournalStorage
+from optuna.storages.journal import JournalFileBackend
 import pandas as pd
 import numpy as np
 from pathlib import Path
-from typing import Dict, List, Tuple, Any
+from dataclasses import dataclass
+from typing import Any, Dict, List, Tuple, Optional
+import concurrent.futures
+from multiprocessing import Manager
+from functools import partial
+from tqdm import tqdm
 
 # Project Root Setup
 project_root: str = str(Path(__file__).resolve().parents[2])
@@ -23,7 +35,7 @@ from config.settings import (
     SLIPPAGE_RATE,
     DATA_DIR,
 )
-from config.opt_config import OPT_V2_CONFIG, SEARCH_SPACE_V2
+from config.opt_config import OPT_V2_CONFIG, get_search_space_v2
 
 # Reuse merge index util from v1 (no cached signals: v2 uses full daily signals once)
 from src.futures_strategy.optimize_futures import compute_segment_merge_index
@@ -31,9 +43,8 @@ from src.futures_strategy.funding_utils import merge_funding_into_ohlcv
 
 # Importing from the new modular structure
 from src.futures_strategy.opt_v2_utils.metrics import calc_romad, calc_romad_from_metrics
-from src.futures_strategy.opt_v2_utils.cv_utils import build_anchored_folds
 from src.futures_strategy.opt_v2_utils.opt_params import suggest_params_v2
-from src.futures_strategy.opt_v2_utils.db_utils import save_study_to_sqlite, fast_reset_study
+from src.futures_strategy.opt_v2_utils.db_utils import save_study_to_sqlite
 from src.futures_strategy.opt_v2_utils.evaluator import objective_v2, evaluate_symbol_fold
 from src.futures_strategy.opt_v2_utils.go_nogo import run_go_nogo_check, GoNoGoResult
 from config.opt_config import get_quarterly_window
@@ -50,6 +61,167 @@ optuna.logging.set_verbosity(optuna.logging.WARNING)
 logging.basicConfig(level=logging.INFO, format="%(message)s", force=True)
 _logger: logging.Logger = logging.getLogger("opt_v2")
 
+SEP_WIDTH: int = 60
+
+
+class _ThreadSafeJournalStorageWrapper:
+    """
+    Serializes storage access within a single process (thread lock). On Windows,
+    cross-process serialization is handled by WindowsNamedMutexJournalLock.
+    """
+
+    def __init__(self, storage: Any) -> None:
+        self._storage = storage
+        self._lock: threading.Lock = threading.Lock()
+
+    def __getattr__(self, name: str) -> Any:
+        attr = getattr(self._storage, name)
+        if callable(attr):
+            def _locked(*args: Any, **kwargs: Any) -> Any:
+                with self._lock:
+                    return attr(*args, **kwargs)
+            return _locked
+        return attr
+
+
+def _ensure_fresh_journal(journal_path: Path) -> None:
+    """
+    Remove existing journal file so optimization runs with no prior trials.
+    If the file is missing, no-op. Uses Path.unlink for atomic removal.
+    """
+    if journal_path.exists():
+        try:
+            journal_path.unlink()
+            _logger.info("Removed existing journal file for fresh optimization: %s", journal_path)
+        except OSError as e:
+            _logger.warning("Could not remove journal file %s: %s. Truncating instead.", journal_path, e)
+            try:
+                journal_path.write_text("")
+            except OSError:
+                pass
+
+
+@dataclass
+class _TfOptimizationContext:
+    """Picklable context for per-timeframe optimization in ProcessPoolExecutor."""
+    clean_symbol: str
+    seeds: List[int]
+    n_trials: int
+    n_jobs: int
+    data_maps: Dict[str, Dict[str, Any]]
+    symbols: List[str]
+    project_root: str
+    progress_queue: Any  # multiprocessing.managers.QueueProxy; optional for pickling
+
+
+def _run_tf_optimization(
+    tf: str, ctx: _TfOptimizationContext
+) -> Tuple[str, optuna.trial.FrozenTrial]:
+    """Module-level worker for ProcessPoolExecutor. Returns only (tf, best_trial); study is not picklable (contains Lock)."""
+    tf_study_name: str = f"FuturesV2_{ctx.clean_symbol}_{tf}"
+    journal_path: Path = Path(ctx.project_root) / f"optuna_journal_{tf}.log"
+    _ensure_fresh_journal(journal_path)
+
+    lock_obj: Any = None
+    if sys.platform == "win32":
+        from src.futures_strategy.opt_v2_utils.win_journal_lock import WindowsNamedMutexJournalLock
+        lock_obj = WindowsNamedMutexJournalLock(str(journal_path))
+
+    backend = JournalFileBackend(str(journal_path), lock_obj=lock_obj)
+    journal_storage = JournalStorage(backend)
+    storage = _ThreadSafeJournalStorageWrapper(journal_storage)
+
+    sampler = optuna.samplers.TPESampler(
+        n_startup_trials=OPT_V2_CONFIG.get("n_startup_trials", 150),
+        multivariate=True,
+        group=True, # [NEW] Priority 6: Categorical 변수 간의 연관성(Group) 학습으로 최적화 속도 극대화
+        constant_liar=True,
+        n_ei_candidates=64, # [NEW] Priority 6: EI 탐색 깊이를 늘려 Exploitation(정밀 탐색) 강화
+        warn_independent_sampling=False,
+        seed=ctx.seeds[0],
+    )
+
+    study = optuna.create_study(
+        study_name=tf_study_name,
+        storage=storage,
+        direction="maximize",
+        sampler=sampler,
+    )
+
+    def _progress_cb(study: optuna.Study, trial: optuna.trial.FrozenTrial) -> None:
+        n_done: int = len(study.trials)
+        completed: List[optuna.trial.FrozenTrial] = [t for t in study.trials if t.state == TrialState.COMPLETE]
+        if not completed:
+            ctx.progress_queue.put((tf, n_done, ctx.n_trials, 0, 0.0))
+            return
+        best_trial_num: int = study.best_trial.number
+        best_val: float = float(study.best_value)
+        ctx.progress_queue.put((tf, n_done, ctx.n_trials, best_trial_num, best_val))
+
+    # NEW: Fetch TF-specific search space (Option B)
+    tf_space = get_search_space_v2(tf)
+
+    def _objective_with_logging(trial: optuna.Trial) -> float:
+        """Log full traceback on objective failure; store on trial for visibility when 0 completed."""
+        try:
+            return objective_v2(
+                trial,
+                data_maps=ctx.data_maps,
+                symbols=ctx.symbols,
+                tf_target=tf,
+                space=tf_space,
+                project_root=ctx.project_root,
+            )
+        except optuna.TrialPruned:
+            raise
+        except Exception as e:
+            tb_str: str = traceback.format_exc()
+            _logger.exception("[%s] Trial %d failed (root cause above).", tf, trial.number)
+            try:
+                trial.set_user_attr("_fail_traceback", tb_str)
+                trial.set_user_attr("_fail_message", str(e))
+            except Exception:
+                pass
+            raise
+
+    _logger.info("[%s] Starting optimization (%s trials, %s workers)...", tf, ctx.n_trials, ctx.n_jobs)
+    study.optimize(
+        _objective_with_logging,
+        n_trials=ctx.n_trials,
+        n_jobs=ctx.n_jobs,
+        catch=(Exception,),
+        callbacks=[_progress_cb],
+    )
+    n_actual: int = len(study.trials)
+    if n_actual < ctx.n_trials:
+        _logger.warning(
+            "[%s] Optimization stopped early: %d/%d trials run. Check for timeouts or worker failures.",
+            tf, n_actual, ctx.n_trials,
+        )
+    completed_trials: List[optuna.trial.FrozenTrial] = [t for t in study.trials if t.state == TrialState.COMPLETE]
+    if not completed_trials:
+        failed_trials: List[optuna.trial.FrozenTrial] = [t for t in study.trials if t.state == TrialState.FAIL]
+        pruned_trials: List[optuna.trial.FrozenTrial] = [t for t in study.trials if t.state == TrialState.PRUNED]
+        _logger.warning("[%s] No completed trials: %d failed, %d pruned.", tf, len(failed_trials), len(pruned_trials))
+        for i, t in enumerate(failed_trials[:3]):
+            attrs: Dict[str, Any] = getattr(t, "system_attrs", {}) or {}
+            uattrs: Dict[str, Any] = getattr(t, "user_attrs", {}) or {}
+            fail_msg: Optional[str] = uattrs.get("_fail_message") or attrs.get("fail_reason")
+            fail_tb: Optional[str] = uattrs.get("_fail_traceback")
+            _logger.warning("[%s] Failed trial %d: %s", tf, t.number, fail_msg or "(no message)")
+            if fail_tb:
+                _logger.warning("[%s] Trial %d traceback:\n%s", tf, t.number, fail_tb)
+            if not fail_msg and not fail_tb:
+                _logger.warning("[%s] Failed trial %d system_attrs: %s", tf, t.number, attrs)
+        raise ValueError(
+            f"No trials are completed yet (all {len(study.trials)} trials failed or pruned). "
+            "See exception traceback(s) above for root cause."
+        )
+    ctx.progress_queue.put(("done", tf, study.best_value, n_actual))
+    _logger.info("[%s] Optimization complete. Best Score: %.4f (%d/%d trials)", tf, study.best_value, n_actual, ctx.n_trials)
+    return tf, study.best_trial
+
+
 # --------------------------------------------------------------------------
 # Execution Main
 # --------------------------------------------------------------------------
@@ -57,7 +229,7 @@ def main() -> None:
     parser: argparse.ArgumentParser = argparse.ArgumentParser()
     parser.add_argument("--symbols", type=str, default="BTC/USDT")
     parser.add_argument("--trials", type=int, default=OPT_V2_CONFIG["total_trials"])
-    parser.add_argument("--jobs", type=int, default=OPT_V2_CONFIG["n_jobs"])
+    parser.add_argument("--jobs", type=int, default=2, help="Optuna workers per timeframe study (Keep low if multi-TF parallel)")
     parser.add_argument("--test", action="store_true", help="Load best study from DB and evaluate without optimizing")
     parser.add_argument("--reference-date", type=str, default=None, help="Reference date for quarterly window (YYYY-MM-DD)")
     args: argparse.Namespace = parser.parse_args()
@@ -65,17 +237,17 @@ def main() -> None:
     FETCH_START_DATE, START_DATE, IS_END_DATE, END_DATE = get_quarterly_window(args.reference_date)
 
     symbols: List[str] = [s.strip() for s in args.symbols.split(",")]
-    oos_symbols: List[str] = ["ETH/USDT", "SOL/USDT", "BNB/USDT", "XRP/USDT"]
 
     collector: DataCollector = DataCollector()
     data_maps: Dict[str, Dict[str, Any]] = {}
     oos_data_maps: Dict[str, Dict[str, Any]] = {}
 
     _logger.info("Loading target futures database (Fetch: %s, IS: %s to %s, OOS: %s to %s)...", FETCH_START_DATE, START_DATE, IS_END_DATE, IS_END_DATE, END_DATE)
+    target_tfs: List[str] = OPT_V2_CONFIG.get("TARGET_TIMEFRAMES", ["30m", "1h", "4h"])
     for sym in symbols:
         data_maps[sym] = {}
         oos_data_maps[sym] = {}
-        for tf in ["1d", "4h"]:
+        for tf in target_tfs + ["1d"]:
             # Load full data first to ensure technical indicators (like EMA) have enough history, 
             # but we will slice it immediately for engine usage.
             full_df: pd.DataFrame = collector.collect_and_save(sym, tf, FETCH_START_DATE, END_DATE)
@@ -115,11 +287,12 @@ def main() -> None:
             else:
                 oos_data_maps[sym][f"oos_start_idx_{tf}"] = len(full_df)
             
+        for tf in target_tfs:
+             data_maps[sym][f"merge_idx_{tf}"] = compute_segment_merge_index(data_maps[sym][tf], data_maps[sym]["1d"])
+             oos_data_maps[sym][f"merge_idx_{tf}"] = compute_segment_merge_index(oos_data_maps[sym][tf], oos_data_maps[sym]["1d"])
+
         data_maps[sym]["merge_idx_1d"] = compute_segment_merge_index(data_maps[sym]["1d"], data_maps[sym]["1d"])
-        data_maps[sym]["merge_idx_4h"] = compute_segment_merge_index(data_maps[sym]["4h"], data_maps[sym]["1d"])
-        
         oos_data_maps[sym]["merge_idx_1d"] = compute_segment_merge_index(oos_data_maps[sym]["1d"], oos_data_maps[sym]["1d"])
-        oos_data_maps[sym]["merge_idx_4h"] = compute_segment_merge_index(oos_data_maps[sym]["4h"], oos_data_maps[sym]["1d"])
     _logger.info("Target Data load complete (IS and OOS).")
 
     # Dynamic study name based on symbols to support per-coin storage
@@ -138,281 +311,205 @@ def main() -> None:
     seeds: List[int] = OPT_V2_CONFIG["seeds"]
     n_trials: int = args.trials
 
-    q_seeds: List[int]
-    base_trials: int
-    if n_trials <= len(seeds):
-        q_seeds = seeds[:n_trials]
-        base_trials = n_trials
-    else:
-        q_seeds = seeds
-        base_trials = n_trials
+    _logger.info("Starting Multi-TF Parallel Optimization. Target TFs: %s", target_tfs)
 
-    _logger.info("Starting V2 Optimization. Total Trials: %d, Seeds: %s, Workers: %d", base_trials, q_seeds, args.jobs)
-
-    sampler: optuna.samplers.TPESampler = optuna.samplers.TPESampler(
-        n_startup_trials=OPT_V2_CONFIG["n_startup_trials"],
-        multivariate=True,
-        constant_liar=True,
-        warn_independent_sampling=False,
-        seed=q_seeds[0],
+    manager: Manager = Manager()
+    progress_queue: Any = manager.Queue()
+    opt_ctx: _TfOptimizationContext = _TfOptimizationContext(
+        clean_symbol=clean_symbol,
+        seeds=seeds,
+        n_trials=n_trials,
+        n_jobs=args.jobs,
+        data_maps=data_maps,
+        symbols=symbols,
+        project_root=project_root,
+        progress_queue=progress_queue,
     )
 
-    if args.test:
-        try:
-            study = optuna.load_study(study_name=study_name, storage=storage_url)
-            _logger.info(f"Loaded existing study '{study_name}' for testing.")
-        except Exception as e:
-            _logger.error(f"Failed to load study '{study_name}': {e}")
-            sys.exit(1)
-    else:
-        # Fast-path: bypass Optuna's slow ORM cascade deletion via direct raw SQL.
-        # Falls back to optuna.delete_study() automatically if direct SQL fails.
-        deleted_fast: bool = fast_reset_study(
-            study_name=study_name,
-            db_user=db_user,
-            db_pass=db_pass,
-            db_host=db_host,
-            db_port=db_port,
-            db_name=db_name,
+    tf_bars: Dict[str, tqdm] = {}
+    for i, tf in enumerate(target_tfs):
+        tf_bars[tf] = tqdm(
+            total=n_trials,
+            desc=f"[{tf}] Best trial: 0. Best value: 0.000000",
+            position=i,
+            leave=True,
+            dynamic_ncols=True,
         )
-        if not deleted_fast:
+
+    def _progress_listener() -> None:
+        done_count: int = 0
+        while True:
+            msg: Any = progress_queue.get()
+            if msg is None:
+                break
+            if msg[0] == "done":
+                _, done_tf, best_val, n_actual = msg
+                bar = tf_bars[done_tf]
+                bar.n = n_actual
+                bar.total = bar.total  # keep requested total for display
+                bar.set_description(
+                    f"[{done_tf}] Best: {best_val:.6f} ({n_actual}/{bar.total})" if best_val is not None else f"[{done_tf}] Done ({n_actual})"
+                )
+                bar.close()
+                done_count += 1
+            else:
+                tf, current, total, best_num, best_val = msg
+                bar = tf_bars[tf]
+                bar.n = current
+                bar.total = total
+                bar.set_description(f"[{tf}] Best trial: {best_num}. Best value: {best_val:.6f}")
+                bar.refresh()
+
+    progress_thread: threading.Thread = threading.Thread(target=_progress_listener, daemon=False)
+    progress_thread.start()
+
+    best_results: Dict[str, Tuple[optuna.trial.FrozenTrial, ...]] = {}
+    try:
+        with concurrent.futures.ProcessPoolExecutor(max_workers=len(target_tfs)) as executor:
+            future_to_tf = {executor.submit(_run_tf_optimization, tf, opt_ctx): tf for tf in target_tfs}
+            for future in concurrent.futures.as_completed(future_to_tf):
+                tf = future_to_tf[future]
+                try:
+                    res_tf, res_trial = future.result()
+                    best_results[res_tf] = (res_trial,)
+                except Exception as e:
+                    _logger.error("[%s] Parallel optimization failed: %s", tf, e)
+    finally:
+        progress_queue.put(None)
+        progress_thread.join(timeout=5.0)
+
+    if not best_results:
+        _logger.error("All timeframe optimizations failed.")
+        return
+
+    # Per-TF summary for DB selection: (tf, go_nogo_passed, mean_oos_romad)
+    tf_summary: List[Tuple[str, bool, float]] = []
+
+    # Evaluate each TF in fixed order (target_tfs) so logs are scannable per timeframe
+    for tf_val in target_tfs:
+        if tf_val not in best_results:
+            continue
+        (best_trial,) = best_results[tf_val]
+
+        _logger.info("")
+        _logger.info("=" * SEP_WIDTH)
+        _logger.info("  [TF: %s] Results for Timeframe: %s", tf_val, tf_val)
+        _logger.info("=" * SEP_WIDTH)
+
+        # 1. Best Parameters
+        _logger.info("  [TF: %s] Best Parameters", tf_val)
+        best_params: Dict[str, Any] = best_trial.params.copy()
+        best_params["TIMEFRAME"] = tf_val
+        # Parameters are already normalized by suggest_params_v2
+        for p_to_pop in ["MAX_HOLDING_BARS_1H", "MAX_HOLDING_BARS_4H",
+                        "ENTRY_PERIOD_1H", "ENTRY_PERIOD_4H"]:
+            best_params.pop(p_to_pop, None)
+        for k, v in best_params.items():
+            if isinstance(v, float):
+                _logger.info("  - %s: %.6f", k, v)
+            else:
+                _logger.info("  - %s: %s", k, v)
+        _logger.info("-" * SEP_WIDTH)
+        _logger.info("  [TF: %s] Best CV Score: %.4f", tf_val, best_trial.value)
+        _logger.info("-" * SEP_WIDTH)
+
+        # 2. IS (Purged Walk-Forward) metrics
+        _logger.info("  [TF: %s] IS — Purged Walk-Forward Metrics", tf_val)
+        header: str = f"| {'Symbol':<10} | {'Ret%':>8} | {'MDD%':>7} | {'Trades':>6} | {'Win%':>6} | {'PF':>6} | {'Score':>7} |"
+        _logger.info(header)
+        _logger.info("|" + "-" * (len(header) - 2) + "|")
+        for sym in symbols:
+            ret_sum = float(best_trial.user_attrs.get(f"{sym}_ret_sum", 0.0))
+            m = float(best_trial.user_attrs.get(f"{sym}_mdd", 0.0))
+            t = int(best_trial.user_attrs.get(f"{sym}_trades", 0))
+            win = float(best_trial.user_attrs.get(f"{sym}_win", 0.0))
+            pf = float(best_trial.user_attrs.get(f"{sym}_pf", 1.0))
+            cv_mean = float(best_trial.user_attrs.get(f"{sym}_cv_mean", 0.0))
+            _logger.info("| %s | %8.2f | %7.2f | %6d | %6.2f | %6.2f | %7.2f |", sym, ret_sum, m, t, win, pf, cv_mean)
+        _logger.info("-" * SEP_WIDTH)
+
+        # 3. True OOS Verification
+        _logger.info("  [TF: %s] True OOS Forward-Testing", tf_val)
+        header_oos: str = f"| {'Symbol':<10} | {'Ret%':>8} | {'MDD%':>7} | {'Trades':>6} | {'Win%':>6} | {'PF':>6} | {'Score':>7} |"
+        _logger.info(header_oos)
+        _logger.info("|" + "-" * (len(header_oos) - 2) + "|")
+        strategy_oos: UltimateStrategy = UltimateStrategy(name=f"FuturesV2_OOS_{tf_val}", params=best_params)
+        oos_romad_scores: List[float] = []
+        oos_pfs: List[float] = []
+        oos_mdds: List[float] = []
+        oos_longs: int = 0
+        oos_shorts: int = 0
+
+        for sym in symbols:
+            target_df_oos = oos_data_maps.get(sym, {}).get(tf_val)
+            daily_df_oos = oos_data_maps.get(sym, {}).get("1d")
+            full_merge_idx_oos = oos_data_maps.get(sym, {}).get(f"merge_idx_{tf_val}")
+            if target_df_oos is None or target_df_oos.empty:
+                continue
             try:
-                _logger.info(f"Fast reset failed; falling back to slow ORM deletion for '{study_name}'...")
-                optuna.delete_study(study_name=study_name, storage=storage_url)
-                _logger.info(f"Deleted existing study '{study_name}' (ORM fallback complete).")
-            except KeyError:
-                pass
+                n_oos_bars = len(target_df_oos)
+                oos_start_idx = oos_data_maps.get(sym, {}).get(f"oos_start_idx_{tf_val}", 0)
+                s_f, r_f, m_f, t_f, w_f, pf_f, lc_f, sc_f = evaluate_symbol_fold(
+                    strategy_oos, best_params, sym, tf_val, target_df_oos, daily_df_oos,
+                    full_merge_idx_oos, None, oos_start_idx, n_oos_bars
+                )
+                oos_romad_scores.append(s_f)
+                oos_pfs.append(pf_f)
+                oos_mdds.append(m_f)
+                oos_longs += int(lc_f)
+                oos_shorts += int(sc_f)
+                _logger.info("| %s | %8.2f | %7.2f | %6d | %6.2f | %6.2f | %7.2f |", sym, r_f, m_f, int(t_f), w_f, pf_f, s_f)
             except Exception as e:
-                _logger.error(f"Failed to delete study '{study_name}': {e}")
+                _logger.error("  [TF: %s] OOS error for %s: %s", tf_val, sym, e)
+        _logger.info("-" * SEP_WIDTH)
 
-        study = optuna.create_study(
-            study_name=study_name,
-            storage=storage_url,
-            direction="maximize",
-            sampler=sampler,
-            load_if_exists=False,
+        # 4. Go/No-Go Checklist
+        _logger.info("  [TF: %s] Go/No-Go Checklist", tf_val)
+        cv_scores = best_trial.user_attrs.get("cv_scores", [])
+        holdout_score = best_trial.user_attrs.get("holdout_score", 0.0)
+        true_max_mdd = float(np.max(oos_mdds)) if oos_mdds else 99.9
+        avg_pf = float(np.mean(oos_pfs)) if oos_pfs else 0.0
+        go_nogo: GoNoGoResult = run_go_nogo_check(
+            cv_fold_scores=cv_scores,
+            holdout_score=holdout_score,
+            oos_romad_scores=oos_romad_scores,
+            max_mdd_pct=true_max_mdd,
+            profit_factor=avg_pf,
+            long_count=oos_longs,
+            short_count=oos_shorts,
+            tf=tf_val,
         )
+        _logger.info("%s", go_nogo.summary)
+        mean_oos_romad: float = float(np.mean(oos_romad_scores)) if oos_romad_scores else 0.0
+        _logger.info("  [TF: %s] Go/No-Go: %s | Mean OOS RoMaD: %.4f", tf_val, "PASS" if go_nogo.passed else "FAIL", mean_oos_romad)
 
-        study.optimize(
-            lambda t: objective_v2(t, data_maps, symbols),
-            n_trials=base_trials,
-            n_jobs=args.jobs,
-            catch=(Exception,),
-            show_progress_bar=True,  
-        )
-
-    SEP_WIDTH: int = 70
-    _logger.info("=" * SEP_WIDTH)
-    _logger.info("  🚀 Optimization Complete")
-    _logger.info("=" * SEP_WIDTH)
-    best_trial: optuna.trial.FrozenTrial = study.best_trial
-    # 1. Best Parameters
-    _logger.info("  [Best Parameters]")
-    best_params: Dict[str, Any] = best_trial.params.copy()
-    tf_val: str = str(best_params.get("TIMEFRAME", "4h"))
-    if "MAX_HOLDING_BARS_4H" in best_params and "MAX_HOLDING_BARS_1D" in best_params:
-        best_params["MAX_HOLDING_BARS"] = best_params["MAX_HOLDING_BARS_4H"] if tf_val == "4h" else best_params["MAX_HOLDING_BARS_1D"]
-        best_params.pop("MAX_HOLDING_BARS_4H", None)
-        best_params.pop("MAX_HOLDING_BARS_1D", None)
-
-    for k, v in best_params.items():
-        if isinstance(v, float):
-            _logger.info(f"  - {k:26s}: {v:.6f}")
-        else:
-            _logger.info(f"  - {k:26s}: {v}")
-    
-    _logger.info("-" * SEP_WIDTH)
-    _logger.info(f"  ⭐ Best Score: {best_trial.value:.4f}")
-    _logger.info("-" * SEP_WIDTH)
-    
-    # 2. Target Symbol Performance
-    _logger.info("  [Target Performance: %s]", ", ".join(symbols))
-    header: str = f"| {'Symbol':<10} | {'M.Ret(%)':>8} | {'MaxMDD(%)':>9} | {'TotTrd':>6} | {'M.Win(%)':>8} | {'Score':>7} |"
-    _logger.info(header)
-    _logger.info("|" + "-" * (len(header)-2) + "|")
-    
-    for sym in symbols:
-        r: float = float(best_trial.user_attrs.get(f"{sym}_ret", 0.0))
-        m: float = float(best_trial.user_attrs.get(f"{sym}_mdd", 0.0))
-        s_val: float = float(best_trial.user_attrs.get(f"{sym}_score", 0.0))
-        t: float = float(best_trial.user_attrs.get(f"{sym}_trades", 0.0))
-        w: float = float(best_trial.user_attrs.get(f"{sym}_win_rate", 0.0))
-        _logger.info(f"| {sym:<10} | {r:8.2f} | {m:9.2f} | {int(t):6d} | {w:8.2f} | {s_val:7.2f} |")
-    _logger.info("-" * SEP_WIDTH)
-
-    # 3. True OOS Verification (On Target Symbols)
-    _logger.info("  🚀 Running True OOS Forward-Testing (IS_END to END_DATE)...")
-    _logger.info("  [True OOS Target Performance: %s]", ", ".join(symbols))
-    header_oos: str = f"| {'Symbol':<10} | {'M.Ret(%)':>8} | {'MaxMDD(%)':>9} | {'TotTrd':>6} | {'M.Win(%)':>8} | {'RoMaD':>7} |"
-    _logger.info(header_oos)
-    _logger.info("|" + "-" * (len(header_oos)-2) + "|")
-
-    # Strategy object for OOS/Cross-Symbol testing
-    strategy_oos: UltimateStrategy = UltimateStrategy(name="FuturesV2_OOS", params=best_params)
-    oos_romad_scores: List[float] = []
-    oos_pfs: List[float] = []
-    oos_trades: int = 0
-
-    for sym in symbols:
-        target_df_oos: pd.DataFrame = oos_data_maps.get(sym, {}).get(tf_val)
-        daily_df_oos: pd.DataFrame = oos_data_maps.get(sym, {}).get("1d")
-        full_merge_idx_oos: np.ndarray = oos_data_maps.get(sym, {}).get(f"merge_idx_{tf_val}")
-        
-        if target_df_oos is None or target_df_oos.empty or daily_df_oos is None or daily_df_oos.empty or full_merge_idx_oos is None:
-            _logger.info(f"| {sym:<10} | {'N/A':>8} | {'N/A':>8} | {'N/A':>5} | {'N/A':>8} | {'N/A':>7} |")
-            continue
-            
-        try:
-            n_oos_bars = len(target_df_oos)
-            oos_start_idx = oos_data_maps.get(sym, {}).get(f"oos_start_idx_{tf_val}", 0)
-            precomputed_daily_oos: pd.DataFrame = strategy_oos.generate_signals(daily_df_oos)
-            
-            s_f, r_f, m_f, t_f, w_f, pf_f = evaluate_symbol_fold(
-                strategy_oos, best_params, sym, tf_val, target_df_oos, daily_df_oos,
-                full_merge_idx_oos, precomputed_daily_oos, test_start=oos_start_idx, test_end=n_oos_bars, n_trials=1
-            )
-            oos_romad_scores.append(s_f)
-            oos_pfs.append(pf_f)
-            oos_trades += int(t_f)
-            
-            _logger.info(f"| {sym:<10} | {r_f:8.2f} | {m_f:9.2f} | {int(t_f):6d} | {w_f:8.2f} | {s_f:7.2f} |")
-        except Exception as e:
-            _logger.info(f"| {sym:<10} | {'ERR':>8} | {'ERR':>8} | {'ERR':>5} | {'ERR':>8} | {'ERR':>7} |")
-
-    _logger.info("-" * SEP_WIDTH)
-
-    # 4. Cross-Symbol Verification (CV-Fold Mode)
-    _logger.info("  🔍 Running Cross-Symbol Verification (CV-Fold Mode)...")
-    from src.futures_strategy.opt_v2_utils.evaluator import EMBARGO_BARS
-
-    for sym in oos_symbols:
-        if sym in data_maps:
-            continue
-        data_maps[sym] = {}
-        tf_list: List[str] = list(set(["1d", tf_val]))
-        for tf in tf_list:
-            oos_df: pd.DataFrame = collector.collect_and_save(sym, tf, FETCH_START_DATE, END_DATE)
-            if not oos_df.empty:
-                oos_df = merge_funding_into_ohlcv(sym, oos_df, DATA_DIR)
-                data_maps[sym][tf] = oos_df.reset_index(drop=True)
-
-                # Cross-symbol IS 시작 인덱스는 reset_index 이후의 "포지션" 기준으로 계산해야 함
-                is_start_dt = (
-                    pd.to_datetime(START_DATE).tz_localize(oos_df["datetime"].dt.tz)
-                    if oos_df["datetime"].dt.tz
-                    else pd.to_datetime(START_DATE)
-                )
-                tf_df: pd.DataFrame = data_maps[sym][tf]
-                is_mask_for_idx: pd.Series = tf_df["datetime"] >= is_start_dt
-                data_maps[sym][f"is_start_idx_{tf}"] = (
-                    int(is_mask_for_idx.to_numpy().argmax()) if is_mask_for_idx.any() else 0
-                )
-
-        if "1d" in data_maps[sym] and tf_val in data_maps[sym]:
-            data_maps[sym][f"merge_idx_{tf_val}"] = compute_segment_merge_index(
-                data_maps[sym][tf_val], data_maps[sym]["1d"]
-            )
-
-    _logger.info("  [Cross-Symbol Verification Summary (Averaged Over Folds)]")
-    _logger.info(header.replace("Score", "RoMaD"))
-    _logger.info("|" + "-" * (len(header)-2) + "|")
-
-    cross_sym_scores: List[float] = []
-    cross_pfs: List[float] = []
-    cross_trades: int = 0
-
-    for sym in oos_symbols:
-        target_df: Any = data_maps[sym].get(tf_val)
-        daily_df: Any = data_maps[sym].get("1d")
-        full_merge_idx: Any = data_maps[sym].get(f"merge_idx_{tf_val}")
-        
-        if target_df is None or daily_df is None or full_merge_idx is None:
-            _logger.info(f"| {sym:<10} | {'N/A':>8} | {'N/A':>8} | {'N/A':>5} | {'N/A':>8} | {'N/A':>7} |")
-            continue
-            
-        try:
-            is_start_idx = data_maps[sym].get(f"is_start_idx_{tf_val}", 0)
-            n_eval_bars = len(target_df) - is_start_idx
-
-            if n_eval_bars < 500:
-                _logger.info(f"| {sym:<10} | {'SHORT':>8} | {'SHORT':>8} | {'SHORT':>5} | {'SHORT':>8} | {'SHORT':>7} |")
-                continue
-
-            base_df_for_folds = pd.DataFrame(index=range(n_eval_bars))
-            cv_folds, holdout_fold = build_anchored_folds(base_df_for_folds, n_folds=3, holdout_ratio=0.25, embargo=EMBARGO_BARS.get(tf_val, 0))
-            folds_oos = cv_folds + ([holdout_fold] if holdout_fold[2] > holdout_fold[1] else [])
-            if not folds_oos:
-                _logger.info(f"| {sym:<10} | {'NOFOLD':>8} | {'NOFOLD':>8} | {'NOFOLD':>5} | {'NOFOLD':>8} | {'NOFOLD':>7} |")
-                continue
-
-            f_rets: List[float] = []
-            f_mdds: List[float] = []
-            f_trds: List[float] = []
-            f_wins: List[float] = []
-            f_scrs: List[float] = []
-            f_pfs: List[float] = []
-
-            for train_end, test_start, test_end in folds_oos:
-                adj_test_start = test_start + is_start_idx
-                adj_test_end = test_end + is_start_idx
-                
-                tf_idx_test_end_minus_1: int = adj_test_end - 1
-                daily_end_idx: int = int(full_merge_idx[tf_idx_test_end_minus_1]) if tf_idx_test_end_minus_1 < len(full_merge_idx) else len(daily_df) - 1
-                daily_trunc: pd.DataFrame = daily_df.iloc[:daily_end_idx + 1].copy()
-                
-                precomputed_daily: pd.DataFrame = strategy_oos.generate_signals(daily_trunc)
-                s_f, r_f, m_f, t_f, w_f, pf_f = evaluate_symbol_fold(
-                    strategy_oos, best_params, sym, tf_val, target_df, daily_trunc,
-                    full_merge_idx, precomputed_daily, adj_test_start, adj_test_end, n_trials=1
-                )
-                f_scrs.append(s_f)
-                f_rets.append(r_f)
-                f_mdds.append(m_f)
-                f_trds.append(float(t_f))
-                f_wins.append(w_f)
-                f_pfs.append(pf_f)
-
-            avg_score = float(np.mean(f_scrs))
-            cross_sym_scores.append(avg_score)
-            cross_pfs.append(float(np.mean(f_pfs)))
-            cross_trades += int(np.sum(f_trds))
-            
-            _logger.info(
-                f"| {sym:<10} | {np.mean(f_rets):8.2f} | {np.max(f_mdds):9.2f} | "
-                f"{int(np.sum(f_trds)):6d} | {np.mean(f_wins):8.2f} | {avg_score:7.2f} |"
-            )
-        except Exception as e:
-            _logger.info(f"| {sym:<10} | {'ERR':>8} | {'ERR':>8} | {'ERR':>5} | {'ERR':>8} | {'ERR':>7} |")
-
-    _logger.info("=" * SEP_WIDTH)
-
-    # 5. Go/No-Go Checklist
-    _logger.info("  ✅ Running Go/No-Go Checklist...")
-    cv_scores = best_trial.user_attrs.get("cv_scores", [])
-    holdout_score = best_trial.user_attrs.get("holdout_score", 0.0)
-    max_mdd = best_trial.user_attrs.get("avg_mdd", 0.0)
-    avg_pf = float(np.mean(oos_pfs + cross_pfs)) if (oos_pfs or cross_pfs) else best_trial.user_attrs.get("avg_pf", 1.0)
-    total_trades = oos_trades + cross_trades
-    
-    go_nogo: GoNoGoResult = run_go_nogo_check(
-        cv_fold_scores=cv_scores,
-        holdout_score=holdout_score,
-        oos_romad_scores=oos_romad_scores,
-        cross_sym_romad_scores=cross_sym_scores,
-        max_mdd_pct=max_mdd,
-        profit_factor=avg_pf,
-        long_count=total_trades // 2,
-        short_count=total_trades // 2,
-    )
-    
-    _logger.info(go_nogo.summary)
-    
-    if not args.test:
         best_trial.set_user_attr("go_nogo_passed", go_nogo.passed)
-        if go_nogo.passed:
-            save_study_to_sqlite(study, project_root)
-        else:
-            _logger.warning("  ❌ Go/No-Go FAIL: Skipping SQLite DB storage.")
+        tf_summary.append((tf_val, go_nogo.passed, mean_oos_romad))
+
+    # Save to DB: among Go/No-Go passed TFs, the one with highest mean OOS RoMaD (build minimal study from best_trial)
+    passed_tfs: List[Tuple[str, optuna.trial.FrozenTrial, float]] = [
+        (tf, best_results[tf][0], score) for tf, passed, score in tf_summary if passed
+    ]
+    if passed_tfs:
+        best_tf, best_trial_win, best_oos = max(passed_tfs, key=lambda x: x[2])
+        minimal_study: optuna.Study = optuna.create_study(
+            study_name=f"FuturesV2_{clean_symbol}_{best_tf}",
+            direction="maximize",
+        )
+        minimal_study.add_trial(best_trial_win)
+        save_study_to_sqlite(minimal_study, project_root, target_study_name="futures_strategy")
+        _logger.info("")
+        _logger.info("  💾 Saved to DB: study 'futures_strategy' (from TF: %s, OOS RoMaD: %.4f)", best_tf, best_oos)
+    else:
+        _logger.warning("  ❌ No TF passed Go/No-Go. SQLite DB not updated.")
+
+    # Summary table: TF | Go/No-Go | OOS Score
+    _logger.info("")
+    _logger.info("  [Summary] Per-Timeframe")
+    _logger.info("  | %s | %s | %s |", "TF".ljust(6), "Go/No-Go".ljust(8), "Mean OOS RoMaD")
+    _logger.info("  |%s|%s|%s|", "-" * 8, "-" * 10, "-" * 16)
+    for tf, passed, score in tf_summary:
+        _logger.info("  | %s | %s | %14.4f |", tf.ljust(6), "PASS" if passed else "FAIL", score)
 
 if __name__ == "__main__":
     main()
