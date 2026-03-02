@@ -36,6 +36,8 @@ from .indicators_advanced_futures import (
     calculate_tema,
     calculate_vhf,
     calculate_vwap,
+    calculate_vwma,
+    calculate_roc,
     calculate_williams_r,
 )
 
@@ -79,6 +81,8 @@ _FUTURES_INDICATORS = SimpleNamespace(
     calculate_force_index=calculate_force_index,
     calculate_williams_r=calculate_williams_r,
     calculate_obv=calculate_obv,
+    calculate_roc=calculate_roc,
+    calculate_vwma=calculate_vwma,
 )
 
 
