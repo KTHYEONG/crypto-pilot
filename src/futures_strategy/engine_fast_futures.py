@@ -3,10 +3,11 @@ from __future__ import annotations
 
 from typing import Optional
 
-import pandas as pd
-import numpy as np
 import logging
+import numpy as np
+import pandas as pd
 from numba import njit
+
 from config.settings import TRADING_FEE_RATE, SLIPPAGE_RATE, FUNDING_FEE_RATE
 
 class BacktestEngineFast:
@@ -45,87 +46,35 @@ class BacktestEngineFast:
         # Optional fast merge index injection (must be set before _prepare_data call)
         if merge_index_map is not None:
             self._merge_index_map = merge_index_map
-        
-        self.risk_limits = {'max_daily_loss': 0.05}
+
         self.logger = logging.getLogger(__name__)
         self._prepare_data()
-    
-    def _prepare_data(self):
-        # [OPTIMIZATION] Use pre-computed merge index if available (set by optimize script)
-        # This eliminates expensive pd.merge on every trial
-        if hasattr(self, '_merge_index_map'):
-            # Fast path: Use pre-computed index mapping
-            self._prepare_data_with_index()
-        else:
-            # Fallback: Traditional merge (for verify/live scripts)
-            self._prepare_data_with_merge()
-    
-    def _prepare_data_with_index(self):
-        """
-        [FAST PATH] Use pre-computed merge index to avoid pd.merge overhead.
-        This is 10-50x faster than pd.merge for large datasets.
-        """
-        # Use pre-computed signals if available (cache hit path), otherwise compute
-        if self._precomputed_daily_df is not None:
-            self.daily_df = self._precomputed_daily_df
-        else:
-            self.daily_df = self.strategy.generate_signals(self.daily_df)
-        
-        # Filter essential columns only
-        exclude_cols = {'date_key', 'datetime', 'date', 'open', 'high', 'low', 'close', 'volume', 'timestamp'}
-        indicator_cols = [c for c in self.daily_df.columns if c not in exclude_cols]
-        
-        # Shift(1) to prevent lookahead
-        shifted_daily = self.daily_df[indicator_cols].shift(1)
 
-        max_valid_idx = len(shifted_daily) - 1
-        if np.any(self._merge_index_map < 0) or np.any(self._merge_index_map > max_valid_idx):
-            raise ValueError(
-                f"merge_index_map out of bounds: "
-                f"min={self._merge_index_map.min()}, max={self._merge_index_map.max()}, "
-                f"valid=[0, {max_valid_idx}]"
-            )
+    # Columns from strategy.generate_signals() actually consumed by run() / backtest_loop_numba (V2).
+    _REQUIRED_INDICATOR_COLS: frozenset = frozenset({
+        "entry_upper", "entry_lower", "trend_direction", "strength_filter",
+        "volume_ratio", "atr", "parabolic_sar", "rsi", "rsi_entry", "risk_scalar", "exit_scalar",
+    })
 
-        # Shallow copy (deep=False): new object so we add daily_* columns to merged_df only;
-        # underlying data shared with hourly_df for memory/speed. Align daily -> hourly via index map.
+    def _prepare_data(self) -> None:
+        # [REFACTOR: INTRADAY NATIVE] Signals computed on target timeframe (hourly_df).
+        # If hourly_df already has all required indicator cols (e.g. from signal cache), skip generate_signals.
+        exclude_cols = {"date_key", "datetime", "date", "open", "high", "low", "close", "volume", "timestamp"}
+        if all(c in self.hourly_df.columns for c in self._REQUIRED_INDICATOR_COLS):
+            signal_df = self.hourly_df
+        else:
+            signal_df = self.strategy.generate_signals(self.hourly_df.copy(deep=True))
+
+        indicator_cols = [
+            c for c in signal_df.columns
+            if c not in exclude_cols and c in self._REQUIRED_INDICATOR_COLS
+        ]
+
+        shifted_signals = signal_df[indicator_cols].shift(1)
         self.merged_df = self.hourly_df.copy(deep=False)
-        
-        # Map daily indicators to hourly using pre-computed indices
+
         for col in indicator_cols:
-            # Use NumPy array indexing for maximum speed
-            daily_values = shifted_daily[col].values
-            mapped_values = daily_values[self._merge_index_map]
-            self.merged_df[f'daily_{col}'] = mapped_values
-    
-    def _prepare_data_with_merge(self):
-        """
-        [FALLBACK] Traditional pd.merge approach for compatibility.
-        Used when merge index is not pre-computed (verify/live scripts).
-        """
-        # Use pre-computed signals if available (cache hit path), otherwise compute
-        if self._precomputed_daily_df is not None:
-            self.daily_df = self._precomputed_daily_df
-        else:
-            self.daily_df = self.strategy.generate_signals(self.daily_df)
-
-        # Ensure date_key after replace (precomputed/generate_signals may omit it)
-        if 'date_key' not in self.daily_df.columns:
-            self.daily_df['date_key'] = pd.to_datetime(self.daily_df['datetime']).dt.strftime('%Y-%m-%d')
-
-        # Filter essential columns
-        exclude_cols = {'date_key', 'datetime', 'date', 'open', 'high', 'low', 'close', 'volume', 'timestamp'}
-        indicator_cols = [c for c in self.daily_df.columns if c not in exclude_cols]
-        
-        # Shift & Rename
-        shifted_daily = self.daily_df[indicator_cols].shift(1)
-        shifted_daily.columns = [f'daily_{c}' for c in indicator_cols]
-        shifted_daily['date_key'] = self.daily_df['date_key']
-        
-        if 'date_key' not in self.hourly_df.columns:
-            self.hourly_df['date_key'] = pd.to_datetime(self.hourly_df['datetime']).dt.strftime('%Y-%m-%d')
-            
-        # Left Join: Hourly <- Daily
-        self.merged_df = pd.merge(self.hourly_df, shifted_daily, on='date_key', how='left')
+            self.merged_df[f"daily_{col}"] = shifted_signals[col]
     
     def run(self):
         self.logger.debug(f"Running FAST backtest for {self.strategy.name}...")
@@ -227,43 +176,38 @@ class BacktestEngineFast:
         rsi_long_exit = self.strategy.params.get("RSI_LONG_EXIT_THRESHOLD", _legacy)
         rsi_short_exit = self.strategy.params.get("RSI_SHORT_EXIT_THRESHOLD", 100.0 - _legacy)
         
-        # [NEW] Dynamic Risk Sizing (Regime-based)
-        # Extract Hurst & NATR for regime detection
-        if 'daily_hurst' in df.columns:
-            hurst = df['daily_hurst'].values
+        if "daily_risk_scalar" in df.columns:
+            risk_scalar = df["daily_risk_scalar"].values
         else:
-            hurst = np.full(n, 0.5)  # Neutral (random walk)
+            risk_scalar = np.full(n, 1.0)
             
-        if 'daily_natr' in df.columns:
-            natr = df['daily_natr'].values
+        if "daily_exit_scalar" in df.columns:
+            exit_scalar = df["daily_exit_scalar"].values
         else:
-            natr = np.full(n, 1.0)  # Neutral volatility
-        
-        # Dynamic Risk Multipliers (Optimizable)
-        use_dynamic_risk = self.strategy.params.get('USE_DYNAMIC_RISK', False)
-        strong_regime_hurst = self.strategy.params.get('STRONG_REGIME_HURST', 0.6)
-        strong_regime_natr = self.strategy.params.get('STRONG_REGIME_NATR', 1.5)
-        strong_regime_multiplier = self.strategy.params.get('STRONG_REGIME_MULTIPLIER', 1.5)
-        
-        weak_regime_hurst = self.strategy.params.get('WEAK_REGIME_HURST', 0.55)
-        weak_regime_multiplier = self.strategy.params.get('WEAK_REGIME_MULTIPLIER', 0.5)
-        
-        panic_regime_natr = self.strategy.params.get('PANIC_REGIME_NATR', 4.0)
-        panic_regime_multiplier = self.strategy.params.get('PANIC_REGIME_MULTIPLIER', 0.25)
+            exit_scalar = np.full(n, 1.0)
         
         # [OPTIMIZATION] Extract timestamps for fast lookup (avoid iloc)
         datetime_values = df['datetime'].values
         
-        # [NEW] Compounding Control
-        use_compounding = self.strategy.params.get('USE_COMPOUNDING', False)
-        max_capital_usage = self.strategy.params.get('MAX_CAPITAL_USAGE', self.initial_balance)
+        # [NEW] Compounding Control (FIXED BUG: Removed artificial cap restricting geometric growth)
+        use_compounding = self.strategy.params.get('USE_COMPOUNDING', True)
+        max_capital_usage = self.strategy.params.get('MAX_CAPITAL_USAGE', 1e12) # Default to infinity for pure math
+        
+        # [NEW] RSI Entry Filter
+        use_rsi_entry_filter = self.strategy.params.get('USE_RSI_ENTRY_FILTER', False)
+        rsi_entry_threshold = self.strategy.params.get('RSI_ENTRY_THRESHOLD', 30)
+        
+        if 'daily_rsi_entry' in df.columns:
+            rsi_entry = df['daily_rsi_entry'].values
+        else:
+            rsi_entry = np.full(n, 50.0)
         
         # Run Numba-accelerated loop
         trades, final_balance, equity_curve = backtest_loop_numba(
             close, high, low, open_prices, volume_ratio,
             entry_upper, entry_lower,
             trend_dir, strength_filter, atr, parabolic_sar, rsi,
-            hurst, natr,
+            risk_scalar, exit_scalar,
             self.initial_balance,
             leverage,
             self.fee_rate,
@@ -277,9 +221,7 @@ class BacktestEngineFast:
             max_holding_bars, trailing_activation_atr, time_exit_profit_threshold,
             enable_trend_exit,
             rsi_long_exit, rsi_short_exit,
-            use_dynamic_risk, strong_regime_hurst, strong_regime_natr, strong_regime_multiplier,
-            weak_regime_hurst, weak_regime_multiplier,
-            panic_regime_natr, panic_regime_multiplier,
+            use_rsi_entry_filter, rsi_entry_threshold, rsi_entry, # [NEW]
             warmup_bars,
             use_compounding,    # [NEW]
             max_capital_usage,  # [NEW]
@@ -342,11 +284,15 @@ class BacktestEngineFast:
                 'mdd_pct': 0,
                 'trades_df': pd.DataFrame()
             }
-        
-        trades_df = pd.DataFrame(self.trades)
+
+        # Extract columns once as numpy arrays (avoid repeated DataFrame access)
+        n_trades = len(self.trades)
+        pnl_arr = np.fromiter((t["pnl"] for t in self.trades), dtype=np.float64, count=n_trades)
+        entry_fee_arr = np.fromiter((t["entry_fee"] for t in self.trades), dtype=np.float64, count=n_trades)
+        entry_p = np.fromiter((t["entry_price"] for t in self.trades), dtype=np.float64, count=n_trades)
+        amount_arr = np.fromiter((t["amount"] for t in self.trades), dtype=np.float64, count=n_trades)
 
         # MDD from bar-level equity (includes unrealized P&L during open positions)
-        # Exclude warmup segment so MDD is computed on actual trading period only
         equity = getattr(self, "_equity_curve", None)
         warmup_bars = getattr(self, "_warmup_bars", 0)
         if equity is not None and len(equity) > 0 and np.isfinite(equity).all():
@@ -360,11 +306,11 @@ class BacktestEngineFast:
             drawdown = np.nan_to_num(drawdown, nan=0.0)
             mdd = float(drawdown.min())
         else:
-            # Fallback: trade-level cumulative (no unrealized)
-            cumulative = [self.initial_balance]
-            for pnl in trades_df["pnl"]:
-                cumulative.append(cumulative[-1] + pnl)
-            cumulative = np.array(cumulative)
+            # Fallback: trade-level cumulative (numpy only)
+            cumulative = np.empty(n_trades + 1, dtype=np.float64)
+            cumulative[0] = self.initial_balance
+            np.cumsum(pnl_arr, out=cumulative[1:])
+            cumulative[1:] += self.initial_balance
             if not np.isfinite(cumulative).all():
                 mdd = 0.0
             else:
@@ -374,21 +320,16 @@ class BacktestEngineFast:
                 drawdown = np.nan_to_num(drawdown, nan=0.0)
                 mdd = float(drawdown.min())
 
-        # ROE per trade = (PnL - entry_fee) / Margin Used. entry_fee is deducted at entry but not in pnl.
-        entry_fee_arr = trades_df["entry_fee"].values
-        true_pnl = trades_df["pnl"].values - entry_fee_arr
-        entry_p = trades_df["entry_price"].values
-        amount_arr = trades_df["amount"].values
-        leverage = float(self.leverage)
-        margin_used = amount_arr * entry_p / leverage
+        # ROE per trade: balance_before, pnl_pct (numpy-only)
+        true_pnl = pnl_arr - entry_fee_arr
+        leverage_f = float(self.leverage)
+        margin_used = amount_arr * entry_p / leverage_f
         margin_used = np.where(np.isfinite(margin_used) & (margin_used > 0), margin_used, np.nan)
 
-        entry_fee_cumsum = trades_df["entry_fee"].cumsum().shift(1).fillna(0)
-        pnl_cumsum = trades_df["pnl"].cumsum().shift(1).fillna(0)
-        trades_df["balance_before"] = (
-            self.initial_balance - entry_fee_cumsum + pnl_cumsum
-        ).replace(0, 1e-9)
-        balance_before = trades_df["balance_before"].values
+        entry_fee_cumsum = np.concatenate(([0.0], np.cumsum(entry_fee_arr)[:-1]))
+        pnl_cumsum = np.concatenate(([0.0], np.cumsum(pnl_arr)[:-1]))
+        balance_before = self.initial_balance - entry_fee_cumsum + pnl_cumsum
+        balance_before = np.where(balance_before == 0, 1e-9, balance_before)
 
         denom = np.where(
             np.isfinite(margin_used) & (margin_used > 0),
@@ -396,16 +337,20 @@ class BacktestEngineFast:
             np.asarray(balance_before, dtype=np.float64),
         )
         with np.errstate(invalid="ignore", divide="ignore"):
-            trades_df["pnl_pct"] = (true_pnl / denom) * 100
-        trades_df["pnl_pct"] = trades_df["pnl_pct"].replace([np.inf, -np.inf], 0).fillna(0)
-        
-        true_pnl_arr = trades_df["pnl"] - trades_df["entry_fee"]
-        win_trades = len(trades_df[true_pnl_arr > 0])
-        loss_trades = len(trades_df[true_pnl_arr <= 0])
-        win_rate = (win_trades / len(trades_df)) * 100 if len(trades_df) > 0 else 0
+            pnl_pct = (true_pnl / denom) * 100
+        pnl_pct = np.nan_to_num(pnl_pct, nan=0.0, posinf=0.0, neginf=0.0)
+
+        win_trades = int(np.sum(true_pnl > 0))
+        loss_trades = int(np.sum(true_pnl <= 0))
+        win_rate = (win_trades / n_trades) * 100 if n_trades > 0 else 0.0
+
+        # Build DataFrame once for API contract (evaluator, metrics expect trades_df)
+        trades_df = pd.DataFrame(self.trades)
+        trades_df["balance_before"] = balance_before
+        trades_df["pnl_pct"] = pnl_pct
 
         return {
-            'total_trades': len(trades_df),
+            'total_trades': n_trades,
             'win_trades': win_trades,
             'loss_trades': loss_trades,
             'win_rate': win_rate,
@@ -422,7 +367,7 @@ def backtest_loop_numba(
     close, high, low, open_prices, volume_ratio,
     entry_upper, entry_lower,
     trend_dir, strength_filter, atr, parabolic_sar, rsi, # [NEW]
-    hurst, natr, # [NEW] Regime indicators
+    risk_scalar, exit_scalar, # [NEW] ER-based Position Sizing & Exit Scalars
     initial_balance, leverage, fee_rate, slippage_rate,
     exit_type, stop_loss_type, stop_loss_pct, atr_sl_mult,
     atr_mult,
@@ -433,9 +378,7 @@ def backtest_loop_numba(
     max_holding_bars, trailing_activation_atr, time_exit_profit_threshold,
     enable_trend_exit,
     rsi_long_exit, rsi_short_exit,
-    use_dynamic_risk, strong_regime_hurst, strong_regime_natr, strong_regime_multiplier,
-    weak_regime_hurst, weak_regime_multiplier,
-    panic_regime_natr, panic_regime_multiplier, # [NEW] Dynamic Risk
+    use_rsi_entry_filter, rsi_entry_threshold, rsi_entry, # [NEW]
     warmup_bars,  # [WARMUP] Number of bars to skip at start for indicator warmup
     use_compounding,   # [NEW] Bool
     max_capital_usage,  # [NEW] Float
@@ -538,12 +481,15 @@ def backtest_loop_numba(
             start_of_bar_stop = stop_price
             
             # [SEQ-1] Update High/Low & Trailing Stop in real time (exit_triggered-agnostic)
+            # [INSTITUTIONAL] Dynamic Trailing Activation: Lower hurdle in chop, higher in trends.
+            dynamic_trailing_act = trailing_activation_atr * exit_scalar[i]
+            
             if pos_side == 1:
                 if c_high > highest:
                     highest = c_high
                 if exit_type == 0:
                     unreal_profit = (highest - entry_price) / pos_atr if pos_atr > 0 else 0
-                    if unreal_profit >= trailing_activation_atr:
+                    if unreal_profit >= dynamic_trailing_act:
                         new_stop = max(highest - (pos_atr * atr_mult), entry_price * 0.01)
                         if new_stop > stop_price:
                             stop_price = new_stop
@@ -552,7 +498,7 @@ def backtest_loop_numba(
                     lowest = c_low
                 if exit_type == 0:
                     unreal_profit = (entry_price - lowest) / pos_atr if pos_atr > 0 else 0
-                    if unreal_profit >= trailing_activation_atr:
+                    if unreal_profit >= dynamic_trailing_act:
                         new_stop = min(lowest + (pos_atr * atr_mult), entry_price * 1.99)
                         if new_stop < stop_price:
                             stop_price = new_stop
@@ -611,25 +557,22 @@ def backtest_loop_numba(
             # [SEQ-4] Conditional Market Exits
             if not exit_triggered:
                 # Time Exit: after MAX_HOLDING_BARS, exit if profit below threshold; hard cap at 2x bars
+                # Time Exit (Vol_Drag Early Exit): after MAX_HOLDING_BARS, exit if profit below threshold
                 bars_held = i - entry_idx
-                if bars_held > 0:
-                    hard_exit = bars_held >= max_holding_bars * 2
-                    soft_check = bars_held >= max_holding_bars
+                if bars_held > max_holding_bars:
+                    # Evaluate unrealized PnL at open (no look-ahead)
+                    if pos_side == 1:
+                        unreal_p = (c_open - entry_price) / pos_atr if pos_atr > 0 else 0.0
+                    else:
+                        unreal_p = (entry_price - c_open) / pos_atr if pos_atr > 0 else 0.0
 
-                    if soft_check or hard_exit:
-                        # [FIX] Evaluate unrealized PnL at open; exit is at open → no look-ahead
+                    if unreal_p < time_exit_profit_threshold:
+                        exit_price = c_open  # Market at bar open
                         if pos_side == 1:
-                            unreal_p = (c_open - entry_price) / pos_atr if pos_atr > 0 else 0.0
+                            exit_price *= (1 - slippage_rate)
                         else:
-                            unreal_p = (entry_price - c_open) / pos_atr if pos_atr > 0 else 0.0
-
-                        if unreal_p < time_exit_profit_threshold or hard_exit:
-                            exit_price = c_open  # Market at bar open
-                            if pos_side == 1:
-                                exit_price *= (1 - slippage_rate)
-                            else:
-                                exit_price *= (1 + slippage_rate)
-                            exit_triggered = True
+                            exit_price *= (1 + slippage_rate)
+                        exit_triggered = True
                 
                 # RSI Panic (rsi[i] is shift(1) daily → prior day; no future reference)
                 if not exit_triggered:
@@ -695,15 +638,10 @@ def backtest_loop_numba(
                 equity_curve[i] = balance
                 continue
 
-            regime_mult = 1.0
-            if use_dynamic_risk:
-                if natr[i] > panic_regime_natr:
-                    regime_mult = panic_regime_multiplier
-                elif hurst[i] > strong_regime_hurst and natr[i] > strong_regime_natr:
-                    regime_mult = strong_regime_multiplier
-                elif hurst[i] < weak_regime_hurst:
-                    regime_mult = weak_regime_multiplier
-            exec_risk = risk_per_trade * regime_mult
+            # [NEW] Pure Mathematical Position Sizing (Kelly / ER Based)
+            # Replaced volatility scaler with pure Efficiency Ratio risk scaling.
+            # Chop = 10% Risk. Pure Trend = 100% Risk.
+            exec_risk = risk_per_trade * risk_scalar[i]
 
             do_entry = False
             fill_price = 0.0
@@ -716,6 +654,12 @@ def backtest_loop_numba(
                 fill_price = min(c_open, entry_lower[i]) * (1 - slippage_rate)
                 pending_side = -1
                 do_entry = True
+
+            if use_rsi_entry_filter and do_entry:
+                if pending_side == 1 and rsi_entry[i] >= rsi_entry_threshold:
+                    do_entry = False
+                elif pending_side == -1 and rsi_entry[i] <= (100 - rsi_entry_threshold):
+                    do_entry = False
 
             if do_entry:
                 # Use atr[i]: daily_atr is already shift(1) in _prepare_data (prior day). No extra i-1.
@@ -742,11 +686,15 @@ def backtest_loop_numba(
                         stop_price = fill_price * (1 + stop_loss_pct)
                 tp_price = 0.0
                 if use_take_profit:
+                    # [INSTITUTIONAL] Dynamic TP Scaling: Lower TP in chop, full TP in trends.
+                    dynamic_tp_mult = tp_atr_mult * exit_scalar[i]
                     if pending_side == 1:
-                        tp_price = fill_price + (current_atr * tp_atr_mult)
+                        tp_price = fill_price + (current_atr * dynamic_tp_mult)
                     else:
-                        tp_price = fill_price - (current_atr * tp_atr_mult)
+                        tp_price = fill_price - (current_atr * dynamic_tp_mult)
                 stop_distance = abs(fill_price - stop_price)
+                if fill_price <= 0.0:
+                    fill_price = 1e-9
                 if use_compounding:
                     current_equity = max_capital_usage if balance > max_capital_usage else balance
                 else:
