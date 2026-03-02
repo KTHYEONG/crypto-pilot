@@ -152,16 +152,19 @@ def fast_reset_study(
                 pass
 
 
-def save_study_to_sqlite(study: optuna.Study, project_root: str) -> bool:
+def save_study_to_sqlite(
+    study: optuna.Study, project_root: str, target_study_name: Optional[str] = None
+) -> bool:
     """
     Export ONLY the best trial from the current study to local SQLite for production.
-    This avoids the bottleneck of copying thousands of trials.
+    When target_study_name is set (e.g. "futures_strategy"), the trial is stored under
+    that name so downstream (e.g. real_trader) can load it.
     """
-    study_name: str = study.study_name
+    study_name: str = target_study_name if target_study_name is not None else study.study_name
     sqlite_path: str = os.path.join(project_root, "futures_strategy.db")
     sqlite_storage_url: str = f"sqlite:///{sqlite_path}"
     
-    _logger.info(f"  💾 Exporting BEST trial of '{study_name}' to local SQLite...")
+    _logger.info("  💾 Exporting BEST trial to local SQLite as '%s'...", study_name)
     
     try:
         # 1. Delete existing local study to ensure fresh best trial
