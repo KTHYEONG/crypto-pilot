@@ -1,0 +1,38 @@
+# 코인 선물 전략 최적화 알고리즘 개선 제안서
+
+현재 [optimize_futures_v2.py](file:///c:/KTHYEONG_github/my_coin_traider/src/futures_strategy/optimize_futures_v2.py)의 **PWF(Purged Walk-Forward)** 기반 단일 목적함수 최적화 구조를 개선하여, 과최적화를 최소화하고 실전 견고성(Robustness)을 극대화하기 위한 3가지 핵심 전략입니다.
+
+---
+
+## 1. 다중 목적 최적화 (Multi-Objective MOTPE)
+가장 강력하면서도 즉각적인 개선안입니다. 단일 스칼라 점수(Score)에 의존하는 탐색은 특정 지표가 비정상적으로 튀는 '노이즈 피팅'에 취약합니다.
+
+*   **알고리즘 근거**: Optuna의 TPE 샘플러를 **MOTPE(Multi-Objective TPE)**로 확장합니다. 수익률 극대화와 MDD 최소화라는 상충하는 목표 사이의 **파레토 프론트(Pareto Front)**를 탐색합니다.
+*   **핵심 개선 사항**:
+    *   `directions=["maximize", "minimize"]` (수익률, MDD)로 스터디 구조 변경.
+    *   목적 함수에서 [(cv_mean, cv_mdd)](file:///c:/KTHYEONG_github/my_coin_traider/src/futures_strategy/optimize_futures_v2.py#228-513)를 튜플로 반환하여 엔진이 입체적으로 학습하도록 유도.
+*   **기대 효과**: 단일 지표에 치우친 '뾰족한 최적점' 대신, 어떠한 시장 상황에서도 균형을 유지하는 '로버스트 영역'을 자동으로 식별합니다.
+
+## 2. 계단식 조기 종료 (Cascaded Pruning)
+연산 효율성을 극대화하여 더 넓은 파라미터 공간을 정밀하게 탐색할 수 있게 합니다.
+
+*   **알고리즘 근거**: 금융 시계열의 특성상 특정 구간(Fold)에서 생존하지 못하는 전략은 전체 구간에서도 무의미합니다. **Step-wise Pruning**을 통해 부적격 파라미터를 조기에 제거합니다.
+*   **핵심 개선 사항**:
+    *   [evaluator.py](file:///c:/KTHYEONG_github/my_coin_traider/src/futures_strategy/opt_v2_utils/evaluator.py) 내의 폴드 순회 루프 도중 **MDD 한계치(예: -15%) 초과** 또는 **최소 거래 횟수 미달** 발생 시 즉시 `optuna.TrialPruned()` 가동.
+    *   검증되지 않은 쓰레기(Noise) 파라미터에 투입되던 연산 자원을 유망한 공간의 정밀 탐색으로 전환.
+*   **기대 효과**: 전체 최적화 속도가 2~3배 향상되며, 동일 시간 내에 TPE가 유효한 패턴을 발견할 확률이 비약적으로 상승합니다.
+
+## 3. 상위 파라미터 앙상블 (Top-K Ensemble & Flat Maximum)
+최고 성적 1등(Global Best) 파라미터에만 베팅하는 'Winner-takes-all' 방식의 오버피팅 리스크를 제거합니다.
+
+*   **알고리즘 근거**: 실전 시장 데이터는 과거 데이터와 미세하게 다릅니다. 따라서 좁은 최적점이 아닌, 주변 파라미터로의 변동에도 성과가 유지되는 **평탄한 고원(Flat Maximum)** 형태의 해를 선택해야 합니다.
+*   **핵심 개선 사항**:
+    *   최적화 종료 후 `best_trial` 하나만 저장하는 것이 아니라, 상위 N개(예: 상위 3~5%)의 파라미터 세트를 추출.
+    *   OOS 검증 및 실전 운용 시 이 상위 파라미터들의 시그널을 **다수결 또는 가중 평균(Ensemble)**하여 최종 포지션을 결정.
+*   **기대 효과**: 파라미터 민감도가 낮아져 실전 환경의 데이터 드리프트(Data Drift)에 대한 방어력이 극대화됩니다.
+
+---
+
+> [!IMPORTANT]
+> **권장 도입 순서**: 
+> 1단계: **MOTPE(1번)** 도입을 통한 목적함수 분리 (코드 수정 최소화) -> 2단계: **Pruning(2번)** 조건 강화로 탐색 효율 최적화 -> 3단계: **앙상블(3번)** 로직 추가로 실전 방어력 완성.
