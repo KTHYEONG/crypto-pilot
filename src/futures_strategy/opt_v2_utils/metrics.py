@@ -35,7 +35,7 @@ def calc_romad(pnl_series: pd.Series, n_trades: int, tf: str) -> Tuple[float, fl
     else:
         gains: float = float(pnl_series[pnl_series > 0].sum())
         losses: float = abs(float(pnl_series[pnl_series < 0].sum()))
-        pf = float(gains / losses) if losses > 0 else (999.0 if gains > 0 else 1.0)
+        pf = float(gains / losses) if losses > 0 else (5.0 if gains > 0 else 1.0)
 
     return calc_romad_from_metrics(
         ret_pct=ret_pct,
@@ -57,7 +57,7 @@ def calc_profit_factor_from_pnl(pnl_series: pd.Series) -> float:
     gross_loss: float = abs(float(pnl_series[pnl_series < 0].sum()))
 
     if gross_loss == 0.0:
-        return 999.0 if gross_profit > 0 else 1.0
+        return 5.0 if gross_profit > 0 else 1.0
 
     return gross_profit / gross_loss
 
@@ -74,7 +74,7 @@ def calc_profit_factor(trades_df: pd.DataFrame) -> float:
     gross_loss: float = abs(float(losses.sum())) if not losses.empty else 0.0
     
     if gross_loss == 0.0:
-        return 999.0 if gross_profit > 0 else 1.0
+        return 5.0 if gross_profit > 0 else 1.0
         
     return gross_profit / gross_loss
 
@@ -89,76 +89,64 @@ def calc_romad_from_metrics(
     leverage: float = 1.0,
 ) -> Tuple[float, float, float]:
     """
-    RoMaD score from precomputed return and MDD with strict financial engineering constraints.
-    Returns: (score, return_pct, mdd_pct).
-    
-    Reflected Plan Details:
-    1. 보편적 시간 정규화 (Time-Normalized Log-Return): 순수한 '일별 평균 복리 성장률' 기준.
-    2. Log-Drawdown 기반 페널티: 위험과 수익의 수학적 일관성 유지.
-    3. 표본 횟수 기반 통계적 페널티 (Standard Error Penalty): C/sqrt(N) 원리 차용.
-    4. Profit Factor Sigmoid Credibility (Secondary Filter): PF 기반 신뢰도 점수.
+    Deprecated complex scoring. Returns Pure CAGR and MDD.
     """
-    # 1. 보편적 시간 정규화 (Time-Normalized Log-Return) — 복리 엔진 정합성 유지
-    days: float = max(float(span_days), 90.0)
-    mdd_abs: float = float(abs(mdd_pct))
+    days: float = max(float(span_days), 1.0)
     total_ret_ratio: float = 1.0 + (ret_pct / 100.0)
-    # 1-1. TPE 하한선 그래디언트 소실 교정 (Log-Extension): total_ret_ratio < 0.01 구간에서 접선 기반 1차 선형 보간
-    if total_ret_ratio >= 0.01:
-        log_ret: float = float(np.log(total_ret_ratio))
+    
+    # Annualized Geometric Return (CAGR)
+    if total_ret_ratio > 0:
+        cagr = ((total_ret_ratio ** (365.0 / days)) - 1.0) * 100.0
     else:
-        log_ret: float = float(np.log(0.01)) + 100.0 * (total_ret_ratio - 0.01)
-    
-    annualized_g: float = (log_ret / days) * 365.0
+        cagr = -100.0
 
-    # 2. Log-Drawdown 기반 페널티 (Scale alignment with Return)
-    mdd_decimal: float = min(mdd_abs / 100.0, 0.999)
-    risk_cost: float = -float(np.log(1.0 - mdd_decimal))
-    
-    # 2-1. MDD 20% 초과 시 비선형 페널티 (스케일 조정: 5.0 -> 1.0)
-    if mdd_decimal > 0.20:
-        risk_cost += ((mdd_decimal - 0.20) * 1.0) ** 2
+    return float(cagr), ret_pct, float(abs(mdd_pct))
 
-    base_score: float = annualized_g - risk_cost
+# ==============================================================================
+# [NEW] Portfolio Aggregated Equity Curve Metrics 
+# ==============================================================================
 
-    # 3. 구간형 표본 횟수 기반 페널티 (Dynamic TF-based Penalty)
-    # 타임프레임별 기대 거래 빈도(EDF), 일일 봉 개수, 최대 봉 비율(max_ratio), Sniper PF 기준
-    tf_params_map: dict[str, tuple[float, float, float, float]] = {
-        # 1H (Mean Reversion): 통계적 검증을 위해 최소 이틀에 1번 꼴(0.5) 거래 권장. 하루 최대 2.4번(0.10)까지 정상 허용.
-        # 승률로 엣지를 내므로 PF 1.3 이상이면 훌륭한 전략으로 간주.
-        "1h": (0.50, 24.0, 0.10, 1.3),
+def calc_mdd_from_equity(equity_curve: np.ndarray) -> float:
+    """Calculate Maximum Drawdown from an aggregated equity curve."""
+    if len(equity_curve) == 0:
+        return 0.0
+    running_max = np.maximum.accumulate(equity_curve)
+    running_max[running_max == 0] = 1e-9
+    drawdown = (equity_curve - running_max) / running_max * 100.0
+    return float(abs(np.min(np.nan_to_num(drawdown, nan=0.0))))
+
+def calc_sortino_from_equity(equity_curve: np.ndarray, span_days: float) -> float:
+    """Calculate Sortino Ratio from an aggregated equity curve."""
+    if len(equity_curve) < 2 or span_days <= 0:
+        return 0.0
         
-        # 4H (Trend Following): 매크로 대추세이므로 최소 25일에 1번(0.04) 꼴 권장. 잦은 진입은 휩쏘로 간주(0.03).
-        # 손익비가 높아야 하므로 PF 1.5 이상일 때만 면제.
-        "4h": (0.04, 6.0, 0.03, 1.5),
-    }
-    edf, bars_per_day, max_ratio, sniper_pf = tf_params_map.get(tf, (0.1, 24.0, 0.03, 1.5))
+    start_eq = equity_curve[0] if equity_curve[0] > 0 else 1e-9
+    end_eq = equity_curve[-1]
+    total_ret = (end_eq / start_eq) - 1.0
     
-    # N_MIN: 통계적 유의성 하한선 (분기별 테스트 기준에 맞춰 절대 하한선을 3.0으로 완화)
-    # 우연한 1~2번의 수익(Curve-fitting)은 걸러내되, 추세추종의 본질을 훼손하지 않는 타협점.
-    N_MIN: float = max(3.0, float(span_days) * edf)
-    # N_MAX: 노이즈 과적합(Turnover) 방어선 - 타임프레임 성격에 맞춘 상한선
-    N_MAX: float = float(span_days) * bars_per_day * max_ratio
-
-    # 3. Monotonic Penalty (Directional Pruning for TPE)
-    if n_trades < N_MIN:
-        dist_factor: float = (N_MIN - float(n_trades)) / N_MIN
-        # Soft Penalty for Sniper Strategies (High PF) -> 적게 매매하되 훌륭한 엣지가 있는 전략 보존
-        if pf >= sniper_pf:
-            final_score: float = base_score - (dist_factor * 0.5)
-        else:
-            # TPE Gradient 보존을 위한 연속 선형 감점 (최대 -3.0)
-            final_score: float = base_score - (dist_factor * 3.0)
-        return float(final_score), ret_pct, mdd_abs
+    # Log return is safer for compounding
+    if total_ret > -0.99:
+        log_ret = np.log(1.0 + total_ret)
+    else:
+        log_ret = np.log(0.01) # Max -99% floor
+        
+    annualized_return = (log_ret / span_days) * 365.0
     
-    if n_trades > N_MAX:
-        # 과도한 매매 시 로그 스케일로 부드럽게 감점
-        dist_factor: float = float(np.log(float(n_trades) / N_MAX))
-        final_score: float = base_score - (dist_factor * 2.0)
-        return float(final_score), ret_pct, mdd_abs
+    returns = np.diff(equity_curve) / equity_curve[:-1]
+    returns = np.clip(returns, -0.999, None)
+    log_returns = np.log(1.0 + returns)
     
-    # 4. Profit Factor 가산 보너스 (가산형 전환, 음수 구간 변별력 확보)
-    pf_bonus: float = float(np.tanh(2.0 * (pf - 1.0))) * 0.1
-
-    final_score: float = base_score + pf_bonus
+    downside_returns = log_returns[log_returns < 0]
     
-    return float(final_score), ret_pct, mdd_abs
+    if len(downside_returns) == 0:
+        return 999.0 if annualized_return > 0 else 0.0
+        
+    bars_per_day = len(log_returns) / span_days
+    bars_per_year = bars_per_day * 365.0
+    
+    downside_dev = np.sqrt(np.mean(downside_returns**2)) * np.sqrt(bars_per_year)
+    
+    if downside_dev == 0:
+        return 999.0 if annualized_return > 0 else 0.0
+        
+    return float(annualized_return / downside_dev)
