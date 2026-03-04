@@ -36,8 +36,8 @@ class BacktestEngineFast:
         self._warmup_bars_override = warmup_bars
 
         # injected by optimization script
-        self.leverage = 1
-        self.risk_per_trade = 0.02
+        self.leverage = self.strategy.params.get("LEVERAGE", 1)
+        self.risk_per_trade = self.strategy.params.get("RISK_PER_TRADE", 0.02)
         self.funding_events_per_bar = 1  # 1 for 4h/hourly; 3 for 1d (UTC 00, 08, 16 per day)
 
         self.fee_rate = TRADING_FEE_RATE
@@ -52,8 +52,7 @@ class BacktestEngineFast:
 
     # Columns from strategy.generate_signals() actually consumed by run() / backtest_loop_numba (V2).
     _REQUIRED_INDICATOR_COLS: frozenset = frozenset({
-        "entry_upper", "entry_lower", "trend_direction", "strength_filter",
-        "volume_ratio", "atr", "parabolic_sar", "rsi", "rsi_entry", "risk_scalar", "exit_scalar",
+        "entry_upper", "entry_lower", "trend_direction", "strength_filter", "atr"
     })
 
     def _prepare_data(self) -> None:
@@ -70,11 +69,14 @@ class BacktestEngineFast:
             if c not in exclude_cols and c in self._REQUIRED_INDICATOR_COLS
         ]
 
-        shifted_signals = signal_df[indicator_cols].shift(1)
+        # Signals from generate_signals() are already computed on the correct bar index.
+        # A second shift(1) here was causing: (1) NaN on the first bar of every sliced fold,
+        # (2) 1-bar latency on all entries, (3) catastrophic -100% on short OOS windows
+        # where entry_lower (float_max) became NaN after shift and bypassed NaN guard.
         self.merged_df = self.hourly_df.copy(deep=False)
 
         for col in indicator_cols:
-            self.merged_df[f"daily_{col}"] = shifted_signals[col]
+            self.merged_df[f"daily_{col}"] = signal_df[col].values
     
     def run(self):
         self.logger.debug(f"Running FAST backtest for {self.strategy.name}...")
@@ -105,33 +107,12 @@ class BacktestEngineFast:
         # Strength filter
         strength_filter = df['daily_strength_filter'].values
         
-        # Volume Filter (Ratio)
-        volume_ratio = df['daily_volume_ratio'].values
-        
         # ATR for risk
         atr = df['daily_atr'].values
         
         # Strategy params
-        exit_type_str = self.strategy.params.get('EXIT_TYPE', 'ATR')  # 'ATR', 'PARABOLIC_SAR'
-        exit_type = 1 if exit_type_str == 'PARABOLIC_SAR' else 0  # 0: ATR, 1: SAR
-        
-        stop_loss_type = 1 if self.strategy.params.get('STOP_LOSS_TYPE', 'FIXED') == 'ATR' else 0 # 0: FIXED, 1: ATR
-        stop_loss_pct = self.strategy.params.get('STOP_LOSS_PCT', 0.03)
-        atr_sl_mult = self.strategy.params.get('ATR_STOP_LOSS_MULT', 1.5)
-        
         atr_mult = self.strategy.params.get('ATR_MULTIPLIER', 3.0) # For Trailing Stop
         leverage = self.leverage
-        
-        # New Params for Volume & TP
-        use_volume_filter = self.strategy.params.get('USE_VOLUME_FILTER', False)
-        vol_threshold = self.strategy.params.get('VOLUME_Z_THRESHOLD', self.strategy.params.get('VOLUME_THRESHOLD_MULT', 1.0))
-        
-        use_take_profit = self.strategy.params.get('USE_TAKE_PROFIT', False)
-        # Use Futures specific TP if available
-        tp_atr_mult = self.strategy.params.get('TAKE_PROFIT_ATR_MULT_FUTURES', self.strategy.params.get('TAKE_PROFIT_ATR_MULT', 3.0))
-        
-        # Parabolic SAR (optional exit signal)
-        parabolic_sar = df['daily_parabolic_sar'].values
         
         # Extract timestamps for funding fee calculation
         timestamps = df["timestamp"].values  # milliseconds
@@ -164,28 +145,7 @@ class BacktestEngineFast:
             )
         self._warmup_bars = warmup_bars  # for get_results() MDD exclusion
 
-        # [NEW] RSI for Panic Exit
-        # Use existing rsi if available, else fill 50
-        if 'daily_rsi' in df.columns:
-            rsi = df['daily_rsi'].values
-        else:
-            rsi = np.full(n, 50.0)
-            
-        # Long/short independent; fallback to legacy RSI_EXIT_THRESHOLD (long=K, short=100-K)
-        _legacy = self.strategy.params.get("RSI_EXIT_THRESHOLD", 80.0)
-        rsi_long_exit = self.strategy.params.get("RSI_LONG_EXIT_THRESHOLD", _legacy)
-        rsi_short_exit = self.strategy.params.get("RSI_SHORT_EXIT_THRESHOLD", 100.0 - _legacy)
-        
-        if "daily_risk_scalar" in df.columns:
-            risk_scalar = df["daily_risk_scalar"].values
-        else:
-            risk_scalar = np.full(n, 1.0)
-            
-        if "daily_exit_scalar" in df.columns:
-            exit_scalar = df["daily_exit_scalar"].values
-        else:
-            exit_scalar = np.full(n, 1.0)
-        
+
         # [OPTIMIZATION] Extract timestamps for fast lookup (avoid iloc)
         datetime_values = df['datetime'].values
         
@@ -193,39 +153,31 @@ class BacktestEngineFast:
         use_compounding = self.strategy.params.get('USE_COMPOUNDING', True)
         max_capital_usage = self.strategy.params.get('MAX_CAPITAL_USAGE', 1e12) # Default to infinity for pure math
         
-        # [NEW] RSI Entry Filter
-        use_rsi_entry_filter = self.strategy.params.get('USE_RSI_ENTRY_FILTER', False)
-        rsi_entry_threshold = self.strategy.params.get('RSI_ENTRY_THRESHOLD', 30)
-        
-        if 'daily_rsi_entry' in df.columns:
-            rsi_entry = df['daily_rsi_entry'].values
-        else:
-            rsi_entry = np.full(n, 50.0)
-        
-        # Run Numba-accelerated loop
+        # [NEW] Kelly Parameters (from opt_params or default)
+        kelly_p = float(self.strategy.params.get('KELLY_P', 0.5))
+        kelly_b = float(self.strategy.params.get('KELLY_B', 1.0))
+        kelly_kappa = float(self.strategy.params.get('KELLY_KAPPA', 0.3))
+
         trades, final_balance, equity_curve = backtest_loop_numba(
-            close, high, low, open_prices, volume_ratio,
+            close, high, low, open_prices,
             entry_upper, entry_lower,
-            trend_dir, strength_filter, atr, parabolic_sar, rsi,
-            risk_scalar, exit_scalar,
+            trend_dir, strength_filter, atr,
             self.initial_balance,
             leverage,
             self.fee_rate,
             self.slippage_rate,
-            exit_type, stop_loss_type, stop_loss_pct, atr_sl_mult,
             atr_mult,
             self.risk_per_trade,
-            use_volume_filter, vol_threshold,
-            use_take_profit, tp_atr_mult,
             timestamps, funding_rates,
             max_holding_bars, trailing_activation_atr, time_exit_profit_threshold,
             enable_trend_exit,
-            rsi_long_exit, rsi_short_exit,
-            use_rsi_entry_filter, rsi_entry_threshold, rsi_entry, # [NEW]
             warmup_bars,
-            use_compounding,    # [NEW]
-            max_capital_usage,  # [NEW]
+            use_compounding,
+            max_capital_usage,
             self.funding_events_per_bar,
+            kelly_p,
+            kelly_b,
+            kelly_kappa,
         )
         
         self.balance = final_balance
@@ -267,7 +219,8 @@ class BacktestEngineFast:
                 'total_return_pct': 0,
                 'final_balance': self.initial_balance,
                 'mdd_pct': 0,
-                'trades_df': pd.DataFrame()
+                'trades_df': pd.DataFrame(),
+                'equity_curve': np.array([]),
             }
 
         total_return = self.balance - self.initial_balance
@@ -282,7 +235,8 @@ class BacktestEngineFast:
                 'total_return_pct': 0,
                 'final_balance': self.initial_balance,
                 'mdd_pct': 0,
-                'trades_df': pd.DataFrame()
+                'trades_df': pd.DataFrame(),
+                'equity_curve': np.array([]),
             }
 
         # Extract columns once as numpy arrays (avoid repeated DataFrame access)
@@ -295,6 +249,7 @@ class BacktestEngineFast:
         # MDD from bar-level equity (includes unrealized P&L during open positions)
         equity = getattr(self, "_equity_curve", None)
         warmup_bars = getattr(self, "_warmup_bars", 0)
+        equity_for_mdd: np.ndarray = np.array([])
         if equity is not None and len(equity) > 0 and np.isfinite(equity).all():
             if len(equity) > warmup_bars:
                 equity_for_mdd = equity[warmup_bars:]
@@ -307,6 +262,7 @@ class BacktestEngineFast:
             mdd = float(drawdown.min())
         else:
             # Fallback: trade-level cumulative (numpy only)
+            equity_for_mdd = np.array([])
             cumulative = np.empty(n_trades + 1, dtype=np.float64)
             cumulative[0] = self.initial_balance
             np.cumsum(pnl_arr, out=cumulative[1:])
@@ -357,32 +313,30 @@ class BacktestEngineFast:
             'total_return_pct': total_return_pct,
             'final_balance': self.balance,
             'mdd_pct': mdd,
-            'trades_df': trades_df
+            'trades_df': trades_df,
+            'equity_curve': equity_for_mdd,
         }
 
 
 
 @njit(nogil=True, cache=True)
 def backtest_loop_numba(
-    close, high, low, open_prices, volume_ratio,
+    close, high, low, open_prices,
     entry_upper, entry_lower,
-    trend_dir, strength_filter, atr, parabolic_sar, rsi, # [NEW]
-    risk_scalar, exit_scalar, # [NEW] ER-based Position Sizing & Exit Scalars
+    trend_dir, strength_filter, atr,
     initial_balance, leverage, fee_rate, slippage_rate,
-    exit_type, stop_loss_type, stop_loss_pct, atr_sl_mult,
     atr_mult,
     risk_per_trade,
-    use_volume_filter, vol_threshold,
-    use_take_profit, tp_atr_mult,
     timestamps, funding_rates,
     max_holding_bars, trailing_activation_atr, time_exit_profit_threshold,
     enable_trend_exit,
-    rsi_long_exit, rsi_short_exit,
-    use_rsi_entry_filter, rsi_entry_threshold, rsi_entry, # [NEW]
     warmup_bars,  # [WARMUP] Number of bars to skip at start for indicator warmup
     use_compounding,   # [NEW] Bool
     max_capital_usage,  # [NEW] Float
     funding_events_per_bar,  # 1 for 4h/hourly; 3 for 1d (UTC 00, 08, 16 per bar)
+    kelly_p,  # [NEW] Float (Win rate)
+    kelly_b,  # [NEW] Float (Payoff ratio)
+    kelly_kappa,  # [NEW] Float (Min Kelly fraction during DD)
 ):
     """
     Numba JIT-compiled backtest loop for Futures (Long/Short).
@@ -396,6 +350,7 @@ def backtest_loop_numba(
     """
     n = len(close)
     balance = initial_balance
+    peak_equity = initial_balance
     equity_curve = np.zeros(n)
 
     # Position state
@@ -410,8 +365,7 @@ def backtest_loop_numba(
     highest = 0.0
     lowest = 0.0
     pos_atr = 0.0
-    stop_price = 0.0 # Initial Stop Loss
-    tp_price = 0.0 
+    stop_price = 0.0 # Initial Stop Loss 
     
     # Funding Fee Tracking (UTC-based: 00:00, 08:00, 16:00)
     last_funding_hour = -1
@@ -482,26 +436,24 @@ def backtest_loop_numba(
             
             # [SEQ-1] Update High/Low & Trailing Stop in real time (exit_triggered-agnostic)
             # [INSTITUTIONAL] Dynamic Trailing Activation: Lower hurdle in chop, higher in trends.
-            dynamic_trailing_act = trailing_activation_atr * exit_scalar[i]
+            dynamic_trailing_act = trailing_activation_atr
             
             if pos_side == 1:
                 if c_high > highest:
                     highest = c_high
-                if exit_type == 0:
-                    unreal_profit = (highest - entry_price) / pos_atr if pos_atr > 0 else 0
-                    if unreal_profit >= dynamic_trailing_act:
-                        new_stop = max(highest - (pos_atr * atr_mult), entry_price * 0.01)
-                        if new_stop > stop_price:
-                            stop_price = new_stop
+                unreal_profit = (highest - entry_price) / pos_atr if pos_atr > 0 else 0
+                if unreal_profit >= dynamic_trailing_act:
+                    new_stop = max(highest - (pos_atr * atr_mult), entry_price * 0.01)
+                    if new_stop > stop_price:
+                        stop_price = new_stop
             else:
                 if c_low < lowest:
                     lowest = c_low
-                if exit_type == 0:
-                    unreal_profit = (entry_price - lowest) / pos_atr if pos_atr > 0 else 0
-                    if unreal_profit >= dynamic_trailing_act:
-                        new_stop = min(lowest + (pos_atr * atr_mult), entry_price * 1.99)
-                        if new_stop < stop_price:
-                            stop_price = new_stop
+                unreal_profit = (entry_price - lowest) / pos_atr if pos_atr > 0 else 0
+                if unreal_profit >= dynamic_trailing_act:
+                    new_stop = min(lowest + (pos_atr * atr_mult), entry_price * 1.99)
+                    if new_stop < stop_price:
+                        stop_price = new_stop
             
             # B. Exit Checks (use start_of_bar_stop so same-bar exit does not use same-bar-updated stop)
             exit_triggered = False
@@ -509,13 +461,6 @@ def backtest_loop_numba(
             
             # [SEQ-2] Stop Loss (Gap-Adjusted Realism)
             current_stop = start_of_bar_stop
-            # SAR valid only when on correct side of price (bullish: SAR below price; bearish: SAR above)
-            if exit_type == 1 and parabolic_sar[i] > 0:
-                if pos_side == 1 and parabolic_sar[i] < c_open:
-                    current_stop = max(start_of_bar_stop, parabolic_sar[i])
-                elif pos_side == -1 and parabolic_sar[i] > c_open:
-                    current_stop = min(start_of_bar_stop, parabolic_sar[i])
-                # else: wrong side → keep ATR stop only
 
             if pos_side == 1:  # Long exit
                 if c_open < current_stop:
@@ -535,24 +480,6 @@ def backtest_loop_numba(
                     exit_price = current_stop * (1 + slippage_rate)
                     exit_triggered = True
 
-            # [SEQ-3] Take Profit (Gap-Adjusted)
-            if not exit_triggered and use_take_profit and tp_price > 0:
-                if pos_side == 1:
-                    if c_open > tp_price:
-                        # Gap up through TP: fill at open (favorable; slippage would wrongly worsen it)
-                        exit_price = c_open
-                        exit_triggered = True
-                    elif c_high >= tp_price:
-                        exit_price = tp_price
-                        exit_triggered = True
-                else:
-                    if c_open < tp_price:
-                        # Gap down through TP: fill at open (favorable for short; slippage would wrongly worsen it)
-                        exit_price = c_open
-                        exit_triggered = True
-                    elif c_low <= tp_price:
-                        exit_price = tp_price
-                        exit_triggered = True
 
             # [SEQ-4] Conditional Market Exits
             if not exit_triggered:
@@ -573,34 +500,15 @@ def backtest_loop_numba(
                         else:
                             exit_price *= (1 + slippage_rate)
                         exit_triggered = True
-                
-                # RSI Panic (rsi[i] is shift(1) daily → prior day; no future reference)
-                if not exit_triggered:
-                    if pos_side == 1 and rsi[i] > rsi_long_exit:
+                # Trend Reversal & Neutralization Exit (Edge loss exit)
+                if not exit_triggered and enable_trend_exit:
+                    prev_i = i - 1 if i > 0 else 0
+                    if pos_side == 1 and trend_dir[prev_i] <= 0:  # Trend inverted or neutral
                         exit_price = c_open * (1 - slippage_rate)
                         exit_triggered = True
-                    elif pos_side == -1 and rsi[i] < rsi_short_exit:
+                    elif pos_side == -1 and trend_dir[prev_i] >= 0: # Trend inverted or neutral
                         exit_price = c_open * (1 + slippage_rate)
                         exit_triggered = True
-                
-                # Trend Reversal (optional to avoid over-filtered early exits)
-                if not exit_triggered and enable_trend_exit:
-                    # [FIX] Evaluate unrealized PnL at open; exit is at open → no look-ahead
-                    unrealized_atr = 0.0
-                    if pos_atr > 0:
-                        if pos_side == 1:
-                            unrealized_atr = (c_open - entry_price) / pos_atr
-                        else:
-                            unrealized_atr = (entry_price - c_open) / pos_atr
-                    if pos_side == 1 and trend_dir[i] == -1:
-                        # Ignore reversal exits on strong trend winners.
-                        if unrealized_atr < 1.0:
-                            exit_price = c_open * (1 - slippage_rate)
-                            exit_triggered = True
-                    elif pos_side == -1 and trend_dir[i] == 1:
-                        if unrealized_atr < 1.0:
-                            exit_price = c_open * (1 + slippage_rate)
-                            exit_triggered = True
 
             if exit_triggered:
                 # PnL Calc with Slippage
@@ -625,76 +533,50 @@ def backtest_loop_numba(
         # --- 2. ENTRY: Intra-bar breakout (simulation premise: bar i high/low known at bar i) ---
         # Only check entry when no position AND this bar did not just exit (Zombie fix)
         elif not in_position and not bar_processed:
-            if np.isnan(entry_upper[i]) or np.isnan(entry_lower[i]):
+            prev_i = i - 1 if i > 0 else 0
+            if np.isnan(entry_upper[prev_i]) or np.isnan(entry_lower[prev_i]):
                 equity_curve[i] = balance
                 continue
-            if strength_filter[i] == 0 or np.isnan(strength_filter[i]):
-                equity_curve[i] = balance
-                continue
-            vol_pass = True
-            if use_volume_filter and volume_ratio[i] < vol_threshold:
-                vol_pass = False
-            if not vol_pass:
+            if strength_filter[prev_i] == 0 or np.isnan(strength_filter[prev_i]):
                 equity_curve[i] = balance
                 continue
 
-            # [NEW] Pure Mathematical Position Sizing (Kelly / ER Based)
-            # Replaced volatility scaler with pure Efficiency Ratio risk scaling.
-            # Chop = 10% Risk. Pure Trend = 100% Risk.
-            exec_risk = risk_per_trade * risk_scalar[i]
+            # [NEW] Fixed Fractional Risk (1% Rule) - Removed Lookahead Kelly Compounding
+            exec_risk = risk_per_trade
 
             do_entry = False
             fill_price = 0.0
             # Breakout: use bar i high/low (intra-bar premise); fill at first touch (open or level)
-            if c_high > entry_upper[i] and trend_dir[i] == 1:
-                fill_price = max(c_open, entry_upper[i]) * (1 + slippage_rate)
+            if c_high > entry_upper[prev_i] and trend_dir[prev_i] == 1:
+                fill_price = max(c_open, entry_upper[prev_i]) * (1 + slippage_rate)
                 pending_side = 1
                 do_entry = True
-            elif c_low < entry_lower[i] and trend_dir[i] == -1:
-                fill_price = min(c_open, entry_lower[i]) * (1 - slippage_rate)
+            elif c_low < entry_lower[prev_i] and trend_dir[prev_i] == -1:
+                fill_price = min(c_open, entry_lower[prev_i]) * (1 - slippage_rate)
                 pending_side = -1
                 do_entry = True
 
-            if use_rsi_entry_filter and do_entry:
-                if pending_side == 1 and rsi_entry[i] >= rsi_entry_threshold:
-                    do_entry = False
-                elif pending_side == -1 and rsi_entry[i] <= (100 - rsi_entry_threshold):
-                    do_entry = False
-
-            if do_entry:
-                # Use atr[i]: daily_atr is already shift(1) in _prepare_data (prior day). No extra i-1.
-                current_atr = atr[i]
+            if do_entry and exec_risk > 0.0:
+                # Use atr[prev_i] safely
+                current_atr = atr[prev_i]
                 if np.isnan(current_atr) or current_atr <= 0.0:
-                    current_atr = atr[i - 1] if i > 0 else 0.0
+                    current_atr = atr[prev_i - 1] if prev_i > 0 else 0.0
                 if np.isnan(current_atr) or current_atr <= 0.0:
                     current_atr = 0.0
-                # ATR-based stop with zero ATR would set stop_price=entry_price → instant SL; skip entry
-                if stop_loss_type == 1 and current_atr <= 0.0:
+                if current_atr <= 0.0:
                     equity_curve[i] = balance
                     continue
-                if stop_loss_type == 1:
-                    if pending_side == 1:
-                        # Floor at 1% of fill_price so stop_price is never negative (SL stays enforceable)
-                        stop_price = max(fill_price - (current_atr * atr_sl_mult), fill_price * 0.01)
-                    else:
-                        # Cap at 199% of fill_price so short stop remains finite and enforceable
-                        stop_price = min(fill_price + (current_atr * atr_sl_mult), fill_price * 1.99)
-                else:
-                    if pending_side == 1:
-                        stop_price = fill_price * (1 - stop_loss_pct)
-                    else:
-                        stop_price = fill_price * (1 + stop_loss_pct)
-                tp_price = 0.0
-                if use_take_profit:
-                    # [INSTITUTIONAL] Dynamic TP Scaling: Lower TP in chop, full TP in trends.
-                    dynamic_tp_mult = tp_atr_mult * exit_scalar[i]
-                    if pending_side == 1:
-                        tp_price = fill_price + (current_atr * dynamic_tp_mult)
-                    else:
-                        tp_price = fill_price - (current_atr * dynamic_tp_mult)
-                stop_distance = abs(fill_price - stop_price)
+                
                 if fill_price <= 0.0:
                     fill_price = 1e-9
+                
+                # ATR-based Initial Stop Loss
+                if pending_side == 1:
+                    stop_price = max(fill_price - (current_atr * atr_mult), fill_price * 0.01)
+                else:
+                    stop_price = min(fill_price + (current_atr * atr_mult), fill_price * 1.99)
+                
+                stop_distance = abs(fill_price - stop_price)
                 if use_compounding:
                     current_equity = max_capital_usage if balance > max_capital_usage else balance
                 else:
@@ -730,13 +612,7 @@ def backtest_loop_numba(
             elif pos_side == -1 and c_high >= stop_price:
                 intra_exit_price = stop_price * (1 + slippage_rate)
                 intra_exit_triggered = True
-            elif use_take_profit and tp_price > 0:
-                if pos_side == 1 and c_high >= tp_price:
-                    intra_exit_price = tp_price
-                    intra_exit_triggered = True
-                elif pos_side == -1 and c_low <= tp_price:
-                    intra_exit_price = tp_price
-                    intra_exit_triggered = True
+
             if intra_exit_triggered:
                 if pos_side == 1:
                     pnl = (intra_exit_price - entry_price) * amount
@@ -761,6 +637,9 @@ def backtest_loop_numba(
             equity_curve[i] = balance + margin + unrealized
         else:
             equity_curve[i] = balance
+            
+        if equity_curve[i] > peak_equity:
+            peak_equity = equity_curve[i]
 
     # --- 4. END-OF-DATA FORCED LIQUIDATION ---
     # Realize remaining position at the final bar close to avoid hidden unrealized PnL.

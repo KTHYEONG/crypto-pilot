@@ -88,11 +88,10 @@ _FUTURES_INDICATORS = SimpleNamespace(
 
 class UltimateStrategy(UltimateStrategyBase):
     """
-    The Ultimate Strategy: Dynamic combinations of all major indicators.
-    Futures profile: non-shift entry bands + always-on ATR baseline.
+    Pure TSMOM Trend-Following Strategy for Futures.
+    Uses ATR Chandelier trailing exit.
+    ENTRY_SHIFT=True: signal at index i uses close[i-1] → engine enters at bar i open. No lookahead.
     """
 
     INDICATORS = _FUTURES_INDICATORS
     ENTRY_SHIFT = False
-    ATR_ALWAYS_ON = True
-    RSI_OVERBOUGHT_KEYS = ("RSI_OVERBOUGHT_FUTURES", "RSI_OVERBOUGHT")
