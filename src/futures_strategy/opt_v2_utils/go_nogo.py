@@ -32,11 +32,11 @@ def run_go_nogo_check(
     cv_mean: float = float(np.mean(cv_fold_scores)) if cv_fold_scores else 0.0
     cv_min: float = float(np.min(cv_fold_scores)) if cv_fold_scores else -100.0
 
-    # 1. 최악의 구간 방어력 (CV Min RoMaD > -0.3)
-    cv_min_pass: bool = cv_min > -0.3
+    # 1. 최악의 구간 방어력 (CV Min Hybrid Score > 0.0)
+    cv_min_pass: bool = cv_min > 0.0
     
-    # 2. 성장 엔진 확보 (CV Mean >= 0.0)
-    cv_growth_pass: bool = cv_mean >= 0.0
+    # 2. 성장 엔진 확보 (CV Mean >= 5.0)
+    cv_growth_pass: bool = cv_mean >= 5.0
     
     # 5. Volatility Drag Control (Max MDD <= 20.0%)
     mdd_pass: bool = abs(max_mdd_pct) <= 20.0
@@ -61,8 +61,8 @@ def run_go_nogo_check(
     trades_pass: bool = total_trades >= min_trades_req
 
     details: Dict[str, bool] = {
-        "1. Robustness (CV Min > -0.3)": cv_min_pass,
-        "2. Growth Engine (CV Mean >= 0.0)": cv_growth_pass,
+        "1. Robustness (CV Min > 0.0)": cv_min_pass,
+        "2. Growth Engine (CV Mean >= 5.0)": cv_growth_pass,
         f"3. PBO Control ({ho_str})": ho_deg_pass,
         f"4. Target FW-Test ({oos_str})": all_oos_pass,
         "5. Vol Drag (Max MDD <= 20%)": mdd_pass,
@@ -75,8 +75,8 @@ def run_go_nogo_check(
     summary_lines: List[str] = ["[Elite 1% Go/No-Go Checklist]"]
     
     metric_values: Dict[str, str] = {
-        "1. Robustness (CV Min > -0.3)": f"Min: {cv_min:.3f}",
-        "2. Growth Engine (CV Mean >= 0.0)": f"Mean: {cv_mean:.3f}",
+        "1. Robustness (CV Min > 0.0)": f"Min: {cv_min:.3f}",
+        "2. Growth Engine (CV Mean >= 5.0)": f"Mean: {cv_mean:.3f}",
         f"3. PBO Control ({ho_str})": f"HO: {holdout_score:.3f}",
         f"4. Target FW-Test ({oos_str})": "PASS" if all_oos_pass else "FAIL",
         "5. Vol Drag (Max MDD <= 20%)": f"MDD: {abs(max_mdd_pct):.2f}%",
