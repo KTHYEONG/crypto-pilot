@@ -14,6 +14,7 @@ calculate_dema = _ENGINE.calculate_dema
 calculate_tema = _ENGINE.calculate_tema
 calculate_atr = _ENGINE.calculate_atr
 calculate_bollinger_bands = _ENGINE.calculate_bollinger_bands
+calculate_keltner_channels = _ENGINE.calculate_keltner_channels
 calculate_keltner_channel = _ENGINE.calculate_keltner_channel
 calculate_supertrend = _ENGINE.calculate_supertrend
 calculate_vhf = _ENGINE.calculate_vhf
