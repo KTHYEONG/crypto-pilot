@@ -5,8 +5,99 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+from numba import njit
 
 from .core import StrategyBase
+
+
+@njit(cache=True)
+def _rolling_last_rank_numba(values: np.ndarray, window: int) -> np.ndarray:
+    out = np.empty(values.shape[0], dtype=np.float64)
+    out[:] = np.nan
+    if window <= 0:
+        return out
+    for i in range(window - 1, values.shape[0]):
+        last_val = values[i]
+        if np.isnan(last_val):
+            continue
+        count = 0
+        valid = 0
+        start = i - window + 1
+        for j in range(start, i + 1):
+            v = values[j]
+            if np.isnan(v):
+                continue
+            valid += 1
+            if last_val >= v:
+                count += 1
+        if valid > 0:
+            out[i] = count / valid
+    return out
+
+
+@njit(cache=True)
+def _rolling_r2_numba(values: np.ndarray, window: int) -> np.ndarray:
+    out = np.empty(values.shape[0], dtype=np.float64)
+    out[:] = np.nan
+    if window < 5: return out
+    
+    x = np.arange(window, dtype=np.float64)
+    x_mean = (window - 1) / 2.0
+    ss_xx = np.sum((x - x_mean)**2)
+    
+    for i in range(window - 1, values.shape[0]):
+        y = values[i - window + 1 : i + 1]
+        if np.isnan(y).any(): continue
+        
+        y_mean = np.mean(y)
+        ss_yy = np.sum((y - y_mean)**2)
+        if ss_yy <= 0:
+            out[i] = 0.0
+            continue
+            
+        ss_xy = np.sum((x - x_mean) * (y - y_mean))
+        r2 = (ss_xy**2) / (ss_xx * ss_yy)
+        out[i] = r2
+    return out
+
+
+@njit(cache=True)
+def _rolling_t_stat_numba(values: np.ndarray, window: int) -> np.ndarray:
+    out = np.empty(values.shape[0], dtype=np.float64)
+    out[:] = np.nan
+    if window < 3:
+        return out
+
+    x_sum = window * (window - 1) / 2.0
+    sxx = window * (window**2 - 1) / 12.0
+    sqrt_term = np.sqrt(window - 2.0)
+
+    for i in range(window - 1, values.shape[0]):
+        sum_y = 0.0
+        sum_y2 = 0.0
+        sum_xy = 0.0
+        start = i - window + 1
+        valid = True
+        for k in range(window):
+            y = values[start + k]
+            if np.isnan(y):
+                valid = False
+                break
+            sum_y += y
+            sum_y2 += y * y
+            sum_xy += k * y
+        if not valid:
+            continue
+
+        sxy = sum_xy - (x_sum * sum_y) / window
+        syy = sum_y2 - (sum_y * sum_y) / window
+        denom = sxx * syy - (sxy * sxy)
+        if syy == 0.0 or denom <= 0.0:
+            out[i] = 0.0
+        else:
+            out[i] = sxy * sqrt_term / np.sqrt(denom)
+
+    return out
 
 
 class UltimateStrategyBase(StrategyBase):
@@ -27,118 +118,72 @@ class UltimateStrategyBase(StrategyBase):
         return series.shift(1) if self.ENTRY_SHIFT else series
 
     def generate_signals(self, df: pd.DataFrame) -> pd.DataFrame:
+        # [ROBUSTNESS] Ensure all price columns are float64 for TA-Lib compatibility
+        for col in ["open", "high", "low", "close", "volume"]:
+            if col in df.columns:
+                df[col] = df[col].astype(np.float64)
+                
         ind = self._ind()
         
-        # Ensure parameters
-        atr_window = int(self.params.get("ATR_WINDOW", 14))
-        weight_decay = float(self.params.get("TSMOM_WEIGHT_DECAY", 0.0))
-        entry_threshold = float(self.params.get("TSMOM_ENTRY_THRESHOLD", 1.5))
+        # --- 1. RSM-VT Parameters ---
+        # 4h parameters directly mapped
+        macro_ema_period = int(self.params.get("MACRO_EMA_PERIOD", 200))
+        momentum_period = int(self.params.get("MOMENTUM_PERIOD", 20))
+        kc_mult = float(self.params.get("KC_MULT", 1.5))
+        atr_period = int(self.params.get("ATR_PERIOD", 20))
         
-        # Epsilon guard for zero-division avoidance
-        EPS = 1e-8
-
-        # --- 1. Baseline Indicators ---
-        df["atr"] = ind.calculate_atr(df, window=atr_window)
-        # Engine expects 'atr' for its trailing exit logic.
+        # --- 2. Core Indicators Calculation ---
+        df["atr"] = ind.calculate_atr(df, window=atr_period)
         
-        # --- 1.2 Volatility Regime Filter ---
-        # [INSTITUTIONAL] Prevent entries during low-volatility regimes where signals are noisy.
-        # Use ATR percentile to define regime: ignore signals if ATR < 20th percentile.
-        prc_window = int(self.params.get("ATR_PRC_WINDOW", 250))
-        # Percentile calculation
-        def calc_rank(x):
-            return (x[-1] >= x).mean()
-        atr_rank = df["atr"].rolling(prc_window).apply(calc_rank, raw=True)
-        vol_regime_mask = atr_rank > 0.20 # Ignore if in bottom 20% vol
+        # Macro Trend
+        df["macro_ema"] = ind.calculate_ema(df["close"], window=macro_ema_period)
         
-        # Stationary 1-bar log return
-        r1 = np.log(df["close"] / df["close"].shift(1))
+        # Bollinger Bands (20, 2.0)
+        df["bb_mid"] = ind.calculate_sma(df["close"], window=20)
+        std_dev = df["close"].rolling(window=20).std()
+        df["bb_upper"] = df["bb_mid"] + (std_dev * 2.0)
+        df["bb_lower"] = df["bb_mid"] - (std_dev * 2.0)
         
-        # Multi-Timeframe TSMOM Calc (1H Crypto Native Cycles)
-        lookbacks = [12, 24, 72, 168]
-        weights = [1.0 / (lb ** weight_decay) for lb in lookbacks]
-        tot_w = sum(weights)
-        w_norm = [w / tot_w for w in weights]
+        # Keltner Channels (20, KC_MULT)
+        df["kc_mid"] = ind.calculate_ema(df["close"], window=20)
+        df["kc_upper"] = df["kc_mid"] + (df["atr"] * kc_mult)
+        df["kc_lower"] = df["kc_mid"] - (df["atr"] * kc_mult)
         
-        total_tsmom_z = pd.Series(0.0, index=df.index)
+        # Squeeze Condition: BB is entirely inside KC
+        df["is_squeezing"] = (df["bb_upper"] < df["kc_upper"]) & (df["bb_lower"] > df["kc_lower"])
+        # Has it squeezed recently? (In the last 5 bars)
+        df["recent_squeeze"] = df["is_squeezing"].rolling(window=5).sum() > 0
         
-        for w, n in zip(w_norm, lookbacks):
-            rn = np.log(df["close"] / df["close"].shift(n))
-            sigma_n = r1.rolling(n).std() * np.sqrt(n)
-            tsmom_n = rn / (sigma_n + EPS)
-            total_tsmom_z += w * tsmom_n
-            
-        # Total alpha (Re-standardize to restore N(0,1) variance lost by weighted sum)
-        total_tsmom_z = total_tsmom_z.fillna(0.0)
-        roll_std = total_tsmom_z.rolling(window=lookbacks[-1], min_periods=max(100, lookbacks[0])).std()
-        total_tsmom_z = total_tsmom_z / (roll_std + EPS)
-        total_tsmom_z = total_tsmom_z.fillna(0.0)
-
-        # --- 2. Signal Generation ---
-        # 1H Macro Trend Filter (1W vs 3D EMA)
-        ema_fast = df["close"].ewm(span=72, min_periods=72).mean()
-        ema_slow = df["close"].ewm(span=168, min_periods=168).mean()
-        macro_bull = ema_fast > ema_slow
-        macro_bear = ema_fast < ema_slow
-
-        # Crossing Filter
-        crossed_up = (total_tsmom_z > entry_threshold) & (total_tsmom_z.shift(1) <= entry_threshold)
-        crossed_down = (total_tsmom_z < -entry_threshold) & (total_tsmom_z.shift(1) >= -entry_threshold)
+        # Volume Spike
+        df["vol_sma"] = df["volume"].rolling(window=20).mean()
+        vol_spike = df["volume"] > df["vol_sma"] * 1.2
         
-        # Velocity Filter
-        velocity_k = int(self.params.get("VELOCITY_K", 12))
-        # [REFINED] Use short-term velocity for entry gating to ensure momentum persistence at crossing.
-        dz_short = total_tsmom_z - total_tsmom_z.shift(max(velocity_k // 3, 2))
+        # Breakout Channels
+        df["dc_upper"] = df["high"].rolling(window=momentum_period).max()
+        df["dc_lower"] = df["low"].rolling(window=momentum_period).min()
         
-        # [CTA-Style] Pulse Entry: Allow re-entry during regime if momentum accelerates (dz cross-up/down)
-        in_long_regime = total_tsmom_z > entry_threshold
-        in_short_regime = total_tsmom_z < -entry_threshold
+        # --- 3. Signal Generation (Squeeze Breakout) ---
+        macro_uptrend = df["close"] > df["macro_ema"]
+        macro_downtrend = df["close"] < df["macro_ema"]
         
-        dz_crossed_up = (dz_short > 0) & (dz_short.shift(1) <= 0)
-        dz_crossed_down = (dz_short < 0) & (dz_short.shift(1) >= 0)
+        # Bull: Squeezed recently, Macro is UP, Price closes above KC Upper, Vol Spike
+        bull_breakout = df["recent_squeeze"] & macro_uptrend & (df["close"] > df["kc_upper"]) & vol_spike
         
-        # Lower velocity importance on initial breakout to ensure we catch moves early
-        long_cond = ((in_long_regime & dz_crossed_up) | crossed_up) & vol_regime_mask & macro_bull
-        short_cond = ((in_short_regime & dz_crossed_down) | crossed_down) & vol_regime_mask & macro_bear
-
-        df_len = len(df)
-        trend_state = np.zeros(df_len, dtype=int)
-        tsmom_z_vals = total_tsmom_z.values
-        long_cond_vals = long_cond.values
-        short_cond_vals = short_cond.values
+        # Bear: Squeezed recently, Macro is DOWN, Price closes below KC Lower, Vol Spike
+        bear_breakout = df["recent_squeeze"] & macro_downtrend & (df["close"] < df["kc_lower"]) & vol_spike
         
-        current_state = 0
-        for i in range(df_len):
-            if current_state == 0:
-                if long_cond_vals[i]:
-                    current_state = 1
-                elif short_cond_vals[i]:
-                    current_state = -1
-            elif current_state == 1:
-                if tsmom_z_vals[i] < 0:
-                    current_state = 0
-                if short_cond_vals[i]:
-                    current_state = -1
-            elif current_state == -1:
-                if tsmom_z_vals[i] > 0:
-                    current_state = 0
-                if long_cond_vals[i]:
-                    current_state = 1
-            trend_state[i] = current_state
-
-        df["trend_direction"] = self._shift_if_needed(pd.Series(trend_state, index=df.index))
+        # For Numba engine execution:
+        df["strength_filter"] = np.where(bull_breakout | bear_breakout, 1, 0)
+        df["trend_direction"] = np.where(bull_breakout, 1, np.where(bear_breakout, -1, 0))
         
-        # Market entry: set upper/lower to 0/inf so engine always triggers at open price.
-        df["entry_upper"] = 0.0          # LONG  fills at c_open if trend_dir == 1
-        df["entry_lower"] = np.finfo(np.float64).max  # SHORT fills at c_open if trend_dir == -1
+        # [HACK FOR ENGINE] 
+        # By setting entry_upper to 0.0 when confirmed, `c_high > 0.0` triggers Open entry.
+        df["entry_upper"] = np.where(bull_breakout, 0.0, 999999.0)
+        df["entry_lower"] = np.where(bear_breakout, 999999.0, 0.0)
         
-        # Strength filter acts as master toggle
-        df["strength_filter"] = np.where(df["trend_direction"] != 0, 1, 0)
+        # Shift so the engine reads the signal from the previous closed bar
+        df["entry_upper"] = self._shift_if_needed(df["entry_upper"])
+        df["entry_lower"] = self._shift_if_needed(df["entry_lower"])
         
-        # Cleanup
         df["atr"] = df["atr"].ffill().fillna(df["close"] * 0.01)
-        df["strength_filter"] = df["strength_filter"].fillna(0).astype(int)
-        df["trend_direction"] = df["trend_direction"].fillna(0).astype(int)
-
         return df
-
