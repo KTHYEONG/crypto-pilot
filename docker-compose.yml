@@ -10,9 +10,9 @@ services:
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs
-      # DB 파일도 호스트와 동기화하여 데이터 영속성 유지
+      - ./results:/app/results
+      # Spot도 JSON 방식을 사용한다면 아래 DB 매핑은 추후 제거 가능
       - ./spot_strategy.db:/app/spot_strategy.db
-      - ./trade_history.db:/app/trade_history.db
     command: python -u src/spot_strategy/real_trader_spot.py
     logging:
       driver: "json-file"
@@ -29,8 +29,7 @@ services:
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs
-      - ./futures_strategy.db:/app/futures_strategy.db
-      - ./trade_history.db:/app/trade_history.db
+      - ./results:/app/results
     command: python -u src/futures_strategy/real_trader_futures.py
     logging:
       driver: "json-file"
