@@ -23,6 +23,7 @@ from .indicators_advanced_futures import (
     calculate_hurst_exponent,
     calculate_ichimoku,
     calculate_keltner_channel,
+    calculate_keltner_channels,
     calculate_macd,
     calculate_mfi,
     calculate_natr,
@@ -60,6 +61,7 @@ _FUTURES_INDICATORS = SimpleNamespace(
     calculate_atr=calculate_atr,
     calculate_bollinger_bands=calculate_bollinger_bands,
     calculate_keltner_channel=calculate_keltner_channel,
+    calculate_keltner_channels=calculate_keltner_channels,
     calculate_adx=calculate_adx,
     calculate_vhf=calculate_vhf,
     calculate_parabolic_sar=calculate_parabolic_sar,
@@ -88,11 +90,10 @@ _FUTURES_INDICATORS = SimpleNamespace(
 
 class UltimateStrategy(UltimateStrategyBase):
     """
-    The Ultimate Strategy: Dynamic combinations of all major indicators.
-    Futures profile: non-shift entry bands + always-on ATR baseline.
+    Pure TSMOM Trend-Following Strategy for Futures.
+    Uses ATR Chandelier trailing exit.
+    ENTRY_SHIFT=True: signal at index i uses close[i-1] → engine enters at bar i open. No lookahead.
     """
 
     INDICATORS = _FUTURES_INDICATORS
     ENTRY_SHIFT = False
-    ATR_ALWAYS_ON = True
-    RSI_OVERBOUGHT_KEYS = ("RSI_OVERBOUGHT_FUTURES", "RSI_OVERBOUGHT")
