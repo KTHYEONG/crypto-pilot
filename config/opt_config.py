@@ -13,6 +13,19 @@ OPT_FUTURES_CONFIG: Dict[str, Any] = {
     "TARGET_TIMEFRAMES": ["4h"],
 }
 
+# ==============================================================================
+# OPTIMIZATION SPOT SEARCH SPACE & CONFIGURATION
+# ==============================================================================
+
+OPT_SPOT_CONFIG: Dict[str, Any] = {
+    "total_trials": 5000,
+    "n_startup_trials": 150,
+    "seeds": [42],
+    "n_jobs": 8,
+    "task_workers": 1,
+    "TARGET_TIMEFRAMES": ["4h"],
+}
+
 TARGET_TIMEFRAMES: List[str] = ["4h"]
 WARMUP_PERIODS: Dict[str, int] = {"1h": 2160, "4h": 540}  
 
@@ -43,8 +56,34 @@ SEARCH_SPACE_4H: Dict[str, Dict[str, Any]] = {
     "RISK_PER_TRADE":    {"type": "float", "low": 0.02, "high": 0.08, "step": 0.01}, 
 }
 
+SEARCH_SPACE_SPOT_4H: Dict[str, Dict[str, Any]] = {
+    # --- 1. Macro Trend & Strength Filter (이중 정배열 및 가짜 반등 방어) ---
+    "MACRO_EMA_PERIOD":  {"type": "int",   "low": 100,  "high": 300, "step": 20}, 
+    "FAST_EMA_PERIOD":   {"type": "int",   "low": 20,   "high": 80,  "step": 10},
+    "ADX_PERIOD":        {"type": "int",   "low": 7,    "high": 21,  "step": 2},
+    "ADX_THRESHOLD":     {"type": "float", "low": 15.0, "high": 35.0,"step": 2.5},
+    
+    # --- 2. Squeeze Parameters ---
+    "KC_MULT":           {"type": "float", "low": 1.5,  "high": 3.0,  "step": 0.1}, 
+    
+    # --- 3. Momentum Breakout Trigger ---
+    "MOMENTUM_PERIOD":   {"type": "int",   "low": 10,   "high": 40,  "step": 5},
+    
+    # --- 4. Exits (Long Only - 타이트한 손절, 넉넉한 익절) ---
+    "ATR_PERIOD":        {"type": "int",   "low": 10,   "high": 24,  "step": 2},
+    "LONG_ATR_MULT":     {"type": "float", "low": 1.5,  "high": 3.5,  "step": 0.5}, # 빠른 초기 손절
+    "LONG_TRAIL_MULT":   {"type": "float", "low": 2.5,  "high": 8.0,  "step": 0.5}, # 여유로운 트레일링
+    "LONG_TP_MULT":      {"type": "float", "low": 2.0,  "high": 12.0, "step": 1.0}, # 급등 시 하드 익절
+    
+    # --- 5. Portfolio Risk Sizing (현물은 비중을 크게) ---
+    "RISK_PER_TRADE":    {"type": "float", "low": 0.1,  "high": 0.6,  "step": 0.05}, 
+}
+
 def get_search_space_futures(tf: str) -> Dict[str, Dict[str, Any]]:
     return SEARCH_SPACE_4H.copy()
+
+def get_search_space_spot(tf: str) -> Dict[str, Dict[str, Any]]:
+    return SEARCH_SPACE_SPOT_4H.copy()
 
 
 def get_quarterly_window(reference_date=None) -> tuple[str, str, str, str]:
