@@ -1,10 +1,10 @@
 from typing import Any, Dict, List
 
 # ==============================================================================
-# OPTIMIZATION V2 SEARCH SPACE & CONFIGURATION
+# OPTIMIZATION FUTURES SEARCH SPACE & CONFIGURATION
 # ==============================================================================
 
-OPT_V2_CONFIG: Dict[str, Any] = {
+OPT_FUTURES_CONFIG: Dict[str, Any] = {
     "total_trials": 5000,     # [CONSISTENCY] Massive increase to ensure global optimum is found
     "n_startup_trials": 150,  # [DIVERSITY] 150 population size gives 32 generations of deep evolution
     "seeds": [42],
@@ -43,7 +43,7 @@ SEARCH_SPACE_4H: Dict[str, Dict[str, Any]] = {
     "RISK_PER_TRADE":    {"type": "float", "low": 0.02, "high": 0.08, "step": 0.01}, 
 }
 
-def get_search_space_v2(tf: str) -> Dict[str, Dict[str, Any]]:
+def get_search_space_futures(tf: str) -> Dict[str, Dict[str, Any]]:
     return SEARCH_SPACE_4H.copy()
 
 
