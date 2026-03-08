@@ -11,7 +11,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.futures_strategy.engine_fast_futures import BacktestEngineFast
-from src.futures_strategy.opt_v2_utils.evaluator import _segment_with_context
+from src.futures_strategy.opt_futures_utils.evaluator import _segment_with_context
 
 
 class _DummyStrategy:
