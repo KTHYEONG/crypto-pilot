@@ -27,8 +27,8 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 
-# 데이터베이스 파일 경로 (SQLite)
-DB_PATH = DATA_DIR / "trading_data.db"
+# 매매 기록 데이터베이스 파일 (SQLite)
+TRADE_HISTORY_DB = DATA_DIR / "trade_history.db"
 
 # Binance 설정
 BINANCE_API_KEY = os.getenv("BINANCE_API_KEY", "")
