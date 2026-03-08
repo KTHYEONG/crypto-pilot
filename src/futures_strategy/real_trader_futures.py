@@ -438,7 +438,7 @@ class RealTraderFutures:
                 logger.error(f"❌ Failed to parse JSON for {symbol}: {e}")
                 raise
                 
-            symbol_params.setdefault('INDICATOR_TIMEFRAME', '1d')
+            symbol_params.setdefault('INDICATOR_TIMEFRAME', '4h')
             self.params_map[symbol] = symbol_params
             strategy_name = f"Real_{clean_sym}"
             self.strategies[symbol] = UltimateStrategy(strategy_name, symbol_params)
@@ -845,13 +845,13 @@ class RealTraderFutures:
         if self._timeframe_to_minutes(execution_tf) <= 0:
             logger.warning(f"⚠️ Invalid execution timeframe '{execution_tf}'. Falling back to '1h'.")
             execution_tf = '1h'
-        indicator_tf = str(params.get('INDICATOR_TIMEFRAME', '1d'))
+        indicator_tf = str(params.get('INDICATOR_TIMEFRAME', '4h'))
         # Invalid indicator TF -> 1d로 동기화 (backtest parity)
         if self._timeframe_to_minutes(indicator_tf) <= 0:
             logger.warning(
                 f"⚠️ Invalid indicator timeframe '{indicator_tf}'. Falling back to '1d' for backtest parity."
             )
-            indicator_tf = '1d'
+            indicator_tf = '4h'
         return execution_tf, indicator_tf
 
     def _timeframe_to_minutes(self, timeframe: str) -> int:
