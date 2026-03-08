@@ -7,14 +7,13 @@ ENV LD_LIBRARY_PATH=/usr/lib:/usr/local/lib:$LD_LIBRARY_PATH
 
 WORKDIR /app
 
-# 1. 필수 빌드 도구 설치 (numba 설치를 위해 llvm 등 관련 도구 대비)
+# 1. Install build dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     wget \
-    python3-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# 2. TA-Lib C 라이브러리 설치
+# 2. Build & Install TA-Lib C Library
 RUN wget http://prdownloads.sourceforge.net/ta-lib/ta-lib-0.4.0-src.tar.gz && \
     tar -xzf ta-lib-0.4.0-src.tar.gz && \
     cd ta-lib && \
@@ -25,21 +24,17 @@ RUN wget http://prdownloads.sourceforge.net/ta-lib/ta-lib-0.4.0-src.tar.gz && \
     cd .. && \
     rm -rf ta-lib ta-lib-0.4.0-src.tar.gz
 
-# 3. 파이썬 패키지 설치
+# 3. Install Python Dependencies
 COPY requirements.txt .
-RUN pip install --upgrade pip setuptools wheel
+RUN pip install --upgrade pip setuptools wheel && \
+    pip install --no-cache-dir numpy && \
+    pip install --no-cache-dir TA-Lib && \
+    pip install --no-cache-dir numba && \
+    pip install --no-cache-dir -r requirements.txt
 
-# 핵심 의존성 패키지들을 명시적으로 선행 설치
-RUN pip install --no-cache-dir numpy
-RUN pip install --no-cache-dir TA-Lib
-# 추가: numba 패키지 명시적 설치
-RUN pip install --no-cache-dir numba
-
-# 나머지 패키지 설치
-RUN pip install --no-cache-dir -r requirements.txt
-
-# 4. 소스 코드 복사 및 실행 환경 설정
+# 4. Copy Project Files
 COPY . .
-RUN mkdir -p logs data
+RUN mkdir -p logs data results
 
-CMD ["python", "src/spot_strategy/real_trader_spot.py"]
+# Default CMD runs nothing to allow docker-compose to override with specific bots
+CMD ["python", "-c", "print('Please use docker-compose to start specific bots.')"]
