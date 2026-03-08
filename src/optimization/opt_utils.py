@@ -961,3 +961,19 @@ def calculate_score(ret, mdd, trades_df, mode="UNIFIED", market_type="spot", tim
     if not np.isfinite(score):
         return -10000.0
     return float(score)
+
+
+def compute_segment_merge_index(hourly_df: pd.DataFrame, daily_df: pd.DataFrame) -> np.ndarray:
+    """
+    Build merge index for a sliced segment so engine can use fast index mapping.
+    """
+    hourly_days = pd.to_datetime(hourly_df["datetime"]).dt.normalize().values.astype("datetime64[ns]")
+    daily_days = pd.to_datetime(daily_df["datetime"]).dt.normalize().values.astype("datetime64[ns]")
+    if len(daily_days) == 0:
+        return np.zeros(len(hourly_days), dtype=np.int32)
+
+    # As-of backward mapping: use the most recent available daily bar for each intraday bar.
+    # This is safer than forcing missing keys to index 0.
+    pos = np.searchsorted(daily_days, hourly_days, side="right") - 1
+    pos = np.clip(pos, 0, len(daily_days) - 1).astype(np.int32)
+    return pos
