@@ -120,13 +120,12 @@ SPOT_LOOP_INTERVAL_SECONDS = 10  # 메인 루프 간격 (10초)
 SPOT_SYMBOL_DELAY_SECONDS = 2  # 심볼 간 딜레이
 
 # --- 대상 심볼 (Upbit) ---
-# [Option A] 공용 풀(Shared Pool) 100% 자산 활용 (자산 증식형 모델)
-# OOS 성과 최상위 3종목. 빠른 자본 회전율과 백테스트(68% 룰) 완전 연동
-SPOT_TARGET_SYMBOLS = ["KRW-BTC", "KRW-DOGE", "KRW-SOL"]
+# OOS 성과 최상위 3종목 (ETH, SOL, DOGE) 압축 투자로 복리 증식 극대화
+SPOT_TARGET_SYMBOLS = ["KRW-ETH", "KRW-SOL", "KRW-DOGE"]
 
-# --- 포지션 사이징 가중치 (Option A - Spot) ---
-# 모든 코인이 전체 자금을 공유하여 기회가 올 때마다 백테스트 최적화 비중인 RISK_PER_TRADE_SPOT(약 68%)을 확보함.
-SPOT_ALLOCATION_WEIGHTS = {"KRW-BTC": 1.0, "KRW-DOGE": 1.0, "KRW-SOL": 1.0}
+# --- 포지션 사이징 가중치 (Spot) ---
+# 추천 포트폴리오 비중: ETH(40%), SOL(30%), DOGE(30%)
+SPOT_ALLOCATION_WEIGHTS = {"KRW-ETH": 0.4, "KRW-SOL": 0.3, "KRW-DOGE": 0.3}
 
 # --- Optuna Study ---
 SPOT_OPTUNA_STUDY_NAME = "spot_strategy"
