@@ -3,9 +3,10 @@
 최적화된 파라미터를 실제 트레이딩 시스템에서 사용할 수 있도록 데이터베이스를 실시간으로 동기화함.
 """
 import os
-import optuna
 import logging
-from typing import Optional
+from typing import Any, Dict, Optional
+
+import optuna
 
 _logger: logging.Logger = logging.getLogger("opt_v2")
 
@@ -171,22 +172,33 @@ def save_study_to_sqlite(
         try:
             optuna.delete_study(study_name=study_name, storage=sqlite_storage_url)
         except (KeyError, Exception):
+            # Study may not exist yet or storage may be empty; both are safe to ignore.
             pass
-            
+
         # 2. Create new local study
-        local_study: optuna.Study = optuna.create_study(
-            study_name=study_name,
-            storage=sqlite_storage_url,
-            direction=study.direction,
-            load_if_exists=False
-        )
-        
-        # 3. Add only the best trial
-        local_study.add_trial(study.best_trial)
-        
-        _logger.info("✅ SQLite persistence (Best Trial Only) complete.")
+        create_kwargs: Dict[str, Any] = {
+            "study_name": study_name,
+            "storage": sqlite_storage_url,
+            "load_if_exists": False,
+        }
+
+        directions = getattr(study, "directions", None)
+        if directions:
+            # Multi-objective (or single-objective with directions tuple)
+            create_kwargs["directions"] = list(directions)
+        else:
+            # Backward-compatible path for old single-objective studies
+            create_kwargs["direction"] = study.direction  # type: ignore[assignment]
+
+        local_study: optuna.Study = optuna.create_study(**create_kwargs)
+
+        # 3. Add trials (이미 Pareto Front로만 구성된 study가 전달됨)
+        for trial in study.trials:
+            local_study.add_trial(trial)
+
+        _logger.info("✅ SQLite persistence (%d Pareto Trials) complete.", len(study.trials))
         return True
-        
+
     except Exception as e:
-        _logger.error(f"❌ Failed to persist best trial to SQLite: {e}")
+        _logger.error("❌ Failed to persist best trial to SQLite: %s", e)
         return False

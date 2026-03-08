@@ -5,32 +5,46 @@ from typing import Any, Dict, List
 # ==============================================================================
 
 OPT_V2_CONFIG: Dict[str, Any] = {
-    "total_trials": 600,  # Total Optuna trials per timeframe (NSGA-II)
-    "n_startup_trials": 60,  # Also used as NSGA-II population size
+    "total_trials": 5000,     # [CONSISTENCY] Massive increase to ensure global optimum is found
+    "n_startup_trials": 150,  # [DIVERSITY] 150 population size gives 32 generations of deep evolution
     "seeds": [42],
-    "n_jobs": 2,
-    "TARGET_TIMEFRAMES": ["1h"],
+    "n_jobs": 8,              # [BALANCE] Reduced slightly from 10 to 8 to minimize parallel race conditions
+    "task_workers": 1,
+    "TARGET_TIMEFRAMES": ["4h"],
 }
 
-TARGET_TIMEFRAMES: List[str] = ["1h"]
-WARMUP_PERIOD: int = 2160  # 3M lookback (2160 bars for 1h)
+TARGET_TIMEFRAMES: List[str] = ["4h"]
+WARMUP_PERIODS: Dict[str, int] = {"1h": 2160, "4h": 540}  
 
-BASE_SEARCH_SPACE: Dict[str, Dict[str, Any]] = {
-    "TSMOM_ENTRY_THRESHOLD": {"type": "float", "low": 0.5,  "high": 2.0, "step": 0.1},
-    "TSMOM_WEIGHT_DECAY":    {"type": "float", "low": 0.0,  "high": 2.0, "step": 0.2},
-    "ATR_WINDOW":            {"type": "int",   "low": 12,  "high": 48,  "step": 2},
-    "ATR_MULTIPLIER":        {"type": "float", "low": 3.5, "high": 6.0, "step": 0.25},
-    "ATR_PRC_WINDOW":        {"type": "int",   "low": 100, "high": 500, "step": 50},
-    "VELOCITY_K":            {"type": "int",   "low": 6,   "high": 24,  "step": 2},
-    "RISK_PER_TRADE":        {"type": "float", "low": 0.01, "high": 0.04, "step": 0.005},
+# ==============================================================================
+# TF-SPECIFIC SEARCH SPACES
+# ==============================================================================
+
+# [INSTITUTIONAL GROWTH] TTM Squeeze + Fat-Tail Momentum
+SEARCH_SPACE_4H: Dict[str, Dict[str, Any]] = {
+    # --- 1. Macro Trend Filter ---
+    "MACRO_EMA_PERIOD":  {"type": "int",   "low": 50,   "high": 200, "step": 10}, 
+    
+    # --- 2. Squeeze Parameters (Relaxed for Opportunity) ---
+    "KC_MULT":           {"type": "float", "low": 1.5,  "high": 3.0,  "step": 0.25}, 
+    
+    # --- 3. Momentum Breakout Trigger ---
+    "MOMENTUM_PERIOD":   {"type": "int",   "low": 10,   "high": 40,  "step": 5},
+    
+    # --- 4. Exits (Asymmetric Hard Stop vs Fat-Tail Trail) ---
+    "ATR_PERIOD":        {"type": "int",   "low": 14,   "high": 24,  "step": 2},
+    "LONG_ATR_MULT":     {"type": "float", "low": 2.0,  "high": 5.0,  "step": 0.5}, # Initial Stop
+    "LONG_TRAIL_MULT":   {"type": "float", "low": 2.5,  "high": 10.0, "step": 0.5}, # Fat tail trailing
+    
+    "SHORT_ATR_MULT":    {"type": "float", "low": 2.0,  "high": 4.0,  "step": 0.5},
+    "SHORT_TP_MULT":     {"type": "float", "low": 2.0,  "high": 6.0,  "step": 0.5}, 
+    
+    # --- 5. Volatility Targeting (Compounding) ---
+    "RISK_PER_TRADE":    {"type": "float", "low": 0.02, "high": 0.08, "step": 0.01}, 
 }
-
-SEARCH_SPACE_V2: Dict[str, Dict[str, Any]] = BASE_SEARCH_SPACE.copy()
-
 
 def get_search_space_v2(tf: str) -> Dict[str, Dict[str, Any]]:
-    """Return the search space for the given timeframe. Currently 1h only."""
-    return SEARCH_SPACE_V2
+    return SEARCH_SPACE_4H.copy()
 
 
 def get_quarterly_window(reference_date=None) -> tuple[str, str, str, str]:
