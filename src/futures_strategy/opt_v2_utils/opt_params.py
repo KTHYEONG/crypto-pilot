@@ -4,7 +4,7 @@ from typing import Dict, Any
 
 def suggest_params_v2(trial: optuna.Trial, space: Dict[str, Any], tf: str) -> Dict[str, Any]:
     """
-    Suggests parameters for optimization based on the updated TSMOM+ATR regime.
+    Suggests parameters for optimization based on the RSM-VT architecture.
     """
     params: Dict[str, Any] = {"TIMEFRAME": tf}
     
@@ -16,20 +16,27 @@ def suggest_params_v2(trial: optuna.Trial, space: Dict[str, Any], tf: str) -> Di
         elif t == "int": params[param_name] = trial.suggest_int(param_name, spec["low"], spec["high"], step=spec.get("step", 1))
         elif t == "float": params[param_name] = trial.suggest_float(param_name, spec["low"], spec["high"], step=spec.get("step"))
 
-    # 4 Core Parameters
-    _suggest("TSMOM_ENTRY_THRESHOLD")
-    _suggest("TSMOM_WEIGHT_DECAY")
-    _suggest("ATR_WINDOW")
-    _suggest("ATR_MULTIPLIER")
-    _suggest("ATR_PRC_WINDOW")
+    # --- 1. Macro Trend Filter ---
+    _suggest("MACRO_EMA_PERIOD")
     
-    # [NEW] Asymmetry & Sizing Parameters
-    _suggest("VELOCITY_K")
+    # --- 2. Squeeze Parameters ---
+    _suggest("KC_MULT")
+    
+    # --- 3. Momentum Breakout Trigger ---
+    _suggest("MOMENTUM_PERIOD")
+    
+    # --- 4. Exits (Asymmetric Hard Stop vs Fat-Tail Trail) ---
+    _suggest("ATR_PERIOD")
+    _suggest("LONG_ATR_MULT")
+    _suggest("LONG_TRAIL_MULT")
+    _suggest("SHORT_ATR_MULT")
+    _suggest("SHORT_TP_MULT")
+    
+    # --- 5. Portfolio Risk Sizing ---
     _suggest("RISK_PER_TRADE")
 
-    # Hardcoded constraints for pure alpha discovery (no compounding/leverage noise)
-    params["LEVERAGE"] = 1           # 1x leverage
-    params["STOP_LOSS_TYPE"] = "ATR"
-    params["EXIT_TYPE"] = "ATR"
+    # [INSTITUTIONAL] Leverage & Execution Config
+    params["LEVERAGE"] = 20
+    params["USE_COMPOUNDING"] = True
 
     return params
