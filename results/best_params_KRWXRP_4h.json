@@ -1,0 +1,16 @@
+{
+    "MACRO_EMA_PERIOD": 260,
+    "FAST_EMA_PERIOD": 30,
+    "ADX_PERIOD": 21,
+    "ADX_THRESHOLD": 20.0,
+    "KC_MULT": 2.0,
+    "MOMENTUM_PERIOD": 40,
+    "ATR_PERIOD": 22,
+    "LONG_ATR_MULT": 3.5,
+    "LONG_TRAIL_MULT": 7.5,
+    "LONG_TP_MULT": 6.0,
+    "RISK_PER_TRADE": 0.6,
+    "TIMEFRAME": "4h",
+    "LEVERAGE": 1,
+    "USE_COMPOUNDING": true
+}
