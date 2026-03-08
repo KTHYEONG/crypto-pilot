@@ -412,30 +412,10 @@ class RealTraderFutures:
         target_lev = max(1.0, min(target_lev, float(MAX_EXCHANGE_LEVERAGE)))
         return int(math.ceil(target_lev))
     
-    def load_strategies_from_db(self):
-        """Optuna DB에서 최적화된 파라미터 로드"""
-        logger.info(f"📂 Loading strategies from {self.db_path}...")
+    def load_strategies_from_json(self):
+        """results 폴더의 JSON 파일에서 최적화된 파라미터 로드"""
+        logger.info("📂 Loading strategies from JSON files in results/...")
         
-        if not os.path.exists(self.db_path):
-            raise FileNotFoundError(f"DB file not found: {self.db_path}")
-        
-        # [Lazy Loading] optuna is heavy, load only when needed
-        import optuna
-        storage = f"sqlite:///{self.db_path}"
-        
-        study = None
-        for s_name in OPTUNA_STUDY_NAMES:
-            try:
-                study = optuna.load_study(study_name=s_name, storage=storage)
-                logger.info(f"✅ Loaded Study: '{s_name}' (Score: {study.best_value:.4f})")
-                break
-            except KeyError:
-                continue
-        
-        if study is None:
-            raise ValueError(f"No valid study found in DB. Tried: {OPTUNA_STUDY_NAMES}")
-        
-        best_params = study.best_params
         preferred_symbols = list(FUTURES_TARGET_SYMBOLS) if FUTURES_TARGET_SYMBOLS else list(SYMBOL_ALLOCATION_WEIGHTS.keys())
         if not preferred_symbols:
             raise ValueError("No live futures symbols configured. Check FUTURES_TARGET_SYMBOLS in config/settings.py")
@@ -446,14 +426,29 @@ class RealTraderFutures:
             ", ".join(f"{s}={self.symbol_allocation_weights.get(s, 0.0):.2f}" for s in self.symbols),
         )
         
+        results_dir = os.path.join(project_root, "results")
+        
         for symbol in self.symbols:
-            symbol_params = best_params.copy()
+            clean_sym = symbol.replace("/", "")
+            json_path = os.path.join(results_dir, f"best_params_{clean_sym}_4h.json")
+            
+            if not os.path.exists(json_path):
+                logger.error(f"❌ JSON file not found for {symbol}: {json_path}")
+                raise FileNotFoundError(f"Missing parameter JSON: {json_path}")
+                
+            try:
+                with open(json_path, 'r', encoding='utf-8') as f:
+                    symbol_params = json.load(f)
+            except Exception as e:
+                logger.error(f"❌ Failed to parse JSON for {symbol}: {e}")
+                raise
+                
             symbol_params.setdefault('INDICATOR_TIMEFRAME', '1d')
             self.params_map[symbol] = symbol_params
-            strategy_name = f"Real_{symbol.replace('/', '_')}"
+            strategy_name = f"Real_{clean_sym}"
             self.strategies[symbol] = UltimateStrategy(strategy_name, symbol_params)
             logger.info(
-                f"🔹 Strategy initialized: {symbol} | Exec TF: {symbol_params.get('TIMEFRAME', '1h')} | Indicator TF: {symbol_params.get('INDICATOR_TIMEFRAME', '1d')}"
+                f"✅ Strategy initialized from JSON: {symbol} | Exec TF: {symbol_params.get('TIMEFRAME', '4h')} | Indicator TF: {symbol_params.get('INDICATOR_TIMEFRAME', '1d')}"
             )
 
     def _build_symbol_allocation_weights(self, symbols: list) -> Dict[str, float]:
@@ -694,7 +689,7 @@ class RealTraderFutures:
             entry_atr = float(atr) if np.isfinite(atr) and atr > 0 else 0.0
             sl_type = str(params.get('STOP_LOSS_TYPE', 'FIXED') or 'FIXED').upper()
             if sl_type == 'ATR' and entry_atr > 0:
-                sl_mult = float(params.get('ATR_STOP_LOSS_MULT', 1.5))
+                sl_mult = float(params.get('LONG_ATR_MULT' if amount > 0 else 'SHORT_ATR_MULT', 2.0))
                 stop_price = (
                     entry_price - (entry_atr * sl_mult)
                     if amount > 0 else
@@ -1208,7 +1203,7 @@ class RealTraderFutures:
         confirmed_entry_price = float(confirmed_pos.get('entryPrice', current_price) or current_price)
         sl_type = params.get('STOP_LOSS_TYPE', 'FIXED')
         if sl_type == 'ATR' and atr > 0:
-            sl_mult = params.get('ATR_STOP_LOSS_MULT', 1.5)
+            sl_mult = float(params.get('LONG_ATR_MULT' if is_long else 'SHORT_ATR_MULT', 2.0))
             stop_price = (
                 confirmed_entry_price - (atr * sl_mult)
                 if is_long else
@@ -1336,19 +1331,15 @@ class RealTraderFutures:
             already_calculated = self.last_calc_candle.get(symbol) == current_slot
             
             # [P0 FIX] 캐시 미존재 시 무한 재계산 방지
-            # 캐시가 없으면 무조건 계산 (초기화), 이후에는 indicator TF 슬롯 변경 시에만 계산
+            # 백테스트 엔진(_REQUIRED_INDICATOR_COLS)과 완벽히 일치하는 필수 지표만 검증합니다.
             cached = self._get_cached_indicators(symbol)
             required_indicator_keys = (
                 'trend_direction',
                 'atr',
-                'parabolic_sar',
                 'entry_upper',
                 'entry_lower',
                 'strength_filter',
-                'volume_ratio',
-                'rsi',
-                'hurst',
-                'natr',
+                'volume_ratio'
             )
             need_calculation = False
             
@@ -1875,7 +1866,7 @@ class RealTraderFutures:
             if amount > 0:  # LONG -> Sell SL
                 sl_side = 'sell'
                 if sl_type == 'ATR' and atr > 0:
-                    sl_mult = params.get('ATR_STOP_LOSS_MULT', 1.5)
+                    sl_mult = float(params.get('LONG_ATR_MULT', 2.0))
                     stop_price = entry_price - (atr * sl_mult)
                 else:
                     sl_pct = params.get('STOP_LOSS_PCT', 0.02)
@@ -1883,7 +1874,7 @@ class RealTraderFutures:
             else:  # SHORT -> Buy SL
                 sl_side = 'buy'
                 if sl_type == 'ATR' and atr > 0:
-                    sl_mult = params.get('ATR_STOP_LOSS_MULT', 1.5)
+                    sl_mult = float(params.get('SHORT_ATR_MULT', 2.0))
                     stop_price = entry_price + (atr * sl_mult)
                 else:
                     sl_pct = params.get('STOP_LOSS_PCT', 0.02)
@@ -2171,7 +2162,7 @@ class RealTraderFutures:
             active_stop = float(state.get('active_stop_price', 0.0) or 0.0)
             if not np.isfinite(active_stop) or active_stop <= 0:
                 if sl_type == 'ATR' and pos_atr > 0:
-                    sl_mult = float(params.get('ATR_STOP_LOSS_MULT', 1.5))
+                    sl_mult = float(params.get('LONG_ATR_MULT' if amount > 0 else 'SHORT_ATR_MULT', 2.0))
                     active_stop = entry_price - (pos_atr * sl_mult) if amount > 0 else entry_price + (pos_atr * sl_mult)
                 else:
                     sl_pct = float(params.get('STOP_LOSS_PCT', 0.02))
@@ -2233,73 +2224,9 @@ class RealTraderFutures:
                         exit_price_for_calc = tp_price_val
 
             # [SEQ-3] Conditional market exits (time -> RSI -> trend)
-            bars_held = 0.0
-            if not exit_triggered:
-                interval_min = self._timeframe_to_minutes(execution_tf)
-                if interval_min > 0:
-                    interval_ms = interval_min * 60 * 1000
-                    # Backtest parity: count bars from intended entry bar open.
-                    entry_open_ts = int(state.get('entry_target_open_ts', 0) or 0)
-                    if entry_open_ts <= 0:
-                        entry_fill_time_str = state.get('entry_fill_time')
-                        if entry_fill_time_str:
-                            try:
-                                entry_fill_dt = datetime.fromisoformat(entry_fill_time_str)
-                                entry_open_ts = int(entry_fill_dt.timestamp() * 1000)
-                            except Exception:
-                                entry_open_ts = 0
-                    if entry_open_ts <= 0:
-                        entry_time_str = state.get('entry_time')
-                        if entry_time_str:
-                            try:
-                                entry_dt = datetime.fromisoformat(entry_time_str)
-                                entry_open_ts = int(entry_dt.timestamp() * 1000)
-                            except Exception:
-                                entry_open_ts = 0
-
-                    if entry_open_ts > 0:
-                        recovery_mode = bool(state.get('recovery_mode', False))
-                        if recovery_mode and interval_ms > 0:
-                            entry_open_ts = int(entry_open_ts - (entry_open_ts % interval_ms))
-                        ref_ms = candle_ts if candle_ts > 0 else self._get_reference_now_ms()
-                        bars_held = max(
-                            0.0,
-                            (ref_ms - entry_open_ts) / float(interval_ms),
-                        )
-
-                max_holding_bars = float(params.get('MAX_HOLDING_BARS', 9999))
-                hard_exit = (bars_held >= max_holding_bars * 2.0)
-                soft_check = (bars_held >= max_holding_bars)
-                
-                if soft_check or hard_exit:
-                    if pos_atr > 0:
-                        if amount > 0:
-                            unreal_p = (candle_close - entry_price) / pos_atr
-                        else:
-                            unreal_p = (entry_price - candle_close) / pos_atr
-                    else:
-                        unreal_p = 0.0
-
-                    time_exit_profit_threshold = float(params.get('TIME_EXIT_PROFIT_THRESHOLD', 0.5))
-                    if unreal_p < time_exit_profit_threshold or hard_exit:
-                        exit_triggered = True
-                        reason = f"Time Cut (Held {bars_held:.1f} bars, UnrealATR {unreal_p:.2f}{', Hard' if hard_exit else ''})"
-                        exit_price_for_calc = candle_open * (1 - slippage if amount > 0 else 1 + slippage)
-
-            if not exit_triggered:
-                rsi = float(50.0 if pd.isna(rsi_value) else rsi_value)
-                rsi_exit_thresh = float(params.get('RSI_EXIT_THRESHOLD', 80.0))
-                if amount > 0 and rsi > rsi_exit_thresh:
-                    exit_triggered = True
-                    reason = f"Panic Exit (RSI {rsi:.1f})"
-                    exit_price_for_calc = candle_open * (1 - slippage)
-                elif amount < 0 and rsi < (100.0 - rsi_exit_thresh):
-                    exit_triggered = True
-                    reason = f"Panic Exit (RSI {rsi:.1f})"
-                    exit_price_for_calc = candle_open * (1 + slippage)
-
+            # [V1 PARITY FIX] Time Cut and RSI Panic Exits are REMOVED to preserve fat-tail convexity.
             # Trend Reversal (backtest parity: ENABLE_TREND_EXIT + unrealized_atr < 1.0)
-            if not exit_triggered and bool(params.get('ENABLE_TREND_EXIT', True)):
+            if not exit_triggered and bool(params.get('ENABLE_TREND_EXIT', False)): # Default False for V1 parity
                 unrealized_atr = 0.0
                 if pos_atr > 0:
                     if amount > 0:
@@ -2320,9 +2247,9 @@ class RealTraderFutures:
             prev_stop = float(active_stop)
             if not exit_triggered and (not fallback_without_candle):
                 trailing_activation_atr = float(params.get('TRAILING_ACTIVATION_ATR', 0.0))
-                atr_mult = float(params.get('ATR_MULTIPLIER', 3.0))
-
+                
                 if amount > 0:
+                    atr_mult = float(params.get('LONG_TRAIL_MULT', 3.0))
                     if candle_high > highest_price:
                         highest_price = candle_high
                     if exit_type != 'PARABOLIC_SAR' and pos_atr > 0:
@@ -2335,13 +2262,8 @@ class RealTraderFutures:
                 else:
                     if candle_low < lowest_price:
                         lowest_price = candle_low
-                    if exit_type != 'PARABOLIC_SAR' and pos_atr > 0:
-                        unreal_profit = (entry_price - lowest_price) / pos_atr
-                        if unreal_profit >= trailing_activation_atr:
-                            new_stop = lowest_price + (pos_atr * atr_mult)
-                            if new_stop < active_stop:
-                                active_stop = new_stop
-                                trailing_updated = True
+                    # [V1 Parity] Shorts DO NOT trailing stop, they rely on Hard SL and Hard TP only.
+                    # No trailing_updated = True here.
 
                 active_stop = self.client.round_price(symbol, active_stop)
                 base_update = {
@@ -2483,6 +2405,7 @@ class RealTraderFutures:
     def _calculate_position_size(
         self, 
         symbol: str, 
+        side: str,
         price: float, 
         params: dict, 
         atr: float = 0.0,
@@ -2566,7 +2489,7 @@ class RealTraderFutures:
         sl_type = str(params.get('STOP_LOSS_TYPE', 'FIXED')).upper()
         
         if sl_type == 'ATR' and atr > 0 and price > 0:
-            atr_mult = float(params.get('ATR_STOP_LOSS_MULT', 1.5))
+            atr_mult = float(params.get('LONG_ATR_MULT' if side == 'LONG' else 'SHORT_ATR_MULT', 2.0))
             stop_distance = atr * atr_mult
             stop_distance_pct = stop_distance / price
         else:
