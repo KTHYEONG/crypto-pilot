@@ -27,8 +27,8 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 
-# 데이터베이스 파일 경로 (SQLite)
-DB_PATH = DATA_DIR / "trading_data.db"
+# 매매 기록 데이터베이스 파일 (SQLite)
+TRADE_HISTORY_DB = DATA_DIR / "trade_history.db"
 
 # Binance 설정
 BINANCE_API_KEY = os.getenv("BINANCE_API_KEY", "")
@@ -62,10 +62,6 @@ LOG_LEVEL = "DEBUG"
 # RealTrader Futures 설정
 # ============================================================
 
-# 거래 DB 경로
-FUTURES_STRATEGY_DB = BASE_DIR / "futures_strategy.db"
-TRADE_HISTORY_DB = DATA_DIR / "trade_history.db"
-
 # 헬스체크 파일 (봇 생존 확인용)
 HEARTBEAT_FILE = LOG_DIR / "trader_heartbeat.json"
 FUTURES_STATE_FILE = DATA_DIR / "futures_trading_state.json"
@@ -82,15 +78,14 @@ API_RETRY_WAIT_MAX = 30  # 최대 대기 시간 (초)
 MIN_BALANCE_USDT = 10.0  # 최소 운영 잔고 (USDT)
 MIN_BALANCE_FOR_TRADE = 5.0  # 최소 거래 가능 잔고
 MIN_ORDER_VALUE_USDT = 5.0  # Binance 최소 주문 금액 (바이낸스 규정 기반)
-MAX_EXCHANGE_LEVERAGE = 10  # 거래소 설정 레버리지 (전략 목표 반영)
+MAX_EXCHANGE_LEVERAGE = 20  # 최대 허용 레버리지 
 
 # --- 타이밍 설정 ---
-LOOP_INTERVAL_SECONDS = 10  # 메인 루프 간격 (청산 감시 기능 강화)
+LOOP_INTERVAL_SECONDS = 10  # 메인 루프 간격
 SYMBOL_DELAY_SECONDS = 2  # 심볼 간 딜레이
 ERROR_SLEEP_SECONDS = 60  # 에러 발생 시 대기
 
 # --- 캔들 동기화 오프셋 (분) ---
-# 정시 봉 마감 후 N초 뒤에 실행하여 데이터 안정성 확보
 CANDLE_SYNC_OFFSET_SECONDS = 15
 
 # --- 로그 회전 설정 ---
@@ -98,16 +93,12 @@ LOG_MAX_BYTES = 10 * 1024 * 1024  # 10MB
 LOG_BACKUP_COUNT = 5
 
 # --- 대상 심볼 (Futures) ---
-# [Verified Portfolio] B 1h Holdout OOS 기준 — Core(BTC/ETH) + 알트 1종(XRP)
-# 80만원 자산증식: OOS 수익·MDD·PF 기준 선정
-FUTURES_TARGET_SYMBOLS = ["BTC/USDT", "ETH/USDT", "XRP/USDT"]
-
-# --- 스터디 이름 (Optuna) ---
-OPTUNA_STUDY_NAMES = ["futures_strategy", "future_strategy", "UNIFIED"]
+# 최상위 퀀트 포트폴리오 (AVAX, LINK, ETH)
+FUTURES_TARGET_SYMBOLS = ["AVAX/USDT", "LINK/USDT", "ETH/USDT"]
 
 # --- 포지션 사이징 가중치 (Futures) ---
-# BTC 35% + ETH 45% + XRP 20% — OOS(holdout) 기준 ETH 우선, 알트 XRP
-SYMBOL_ALLOCATION_WEIGHTS = {"BTC/USDT": 0.35, "ETH/USDT": 0.45, "XRP/USDT": 0.20}
+# 자본 균등 배분 (1/N Rule)
+SYMBOL_ALLOCATION_WEIGHTS = {"AVAX/USDT": 0.33, "LINK/USDT": 0.33, "ETH/USDT": 0.34}
 
 # ============================================================
 # RealTrader Spot 설정 (Upbit)
