@@ -58,7 +58,6 @@ from config.settings import (
     BINANCE_API_KEY, 
     BINANCE_SECRET,
     LOG_DIR,
-    FUTURES_STRATEGY_DB,
     TRADE_HISTORY_DB,
     HEARTBEAT_FILE,
     API_RETRY_ATTEMPTS,
@@ -75,7 +74,6 @@ from config.settings import (
     LOG_MAX_BYTES,
     LOG_BACKUP_COUNT,
     FUTURES_TARGET_SYMBOLS,
-    OPTUNA_STUDY_NAMES,
     SYMBOL_ALLOCATION_WEIGHTS,
     FUTURES_STATE_FILE,
     SLIPPAGE_RATE,
@@ -95,8 +93,6 @@ except ImportError:
 # ============================================================
 # Structured JSON Logger
 # ============================================================
-
-
 
 logger = setup_logger("RealTraderFutures")
 
@@ -301,9 +297,8 @@ class StateManager:
 class RealTraderFutures:
     """Production-grade 선물 트레이딩 봇"""
     
-    def __init__(self, db_path: str = None, enable_oracle_optimization: bool = False):
+    def __init__(self, enable_oracle_optimization: bool = False):
         self.client = BinanceClient(BINANCE_API_KEY, BINANCE_SECRET)
-        self.db_path = db_path or str(FUTURES_STRATEGY_DB)
         self.strategies: Dict[str, UltimateStrategy] = {}
         self.params_map: Dict[str, dict] = {}
         self.symbols: list = []
@@ -1046,7 +1041,7 @@ class RealTraderFutures:
         self._sync_server_time_offset(force=True)
         
         # 1. 전략 로드
-        self.load_strategies_from_db()
+        self.load_strategies_from_json()
         gc.collect() # 전략 객체 생성 후 메모리 정리
         
         # 2. 잔고 확인
@@ -1769,6 +1764,12 @@ class RealTraderFutures:
         except Exception as e:
             logger.error(f"🚨 Error executing logic for {symbol}: {e}")
             self.health_manager.record_error(e)
+            
+        finally:
+            # [MEMORY SAFETY] 에러 발생 시에도 무조건 로컬 메모리 비우기
+            if 'df' in locals() and df is not None:
+                del df
+                gc.collect()
     
     def _detect_stop_loss_orders(self, symbol: str) -> list:
         """
@@ -2685,13 +2686,18 @@ class RealTraderFutures:
                     positions=positions
                 )
                 
-                # 클라우드 최적화 실행 (시간 기반 체크)
+                # 클라우드 최적화 및 시스템 관리
+                now = datetime.utcnow()
+                
                 if self.cloud_optimizer:
-                    now = datetime.utcnow()
+                    # 1. 시간 동기화 검증 (1시간마다로 완화하여 네트워크 부하 감소)
+                    if not hasattr(self, '_last_ntp_check'):
+                        self._last_ntp_check = datetime.min
                     
-                    # 1. 시간 동기화 검증 (매 루프)
-                    if not self.cloud_optimizer.check_time_sync_ntp():
-                        logger.error("⏰ Time drift detected! Bot may fail to place orders on Binance.")
+                    if (now - self._last_ntp_check).total_seconds() >= 3600:
+                        if not self.cloud_optimizer.check_time_sync_ntp():
+                            logger.error("⏰ Time drift detected! Bot may fail to place orders on Binance.")
+                        self._last_ntp_check = now
                     
                     # 2. 리소스 모니터링 (10분마다) & 메모리 보호
                     if (now - self._last_resource_check).total_seconds() >= 600:  # 10분 = 600초
@@ -2701,18 +2707,24 @@ class RealTraderFutures:
                             self.cloud_optimizer.force_gc()
                         self._last_resource_check = now
                     
-                    # 3. DB 정리 (24시간마다)
-                    if (now - self._last_db_cleanup).total_seconds() >= 86400:  # 24시간 = 86400초
-                        self.cloud_optimizer.cleanup_db_old_records(
-                            TRADE_HISTORY_DB, 
-                            days_to_keep=90
-                        )
-                        self._last_db_cleanup = now
-                    
-                    # 4. 명시적 GC (2시간마다)
+                    # 3. 명시적 GC (2시간마다)
                     if (now - self._last_gc).total_seconds() >= 7200:  # 2시간 = 7200초
                         self.cloud_optimizer.force_gc()
                         self._last_gc = now
+
+                # [필수] DB 정리 (24시간마다) - 클라우드 옵션과 무관하게 실행하여 용량 부족 방지
+                if getattr(self, 'trade_db', None) and (now - self._last_db_cleanup).total_seconds() >= 86400:  # 24시간
+                    try:
+                        # TradeHistoryDB가 cleanup_old_records 메서드를 지원한다고 가정
+                        # 만약 없다면 cloud_optimizer의 유틸함수를 활용
+                        if hasattr(self.trade_db, 'cleanup_old_records'):
+                            self.trade_db.cleanup_old_records(days_to_keep=90)
+                        elif self.cloud_optimizer:
+                            self.cloud_optimizer.cleanup_db_old_records(TRADE_HISTORY_DB, days_to_keep=90)
+                        self._last_db_cleanup = now
+                        logger.info("🧹 Daily DB cleanup check completed.")
+                    except Exception as e:
+                        logger.warning(f"⚠️ Failed to cleanup DB: {e}")
                 
                 # [FIX] 심볼 처리 시간을 고려한 동적 대기 시간 계산
                 # 목표: 전체 루프 주기를 정확히 LOOP_INTERVAL_SECONDS(10초)로 유지
