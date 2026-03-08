@@ -1,52 +1,11 @@
 """
-백테스트 결과인 손익 데이터를 바탕으로 수익률, MDD, RoMaD 등 정량적 성과 지표를 계산함.
+백테스트 결과인 손익 데이터를 바탕으로 수익률, MDD, Sortino 등 정량적 성과 지표를 계산함.
 전략의 우수성을 판단하기 위해 단순 수익률뿐만 아니라 리스크 대비 효율성을 점수화하는 역할을 수행함.
 """
 import numpy as np
 import pandas as pd
 from typing import Tuple
 from config.settings import FUTURES_INITIAL_BALANCE
-
-# Maximum annualization factor is no longer used for capping in V2.7 Time-Normalized logic.
-_MAX_ANNUALIZATION_FACTOR: float = 1.0 
-
-def calc_romad(pnl_series: pd.Series, n_trades: int, tf: str) -> Tuple[float, float, float]:
-    """
-    Calculate Return on Max Drawdown (RoMaD) as the primary risk-adjusted metric.
-    Standardized to mirror the enhanced logic in calc_romad_from_metrics.
-    """
-    if pnl_series.empty or n_trades == 0:
-        return -10.0, 0.0, 0.0
-
-    equity: pd.Series = FUTURES_INITIAL_BALANCE + pnl_series.cumsum()
-    end_equity: float = float(equity.iloc[-1])
-    ret_pct: float = ((end_equity / FUTURES_INITIAL_BALANCE) - 1.0) * 100.0
-
-    running_max: np.ndarray = np.maximum.accumulate(equity.values)
-    running_max[running_max == 0] = 1e-9
-    drawdown: np.ndarray = (equity.values - running_max) / running_max * 100.0
-    mdd_pct: float = abs(float(np.min(drawdown))) if len(drawdown) > 0 else 0.0
-
-    span_days: float = float((pnl_series.index[-1] - pnl_series.index[0]).total_seconds() / 86400.0)
-    win_rate: float = float((pnl_series > 0).mean() * 100.0) if not pnl_series.empty else 0.0
-
-    if pnl_series.empty:
-        pf: float = 1.0
-    else:
-        gains: float = float(pnl_series[pnl_series > 0].sum())
-        losses: float = abs(float(pnl_series[pnl_series < 0].sum()))
-        pf = float(gains / losses) if losses > 0 else (5.0 if gains > 0 else 1.0)
-
-    return calc_romad_from_metrics(
-        ret_pct=ret_pct,
-        mdd_pct=mdd_pct,
-        n_trades=n_trades,
-        tf=tf,
-        span_days=span_days,
-        win_rate=win_rate,
-        pf=pf,
-        leverage=1.0,
-    )
 
 def calc_profit_factor_from_pnl(pnl_series: pd.Series) -> float:
     """Calculate Profit Factor from a pre-computed net PNL series (fee-deducted)."""
@@ -60,7 +19,6 @@ def calc_profit_factor_from_pnl(pnl_series: pd.Series) -> float:
         return 5.0 if gross_profit > 0 else 1.0
 
     return gross_profit / gross_loss
-
 
 def calc_profit_factor(trades_df: pd.DataFrame) -> float:
     """Calculate Profit Factor (Gross Profit / Gross Loss) from raw trades_df."""
@@ -78,30 +36,6 @@ def calc_profit_factor(trades_df: pd.DataFrame) -> float:
         
     return gross_profit / gross_loss
 
-def calc_romad_from_metrics(
-    ret_pct: float,
-    mdd_pct: float,
-    n_trades: int,
-    tf: str,
-    span_days: float,
-    win_rate: float = 0.0,
-    pf: float = 1.0,
-    leverage: float = 1.0,
-) -> Tuple[float, float, float]:
-    """
-    Deprecated complex scoring. Returns Pure CAGR and MDD.
-    """
-    days: float = max(float(span_days), 1.0)
-    total_ret_ratio: float = 1.0 + (ret_pct / 100.0)
-    
-    # Annualized Geometric Return (CAGR)
-    if total_ret_ratio > 0:
-        cagr = ((total_ret_ratio ** (365.0 / days)) - 1.0) * 100.0
-    else:
-        cagr = -100.0
-
-    return float(cagr), ret_pct, float(abs(mdd_pct))
-
 # ==============================================================================
 # [NEW] Portfolio Aggregated Equity Curve Metrics 
 # ==============================================================================
@@ -116,37 +50,55 @@ def calc_mdd_from_equity(equity_curve: np.ndarray) -> float:
     return float(abs(np.min(np.nan_to_num(drawdown, nan=0.0))))
 
 def calc_sortino_from_equity(equity_curve: np.ndarray, span_days: float) -> float:
-    """Calculate Sortino Ratio from an aggregated equity curve."""
+    """
+    [ALGO-TRADING & COMPOUNDING OPTIMIZED METHOD]
+    기계식 매매와 복리(Compounding) 자산 증식의 수학적 특성을 완벽히 반영함.
+    1. 스무딩 없음: 엔진이 반환한 틱/캔들 단위의 모든 궤적(Path) 고통을 그대로 측정.
+    2. 로그 수익률(Log Returns) 사용: 상하방 비대칭성을 제거하여 복리 환경에서의 실제 변동성 드래그를 정확히 산출.
+    """
     if len(equity_curve) < 2 or span_days <= 0:
         return 0.0
         
     start_eq = equity_curve[0] if equity_curve[0] > 0 else 1e-9
     end_eq = equity_curve[-1]
-    total_ret = (end_eq / start_eq) - 1.0
     
-    # Log return is safer for compounding
-    if total_ret > -0.99:
-        log_ret = np.log(1.0 + total_ret)
-    else:
-        log_ret = np.log(0.01) # Max -99% floor
+    # 1. CAGR (Annualized Geometric Return)
+    total_ret_ratio = max(end_eq / start_eq, 0.0001)
+    cagr_decimal = (total_ret_ratio ** (365.0 / span_days)) - 1.0
+    
+    # 2. High-Resolution Log Returns (모든 스텝의 로그 수익률)
+    # 기계식 복리 환경에서는 산술 수익률 대신 로그 수익률을 써야 수학적 왜곡(오차)이 없음.
+    # 0 이하로 떨어지는 것을 방지하기 위해 매우 작은 값(1e-9)으로 클리핑.
+    safe_curve = np.clip(equity_curve, 1e-9, None)
+    step_log_returns = np.log(safe_curve[1:] / safe_curve[:-1])
+    
+    # 3. Downside Deviation (하방 변동성)
+    # 기계에게 리스크란 '계좌 잔고가 전 캔들 대비 줄어든 모든 순간'임.
+    downside_log_returns = step_log_returns[step_log_returns < 0]
+    
+    if len(downside_log_returns) == 0:
+        return 999.0 if cagr_decimal > 0 else 0.0
         
-    annualized_return = (log_ret / span_days) * 365.0
+    # [INSTITUTIONAL] Standard Sortino Calculation (L2 Norm)
+    # NSGA-II 최적화의 수렴을 돕기 위해 표준 금융공학 산식(제곱 하방편차)으로 복구.
+    # CAGR Cap과 연동하여 생존 모델을 찾음.
+    downside_log_returns = step_log_returns[step_log_returns < 0]
     
-    returns = np.diff(equity_curve) / equity_curve[:-1]
-    returns = np.clip(returns, -0.999, None)
-    log_returns = np.log(1.0 + returns)
-    
-    downside_returns = log_returns[log_returns < 0]
-    
-    if len(downside_returns) == 0:
-        return 999.0 if annualized_return > 0 else 0.0
+    if len(downside_log_returns) == 0:
+        return 999.0 if cagr_decimal > 0 else 0.0
         
-    bars_per_day = len(log_returns) / span_days
-    bars_per_year = bars_per_day * 365.0
+    # Standard L2 variance of downside returns
+    step_downside_var = np.mean(downside_log_returns**2.0)
     
-    downside_dev = np.sqrt(np.mean(downside_returns**2)) * np.sqrt(bars_per_year)
+    # Annualized Downside Deviation
+    # 1년(365일) 동안 발생하는 캔들(스텝)의 개수로 스케일 업.
+    bars_per_year = (len(equity_curve) / span_days) * 365.0
+    annual_downside_dev = np.sqrt(step_downside_var * bars_per_year)
     
-    if downside_dev == 0:
-        return 999.0 if annualized_return > 0 else 0.0
+    if annual_downside_dev == 0.0:
+        return 999.0 if cagr_decimal > 0 else 0.0
         
-    return float(annualized_return / downside_dev)
+    # Continuous Log-Sortino Ratio
+    sortino = cagr_decimal / annual_downside_dev
+    
+    return float(sortino)

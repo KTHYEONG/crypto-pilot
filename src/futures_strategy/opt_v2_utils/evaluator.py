@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import optuna
@@ -14,11 +15,10 @@ from collections import OrderedDict
 from typing import Any, Dict, List, Optional, Tuple
 
 from config.settings import FUTURES_INITIAL_BALANCE
-from config.opt_config import WARMUP_PERIOD
+from config.opt_config import WARMUP_PERIODS
 from src.futures_strategy.strategies_futures import UltimateStrategy
 from src.futures_strategy.engine_fast_futures import BacktestEngineFast
 from src.futures_strategy.opt_v2_utils.metrics import (
-    calc_romad_from_metrics, 
     calc_profit_factor_from_pnl,
     calc_mdd_from_equity,
     calc_sortino_from_equity
@@ -30,7 +30,7 @@ _logger: logging.Logger = logging.getLogger("opt_v2")
 
 SymbolFoldResult = Tuple[str, float, float, float, float, float, float, np.ndarray, float]
 
-_MAX_SYMBOL_WORKERS: int = 8
+_MAX_SYMBOL_WORKERS: int = max(1, int(os.getenv("OPT_V2_SYMBOL_WORKERS", "1")))
 
 def compute_embargo_bars(tf: str, longest_indicator_period: int = 150) -> int:
     fixed_min: Dict[str, int] = {"1h": 24, "4h": 6}
@@ -43,19 +43,37 @@ EMBARGO_BARS: Dict[str, int] = {
     "4h": compute_embargo_bars("4h"),
 }
 
-# Params that affect strategy.generate_signals() (ultimate.py). Only keys actually suggested
-# in opt_config / suggest_params_v2; trials differing only in LEVERAGE/RISK reuse cache.
-SIGNAL_CACHE_PARAM_KEYS: frozenset[str] = frozenset({
-    "TSMOM_ENTRY_THRESHOLD",
-    "TSMOM_WEIGHT_DECAY",
-    "ATR_WINDOW",
-    "VELOCITY_K",
-    "ATR_PRC_WINDOW",
-})
+SIGNAL_CACHE_PARAM_KEYS: frozenset[str] = frozenset([
+    "MACRO_EMA_PERIOD",
+    "KC_MULT",
+    "MOMENTUM_PERIOD",
+    "ATR_PERIOD"
+])
+
+# (signal_params, sym, tf, data_len)
+_SignalCacheKey = Tuple[Tuple[Tuple[str, Any], ...], str, str, int]
 
 _SIGNAL_CACHE_MAXSIZE: int = 64
 _cache_lock: threading.Lock = threading.Lock()
-_signal_cache: OrderedDict[Tuple[Tuple[Tuple[str, Any], ...], str, str], pd.DataFrame] = OrderedDict()
+_signal_cache: OrderedDict[_SignalCacheKey, pd.DataFrame] = OrderedDict()
+
+
+def _segment_with_context(
+    full_signal_df: pd.DataFrame,
+    exec_start_idx: int,
+    exec_end_idx: int,
+) -> Tuple[pd.DataFrame, int]:
+    """
+    Include one prior bar as context so the first tradable bar can legally read prev_i.
+    Only the absolute dataset first bar is sacrificed when no prior bar exists.
+    """
+    slice_start = max(0, int(exec_start_idx) - 1)
+    slice_end = max(slice_start, int(exec_end_idx))
+    segment = full_signal_df.iloc[slice_start:slice_end].copy()
+    execution_start_idx = int(exec_start_idx) - slice_start
+    if execution_start_idx == 0 and len(segment) > 1:
+        execution_start_idx = 1
+    return segment, execution_start_idx
 
 
 def _evaluate_symbol_for_fold_parallel(
@@ -83,7 +101,9 @@ def _evaluate_symbol_for_fold_parallel(
         _logger.warning("Signal df missing for %s, skipping.", sym)
         return None
 
-    segment: pd.DataFrame = full_signal_dfs[sym].iloc[adj_test_start:adj_test_end]
+    segment, execution_start_idx = _segment_with_context(
+        full_signal_dfs[sym], adj_test_start, adj_test_end
+    )
 
     try:
         score: float
@@ -117,6 +137,7 @@ def _evaluate_symbol_for_fold_parallel(
             adj_test_start,
             adj_test_end,
             precomputed_signal_df=segment,
+            execution_start_idx=execution_start_idx,
         )
     except Exception as exc:
         _logger.warning("Symbol-level evaluation error for %s: %s", sym, exc, exc_info=True)
@@ -124,9 +145,12 @@ def _evaluate_symbol_for_fold_parallel(
 
     if equity_curve.size == 0:
         span_days_sym: float = 0.0
-    elif "datetime" in segment.columns and not segment.empty:
+    elif "datetime" in segment.columns and len(segment) > execution_start_idx:
         span_seconds: float = float(
-            (segment["datetime"].iloc[-1] - segment["datetime"].iloc[0]).total_seconds()
+            (
+                segment["datetime"].iloc[-1]
+                - segment["datetime"].iloc[execution_start_idx]
+            ).total_seconds()
         )
         span_days_sym = max(span_seconds / 86400.0, 1.0)
     else:
@@ -144,18 +168,16 @@ def _evaluate_symbol_for_fold_parallel(
         span_days_sym,
     )
 
-# ... (skip to objective_v2)
-
-def _build_signal_cache_key(params: Dict[str, Any], sym: str, tf: str) -> Tuple[Tuple[Tuple[str, Any], ...], str, str]:
-    """Build cache key from signal-affecting params only so exit/risk/leverage differences still hit cache."""
+def _build_signal_cache_key(params: Dict[str, Any], sym: str, tf: str, data_len: int) -> _SignalCacheKey:
+    """Build cache key from signal-affecting params AND data length to isolate walk-forward segments."""
     signal_items: List[Tuple[str, Any]] = sorted(
         (k, params[k]) for k in SIGNAL_CACHE_PARAM_KEYS if k in params
     )
-    return (tuple(signal_items), sym, tf)
+    return (tuple(signal_items), sym, tf, data_len)
 
 
 def get_or_compute_signals(
-    cache_key: Tuple[Tuple[Tuple[str, Any], ...], str, str],
+    cache_key: _SignalCacheKey,
     target_df: pd.DataFrame,
     strategy: UltimateStrategy,
 ) -> pd.DataFrame:
@@ -187,12 +209,13 @@ def evaluate_symbol_fold(
     test_start: int,
     test_end: int,
     precomputed_signal_df: Optional[pd.DataFrame] = None,
+    execution_start_idx: int = 0,
 ) -> Tuple[float, float, float, int, float, float, int, int, np.ndarray]:
     if precomputed_signal_df is not None:
         sig_oos: pd.DataFrame = precomputed_signal_df
     else:
         full_signal: pd.DataFrame = strategy.generate_signals(target_df.copy(deep=True))
-        sig_oos = full_signal.iloc[test_start:test_end].copy()
+        sig_oos, execution_start_idx = _segment_with_context(full_signal, test_start, test_end)
 
     warmup_bars: int = 0
     sig_oos.attrs = {"warmup_bars": warmup_bars}
@@ -215,11 +238,13 @@ def evaluate_symbol_fold(
         merge_index_map=None,
         precomputed_daily_df=None,
         warmup_bars=warmup_bars,
+        execution_start_idx=execution_start_idx,
     )
     engine.leverage = params.get("LEVERAGE", 1)
     engine.risk_per_trade = params.get("RISK_PER_TRADE", 0.01)
-    # Crypto generic standard: funding fee charged every 8 hours
-    engine.funding_events_per_bar = tf_hours / 8.0
+    # Crypto generic standard: Numba engine triggers exactly at UTC 0, 8, 16.
+    # Do not override with fractional values (tf_hours / 8.0) as the engine handles exact timestamp matches.
+    engine.funding_events_per_bar = 1.0
 
     params_fixed = params.copy()
     params_fixed["USE_COMPOUNDING"] = True
@@ -242,7 +267,16 @@ def evaluate_symbol_fold(
     mdd_pct: float = abs(float(result.get("mdd_pct", 0.0)))
     ret_pct: float = float(result.get("total_return_pct", 0.0))
 
-    span_days: float = float((sig_oos["datetime"].iloc[-1] - sig_oos["datetime"].iloc[0]).total_seconds() / 86400.0) if "datetime" in sig_oos.columns else 1.0
+    span_days: float = (
+        float(
+            (
+                sig_oos["datetime"].iloc[-1]
+                - sig_oos["datetime"].iloc[min(execution_start_idx, len(sig_oos) - 1)]
+            ).total_seconds() / 86400.0
+        )
+        if "datetime" in sig_oos.columns and not sig_oos.empty
+        else 1.0
+    )
     span_days = max(span_days, 1.0)
     
     true_pnl = trades_df["pnl"] - trades_df["entry_fee"]
@@ -263,8 +297,9 @@ def objective_v2(
     tf_target: str,
     *,
     space: Dict[str, Dict[str, Any]],
+    mode: str = "single",
     project_root: Optional[str] = None,
-) -> Tuple[float, float]:
+) -> float:
     params: Dict[str, Any] = suggest_params_v2(trial, space, tf_target)
     if params.pop("_INVALID_CONSTRAINT", False):
         raise optuna.TrialPruned()
@@ -272,18 +307,15 @@ def objective_v2(
     tf: str = tf_target
     strategy: UltimateStrategy = UltimateStrategy(name="FuturesV2", params=params)
 
-    lengths: List[int] = [len(data_maps[sym][tf]) - data_maps[sym].get(f"is_start_idx_{tf}", 0) for sym in symbols if tf in data_maps.get(sym, {})]
-    if not lengths:
-        raise optuna.TrialPruned()
-    min_len: int = min(lengths)
-    base_df_for_folds: pd.DataFrame = pd.DataFrame(index=range(min_len))
+    # Use first available symbol length as base for walk-forward folds
+    ref_sym = symbols[0]
+    ref_len = len(data_maps[ref_sym][tf]) - data_maps[ref_sym].get(f"is_start_idx_{tf}", 0)
+    base_df_for_folds: pd.DataFrame = pd.DataFrame(index=range(ref_len))
     
-    # [INSTITUTIONAL] 4H 매크로 추세의 사이클을 온전히 담아내기 위해 테스트 폴드를 분기(3개월) 단위로 확대.
-    # 진성 OOS가 6개월 확보되어 있으므로 내부 Holdout은 15%로 축소하여 훈련/CV 데이터를 극대화.
     cv_folds, holdout_fold = build_purged_walk_forward_folds(
         base_df_for_folds, 
-        n_folds=3, 
-        holdout_ratio=0.15, 
+        n_folds=4, 
+        holdout_ratio=0.20, 
         embargo=EMBARGO_BARS.get(tf, 0)
     )
 
@@ -291,15 +323,6 @@ def objective_v2(
         raise optuna.TrialPruned()
 
     all_folds = cv_folds + ([holdout_fold] if holdout_fold[2] > holdout_fold[1] else [])
-
-    # Pre-fetch full signal DataFrame per (params, sym, tf) for ALL symbols (cache reuse across folds).
-    full_signal_dfs: Dict[str, pd.DataFrame] = {}
-    for sym in symbols:
-        target_df_pre: Optional[pd.DataFrame] = data_maps[sym].get(tf)
-        if target_df_pre is None:
-            continue
-        cache_key: Tuple[Tuple[Tuple[str, Any], ...], str, str] = _build_signal_cache_key(params, sym, tf)
-        full_signal_dfs[sym] = get_or_compute_signals(cache_key, target_df_pre, strategy)
 
     fold_scores: List[float] = []
     fold_rets: List[float] = []
@@ -314,22 +337,21 @@ def objective_v2(
     sym_total_trades: Dict[str, List[float]] = {sym: [] for sym in symbols}
     sym_total_wins: Dict[str, List[float]] = {sym: [] for sym in symbols}
     sym_total_pfs: Dict[str, List[float]] = {sym: [] for sym in symbols}
+
+    full_signal_dfs: Dict[str, pd.DataFrame] = {}
+    for sym in symbols:
+        target_df_full: Optional[pd.DataFrame] = data_maps.get(sym, {}).get(tf)
+        if target_df_full is None or target_df_full.empty: continue
+        cache_key: _SignalCacheKey = _build_signal_cache_key(params, sym, tf, len(target_df_full))
+        full_signal_dfs[sym] = get_or_compute_signals(cache_key, target_df_full, strategy)
+
+    if not full_signal_dfs:
+        raise optuna.TrialPruned()
     
     for f_idx, fold_info in enumerate(all_folds):
-        if len(fold_info) == 4:
-            train_start, train_end, test_start, test_end = fold_info
-        else:
-            train_start = 0
-            train_end, test_start, test_end = fold_info
-            
-        sym_scores: List[float] = []
-        sym_rets: List[float] = []
-        sym_mdds: List[float] = []
-        sym_trades_fold: List[float] = []
-        sym_wins_fold: List[float] = []
-        sym_pfs_fold: List[float] = []
-        
-        # Array to accumulate aggregated portfolio equity curve for the current fold
+        if len(fold_info) == 4: train_start, train_end, test_start, test_end = fold_info
+        else: train_start = 0; train_end, test_start, test_end = fold_info
+
         target_symbols: List[str] = symbols
         fold_agg_eq: Optional[np.ndarray] = None
         fold_span_days: float = 0.0
@@ -337,158 +359,134 @@ def objective_v2(
         max_workers: int = min(len(target_symbols), _MAX_SYMBOL_WORKERS)
         symbol_results: List[SymbolFoldResult] = []
 
-        if max_workers > 0:
+        if max_workers > 1:
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 futures = [
-                    executor.submit(
-                        _evaluate_symbol_for_fold_parallel,
-                        sym,
-                        params=params,
-                        strategy=strategy,
-                        tf=tf,
-                        data_maps=data_maps,
-                        full_signal_dfs=full_signal_dfs,
-                        test_start=test_start,
-                        test_end=test_end,
-                    )
+                    executor.submit(_evaluate_symbol_for_fold_parallel, sym, params=params, strategy=strategy, tf=tf, 
+                                   data_maps=data_maps, full_signal_dfs=full_signal_dfs, test_start=test_start, test_end=test_end)
                     for sym in target_symbols
                 ]
                 for future in as_completed(futures):
                     result: Optional[SymbolFoldResult] = future.result()
-                    if result is None:
-                        continue
-                    symbol_results.append(result)
+                    if result: symbol_results.append(result)
+        else:
+            for sym in target_symbols:
+                result = _evaluate_symbol_for_fold_parallel(sym, params=params, strategy=strategy, tf=tf, 
+                                                            data_maps=data_maps, full_signal_dfs=full_signal_dfs, test_start=test_start, test_end=test_end)
+                if result: symbol_results.append(result)
 
-        for (
-            sym,
-            s,
-            r,
-            m,
-            t,
-            w,
-            pf,
-            eq,
-            span_days_sym,
-        ) in symbol_results:
-            sym_scores.append(s)
-            sym_rets.append(r)
-            sym_mdds.append(m)
-            sym_trades_fold.append(float(t))
-            sym_wins_fold.append(w)
-            sym_pfs_fold.append(pf)
+        if not symbol_results: raise optuna.TrialPruned()
 
+        fold_sym_cagrs: List[float] = []
+        fold_sym_rets: List[float] = []
+        fold_sym_mdds: List[float] = []
+        fold_sym_trades: List[float] = []
+
+        for (sym, s, r, m, t, w, pf, eq, span_days_sym) in symbol_results:
+            fold_sym_cagrs.append(s)
+            fold_sym_rets.append(r)
+            fold_sym_mdds.append(m)
+            fold_sym_trades.append(t)
+            
             sym_total_scores[sym].append(s)
             sym_total_rets[sym].append(r)
             sym_total_mdds[sym].append(m)
-            sym_total_trades[sym].append(float(t))
+            sym_total_trades[sym].append(t)
             sym_total_wins[sym].append(w)
             sym_total_pfs[sym].append(pf)
 
-            # Aggregate Equity Curve
             if eq.size > 0:
-                eq_start: float = float(eq[0]) if eq[0] > 0 else 1e-9
-                eq_norm: np.ndarray = eq / eq_start
-                if fold_agg_eq is None:
-                    fold_agg_eq = eq_norm.copy()
-                else:
-                    # Sum correctly by maintaining the base capital accurately
-                    min_len_eq: int = min(len(fold_agg_eq), len(eq_norm))
-                    fold_agg_eq = fold_agg_eq[:min_len_eq] + eq_norm[:min_len_eq]
-
+                eq_norm = eq / eq[0]
+                if fold_agg_eq is None: fold_agg_eq = eq_norm.copy()
+                else: 
+                    min_l = min(len(fold_agg_eq), len(eq_norm))
+                    fold_agg_eq = fold_agg_eq[:min_l] + eq_norm[:min_l]
             fold_span_days = max(fold_span_days, span_days_sym)
 
-        if not sym_scores or fold_agg_eq is None:
-            raise optuna.TrialPruned()
+        if fold_agg_eq is None: raise optuna.TrialPruned()
+        
+        # [NEW] Anti-Ruin Protection: If any single symbol went bust (< -99%), prune the trial.
+        for r in fold_sym_rets:
+            if r <= -99.0:
+                return -100.0, 100.0 # Instant ruin penalty (CAGR, MDD)
+        
+        # Normalized Portfolio Equity (Equal Risk/Weight per symbol)
+        port_eq = fold_agg_eq / len(symbol_results)
+        port_mdd = float(calc_mdd_from_equity(port_eq))
+        
+        # Kelly Proxy for Portfolio
+        safe_eq = np.clip(port_eq, 1e-9, None)
+        log_rets = np.log(safe_eq[1:] / safe_eq[:-1])
+        bars_per_year = (len(port_eq) / max(fold_span_days, 1.0)) * 365.0
+        ann_log_ret = np.mean(log_rets) * bars_per_year
+        ann_var = np.var(log_rets) * bars_per_year
+        port_kelly = ann_log_ret - (ann_var * 0.5)
 
-        # Pure Portfolio Metrics: CAGR and MDD
-        start_eq = fold_agg_eq[0] if fold_agg_eq[0] > 0 else 1e-9
-        end_eq = fold_agg_eq[-1]
-        total_ret_ratio = max(end_eq / start_eq, 0.0001)
-        
-        # Portfolio CAGR (kept for logging/attributes if needed)
-        port_cagr = ((total_ret_ratio ** (365.0 / max(fold_span_days, 1.0))) - 1.0) * 100.0
-        port_mdd = float(calc_mdd_from_equity(fold_agg_eq))
-        
-        # No artificial penalties.
-        mean_trades_fold: float = float(np.mean(sym_trades_fold))
-        port_trades: float = float(np.sum(sym_trades_fold))
-        
-        # Prune if zero trades to prevent optimization failure
-        if port_trades == 0.0:
-            raise optuna.TrialPruned()
-            
-        # Use Sortino instead of CAGR (cap at 5.0 to prevent overfitting to low trade count)
-        port_sortino: float = min(float(calc_sortino_from_equity(fold_agg_eq, fold_span_days)), 5.0)
-        
-        # Hybrid Score: Scale absolute returns by their risk-adjusted quality
-        hybrid_score: float = port_cagr * max(port_sortino, 0.0)
-
-        fold_scores.append(hybrid_score)
-        fold_rets.append(float(np.mean(sym_rets)))
+        fold_scores.append(port_kelly)
+        fold_rets.append(float(np.mean(fold_sym_cagrs))) # [FIX] Append CAGR ('s') instead of Ret% ('r')
         fold_mdds.append(port_mdd)
-        fold_trades.append(mean_trades_fold)
-        fold_wins.append(float(np.mean(sym_wins_fold)))
-        fold_pfs.append(float(np.mean(sym_pfs_fold)))
+        fold_trades.append(float(np.mean(fold_sym_trades)))
+        fold_wins.append(float(np.mean([res[5] for res in symbol_results])))
+        fold_pfs.append(float(np.mean([res[6] for res in symbol_results])))
 
-    # --- [NEW] Aggregated Equity Curve Calculation ---
-    # We will build a single continuous aggregated equity curve across all folds and symbols
-    # to evaluate Portfolio Sortino and Portfolio Maximum Drawdown.
-    # Since we didn't store all `eq` arrays in the loop to save memory, we can approximate 
-    # cross-sectional robustness by using average of Sortino/MDD, OR we can collect them.
-    # Actually, the user specifically requested an aggregated portfolio equity curve per trial.
-    # To do this cleanly, we'd need to sum eq arrays.
-    
+    # --- [MULTI-OBJECTIVE: NSGA-II] ---
     has_holdout = len(all_folds) > len(cv_folds)
-    cv_scores = fold_scores[:-1] if has_holdout else fold_scores
-    holdout_score = fold_scores[-1] if has_holdout else 0.0
+    avg_cagr = float(np.mean(fold_rets))
+    cv_mdd = float(np.mean(fold_mdds[:-1] if has_holdout else fold_mdds))
+    avg_pf = float(np.mean(fold_pfs))
+    avg_win_rate = float(np.mean(fold_wins))
 
-    if not cv_scores:
-        raise optuna.TrialPruned()
-    cv_mean_score: float = float(np.mean(cv_scores))
-    cv_mdd: float = float(np.mean(fold_mdds[:-1] if has_holdout else fold_mdds))
-    cv_std_score: float = float(np.std(cv_scores)) if len(cv_scores) > 1 else 0.0
-    # Final consistency-adjusted objective
-    cv_final_obj: float = cv_mean_score - 0.5 * cv_std_score
+    # [UPGRADED] Soft Penalty (Gradient-Preserving Constraint)
+    # NSGA-II needs a continuous slope to learn. A hard gate (-100) destroys the fitness landscape.
+    # We apply a penalty proportional to how far the strategy is from our minimum viable targets.
+    cagr_penalty = 0.0
+    mdd_penalty = 0.0
+    
+    # Target PF: 1.2 / Target WR: 35%
+    if avg_pf < 1.2:
+        cagr_penalty += (1.2 - avg_pf) * 50.0  
+        mdd_penalty += (1.2 - avg_pf) * 20.0
+        
+    if avg_win_rate < 35.0:
+        cagr_penalty += (35.0 - avg_win_rate) * 2.0
+        mdd_penalty += (35.0 - avg_win_rate) * 1.0
 
-    # User Attributes
-    trial.set_user_attr("avg_cagr", cv_mean_score)
+    # [NEW] Consistency Penalty (Robustness Check)
+    # 1. Fold-level variance penalty
+    if len(fold_rets) > 1:
+        std_cagr = float(np.std(fold_rets))
+        std_mdd = float(np.std(fold_mdds))
+        cagr_penalty += std_cagr * 1.5
+        mdd_penalty += std_mdd * 1.0
+
+    # 2. [RESTORED] Symbol-level Worst-Case Penalty (Avoid Single-Asset Curve Fitting)
+    # If we don't penalize the worst asset, Optuna will curve-fit SOL and let ETH die.
+    if len(symbols) > 1:
+        sym_pfs = [float(np.mean(sym_total_pfs[s])) for s in symbols]
+        min_sym_pf = float(np.min(sym_pfs))
+        if min_sym_pf < 1.3: # Increased baseline requirement for all assets
+            cagr_penalty += (1.3 - min_sym_pf) * 40.0 
+            mdd_penalty += (1.3 - min_sym_pf) * 10.0
+
+    # 3. [NEW] Trade Count Penalty (Avoid Statistical Flukes)
+    # Penalize if total trades over 2 years (per symbol) is too low to be trusted.
+    avg_trades_per_sym = float(np.mean(fold_trades)) / max(1, len(symbols))
+    if avg_trades_per_sym < 30.0: # Less than ~1 trade per month is too few
+        cagr_penalty += (30.0 - avg_trades_per_sym) * 2.0
+
+    adjusted_cagr = avg_cagr - cagr_penalty
+    adjusted_mdd = cv_mdd + mdd_penalty
+
+    # Store Attributes (Logging - unpenalized raw values for transparency)
+    trial.set_user_attr("avg_cagr", avg_cagr)
     trial.set_user_attr("avg_mdd", cv_mdd)
-    trial.set_user_attr("avg_ret", float(np.mean(fold_rets)))
     trial.set_user_attr("avg_trades", float(np.mean(fold_trades)))
-    trial.set_user_attr("avg_win_rate", float(np.mean(fold_wins)))
-    trial.set_user_attr("avg_pf", float(np.mean(fold_pfs)))
-    trial.set_user_attr("holdout_cagr", holdout_score)
-    trial.set_user_attr("cv_scores", cv_scores)
+    trial.set_user_attr("avg_pf", avg_pf)
     
     for sym in symbols:
-        if len(sym_total_scores[sym]) > 0:
-            cv_scrs_sym: List[float] = sym_total_scores[sym][:len(cv_folds)]
-            ho_scr_sym: float = sym_total_scores[sym][-1] if has_holdout else 0.0
-            s_cv_mean: float = float(np.mean(cv_scrs_sym)) if cv_scrs_sym else -100.0
-            s_cv_std: float = float(np.std(cv_scrs_sym)) if len(cv_scrs_sym) > 1 else 0.0
-            s_cv_min: float = float(np.min(cv_scrs_sym)) if cv_scrs_sym else -100.0
-            s_pass_fold: int = sum(1 for sc in cv_scrs_sym if sc > 0)
-            s_fold_cnt: int = len(cv_scrs_sym)
-            
-            s_mdd: float = float(np.max(sym_total_mdds[sym]))
-            s_trades: float = float(np.sum(sym_total_trades[sym]))
-            s_ret_sum: float = float(np.sum(sym_total_rets[sym]))
-            s_pf_mean: float = float(np.mean(sym_total_pfs[sym])) if sym_total_pfs[sym] else 1.0
-            s_win: float = float(np.mean(sym_total_wins[sym])) if sym_total_wins[sym] else 0.0
-        else:
-            s_cv_mean, s_cv_std, s_cv_min, s_pass_fold, s_fold_cnt = -100.0, 0.0, -100.0, 0, 0
-            ho_scr_sym, s_mdd, s_trades, s_ret_sum, s_pf_mean, s_win = -100.0, 0.0, 0.0, 0.0, 1.0, 0.0
-            
-        trial.set_user_attr(f"{sym}_cv_mean", s_cv_mean)
-        trial.set_user_attr(f"{sym}_cv_std", s_cv_std)
-        trial.set_user_attr(f"{sym}_cv_min", s_cv_min)
-        trial.set_user_attr(f"{sym}_pass_ratio", f"{s_pass_fold}/{s_fold_cnt}")
-        trial.set_user_attr(f"{sym}_ho_score", ho_scr_sym)
-        trial.set_user_attr(f"{sym}_mdd", s_mdd)
-        trial.set_user_attr(f"{sym}_trades", s_trades)
-        trial.set_user_attr(f"{sym}_ret_sum", s_ret_sum)
-        trial.set_user_attr(f"{sym}_pf", s_pf_mean)
-        trial.set_user_attr(f"{sym}_win", s_win)
+        scrs_sym = sym_total_scores[sym][:len(cv_folds)]
+        trial.set_user_attr(f"{sym}_cv_cagr", float(np.mean(sym_total_scores[sym])) if sym_total_scores[sym] else -100.0)
+        trial.set_user_attr(f"{sym}_mdd", float(np.max(sym_total_mdds[sym])) if sym_total_mdds[sym] else 0.0)
 
-    # Final Dual-Objective return: Maximize Adjusted Hybrid Score, Minimize MDD
-    return cv_final_obj, cv_mdd
+    # Return Penalized Tuple for NSGA-II
+    return adjusted_cagr, adjusted_mdd
