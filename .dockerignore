@@ -2,7 +2,6 @@
 
 # 1. Backtest & Exploration Data (Large CSVs)
 data/*.csv
-results/
 
 # 2. Local Environment, Logs & Legacy
 legacy/
