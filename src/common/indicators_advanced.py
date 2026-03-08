@@ -154,7 +154,7 @@ class IndicatorEngine:
             series,
             (int(window),),
             {},
-            lambda: pd.Series(talib.SMA(series.values, timeperiod=window), index=series.index),
+            lambda: pd.Series(talib.SMA(series.values.astype(np.float64), timeperiod=window), index=series.index),
         )
 
     def calculate_ema(self, series: pd.Series, window: int) -> pd.Series:
@@ -163,7 +163,7 @@ class IndicatorEngine:
             series,
             (int(window),),
             {},
-            lambda: pd.Series(talib.EMA(series.values, timeperiod=window), index=series.index),
+            lambda: pd.Series(talib.EMA(series.values.astype(np.float64), timeperiod=window), index=series.index),
         )
 
     def calculate_wma(self, series: pd.Series, window: int) -> pd.Series:
@@ -172,7 +172,7 @@ class IndicatorEngine:
             series,
             (int(window),),
             {},
-            lambda: pd.Series(talib.WMA(series.values, timeperiod=window), index=series.index),
+            lambda: pd.Series(talib.WMA(series.values.astype(np.float64), timeperiod=window), index=series.index),
         )
 
     def calculate_hma(self, series: pd.Series, window: int) -> pd.Series:
@@ -193,7 +193,7 @@ class IndicatorEngine:
             series,
             (int(window),),
             {},
-            lambda: pd.Series(talib.DEMA(series.values, timeperiod=window), index=series.index),
+            lambda: pd.Series(talib.DEMA(series.values.astype(np.float64), timeperiod=window), index=series.index),
         )
 
     def calculate_tema(self, series: pd.Series, window: int) -> pd.Series:
@@ -202,7 +202,7 @@ class IndicatorEngine:
             series,
             (int(window),),
             {},
-            lambda: pd.Series(talib.TEMA(series.values, timeperiod=window), index=series.index),
+            lambda: pd.Series(talib.TEMA(series.values.astype(np.float64), timeperiod=window), index=series.index),
         )
 
     def calculate_atr(self, df: pd.DataFrame, window: int = 14) -> pd.Series:
@@ -212,7 +212,12 @@ class IndicatorEngine:
             (int(window),),
             {},
             lambda: pd.Series(
-                talib.ATR(df["high"].values, df["low"].values, df["close"].values, timeperiod=window),
+                talib.ATR(
+                    df["high"].values.astype(np.float64), 
+                    df["low"].values.astype(np.float64), 
+                    df["close"].values.astype(np.float64), 
+                    timeperiod=window
+                ),
                 index=df.index,
             ),
         )
@@ -221,27 +226,47 @@ class IndicatorEngine:
         self,
         df: pd.DataFrame,
         window: int = 20,
-        std_dev: float = 2.0,
+        num_std: float = 2.0,
     ) -> tuple[pd.Series, pd.Series, pd.Series]:
         def _compute() -> tuple[pd.Series, pd.Series, pd.Series]:
             upper, middle, lower = talib.BBANDS(
-                df["close"].values,
+                df["close"].values.astype(np.float64),
                 timeperiod=window,
-                nbdevup=std_dev,
-                nbdevdn=std_dev,
+                nbdevup=num_std,
+                nbdevdn=num_std,
                 matype=0,
             )
-            bandwidth = (upper - lower) / middle
             return (
                 pd.Series(upper, index=df.index),
+                pd.Series(middle, index=df.index),
                 pd.Series(lower, index=df.index),
-                pd.Series(bandwidth, index=df.index),
             )
 
         return self._cached_call(
             "calculate_bollinger_bands",
             df,
-            (int(window), float(std_dev)),
+            (int(window), float(num_std)),
+            {},
+            _compute,
+        )
+
+    def calculate_keltner_channels(
+        self,
+        df: pd.DataFrame,
+        window: int = 20,
+        atr_mult: float = 1.5,
+    ) -> tuple[pd.Series, pd.Series, pd.Series]:
+        def _compute() -> tuple[pd.Series, pd.Series, pd.Series]:
+            mid = self.calculate_ema(df["close"], window)
+            atr = self.calculate_atr(df, window=window)
+            upper = mid + (atr * atr_mult)
+            lower = mid - (atr * atr_mult)
+            return upper, mid, lower
+
+        return self._cached_call(
+            "calculate_keltner_channels",
+            df,
+            (int(window), float(atr_mult)),
             {},
             _compute,
         )
@@ -331,7 +356,12 @@ class IndicatorEngine:
             (int(window),),
             {},
             lambda: pd.Series(
-                talib.ADX(df["high"].values, df["low"].values, df["close"].values, timeperiod=window),
+                talib.ADX(
+                    df["high"].values.astype(np.float64), 
+                    df["low"].values.astype(np.float64), 
+                    df["close"].values.astype(np.float64), 
+                    timeperiod=window
+                ),
                 index=df.index,
             ),
         )
@@ -343,10 +373,16 @@ class IndicatorEngine:
 
         def _compute() -> tuple[pd.Series, pd.Series]:
             plus_di = talib.PLUS_DI(
-                df["high"].values, df["low"].values, df["close"].values, timeperiod=window
+                df["high"].values.astype(np.float64), 
+                df["low"].values.astype(np.float64), 
+                df["close"].values.astype(np.float64), 
+                timeperiod=window
             )
             minus_di = talib.MINUS_DI(
-                df["high"].values, df["low"].values, df["close"].values, timeperiod=window
+                df["high"].values.astype(np.float64), 
+                df["low"].values.astype(np.float64), 
+                df["close"].values.astype(np.float64), 
+                timeperiod=window
             )
             return (
                 pd.Series(plus_di, index=df.index),
@@ -379,7 +415,7 @@ class IndicatorEngine:
             series,
             (int(window),),
             {},
-            lambda: pd.Series(talib.RSI(series.values, timeperiod=window), index=series.index),
+            lambda: pd.Series(talib.RSI(series.values.astype(np.float64), timeperiod=window), index=series.index),
         )
 
     def calculate_stochastic(
@@ -391,9 +427,9 @@ class IndicatorEngine:
     ) -> tuple[pd.Series, pd.Series]:
         def _compute() -> tuple[pd.Series, pd.Series]:
             stoch_k, stoch_d = talib.STOCH(
-                df["high"].values,
-                df["low"].values,
-                df["close"].values,
+                df["high"].values.astype(np.float64),
+                df["low"].values.astype(np.float64),
+                df["close"].values.astype(np.float64),
                 fastk_period=window,
                 slowk_period=smooth_k,
                 slowk_matype=0,
@@ -419,7 +455,7 @@ class IndicatorEngine:
     ) -> tuple[pd.Series, pd.Series]:
         def _compute() -> tuple[pd.Series, pd.Series]:
             stoch_k, stoch_d = talib.STOCHRSI(
-                series.values,
+                series.values.astype(np.float64),
                 timeperiod=window,
                 fastk_period=smooth_k,
                 fastd_period=smooth_d,
@@ -444,7 +480,7 @@ class IndicatorEngine:
     ) -> tuple[pd.Series, pd.Series, pd.Series]:
         def _compute() -> tuple[pd.Series, pd.Series, pd.Series]:
             macd, macd_signal, macd_hist = talib.MACD(
-                df["close"].values,
+                df["close"].values.astype(np.float64),
                 fastperiod=fast,
                 slowperiod=slow,
                 signalperiod=signal,
@@ -471,19 +507,19 @@ class IndicatorEngine:
         senkou_span_b_window: int = 52,
     ) -> tuple[pd.Series, pd.Series, pd.Series, pd.Series]:
         def _compute() -> tuple[pd.Series, pd.Series, pd.Series, pd.Series]:
-            high = df["high"]
-            low = df["low"]
+            high = df["high"].values.astype(np.float64)
+            low = df["low"].values.astype(np.float64)
             tenkan_sen = (
-                talib.MAX(high.values, timeperiod=tenkan_window)
-                + talib.MIN(low.values, timeperiod=tenkan_window)
+                talib.MAX(high, timeperiod=tenkan_window)
+                + talib.MIN(low, timeperiod=tenkan_window)
             ) / 2
             kijun_sen = (
-                talib.MAX(high.values, timeperiod=kijun_window)
-                + talib.MIN(low.values, timeperiod=kijun_window)
+                talib.MAX(high, timeperiod=kijun_window)
+                + talib.MIN(low, timeperiod=kijun_window)
             ) / 2
             senkou_span_a = (tenkan_sen + kijun_sen) / 2
-            sb_high = talib.MAX(high.values, timeperiod=senkou_span_b_window)
-            sb_low = talib.MIN(low.values, timeperiod=senkou_span_b_window)
+            sb_high = talib.MAX(high, timeperiod=senkou_span_b_window)
+            sb_low = talib.MIN(low, timeperiod=senkou_span_b_window)
             senkou_span_b = (sb_high + sb_low) / 2
             return (
                 pd.Series(tenkan_sen, index=df.index),
@@ -507,7 +543,12 @@ class IndicatorEngine:
             (int(window),),
             {},
             lambda: pd.Series(
-                talib.CCI(df["high"].values, df["low"].values, df["close"].values, timeperiod=window),
+                talib.CCI(
+                    df["high"].values.astype(np.float64), 
+                    df["low"].values.astype(np.float64), 
+                    df["close"].values.astype(np.float64), 
+                    timeperiod=window
+                ),
                 index=df.index,
             ),
         )
@@ -520,10 +561,10 @@ class IndicatorEngine:
             {},
             lambda: pd.Series(
                 talib.MFI(
-                    df["high"].values,
-                    df["low"].values,
-                    df["close"].values,
-                    df["volume"].values.astype(float),
+                    df["high"].values.astype(np.float64),
+                    df["low"].values.astype(np.float64),
+                    df["close"].values.astype(np.float64),
+                    df["volume"].values.astype(np.float64),
                     timeperiod=window,
                 ),
                 index=df.index,
@@ -543,7 +584,11 @@ class IndicatorEngine:
             {},
             lambda: (
                 pd.Series(
-                    talib.SAR(df["high"].values, df["low"].values, acceleration=step, maximum=max_step),
+                    talib.SAR(
+                        df["high"].values.astype(np.float64), 
+                        df["low"].values.astype(np.float64), 
+                        acceleration=step, maximum=max_step
+                    ),
                     index=df.index,
                 ),
                 None,
@@ -659,9 +704,9 @@ class IndicatorEngine:
         def _compute() -> pd.Series:
             out = pd.Series(
                 talib.WILLR(
-                    df["high"].values,
-                    df["low"].values,
-                    df["close"].values,
+                    df["high"].values.astype(np.float64),
+                    df["low"].values.astype(np.float64),
+                    df["close"].values.astype(np.float64),
                     timeperiod=window,
                 ),
                 index=df.index,
@@ -690,7 +735,7 @@ class IndicatorEngine:
             series,
             (int(window),),
             {},
-            lambda: pd.Series(talib.ROC(series.values, timeperiod=window), index=series.index),
+            lambda: pd.Series(talib.ROC(series.values.astype(np.float64), timeperiod=window), index=series.index),
         )
 
     def calculate_vwma(self, df: pd.DataFrame, window: int = 20) -> pd.Series:
