@@ -298,7 +298,7 @@ class RealTraderSpot:
                 logger.error(f"❌ Failed to parse JSON for {symbol}: {e}")
                 continue
                 
-            symbol_params.setdefault('INDICATOR_TIMEFRAME', '1d')
+            symbol_params.setdefault('INDICATOR_TIMEFRAME', '4h')
             self.params_map[symbol] = symbol_params
             strategy_name = f"RealSpot_{clean_sym}"
             self.strategies[symbol] = UltimateSpotStrategy(strategy_name, symbol_params)
@@ -504,7 +504,7 @@ class RealTraderSpot:
             params = self.params_map[symbol]
             strategy = self.strategies[symbol]
             execution_tf = str(params.get('TIMEFRAME', '4h'))
-            indicator_tf = str(params.get('INDICATOR_TIMEFRAME', '1d'))
+            indicator_tf = str(params.get('INDICATOR_TIMEFRAME', '4h'))
 
             current_price = self._get_market_price_safe(symbol)
             if current_price is None: return
