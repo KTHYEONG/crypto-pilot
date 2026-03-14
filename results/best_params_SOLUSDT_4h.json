@@ -1,0 +1,16 @@
+{
+    "MACRO_EMA_PERIOD": 30,
+    "KC_MULT": 2.3,
+    "SQUEEZE_WINDOW": 4,
+    "MOMENTUM_PERIOD": 20,
+    "VOL_MULT": 0.8,
+    "ATR_PERIOD": 20,
+    "LONG_ATR_MULT": 2.5,
+    "LONG_TRAIL_MULT": 3.5,
+    "SHORT_ATR_MULT": 2.0,
+    "SHORT_TP_MULT": 5.5,
+    "RISK_PER_TRADE": 0.08,
+    "TIMEFRAME": "4h",
+    "LEVERAGE": 20,
+    "USE_COMPOUNDING": true
+}
