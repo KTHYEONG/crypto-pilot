@@ -209,7 +209,7 @@ def main() -> None:
         while True:
             msg = progress_queue.get()
             if msg is None: break
-            k, cur, tot, b_val = msg; bar = tf_bars[k]; bar.n = cur; bar.set_description(f"[{k}] Best CAGR: {b_val:.2f}%"); bar.refresh()
+            k, cur, tot, b_val = msg; bar = tf_bars[k]; bar.n = cur; bar.set_description(f"[{k}] Best Kelly: {b_val:.2f}%"); bar.refresh()
 
     progress_thread = threading.Thread(target=_progress_listener, daemon=True); progress_thread.start()
 
@@ -266,10 +266,12 @@ def main() -> None:
             _logger.info("\n" + "═" * 60)
             _logger.info("  [BEST TRIAL PORTFOLIO INTERNAL BREAKDOWN (IS)]")
             _logger.info("-" * 60)
-            _logger.info(f"  Target Score (CAGR/MDD): {best_trial.values[0]:.2f}% / {best_trial.values[1]:.2f}%")
-            _logger.info(f"  Avg Portfolio CAGR: {best_trial.user_attrs.get('avg_cagr', 0):.2f}%")
-            _logger.info(f"  Avg Portfolio MDD : {best_trial.user_attrs.get('avg_mdd', 0):.2f}%")
-            _logger.info(f"  Avg Portfolio PF  : {best_trial.user_attrs.get('avg_pf', 0):.2f}")
+            _logger.info(f"  Target Score (Kelly/MDD): {best_trial.values[0]:.2f}% / {best_trial.values[1]:.2f}%")
+            _logger.info(f"  Avg Portfolio Kelly: {best_trial.user_attrs.get('port_kelly', 0):.2f}%")
+            _logger.info(f"  Avg Portfolio CAGR : {best_trial.user_attrs.get('avg_cagr', 0):.2f}%")
+            _logger.info(f"  Avg Portfolio MDD  : {best_trial.user_attrs.get('avg_mdd', 0):.2f}%")
+            _logger.info(f"  Avg Portfolio PF   : {best_trial.user_attrs.get('avg_pf', 0):.2f}")
+            _logger.info(f"  Portfolio Sortino  : {best_trial.user_attrs.get('port_sortino', 0):.2f}")
             
             for s_eval in target_symbols:
                 s_cagr = best_trial.user_attrs.get(f"{s_eval}_cv_cagr", -100)
