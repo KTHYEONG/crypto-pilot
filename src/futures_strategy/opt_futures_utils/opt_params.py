@@ -21,9 +21,11 @@ def suggest_params_futures(trial: optuna.Trial, space: Dict[str, Any], tf: str) 
     
     # --- 2. Squeeze Parameters ---
     _suggest("KC_MULT")
+    _suggest("SQUEEZE_WINDOW")
     
     # --- 3. Momentum Breakout Trigger ---
     _suggest("MOMENTUM_PERIOD")
+    _suggest("VOL_MULT")
     
     # --- 4. Exits (Asymmetric Hard Stop vs Fat-Tail Trail) ---
     _suggest("ATR_PERIOD")
