@@ -37,7 +37,12 @@ from config.settings import (
     SLIPPAGE_RATE,
     DATA_DIR,
 )
-from config.opt_config import OPT_FUTURES_CONFIG, get_search_space_futures, get_quarterly_window
+from config.opt_config import (
+    OPT_FUTURES_CONFIG, 
+    get_search_space_futures, 
+    get_quarterly_window,
+    FUTURES_SYMBOLS
+)
 
 from src.optimization.opt_utils import compute_segment_merge_index
 from src.futures_strategy.funding_utils import merge_funding_into_ohlcv
@@ -159,8 +164,8 @@ def _run_tf_optimization(task: Tuple[Any, str], ctx: _TfOptimizationContext) -> 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--symbols", type=str, default="ETH/USDT,SOL/USDT")
-    parser.add_argument("--mode", type=str, choices=["single", "multi"], default="multi")
+    parser.add_argument("--symbols", type=str, default=",".join(FUTURES_SYMBOLS))
+    parser.add_argument("--mode", type=str, choices=["single", "multi"], default="single")
     parser.add_argument("--trials", type=int, default=OPT_FUTURES_CONFIG["total_trials"])
     parser.add_argument("--jobs", type=int, default=int(OPT_FUTURES_CONFIG.get("n_jobs", 10)))
     parser.add_argument("--task-workers", type=int, default=int(OPT_FUTURES_CONFIG.get("task_workers", 1)))
