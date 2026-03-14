@@ -13,6 +13,12 @@ OPT_FUTURES_CONFIG: Dict[str, Any] = {
     "TARGET_TIMEFRAMES": ["4h"],
 }
 
+# [STRATEGIC] Recommended symbols for 4H TSMOM Squeeze optimization
+FUTURES_SYMBOLS: List[str] = [
+    "BTC/USDT", "ETH/USDT", "SOL/USDT", "AVAX/USDT", "NEAR/USDT",
+    "LINK/USDT", "DOGE/USDT", "SUI/USDT", "INJ/USDT", "RENDER/USDT"
+]
+
 # ==============================================================================
 # OPTIMIZATION SPOT SEARCH SPACE & CONFIGURATION
 # ==============================================================================
@@ -36,13 +42,15 @@ WARMUP_PERIODS: Dict[str, int] = {"1h": 2160, "4h": 540}
 # [INSTITUTIONAL GROWTH] TTM Squeeze + Fat-Tail Momentum
 SEARCH_SPACE_4H: Dict[str, Dict[str, Any]] = {
     # --- 1. Macro Trend Filter ---
-    "MACRO_EMA_PERIOD":  {"type": "int",   "low": 50,   "high": 200, "step": 10}, 
+    "MACRO_EMA_PERIOD":  {"type": "int",   "low": 20,   "high": 200, "step": 10}, 
     
     # --- 2. Squeeze Parameters (Relaxed for Opportunity) ---
-    "KC_MULT":           {"type": "float", "low": 1.5,  "high": 3.0,  "step": 0.25}, 
+    "KC_MULT":           {"type": "float", "low": 1.0,  "high": 3.0,  "step": 0.1}, 
+    "SQUEEZE_WINDOW":    {"type": "int",   "low": 3,    "high": 12,   "step": 1},
     
     # --- 3. Momentum Breakout Trigger ---
-    "MOMENTUM_PERIOD":   {"type": "int",   "low": 10,   "high": 40,  "step": 5},
+    "MOMENTUM_PERIOD":   {"type": "int",   "low": 10,   "high": 50,  "step": 5},
+    "VOL_MULT":          {"type": "float", "low": 0.0,  "high": 1.5, "step": 0.1},
     
     # --- 4. Exits (Asymmetric Hard Stop vs Fat-Tail Trail) ---
     "ATR_PERIOD":        {"type": "int",   "low": 14,   "high": 24,  "step": 2},
