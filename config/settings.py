@@ -93,12 +93,12 @@ LOG_MAX_BYTES = 10 * 1024 * 1024  # 10MB
 LOG_BACKUP_COUNT = 5
 
 # --- 대상 심볼 (Futures) ---
-# 최상위 퀀트 포트폴리오 (AVAX, LINK, ETH)
-FUTURES_TARGET_SYMBOLS = ["AVAX/USDT", "LINK/USDT", "ETH/USDT"]
+# 최적화 결과 기반, 100만원 소자본 자산 증식 전용 포트폴리오 (SOL, SUI, BTC)
+FUTURES_TARGET_SYMBOLS = ["SOL/USDT", "SUI/USDT", "BTC/USDT"]
 
 # --- 포지션 사이징 가중치 (Futures) ---
-# 자본 균등 배분 (1/N Rule)
-SYMBOL_ALLOCATION_WEIGHTS = {"AVAX/USDT": 0.33, "LINK/USDT": 0.33, "ETH/USDT": 0.34}
+# "First-Come, First-Served" 방식: 각 심볼이 자본의 50%까지 활용 가능하도록 가중치 설정
+SYMBOL_ALLOCATION_WEIGHTS = {"SOL/USDT": 0.50, "SUI/USDT": 0.50, "BTC/USDT": 0.50}
 
 # ============================================================
 # RealTrader Spot 설정 (Upbit)
