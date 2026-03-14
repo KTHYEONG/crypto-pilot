@@ -324,6 +324,9 @@ def objective_futures(
 
     all_folds = cv_folds + ([holdout_fold] if holdout_fold[2] > holdout_fold[1] else [])
 
+    cagr_penalty: float = 0.0
+    mdd_penalty: float = 0.0
+
     fold_scores: List[float] = []
     fold_rets: List[float] = []
     fold_mdds: List[float] = []
@@ -423,11 +426,34 @@ def objective_futures(
         port_kelly = ann_log_ret - (ann_var * 0.5)
 
         fold_scores.append(port_kelly)
-        fold_rets.append(float(np.mean(fold_sym_cagrs))) # [FIX] Append CAGR ('s') instead of Ret% ('r')
+        fold_rets.append(float(np.mean(fold_sym_cagrs)))
         fold_mdds.append(port_mdd)
         fold_trades.append(float(np.mean(fold_sym_trades)))
         fold_wins.append(float(np.mean([res[5] for res in symbol_results])))
         fold_pfs.append(float(np.mean([res[6] for res in symbol_results])))
+
+        # --- [NEW] Rolling Robustness (Time-series Consistency) ---
+        # Instead of chopping the backtest, we run continuously and evaluate consistency of the resulting equity curve.
+        n_segments = 4
+        if len(port_eq) > n_segments * 10:
+            seg_len = len(port_eq) // n_segments
+            seg_rets = []
+            for s_i in range(n_segments):
+                segment = port_eq[s_i * seg_len : (s_i + 1) * seg_len]
+                if segment[0] > 0:
+                    seg_ret_ratio = segment[-1] / segment[0]
+                    seg_rets.append(max(0.0, seg_ret_ratio - 1.0))
+                else:
+                    seg_rets.append(0.0)
+            
+            # Penalty if any segment is deeply negative or if variance is extremely high
+            if len(seg_rets) > 1:
+                seg_std = float(np.std(seg_rets))
+                seg_avg = float(np.mean(seg_rets))
+                # Coefficient of Variation penalty: higher CV means less consistency
+                cv_penalty = (seg_std / (seg_avg + 1e-6)) * 10.0
+                cagr_penalty += cv_penalty
+                mdd_penalty += cv_penalty * 2.0
 
     # --- [MULTI-OBJECTIVE: NSGA-II] ---
     has_holdout = len(all_folds) > len(cv_folds)
@@ -439,8 +465,6 @@ def objective_futures(
     # [UPGRADED] Soft Penalty (Gradient-Preserving Constraint)
     # NSGA-II needs a continuous slope to learn. A hard gate (-100) destroys the fitness landscape.
     # We apply a penalty proportional to how far the strategy is from our minimum viable targets.
-    cagr_penalty = 0.0
-    mdd_penalty = 0.0
     
     # Target PF: 1.2 / Target WR: 35%
     if avg_pf < 1.2:
@@ -471,9 +495,9 @@ def objective_futures(
     # 3. [NEW] Trade Count Penalty (Avoid Statistical Flukes)
     # Penalize if total trades over 2 years (per symbol) is too low to be trusted.
     avg_trades_per_sym = float(np.mean(fold_trades)) / max(1, len(symbols))
-    if avg_trades_per_sym < 30.0: # Less than ~1 trade per month is too few
-        cagr_penalty += (30.0 - avg_trades_per_sym) * 2.0
-
+    if avg_trades_per_sym < 35.0:  # Relaxed from 50.0 to 35.0 (approx 1.5 trade/month on 4H)
+        cagr_penalty += (35.0 - avg_trades_per_sym) * 3.0
+        mdd_penalty += (35.0 - avg_trades_per_sym) * 1.0
     adjusted_cagr = avg_cagr - cagr_penalty
     adjusted_mdd = cv_mdd + mdd_penalty
 
