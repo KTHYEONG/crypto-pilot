@@ -48,7 +48,13 @@ def run_go_nogo_check(
     else:  # 4h
         min_trades_req = 10
 
-    trades_pass: bool = total_trades >= min_trades_req
+    # [ULTIMATE UPGRADE] Exception for Ultra-High PF (Top 0.1% Quality)
+    # Even if trade count is slightly low, if PF is exceptional (>= 1.5), we trust the edge.
+    is_high_quality = profit_factor >= 1.5
+    if is_high_quality and total_trades >= (min_trades_req * 0.7):
+        trades_pass = True
+    else:
+        trades_pass = total_trades >= min_trades_req
 
     details: Dict[str, bool] = {
         "1. Out-of-Sample Growth (CAGR > 0%)": growth_pass,

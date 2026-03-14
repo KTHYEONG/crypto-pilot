@@ -325,7 +325,8 @@ def objective_futures(
     all_folds = cv_folds + ([holdout_fold] if holdout_fold[2] > holdout_fold[1] else [])
 
     cagr_penalty: float = 0.0
-    mdd_penalty: float = 0.0
+    port_eq: Optional[np.ndarray] = None
+    fold_span_days: float = 0.0
 
     fold_scores: List[float] = []
     fold_rets: List[float] = []
@@ -417,23 +418,25 @@ def objective_futures(
         port_eq = fold_agg_eq / len(symbol_results)
         port_mdd = float(calc_mdd_from_equity(port_eq))
         
-        # Kelly Proxy for Portfolio
+        # [NEW] Calculate True Portfolio CAGR & Kelly Proxy
+        port_ret_ratio = max(port_eq[-1] / port_eq[0], 1e-9) if port_eq[0] > 0 else 1e-9
+        port_cagr = ((port_ret_ratio ** (365.0 / max(fold_span_days, 1.0))) - 1.0) * 100.0
+        
         safe_eq = np.clip(port_eq, 1e-9, None)
         log_rets = np.log(safe_eq[1:] / safe_eq[:-1])
         bars_per_year = (len(port_eq) / max(fold_span_days, 1.0)) * 365.0
         ann_log_ret = np.mean(log_rets) * bars_per_year
         ann_var = np.var(log_rets) * bars_per_year
-        port_kelly = ann_log_ret - (ann_var * 0.5)
+        port_kelly = (ann_log_ret - (ann_var * 0.5)) * 100.0  # Scale to %
 
         fold_scores.append(port_kelly)
-        fold_rets.append(float(np.mean(fold_sym_cagrs)))
+        fold_rets.append(port_cagr)
         fold_mdds.append(port_mdd)
         fold_trades.append(float(np.mean(fold_sym_trades)))
         fold_wins.append(float(np.mean([res[5] for res in symbol_results])))
         fold_pfs.append(float(np.mean([res[6] for res in symbol_results])))
 
-        # --- [NEW] Rolling Robustness (Time-series Consistency) ---
-        # Instead of chopping the backtest, we run continuously and evaluate consistency of the resulting equity curve.
+        # --- Rolling Robustness (Time-series Consistency) ---
         n_segments = 4
         if len(port_eq) > n_segments * 10:
             seg_len = len(port_eq) // n_segments
@@ -445,72 +448,67 @@ def objective_futures(
                     seg_rets.append(max(0.0, seg_ret_ratio - 1.0))
                 else:
                     seg_rets.append(0.0)
-            
-            # Penalty if any segment is deeply negative or if variance is extremely high
             if len(seg_rets) > 1:
                 seg_std = float(np.std(seg_rets))
                 seg_avg = float(np.mean(seg_rets))
-                # Coefficient of Variation penalty: higher CV means less consistency
-                cv_penalty = (seg_std / (seg_avg + 1e-6)) * 10.0
+                cv_penalty = (seg_std / (seg_avg + 1e-6)) * 5.0 # Reduced weight
                 cagr_penalty += cv_penalty
-                mdd_penalty += cv_penalty * 2.0
 
     # --- [MULTI-OBJECTIVE: NSGA-II] ---
-    has_holdout = len(all_folds) > len(cv_folds)
-    avg_cagr = float(np.mean(fold_rets))
-    cv_mdd = float(np.mean(fold_mdds[:-1] if has_holdout else fold_mdds))
+    final_kelly = float(np.mean(fold_scores))
+    final_cagr = float(np.mean(fold_rets))
+    final_mdd = float(np.mean(fold_mdds))
     avg_pf = float(np.mean(fold_pfs))
     avg_win_rate = float(np.mean(fold_wins))
+    avg_trades_per_sym = float(np.mean(fold_trades))
 
-    # [UPGRADED] Soft Penalty (Gradient-Preserving Constraint)
-    # NSGA-II needs a continuous slope to learn. A hard gate (-100) destroys the fitness landscape.
-    # We apply a penalty proportional to how far the strategy is from our minimum viable targets.
-    
-    # Target PF: 1.2 / Target WR: 35%
+    # [INSTITUTIONAL GROWTH METRICS]
+    # We optimize for Kelly Proxy (maximizes long-term compounded growth mathematically)
+    # NSGA-II Objective 1: Maximize Kelly Proxy
+    # NSGA-II Objective 2: Minimize MDD
+
+    # Soft Penalties for unacceptable institutional profiles
     if avg_pf < 1.2:
-        cagr_penalty += (1.2 - avg_pf) * 50.0  
-        mdd_penalty += (1.2 - avg_pf) * 20.0
-        
-    if avg_win_rate < 35.0:
-        cagr_penalty += (35.0 - avg_win_rate) * 2.0
-        mdd_penalty += (35.0 - avg_win_rate) * 1.0
+        cagr_penalty += (1.2 - avg_pf) * 20.0
 
-    # [NEW] Consistency Penalty (Robustness Check)
-    # 1. Fold-level variance penalty
-    if len(fold_rets) > 1:
-        std_cagr = float(np.std(fold_rets))
-        std_mdd = float(np.std(fold_mdds))
-        cagr_penalty += std_cagr * 1.5
-        mdd_penalty += std_mdd * 1.0
+    # Trend following win rate minimum (relaxed from 35% to 25%)
+    if avg_win_rate < 25.0:
+        cagr_penalty += (25.0 - avg_win_rate) * 1.0
 
-    # 2. [RESTORED] Symbol-level Worst-Case Penalty (Avoid Single-Asset Curve Fitting)
-    # If we don't penalize the worst asset, Optuna will curve-fit SOL and let ETH die.
+    # Minimum Trades Count (Avoid statistical flukes)
+    if avg_trades_per_sym < 30.0:
+        cagr_penalty += (30.0 - avg_trades_per_sym) * 2.0
+
+    # Symbol level diversity check (Avoid fitting only 1 asset)
     if len(symbols) > 1:
         sym_pfs = [float(np.mean(sym_total_pfs[s])) for s in symbols]
         min_sym_pf = float(np.min(sym_pfs))
-        if min_sym_pf < 1.3: # Increased baseline requirement for all assets
-            cagr_penalty += (1.3 - min_sym_pf) * 40.0 
-            mdd_penalty += (1.3 - min_sym_pf) * 10.0
+        if min_sym_pf < 1.1: # Ensure minimum viability on the worst-performing asset
+            cagr_penalty += (1.1 - min_sym_pf) * 15.0
+            
+    # 1. Fold-level variance penalty (안정성 평가)
+    # 복원된 CV Fold들 사이의 성과 편차를 감지하여 '운 좋게 맞춘' 결과 차단
+    if len(fold_rets) > 1:
+        std_cagr = float(np.std(fold_rets))
+        cagr_penalty += std_cagr * 0.8
 
-    # 3. [NEW] Trade Count Penalty (Avoid Statistical Flukes)
-    # Penalize if total trades over 2 years (per symbol) is too low to be trusted.
-    avg_trades_per_sym = float(np.mean(fold_trades)) / max(1, len(symbols))
-    if avg_trades_per_sym < 35.0:  # Relaxed from 50.0 to 35.0 (approx 1.5 trade/month on 4H)
-        cagr_penalty += (35.0 - avg_trades_per_sym) * 3.0
-        mdd_penalty += (35.0 - avg_trades_per_sym) * 1.0
-    adjusted_cagr = avg_cagr - cagr_penalty
-    adjusted_mdd = cv_mdd + mdd_penalty
+    adjusted_kelly = final_kelly - cagr_penalty
+    adjusted_mdd = final_mdd
 
     # Store Attributes (Logging - unpenalized raw values for transparency)
-    trial.set_user_attr("avg_cagr", avg_cagr)
-    trial.set_user_attr("avg_mdd", cv_mdd)
-    trial.set_user_attr("avg_trades", float(np.mean(fold_trades)))
+    trial.set_user_attr("avg_cagr", final_cagr)
+    trial.set_user_attr("avg_mdd", final_mdd)
+    trial.set_user_attr("std_cagr", float(np.std(fold_rets)) if len(fold_rets) > 1 else 0.0)
+    trial.set_user_attr("avg_trades", avg_trades_per_sym)
     trial.set_user_attr("avg_pf", avg_pf)
+    trial.set_user_attr("port_kelly", final_kelly)
+    
+    if port_eq is not None and fold_span_days > 0:
+        trial.set_user_attr("port_sortino", calc_sortino_from_equity(port_eq, fold_span_days))
     
     for sym in symbols:
-        scrs_sym = sym_total_scores[sym][:len(cv_folds)]
         trial.set_user_attr(f"{sym}_cv_cagr", float(np.mean(sym_total_scores[sym])) if sym_total_scores[sym] else -100.0)
         trial.set_user_attr(f"{sym}_mdd", float(np.max(sym_total_mdds[sym])) if sym_total_mdds[sym] else 0.0)
 
     # Return Penalized Tuple for NSGA-II
-    return adjusted_cagr, adjusted_mdd
+    return adjusted_kelly, adjusted_mdd
