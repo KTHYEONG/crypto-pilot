@@ -131,6 +131,8 @@ class UltimateStrategyBase(StrategyBase):
         momentum_period = int(self.params.get("MOMENTUM_PERIOD", 20))
         kc_mult = float(self.params.get("KC_MULT", 1.5))
         atr_period = int(self.params.get("ATR_PERIOD", 20))
+        vol_mult = float(self.params.get("VOL_MULT", 1.2))
+        squeeze_window = int(self.params.get("SQUEEZE_WINDOW", 5))
         
         # --- 2. Core Indicators Calculation ---
         df["atr"] = ind.calculate_atr(df, window=atr_period)
@@ -151,12 +153,12 @@ class UltimateStrategyBase(StrategyBase):
         
         # Squeeze Condition: BB is entirely inside KC
         df["is_squeezing"] = (df["bb_upper"] < df["kc_upper"]) & (df["bb_lower"] > df["kc_lower"])
-        # Has it squeezed recently? (In the last 5 bars)
-        df["recent_squeeze"] = df["is_squeezing"].rolling(window=5).sum() > 0
+        # Has it squeezed recently?
+        df["recent_squeeze"] = df["is_squeezing"].rolling(window=squeeze_window).sum() > 0
         
         # Volume Spike
         df["vol_sma"] = df["volume"].rolling(window=20).mean()
-        vol_spike = df["volume"] > df["vol_sma"] * 1.2
+        vol_spike = df["volume"] > df["vol_sma"] * vol_mult
         
         # Breakout Channels
         df["dc_upper"] = df["high"].rolling(window=momentum_period).max()
