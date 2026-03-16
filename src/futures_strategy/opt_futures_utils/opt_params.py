@@ -40,6 +40,10 @@ def suggest_params_futures(trial: optuna.Trial, space: Dict[str, Any], tf: str) 
     # --- 5. Portfolio Risk Sizing ---
     _suggest("RISK_PER_TRADE")
 
+    # --- 6. Microstructure (CVD) Filters ---
+    _suggest("CVD_WINDOW")
+    _suggest("TAKER_RATIO_THRESHOLD")
+
     # [INSTITUTIONAL] Leverage & Execution Config
     params["LEVERAGE"] = 20
     params["USE_COMPOUNDING"] = True

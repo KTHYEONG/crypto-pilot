@@ -167,19 +167,56 @@ class UltimateStrategyBase(StrategyBase):
         # Exhaustion fakeout guard: candle range > ATR * mult => climax, skip entry
         candle_range = df["high"] - df["low"]
         df["is_exhausted"] = candle_range > (df["atr"] * exhaustion_mult)
+
+        # --- 3. Microstructure: CVD & Taker Ratio Filters ---
+        cvd_window = int(self.params.get("CVD_WINDOW", 5))
+        taker_ratio_threshold = float(self.params.get("TAKER_RATIO_THRESHOLD", 1.1))
+
+        if "taker_buy_base_volume" in df.columns:
+            # Guard against negative/NaN volumes
+            df["taker_buy_base_volume"] = df["taker_buy_base_volume"].astype(np.float64).clip(lower=0.0)
+            df["volume"] = df["volume"].astype(np.float64).clip(lower=0.0)
+
+            df["taker_sell_volume"] = np.maximum(df["volume"] - df["taker_buy_base_volume"], 0.0)
+            df["vol_delta"] = df["taker_buy_base_volume"] - df["taker_sell_volume"]
+            df["cvd"] = df["vol_delta"].rolling(window=cvd_window).sum()
+
+            safe_sell = df["taker_sell_volume"].replace(0.0, 1e-8)
+            df["taker_ratio"] = df["taker_buy_base_volume"] / safe_sell
+
+            cvd_bull_filter = (df["cvd"] > 0.0) & (df["taker_ratio"] >= taker_ratio_threshold)
+            cvd_bear_filter = (df["cvd"] < 0.0) & (df["taker_ratio"] <= (1.0 / taker_ratio_threshold))
+        else:
+            # Fallback: if taker data is unavailable, do not block entries
+            cvd_bull_filter = pd.Series(True, index=df.index)
+            cvd_bear_filter = pd.Series(True, index=df.index)
         
         # Breakout Channels
         df["dc_upper"] = df["high"].rolling(window=momentum_period).max()
         df["dc_lower"] = df["low"].rolling(window=momentum_period).min()
         
-        # --- 3. Signal Generation (Squeeze Breakout) ---
+        # --- 4. Signal Generation (Squeeze Breakout) ---
         macro_uptrend = df["close"] > df["macro_ema"]
         macro_downtrend = df["close"] < df["macro_ema"]
         
-        # Bull: Squeeze + macro up + KC upper breakout + vol z-spike + not exhausted
-        bull_breakout = df["recent_squeeze"] & macro_uptrend & (df["close"] > df["kc_upper"]) & vol_spike & (~df["is_exhausted"])
-        # Bear: Squeeze + macro down + KC lower breakout + vol z-spike + not exhausted
-        bear_breakout = df["recent_squeeze"] & macro_downtrend & (df["close"] < df["kc_lower"]) & vol_spike & (~df["is_exhausted"])
+        # Bull: Squeeze + macro up + KC upper breakout + vol z-spike + not exhausted + CVD/taker confirmation
+        bull_breakout = (
+            df["recent_squeeze"]
+            & macro_uptrend
+            & (df["close"] > df["kc_upper"])
+            & vol_spike
+            & (~df["is_exhausted"])
+            & cvd_bull_filter
+        )
+        # Bear: Squeeze + macro down + KC lower breakout + vol z-spike + not exhausted + CVD/taker confirmation
+        bear_breakout = (
+            df["recent_squeeze"]
+            & macro_downtrend
+            & (df["close"] < df["kc_lower"])
+            & vol_spike
+            & (~df["is_exhausted"])
+            & cvd_bear_filter
+        )
         
         # For Numba engine execution:
         df["strength_filter"] = np.where(bull_breakout | bear_breakout, 1, 0)
