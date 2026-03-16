@@ -28,12 +28,14 @@ def suggest_params_futures(trial: optuna.Trial, space: Dict[str, Any], tf: str) 
     _suggest("VOL_Z_THRESHOLD")
     _suggest("EXHAUSTION_MULT")
     
-    # --- 4. Exits (Asymmetric Hard Stop vs Fat-Tail Trail) ---
+    # --- 4. Exits (Asymmetric Hard Stop vs Fat-Tail Trail + Scale-out) ---
     _suggest("ATR_PERIOD")
     _suggest("LONG_ATR_MULT")
     _suggest("LONG_TRAIL_MULT")
+    _suggest("LONG_SCALE_PCT")
     _suggest("SHORT_ATR_MULT")
     _suggest("SHORT_TP_MULT")
+    _suggest("SHORT_TRAIL_MULT")
     
     # --- 5. Portfolio Risk Sizing ---
     _suggest("RISK_PER_TRADE")
