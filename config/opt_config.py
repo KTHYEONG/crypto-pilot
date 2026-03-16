@@ -50,7 +50,8 @@ SEARCH_SPACE_4H: Dict[str, Dict[str, Any]] = {
     
     # --- 3. Momentum Breakout Trigger ---
     "MOMENTUM_PERIOD":   {"type": "int",   "low": 10,   "high": 50,  "step": 5},
-    "VOL_MULT":          {"type": "float", "low": 0.0,  "high": 1.5, "step": 0.1},
+    "VOL_Z_THRESHOLD":   {"type": "float", "low": 1.0,  "high": 3.0,  "step": 0.25},
+    "EXHAUSTION_MULT":   {"type": "float", "low": 2.5,  "high": 5.0,  "step": 0.5},
     
     # --- 4. Exits (Asymmetric Hard Stop vs Fat-Tail Trail) ---
     "ATR_PERIOD":        {"type": "int",   "low": 14,   "high": 24,  "step": 2},
