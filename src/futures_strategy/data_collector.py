@@ -1,9 +1,14 @@
-import pandas as pd
-from .binance_client import BinanceClient
-import sys
+from __future__ import annotations
+
+import json
 import os
 import re
-import json
+import sys
+from pathlib import Path
+
+import pandas as pd
+
+from .binance_client import BinanceClient
 
 # 프로젝트 루트 경로 추가 (모듈 import 문제 해결)
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
@@ -82,17 +87,29 @@ class DataCollector:
             json.dump(meta, f, ensure_ascii=False, indent=2)
         tmp.replace(path)
 
-    def _normalize_df(self, df):
+    TAKE_COLUMNS = (
+        "timestamp",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "datetime",
+        "taker_buy_base_volume",
+        "taker_buy_quote_volume",
+    )
+
+    def _normalize_df(self, df: pd.DataFrame | None) -> pd.DataFrame:
         if df is None or df.empty:
-            return pd.DataFrame(columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'datetime'])
+            return pd.DataFrame(columns=list(self.TAKE_COLUMNS))
 
         out = df.copy()
-        if 'datetime' not in out.columns and 'timestamp' in out.columns:
-            out['datetime'] = pd.to_datetime(out['timestamp'], unit='ms')
-        elif 'datetime' in out.columns:
-            out['datetime'] = pd.to_datetime(out['datetime'])
+        if "datetime" not in out.columns and "timestamp" in out.columns:
+            out["datetime"] = pd.to_datetime(out["timestamp"], unit="ms")
+        elif "datetime" in out.columns:
+            out["datetime"] = pd.to_datetime(out["datetime"])
 
-        out = out.drop_duplicates(subset=['timestamp']).sort_values('timestamp').reset_index(drop=True)
+        out = out.drop_duplicates(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
         return out
 
     def _read_parquet(self, path):
@@ -209,7 +226,7 @@ class DataCollector:
             s = pd.Timestamp(miss_start).strftime("%Y-%m-%d")
             e = pd.Timestamp(miss_end).strftime("%Y-%m-%d")
             self.logger.info(f"Fetching missing range for {symbol} {timeframe}: {s} ~ {e}")
-            fetched = self.client.fetch_ohlcv(symbol, timeframe, s, e)
+            fetched = self.client.fetch_ohlcv_with_taker(symbol, timeframe, s, e)
             fetched = self._normalize_df(fetched)
             if not fetched.empty:
                 validator = DataValidator()
