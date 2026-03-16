@@ -5,6 +5,7 @@ import logging
 import math
 import os
 import queue
+import time
 import sys
 import gc
 import threading
@@ -59,6 +60,7 @@ logging.basicConfig(level=logging.INFO, format="%(message)s", force=True)
 _logger: logging.Logger = logging.getLogger("opt_futures")
 
 SEP_WIDTH: int = 60
+PROGRESS_MIN_INTERVAL: float = 0.2
 
 class _ThreadSafeJournalStorageWrapper:
     def __init__(self, storage: Any) -> None:
@@ -90,6 +92,7 @@ class _TfOptimizationContext:
     progress_queue: Any 
     mode: str = "single"
     use_journal_storage: bool = True
+    progress_min_interval: float = PROGRESS_MIN_INTERVAL
 
 @dataclass(frozen=True)
 class _ParallelExecutionPlan:
@@ -155,12 +158,29 @@ def _run_tf_optimization(task: Tuple[Any, str], ctx: _TfOptimizationContext) -> 
         sampler=sampler
     )
 
+    last_progress_ts: float = 0.0
+    last_progress_trial: int = -1
+
     def _progress_cb(study: optuna.Study, trial: optuna.trial.FrozenTrial) -> None:
+        nonlocal last_progress_ts, last_progress_trial
+        if ctx.progress_queue is None:
+            return
+        cur = trial.number + 1
+        if cur == last_progress_trial:
+            return
+        if ctx.progress_min_interval > 0.0 and cur < ctx.n_trials:
+            now = time.monotonic()
+            if (now - last_progress_ts) < ctx.progress_min_interval:
+                return
+            last_progress_ts = now
+        else:
+            last_progress_ts = time.monotonic()
+        last_progress_trial = cur
         try:
             b_val = float(trial.values[0]) if trial.values else 0.0
         except Exception:
             b_val = 0.0
-        ctx.progress_queue.put((f"{target_str}_{tf}", trial.number + 1, ctx.n_trials, b_val))
+        ctx.progress_queue.put((f"{target_str}_{tf}", cur, ctx.n_trials, b_val))
 
     tf_space = get_search_space_futures(tf)
 
@@ -176,12 +196,13 @@ def _run_tf_optimization(task: Tuple[Any, str], ctx: _TfOptimizationContext) -> 
         "[%s/%s/%s] Starting NSGA-II optimization (n_jobs=%d for trial parallelism)...",
         target_str, tf, ctx.mode, ctx.n_jobs,
     )
+    callbacks = [_progress_cb] if ctx.progress_queue is not None else []
     study.optimize(
         _objective_with_logging,
         n_trials=ctx.n_trials,
         n_jobs=ctx.n_jobs,
         catch=(Exception,),
-        callbacks=[_progress_cb],
+        callbacks=callbacks,
     )
 
     best_trials = list(study.best_trials)
@@ -207,6 +228,7 @@ def main() -> None:
     parser.add_argument("--task-workers", type=int, default=int(OPT_FUTURES_CONFIG.get("task_workers", 1)))
     parser.add_argument("--tf", type=str, choices=["1h", "4h"], default=OPT_FUTURES_CONFIG.get("TARGET_TIMEFRAMES", ["4h"])[0])
     parser.add_argument("--reference-date", type=str, default=None)
+    parser.add_argument("--progress", action="store_true", help="Enable progress bars (default: off in multi mode).")
     args = parser.parse_args()
 
     FETCH_START_DATE, START_DATE, IS_END_DATE, END_DATE = get_quarterly_window(args.reference_date)
@@ -235,31 +257,37 @@ def main() -> None:
     tasks = [(tuple(symbols), args.tf)] if args.mode == "multi" else [(s, args.tf) for s in symbols]
     plan = _resolve_parallel_plan(len(tasks), args.jobs, args.task_workers, 0)
     use_mp = len(tasks) > 1 and plan.task_workers > 1
+    enable_progress = args.mode != "multi" or args.progress
     if args.mode == "multi":
         _logger.info("Multi mode: 1 portfolio task, trial parallelism n_jobs=%d (--jobs to override).", plan.jobs_per_task)
-    manager = Manager() if use_mp else None; progress_queue = manager.Queue() if manager else queue.Queue()
+    manager = Manager() if use_mp and enable_progress else None
+    progress_queue = manager.Queue() if manager else (queue.SimpleQueue() if enable_progress else None)
 
     tf_bars = {}
-    for i, (target, tf) in enumerate(tasks):
-        key = "_".join(target) if isinstance(target, tuple) else target
-        tf_bars[f"{key}_{tf}"] = tqdm(total=args.trials, desc=f"[{key}] Waiting...", position=i, leave=True)
+    if enable_progress:
+        for i, (target, tf) in enumerate(tasks):
+            key = "_".join(target) if isinstance(target, tuple) else target
+            tf_bars[f"{key}_{tf}"] = tqdm(total=args.trials, desc=f"[{key}] Waiting...", position=i, leave=True)
 
     _multi_short_label = (
         f"Multi({len(tasks[0][0])} syms)_{tasks[0][1]}" if tasks and isinstance(tasks[0][0], tuple) else None
     )
 
-    def _progress_listener():
-        while True:
-            msg = progress_queue.get()
-            if msg is None: break
-            k, cur, tot, b_val = msg
-            bar = tf_bars[k]
-            bar.n = cur
-            desc = f"[{_multi_short_label}] Best Kelly: {b_val:.2f}%" if _multi_short_label else f"[{k}] Best Kelly: {b_val:.2f}%"
-            bar.set_description(desc)
-            bar.refresh()
+    progress_thread = None
+    if enable_progress:
+        def _progress_listener():
+            while True:
+                msg = progress_queue.get()
+                if msg is None:
+                    break
+                k, cur, tot, b_val = msg
+                bar = tf_bars[k]
+                bar.n = cur
+                desc = f"[{_multi_short_label}] Best Kelly: {b_val:.2f}%" if _multi_short_label else f"[{k}] Best Kelly: {b_val:.2f}%"
+                bar.set_description(desc)
+                bar.refresh()
 
-    progress_thread = threading.Thread(target=_progress_listener, daemon=True); progress_thread.start()
+        progress_thread = threading.Thread(target=_progress_listener, daemon=True); progress_thread.start()
 
     best_results = {}
     try:
@@ -283,7 +311,10 @@ def main() -> None:
                 ))
                 best_results[t_res] = trials
     finally:
-        progress_queue.put(None); progress_thread.join(timeout=2.0)
+        if progress_queue is not None:
+            progress_queue.put(None)
+        if progress_thread is not None:
+            progress_thread.join(timeout=2.0)
         if manager: manager.shutdown()
 
     final_summaries = []
