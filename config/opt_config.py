@@ -57,7 +57,7 @@ SEARCH_SPACE_4H: Dict[str, Dict[str, Any]] = {
     "ATR_PERIOD":        {"type": "int",   "low": 14,   "high": 24,  "step": 2},
     "LONG_ATR_MULT":     {"type": "float", "low": 2.0,  "high": 5.0,  "step": 0.5},
     "LONG_TRAIL_MULT":   {"type": "float", "low": 2.5,  "high": 10.0, "step": 0.5},
-    "LONG_SCALE_PCT":    {"type": "float", "low": 0.05, "high": 0.30, "step": 0.05},
+    "LONG_SCALE_ATR_MULT": {"type": "float", "low": 2.0, "high": 8.0, "step": 0.5},
     "SHORT_ATR_MULT":    {"type": "float", "low": 2.0,  "high": 4.0,  "step": 0.5},
     "SHORT_TP_MULT":     {"type": "float", "low": 2.0,  "high": 6.0,  "step": 0.5},
     "SHORT_TRAIL_MULT":  {"type": "float", "low": 2.0,  "high": 5.0,  "step": 0.5}, 

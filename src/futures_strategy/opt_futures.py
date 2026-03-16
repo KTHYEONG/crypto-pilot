@@ -128,10 +128,24 @@ def _run_tf_optimization(task: Tuple[Any, str], ctx: _TfOptimizationContext) -> 
         storage = _ThreadSafeJournalStorageWrapper(JournalStorage(backend))
     else:
         storage = InMemoryStorage()
+    
+    def constraints_func(trial: optuna.trial.FrozenTrial) -> tuple[float, ...]:
+        pf: float = float(trial.user_attrs.get("avg_pf", 0.0) or 0.0)
+        win_rate: float = float(trial.user_attrs.get("avg_win_rate", 0.0) or 0.0)
+        trades: float = float(trial.user_attrs.get("avg_trades", 0.0) or 0.0)
+        min_sym_pf: float = float(trial.user_attrs.get("min_sym_pf", 0.0) or 0.0)
 
+        c1: float = 1.2 - pf
+        c2: float = 25.0 - win_rate
+        c3: float = 30.0 - trades
+        c4: float = 1.1 - min_sym_pf
+
+        return (c1, c2, c3, c4)
+    
     sampler = optuna.samplers.NSGAIISampler(
         seed=ctx.seeds[0],
-        population_size=OPT_FUTURES_CONFIG.get("n_startup_trials", 500)
+        population_size=OPT_FUTURES_CONFIG.get("n_startup_trials", 150),
+        constraints_func=constraints_func,
     )
     
     study = optuna.create_study(
@@ -159,8 +173,27 @@ def _run_tf_optimization(task: Tuple[Any, str], ctx: _TfOptimizationContext) -> 
             raise
 
     _logger.info("[%s/%s/%s] Starting NSGA-II optimization...", target_str, tf, ctx.mode)
-    study.optimize(_objective_with_logging, n_trials=ctx.n_trials, n_jobs=ctx.n_jobs, catch=(Exception,), callbacks=[_progress_cb])
-    return (target_obj, tf), study.best_trials
+    study.optimize(
+        _objective_with_logging,
+        n_trials=ctx.n_trials,
+        n_jobs=ctx.n_jobs,
+        catch=(Exception,),
+        callbacks=[_progress_cb],
+    )
+
+    best_trials = list(study.best_trials)
+    if not best_trials:
+        complete_trials = [
+            t
+            for t in study.get_trials(deepcopy=True)
+            if t.state == TrialState.COMPLETE and t.values is not None
+        ]
+        if complete_trials:
+            # Fallback: use best Kelly trial when no feasible (constraint-satisfying) trials exist
+            best_single = max(complete_trials, key=lambda t: t.values[0])
+            best_trials = [best_single]
+
+    return (target_obj, tf), best_trials
 
 def main() -> None:
     parser = argparse.ArgumentParser()
