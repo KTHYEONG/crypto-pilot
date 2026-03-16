@@ -53,13 +53,14 @@ SEARCH_SPACE_4H: Dict[str, Dict[str, Any]] = {
     "VOL_Z_THRESHOLD":   {"type": "float", "low": 1.0,  "high": 3.0,  "step": 0.25},
     "EXHAUSTION_MULT":   {"type": "float", "low": 2.5,  "high": 5.0,  "step": 0.5},
     
-    # --- 4. Exits (Asymmetric Hard Stop vs Fat-Tail Trail) ---
+    # --- 4. Exits (Asymmetric Hard Stop vs Fat-Tail Trail + Scale-out) ---
     "ATR_PERIOD":        {"type": "int",   "low": 14,   "high": 24,  "step": 2},
-    "LONG_ATR_MULT":     {"type": "float", "low": 2.0,  "high": 5.0,  "step": 0.5}, # Initial Stop
-    "LONG_TRAIL_MULT":   {"type": "float", "low": 2.5,  "high": 10.0, "step": 0.5}, # Fat tail trailing
-    
+    "LONG_ATR_MULT":     {"type": "float", "low": 2.0,  "high": 5.0,  "step": 0.5},
+    "LONG_TRAIL_MULT":   {"type": "float", "low": 2.5,  "high": 10.0, "step": 0.5},
+    "LONG_SCALE_PCT":    {"type": "float", "low": 0.05, "high": 0.30, "step": 0.05},
     "SHORT_ATR_MULT":    {"type": "float", "low": 2.0,  "high": 4.0,  "step": 0.5},
-    "SHORT_TP_MULT":     {"type": "float", "low": 2.0,  "high": 6.0,  "step": 0.5}, 
+    "SHORT_TP_MULT":     {"type": "float", "low": 2.0,  "high": 6.0,  "step": 0.5},
+    "SHORT_TRAIL_MULT":  {"type": "float", "low": 2.0,  "high": 5.0,  "step": 0.5}, 
     
     # --- 5. Volatility Targeting (Compounding) ---
     "RISK_PER_TRADE":    {"type": "float", "low": 0.02, "high": 0.08, "step": 0.01}, 
