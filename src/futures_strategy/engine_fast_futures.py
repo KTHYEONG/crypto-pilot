@@ -43,7 +43,7 @@ class BacktestEngineFast:
         self.logger = logging.getLogger(__name__)
         self._prepare_data()
 
-    # RSM-VT _REQUIRED_INDICATOR_COLS (macro_ema for long scale-out threshold)
+        # RSM-VT _REQUIRED_INDICATOR_COLS
     _REQUIRED_INDICATOR_COLS: frozenset = frozenset({
         "entry_upper", "entry_lower", "trend_direction", "strength_filter", "atr", "macro_ema"
     })
@@ -86,7 +86,7 @@ class BacktestEngineFast:
         long_trail_mult = float(self.strategy.params.get('LONG_TRAIL_MULT', 3.0))
         short_atr_mult = float(self.strategy.params.get('SHORT_ATR_MULT', 2.0))
         short_tp_mult = float(self.strategy.params.get('SHORT_TP_MULT', 3.0))
-        long_scale_pct = float(self.strategy.params.get('LONG_SCALE_PCT', 0.15))
+        long_scale_atr_mult = float(self.strategy.params.get('LONG_SCALE_ATR_MULT', 3.0))
         short_trail_mult = float(self.strategy.params.get('SHORT_TRAIL_MULT', 3.0))
         leverage = float(self.leverage)
         
@@ -131,7 +131,7 @@ class BacktestEngineFast:
             self.initial_balance, leverage, self.fee_rate, self.slippage_rate,
             self.risk_per_trade, timestamps, funding_rate_sums,
             long_atr_mult, long_trail_mult, short_atr_mult, short_tp_mult,
-            long_scale_pct, short_trail_mult,
+            long_scale_atr_mult, short_trail_mult,
             warmup_bars, self._execution_start_idx,
             use_compounding, max_capital_usage
         )
@@ -258,7 +258,7 @@ def backtest_loop_numba(
     initial_balance, leverage, fee_rate, slippage_rate,
     risk_per_trade, timestamps, funding_rate_sums,
     long_atr_mult, long_trail_mult, short_atr_mult, short_tp_mult,
-    long_scale_pct, short_trail_mult,
+    long_scale_atr_mult, short_trail_mult,
     warmup_bars, execution_start_idx,
     use_compounding, max_capital_usage
 ):
@@ -339,25 +339,23 @@ def backtest_loop_numba(
                 if c_high > highest:
                     highest = c_high
                 pos_atr = atr[entry_idx]
-
-                # Long: scale-out 50% at macro_ema * (1 + long_scale_pct)
+                
+                # Long: scale-out 50% at ATR-based target from entry
                 if not has_scaled_out:
-                    macro_val = macro_ema_arr[i]
-                    if not np.isnan(macro_val) and macro_val > 0.0:
-                        scale_price = macro_val * (1.0 + long_scale_pct)
-                        if c_high >= scale_price:
-                            scale_exit_price = c_open if c_open >= scale_price else scale_price
-                            scale_amount = amount / 2.0
-                            pnl_scale = (scale_exit_price - entry_price) * scale_amount
-                            exit_fee_scale = scale_amount * scale_exit_price * fee_rate
-                            pnl_scale -= exit_fee_scale
-                            balance += (scale_amount * entry_price) / leverage + pnl_scale
-                            if trade_count < max_trades:
-                                trades[trade_count] = [entry_idx, i, pos_side, entry_price, scale_exit_price, pnl_scale, scale_amount, entry_fee_stored / 2.0]
-                                trade_count += 1
-                            amount -= scale_amount
-                            entry_fee_stored -= (entry_fee_stored / 2.0)
-                            has_scaled_out = True
+                    scale_price = entry_price + (pos_atr * long_scale_atr_mult)
+                    if c_high >= scale_price:
+                        scale_exit_price = c_open if c_open >= scale_price else scale_price
+                        scale_amount = amount / 2.0
+                        pnl_scale = (scale_exit_price - entry_price) * scale_amount
+                        exit_fee_scale = scale_amount * scale_exit_price * fee_rate
+                        pnl_scale -= exit_fee_scale
+                        balance += (scale_amount * entry_price) / leverage + pnl_scale
+                        if trade_count < max_trades:
+                            trades[trade_count] = [entry_idx, i, pos_side, entry_price, scale_exit_price, pnl_scale, scale_amount, entry_fee_stored / 2.0]
+                            trade_count += 1
+                        amount -= scale_amount
+                        entry_fee_stored -= (entry_fee_stored / 2.0)
+                        has_scaled_out = True
 
                 # Long trailing stop for remainder
                 if c_open <= stop_price:
