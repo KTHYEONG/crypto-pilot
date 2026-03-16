@@ -1,0 +1,321 @@
+"""
+2D Portfolio backtest engine: single global balance, per-symbol state arrays.
+For use when mode=multi (aligned Time x Symbol matrix).
+"""
+from __future__ import annotations
+
+import logging
+from typing import Any
+
+import numpy as np
+import pandas as pd
+from numba import njit
+
+_logger: logging.Logger = logging.getLogger(__name__)
+
+
+class PortfolioBacktestEngineFast:
+    def __init__(
+        self,
+        aligned_data: dict[str, np.ndarray],
+        symbol_names: list[str],
+        strategy_params: dict[str, Any],
+        initial_balance: float = 1_000_000,
+        fee_rate: float = 0.0004,
+        slippage_rate: float = 0.001,
+    ) -> None:
+        self.data = aligned_data
+        self.symbols = symbol_names
+        self.params = strategy_params
+        self.initial_balance = initial_balance
+        self.fee_rate = fee_rate
+        self.slippage_rate = slippage_rate
+
+        self.leverage = float(self.params.get("LEVERAGE", 1.0))
+        self.risk_per_trade = float(self.params.get("RISK_PER_TRADE", 0.02))
+
+    def run(
+        self,
+    ) -> tuple[pd.DataFrame, np.ndarray, float]:
+        close_2d = self.data["close"]
+        high_2d = self.data["high"]
+        low_2d = self.data["low"]
+        open_2d = self.data["open"]
+
+        entry_upper = self.data["entry_upper"]
+        entry_lower = self.data["entry_lower"]
+        trend_dir = self.data["trend_direction"]
+        strength_filter = self.data["strength_filter"]
+        atr_2d = self.data["atr"]
+
+        l_atr_mult = float(self.params.get("LONG_ATR_MULT", 3.0))
+        l_trail_mult = float(self.params.get("LONG_TRAIL_MULT", 3.0))
+        s_atr_mult = float(self.params.get("SHORT_ATR_MULT", 2.0))
+        s_tp_mult = float(self.params.get("SHORT_TP_MULT", 3.0))
+        l_scale_atr = float(self.params.get("LONG_SCALE_ATR_MULT", 3.0))
+        s_trail_mult = float(self.params.get("SHORT_TRAIL_MULT", 3.0))
+
+        trades_arr, final_balance, equity_curve = backtest_portfolio_numba(
+            close_2d,
+            high_2d,
+            low_2d,
+            open_2d,
+            entry_upper,
+            entry_lower,
+            trend_dir,
+            strength_filter,
+            atr_2d,
+            self.initial_balance,
+            self.leverage,
+            self.fee_rate,
+            self.slippage_rate,
+            self.risk_per_trade,
+            l_atr_mult,
+            l_trail_mult,
+            s_atr_mult,
+            s_tp_mult,
+            l_scale_atr,
+            s_trail_mult,
+        )
+
+        trades_list: list[dict[str, Any]] = []
+        for t in trades_arr:
+            sym_idx = int(t[0])
+            trades_list.append({
+                "symbol": self.symbols[sym_idx],
+                "entry_idx": int(t[1]),
+                "exit_idx": int(t[2]),
+                "side": "LONG" if t[3] == 1 else "SHORT",
+                "entry_price": float(t[4]),
+                "exit_price": float(t[5]),
+                "pnl": float(t[6]),
+                "amount": float(t[7]),
+                "entry_fee": float(t[8]),
+            })
+
+        return pd.DataFrame(trades_list), equity_curve, final_balance
+
+
+@njit(nogil=True, cache=True)
+def backtest_portfolio_numba(
+    close_2d: np.ndarray,
+    high_2d: np.ndarray,
+    low_2d: np.ndarray,
+    open_2d: np.ndarray,
+    entry_upper: np.ndarray,
+    entry_lower: np.ndarray,
+    trend_dir: np.ndarray,
+    strength_filter: np.ndarray,
+    atr_2d: np.ndarray,
+    initial_balance: float,
+    leverage: float,
+    fee_rate: float,
+    slippage_rate: float,
+    risk_per_trade: float,
+    l_atr_mult: float,
+    l_trail_mult: float,
+    s_atr_mult: float,
+    s_tp_mult: float,
+    l_scale_atr: float,
+    s_trail_mult: float,
+) -> tuple[np.ndarray, float, np.ndarray]:
+    n_bars = close_2d.shape[0]
+    n_syms = close_2d.shape[1]
+
+    balance = initial_balance
+    equity_curve = np.zeros(n_bars, dtype=np.float64)
+    equity_curve[0] = initial_balance
+
+    in_pos = np.zeros(n_syms, dtype=np.bool_)
+    pos_side = np.zeros(n_syms, dtype=np.int8)
+    entry_p = np.zeros(n_syms, dtype=np.float64)
+    entry_idx = np.zeros(n_syms, dtype=np.int32)
+    amount = np.zeros(n_syms, dtype=np.float64)
+    entry_fee_stored = np.zeros(n_syms, dtype=np.float64)
+
+    stop_p = np.zeros(n_syms, dtype=np.float64)
+    highest = np.zeros(n_syms, dtype=np.float64)
+    lowest = np.zeros(n_syms, dtype=np.float64)
+    has_scaled = np.zeros(n_syms, dtype=np.bool_)
+
+    max_trades = 50000
+    trades = np.zeros((max_trades, 9), dtype=np.float64)
+    t_count = 0
+
+    for i in range(1, n_bars):
+        unrealized_total = 0.0
+        used_margin_total = 0.0
+
+        for s in range(n_syms):
+            if in_pos[s]:
+                if np.isnan(close_2d[i, s]):
+                    continue
+                u_pnl = (close_2d[i, s] - entry_p[s]) * amount[s] * pos_side[s]
+                unrealized_total += u_pnl
+                used_margin_total += (amount[s] * entry_p[s]) / leverage
+
+        current_equity = balance + unrealized_total
+        equity_curve[i] = current_equity
+
+        if current_equity <= 0:
+            break
+
+        free_margin = current_equity - used_margin_total
+
+        # --- Exit logic ---
+        for s in range(n_syms):
+            if not in_pos[s]:
+                continue
+            if np.isnan(close_2d[i, s]):
+                continue
+
+            c_open = open_2d[i, s]
+            c_high = high_2d[i, s]
+            c_low = low_2d[i, s]
+            pos_atr = atr_2d[entry_idx[s], s]
+            exit_triggered = False
+            exit_price = 0.0
+
+            if pos_side[s] == 1:
+                if c_high > highest[s]:
+                    highest[s] = c_high
+
+                if not has_scaled[s]:
+                    scale_target = entry_p[s] + (pos_atr * l_scale_atr)
+                    if c_high >= scale_target:
+                        sc_price = c_open if c_open >= scale_target else scale_target
+                        sc_amount = amount[s] / 2.0
+
+                        pnl = (sc_price - entry_p[s]) * sc_amount
+                        fee = sc_amount * sc_price * fee_rate
+                        balance += (sc_amount * entry_p[s]) / leverage + (pnl - fee)
+
+                        trades[t_count] = [
+                            s, entry_idx[s], i, 1.0, entry_p[s], sc_price,
+                            pnl - fee, sc_amount, entry_fee_stored[s] / 2.0,
+                        ]
+                        t_count += 1
+
+                        amount[s] -= sc_amount
+                        entry_fee_stored[s] = entry_fee_stored[s] / 2.0
+                        has_scaled[s] = True
+
+                if c_open <= stop_p[s]:
+                    exit_price = c_open * (1.0 - slippage_rate)
+                    exit_triggered = True
+                elif c_low <= stop_p[s]:
+                    exit_price = stop_p[s] * (1.0 - slippage_rate)
+                    exit_triggered = True
+
+                if not exit_triggered:
+                    new_stop = highest[s] - (pos_atr * l_trail_mult)
+                    if new_stop > stop_p[s]:
+                        stop_p[s] = new_stop
+
+            elif pos_side[s] == -1:
+                if c_low < lowest[s]:
+                    lowest[s] = c_low
+                tp_price = entry_p[s] - (pos_atr * s_tp_mult)
+
+                if not has_scaled[s]:
+                    if c_open <= tp_price or c_low <= tp_price:
+                        sc_price = c_open if c_open <= tp_price else tp_price
+                        sc_amount = amount[s] / 2.0
+                        pnl = (entry_p[s] - sc_price) * sc_amount
+                        fee = sc_amount * sc_price * fee_rate
+                        balance += (sc_amount * entry_p[s]) / leverage + (pnl - fee)
+
+                        trades[t_count] = [
+                            s, entry_idx[s], i, -1.0, entry_p[s], sc_price,
+                            pnl - fee, sc_amount, entry_fee_stored[s] / 2.0,
+                        ]
+                        t_count += 1
+
+                        amount[s] -= sc_amount
+                        entry_fee_stored[s] = entry_fee_stored[s] / 2.0
+                        has_scaled[s] = True
+                        breakeven = entry_p[s] - (entry_p[s] * fee_rate * 2.0)
+                        stop_p[s] = breakeven
+                else:
+                    new_stop = lowest[s] + (pos_atr * s_trail_mult)
+                    if new_stop < stop_p[s]:
+                        stop_p[s] = new_stop
+
+                if c_open >= stop_p[s]:
+                    exit_price = c_open * (1.0 + slippage_rate)
+                    exit_triggered = True
+                elif c_high >= stop_p[s]:
+                    exit_price = stop_p[s] * (1.0 + slippage_rate)
+                    exit_triggered = True
+
+            if exit_triggered:
+                if pos_side[s] == 1:
+                    pnl = (exit_price - entry_p[s]) * amount[s]
+                else:
+                    pnl = (entry_p[s] - exit_price) * amount[s]
+                fee = amount[s] * exit_price * fee_rate
+                balance += ((amount[s] * entry_p[s]) / leverage) + (pnl - fee)
+
+                trades[t_count] = [
+                    s, entry_idx[s], i, float(pos_side[s]), entry_p[s],
+                    exit_price, pnl - fee, amount[s], entry_fee_stored[s],
+                ]
+                t_count += 1
+                in_pos[s] = False
+
+        unrealized_total = 0.0
+        used_margin_total = 0.0
+        for s in range(n_syms):
+            if in_pos[s] and not np.isnan(close_2d[i, s]):
+                unrealized_total += (close_2d[i, s] - entry_p[s]) * amount[s] * pos_side[s]
+                used_margin_total += (amount[s] * entry_p[s]) / leverage
+        current_equity = balance + unrealized_total
+        free_margin = current_equity - used_margin_total
+
+        # --- Entry logic ---
+        prev_i = i - 1
+        for s in range(n_syms):
+            if in_pos[s]:
+                continue
+            if np.isnan(open_2d[i, s]) or np.isnan(strength_filter[prev_i, s]):
+                continue
+
+            if strength_filter[prev_i, s] == 1:
+                c_open = open_2d[i, s]
+                do_entry = False
+                p_side = 0
+                fill_p = 0.0
+
+                if trend_dir[prev_i, s] == 1 and high_2d[i, s] > entry_upper[prev_i, s]:
+                    fill_p = max(c_open, entry_upper[prev_i, s]) * (1.0 + slippage_rate)
+                    p_side, do_entry = 1, True
+                elif trend_dir[prev_i, s] == -1 and low_2d[i, s] < entry_lower[prev_i, s]:
+                    fill_p = min(c_open, entry_lower[prev_i, s]) * (1.0 - slippage_rate)
+                    p_side, do_entry = -1, True
+
+                if do_entry:
+                    pos_atr = atr_2d[prev_i, s]
+                    stop_dist = (pos_atr * l_atr_mult) if p_side == 1 else (pos_atr * s_atr_mult)
+
+                    if stop_dist > 0:
+                        risk_amt = current_equity * risk_per_trade
+                        target_qty = risk_amt / stop_dist
+                        req_margin = (target_qty * fill_p) / leverage
+                        entry_fee = target_qty * fill_p * fee_rate
+
+                        if free_margin >= (req_margin + entry_fee):
+                            balance -= req_margin + entry_fee
+                            free_margin -= req_margin + entry_fee
+
+                            in_pos[s] = True
+                            pos_side[s] = p_side
+                            entry_p[s] = fill_p
+                            entry_idx[s] = i
+                            amount[s] = target_qty
+                            entry_fee_stored[s] = entry_fee
+                            highest[s] = fill_p
+                            lowest[s] = fill_p
+                            has_scaled[s] = False
+                            stop_p[s] = fill_p - stop_dist if p_side == 1 else fill_p + stop_dist
+
+    return trades[:t_count], balance, equity_curve
