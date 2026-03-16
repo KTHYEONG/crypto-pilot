@@ -290,6 +290,9 @@ class RealTraderFutures:
         self._log_last_emit_ts: Dict[str, float] = {}
         self._log_last_message: Dict[str, str] = {}
 
+        self._db_write_lock = threading.Lock()
+        self._time_sync_lock = threading.Lock()
+
         self._executor: ThreadPoolExecutor | None = None
 
         self._setup_signal_handlers()
@@ -423,19 +426,20 @@ class RealTraderFutures:
     def _sync_server_time_offset(
         self, force: bool = False, sync_interval_seconds: int = 60
     ):
-        now = datetime.utcnow()
-        elapsed = (now - self._last_server_time_sync).total_seconds()
-        if (not force) and elapsed < max(5, int(sync_interval_seconds)):
-            return
-        local_ms = int(now.timestamp() * 1000)
-        try:
-            server_ms = self._fetch_server_time_ms_safe()
-            if server_ms > 0:
-                self._server_time_offset_ms = int(server_ms - local_ms)
+        with self._time_sync_lock:
+            now = datetime.utcnow()
+            elapsed = (now - self._last_server_time_sync).total_seconds()
+            if (not force) and elapsed < max(5, int(sync_interval_seconds)):
+                return
+            local_ms = int(now.timestamp() * 1000)
+            try:
+                server_ms = self._fetch_server_time_ms_safe()
+                if server_ms > 0:
+                    self._server_time_offset_ms = int(server_ms - local_ms)
+                    self._last_server_time_sync = now
+            except Exception as e:
                 self._last_server_time_sync = now
-        except Exception as e:
-            self._last_server_time_sync = now
-            logger.debug(f"[time-sync] server time sync failed: {e}")
+                logger.debug(f"[time-sync] server time sync failed: {e}")
 
     def _get_reference_now_ms(self) -> int:
         self._sync_server_time_offset(force=False)
@@ -657,6 +661,8 @@ class RealTraderFutures:
         - dry_run=True  -> 실제 주문 대신 DRY-RUN 더미 응답 반환
         - dry_run=False -> BinanceClient.place_order_smart로 실제 주문 실행
         """
+        client = self._get_client_for_symbol(symbol)
+
         if self.dry_run:
             logger.info(
                 "[DRY-RUN] place_order_smart(%s, side=%s, qty=%.8f, reduce_only=%s)",
@@ -682,15 +688,15 @@ class RealTraderFutures:
                 params_dict["clientOrderId"] = cid
 
                 exchange_symbol = symbol
-                if hasattr(self.client, "get_market_symbol"):
-                    exchange_symbol = self.client.get_market_symbol(symbol)
+                if hasattr(client, "get_market_symbol"):
+                    exchange_symbol = client.get_market_symbol(symbol)
                 else:
                     if "/" in symbol and ":" not in symbol:
                         base, quote = symbol.split("/", 1)
                         if quote in ["USDT", "USDC"]:
                             exchange_symbol = f"{symbol}:{quote}"
 
-                return self.client.exchange.create_order(
+                return client.exchange.create_order(
                     symbol=exchange_symbol,
                     type="limit",
                     side=side.lower(),
@@ -702,7 +708,7 @@ class RealTraderFutures:
                 logger.error(f"❌ LIMIT order failed for {symbol}: {e}")
                 raise
 
-        return self.client.place_order_smart(
+        return client.place_order_smart(
             symbol,
             side,
             qty,
@@ -729,6 +735,8 @@ class RealTraderFutures:
         - dry_run=True  -> DRY-RUN 더미 SL 주문
         - dry_run=False -> BinanceClient.place_stop_market_order 호출
         """
+        client = self._get_client_for_symbol(symbol)
+
         if self.dry_run:
             logger.info(
                 "[DRY-RUN] place_stop_market_order(%s, side=%s, qty=%.8f, stop=%.8f)",
@@ -751,7 +759,7 @@ class RealTraderFutures:
             unique_string = f"SL_{symbol}_{side}_{qty}_{stop_price}_{uuid.uuid4().hex}"
             client_order_id = "RT_" + hashlib.md5(unique_string.encode()).hexdigest()[:20]
 
-        return self.client.place_stop_market_order(
+        return client.place_stop_market_order(
             symbol,
             side,
             qty,
@@ -772,6 +780,8 @@ class RealTraderFutures:
         - dry_run=True  -> DRY-RUN 더미 TP 주문
         - dry_run=False -> BinanceClient.place_take_profit_market_order (있을 때만)
         """
+        client = self._get_client_for_symbol(symbol)
+
         if self.dry_run:
             logger.info(
                 "[DRY-RUN] place_take_profit_market_order(%s, side=%s, qty=%.8f, tp=%.8f)",
@@ -790,8 +800,8 @@ class RealTraderFutures:
                 "type": "TAKE_PROFIT_MARKET",
             }
 
-        if hasattr(self.client, "place_take_profit_market_order"):
-            return self.client.place_take_profit_market_order(
+        if hasattr(client, "place_take_profit_market_order"):
+            return client.place_take_profit_market_order(
                 symbol,
                 side,
                 qty,
@@ -806,11 +816,13 @@ class RealTraderFutures:
         - dry_run=True  -> 실제 취소 대신 DRY-RUN 로그만 남김
         - dry_run=False -> BinanceClient.cancel_all_orders 호출
         """
+        client = self._get_client_for_symbol(symbol)
+
         if self.dry_run:
             logger.info("[DRY-RUN] cancel_all_orders(%s)", symbol)
             return True
 
-        return self.client.cancel_all_orders(symbol)
+        return client.cancel_all_orders(symbol)
 
     def _resolve_timeframes(self, params: dict) -> Tuple[str, str]:
         execution_tf = str(params.get("TIMEFRAME", "1h"))
@@ -1300,22 +1312,23 @@ class RealTraderFutures:
                 )
             )
 
-        self.trade_db.record_trade(
-            symbol=symbol,
-            side=expected_side,
-            action="ENTRY",
-            quantity=filled_qty,
-            price=confirmed_entry_price,
-            reason=f"2D Rank Alloc ({'UP' if is_long else 'DN'})",
-            params={
-                "timeframe": execution_tf,
-                "atr": atr,
-                "sl": stop_price,
-                "sl_active": sl_active,
-                "tp": tp_price if use_tp_entry else 0.0,
-                "tp_active": tp_active,
-            },
-        )
+        with self._db_write_lock:
+            self.trade_db.record_trade(
+                symbol=symbol,
+                side=expected_side,
+                action="ENTRY",
+                quantity=filled_qty,
+                price=confirmed_entry_price,
+                reason=f"2D Rank Alloc ({'UP' if is_long else 'DN'})",
+                params={
+                    "timeframe": execution_tf,
+                    "atr": atr,
+                    "sl": stop_price,
+                    "sl_active": sl_active,
+                    "tp": tp_price if use_tp_entry else 0.0,
+                    "tp_active": tp_active,
+                },
+            )
 
         now_utc_str = datetime.utcnow().isoformat()
         update_payload = {
@@ -1499,6 +1512,7 @@ class RealTraderFutures:
     def _scan_entries(self, symbol: str) -> Optional[dict]:
         """Phase 2: 진입 시그널 동시 스캔 (No Execution)"""
         df: Optional[pd.DataFrame] = None
+        signal_df: Optional[pd.DataFrame] = None
         try:
             params = self.params_map[symbol]
             strategy = self.strategies[symbol]
@@ -1770,6 +1784,8 @@ class RealTraderFutures:
         finally:
             if df is not None:
                 del df
+            if signal_df is not None:
+                del signal_df
 
     def _execute_entry_order(self, cand: dict) -> None:
         """Phase 3: 랭킹 기반 실진입 주문"""
@@ -2058,21 +2074,22 @@ class RealTraderFutures:
                         scale_pnl_pct = (
                             (scale_pnl / entry_value) * 100.0 if entry_value > 0 else 0.0
                         )
-                        self.trade_db.record_trade(
-                            symbol=symbol,
-                            side=side_str,
-                            action="EXIT_PARTIAL",
-                            quantity=scale_qty,
-                            price=scale_exit_price,
-                            entry_price=entry_price,
-                            pnl=scale_pnl,
-                            pnl_pct=scale_pnl_pct,
-                            reason=(
-                                "Scale-Out 50% (LONG)"
-                                if amount > 0
-                                else "Scale-Out 50% (SHORT)"
-                            ),
-                        )
+                        with self._db_write_lock:
+                            self.trade_db.record_trade(
+                                symbol=symbol,
+                                side=side_str,
+                                action="EXIT_PARTIAL",
+                                quantity=scale_qty,
+                                price=scale_exit_price,
+                                entry_price=entry_price,
+                                pnl=scale_pnl,
+                                pnl_pct=scale_pnl_pct,
+                                reason=(
+                                    "Scale-Out 50% (LONG)"
+                                    if amount > 0
+                                    else "Scale-Out 50% (SHORT)"
+                                ),
+                            )
                     self.state_manager.update_symbol_state(
                         symbol,
                         {
@@ -2092,7 +2109,8 @@ class RealTraderFutures:
                     )
                     if scale_order_id:
                         try:
-                            self.client.exchange.cancel_order(scale_order_id, symbol)
+                            client = self._get_client_for_symbol(symbol)
+                            client.exchange.cancel_order(scale_order_id, symbol)
                         except Exception:
                             pass
 
@@ -2372,17 +2390,18 @@ class RealTraderFutures:
                 f"EXIT {side_str} {symbol} | PnL: {pnl_pct:+.2f}% | Reason: {reason}"
             )
 
-            self.trade_db.record_trade(
-                symbol=symbol,
-                side=side_str,
-                action="EXIT",
-                quantity=closed_qty,
-                price=exit_price_for_calc,
-                entry_price=entry_price,
-                pnl=pnl,
-                pnl_pct=pnl_pct,
-                reason=reason,
-            )
+            with self._db_write_lock:
+                self.trade_db.record_trade(
+                    symbol=symbol,
+                    side=side_str,
+                    action="EXIT",
+                    quantity=closed_qty,
+                    price=exit_price_for_calc,
+                    entry_price=entry_price,
+                    pnl=pnl,
+                    pnl_pct=pnl_pct,
+                    reason=reason,
+                )
             self.state_manager.clear_symbol_state(symbol)
         except Exception as e:
             logger.error(f"Error in _check_exit for {symbol}: {e}")
@@ -2418,7 +2437,8 @@ class RealTraderFutures:
 
     @network_api_retry
     def _detect_stop_loss_orders(self, symbol: str) -> list:
-        open_orders = self.client.fetch_open_orders(symbol)
+        client = self._get_client_for_symbol(symbol)
+        open_orders = client.fetch_open_orders(symbol)
         return [
             o
             for o in open_orders
@@ -2432,7 +2452,8 @@ class RealTraderFutures:
         sl_order_id = str(state.get("sl_order_id", "") or "") if state else ""
         if sl_order_id:
             try:
-                self.client.exchange.cancel_order(sl_order_id, symbol)
+                client = self._get_client_for_symbol(symbol)
+                client.exchange.cancel_order(sl_order_id, symbol)
                 self.state_manager.update_symbol_state(
                     symbol,
                     {
@@ -2444,7 +2465,8 @@ class RealTraderFutures:
                 pass
 
         try:
-            open_orders = self.client.fetch_open_orders(symbol)
+            client = self._get_client_for_symbol(symbol)
+            open_orders = client.fetch_open_orders(symbol)
             stop_orders = [
                 o
                 for o in open_orders
@@ -2453,7 +2475,7 @@ class RealTraderFutures:
             ]
             for o in stop_orders:
                 try:
-                    self.client.exchange.cancel_order(o["id"], symbol)
+                    client.exchange.cancel_order(o["id"], symbol)
                 except Exception:
                     pass
         except Exception:
@@ -2464,9 +2486,10 @@ class RealTraderFutures:
             sorted_orders = sorted(
                 sl_orders, key=lambda x: x.get("timestamp", 0), reverse=True
             )
+            client = self._get_client_for_symbol(symbol)
             for old_order in sorted_orders[1:]:
                 try:
-                    self.client.exchange.cancel_order(old_order["id"], symbol)
+                    client.exchange.cancel_order(old_order["id"], symbol)
                 except:
                     pass
             return [sorted_orders[0]]
@@ -2669,18 +2692,19 @@ class RealTraderFutures:
             pnl = gross_pnl - total_fee
             pnl_pct = (pnl / entry_value) * 100.0 if entry_value > 0 else 0.0
 
-        self.trade_db.record_trade(
-            symbol=symbol,
-            side=side_str,
-            action="EXIT",
-            quantity=abs(actual_amount),
-            price=exit_price,
-            entry_price=(entry_price if entry_price > 0 else None),
-            pnl=pnl,
-            pnl_pct=pnl_pct,
-            reason="Exit Recovery",
-            params={"recovery_attempt_count": int(recovery_attempts)},
-        )
+        with self._db_write_lock:
+            self.trade_db.record_trade(
+                symbol=symbol,
+                side=side_str,
+                action="EXIT",
+                quantity=abs(actual_amount),
+                price=exit_price,
+                entry_price=(entry_price if entry_price > 0 else None),
+                pnl=pnl,
+                pnl_pct=pnl_pct,
+                reason="Exit Recovery",
+                params={"recovery_attempt_count": int(recovery_attempts)},
+            )
         self.state_manager.clear_symbol_state(symbol)
         return True
 
@@ -2702,15 +2726,19 @@ class RealTraderFutures:
                 # [2D 마진 공유 아키텍처] 3-Phase Execution
                 # ==============================================================
 
-                # Phase 1: Exit First (가용 마진 확보 최우선)
-                for symbol in self.symbols:
-                    if self._shutdown_requested:
-                        break
-                    try:
-                        self._process_exits(symbol)
-                    except Exception as e:
-                        logger.error("Error in Phase1 (exit) for %s: %s", symbol, e)
-                    time.sleep(SYMBOL_DELAY_SECONDS)
+                # Phase 1: Exit First (가용 마진 확보 최우선, 스레드풀 병렬 처리)
+                if self._executor is not None:
+                    future_exits = {
+                        self._executor.submit(self._process_exits, symbol): symbol
+                        for symbol in self.symbols
+                        if not self._shutdown_requested
+                    }
+                    for future in as_completed(future_exits):
+                        symbol = future_exits[future]
+                        try:
+                            future.result()
+                        except Exception as e:
+                            logger.error("Error in Phase1 (exit) for %s: %s", symbol, e)
 
                 # Phase 2: Signal Scan (동시 타점 스캔, 스레드풀 적용)
                 entry_candidates: list[dict] = []
