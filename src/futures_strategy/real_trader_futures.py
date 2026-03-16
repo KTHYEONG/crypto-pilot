@@ -64,6 +64,7 @@ from config.settings import (
     SYMBOL_DELAY_SECONDS,
     FUTURES_STATE_FILE,
     SLIPPAGE_RATE,
+    FUTURES_LIVE_SYMBOLS,
 )
 from src.futures_strategy.binance_client import BinanceClient
 from src.futures_strategy.strategies_futures import UltimateStrategy
@@ -232,11 +233,13 @@ class StateManager:
 
 
 class RealTraderFutures:
-    def __init__(self, enable_oracle_optimization: bool = False):
+    def __init__(self, enable_oracle_optimization: bool = False, dry_run: bool = False):
         self.client = BinanceClient(BINANCE_API_KEY, BINANCE_SECRET)
         self.strategies: Dict[str, UltimateStrategy] = {}
         self.params_map: Dict[str, dict] = {}
         self.symbols: list = []
+
+        self.dry_run: bool = bool(dry_run)
 
         self.trade_db = TradeHistoryDB(TRADE_HISTORY_DB)
         self.health_manager = HealthCheckManager(HEARTBEAT_FILE)
@@ -323,11 +326,10 @@ class RealTraderFutures:
         logger.info("Loading strategies from JSON files in results/...")
         results_dir = os.path.join(project_root, "results")
 
-        # 이름이 가장 긴(가장 많은 심볼이 포함된) 최신 JSON 파일 자동 검색
-        json_files = glob.glob(os.path.join(results_dir, "best_params_*_4h.json"))
-        multi_path = max(json_files, key=len) if json_files else None
+        # [FIX] 명확하게 multi 포트폴리오 파일을 지정하여 오인 로드 방지
+        multi_path = os.path.join(results_dir, "best_params_multi_4h.json")
 
-        if multi_path and os.path.exists(multi_path):
+        if os.path.exists(multi_path):
             logger.info(
                 "Detected multi-portfolio config: %s",
                 os.path.basename(multi_path),
@@ -339,19 +341,10 @@ class RealTraderFutures:
                 logger.error(f"❌ Failed to parse multi-portfolio JSON: {e}")
                 raise
 
-            # [FIX 3] 엄격한 OOS 검증을 통과한 Golden 6 심볼만 실거래 대상으로 승인
-            multi_pass_symbols: list[str] = [
-                "AVAX/USDT",
-                "DOGE/USDT",
-                "ETH/USDT",
-                "LINK/USDT",
-                "NEAR/USDT",
-                "SUI/USDT",
-            ]
-
-            self.symbols = multi_pass_symbols.copy()
+            # [FIX 3] 엄격한 OOS 검증을 통과한 심볼만 실거래 대상으로 승인 (settings.py 참조)
+            self.symbols = list(FUTURES_LIVE_SYMBOLS)
             logger.info(
-                "Live Golden 6 multi-portfolio symbols: %s", ", ".join(self.symbols)
+                "Live multi-portfolio symbols: %s", ", ".join(self.symbols)
             )
 
             for symbol in self.symbols:
@@ -588,6 +581,7 @@ class RealTraderFutures:
                     "highest_price": float(entry_price),
                     "lowest_price": float(entry_price),
                     "recovery_bootstrapped": True,
+                    "has_scaled_out": True,
                 },
             )
             logger.warning("[%s] Bootstrapped local state from live position.", symbol)
@@ -611,25 +605,40 @@ class RealTraderFutures:
         post_only_requote_max: Optional[int] = None,
     ):
         """
-        DRY-RUN 모드용 가상 주문 실행.
-        실제 거래소에는 주문을 보내지 않고, 로깅과 더미 응답만 반환한다.
+        주문 실행 래퍼.
+        - dry_run=True  -> 실제 주문 대신 DRY-RUN 더미 응답 반환
+        - dry_run=False -> BinanceClient.place_order_smart로 실제 주문 실행
         """
-        logger.info(
-            "[DRY-RUN] place_order_smart(%s, side=%s, qty=%.8f, reduce_only=%s)",
+        if self.dry_run:
+            logger.info(
+                "[DRY-RUN] place_order_smart(%s, side=%s, qty=%.8f, reduce_only=%s)",
+                symbol,
+                side,
+                qty,
+                reduce_only,
+            )
+            return {
+                "id": "dry-run-order",
+                "symbol": symbol,
+                "side": side,
+                "amount": float(qty),
+                "price": float(current_price) if current_price is not None else None,
+                "reduce_only": bool(reduce_only),
+                "status": "closed",
+            }
+
+        return self.client.place_order_smart(
             symbol,
             side,
             qty,
-            reduce_only,
+            atr=atr,
+            current_price=current_price,
+            reduce_only=reduce_only,
+            allow_market_fallback=allow_market_fallback,
+            order_deadline_ms=order_deadline_ms,
+            post_only_wait_seconds=post_only_wait_seconds,
+            post_only_requote_max=post_only_requote_max,
         )
-        return {
-            "id": "dry-run-order",
-            "symbol": symbol,
-            "side": side,
-            "amount": float(qty),
-            "price": float(current_price) if current_price is not None else None,
-            "reduce_only": bool(reduce_only),
-            "status": "closed",
-        }
 
     @network_api_retry
     def _place_stop_loss_safe(
@@ -640,24 +649,29 @@ class RealTraderFutures:
         stop_price: float,
     ):
         """
-        DRY-RUN 모드용 가상 Stop Loss 주문.
+        서버 사이드 Stop Loss 주문 실행 래퍼.
+        - dry_run=True  -> DRY-RUN 더미 SL 주문
+        - dry_run=False -> BinanceClient.place_stop_market_order 호출
         """
-        logger.info(
-            "[DRY-RUN] place_stop_market_order(%s, side=%s, qty=%.8f, stop=%.8f)",
-            symbol,
-            side,
-            qty,
-            stop_price,
-        )
-        return {
-            "id": "dry-run-sl",
-            "symbol": symbol,
-            "side": side,
-            "amount": float(qty),
-            "stopPrice": float(stop_price),
-            "status": "open",
-            "type": "STOP_MARKET",
-        }
+        if self.dry_run:
+            logger.info(
+                "[DRY-RUN] place_stop_market_order(%s, side=%s, qty=%.8f, stop=%.8f)",
+                symbol,
+                side,
+                qty,
+                stop_price,
+            )
+            return {
+                "id": "dry-run-sl",
+                "symbol": symbol,
+                "side": side,
+                "amount": float(qty),
+                "stopPrice": float(stop_price),
+                "status": "open",
+                "type": "STOP_MARKET",
+            }
+
+        return self.client.place_stop_market_order(symbol, side, qty, stop_price)
 
     @network_api_retry
     def _place_take_profit_safe(
@@ -668,32 +682,49 @@ class RealTraderFutures:
         tp_price: float,
     ):
         """
-        DRY-RUN 모드용 가상 Take Profit 주문.
+        서버 사이드 Take Profit 주문 실행 래퍼.
+        - dry_run=True  -> DRY-RUN 더미 TP 주문
+        - dry_run=False -> BinanceClient.place_take_profit_market_order (있을 때만)
         """
-        logger.info(
-            "[DRY-RUN] place_take_profit_market_order(%s, side=%s, qty=%.8f, tp=%.8f)",
-            symbol,
-            side,
-            qty,
-            tp_price,
-        )
-        return {
-            "id": "dry-run-tp",
-            "symbol": symbol,
-            "side": side,
-            "amount": float(qty),
-            "tpPrice": float(tp_price),
-            "status": "open",
-            "type": "TAKE_PROFIT_MARKET",
-        }
+        if self.dry_run:
+            logger.info(
+                "[DRY-RUN] place_take_profit_market_order(%s, side=%s, qty=%.8f, tp=%.8f)",
+                symbol,
+                side,
+                qty,
+                tp_price,
+            )
+            return {
+                "id": "dry-run-tp",
+                "symbol": symbol,
+                "side": side,
+                "amount": float(qty),
+                "tpPrice": float(tp_price),
+                "status": "open",
+                "type": "TAKE_PROFIT_MARKET",
+            }
+
+        if hasattr(self.client, "place_take_profit_market_order"):
+            return self.client.place_take_profit_market_order(
+                symbol,
+                side,
+                qty,
+                tp_price,
+            )
+        return None
 
     @network_api_retry
     def _cancel_all_orders_safe(self, symbol: str):
         """
-        DRY-RUN 모드용 가상 주문 취소.
+        모든 오픈 주문 취소 래퍼.
+        - dry_run=True  -> 실제 취소 대신 DRY-RUN 로그만 남김
+        - dry_run=False -> BinanceClient.cancel_all_orders 호출
         """
-        logger.info("[DRY-RUN] cancel_all_orders(%s)", symbol)
-        return True
+        if self.dry_run:
+            logger.info("[DRY-RUN] cancel_all_orders(%s)", symbol)
+            return True
+
+        return self.client.cancel_all_orders(symbol)
 
     def _resolve_timeframes(self, params: dict) -> Tuple[str, str]:
         execution_tf = str(params.get("TIMEFRAME", "1h"))
@@ -954,6 +985,9 @@ class RealTraderFutures:
             f"{side_emoji} {expected_side} {symbol} | Signal: {signal_price:.4f}, ExecPx: {current_price:.4f} | Preparing 2D Margin Alloc..."
         )
 
+        if (not np.isfinite(atr)) or atr <= 0:
+            atr = 0.0
+
         # 내부적으로 최신 가용 마진(Free Margin)을 체크하여 사이즈 도출
         qty = self._calculate_position_size(
             symbol=symbol,
@@ -1034,6 +1068,8 @@ class RealTraderFutures:
                 if is_long
                 else confirmed_entry_price * (1 + sl_pct)
             )
+        tick_size = float(self.client.get_price_tick_size(symbol, fallback=0.0001))
+        stop_price = max(tick_size, stop_price)
         stop_price = self.client.round_price(symbol, stop_price)
 
         use_tp_entry = bool(params.get("USE_TAKE_PROFIT", False))
@@ -1056,6 +1092,15 @@ class RealTraderFutures:
             symbol, close_sl_side, filled_qty, stop_price
         )
         sl_active = bool(sl_result)
+        if sl_active:
+            sl_order_id = str(sl_result.get("id", "") or "")
+            if sl_order_id:
+                self.state_manager.update_symbol_state(
+                    symbol,
+                    {
+                        "sl_order_id": sl_order_id,
+                    },
+                )
 
         tp_active = False
         if use_tp_entry and tp_price > 0:
@@ -1113,6 +1158,7 @@ class RealTraderFutures:
                 "highest_price": float(confirmed_entry_price),
                 "lowest_price": float(confirmed_entry_price),
                 "last_entry_signal_candle_ts": int(signal_candle_ts),
+                "has_scaled_out": False,
             },
         )
         return False
@@ -1185,18 +1231,24 @@ class RealTraderFutures:
                 last_sl_time_str = state.get("last_sl_order_time")
                 sl_required = bool(state.get("sl_required", False))
                 should_check = True
-                if last_sl_time_str and not sl_required:
+
+                if last_sl_time_str:
                     last_sl_time = datetime.fromisoformat(last_sl_time_str)
-                    cooldown = max(
-                        300.0,
-                        min(
-                            1800.0,
-                            float(params.get("SL_WATCHDOG_COOLDOWN_SECONDS", 600)),
-                        ),
-                    )
                     elapsed = (datetime.utcnow() - last_sl_time).total_seconds()
-                    if elapsed < cooldown:
-                        should_check = False
+
+                    if not sl_required:
+                        cooldown = max(
+                            300.0,
+                            min(
+                                1800.0,
+                                float(params.get("SL_WATCHDOG_COOLDOWN_SECONDS", 600)),
+                            ),
+                        )
+                        if elapsed < cooldown:
+                            should_check = False
+                    else:
+                        if elapsed < 60.0:
+                            should_check = False
 
                 if should_check:
                     sl_orders = self._detect_stop_loss_orders(symbol)
@@ -1257,10 +1309,6 @@ class RealTraderFutures:
                 return None
 
             state = self.state_manager.get_symbol_state(symbol)
-            open_orders = self.client.fetch_open_orders(symbol)
-            entry_orders = [o for o in open_orders if o.get("type") != "STOP_MARKET"]
-            if len(entry_orders) > 0:
-                return None
 
             current_slot = self._get_candle_slot_id(indicator_tf)
             already_calculated = self.last_calc_candle.get(symbol) == current_slot
@@ -1324,11 +1372,12 @@ class RealTraderFutures:
                 hurst_value = last_candle.get("hurst", 0.5)
                 natr_value = last_candle.get("natr", 1.0)
 
+                atr_safe = float(0.0 if pd.isna(atr) else atr)
                 self._cache_indicators(
                     symbol,
                     {
                         "trend_direction": int(0 if pd.isna(trend_dir) else trend_dir),
-                        "atr": float(0.0 if pd.isna(atr) else atr),
+                        "atr": float(atr_safe),
                         "parabolic_sar": float(0.0 if pd.isna(sar) else sar),
                         "entry_upper": (
                             float(entry_upper) if pd.notna(entry_upper) else None
@@ -1362,6 +1411,9 @@ class RealTraderFutures:
             if current_price is None:
                 return None
 
+            if (not np.isfinite(atr)) or atr <= 0:
+                atr = 0.0
+
             if (
                 pd.isna(entry_upper)
                 or pd.isna(entry_lower)
@@ -1370,7 +1422,6 @@ class RealTraderFutures:
             ):
                 return None
 
-            use_vol_filter = params.get("USE_VOLUME_FILTER", False)
             signal_df = self._fetch_recent_ohlcv_safe(symbol, execution_tf, limit=4)
             if signal_df is None or len(signal_df) < 2:
                 return None
@@ -1404,8 +1455,14 @@ class RealTraderFutures:
             )
             late_bound_ms = target_entry_open_ts + int(entry_grace_sec * 1000)
 
-            if now_ref_ms < early_bound_ms or now_ref_ms > late_bound_ms:
-                return None
+            use_intrabar_entry = bool(params.get("USE_INTRABAR_ENTRY", False))
+            if not use_intrabar_entry:
+                if now_ref_ms < early_bound_ms or now_ref_ms > late_bound_ms:
+                    return None
+            else:
+                # Intra-bar 돌파 진입: 미래 캔들 조기 진입만 방지
+                if now_ref_ms < early_bound_ms:
+                    return None
 
             entry_retry_max = max(1, int(params.get("ENTRY_SIGNAL_RETRY_MAX", 2)))
             last_attempt_signal_ts = int(
@@ -1420,17 +1477,19 @@ class RealTraderFutures:
                 return None
             next_attempt_count = attempt_count_for_signal + 1
 
-            vol_z_threshold = float(
-                params.get(
-                    "VOLUME_Z_THRESHOLD", params.get("VOLUME_THRESHOLD_MULT", 1.0)
-                )
-            )
-
             is_uptrend = trend_dir == 1
             is_downtrend = trend_dir == -1
-            long_breakout = signal_price > entry_upper
-            short_breakout = signal_price < entry_lower
-            vol_ok = (not use_vol_filter) or (vol_ratio >= vol_z_threshold)
+
+            if use_intrabar_entry:
+                long_breakout = (signal_price > entry_upper) or (
+                    current_price > entry_upper
+                )
+                short_breakout = (signal_price < entry_lower) or (
+                    current_price < entry_lower
+                )
+            else:
+                long_breakout = signal_price > entry_upper
+                short_breakout = signal_price < entry_lower
             entry_lag_sec = max(
                 0.0, float((now_ref_ms - target_entry_open_ts) / 1000.0)
             )
@@ -1442,9 +1501,9 @@ class RealTraderFutures:
             )
 
             side: Optional[str] = None
-            if is_uptrend and long_breakout and strength_ok and vol_ok:
+            if is_uptrend and long_breakout and strength_ok:
                 side = "LONG"
-            elif is_downtrend and short_breakout and strength_ok and vol_ok:
+            elif is_downtrend and short_breakout and strength_ok:
                 side = "SHORT"
 
             if side is None:
@@ -1476,16 +1535,10 @@ class RealTraderFutures:
                 "entry_upper": float(entry_upper),
                 "entry_lower": float(entry_lower),
             }
-            if df is not None:
-                del df
-                gc.collect()
             return candidate
         except Exception as e:
             logger.error("🚨 Error in _scan_entries for %s: %s", symbol, e)
             self.health_manager.record_error(e)
-            if "df" in locals() and df is not None:
-                del df
-                gc.collect()
             return None
 
     def _execute_entry_order(self, cand: dict) -> None:
@@ -1618,10 +1671,6 @@ class RealTraderFutures:
                 0,
             )
             if exit_ind:
-                candle_open = float(exit_ind.get("candle_open", candle_open))
-                candle_high = float(exit_ind.get("candle_high", candle_high))
-                candle_low = float(exit_ind.get("candle_low", candle_low))
-                candle_close = float(exit_ind.get("candle_close", candle_close))
                 candle_ts = int(exit_ind.get("candle_ts", 0) or 0)
 
             last_processed_candle_ts = int(
@@ -1679,6 +1728,7 @@ class RealTraderFutures:
                 state.get("highest_price", entry_price) or entry_price
             )
             lowest_price = float(state.get("lowest_price", entry_price) or entry_price)
+            has_scaled_out = bool(state.get("has_scaled_out", False))
 
             sl_type = str(params.get("STOP_LOSS_TYPE", "FIXED") or "FIXED").upper()
             active_stop = float(state.get("active_stop_price", 0.0) or 0.0)
@@ -1702,13 +1752,14 @@ class RealTraderFutures:
                         else entry_price * (1 + sl_pct)
                     )
 
-            tick_size = self.client.get_price_tick_size(
-                symbol, fallback=(0.1 if "BTC" in symbol else 0.01)
-            )
-            if amount > 0 and active_stop >= entry_price:
-                active_stop = entry_price - (tick_size * 2)
-            elif amount < 0 and active_stop <= entry_price:
-                active_stop = entry_price + (tick_size * 2)
+                tick_size = self.client.get_price_tick_size(
+                    symbol, fallback=(0.1 if "BTC" in symbol else 0.01)
+                )
+                if amount > 0 and active_stop >= entry_price:
+                    active_stop = entry_price - (tick_size * 2)
+                elif amount < 0 and active_stop <= entry_price:
+                    active_stop = entry_price + (tick_size * 2)
+
             active_stop = self.client.round_price(symbol, active_stop)
 
             tp_price_val = float(state.get("tp_price", 0.0) or 0.0)
@@ -1735,16 +1786,166 @@ class RealTraderFutures:
             )
             slippage = float(SLIPPAGE_RATE)
 
+            # --- 50% Scale-Out (Backtest alignment) ---
+            scale_out_done = False
+            if not fallback_without_candle and pos_atr > 0:
+                long_scale_atr_mult = float(
+                    params.get("LONG_SCALE_ATR_MULT", params.get("LONG_TP_MULT", 3.0))
+                )
+                short_scale_atr_mult = float(
+                    params.get("SHORT_SCALE_ATR_MULT", params.get("SHORT_TP_MULT", 3.0))
+                )
+                if amount > 0 and not has_scaled_out and long_scale_atr_mult > 0:
+                    scale_price = entry_price + (pos_atr * long_scale_atr_mult)
+                    if current_price >= scale_price:
+                        scale_exit_price = current_price
+                        scale_qty = self.client.round_amount(
+                            symbol, abs(amount) * 0.5
+                        )
+                        if scale_qty > 0:
+                            if self._place_order_safe(
+                                symbol,
+                                "sell",
+                                scale_qty,
+                                reduce_only=True,
+                            ):
+                                time.sleep(0.5)
+                                scale_out_done = True
+                                has_scaled_out = True
+                                exit_price_for_calc = float(scale_exit_price)
+                                scale_qty_float = float(scale_qty)
+                                scale_pnl = (
+                                    (scale_exit_price - entry_price) * scale_qty_float
+                                )
+                                scale_pnl_pct = (
+                                    ((scale_exit_price / entry_price) - 1.0) * 100.0
+                                )
+                                self.trade_db.record_trade(
+                                    symbol=symbol,
+                                    side=side_str,
+                                    action="EXIT_PARTIAL",
+                                    quantity=scale_qty,
+                                    price=scale_exit_price,
+                                    entry_price=entry_price,
+                                    pnl=scale_pnl,
+                                    pnl_pct=scale_pnl_pct,
+                                    reason="Scale-Out 50% (LONG)",
+                                )
+                                self.state_manager.update_symbol_state(
+                                    symbol,
+                                    {
+                                        "has_scaled_out": True,
+                                        "highest_price": float(highest_price),
+                                        "lowest_price": float(lowest_price),
+                                        "pos_atr": float(pos_atr),
+                                    },
+                                )
+                elif amount < 0 and not has_scaled_out and short_scale_atr_mult > 0:
+                    tp_price = entry_price - (pos_atr * short_scale_atr_mult)
+                    if current_price <= tp_price:
+                        scale_exit_price = current_price
+                        scale_qty = self.client.round_amount(
+                            symbol, abs(amount) * 0.5
+                        )
+                        if scale_qty > 0:
+                            if self._place_order_safe(
+                                symbol,
+                                "buy",
+                                scale_qty,
+                                reduce_only=True,
+                            ):
+                                time.sleep(0.5)
+                                scale_out_done = True
+                                has_scaled_out = True
+                                exit_price_for_calc = float(scale_exit_price)
+                                scale_qty_float = float(scale_qty)
+                                scale_pnl = (
+                                    (entry_price - scale_exit_price) * scale_qty_float
+                                )
+                                scale_pnl_pct = (
+                                    ((entry_price / scale_exit_price) - 1.0) * 100.0
+                                )
+                                self.trade_db.record_trade(
+                                    symbol=symbol,
+                                    side=side_str,
+                                    action="EXIT_PARTIAL",
+                                    quantity=scale_qty,
+                                    price=scale_exit_price,
+                                    entry_price=entry_price,
+                                    pnl=scale_pnl,
+                                    pnl_pct=scale_pnl_pct,
+                                    reason="Scale-Out 50% (SHORT)",
+                                )
+                                self.state_manager.update_symbol_state(
+                                    symbol,
+                                    {
+                                        "has_scaled_out": True,
+                                        "highest_price": float(highest_price),
+                                        "lowest_price": float(lowest_price),
+                                        "pos_atr": float(pos_atr),
+                                    },
+                                )
+
+            if scale_out_done:
+                fee_rate = float(params.get("FEE_RATE", 0.0004))
+                breakeven_raw = (
+                    entry_price
+                    * (1.0 + (float(SLIPPAGE_RATE) + fee_rate) * 2.0)
+                    if amount > 0
+                    else entry_price
+                    * (1.0 - (float(SLIPPAGE_RATE) + fee_rate) * 2.0)
+                )
+                breakeven_stop = self.client.round_price(symbol, breakeven_raw)
+
+                # 1) 로컬 상태 업데이트
+                self.state_manager.update_symbol_state(
+                    symbol,
+                    {
+                        "has_scaled_out": True,
+                        "active_stop_price": float(breakeven_stop),
+                        "last_sl_order_time": datetime.utcnow().isoformat(),
+                    },
+                )
+
+                # 2) 거래소 측 스탑로스 주문을 본절가로 재설정
+                try:
+                    self._cancel_stop_orders_only(symbol)
+                    remaining_qty_raw = max(0.0, abs(amount) - float(scale_qty))
+                    remaining_qty = self.client.round_amount(symbol, remaining_qty_raw)
+                    if remaining_qty > 0:
+                        stop_side = "sell" if amount > 0 else "buy"
+                        sl_result = self._place_stop_loss_safe(
+                            symbol, stop_side, remaining_qty, breakeven_stop
+                        )
+                        if sl_result:
+                            sl_order_id = str(sl_result.get("id", "") or "")
+                            if sl_order_id:
+                                self.state_manager.update_symbol_state(
+                                    symbol,
+                                    {
+                                        "sl_order_id": sl_order_id,
+                                    },
+                                )
+                except Exception as e:
+                    logger.error(
+                        "Error while updating breakeven stop after scale-out for %s: %s",
+                        symbol,
+                        e,
+                    )
+                return
+
             if not fallback_without_candle:
                 if amount > 0:
-                    if candle_low <= current_stop:
+                    long_min_price = min(current_price, lowest_price)
+                    if long_min_price <= current_stop:
                         exit_triggered, reason, exit_price_for_calc = (
                             True,
                             f"Stop Loss ({current_stop:.2f})",
                             current_stop * (1 - slippage),
                         )
                 else:
-                    if candle_high >= current_stop:
+                    short_max_price = max(current_price, highest_price)
+                    if short_max_price >= current_stop:
                         exit_triggered, reason, exit_price_for_calc = (
                             True,
                             f"Stop Loss ({current_stop:.2f})",
@@ -1752,13 +1953,13 @@ class RealTraderFutures:
                         )
 
                 if not exit_triggered and use_tp and tp_price_val > 0:
-                    if amount > 0 and candle_high >= tp_price_val:
+                    if amount > 0 and max(current_price, highest_price) >= tp_price_val:
                         exit_triggered, reason, exit_price_for_calc = (
                             True,
                             f"Take Profit ({tp_price_val:.2f})",
                             tp_price_val,
                         )
-                    elif amount < 0 and candle_low <= tp_price_val:
+                    elif amount < 0 and min(current_price, lowest_price) <= tp_price_val:
                         exit_triggered, reason, exit_price_for_calc = (
                             True,
                             f"Take Profit ({tp_price_val:.2f})",
@@ -1768,23 +1969,42 @@ class RealTraderFutures:
             trailing_updated = False
             prev_stop = float(active_stop)
             if not exit_triggered and not fallback_without_candle:
-                trailing_activation_atr = float(
-                    params.get("TRAILING_ACTIVATION_ATR", 0.0)
-                )
+                min_update_step = 0.0
+                if pos_atr > 0:
+                    atr_step_ratio = float(
+                        params.get("TRAIL_UPDATE_ATR_RATIO", 0.2)
+                    )
+                    min_update_step = max(0.0, pos_atr * atr_step_ratio)
+
                 if amount > 0:
                     atr_mult = float(params.get("LONG_TRAIL_MULT", 3.0))
                     if candle_high > highest_price:
                         highest_price = candle_high
                     if exit_type != "PARABOLIC_SAR" and pos_atr > 0:
-                        unreal_profit = (highest_price - entry_price) / pos_atr
-                        if unreal_profit >= trailing_activation_atr:
-                            new_stop = highest_price - (pos_atr * atr_mult)
-                            if new_stop > active_stop:
+                        new_stop = highest_price - (pos_atr * atr_mult)
+                        if min_update_step > 0.0:
+                            if new_stop > (active_stop + min_update_step):
                                 active_stop = new_stop
                                 trailing_updated = True
+                        elif new_stop > active_stop:
+                            active_stop = new_stop
+                            trailing_updated = True
                 else:
+                    short_trail_mult = float(params.get("SHORT_TRAIL_MULT", 3.0))
                     if candle_low < lowest_price:
                         lowest_price = candle_low
+                    if exit_type != "PARABOLIC_SAR" and pos_atr > 0:
+                        new_stop = lowest_price + (pos_atr * short_trail_mult)
+                        if active_stop <= 0:
+                            active_stop = new_stop
+                            trailing_updated = True
+                        elif min_update_step > 0.0:
+                            if new_stop < (active_stop - min_update_step):
+                                active_stop = new_stop
+                                trailing_updated = True
+                        elif new_stop < active_stop:
+                            active_stop = new_stop
+                            trailing_updated = True
 
                 active_stop = self.client.round_price(symbol, active_stop)
                 base_update = {
@@ -1805,34 +2025,46 @@ class RealTraderFutures:
                     stop_side = "sell" if amount > 0 else "buy"
                     new_stop_price = self.client.round_price(symbol, active_stop)
                     self._cancel_stop_orders_only(symbol)
-                    if self._place_stop_loss_safe(
+                    sl_result = self._place_stop_loss_safe(
                         symbol, stop_side, stop_qty, new_stop_price
-                    ):
-                        self.state_manager.update_symbol_state(
-                            symbol,
-                            {
-                                "active_stop_price": float(new_stop_price),
-                                "sl_required": False,
-                                "last_sl_order_time": datetime.utcnow().isoformat(),
-                            },
-                        )
+                    )
+                    if sl_result:
+                        sl_order_id = str(sl_result.get("id", "") or "")
+                        update_payload = {
+                            "active_stop_price": float(new_stop_price),
+                            "sl_required": False,
+                            "last_sl_order_time": datetime.utcnow().isoformat(),
+                        }
+                        if sl_order_id:
+                            update_payload["sl_order_id"] = sl_order_id
+                        self.state_manager.update_symbol_state(symbol, update_payload)
                     else:
-                        if prev_stop > 0 and self._place_stop_loss_safe(
-                            symbol,
-                            stop_side,
-                            stop_qty,
-                            self.client.round_price(symbol, prev_stop),
-                        ):
-                            self.state_manager.update_symbol_state(
+                        if prev_stop > 0:
+                            prev_price_rounded = self.client.round_price(
+                                symbol, prev_stop
+                            )
+                            sl_result_prev = self._place_stop_loss_safe(
                                 symbol,
-                                {
-                                    "active_stop_price": float(
-                                        self.client.round_price(symbol, prev_stop)
-                                    ),
+                                stop_side,
+                                stop_qty,
+                                prev_price_rounded,
+                            )
+                            if sl_result_prev:
+                                sl_order_id_prev = str(
+                                    sl_result_prev.get("id", "") or ""
+                                )
+                                update_payload_prev = {
+                                    "active_stop_price": float(prev_price_rounded),
                                     "sl_required": False,
                                     "last_sl_order_time": datetime.utcnow().isoformat(),
-                                },
-                            )
+                                }
+                                if sl_order_id_prev:
+                                    update_payload_prev["sl_order_id"] = (
+                                        sl_order_id_prev
+                                    )
+                                self.state_manager.update_symbol_state(
+                                    symbol, update_payload_prev
+                                )
                         else:
                             self.state_manager.update_symbol_state(
                                 symbol,
@@ -1958,6 +2190,21 @@ class RealTraderFutures:
         ]
 
     def _cancel_stop_orders_only(self, symbol: str):
+        state = self.state_manager.get_symbol_state(symbol)
+        sl_order_id = str(state.get("sl_order_id", "") or "") if state else ""
+        if sl_order_id:
+            try:
+                self.client.exchange.cancel_order(sl_order_id, symbol)
+                self.state_manager.update_symbol_state(
+                    symbol,
+                    {
+                        "sl_order_id": None,
+                    },
+                )
+                return
+            except Exception:
+                pass
+
         try:
             open_orders = self.client.fetch_open_orders(symbol)
             stop_orders = [
@@ -2028,9 +2275,12 @@ class RealTraderFutures:
                 else:
                     stop_price = entry_price * (1 + params.get("STOP_LOSS_PCT", 0.02))
 
-        tick_size = self.client.get_price_tick_size(
-            symbol, fallback=(0.1 if "BTC" in symbol else 0.01)
+        tick_size = float(
+            self.client.get_price_tick_size(
+                symbol, fallback=(0.1 if "BTC" in symbol else 0.01)
+            )
         )
+        stop_price = max(tick_size, stop_price)
         stop_price = self.client.round_price(symbol, stop_price)
 
         if not using_state_stop:
@@ -2040,10 +2290,15 @@ class RealTraderFutures:
                 stop_price = entry_price + (tick_size * 2)
         stop_price = self.client.round_price(symbol, stop_price)
 
-        if self._place_stop_loss_safe(symbol, sl_side, sl_qty, stop_price):
-            self.state_manager.update_symbol_state(
-                symbol, {"last_sl_order_time": datetime.utcnow().isoformat()}
-            )
+        sl_result = self._place_stop_loss_safe(symbol, sl_side, sl_qty, stop_price)
+        if sl_result:
+            sl_order_id = str(sl_result.get("id", "") or "")
+            update_payload = {
+                "last_sl_order_time": datetime.utcnow().isoformat(),
+            }
+            if sl_order_id:
+                update_payload["sl_order_id"] = sl_order_id
+            self.state_manager.update_symbol_state(symbol, update_payload)
             time.sleep(0.5)
             return True
         return False
@@ -2066,8 +2321,8 @@ class RealTraderFutures:
 
         now = datetime.utcnow()
         retry_cooldown = max(
-            0.5,
-            min(30.0, float(params.get("EXIT_RECOVERY_RETRY_COOLDOWN_SECONDS", 2.0))),
+            3.0,
+            min(30.0, float(params.get("EXIT_RECOVERY_RETRY_COOLDOWN_SECONDS", 3.0))),
         )
         last_attempt_at = str(state.get("exit_attempt_at") or "")
         if last_attempt_at:
@@ -2116,10 +2371,11 @@ class RealTraderFutures:
             )
 
         timeout_seconds = max(
-            3.0, min(20.0, float(params.get("EXIT_RECOVERY_TIMEOUT_SECONDS", 8.0)))
+            4.0,
+            min(20.0, float(params.get("EXIT_RECOVERY_TIMEOUT_SECONDS", 8.0))),
         )
         is_flat, remaining_amount = self._wait_until_position_flat(
-            symbol, timeout_seconds=timeout_seconds, poll_seconds=0.3
+            symbol, timeout_seconds=timeout_seconds, poll_seconds=0.5
         )
         if not is_flat:
             self.state_manager.update_symbol_state(
