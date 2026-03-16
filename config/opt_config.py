@@ -15,8 +15,8 @@ OPT_FUTURES_CONFIG: Dict[str, Any] = {
 
 # [STRATEGIC] Recommended symbols for 4H TSMOM Squeeze optimization
 FUTURES_SYMBOLS: List[str] = [
-    "BTC/USDT", "ETH/USDT", "SOL/USDT", "AVAX/USDT", "NEAR/USDT",
-    "LINK/USDT", "DOGE/USDT", "SUI/USDT", "INJ/USDT", "RENDER/USDT"
+    "ETH/USDT", "SOL/USDT", "AVAX/USDT", "NEAR/USDT",
+    "LINK/USDT", "DOGE/USDT", "SUI/USDT", "1000PEPE/USDT", "FET/USDT", "APT/USDT"
 ]
 
 # ==============================================================================

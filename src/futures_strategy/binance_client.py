@@ -412,6 +412,112 @@ class BinanceClient:
             self.logger.warning(f"Failed to fetch exchange server time: {e}")
         return int(time.time() * 1000)
 
+    def fetch_funding_rate(
+        self,
+        symbol: str,
+        start_date: str | datetime,
+        end_date: str | datetime | None = None,
+    ) -> pd.DataFrame:
+        """
+        Fetch funding rate history from Binance GET /fapi/v1/fundingRate.
+        Returns DataFrame with columns: timestamp (ms), funding_rate.
+        """
+        base_url = "https://fapi.binance.com/fapi/v1/fundingRate"
+        timeout_sec = API_READ_TIMEOUT
+        limit = 1000
+
+        try:
+            market = self.exchange.market(symbol)
+            binance_symbol: str = str(market.get("id", symbol).replace("/", ""))
+        except Exception:
+            binance_symbol = str(symbol).replace("/", "")
+
+        if isinstance(start_date, datetime):
+            start_ts = int(start_date.timestamp() * 1000)
+        else:
+            start_str = str(start_date).strip()
+            if "T" in start_str or " " in start_str:
+                start_iso = start_str.replace(" ", "T")
+                if not start_iso.endswith("Z"):
+                    start_iso += "Z"
+            else:
+                start_iso = f"{start_str}T00:00:00Z"
+            start_ts = self.exchange.parse8601(start_iso)
+
+        if end_date is not None:
+            if isinstance(end_date, datetime):
+                end_ts = int(end_date.timestamp() * 1000)
+            else:
+                end_str = str(end_date).strip()
+                if "T" in end_str or " " in end_str:
+                    end_iso = end_str.replace(" ", "T")
+                    if not end_iso.endswith("Z"):
+                        end_iso += "Z"
+                else:
+                    end_iso = f"{end_str}T23:59:59Z"
+                end_ts = self.exchange.parse8601(end_iso)
+        else:
+            end_ts = self.exchange.milliseconds()
+
+        all_rows: list[tuple[int, float]] = []
+        since = start_ts
+
+        self.logger.info(
+            "Fetching funding rate for %s from %s to %s...",
+            symbol,
+            datetime.fromtimestamp(since / 1000).strftime("%Y-%m-%d"),
+            datetime.fromtimestamp(end_ts / 1000).strftime("%Y-%m-%d"),
+        )
+
+        while since < end_ts:
+            params = {
+                "symbol": binance_symbol,
+                "startTime": since,
+                "endTime": end_ts,
+                "limit": limit,
+            }
+            qs = urllib.parse.urlencode(params)
+            url = f"{base_url}?{qs}"
+            req = urllib.request.Request(url, method="GET")
+            try:
+                with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
+                    raw = resp.read().decode("utf-8")
+                data = json.loads(raw)
+            except Exception as e:
+                self.logger.error("Error fetching funding rate: %s", e)
+                time.sleep(5)
+                continue
+
+            if not data:
+                break
+
+            for item in data:
+                if not isinstance(item, dict):
+                    continue
+                ft = item.get("fundingTime")
+                fr = item.get("fundingRate")
+                if ft is None or fr is None:
+                    continue
+                try:
+                    ts = int(ft)
+                    rate = float(fr)
+                except (TypeError, ValueError):
+                    continue
+                all_rows.append((ts, rate))
+
+            last_ts = int(data[-1]["fundingTime"])
+            since = last_ts + 1
+            if last_ts >= end_ts:
+                break
+            time.sleep(0.1)
+
+        if not all_rows:
+            return pd.DataFrame(columns=["timestamp", "funding_rate"])
+
+        df = pd.DataFrame(all_rows, columns=["timestamp", "funding_rate"])
+        df = df.drop_duplicates(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
+        return df
+
     def fetch_balance(self):
         """USDT 선물 지갑 잔고 조회"""
         try:
