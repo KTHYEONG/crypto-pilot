@@ -14,10 +14,15 @@ import pandas as pd
 from collections import OrderedDict
 from typing import Any, Dict, List, Optional, Tuple
 
-from config.settings import FUTURES_INITIAL_BALANCE
+from config.settings import (
+    FUTURES_INITIAL_BALANCE,
+    TRADING_FEE_RATE,
+    SLIPPAGE_RATE,
+)
 from config.opt_config import WARMUP_PERIODS
 from src.futures_strategy.strategies_futures import UltimateStrategy
 from src.futures_strategy.engine_fast_futures import BacktestEngineFast
+from src.futures_strategy.engine_portfolio_futures import PortfolioBacktestEngineFast
 from src.futures_strategy.opt_futures_utils.metrics import (
     calc_profit_factor_from_pnl,
     calc_mdd_from_equity,
@@ -58,6 +63,56 @@ _SignalCacheKey = Tuple[Tuple[Tuple[str, Any], ...], str, str, int]
 _SIGNAL_CACHE_MAXSIZE: int = 64
 _cache_lock: threading.Lock = threading.Lock()
 _signal_cache: OrderedDict[_SignalCacheKey, pd.DataFrame] = OrderedDict()
+
+
+def align_data_for_2d_engine(
+    signal_dfs: Dict[str, pd.DataFrame],
+    symbols: List[str],
+) -> Tuple[Dict[str, np.ndarray], pd.Series]:
+    """
+    Merge per-symbol DataFrames to master datetime index and produce
+    Time x Symbol 2D arrays for the Numba portfolio engine.
+    """
+    all_dates: List[pd.Series] = []
+    for sym in symbols:
+        df = signal_dfs.get(sym)
+        if df is not None and "datetime" in df.columns:
+            all_dates.append(df["datetime"])
+    if not all_dates:
+        empty: Dict[str, np.ndarray] = {}
+        return empty, pd.Series(dtype="datetime64[ns]")
+
+    master_index = pd.concat(all_dates, ignore_index=True).drop_duplicates().sort_values().reset_index(drop=True)
+    master_df = pd.DataFrame({"datetime": master_index})
+    n_bars = len(master_index)
+    n_syms = len(symbols)
+
+    target_cols = [
+        "open", "high", "low", "close",
+        "entry_upper", "entry_lower", "trend_direction", "strength_filter", "atr",
+    ]
+    aligned_data: Dict[str, np.ndarray] = {
+        col: np.full((n_bars, n_syms), np.nan, dtype=np.float64)
+        for col in target_cols
+    }
+
+    for s_idx, sym in enumerate(symbols):
+        df = signal_dfs.get(sym)
+        if df is None:
+            continue
+        merged = pd.merge(master_df, df, on="datetime", how="left")
+        for col in ["open", "high", "low", "close", "atr"]:
+            if col in merged.columns:
+                aligned_data[col][:, s_idx] = merged[col].ffill().values
+        for col in ["strength_filter", "trend_direction"]:
+            if col in merged.columns:
+                aligned_data[col][:, s_idx] = merged[col].fillna(0).values
+        for col in ["entry_upper", "entry_lower"]:
+            if col in merged.columns:
+                default_val = 999999.0 if col == "entry_upper" else 0.0
+                aligned_data[col][:, s_idx] = merged[col].fillna(default_val).values
+
+    return aligned_data, master_index
 
 
 def _segment_with_context(
@@ -361,6 +416,98 @@ def objective_futures(
         fold_agg_eq: Optional[np.ndarray] = None
         fold_span_days: float = 0.0
 
+        if mode == "multi":
+            signal_dfs_fold: Dict[str, pd.DataFrame] = {}
+            for sym in target_symbols:
+                is_start_idx = int(data_maps.get(sym, {}).get(f"is_start_idx_{tf}", 0))
+                adj_test_start = test_start + is_start_idx
+                adj_test_end = test_end + is_start_idx
+                if sym not in full_signal_dfs:
+                    continue
+                seg, _ = _segment_with_context(
+                    full_signal_dfs[sym], adj_test_start, adj_test_end
+                )
+                signal_dfs_fold[sym] = seg
+
+            aligned_data, master_dt = align_data_for_2d_engine(signal_dfs_fold, target_symbols)
+            if not aligned_data or master_dt.empty:
+                raise optuna.TrialPruned()
+
+            try:
+                engine = PortfolioBacktestEngineFast(
+                    aligned_data=aligned_data,
+                    symbol_names=target_symbols,
+                    strategy_params=params,
+                    initial_balance=FUTURES_INITIAL_BALANCE,
+                    fee_rate=TRADING_FEE_RATE,
+                    slippage_rate=SLIPPAGE_RATE,
+                )
+                trades_df, equity_curve, final_balance = engine.run()
+            except Exception as exc:
+                _logger.warning("Portfolio engine error (multi): %s", exc, exc_info=True)
+                raise optuna.TrialPruned()
+
+            if trades_df is None or trades_df.empty:
+                raise optuna.TrialPruned()
+
+            span_seconds = (
+                (master_dt.iloc[-1] - master_dt.iloc[0]).total_seconds()
+                if len(master_dt) >= 2 else 86400.0
+            )
+            fold_span_days = max(span_seconds / 86400.0, 1.0)
+
+            port_eq = equity_curve
+            port_mdd = float(calc_mdd_from_equity(port_eq))
+            port_ret_ratio = max(final_balance / FUTURES_INITIAL_BALANCE, 1e-9)
+            port_cagr = ((port_ret_ratio ** (365.0 / fold_span_days)) - 1.0) * 100.0
+
+            safe_eq = np.clip(port_eq, 1e-9, None)
+            if len(safe_eq) < 2:
+                port_kelly = -100.0
+            else:
+                log_rets = np.log(safe_eq[1:] / safe_eq[:-1])
+                bars_per_year = (len(port_eq) / fold_span_days) * 365.0
+                ann_log_ret = np.mean(log_rets) * bars_per_year
+                ann_var = np.var(log_rets) * bars_per_year
+                port_kelly = (ann_log_ret - (ann_var * 0.5)) * 100.0
+
+            true_pnl = trades_df["pnl"] - trades_df["entry_fee"]
+            win_rate_f = float((len(trades_df[true_pnl > 0]) / len(trades_df)) * 100) if len(trades_df) > 0 else 0.0
+            pf_f = calc_profit_factor_from_pnl(true_pnl)
+            n_trades_f = float(len(trades_df))
+
+            fold_scores.append(port_kelly)
+            fold_rets.append(port_cagr)
+            fold_mdds.append(port_mdd)
+            fold_trades.append(n_trades_f)
+            fold_wins.append(win_rate_f)
+            fold_pfs.append(pf_f)
+
+            for sym in target_symbols:
+                sym_trades = trades_df[trades_df["symbol"] == sym]
+                if sym_trades.empty:
+                    sym_total_scores[sym].append(port_cagr)
+                    sym_total_rets[sym].append(0.0)
+                    sym_total_mdds[sym].append(port_mdd)
+                    sym_total_trades[sym].append(0.0)
+                    sym_total_wins[sym].append(0.0)
+                    sym_total_pfs[sym].append(1.0)
+                else:
+                    sym_ret = (sym_trades["pnl"] - sym_trades["entry_fee"]).sum() / FUTURES_INITIAL_BALANCE * 100.0
+                    sym_ratio = 1.0 + sym_ret / 100.0
+                    sym_cagr = ((sym_ratio ** (365.0 / fold_span_days)) - 1.0) * 100.0 if sym_ratio > 0 else -100.0
+                    sym_total_scores[sym].append(sym_cagr)
+                    sym_total_rets[sym].append(sym_ret)
+                    sym_total_mdds[sym].append(port_mdd)
+                    sym_total_trades[sym].append(float(len(sym_trades)))
+                    tw = sym_trades["pnl"] - sym_trades["entry_fee"]
+                    sym_total_wins[sym].append(float((len(tw[tw > 0]) / len(tw)) * 100) if len(tw) > 0 else 0.0)
+                    sym_total_pfs[sym].append(calc_profit_factor_from_pnl(tw))
+
+            if port_cagr <= -99.0:
+                return -100.0, 100.0
+            continue
+
         max_workers: int = min(len(target_symbols), _MAX_SYMBOL_WORKERS)
         symbol_results: List[SymbolFoldResult] = []
 
@@ -411,16 +558,13 @@ def objective_futures(
         if fold_agg_eq is None:
             raise optuna.TrialPruned()
         
-        # [NEW] Anti-Ruin Protection: If any single symbol went bust (< -99%), treat as ruin.
         for r in fold_sym_rets:
             if r <= -99.0:
                 return -100.0, 100.0
         
-        # Normalized Portfolio Equity (Equal Risk/Weight per symbol)
         port_eq = fold_agg_eq / len(symbol_results)
         port_mdd = float(calc_mdd_from_equity(port_eq))
         
-        # [NEW] Calculate True Portfolio CAGR & Kelly Proxy
         port_ret_ratio = max(port_eq[-1] / port_eq[0], 1e-9) if port_eq[0] > 0 else 1e-9
         port_cagr = ((port_ret_ratio ** (365.0 / max(fold_span_days, 1.0))) - 1.0) * 100.0
         
@@ -429,7 +573,7 @@ def objective_futures(
         bars_per_year = (len(port_eq) / max(fold_span_days, 1.0)) * 365.0
         ann_log_ret = np.mean(log_rets) * bars_per_year
         ann_var = np.var(log_rets) * bars_per_year
-        port_kelly = (ann_log_ret - (ann_var * 0.5)) * 100.0  # Scale to %
+        port_kelly = (ann_log_ret - (ann_var * 0.5)) * 100.0
 
         fold_scores.append(port_kelly)
         fold_rets.append(port_cagr)
