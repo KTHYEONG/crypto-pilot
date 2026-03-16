@@ -131,7 +131,8 @@ class UltimateStrategyBase(StrategyBase):
         momentum_period = int(self.params.get("MOMENTUM_PERIOD", 20))
         kc_mult = float(self.params.get("KC_MULT", 1.5))
         atr_period = int(self.params.get("ATR_PERIOD", 20))
-        vol_mult = float(self.params.get("VOL_MULT", 1.2))
+        vol_z_threshold = float(self.params.get("VOL_Z_THRESHOLD", 1.5))
+        exhaustion_mult = float(self.params.get("EXHAUSTION_MULT", 4.0))
         squeeze_window = int(self.params.get("SQUEEZE_WINDOW", 5))
         
         # --- 2. Core Indicators Calculation ---
@@ -156,9 +157,16 @@ class UltimateStrategyBase(StrategyBase):
         # Has it squeezed recently?
         df["recent_squeeze"] = df["is_squeezing"].rolling(window=squeeze_window).sum() > 0
         
-        # Volume Spike
-        df["vol_sma"] = df["volume"].rolling(window=20).mean()
-        vol_spike = df["volume"] > df["vol_sma"] * vol_mult
+        # Volume Z-Score (statistical spike filter)
+        vol_mean = df["volume"].rolling(window=20).mean()
+        vol_std = df["volume"].rolling(window=20).std()
+        vol_std = vol_std.replace(0, 1e-8)
+        df["vol_zscore"] = (df["volume"] - vol_mean) / vol_std
+        vol_spike = df["vol_zscore"] > vol_z_threshold
+        
+        # Exhaustion fakeout guard: candle range > ATR * mult => climax, skip entry
+        candle_range = df["high"] - df["low"]
+        df["is_exhausted"] = candle_range > (df["atr"] * exhaustion_mult)
         
         # Breakout Channels
         df["dc_upper"] = df["high"].rolling(window=momentum_period).max()
@@ -168,11 +176,10 @@ class UltimateStrategyBase(StrategyBase):
         macro_uptrend = df["close"] > df["macro_ema"]
         macro_downtrend = df["close"] < df["macro_ema"]
         
-        # Bull: Squeezed recently, Macro is UP, Price closes above KC Upper, Vol Spike
-        bull_breakout = df["recent_squeeze"] & macro_uptrend & (df["close"] > df["kc_upper"]) & vol_spike
-        
-        # Bear: Squeezed recently, Macro is DOWN, Price closes below KC Lower, Vol Spike
-        bear_breakout = df["recent_squeeze"] & macro_downtrend & (df["close"] < df["kc_lower"]) & vol_spike
+        # Bull: Squeeze + macro up + KC upper breakout + vol z-spike + not exhausted
+        bull_breakout = df["recent_squeeze"] & macro_uptrend & (df["close"] > df["kc_upper"]) & vol_spike & (~df["is_exhausted"])
+        # Bear: Squeeze + macro down + KC lower breakout + vol z-spike + not exhausted
+        bear_breakout = df["recent_squeeze"] & macro_downtrend & (df["close"] < df["kc_lower"]) & vol_spike & (~df["is_exhausted"])
         
         # For Numba engine execution:
         df["strength_filter"] = np.where(bull_breakout | bear_breakout, 1, 0)
