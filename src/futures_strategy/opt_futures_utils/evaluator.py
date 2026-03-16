@@ -325,8 +325,7 @@ def objective_futures(
         raise optuna.TrialPruned()
 
     all_folds = cv_folds + ([holdout_fold] if holdout_fold[2] > holdout_fold[1] else [])
-
-    cagr_penalty: float = 0.0
+    
     port_eq: Optional[np.ndarray] = None
     fold_span_days: float = 0.0
 
@@ -409,12 +408,13 @@ def objective_futures(
                     fold_agg_eq = fold_agg_eq[:min_l] + eq_norm[:min_l]
             fold_span_days = max(fold_span_days, span_days_sym)
 
-        if fold_agg_eq is None: raise optuna.TrialPruned()
+        if fold_agg_eq is None:
+            raise optuna.TrialPruned()
         
-        # [NEW] Anti-Ruin Protection: If any single symbol went bust (< -99%), prune the trial.
+        # [NEW] Anti-Ruin Protection: If any single symbol went bust (< -99%), treat as ruin.
         for r in fold_sym_rets:
             if r <= -99.0:
-                return -100.0, 100.0 # Instant ruin penalty (CAGR, MDD)
+                return -100.0, 100.0
         
         # Normalized Portfolio Equity (Equal Risk/Weight per symbol)
         port_eq = fold_agg_eq / len(symbol_results)
@@ -438,24 +438,6 @@ def objective_futures(
         fold_wins.append(float(np.mean([res[5] for res in symbol_results])))
         fold_pfs.append(float(np.mean([res[6] for res in symbol_results])))
 
-        # --- Rolling Robustness (Time-series Consistency) ---
-        n_segments = 4
-        if len(port_eq) > n_segments * 10:
-            seg_len = len(port_eq) // n_segments
-            seg_rets = []
-            for s_i in range(n_segments):
-                segment = port_eq[s_i * seg_len : (s_i + 1) * seg_len]
-                if segment[0] > 0:
-                    seg_ret_ratio = segment[-1] / segment[0]
-                    seg_rets.append(max(0.0, seg_ret_ratio - 1.0))
-                else:
-                    seg_rets.append(0.0)
-            if len(seg_rets) > 1:
-                seg_std = float(np.std(seg_rets))
-                seg_avg = float(np.mean(seg_rets))
-                cv_penalty = (seg_std / (seg_avg + 1e-6)) * 5.0 # Reduced weight
-                cagr_penalty += cv_penalty
-
     # --- [MULTI-OBJECTIVE: NSGA-II] ---
     final_kelly = float(np.mean(fold_scores))
     final_cagr = float(np.mean(fold_rets))
@@ -463,46 +445,21 @@ def objective_futures(
     avg_pf = float(np.mean(fold_pfs))
     avg_win_rate = float(np.mean(fold_wins))
     avg_trades_per_sym = float(np.mean(fold_trades))
-
-    # [INSTITUTIONAL GROWTH METRICS]
-    # We optimize for Kelly Proxy (maximizes long-term compounded growth mathematically)
-    # NSGA-II Objective 1: Maximize Kelly Proxy
-    # NSGA-II Objective 2: Minimize MDD
-
-    # Soft Penalties for unacceptable institutional profiles
-    if avg_pf < 1.2:
-        cagr_penalty += (1.2 - avg_pf) * 20.0
-
-    # Trend following win rate minimum (relaxed from 35% to 25%)
-    if avg_win_rate < 25.0:
-        cagr_penalty += (25.0 - avg_win_rate) * 1.0
-
-    # Minimum Trades Count (Avoid statistical flukes)
-    if avg_trades_per_sym < 30.0:
-        cagr_penalty += (30.0 - avg_trades_per_sym) * 2.0
-
-    # Symbol level diversity check (Avoid fitting only 1 asset)
+    
     if len(symbols) > 1:
         sym_pfs = [float(np.mean(sym_total_pfs[s])) for s in symbols]
         min_sym_pf = float(np.min(sym_pfs))
-        if min_sym_pf < 1.1: # Ensure minimum viability on the worst-performing asset
-            cagr_penalty += (1.1 - min_sym_pf) * 15.0
-            
-    # 1. Fold-level variance penalty (안정성 평가)
-    # 복원된 CV Fold들 사이의 성과 편차를 감지하여 '운 좋게 맞춘' 결과 차단
-    if len(fold_rets) > 1:
-        std_cagr = float(np.std(fold_rets))
-        cagr_penalty += std_cagr * 0.8
-
-    adjusted_kelly = final_kelly - cagr_penalty
-    adjusted_mdd = final_mdd
-
-    # Store Attributes (Logging - unpenalized raw values for transparency)
+    else:
+        min_sym_pf = avg_pf
+    
+    # Store Attributes (Logging & NSGA-II constraints)
     trial.set_user_attr("avg_cagr", final_cagr)
     trial.set_user_attr("avg_mdd", final_mdd)
     trial.set_user_attr("std_cagr", float(np.std(fold_rets)) if len(fold_rets) > 1 else 0.0)
     trial.set_user_attr("avg_trades", avg_trades_per_sym)
     trial.set_user_attr("avg_pf", avg_pf)
+    trial.set_user_attr("avg_win_rate", avg_win_rate)
+    trial.set_user_attr("min_sym_pf", min_sym_pf)
     trial.set_user_attr("port_kelly", final_kelly)
     
     if port_eq is not None and fold_span_days > 0:
@@ -512,5 +469,5 @@ def objective_futures(
         trial.set_user_attr(f"{sym}_cv_cagr", float(np.mean(sym_total_scores[sym])) if sym_total_scores[sym] else -100.0)
         trial.set_user_attr(f"{sym}_mdd", float(np.max(sym_total_mdds[sym])) if sym_total_mdds[sym] else 0.0)
 
-    # Return Penalized Tuple for NSGA-II
-    return adjusted_kelly, adjusted_mdd
+    # Return raw (unpenalized) objectives for NSGA-II
+    return final_kelly, final_mdd
