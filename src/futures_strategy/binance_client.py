@@ -549,7 +549,7 @@ class BinanceClient:
             # CCXT unified method
             self.exchange.set_position_mode(hedged=dual_side_position)
             mode_str = "Hedge" if dual_side_position else "One-Way"
-            self.logger.info(f"✅ Position mode set to {mode_str} Mode")
+            self.logger.info(f"Position mode set to {mode_str} Mode")
             return True
         except Exception as e:
             # 이미 설정됨 등 무시 가능한 에러 처리
@@ -577,7 +577,7 @@ class BinanceClient:
         try:
             # CCXT fapiPrivate 메서드 존재 확인
             if not hasattr(self.exchange, 'fapiPrivate_get_multiassetsmargin'):
-                self.logger.info("ℹ️ Asset mode API not available in this CCXT version. Skipping.")
+                self.logger.info("Asset mode API not available in this CCXT version. Skipping.")
                 return True
             
             # 1. Check current mode
@@ -592,17 +592,17 @@ class BinanceClient:
                 'multiAssetsMargin': 'true' if is_multi_asset else 'false'
             })
             mode_str = "Multi-Asset" if is_multi_asset else "Single-Asset"
-            self.logger.info(f"✅ Asset mode updated to {mode_str} Mode")
+            self.logger.info(f"Asset mode updated to {mode_str} Mode")
             return True
         except AttributeError:
             # CCXT 버전 문제로 메서드 미존재
-            self.logger.info("ℹ️ Asset mode API not available. Skipping (non-critical).")
+            self.logger.info("Asset mode API not available. Skipping (non-critical).")
             return True
         except Exception as e:
             if "No need to change" in str(e):
                 return True
             # 실패해도 봇 운영에 지장 없으므로 WARNING 레벨로 변경
-            self.logger.warning(f"⚠️ Asset mode setting skipped: {e}")
+            self.logger.warning(f"Asset mode setting skipped: {e}")
             return True  # 봇 계속 진행
 
 
@@ -616,7 +616,7 @@ class BinanceClient:
             # CCXT unified method: ISOLATED, CROSS
             mode = 'CROSS' if margin_type == 'CROSSED' else margin_type
             self.exchange.set_margin_mode(mode, symbol)
-            self.logger.info(f"✅ Margin type set to {margin_type} for {symbol}")
+            self.logger.info(f"Margin type set to {margin_type} for {symbol}")
             return True
         except Exception as e:
             # 이미 설정되어 있거나 포지션이 있으면 에러 발생 (무시 가능)
@@ -672,7 +672,7 @@ class BinanceClient:
                         'leverage': leverage
                     }
                     self.logger.info(
-                        f"✅ [{symbol}] Position Found: {result['amount']} contracts "
+                        f"[{symbol}] Position Found: {result['amount']} contracts "
                         f"@ {result['entryPrice']:.2f} (PnL: {result['unrealizedPnL']:.2f} USDT, Lev: {leverage}x)"
                     )
                     return result
@@ -979,7 +979,7 @@ class BinanceClient:
 
                     if status in ('closed', 'filled') or remaining_amount <= 0:
                         self.logger.info(
-                            f"✅ Tier 1 Filled ({filled_this_round}/{request_amount}) @ "
+                            f"Tier 1 Filled ({filled_this_round}/{request_amount}) @ "
                             f"{order.get('average', target_price)}"
                         )
                         return order
@@ -1074,7 +1074,7 @@ class BinanceClient:
                 if filled > 0:
                     fill_ratio = filled / request_amount if request_amount > 0 else 0.0
                     if remaining_amount <= 0 or fill_ratio >= 0.999:
-                        self.logger.info(f"✅ Tier 2 Filled ({filled}/{request_amount}) @ {order.get('average', limit_price)}")
+                        self.logger.info(f"Tier 2 Filled ({filled}/{request_amount}) @ {order.get('average', limit_price)}")
                         return order
 
                     self.logger.warning(
