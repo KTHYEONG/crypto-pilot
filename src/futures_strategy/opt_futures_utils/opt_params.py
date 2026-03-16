@@ -25,7 +25,8 @@ def suggest_params_futures(trial: optuna.Trial, space: Dict[str, Any], tf: str) 
     
     # --- 3. Momentum Breakout Trigger ---
     _suggest("MOMENTUM_PERIOD")
-    _suggest("VOL_MULT")
+    _suggest("VOL_Z_THRESHOLD")
+    _suggest("EXHAUSTION_MULT")
     
     # --- 4. Exits (Asymmetric Hard Stop vs Fat-Tail Trail) ---
     _suggest("ATR_PERIOD")
