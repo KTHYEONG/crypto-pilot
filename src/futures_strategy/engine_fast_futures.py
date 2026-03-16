@@ -43,9 +43,9 @@ class BacktestEngineFast:
         self.logger = logging.getLogger(__name__)
         self._prepare_data()
 
-    # RSM-VT _REQUIRED_INDICATOR_COLS
+    # RSM-VT _REQUIRED_INDICATOR_COLS (macro_ema for long scale-out threshold)
     _REQUIRED_INDICATOR_COLS: frozenset = frozenset({
-        "entry_upper", "entry_lower", "trend_direction", "strength_filter", "atr"
+        "entry_upper", "entry_lower", "trend_direction", "strength_filter", "atr", "macro_ema"
     })
 
     def _prepare_data(self) -> None:
@@ -79,12 +79,15 @@ class BacktestEngineFast:
         trend_dir = df['daily_trend_direction'].values
         strength_filter = df['daily_strength_filter'].values
         atr = df['daily_atr'].values
-        
-        # RSM-VT Params (V1 Rollback)
+        macro_ema = df['daily_macro_ema'].values
+
+        # RSM-VT Params
         long_atr_mult = float(self.strategy.params.get('LONG_ATR_MULT', 3.0))
         long_trail_mult = float(self.strategy.params.get('LONG_TRAIL_MULT', 3.0))
         short_atr_mult = float(self.strategy.params.get('SHORT_ATR_MULT', 2.0))
         short_tp_mult = float(self.strategy.params.get('SHORT_TP_MULT', 3.0))
+        long_scale_pct = float(self.strategy.params.get('LONG_SCALE_PCT', 0.15))
+        short_trail_mult = float(self.strategy.params.get('SHORT_TRAIL_MULT', 3.0))
         leverage = float(self.leverage)
         
         timestamps = df["timestamp"].values 
@@ -124,10 +127,11 @@ class BacktestEngineFast:
         trades, final_balance, equity_curve = backtest_loop_numba(
             close, high, low, open_prices,
             entry_upper, entry_lower,
-            trend_dir, strength_filter, atr,
+            trend_dir, strength_filter, atr, macro_ema,
             self.initial_balance, leverage, self.fee_rate, self.slippage_rate,
             self.risk_per_trade, timestamps, funding_rate_sums,
             long_atr_mult, long_trail_mult, short_atr_mult, short_tp_mult,
+            long_scale_pct, short_trail_mult,
             warmup_bars, self._execution_start_idx,
             use_compounding, max_capital_usage
         )
@@ -250,10 +254,11 @@ class BacktestEngineFast:
 def backtest_loop_numba(
     close, high, low, open_prices,
     entry_upper, entry_lower,
-    trend_dir, strength_filter, atr,
+    trend_dir, strength_filter, atr, macro_ema_arr,
     initial_balance, leverage, fee_rate, slippage_rate,
     risk_per_trade, timestamps, funding_rate_sums,
     long_atr_mult, long_trail_mult, short_atr_mult, short_tp_mult,
+    long_scale_pct, short_trail_mult,
     warmup_bars, execution_start_idx,
     use_compounding, max_capital_usage
 ):
@@ -268,12 +273,14 @@ def backtest_loop_numba(
     entry_idx = 0
     amount = 0.0
     entry_fee_stored = 0.0
-    
-    stop_price = 0.0 
+
+    stop_price = 0.0
     highest = 0.0
-    
+    has_scaled_out = False
+    lowest = 0.0
+
     max_trades = 30000
-    trades = np.zeros((max_trades, 8))  
+    trades = np.zeros((max_trades, 8))
     trade_count = 0
     
     for i in range(n):
@@ -327,45 +334,74 @@ def backtest_loop_numba(
             
             exit_triggered = False
             exit_price = 0.0
-            
+
             if pos_side == 1:
-                # [V1 ROLLBACK] Long: 100% Pure Fat-tail Trailing Stop (No Scale-out)
                 if c_high > highest:
                     highest = c_high
-                
                 pos_atr = atr[entry_idx]
-                
-                # Check Stop Loss (against previous bar's stop_price) FIRST
+
+                # Long: scale-out 50% at macro_ema * (1 + long_scale_pct)
+                if not has_scaled_out:
+                    macro_val = macro_ema_arr[i]
+                    if not np.isnan(macro_val) and macro_val > 0.0:
+                        scale_price = macro_val * (1.0 + long_scale_pct)
+                        if c_high >= scale_price:
+                            scale_exit_price = c_open if c_open >= scale_price else scale_price
+                            scale_amount = amount / 2.0
+                            pnl_scale = (scale_exit_price - entry_price) * scale_amount
+                            exit_fee_scale = scale_amount * scale_exit_price * fee_rate
+                            pnl_scale -= exit_fee_scale
+                            balance += (scale_amount * entry_price) / leverage + pnl_scale
+                            if trade_count < max_trades:
+                                trades[trade_count] = [entry_idx, i, pos_side, entry_price, scale_exit_price, pnl_scale, scale_amount, entry_fee_stored / 2.0]
+                                trade_count += 1
+                            amount -= scale_amount
+                            entry_fee_stored -= (entry_fee_stored / 2.0)
+                            has_scaled_out = True
+
+                # Long trailing stop for remainder
                 if c_open <= stop_price:
                     exit_price = c_open * (1 - slippage_rate)
                     exit_triggered = True
                 elif c_low <= stop_price:
                     exit_price = stop_price * (1 - slippage_rate)
                     exit_triggered = True
-                
-                # Update stop for next bar
                 if not exit_triggered:
                     new_stop = highest - (pos_atr * long_trail_mult)
                     if new_stop > stop_price:
                         stop_price = new_stop
-            
+
             elif pos_side == -1:
-                # Short: Fixed TP & Hard Stop
+                if c_low < lowest:
+                    lowest = c_low
                 tp_price = entry_price - (atr[entry_idx] * short_tp_mult)
-                
-                # Check Stop Loss first (Gap up)
+
+                if not has_scaled_out:
+                    if c_open <= tp_price or c_low <= tp_price:
+                        scale_exit_price = c_open if c_open <= tp_price else tp_price
+                        scale_amount = amount / 2.0
+                        pnl_scale = (entry_price - scale_exit_price) * scale_amount
+                        exit_fee_scale = scale_amount * scale_exit_price * fee_rate
+                        pnl_scale -= exit_fee_scale
+                        balance += (scale_amount * entry_price) / leverage + pnl_scale
+                        if trade_count < max_trades:
+                            trades[trade_count] = [entry_idx, i, pos_side, entry_price, scale_exit_price, pnl_scale, scale_amount, entry_fee_stored / 2.0]
+                            trade_count += 1
+                        amount -= scale_amount
+                        entry_fee_stored -= (entry_fee_stored / 2.0)
+                        has_scaled_out = True
+                        breakeven_price = entry_price - (entry_price * fee_rate * 2.0)
+                        stop_price = breakeven_price
+                else:
+                    new_stop = lowest + (atr[entry_idx] * short_trail_mult)
+                    if new_stop < stop_price:
+                        stop_price = new_stop
+
                 if c_open >= stop_price:
                     exit_price = c_open * (1 + slippage_rate)
                     exit_triggered = True
                 elif c_high >= stop_price:
                     exit_price = stop_price * (1 + slippage_rate)
-                    exit_triggered = True
-                # Check TP
-                elif c_open <= tp_price:
-                    exit_price = c_open * (1 + slippage_rate)
-                    exit_triggered = True
-                elif c_low <= tp_price:
-                    exit_price = tp_price * (1 + slippage_rate)
                     exit_triggered = True
 
             if exit_triggered:
@@ -437,7 +473,9 @@ def backtest_loop_numba(
                         entry_price = fill_price
                         entry_idx = i
                         highest = fill_price
-                        
+                        lowest = fill_price
+                        has_scaled_out = False
+
                         # Intra-bar instant stop check
                         if pos_side == 1 and c_low <= stop_price:
                             intra_exit_price = stop_price * (1 - slippage_rate)
