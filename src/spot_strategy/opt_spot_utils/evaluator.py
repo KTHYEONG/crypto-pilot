@@ -390,32 +390,31 @@ def objective_spot(
 
     cagr_penalty = 0.0
     
-    # 1. 현물 핵심 제약: Sortino Ratio (하방 변동성 통제)
-    # 롱 포지션만 있으므로 효율성 하한선이 엄격해야 함
-    if avg_sortino < 1.0:
-        cagr_penalty += (1.0 - avg_sortino) * 100.0  
+    # 1. 현물 보수적 위험 대비 수익률: Sortino Ratio
+    if avg_sortino < 1.5:
+        cagr_penalty += (1.5 - avg_sortino) * 50.0
         
-    # 2. 현물 승률 제약: 지나친 저승률(역추세 등) 과적합 방어
-    if avg_win_rate < 25.0:
-        cagr_penalty += (25.0 - avg_win_rate) * 2.0
+    # 2. 현물 승률 통제: 상승장 수익 포착 시 잦은 손절을 방어하는 최소 승률 (35% 이상 권장)
+    if avg_win_rate < 35.0:
+        cagr_penalty += (35.0 - avg_win_rate) * 5.0
 
-    # 3. 구간별 안정성 페널티 (std_cagr)
-    # 전체 기간 수익률은 좋아도 구간별 편차가 크면 과적합으로 간주
-    if len(fold_rets) > 1:
-        std_cagr = float(np.std(fold_rets))
-        cagr_penalty += std_cagr * 1.5
+    # 3. 강건성 보정 (과최적화 방지): 절대 수익률(Std CAGR) 대신 효율성(Std PF) 편차 통제
+    # 현물은 폴드별 상승기/하락기에 따라 수익률 편차가 큰 것이 당연하므로 Std(CAGR)는 제거함.
+    if len(fold_pfs) > 1:
+        std_pf = float(np.std(fold_pfs))
+        cagr_penalty += std_pf * 10.0
 
     # 4. 심볼/종목별 최소 효율성 (PF)
     if len(symbols) > 1:
         sym_pfs = [float(np.mean(sym_total_pfs[s])) for s in symbols]
         min_sym_pf = float(np.min(sym_pfs))
-        if min_sym_pf < 1.1:
-            cagr_penalty += (1.1 - min_sym_pf) * 30.0 
+        if min_sym_pf < 1.2:
+            cagr_penalty += (1.2 - min_sym_pf) * 30.0 
 
-    # 5. 거래 횟수 제약 (통계적 유의성)
-    avg_trades_per_sym = float(np.mean(fold_trades)) / max(1, len(symbols))
-    if avg_trades_per_sym < 10.0:
-        cagr_penalty += (10.0 - avg_trades_per_sym) * 5.0
+    # 5. 통계적 유의성 제약 (우연한 수익 배제)
+    avg_trades_per_sym = float(np.mean(fold_trades))
+    if avg_trades_per_sym < 30.0:
+        cagr_penalty += (30.0 - avg_trades_per_sym) * 10.0
 
     adjusted_cagr = avg_cagr - cagr_penalty
     adjusted_mdd = cv_mdd  # MDD Penalty 제거: Pareto Front 복구
