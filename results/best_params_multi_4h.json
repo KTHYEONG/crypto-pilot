@@ -1,0 +1,21 @@
+{
+    "MACRO_EMA_PERIOD": 190,
+    "KC_MULT": 2.2,
+    "SQUEEZE_WINDOW": 10,
+    "MOMENTUM_PERIOD": 40,
+    "VOL_Z_THRESHOLD": 1.0,
+    "EXHAUSTION_MULT": 3.0,
+    "ATR_PERIOD": 18,
+    "LONG_ATR_MULT": 3.5,
+    "LONG_TRAIL_MULT": 4.0,
+    "LONG_SCALE_ATR_MULT": 8.0,
+    "SHORT_ATR_MULT": 4.0,
+    "SHORT_TP_MULT": 2.5,
+    "SHORT_TRAIL_MULT": 3.0,
+    "RISK_PER_TRADE": 0.06,
+    "CVD_WINDOW": 3,
+    "TAKER_RATIO_THRESHOLD": 1.1,
+    "TIMEFRAME": "4h",
+    "LEVERAGE": 20,
+    "USE_COMPOUNDING": true
+}

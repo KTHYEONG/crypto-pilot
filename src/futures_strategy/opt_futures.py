@@ -345,7 +345,10 @@ def main() -> None:
         best_score_final = best_trial.values[0] if best_trial.values else -100
         if best_score_final > 0 and is_all_passed:
             import json
-            s_name = f"best_params_{('_'.join(target) if isinstance(target, tuple) else target).replace('/', '')}_{tf_eval}"
+            if args.mode == "multi":
+                s_name = f"best_params_multi_{tf_eval}"
+            else:
+                s_name = f"best_params_{('_'.join(target) if isinstance(target, tuple) else target).replace('/', '')}_{tf_eval}"
             
             # [UPGRADE] Save to 'results' directory
             results_dir = os.path.join(project_root, "results")
