@@ -157,9 +157,20 @@ class UltimateStrategyBase(StrategyBase):
         # Has it squeezed recently?
         df["recent_squeeze"] = df["is_squeezing"].rolling(window=squeeze_window).sum() > 0
         
-        # Volume Z-Score (statistical spike filter)
-        vol_mean = df["volume"].rolling(window=20).mean()
-        vol_std = df["volume"].rolling(window=20).std()
+        # Volume Z-Score (statistical spike filter) with time-of-day seasonality adjustment
+        if "datetime" in df.columns:
+            hours = df["datetime"].dt.hour
+            grouped_vol = df.groupby(hours)["volume"]
+            vol_mean = grouped_vol.transform(
+                lambda x: x.rolling(window=10, min_periods=3).mean()
+            )
+            vol_std = grouped_vol.transform(
+                lambda x: x.rolling(window=10, min_periods=3).std()
+            )
+        else:
+            vol_mean = df["volume"].rolling(window=20).mean()
+            vol_std = df["volume"].rolling(window=20).std()
+
         vol_std = vol_std.replace(0, 1e-8)
         df["vol_zscore"] = (df["volume"] - vol_mean) / vol_std
         vol_spike = df["vol_zscore"] > vol_z_threshold
