@@ -93,13 +93,15 @@ LOG_MAX_BYTES = 10 * 1024 * 1024  # 10MB
 LOG_BACKUP_COUNT = 5
 
 # --- 대상 심볼 (Futures) ---
-# 최적화 결과 기반, 100만원 소자본 자산 증식 최상위 퀀트 포트폴리오 (AVAX, DOGE, SOL)
-FUTURES_TARGET_SYMBOLS = ["AVAX/USDT", "DOGE/USDT", "SOL/USDT"]
-
-# --- 포지션 사이징 가중치 (Futures) ---
-# Edge-Weighted Allocation: 기대값(PF)과 안정성(MDD)에 비례하여 자산을 고정 배분함.
-# AVAX(PF 2.52), DOGE(PF 2.69), SOL(MDD 8.2%) 정예 3종목.
-SYMBOL_ALLOCATION_WEIGHTS = {"AVAX/USDT": 0.45, "DOGE/USDT": 0.35, "SOL/USDT": 0.20}
+# 최적화 및 OOS 검증을 통과한 실거래 대상 Golden 6 심볼
+FUTURES_LIVE_SYMBOLS = [
+    "AVAX/USDT",
+    "DOGE/USDT",
+    "ETH/USDT",
+    "LINK/USDT",
+    "NEAR/USDT",
+    "SUI/USDT",
+]
 
 # ============================================================
 # RealTrader Spot 설정 (Upbit)
