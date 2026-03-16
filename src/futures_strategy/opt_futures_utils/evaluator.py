@@ -47,7 +47,9 @@ SIGNAL_CACHE_PARAM_KEYS: frozenset[str] = frozenset([
     "MACRO_EMA_PERIOD",
     "KC_MULT",
     "MOMENTUM_PERIOD",
-    "ATR_PERIOD"
+    "ATR_PERIOD",
+    "VOL_Z_THRESHOLD",
+    "EXHAUSTION_MULT",
 ])
 
 # (signal_params, sym, tf, data_len)
