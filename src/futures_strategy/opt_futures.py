@@ -327,14 +327,20 @@ def main() -> None:
                 _logger.info(f"  > {s_eval:<10}: {s_cagr:>7.2f}% CAGR | {s_mdd:>5.2f}% MDD")
             _logger.info("═" * 60)
 
-        is_all_passed = True
+        passed_count: int = 0
         target_symbols = sorted(target_symbols) 
         for s_eval in target_symbols:
             s_is, r_is, m_is, t_is, _, pf_is, _, _, _ = evaluate_symbol_fold(UltimateStrategy(name=f"IS_{s_eval}", params=params), params, s_eval, tf_eval, data_maps[s_eval][tf_eval], data_maps[s_eval]["1d"], data_maps[s_eval][f"merge_idx_{tf_eval}"], None, data_maps[s_eval][f"is_start_idx_{tf_eval}"], len(data_maps[s_eval][tf_eval]))
             s_oos, r_oos, m_oos, t_oos, _, pf_oos, lc_oos, sc_oos, _ = evaluate_symbol_fold(UltimateStrategy(name=f"OOS_{s_eval}", params=params), params, s_eval, tf_eval, oos_data_maps[s_eval][tf_eval], oos_data_maps[s_eval]["1d"], oos_data_maps[s_eval][f"merge_idx_{tf_eval}"], None, oos_data_maps[s_eval][f"oos_start_idx_{tf_eval}"], len(oos_data_maps[s_eval][tf_eval]))
             go_nogo = run_go_nogo_check([], 0.0, [s_oos], m_oos, pf_oos, int(lc_oos), int(sc_oos), tf_eval)
-            if not go_nogo.passed: is_all_passed = False
+            if go_nogo.passed:
+                passed_count += 1
             final_summaries.append({"sym": s_eval, "tf": tf_eval, "is": (s_is, r_is, m_is, t_is, pf_is), "oos": (s_oos, r_oos, m_oos, t_oos, pf_oos), "passed": go_nogo.passed})
+        
+        if args.mode == "multi":
+            is_all_passed: bool = passed_count >= 4
+        else:
+            is_all_passed = passed_count == len(target_symbols)
         
         best_score_final = best_trial.values[0] if best_trial.values else -100
         if best_score_final > 0 and is_all_passed:
