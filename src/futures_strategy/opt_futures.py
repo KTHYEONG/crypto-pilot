@@ -107,7 +107,7 @@ class _ParallelExecutionPlan:
 def _resolve_parallel_plan(task_count: int, requested_jobs: int, requested_task_workers: int, requested_cpu_budget: int) -> _ParallelExecutionPlan:
     logical_cpus = max(1, os.cpu_count() or 1)
     cpu_budget = max(1, requested_cpu_budget or (4 if logical_cpus > 2 else 1))
-    jobs_per_task = max(1, requested_jobs)
+    jobs_per_task = min(logical_cpus, max(1, requested_jobs))
     task_workers = min(task_count, requested_task_workers) if requested_task_workers > 0 else min(task_count, max(1, cpu_budget // jobs_per_task))
     return _ParallelExecutionPlan(task_workers=max(1, task_workers), jobs_per_task=jobs_per_task, cpu_budget=cpu_budget, logical_cpus=logical_cpus, task_count=task_count)
 
@@ -158,7 +158,7 @@ def _run_tf_optimization(task: Tuple[Any, str], ctx: _TfOptimizationContext) -> 
     def _progress_cb(study: optuna.Study, trial: optuna.trial.FrozenTrial) -> None:
         try:
             b_val = float(trial.values[0]) if trial.values else 0.0
-        except:
+        except Exception:
             b_val = 0.0
         ctx.progress_queue.put((f"{target_str}_{tf}", trial.number + 1, ctx.n_trials, b_val))
 
@@ -172,7 +172,10 @@ def _run_tf_optimization(task: Tuple[Any, str], ctx: _TfOptimizationContext) -> 
             _logger.exception("[%s/%s] Trial %d failed.", target_str, tf, trial.number)
             raise
 
-    _logger.info("[%s/%s/%s] Starting NSGA-II optimization...", target_str, tf, ctx.mode)
+    _logger.info(
+        "[%s/%s/%s] Starting NSGA-II optimization (n_jobs=%d for trial parallelism)...",
+        target_str, tf, ctx.mode, ctx.n_jobs,
+    )
     study.optimize(
         _objective_with_logging,
         n_trials=ctx.n_trials,
@@ -213,6 +216,7 @@ def main() -> None:
     _logger.info("Loading data for %d symbols (Mode: %s)...", len(symbols), args.mode)
     for sym in symbols:
         data_maps[sym] = {}; oos_data_maps[sym] = {}
+        collector.ensure_funding_data(sym, FETCH_START_DATE, END_DATE)
         for tf in [args.tf, "1d"]:
             full_df = collector.collect_and_save(sym, tf, FETCH_START_DATE, END_DATE)
             full_df = merge_funding_into_ohlcv(sym, full_df, DATA_DIR)
@@ -231,6 +235,8 @@ def main() -> None:
     tasks = [(tuple(symbols), args.tf)] if args.mode == "multi" else [(s, args.tf) for s in symbols]
     plan = _resolve_parallel_plan(len(tasks), args.jobs, args.task_workers, 0)
     use_mp = len(tasks) > 1 and plan.task_workers > 1
+    if args.mode == "multi":
+        _logger.info("Multi mode: 1 portfolio task, trial parallelism n_jobs=%d (--jobs to override).", plan.jobs_per_task)
     manager = Manager() if use_mp else None; progress_queue = manager.Queue() if manager else queue.Queue()
 
     tf_bars = {}
@@ -238,11 +244,20 @@ def main() -> None:
         key = "_".join(target) if isinstance(target, tuple) else target
         tf_bars[f"{key}_{tf}"] = tqdm(total=args.trials, desc=f"[{key}] Waiting...", position=i, leave=True)
 
+    _multi_short_label = (
+        f"Multi({len(tasks[0][0])} syms)_{tasks[0][1]}" if tasks and isinstance(tasks[0][0], tuple) else None
+    )
+
     def _progress_listener():
         while True:
             msg = progress_queue.get()
             if msg is None: break
-            k, cur, tot, b_val = msg; bar = tf_bars[k]; bar.n = cur; bar.set_description(f"[{k}] Best Kelly: {b_val:.2f}%"); bar.refresh()
+            k, cur, tot, b_val = msg
+            bar = tf_bars[k]
+            bar.n = cur
+            desc = f"[{_multi_short_label}] Best Kelly: {b_val:.2f}%" if _multi_short_label else f"[{k}] Best Kelly: {b_val:.2f}%"
+            bar.set_description(desc)
+            bar.refresh()
 
     progress_thread = threading.Thread(target=_progress_listener, daemon=True); progress_thread.start()
 

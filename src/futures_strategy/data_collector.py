@@ -328,6 +328,77 @@ class DataCollector:
 
         return self._slice_by_date(cache_df, start, end)
 
+    def _funding_cache_path(self, symbol: str) -> Path:
+        return DATA_DIR / f"{self._safe_symbol(symbol)}_funding.parquet"
+
+    def ensure_funding_data(
+        self,
+        symbol: str,
+        start_date: str | None = None,
+        end_date: str | None = None,
+    ) -> None:
+        """
+        Ensure funding rate parquet exists for the symbol over [start_date, end_date].
+        Fetches from Binance /fapi/v1/fundingRate and merges into {symbol}_funding.parquet
+        so merge_funding_into_ohlcv can attach funding_rate / funding_rate_sum to OHLCV.
+        """
+        start = start_date or FUTURES_BACKTEST_START_DATE
+        end = end_date or FUTURES_BACKTEST_END_DATE
+        req_start = pd.Timestamp(start).normalize()
+        req_end = pd.Timestamp(end).normalize()
+        if req_start > req_end:
+            return
+
+        path = self._funding_cache_path(symbol)
+        cache_df = pd.DataFrame(columns=["timestamp", "funding_rate"])
+        if path.exists():
+            try:
+                cache_df = pd.read_parquet(path)
+                if "timestamp" not in cache_df.columns or "funding_rate" not in cache_df.columns:
+                    cache_df = pd.DataFrame(columns=["timestamp", "funding_rate"])
+                else:
+                    cache_df["timestamp"] = pd.to_numeric(cache_df["timestamp"], errors="coerce").astype("int64")
+            except Exception as e:
+                self.logger.warning("Failed to read funding parquet %s: %s", path, e)
+                cache_df = pd.DataFrame(columns=["timestamp", "funding_rate"])
+
+        missing_ranges: list[tuple[pd.Timestamp, pd.Timestamp]] = []
+        if cache_df.empty:
+            missing_ranges.append((req_start, req_end))
+        else:
+            cache_start = pd.to_datetime(cache_df["timestamp"].min(), unit="ms").normalize()
+            cache_end = pd.to_datetime(cache_df["timestamp"].max(), unit="ms").normalize()
+            if req_start < cache_start:
+                missing_ranges.append((req_start, cache_start - pd.Timedelta(days=1)))
+            if req_end > cache_end:
+                missing_ranges.append((cache_end + pd.Timedelta(days=1), req_end))
+
+        fetched_frames: list[pd.DataFrame] = []
+        for range_start, range_end in missing_ranges:
+            if range_start > range_end:
+                continue
+            s = range_start.strftime("%Y-%m-%d")
+            e = range_end.strftime("%Y-%m-%d")
+            self.logger.info("Fetching funding rate for %s: %s ~ %s", symbol, s, e)
+            try:
+                fr_df = self.client.fetch_funding_rate(symbol, s, e)
+                if not fr_df.empty:
+                    fetched_frames.append(fr_df)
+            except Exception as exc:
+                self.logger.warning("Funding rate fetch failed for %s %s..%s: %s", symbol, s, e, exc)
+
+        if fetched_frames:
+            all_frames = [cache_df] if not cache_df.empty else []
+            all_frames.extend(fetched_frames)
+            merged = (
+                pd.concat(all_frames, ignore_index=True)
+                .drop_duplicates(subset=["timestamp"])
+                .sort_values("timestamp")
+                .reset_index(drop=True)
+            )
+            self._write_parquet(path, merged)
+            self.logger.info("Updated funding parquet cache: %s", path)
+
     def collect_and_save(self, symbol, timeframe, start_date=None, end_date=None):
         """
         Backward-compatible API.
