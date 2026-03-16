@@ -1,4 +1,5 @@
-﻿
+
+from __future__ import annotations
 
 import ccxt
 import time
@@ -8,6 +9,9 @@ import logging
 from collections import deque
 import sys
 from pathlib import Path
+import urllib.parse
+import urllib.request
+import json
 
 # Project Root Setup
 try:
@@ -252,6 +256,127 @@ class BinanceClient:
         df = df.drop_duplicates(subset=['timestamp'])
         df = df[(df['timestamp'] <= end_timestamp)]
         
+        return df
+
+    def fetch_ohlcv_with_taker(
+        self,
+        symbol: str,
+        timeframe: str,
+        start_date: str | datetime,
+        end_date: str | datetime | None = None,
+    ) -> pd.DataFrame:
+        """
+        Fetch OHLCV plus taker buy base/quote volume from Binance /fapi/v1/klines.
+        Returns DataFrame with columns: timestamp, open, high, low, close, volume,
+        taker_buy_base_volume, taker_buy_quote_volume, datetime.
+        """
+        limit = 1000
+        base_url = "https://fapi.binance.com/fapi/v1/klines"
+        timeout_sec = API_READ_TIMEOUT
+
+        if isinstance(start_date, datetime):
+            start_iso = start_date.strftime("%Y-%m-%dT%H:%M:%SZ")
+        else:
+            start_str = str(start_date).strip()
+            if "T" in start_str or " " in start_str:
+                start_iso = start_str.replace(" ", "T")
+                if not start_iso.endswith("Z"):
+                    start_iso += "Z"
+            else:
+                start_iso = f"{start_str}T00:00:00Z"
+        since = self.exchange.parse8601(start_iso)
+
+        if end_date is not None:
+            if isinstance(end_date, datetime):
+                end_iso = end_date.strftime("%Y-%m-%dT%H:%M:%SZ")
+            else:
+                end_str = str(end_date).strip()
+                if "T" in end_str or " " in end_str:
+                    end_iso = end_str.replace(" ", "T")
+                    if not end_iso.endswith("Z"):
+                        end_iso += "Z"
+                else:
+                    end_iso = f"{end_str}T23:59:59Z"
+            end_timestamp = self.exchange.parse8601(end_iso)
+        else:
+            end_timestamp = self.exchange.milliseconds()
+
+        try:
+            market = self.exchange.market(symbol)
+            binance_symbol: str = str(market.get("id", symbol).replace("/", ""))
+        except Exception:
+            binance_symbol = str(symbol).replace("/", "")
+
+        interval_map = {"1m": "1m", "3m": "3m", "5m": "5m", "15m": "15m", "30m": "30m",
+                       "1h": "1h", "2h": "2h", "4h": "4h", "6h": "6h", "8h": "8h",
+                       "12h": "12h", "1d": "1d", "3d": "3d", "1w": "1w", "1M": "1M"}
+        interval = interval_map.get(str(timeframe).strip().lower(), str(timeframe).strip().lower())
+
+        all_rows: list[list[float | int]] = []
+        while since < end_timestamp:
+            params = {
+                "symbol": binance_symbol,
+                "interval": interval,
+                "startTime": since,
+                "endTime": end_timestamp,
+                "limit": limit,
+            }
+            qs = urllib.parse.urlencode(params)
+            url = f"{base_url}?{qs}"
+            req = urllib.request.Request(url, method="GET")
+            try:
+                with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
+                    raw = resp.read().decode("utf-8")
+                data = json.loads(raw)
+            except Exception as e:
+                self.logger.error("Error fetching klines with taker: %s", e)
+                time.sleep(5)
+                continue
+
+            if not data:
+                break
+
+            for row in data:
+                if not isinstance(row, (list, tuple)) or len(row) < 11:
+                    continue
+                ts = int(row[0])
+                all_rows.append([
+                    ts,
+                    float(row[1]),
+                    float(row[2]),
+                    float(row[3]),
+                    float(row[4]),
+                    float(row[5]),
+                    float(row[9]) if row[9] not in (None, "") else 0.0,
+                    float(row[10]) if row[10] not in (None, "") else 0.0,
+                ])
+
+            last_ts = int(data[-1][0])
+            since = last_ts + 1
+            current_date = datetime.fromtimestamp(last_ts / 1000).strftime("%Y-%m-%d")
+            self.logger.info("Klines with taker up to %s (%d candles)", current_date, len(all_rows))
+            if last_ts >= end_timestamp:
+                break
+            time.sleep(0.1)
+
+        if not all_rows:
+            return pd.DataFrame(
+                columns=[
+                    "timestamp", "open", "high", "low", "close", "volume",
+                    "taker_buy_base_volume", "taker_buy_quote_volume", "datetime",
+                ]
+            )
+
+        df = pd.DataFrame(
+            all_rows,
+            columns=[
+                "timestamp", "open", "high", "low", "close", "volume",
+                "taker_buy_base_volume", "taker_buy_quote_volume",
+            ],
+        )
+        df["datetime"] = pd.to_datetime(df["timestamp"], unit="ms")
+        df = df.drop_duplicates(subset=["timestamp"])
+        df = df[df["timestamp"] <= end_timestamp].copy()
         return df
 
     def fetch_recent_ohlcv(self, symbol, timeframe, limit=3):
