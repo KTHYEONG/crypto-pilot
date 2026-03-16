@@ -55,6 +55,9 @@ SIGNAL_CACHE_PARAM_KEYS: frozenset[str] = frozenset([
     "ATR_PERIOD",
     "VOL_Z_THRESHOLD",
     "EXHAUSTION_MULT",
+    "SQUEEZE_WINDOW",
+    "CVD_WINDOW",
+    "TAKER_RATIO_THRESHOLD",
 ])
 
 # (signal_params, sym, tf, data_len)
@@ -126,7 +129,7 @@ def _segment_with_context(
     """
     slice_start = max(0, int(exec_start_idx) - 1)
     slice_end = max(slice_start, int(exec_end_idx))
-    segment = full_signal_df.iloc[slice_start:slice_end].copy()
+    segment = full_signal_df.iloc[slice_start:slice_end].copy(deep=False)
     execution_start_idx = int(exec_start_idx) - slice_start
     if execution_start_idx == 0 and len(segment) > 1:
         execution_start_idx = 1
