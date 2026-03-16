@@ -63,7 +63,13 @@ SEARCH_SPACE_4H: Dict[str, Dict[str, Any]] = {
     "SHORT_TRAIL_MULT":  {"type": "float", "low": 2.0,  "high": 5.0,  "step": 0.5}, 
     
     # --- 5. Volatility Targeting (Compounding) ---
-    "RISK_PER_TRADE":    {"type": "float", "low": 0.02, "high": 0.08, "step": 0.01}, 
+    "RISK_PER_TRADE":    {"type": "float", "low": 0.02, "high": 0.08, "step": 0.01},
+
+    # --- 6. Microstructure (CVD) Filters ---
+    # CVD window: 4H 기준 3~9봉 (12~36시간)
+    "CVD_WINDOW":            {"type": "int",   "low": 3,    "high": 9,   "step": 2},
+    # Taker buy dominance threshold: 1.05 (5% 우위) ~ 1.50 (50% 우위)
+    "TAKER_RATIO_THRESHOLD": {"type": "float", "low": 1.05, "high": 1.50, "step": 0.05},
 }
 
 SEARCH_SPACE_SPOT_4H: Dict[str, Dict[str, Any]] = {
