@@ -96,7 +96,7 @@ class OrderBookCache:
 
 
 class BinanceClient:
-    def __init__(self, api_key=None, secret=None):
+    def __init__(self, api_key=None, secret=None, shared_rate_limiter=None):
         # 1. CCXT Exchange 인스턴스 생성
         # 타임아웃: 데이터 조회(READ) 기준으로 기본 설정 (20초)
         self.exchange = ccxt.binanceusdm({
@@ -113,8 +113,12 @@ class BinanceClient:
         from src.common.utils import setup_logger
         self.logger = setup_logger("BinanceClient")
         
-        # Order Rate Limiter (바이낸스 10초당 주문 제한 방어)
-        self.rate_limiter = OrderRateLimiter(max_orders_per_10s=40)
+        # Order Rate Limiter: 주입된 공유 Limiter 사용 또는 자체 생성
+        self.rate_limiter = (
+            shared_rate_limiter
+            if shared_rate_limiter is not None
+            else OrderRateLimiter(max_orders_per_10s=40)
+        )
         
         # Order Book Cache (0.3초 TTL - API 호출 60% 감소)
         self.orderbook_cache = OrderBookCache(ttl_seconds=0.3)
