@@ -89,8 +89,8 @@ ERROR_SLEEP_SECONDS = 60  # 에러 발생 시 대기
 CANDLE_SYNC_OFFSET_SECONDS = 15
 
 # --- 로그 회전 설정 ---
-LOG_MAX_BYTES = 10 * 1024 * 1024  # 10MB
-LOG_BACKUP_COUNT = 5
+LOG_MAX_BYTES = 50 * 1024 * 1024  # 50MB
+LOG_BACKUP_COUNT = 3
 
 # --- 대상 심볼 (Futures) ---
 # 최적화 및 OOS 검증을 통과한 실거래 대상 Golden 6 심볼
