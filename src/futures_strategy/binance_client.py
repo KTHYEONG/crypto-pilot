@@ -12,6 +12,7 @@ from pathlib import Path
 import urllib.parse
 import urllib.request
 import json
+import threading
 
 # Project Root Setup
 try:
@@ -32,33 +33,47 @@ class OrderRateLimiter:
         self.max_orders = max_orders_per_10s
         self.order_timestamps = deque(maxlen=max_orders_per_10s)
         self.logger = logging.getLogger(__name__)
+        self._lock = threading.Lock()
     
     def can_place_order(self) -> bool:
         """주문 가능 여부 확인"""
         now = time.time()
-        
-        # 10초 이전 주문 제거
-        while self.order_timestamps and now - self.order_timestamps[0] > 10:
-            self.order_timestamps.popleft()
-        
-        # 현재 10초간 주문 수 확인
-        if len(self.order_timestamps) >= self.max_orders:
-            oldest = self.order_timestamps[0]
-            wait_time = 10 - (now - oldest)
-            self.logger.warning(f"⏸️ Order rate limit: wait {wait_time:.1f}s")
-            return False
-        
-        return True
+        with self._lock:
+            while self.order_timestamps and now - self.order_timestamps[0] > 10:
+                self.order_timestamps.popleft()
+
+            if len(self.order_timestamps) >= self.max_orders:
+                oldest = self.order_timestamps[0]
+                wait_time = 10 - (now - oldest)
+                self.logger.warning(f"⏸️ Order rate limit: wait {wait_time:.1f}s")
+                return False
+
+            return True
     
     def record_order(self):
         """주문 기록"""
-        self.order_timestamps.append(time.time())
+        with self._lock:
+            self.order_timestamps.append(time.time())
     
     def wait_if_needed(self):
-        """필요시 대기 (Blocking 최소화)"""
-        while not self.can_place_order():
-            time.sleep(0.1)  # 0.5s -> 0.1s (반응성 향상)
-        self.record_order()
+        """필요시 대기 (원자성 보장)"""
+        while True:
+            now = time.time()
+            wait_time = 0.0
+
+            with self._lock:
+                while self.order_timestamps and now - self.order_timestamps[0] > 10:
+                    self.order_timestamps.popleft()
+
+                if len(self.order_timestamps) < self.max_orders:
+                    self.order_timestamps.append(now)
+                    return
+
+                oldest = self.order_timestamps[0]
+                wait_time = 10 - (now - oldest)
+
+            self.logger.warning(f"⏸️ Order rate limit: wait {wait_time:.1f}s")
+            time.sleep(max(0.1, min(wait_time, 1.0)))
 
 
 class OrderBookCache:
@@ -72,15 +87,16 @@ class OrderBookCache:
         self.logger = logging.getLogger(__name__)
     
     def get(self, symbol):
-        """캐시된 호가창 조회"""
-        if symbol in self.cache:
-            data, timestamp = self.cache[symbol]
+        """캐시된 호가창 조회 (스레드 안전성 강화)"""
+        cached_item = self.cache.get(symbol)
+        if cached_item is not None:
+            data, timestamp = cached_item
             age = time.time() - timestamp
-            
+
             if age < self.ttl:
                 self.logger.debug(f"📦 Cache HIT: {symbol} (age: {age*1000:.0f}ms)")
                 return data
-        
+
         return None
     
     def set(self, symbol, data):
@@ -225,33 +241,34 @@ class BinanceClient:
         self.logger.info(f"Fetching {symbol} {timeframe} data from {start_date} to {end_date}...")
 
         while since < end_timestamp:
-            try:
-                ohlcv = self.exchange.fetch_ohlcv(symbol, timeframe, since, limit)
-                
-                if not ohlcv:
+            retry_count = 0
+            while retry_count < 3:
+                try:
+                    ohlcv = self.exchange.fetch_ohlcv(symbol, timeframe, since, limit)
+
+                    if not ohlcv:
+                        since = end_timestamp
+                        break
+
+                    all_ohlcv.extend(ohlcv)
+
+                    last_timestamp = ohlcv[-1][0]
+                    since = last_timestamp + 1
+
+                    current_date = datetime.fromtimestamp(last_timestamp / 1000).strftime('%Y-%m-%d')
+                    self.logger.info(f"Measured up to {current_date} ({len(all_ohlcv)} candles)")
+
+                    time.sleep(0.1)
+
+                    if last_timestamp >= end_timestamp:
+                        since = end_timestamp
                     break
-                
-                all_ohlcv.extend(ohlcv)
-                
-                # 마지막 데이터의 타임스탬프 업데이트
-                last_timestamp = ohlcv[-1][0]
-                since = last_timestamp + 1  # 다음 데이터부터 조회
-                
-                # 진행 상황 로깅
-                current_date = datetime.fromtimestamp(last_timestamp / 1000).strftime('%Y-%m-%d')
-                self.logger.info(f"Measured up to {current_date} ({len(all_ohlcv)} candles)")
-                
-                # API 호출 간격 조절 (안전을 위해 추가 대기)
-                time.sleep(0.1)
-                
-                # 목표 시점 도달 확인
-                if last_timestamp >= end_timestamp:
-                    break
-                    
-            except Exception as e:
-                self.logger.error(f"Error fetching data: {e}")
-                time.sleep(5) # 에러 발생 시 5초 대기 후 재시도
-                continue
+                except Exception as e:
+                    retry_count += 1
+                    self.logger.error(f"Error fetching data ({retry_count}/3): {e}")
+                    time.sleep(5)
+                    if retry_count >= 3:
+                        raise RuntimeError(f"Data fetch failed persistently for {symbol}") from e
 
         df = pd.DataFrame(all_ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         df['datetime'] = pd.to_datetime(df['timestamp'], unit='ms')
@@ -318,42 +335,58 @@ class BinanceClient:
 
         all_rows: list[list[float | int]] = []
         while since < end_timestamp:
-            params = {
-                "symbol": binance_symbol,
-                "interval": interval,
-                "startTime": since,
-                "endTime": end_timestamp,
-                "limit": limit,
-            }
-            qs = urllib.parse.urlencode(params)
-            url = f"{base_url}?{qs}"
-            req = urllib.request.Request(url, method="GET")
-            try:
-                with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
-                    raw = resp.read().decode("utf-8")
-                data = json.loads(raw)
-            except Exception as e:
-                self.logger.error("Error fetching klines with taker: %s", e)
-                time.sleep(5)
-                continue
-
-            if not data:
-                break
-
-            for row in data:
-                if not isinstance(row, (list, tuple)) or len(row) < 11:
+            retry_count = 0
+            while retry_count < 3:
+                params = {
+                    "symbol": binance_symbol,
+                    "interval": interval,
+                    "startTime": since,
+                    "endTime": end_timestamp,
+                    "limit": limit,
+                }
+                qs = urllib.parse.urlencode(params)
+                url = f"{base_url}?{qs}"
+                req = urllib.request.Request(url, method="GET")
+                try:
+                    with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
+                        raw = resp.read().decode("utf-8")
+                    data = json.loads(raw)
+                except Exception as e:
+                    retry_count += 1
+                    self.logger.error(
+                        "Error fetching klines with taker (%d/3) for %s: %s",
+                        retry_count,
+                        symbol,
+                        e,
+                    )
+                    time.sleep(5)
+                    if retry_count >= 3:
+                        raise RuntimeError(
+                            f"Data fetch with taker failed persistently for {symbol}"
+                        ) from e
                     continue
-                ts = int(row[0])
-                all_rows.append([
-                    ts,
-                    float(row[1]),
-                    float(row[2]),
-                    float(row[3]),
-                    float(row[4]),
-                    float(row[5]),
-                    float(row[9]) if row[9] not in (None, "") else 0.0,
-                    float(row[10]) if row[10] not in (None, "") else 0.0,
-                ])
+
+                if not data:
+                    since = end_timestamp
+                    break
+
+                for row in data:
+                    if not isinstance(row, (list, tuple)) or len(row) < 11:
+                        continue
+
+                    ts = int(row[0])
+                    all_rows.append([
+                        ts,
+                        float(row[1]),
+                        float(row[2]),
+                        float(row[3]),
+                        float(row[4]),
+                        float(row[5]),
+                        float(row[9]) if row[9] not in (None, "") else 0.0,
+                        float(row[10]) if row[10] not in (None, "") else 0.0,
+                    ])
+
+                break
 
             last_ts = int(data[-1][0])
             since = last_ts + 1
@@ -394,13 +427,19 @@ class BinanceClient:
             return df
         except Exception as e:
             self.logger.error(f"Error fetching recent OHLCV for {symbol} {timeframe}: {e}")
-            return pd.DataFrame(columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'datetime'])
+            raise
 
     def get_market_price(self, symbol):
-        """현재 시장가 조회"""
+        """현재 시장가 조회 (캐시 적용)"""
+        cached_price = self.orderbook_cache.get(f"{symbol}_ticker")
+        if cached_price is not None:
+            return cached_price
+
         try:
             ticker = self.exchange.fetch_ticker(symbol)
-            return ticker['last']
+            price = ticker["last"]
+            self.orderbook_cache.set(f"{symbol}_ticker", price)
+            return price
         except Exception as e:
             self.logger.error(f"Error fetching ticker: {e}")
             return None
@@ -414,7 +453,7 @@ class BinanceClient:
                 return int(server_ms)
         except Exception as e:
             self.logger.warning(f"Failed to fetch exchange server time: {e}")
-        return int(time.time() * 1000)
+        return None
 
     def fetch_funding_rate(
         self,
@@ -465,6 +504,7 @@ class BinanceClient:
 
         all_rows: list[tuple[int, float]] = []
         since = start_ts
+        retry_count = 0
 
         self.logger.info(
             "Fetching funding rate for %s from %s to %s...",
@@ -487,9 +527,17 @@ class BinanceClient:
                 with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
                     raw = resp.read().decode("utf-8")
                 data = json.loads(raw)
+                retry_count = 0
             except Exception as e:
-                self.logger.error("Error fetching funding rate: %s", e)
+                retry_count += 1
+                self.logger.error(
+                    "Error fetching funding rate (%d/3): %s", retry_count, e
+                )
                 time.sleep(5)
+                if retry_count >= 3:
+                    raise RuntimeError(
+                        f"Funding rate fetch failed persistently for {symbol}"
+                    ) from e
                 continue
 
             if not data:
@@ -717,78 +765,91 @@ class BinanceClient:
             self.logger.error(f"❌ Order Failed: {e}")
             return None
 
-    def place_stop_market_order(self, symbol, side, amount, stop_price):
+    def place_stop_market_order(
+        self,
+        symbol: str,
+        side: str,
+        amount: float,
+        stop_price: float,
+        client_order_id: Optional[str] | None = None,
+    ):
         """
         서버 사이드 Stop Market 주문 (손절용)
         side: 'buy' (숏 손절용) or 'sell' (롱 손절용)
         stop_price: 트리거 가격
         """
         try:
-            # 바이낸스 선물 STOP_MARKET 주문은 stopPrice를 params에 넣어야 함
-            params = {
-                'stopPrice': stop_price,
-                'closePosition': True  # [One-Way Mode 권장] reduceOnly보다 안정적
+            self.rate_limiter.wait_if_needed()
+
+            params: dict[str, object] = {
+                "stopPrice": float(stop_price),
+                "reduceOnly": True,
             }
-            
-            # [NOTE] One-Way Mode에서는 closePosition=True가 바이낸스 공식 권장 파라미터
-            # reduceOnly는 포지션 수량과 맞지 않을 경우 주문이 자동 취소될 수 있음
-            
+            if client_order_id:
+                params["clientOrderId"] = client_order_id
+
             order = self.exchange.create_order(
                 symbol=symbol,
-                type='STOP_MARKET',
+                type="STOP_MARKET",
                 side=side,
                 amount=amount,
-                params=params
+                params=params,
             )
-            self.logger.info(f"🛡️ Server SL Placed: {symbol} {side} {amount} @ Stop {stop_price}")
+            self.logger.info(
+                f"🛡️ Server SL Placed: {symbol} {side} {amount} @ Stop {stop_price}"
+            )
             return order
         except Exception as e:
             error_msg = str(e)
-            
-            # -4130: 이미 동일한 방향의 closePosition 주문이 존재함 (성공으로 간주)
             if "-4130" in error_msg:
-                self.logger.info(f"ℹ️ Stop Loss already exists for {symbol}. Skipping duplicate.")
-                return True
-            
-            # -2021: Order would immediately trigger (현재가가 이미 손절가 도달)
+                self.logger.warning(f"⚠️ [-4130] SL would immediately trigger for {symbol}. Bypassing.")
+                return {"id": "triggered_4130_sl", "status": "closed", "info": "-4130"}
             if "-2021" in error_msg:
-                self.logger.warning(f"⚠️ Stop Loss trigger price is immediate! Skipping SL for {symbol}")
                 return None
-            
             self.logger.error(f"❌ Failed to place Server SL for {symbol}: {e}")
             return None
-    def place_take_profit_market_order(self, symbol, side, amount, tp_price):
+
+    def place_take_profit_market_order(
+        self,
+        symbol: str,
+        side: str,
+        amount: float,
+        tp_price: float,
+        client_order_id: Optional[str] | None = None,
+    ):
         """
         서버 사이드 Take Profit Market 주문 (익절용)
         side: 'buy' (숏 익절용) or 'sell' (롱 익절용)
         tp_price: 트리거 가격
         """
         try:
-            params = {
-                'stopPrice': tp_price,
-                'closePosition': True
+            self.rate_limiter.wait_if_needed()
+
+            params: dict[str, object] = {
+                "stopPrice": float(tp_price),
+                "reduceOnly": True,
             }
-            
+            if client_order_id:
+                params["clientOrderId"] = client_order_id
+
             order = self.exchange.create_order(
                 symbol=symbol,
-                type='TAKE_PROFIT_MARKET',
+                type="TAKE_PROFIT_MARKET",
                 side=side,
                 amount=amount,
-                params=params
+                params=params,
             )
-            self.logger.info(f"🎯 Server TP Placed: {symbol} {side} {amount} @ TP {tp_price}")
+            self.logger.info(
+                f"🎯 Server TP Placed: {symbol} {side} {amount} @ TP {tp_price}"
+            )
             return order
         except Exception as e:
             error_msg = str(e)
-            
             if "-4130" in error_msg:
-                self.logger.info(f"ℹ️ Take Profit already exists for {symbol}. Skipping duplicate.")
-                return True
-            
+                self.logger.warning(f"⚠️ [-4130] TP would immediately trigger for {symbol}. Bypassing.")
+                return {"id": "triggered_4130_tp", "status": "closed", "info": "-4130"}
             if "-2021" in error_msg:
-                self.logger.warning(f"⚠️ Take Profit trigger price is immediate! Skipping TP for {symbol}")
                 return None
-            
             self.logger.error(f"❌ Failed to place Server TP for {symbol}: {e}")
             return None
 
@@ -821,14 +882,19 @@ class BinanceClient:
             return round(float(price) / tick) * tick
 
         def get_best_price_fresh():
+            cached_ob = self.orderbook_cache.get(f"{symbol}_ob")
+            if cached_ob:
+                return cached_ob[0], cached_ob[1]
+
             try:
                 orderbook = self.exchange.fetch_order_book(symbol, limit=1)
-                best_bid = orderbook['bids'][0][0] if orderbook['bids'] else None
-                best_ask = orderbook['asks'][0][0] if orderbook['asks'] else None
-                if not best_bid:
-                    best_bid = current_price
-                if not best_ask:
-                    best_ask = current_price
+                best_bid = (
+                    orderbook["bids"][0][0] if orderbook["bids"] else current_price
+                )
+                best_ask = (
+                    orderbook["asks"][0][0] if orderbook["asks"] else current_price
+                )
+                self.orderbook_cache.set(f"{symbol}_ob", (best_bid, best_ask))
                 return best_bid, best_ask
             except Exception:
                 return current_price, current_price
@@ -855,11 +921,16 @@ class BinanceClient:
                 params['reduceOnly'] = True
             return params
 
+        start_local_time_ms = int(time.time() * 1000)
+
         def deadline_reached():
             if order_deadline_ms is None:
                 return False
             try:
-                return int(time.time() * 1000) >= int(order_deadline_ms)
+                elapsed_ms = int(time.time() * 1000) - start_local_time_ms
+                _ = elapsed_ms  # keep for potential future use
+                current_synced_ms = self.exchange.milliseconds()
+                return current_synced_ms >= int(order_deadline_ms)
             except Exception:
                 return False
 
@@ -1133,12 +1204,9 @@ class BinanceClient:
             return None
 
 
-    def cancel_all_orders(self, symbol):
-        """미체결 주문 취소"""
-        try:
-            self.exchange.cancel_all_orders(symbol)
-            self.logger.info(f"🗑️ Canceled all open orders for {symbol}")
-        except Exception as e:
-            self.logger.error(f"Error canceling orders: {e}")
+    def cancel_all_orders(self, symbol: str) -> None:
+        """미체결 주문 취소 (예외를 상위로 전파)"""
+        self.logger.info("🗑️ Canceling all open orders for %s", symbol)
+        self.exchange.cancel_all_orders(symbol)
 
 
