@@ -27,9 +27,9 @@ from config.settings import API_READ_TIMEOUT, API_ORDER_TIMEOUT, API_CHECK_TIMEO
 class OrderRateLimiter:
     """
     바이낸스 주문 횟수 제한 방어 (토큰 버킷 알고리즘)
-    10초당 최대 40 orders (안전 마진 20%)
+    10초당 최대 80 orders (안전 마진 20%)
     """
-    def __init__(self, max_orders_per_10s=40):
+    def __init__(self, max_orders_per_10s=80):
         self.max_orders = max_orders_per_10s
         self.order_timestamps = deque(maxlen=max_orders_per_10s)
         self.logger = logging.getLogger(__name__)
@@ -133,7 +133,7 @@ class BinanceClient:
         self.rate_limiter = (
             shared_rate_limiter
             if shared_rate_limiter is not None
-            else OrderRateLimiter(max_orders_per_10s=40)
+            else OrderRateLimiter(max_orders_per_10s=80)
         )
         
         # Order Book Cache (0.3초 TTL - API 호출 60% 감소)
@@ -240,7 +240,16 @@ class BinanceClient:
         
         self.logger.info(f"Fetching {symbol} {timeframe} data from {start_date} to {end_date}...")
 
+        max_iterations = 500
+        iteration_count = 0
         while since < end_timestamp:
+            iteration_count += 1
+            if iteration_count > max_iterations:
+                self.logger.error(
+                    "fetch_ohlcv loop exceeded %d iterations. Breaking.",
+                    max_iterations,
+                )
+                break
             retry_count = 0
             while retry_count < 3:
                 try:
@@ -253,7 +262,16 @@ class BinanceClient:
                     all_ohlcv.extend(ohlcv)
 
                     last_timestamp = ohlcv[-1][0]
-                    since = last_timestamp + 1
+                    new_since = last_timestamp + 1
+                    if new_since <= since:
+                        self.logger.warning(
+                            "Timestamp not advancing (%d -> %d). Breaking.",
+                            since,
+                            new_since,
+                        )
+                        since = end_timestamp
+                        break
+                    since = new_since
 
                     current_date = datetime.fromtimestamp(last_timestamp / 1000).strftime('%Y-%m-%d')
                     self.logger.info(f"Measured up to {current_date} ({len(all_ohlcv)} candles)")
@@ -388,6 +406,9 @@ class BinanceClient:
 
                 break
 
+            if not data:
+                break
+
             last_ts = int(data[-1][0])
             since = last_ts + 1
             current_date = datetime.fromtimestamp(last_ts / 1000).strftime("%Y-%m-%d")
@@ -437,7 +458,11 @@ class BinanceClient:
 
         try:
             ticker = self.exchange.fetch_ticker(symbol)
-            price = ticker["last"]
+            price = ticker.get("last")
+            if price is None:
+                self.logger.warning("Ticker 'last' is None for %s", symbol)
+                return None
+            price = float(price)
             self.orderbook_cache.set(f"{symbol}_ticker", price)
             return price
         except Exception as e:
@@ -556,6 +581,9 @@ class BinanceClient:
                 except (TypeError, ValueError):
                     continue
                 all_rows.append((ts, rate))
+
+            if not data:
+                break
 
             last_ts = int(data[-1]["fundingTime"])
             since = last_ts + 1

@@ -5,6 +5,7 @@ import json
 import time
 import sqlite3
 import logging
+import threading
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -29,6 +30,8 @@ class TradeHistoryDB:
     
     def __init__(self, db_path: Path):
         self.db_path = db_path
+        self._conn: Optional[sqlite3.Connection] = None
+        self._lock = threading.Lock()
         self._init_db()
     
     def _init_db(self):
@@ -64,6 +67,15 @@ class TradeHistoryDB:
                 ON trades(symbol)
             """)
             conn.commit()
+
+    def _get_conn(self) -> sqlite3.Connection:
+        if self._conn is None:
+            self._conn = sqlite3.connect(
+                str(self.db_path), timeout=30.0, check_same_thread=False
+            )
+            self._conn.execute("PRAGMA journal_mode=WAL")
+            self._conn.execute("PRAGMA synchronous=NORMAL")
+        return self._conn
     
     def record_trade(
         self,
@@ -82,7 +94,8 @@ class TradeHistoryDB:
         max_retries = 3
         for attempt in range(max_retries):
             try:
-                with sqlite3.connect(self.db_path, timeout=30.0) as conn:
+                with self._lock:
+                    conn = self._get_conn()
                     conn.execute("""
                         INSERT INTO trades 
                         (timestamp, symbol, side, action, quantity, price, 
@@ -121,7 +134,8 @@ class TradeHistoryDB:
     
     def get_recent_trades(self, symbol: str = None, limit: int = 100) -> list:
         """최근 거래 조회"""
-        with sqlite3.connect(self.db_path, timeout=30.0) as conn:
+        with self._lock:
+            conn = self._get_conn()
             conn.row_factory = sqlite3.Row
             if symbol:
                 rows = conn.execute(
