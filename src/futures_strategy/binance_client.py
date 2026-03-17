@@ -802,8 +802,10 @@ class BinanceClient:
         except Exception as e:
             error_msg = str(e)
             if "-4130" in error_msg:
-                self.logger.warning(f"⚠️ [-4130] SL would immediately trigger for {symbol}. Bypassing.")
-                return {"id": "triggered_4130_sl", "status": "closed", "info": "-4130"}
+                self.logger.warning(
+                    f"⚠️ [-4130] SL would immediately trigger for {symbol}. Returning None."
+                )
+                return None
             if "-2021" in error_msg:
                 return None
             self.logger.error(f"❌ Failed to place Server SL for {symbol}: {e}")
@@ -1183,14 +1185,40 @@ class BinanceClient:
                     return build_partial_result(status='partial_no_market')
                 return None
             self.rate_limiter.wait_if_needed()
-            self.logger.warning(f"🚨 Tier 3: Market Order {side} (remaining: {remaining_amount})")
-            order = self.exchange.create_order(
-                symbol=symbol,
-                type='market',
-                side=side,
-                amount=remaining_amount,
-                params=build_params(),
-            )
+            if current_price and atr:
+                max_slip_ratio = min(
+                    0.01, (float(atr) * 0.2) / float(current_price)
+                )
+                if side == "buy":
+                    hard_limit_price = round_to_tick(
+                        current_price * (1 + max_slip_ratio), tick_size
+                    )
+                else:
+                    hard_limit_price = round_to_tick(
+                        current_price * (1 - max_slip_ratio), tick_size
+                    )
+                self.logger.warning(
+                    f"🚨 Tier 3: Capped Market Order (Limit IOC fallback) {side} @ {hard_limit_price}"
+                )
+                order = self.exchange.create_order(
+                    symbol=symbol,
+                    type="limit",
+                    side=side,
+                    amount=remaining_amount,
+                    price=hard_limit_price,
+                    params=build_params({"timeInForce": "IOC"}),
+                )
+            else:
+                self.logger.warning(
+                    f"🚨 Tier 3: Market Order {side} (remaining: {remaining_amount})"
+                )
+                order = self.exchange.create_order(
+                    symbol=symbol,
+                    type="market",
+                    side=side,
+                    amount=remaining_amount,
+                    params=build_params(),
+                )
             register_fill(order, remaining_amount)
             return order
         except Exception as e:
