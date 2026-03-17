@@ -1174,7 +1174,7 @@ class RealTraderFutures:
             logger.error(f"⚠️ Failed to set Single-Asset Mode: {e}")
 
         if self._executor is None and self.symbols:
-            max_workers = max(1, min(len(self.symbols), 8))
+            max_workers = min(3, len(self.symbols))
             self._executor = ThreadPoolExecutor(max_workers=max_workers)
 
         try:
@@ -1917,6 +1917,8 @@ class RealTraderFutures:
                 df[float_cols] = df[float_cols].astype(np.float64)
                 df = strategy.generate_signals(df)
                 last_candle = self._select_last_closed_candle(df, indicator_tf)
+                del df
+                df = None
                 if last_candle is None:
                     return None
 
@@ -2226,8 +2228,13 @@ class RealTraderFutures:
             fee_rate = float(
                 params.get("TAKER_FEE_RATE", params.get("FEE_RATE", 0.0005))
             )
-            margin_buffer_multiplier = 1.0 + (fee_rate * 2.0) + float(SLIPPAGE_RATE)
-
+            max_expected_funding_rate = 0.001
+            margin_buffer_multiplier = (
+                1.0
+                + (fee_rate * 2.0)
+                + float(SLIPPAGE_RATE)
+                + max_expected_funding_rate
+            )
             used_margin = (final_notional / leverage) * margin_buffer_multiplier
 
             margin_context["free_usdt"] = max(
