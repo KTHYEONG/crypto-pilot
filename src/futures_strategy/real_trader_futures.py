@@ -149,56 +149,18 @@ class StateManager:
 
     def __init__(self, state_file: Path):
         self.state_file = state_file
-        self.lock_file = self.state_file.with_suffix(self.state_file.suffix + ".lock")
         self._memory_cache: Dict[str, Any] = {}
         self._cache_initialized: bool = False
         self._thread_lock = threading.Lock()
+        self._dirty: bool = False
+        self._last_flush: float = 0.0
+        self._flush_interval: float = 1.0
         self._ensure_file_exists()
 
     def _ensure_file_exists(self):
         if not self.state_file.exists():
             self.state_file.parent.mkdir(parents=True, exist_ok=True)
             self._save_unlocked({})
-        if not self.lock_file.exists():
-            self.lock_file.parent.mkdir(parents=True, exist_ok=True)
-            self.lock_file.touch(exist_ok=True)
-
-    def _acquire_lock(self):
-        self.lock_file.parent.mkdir(parents=True, exist_ok=True)
-        lock_fp = open(self.lock_file, "a+b")
-        try:
-            for _ in range(50):
-                try:
-                    if msvcrt is not None:
-                        lock_fp.seek(0)
-                        msvcrt.locking(lock_fp.fileno(), msvcrt.LK_NBLCK, 1)
-                    elif fcntl is not None:
-                        fcntl.flock(lock_fp.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    return lock_fp
-                except (BlockingIOError, OSError):
-                    time.sleep(0.1)
-
-            lock_fp.close()
-            raise TimeoutError(f"🔒 State lock acquisition timeout for {self.state_file}")
-        except BaseException:
-            try:
-                lock_fp.close()
-            except Exception:
-                pass
-            raise
-
-    def _release_lock(self, lock_fp):
-        try:
-            if msvcrt is not None:
-                lock_fp.seek(0)
-                msvcrt.locking(lock_fp.fileno(), msvcrt.LK_UNLCK, 1)
-            elif fcntl is not None:
-                fcntl.flock(lock_fp.fileno(), fcntl.LOCK_UN)
-        finally:
-            try:
-                lock_fp.close()
-            except Exception:
-                pass
 
     def _load_unlocked(self) -> dict:
         if self._cache_initialized:
@@ -221,7 +183,12 @@ class StateManager:
                 json.dump(state, f, indent=2, ensure_ascii=False)
                 f.flush()
                 os.fsync(f.fileno())
-            os.replace(tmp_file, self.state_file)
+            try:
+                os.replace(tmp_file, self.state_file)
+            except OSError:
+                if self.state_file.exists():
+                    self.state_file.unlink()
+                os.rename(tmp_file, self.state_file)
             self._memory_cache = state
             self._cache_initialized = True
         except Exception as e:
@@ -231,46 +198,58 @@ class StateManager:
             except Exception:
                 pass
 
+    def _maybe_flush(self) -> None:
+        if not self._dirty:
+            return
+        now = time.time()
+        if (now - self._last_flush) >= self._flush_interval:
+            self._save_unlocked(self._memory_cache)
+            self._dirty = False
+            self._last_flush = now
+
     def get_symbol_state(self, symbol: str) -> dict:
         with self._thread_lock:
-            lock_fp = self._acquire_lock()
-            try:
-                state_ref = self._load_unlocked().get(symbol, {})
-                return dict(state_ref) if state_ref else {}
-            finally:
-                self._release_lock(lock_fp)
+            if not self._cache_initialized:
+                self._memory_cache = self._load_unlocked()
+                self._cache_initialized = True
+            return dict(self._memory_cache.get(symbol, {}))
 
     def update_symbol_state(self, symbol: str, data: dict):
         with self._thread_lock:
-            lock_fp = self._acquire_lock()
-            try:
-                state = self._load_unlocked()
-                if symbol not in state:
-                    state[symbol] = {}
-                state[symbol].update(data)
-                self._save_unlocked(state)
-            finally:
-                self._release_lock(lock_fp)
+            if not self._cache_initialized:
+                self._memory_cache = self._load_unlocked()
+                self._cache_initialized = True
+            if symbol not in self._memory_cache:
+                self._memory_cache[symbol] = {}
+            self._memory_cache[symbol].update(data)
+            self._dirty = True
+            self._maybe_flush()
 
     def clear_symbol_state(
         self, symbol: str, preserve_keys: Optional[list] = None
     ) -> None:
         with self._thread_lock:
-            lock_fp = self._acquire_lock()
-            try:
-                state = self._load_unlocked()
-                if symbol in state:
-                    preserved: Dict[str, Any] = {}
-                    if preserve_keys:
-                        preserved = {
-                            k: state[symbol].get(k)
-                            for k in preserve_keys
-                            if k in state[symbol]
-                        }
-                    state[symbol] = preserved
-                    self._save_unlocked(state)
-            finally:
-                self._release_lock(lock_fp)
+            if not self._cache_initialized:
+                self._memory_cache = self._load_unlocked()
+                self._cache_initialized = True
+            if symbol in self._memory_cache:
+                preserved: Dict[str, Any] = {}
+                if preserve_keys:
+                    preserved = {
+                        k: self._memory_cache[symbol].get(k)
+                        for k in preserve_keys
+                        if k in self._memory_cache[symbol]
+                    }
+                self._memory_cache[symbol] = preserved
+                self._dirty = True
+                self._maybe_flush()
+
+    def flush_now(self) -> None:
+        with self._thread_lock:
+            if self._dirty:
+                self._save_unlocked(self._memory_cache)
+                self._dirty = False
+                self._last_flush = time.time()
 
 
 class RealTraderFutures:
@@ -308,6 +287,7 @@ class RealTraderFutures:
         self._last_ntp_check = datetime.min
         self._log_last_emit_ts: Dict[str, float] = {}
         self._log_last_message: Dict[str, str] = {}
+        self._log_throttle_lock = threading.Lock()
 
         self._db_write_lock = threading.Lock()
         self._time_sync_lock = threading.Lock()
@@ -323,20 +303,21 @@ class RealTraderFutures:
         message: Optional[str] = None,
         emit_on_change: bool = False,
     ) -> bool:
-        now_ts = time.time()
-        last_ts = float(self._log_last_emit_ts.get(key, 0.0) or 0.0)
-        if emit_on_change and message is not None:
-            last_message = self._log_last_message.get(key)
-            if last_message != message:
-                self._log_last_message[key] = message
+        with self._log_throttle_lock:
+            now_ts = time.time()
+            last_ts = float(self._log_last_emit_ts.get(key, 0.0) or 0.0)
+            if emit_on_change and message is not None:
+                last_message = self._log_last_message.get(key)
+                if last_message != message:
+                    self._log_last_message[key] = message
+                    self._log_last_emit_ts[key] = now_ts
+                    return True
+            if now_ts - last_ts >= max(0.0, float(interval_seconds)):
+                if message is not None:
+                    self._log_last_message[key] = message
                 self._log_last_emit_ts[key] = now_ts
                 return True
-        if now_ts - last_ts >= max(0.0, float(interval_seconds)):
-            if message is not None:
-                self._log_last_message[key] = message
-            self._log_last_emit_ts[key] = now_ts
-            return True
-        return False
+            return False
 
     def _log_throttled(
         self,
@@ -454,15 +435,21 @@ class RealTraderFutures:
 
     @network_api_retry
     def _fetch_server_time_ms_safe(self) -> int:
-        return int(self.client.fetch_server_time_ms())
+        result = self.client.fetch_server_time_ms()
+        if result is None:
+            raise ConnectionError("Server time returned None")
+        return int(result)
 
     def _sync_server_time_offset(
         self, force: bool = False, sync_interval_seconds: int = 60
     ):
         with self._time_sync_lock:
             now = datetime.utcnow()
+            minutes_in_4h_cycle = (now.hour * 60 + now.minute) % 240
+            near_boundary = minutes_in_4h_cycle >= 239 or minutes_in_4h_cycle <= 0
+            effective_interval = 5 if near_boundary else max(5, int(sync_interval_seconds))
             elapsed = (now - self._last_server_time_sync).total_seconds()
-            if (not force) and elapsed < max(5, int(sync_interval_seconds)):
+            if (not force) and elapsed < effective_interval:
                 return
             local_ms = int(now.timestamp() * 1000)
             try:
@@ -565,7 +552,7 @@ class RealTraderFutures:
             return True
         try:
             entry_price = float(state.get("entry_price", 0.0) or 0.0)
-        except:
+        except Exception:
             entry_price = 0.0
         if not (np.isfinite(entry_price) and entry_price > 0.0):
             return True
@@ -919,14 +906,19 @@ class RealTraderFutures:
         return execution_tf, indicator_tf
 
     def _timeframe_to_minutes(self, timeframe: str) -> int:
-        tf = str(timeframe or "").strip().lower()
+        tf_raw = str(timeframe or "").strip()
+        tf = tf_raw.lower()
         try:
+            if tf_raw.endswith("M"):
+                return max(1, int(tf_raw[:-1]) * 43200)
             if tf.endswith("m"):
                 return max(1, int(tf[:-1]))
             if tf.endswith("h"):
                 return max(1, int(tf[:-1]) * 60)
             if tf.endswith("d"):
                 return max(1, int(tf[:-1]) * 1440)
+            if tf.endswith("w"):
+                return max(1, int(tf[:-1]) * 10080)
         except ValueError:
             return -1
         return -1
@@ -994,15 +986,18 @@ class RealTraderFutures:
     ) -> dict:
         current_slot = self._get_candle_slot_id(execution_tf)
         cached = self._get_cached_exit_indicators(symbol)
-        if cached and self.last_exit_calc_candle.get(symbol) == current_slot:
+        with self._cache_lock:
+            already_calculated = self.last_exit_calc_candle.get(symbol) == current_slot
+        if cached and already_calculated:
             return cached
 
         lookback_bars = max(300, int(params.get("HURST_PERIOD", 200)) + 80)
         df: Optional[pd.DataFrame] = None
+        signal_df: Optional[pd.DataFrame] = None
         try:
             df = self._fetch_recent_ohlcv_safe(
                 symbol, execution_tf, limit=lookback_bars
-            )
+                )
             if df is None or len(df) < 80:
                 return cached
 
@@ -1011,8 +1006,12 @@ class RealTraderFutures:
 
             float_cols = ["open", "high", "low", "close", "volume"]
             df[float_cols] = df[float_cols].astype(np.float64)
-            df = strategy.generate_signals(df)
-            last_candle = self._select_last_closed_candle(df, execution_tf)
+            signal_df = strategy.generate_signals(df)
+            last_candle = self._select_last_closed_candle(signal_df, execution_tf)
+            del signal_df
+            del df
+            signal_df = None
+            df = None
             if last_candle is None:
                 return cached
 
@@ -1046,17 +1045,20 @@ class RealTraderFutures:
                 "cached_at": datetime.utcnow().isoformat(),
             }
             self._cache_exit_indicators(symbol, refreshed)
-            self.last_exit_calc_candle[symbol] = current_slot
+            with self._cache_lock:
+                self.last_exit_calc_candle[symbol] = current_slot
             return refreshed
         finally:
             if df is not None:
                 del df
+            if signal_df is not None:
+                del signal_df
 
     def _confirm_position(
         self,
         symbol: str,
         expected_side: Optional[str] = None,
-        retries: int = 5,
+        retries: int = 6,
         sleep_seconds: float = 0.3,
     ) -> dict:
         last_pos = {
@@ -1066,7 +1068,7 @@ class RealTraderFutures:
             "leverage": 1,
         }
         attempts = max(1, int(retries))
-        for _ in range(attempts):
+        for attempt in range(attempts):
             pos = self._fetch_position_safe(symbol)
             if pos:
                 last_pos = pos
@@ -1077,7 +1079,7 @@ class RealTraderFutures:
                 return last_pos
             if expected_side is None and abs(amount) > 0:
                 return last_pos
-            if sleep_seconds > 0:
+            if attempt < attempts - 1 and sleep_seconds > 0:
                 time.sleep(float(sleep_seconds))
         return last_pos
 
@@ -1124,7 +1126,7 @@ class RealTraderFutures:
         except Exception as e:
             logger.error(f"❌ Failed to fetch balance: {e}")
 
-        global_rate_limiter = OrderRateLimiter(max_orders_per_10s=40)
+        global_rate_limiter = OrderRateLimiter(max_orders_per_10s=80)
         for symbol in list(self.symbols):
             self.clients[symbol] = BinanceClient(
                 BINANCE_API_KEY,
@@ -1177,17 +1179,18 @@ class RealTraderFutures:
             max_workers = min(3, len(self.symbols))
             self._executor = ThreadPoolExecutor(max_workers=max_workers)
 
-        try:
-            from src.futures_strategy.engine_fast_futures import (
-                backtest_loop_numba,
-            )
+        if os.getenv("SKIP_NUMBA_WARMUP", "true").lower() != "true":
+            try:
+                from src.futures_strategy.engine_fast_futures import (
+                    backtest_loop_numba,
+                )
 
-            logger.info(
+                logger.info(
                 "⚙️ Pre-compiling Numba JIT functions to prevent runtime CPU spike..."
             )
-            dummy_arr = np.array([1.0], dtype=np.float64)
-            dummy_int_arr = np.array([1], dtype=np.int64)
-            _ = backtest_loop_numba(
+                dummy_arr = np.array([1.0], dtype=np.float64)
+                dummy_int_arr = np.array([1], dtype=np.int64)
+                _ = backtest_loop_numba(
                 dummy_arr,
                 dummy_arr,
                 dummy_arr,
@@ -1216,9 +1219,11 @@ class RealTraderFutures:
                 False,
                 1000.0,
             )
-            logger.info("✅ Numba JIT warm-up complete.")
-        except ImportError:
-            pass
+                logger.info("✅ Numba JIT warm-up complete.")
+            except ImportError:
+                pass
+        else:
+            logger.info("??Skipping Numba warm-up (SKIP_NUMBA_WARMUP=true)")
 
         self.health_manager.update_heartbeat(status="initialized")
         logger.info("🚀 Initialization Complete. Bot is Running in 2D Mode...")
@@ -1315,7 +1320,7 @@ class RealTraderFutures:
             post_only_requote_max=entry_post_only_requote_max,
         )
         confirmed_pos = self._confirm_position(
-            symbol, expected_side=expected_side, retries=10, sleep_seconds=0.5
+            symbol, expected_side=expected_side, retries=6, sleep_seconds=0.3
         )
         confirmed_amount = float(confirmed_pos.get("amount", 0.0) or 0.0)
 
@@ -1569,6 +1574,7 @@ class RealTraderFutures:
             in_position = abs(amount) > 0
 
             state_snapshot = self.state_manager.get_symbol_state(symbol)
+            current_price = self._get_market_price_safe(symbol)
             if not in_position:
                 try:
                     self._cancel_all_orders_safe(symbol)
@@ -1585,10 +1591,11 @@ class RealTraderFutures:
                     if state_snapshot.get("entry_time") and not state_snapshot.get(
                         "exit_pending"
                     ):
+                        safe_price = float(current_price) if current_price is not None else 0.0
                         self._log_silent_exchange_exit(
                             symbol=symbol,
                             state=state_snapshot,
-                            current_price=float(current_price),
+                            current_price=safe_price,
                             params=params,
                         )
 
@@ -1605,9 +1612,31 @@ class RealTraderFutures:
                     )
                 return
 
-            current_price = self._get_market_price_safe(symbol)
             if current_price is None:
                 return
+
+            scale_order_id = str(state_snapshot.get("scale_order_id", "") or "")
+            if scale_order_id and not bool(state_snapshot.get("has_scaled_out", False)):
+                try:
+                    client = self._get_client_for_symbol(symbol)
+                    order_info = client.exchange.fetch_order(scale_order_id, symbol)
+                    order_status = str(order_info.get("status", "") or "").lower()
+                    if order_status in ("canceled", "cancelled", "expired", "rejected"):
+                        logger.warning(
+                            "[%s] Scale-out order %s was %s. Clearing.",
+                            symbol,
+                            scale_order_id,
+                            order_status,
+                        )
+                        self.state_manager.update_symbol_state(
+                            symbol,
+                            {
+                                "scale_order_id": None,
+                                "has_scaled_out": True,
+                            },
+                        )
+                except Exception:
+                    pass
 
             cached = self._get_cached_indicators(symbol)
             atr = float(cached.get("atr", 0.0) or 0.0)
@@ -1769,6 +1798,9 @@ class RealTraderFutures:
                 )
                 expected_close_side = "SELL" if side_str.upper() == "LONG" else "BUY"
                 for o in sorted_orders:
+                    cid = str(o.get("clientOrderId", "") or "")
+                    if not cid.startswith("RT_"):
+                        continue
                     order_side = str(o.get("side", "") or "").upper()
                     filled_qty = float(o.get("filled", 0.0) or 0.0)
                     if order_side != expected_close_side or filled_qty <= 0.0:
@@ -1802,6 +1834,27 @@ class RealTraderFutures:
 
             pnl = gross_pnl - total_fee
             pnl_pct = (pnl / entry_value) * 100.0 if entry_value > 0 else 0.0
+            funding_estimate = 0.0
+            entry_time_str = str(state.get("entry_time", "") or "")
+            if entry_time_str:
+                try:
+                    entry_dt = datetime.fromisoformat(entry_time_str)
+                    hold_hours = max(
+                        0.0, (datetime.utcnow() - entry_dt).total_seconds() / 3600
+                    )
+                    funding_sessions = int(hold_hours / 8)
+                    avg_funding_rate = 0.0001
+                    funding_estimate = (
+                        abs(actual_exit_amount * entry_price)
+                        * avg_funding_rate
+                        * funding_sessions
+                    )
+                except Exception:
+                    pass
+            pnl_with_funding = pnl - funding_estimate
+            pnl_with_funding_pct = (
+                (pnl_with_funding / entry_value) * 100.0 if entry_value > 0 else 0.0
+            )
 
             with self._db_write_lock:
                 self.trade_db.record_trade(
@@ -1836,7 +1889,8 @@ class RealTraderFutures:
             state = self.state_manager.get_symbol_state(symbol)
 
             current_slot = self._get_candle_slot_id(indicator_tf)
-            already_calculated = self.last_calc_candle.get(symbol) == current_slot
+            with self._cache_lock:
+                already_calculated = self.last_calc_candle.get(symbol) == current_slot
             cached = self._get_cached_indicators(symbol)
             required_indicator_keys = (
                 "trend_direction",
@@ -1899,7 +1953,8 @@ class RealTraderFutures:
                     df = self._fetch_ohlcv_safe(symbol, indicator_tf, start_str)
 
                 if df is None or len(df) < 200:
-                    self.last_calc_candle[symbol] = current_slot
+                    with self._cache_lock:
+                        self.last_calc_candle[symbol] = current_slot
                     return None
 
                 if cvd_required and "taker_buy_base_volume" not in df.columns:
@@ -1920,6 +1975,18 @@ class RealTraderFutures:
                 del df
                 df = None
                 if last_candle is None:
+                    return None
+
+                candle_ts = self._extract_candle_timestamp_ms(last_candle)
+                interval_ms = tf_min * 60 * 1000
+                candle_close_boundary_ms = candle_ts + interval_ms
+                elapsed_since_close_ms = now_ref_ms - candle_close_boundary_ms
+                if 0 < elapsed_since_close_ms < 2000:
+                    logger.debug(
+                        "[%s] Candle just closed %dms ago. Waiting for settlement.",
+                        symbol,
+                        elapsed_since_close_ms,
+                    )
                     return None
 
                 entry_upper = last_candle.get("entry_upper")
@@ -1960,14 +2027,15 @@ class RealTraderFutures:
                         "cached_at": datetime.utcnow().isoformat(),
                     },
                 )
-                self.last_calc_candle[symbol] = current_slot
+                with self._cache_lock:
+                    self.last_calc_candle[symbol] = current_slot
             else:
                 trend_dir = cached.get("trend_direction", 0)
                 atr = cached.get("atr", 0.0)
                 sar = cached.get("parabolic_sar", 0.0)
                 entry_upper = cached.get("entry_upper")
                 entry_lower = cached.get("entry_lower")
-                strength_ok = bool(cached.get("strength_filter", False))
+                strength_ok = int(cached.get("strength_filter", 0)) == 1
                 vol_ratio = cached.get("vol_zscore", -10.0)
                 rsi_value = cached.get("rsi", 50.0)
                 hurst_value = cached.get("hurst", 0.5)
@@ -2057,15 +2125,15 @@ class RealTraderFutures:
             is_downtrend = trend_dir == -1
 
             if use_intrabar_entry:
-                long_breakout = (signal_price > entry_upper) or (
-                    current_price > entry_upper
-                )
-                short_breakout = (signal_price < entry_lower) or (
-                    current_price < entry_lower
-                )
+                long_signal = is_uptrend and strength_ok
+                short_signal = is_downtrend and strength_ok
             else:
-                long_breakout = signal_price > entry_upper
-                short_breakout = signal_price < entry_lower
+                long_signal = is_uptrend and strength_ok and (
+                    signal_price > float(entry_upper)
+                )
+                short_signal = is_downtrend and strength_ok and (
+                    signal_price < float(entry_lower)
+                )
             entry_lag_sec = max(
                 0.0, float((now_ref_ms - target_entry_open_ts) / 1000.0)
             )
@@ -2077,9 +2145,9 @@ class RealTraderFutures:
             )
 
             side: Optional[str] = None
-            if is_uptrend and long_breakout and strength_ok:
+            if long_signal:
                 side = "LONG"
-            elif is_downtrend and short_breakout and strength_ok:
+            elif short_signal:
                 side = "SHORT"
 
             if side is None:
@@ -2406,7 +2474,7 @@ class RealTraderFutures:
             initial_amount = float(state.get("initial_amount", amount) or amount)
 
             if (not has_scaled_out) and initial_amount != 0.0:
-                if abs(amount) <= abs(initial_amount) * 0.55:
+                if abs(amount) <= abs(initial_amount) * 0.5:
                     scale_out_done = True
                     has_scaled_out = True
                     scale_exit_price = float(
@@ -2483,10 +2551,10 @@ class RealTraderFutures:
                 )
                 breakeven_raw = (
                     entry_price
-                    * (1.0 + (float(SLIPPAGE_RATE) + fee_rate) * 2.0)
+                    * (1.0 + fee_rate * 2.0)
                     if amount > 0
                     else entry_price
-                    * (1.0 - (float(SLIPPAGE_RATE) + fee_rate) * 2.0)
+                    * (1.0 - fee_rate * 2.0)
                 )
                 client = self._get_client_for_symbol(symbol)
                 breakeven_stop = client.round_price(symbol, breakeven_raw)
@@ -2735,7 +2803,7 @@ class RealTraderFutures:
 
             try:
                 self._cancel_all_orders_safe(symbol)
-            except:
+            except Exception:
                 pass
 
             fee_rate = float(
@@ -2755,8 +2823,24 @@ class RealTraderFutures:
             # 실제 지갑 잔고와의 오차는 Phase 3의 _fetch_balance_safe() 호출 시 자동 교정됨.
             pnl_pct = (pnl / entry_value) * 100.0 if entry_value > 0 else 0.0
 
+            funding_estimate = 0.0
+            entry_time_str = str(state.get("entry_time", "") or "")
+            if entry_time_str:
+                try:
+                    entry_dt = datetime.fromisoformat(entry_time_str)
+                    hold_hours = max(0.0, (datetime.utcnow() - entry_dt).total_seconds() / 3600.0)
+                    funding_sessions = int(hold_hours / 8)
+                    avg_funding_rate = 0.0001
+                    funding_estimate = abs(closed_qty * entry_price) * avg_funding_rate * funding_sessions
+                except Exception:
+                    pass
+            pnl_with_funding = pnl - funding_estimate
+            pnl_with_funding_pct = (pnl_with_funding / entry_value) * 100.0 if entry_value > 0 else 0.0
+
             logger.info(
-                f"EXIT {side_str} {symbol} | Gross PnL(Excl. Funding): {pnl_pct:+.2f}% | Reason: {reason}"
+                f"EXIT {side_str} {symbol} | Gross PnL(Excl. Funding): {pnl_pct:+.2f}% | "
+                f"Est Funding: {funding_estimate:.4f} | Net PnL: {pnl_with_funding_pct:+.2f}% | "
+                f"Reason: {reason}"
             )
 
             with self._db_write_lock:
@@ -2790,7 +2874,7 @@ class RealTraderFutures:
                         "exit_attempt_at": datetime.utcnow().isoformat(),
                     },
                 )
-            except:
+            except Exception:
                 pass
 
     # --- (End of _check_exit expansion) ---
@@ -2869,10 +2953,17 @@ class RealTraderFutures:
             )
             client = self._get_client_for_symbol(symbol)
             for old_order in sorted_orders[1:]:
-                try:
-                    client.exchange.cancel_order(old_order["id"], symbol)
-                except:
-                    pass
+                for retry in range(2):
+                    try:
+                        client.exchange.cancel_order(old_order["id"], symbol)
+                        break
+                    except Exception as e:
+                        logger.warning(
+                            "Failed to cancel dup SL %s (attempt %d): %s",
+                            old_order.get("id"),
+                            retry + 1,
+                            e,
+                        )
             return [sorted_orders[0]]
         return sl_orders
 
@@ -2893,7 +2984,7 @@ class RealTraderFutures:
         state_stop = state.get("active_stop_price")
         try:
             state_stop_val = float(state_stop) if state_stop is not None else 0.0
-        except:
+        except Exception:
             state_stop_val = 0.0
 
         using_state_stop = bool(np.isfinite(state_stop_val) and state_stop_val > 0)
@@ -2992,7 +3083,7 @@ class RealTraderFutures:
                     now - datetime.fromisoformat(last_attempt_at)
                 ).total_seconds() < retry_cooldown:
                     return False
-            except:
+            except Exception:
                 pass
 
         side_str, order_side = (
@@ -3017,7 +3108,7 @@ class RealTraderFutures:
 
         try:
             self._cancel_all_orders_safe(symbol)
-        except:
+        except Exception:
             pass
 
         if not self._place_order_safe(
@@ -3057,7 +3148,7 @@ class RealTraderFutures:
 
         try:
             self._cancel_all_orders_safe(symbol)
-        except:
+        except Exception:
             pass
 
         entry_price = float(
@@ -3200,7 +3291,18 @@ class RealTraderFutures:
                         if self._shutdown_requested:
                             break
                         cand["margin_context"] = margin_context
-                        self._execute_entry_order(cand)
+                        pre_entry_free_usdt = float(
+                            margin_context.get("free_usdt", 0.0)
+                        )
+                        try:
+                            self._execute_entry_order(cand)
+                        except Exception as e:
+                            logger.error(
+                                "Unhandled entry exception for %s: %s",
+                                cand.get("symbol"),
+                                e,
+                            )
+                            margin_context["free_usdt"] = pre_entry_free_usdt
 
                 # ==============================================================
 
@@ -3229,7 +3331,7 @@ class RealTraderFutures:
                             self.cloud_optimizer.force_gc()
                         self._last_resource_check = now
 
-                    if (now - self._last_gc).total_seconds() >= 7200:
+                    if (now - self._last_gc).total_seconds() >= 1800:
                         self.cloud_optimizer.force_gc()
                         self._last_gc = now
 
@@ -3269,9 +3371,14 @@ class RealTraderFutures:
     def _shutdown(self):
         logger.info("🛑 Shutting down gracefully...")
 
+        if hasattr(self, "state_manager"):
+            self.state_manager.flush_now()
+
         if self._executor is not None:
             try:
-                self._executor.shutdown(wait=False)
+                self._executor.shutdown(wait=True, cancel_futures=True)
+            except TypeError:
+                self._executor.shutdown(wait=True)
             except Exception as e:
                 logger.warning(f"Failed to shutdown executor: {e}")
             finally:
