@@ -14,6 +14,7 @@ import json
 import sqlite3
 import logging
 import gc
+import threading
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
@@ -118,42 +119,18 @@ class StateManager:
     """Spot 전용 거래 상태 관리 (JSON 파일 기반)"""
     def __init__(self, state_file: Path):
         self.state_file = Path(state_file)
-        self.lock_file = self.state_file.with_suffix(self.state_file.suffix + ".lock")
+        self._memory_cache: Dict[str, Any] = {}
+        self._cache_initialized: bool = False
+        self._thread_lock = threading.Lock()
+        self._dirty: bool = False
+        self._last_flush: float = 0.0
+        self._flush_interval: float = 1.0
         self._ensure_file_exists()
 
     def _ensure_file_exists(self):
         if not self.state_file.exists():
             self.state_file.parent.mkdir(parents=True, exist_ok=True)
             self._save_unlocked({})
-        if not self.lock_file.exists():
-            self.lock_file.parent.mkdir(parents=True, exist_ok=True)
-            self.lock_file.touch(exist_ok=True)
-
-    def _acquire_lock(self):
-        self.lock_file.parent.mkdir(parents=True, exist_ok=True)
-        lock_fp = open(self.lock_file, 'a+b')
-        try:
-            if msvcrt is not None:
-                lock_fp.seek(0)
-                msvcrt.locking(lock_fp.fileno(), msvcrt.LK_LOCK, 1)
-            elif fcntl is not None:
-                fcntl.flock(lock_fp.fileno(), fcntl.LOCK_EX)
-            return lock_fp
-        except BaseException:
-            try: lock_fp.close()
-            except Exception: pass
-            raise
-
-    def _release_lock(self, lock_fp):
-        try:
-            if msvcrt is not None:
-                lock_fp.seek(0)
-                msvcrt.locking(lock_fp.fileno(), msvcrt.LK_UNLCK, 1)
-            elif fcntl is not None:
-                fcntl.flock(lock_fp.fileno(), fcntl.LOCK_UN)
-        finally:
-            try: lock_fp.close()
-            except Exception: pass
 
     def _load_unlocked(self) -> dict:
         try:
@@ -171,43 +148,61 @@ class StateManager:
                 json.dump(state, f, indent=2, ensure_ascii=False)
                 f.flush()
                 os.fsync(f.fileno())
-            os.replace(tmp_file, self.state_file)
+            try:
+                os.replace(tmp_file, self.state_file)
+            except OSError:
+                if self.state_file.exists():
+                    self.state_file.unlink()
+                os.rename(tmp_file, self.state_file)
         except Exception as e:
             logger.error(f"⚠️ State save error: {e}")
             try:
                 if tmp_file.exists(): tmp_file.unlink()
             except Exception: pass
 
-    def _load(self) -> dict:
-        lock_fp = self._acquire_lock()
-        try: return self._load_unlocked()
-        finally: self._release_lock(lock_fp)
-
-    def _save(self, state: dict):
-        lock_fp = self._acquire_lock()
-        try: self._save_unlocked(state)
-        finally: self._release_lock(lock_fp)
-
     def get_symbol_state(self, symbol: str) -> dict:
-        return self._load().get(symbol, {})
+        with self._thread_lock:
+            if not self._cache_initialized:
+                self._memory_cache = self._load_unlocked()
+                self._cache_initialized = True
+            return dict(self._memory_cache.get(symbol, {}))
 
     def update_symbol_state(self, symbol: str, data: dict):
-        lock_fp = self._acquire_lock()
-        try:
-            state = self._load_unlocked()
-            if symbol not in state: state[symbol] = {}
-            state[symbol].update(data)
-            self._save_unlocked(state)
-        finally: self._release_lock(lock_fp)
+        with self._thread_lock:
+            if not self._cache_initialized:
+                self._memory_cache = self._load_unlocked()
+                self._cache_initialized = True
+            if symbol not in self._memory_cache:
+                self._memory_cache[symbol] = {}
+            self._memory_cache[symbol].update(data)
+            self._dirty = True
+            self._maybe_flush()
 
     def clear_symbol_state(self, symbol: str):
-        lock_fp = self._acquire_lock()
-        try:
-            state = self._load_unlocked()
-            if symbol in state:
-                state[symbol] = {}
-                self._save_unlocked(state)
-        finally: self._release_lock(lock_fp)
+        with self._thread_lock:
+            if not self._cache_initialized:
+                self._memory_cache = self._load_unlocked()
+                self._cache_initialized = True
+            if symbol in self._memory_cache:
+                self._memory_cache[symbol] = {}
+                self._dirty = True
+                self._maybe_flush()
+
+    def _maybe_flush(self) -> None:
+        if not self._dirty:
+            return
+        now = time.time()
+        if (now - self._last_flush) >= self._flush_interval:
+            self._save_unlocked(self._memory_cache)
+            self._dirty = False
+            self._last_flush = now
+
+    def flush_now(self) -> None:
+        with self._thread_lock:
+            if self._dirty:
+                self._save_unlocked(self._memory_cache)
+                self._dirty = False
+                self._last_flush = time.time()
 
 class RealTraderSpot:
     """Production-grade 업비트 현물 트레이딩 봇"""
@@ -232,24 +227,26 @@ class RealTraderSpot:
         
         self._log_last_emit_ts: Dict[str, float] = {}
         self._log_last_message: Dict[str, str] = {}
+        self._log_throttle_lock = threading.Lock()
         
         self._setup_signal_handlers()
 
     def _should_emit_log(self, key: str, interval_seconds: float = 0.0, message: Optional[str] = None, emit_on_change: bool = False) -> bool:
-        now_ts = time.time()
-        last_ts = float(self._log_last_emit_ts.get(key, 0.0) or 0.0)
-        if emit_on_change and message is not None:
-            last_message = self._log_last_message.get(key)
-            if last_message != message:
-                self._log_last_message[key] = message
+        with self._log_throttle_lock:
+            now_ts = time.time()
+            last_ts = float(self._log_last_emit_ts.get(key, 0.0) or 0.0)
+            if emit_on_change and message is not None:
+                last_message = self._log_last_message.get(key)
+                if last_message != message:
+                    self._log_last_message[key] = message
+                    self._log_last_emit_ts[key] = now_ts
+                    return True
+            if now_ts - last_ts >= max(0.0, float(interval_seconds)):
+                if message is not None:
+                    self._log_last_message[key] = message
                 self._log_last_emit_ts[key] = now_ts
                 return True
-        if now_ts - last_ts >= max(0.0, float(interval_seconds)):
-            if message is not None:
-                self._log_last_message[key] = message
-            self._log_last_emit_ts[key] = now_ts
-            return True
-        return False
+            return False
 
     def _log_throttled(self, level: str, key: str, message: str, interval_seconds: float, emit_on_change: bool = False) -> None:
         if not self._should_emit_log(key=key, interval_seconds=interval_seconds, message=message, emit_on_change=emit_on_change): return
@@ -323,12 +320,18 @@ class RealTraderSpot:
 
     @network_api_retry
     def _fetch_server_time_ms_safe(self) -> int:
-        return int(self.client.fetch_server_time_ms())
+        result = self.client.fetch_server_time_ms()
+        if result is None:
+            raise ConnectionError("Server time returned None")
+        return int(result)
 
     def _sync_server_time_offset(self, force: bool = False, sync_interval_seconds: int = 60):
         now = datetime.utcnow()
+        minutes_in_4h_cycle = (now.hour * 60 + now.minute) % 240
+        near_boundary = minutes_in_4h_cycle >= 239 or minutes_in_4h_cycle <= 0
+        effective_interval = 5 if near_boundary else max(5, int(sync_interval_seconds))
         elapsed = (now - self._last_server_time_sync).total_seconds()
-        if (not force) and elapsed < max(5, int(sync_interval_seconds)): return
+        if (not force) and elapsed < effective_interval: return
         local_ms = int(now.timestamp() * 1000)
         try:
             server_ms = self._fetch_server_time_ms_safe()
@@ -343,11 +346,14 @@ class RealTraderSpot:
         return int(datetime.utcnow().timestamp() * 1000) + int(self._server_time_offset_ms)
 
     def _timeframe_to_minutes(self, timeframe: str) -> int:
-        tf = str(timeframe or '').strip().lower()
+        tf_raw = str(timeframe or '').strip()
+        tf = tf_raw.lower()
         try:
+            if tf_raw.endswith('M'): return max(1, int(tf_raw[:-1]) * 43200)
             if tf.endswith('m'): return max(1, int(tf[:-1]))
             if tf.endswith('h'): return max(1, int(tf[:-1]) * 60)
             if tf.endswith('d'): return max(1, int(tf[:-1]) * 1440)
+            if tf.endswith('w'): return max(1, int(tf[:-1]) * 10080)
         except ValueError: return -1
         return -1
 
@@ -377,7 +383,7 @@ class RealTraderSpot:
         if candle is None: return 0
         raw_ts = candle.get('timestamp', 0)
         try: return int(raw_ts) if not pd.isna(raw_ts) else 0
-        except: return 0
+        except Exception: return 0
 
     def _cache_indicators(self, symbol: str, data: dict):
         if not hasattr(self, '_ind_cache'): self._ind_cache = {}
@@ -556,7 +562,7 @@ class RealTraderSpot:
             trend_dir = cached.get('trend_direction', 0)
             atr = cached.get('atr', 0.0)
             entry_upper = cached.get('entry_upper', 999999.0)
-            strength_ok = bool(cached.get('strength_filter', False))
+            strength_ok = int(cached.get('strength_filter', 0)) == 1
 
             # --- EXIT LOGIC ---
             if in_position:
@@ -608,7 +614,7 @@ class RealTraderSpot:
             elif not in_position:
                 self._log_throttled("info", f"{symbol}:scan", f"ℹ️ [{symbol}] Scanning for entry...", 180.0)
                 
-                if trend_dir == 1 and strength_ok and current_price > entry_upper:
+                if trend_dir == 1 and strength_ok:
                     _, free_krw = self._fetch_balance_safe()
                     qty = self._calculate_spot_position_size(current_price, params, free_krw)
                     
