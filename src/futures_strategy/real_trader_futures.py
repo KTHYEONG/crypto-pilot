@@ -69,7 +69,7 @@ from config.settings import (
     SLIPPAGE_RATE,
     FUTURES_LIVE_SYMBOLS,
 )
-from src.futures_strategy.binance_client import BinanceClient
+from src.futures_strategy.binance_client import BinanceClient, OrderRateLimiter
 from src.futures_strategy.strategies_futures import UltimateStrategy
 from src.common.utils import setup_logger
 from src.common.components import TradeHistoryDB, HealthCheckManager
@@ -103,6 +103,14 @@ def _is_retryable_api_exception(exc: Exception) -> bool:
         return True
     if _CCXT_TRANSIENT_ERRORS and isinstance(exc, _CCXT_TRANSIENT_ERRORS):
         return True
+
+    cause = getattr(exc, "__cause__", None)
+    if cause is not None:
+        if isinstance(cause, (ConnectionError, TimeoutError)):
+            return True
+        if _CCXT_TRANSIENT_ERRORS and isinstance(cause, _CCXT_TRANSIENT_ERRORS):
+            return True
+
     return False
 
 
@@ -227,7 +235,8 @@ class StateManager:
         with self._thread_lock:
             lock_fp = self._acquire_lock()
             try:
-                return self._load_unlocked().get(symbol, {})
+                state_ref = self._load_unlocked().get(symbol, {})
+                return dict(state_ref) if state_ref else {}
             finally:
                 self._release_lock(lock_fp)
 
@@ -243,13 +252,22 @@ class StateManager:
             finally:
                 self._release_lock(lock_fp)
 
-    def clear_symbol_state(self, symbol: str):
+    def clear_symbol_state(
+        self, symbol: str, preserve_keys: Optional[list] = None
+    ) -> None:
         with self._thread_lock:
             lock_fp = self._acquire_lock()
             try:
                 state = self._load_unlocked()
                 if symbol in state:
-                    state[symbol] = {}
+                    preserved: Dict[str, Any] = {}
+                    if preserve_keys:
+                        preserved = {
+                            k: state[symbol].get(k)
+                            for k in preserve_keys
+                            if k in state[symbol]
+                        }
+                    state[symbol] = preserved
                     self._save_unlocked(state)
             finally:
                 self._release_lock(lock_fp)
@@ -267,6 +285,7 @@ class RealTraderFutures:
 
         self._indicator_cache: Dict[str, dict] = {}
         self._exit_indicator_cache: Dict[str, dict] = {}
+        self._cache_lock = threading.Lock()
 
         self.trade_db = TradeHistoryDB(TRADE_HISTORY_DB)
         self.health_manager = HealthCheckManager(HEARTBEAT_FILE)
@@ -396,13 +415,27 @@ class RealTraderFutures:
             )
 
     @network_api_retry
-    def _fetch_balance_safe(self) -> tuple:
-        return self.client.fetch_balance()
+    def _fetch_balance_safe(self, symbol: Optional[str] = None) -> tuple:
+        client = (
+            self._get_client_for_symbol(symbol) if symbol else self.client
+        )
+        return client.fetch_balance()
 
     @network_api_retry
     def _fetch_ohlcv_safe(self, symbol: str, timeframe: str, start_str: str):
         client = self._get_client_for_symbol(symbol)
         return client.fetch_ohlcv(symbol, timeframe, start_date=start_str)
+
+    @network_api_retry
+    def _fetch_ohlcv_with_taker_safe(
+        self,
+        symbol: str,
+        timeframe: str,
+        start_str: str,
+    ) -> pd.DataFrame:
+        """Taker volume 포함 OHLCV 안전 래퍼 (공통 예외/리트라이 파이프라인 사용)."""
+        client = self._get_client_for_symbol(symbol)
+        return client.fetch_ohlcv_with_taker(symbol, timeframe, start_date=start_str)
 
     @network_api_retry
     def _fetch_recent_ohlcv_safe(self, symbol: str, timeframe: str, limit: int = 3):
@@ -501,49 +534,28 @@ class RealTraderFutures:
     ) -> bool:
         expected = abs(float(expected_qty) if expected_qty else 0.0)
         actual = abs(float(confirmed_amount) if confirmed_amount else 0.0)
+
         if expected <= 0 or actual <= 0:
             return actual > 0
+
         min_fill_ratio = float(params.get("ENTRY_MIN_FILL_RATIO", 0.60))
         min_fill_ratio = max(0.0, min(1.0, min_fill_ratio))
+
         if min_fill_ratio <= 0.0:
             return True
+
         fill_ratio = actual / expected
-        if fill_ratio >= min_fill_ratio:
-            return True
-        logger.warning(
-            "[%s] Underfilled entry rejected: fill_ratio=%.3f < %.3f",
-            symbol,
-            fill_ratio,
-            min_fill_ratio,
-        )
-        close_side = "sell" if side == "LONG" else "buy"
-        client = self._get_client_for_symbol(symbol)
-        close_qty = client.round_amount(symbol, actual) or actual
-        self._place_order_safe(
-            symbol=symbol,
-            side=close_side,
-            qty=close_qty,
-            atr=atr,
-            current_price=current_price,
-            reduce_only=True,
-            allow_market_fallback=True,
-        )
-        is_flat, _ = self._wait_until_position_flat(
-            symbol, timeout_seconds=6.0, poll_seconds=0.35
-        )
-        try:
-            self._cancel_all_orders_safe(symbol)
-        except Exception:
-            pass
-
-        if not is_flat:
-            logger.error(
-                f"🚨 [{symbol}] Failed to close underfilled position! "
-                f"Accepting partial fill to ensure Stop-Loss protection."
+        if fill_ratio < min_fill_ratio:
+            logger.warning(
+                "⚠️ [%s] Underfilled entry (Ratio: %.2f < %.2f). "
+                "Accepting partial fill (%.8f) to ensure SL/TP protection.",
+                symbol,
+                fill_ratio,
+                min_fill_ratio,
+                actual,
             )
-            return True
 
-        return False
+        return True
 
     def _position_state_missing_core(self, state: Optional[dict]) -> bool:
         if not state:
@@ -640,7 +652,6 @@ class RealTraderFutures:
             logger.error(f"❌ [{symbol}] Failed to bootstrap local state: {e}")
             return False
 
-    @network_api_retry
     def _place_order_safe(
         self,
         symbol: str,
@@ -682,20 +693,23 @@ class RealTraderFutures:
             }
 
         if order_type.upper() == "LIMIT":
+            params_dict: dict[str, object] = {}
+            if reduce_only:
+                params_dict["reduceOnly"] = True
+            cid = client_order_id or ("RT_LMT_" + uuid.uuid4().hex[:20])
+            params_dict["clientOrderId"] = cid
+
+            exchange_symbol = symbol
+            if hasattr(client, "get_market_symbol"):
+                exchange_symbol = client.get_market_symbol(symbol)
+            else:
+                if "/" in symbol and ":" not in symbol:
+                    base, quote = symbol.split("/", 1)
+                    if quote in ["USDT", "USDC"]:
+                        exchange_symbol = f"{symbol}:{quote}"
+
             try:
-                params_dict = {"reduceOnly": reduce_only}
-                cid = client_order_id or ("RT_LMT_" + uuid.uuid4().hex[:20])
-                params_dict["clientOrderId"] = cid
-
-                exchange_symbol = symbol
-                if hasattr(client, "get_market_symbol"):
-                    exchange_symbol = client.get_market_symbol(symbol)
-                else:
-                    if "/" in symbol and ":" not in symbol:
-                        base, quote = symbol.split("/", 1)
-                        if quote in ["USDT", "USDC"]:
-                            exchange_symbol = f"{symbol}:{quote}"
-
+                client.rate_limiter.wait_if_needed()
                 return client.exchange.create_order(
                     symbol=exchange_symbol,
                     type="limit",
@@ -704,24 +718,50 @@ class RealTraderFutures:
                     price=current_price,
                     params=params_dict,
                 )
+            except ccxt.RequestTimeout:
+                logger.warning(
+                    "[%s] LIMIT order timeout. Reconciling with exchange...",
+                    symbol,
+                )
+                open_orders = client.exchange.fetch_open_orders(
+                    exchange_symbol
+                )
+                for order in open_orders:
+                    if order.get("clientOrderId") == cid:
+                        logger.info(
+                            "[%s] LIMIT order reached exchange despite timeout.",
+                            symbol,
+                        )
+                        return order
+                logger.error(
+                    "[%s] LIMIT order lost in transit. No retry to avoid double entry.",
+                    symbol,
+                )
+                return None
             except Exception as e:
-                logger.error(f"❌ LIMIT order failed for {symbol}: {e}")
+                logger.error("❌ LIMIT order failed for %s: %s", symbol, e)
                 raise
 
-        return client.place_order_smart(
-            symbol,
-            side,
-            qty,
-            atr=atr,
-            current_price=current_price,
-            reduce_only=reduce_only,
-            allow_market_fallback=allow_market_fallback,
-            order_deadline_ms=order_deadline_ms,
-            post_only_wait_seconds=post_only_wait_seconds,
-            post_only_requote_max=post_only_requote_max,
-        )
+        try:
+            return client.place_order_smart(
+                symbol,
+                side,
+                qty,
+                atr=atr,
+                current_price=current_price,
+                reduce_only=reduce_only,
+                allow_market_fallback=allow_market_fallback,
+                order_deadline_ms=order_deadline_ms,
+                post_only_wait_seconds=post_only_wait_seconds,
+                post_only_requote_max=post_only_requote_max,
+            )
+        except ccxt.RequestTimeout:
+            logger.error(
+                "[%s] Market order timeout. No reconciliation (no clientOrderId). No retry.",
+                symbol,
+            )
+            return None
 
-    @network_api_retry
     def _place_stop_loss_safe(
         self,
         symbol: str,
@@ -759,21 +799,42 @@ class RealTraderFutures:
             unique_string = f"SL_{symbol}_{side}_{qty}_{stop_price}_{uuid.uuid4().hex}"
             client_order_id = "RT_" + hashlib.md5(unique_string.encode()).hexdigest()[:20]
 
-        return client.place_stop_market_order(
-            symbol,
-            side,
-            qty,
-            stop_price,
-            client_order_id=client_order_id,
-        )
+        try:
+            return client.place_stop_market_order(
+                symbol,
+                side,
+                qty,
+                stop_price,
+                client_order_id=client_order_id,
+            )
+        except ccxt.RequestTimeout as e:
+            logger.warning(
+                "[%s] SL Order Timeout. Reconciling with exchange...", symbol
+            )
+            open_orders = client.fetch_open_orders(symbol)
+            for order in open_orders:
+                if order.get("clientOrderId") == client_order_id:
+                    logger.info(
+                        "[%s] SL Order successfully reached exchange despite timeout.",
+                        symbol,
+                    )
+                    return order
+            logger.error(
+                "[%s] SL Order lost in transit. Needs manual intervention or next loop retry.",
+                symbol,
+            )
+            return None
+        except Exception as e:
+            logger.error("[%s] SL Order failed: %s", symbol, e)
+            return None
 
-    @network_api_retry
     def _place_take_profit_safe(
         self,
         symbol: str,
         side: str,
         qty: float,
         tp_price: float,
+        client_order_id: Optional[str] = None,
     ):
         """
         서버 사이드 Take Profit 주문 실행 래퍼.
@@ -800,14 +861,42 @@ class RealTraderFutures:
                 "type": "TAKE_PROFIT_MARKET",
             }
 
-        if hasattr(client, "place_take_profit_market_order"):
+        if client_order_id is None:
+            unique_string = f"TP_{symbol}_{side}_{qty}_{tp_price}_{uuid.uuid4().hex}"
+            client_order_id = "RT_" + hashlib.md5(
+                unique_string.encode()
+            ).hexdigest()[:20]
+
+        if not hasattr(client, "place_take_profit_market_order"):
+            return None
+        try:
             return client.place_take_profit_market_order(
                 symbol,
                 side,
                 qty,
                 tp_price,
+                client_order_id=client_order_id,
             )
-        return None
+        except ccxt.RequestTimeout as e:
+            logger.warning(
+                "[%s] TP Order Timeout. Reconciling with exchange...", symbol
+            )
+            open_orders = client.fetch_open_orders(symbol)
+            for order in open_orders:
+                if order.get("clientOrderId") == client_order_id:
+                    logger.info(
+                        "[%s] TP Order successfully reached exchange despite timeout.",
+                        symbol,
+                    )
+                    return order
+            logger.error(
+                "[%s] TP Order lost in transit. Needs manual intervention or next loop retry.",
+                symbol,
+            )
+            return None
+        except Exception as e:
+            logger.error("[%s] TP Order failed: %s", symbol, e)
+            return None
 
     @network_api_retry
     def _cancel_all_orders_safe(self, symbol: str):
@@ -884,17 +973,21 @@ class RealTraderFutures:
 
     def _cache_indicators(self, symbol: str, data: dict) -> None:
         """Indicator TF 기준 지표 캐싱 (엔트리/청산 공용)."""
-        self._indicator_cache[symbol] = data
+        with self._cache_lock:
+            self._indicator_cache[symbol] = data
 
     def _get_cached_indicators(self, symbol: str) -> dict:
         """캐시된 지표 조회 (없으면 빈 dict)."""
-        return self._indicator_cache.get(symbol, {})
+        with self._cache_lock:
+            return dict(self._indicator_cache.get(symbol, {}))
 
-    def _cache_exit_indicators(self, symbol: str, indicators: dict):
-        self._exit_indicator_cache[symbol] = indicators
+    def _cache_exit_indicators(self, symbol: str, indicators: dict) -> None:
+        with self._cache_lock:
+            self._exit_indicator_cache[symbol] = indicators
 
     def _get_cached_exit_indicators(self, symbol: str) -> dict:
-        return self._exit_indicator_cache.get(symbol, {})
+        with self._cache_lock:
+            return dict(self._exit_indicator_cache.get(symbol, {}))
 
     def _refresh_exit_indicators_if_needed(
         self, symbol: str, strategy: UltimateStrategy, params: dict, execution_tf: str
@@ -1031,16 +1124,44 @@ class RealTraderFutures:
         except Exception as e:
             logger.error(f"❌ Failed to fetch balance: {e}")
 
-        for symbol in self.symbols:
-            self.clients[symbol] = BinanceClient(BINANCE_API_KEY, BINANCE_SECRET)
+        global_rate_limiter = OrderRateLimiter(max_orders_per_10s=40)
+        for symbol in list(self.symbols):
+            self.clients[symbol] = BinanceClient(
+                BINANCE_API_KEY,
+                BINANCE_SECRET,
+                shared_rate_limiter=global_rate_limiter,
+            )
             client = self._get_client_for_symbol(symbol)
-            try:
-                target_lev = self.params_map[symbol].get("LEVERAGE", 1)
-                applied_lev = self._resolve_exchange_leverage(target_lev)
-                client.set_leverage(symbol, applied_lev)
-                client.set_margin_type(symbol, margin_type="CROSSED")
-            except Exception as e:
-                logger.error(f"⚠️ Error setting leverage/margin for {symbol}: {e}")
+            target_lev = self.params_map[symbol].get("LEVERAGE", 1)
+            applied_lev = self._resolve_exchange_leverage(target_lev)
+
+            max_retries = 5
+            success = False
+            for attempt in range(max_retries):
+                try:
+                    client.set_leverage(symbol, applied_lev)
+                    client.set_margin_type(symbol, margin_type="CROSSED")
+                    success = True
+                    break
+                except Exception as e:
+                    if attempt < max_retries - 1:
+                        logger.warning(
+                            "⚠️ Retry %d/%d: Failed to set leverage for %s. %s",
+                            attempt + 1,
+                            max_retries,
+                            symbol,
+                            e,
+                        )
+                        time.sleep(2.0)
+                    else:
+                        logger.error(
+                            "❌ Critical: Could not set leverage for %s after %d attempts.",
+                            symbol,
+                            max_retries,
+                        )
+            if not success:
+                if symbol in self.symbols:
+                    self.symbols.remove(symbol)
 
         try:
             self.client.set_position_mode(dual_side_position=False)
@@ -1055,6 +1176,49 @@ class RealTraderFutures:
         if self._executor is None and self.symbols:
             max_workers = max(1, min(len(self.symbols), 8))
             self._executor = ThreadPoolExecutor(max_workers=max_workers)
+
+        try:
+            from src.futures_strategy.engine_fast_futures import (
+                backtest_loop_numba,
+            )
+
+            logger.info(
+                "⚙️ Pre-compiling Numba JIT functions to prevent runtime CPU spike..."
+            )
+            dummy_arr = np.array([1.0], dtype=np.float64)
+            dummy_int_arr = np.array([1], dtype=np.int64)
+            _ = backtest_loop_numba(
+                dummy_arr,
+                dummy_arr,
+                dummy_arr,
+                dummy_arr,
+                dummy_arr,
+                dummy_arr,
+                dummy_int_arr,
+                dummy_arr,
+                dummy_arr,
+                dummy_arr,
+                100.0,
+                1.0,
+                0.0005,
+                0.0005,
+                0.01,
+                dummy_int_arr,
+                dummy_arr,
+                2.0,
+                2.0,
+                2.0,
+                2.0,
+                2.0,
+                2.0,
+                0,
+                0,
+                False,
+                1000.0,
+            )
+            logger.info("✅ Numba JIT warm-up complete.")
+        except ImportError:
+            pass
 
         self.health_manager.update_heartbeat(status="initialized")
         logger.info("🚀 Initialization Complete. Bot is Running in 2D Mode...")
@@ -1080,6 +1244,7 @@ class RealTraderFutures:
         execution_tf: str,
         entry_upper: float,
         entry_lower: float,
+        margin_context: Optional[dict] = None,
     ) -> bool:
         now_ms = self._get_reference_now_ms()
         if now_ms > int(late_bound_ms):
@@ -1108,9 +1273,25 @@ class RealTraderFutures:
             price=current_price,
             params=params,
             atr=atr,
+            margin_context=margin_context,
         )
         if qty <= 0:
             return False
+
+        used_margin = 0.0
+        if margin_context is not None:
+            leverage = self._resolve_exchange_leverage(
+                params.get("LEVERAGE", 20)
+            )
+            fee_rate = float(
+                params.get("TAKER_FEE_RATE", params.get("FEE_RATE", 0.0005))
+            )
+            margin_buffer_multiplier = (
+                1.0 + (fee_rate * 2.0) + float(SLIPPAGE_RATE)
+            )
+            used_margin = (
+                (qty * current_price) / leverage
+            ) * margin_buffer_multiplier
 
         self.state_manager.update_symbol_state(
             symbol,
@@ -1143,6 +1324,10 @@ class RealTraderFutures:
         )
         if invalid_confirmation:
             self._cancel_all_orders_safe(symbol)
+            if margin_context is not None:
+                margin_context["free_usdt"] = float(
+                    margin_context.get("free_usdt", 0.0)
+                ) + used_margin
 
             current_state = self.state_manager.get_symbol_state(symbol)
             current_attempts = int(
@@ -1169,6 +1354,10 @@ class RealTraderFutures:
             current_price=current_price,
             atr=atr,
         ):
+            if margin_context is not None:
+                margin_context["free_usdt"] = float(
+                    margin_context.get("free_usdt", 0.0)
+                ) + used_margin
             current_state = self.state_manager.get_symbol_state(symbol)
             current_attempts = int(
                 (current_state or {}).get("entry_attempt_count_for_signal", 1)
@@ -1255,7 +1444,11 @@ class RealTraderFutures:
         )
         sl_active = bool(sl_result)
         if sl_active:
-            sl_order_id = str(sl_result.get("id", "") or "")
+            sl_order_id = (
+                str(sl_result.get("id", "") or "")
+                if isinstance(sl_result, dict)
+                else ""
+            )
             if sl_order_id:
                 self.state_manager.update_symbol_state(
                     symbol,
@@ -1263,20 +1456,6 @@ class RealTraderFutures:
                         "sl_order_id": sl_order_id,
                     },
                 )
-
-        tp_active = False
-        if use_tp_entry and tp_price > 0:
-            client = self._get_client_for_symbol(symbol)
-            tp_qty = (
-                client.round_amount(symbol, filled_qty - scale_qty)
-                if scale_qty > 0
-                else filled_qty
-            )
-            if tp_qty > 0:
-                tp_result = self._place_take_profit_safe(
-                    symbol, close_sl_side, tp_qty, tp_price
-                )
-                tp_active = bool(tp_result)
 
         scale_order_id: Optional[str] = None
         if scale_qty > 0:
@@ -1295,10 +1474,27 @@ class RealTraderFutures:
                 if isinstance(scale_res, dict):
                     scale_order_id = str(scale_res.get("id", "") or "")
             except Exception as e:
-                logger.error(
-                    f"❌ [{symbol}] Scale-out LIMIT order failed, proceeding without it: {e}"
-                )
+                logger.error(f"❌ [{symbol}] Scale-out LIMIT order failed: {e}")
                 scale_order_id = None
+
+        actual_scale_qty = scale_qty if scale_order_id else 0.0
+        tp_qty = (
+            client.round_amount(symbol, filled_qty - actual_scale_qty)
+            if actual_scale_qty > 0
+            else filled_qty
+        )
+
+        tp_active = False
+        if use_tp_entry and tp_price > 0 and tp_qty > 0:
+            tp_client_id = "RT_TP_" + uuid.uuid4().hex[:20]
+            tp_result = self._place_take_profit_safe(
+                symbol,
+                close_sl_side,
+                tp_qty,
+                tp_price,
+                client_order_id=tp_client_id,
+            )
+            tp_active = bool(tp_result)
 
         if not sl_active:
             sl_active = bool(
@@ -1350,6 +1546,7 @@ class RealTraderFutures:
             "highest_price": float(confirmed_entry_price),
             "lowest_price": float(confirmed_entry_price),
             "last_entry_signal_candle_ts": int(signal_candle_ts),
+            "successful_entry_candle_ts": int(signal_candle_ts),
             "has_scaled_out": False,
             "initial_amount": float(confirmed_amount),
         }
@@ -1373,15 +1570,39 @@ class RealTraderFutures:
 
             state_snapshot = self.state_manager.get_symbol_state(symbol)
             if not in_position:
+                try:
+                    self._cancel_all_orders_safe(symbol)
+                except Exception as e:
+                    logger.warning(
+                        "Failed to clear orphan orders for %s: %s", symbol, e
+                    )
+
                 if state_snapshot and (
                     state_snapshot.get("entry_time")
                     or state_snapshot.get("exit_pending")
                     or state_snapshot.get("exit_error")
                 ):
+                    if state_snapshot.get("entry_time") and not state_snapshot.get(
+                        "exit_pending"
+                    ):
+                        self._log_silent_exchange_exit(
+                            symbol=symbol,
+                            state=state_snapshot,
+                            current_price=float(current_price),
+                            params=params,
+                        )
+
                     logger.info(
                         "🧹 [%s] Clearing stale local state (no open position).", symbol
                     )
-                    self.state_manager.clear_symbol_state(symbol)
+                    self.state_manager.clear_symbol_state(
+                        symbol,
+                        preserve_keys=[
+                            "last_entry_attempt_signal_candle_ts",
+                            "entry_attempt_count_for_signal",
+                            "last_entry_attempt_at",
+                        ],
+                    )
                 return
 
             current_price = self._get_market_price_safe(symbol)
@@ -1509,6 +1730,94 @@ class RealTraderFutures:
             logger.error("🚨 Error in _process_exits for %s: %s", symbol, e)
             self.health_manager.record_error(e)
 
+    def _log_silent_exchange_exit(
+        self, symbol: str, state: dict, current_price: float, params: dict
+    ) -> None:
+        try:
+            entry_price = float(state.get("entry_price", 0.0) or 0.0)
+            initial_amount = float(state.get("initial_amount", 0.0) or 0.0)
+            side_str = str(state.get("side", "") or "")
+
+            if entry_price <= 0 or initial_amount <= 0 or not side_str:
+                return
+
+            has_scaled_out = bool(state.get("has_scaled_out", False))
+            actual_exit_amount = (
+                initial_amount * 0.5 if has_scaled_out else initial_amount
+            )
+
+            exit_price = float(current_price)
+            active_stop = float(state.get("active_stop_price", 0.0) or 0.0)
+            tp_price = float(state.get("tp_price", 0.0) or 0.0)
+            if active_stop > 0 and tp_price > 0:
+                is_long = side_str.upper() == "LONG"
+                if (is_long and current_price < entry_price) or (
+                    not is_long and current_price > entry_price
+                ):
+                    exit_price = active_stop
+                else:
+                    exit_price = tp_price
+            reason = "Exchange SL/TP Executed (Estimated)"
+
+            client = self._get_client_for_symbol(symbol)
+            try:
+                closed_orders = client.exchange.fetch_closed_orders(symbol, limit=5)
+                sorted_orders = sorted(
+                    closed_orders,
+                    key=lambda o: float(o.get("timestamp", 0) or 0.0),
+                    reverse=True,
+                )
+                expected_close_side = "SELL" if side_str.upper() == "LONG" else "BUY"
+                for o in sorted_orders:
+                    order_side = str(o.get("side", "") or "").upper()
+                    filled_qty = float(o.get("filled", 0.0) or 0.0)
+                    if order_side != expected_close_side or filled_qty <= 0.0:
+                        continue
+                    avg_price = o.get("average")
+                    raw_price = o.get("price")
+                    if avg_price is not None:
+                        exit_price = float(avg_price)
+                    elif raw_price is not None:
+                        exit_price = float(raw_price)
+                    o_type = str(o.get("type", "") or "").upper()
+                    if "STOP" in o_type:
+                        reason = f"Exchange SL Hit ({exit_price:.2f})"
+                    elif "TAKE_PROFIT" in o_type:
+                        reason = f"Exchange TP Hit ({exit_price:.2f})"
+                    break
+            except Exception:
+                pass
+
+            fee_rate = float(
+                params.get("TAKER_FEE_RATE", params.get("FEE_RATE", 0.0005))
+            )
+            entry_value = entry_price * actual_exit_amount
+            exit_value = exit_price * actual_exit_amount
+            total_fee = (entry_value + exit_value) * fee_rate
+
+            if side_str.upper() == "LONG":
+                gross_pnl = (exit_price - entry_price) * actual_exit_amount
+            else:
+                gross_pnl = (entry_price - exit_price) * actual_exit_amount
+
+            pnl = gross_pnl - total_fee
+            pnl_pct = (pnl / entry_value) * 100.0 if entry_value > 0 else 0.0
+
+            with self._db_write_lock:
+                self.trade_db.record_trade(
+                    symbol=symbol,
+                    side=side_str,
+                    action="EXIT",
+                    quantity=actual_exit_amount,
+                    price=exit_price,
+                    entry_price=entry_price,
+                    pnl=pnl,
+                    pnl_pct=pnl_pct,
+                    reason=reason,
+                )
+        except Exception as e:
+            logger.error("Failed to log silent exit for %s: %s", symbol, e)
+
     def _scan_entries(self, symbol: str) -> Optional[dict]:
         """Phase 2: 진입 시그널 동시 스캔 (No Execution)"""
         df: Optional[pd.DataFrame] = None
@@ -1546,6 +1855,16 @@ class RealTraderFutures:
             ):
                 need_calculation = True
 
+            now_ref_ms = self._get_reference_now_ms()
+            if cached:
+                cached_ts = cached.get("candle_ts", 0)
+                if cached_ts > now_ref_ms:
+                    logger.warning(
+                        "[%s] Look-ahead detected in indicator cache. Forcing recalculation.",
+                        symbol,
+                    )
+                    need_calculation = True
+
             if need_calculation:
                 tf_min = self._timeframe_to_minutes(indicator_tf)
                 if tf_min <= 0:
@@ -1568,12 +1887,21 @@ class RealTraderFutures:
                 start_dt = datetime.utcnow() - timedelta(days=lookback_days + 2)
                 start_str = start_dt.strftime("%Y-%m-%d %H:%M:%S")
 
-                df = self._fetch_ohlcv_safe(symbol, indicator_tf, start_str)
+                cvd_required = "TAKER_RATIO_THRESHOLD" in params
+
+                if cvd_required:
+                    df = self._fetch_ohlcv_with_taker_safe(
+                        symbol,
+                        indicator_tf,
+                        start_str,
+                    )
+                else:
+                    df = self._fetch_ohlcv_safe(symbol, indicator_tf, start_str)
+
                 if df is None or len(df) < 200:
                     self.last_calc_candle[symbol] = current_slot
                     return None
 
-                cvd_required = "TAKER_RATIO_THRESHOLD" in params
                 if cvd_required and "taker_buy_base_volume" not in df.columns:
                     logger.error(
                         "🚨 [%s] Critical Data Missing: 'taker_buy_base_volume' not found. Aborting entry scan.",
@@ -1706,6 +2034,11 @@ class RealTraderFutures:
                     return None
 
             entry_retry_max = max(1, int(params.get("ENTRY_SIGNAL_RETRY_MAX", 2)))
+            successful_entry_ts = int(
+                state.get("successful_entry_candle_ts", 0) or 0
+            )
+            if successful_entry_ts > 0 and successful_entry_ts == signal_candle_ts:
+                return None
             last_attempt_signal_ts = int(
                 state.get("last_entry_attempt_signal_candle_ts", 0) or 0
             )
@@ -1812,6 +2145,7 @@ class RealTraderFutures:
             execution_tf=str(cand.get("execution_tf")),
             entry_upper=float(cand.get("entry_upper")),
             entry_lower=float(cand.get("entry_lower")),
+            margin_context=cand.get("margin_context"),
         )
         if should_abort:
             logger.warning("Entry execution aborted for %s", symbol)
@@ -1825,14 +2159,23 @@ class RealTraderFutures:
         atr: float = 0.0,
         hurst: float = 0.5,
         natr: float = 0.0,
+        margin_context: Optional[dict] = None,
     ) -> float:
         """2D 마진 공유: 고정 할당량 폐지, 총 자본 및 실시간 가용 마진 기준 동적 계산"""
         if price <= 0:
             return 0.0
-        try:
-            total_balance, usdt_free = self._fetch_balance_safe()
-        except Exception as e:
-            return 0.0
+
+        if margin_context is not None:
+            usdt_free = float(margin_context.get("free_usdt", 0.0))
+            total_balance = float(
+                margin_context.get("total_equity_snapshot", usdt_free)
+            )
+        else:
+            try:
+                total_balance, usdt_free = self._fetch_balance_safe(symbol=symbol)
+            except Exception:
+                return 0.0
+
         if usdt_free < MIN_BALANCE_FOR_TRADE:
             return 0.0
 
@@ -1868,7 +2211,8 @@ class RealTraderFutures:
 
         final_notional = min(target_notional, max_tradeable_notional)
 
-        constraints = self.client.get_symbol_constraints(symbol)
+        client = self._get_client_for_symbol(symbol)
+        constraints = client.get_symbol_constraints(symbol)
         effective_min_order_value = max(
             float(MIN_ORDER_VALUE_USDT), float(constraints.get("min_cost") or 0.0)
         )
@@ -1877,6 +2221,19 @@ class RealTraderFutures:
                 f"[{symbol}] Free Margin too low (${usdt_free:.2f}). Need ${effective_min_order_value/leverage:.2f} to trade."
             )
             return 0.0
+
+        if margin_context is not None:
+            fee_rate = float(
+                params.get("TAKER_FEE_RATE", params.get("FEE_RATE", 0.0005))
+            )
+            margin_buffer_multiplier = 1.0 + (fee_rate * 2.0) + float(SLIPPAGE_RATE)
+
+            used_margin = (final_notional / leverage) * margin_buffer_multiplier
+
+            margin_context["free_usdt"] = max(
+                0.0,
+                float(margin_context.get("free_usdt", 0.0)) - used_margin,
+            )
 
         client = self._get_client_for_symbol(symbol)
         quantity = client.round_amount(symbol, final_notional / price)
@@ -2055,7 +2412,7 @@ class RealTraderFutures:
                     if scale_qty > 0:
                         scale_qty_float = float(scale_qty)
                         fee_rate = float(
-                            params.get("TAKER_FEE_RATE", params.get("FEE_RATE", 0.0005))
+                            params.get("MAKER_FEE_RATE", params.get("FEE_RATE", 0.0002))
                         )
                         entry_value = entry_price * scale_qty_float
                         exit_value = scale_exit_price * scale_qty_float
@@ -2124,7 +2481,8 @@ class RealTraderFutures:
                     else entry_price
                     * (1.0 - (float(SLIPPAGE_RATE) + fee_rate) * 2.0)
                 )
-                breakeven_stop = self.client.round_price(symbol, breakeven_raw)
+                client = self._get_client_for_symbol(symbol)
+                breakeven_stop = client.round_price(symbol, breakeven_raw)
 
                 self.state_manager.update_symbol_state(
                     symbol,
@@ -2148,7 +2506,7 @@ class RealTraderFutures:
                             client_order_id=be_client_id,
                         )
 
-                        if sl_result:
+                        if sl_result and isinstance(sl_result, dict):
                             sl_order_id = str(sl_result.get("id", "") or "")
                             self.state_manager.update_symbol_state(
                                 symbol,
@@ -2242,18 +2600,18 @@ class RealTraderFutures:
                 active_stop = client.round_price(symbol, active_stop)
                 base_update = {
                     "pos_atr": float(pos_atr),
-                    "active_stop_price": float(active_stop),
                     "tp_price": float(tp_price_val),
                     "highest_price": float(highest_price),
                     "lowest_price": float(lowest_price),
                 }
+                if not trailing_updated:
+                    base_update["active_stop_price"] = float(active_stop)
                 if candle_ts > 0:
                     base_update["last_processed_candle_ts"] = int(candle_ts)
                 self.state_manager.update_symbol_state(symbol, base_update)
 
                 if trailing_updated:
-                    current_pos = self._fetch_position_safe(symbol)
-                    actual_amount = float(current_pos.get("amount", 0.0) or 0.0)
+                    actual_amount = float(amount)
 
                     if abs(actual_amount) > 0:
                         client = self._get_client_for_symbol(symbol)
@@ -2293,7 +2651,7 @@ class RealTraderFutures:
                                     prev_price_rounded,
                                     client_order_id=prev_sl_client_id,
                                 )
-                                if sl_result_prev:
+                                if sl_result_prev and isinstance(sl_result_prev, dict):
                                     sl_order_id_prev = str(
                                         sl_result_prev.get("id", "") or ""
                                     )
@@ -2328,27 +2686,29 @@ class RealTraderFutures:
                 "exit_pending": True,
                 "exit_reason": reason,
                 "exit_attempt_at": datetime.utcnow().isoformat(),
-                "exit_requested_qty": float(abs(amount)),
-                "exit_error": None,
             }
             if candle_ts > 0:
                 pending_update["last_processed_candle_ts"] = int(candle_ts)
             self.state_manager.update_symbol_state(symbol, pending_update)
 
-            current_pos = self._fetch_position_safe(symbol)
-            actual_amount = float(current_pos.get("amount", 0.0) or 0.0)
-            closed_qty = abs(actual_amount) if abs(actual_amount) > 0 else abs(amount)
+            try:
+                self._cancel_all_orders_safe(symbol)
+            except Exception:
+                pass
 
-            if abs(actual_amount) > 0:
+            time.sleep(0.1)
+
+            final_pos = self._fetch_position_safe(symbol)
+            actual_amount = float(final_pos.get("amount", 0.0) or 0.0)
+            closed_qty = abs(actual_amount)
+
+            if closed_qty > 0:
                 if not self._place_order_safe(
-                    symbol, order_side, abs(actual_amount), reduce_only=True
+                    symbol, order_side, closed_qty, reduce_only=True
                 ):
                     self.state_manager.update_symbol_state(
                         symbol,
-                        {
-                            "exit_error": "order_submit_failed_or_unknown",
-                            "exit_attempt_at": datetime.utcnow().isoformat(),
-                        },
+                        {"exit_error": "order_submit_failed_or_unknown"},
                     )
 
             is_flat, remaining_amount = self._wait_until_position_flat(
@@ -2384,10 +2744,12 @@ class RealTraderFutures:
                 gross_pnl = (entry_price - exit_price_for_calc) * closed_qty
 
             pnl = gross_pnl - total_fee
+            # Note: 이 PnL은 Trading Fee만 차감되었으며, 누적 Funding Fee는 포함되지 않은 Gross PnL임.
+            # 실제 지갑 잔고와의 오차는 Phase 3의 _fetch_balance_safe() 호출 시 자동 교정됨.
             pnl_pct = (pnl / entry_value) * 100.0 if entry_value > 0 else 0.0
 
             logger.info(
-                f"EXIT {side_str} {symbol} | PnL: {pnl_pct:+.2f}% | Reason: {reason}"
+                f"EXIT {side_str} {symbol} | Gross PnL(Excl. Funding): {pnl_pct:+.2f}% | Reason: {reason}"
             )
 
             with self._db_write_lock:
@@ -2402,7 +2764,14 @@ class RealTraderFutures:
                     pnl_pct=pnl_pct,
                     reason=reason,
                 )
-            self.state_manager.clear_symbol_state(symbol)
+            self.state_manager.clear_symbol_state(
+                symbol,
+                preserve_keys=[
+                    "last_entry_attempt_signal_candle_ts",
+                    "entry_attempt_count_for_signal",
+                    "last_entry_attempt_at",
+                ],
+            )
         except Exception as e:
             logger.error(f"Error in _check_exit for {symbol}: {e}")
             try:
@@ -2464,22 +2833,27 @@ class RealTraderFutures:
             except Exception:
                 pass
 
-        try:
-            client = self._get_client_for_symbol(symbol)
-            open_orders = client.fetch_open_orders(symbol)
-            stop_orders = [
-                o
-                for o in open_orders
-                if ("STOP" in o.get("type", "").upper())
-                and ("TAKE_PROFIT" not in o.get("type", "").upper())
-            ]
-            for o in stop_orders:
-                try:
-                    client.exchange.cancel_order(o["id"], symbol)
-                except Exception:
-                    pass
-        except Exception:
-            pass
+        client = self._get_client_for_symbol(symbol)
+        open_orders = client.fetch_open_orders(symbol)
+        stop_orders = [
+            o
+            for o in open_orders
+            if ("STOP" in o.get("type", "").upper())
+            and ("TAKE_PROFIT" not in o.get("type", "").upper())
+        ]
+        failed_cancels: list[str] = []
+        last_exception: Optional[Exception] = None
+        for o in stop_orders:
+            try:
+                client.exchange.cancel_order(o["id"], symbol)
+            except Exception as e:
+                logger.warning(
+                    "Failed to cancel SL order %s for %s: %s", o.get("id"), symbol, e
+                )
+                failed_cancels.append(str(o.get("id")))
+                last_exception = e
+        if failed_cancels and last_exception is not None:
+            raise last_exception
 
     def _cleanup_duplicate_sl_orders(self, symbol: str, sl_orders: list) -> list:
         if len(sl_orders) > 1:
@@ -2504,7 +2878,8 @@ class RealTraderFutures:
         params: dict,
         atr: float,
     ) -> bool:
-        sl_qty = self.client.round_amount(symbol, abs(amount)) or abs(amount)
+        client = self._get_client_for_symbol(symbol)
+        sl_qty = client.round_amount(symbol, abs(amount)) or abs(amount)
         sl_type = params.get("STOP_LOSS_TYPE", "ATR")
 
         state = self.state_manager.get_symbol_state(symbol)
@@ -2536,7 +2911,6 @@ class RealTraderFutures:
                 else:
                     stop_price = entry_price * (1 + params.get("STOP_LOSS_PCT", 0.02))
 
-        client = self._get_client_for_symbol(symbol)
         tick_size = float(
             client.get_price_tick_size(
                 symbol, fallback=(0.1 if "BTC" in symbol else 0.01)
@@ -2560,7 +2934,7 @@ class RealTraderFutures:
             stop_price=stop_price,
             client_order_id=sl_client_id,
         )
-        if sl_result:
+        if sl_result and isinstance(sl_result, dict):
             sl_order_id = str(sl_result.get("id", "") or "")
             update_payload = {
                 "last_sl_order_time": datetime.utcnow().isoformat(),
@@ -2589,7 +2963,14 @@ class RealTraderFutures:
         actual_amount = float(current_pos.get("amount", 0.0) or 0.0)
 
         if abs(actual_amount) <= 0:
-            self.state_manager.clear_symbol_state(symbol)
+            self.state_manager.clear_symbol_state(
+                symbol,
+                preserve_keys=[
+                    "last_entry_attempt_signal_candle_ts",
+                    "entry_attempt_count_for_signal",
+                    "last_entry_attempt_at",
+                ],
+            )
             return True
 
         now = datetime.utcnow()
@@ -2610,8 +2991,9 @@ class RealTraderFutures:
         side_str, order_side = (
             ("LONG", "sell") if actual_amount > 0 else ("SHORT", "buy")
         )
+        client = self._get_client_for_symbol(symbol)
         exit_qty = (
-            self.client.round_amount(symbol, abs(actual_amount)) or abs(actual_amount)
+            client.round_amount(symbol, abs(actual_amount)) or abs(actual_amount)
         )
 
         recovery_attempts = int(state.get("exit_recovery_attempt_count", 0) or 0) + 1
@@ -2705,7 +3087,14 @@ class RealTraderFutures:
                 reason="Exit Recovery",
                 params={"recovery_attempt_count": int(recovery_attempts)},
             )
-        self.state_manager.clear_symbol_state(symbol)
+        self.state_manager.clear_symbol_state(
+            symbol,
+            preserve_keys=[
+                "last_entry_attempt_signal_candle_ts",
+                "entry_attempt_count_for_signal",
+                "last_entry_attempt_at",
+            ],
+        )
         return True
 
     def run_forever(self):
@@ -2738,18 +3127,28 @@ class RealTraderFutures:
                         try:
                             future.result()
                         except Exception as e:
-                            logger.error("Error in Phase1 (exit) for %s: %s", symbol, e)
+                            logger.error(
+                                "Error in Phase1 (exit) for %s: %s", symbol, e
+                            )
+                else:
+                    for symbol in self.symbols:
+                        if self._shutdown_requested:
+                            break
+                        try:
+                            self._process_exits(symbol)
+                        except Exception as e:
+                            logger.error(
+                                "Error in Phase1 fallback for %s: %s", symbol, e
+                            )
 
                 # Phase 2: Signal Scan (동시 타점 스캔, 스레드풀 적용)
                 entry_candidates: list[dict] = []
                 if self._executor is not None:
-                    # 모든 심볼에 대한 API 요청 및 지표 계산을 병렬로 수행
                     future_to_symbol = {
                         self._executor.submit(self._scan_entries, symbol): symbol
                         for symbol in self.symbols
                         if not self._shutdown_requested
                     }
-
                     for future in as_completed(future_to_symbol):
                         symbol = future_to_symbol[future]
                         try:
@@ -2757,7 +3156,21 @@ class RealTraderFutures:
                             if candidate is not None:
                                 entry_candidates.append(candidate)
                         except Exception as e:
-                            logger.error("Error in Phase2 (scan) for %s: %s", symbol, e)
+                            logger.error(
+                                "Error in Phase2 (scan) for %s: %s", symbol, e
+                            )
+                else:
+                    for symbol in self.symbols:
+                        if self._shutdown_requested:
+                            break
+                        try:
+                            candidate = self._scan_entries(symbol)
+                            if candidate is not None:
+                                entry_candidates.append(candidate)
+                        except Exception as e:
+                            logger.error(
+                                "Error in Phase2 fallback for %s: %s", symbol, e
+                            )
 
                 # Phase 3: Rank & Margin Allocation (백테스트와 동일한 심볼 순서 유지)
                 if entry_candidates:
@@ -2765,9 +3178,21 @@ class RealTraderFutures:
                     entry_candidates.sort(
                         key=lambda x: symbol_priority.get(x.get("symbol"), 999)
                     )
+
+                    try:
+                        current_total_balance, current_free_usdt = self._fetch_balance_safe()
+                    except Exception:
+                        current_total_balance, current_free_usdt = 0.0, 0.0
+
+                    margin_context: Dict[str, Any] = {
+                        "free_usdt": current_free_usdt,
+                        "total_equity_snapshot": current_total_balance,
+                    }
+
                     for cand in entry_candidates:
                         if self._shutdown_requested:
                             break
+                        cand["margin_context"] = margin_context
                         self._execute_entry_order(cand)
 
                 # ==============================================================
