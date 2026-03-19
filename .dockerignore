@@ -1,17 +1,28 @@
-# Docker Build Context Exclusions
-
-# 1. Backtest & Exploration Data (Large CSVs)
-data/*.csv
-
-# 2. Local Environment, Logs & Legacy
-legacy/
-logs/
-.git/
+# Git & Environment
+.git
+.github
 .env
-.agent/
-.pytest_cache/
-__pycache__/
-*.pyc
+.agent
+.gemini
+*.pem
+aws_coin_key.pem
 
-# 3. Strategy Optimization DBs (if you want to keep them only on host)
-# *.db
+# Python
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache
+.venv
+venv
+
+# Data & Logs (Local)
+logs/
+data/*.csv
+data/*.db
+results/*.json
+!results/best_params_*.json
+
+# Documentation
+README.md
+docs/
