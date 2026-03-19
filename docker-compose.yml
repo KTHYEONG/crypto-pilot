@@ -2,21 +2,21 @@ version: '3.8'
 
 services:
   # Upbit Spot Trading Bot
-  spot-bot:
-    image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/my-coin-bot:latest
-    container_name: coin-trader-spot
-    restart: unless-stopped
-    env_file: .env
-    volumes:
-      - ./data:/app/data
-      - ./logs:/app/logs
-      - ./results:/app/results
-    command: python -u src/spot_strategy/real_trader_spot.py
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "5"
+  # spot-bot:
+  #   image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/my-coin-bot:latest
+  #   container_name: coin-trader-spot
+  #   restart: unless-stopped
+  #   env_file: .env
+  #   volumes:
+  #     - ./data:/app/data
+  #     - ./logs:/app/logs
+  #     - ./results:/app/results
+  #   command: python -u src/spot_strategy/real_trader_spot.py
+  #   logging:
+  #     driver: "json-file"
+  #     options:
+  #       max-size: "10m"
+  #       max-file: "5"
 
   # Binance Futures Trading Bot
   futures-bot:
