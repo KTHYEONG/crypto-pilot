@@ -36,11 +36,11 @@ FUTURES_SYMBOLS: List[str] = [
 OPT_SPOT_CONFIG: Dict[str, Any] = {
     "total_trials": 1200,
     "n_startup_trials": 150,
-    "tpe_n_startup_trials": 96,
+    "tpe_n_startup_trials": 150,
     "tpe_pruner_n_startup_trials": 10,
     "tpe_pruner_n_warmup_steps": 2,
     "seeds": [42],
-    "n_jobs": 2,
+    "n_jobs": 1,
     "task_workers": 1,
     "TARGET_TIMEFRAMES": ["4h"],
     "SPOT_MAX_CONCURRENT_POSITIONS": 3,
@@ -56,6 +56,7 @@ OPT_SPOT_CONFIG: Dict[str, Any] = {
     "SPOT_DD_DURATION_BARS_THRESHOLD": 100,
     "SPOT_DD_DURATION_PENALTY_PER_BAR": 0.001,
     "SPOT_HOLDOUT_MIN_PORTFOLIO_LONG_TRADES": 8,
+    "SPOT_HOLDOUT_MIN_PF": 1.0,
     "SPOT_HOLDOUT_MAX_CVAR_PCT": 25.0,
     "SPOT_STRESS_SYMBOLS": [],
     "SPOT_SYMBOL_CLUSTER": {
@@ -107,10 +108,8 @@ SEARCH_SPACE_4H: Dict[str, Dict[str, Any]] = {
 
 SEARCH_SPACE_SPOT_4H: Dict[str, Dict[str, Any]] = {
     "MACRO_EMA_PERIOD": {"type": "int", "low": 100, "high": 300, "step": 20},
-    "FAST_EMA_PERIOD": {"type": "int", "low": 20, "high": 80, "step": 10},
     "ADX_PERIOD": {"type": "int", "low": 7, "high": 21, "step": 2},
     "ADX_THRESHOLD": {"type": "float", "low": 15.0, "high": 35.0, "step": 2.5},
-    "KC_MULT": {"type": "float", "low": 1.5, "high": 3.0, "step": 0.1},
     "MOMENTUM_PERIOD": {"type": "int", "low": 10, "high": 40, "step": 5},
     "VOL_Z_THRESHOLD": {"type": "float", "low": 0.5, "high": 3.0, "step": 0.25},
     "ATR_PERIOD": {"type": "int", "low": 10, "high": 24, "step": 2},
