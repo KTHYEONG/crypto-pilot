@@ -41,7 +41,7 @@ OPT_SPOT_CONFIG: Dict[str, Any] = {
 }
 
 TARGET_TIMEFRAMES: List[str] = ["4h"]
-WARMUP_PERIODS: Dict[str, int] = {"1h": 2160, "4h": 540}
+WARMUP_PERIODS: Dict[str, int] = {"4h": 540}
 
 # ==============================================================================
 # TF-SPECIFIC SEARCH SPACES
