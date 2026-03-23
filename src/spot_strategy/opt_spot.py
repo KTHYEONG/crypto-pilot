@@ -186,8 +186,8 @@ def _run_tf_optimization(task: Tuple[Any, str], ctx: _TfOptimizationContext) -> 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--symbols", type=str, default="KRW-BTC,KRW-ETH,KRW-SOL,KRW-AVAX,KRW-NEAR,KRW-LINK,KRW-DOGE,KRW-XRP,KRW-ADA,KRW-STX")
-    parser.add_argument("--mode", type=str, choices=["single", "multi"], default="single")
+    parser.add_argument("--symbols", type=str, default="KRW-BTC,KRW-DOGE,KRW-ETH,KRW-LINK,KRW-SOL,KRW-AVAX")
+    parser.add_argument("--mode", type=str, choices=["single", "multi"], default="multi")
     parser.add_argument("--trials", type=int, default=OPT_SPOT_CONFIG["total_trials"])
     parser.add_argument("--jobs", type=int, default=int(OPT_SPOT_CONFIG.get("n_jobs", 8)))
     parser.add_argument("--task-workers", type=int, default=int(OPT_SPOT_CONFIG.get("task_workers", 1)))
@@ -315,6 +315,7 @@ def main() -> None:
     top_k = int(OPT_SPOT_CONFIG.get("SPOT_SHORTLIST_TOP_K", 50))
     max_ho_cvar = float(OPT_SPOT_CONFIG.get("SPOT_HOLDOUT_MAX_CVAR_PCT", 25.0))
     min_pf_trades = int(OPT_SPOT_CONFIG.get("SPOT_HOLDOUT_MIN_PORTFOLIO_LONG_TRADES", 8))
+    holdout_min_pf = float(OPT_SPOT_CONFIG.get("SPOT_HOLDOUT_MIN_PF", 1.0))
 
     for (target, tf_eval), study in best_results.items():
         if study is None:
@@ -356,6 +357,7 @@ def main() -> None:
             portfolio_pf=float(port_ho["pf"]),
             min_path_terminal_wealth_ratio=float(port_ho["min_path_tw"]),
             max_cvar_pct=max_ho_cvar,
+            pf_need=holdout_min_pf,
         )
         is_all_passed = bool(veto_ok and trade_floor.passed and shared_cash_gate.passed)
 
