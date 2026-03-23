@@ -27,9 +27,8 @@ class DataValidator:
         df.sort_index(inplace=True)
         
         expected_diff = {
-            '1h': pd.Timedelta(hours=1),
-            '1d': pd.Timedelta(days=1),
-            '4h': pd.Timedelta(hours=4)
+            "1d": pd.Timedelta(days=1),
+            "4h": pd.Timedelta(hours=4),
         }.get(timeframe)
         
         if expected_diff:

@@ -31,10 +31,7 @@ def run_go_nogo_check(
     target_pf = 1.10
     pf_pass: bool = profit_factor >= target_pf
 
-    if tf == "1h":
-        min_trades_req = 15
-    else:  # 4h
-        min_trades_req = 5
+    min_trades_req = 5
 
     trades_pass: bool = total_trades >= min_trades_req
 

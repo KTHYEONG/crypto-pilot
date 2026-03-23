@@ -11,7 +11,6 @@ from collections import OrderedDict
 from typing import Any, Dict, List, Optional, Tuple
 
 from config.settings import FUTURES_INITIAL_BALANCE as SPOT_INITIAL_BALANCE
-from config.opt_config import WARMUP_PERIODS
 from src.spot_strategy.strategies_spot import UltimateSpotStrategy
 from src.spot_strategy.engine_fast_spot import BacktestEngineFastSpot
 from src.spot_strategy.opt_spot_utils.metrics import (
@@ -29,13 +28,12 @@ SymbolFoldResult = Tuple[str, float, float, float, float, float, float, np.ndarr
 _MAX_SYMBOL_WORKERS: int = max(1, int(os.getenv("OPT_SPOT_SYMBOL_WORKERS", "1")))
 
 def compute_embargo_bars(tf: str, longest_indicator_period: int = 150) -> int:
-    fixed_min: Dict[str, int] = {"1h": 24, "4h": 6}
-    ratio_map: Dict[str, float] = {"1h": 0.08, "4h": 0.05}
+    fixed_min: Dict[str, int] = {"4h": 6}
+    ratio_map: Dict[str, float] = {"4h": 0.05}
     ratio: float = ratio_map.get(tf, 0.03)
     return max(fixed_min.get(tf, 2), int(longest_indicator_period * ratio))
 
 EMBARGO_BARS: Dict[str, int] = {
-    "1h": compute_embargo_bars("1h"),
     "4h": compute_embargo_bars("4h"),
 }
 
