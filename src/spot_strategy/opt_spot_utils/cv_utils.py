@@ -1,10 +1,13 @@
 """
-교차 검증(Cross-Validation)을 위해 데이터를 고정된 훈련 세트와 이후의 테스트 세트로 나누는 기능을 제공함.
-시계열 데이터의 과거 학습과 미래 검증 구간 분리를 위한 로직을 포함함.
+Cross-validation helpers: purged walk-forward (legacy) and CPCV test paths for spot optimization.
 """
+from __future__ import annotations
+
 import logging
-import pandas as pd
+from itertools import combinations
 from typing import List, Tuple
+
+import pandas as pd
 
 _logger: logging.Logger = logging.getLogger("opt_spot")
 
@@ -13,6 +16,8 @@ _logger: logging.Logger = logging.getLogger("opt_spot")
 CVFold = Tuple[int, int, int, int]
 HoldoutFold = Tuple[int, int, int]
 
+# CPCV: each path is a list of disjoint test segment index ranges [start, end)
+CPCVPath = List[Tuple[int, int]]
 
 def build_purged_walk_forward_folds(
     df: pd.DataFrame,
@@ -50,3 +55,36 @@ def build_purged_walk_forward_folds(
     holdout_fold: HoldoutFold = (is_bars, ho_start, n_bars)
 
     return splits, holdout_fold
+
+
+def build_cpcv_test_paths(n_bars: int, n_blocks: int, k_test_blocks: int) -> List[CPCVPath]:
+    """Combinatorial purged CV: choose k_test_blocks disjoint blocks as test; each path is their union."""
+    n = int(n_bars)
+    nb = int(n_blocks)
+    k = int(k_test_blocks)
+    if n < nb * 2 or k < 1 or k > nb:
+        return []
+
+    base = n // nb
+    block_starts: List[int] = [j * base for j in range(nb)]
+    block_ends: List[int] = []
+    for j in range(nb):
+        end = (j + 1) * base if j < nb - 1 else n
+        block_ends.append(end)
+        if block_ends[-1] <= block_starts[j]:
+            return []
+
+    paths: List[CPCVPath] = []
+    for test_indices in combinations(range(nb), k):
+        segs = tuple((block_starts[j], block_ends[j]) for j in sorted(test_indices))
+        paths.append(list(segs))
+    return paths
+
+
+def build_cpcv_test_paths_with_fallback(n_bars: int) -> Tuple[List[CPCVPath], int, int]:
+    """Prefer 6 blocks / K=2; fallback to 4 blocks / K=2 if empty."""
+    paths = build_cpcv_test_paths(n_bars, 6, 2)
+    if paths:
+        return paths, 6, 2
+    paths_fb = build_cpcv_test_paths(n_bars, 4, 2)
+    return paths_fb, 4, 2
