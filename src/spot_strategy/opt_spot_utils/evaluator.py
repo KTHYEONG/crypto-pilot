@@ -47,10 +47,8 @@ EMBARGO_BARS: Dict[str, int] = {
 
 SIGNAL_CACHE_PARAM_KEYS: frozenset[str] = frozenset([
     "MACRO_EMA_PERIOD",
-    "FAST_EMA_PERIOD",
     "ADX_PERIOD",
     "ADX_THRESHOLD",
-    "KC_MULT",
     "MOMENTUM_PERIOD",
     "ATR_PERIOD",
     "VOL_Z_THRESHOLD",
@@ -188,7 +186,7 @@ def evaluate_symbol_fold(
     target_df: pd.DataFrame,
     daily_df: pd.DataFrame,
     full_merge_idx: np.ndarray,
-    precomputed_daily_df: pd.DataFrame,
+    precomputed_daily_df: Optional[pd.DataFrame],
     test_start: int,
     test_end: int,
     precomputed_signal_df: Optional[pd.DataFrame] = None,
@@ -411,7 +409,7 @@ def objective_spot(
 
     mean_log_tw = float(np.mean(path_mean_log_tw))
     cvar25_log = float(mean_of_worst_quartile(path_mean_log_tw))
-    base_growth = mean_log_tw + cvar25_w * cvar25_log
+    base_growth = 100.0 * (mean_log_tw + cvar25_w * cvar25_log)
 
     penalty = 0.0
     if len(path_mean_log_tw) > 1:
@@ -438,7 +436,6 @@ def objective_spot(
     trial.set_user_attr("cvar25_log_tw", cvar25_log)
     trial.set_user_attr("path_mean_log_tw_std", float(np.std(path_mean_log_tw, ddof=1)) if len(path_mean_log_tw) > 1 else 0.0)
     trial.set_user_attr("growth_score", growth_score)
-    trial.set_user_attr("mean_path_port_cagr", mean_log_tw)
 
     n_done = trial.number + 1
     n_startup = int(OPT_SPOT_CONFIG.get("tpe_n_startup_trials", 96))
