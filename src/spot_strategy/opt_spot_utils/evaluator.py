@@ -10,15 +10,23 @@ import pandas as pd
 from collections import OrderedDict
 from typing import Any, Dict, List, Optional, Tuple
 
-from config.settings import FUTURES_INITIAL_BALANCE as SPOT_INITIAL_BALANCE
+from config.opt_config import OPT_SPOT_CONFIG, get_spot_effective_independent_trials
+from config.settings import SPOT_INITIAL_BALANCE
 from src.spot_strategy.strategies_spot import UltimateSpotStrategy
 from src.spot_strategy.engine_spot import BacktestEngineFastSpot
+from src.spot_strategy.portfolio_shared_cash import run_shared_cash_multi_symbol
 from src.spot_strategy.opt_spot_utils.metrics import (
     calc_profit_factor_from_pnl,
     calc_mdd_from_equity,
-    calc_sortino_from_equity
+    calc_sortino_from_equity,
+    cvar_loss_pct_from_simple_returns,
+    compute_dsr_from_path_values,
+    max_underwater_bars_from_equity,
+    mean_of_worst_quartile,
+    portfolio_cagr_pct_from_equity,
+    probabilistic_sharpe_ratio,
 )
-from src.spot_strategy.opt_spot_utils.cv_utils import build_purged_walk_forward_folds
+from src.spot_strategy.opt_spot_utils.cv_utils import build_cpcv_test_paths_with_fallback
 from src.spot_strategy.opt_spot_utils.opt_params import suggest_params_spot
 
 _logger: logging.Logger = logging.getLogger("opt_spot")
@@ -39,9 +47,13 @@ EMBARGO_BARS: Dict[str, int] = {
 
 SIGNAL_CACHE_PARAM_KEYS: frozenset[str] = frozenset([
     "MACRO_EMA_PERIOD",
+    "FAST_EMA_PERIOD",
+    "ADX_PERIOD",
+    "ADX_THRESHOLD",
     "KC_MULT",
     "MOMENTUM_PERIOD",
-    "ATR_PERIOD"
+    "ATR_PERIOD",
+    "VOL_Z_THRESHOLD",
 ])
 
 _SignalCacheKey = Tuple[Tuple[Tuple[str, Any], ...], str, str, int]
@@ -243,6 +255,39 @@ def evaluate_symbol_fold(
 
     return cagr, ret_pct, mdd_pct, len(trades_df), win_rate, pf, long_count, equity_curve
 
+def _merge_spot_fixed_signal_params(params: Dict[str, Any]) -> Dict[str, Any]:
+    out = dict(params)
+    out.setdefault("BB_WINDOW", int(OPT_SPOT_CONFIG.get("BB_WINDOW", 20)))
+    out.setdefault("VOL_Z_WINDOW", int(OPT_SPOT_CONFIG.get("VOL_Z_WINDOW", 20)))
+    out.setdefault("VOL_EXPANSION_MULT", float(OPT_SPOT_CONFIG.get("VOL_EXPANSION_MULT", 1.05)))
+    macro = int(out.get("MACRO_EMA_PERIOD", 200))
+    out["BTC_REGIME_SMA_PERIOD"] = int(out.get("BTC_REGIME_SMA_PERIOD", macro))
+    return out
+
+
+def _dataframe_to_symbol_arrays(sig_df: pd.DataFrame) -> Dict[str, np.ndarray]:
+    required = ("open", "high", "low", "close", "atr", "long_entry_signal", "entry_upper")
+    for c in required:
+        if c not in sig_df.columns:
+            raise ValueError(f"Missing column {c} for shared-cash segment.")
+    out: Dict[str, np.ndarray] = {}
+    for c in required:
+        out[c] = sig_df[c].to_numpy(dtype=np.float64)
+    if "regime_risk_mult" in sig_df.columns:
+        out["regime_risk_mult"] = sig_df["regime_risk_mult"].to_numpy(dtype=np.float64)
+    return out
+
+
+def _segment_span_days(sig_df: pd.DataFrame, execution_start_idx: int) -> float:
+    if "datetime" not in sig_df.columns or sig_df.empty:
+        return 1.0
+    i0 = min(max(0, int(execution_start_idx)), len(sig_df) - 1)
+    span_seconds = float(
+        (sig_df["datetime"].iloc[-1] - sig_df["datetime"].iloc[i0]).total_seconds()
+    )
+    return max(span_seconds / 86400.0, 1.0)
+
+
 def objective_spot(
     trial: optuna.Trial,
     data_maps: Dict[str, Dict[str, Any]],
@@ -252,179 +297,252 @@ def objective_spot(
     space: Dict[str, Dict[str, Any]],
     mode: str = "single",
     project_root: Optional[str] = None,
-) -> Tuple[float, float]:
-    params: Dict[str, Any] = suggest_params_spot(trial, space, tf_target)
-    if params.pop("_INVALID_CONSTRAINT", False):
-        raise optuna.TrialPruned()
-
+) -> float:
+    params: Dict[str, Any] = _merge_spot_fixed_signal_params(suggest_params_spot(trial, space, tf_target))
     tf: str = tf_target
     strategy: UltimateSpotStrategy = UltimateSpotStrategy(name="OptSpot", params=params)
 
     ref_sym = symbols[0]
-    ref_len = len(data_maps[ref_sym][tf]) - data_maps[ref_sym].get(f"is_start_idx_{tf}", 0)
-    base_df_for_folds: pd.DataFrame = pd.DataFrame(index=range(ref_len))
-    
-    cv_folds, holdout_fold = build_purged_walk_forward_folds(
-        base_df_for_folds, 
-        n_folds=4, 
-        holdout_ratio=0.20, 
-        embargo=EMBARGO_BARS.get(tf, 0)
-    )
-
-    if not cv_folds:
+    is_off = int(data_maps[ref_sym].get(f"is_start_idx_{tf}", 0))
+    ref_df = data_maps[ref_sym][tf]
+    if ref_df is None or ref_df.empty:
+        raise optuna.TrialPruned()
+    ref_len = len(ref_df) - is_off
+    if ref_len < 200:
         raise optuna.TrialPruned()
 
-    all_folds = cv_folds + ([holdout_fold] if holdout_fold[2] > holdout_fold[1] else [])
-
-    fold_scores: List[float] = []
-    fold_rets: List[float] = []
-    fold_mdds: List[float] = []
-    fold_trades: List[float] = []
-    fold_wins: List[float] = []
-    fold_pfs: List[float] = []
-    
-    sym_total_rets: Dict[str, List[float]] = {sym: [] for sym in symbols}
-    sym_total_mdds: Dict[str, List[float]] = {sym: [] for sym in symbols}
-    sym_total_scores: Dict[str, List[float]] = {sym: [] for sym in symbols}
-    sym_total_trades: Dict[str, List[float]] = {sym: [] for sym in symbols}
-    sym_total_wins: Dict[str, List[float]] = {sym: [] for sym in symbols}
-    sym_total_pfs: Dict[str, List[float]] = {sym: [] for sym in symbols}
+    cpcv_paths, _nb, _k = build_cpcv_test_paths_with_fallback(ref_len)
+    if not cpcv_paths:
+        raise optuna.TrialPruned()
 
     full_signal_dfs: Dict[str, pd.DataFrame] = {}
     for sym in symbols:
         target_df_full: Optional[pd.DataFrame] = data_maps.get(sym, {}).get(tf)
-        if target_df_full is None or target_df_full.empty: continue
+        if target_df_full is None or target_df_full.empty:
+            continue
         cache_key: _SignalCacheKey = _build_signal_cache_key(params, sym, tf, len(target_df_full))
         full_signal_dfs[sym] = get_or_compute_signals(cache_key, target_df_full, strategy)
 
-    if not full_signal_dfs:
+    if len(full_signal_dfs) != len(symbols):
         raise optuna.TrialPruned()
-    
-    for f_idx, fold_info in enumerate(all_folds):
-        if len(fold_info) == 4: train_start, train_end, test_start, test_end = fold_info
-        else: train_start = 0; train_end, test_start, test_end = fold_info
 
-        target_symbols: List[str] = symbols
-        fold_agg_eq: Optional[np.ndarray] = None
-        fold_span_days: float = 0.0
+    max_slots = int(OPT_SPOT_CONFIG.get("SPOT_MAX_CONCURRENT_POSITIONS", 3))
+    min_seg_trades = int(OPT_SPOT_CONFIG.get("SPOT_MIN_TRADES_PER_CPCV_SEGMENT", 4))
+    warmup_bars = int(max(params.get("MOMENTUM_PERIOD", 20), params.get("ATR_PERIOD", 20), 120))
 
-        max_workers: int = min(len(target_symbols), _MAX_SYMBOL_WORKERS)
-        symbol_results: List[SymbolFoldResult] = []
+    cfg = OPT_SPOT_CONFIG
+    std_pen_mult = float(cfg.get("SPOT_PATH_CROSS_PATH_LOG_TW_STD_PENALTY_MULT", 2.0))
+    min_path_pen_mult = float(cfg.get("SPOT_MIN_PATH_CAGR_PENALTY_MULT", 1.5))
+    seg_fail_pen = float(cfg.get("SPOT_SEGMENT_TRADE_FAIL_PENALTY", 2.0))
+    mdd_thr = float(cfg.get("SPOT_MDD_PENALTY_THRESHOLD_PCT", 35.0))
+    cvar_thr = float(cfg.get("SPOT_OBJECTIVE_CVAR_PENALTY_THRESHOLD", 15.0))
+    cvar25_w = float(cfg.get("SPOT_OBJECTIVE_CVAR25_LOG_TW_WEIGHT", 0.20))
+    dd_bars_thr = int(cfg.get("SPOT_DD_DURATION_BARS_THRESHOLD", 100))
+    dd_bar_pen = float(cfg.get("SPOT_DD_DURATION_PENALTY_PER_BAR", 0.001))
 
-        if max_workers > 1:
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                futures = [
-                    executor.submit(_evaluate_symbol_for_fold_parallel, sym, params=params, strategy=strategy, tf=tf, 
-                                   data_maps=data_maps, full_signal_dfs=full_signal_dfs, test_start=test_start, test_end=test_end)
-                    for sym in target_symbols
-                ]
-                for future in as_completed(futures):
-                    result: Optional[SymbolFoldResult] = future.result()
-                    if result: symbol_results.append(result)
-        else:
-            for sym in target_symbols:
-                result = _evaluate_symbol_for_fold_parallel(sym, params=params, strategy=strategy, tf=tf, 
-                                                            data_maps=data_maps, full_signal_dfs=full_signal_dfs, test_start=test_start, test_end=test_end)
-                if result: symbol_results.append(result)
+    path_mean_log_tw: List[float] = []
+    path_min_tw_ratio: List[float] = []
+    path_worst_mdd: List[float] = []
+    path_max_cvar: List[float] = []
+    for path_idx, path in enumerate(cpcv_paths):
+        seg_log_tw: List[float] = []
+        seg_tw_ratio: List[float] = []
+        seg_mdds: List[float] = []
+        seg_cvars: List[float] = []
+        for test_start, test_end in path:
+            abs_start = is_off + int(test_start)
+            abs_end = is_off + int(test_end)
+            slice_start = max(0, abs_start - 1)
+            slice_end = min(len(ref_df), abs_end)
+            if slice_end - slice_start < 5:
+                continue
+            symbol_arrays: Dict[str, Dict[str, np.ndarray]] = {}
+            rank_scores: Dict[str, np.ndarray] = {}
+            for sym in symbols:
+                full_df = full_signal_dfs[sym]
+                seg = full_df.iloc[slice_start:slice_end].copy()
+                symbol_arrays[sym] = _dataframe_to_symbol_arrays(seg)
+                if "slot_rank_score" in seg.columns:
+                    rank_scores[sym] = seg["slot_rank_score"].to_numpy(dtype=np.float64)
 
-        if not symbol_results: raise optuna.TrialPruned()
+            execution_start_idx = max(1, abs_start - slice_start)
+            initial_balance = float(SPOT_INITIAL_BALANCE)
+            result = run_shared_cash_multi_symbol(
+                symbol_arrays,
+                symbols,
+                params,
+                initial_balance=initial_balance,
+                max_concurrent_positions=max_slots,
+                rank_scores=rank_scores if rank_scores else None,
+                warmup_bars=warmup_bars,
+                execution_start_idx=execution_start_idx,
+            )
+            eq = result.equity_curve
+            if eq.size == 0:
+                twr = 1.0
+            else:
+                twr = max(float(result.final_balance / initial_balance), 1e-9)
+            log_tw = float(np.log(twr))
+            if eq.size > 1:
+                seg_mdds.append(float(calc_mdd_from_equity(eq)))
+                seg_cvars.append(float(cvar_loss_pct_from_simple_returns(eq)))
+                uw = max_underwater_bars_from_equity(eq)
+                if uw > dd_bars_thr:
+                    log_tw -= float(uw - dd_bars_thr) * dd_bar_pen
+            else:
+                seg_mdds.append(0.0)
+                seg_cvars.append(0.0)
 
-        fold_sym_cagrs: List[float] = []
-        fold_sym_rets: List[float] = []
-        fold_sym_mdds: List[float] = []
-        fold_sym_trades: List[float] = []
+            if int(result.total_trades) < min_seg_trades:
+                log_tw -= seg_fail_pen
 
-        for (sym, s, r, m, t, w, pf, eq, span_days_sym) in symbol_results:
-            fold_sym_cagrs.append(s)
-            fold_sym_rets.append(r)
-            fold_sym_mdds.append(m)
-            fold_sym_trades.append(t)
-            
-            sym_total_scores[sym].append(s)
-            sym_total_rets[sym].append(r)
-            sym_total_mdds[sym].append(m)
-            sym_total_trades[sym].append(t)
-            sym_total_wins[sym].append(w)
-            sym_total_pfs[sym].append(pf)
+            seg_log_tw.append(log_tw)
+            seg_tw_ratio.append(twr)
 
-            if eq.size > 0:
-                eq_norm = eq / eq[0]
-                if fold_agg_eq is None: fold_agg_eq = eq_norm.copy()
-                else: 
-                    min_l = min(len(fold_agg_eq), len(eq_norm))
-                    fold_agg_eq = fold_agg_eq[:min_l] + eq_norm[:min_l]
-            fold_span_days = max(fold_span_days, span_days_sym)
+        if not seg_log_tw:
+            raise optuna.TrialPruned()
+        path_mean_log_tw.append(float(np.mean(seg_log_tw)))
+        path_min_tw_ratio.append(float(np.min(seg_tw_ratio)) if seg_tw_ratio else 1.0)
+        path_worst_mdd.append(float(np.max(seg_mdds)) if seg_mdds else 0.0)
+        path_max_cvar.append(float(np.max(seg_cvars)) if seg_cvars else 0.0)
 
-        if fold_agg_eq is None: raise optuna.TrialPruned()
-        
-        for r in fold_sym_rets:
-            if r <= -99.0:
-                return -100.0, 100.0
-        
-        port_eq = fold_agg_eq / len(symbol_results)
-        port_mdd = float(calc_mdd_from_equity(port_eq))
-        
-        safe_eq = np.clip(port_eq, 1e-9, None)
-        log_rets = np.log(safe_eq[1:] / safe_eq[:-1])
-        bars_per_year = (len(port_eq) / max(fold_span_days, 1.0)) * 365.0
-        ann_log_ret = np.mean(log_rets) * bars_per_year
-        ann_var = np.var(log_rets) * bars_per_year
-        port_kelly = ann_log_ret - (ann_var * 0.5)
-        port_sortino = float(calc_sortino_from_equity(port_eq, max(1.0, fold_span_days)))
+        interm = float(np.mean(path_mean_log_tw))
+        trial.report(interm, step=path_idx)
 
-        fold_scores.append(port_sortino)
-        fold_rets.append(float(np.mean(fold_sym_cagrs)))
-        fold_mdds.append(port_mdd)
-        fold_trades.append(float(np.mean(fold_sym_trades)))
-        fold_wins.append(float(np.mean([res[5] for res in symbol_results])))
-        fold_pfs.append(float(np.mean([res[6] for res in symbol_results])))
+    mean_log_tw = float(np.mean(path_mean_log_tw))
+    cvar25_log = float(mean_of_worst_quartile(path_mean_log_tw))
+    base_growth = mean_log_tw + cvar25_w * cvar25_log
 
-    has_holdout = len(all_folds) > len(cv_folds)
-    avg_cagr = float(np.mean(fold_rets))
-    cv_mdd = float(np.mean(fold_mdds[:-1] if has_holdout else fold_mdds))
-    avg_pf = float(np.mean(fold_pfs))
-    avg_win_rate = float(np.mean(fold_wins))
-    avg_sortino = float(np.mean(fold_scores))
+    penalty = 0.0
+    if len(path_mean_log_tw) > 1:
+        penalty += std_pen_mult * float(np.std(path_mean_log_tw, ddof=1))
+    min_log_tw = float(np.min(path_mean_log_tw))
+    if min_log_tw < 0.0:
+        penalty += min_path_pen_mult * abs(min_log_tw)
 
-    cagr_penalty = 0.0
-    
-    # 1. 현물 보수적 위험 대비 수익률: Sortino Ratio
-    if avg_sortino < 1.5:
-        cagr_penalty += (1.5 - avg_sortino) * 50.0
-        
-    # 2. 현물 승률 통제: 상승장 수익 포착 시 잦은 손절을 방어하는 최소 승률 (35% 이상 권장)
-    if avg_win_rate < 35.0:
-        cagr_penalty += (35.0 - avg_win_rate) * 5.0
+    worst_mdd = float(np.max(path_worst_mdd)) if path_worst_mdd else 0.0
+    if worst_mdd > mdd_thr:
+        penalty += (worst_mdd - mdd_thr) * 0.08
 
-    # 3. 강건성 보정 (과최적화 방지): 절대 수익률(Std CAGR) 대신 효율성(Std PF) 편차 통제
-    # 현물은 폴드별 상승기/하락기에 따라 수익률 편차가 큰 것이 당연하므로 Std(CAGR)는 제거함.
-    if len(fold_pfs) > 1:
-        std_pf = float(np.std(fold_pfs))
-        cagr_penalty += std_pf * 10.0
+    max_cvar = float(np.max(path_max_cvar)) if path_max_cvar else 0.0
+    if max_cvar > cvar_thr:
+        penalty += (max_cvar - cvar_thr) * 0.15
 
-    # 4. 심볼/종목별 최소 효율성 (PF)
-    if len(symbols) > 1:
-        sym_pfs = [float(np.mean(sym_total_pfs[s])) for s in symbols]
-        min_sym_pf = float(np.min(sym_pfs))
-        if min_sym_pf < 1.2:
-            cagr_penalty += (1.2 - min_sym_pf) * 30.0 
+    growth_score = base_growth - penalty
 
-    # 5. 통계적 유의성 제약 (우연한 수익 배제)
-    avg_trades_per_sym = float(np.mean(fold_trades))
-    if avg_trades_per_sym < 30.0:
-        cagr_penalty += (30.0 - avg_trades_per_sym) * 10.0
+    min_path_tw = float(np.min(path_min_tw_ratio)) if path_min_tw_ratio else 1.0
 
-    adjusted_cagr = avg_cagr - cagr_penalty
-    adjusted_mdd = cv_mdd  # MDD Penalty 제거: Pareto Front 복구
+    trial.set_user_attr("mean_path_terminal_wealth_ratio", float(np.mean(path_min_tw_ratio)))
+    trial.set_user_attr("min_path_terminal_wealth_ratio", min_path_tw)
+    trial.set_user_attr("mean_log_terminal_wealth", mean_log_tw)
+    trial.set_user_attr("cvar25_log_tw", cvar25_log)
+    trial.set_user_attr("path_mean_log_tw_std", float(np.std(path_mean_log_tw, ddof=1)) if len(path_mean_log_tw) > 1 else 0.0)
+    trial.set_user_attr("growth_score", growth_score)
+    trial.set_user_attr("mean_path_port_cagr", mean_log_tw)
 
-    trial.set_user_attr("avg_cagr", avg_cagr)
-    trial.set_user_attr("avg_mdd", cv_mdd)
-    trial.set_user_attr("avg_trades", float(np.mean(fold_trades)))
-    trial.set_user_attr("avg_pf", avg_pf)
-    
+    n_done = trial.number + 1
+    n_startup = int(OPT_SPOT_CONFIG.get("tpe_n_startup_trials", 96))
+    n_eff = get_spot_effective_independent_trials(n_done, n_startup)
+    psr_val = probabilistic_sharpe_ratio(
+        float(np.mean(path_mean_log_tw) / (np.std(path_mean_log_tw, ddof=1) + 1e-12)),
+        max(len(path_mean_log_tw), 2),
+    )
+    trial.set_user_attr("psr_paths", psr_val)
+    trial.set_user_attr("n_effective_independent_trials", n_eff)
+
+    path_vals = [float(x) for x in path_mean_log_tw]
+    trial.set_user_attr(
+        "dsr_paths",
+        float(compute_dsr_from_path_values(path_vals, n_eff)),
+    )
+
+    return float(growth_score)
+
+
+def run_holdout_shared_cash_portfolio(
+    params: Dict[str, Any],
+    symbols: List[str],
+    tf: str,
+    oos_data_maps: Dict[str, Dict[str, Any]],
+) -> Dict[str, float]:
+    """
+    OOS holdout: single shared-cash run from oos_start_idx to end for all symbols.
+    """
+    p = _merge_spot_fixed_signal_params(dict(params))
+    strategy: UltimateSpotStrategy = UltimateSpotStrategy(name="HoldoutSpot", params=p)
+    full_signal_dfs: Dict[str, pd.DataFrame] = {}
     for sym in symbols:
-        scrs_sym = sym_total_scores[sym][:len(cv_folds)]
-        trial.set_user_attr(f"{sym}_cv_cagr", float(np.mean(sym_total_scores[sym])) if sym_total_scores[sym] else -100.0)
-        trial.set_user_attr(f"{sym}_mdd", float(np.max(sym_total_mdds[sym])) if sym_total_mdds[sym] else 0.0)
+        df_full: Optional[pd.DataFrame] = oos_data_maps.get(sym, {}).get(tf)
+        if df_full is None or df_full.empty:
+            continue
+        cache_key: _SignalCacheKey = _build_signal_cache_key(p, sym, tf, len(df_full))
+        full_signal_dfs[sym] = get_or_compute_signals(cache_key, df_full, strategy)
+    if len(full_signal_dfs) != len(symbols):
+        return {
+            "portfolio_cagr_pct": -100.0,
+            "mdd_pct": 100.0,
+            "cvar_pct": 100.0,
+            "pf": 0.0,
+            "long_trades": 0.0,
+            "min_path_tw": 0.0,
+            "dd_bars": 0.0,
+        }
 
-    return adjusted_cagr, adjusted_mdd
+    ref_sym = symbols[0]
+    oos_start = int(oos_data_maps[ref_sym].get(f"oos_start_idx_{tf}", 0))
+    ref_df = full_signal_dfs[ref_sym]
+    slice_start = max(0, oos_start - 1)
+    slice_end = len(ref_df)
+    if slice_end - slice_start < 5:
+        return {
+            "portfolio_cagr_pct": -100.0,
+            "mdd_pct": 100.0,
+            "cvar_pct": 100.0,
+            "pf": 0.0,
+            "long_trades": 0.0,
+            "min_path_tw": 0.0,
+            "dd_bars": 0.0,
+        }
+
+    symbol_arrays: Dict[str, Dict[str, np.ndarray]] = {}
+    rank_scores: Dict[str, np.ndarray] = {}
+    for sym in symbols:
+        seg = full_signal_dfs[sym].iloc[slice_start:slice_end].copy()
+        symbol_arrays[sym] = _dataframe_to_symbol_arrays(seg)
+        if "slot_rank_score" in seg.columns:
+            rank_scores[sym] = seg["slot_rank_score"].to_numpy(dtype=np.float64)
+
+    execution_start_idx = max(1, oos_start - slice_start)
+    warmup_bars = int(max(p.get("MOMENTUM_PERIOD", 20), p.get("ATR_PERIOD", 20), 120))
+    initial_balance = float(SPOT_INITIAL_BALANCE)
+    max_slots = int(OPT_SPOT_CONFIG.get("SPOT_MAX_CONCURRENT_POSITIONS", 3))
+    res = run_shared_cash_multi_symbol(
+        symbol_arrays,
+        symbols,
+        p,
+        initial_balance=initial_balance,
+        max_concurrent_positions=max_slots,
+        rank_scores=rank_scores if rank_scores else None,
+        warmup_bars=warmup_bars,
+        execution_start_idx=execution_start_idx,
+    )
+    eq = res.equity_curve
+    span_days = _segment_span_days(
+        full_signal_dfs[ref_sym].iloc[slice_start:slice_end],
+        execution_start_idx,
+    )
+    cagr = float(portfolio_cagr_pct_from_equity(eq, span_days)) if eq.size > 1 else -100.0
+    mdd = float(calc_mdd_from_equity(eq)) if eq.size > 1 else 100.0
+    cvar_pct = float(cvar_loss_pct_from_simple_returns(eq)) if eq.size > 1 else 100.0
+    twr = max(float(res.final_balance / initial_balance), 1e-9)
+    pf_est = float((1.0 + max(cagr, 0.0) / 100.0) / (1.0 + abs(mdd) / 100.0))
+    dd_bars = float(max_underwater_bars_from_equity(eq)) if eq.size > 1 else 0.0
+    return {
+        "portfolio_cagr_pct": cagr,
+        "mdd_pct": mdd,
+        "cvar_pct": cvar_pct,
+        "pf": pf_est,
+        "long_trades": float(res.total_trades),
+        "min_path_tw": twr,
+        "dd_bars": dd_bars,
+    }

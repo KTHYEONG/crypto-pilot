@@ -136,6 +136,11 @@ SPOT_OPTUNA_STUDY_NAME = "spot_strategy"
 # --- 백테스트 초기 잔고 (Futures) ---
 FUTURES_INITIAL_BALANCE = 800.0  # USDT, backtest/optimize/verify 공통
 
+# --- Spot backtest / shared-cash (KRW) ---
+SPOT_INITIAL_BALANCE = 10_000_000.0
+UPBIT_SPOT_TAKER_FEE_RATE = 0.0005
+SPOT_SLIPPAGE_RATE = SLIPPAGE_RATE
+
 # --- 데이터 기간 설정 (Backtest & Optimization) ---
 # Futures 전용 설정
 FUTURES_BACKTEST_START_DATE = "2021-01-01"
