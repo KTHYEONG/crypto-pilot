@@ -1,7 +1,11 @@
 """
-백테스트 결과인 손익 데이터를 바탕으로 수익률, MDD, Sortino 등 정량적 성과 지표를 계산함.
-전략의 우수성을 판단하기 위해 단순 수익률뿐만 아니라 리스크 대비 효율성을 점수화하는 역할을 수행함.
+Backtest metrics: profit factor, MDD, Sortino, portfolio CAGR, CVaR, PSR/DSR, underwater duration.
 """
+from __future__ import annotations
+
+import math
+from typing import List, Sequence
+
 import numpy as np
 import pandas as pd
 
@@ -52,3 +56,94 @@ def calc_sortino_from_equity(equity_curve: np.ndarray, span_days: float) -> floa
         
     sortino = cagr_decimal / annual_downside_dev
     return float(sortino)
+
+
+def portfolio_cagr_pct_from_equity(equity_curve: np.ndarray, span_days: float) -> float:
+    if equity_curve.size < 2 or span_days <= 1e-9:
+        return -100.0
+    start_eq = float(max(equity_curve[0], 1e-9))
+    end_eq = float(max(equity_curve[-1], 1e-9))
+    ratio = end_eq / start_eq
+    return float((ratio ** (365.0 / span_days) - 1.0) * 100.0)
+
+
+def max_underwater_bars_from_equity(equity_curve: np.ndarray) -> int:
+    if equity_curve.size < 2:
+        return 0
+    peak = np.maximum.accumulate(equity_curve)
+    underwater = equity_curve < peak
+    max_run = 0
+    cur = 0
+    for u in underwater:
+        if bool(u):
+            cur += 1
+            max_run = max(max_run, cur)
+        else:
+            cur = 0
+    return int(max_run)
+
+
+def cvar_loss_pct_from_simple_returns(equity_curve: np.ndarray, tail_frac: float = 0.05) -> float:
+    """Mean loss magnitude (%) of worst tail_frac bar returns (positive number = worse tail)."""
+    if equity_curve.size < 2:
+        return 0.0
+    safe = np.clip(equity_curve, 1e-9, None)
+    r = np.diff(safe) / safe[:-1]
+    if r.size == 0:
+        return 0.0
+    sorted_r = np.sort(r)
+    k = max(1, int(tail_frac * len(sorted_r)))
+    tail = sorted_r[:k]
+    return float(abs(float(np.mean(tail))) * 100.0)
+
+
+def mean_of_worst_quartile(values: Sequence[float]) -> float:
+    arr = np.asarray(sorted(values), dtype=np.float64)
+    if arr.size == 0:
+        return 0.0
+    k = max(1, int(math.ceil(0.25 * arr.size)))
+    return float(np.mean(arr[:k]))
+
+
+def probabilistic_sharpe_ratio(
+    sharpe_estimate: float,
+    n_obs: int,
+    skew: float = 0.0,
+    kurtosis: float = 3.0,
+) -> float:
+    """Bailey & Lopez de Prado (2012) PSR approximation."""
+    if n_obs < 2:
+        return 0.0
+    n = float(n_obs)
+    skewness = float(skew)
+    excess_kurt = float(kurtosis) - 3.0
+    denom = max(
+        1e-12,
+        math.sqrt(1.0 - skewness * sharpe_estimate + (excess_kurt + 3.0 - 3.0) / 4.0 * sharpe_estimate**2),
+    )
+    z = sharpe_estimate * math.sqrt(n - 1.0) / denom
+    return float(0.5 * (1.0 + math.erf(z / math.sqrt(2.0))))
+
+
+def compute_dsr_from_path_values(path_values: Sequence[float], n_independent_trials: int) -> float:
+    """
+    Deflated Sharpe on path-level scalars (e.g. log terminal wealth per CPCV path).
+    Uses variance of Sharpe estimator and expected max SR under multiple testing (rough).
+    """
+    x = np.asarray(path_values, dtype=np.float64)
+    if x.size < 2:
+        return 0.0
+    mu = float(np.mean(x))
+    sigma = float(np.std(x, ddof=1))
+    if sigma < 1e-12:
+        return 0.0
+    sr_hat = mu / sigma
+    n = float(max(1, int(n_independent_trials)))
+    # Expected max of n independent ~N(0,1)
+    sr_star = math.sqrt(2.0 * math.log(max(n * math.pi / 2.0, 1.0)))
+    var_sr = (1.0 + 0.5 * sr_hat**2) / max(float(x.size - 1), 1.0)
+    return float((sr_hat - sr_star * math.sqrt(var_sr)) / (math.sqrt(var_sr) + 1e-12))
+
+
+def compute_dsr_from_path_sortinos(path_values: Sequence[float], n_independent_trials: int) -> float:
+    return compute_dsr_from_path_values(path_values, n_independent_trials)
