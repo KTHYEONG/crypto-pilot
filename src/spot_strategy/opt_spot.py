@@ -148,7 +148,7 @@ def main() -> None:
     parser.add_argument("--trials", type=int, default=OPT_SPOT_CONFIG["total_trials"])
     parser.add_argument("--jobs", type=int, default=int(OPT_SPOT_CONFIG.get("n_jobs", 8)))
     parser.add_argument("--task-workers", type=int, default=int(OPT_SPOT_CONFIG.get("task_workers", 1)))
-    parser.add_argument("--tf", type=str, choices=["1h", "4h"], default=OPT_SPOT_CONFIG.get("TARGET_TIMEFRAMES", ["4h"])[0])
+    parser.add_argument("--tf", type=str, choices=["4h"], default=OPT_SPOT_CONFIG.get("TARGET_TIMEFRAMES", ["4h"])[0])
     parser.add_argument("--reference-date", type=str, default=None)
     args = parser.parse_args()
 
