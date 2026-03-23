@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from config.settings import FUTURES_INITIAL_BALANCE as SPOT_INITIAL_BALANCE
 from src.spot_strategy.strategies_spot import UltimateSpotStrategy
-from src.spot_strategy.engine_fast_spot import BacktestEngineFastSpot
+from src.spot_strategy.engine_spot import BacktestEngineFastSpot
 from src.spot_strategy.opt_spot_utils.metrics import (
     calc_profit_factor_from_pnl,
     calc_mdd_from_equity,
