@@ -27,10 +27,8 @@ def suggest_params_spot(trial: optuna.Trial, space: Dict[str, Any], tf: str) -> 
             )
 
     _suggest("MACRO_EMA_PERIOD")
-    _suggest("FAST_EMA_PERIOD")
     _suggest("ADX_PERIOD")
     _suggest("ADX_THRESHOLD")
-    _suggest("KC_MULT")
     _suggest("MOMENTUM_PERIOD")
     _suggest("VOL_Z_THRESHOLD")
     _suggest("ATR_PERIOD")
