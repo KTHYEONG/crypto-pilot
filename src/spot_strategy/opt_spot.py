@@ -8,6 +8,7 @@ import queue
 import sys
 import threading
 import optuna
+from optuna.trial import TrialState
 from optuna.storages import InMemoryStorage
 from optuna.storages import JournalStorage
 from optuna.storages.journal import JournalFileBackend
@@ -15,7 +16,7 @@ import pandas as pd
 import numpy as np
 from pathlib import Path
 from dataclasses import dataclass
-from typing import Any, Dict, List, Tuple, Optional
+from typing import Any, Dict, List, Tuple
 import concurrent.futures
 from multiprocessing import Manager
 from tqdm import tqdm
@@ -29,8 +30,17 @@ from src.spot_strategy.strategies_spot import UltimateSpotStrategy
 from config.settings import DATA_DIR
 from config.opt_config import OPT_SPOT_CONFIG, get_search_space_spot, get_quarterly_window
 from src.optimization.opt_utils import compute_segment_merge_index
-from src.spot_strategy.opt_spot_utils.evaluator import objective_spot, evaluate_symbol_fold
-from src.spot_strategy.opt_spot_utils.go_nogo import run_go_nogo_check, GoNoGoResult
+from src.spot_strategy.opt_spot_utils.evaluator import (
+    evaluate_symbol_fold,
+    objective_spot,
+    run_holdout_shared_cash_portfolio,
+)
+from src.spot_strategy.opt_spot_utils.go_nogo import (
+    run_go_nogo_check,
+    run_holdout_portfolio_shared_cash,
+    run_holdout_portfolio_trade_floor,
+    run_portfolio_discovery_veto,
+)
 
 import warnings
 warnings.filterwarnings("ignore")
@@ -83,6 +93,15 @@ class _ParallelExecutionPlan:
     @property
     def batch_count(self) -> int: return max(1, math.ceil(self.task_count / max(1, self.task_workers)))
 
+def _task_progress_key(target_obj: Any, tf: str) -> str:
+    """Short tqdm key: portfolio -> SPOT_{tf}; single symbol -> SPOT_{tf}_ETH."""
+    if isinstance(target_obj, (list, tuple)) and len(target_obj) > 1:
+        return f"SPOT_{tf}"
+    sym = target_obj[0] if isinstance(target_obj, (list, tuple)) else target_obj
+    short = str(sym).replace("KRW-", "").replace("-", "")
+    return f"SPOT_{tf}_{short}"
+
+
 def _resolve_parallel_plan(task_count: int, requested_jobs: int, requested_task_workers: int, requested_cpu_budget: int) -> _ParallelExecutionPlan:
     logical_cpus = max(1, os.cpu_count() or 1)
     cpu_budget = max(1, requested_cpu_budget or (4 if logical_cpus > 2 else 1))
@@ -90,9 +109,10 @@ def _resolve_parallel_plan(task_count: int, requested_jobs: int, requested_task_
     task_workers = min(task_count, requested_task_workers) if requested_task_workers > 0 else min(task_count, max(1, cpu_budget // jobs_per_task))
     return _ParallelExecutionPlan(task_workers=max(1, task_workers), jobs_per_task=jobs_per_task, cpu_budget=cpu_budget, logical_cpus=logical_cpus, task_count=task_count)
 
-def _run_tf_optimization(task: Tuple[Any, str], ctx: _TfOptimizationContext) -> Tuple[Tuple[Any, str], List[optuna.trial.FrozenTrial]]:
+def _run_tf_optimization(task: Tuple[Any, str], ctx: _TfOptimizationContext) -> Tuple[Tuple[Any, str], optuna.Study]:
     target_obj, tf = task
     target_str = "_".join(target_obj) if isinstance(target_obj, (list, tuple)) else target_obj
+    progress_key = _task_progress_key(target_obj, tf)
     tf_study_name: str = f"OptSpot_{target_str.replace('/', '').replace('-', '')}_{tf}_{ctx.mode}"
     
     storage: Any
@@ -108,38 +128,61 @@ def _run_tf_optimization(task: Tuple[Any, str], ctx: _TfOptimizationContext) -> 
     else:
         storage = InMemoryStorage()
 
-    sampler = optuna.samplers.NSGAIISampler(
+    sampler = optuna.samplers.TPESampler(
         seed=ctx.seeds[0],
-        population_size=OPT_SPOT_CONFIG.get("n_startup_trials", 150)
+        n_startup_trials=int(OPT_SPOT_CONFIG.get("tpe_n_startup_trials", 96)),
     )
-    
-    study = optuna.create_study(
-        study_name=tf_study_name, 
-        storage=storage, 
-        directions=["maximize", "minimize"],
-        sampler=sampler
+    pruner = optuna.pruners.MedianPruner(
+        n_startup_trials=int(OPT_SPOT_CONFIG.get("tpe_pruner_n_startup_trials", 10)),
+        n_warmup_steps=int(OPT_SPOT_CONFIG.get("tpe_pruner_n_warmup_steps", 2)),
     )
 
-    def _progress_cb(study: optuna.Study, trial: optuna.trial.FrozenTrial) -> None:
-        try:
-            b_val = float(trial.values[0]) if trial.values else 0.0
-        except:
-            b_val = 0.0
-        ctx.progress_queue.put((f"{target_str}_{tf}", trial.number + 1, ctx.n_trials, b_val))
+    study = optuna.create_study(
+        study_name=tf_study_name,
+        storage=storage,
+        direction="maximize",
+        sampler=sampler,
+        pruner=pruner,
+    )
+
+    best_so_far: float = float("-inf")
+
+    def _progress_cb(study_inner: optuna.Study, trial: optuna.trial.FrozenTrial) -> None:
+        nonlocal best_so_far
+        cur_val: float = 0.0
+        if trial.value is not None:
+            try:
+                cur_val = float(trial.value)
+            except Exception:
+                cur_val = 0.0
+        if cur_val > best_so_far:
+            best_so_far = cur_val
+        ctx.progress_queue.put(
+            (progress_key, trial.number + 1, ctx.n_trials, 0.0 if best_so_far == float("-inf") else best_so_far)
+        )
 
     tf_space = get_search_space_spot(tf)
 
-    def _objective_with_logging(trial: optuna.Trial) -> Tuple[float, float]:
+    def _objective_with_logging(trial: optuna.Trial) -> float:
         try:
-            return objective_spot(trial, data_maps=ctx.data_maps, symbols=ctx.symbols, tf_target=tf, space=tf_space, mode=ctx.mode, project_root=ctx.project_root)
-        except optuna.TrialPruned: raise
+            return objective_spot(
+                trial,
+                data_maps=ctx.data_maps,
+                symbols=ctx.symbols,
+                tf_target=tf,
+                space=tf_space,
+                mode=ctx.mode,
+                project_root=ctx.project_root,
+            )
+        except optuna.TrialPruned:
+            raise
         except Exception:
             _logger.exception("[%s/%s] Trial %d failed.", target_str, tf, trial.number)
             raise
 
-    _logger.info("[%s/%s/%s] Starting Spot NSGA-II optimization...", target_str, tf, ctx.mode)
+    _logger.info("[%s/%s] Starting Spot TPE (CPCV discovery, growth objective)...", target_str, tf)
     study.optimize(_objective_with_logging, n_trials=ctx.n_trials, n_jobs=ctx.n_jobs, catch=(Exception,), callbacks=[_progress_cb])
-    return (target_obj, tf), study.best_trials
+    return (target_obj, tf), study
 
 def main() -> None:
     parser = argparse.ArgumentParser()
@@ -158,7 +201,7 @@ def main() -> None:
     collector = DataCollectorSpot()
     data_maps = {}
     oos_data_maps = {}
-    _logger.info("Loading Spot data for %d symbols (Mode: %s)...", len(symbols), args.mode)
+    _logger.info("Loading Spot data for %d symbols (discovery + holdout)...", len(symbols))
     valid_symbols = []
     for sym in symbols:
         data_maps[sym] = {}; oos_data_maps[sym] = {}
@@ -184,10 +227,21 @@ def main() -> None:
         
         if skip_symbol:
             continue
-            
+
         data_maps[sym][f"merge_idx_{args.tf}"] = compute_segment_merge_index(data_maps[sym][args.tf], data_maps[sym]["1d"])
         oos_data_maps[sym][f"merge_idx_{args.tf}"] = compute_segment_merge_index(oos_data_maps[sym][args.tf], oos_data_maps[sym]["1d"])
         valid_symbols.append(sym)
+
+    if "KRW-BTC" in valid_symbols:
+        btc_4h = data_maps["KRW-BTC"][args.tf][["datetime", "close"]].copy()
+        btc_4h = btc_4h.rename(columns={"close": "btc_close"})
+        btc_oos = oos_data_maps["KRW-BTC"][args.tf][["datetime", "close"]].copy()
+        btc_oos = btc_oos.rename(columns={"close": "btc_close"})
+        for sym in valid_symbols:
+            if sym == "KRW-BTC":
+                continue
+            data_maps[sym][args.tf] = data_maps[sym][args.tf].merge(btc_4h, on="datetime", how="left")
+            oos_data_maps[sym][args.tf] = oos_data_maps[sym][args.tf].merge(btc_oos, on="datetime", how="left")
 
     if not valid_symbols:
         _logger.error("❌ No valid symbols with data found. Aborting optimization.")
@@ -200,18 +254,28 @@ def main() -> None:
 
     tf_bars = {}
     for i, (target, tf) in enumerate(tasks):
-        key = "_".join(target) if isinstance(target, tuple) else target
-        tf_bars[f"{key}_{tf}"] = tqdm(total=args.trials, desc=f"[{key}] Waiting...", position=i, leave=True)
+        progress_key = _task_progress_key(target, tf)
+        tf_bars[progress_key] = tqdm(
+            total=args.trials,
+            desc=f"{progress_key} …",
+            position=i,
+            leave=True,
+        )
 
     def _progress_listener():
         while True:
             msg = progress_queue.get()
             if msg is None: break
-            k, cur, tot, b_val = msg; bar = tf_bars[k]; bar.n = cur; bar.set_description(f"[{k}] Best CAGR: {b_val:.2f}%"); bar.refresh()
+            k, cur, tot, b_val = msg
+            bar = tf_bars[k]
+            bar.n = cur
+            bar.set_description(f"{k} | Best: {b_val:.2f}")
+            bar.refresh()
 
     progress_thread = threading.Thread(target=_progress_listener, daemon=True); progress_thread.start()
 
     best_results = {}
+    pending_json_writes: List[Tuple[str, Dict[str, Any], float, bool]] = []
     try:
         if use_mp:
             with concurrent.futures.ProcessPoolExecutor(max_workers=plan.task_workers) as exec:
@@ -222,110 +286,207 @@ def main() -> None:
                     symbols=(list(t[0]) if isinstance(t[0], tuple) else [t[0]]), project_root=project_root,
                     progress_queue=progress_queue, mode=args.mode
                 )): t for t in tasks}
-                for f in concurrent.futures.as_completed(futures): t_res, trials = f.result(); best_results[t_res] = trials
+                for f in concurrent.futures.as_completed(futures):
+                    t_res, study = f.result()
+                    best_results[t_res] = study
         else:
             for t in tasks:
-                t_res, trials = _run_tf_optimization(t, _TfOptimizationContext(
-                    clean_symbol=("_".join(t[0]) if isinstance(t[0], tuple) else t[0]).replace("/", ""),
-                    seeds=OPT_SPOT_CONFIG["seeds"], n_trials=args.trials, n_jobs=plan.jobs_per_task,
-                    data_maps=data_maps, symbols=(list(t[0]) if isinstance(t[0], tuple) else [t[0]]),
-                    project_root=project_root, progress_queue=progress_queue, mode=args.mode, use_journal_storage=False
-                ))
-                best_results[t_res] = trials
+                t_res, study = _run_tf_optimization(
+                    t,
+                    _TfOptimizationContext(
+                        clean_symbol=("_".join(t[0]) if isinstance(t[0], tuple) else t[0]).replace("/", ""),
+                        seeds=OPT_SPOT_CONFIG["seeds"],
+                        n_trials=args.trials,
+                        n_jobs=plan.jobs_per_task,
+                        data_maps=data_maps,
+                        symbols=(list(t[0]) if isinstance(t[0], tuple) else [t[0]]),
+                        project_root=project_root,
+                        progress_queue=progress_queue,
+                        mode=args.mode,
+                        use_journal_storage=False,
+                    ),
+                )
+                best_results[t_res] = study
     finally:
         progress_queue.put(None); progress_thread.join(timeout=2.0)
         if manager: manager.shutdown()
 
     final_summaries = []
-    for (target, tf_eval), trials in best_results.items():
-        if not trials: continue
-        
-        valid_trials = [t for t in trials if t.values is not None and len(t.values) == 2 and t.values[1] <= 35.0]
-        if valid_trials:
-            best_trial = max(valid_trials, key=lambda x: x.values[0])
-        else:
-            valid_any = [t for t in trials if t.values is not None and len(t.values) == 2]
-            if valid_any:
-                best_trial = max(valid_any, key=lambda x: x.values[0])
-            else:
-                continue
+    top_k = int(OPT_SPOT_CONFIG.get("SPOT_SHORTLIST_TOP_K", 50))
+    max_ho_cvar = float(OPT_SPOT_CONFIG.get("SPOT_HOLDOUT_MAX_CVAR_PCT", 25.0))
+    min_pf_trades = int(OPT_SPOT_CONFIG.get("SPOT_HOLDOUT_MIN_PORTFOLIO_LONG_TRADES", 8))
+
+    for (target, tf_eval), study in best_results.items():
+        if study is None:
+            continue
+        completed = [
+            t
+            for t in study.trials
+            if t.state == TrialState.COMPLETE and t.value is not None
+        ]
+        if not completed:
+            continue
+        ranked = sorted(completed, key=lambda tr: float(tr.value), reverse=True)[:top_k]
+        best_trial = max(
+            ranked,
+            key=lambda tr: float(tr.user_attrs.get("min_path_terminal_wealth_ratio", 0.0)),
+        )
 
         params = best_trial.params.copy()
         params["TIMEFRAME"] = tf_eval
         params["LEVERAGE"] = 1
         params["USE_COMPOUNDING"] = True
-        
-        target_symbols = list(target) if isinstance(target, tuple) else [target]
-        
-        if args.mode == "multi":
-            _logger.info("\n" + "═" * 60)
-            _logger.info("  [BEST TRIAL PORTFOLIO INTERNAL BREAKDOWN (IS)]")
-            _logger.info("-" * 60)
-            _logger.info(f"  Target Score (CAGR/MDD): {best_trial.values[0]:.2f}% / {best_trial.values[1]:.2f}%")
-            _logger.info(f"  Avg Portfolio CAGR: {best_trial.user_attrs.get('avg_cagr', 0):.2f}%")
-            _logger.info(f"  Avg Portfolio MDD : {best_trial.user_attrs.get('avg_mdd', 0):.2f}%")
-            _logger.info(f"  Avg Portfolio PF  : {best_trial.user_attrs.get('avg_pf', 0):.2f}")
-            
-            for s_eval in target_symbols:
-                s_cagr = best_trial.user_attrs.get(f"{s_eval}_cv_cagr", -100)
-                s_mdd = best_trial.user_attrs.get(f"{s_eval}_mdd", 0)
-                _logger.info(f"  > {s_eval:<10}: {s_cagr:>7.2f}% CAGR | {s_mdd:>5.2f}% MDD")
-            _logger.info("═" * 60)
 
-        is_all_passed = True
-        target_symbols = sorted(target_symbols) 
+        target_symbols = sorted(list(target) if isinstance(target, tuple) else [target])
+
+        psr_v = float(best_trial.user_attrs.get("psr_paths", 0.0))
+        dsr_v = float(best_trial.user_attrs.get("dsr_paths", 0.0))
+        veto = run_portfolio_discovery_veto(psr=psr_v, dsr=dsr_v)
+        veto_ok = bool(veto.passed)
+
+        port_ho = run_holdout_shared_cash_portfolio(params, target_symbols, tf_eval, oos_data_maps)
+        trade_floor = run_holdout_portfolio_trade_floor(
+            portfolio_long_trades=int(port_ho["long_trades"]),
+            min_portfolio_trades=min_pf_trades,
+        )
+        shared_cash_gate = run_holdout_portfolio_shared_cash(
+            portfolio_cagr_pct=float(port_ho["portfolio_cagr_pct"]),
+            portfolio_mdd_pct=float(port_ho["mdd_pct"]),
+            portfolio_cvar_pct=float(port_ho["cvar_pct"]),
+            portfolio_pf=float(port_ho["pf"]),
+            min_path_terminal_wealth_ratio=float(port_ho["min_path_tw"]),
+            max_cvar_pct=max_ho_cvar,
+        )
+        is_all_passed = bool(veto_ok and trade_floor.passed and shared_cash_gate.passed)
+
+        n_complete = len([t for t in study.trials if t.state == TrialState.COMPLETE])
+        _logger.info(
+            "Post-study: complete=%d shortlist=%d (top_k=%d)",
+            n_complete,
+            len(ranked),
+            top_k,
+        )
+        _logger.info(
+            "Post-study: selected trial=%d (max min_path_terminal_wealth_ratio within top-%d by objective)",
+            int(best_trial.number),
+            len(ranked),
+        )
+        _logger.info("%s", veto.summary)
+        _logger.info("%s", trade_floor.summary)
+        _logger.info("%s", shared_cash_gate.summary)
+        dd_bars = float(port_ho.get("dd_bars", 0.0))
+        _logger.info(
+            "Holdout shared-cash: CAGR=%.2f%% MDD=%.2f%% CVaR=%.2f%% trades=%d tw=%.4f dd_bars=%d",
+            float(port_ho["portfolio_cagr_pct"]),
+            float(port_ho["mdd_pct"]),
+            float(port_ho["cvar_pct"]),
+            int(port_ho["long_trades"]),
+            float(port_ho["min_path_tw"]),
+            int(dd_bars),
+        )
+
         for s_eval in target_symbols:
-            s_is, r_is, m_is, t_is, _, pf_is, _, _ = evaluate_symbol_fold(UltimateSpotStrategy(name=f"IS_{s_eval}", params=params), params, s_eval, tf_eval, data_maps[s_eval][tf_eval], data_maps[s_eval]["1d"], data_maps[s_eval][f"merge_idx_{tf_eval}"], None, data_maps[s_eval][f"is_start_idx_{tf_eval}"], len(data_maps[s_eval][tf_eval]))
-            s_oos, r_oos, m_oos, t_oos, _, pf_oos, lc_oos, _ = evaluate_symbol_fold(UltimateSpotStrategy(name=f"OOS_{s_eval}", params=params), params, s_eval, tf_eval, oos_data_maps[s_eval][tf_eval], oos_data_maps[s_eval]["1d"], oos_data_maps[s_eval][f"merge_idx_{tf_eval}"], None, oos_data_maps[s_eval][f"oos_start_idx_{tf_eval}"], len(oos_data_maps[s_eval][tf_eval]))
+            s_is, r_is, m_is, t_is, _, pf_is, _, _ = evaluate_symbol_fold(
+                UltimateSpotStrategy(name=f"IS_{s_eval}", params=params),
+                params,
+                s_eval,
+                tf_eval,
+                data_maps[s_eval][tf_eval],
+                data_maps[s_eval]["1d"],
+                data_maps[s_eval][f"merge_idx_{tf_eval}"],
+                None,
+                data_maps[s_eval][f"is_start_idx_{tf_eval}"],
+                len(data_maps[s_eval][tf_eval]),
+            )
+            s_oos, r_oos, m_oos, t_oos, _, pf_oos, lc_oos, _ = evaluate_symbol_fold(
+                UltimateSpotStrategy(name=f"OOS_{s_eval}", params=params),
+                params,
+                s_eval,
+                tf_eval,
+                oos_data_maps[s_eval][tf_eval],
+                oos_data_maps[s_eval]["1d"],
+                oos_data_maps[s_eval][f"merge_idx_{tf_eval}"],
+                None,
+                oos_data_maps[s_eval][f"oos_start_idx_{tf_eval}"],
+                len(oos_data_maps[s_eval][tf_eval]),
+            )
             go_nogo = run_go_nogo_check([], 0.0, [s_oos], m_oos, pf_oos, int(lc_oos), tf_eval)
-            if not go_nogo.passed: is_all_passed = False
-            final_summaries.append({"sym": s_eval, "tf": tf_eval, "is": (s_is, r_is, m_is, t_is, pf_is), "oos": (s_oos, r_oos, m_oos, t_oos, pf_oos), "passed": go_nogo.passed})
-        
-        best_score_final = best_trial.values[0] if best_trial.values else -100
-        if best_score_final > 0 and is_all_passed:
-            import json
-            s_name = f"best_params_{('_'.join(target) if isinstance(target, tuple) else target).replace('/', '').replace('-', '')}_{tf_eval}"
-            
-            results_dir = os.path.join(project_root, "results")
-            if not os.path.exists(results_dir):
-                os.makedirs(results_dir)
-                
-            json_path = os.path.join(results_dir, f"{s_name}.json")
-            
-            with open(json_path, 'w', encoding='utf-8') as f:
-                json.dump(params, f, indent=4)
-            
-            _logger.info("  ⚡ Saved Live Spot Bot Config: results/%s.json", s_name)
-        else:
-            _logger.info("  🚫 JSON Save Skipped: Criteria not met.")
+            final_summaries.append(
+                {
+                    "sym": s_eval,
+                    "tf": tf_eval,
+                    "is": (s_is, r_is, m_is, t_is, pf_is),
+                    "oos": (s_oos, r_oos, m_oos, t_oos, pf_oos),
+                    "passed": go_nogo.passed,
+                }
+            )
+
+        best_score_final = float(best_trial.value) if best_trial.value is not None else -100.0
+
+        mean_log = float(best_trial.user_attrs.get("mean_log_terminal_wealth", 0.0))
+        should_save = bool(mean_log > 0.0 and is_all_passed)
+        # File name is required by downstream loaders; overwrite risk is limited to multi-mode.
+        clean_sym = str(target).replace("/", "").replace("-", "") if not isinstance(target, tuple) else ""
+        json_filename = f"spot_params_{tf_eval}.json" if args.mode == "multi" else f"spot_params_{tf_eval}_{clean_sym}.json"
+        pending_json_writes.append((json_filename, params, best_score_final, should_save))
 
     if final_summaries:
         table_w = 120
         _logger.info("\n" + "═" * table_w)
-        _logger.info(f"{'  FINAL SPOT OPTIMIZATION SUMMARY (IS vs OOS)':^{table_w}}")
+        _logger.info(f"{'SPOT OPTIMIZATION SUMMARY (Discovery vs Holdout)':^{table_w}}")
+        _logger.info(
+            "Primary deployment metrics: shared-cash portfolio holdout (see logs above). "
+            "Per-symbol rows are diagnostic-only (not concurrent shared-cash)."
+        )
         _logger.info("─" * table_w)
-        header = f"{'Symbol':<12} | {'TF':<3} | {'IS (Score / Ret% / MDD% / Trd / PF)':^45} | {'OOS (Score / Ret% / MDD% / Trd / PF)':^45} | Status"
+        disc_hdr = "Discovery (CAGR% / MDD% / Trd / PF)"
+        ho_hdr = "Holdout (CAGR% / MDD% / Trd / PF)"
+        header = f"{'Symbol':<12} | {'TF':<3} | {disc_hdr:^42} | {ho_hdr:^42} | SymGate"
         _logger.info(header)
         _logger.info("─" * table_w)
-        
+
         is_scores, is_rets, is_mdds, is_trds, is_pfs = [], [], [], [], []
         oos_scores, oos_rets, oos_mdds, oos_trds, oos_pfs = [], [], [], [], []
 
         for r in final_summaries:
-            is_v = f"{r['is'][0]:>7.2f} / {r['is'][1]:>5.1f}% / {r['is'][2]:>4.1f}% / {int(r['is'][3]):>4} / {r['is'][4]:>4.2f}"
-            oos_v = f"{r['oos'][0]:>7.2f} / {r['oos'][1]:>5.1f}% / {r['oos'][2]:>4.1f}% / {int(r['oos'][3]):>4} / {r['oos'][4]:>4.2f}"
-            stat = "✅ PASS" if r['passed'] else "❌ FAIL"
+            is_v = f"{r['is'][0]:>7.2f}% / {r['is'][2]:>4.1f}% / {int(r['is'][3]):>4} / {r['is'][4]:>4.2f}"
+            oos_v = f"{r['oos'][0]:>7.2f}% / {r['oos'][2]:>4.1f}% / {int(r['oos'][3]):>4} / {r['oos'][4]:>4.2f}"
+            stat = "PASS" if r["passed"] else "FAIL"
             _logger.info(f"{r['sym']:<12} | {r['tf']:<3} | {is_v} | {oos_v} | {stat}")
-            
-            is_scores.append(r['is'][0]); is_rets.append(r['is'][1]); is_mdds.append(r['is'][2]); is_trds.append(r['is'][3]); is_pfs.append(r['is'][4])
-            oos_scores.append(r['oos'][0]); oos_rets.append(r['oos'][1]); oos_mdds.append(r['oos'][2]); oos_trds.append(r['oos'][3]); oos_pfs.append(r['oos'][4])
+
+            is_scores.append(r["is"][0])
+            is_rets.append(r["is"][1])
+            is_mdds.append(r["is"][2])
+            is_trds.append(r["is"][3])
+            is_pfs.append(r["is"][4])
+            oos_scores.append(r["oos"][0])
+            oos_rets.append(r["oos"][1])
+            oos_mdds.append(r["oos"][2])
+            oos_trds.append(r["oos"][3])
+            oos_pfs.append(r["oos"][4])
 
         if args.mode == "multi":
             _logger.info("─" * table_w)
-            port_is = f"{np.mean(is_scores):>7.2f} / {np.mean(is_rets):>5.1f}% / {np.mean(is_mdds):>4.1f}% / {int(np.sum(is_trds)):>4} / {np.mean(is_pfs):>4.2f}"
-            port_oos = f"{np.mean(oos_scores):>7.2f} / {np.mean(oos_rets):>5.1f}% / {np.mean(oos_mdds):>4.1f}% / {int(np.sum(oos_trds)):>4} / {np.mean(oos_pfs):>4.2f}"
-            _logger.info(f"{'PORTFOLIO':<12} | {args.tf:<3} | {port_is} | {port_oos} | {'---'}")
+            port_is = f"{np.mean(is_scores):>7.2f}% / {np.mean(is_mdds):>4.1f}% / {int(np.sum(is_trds)):>4} / {np.mean(is_pfs):>4.2f}"
+            port_oos = f"{np.mean(oos_scores):>7.2f}% / {np.mean(oos_mdds):>4.1f}% / {int(np.sum(oos_trds)):>4} / {np.mean(oos_pfs):>4.2f}"
+            _logger.info(f"{'PORTFOLIO':<12} | {args.tf:<3} | {port_is} | {port_oos} | ---")
         _logger.info("═" * table_w + "\n")
+
+    # JSON save logs last
+    if pending_json_writes:
+        import json
+        results_dir = Path(project_root) / "results"
+        results_dir.mkdir(parents=True, exist_ok=True)
+        for json_filename, params, best_score_final, should_save in pending_json_writes:
+            json_path = results_dir / json_filename
+            if should_save:
+                json_path.write_text(json.dumps(params, indent=4), encoding="utf-8")
+                _logger.info("Saved config: %s", json_path.resolve())
+            else:
+                _logger.info(
+                    "JSON save skipped: criteria not met (growth_score / gates). objective=%.4f",
+                    best_score_final,
+                )
 
 if __name__ == "__main__":
     main()
