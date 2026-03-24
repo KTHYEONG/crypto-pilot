@@ -24,3 +24,21 @@ def test_cpcv_four_blocks_direct() -> None:
     assert nb == 6
     assert k == 2
     assert len(paths_fb) == 15
+
+
+def test_cpcv_embargo_trims_block_starts() -> None:
+    n = 1200
+    paths0 = build_cpcv_test_paths(n, 6, 2, embargo=0)
+    paths7 = build_cpcv_test_paths(n, 6, 2, embargo=7)
+    assert len(paths0) == len(paths7) == 15
+    for p0, p7 in zip(paths0, paths7):
+        assert len(p0) == len(p7)
+        for (s0, e0), (s7, e7) in zip(p0, p7):
+            assert e0 == e7
+            assert s7 == s0 + 7
+            assert 0 <= s7 < e7 <= n
+
+
+def test_cpcv_embargo_too_large_returns_empty() -> None:
+    n = 120
+    assert build_cpcv_test_paths(n, 6, 2, embargo=25) == []

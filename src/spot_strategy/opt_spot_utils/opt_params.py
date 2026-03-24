@@ -37,6 +37,10 @@ def suggest_params_spot(trial: optuna.Trial, space: Dict[str, Any], tf: str) -> 
     _suggest("RISK_PER_TRADE")
     _suggest("MAX_POSITION_PCT")
     _suggest("TIME_STOP_BARS")
+    _suggest("BB_WINDOW")
+    _suggest("VOL_Z_WINDOW")
+    _suggest("BTC_REGIME_SMA_PERIOD")
+    _suggest("VOL_CONFIRM_OR_MODE")
 
     params["LONG_TP_MULT"] = 0
     params["LEVERAGE"] = 1
@@ -47,7 +51,8 @@ def suggest_params_spot(trial: optuna.Trial, space: Dict[str, Any], tf: str) -> 
     if long_trail < long_atr:
         params["LONG_TRAIL_MULT"] = long_atr
 
-    macro = int(params.get("MACRO_EMA_PERIOD", 200))
-    params["BTC_REGIME_SMA_PERIOD"] = macro
+    if "BTC_REGIME_SMA_PERIOD" not in params:
+        macro = int(params.get("MACRO_EMA_PERIOD", 200))
+        params["BTC_REGIME_SMA_PERIOD"] = macro
 
     return params
