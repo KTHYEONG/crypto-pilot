@@ -71,16 +71,29 @@ def max_underwater_bars_from_equity(equity_curve: np.ndarray) -> int:
     if equity_curve.size < 2:
         return 0
     peak = np.maximum.accumulate(equity_curve)
-    underwater = equity_curve < peak
-    max_run = 0
-    cur = 0
-    for u in underwater:
-        if bool(u):
-            cur += 1
-            max_run = max(max_run, cur)
-        else:
-            cur = 0
-    return int(max_run)
+    underwater = (equity_curve < peak).astype(np.int8)
+    padded = np.concatenate(([0], underwater, [0]))
+    diff = np.diff(padded)
+    starts = np.flatnonzero(diff == 1)
+    ends = np.flatnonzero(diff == -1)
+    if starts.size == 0:
+        return 0
+    return int(np.max(ends - starts))
+
+
+def calc_tail_ratio_from_equity(equity_curve: np.ndarray) -> float:
+    """95th / |5th| percentile of step log-returns (asymmetry proxy)."""
+    if equity_curve.size < 2:
+        return 1.0
+    safe = np.clip(equity_curve.astype(np.float64, copy=False), 1e-9, None)
+    log_step = np.log(safe[1:] / safe[:-1])
+    if log_step.size < 2:
+        return 1.0
+    p95 = float(np.percentile(log_step, 95))
+    p5 = float(np.percentile(log_step, 5))
+    if abs(p5) < 1e-12:
+        return 999.0 if p95 > 0 else 0.0
+    return float(p95 / abs(p5))
 
 
 def cvar_loss_pct_from_simple_returns(equity_curve: np.ndarray, tail_frac: float = 0.05) -> float:
