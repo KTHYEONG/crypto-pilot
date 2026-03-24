@@ -9,7 +9,7 @@ _SPOT_FLOAT_PERTURB_KEYS: frozenset[str] = frozenset(
     {
         "RISK_PER_TRADE",
         "MAX_POSITION_PCT",
-        "VOL_Z_THRESHOLD",
+        "ADX_THRESHOLD",
     }
 )
 _SPOT_INT_PERTURB_KEYS: frozenset[str] = frozenset(
@@ -17,6 +17,7 @@ _SPOT_INT_PERTURB_KEYS: frozenset[str] = frozenset(
         "MACRO_EMA_PERIOD",
         "MOMENTUM_PERIOD",
         "ATR_PERIOD",
+        "ADX_PERIOD",
     }
 )
 
@@ -43,8 +44,6 @@ def perturb_params_spot(
         v = int(out[k])
         delta = max(1, int(round(abs(v) * scale)))
         out[k] = max(1, v + int(sign * delta))
-    if "MACRO_EMA_PERIOD" in out:
-        out["BTC_REGIME_SMA_PERIOD"] = int(out["MACRO_EMA_PERIOD"])
     return out
 
 

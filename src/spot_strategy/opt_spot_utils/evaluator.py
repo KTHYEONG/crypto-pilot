@@ -53,11 +53,6 @@ SIGNAL_CACHE_PARAM_KEYS: frozenset[str] = frozenset([
     "ADX_THRESHOLD",
     "MOMENTUM_PERIOD",
     "ATR_PERIOD",
-    "VOL_Z_THRESHOLD",
-    "BB_WINDOW",
-    "VOL_Z_WINDOW",
-    "BTC_REGIME_SMA_PERIOD",
-    "VOL_CONFIRM_OR_MODE",
 ])
 
 _SignalCacheKey = Tuple[Tuple[Tuple[str, Any], ...], str, str, int]
@@ -264,13 +259,7 @@ def evaluate_symbol_fold(
     return cagr, ret_pct, mdd_pct, len(trades_df), win_rate, pf, long_count, equity_curve, tail_ratio
 
 def _merge_spot_fixed_signal_params(params: Dict[str, Any]) -> Dict[str, Any]:
-    out = dict(params)
-    out.setdefault("BB_WINDOW", int(OPT_SPOT_CONFIG.get("BB_WINDOW", 20)))
-    out.setdefault("VOL_Z_WINDOW", int(OPT_SPOT_CONFIG.get("VOL_Z_WINDOW", 20)))
-    out.setdefault("VOL_EXPANSION_MULT", float(OPT_SPOT_CONFIG.get("VOL_EXPANSION_MULT", 1.05)))
-    macro = int(out.get("MACRO_EMA_PERIOD", 200))
-    out["BTC_REGIME_SMA_PERIOD"] = int(out.get("BTC_REGIME_SMA_PERIOD", macro))
-    return out
+    return dict(params)
 
 
 def _dataframe_to_symbol_arrays(sig_df: pd.DataFrame) -> Dict[str, np.ndarray]:
@@ -355,11 +344,14 @@ def objective_spot(
     path_compound_tw_ratio: List[float] = []
     path_worst_mdd: List[float] = []
     path_max_cvar: List[float] = []
+    path_trades: List[int] = []
+
     for path_idx, path in enumerate(cpcv_paths):
         seg_log_tw: List[float] = []
         seg_tw_ratio: List[float] = []
         seg_mdds: List[float] = []
         seg_cvars: List[float] = []
+        path_total_trades = 0
         running_balance = float(SPOT_INITIAL_BALANCE)
         for test_start, test_end in path:
             abs_start = is_off + int(test_start)
@@ -390,6 +382,7 @@ def objective_spot(
                 execution_start_idx=execution_start_idx,
             )
             eq = result.equity_curve
+            path_total_trades += int(result.total_trades)
             if eq.size == 0:
                 twr = 1.0
             else:
@@ -418,6 +411,7 @@ def objective_spot(
         path_compound_tw_ratio.append(float(np.prod(seg_tw_ratio)) if seg_tw_ratio else 1.0)
         path_worst_mdd.append(float(np.max(seg_mdds)) if seg_mdds else 0.0)
         path_max_cvar.append(float(np.max(seg_cvars)) if seg_cvars else 0.0)
+        path_trades.append(path_total_trades)
 
         interm = float(np.mean(path_compound_log_tw))
         trial.report(interm, step=path_idx)
@@ -440,6 +434,15 @@ def objective_spot(
     max_cvar = float(np.max(path_max_cvar)) if path_max_cvar else 0.0
     if max_cvar > cvar_thr:
         penalty += (max_cvar - cvar_thr) * 0.15
+
+    # Path-level trade frequency penalty
+    if path_trades:
+        avg_trades_per_path = float(np.mean(path_trades))
+        # Expected trades: roughly segments per path * min_seg_trades
+        n_segs = len(cpcv_paths[0]) if cpcv_paths else 1
+        expected_min = float(n_segs * min_seg_trades)
+        if avg_trades_per_path < expected_min:
+            penalty += (expected_min - avg_trades_per_path) * 0.2
 
     growth_score = base_growth - penalty
 
@@ -478,13 +481,14 @@ def objective_spot(
     if n_paths_ct >= 2:
         mu_paths = float(np.mean(path_arr))
         sd_paths = float(np.std(path_arr, ddof=1))
+        MAX_RATIO_FALLBACK: float = 99.0
         gate1_sqn = math.sqrt(float(n_paths_ct)) * mu_paths / sd_paths if sd_paths > 1e-12 else 0.0
         neg_p = path_arr[path_arr < 0]
         dsd = float(np.std(neg_p, ddof=1)) if neg_p.size > 1 else 0.0
-        gate1_path_sortino = mu_paths / dsd if dsd > 1e-12 else (999.0 if mu_paths > 0 else 0.0)
+        gate1_path_sortino = mu_paths / dsd if dsd > 1e-12 else (MAX_RATIO_FALLBACK if mu_paths > 0.0 else 0.0)
         pr95 = float(np.percentile(path_arr, 95))
         pr5 = float(np.percentile(path_arr, 5))
-        cpcv_path_tail_ratio = pr95 / abs(pr5) if abs(pr5) > 1e-12 else (999.0 if pr95 > 0 else 0.0)
+        cpcv_path_tail_ratio = pr95 / abs(pr5) if abs(pr5) > 1e-12 else (MAX_RATIO_FALLBACK if pr95 > 0.0 else 0.0)
     else:
         gate1_sqn = 0.0
         gate1_path_sortino = 0.0
