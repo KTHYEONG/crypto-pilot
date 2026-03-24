@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import os
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -19,6 +20,7 @@ from src.spot_strategy.opt_spot_utils.metrics import (
     calc_profit_factor_from_pnl,
     calc_mdd_from_equity,
     calc_sortino_from_equity,
+    calc_tail_ratio_from_equity,
     cvar_loss_pct_from_simple_returns,
     compute_dsr_from_path_values,
     max_underwater_bars_from_equity,
@@ -31,7 +33,7 @@ from src.spot_strategy.opt_spot_utils.opt_params import suggest_params_spot
 
 _logger: logging.Logger = logging.getLogger("opt_spot")
 
-SymbolFoldResult = Tuple[str, float, float, float, float, float, float, np.ndarray, float]
+SymbolFoldResult = Tuple[str, float, float, float, float, float, float, float, np.ndarray, float]
 
 _MAX_SYMBOL_WORKERS: int = max(1, int(os.getenv("OPT_SPOT_SYMBOL_WORKERS", "1")))
 
@@ -114,6 +116,7 @@ def _evaluate_symbol_for_fold_parallel(
             pf,
             long_count,
             equity_curve,
+            tail_ratio,
         ) = evaluate_symbol_fold(
             strategy,
             params,
@@ -153,6 +156,7 @@ def _evaluate_symbol_for_fold_parallel(
         float(trades_count),
         win_rate,
         pf,
+        tail_ratio,
         equity_curve,
         span_days_sym,
     )
@@ -195,7 +199,7 @@ def evaluate_symbol_fold(
     test_end: int,
     precomputed_signal_df: Optional[pd.DataFrame] = None,
     execution_start_idx: int = 0,
-) -> Tuple[float, float, float, int, float, float, int, np.ndarray]:
+) -> Tuple[float, float, float, int, float, float, int, np.ndarray, float]:
     if precomputed_signal_df is not None:
         sig_oos: pd.DataFrame = precomputed_signal_df
     else:
@@ -225,10 +229,10 @@ def evaluate_symbol_fold(
         trades_df: pd.DataFrame = result.get("trades_df", pd.DataFrame())
     except Exception as e:
         _logger.warning("Backtest engine error: %s", e, exc_info=True)
-        return -10.0, 0.0, 0.0, 0, 0.0, 0.0, 0, np.array([])
-        
+        return -10.0, 0.0, 0.0, 0, 0.0, 0.0, 0, np.array([]), 0.0
+
     if trades_df is None or trades_df.empty:
-        return -10.0, 0.0, 0.0, 0, 0.0, 0.0, 0, np.array([])
+        return -10.0, 0.0, 0.0, 0, 0.0, 0.0, 0, np.array([]), 0.0
         
     long_count: int = len(trades_df[trades_df["side"] == "LONG"])
 
@@ -255,7 +259,9 @@ def evaluate_symbol_fold(
     total_ret_ratio = 1.0 + (ret_pct / 100.0)
     cagr = ((total_ret_ratio ** (365.0 / span_days)) - 1.0) * 100.0 if total_ret_ratio > 0 else -100.0
 
-    return cagr, ret_pct, mdd_pct, len(trades_df), win_rate, pf, long_count, equity_curve
+    tail_ratio = calc_tail_ratio_from_equity(equity_curve) if equity_curve.size > 1 else 0.0
+
+    return cagr, ret_pct, mdd_pct, len(trades_df), win_rate, pf, long_count, equity_curve, tail_ratio
 
 def _merge_spot_fixed_signal_params(params: Dict[str, Any]) -> Dict[str, Any]:
     out = dict(params)
@@ -467,6 +473,34 @@ def objective_spot(
         float(compute_dsr_from_path_values(path_vals, n_eff)),
     )
 
+    path_arr = np.asarray(path_compound_log_tw, dtype=np.float64)
+    n_paths_ct = int(path_arr.size)
+    if n_paths_ct >= 2:
+        mu_paths = float(np.mean(path_arr))
+        sd_paths = float(np.std(path_arr, ddof=1))
+        gate1_sqn = math.sqrt(float(n_paths_ct)) * mu_paths / sd_paths if sd_paths > 1e-12 else 0.0
+        neg_p = path_arr[path_arr < 0]
+        dsd = float(np.std(neg_p, ddof=1)) if neg_p.size > 1 else 0.0
+        gate1_path_sortino = mu_paths / dsd if dsd > 1e-12 else (999.0 if mu_paths > 0 else 0.0)
+        pr95 = float(np.percentile(path_arr, 95))
+        pr5 = float(np.percentile(path_arr, 5))
+        cpcv_path_tail_ratio = pr95 / abs(pr5) if abs(pr5) > 1e-12 else (999.0 if pr95 > 0 else 0.0)
+    else:
+        gate1_sqn = 0.0
+        gate1_path_sortino = 0.0
+        cpcv_path_tail_ratio = 1.0
+
+    worst_seg_mdd_pct = float(np.max(path_worst_mdd)) if path_worst_mdd else 0.0
+    cpcv_mean_path_return_pct = (
+        float(np.mean(path_compound_tw_ratio) - 1.0) * 100.0 if path_compound_tw_ratio else 0.0
+    )
+
+    trial.set_user_attr("gate1_sqn", float(gate1_sqn))
+    trial.set_user_attr("gate1_path_sortino", float(gate1_path_sortino))
+    trial.set_user_attr("cpcv_path_tail_ratio", float(cpcv_path_tail_ratio))
+    trial.set_user_attr("cpcv_worst_segment_mdd_pct", worst_seg_mdd_pct)
+    trial.set_user_attr("cpcv_mean_path_return_pct", cpcv_mean_path_return_pct)
+
     return float(growth_score)
 
 
@@ -475,7 +509,7 @@ def run_holdout_shared_cash_portfolio(
     symbols: List[str],
     tf: str,
     oos_data_maps: Dict[str, Dict[str, Any]],
-) -> Dict[str, float]:
+) -> Dict[str, Any]:
     """
     OOS holdout: single shared-cash run from oos_start_idx to end for all symbols.
     """
@@ -493,10 +527,13 @@ def run_holdout_shared_cash_portfolio(
             "portfolio_cagr_pct": -100.0,
             "mdd_pct": 100.0,
             "cvar_pct": 100.0,
-            "pf": 0.0,
+            "tail_ratio": 0.0,
             "long_trades": 0.0,
             "min_path_tw": 0.0,
             "dd_bars": 0.0,
+            "final_balance": 0.0,
+            "moic": 0.0,
+            "equity_curve": np.array([]),
         }
 
     ref_sym = symbols[0]
@@ -509,10 +546,13 @@ def run_holdout_shared_cash_portfolio(
             "portfolio_cagr_pct": -100.0,
             "mdd_pct": 100.0,
             "cvar_pct": 100.0,
-            "pf": 0.0,
+            "tail_ratio": 0.0,
             "long_trades": 0.0,
             "min_path_tw": 0.0,
             "dd_bars": 0.0,
+            "final_balance": 0.0,
+            "moic": 0.0,
+            "equity_curve": np.array([]),
         }
 
     symbol_arrays: Dict[str, Dict[str, np.ndarray]] = {}
@@ -546,14 +586,19 @@ def run_holdout_shared_cash_portfolio(
     mdd = float(calc_mdd_from_equity(eq)) if eq.size > 1 else 100.0
     cvar_pct = float(cvar_loss_pct_from_simple_returns(eq)) if eq.size > 1 else 100.0
     twr = max(float(res.final_balance / initial_balance), 1e-9)
-    pf_est = float((1.0 + max(cagr, 0.0) / 100.0) / (1.0 + abs(mdd) / 100.0))
+    tail_r = float(calc_tail_ratio_from_equity(eq)) if eq.size > 1 else 0.0
     dd_bars = float(max_underwater_bars_from_equity(eq)) if eq.size > 1 else 0.0
+    final_bal = float(res.final_balance)
+    moic = final_bal / initial_balance if initial_balance > 0 else 0.0
     return {
         "portfolio_cagr_pct": cagr,
         "mdd_pct": mdd,
         "cvar_pct": cvar_pct,
-        "pf": pf_est,
+        "tail_ratio": tail_r,
         "long_trades": float(res.total_trades),
         "min_path_tw": twr,
         "dd_bars": dd_bars,
+        "final_balance": final_bal,
+        "moic": float(moic),
+        "equity_curve": eq,
     }

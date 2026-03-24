@@ -27,7 +27,7 @@ if project_root not in sys.path:
 
 from src.spot_strategy.data_collector_spot import DataCollectorSpot
 from src.spot_strategy.strategies_spot import UltimateSpotStrategy
-from config.settings import DATA_DIR
+from config.settings import DATA_DIR, SPOT_INITIAL_BALANCE
 from config.opt_config import OPT_SPOT_CONFIG, get_search_space_spot, get_quarterly_window
 from src.optimization.opt_utils import compute_segment_merge_index
 from src.spot_strategy.opt_spot_utils.evaluator import (
@@ -36,6 +36,9 @@ from src.spot_strategy.opt_spot_utils.evaluator import (
     run_holdout_shared_cash_portfolio,
 )
 from src.spot_strategy.opt_spot_utils.go_nogo import (
+    FinalDeploymentReportInput,
+    SymbolGateRow,
+    run_final_deployment_report,
     run_go_nogo_check,
     run_holdout_portfolio_shared_cash,
     run_holdout_portfolio_trade_floor,
@@ -315,8 +318,14 @@ def main() -> None:
     top_k = int(OPT_SPOT_CONFIG.get("SPOT_SHORTLIST_TOP_K", 50))
     max_ho_cvar = float(OPT_SPOT_CONFIG.get("SPOT_HOLDOUT_MAX_CVAR_PCT", 25.0))
     min_pf_trades = int(OPT_SPOT_CONFIG.get("SPOT_HOLDOUT_MIN_PORTFOLIO_LONG_TRADES", 8))
-    holdout_min_pf = float(OPT_SPOT_CONFIG.get("SPOT_HOLDOUT_MIN_PF", 1.0))
-    holdout_min_cagr = float(OPT_SPOT_CONFIG.get("SPOT_HOLDOUT_MIN_CAGR_PCT", 25.0))
+    holdout_min_tail = float(OPT_SPOT_CONFIG.get("SPOT_HOLDOUT_MIN_TAIL_RATIO", 2.0))
+    holdout_min_cagr = float(OPT_SPOT_CONFIG.get("SPOT_HOLDOUT_MIN_CAGR_PCT", 30.0))
+    holdout_mdd_limit = float(OPT_SPOT_CONFIG.get("SPOT_HOLDOUT_MDD_LIMIT_PCT", 45.0))
+    holdout_hwm_max_days = float(OPT_SPOT_CONFIG.get("SPOT_HOLDOUT_HWM_RECOVERY_MAX_DAYS", 300.0))
+    holdout_alpha_floor = float(OPT_SPOT_CONFIG.get("SPOT_HOLDOUT_ALPHA_DECAY_FLOOR_PCT", -50.0))
+    gate1_sqn_min = float(OPT_SPOT_CONFIG.get("SPOT_GATE1_SQN_MIN", 3.0))
+    gate1_psort_min = float(OPT_SPOT_CONFIG.get("SPOT_GATE1_PATH_SORTINO_MIN", 2.5))
+    gate1_tr_min = float(OPT_SPOT_CONFIG.get("SPOT_GATE1_TAIL_RATIO_MIN", 3.0))
     discovery_dsr_min = float(OPT_SPOT_CONFIG.get("SPOT_DISCOVERY_DSR_MIN", -1.0))
 
     for (target, tf_eval), study in best_results.items():
@@ -352,6 +361,54 @@ def main() -> None:
         veto_ok = bool(veto.passed)
 
         port_ho = run_holdout_shared_cash_portfolio(params, target_symbols, tf_eval, oos_data_maps)
+        oos_dd_days = float(port_ho["dd_bars"]) / 6.0
+
+        symbol_fold_payloads: List[Dict[str, Any]] = []
+        is_cagr_vals: List[float] = []
+        for s_eval in target_symbols:
+            s_is, r_is, m_is, t_is, wr_is, pf_is, lc_is, _, tr_is = evaluate_symbol_fold(
+                UltimateSpotStrategy(name=f"IS_{s_eval}", params=params),
+                params,
+                s_eval,
+                tf_eval,
+                data_maps[s_eval][tf_eval],
+                data_maps[s_eval]["1d"],
+                data_maps[s_eval][f"merge_idx_{tf_eval}"],
+                None,
+                data_maps[s_eval][f"is_start_idx_{tf_eval}"],
+                len(data_maps[s_eval][tf_eval]),
+            )
+            s_oos, r_oos, m_oos, trd_oos, wr_oos, pf_oos, lc_oos, _, tail_oos = evaluate_symbol_fold(
+                UltimateSpotStrategy(name=f"OOS_{s_eval}", params=params),
+                params,
+                s_eval,
+                tf_eval,
+                oos_data_maps[s_eval][tf_eval],
+                oos_data_maps[s_eval]["1d"],
+                oos_data_maps[s_eval][f"merge_idx_{tf_eval}"],
+                None,
+                oos_data_maps[s_eval][f"oos_start_idx_{tf_eval}"],
+                len(oos_data_maps[s_eval][tf_eval]),
+            )
+            is_cagr_vals.append(s_is)
+            symbol_fold_payloads.append(
+                {
+                    "sym": s_eval,
+                    "is_row": (s_is, r_is, m_is, t_is, pf_is),
+                    "oos": {
+                        "cagr": s_oos,
+                        "ret": r_oos,
+                        "mdd": m_oos,
+                        "trd": trd_oos,
+                        "wr": wr_oos,
+                        "pf": pf_oos,
+                        "lc": lc_oos,
+                        "tail": tail_oos,
+                    },
+                }
+            )
+        is_mean_cagr = float(np.mean(is_cagr_vals)) if is_cagr_vals else 0.0
+
         trade_floor = run_holdout_portfolio_trade_floor(
             portfolio_long_trades=int(port_ho["long_trades"]),
             min_portfolio_trades=min_pf_trades,
@@ -360,11 +417,16 @@ def main() -> None:
             portfolio_cagr_pct=float(port_ho["portfolio_cagr_pct"]),
             portfolio_mdd_pct=float(port_ho["mdd_pct"]),
             portfolio_cvar_pct=float(port_ho["cvar_pct"]),
-            portfolio_pf=float(port_ho["pf"]),
+            portfolio_tail_ratio=float(port_ho["tail_ratio"]),
             min_path_terminal_wealth_ratio=float(port_ho["min_path_tw"]),
             max_cvar_pct=max_ho_cvar,
-            pf_need=holdout_min_pf,
+            tail_ratio_min=holdout_min_tail,
             cagr_min_pct=holdout_min_cagr,
+            mdd_limit_pct=holdout_mdd_limit,
+            oos_dd_days=oos_dd_days,
+            hw_recovery_days_max=holdout_hwm_max_days,
+            is_cagr_pct=is_mean_cagr,
+            alpha_decay_floor_pct=holdout_alpha_floor,
         )
         is_all_passed = bool(veto_ok and trade_floor.passed and shared_cash_gate.passed)
 
@@ -385,50 +447,112 @@ def main() -> None:
         _logger.info("%s", shared_cash_gate.summary)
         dd_bars = float(port_ho.get("dd_bars", 0.0))
         _logger.info(
-            "Holdout shared-cash: CAGR=%.2f%% MDD=%.2f%% CVaR=%.2f%% trades=%d tw=%.4f dd_bars=%d",
+            "Holdout shared-cash: CAGR=%.2f%% MDD=%.2f%% CVaR=%.2f%% trades=%d tw=%.4f dd_bars=%d tail=%.2f",
             float(port_ho["portfolio_cagr_pct"]),
             float(port_ho["mdd_pct"]),
             float(port_ho["cvar_pct"]),
             int(port_ho["long_trades"]),
             float(port_ho["min_path_tw"]),
             int(dd_bars),
+            float(port_ho["tail_ratio"]),
         )
 
-        for s_eval in target_symbols:
-            s_is, r_is, m_is, t_is, _, pf_is, _, _ = evaluate_symbol_fold(
-                UltimateSpotStrategy(name=f"IS_{s_eval}", params=params),
-                params,
-                s_eval,
+        symbol_gate_rows: List[SymbolGateRow] = []
+        for pl in symbol_fold_payloads:
+            s_eval = pl["sym"]
+            s_is, r_is, m_is, t_is, pf_is = pl["is_row"]
+            o = pl["oos"]
+            s_oos = float(o["cagr"])
+            r_oos = float(o["ret"])
+            m_oos = float(o["mdd"])
+            trd_oos = int(o["trd"])
+            wr_oos = float(o["wr"])
+            pf_oos = float(o["pf"])
+            lc_oos = int(o["lc"])
+            tail_oos = float(o["tail"])
+            go_nogo = run_go_nogo_check(
+                [],
+                0.0,
+                [s_oos],
+                m_oos,
+                tail_oos,
+                lc_oos,
                 tf_eval,
-                data_maps[s_eval][tf_eval],
-                data_maps[s_eval]["1d"],
-                data_maps[s_eval][f"merge_idx_{tf_eval}"],
-                None,
-                data_maps[s_eval][f"is_start_idx_{tf_eval}"],
-                len(data_maps[s_eval][tf_eval]),
+                mdd_limit_pct=holdout_mdd_limit,
+                tail_ratio_min=holdout_min_tail,
             )
-            s_oos, r_oos, m_oos, t_oos, _, pf_oos, lc_oos, _ = evaluate_symbol_fold(
-                UltimateSpotStrategy(name=f"OOS_{s_eval}", params=params),
-                params,
-                s_eval,
-                tf_eval,
-                oos_data_maps[s_eval][tf_eval],
-                oos_data_maps[s_eval]["1d"],
-                oos_data_maps[s_eval][f"merge_idx_{tf_eval}"],
-                None,
-                oos_data_maps[s_eval][f"oos_start_idx_{tf_eval}"],
-                len(oos_data_maps[s_eval][tf_eval]),
+            symbol_gate_rows.append(
+                SymbolGateRow(
+                    symbol=s_eval,
+                    net_cagr_pct=s_oos,
+                    max_mdd_pct=m_oos,
+                    tail_ratio=tail_oos,
+                    win_rate_pct=wr_oos,
+                    trade_count=trd_oos,
+                )
             )
-            go_nogo = run_go_nogo_check([], 0.0, [s_oos], m_oos, pf_oos, int(lc_oos), tf_eval)
             final_summaries.append(
                 {
                     "sym": s_eval,
                     "tf": tf_eval,
                     "is": (s_is, r_is, m_is, t_is, pf_is),
-                    "oos": (s_oos, r_oos, m_oos, t_oos, pf_oos),
+                    "oos": (s_oos, r_oos, m_oos, trd_oos, pf_oos),
                     "passed": go_nogo.passed,
                 }
             )
+
+        oos_cagrs = [float(r.net_cagr_pct) for r in symbol_gate_rows]
+        pos_sum = float(sum(max(0.0, x) for x in oos_cagrs))
+        if pos_sum > 1e-9 and oos_cagrs:
+            max_share = float(max(oos_cagrs)) / pos_sum
+            loso_warning = (
+                f"경고 (단일 심볼 OOS CAGR 비중 {max_share:.0%} >= 40%)"
+                if max_share >= 0.4
+                else f"안전 (특정 심볼 의존도 {max_share:.0%} < 40%)"
+            )
+        else:
+            loso_warning = "N/A (OOS CAGR 비중 산출 불가)"
+
+        alpha_decay_pct = float(shared_cash_gate.advisory.get("alpha_decay_pct", -100.0))
+
+        hard_passed = (
+            sum(1 for v in veto.details.values() if v)
+            + (1 if trade_floor.passed else 0)
+            + sum(1 for v in shared_cash_gate.details.values() if v)
+        )
+        hard_total = len(veto.details) + 1 + len(shared_cash_gate.details)
+
+        report = run_final_deployment_report(
+            FinalDeploymentReportInput(
+                gate1_sqn=float(best_trial.user_attrs.get("gate1_sqn", 0.0)),
+                gate1_path_sortino=float(best_trial.user_attrs.get("gate1_path_sortino", 0.0)),
+                gate1_tail_ratio=float(best_trial.user_attrs.get("cpcv_path_tail_ratio", 0.0)),
+                cpcv_mean_path_return_pct=float(best_trial.user_attrs.get("cpcv_mean_path_return_pct", 0.0)),
+                cpcv_worst_segment_mdd_pct=float(best_trial.user_attrs.get("cpcv_worst_segment_mdd_pct", 0.0)),
+                sqn_target=gate1_sqn_min,
+                path_sortino_target=gate1_psort_min,
+                tail_ratio_target=gate1_tr_min,
+                moic=float(port_ho["moic"]),
+                initial_capital_krw=float(SPOT_INITIAL_BALANCE),
+                oos_net_cagr_pct=float(port_ho["portfolio_cagr_pct"]),
+                oos_mdd_pct=float(port_ho["mdd_pct"]),
+                hw_recovery_days=oos_dd_days,
+                alpha_decay_pct=alpha_decay_pct,
+                oos_cagr_target_pct=holdout_min_cagr,
+                oos_mdd_limit_pct=holdout_mdd_limit,
+                hw_recovery_max_days=holdout_hwm_max_days,
+                alpha_decay_floor_pct=holdout_alpha_floor,
+                symbol_rows=symbol_gate_rows,
+                loso_warning=loso_warning,
+                hard_passed=hard_passed,
+                hard_total=hard_total,
+                final_decision_go=is_all_passed,
+            )
+        )
+        _logger.info(
+            "\n%s",
+            report,
+        )
 
         best_score_final = float(best_trial.value) if best_trial.value is not None else -100.0
 
@@ -438,48 +562,6 @@ def main() -> None:
         clean_sym = str(target).replace("/", "").replace("-", "") if not isinstance(target, tuple) else ""
         json_filename = f"spot_params_{tf_eval}.json" if args.mode == "multi" else f"spot_params_{tf_eval}_{clean_sym}.json"
         pending_json_writes.append((json_filename, params, best_score_final, should_save))
-
-    if final_summaries:
-        table_w = 120
-        _logger.info("\n" + "═" * table_w)
-        _logger.info(f"{'SPOT OPTIMIZATION SUMMARY (Discovery vs Holdout)':^{table_w}}")
-        _logger.info(
-            "Primary deployment metrics: shared-cash portfolio holdout (see logs above). "
-            "Per-symbol rows are diagnostic-only (not concurrent shared-cash)."
-        )
-        _logger.info("─" * table_w)
-        disc_hdr = "Discovery (CAGR% / MDD% / Trd / PF)"
-        ho_hdr = "Holdout (CAGR% / MDD% / Trd / PF)"
-        header = f"{'Symbol':<12} | {'TF':<3} | {disc_hdr:^42} | {ho_hdr:^42} | SymGate"
-        _logger.info(header)
-        _logger.info("─" * table_w)
-
-        is_scores, is_rets, is_mdds, is_trds, is_pfs = [], [], [], [], []
-        oos_scores, oos_rets, oos_mdds, oos_trds, oos_pfs = [], [], [], [], []
-
-        for r in final_summaries:
-            is_v = f"{r['is'][0]:>7.2f}% / {r['is'][2]:>4.1f}% / {int(r['is'][3]):>4} / {r['is'][4]:>4.2f}"
-            oos_v = f"{r['oos'][0]:>7.2f}% / {r['oos'][2]:>4.1f}% / {int(r['oos'][3]):>4} / {r['oos'][4]:>4.2f}"
-            stat = "PASS" if r["passed"] else "FAIL"
-            _logger.info(f"{r['sym']:<12} | {r['tf']:<3} | {is_v} | {oos_v} | {stat}")
-
-            is_scores.append(r["is"][0])
-            is_rets.append(r["is"][1])
-            is_mdds.append(r["is"][2])
-            is_trds.append(r["is"][3])
-            is_pfs.append(r["is"][4])
-            oos_scores.append(r["oos"][0])
-            oos_rets.append(r["oos"][1])
-            oos_mdds.append(r["oos"][2])
-            oos_trds.append(r["oos"][3])
-            oos_pfs.append(r["oos"][4])
-
-        if args.mode == "multi":
-            _logger.info("─" * table_w)
-            port_is = f"{np.mean(is_scores):>7.2f}% / {np.mean(is_mdds):>4.1f}% / {int(np.sum(is_trds)):>4} / {np.mean(is_pfs):>4.2f}"
-            port_oos = f"{np.mean(oos_scores):>7.2f}% / {np.mean(oos_mdds):>4.1f}% / {int(np.sum(oos_trds)):>4} / {np.mean(oos_pfs):>4.2f}"
-            _logger.info(f"{'PORTFOLIO':<12} | {args.tf:<3} | {port_is} | {port_oos} | ---")
-        _logger.info("═" * table_w + "\n")
 
     # JSON save logs last
     if pending_json_writes:
