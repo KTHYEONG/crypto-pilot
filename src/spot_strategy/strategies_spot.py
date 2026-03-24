@@ -10,7 +10,7 @@ from src.futures_strategy.strategies_futures import _FUTURES_INDICATORS as _SPOT
 
 class UltimateSpotStrategy(UltimateStrategyBase):
     """
-    Spot trend-following: macro alignment, ADX strength, BB expansion AND volume Z (AND),
+    Spot trend-following: macro alignment, ADX strength, BB expansion + volume Z (AND or OR via VOL_CONFIRM_OR_MODE),
     Donchian breakout fill on next bar. BTC distance-based regime_risk_mult (continuous).
     """
 
@@ -58,7 +58,10 @@ class UltimateSpotStrategy(UltimateStrategyBase):
         vol_z = (vol - v_mu) / v_sd
         vol_z_ok = (vol_z > vol_z_threshold) & vol_z.notna()
 
-        vol_confirm = vol_expansion & vol_z_ok
+        vol_confirm_or = bool(self.params.get("VOL_CONFIRM_OR_MODE", False))
+        vol_confirm = (
+            (vol_expansion | vol_z_ok) if vol_confirm_or else (vol_expansion & vol_z_ok)
+        )
 
         df["dc_upper"] = df["high"].rolling(window=momentum_period).max().shift(1)
 
