@@ -156,7 +156,7 @@ def run_holdout_portfolio_trade_floor(
     return GoNoGoResult(
         passed=ok,
         details={"trade_floor": ok},
-        summary="\n".join(summary_lines),
+        summary="\n".join(lines),
         checks=[
             CheckRecord(
                 "trades",
