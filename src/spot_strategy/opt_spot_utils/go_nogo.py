@@ -34,12 +34,12 @@ def run_go_nogo_check(
     long_count: int,
     tf: str = "4h",
 ) -> GoNoGoResult:
-    """Legacy per-symbol holdout gate (PF floor 1.0)."""
+    """Legacy per-symbol holdout gate (PF floor 1.6)."""
     total_trades = long_count
     oos_cagr: float = float(oos_romad_scores[0]) if oos_romad_scores else -100.0
     growth_pass: bool = oos_cagr > 0.0
     mdd_pass: bool = abs(max_mdd_pct) <= 35.0
-    target_pf = 1.0
+    target_pf = 1.6
     pf_pass: bool = profit_factor >= target_pf
     min_trades_req = 5
     trades_pass: bool = total_trades >= min_trades_req
@@ -75,18 +75,20 @@ def run_portfolio_discovery_veto(
     psr: float,
     dsr: float,
     psr_min: float = 0.5,
-    dsr_min: float = 0.0,
+    dsr_min: float = -1.0,
 ) -> GoNoGoResult:
     """
-    Discovery veto: PSR can block; DSR is advisory-only (spot8).
+    Discovery veto: PSR hard; DSR soft floor (fail if dsr < dsr_min, default -1.0).
     """
     psr_ok = psr >= psr_min
-    details: Dict[str, bool] = {"psr_hard": psr_ok}
-    passed = psr_ok
+    dsr_ok = dsr >= dsr_min
+    details: Dict[str, bool] = {"psr_hard": psr_ok, "dsr_soft": dsr_ok}
+    passed = bool(psr_ok and dsr_ok)
+    dsr_label = "soft floor" if dsr_min < 0.0 else "hard"
     summary_lines = [
         "[Portfolio Discovery Veto]",
         f"  PSR (hard): {psr:.4f} vs {psr_min} -> {'PASS' if psr_ok else 'FAIL'}",
-        f"  DSR (advisory): {dsr:.4f} vs {dsr_min} (non-blocking)",
+        f"  DSR ({dsr_label}): {dsr:.4f} vs {dsr_min} -> {'PASS' if dsr_ok else 'FAIL'}",
     ]
     return GoNoGoResult(
         passed=passed,
@@ -140,12 +142,13 @@ def run_holdout_portfolio_shared_cash(
     mdd_limit_pct: float = 35.0,
     tw_need: float = 1.0,
     pf_need: float = 1.0,
+    cagr_min_pct: float = 25.0,
 ) -> GoNoGoResult:
     """
-    Shared-cash holdout: terminal wealth, CAGR, MDD, CVaR, PF (no trade count here).
+    Shared-cash holdout: terminal wealth, CAGR floor, MDD, CVaR, PF (no trade count here).
     """
     c_tw = min_path_terminal_wealth_ratio > tw_need
-    c_cagr = portfolio_cagr_pct > 0.0
+    c_cagr = portfolio_cagr_pct > cagr_min_pct
     c_mdd = abs(portfolio_mdd_pct) <= mdd_limit_pct
     c_cvar = portfolio_cvar_pct <= max_cvar_pct
     c_pf = portfolio_pf >= pf_need
@@ -157,8 +160,8 @@ def run_holdout_portfolio_shared_cash(
             f"{'PASS' if c_tw else 'FAIL'} | observed={min_path_terminal_wealth_ratio:.5f} | need > {tw_need}"
         ),
         (
-            f"  - Holdout portfolio CAGR > 0% (advisory) | "
-            f"{'PASS' if c_cagr else 'FAIL'} | observed={portfolio_cagr_pct:.4f} | need > 0"
+            f"  - Holdout portfolio CAGR > {cagr_min_pct}% | "
+            f"{'PASS' if c_cagr else 'FAIL'} | observed={portfolio_cagr_pct:.4f} | need > {cagr_min_pct}"
         ),
         (
             f"  - Holdout portfolio MDD <= {mdd_limit_pct}% | "
@@ -177,7 +180,7 @@ def run_holdout_portfolio_shared_cash(
     ]
     checks: List[CheckRecord] = [
         CheckRecord("tw", "terminal wealth ratio", min_path_terminal_wealth_ratio, tw_need, c_tw),
-        CheckRecord("cagr", "CAGR > 0", portfolio_cagr_pct, 0.0, c_cagr),
+        CheckRecord("cagr", f"CAGR > {cagr_min_pct}", portfolio_cagr_pct, cagr_min_pct, c_cagr),
         CheckRecord("mdd", "MDD cap", abs(portfolio_mdd_pct), mdd_limit_pct, c_mdd),
         CheckRecord("cvar", "CVaR cap", portfolio_cvar_pct, max_cvar_pct, c_cvar),
         CheckRecord("pf", "PF floor", portfolio_pf, pf_need, c_pf),
@@ -206,6 +209,8 @@ def run_go_nogo_holdout_portfolio_growth(
     min_path_terminal_wealth_ratio: float,
     min_portfolio_trades: int,
     max_cvar_pct: float,
+    pf_need: float = 1.6,
+    cagr_min_pct: float = 25.0,
 ) -> GoNoGoResult:
     """
     Backward-compatible: trade floor AND shared-cash screen; all must pass.
@@ -221,6 +226,8 @@ def run_go_nogo_holdout_portfolio_growth(
         portfolio_pf=portfolio_pf,
         min_path_terminal_wealth_ratio=min_path_terminal_wealth_ratio,
         max_cvar_pct=max_cvar_pct,
+        pf_need=pf_need,
+        cagr_min_pct=cagr_min_pct,
     )
     passed = bool(tfloor.passed and scash.passed)
     summary = tfloor.summary + "\n\n" + scash.summary
