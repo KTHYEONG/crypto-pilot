@@ -16,7 +16,7 @@ import pandas as pd
 import numpy as np
 from pathlib import Path
 from dataclasses import dataclass
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Sequence, Tuple
 import concurrent.futures
 from multiprocessing import Manager
 from tqdm import tqdm
@@ -103,6 +103,76 @@ def _task_progress_key(target_obj: Any, tf: str) -> str:
     sym = target_obj[0] if isinstance(target_obj, (list, tuple)) else target_obj
     short = str(sym).replace("KRW-", "").replace("-", "")
     return f"SPOT_{tf}_{short}"
+
+
+def _rebuild_is_data_maps_from_aligned_oos(
+    data_maps: Dict[str, Dict[str, Any]],
+    oos_data_maps: Dict[str, Dict[str, Any]],
+    symbols: Sequence[str],
+    tf: str,
+    is_start_dt: pd.Timestamp,
+    is_end_dt: pd.Timestamp,
+) -> None:
+    """After full-timeline alignment, derive IS-only `data_maps` so IS rows match OOS prefixes."""
+    for sym in symbols:
+        full = oos_data_maps[sym][tf]
+        is_df = full[full["datetime"] < is_end_dt].copy().reset_index(drop=True)
+        data_maps[sym][tf] = is_df
+        m = is_df["datetime"] >= is_start_dt
+        data_maps[sym][f"is_start_idx_{tf}"] = int(m.to_numpy().argmax()) if bool(m.any()) else 0
+        data_maps[sym][f"merge_idx_{tf}"] = compute_segment_merge_index(
+            is_df, data_maps[sym]["1d"]
+        )
+
+
+def _align_oos_dataframes_on_common_datetimes(
+    oos_data_maps: Dict[str, Dict[str, Any]],
+    symbols: Sequence[str],
+    tf: str,
+    is_end_dt: pd.Timestamp,
+) -> None:
+    """
+    Same bar alignment as IS, for full OHLCV (IS+OOS) used in holdout shared-cash.
+    """
+    sym_list = list(symbols)
+    if len(sym_list) < 2:
+        return
+
+    common = (
+        oos_data_maps[sym_list[0]][tf][["datetime"]]
+        .drop_duplicates(subset=["datetime"])
+        .copy()
+    )
+    for sym in sym_list[1:]:
+        right = (
+            oos_data_maps[sym][tf][["datetime"]]
+            .drop_duplicates(subset=["datetime"])
+            .rename(columns={"datetime": "_dt_r"})
+        )
+        common = common.merge(right, left_on="datetime", right_on="_dt_r", how="inner")
+        common = common[["datetime"]]
+
+    if len(common) < 200:
+        raise ValueError(
+            f"Insufficient overlapping {tf} bars in OOS maps after alignment ({len(common)} < 200)."
+        )
+
+    common_order = common["datetime"].sort_values()
+    for sym in sym_list:
+        df = oos_data_maps[sym][tf]
+        filtered = (
+            df[df["datetime"].isin(common_order)]
+            .sort_values("datetime")
+            .reset_index(drop=True)
+        )
+        oos_data_maps[sym][tf] = filtered
+        m_oos = filtered["datetime"] >= is_end_dt
+        oos_data_maps[sym][f"oos_start_idx_{tf}"] = (
+            int(m_oos.to_numpy().argmax()) if bool(m_oos.any()) else len(filtered)
+        )
+        oos_data_maps[sym][f"merge_idx_{tf}"] = compute_segment_merge_index(
+            filtered, oos_data_maps[sym]["1d"]
+        )
 
 
 def _resolve_parallel_plan(task_count: int, requested_jobs: int, requested_task_workers: int, requested_cpu_budget: int) -> _ParallelExecutionPlan:
@@ -245,6 +315,27 @@ def main() -> None:
                 continue
             data_maps[sym][args.tf] = data_maps[sym][args.tf].merge(btc_4h, on="datetime", how="left")
             oos_data_maps[sym][args.tf] = oos_data_maps[sym][args.tf].merge(btc_oos, on="datetime", how="left")
+
+    if len(valid_symbols) >= 2:
+        ref_tz = oos_data_maps[valid_symbols[0]][args.tf]["datetime"].dt.tz
+        is_start_align = pd.to_datetime(START_DATE)
+        is_end_align = pd.to_datetime(IS_END_DATE)
+        if ref_tz is not None:
+            is_start_align = is_start_align.tz_localize(ref_tz)
+            is_end_align = is_end_align.tz_localize(ref_tz)
+        _align_oos_dataframes_on_common_datetimes(
+            oos_data_maps, valid_symbols, args.tf, is_end_align
+        )
+        _rebuild_is_data_maps_from_aligned_oos(
+            data_maps, oos_data_maps, valid_symbols, args.tf, is_start_align, is_end_align
+        )
+        _logger.info(
+            "Aligned full %s on common datetimes: IS=%d bars, OOS full=%d bars (%d symbols).",
+            args.tf,
+            len(data_maps[valid_symbols[0]][args.tf]),
+            len(oos_data_maps[valid_symbols[0]][args.tf]),
+            len(valid_symbols),
+        )
 
     if not valid_symbols:
         _logger.error("❌ No valid symbols with data found. Aborting optimization.")

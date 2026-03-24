@@ -85,11 +85,6 @@ OPT_SPOT_CONFIG: Dict[str, Any] = {
         "liquid_alt": 0.95,
         "small_alt": 0.85,
     },
-    # Defaults when not in SEARCH_SPACE_SPOT_4H (backward compat)
-    "BB_WINDOW": 20,
-    "VOL_Z_WINDOW": 20,
-    "VOL_EXPANSION_MULT": 1.05,
-    "BTC_REGIME_SMA_PERIOD": None,
 }
 
 TARGET_TIMEFRAMES: List[str] = ["4h"]
@@ -115,21 +110,15 @@ SEARCH_SPACE_4H: Dict[str, Dict[str, Any]] = {
 }
 
 SEARCH_SPACE_SPOT_4H: Dict[str, Dict[str, Any]] = {
-    "MACRO_EMA_PERIOD": {"type": "int", "low": 100, "high": 300, "step": 20},
-    "ADX_PERIOD": {"type": "int", "low": 7, "high": 21, "step": 2},
-    "ADX_THRESHOLD": {"type": "float", "low": 15.0, "high": 35.0, "step": 2.5},
-    "MOMENTUM_PERIOD": {"type": "int", "low": 10, "high": 40, "step": 5},
-    "VOL_Z_THRESHOLD": {"type": "float", "low": 0.5, "high": 3.0, "step": 0.25},
+    "MACRO_EMA_PERIOD": {"type": "int", "low": 100, "high": 300, "step": 25},
+    "ADX_PERIOD": {"type": "int", "low": 10, "high": 21, "step": 1},
+    "ADX_THRESHOLD": {"type": "float", "low": 15.0, "high": 30.0, "step": 2.5},
+    "MOMENTUM_PERIOD": {"type": "int", "low": 10, "high": 60, "step": 5},
     "ATR_PERIOD": {"type": "int", "low": 10, "high": 24, "step": 2},
-    "LONG_ATR_MULT": {"type": "float", "low": 1.5, "high": 3.5, "step": 0.5},
-    "LONG_TRAIL_MULT": {"type": "float", "low": 2.5, "high": 15.0, "step": 0.5},
-    "RISK_PER_TRADE": {"type": "float", "low": 0.0025, "high": 0.15, "step": 0.0025},
-    "MAX_POSITION_PCT": {"type": "float", "low": 0.10, "high": 0.95, "step": 0.05},
-    "TIME_STOP_BARS": {"type": "int", "low": 0, "high": 200, "step": 4},
-    "BB_WINDOW": {"type": "int", "low": 10, "high": 30, "step": 5},
-    "VOL_Z_WINDOW": {"type": "int", "low": 10, "high": 30, "step": 5},
-    "BTC_REGIME_SMA_PERIOD": {"type": "int", "low": 50, "high": 300, "step": 25},
-    "VOL_CONFIRM_OR_MODE": {"type": "categorical", "choices": [False, True]},
+    "LONG_ATR_MULT": {"type": "float", "low": 1.5, "high": 3.5, "step": 0.25},
+    "LONG_TRAIL_MULT": {"type": "float", "low": 2.5, "high": 8.0, "step": 0.5},
+    "RISK_PER_TRADE": {"type": "float", "low": 0.01, "high": 0.10, "step": 0.005},
+    "MAX_POSITION_PCT": {"type": "float", "low": 0.10, "high": 0.80, "step": 0.05},
 }
 
 
@@ -176,7 +165,7 @@ def get_quarterly_window(reference_date: Any = None) -> tuple[str, str, str, str
     )
     oos_end: datetime.date = current_quarter_start - datetime.timedelta(days=1)
     oos_start: datetime.date = current_quarter_start - relativedelta(months=6)
-    is_start: datetime.date = oos_start - relativedelta(months=24)
+    is_start: datetime.date = oos_start - relativedelta(months=36)
     fetch_start: datetime.date = is_start - relativedelta(days=500)
     return (
         fetch_start.strftime("%Y-%m-%d"),
