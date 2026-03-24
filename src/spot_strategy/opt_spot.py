@@ -316,6 +316,8 @@ def main() -> None:
     max_ho_cvar = float(OPT_SPOT_CONFIG.get("SPOT_HOLDOUT_MAX_CVAR_PCT", 25.0))
     min_pf_trades = int(OPT_SPOT_CONFIG.get("SPOT_HOLDOUT_MIN_PORTFOLIO_LONG_TRADES", 8))
     holdout_min_pf = float(OPT_SPOT_CONFIG.get("SPOT_HOLDOUT_MIN_PF", 1.0))
+    holdout_min_cagr = float(OPT_SPOT_CONFIG.get("SPOT_HOLDOUT_MIN_CAGR_PCT", 25.0))
+    discovery_dsr_min = float(OPT_SPOT_CONFIG.get("SPOT_DISCOVERY_DSR_MIN", -1.0))
 
     for (target, tf_eval), study in best_results.items():
         if study is None:
@@ -342,7 +344,11 @@ def main() -> None:
 
         psr_v = float(best_trial.user_attrs.get("psr_paths", 0.0))
         dsr_v = float(best_trial.user_attrs.get("dsr_paths", 0.0))
-        veto = run_portfolio_discovery_veto(psr=psr_v, dsr=dsr_v)
+        veto = run_portfolio_discovery_veto(
+            psr=psr_v,
+            dsr=dsr_v,
+            dsr_min=discovery_dsr_min,
+        )
         veto_ok = bool(veto.passed)
 
         port_ho = run_holdout_shared_cash_portfolio(params, target_symbols, tf_eval, oos_data_maps)
@@ -358,6 +364,7 @@ def main() -> None:
             min_path_terminal_wealth_ratio=float(port_ho["min_path_tw"]),
             max_cvar_pct=max_ho_cvar,
             pf_need=holdout_min_pf,
+            cagr_min_pct=holdout_min_cagr,
         )
         is_all_passed = bool(veto_ok and trade_floor.passed and shared_cash_gate.passed)
 

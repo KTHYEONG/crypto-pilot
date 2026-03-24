@@ -57,22 +57,39 @@ def build_purged_walk_forward_folds(
     return splits, holdout_fold
 
 
-def build_cpcv_test_paths(n_bars: int, n_blocks: int, k_test_blocks: int) -> List[CPCVPath]:
-    """Combinatorial purged CV: choose k_test_blocks disjoint blocks as test; each path is their union."""
+def build_cpcv_test_paths(
+    n_bars: int,
+    n_blocks: int,
+    k_test_blocks: int,
+    embargo: int = 0,
+) -> List[CPCVPath]:
+    """
+    Combinatorial purged CV: choose k_test_blocks disjoint blocks as test; each path is their union.
+
+    Each physical block [j*base, end_j) is trimmed to [j*base+embargo, end_j) so the first `embargo`
+    bars of each candidate test block are excluded (train/test boundary mitigation).
+    """
     n = int(n_bars)
     nb = int(n_blocks)
     k = int(k_test_blocks)
+    e = max(0, int(embargo))
     if n < nb * 2 or k < 1 or k > nb:
         return []
 
     base = n // nb
-    block_starts: List[int] = [j * base for j in range(nb)]
+    if base <= e:
+        return []
+
+    block_starts: List[int] = []
     block_ends: List[int] = []
     for j in range(nb):
+        raw_start = j * base
         end = (j + 1) * base if j < nb - 1 else n
-        block_ends.append(end)
-        if block_ends[-1] <= block_starts[j]:
+        start = raw_start + e
+        if end <= start:
             return []
+        block_starts.append(start)
+        block_ends.append(end)
 
     paths: List[CPCVPath] = []
     for test_indices in combinations(range(nb), k):
@@ -81,10 +98,13 @@ def build_cpcv_test_paths(n_bars: int, n_blocks: int, k_test_blocks: int) -> Lis
     return paths
 
 
-def build_cpcv_test_paths_with_fallback(n_bars: int) -> Tuple[List[CPCVPath], int, int]:
+def build_cpcv_test_paths_with_fallback(
+    n_bars: int,
+    embargo: int = 0,
+) -> Tuple[List[CPCVPath], int, int]:
     """Prefer 6 blocks / K=2; fallback to 4 blocks / K=2 if empty."""
-    paths = build_cpcv_test_paths(n_bars, 6, 2)
+    paths = build_cpcv_test_paths(n_bars, 6, 2, embargo=embargo)
     if paths:
         return paths, 6, 2
-    paths_fb = build_cpcv_test_paths(n_bars, 4, 2)
+    paths_fb = build_cpcv_test_paths(n_bars, 4, 2, embargo=embargo)
     return paths_fb, 4, 2
