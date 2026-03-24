@@ -52,6 +52,10 @@ SIGNAL_CACHE_PARAM_KEYS: frozenset[str] = frozenset([
     "MOMENTUM_PERIOD",
     "ATR_PERIOD",
     "VOL_Z_THRESHOLD",
+    "BB_WINDOW",
+    "VOL_Z_WINDOW",
+    "BTC_REGIME_SMA_PERIOD",
+    "VOL_CONFIRM_OR_MODE",
 ])
 
 _SignalCacheKey = Tuple[Tuple[Tuple[str, Any], ...], str, str, int]
@@ -309,9 +313,11 @@ def objective_spot(
     if ref_len < 200:
         raise optuna.TrialPruned()
 
-    cpcv_paths, _nb, _k = build_cpcv_test_paths_with_fallback(ref_len)
+    embargo = int(EMBARGO_BARS.get(tf, 0))
+    cpcv_paths, nb_cpcv, k_cpcv = build_cpcv_test_paths_with_fallback(ref_len, embargo=embargo)
     if not cpcv_paths:
         raise optuna.TrialPruned()
+    n_independent_paths = max(2, nb_cpcv // k_cpcv)
 
     full_signal_dfs: Dict[str, pd.DataFrame] = {}
     for sym in symbols:
@@ -326,7 +332,8 @@ def objective_spot(
 
     max_slots = int(OPT_SPOT_CONFIG.get("SPOT_MAX_CONCURRENT_POSITIONS", 3))
     min_seg_trades = int(OPT_SPOT_CONFIG.get("SPOT_MIN_TRADES_PER_CPCV_SEGMENT", 4))
-    warmup_bars = int(max(params.get("MOMENTUM_PERIOD", 20), params.get("ATR_PERIOD", 20), 120))
+    # Signals are pre-computed on full IS; per-segment re-warmup would skip most of each test block.
+    warmup_bars = 0
 
     cfg = OPT_SPOT_CONFIG
     std_pen_mult = float(cfg.get("SPOT_PATH_CROSS_PATH_LOG_TW_STD_PENALTY_MULT", 2.0))
@@ -338,8 +345,8 @@ def objective_spot(
     dd_bars_thr = int(cfg.get("SPOT_DD_DURATION_BARS_THRESHOLD", 100))
     dd_bar_pen = float(cfg.get("SPOT_DD_DURATION_PENALTY_PER_BAR", 0.001))
 
-    path_mean_log_tw: List[float] = []
-    path_min_tw_ratio: List[float] = []
+    path_compound_log_tw: List[float] = []
+    path_compound_tw_ratio: List[float] = []
     path_worst_mdd: List[float] = []
     path_max_cvar: List[float] = []
     for path_idx, path in enumerate(cpcv_paths):
@@ -347,6 +354,7 @@ def objective_spot(
         seg_tw_ratio: List[float] = []
         seg_mdds: List[float] = []
         seg_cvars: List[float] = []
+        running_balance = float(SPOT_INITIAL_BALANCE)
         for test_start, test_end in path:
             abs_start = is_off + int(test_start)
             abs_end = is_off + int(test_end)
@@ -364,12 +372,12 @@ def objective_spot(
                     rank_scores[sym] = seg["slot_rank_score"].to_numpy(dtype=np.float64)
 
             execution_start_idx = max(1, abs_start - slice_start)
-            initial_balance = float(SPOT_INITIAL_BALANCE)
+            segment_initial = max(running_balance, 1e-9)
             result = run_shared_cash_multi_symbol(
                 symbol_arrays,
                 symbols,
                 params,
-                initial_balance=initial_balance,
+                initial_balance=segment_initial,
                 max_concurrent_positions=max_slots,
                 rank_scores=rank_scores if rank_scores else None,
                 warmup_bars=warmup_bars,
@@ -379,7 +387,7 @@ def objective_spot(
             if eq.size == 0:
                 twr = 1.0
             else:
-                twr = max(float(result.final_balance / initial_balance), 1e-9)
+                twr = max(float(result.final_balance / segment_initial), 1e-9)
             log_tw = float(np.log(twr))
             if eq.size > 1:
                 seg_mdds.append(float(calc_mdd_from_equity(eq)))
@@ -396,25 +404,26 @@ def objective_spot(
 
             seg_log_tw.append(log_tw)
             seg_tw_ratio.append(twr)
+            running_balance = max(float(result.final_balance), 1e-9)
 
         if not seg_log_tw:
             raise optuna.TrialPruned()
-        path_mean_log_tw.append(float(np.mean(seg_log_tw)))
-        path_min_tw_ratio.append(float(np.min(seg_tw_ratio)) if seg_tw_ratio else 1.0)
+        path_compound_log_tw.append(float(np.sum(seg_log_tw)))
+        path_compound_tw_ratio.append(float(np.prod(seg_tw_ratio)) if seg_tw_ratio else 1.0)
         path_worst_mdd.append(float(np.max(seg_mdds)) if seg_mdds else 0.0)
         path_max_cvar.append(float(np.max(seg_cvars)) if seg_cvars else 0.0)
 
-        interm = float(np.mean(path_mean_log_tw))
+        interm = float(np.mean(path_compound_log_tw))
         trial.report(interm, step=path_idx)
 
-    mean_log_tw = float(np.mean(path_mean_log_tw))
-    cvar25_log = float(mean_of_worst_quartile(path_mean_log_tw))
+    mean_log_tw = float(np.mean(path_compound_log_tw))
+    cvar25_log = float(mean_of_worst_quartile(path_compound_log_tw))
     base_growth = 100.0 * (mean_log_tw + cvar25_w * cvar25_log)
 
     penalty = 0.0
-    if len(path_mean_log_tw) > 1:
-        penalty += std_pen_mult * float(np.std(path_mean_log_tw, ddof=1))
-    min_log_tw = float(np.min(path_mean_log_tw))
+    if len(path_compound_log_tw) > 1:
+        penalty += std_pen_mult * float(np.std(path_compound_log_tw, ddof=1))
+    min_log_tw = float(np.min(path_compound_log_tw))
     if min_log_tw < 0.0:
         penalty += min_path_pen_mult * abs(min_log_tw)
 
@@ -428,26 +437,31 @@ def objective_spot(
 
     growth_score = base_growth - penalty
 
-    min_path_tw = float(np.min(path_min_tw_ratio)) if path_min_tw_ratio else 1.0
+    min_path_tw = float(np.min(path_compound_tw_ratio)) if path_compound_tw_ratio else 1.0
 
-    trial.set_user_attr("mean_path_terminal_wealth_ratio", float(np.mean(path_min_tw_ratio)))
+    trial.set_user_attr("mean_path_terminal_wealth_ratio", float(np.mean(path_compound_tw_ratio)))
     trial.set_user_attr("min_path_terminal_wealth_ratio", min_path_tw)
     trial.set_user_attr("mean_log_terminal_wealth", mean_log_tw)
     trial.set_user_attr("cvar25_log_tw", cvar25_log)
-    trial.set_user_attr("path_mean_log_tw_std", float(np.std(path_mean_log_tw, ddof=1)) if len(path_mean_log_tw) > 1 else 0.0)
+    trial.set_user_attr(
+        "path_mean_log_tw_std",
+        float(np.std(path_compound_log_tw, ddof=1)) if len(path_compound_log_tw) > 1 else 0.0,
+    )
     trial.set_user_attr("growth_score", growth_score)
+    trial.set_user_attr("cpcv_embargo_bars", embargo)
+    trial.set_user_attr("cpcv_n_independent_paths", int(n_independent_paths))
 
     n_done = trial.number + 1
     n_startup = int(OPT_SPOT_CONFIG.get("tpe_n_startup_trials", 96))
     n_eff = get_spot_effective_independent_trials(n_done, n_startup)
     psr_val = probabilistic_sharpe_ratio(
-        float(np.mean(path_mean_log_tw) / (np.std(path_mean_log_tw, ddof=1) + 1e-12)),
-        max(len(path_mean_log_tw), 2),
+        float(np.mean(path_compound_log_tw) / (np.std(path_compound_log_tw, ddof=1) + 1e-12)),
+        n_independent_paths,
     )
     trial.set_user_attr("psr_paths", psr_val)
     trial.set_user_attr("n_effective_independent_trials", n_eff)
 
-    path_vals = [float(x) for x in path_mean_log_tw]
+    path_vals = [float(x) for x in path_compound_log_tw]
     trial.set_user_attr(
         "dsr_paths",
         float(compute_dsr_from_path_values(path_vals, n_eff)),
@@ -510,7 +524,7 @@ def run_holdout_shared_cash_portfolio(
             rank_scores[sym] = seg["slot_rank_score"].to_numpy(dtype=np.float64)
 
     execution_start_idx = max(1, oos_start - slice_start)
-    warmup_bars = int(max(p.get("MOMENTUM_PERIOD", 20), p.get("ATR_PERIOD", 20), 120))
+    holdout_warmup_bars = 0
     initial_balance = float(SPOT_INITIAL_BALANCE)
     max_slots = int(OPT_SPOT_CONFIG.get("SPOT_MAX_CONCURRENT_POSITIONS", 3))
     res = run_shared_cash_multi_symbol(
@@ -520,13 +534,13 @@ def run_holdout_shared_cash_portfolio(
         initial_balance=initial_balance,
         max_concurrent_positions=max_slots,
         rank_scores=rank_scores if rank_scores else None,
-        warmup_bars=warmup_bars,
+        warmup_bars=holdout_warmup_bars,
         execution_start_idx=execution_start_idx,
     )
     eq = res.equity_curve
     span_days = _segment_span_days(
         full_signal_dfs[ref_sym].iloc[slice_start:slice_end],
-        execution_start_idx,
+        max(holdout_warmup_bars, execution_start_idx),
     )
     cagr = float(portfolio_cagr_pct_from_equity(eq, span_days)) if eq.size > 1 else -100.0
     mdd = float(calc_mdd_from_equity(eq)) if eq.size > 1 else 100.0
