@@ -259,7 +259,7 @@ def _run_tf_optimization(task: Tuple[Any, str], ctx: _TfOptimizationContext) -> 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--symbols", type=str, default="KRW-BTC,KRW-DOGE,KRW-ETH,KRW-LINK,KRW-SOL,KRW-AVAX")
+    parser.add_argument("--symbols", type=str, default="KRW-BTC,KRW-XRP,KRW-ETH,KRW-LINK,KRW-ADA,KRW-DOT")
     parser.add_argument("--mode", type=str, choices=["single", "multi"], default="multi")
     parser.add_argument("--trials", type=int, default=OPT_SPOT_CONFIG["total_trials"])
     parser.add_argument("--jobs", type=int, default=int(OPT_SPOT_CONFIG.get("n_jobs", 8)))
