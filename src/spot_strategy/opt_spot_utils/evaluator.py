@@ -666,6 +666,9 @@ def run_holdout_shared_cash_portfolio(
     symbols: List[str],
     tf: str,
     oos_data_maps: Dict[str, Dict[str, Any]],
+    *,
+    signal_disk_cache_root: Optional[Path] = None,
+    return_signal_dfs: bool = False,
 ) -> Dict[str, Any]:
     """
     OOS holdout: single shared-cash run from oos_start_idx to end for all symbols.
@@ -679,9 +682,14 @@ def run_holdout_shared_cash_portfolio(
             continue
         fp = _dataset_fingerprint_from_df(df_full)
         cache_key: _SignalCacheKey = _build_signal_cache_key(p, sym, tf, len(df_full), fp)
-        full_signal_dfs[sym] = get_or_compute_signals(cache_key, df_full, strategy)
+        full_signal_dfs[sym] = get_or_compute_signals(
+            cache_key,
+            df_full,
+            strategy,
+            disk_cache_root=signal_disk_cache_root,
+        )
     if len(full_signal_dfs) != len(symbols):
-        return {
+        failed: Dict[str, Any] = {
             "portfolio_cagr_pct": -100.0,
             "mdd_pct": 100.0,
             "cvar_pct": 100.0,
@@ -693,6 +701,9 @@ def run_holdout_shared_cash_portfolio(
             "moic": 0.0,
             "equity_curve": np.array([]),
         }
+        if return_signal_dfs:
+            failed["full_signal_dfs"] = {}
+        return failed
 
     ref_sym = symbols[0]
     oos_start = int(oos_data_maps[ref_sym].get(f"oos_start_idx_{tf}", 0))
@@ -700,7 +711,7 @@ def run_holdout_shared_cash_portfolio(
     slice_start = max(0, oos_start - 1)
     slice_end = len(ref_df)
     if slice_end - slice_start < 5:
-        return {
+        failed: Dict[str, Any] = {
             "portfolio_cagr_pct": -100.0,
             "mdd_pct": 100.0,
             "cvar_pct": 100.0,
@@ -712,6 +723,9 @@ def run_holdout_shared_cash_portfolio(
             "moic": 0.0,
             "equity_curve": np.array([]),
         }
+        if return_signal_dfs:
+            failed["full_signal_dfs"] = full_signal_dfs
+        return failed
 
     symbol_arrays: Dict[str, Dict[str, np.ndarray]] = {}
     rank_scores: Dict[str, np.ndarray] = {}
@@ -748,7 +762,7 @@ def run_holdout_shared_cash_portfolio(
     dd_bars = float(max_underwater_bars_from_equity(eq)) if eq.size > 1 else 0.0
     final_bal = float(res.final_balance)
     moic = final_bal / initial_balance if initial_balance > 0 else 0.0
-    return {
+    out: Dict[str, Any] = {
         "portfolio_cagr_pct": cagr,
         "mdd_pct": mdd,
         "cvar_pct": cvar_pct,
@@ -760,3 +774,6 @@ def run_holdout_shared_cash_portfolio(
         "moic": float(moic),
         "equity_curve": eq,
     }
+    if return_signal_dfs:
+        out["full_signal_dfs"] = full_signal_dfs
+    return out
