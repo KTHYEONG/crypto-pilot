@@ -4,7 +4,6 @@ import hashlib
 import logging
 import math
 import os
-import pickle
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import optuna
@@ -191,7 +190,7 @@ def _dataset_fingerprint_from_df(df: pd.DataFrame) -> int:
 
 
 def _signal_disk_cache_path(cache_key: _SignalCacheKey, root: Path) -> Path:
-    digest = hashlib.sha256(pickle.dumps(cache_key, protocol=4)).hexdigest()
+    digest = hashlib.sha256(repr(cache_key).encode("utf-8")).hexdigest()
     return root / f"spot_sig_{digest}.pkl"
 
 
@@ -505,6 +504,7 @@ def objective_spot(
                 rank_scores=rank_scores if rank_scores else None,
                 warmup_bars=warmup_bars,
                 execution_start_idx=execution_start_idx,
+                allow_python_fallback=False,
             )
             eq = result.equity_curve
             path_total_trades += int(result.total_trades)
@@ -730,7 +730,7 @@ def run_holdout_shared_cash_portfolio(
     symbol_arrays: Dict[str, Dict[str, np.ndarray]] = {}
     rank_scores: Dict[str, np.ndarray] = {}
     for sym in symbols:
-        seg = full_signal_dfs[sym].iloc[slice_start:slice_end].copy()
+        seg = full_signal_dfs[sym].iloc[slice_start:slice_end]
         symbol_arrays[sym] = _dataframe_to_symbol_arrays(seg)
         if "slot_rank_score" in seg.columns:
             rank_scores[sym] = seg["slot_rank_score"].to_numpy(dtype=np.float64)
@@ -748,6 +748,7 @@ def run_holdout_shared_cash_portfolio(
         rank_scores=rank_scores if rank_scores else None,
         warmup_bars=holdout_warmup_bars,
         execution_start_idx=execution_start_idx,
+        allow_python_fallback=False,
     )
     eq = res.equity_curve
     span_days = _segment_span_days(
