@@ -46,4 +46,19 @@ def suggest_params_spot(trial: optuna.Trial, space: Dict[str, Any], tf: str) -> 
     if atr_l <= atr_s:
         params["ATR_RATIO_LONG_PERIOD"] = atr_s * 3
 
+    hmm_w = int(params.get("HMM_TRAIN_WINDOW", 360))
+    if hmm_w < 120:
+        params["HMM_TRAIN_WINDOW"] = 120
+
+    g_w = int(params.get("GARCH_WINDOW", 360))
+    if g_w < 120:
+        params["GARCH_WINDOW"] = 120
+
+    g_rf = int(params.get("GARCH_RETRAIN_FREQ", 24))
+    h_rf = int(params.get("HMM_RETRAIN_FREQ", 24))
+    if g_rf < 1:
+        params["GARCH_RETRAIN_FREQ"] = 1
+    if h_rf < 1:
+        params["HMM_RETRAIN_FREQ"] = 1
+
     return params
