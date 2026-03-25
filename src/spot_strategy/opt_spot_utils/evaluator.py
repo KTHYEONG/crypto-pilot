@@ -1,15 +1,23 @@
 from __future__ import annotations
 
+import hashlib
 import logging
 import math
 import os
+import pickle
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import optuna
 import numpy as np
 import pandas as pd
 from collections import OrderedDict
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+try:
+    from filelock import FileLock
+except ImportError:
+    FileLock = None  # type: ignore[misc, assignment]
 
 from config.opt_config import OPT_SPOT_CONFIG, get_spot_effective_independent_trials
 from config.settings import SPOT_INITIAL_BALANCE
@@ -19,6 +27,7 @@ from src.spot_strategy.portfolio_shared_cash import run_shared_cash_multi_symbol
 from src.spot_strategy.opt_spot_utils.metrics import (
     calc_profit_factor_from_pnl,
     calc_mdd_from_equity,
+    calc_pain_index_from_equity,
     calc_sortino_from_equity,
     calc_tail_ratio_from_equity,
     cvar_loss_pct_from_simple_returns,
@@ -28,7 +37,10 @@ from src.spot_strategy.opt_spot_utils.metrics import (
     portfolio_cagr_pct_from_equity,
     probabilistic_sharpe_ratio,
 )
-from src.spot_strategy.opt_spot_utils.cv_utils import build_cpcv_test_paths_with_fallback
+from src.spot_strategy.opt_spot_utils.cv_utils import (
+    CPCVPath,
+    build_cpcv_test_paths_with_fallback,
+)
 from src.spot_strategy.opt_spot_utils.opt_params import suggest_params_spot
 
 _logger: logging.Logger = logging.getLogger("opt_spot")
@@ -56,10 +68,17 @@ SIGNAL_CACHE_PARAM_KEYS: frozenset[str] = frozenset([
     "EMA_TREND_PERIOD",
     "MOMENTUM_ROC_PERIOD",
     "RSI_PERIOD",
+    "HMM_TRAIN_WINDOW",
+    "HMM_RETRAIN_FREQ",
+    "USE_HMM_REGIME",
+    "GARCH_WINDOW",
+    "GARCH_RETRAIN_FREQ",
+    "KILL_ATR_K",
+    "HURST_WINDOW",
 ])
 
-_SignalCacheKey = Tuple[Tuple[Tuple[str, Any], ...], str, str, int]
-_SIGNAL_CACHE_MAXSIZE: int = 64
+_SignalCacheKey = Tuple[Tuple[Tuple[str, Any], ...], str, str, int, int]
+_SIGNAL_CACHE_MAXSIZE: int = 512
 _cache_lock: threading.Lock = threading.Lock()
 _signal_cache: OrderedDict[_SignalCacheKey, pd.DataFrame] = OrderedDict()
 
@@ -159,21 +178,68 @@ def _evaluate_symbol_for_fold_parallel(
         span_days_sym,
     )
 
-def _build_signal_cache_key(params: Dict[str, Any], sym: str, tf: str, data_len: int) -> _SignalCacheKey:
+def _dataset_fingerprint_from_df(df: pd.DataFrame) -> int:
+    """Lightweight cache invalidation when OHLCV rows change but length stays equal."""
+    if "close" not in df.columns or df.empty:
+        return 0
+    c = df["close"].to_numpy(dtype=np.float64)
+    n = len(c)
+    head = c[: min(5, n)]
+    tail = c[max(0, n - 5) :]
+    h = hash((tuple(head.tolist()), tuple(tail.tolist()), n))
+    return int(h & ((1 << 63) - 1))
+
+
+def _signal_disk_cache_path(cache_key: _SignalCacheKey, root: Path) -> Path:
+    digest = hashlib.sha256(pickle.dumps(cache_key, protocol=4)).hexdigest()
+    return root / f"spot_sig_{digest}.pkl"
+
+
+def _build_signal_cache_key(
+    params: Dict[str, Any],
+    sym: str,
+    tf: str,
+    data_len: int,
+    fingerprint: int,
+) -> _SignalCacheKey:
     signal_items: List[Tuple[str, Any]] = sorted(
         (k, params[k]) for k in SIGNAL_CACHE_PARAM_KEYS if k in params
     )
-    return (tuple(signal_items), sym, tf, data_len)
+    return (tuple(signal_items), sym, tf, data_len, int(fingerprint))
 
 def get_or_compute_signals(
     cache_key: _SignalCacheKey,
     target_df: pd.DataFrame,
     strategy: UltimateSpotStrategy,
+    *,
+    disk_cache_root: Optional[Path] = None,
 ) -> pd.DataFrame:
     with _cache_lock:
         if cache_key in _signal_cache:
             _signal_cache.move_to_end(cache_key)
             return _signal_cache[cache_key]
+
+    root = disk_cache_root
+    if root is None:
+        env = os.getenv("OPT_SPOT_SIGNAL_CACHE_DIR")
+        if env:
+            root = Path(env)
+    if root is not None and FileLock is not None:
+        root.mkdir(parents=True, exist_ok=True)
+        p = _signal_disk_cache_path(cache_key, root)
+        lock_path = str(p) + ".lock"
+        with FileLock(lock_path):
+            if p.is_file():
+                full_df_disk: pd.DataFrame = pd.read_pickle(p)
+                with _cache_lock:
+                    if cache_key in _signal_cache:
+                        _signal_cache.move_to_end(cache_key)
+                        return _signal_cache[cache_key]
+                    while len(_signal_cache) >= _SIGNAL_CACHE_MAXSIZE:
+                        _signal_cache.popitem(last=False)
+                    _signal_cache[cache_key] = full_df_disk
+                    return full_df_disk
+
     full_df: pd.DataFrame = strategy.generate_signals(target_df.copy(deep=True))
     with _cache_lock:
         if cache_key in _signal_cache:
@@ -182,7 +248,15 @@ def get_or_compute_signals(
         while len(_signal_cache) >= _SIGNAL_CACHE_MAXSIZE:
             _signal_cache.popitem(last=False)
         _signal_cache[cache_key] = full_df
-        return full_df
+        out = full_df
+
+    if root is not None and FileLock is not None:
+        p = _signal_disk_cache_path(cache_key, root)
+        lock_path = str(p) + ".lock"
+        with FileLock(lock_path):
+            if not p.is_file():
+                out.to_pickle(p)
+    return out
 
 def evaluate_symbol_fold(
     strategy: UltimateSpotStrategy,
@@ -275,7 +349,27 @@ def _dataframe_to_symbol_arrays(sig_df: pd.DataFrame) -> Dict[str, np.ndarray]:
         out[c] = sig_df[c].to_numpy(dtype=np.float64)
     if "regime_risk_mult" in sig_df.columns:
         out["regime_risk_mult"] = sig_df["regime_risk_mult"].to_numpy(dtype=np.float64)
+    if "garch_kelly_f" in sig_df.columns:
+        out["garch_kelly_f"] = sig_df["garch_kelly_f"].to_numpy(dtype=np.float64)
+    if "kill_signal" in sig_df.columns:
+        out["kill_signal"] = sig_df["kill_signal"].to_numpy(dtype=np.float64)
     return out
+
+
+def _dataframe_to_symbol_arrays_extended(sig_df: pd.DataFrame) -> Dict[str, np.ndarray]:
+    """Full IS arrays for shared-cash + optional slot_rank_score (views used in CPCV slices)."""
+    base = _dataframe_to_symbol_arrays(sig_df)
+    if "slot_rank_score" in sig_df.columns:
+        base["slot_rank_score"] = sig_df["slot_rank_score"].to_numpy(dtype=np.float64)
+    return base
+
+
+def _slice_symbol_arrays_view(
+    full: Dict[str, np.ndarray],
+    slice_start: int,
+    slice_end: int,
+) -> Dict[str, np.ndarray]:
+    return {k: v[slice_start:slice_end] for k, v in full.items()}
 
 
 def _segment_span_days(sig_df: pd.DataFrame, execution_start_idx: int) -> float:
@@ -297,6 +391,8 @@ def objective_spot(
     space: Dict[str, Dict[str, Any]],
     mode: str = "single",
     project_root: Optional[str] = None,
+    prebuilt_cpcv_bundle: Optional[Tuple[List[CPCVPath], int, int]] = None,
+    signal_disk_cache_root: Optional[Path] = None,
 ) -> float:
     params: Dict[str, Any] = _merge_spot_fixed_signal_params(suggest_params_spot(trial, space, tf_target))
     tf: str = tf_target
@@ -312,21 +408,37 @@ def objective_spot(
         raise optuna.TrialPruned()
 
     embargo = int(EMBARGO_BARS.get(tf, 0))
-    cpcv_paths, nb_cpcv, k_cpcv = build_cpcv_test_paths_with_fallback(ref_len, embargo=embargo)
+    if prebuilt_cpcv_bundle is not None:
+        cpcv_paths, nb_cpcv, k_cpcv = prebuilt_cpcv_bundle
+    else:
+        cpcv_paths, nb_cpcv, k_cpcv = build_cpcv_test_paths_with_fallback(ref_len, embargo=embargo)
     if not cpcv_paths:
         raise optuna.TrialPruned()
     n_independent_paths = max(2, nb_cpcv // k_cpcv)
+
+    cache_root: Optional[Path] = signal_disk_cache_root
+    if cache_root is None and project_root is not None:
+        cache_root = Path(project_root) / ".spot_signal_cache"
 
     full_signal_dfs: Dict[str, pd.DataFrame] = {}
     for sym in symbols:
         target_df_full: Optional[pd.DataFrame] = data_maps.get(sym, {}).get(tf)
         if target_df_full is None or target_df_full.empty:
             continue
-        cache_key: _SignalCacheKey = _build_signal_cache_key(params, sym, tf, len(target_df_full))
-        full_signal_dfs[sym] = get_or_compute_signals(cache_key, target_df_full, strategy)
+        fp = _dataset_fingerprint_from_df(target_df_full)
+        cache_key: _SignalCacheKey = _build_signal_cache_key(
+            params, sym, tf, len(target_df_full), fp
+        )
+        full_signal_dfs[sym] = get_or_compute_signals(
+            cache_key, target_df_full, strategy, disk_cache_root=cache_root
+        )
 
     if len(full_signal_dfs) != len(symbols):
         raise optuna.TrialPruned()
+
+    prebuilt_full_arrays: Dict[str, Dict[str, np.ndarray]] = {
+        sym: _dataframe_to_symbol_arrays_extended(full_signal_dfs[sym]) for sym in symbols
+    }
 
     max_slots = int(OPT_SPOT_CONFIG.get("SPOT_MAX_CONCURRENT_POSITIONS", 3))
     min_seg_trades = int(OPT_SPOT_CONFIG.get("SPOT_MIN_TRADES_PER_CPCV_SEGMENT", 4))
@@ -347,14 +459,19 @@ def objective_spot(
 
     path_compound_log_tw: List[float] = []
     path_compound_tw_ratio: List[float] = []
+    path_pain_ratio_seg: List[float] = []
     path_worst_mdd: List[float] = []
     path_max_cvar: List[float] = []
     path_trades: List[int] = []
     path_tail_ratios: List[float] = []
+    lambda_mdd = float(
+        params.get("LAMBDA_MAXDD", cfg.get("SPOT_OBJECTIVE_LAMBDA_MAXDD", 1.0))
+    )
 
     for path_idx, path in enumerate(cpcv_paths):
         seg_log_tw: List[float] = []
         seg_tw_ratio: List[float] = []
+        seg_pain_ratio: List[float] = []
         seg_mdds: List[float] = []
         seg_cvars: List[float] = []
         seg_tails: List[float] = []
@@ -370,11 +487,12 @@ def objective_spot(
             symbol_arrays: Dict[str, Dict[str, np.ndarray]] = {}
             rank_scores: Dict[str, np.ndarray] = {}
             for sym in symbols:
-                full_df = full_signal_dfs[sym]
-                seg = full_df.iloc[slice_start:slice_end].copy()
-                symbol_arrays[sym] = _dataframe_to_symbol_arrays(seg)
-                if "slot_rank_score" in seg.columns:
-                    rank_scores[sym] = seg["slot_rank_score"].to_numpy(dtype=np.float64)
+                symbol_arrays[sym] = _slice_symbol_arrays_view(
+                    prebuilt_full_arrays[sym], slice_start, slice_end
+                )
+                rs = symbol_arrays[sym].get("slot_rank_score")
+                if rs is not None:
+                    rank_scores[sym] = rs
 
             execution_start_idx = max(1, abs_start - slice_start)
             segment_initial = max(running_balance, 1e-9)
@@ -396,7 +514,12 @@ def objective_spot(
                 twr = max(float(result.final_balance / segment_initial), 1e-9)
             log_tw = float(np.log(twr))
             if eq.size > 1:
-                seg_mdds.append(float(calc_mdd_from_equity(eq)))
+                mdd_seg = float(calc_mdd_from_equity(eq))
+                pi = float(calc_pain_index_from_equity(eq))
+                ret_seg = float(twr - 1.0)
+                pr = ret_seg / (pi + 1e-9) - lambda_mdd * (abs(mdd_seg) / 100.0)
+                seg_pain_ratio.append(pr)
+                seg_mdds.append(mdd_seg)
                 seg_cvars.append(float(cvar_loss_pct_from_simple_returns(eq)))
                 seg_tails.append(float(calc_tail_ratio_from_equity(eq)))
                 uw = max_underwater_bars_from_equity(eq)
@@ -406,6 +529,7 @@ def objective_spot(
                 seg_mdds.append(0.0)
                 seg_cvars.append(0.0)
                 seg_tails.append(1.0)
+                seg_pain_ratio.append(0.0)
 
             if int(result.total_trades) < min_seg_trades:
                 log_tw -= seg_fail_pen
@@ -418,6 +542,7 @@ def objective_spot(
             raise optuna.TrialPruned()
         path_compound_log_tw.append(float(np.sum(seg_log_tw)))
         path_compound_tw_ratio.append(float(np.prod(seg_tw_ratio)) if seg_tw_ratio else 1.0)
+        path_pain_ratio_seg.append(float(np.mean(seg_pain_ratio)) if seg_pain_ratio else 0.0)
         path_worst_mdd.append(float(np.max(seg_mdds)) if seg_mdds else 0.0)
         path_max_cvar.append(float(np.max(seg_cvars)) if seg_cvars else 0.0)
         path_trades.append(path_total_trades)
@@ -425,10 +550,14 @@ def objective_spot(
 
         interm = float(np.mean(path_compound_log_tw))
         trial.report(interm, step=path_idx)
+        if trial.should_prune():
+            raise optuna.TrialPruned()
 
     mean_log_tw = float(np.mean(path_compound_log_tw))
     cvar25_log = float(mean_of_worst_quartile(path_compound_log_tw))
-    base_growth = 100.0 * (mean_log_tw + cvar25_w * cvar25_log)
+    mean_pr = float(np.mean(path_pain_ratio_seg)) if path_pain_ratio_seg else 0.0
+    cvar25_pr = float(mean_of_worst_quartile(path_pain_ratio_seg)) if path_pain_ratio_seg else 0.0
+    base_growth = 100.0 * (mean_pr + cvar25_w * cvar25_pr)
 
     penalty = 0.0
     if len(path_compound_log_tw) > 1:
@@ -548,7 +677,8 @@ def run_holdout_shared_cash_portfolio(
         df_full: Optional[pd.DataFrame] = oos_data_maps.get(sym, {}).get(tf)
         if df_full is None or df_full.empty:
             continue
-        cache_key: _SignalCacheKey = _build_signal_cache_key(p, sym, tf, len(df_full))
+        fp = _dataset_fingerprint_from_df(df_full)
+        cache_key: _SignalCacheKey = _build_signal_cache_key(p, sym, tf, len(df_full), fp)
         full_signal_dfs[sym] = get_or_compute_signals(cache_key, df_full, strategy)
     if len(full_signal_dfs) != len(symbols):
         return {

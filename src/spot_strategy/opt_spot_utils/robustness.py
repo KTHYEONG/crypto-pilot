@@ -16,6 +16,9 @@ _SPOT_FLOAT_PERTURB_KEYS: frozenset[str] = frozenset(
         "LONG_TP_MULT",
         "TP_LOCK_ATR_MULT",
         "LONG_TRAIL_LOCK_MULT",
+        "KILL_ATR_K",
+        "DELTA_GATE",
+        "LAMBDA_MAXDD",
     }
 )
 _SPOT_INT_PERTURB_KEYS: frozenset[str] = frozenset(
@@ -26,6 +29,12 @@ _SPOT_INT_PERTURB_KEYS: frozenset[str] = frozenset(
         "EMA_TREND_PERIOD",
         "MOMENTUM_ROC_PERIOD",
         "RSI_PERIOD",
+        "HMM_TRAIN_WINDOW",
+        "HMM_RETRAIN_FREQ",
+        "GARCH_WINDOW",
+        "GARCH_RETRAIN_FREQ",
+        "KILL_COOLDOWN_BARS",
+        "HURST_WINDOW",
     }
 )
 
