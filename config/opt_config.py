@@ -42,17 +42,19 @@ SPOT_SYMBOLS: List[str] = [
 ]
 
 OPT_SPOT_CONFIG: Dict[str, Any] = {
-    "total_trials": 1200,
-    "n_startup_trials": 150,
-    "tpe_n_startup_trials": 150,
+    "total_trials": 540,
+    "n_startup_trials": 96,
+    "tpe_n_startup_trials": 96,
     "tpe_pruner_n_startup_trials": 10,
-    "tpe_pruner_n_warmup_steps": 2,
+    "tpe_pruner_n_warmup_steps": 8,
+    "tpe_pruner_patience": 2,
     "seeds": [42],
-    "n_jobs": 1,
-    "task_workers": 1,
+    "n_jobs": 4,
+    # 0 = auto (logical CPUs) for multi-mode portfolio process-parallel TPE; >0 caps workers
+    "task_workers": 0,
     "TARGET_TIMEFRAMES": ["4h"],
     "SPOT_MAX_CONCURRENT_POSITIONS": 5,
-    "SPOT_SHORTLIST_TOP_K": 50,
+    "SPOT_SHORTLIST_TOP_K": 25,
     "SPOT_OBJECTIVE_TRADE_FREQ_CAP": 120.0,
     "SPOT_PATH_CROSS_PATH_LOG_TW_STD_PENALTY_MULT": 0.5,
     "SPOT_MIN_PATH_CAGR_PENALTY_MULT": 0.5,
@@ -78,6 +80,7 @@ OPT_SPOT_CONFIG: Dict[str, Any] = {
     "SPOT_OBJECTIVE_TAIL_PENALTY_MULT": 8.0,
     "SPOT_IS_CAGR_FLOOR_LOG_ANNUAL": 0.05,
     "SPOT_IS_CAGR_FLOOR_PENALTY_MULT": 15.0,
+    "SPOT_OBJECTIVE_LAMBDA_MAXDD": 1.0,
     "SPOT_STRESS_SYMBOLS": [],
     "SPOT_SYMBOL_CLUSTER": {
         "KRW-BTC": "anchor",
@@ -132,6 +135,15 @@ SEARCH_SPACE_SPOT_4H: Dict[str, Dict[str, Any]] = {
     "LONG_TRAIL_LOCK_MULT": {"type": "float", "low": 0.5, "high": 2.5, "step": 0.25},
     "RISK_PER_TRADE": {"type": "float", "low": 0.02, "high": 0.15, "step": 0.005},
     "MAX_POSITION_PCT": {"type": "float", "low": 0.15, "high": 0.80, "step": 0.05},
+    "HMM_TRAIN_WINDOW": {"type": "int", "low": 240, "high": 480, "step": 60},
+    "HMM_RETRAIN_FREQ": {"type": "int", "low": 12, "high": 48, "step": 12},
+    "GARCH_WINDOW": {"type": "int", "low": 240, "high": 480, "step": 60},
+    "GARCH_RETRAIN_FREQ": {"type": "int", "low": 12, "high": 48, "step": 12},
+    "KILL_ATR_K": {"type": "float", "low": 2.0, "high": 5.0, "step": 0.5},
+    "KILL_COOLDOWN_BARS": {"type": "int", "low": 3, "high": 12, "step": 3},
+    "DELTA_GATE": {"type": "float", "low": 0.03, "high": 0.15, "step": 0.02},
+    "HURST_WINDOW": {"type": "int", "low": 30, "high": 60, "step": 10},
+    "LAMBDA_MAXDD": {"type": "float", "low": 0.5, "high": 3.0, "step": 0.5},
 }
 
 
