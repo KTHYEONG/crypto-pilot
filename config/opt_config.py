@@ -33,6 +33,14 @@ FUTURES_SYMBOLS: List[str] = [
 # OPTIMIZATION SPOT SEARCH SPACE & CONFIGURATION (shared-cash + CPCV)
 # ==============================================================================
 
+SPOT_SYMBOLS: List[str] = [
+    "KRW-BTC",
+    "KRW-ETH",
+    "KRW-XRP",
+    "KRW-ADA",
+    "KRW-DOGE",
+]
+
 OPT_SPOT_CONFIG: Dict[str, Any] = {
     "total_trials": 1200,
     "n_startup_trials": 150,
@@ -52,7 +60,7 @@ OPT_SPOT_CONFIG: Dict[str, Any] = {
     "SPOT_SEGMENT_TRADE_FAIL_PENALTY": 2.0,
     "SPOT_MDD_PENALTY_THRESHOLD_PCT": 35.0,
     "SPOT_OBJECTIVE_CVAR_PENALTY_THRESHOLD": 25.0,
-    "SPOT_OBJECTIVE_CVAR25_LOG_TW_WEIGHT": 0.05,
+    "SPOT_OBJECTIVE_CVAR25_LOG_TW_WEIGHT": 0.30,
     "SPOT_DD_DURATION_BARS_THRESHOLD": 100,
     "SPOT_DD_DURATION_PENALTY_PER_BAR": 0.0005,
     "SPOT_HOLDOUT_MIN_PORTFOLIO_LONG_TRADES": 8,
@@ -61,23 +69,22 @@ OPT_SPOT_CONFIG: Dict[str, Any] = {
     "SPOT_HOLDOUT_MDD_LIMIT_PCT": 45.0,
     "SPOT_HOLDOUT_HWM_RECOVERY_MAX_DAYS": 300.0,
     "SPOT_HOLDOUT_ALPHA_DECAY_FLOOR_PCT": -50.0,
-    "SPOT_GATE1_SQN_MIN": 3.0,
-    "SPOT_GATE1_PATH_SORTINO_MIN": 2.5,
-    "SPOT_GATE1_TAIL_RATIO_MIN": 3.0,
+    "SPOT_GATE1_SQN_MIN": 1.5,
+    "SPOT_GATE1_PATH_SORTINO_MIN": 1.0,
+    "SPOT_GATE1_TAIL_RATIO_MIN": 1.5,
     "SPOT_DISCOVERY_DSR_MIN": -1.0,
     "SPOT_HOLDOUT_MAX_CVAR_PCT": 25.0,
+    "SPOT_OBJECTIVE_TAIL_PENALTY_TARGET": 1.5,
+    "SPOT_OBJECTIVE_TAIL_PENALTY_MULT": 8.0,
+    "SPOT_IS_CAGR_FLOOR_LOG_ANNUAL": 0.05,
+    "SPOT_IS_CAGR_FLOOR_PENALTY_MULT": 15.0,
     "SPOT_STRESS_SYMBOLS": [],
     "SPOT_SYMBOL_CLUSTER": {
         "KRW-BTC": "anchor",
         "KRW-ETH": "large_alt",
-        "KRW-SOL": "large_alt",
-        "KRW-LINK": "liquid_alt",
-        "KRW-AVAX": "liquid_alt",
-        "KRW-DOGE": "liquid_alt",
-        "KRW-NEAR": "liquid_alt",
         "KRW-XRP": "liquid_alt",
         "KRW-ADA": "liquid_alt",
-        "KRW-STX": "liquid_alt",
+        "KRW-DOGE": "liquid_alt",
     },
     "SPOT_CLUSTER_WEIGHT": {
         "anchor": 1.0,
@@ -110,15 +117,21 @@ SEARCH_SPACE_4H: Dict[str, Dict[str, Any]] = {
 }
 
 SEARCH_SPACE_SPOT_4H: Dict[str, Dict[str, Any]] = {
-    "MACRO_EMA_PERIOD": {"type": "int", "low": 100, "high": 300, "step": 25},
-    "ADX_PERIOD": {"type": "int", "low": 10, "high": 21, "step": 1},
-    "ADX_THRESHOLD": {"type": "float", "low": 15.0, "high": 30.0, "step": 2.5},
-    "MOMENTUM_PERIOD": {"type": "int", "low": 10, "high": 60, "step": 5},
-    "ATR_PERIOD": {"type": "int", "low": 10, "high": 24, "step": 2},
-    "LONG_ATR_MULT": {"type": "float", "low": 1.5, "high": 3.5, "step": 0.25},
-    "LONG_TRAIL_MULT": {"type": "float", "low": 2.5, "high": 8.0, "step": 0.5},
-    "RISK_PER_TRADE": {"type": "float", "low": 0.01, "high": 0.10, "step": 0.005},
-    "MAX_POSITION_PCT": {"type": "float", "low": 0.10, "high": 0.80, "step": 0.05},
+    "SUPERTREND_PERIOD": {"type": "int", "low": 8, "high": 20, "step": 2},
+    "SUPERTREND_MULT": {"type": "float", "low": 2.0, "high": 4.5, "step": 0.25},
+    "ATR_RATIO_PERIOD": {"type": "int", "low": 10, "high": 20, "step": 2},
+    "ATR_RATIO_LONG_PERIOD": {"type": "int", "low": 40, "high": 80, "step": 10},
+    "ATR_EXPANSION_THRESHOLD": {"type": "float", "low": 1.05, "high": 1.5, "step": 0.05},
+    "EMA_TREND_PERIOD": {"type": "int", "low": 50, "high": 200, "step": 25},
+    "MOMENTUM_ROC_PERIOD": {"type": "int", "low": 8, "high": 20, "step": 2},
+    "RSI_PERIOD": {"type": "int", "low": 10, "high": 20, "step": 2},
+    "LONG_ATR_MULT": {"type": "float", "low": 1.5, "high": 4.0, "step": 0.25},
+    "LONG_TRAIL_MULT": {"type": "float", "low": 2.0, "high": 8.0, "step": 0.5},
+    "LONG_TP_MULT": {"type": "float", "low": 2.0, "high": 8.0, "step": 0.5},
+    "TP_LOCK_ATR_MULT": {"type": "float", "low": 1.0, "high": 4.0, "step": 0.5},
+    "LONG_TRAIL_LOCK_MULT": {"type": "float", "low": 0.5, "high": 2.5, "step": 0.25},
+    "RISK_PER_TRADE": {"type": "float", "low": 0.02, "high": 0.15, "step": 0.005},
+    "MAX_POSITION_PCT": {"type": "float", "low": 0.15, "high": 0.80, "step": 0.05},
 }
 
 
