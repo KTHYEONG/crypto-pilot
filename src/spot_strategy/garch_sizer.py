@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -13,6 +14,9 @@ try:
     from arch import arch_model
 except ImportError:
     arch_model = None  # type: ignore[misc, assignment]
+
+_DEGENERATE_RET_STD: float = 1e-8
+_GARCH_MAXITER: int = 100
 
 
 def _t_kelly_fraction(mu: float, sigma2: float, nu: float) -> float:
@@ -63,6 +67,8 @@ def compute_garch_kelly_series(
         return pd.Series(out, index=close.index)
 
     last_k_mult = 0.5
+    last_starting: Optional[np.ndarray] = None
+
     for t in range(w, n):
         if (t - w) % rf != 0:
             out[t] = last_k_mult
@@ -70,9 +76,27 @@ def compute_garch_kelly_series(
 
         y = log_ret[t - w : t] * 100.0
         y = np.nan_to_num(y, nan=0.0, posinf=0.0, neginf=0.0)
+        if float(np.std(y)) < _DEGENERATE_RET_STD:
+            seg = log_ret[t - 30 : t]
+            mu = float(np.mean(seg)) if seg.size > 0 else 0.0
+            rv = float(np.std(seg) + 1e-12) if seg.size > 1 else 0.02
+            k = _t_kelly_fraction(mu, rv * rv, nu_fallback)
+            last_k_mult = _kelly_to_multiplier(k)
+            out[t] = last_k_mult
+            continue
+
         try:
             am = arch_model(y, mean="Constant", vol="GARCH", p=1, q=1, dist="t")
-            res = am.fit(disp="off", show_warning=False)
+            n_param = len(am._all_parameter_names())
+            fit_kw: dict[str, object] = {
+                "disp": "off",
+                "show_warning": False,
+                "options": {"maxiter": int(_GARCH_MAXITER)},
+            }
+            if last_starting is not None and last_starting.shape[0] == n_param:
+                fit_kw["starting_values"] = last_starting
+            res = am.fit(**fit_kw)
+            last_starting = np.asarray(res.params.values, dtype=np.float64)
             cv = res.conditional_volatility
             sig = float(cv.iloc[-1]) / 100.0
             var = max(sig * sig, 1e-12)

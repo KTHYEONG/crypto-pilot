@@ -29,6 +29,9 @@ _DEFAULT_STALE_MODEL_MAX_BARS: int = 48
 # Sharpe relabel uses -1e9 for "too few samples"; two or more bad states => discard fit.
 _RELABEL_BAD_SCORE: float = -1e9
 
+_HMM_N_ITER: int = 80
+_HMM_TOL: float = 1e-3
+
 
 def _winsorize_frame(x: np.ndarray, low_q: float = 2.0, high_q: float = 98.0) -> np.ndarray:
     if x.size == 0:
@@ -127,25 +130,29 @@ def compute_walk_forward_hmm(
     last_sigma: np.ndarray | None = None
     last_fit_t: int = -10**9
 
-    for t in range(tw, n):
-        train_start = t - tw
-        train_end = t
+    t = tw
+    while t < n:
         should_refit = (t - tw) % rf == 0 or last_model is None
 
-        X_win = X_all[train_start:train_end].copy()
-        lr_win = log_ret[train_start:train_end]
-
         if should_refit:
+            train_start = t - tw
+            train_end = t
+            X_win = X_all[train_start:train_end].copy()
+            lr_win = log_ret[train_start:train_end]
+
             Xw = np.nan_to_num(X_win, nan=0.0, posinf=0.0, neginf=0.0)
             for j in range(Xw.shape[1]):
                 Xw[:, j] = _winsorize_frame(Xw[:, j])
             mu, sigma = _fit_scaler(Xw)
             Xw_scaled = _apply_scaler(Xw, mu, sigma)
             try:
+                # No EM warm-start from previous window: scaler (mu/sigma) is refit each time,
+                # so prior means_/covars_ live in a different scaled space than current Xw_scaled.
                 model = GaussianHMM(
                     n_components=3,
                     covariance_type="diag",
-                    n_iter=200,
+                    n_iter=_HMM_N_ITER,
+                    tol=_HMM_TOL,
                     random_state=random_state,
                     min_covar=min_covar,
                 )
@@ -178,37 +185,50 @@ def compute_walk_forward_hmm(
                 _logger.debug("HMM fit failed at t=%s: %s", t, exc)
 
         if last_model is None:
+            t += 1
             continue
 
         if (t - last_fit_t) > stale_cap:
             p_bull[t] = 1.0 / 3.0
             p_side[t] = 1.0 / 3.0
             viterbi_label[t] = 1
+            t += 1
             continue
 
         if last_mu is None or last_sigma is None:
+            t += 1
             continue
 
-        X_cur = X_all[t - 1 : t].copy()
-        X_cur = np.nan_to_num(X_cur, nan=0.0, posinf=0.0, neginf=0.0)
-        X_cur_scaled = _apply_scaler(X_cur, last_mu, last_sigma)
+        t_end = min(n - 1, last_fit_t + rf - 1, last_fit_t + stale_cap)
+        if t > t_end:
+            t += 1
+            continue
+
+        X_block = X_all[t - 1 : t_end]
+        X_block = np.nan_to_num(X_block, nan=0.0, posinf=0.0, neginf=0.0)
+        X_scaled = _apply_scaler(X_block, last_mu, last_sigma)
 
         try:
-            if hasattr(last_model, "predict_proba"):
-                proba_row = last_model.predict_proba(X_cur_scaled)[0]
+            lm = last_model
+            if hasattr(lm, "predict_proba"):
+                proba_mat = lm.predict_proba(X_scaled)
             else:
-                st = last_model.predict(X_cur_scaled)
-                proba_row = np.zeros(3, dtype=np.float64)
-                proba_row[int(st[0])] = 1.0
+                st = lm.predict(X_scaled)
+                proba_mat = np.zeros((X_scaled.shape[0], 3), dtype=np.float64)
+                proba_mat[np.arange(X_scaled.shape[0]), st.astype(np.int32)] = 1.0
 
-            p_sd = float(proba_row[last_perm[1]])
-            p_bl = float(proba_row[last_perm[2]])
-            p_bull[t] = p_bl
-            p_side[t] = p_sd
-            vit = int(np.argmax(proba_row))
-            vit_map = np.where(last_perm == vit)[0]
-            viterbi_label[t] = int(vit_map[0]) if vit_map.size > 0 else 1
+            for i, tb in enumerate(range(t, t_end + 1)):
+                proba_row = proba_mat[i]
+                p_sd = float(proba_row[last_perm[1]])
+                p_bl = float(proba_row[last_perm[2]])
+                p_bull[tb] = p_bl
+                p_side[tb] = p_sd
+                vit = int(np.argmax(proba_row))
+                vit_map = np.where(last_perm == vit)[0]
+                viterbi_label[tb] = int(vit_map[0]) if vit_map.size > 0 else 1
         except Exception as exc:
             _logger.debug("HMM predict failed at t=%s: %s", t, exc)
+
+        t = t_end + 1
 
     return viterbi_label, p_bull, p_side
