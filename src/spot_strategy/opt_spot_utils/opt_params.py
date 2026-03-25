@@ -26,17 +26,9 @@ def suggest_params_spot(trial: optuna.Trial, space: Dict[str, Any], tf: str) -> 
                 param_name, spec["low"], spec["high"], step=spec.get("step")
             )
 
-    _suggest("MACRO_EMA_PERIOD")
-    _suggest("ADX_PERIOD")
-    _suggest("ADX_THRESHOLD")
-    _suggest("MOMENTUM_PERIOD")
-    _suggest("ATR_PERIOD")
-    _suggest("LONG_ATR_MULT")
-    _suggest("LONG_TRAIL_MULT")
-    _suggest("RISK_PER_TRADE")
-    _suggest("MAX_POSITION_PCT")
+    for param_name in sorted(space.keys()):
+        _suggest(param_name)
 
-    params["LONG_TP_MULT"] = 0
     params["LEVERAGE"] = 1
     params["USE_COMPOUNDING"] = True
 
@@ -44,5 +36,14 @@ def suggest_params_spot(trial: optuna.Trial, space: Dict[str, Any], tf: str) -> 
     long_trail = float(params.get("LONG_TRAIL_MULT", long_atr))
     if long_trail < long_atr:
         params["LONG_TRAIL_MULT"] = long_atr
+
+    long_tp = float(params.get("LONG_TP_MULT", 5.0))
+    if long_tp < long_atr * 1.2:
+        params["LONG_TP_MULT"] = long_atr * 1.2
+
+    atr_s = int(params.get("ATR_RATIO_PERIOD", 14))
+    atr_l = int(params.get("ATR_RATIO_LONG_PERIOD", 42))
+    if atr_l <= atr_s:
+        params["ATR_RATIO_LONG_PERIOD"] = atr_s * 3
 
     return params

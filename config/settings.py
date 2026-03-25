@@ -123,12 +123,17 @@ SPOT_LOOP_INTERVAL_SECONDS = 10  # 메인 루프 간격 (10초)
 SPOT_SYMBOL_DELAY_SECONDS = 2  # 심볼 간 딜레이
 
 # --- 대상 심볼 (Upbit) ---
-# OOS 성과 최상위 3종목 (ETH, SOL, DOGE) 압축 투자로 복리 증식 극대화
-SPOT_TARGET_SYMBOLS = ["KRW-ETH", "KRW-SOL", "KRW-DOGE"]
+# 데이터 기간(FETCH_START=2021-03-18) 충족 및 수익성 기반 5종 선정
+SPOT_TARGET_SYMBOLS = ["KRW-BTC", "KRW-ETH", "KRW-XRP", "KRW-ADA", "KRW-DOGE"]
 
 # --- 포지션 사이징 가중치 (Spot) ---
-# 추천 포트폴리오 비중: ETH(40%), SOL(30%), DOGE(30%)
-SPOT_ALLOCATION_WEIGHTS = {"KRW-ETH": 0.4, "KRW-SOL": 0.3, "KRW-DOGE": 0.3}
+SPOT_ALLOCATION_WEIGHTS = {
+    "KRW-BTC": 0.2, 
+    "KRW-ETH": 0.2, 
+    "KRW-XRP": 0.2, 
+    "KRW-ADA": 0.2, 
+    "KRW-DOGE": 0.2
+}
 
 # --- Optuna Study ---
 SPOT_OPTUNA_STUDY_NAME = "spot_strategy"

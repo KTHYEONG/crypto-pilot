@@ -48,11 +48,14 @@ EMBARGO_BARS: Dict[str, int] = {
 }
 
 SIGNAL_CACHE_PARAM_KEYS: frozenset[str] = frozenset([
-    "MACRO_EMA_PERIOD",
-    "ADX_PERIOD",
-    "ADX_THRESHOLD",
-    "MOMENTUM_PERIOD",
-    "ATR_PERIOD",
+    "SUPERTREND_PERIOD",
+    "SUPERTREND_MULT",
+    "ATR_RATIO_PERIOD",
+    "ATR_RATIO_LONG_PERIOD",
+    "ATR_EXPANSION_THRESHOLD",
+    "EMA_TREND_PERIOD",
+    "MOMENTUM_ROC_PERIOD",
+    "RSI_PERIOD",
 ])
 
 _SignalCacheKey = Tuple[Tuple[Tuple[str, Any], ...], str, str, int]
@@ -247,7 +250,7 @@ def evaluate_symbol_fold(
     )
     span_days = max(span_days, 1.0)
     
-    true_pnl = trades_df["pnl"] - trades_df["entry_fee"]
+    true_pnl = trades_df["pnl"]
     win_rate: float = float((len(trades_df[true_pnl > 0]) / len(trades_df)) * 100) if len(trades_df) > 0 else 0.0
     pf = calc_profit_factor_from_pnl(true_pnl)
     
@@ -338,19 +341,23 @@ def objective_spot(
     cvar_thr = float(cfg.get("SPOT_OBJECTIVE_CVAR_PENALTY_THRESHOLD", 15.0))
     cvar25_w = float(cfg.get("SPOT_OBJECTIVE_CVAR25_LOG_TW_WEIGHT", 0.20))
     dd_bars_thr = int(cfg.get("SPOT_DD_DURATION_BARS_THRESHOLD", 100))
-    dd_bar_pen = float(cfg.get("SPOT_DD_DURATION_PENALTY_PER_BAR", 0.001))
+    dd_bar_pen = float(cfg.get("SPOT_DD_DURATION_PENALTY_PER_BAR", 0.0005))
+    tail_target = float(cfg.get("SPOT_OBJECTIVE_TAIL_PENALTY_TARGET", 1.5))
+    tail_pen_mult = float(cfg.get("SPOT_OBJECTIVE_TAIL_PENALTY_MULT", 5.0))
 
     path_compound_log_tw: List[float] = []
     path_compound_tw_ratio: List[float] = []
     path_worst_mdd: List[float] = []
     path_max_cvar: List[float] = []
     path_trades: List[int] = []
+    path_tail_ratios: List[float] = []
 
     for path_idx, path in enumerate(cpcv_paths):
         seg_log_tw: List[float] = []
         seg_tw_ratio: List[float] = []
         seg_mdds: List[float] = []
         seg_cvars: List[float] = []
+        seg_tails: List[float] = []
         path_total_trades = 0
         running_balance = float(SPOT_INITIAL_BALANCE)
         for test_start, test_end in path:
@@ -391,12 +398,14 @@ def objective_spot(
             if eq.size > 1:
                 seg_mdds.append(float(calc_mdd_from_equity(eq)))
                 seg_cvars.append(float(cvar_loss_pct_from_simple_returns(eq)))
+                seg_tails.append(float(calc_tail_ratio_from_equity(eq)))
                 uw = max_underwater_bars_from_equity(eq)
                 if uw > dd_bars_thr:
                     log_tw -= float(uw - dd_bars_thr) * dd_bar_pen
             else:
                 seg_mdds.append(0.0)
                 seg_cvars.append(0.0)
+                seg_tails.append(1.0)
 
             if int(result.total_trades) < min_seg_trades:
                 log_tw -= seg_fail_pen
@@ -412,6 +421,7 @@ def objective_spot(
         path_worst_mdd.append(float(np.max(seg_mdds)) if seg_mdds else 0.0)
         path_max_cvar.append(float(np.max(seg_cvars)) if seg_cvars else 0.0)
         path_trades.append(path_total_trades)
+        path_tail_ratios.append(float(np.mean(seg_tails)) if seg_tails else 1.0)
 
         interm = float(np.mean(path_compound_log_tw))
         trial.report(interm, step=path_idx)
@@ -435,6 +445,12 @@ def objective_spot(
     if max_cvar > cvar_thr:
         penalty += (max_cvar - cvar_thr) * 0.15
 
+    # Tail Ratio Penalty (Exponential)
+    mean_path_tail = float(np.mean(path_tail_ratios)) if path_tail_ratios else 0.0
+    if mean_path_tail < tail_target:
+        tail_gap = tail_target - mean_path_tail
+        penalty += tail_pen_mult * (tail_gap ** 2.0) * (1.0 + tail_gap)
+
     # Path-level trade frequency penalty
     if path_trades:
         avg_trades_per_path = float(np.mean(path_trades))
@@ -443,6 +459,14 @@ def objective_spot(
         expected_min = float(n_segs * min_seg_trades)
         if avg_trades_per_path < expected_min:
             penalty += (expected_min - avg_trades_per_path) * 0.2
+
+    bar_hours = float({"4h": 4.0, "1d": 24.0}.get(tf, 4.0))
+    is_span_years = (float(ref_len) * (bar_hours / 24.0)) / 365.0
+    is_cagr_floor = float(cfg.get("SPOT_IS_CAGR_FLOOR_LOG_ANNUAL", 0.05))
+    ann_log_cagr = mean_log_tw / max(is_span_years, 0.5)
+    if ann_log_cagr < is_cagr_floor:
+        is_cagr_pen_mult = float(cfg.get("SPOT_IS_CAGR_FLOOR_PENALTY_MULT", 15.0))
+        penalty += is_cagr_pen_mult * (is_cagr_floor - ann_log_cagr)
 
     growth_score = base_growth - penalty
 
