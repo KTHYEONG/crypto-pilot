@@ -1,5 +1,5 @@
 import pandas as pd
-from .upbit_client import UpbitClient
+from .upbit_client import UpbitClient, UpbitOhlcvFetchError
 import sys
 import os
 import re
@@ -141,7 +141,19 @@ class DataCollectorSpot:
             s = pd.Timestamp(miss_start).strftime("%Y-%m-%d")
             e = pd.Timestamp(miss_end).strftime("%Y-%m-%d")
             self.logger.info(f"Fetching missing Spot range for {symbol} {timeframe}: {s} ~ {e}")
-            fetched = self.client.fetch_ohlcv(symbol, timeframe, s, e)
+            try:
+                fetched = self.client.fetch_ohlcv(symbol, timeframe, s, e)
+            except UpbitOhlcvFetchError as exc:
+                self.logger.error(
+                    "Upbit OHLCV fetch failed for %s %s %s~%s: partial_rows=%s since_ms=%s",
+                    symbol,
+                    timeframe,
+                    s,
+                    e,
+                    len(exc.partial_ohlcv),
+                    exc.since_ms,
+                )
+                raise
             fetched = self._normalize_df(fetched)
             if not fetched.empty:
                 validator = DataValidator()
