@@ -176,6 +176,26 @@ def _task_progress_key(target_obj: Any, tf: str) -> str:
     return f"SPOT_{tf}_{short}"
 
 
+def _build_precomputed_segment(
+    full_signal_df: Any,
+    exec_start_idx: int,
+    exec_end_idx: int,
+) -> Tuple[pd.DataFrame | None, int]:
+    if not isinstance(full_signal_df, pd.DataFrame) or full_signal_df.empty:
+        return None, 0
+    n = len(full_signal_df)
+    start = max(0, min(int(exec_start_idx), n))
+    end = max(start, min(int(exec_end_idx), n))
+    if end - start < 2:
+        return None, 0
+    slice_start = max(0, start - 1)
+    segment = full_signal_df.iloc[slice_start:end].copy()
+    execution_start_idx = start - slice_start
+    if execution_start_idx == 0 and len(segment) > 1:
+        execution_start_idx = 1
+    return segment, execution_start_idx
+
+
 def _rebuild_is_data_maps_from_aligned_oos(
     data_maps: Dict[str, Dict[str, Any]],
     oos_data_maps: Dict[str, Dict[str, Any]],
@@ -742,12 +762,28 @@ def main() -> None:
         )
         veto_ok = bool(veto.passed)
 
-        port_ho = run_holdout_shared_cash_portfolio(params, target_symbols, tf_eval, oos_data_maps)
+        port_ho = run_holdout_shared_cash_portfolio(
+            params,
+            target_symbols,
+            tf_eval,
+            oos_data_maps,
+            signal_disk_cache_root=Path(signal_cache_dir),
+            return_signal_dfs=True,
+        )
+        post_full_signal_dfs: Dict[str, pd.DataFrame] = port_ho.get("full_signal_dfs", {})
         oos_dd_days = float(port_ho["dd_bars"]) / 6.0
 
         symbol_fold_payloads: List[Dict[str, Any]] = []
         is_cagr_vals: List[float] = []
         for s_eval in target_symbols:
+            is_start_idx = int(data_maps[s_eval][f"is_start_idx_{tf_eval}"])
+            is_end_idx = len(data_maps[s_eval][tf_eval])
+            oos_start_idx = int(oos_data_maps[s_eval][f"oos_start_idx_{tf_eval}"])
+            oos_end_idx = len(oos_data_maps[s_eval][tf_eval])
+            pre_sig_full = post_full_signal_dfs.get(s_eval)
+            pre_is_df, pre_is_exec = _build_precomputed_segment(pre_sig_full, is_start_idx, is_end_idx)
+            pre_oos_df, pre_oos_exec = _build_precomputed_segment(pre_sig_full, oos_start_idx, oos_end_idx)
+
             s_is, r_is, m_is, t_is, wr_is, pf_is, lc_is, _, tr_is = evaluate_symbol_fold(
                 UltimateSpotStrategy(name=f"IS_{s_eval}", params=params),
                 params,
@@ -757,8 +793,10 @@ def main() -> None:
                 data_maps[s_eval]["1d"],
                 data_maps[s_eval][f"merge_idx_{tf_eval}"],
                 None,
-                data_maps[s_eval][f"is_start_idx_{tf_eval}"],
-                len(data_maps[s_eval][tf_eval]),
+                is_start_idx,
+                is_end_idx,
+                precomputed_signal_df=pre_is_df,
+                execution_start_idx=pre_is_exec,
             )
             s_oos, r_oos, m_oos, trd_oos, wr_oos, pf_oos, lc_oos, _, tail_oos = evaluate_symbol_fold(
                 UltimateSpotStrategy(name=f"OOS_{s_eval}", params=params),
@@ -769,8 +807,10 @@ def main() -> None:
                 oos_data_maps[s_eval]["1d"],
                 oos_data_maps[s_eval][f"merge_idx_{tf_eval}"],
                 None,
-                oos_data_maps[s_eval][f"oos_start_idx_{tf_eval}"],
-                len(oos_data_maps[s_eval][tf_eval]),
+                oos_start_idx,
+                oos_end_idx,
+                precomputed_signal_df=pre_oos_df,
+                execution_start_idx=pre_oos_exec,
             )
             is_cagr_vals.append(s_is)
             symbol_fold_payloads.append(
