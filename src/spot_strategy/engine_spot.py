@@ -76,7 +76,9 @@ class BacktestEngineFastSpot:
         long_atr_mult = float(self.strategy.params.get('LONG_ATR_MULT', 3.0))
         long_trail_mult = float(self.strategy.params.get('LONG_TRAIL_MULT', 3.0))
         long_tp_mult = float(self.strategy.params.get('LONG_TP_MULT', 5.0))
-        
+        long_trail_lock_mult = float(self.strategy.params.get('LONG_TRAIL_LOCK_MULT', 1.5))
+        tp_lock_mult = float(self.strategy.params.get('TP_LOCK_ATR_MULT', 3.0))
+
         timestamps = df["timestamp"].values 
         
         if getattr(self, "_warmup_bars_override", None) is not None:
@@ -100,6 +102,7 @@ class BacktestEngineFastSpot:
             self.initial_balance, self.fee_rate, self.slippage_rate,
             self.risk_per_trade, timestamps,
             long_atr_mult, long_trail_mult, long_tp_mult,
+            long_trail_lock_mult, tp_lock_mult,
             warmup_bars, self._execution_start_idx,
             use_compounding, max_capital_usage
         )
@@ -172,7 +175,7 @@ class BacktestEngineFastSpot:
                 drawdown = np.nan_to_num(drawdown, nan=0.0)
                 mdd = float(drawdown.min())
 
-        true_pnl = pnl_arr - entry_fee_arr
+        true_pnl = pnl_arr
         capital_used = amount_arr * entry_p
         capital_used = np.where(np.isfinite(capital_used) & (capital_used > 0), capital_used, np.nan)
 
@@ -225,6 +228,7 @@ def backtest_loop_numba_spot(
     initial_balance, fee_rate, slippage_rate,
     risk_per_trade, timestamps,
     long_atr_mult, long_trail_mult, long_tp_mult,
+    long_trail_lock_mult, tp_lock_mult,
     warmup_bars, execution_start_idx,
     use_compounding, max_capital_usage
 ):
@@ -299,7 +303,13 @@ def backtest_loop_numba_spot(
                 exit_triggered = True
             
             if not exit_triggered:
-                new_stop = highest - (pos_atr * long_trail_mult)
+                # Parabolic Tightening: If price moved enough from entry relative to ATR, use tighter trail
+                dist = highest - entry_price
+                current_trail_mult = long_trail_mult
+                if dist > (pos_atr * tp_lock_mult):
+                    current_trail_mult = long_trail_lock_mult
+                
+                new_stop = highest - (pos_atr * current_trail_mult)
                 if new_stop > stop_price:
                     stop_price = new_stop
 
