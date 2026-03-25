@@ -49,6 +49,7 @@ def run_shared_cash_multi_symbol(
     rank_scores: Optional[Dict[str, np.ndarray]] = None,
     warmup_bars: int = 0,
     execution_start_idx: int = 0,
+    allow_python_fallback: bool = True,
 ) -> SharedCashResult:
     """
     Shared balance; per bar: exit all slots first, then enter ranked candidates into free slots.
@@ -76,6 +77,8 @@ def run_shared_cash_multi_symbol(
             )
             return SharedCashResult(equity_curve=eq, final_balance=float(bal), total_trades=int(tt))
     except Exception as exc:
+        if not allow_python_fallback:
+            raise
         _logger.warning("Shared-cash Numba path failed; using Python loop: %s", exc, exc_info=True)
 
     n = int(len(symbol_arrays[symbols_ordered[0]]["close"]))
@@ -522,3 +525,31 @@ def _try_open_long(
         last_risk_pct_ref[sym_idx] = new_risk_pct
 
     return slot, balance, True, trades_delta
+
+
+def _warn_if_numba_shared_cash_smoke_fails() -> None:
+    """One-time import check: warn if Numba is expected but JIT compilation fails."""
+    try:
+        from src.spot_strategy.portfolio_shared_cash_numba import use_numba_shared_cash
+
+        if not use_numba_shared_cash():
+            _logger.warning(
+                "OPT_SPOT_SHARED_CASH_NUMBA is disabled; shared-cash may use slow Python loop."
+            )
+            return
+        from numba import njit
+
+        @njit(cache=False)
+        def _smoke_add(x: float) -> float:
+            return x + 1.0
+
+        _ = float(_smoke_add(1.0))
+    except Exception as exc:
+        _logger.warning(
+            "Shared-cash Numba JIT smoke test failed; optimization may fall back to Python loop: %s",
+            exc,
+            exc_info=True,
+        )
+
+
+_warn_if_numba_shared_cash_smoke_fails()
