@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import argparse
 import logging
-import math
 import os
 import queue
 import sys
 import threading
 import optuna
+from optuna.pruners import MedianPruner, PatientPruner
+from optuna.samplers import QMCSampler, TPESampler
 from optuna.trial import TrialState
 from optuna.storages import InMemoryStorage
 from optuna.storages import JournalStorage
@@ -27,10 +28,12 @@ if project_root not in sys.path:
 
 from src.spot_strategy.data_collector_spot import DataCollectorSpot
 from src.spot_strategy.strategies_spot import UltimateSpotStrategy
-from config.settings import DATA_DIR, SPOT_INITIAL_BALANCE
+from config.settings import SPOT_INITIAL_BALANCE
 from config.opt_config import OPT_SPOT_CONFIG, SPOT_SYMBOLS, get_search_space_spot, get_quarterly_window
 from src.optimization.opt_utils import compute_segment_merge_index
+from src.spot_strategy.opt_spot_utils.cv_utils import build_cpcv_test_paths_with_fallback
 from src.spot_strategy.opt_spot_utils.evaluator import (
+    EMBARGO_BARS,
     evaluate_symbol_fold,
     objective_spot,
     run_holdout_shared_cash_portfolio,
@@ -47,6 +50,12 @@ from src.spot_strategy.opt_spot_utils.go_nogo import (
 
 import warnings
 warnings.filterwarnings("ignore")
+
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("VECLIB_MAXIMUM_THREADS", "1")
+os.environ.setdefault("NUMBA_NUM_THREADS", "1")
 
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 logging.basicConfig(level=logging.INFO, format="%(message)s", force=True)
@@ -79,22 +88,84 @@ class _TfOptimizationContext:
     data_maps: Dict[str, Dict[str, Any]]
     symbols: List[str]
     project_root: str
-    progress_queue: Any 
+    progress_queue: Any
     mode: str = "single"
     use_journal_storage: bool = True
+    parallel_tpe_workers: int = 1
+    disable_inner_tpe_pool: bool = False
+    fresh_journal: bool = True
+    signal_cache_dir: str = ""
 
 @dataclass(frozen=True)
-class _ParallelExecutionPlan:
-    task_workers: int
+class _SpotExecutionPlan:
+    outer_task_workers: int
     jobs_per_task: int
-    cpu_budget: int
+    parallel_tpe_workers: int
+    use_outer_process_pool: bool
     logical_cpus: int
     task_count: int
 
-    @property
-    def total_active_workers(self) -> int: return self.task_workers * self.jobs_per_task
-    @property
-    def batch_count(self) -> int: return max(1, math.ceil(self.task_count / max(1, self.task_workers)))
+
+def _split_tpe_trials(total: int, n_workers: int) -> List[int]:
+    if total <= 0:
+        return []
+    n_workers = max(1, min(int(n_workers), int(total)))
+    base = total // n_workers
+    rem = total % n_workers
+    return [base + (1 if i < rem else 0) for i in range(n_workers)]
+
+
+def _resolve_spot_execution_plan(
+    task_count: int,
+    mode: str,
+    requested_jobs: int,
+    requested_task_workers: int,
+) -> _SpotExecutionPlan:
+    logical_cpus = max(1, os.cpu_count() or 1)
+    if mode == "multi" and task_count == 1:
+        tw = requested_task_workers if requested_task_workers > 0 else logical_cpus
+        tw = max(1, min(int(tw), logical_cpus))
+        return _SpotExecutionPlan(
+            outer_task_workers=1,
+            jobs_per_task=1,
+            parallel_tpe_workers=tw,
+            use_outer_process_pool=False,
+            logical_cpus=logical_cpus,
+            task_count=task_count,
+        )
+    jobs = max(1, min(int(requested_jobs), logical_cpus))
+    if requested_task_workers <= 0:
+        cpu_budget = max(1, 4 if logical_cpus > 2 else 1)
+        outer_tw = min(task_count, max(1, cpu_budget // jobs))
+    else:
+        outer_tw = min(task_count, int(requested_task_workers))
+    outer_tw = max(1, outer_tw)
+    use_outer = task_count > 1 and outer_tw > 1
+    return _SpotExecutionPlan(
+        outer_task_workers=outer_tw,
+        jobs_per_task=jobs,
+        parallel_tpe_workers=1,
+        use_outer_process_pool=use_outer,
+        logical_cpus=logical_cpus,
+        task_count=task_count,
+    )
+
+
+def _journal_lock_for_path(journal_path: Path) -> Any:
+    lock_obj: Any = None
+    if sys.platform == "win32":
+        from src.futures_strategy.opt_futures_utils.win_journal_lock import WindowsNamedMutexJournalLock
+
+        lock_obj = WindowsNamedMutexJournalLock(str(journal_path))
+    return lock_obj
+
+
+def _build_journal_storage(journal_path: Path, thread_safe: bool) -> Any:
+    backend = JournalFileBackend(str(journal_path), lock_obj=_journal_lock_for_path(journal_path))
+    storage = JournalStorage(backend)
+    if thread_safe:
+        return _ThreadSafeJournalStorageWrapper(storage)
+    return storage
 
 def _task_progress_key(target_obj: Any, tf: str) -> str:
     """Short tqdm key: portfolio -> SPOT_{tf}; single symbol -> SPOT_{tf}_ETH."""
@@ -175,52 +246,155 @@ def _align_oos_dataframes_on_common_datetimes(
         )
 
 
-def _resolve_parallel_plan(task_count: int, requested_jobs: int, requested_task_workers: int, requested_cpu_budget: int) -> _ParallelExecutionPlan:
-    logical_cpus = max(1, os.cpu_count() or 1)
-    cpu_budget = max(1, requested_cpu_budget or (4 if logical_cpus > 2 else 1))
-    jobs_per_task = max(1, requested_jobs)
-    task_workers = min(task_count, requested_task_workers) if requested_task_workers > 0 else min(task_count, max(1, cpu_budget // jobs_per_task))
-    return _ParallelExecutionPlan(task_workers=max(1, task_workers), jobs_per_task=jobs_per_task, cpu_budget=cpu_budget, logical_cpus=logical_cpus, task_count=task_count)
+def _spot_tpe_worker_run(payload: Dict[str, Any]) -> None:
+    os.environ.setdefault("OMP_NUM_THREADS", "1")
+    os.environ.setdefault("MKL_NUM_THREADS", "1")
+    os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+    os.environ.setdefault("VECLIB_MAXIMUM_THREADS", "1")
+    os.environ.setdefault("NUMBA_NUM_THREADS", "1")
+    journal_path = Path(str(payload["journal_path"]))
+    tf_study_name = str(payload["study_name"])
+    tf = str(payload["tf"])
+    target_str = str(payload["target_str"])
+    symbols = list(payload["symbols"])
+    mode = str(payload["mode"])
+    seed = int(payload["seed"])
+    n_trials = int(payload["n_trials"])
+    n_trials_total = int(payload["n_trials_total"])
+    prebuilt_cpcv_bundle = payload["prebuilt_cpcv_bundle"]
+    data_maps = payload["data_maps"]
+    progress_queue = payload["progress_queue"]
+    project_root = str(payload["project_root"])
+    signal_cache_dir = str(payload.get("signal_cache_dir", ""))
+    if signal_cache_dir:
+        os.environ["OPT_SPOT_SIGNAL_CACHE_DIR"] = signal_cache_dir
+    progress_key = str(payload["progress_key"])
 
-def _run_tf_optimization(task: Tuple[Any, str], ctx: _TfOptimizationContext) -> Tuple[Tuple[Any, str], optuna.Study]:
-    target_obj, tf = task
-    target_str = "_".join(target_obj) if isinstance(target_obj, (list, tuple)) else target_obj
-    progress_key = _task_progress_key(target_obj, tf)
-    tf_study_name: str = f"OptSpot_{target_str.replace('/', '').replace('-', '')}_{tf}_{ctx.mode}"
-    
-    storage: Any
-    if ctx.use_journal_storage:
-        journal_path = Path(ctx.project_root) / f"optuna_spot_journal_{target_str.replace('/', '').replace('-', '')}_{tf}.log"
-        _ensure_fresh_journal(journal_path)
-        lock_obj = None
-        if sys.platform == "win32":
-            from src.futures_strategy.opt_futures_utils.win_journal_lock import WindowsNamedMutexJournalLock
-            lock_obj = WindowsNamedMutexJournalLock(str(journal_path))
-        backend = JournalFileBackend(str(journal_path), lock_obj=lock_obj)
-        storage = _ThreadSafeJournalStorageWrapper(JournalStorage(backend))
-    else:
-        storage = InMemoryStorage()
+    tf_space = get_search_space_spot(tf)
 
-    sampler = optuna.samplers.TPESampler(
-        seed=ctx.seeds[0],
-        n_startup_trials=int(OPT_SPOT_CONFIG.get("tpe_n_startup_trials", 96)),
+    sampler = TPESampler(
+        seed=seed,
+        n_startup_trials=0,
+        multivariate=True,
+        group=True,
+        constant_liar=True,
     )
-    pruner = optuna.pruners.MedianPruner(
+    base_pruner = MedianPruner(
         n_startup_trials=int(OPT_SPOT_CONFIG.get("tpe_pruner_n_startup_trials", 10)),
-        n_warmup_steps=int(OPT_SPOT_CONFIG.get("tpe_pruner_n_warmup_steps", 2)),
+        n_warmup_steps=int(OPT_SPOT_CONFIG.get("tpe_pruner_n_warmup_steps", 8)),
+    )
+    pruner = PatientPruner(
+        base_pruner,
+        patience=int(OPT_SPOT_CONFIG.get("tpe_pruner_patience", 2)),
     )
 
-    study = optuna.create_study(
+    backend = JournalFileBackend(str(journal_path), lock_obj=_journal_lock_for_path(journal_path))
+    storage = JournalStorage(backend)
+
+    study = optuna.load_study(
         study_name=tf_study_name,
         storage=storage,
-        direction="maximize",
         sampler=sampler,
         pruner=pruner,
     )
 
     best_so_far: float = float("-inf")
 
-    def _progress_cb(study_inner: optuna.Study, trial: optuna.trial.FrozenTrial) -> None:
+    def _progress_cb(_study_inner: optuna.Study, trial: optuna.trial.FrozenTrial) -> None:
+        nonlocal best_so_far
+        cur_val: float = 0.0
+        if trial.value is not None:
+            try:
+                cur_val = float(trial.value)
+            except Exception:
+                cur_val = 0.0
+        if cur_val > best_so_far:
+            best_so_far = cur_val
+        progress_queue.put(
+            (
+                progress_key,
+                trial.number + 1,
+                n_trials_total,
+                0.0 if best_so_far == float("-inf") else best_so_far,
+            )
+        )
+
+    cache_root_opt = Path(signal_cache_dir) if signal_cache_dir else None
+
+    def _objective_with_logging(trial: optuna.Trial) -> float:
+        try:
+            return objective_spot(
+                trial,
+                data_maps=data_maps,
+                symbols=symbols,
+                tf_target=tf,
+                space=tf_space,
+                mode=mode,
+                project_root=project_root,
+                prebuilt_cpcv_bundle=prebuilt_cpcv_bundle,
+                signal_disk_cache_root=cache_root_opt,
+            )
+        except optuna.TrialPruned:
+            raise
+        except Exception:
+            _logger.exception("[%s/%s] Trial %d failed.", target_str, tf, trial.number)
+            raise
+
+    study.optimize(
+        _objective_with_logging,
+        n_trials=n_trials,
+        n_jobs=1,
+        catch=(Exception,),
+        callbacks=[_progress_cb],
+    )
+
+
+def _run_tf_optimization(task: Tuple[Any, str], ctx: _TfOptimizationContext) -> Tuple[Tuple[Any, str], optuna.Study]:
+    target_obj, tf = task
+    target_str = "_".join(target_obj) if isinstance(target_obj, (list, tuple)) else target_obj
+    progress_key = _task_progress_key(target_obj, tf)
+    tf_study_name: str = f"OptSpot_{target_str.replace('/', '').replace('-', '')}_{tf}_{ctx.mode}"
+
+    journal_path: Path | None = None
+    if ctx.use_journal_storage:
+        journal_path = Path(ctx.project_root) / f"optuna_spot_journal_{target_str.replace('/', '').replace('-', '')}_{tf}.log"
+        if ctx.fresh_journal:
+            _ensure_fresh_journal(journal_path)
+
+    n_qmc = min(int(OPT_SPOT_CONFIG.get("tpe_n_startup_trials", 96)), int(ctx.n_trials))
+    seed = int(ctx.seeds[0])
+
+    tpe_thread_safe = ctx.use_journal_storage and ctx.parallel_tpe_workers <= 1 and ctx.n_jobs > 1
+
+    storage: Any
+    if ctx.use_journal_storage:
+        assert journal_path is not None
+        storage = _build_journal_storage(journal_path, thread_safe=tpe_thread_safe)
+    else:
+        storage = InMemoryStorage()
+
+    qmc_sampler = QMCSampler(qmc_type="sobol", scramble=True, seed=seed)
+    base_pruner = MedianPruner(
+        n_startup_trials=int(OPT_SPOT_CONFIG.get("tpe_pruner_n_startup_trials", 10)),
+        n_warmup_steps=int(OPT_SPOT_CONFIG.get("tpe_pruner_n_warmup_steps", 8)),
+    )
+    pruner = PatientPruner(
+        base_pruner,
+        patience=int(OPT_SPOT_CONFIG.get("tpe_pruner_patience", 2)),
+    )
+
+    study = optuna.create_study(
+        study_name=tf_study_name,
+        storage=storage,
+        direction="maximize",
+        sampler=qmc_sampler,
+        pruner=pruner,
+        load_if_exists=False,
+    )
+
+    best_so_far: float = float("-inf")
+
+    def _progress_cb(_study_inner: optuna.Study, trial: optuna.trial.FrozenTrial) -> None:
         nonlocal best_so_far
         cur_val: float = 0.0
         if trial.value is not None:
@@ -236,6 +410,19 @@ def _run_tf_optimization(task: Tuple[Any, str], ctx: _TfOptimizationContext) -> 
 
     tf_space = get_search_space_spot(tf)
 
+    ref_sym0 = ctx.symbols[0]
+    is_off0 = int(ctx.data_maps[ref_sym0].get(f"is_start_idx_{tf}", 0))
+    ref_df0 = ctx.data_maps[ref_sym0][tf]
+    prebuilt_cpcv_bundle = None
+    if ref_df0 is not None and not ref_df0.empty:
+        ref_len0 = len(ref_df0) - is_off0
+        if ref_len0 >= 200:
+            prebuilt_cpcv_bundle = build_cpcv_test_paths_with_fallback(
+                ref_len0, embargo=int(EMBARGO_BARS.get(tf, 0))
+            )
+
+    cache_root_opt = Path(ctx.signal_cache_dir) if ctx.signal_cache_dir else None
+
     def _objective_with_logging(trial: optuna.Trial) -> float:
         try:
             return objective_spot(
@@ -246,6 +433,8 @@ def _run_tf_optimization(task: Tuple[Any, str], ctx: _TfOptimizationContext) -> 
                 space=tf_space,
                 mode=ctx.mode,
                 project_root=ctx.project_root,
+                prebuilt_cpcv_bundle=prebuilt_cpcv_bundle,
+                signal_disk_cache_root=cache_root_opt,
             )
         except optuna.TrialPruned:
             raise
@@ -253,8 +442,83 @@ def _run_tf_optimization(task: Tuple[Any, str], ctx: _TfOptimizationContext) -> 
             _logger.exception("[%s/%s] Trial %d failed.", target_str, tf, trial.number)
             raise
 
-    _logger.info("[%s/%s] Starting Spot TPE (CPCV discovery, growth objective)...", target_str, tf)
-    study.optimize(_objective_with_logging, n_trials=ctx.n_trials, n_jobs=ctx.n_jobs, catch=(Exception,), callbacks=[_progress_cb])
+    _logger.info("[%s/%s] Spot QMC startup (Sobol) then TPE (CPCV discovery)...", target_str, tf)
+    study.optimize(_objective_with_logging, n_trials=n_qmc, n_jobs=1, catch=(Exception,), callbacks=[_progress_cb])
+
+    remaining = int(ctx.n_trials) - n_qmc
+    if remaining <= 0:
+        return (target_obj, tf), study
+
+    tpe_sampler = TPESampler(
+        seed=seed,
+        n_startup_trials=0,
+        multivariate=True,
+        group=True,
+        constant_liar=True,
+    )
+
+    if ctx.use_journal_storage:
+        assert journal_path is not None
+        storage_tpe = _build_journal_storage(journal_path, thread_safe=tpe_thread_safe)
+    else:
+        storage_tpe = storage
+
+    study = optuna.load_study(
+        study_name=tf_study_name,
+        storage=storage_tpe,
+        sampler=tpe_sampler,
+        pruner=pruner,
+    )
+
+    use_inner_pool = (
+        ctx.parallel_tpe_workers > 1
+        and remaining > 0
+        and not ctx.disable_inner_tpe_pool
+        and ctx.use_journal_storage
+    )
+
+    if use_inner_pool:
+        assert journal_path is not None
+        n_workers = min(int(ctx.parallel_tpe_workers), int(remaining))
+        splits = _split_tpe_trials(remaining, n_workers)
+        payloads: List[Dict[str, Any]] = []
+        for nt in splits:
+            if nt <= 0:
+                continue
+            payloads.append(
+                {
+                    "journal_path": str(journal_path),
+                    "study_name": tf_study_name,
+                    "tf": tf,
+                    "target_str": target_str,
+                    "symbols": list(ctx.symbols),
+                    "mode": ctx.mode,
+                    "seed": seed,
+                    "n_trials": nt,
+                    "n_trials_total": ctx.n_trials,
+                    "prebuilt_cpcv_bundle": prebuilt_cpcv_bundle,
+                    "data_maps": ctx.data_maps,
+                    "progress_queue": ctx.progress_queue,
+                    "project_root": ctx.project_root,
+                    "signal_cache_dir": ctx.signal_cache_dir,
+                    "progress_key": progress_key,
+                }
+            )
+        with concurrent.futures.ProcessPoolExecutor(max_workers=len(payloads)) as pool:
+            futures = [pool.submit(_spot_tpe_worker_run, p) for p in payloads]
+            for f in concurrent.futures.as_completed(futures):
+                f.result()
+        storage_final = _build_journal_storage(journal_path, thread_safe=False)
+        study = optuna.load_study(study_name=tf_study_name, storage=storage_final)
+        return (target_obj, tf), study
+
+    study.optimize(
+        _objective_with_logging,
+        n_trials=remaining,
+        n_jobs=ctx.n_jobs,
+        catch=(Exception,),
+        callbacks=[_progress_cb],
+    )
     return (target_obj, tf), study
 
 def main() -> None:
@@ -263,7 +527,7 @@ def main() -> None:
     parser.add_argument("--mode", type=str, choices=["single", "multi"], default="multi")
     parser.add_argument("--trials", type=int, default=OPT_SPOT_CONFIG["total_trials"])
     parser.add_argument("--jobs", type=int, default=int(OPT_SPOT_CONFIG.get("n_jobs", 8)))
-    parser.add_argument("--task-workers", type=int, default=int(OPT_SPOT_CONFIG.get("task_workers", 1)))
+    parser.add_argument("--task-workers", type=int, default=int(OPT_SPOT_CONFIG.get("task_workers", 0)))
     parser.add_argument("--tf", type=str, choices=["4h"], default=OPT_SPOT_CONFIG.get("TARGET_TIMEFRAMES", ["4h"])[0])
     parser.add_argument("--reference-date", type=str, default=None)
     args = parser.parse_args()
@@ -342,9 +606,16 @@ def main() -> None:
         return
 
     tasks = [(tuple(valid_symbols), args.tf)] if args.mode == "multi" else [(s, args.tf) for s in valid_symbols]
-    plan = _resolve_parallel_plan(len(tasks), args.jobs, args.task_workers, 0)
-    use_mp = len(tasks) > 1 and plan.task_workers > 1
-    manager = Manager() if use_mp else None; progress_queue = manager.Queue() if manager else queue.Queue()
+    plan = _resolve_spot_execution_plan(len(tasks), args.mode, args.jobs, args.task_workers)
+    signal_cache_dir = str(Path(project_root) / ".spot_signal_cache")
+    Path(signal_cache_dir).mkdir(parents=True, exist_ok=True)
+    os.environ["OPT_SPOT_SIGNAL_CACHE_DIR"] = signal_cache_dir
+
+    need_multiprocess_queue = plan.use_outer_process_pool or (
+        args.mode == "multi" and plan.parallel_tpe_workers > 1
+    )
+    manager = Manager() if need_multiprocess_queue else None
+    progress_queue = manager.Queue() if manager else queue.Queue()
 
     tf_bars = {}
     for i, (target, tf) in enumerate(tasks):
@@ -371,15 +642,31 @@ def main() -> None:
     best_results = {}
     pending_json_writes: List[Tuple[str, Dict[str, Any], float, bool]] = []
     try:
-        if use_mp:
-            with concurrent.futures.ProcessPoolExecutor(max_workers=plan.task_workers) as exec:
-                futures = {exec.submit(_run_tf_optimization, t, _TfOptimizationContext(
-                    clean_symbol=("_".join(t[0]) if isinstance(t[0], tuple) else t[0]).replace("/", ""),
-                    seeds=OPT_SPOT_CONFIG["seeds"], n_trials=args.trials, n_jobs=plan.jobs_per_task,
-                    data_maps={s: data_maps[s] for s in (list(t[0]) if isinstance(t[0], tuple) else [t[0]])},
-                    symbols=(list(t[0]) if isinstance(t[0], tuple) else [t[0]]), project_root=project_root,
-                    progress_queue=progress_queue, mode=args.mode
-                )): t for t in tasks}
+        if plan.use_outer_process_pool:
+            with concurrent.futures.ProcessPoolExecutor(max_workers=plan.outer_task_workers) as exec:
+                futures = {
+                    exec.submit(
+                        _run_tf_optimization,
+                        t,
+                        _TfOptimizationContext(
+                            clean_symbol=("_".join(t[0]) if isinstance(t[0], tuple) else t[0]).replace("/", ""),
+                            seeds=OPT_SPOT_CONFIG["seeds"],
+                            n_trials=args.trials,
+                            n_jobs=plan.jobs_per_task,
+                            data_maps={s: data_maps[s] for s in (list(t[0]) if isinstance(t[0], tuple) else [t[0]])},
+                            symbols=(list(t[0]) if isinstance(t[0], tuple) else [t[0]]),
+                            project_root=project_root,
+                            progress_queue=progress_queue,
+                            mode=args.mode,
+                            use_journal_storage=False,
+                            parallel_tpe_workers=1,
+                            disable_inner_tpe_pool=True,
+                            fresh_journal=True,
+                            signal_cache_dir=signal_cache_dir,
+                        ),
+                    ): t
+                    for t in tasks
+                }
                 for f in concurrent.futures.as_completed(futures):
                     t_res, study = f.result()
                     best_results[t_res] = study
@@ -397,7 +684,11 @@ def main() -> None:
                         project_root=project_root,
                         progress_queue=progress_queue,
                         mode=args.mode,
-                        use_journal_storage=False,
+                        use_journal_storage=(args.mode == "multi"),
+                        parallel_tpe_workers=plan.parallel_tpe_workers if args.mode == "multi" else 1,
+                        disable_inner_tpe_pool=plan.use_outer_process_pool,
+                        fresh_journal=True,
+                        signal_cache_dir=signal_cache_dir,
                     ),
                 )
                 best_results[t_res] = study
