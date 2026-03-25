@@ -39,7 +39,13 @@ class BacktestEngineFastSpot:
         self._prepare_data()
 
     _REQUIRED_INDICATOR_COLS: frozenset = frozenset({
-        "entry_upper", "trend_direction", "strength_filter", "atr"
+        "entry_upper",
+        "trend_direction",
+        "strength_filter",
+        "atr",
+        "regime_risk_mult",
+        "kill_signal",
+        "garch_kelly_f",
     })
 
     def _prepare_data(self) -> None:
@@ -95,16 +101,26 @@ class BacktestEngineFastSpot:
         use_compounding = self.strategy.params.get('USE_COMPOUNDING', True)
         max_capital_usage = self.strategy.params.get('MAX_CAPITAL_USAGE', 1e12) 
 
+        n_bars = len(close)
+        regime_rm = df["daily_regime_risk_mult"].values if "daily_regime_risk_mult" in df.columns else np.ones(n_bars, dtype=np.float64)
+        garch_k = df["daily_garch_kelly_f"].values if "daily_garch_kelly_f" in df.columns else np.ones(n_bars, dtype=np.float64)
+        kill_sig = df["daily_kill_signal"].values if "daily_kill_signal" in df.columns else np.zeros(n_bars, dtype=np.float64)
+
+        kill_cd = int(self.strategy.params.get("KILL_COOLDOWN_BARS", 6))
+        delta_gate = float(self.strategy.params.get("DELTA_GATE", 0.08))
+
         trades, final_balance, equity_curve = backtest_loop_numba_spot(
             close, high, low, open_prices,
             entry_upper,
             trend_dir, strength_filter, atr,
+            regime_rm, garch_k, kill_sig,
             self.initial_balance, self.fee_rate, self.slippage_rate,
             self.risk_per_trade, timestamps,
             long_atr_mult, long_trail_mult, long_tp_mult,
             long_trail_lock_mult, tp_lock_mult,
             warmup_bars, self._execution_start_idx,
-            use_compounding, max_capital_usage
+            use_compounding, max_capital_usage,
+            kill_cd, delta_gate,
         )
         
         self.balance = final_balance
@@ -225,12 +241,14 @@ def backtest_loop_numba_spot(
     close, high, low, open_prices,
     entry_upper,
     trend_dir, strength_filter, atr,
+    regime_risk_mult, garch_kelly_f, kill_signal,
     initial_balance, fee_rate, slippage_rate,
     risk_per_trade, timestamps,
     long_atr_mult, long_trail_mult, long_tp_mult,
     long_trail_lock_mult, tp_lock_mult,
     warmup_bars, execution_start_idx,
-    use_compounding, max_capital_usage
+    use_compounding, max_capital_usage,
+    kill_cooldown_bars, delta_gate,
 ):
     n = len(close)
     balance = initial_balance
@@ -250,6 +268,10 @@ def backtest_loop_numba_spot(
     max_trades = 30000
     trades = np.zeros((max_trades, 7))  
     trade_count = 0
+
+    cooldown_remaining = 0
+    last_entry_risk_pct = 0.0
+    skip_cooldown_tick = False
     
     for i in range(n):
         if i < warmup_bars or i < execution_start_idx:
@@ -281,29 +303,38 @@ def backtest_loop_numba_spot(
         if in_position:
             exit_triggered = False
             exit_price = 0.0
+
+            kill_now = kill_signal[i] > 0.5 if i < len(kill_signal) else False
+            if kill_now:
+                exit_price = c_open * (1.0 - slippage_rate)
+                exit_triggered = True
+                cooldown_remaining = kill_cooldown_bars
+                skip_cooldown_tick = True
             
-            if c_high > highest:
-                highest = c_high
+            if not exit_triggered:
+                if c_high > highest:
+                    highest = c_high
             
-            pos_atr = atr[entry_idx]
+                pos_atr = atr[entry_idx]
             
             # Check Stop Loss first (Gap down)
-            if c_open <= stop_price:
+            if not exit_triggered and c_open <= stop_price:
                 exit_price = c_open * (1 - slippage_rate)
                 exit_triggered = True
-            elif c_low <= stop_price:
+            elif not exit_triggered and c_low <= stop_price:
                 exit_price = stop_price * (1 - slippage_rate)
                 exit_triggered = True
             # Check Take Profit (Gap up or high breach)
-            elif c_open >= tp_price:
+            elif not exit_triggered and c_open >= tp_price:
                 exit_price = c_open * (1 - slippage_rate)
                 exit_triggered = True
-            elif c_high >= tp_price:
+            elif not exit_triggered and c_high >= tp_price:
                 exit_price = tp_price * (1 - slippage_rate)
                 exit_triggered = True
             
             if not exit_triggered:
                 # Parabolic Tightening: If price moved enough from entry relative to ATR, use tighter trail
+                pos_atr = atr[entry_idx]
                 dist = highest - entry_price
                 current_trail_mult = long_trail_mult
                 if dist > (pos_atr * tp_lock_mult):
@@ -323,11 +354,16 @@ def backtest_loop_numba_spot(
                     trades[trade_count] = [entry_idx, i, entry_price, exit_price, pnl, amount, entry_fee_stored]
                     trade_count += 1
                 in_position = False
+                last_entry_risk_pct = 0.0
                 bar_processed = True
 
         if not in_position and not bar_processed:
             prev_i = i - 1 if i > 0 else 0
             if strength_filter[prev_i] == 0 or np.isnan(strength_filter[prev_i]):
+                equity_curve[i] = balance
+                continue
+
+            if cooldown_remaining > 0:
                 equity_curve[i] = balance
                 continue
 
@@ -349,9 +385,27 @@ def backtest_loop_numba_spot(
                 stop_distance = abs(fill_price - stop_price)
                 if stop_distance > 0:
                     current_equity = max_capital_usage if use_compounding and balance > max_capital_usage else balance
+
+                    rr = regime_risk_mult[prev_i] if prev_i < len(regime_risk_mult) else 1.0
+                    gk = garch_kelly_f[prev_i] if prev_i < len(garch_kelly_f) else 1.0
+                    if np.isnan(rr) or rr <= 0.0:
+                        equity_curve[i] = balance
+                        continue
+                    if np.isnan(gk) or gk <= 0.0:
+                        gk = 1.0
+                    eff = rr * gk
+                    if eff < 0.05:
+                        eff = 0.05
+                    if eff > 1.0:
+                        eff = 1.0
+
+                    new_risk_pct = risk_per_trade * eff
+                    if last_entry_risk_pct > 1e-12 and abs(new_risk_pct - last_entry_risk_pct) < delta_gate:
+                        equity_curve[i] = balance
+                        continue
                     
                     # Spot Allocation: Allocate direct percentage of available equity
-                    target_capital = current_equity * risk_per_trade
+                    target_capital = current_equity * new_risk_pct
                     
                     # Prevent allocating more than we have
                     available_capital = balance * 0.99  # 1% buffer for fees
@@ -370,6 +424,7 @@ def backtest_loop_numba_spot(
                             entry_price = fill_price
                             entry_idx = i
                             highest = fill_price
+                            last_entry_risk_pct = new_risk_pct
                             tp_price = fill_price + (prev_atr * long_tp_mult)
                             
                             if c_low <= stop_price:
@@ -382,6 +437,7 @@ def backtest_loop_numba_spot(
                                     trades[trade_count] = [entry_idx, i, entry_price, intra_exit_price, pnl, amount, entry_fee_stored]
                                     trade_count += 1
                                 in_position = False
+                                last_entry_risk_pct = 0.0
 
         if in_position:
             unrealized = (c_price - entry_price) * amount
@@ -391,6 +447,10 @@ def backtest_loop_numba_spot(
             
         if equity_curve[i] > peak_equity:
             peak_equity = equity_curve[i]
+
+        if not skip_cooldown_tick and cooldown_remaining > 0:
+            cooldown_remaining -= 1
+        skip_cooldown_tick = False
 
     if in_position and n > 0:
         last_idx = n - 1
