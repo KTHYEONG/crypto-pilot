@@ -28,7 +28,7 @@ if project_root not in sys.path:
 from src.spot_strategy.data_collector_spot import DataCollectorSpot
 from src.spot_strategy.strategies_spot import UltimateSpotStrategy
 from config.settings import DATA_DIR, SPOT_INITIAL_BALANCE
-from config.opt_config import OPT_SPOT_CONFIG, get_search_space_spot, get_quarterly_window
+from config.opt_config import OPT_SPOT_CONFIG, SPOT_SYMBOLS, get_search_space_spot, get_quarterly_window
 from src.optimization.opt_utils import compute_segment_merge_index
 from src.spot_strategy.opt_spot_utils.evaluator import (
     evaluate_symbol_fold,
@@ -259,7 +259,7 @@ def _run_tf_optimization(task: Tuple[Any, str], ctx: _TfOptimizationContext) -> 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--symbols", type=str, default="KRW-BTC,KRW-XRP,KRW-ETH,KRW-LINK,KRW-ADA,KRW-DOT")
+    parser.add_argument("--symbols", type=str, default=",".join(SPOT_SYMBOLS))
     parser.add_argument("--mode", type=str, choices=["single", "multi"], default="multi")
     parser.add_argument("--trials", type=int, default=OPT_SPOT_CONFIG["total_trials"])
     parser.add_argument("--jobs", type=int, default=int(OPT_SPOT_CONFIG.get("n_jobs", 8)))
