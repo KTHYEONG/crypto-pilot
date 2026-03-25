@@ -21,6 +21,17 @@ def calc_profit_factor_from_pnl(pnl_series: pd.Series) -> float:
 
     return gross_profit / gross_loss
 
+def calc_pain_index_from_equity(equity_curve: np.ndarray) -> float:
+    """Mean absolute drawdown depth (fraction of peak), O(T) pain area proxy."""
+    if equity_curve.size < 2:
+        return 1e-9
+    safe = np.clip(equity_curve.astype(np.float64, copy=False), 1e-12, None)
+    peak = np.maximum.accumulate(safe)
+    dd = (peak - safe) / peak
+    dd = np.nan_to_num(dd, nan=0.0, posinf=0.0, neginf=0.0)
+    return float(max(np.mean(dd), 1e-9))
+
+
 def calc_mdd_from_equity(equity_curve: np.ndarray) -> float:
     if len(equity_curve) == 0:
         return 0.0
