@@ -4,6 +4,13 @@ data/
 # cursor
 .cursor/
 
+# claude
+CLAUDE.md
+.claude/
+
+# cache
+.spot_signal_cache/
+
 # legacy
 legacy/
 
