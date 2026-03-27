@@ -99,7 +99,7 @@ def _run_shared_cash_packed_numba(
                 if slot_sym[sj] < 0 or not slot_in[sj]:
                     continue
                 si = slot_sym[sj]
-                ks = kill_signal[si, i]
+                ks = kill_signal[si, i - 1] if i > 0 else 0.0
 
                 c_open = open_p[si, i]
                 c_high = high[si, i]
