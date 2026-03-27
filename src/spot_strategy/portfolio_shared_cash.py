@@ -318,9 +318,10 @@ def _process_in_position_bar(
     c_low = float(low[i])
 
     if (
-        kill_signal is not None
-        and len(kill_signal) > i
-        and float(kill_signal[i]) > 0.5
+        i > 0
+        and kill_signal is not None
+        and len(kill_signal) > (i - 1)
+        and float(kill_signal[i - 1]) > 0.5
         and slot.in_position
     ):
         exit_price = c_open * (1.0 - slippage_rate)

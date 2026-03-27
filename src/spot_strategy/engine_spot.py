@@ -304,7 +304,12 @@ def backtest_loop_numba_spot(
             exit_triggered = False
             exit_price = 0.0
 
-            kill_now = kill_signal[i] > 0.5 if i < len(kill_signal) else False
+            # Causal: kill_signal[i] uses bar-i close; exits at bar-i open — use prior bar.
+            kill_now = (
+                (kill_signal[i - 1] > 0.5)
+                if i > 0 and i - 1 < len(kill_signal)
+                else False
+            )
             if kill_now:
                 exit_price = c_open * (1.0 - slippage_rate)
                 exit_triggered = True

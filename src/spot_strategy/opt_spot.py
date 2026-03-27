@@ -6,6 +6,7 @@ import os
 import queue
 import sys
 import threading
+import warnings
 import optuna
 from optuna.pruners import MedianPruner, PatientPruner
 from optuna.samplers import QMCSampler, TPESampler
@@ -21,6 +22,13 @@ from typing import Any, Dict, List, Sequence, Tuple
 import concurrent.futures
 from multiprocessing import Manager
 from tqdm import tqdm
+
+warnings.filterwarnings("ignore")
+warnings.filterwarnings(
+    "ignore",
+    message=r".*pkg_resources is deprecated as an API.*",
+    category=UserWarning,
+)
 
 project_root: str = str(Path(__file__).resolve().parents[2])
 if project_root not in sys.path:
@@ -47,9 +55,6 @@ from src.spot_strategy.opt_spot_utils.go_nogo import (
     run_holdout_portfolio_trade_floor,
     run_portfolio_discovery_veto,
 )
-
-import warnings
-warnings.filterwarnings("ignore")
 
 os.environ.setdefault("OMP_NUM_THREADS", "1")
 os.environ.setdefault("MKL_NUM_THREADS", "1")
@@ -322,14 +327,13 @@ def _spot_tpe_worker_run(payload: Dict[str, Any]) -> None:
 
     def _progress_cb(_study_inner: optuna.Study, trial: optuna.trial.FrozenTrial) -> None:
         nonlocal best_so_far
-        cur_val: float = 0.0
         if trial.value is not None:
             try:
                 cur_val = float(trial.value)
             except Exception:
                 cur_val = 0.0
-        if cur_val > best_so_far:
-            best_so_far = cur_val
+            if cur_val > best_so_far:
+                best_so_far = cur_val
         progress_queue.put(
             (
                 progress_key,
@@ -416,14 +420,13 @@ def _run_tf_optimization(task: Tuple[Any, str], ctx: _TfOptimizationContext) -> 
 
     def _progress_cb(_study_inner: optuna.Study, trial: optuna.trial.FrozenTrial) -> None:
         nonlocal best_so_far
-        cur_val: float = 0.0
         if trial.value is not None:
             try:
                 cur_val = float(trial.value)
             except Exception:
                 cur_val = 0.0
-        if cur_val > best_so_far:
-            best_so_far = cur_val
+            if cur_val > best_so_far:
+                best_so_far = cur_val
         ctx.progress_queue.put(
             (progress_key, trial.number + 1, ctx.n_trials, 0.0 if best_so_far == float("-inf") else best_so_far)
         )
@@ -463,7 +466,7 @@ def _run_tf_optimization(task: Tuple[Any, str], ctx: _TfOptimizationContext) -> 
             raise
 
     _logger.info("[%s/%s] Spot QMC startup (Sobol) then TPE (CPCV discovery)...", target_str, tf)
-    study.optimize(_objective_with_logging, n_trials=n_qmc, n_jobs=1, catch=(Exception,), callbacks=[_progress_cb])
+    study.optimize(_objective_with_logging, n_trials=n_qmc, n_jobs=ctx.n_jobs, catch=(Exception,), callbacks=[_progress_cb])
 
     remaining = int(ctx.n_trials) - n_qmc
     if remaining <= 0:
@@ -620,6 +623,12 @@ def main() -> None:
             len(oos_data_maps[valid_symbols[0]][args.tf]),
             len(valid_symbols),
         )
+
+    for sym in valid_symbols:
+        tf_k = str(args.tf)
+        oos_df = oos_data_maps[sym][tf_k]
+        oos_ix = int(oos_data_maps[sym].get(f"oos_start_idx_{tf_k}", len(oos_df)))
+        oos_df.attrs["nu_fit_end"] = oos_ix
 
     if not valid_symbols:
         _logger.error("❌ No valid symbols with data found. Aborting optimization.")

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import numpy as np
 import optuna
 from typing import Any, Dict
 
@@ -41,24 +42,21 @@ def suggest_params_spot(trial: optuna.Trial, space: Dict[str, Any], tf: str) -> 
     if long_tp < long_atr * 1.2:
         params["LONG_TP_MULT"] = long_atr * 1.2
 
-    atr_s = int(params.get("ATR_RATIO_PERIOD", 14))
-    atr_l = int(params.get("ATR_RATIO_LONG_PERIOD", 42))
-    if atr_l <= atr_s:
-        params["ATR_RATIO_LONG_PERIOD"] = atr_s * 3
+    atr_p = int(params.get("ATR_PERIOD", 14))
+    if atr_p < 5:
+        params["ATR_PERIOD"] = 5
 
     hmm_w = int(params.get("HMM_TRAIN_WINDOW", 360))
     if hmm_w < 120:
         params["HMM_TRAIN_WINDOW"] = 120
 
-    g_w = int(params.get("GARCH_WINDOW", 360))
-    if g_w < 120:
-        params["GARCH_WINDOW"] = 120
-
-    g_rf = int(params.get("GARCH_RETRAIN_FREQ", 24))
     h_rf = int(params.get("HMM_RETRAIN_FREQ", 24))
-    if g_rf < 1:
-        params["GARCH_RETRAIN_FREQ"] = 1
     if h_rf < 1:
         params["HMM_RETRAIN_FREQ"] = 1
+
+    if "FRAMA_PERIOD" in params:
+        fp = int(params["FRAMA_PERIOD"])
+        if fp % 2 != 0:
+            params["FRAMA_PERIOD"] = fp + 1
 
     return params

@@ -21,7 +21,7 @@ _NU_CLIP_HIGH: float = 10.0
 
 _GARCH_CACHE_MAXSIZE: int = 64
 _garch_cache_lock: threading.Lock = threading.Lock()
-_garch_cache: OrderedDict[tuple[int, int, float, int, int], pd.Series] = OrderedDict()
+_garch_cache: OrderedDict[tuple[int, int, float, int, int, int], pd.Series] = OrderedDict()
 
 
 def _garch_close_fingerprint(close: pd.Series) -> int:
@@ -71,9 +71,17 @@ def _nu_from_full_window_excess_kurtosis(
     log_ret: np.ndarray,
     w: int,
     nu_fallback: float,
+    nu_fit_end: int | None = None,
 ) -> float:
     """One-shot excess kurtosis on post-warmup returns; clip + shrink toward nu_fallback."""
-    seg = log_ret[int(w) :] if len(log_ret) > int(w) else log_ret
+    w_i = int(w)
+    if nu_fit_end is not None:
+        end = min(int(nu_fit_end), len(log_ret))
+        if end <= w_i:
+            return float(np.clip(nu_fallback, _NU_CLIP_LOW, _NU_CLIP_HIGH))
+        seg = log_ret[w_i:end]
+    else:
+        seg = log_ret[w_i:] if len(log_ret) > w_i else log_ret
     if seg.size < 50:
         return float(np.clip(nu_fallback, _NU_CLIP_LOW, _NU_CLIP_HIGH))
     x = seg - float(np.mean(seg))
@@ -97,6 +105,7 @@ def _compute_garch_kelly_series_core(
     window: int,
     retrain_freq: int,
     nu_fallback: float,
+    nu_fit_end: int | None = None,
 ) -> pd.Series:
     """Vectorized EWMA Kelly series (no MLE; retrain_freq accepted for API compatibility, ignored)."""
     _ = retrain_freq
@@ -113,7 +122,7 @@ def _compute_garch_kelly_series_core(
         _logger.debug("Degenerate returns after warmup; Kelly series stays neutral.")
         return pd.Series(out, index=close.index)
 
-    nu = _nu_from_full_window_excess_kurtosis(log_ret, w, nu_fallback)
+    nu = _nu_from_full_window_excess_kurtosis(log_ret, w, nu_fallback, nu_fit_end=nu_fit_end)
     sigma2 = _riskmetrics_ewma_variance(log_ret, _EWMA_LAMBDA)
     mu_short = (
         pd.Series(log_ret).rolling(30, min_periods=1).mean().to_numpy(dtype=np.float64)
@@ -133,6 +142,7 @@ def compute_garch_kelly_series(
     window: int,
     retrain_freq: int = 24,
     nu_fallback: float = 5.0,
+    nu_fit_end: int | None = None,
 ) -> pd.Series:
     """
     Per-bar fractional-Kelly multiplier in (0, 1] from EWMA variance and fixed nu (kurtosis shrink).
@@ -142,12 +152,14 @@ def compute_garch_kelly_series(
     w = max(120, int(window))
     rf = max(1, int(retrain_freq))
     fp = _garch_close_fingerprint(close)
-    cache_key: tuple[int, int, float, int, int] = (
+    nu_key = int(nu_fit_end) if nu_fit_end is not None else -1
+    cache_key: tuple[int, int, float, int, int, int] = (
         w,
         rf,
         float(nu_fallback),
         n,
         fp,
+        nu_key,
     )
 
     with _garch_cache_lock:
@@ -160,6 +172,7 @@ def compute_garch_kelly_series(
         window=window,
         retrain_freq=retrain_freq,
         nu_fallback=nu_fallback,
+        nu_fit_end=nu_fit_end,
     )
 
     with _garch_cache_lock:
