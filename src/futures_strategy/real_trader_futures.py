@@ -111,6 +111,12 @@ def _is_retryable_api_exception(exc: Exception) -> bool:
         if _CCXT_TRANSIENT_ERRORS and isinstance(cause, _CCXT_TRANSIENT_ERRORS):
             return True
 
+    error_text = str(exc).lower()
+    if ("recvwindow" in error_text) or ("outside of the recvwindow" in error_text):
+        return True
+    if ("timestamp for this request is outside" in error_text) or ("code\":-1021" in error_text):
+        return True
+
     return False
 
 
@@ -741,6 +747,7 @@ class RealTraderFutures:
                 order_deadline_ms=order_deadline_ms,
                 post_only_wait_seconds=post_only_wait_seconds,
                 post_only_requote_max=post_only_requote_max,
+                client_order_id=client_order_id,
             )
         except ccxt.RequestTimeout:
             logger.error(
@@ -898,6 +905,7 @@ class RealTraderFutures:
             logger.info("[DRY-RUN] cancel_all_orders(%s)", symbol)
             return True
 
+        self._sync_server_time_offset(force=True)
         return client.cancel_all_orders(symbol)
 
     def _resolve_timeframes(self, params: dict) -> Tuple[str, str]:
@@ -1318,6 +1326,12 @@ class RealTraderFutures:
             order_deadline_ms=int(late_bound_ms),
             post_only_wait_seconds=entry_post_only_wait_seconds,
             post_only_requote_max=entry_post_only_requote_max,
+            client_order_id=(
+                "RT_EN_"
+                + hashlib.md5(
+                    f"{symbol}|{expected_side}|{int(signal_candle_ts)}".encode("utf-8")
+                ).hexdigest()[:20]
+            ),
         )
         confirmed_pos = self._confirm_position(
             symbol, expected_side=expected_side, retries=6, sleep_seconds=0.3
@@ -1573,7 +1587,7 @@ class RealTraderFutures:
             amount = float(pos.get("amount", 0.0) or 0.0)
             in_position = abs(amount) > 0
 
-            state_snapshot = self.state_manager.get_symbol_state(symbol)
+            state_snapshot = self.state_manager.get_symbol_state(symbol) or {}
             current_price = self._get_market_price_safe(symbol)
             if not in_position:
                 try:
@@ -1632,7 +1646,7 @@ class RealTraderFutures:
                             symbol,
                             {
                                 "scale_order_id": None,
-                                "has_scaled_out": True,
+                                "has_scaled_out": False,
                             },
                         )
                 except Exception:
@@ -1675,7 +1689,7 @@ class RealTraderFutures:
                     atr=atr,
                     execution_tf=execution_tf,
                 )
-                state_snapshot = self.state_manager.get_symbol_state(symbol)
+                state_snapshot = self.state_manager.get_symbol_state(symbol) or {}
 
             if bool(state_snapshot.get("exit_pending", False)):
                 recovered = self._recover_pending_exit(
