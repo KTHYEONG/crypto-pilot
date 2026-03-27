@@ -9,32 +9,27 @@ _SPOT_FLOAT_PERTURB_KEYS: frozenset[str] = frozenset(
     {
         "RISK_PER_TRADE",
         "MAX_POSITION_PCT",
-        "SUPERTREND_MULT",
-        "ATR_EXPANSION_THRESHOLD",
         "LONG_ATR_MULT",
         "LONG_TRAIL_MULT",
         "LONG_TP_MULT",
         "TP_LOCK_ATR_MULT",
         "LONG_TRAIL_LOCK_MULT",
-        "KILL_ATR_K",
         "DELTA_GATE",
-        "LAMBDA_MAXDD",
+        "EVR_THRESHOLD",
+        "FRAMA_MIN_SLOPE",
+        "GARCH_NU_FALLBACK",
     }
 )
 _SPOT_INT_PERTURB_KEYS: frozenset[str] = frozenset(
     {
-        "SUPERTREND_PERIOD",
-        "ATR_RATIO_PERIOD",
-        "ATR_RATIO_LONG_PERIOD",
-        "EMA_TREND_PERIOD",
-        "MOMENTUM_ROC_PERIOD",
-        "RSI_PERIOD",
+        "ATR_PERIOD",
         "HMM_TRAIN_WINDOW",
         "HMM_RETRAIN_FREQ",
+        "KILL_COOLDOWN_BARS",
+        "FRAMA_PERIOD",
+        "EVR_WINDOW",
         "GARCH_WINDOW",
         "GARCH_RETRAIN_FREQ",
-        "KILL_COOLDOWN_BARS",
-        "HURST_WINDOW",
     }
 )
 
