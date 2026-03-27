@@ -61,7 +61,7 @@ def _frama_recurrence(
                 hh1 = high[j0]
             if low[j0] < ll1:
                 ll1 = low[j0]
-        n1 = hh1 - ll1
+        n1 = (hh1 - ll1) / half
         if n1 < 1e-12:
             n1 = 1e-12
 
@@ -73,7 +73,7 @@ def _frama_recurrence(
                 hh2 = high[j0]
             if low[j0] < ll2:
                 ll2 = low[j0]
-        n2 = hh2 - ll2
+        n2 = (hh2 - ll2) / half
         if n2 < 1e-12:
             n2 = 1e-12
 
@@ -85,7 +85,7 @@ def _frama_recurrence(
                 hh3 = high[j0]
             if low[j0] < ll3:
                 ll3 = low[j0]
-        n3 = hh3 - ll3
+        n3 = (hh3 - ll3) / n
         if n3 < 1e-12:
             n3 = 1e-12
 
