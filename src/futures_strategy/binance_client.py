@@ -895,6 +895,7 @@ class BinanceClient:
         order_deadline_ms=None,
         post_only_wait_seconds=1.2,
         post_only_requote_max=2,
+        client_order_id: str | None = None,
     ):
         """
         Production waterfall order executor.
@@ -945,10 +946,15 @@ class BinanceClient:
         last_order = None
         order_fill_tracker = {}
 
-        def build_params(base_params=None):
+        def build_params(base_params=None, *, order_tag: str | None = None):
             params = dict(base_params or {})
             if reduce_only:
                 params['reduceOnly'] = True
+            if client_order_id:
+                cid = client_order_id
+                if order_tag:
+                    cid = f"{client_order_id}_{order_tag}"
+                params['clientOrderId'] = cid[:36]
             return params
 
         start_local_time_ms = int(time.time() * 1000)
@@ -1075,7 +1081,10 @@ class BinanceClient:
                         side=side,
                         amount=request_amount,
                         price=target_price,
-                        params=build_params({'postOnly': True}),
+                        params=build_params(
+                            {'postOnly': True},
+                            order_tag=f"T1{requote_idx}",
+                        ),
                     )
                     register_fill(order, request_amount)
                     order = wait_post_only_fill(order, request_amount)
@@ -1172,7 +1181,7 @@ class BinanceClient:
                     side=side,
                     amount=request_amount,
                     price=limit_price,
-                    params=build_params({'timeInForce': 'IOC'}),
+                    params=build_params({'timeInForce': 'IOC'}, order_tag='T2'),
                 )
                 filled = register_fill(order, request_amount)
 
@@ -1234,7 +1243,7 @@ class BinanceClient:
                     side=side,
                     amount=remaining_amount,
                     price=hard_limit_price,
-                    params=build_params({"timeInForce": "IOC"}),
+                    params=build_params({"timeInForce": "IOC"}, order_tag='T3L'),
                 )
             else:
                 self.logger.warning(
@@ -1245,7 +1254,7 @@ class BinanceClient:
                     type="market",
                     side=side,
                     amount=remaining_amount,
-                    params=build_params(),
+                    params=build_params(order_tag='T3M'),
                 )
             register_fill(order, remaining_amount)
             return order
