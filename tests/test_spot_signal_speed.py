@@ -9,7 +9,7 @@ import pytest
 from src.spot_strategy.strategies_spot import UltimateSpotStrategy
 
 
-def _sample_ohlcv(n: int = 900, seed: int = 7) -> pd.DataFrame:
+def _sample_ohlcv(n: int = 480, seed: int = 7) -> pd.DataFrame:
     rng = np.random.default_rng(seed)
     idx = pd.date_range("2020-01-01", periods=n, freq="4h")
     price = 100.0 + np.cumsum(rng.standard_normal(n) * 0.5)
@@ -27,21 +27,12 @@ def _sample_ohlcv(n: int = 900, seed: int = 7) -> pd.DataFrame:
 
 def _default_params() -> dict[str, object]:
     return {
-        "SUPERTREND_PERIOD": 10,
-        "SUPERTREND_MULT": 3.0,
-        "ATR_RATIO_PERIOD": 14,
-        "ATR_RATIO_LONG_PERIOD": 42,
-        "ATR_EXPANSION_THRESHOLD": 1.2,
-        "EMA_TREND_PERIOD": 100,
-        "MOMENTUM_ROC_PERIOD": 14,
-        "RSI_PERIOD": 14,
-        "HMM_TRAIN_WINDOW": 240,
-        "HMM_RETRAIN_FREQ": 24,
-        "GARCH_WINDOW": 240,
-        "GARCH_RETRAIN_FREQ": 24,
-        "KILL_ATR_K": 4.0,
-        "HURST_WINDOW": 40,
-        "USE_HMM_REGIME": True,
+        "ATR_PERIOD": 14,
+        "FRAMA_PERIOD": 16,
+        "EVR_WINDOW": 20,
+        "EVR_THRESHOLD": 0.0,
+        "HMM_TRAIN_WINDOW": 120,
+        "HMM_RETRAIN_FREQ": 48,
     }
 
 
