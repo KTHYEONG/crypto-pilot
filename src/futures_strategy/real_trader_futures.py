@@ -1827,10 +1827,11 @@ class RealTraderFutures:
                         exit_price = float(avg_price)
                     elif raw_price is not None:
                         exit_price = float(raw_price)
-                    o_type = str(o.get("type", "") or "").upper()
-                    if "STOP" in o_type:
+                    raw_o_type = o.get("info", {}).get("type", "").upper()
+                    ccxt_o_type = o.get("type", "").upper()
+                    if "STOP" in raw_o_type or "STOP" in ccxt_o_type:
                         reason = f"Exchange SL Hit ({exit_price:.2f})"
-                    elif "TAKE_PROFIT" in o_type:
+                    elif "TAKE_PROFIT" in raw_o_type or "TAKE_PROFIT" in ccxt_o_type:
                         reason = f"Exchange TP Hit ({exit_price:.2f})"
                     break
             except Exception:
@@ -2912,16 +2913,20 @@ class RealTraderFutures:
                 pass
         return positions
 
+    @staticmethod
+    def _is_stop_loss_order(o: dict) -> bool:
+        """ccxt normalizes STOP_MARKET → 'market', so check raw info.type as well."""
+        ccxt_type = o.get("type", "").upper()
+        raw_type = o.get("info", {}).get("type", "").upper()
+        is_stop = "STOP" in ccxt_type or "STOP" in raw_type
+        is_take_profit = "TAKE_PROFIT" in ccxt_type or "TAKE_PROFIT" in raw_type
+        return is_stop and not is_take_profit
+
     @network_api_retry
     def _detect_stop_loss_orders(self, symbol: str) -> list:
         client = self._get_client_for_symbol(symbol)
         open_orders = client.fetch_open_orders(symbol)
-        return [
-            o
-            for o in open_orders
-            if ("STOP" in o.get("type", "").upper())
-            and ("TAKE_PROFIT" not in o.get("type", "").upper())
-        ]
+        return [o for o in open_orders if self._is_stop_loss_order(o)]
 
     @network_api_retry
     def _cancel_stop_orders_only(self, symbol: str):
@@ -2937,12 +2942,7 @@ class RealTraderFutures:
 
         client = self._get_client_for_symbol(symbol)
         open_orders = client.fetch_open_orders(symbol)
-        stop_orders = [
-            o
-            for o in open_orders
-            if ("STOP" in o.get("type", "").upper())
-            and ("TAKE_PROFIT" not in o.get("type", "").upper())
-        ]
+        stop_orders = [o for o in open_orders if self._is_stop_loss_order(o)]
         failed_cancels: list[str] = []
         last_exception: Optional[Exception] = None
         for o in stop_orders:
@@ -3036,11 +3036,7 @@ class RealTraderFutures:
         stop_price = client.round_price(symbol, stop_price)
 
         existing = client.fetch_open_orders(symbol)
-        existing_sl = [
-            o for o in existing
-            if ("STOP" in o.get("type", "").upper())
-            and ("TAKE_PROFIT" not in o.get("type", "").upper())
-        ]
+        existing_sl = [o for o in existing if self._is_stop_loss_order(o)]
         if existing_sl:
             logger.warning(
                 "[%s] _restore_stop_loss: %d existing SL order(s) found on exchange — aborting restore.",
