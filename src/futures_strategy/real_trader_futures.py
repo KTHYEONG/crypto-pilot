@@ -2734,6 +2734,7 @@ class RealTraderFutures:
                             if prev_stop > 0:
                                 client = self._get_client_for_symbol(symbol)
                                 prev_price_rounded = client.round_price(symbol, prev_stop)
+                                self._cancel_stop_orders_only(symbol)
                                 prev_sl_client_id = "RT_TR_FB_" + uuid.uuid4().hex[:20]
                                 sl_result_prev = self._place_stop_loss_safe(
                                     symbol,
