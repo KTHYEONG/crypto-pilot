@@ -2930,15 +2930,9 @@ class RealTraderFutures:
             try:
                 client = self._get_client_for_symbol(symbol)
                 client.exchange.cancel_order(sl_order_id, symbol)
-                self.state_manager.update_symbol_state(
-                    symbol,
-                    {
-                        "sl_order_id": None,
-                    },
-                )
-                return
             except Exception:
                 pass
+            self.state_manager.update_symbol_state(symbol, {"sl_order_id": None})
 
         client = self._get_client_for_symbol(symbol)
         open_orders = client.fetch_open_orders(symbol)
@@ -3039,6 +3033,29 @@ class RealTraderFutures:
             elif amount < 0 and stop_price <= entry_price:
                 stop_price = entry_price + (tick_size * 2)
         stop_price = client.round_price(symbol, stop_price)
+
+        existing = client.fetch_open_orders(symbol)
+        existing_sl = [
+            o for o in existing
+            if ("STOP" in o.get("type", "").upper())
+            and ("TAKE_PROFIT" not in o.get("type", "").upper())
+        ]
+        if existing_sl:
+            logger.warning(
+                "[%s] _restore_stop_loss: %d existing SL order(s) found on exchange — aborting restore.",
+                symbol,
+                len(existing_sl),
+            )
+            sl_order_id_existing = str(existing_sl[0].get("id", "") or "")
+            self.state_manager.update_symbol_state(
+                symbol,
+                {
+                    "last_sl_order_time": datetime.utcnow().isoformat(),
+                    "sl_required": False,
+                    **({"sl_order_id": sl_order_id_existing} if sl_order_id_existing else {}),
+                },
+            )
+            return True
 
         sl_client_id = f"RT_SL_RS_{uuid.uuid4().hex[:17]}"
         sl_result = self._place_stop_loss_safe(
