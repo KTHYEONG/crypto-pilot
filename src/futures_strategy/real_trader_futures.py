@@ -2915,12 +2915,22 @@ class RealTraderFutures:
 
     @staticmethod
     def _is_stop_loss_order(o: dict) -> bool:
-        """ccxt normalizes STOP_MARKET → 'market', so check raw info.type as well."""
-        ccxt_type = o.get("type", "").upper()
-        raw_type = o.get("info", {}).get("type", "").upper()
-        is_stop = "STOP" in ccxt_type or "STOP" in raw_type
-        is_take_profit = "TAKE_PROFIT" in ccxt_type or "TAKE_PROFIT" in raw_type
-        return is_stop and not is_take_profit
+        """ccxt normalizes STOP_MARKET → 'market', so check raw info.type and info.origType as well."""
+        ccxt_type = str(o.get("type") or "").upper()
+        info = o.get("info", {})
+        raw_type = str(info.get("type") or "").upper()
+        orig_type = str(info.get("origType") or "").upper()
+
+        is_stop = ("STOP" in ccxt_type) or ("STOP" in raw_type) or ("STOP" in orig_type)
+        is_take_profit = ("TAKE_PROFIT" in ccxt_type) or ("TAKE_PROFIT" in raw_type) or ("TAKE_PROFIT" in orig_type)
+        
+        stop_price = o.get("stopPrice") or info.get("stopPrice")
+        has_stop_price = stop_price is not None and float(stop_price) > 0
+
+        # 만약 타입에 STOP이 포함되어 있거나 (TP가 아닌데) stopPrice가 존재하면 SL로 간주
+        if (is_stop or has_stop_price) and not is_take_profit:
+            return True
+        return False
 
     @network_api_retry
     def _detect_stop_loss_orders(self, symbol: str) -> list:
@@ -2960,7 +2970,7 @@ class RealTraderFutures:
     def _cleanup_duplicate_sl_orders(self, symbol: str, sl_orders: list) -> list:
         if len(sl_orders) > 1:
             sorted_orders = sorted(
-                sl_orders, key=lambda x: x.get("timestamp", 0), reverse=True
+                sl_orders, key=lambda x: x.get("timestamp") or 0, reverse=True
             )
             client = self._get_client_for_symbol(symbol)
             for old_order in sorted_orders[1:]:
