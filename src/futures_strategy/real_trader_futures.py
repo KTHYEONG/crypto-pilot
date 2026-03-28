@@ -716,7 +716,7 @@ class RealTraderFutures:
                     "[%s] LIMIT order timeout. Reconciling with exchange...",
                     symbol,
                 )
-                open_orders = client.exchange.fetch_open_orders(
+                open_orders = client.fetch_open_orders(
                     exchange_symbol
                 )
                 for order in open_orders:
@@ -2559,7 +2559,7 @@ class RealTraderFutures:
                     if scale_order_id:
                         try:
                             client = self._get_client_for_symbol(symbol)
-                            client.exchange.cancel_order(scale_order_id, symbol)
+                            client.cancel_order(scale_order_id, symbol)
                         except Exception:
                             pass
 
@@ -2915,16 +2915,17 @@ class RealTraderFutures:
 
     @staticmethod
     def _is_stop_loss_order(o: dict) -> bool:
-        """ccxt normalizes STOP_MARKET → 'market', so check raw info.type and info.origType as well."""
+        """ccxt normalizes STOP_MARKET → 'market', so check raw info fields including orderType for ALGO orders."""
         ccxt_type = str(o.get("type") or "").upper()
         info = o.get("info", {})
         raw_type = str(info.get("type") or "").upper()
         orig_type = str(info.get("origType") or "").upper()
+        algo_type = str(info.get("orderType") or "").upper()
 
-        is_stop = ("STOP" in ccxt_type) or ("STOP" in raw_type) or ("STOP" in orig_type)
-        is_take_profit = ("TAKE_PROFIT" in ccxt_type) or ("TAKE_PROFIT" in raw_type) or ("TAKE_PROFIT" in orig_type)
+        is_stop = ("STOP" in ccxt_type) or ("STOP" in raw_type) or ("STOP" in orig_type) or ("STOP" in algo_type)
+        is_take_profit = ("TAKE_PROFIT" in ccxt_type) or ("TAKE_PROFIT" in raw_type) or ("TAKE_PROFIT" in orig_type) or ("TAKE_PROFIT" in algo_type)
         
-        stop_price = o.get("stopPrice") or info.get("stopPrice")
+        stop_price = o.get("stopPrice") or info.get("stopPrice") or info.get("triggerPrice")
         has_stop_price = stop_price is not None and float(stop_price) > 0
 
         # 만약 타입에 STOP이 포함되어 있거나 (TP가 아닌데) stopPrice가 존재하면 SL로 간주
@@ -2945,7 +2946,7 @@ class RealTraderFutures:
         if sl_order_id:
             try:
                 client = self._get_client_for_symbol(symbol)
-                client.exchange.cancel_order(sl_order_id, symbol)
+                client.cancel_order(sl_order_id, symbol)
             except Exception:
                 pass
             self.state_manager.update_symbol_state(symbol, {"sl_order_id": None})
@@ -2957,7 +2958,7 @@ class RealTraderFutures:
         last_exception: Optional[Exception] = None
         for o in stop_orders:
             try:
-                client.exchange.cancel_order(o["id"], symbol)
+                client.cancel_order(o["id"], symbol)
             except Exception as e:
                 logger.warning(
                     "Failed to cancel SL order %s for %s: %s", o.get("id"), symbol, e
@@ -2976,7 +2977,7 @@ class RealTraderFutures:
             for old_order in sorted_orders[1:]:
                 for retry in range(2):
                     try:
-                        client.exchange.cancel_order(old_order["id"], symbol)
+                        client.cancel_order(old_order["id"], symbol)
                         break
                     except Exception as e:
                         logger.warning(

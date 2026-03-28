@@ -765,14 +765,91 @@ class BinanceClient:
         return {'amount': 0.0, 'entryPrice': 0.0, 'unrealizedPnL': 0.0, 'leverage': 1}
 
     def fetch_open_orders(self, symbol):
-        """미체결 주문 조회"""
+        """미체결 주문 조회 (Standard + ALGO 주문 통합)"""
         try:
-            return self.exchange.fetch_open_orders(symbol)
+            # 1. 일반 주문 조회
+            orders = self.exchange.fetch_open_orders(symbol)
+            
+            # 2. ALGO 주문 조회 (STOP_MARKET, TAKE_PROFIT_MARKET 등)
+            try:
+                # symbol format: AVAX/USDT -> AVAXUSDT for algo endpoint if needed, 
+                # but usually we can filter manually
+                algo_res = self.exchange.fapiPrivateGetOpenAlgoOrders()
+                
+                # AVAX/USDT -> AVAXUSDT (Binance raw symbol)
+                market = self.exchange.market(symbol)
+                raw_symbol = market['id']
+                
+                for ao in algo_res:
+                    if ao.get('symbol') == raw_symbol:
+                        # CCXT 스타일로 변환
+                        algo_order = {
+                            'id': ao.get('algoId'),
+                            'symbol': symbol,
+                            'type': ao.get('orderType', '').lower(),
+                            'side': ao.get('side', '').lower(),
+                            'amount': float(ao.get('quantity') or 0),
+                            'price': float(ao.get('price') or 0),
+                            'stopPrice': float(ao.get('triggerPrice') or 0),
+                            'status': 'open' if ao.get('algoStatus') == 'NEW' else ao.get('algoStatus').lower(),
+                            'timestamp': int(ao.get('createTime', 0)),
+                            'datetime': self.exchange.iso8601(ao.get('createTime', 0)),
+                            'info': ao,
+                            'clientOrderId': ao.get('clientAlgoId'),
+                        }
+                        # 중복 방지 (이미 있으면 무시)
+                        if not any(o['id'] == algo_order['id'] for o in orders):
+                            orders.append(algo_order)
+            except Exception as ae:
+                self.logger.warning(f"Failed to fetch ALGO orders for {symbol}: {ae}")
+                
+            return orders
         except Exception as e:
             self.logger.error(f"Error fetching open orders for {symbol}: {e}")
             raise RuntimeError(f"fetch_open_orders_failed:{symbol}") from e
 
-    def place_order(self, symbol, side, amount, order_type='market', price=None, params=None):
+    def cancel_order(self, order_id, symbol):
+        """주문 취소 (일반 및 ALGO 주문 대응)"""
+        try:
+            self.rate_limiter.wait_if_needed()
+            # 먼저 일반 주문으로 취소 시도
+            try:
+                return self.exchange.cancel_order(order_id, symbol)
+            except Exception as e:
+                # 일반 취소 실패 시 ALGO 주문으로 시도
+                if "Unknown order sent" in str(e) or "-2011" in str(e):
+                    try:
+                        return self.exchange.fapiPrivateDeleteAlgoOrder({'algoId': order_id})
+                    except Exception as ae:
+                        raise ae
+                raise e
+        except Exception as e:
+            self.logger.error(f"Error cancelling order {order_id} for {symbol}: {e}")
+            return False
+
+    def cancel_all_orders(self, symbol):
+        """모든 오픈 주문 취소 (Standard + ALGO 주문 통합)"""
+        try:
+            self.rate_limiter.wait_if_needed()
+            # 1. 일반 주문 일괄 취소
+            try:
+                self.exchange.cancel_all_orders(symbol)
+            except Exception as e:
+                self.logger.warning(f"Standard cancel_all_orders failed for {symbol}: {e}")
+
+            # 2. ALGO 주문 개별 취소 (일괄 취소 API가 symbol별로 없을 수 있으므로)
+            open_orders = self.fetch_open_orders(symbol)
+            for o in open_orders:
+                if 'algoId' in o.get('info', {}):
+                    try:
+                        self.exchange.fapiPrivateDeleteAlgoOrder({'algoId': o['id']})
+                    except Exception as ae:
+                        self.logger.warning(f"Failed to cancel ALGO order {o['id']}: {ae}")
+            
+            return True
+        except Exception as e:
+            self.logger.error(f"Error in cancel_all_orders for {symbol}: {e}")
+            return False
         """
         기본 주문 실행 (내부 사용)
         side: 'buy' or 'sell'
@@ -1001,7 +1078,7 @@ class BinanceClient:
                 return self.exchange.fetch_order(order_id, symbol)
             except Exception:
                 try:
-                    open_orders = self.exchange.fetch_open_orders(symbol)
+                    open_orders = self.fetch_open_orders(symbol)
                     for o in open_orders:
                         if str(o.get('id')) == str(order_id):
                             return o
@@ -1138,7 +1215,7 @@ class BinanceClient:
                     if 'timeout' in str(e).lower():
                         self.logger.warning("⚠️ Tier 1 Timeout -> Reconciling...")
                         try:
-                            open_orders = self.exchange.fetch_open_orders(symbol)
+                            open_orders = self.fetch_open_orders(symbol)
                             if open_orders:
                                 self.exchange.cancel_all_orders(symbol)
                                 self.logger.info("🗑️ Zombie Order Canceled")
@@ -1267,11 +1344,5 @@ class BinanceClient:
                 )
                 return build_partial_result(status='partial_failed')
             return None
-
-
-    def cancel_all_orders(self, symbol: str) -> None:
-        """미체결 주문 취소 (예외를 상위로 전파)"""
-        self.logger.info("🗑️ Canceling all open orders for %s", symbol)
-        self.exchange.cancel_all_orders(symbol)
 
 
