@@ -1742,10 +1742,12 @@ class RealTraderFutures:
                             symbol, {"sl_required": (not bool(restored))}
                         )
                     else:
+                        update: dict = {
+                            "last_sl_order_time": datetime.utcnow().isoformat(),
+                        }
                         if sl_required:
-                            self.state_manager.update_symbol_state(
-                                symbol, {"sl_required": False}
-                            )
+                            update["sl_required"] = False
+                        self.state_manager.update_symbol_state(symbol, update)
             except Exception as e:
                 logger.error(f"🚨 [{symbol}] SL Watchdog evaluation failed: {e}")
                 self.state_manager.update_symbol_state(
@@ -2597,14 +2599,14 @@ class RealTraderFutures:
 
                         if sl_result and isinstance(sl_result, dict):
                             sl_order_id = str(sl_result.get("id", "") or "")
-                            self.state_manager.update_symbol_state(
-                                symbol,
-                                {
-                                    "active_stop_price": float(breakeven_stop),
-                                    "last_sl_order_time": datetime.utcnow().isoformat(),
-                                    "sl_order_id": sl_order_id if sl_order_id else None,
-                                },
-                            )
+                            be_update: dict = {
+                                "active_stop_price": float(breakeven_stop),
+                                "last_sl_order_time": datetime.utcnow().isoformat(),
+                                "sl_order_id": sl_order_id if sl_order_id else None,
+                            }
+                            if candle_ts > 0:
+                                be_update["last_processed_candle_ts"] = int(candle_ts)
+                            self.state_manager.update_symbol_state(symbol, be_update)
                 except Exception as e:
                     logger.error(
                         "Error while updating breakeven stop after scale-out for %s: %s",
