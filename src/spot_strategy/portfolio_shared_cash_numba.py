@@ -412,9 +412,20 @@ def _run_shared_cash_packed_numba(
             if req_cap < 5000.0:
                 continue
             entry_fee = req_cap * fee_rate
-            if balance < req_cap + entry_fee:
+            total_required = req_cap + entry_fee
+            if total_required <= 0.0:
                 continue
-            balance -= req_cap + entry_fee
+            if balance < total_required:
+                if balance <= 0.0:
+                    continue
+                scale = balance / total_required
+                amt *= scale
+                req_cap = amt * fill_price
+                entry_fee = req_cap * fee_rate
+                total_required = req_cap + entry_fee
+            if amt <= 0.0 or req_cap < 5000.0:
+                continue
+            balance -= total_required
             slot_entry_fee[sj] = entry_fee
             slot_in[sj] = True
             slot_entry_price[sj] = fill_price
