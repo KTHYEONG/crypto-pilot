@@ -13,6 +13,7 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
+from config.opt_config import SLIPPAGE_GAMMA_BASE, SLIPPAGE_REFERENCE_ADV_KRW
 from config.settings import SPOT_INITIAL_BALANCE, SPOT_SLIPPAGE_RATE, UPBIT_SPOT_TAKER_FEE_RATE
 
 _logger: logging.Logger = logging.getLogger(__name__)
@@ -37,6 +38,7 @@ class _SlotState:
     tp_price: float = 0.0
     highest: float = 0.0
     scale_done: bool = False
+    fractal_scale_done: bool = False
 
 
 def run_shared_cash_multi_symbol(
@@ -50,6 +52,7 @@ def run_shared_cash_multi_symbol(
     warmup_bars: int = 0,
     execution_start_idx: int = 0,
     allow_python_fallback: bool = True,
+    concurrency_penalty_scale: float = 1.0,
 ) -> SharedCashResult:
     """
     Shared balance; per bar: exit all slots first, then enter ranked candidates into free slots.
@@ -74,6 +77,7 @@ def run_shared_cash_multi_symbol(
                 rank_scores=rank_scores,
                 warmup_bars=warmup_bars,
                 execution_start_idx=execution_start_idx,
+                concurrency_penalty_scale=float(concurrency_penalty_scale),
             )
             return SharedCashResult(equity_curve=eq, final_balance=float(bal), total_trades=int(tt))
     except Exception as exc:
@@ -90,11 +94,15 @@ def run_shared_cash_multi_symbol(
     slippage_rate = float(SPOT_SLIPPAGE_RATE)
     risk_per_trade = float(params.get("RISK_PER_TRADE", 0.015))
     max_position_pct = float(params.get("MAX_POSITION_PCT", 0.25))
+    cap_coin = params.get("MAX_CAP_PER_COIN")
+    if cap_coin is not None:
+        max_position_pct = min(max_position_pct, float(cap_coin))
     long_atr_mult = float(params.get("LONG_ATR_MULT", 3.0))
     long_trail_mult = float(params.get("LONG_TRAIL_MULT", 3.0))
     long_tp_mult = float(params.get("LONG_TP_MULT", 5.0))
     long_scale_atr_mult = float(params.get("LONG_SCALE_ATR_MULT", 0.0))
     scale_out_pct = float(params.get("SCALE_OUT_PCT", 0.0))
+    fractal_scale_out_ratio = float(params.get("SCALE_OUT_RATIO", 0.5))
     time_stop_bars = int(params.get("TIME_STOP_BARS", 0))
     tp_lock_mult = float(params.get("TP_LOCK_ATR_MULT", 3.0))
     long_trail_lock_mult = float(params.get("LONG_TRAIL_LOCK_MULT", 1.5))
@@ -111,6 +119,16 @@ def run_shared_cash_multi_symbol(
     kill_cd_bars = int(params.get("KILL_COOLDOWN_BARS", 6))
     delta_gate = float(params.get("DELTA_GATE", 0.08))
     last_risk_pct_sym = [0.0] * n_sym
+    gamma_base = float(params.get("SLIPPAGE_GAMMA_BASE", SLIPPAGE_GAMMA_BASE))
+    ref_adv_py = max(float(params.get("SLIPPAGE_REFERENCE_ADV_KRW", SLIPPAGE_REFERENCE_ADV_KRW)), 1.0)
+    pen_scale_py = float(concurrency_penalty_scale)
+    adv_by_si = [0.0] * n_sym
+    for si_a, sym_a in enumerate(symbols_ordered):
+        a0 = symbol_arrays[sym_a]
+        v0 = a0["volume"]
+        c0 = a0["close"]
+        lb0 = min(6, len(c0))
+        adv_by_si[si_a] = float(np.mean(v0[-lb0:] * c0[-lb0:])) if lb0 > 0 else 1.0
 
     for i in range(n):
         # --- exits and in-position management for each occupied slot ---
@@ -120,6 +138,7 @@ def run_shared_cash_multi_symbol(
             sym = symbols_ordered[slot.sym_idx]
             arr = symbol_arrays[sym]
             ks = arr.get("kill_signal")
+            fh = arr.get("fractal_high_flag")
             slot, balance, td = _process_in_position_bar(
                 i=i,
                 n=n,
@@ -138,6 +157,8 @@ def run_shared_cash_multi_symbol(
                 long_tp_mult=long_tp_mult,
                 long_scale_atr_mult=long_scale_atr_mult,
                 scale_out_pct=scale_out_pct,
+                fractal_scale_out_ratio=fractal_scale_out_ratio,
+                fractal_high_flag=fh,
                 time_stop_bars=time_stop_bars,
                 warmup_bars=warmup_bars,
                 execution_start_idx=execution_start_idx,
@@ -146,6 +167,8 @@ def run_shared_cash_multi_symbol(
                 sym_cooldown=sym_cooldown,
                 sym_cooldown_skip=sym_cooldown_skip,
                 kill_cooldown_bars=kill_cd_bars,
+                bb_upper=arr.get("bb_upper"),
+                trail_tighten=arr.get("trail_tighten_flag"),
             )
             total_trades += td
             if not slot.in_position:
@@ -176,7 +199,10 @@ def run_shared_cash_multi_symbol(
             if les < 0.5 or np.isnan(les):
                 continue
             c_high = float(arr["high"][i])
-            if c_high > float(arr["entry_upper"][prev_i]):
+            eu_prev = float(arr["entry_upper"][prev_i])
+            if eu_prev < 1.0:
+                candidates.append(si)
+            elif c_high > eu_prev:
                 candidates.append(si)
 
         if not candidates:
@@ -195,6 +221,10 @@ def run_shared_cash_multi_symbol(
 
         candidates.sort(key=rank_key, reverse=True)
 
+        n_new_e = min(len(candidates), len(free_slots))
+        excess_e = max(0, n_new_e - 1)
+        excess_pow = float(excess_e) ** 1.5
+
         for si in candidates:
             if not free_slots:
                 break
@@ -203,6 +233,9 @@ def run_shared_cash_multi_symbol(
             j = free_slots[0]
             rr = arr.get("regime_risk_mult")
             gk = arr.get("garch_kelly_f")
+            adv_r = max(adv_by_si[si] / ref_adv_py, 0.01)
+            gamma_sym = gamma_base / float(np.sqrt(adv_r))
+            adj_slip = slippage_rate * (1.0 + pen_scale_py * gamma_sym * excess_pow)
             st, balance, opened, td = _try_open_long(
                 i=i,
                 n=n,
@@ -215,7 +248,7 @@ def run_shared_cash_multi_symbol(
                 atr=arr["atr"],
                 balance=balance,
                 fee_rate=fee_rate,
-                slippage_rate=slippage_rate,
+                slippage_rate=adj_slip,
                 risk_per_trade=risk_per_trade,
                 max_position_pct=max_position_pct,
                 long_atr_mult=long_atr_mult,
@@ -300,6 +333,8 @@ def _process_in_position_bar(
     long_tp_mult: float,
     long_scale_atr_mult: float,
     scale_out_pct: float,
+    fractal_scale_out_ratio: float,
+    fractal_high_flag: Optional[np.ndarray],
     time_stop_bars: int,
     warmup_bars: int,
     execution_start_idx: int,
@@ -308,6 +343,8 @@ def _process_in_position_bar(
     sym_cooldown: Optional[np.ndarray] = None,
     sym_cooldown_skip: Optional[np.ndarray] = None,
     kill_cooldown_bars: int = 6,
+    bb_upper: Optional[np.ndarray] = None,
+    trail_tighten: Optional[np.ndarray] = None,
 ) -> Tuple[_SlotState, float, int]:
     trades_delta = 0
     if i < warmup_bars or i < execution_start_idx:
@@ -360,6 +397,17 @@ def _process_in_position_bar(
             exit_triggered = True
 
     if (
+        (not exit_triggered)
+        and bb_upper is not None
+        and len(bb_upper) > i
+        and np.isfinite(bb_upper[i])
+        and float(bb_upper[i]) < 1e18
+        and c_high >= float(bb_upper[i])
+    ):
+        exit_price = float(bb_upper[i]) * (1.0 - slippage_rate)
+        exit_triggered = True
+
+    if (
         not exit_triggered
         and (not slot.scale_done)
         and long_scale_atr_mult > 0.0
@@ -379,6 +427,39 @@ def _process_in_position_bar(
             slot.amount -= partial_amt
             slot.scale_done = True
 
+    if (
+        not exit_triggered
+        and slot.in_position
+        and (not slot.fractal_scale_done)
+        and fractal_high_flag is not None
+        and len(fractal_high_flag) > i
+        and float(fractal_high_flag[i]) > 0.5
+        and slot.amount > 0.0
+        and fractal_scale_out_ratio > 1e-12
+        and fractal_scale_out_ratio < 1.0 - 1e-12
+    ):
+        cap_amt = slot.amount * 0.99
+        partial_f = slot.amount * fractal_scale_out_ratio
+        if partial_f > cap_amt:
+            partial_f = cap_amt
+        if partial_f > 0.0:
+            exit_px_f = c_open * (1.0 - slippage_rate)
+            exit_fee_f = partial_f * exit_px_f * fee_rate
+            pnl_f = (exit_px_f - slot.entry_price) * partial_f - exit_fee_f
+            balance += partial_f * slot.entry_price + pnl_f
+            ef_part_f = slot.entry_fee_stored * (partial_f / slot.amount)
+            slot.entry_fee_stored -= ef_part_f
+            slot.amount -= partial_f
+            slot.fractal_scale_done = True
+        if slot.amount < 1e-12 and slot.in_position:
+            dust_px = c_open * (1.0 - slippage_rate)
+            pnl_d = (dust_px - slot.entry_price) * slot.amount
+            pnl_d -= slot.amount * dust_px * fee_rate
+            balance += slot.amount * slot.entry_price + pnl_d
+            trades_delta += 1
+            slot.in_position = False
+            return slot, balance, trades_delta
+
     if slot.in_position and not exit_triggered:
         ei2 = int(slot.entry_idx)
         pos_atr = float(atr[ei2]) if ei2 < n else trail_atr
@@ -386,7 +467,13 @@ def _process_in_position_bar(
             pos_atr = trail_atr
         dist = float(slot.highest - slot.entry_price)
         current_trail_mult = long_trail_mult
-        if dist > pos_atr * tp_lock_mult:
+        if (
+            trail_tighten is not None
+            and len(trail_tighten) > i
+            and float(trail_tighten[i]) > 0.5
+        ):
+            current_trail_mult = long_trail_lock_mult
+        elif dist > pos_atr * tp_lock_mult:
             current_trail_mult = long_trail_lock_mult
         new_stop = float(slot.highest) - pos_atr * current_trail_mult
         if new_stop > slot.stop_price:
@@ -447,10 +534,13 @@ def _try_open_long(
     c_high = float(high[i])
     c_low = float(low[i])
 
-    if c_high <= float(entry_upper[prev_i]):
-        return slot, balance, False, 0
-
-    fill_price = max(c_open, float(entry_upper[prev_i])) * (1.0 + slippage_rate)
+    eu_prev = float(entry_upper[prev_i])
+    if eu_prev < 1.0:
+        fill_price = c_open * (1.0 + slippage_rate)
+    else:
+        if c_high <= eu_prev:
+            return slot, balance, False, 0
+        fill_price = max(c_open, eu_prev) * (1.0 + slippage_rate)
     prev_atr = float(atr[prev_i])
     if np.isnan(prev_atr) or prev_atr <= 0.0:
         return slot, balance, False, 0
@@ -463,7 +553,7 @@ def _try_open_long(
     rm = 1.0
     if regime_risk_mult is not None and len(regime_risk_mult) > prev_i:
         rm = float(regime_risk_mult[prev_i])
-    if not np.isfinite(rm) or rm <= 0.0:
+    if not np.isfinite(rm):
         return slot, balance, False, 0
     rm = float(np.clip(rm, 0.05, 1.0))
 
@@ -508,6 +598,7 @@ def _try_open_long(
     slot.amount = amt
     slot.stop_price = stop_price
     slot.scale_done = False
+    slot.fractal_scale_done = False
     if long_tp_mult > 0.0:
         slot.tp_price = fill_price + (prev_atr * long_tp_mult)
     else:

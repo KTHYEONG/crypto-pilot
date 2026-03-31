@@ -102,9 +102,8 @@ def calc_tail_ratio_from_equity(equity_curve: np.ndarray) -> float:
         return 1.0
     p95 = float(np.percentile(log_step, 95))
     p5 = float(np.percentile(log_step, 5))
-    if abs(p5) < 1e-12:
-        return 999.0 if p95 > 0 else 0.0
-    return float(p95 / abs(p5))
+    denom = max(abs(p5), 1e-6)
+    return float(min(p95 / denom, 20.0))
 
 
 def cvar_loss_pct_from_simple_returns(equity_curve: np.ndarray, tail_frac: float = 0.05) -> float:
