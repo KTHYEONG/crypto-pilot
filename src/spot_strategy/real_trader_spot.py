@@ -614,12 +614,16 @@ class RealTraderSpot:
             elif not in_position:
                 self._log_throttled("info", f"{symbol}:scan", f"ℹ️ [{symbol}] Scanning for entry...", 180.0)
                 
-                if trend_dir == 1 and strength_ok:
+                eu = float(entry_upper)
+                pullback_next_open = eu < 1.0
+                breakout_ok = pullback_next_open or (current_price > eu)
+                if trend_dir == 1 and strength_ok and breakout_ok:
                     _, free_krw = self._fetch_balance_safe()
                     qty = self._calculate_spot_position_size(current_price, params, free_krw)
                     
                     if qty > 0:
-                        logger.info(f"🟢 [{symbol}] Bull Breakout Detected! Buying {qty:.4f} @ {current_price:,.0f}")
+                        tag = "Pullback (next-bar open proxy)" if pullback_next_open else "Breakout trigger"
+                        logger.info(f"🟢 [{symbol}] {tag}. Buying {qty:.4f} @ {current_price:,.0f}")
                         order = self._place_order_safe(symbol, 'buy', qty)
                         
                         if order:
