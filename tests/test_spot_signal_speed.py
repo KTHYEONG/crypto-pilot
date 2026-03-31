@@ -27,12 +27,13 @@ def _sample_ohlcv(n: int = 480, seed: int = 7) -> pd.DataFrame:
 
 def _default_params() -> dict[str, object]:
     return {
+        "SIGNAL_TYPE": "ADX_BREAKOUT",
+        "REGIME_TYPE": "EMA_ATR",
         "ATR_PERIOD": 14,
-        "FRAMA_PERIOD": 16,
-        "EVR_WINDOW": 20,
-        "EVR_THRESHOLD": 0.0,
-        "HMM_TRAIN_WINDOW": 120,
-        "HMM_RETRAIN_FREQ": 48,
+        "KC_PERIOD": 20,
+        "KC_MULT": 2.0,
+        "SIZING_METHOD": "vol_target",
+        "RISK_PER_TRADE": 0.02,
     }
 
 
@@ -55,5 +56,5 @@ def test_generate_signals_key_columns_finite() -> None:
     df = _sample_ohlcv()
     s = UltimateSpotStrategy("spot_fin", _default_params())
     out = s.generate_signals(df.copy())
-    for col in ("garch_kelly_f", "regime_risk_mult", "p_bull", "p_side", "long_entry_signal"):
+    for col in ("garch_kelly_f", "regime_risk_mult", "long_entry_signal"):
         assert np.isfinite(out[col].astype(np.float64).values).all(), col
