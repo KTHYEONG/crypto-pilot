@@ -14,8 +14,6 @@ from optuna.pruners import MedianPruner, PatientPruner
 from optuna.samplers import QMCSampler, TPESampler
 from optuna.trial import TrialState
 from optuna.storages import InMemoryStorage
-from optuna.storages import JournalStorage
-from optuna.storages.journal import JournalFileBackend
 import pandas as pd
 import numpy as np
 from pathlib import Path
@@ -68,10 +66,29 @@ optuna.logging.set_verbosity(optuna.logging.WARNING)
 logging.basicConfig(level=logging.INFO, format="%(message)s", force=True)
 _logger: logging.Logger = logging.getLogger("opt_spot")
 
-def _ensure_fresh_journal(journal_path: Path) -> None:
-    if journal_path.exists():
-        try: journal_path.unlink()
-        except OSError: journal_path.write_text("")
+def _ensure_fresh_sqlite(db_path: Path) -> None:
+    """RAM Disk 내 기존 DB 및 관련 저널 파일들을 안전하게 제거함."""
+    for suffix in ["", "-wal", "-shm"]:
+        p = Path(str(db_path) + suffix)
+        if p.exists():
+            try: p.unlink()
+            except OSError: pass
+
+def _build_sqlite_storage(db_path: Path) -> optuna.storages.RDBStorage:
+    """WSL2 환경 최적화: RAM Disk 경로에 SQLite WAL 모드를 활성화하여 RDBStorage 생성함."""
+    import sqlite3
+    url: str = f"sqlite:///{db_path.absolute()}"
+    storage: optuna.storages.RDBStorage = optuna.storages.RDBStorage(
+        url=url,
+        engine_kwargs={"connect_args": {"timeout": 60}}
+    )
+    # WAL 모드 강제 활성화 (병렬 성능 극대화)
+    try:
+        with sqlite3.connect(db_path) as conn:
+            conn.execute("PRAGMA journal_mode=WAL;")
+    except Exception:
+        pass
+    return storage
 
 def _get_effective_search_space_spot(
     tf: str,
@@ -160,19 +177,6 @@ def _resolve_spot_execution_plan(
         task_count=task_count,
     )
 
-
-def _journal_lock_for_path(journal_path: Path) -> Any:
-    lock_obj: Any = None
-    if sys.platform == "win32":
-        from src.futures_strategy.opt_futures_utils.win_journal_lock import WindowsNamedMutexJournalLock
-
-        lock_obj = WindowsNamedMutexJournalLock(str(journal_path))
-    return lock_obj
-
-
-def _build_journal_storage(journal_path: Path) -> JournalStorage:
-    backend = JournalFileBackend(str(journal_path), lock_obj=_journal_lock_for_path(journal_path))
-    return JournalStorage(backend)
 
 def _task_progress_key(target_obj: Any, tf: str) -> str:
     """Short tqdm key: portfolio -> SPOT_{tf}; single symbol -> SPOT_{tf}_ETH."""
@@ -279,7 +283,7 @@ def _spot_tpe_worker_run(payload: Dict[str, Any]) -> None:
     os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
     os.environ.setdefault("VECLIB_MAXIMUM_THREADS", "1")
     os.environ.setdefault("NUMBA_NUM_THREADS", "1")
-    journal_path = Path(str(payload["journal_path"]))
+    db_path = Path(str(payload["journal_path"]))
     tf_study_name = str(payload["study_name"])
     tf = str(payload["tf"])
     target_str = str(payload["target_str"])
@@ -321,8 +325,7 @@ def _spot_tpe_worker_run(payload: Dict[str, Any]) -> None:
         patience=int(OPT_SPOT_CONFIG.get("tpe_pruner_patience", 2)),
     )
 
-    backend = JournalFileBackend(str(journal_path), lock_obj=_journal_lock_for_path(journal_path))
-    storage = JournalStorage(backend)
+    storage: optuna.storages.RDBStorage = _build_sqlite_storage(db_path)
 
     study = optuna.load_study(
         study_name=tf_study_name,
@@ -390,19 +393,20 @@ def _run_tf_optimization(task: Tuple[Any, str], ctx: _TfOptimizationContext) -> 
     progress_key = _task_progress_key(target_obj, tf)
     tf_study_name: str = f"OptSpot_{target_str.replace('/', '').replace('-', '')}_{tf}_{ctx.mode}"
 
-    journal_path: Path | None = None
+    db_path: Path | None = None
     if ctx.use_journal_storage:
-        journal_path = Path(ctx.project_root) / f"optuna_spot_journal_{target_str.replace('/', '').replace('-', '')}_{tf}.log"
+        # WSL2 성능 극대화: RAM Disk 경로에 SQLite DB 생성
+        db_path = Path("/dev/shm") / f"optuna_spot_{target_str.replace('/', '').replace('-', '')}_{tf}.db"
         if ctx.fresh_journal:
-            _ensure_fresh_journal(journal_path)
+            _ensure_fresh_sqlite(db_path)
 
     n_qmc = min(int(OPT_SPOT_CONFIG.get("tpe_n_startup_trials", 96)), int(ctx.n_trials))
     seed = int(ctx.seeds[0])
 
-    storage: JournalStorage | InMemoryStorage
+    storage: optuna.storages.RDBStorage | InMemoryStorage
     if ctx.use_journal_storage:
-        assert journal_path is not None
-        storage = _build_journal_storage(journal_path)
+        assert db_path is not None
+        storage = _build_sqlite_storage(db_path)
     else:
         storage = InMemoryStorage()
 
@@ -490,8 +494,8 @@ def _run_tf_optimization(task: Tuple[Any, str], ctx: _TfOptimizationContext) -> 
     )
 
     if ctx.use_journal_storage:
-        assert journal_path is not None
-        storage_tpe = _build_journal_storage(journal_path)
+        assert db_path is not None
+        storage_tpe = _build_sqlite_storage(db_path)
     else:
         storage_tpe = storage
 
@@ -510,12 +514,13 @@ def _run_tf_optimization(task: Tuple[Any, str], ctx: _TfOptimizationContext) -> 
     )
 
     if use_inner_pool:
-        assert journal_path is not None
+        assert db_path is not None
         n_workers = min(int(ctx.parallel_tpe_workers), int(remaining))
         splits = _split_tpe_trials(remaining, n_workers)
         data_maps_file = ""
+        # DB 파일이 있는 RAM Disk 경로에 데이터 맵 임시 파일 생성
         with tempfile.NamedTemporaryFile(
-            suffix=".pkl", delete=False, dir=str(journal_path.parent)
+            suffix=".pkl", delete=False, dir=str(db_path.parent)
         ) as dm_tmp:
             data_maps_file = dm_tmp.name
             pickle.dump(ctx.data_maps, dm_tmp, protocol=pickle.HIGHEST_PROTOCOL)
@@ -526,7 +531,7 @@ def _run_tf_optimization(task: Tuple[Any, str], ctx: _TfOptimizationContext) -> 
                     continue
                 payloads.append(
                     {
-                        "journal_path": str(journal_path),
+                        "journal_path": str(db_path),
                         "study_name": tf_study_name,
                         "tf": tf,
                         "target_str": target_str,
@@ -554,7 +559,7 @@ def _run_tf_optimization(task: Tuple[Any, str], ctx: _TfOptimizationContext) -> 
                     Path(data_maps_file).unlink()
                 except OSError:
                     pass
-        storage_final = _build_journal_storage(journal_path)
+        storage_final = _build_sqlite_storage(db_path)
         study = optuna.load_study(study_name=tf_study_name, storage=storage_final)
         return (target_obj, tf), study
 
