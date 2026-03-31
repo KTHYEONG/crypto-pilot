@@ -27,10 +27,10 @@ class RegimeLabel(str, Enum):
 class SpotArchetypeContract:
     """Versioned label for the implemented spot trend-following archetype."""
 
-    archetype_id: str = "spot_v1_breakout_efficiency"
-    signal_template: str = "RegimeAwareBreakoutContinuationHybrid"
-    execution_template: str = "VolTargetedAtrChandelierTrail"
-    schema_version: str = "1.0.0"
+    archetype_id: str = "spot_v2_pullback_fractal_rsi2"
+    signal_template: str = "RegimeAwareFractalPullbackRSI2EvR"
+    execution_template: str = "VolTargetedAtrChandelierTrailScaleOut"
+    schema_version: str = "2.0.0"
 
 
 @dataclass

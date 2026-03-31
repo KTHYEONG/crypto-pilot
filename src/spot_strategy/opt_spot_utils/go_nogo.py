@@ -39,11 +39,17 @@ class FinalDeploymentReportInput:
     gate1_sqn: float
     gate1_path_sortino: float
     gate1_tail_ratio: float
+    gate1_p10_gmgr: float
+    gate1_max_ui: float
+    gate1_psr: float
+    gate1_dsr: float
     cpcv_mean_path_return_pct: float
     cpcv_worst_segment_mdd_pct: float
     sqn_target: float
     path_sortino_target: float
     tail_ratio_target: float
+    psr_target: float
+    dsr_target: float
     moic: float
     initial_capital_krw: float
     oos_net_cagr_pct: float
@@ -112,21 +118,28 @@ def run_portfolio_discovery_veto(
     *,
     psr: float,
     dsr: float,
+    p10_gmgr: float = 0.0,
     psr_min: float = 0.5,
     dsr_min: float = -1.0,
 ) -> GoNoGoResult:
     """
-    Discovery veto: PSR hard; DSR soft floor (fail if dsr < dsr_min, default -1.0).
+    Discovery veto: PSR hard; DSR soft floor; P10 GMGR must be > 0.
     """
     psr_ok = psr >= psr_min
     dsr_ok = dsr >= dsr_min
-    details: Dict[str, bool] = {"psr_hard": psr_ok, "dsr_soft": dsr_ok}
-    passed = bool(psr_ok and dsr_ok)
+    gmgr_ok = p10_gmgr > 0.0
+    details: Dict[str, bool] = {
+        "psr_hard": psr_ok,
+        "dsr_soft": dsr_ok,
+        "p10_gmgr_positive": gmgr_ok,
+    }
+    passed = bool(psr_ok and dsr_ok and gmgr_ok)
     dsr_label = "soft floor" if dsr_min < 0.0 else "hard"
     summary_lines = [
         "[Portfolio Discovery Veto]",
         f"  PSR (hard): {psr:.4f} vs {psr_min} -> {'PASS' if psr_ok else 'FAIL'}",
         f"  DSR ({dsr_label}): {dsr:.4f} vs {dsr_min} -> {'PASS' if dsr_ok else 'FAIL'}",
+        f"  P10 GMGR (>0): {p10_gmgr:.6f} -> {'PASS' if gmgr_ok else 'FAIL'}",
     ]
     return GoNoGoResult(
         passed=passed,
@@ -321,53 +334,92 @@ def _fmt_pass_info(ok: bool) -> str:
 
 
 def run_final_deployment_report(ctx: FinalDeploymentReportInput) -> str:
-    """Build the 3-gate Spot Strategy deployment report (logging-friendly)."""
+    """Build the 2-part Spot Strategy deployment report: Part 1 (Rigor), Part 2 (Intuitive)."""
+    # Part 1 Logic: Quantitative Rigor
     sqn_ok = ctx.gate1_sqn >= ctx.sqn_target
     ps_ok = ctx.gate1_path_sortino >= ctx.path_sortino_target
     g1_tr_ok = ctx.gate1_tail_ratio >= ctx.tail_ratio_target
+    gmgr_ok = ctx.gate1_p10_gmgr > 0.0
+    psr_ok = ctx.gate1_psr >= ctx.psr_target
+    dsr_ok = ctx.gate1_dsr >= ctx.dsr_target
 
     oos_cagr_ok = ctx.oos_net_cagr_pct >= ctx.oos_cagr_target_pct
     oos_mdd_ok = abs(ctx.oos_mdd_pct) <= ctx.oos_mdd_limit_pct
     hw_ok = ctx.hw_recovery_days <= ctx.hw_recovery_max_days
     ad_ok = ctx.alpha_decay_pct >= ctx.alpha_decay_floor_pct
 
+    # Part 2 Logic: Intuitive Summary
+    final_capital = ctx.initial_capital_krw * ctx.moic
+    profit_pct = (ctx.moic - 1.0) * 100.0
+
     lines: List[str] = [
         "=" * 71,
-        "[Spot Strategy Final Verification & Deployment Report]",
+        " [PART 1. QUANTITATIVE RIGOR: FINANCIAL ENGINEERING EVALUATION]",
         "=" * 71,
-        "",
-        "▶ Gate 1. Statistical Edge (CPCV / path robustness)",
-        f"  - System Quality Number (SQN) : {ctx.gate1_sqn:.2f}   {_fmt_pass_info(sqn_ok)} (Target: >= {ctx.sqn_target})",
-        f"  - Path Sortino Ratio          : {ctx.gate1_path_sortino:.2f}   {_fmt_pass_info(ps_ok)} (Target: >= {ctx.path_sortino_target})",
-        f"  - Tail Ratio (path asymmetry)  : {ctx.gate1_tail_ratio:.2f}   {_fmt_pass_info(g1_tr_ok)} (Target: >= {ctx.tail_ratio_target})",
-        f"  - CPCV Mean path return       : {ctx.cpcv_mean_path_return_pct:.1f}%",
+        "▶ Statistical Edge & Path Robustness (CPCV Discovery)",
+        f"  - System Quality Number (SQN) : {ctx.gate1_sqn:.2f}   {_fmt_pass_info(sqn_ok)} (Min: {ctx.sqn_target})",
+        f"  - Path Sortino Ratio          : {ctx.gate1_path_sortino:.2f}   {_fmt_pass_info(ps_ok)} (Min: {ctx.path_sortino_target})",
+        f"  - Tail Ratio (Asymmetry)      : {ctx.gate1_tail_ratio:.2f}   {_fmt_pass_info(g1_tr_ok)} (Min: {ctx.tail_ratio_target})",
+        f"  - Prob. Sharpe Ratio (PSR)    : {ctx.gate1_psr:.4f}   {_fmt_pass_info(psr_ok)} (Min: {ctx.psr_target})",
+        f"  - Deflated Sharpe Ratio (DSR) : {ctx.gate1_dsr:.4f}   {_fmt_pass_info(dsr_ok)} (Min: {ctx.dsr_target})",
+        f"  - P10 GMGR (Worst Growth)     : {ctx.gate1_p10_gmgr:.6f}   {_fmt_pass_info(gmgr_ok)} (Target: > 0)",
+        f"  - Max Ulcer Index (Risk)      : {ctx.gate1_max_ui:.2f}   [INFO]",
+        f"  - CPCV Mean Path Return       : {ctx.cpcv_mean_path_return_pct:.1f}%",
         f"  - CPCV Worst Segment MDD      : {ctx.cpcv_worst_segment_mdd_pct:.1f}%",
         "",
-        "▶ Gate 2. Business Impact (OOS holdout)",
-        f"  - MOIC (multiple on capital)   : {ctx.moic:.1f}x   [INFO] (₩{ctx.initial_capital_krw:,.0f} -> ₩{ctx.initial_capital_krw * ctx.moic:,.0f})",
-        f"  - OOS Net CAGR                 : {ctx.oos_net_cagr_pct:.1f}%   {_fmt_pass_info(oos_cagr_ok)} (Target: >= {ctx.oos_cagr_target_pct}%)",
-        f"  - OOS Max Drawdown             : {ctx.oos_mdd_pct:.1f}%   {_fmt_pass_info(oos_mdd_ok)} (Target: <= {ctx.oos_mdd_limit_pct}%)",
-        f"  - HWM Recovery (max underwater): {ctx.hw_recovery_days:.0f} days   {_fmt_pass_info(hw_ok)} (Target: <= {ctx.hw_recovery_max_days:.0f} days)",
-        f"  - Alpha Decay (IS vs OOS)      : {ctx.alpha_decay_pct:.1f}%   {_fmt_pass_info(ad_ok)} (Target: >= {ctx.alpha_decay_floor_pct}%)",
+        "▶ Alpha Decay & Stability (IS vs OOS)",
+        f"  - Alpha Decay (Degradation)   : {ctx.alpha_decay_pct:.1f}%   {_fmt_pass_info(ad_ok)} (Limit: {ctx.alpha_decay_floor_pct}%)",
         "",
-        "▶ Gate 3. Symbol-Level Microstructure (OOS)",
-        "  | Symbol    | Net CAGR | Max MDD | Tail Ratio | Win Rate | Trade Count |",
-        "  |-----------|----------|---------|------------|----------|-------------|",
+        "▶ Symbol-Level Microstructure (OOS Performance)",
+        "  | Symbol    | Net CAGR | Max MDD | Tail Ratio | Win Rate | Trades |",
+        "  |-----------|----------|---------|------------|----------|--------|",
     ]
     for row in ctx.symbol_rows:
         lines.append(
             f"  | {row.symbol:<9} | {row.net_cagr_pct:>+6.1f}% | {row.max_mdd_pct:>6.1f}% | "
-            f"{row.tail_ratio:>10.2f} | {row.win_rate_pct:>7.1f}% | {row.trade_count:>11} |"
+            f"{row.tail_ratio:>10.2f} | {row.win_rate_pct:>7.1f}% | {row.trade_count:>6} |"
         )
+
     lines.extend(
         [
-            "  ---------------------------------------------------------------------",
-            f"  * LOSO / concentration: {ctx.loso_warning}",
             "",
             "=" * 71,
-            f"  FINAL DECISION: [{'GO - DEPLOYABLE' if ctx.final_decision_go else 'NO-GO'}] "
-            f"(Passed {ctx.hard_passed}/{ctx.hard_total} Hard Constraints)",
+            " [PART 2. INTUITIVE SUMMARY: BUSINESS IMPACT & EXECUTION]",
             "=" * 71,
+            "▶ Capital Growth & Efficiency",
+            f"  - Capital Trajectory   : ₩{ctx.initial_capital_krw:,.0f} -> ₩{final_capital:,.0f} ({profit_pct:+.1f}%)",
+            f"  - Growth Multiplier    : {ctx.moic:.2f}x (MOIC)",
+            f"  - Annualized Return    : {ctx.oos_net_cagr_pct:.1f}% (CAGR)   {_fmt_pass_info(oos_cagr_ok)}",
+            "",
+            "▶ Risk & Recovery Experience",
+            f"  - Maximum Pain (MDD)   : {ctx.oos_mdd_pct:.1f}%   {_fmt_pass_info(oos_mdd_ok)}",
+            f"  - Recovery Time        : {ctx.hw_recovery_days:.1f} days (Max Underwater)   {_fmt_pass_info(hw_ok)}",
+            f"  - Concentration Risk   : {ctx.loso_warning}",
+            "",
+            "▶ Final Deployment Verdict",
+            f"  - Status               : {'[GO - DEPLOYABLE]' if ctx.final_decision_go else '[NO-GO - NEEDS REFINEMENT]'}",
+            f"  - Compliance           : {ctx.hard_passed}/{ctx.hard_total} Hard Constraints Passed",
         ]
     )
+
+    if not ctx.final_decision_go:
+        lines.append("\n  ※ 주요 결격 사유 (Critical Failures):")
+        if not psr_ok:
+            lines.append(f"    - PSR 점수({ctx.gate1_psr:.4f})가 기준치({ctx.psr_target}) 미달")
+        if not dsr_ok:
+            lines.append(f"    - DSR 점수({ctx.gate1_dsr:.4f})가 기준치({ctx.dsr_target}) 미달")
+        if not oos_cagr_ok:
+            lines.append(f"    - OOS CAGR({ctx.oos_net_cagr_pct:.1f}%)이 목표({ctx.oos_cagr_target_pct}%) 미달")
+        if not oos_mdd_ok:
+            lines.append(f"    - OOS MDD({abs(ctx.oos_mdd_pct):.1f}%)가 제한({ctx.oos_mdd_limit_pct}%) 초과")
+        if not g1_tr_ok:
+            lines.append(f"    - Tail Ratio({ctx.gate1_tail_ratio:.2f})가 비대칭성 기준({ctx.tail_ratio_target}) 미달")
+        if not ad_ok:
+            lines.append(f"    - Alpha Decay({ctx.alpha_decay_pct:.1f}%)가 허용치({ctx.alpha_decay_floor_pct}%) 초과")
+        if ctx.hw_recovery_days > ctx.hw_recovery_max_days:
+            lines.append(
+                f"    - 회복 기간({ctx.hw_recovery_days:.1f}일)이 허용치({ctx.hw_recovery_max_days}일) 초과"
+            )
+
+    lines.append("=" * 71)
     return "\n".join(lines)
