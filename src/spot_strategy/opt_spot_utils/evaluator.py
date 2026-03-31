@@ -101,8 +101,8 @@ _SPOT_OBJECTIVE_TAIL_RATIO_WEIGHT: float = 0.08
 _SPOT_OBJECTIVE_DSR_WEIGHT: float = 0.05
 
 _SignalCacheKey = Tuple[Tuple[Tuple[str, Any], ...], str, str, int, int, int]
-_SIGNAL_CACHE_MAXSIZE: int = 4096
-_ARRAYS_CACHE_MAXSIZE: int = 4096
+_SIGNAL_CACHE_MAXSIZE: int = 256
+_ARRAYS_CACHE_MAXSIZE: int = 256
 _cache_lock: threading.Lock = threading.Lock()
 _signal_cache: OrderedDict[_SignalCacheKey, pd.DataFrame] = OrderedDict()
 _arrays_cache: OrderedDict[_SignalCacheKey, Dict[str, np.ndarray]] = OrderedDict()
