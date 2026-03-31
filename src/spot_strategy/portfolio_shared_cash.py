@@ -228,6 +228,11 @@ def run_shared_cash_multi_symbol(
         for si in candidates:
             if not free_slots:
                 break
+                
+            # CIRCUIT BREAKER: Stop new entries if capital drops below 30% (Wealth Preservation).
+            if balance < initial_balance * 0.3:
+                 break
+                 
             sym = symbols_ordered[si]
             arr = symbol_arrays[sym]
             j = free_slots[0]
