@@ -212,6 +212,8 @@ def _warmup_numba(
     data_maps: Dict[str, Dict[str, Any]],
     symbols: List[str],
     tf: str,
+    project_root: str = "",
+    signal_cache_dir: str = "",
 ) -> None:
     """Trigger Numba JIT in the parent before fork so children inherit compiled code."""
     from src.spot_strategy.regimes import REGIME_REGISTRY
@@ -237,9 +239,9 @@ def _warmup_numba(
                 tf,
                 space=space,
                 mode="multi",
-                project_root="",
+                project_root=project_root,
                 prebuilt_cpcv_bundle=None,
-                signal_disk_cache_root=None,
+                signal_disk_cache_root=Path(signal_cache_dir) if signal_cache_dir else None,
             )
 
         study.optimize(
@@ -345,7 +347,7 @@ def run_combination_screening(
         return []
 
     _logger.info("Warming up Numba JIT before process pool...")
-    _warmup_numba(data_maps, symbols, tf)
+    _warmup_numba(data_maps, symbols, tf, project_root=project_root, signal_cache_dir=signal_cache_dir)
 
     mp_ctx = _process_pool_context()
 
