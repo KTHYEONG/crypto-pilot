@@ -13,7 +13,6 @@ class RollingKellySizing:
     name: ClassVar[str] = "rolling_kelly"
     param_space: ClassVar[Dict[str, Any]] = {
         "KELLY_WINDOW": {"type": "int", "low": 30, "high": 120, "step": 10},
-        "KELLY_MIN_F": {"type": "float", "low": 0.05, "high": 0.30, "step": 0.05},
     }
 
     def compute(self, df: pd.DataFrame, params: Dict[str, Any]) -> np.ndarray:
@@ -29,11 +28,10 @@ class RollingKellySizing:
         with np.errstate(divide="ignore", invalid="ignore"):
             f = np.where(var > 1e-12, (mu / var) * kelly_frac, 0.0)
         f = np.nan_to_num(f, nan=0.0, posinf=0.0, neginf=0.0)
-        min_f = float(params.get("KELLY_MIN_F", 0.1))
         entry_mask = (
             df["long_entry_signal"].to_numpy(dtype=np.float64)
             if "long_entry_signal" in df.columns
             else np.ones(len(f), dtype=np.float64)
         )
-        floored = np.where(entry_mask > 0, np.maximum(f, min_f), f)
+        floored = np.where(entry_mask > 0, np.maximum(f, 0.0), f)
         return np.clip(floored, 0.0, max_exp).astype(np.float64)

@@ -278,6 +278,7 @@ def _align_oos_dataframes_on_common_datetimes(
 
 
 def _spot_tpe_worker_run(payload: Dict[str, Any]) -> None:
+    import gc
     os.environ.setdefault("OMP_NUM_THREADS", "1")
     os.environ.setdefault("MKL_NUM_THREADS", "1")
     os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
@@ -378,13 +379,17 @@ def _spot_tpe_worker_run(payload: Dict[str, Any]) -> None:
             _logger.exception("[%s/%s] Trial %d failed.", target_str, tf, trial.number)
             raise
 
-    study.optimize(
-        _objective_with_logging,
-        n_trials=n_trials,
-        n_jobs=1,
-        catch=(Exception,),
-        callbacks=[_progress_cb],
-    )
+    try:
+        study.optimize(
+            _objective_with_logging,
+            n_trials=n_trials,
+            n_jobs=1,
+            catch=(Exception,),
+            callbacks=[_progress_cb],
+        )
+    finally:
+        del data_maps
+        gc.collect()
 
 
 def _run_tf_optimization(task: Tuple[Any, str], ctx: _TfOptimizationContext) -> Tuple[Tuple[Any, str], optuna.Study]:

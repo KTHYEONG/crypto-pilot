@@ -40,9 +40,9 @@ SPOT_SYMBOLS: List[str] = [
 ]
 
 OPT_SPOT_CONFIG: Dict[str, Any] = {
-    "total_trials": 1000,
-    "n_startup_trials": 30,
-    "tpe_n_startup_trials": 30,
+    "total_trials": 2500,
+    "n_startup_trials": 280,
+    "tpe_n_startup_trials": 280,
     "tpe_pruner_n_startup_trials": 10,
     "tpe_pruner_n_warmup_steps": 8,
     "tpe_pruner_patience": 2,
