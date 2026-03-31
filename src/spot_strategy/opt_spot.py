@@ -133,7 +133,7 @@ def _resolve_spot_execution_plan(
 ) -> _SpotExecutionPlan:
     logical_cpus = max(1, os.cpu_count() or 1)
     if mode == "multi" and task_count == 1:
-        tw = requested_task_workers if requested_task_workers > 0 else logical_cpus
+        tw = requested_task_workers if requested_task_workers > 0 else requested_jobs
         tw = max(1, min(int(tw), logical_cpus))
         return _SpotExecutionPlan(
             outer_task_workers=1,
