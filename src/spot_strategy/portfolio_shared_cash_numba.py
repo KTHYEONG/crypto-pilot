@@ -11,6 +11,7 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 from numba import njit
 
+from config.opt_config import SLIPPAGE_GAMMA_BASE, SLIPPAGE_REFERENCE_ADV_KRW
 from config.settings import SPOT_INITIAL_BALANCE, SPOT_SLIPPAGE_RATE, UPBIT_SPOT_TAKER_FEE_RATE
 
 
@@ -49,6 +50,10 @@ def _run_shared_cash_packed_numba(
     garch_kelly: np.ndarray,
     kill_signal: np.ndarray,
     rank_scores: np.ndarray,
+    fractal_high_flag: np.ndarray,
+    bb_upper: np.ndarray,
+    trail_tighten: np.ndarray,
+    adv_symbol_krw: np.ndarray,
     *,
     initial_balance: float,
     fee_rate: float,
@@ -62,12 +67,16 @@ def _run_shared_cash_packed_numba(
     tp_lock_mult: float,
     long_scale_atr_mult: float,
     scale_out_pct: float,
+    fractal_scale_out_ratio: float,
     time_stop_bars: int,
     warmup_bars: int,
     execution_start_idx: int,
     kill_cd_bars: int,
     delta_gate: float,
     max_slots: int,
+    slippage_gamma_base: float,
+    slippage_ref_adv_krw: float,
+    concurrency_penalty_scale: float,
 ) -> Tuple[np.ndarray, float, int]:
     n_sym, n = close.shape
     balance = initial_balance
@@ -84,6 +93,7 @@ def _run_shared_cash_packed_numba(
     slot_tp = np.zeros(max_slots, dtype=np.float64)
     slot_highest = np.zeros(max_slots, dtype=np.float64)
     slot_scale_done = np.zeros(max_slots, dtype=np.bool_)
+    slot_fractal_scale_done = np.zeros(max_slots, dtype=np.bool_)
 
     sym_cooldown = np.zeros(n_sym, dtype=np.int32)
     sym_cooldown_skip = np.zeros(n_sym, dtype=np.bool_)
@@ -145,6 +155,15 @@ def _run_shared_cash_packed_numba(
                     elif c_high >= slot_tp[sj]:
                         ex_px = slot_tp[sj] * (1.0 - slippage_rate)
                         exit_triggered = True
+                bub = bb_upper[si, i]
+                if (
+                    (not exit_triggered)
+                    and np.isfinite(bub)
+                    and bub < 1e18
+                    and c_high >= bub
+                ):
+                    ex_px = bub * (1.0 - slippage_rate)
+                    exit_triggered = True
 
                 if (
                     (not exit_triggered)
@@ -166,6 +185,40 @@ def _run_shared_cash_packed_numba(
                         slot_amount[sj] -= partial_amt
                         slot_scale_done[sj] = True
 
+                if (
+                    (not exit_triggered)
+                    and slot_in[sj]
+                    and (not slot_fractal_scale_done[sj])
+                    and fractal_high_flag[si, i] > 0.5
+                    and slot_amount[sj] > 0.0
+                    and fractal_scale_out_ratio > 1e-12
+                    and fractal_scale_out_ratio < 1.0 - 1e-12
+                ):
+                    cap_amt = slot_amount[sj] * 0.99
+                    partial_f = slot_amount[sj] * fractal_scale_out_ratio
+                    if partial_f > cap_amt:
+                        partial_f = cap_amt
+                    if partial_f > 0.0:
+                        exit_px_f = c_open * (1.0 - slippage_rate)
+                        exit_fee_f = partial_f * exit_px_f * fee_rate
+                        pnl_f = (exit_px_f - slot_entry_price[sj]) * partial_f - exit_fee_f
+                        balance += partial_f * slot_entry_price[sj] + pnl_f
+                        ef_part_f = slot_entry_fee[sj] * (partial_f / slot_amount[sj])
+                        slot_entry_fee[sj] -= ef_part_f
+                        slot_amount[sj] -= partial_f
+                        slot_fractal_scale_done[sj] = True
+                    if slot_amount[sj] < 1e-12 and slot_in[sj]:
+                        dust_px = c_open * (1.0 - slippage_rate)
+                        pnl = (dust_px - slot_entry_price[sj]) * slot_amount[sj]
+                        pnl -= slot_amount[sj] * dust_px * fee_rate
+                        balance += slot_amount[sj] * slot_entry_price[sj] + pnl
+                        total_trades += 1
+                        slot_in[sj] = False
+                        if 0 <= si < n_sym:
+                            last_risk_pct_sym[si] = 0.0
+                        slot_sym[sj] = -1
+                        continue
+
                 if slot_in[sj] and (not exit_triggered):
                     ei2 = slot_entry_idx[sj]
                     pos_atr = atr[si, ei2] if ei2 < n else trail_atr
@@ -173,7 +226,9 @@ def _run_shared_cash_packed_numba(
                         pos_atr = trail_atr
                     dist = slot_highest[sj] - slot_entry_price[sj]
                     cur_tm = long_trail_mult
-                    if dist > pos_atr * tp_lock_mult:
+                    if trail_tighten[si, i] > 0.5:
+                        cur_tm = long_trail_lock_mult
+                    elif dist > pos_atr * tp_lock_mult:
                         cur_tm = long_trail_lock_mult
                     new_stop = slot_highest[sj] - pos_atr * cur_tm
                     if new_stop > slot_stop[sj]:
@@ -237,7 +292,11 @@ def _run_shared_cash_packed_numba(
             les = long_entry_signal[si, prev_i]
             if les < 0.5 or np.isnan(les):
                 continue
-            if high[si, i] > entry_upper[si, prev_i]:
+            eu_prev = entry_upper[si, prev_i]
+            if eu_prev < 1.0:
+                cand_si[n_cand] = si
+                n_cand += 1
+            elif high[si, i] > eu_prev:
                 cand_si[n_cand] = si
                 n_cand += 1
 
@@ -269,6 +328,19 @@ def _run_shared_cash_packed_numba(
                 cand_si[a] = cand_si[best]
                 cand_si[best] = tmp
 
+        n_new_entries = n_cand
+        if n_new_entries > n_free:
+            n_new_entries = n_free
+        excess_entries = n_new_entries - 1
+        if excess_entries < 0:
+            excess_entries = 0
+        excess_f = float(excess_entries)
+        ref_adv = slippage_ref_adv_krw
+        if ref_adv < 1.0:
+            ref_adv = 1.0
+        gamma0 = slippage_gamma_base
+        pen_scale = concurrency_penalty_scale
+
         fp = 0
         free_ptr = 0
         while fp < n_cand and free_ptr < n_free:
@@ -282,9 +354,18 @@ def _run_shared_cash_packed_numba(
             prev_i2 = prev_i
             if long_entry_signal[si, prev_i2] < 0.5 or np.isnan(long_entry_signal[si, prev_i2]):
                 continue
-            if c_high <= entry_upper[si, prev_i2]:
-                continue
-            fill_price = max(c_open, entry_upper[si, prev_i2]) * (1.0 + slippage_rate)
+            eu_p = entry_upper[si, prev_i2]
+            adv_r = adv_symbol_krw[si] / ref_adv
+            if adv_r < 0.01:
+                adv_r = 0.01
+            gamma_sym = gamma0 / np.sqrt(adv_r)
+            adj_slip = slippage_rate * (1.0 + pen_scale * gamma_sym * (excess_f**1.5))
+            if eu_p < 1.0:
+                fill_price = c_open * (1.0 + adj_slip)
+            else:
+                if c_high <= eu_p:
+                    continue
+                fill_price = max(c_open, eu_p) * (1.0 + adj_slip)
             prev_atr = atr[si, prev_i2]
             if np.isnan(prev_atr) or prev_atr <= 0.0:
                 continue
@@ -293,7 +374,7 @@ def _run_shared_cash_packed_numba(
             if stop_dist <= 1e-18:
                 continue
             rm = regime_risk[si, prev_i2]
-            if not np.isfinite(rm) or rm <= 0.0:
+            if not np.isfinite(rm):
                 continue
             if rm < 0.05:
                 rm = 0.05
@@ -328,6 +409,8 @@ def _run_shared_cash_packed_numba(
             if amt <= 0:
                 continue
             req_cap = amt * fill_price
+            if req_cap < 5000.0:
+                continue
             entry_fee = req_cap * fee_rate
             if balance < req_cap + entry_fee:
                 continue
@@ -340,6 +423,7 @@ def _run_shared_cash_packed_numba(
             slot_amount[sj] = amt
             slot_stop[sj] = stop_price
             slot_scale_done[sj] = False
+            slot_fractal_scale_done[sj] = False
             if long_tp_mult > 0.0:
                 slot_tp[sj] = fill_price + prev_atr * long_tp_mult
             else:
@@ -397,6 +481,7 @@ def run_packed_from_symbol_arrays(
     rank_scores: Optional[Dict[str, np.ndarray]],
     warmup_bars: int,
     execution_start_idx: int,
+    concurrency_penalty_scale: float = 1.0,
 ) -> Tuple[np.ndarray, float, int]:
     """Build packed arrays and run numba kernel."""
     n = len(symbol_arrays[symbols_ordered[0]]["close"])
@@ -412,6 +497,10 @@ def run_packed_from_symbol_arrays(
     garch_kelly = np.ones((n_sym, n), dtype=np.float64)
     kill_signal = np.zeros((n_sym, n), dtype=np.float64)
     rank_scores_m = np.zeros((n_sym, n), dtype=np.float64)
+    fractal_high_m = np.zeros((n_sym, n), dtype=np.float64)
+    bb_upper_m = np.full((n_sym, n), np.inf, dtype=np.float64)
+    trail_m = np.zeros((n_sym, n), dtype=np.float64)
+    adv_krw = np.zeros(n_sym, dtype=np.float64)
 
     for si, sym in enumerate(symbols_ordered):
         arr = symbol_arrays[sym]
@@ -428,16 +517,36 @@ def run_packed_from_symbol_arrays(
             garch_kelly[si, :] = arr["garch_kelly_f"]
         if "kill_signal" in arr:
             kill_signal[si, :] = arr["kill_signal"]
+        if "fractal_high_flag" in arr:
+            fractal_high_m[si, :] = arr["fractal_high_flag"]
         if rank_scores is not None and sym in rank_scores:
             rank_scores_m[si, :] = rank_scores[sym]
         else:
             for j in range(n):
                 rank_scores_m[si, j] = float(-si)
+        if "bb_upper" in arr:
+            bb_upper_m[si, :] = arr["bb_upper"]
+        if "trail_tighten_flag" in arr:
+            trail_m[si, :] = arr["trail_tighten_flag"]
+        c = arr["close"]
+        if "volume" in arr:
+            v = arr["volume"]
+        else:
+            # Fallback when arrays omit volume (caller should pass volume for realistic ADV).
+            v = np.ones(n, dtype=np.float64)
+        lb = min(6, n)
+        if lb > 0:
+            adv_krw[si] = float(np.mean(v[n - lb :] * c[n - lb :]))
+        else:
+            adv_krw[si] = 1.0
 
     fee_rate = float(UPBIT_SPOT_TAKER_FEE_RATE)
     slippage_rate = float(SPOT_SLIPPAGE_RATE)
     risk_per_trade = float(params.get("RISK_PER_TRADE", 0.015))
     max_position_pct = float(params.get("MAX_POSITION_PCT", 0.25))
+    cap_coin = params.get("MAX_CAP_PER_COIN")
+    if cap_coin is not None:
+        max_position_pct = min(max_position_pct, float(cap_coin))
     long_atr_mult = float(params.get("LONG_ATR_MULT", 3.0))
     long_trail_mult = float(params.get("LONG_TRAIL_MULT", 3.0))
     long_trail_lock_mult = float(params.get("LONG_TRAIL_LOCK_MULT", 1.5))
@@ -445,10 +554,14 @@ def run_packed_from_symbol_arrays(
     tp_lock_mult = float(params.get("TP_LOCK_ATR_MULT", 3.0))
     long_scale_atr_mult = float(params.get("LONG_SCALE_ATR_MULT", 0.0))
     scale_out_pct = float(params.get("SCALE_OUT_PCT", 0.0))
+    fractal_scale_out_ratio = float(params.get("SCALE_OUT_RATIO", 0.5))
     time_stop_bars = int(params.get("TIME_STOP_BARS", 0))
     kill_cd_bars = int(params.get("KILL_COOLDOWN_BARS", 6))
     delta_gate = float(params.get("DELTA_GATE", 0.08))
     max_slots = max(1, min(int(max_concurrent_positions), n_sym))
+    gamma_base = float(params.get("SLIPPAGE_GAMMA_BASE", SLIPPAGE_GAMMA_BASE))
+    ref_adv = float(params.get("SLIPPAGE_REFERENCE_ADV_KRW", SLIPPAGE_REFERENCE_ADV_KRW))
+    pen_scale = float(concurrency_penalty_scale)
 
     return _run_shared_cash_packed_numba(
         close,
@@ -462,6 +575,10 @@ def run_packed_from_symbol_arrays(
         garch_kelly,
         kill_signal,
         rank_scores_m,
+        fractal_high_m,
+        bb_upper_m,
+        trail_m,
+        adv_krw,
         initial_balance=initial_balance,
         fee_rate=fee_rate,
         slippage_rate=slippage_rate,
@@ -474,12 +591,16 @@ def run_packed_from_symbol_arrays(
         tp_lock_mult=tp_lock_mult,
         long_scale_atr_mult=long_scale_atr_mult,
         scale_out_pct=scale_out_pct,
+        fractal_scale_out_ratio=fractal_scale_out_ratio,
         time_stop_bars=time_stop_bars,
         warmup_bars=warmup_bars,
         execution_start_idx=execution_start_idx,
         kill_cd_bars=kill_cd_bars,
         delta_gate=delta_gate,
         max_slots=max_slots,
+        slippage_gamma_base=gamma_base,
+        slippage_ref_adv_krw=ref_adv,
+        concurrency_penalty_scale=pen_scale,
     )
 
 
