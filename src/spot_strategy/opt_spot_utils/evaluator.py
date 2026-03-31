@@ -1,10 +1,10 @@
 from __future__ import annotations
 
+import joblib
 import hashlib
 import logging
 import math
 import os
-import pickle
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import optuna
@@ -115,7 +115,6 @@ _DISK_CACHE_READ_EXCEPTIONS: tuple[type[Exception], ...] = (
     AttributeError,
     ImportError,
     ModuleNotFoundError,
-    pickle.UnpicklingError,
 )
 
 
@@ -230,8 +229,23 @@ def _dataset_fingerprint_from_df(df: pd.DataFrame) -> int:
 
 
 def _signal_disk_cache_path(cache_key: _SignalCacheKey, root: Path) -> Path:
-    digest = hashlib.sha256(repr(cache_key).encode("utf-8")).hexdigest()
-    return root / f"spot_sig_{digest}.pkl"
+    # cache_key = (params_tuple, sym, tf, data_len, fingerprint, version)
+    params_tuple, sym, tf, _, _, _ = cache_key
+    
+    # SIGNAL_TYPE 추출 (폴더 구조용)
+    sig_type = "default"
+    for k, v in params_tuple:
+        if k == "SIGNAL_TYPE":
+            sig_type = str(v).lower()
+            break
+            
+    # 파라미터 해시 생성
+    digest = hashlib.sha256(repr(params_tuple).encode("utf-8")).hexdigest()
+    
+    # 구조: root / symbol / tf / sig_type / hash.joblib
+    folder = root / sym / tf / sig_type
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder / f"{digest}.joblib"
 
 
 def _build_signal_cache_key(
@@ -266,8 +280,39 @@ def get_or_compute_signals(
             _signal_cache.move_to_end(cache_key)
             return _signal_cache[cache_key]
 
-    # Disk cache removed for memory-only performance
+    # 1. 디스크 캐시 확인
+    if disk_cache_root is not None:
+        cache_path = _signal_disk_cache_path(cache_key, disk_cache_root)
+        if cache_path.exists():
+            try:
+                # joblib.load와 mmap_mode='r'을 사용하여 RAM 사용량 최소화 (DDR5/NVMe 최적)
+                full_df = joblib.load(cache_path, mmap_mode='r')
+                
+                # 메모리 캐시에도 저장 (LRU)
+                with _cache_lock:
+                    while len(_signal_cache) >= _SIGNAL_CACHE_MAXSIZE:
+                        _signal_cache.popitem(last=False)
+                    _signal_cache[cache_key] = full_df
+                return full_df
+            except _DISK_CACHE_READ_EXCEPTIONS:
+                _logger.warning("Failed to read signal cache with joblib at %s, recomputing...", cache_path)
+
+    # 2. 신규 계산
     full_df: pd.DataFrame = strategy.generate_signals(target_df.copy(deep=True))
+    
+    # 3. 디스크 캐시 저장
+    if disk_cache_root is not None:
+        cache_path = _signal_disk_cache_path(cache_key, disk_cache_root)
+        try:
+            # 병렬 워커 간 충돌 방지를 위한 임시 파일 저장 후 교체 방식
+            tmp_path = cache_path.with_suffix(f".tmp.{os.getpid()}")
+            # mmap 효율을 위해 압축 없이 저장 (DDR5/NVMe 환경 최적)
+            joblib.dump(full_df, tmp_path)
+            tmp_path.replace(cache_path)
+        except Exception as e:
+            _logger.warning("Failed to write signal cache with joblib at %s: %s", cache_path, e)
+
+    # 4. 메모리 캐시 저장
     with _cache_lock:
         if cache_key in _signal_cache:
             _signal_cache.move_to_end(cache_key)

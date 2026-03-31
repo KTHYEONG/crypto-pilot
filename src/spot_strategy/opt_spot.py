@@ -671,7 +671,7 @@ def main() -> None:
     parser.add_argument("--symbols", type=str, default=",".join(SPOT_SYMBOLS))
     parser.add_argument("--mode", type=str, choices=["single", "multi"], default="multi")
     parser.add_argument("--trials", type=int, default=OPT_SPOT_CONFIG["total_trials"])
-    parser.add_argument("--jobs", type=int, default=int(OPT_SPOT_CONFIG.get("n_jobs", 8)))
+    parser.add_argument("--jobs", type=int, default=int(OPT_SPOT_CONFIG.get("n_jobs", 6)))
     parser.add_argument("--task-workers", type=int, default=int(OPT_SPOT_CONFIG.get("task_workers", 0)))
     parser.add_argument("--tf", type=str, choices=["4h"], default=OPT_SPOT_CONFIG.get("TARGET_TIMEFRAMES", ["4h"])[0])
     parser.add_argument("--reference-date", type=str, default=None)
@@ -794,8 +794,11 @@ def main() -> None:
 
     tasks = [(tuple(valid_symbols), args.tf)] if args.mode == "multi" else [(s, args.tf) for s in valid_symbols]
     plan = _resolve_spot_execution_plan(len(tasks), args.mode, args.jobs, args.task_workers)
-    # signal_cache_dir removed for memory-only performance
-    signal_cache_dir = ""
+    
+    # [수정] 메모리 절약을 위한 디스크 캐시 활성화
+    signal_cache_dir = str(Path(project_root) / "data" / "cache_spot")
+    Path(signal_cache_dir).mkdir(parents=True, exist_ok=True)
+    _logger.info(f"Signal Disk Cache Enabled: {signal_cache_dir}")
 
     narrowed_space_effective: Optional[Dict[str, Dict[str, Any]]] = (
         {k: dict(v) if isinstance(v, dict) else v for k, v in narrowed_space_file.items()}
