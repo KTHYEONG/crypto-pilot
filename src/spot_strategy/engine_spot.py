@@ -46,6 +46,9 @@ class BacktestEngineFastSpot:
         "regime_risk_mult",
         "kill_signal",
         "garch_kelly_f",
+        "fractal_high_flag",
+        "bb_upper",
+        "trail_tighten_flag",
     })
 
     def _prepare_data(self) -> None:
@@ -105,6 +108,23 @@ class BacktestEngineFastSpot:
         regime_rm = df["daily_regime_risk_mult"].values if "daily_regime_risk_mult" in df.columns else np.ones(n_bars, dtype=np.float64)
         garch_k = df["daily_garch_kelly_f"].values if "daily_garch_kelly_f" in df.columns else np.ones(n_bars, dtype=np.float64)
         kill_sig = df["daily_kill_signal"].values if "daily_kill_signal" in df.columns else np.zeros(n_bars, dtype=np.float64)
+        fractal_hf = (
+            df["daily_fractal_high_flag"].values
+            if "daily_fractal_high_flag" in df.columns
+            else np.zeros(n_bars, dtype=np.float64)
+        )
+        bb_upper = (
+            df["daily_bb_upper"].values
+            if "daily_bb_upper" in df.columns
+            else np.full(n_bars, np.inf, dtype=np.float64)
+        )
+        trail_tighten = (
+            df["daily_trail_tighten_flag"].values
+            if "daily_trail_tighten_flag" in df.columns
+            else np.zeros(n_bars, dtype=np.float64)
+        )
+        scale_out_ratio = float(self.strategy.params.get("SCALE_OUT_RATIO", 0.5))
+        time_stop_bars = int(self.strategy.params.get("TIME_STOP_BARS", 0))
 
         kill_cd = int(self.strategy.params.get("KILL_COOLDOWN_BARS", 6))
         delta_gate = float(self.strategy.params.get("DELTA_GATE", 0.08))
@@ -121,6 +141,11 @@ class BacktestEngineFastSpot:
             warmup_bars, self._execution_start_idx,
             use_compounding, max_capital_usage,
             kill_cd, delta_gate,
+            fractal_hf,
+            scale_out_ratio,
+            time_stop_bars,
+            bb_upper,
+            trail_tighten,
         )
         
         self.balance = final_balance
@@ -249,6 +274,11 @@ def backtest_loop_numba_spot(
     warmup_bars, execution_start_idx,
     use_compounding, max_capital_usage,
     kill_cooldown_bars, delta_gate,
+    fractal_high_flag,
+    scale_out_ratio,
+    time_stop_bars,
+    bb_upper,
+    trail_tighten_flag,
 ):
     n = len(close)
     balance = initial_balance
@@ -272,7 +302,8 @@ def backtest_loop_numba_spot(
     cooldown_remaining = 0
     last_entry_risk_pct = 0.0
     skip_cooldown_tick = False
-    
+    fractal_scale_done = False
+
     for i in range(n):
         if i < warmup_bars or i < execution_start_idx:
             equity_curve[i] = initial_balance
@@ -297,6 +328,7 @@ def backtest_loop_numba_spot(
                     trades[trade_count] = [entry_idx, i, entry_price, exit_price, pnl - exit_fee, amount, entry_fee_stored]
                     trade_count += 1
                 in_position = False
+                fractal_scale_done = False
                 balance = 0.0
             break
 
@@ -315,13 +347,33 @@ def backtest_loop_numba_spot(
                 exit_triggered = True
                 cooldown_remaining = kill_cooldown_bars
                 skip_cooldown_tick = True
-            
+
             if not exit_triggered:
                 if c_high > highest:
                     highest = c_high
-            
-                pos_atr = atr[entry_idx]
-            
+
+            if (
+                (not exit_triggered)
+                and (not fractal_scale_done)
+                and fractal_high_flag[i] > 0.5
+                and amount > 0.0
+            ):
+                cap_amt = amount * 0.99
+                scale_amount = amount * scale_out_ratio
+                if scale_amount > cap_amt:
+                    scale_amount = cap_amt
+                if scale_amount > 0.0:
+                    scale_exit_price = c_open * (1.0 - slippage_rate)
+                    scale_pnl = (scale_exit_price - entry_price) * scale_amount
+                    scale_fee = scale_amount * scale_exit_price * fee_rate
+                    scale_pnl -= scale_fee
+                    balance += (scale_amount * entry_price) + scale_pnl
+                    amount -= scale_amount
+                    fractal_scale_done = True
+                if amount < 1e-12:
+                    exit_price = c_open * (1.0 - slippage_rate)
+                    exit_triggered = True
+
             # Check Stop Loss first (Gap down)
             if not exit_triggered and c_open <= stop_price:
                 exit_price = c_open * (1 - slippage_rate)
@@ -336,18 +388,37 @@ def backtest_loop_numba_spot(
             elif not exit_triggered and c_high >= tp_price:
                 exit_price = tp_price * (1 - slippage_rate)
                 exit_triggered = True
-            
+            elif (
+                (not exit_triggered)
+                and i < len(bb_upper)
+                and np.isfinite(bb_upper[i])
+                and bb_upper[i] < 1e18
+                and c_high >= bb_upper[i]
+            ):
+                exit_price = bb_upper[i] * (1.0 - slippage_rate)
+                exit_triggered = True
+
             if not exit_triggered:
                 # Parabolic Tightening: If price moved enough from entry relative to ATR, use tighter trail
                 pos_atr = atr[entry_idx]
                 dist = highest - entry_price
                 current_trail_mult = long_trail_mult
-                if dist > (pos_atr * tp_lock_mult):
+                if i < len(trail_tighten_flag) and trail_tighten_flag[i] > 0.5:
                     current_trail_mult = long_trail_lock_mult
-                
+                elif dist > (pos_atr * tp_lock_mult):
+                    current_trail_mult = long_trail_lock_mult
+
                 new_stop = highest - (pos_atr * current_trail_mult)
                 if new_stop > stop_price:
                     stop_price = new_stop
+
+            if (
+                (not exit_triggered)
+                and time_stop_bars > 0
+                and (i - entry_idx) >= time_stop_bars
+            ):
+                exit_price = c_open * (1.0 - slippage_rate)
+                exit_triggered = True
 
             if exit_triggered:
                 pnl = (exit_price - entry_price) * amount
@@ -360,6 +431,7 @@ def backtest_loop_numba_spot(
                     trade_count += 1
                 in_position = False
                 last_entry_risk_pct = 0.0
+                fractal_scale_done = False
                 bar_processed = True
 
         if not in_position and not bar_processed:
@@ -376,8 +448,12 @@ def backtest_loop_numba_spot(
             fill_price = 0.0
             
             if trend_dir[prev_i] == 1:
-                if c_high > entry_upper[prev_i]:
-                    fill_price = max(c_open, entry_upper[prev_i]) * (1 + slippage_rate)
+                eu_prev = entry_upper[prev_i]
+                if eu_prev < 1.0:
+                    fill_price = c_open * (1.0 + slippage_rate)
+                    do_entry = True
+                elif c_high > eu_prev:
+                    fill_price = max(c_open, eu_prev) * (1.0 + slippage_rate)
                     do_entry = True
 
             if do_entry:
@@ -393,9 +469,11 @@ def backtest_loop_numba_spot(
 
                     rr = regime_risk_mult[prev_i] if prev_i < len(regime_risk_mult) else 1.0
                     gk = garch_kelly_f[prev_i] if prev_i < len(garch_kelly_f) else 1.0
-                    if np.isnan(rr) or rr <= 0.0:
+                    if np.isnan(rr):
                         equity_curve[i] = balance
                         continue
+                    # Numba nopython: np.clip(scalar) unsupported; use min/max.
+                    rr = max(0.05, min(1.0, rr))
                     if np.isnan(gk) or gk <= 0.0:
                         gk = 1.0
                     eff = rr * gk
@@ -430,8 +508,9 @@ def backtest_loop_numba_spot(
                             entry_idx = i
                             highest = fill_price
                             last_entry_risk_pct = new_risk_pct
+                            fractal_scale_done = False
                             tp_price = fill_price + (prev_atr * long_tp_mult)
-                            
+
                             if c_low <= stop_price:
                                 intra_exit_price = stop_price * (1 - slippage_rate)
                                 pnl = (intra_exit_price - entry_price) * amount
@@ -443,6 +522,7 @@ def backtest_loop_numba_spot(
                                     trade_count += 1
                                 in_position = False
                                 last_entry_risk_pct = 0.0
+                                fractal_scale_done = False
 
         if in_position:
             unrealized = (c_price - entry_price) * amount
