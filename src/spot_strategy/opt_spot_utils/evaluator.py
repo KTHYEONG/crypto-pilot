@@ -94,11 +94,12 @@ SIGNAL_CACHE_PARAM_KEYS: frozenset[str] = frozenset([
 
 _SIGNAL_CACHE_SCHEMA_VERSION: int = 11
 
-_SPOT_OBJECTIVE_CALMAR_WEIGHT: float = 0.05
-_SPOT_OBJECTIVE_CAGR_WEIGHT: float = 0.005
-_SPOT_OBJECTIVE_MIN_TRADES_SOFT: float = 15.0
-_SPOT_OBJECTIVE_TAIL_RATIO_WEIGHT: float = 0.08
-_SPOT_OBJECTIVE_DSR_WEIGHT: float = 0.05
+_SPOT_OBJECTIVE_CAGR_WEIGHT: float = 0.0  # Abandoning additive CAGR
+_SPOT_OBJECTIVE_MIN_TRADES_HARD: float = 10.0 # Min trades per path to even consider
+_SPOT_OBJECTIVE_MIN_TRADES_SOFT: float = 25.0 # Target trades for statistical robustness
+_SPOT_OBJECTIVE_TAIL_RATIO_WEIGHT: float = 0.15 # Increased importance of asymmetry
+_SPOT_OBJECTIVE_LOG_TWR_WEIGHT: float = 1.0
+_SPOT_OBJECTIVE_PATH_CV_PENALTY: float = 0.5  # Lambda for path variance penalty
 
 _SignalCacheKey = Tuple[Tuple[Tuple[str, Any], ...], str, str, int, int, int]
 _SIGNAL_CACHE_MAXSIZE: int = 256
@@ -699,7 +700,16 @@ def objective_spot(
             path_compound_raw_log_tw.append(float(np.sum(seg_raw_log_tw)))
             path_compound_tw_ratio.append(float(np.prod(seg_tw_ratio)) if seg_tw_ratio else 1.0)
             path_worst_mdd.append(float(np.max(seg_mdds)) if seg_mdds else 0.0)
-            path_max_cvar.append(float(np.max(seg_cvars)) if seg_cvars else 0.0)
+            
+            # HARD HURDLE: If any path exceeds MDD limit, prune immediately.
+            path_mdd_limit = float(OPT_SPOT_CONFIG.get("SPOT_MDD_LIMIT_PCT", 40.0))
+            if path_worst_mdd[-1] > path_mdd_limit:
+                 raise optuna.TrialPruned()
+            
+            # HARD HURDLE: Min trades per path for statistical relevance.
+            if path_total_trades < _SPOT_OBJECTIVE_MIN_TRADES_HARD:
+                 raise optuna.TrialPruned()
+
             path_trades.append(path_total_trades)
             path_tail_ratios.append(float(np.mean(seg_tails)) if seg_tails else 1.0)
 
@@ -747,15 +757,11 @@ def objective_spot(
             run_tail = float(np.mean(path_tail_ratios)) if path_tail_ratios else 0.0
             run_tail_bonus = math.log(max(run_tail, 0.1)) * _SPOT_OBJECTIVE_TAIL_RATIO_WEIGHT
             run_cagr_floor_pen = max(0.0, 30.0 - run_cagr) * 0.003
-            interm = (
-                run_geo
-                + _SPOT_OBJECTIVE_CALMAR_WEIGHT * run_calmar
-                + _SPOT_OBJECTIVE_CAGR_WEIGHT * run_cagr
-                + run_tail_bonus
-                - lam_ui * run_max_ui
-                - soft_p
-                - run_cagr_floor_pen
-            )
+            mu_p = float(np.mean(path_arr_partial)) if path_arr_partial.size > 0 else 0.0
+            sd_p = float(np.std(path_arr_partial)) if path_arr_partial.size > 1 else 0.0
+            
+            # Simple intermediate objective for pruning: Mean Log-TWR - Variance Penalty
+            interm = mu_p - _SPOT_OBJECTIVE_PATH_CV_PENALTY * sd_p + run_tail_bonus - lam_ui * run_max_ui - (soft_p * 2.0)
             trial.report(interm, step=path_idx)
             if trial.should_prune():
                 raise optuna.TrialPruned()
@@ -805,30 +811,34 @@ def objective_spot(
 
         concentration_pen = max(0.0, cv_paths - 2.0) * 0.02
         # Soft Penalties: SQN < 1.6, low mean CPCV trades (CLT), path CV concentration
-        soft_penalty = (
-            max(0.0, _SPOT_OBJECTIVE_MIN_TRADES_SOFT - n_trades_mean) * w_trade_pen
-            + max(0.0, 1.6 - gate1_sqn) * w_sqn_pen
-            + concentration_pen
-        )
-
-        geometric_mean_log = float(np.mean(path_compound_raw_log_tw)) if path_compound_raw_log_tw else 0.0
-        mean_path_calmar = float(np.mean(path_calmars)) if path_calmars else 0.0
-        mean_path_cagr = float(np.mean(path_cagrs)) if path_cagrs else 0.0
+        # NEW MULTIPLICATIVE/ROBUST OBJECTIVE: Log-TWR Mean - Path Variance Penalty
+        mu_paths = float(np.mean(path_arr)) if path_arr.size > 0 else -10.0
+        sd_paths = float(np.std(path_arr)) if path_arr.size > 1 else 10.0
+        
+        # Path Consistency Coefficient (CV)
+        path_cv = sd_paths / (abs(mu_paths) + 1e-6)
+        
+        # Base Wealth Maximization (Geometric Mean in log space)
+        geometric_mean_log = mu_paths
+        
+        # Penalize inconsistency between paths
+        consistency_penalty = _SPOT_OBJECTIVE_PATH_CV_PENALTY * sd_paths
+        
+        # Tail Ratio and Trade count bonuses/penalties refined
         mean_tail_ratio = float(np.mean(path_tail_ratios)) if path_tail_ratios else 0.0
         tail_bonus = math.log(max(mean_tail_ratio, 0.1)) * _SPOT_OBJECTIVE_TAIL_RATIO_WEIGHT
-        cagr_floor_penalty = max(0.0, 30.0 - mean_path_cagr) * 0.003
-        dsr_target_soft = float(OPT_SPOT_CONFIG.get("SPOT_OBJECTIVE_DSR_TARGET", 0.35))
-        dsr_penalty = max(0.0, dsr_target_soft - dsr_val) * _SPOT_OBJECTIVE_DSR_WEIGHT
+        
+        soft_penalty = (
+            max(0.0, _SPOT_OBJECTIVE_MIN_TRADES_SOFT - n_trades_mean) * (w_trade_pen * 10.0)
+            + max(0.0, 2.0 - gate1_sqn) * (w_sqn_pen * 2.0)
+        )
 
         objective_final = float(
             geometric_mean_log
-            + _SPOT_OBJECTIVE_CALMAR_WEIGHT * mean_path_calmar
-            + _SPOT_OBJECTIVE_CAGR_WEIGHT * mean_path_cagr
+            - consistency_penalty
             + tail_bonus
             - lam_ui * max_ui
             - soft_penalty
-            - dsr_penalty
-            - cagr_floor_penalty
         )
 
         # PSR: P(SR > 0) on CPCV path log-TWR values
@@ -840,6 +850,7 @@ def objective_spot(
 
         worst_seg_mdd = float(np.max(path_worst_mdd)) if path_worst_mdd else 0.0
         mean_path_return_pct = (math.exp(mean_log_tw) - 1.0) * 100.0
+        mean_path_calmar = float(np.mean(path_calmars)) if path_calmars else 0.0
 
         trial.set_user_attr("growth_score", float(objective_final))
         trial.set_user_attr("p10_gmgr", float(p10_gmgr))

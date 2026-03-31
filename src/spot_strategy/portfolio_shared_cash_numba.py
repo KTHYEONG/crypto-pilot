@@ -415,6 +415,10 @@ def _run_shared_cash_packed_numba(
             total_required = req_cap + entry_fee
             if total_required <= 0.0:
                 continue
+            # CIRCUIT BREAKER: If balance drops below 30% of initial capital, stop opening new positions (Wealth Preservation).
+            if balance < initial_balance * 0.3:
+                break
+                
             if balance < total_required:
                 if balance <= 0.0:
                     continue

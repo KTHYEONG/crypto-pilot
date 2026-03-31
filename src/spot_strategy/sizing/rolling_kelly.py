@@ -18,20 +18,31 @@ class RollingKellySizing:
     def compute(self, df: pd.DataFrame, params: Dict[str, Any]) -> np.ndarray:
         close = df["close"].to_numpy(dtype=np.float64)
         n = len(close)
-        window = int(max(5, params.get("KELLY_WINDOW", 60)))
-        kelly_frac = float(params.get("KELLY_FRACTION", 0.5))
-        max_exp = float(params.get("MAX_EXPOSURE", 1.0))
-        r = pd.Series(close).pct_change().to_numpy(dtype=np.float64)
+        window = int(max(10, params.get("KELLY_WINDOW", 60)))
+        # Fractional Kelly: Default to Quarter Kelly (0.25) to mitigate estimation error.
+        kelly_frac = float(params.get("KELLY_FRACTION", 0.25))
+        # Hard Cap: 30% individual coin limit for wealth preservation.
+        max_exp = float(min(params.get("MAX_EXPOSURE", 0.3), 0.3))
+        
+        r = pd.Series(close).pct_change().fillna(0).to_numpy(dtype=np.float64)
         s = pd.Series(r)
-        mu = s.rolling(window, min_periods=window).mean().to_numpy(dtype=np.float64)
-        var = s.rolling(window, min_periods=window).var().to_numpy(dtype=np.float64)
+        
+        # Use EWMA for more stable/responsive volatility estimation in non-stationary markets.
+        mu = s.ewm(span=window, min_periods=window // 2).mean().to_numpy(dtype=np.float64)
+        var = s.ewm(span=window, min_periods=window // 2).var().to_numpy(dtype=np.float64)
+        
+        # Regularization to prevent division by zero in flat periods.
+        eps = 1e-8
         with np.errstate(divide="ignore", invalid="ignore"):
-            f = np.where(var > 1e-12, (mu / var) * kelly_frac, 0.0)
+            f = np.where(var > eps, (mu / var) * kelly_frac, 0.0)
+        
         f = np.nan_to_num(f, nan=0.0, posinf=0.0, neginf=0.0)
         entry_mask = (
             df["long_entry_signal"].to_numpy(dtype=np.float64)
             if "long_entry_signal" in df.columns
-            else np.ones(len(f), dtype=np.float64)
+            else np.ones(n, dtype=np.float64)
         )
-        floored = np.where(entry_mask > 0, np.maximum(f, 0.0), f)
+        # Apply fractional size only on long signals.
+        floored = np.where(entry_mask > 0.5, np.maximum(f, 0.0), 0.0)
         return np.clip(floored, 0.0, max_exp).astype(np.float64)
+
