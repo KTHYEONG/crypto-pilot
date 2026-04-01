@@ -279,27 +279,45 @@ class SpotBot:
         
         results_dir = os.path.join(project_root, "results")
         
+        from src.common.secure_config import decrypt_config, get_strategy_secret
+        secret = get_strategy_secret()
+
         for symbol in self.symbols:
             # KRW-BTC -> KRWBTC
             clean_sym = symbol.replace("/", "").replace("-", "")
-            json_path = os.path.join(results_dir, f"best_params_{clean_sym}_4h.json")
+            base_json_name = f"best_params_{clean_sym}_4h.json"
+            json_path = os.path.join(results_dir, base_json_name)
+            enc_path = json_path + ".enc"
             
-            if not os.path.exists(json_path):
-                logger.error(f"❌ JSON file not found for {symbol}: {json_path}")
-                continue # 현물은 없는 코인이 있을 수 있으므로 에러 대신 패스
-                
-            try:
-                with open(json_path, 'r', encoding='utf-8') as f:
-                    symbol_params = json.load(f)
-            except Exception as e:
-                logger.error(f"❌ Failed to parse JSON for {symbol}: {e}")
+            symbol_params = None
+            
+            # 1. Try Encrypted Load First (For production/CI/CD environment)
+            if os.path.exists(enc_path) and secret:
+                try:
+                    encrypted_data = Path(enc_path).read_bytes()
+                    symbol_params = decrypt_config(encrypted_data, secret)
+                    logger.info(f"🛡️ [{symbol}] Loaded from encrypted config: {enc_path}")
+                except Exception as e:
+                    logger.error(f"❌ Failed to decrypt {enc_path}: {e}")
+            
+            # 2. Hard Fallback to Cleartext (Only if encrypted load failed or doesn't exist)
+            if symbol_params is None and os.path.exists(json_path):
+                try:
+                    with open(json_path, 'r', encoding='utf-8') as f:
+                        symbol_params = json.load(f)
+                    logger.info(f"📂 [{symbol}] Loaded from plaintext config: {json_path}")
+                except Exception as e:
+                    logger.error(f"❌ Failed to parse JSON for {symbol}: {e}")
+            
+            if symbol_params is None:
+                logger.error(f"❌ No valid strategy config found for {symbol} (Tried .json and .enc)")
                 continue
                 
             symbol_params.setdefault('INDICATOR_TIMEFRAME', '4h')
             self.params_map[symbol] = symbol_params
             strategy_name = f"RealSpot_{clean_sym}"
             self.strategies[symbol] = UltimateSpotStrategy(strategy_name, symbol_params)
-            logger.info(f"✅ Strategy initialized from JSON: {symbol} | Exec TF: {symbol_params.get('TIMEFRAME', '4h')}")
+            logger.info(f"✅ Strategy initialized for {symbol} | Exec TF: {symbol_params.get('TIMEFRAME', '4h')}")
 
     @network_api_retry
     def _fetch_balance_safe(self) -> tuple:
