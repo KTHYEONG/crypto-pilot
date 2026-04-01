@@ -1,5 +1,5 @@
 """
-RealTrader Spot - 24시간 자동 현물(Upbit) 트레이딩 봇
+SpotBot - 24시간 자동 현물(Upbit) 트레이딩 봇
 ===================================================
 - Upbit 현물 시장 특화 (Long-Only, 1x Leverage, KRW 마켓)
 - 숏(Short), 레버리지, 펀딩비 관련 로직 완벽 제거
@@ -74,7 +74,7 @@ from src.spot_strategy.strategies_spot import UltimateSpotStrategy
 from src.common.utils import setup_logger
 from src.common.components import TradeHistoryDB, HealthCheckManager, calculate_candle_wait_time
 
-logger = setup_logger("RealTraderSpot")
+logger = setup_logger("SpotBot")
 
 _CCXT_TRANSIENT_ERRORS: Tuple[type, ...] = ()
 if ccxt is not None:
@@ -204,7 +204,7 @@ class StateManager:
                 self._dirty = False
                 self._last_flush = time.time()
 
-class RealTraderSpot:
+class SpotBot:
     """Production-grade 업비트 현물 트레이딩 봇"""
     
     def __init__(self):
@@ -484,7 +484,7 @@ class RealTraderSpot:
             return None
 
     def initialize(self):
-        logger.info("🤖 RealTrader Spot (Upbit) Bot Initializing...")
+        logger.info("🤖 SpotBot (Upbit) Initializing...")
         self._sync_server_time_offset(force=True)
         
         self.load_strategies_from_json()
@@ -670,5 +670,5 @@ class RealTraderSpot:
             logger.info("🛑 Bot Stopped.")
 
 if __name__ == "__main__":
-    bot = RealTraderSpot()
+    bot = SpotBot()
     bot.run()
