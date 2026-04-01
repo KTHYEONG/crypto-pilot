@@ -375,6 +375,8 @@ def _process_in_position_bar(
         if sym_cooldown is not None and sym_cooldown_skip is not None and 0 <= sym_idx < len(sym_cooldown):
             sym_cooldown[sym_idx] = int(kill_cooldown_bars)
             sym_cooldown_skip[sym_idx] = True
+            if last_risk_pct_sym is not None and 0 <= sym_idx < len(last_risk_pct_sym):
+                last_risk_pct_sym[sym_idx] = 0.0
         return slot, balance, trades_delta
 
     trail_atr = float(atr[i])

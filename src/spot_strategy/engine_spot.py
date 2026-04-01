@@ -146,6 +146,7 @@ class BacktestEngineFastSpot:
             time_stop_bars,
             bb_upper,
             trail_tighten,
+            float(self.strategy.params.get('MAX_CAP_PER_COIN', 1.0)),
         )
         
         self.balance = final_balance
@@ -279,6 +280,7 @@ def backtest_loop_numba_spot(
     time_stop_bars,
     bb_upper,
     trail_tighten_flag,
+    max_position_pct,
 ):
     n = len(close)
     balance = initial_balance
@@ -487,16 +489,20 @@ def backtest_loop_numba_spot(
                         equity_curve[i] = balance
                         continue
                     
-                    # Spot Allocation: Allocate direct percentage of available equity
-                    target_capital = current_equity * new_risk_pct
+                    # Spot Allocation: Align with shared-cash Risk-based sizing
+                    risk_budget = current_equity * new_risk_pct
+                    raw_amount = risk_budget / stop_distance
                     
-                    # Prevent allocating more than we have
-                    available_capital = balance * 0.99  # 1% buffer for fees
-                    allocate_capital = min(target_capital, available_capital)
+                    # Cap by max_position_pct (Portfolio-aligned)
+                    max_notional = current_equity * max_position_pct
+                    amount_pos_cap = max_notional / fill_price
                     
-                    if allocate_capital > 0:
-                        amount = allocate_capital / fill_price
-                        
+                    # Prevent allocating more than we have (Buffer for fees)
+                    max_affordable = (balance * 0.99) / (fill_price * (1.0 + fee_rate))
+                    
+                    amount = min(raw_amount, amount_pos_cap, max_affordable)
+                    
+                    if amount > 1e-12:
                         required_capital = amount * fill_price
                         entry_fee = required_capital * fee_rate
                         
