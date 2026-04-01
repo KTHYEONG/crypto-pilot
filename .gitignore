@@ -4,6 +4,9 @@ data/
 # cursor
 .cursor/
 
+# .vscode
+.vscode/
+
 # claude
 CLAUDE.md
 .claude/
