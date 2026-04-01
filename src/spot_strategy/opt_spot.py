@@ -958,8 +958,10 @@ def main() -> None:
     holdout_alpha_floor = float(OPT_SPOT_CONFIG.get("SPOT_HOLDOUT_ALPHA_DECAY_FLOOR_PCT", -50.0))
     gate1_sqn_min = float(OPT_SPOT_CONFIG.get("SPOT_GATE1_SQN_MIN", 3.0))
     gate1_psort_min = float(OPT_SPOT_CONFIG.get("SPOT_GATE1_PATH_SORTINO_MIN", 2.5))
-    gate1_tr_min = float(OPT_SPOT_CONFIG.get("SPOT_GATE1_TAIL_RATIO_MIN", 3.0))
-    discovery_dsr_min = float(OPT_SPOT_CONFIG.get("SPOT_DISCOVERY_DSR_MIN", -1.0))
+    gate1_tr_min = float(OPT_SPOT_CONFIG.get("SPOT_GATE1_TAIL_RATIO_MIN", 2.0))
+    discovery_dsr_min = float(OPT_SPOT_CONFIG.get("SPOT_DISCOVERY_DSR_MIN", 0.25))
+    holdout_min_pf = float(OPT_SPOT_CONFIG.get("SPOT_HOLDOUT_MIN_PROFIT_FACTOR", 1.3))
+    holdout_min_calmar = float(OPT_SPOT_CONFIG.get("SPOT_HOLDOUT_MIN_CALMAR_RATIO", 1.5))
 
     for (target, tf_eval), study in best_results.items():
         if study is None:
@@ -994,6 +996,8 @@ def main() -> None:
             dsr_min=discovery_dsr_min,
         )
         veto_ok = bool(veto.passed)
+
+        min_pf_trades_dynamic = max(50, len(target_symbols) * 8)
 
         port_ho = run_holdout_shared_cash_portfolio(
             params,
@@ -1077,11 +1081,11 @@ def main() -> None:
             return_signal_dfs=False,
             concurrency_penalty_scale=1.0,
         )
-        is_portfolio_cagr: float = float(port_is.get("portfolio_cagr_pct", 0.0))
+        is_portfolio_cagr: float = float(best_trial.user_attrs.get("cpcv_mean_path_return_pct", 0.0))
 
         trade_floor = run_holdout_portfolio_trade_floor(
             portfolio_long_trades=int(port_ho["long_trades"]),
-            min_portfolio_trades=min_pf_trades,
+            min_portfolio_trades=min_pf_trades_dynamic,
         )
         shared_cash_gate = run_holdout_portfolio_shared_cash(
             portfolio_cagr_pct=float(port_ho["portfolio_cagr_pct"]),
@@ -1089,6 +1093,8 @@ def main() -> None:
             portfolio_cvar_pct=float(port_ho["cvar_pct"]),
             portfolio_tail_ratio=float(port_ho["tail_ratio"]),
             min_path_terminal_wealth_ratio=float(port_ho["min_path_tw"]),
+            portfolio_profit_factor=float(port_ho["profit_factor"]),
+            portfolio_calmar_ratio=float(port_ho["calmar_ratio"]),
             max_cvar_pct=max_ho_cvar,
             tail_ratio_min=holdout_min_tail,
             cagr_min_pct=holdout_min_cagr,
@@ -1097,8 +1103,15 @@ def main() -> None:
             hw_recovery_days_max=holdout_hwm_max_days,
             is_cagr_pct=is_portfolio_cagr,
             alpha_decay_floor_pct=holdout_alpha_floor,
+            pf_min=holdout_min_pf,
+            calmar_min=holdout_min_calmar,
         )
         is_all_passed = bool(veto_ok and trade_floor.passed and shared_cash_gate.passed)
+        if not is_all_passed:
+            _logger.info("❌ Gate check failed. Diagnostic details:")
+            _logger.info("\n%s", veto.summary)
+            _logger.info("\n%s", trade_floor.summary)
+            _logger.info("\n%s", shared_cash_gate.summary)
 
         symbol_gate_rows: List[SymbolGateRow] = []
         for pl in symbol_fold_payloads:
@@ -1166,7 +1179,16 @@ def main() -> None:
                 oos_mdd_limit_pct=holdout_mdd_limit,
                 hw_recovery_max_days=holdout_hwm_max_days,
                 alpha_decay_floor_pct=holdout_alpha_floor,
+                oos_cvar_pct=float(port_ho["cvar_pct"]),
+                cvar_limit_pct=max_ho_cvar,
+                terminal_wealth_ratio=float(port_ho["min_path_tw"]),
+                tw_target=1.0,
                 oos_total_trades=int(port_ho.get("long_trades", 0)),
+                oos_pf=float(port_ho["profit_factor"]),
+                pf_target=holdout_min_pf,
+                oos_calmar=float(port_ho["calmar_ratio"]),
+                calmar_target=holdout_min_calmar,
+                oos_win_rate_pct=float(port_ho["win_rate_pct"]),
                 symbol_rows=symbol_gate_rows,
                 loso_warning=loso_warning,
                 hard_passed=hard_passed,

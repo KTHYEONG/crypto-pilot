@@ -8,7 +8,7 @@ Exit/entry rules match engine_spot.backtest_loop_numba_spot per active slot.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -24,6 +24,7 @@ class SharedCashResult:
     equity_curve: np.ndarray
     final_balance: float
     total_trades: int
+    pnl_array: np.ndarray = field(default_factory=lambda: np.array([], dtype=np.float64))
 
 
 @dataclass
@@ -68,7 +69,7 @@ def run_shared_cash_multi_symbol(
         )
 
         if use_numba_shared_cash():
-            eq, bal, tt = run_packed_from_symbol_arrays(
+            return run_packed_from_symbol_arrays(
                 symbol_arrays,
                 symbols_ordered,
                 params,
@@ -79,7 +80,6 @@ def run_shared_cash_multi_symbol(
                 execution_start_idx=execution_start_idx,
                 concurrency_penalty_scale=float(concurrency_penalty_scale),
             )
-            return SharedCashResult(equity_curve=eq, final_balance=float(bal), total_trades=int(tt))
     except Exception as exc:
         if not allow_python_fallback:
             raise
