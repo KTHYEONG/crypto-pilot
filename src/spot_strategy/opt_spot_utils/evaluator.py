@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import joblib
+import inspect
+import time
 import hashlib
 import logging
 import math
@@ -101,7 +103,40 @@ _SPOT_OBJECTIVE_TAIL_RATIO_WEIGHT: float = 0.15 # Increased importance of asymme
 _SPOT_OBJECTIVE_LOG_TWR_WEIGHT: float = 1.0
 _SPOT_OBJECTIVE_PATH_CV_PENALTY: float = 0.75  # Kelly drag 균형점: G∞=μ-σ²/2 → σ직접 패널티화의 합리적 상한 λ=0.75 (λ=1.0은 고수익 고변동 경로 과억압)
 
-_SignalCacheKey = Tuple[Tuple[Tuple[str, Any], ...], str, str, int, int, int]
+_STRATEGY_LOGIC_HASH: Optional[str] = None
+_CACHE_CLEANUP_DONE: bool = False
+
+def _get_logic_hash() -> str:
+    """Strategy logic fingerprinting via source code hashing."""
+    global _STRATEGY_LOGIC_HASH
+    if _STRATEGY_LOGIC_HASH is None:
+        try:
+            # Avoid circular import by local import
+            from src.spot_strategy.strategies_spot import UltimateSpotStrategy
+            src = inspect.getsource(UltimateSpotStrategy.generate_signals)
+            _STRATEGY_LOGIC_HASH = hashlib.sha256(src.encode("utf-8")).hexdigest()[:16]
+        except Exception:
+            _STRATEGY_LOGIC_HASH = "legacy"
+    return _STRATEGY_LOGIC_HASH
+
+def _cleanup_old_cache(root: Path, max_days: int = 7) -> None:
+    """Deletes cache files older than specified days to manage disk space."""
+    if not root.exists():
+        return
+    now = time.time()
+    max_sec = max_days * 86400
+    count = 0
+    for f in root.rglob("*.joblib"):
+        try:
+            if now - f.stat().st_mtime > max_sec:
+                f.unlink()
+                count += 1
+        except OSError:
+            pass
+    if count > 0:
+        _logger.info("Auto-cleaned %d expired cache files (>%d days).", count, max_days)
+
+_SignalCacheKey = Tuple[Tuple[Tuple[str, Any], ...], str, str, int, int, int, str]
 _SIGNAL_CACHE_MAXSIZE: int = 256
 _ARRAYS_CACHE_MAXSIZE: int = 256
 _cache_lock: threading.Lock = threading.Lock()
@@ -230,8 +265,8 @@ def _dataset_fingerprint_from_df(df: pd.DataFrame) -> int:
 
 
 def _signal_disk_cache_path(cache_key: _SignalCacheKey, root: Path) -> Path:
-    # cache_key = (params_tuple, sym, tf, data_len, fingerprint, version)
-    params_tuple, sym, tf, data_len, fingerprint, version = cache_key
+    # cache_key = (params_tuple, sym, tf, data_len, fingerprint, version, logic_hash)
+    params_tuple, sym, tf, data_len, fingerprint, version, logic_hash = cache_key
     
     # SIGNAL_TYPE 추출 (폴더 구조용)
     sig_type = "default"
@@ -240,8 +275,8 @@ def _signal_disk_cache_path(cache_key: _SignalCacheKey, root: Path) -> Path:
             sig_type = str(v).lower()
             break
             
-    # 파라미터 제원 + 데이터 길이/버전/지문까지 포함하여 해시 충돌 방지
-    hash_payload = (params_tuple, data_len, fingerprint, version)
+    # 파라미터 제원 + 데이터 길이/버전/지문/코드해시까지 포함하여 해시 충돌 방지
+    hash_payload = (params_tuple, data_len, fingerprint, version, logic_hash)
     digest = hashlib.sha256(repr(hash_payload).encode("utf-8")).hexdigest()
     
     # 구조: root / symbol / tf / sig_type / hash.joblib
@@ -267,6 +302,7 @@ def _build_signal_cache_key(
         data_len,
         int(fingerprint),
         _SIGNAL_CACHE_SCHEMA_VERSION,
+        _get_logic_hash(),
     )
 
 
@@ -277,6 +313,12 @@ def get_or_compute_signals(
     *,
     disk_cache_root: Optional[Path] = None,
 ) -> pd.DataFrame:
+    global _CACHE_CLEANUP_DONE
+    if disk_cache_root is not None and not _CACHE_CLEANUP_DONE:
+        # 최초 실행 시 1회만 7일 지난 캐시 정리
+        _cleanup_old_cache(disk_cache_root, max_days=7)
+        _CACHE_CLEANUP_DONE = True
+
     with _cache_lock:
         if cache_key in _signal_cache:
             _signal_cache.move_to_end(cache_key)
