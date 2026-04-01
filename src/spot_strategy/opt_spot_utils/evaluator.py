@@ -611,6 +611,9 @@ def objective_spot(
         path_calmars: List[float] = []
         path_cagrs: List[float] = []
 
+        total_sym_trades = np.zeros(len(symbols), dtype=np.int32)
+        total_sym_pnl = np.zeros(len(symbols), dtype=np.float64)
+
         for path_idx, path in enumerate(cpcv_paths):
             seg_log_tw: List[float] = []
             seg_raw_log_tw: List[float] = []
@@ -665,6 +668,9 @@ def objective_spot(
                     raise
                 eq = result.equity_curve
                 path_total_trades += int(result.total_trades)
+                if hasattr(result, "per_symbol_trades"):
+                    total_sym_trades += result.per_symbol_trades
+                    total_sym_pnl += result.per_symbol_pnl
                 if eq.size == 0:
                     twr = 1.0
                 else:
@@ -842,12 +848,11 @@ def objective_spot(
         # Base Wealth Maximization (Geometric Mean in log space)
         raw_geometric_mean = mu_paths
         
-        # Soft Cap for Extreme IS Returns (Diminishing Returns)
-        # Threshold: 70% CAGR ≈ 0.5306 log return
-        # Logic: (Benchmark ~50%) + (Target Alpha ~20%) = 70%
-        cap_threshold = 0.53
+        # Soft Cap for Extreme IS Returns (Restored for Power Law extraction)
+        # Sweet Spot: 100% CAGR ≈ 0.693 log return. Encourages aggressive compounding.
+        cap_threshold = 0.693
         if raw_geometric_mean > cap_threshold:
-            geometric_mean_log = cap_threshold + (raw_geometric_mean - cap_threshold) * 0.5
+            geometric_mean_log = cap_threshold + (raw_geometric_mean - cap_threshold) * 0.3
         else:
             geometric_mean_log = raw_geometric_mean
         
@@ -860,10 +865,16 @@ def objective_spot(
         
         mean_path_pf = float(np.mean(path_pfs)) if path_pfs else 1.0
         
+        # Breadth Penalty (Generalization without forced equality)
+        # Ensures underlying alpha works on at least 3~4 assets, allowing Power Law scaling.
+        positive_coins = np.sum(total_sym_pnl > 0.0)
+        breadth_penalty = max(0.0, 4.0 - float(positive_coins)) * 0.15
+        
         soft_penalty = (
             max(0.0, _SPOT_OBJECTIVE_MIN_TRADES_SOFT - n_trades_mean) * (w_trade_pen * 10.0)
             + max(0.0, 2.0 - gate1_sqn) * (w_sqn_pen * 2.0)
             + max(0.0, 1.35 - mean_path_pf) * 0.1     # Recalibrated: 0.1 PF drop ≈ 1% log-drag
+            + breadth_penalty
         )
 
         w_calmar = float(cfg.get("SPOT_OBJECTIVE_W_CALMAR", 0.08))
