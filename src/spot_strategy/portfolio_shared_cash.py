@@ -25,6 +25,9 @@ class SharedCashResult:
     final_balance: float
     total_trades: int
     pnl_array: np.ndarray = field(default_factory=lambda: np.array([], dtype=np.float64))
+    per_symbol_trades: np.ndarray = field(default_factory=lambda: np.array([], dtype=np.int32))
+    per_symbol_wins: np.ndarray = field(default_factory=lambda: np.array([], dtype=np.int32))
+    per_symbol_pnl: np.ndarray = field(default_factory=lambda: np.array([], dtype=np.float64))
 
 
 @dataclass
@@ -114,6 +117,12 @@ def run_shared_cash_multi_symbol(
     total_trades = 0
 
     n_sym = len(symbols_ordered)
+    per_symbol_trades = np.zeros(n_sym, dtype=np.int32)
+    per_symbol_wins = np.zeros(n_sym, dtype=np.int32)
+    per_symbol_pnl = np.zeros(n_sym, dtype=np.float64)
+    pnl_list = []
+
+    n_sym = len(symbols_ordered)
     sym_cooldown = np.zeros(n_sym, dtype=np.int32)
     sym_cooldown_skip = np.zeros(n_sym, dtype=np.bool_)
     kill_cd_bars = int(params.get("KILL_COOLDOWN_BARS", 6))
@@ -139,7 +148,7 @@ def run_shared_cash_multi_symbol(
             arr = symbol_arrays[sym]
             ks = arr.get("kill_signal")
             fh = arr.get("fractal_high_flag")
-            slot, balance, td = _process_in_position_bar(
+            slot, balance, td, spnl = _process_in_position_bar(
                 i=i,
                 n=n,
                 close=arr["close"],
@@ -169,8 +178,16 @@ def run_shared_cash_multi_symbol(
                 kill_cooldown_bars=kill_cd_bars,
                 bb_upper=arr.get("bb_upper"),
                 trail_tighten=arr.get("trail_tighten_flag"),
+                regime_risk_mult=arr.get("regime_risk_mult"),
             )
             total_trades += td
+            if td > 0:
+                ssi = slot.sym_idx
+                per_symbol_trades[ssi] += td
+                per_symbol_pnl[ssi] += spnl
+                if spnl > 0:
+                    per_symbol_wins[ssi] += 1
+                pnl_list.append(spnl)
             if not slot.in_position:
                 done_si = int(slot.sym_idx)
                 if 0 <= done_si < n_sym:
@@ -241,7 +258,7 @@ def run_shared_cash_multi_symbol(
             adv_r = max(adv_by_si[si] / ref_adv_py, 0.01)
             gamma_sym = gamma_base / float(np.sqrt(adv_r))
             adj_slip = slippage_rate * (1.0 + pen_scale_py * gamma_sym * excess_pow)
-            st, balance, opened, td = _try_open_long(
+            st, balance, opened, td, spnl = _try_open_long(
                 i=i,
                 n=n,
                 close=arr["close"],
@@ -266,7 +283,18 @@ def run_shared_cash_multi_symbol(
                 last_risk_pct_ref=last_risk_pct_sym,
                 sym_idx=si,
             )
-            total_trades += td
+            if td > 0:
+                total_trades += td
+                per_symbol_trades[si] += td
+                per_symbol_pnl[si] += spnl
+                if spnl > 0:
+                    per_symbol_wins[si] += 1
+                pnl_list.append(spnl)
+                
+                if not opened:
+                    # Intra-SL: Churning Prevention
+                    sym_cooldown[si] = 1 
+                    sym_cooldown_skip[si] = True
             if opened:
                 st.sym_idx = si
                 slots[j] = st
@@ -294,11 +322,26 @@ def run_shared_cash_multi_symbol(
             pnl -= slot.amount * exit_price * fee_rate
             balance += (slot.amount * slot.entry_price) + pnl
             total_trades += 1
+            done_si = slot.sym_idx
+            per_symbol_trades[done_si] += 1
+            per_symbol_pnl[done_si] += pnl
+            if pnl > 0:
+                per_symbol_wins[done_si] += 1
+            pnl_list.append(pnl)
+            
             slot.in_position = False
             slot.sym_idx = -1
         equity_curve[last_idx] = balance
 
-    return SharedCashResult(equity_curve=equity_curve, final_balance=float(balance), total_trades=total_trades)
+    return SharedCashResult(
+        equity_curve=equity_curve, 
+        final_balance=float(balance), 
+        total_trades=total_trades,
+        pnl_array=np.array(pnl_list, dtype=np.float64),
+        per_symbol_trades=per_symbol_trades,
+        per_symbol_wins=per_symbol_wins,
+        per_symbol_pnl=per_symbol_pnl,
+    )
 
 
 def _portfolio_equity(
@@ -350,10 +393,12 @@ def _process_in_position_bar(
     kill_cooldown_bars: int = 6,
     bb_upper: Optional[np.ndarray] = None,
     trail_tighten: Optional[np.ndarray] = None,
-) -> Tuple[_SlotState, float, int]:
+    regime_risk_mult: Optional[np.ndarray] = None,
+) -> Tuple[_SlotState, float, int, float]:
     trades_delta = 0
+    pnl_out = 0.0
     if i < warmup_bars or i < execution_start_idx:
-        return slot, balance, 0
+        return slot, balance, 0, 0.0
 
     c_open = float(open_p[i])
     c_high = float(high[i])
@@ -371,13 +416,14 @@ def _process_in_position_bar(
         pnl -= slot.amount * exit_price * fee_rate
         balance += slot.amount * slot.entry_price + pnl
         trades_delta += 1
+        pnl_out = pnl
         slot.in_position = False
         if sym_cooldown is not None and sym_cooldown_skip is not None and 0 <= sym_idx < len(sym_cooldown):
             sym_cooldown[sym_idx] = int(kill_cooldown_bars)
             sym_cooldown_skip[sym_idx] = True
             if last_risk_pct_sym is not None and 0 <= sym_idx < len(last_risk_pct_sym):
                 last_risk_pct_sym[sym_idx] = 0.0
-        return slot, balance, trades_delta
+        return slot, balance, trades_delta, pnl_out
 
     trail_atr = float(atr[i])
     if trail_atr <= 0.0 or np.isnan(trail_atr):
@@ -431,6 +477,7 @@ def _process_in_position_bar(
             ef_part = slot.entry_fee_stored * (partial_amt / slot.amount)
             slot.entry_fee_stored -= ef_part
             trades_delta += 1
+            pnl_out += pnl_p
             slot.amount -= partial_amt
             slot.scale_done = True
 
@@ -458,14 +505,16 @@ def _process_in_position_bar(
             slot.entry_fee_stored -= ef_part_f
             slot.amount -= partial_f
             slot.fractal_scale_done = True
+            pnl_out += pnl_f
         if slot.amount < 1e-12 and slot.in_position:
             dust_px = c_open * (1.0 - slippage_rate)
             pnl_d = (dust_px - slot.entry_price) * slot.amount
             pnl_d -= slot.amount * dust_px * fee_rate
             balance += slot.amount * slot.entry_price + pnl_d
             trades_delta += 1
+            pnl_out += pnl_d
             slot.in_position = False
-            return slot, balance, trades_delta
+            return slot, balance, trades_delta, pnl_out
 
     if slot.in_position and not exit_triggered:
         ei2 = int(slot.entry_idx)
@@ -487,7 +536,14 @@ def _process_in_position_bar(
             slot.stop_price = new_stop
 
     if slot.in_position and not exit_triggered:
-        if time_stop_bars > 0 and (i - slot.entry_idx) >= time_stop_bars:
+        # Adaptive Time-Stop: Shorten if regime is bearish/choppy
+        adaptive_stop = time_stop_bars
+        if regime_risk_mult is not None and len(regime_risk_mult) > i:
+            rrm = float(regime_risk_mult[i])
+            if rrm < 0.4:
+                adaptive_stop = max(1, time_stop_bars // 2)
+        
+        if time_stop_bars > 0 and (i - slot.entry_idx) >= adaptive_stop:
             exit_price = c_open * (1.0 - slippage_rate)
             exit_triggered = True
 
@@ -496,10 +552,11 @@ def _process_in_position_bar(
         pnl -= slot.amount * exit_price * fee_rate
         balance += (slot.amount * slot.entry_price) + pnl
         trades_delta += 1
+        pnl_out += pnl
         slot.in_position = False
-        return slot, balance, trades_delta
+        return slot, balance, trades_delta, pnl_out
 
-    return slot, balance, trades_delta
+    return slot, balance, trades_delta, pnl_out
 
 
 def _try_open_long(
@@ -527,15 +584,16 @@ def _try_open_long(
     delta_gate: float = 0.08,
     last_risk_pct_ref: Optional[List[float]] = None,
     sym_idx: int = 0,
-) -> Tuple[_SlotState, float, bool, int]:
+) -> Tuple[_SlotState, float, bool, int, float]:
     trades_delta = 0
+    pnl_out = 0.0
     slot = _SlotState()
     if i < warmup_bars or i < execution_start_idx:
-        return slot, balance, False, 0
+        return slot, balance, False, 0, 0.0
 
     prev_i = i - 1 if i > 0 else 0
     if long_entry_signal[prev_i] < 0.5 or np.isnan(long_entry_signal[prev_i]):
-        return slot, balance, False, 0
+        return slot, balance, False, 0, 0.0
 
     c_open = float(open_p[i])
     c_high = float(high[i])
@@ -546,22 +604,22 @@ def _try_open_long(
         fill_price = c_open * (1.0 + slippage_rate)
     else:
         if c_high <= eu_prev:
-            return slot, balance, False, 0
+            return slot, balance, False, 0, 0.0
         fill_price = max(c_open, eu_prev) * (1.0 + slippage_rate)
     prev_atr = float(atr[prev_i])
     if np.isnan(prev_atr) or prev_atr <= 0.0:
-        return slot, balance, False, 0
+        return slot, balance, False, 0, 0.0
 
     stop_price = fill_price - (prev_atr * long_atr_mult)
     stop_distance = abs(fill_price - stop_price)
     if stop_distance <= 1e-18:
-        return slot, balance, False, 0
+        return slot, balance, False, 0, 0.0
 
     rm = 1.0
     if regime_risk_mult is not None and len(regime_risk_mult) > prev_i:
         rm = float(regime_risk_mult[prev_i])
     if not np.isfinite(rm):
-        return slot, balance, False, 0
+        return slot, balance, False, 0, 0.0
     rm = float(np.clip(rm, 0.05, 1.0))
 
     gk = 1.0
@@ -579,7 +637,7 @@ def _try_open_long(
         and last_risk_pct_ref[sym_idx] > 1e-12
         and abs(new_risk_pct - last_risk_pct_ref[sym_idx]) < delta_gate
     ):
-        return slot, balance, False, 0
+        return slot, balance, False, 0, 0.0
 
     risk_budget = balance * new_risk_pct
     amount_from_risk = risk_budget / stop_distance
@@ -589,12 +647,12 @@ def _try_open_long(
     amt = min(amount_from_risk, amount_pos_cap, max_affordable)
 
     if amt <= 0:
-        return slot, balance, False, 0
+        return slot, balance, False, 0, 0.0
 
     required_capital = amt * fill_price
     entry_fee = required_capital * fee_rate
     if balance < required_capital + entry_fee:
-        return slot, balance, False, 0
+        return slot, balance, False, 0, 0.0
 
     balance -= required_capital + entry_fee
     slot.entry_fee_stored = entry_fee
@@ -604,7 +662,6 @@ def _try_open_long(
     slot.highest = fill_price
     slot.amount = amt
     slot.stop_price = stop_price
-    slot.scale_done = False
     slot.fractal_scale_done = False
     if long_tp_mult > 0.0:
         slot.tp_price = fill_price + (prev_atr * long_tp_mult)
@@ -617,13 +674,14 @@ def _try_open_long(
         pnl -= slot.amount * intra_exit_price * fee_rate
         balance += (slot.amount * slot.entry_price) + pnl
         trades_delta += 1
+        pnl_out = pnl
         slot.in_position = False
-        return slot, balance, False, trades_delta
+        return slot, balance, False, trades_delta, pnl_out
 
     if last_risk_pct_ref is not None and 0 <= sym_idx < len(last_risk_pct_ref):
         last_risk_pct_ref[sym_idx] = new_risk_pct
 
-    return slot, balance, True, trades_delta
+    return slot, balance, True, trades_delta, pnl_out
 
 
 def _warn_if_numba_shared_cash_smoke_fails() -> None:
