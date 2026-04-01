@@ -60,6 +60,7 @@ class FinalDeploymentReportInput:
     oos_mdd_limit_pct: float
     hw_recovery_max_days: float
     alpha_decay_floor_pct: float
+    oos_total_trades: int
     symbol_rows: Sequence[SymbolGateRow]
     loso_warning: str
     hard_passed: int
@@ -209,14 +210,14 @@ def run_holdout_portfolio_shared_cash(
     c_cvar = portfolio_cvar_pct <= max_cvar_pct
     c_tr = portfolio_tail_ratio >= tail_ratio_min
     c_hw = oos_dd_days <= hw_recovery_days_max
-    if is_cagr_pct == 0.0:
+    if is_cagr_pct <= -99.99:
         c_alpha = False
         alpha_decay_pct = -100.0
     else:
-        # Prevent alpha decay explosion when is_cagr is near zero
-        IS_CAGR_DENOMINATOR_FLOOR_PCT: float = 5.0
-        safe_is_cagr = max(abs(is_cagr_pct), IS_CAGR_DENOMINATOR_FLOOR_PCT)
-        alpha_decay_pct = float((portfolio_cagr_pct - is_cagr_pct) / safe_is_cagr * 100.0)
+        is_ratio: float = 1.0 + (is_cagr_pct / 100.0)
+        oos_ratio: float = 1.0 + (portfolio_cagr_pct / 100.0)
+        # Financial Engineering: Geometric return degradation preventing zero-denominator explosion
+        alpha_decay_pct = float((oos_ratio / max(is_ratio, 0.01) - 1.0) * 100.0)
         c_alpha = alpha_decay_pct >= alpha_decay_floor_pct
 
     passed = bool(c_tw and c_cagr and c_mdd and c_cvar and c_tr and c_hw and c_alpha)
@@ -388,6 +389,7 @@ def run_final_deployment_report(ctx: FinalDeploymentReportInput) -> str:
             "=" * 71,
             "▶ Capital Growth & Efficiency",
             f"  - Capital Trajectory   : ₩{ctx.initial_capital_krw:,.0f} -> ₩{final_capital:,.0f} ({profit_pct:+.1f}%)",
+            f"  - Portfolio Trades     : {ctx.oos_total_trades} trades",
             f"  - Growth Multiplier    : {ctx.moic:.2f}x (MOIC)",
             f"  - Annualized Return    : {ctx.oos_net_cagr_pct:.1f}% (CAGR)   {_fmt_pass_info(oos_cagr_ok)}",
             "",
