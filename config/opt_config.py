@@ -34,15 +34,17 @@ FUTURES_SYMBOLS: List[str] = [
 # ==============================================================================
 
 SPOT_SYMBOLS: List[str] = [
-    "KRW-BTC", "KRW-ETH",           # Macro Anchor
+    "KRW-BTC", "KRW-ETH",              # Macro Anchor (충분한 히스토리 보장)
     "KRW-SOL", "KRW-XRP", "KRW-DOGE",  # Liquid Majors (high momentum)
-    "KRW-AVAX", "KRW-LINK",         # Trending Alts (clean 4H breakout pattern)
+    "KRW-AVAX", "KRW-LINK", "KRW-NEAR",  # Trending Alts (≥2021 Upbit 상장, 4H 패턴 양호)
+    # KRW-SUI(상장 2023-05): IS 24개월 요건 미달 → 제외
+    # KRW-SEI(상장 2023-09): IS 24개월 요건 미달 → 제외
 ]
 
 OPT_SPOT_CONFIG: Dict[str, Any] = {
-    "total_trials": 2500,
-    "n_startup_trials": 280,
-    "tpe_n_startup_trials": 280,
+    "total_trials": 5000,
+    "n_startup_trials": 300,  # QMC(Sobol) 탐색량: 총 trials의 6% = 공간 커버리지와 TPE 학습 균형점
+    "tpe_n_startup_trials": 300,  # 500은 예산 10%를 startup에 낭비함 → 300 복원
     "tpe_pruner_n_startup_trials": 10,
     "tpe_pruner_n_warmup_steps": 8,
     "tpe_pruner_patience": 2,
@@ -62,11 +64,12 @@ OPT_SPOT_CONFIG: Dict[str, Any] = {
     "SPOT_HOLDOUT_MDD_LIMIT_PCT": 20.0,
     "SPOT_HOLDOUT_HWM_RECOVERY_MAX_DAYS": 180.0,
     "SPOT_HOLDOUT_MAX_CVAR_PCT": 10.0,
-    "SPOT_HOLDOUT_ALPHA_DECAY_FLOOR_PCT": -25.0,
+    "SPOT_HOLDOUT_ALPHA_DECAY_FLOOR_PCT": -50.0,
     "SPOT_GATE1_SQN_MIN": 2.0,
     "SPOT_GATE1_PATH_SORTINO_MIN": 1.0,
     "SPOT_GATE1_TAIL_RATIO_MIN": 2.0,
-    "SPOT_DISCOVERY_DSR_MIN": 0.25,
+    "SPOT_GATE1_TAIL_RATIO_MIN": 2.0,
+    "SPOT_DISCOVERY_DSR_MIN": 0.35,
     "SPOT_OBJECTIVE_DSR_TARGET": 0.35,
     "SPOT_OBJECTIVE_LAMBDA_UI": 0.02,
     "SPOT_OBJECTIVE_W_TRADE": 0.03,
@@ -78,13 +81,14 @@ OPT_SPOT_CONFIG: Dict[str, Any] = {
     "SPOT_COMBO_PRUNE_THRESHOLD": -0.5,
     "SPOT_COMBO_N_WORKERS": 6,
     "SPOT_COMBO_MIN_SCREEN_SCORE": 0.0,
-    "SPOT_STAGE1_TRIALS_PER_SIGNAL": 80,
+    "SPOT_STAGE1_TRIALS_PER_SIGNAL": 100,  # 11 signals × 100 = 1100 trials(22%): 80→100 상향으로 순위 안정성 확보, 150은 Stage2 예산 과잠식
     "SPOT_STAGE1_TOP_K": 2,
     "SPOT_STAGE1_MIN_P10_GMGR": -0.5,
+    "SPOT_OBJECTIVE_W_CALMAR": 0.08,
     "SPOT_SYMBOL_CLUSTER": {
         "KRW-BTC": "anchor", "KRW-ETH": "anchor",
         "KRW-SOL": "liquid_major", "KRW-XRP": "liquid_major", "KRW-DOGE": "liquid_major",
-        "KRW-AVAX": "trending_alt", "KRW-LINK": "trending_alt",
+        "KRW-AVAX": "trending_alt", "KRW-LINK": "trending_alt", "KRW-NEAR": "trending_alt",
     },
 }
 
@@ -96,12 +100,12 @@ SLIPPAGE_GAMMA_BASE: float = 0.03
 SLIPPAGE_REFERENCE_ADV_KRW: float = 3e10
 
 ENGINE_PARAM_SPACE: Dict[str, Dict[str, Any]] = {
-    "LONG_ATR_MULT": {"type": "float", "low": 0.25, "high": 2.0, "step": 0.25},
-    "LONG_TRAIL_MULT": {"type": "float", "low": 2.0, "high": 5.0, "step": 0.5},
+    "LONG_ATR_MULT": {"type": "float", "low": 1.5, "high": 4.0, "step": 0.25},
+    "LONG_TRAIL_MULT": {"type": "float", "low": 2.5, "high": 6.0, "step": 0.5},
     "LONG_SCALE_ATR_MULT": {"type": "float", "low": 1.0, "high": 4.0, "step": 0.5},
     "SCALE_OUT_PCT": {"type": "float", "low": 0.25, "high": 0.60, "step": 0.05},
-    "TIME_STOP_BARS": {"type": "int", "low": 0, "high": 48, "step": 6},
-    "RISK_PER_TRADE": {"type": "float", "low": 0.02, "high": 0.12, "step": 0.02},
+    "TIME_STOP_BARS": {"type": "int", "low": 6, "high": 48, "step": 6},
+    "RISK_PER_TRADE": {"type": "float", "low": 0.01, "high": 0.05, "step": 0.01},
     "MAX_EXPOSURE": {"type": "float", "low": 0.5, "high": 1.0, "step": 0.1},
     "RSI_EXIT_THRESHOLD": {"type": "float", "low": 75.0, "high": 92.0, "step": 1.0},
     "RSI_EXIT_PERIOD": {"type": "int", "low": 10, "high": 21, "step": 1},
@@ -112,7 +116,7 @@ ENGINE_PARAM_SPACE: Dict[str, Dict[str, Any]] = {
 SPOT_SHARED_PARAM_SPACE: Dict[str, Dict[str, Any]] = {
     "ATR_PERIOD": {"type": "int", "low": 10, "high": 20, "step": 2},
     "KELLY_FRACTION": {"type": "float", "low": 0.2, "high": 0.8, "step": 0.1},
-    "MAX_CAP_PER_COIN": {"type": "float", "low": 0.15, "high": 0.35, "step": 0.05},
+    "MAX_CAP_PER_COIN": {"type": "float", "low": 0.15, "high": 0.25, "step": 0.05},
     "MAX_PARTICIPATION_RATE": {"type": "float", "low": 0.005, "high": 0.05, "step": 0.005},
 }
 
