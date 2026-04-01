@@ -1063,7 +1063,21 @@ def main() -> None:
                     },
                 }
             )
-        is_mean_cagr = float(np.mean(is_cagr_vals)) if is_cagr_vals else 0.0
+        is_holdout_maps: Dict[str, Dict[str, Any]] = {}
+        for s_eval in target_symbols:
+            is_holdout_maps[s_eval] = dict(data_maps[s_eval])
+            is_holdout_maps[s_eval][f"oos_start_idx_{tf_eval}"] = data_maps[s_eval][f"is_start_idx_{tf_eval}"]
+
+        port_is = run_holdout_shared_cash_portfolio(
+            params,
+            target_symbols,
+            tf_eval,
+            is_holdout_maps,
+            signal_disk_cache_root=Path(signal_cache_dir),
+            return_signal_dfs=False,
+            concurrency_penalty_scale=1.0,
+        )
+        is_portfolio_cagr: float = float(port_is.get("portfolio_cagr_pct", 0.0))
 
         trade_floor = run_holdout_portfolio_trade_floor(
             portfolio_long_trades=int(port_ho["long_trades"]),
@@ -1081,7 +1095,7 @@ def main() -> None:
             mdd_limit_pct=holdout_mdd_limit,
             oos_dd_days=oos_dd_days,
             hw_recovery_days_max=holdout_hwm_max_days,
-            is_cagr_pct=is_mean_cagr,
+            is_cagr_pct=is_portfolio_cagr,
             alpha_decay_floor_pct=holdout_alpha_floor,
         )
         is_all_passed = bool(veto_ok and trade_floor.passed and shared_cash_gate.passed)
@@ -1152,6 +1166,7 @@ def main() -> None:
                 oos_mdd_limit_pct=holdout_mdd_limit,
                 hw_recovery_max_days=holdout_hwm_max_days,
                 alpha_decay_floor_pct=holdout_alpha_floor,
+                oos_total_trades=int(port_ho.get("long_trades", 0)),
                 symbol_rows=symbol_gate_rows,
                 loso_warning=loso_warning,
                 hard_passed=hard_passed,
