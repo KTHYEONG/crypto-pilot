@@ -60,12 +60,21 @@ class FinalDeploymentReportInput:
     oos_mdd_limit_pct: float
     hw_recovery_max_days: float
     alpha_decay_floor_pct: float
+    oos_cvar_pct: float
+    cvar_limit_pct: float
+    terminal_wealth_ratio: float
+    tw_target: float
     oos_total_trades: int
-    symbol_rows: Sequence[SymbolGateRow]
-    loso_warning: str
-    hard_passed: int
-    hard_total: int
-    final_decision_go: bool
+    oos_pf: float
+    pf_target: float
+    oos_calmar: float
+    calmar_target: float
+    oos_win_rate_pct: float
+    symbol_rows: Sequence[SymbolGateRow] = field(default_factory=list)
+    loso_warning: str = ""
+    hard_passed: int = 0
+    hard_total: int = 0
+    final_decision_go: bool = False
 
 
 def run_go_nogo_check(
@@ -190,90 +199,77 @@ def run_holdout_portfolio_shared_cash(
     portfolio_cvar_pct: float,
     portfolio_tail_ratio: float,
     min_path_terminal_wealth_ratio: float,
+    portfolio_profit_factor: float,
+    portfolio_calmar_ratio: float,
     max_cvar_pct: float,
-    mdd_limit_pct: float = 45.0,
+    mdd_limit_pct: float = 20.0,
     tw_need: float = 1.0,
-    tail_ratio_min: float = 2.0,
-    cagr_min_pct: float = 30.0,
+    tail_ratio_min: float = 1.20,
+    cagr_min_pct: float = 35.0,
     oos_dd_days: float = 0.0,
-    hw_recovery_days_max: float = 300.0,
+    hw_recovery_days_max: float = 180.0,
     is_cagr_pct: float = 0.0,
-    alpha_decay_floor_pct: float = -50.0,
+    alpha_decay_floor_pct: float = -25.0,
+    pf_min: float = 1.3,
+    calmar_min: float = 1.5,
 ) -> GoNoGoResult:
     """
     Shared-cash holdout: terminal wealth, CAGR floor, MDD, CVaR, tail ratio,
-    HWM recovery (days underwater), alpha decay vs IS mean CAGR.
+    PF, Calmar, HWM recovery, alpha decay.
     """
     c_tw = min_path_terminal_wealth_ratio > tw_need
-    c_cagr = portfolio_cagr_pct > cagr_min_pct
+    c_cagr = portfolio_cagr_pct >= cagr_min_pct
     c_mdd = abs(portfolio_mdd_pct) <= mdd_limit_pct
     c_cvar = portfolio_cvar_pct <= max_cvar_pct
     c_tr = portfolio_tail_ratio >= tail_ratio_min
     c_hw = oos_dd_days <= hw_recovery_days_max
-    if is_cagr_pct <= -99.99:
-        c_alpha = False
-        alpha_decay_pct = -100.0
+    c_pf = portfolio_profit_factor >= pf_min
+    c_calmar = portfolio_calmar_ratio >= calmar_min
+
+    # Alpha decay
+    if abs(is_cagr_pct) < 1e-6:
+        alpha_decay_pct = 0.0
+        c_alpha = portfolio_cagr_pct >= alpha_decay_floor_pct # Fallback
     else:
-        is_ratio: float = 1.0 + (is_cagr_pct / 100.0)
-        oos_ratio: float = 1.0 + (portfolio_cagr_pct / 100.0)
-        # Financial Engineering: Geometric return degradation preventing zero-denominator explosion
-        alpha_decay_pct = float((oos_ratio / max(is_ratio, 0.01) - 1.0) * 100.0)
+        # Simple percentage decay relative to IS mean
+        alpha_decay_pct = ((portfolio_cagr_pct / is_cagr_pct) - 1.0) * 100.0
         c_alpha = alpha_decay_pct >= alpha_decay_floor_pct
 
-    passed = bool(c_tw and c_cagr and c_mdd and c_cvar and c_tr and c_hw and c_alpha)
+    passed = all([c_tw, c_cagr, c_mdd, c_cvar, c_tr, c_hw, c_alpha, c_pf, c_calmar])
+    
     lines = [
         "[Spot Holdout Portfolio (shared-cash)]",
-        (
-            f"  - Holdout portfolio terminal wealth ratio > {tw_need} | "
-            f"{'PASS' if c_tw else 'FAIL'} | observed={min_path_terminal_wealth_ratio:.5f} | need > {tw_need}"
-        ),
-        (
-            f"  - Holdout portfolio CAGR > {cagr_min_pct}% | "
-            f"{'PASS' if c_cagr else 'FAIL'} | observed={portfolio_cagr_pct:.4f} | need > {cagr_min_pct}"
-        ),
-        (
-            f"  - Holdout portfolio MDD <= {mdd_limit_pct}% | "
-            f"{'PASS' if c_mdd else 'FAIL'} | observed={abs(portfolio_mdd_pct):.5f} | need <= {mdd_limit_pct}"
-        ),
-        (
-            f"  - Holdout portfolio CVaR <= {max_cvar_pct}% | "
-            f"{'PASS' if c_cvar else 'FAIL'} | observed={portfolio_cvar_pct:.6f} | need <= {max_cvar_pct}"
-        ),
-        (
-            f"  - Holdout portfolio Tail Ratio >= {tail_ratio_min} | "
-            f"{'PASS' if c_tr else 'FAIL'} | observed={portfolio_tail_ratio:.4f} | need >= {tail_ratio_min}"
-        ),
-        (
-            f"  - HWM recovery (underwater days) <= {hw_recovery_days_max} | "
-            f"{'PASS' if c_hw else 'FAIL'} | observed={oos_dd_days:.1f} | need <= {hw_recovery_days_max}"
-        ),
-        (
-            f"  - Alpha decay % >= {alpha_decay_floor_pct}% | "
-            f"{'PASS' if c_alpha else 'FAIL'} | observed={alpha_decay_pct:.2f}% | IS_CAGR={is_cagr_pct:.2f}%"
-        ),
+        f"  - Terminal wealth > {tw_need} | {'PASS' if c_tw else 'FAIL'} | obs={min_path_terminal_wealth_ratio:.4f}",
+        f"  - CAGR >= {cagr_min_pct}% | {'PASS' if c_cagr else 'FAIL'} | obs={portfolio_cagr_pct:.2f}%",
+        f"  - MDD <= {mdd_limit_pct}% | {'PASS' if c_mdd else 'FAIL'} | obs={abs(portfolio_mdd_pct):.2f}%",
+        f"  - CVaR <= {max_cvar_pct}% | {'PASS' if c_cvar else 'FAIL'} | obs={portfolio_cvar_pct:.2f}%",
+        f"  - Tail Ratio >= {tail_ratio_min} | {'PASS' if c_tr else 'FAIL'} | obs={portfolio_tail_ratio:.4f}",
+        f"  - Profit Factor >= {pf_min} | {'PASS' if c_pf else 'FAIL'} | obs={portfolio_profit_factor:.4f}",
+        f"  - Calmar Ratio >= {calmar_min} | {'PASS' if c_calmar else 'FAIL'} | obs={portfolio_calmar_ratio:.4f}",
+        f"  - HWM recovery <= {hw_recovery_days_max}d | {'PASS' if c_hw else 'FAIL'} | obs={oos_dd_days:.1f}d",
+        f"  - Alpha decay >= {alpha_decay_floor_pct}% | {'PASS' if c_alpha else 'FAIL'} | obs={alpha_decay_pct:.1f}% (IS={is_cagr_pct:.1f}%)",
         "-" * 55,
         f"  FINAL: {'GO' if passed else 'NO-GO'}",
     ]
-    checks: List[CheckRecord] = [
-        CheckRecord("tw", "terminal wealth ratio", min_path_terminal_wealth_ratio, tw_need, c_tw),
-        CheckRecord("cagr", f"CAGR > {cagr_min_pct}", portfolio_cagr_pct, cagr_min_pct, c_cagr),
-        CheckRecord("mdd", "MDD cap", abs(portfolio_mdd_pct), mdd_limit_pct, c_mdd),
-        CheckRecord("cvar", "CVaR cap", portfolio_cvar_pct, max_cvar_pct, c_cvar),
-        CheckRecord("tail_ratio", "Tail ratio floor", portfolio_tail_ratio, tail_ratio_min, c_tr),
-        CheckRecord("hwm", "HWM recovery days", oos_dd_days, hw_recovery_days_max, c_hw),
-        CheckRecord("alpha_decay", "Alpha decay floor %", alpha_decay_pct, alpha_decay_floor_pct, c_alpha),
+    
+    details = {
+        "tw": c_tw, "cagr": c_cagr, "mdd": c_mdd, "cvar": c_cvar,
+        "tail_ratio": c_tr, "hw_recovery": c_hw, "alpha_decay": c_alpha,
+        "pf": c_pf, "calmar": c_calmar,
+    }
+    
+    # We maintain CheckRecord for backward compatibility with existing reporting if needed
+    checks = [
+        CheckRecord("tw", "Wealth", min_path_terminal_wealth_ratio, tw_need, c_tw),
+        CheckRecord("cagr", "CAGR", portfolio_cagr_pct, cagr_min_pct, c_cagr),
+        CheckRecord("mdd", "MDD", abs(portfolio_mdd_pct), mdd_limit_pct, c_mdd),
+        CheckRecord("pf", "ProfitFactor", portfolio_profit_factor, pf_min, c_pf),
+        CheckRecord("calmar", "Calmar", portfolio_calmar_ratio, calmar_min, c_calmar),
     ]
+
     return GoNoGoResult(
         passed=passed,
-        details={
-            "tw": c_tw,
-            "cagr": c_cagr,
-            "mdd": c_mdd,
-            "cvar": c_cvar,
-            "tail_ratio": c_tr,
-            "hw_recovery": c_hw,
-            "alpha_decay": c_alpha,
-        },
+        details=details,
         summary="\n".join(lines),
         checks=checks,
         advisory={"alpha_decay_pct": alpha_decay_pct},
@@ -288,15 +284,19 @@ def run_go_nogo_holdout_portfolio_growth(
     portfolio_tail_ratio: float,
     portfolio_long_trades: int,
     min_path_terminal_wealth_ratio: float,
+    portfolio_profit_factor: float,
+    portfolio_calmar_ratio: float,
     min_portfolio_trades: int,
     max_cvar_pct: float,
-    tail_ratio_min: float = 2.0,
-    cagr_min_pct: float = 30.0,
-    mdd_limit_pct: float = 45.0,
+    tail_ratio_min: float = 1.20,
+    cagr_min_pct: float = 35.0,
+    mdd_limit_pct: float = 20.0,
     oos_dd_days: float = 0.0,
-    hw_recovery_days_max: float = 300.0,
+    hw_recovery_days_max: float = 180.0,
     is_cagr_pct: float = 0.0,
-    alpha_decay_floor_pct: float = -50.0,
+    alpha_decay_floor_pct: float = -25.0,
+    pf_min: float = 1.3,
+    calmar_min: float = 1.5,
 ) -> GoNoGoResult:
     """
     Backward-compatible: trade floor AND shared-cash screen; all must pass.
@@ -311,6 +311,8 @@ def run_go_nogo_holdout_portfolio_growth(
         portfolio_cvar_pct=portfolio_cvar_pct,
         portfolio_tail_ratio=portfolio_tail_ratio,
         min_path_terminal_wealth_ratio=min_path_terminal_wealth_ratio,
+        portfolio_profit_factor=portfolio_profit_factor,
+        portfolio_calmar_ratio=portfolio_calmar_ratio,
         max_cvar_pct=max_cvar_pct,
         tail_ratio_min=tail_ratio_min,
         cagr_min_pct=cagr_min_pct,
@@ -319,6 +321,8 @@ def run_go_nogo_holdout_portfolio_growth(
         hw_recovery_days_max=hw_recovery_days_max,
         is_cagr_pct=is_cagr_pct,
         alpha_decay_floor_pct=alpha_decay_floor_pct,
+        pf_min=pf_min,
+        calmar_min=calmar_min,
     )
     passed = bool(tfloor.passed and scash.passed)
     summary = tfloor.summary + "\n\n" + scash.summary
@@ -335,8 +339,8 @@ def _fmt_pass_info(ok: bool) -> str:
 
 
 def run_final_deployment_report(ctx: FinalDeploymentReportInput) -> str:
-    """Build the 2-part Spot Strategy deployment report: Part 1 (Rigor), Part 2 (Intuitive)."""
-    # Part 1 Logic: Quantitative Rigor
+    """Build the Spot Strategy deployment report: TIER 1 (IS), TIER 2 (OOS Risk), TIER 3 (OOS Profit)."""
+    # TIER 1 Gates: Statistical Discovery Rigor
     sqn_ok = ctx.gate1_sqn >= ctx.sqn_target
     ps_ok = ctx.gate1_path_sortino >= ctx.path_sortino_target
     g1_tr_ok = ctx.gate1_tail_ratio >= ctx.tail_ratio_target
@@ -344,84 +348,92 @@ def run_final_deployment_report(ctx: FinalDeploymentReportInput) -> str:
     psr_ok = ctx.gate1_psr >= ctx.psr_target
     dsr_ok = ctx.gate1_dsr >= ctx.dsr_target
 
-    oos_cagr_ok = ctx.oos_net_cagr_pct >= ctx.oos_cagr_target_pct
+    # TIER 2 Gates: OOS Risk Management (Shared-Cash)
     oos_mdd_ok = abs(ctx.oos_mdd_pct) <= ctx.oos_mdd_limit_pct
+    cvar_ok = ctx.oos_cvar_pct <= ctx.cvar_limit_pct
     hw_ok = ctx.hw_recovery_days <= ctx.hw_recovery_max_days
-    ad_ok = ctx.alpha_decay_pct >= ctx.alpha_decay_floor_pct
+    calmar_ok = ctx.oos_calmar >= ctx.calmar_target
 
-    # Part 2 Logic: Intuitive Summary
+    # TIER 3 Gates: OOS Profitability & Statistical Quality
+    oos_cagr_ok = ctx.oos_net_cagr_pct >= ctx.oos_cagr_target_pct
+    pf_ok = ctx.oos_pf >= ctx.pf_target
+    ad_ok = ctx.alpha_decay_pct >= ctx.alpha_decay_floor_pct
+    tw_ok = ctx.terminal_wealth_ratio > ctx.tw_target
+
+    # Business Impact
     final_capital = ctx.initial_capital_krw * ctx.moic
     profit_pct = (ctx.moic - 1.0) * 100.0
 
     lines: List[str] = [
         "=" * 71,
-        " [PART 1. QUANTITATIVE RIGOR: FINANCIAL ENGINEERING EVALUATION]",
+        " [TIER 1. CPCV STATISTICAL EDGE RIGOR]",
         "=" * 71,
-        "▶ Statistical Edge & Path Robustness (CPCV Discovery)",
         f"  - System Quality Number (SQN) : {ctx.gate1_sqn:.2f}   {_fmt_pass_info(sqn_ok)} (Min: {ctx.sqn_target})",
         f"  - Path Sortino Ratio          : {ctx.gate1_path_sortino:.2f}   {_fmt_pass_info(ps_ok)} (Min: {ctx.path_sortino_target})",
-        f"  - Tail Ratio (Asymmetry)      : {ctx.gate1_tail_ratio:.2f}   {_fmt_pass_info(g1_tr_ok)} (Min: {ctx.tail_ratio_target})",
+        f"  - Path Tail Ratio (Discovery) : {ctx.gate1_tail_ratio:.2f}   {_fmt_pass_info(g1_tr_ok)} (Min: {ctx.tail_ratio_target})",
         f"  - Prob. Sharpe Ratio (PSR)    : {ctx.gate1_psr:.4f}   {_fmt_pass_info(psr_ok)} (Min: {ctx.psr_target})",
         f"  - Deflated Sharpe Ratio (DSR) : {ctx.gate1_dsr:.4f}   {_fmt_pass_info(dsr_ok)} (Min: {ctx.dsr_target})",
-        f"  - P10 GMGR (Worst Growth)     : {ctx.gate1_p10_gmgr:.6f}   {_fmt_pass_info(gmgr_ok)} (Target: > 0)",
-        f"  - Max Ulcer Index (Risk)      : {ctx.gate1_max_ui:.2f}   [INFO]",
+        f"  - P10 GMGR (Worst Path Grow)  : {ctx.gate1_p10_gmgr:.6f}   {_fmt_pass_info(gmgr_ok)} (Target: > 0)",
         f"  - CPCV Mean Path Return       : {ctx.cpcv_mean_path_return_pct:.1f}%",
         f"  - CPCV Worst Segment MDD      : {ctx.cpcv_worst_segment_mdd_pct:.1f}%",
         "",
-        "▶ Alpha Decay & Stability (IS vs OOS)",
-        f"  - Alpha Decay (Degradation)   : {ctx.alpha_decay_pct:.1f}%   {_fmt_pass_info(ad_ok)} (Limit: {ctx.alpha_decay_floor_pct}%)",
+        "=" * 71,
+        " [TIER 2. OOS ABSOLUTE RISK HARD GATES: 4H SPOT]",
+        "=" * 71,
+        f"  - Maximum Pain (MDD Limit)    : {ctx.oos_mdd_pct:.1f}%   {_fmt_pass_info(oos_mdd_ok)} (Limit: {ctx.oos_mdd_limit_pct}%)",
+        f"  - Portfolio CVaR(5%) Loss     : {ctx.oos_cvar_pct:.2f}%   {_fmt_pass_info(cvar_ok)} (Limit: {ctx.cvar_limit_pct}%)",
+        f"  - Recovery Time (Max UD)      : {ctx.hw_recovery_days:.1f}d   {_fmt_pass_info(hw_ok)} (Limit: {ctx.hw_recovery_max_days}d)",
+        f"  - OOS Calmar Ratio (Grow/Risk): {ctx.oos_calmar:.2f}   {_fmt_pass_info(calmar_ok)} (Min: {ctx.calmar_target})",
         "",
-        "▶ Symbol-Level Microstructure (OOS Performance)",
-        "  | Symbol    | Net CAGR | Max MDD | Tail Ratio | Win Rate | Trades |",
-        "  |-----------|----------|---------|------------|----------|--------|",
+        "=" * 71,
+        " [TIER 3. OOS PROFITABILITY & ROBUSTNESS]",
+        "=" * 71,
+        f"  - Annualized Return (CAGR)    : {ctx.oos_net_cagr_pct:.1f}%   {_fmt_pass_info(oos_cagr_ok)} (Min: {ctx.oos_cagr_target_pct}%)",
+        f"  - Trade Profit Factor         : {ctx.oos_pf:.2f}   {_fmt_pass_info(pf_ok)} (Min: {ctx.pf_target})",
+        f"  - Alpha Decay (Stability)     : {ctx.alpha_decay_pct:.1f}%   {_fmt_pass_info(ad_ok)} (Limit: {ctx.alpha_decay_floor_pct}%)",
+        f"  - Terminal Wealth Ratio       : {ctx.terminal_wealth_ratio:.3f}   {_fmt_pass_info(tw_ok)} (Min: {ctx.tw_target})",
+        f"  - OOS Win Rate (INFO)         : {ctx.oos_win_rate_pct:.1f}%",
+        "",
+        "=" * 71,
+        " [PART 3. SYMBOL MICROSTRUCTURE & FINAL VERDICT]",
+        "=" * 71,
+        "▶ Portfolio Composition (Shared Cash)",
+        f"  - Capital: ₩{ctx.initial_capital_krw:,.0f} -> ₩{final_capital:,.0f} ({profit_pct:+.1f}%)",
+        f"  - Total Trades: {ctx.oos_total_trades} | Concentration: {ctx.loso_warning}",
+        "",
+        "  | Symbol    | Net CAGR | Max MDD | Win Rate | Trades |",
+        "  |-----------|----------|---------|----------|--------|",
     ]
     for row in ctx.symbol_rows:
         lines.append(
             f"  | {row.symbol:<9} | {row.net_cagr_pct:>+6.1f}% | {row.max_mdd_pct:>6.1f}% | "
-            f"{row.tail_ratio:>10.2f} | {row.win_rate_pct:>7.1f}% | {row.trade_count:>6} |"
+            f"{row.win_rate_pct:>7.1f}% | {row.trade_count:>6} |"
         )
 
     lines.extend(
         [
             "",
-            "=" * 71,
-            " [PART 2. INTUITIVE SUMMARY: BUSINESS IMPACT & EXECUTION]",
-            "=" * 71,
-            "▶ Capital Growth & Efficiency",
-            f"  - Capital Trajectory   : ₩{ctx.initial_capital_krw:,.0f} -> ₩{final_capital:,.0f} ({profit_pct:+.1f}%)",
-            f"  - Portfolio Trades     : {ctx.oos_total_trades} trades",
-            f"  - Growth Multiplier    : {ctx.moic:.2f}x (MOIC)",
-            f"  - Annualized Return    : {ctx.oos_net_cagr_pct:.1f}% (CAGR)   {_fmt_pass_info(oos_cagr_ok)}",
-            "",
-            "▶ Risk & Recovery Experience",
-            f"  - Maximum Pain (MDD)   : {ctx.oos_mdd_pct:.1f}%   {_fmt_pass_info(oos_mdd_ok)}",
-            f"  - Recovery Time        : {ctx.hw_recovery_days:.1f} days (Max Underwater)   {_fmt_pass_info(hw_ok)}",
-            f"  - Concentration Risk   : {ctx.loso_warning}",
-            "",
-            "▶ Final Deployment Verdict",
-            f"  - Status               : {'[GO - DEPLOYABLE]' if ctx.final_decision_go else '[NO-GO - NEEDS REFINEMENT]'}",
-            f"  - Compliance           : {ctx.hard_passed}/{ctx.hard_total} Hard Constraints Passed",
+            f"▶ Final Verdict : {'[GO - DEPLOYABLE]' if ctx.final_decision_go else '[NO-GO - REFINEMENT NEEDED]'}",
+            f"  Compliance Score: {ctx.hard_passed}/{ctx.hard_total} Critical Gates Passed",
         ]
     )
 
     if not ctx.final_decision_go:
         lines.append("\n  ※ 주요 결격 사유 (Critical Failures):")
         if not psr_ok:
-            lines.append(f"    - PSR 점수({ctx.gate1_psr:.4f})가 기준치({ctx.psr_target}) 미달")
+            lines.append(f"    - TIER1: PSR 점수({ctx.gate1_psr:.4f})가 기준({ctx.psr_target}) 미달")
         if not dsr_ok:
-            lines.append(f"    - DSR 점수({ctx.gate1_dsr:.4f})가 기준치({ctx.dsr_target}) 미달")
-        if not oos_cagr_ok:
-            lines.append(f"    - OOS CAGR({ctx.oos_net_cagr_pct:.1f}%)이 목표({ctx.oos_cagr_target_pct}%) 미달")
+            lines.append(f"    - TIER1: DSR 점수({ctx.gate1_dsr:.4f})가 기준({ctx.dsr_target}) 미달")
         if not oos_mdd_ok:
-            lines.append(f"    - OOS MDD({abs(ctx.oos_mdd_pct):.1f}%)가 제한({ctx.oos_mdd_limit_pct}%) 초과")
-        if not g1_tr_ok:
-            lines.append(f"    - Tail Ratio({ctx.gate1_tail_ratio:.2f})가 비대칭성 기준({ctx.tail_ratio_target}) 미달")
+            lines.append(f"    - TIER2: OOS MDD({abs(ctx.oos_mdd_pct):.1f}%)가 제한({ctx.oos_mdd_limit_pct}%) 초과")
+        if not calmar_ok:
+            lines.append(f"    - TIER2: Calmar Ratio({ctx.oos_calmar:.2f})가 기준({ctx.calmar_target}) 미달")
+        if not oos_cagr_ok:
+            lines.append(f"    - TIER3: OOS CAGR({ctx.oos_net_cagr_pct:.1f}%)이 목표({ctx.oos_cagr_target_pct}%) 미달")
+        if not pf_ok:
+            lines.append(f"    - TIER3: Profit Factor({ctx.oos_pf:.2f})가 기준({ctx.pf_target}) 미달")
         if not ad_ok:
-            lines.append(f"    - Alpha Decay({ctx.alpha_decay_pct:.1f}%)가 허용치({ctx.alpha_decay_floor_pct}%) 초과")
-        if ctx.hw_recovery_days > ctx.hw_recovery_max_days:
-            lines.append(
-                f"    - 회복 기간({ctx.hw_recovery_days:.1f}일)이 허용치({ctx.hw_recovery_max_days}일) 초과"
-            )
+            lines.append(f"    - TIER3: Alpha Decay({ctx.alpha_decay_pct:.1f}%)가 허용치({ctx.alpha_decay_floor_pct}%) 초과")
 
     lines.append("=" * 71)
     return "\n".join(lines)
