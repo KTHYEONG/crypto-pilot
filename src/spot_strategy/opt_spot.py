@@ -42,6 +42,7 @@ from src.optimization.opt_utils import compute_segment_merge_index
 from src.spot_strategy.opt_spot_utils.cv_utils import CPCVPath, build_cpcv_test_paths_with_fallback
 from src.spot_strategy.opt_spot_utils.evaluator import (
     EMBARGO_BARS,
+    _segment_with_context,
     evaluate_symbol_fold,
     objective_spot,
     run_holdout_shared_cash_portfolio,
@@ -997,6 +998,8 @@ def main() -> None:
         )
         veto_ok = bool(veto.passed)
 
+        max_slots: int = int(OPT_SPOT_CONFIG.get("SPOT_MAX_CONCURRENT_POSITIONS", 3))
+        params["MAX_CAP_PER_COIN"] = 1.0 / float(max_slots)
         min_pf_trades_dynamic = max(50, len(target_symbols) * 8)
 
         port_ho = run_holdout_shared_cash_portfolio(
@@ -1014,14 +1017,11 @@ def main() -> None:
         symbol_fold_payloads: List[Dict[str, Any]] = []
         is_cagr_vals: List[float] = []
         for s_eval in target_symbols:
+            # 1. In-Sample Segment (Global data_maps context)
             is_start_idx = int(data_maps[s_eval][f"is_start_idx_{tf_eval}"])
             is_end_idx = len(data_maps[s_eval][tf_eval])
-            oos_start_idx = int(oos_data_maps[s_eval][f"oos_start_idx_{tf_eval}"])
-            oos_end_idx = len(oos_data_maps[s_eval][tf_eval])
-            pre_sig_full = post_full_signal_dfs.get(s_eval)
-            pre_is_df, pre_is_exec = _build_precomputed_segment(pre_sig_full, is_start_idx, is_end_idx)
-            pre_oos_df, pre_oos_exec = _build_precomputed_segment(pre_sig_full, oos_start_idx, oos_end_idx)
-
+            
+            # IS Evaluation (Global indexing)
             s_is, r_is, m_is, t_is, wr_is, pf_is, lc_is, _, tr_is = evaluate_symbol_fold(
                 UltimateSpotStrategy(name=f"IS_{s_eval}", params=params),
                 params,
@@ -1033,10 +1033,43 @@ def main() -> None:
                 None,
                 is_start_idx,
                 is_end_idx,
-                precomputed_signal_df=pre_is_df,
-                execution_start_idx=pre_is_exec,
+                precomputed_signal_df=None,
+                execution_start_idx=0,
             )
-            s_oos, r_oos, m_oos, trd_oos, wr_oos, pf_oos, lc_oos, _, tail_oos = evaluate_symbol_fold(
+            
+            oos_start_idx = int(oos_data_maps[s_eval].get(f"oos_start_idx_{tf_eval}", 0))
+            oos_local_end = len(oos_data_maps[s_eval][tf_eval])
+            
+            # Integrated OOS metrics from port_ho (shared-cash)
+            si_idx = target_symbols.index(s_eval)
+            trd_oos = int(port_ho["per_symbol_trades"][si_idx])
+            wins_oos = int(port_ho["per_symbol_wins"][si_idx])
+            pnl_total_oos = float(port_ho["per_symbol_pnl"][si_idx])
+            wr_oos = (wins_oos / trd_oos * 100.0) if trd_oos > 0 else 0.0
+            
+            # Contribution CAGR: How much this symbol added to the portfolio CAGR
+            # (Total Symbol PnL / Initial Balance) / Years
+            initial_bal = float(SPOT_INITIAL_BALANCE)
+            span_days_oos = float(port_ho.get("span_days", 365.0)) # Need to ensure span_days is in port_ho
+            cagr_contrib = (pnl_total_oos / initial_bal) / (span_days_oos / 365.0) * 100.0
+            
+            # Worst Trade % as a proxy for symbol risk within the portfolio
+            # We can't easily get MDD contribution without time-series PnL per symbol, 
+            # so we use Worst Trade relative to balance at that time or just raw.
+            # For now, let's use the standalone MDD but scaled or keep it if it's more intuitive.
+            # Actually, let's use raw PnL sum to show absolute contribution.
+            
+            # For CAGR/MDD in shared context, we use the standalone engine but with portfolio constraints 
+            # to keep the "Potential" metric consistent, but we sync the TRADE counts.
+            pre_oos_sig_full = post_full_signal_dfs.get(s_eval)
+            if pre_oos_sig_full is not None:
+                pre_oos_sig, exec_start_oos = _segment_with_context(
+                    pre_oos_sig_full, oos_start_idx, oos_local_end
+                )
+            else:
+                pre_oos_sig, exec_start_oos = None, 0
+
+            s_oos, r_oos, m_oos, _, _, pf_oos, lc_oos, _, tail_oos = evaluate_symbol_fold(
                 UltimateSpotStrategy(name=f"OOS_{s_eval}", params=params),
                 params,
                 s_eval,
@@ -1045,25 +1078,27 @@ def main() -> None:
                 oos_data_maps[s_eval]["1d"],
                 oos_data_maps[s_eval][f"merge_idx_{tf_eval}"],
                 None,
-                oos_start_idx,
-                oos_end_idx,
-                precomputed_signal_df=pre_oos_df,
-                execution_start_idx=pre_oos_exec,
+                test_start=oos_start_idx,
+                test_end=oos_local_end,
+                precomputed_signal_df=pre_oos_sig,
+                execution_start_idx=exec_start_oos,
             )
+            
             is_cagr_vals.append(s_is)
             symbol_fold_payloads.append(
                 {
                     "sym": s_eval,
                     "is_row": (s_is, r_is, m_is, t_is, pf_is),
                     "oos": {
-                        "cagr": s_oos,
-                        "ret": r_oos,
-                        "mdd": m_oos,
+                        "cagr": cagr_contrib,
+                        "ret": (pnl_total_oos / initial_bal) * 100.0,
+                        "mdd": m_oos / params.get("MAX_CAP_PER_COIN", 0.2) if params.get("MAX_CAP_PER_COIN", 0.2) > 0 else m_oos, 
                         "trd": trd_oos,
                         "wr": wr_oos,
                         "pf": pf_oos,
                         "lc": lc_oos,
                         "tail": tail_oos,
+                        "pnl": pnl_total_oos,
                     },
                 }
             )

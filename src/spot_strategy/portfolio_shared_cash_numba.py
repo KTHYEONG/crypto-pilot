@@ -77,7 +77,7 @@ def _run_shared_cash_packed_numba(
     slippage_gamma_base: float,
     slippage_ref_adv_krw: float,
     concurrency_penalty_scale: float,
-) -> Tuple[np.ndarray, float, int, np.ndarray]:
+) -> Tuple[np.ndarray, float, int, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     n_sym, n = close.shape
     balance = initial_balance
     equity_curve = np.zeros(n, dtype=np.float64)
@@ -98,6 +98,10 @@ def _run_shared_cash_packed_numba(
     sym_cooldown = np.zeros(n_sym, dtype=np.int32)
     sym_cooldown_skip = np.zeros(n_sym, dtype=np.bool_)
     last_risk_pct_sym = np.zeros(n_sym, dtype=np.float64)
+
+    per_symbol_trades = np.zeros(n_sym, dtype=np.int32)
+    per_symbol_wins = np.zeros(n_sym, dtype=np.int32)
+    per_symbol_pnl = np.zeros(n_sym, dtype=np.float64)
 
     wu = warmup_bars
     if execution_start_idx > wu:
@@ -126,10 +130,13 @@ def _run_shared_cash_packed_numba(
                     if total_trades < max_trades:
                         pnl_array[total_trades] = pnl
                     total_trades += 1
-                    if 0 <= si < n_sym:
-                        sym_cooldown[si] = kill_cd_bars
-                        sym_cooldown_skip[si] = True
-                        last_risk_pct_sym[si] = 0.0
+                    sym_cooldown[si] = kill_cd_bars
+                    sym_cooldown_skip[si] = True
+                    last_risk_pct_sym[si] = 0.0
+                    per_symbol_trades[si] += 1
+                    per_symbol_pnl[si] += pnl
+                    if pnl > 0.0:
+                        per_symbol_wins[si] += 1
                     slot_in[sj] = False
                     slot_sym[sj] = -1
                     continue
@@ -190,6 +197,10 @@ def _run_shared_cash_packed_numba(
                         if total_trades < max_trades:
                             pnl_array[total_trades] = pnl_p
                         total_trades += 1
+                        per_symbol_trades[si] += 1
+                        per_symbol_pnl[si] += pnl_p
+                        if pnl_p > 0.0:
+                            per_symbol_wins[si] += 1
                         slot_amount[sj] -= partial_amt
                         slot_scale_done[sj] = True
 
@@ -215,6 +226,7 @@ def _run_shared_cash_packed_numba(
                         slot_entry_fee[sj] -= ef_part_f
                         slot_amount[sj] -= partial_f
                         slot_fractal_scale_done[sj] = True
+                        per_symbol_pnl[si] += pnl_f
                     if slot_amount[sj] < 1e-12 and slot_in[sj]:
                         dust_px = c_open * (1.0 - slippage_rate)
                         pnl = (dust_px - slot_entry_price[sj]) * slot_amount[sj]
@@ -223,6 +235,10 @@ def _run_shared_cash_packed_numba(
                         if total_trades < max_trades:
                             pnl_array[total_trades] = pnl
                         total_trades += 1
+                        per_symbol_trades[si] += 1
+                        per_symbol_pnl[si] += pnl
+                        if pnl > 0.0:
+                            per_symbol_wins[si] += 1
                         slot_in[sj] = False
                         if 0 <= si < n_sym:
                             last_risk_pct_sym[si] = 0.0
@@ -245,7 +261,14 @@ def _run_shared_cash_packed_numba(
                         slot_stop[sj] = new_stop
 
                 if slot_in[sj] and (not exit_triggered):
-                    if time_stop_bars > 0 and (i - slot_entry_idx[sj]) >= time_stop_bars:
+                    # Adaptive Time-Stop: Shorten if regime is bearish/choppy
+                    adaptive_stop = time_stop_bars
+                    if regime_risk[si, i] < 0.4:
+                        adaptive_stop = time_stop_bars // 2
+                        if adaptive_stop < 1:
+                            adaptive_stop = 1
+                    
+                    if time_stop_bars > 0 and (i - slot_entry_idx[sj]) >= adaptive_stop:
                         ex_px = c_open * (1.0 - slippage_rate)
                         exit_triggered = True
 
@@ -256,6 +279,10 @@ def _run_shared_cash_packed_numba(
                     if total_trades < max_trades:
                         pnl_array[total_trades] = pnl
                     total_trades += 1
+                    per_symbol_trades[si] += 1
+                    per_symbol_pnl[si] += pnl
+                    if pnl > 0.0:
+                        per_symbol_wins[si] += 1
                     slot_in[sj] = False
                     if 0 <= si < n_sym:
                         last_risk_pct_sym[si] = 0.0
@@ -466,6 +493,15 @@ def _run_shared_cash_packed_numba(
                 if total_trades < max_trades:
                     pnl_array[total_trades] = pnl
                 total_trades += 1
+                per_symbol_trades[si] += 1
+                per_symbol_pnl[si] += pnl
+                if pnl > 0.0:
+                    per_symbol_wins[si] += 1
+                
+                # Intra-SL: Churning Prevention
+                sym_cooldown[si] = 1 
+                sym_cooldown_skip[si] = True
+                
                 slot_in[sj] = False
                 slot_sym[sj] = -1
             else:
@@ -495,11 +531,23 @@ def _run_shared_cash_packed_numba(
             if total_trades < max_trades:
                 pnl_array[total_trades] = pnl
             total_trades += 1
+            per_symbol_trades[si] += 1
+            per_symbol_pnl[si] += pnl
+            if pnl > 0.0:
+                per_symbol_wins[si] += 1
             slot_in[sj] = False
             slot_sym[sj] = -1
         equity_curve[last_idx] = balance
 
-    return equity_curve, float(balance), total_trades, pnl_array[:total_trades]
+    return (
+        equity_curve, 
+        float(balance), 
+        total_trades, 
+        pnl_array[:total_trades],
+        per_symbol_trades,
+        per_symbol_wins,
+        per_symbol_pnl,
+    )
 
 
 def run_packed_from_symbol_arrays(
@@ -594,7 +642,7 @@ def run_packed_from_symbol_arrays(
     ref_adv = float(params.get("SLIPPAGE_REFERENCE_ADV_KRW", SLIPPAGE_REFERENCE_ADV_KRW))
     pen_scale = float(concurrency_penalty_scale)
 
-    eq_curve, fin_bal, tot_trade, pnl_arr = _run_shared_cash_packed_numba(
+    eq_curve, fin_bal, tot_trade, pnl_arr, ps_trd, ps_win, ps_pnl = _run_shared_cash_packed_numba(
         close,
         high,
         low,
@@ -639,6 +687,9 @@ def run_packed_from_symbol_arrays(
         final_balance=fin_bal,
         total_trades=tot_trade,
         pnl_array=pnl_arr,
+        per_symbol_trades=ps_trd,
+        per_symbol_wins=ps_win,
+        per_symbol_pnl=ps_pnl,
     )
 
 
