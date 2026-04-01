@@ -59,7 +59,7 @@ OPT_SPOT_CONFIG: Dict[str, Any] = {
     "SPOT_HOLDOUT_MIN_CAGR_PCT": 30.0,
     "SPOT_HOLDOUT_MDD_LIMIT_PCT": 45.0,
     "SPOT_HOLDOUT_HWM_RECOVERY_MAX_DAYS": 300.0,
-    "SPOT_HOLDOUT_ALPHA_DECAY_FLOOR_PCT": -50.0,
+    "SPOT_HOLDOUT_ALPHA_DECAY_FLOOR_PCT": -30.0,
     "SPOT_GATE1_SQN_MIN": 1.6,
     "SPOT_GATE1_PATH_SORTINO_MIN": 0.5,
     "SPOT_GATE1_TAIL_RATIO_MIN": 2.0,
@@ -161,8 +161,8 @@ def get_quarterly_window(reference_date: Any = None) -> tuple[str, str, str, str
         reference_date.year, current_quarter_start_month, 1
     )
     oos_end: datetime.date = current_quarter_start - datetime.timedelta(days=1)
-    oos_start: datetime.date = current_quarter_start - relativedelta(months=6)
-    is_start: datetime.date = oos_start - relativedelta(months=18)
+    oos_start: datetime.date = current_quarter_start - relativedelta(months=12)
+    is_start: datetime.date = oos_start - relativedelta(months=24)
     fetch_start: datetime.date = is_start - relativedelta(days=500)
     return (
         fetch_start.strftime("%Y-%m-%d"),

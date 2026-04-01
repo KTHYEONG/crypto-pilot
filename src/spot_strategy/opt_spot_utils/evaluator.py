@@ -231,7 +231,7 @@ def _dataset_fingerprint_from_df(df: pd.DataFrame) -> int:
 
 def _signal_disk_cache_path(cache_key: _SignalCacheKey, root: Path) -> Path:
     # cache_key = (params_tuple, sym, tf, data_len, fingerprint, version)
-    params_tuple, sym, tf, _, _, _ = cache_key
+    params_tuple, sym, tf, data_len, fingerprint, version = cache_key
     
     # SIGNAL_TYPE 추출 (폴더 구조용)
     sig_type = "default"
@@ -240,8 +240,9 @@ def _signal_disk_cache_path(cache_key: _SignalCacheKey, root: Path) -> Path:
             sig_type = str(v).lower()
             break
             
-    # 파라미터 해시 생성
-    digest = hashlib.sha256(repr(params_tuple).encode("utf-8")).hexdigest()
+    # 파라미터 제원 + 데이터 길이/버전/지문까지 포함하여 해시 충돌 방지
+    hash_payload = (params_tuple, data_len, fingerprint, version)
+    digest = hashlib.sha256(repr(hash_payload).encode("utf-8")).hexdigest()
     
     # 구조: root / symbol / tf / sig_type / hash.joblib
     folder = root / sym / tf / sig_type
@@ -950,7 +951,14 @@ def run_holdout_shared_cash_portfolio(
     ref_df = full_signal_dfs[ref_sym]
     slice_start = max(0, oos_start - 1)
     slice_end = len(ref_df)
+    _logger.info(
+        "Holdout OOS debug: oos_start=%d, slice_start=%d, slice_end=%d, "
+        "exec_start=%d, seg_len=%d, n_symbols=%d",
+        oos_start, slice_start, slice_end, max(1, oos_start - slice_start),
+        slice_end - slice_start, len(symbols)
+    )
     if slice_end - slice_start < 5:
+        _logger.warning("Holdout OOS segment too short (len < 5). Returning FAIL.")
         failed: Dict[str, Any] = {
             "portfolio_cagr_pct": -100.0,
             "mdd_pct": 100.0,
@@ -993,6 +1001,13 @@ def run_holdout_shared_cash_portfolio(
         concurrency_penalty_scale=float(concurrency_penalty_scale),
     )
     eq = res.equity_curve
+    _logger.info(
+        "Holdout OOS result: final_balance=%.2f, total_trades=%d, "
+        "eq_first=%.2f, eq_last=%.2f",
+        res.final_balance, res.total_trades,
+        float(eq[0]) if eq.size > 0 else -1.0,
+        float(eq[-1]) if eq.size > 0 else -1.0,
+    )
     span_days = _segment_span_days(
         full_signal_dfs[ref_sym].iloc[slice_start:slice_end],
         max(holdout_warmup_bars, execution_start_idx),
