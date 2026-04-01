@@ -99,7 +99,7 @@ _SPOT_OBJECTIVE_MIN_TRADES_HARD: float = 10.0 # Min trades per path to even cons
 _SPOT_OBJECTIVE_MIN_TRADES_SOFT: float = 25.0 # Target trades for statistical robustness
 _SPOT_OBJECTIVE_TAIL_RATIO_WEIGHT: float = 0.15 # Increased importance of asymmetry
 _SPOT_OBJECTIVE_LOG_TWR_WEIGHT: float = 1.0
-_SPOT_OBJECTIVE_PATH_CV_PENALTY: float = 0.5  # Lambda for path variance penalty
+_SPOT_OBJECTIVE_PATH_CV_PENALTY: float = 0.75  # Kelly drag 균형점: G∞=μ-σ²/2 → σ직접 패널티화의 합리적 상한 λ=0.75 (λ=1.0은 고수익 고변동 경로 과억압)
 
 _SignalCacheKey = Tuple[Tuple[Tuple[str, Any], ...], str, str, int, int, int]
 _SIGNAL_CACHE_MAXSIZE: int = 256
@@ -605,6 +605,7 @@ def objective_spot(
         path_max_cvar: List[float] = []
         path_trades: List[int] = []
         path_tail_ratios: List[float] = []
+        path_pfs: List[float] = []
         path_gmgr: List[float] = []
         path_ui: List[float] = []
         path_calmars: List[float] = []
@@ -617,6 +618,7 @@ def objective_spot(
             seg_mdds: List[float] = []
             seg_cvars: List[float] = []
             seg_tails: List[float] = []
+            seg_pfs: List[float] = []
             path_total_trades = 0
             running_balance = float(SPOT_INITIAL_BALANCE)
             path_eq_chunks: List[np.ndarray] = []
@@ -686,6 +688,18 @@ def objective_spot(
                     seg_mdds.append(0.0)
                     seg_cvars.append(0.0)
                     seg_tails.append(1.0)
+                    
+                pnl = result.pnl_array
+                pos_pnl = float(np.sum(pnl[pnl > 0.0]))
+                neg_pnl = float(np.abs(np.sum(pnl[pnl < 0.0])))
+                # Asymptotic Cap for zero-loss singularity to avoid penalizing perfect segments
+                if neg_pnl > 1e-12:
+                    seg_pf = pos_pnl / neg_pnl
+                elif pos_pnl > 1e-12:
+                    seg_pf = 3.0  # Theoretical cap for stable alpha
+                else:
+                    seg_pf = 1.0  # Neutral for zero trades
+                seg_pfs.append(seg_pf)
 
                 if int(result.total_trades) < min_seg_trades:
                     log_tw -= seg_fail_pen
@@ -703,7 +717,7 @@ def objective_spot(
             path_worst_mdd.append(float(np.max(seg_mdds)) if seg_mdds else 0.0)
             
             # HARD HURDLE: If any path exceeds MDD limit, prune immediately.
-            path_mdd_limit = float(OPT_SPOT_CONFIG.get("SPOT_MDD_LIMIT_PCT", 40.0))
+            path_mdd_limit = float(OPT_SPOT_CONFIG.get("SPOT_HOLDOUT_MDD_LIMIT_PCT", 20.0))
             if path_worst_mdd[-1] > path_mdd_limit:
                  raise optuna.TrialPruned()
             
@@ -713,6 +727,7 @@ def objective_spot(
 
             path_trades.append(path_total_trades)
             path_tail_ratios.append(float(np.mean(seg_tails)) if seg_tails else 1.0)
+            path_pfs.append(float(np.mean(seg_pfs)) if seg_pfs else 1.0)
 
             path_eq = np.concatenate(path_eq_chunks) if path_eq_chunks else np.array([], dtype=np.float64)
             span_for_sortino = max(span_path_days, 1.0)
@@ -748,9 +763,14 @@ def objective_spot(
             else:
                 sqn_p = 0.0
             n_tm = float(np.mean(path_trades)) if path_trades else 0.0
+            p_pf = float(np.mean(path_pfs)) if path_pfs else 1.0
+            
+            # Penalize: trades < target, SQN < target, Turnover > 100, PF < 1.4
             soft_p = (
                 max(0.0, _SPOT_OBJECTIVE_MIN_TRADES_SOFT - n_tm) * w_trade_pen
                 + max(0.0, 1.6 - sqn_p) * w_sqn_pen
+                + max(0.0, n_tm - 100.0) * 0.005
+                + max(0.0, 1.4 - p_pf) * 0.1
             )
             run_geo = float(np.mean(path_compound_raw_log_tw)) if path_compound_raw_log_tw else 0.0
             run_calmar = float(np.mean(path_calmars)) if path_calmars else 0.0
@@ -820,7 +840,16 @@ def objective_spot(
         path_cv = sd_paths / (abs(mu_paths) + 1e-6)
         
         # Base Wealth Maximization (Geometric Mean in log space)
-        geometric_mean_log = mu_paths
+        raw_geometric_mean = mu_paths
+        
+        # Soft Cap for Extreme IS Returns (Diminishing Returns)
+        # Threshold: 70% CAGR ≈ 0.5306 log return
+        # Logic: (Benchmark ~50%) + (Target Alpha ~20%) = 70%
+        cap_threshold = 0.53
+        if raw_geometric_mean > cap_threshold:
+            geometric_mean_log = cap_threshold + (raw_geometric_mean - cap_threshold) * 0.5
+        else:
+            geometric_mean_log = raw_geometric_mean
         
         # Penalize inconsistency between paths
         consistency_penalty = _SPOT_OBJECTIVE_PATH_CV_PENALTY * sd_paths
@@ -829,15 +858,23 @@ def objective_spot(
         mean_tail_ratio = float(np.mean(path_tail_ratios)) if path_tail_ratios else 0.0
         tail_bonus = math.log(max(mean_tail_ratio, 0.1)) * _SPOT_OBJECTIVE_TAIL_RATIO_WEIGHT
         
+        mean_path_pf = float(np.mean(path_pfs)) if path_pfs else 1.0
+        
         soft_penalty = (
             max(0.0, _SPOT_OBJECTIVE_MIN_TRADES_SOFT - n_trades_mean) * (w_trade_pen * 10.0)
             + max(0.0, 2.0 - gate1_sqn) * (w_sqn_pen * 2.0)
+            + max(0.0, 1.35 - mean_path_pf) * 0.1     # Recalibrated: 0.1 PF drop ≈ 1% log-drag
         )
+
+        w_calmar = float(cfg.get("SPOT_OBJECTIVE_W_CALMAR", 0.08))
+        worst25_calmar = float(np.percentile(path_calmars, 25)) if path_calmars else 0.0
+        calmar_term = math.log(max(worst25_calmar + 1.0, 0.01)) * w_calmar
 
         objective_final = float(
             geometric_mean_log
             - consistency_penalty
             + tail_bonus
+            + calmar_term
             - lam_ui * max_ui
             - soft_penalty
         )
@@ -1048,6 +1085,10 @@ def run_holdout_shared_cash_portfolio(
         "profit_factor": pf,
         "calmar_ratio": calmar,
         "win_rate_pct": win_rate,
+        "span_days": span_days,
+        "per_symbol_trades": res.per_symbol_trades,
+        "per_symbol_wins": res.per_symbol_wins,
+        "per_symbol_pnl": res.per_symbol_pnl,
     }
     if return_signal_dfs:
         out["full_signal_dfs"] = full_signal_dfs
