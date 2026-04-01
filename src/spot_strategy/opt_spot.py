@@ -1239,19 +1239,35 @@ def main() -> None:
         should_save = bool(mean_log > 0.0 and is_all_passed)
         # File name is required by downstream loaders; overwrite risk is limited to multi-mode.
         clean_sym = str(target).replace("/", "").replace("-", "") if not isinstance(target, tuple) else ""
-        json_filename = f"spot_params_{tf_eval}.json" if args.mode == "multi" else f"spot_params_{tf_eval}_{clean_sym}.json"
+        json_filename = f"best_params_{tf_eval}.json" if args.mode == "multi" else f"best_params_{clean_sym}_{tf_eval}.json"
         pending_json_writes.append((json_filename, params, best_score_final, should_save))
 
     # JSON save logs last
     if pending_json_writes:
         import json
+        from src.common.secure_config import encrypt_config, get_strategy_secret
+        
         results_dir = Path(project_root) / "results"
         results_dir.mkdir(parents=True, exist_ok=True)
+        
+        secret = get_strategy_secret()
+        
         for json_filename, params, best_score_final, should_save in pending_json_writes:
             json_path = results_dir / json_filename
+            enc_path = json_path.with_suffix(json_path.suffix + ".enc")
+            
             if should_save:
+                # 1. Plaintext JSON (Local use only)
                 json_path.write_text(json.dumps(params, indent=4), encoding="utf-8")
                 _logger.info("Saved config: %s", json_path.resolve())
+                
+                # 2. Encrypted JSON (For Git/Public repo)
+                if secret:
+                    encrypted_data = encrypt_config(params, secret)
+                    enc_path.write_bytes(encrypted_data)
+                    _logger.info("Saved encrypted config: %s", enc_path.resolve())
+                else:
+                    _logger.warning("STRATEGY_SECRET_KEY not set; skipping encrypted save.")
             else:
                 _logger.info(
                     "JSON save skipped: criteria not met (growth_score / gates). objective=%.4f",
