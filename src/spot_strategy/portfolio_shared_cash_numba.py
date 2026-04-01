@@ -121,10 +121,11 @@ def _run_shared_cash_packed_numba(
                     pnl -= slot_amount[sj] * exit_price * fee_rate
                     balance += slot_amount[sj] * slot_entry_price[sj] + pnl
                     total_trades += 1
-                    slot_in[sj] = False
                     if 0 <= si < n_sym:
                         sym_cooldown[si] = kill_cd_bars
                         sym_cooldown_skip[si] = True
+                        last_risk_pct_sym[si] = 0.0
+                    slot_in[sj] = False
                     slot_sym[sj] = -1
                     continue
 
