@@ -1015,6 +1015,13 @@ def run_holdout_shared_cash_portfolio(
     cagr = float(portfolio_cagr_pct_from_equity(eq, span_days)) if eq.size > 1 else -100.0
     mdd = float(calc_mdd_from_equity(eq)) if eq.size > 1 else 100.0
     cvar_pct = float(cvar_loss_pct_from_simple_returns(eq)) if eq.size > 1 else 100.0
+    pnl = res.pnl_array
+    pos_pnl = float(np.sum(pnl[pnl > 0.0]))
+    neg_pnl = float(np.abs(np.sum(pnl[pnl < 0.0])))
+    pf = pos_pnl / neg_pnl if neg_pnl > 1e-12 else 10.0
+    calmar = abs(cagr) / abs(mdd) if abs(mdd) > 1e-6 else 0.0
+    win_rate = float(np.sum(pnl > 0.0) / len(pnl)) * 100.0 if len(pnl) > 0 else 0.0
+
     twr = max(float(res.final_balance / initial_balance), 1e-9)
     tail_r = float(calc_tail_ratio_from_equity(eq)) if eq.size > 1 else 0.0
     dd_bars = float(max_underwater_bars_from_equity(eq)) if eq.size > 1 else 0.0
@@ -1025,6 +1032,7 @@ def run_holdout_shared_cash_portfolio(
         seg = full_signal_dfs[sym].iloc[slice_start:slice_end]
         diag = seg.iloc[execution_start_idx:]
         oos_signal_stats_by_symbol[sym] = _compute_signal_stats(diag)
+
     out: Dict[str, Any] = {
         "portfolio_cagr_pct": cagr,
         "mdd_pct": mdd,
@@ -1037,6 +1045,9 @@ def run_holdout_shared_cash_portfolio(
         "moic": float(moic),
         "equity_curve": eq,
         "oos_signal_stats_by_symbol": oos_signal_stats_by_symbol,
+        "profit_factor": pf,
+        "calmar_ratio": calmar,
+        "win_rate_pct": win_rate,
     }
     if return_signal_dfs:
         out["full_signal_dfs"] = full_signal_dfs
