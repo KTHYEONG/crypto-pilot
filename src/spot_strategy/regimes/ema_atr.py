@@ -77,6 +77,7 @@ class EmaAtrRegime:
         "ATR_REGIME_PERIOD": {"type": "int", "low": 10, "high": 30, "step": 5},
         "VOL_PCT_WINDOW": {"type": "int", "low": 40, "high": 120, "step": 10},
         "VOL_QUANTILE": {"type": "float", "low": 0.45, "high": 0.75, "step": 0.05},
+        "VOV_WINDOW": {"type": "int", "low": 20, "high": 60, "step": 20},
     }
 
     def compute(self, data_maps: Dict[str, Dict[str, Any]], params: Dict[str, Any]) -> np.ndarray:
@@ -85,12 +86,33 @@ class EmaAtrRegime:
         if not symbols:
             raise ValueError("ema_atr regime: empty data_maps")
         df = data_maps[symbols[0]][tf]
+        atr_period = int(params.get("ATR_REGIME_PERIOD", 14))
         labels = compute_ema_atr_regime_labels(
             df,
             ema_slow=int(params.get("EMA_ATR_REGIME_SLOW", 200)),
-            atr_period=int(params.get("ATR_REGIME_PERIOD", 14)),
+            atr_period=atr_period,
             vol_pct_window=int(params.get("VOL_PCT_WINDOW", 60)),
             vol_quantile=float(params.get("VOL_QUANTILE", 0.60)),
         )
         mult = np.where(labels < 2, 0.0, np.where(labels == 3, 0.5, 1.0))
+        close = df["close"].to_numpy(dtype=np.float64)
+        high = df["high"].to_numpy(dtype=np.float64)
+        low = df["low"].to_numpy(dtype=np.float64)
+        atr_pct = _atr_pct(close, high, low, atr_period)
+        vov_w = max(2, int(params.get("VOV_WINDOW", 40)))
+        vov = (
+            pd.Series(atr_pct)
+            .rolling(window=vov_w, min_periods=1)
+            .std()
+            .to_numpy(dtype=np.float64)
+        )
+        roll_q = max(vov_w * 3, 60)
+        vov_q75 = (
+            pd.Series(vov)
+            .rolling(window=roll_q, min_periods=vov_w)
+            .quantile(0.75)
+            .to_numpy(dtype=np.float64)
+        )
+        high_vov = np.isfinite(vov) & np.isfinite(vov_q75) & (vov >= vov_q75)
+        mult = np.where(high_vov, mult * 0.5, mult)
         return mult.astype(np.float64)
