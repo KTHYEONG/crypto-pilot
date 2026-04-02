@@ -101,9 +101,9 @@ _SIGNAL_CACHE_SCHEMA_VERSION: int = 13
 _SPOT_OBJECTIVE_CAGR_WEIGHT: float = 0.0  # Abandoning additive CAGR
 _SPOT_OBJECTIVE_MIN_TRADES_HARD: float = 10.0 # Min trades per path to even consider
 _SPOT_OBJECTIVE_MIN_TRADES_SOFT: float = 25.0 # Target trades for statistical robustness
-_SPOT_OBJECTIVE_TAIL_RATIO_WEIGHT: float = 0.15 # Increased importance of asymmetry
+_SPOT_OBJECTIVE_TAIL_RATIO_WEIGHT: float = 0.28  # Asymmetric payoff preference (Tail Ratio gate)
 _SPOT_OBJECTIVE_LOG_TWR_WEIGHT: float = 1.0
-_SPOT_OBJECTIVE_PATH_CV_PENALTY: float = 1.25  # Anti-overfit path dispersion penalty (λ≈1.0 Kelly log-utility reference)
+_SPOT_OBJECTIVE_PATH_CV_PENALTY: float = 0.90  # Path CV penalty (λ≈1.0 Kelly with estimation slack)
 
 _STRATEGY_LOGIC_HASH: Optional[str] = None
 _CACHE_CLEANUP_DONE: bool = False
@@ -1255,10 +1255,10 @@ def objective_spot(
         # Base Wealth Maximization (Geometric Mean in log space)
         raw_geometric_mean = mu_paths
         
-        # Soft Cap for Extreme IS Returns (~60% CAGR ≈ 0.470 log) to curb in-sample overfitting.
-        cap_threshold = 0.470
+        # Soft cap for extreme IS returns (~73% CAGR ≈ 0.550 log); continuation slope limits IS inflation.
+        cap_threshold = 0.550
         if raw_geometric_mean > cap_threshold:
-            geometric_mean_log = cap_threshold + (raw_geometric_mean - cap_threshold) * 0.15
+            geometric_mean_log = cap_threshold + (raw_geometric_mean - cap_threshold) * 0.20
         else:
             geometric_mean_log = raw_geometric_mean
         
@@ -1277,7 +1277,7 @@ def objective_spot(
         hhi = float(np.sum(sym_shares**2))
         n_sym = max(1, len(total_sym_pnl))
         hhi_equal = 1.0 / float(n_sym)
-        hhi_penalty = max(0.0, hhi - 2.0 * hhi_equal) * 0.80
+        hhi_penalty = max(0.0, hhi - 2.5 * hhi_equal) * 0.70
 
         soft_penalty = (
             max(0.0, _SPOT_OBJECTIVE_MIN_TRADES_SOFT - n_trades_mean) * (w_trade_pen * 10.0)
