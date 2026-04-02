@@ -14,7 +14,7 @@ import numpy as np
 import pandas as pd
 from collections import OrderedDict
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 try:
     from filelock import FileLock
@@ -94,7 +94,7 @@ SIGNAL_CACHE_PARAM_KEYS: frozenset[str] = frozenset([
     "PFK_MIN_F",
 ])
 
-_SIGNAL_CACHE_SCHEMA_VERSION: int = 11
+_SIGNAL_CACHE_SCHEMA_VERSION: int = 12
 
 _SPOT_OBJECTIVE_CAGR_WEIGHT: float = 0.0  # Abandoning additive CAGR
 _SPOT_OBJECTIVE_MIN_TRADES_HARD: float = 10.0 # Min trades per path to even consider
@@ -105,6 +105,44 @@ _SPOT_OBJECTIVE_PATH_CV_PENALTY: float = 0.75  # Kelly drag 균형점: G∞=μ-�
 
 _STRATEGY_LOGIC_HASH: Optional[str] = None
 _CACHE_CLEANUP_DONE: bool = False
+_CACHE_LAST_CLEANUP_TS: float = 0.0
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return int(default)
+
+
+def _signal_cache_max_days() -> int:
+    return max(0, _env_int("OPT_SPOT_SIGNAL_CACHE_MAX_DAYS", 7))
+
+
+def _signal_cache_max_bytes() -> int:
+    max_gb = max(0, _env_int("OPT_SPOT_SIGNAL_CACHE_MAX_GB", 0))
+    return max_gb * 1024 * 1024 * 1024
+
+
+def _signal_cache_target_bytes(max_bytes: int) -> int:
+    target_gb = max(0, _env_int("OPT_SPOT_SIGNAL_CACHE_TARGET_GB", 0))
+    if target_gb > 0:
+        return target_gb * 1024 * 1024 * 1024
+    if max_bytes <= 0:
+        return 0
+    return int(max_bytes * 0.8)
+
+
+def _signal_cache_cleanup_interval_sec() -> int:
+    return max(0, _env_int("OPT_SPOT_SIGNAL_CACHE_CLEANUP_INTERVAL_SEC", 300))
+
+
+def _signal_mem_cache_maxsize() -> int:
+    return max(16, _env_int("OPT_SPOT_SIGNAL_MEM_CACHE_MAX", 96))
+
+
+def _arrays_mem_cache_maxsize() -> int:
+    return max(16, _env_int("OPT_SPOT_ARRAYS_MEM_CACHE_MAX", 96))
 
 def _get_logic_hash() -> str:
     """Strategy logic fingerprinting via source code hashing."""
@@ -119,30 +157,140 @@ def _get_logic_hash() -> str:
             _STRATEGY_LOGIC_HASH = "legacy"
     return _STRATEGY_LOGIC_HASH
 
-def _cleanup_old_cache(root: Path, max_days: int = 7) -> None:
-    """Deletes cache files older than specified days to manage disk space."""
+def _cleanup_old_cache(root: Path, *, force: bool = False) -> None:
+    """Deletes expired cache files and trims total cache size with LRU-like mtime policy."""
+    global _CACHE_LAST_CLEANUP_TS
     if not root.exists():
         return
+
+    now = time.time()
+    interval_sec = _signal_cache_cleanup_interval_sec()
+    if not force and interval_sec > 0 and (now - _CACHE_LAST_CLEANUP_TS) < interval_sec:
+        return
+
+    max_days = _signal_cache_max_days()
+    max_bytes = _signal_cache_max_bytes()
+    target_bytes = _signal_cache_target_bytes(max_bytes)
+    lock_path = root / ".cache_cleanup.lock"
+
+    if FileLock is not None:
+        try:
+            with FileLock(str(lock_path), timeout=0.1):
+                _cleanup_old_cache_impl(root, now, max_days=max_days, max_bytes=max_bytes, target_bytes=target_bytes)
+            _CACHE_LAST_CLEANUP_TS = now
+            return
+        except Exception:
+            pass
+
+    _cleanup_old_cache_impl(root, now, max_days=max_days, max_bytes=max_bytes, target_bytes=target_bytes)
+    _CACHE_LAST_CLEANUP_TS = now
+
+
+def _cleanup_old_cache_impl(
+    root: Path,
+    now: float,
+    *,
+    max_days: int,
+    max_bytes: int,
+    target_bytes: int,
+) -> None:
     now = time.time()
     max_sec = max_days * 86400
-    count = 0
+    expired_count = 0
+    expired_bytes = 0
+    kept_files: List[Tuple[float, int, Path]] = []
+    total_bytes = 0
     for f in root.rglob("*.joblib"):
         try:
-            if now - f.stat().st_mtime > max_sec:
+            stat = f.stat()
+            size = int(stat.st_size)
+            mtime = float(stat.st_mtime)
+            if max_days > 0 and now - mtime > max_sec:
                 f.unlink()
-                count += 1
+                expired_count += 1
+                expired_bytes += size
+                continue
+            kept_files.append((mtime, size, f))
+            total_bytes += size
         except OSError:
             pass
-    if count > 0:
-        _logger.info("Auto-cleaned %d expired cache files (>%d days).", count, max_days)
+    if expired_count > 0:
+        _logger.info(
+            "Auto-cleaned %d expired cache files (>%d days, %.2f GB).",
+            expired_count,
+            max_days,
+            expired_bytes / (1024 ** 3),
+        )
+
+    if max_bytes > 0 and total_bytes > max_bytes:
+        trim_target = min(target_bytes if target_bytes > 0 else max_bytes, max_bytes)
+        trim_target = max(0, trim_target)
+        removed_count = 0
+        removed_bytes = 0
+        for _, size, path in sorted(kept_files, key=lambda item: item[0]):
+            if total_bytes <= trim_target:
+                break
+            try:
+                path.unlink()
+                total_bytes -= size
+                removed_count += 1
+                removed_bytes += size
+            except OSError:
+                pass
+        if removed_count > 0:
+            _logger.info(
+                "Trimmed signal cache by %d files (%.2f GB) to stay within %.2f GB target.",
+                removed_count,
+                removed_bytes / (1024 ** 3),
+                trim_target / (1024 ** 3),
+            )
+
+
+def _touch_cache_file(path: Path) -> None:
+    try:
+        path.touch(exist_ok=True)
+    except OSError:
+        pass
 
 _SignalCacheKey = Tuple[Tuple[Tuple[str, Any], ...], str, str, int, int, int, str]
-_SIGNAL_CACHE_MAXSIZE: int = 256
-_ARRAYS_CACHE_MAXSIZE: int = 256
+_SignalComponentCacheKey = Tuple[str, Tuple[Tuple[str, Any], ...], str, str, int, int, int, str]
+_SIGNAL_CACHE_MAXSIZE: int = _signal_mem_cache_maxsize()
+_ARRAYS_CACHE_MAXSIZE: int = _arrays_mem_cache_maxsize()
 _cache_lock: threading.Lock = threading.Lock()
 _signal_cache: OrderedDict[_SignalCacheKey, pd.DataFrame] = OrderedDict()
 _arrays_cache: OrderedDict[_SignalCacheKey, Dict[str, np.ndarray]] = OrderedDict()
 _numpy_cache_warning_emitted: bool = False
+
+_CACHE_PARAM_EXCLUDE: frozenset[str] = frozenset({"LEVERAGE", "USE_COMPOUNDING"})
+_CACHE_COMPONENTS: Tuple[str, ...] = ("signal", "regime", "sizing", "exit")
+_BASE_OHLCV_COLS: Tuple[str, ...] = ("open", "high", "low", "close", "volume")
+_BASE_KEEP_COLS: Tuple[str, ...] = ("timestamp", "datetime", "btc_close")
+_EXIT_PARAM_KEYS: frozenset[str] = frozenset(
+    {"BB_EXIT_PERIOD", "BB_EXIT_STD", "RSI_EXIT_PERIOD", "RSI_EXIT_THRESHOLD"}
+)
+_COMPONENT_COLUMN_SPECS: Dict[str, Tuple[Tuple[str, str, str], ...]] = {
+    "signal": (
+        ("long_entry_signal", "float32", "float64"),
+        ("entry_upper", "float32", "float64"),
+        ("trend_direction", "int8", "int32"),
+        ("strength_filter", "int8", "int32"),
+        ("atr", "float32", "float64"),
+        ("slot_rank_score", "float32", "float64"),
+        ("kill_signal", "float32", "float64"),
+        ("fractal_high_flag", "float32", "float64"),
+    ),
+    "regime": (
+        ("regime_risk_mult", "float32", "float64"),
+        ("regime_label", "int8", "int32"),
+    ),
+    "sizing": (
+        ("garch_kelly_f", "float32", "float64"),
+    ),
+    "exit": (
+        ("bb_upper", "float32", "float64"),
+        ("trail_tighten_flag", "float32", "float64"),
+    ),
+}
 
 _DISK_CACHE_READ_EXCEPTIONS: tuple[type[Exception], ...] = (
     OSError,
@@ -264,25 +412,150 @@ def _dataset_fingerprint_from_df(df: pd.DataFrame) -> int:
     return int(h & ((1 << 63) - 1))
 
 
-def _signal_disk_cache_path(cache_key: _SignalCacheKey, root: Path) -> Path:
-    # cache_key = (params_tuple, sym, tf, data_len, fingerprint, version, logic_hash)
-    params_tuple, sym, tf, data_len, fingerprint, version, logic_hash = cache_key
-    
-    # SIGNAL_TYPE 추출 (폴더 구조용)
-    sig_type = "default"
-    for k, v in params_tuple:
-        if k == "SIGNAL_TYPE":
-            sig_type = str(v).lower()
-            break
-            
-    # 파라미터 제원 + 데이터 길이/버전/지문/코드해시까지 포함하여 해시 충돌 방지
-    hash_payload = (params_tuple, data_len, fingerprint, version, logic_hash)
+def _normalize_key_value(v: Any) -> Any:
+    if isinstance(v, np.generic):
+        return v.item()
+    if isinstance(v, (list, tuple)):
+        return tuple(_normalize_key_value(x) for x in v)
+    return v
+
+
+def _cache_key_to_params(cache_key: _SignalCacheKey) -> Dict[str, Any]:
+    return {k: v for k, v in cache_key[0]}
+
+
+def _params_for_component(params: Dict[str, Any], component: str) -> Set[str]:
+    keys: Set[str] = set()
+    if component == "signal":
+        keys.update({"SIGNAL_TYPE", "ATR_PERIOD"})
+        try:
+            from src.spot_strategy.signals import SIGNAL_REGISTRY
+            st = str(params.get("SIGNAL_TYPE", "ADX_BREAKOUT")).upper()
+            if st in SIGNAL_REGISTRY:
+                keys.update(SIGNAL_REGISTRY[st].param_space.keys())
+        except Exception:
+            pass
+    elif component == "regime":
+        keys.add("REGIME_TYPE")
+        try:
+            from src.spot_strategy.regimes import REGIME_REGISTRY
+            rt = str(params.get("REGIME_TYPE", "MARKET_BREADTH")).upper()
+            if rt in REGIME_REGISTRY:
+                keys.update(REGIME_REGISTRY[rt].param_space.keys())
+        except Exception:
+            pass
+    elif component == "sizing":
+        keys.add("SIZING_METHOD")
+        try:
+            from src.spot_strategy.sizing import SIZING_REGISTRY
+            sm = str(params.get("SIZING_METHOD", "vol_target")).lower()
+            if sm in SIZING_REGISTRY:
+                keys.update(SIZING_REGISTRY[sm].param_space.keys())
+        except Exception:
+            pass
+    elif component == "exit":
+        keys.update(_EXIT_PARAM_KEYS)
+    keys.add("TIMEFRAME")
+    keys.difference_update(_CACHE_PARAM_EXCLUDE)
+    return keys
+
+
+def _build_component_cache_key(cache_key: _SignalCacheKey, params: Dict[str, Any], component: str) -> _SignalComponentCacheKey:
+    _, sym, tf, data_len, fingerprint, version, logic_hash = cache_key
+    names = _params_for_component(params, component)
+    items: List[Tuple[str, Any]] = sorted(
+        (k, _normalize_key_value(params[k])) for k in names if k in params
+    )
+    return (component, tuple(items), sym, tf, data_len, fingerprint, version, logic_hash)
+
+
+def _signal_component_cache_path(component_key: _SignalComponentCacheKey, root: Path) -> Path:
+    component, params_tuple, sym, tf, data_len, fingerprint, version, logic_hash = component_key
+    sig_type = str(dict(params_tuple).get("SIGNAL_TYPE", "default")).lower()
+    hash_payload = (component, params_tuple, data_len, fingerprint, version, logic_hash)
     digest = hashlib.sha256(repr(hash_payload).encode("utf-8")).hexdigest()
-    
-    # 구조: root / symbol / tf / sig_type / hash.joblib
-    folder = root / sym / tf / sig_type
+    folder = root / sym / tf / sig_type / component
     folder.mkdir(parents=True, exist_ok=True)
     return folder / f"{digest}.joblib"
+
+
+def _extract_component_arrays(full_df: pd.DataFrame, component: str) -> Dict[str, np.ndarray]:
+    out: Dict[str, np.ndarray] = {}
+    for col, disk_dtype, _ in _COMPONENT_COLUMN_SPECS[component]:
+        if col not in full_df.columns:
+            raise KeyError(f"Missing required component column: {col}")
+        out[col] = full_df[col].to_numpy(dtype=np.dtype(disk_dtype), copy=True)
+    return out
+
+
+def _write_component_cache(
+    cache_key: _SignalCacheKey,
+    params: Dict[str, Any],
+    full_df: pd.DataFrame,
+    root: Path,
+) -> None:
+    for component in _CACHE_COMPONENTS:
+        comp_key = _build_component_cache_key(cache_key, params, component)
+        cache_path = _signal_component_cache_path(comp_key, root)
+        payload: Dict[str, Any] = {
+            "schema": _SIGNAL_CACHE_SCHEMA_VERSION,
+            "component": component,
+            "n": int(len(full_df)),
+            "arrays": _extract_component_arrays(full_df, component),
+        }
+        tmp_path = cache_path.with_suffix(f".tmp.{os.getpid()}")
+        joblib.dump(payload, tmp_path, compress=3)
+        tmp_path.replace(cache_path)
+
+
+def _load_component_cache(
+    cache_key: _SignalCacheKey,
+    params: Dict[str, Any],
+    root: Path,
+) -> Optional[Dict[str, np.ndarray]]:
+    all_cols: Dict[str, np.ndarray] = {}
+    expected_n = int(cache_key[3])
+    for component in _CACHE_COMPONENTS:
+        comp_key = _build_component_cache_key(cache_key, params, component)
+        cache_path = _signal_component_cache_path(comp_key, root)
+        if not cache_path.exists():
+            return None
+        try:
+            payload = joblib.load(cache_path)
+            if not isinstance(payload, dict):
+                return None
+            arrays = payload.get("arrays")
+            n = int(payload.get("n", -1))
+            if not isinstance(arrays, dict) or n != expected_n:
+                return None
+            for col, _, runtime_dtype in _COMPONENT_COLUMN_SPECS[component]:
+                arr = arrays.get(col)
+                if arr is None:
+                    return None
+                all_cols[col] = np.asarray(arr, dtype=np.dtype(runtime_dtype))
+            _touch_cache_file(cache_path)
+        except _DISK_CACHE_READ_EXCEPTIONS:
+            return None
+    return all_cols
+
+
+def _rebuild_full_df_from_components(
+    target_df: pd.DataFrame,
+    component_cols: Dict[str, np.ndarray],
+) -> pd.DataFrame:
+    full_df = target_df.copy(deep=True)
+    for col in _BASE_OHLCV_COLS:
+        if col in full_df.columns:
+            full_df[col] = full_df[col].astype(np.float64)
+    if "btc_close" not in full_df.columns and "close" in full_df.columns:
+        full_df["btc_close"] = full_df["close"].astype(np.float64)
+    for component in _CACHE_COMPONENTS:
+        for col, _, runtime_dtype in _COMPONENT_COLUMN_SPECS[component]:
+            arr = component_cols.get(col)
+            if arr is None:
+                raise KeyError(f"Missing component column while rebuilding: {col}")
+            full_df[col] = np.asarray(arr, dtype=np.dtype(runtime_dtype))
+    return full_df
 
 
 def _build_signal_cache_key(
@@ -293,7 +566,9 @@ def _build_signal_cache_key(
     fingerprint: int,
 ) -> _SignalCacheKey:
     signal_items: List[Tuple[str, Any]] = sorted(
-        (k, params[k]) for k in SIGNAL_CACHE_PARAM_KEYS if k in params
+        (k, _normalize_key_value(v))
+        for k, v in params.items()
+        if k not in _CACHE_PARAM_EXCLUDE
     )
     return (
         tuple(signal_items),
@@ -314,9 +589,10 @@ def get_or_compute_signals(
     disk_cache_root: Optional[Path] = None,
 ) -> pd.DataFrame:
     global _CACHE_CLEANUP_DONE
+    params = _cache_key_to_params(cache_key)
     if disk_cache_root is not None and not _CACHE_CLEANUP_DONE:
-        # 최초 실행 시 1회만 7일 지난 캐시 정리
-        _cleanup_old_cache(disk_cache_root, max_days=7)
+        # 최초 실행 시 1회 정리 후, 이후에는 주기적으로 재정리한다.
+        _cleanup_old_cache(disk_cache_root, force=True)
         _CACHE_CLEANUP_DONE = True
 
     with _cache_lock:
@@ -326,35 +602,28 @@ def get_or_compute_signals(
 
     # 1. 디스크 캐시 확인
     if disk_cache_root is not None:
-        cache_path = _signal_disk_cache_path(cache_key, disk_cache_root)
-        if cache_path.exists():
+        cached_components = _load_component_cache(cache_key, params, disk_cache_root)
+        if cached_components is not None:
             try:
-                # joblib.load와 mmap_mode='r'을 사용하여 RAM 사용량 최소화 (DDR5/NVMe 최적)
-                full_df = joblib.load(cache_path, mmap_mode='r')
-                
-                # 메모리 캐시에도 저장 (LRU)
+                full_df = _rebuild_full_df_from_components(target_df, cached_components)
                 with _cache_lock:
                     while len(_signal_cache) >= _SIGNAL_CACHE_MAXSIZE:
                         _signal_cache.popitem(last=False)
                     _signal_cache[cache_key] = full_df
                 return full_df
-            except _DISK_CACHE_READ_EXCEPTIONS:
-                _logger.warning("Failed to read signal cache with joblib at %s, recomputing...", cache_path)
+            except Exception:
+                pass
 
     # 2. 신규 계산
     full_df: pd.DataFrame = strategy.generate_signals(target_df.copy(deep=True))
     
     # 3. 디스크 캐시 저장
     if disk_cache_root is not None:
-        cache_path = _signal_disk_cache_path(cache_key, disk_cache_root)
         try:
-            # 병렬 워커 간 충돌 방지를 위한 임시 파일 저장 후 교체 방식
-            tmp_path = cache_path.with_suffix(f".tmp.{os.getpid()}")
-            # mmap 효율을 위해 압축 없이 저장 (DDR5/NVMe 환경 최적)
-            joblib.dump(full_df, tmp_path)
-            tmp_path.replace(cache_path)
+            _write_component_cache(cache_key, params, full_df, disk_cache_root)
+            _cleanup_old_cache(disk_cache_root, force=False)
         except Exception as e:
-            _logger.warning("Failed to write signal cache with joblib at %s: %s", cache_path, e)
+            _logger.warning("Failed to write split signal cache: %s", e)
 
     # 4. 메모리 캐시 저장
     with _cache_lock:
