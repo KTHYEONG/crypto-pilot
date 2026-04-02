@@ -6,13 +6,50 @@ Mirrors run_shared_cash_multi_symbol in portfolio_shared_cash.py.
 from __future__ import annotations
 
 import os
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, cast
 
 import numpy as np
 from numba import njit
 
-from config.opt_config import SLIPPAGE_GAMMA_BASE, SLIPPAGE_REFERENCE_ADV_KRW
+from config.opt_config import OPT_SPOT_CONFIG, SLIPPAGE_GAMMA_BASE, SLIPPAGE_REFERENCE_ADV_KRW
 from config.settings import SPOT_INITIAL_BALANCE, SPOT_SLIPPAGE_RATE, UPBIT_SPOT_TAKER_FEE_RATE
+
+
+def _max_position_pct_by_symbol(
+    symbols_ordered: List[str],
+    params: Dict[str, object],
+) -> np.ndarray:
+    """Per-symbol position cap: anchor / liquid_major / trending_alt from OPT_SPOT_CONFIG."""
+    max_pos = float(params.get("MAX_POSITION_PCT", 0.25))
+    cap_coin = params.get("MAX_CAP_PER_COIN")
+    if cap_coin is not None:
+        base_cap = min(max_pos, float(cap_coin))
+    else:
+        base_cap = max_pos
+    liq = params.get("MAX_CAP_LIQUID_MAJOR")
+    cap_liquid = min(max_pos, float(liq)) if liq is not None else base_cap
+    trd = params.get("MAX_CAP_TRENDING_ALT")
+    cap_trend = min(max_pos, float(trd)) if trd is not None else base_cap
+    cluster_map: Dict[str, str] = cast(
+        Dict[str, str], OPT_SPOT_CONFIG.get("SPOT_SYMBOL_CLUSTER", {})
+    )
+    n_sym = len(symbols_ordered)
+    out = np.empty(n_sym, dtype=np.float64)
+    for si, sym in enumerate(symbols_ordered):
+        cl = str(cluster_map.get(sym, "trending_alt"))
+        if cl == "anchor":
+            raw = base_cap
+        elif cl == "liquid_major":
+            raw = cap_liquid
+        else:
+            raw = cap_trend
+        c = raw
+        if c < 0.0:
+            c = 0.0
+        if c > 1.0:
+            c = 1.0
+        out[si] = c
+    return out
 
 
 @njit(cache=True)
@@ -59,7 +96,6 @@ def _run_shared_cash_packed_numba(
     fee_rate: float,
     slippage_rate: float,
     risk_per_trade: float,
-    max_position_pct: float,
     long_atr_mult: float,
     long_trail_mult: float,
     long_trail_lock_mult: float,
@@ -77,6 +113,7 @@ def _run_shared_cash_packed_numba(
     slippage_gamma_base: float,
     slippage_ref_adv_krw: float,
     concurrency_penalty_scale: float,
+    max_position_pct_by_sym: np.ndarray,
 ) -> Tuple[np.ndarray, float, int, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     n_sym, n = close.shape
     balance = initial_balance
@@ -437,7 +474,12 @@ def _run_shared_cash_packed_numba(
 
             risk_budget = balance * new_risk_pct
             amt_from_risk = risk_budget / stop_dist
-            max_notional = balance * max_position_pct
+            cap_pct = max_position_pct_by_sym[si]
+            if cap_pct < 0.0:
+                cap_pct = 0.0
+            if cap_pct > 1.0:
+                cap_pct = 1.0
+            max_notional = balance * cap_pct
             amt_pos_cap = max_notional / fill_price
             max_aff = balance * 0.99 / (fill_price * (1.0 + fee_rate))
             amt = amt_from_risk
@@ -622,10 +664,7 @@ def run_packed_from_symbol_arrays(
     fee_rate = float(UPBIT_SPOT_TAKER_FEE_RATE)
     slippage_rate = float(SPOT_SLIPPAGE_RATE)
     risk_per_trade = float(params.get("RISK_PER_TRADE", 0.015))
-    max_position_pct = float(params.get("MAX_POSITION_PCT", 0.25))
-    cap_coin = params.get("MAX_CAP_PER_COIN")
-    if cap_coin is not None:
-        max_position_pct = min(max_position_pct, float(cap_coin))
+    max_position_pct_by_sym = _max_position_pct_by_symbol(symbols_ordered, params)
     long_atr_mult = float(params.get("LONG_ATR_MULT", 3.0))
     long_trail_mult = float(params.get("LONG_TRAIL_MULT", 3.0))
     long_trail_lock_mult = float(params.get("LONG_TRAIL_LOCK_MULT", 1.5))
@@ -662,7 +701,6 @@ def run_packed_from_symbol_arrays(
         fee_rate=fee_rate,
         slippage_rate=slippage_rate,
         risk_per_trade=risk_per_trade,
-        max_position_pct=max_position_pct,
         long_atr_mult=long_atr_mult,
         long_trail_mult=long_trail_mult,
         long_trail_lock_mult=long_trail_lock_mult,
@@ -680,6 +718,7 @@ def run_packed_from_symbol_arrays(
         slippage_gamma_base=gamma_base,
         slippage_ref_adv_krw=ref_adv,
         concurrency_penalty_scale=pen_scale,
+        max_position_pct_by_sym=max_position_pct_by_sym,
     )
     from src.spot_strategy.portfolio_shared_cash import SharedCashResult
     return SharedCashResult(
