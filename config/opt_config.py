@@ -53,6 +53,8 @@ OPT_SPOT_CONFIG: Dict[str, Any] = {
     "task_workers": 0,
     "TARGET_TIMEFRAMES": ["4h"],
     "SPOT_MAX_CONCURRENT_POSITIONS": 5,
+    "CPCV_N_BLOCKS": 8,
+    "CPCV_K_TEST": 3,
     "SPOT_SHORTLIST_TOP_K": 25,
     "SPOT_MIN_TRADES_PER_CPCV_SEGMENT": 8,
     "SPOT_SEGMENT_TRADE_FAIL_PENALTY": 2.0,
@@ -116,6 +118,8 @@ SPOT_SHARED_PARAM_SPACE: Dict[str, Dict[str, Any]] = {
     "ATR_PERIOD": {"type": "int", "low": 10, "high": 20, "step": 2},
     "KELLY_FRACTION": {"type": "float", "low": 0.2, "high": 0.8, "step": 0.1},
     "MAX_CAP_PER_COIN": {"type": "float", "low": 0.15, "high": 0.25, "step": 0.05},
+    "MAX_CAP_LIQUID_MAJOR": {"type": "float", "low": 0.10, "high": 0.18, "step": 0.02},
+    "MAX_CAP_TRENDING_ALT": {"type": "float", "low": 0.12, "high": 0.22, "step": 0.02},
     "MAX_PARTICIPATION_RATE": {"type": "float", "low": 0.005, "high": 0.05, "step": 0.005},
 }
 
