@@ -244,3 +244,6 @@ __marimo__/
 # strategy results
 results/*.json
 !results/*.json.enc
+
+# codex
+.codex
