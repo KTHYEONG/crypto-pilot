@@ -288,7 +288,10 @@ def run_combination_screening(
     prune_thr = float(OPT_SPOT_CONFIG.get("SPOT_COMBO_PRUNE_THRESHOLD", -0.5))
     top_k = int(OPT_SPOT_CONFIG.get("SPOT_COMBO_TOP_K", 3))
     n_workers_cfg = int(OPT_SPOT_CONFIG.get("SPOT_COMBO_N_WORKERS", 0))
-    n_workers = n_workers_cfg if n_workers_cfg > 0 else max(1, (os.cpu_count() or 2) - 1)
+    worker_cap = int(os.getenv("OPT_SPOT_MAX_WORKERS", "3"))
+    worker_cap = max(1, worker_cap)
+    n_workers_base = n_workers_cfg if n_workers_cfg > 0 else max(1, (os.cpu_count() or 2) - 1)
+    n_workers = max(1, min(n_workers_base, worker_cap))
 
     combinations = list(
         itertools.product(
