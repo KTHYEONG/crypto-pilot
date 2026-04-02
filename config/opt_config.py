@@ -42,9 +42,9 @@ SPOT_SYMBOLS: List[str] = [
 ]
 
 OPT_SPOT_CONFIG: Dict[str, Any] = {
-    "total_trials": 5000,
+    "total_trials": 3500,
     "n_startup_trials": 300,  # QMC(Sobol) 탐색량: 총 trials의 6% = 공간 커버리지와 TPE 학습 균형점
-    "tpe_n_startup_trials": 300,  # 500은 예산 10%를 startup에 낭비함 → 300 복원
+    "tpe_n_startup_trials": 256,  # Sweet spot: 26~35D combo-space에서 초기 커버리지/예산 균형
     "tpe_pruner_n_startup_trials": 10,
     "tpe_pruner_n_warmup_steps": 8,
     "tpe_pruner_patience": 2,
@@ -53,8 +53,8 @@ OPT_SPOT_CONFIG: Dict[str, Any] = {
     "task_workers": 0,
     "TARGET_TIMEFRAMES": ["4h"],
     "SPOT_MAX_CONCURRENT_POSITIONS": 5,
-    "CPCV_N_BLOCKS": 8,
-    "CPCV_K_TEST": 3,
+    "CPCV_N_BLOCKS": 6,
+    "CPCV_K_TEST": 2,
     "SPOT_SHORTLIST_TOP_K": 25,
     "SPOT_MIN_TRADES_PER_CPCV_SEGMENT": 8,
     "SPOT_SEGMENT_TRADE_FAIL_PENALTY": 2.0,
@@ -76,7 +76,7 @@ OPT_SPOT_CONFIG: Dict[str, Any] = {
     "SPOT_OBJECTIVE_W_TRADE": 0.03,
     "SPOT_OBJECTIVE_W_SQN": 0.02,
     "SPOT_COMBO_TOP_K": 3,
-    "SPOT_COMBO_QUICK_TRIALS": 40,
+    "SPOT_COMBO_QUICK_TRIALS": 28,
     "SPOT_COMBO_MIN_SIGNAL_RATE": 0.005,
     "SPOT_COMBO_QUICK_TRIALS_PHASE1": 10,
     "SPOT_COMBO_PRUNE_THRESHOLD": -0.5,
@@ -85,7 +85,7 @@ OPT_SPOT_CONFIG: Dict[str, Any] = {
     "SPOT_STAGE1_TRIALS_PER_SIGNAL": 100,  # 11 signals × 100 = 1100 trials(22%): 80→100 상향으로 순위 안정성 확보, 150은 Stage2 예산 과잠식
     "SPOT_STAGE1_TOP_K": 2,
     "SPOT_STAGE1_MIN_P10_GMGR": -0.5,
-    "SPOT_OBJECTIVE_W_CALMAR": 0.08,
+    "SPOT_OBJECTIVE_W_CALMAR": 0.14,
     "SPOT_SYMBOL_CLUSTER": {
         "KRW-BTC": "anchor", "KRW-ETH": "anchor",
         "KRW-SOL": "liquid_major", "KRW-XRP": "liquid_major", "KRW-DOGE": "liquid_major",
