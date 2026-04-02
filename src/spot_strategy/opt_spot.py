@@ -149,10 +149,11 @@ def _resolve_spot_execution_plan(
     requested_jobs: int,
     requested_task_workers: int,
 ) -> _SpotExecutionPlan:
+    worker_cap = 3
     logical_cpus = max(1, os.cpu_count() or 1)
     if mode == "multi" and task_count == 1:
         tw = requested_task_workers if requested_task_workers > 0 else requested_jobs
-        tw = max(1, min(int(tw), logical_cpus))
+        tw = max(1, min(int(tw), logical_cpus, worker_cap))
         return _SpotExecutionPlan(
             outer_task_workers=1,
             jobs_per_task=1,
@@ -161,13 +162,13 @@ def _resolve_spot_execution_plan(
             logical_cpus=logical_cpus,
             task_count=task_count,
         )
-    jobs = max(1, min(int(requested_jobs), logical_cpus))
+    jobs = max(1, min(int(requested_jobs), logical_cpus, worker_cap))
     if requested_task_workers <= 0:
         cpu_budget = max(1, 4 if logical_cpus > 2 else 1)
         outer_tw = min(task_count, max(1, cpu_budget // jobs))
     else:
         outer_tw = min(task_count, int(requested_task_workers))
-    outer_tw = max(1, outer_tw)
+    outer_tw = max(1, min(outer_tw, worker_cap))
     use_outer = task_count > 1 and outer_tw > 1
     return _SpotExecutionPlan(
         outer_task_workers=outer_tw,
@@ -682,7 +683,7 @@ def main() -> None:
     parser.add_argument("--symbols", type=str, default=",".join(SPOT_SYMBOLS))
     parser.add_argument("--mode", type=str, choices=["single", "multi"], default="multi")
     parser.add_argument("--trials", type=int, default=OPT_SPOT_CONFIG["total_trials"])
-    parser.add_argument("--jobs", type=int, default=int(OPT_SPOT_CONFIG.get("n_jobs", 6)))
+    parser.add_argument("--jobs", type=int, default=3)
     parser.add_argument("--task-workers", type=int, default=int(OPT_SPOT_CONFIG.get("task_workers", 0)))
     parser.add_argument("--tf", type=str, choices=["4h"], default=OPT_SPOT_CONFIG.get("TARGET_TIMEFRAMES", ["4h"])[0])
     parser.add_argument("--reference-date", type=str, default=None)
@@ -809,7 +810,18 @@ def main() -> None:
     # [수정] 메모리 절약을 위한 디스크 캐시 활성화
     signal_cache_dir = str(Path(project_root) / "data" / "cache_spot")
     Path(signal_cache_dir).mkdir(parents=True, exist_ok=True)
-    _logger.info(f"Signal Disk Cache Enabled: {signal_cache_dir}")
+    os.environ.setdefault("OPT_SPOT_SIGNAL_CACHE_MAX_GB", "24")
+    os.environ.setdefault("OPT_SPOT_SIGNAL_CACHE_TARGET_GB", "20")
+    os.environ.setdefault("OPT_SPOT_SIGNAL_CACHE_CLEANUP_INTERVAL_SEC", "300")
+    os.environ.setdefault("OPT_SPOT_SIGNAL_MEM_CACHE_MAX", "96")
+    os.environ.setdefault("OPT_SPOT_ARRAYS_MEM_CACHE_MAX", "96")
+    _logger.info(
+        "Signal Disk Cache Enabled: %s (max=%sGB, target=%sGB, cleanup=%ss)",
+        signal_cache_dir,
+        os.getenv("OPT_SPOT_SIGNAL_CACHE_MAX_GB", "0"),
+        os.getenv("OPT_SPOT_SIGNAL_CACHE_TARGET_GB", "0"),
+        os.getenv("OPT_SPOT_SIGNAL_CACHE_CLEANUP_INTERVAL_SEC", "0"),
+    )
 
     narrowed_space_effective: Optional[Dict[str, Dict[str, Any]]] = (
         {k: dict(v) if isinstance(v, dict) else v for k, v in narrowed_space_file.items()}
