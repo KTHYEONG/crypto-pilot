@@ -77,6 +77,8 @@ _CORE_ORDER: tuple[str, ...] = (
     "MAX_EXPOSURE",
     "KELLY_FRACTION",
     "MAX_CAP_PER_COIN",
+    "MAX_CAP_LIQUID_MAJOR",
+    "MAX_CAP_TRENDING_ALT",
     "ATR_PERIOD",
 )
 
