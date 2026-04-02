@@ -8,6 +8,7 @@ import logging
 import math
 import os
 import threading
+import shutil
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import optuna
 import numpy as np
@@ -84,6 +85,7 @@ SIGNAL_CACHE_PARAM_KEYS: frozenset[str] = frozenset([
     "ATR_REGIME_PERIOD",
     "VOL_PCT_WINDOW",
     "VOL_QUANTILE",
+    "VOV_WINDOW",
     "ST_ATR_PERIOD",
     "ST_MULT",
     "TQ_EMA_FAST",
@@ -94,14 +96,14 @@ SIGNAL_CACHE_PARAM_KEYS: frozenset[str] = frozenset([
     "PFK_MIN_F",
 ])
 
-_SIGNAL_CACHE_SCHEMA_VERSION: int = 12
+_SIGNAL_CACHE_SCHEMA_VERSION: int = 13
 
 _SPOT_OBJECTIVE_CAGR_WEIGHT: float = 0.0  # Abandoning additive CAGR
 _SPOT_OBJECTIVE_MIN_TRADES_HARD: float = 10.0 # Min trades per path to even consider
 _SPOT_OBJECTIVE_MIN_TRADES_SOFT: float = 25.0 # Target trades for statistical robustness
 _SPOT_OBJECTIVE_TAIL_RATIO_WEIGHT: float = 0.15 # Increased importance of asymmetry
 _SPOT_OBJECTIVE_LOG_TWR_WEIGHT: float = 1.0
-_SPOT_OBJECTIVE_PATH_CV_PENALTY: float = 0.75  # Kelly drag 균형점: G∞=μ-σ²/2 → σ직접 패널티화의 합리적 상한 λ=0.75 (λ=1.0은 고수익 고변동 경로 과억압)
+_SPOT_OBJECTIVE_PATH_CV_PENALTY: float = 1.25  # Anti-overfit path dispersion penalty (λ≈1.0 Kelly log-utility reference)
 
 _STRATEGY_LOGIC_HASH: Optional[str] = None
 _CACHE_CLEANUP_DONE: bool = False
@@ -222,6 +224,8 @@ def _cleanup_old_cache_impl(
             expired_bytes / (1024 ** 3),
         )
 
+    _cleanup_stale_signal_type_dirs(root)
+
     if max_bytes > 0 and total_bytes > max_bytes:
         trim_target = min(target_bytes if target_bytes > 0 else max_bytes, max_bytes)
         trim_target = max(0, trim_target)
@@ -246,6 +250,29 @@ def _cleanup_old_cache_impl(
             )
 
 
+def _cleanup_stale_signal_type_dirs(root: Path) -> None:
+    try:
+        from src.spot_strategy.signals import SIGNAL_REGISTRY
+        valid = {str(k).lower() for k in SIGNAL_REGISTRY.keys()}
+    except Exception:
+        return
+    for sym_dir in root.iterdir():
+        if not sym_dir.is_dir():
+            continue
+        for tf_dir in sym_dir.iterdir():
+            if not tf_dir.is_dir():
+                continue
+            for sig_dir in tf_dir.iterdir():
+                if not sig_dir.is_dir():
+                    continue
+                if sig_dir.name in valid:
+                    continue
+                try:
+                    shutil.rmtree(sig_dir, ignore_errors=True)
+                except OSError:
+                    pass
+
+
 def _touch_cache_file(path: Path) -> None:
     try:
         path.touch(exist_ok=True)
@@ -264,32 +291,17 @@ _numpy_cache_warning_emitted: bool = False
 _CACHE_PARAM_EXCLUDE: frozenset[str] = frozenset({"LEVERAGE", "USE_COMPOUNDING"})
 _CACHE_COMPONENTS: Tuple[str, ...] = ("signal", "regime", "sizing", "exit")
 _BASE_OHLCV_COLS: Tuple[str, ...] = ("open", "high", "low", "close", "volume")
-_BASE_KEEP_COLS: Tuple[str, ...] = ("timestamp", "datetime", "btc_close")
-_EXIT_PARAM_KEYS: frozenset[str] = frozenset(
-    {"BB_EXIT_PERIOD", "BB_EXIT_STD", "RSI_EXIT_PERIOD", "RSI_EXIT_THRESHOLD"}
+_RUNTIME_REQUIRED_SIGNAL_COLS: Tuple[str, ...] = (
+    "long_entry_signal",
+    "entry_upper",
+    "trend_direction",
+    "strength_filter",
+    "atr",
 )
-_COMPONENT_COLUMN_SPECS: Dict[str, Tuple[Tuple[str, str, str], ...]] = {
-    "signal": (
-        ("long_entry_signal", "float32", "float64"),
-        ("entry_upper", "float32", "float64"),
-        ("trend_direction", "int8", "int32"),
-        ("strength_filter", "int8", "int32"),
-        ("atr", "float32", "float64"),
-        ("slot_rank_score", "float32", "float64"),
-        ("kill_signal", "float32", "float64"),
-        ("fractal_high_flag", "float32", "float64"),
-    ),
-    "regime": (
-        ("regime_risk_mult", "float32", "float64"),
-        ("regime_label", "int8", "int32"),
-    ),
-    "sizing": (
-        ("garch_kelly_f", "float32", "float64"),
-    ),
-    "exit": (
-        ("bb_upper", "float32", "float64"),
-        ("trail_tighten_flag", "float32", "float64"),
-    ),
+_COMPONENT_HINTS: Dict[str, Tuple[str, ...]] = {
+    "regime": ("regime_",),
+    "sizing": ("garch_", "kelly", "position_size", "size_"),
+    "exit": ("bb_", "trail_", "exit_"),
 }
 
 _DISK_CACHE_READ_EXCEPTIONS: tuple[type[Exception], ...] = (
@@ -425,39 +437,106 @@ def _cache_key_to_params(cache_key: _SignalCacheKey) -> Dict[str, Any]:
 
 
 def _params_for_component(params: Dict[str, Any], component: str) -> Set[str]:
+    signal_keys: Set[str] = set()
+    regime_keys: Set[str] = set()
+    sizing_keys: Set[str] = set()
+
+    try:
+        from src.spot_strategy.signals import SIGNAL_REGISTRY
+        st = str(params.get("SIGNAL_TYPE", "ADX_BREAKOUT")).upper()
+        signal_keys.update({"SIGNAL_TYPE", "ATR_PERIOD"})
+        if st in SIGNAL_REGISTRY:
+            signal_keys.update(SIGNAL_REGISTRY[st].param_space.keys())
+    except Exception:
+        signal_keys.update({"SIGNAL_TYPE", "ATR_PERIOD"})
+
+    try:
+        from src.spot_strategy.regimes import REGIME_REGISTRY
+        rt = str(params.get("REGIME_TYPE", "MARKET_BREADTH")).upper()
+        regime_keys.add("REGIME_TYPE")
+        if rt in REGIME_REGISTRY:
+            regime_keys.update(REGIME_REGISTRY[rt].param_space.keys())
+    except Exception:
+        regime_keys.add("REGIME_TYPE")
+
+    try:
+        from src.spot_strategy.sizing import SIZING_REGISTRY
+        sm = str(params.get("SIZING_METHOD", "vol_target")).lower()
+        sizing_keys.add("SIZING_METHOD")
+        if sm in SIZING_REGISTRY:
+            sizing_keys.update(SIZING_REGISTRY[sm].param_space.keys())
+    except Exception:
+        sizing_keys.add("SIZING_METHOD")
+
     keys: Set[str] = set()
     if component == "signal":
-        keys.update({"SIGNAL_TYPE", "ATR_PERIOD"})
-        try:
-            from src.spot_strategy.signals import SIGNAL_REGISTRY
-            st = str(params.get("SIGNAL_TYPE", "ADX_BREAKOUT")).upper()
-            if st in SIGNAL_REGISTRY:
-                keys.update(SIGNAL_REGISTRY[st].param_space.keys())
-        except Exception:
-            pass
+        keys.update(signal_keys)
     elif component == "regime":
-        keys.add("REGIME_TYPE")
-        try:
-            from src.spot_strategy.regimes import REGIME_REGISTRY
-            rt = str(params.get("REGIME_TYPE", "MARKET_BREADTH")).upper()
-            if rt in REGIME_REGISTRY:
-                keys.update(REGIME_REGISTRY[rt].param_space.keys())
-        except Exception:
-            pass
+        keys.update(regime_keys)
     elif component == "sizing":
-        keys.add("SIZING_METHOD")
-        try:
-            from src.spot_strategy.sizing import SIZING_REGISTRY
-            sm = str(params.get("SIZING_METHOD", "vol_target")).lower()
-            if sm in SIZING_REGISTRY:
-                keys.update(SIZING_REGISTRY[sm].param_space.keys())
-        except Exception:
-            pass
+        keys.update(sizing_keys)
     elif component == "exit":
-        keys.update(_EXIT_PARAM_KEYS)
+        known = signal_keys | regime_keys | sizing_keys | _CACHE_PARAM_EXCLUDE
+        keys.update({k for k in params.keys() if k not in known})
     keys.add("TIMEFRAME")
     keys.difference_update(_CACHE_PARAM_EXCLUDE)
     return keys
+
+
+def _component_for_column(col: str) -> str:
+    c = str(col).lower()
+    for comp, hints in _COMPONENT_HINTS.items():
+        if any(h in c for h in hints):
+            return comp
+    return "signal"
+
+
+def _disk_dtype_for_array(arr: np.ndarray) -> str:
+    dt = arr.dtype
+    if np.issubdtype(dt, np.bool_):
+        return "int8"
+    if np.issubdtype(dt, np.integer):
+        return "int8" if dt.itemsize <= 2 else "int32"
+    if np.issubdtype(dt, np.floating):
+        return "float32"
+    return "float32"
+
+
+def _runtime_dtype_for_disk_dtype(disk_dtype: str) -> str:
+    if disk_dtype.startswith("int"):
+        return "int32"
+    return "float64"
+
+
+def _collect_component_specs(
+    full_df: pd.DataFrame,
+    target_df: pd.DataFrame,
+) -> Dict[str, List[Tuple[str, str, str]]]:
+    base_cols: Set[str] = set(target_df.columns)
+    dynamic_cols = [c for c in full_df.columns if c not in base_cols]
+    specs: Dict[str, List[Tuple[str, str, str]]] = {c: [] for c in _CACHE_COMPONENTS}
+    for col in dynamic_cols:
+        s = full_df[col]
+        if s.empty:
+            continue
+        if not (
+            np.issubdtype(s.dtype, np.number)
+            or np.issubdtype(s.dtype, np.bool_)
+        ):
+            continue
+        arr = s.to_numpy(copy=False)
+        disk_dtype = _disk_dtype_for_array(arr)
+        runtime_dtype = _runtime_dtype_for_disk_dtype(disk_dtype)
+        comp = _component_for_column(col)
+        specs[comp].append((str(col), disk_dtype, runtime_dtype))
+    for req in _RUNTIME_REQUIRED_SIGNAL_COLS:
+        if req in full_df.columns and not any(req == n for n, _, _ in specs["signal"]):
+            s = full_df[req]
+            arr = s.to_numpy(copy=False)
+            disk_dtype = _disk_dtype_for_array(arr)
+            runtime_dtype = _runtime_dtype_for_disk_dtype(disk_dtype)
+            specs["signal"].append((req, disk_dtype, runtime_dtype))
+    return specs
 
 
 def _build_component_cache_key(cache_key: _SignalCacheKey, params: Dict[str, Any], component: str) -> _SignalComponentCacheKey:
@@ -479,9 +558,13 @@ def _signal_component_cache_path(component_key: _SignalComponentCacheKey, root: 
     return folder / f"{digest}.joblib"
 
 
-def _extract_component_arrays(full_df: pd.DataFrame, component: str) -> Dict[str, np.ndarray]:
+def _extract_component_arrays(
+    full_df: pd.DataFrame,
+    component: str,
+    col_specs: List[Tuple[str, str, str]],
+) -> Dict[str, np.ndarray]:
     out: Dict[str, np.ndarray] = {}
-    for col, disk_dtype, _ in _COMPONENT_COLUMN_SPECS[component]:
+    for col, disk_dtype, _ in col_specs:
         if col not in full_df.columns:
             raise KeyError(f"Missing required component column: {col}")
         out[col] = full_df[col].to_numpy(dtype=np.dtype(disk_dtype), copy=True)
@@ -492,16 +575,22 @@ def _write_component_cache(
     cache_key: _SignalCacheKey,
     params: Dict[str, Any],
     full_df: pd.DataFrame,
+    target_df: pd.DataFrame,
     root: Path,
 ) -> None:
+    component_specs = _collect_component_specs(full_df, target_df)
     for component in _CACHE_COMPONENTS:
+        col_specs = component_specs.get(component, [])
+        if not col_specs:
+            continue
         comp_key = _build_component_cache_key(cache_key, params, component)
         cache_path = _signal_component_cache_path(comp_key, root)
         payload: Dict[str, Any] = {
             "schema": _SIGNAL_CACHE_SCHEMA_VERSION,
             "component": component,
             "n": int(len(full_df)),
-            "arrays": _extract_component_arrays(full_df, component),
+            "columns": col_specs,
+            "arrays": _extract_component_arrays(full_df, component, col_specs),
         }
         tmp_path = cache_path.with_suffix(f".tmp.{os.getpid()}")
         joblib.dump(payload, tmp_path, compress=3)
@@ -519,16 +608,20 @@ def _load_component_cache(
         comp_key = _build_component_cache_key(cache_key, params, component)
         cache_path = _signal_component_cache_path(comp_key, root)
         if not cache_path.exists():
-            return None
+            continue
         try:
             payload = joblib.load(cache_path)
             if not isinstance(payload, dict):
                 return None
             arrays = payload.get("arrays")
+            col_specs = payload.get("columns")
             n = int(payload.get("n", -1))
-            if not isinstance(arrays, dict) or n != expected_n:
+            if not isinstance(arrays, dict) or not isinstance(col_specs, list) or n != expected_n:
                 return None
-            for col, _, runtime_dtype in _COMPONENT_COLUMN_SPECS[component]:
+            for spec in col_specs:
+                if not isinstance(spec, (list, tuple)) or len(spec) != 3:
+                    return None
+                col, _, runtime_dtype = spec
                 arr = arrays.get(col)
                 if arr is None:
                     return None
@@ -536,6 +629,10 @@ def _load_component_cache(
             _touch_cache_file(cache_path)
         except _DISK_CACHE_READ_EXCEPTIONS:
             return None
+    if not all_cols:
+        return None
+    if not all(k in all_cols for k in _RUNTIME_REQUIRED_SIGNAL_COLS):
+        return None
     return all_cols
 
 
@@ -549,12 +646,11 @@ def _rebuild_full_df_from_components(
             full_df[col] = full_df[col].astype(np.float64)
     if "btc_close" not in full_df.columns and "close" in full_df.columns:
         full_df["btc_close"] = full_df["close"].astype(np.float64)
-    for component in _CACHE_COMPONENTS:
-        for col, _, runtime_dtype in _COMPONENT_COLUMN_SPECS[component]:
-            arr = component_cols.get(col)
-            if arr is None:
-                raise KeyError(f"Missing component column while rebuilding: {col}")
-            full_df[col] = np.asarray(arr, dtype=np.dtype(runtime_dtype))
+    for col, arr in component_cols.items():
+        full_df[str(col)] = arr
+    for req in _RUNTIME_REQUIRED_SIGNAL_COLS:
+        if req not in full_df.columns:
+            raise KeyError(f"Missing required cached runtime column: {req}")
     return full_df
 
 
@@ -620,7 +716,7 @@ def get_or_compute_signals(
     # 3. 디스크 캐시 저장
     if disk_cache_root is not None:
         try:
-            _write_component_cache(cache_key, params, full_df, disk_cache_root)
+            _write_component_cache(cache_key, params, full_df, target_df, disk_cache_root)
             _cleanup_old_cache(disk_cache_root, force=False)
         except Exception as e:
             _logger.warning("Failed to write split signal cache: %s", e)
@@ -1159,11 +1255,10 @@ def objective_spot(
         # Base Wealth Maximization (Geometric Mean in log space)
         raw_geometric_mean = mu_paths
         
-        # Soft Cap for Extreme IS Returns (Restored for Power Law extraction)
-        # Sweet Spot: 100% CAGR ≈ 0.693 log return. Encourages aggressive compounding.
-        cap_threshold = 0.693
+        # Soft Cap for Extreme IS Returns (~60% CAGR ≈ 0.470 log) to curb in-sample overfitting.
+        cap_threshold = 0.470
         if raw_geometric_mean > cap_threshold:
-            geometric_mean_log = cap_threshold + (raw_geometric_mean - cap_threshold) * 0.3
+            geometric_mean_log = cap_threshold + (raw_geometric_mean - cap_threshold) * 0.15
         else:
             geometric_mean_log = raw_geometric_mean
         
@@ -1176,16 +1271,19 @@ def objective_spot(
         
         mean_path_pf = float(np.mean(path_pfs)) if path_pfs else 1.0
         
-        # Breadth Penalty (Generalization without forced equality)
-        # Ensures underlying alpha works on at least 3~4 assets, allowing Power Law scaling.
-        positive_coins = np.sum(total_sym_pnl > 0.0)
-        breadth_penalty = max(0.0, 4.0 - float(positive_coins)) * 0.15
-        
+        # HHI concentration penalty on symbol PnL shares (discourages single-asset dominance).
+        total_abs_pnl = float(np.sum(np.abs(total_sym_pnl))) + 1e-9
+        sym_shares = total_sym_pnl / total_abs_pnl
+        hhi = float(np.sum(sym_shares**2))
+        n_sym = max(1, len(total_sym_pnl))
+        hhi_equal = 1.0 / float(n_sym)
+        hhi_penalty = max(0.0, hhi - 2.0 * hhi_equal) * 0.80
+
         soft_penalty = (
             max(0.0, _SPOT_OBJECTIVE_MIN_TRADES_SOFT - n_trades_mean) * (w_trade_pen * 10.0)
             + max(0.0, 2.0 - gate1_sqn) * (w_sqn_pen * 2.0)
             + max(0.0, 1.35 - mean_path_pf) * 0.1     # Recalibrated: 0.1 PF drop ≈ 1% log-drag
-            + breadth_penalty
+            + hhi_penalty
         )
 
         w_calmar = float(cfg.get("SPOT_OBJECTIVE_W_CALMAR", 0.08))
