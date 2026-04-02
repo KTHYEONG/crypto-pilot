@@ -9,6 +9,8 @@ from typing import List, Tuple
 
 import pandas as pd
 
+from config.opt_config import OPT_SPOT_CONFIG
+
 _logger: logging.Logger = logging.getLogger("opt_spot")
 
 # CV folds  : 4-tuple (train_start, train_end, test_start, test_end)
@@ -102,9 +104,14 @@ def build_cpcv_test_paths_with_fallback(
     n_bars: int,
     embargo: int = 0,
 ) -> Tuple[List[CPCVPath], int, int]:
-    """Prefer 6 blocks / K=2; fallback to 4 blocks / K=2 if empty."""
-    paths = build_cpcv_test_paths(n_bars, 6, 2, embargo=embargo)
+    """Prefer N/K from OPT_SPOT_CONFIG (default 8/3); fallback 6/2 then 4/2 if empty."""
+    n_primary = int(OPT_SPOT_CONFIG.get("CPCV_N_BLOCKS", 8))
+    k_primary = int(OPT_SPOT_CONFIG.get("CPCV_K_TEST", 3))
+    paths = build_cpcv_test_paths(n_bars, n_primary, k_primary, embargo=embargo)
     if paths:
-        return paths, 6, 2
+        return paths, n_primary, k_primary
+    paths_fb62 = build_cpcv_test_paths(n_bars, 6, 2, embargo=embargo)
+    if paths_fb62:
+        return paths_fb62, 6, 2
     paths_fb = build_cpcv_test_paths(n_bars, 4, 2, embargo=embargo)
     return paths_fb, 4, 2
