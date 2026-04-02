@@ -16,14 +16,14 @@ def test_cpcv_six_blocks_yields_fifteen_paths() -> None:
             assert 0 <= s < e <= n
 
 
-def test_cpcv_fallback_prefers_eight_three() -> None:
+def test_cpcv_fallback_prefers_config_primary_six_two() -> None:
     n = 500
     paths = build_cpcv_test_paths(n, 4, 2)
     assert len(paths) == 6
     paths_fb, nb, k = build_cpcv_test_paths_with_fallback(n)
-    assert nb == 8
-    assert k == 3
-    assert len(paths_fb) == 56
+    assert nb == 6
+    assert k == 2
+    assert len(paths_fb) == 15
 
 
 def test_cpcv_embargo_trims_block_starts() -> None:
