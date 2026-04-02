@@ -1141,7 +1141,17 @@ def main() -> None:
             pf_min=holdout_min_pf,
             calmar_min=holdout_min_calmar,
         )
-        is_all_passed = bool(veto_ok and trade_floor.passed and shared_cash_gate.passed)
+        sqn_v = float(best_trial.user_attrs.get("gate1_sqn", 0.0))
+        psort_v = float(best_trial.user_attrs.get("gate1_path_sortino", 0.0))
+        tr_v = float(best_trial.user_attrs.get("cpcv_path_tail_ratio", 0.0))
+
+        tier1_passed = bool(
+            veto_ok and 
+            sqn_v >= gate1_sqn_min and 
+            psort_v >= gate1_psort_min and 
+            tr_v >= gate1_tr_min
+        )
+        is_all_passed = bool(tier1_passed and trade_floor.passed and shared_cash_gate.passed)
         if not is_all_passed:
             _logger.info("❌ Gate check failed. Diagnostic details:")
             _logger.info("\n%s", veto.summary)
@@ -1183,10 +1193,13 @@ def main() -> None:
         alpha_decay_pct = float(shared_cash_gate.advisory.get("alpha_decay_pct", -100.0))
         hard_passed = (
             sum(1 for v in veto.details.values() if v)
+            + (1 if sqn_v >= gate1_sqn_min else 0)
+            + (1 if psort_v >= gate1_psort_min else 0)
+            + (1 if tr_v >= gate1_tr_min else 0)
             + (1 if trade_floor.passed else 0)
             + sum(1 for v in shared_cash_gate.details.values() if v)
         )
-        hard_total = len(veto.details) + 1 + len(shared_cash_gate.details)
+        hard_total = len(veto.details) + 3 + 1 + len(shared_cash_gate.details)
 
         report = run_final_deployment_report(
             FinalDeploymentReportInput(
@@ -1235,8 +1248,8 @@ def main() -> None:
 
         best_score_final = float(best_trial.value) if best_trial.value is not None else -100.0
 
-        mean_log = float(best_trial.user_attrs.get("mean_log_terminal_wealth", 0.0))
-        should_save = bool(mean_log > 0.0 and is_all_passed)
+        growth_score = float(best_trial.user_attrs.get("growth_score", 0.0))
+        should_save = bool(growth_score > 0.0 and is_all_passed)
         # File name is required by downstream loaders; overwrite risk is limited to multi-mode.
         clean_sym = str(target).replace("/", "").replace("-", "") if not isinstance(target, tuple) else ""
         json_filename = f"best_params_{tf_eval}.json" if args.mode == "multi" else f"best_params_{clean_sym}_{tf_eval}.json"
