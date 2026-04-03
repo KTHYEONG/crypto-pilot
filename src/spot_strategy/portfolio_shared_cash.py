@@ -101,7 +101,8 @@ def run_shared_cash_multi_symbol(
     if cap_coin is not None:
         max_position_pct = min(max_position_pct, float(cap_coin))
     long_atr_mult = float(params.get("LONG_ATR_MULT", 3.0))
-    long_trail_mult = float(params.get("LONG_TRAIL_MULT", 3.0))
+    long_trail_mult = float(params.get("TRAIL_ATR_MULT", params.get("LONG_TRAIL_MULT", 3.0)))
+    use_trailing_stop = bool(params.get("USE_TRAILING_STOP", True))
     long_tp_mult = float(params.get("LONG_TP_MULT", 5.0))
     long_scale_atr_mult = float(params.get("LONG_SCALE_ATR_MULT", 0.0))
     scale_out_pct = float(params.get("SCALE_OUT_PCT", 0.0))
@@ -163,6 +164,7 @@ def run_shared_cash_multi_symbol(
                 long_trail_mult=long_trail_mult,
                 long_trail_lock_mult=long_trail_lock_mult,
                 tp_lock_mult=tp_lock_mult,
+                use_trailing_stop=use_trailing_stop,
                 long_tp_mult=long_tp_mult,
                 long_scale_atr_mult=long_scale_atr_mult,
                 scale_out_pct=scale_out_pct,
@@ -378,6 +380,7 @@ def _process_in_position_bar(
     long_trail_mult: float,
     long_trail_lock_mult: float,
     tp_lock_mult: float,
+    use_trailing_stop: bool,
     long_tp_mult: float,
     long_scale_atr_mult: float,
     scale_out_pct: float,
@@ -516,7 +519,7 @@ def _process_in_position_bar(
             slot.in_position = False
             return slot, balance, trades_delta, pnl_out
 
-    if slot.in_position and not exit_triggered:
+    if use_trailing_stop and slot.in_position and not exit_triggered:
         ei2 = int(slot.entry_idx)
         pos_atr = float(atr[ei2]) if ei2 < n else trail_atr
         if pos_atr <= 0.0 or np.isnan(pos_atr):

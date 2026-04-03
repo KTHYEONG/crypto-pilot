@@ -101,6 +101,7 @@ def _run_shared_cash_packed_numba(
     long_trail_lock_mult: float,
     long_tp_mult: float,
     tp_lock_mult: float,
+    use_trailing_stop: int,
     long_scale_atr_mult: float,
     scale_out_pct: float,
     fractal_scale_out_ratio: float,
@@ -282,7 +283,7 @@ def _run_shared_cash_packed_numba(
                         slot_sym[sj] = -1
                         continue
 
-                if slot_in[sj] and (not exit_triggered):
+                if use_trailing_stop != 0 and slot_in[sj] and (not exit_triggered):
                     ei2 = slot_entry_idx[sj]
                     pos_atr = atr[si, ei2] if ei2 < n else trail_atr
                     if pos_atr <= 0.0 or np.isnan(pos_atr):
@@ -666,7 +667,8 @@ def run_packed_from_symbol_arrays(
     risk_per_trade = float(params.get("RISK_PER_TRADE", 0.015))
     max_position_pct_by_sym = _max_position_pct_by_symbol(symbols_ordered, params)
     long_atr_mult = float(params.get("LONG_ATR_MULT", 3.0))
-    long_trail_mult = float(params.get("LONG_TRAIL_MULT", 3.0))
+    long_trail_mult = float(params.get("TRAIL_ATR_MULT", params.get("LONG_TRAIL_MULT", 3.0)))
+    use_trailing_stop = 1 if bool(params.get("USE_TRAILING_STOP", True)) else 0
     long_trail_lock_mult = float(params.get("LONG_TRAIL_LOCK_MULT", 1.5))
     long_tp_mult = float(params.get("LONG_TP_MULT", 5.0))
     tp_lock_mult = float(params.get("TP_LOCK_ATR_MULT", 3.0))
@@ -706,6 +708,7 @@ def run_packed_from_symbol_arrays(
         long_trail_lock_mult=long_trail_lock_mult,
         long_tp_mult=long_tp_mult,
         tp_lock_mult=tp_lock_mult,
+        use_trailing_stop=use_trailing_stop,
         long_scale_atr_mult=long_scale_atr_mult,
         scale_out_pct=scale_out_pct,
         fractal_scale_out_ratio=fractal_scale_out_ratio,
