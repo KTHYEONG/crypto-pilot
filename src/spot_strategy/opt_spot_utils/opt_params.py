@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from typing import Any, Dict, Mapping
+from typing import Any, Dict, Mapping, Protocol, Sequence
 
 import optuna
 
-from config.opt_config import ENGINE_PARAM_SPACE, SPOT_SHARED_PARAM_SPACE
+from config.opt_config import ENGINE_PARAM_SPACE, SPOT_EXCLUDED_SIZING_METHODS, SPOT_SHARED_PARAM_SPACE
 
 
 def build_full_discovery_space() -> Dict[str, Any]:
@@ -13,6 +13,9 @@ def build_full_discovery_space() -> Dict[str, Any]:
     from src.spot_strategy.signals import SIGNAL_REGISTRY
     from src.spot_strategy.sizing import SIZING_REGISTRY
 
+    sizing_choices = tuple(
+        sorted(k for k in SIZING_REGISTRY.keys() if k not in SPOT_EXCLUDED_SIZING_METHODS)
+    )
     out: Dict[str, Any] = {
         "SIGNAL_TYPE": {
             "type": "categorical",
@@ -24,7 +27,7 @@ def build_full_discovery_space() -> Dict[str, Any]:
         },
         "SIZING_METHOD": {
             "type": "categorical",
-            "choices": tuple(sorted(SIZING_REGISTRY.keys())),
+            "choices": sizing_choices,
         },
     }
     for name in sorted(SIGNAL_REGISTRY.keys()):
@@ -35,7 +38,7 @@ def build_full_discovery_space() -> Dict[str, Any]:
         inst = REGIME_REGISTRY[name]
         for k, spec in inst.param_space.items():
             out.setdefault(k, dict(spec))
-    for name in sorted(SIZING_REGISTRY.keys()):
+    for name in sizing_choices:
         inst = SIZING_REGISTRY[name]
         for k, spec in inst.param_space.items():
             out.setdefault(k, dict(spec))
@@ -50,6 +53,9 @@ def build_combined_param_space(signal: str, regime: str, sizing: str) -> Dict[st
     from src.spot_strategy.regimes import REGIME_REGISTRY
     from src.spot_strategy.signals import SIGNAL_REGISTRY
     from src.spot_strategy.sizing import SIZING_REGISTRY
+
+    if sizing in SPOT_EXCLUDED_SIZING_METHODS:
+        raise ValueError(f"SIZING_METHOD {sizing!r} is excluded from spot optimization.")
 
     space: Dict[str, Any] = {}
     space["SIGNAL_TYPE"] = {"type": "categorical", "choices": (signal,)}
@@ -71,14 +77,52 @@ def build_combined_param_space(signal: str, regime: str, sizing: str) -> Dict[st
     return space
 
 
+class _Stage1ComboLike(Protocol):
+    signal: str
+    regime: str
+    sizing: str
+
+
+def build_multi_combo_param_space(tops: Sequence[_Stage1ComboLike]) -> Dict[str, Any]:
+    """Union param space for multiple Stage1 combos — allows TPE to choose signal/regime/sizing."""
+    from src.spot_strategy.regimes import REGIME_REGISTRY
+    from src.spot_strategy.signals import SIGNAL_REGISTRY
+    from src.spot_strategy.sizing import SIZING_REGISTRY
+
+    if not tops:
+        raise ValueError("build_multi_combo_param_space requires at least one Stage1 combo.")
+
+    all_sigs = list(dict.fromkeys(t.signal for t in tops))
+    all_regs = list(dict.fromkeys(t.regime for t in tops))
+    all_sizs = list(dict.fromkeys(t.sizing for t in tops))
+
+    space: Dict[str, Any] = {
+        "SIGNAL_TYPE": {"type": "categorical", "choices": tuple(all_sigs)},
+        "REGIME_TYPE": {"type": "categorical", "choices": tuple(all_regs)},
+        "SIZING_METHOD": {"type": "categorical", "choices": tuple(all_sizs)},
+    }
+    for sig in all_sigs:
+        for k, v in SIGNAL_REGISTRY[sig].param_space.items():
+            space.setdefault(k, dict(v))
+    for reg in all_regs:
+        for k, v in REGIME_REGISTRY[reg].param_space.items():
+            space.setdefault(k, dict(v))
+    for siz in all_sizs:
+        for k, v in SIZING_REGISTRY[siz].param_space.items():
+            space.setdefault(k, dict(v))
+    for k, v in ENGINE_PARAM_SPACE.items():
+        space[k] = dict(v)
+    for k, v in SPOT_SHARED_PARAM_SPACE.items():
+        space.setdefault(k, dict(v))
+    return space
+
+
 _CORE_ORDER: tuple[str, ...] = (
     "SIZING_METHOD",
     "RISK_PER_TRADE",
     "MAX_EXPOSURE",
     "KELLY_FRACTION",
     "MAX_CAP_PER_COIN",
-    "MAX_CAP_LIQUID_MAJOR",
-    "MAX_CAP_TRENDING_ALT",
     "ATR_PERIOD",
 )
 
@@ -108,7 +152,7 @@ def _iter_param_names_define_by_run(space: Mapping[str, Any], signal_type: str) 
     for rname in sorted(REGIME_REGISTRY.keys()):
         for k in sorted(REGIME_REGISTRY[rname].param_space.keys()):
             _add(k)
-    for zname in sorted(SIZING_REGISTRY.keys()):
+    for zname in sorted(k for k in SIZING_REGISTRY.keys() if k not in SPOT_EXCLUDED_SIZING_METHODS):
         for k in sorted(SIZING_REGISTRY[zname].param_space.keys()):
             _add(k)
     for k in sorted(ENGINE_PARAM_SPACE.keys()):
