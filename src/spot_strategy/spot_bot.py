@@ -594,7 +594,7 @@ class SpotBot:
                     self.state_manager.update_symbol_state(symbol, {'highest_price': highest})
                 
                 pos_atr = float(state.get('entry_atr', atr))
-                long_trail_mult = float(params.get('LONG_TRAIL_MULT', 5.0))
+                long_trail_mult = float(params.get('TRAIL_ATR_MULT', params.get('LONG_TRAIL_MULT', 5.0)))
                 long_tp_mult = float(params.get('LONG_TP_MULT', 10.0))
                 
                 stop_price = float(state.get('active_stop_price', entry_price * 0.9))

@@ -101,9 +101,9 @@ _SIGNAL_CACHE_SCHEMA_VERSION: int = 13
 _SPOT_OBJECTIVE_CAGR_WEIGHT: float = 0.0  # Abandoning additive CAGR
 _SPOT_OBJECTIVE_MIN_TRADES_HARD: float = 10.0 # Min trades per path to even consider
 _SPOT_OBJECTIVE_MIN_TRADES_SOFT: float = 25.0 # Target trades for statistical robustness
-_SPOT_OBJECTIVE_TAIL_RATIO_WEIGHT: float = 0.28  # Asymmetric payoff preference (Tail Ratio gate)
+_SPOT_OBJECTIVE_TAIL_RATIO_WEIGHT: float = 0.20  # Asymmetric payoff preference (Tail Ratio gate)
 _SPOT_OBJECTIVE_LOG_TWR_WEIGHT: float = 1.0
-_SPOT_OBJECTIVE_PATH_CV_PENALTY: float = 0.90  # Path CV penalty (λ≈1.0 Kelly with estimation slack)
+_SPOT_OBJECTIVE_PATH_CV_PENALTY: float = 0.75  # Path CV penalty (Generalized Kelly λ≈0.75)
 
 _STRATEGY_LOGIC_HASH: Optional[str] = None
 _CACHE_CLEANUP_DONE: bool = False
@@ -1019,6 +1019,7 @@ def objective_spot(
         path_cagrs: List[float] = []
 
         total_sym_trades = np.zeros(len(symbols), dtype=np.int32)
+        total_sym_wins = np.zeros(len(symbols), dtype=np.int32)
         total_sym_pnl = np.zeros(len(symbols), dtype=np.float64)
 
         for path_idx, path in enumerate(cpcv_paths):
@@ -1078,6 +1079,8 @@ def objective_spot(
                 if hasattr(result, "per_symbol_trades"):
                     total_sym_trades += result.per_symbol_trades
                     total_sym_pnl += result.per_symbol_pnl
+                if hasattr(result, "per_symbol_wins"):
+                    total_sym_wins += result.per_symbol_wins
                 if eq.size == 0:
                     twr = 1.0
                 else:
@@ -1258,7 +1261,7 @@ def objective_spot(
         # Soft cap for extreme IS returns (~73% CAGR ≈ 0.550 log); continuation slope limits IS inflation.
         cap_threshold = 0.550
         if raw_geometric_mean > cap_threshold:
-            geometric_mean_log = cap_threshold + (raw_geometric_mean - cap_threshold) * 0.20
+            geometric_mean_log = cap_threshold + (raw_geometric_mean - cap_threshold) * 0.25
         else:
             geometric_mean_log = raw_geometric_mean
         
@@ -1277,13 +1280,26 @@ def objective_spot(
         hhi = float(np.sum(sym_shares**2))
         n_sym = max(1, len(total_sym_pnl))
         hhi_equal = 1.0 / float(n_sym)
-        hhi_penalty = max(0.0, hhi - 2.5 * hhi_equal) * 0.70
+        hhi_penalty = max(0.0, hhi - 4.0 * hhi_equal) * 0.35
+
+        min_sym_wr = float(cfg.get("SPOT_OBJECTIVE_MIN_SYMBOL_WIN_RATE", 0.45))
+        w_sym_edge = float(cfg.get("SPOT_OBJECTIVE_W_SYMBOL_EDGE", 0.08))
+        min_trades_sym_edge = int(cfg.get("SPOT_OBJECTIVE_MIN_TRADES_PER_SYMBOL_EDGE", 5))
+        per_symbol_edge_pen = 0.0
+        for si in range(len(symbols)):
+            nt_sym = int(total_sym_trades[si])
+            if nt_sym < min_trades_sym_edge:
+                continue
+            wr_sym = float(total_sym_wins[si]) / float(nt_sym)
+            if wr_sym < min_sym_wr:
+                per_symbol_edge_pen += float(min_sym_wr - wr_sym) * w_sym_edge
 
         soft_penalty = (
             max(0.0, _SPOT_OBJECTIVE_MIN_TRADES_SOFT - n_trades_mean) * (w_trade_pen * 10.0)
             + max(0.0, 2.0 - gate1_sqn) * (w_sqn_pen * 2.0)
             + max(0.0, 1.35 - mean_path_pf) * 0.1     # Recalibrated: 0.1 PF drop ≈ 1% log-drag
             + hhi_penalty
+            + per_symbol_edge_pen
         )
 
         w_calmar = float(cfg.get("SPOT_OBJECTIVE_W_CALMAR", 0.08))
