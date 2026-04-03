@@ -15,7 +15,7 @@ from optuna.storages import InMemoryStorage
 from optuna.samplers import TPESampler
 from optuna.trial import TrialState
 
-from config.opt_config import OPT_SPOT_CONFIG
+from config.opt_config import OPT_SPOT_CONFIG, SPOT_EXCLUDED_SIZING_METHODS
 from src.spot_strategy.opt_spot_utils.cv_utils import build_cpcv_test_paths_with_fallback
 from src.spot_strategy.opt_spot_utils.evaluator import EMBARGO_BARS, objective_spot
 from src.spot_strategy.opt_spot_utils.opt_params import build_combined_param_space
@@ -222,7 +222,8 @@ def _warmup_numba(
 
     sig = sorted(SIGNAL_REGISTRY.keys())[0]
     reg = sorted(REGIME_REGISTRY.keys())[0]
-    siz = sorted(SIZING_REGISTRY.keys())[0]
+    siz_choices = sorted(k for k in SIZING_REGISTRY.keys() if k not in SPOT_EXCLUDED_SIZING_METHODS)
+    siz = siz_choices[0] if siz_choices else sorted(SIZING_REGISTRY.keys())[0]
     space = build_combined_param_space(sig, reg, siz)
     try:
         study = optuna.create_study(
@@ -293,11 +294,12 @@ def run_combination_screening(
     n_workers_base = n_workers_cfg if n_workers_cfg > 0 else max(1, (os.cpu_count() or 2) - 1)
     n_workers = max(1, min(n_workers_base, worker_cap))
 
+    sizing_for_screen = sorted(k for k in SIZING_REGISTRY.keys() if k not in SPOT_EXCLUDED_SIZING_METHODS)
     combinations = list(
         itertools.product(
             sorted(SIGNAL_REGISTRY.keys()),
             sorted(REGIME_REGISTRY.keys()),
-            sorted(SIZING_REGISTRY.keys()),
+            sizing_for_screen,
         )
     )
 
