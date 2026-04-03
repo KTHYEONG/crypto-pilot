@@ -83,7 +83,10 @@ class BacktestEngineFastSpot:
         atr = df['daily_atr'].values
         
         long_atr_mult = float(self.strategy.params.get('LONG_ATR_MULT', 3.0))
-        long_trail_mult = float(self.strategy.params.get('LONG_TRAIL_MULT', 3.0))
+        long_trail_mult = float(
+            self.strategy.params.get('TRAIL_ATR_MULT', self.strategy.params.get('LONG_TRAIL_MULT', 3.0))
+        )
+        use_trailing_stop = 1 if bool(self.strategy.params.get('USE_TRAILING_STOP', True)) else 0
         long_tp_mult = float(self.strategy.params.get('LONG_TP_MULT', 5.0))
         long_trail_lock_mult = float(self.strategy.params.get('LONG_TRAIL_LOCK_MULT', 1.5))
         tp_lock_mult = float(self.strategy.params.get('TP_LOCK_ATR_MULT', 3.0))
@@ -138,6 +141,7 @@ class BacktestEngineFastSpot:
             self.risk_per_trade, timestamps,
             long_atr_mult, long_trail_mult, long_tp_mult,
             long_trail_lock_mult, tp_lock_mult,
+            use_trailing_stop,
             warmup_bars, self._execution_start_idx,
             use_compounding, max_capital_usage,
             kill_cd, delta_gate,
@@ -272,6 +276,7 @@ def backtest_loop_numba_spot(
     risk_per_trade, timestamps,
     long_atr_mult, long_trail_mult, long_tp_mult,
     long_trail_lock_mult, tp_lock_mult,
+    use_trailing_stop,
     warmup_bars, execution_start_idx,
     use_compounding, max_capital_usage,
     kill_cooldown_bars, delta_gate,
@@ -400,7 +405,7 @@ def backtest_loop_numba_spot(
                 exit_price = bb_upper[i] * (1.0 - slippage_rate)
                 exit_triggered = True
 
-            if not exit_triggered:
+            if use_trailing_stop != 0 and (not exit_triggered):
                 # Parabolic Tightening: If price moved enough from entry relative to ATR, use tighter trail
                 pos_atr = atr[entry_idx]
                 dist = highest - entry_price
