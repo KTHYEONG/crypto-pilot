@@ -82,10 +82,13 @@ OPT_SPOT_CONFIG: Dict[str, Any] = {
     "SPOT_COMBO_PRUNE_THRESHOLD": -0.5,
     "SPOT_COMBO_N_WORKERS": 6,
     "SPOT_COMBO_MIN_SCREEN_SCORE": 0.0,
-    "SPOT_STAGE1_TRIALS_PER_SIGNAL": 100,  # 11 signals × 100 = 1100 trials(22%): 80→100 상향으로 순위 안정성 확보, 150은 Stage2 예산 과잠식
-    "SPOT_STAGE1_TOP_K": 2,
+    "SPOT_STAGE1_TRIALS_PER_SIGNAL": 150,  # Stage1 ranking stability (tmp.md: 100→150)
+    "SPOT_OBJECTIVE_MIN_SYMBOL_WIN_RATE": 0.45,
+    "SPOT_OBJECTIVE_W_SYMBOL_EDGE": 0.08,
+    "SPOT_OBJECTIVE_MIN_TRADES_PER_SYMBOL_EDGE": 5,
+    "SPOT_STAGE1_TOP_K": 3,
     "SPOT_STAGE1_MIN_P10_GMGR": -0.5,
-    "SPOT_OBJECTIVE_W_CALMAR": 0.14,
+    "SPOT_OBJECTIVE_W_CALMAR": 0.10,
     "SPOT_SYMBOL_CLUSTER": {
         "KRW-BTC": "anchor", "KRW-ETH": "anchor",
         "KRW-SOL": "liquid_major", "KRW-XRP": "liquid_major", "KRW-DOGE": "liquid_major",
@@ -96,13 +99,17 @@ OPT_SPOT_CONFIG: Dict[str, Any] = {
 TARGET_TIMEFRAMES: List[str] = ["4h"]
 WARMUP_PERIODS: Dict[str, int] = {"4h": 540}
 
+# Spot optimization: exclude institutional-only sizing for small KRW books (see tmp.md).
+SPOT_EXCLUDED_SIZING_METHODS: frozenset[str] = frozenset({"liquidity_adjusted"})
+
 # Shared-cash concurrency slippage (Reference ADV anchor; ~300B KRW / 4H notional proxy).
 SLIPPAGE_GAMMA_BASE: float = 0.03
 SLIPPAGE_REFERENCE_ADV_KRW: float = 3e10
 
 ENGINE_PARAM_SPACE: Dict[str, Dict[str, Any]] = {
     "LONG_ATR_MULT": {"type": "float", "low": 1.5, "high": 4.0, "step": 0.25},
-    "LONG_TRAIL_MULT": {"type": "float", "low": 2.5, "high": 6.0, "step": 0.5},
+    "TRAIL_ATR_MULT": {"type": "float", "low": 2.5, "high": 6.0, "step": 0.5},
+    "USE_TRAILING_STOP": {"type": "categorical", "choices": (True, False)},
     "LONG_SCALE_ATR_MULT": {"type": "float", "low": 1.0, "high": 4.0, "step": 0.5},
     "SCALE_OUT_PCT": {"type": "float", "low": 0.25, "high": 0.60, "step": 0.05},
     "TIME_STOP_BARS": {"type": "int", "low": 6, "high": 48, "step": 6},
@@ -118,8 +125,6 @@ SPOT_SHARED_PARAM_SPACE: Dict[str, Dict[str, Any]] = {
     "ATR_PERIOD": {"type": "int", "low": 10, "high": 20, "step": 2},
     "KELLY_FRACTION": {"type": "float", "low": 0.2, "high": 0.8, "step": 0.1},
     "MAX_CAP_PER_COIN": {"type": "float", "low": 0.15, "high": 0.25, "step": 0.05},
-    "MAX_CAP_LIQUID_MAJOR": {"type": "float", "low": 0.10, "high": 0.18, "step": 0.02},
-    "MAX_CAP_TRENDING_ALT": {"type": "float", "low": 0.12, "high": 0.22, "step": 0.02},
     "MAX_PARTICIPATION_RATE": {"type": "float", "low": 0.005, "high": 0.05, "step": 0.005},
 }
 

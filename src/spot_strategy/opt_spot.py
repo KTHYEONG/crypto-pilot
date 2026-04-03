@@ -834,7 +834,7 @@ def main() -> None:
         _logger.info("Applied --signal-type narrowed space: %s", str(args.signal_type).upper())
     elif not args.skip_stage1 and args.mode == "multi":
         from src.spot_strategy.opt_spot_utils.combination_screener import run_combination_screening
-        from src.spot_strategy.opt_spot_utils.opt_params import build_combined_param_space
+        from src.spot_strategy.opt_spot_utils.opt_params import build_multi_combo_param_space
 
         tops = run_combination_screening(
             data_maps={s: data_maps[s] for s in valid_symbols},
@@ -857,7 +857,7 @@ def main() -> None:
             ],
         )
         narrowed_space_effective = _merge_narrowed_space_dicts(
-            build_combined_param_space(tops[0].signal, tops[0].regime, tops[0].sizing),
+            build_multi_combo_param_space(tops),
             narrowed_space_effective,
         )
     elif not args.skip_stage1:
@@ -987,10 +987,12 @@ def main() -> None:
         if not completed:
             continue
         ranked = sorted(completed, key=lambda tr: float(tr.value), reverse=True)[:top_k]
-        best_trial = max(
-            ranked,
-            key=lambda tr: float(tr.user_attrs.get("min_path_terminal_wealth_ratio", 0.0)),
-        )
+        viable = [
+            tr
+            for tr in ranked
+            if float(tr.user_attrs.get("min_path_terminal_wealth_ratio", 0.0)) >= 1.0
+        ]
+        best_trial = viable[0] if viable else ranked[0]
 
         params = best_trial.params.copy()
         params["TIMEFRAME"] = tf_eval
@@ -1190,15 +1192,48 @@ def main() -> None:
                 )
             )
 
+        portfolio_mdd_pct = float(port_ho["mdd_pct"])
+        if symbol_gate_rows:
+            max_sym_mdd = max(float(r.max_mdd_pct) for r in symbol_gate_rows)
+            if max_sym_mdd > 0.0 and portfolio_mdd_pct > 3.0 * max_sym_mdd:
+                _logger.warning(
+                    "  ⚠ 동조화 리스크: 포트폴리오 MDD(%.1f%%) = 심볼 최대 MDD(%.1f%%)의 %.1f배",
+                    portfolio_mdd_pct,
+                    max_sym_mdd,
+                    portfolio_mdd_pct / max_sym_mdd,
+                )
+
+        friction_noise_cagr_pct = 1.0
+        for row_fr in symbol_gate_rows:
+            if (
+                0.0 < float(row_fr.net_cagr_pct) < friction_noise_cagr_pct
+                and float(row_fr.win_rate_pct) > 50.0
+            ):
+                _logger.warning(
+                    "  ⚠ %s: 승률(%.0f%%)에 비해 CAGR(%.1f%%) 낮음 → 실전 마찰 초과 리스크",
+                    row_fr.symbol,
+                    row_fr.win_rate_pct,
+                    row_fr.net_cagr_pct,
+                )
+
         oos_cagrs = [float(r.net_cagr_pct) for r in symbol_gate_rows]
-        pos_sum = float(sum(max(0.0, x) for x in oos_cagrs))
-        if pos_sum > 1e-9 and oos_cagrs:
-            max_share = float(max(oos_cagrs)) / pos_sum
-            loso_warning = (
-                f"경고 (단일 심볼 OOS CAGR 비중 {max_share:.0%} >= 40%)"
-                if max_share >= 0.4
-                else f"안전 (특정 심볼 의존도 {max_share:.0%} < 40%)"
+        oos_cagrs_sorted = sorted(oos_cagrs, reverse=True)
+        pos_cagrs_sorted = [x for x in oos_cagrs_sorted if x > 0.0]
+        pos_sum = float(sum(pos_cagrs_sorted)) + 1e-9
+
+        if pos_cagrs_sorted:
+            max_share = pos_cagrs_sorted[0] / pos_sum
+            top2_share = (
+                sum(pos_cagrs_sorted[:2]) / pos_sum
+                if len(pos_cagrs_sorted) >= 2
+                else max_share
             )
+            if max_share >= 0.4:
+                loso_warning = f"경고 (단일 심볼 OOS CAGR 비중 {max_share:.0%} >= 40%)"
+            elif top2_share >= 0.65:
+                loso_warning = f"주의 (상위 2개 심볼 집중도 {top2_share:.0%} >= 65%)"
+            else:
+                loso_warning = f"안전 (최대 {max_share:.0%} / 상위2 {top2_share:.0%})"
         else:
             loso_warning = "N/A (OOS CAGR 비중 산출 불가)"
 
