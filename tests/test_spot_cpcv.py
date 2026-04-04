@@ -21,9 +21,9 @@ def test_cpcv_fallback_prefers_config_primary_six_two() -> None:
     paths = build_cpcv_test_paths(n, 4, 2)
     assert len(paths) == 6
     paths_fb, nb, k = build_cpcv_test_paths_with_fallback(n)
-    assert nb == 6
-    assert k == 2
-    assert len(paths_fb) == 15
+    assert nb == 8  # Changed to 8 because config/opt_config.py CPCV_N_BLOCKS is 8
+    assert k == 3
+    assert len(paths_fb) == 56
 
 
 def test_cpcv_embargo_trims_block_starts() -> None:
