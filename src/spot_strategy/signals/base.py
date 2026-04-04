@@ -11,6 +11,7 @@ import pandas as pd
 class SignalOutput:
     entry_signal: np.ndarray
     kill_signal: np.ndarray
+    # Higher rank_score => higher priority among concurrent entry candidates (shared-cash).
     rank_score: np.ndarray
 
 
