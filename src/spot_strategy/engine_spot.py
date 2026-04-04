@@ -429,9 +429,8 @@ def backtest_loop_numba_spot(
                 pos_atr = atr[entry_idx]
                 dist = highest - entry_price
                 rst_i = regime_state[i] if i < len(regime_state) else 2.0
-                current_trail_mult = long_trail_mult
-                if rst_i > 0.5 and rst_i < 1.5:
-                    current_trail_mult = current_trail_mult * 0.88
+                trail_regime_factor = max(0.5, 1.0 - (2.0 - rst_i) * 0.14)
+                current_trail_mult = long_trail_mult * trail_regime_factor
                 if i < len(trail_tighten_flag) and trail_tighten_flag[i] > 0.5:
                     current_trail_mult = long_trail_lock_mult
                 elif dist > (pos_atr * tp_lock_mult):
@@ -442,9 +441,8 @@ def backtest_loop_numba_spot(
                     stop_price = new_stop
 
             rst_ts = regime_state[i] if i < len(regime_state) else 2.0
-            eff_ts = time_stop_bars
-            if rst_ts > 0.5 and rst_ts < 1.5:
-                eff_ts = max(1, int(time_stop_bars * 0.65))
+            ts_regime_factor = max(0.50, 1.0 - (2.0 - rst_ts) * 0.35)
+            eff_ts = max(1, int(time_stop_bars * ts_regime_factor)) if time_stop_bars > 0 else 0
             if (
                 (not exit_triggered)
                 and time_stop_bars > 0

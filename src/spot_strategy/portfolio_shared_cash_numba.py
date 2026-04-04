@@ -296,9 +296,8 @@ def _run_shared_cash_packed_numba(
                         pos_atr = trail_atr
                     dist = slot_highest[sj] - slot_entry_price[sj]
                     rst_tr = regime_state[si, i]
-                    cur_tm = long_trail_mult
-                    if rst_tr > 0.5 and rst_tr < 1.5:
-                        cur_tm = cur_tm * 0.88
+                    trail_regime_factor = max(0.5, 1.0 - (2.0 - rst_tr) * 0.14)
+                    cur_tm = long_trail_mult * trail_regime_factor
                     if trail_tighten[si, i] > 0.5:
                         cur_tm = long_trail_lock_mult
                     elif dist > pos_atr * tp_lock_mult:
@@ -309,13 +308,8 @@ def _run_shared_cash_packed_numba(
 
                 if slot_in[sj] and (not exit_triggered):
                     rst_ts = regime_state[si, i]
-                    adaptive_stop = time_stop_bars
-                    if rst_ts > 0.5 and rst_ts < 1.5:
-                        adaptive_stop = max(1, int(time_stop_bars * 0.65))
-                    elif regime_risk[si, i] < 0.4:
-                        adaptive_stop = time_stop_bars // 2
-                        if adaptive_stop < 1:
-                            adaptive_stop = 1
+                    ts_regime_factor = max(0.50, 1.0 - (2.0 - rst_ts) * 0.35)
+                    adaptive_stop = max(1, int(time_stop_bars * ts_regime_factor)) if time_stop_bars > 0 else 0
 
                     if time_stop_bars > 0 and (i - slot_entry_idx[sj]) >= adaptive_stop:
                         ex_px = c_open * (1.0 - slippage_rate)
