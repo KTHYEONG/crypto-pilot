@@ -1463,10 +1463,10 @@ def objective_spot(
         trade_count_pen = max(0.0, _SPOT_OBJECTIVE_MIN_TRADES_SOFT - n_trades_mean) * 0.05
 
         _TAIL_RATIO_TARGET = 1.2
-        w_tail_obj = float(cfg.get("SPOT_OBJECTIVE_W_TAIL_RATIO", 0.30))
+        w_tail_obj = float(cfg.get("SPOT_OBJECTIVE_W_TAIL_RATIO", 0.60))
         tail_shortfall = max(0.0, _TAIL_RATIO_TARGET - mean_tail_gate)
         tail_bonus = math.log(max(mean_tail_gate, 0.5)) * w_tail_obj
-        tail_penalty = (tail_shortfall ** 1.5) * 5.0
+        tail_penalty = tail_shortfall * 0.80
         tail_ratio_reward = tail_bonus - tail_penalty
         
         # Metrics for Optuna attributes and transparency
