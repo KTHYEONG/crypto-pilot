@@ -170,3 +170,26 @@ def compute_dsr_from_path_values(path_values: Sequence[float], n_independent_tri
 
 def compute_dsr_from_path_sortinos(path_values: Sequence[float], n_independent_trials: int) -> float:
     return compute_dsr_from_path_values(path_values, n_independent_trials)
+
+
+def compute_pbo_from_cpcv_paths(
+    is_path_scores: Sequence[float],
+    oos_path_scores: Sequence[float],
+) -> tuple[float, float]:
+    """
+    PBO proxy from CPCV path IS vs OOS score ranks.
+    Returns (pbo_fraction, spearman_rho). Uses Spearman via Pearson on ranks; PBO ~ 0.5 * (1 - rho).
+    """
+    is_arr = np.asarray(list(is_path_scores), dtype=np.float64)
+    oos_arr = np.asarray(list(oos_path_scores), dtype=np.float64)
+    if is_arr.size != oos_arr.size or is_arr.size < 2:
+        return (0.5, 0.0)
+    ri = pd.Series(is_arr).rank(method="average").to_numpy(dtype=np.float64)
+    ro = pd.Series(oos_arr).rank(method="average").to_numpy(dtype=np.float64)
+    if np.std(ri) < 1e-12 or np.std(ro) < 1e-12:
+        return (0.5, 0.0)
+    rho = float(np.corrcoef(ri, ro)[0, 1])
+    if not np.isfinite(rho):
+        rho = 0.0
+    pbo = float(np.clip(0.5 * (1.0 - rho), 0.0, 1.0))
+    return (pbo, rho)

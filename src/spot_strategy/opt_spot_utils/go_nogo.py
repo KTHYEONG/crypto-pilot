@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Sequence
+from statistics import median
+from typing import Any, Dict, List, Sequence, Tuple
 
 
 @dataclass
@@ -75,6 +77,116 @@ class FinalDeploymentReportInput:
     hard_passed: int = 0
     hard_total: int = 0
     final_decision_go: bool = False
+    pbo: float = float("nan")
+    spearman_rho: float = float("nan")
+    pbo_gate_passed: bool = True
+    pbo_hard_gate: bool = False
+    multi_window_passed: bool = True
+    multi_window_summary: str = ""
+    regime_diagnostic_block: str = ""
+
+
+def run_pbo_gate(
+    *,
+    pbo: float,
+    pbo_max: float,
+    hard: bool,
+) -> GoNoGoResult:
+    """CPCV IS vs OOS rank PBO proxy; advisory unless hard mode."""
+    ok = float(pbo) <= float(pbo_max)
+    passed = bool(ok or not hard)
+    lines = [
+        "[Gate 1.5 — CPCV PBO (train vs test path score consistency)]",
+        f"  - PBO <= {pbo_max:.2f} | {'PASS' if ok else 'FAIL'} | obs={float(pbo):.4f} | mode={'HARD' if hard else 'ADVISORY'}",
+        "-" * 55,
+        f"  FINAL: {'GO' if passed else 'NO-GO'}",
+    ]
+    return GoNoGoResult(
+        passed=passed,
+        details={"pbo": ok},
+        summary="\n".join(lines),
+        checks=[
+            CheckRecord(
+                "pbo",
+                "PBO vs max",
+                float(pbo),
+                float(pbo_max),
+                ok,
+            )
+        ],
+    )
+
+
+def run_multi_window_oos_gate(
+    *,
+    window_results: List[Dict[str, Any]],
+    min_positive_windows: int,
+    min_median_cagr_pct: float,
+    max_worst_mdd_pct: float,
+) -> GoNoGoResult:
+    """Anchored multi-window OOS consistency (hard gate when enabled from config)."""
+    if not window_results:
+        return GoNoGoResult(
+            passed=False,
+            details={"windows": False},
+            summary="[Gate 3.5 — Multi-Window OOS]\n  FAIL: no window results",
+            checks=[],
+        )
+    cagrs = [float(w.get("cagr_pct", -100.0)) for w in window_results]
+    pos = int(sum(1 for c in cagrs if c > 0.0))
+    med_c = float(median(cagrs)) if cagrs else -100.0
+    worst_mdd = float(max(abs(float(w.get("mdd_pct", 0.0))) for w in window_results))
+    ok_pos = pos >= int(min_positive_windows)
+    ok_med = med_c >= float(min_median_cagr_pct)
+    ok_mdd = worst_mdd <= float(max_worst_mdd_pct)
+    passed = bool(ok_pos and ok_med and ok_mdd)
+    lines = [
+        "[Gate 3.5 — Multi-Window OOS Consistency]",
+        f"  - Positive windows >= {min_positive_windows} | {'PASS' if ok_pos else 'FAIL'} | obs={pos}/{len(window_results)}",
+        f"  - Median window CAGR >= {min_median_cagr_pct}% | {'PASS' if ok_med else 'FAIL'} | obs={med_c:.2f}%",
+        f"  - Worst-window |MDD| <= {max_worst_mdd_pct}% | {'PASS' if ok_mdd else 'FAIL'} | obs={worst_mdd:.2f}%",
+        "-" * 55,
+        f"  FINAL: {'GO' if passed else 'NO-GO'}",
+    ]
+    return GoNoGoResult(
+        passed=passed,
+        details={"positive_windows": ok_pos, "median_cagr": ok_med, "worst_mdd": ok_mdd},
+        summary="\n".join(lines),
+        checks=[],
+    )
+
+
+def format_regime_oos_diagnostic_block(
+    regime_metrics: Dict[str, Dict[str, float]],
+    stress_mdd_warn_pct: float,
+) -> str:
+    """Advisory TIER 4 text block for deployment log."""
+    lines: List[str] = [
+        "=" * 71,
+        " [TIER 4. REGIME ROBUSTNESS DIAGNOSTIC (advisory)]",
+        "=" * 71,
+    ]
+    order = ("risk_on", "cautious", "stress")
+    labels = {
+        "risk_on": "Risk-On bars (mult > 0.5)",
+        "cautious": "Cautious bars (0 < mult <= 0.5)",
+        "stress": "Stress bars (mult <= 0)",
+    }
+    for key in order:
+        m = regime_metrics.get(key, {})
+        n = int(m.get("bar_count", 0.0))
+        rp = float(m.get("return_pct", 0.0))
+        mdd = float(m.get("mdd_pct", 0.0))
+        lines.append(
+            f"  - {labels[key]}: N={n} | return: {rp:.2f}% | MDD: {mdd:.2f}%"
+        )
+    stress_mdd = float(regime_metrics.get("stress", {}).get("mdd_pct", 0.0))
+    if stress_mdd > float(stress_mdd_warn_pct):
+        lines.append(
+            f"  ⚠ WARNING: Stress-regime MDD ({stress_mdd:.2f}%) exceeds advisory threshold ({stress_mdd_warn_pct}%)"
+        )
+    lines.append("=" * 71)
+    return "\n".join(lines)
 
 
 def run_go_nogo_check(
@@ -247,7 +359,8 @@ def run_holdout_portfolio_shared_cash(
         f"  - Profit Factor >= {pf_min} | {'PASS' if c_pf else 'FAIL'} | obs={portfolio_profit_factor:.4f}",
         f"  - Calmar Ratio >= {calmar_min} | {'PASS' if c_calmar else 'FAIL'} | obs={portfolio_calmar_ratio:.4f}",
         f"  - HWM recovery <= {hw_recovery_days_max}d | {'PASS' if c_hw else 'FAIL'} | obs={oos_dd_days:.1f}d",
-        f"  - Alpha decay >= {alpha_decay_floor_pct}% | {'PASS' if c_alpha else 'FAIL'} | obs={alpha_decay_pct:.1f}% (IS={is_cagr_pct:.1f}%)",
+        f"  - Alpha decay >= {alpha_decay_floor_pct}% | {'PASS' if c_alpha else 'FAIL'} | "
+        f"obs={alpha_decay_pct:.1f}% (ref CAGR={is_cagr_pct:.1f}% for decay ratio)",
         "-" * 55,
         f"  FINAL: {'GO' if passed else 'NO-GO'}",
     ]
@@ -338,6 +451,52 @@ def _fmt_pass_info(ok: bool) -> str:
     return "[PASS]" if ok else "[FAIL]"
 
 
+# PART 3 markdown-style columns: must match separator dash counts exactly.
+_PART3_COL_WIDTHS: Tuple[int, int, int, int, int] = (11, 18, 9, 10, 8)
+
+
+def _part3_symbol_table_lines(rows: Sequence[SymbolGateRow]) -> List[str]:
+    """Fixed-width symbol table: header, rule, and one row per symbol (aligned columns)."""
+    w = _PART3_COL_WIDTHS
+    header = (
+        "  | "
+        + f"{'Symbol':<{w[0]}} | "
+        + f"{'PnL contrib ann%':^{w[1]}} | "
+        + f"{'Max MDD':^{w[2]}} | "
+        + f"{'Win Rate':^{w[3]}} | "
+        + f"{'Trades':^{w[4]}} |"
+    )
+    rule = (
+        "  | "
+        + "-" * w[0]
+        + " | "
+        + "-" * w[1]
+        + " | "
+        + "-" * w[2]
+        + " | "
+        + "-" * w[3]
+        + " | "
+        + "-" * w[4]
+        + " |"
+    )
+    out: List[str] = [header, rule]
+    for row in rows:
+        sym = row.symbol if len(row.symbol) <= w[0] else row.symbol[: w[0] - 2] + ".."
+        pnl = f"{row.net_cagr_pct:+.1f}%"
+        mdd = f"{row.max_mdd_pct:.1f}%"
+        wr = f"{row.win_rate_pct:.1f}%"
+        tr = str(int(row.trade_count))
+        out.append(
+            "  | "
+            + f"{sym:<{w[0]}} | "
+            + f"{pnl:^{w[1]}} | "
+            + f"{mdd:^{w[2]}} | "
+            + f"{wr:^{w[3]}} | "
+            + f"{tr:^{w[4]}} |"
+        )
+    return out
+
+
 def run_final_deployment_report(ctx: FinalDeploymentReportInput) -> str:
     """Build the Spot Strategy deployment report: TIER 1 (IS), TIER 2 (OOS Risk), TIER 3 (OOS Profit)."""
     # TIER 1 Gates: Statistical Discovery Rigor
@@ -364,6 +523,9 @@ def run_final_deployment_report(ctx: FinalDeploymentReportInput) -> str:
     final_capital = ctx.initial_capital_krw * ctx.moic
     profit_pct = (ctx.moic - 1.0) * 100.0
 
+    pbo_disp = f"{ctx.pbo:.4f}" if math.isfinite(ctx.pbo) else "N/A"
+    rho_disp = f"{ctx.spearman_rho:.4f}" if math.isfinite(ctx.spearman_rho) else "N/A"
+
     lines: List[str] = [
         "=" * 71,
         " [TIER 1. CPCV STATISTICAL EDGE RIGOR]",
@@ -376,6 +538,10 @@ def run_final_deployment_report(ctx: FinalDeploymentReportInput) -> str:
         f"  - P10 GMGR (Worst Path Grow)  : {ctx.gate1_p10_gmgr:.6f}   {_fmt_pass_info(gmgr_ok)} (Target: > 0)",
         f"  - CPCV Mean Path Return       : {ctx.cpcv_mean_path_return_pct:.1f}%",
         f"  - CPCV Worst Segment MDD      : {ctx.cpcv_worst_segment_mdd_pct:.1f}%",
+        "",
+        f"  - PBO (IS vs OOS path ranks)  : {pbo_disp}   {_fmt_pass_info(ctx.pbo_gate_passed)} "
+        f"({'HARD' if ctx.pbo_hard_gate else 'ADVISORY'})",
+        f"  - Spearman rho (IS vs OOS)    : {rho_disp}",
         "",
         "=" * 71,
         " [TIER 2. OOS ABSOLUTE RISK HARD GATES: 4H SPOT]",
@@ -394,29 +560,35 @@ def run_final_deployment_report(ctx: FinalDeploymentReportInput) -> str:
         f"  - Terminal Wealth Ratio       : {ctx.terminal_wealth_ratio:.3f}   {_fmt_pass_info(tw_ok)} (Min: {ctx.tw_target})",
         f"  - OOS Win Rate (INFO)         : {ctx.oos_win_rate_pct:.1f}%",
         "",
-        "=" * 71,
-        " [PART 3. SYMBOL MICROSTRUCTURE & FINAL VERDICT]",
-        "=" * 71,
-        "▶ Portfolio Composition (Shared Cash)",
-        f"  - Capital: ₩{ctx.initial_capital_krw:,.0f} -> ₩{final_capital:,.0f} ({profit_pct:+.1f}%)",
-        f"  - Total Trades: {ctx.oos_total_trades} | Concentration: {ctx.loso_warning}",
-        "",
-        "  | Symbol    | Net CAGR | Max MDD | Win Rate | Trades |",
-        "  |-----------|----------|---------|----------|--------|",
     ]
-    for row in ctx.symbol_rows:
-        lines.append(
-            f"  | {row.symbol:<9} | {row.net_cagr_pct:>+6.1f}% | {row.max_mdd_pct:>6.1f}% | "
-            f"{row.win_rate_pct:>7.1f}% | {row.trade_count:>6} |"
-        )
+    if ctx.multi_window_summary:
+        lines.append(ctx.multi_window_summary)
+        lines.append("")
+    lines.extend(
+        [
+            "=" * 71,
+            " [PART 3. SYMBOL MICROSTRUCTURE & FINAL VERDICT]",
+            "=" * 71,
+            "▶ Portfolio Composition (Shared Cash)",
+            f"  - Capital: ₩{ctx.initial_capital_krw:,.0f} -> ₩{final_capital:,.0f} ({profit_pct:+.1f}%)",
+            f"  - Total Trades: {ctx.oos_total_trades} | Concentration: {ctx.loso_warning}",
+            "",
+        ]
+    )
+    lines.extend(_part3_symbol_table_lines(ctx.symbol_rows))
 
     lines.extend(
         [
+            "  ※ Symbol PnL contrib ann%: shared-cash trade PnL vs initial, annualized (not standalone engine CAGR).",
             "",
             f"▶ Final Verdict : {'[GO - DEPLOYABLE]' if ctx.final_decision_go else '[NO-GO - REFINEMENT NEEDED]'}",
             f"  Compliance Score: {ctx.hard_passed}/{ctx.hard_total} Critical Gates Passed",
         ]
     )
+
+    if ctx.regime_diagnostic_block:
+        lines.append("")
+        lines.append(ctx.regime_diagnostic_block)
 
     if not ctx.final_decision_go:
         lines.append("\n  ※ 주요 결격 사유 (Critical Failures):")
