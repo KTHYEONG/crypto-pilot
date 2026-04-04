@@ -6,6 +6,7 @@ from src.spot_strategy.sizing import inv_vol_parity  # noqa: F401
 from src.spot_strategy.sizing import liquidity_adjusted  # noqa: F401
 from src.spot_strategy.sizing import profit_factor_kelly  # noqa: F401
 from src.spot_strategy.sizing import rolling_kelly  # noqa: F401
+from src.spot_strategy.sizing import confidence_vol_target  # noqa: F401
 from src.spot_strategy.sizing import vol_target  # noqa: F401
 from src.spot_strategy.sizing.base import ISizing
 

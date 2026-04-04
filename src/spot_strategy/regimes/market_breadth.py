@@ -1,7 +1,9 @@
 """
 Market-breadth regime with hysteresis (Schmitt-style) and BTC circuit breaker.
 
-Returns per-bar labels in {0, 1}: 0 = risk-off, 1 = risk-on. Causal only.
+Returns per-bar strength in [0, 1]: risk-off / BTC lock => 0; risk-on strength scales
+with smoothed breadth signal so regime_state can be OFF / SOFT / FULL (strategies_spot).
+Causal only.
 """
 from __future__ import annotations
 
@@ -30,7 +32,7 @@ def compute_market_breadth_regime(
     ref = np.asarray(close_map[sym_list[0]], dtype=np.float64).ravel()
     n = int(ref.size)
     if n < 3:
-        return np.zeros(n, dtype=np.int32)
+        return np.zeros(n, dtype=np.float64)
 
     w_sig = max(2, int(w_signal))
     k_acc = max(1, int(k_accel))
@@ -75,12 +77,12 @@ def compute_market_breadth_regime(
     btc_ret_k = (btc / safe_prev) - 1.0
     btc_lock = (btc_ret_k <= float(btc_drop_threshold)).astype(np.bool_)
 
-    out = np.zeros(n, dtype=np.int32)
+    out = np.zeros(n, dtype=np.float64)
     state = 0
     for t in range(n):
         if bool(btc_lock[t]):
             state = 0
-            out[t] = state
+            out[t] = 0.0
             continue
         s = float(signal_t[t])
         e = float(eps_t[t])
@@ -88,7 +90,8 @@ def compute_market_breadth_regime(
             state = 1
         elif s <= floor - e:
             state = 0
-        out[t] = state
+        strength = float(state) * float(np.clip(s, 0.0, 1.0))
+        out[t] = strength
     return out
 
 
