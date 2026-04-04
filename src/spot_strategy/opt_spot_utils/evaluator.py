@@ -1299,7 +1299,7 @@ def objective_spot(
                 # If path is mostly Non-Risk-On, heavily penalize net-losses & high drawdowns
                 path_worst_mdd_seg = float(np.max(seg_mdds)) if seg_mdds else 0.0
                 if run_geo < 0.0:
-                    cautious_penalty += abs(run_geo) * 5.0
+                    cautious_penalty += abs(run_geo) * 0.5
                 if path_worst_mdd_seg > 6.0:
                     cautious_penalty += (path_worst_mdd_seg - 6.0) * 0.25
             path_cautious_penalties.append(cautious_penalty)
@@ -1466,7 +1466,7 @@ def objective_spot(
         w_tail_obj = float(cfg.get("SPOT_OBJECTIVE_W_TAIL_RATIO", 0.30))
         tail_shortfall = max(0.0, _TAIL_RATIO_TARGET - mean_tail_gate)
         tail_bonus = math.log(max(mean_tail_gate, 0.5)) * w_tail_obj
-        tail_penalty = tail_shortfall * 0.40
+        tail_penalty = (tail_shortfall ** 1.5) * 5.0
         tail_ratio_reward = tail_bonus - tail_penalty
         
         # Metrics for Optuna attributes and transparency
