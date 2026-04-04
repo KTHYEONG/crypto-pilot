@@ -30,7 +30,8 @@ class TrendQualityRegime:
         symbols = sorted(s for s in data_maps if tf in data_maps[s] and data_maps[s][tf] is not None)
         if not symbols:
             raise ValueError("trend_quality regime: empty data_maps")
-        df: pd.DataFrame = data_maps[symbols[0]][tf]
+        ref = "KRW-BTC" if "KRW-BTC" in data_maps and data_maps["KRW-BTC"].get(tf) is not None else symbols[0]
+        df: pd.DataFrame = data_maps[ref][tf]
         close = df["close"].to_numpy(dtype=np.float64)
         high = df["high"].to_numpy(dtype=np.float64)
         low = df["low"].to_numpy(dtype=np.float64)
