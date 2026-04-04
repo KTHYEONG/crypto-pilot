@@ -3,11 +3,12 @@ from __future__ import annotations
 
 import itertools
 import logging
+import math
 import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Sequence
+from typing import Any, Dict, List, Sequence, Tuple
 
 import numpy as np
 import optuna
@@ -23,6 +24,15 @@ from src.spot_strategy.opt_spot_utils.opt_params import build_combined_param_spa
 _logger = logging.getLogger("combination_screener")
 
 
+def _p25_path_consistency_score(metrics: Dict[str, float]) -> float:
+    """Stage-1 growth rank: p25 log-TWR scaled by inverse path CV (tmp.md: p25 / (1 + path_cv))."""
+    p25 = float(metrics.get("cpcv_p25_log_tw", -1e9))
+    if p25 <= -1e8:
+        return p25
+    cv = float(metrics.get("cpcv_path_cv", 10.0))
+    return float(p25 * (1.0 / (1.0 + max(0.0, cv))))
+
+
 @dataclass
 class CombinationScore:
     signal: str
@@ -32,6 +42,70 @@ class CombinationScore:
     mean_signal_rate: float
     disqualified: bool = False
     reason: str = ""
+
+
+def _combo_search_dim(space: Dict[str, Any]) -> int:
+    dim = 0
+    for k, spec in space.items():
+        if k in ("SIGNAL_TYPE", "REGIME_TYPE", "SIZING_METHOD"):
+            continue
+        if not isinstance(spec, dict) or "type" not in spec:
+            continue
+        dim += 1
+    return dim
+
+
+def _auto_combo_trials(
+    viable_count: int,
+    median_dim: float,
+    cfg: Dict[str, Any],
+) -> tuple[int, int]:
+    """
+    Practical auto-sizing for Stage-1 quick CPCV.
+    Keep current config as floors, then scale mildly by viable combo count and
+    effective combo dimension so runtime stays bounded as the search space grows.
+    """
+    v = max(1, int(viable_count))
+    d = max(1.0, float(median_dim))
+    p1_floor = int(cfg.get("SPOT_COMBO_QUICK_TRIALS_PHASE1", 10))
+    p2_floor = int(cfg.get("SPOT_COMBO_QUICK_TRIALS", 28))
+    p1_cap = max(p1_floor, int(cfg.get("SPOT_COMBO_QUICK_TRIALS_PHASE1_MAX", 18)))
+    p2_cap = max(p2_floor, int(cfg.get("SPOT_COMBO_QUICK_TRIALS_MAX", 40)))
+
+    phase1 = int(round(7.0 + 0.75 * math.log2(v + 1.0) + 0.20 * math.sqrt(d)))
+    phase2 = int(round(19.0 + 1.25 * math.log2(v + 1.0) + 0.45 * math.sqrt(d)))
+
+    phase1 = int(np.clip(phase1, p1_floor, p1_cap))
+    phase2 = int(np.clip(phase2, p2_floor, p2_cap))
+    if phase2 < phase1 + 12:
+        phase2 = min(p2_cap, phase1 + 12)
+    return phase1, phase2
+
+
+def _ambiguity_phase2_boost(
+    phase1_scores: Sequence[float],
+    top_k: int,
+    cfg: Dict[str, Any],
+) -> int:
+    """
+    If the prune boundary is crowded, add a small Phase-2 budget bump.
+    This preserves fast default behavior while spending a bit more only when
+    combo ranking is genuinely ambiguous.
+    """
+    arr = np.asarray([float(x) for x in phase1_scores if np.isfinite(float(x))], dtype=np.float64)
+    if arr.size < max(6, top_k + 3):
+        return 0
+    arr.sort()
+    std = float(np.std(arr))
+    if std <= 1e-12:
+        return int(cfg.get("SPOT_COMBO_PHASE2_AMBIGUITY_BOOST", 4))
+    edge_idx = max(1, min(arr.size - 1, arr.size - top_k))
+    gap = float(arr[edge_idx] - arr[edge_idx - 1])
+    ratio = abs(gap) / std
+    thr = float(cfg.get("SPOT_COMBO_AMBIGUITY_STD_RATIO", 0.15))
+    if ratio < thr:
+        return int(cfg.get("SPOT_COMBO_PHASE2_AMBIGUITY_BOOST", 4))
+    return 0
 
 
 def _mid_value_from_spec(spec: Dict[str, Any]) -> int | float:
@@ -104,6 +178,32 @@ def measure_signal_rate(
     return float(np.mean(out.entry_signal.astype(np.float64)))
 
 
+def _metrics_from_best_study(study: optuna.Study) -> Dict[str, float]:
+    completed = [t for t in study.trials if t.state == TrialState.COMPLETE and t.value is not None]
+    if not completed:
+        return {
+            "objective_final": -1e9,
+            "cpcv_mean_path_return_pct": -1e9,
+            "cpcv_p25_log_tw": -1e9,
+            "cpcv_path_cv": 10.0,
+            "psr_paths": -1.0,
+            "dsr_paths": -1.0,
+            "p10_gmgr": -1e9,
+        }
+    completed.sort(key=lambda tr: float(tr.value or -1e9), reverse=True)
+    best = completed[0]
+    ua = best.user_attrs
+    return {
+        "objective_final": float(best.value or -1e9),
+        "cpcv_mean_path_return_pct": float(ua.get("cpcv_mean_path_return_pct", -1e9)),
+        "cpcv_p25_log_tw": float(ua.get("cpcv_p25_log_tw", -1e9)),
+        "cpcv_path_cv": float(ua.get("cpcv_path_cv", 10.0)),
+        "psr_paths": float(ua.get("psr_paths", 0.0)),
+        "dsr_paths": float(ua.get("dsr_paths", -1.0)),
+        "p10_gmgr": float(ua.get("p10_gmgr", -1e9)),
+    }
+
+
 def run_quick_cpcv_for_combo(
     combo: tuple[str, str, str],
     *,
@@ -164,6 +264,52 @@ def run_quick_cpcv_for_combo(
     return mean_score
 
 
+def run_quick_cpcv_for_combo_metrics(
+    combo: tuple[str, str, str],
+    *,
+    data_maps: Dict[str, Dict[str, Any]],
+    symbols: List[str],
+    tf: str,
+    n_trials: int,
+    project_root: str,
+    signal_cache_dir: str,
+) -> Dict[str, float]:
+    sig, reg, siz = combo
+    space = build_combined_param_space(sig, reg, siz)
+    ref_sym = symbols[0]
+    is_off = int(data_maps[ref_sym].get(f"is_start_idx_{tf}", 0))
+    ref_df = data_maps[ref_sym][tf]
+    prebuilt = None
+    if ref_df is not None and not ref_df.empty:
+        ref_len = len(ref_df) - is_off
+        if ref_len >= 200:
+            prebuilt = build_cpcv_test_paths_with_fallback(
+                ref_len, embargo=int(EMBARGO_BARS.get(tf, 0))
+            )
+    study = optuna.create_study(
+        direction="maximize",
+        sampler=TPESampler(n_startup_trials=min(15, max(5, n_trials // 3)), seed=42),
+        storage=InMemoryStorage(),
+    )
+    cache_root = signal_cache_dir if signal_cache_dir else None
+
+    def _obj(trial: optuna.Trial) -> float:
+        return objective_spot(
+            trial,
+            data_maps,
+            list(symbols),
+            tf,
+            space=space,
+            mode="multi",
+            project_root=project_root,
+            prebuilt_cpcv_bundle=prebuilt,
+            signal_disk_cache_root=Path(cache_root) if cache_root else None,
+        )
+
+    study.optimize(_obj, n_trials=max(5, int(n_trials)), n_jobs=1, show_progress_bar=False)
+    return _metrics_from_best_study(study)
+
+
 def _phase1_worker(
     combo: tuple[str, str, str],
     *,
@@ -195,9 +341,9 @@ def _phase2_worker(
     n_trials: int,
     project_root: str,
     signal_cache_dir: str,
-) -> float:
+) -> Dict[str, float]:
     """Full-trial CPCV screen for surviving combinations."""
-    return run_quick_cpcv_for_combo(
+    return run_quick_cpcv_for_combo_metrics(
         combo,
         data_maps=data_maps,
         symbols=symbols,
@@ -284,10 +430,11 @@ def run_combination_screening(
     from tqdm import tqdm
 
     min_rate = float(OPT_SPOT_CONFIG.get("SPOT_COMBO_MIN_SIGNAL_RATE", 0.005))
-    n_quick = int(OPT_SPOT_CONFIG.get("SPOT_COMBO_QUICK_TRIALS", 40))
-    n_phase1 = int(OPT_SPOT_CONFIG.get("SPOT_COMBO_QUICK_TRIALS_PHASE1", 10))
+    n_quick_floor = int(OPT_SPOT_CONFIG.get("SPOT_COMBO_QUICK_TRIALS", 40))
+    n_phase1_floor = int(OPT_SPOT_CONFIG.get("SPOT_COMBO_QUICK_TRIALS_PHASE1", 10))
     prune_thr = float(OPT_SPOT_CONFIG.get("SPOT_COMBO_PRUNE_THRESHOLD", -0.5))
     top_k = int(OPT_SPOT_CONFIG.get("SPOT_COMBO_TOP_K", 3))
+    bucket_each = int(OPT_SPOT_CONFIG.get("SPOT_BUCKET_TOP_EACH", 2))
     n_workers_cfg = int(OPT_SPOT_CONFIG.get("SPOT_COMBO_N_WORKERS", 0))
     worker_cap = int(os.getenv("OPT_SPOT_MAX_WORKERS", "3"))
     worker_cap = max(1, worker_cap)
@@ -305,6 +452,7 @@ def run_combination_screening(
 
     scores: List[CombinationScore] = []
     viable: List[tuple[str, str, str]] = []
+    viable_dims: List[int] = []
 
     for sig, reg, siz in combinations:
         combo_space = build_combined_param_space(sig, reg, siz)
@@ -340,6 +488,7 @@ def run_combination_screening(
             continue
 
         viable.append((sig, reg, siz))
+        viable_dims.append(_combo_search_dim(combo_space))
 
     _logger.info(
         "Phase 0 complete: %d viable / %d total combinations",
@@ -350,6 +499,18 @@ def run_combination_screening(
     if not viable:
         _logger.error("Stage1: all combinations disqualified after Phase 0.")
         return []
+
+    median_dim = float(np.median(np.asarray(viable_dims, dtype=np.float64))) if viable_dims else 1.0
+    n_phase1, n_quick = _auto_combo_trials(len(viable), median_dim, OPT_SPOT_CONFIG)
+    _logger.info(
+        "Stage1 auto trials: phase1=%d (floor=%d), phase2=%d (floor=%d), viable=%d, median_dim=%.1f",
+        n_phase1,
+        n_phase1_floor,
+        n_quick,
+        n_quick_floor,
+        len(viable),
+        median_dim,
+    )
 
     _logger.info("Warming up Numba JIT before process pool...")
     _warmup_numba(data_maps, symbols, tf, project_root=project_root, signal_cache_dir=signal_cache_dir)
@@ -406,6 +567,18 @@ def run_combination_screening(
         _logger.warning("Phase 1: all pruned. Relaxing threshold, keeping top-5.")
         surviving = [c for _, c in sorted(zip(phase1_results, viable), reverse=True)[:5]]
 
+    phase2_boost = _ambiguity_phase2_boost(phase1_results, top_k=max(1, top_k), cfg=OPT_SPOT_CONFIG)
+    if phase2_boost > 0:
+        n_quick = min(
+            int(OPT_SPOT_CONFIG.get("SPOT_COMBO_QUICK_TRIALS_MAX", 40)),
+            n_quick + phase2_boost,
+        )
+        _logger.info(
+            "Phase 1 boundary ambiguous: boosting phase2 trials by +%d -> %d",
+            phase2_boost,
+            n_quick,
+        )
+
     phase2_fn = partial(
         _phase2_worker,
         data_maps=data_maps,
@@ -432,8 +605,37 @@ def run_combination_screening(
             )
         )
 
-    for combo, score in zip(surviving, phase2_results):
+    scored_rows: List[Tuple[tuple[str, str, str], Dict[str, float]]] = list(
+        zip(surviving, phase2_results)
+    )
+
+    def _robust_key(m: Dict[str, float]) -> float:
+        return float(m["psr_paths"]) + float(max(0.0, m["dsr_paths"]))
+
+    by_growth = sorted(
+        scored_rows,
+        key=lambda x: _p25_path_consistency_score(x[1]),
+        reverse=True,
+    )[: max(1, bucket_each)]
+    by_robust = sorted(scored_rows, key=lambda x: _robust_key(x[1]), reverse=True)[
+        : max(1, bucket_each)
+    ]
+    by_balance = sorted(scored_rows, key=lambda x: x[1]["objective_final"], reverse=True)[
+        : max(1, bucket_each)
+    ]
+
+    seen: set[tuple[str, str, str]] = set()
+    bucket_order: List[tuple[str, str, str]] = []
+    for bucket in (by_growth, by_robust, by_balance):
+        for combo, _m in bucket:
+            if combo not in seen:
+                seen.add(combo)
+                bucket_order.append(combo)
+
+    for combo in bucket_order:
         sig, reg, siz = combo
+        metrics = next(m for c, m in scored_rows if c == combo)
+        score = _p25_path_consistency_score(metrics)
         probe = _build_probe_params(sig, reg, siz, tf)
         sig_rate = measure_signal_rate(data_maps, symbols, tf, sig, mid_params=probe)
         scores.append(
@@ -456,13 +658,13 @@ def run_combination_screening(
         "=" * 71,
         " [STAGE 1. STRATEGY COMBINATION SCREENING REPORT]",
         "=" * 71,
-        "▶ Qualified Combinations (Sorted by CPCV Return)",
-        "  | Signal         | Regime         | Sizing Method  | Rate  | Return |",
-        "  |----------------|----------------|----------------|-------|--------|",
+        "▶ Qualified Combinations (growth sort: p25_log_tw / (1 + path_cv))",
+        "  | Signal         | Regime         | Sizing Method  | Rate  | w_p25 |",
+        "  |----------------|----------------|----------------|-------|-------|",
     ]
 
     for s in qualified[:10]:
-        ret_str = f"{s.p10_gmgr:>6.2f}%" if s.p10_gmgr > -1e6 else "  FAIL "
+        ret_str = f"{s.p10_gmgr:>8.4f}" if s.p10_gmgr > -1e6 else "  FAIL "
         lines.append(
             f"  | {s.signal:<14} | {s.regime:<14} | {s.sizing:<14} | "
             f"{s.mean_signal_rate:>5.1%} | {ret_str} |"
@@ -502,7 +704,8 @@ def run_combination_screening(
     min_screen = float(OPT_SPOT_CONFIG.get("SPOT_COMBO_MIN_SCREEN_SCORE", 0.0))
 
     positive = [s for s in qualified if s.p10_gmgr > min_screen]
+    out_cap = max(1, top_k, len(bucket_order))
     if not positive:
-        _logger.warning("No combo cleared min_screen_score. Returning best %d.", top_k)
-        return qualified[: max(1, top_k)]
-    return positive[: max(1, top_k)]
+        _logger.warning("No combo cleared min_screen_score. Returning bucket-union best %d.", out_cap)
+        return qualified[:out_cap]
+    return positive[:out_cap]

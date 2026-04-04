@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+from collections import Counter
 import os
 import pickle
 import queue
@@ -39,21 +40,32 @@ from src.spot_strategy.strategies_spot import UltimateSpotStrategy
 from config.settings import SPOT_INITIAL_BALANCE
 from config.opt_config import OPT_SPOT_CONFIG, SPOT_SYMBOLS, get_search_space_spot, get_quarterly_window
 from src.optimization.opt_utils import compute_segment_merge_index
-from src.spot_strategy.opt_spot_utils.cv_utils import CPCVPath, build_cpcv_test_paths_with_fallback
+from src.spot_strategy.opt_spot_utils.cv_utils import (
+    CPCVPath,
+    build_cpcv_test_paths_with_fallback,
+    list_cpcv_block_ranges,
+)
 from src.spot_strategy.opt_spot_utils.evaluator import (
     EMBARGO_BARS,
     _segment_with_context,
+    compute_regime_conditional_oos_metrics,
     evaluate_symbol_fold,
     objective_spot,
+    run_cpcv_complement_evaluation,
     run_holdout_shared_cash_portfolio,
+    run_multi_window_oos_holdout,
 )
 from src.spot_strategy.opt_spot_utils.go_nogo import (
     FinalDeploymentReportInput,
+    GoNoGoResult,
     SymbolGateRow,
+    format_regime_oos_diagnostic_block,
     run_final_deployment_report,
     run_go_nogo_check,
     run_holdout_portfolio_shared_cash,
     run_holdout_portfolio_trade_floor,
+    run_multi_window_oos_gate,
+    run_pbo_gate,
     run_portfolio_discovery_veto,
 )
 
@@ -678,9 +690,52 @@ def _run_stage1_structure_discovery(
     return _build_narrowed_space_for_signal_types(tuple(winning), tf)
 
 
+def _select_best_trial_from_shortlist(
+    ranked: List[optuna.trial.FrozenTrial],
+) -> optuna.trial.FrozenTrial:
+    """
+    Within ~2% of top objective value, prefer higher CPCV robustness (tmp.md tie-break).
+    """
+    if not ranked:
+        raise ValueError("ranked trials empty")
+    top_val = float(ranked[0].value if ranked[0].value is not None else -1e9)
+    band = max(abs(top_val) * 0.02, 0.02)
+    close_trials = [
+        t
+        for t in ranked
+        if t.value is not None and abs(float(t.value) - top_val) <= band
+    ]
+    pool = close_trials if close_trials else ranked[:1]
+
+    def robust_key(t: optuna.trial.FrozenTrial) -> Tuple[float, float, float, float]:
+        ua = t.user_attrs
+        return (
+            float(ua.get("gate1_sqn", 0.0)),
+            float(ua.get("psr_paths", 0.0)),
+            float(ua.get("cpcv_path_tail_ratio", 0.0)),
+            float(ua.get("dsr_paths", 0.0)),
+        )
+
+    return max(pool, key=robust_key)
+
+
 def main() -> None:
+    import importlib
+    import config.opt_config
+
+    # 0. Phase 0: Universe Screening (Run once before argparse to refresh defaults)
+    if "--skip-universe" not in sys.argv:
+        from src.spot_strategy.opt_spot_utils.universe_screener import screen_universe
+        
+        screen_universe()
+        importlib.reload(config.opt_config)
+        # Update global constants for the rest of the script (used as defaults or globals)
+        globals()["SPOT_SYMBOLS"] = config.opt_config.SPOT_SYMBOLS
+        globals()["OPT_SPOT_CONFIG"] = config.opt_config.OPT_SPOT_CONFIG
+
     parser = argparse.ArgumentParser()
-    parser.add_argument("--symbols", type=str, default=",".join(SPOT_SYMBOLS))
+    parser.add_argument("--symbols", type=str, default=",".join(config.opt_config.SPOT_SYMBOLS))
+    parser.add_argument("--skip-universe", action="store_true", help="Skip the initial Phase 0 universe screening.")
     parser.add_argument("--mode", type=str, choices=["single", "multi"], default="multi")
     parser.add_argument("--trials", type=int, default=OPT_SPOT_CONFIG["total_trials"])
     parser.add_argument("--jobs", type=int, default=3)
@@ -773,6 +828,17 @@ def main() -> None:
             data_maps[sym][args.tf] = data_maps[sym][args.tf].merge(btc_4h, on="datetime", how="left")
             oos_data_maps[sym][args.tf] = oos_data_maps[sym][args.tf].merge(btc_oos, on="datetime", how="left")
 
+    if "KRW-ETH" in valid_symbols:
+        eth_4h = data_maps["KRW-ETH"][args.tf][["datetime", "close"]].copy()
+        eth_4h = eth_4h.rename(columns={"close": "eth_close"})
+        eth_oos = oos_data_maps["KRW-ETH"][args.tf][["datetime", "close"]].copy()
+        eth_oos = eth_oos.rename(columns={"close": "eth_close"})
+        for sym in valid_symbols:
+            if sym == "KRW-ETH":
+                continue
+            data_maps[sym][args.tf] = data_maps[sym][args.tf].merge(eth_4h, on="datetime", how="left")
+            oos_data_maps[sym][args.tf] = oos_data_maps[sym][args.tf].merge(eth_oos, on="datetime", how="left")
+
     if len(valid_symbols) >= 2:
         ref_tz = oos_data_maps[valid_symbols[0]][args.tf]["datetime"].dt.tz
         is_start_align = pd.to_datetime(START_DATE)
@@ -833,7 +899,10 @@ def main() -> None:
         narrowed_space_effective = _merge_narrowed_space_dicts(forced, narrowed_space_effective)
         _logger.info("Applied --signal-type narrowed space: %s", str(args.signal_type).upper())
     elif not args.skip_stage1 and args.mode == "multi":
-        from src.spot_strategy.opt_spot_utils.combination_screener import run_combination_screening
+        from src.spot_strategy.opt_spot_utils.combination_screener import (
+            CombinationScore,
+            run_combination_screening,
+        )
         from src.spot_strategy.opt_spot_utils.opt_params import build_multi_combo_param_space
 
         tops = run_combination_screening(
@@ -849,15 +918,31 @@ def main() -> None:
                 "No edge detected in current data/symbols. Aborting optimization."
             )
             return
+        max_per_sig = int(OPT_SPOT_CONFIG.get("SPOT_STAGE2_MAX_PER_SIGNAL_TYPE", 2))
+        filtered_tops: List[CombinationScore] = []
+        sig_ct: Counter[str] = Counter()
+        for combo in tops:
+            sig = str(combo.signal)
+            if sig_ct[sig] < max_per_sig:
+                filtered_tops.append(combo)
+                sig_ct[sig] += 1
+        if len(filtered_tops) < len(tops):
+            _logger.info(
+                "Stage2 diversity cap: max %d per SIGNAL_TYPE (%d → %d combos)",
+                max_per_sig,
+                len(tops),
+                len(filtered_tops),
+            )
+        tops_for_stage2 = filtered_tops if filtered_tops else tops
         _logger.info(
             "Stage1 combination screening top combos: %s",
             [
                 (x.signal, x.regime, x.sizing, round(x.p10_gmgr, 6), round(x.mean_signal_rate, 5), x.reason or "ok")
-                for x in tops
+                for x in tops_for_stage2
             ],
         )
         narrowed_space_effective = _merge_narrowed_space_dicts(
-            build_multi_combo_param_space(tops),
+            build_multi_combo_param_space(tops_for_stage2),
             narrowed_space_effective,
         )
     elif not args.skip_stage1:
@@ -964,11 +1049,11 @@ def main() -> None:
     top_k = int(OPT_SPOT_CONFIG.get("SPOT_SHORTLIST_TOP_K", 50))
     max_ho_cvar = float(OPT_SPOT_CONFIG.get("SPOT_HOLDOUT_MAX_CVAR_PCT", 25.0))
     min_pf_trades = int(OPT_SPOT_CONFIG.get("SPOT_HOLDOUT_MIN_PORTFOLIO_LONG_TRADES", 8))
-    holdout_min_tail = float(OPT_SPOT_CONFIG.get("SPOT_HOLDOUT_MIN_TAIL_RATIO", 2.0))
+    holdout_min_tail = float(OPT_SPOT_CONFIG.get("SPOT_HOLDOUT_MIN_TAIL_RATIO", 1.10))
     holdout_min_cagr = float(OPT_SPOT_CONFIG.get("SPOT_HOLDOUT_MIN_CAGR_PCT", 30.0))
     holdout_mdd_limit = float(OPT_SPOT_CONFIG.get("SPOT_HOLDOUT_MDD_LIMIT_PCT", 45.0))
     holdout_hwm_max_days = float(OPT_SPOT_CONFIG.get("SPOT_HOLDOUT_HWM_RECOVERY_MAX_DAYS", 300.0))
-    holdout_alpha_floor = float(OPT_SPOT_CONFIG.get("SPOT_HOLDOUT_ALPHA_DECAY_FLOOR_PCT", -50.0))
+    holdout_alpha_floor = float(OPT_SPOT_CONFIG.get("SPOT_HOLDOUT_ALPHA_DECAY_FLOOR_PCT", -65.0))
     gate1_sqn_min = float(OPT_SPOT_CONFIG.get("SPOT_GATE1_SQN_MIN", 3.0))
     gate1_psort_min = float(OPT_SPOT_CONFIG.get("SPOT_GATE1_PATH_SORTINO_MIN", 2.5))
     gate1_tr_min = float(OPT_SPOT_CONFIG.get("SPOT_GATE1_TAIL_RATIO_MIN", 2.0))
@@ -992,7 +1077,8 @@ def main() -> None:
             for tr in ranked
             if float(tr.user_attrs.get("min_path_terminal_wealth_ratio", 0.0)) >= 1.0
         ]
-        best_trial = viable[0] if viable else ranked[0]
+        pool = viable if viable else ranked
+        best_trial = _select_best_trial_from_shortlist(pool)
 
         params = best_trial.params.copy()
         params["TIMEFRAME"] = tf_eval
@@ -1012,6 +1098,37 @@ def main() -> None:
         )
         veto_ok = bool(veto.passed)
 
+        pbo_val: float = 0.5
+        rho_val: float = 0.0
+        ref_pbo_sym = target_symbols[0]
+        is_off_pbo = int(data_maps[ref_pbo_sym][f"is_start_idx_{tf_eval}"])
+        ref_len_pbo = len(data_maps[ref_pbo_sym][tf_eval]) - is_off_pbo
+        emb_pbo = int(EMBARGO_BARS.get(tf_eval, 0))
+        prebuilt_pbo = build_cpcv_test_paths_with_fallback(ref_len_pbo, embargo=emb_pbo)
+        cpcv_paths_pbo, nb_pbo, _k_pbo = prebuilt_pbo
+        all_blocks_pbo = list_cpcv_block_ranges(ref_len_pbo, nb_pbo, emb_pbo)
+        oos_log_tw = best_trial.user_attrs.get("cpcv_path_oos_log_tw")
+        if (
+            isinstance(oos_log_tw, list)
+            and len(oos_log_tw) == len(cpcv_paths_pbo)
+            and all_blocks_pbo
+        ):
+            pbo_val, rho_val = run_cpcv_complement_evaluation(
+                params,
+                target_symbols,
+                tf_eval,
+                data_maps,
+                cpcv_paths_pbo,
+                all_blocks_pbo,
+                oos_path_scores=oos_log_tw,
+                signal_disk_cache_root=Path(signal_cache_dir),
+                project_root=project_root,
+                concurrency_penalty_scale=1.0,
+            )
+        pbo_hard = bool(OPT_SPOT_CONFIG.get("SPOT_PBO_GATE_HARD", False))
+        pbo_max_cfg = float(OPT_SPOT_CONFIG.get("SPOT_PBO_MAX", 0.45))
+        pbo_gate = run_pbo_gate(pbo=pbo_val, pbo_max=pbo_max_cfg, hard=pbo_hard)
+
         max_slots: int = int(OPT_SPOT_CONFIG.get("SPOT_MAX_CONCURRENT_POSITIONS", 3))
         params["MAX_CAP_PER_COIN"] = 1.0 / float(max_slots)
         min_pf_trades_dynamic = max(50, len(target_symbols) * 8)
@@ -1027,6 +1144,66 @@ def main() -> None:
         )
         post_full_signal_dfs: Dict[str, pd.DataFrame] = port_ho.get("full_signal_dfs", {})
         oos_dd_days = float(port_ho["dd_bars"]) / 6.0
+
+        mw_enabled = bool(OPT_SPOT_CONFIG.get("SPOT_MULTI_WINDOW_OOS_ENABLED", True))
+        multi_win: Dict[str, Any] = {}
+        mw_gate = GoNoGoResult(passed=True, details={}, summary="", checks=[])
+        mw_summary = ""
+        if mw_enabled:
+            n_sub = int(OPT_SPOT_CONFIG.get("SPOT_MULTI_WINDOW_OOS_SUBS", 2))
+            multi_win = run_multi_window_oos_holdout(
+                params,
+                target_symbols,
+                tf_eval,
+                oos_data_maps,
+                n_sub_windows=n_sub,
+                signal_disk_cache_root=Path(signal_cache_dir),
+                concurrency_penalty_scale=1.0,
+                full_holdout_result=port_ho,
+            )
+            mw_gate = run_multi_window_oos_gate(
+                window_results=multi_win.get("windows", []),
+                min_positive_windows=int(OPT_SPOT_CONFIG.get("SPOT_MULTI_WINDOW_MIN_POSITIVE", 3)),
+                min_median_cagr_pct=float(OPT_SPOT_CONFIG.get("SPOT_MULTI_WINDOW_MIN_MEDIAN_CAGR_PCT", 20.0)),
+                max_worst_mdd_pct=float(OPT_SPOT_CONFIG.get("SPOT_MULTI_WINDOW_MAX_WORST_MDD_PCT", 25.0)),
+            )
+            wins = multi_win.get("windows", [])
+            if wins:
+                mw_summary = "\n".join(
+                    [
+                        "=" * 71,
+                        " [Gate 3.5 — Multi-Window OOS (anchored)]",
+                        "=" * 71,
+                        *[
+                            (
+                                f"  - end_idx={w['end_idx']} | CAGR {w['cagr_pct']:.2f}% | "
+                                f"MDD {w['mdd_pct']:.2f}% | PF {w['pf']:.2f}"
+                            )
+                            for w in wins
+                        ],
+                        (
+                            f"  - median CAGR {multi_win['median_cagr_pct']:.2f}% | "
+                            f"dispersion {multi_win['cagr_dispersion']:.4f} | "
+                            f"positive {multi_win['positive_windows']}/{multi_win['total_windows']}"
+                        ),
+                        mw_gate.summary,
+                    ]
+                )
+
+        regime_block = ""
+        if bool(OPT_SPOT_CONFIG.get("SPOT_REGIME_DIAGNOSTIC_ENABLED", True)) and post_full_signal_dfs:
+            oos_start_reg = int(oos_data_maps[target_symbols[0]].get(f"oos_start_idx_{tf_eval}", 0))
+            eq_arr = port_ho.get("equity_curve", np.array([]))
+            rm = compute_regime_conditional_oos_metrics(
+                post_full_signal_dfs,
+                np.asarray(eq_arr),
+                oos_start_reg,
+                target_symbols,
+            )
+            regime_block = format_regime_oos_diagnostic_block(
+                rm,
+                float(OPT_SPOT_CONFIG.get("SPOT_REGIME_STRESS_MAX_MDD_PCT", 30.0)),
+            )
 
         symbol_fold_payloads: List[Dict[str, Any]] = []
         is_cagr_vals: List[float] = []
@@ -1130,7 +1307,8 @@ def main() -> None:
             return_signal_dfs=False,
             concurrency_penalty_scale=1.0,
         )
-        is_portfolio_cagr: float = float(best_trial.user_attrs.get("cpcv_mean_path_return_pct", 0.0))
+        is_portfolio_cagr: float = float(port_is["portfolio_cagr_pct"])
+        is_cagr_pct_alpha_decay: float = is_portfolio_cagr
 
         trade_floor = run_holdout_portfolio_trade_floor(
             portfolio_long_trades=int(port_ho["long_trades"]),
@@ -1150,7 +1328,7 @@ def main() -> None:
             mdd_limit_pct=holdout_mdd_limit,
             oos_dd_days=oos_dd_days,
             hw_recovery_days_max=holdout_hwm_max_days,
-            is_cagr_pct=is_portfolio_cagr,
+            is_cagr_pct=is_cagr_pct_alpha_decay,
             alpha_decay_floor_pct=holdout_alpha_floor,
             pf_min=holdout_min_pf,
             calmar_min=holdout_min_calmar,
@@ -1160,17 +1338,26 @@ def main() -> None:
         tr_v = float(best_trial.user_attrs.get("cpcv_path_tail_ratio", 0.0))
 
         tier1_passed = bool(
-            veto_ok and 
-            sqn_v >= gate1_sqn_min and 
-            psort_v >= gate1_psort_min and 
-            tr_v >= gate1_tr_min
+            veto_ok
+            and sqn_v >= gate1_sqn_min
+            and psort_v >= gate1_psort_min
+            and tr_v >= gate1_tr_min
+            and (not pbo_hard or pbo_gate.passed)
         )
-        is_all_passed = bool(tier1_passed and trade_floor.passed and shared_cash_gate.passed)
+        is_all_passed = bool(
+            tier1_passed
+            and trade_floor.passed
+            and shared_cash_gate.passed
+            and (not mw_enabled or mw_gate.passed)
+        )
         if not is_all_passed:
             _logger.info("❌ Gate check failed. Diagnostic details:")
             _logger.info("\n%s", veto.summary)
+            _logger.info("\n%s", pbo_gate.summary)
             _logger.info("\n%s", trade_floor.summary)
             _logger.info("\n%s", shared_cash_gate.summary)
+            if mw_enabled:
+                _logger.info("\n%s", mw_gate.summary)
 
         symbol_gate_rows: List[SymbolGateRow] = []
         for pl in symbol_fold_payloads:
@@ -1247,6 +1434,12 @@ def main() -> None:
             + sum(1 for v in shared_cash_gate.details.values() if v)
         )
         hard_total = len(veto.details) + 3 + 1 + len(shared_cash_gate.details)
+        if pbo_hard:
+            hard_total += 1
+            hard_passed += 1 if pbo_gate.passed else 0
+        if mw_enabled:
+            hard_total += len(mw_gate.details)
+            hard_passed += sum(1 for v in mw_gate.details.values() if v)
 
         report = run_final_deployment_report(
             FinalDeploymentReportInput(
@@ -1289,6 +1482,13 @@ def main() -> None:
                 hard_passed=hard_passed,
                 hard_total=hard_total,
                 final_decision_go=is_all_passed,
+                pbo=float(pbo_val),
+                spearman_rho=float(rho_val),
+                pbo_gate_passed=bool(pbo_gate.passed),
+                pbo_hard_gate=pbo_hard,
+                multi_window_passed=bool(not mw_enabled or mw_gate.passed),
+                multi_window_summary=mw_summary,
+                regime_diagnostic_block=regime_block,
             )
         )
         _logger.info("\n%s", report)
