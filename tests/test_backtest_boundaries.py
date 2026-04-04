@@ -29,6 +29,9 @@ class _DummyStrategy:
         _ = freq
         return 0
 
+    def generate_signals(self, df: pd.DataFrame) -> pd.DataFrame:
+        return df
+
 
 def test_segment_with_context_uses_one_prior_bar() -> None:
     df = pd.DataFrame({"x": [10, 20, 30, 40]})
@@ -62,6 +65,7 @@ def test_engine_respects_execution_start_idx() -> None:
             "strength_filter": [1, 1],
             "atr": [1.0, 1.0],
             "funding_rate_sum": [0.0, 0.0],
+            "daily_macro_ema": [100.0, 100.0],
         }
     )
 
