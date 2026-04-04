@@ -84,6 +84,8 @@ def _run_shared_cash_packed_numba(
     long_entry_signal: np.ndarray,
     entry_upper: np.ndarray,
     regime_risk: np.ndarray,
+    regime_entry_gate: np.ndarray,
+    regime_state: np.ndarray,
     garch_kelly: np.ndarray,
     kill_signal: np.ndarray,
     rank_scores: np.ndarray,
@@ -252,7 +254,11 @@ def _run_shared_cash_packed_numba(
                     and fractal_scale_out_ratio < 1.0 - 1e-12
                 ):
                     cap_amt = slot_amount[sj] * 0.99
-                    partial_f = slot_amount[sj] * fractal_scale_out_ratio
+                    eff_ratio = fractal_scale_out_ratio
+                    rst_f = regime_state[si, i]
+                    if rst_f > 0.5 and rst_f < 1.5:
+                        eff_ratio = min(0.95, fractal_scale_out_ratio * 1.12)
+                    partial_f = slot_amount[sj] * eff_ratio
                     if partial_f > cap_amt:
                         partial_f = cap_amt
                     if partial_f > 0.0:
@@ -289,7 +295,10 @@ def _run_shared_cash_packed_numba(
                     if pos_atr <= 0.0 or np.isnan(pos_atr):
                         pos_atr = trail_atr
                     dist = slot_highest[sj] - slot_entry_price[sj]
+                    rst_tr = regime_state[si, i]
                     cur_tm = long_trail_mult
+                    if rst_tr > 0.5 and rst_tr < 1.5:
+                        cur_tm = cur_tm * 0.88
                     if trail_tighten[si, i] > 0.5:
                         cur_tm = long_trail_lock_mult
                     elif dist > pos_atr * tp_lock_mult:
@@ -299,13 +308,15 @@ def _run_shared_cash_packed_numba(
                         slot_stop[sj] = new_stop
 
                 if slot_in[sj] and (not exit_triggered):
-                    # Adaptive Time-Stop: Shorten if regime is bearish/choppy
+                    rst_ts = regime_state[si, i]
                     adaptive_stop = time_stop_bars
-                    if regime_risk[si, i] < 0.4:
+                    if rst_ts > 0.5 and rst_ts < 1.5:
+                        adaptive_stop = max(1, int(time_stop_bars * 0.65))
+                    elif regime_risk[si, i] < 0.4:
                         adaptive_stop = time_stop_bars // 2
                         if adaptive_stop < 1:
                             adaptive_stop = 1
-                    
+
                     if time_stop_bars > 0 and (i - slot_entry_idx[sj]) >= adaptive_stop:
                         ex_px = c_open * (1.0 - slippage_rate)
                         exit_triggered = True
@@ -368,6 +379,8 @@ def _run_shared_cash_packed_numba(
                 continue
             les = long_entry_signal[si, prev_i]
             if les < 0.5 or np.isnan(les):
+                continue
+            if regime_entry_gate[si, prev_i] < 0.5:
                 continue
             eu_prev = entry_upper[si, prev_i]
             if eu_prev < 1.0:
@@ -453,6 +466,8 @@ def _run_shared_cash_packed_numba(
             rm = regime_risk[si, prev_i2]
             if not np.isfinite(rm):
                 continue
+            if rm < 1e-9:
+                continue
             if rm < 0.05:
                 rm = 0.05
             if rm > 1.0:
@@ -465,6 +480,9 @@ def _run_shared_cash_packed_numba(
             if gk > 1.0:
                 gk = 1.0
             eff = rm * gk
+            rst_e = regime_state[si, prev_i2]
+            if rst_e > 0.5 and rst_e < 1.5:
+                eff = eff * 0.90
             if eff < 0.05:
                 eff = 0.05
             if eff > 1.0:
@@ -616,6 +634,8 @@ def run_packed_from_symbol_arrays(
     long_entry_signal = np.empty((n_sym, n), dtype=np.float64)
     entry_upper = np.empty((n_sym, n), dtype=np.float64)
     regime_risk = np.ones((n_sym, n), dtype=np.float64)
+    regime_entry_gate_m = np.ones((n_sym, n), dtype=np.float64)
+    regime_state_m = np.full((n_sym, n), 2.0, dtype=np.float64)
     garch_kelly = np.ones((n_sym, n), dtype=np.float64)
     kill_signal = np.zeros((n_sym, n), dtype=np.float64)
     rank_scores_m = np.zeros((n_sym, n), dtype=np.float64)
@@ -635,6 +655,10 @@ def run_packed_from_symbol_arrays(
         entry_upper[si, :] = arr["entry_upper"]
         if "regime_risk_mult" in arr:
             regime_risk[si, :] = arr["regime_risk_mult"]
+        if "regime_entry_gate" in arr:
+            regime_entry_gate_m[si, :] = arr["regime_entry_gate"]
+        if "regime_state" in arr:
+            regime_state_m[si, :] = arr["regime_state"]
         if "garch_kelly_f" in arr:
             garch_kelly[si, :] = arr["garch_kelly_f"]
         if "kill_signal" in arr:
@@ -692,6 +716,8 @@ def run_packed_from_symbol_arrays(
         long_entry_signal,
         entry_upper,
         regime_risk,
+        regime_entry_gate_m,
+        regime_state_m,
         garch_kelly,
         kill_signal,
         rank_scores_m,

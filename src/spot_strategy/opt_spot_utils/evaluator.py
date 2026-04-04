@@ -15,7 +15,7 @@ import numpy as np
 import pandas as pd
 from collections import OrderedDict
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 try:
     from filelock import FileLock
@@ -35,6 +35,7 @@ from src.spot_strategy.opt_spot_utils.metrics import (
     calc_tail_ratio_from_equity,
     cvar_loss_pct_from_simple_returns,
     compute_dsr_from_path_values,
+    compute_pbo_from_cpcv_paths,
     max_underwater_bars_from_equity,
     mean_of_worst_quartile,
     probabilistic_sharpe_ratio,
@@ -42,7 +43,10 @@ from src.spot_strategy.opt_spot_utils.metrics import (
 from src.spot_strategy.opt_spot_utils.cv_utils import (
     CPCVPath,
     build_cpcv_test_paths_with_fallback,
+    cpcv_complement_segments,
+    list_cpcv_block_ranges,
 )
+from src.spot_strategy.opt_spot_utils.exit_family_prior import exit_family_prior_penalty
 from src.spot_strategy.opt_spot_utils.opt_params import suggest_params_spot
 
 _logger: logging.Logger = logging.getLogger("opt_spot")
@@ -64,6 +68,7 @@ EMBARGO_BARS: Dict[str, int] = {
 SIGNAL_CACHE_PARAM_KEYS: frozenset[str] = frozenset([
     "SIGNAL_TYPE",
     "REGIME_TYPE",
+    "EXIT_FAMILY",
     "SIZING_METHOD",
     "ATR_PERIOD",
     "EMA_FAST_PERIOD",
@@ -96,14 +101,39 @@ SIGNAL_CACHE_PARAM_KEYS: frozenset[str] = frozenset([
     "PFK_MIN_F",
 ])
 
-_SIGNAL_CACHE_SCHEMA_VERSION: int = 13
+_SIGNAL_CACHE_SCHEMA_VERSION: int = 15
 
 _SPOT_OBJECTIVE_CAGR_WEIGHT: float = 0.0  # Abandoning additive CAGR
 _SPOT_OBJECTIVE_MIN_TRADES_HARD: float = 10.0 # Min trades per path to even consider
 _SPOT_OBJECTIVE_MIN_TRADES_SOFT: float = 25.0 # Target trades for statistical robustness
-_SPOT_OBJECTIVE_TAIL_RATIO_WEIGHT: float = 0.20  # Asymmetric payoff preference (Tail Ratio gate)
 _SPOT_OBJECTIVE_LOG_TWR_WEIGHT: float = 1.0
 _SPOT_OBJECTIVE_PATH_CV_PENALTY: float = 0.75  # Path CV penalty (Generalized Kelly λ≈0.75)
+_SPOT_OBJECTIVE_GAMMA: float = 2.0  # CRRA Risk Aversion (gamma > 1 for risk-aversion)
+_SPOT_OBJECTIVE_MAR: float = 0.0    # Minimum Acceptable Return (0% for log-TWR context)
+
+def _calculate_crra_utility(tw_ratio: float, gamma: float) -> float:
+    """Von Neumann-Morgenstern CRRA utility function. gamma=1 is log(W)."""
+    if tw_ratio <= 1e-9:
+        return -1e12
+    if abs(gamma - 1.0) < 1e-6:
+        return math.log(tw_ratio)
+    return (tw_ratio ** (1.0 - gamma) - 1.0) / (1.0 - gamma)
+
+def _calculate_ceq(utilities: np.ndarray, gamma: float) -> float:
+    """Derive Certainty Equivalent from expected utility."""
+    mean_u = np.mean(utilities)
+    if abs(gamma - 1.0) < 1e-6:
+        return math.exp(mean_u) - 1.0
+    val = (1.0 - gamma) * mean_u + 1.0
+    if val <= 0:
+        return -1.0
+    return (val ** (1.0 / (1.0 - gamma))) - 1.0
+
+def _calculate_lpm(returns: np.ndarray, mar: float, order: int = 2) -> float:
+    """Lower Partial Moment (Downside risk). Measures deviation below MAR."""
+    diff = mar - returns
+    downside = np.clip(diff, 0, None)
+    return float(np.mean(downside ** order))
 
 _STRATEGY_LOGIC_HASH: Optional[str] = None
 _CACHE_CLEANUP_DONE: bool = False
@@ -824,6 +854,10 @@ def _dataframe_to_symbol_arrays(sig_df: pd.DataFrame) -> Dict[str, np.ndarray]:
         out[c] = sig_df[c].to_numpy(dtype=np.float64)
     if "regime_risk_mult" in sig_df.columns:
         out["regime_risk_mult"] = sig_df["regime_risk_mult"].to_numpy(dtype=np.float64)
+    if "regime_entry_gate" in sig_df.columns:
+        out["regime_entry_gate"] = sig_df["regime_entry_gate"].to_numpy(dtype=np.float64)
+    if "regime_state" in sig_df.columns:
+        out["regime_state"] = sig_df["regime_state"].to_numpy(dtype=np.float64)
     if "garch_kelly_f" in sig_df.columns:
         out["garch_kelly_f"] = sig_df["garch_kelly_f"].to_numpy(dtype=np.float64)
     if "kill_signal" in sig_df.columns:
@@ -912,6 +946,64 @@ def _compute_ulcer_index(equity: np.ndarray) -> float:
     safe = np.where(peak > 1e-12, peak, 1.0)
     drawdown_pct = (peak - eq) / safe * 100.0
     return float(np.sqrt(np.mean(drawdown_pct * drawdown_pct)))
+
+
+def _cpcv_path_compound_raw_log_tw(
+    segments: List[Tuple[int, int]],
+    *,
+    prebuilt_full_arrays: Dict[str, Dict[str, np.ndarray]],
+    symbols: List[str],
+    params: Dict[str, Any],
+    is_off: int,
+    ref_df: pd.DataFrame,
+    max_slots: int,
+    warmup_bars: int,
+    concurrency_penalty_scale: float = 1.0,
+) -> float:
+    """Sum of raw log terminal-wealth ratios per segment (matches objective_spot CPCV path metric)."""
+    seg_raw_log_tw: List[float] = []
+    running_balance = float(SPOT_INITIAL_BALANCE)
+    for test_start, test_end in segments:
+        abs_start = is_off + int(test_start)
+        abs_end = is_off + int(test_end)
+        slice_start = max(0, abs_start - 1)
+        slice_end = min(len(ref_df), abs_end)
+        if slice_end - slice_start < 5:
+            continue
+        symbol_arrays: Dict[str, Dict[str, np.ndarray]] = {}
+        rank_scores: Dict[str, np.ndarray] = {}
+        for sym in symbols:
+            symbol_arrays[sym] = _slice_symbol_arrays_view(
+                prebuilt_full_arrays[sym], slice_start, slice_end
+            )
+            rs = symbol_arrays[sym].get("slot_rank_score")
+            if rs is not None:
+                rank_scores[sym] = rs
+        execution_start_idx = max(1, abs_start - slice_start)
+        segment_initial = max(running_balance, 1e-9)
+        result = run_shared_cash_multi_symbol(
+            symbol_arrays,
+            symbols,
+            params,
+            initial_balance=segment_initial,
+            max_concurrent_positions=max_slots,
+            rank_scores=rank_scores if rank_scores else None,
+            warmup_bars=warmup_bars,
+            execution_start_idx=execution_start_idx,
+            allow_python_fallback=False,
+            concurrency_penalty_scale=float(concurrency_penalty_scale),
+        )
+        eq = result.equity_curve
+        if eq.size == 0:
+            twr = 1.0
+        else:
+            twr = max(float(result.final_balance / segment_initial), 1e-9)
+        raw_log_tw = float(np.log(twr))
+        seg_raw_log_tw.append(raw_log_tw)
+        running_balance = max(float(result.final_balance), 1e-9)
+    if not seg_raw_log_tw:
+        return float("nan")
+    return float(np.sum(seg_raw_log_tw))
 
 
 def objective_spot(
@@ -1017,6 +1109,8 @@ def objective_spot(
         path_ui: List[float] = []
         path_calmars: List[float] = []
         path_cagrs: List[float] = []
+        path_regime_rates: List[float] = []
+        path_cautious_penalties: List[float] = []
 
         total_sym_trades = np.zeros(len(symbols), dtype=np.int32)
         total_sym_wins = np.zeros(len(symbols), dtype=np.int32)
@@ -1028,9 +1122,10 @@ def objective_spot(
             seg_tw_ratio: List[float] = []
             seg_mdds: List[float] = []
             seg_cvars: List[float] = []
-            seg_tails: List[float] = []
             seg_pfs: List[float] = []
             path_total_trades = 0
+            path_regime_on = 0
+            path_regime_len = 0
             running_balance = float(SPOT_INITIAL_BALANCE)
             path_eq_chunks: List[np.ndarray] = []
             span_path_days = 0.0
@@ -1052,6 +1147,13 @@ def objective_spot(
                     if rs is not None:
                         rank_scores[sym] = rs
 
+                ref_seg = symbol_arrays.get(ref_sym)
+                if ref_seg is not None:
+                    rs_arr = ref_seg.get("regime_state")
+                    if rs_arr is not None and rs_arr.size > 0:
+                        path_regime_on += int(np.sum(rs_arr > 0.1))
+                        path_regime_len += int(rs_arr.size)
+
                 execution_start_idx = max(1, abs_start - slice_start)
                 segment_initial = max(running_balance, 1e-9)
                 try:
@@ -1065,7 +1167,7 @@ def objective_spot(
                         warmup_bars=warmup_bars,
                         execution_start_idx=execution_start_idx,
                         allow_python_fallback=False,
-                        concurrency_penalty_scale=0.5,
+                        concurrency_penalty_scale=1.0,
                     )
                 except Exception as exc:
                     _logger.warning(
@@ -1099,11 +1201,9 @@ def objective_spot(
                     mdd_seg = float(calc_mdd_from_equity(eq))
                     seg_mdds.append(mdd_seg)
                     seg_cvars.append(float(cvar_loss_pct_from_simple_returns(eq)))
-                    seg_tails.append(float(calc_tail_ratio_from_equity(eq)))
                 else:
                     seg_mdds.append(0.0)
                     seg_cvars.append(0.0)
-                    seg_tails.append(1.0)
                     
                 pnl = result.pnl_array
                 pos_pnl = float(np.sum(pnl[pnl > 0.0]))
@@ -1127,6 +1227,8 @@ def objective_spot(
 
             if not seg_log_tw:
                 raise optuna.TrialPruned()
+            if path_regime_len > 0:
+                path_regime_rates.append(path_regime_on / float(path_regime_len))
             path_compound_log_tw.append(float(np.sum(seg_log_tw)))
             path_compound_raw_log_tw.append(float(np.sum(seg_raw_log_tw)))
             path_compound_tw_ratio.append(float(np.prod(seg_tw_ratio)) if seg_tw_ratio else 1.0)
@@ -1142,10 +1244,11 @@ def objective_spot(
                  raise optuna.TrialPruned()
 
             path_trades.append(path_total_trades)
-            path_tail_ratios.append(float(np.mean(seg_tails)) if seg_tails else 1.0)
             path_pfs.append(float(np.mean(seg_pfs)) if seg_pfs else 1.0)
 
             path_eq = np.concatenate(path_eq_chunks) if path_eq_chunks else np.array([], dtype=np.float64)
+            path_level_tail = float(calc_tail_ratio_from_equity(path_eq)) if path_eq.size >= 2 else 1.0
+            path_tail_ratios.append(path_level_tail)
             span_for_sortino = max(span_path_days, 1.0)
             raw_ps = float(calc_sortino_from_equity(path_eq, span_for_sortino)) if path_eq.size >= 2 else 0.0
             if not np.isfinite(raw_ps):
@@ -1186,22 +1289,47 @@ def objective_spot(
                 max(0.0, _SPOT_OBJECTIVE_MIN_TRADES_SOFT - n_tm) * w_trade_pen
                 + max(0.0, 1.6 - sqn_p) * w_sqn_pen
                 + max(0.0, n_tm - 100.0) * 0.005
-                + max(0.0, 1.4 - p_pf) * 0.1
+                + max(0.0, 1.4 - p_pf) * 0.18
             )
             run_geo = float(np.mean(path_compound_raw_log_tw)) if path_compound_raw_log_tw else 0.0
+            
+            path_cautious_rate = 1.0 - (path_regime_on / max(1.0, float(path_regime_len)))
+            cautious_penalty = 0.0
+            if path_cautious_rate >= 0.5:
+                # If path is mostly Non-Risk-On, heavily penalize net-losses & high drawdowns
+                path_worst_mdd_seg = float(np.max(seg_mdds)) if seg_mdds else 0.0
+                if run_geo < 0.0:
+                    cautious_penalty += abs(run_geo) * 5.0
+                if path_worst_mdd_seg > 6.0:
+                    cautious_penalty += (path_worst_mdd_seg - 6.0) * 0.25
+            path_cautious_penalties.append(cautious_penalty)
+            
             run_calmar = float(np.mean(path_calmars)) if path_calmars else 0.0
             run_cagr = float(np.mean(path_cagrs)) if path_cagrs else 0.0
             run_tail = float(np.mean(path_tail_ratios)) if path_tail_ratios else 0.0
-            run_tail_bonus = math.log(max(run_tail, 0.1)) * _SPOT_OBJECTIVE_TAIL_RATIO_WEIGHT
+            run_mean_reg = float(np.mean(path_regime_rates)) if path_regime_rates else 1.0
+            run_tail_w = 0.12 if run_mean_reg > 0.30 else 0.04
+            run_tail_bonus = math.log(max(run_tail, 0.1)) * run_tail_w
             run_cagr_floor_pen = max(0.0, 30.0 - run_cagr) * 0.003
             mu_p = float(np.mean(path_arr_partial)) if path_arr_partial.size > 0 else 0.0
             sd_p = float(np.std(path_arr_partial)) if path_arr_partial.size > 1 else 0.0
             
-            # Simple intermediate objective for pruning: Mean Log-TWR - Variance Penalty
-            interm = mu_p - _SPOT_OBJECTIVE_PATH_CV_PENALTY * sd_p + run_tail_bonus - lam_ui * run_max_ui - (soft_p * 2.0)
+            # Theory-based intermediate objective for pruning
+            gamma_int = float(cfg.get("SPOT_OBJECTIVE_GAMMA", _SPOT_OBJECTIVE_GAMMA))
+            twrs_p = np.asarray(path_compound_tw_ratio, dtype=np.float64)
+            u_p = np.array([_calculate_crra_utility(t_r, gamma_int) for t_r in twrs_p])
+            ceq_int = _calculate_ceq(u_p, gamma_int)
+            
+            # Simple statistical penalty for early pruning
+            run_tail_gap_pen = max(0.0, 1.15 - run_tail) * 0.30
+            interm = ceq_int - (soft_p * 0.5) + run_tail_bonus - run_tail_gap_pen
             trial.report(interm, step=path_idx)
             if trial.should_prune():
                 raise optuna.TrialPruned()
+
+        mean_regime_on_rate = float(np.mean(path_regime_rates)) if path_regime_rates else 1.0
+        cpcv_mean_path_cagr_pct = float(np.mean(path_cagrs)) if path_cagrs else 0.0
+        trial.set_user_attr("cpcv_mean_path_cagr_pct", float(cpcv_mean_path_cagr_pct))
 
         mean_log_tw = float(np.mean(path_compound_raw_log_tw))
         mean_penalized_log_tw = float(np.mean(path_compound_log_tw))
@@ -1222,14 +1350,16 @@ def objective_spot(
         gmgr_arr = np.asarray(path_gmgr, dtype=np.float64)
         ui_arr = np.asarray(path_ui, dtype=np.float64)
         p10_gmgr = float(np.percentile(gmgr_arr, 10.0)) if gmgr_arr.size else -1.0
+        cagr_arr = np.asarray(path_cagrs, dtype=np.float64)
+        p10_cagr = float(np.percentile(cagr_arr, 10.0)) if cagr_arr.size else -100.0
         max_ui = float(np.max(ui_arr)) if ui_arr.size else 0.0
         n_trades_mean = float(np.mean(path_trades)) if path_trades else 0.0
 
         path_arr = np.asarray(path_compound_raw_log_tw, dtype=np.float64)
         n_paths_ct = int(path_arr.size)
+        mu_paths = float(np.mean(path_arr)) if path_arr.size > 0 else -10.0
+        sd_paths = float(np.std(path_arr, ddof=1)) if path_arr.size > 1 else 10.0
         if n_paths_ct >= 2:
-            mu_paths = float(np.mean(path_arr))
-            sd_paths = float(np.std(path_arr, ddof=1))
             gate1_sqn = math.sqrt(float(n_paths_ct)) * mu_paths / sd_paths if sd_paths > 1e-12 else 0.0
             cv_paths = sd_paths / (abs(mu_paths) + 1e-6)
         else:
@@ -1243,103 +1373,150 @@ def objective_spot(
         path_vals = [float(x) for x in path_compound_raw_log_tw]
         dsr_val = float(compute_dsr_from_path_values(path_vals, n_eff))
 
+        if n_paths_ct >= 2 and sd_paths > 1e-12:
+            sr_est = mu_paths / sd_paths
+            psr_val = float(probabilistic_sharpe_ratio(sr_est, n_obs=n_paths_ct))
+        else:
+            psr_val = 0.0
+
         if n_paths_ct >= 4 and dsr_val < -1.0:
             raise optuna.TrialPruned()
 
-        concentration_pen = max(0.0, cv_paths - 2.0) * 0.02
-        # Soft Penalties: SQN < 1.6, low mean CPCV trades (CLT), path CV concentration
-        # NEW MULTIPLICATIVE/ROBUST OBJECTIVE: Log-TWR Mean - Path Variance Penalty
-        mu_paths = float(np.mean(path_arr)) if path_arr.size > 0 else -10.0
-        sd_paths = float(np.std(path_arr)) if path_arr.size > 1 else 10.0
+        min_path_tw_ratio = (
+            float(np.min(np.asarray(path_compound_tw_ratio, dtype=np.float64)))
+            if path_compound_tw_ratio
+            else 0.0
+        )
+        psr_floor = float(cfg.get("SPOT_CONSTRAINT_PSR_FLOOR", 0.02))
+        dsr_floor = max(
+            float(cfg.get("SPOT_CONSTRAINT_DSR_FLOOR", 0.0)),
+            float(cfg.get("SPOT_DISCOVERY_DSR_MIN", 0.35)),
+        )
+        min_tw_req = float(cfg.get("SPOT_CONSTRAINT_MIN_PATH_TW_RATIO", 0.88))
+        min_mean_tr_req = float(cfg.get("SPOT_CONSTRAINT_MIN_MEAN_TRADES", 12.0))
+        mean_path_pf_gate = float(np.mean(path_pfs)) if path_pfs else 1.0
+        mean_tail_gate = float(np.mean(path_tail_ratios)) if path_tail_ratios else 0.0
+        worst25_cal_gate = (
+            float(np.percentile(np.asarray(path_calmars, dtype=np.float64), 25.0))
+            if path_calmars
+            else 0.0
+        )
+        min_mean_pf_req = float(cfg.get("SPOT_CONSTRAINT_MIN_MEAN_PF", 1.0))
+        min_mean_tail_req = float(cfg.get("SPOT_CONSTRAINT_MIN_MEAN_PATH_TAIL", 1.0))
+        min_w25_cal_req = float(cfg.get("SPOT_CONSTRAINT_MIN_WORST25_CALMAR", 0.0))
+        min_p10_cagr_req = float(cfg.get("SPOT_MIN_P10_GMGR_CAGR_PCT", 5.0))
+        min_regime_floor = float(cfg.get("SPOT_MIN_REGIME_ON_RATE", 0.15))
+        if n_paths_ct >= 3:
+            if (
+                psr_val < psr_floor
+                or dsr_val < dsr_floor
+                or p10_cagr < min_p10_cagr_req
+                or min_path_tw_ratio < min_tw_req
+                or n_trades_mean < min_mean_tr_req
+                or mean_path_pf_gate < min_mean_pf_req
+                or mean_tail_gate < min_mean_tail_req
+                or (min_w25_cal_req > 1e-12 and worst25_cal_gate < min_w25_cal_req)
+            ):
+                raise optuna.TrialPruned()
+            if path_regime_rates and mean_regime_on_rate < min_regime_floor:
+                raise optuna.TrialPruned()
+
+        # Theory-based Objective Re-engineering
+        # 1. CRRA Utility & CEQ (Certainty Equivalent)
+        gamma = float(cfg.get("SPOT_OBJECTIVE_GAMMA", _SPOT_OBJECTIVE_GAMMA))
+        path_twr_arr = np.asarray(path_compound_tw_ratio, dtype=np.float64)
+        path_utilities = np.array([_calculate_crra_utility(twr, gamma) for twr in path_twr_arr])
+        ceq_growth = _calculate_ceq(path_utilities, gamma)
         
-        # Path Consistency Coefficient (CV)
-        path_cv = sd_paths / (abs(mu_paths) + 1e-6)
+        # 2. Downside Risk via LPM (Lower Partial Moment)
+        mar = float(cfg.get("SPOT_OBJECTIVE_MAR", _SPOT_OBJECTIVE_MAR))
+        path_returns = np.asarray(path_compound_raw_log_tw, dtype=np.float64)
+        lpm2 = _calculate_lpm(path_returns, mar, order=2)
         
-        # Base Wealth Maximization (Geometric Mean in log space)
-        raw_geometric_mean = mu_paths
+        # 3. Statistical Confidence Lower Bound (Overfitting Prevention)
+        # Using standard error of growth estimate across paths, biased towards downside
+        n_p = len(path_returns)
+        se_lpm = math.sqrt(lpm2 / n_p) if n_p > 0 else 1.0
+        z_conf = float(cfg.get("SPOT_OBJECTIVE_Z_CONF", 1.645)) # 95% confidence
+        stat_lcb = ceq_growth - (z_conf * se_lpm)
+
+        # 4. Refined Penalties (Minimal & Targetted)
+        concentration_pen = max(0.0, cv_paths - 1.5) * 0.15
         
-        # Soft cap for extreme IS returns (~73% CAGR ≈ 0.550 log); continuation slope limits IS inflation.
-        cap_threshold = 0.550
-        if raw_geometric_mean > cap_threshold:
-            geometric_mean_log = cap_threshold + (raw_geometric_mean - cap_threshold) * 0.25
-        else:
-            geometric_mean_log = raw_geometric_mean
-        
-        # Penalize inconsistency between paths
-        consistency_penalty = _SPOT_OBJECTIVE_PATH_CV_PENALTY * sd_paths
-        
-        # Tail Ratio and Trade count bonuses/penalties refined
-        mean_tail_ratio = float(np.mean(path_tail_ratios)) if path_tail_ratios else 0.0
-        tail_bonus = math.log(max(mean_tail_ratio, 0.1)) * _SPOT_OBJECTIVE_TAIL_RATIO_WEIGHT
-        
-        mean_path_pf = float(np.mean(path_pfs)) if path_pfs else 1.0
-        
-        # HHI concentration penalty on symbol PnL shares (discourages single-asset dominance).
         total_abs_pnl = float(np.sum(np.abs(total_sym_pnl))) + 1e-9
         sym_shares = total_sym_pnl / total_abs_pnl
         hhi = float(np.sum(sym_shares**2))
         n_sym = max(1, len(total_sym_pnl))
         hhi_equal = 1.0 / float(n_sym)
-        hhi_penalty = max(0.0, hhi - 4.0 * hhi_equal) * 0.35
-
+        hhi_penalty = max(0.0, hhi - 4.0 * hhi_equal) * 0.50 # Penalize low diversity
+        
         min_sym_wr = float(cfg.get("SPOT_OBJECTIVE_MIN_SYMBOL_WIN_RATE", 0.45))
-        w_sym_edge = float(cfg.get("SPOT_OBJECTIVE_W_SYMBOL_EDGE", 0.08))
-        min_trades_sym_edge = int(cfg.get("SPOT_OBJECTIVE_MIN_TRADES_PER_SYMBOL_EDGE", 5))
+        w_sym_edge = float(cfg.get("SPOT_OBJECTIVE_W_SYMBOL_EDGE", 0.10))
         per_symbol_edge_pen = 0.0
         for si in range(len(symbols)):
             nt_sym = int(total_sym_trades[si])
-            if nt_sym < min_trades_sym_edge:
-                continue
+            if nt_sym < 5: continue
             wr_sym = float(total_sym_wins[si]) / float(nt_sym)
             if wr_sym < min_sym_wr:
                 per_symbol_edge_pen += float(min_sym_wr - wr_sym) * w_sym_edge
 
-        soft_penalty = (
-            max(0.0, _SPOT_OBJECTIVE_MIN_TRADES_SOFT - n_trades_mean) * (w_trade_pen * 10.0)
-            + max(0.0, 2.0 - gate1_sqn) * (w_sqn_pen * 2.0)
-            + max(0.0, 1.35 - mean_path_pf) * 0.1     # Recalibrated: 0.1 PF drop ≈ 1% log-drag
-            + hhi_penalty
-            + per_symbol_edge_pen
-        )
+        trade_count_pen = max(0.0, _SPOT_OBJECTIVE_MIN_TRADES_SOFT - n_trades_mean) * 0.05
 
-        w_calmar = float(cfg.get("SPOT_OBJECTIVE_W_CALMAR", 0.08))
-        worst25_calmar = float(np.percentile(path_calmars, 25)) if path_calmars else 0.0
-        calmar_term = math.log(max(worst25_calmar + 1.0, 0.01)) * w_calmar
-
+        _TAIL_RATIO_TARGET = 1.2
+        w_tail_obj = float(cfg.get("SPOT_OBJECTIVE_W_TAIL_RATIO", 0.30))
+        tail_shortfall = max(0.0, _TAIL_RATIO_TARGET - mean_tail_gate)
+        tail_bonus = math.log(max(mean_tail_gate, 0.5)) * w_tail_obj
+        tail_penalty = tail_shortfall * 0.40
+        tail_ratio_reward = tail_bonus - tail_penalty
+        
+        # Metrics for Optuna attributes and transparency
+        p25_log = float(np.percentile(path_returns, 25.0)) if path_returns.size else -10.0
+        p10_log = float(np.percentile(path_returns, 10.0)) if path_returns.size else -10.0
+        total_soft_penalty = trade_count_pen + hhi_penalty + per_symbol_edge_pen
+        
         objective_final = float(
-            geometric_mean_log
-            - consistency_penalty
-            + tail_bonus
-            + calmar_term
-            - lam_ui * max_ui
-            - soft_penalty
+            stat_lcb             # Core Risk-Adjusted Growth
+            + tail_ratio_reward  # CPCV path tail ratio (soft reward toward gate)
+            - concentration_pen  # Path stability
+            - hhi_penalty        # Asset diversity
+            - per_symbol_edge_pen # Individual asset edge
+            - trade_count_pen    # Statistical significance
         )
-
-        # PSR: P(SR > 0) on CPCV path log-TWR values
-        if n_paths_ct >= 2 and sd_paths > 1e-12:
-            sr_est = mu_paths / sd_paths
-            psr_val = probabilistic_sharpe_ratio(sr_est, n_obs=n_paths_ct)
-        else:
-            psr_val = 0.0
+        prior_scale = float(cfg.get("SPOT_EXIT_FAMILY_PRIOR_SCALE", 1.0))
+        prior_pen = float(
+            exit_family_prior_penalty(
+                str(params.get("SIGNAL_TYPE", "ADX_BREAKOUT")),
+                str(params.get("EXIT_FAMILY", "BALANCED")),
+            )
+        ) * prior_scale
+        objective_final = float(objective_final - prior_pen)
 
         worst_seg_mdd = float(np.max(path_worst_mdd)) if path_worst_mdd else 0.0
         mean_path_return_pct = (math.exp(mean_log_tw) - 1.0) * 100.0
         mean_path_calmar = float(np.mean(path_calmars)) if path_calmars else 0.0
 
+        trial.set_user_attr("objective_final", objective_final)
         trial.set_user_attr("growth_score", float(objective_final))
+        trial.set_user_attr("exit_family_prior_penalty", float(prior_pen))
         trial.set_user_attr("p10_gmgr", float(p10_gmgr))
-        trial.set_user_attr("objective_geometric_mean_log", float(geometric_mean_log))
+        trial.set_user_attr("cpcv_p25_log_tw", float(p25_log))
+        trial.set_user_attr("cpcv_path_cv", float(cv_paths))
+        trial.set_user_attr("objective_ceq_growth", float(ceq_growth))
+        trial.set_user_attr("objective_geometric_mean_log", float(mu_paths))
         trial.set_user_attr("objective_mean_path_calmar", float(mean_path_calmar))
         trial.set_user_attr("max_ulcer_index", float(max_ui))
-        trial.set_user_attr("objective_soft_penalty", float(soft_penalty))
+        trial.set_user_attr("objective_soft_penalty", float(total_soft_penalty))
         trial.set_user_attr("dsr_paths", dsr_val)
-        trial.set_user_attr("objective_final", objective_final)
         trial.set_user_attr("gate1_sqn", float(gate1_sqn))
         trial.set_user_attr("psr_paths", float(psr_val))
         trial.set_user_attr("gate1_path_sortino", float(mean_path_sortino))
-        trial.set_user_attr("cpcv_path_tail_ratio", float(mean_tail_ratio))
+        trial.set_user_attr("cpcv_path_tail_ratio", float(mean_tail_gate))
         trial.set_user_attr("cpcv_mean_path_return_pct", float(mean_path_return_pct))
         trial.set_user_attr("cpcv_worst_segment_mdd_pct", float(worst_seg_mdd))
+        trial.set_user_attr(
+            "cpcv_path_oos_log_tw",
+            [float(x) for x in path_compound_raw_log_tw],
+        )
 
         return float(objective_final)
     finally:
@@ -1378,9 +1555,11 @@ def run_holdout_shared_cash_portfolio(
     signal_disk_cache_root: Optional[Path] = None,
     return_signal_dfs: bool = False,
     concurrency_penalty_scale: float = 1.0,
+    oos_end_idx: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
     OOS holdout: single shared-cash run from oos_start_idx to end for all symbols.
+    If oos_end_idx is set, evaluation ends at that absolute bar index (exclusive upper bound on OHLCV index).
     """
     p = dict(params)
     strategy: UltimateSpotStrategy = UltimateSpotStrategy(name="HoldoutSpot", params=p)
@@ -1424,6 +1603,8 @@ def run_holdout_shared_cash_portfolio(
     ref_df = full_signal_dfs[ref_sym]
     slice_start = max(0, oos_start - 1)
     slice_end = len(ref_df)
+    if oos_end_idx is not None:
+        slice_end = min(int(oos_end_idx), len(ref_df))
     _logger.info(
         "Holdout OOS debug: oos_start=%d, slice_start=%d, slice_end=%d, "
         "exec_start=%d, seg_len=%d, n_symbols=%d",
@@ -1492,7 +1673,7 @@ def run_holdout_shared_cash_portfolio(
     pos_pnl = float(np.sum(pnl[pnl > 0.0]))
     neg_pnl = float(np.abs(np.sum(pnl[pnl < 0.0])))
     pf = pos_pnl / neg_pnl if neg_pnl > 1e-12 else 10.0
-    calmar = abs(cagr) / abs(mdd) if abs(mdd) > 1e-6 else 0.0
+    calmar = (cagr / abs(mdd)) if abs(mdd) > 1e-6 else 0.0
     win_rate = float(np.sum(pnl > 0.0) / len(pnl)) * 100.0 if len(pnl) > 0 else 0.0
 
     twr = max(float(res.final_balance / initial_balance), 1e-9)
@@ -1528,4 +1709,270 @@ def run_holdout_shared_cash_portfolio(
     }
     if return_signal_dfs:
         out["full_signal_dfs"] = full_signal_dfs
+    return out
+
+
+def run_cpcv_complement_evaluation(
+    params: Dict[str, Any],
+    symbols: List[str],
+    tf: str,
+    data_maps: Dict[str, Dict[str, Any]],
+    cpcv_paths: List[CPCVPath],
+    all_block_ranges: List[Tuple[int, int]],
+    *,
+    oos_path_scores: Sequence[float],
+    signal_disk_cache_root: Optional[Path] = None,
+    project_root: Optional[str] = None,
+    concurrency_penalty_scale: float = 1.0,
+) -> Tuple[float, float]:
+    """
+    Evaluate CPCV complement (train) segments for each path on fixed params; compare to stored OOS path scores.
+    Returns (pbo, spearman_rho).
+    """
+    oos_list = [float(x) for x in oos_path_scores]
+    if len(cpcv_paths) != len(oos_list) or not cpcv_paths or not all_block_ranges:
+        return (0.5, 0.0)
+
+    ref_sym = symbols[0]
+    is_off = int(data_maps[ref_sym].get(f"is_start_idx_{tf}", 0))
+    ref_df = data_maps[ref_sym][tf]
+    if ref_df is None or ref_df.empty:
+        return (0.5, 0.0)
+    ref_len = len(ref_df) - is_off
+    if ref_len < 200:
+        return (0.5, 0.0)
+
+    p = dict(params)
+    strategy: UltimateSpotStrategy = UltimateSpotStrategy(name="PBOComplement", params=p)
+    cache_root: Optional[Path] = signal_disk_cache_root
+    if cache_root is None and project_root is not None:
+        cache_root = Path(project_root) / ".spot_signal_cache"
+
+    strategy._portfolio_eval_ctx = {"data_maps": data_maps, "symbols": list(symbols), "tf": tf}
+    full_signal_dfs: Dict[str, pd.DataFrame] = {}
+    try:
+        for sym in symbols:
+            target_df_full: Optional[pd.DataFrame] = data_maps.get(sym, {}).get(tf)
+            if target_df_full is None or target_df_full.empty:
+                continue
+            fp = _dataset_fingerprint_from_df(target_df_full)
+            cache_key: _SignalCacheKey = _build_signal_cache_key(p, sym, tf, len(target_df_full), fp)
+            full_signal_dfs[sym] = get_or_compute_signals(
+                cache_key, target_df_full, strategy, disk_cache_root=cache_root
+            )
+    finally:
+        strategy._portfolio_eval_ctx = None
+
+    if len(full_signal_dfs) != len(symbols):
+        return (0.5, 0.0)
+
+    prebuilt_full_arrays: Dict[str, Dict[str, np.ndarray]] = {}
+    for sym in symbols:
+        target_df_full = data_maps.get(sym, {}).get(tf)
+        if target_df_full is None or target_df_full.empty:
+            return (0.5, 0.0)
+        fp = _dataset_fingerprint_from_df(target_df_full)
+        sig_key = _build_signal_cache_key(p, sym, tf, len(target_df_full), fp)
+        with _cache_lock:
+            if sig_key in _arrays_cache:
+                _arrays_cache.move_to_end(sig_key)
+                prebuilt_full_arrays[sym] = _arrays_cache[sig_key]
+                continue
+        arrs = _dataframe_to_symbol_arrays_extended(full_signal_dfs[sym])
+        with _cache_lock:
+            while len(_arrays_cache) >= _ARRAYS_CACHE_MAXSIZE:
+                _arrays_cache.popitem(last=False)
+            _arrays_cache[sig_key] = arrs
+        prebuilt_full_arrays[sym] = arrs
+
+    max_slots = int(OPT_SPOT_CONFIG.get("SPOT_MAX_CONCURRENT_POSITIONS", 3))
+    is_scores: List[float] = []
+    for path in cpcv_paths:
+        comp = cpcv_complement_segments(path, all_block_ranges)
+        raw = _cpcv_path_compound_raw_log_tw(
+            comp,
+            prebuilt_full_arrays=prebuilt_full_arrays,
+            symbols=symbols,
+            params=p,
+            is_off=is_off,
+            ref_df=ref_df,
+            max_slots=max_slots,
+            warmup_bars=0,
+            concurrency_penalty_scale=concurrency_penalty_scale,
+        )
+        is_scores.append(raw)
+    if any(not np.isfinite(x) for x in is_scores):
+        return (0.5, 0.0)
+    return compute_pbo_from_cpcv_paths(is_scores, oos_list)
+
+
+def run_multi_window_oos_holdout(
+    params: Dict[str, Any],
+    symbols: List[str],
+    tf: str,
+    oos_data_maps: Dict[str, Dict[str, Any]],
+    n_sub_windows: int = 2,
+    *,
+    signal_disk_cache_root: Optional[Path] = None,
+    concurrency_penalty_scale: float = 1.0,
+    full_holdout_result: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """
+    Anchored expanding OOS windows (4mo, 8mo, ... + full). Reuses full-window holdout once for the last window.
+    Pass full_holdout_result to avoid a second full-OOS shared-cash run when already computed.
+    """
+    ref_sym = symbols[0]
+    oos_start = int(oos_data_maps[ref_sym].get(f"oos_start_idx_{tf}", 0))
+    full_end = len(oos_data_maps[ref_sym][tf])
+    bars_pm = float(OPT_SPOT_CONFIG.get("SPOT_MULTI_WINDOW_BARS_PER_MONTH", 180.0))
+    ends_raw: List[int] = []
+    for i in range(1, n_sub_windows + 1):
+        cap = oos_start + int(i * 4 * bars_pm)
+        ends_raw.append(min(cap, full_end))
+    ends_raw.append(full_end)
+
+    ordered: List[int] = []
+    seen: Set[int] = set()
+    for e in ends_raw:
+        if e > oos_start and e not in seen:
+            seen.add(e)
+            ordered.append(int(e))
+
+    if full_holdout_result is not None:
+        full_res = full_holdout_result
+    else:
+        full_res = run_holdout_shared_cash_portfolio(
+            params,
+            symbols,
+            tf,
+            oos_data_maps,
+            signal_disk_cache_root=signal_disk_cache_root,
+            return_signal_dfs=False,
+            concurrency_penalty_scale=concurrency_penalty_scale,
+            oos_end_idx=None,
+        )
+
+    if not ordered:
+        return {
+            "windows": [],
+            "median_cagr_pct": float(full_res.get("portfolio_cagr_pct", -100.0)),
+            "worst_mdd_pct": float(full_res.get("mdd_pct", 100.0)),
+            "positive_windows": 0,
+            "total_windows": 0,
+            "cagr_dispersion": 0.0,
+            "full_window_result": full_res,
+        }
+
+    windows: List[Dict[str, Any]] = []
+    cagrs: List[float] = []
+    for end in ordered:
+        if end >= full_end:
+            r = full_res
+        else:
+            r = run_holdout_shared_cash_portfolio(
+                params,
+                symbols,
+                tf,
+                oos_data_maps,
+                signal_disk_cache_root=signal_disk_cache_root,
+                return_signal_dfs=False,
+                concurrency_penalty_scale=concurrency_penalty_scale,
+                oos_end_idx=end,
+            )
+        cagr_w = float(r["portfolio_cagr_pct"])
+        cagrs.append(cagr_w)
+        windows.append(
+            {
+                "end_idx": int(end),
+                "cagr_pct": cagr_w,
+                "mdd_pct": float(r["mdd_pct"]),
+                "pf": float(r["profit_factor"]),
+                "trades": float(r["long_trades"]),
+                "calmar": float(r["calmar_ratio"]),
+                "tail_ratio": float(r["tail_ratio"]),
+            }
+        )
+
+    mean_c = float(np.mean(cagrs)) if cagrs else 0.0
+    std_c = float(np.std(cagrs, ddof=1)) if len(cagrs) > 1 else 0.0
+    disp = float(std_c / max(abs(mean_c), 1e-6))
+    pos = int(sum(1 for c in cagrs if c > 0.0))
+    med = float(np.median(cagrs)) if cagrs else -100.0
+    worst_mdd = float(max((float(w["mdd_pct"]) for w in windows), default=100.0))
+
+    return {
+        "windows": windows,
+        "median_cagr_pct": med,
+        "worst_mdd_pct": worst_mdd,
+        "positive_windows": pos,
+        "total_windows": int(len(windows)),
+        "cagr_dispersion": disp,
+        "full_window_result": full_res,
+    }
+
+
+def _regime_stress_label(mult: float) -> str:
+    if mult > 0.5:
+        return "risk_on"
+    if mult > 0.0:
+        return "cautious"
+    return "stress"
+
+
+def compute_regime_conditional_oos_metrics(
+    full_signal_dfs: Dict[str, pd.DataFrame],
+    portfolio_equity_curve: np.ndarray,
+    oos_start_idx: int,
+    symbols: List[str],
+) -> Dict[str, Dict[str, float]]:
+    """
+    OOS bars classified by reference symbol regime_risk_mult; per-regime return and MDD (diagnostic).
+    """
+    ref = symbols[0]
+    if ref not in full_signal_dfs:
+        return {}
+    sig = full_signal_dfs[ref]
+    if "regime_risk_mult" not in sig.columns:
+        return {}
+    eq = np.asarray(portfolio_equity_curve, dtype=np.float64).ravel()
+    rrm = sig["regime_risk_mult"].to_numpy(dtype=np.float64)
+    start = int(oos_start_idx)
+    n_sig = max(0, len(rrm) - start)
+    n_eq = len(eq)
+    n = min(n_sig, n_eq)
+    if n < 2:
+        return {}
+    rrm = rrm[start : start + n]
+    eq = eq[:n]
+
+    labels = [_regime_stress_label(float(rrm[i])) for i in range(n)]
+    log_ret = np.diff(np.log(np.maximum(eq, 1e-12)))
+    keys = ("risk_on", "cautious", "stress")
+    sum_log: Dict[str, float] = {k: 0.0 for k in keys}
+    bar_ct: Dict[str, float] = {k: 0.0 for k in keys}
+    for j in range(n):
+        bar_ct[labels[j]] += 1.0
+    for i in range(1, n):
+        lab = labels[i]
+        lr = float(log_ret[i - 1])
+        sum_log[lab] += lr
+
+    out: Dict[str, Dict[str, float]] = {}
+    for lab in keys:
+        slr = sum_log[lab]
+        bc = bar_ct[lab]
+        ret_pct = float((np.exp(slr) - 1.0) * 100.0) if bc > 0 else 0.0
+        idx = [j for j in range(n) if labels[j] == lab]
+        if len(idx) >= 2:
+            sub_eq = eq[np.asarray(idx, dtype=np.int64)]
+            mdd_c = float(calc_mdd_from_equity(sub_eq))
+        else:
+            mdd_c = 0.0
+        avg_br = float((np.exp(slr / max(bc, 1.0)) - 1.0) * 100.0) if bc > 0 else 0.0
+        out[lab] = {
+            "bar_count": bc,
+            "return_pct": ret_pct,
+            "mdd_pct": mdd_c,
+            "avg_bar_return": avg_br,
+        }
     return out
