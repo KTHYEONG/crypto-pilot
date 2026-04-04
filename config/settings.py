@@ -19,11 +19,13 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 # 데이터 저장 경로
 DATA_DIR = BASE_DIR / "data"
+SPOT_DATA_DIR = DATA_DIR / "spot"
 RESULTS_DIR = BASE_DIR / "results"
 LOG_DIR = BASE_DIR / "logs"
 
 # 디렉토리 자동 생성
 DATA_DIR.mkdir(parents=True, exist_ok=True)
+SPOT_DATA_DIR.mkdir(parents=True, exist_ok=True)
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 

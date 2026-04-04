@@ -21,6 +21,37 @@ HoldoutFold = Tuple[int, int, int]
 # CPCV: each path is a list of disjoint test segment index ranges [start, end)
 CPCVPath = List[Tuple[int, int]]
 
+
+def list_cpcv_block_ranges(n_bars: int, n_blocks: int, embargo: int = 0) -> List[Tuple[int, int]]:
+    """
+    Physical IS blocks used by build_cpcv_test_paths (same geometry, IS-relative indices).
+    """
+    n = int(n_bars)
+    nb = int(n_blocks)
+    e = max(0, int(embargo))
+    if n < nb * 2 or nb < 1:
+        return []
+    base = n // nb
+    if base <= e:
+        return []
+    out: List[Tuple[int, int]] = []
+    for j in range(nb):
+        raw_start = j * base
+        end = (j + 1) * base if j < nb - 1 else n
+        start = raw_start + e
+        if end <= start:
+            return []
+        out.append((start, end))
+    return out
+
+
+def cpcv_complement_segments(test_path: CPCVPath, all_blocks: List[Tuple[int, int]]) -> List[Tuple[int, int]]:
+    """Train/CPCV complement = all physical blocks not selected as test in this path."""
+    test_set = {tuple(int(x) for x in pair) for pair in test_path}
+    norm_blocks = [tuple(int(x) for x in b) for b in all_blocks]
+    comp = [b for b in norm_blocks if b not in test_set]
+    return sorted(comp, key=lambda t: t[0])
+
 def build_purged_walk_forward_folds(
     df: pd.DataFrame,
     n_folds: int = 4,

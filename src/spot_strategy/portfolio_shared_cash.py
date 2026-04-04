@@ -217,6 +217,9 @@ def run_shared_cash_multi_symbol(
             les = float(arr["long_entry_signal"][prev_i])
             if les < 0.5 or np.isnan(les):
                 continue
+            gate = arr.get("regime_entry_gate")
+            if gate is not None and len(gate) > prev_i and float(gate[prev_i]) < 0.5:
+                continue
             c_high = float(arr["high"][i])
             eu_prev = float(arr["entry_upper"][prev_i])
             if eu_prev < 1.0:
@@ -622,6 +625,8 @@ def _try_open_long(
     if regime_risk_mult is not None and len(regime_risk_mult) > prev_i:
         rm = float(regime_risk_mult[prev_i])
     if not np.isfinite(rm):
+        return slot, balance, False, 0, 0.0
+    if rm < 1e-9:
         return slot, balance, False, 0, 0.0
     rm = float(np.clip(rm, 0.05, 1.0))
 
