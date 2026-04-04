@@ -45,8 +45,10 @@ class KCPullbackSignal:
         entry = macro_bull & dip
         ema_fast = compute_ema_numpy(close, tp_mean_p)
         kill = close > ema_fast
+        # rank_score: deeper oversold (lower RSI) => higher priority for long dip entries
+        rank = 100.0 - rsi
         return SignalOutput(
             entry_signal=entry.astype(np.bool_),
             kill_signal=kill.astype(np.float64),
-            rank_score=rsi.astype(np.float64),
+            rank_score=rank.astype(np.float64),
         )

@@ -85,7 +85,8 @@ class EmaAtrRegime:
         symbols = sorted(s for s in data_maps if tf in data_maps[s])
         if not symbols:
             raise ValueError("ema_atr regime: empty data_maps")
-        df = data_maps[symbols[0]][tf]
+        ref = "KRW-BTC" if "KRW-BTC" in data_maps and data_maps["KRW-BTC"].get(tf) is not None else symbols[0]
+        df = data_maps[ref][tf]
         atr_period = int(params.get("ATR_REGIME_PERIOD", 14))
         labels = compute_ema_atr_regime_labels(
             df,
