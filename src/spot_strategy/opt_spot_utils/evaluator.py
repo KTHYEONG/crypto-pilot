@@ -105,7 +105,7 @@ _SIGNAL_CACHE_SCHEMA_VERSION: int = 15
 
 _SPOT_OBJECTIVE_CAGR_WEIGHT: float = 0.0  # Abandoning additive CAGR
 _SPOT_OBJECTIVE_MIN_TRADES_HARD: float = 10.0 # Min trades per path to even consider
-_SPOT_OBJECTIVE_MIN_TRADES_SOFT: float = 25.0 # Target trades for statistical robustness
+_SPOT_OBJECTIVE_MIN_TRADES_SOFT: float = 40.0  # Target trades for statistical robustness
 _SPOT_OBJECTIVE_LOG_TWR_WEIGHT: float = 1.0
 _SPOT_OBJECTIVE_PATH_CV_PENALTY: float = 0.75  # Path CV penalty (Generalized Kelly λ≈0.75)
 _SPOT_OBJECTIVE_GAMMA: float = 2.0  # CRRA Risk Aversion (gamma > 1 for risk-aversion)
@@ -1473,7 +1473,18 @@ def objective_spot(
         p25_log = float(np.percentile(path_returns, 25.0)) if path_returns.size else -10.0
         p10_log = float(np.percentile(path_returns, 10.0)) if path_returns.size else -10.0
         total_soft_penalty = trade_count_pen + hhi_penalty + per_symbol_edge_pen
-        
+
+        temporal_decay_pen = 0.0
+        n_p_raw = len(path_compound_raw_log_tw)
+        temporal_decay_weight = float(cfg.get("SPOT_TEMPORAL_DECAY_PEN_WEIGHT", 0.20))
+        if n_p_raw >= 4 and temporal_decay_weight > 0.0:
+            k_recent = max(2, n_p_raw // 4)
+            tw_raw_arr = np.asarray(path_compound_raw_log_tw, dtype=np.float64)
+            all_mean_tw = float(np.mean(tw_raw_arr))
+            recent_mean_tw = float(np.mean(tw_raw_arr[-k_recent:]))
+            temporal_decay = max(0.0, all_mean_tw - recent_mean_tw)
+            temporal_decay_pen = temporal_decay * temporal_decay_weight
+
         objective_final = float(
             stat_lcb             # Core Risk-Adjusted Growth
             + tail_ratio_reward  # CPCV path tail ratio (soft reward toward gate)
@@ -1481,6 +1492,7 @@ def objective_spot(
             - hhi_penalty        # Asset diversity
             - per_symbol_edge_pen # Individual asset edge
             - trade_count_pen    # Statistical significance
+            - temporal_decay_pen  # Recent CPCV paths must not collapse vs earlier paths
         )
         prior_scale = float(cfg.get("SPOT_EXIT_FAMILY_PRIOR_SCALE", 1.0))
         prior_pen = float(
@@ -1497,6 +1509,7 @@ def objective_spot(
 
         trial.set_user_attr("objective_final", objective_final)
         trial.set_user_attr("growth_score", float(objective_final))
+        trial.set_user_attr("temporal_decay_pen", float(temporal_decay_pen))
         trial.set_user_attr("exit_family_prior_penalty", float(prior_pen))
         trial.set_user_attr("p10_gmgr", float(p10_gmgr))
         trial.set_user_attr("cpcv_p25_log_tw", float(p25_log))
