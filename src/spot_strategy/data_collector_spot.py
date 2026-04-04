@@ -11,7 +11,7 @@ project_root = str(Path(__file__).resolve().parents[2])
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-from config.settings import DATA_DIR, SPOT_BACKTEST_START_DATE, SPOT_BACKTEST_END_DATE
+from config.settings import DATA_DIR, SPOT_DATA_DIR, SPOT_BACKTEST_START_DATE, SPOT_BACKTEST_END_DATE
 from src.common.utils import setup_logger
 
 class DataValidator:
@@ -59,10 +59,10 @@ class DataCollectorSpot:
 
     def _cache_path(self, symbol, timeframe):
         safe_symbol = self._safe_symbol(symbol)
-        return DATA_DIR / f"spot_{safe_symbol}_{timeframe}.parquet"
+        return SPOT_DATA_DIR / f"spot_{safe_symbol}_{timeframe}.parquet"
 
     def _meta_path(self):
-        return DATA_DIR / "parquet_spot_cache_meta.json"
+        return SPOT_DATA_DIR / "parquet_spot_cache_meta.json"
 
     def _meta_key(self, symbol, timeframe):
         return f"spot::{self._safe_symbol(symbol)}::{timeframe}"

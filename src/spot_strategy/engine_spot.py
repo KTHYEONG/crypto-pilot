@@ -44,6 +44,7 @@ class BacktestEngineFastSpot:
         "strength_filter",
         "atr",
         "regime_risk_mult",
+        "regime_state",
         "kill_signal",
         "garch_kelly_f",
         "fractal_high_flag",
@@ -109,6 +110,16 @@ class BacktestEngineFastSpot:
 
         n_bars = len(close)
         regime_rm = df["daily_regime_risk_mult"].values if "daily_regime_risk_mult" in df.columns else np.ones(n_bars, dtype=np.float64)
+        regime_entry_gate = (
+            df["daily_regime_entry_gate"].values
+            if "daily_regime_entry_gate" in df.columns
+            else np.ones(n_bars, dtype=np.float64)
+        )
+        regime_state_1d = (
+            df["daily_regime_state"].values
+            if "daily_regime_state" in df.columns
+            else np.full(n_bars, 2.0, dtype=np.float64)
+        )
         garch_k = df["daily_garch_kelly_f"].values if "daily_garch_kelly_f" in df.columns else np.ones(n_bars, dtype=np.float64)
         kill_sig = df["daily_kill_signal"].values if "daily_kill_signal" in df.columns else np.zeros(n_bars, dtype=np.float64)
         fractal_hf = (
@@ -137,6 +148,8 @@ class BacktestEngineFastSpot:
             entry_upper,
             trend_dir, strength_filter, atr,
             regime_rm, garch_k, kill_sig,
+            regime_entry_gate,
+            regime_state_1d,
             self.initial_balance, self.fee_rate, self.slippage_rate,
             self.risk_per_trade, timestamps,
             long_atr_mult, long_trail_mult, long_tp_mult,
@@ -272,6 +285,8 @@ def backtest_loop_numba_spot(
     entry_upper,
     trend_dir, strength_filter, atr,
     regime_risk_mult, garch_kelly_f, kill_signal,
+    regime_entry_gate,
+    regime_state,
     initial_balance, fee_rate, slippage_rate,
     risk_per_trade, timestamps,
     long_atr_mult, long_trail_mult, long_tp_mult,
@@ -366,7 +381,11 @@ def backtest_loop_numba_spot(
                 and amount > 0.0
             ):
                 cap_amt = amount * 0.99
-                scale_amount = amount * scale_out_ratio
+                eff_scale = scale_out_ratio
+                rst_fr = regime_state[i] if i < len(regime_state) else 2.0
+                if rst_fr > 0.5 and rst_fr < 1.5:
+                    eff_scale = min(0.95, scale_out_ratio * 1.12)
+                scale_amount = amount * eff_scale
                 if scale_amount > cap_amt:
                     scale_amount = cap_amt
                 if scale_amount > 0.0:
@@ -409,7 +428,10 @@ def backtest_loop_numba_spot(
                 # Parabolic Tightening: If price moved enough from entry relative to ATR, use tighter trail
                 pos_atr = atr[entry_idx]
                 dist = highest - entry_price
+                rst_i = regime_state[i] if i < len(regime_state) else 2.0
                 current_trail_mult = long_trail_mult
+                if rst_i > 0.5 and rst_i < 1.5:
+                    current_trail_mult = current_trail_mult * 0.88
                 if i < len(trail_tighten_flag) and trail_tighten_flag[i] > 0.5:
                     current_trail_mult = long_trail_lock_mult
                 elif dist > (pos_atr * tp_lock_mult):
@@ -419,10 +441,14 @@ def backtest_loop_numba_spot(
                 if new_stop > stop_price:
                     stop_price = new_stop
 
+            rst_ts = regime_state[i] if i < len(regime_state) else 2.0
+            eff_ts = time_stop_bars
+            if rst_ts > 0.5 and rst_ts < 1.5:
+                eff_ts = max(1, int(time_stop_bars * 0.65))
             if (
                 (not exit_triggered)
                 and time_stop_bars > 0
-                and (i - entry_idx) >= time_stop_bars
+                and (i - entry_idx) >= eff_ts
             ):
                 exit_price = c_open * (1.0 - slippage_rate)
                 exit_triggered = True
@@ -464,6 +490,10 @@ def backtest_loop_numba_spot(
                     do_entry = True
 
             if do_entry:
+                ge = regime_entry_gate[prev_i] if prev_i < len(regime_entry_gate) else 1.0
+                if ge < 0.5:
+                    equity_curve[i] = balance
+                    continue
                 prev_atr = atr[prev_i]
                 if np.isnan(prev_atr) or prev_atr <= 0.0:
                     equity_curve[i] = balance
@@ -479,11 +509,17 @@ def backtest_loop_numba_spot(
                     if np.isnan(rr):
                         equity_curve[i] = balance
                         continue
+                    if rr < 1e-9:
+                        equity_curve[i] = balance
+                        continue
                     # Numba nopython: np.clip(scalar) unsupported; use min/max.
                     rr = max(0.05, min(1.0, rr))
                     if np.isnan(gk) or gk <= 0.0:
                         gk = 1.0
                     eff = rr * gk
+                    rst_ent = regime_state[prev_i] if prev_i < len(regime_state) else 2.0
+                    if rst_ent > 0.5 and rst_ent < 1.5:
+                        eff = eff * 0.90
                     if eff < 0.05:
                         eff = 0.05
                     if eff > 1.0:

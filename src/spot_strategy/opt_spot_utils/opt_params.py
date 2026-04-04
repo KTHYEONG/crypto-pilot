@@ -119,6 +119,7 @@ def build_multi_combo_param_space(tops: Sequence[_Stage1ComboLike]) -> Dict[str,
 
 _CORE_ORDER: tuple[str, ...] = (
     "SIZING_METHOD",
+    "EXIT_FAMILY",
     "RISK_PER_TRADE",
     "MAX_EXPOSURE",
     "KELLY_FRACTION",
@@ -214,6 +215,11 @@ def suggest_params_spot(
         _suggest_one(trial, space, params, "SIZING_METHOD")
     if "SIZING_METHOD" in params:
         params["SIZING_METHOD"] = str(params["SIZING_METHOD"]).lower()
+
+    if "EXIT_FAMILY" in space and "EXIT_FAMILY" not in params:
+        _suggest_one(trial, space, params, "EXIT_FAMILY")
+    if "EXIT_FAMILY" in params:
+        params["EXIT_FAMILY"] = str(params["EXIT_FAMILY"]).upper()
 
     for name in _iter_param_names_define_by_run(space, signal_type):
         if name in params:
