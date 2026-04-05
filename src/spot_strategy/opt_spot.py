@@ -1651,7 +1651,8 @@ def main() -> None:
         should_save = bool(growth_score > 0.0 and is_all_passed)
         # File name is required by downstream loaders; overwrite risk is limited to multi-mode.
         clean_sym = str(target).replace("/", "").replace("-", "") if not isinstance(target, tuple) else ""
-        json_filename = f"best_params_{tf_eval}.json" if args.mode == "multi" else f"best_params_{clean_sym}_{tf_eval}.json"
+        # FILENAME CHANGE: best_spot_{tf}.json / best_spot_{clean_sym}_{tf}.json
+        json_filename = f"best_spot_{tf_eval}.json" if args.mode == "multi" else f"best_spot_{clean_sym}_{tf_eval}.json"
         pending_json_writes.append((json_filename, params, best_score_final, should_save))
 
     # JSON save logs last
@@ -1666,7 +1667,8 @@ def main() -> None:
         
         for json_filename, params, best_score_final, should_save in pending_json_writes:
             json_path = results_dir / json_filename
-            enc_path = json_path.with_suffix(json_path.suffix + ".enc")
+            # ENCRYPTED FILENAME: result.json -> result.enc
+            enc_path = json_path.with_suffix(".enc")
             
             if should_save:
                 # 1. Plaintext JSON (Local use only)
