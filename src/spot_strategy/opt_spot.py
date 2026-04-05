@@ -38,7 +38,13 @@ if project_root not in sys.path:
 from src.spot_strategy.data_collector_spot import DataCollectorSpot
 from src.spot_strategy.strategies_spot import UltimateSpotStrategy
 from config.settings import SPOT_INITIAL_BALANCE
-from config.opt_config import OPT_SPOT_CONFIG, SPOT_SYMBOLS, get_search_space_spot, get_quarterly_window
+from config.opt_config import (
+    OPT_SPOT_CONFIG,
+    SPOT_ANCHOR_SYMBOLS,
+    SPOT_SYMBOLS,
+    get_search_space_spot,
+    get_quarterly_window,
+)
 from src.optimization.opt_utils import compute_segment_merge_index
 from src.spot_strategy.opt_spot_utils.cv_utils import (
     CPCVPath,
@@ -719,17 +725,228 @@ def _select_best_trial_from_shortlist(
     return max(pool, key=robust_key)
 
 
+def _load_spot_data_maps_for_symbols(
+    symbols: List[str],
+    tf: str,
+    fetch_start: str,
+    start: str,
+    is_end: str,
+    end: str,
+) -> tuple[Dict[str, Dict[str, Any]], Dict[str, Dict[str, Any]], List[str]]:
+    """Load IS + full OHLCV maps and align (same contract as opt_spot main discovery path)."""
+    collector = DataCollectorSpot()
+    data_maps: Dict[str, Dict[str, Any]] = {}
+    oos_data_maps: Dict[str, Dict[str, Any]] = {}
+    valid_symbols: List[str] = []
+    for sym in symbols:
+        data_maps[sym] = {}
+        oos_data_maps[sym] = {}
+        skip_symbol = False
+        for tfx in [tf, "1d"]:
+            full_df = collector.collect_and_save(sym, tfx, fetch_start, end)
+
+            if full_df is None or full_df.empty or "datetime" not in full_df.columns:
+                _logger.warning("⚠️ [%s] No data available for %s. Skipping this symbol.", sym, tfx)
+                skip_symbol = True
+                break
+
+            tz = full_df["datetime"].dt.tz
+            is_start_dt = pd.to_datetime(start).tz_localize(tz) if tz else pd.to_datetime(start)
+            is_end_dt = pd.to_datetime(is_end).tz_localize(tz) if tz else pd.to_datetime(is_end)
+            data_maps[sym][tfx] = full_df[full_df["datetime"] < is_end_dt].reset_index(drop=True)
+            m = data_maps[sym][tfx]["datetime"] >= is_start_dt
+            data_maps[sym][f"is_start_idx_{tfx}"] = int(m.to_numpy().argmax()) if m.any() else 0
+            oos_data_maps[sym][tfx] = full_df
+            m_oos = full_df["datetime"] >= is_end_dt
+            oos_data_maps[sym][f"oos_start_idx_{tfx}"] = (
+                int(m_oos.to_numpy().argmax()) if m_oos.any() else len(full_df)
+            )
+
+        if skip_symbol:
+            continue
+
+        data_maps[sym][f"merge_idx_{tf}"] = compute_segment_merge_index(data_maps[sym][tf], data_maps[sym]["1d"])
+        oos_data_maps[sym][f"merge_idx_{tf}"] = compute_segment_merge_index(
+            oos_data_maps[sym][tf], oos_data_maps[sym]["1d"]
+        )
+        valid_symbols.append(sym)
+
+    if "KRW-BTC" in valid_symbols:
+        btc_4h = data_maps["KRW-BTC"][tf][["datetime", "close"]].copy()
+        btc_4h = btc_4h.rename(columns={"close": "btc_close"})
+        btc_oos = oos_data_maps["KRW-BTC"][tf][["datetime", "close"]].copy()
+        btc_oos = btc_oos.rename(columns={"close": "btc_close"})
+        for sym in valid_symbols:
+            if sym == "KRW-BTC":
+                continue
+            data_maps[sym][tf] = data_maps[sym][tf].merge(btc_4h, on="datetime", how="left")
+            oos_data_maps[sym][tf] = oos_data_maps[sym][tf].merge(btc_oos, on="datetime", how="left")
+
+    if "KRW-ETH" in valid_symbols:
+        eth_4h = data_maps["KRW-ETH"][tf][["datetime", "close"]].copy()
+        eth_4h = eth_4h.rename(columns={"close": "eth_close"})
+        eth_oos = oos_data_maps["KRW-ETH"][tf][["datetime", "close"]].copy()
+        eth_oos = eth_oos.rename(columns={"close": "eth_close"})
+        for sym in valid_symbols:
+            if sym == "KRW-ETH":
+                continue
+            data_maps[sym][tf] = data_maps[sym][tf].merge(eth_4h, on="datetime", how="left")
+            oos_data_maps[sym][tf] = oos_data_maps[sym][tf].merge(eth_oos, on="datetime", how="left")
+
+    if len(valid_symbols) >= 2:
+        ref_tz = oos_data_maps[valid_symbols[0]][tf]["datetime"].dt.tz
+        is_start_align = pd.to_datetime(start)
+        is_end_align = pd.to_datetime(is_end)
+        if ref_tz is not None:
+            is_start_align = is_start_align.tz_localize(ref_tz)
+            is_end_align = is_end_align.tz_localize(ref_tz)
+        _align_oos_dataframes_on_common_datetimes(oos_data_maps, valid_symbols, tf, is_end_align)
+        _rebuild_is_data_maps_from_aligned_oos(
+            data_maps, oos_data_maps, valid_symbols, tf, is_start_align, is_end_align
+        )
+        _logger.info(
+            "Aligned full %s on common datetimes: IS=%d bars, OOS full=%d bars (%d symbols).",
+            tf,
+            len(data_maps[valid_symbols[0]][tf]),
+            len(oos_data_maps[valid_symbols[0]][tf]),
+            len(valid_symbols),
+        )
+
+    for sym in valid_symbols:
+        oos_df = oos_data_maps[sym][tf]
+        oos_ix = int(oos_data_maps[sym].get(f"oos_start_idx_{tf}", len(oos_df)))
+        oos_df.attrs["nu_fit_end"] = oos_ix
+
+    return data_maps, oos_data_maps, valid_symbols
+
+
 def main() -> None:
     import importlib
     import config.opt_config
 
-    # 0. Phase 0: Universe Screening (Run once before argparse to refresh defaults)
-    if "--skip-universe" not in sys.argv:
-        from src.spot_strategy.opt_spot_utils.universe_screener import screen_universe
-        
-        screen_universe()
+    pre_parser = argparse.ArgumentParser(add_help=False)
+    pre_parser.add_argument("--skip-universe", action="store_true")
+    pre_parser.add_argument("--reference-date", type=str, default=None)
+    pre_parser.add_argument("--skip-stage1", action="store_true")
+    pre_parser.add_argument("--signal-type", type=str, default=None)
+    pre_parser.add_argument("--mode", type=str, default="multi")
+    pre_parser.add_argument("--tf", type=str, default="4h")
+    pre_args, _ = pre_parser.parse_known_args()
+
+    phase0_narrowed_space: Optional[Dict[str, Dict[str, Any]]] = None
+
+    if not pre_args.skip_universe:
+        from src.spot_strategy.opt_spot_utils.combination_screener import run_combination_screening
+        from src.spot_strategy.opt_spot_utils.opt_params import build_multi_combo_param_space
+        from src.spot_strategy.opt_spot_utils.universe_screener import (
+            load_screener_fixed_params,
+            screen_broad_universe,
+            screen_symbol_refinement,
+        )
+
+        FETCH_START_DATE, START_DATE, IS_END_DATE, END_DATE = get_quarterly_window(pre_args.reference_date)
+        broad_candidates = screen_broad_universe(
+            is_start=START_DATE,
+            is_end=IS_END_DATE,
+            fetch_end=END_DATE,
+        )
         importlib.reload(config.opt_config)
-        # Update global constants for the rest of the script (used as defaults or globals)
+        globals()["SPOT_SYMBOLS"] = config.opt_config.SPOT_SYMBOLS
+        globals()["OPT_SPOT_CONFIG"] = config.opt_config.OPT_SPOT_CONFIG
+
+        if not broad_candidates:
+            _logger.error("Phase A returned no broad candidates. Aborting.")
+            return
+
+        tf0 = pre_args.tf if pre_args.tf == "4h" else "4h"
+        signal_cache_dir_phase0 = str(Path(project_root) / "data" / "cache_spot")
+        Path(signal_cache_dir_phase0).mkdir(parents=True, exist_ok=True)
+
+        anchors_to_add = [s for s in SPOT_ANCHOR_SYMBOLS if s not in broad_candidates]
+        all_symbols_for_load = list(broad_candidates) + anchors_to_add
+        data_maps_broad, _, valid_broad = _load_spot_data_maps_for_symbols(
+            all_symbols_for_load,
+            tf0,
+            FETCH_START_DATE,
+            START_DATE,
+            IS_END_DATE,
+            END_DATE,
+        )
+        if len(valid_broad) < 2:
+            _logger.error("Phase 0: fewer than 2 symbols with loadable data. Aborting.")
+            return
+
+        winning_signal_type: str
+        if not pre_args.skip_stage1 and pre_args.mode == "multi":
+            # Stage1 uses top-K by ADV (broad_candidates already sorted ADV desc).
+            # K is sufficient for signal-type discovery; full pool used in Phase C.
+            stage1_k = int(OPT_SPOT_CONFIG.get("SPOT_STAGE1_BROAD_SAMPLE_K", 12))
+            stage1_syms = [s for s in broad_candidates if s in valid_broad][:stage1_k]
+            if not stage1_syms:
+                stage1_syms = valid_broad[:stage1_k]
+            _logger.info(
+                "Stage1 combination screening on N=%d/%d broad candidates (top ADV, is_end=%s)",
+                len(stage1_syms),
+                len(valid_broad),
+                IS_END_DATE,
+            )
+            tops = run_combination_screening(
+                data_maps={s: data_maps_broad[s] for s in stage1_syms},
+                symbols=stage1_syms,
+                tf=tf0,
+                project_root=project_root,
+                signal_cache_dir=signal_cache_dir_phase0,
+            )
+            if not tops:
+                _logger.error("Phase B: combination screening returned no tops. Aborting.")
+                return
+            max_per_sig = int(config.opt_config.OPT_SPOT_CONFIG.get("SPOT_STAGE2_MAX_PER_SIGNAL_TYPE", 2))
+            filtered_tops: List[Any] = []  # CombinationScore rows
+            sig_ct: Counter[str] = Counter()
+            for combo in tops:
+                sig = str(combo.signal)
+                if sig_ct[sig] < max_per_sig:
+                    filtered_tops.append(combo)
+                    sig_ct[sig] += 1
+            tops_for_stage2 = filtered_tops if filtered_tops else tops
+            winning_signal_type = str(tops_for_stage2[0].signal)
+            phase0_narrowed_space = build_multi_combo_param_space(tops_for_stage2)
+            _logger.info("Phase B winning SIGNAL_TYPE=%s", winning_signal_type)
+            from src.spot_strategy.opt_spot_utils.combination_screener import build_probe_params
+            phase_b_params: Optional[Dict[str, Any]] = build_probe_params(tops_for_stage2[0], tf0)
+        else:
+            st_raw = pre_args.signal_type
+            if st_raw:
+                winning_signal_type = str(st_raw).upper()
+            else:
+                winning_signal_type = str(
+                    load_screener_fixed_params(Path(project_root)).get("SIGNAL_TYPE", "ADX_BREAKOUT")
+                )
+            if pre_args.signal_type:
+                phase0_narrowed_space = _build_narrowed_space_for_signal_types((winning_signal_type,), tf0)
+            _logger.info(
+                "Phase B skipped; using SIGNAL_TYPE=%s for refinement (search-space midpoints for Phase C).",
+                winning_signal_type,
+            )
+            phase_b_params = None  # fallback to _default_screener_params_from_space in Phase C
+
+        refinement_symbols = list(
+            dict.fromkeys(
+                [s for s in broad_candidates if s in valid_broad]
+                + [s for s in SPOT_ANCHOR_SYMBOLS if s in valid_broad]
+            )
+        )
+        screen_symbol_refinement(
+            refinement_symbols,
+            winning_signal_type,
+            IS_END_DATE,
+            symbol_dfs_4h={s: data_maps_broad[s][tf0] for s in valid_broad if s in data_maps_broad},
+            daily_dfs={s: data_maps_broad[s]["1d"] for s in valid_broad if s in data_maps_broad},
+            phase_b_params=phase_b_params,
+            phase_a_broad=list(broad_candidates),
+            anchor_symbols=list(SPOT_ANCHOR_SYMBOLS),
+        )
+        importlib.reload(config.opt_config)
         globals()["SPOT_SYMBOLS"] = config.opt_config.SPOT_SYMBOLS
         globals()["OPT_SPOT_CONFIG"] = config.opt_config.OPT_SPOT_CONFIG
 
@@ -783,88 +1000,15 @@ def main() -> None:
     FETCH_START_DATE, START_DATE, IS_END_DATE, END_DATE = get_quarterly_window(args.reference_date)
     symbols = [s.strip() for s in args.symbols.split(",") if s.strip()]
 
-    collector = DataCollectorSpot()
-    data_maps = {}
-    oos_data_maps = {}
     _logger.info("Loading Spot data for %d symbols (discovery + holdout)...", len(symbols))
-    valid_symbols = []
-    for sym in symbols:
-        data_maps[sym] = {}; oos_data_maps[sym] = {}
-        skip_symbol = False
-        for tf in [args.tf, "1d"]:
-            full_df = collector.collect_and_save(sym, tf, FETCH_START_DATE, END_DATE)
-            
-            if full_df is None or full_df.empty or "datetime" not in full_df.columns:
-                _logger.warning(f"⚠️ [{sym}] No data available for {tf}. Skipping this symbol.")
-                skip_symbol = True
-                break
-                
-            # Spot doesn't use funding fees, skipping merge_funding_into_ohlcv
-            tz = full_df["datetime"].dt.tz
-            is_start_dt = pd.to_datetime(START_DATE).tz_localize(tz) if tz else pd.to_datetime(START_DATE)
-            is_end_dt = pd.to_datetime(IS_END_DATE).tz_localize(tz) if tz else pd.to_datetime(IS_END_DATE)
-            data_maps[sym][tf] = full_df[full_df["datetime"] < is_end_dt].reset_index(drop=True)
-            m = data_maps[sym][tf]["datetime"] >= is_start_dt
-            data_maps[sym][f"is_start_idx_{tf}"] = int(m.to_numpy().argmax()) if m.any() else 0
-            oos_data_maps[sym][tf] = full_df
-            m_oos = full_df["datetime"] >= is_end_dt
-            oos_data_maps[sym][f"oos_start_idx_{tf}"] = int(m_oos.to_numpy().argmax()) if m_oos.any() else len(full_df)
-        
-        if skip_symbol:
-            continue
-
-        data_maps[sym][f"merge_idx_{args.tf}"] = compute_segment_merge_index(data_maps[sym][args.tf], data_maps[sym]["1d"])
-        oos_data_maps[sym][f"merge_idx_{args.tf}"] = compute_segment_merge_index(oos_data_maps[sym][args.tf], oos_data_maps[sym]["1d"])
-        valid_symbols.append(sym)
-
-    if "KRW-BTC" in valid_symbols:
-        btc_4h = data_maps["KRW-BTC"][args.tf][["datetime", "close"]].copy()
-        btc_4h = btc_4h.rename(columns={"close": "btc_close"})
-        btc_oos = oos_data_maps["KRW-BTC"][args.tf][["datetime", "close"]].copy()
-        btc_oos = btc_oos.rename(columns={"close": "btc_close"})
-        for sym in valid_symbols:
-            if sym == "KRW-BTC":
-                continue
-            data_maps[sym][args.tf] = data_maps[sym][args.tf].merge(btc_4h, on="datetime", how="left")
-            oos_data_maps[sym][args.tf] = oos_data_maps[sym][args.tf].merge(btc_oos, on="datetime", how="left")
-
-    if "KRW-ETH" in valid_symbols:
-        eth_4h = data_maps["KRW-ETH"][args.tf][["datetime", "close"]].copy()
-        eth_4h = eth_4h.rename(columns={"close": "eth_close"})
-        eth_oos = oos_data_maps["KRW-ETH"][args.tf][["datetime", "close"]].copy()
-        eth_oos = eth_oos.rename(columns={"close": "eth_close"})
-        for sym in valid_symbols:
-            if sym == "KRW-ETH":
-                continue
-            data_maps[sym][args.tf] = data_maps[sym][args.tf].merge(eth_4h, on="datetime", how="left")
-            oos_data_maps[sym][args.tf] = oos_data_maps[sym][args.tf].merge(eth_oos, on="datetime", how="left")
-
-    if len(valid_symbols) >= 2:
-        ref_tz = oos_data_maps[valid_symbols[0]][args.tf]["datetime"].dt.tz
-        is_start_align = pd.to_datetime(START_DATE)
-        is_end_align = pd.to_datetime(IS_END_DATE)
-        if ref_tz is not None:
-            is_start_align = is_start_align.tz_localize(ref_tz)
-            is_end_align = is_end_align.tz_localize(ref_tz)
-        _align_oos_dataframes_on_common_datetimes(
-            oos_data_maps, valid_symbols, args.tf, is_end_align
-        )
-        _rebuild_is_data_maps_from_aligned_oos(
-            data_maps, oos_data_maps, valid_symbols, args.tf, is_start_align, is_end_align
-        )
-        _logger.info(
-            "Aligned full %s on common datetimes: IS=%d bars, OOS full=%d bars (%d symbols).",
-            args.tf,
-            len(data_maps[valid_symbols[0]][args.tf]),
-            len(oos_data_maps[valid_symbols[0]][args.tf]),
-            len(valid_symbols),
-        )
-
-    for sym in valid_symbols:
-        tf_k = str(args.tf)
-        oos_df = oos_data_maps[sym][tf_k]
-        oos_ix = int(oos_data_maps[sym].get(f"oos_start_idx_{tf_k}", len(oos_df)))
-        oos_df.attrs["nu_fit_end"] = oos_ix
+    data_maps, oos_data_maps, valid_symbols = _load_spot_data_maps_for_symbols(
+        symbols,
+        args.tf,
+        FETCH_START_DATE,
+        START_DATE,
+        IS_END_DATE,
+        END_DATE,
+    )
 
     if not valid_symbols:
         _logger.error("❌ No valid symbols with data found. Aborting optimization.")
@@ -894,6 +1038,7 @@ def main() -> None:
         if narrowed_space_file
         else None
     )
+    narrowed_space_effective = _merge_narrowed_space_dicts(phase0_narrowed_space, narrowed_space_effective)
     if args.signal_type:
         forced = _build_narrowed_space_for_signal_types((str(args.signal_type).upper(),), args.tf)
         narrowed_space_effective = _merge_narrowed_space_dicts(forced, narrowed_space_effective)
@@ -905,46 +1050,49 @@ def main() -> None:
         )
         from src.spot_strategy.opt_spot_utils.opt_params import build_multi_combo_param_space
 
-        tops = run_combination_screening(
-            data_maps={s: data_maps[s] for s in valid_symbols},
-            symbols=valid_symbols,
-            tf=args.tf,
-            project_root=project_root,
-            signal_cache_dir=signal_cache_dir,
-        )
-        if not tops:
-            _logger.error(
-                "Stage1 combination screening found no viable combo (screen score <= threshold). "
-                "No edge detected in current data/symbols. Aborting optimization."
+        if phase0_narrowed_space is not None:
+            _logger.info("Using Stage1 narrowed space from Phase 0 (broad-universe pipeline).")
+        else:
+            tops = run_combination_screening(
+                data_maps={s: data_maps[s] for s in valid_symbols},
+                symbols=valid_symbols,
+                tf=args.tf,
+                project_root=project_root,
+                signal_cache_dir=signal_cache_dir,
             )
-            return
-        max_per_sig = int(OPT_SPOT_CONFIG.get("SPOT_STAGE2_MAX_PER_SIGNAL_TYPE", 2))
-        filtered_tops: List[CombinationScore] = []
-        sig_ct: Counter[str] = Counter()
-        for combo in tops:
-            sig = str(combo.signal)
-            if sig_ct[sig] < max_per_sig:
-                filtered_tops.append(combo)
-                sig_ct[sig] += 1
-        if len(filtered_tops) < len(tops):
+            if not tops:
+                _logger.error(
+                    "Stage1 combination screening found no viable combo (screen score <= threshold). "
+                    "No edge detected in current data/symbols. Aborting optimization."
+                )
+                return
+            max_per_sig = int(OPT_SPOT_CONFIG.get("SPOT_STAGE2_MAX_PER_SIGNAL_TYPE", 2))
+            filtered_tops: List[CombinationScore] = []
+            sig_ct: Counter[str] = Counter()
+            for combo in tops:
+                sig = str(combo.signal)
+                if sig_ct[sig] < max_per_sig:
+                    filtered_tops.append(combo)
+                    sig_ct[sig] += 1
+            if len(filtered_tops) < len(tops):
+                _logger.info(
+                    "Stage2 diversity cap: max %d per SIGNAL_TYPE (%d → %d combos)",
+                    max_per_sig,
+                    len(tops),
+                    len(filtered_tops),
+                )
+            tops_for_stage2 = filtered_tops if filtered_tops else tops
             _logger.info(
-                "Stage2 diversity cap: max %d per SIGNAL_TYPE (%d → %d combos)",
-                max_per_sig,
-                len(tops),
-                len(filtered_tops),
+                "Stage1 combination screening top combos: %s",
+                [
+                    (x.signal, x.regime, x.sizing, round(x.p10_gmgr, 6), round(x.mean_signal_rate, 5), x.reason or "ok")
+                    for x in tops_for_stage2
+                ],
             )
-        tops_for_stage2 = filtered_tops if filtered_tops else tops
-        _logger.info(
-            "Stage1 combination screening top combos: %s",
-            [
-                (x.signal, x.regime, x.sizing, round(x.p10_gmgr, 6), round(x.mean_signal_rate, 5), x.reason or "ok")
-                for x in tops_for_stage2
-            ],
-        )
-        narrowed_space_effective = _merge_narrowed_space_dicts(
-            build_multi_combo_param_space(tops_for_stage2),
-            narrowed_space_effective,
-        )
+            narrowed_space_effective = _merge_narrowed_space_dicts(
+                build_multi_combo_param_space(tops_for_stage2),
+                narrowed_space_effective,
+            )
     elif not args.skip_stage1:
         stage1_space = _run_stage1_structure_discovery(
             data_maps=data_maps,

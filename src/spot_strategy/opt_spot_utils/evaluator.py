@@ -33,6 +33,7 @@ from src.spot_strategy.opt_spot_utils.metrics import (
     portfolio_cagr_pct_from_equity,
     calc_sortino_from_equity,
     calc_tail_ratio_from_equity,
+    calc_tail_ratio_from_trades,
     cvar_loss_pct_from_simple_returns,
     compute_dsr_from_path_values,
     compute_pbo_from_cpcv_paths,
@@ -1690,7 +1691,18 @@ def run_holdout_shared_cash_portfolio(
     win_rate = float(np.sum(pnl > 0.0) / len(pnl)) * 100.0 if len(pnl) > 0 else 0.0
 
     twr = max(float(res.final_balance / initial_balance), 1e-9)
-    tail_r = float(calc_tail_ratio_from_equity(eq)) if eq.size > 1 else 0.0
+    pnl_for_tail = np.asarray(res.pnl_array, dtype=np.float64)
+    if pnl_for_tail.size >= 10:
+        tail_r = float(calc_tail_ratio_from_trades(pnl_for_tail))
+    else:
+        tail_r = 1.0
+    eq_tail_r = float(calc_tail_ratio_from_equity(eq)) if eq.size > 1 else 0.0
+    _logger.info(
+        "Holdout tail ratio: trade-based=%.4f, equity-curve (reference)=%.4f, n_trades=%d",
+        tail_r,
+        eq_tail_r,
+        int(pnl_for_tail.size),
+    )
     dd_bars = float(max_underwater_bars_from_equity(eq)) if eq.size > 1 else 0.0
     final_bal = float(res.final_balance)
     moic = final_bal / initial_balance if initial_balance > 0 else 0.0
@@ -1716,6 +1728,7 @@ def run_holdout_shared_cash_portfolio(
         "calmar_ratio": calmar,
         "win_rate_pct": win_rate,
         "span_days": span_days,
+        "equity_tail_ratio": eq_tail_r,
         "per_symbol_trades": res.per_symbol_trades,
         "per_symbol_wins": res.per_symbol_wins,
         "per_symbol_pnl": res.per_symbol_pnl,
