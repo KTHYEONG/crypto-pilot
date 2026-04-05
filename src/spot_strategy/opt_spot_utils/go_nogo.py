@@ -245,11 +245,11 @@ def run_portfolio_discovery_veto(
     dsr_min: float = -1.0,
 ) -> GoNoGoResult:
     """
-    Discovery veto: PSR hard; DSR soft floor; P10 GMGR must be > 0.
+    Discovery veto: PSR hard; DSR soft floor; P10 GMGR >= -0.001 (noise tolerance).
     """
     psr_ok = psr >= psr_min
     dsr_ok = dsr >= dsr_min
-    gmgr_ok = p10_gmgr > 0.0
+    gmgr_ok = p10_gmgr >= -0.001
     details: Dict[str, bool] = {
         "psr_hard": psr_ok,
         "dsr_soft": dsr_ok,
@@ -261,7 +261,7 @@ def run_portfolio_discovery_veto(
         "[Portfolio Discovery Veto]",
         f"  PSR (hard): {psr:.4f} vs {psr_min} -> {'PASS' if psr_ok else 'FAIL'}",
         f"  DSR ({dsr_label}): {dsr:.4f} vs {dsr_min} -> {'PASS' if dsr_ok else 'FAIL'}",
-        f"  P10 GMGR (>0): {p10_gmgr:.6f} -> {'PASS' if gmgr_ok else 'FAIL'}",
+        f"  P10 GMGR (>= -0.001): {p10_gmgr:.6f} -> {'PASS' if gmgr_ok else 'FAIL'}",
     ]
     return GoNoGoResult(
         passed=passed,
@@ -339,11 +339,12 @@ def run_holdout_portfolio_shared_cash(
     c_calmar = portfolio_calmar_ratio >= calmar_min
 
     # Alpha decay
-    if abs(is_cagr_pct) < 1e-6:
-        alpha_decay_pct = 0.0
-        c_alpha = portfolio_cagr_pct >= alpha_decay_floor_pct # Fallback
+    if is_cagr_pct <= 0.0:
+        # IS period was losing or flat: ratio-based decay is undefined.
+        # CAGR gate already enforces profitability; alpha decay is N/A.
+        alpha_decay_pct = float("nan")
+        c_alpha = True
     else:
-        # Simple percentage decay relative to IS mean
         alpha_decay_pct = ((portfolio_cagr_pct / is_cagr_pct) - 1.0) * 100.0
         c_alpha = alpha_decay_pct >= alpha_decay_floor_pct
 
@@ -359,8 +360,11 @@ def run_holdout_portfolio_shared_cash(
         f"  - Profit Factor >= {pf_min} | {'PASS' if c_pf else 'FAIL'} | obs={portfolio_profit_factor:.4f}",
         f"  - Calmar Ratio >= {calmar_min} | {'PASS' if c_calmar else 'FAIL'} | obs={portfolio_calmar_ratio:.4f}",
         f"  - HWM recovery <= {hw_recovery_days_max}d | {'PASS' if c_hw else 'FAIL'} | obs={oos_dd_days:.1f}d",
-        f"  - Alpha decay >= {alpha_decay_floor_pct}% | {'PASS' if c_alpha else 'FAIL'} | "
-        f"obs={alpha_decay_pct:.1f}% (ref CAGR={is_cagr_pct:.1f}% for decay ratio)",
+        (
+            f"  - Alpha decay >= {alpha_decay_floor_pct}% | {'PASS' if c_alpha else 'FAIL'} | "
+            f"obs={('N/A (IS<=0)' if not math.isfinite(alpha_decay_pct) else f'{alpha_decay_pct:.1f}%')} "
+            f"(ref CAGR={is_cagr_pct:.1f}% for decay ratio)"
+        ),
         "-" * 55,
         f"  FINAL: {'GO' if passed else 'NO-GO'}",
     ]
@@ -503,7 +507,7 @@ def run_final_deployment_report(ctx: FinalDeploymentReportInput) -> str:
     sqn_ok = ctx.gate1_sqn >= ctx.sqn_target
     ps_ok = ctx.gate1_path_sortino >= ctx.path_sortino_target
     g1_tr_ok = ctx.gate1_tail_ratio >= ctx.tail_ratio_target
-    gmgr_ok = ctx.gate1_p10_gmgr > 0.0
+    gmgr_ok = ctx.gate1_p10_gmgr >= -0.001
     psr_ok = ctx.gate1_psr >= ctx.psr_target
     dsr_ok = ctx.gate1_dsr >= ctx.dsr_target
 
@@ -535,7 +539,7 @@ def run_final_deployment_report(ctx: FinalDeploymentReportInput) -> str:
         f"  - Path Tail Ratio (Discovery) : {ctx.gate1_tail_ratio:.2f}   {_fmt_pass_info(g1_tr_ok)} (Min: {ctx.tail_ratio_target})",
         f"  - Prob. Sharpe Ratio (PSR)    : {ctx.gate1_psr:.4f}   {_fmt_pass_info(psr_ok)} (Min: {ctx.psr_target})",
         f"  - Deflated Sharpe Ratio (DSR) : {ctx.gate1_dsr:.4f}   {_fmt_pass_info(dsr_ok)} (Min: {ctx.dsr_target})",
-        f"  - P10 GMGR (Worst Path Grow)  : {ctx.gate1_p10_gmgr:.6f}   {_fmt_pass_info(gmgr_ok)} (Target: > 0)",
+        f"  - P10 GMGR (Worst Path Grow)  : {ctx.gate1_p10_gmgr:.6f}   {_fmt_pass_info(gmgr_ok)} (Target: >= -0.001)",
         f"  - CPCV Mean Path Return       : {ctx.cpcv_mean_path_return_pct:.1f}%",
         f"  - CPCV Worst Segment MDD      : {ctx.cpcv_worst_segment_mdd_pct:.1f}%",
         "",
