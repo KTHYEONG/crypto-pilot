@@ -52,6 +52,16 @@ from src.spot_strategy.opt_spot_utils.opt_params import suggest_params_spot
 
 _logger: logging.Logger = logging.getLogger("opt_spot")
 
+# Optuna TPE `constraints_func`: each value <= 0 means satisfied (Gardner-style soft constraints).
+SPOT_OBJECTIVE_CONSTRAINT_DIM: int = 9
+
+
+def spot_frozen_trial_constraints(trial: optuna.trial.FrozenTrial) -> tuple[float, ...]:
+    raw = trial.user_attrs.get("spot_constraint_values")
+    if isinstance(raw, (list, tuple)) and len(raw) == SPOT_OBJECTIVE_CONSTRAINT_DIM:
+        return tuple(float(x) for x in raw)
+    return tuple(1.0 for _ in range(SPOT_OBJECTIVE_CONSTRAINT_DIM))
+
 SymbolFoldResult = Tuple[str, float, float, float, float, float, float, float, np.ndarray, float]
 
 _MAX_SYMBOL_WORKERS: int = max(1, int(os.getenv("OPT_SPOT_SYMBOL_WORKERS", "1")))
@@ -1065,10 +1075,6 @@ def objective_spot(
         sortino_eps = float(cfg.get("SPOT_OBJECTIVE_SORTINO_EPS", 1e-6))
         sortino_ratio_cap = float(cfg.get("SPOT_OBJECTIVE_SORTINO_RATIO_CAP", 1.0e6))
         path_sortino_clip = float(cfg.get("SPOT_OBJECTIVE_PATH_SORTINO_CLIP", 500.0))
-        mini_window_pct = float(cfg.get("SPOT_OBJECTIVE_MINI_WINDOW_PCT", 0.33))
-        lam_ui = float(cfg.get("SPOT_OBJECTIVE_LAMBDA_UI", 0.05))
-        w_trade_pen = float(cfg.get("SPOT_OBJECTIVE_W_TRADE", 0.005))
-        w_sqn_pen = float(cfg.get("SPOT_OBJECTIVE_W_SQN", 0.02))
 
         path_compound_log_tw: List[float] = []
         path_compound_raw_log_tw: List[float] = []
@@ -1084,8 +1090,6 @@ def objective_spot(
         path_calmars: List[float] = []
         path_cagrs: List[float] = []
         path_regime_rates: List[float] = []
-        path_cautious_penalties: List[float] = []
-
         total_sym_pnl = np.zeros(len(symbols), dtype=np.float64)
 
         for path_idx, path in enumerate(cpcv_paths):
@@ -1239,58 +1243,12 @@ def objective_spot(
                 path_calmars.append(0.0)
                 path_cagrs.append(0.0)
 
-            g_arr = np.asarray(path_gmgr, dtype=np.float64)
-            u_arr = np.asarray(path_ui, dtype=np.float64)
-            run_max_ui = float(np.max(u_arr)) if u_arr.size else 0.0
-            path_arr_partial = np.asarray(path_compound_raw_log_tw, dtype=np.float64)
-            n_p = int(path_arr_partial.size)
-            if n_p >= 2:
-                mu_p = float(np.mean(path_arr_partial))
-                sd_p = float(np.std(path_arr_partial, ddof=1))
-                sqn_p = math.sqrt(float(n_p)) * mu_p / sd_p if sd_p > 1e-12 else 0.0
-            else:
-                sqn_p = 0.0
-            n_tm = float(np.mean(path_trades)) if path_trades else 0.0
-            p_pf = float(np.mean(path_pfs)) if path_pfs else 1.0
-            
-            # Penalize: trades < target, SQN < target, Turnover > 100, PF < 1.4
-            soft_p = (
-                max(0.0, _SPOT_OBJECTIVE_MIN_TRADES_SOFT - n_tm) * w_trade_pen
-                + max(0.0, 1.6 - sqn_p) * w_sqn_pen
-                + max(0.0, n_tm - 100.0) * 0.005
-                + max(0.0, 1.4 - p_pf) * 0.18
-            )
-            run_geo = float(np.mean(path_compound_raw_log_tw)) if path_compound_raw_log_tw else 0.0
-            
-            path_cautious_rate = 1.0 - (path_regime_on / max(1.0, float(path_regime_len)))
-            cautious_penalty = 0.0
-            if path_cautious_rate >= 0.5:
-                # If path is mostly Non-Risk-On, heavily penalize net-losses & high drawdowns
-                path_worst_mdd_seg = float(np.max(seg_mdds)) if seg_mdds else 0.0
-                if run_geo < 0.0:
-                    cautious_penalty += abs(run_geo) * 0.5
-                if path_worst_mdd_seg > 6.0:
-                    cautious_penalty += (path_worst_mdd_seg - 6.0) * 0.25
-            path_cautious_penalties.append(cautious_penalty)
-            
-            run_calmar = float(np.mean(path_calmars)) if path_calmars else 0.0
-            run_cagr = float(np.mean(path_cagrs)) if path_cagrs else 0.0
-            run_tail = float(np.mean(path_tail_ratios)) if path_tail_ratios else 0.0
-            run_mean_reg = float(np.mean(path_regime_rates)) if path_regime_rates else 1.0
-            run_tail_w = 0.12 if run_mean_reg > 0.30 else 0.04
-            run_tail_bonus = math.log(max(run_tail, 0.1)) * run_tail_w
-            run_cagr_floor_pen = max(0.0, 30.0 - run_cagr) * 0.003
-            mu_p = float(np.mean(path_arr_partial)) if path_arr_partial.size > 0 else 0.0
-            sd_p = float(np.std(path_arr_partial)) if path_arr_partial.size > 1 else 0.0
-            
-            # Kelly mean log-TWR for intermediate pruning (replaces CRRA CEQ).
-            kelly_int = float(np.mean(path_arr_partial)) if path_arr_partial.size > 0 else 0.0
-            # Simple statistical penalty for early pruning
-            run_tail_gap_pen = max(0.0, 1.15 - run_tail) * 0.30
-            interm = kelly_int - (soft_p * 0.5) + run_tail_bonus - run_tail_gap_pen
-            trial.report(interm, step=path_idx)
-            if trial.should_prune():
-                raise optuna.TrialPruned()
+            # Intermediate pruning: mean CPCV path log-TWR so far (enables MedianPruner / PatientPruner).
+            if path_idx >= 4 and path_compound_raw_log_tw:
+                intermediate = float(np.mean(path_compound_raw_log_tw))
+                trial.report(intermediate, step=path_idx)
+                if trial.should_prune():
+                    raise optuna.TrialPruned()
 
         mean_regime_on_rate = float(np.mean(path_regime_rates)) if path_regime_rates else 1.0
         cpcv_mean_path_cagr_pct = float(np.mean(path_cagrs)) if path_cagrs else 0.0
@@ -1372,25 +1330,53 @@ def objective_spot(
         min_p10_cagr_req = float(cfg.get("SPOT_MIN_P10_GMGR_CAGR_PCT", 5.0))
         min_regime_floor = float(cfg.get("SPOT_MIN_REGIME_ON_RATE", 0.15))
         if n_paths_ct >= 3:
-            if (
-                psr_val < psr_floor
-                or dsr_val < dsr_floor
-                or p10_cagr < min_p10_cagr_req
-                or min_path_tw_ratio < min_tw_req
-                or n_trades_mean < min_mean_tr_req
-                or mean_path_pf_gate < min_mean_pf_req
-                or mean_tail_gate < min_mean_tail_req
-                or (min_w25_cal_req > 1e-12 and worst25_cal_gate < min_w25_cal_req)
-            ):
-                raise optuna.TrialPruned()
-            if path_regime_rates and mean_regime_on_rate < min_regime_floor:
-                raise optuna.TrialPruned()
+            c_w25 = (
+                float(min_w25_cal_req - worst25_cal_gate)
+                if min_w25_cal_req > 1e-12
+                else 0.0
+            )
+            c_reg = (
+                float(min_regime_floor - mean_regime_on_rate)
+                if path_regime_rates
+                else 0.0
+            )
+            constraint_vec = (
+                float(psr_floor - psr_val),
+                float(dsr_floor - dsr_val),
+                float(min_p10_cagr_req - p10_cagr),
+                float(min_tw_req - min_path_tw_ratio),
+                float(min_mean_tr_req - n_trades_mean),
+                float(min_mean_pf_req - mean_path_pf_gate),
+                float(min_mean_tail_req - mean_tail_gate),
+                c_w25,
+                c_reg,
+            )
+        else:
+            constraint_vec = tuple(0.0 for _ in range(SPOT_OBJECTIVE_CONSTRAINT_DIM))
+
+        trial.set_user_attr("spot_constraint_values", list(constraint_vec))
+        spot_feasible = all(c <= 0.0 for c in constraint_vec)
+        trial.set_user_attr("spot_constraints_feasible", spot_feasible)
+
+        infeasible_pen = float(cfg.get("SPOT_OBJECTIVE_INFEASIBLE_RETURN", -1e9))
+        if n_paths_ct >= 3 and not spot_feasible:
+            trial.set_user_attr("objective_final", float(infeasible_pen))
+            return float(infeasible_pen)
 
         # Kelly-CVaR: E[log W] with coherent tail penalty (replaces CRRA CEQ + z_conf LPM).
         path_log_tw_arr = np.asarray(path_compound_raw_log_tw, dtype=np.float64)
         path_returns = path_log_tw_arr
 
-        kelly_obj = float(np.mean(path_log_tw_arr)) if path_log_tw_arr.size > 0 else 0.0
+        mean_log_tw_k = float(np.mean(path_log_tw_arr)) if path_log_tw_arr.size > 0 else 0.0
+        w_mean = float(cfg.get("SPOT_OBJECTIVE_W_MEAN_LOG_TW", 0.7))
+        w_mean = float(np.clip(w_mean, 0.0, 1.0))
+        w_p10 = 1.0 - w_mean
+        p10_log_tw_path = (
+            float(np.percentile(path_log_tw_arr, 10.0))
+            if path_log_tw_arr.size >= 10
+            else mean_log_tw_k
+        )
+        kelly_obj = w_mean * mean_log_tw_k + w_p10 * p10_log_tw_path
 
         cvar_alpha = float(cfg.get("SPOT_CPCV_CVAR_ALPHA", 0.10))
         cvar_thr = float(cfg.get("SPOT_CPCV_CVAR_THRESHOLD", 0.05))
@@ -1409,19 +1395,21 @@ def objective_spot(
 
         # Refined Penalties (Minimal & Targetted)
         concentration_pen = max(0.0, cv_paths - 1.5) * 0.15
-        
+
         total_abs_pnl = float(np.sum(np.abs(total_sym_pnl))) + 1e-9
         sym_shares = total_sym_pnl / total_abs_pnl
         hhi = float(np.sum(sym_shares**2))
         n_sym = max(1, len(total_sym_pnl))
         hhi_equal = 1.0 / float(n_sym)
-        hhi_penalty = max(0.0, hhi - 4.0 * hhi_equal) * 0.50 # Penalize low diversity
-        
-        trade_count_pen = max(0.0, _SPOT_OBJECTIVE_MIN_TRADES_SOFT - n_trades_mean) * 0.05
+        hhi_penalty = max(0.0, hhi - 3.0 * hhi_equal) * 0.50
 
-        _TAIL_RATIO_TARGET = 1.2
+        trade_count_pen = max(0.0, _SPOT_OBJECTIVE_MIN_TRADES_SOFT - n_trades_mean) * 0.15
+
+        _tail_ratio_target = float(
+            cfg.get("SPOT_OBJECTIVE_TAIL_RATIO_TARGET", cfg.get("SPOT_GATE1_TAIL_RATIO_MIN", 1.1))
+        )
         w_tail_obj = float(cfg.get("SPOT_OBJECTIVE_W_TAIL_RATIO", 0.60))
-        tail_shortfall = max(0.0, _TAIL_RATIO_TARGET - mean_tail_gate)
+        tail_shortfall = max(0.0, _tail_ratio_target - mean_tail_gate)
         tail_bonus = math.log(max(mean_tail_gate, 0.5)) * w_tail_obj
         tail_penalty = tail_shortfall * 0.80
         tail_ratio_reward = tail_bonus - tail_penalty
