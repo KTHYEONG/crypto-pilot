@@ -60,6 +60,7 @@ from src.spot_strategy.opt_spot_utils.evaluator import (
     run_cpcv_complement_evaluation,
     run_holdout_shared_cash_portfolio,
     run_multi_window_oos_holdout,
+    spot_frozen_trial_constraints,
 )
 from src.spot_strategy.opt_spot_utils.go_nogo import (
     FinalDeploymentReportInput,
@@ -84,6 +85,18 @@ os.environ.setdefault("NUMBA_NUM_THREADS", "1")
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 logging.basicConfig(level=logging.INFO, format="%(message)s", force=True)
 _logger: logging.Logger = logging.getLogger("opt_spot")
+
+
+def _spot_tpe_sampler(seed: int) -> TPESampler:
+    return TPESampler(
+        seed=seed,
+        n_startup_trials=0,
+        multivariate=True,
+        group=True,
+        constant_liar=True,
+        constraints_func=spot_frozen_trial_constraints,
+    )
+
 
 def _ensure_fresh_sqlite(db_path: Path) -> None:
     """RAM Disk 내 기존 DB 및 관련 저널 파일들을 안전하게 제거함."""
@@ -330,13 +343,7 @@ def _spot_tpe_worker_run(payload: Dict[str, Any]) -> None:
     narrowed_w: Optional[Dict[str, Dict[str, Any]]] = raw_narrow if isinstance(raw_narrow, dict) else None
     tf_space = _get_effective_search_space_spot(tf, narrowed_w)
 
-    sampler = TPESampler(
-        seed=seed,
-        n_startup_trials=0,
-        multivariate=True,
-        group=True,
-        constant_liar=True,
-    )
+    sampler = _spot_tpe_sampler(seed)
     base_pruner = MedianPruner(
         n_startup_trials=int(OPT_SPOT_CONFIG.get("tpe_pruner_n_startup_trials", 10)),
         n_warmup_steps=int(OPT_SPOT_CONFIG.get("tpe_pruner_n_warmup_steps", 8)),
@@ -510,13 +517,7 @@ def _run_tf_optimization(task: Tuple[Any, str], ctx: _TfOptimizationContext) -> 
     if remaining <= 0:
         return (target_obj, tf), study
 
-    tpe_sampler = TPESampler(
-        seed=seed,
-        n_startup_trials=0,
-        multivariate=True,
-        group=True,
-        constant_liar=True,
-    )
+    tpe_sampler = _spot_tpe_sampler(seed)
 
     if ctx.use_journal_storage:
         assert db_path is not None
@@ -1248,12 +1249,14 @@ def main() -> None:
 
         pbo_val: float = 0.5
         rho_val: float = 0.0
+        pbo_n_paths = 0
         ref_pbo_sym = target_symbols[0]
         is_off_pbo = int(data_maps[ref_pbo_sym][f"is_start_idx_{tf_eval}"])
         ref_len_pbo = len(data_maps[ref_pbo_sym][tf_eval]) - is_off_pbo
         emb_pbo = int(EMBARGO_BARS.get(tf_eval, 0))
         prebuilt_pbo = build_cpcv_test_paths_with_fallback(ref_len_pbo, embargo=emb_pbo)
         cpcv_paths_pbo, nb_pbo, _k_pbo = prebuilt_pbo
+        pbo_n_paths = len(cpcv_paths_pbo)
         all_blocks_pbo = list_cpcv_block_ranges(ref_len_pbo, nb_pbo, emb_pbo)
         oos_log_tw = best_trial.user_attrs.get("cpcv_path_oos_log_tw")
         if (
@@ -1634,6 +1637,7 @@ def main() -> None:
                 spearman_rho=float(rho_val),
                 pbo_gate_passed=bool(pbo_gate.passed),
                 pbo_hard_gate=pbo_hard,
+                pbo_n_paths=int(pbo_n_paths),
                 multi_window_passed=bool(not mw_enabled or mw_gate.passed),
                 multi_window_summary=mw_summary,
                 regime_diagnostic_block=regime_block,
