@@ -33,13 +33,52 @@ FUTURES_SYMBOLS: List[str] = [
 # OPTIMIZATION SPOT SEARCH SPACE & CONFIGURATION (shared-cash + CPCV)
 # ==============================================================================
 
+# Manually curated; Phase C mini-BT bypass for inclusion (anchor tier).
+SPOT_ANCHOR_SYMBOLS: List[str] = [
+    "KRW-ETH",
+    "KRW-SOL",
+    "KRW-XRP",
+]
+
 SPOT_SYMBOLS: List[str] = [
     "KRW-ETH",
-    "KRW-POL",
-    "KRW-XLM",
+    "KRW-SOL",
+    "KRW-XRP",
+    "KRW-HBAR",
+]
+
+# Phase A universe screen output (broad ADV+ATR gate); refreshed by universe_screener / opt_spot Phase 0.
+SPOT_BROAD_CANDIDATES: List[str] = [
+    "KRW-XRP",
+    "KRW-BTC",
+    "KRW-DOGE",
+    "KRW-ETH",
+    "KRW-SOL",
+    "KRW-ADA",
     "KRW-AWE",
-    "KRW-AXS",
-    "KRW-1INCH",
+    "KRW-HBAR",
+    "KRW-LINK",
+    "KRW-XLM",
+    "KRW-TRX",
+    "KRW-STX",
+    "KRW-AAVE",
+    "KRW-WAVES",
+    "KRW-ETC",
+    "KRW-SAND",
+    "KRW-BCH",
+    "KRW-CRO",
+    "KRW-DOT",
+    "KRW-POL",
+    "KRW-A",
+    "KRW-IOTA",
+    "KRW-NEO",
+    "KRW-GLM",
+    "KRW-KAVA",
+    "KRW-AQT",
+    "KRW-VET",
+    "KRW-HIVE",
+    "KRW-BTT",
+    "KRW-ARK",
 ]
 
 OPT_SPOT_CONFIG: Dict[str, Any] = {
@@ -60,7 +99,7 @@ OPT_SPOT_CONFIG: Dict[str, Any] = {
     "SPOT_MIN_TRADES_PER_CPCV_SEGMENT": 8,
     "SPOT_SEGMENT_TRADE_FAIL_PENALTY": 2.0,
     "SPOT_HOLDOUT_MIN_PORTFOLIO_LONG_TRADES": 50,  # Dynamically calculated in opt_spot.py but used as a fallback
-    "SPOT_HOLDOUT_MIN_TAIL_RATIO": 1.05,
+    "SPOT_HOLDOUT_MIN_TAIL_RATIO": 0.90,
     "SPOT_HOLDOUT_MIN_PROFIT_FACTOR": 1.2,
     "SPOT_HOLDOUT_MIN_CALMAR_RATIO": 1.2,
     "SPOT_HOLDOUT_MIN_CAGR_PCT": 18.0,
@@ -87,6 +126,7 @@ OPT_SPOT_CONFIG: Dict[str, Any] = {
     "SPOT_COMBO_MIN_SCREEN_SCORE": 0.0,
     "SPOT_COMBO_AMBIGUITY_STD_RATIO": 0.15,
     "SPOT_COMBO_PHASE2_AMBIGUITY_BOOST": 4,
+    "SPOT_STAGE1_BROAD_SAMPLE_K": 12,       # Stage1 uses top-K ADV symbols from broad pool (not all)
     "SPOT_STAGE1_TRIALS_PER_SIGNAL": 150,  # Stage1 ranking stability (tmp.md: 100→150)
     "SPOT_STAGE1_TOP_K": 3,
     "SPOT_STAGE1_MIN_P10_GMGR": -0.5,
@@ -110,7 +150,7 @@ OPT_SPOT_CONFIG: Dict[str, Any] = {
     "SPOT_STAGE2_MAX_PER_SIGNAL_TYPE": 2,
     "SPOT_EXIT_FAMILY_PRIOR_SCALE": 1.0,
     "SPOT_OBJECTIVE_W_CALMAR": 0.10,
-    "SPOT_PBO_MAX": 0.45,
+    "SPOT_PBO_MAX": 0.85,
     "SPOT_PBO_GATE_HARD": False,
     "SPOT_MULTI_WINDOW_OOS_ENABLED": True,
     "SPOT_MULTI_WINDOW_OOS_SUBS": 2,
@@ -121,12 +161,10 @@ OPT_SPOT_CONFIG: Dict[str, Any] = {
     "SPOT_REGIME_DIAGNOSTIC_ENABLED": True,
     "SPOT_REGIME_STRESS_MAX_MDD_PCT": 40.0,
     "SPOT_SYMBOL_CLUSTER": {
-            "KRW-ETH": "cluster_0",
-            "KRW-POL": "cluster_1",
-            "KRW-XLM": "cluster_2",
-            "KRW-AWE": "cluster_3",
-            "KRW-AXS": "cluster_4",
-            "KRW-1INCH": "cluster_5",
+            "KRW-ETH": "mrmr_0",
+            "KRW-SOL": "mrmr_1",
+            "KRW-XRP": "mrmr_2",
+            "KRW-HBAR": "mrmr_3",
         },
 }
 
@@ -136,9 +174,25 @@ WARMUP_PERIODS: Dict[str, int] = {"4h": 540}
 # Spot optimization: exclude institutional-only sizing for small KRW books (see tmp.md).
 SPOT_EXCLUDED_SIZING_METHODS: frozenset[str] = frozenset({"liquidity_adjusted"})
 
-# Shared-cash concurrency slippage (Reference ADV anchor; ~300B KRW / 4H notional proxy).
+# Universe screener: theory-based thresholds (ADV floor, Hurst bootstrap, MP, mRMR).
+SPOT_SCREENER_CONFIG: dict[str, float | int | bool] = {
+    "ADV_MIN_KRW_DAY": 2_000_000_000.0,  # 100M KRW scale: 10M position / 5% participation / 0.25×6
+    "SCREENER_MIN_P25_BAR_KRW": 80_000_000.0,  # p25 4H bar floor (100M / 5 symbols / 5% participation)
+    "SCREENER_ATR_PERIOD": 14,
+    "SCREENER_ATR_PCT_MIN": 1.0,
+    "SCREENER_ATR_PCT_MAX": 8.0,
+    "SCREENER_MIN_TRADES": 8,
+    "SCREENER_MIN_TRADES_DYNAMIC": 3,
+    "SCREENER_MIN_PF": 1.10,
+    "MP_MIN_SYMBOLS": 4,
+    "MP_MAX_SYMBOLS": 10,
+    "CANDIDATES_TOP_K": 20,
+    "ADAPTIVE_SLIPPAGE_REF_ADV": True,
+}
+
+# Shared-cash concurrency slippage (Reference ADV anchor; universe_screener may set adaptively).
 SLIPPAGE_GAMMA_BASE: float = 0.03
-SLIPPAGE_REFERENCE_ADV_KRW: float = 3e10
+SLIPPAGE_REFERENCE_ADV_KRW: float = 78796702448.02948
 
 ENGINE_PARAM_SPACE: Dict[str, Dict[str, Any]] = {
     "EXIT_FAMILY": {

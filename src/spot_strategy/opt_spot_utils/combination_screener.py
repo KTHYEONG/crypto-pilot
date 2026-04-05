@@ -137,6 +137,11 @@ def params_disqualified_against_space(params: Dict[str, Any], space: Dict[str, A
     return ""
 
 
+def build_probe_params(combo: "CombinationScore", tf: str) -> Dict[str, Any]:
+    """Return search-space midpoint params for a Phase-B combo (signal-agnostic for Phase C)."""
+    return _build_probe_params(combo.signal, combo.regime, combo.sizing, tf)
+
+
 def _build_probe_params(sig: str, reg: str, siz: str, tf: str) -> Dict[str, Any]:
     combo_space = build_combined_param_space(sig, reg, siz)
     probe_params: Dict[str, Any] = {

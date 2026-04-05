@@ -106,6 +106,16 @@ def calc_tail_ratio_from_equity(equity_curve: np.ndarray) -> float:
     return float(min(p95 / denom, 20.0))
 
 
+def calc_tail_ratio_from_trades(pnl: np.ndarray) -> float:
+    """95th / |5th| percentile of per-trade PnL — idle-bar agnostic asymmetry proxy."""
+    arr = np.asarray(pnl, dtype=np.float64)
+    if arr.size < 10:
+        return 1.0
+    p95 = float(np.percentile(arr, 95))
+    p5 = float(np.percentile(arr, 5))
+    return float(min(p95 / max(abs(p5), 1e-6), 20.0))
+
+
 def cvar_loss_pct_from_simple_returns(equity_curve: np.ndarray, tail_frac: float = 0.05) -> float:
     """Mean loss magnitude (%) of worst tail_frac bar returns (positive number = worse tail)."""
     if equity_curve.size < 2:
