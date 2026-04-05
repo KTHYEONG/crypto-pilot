@@ -81,6 +81,7 @@ class FinalDeploymentReportInput:
     spearman_rho: float = float("nan")
     pbo_gate_passed: bool = True
     pbo_hard_gate: bool = False
+    pbo_n_paths: int = 0
     multi_window_passed: bool = True
     multi_window_summary: str = ""
     regime_diagnostic_block: str = ""
@@ -489,7 +490,7 @@ def _part3_symbol_table_lines(rows: Sequence[SymbolGateRow]) -> List[str]:
         pnl = f"{row.net_cagr_pct:+.1f}%"
         mdd = f"{row.max_mdd_pct:.1f}%"
         wr = f"{row.win_rate_pct:.1f}%"
-        tr = str(int(row.trade_count))
+        tr = f"{int(row.trade_count)} ⚠" if int(row.trade_count) < 30 else str(int(row.trade_count))
         out.append(
             "  | "
             + f"{sym:<{w[0]}} | "
@@ -543,7 +544,8 @@ def run_final_deployment_report(ctx: FinalDeploymentReportInput) -> str:
         f"  - CPCV Mean Path Return       : {ctx.cpcv_mean_path_return_pct:.1f}%",
         f"  - CPCV Worst Segment MDD      : {ctx.cpcv_worst_segment_mdd_pct:.1f}%",
         "",
-        f"  - PBO (IS vs OOS path ranks)  : {pbo_disp}   {_fmt_pass_info(ctx.pbo_gate_passed)} "
+        f"  - PBO (IS vs OOS path ranks, n_paths={ctx.pbo_n_paths})  : {pbo_disp}   "
+        f"{_fmt_pass_info(ctx.pbo_gate_passed)} "
         f"({'HARD' if ctx.pbo_hard_gate else 'ADVISORY'})",
         f"  - Spearman rho (IS vs OOS)    : {rho_disp}",
         "",

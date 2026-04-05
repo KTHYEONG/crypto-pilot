@@ -83,7 +83,6 @@ SPOT_BROAD_CANDIDATES: List[str] = [
 
 OPT_SPOT_CONFIG: Dict[str, Any] = {
     "total_trials": 1500,
-    "n_startup_trials": 300,  # QMC(Sobol) 탐색량: 총 trials의 6% = 공간 커버리지와 TPE 학습 균형점
     "tpe_n_startup_trials": 256,  # Sweet spot: 26~35D combo-space에서 초기 커버리지/예산 균형
     "tpe_pruner_n_startup_trials": 10,
     "tpe_pruner_n_warmup_steps": 8,
@@ -110,6 +109,9 @@ OPT_SPOT_CONFIG: Dict[str, Any] = {
     "SPOT_GATE1_SQN_MIN": 2.0,
     "SPOT_GATE1_PATH_SORTINO_MIN": 0.5,
     "SPOT_GATE1_TAIL_RATIO_MIN": 1.1,
+    "SPOT_OBJECTIVE_W_MEAN_LOG_TW": 0.7,
+    "SPOT_OBJECTIVE_TAIL_RATIO_TARGET": 1.1,
+    "SPOT_OBJECTIVE_INFEASIBLE_RETURN": -1.0e9,
     "SPOT_DISCOVERY_DSR_MIN": 0.35,
     "SPOT_OBJECTIVE_DSR_TARGET": 0.35,
     "SPOT_OBJECTIVE_LAMBDA_UI": 0.02,
@@ -153,7 +155,7 @@ OPT_SPOT_CONFIG: Dict[str, Any] = {
     "SPOT_PBO_MAX": 0.85,
     "SPOT_PBO_GATE_HARD": False,
     "SPOT_MULTI_WINDOW_OOS_ENABLED": True,
-    "SPOT_MULTI_WINDOW_OOS_SUBS": 2,
+    "SPOT_MULTI_WINDOW_OOS_SUBS": 3,
     "SPOT_MULTI_WINDOW_BARS_PER_MONTH": 180,
     "SPOT_MULTI_WINDOW_MIN_POSITIVE": 3,
     "SPOT_MULTI_WINDOW_MIN_MEDIAN_CAGR_PCT": 15.0,
