@@ -1,5 +1,5 @@
 import pandas as pd
-from .upbit_client import UpbitClient
+from .upbit_client import UpbitClient, UpbitOhlcvFetchError
 import sys
 import os
 import re
@@ -11,7 +11,7 @@ project_root = str(Path(__file__).resolve().parents[2])
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-from config.settings import DATA_DIR, SPOT_BACKTEST_START_DATE, SPOT_BACKTEST_END_DATE
+from config.settings import DATA_DIR, SPOT_DATA_DIR, SPOT_BACKTEST_START_DATE, SPOT_BACKTEST_END_DATE
 from src.common.utils import setup_logger
 
 class DataValidator:
@@ -27,9 +27,8 @@ class DataValidator:
         df.sort_index(inplace=True)
         
         expected_diff = {
-            '1h': pd.Timedelta(hours=1),
-            '1d': pd.Timedelta(days=1),
-            '4h': pd.Timedelta(hours=4)
+            "1d": pd.Timedelta(days=1),
+            "4h": pd.Timedelta(hours=4),
         }.get(timeframe)
         
         if expected_diff:
@@ -60,10 +59,10 @@ class DataCollectorSpot:
 
     def _cache_path(self, symbol, timeframe):
         safe_symbol = self._safe_symbol(symbol)
-        return DATA_DIR / f"spot_{safe_symbol}_{timeframe}.parquet"
+        return SPOT_DATA_DIR / f"spot_{safe_symbol}_{timeframe}.parquet"
 
     def _meta_path(self):
-        return DATA_DIR / "parquet_spot_cache_meta.json"
+        return SPOT_DATA_DIR / "parquet_spot_cache_meta.json"
 
     def _meta_key(self, symbol, timeframe):
         return f"spot::{self._safe_symbol(symbol)}::{timeframe}"
@@ -142,7 +141,19 @@ class DataCollectorSpot:
             s = pd.Timestamp(miss_start).strftime("%Y-%m-%d")
             e = pd.Timestamp(miss_end).strftime("%Y-%m-%d")
             self.logger.info(f"Fetching missing Spot range for {symbol} {timeframe}: {s} ~ {e}")
-            fetched = self.client.fetch_ohlcv(symbol, timeframe, s, e)
+            try:
+                fetched = self.client.fetch_ohlcv(symbol, timeframe, s, e)
+            except UpbitOhlcvFetchError as exc:
+                self.logger.error(
+                    "Upbit OHLCV fetch failed for %s %s %s~%s: partial_rows=%s since_ms=%s",
+                    symbol,
+                    timeframe,
+                    s,
+                    e,
+                    len(exc.partial_ohlcv),
+                    exc.since_ms,
+                )
+                raise
             fetched = self._normalize_df(fetched)
             if not fetched.empty:
                 validator = DataValidator()
