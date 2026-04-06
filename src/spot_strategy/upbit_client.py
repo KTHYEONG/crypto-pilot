@@ -236,8 +236,8 @@ class UpbitClient:
             server_ms = self.exchange.fetch_time()
             if server_ms is not None:
                 return int(server_ms)
-        except Exception as e:
-            self.logger.warning(f"Failed to fetch Upbit server time: {e}")
+        except Exception:
+            pass  # ccxt Upbit does not support fetchTime(); local time used as fallback
         return int(time.time() * 1000)
 
     def fetch_balance(self):
