@@ -4,6 +4,12 @@ data/
 # cursor
 .cursor/
 
+<<<<<<< HEAD
+=======
+# .vscode
+.vscode/
+
+>>>>>>> feat/fix-spot
 # claude
 CLAUDE.md
 .claude/
@@ -237,3 +243,10 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# strategy results
+results/*.json
+!results/*.json.enc
+
+# codex
+.codex
