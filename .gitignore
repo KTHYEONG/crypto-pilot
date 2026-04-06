@@ -4,12 +4,9 @@ data/
 # cursor
 .cursor/
 
-<<<<<<< HEAD
-=======
 # .vscode
 .vscode/
 
->>>>>>> feat/fix-spot
 # claude
 CLAUDE.md
 .claude/
