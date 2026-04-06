@@ -292,6 +292,7 @@ class SpotBot:
         self._loop_count: int = 0
         self._last_gc_time: float = 0.0
         self._db_write_lock = threading.Lock()
+        self._last_entry_risk_pct: Dict[str, float] = {}
 
         self.last_calc_candle: Dict[str, str] = {}
         self._server_time_offset_ms: int = 0
@@ -303,6 +304,12 @@ class SpotBot:
         self._time_sync_lock = threading.Lock()
 
         self._setup_signal_handlers()
+
+    def _clear_symbol_state_tracked(
+        self, symbol: str, preserve_keys: Optional[list[str]] = None
+    ) -> None:
+        self.state_manager.clear_symbol_state(symbol, preserve_keys=preserve_keys)
+        self._last_entry_risk_pct.pop(symbol, None)
 
     # ------------------------------------------------------------------ #
     #  Logging helpers                                                     #
@@ -670,12 +677,21 @@ class SpotBot:
             eff = eff * 0.90
 
         new_risk_pct = risk_per_trade * eff
-        risk_budget = balance_krw * new_risk_pct
+
+        use_compounding = bool(params.get("USE_COMPOUNDING", True))
+        max_capital_usage = float(params.get("MAX_CAPITAL_USAGE", 1e12))
+        current_equity = (
+            min(balance_krw, max_capital_usage)
+            if use_compounding and balance_krw > max_capital_usage
+            else balance_krw
+        )
+
+        risk_budget = current_equity * new_risk_pct
         raw_amount = risk_budget / stop_distance
 
         # MAX_CAP_PER_COIN 상한
         max_cap_pct = float(params.get("MAX_CAP_PER_COIN", 1.0))
-        max_notional = balance_krw * max_cap_pct
+        max_notional = current_equity * max_cap_pct
         amount_cap = max_notional / fill_price
 
         # 실제 잔고 초과 방지 (수수료 버퍼 포함)
@@ -738,6 +754,7 @@ class SpotBot:
                 "tp_price": float(tp_price),
                 "recovery_bootstrapped": True,
                 "initial_amount": float(abs(amount)),
+                "fractal_scale_done": False,
                 "exit_pending": False,
                 "exit_error": None,
                 "exit_remaining_amount": 0.0,
@@ -907,7 +924,7 @@ class SpotBot:
             px_chk = float(current_price)
         value_krw = raw_amt * px_chk if px_chk > 0 else 0.0
         if raw_amt < 1e-12 or value_krw < float(MIN_POSITION_VALUE_KRW):
-            self.state_manager.clear_symbol_state(
+            self._clear_symbol_state_tracked(
                 symbol,
                 preserve_keys=[
                     "last_entry_attempt_signal_candle_ts",
@@ -994,7 +1011,7 @@ class SpotBot:
                 params={"recovery_attempt_count": int(recovery_attempts)},
             )
 
-        self.state_manager.clear_symbol_state(
+        self._clear_symbol_state_tracked(
             symbol,
             preserve_keys=[
                 "last_entry_attempt_signal_candle_ts",
@@ -1055,6 +1072,7 @@ class SpotBot:
             "trail_tighten_flag",
             "regime_state",
             "signal_candle_ts",
+            "fractal_high_flag",
         )
         need_calculation = (
             not cached
@@ -1097,6 +1115,7 @@ class SpotBot:
 
         regime_state_val = float(last_candle.get("regime_state", 2.0))
         signal_candle_ts = int(self._extract_candle_timestamp_ms(last_candle))
+        fractal_high_flag_val = float(last_candle.get("fractal_high_flag", 0.0))
 
         self._cache_indicators(
             symbol,
@@ -1113,6 +1132,7 @@ class SpotBot:
                 "trail_tighten_flag": float(last_candle.get("trail_tighten_flag", 0.0)),
                 "regime_state": regime_state_val,
                 "signal_candle_ts": signal_candle_ts,
+                "fractal_high_flag": fractal_high_flag_val,
                 "indicator_timeframe": indicator_tf,
             },
         )
@@ -1144,7 +1164,7 @@ class SpotBot:
                     f"🧹 [{symbol}] Clearing stale state.",
                     600.0,
                 )
-                self.state_manager.clear_symbol_state(
+                self._clear_symbol_state_tracked(
                     symbol,
                     preserve_keys=[
                         "last_entry_attempt_signal_candle_ts",
@@ -1223,6 +1243,49 @@ class SpotBot:
 
             exit_triggered = False
             reason = ""
+
+            fractal_high_flag = float(cached.get("fractal_high_flag", 0.0))
+            scale_out_ratio = float(params.get("SCALE_OUT_RATIO", 0.5))
+            fractal_scale_done = bool(state.get("fractal_scale_done", False))
+
+            if (
+                not fractal_scale_done
+                and fractal_high_flag > 0.5
+                and amount > 0.0
+                and not exit_triggered
+            ):
+                eff_scale = scale_out_ratio
+                if 0.5 < rst < 1.5:
+                    eff_scale = min(0.95, scale_out_ratio * 1.12)
+                scale_amount = amount * eff_scale
+                cap_amt = amount * 0.99
+                if scale_amount > cap_amt:
+                    scale_amount = cap_amt
+                if scale_amount * current_price >= float(MIN_ORDER_VALUE_KRW):
+                    logger.info(
+                        f"📉 [{symbol}] Scale-out {scale_amount:.4f} @ {current_price:,.0f} "
+                        f"(ratio={eff_scale:.2f}, fractal)"
+                    )
+                    scale_order = self._place_order_safe(symbol, "sell", scale_amount)
+                    if scale_order:
+                        if self.dry_run:
+                            new_amount = max(0.0, float(amount) - float(scale_amount))
+                        else:
+                            time.sleep(max(0.0, float(SPOT_EXIT_CONFIRM_SLEEP_SEC)))
+                            new_amount = self._get_spot_coin_amount_raw(symbol)
+                        self.state_manager.update_symbol_state(
+                            symbol,
+                            {
+                                "fractal_scale_done": True,
+                                "entry_amount": float(new_amount),
+                            },
+                        )
+                        amount = float(new_amount)
+                        pos = self._get_current_position(symbol, current_price)
+                        in_position = float(pos["amount"]) > 0
+                        if not in_position:
+                            return
+                        state = self.state_manager.get_symbol_state(symbol)
 
             if not exit_triggered and kill_signal > 0.5:
                 exit_triggered = True
@@ -1336,7 +1399,7 @@ class SpotBot:
                     params={},
                 )
 
-            self.state_manager.clear_symbol_state(
+            self._clear_symbol_state_tracked(
                 symbol,
                 preserve_keys=[
                     "last_entry_attempt_signal_candle_ts",
@@ -1423,6 +1486,28 @@ class SpotBot:
             if atr <= 0.0:
                 return 0.0
 
+            delta_gate = float(params.get("DELTA_GATE", 0.08))
+            rr = max(
+                0.05,
+                min(
+                    1.0,
+                    float(regime_risk_mult) if np.isfinite(regime_risk_mult) else 1.0,
+                ),
+            )
+            gk = (
+                float(garch_kelly_f)
+                if np.isfinite(garch_kelly_f) and garch_kelly_f > 0.0
+                else 1.0
+            )
+            eff_preview = rr * gk
+            eff_preview = max(0.05, min(1.0, eff_preview))
+            if 0.5 < regime_state_val < 1.5:
+                eff_preview *= 0.90
+            new_risk_pct = float(params.get("RISK_PER_TRADE", 0.05)) * eff_preview
+            last_risk_pct = self._last_entry_risk_pct.get(symbol, 0.0)
+            if last_risk_pct > 1e-12 and abs(new_risk_pct - last_risk_pct) < delta_gate:
+                return 0.0
+
             fill_price_est = current_price * (1.0 + SLIPPAGE_RATE)
             qty = self._calculate_spot_position_size(
                 fill_price=fill_price_est,
@@ -1485,6 +1570,7 @@ class SpotBot:
                     "active_stop_price": initial_stop,
                     "order_cid": cid,
                     "initial_amount": float(actual_fill_qty),
+                    "fractal_scale_done": False,
                     "exit_pending": False,
                     "exit_error": None,
                     "exit_remaining_amount": 0.0,
@@ -1492,6 +1578,7 @@ class SpotBot:
                     "exit_attempt_at": None,
                 },
             )
+            self._last_entry_risk_pct[symbol] = new_risk_pct
             with self._db_write_lock:
                 self.trade_db.record_trade(
                     symbol=symbol,
@@ -1521,7 +1608,7 @@ class SpotBot:
         for sym in self.state_manager.list_all_symbols():
             if sym not in target_set:
                 logger.warning("⚠️ Dropping state for non-target symbol: %s", sym)
-                self.state_manager.clear_symbol_state(sym)
+                self._clear_symbol_state_tracked(sym)
 
         all_ohlcv = self._prefetch_all_ohlcv()
         for symbol in self.symbols:
@@ -1539,7 +1626,7 @@ class SpotBot:
                 if bool(state.get("exit_pending", False)):
                     val = raw_amt * price if price > 0 else 0.0
                     if raw_amt < 1e-12 or val < float(MIN_POSITION_VALUE_KRW):
-                        self.state_manager.clear_symbol_state(
+                        self._clear_symbol_state_tracked(
                             symbol,
                             preserve_keys=[
                                 "last_entry_attempt_signal_candle_ts",
@@ -1570,7 +1657,7 @@ class SpotBot:
                         "🧹 [%s] Reconcile: clearing stale local state (no exchange position)",
                         symbol,
                     )
-                    self.state_manager.clear_symbol_state(
+                    self._clear_symbol_state_tracked(
                         symbol,
                         preserve_keys=[
                             "last_entry_attempt_signal_candle_ts",
@@ -1640,31 +1727,56 @@ class SpotBot:
                     for symbol in self.symbols:
                         if self._shutdown_requested:
                             break
-                        self._refresh_indicators_if_needed(symbol, all_ohlcv)
+                        try:
+                            self._refresh_indicators_if_needed(symbol, all_ohlcv)
+                        except Exception as sym_e:
+                            logger.error(
+                                f"🚨 [{symbol}] Indicator refresh error: {sym_e}"
+                            )
                         time.sleep(SPOT_SYMBOL_DELAY_SECONDS)
 
                     for symbol in self.symbols:
                         if self._shutdown_requested:
                             break
-                        price = self._get_market_price_safe(symbol)
-                        if price is None or not np.isfinite(float(price)) or float(price) <= 0:
-                            continue
-                        cached = self._get_cached_indicators(symbol)
-                        self._process_exit(symbol, float(price), cached)
+                        try:
+                            price = self._get_market_price_safe(symbol)
+                            if (
+                                price is None
+                                or not np.isfinite(float(price))
+                                or float(price) <= 0
+                            ):
+                                continue
+                            cached = self._get_cached_indicators(symbol)
+                            self._process_exit(symbol, float(price), cached)
+                        except Exception as sym_e:
+                            logger.error(
+                                f"🚨 [{symbol}] Exit processing error: {sym_e}"
+                            )
+                            self.health_manager.record_error(sym_e)
                         time.sleep(SPOT_SYMBOL_DELAY_SECONDS)
 
                     _, available_krw = self._fetch_balance_safe()
                     for symbol in self.symbols:
                         if self._shutdown_requested:
                             break
-                        price = self._get_market_price_safe(symbol)
-                        if price is None or not np.isfinite(float(price)) or float(price) <= 0:
-                            continue
-                        cached = self._get_cached_indicators(symbol)
-                        used = self._process_entry(
-                            symbol, float(price), cached, available_krw
-                        )
-                        available_krw -= used
+                        try:
+                            price = self._get_market_price_safe(symbol)
+                            if (
+                                price is None
+                                or not np.isfinite(float(price))
+                                or float(price) <= 0
+                            ):
+                                continue
+                            cached = self._get_cached_indicators(symbol)
+                            used = self._process_entry(
+                                symbol, float(price), cached, available_krw
+                            )
+                            available_krw -= used
+                        except Exception as sym_e:
+                            logger.error(
+                                f"🚨 [{symbol}] Entry processing error: {sym_e}"
+                            )
+                            self.health_manager.record_error(sym_e)
                         time.sleep(SPOT_SYMBOL_DELAY_SECONDS)
 
                     snap = self._get_positions_snapshot()
@@ -1687,6 +1799,10 @@ class SpotBot:
 
         except Exception as e:
             logger.critical(f"💥 Critical Failure during Initialization/Run: {e}")
+            try:
+                self.health_manager.update_heartbeat(status="error")
+            except Exception:
+                pass
         finally:
             self._shutdown()
             logger.info("🛑 Bot Stopped.")
