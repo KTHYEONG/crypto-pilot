@@ -11,7 +11,9 @@ services:
       - ./data:/app/data
       - ./logs:/app/logs
       - ./results:/app/results
-    command: python -u src/spot_strategy/spot_bot.py
+    command: >
+      /bin/sh -c "cp /app/results_seed/*.json /app/results/ 2>/dev/null || true &&
+      python -u src/spot_strategy/spot_bot.py"
     logging:
       driver: "json-file"
       options:
@@ -28,7 +30,9 @@ services:
       - ./data:/app/data
       - ./logs:/app/logs
       - ./results:/app/results
-    command: python -u src/futures_strategy/real_trader_futures.py
+    command: >
+      /bin/sh -c "cp /app/results_seed/*.json /app/results/ 2>/dev/null || true &&
+      python -u src/futures_strategy/real_trader_futures.py"
     logging:
       driver: "json-file"
       options:
