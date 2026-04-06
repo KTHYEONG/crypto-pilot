@@ -36,9 +36,10 @@ RUN pip install --upgrade pip setuptools wheel && \
 # Copy Project Files
 COPY . .
 
-# Directory Setup & Permissions
-RUN mkdir -p logs data results /tmp/numba_cache && \
+# Seed strategy JSON configs outside the volume mount point.
+# docker-compose command copies these into /app/results/ at container startup.
+RUN mkdir -p /app/results_seed logs data results /tmp/numba_cache && \
+    cp /app/results/*.json /app/results_seed/ 2>/dev/null || true && \
     chmod -R 755 /app
 
-# Default command
 CMD ["python", "-c", "print('Bot is ready. Use docker-compose to start.')"]
