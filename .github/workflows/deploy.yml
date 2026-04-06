@@ -63,13 +63,13 @@ jobs:
             --group-id ${{ secrets.AWS_SG_ID }} \
             --protocol tcp --port 22 --cidr ${{ steps.ip.outputs.ipv4 }}/32 || true
 
-      - name: Copy docker-compose via SCP
+      - name: Copy project files via SCP
         uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ secrets.HOST }}
           username: ${{ secrets.USERNAME }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
-          source: "docker-compose.yml"
+          source: "docker-compose.yml,results/,config/,src/,requirements.txt,Dockerfile"
           target: "~/my_coin_traider/"
 
       - name: SSH Deploy
