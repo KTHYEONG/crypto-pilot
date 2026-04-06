@@ -19,7 +19,7 @@ import threading
 import hashlib
 import uuid
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from functools import wraps
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -64,16 +64,21 @@ from config.settings import (
     MIN_ORDER_VALUE_KRW,
     MIN_POSITION_VALUE_KRW,
     SLIPPAGE_RATE,
-    SPOT_ALLOCATION_WEIGHTS,
+    SPOT_CANDLE_SETTLEMENT_DELAY_MS,
+    SPOT_DRY_RUN,
+    SPOT_ENTRY_SIGNAL_RETRY_MAX,
+    SPOT_EXIT_CONFIRM_RETRIES,
+    SPOT_EXIT_CONFIRM_SLEEP_SEC,
+    SPOT_EXIT_RECOVERY_COOLDOWN_SEC,
     SPOT_HEARTBEAT_FILE,
     SPOT_LOOP_INTERVAL_SECONDS,
     SPOT_STATE_FILE,
     SPOT_STRATEGY_DB,
     SPOT_SYMBOL_DELAY_SECONDS,
-    SPOT_TARGET_SYMBOLS,
     TRADING_FEE_RATE,
     UPBIT_ACCESS_KEY,
     UPBIT_SECRET_KEY,
+    UPBIT_SPOT_TAKER_FEE_RATE,
 )
 from src.common.components import (
     HealthCheckManager,
@@ -82,9 +87,19 @@ from src.common.components import (
 )
 from src.common.utils import setup_logger
 from src.spot_strategy.strategies_spot import UltimateSpotStrategy, merge_exit_family_params
+from config.opt_config import SPOT_SYMBOLS
 from src.spot_strategy.upbit_client import UpbitClient
 
 logger = setup_logger("SpotBot")
+
+
+def _parse_utc_dt(s: str) -> datetime:
+    """Parse ISO datetime string, treating naive strings as UTC."""
+    dt = datetime.fromisoformat(s)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
 
 _CCXT_TRANSIENT_ERRORS: Tuple[type, ...] = ()
 if ccxt is not None:
@@ -215,15 +230,31 @@ class StateManager:
             self._dirty = True
             self._maybe_flush()
 
-    def clear_symbol_state(self, symbol: str) -> None:
+    def clear_symbol_state(
+        self, symbol: str, preserve_keys: Optional[list[str]] = None
+    ) -> None:
         with self._thread_lock:
             if not self._cache_initialized:
                 self._memory_cache = self._load_unlocked()
                 self._cache_initialized = True
             if symbol in self._memory_cache:
-                self._memory_cache[symbol] = {}
+                preserved: Dict[str, Any] = {}
+                if preserve_keys:
+                    preserved = {
+                        k: self._memory_cache[symbol].get(k)
+                        for k in preserve_keys
+                        if k in self._memory_cache[symbol]
+                    }
+                self._memory_cache[symbol] = preserved
                 self._dirty = True
                 self._maybe_flush()
+
+    def list_all_symbols(self) -> list[str]:
+        with self._thread_lock:
+            if not self._cache_initialized:
+                self._memory_cache = self._load_unlocked()
+                self._cache_initialized = True
+            return list(self._memory_cache.keys())
 
     def _maybe_flush(self) -> None:
         if not self._dirty:
@@ -250,24 +281,26 @@ class SpotBot:
         self.strategies: Dict[str, UltimateSpotStrategy] = {}
         self.params_map: Dict[str, dict] = {}
         self.symbols: list = []
-        self.symbol_allocation_weights: Dict[str, float] = {}
 
         self.trade_db = TradeHistoryDB(SPOT_STRATEGY_DB)
         self.health_manager = HealthCheckManager(SPOT_HEARTBEAT_FILE)
         self.state_manager = StateManager(SPOT_STATE_FILE)
 
         self._shutdown_requested = False
-        self.dry_run: bool = False  # Set to True for testing without actual orders
+        self.dry_run: bool = SPOT_DRY_RUN
+
+        self._loop_count: int = 0
+        self._last_gc_time: float = 0.0
+        self._db_write_lock = threading.Lock()
 
         self.last_calc_candle: Dict[str, str] = {}
         self._server_time_offset_ms: int = 0
-        self._last_server_time_sync: datetime = datetime.min
+        self._last_server_time_sync: datetime = datetime.min.replace(tzinfo=timezone.utc)
 
         self._log_last_emit_ts: Dict[str, float] = {}
         self._log_last_message: Dict[str, str] = {}
         self._log_throttle_lock = threading.Lock()
         self._time_sync_lock = threading.Lock()
-        self._db_write_lock = threading.Lock()
 
         self._setup_signal_handlers()
 
@@ -337,17 +370,10 @@ class SpotBot:
         """
         logger.info("📂 Loading Spot strategy from best_spot_4h.json[.enc]...")
 
-        preferred_symbols = list(SPOT_TARGET_SYMBOLS) if SPOT_TARGET_SYMBOLS else list(SPOT_ALLOCATION_WEIGHTS.keys())
+        preferred_symbols = list(SPOT_SYMBOLS)
         if not preferred_symbols:
-            raise ValueError("No live spot symbols configured. Check SPOT_TARGET_SYMBOLS in config/settings.py")
+            raise ValueError("No live spot symbols configured. Check SPOT_SYMBOLS in config/opt_config.py")
         self.symbols = preferred_symbols.copy()
-
-        weights: Dict[str, float] = {s: float(SPOT_ALLOCATION_WEIGHTS.get(s, 1.0)) for s in self.symbols}
-        total_weight = sum(weights.values())
-        self.symbol_allocation_weights = {
-            s: (w / total_weight if total_weight > 0 else 1.0 / len(self.symbols))
-            for s, w in weights.items()
-        }
 
         results_dir = Path(project_root) / "results"
         json_path = results_dir / "best_spot_4h.json"
@@ -398,9 +424,13 @@ class SpotBot:
             self.strategies[symbol] = UltimateSpotStrategy(f"RealSpot_{clean_sym}", shared_params)
             logger.info(f"✅ [{symbol}] Strategy initialized | TF={shared_params.get('TIMEFRAME', '4h')}")
 
+        shared_params = self.params_map.get(self.symbols[0], {}) if self.symbols else {}
         logger.info(
-            "📌 Allocation: %s",
-            ", ".join(f"{s}={self.symbol_allocation_weights.get(s, 0.0):.2f}" for s in self.symbols),
+            "📌 Symbols: %s | RISK_PER_TRADE=%.1f%% | MAX_CAP_PER_COIN=%.0f%% | LONG_ATR_MULT=%.2f",
+            ", ".join(self.symbols),
+            float(shared_params.get("RISK_PER_TRADE", 0)) * 100,
+            float(shared_params.get("MAX_CAP_PER_COIN", 1.0)) * 100,
+            float(shared_params.get("LONG_ATR_MULT", 3.0)),
         )
 
     # ------------------------------------------------------------------ #
@@ -437,7 +467,7 @@ class SpotBot:
 
     def _sync_server_time_offset(self, force: bool = False, sync_interval_seconds: int = 60) -> None:
         with self._time_sync_lock:
-            now = datetime.utcnow()
+            now = datetime.now(timezone.utc)
             minutes_in_4h_cycle = (now.hour * 60 + now.minute) % 240
             near_boundary = minutes_in_4h_cycle >= 239 or minutes_in_4h_cycle <= 0
             effective_interval = 5 if near_boundary else max(5, int(sync_interval_seconds))
@@ -456,7 +486,7 @@ class SpotBot:
 
     def _get_reference_now_ms(self) -> int:
         self._sync_server_time_offset(force=False)
-        return int(datetime.utcnow().timestamp() * 1000) + int(self._server_time_offset_ms)
+        return int(datetime.now(timezone.utc).timestamp() * 1000) + int(self._server_time_offset_ms)
 
     def _timeframe_to_minutes(self, timeframe: str) -> int:
         tf_raw = str(timeframe or "").strip()
@@ -540,7 +570,7 @@ class SpotBot:
         tf_min = self._timeframe_to_minutes(tf)
         limit = 310
         lookback_days = (limit * tf_min) / 1440
-        start_dt = datetime.utcnow() - timedelta(days=lookback_days + 2)
+        start_dt = datetime.now(timezone.utc) - timedelta(days=lookback_days + 2)
         start_str = start_dt.strftime("%Y-%m-%d %H:%M:%S")
 
         data_maps: Dict[str, pd.DataFrame] = {}
@@ -587,6 +617,20 @@ class SpotBot:
             logger.error(f"[{symbol}] Failed to fetch Spot position: {e}")
             return {"amount": 0.0, "entryPrice": 0.0, "value": 0.0}
 
+    def _get_spot_coin_amount_raw(self, symbol: str) -> float:
+        """Total (free+used) base coin on exchange; ignores local state."""
+        try:
+            base_coin = symbol.split("-")[1] if "-" in symbol else symbol.split("/")[0]
+            balance = self.client.fetch_balance_dict()
+            if not balance or "free" not in balance or "used" not in balance:
+                return 0.0
+            return float(balance["free"].get(base_coin, 0.0)) + float(
+                balance["used"].get(base_coin, 0.0)
+            )
+        except Exception as e:
+            logger.error("[%s] Failed to read base coin amount: %s", symbol, e)
+            return 0.0
+
     # ------------------------------------------------------------------ #
     #  Position sizing (engine-aligned: risk-budget / stop-distance)      #
     # ------------------------------------------------------------------ #
@@ -599,6 +643,7 @@ class SpotBot:
         balance_krw: float,
         regime_risk_mult: float,
         garch_kelly_f: float,
+        regime_state: float = 2.0,
     ) -> float:
         """
         백테스트 엔진과 동일한 리스크 기반 포지션 사이징.
@@ -619,6 +664,10 @@ class SpotBot:
         gk = float(garch_kelly_f) if np.isfinite(garch_kelly_f) and garch_kelly_f > 0.0 else 1.0
         eff = rr * gk
         eff = max(0.05, min(1.0, eff))
+
+        # SOFT regime (0.5 < regime_state < 1.5): engine_spot.py entry path alignment
+        if 0.5 < regime_state < 1.5:
+            eff = eff * 0.90
 
         new_risk_pct = risk_per_trade * eff
         risk_budget = balance_krw * new_risk_pct
@@ -680,7 +729,7 @@ class SpotBot:
             tp_price = entry_price + (entry_atr * long_tp_mult) if long_tp_mult > 1e-9 and entry_atr > 0 else 0.0
 
             state_data = {
-                "entry_time": datetime.utcnow().isoformat(),
+                "entry_time": datetime.now(timezone.utc).isoformat(),
                 "entry_price": float(entry_price),
                 "entry_atr": float(entry_atr),
                 "side": "LONG",
@@ -689,6 +738,11 @@ class SpotBot:
                 "tp_price": float(tp_price),
                 "recovery_bootstrapped": True,
                 "initial_amount": float(abs(amount)),
+                "exit_pending": False,
+                "exit_error": None,
+                "exit_remaining_amount": 0.0,
+                "exit_recovery_attempt_count": 0,
+                "exit_attempt_at": None,
             }
             
             self.state_manager.update_symbol_state(symbol, state_data)
@@ -698,7 +752,7 @@ class SpotBot:
             )
             return True
         except Exception as e:
-            logger.error(f"❌ [%s] Failed to bootstrap state: {e}")
+            logger.error("❌ [%s] Failed to bootstrap state: %s", symbol, e)
             return False
 
     def _enforce_min_fill_ratio(
@@ -737,8 +791,9 @@ class SpotBot:
         and idempotent behavior using clientOrderId (where supported) or balance tracking.
         """
         if self.dry_run:
-            logger.info("[DRY-RUN] Order: %s %s %f", side.upper(), symbol, qty)
-            return {"id": "dry-run", "status": "closed", "amount": qty, "price": 0.0}
+            px = float(self.client.get_market_price(symbol) or 0.0)
+            logger.info("[DRY-RUN] Order: %s %s %f @ %f", side.upper(), symbol, qty, px)
+            return {"id": "dry-run", "status": "closed", "amount": qty, "price": px}
 
         try:
             ccxt_symbol = self.client._normalize_symbol(symbol)
@@ -798,6 +853,156 @@ class SpotBot:
             logger.error(f"❌ Order Failed for {symbol}: {e}")
             return None
 
+    def _confirm_buy_fill(
+        self,
+        symbol: str,
+        expected_qty: float,
+        retries: int = SPOT_EXIT_CONFIRM_RETRIES,
+        sleep_sec: float = SPOT_EXIT_CONFIRM_SLEEP_SEC,
+    ) -> Tuple[bool, float]:
+        if self.dry_run:
+            return True, float(expected_qty)
+        min_fill = max(0.0, float(expected_qty) * 0.95)
+        last_amt = 0.0
+        for attempt in range(max(1, retries)):
+            if attempt > 0:
+                time.sleep(max(0.0, sleep_sec))
+            last_amt = self._get_spot_coin_amount_raw(symbol)
+            if last_amt >= min_fill:
+                return True, last_amt
+        return False, last_amt
+
+    def _confirm_sell_flat(
+        self,
+        symbol: str,
+        retries: int = SPOT_EXIT_CONFIRM_RETRIES,
+        sleep_sec: float = SPOT_EXIT_CONFIRM_SLEEP_SEC,
+    ) -> Tuple[bool, float]:
+        if self.dry_run:
+            return True, 0.0
+        last_amt = 0.0
+        for attempt in range(max(1, retries)):
+            if attempt > 0:
+                time.sleep(max(0.0, sleep_sec))
+            try:
+                px = self._get_market_price_safe(symbol)
+            except Exception:
+                px = 0.0
+            last_amt = self._get_spot_coin_amount_raw(symbol)
+            value_krw = last_amt * px
+            if last_amt < 1e-12 or value_krw < float(MIN_POSITION_VALUE_KRW):
+                return True, 0.0
+        return False, last_amt
+
+    def _recover_pending_exit(self, symbol: str, current_price: float) -> bool:
+        """Retry failed liquidation. Returns True when flat or no pending exit."""
+        state = self.state_manager.get_symbol_state(symbol)
+        if not state or not bool(state.get("exit_pending", False)):
+            return True
+
+        raw_amt = self._get_spot_coin_amount_raw(symbol)
+        try:
+            px_chk = self._get_market_price_safe(symbol)
+        except Exception:
+            px_chk = float(current_price)
+        value_krw = raw_amt * px_chk if px_chk > 0 else 0.0
+        if raw_amt < 1e-12 or value_krw < float(MIN_POSITION_VALUE_KRW):
+            self.state_manager.clear_symbol_state(
+                symbol,
+                preserve_keys=[
+                    "last_entry_attempt_signal_candle_ts",
+                    "entry_attempt_count_for_signal",
+                ],
+            )
+            return True
+
+        now = datetime.now(timezone.utc)
+        last_attempt_at = str(state.get("exit_attempt_at") or "")
+        cooldown = float(SPOT_EXIT_RECOVERY_COOLDOWN_SEC)
+        if last_attempt_at:
+            try:
+                if (now - _parse_utc_dt(last_attempt_at)).total_seconds() < cooldown:
+                    return False
+            except Exception:
+                pass
+
+        recovery_attempts = int(state.get("exit_recovery_attempt_count", 0) or 0) + 1
+        self.state_manager.update_symbol_state(
+            symbol,
+            {
+                "exit_pending": True,
+                "exit_attempt_at": now.isoformat(),
+                "exit_recovery_attempt_count": recovery_attempts,
+                "exit_error": None,
+            },
+        )
+
+        order = self._place_order_safe(symbol, "sell", raw_amt)
+        if not order:
+            self.state_manager.update_symbol_state(
+                symbol,
+                {
+                    "exit_error": "recovery_order_failed",
+                    "exit_attempt_at": datetime.now(timezone.utc).isoformat(),
+                },
+            )
+            return False
+
+        is_flat, remaining = self._confirm_sell_flat(symbol)
+        if not is_flat:
+            self.state_manager.update_symbol_state(
+                symbol,
+                {
+                    "exit_pending": True,
+                    "exit_error": f"not_flat_after_recovery:{remaining:.8f}",
+                    "exit_remaining_amount": float(remaining),
+                    "exit_attempt_at": datetime.now(timezone.utc).isoformat(),
+                },
+            )
+            return False
+
+        entry_price = float(state.get("entry_price", 0.0) or 0.0)
+        exit_price = float(current_price)
+        exit_amt = float(
+            state.get("initial_amount")
+            or state.get("exit_remaining_amount")
+            or raw_amt
+            or 0.0
+        )
+        if exit_amt <= 0.0:
+            exit_amt = raw_amt
+
+        fee_rate = float(UPBIT_SPOT_TAKER_FEE_RATE)
+        entry_value = entry_price * exit_amt
+        exit_value = exit_price * exit_amt
+        total_fee = (entry_value + exit_value) * fee_rate
+        gross_pnl = (exit_price - entry_price) * exit_amt
+        net_pnl = gross_pnl - total_fee
+        pnl_pct = (net_pnl / entry_value) * 100.0 if entry_value > 0 else 0.0
+
+        with self._db_write_lock:
+            self.trade_db.record_trade(
+                symbol=symbol,
+                side="LONG",
+                action="EXIT",
+                quantity=exit_amt,
+                price=exit_price,
+                entry_price=entry_price if entry_price > 0 else None,
+                pnl=net_pnl,
+                pnl_pct=pnl_pct,
+                reason="Exit Recovery",
+                params={"recovery_attempt_count": int(recovery_attempts)},
+            )
+
+        self.state_manager.clear_symbol_state(
+            symbol,
+            preserve_keys=[
+                "last_entry_attempt_signal_candle_ts",
+                "entry_attempt_count_for_signal",
+            ],
+        )
+        return True
+
     # ------------------------------------------------------------------ #
     #  Initialization                                                      #
     # ------------------------------------------------------------------ #
@@ -807,6 +1012,7 @@ class SpotBot:
         self._sync_server_time_offset(force=True)
 
         self.load_strategies_from_json()
+        self._reconcile_positions_on_startup()
         gc.collect()
 
         try:
@@ -824,119 +1030,138 @@ class SpotBot:
     #  Core trading logic                                                  #
     # ------------------------------------------------------------------ #
 
-    def execute_logic(self, symbol: str, all_ohlcv: Dict[str, pd.DataFrame]) -> None:
-        """
-        백테스트 엔진(engine_spot.py)과 동일한 조건으로 진입/청산 수행.
+    def _refresh_indicators_if_needed(
+        self, symbol: str, all_ohlcv: Dict[str, pd.DataFrame]
+    ) -> dict:
+        """Compute and cache indicators. Returns cached indicator dict."""
+        if symbol not in self.params_map or symbol not in self.strategies:
+            return {}
+        params = self.params_map[symbol]
+        strategy = self.strategies[symbol]
+        indicator_tf = str(params.get("INDICATOR_TIMEFRAME", "4h"))
+        tf_min = self._timeframe_to_minutes(indicator_tf)
+        current_slot = self._get_candle_slot_id(indicator_tf)
+        cached = self._get_cached_indicators(symbol)
+        required_keys = (
+            "trend_direction",
+            "atr",
+            "entry_upper",
+            "strength_filter",
+            "regime_entry_gate",
+            "regime_risk_mult",
+            "garch_kelly_f",
+            "kill_signal",
+            "bb_upper",
+            "trail_tighten_flag",
+            "regime_state",
+            "signal_candle_ts",
+        )
+        need_calculation = (
+            not cached
+            or any(k not in cached for k in required_keys)
+            or self.last_calc_candle.get(symbol) != current_slot
+        )
+        if not need_calculation:
+            return cached
 
-        진입 조건 (engine_spot.py backtest_loop_numba_spot 기준):
-          1. strength_filter[prev] == 1
-          2. trend_dir[prev] == 1
-          3. entry_upper[prev] < 1.0 OR current_high > entry_upper[prev]
-          4. regime_entry_gate[prev] >= 0.5
-        청산 조건:
-          1. kill_signal (이전 캔들에서 발생 시 즉시 청산)
-          2. hard stop (current_price <= stop_price)
-          3. take profit (LONG_TP_MULT > 0일 때만)
-          4. BB upper exit (current_price >= bb_upper)
-          5. trailing stop update + trail tighten (RSI 기반)
-          6. time stop (경과 4H 봉 수 기준)
-        """
+        symbol_df = all_ohlcv.get(symbol)
+        if symbol_df is None or len(symbol_df) < 50:
+            self.last_calc_candle[symbol] = current_slot
+            return cached
+
+        last_raw = self._select_last_closed_candle(symbol_df, indicator_tf)
+        if last_raw is not None and tf_min > 0:
+            candle_ts = self._extract_candle_timestamp_ms(last_raw)
+            interval_ms = tf_min * 60 * 1000
+            candle_close_ms = candle_ts + interval_ms
+            now_ms = self._get_reference_now_ms()
+            elapsed_since_close = now_ms - candle_close_ms
+            if 0 < elapsed_since_close < int(SPOT_CANDLE_SETTLEMENT_DELAY_MS):
+                return cached
+
+        min_len = min(len(df) for df in all_ohlcv.values())
+        aligned_maps: Dict[str, Dict[str, pd.DataFrame]] = {
+            s: {indicator_tf: df.iloc[-min_len:].reset_index(drop=True)}
+            for s, df in all_ohlcv.items()
+        }
+        strategy._portfolio_eval_ctx = {
+            "data_maps": aligned_maps,
+            "symbols": list(aligned_maps.keys()),
+            "tf": indicator_tf,
+        }
+        aligned_df = symbol_df.iloc[-min_len:].reset_index(drop=True).copy()
+        signal_df = strategy.generate_signals(aligned_df)
+        last_candle = self._select_last_closed_candle(signal_df, indicator_tf)
+        if last_candle is None:
+            return cached
+
+        regime_state_val = float(last_candle.get("regime_state", 2.0))
+        signal_candle_ts = int(self._extract_candle_timestamp_ms(last_candle))
+
+        self._cache_indicators(
+            symbol,
+            {
+                "trend_direction": int(last_candle.get("trend_direction", 0)),
+                "atr": float(last_candle.get("atr", 0.0)),
+                "entry_upper": float(last_candle.get("entry_upper", 999999.0)),
+                "strength_filter": int(last_candle.get("strength_filter", 0)),
+                "regime_entry_gate": float(last_candle.get("regime_entry_gate", 0.0)),
+                "regime_risk_mult": float(last_candle.get("regime_risk_mult", 1.0)),
+                "garch_kelly_f": float(last_candle.get("garch_kelly_f", 1.0)),
+                "kill_signal": float(last_candle.get("kill_signal", 0.0)),
+                "bb_upper": float(last_candle.get("bb_upper", np.inf)),
+                "trail_tighten_flag": float(last_candle.get("trail_tighten_flag", 0.0)),
+                "regime_state": regime_state_val,
+                "signal_candle_ts": signal_candle_ts,
+                "indicator_timeframe": indicator_tf,
+            },
+        )
+        self.last_calc_candle[symbol] = current_slot
+        return self._get_cached_indicators(symbol)
+
+    def _process_exit(self, symbol: str, current_price: float, cached: dict) -> None:
+        """Exit-only path (includes bootstrap and exit_pending recovery)."""
         try:
             if symbol not in self.params_map or symbol not in self.strategies:
                 return
-
             params = self.params_map[symbol]
-            strategy = self.strategies[symbol]
             indicator_tf = str(params.get("INDICATOR_TIMEFRAME", "4h"))
 
-            current_price = self._get_market_price_safe(symbol)
-            if current_price is None:
-                return
+            state = self.state_manager.get_symbol_state(symbol)
+            if bool(state.get("exit_pending", False)):
+                if not self._recover_pending_exit(symbol, current_price):
+                    return
+                state = self.state_manager.get_symbol_state(symbol)
 
             pos = self._get_current_position(symbol, current_price)
-            amount = pos["amount"]
+            amount = float(pos["amount"])
             in_position = amount > 0
 
-            # --- [ENHANCED] Robust state management & bootstrapping ---
-            state = self.state_manager.get_symbol_state(symbol)
-            
-            # 1. Stale state cleanup (State says in_pos but exchange says empty)
             if not in_position and state and state.get("entry_price"):
-                self._log_throttled("info", f"{symbol}:cleanup", f"🧹 [{symbol}] Clearing stale state.", 600.0)
-                self.state_manager.clear_symbol_state(symbol)
+                self._log_throttled(
+                    "info",
+                    f"{symbol}:cleanup",
+                    f"🧹 [{symbol}] Clearing stale state.",
+                    600.0,
+                )
+                self.state_manager.clear_symbol_state(
+                    symbol,
+                    preserve_keys=[
+                        "last_entry_attempt_signal_candle_ts",
+                        "entry_attempt_count_for_signal",
+                    ],
+                )
                 state = {}
 
-            # Indicator calculation (required for both entry scan and exit/bootstrap)
-            indicator_tf = str(params.get("INDICATOR_TIMEFRAME", "4h"))
-            current_slot = self._get_candle_slot_id(indicator_tf)
-            cached = self._get_cached_indicators(symbol)
-            required_keys = (
-                "trend_direction", "atr", "entry_upper", "strength_filter",
-                "regime_entry_gate", "regime_risk_mult", "garch_kelly_f",
-                "kill_signal", "bb_upper", "trail_tighten_flag",
-            )
-            need_calculation = (
-                not cached
-                or any(k not in cached for k in required_keys)
-                or self.last_calc_candle.get(symbol) != current_slot
-            )
-
-            if need_calculation:
-                # [Calculation logic same as before but ensured it runs for bootstrapping]
-                symbol_df = all_ohlcv.get(symbol)
-                if symbol_df is None or len(symbol_df) < 50:
-                    self.last_calc_candle[symbol] = current_slot
-                    return
-
-                # Set portfolio context for market breadth regime
-                # Align all dataframes to same length (use minimum)
-                min_len = min(len(df) for df in all_ohlcv.values())
-                aligned_maps: Dict[str, Dict[str, pd.DataFrame]] = {
-                    s: {indicator_tf: df.iloc[-min_len:].reset_index(drop=True)}
-                    for s, df in all_ohlcv.items()
-                }
-                strategy._portfolio_eval_ctx = {
-                    "data_maps": aligned_maps,
-                    "symbols": list(aligned_maps.keys()),
-                    "tf": indicator_tf,
-                }
-
-                aligned_df = symbol_df.iloc[-min_len:].reset_index(drop=True).copy()
-                signal_df = strategy.generate_signals(aligned_df)
-                last_candle = self._select_last_closed_candle(signal_df, indicator_tf)
-
-                if last_candle is not None:
-                    self._cache_indicators(
-                        symbol,
-                        {
-                            "trend_direction": int(last_candle.get("trend_direction", 0)),
-                            "atr": float(last_candle.get("atr", 0.0)),
-                            "entry_upper": float(last_candle.get("entry_upper", 999999.0)),
-                            "strength_filter": int(last_candle.get("strength_filter", 0)),
-                            "regime_entry_gate": float(last_candle.get("regime_entry_gate", 0.0)),
-                            "regime_risk_mult": float(last_candle.get("regime_risk_mult", 1.0)),
-                            "garch_kelly_f": float(last_candle.get("garch_kelly_f", 1.0)),
-                            "kill_signal": float(last_candle.get("kill_signal", 0.0)),
-                            "bb_upper": float(last_candle.get("bb_upper", np.inf)),
-                            "trail_tighten_flag": float(last_candle.get("trail_tighten_flag", 0.0)),
-                            "indicator_timeframe": indicator_tf,
-                        },
-                    )
-                    self.last_calc_candle[symbol] = current_slot
-
-            cached = self._get_cached_indicators(symbol)
             trend_dir = int(cached.get("trend_direction", 0))
             atr = float(cached.get("atr", 0.0))
-            entry_upper = float(cached.get("entry_upper", 999999.0))
-            strength_ok = int(cached.get("strength_filter", 0)) == 1
-            regime_gate = float(cached.get("regime_entry_gate", 0.0))
-            regime_risk_mult = float(cached.get("regime_risk_mult", 1.0))
-            garch_kelly_f = float(cached.get("garch_kelly_f", 1.0))
             kill_signal = float(cached.get("kill_signal", 0.0))
             bb_upper = float(cached.get("bb_upper", np.inf))
             trail_tighten_flag = float(cached.get("trail_tighten_flag", 0.0))
+            rst = float(cached.get("regime_state", 2.0))
+            trail_regime_factor = max(0.5, 1.0 - (2.0 - rst) * 0.14)
+            ts_regime_factor = max(0.50, 1.0 - (2.0 - rst) * 0.35)
 
-            # 2. Bootstrapping (Exchange says in_pos but State is empty/missing core)
             if in_position and (not state or not state.get("entry_price")):
                 success = self._bootstrap_state_for_open_position(
                     symbol=symbol,
@@ -944,198 +1169,458 @@ class SpotBot:
                     pos=pos,
                     current_price=current_price,
                     params=params,
-                    atr=atr
+                    atr=atr,
                 )
                 if not success:
-                    return # Skip this sym for now if bootstrap fails
+                    return
                 state = self.state_manager.get_symbol_state(symbol)
 
-            # ---------------------------------------------------------
-            # EXIT LOGIC
-            # ---------------------------------------------------------
-            if in_position:
-                state = self.state_manager.get_symbol_state(symbol)
-                entry_price = float(state.get("entry_price", pos["entryPrice"]))
-                if entry_price <= 0.0:
-                    entry_price = current_price
+            if not in_position:
+                return
 
-                # Update highest price tracker
-                highest = float(state.get("highest_price", current_price))
-                if current_price > highest:
-                    highest = current_price
-                    self.state_manager.update_symbol_state(symbol, {"highest_price": highest})
+            state = self.state_manager.get_symbol_state(symbol)
+            entry_price = float(state.get("entry_price", pos["entryPrice"]))
+            if entry_price <= 0.0:
+                entry_price = current_price
 
-                entry_atr = float(state.get("entry_atr", atr))
-                stop_price = float(state.get("active_stop_price", entry_price * 0.85))
+            highest = float(state.get("highest_price", current_price))
+            if current_price > highest:
+                highest = current_price
+                self.state_manager.update_symbol_state(symbol, {"highest_price": highest})
 
-                long_trail_mult = float(params.get("TRAIL_ATR_MULT", params.get("LONG_TRAIL_MULT", 5.0)))
-                long_trail_lock_mult = float(params.get("LONG_TRAIL_LOCK_MULT", 1.5))
-                tp_lock_atr_mult = float(params.get("TP_LOCK_ATR_MULT", 3.0))
-                long_tp_mult = float(params.get("LONG_TP_MULT", 0.0))
-                time_stop_bars = int(params.get("TIME_STOP_BARS", 0))
+            entry_atr = float(state.get("entry_atr", atr))
+            stop_price = float(state.get("active_stop_price", entry_price * 0.85))
 
-                # --- Trailing stop update (engine-aligned) ---
-                dist = highest - entry_price
-                # Trail tightening: RSI-based flag OR significant profit
-                if trail_tighten_flag > 0.5 or (entry_atr > 0.0 and dist > entry_atr * tp_lock_atr_mult):
-                    effective_trail_mult = long_trail_lock_mult
-                else:
-                    effective_trail_mult = long_trail_mult
+            long_trail_mult = float(params.get("TRAIL_ATR_MULT", params.get("LONG_TRAIL_MULT", 5.0)))
+            long_trail_lock_mult = float(params.get("LONG_TRAIL_LOCK_MULT", 1.5))
+            tp_lock_atr_mult = float(params.get("TP_LOCK_ATR_MULT", 3.0))
+            long_tp_mult = float(params.get("LONG_TP_MULT", 0.0))
+            time_stop_bars = int(params.get("TIME_STOP_BARS", 0))
 
-                if entry_atr > 0.0:
-                    new_stop = highest - (entry_atr * effective_trail_mult)
-                    if new_stop > stop_price:
-                        stop_price = new_stop
-                        self.state_manager.update_symbol_state(symbol, {"active_stop_price": stop_price})
+            dist = highest - entry_price
+            current_trail_mult = long_trail_mult * trail_regime_factor
+            if trail_tighten_flag > 0.5 or (
+                entry_atr > 0.0 and dist > entry_atr * tp_lock_atr_mult
+            ):
+                current_trail_mult = long_trail_lock_mult
+            effective_trail_mult = float(current_trail_mult)
 
-                # Determine TP price (only meaningful if LONG_TP_MULT > 0)
-                tp_price = entry_price + (entry_atr * long_tp_mult) if long_tp_mult > 1e-9 else np.inf
+            if entry_atr > 0.0:
+                new_stop = highest - (entry_atr * effective_trail_mult)
+                if new_stop > stop_price:
+                    stop_price = new_stop
+                    self.state_manager.update_symbol_state(symbol, {"active_stop_price": stop_price})
 
-                exit_triggered = False
-                reason = ""
+            tp_price = (
+                entry_price + (entry_atr * long_tp_mult) if long_tp_mult > 1e-9 else np.inf
+            )
 
-                # 1. Kill signal from previous closed candle → exit immediately
-                if not exit_triggered and kill_signal > 0.5:
-                    exit_triggered = True
-                    reason = "Kill Signal"
+            eff_time_stop = (
+                max(1, int(time_stop_bars * ts_regime_factor))
+                if time_stop_bars > 0
+                else 0
+            )
 
-                # 2. Hard stop loss
-                if not exit_triggered and current_price <= stop_price:
-                    exit_triggered = True
-                    reason = f"Stop Loss ({stop_price:,.0f})"
+            exit_triggered = False
+            reason = ""
 
-                # 3. Take profit (disabled when LONG_TP_MULT=0.0, i.e. TREND_HOLD)
-                if not exit_triggered and current_price >= tp_price:
-                    exit_triggered = True
-                    reason = f"Take Profit ({tp_price:,.0f})"
+            if not exit_triggered and kill_signal > 0.5:
+                exit_triggered = True
+                reason = "Kill Signal"
 
-                # 4. BB upper exit
-                if (
-                    not exit_triggered
-                    and np.isfinite(bb_upper)
-                    and bb_upper < 1e18
-                    and current_price >= bb_upper
-                ):
-                    exit_triggered = True
-                    reason = f"BB Upper ({bb_upper:,.0f})"
+            if not exit_triggered and current_price <= stop_price:
+                exit_triggered = True
+                reason = f"Stop Loss ({stop_price:,.0f})"
 
-                # 5. Time stop (bars = elapsed time / TF minutes)
-                if not exit_triggered and time_stop_bars > 0:
-                    entry_time_str = state.get("entry_time")
-                    if entry_time_str:
-                        try:
-                            entry_dt = datetime.fromisoformat(entry_time_str)
-                            elapsed_minutes = (datetime.utcnow() - entry_dt).total_seconds() / 60.0
-                            tf_min = self._timeframe_to_minutes(indicator_tf)
-                            bars_elapsed = int(elapsed_minutes / tf_min) if tf_min > 0 else 0
-                            if bars_elapsed >= time_stop_bars:
-                                exit_triggered = True
-                                reason = f"Time Stop ({bars_elapsed} bars)"
-                        except Exception:
-                            pass
+            if not exit_triggered and current_price >= tp_price:
+                exit_triggered = True
+                reason = f"Take Profit ({tp_price:,.0f})"
 
-                self._log_throttled(
-                    "info",
-                    f"{symbol}:pos",
-                    f"📊 [{symbol}] Holding {amount:.4f} | Cur: {current_price:,.0f} | "
-                    f"Stop: {stop_price:,.0f} | BB: {bb_upper:,.0f} | "
-                    f"Trail×: {effective_trail_mult:.1f} | TP: {'off' if tp_price == np.inf else f'{tp_price:,.0f}'}",
-                    120.0,
+            if (
+                not exit_triggered
+                and np.isfinite(bb_upper)
+                and bb_upper < 1e18
+                and current_price >= bb_upper
+            ):
+                exit_triggered = True
+                reason = f"BB Upper ({bb_upper:,.0f})"
+
+            if not exit_triggered and time_stop_bars > 0 and eff_time_stop > 0:
+                entry_time_str = state.get("entry_time")
+                if entry_time_str:
+                    try:
+                        entry_dt = _parse_utc_dt(entry_time_str)
+                        elapsed_minutes = (
+                            datetime.now(timezone.utc) - entry_dt
+                        ).total_seconds() / 60.0
+                        tf_min = self._timeframe_to_minutes(indicator_tf)
+                        bars_elapsed = (
+                            int(elapsed_minutes / tf_min) if tf_min > 0 else 0
+                        )
+                        if bars_elapsed >= eff_time_stop:
+                            exit_triggered = True
+                            reason = f"Time Stop ({bars_elapsed}>={eff_time_stop} bars, ts_reg={ts_regime_factor:.2f})"
+                    except Exception:
+                        pass
+
+            self._log_throttled(
+                "info",
+                f"{symbol}:pos",
+                f"📊 [{symbol}] Holding {amount:.4f} | Cur: {current_price:,.0f} | "
+                f"Stop: {stop_price:,.0f} | BB: {bb_upper:,.0f} | "
+                f"Trail×: {effective_trail_mult:.2f} | trf={trail_regime_factor:.2f} | "
+                f"tsf={ts_regime_factor:.2f} | TP: {'off' if tp_price == np.inf else f'{tp_price:,.0f}'}",
+                120.0,
+            )
+
+            if not exit_triggered:
+                return
+
+            logger.warning(
+                f"🚨 [{symbol}] Exit Triggered: {reason}. Selling {amount:.4f}..."
+            )
+            self.state_manager.update_symbol_state(
+                symbol,
+                {
+                    "exit_pending": True,
+                    "exit_attempt_at": datetime.now(timezone.utc).isoformat(),
+                    "exit_remaining_amount": float(amount),
+                    "exit_recovery_attempt_count": 0,
+                    "exit_error": None,
+                },
+            )
+            order = self._place_order_safe(symbol, "sell", amount)
+            if not order:
+                self.state_manager.update_symbol_state(
+                    symbol,
+                    {
+                        "exit_error": "sell_order_failed",
+                        "exit_attempt_at": datetime.now(timezone.utc).isoformat(),
+                    },
+                )
+                return
+
+            is_flat, remaining = self._confirm_sell_flat(symbol)
+            if not is_flat:
+                self.state_manager.update_symbol_state(
+                    symbol,
+                    {
+                        "exit_pending": True,
+                        "exit_remaining_amount": float(remaining),
+                        "exit_error": "sell_not_confirmed_flat",
+                        "exit_attempt_at": datetime.now(timezone.utc).isoformat(),
+                    },
+                )
+                return
+
+            exit_price = float(current_price)
+            fee_rate = float(UPBIT_SPOT_TAKER_FEE_RATE)
+            entry_value = entry_price * amount
+            exit_value = exit_price * amount
+            total_fee = (entry_value + exit_value) * fee_rate
+            gross_pnl = (exit_price - entry_price) * amount
+            net_pnl = gross_pnl - total_fee
+            pnl_pct = (net_pnl / entry_value) * 100.0 if entry_value > 0 else 0.0
+
+            with self._db_write_lock:
+                self.trade_db.record_trade(
+                    symbol=symbol,
+                    side="LONG",
+                    action="EXIT",
+                    quantity=amount,
+                    price=exit_price,
+                    entry_price=entry_price,
+                    pnl=net_pnl,
+                    pnl_pct=pnl_pct,
+                    reason=reason,
+                    params={},
                 )
 
-                if exit_triggered:
-                    logger.warning(f"🚨 [{symbol}] Exit Triggered: {reason}. Selling {amount:.4f}...")
-                    order = self._place_order_safe(symbol, "sell", amount)
-                    if order:
-                        self.trade_db.record_trade(symbol, "LONG", "EXIT", amount, current_price, reason, {})
-                        self.state_manager.clear_symbol_state(symbol)
-
-            # ---------------------------------------------------------
-            # ENTRY LOGIC
-            # ---------------------------------------------------------
-            elif not in_position:
-                self._log_throttled(
-                    "info", f"{symbol}:scan", f"ℹ️ [{symbol}] Scanning for entry...", 180.0
-                )
-
-                # Engine entry conditions:
-                # 1. strength_filter == 1
-                # 2. trend_dir == 1
-                # 3. entry_upper < 1.0 (pullback/signal) OR current_price > entry_upper (breakout)
-                # 4. regime_entry_gate >= 0.5
-                if not strength_ok or trend_dir != 1:
-                    return
-
-                pullback_next_open = entry_upper < 1.0
-                breakout_ok = pullback_next_open or (current_price > entry_upper)
-
-                if not breakout_ok:
-                    return
-
-                # Regime gate check (critical: skipped in old bot)
-                if regime_gate < 0.5:
-                    self._log_throttled(
-                        "info",
-                        f"{symbol}:regime",
-                        f"🚫 [{symbol}] Regime gate OFF ({regime_gate:.2f}). Entry blocked.",
-                        300.0,
-                    )
-                    return
-
-                if atr <= 0.0:
-                    return
-
-                _, free_krw = self._fetch_balance_safe()
-                fill_price = current_price * (1.0 + SLIPPAGE_RATE)
-
-                qty = self._calculate_spot_position_size(
-                    fill_price=fill_price,
-                    entry_atr=atr,
-                    params=params,
-                    balance_krw=free_krw,
-                    regime_risk_mult=regime_risk_mult,
-                    garch_kelly_f=garch_kelly_f,
-                )
-
-                if qty <= 0.0:
-                    return
-
-                tag = "Pullback (signal bar open)" if pullback_next_open else "Breakout"
-                logger.info(
-                    f"🟢 [{symbol}] {tag} | Regime={regime_gate:.2f} | Kelly×={garch_kelly_f:.2f} | "
-                    f"Buying {qty:.4f} @ {current_price:,.0f}"
-                )
-                
-                # Use unique CID for reconciliation (local tracking)
-                cid = "RT_SPT_" + uuid.uuid4().hex[:12]
-                order = self._place_order_safe(symbol, "buy", qty, client_order_id=cid)
-
-                if order:
-                    actual_fill_qty = float(order.get("amount", qty))
-                    self._enforce_min_fill_ratio(symbol, qty, actual_fill_qty, params)
-                    
-                    fill_price = float(order.get("price", current_price * (1.0 + SLIPPAGE_RATE)) or current_price * (1.0 + SLIPPAGE_RATE))
-                    long_atr_mult = float(params.get("LONG_ATR_MULT", 3.0))
-                    initial_stop = fill_price - (atr * long_atr_mult)
-                    self.state_manager.update_symbol_state(
-                        symbol,
-                        {
-                            "entry_time": datetime.utcnow().isoformat(),
-                            "entry_price": fill_price,
-                            "entry_atr": atr,
-                            "side": "LONG",
-                            "highest_price": fill_price,
-                            "active_stop_price": initial_stop,
-                            "order_cid": cid,
-                        },
-                    )
-                    self.trade_db.record_trade(
-                        symbol, "LONG", "ENTRY", actual_fill_qty, fill_price, tag, {"cid": cid}
-                    )
+            self.state_manager.clear_symbol_state(
+                symbol,
+                preserve_keys=[
+                    "last_entry_attempt_signal_candle_ts",
+                    "entry_attempt_count_for_signal",
+                ],
+            )
 
         except Exception as e:
-            logger.error(f"🚨 Error executing spot logic for {symbol}: {e}")
+            logger.error(f"🚨 Error in exit logic for {symbol}: {e}")
             self.health_manager.record_error(e)
+
+    def _process_entry(
+        self,
+        symbol: str,
+        current_price: float,
+        cached: dict,
+        available_krw: float,
+    ) -> float:
+        """Entry-only path. Returns KRW consumed (0.0 if no entry)."""
+        try:
+            if symbol not in self.params_map or symbol not in self.strategies:
+                return 0.0
+            params = self.params_map[symbol]
+            indicator_tf = str(params.get("INDICATOR_TIMEFRAME", "4h"))
+            tf_min = self._timeframe_to_minutes(indicator_tf)
+
+            pos = self._get_current_position(symbol, current_price)
+            if float(pos["amount"]) > 0:
+                return 0.0
+
+            trend_dir = int(cached.get("trend_direction", 0))
+            entry_upper = float(cached.get("entry_upper", 999999.0))
+            strength_ok = int(cached.get("strength_filter", 0)) == 1
+            regime_gate = float(cached.get("regime_entry_gate", 0.0))
+            regime_risk_mult = float(cached.get("regime_risk_mult", 1.0))
+            garch_kelly_f = float(cached.get("garch_kelly_f", 1.0))
+            atr = float(cached.get("atr", 0.0))
+            regime_state_val = float(cached.get("regime_state", 2.0))
+
+            now_ms = self._get_reference_now_ms()
+            signal_candle_ts = int(cached.get("signal_candle_ts", 0) or 0)
+            interval_ms = tf_min * 60 * 1000
+            if (
+                signal_candle_ts > 0
+                and tf_min > 0
+                and now_ms >= signal_candle_ts + (2 * interval_ms)
+            ):
+                return 0.0
+
+            state = self.state_manager.get_symbol_state(symbol)
+            last_signal_ts = int(
+                state.get("last_entry_attempt_signal_candle_ts", 0) or 0
+            )
+            attempt_count = int(state.get("entry_attempt_count_for_signal", 0) or 0)
+            if last_signal_ts != signal_candle_ts:
+                attempt_count = 0
+            if attempt_count >= int(SPOT_ENTRY_SIGNAL_RETRY_MAX):
+                return 0.0
+
+            self._log_throttled(
+                "info",
+                f"{symbol}:scan",
+                f"ℹ️ [{symbol}] Scanning for entry...",
+                180.0,
+            )
+
+            if not strength_ok or trend_dir != 1:
+                return 0.0
+
+            pullback_next_open = entry_upper < 1.0
+            breakout_ok = pullback_next_open or (current_price > entry_upper)
+            if not breakout_ok:
+                return 0.0
+
+            if regime_gate < 0.5:
+                self._log_throttled(
+                    "info",
+                    f"{symbol}:regime",
+                    f"🚫 [{symbol}] Regime gate OFF ({regime_gate:.2f}). Entry blocked.",
+                    300.0,
+                )
+                return 0.0
+
+            if atr <= 0.0:
+                return 0.0
+
+            fill_price_est = current_price * (1.0 + SLIPPAGE_RATE)
+            qty = self._calculate_spot_position_size(
+                fill_price=fill_price_est,
+                entry_atr=atr,
+                params=params,
+                balance_krw=available_krw,
+                regime_risk_mult=regime_risk_mult,
+                garch_kelly_f=garch_kelly_f,
+                regime_state=regime_state_val,
+            )
+            if qty <= 0.0:
+                return 0.0
+
+            tag = "Pullback (signal bar open)" if pullback_next_open else "Breakout"
+            logger.info(
+                f"🟢 [{symbol}] {tag} | Regime={regime_gate:.2f} | Kelly×={garch_kelly_f:.2f} | "
+                f"Buying {qty:.4f} @ {current_price:,.0f}"
+            )
+
+            cid = "RT_SPT_" + uuid.uuid4().hex[:12]
+            next_attempt = attempt_count + 1
+            self.state_manager.update_symbol_state(
+                symbol,
+                {
+                    "last_entry_attempt_signal_candle_ts": signal_candle_ts,
+                    "entry_attempt_count_for_signal": next_attempt,
+                },
+            )
+
+            order = self._place_order_safe(symbol, "buy", qty, client_order_id=cid)
+            if not order:
+                return 0.0
+
+            expected_qty = float(order.get("amount", qty))
+            confirmed, actual_fill_qty = self._confirm_buy_fill(symbol, expected_qty)
+            if not confirmed:
+                logger.warning(
+                    "⚠️ [%s] Buy fill not confirmed (expected ~%.8f).",
+                    symbol,
+                    expected_qty,
+                )
+                return 0.0
+
+            self._enforce_min_fill_ratio(symbol, qty, actual_fill_qty, params)
+
+            fill_price = float(
+                order.get("price", current_price * (1.0 + SLIPPAGE_RATE))
+                or current_price * (1.0 + SLIPPAGE_RATE)
+            )
+            long_atr_mult = float(params.get("LONG_ATR_MULT", 3.0))
+            initial_stop = fill_price - (atr * long_atr_mult)
+            self.state_manager.update_symbol_state(
+                symbol,
+                {
+                    "entry_time": datetime.now(timezone.utc).isoformat(),
+                    "entry_price": fill_price,
+                    "entry_atr": atr,
+                    "side": "LONG",
+                    "highest_price": fill_price,
+                    "active_stop_price": initial_stop,
+                    "order_cid": cid,
+                    "initial_amount": float(actual_fill_qty),
+                    "exit_pending": False,
+                    "exit_error": None,
+                    "exit_remaining_amount": 0.0,
+                    "exit_recovery_attempt_count": 0,
+                    "exit_attempt_at": None,
+                },
+            )
+            with self._db_write_lock:
+                self.trade_db.record_trade(
+                    symbol=symbol,
+                    side="LONG",
+                    action="ENTRY",
+                    quantity=actual_fill_qty,
+                    price=fill_price,
+                    entry_price=None,
+                    pnl=None,
+                    pnl_pct=None,
+                    reason=tag,
+                    params={"cid": cid},
+                )
+
+            krw_used = float(actual_fill_qty * fill_price * (1.0 + TRADING_FEE_RATE))
+            return krw_used
+
+        except Exception as e:
+            logger.error(f"🚨 Error in entry logic for {symbol}: {e}")
+            self.health_manager.record_error(e)
+            return 0.0
+
+    def _reconcile_positions_on_startup(self) -> None:
+        """Validate exchange vs local state on startup."""
+        logger.info("🔍 Reconciling exchange positions vs local state...")
+        target_set = set(SPOT_SYMBOLS)
+        for sym in self.state_manager.list_all_symbols():
+            if sym not in target_set:
+                logger.warning("⚠️ Dropping state for non-target symbol: %s", sym)
+                self.state_manager.clear_symbol_state(sym)
+
+        all_ohlcv = self._prefetch_all_ohlcv()
+        for symbol in self.symbols:
+            try:
+                price = self._get_market_price_safe(symbol)
+            except Exception as e:
+                logger.warning("[%s] Reconcile skipped (price): %s", symbol, e)
+                continue
+            try:
+                pos = self._get_current_position(symbol, price)
+                state = self.state_manager.get_symbol_state(symbol)
+                raw_amt = self._get_spot_coin_amount_raw(symbol)
+                amt = float(pos.get("amount", 0.0) or 0.0)
+
+                if bool(state.get("exit_pending", False)):
+                    val = raw_amt * price if price > 0 else 0.0
+                    if raw_amt < 1e-12 or val < float(MIN_POSITION_VALUE_KRW):
+                        self.state_manager.clear_symbol_state(
+                            symbol,
+                            preserve_keys=[
+                                "last_entry_attempt_signal_candle_ts",
+                                "entry_attempt_count_for_signal",
+                            ],
+                        )
+                        state = self.state_manager.get_symbol_state(symbol)
+
+                if amt > 0 and not state.get("entry_price"):
+                    cached = self._refresh_indicators_if_needed(symbol, all_ohlcv)
+                    atr = float(cached.get("atr", 0.0))
+                    p = self.params_map.get(symbol, {})
+                    self._bootstrap_state_for_open_position(
+                        symbol=symbol,
+                        amount=amt,
+                        pos=pos,
+                        current_price=price,
+                        params=p,
+                        atr=atr,
+                    )
+
+                if (
+                    amt <= 0
+                    and bool(state.get("entry_price"))
+                    and not bool(state.get("exit_pending", False))
+                ):
+                    logger.warning(
+                        "🧹 [%s] Reconcile: clearing stale local state (no exchange position)",
+                        symbol,
+                    )
+                    self.state_manager.clear_symbol_state(
+                        symbol,
+                        preserve_keys=[
+                            "last_entry_attempt_signal_candle_ts",
+                            "entry_attempt_count_for_signal",
+                        ],
+                    )
+            except Exception as ex:
+                logger.error("[%s] Reconcile error: %s", symbol, ex)
+
+    def _get_positions_snapshot(self) -> dict:
+        """Lightweight positions summary for heartbeat."""
+        out: Dict[str, dict] = {}
+        for symbol in self.symbols:
+            try:
+                price = self._get_market_price_safe(symbol)
+                st = self.state_manager.get_symbol_state(symbol)
+                ep = float(st.get("entry_price", 0.0) or 0.0)
+                sp = float(st.get("active_stop_price", 0.0) or 0.0)
+                pos = self._get_current_position(symbol, price)
+                out[symbol] = {
+                    "amount": float(pos.get("amount", 0.0) or 0.0),
+                    "entry_price": ep,
+                    "active_stop_price": sp,
+                }
+            except Exception:
+                out[symbol] = {}
+        return out
+
+    def _shutdown(self) -> None:
+        """Flush state and record shutdown heartbeat."""
+        try:
+            self.state_manager.flush_now()
+        except Exception as e:
+            logger.warning("State flush on shutdown failed: %s", e)
+        for symbol in self.symbols:
+            try:
+                price = self._get_market_price_safe(symbol)
+                pos = self._get_current_position(symbol, price)
+                if float(pos.get("amount", 0.0) or 0.0) > 0:
+                    logger.warning(
+                        "⚠️ Open position at shutdown: %s amount=%s",
+                        symbol,
+                        pos.get("amount"),
+                    )
+            except Exception as e:
+                logger.debug("Shutdown position check [%s]: %s", symbol, e)
+        try:
+            self.health_manager.update_heartbeat(status="stopped", positions={})
+        except Exception as e:
+            logger.warning("Heartbeat on shutdown failed: %s", e)
 
     # ------------------------------------------------------------------ #
     #  Main loop                                                           #
@@ -1148,17 +1633,49 @@ class SpotBot:
 
             while not self._shutdown_requested:
                 cycle_start = time.time()
+                self._loop_count += 1
                 try:
-                    # Pre-fetch all symbol OHLCV for market breadth regime (once per cycle)
                     all_ohlcv = self._prefetch_all_ohlcv()
 
                     for symbol in self.symbols:
                         if self._shutdown_requested:
                             break
-                        self.execute_logic(symbol, all_ohlcv)
+                        self._refresh_indicators_if_needed(symbol, all_ohlcv)
                         time.sleep(SPOT_SYMBOL_DELAY_SECONDS)
 
-                    self.health_manager.update_heartbeat()
+                    for symbol in self.symbols:
+                        if self._shutdown_requested:
+                            break
+                        price = self._get_market_price_safe(symbol)
+                        if price is None or not np.isfinite(float(price)) or float(price) <= 0:
+                            continue
+                        cached = self._get_cached_indicators(symbol)
+                        self._process_exit(symbol, float(price), cached)
+                        time.sleep(SPOT_SYMBOL_DELAY_SECONDS)
+
+                    _, available_krw = self._fetch_balance_safe()
+                    for symbol in self.symbols:
+                        if self._shutdown_requested:
+                            break
+                        price = self._get_market_price_safe(symbol)
+                        if price is None or not np.isfinite(float(price)) or float(price) <= 0:
+                            continue
+                        cached = self._get_cached_indicators(symbol)
+                        used = self._process_entry(
+                            symbol, float(price), cached, available_krw
+                        )
+                        available_krw -= used
+                        time.sleep(SPOT_SYMBOL_DELAY_SECONDS)
+
+                    snap = self._get_positions_snapshot()
+                    self.health_manager.update_heartbeat(
+                        status="running", positions=snap
+                    )
+
+                    now_gc = time.time()
+                    if now_gc - self._last_gc_time >= 1800.0:
+                        gc.collect()
+                        self._last_gc_time = now_gc
 
                 except Exception as loop_e:
                     logger.error(f"💥 Unexpected error in Main Loop cycle: {loop_e}")
@@ -1171,6 +1688,7 @@ class SpotBot:
         except Exception as e:
             logger.critical(f"💥 Critical Failure during Initialization/Run: {e}")
         finally:
+            self._shutdown()
             logger.info("🛑 Bot Stopped.")
 
 

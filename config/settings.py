@@ -110,7 +110,7 @@ FUTURES_LIVE_SYMBOLS = [
 # ============================================================
 
 # 거래 DB 경로
-SPOT_STRATEGY_DB = BASE_DIR / "spot_strategy.db"
+SPOT_STRATEGY_DB = DATA_DIR / "spot_strategy.db"
 SPOT_HEARTBEAT_FILE = LOG_DIR / "spot_trader_heartbeat.json"
 SPOT_STATE_FILE = DATA_DIR / "spot_trading_state.json"
 
@@ -147,6 +147,14 @@ FUTURES_INITIAL_BALANCE = 800.0  # USDT, backtest/optimize/verify 공통
 SPOT_INITIAL_BALANCE = 10_000_000.0
 UPBIT_SPOT_TAKER_FEE_RATE = 0.0005
 SPOT_SLIPPAGE_RATE = SLIPPAGE_RATE
+
+# --- Spot Production Safety Settings ---
+SPOT_DRY_RUN = os.getenv("SPOT_DRY_RUN", "false").lower() == "true"
+SPOT_EXIT_RECOVERY_COOLDOWN_SEC = 5.0
+SPOT_EXIT_CONFIRM_RETRIES = 6
+SPOT_EXIT_CONFIRM_SLEEP_SEC = 0.5
+SPOT_CANDLE_SETTLEMENT_DELAY_MS = 2000
+SPOT_ENTRY_SIGNAL_RETRY_MAX = 2
 
 # --- 데이터 기간 설정 (Backtest & Optimization) ---
 # Futures 전용 설정
