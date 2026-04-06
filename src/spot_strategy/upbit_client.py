@@ -153,7 +153,7 @@ class UpbitClient:
             end_timestamp = self.exchange.milliseconds()
 
         all_ohlcv: list[list[float]] = []
-        self.logger.info(f"Fetching {ccxt_symbol} {timeframe} from Upbit...")
+        self.logger.debug(f"Fetching {ccxt_symbol} {timeframe} from Upbit...")
 
         max_retries = max(1, int(max_consecutive_retries))
         consecutive_failures = 0
