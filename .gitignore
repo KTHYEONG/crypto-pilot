@@ -242,7 +242,9 @@ marimo/_lsp/
 __marimo__/
 
 # strategy results
+# best_spot_4h.json is excluded (derived from .enc at runtime, must not be public)
 results/*.json
+!results/best_params_*.json
 !results/*.json.enc
 
 # codex
