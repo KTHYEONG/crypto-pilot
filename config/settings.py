@@ -19,11 +19,13 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 # 데이터 저장 경로
 DATA_DIR = BASE_DIR / "data"
+SPOT_DATA_DIR = DATA_DIR / "spot"
 RESULTS_DIR = BASE_DIR / "results"
 LOG_DIR = BASE_DIR / "logs"
 
 # 디렉토리 자동 생성
 DATA_DIR.mkdir(parents=True, exist_ok=True)
+SPOT_DATA_DIR.mkdir(parents=True, exist_ok=True)
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -108,7 +110,7 @@ FUTURES_LIVE_SYMBOLS = [
 # ============================================================
 
 # 거래 DB 경로
-SPOT_STRATEGY_DB = BASE_DIR / "spot_strategy.db"
+SPOT_STRATEGY_DB = DATA_DIR / "spot_strategy.db"
 SPOT_HEARTBEAT_FILE = LOG_DIR / "spot_trader_heartbeat.json"
 SPOT_STATE_FILE = DATA_DIR / "spot_trading_state.json"
 
@@ -123,18 +125,36 @@ SPOT_LOOP_INTERVAL_SECONDS = 10  # 메인 루프 간격 (10초)
 SPOT_SYMBOL_DELAY_SECONDS = 2  # 심볼 간 딜레이
 
 # --- 대상 심볼 (Upbit) ---
-# OOS 성과 최상위 3종목 (ETH, SOL, DOGE) 압축 투자로 복리 증식 극대화
-SPOT_TARGET_SYMBOLS = ["KRW-ETH", "KRW-SOL", "KRW-DOGE"]
+# 데이터 기간(FETCH_START=2021-03-18) 충족 및 수익성 기반 5종 선정
+SPOT_TARGET_SYMBOLS = ["KRW-BTC", "KRW-ETH", "KRW-XRP", "KRW-ADA", "KRW-DOGE"]
 
 # --- 포지션 사이징 가중치 (Spot) ---
-# 추천 포트폴리오 비중: ETH(40%), SOL(30%), DOGE(30%)
-SPOT_ALLOCATION_WEIGHTS = {"KRW-ETH": 0.4, "KRW-SOL": 0.3, "KRW-DOGE": 0.3}
+SPOT_ALLOCATION_WEIGHTS = {
+    "KRW-BTC": 0.2, 
+    "KRW-ETH": 0.2, 
+    "KRW-XRP": 0.2, 
+    "KRW-ADA": 0.2, 
+    "KRW-DOGE": 0.2
+}
 
 # --- Optuna Study ---
 SPOT_OPTUNA_STUDY_NAME = "spot_strategy"
 
 # --- 백테스트 초기 잔고 (Futures) ---
 FUTURES_INITIAL_BALANCE = 800.0  # USDT, backtest/optimize/verify 공통
+
+# --- Spot backtest / shared-cash (KRW) ---
+SPOT_INITIAL_BALANCE = 10_000_000.0
+UPBIT_SPOT_TAKER_FEE_RATE = 0.0005
+SPOT_SLIPPAGE_RATE = SLIPPAGE_RATE
+
+# --- Spot Production Safety Settings ---
+SPOT_DRY_RUN = os.getenv("SPOT_DRY_RUN", "false").lower() == "true"
+SPOT_EXIT_RECOVERY_COOLDOWN_SEC = 5.0
+SPOT_EXIT_CONFIRM_RETRIES = 6
+SPOT_EXIT_CONFIRM_SLEEP_SEC = 0.5
+SPOT_CANDLE_SETTLEMENT_DELAY_MS = 2000
+SPOT_ENTRY_SIGNAL_RETRY_MAX = 2
 
 # --- 데이터 기간 설정 (Backtest & Optimization) ---
 # Futures 전용 설정
