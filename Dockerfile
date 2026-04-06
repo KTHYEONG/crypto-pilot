@@ -38,8 +38,10 @@ COPY . .
 
 # Seed strategy JSON configs outside the volume mount point.
 # docker-compose command copies these into /app/results/ at container startup.
-RUN mkdir -p /app/results_seed logs data results /tmp/numba_cache && \
-    cp /app/results/*.json /app/results_seed/ 2>/dev/null || true && \
+# Using COPY (not cp) so missing files cause a loud build failure, not silent skip.
+COPY results/best_params_*.json /app/results_seed/
+
+RUN mkdir -p logs data results /tmp/numba_cache && \
     chmod -R 755 /app
 
 CMD ["python", "-c", "print('Bot is ready. Use docker-compose to start.')"]
