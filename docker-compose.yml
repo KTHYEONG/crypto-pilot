@@ -19,18 +19,18 @@ services:
         max-file: "5"
 
   # Binance Futures Trading Bot
-  # futures-bot:
-  #   image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/my-coin-bot:latest
-  #   container_name: coin-trader-futures
-  #   restart: unless-stopped
-  #   env_file: .env
-  #   volumes:
-  #     - ./data:/app/data
-  #     - ./logs:/app/logs
-  #     - ./results:/app/results
-  #   command: python -u src/futures_strategy/real_trader_futures.py
-  #   logging:
-  #     driver: "json-file"
-  #     options:
-  #       max-size: "10m"
-  #       max-file: "5" 
+  futures-bot:
+    image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/my-coin-bot:latest
+    container_name: coin-trader-futures
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./results:/app/results
+    command: python -u src/futures_strategy/real_trader_futures.py
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5" 
