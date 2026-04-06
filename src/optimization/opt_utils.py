@@ -175,7 +175,6 @@ _SCORE_COEF_SPOT_TAIL: float = _env_float("SPOT_TAIL_DRAG_COEF", 10.0)
 _SCORE_COEF_SPOT_EXCESS_RETURN_BONUS_WEIGHT: float = _env_float("SPOT_EXCESS_RETURN_BONUS_WEIGHT", 12.0)
 _TF_TRADE_DENSITY: dict[str, float] = {
     "30m": 1.00,
-    "1h": 0.70,
     "4h": 0.40,
 }
 
@@ -369,7 +368,6 @@ def suggest_params(trial, search_space):
         tf_bounds = {
             "15m": (36, 320),
             "30m": (30, 260),
-            "1h": (24, 180),
             "2h": (18, 140),
             "4h": (12, 120),  # TODO #4: timeframe-bounded holding cap
             "1d": (8, 60),

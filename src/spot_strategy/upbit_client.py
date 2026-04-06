@@ -1,11 +1,14 @@
-import ccxt
-import time
-import pandas as pd
-from datetime import datetime
+from __future__ import annotations
+
 import logging
-from collections import deque
+import random
 import sys
+import time
+from datetime import datetime
 from pathlib import Path
+
+import ccxt
+import pandas as pd
 
 # Project Root Setup
 try:
@@ -16,6 +19,22 @@ except IndexError:
     pass
 
 from config.settings import API_READ_TIMEOUT, API_ORDER_TIMEOUT, API_CHECK_TIMEOUT
+
+
+class UpbitOhlcvFetchError(RuntimeError):
+    """Raised when OHLCV pagination fails after bounded retries; carries partial rows for recovery."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        partial_ohlcv: list[list[float]] | None = None,
+        since_ms: int | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.partial_ohlcv: list[list[float]] = partial_ohlcv or []
+        self.since_ms: int | None = since_ms
+
 
 class UpbitClient:
     """
@@ -93,7 +112,15 @@ class UpbitClient:
         except Exception:
             return float(amount)
 
-    def fetch_ohlcv(self, symbol, timeframe, start_date, end_date=None):
+    def fetch_ohlcv(
+        self,
+        symbol,
+        timeframe,
+        start_date,
+        end_date=None,
+        *,
+        max_consecutive_retries: int = 10,
+    ):
         limit = 200
         ccxt_symbol = self._normalize_symbol(symbol)
         
@@ -125,12 +152,16 @@ class UpbitClient:
         else:
             end_timestamp = self.exchange.milliseconds()
 
-        all_ohlcv = []
-        self.logger.info(f"Fetching {ccxt_symbol} {timeframe} from Upbit...")
+        all_ohlcv: list[list[float]] = []
+        self.logger.debug(f"Fetching {ccxt_symbol} {timeframe} from Upbit...")
+
+        max_retries = max(1, int(max_consecutive_retries))
+        consecutive_failures = 0
 
         while since < end_timestamp:
             try:
                 ohlcv = self.exchange.fetch_ohlcv(ccxt_symbol, timeframe, since, limit)
+                consecutive_failures = 0
                 if not ohlcv:
                     break
                 all_ohlcv.extend(ohlcv)
@@ -142,9 +173,17 @@ class UpbitClient:
                     break
                 time.sleep(0.2)
             except Exception as e:
-                self.logger.error(f"Error fetching data from Upbit: {e}")
-                time.sleep(2)
-                continue
+                consecutive_failures += 1
+                self.logger.error("Error fetching data from Upbit: %s", e)
+                if consecutive_failures >= max_retries:
+                    raise UpbitOhlcvFetchError(
+                        f"upbit_fetch_ohlcv_max_retries_exceeded after {max_retries} attempts: {e}",
+                        partial_ohlcv=all_ohlcv,
+                        since_ms=since,
+                    ) from e
+                attempt = consecutive_failures - 1
+                sleep_sec = min(float(2**attempt), 30.0) + random.uniform(0.0, 1.0)
+                time.sleep(sleep_sec)
 
         df = pd.DataFrame(all_ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         df['datetime'] = pd.to_datetime(df['timestamp'], unit='ms')
@@ -197,8 +236,8 @@ class UpbitClient:
             server_ms = self.exchange.fetch_time()
             if server_ms is not None:
                 return int(server_ms)
-        except Exception as e:
-            self.logger.warning(f"Failed to fetch Upbit server time: {e}")
+        except Exception:
+            pass  # ccxt Upbit does not support fetchTime(); local time used as fallback
         return int(time.time() * 1000)
 
     def fetch_balance(self):
