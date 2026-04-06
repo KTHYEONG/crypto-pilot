@@ -1692,20 +1692,29 @@ class SpotBot:
             self.state_manager.flush_now()
         except Exception as e:
             logger.warning("State flush on shutdown failed: %s", e)
+            
+        open_positions = {}
         for symbol in self.symbols:
             try:
                 price = self._get_market_price_safe(symbol)
                 pos = self._get_current_position(symbol, price)
-                if float(pos.get("amount", 0.0) or 0.0) > 0:
+                amount = float(pos.get("amount", 0.0) or 0.0)
+                if amount > 0:
+                    open_positions[symbol] = amount
                     logger.warning(
                         "⚠️ Open position at shutdown: %s amount=%s",
                         symbol,
-                        pos.get("amount"),
+                        amount,
                     )
             except Exception as e:
                 logger.debug("Shutdown position check [%s]: %s", symbol, e)
+                
         try:
-            self.health_manager.update_heartbeat(status="stopped", positions={})
+            self.health_manager.update_heartbeat(
+                status="stopped", 
+                positions=open_positions,
+                extra={"shutdown_time": datetime.now(timezone.utc).isoformat()}
+            )
         except Exception as e:
             logger.warning("Heartbeat on shutdown failed: %s", e)
 
@@ -1795,7 +1804,12 @@ class SpotBot:
 
                 elapsed = time.time() - cycle_start
                 sleep_time = max(0.5, SPOT_LOOP_INTERVAL_SECONDS - elapsed)
-                time.sleep(sleep_time)
+                
+                start_wait = time.time()
+                while time.time() - start_wait < sleep_time:
+                    if self._shutdown_requested:
+                        break
+                    time.sleep(0.5)
 
         except Exception as e:
             logger.critical(f"💥 Critical Failure during Initialization/Run: {e}")
