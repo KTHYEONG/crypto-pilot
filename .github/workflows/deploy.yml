@@ -63,15 +63,6 @@ jobs:
             --group-id ${{ secrets.AWS_SG_ID }} \
             --protocol tcp --port 22 --cidr ${{ steps.ip.outputs.ipv4 }}/32 || true
 
-      - name: Copy project files via SCP
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: ${{ secrets.HOST }}
-          username: ${{ secrets.USERNAME }}
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
-          source: "docker-compose.yml"
-          target: "~/my_coin_traider/"
-
       - name: SSH Deploy
         uses: appleboy/ssh-action@v1.0.3
         with:
@@ -83,19 +74,22 @@ jobs:
             export AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}
             export AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}
             export AWS_DEFAULT_REGION=${{ secrets.AWS_REGION }}
-            
-            # 2. ECR 로그인
-            aws ecr get-login-password --region ${{ secrets.AWS_REGION }} | docker login --username AWS --password-stdin ${{ steps.login-ecr.outputs.registry }}
-            
+
+            # 2. 레포 최신화 (docker-compose.yml 포함 모든 파일 동기화)
             cd ~/my_coin_traider
-            
-            # Docker Compose V1/V2 양쪽 호환되게 처리
+            git fetch origin main
+            git reset --hard origin/main
+
+            # 3. ECR 로그인
+            aws ecr get-login-password --region ${{ secrets.AWS_REGION }} | docker login --username AWS --password-stdin ${{ steps.login-ecr.outputs.registry }}
+
+            # 4. Docker Compose V1/V2 양쪽 호환되게 처리
             if docker compose version > /dev/null 2>&1; then
               COMPOSE_CMD="docker compose"
             else
               COMPOSE_CMD="docker-compose"
             fi
-            
+
             $COMPOSE_CMD pull
             $COMPOSE_CMD up -d
 
