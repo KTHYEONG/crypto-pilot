@@ -96,9 +96,11 @@ jobs:
               COMPOSE_CMD="docker-compose"
             fi
 
-            # --remove-orphans: compose 파일에서 제거된 서비스(주석처리 포함)의 컨테이너를 중지
+            # --force-recreate: 이미지가 변경됐을 때 컨테이너를 반드시 재생성
+            # --remove-orphans: compose 파일에서 제거된 서비스의 컨테이너를 중지
             $COMPOSE_CMD pull
-            $COMPOSE_CMD up -d --remove-orphans
+            $COMPOSE_CMD up -d --force-recreate --remove-orphans
+            docker image prune -f
 
       - name: Revoke SSH Port (Close)
         if: always()
