@@ -1327,13 +1327,13 @@ class SpotBot:
                         pass
 
             self._log_throttled(
-                "info",
+                "debug",
                 f"{symbol}:pos",
                 f"📊 [{symbol}] Holding {amount:.4f} | Cur: {current_price:,.0f} | "
                 f"Stop: {stop_price:,.0f} | BB: {bb_upper:,.0f} | "
                 f"Trail×: {effective_trail_mult:.2f} | trf={trail_regime_factor:.2f} | "
                 f"tsf={ts_regime_factor:.2f} | TP: {'off' if tp_price == np.inf else f'{tp_price:,.0f}'}",
-                120.0,
+                600.0,
             )
 
             if not exit_triggered:
@@ -1459,12 +1459,7 @@ class SpotBot:
             if attempt_count >= int(SPOT_ENTRY_SIGNAL_RETRY_MAX):
                 return 0.0
 
-            self._log_throttled(
-                "info",
-                f"{symbol}:scan",
-                f"ℹ️ [{symbol}] Scanning for entry...",
-                180.0,
-            )
+
 
             if not strength_ok or trend_dir != 1:
                 return 0.0
@@ -1476,10 +1471,10 @@ class SpotBot:
 
             if regime_gate < 0.5:
                 self._log_throttled(
-                    "info",
+                    "debug",
                     f"{symbol}:regime",
                     f"🚫 [{symbol}] Regime gate OFF ({regime_gate:.2f}). Entry blocked.",
-                    300.0,
+                    600.0,
                 )
                 return 0.0
 
