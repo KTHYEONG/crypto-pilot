@@ -47,6 +47,8 @@ class PortfolioBacktestEngineFast:
         trend_dir = self.data["trend_direction"]
         strength_filter = self.data["strength_filter"]
         atr_2d = self.data["atr"]
+        garch_kelly_f = self.data["garch_kelly_f"]
+        funding_rate = self.data["funding_rate"]
 
         l_atr_mult = float(self.params.get("LONG_ATR_MULT", 3.0))
         l_trail_mult = float(self.params.get("LONG_TRAIL_MULT", 3.0))
@@ -65,6 +67,8 @@ class PortfolioBacktestEngineFast:
             trend_dir,
             strength_filter,
             atr_2d,
+            garch_kelly_f,
+            funding_rate,
             self.initial_balance,
             self.leverage,
             self.fee_rate,
@@ -91,6 +95,7 @@ class PortfolioBacktestEngineFast:
                 "pnl": float(t[6]),
                 "amount": float(t[7]),
                 "entry_fee": float(t[8]),
+                "funding_fee": float(t[9]),
             })
 
         return pd.DataFrame(trades_list), equity_curve, final_balance
@@ -107,6 +112,8 @@ def backtest_portfolio_numba(
     trend_dir: np.ndarray,
     strength_filter: np.ndarray,
     atr_2d: np.ndarray,
+    garch_kelly_f: np.ndarray,
+    funding_rate: np.ndarray,
     initial_balance: float,
     leverage: float,
     fee_rate: float,
@@ -132,6 +139,7 @@ def backtest_portfolio_numba(
     entry_idx = np.zeros(n_syms, dtype=np.int32)
     amount = np.zeros(n_syms, dtype=np.float64)
     entry_fee_stored = np.zeros(n_syms, dtype=np.float64)
+    fund_fee_stored = np.zeros(n_syms, dtype=np.float64)
 
     stop_p = np.zeros(n_syms, dtype=np.float64)
     highest = np.zeros(n_syms, dtype=np.float64)
@@ -139,7 +147,7 @@ def backtest_portfolio_numba(
     has_scaled = np.zeros(n_syms, dtype=np.bool_)
 
     max_trades = 50000
-    trades = np.zeros((max_trades, 9), dtype=np.float64)
+    trades = np.zeros((max_trades, 10), dtype=np.float64)
     t_count = 0
 
     for i in range(1, n_bars):
@@ -150,6 +158,12 @@ def backtest_portfolio_numba(
             if in_pos[s]:
                 if np.isnan(close_2d[i, s]):
                     continue
+                
+                # Apply funding fee (deducted from balance, accumulated for trade log)
+                fund_fee = amount[s] * close_2d[i, s] * funding_rate[i, s] * pos_side[s]
+                fund_fee_stored[s] += fund_fee
+                balance -= fund_fee
+
                 u_pnl = (close_2d[i, s] - entry_p[s]) * amount[s] * pos_side[s]
                 unrealized_total += u_pnl
                 used_margin_total += (amount[s] * entry_p[s]) / leverage
@@ -188,16 +202,18 @@ def backtest_portfolio_numba(
 
                         pnl = (sc_price - entry_p[s]) * sc_amount
                         fee = sc_amount * sc_price * fee_rate
+                        sc_fund = fund_fee_stored[s] / 2.0
                         balance += (sc_amount * entry_p[s]) / leverage + (pnl - fee)
 
                         trades[t_count] = [
                             s, entry_idx[s], i, 1.0, entry_p[s], sc_price,
-                            pnl - fee, sc_amount, entry_fee_stored[s] / 2.0,
+                            pnl - fee - sc_fund, sc_amount, entry_fee_stored[s] / 2.0, sc_fund
                         ]
                         t_count += 1
 
                         amount[s] -= sc_amount
                         entry_fee_stored[s] = entry_fee_stored[s] / 2.0
+                        fund_fee_stored[s] = fund_fee_stored[s] / 2.0
                         has_scaled[s] = True
 
                 if c_open <= stop_p[s]:
@@ -223,16 +239,18 @@ def backtest_portfolio_numba(
                         sc_amount = amount[s] / 2.0
                         pnl = (entry_p[s] - sc_price) * sc_amount
                         fee = sc_amount * sc_price * fee_rate
+                        sc_fund = fund_fee_stored[s] / 2.0
                         balance += (sc_amount * entry_p[s]) / leverage + (pnl - fee)
 
                         trades[t_count] = [
                             s, entry_idx[s], i, -1.0, entry_p[s], sc_price,
-                            pnl - fee, sc_amount, entry_fee_stored[s] / 2.0,
+                            pnl - fee - sc_fund, sc_amount, entry_fee_stored[s] / 2.0, sc_fund
                         ]
                         t_count += 1
 
                         amount[s] -= sc_amount
                         entry_fee_stored[s] = entry_fee_stored[s] / 2.0
+                        fund_fee_stored[s] = fund_fee_stored[s] / 2.0
                         has_scaled[s] = True
                         breakeven = entry_p[s] - (entry_p[s] * fee_rate * 2.0)
                         stop_p[s] = breakeven
@@ -254,11 +272,14 @@ def backtest_portfolio_numba(
                 else:
                     pnl = (entry_p[s] - exit_price) * amount[s]
                 fee = amount[s] * exit_price * fee_rate
+                
+                # fund_fee was already incrementally subtracted from balance.
+                # just add back margin + realize pnl.
                 balance += ((amount[s] * entry_p[s]) / leverage) + (pnl - fee)
 
                 trades[t_count] = [
                     s, entry_idx[s], i, float(pos_side[s]), entry_p[s],
-                    exit_price, pnl - fee, amount[s], entry_fee_stored[s],
+                    exit_price, pnl - fee - fund_fee_stored[s], amount[s], entry_fee_stored[s], fund_fee_stored[s]
                 ]
                 t_count += 1
                 in_pos[s] = False
@@ -280,7 +301,8 @@ def backtest_portfolio_numba(
             if np.isnan(open_2d[i, s]) or np.isnan(strength_filter[prev_i, s]):
                 continue
 
-            if strength_filter[prev_i, s] == 1:
+            sf = strength_filter[prev_i, s]
+            if sf > 0.0 and not np.isnan(sf):
                 c_open = open_2d[i, s]
                 do_entry = False
                 p_side = 0
@@ -298,8 +320,15 @@ def backtest_portfolio_numba(
                     stop_dist = (pos_atr * l_atr_mult) if p_side == 1 else (pos_atr * s_atr_mult)
 
                     if stop_dist > 0:
-                        risk_amt = current_equity * risk_per_trade
-                        target_qty = risk_amt / stop_dist
+                        kelly_val = garch_kelly_f[prev_i, s]
+                        if kelly_val <= 0.0 or np.isnan(kelly_val):
+                            kelly_val = risk_per_trade
+                            
+                        risk_amt = current_equity * kelly_val
+                        sf_c = sf if sf <= 1.0 else 1.0
+                        if sf_c < 0.0:
+                            sf_c = 0.0
+                        target_qty = (risk_amt / stop_dist) * sf_c
                         req_margin = (target_qty * fill_p) / leverage
                         entry_fee = target_qty * fill_p * fee_rate
 
@@ -313,6 +342,7 @@ def backtest_portfolio_numba(
                             entry_idx[s] = i
                             amount[s] = target_qty
                             entry_fee_stored[s] = entry_fee
+                            fund_fee_stored[s] = 0.0
                             highest[s] = fill_p
                             lowest[s] = fill_p
                             has_scaled[s] = False

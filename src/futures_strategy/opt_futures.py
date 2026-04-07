@@ -4,25 +4,27 @@ import argparse
 import logging
 import math
 import os
+import pickle
 import queue
+import tempfile
 import time
 import sys
-import gc
 import threading
 import traceback
+import sqlite3
+
 import optuna
-from optuna.trial import TrialState
+from optuna.pruners import MedianPruner, PatientPruner
+from optuna.samplers import QMCSampler, TPESampler
 from optuna.storages import InMemoryStorage
-from optuna.storages import JournalStorage
-from optuna.storages.journal import JournalFileBackend
+from optuna.trial import TrialState
 import pandas as pd
 import numpy as np
 from pathlib import Path
 from dataclasses import dataclass
-from typing import Any, Dict, List, Tuple, Optional
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 import concurrent.futures
 from multiprocessing import Manager
-from functools import partial
 from tqdm import tqdm
 
 # Project Root Setup
@@ -33,27 +35,58 @@ if project_root not in sys.path:
 from src.futures_strategy.data_collector import DataCollector
 from src.futures_strategy.strategies_futures import UltimateStrategy
 from config.settings import (
+    FUTURES_CACHE_DIR,
+    FUTURES_DATA_DIR,
     FUTURES_INITIAL_BALANCE,
-    TRADING_FEE_RATE,
     SLIPPAGE_RATE,
-    DATA_DIR,
+    TRADING_FEE_RATE,
 )
 from config.opt_config import (
-    OPT_FUTURES_CONFIG, 
-    get_search_space_futures, 
+    OPT_FUTURES_CONFIG,
+    FUTURES_ANCHOR_SYMBOLS,
+    FUTURES_DYNAMIC_CANDIDATE_POOL,
+    FUTURES_SCREENER_CONFIG,
     get_quarterly_window,
-    FUTURES_SYMBOLS
+    get_search_space_futures,
 )
 
 from src.optimization.opt_utils import compute_segment_merge_index
 from src.futures_strategy.funding_utils import merge_funding_into_ohlcv
 
 from src.futures_strategy.opt_futures_utils.db_utils import save_study_to_sqlite
-from src.futures_strategy.opt_futures_utils.evaluator import objective_futures, evaluate_symbol_fold
-from src.futures_strategy.opt_futures_utils.go_nogo import run_go_nogo_check, GoNoGoResult
+from src.futures_strategy.opt_futures_utils.cv_utils import build_cpcv_test_paths_with_fallback
+from src.futures_strategy.opt_futures_utils.evaluator import (
+    evaluate_symbol_fold,
+    objective_futures,
+    run_oos_margin_shared_portfolio,
+    run_multi_window_oos_holdout,
+    compute_regime_conditional_oos_metrics,
+)
+from src.futures_strategy.opt_futures_utils.go_nogo import run_go_nogo_check
+from src.futures_strategy.opt_futures_utils.go_nogo_futures import (
+    FuturesDeploymentReportInput,
+    FuturesSymbolGateRow,
+    run_futures_deployment_report,
+    run_multi_window_oos_gate,
+    format_regime_oos_diagnostic_block,
+)
+from src.futures_strategy.opt_futures_utils.universe_screener_futures import (
+    screen_futures_symbol_refinement,
+    screen_futures_universe,
+)
+from src.futures_strategy.opt_futures_utils.combination_screener_futures import (
+    run_combination_screening_futures,
+)
+from src.futures_strategy.opt_futures_utils.opt_params import build_combined_param_space_futures
 
 import warnings
 warnings.filterwarnings("ignore")
+
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("VECLIB_MAXIMUM_THREADS", "1")
+os.environ.setdefault("NUMBA_NUM_THREADS", "1")
 
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 logging.basicConfig(level=logging.INFO, format="%(message)s", force=True)
@@ -61,24 +94,66 @@ _logger: logging.Logger = logging.getLogger("opt_futures")
 
 SEP_WIDTH: int = 60
 PROGRESS_MIN_INTERVAL: float = 0.2
+MODE_MULTI: str = "multi"
+BEST_PARAMS_FUTURES_JSON_STEM: str = "best_params_futures_multi_4h"
 
-class _ThreadSafeJournalStorageWrapper:
-    def __init__(self, storage: Any) -> None:
-        self._storage = storage
-        self._lock: threading.Lock = threading.Lock()
+EMBARGO_BARS: Dict[str, int] = {
+    "1h": 24,
+    "4h": 6,
+}
 
-    def __getattr__(self, name: str) -> Any:
-        attr = getattr(self._storage, name)
-        if callable(attr):
-            def _locked(*args: Any, **kwargs: Any) -> Any:
-                with self._lock: return attr(*args, **kwargs)
-            return _locked
-        return attr
 
-def _ensure_fresh_journal(journal_path: Path) -> None:
-    if journal_path.exists():
-        try: journal_path.unlink()
-        except OSError: journal_path.write_text("")
+def _ensure_fresh_sqlite(db_path: Path) -> None:
+    for suffix in ["", "-wal", "-shm"]:
+        p = Path(str(db_path) + suffix)
+        if p.exists():
+            try:
+                p.unlink()
+            except OSError:
+                pass
+
+
+def _build_sqlite_storage(db_path: Path) -> optuna.storages.RDBStorage:
+    url: str = f"sqlite:///{db_path.absolute()}"
+    storage: optuna.storages.RDBStorage = optuna.storages.RDBStorage(
+        url=url,
+        engine_kwargs={"connect_args": {"timeout": 60}},
+    )
+    try:
+        with sqlite3.connect(db_path) as conn:
+            conn.execute("PRAGMA journal_mode=WAL;")
+    except Exception:
+        pass
+    return storage
+
+
+def futures_frozen_trial_constraints(trial: optuna.trial.FrozenTrial) -> tuple[float, ...]:
+    pf = float(trial.user_attrs.get("avg_pf", 0.0) or 0.0)
+    win_rate = float(trial.user_attrs.get("avg_win_rate", 0.0) or 0.0)
+    trades = float(trial.user_attrs.get("avg_trades", 0.0) or 0.0)
+    min_sym_pf = float(trial.user_attrs.get("min_sym_pf", 0.0) or 0.0)
+    avg_mdd = float(trial.user_attrs.get("avg_mdd", 100.0) or 100.0)
+    ls_ratio = float(trial.user_attrs.get("long_short_ratio", 0.0) or 0.0)
+    return (
+        1.2 - pf,
+        25.0 - win_rate,
+        20.0 - trades,
+        1.1 - min_sym_pf,
+        avg_mdd - 25.0,
+        0.15 - ls_ratio,
+    )
+
+
+def _futures_tpe_sampler(seed: int) -> TPESampler:
+    return TPESampler(
+        seed=seed,
+        n_startup_trials=0,
+        multivariate=True,
+        group=True,
+        constant_liar=True,
+        constraints_func=futures_frozen_trial_constraints,
+    )
+
 
 @dataclass
 class _TfOptimizationContext:
@@ -89,79 +164,347 @@ class _TfOptimizationContext:
     data_maps: Dict[str, Dict[str, Any]]
     symbols: List[str]
     project_root: str
-    progress_queue: Any 
-    mode: str = "single"
+    progress_queue: Any
+    mode: str = MODE_MULTI
     use_journal_storage: bool = True
+    parallel_tpe_workers: int = 1
+    disable_inner_tpe_pool: bool = False
+    fresh_journal: bool = True
     progress_min_interval: float = PROGRESS_MIN_INTERVAL
+    signal_cache_dir: str = ""
+    locked_param_space: Optional[Dict[str, Any]] = None
 
 @dataclass(frozen=True)
-class _ParallelExecutionPlan:
-    task_workers: int
+class _FuturesExecutionPlan:
+    outer_task_workers: int
     jobs_per_task: int
-    cpu_budget: int
+    parallel_tpe_workers: int
+    use_outer_process_pool: bool
     logical_cpus: int
     task_count: int
 
-    @property
-    def total_active_workers(self) -> int: return self.task_workers * self.jobs_per_task
-    @property
-    def batch_count(self) -> int: return max(1, math.ceil(self.task_count / max(1, self.task_workers)))
+def _split_tpe_trials(total: int, n_workers: int) -> List[int]:
+    if total <= 0:
+        return []
+    n_workers = max(1, min(int(n_workers), int(total)))
+    base = total // n_workers
+    rem = total % n_workers
+    return [base + (1 if i < rem else 0) for i in range(n_workers)]
 
-def _resolve_parallel_plan(task_count: int, requested_jobs: int, requested_task_workers: int, requested_cpu_budget: int) -> _ParallelExecutionPlan:
+
+def _resolve_futures_execution_plan(
+    task_count: int,
+    mode: str,
+    requested_jobs: int,
+    requested_task_workers: int,
+) -> _FuturesExecutionPlan:
+    worker_cap = 3
     logical_cpus = max(1, os.cpu_count() or 1)
-    cpu_budget = max(1, requested_cpu_budget or (4 if logical_cpus > 2 else 1))
-    jobs_per_task = min(logical_cpus, max(1, requested_jobs))
-    task_workers = min(task_count, requested_task_workers) if requested_task_workers > 0 else min(task_count, max(1, cpu_budget // jobs_per_task))
-    return _ParallelExecutionPlan(task_workers=max(1, task_workers), jobs_per_task=jobs_per_task, cpu_budget=cpu_budget, logical_cpus=logical_cpus, task_count=task_count)
+    if mode == MODE_MULTI and task_count == 1:
+        tw = requested_task_workers if requested_task_workers > 0 else requested_jobs
+        tw = max(1, min(int(tw), logical_cpus, worker_cap))
+        return _FuturesExecutionPlan(
+            outer_task_workers=1,
+            jobs_per_task=1,
+            parallel_tpe_workers=tw,
+            use_outer_process_pool=False,
+            logical_cpus=logical_cpus,
+            task_count=task_count,
+        )
 
-def _run_tf_optimization(task: Tuple[Any, str], ctx: _TfOptimizationContext) -> Tuple[Tuple[Any, str], List[optuna.trial.FrozenTrial]]:
+    jobs = max(1, min(int(requested_jobs), logical_cpus, worker_cap))
+    if requested_task_workers <= 0:
+        cpu_budget = max(1, 4 if logical_cpus > 2 else 1)
+        outer_tw = min(task_count, max(1, cpu_budget // jobs))
+    else:
+        outer_tw = min(task_count, int(requested_task_workers))
+    outer_tw = max(1, min(outer_tw, worker_cap))
+    use_outer = task_count > 1 and outer_tw > 1
+    return _FuturesExecutionPlan(
+        outer_task_workers=outer_tw,
+        jobs_per_task=jobs,
+        parallel_tpe_workers=1,
+        use_outer_process_pool=use_outer,
+        logical_cpus=logical_cpus,
+        task_count=task_count,
+    )
+
+
+def _task_progress_key(target_obj: Any, tf: str) -> str:
+    if isinstance(target_obj, (list, tuple)):
+        base = "_".join(str(x) for x in target_obj)
+    else:
+        base = str(target_obj)
+    return f"{base}_{tf}"
+
+
+def _rebuild_is_data_maps_from_aligned_oos(
+    data_maps: Dict[str, Dict[str, Any]],
+    oos_data_maps: Dict[str, Dict[str, Any]],
+    symbols: Sequence[str],
+    tf: str,
+    is_start_dt: pd.Timestamp,
+    is_end_dt: pd.Timestamp,
+) -> None:
+    for sym in symbols:
+        full = oos_data_maps[sym][tf]
+        is_df = full[full["datetime"] < is_end_dt].copy().reset_index(drop=True)
+        data_maps[sym][tf] = is_df
+        m = is_df["datetime"] >= is_start_dt
+        data_maps[sym][f"is_start_idx_{tf}"] = int(m.to_numpy().argmax()) if bool(m.any()) else 0
+        data_maps[sym][f"merge_idx_{tf}"] = compute_segment_merge_index(is_df, data_maps[sym]["1d"])
+
+
+def _align_oos_dataframes_on_common_datetimes(
+    oos_data_maps: Dict[str, Dict[str, Any]],
+    symbols: Sequence[str],
+    tf: str,
+    is_end_dt: pd.Timestamp,
+) -> None:
+    sym_list = list(symbols)
+    if len(sym_list) < 2:
+        return
+
+    common = (
+        oos_data_maps[sym_list[0]][tf][["datetime"]]
+        .drop_duplicates(subset=["datetime"])
+        .copy()
+    )
+    for sym in sym_list[1:]:
+        right = (
+            oos_data_maps[sym][tf][["datetime"]]
+            .drop_duplicates(subset=["datetime"])
+            .rename(columns={"datetime": "_dt_r"})
+        )
+        common = common.merge(right, left_on="datetime", right_on="_dt_r", how="inner")
+        common = common[["datetime"]]
+
+    if len(common) < 200:
+        raise ValueError(
+            f"Insufficient overlapping {tf} bars in OOS maps after alignment ({len(common)} < 200)."
+        )
+
+    common_order = common["datetime"].sort_values()
+    for sym in sym_list:
+        df = oos_data_maps[sym][tf]
+        filtered = (
+            df[df["datetime"].isin(common_order)]
+            .sort_values("datetime")
+            .reset_index(drop=True)
+        )
+        oos_data_maps[sym][tf] = filtered
+        m_oos = filtered["datetime"] >= is_end_dt
+        oos_data_maps[sym][f"oos_start_idx_{tf}"] = (
+            int(m_oos.to_numpy().argmax()) if bool(m_oos.any()) else len(filtered)
+        )
+        oos_data_maps[sym][f"merge_idx_{tf}"] = compute_segment_merge_index(
+            filtered, oos_data_maps[sym]["1d"]
+        )
+
+
+def _best_trial_from_study(study: optuna.Study) -> Optional[optuna.trial.FrozenTrial]:
+    try:
+        return study.best_trial
+    except Exception:
+        complete_trials = [
+            t
+            for t in study.get_trials(deepcopy=True)
+            if t.state == TrialState.COMPLETE and t.value is not None
+        ]
+        if complete_trials:
+            return max(complete_trials, key=lambda t: float(t.value) if t.value is not None else -1e9)
+        return None
+
+
+def _futures_tpe_worker_run(payload: Dict[str, Any]) -> None:
+    import gc
+
+    os.environ.setdefault("OMP_NUM_THREADS", "1")
+    os.environ.setdefault("MKL_NUM_THREADS", "1")
+    os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+    os.environ.setdefault("VECLIB_MAXIMUM_THREADS", "1")
+    os.environ.setdefault("NUMBA_NUM_THREADS", "1")
+
+    db_path = Path(str(payload["journal_path"]))
+    tf_study_name = str(payload["study_name"])
+    tf = str(payload["tf"])
+    target_str = str(payload["target_str"])
+    symbols = list(payload["symbols"])
+    mode = str(payload["mode"])
+    seed = int(payload["seed"])
+    n_trials = int(payload["n_trials"])
+    n_trials_total = int(payload["n_trials_total"])
+    prebuilt_cpcv_bundle = payload.get("prebuilt_cpcv_bundle")
+    data_maps_file = str(payload.get("data_maps_file", ""))
+    if data_maps_file and Path(data_maps_file).is_file():
+        with Path(data_maps_file).open("rb") as f:
+            data_maps: Dict[str, Dict[str, Any]] = pickle.load(f)
+    else:
+        data_maps = payload.get("data_maps", {})
+    progress_queue = payload.get("progress_queue")
+    project_root = str(payload["project_root"])
+    signal_cache_dir = str(payload.get("signal_cache_dir", ""))
+    progress_key = str(payload["progress_key"])
+    raw_space = payload.get("locked_param_space")
+    tf_space: Dict[str, Any] = (
+        raw_space if isinstance(raw_space, dict) else get_search_space_futures(tf)
+    )
+
+    base_pruner = MedianPruner(
+        n_startup_trials=int(OPT_FUTURES_CONFIG.get("tpe_pruner_n_startup_trials", 10)),
+        n_warmup_steps=int(OPT_FUTURES_CONFIG.get("tpe_pruner_n_warmup_steps", 8)),
+    )
+    pruner = PatientPruner(
+        base_pruner,
+        patience=int(OPT_FUTURES_CONFIG.get("tpe_pruner_patience", 2)),
+    )
+    storage = _build_sqlite_storage(db_path)
+    study = optuna.load_study(
+        study_name=tf_study_name,
+        storage=storage,
+        sampler=_futures_tpe_sampler(seed),
+        pruner=pruner,
+    )
+
+    try:
+        best_so_far = float(study.best_value)
+    except ValueError:
+        best_so_far = float("-inf")
+
+    def _progress_cb(_study_inner: optuna.Study, trial: optuna.trial.FrozenTrial) -> None:
+        nonlocal best_so_far
+        if progress_queue is None:
+            return
+        if trial.value is not None:
+            try:
+                cur_val = float(trial.value)
+            except Exception:
+                cur_val = 0.0
+            if cur_val > best_so_far:
+                best_so_far = cur_val
+        progress_queue.put(
+            (
+                progress_key,
+                trial.number + 1,
+                n_trials_total,
+                float(trial.user_attrs.get("kelly_score_pct", best_so_far * 100.0))
+                if best_so_far != float("-inf")
+                else 0.0,
+            )
+        )
+
+    cache_root = Path(signal_cache_dir) if signal_cache_dir else FUTURES_CACHE_DIR
+
+    def _objective_with_logging(trial: optuna.Trial) -> float:
+        try:
+            return float(
+                objective_futures(
+                    trial,
+                    data_maps=data_maps,
+                    symbols=symbols,
+                    tf_target=tf,
+                    space=tf_space,
+                    mode=mode,
+                    project_root=project_root,
+                    prebuilt_cpcv_bundle=prebuilt_cpcv_bundle,
+                    signal_disk_cache_root=cache_root,
+                )
+            )
+        except optuna.TrialPruned:
+            raise
+        except Exception:
+            _logger.exception("[%s/%s] Trial %d failed.", target_str, tf, trial.number)
+            raise
+
+    try:
+        study.optimize(
+            _objective_with_logging,
+            n_trials=n_trials,
+            n_jobs=1,
+            catch=(Exception,),
+            callbacks=[_progress_cb],
+        )
+    finally:
+        del data_maps
+        gc.collect()
+
+def _run_tf_optimization(
+    task: Tuple[Any, str], ctx: _TfOptimizationContext
+) -> Tuple[Tuple[Any, str], Optional[optuna.trial.FrozenTrial]]:
     target_obj, tf = task
     target_str = "_".join(target_obj) if isinstance(target_obj, (list, tuple)) else target_obj
+    progress_key = _task_progress_key(target_obj, tf)
     tf_study_name: str = f"OptFutures_{target_str.replace('/', '')}_{tf}_{ctx.mode}"
-    
-    storage: Any
+
+    db_path: Path | None = None
+    storage: optuna.storages.RDBStorage | InMemoryStorage
     if ctx.use_journal_storage:
-        journal_path = Path(ctx.project_root) / f"optuna_journal_{target_str.replace('/', '')}_{tf}.log"
-        _ensure_fresh_journal(journal_path)
-        lock_obj = None
-        if sys.platform == "win32":
-            from src.futures_strategy.opt_futures_utils.win_journal_lock import WindowsNamedMutexJournalLock
-            lock_obj = WindowsNamedMutexJournalLock(str(journal_path))
-        backend = JournalFileBackend(str(journal_path), lock_obj=lock_obj)
-        storage = _ThreadSafeJournalStorageWrapper(JournalStorage(backend))
+        db_filename = f"opt_futures_{target_str.replace('/', '')}_{tf}_{ctx.mode}.db"
+        shm_p = Path("/dev/shm")
+        if shm_p.exists() and os.access(shm_p, os.W_OK):
+            db_path = shm_p / db_filename
+        else:
+            results_dir = Path(ctx.project_root) / "results"
+            results_dir.mkdir(parents=True, exist_ok=True)
+            db_path = results_dir / db_filename
+        if ctx.fresh_journal:
+            _ensure_fresh_sqlite(db_path)
+        storage = _build_sqlite_storage(db_path)
     else:
         storage = InMemoryStorage()
-    
-    def constraints_func(trial: optuna.trial.FrozenTrial) -> tuple[float, ...]:
-        pf: float = float(trial.user_attrs.get("avg_pf", 0.0) or 0.0)
-        win_rate: float = float(trial.user_attrs.get("avg_win_rate", 0.0) or 0.0)
-        trades: float = float(trial.user_attrs.get("avg_trades", 0.0) or 0.0)
-        min_sym_pf: float = float(trial.user_attrs.get("min_sym_pf", 0.0) or 0.0)
 
-        c1: float = 1.2 - pf
-        c2: float = 25.0 - win_rate
-        c3: float = 30.0 - trades
-        c4: float = 1.1 - min_sym_pf
+    seed = int(ctx.seeds[0])
+    n_qmc = min(int(OPT_FUTURES_CONFIG.get("tpe_n_startup_trials", 256)), int(ctx.n_trials))
+    qmc_sampler = QMCSampler(qmc_type="sobol", scramble=True, seed=seed, warn_independent_sampling=False)
+    base_pruner = MedianPruner(
+        n_startup_trials=int(OPT_FUTURES_CONFIG.get("tpe_pruner_n_startup_trials", 10)),
+        n_warmup_steps=int(OPT_FUTURES_CONFIG.get("tpe_pruner_n_warmup_steps", 8)),
+    )
+    pruner = PatientPruner(
+        base_pruner,
+        patience=int(OPT_FUTURES_CONFIG.get("tpe_pruner_patience", 2)),
+    )
 
-        return (c1, c2, c3, c4)
-    
-    sampler = optuna.samplers.NSGAIISampler(
-        seed=ctx.seeds[0],
-        population_size=OPT_FUTURES_CONFIG.get("n_startup_trials", 150),
-        constraints_func=constraints_func,
-    )
-    
-    study = optuna.create_study(
-        study_name=tf_study_name, 
-        storage=storage, 
-        directions=["maximize", "minimize"],
-        sampler=sampler
-    )
+    ref_sym0 = ctx.symbols[0]
+    is_off0 = int(ctx.data_maps[ref_sym0].get(f"is_start_idx_{tf}", 0))
+    ref_df0 = ctx.data_maps[ref_sym0][tf]
+    prebuilt_cpcv_bundle = None
+    if ref_df0 is not None and not ref_df0.empty:
+        ref_len0 = len(ref_df0) - is_off0
+        if ref_len0 >= 200:
+            prebuilt_cpcv_bundle = build_cpcv_test_paths_with_fallback(
+                ref_len0, embargo=int(EMBARGO_BARS.get(tf, 0))
+            )
+
+    cache_root = Path(ctx.signal_cache_dir) if ctx.signal_cache_dir else FUTURES_CACHE_DIR
+
+    tf_space = ctx.locked_param_space if ctx.locked_param_space is not None else get_search_space_futures(tf)
+
+    def _objective_with_logging(trial: optuna.Trial) -> float:
+        try:
+            return float(
+                objective_futures(
+                    trial,
+                    data_maps=ctx.data_maps,
+                    symbols=ctx.symbols,
+                    tf_target=tf,
+                    space=tf_space,
+                    mode=ctx.mode,
+                    project_root=ctx.project_root,
+                    prebuilt_cpcv_bundle=prebuilt_cpcv_bundle,
+                    signal_disk_cache_root=cache_root,
+                )
+            )
+        except optuna.TrialPruned:
+            raise
+        except Exception:
+            _logger.exception("[%s/%s] Trial %d failed.", target_str, tf, trial.number)
+            raise
 
     last_progress_ts: float = 0.0
     last_progress_trial: int = -1
 
-    def _progress_cb(study: optuna.Study, trial: optuna.trial.FrozenTrial) -> None:
+    def _progress_cb(_study: optuna.Study, trial: optuna.trial.FrozenTrial) -> None:
         nonlocal last_progress_ts, last_progress_trial
         if ctx.progress_queue is None:
             return
@@ -176,72 +519,172 @@ def _run_tf_optimization(task: Tuple[Any, str], ctx: _TfOptimizationContext) -> 
         else:
             last_progress_ts = time.monotonic()
         last_progress_trial = cur
-        try:
-            b_val = float(trial.values[0]) if trial.values else 0.0
-        except Exception:
-            b_val = 0.0
-        ctx.progress_queue.put((f"{target_str}_{tf}", cur, ctx.n_trials, b_val))
+        kelly_pct = 0.0
+        if trial.value is not None:
+            try:
+                kelly_pct = float(trial.user_attrs.get("kelly_score_pct", float(trial.value) * 100.0))
+            except Exception:
+                kelly_pct = 0.0
+        ctx.progress_queue.put((progress_key, cur, ctx.n_trials, kelly_pct))
 
-    tf_space = get_search_space_futures(tf)
-
-    def _objective_with_logging(trial: optuna.Trial) -> Tuple[float, float]:
-        try:
-            return objective_futures(trial, data_maps=ctx.data_maps, symbols=ctx.symbols, tf_target=tf, space=tf_space, mode=ctx.mode, project_root=ctx.project_root)
-        except optuna.TrialPruned: raise
-        except Exception:
-            _logger.exception("[%s/%s] Trial %d failed.", target_str, tf, trial.number)
-            raise
-
-    _logger.info(
-        "[%s/%s/%s] Starting NSGA-II optimization (n_jobs=%d for trial parallelism)...",
-        target_str, tf, ctx.mode, ctx.n_jobs,
+    study = optuna.create_study(
+        study_name=tf_study_name,
+        storage=storage,
+        direction="maximize",
+        sampler=qmc_sampler,
+        pruner=pruner,
+        load_if_exists=False,
     )
+    _logger.info("[%s/%s/%s] QMC (Sobol) startup then TPE (CPCV)...", target_str, tf, ctx.mode)
     callbacks = [_progress_cb] if ctx.progress_queue is not None else []
     study.optimize(
         _objective_with_logging,
-        n_trials=ctx.n_trials,
+        n_trials=n_qmc,
         n_jobs=ctx.n_jobs,
         catch=(Exception,),
         callbacks=callbacks,
     )
 
-    best_trials = list(study.best_trials)
-    if not best_trials:
-        complete_trials = [
-            t
-            for t in study.get_trials(deepcopy=True)
-            if t.state == TrialState.COMPLETE and t.values is not None
-        ]
-        if complete_trials:
-            # Fallback: use best Kelly trial when no feasible (constraint-satisfying) trials exist
-            best_single = max(complete_trials, key=lambda t: t.values[0])
-            best_trials = [best_single]
+    remaining = int(ctx.n_trials) - n_qmc
+    if remaining <= 0:
+        return (target_obj, tf), _best_trial_from_study(study)
 
-    return (target_obj, tf), best_trials
+    study = optuna.load_study(
+        study_name=tf_study_name,
+        storage=storage,
+        sampler=_futures_tpe_sampler(seed),
+        pruner=pruner,
+    )
+    use_inner_pool = (
+        ctx.parallel_tpe_workers > 1
+        and remaining > 0
+        and not ctx.disable_inner_tpe_pool
+        and ctx.use_journal_storage
+    )
+    if use_inner_pool:
+        assert db_path is not None
+        n_workers = min(int(ctx.parallel_tpe_workers), int(remaining))
+        splits = _split_tpe_trials(remaining, n_workers)
+        data_maps_file = ""
+        with tempfile.NamedTemporaryFile(
+            suffix=".pkl", delete=False, dir=str(db_path.parent)
+        ) as dm_tmp:
+            data_maps_file = dm_tmp.name
+            pickle.dump(ctx.data_maps, dm_tmp, protocol=pickle.HIGHEST_PROTOCOL)
+
+        payloads: List[Dict[str, Any]] = []
+        try:
+            for i, nt in enumerate(splits):
+                if nt <= 0:
+                    continue
+                payloads.append(
+                    {
+                        "journal_path": str(db_path),
+                        "study_name": tf_study_name,
+                        "tf": tf,
+                        "target_str": target_str,
+                        "symbols": list(ctx.symbols),
+                        "mode": ctx.mode,
+                        "seed": seed + i,
+                        "n_trials": nt,
+                        "n_trials_total": ctx.n_trials,
+                        "prebuilt_cpcv_bundle": prebuilt_cpcv_bundle,
+                        "data_maps_file": data_maps_file,
+                        "progress_queue": ctx.progress_queue,
+                        "project_root": ctx.project_root,
+                        "signal_cache_dir": ctx.signal_cache_dir,
+                        "progress_key": progress_key,
+                        "locked_param_space": ctx.locked_param_space,
+                    }
+                )
+            with concurrent.futures.ProcessPoolExecutor(max_workers=len(payloads)) as pool:
+                futures = [pool.submit(_futures_tpe_worker_run, p) for p in payloads]
+                for f in concurrent.futures.as_completed(futures):
+                    f.result()
+        finally:
+            if data_maps_file:
+                try:
+                    Path(data_maps_file).unlink()
+                except OSError:
+                    pass
+        study_final = optuna.load_study(
+            study_name=tf_study_name,
+            storage=_build_sqlite_storage(db_path),
+        )
+        return (target_obj, tf), _best_trial_from_study(study_final)
+
+    study.optimize(
+        _objective_with_logging,
+        n_trials=remaining,
+        n_jobs=ctx.n_jobs,
+        catch=(Exception,),
+        callbacks=callbacks,
+    )
+    return (target_obj, tf), _best_trial_from_study(study)
 
 def main() -> None:
+    import json
+
     parser = argparse.ArgumentParser()
-    parser.add_argument("--symbols", type=str, default=",".join(FUTURES_SYMBOLS))
-    parser.add_argument("--mode", type=str, choices=["single", "multi"], default="single")
+    parser.add_argument(
+        "--skip-universe",
+        action="store_true",
+        help="Skip Phase A/B screening; use anchors + first 5 dynamic pool symbols.",
+    )
     parser.add_argument("--trials", type=int, default=OPT_FUTURES_CONFIG["total_trials"])
     parser.add_argument("--jobs", type=int, default=int(OPT_FUTURES_CONFIG.get("n_jobs", 10)))
     parser.add_argument("--task-workers", type=int, default=int(OPT_FUTURES_CONFIG.get("task_workers", 1)))
     parser.add_argument("--tf", type=str, choices=["1h", "4h"], default=OPT_FUTURES_CONFIG.get("TARGET_TIMEFRAMES", ["4h"])[0])
     parser.add_argument("--reference-date", type=str, default=None)
-    parser.add_argument("--progress", action="store_true", help="Enable progress bars (default: off in multi mode).")
+    parser.add_argument("--no-progress", action="store_true")
     args = parser.parse_args()
 
+    # [INFRA] Signal Cache & Memory Management (Alignment with Spot strategy)
+    os.environ.setdefault("OPT_FUTURES_SIGNAL_CACHE_MAX_GB", "12")
+    os.environ.setdefault("OPT_FUTURES_SIGNAL_MEM_CACHE_MAX", "64")
+    os.environ.setdefault("OPT_FUTURES_SIGNAL_CACHE_CLEANUP_INTERVAL_SEC", "300")
+    
     FETCH_START_DATE, START_DATE, IS_END_DATE, END_DATE = get_quarterly_window(args.reference_date)
-    symbols = [s.strip() for s in args.symbols.split(",") if s.strip()]
+    collector = DataCollector()
 
-    collector = DataCollector(); data_maps = {}; oos_data_maps = {}
-    _logger.info("Loading data for %d symbols (Mode: %s)...", len(symbols), args.mode)
+    broad_candidates: List[str] = []
+    if not args.skip_universe:
+        # Pass empty pool to trigger dynamic all-market discovery
+        broad_candidates, _n_raw = screen_futures_universe(
+            collector,
+            [], 
+            args.tf,
+            FUTURES_SCREENER_CONFIG,
+            FETCH_START_DATE,
+            END_DATE,
+            data_dir=FUTURES_DATA_DIR,
+        )
+        symbols = broad_candidates # Initial symbols for data loading
+    else:
+        symbols = list(dict.fromkeys([*FUTURES_ANCHOR_SYMBOLS, *FUTURES_DYNAMIC_CANDIDATE_POOL[:5]]))
+
+    _logger.info(
+        "Loading Futures data for %d symbols (Mode: %s)...",
+        len(symbols),
+        MODE_MULTI,
+    )
+    if not args.skip_universe:
+        _logger.info(
+            "Universe screening: %d candidates (ADV+ATR, sorted by ADV desc)",
+            len(broad_candidates),
+        )
+    else:
+        _logger.info("Fallback symbols: %s", symbols)
+
+    data_maps: Dict[str, Dict[str, Any]] = {}
+    oos_data_maps: Dict[str, Dict[str, Any]] = {}
     for sym in symbols:
-        data_maps[sym] = {}; oos_data_maps[sym] = {}
+        data_maps[sym] = {}
+        oos_data_maps[sym] = {}
         collector.ensure_funding_data(sym, FETCH_START_DATE, END_DATE)
         for tf in [args.tf, "1d"]:
             full_df = collector.collect_and_save(sym, tf, FETCH_START_DATE, END_DATE)
-            full_df = merge_funding_into_ohlcv(sym, full_df, DATA_DIR)
+            full_df = merge_funding_into_ohlcv(sym, full_df, FUTURES_DATA_DIR)
             tz = full_df["datetime"].dt.tz
             is_start_dt = pd.to_datetime(START_DATE).tz_localize(tz) if tz else pd.to_datetime(START_DATE)
             is_end_dt = pd.to_datetime(IS_END_DATE).tz_localize(tz) if tz else pd.to_datetime(IS_END_DATE)
@@ -252,22 +695,100 @@ def main() -> None:
             m_oos = full_df["datetime"] >= is_end_dt
             oos_data_maps[sym][f"oos_start_idx_{tf}"] = int(m_oos.to_numpy().argmax()) if m_oos.any() else len(full_df)
         data_maps[sym][f"merge_idx_{args.tf}"] = compute_segment_merge_index(data_maps[sym][args.tf], data_maps[sym]["1d"])
-        oos_data_maps[sym][f"merge_idx_{args.tf}"] = compute_segment_merge_index(oos_data_maps[sym][args.tf], oos_data_maps[sym]["1d"])
+        oos_data_maps[sym][f"merge_idx_{args.tf}"] = compute_segment_merge_index(
+            oos_data_maps[sym][args.tf], oos_data_maps[sym]["1d"]
+        )
 
-    tasks = [(tuple(symbols), args.tf)] if args.mode == "multi" else [(s, args.tf) for s in symbols]
-    plan = _resolve_parallel_plan(len(tasks), args.jobs, args.task_workers, 0)
-    use_mp = len(tasks) > 1 and plan.task_workers > 1
-    enable_progress = args.mode != "multi" or args.progress
-    if args.mode == "multi":
-        _logger.info("Multi mode: 1 portfolio task, trial parallelism n_jobs=%d (--jobs to override).", plan.jobs_per_task)
-    manager = Manager() if use_mp and enable_progress else None
-    progress_queue = manager.Queue() if manager else (queue.SimpleQueue() if enable_progress else None)
+    locked_param_space: Optional[Dict[str, Any]] = None
+    _logger.info("Combination screening (signal × regime × sizing)...")
+    
+    stage1_k = int(FUTURES_SCREENER_CONFIG.get("COMBO_SAMPLE_K", 12))
+    stage1_syms = symbols[:stage1_k] if not args.skip_universe else symbols
+    stage1_data_maps = {s: data_maps[s] for s in stage1_syms}
+    _logger.info("Phase B: combination screening on N=%d broad candidates", len(stage1_syms))
 
-    tf_bars = {}
+    top_combos = run_combination_screening_futures(
+        data_maps=stage1_data_maps,
+        symbols=stage1_syms,
+        tf=args.tf,
+        project_root=project_root,
+        signal_cache_dir=str(FUTURES_CACHE_DIR),
+    )
+    
+    if top_combos and not top_combos[0].disqualified:
+        t0 = top_combos[0]
+        locked_param_space = build_combined_param_space_futures(t0.signal, t0.regime, t0.sizing)
+        
+        if not args.skip_universe:
+            # Phase C: Refinement mini-backtest with winning combo
+            from src.futures_strategy.opt_futures_utils.combination_screener_futures import _mid_params_from_space
+            winning_params = _mid_params_from_space(locked_param_space, args.tf)
+            
+            refined_symbols = screen_futures_symbol_refinement(
+                broad_candidates,
+                FUTURES_ANCHOR_SYMBOLS,
+                FUTURES_SCREENER_CONFIG,
+                data_maps=data_maps,
+                winning_params=winning_params
+            )
+            
+            # Re-filter data maps to only include refined symbols for Optuna
+            symbols = refined_symbols
+            data_maps = {s: data_maps[s] for s in symbols if s in data_maps}
+            oos_data_maps = {s: oos_data_maps[s] for s in symbols if s in oos_data_maps}
+            _logger.info("Phase C: Selection finalized. Proceeding to Phase D (Optuna) with %d symbols.", len(symbols))
+        _logger.info(
+            "   Locked combo: SIGNAL=%s REGIME=%s SIZING=%s (bar ls_ratio=%.3f)",
+            t0.signal,
+            t0.regime,
+            t0.sizing,
+            t0.ls_ratio,
+        )
+    else:
+        _logger.warning("Phase B returned no valid combo; Phase C uses full discovery space.")
+
+    if len(symbols) < 2:
+        _logger.error("Need at least 2 symbols for futures multi discovery. Aborting.")
+        return
+
+    # Spot parity: align full OHLCV timelines once, then rebuild IS slices from aligned full maps.
+    ref_tz = oos_data_maps[symbols[0]][args.tf]["datetime"].dt.tz
+    is_start_align = pd.to_datetime(START_DATE)
+    is_end_align = pd.to_datetime(IS_END_DATE)
+    if ref_tz is not None:
+        is_start_align = is_start_align.tz_localize(ref_tz)
+        is_end_align = is_end_align.tz_localize(ref_tz)
+    _align_oos_dataframes_on_common_datetimes(oos_data_maps, symbols, args.tf, is_end_align)
+    _rebuild_is_data_maps_from_aligned_oos(
+        data_maps, oos_data_maps, symbols, args.tf, is_start_align, is_end_align
+    )
+    _logger.info(
+        "Aligned full %s on common datetimes: IS=%d bars, OOS full=%d bars (%d symbols).",
+        args.tf,
+        len(data_maps[symbols[0]][args.tf]),
+        len(oos_data_maps[symbols[0]][args.tf]),
+        len(symbols),
+    )
+
+    tasks: List[Tuple[Any, str]] = [(tuple(symbols), args.tf)]
+    plan = _resolve_futures_execution_plan(len(tasks), MODE_MULTI, args.jobs, args.task_workers)
+    use_mp = plan.use_outer_process_pool
+    enable_progress = not args.no_progress
+    _logger.info(
+        "Starting CPCV discovery (n_trials=%d, n_jobs=%d, tpe_workers=%d)...",
+        args.trials,
+        plan.jobs_per_task,
+        plan.parallel_tpe_workers,
+    )
+    need_multiprocess_queue = use_mp or (plan.parallel_tpe_workers > 1)
+    manager = Manager() if need_multiprocess_queue and enable_progress else None
+    progress_queue = manager.Queue() if manager else (queue.Queue() if enable_progress else None)
+
+    tf_bars: Dict[str, Any] = {}
     if enable_progress:
         for i, (target, tf) in enumerate(tasks):
-            key = "_".join(target) if isinstance(target, tuple) else target
-            tf_bars[f"{key}_{tf}"] = tqdm(total=args.trials, desc=f"[{key}] Waiting...", position=i, leave=True)
+            key = _task_progress_key(target, tf)
+            tf_bars[key] = tqdm(total=args.trials, desc=f"[{key}] Waiting...", position=i, leave=True)
 
     _multi_short_label = (
         f"Multi({len(tasks[0][0])} syms)_{tasks[0][1]}" if tasks and isinstance(tasks[0][0], tuple) else None
@@ -275,41 +796,83 @@ def main() -> None:
 
     progress_thread = None
     if enable_progress:
-        def _progress_listener():
+        def _progress_listener() -> None:
             while True:
                 msg = progress_queue.get()
                 if msg is None:
                     break
-                k, cur, tot, b_val = msg
-                bar = tf_bars[k]
+                k, cur, tot, kelly_pct = msg
+                bar = tf_bars.get(k)
+                if bar is None:
+                    continue
                 bar.n = cur
-                desc = f"[{_multi_short_label}] Best Kelly: {b_val:.2f}%" if _multi_short_label else f"[{k}] Best Kelly: {b_val:.2f}%"
+                desc = (
+                    f"[{_multi_short_label}] Best Kelly: {kelly_pct:.2f}%"
+                    if _multi_short_label
+                    else f"[{k}] Best Kelly: {kelly_pct:.2f}%"
+                )
                 bar.set_description(desc)
                 bar.refresh()
 
-        progress_thread = threading.Thread(target=_progress_listener, daemon=True); progress_thread.start()
+        progress_thread = threading.Thread(target=_progress_listener, daemon=True)
+        progress_thread.start()
 
-    best_results = {}
+    best_results: Dict[Tuple[Any, str], Optional[optuna.trial.FrozenTrial]] = {}
     try:
         if use_mp:
-            with concurrent.futures.ProcessPoolExecutor(max_workers=plan.task_workers) as exec:
-                futures = {exec.submit(_run_tf_optimization, t, _TfOptimizationContext(
-                    clean_symbol=("_".join(t[0]) if isinstance(t[0], tuple) else t[0]).replace("/", ""),
-                    seeds=OPT_FUTURES_CONFIG["seeds"], n_trials=args.trials, n_jobs=plan.jobs_per_task,
-                    data_maps={s: data_maps[s] for s in (list(t[0]) if isinstance(t[0], tuple) else [t[0]])},
-                    symbols=(list(t[0]) if isinstance(t[0], tuple) else [t[0]]), project_root=project_root,
-                    progress_queue=progress_queue, mode=args.mode
-                )): t for t in tasks}
-                for f in concurrent.futures.as_completed(futures): t_res, trials = f.result(); best_results[t_res] = trials
+            with concurrent.futures.ProcessPoolExecutor(max_workers=plan.outer_task_workers) as exec:
+                futures = {
+                    exec.submit(
+                        _run_tf_optimization,
+                        t,
+                        _TfOptimizationContext(
+                            clean_symbol=("_".join(t[0]) if isinstance(t[0], tuple) else t[0]).replace(
+                                "/", ""
+                            ),
+                            seeds=OPT_FUTURES_CONFIG["seeds"],
+                            n_trials=args.trials,
+                            n_jobs=plan.jobs_per_task,
+                            data_maps={s: data_maps[s] for s in (list(t[0]) if isinstance(t[0], tuple) else [t[0]])},
+                            symbols=(list(t[0]) if isinstance(t[0], tuple) else [t[0]]),
+                            project_root=project_root,
+                            progress_queue=progress_queue,
+                            mode=MODE_MULTI,
+                            use_journal_storage=False,
+                            parallel_tpe_workers=1,
+                            disable_inner_tpe_pool=True,
+                            fresh_journal=True,
+                            signal_cache_dir=str(FUTURES_CACHE_DIR),
+                            locked_param_space=locked_param_space,
+                        ),
+                    ): t
+                    for t in tasks
+                }
+                for f in concurrent.futures.as_completed(futures):
+                    t_res, bt = f.result()
+                    best_results[t_res] = bt
         else:
             for t in tasks:
-                t_res, trials = _run_tf_optimization(t, _TfOptimizationContext(
-                    clean_symbol=("_".join(t[0]) if isinstance(t[0], tuple) else t[0]).replace("/", ""),
-                    seeds=OPT_FUTURES_CONFIG["seeds"], n_trials=args.trials, n_jobs=plan.jobs_per_task,
-                    data_maps=data_maps, symbols=(list(t[0]) if isinstance(t[0], tuple) else [t[0]]),
-                    project_root=project_root, progress_queue=progress_queue, mode=args.mode, use_journal_storage=False
-                ))
-                best_results[t_res] = trials
+                t_res, bt = _run_tf_optimization(
+                    t,
+                    _TfOptimizationContext(
+                        clean_symbol=("_".join(t[0]) if isinstance(t[0], tuple) else t[0]).replace("/", ""),
+                        seeds=OPT_FUTURES_CONFIG["seeds"],
+                        n_trials=args.trials,
+                        n_jobs=plan.jobs_per_task,
+                        data_maps=data_maps,
+                        symbols=(list(t[0]) if isinstance(t[0], tuple) else [t[0]]),
+                        project_root=project_root,
+                        progress_queue=progress_queue,
+                        mode=MODE_MULTI,
+                        use_journal_storage=True,
+                        parallel_tpe_workers=plan.parallel_tpe_workers,
+                        disable_inner_tpe_pool=plan.use_outer_process_pool,
+                        fresh_journal=True,
+                        signal_cache_dir=str(FUTURES_CACHE_DIR),
+                        locked_param_space=locked_param_space,
+                    ),
+                )
+                best_results[t_res] = bt
     finally:
         if progress_queue is not None:
             progress_queue.put(None)
@@ -317,112 +880,281 @@ def main() -> None:
             progress_thread.join(timeout=2.0)
         if manager: manager.shutdown()
 
-    final_summaries = []
-    for (target, tf_eval), trials in best_results.items():
-        if not trials: continue
-        
-        # Select best trial from Pareto front: Maximize CAGR (values[0]), while MDD (values[1]) <= 35.0%
-        # Embrace optimal Kelly compounding over strict institutional limits.
-        valid_trials = [t for t in trials if t.values is not None and len(t.values) == 2 and t.values[1] <= 35.0]
-        if valid_trials:
-            best_trial = max(valid_trials, key=lambda x: x.values[0])
-        else:
-            valid_any = [t for t in trials if t.values is not None and len(t.values) == 2]
-            if valid_any:
-                best_trial = max(valid_any, key=lambda x: x.values[0])
-            else:
-                continue
+    pending_json_writes: List[Tuple[str, Dict[str, Any], float, bool]] = []
+
+    for (target, tf_eval), best_trial in best_results.items():
+        if best_trial is None:
+            continue
 
         params = best_trial.params.copy()
         params["TIMEFRAME"] = tf_eval
-        # [CRITICAL FIX] Restore hardcoded institutional params that Optuna doesn't store in trial.params
         params["LEVERAGE"] = 20
         params["USE_COMPOUNDING"] = True
-        
-        target_symbols = list(target) if isinstance(target, tuple) else [target]
-        
-        if args.mode == "multi":
-            _logger.info("\n" + "═" * 60)
-            _logger.info("  [BEST TRIAL PORTFOLIO INTERNAL BREAKDOWN (IS)]")
-            _logger.info("-" * 60)
-            _logger.info(f"  Target Score (Kelly/MDD): {best_trial.values[0]:.2f}% / {best_trial.values[1]:.2f}%")
-            _logger.info(f"  Avg Portfolio Kelly: {best_trial.user_attrs.get('port_kelly', 0):.2f}%")
-            _logger.info(f"  Avg Portfolio CAGR : {best_trial.user_attrs.get('avg_cagr', 0):.2f}%")
-            _logger.info(f"  Avg Portfolio MDD  : {best_trial.user_attrs.get('avg_mdd', 0):.2f}%")
-            _logger.info(f"  Avg Portfolio PF   : {best_trial.user_attrs.get('avg_pf', 0):.2f}")
-            _logger.info(f"  Portfolio Sortino  : {best_trial.user_attrs.get('port_sortino', 0):.2f}")
-            
-            for s_eval in target_symbols:
-                s_cagr = best_trial.user_attrs.get(f"{s_eval}_cv_cagr", -100)
-                s_mdd = best_trial.user_attrs.get(f"{s_eval}_mdd", 0)
-                _logger.info(f"  > {s_eval:<10}: {s_cagr:>7.2f}% CAGR | {s_mdd:>5.2f}% MDD")
-            _logger.info("═" * 60)
 
-        passed_count: int = 0
-        target_symbols = sorted(target_symbols) 
+        target_symbols = sorted(list(target) if isinstance(target, tuple) else [target])
+
+        passed_count = 0
+        symbol_gate_rows: List[FuturesSymbolGateRow] = []
+        total_funding_oos = 0.0
+        total_gross_oos = 0.0
+        is_cagrs: List[float] = []
+
         for s_eval in target_symbols:
-            s_is, r_is, m_is, t_is, _, pf_is, _, _, _ = evaluate_symbol_fold(UltimateStrategy(name=f"IS_{s_eval}", params=params), params, s_eval, tf_eval, data_maps[s_eval][tf_eval], data_maps[s_eval]["1d"], data_maps[s_eval][f"merge_idx_{tf_eval}"], None, data_maps[s_eval][f"is_start_idx_{tf_eval}"], len(data_maps[s_eval][tf_eval]))
-            s_oos, r_oos, m_oos, t_oos, _, pf_oos, lc_oos, sc_oos, _ = evaluate_symbol_fold(UltimateStrategy(name=f"OOS_{s_eval}", params=params), params, s_eval, tf_eval, oos_data_maps[s_eval][tf_eval], oos_data_maps[s_eval]["1d"], oos_data_maps[s_eval][f"merge_idx_{tf_eval}"], None, oos_data_maps[s_eval][f"oos_start_idx_{tf_eval}"], len(oos_data_maps[s_eval][tf_eval]))
-            go_nogo = run_go_nogo_check([], 0.0, [s_oos], m_oos, pf_oos, int(lc_oos), int(sc_oos), tf_eval)
+            s_is, r_is, m_is, t_is, wr_is, pf_is, lc_is, sc_is, _, _, _ = evaluate_symbol_fold(
+                UltimateStrategy(name=f"IS_{s_eval}", params=params),
+                params,
+                s_eval,
+                tf_eval,
+                data_maps[s_eval][tf_eval],
+                data_maps[s_eval]["1d"],
+                data_maps[s_eval][f"merge_idx_{tf_eval}"],
+                None,
+                data_maps[s_eval][f"is_start_idx_{tf_eval}"],
+                len(data_maps[s_eval][tf_eval]),
+            )
+            s_oos, r_oos, m_oos, t_oos, wr_oos, pf_oos, lc_oos, sc_oos, _, fp_oos, gr_oos = evaluate_symbol_fold(
+                UltimateStrategy(name=f"OOS_{s_eval}", params=params),
+                params,
+                s_eval,
+                tf_eval,
+                oos_data_maps[s_eval][tf_eval],
+                oos_data_maps[s_eval]["1d"],
+                oos_data_maps[s_eval][f"merge_idx_{tf_eval}"],
+                None,
+                oos_data_maps[s_eval][f"oos_start_idx_{tf_eval}"],
+                len(oos_data_maps[s_eval][tf_eval]),
+            )
+            total_funding_oos += float(fp_oos)
+            total_gross_oos += float(abs(gr_oos))
+            is_cagrs.append(float(s_is))
+            tot_ls = int(lc_oos) + int(sc_oos)
+            ls_ratio_oos = float(min(int(lc_oos), int(sc_oos)) / max(tot_ls, 1))
+            go_nogo = run_go_nogo_check(
+                [],
+                0.0,
+                [s_oos],
+                m_oos,
+                pf_oos,
+                int(lc_oos),
+                int(sc_oos),
+                tf_eval,
+                long_short_ratio_oos=ls_ratio_oos,
+            )
             if go_nogo.passed:
                 passed_count += 1
-            final_summaries.append({"sym": s_eval, "tf": tf_eval, "is": (s_is, r_is, m_is, t_is, pf_is), "oos": (s_oos, r_oos, m_oos, t_oos, pf_oos), "passed": go_nogo.passed})
-        
-        if args.mode == "multi":
-            is_all_passed: bool = passed_count >= 4
-        else:
-            is_all_passed = passed_count == len(target_symbols)
-        
-        best_score_final = best_trial.values[0] if best_trial.values else -100
-        if best_score_final > 0 and is_all_passed:
-            import json
-            if args.mode == "multi":
-                s_name = f"best_params_multi_{tf_eval}"
+
+            symbol_gate_rows.append(
+                FuturesSymbolGateRow(
+                    symbol=s_eval,
+                    net_cagr_pct=float(s_oos),
+                    max_mdd_pct=float(m_oos),
+                    win_rate_pct=float(wr_oos),
+                    trade_count=int(t_oos),
+                )
+            )
+
+        is_all_passed = passed_count >= 4
+        best_score_final = float(best_trial.value) if best_trial.value is not None else -100.0
+
+        oos_port = run_oos_margin_shared_portfolio(
+            target_symbols,
+            tf_eval,
+            params,
+            oos_data_maps,
+            cache_root=FUTURES_CACHE_DIR,
+            return_signal_dfs=True,
+        )
+
+        # Multi-Window OOS Logic (Ported from Spot)
+        mw_enabled = True
+        mw_gate = None
+        mw_summary = ""
+        if mw_enabled:
+            mw_res = run_multi_window_oos_holdout(
+                params, target_symbols, tf_eval, oos_data_maps, 
+                n_sub_windows=2, cache_root=FUTURES_CACHE_DIR, full_holdout_result=oos_port
+            )
+            mw_gate = run_multi_window_oos_gate(
+                window_results=mw_res["windows"],
+                min_positive_windows=2,
+                min_median_cagr_pct=30.0,
+                max_worst_mdd_pct=20.0
+            )
+            mw_summary = mw_gate.summary
+
+        # PBO Evaluation (Tier 1 advisory)
+        pbo_val: float = float("nan")
+        rho_val: float = float("nan")
+        pbo_n_paths = 0
+        ua = best_trial.user_attrs
+        oos_log_tw = ua.get("cpcv_path_oos_log_tw")
+        if isinstance(oos_log_tw, list) and oos_log_tw:
+            ref_pbo_sym = target_symbols[0]
+            is_off_pbo = int(data_maps[ref_pbo_sym].get(f"is_start_idx_{tf_eval}", 0))
+            ref_len_pbo = len(data_maps[ref_pbo_sym][tf_eval]) - is_off_pbo
+            emb_pbo = int(EMBARGO_BARS.get(tf_eval, 0))
+            from src.futures_strategy.opt_futures_utils.cv_utils import list_cpcv_block_ranges
+            prebuilt_pbo = build_cpcv_test_paths_with_fallback(ref_len_pbo, embargo=emb_pbo)
+            cpcv_paths_pbo, nb_pbo, _k_pbo = prebuilt_pbo
+            pbo_n_paths = len(cpcv_paths_pbo)
+            all_blocks_pbo = list_cpcv_block_ranges(ref_len_pbo, nb_pbo, emb_pbo)
+            if len(oos_log_tw) == pbo_n_paths and all_blocks_pbo:
+                from src.futures_strategy.opt_futures_utils.evaluator import run_cpcv_complement_evaluation
+                pbo_val, rho_val = run_cpcv_complement_evaluation(
+                    params,
+                    target_symbols,
+                    tf_eval,
+                    data_maps,
+                    cpcv_paths_pbo,
+                    all_blocks_pbo,
+                    oos_path_scores=oos_log_tw,
+                    signal_disk_cache_root=FUTURES_CACHE_DIR,
+                    project_root=project_root,
+                )
+
+        # Regime Diagnostic Logic (Tier 4 advisory)
+        regime_block = ""
+        full_sigs_diag = oos_port.get("full_signal_dfs", {})
+        if full_sigs_diag:
+            oos_start_reg = int(oos_data_maps[target_symbols[0]].get(f"oos_start_idx_{tf_eval}", 0))
+            regime_metrics = compute_regime_conditional_oos_metrics(
+                full_sigs_diag, np.asarray(oos_port["equity_curve"]), oos_start_reg, target_symbols
+            )
+            regime_block = format_regime_oos_diagnostic_block(regime_metrics, stress_mdd_warn_pct=30.0)
+
+        funding_drag_pct_oos = (
+            (total_funding_oos / max(total_gross_oos, 1e-9)) * 100.0 if total_gross_oos > 0 else 0.0
+        )
+        mean_is_cagr = float(np.mean(is_cagrs)) if is_cagrs else 0.0
+        mean_oos_cagr = float(np.mean([float(r.net_cagr_pct) for r in symbol_gate_rows])) if symbol_gate_rows else 0.0
+        alpha_decay_pct = (
+            ((mean_is_cagr - mean_oos_cagr) / max(abs(mean_is_cagr), 1e-6)) * 100.0 if is_cagrs else 0.0
+        )
+
+        oos_cagrs_pos = sorted([float(r.net_cagr_pct) for r in symbol_gate_rows if r.net_cagr_pct > 0.0], reverse=True)
+        if oos_cagrs_pos:
+            pos_sum = float(sum(oos_cagrs_pos)) + 1e-9
+            max_share = oos_cagrs_pos[0] / pos_sum
+            top2_share = (
+                sum(oos_cagrs_pos[:2]) / pos_sum if len(oos_cagrs_pos) >= 2 else max_share
+            )
+            if max_share >= 0.4:
+                loso_warning = f"경고 (단일 심볼 OOS CAGR 비중 {max_share:.0%} >= 40%)"
+            elif top2_share >= 0.65:
+                loso_warning = f"주의 (상위 2개 심볼 집중도 {top2_share:.0%} >= 65%)"
             else:
-                s_name = f"best_params_{('_'.join(target) if isinstance(target, tuple) else target).replace('/', '')}_{tf_eval}"
-            
-            # [UPGRADE] Save to 'results' directory
-            results_dir = os.path.join(project_root, "results")
-            if not os.path.exists(results_dir):
-                os.makedirs(results_dir)
-                
-            json_path = os.path.join(results_dir, f"{s_name}.json")
-            
-            # Save only the optimal parameters for the live bot
-            with open(json_path, 'w', encoding='utf-8') as f:
-                json.dump(params, f, indent=4)
-            
-            _logger.info("  ⚡ Saved Live Bot Config: results/%s.json", s_name)
+                loso_warning = f"안전 (최대 {max_share:.0%} / 상위2 {top2_share:.0%})"
         else:
-            _logger.info("  🚫 JSON Save Skipped: Institutional criteria not met.")
+            loso_warning = "N/A (OOS CAGR 비중 산출 불가)"
 
-    if final_summaries:
-        table_w = 120
-        _logger.info("\n" + "═" * table_w)
-        _logger.info(f"{'  FINAL OPTIMIZATION SUMMARY (IS vs OOS)':^{table_w}}")
-        _logger.info("─" * table_w)
-        header = f"{'Symbol':<12} | {'TF':<3} | {'IS (Score / Ret% / MDD% / Trd / PF)':^45} | {'OOS (Score / Ret% / MDD% / Trd / PF)':^45} | Status"
-        _logger.info(header)
-        _logger.info("─" * table_w)
-        
-        is_scores, is_rets, is_mdds, is_trds, is_pfs = [], [], [], [], []
-        oos_scores, oos_rets, oos_mdds, oos_trds, oos_pfs = [], [], [], [], []
+        ua = best_trial.user_attrs
+        gate_checks = [
+            float(ua.get("gate1_sqn", 0.0)) >= 2.0,
+            float(ua.get("gate1_path_sortino", 0.0)) >= 1.5,
+            float(ua.get("gate1_tail_ratio", 0.0)) >= 1.5,
+            float(ua.get("gate1_psr", 0.0)) >= 0.50,
+            float(ua.get("gate1_dsr", 0.0)) >= 0.25,
+            float(ua.get("gate1_p10_gmgr", -999.0)) >= -0.001,
+            abs(float(oos_port["mdd_pct"])) <= 25.0,
+            float(oos_port["cvar_pct"]) <= 12.0,
+            float(oos_port["hw_recovery_days"]) <= 180.0,
+            float(oos_port["calmar_ratio"]) >= 1.0,
+            funding_drag_pct_oos <= 15.0,
+            float(oos_port["cagr_pct"]) >= 15.0,
+            float(oos_port["profit_factor"]) >= 1.50,
+            alpha_decay_pct >= -50.0,
+            float(oos_port["terminal_wealth_ratio"]) > 1.0,
+        ]
+        hard_passed = int(sum(1 for c in gate_checks if c))
+        hard_total = len(gate_checks)
 
-        for r in final_summaries:
-            is_v = f"{r['is'][0]:>7.2f} / {r['is'][1]:>5.1f}% / {r['is'][2]:>4.1f}% / {int(r['is'][3]):>4} / {r['is'][4]:>4.2f}"
-            oos_v = f"{r['oos'][0]:>7.2f} / {r['oos'][1]:>5.1f}% / {r['oos'][2]:>4.1f}% / {int(r['oos'][3]):>4} / {r['oos'][4]:>4.2f}"
-            stat = "✅ PASS" if r['passed'] else "❌ FAIL"
-            _logger.info(f"{r['sym']:<12} | {r['tf']:<3} | {is_v} | {oos_v} | {stat}")
+        report = run_futures_deployment_report(
+            FuturesDeploymentReportInput(
+                gate1_sqn=float(ua.get("gate1_sqn", 0.0)),
+                gate1_path_sortino=float(ua.get("gate1_path_sortino", 0.0)),
+                gate1_tail_ratio=float(ua.get("gate1_tail_ratio", 0.0)),
+                gate1_p10_gmgr=float(ua.get("gate1_p10_gmgr", 0.0)),
+                gate1_psr=float(ua.get("gate1_psr", 0.0)),
+                gate1_dsr=float(ua.get("gate1_dsr", 0.0)),
+                cpcv_mean_path_return_pct=float(ua.get("cpcv_mean_path_return_pct", 0.0)),
+                cpcv_worst_segment_mdd_pct=float(ua.get("cpcv_worst_segment_mdd_pct", 0.0)),
+                sqn_target=2.0,
+                path_sortino_target=1.5,
+                tail_ratio_target=1.5,
+                psr_target=0.50,
+                dsr_target=0.25,
+                moic=float(oos_port["moic"]),
+                initial_capital_usdt=float(FUTURES_INITIAL_BALANCE),
+                oos_net_cagr_pct=float(oos_port["cagr_pct"]),
+                oos_mdd_pct=float(oos_port["mdd_pct"]),
+                hw_recovery_days=float(oos_port["hw_recovery_days"]),
+                alpha_decay_pct=float(alpha_decay_pct),
+                oos_cagr_target_pct=30.0,
+                oos_mdd_limit_pct=20.0,
+                hw_recovery_max_days=180.0,
+                alpha_decay_floor_pct=-50.0,
+                oos_cvar_pct=float(oos_port["cvar_pct"]),
+                cvar_limit_pct=12.0,
+                funding_drag_pct=float(funding_drag_pct_oos),
+                funding_drag_limit_pct=15.0,
+                terminal_wealth_ratio=float(oos_port["terminal_wealth_ratio"]),
+                tw_target=1.0,
+                oos_total_trades=int(oos_port["total_trades"]),
+                oos_pf=float(oos_port["profit_factor"]),
+                pf_target=1.50,
+                oos_calmar=float(oos_port["calmar_ratio"]),
+                calmar_target=1.0,
+                oos_win_rate_pct=float(oos_port["win_rate_pct"]),
+                oos_long_short_minority_pct=float(oos_port["oos_long_short_minority_pct"]),
+                symbol_rows=symbol_gate_rows,
+                loso_warning=loso_warning,
+                hard_passed=hard_passed,
+                hard_total=hard_total,
+                final_decision_go=bool(is_all_passed and (mw_gate.passed if mw_gate else True)),
+                pbo=float(pbo_val),
+                spearman_rho=float(rho_val),
+                pbo_n_paths=int(pbo_n_paths),
+                pbo_gate_passed=bool(pbo_val <= float(OPT_FUTURES_CONFIG.get("FUTURES_PBO_MAX", 0.45))),
+                pbo_hard_gate=bool(OPT_FUTURES_CONFIG.get("FUTURES_PBO_GATE_HARD", False)),
+                multi_window_passed=mw_gate.passed if mw_gate else True,
+                multi_window_summary=mw_summary,
+                regime_diagnostic_block=regime_block,
+                oos_long_trades=int(oos_port["long_trades"]),
+                oos_short_trades=int(oos_port["short_trades"]),
+                funding_cost_total_usdt=float(total_funding_oos),
+                gross_pnl_abs_usdt=float(total_gross_oos),
+            )
+        )
+        _logger.info("\n%s", report)
+
+        should_save = bool(best_score_final > 0 and is_all_passed)
+        json_filename = f"{BEST_PARAMS_FUTURES_JSON_STEM}.json"
+        pending_json_writes.append((json_filename, params, best_score_final, should_save))
+
+    if pending_json_writes:
+        import json
+        from src.common.secure_config import encrypt_config, get_strategy_secret
+        results_dir_p = Path(project_root) / "results"
+        results_dir_p.mkdir(parents=True, exist_ok=True)
+        secret = get_strategy_secret()
+
+        for json_filename, params, best_score_final, should_save in pending_json_writes:
+            json_path = results_dir_p / json_filename
+            enc_path = json_path.with_suffix(".enc")
             
-            is_scores.append(r['is'][0]); is_rets.append(r['is'][1]); is_mdds.append(r['is'][2]); is_trds.append(r['is'][3]); is_pfs.append(r['is'][4])
-            oos_scores.append(r['oos'][0]); oos_rets.append(r['oos'][1]); oos_mdds.append(r['oos'][2]); oos_trds.append(r['oos'][3]); oos_pfs.append(r['oos'][4])
-
-        if args.mode == "multi":
-            _logger.info("─" * table_w)
-            port_is = f"{np.mean(is_scores):>7.2f} / {np.mean(is_rets):>5.1f}% / {np.mean(is_mdds):>4.1f}% / {int(np.sum(is_trds)):>4} / {np.mean(is_pfs):>4.2f}"
-            port_oos = f"{np.mean(oos_scores):>7.2f} / {np.mean(oos_rets):>5.1f}% / {np.mean(oos_mdds):>4.1f}% / {int(np.sum(oos_trds)):>4} / {np.mean(oos_pfs):>4.2f}"
-            _logger.info(f"{'PORTFOLIO':<12} | {args.tf:<3} | {port_is} | {port_oos} | {'---'}")
-        _logger.info("═" * table_w + "\n")
+            if should_save:
+                json_path.write_text(json.dumps(params, indent=4), encoding="utf-8")
+                _logger.info("Saved config: %s", json_path.resolve())
+                if secret:
+                    enc_path.write_bytes(encrypt_config(params, secret))
+                    _logger.info("Saved encrypted config: %s", enc_path.resolve())
+                else:
+                    _logger.warning("STRATEGY_SECRET_KEY not set; skipping encrypted save.")
+            else:
+                _logger.info(
+                    "JSON save skipped: criteria not met (growth_score / gates). objective=%.4f",
+                    best_score_final,
+                )
 
 if __name__ == "__main__":
     main()
