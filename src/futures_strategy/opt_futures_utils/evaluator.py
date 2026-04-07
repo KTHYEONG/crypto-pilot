@@ -257,14 +257,14 @@ _FUTURES_2D_REQUIRED_COLS: Tuple[str, ...] = (
     "strength_filter",
     "atr",
     "garch_kelly_f",
-    "funding_rate",
+    "funding_rate_sum",
 )
 
 
 def _dataframe_to_symbol_arrays(sig_df: pd.DataFrame) -> Dict[str, np.ndarray]:
     for c in _FUTURES_2D_REQUIRED_COLS:
         if c not in sig_df.columns:
-            if c in ("garch_kelly_f", "funding_rate"):
+            if c in ("garch_kelly_f", "funding_rate_sum"):
                 sig_df[c] = 0.0
             else:
                 raise ValueError(f"Missing required column {c} for futures 2D engine.")
@@ -279,7 +279,7 @@ def _dataframe_to_symbol_arrays(sig_df: pd.DataFrame) -> Dict[str, np.ndarray]:
     out["entry_upper"] = sig_df["entry_upper"].fillna(999999.0).to_numpy(dtype=np.float64, copy=False)
     out["entry_lower"] = sig_df["entry_lower"].fillna(0.0).to_numpy(dtype=np.float64, copy=False)
     out["garch_kelly_f"] = sig_df["garch_kelly_f"].fillna(0.0).to_numpy(dtype=np.float64, copy=False)
-    out["funding_rate"] = sig_df["funding_rate"].fillna(0.0).to_numpy(dtype=np.float64, copy=False)
+    out["funding_rate_sum"] = sig_df["funding_rate_sum"].fillna(0.0).to_numpy(dtype=np.float64, copy=False)
     return out
 
 
@@ -339,7 +339,7 @@ def align_data_for_2d_engine(
         "strength_filter",
         "atr",
         "garch_kelly_f",
-        "funding_rate",
+        "funding_rate_sum",
     ]
     aligned_data: Dict[str, np.ndarray] = {
         col: np.full((n_bars, n_syms), np.nan, dtype=np.float64) for col in target_cols
@@ -353,7 +353,7 @@ def align_data_for_2d_engine(
         for col in ["open", "high", "low", "close", "atr"]:
             if col in merged.columns:
                 aligned_data[col][:, s_idx] = merged[col].ffill().values
-        for col in ["strength_filter", "trend_direction", "garch_kelly_f", "funding_rate"]:
+        for col in ["strength_filter", "trend_direction", "garch_kelly_f", "funding_rate_sum"]:
             if col in merged.columns:
                 aligned_data[col][:, s_idx] = merged[col].fillna(0).values
         for col in ["entry_upper", "entry_lower"]:
@@ -657,7 +657,9 @@ def objective_futures(
                 seg_pfs.append(pf_s)
                 seg_wins.append(win_rate_s)
                 seg_trades.append(float(n_tr))
-                funding_ratios.append(0.0)
+                _fp = float(trades_df["funding_fee"].sum()) if "funding_fee" in trades_df.columns else 0.0
+                _gr = float(trades_df["pnl"].abs().sum())
+                funding_ratios.append(_fp / max(_gr, 1e-9))
 
                 if mdd_seg >= liq_mdd_thr:
                     raise optuna.TrialPruned()
@@ -738,14 +740,7 @@ def objective_futures(
                 raise optuna.TrialPruned()
 
     path_arr = np.asarray(path_compound_raw_log_tw, dtype=np.float64)
-    
-    if path_arr.size >= 4:
-        from src.futures_strategy.opt_futures_utils.metrics import compute_dsr_from_path_values
-        n_eff = trial.number + 1
-        dsr_val = float(compute_dsr_from_path_values([float(x) for x in path_compound_raw_log_tw], n_eff))
-        if dsr_val < -1.0:
-            raise optuna.TrialPruned()
-            
+
     mean_log_tw_k = float(np.mean(path_arr)) if path_arr.size > 0 else 0.0
     p10_log_tw_path = (
         float(np.percentile(path_arr, 10.0)) if path_arr.size >= 10 else mean_log_tw_k
