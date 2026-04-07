@@ -48,7 +48,9 @@ class PortfolioBacktestEngineFast:
         strength_filter = self.data["strength_filter"]
         atr_2d = self.data["atr"]
         garch_kelly_f = self.data["garch_kelly_f"]
-        funding_rate = self.data["funding_rate"]
+        funding_rate = self.data["funding_rate_sum"]
+        print(f"Data: trend_dir sum={np.nansum(trend_dir)}, strength sum={np.nansum(strength_filter)}, kelly sum={np.nansum(garch_kelly_f)}, funding sum={np.nansum(funding_rate)}")
+
 
         l_atr_mult = float(self.params.get("LONG_ATR_MULT", 3.0))
         l_trail_mult = float(self.params.get("LONG_TRAIL_MULT", 3.0))
@@ -98,7 +100,7 @@ class PortfolioBacktestEngineFast:
                 "funding_fee": float(t[9]),
             })
 
-        return pd.DataFrame(trades_list), equity_curve, final_balance
+        print(f"Engine Finished. Trades: {len(trades_list)}"); return pd.DataFrame(trades_list), equity_curve, final_balance
 
 
 @njit(nogil=True, cache=True)
@@ -320,19 +322,28 @@ def backtest_portfolio_numba(
                     stop_dist = (pos_atr * l_atr_mult) if p_side == 1 else (pos_atr * s_atr_mult)
 
                     if stop_dist > 0:
-                        kelly_val = garch_kelly_f[prev_i, s]
-                        if kelly_val <= 0.0 or np.isnan(kelly_val):
-                            kelly_val = risk_per_trade
+                        kf = garch_kelly_f[prev_i, s]
+                        if np.isnan(kf) or kf <= 0.0:
+                            kf = 1.0
                             
-                        risk_amt = current_equity * kelly_val
+                        eff_risk = risk_per_trade * float(kf)
+                        risk_amt = current_equity * eff_risk
+                        target_qty = (risk_amt / stop_dist)
+                        
+                        max_qty = (free_margin * leverage) / fill_p
+                        if max_qty < 0:
+                            max_qty = 0.0
+                        target_qty = min(target_qty, max_qty)
+
                         sf_c = sf if sf <= 1.0 else 1.0
                         if sf_c < 0.0:
                             sf_c = 0.0
-                        target_qty = (risk_amt / stop_dist) * sf_c
+                        target_qty *= sf_c
+
                         req_margin = (target_qty * fill_p) / leverage
                         entry_fee = target_qty * fill_p * fee_rate
 
-                        if free_margin >= (req_margin + entry_fee):
+                        if target_qty > 0 and free_margin >= (req_margin + entry_fee):
                             balance -= req_margin + entry_fee
                             free_margin -= req_margin + entry_fee
 
