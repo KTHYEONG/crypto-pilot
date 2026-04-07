@@ -43,10 +43,10 @@ class BacktestEngineFast:
         self.logger = logging.getLogger(__name__)
         self._prepare_data()
 
-        # RSM-VT _REQUIRED_INDICATOR_COLS
-    _REQUIRED_INDICATOR_COLS: frozenset = frozenset({
-        "entry_upper", "entry_lower", "trend_direction", "strength_filter", "atr", "macro_ema"
+    _REQUIRED_INDICATOR_COLS: frozenset[str] = frozenset({
+        "entry_upper", "entry_lower", "trend_direction", "strength_filter", "atr", "macro_ema",
     })
+    _OPTIONAL_MERGE_COLS: frozenset[str] = frozenset({"garch_kelly_f"})
 
     def _prepare_data(self) -> None:
         exclude_cols = {"date_key", "datetime", "date", "open", "high", "low", "close", "volume", "timestamp"}
@@ -55,9 +55,10 @@ class BacktestEngineFast:
         else:
             signal_df = self.strategy.generate_signals(self.hourly_df.copy(deep=True))
 
+        merge_keys = self._REQUIRED_INDICATOR_COLS | self._OPTIONAL_MERGE_COLS
         indicator_cols = [
             c for c in signal_df.columns
-            if c not in exclude_cols and c in self._REQUIRED_INDICATOR_COLS
+            if c not in exclude_cols and c in merge_keys
         ]
 
         self.merged_df = self.hourly_df.copy(deep=False)
@@ -80,6 +81,13 @@ class BacktestEngineFast:
         strength_filter = df['daily_strength_filter'].values
         atr = df['daily_atr'].values
         macro_ema = df['daily_macro_ema'].values
+        if "daily_garch_kelly_f" in df.columns:
+            garch_kelly_f = np.asarray(df["daily_garch_kelly_f"].values, dtype=np.float64)
+            if len(garch_kelly_f) < n:
+                garch_kelly_f = np.pad(garch_kelly_f, (0, n - len(garch_kelly_f)), constant_values=1.0)
+            garch_kelly_f = np.nan_to_num(garch_kelly_f[:n], nan=1.0, posinf=1.0, neginf=1.0)
+        else:
+            garch_kelly_f = np.ones(n, dtype=np.float64)
 
         # RSM-VT Params
         long_atr_mult = float(self.strategy.params.get('LONG_ATR_MULT', 3.0))
@@ -124,10 +132,11 @@ class BacktestEngineFast:
         use_compounding = self.strategy.params.get('USE_COMPOUNDING', True)
         max_capital_usage = self.strategy.params.get('MAX_CAPITAL_USAGE', 1e12) 
 
-        trades, final_balance, equity_curve = backtest_loop_numba(
+        trades, final_balance, equity_curve, funding_paid_total = backtest_loop_numba(
             close, high, low, open_prices,
             entry_upper, entry_lower,
             trend_dir, strength_filter, atr, macro_ema,
+            garch_kelly_f,
             self.initial_balance, leverage, self.fee_rate, self.slippage_rate,
             self.risk_per_trade, timestamps, funding_rate_sums,
             long_atr_mult, long_trail_mult, short_atr_mult, short_tp_mult,
@@ -138,6 +147,7 @@ class BacktestEngineFast:
         
         self.balance = final_balance
         self._equity_curve = equity_curve
+        self._total_funding_paid = float(funding_paid_total)
 
         self.merged_df = None
         self.hourly_df = None
@@ -231,6 +241,8 @@ class BacktestEngineFast:
         trades_df["balance_before"] = balance_before
         trades_df["pnl_pct"] = pnl_pct
 
+        gross_pnl_abs = float(np.sum(np.abs(true_pnl)))
+
         return {
             'total_trades': n_trades,
             'win_trades': win_trades,
@@ -241,6 +253,8 @@ class BacktestEngineFast:
             'mdd_pct': mdd,
             'trades_df': trades_df,
             'equity_curve': equity_for_mdd,
+            'total_funding_paid': float(getattr(self, '_total_funding_paid', 0.0)),
+            'gross_pnl_abs': gross_pnl_abs,
         }
         
     def _empty_result(self):
@@ -248,6 +262,7 @@ class BacktestEngineFast:
             'total_trades': 0, 'win_trades': 0, 'loss_trades': 0, 'win_rate': 0,
             'total_return_pct': 0, 'final_balance': self.initial_balance, 'mdd_pct': 0,
             'trades_df': pd.DataFrame(), 'equity_curve': np.array([]),
+            'total_funding_paid': 0.0, 'gross_pnl_abs': 0.0,
         }
 
 @njit(nogil=True, cache=True)
@@ -255,6 +270,7 @@ def backtest_loop_numba(
     close, high, low, open_prices,
     entry_upper, entry_lower,
     trend_dir, strength_filter, atr, macro_ema_arr,
+    garch_kelly_f,
     initial_balance, leverage, fee_rate, slippage_rate,
     risk_per_trade, timestamps, funding_rate_sums,
     long_atr_mult, long_trail_mult, short_atr_mult, short_tp_mult,
@@ -262,6 +278,7 @@ def backtest_loop_numba(
     warmup_bars, execution_start_idx,
     use_compounding, max_capital_usage
 ):
+    funding_paid_total = 0.0
     n = len(close)
     balance = initial_balance
     peak_equity = initial_balance
@@ -319,6 +336,7 @@ def backtest_loop_numba(
             if not np.isnan(funding_rate_sum) and funding_rate_sum != 0.0:
                 funding_cost = (amount * c_open) * funding_rate_sum * pos_side
                 balance -= funding_cost
+                funding_paid_total += funding_cost
                 funding_eq_check = balance + (amount * entry_price) / leverage + (c_open - entry_price) * amount * pos_side
                 if funding_eq_check <= 0:
                     exit_price = c_open
@@ -420,7 +438,8 @@ def backtest_loop_numba(
         # --- 2. ENTRY LOGIC ---
         if not in_position and not bar_processed:
             prev_i = i - 1 if i > 0 else 0
-            if strength_filter[prev_i] == 0 or np.isnan(strength_filter[prev_i]):
+            sf_raw = strength_filter[prev_i]
+            if sf_raw <= 0.0 or np.isnan(sf_raw):
                 equity_curve[i] = balance
                 continue
 
@@ -457,9 +476,17 @@ def backtest_loop_numba(
                 stop_distance = abs(fill_price - stop_price)
                 if stop_distance > 0:
                     current_equity = max_capital_usage if use_compounding and balance > max_capital_usage else balance
-                    amount = (current_equity * risk_per_trade) / stop_distance
+                    kf = garch_kelly_f[prev_i]
+                    if np.isnan(kf) or kf <= 0.0:
+                        kf = 1.0
+                    eff_risk = risk_per_trade * float(kf)
+                    amount = (current_equity * eff_risk) / stop_distance
                     max_amount = (current_equity * leverage) / fill_price
                     amount = min(amount, max_amount)
+                    sf_clamped = sf_raw if sf_raw <= 1.0 else 1.0
+                    if sf_clamped < 0.0:
+                        sf_clamped = 0.0
+                    amount *= sf_clamped
                     
                     required_margin = (amount * fill_price) / leverage
                     entry_fee = amount * fill_price * fee_rate
@@ -524,4 +551,4 @@ def backtest_loop_numba(
             trades[trade_count] = [entry_idx, last_idx, pos_side, entry_price, exit_price, pnl, amount, entry_fee_stored]
             trade_count += 1
 
-    return trades[:trade_count], balance, equity_curve
+    return trades[:trade_count], balance, equity_curve, funding_paid_total
