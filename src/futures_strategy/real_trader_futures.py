@@ -365,17 +365,34 @@ class RealTraderFutures:
         logger.info("Loading strategies from JSON files in results/...")
         results_dir = os.path.join(project_root, "results")
 
-        # [FIX] 명확하게 multi 포트폴리오 파일을 지정하여 오인 로드 방지
-        multi_path = os.path.join(results_dir, "best_params_multi_4h.json")
+        preferred = os.path.join(results_dir, "best_params_futures_multi_4h.json")
+        legacy = os.path.join(results_dir, "best_params_multi_4h.json")
+        preferred_p = Path(preferred)
+        legacy_p = Path(legacy)
+        enc_path = preferred_p.with_suffix(".enc") if preferred_p.with_suffix(".enc").is_file() else (
+            legacy_p.with_suffix(".enc") if legacy_p.with_suffix(".enc").is_file() else None
+        )
+        json_path = preferred if os.path.isfile(preferred) else (legacy if os.path.isfile(legacy) else None)
 
-        if os.path.exists(multi_path):
-            logger.info(
-                "Detected multi-portfolio config: %s",
-                os.path.basename(multi_path),
-            )
+        if enc_path is not None or json_path is not None:
             try:
-                with open(multi_path, "r", encoding="utf-8") as f:
-                    base_params = json.load(f)
+                from src.common.secure_config import decrypt_config, get_strategy_secret
+
+                secret = get_strategy_secret()
+                if enc_path is not None and secret:
+                    logger.info("Loading multi-portfolio config from encrypted: %s", enc_path.name)
+                    base_params = decrypt_config(enc_path.read_bytes(), secret)
+                elif json_path is not None:
+                    logger.info(
+                        "Detected multi-portfolio config: %s",
+                        os.path.basename(json_path),
+                    )
+                    with open(json_path, "r", encoding="utf-8") as f:
+                        base_params = json.load(f)
+                else:
+                    raise RuntimeError(
+                        "Found .enc params but STRATEGY_SECRET_KEY is not set; cannot decrypt."
+                    )
             except Exception as e:
                 logger.error(f"❌ Failed to parse multi-portfolio JSON: {e}")
                 raise
@@ -398,7 +415,8 @@ class RealTraderFutures:
             return
         else:
             raise FileNotFoundError(
-                "❌ Multi-portfolio JSON file not found in results/ directory."
+                "❌ Multi-portfolio config not found: expected best_params_futures_multi_4h.json / "
+                "best_params_multi_4h.json or matching .enc under results/."
             )
 
     @network_api_retry
@@ -1189,7 +1207,7 @@ class RealTraderFutures:
 
         if os.getenv("SKIP_NUMBA_WARMUP", "true").lower() != "true":
             try:
-                from src.futures_strategy.engine_fast_futures import (
+                from src.futures_strategy.engine_futures import (
                     backtest_loop_numba,
                 )
 
@@ -1206,6 +1224,7 @@ class RealTraderFutures:
                 dummy_arr,
                 dummy_arr,
                 dummy_int_arr,
+                dummy_arr,
                 dummy_arr,
                 dummy_arr,
                 dummy_arr,

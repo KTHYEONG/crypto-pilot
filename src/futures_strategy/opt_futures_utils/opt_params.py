@@ -1,50 +1,95 @@
 from __future__ import annotations
+
+from typing import Any, Dict
+
 import optuna
-from typing import Dict, Any
+
+from config.opt_config import ENGINE_PARAM_SPACE_FUTURES
+
+
+def _suggest_one(trial: optuna.Trial, name: str, spec: Dict[str, Any]) -> Any:
+    t = spec["type"]
+    if t == "categorical":
+        return trial.suggest_categorical(name, spec["choices"])
+    if t == "int":
+        return trial.suggest_int(name, spec["low"], spec["high"], step=spec.get("step", 1))
+    if t == "float":
+        return trial.suggest_float(name, spec["low"], spec["high"], step=spec.get("step"))
+    raise ValueError(f"Unknown param type: {t}")
+
+
+def build_full_discovery_space_futures() -> Dict[str, Any]:
+    """Union of signal / regime / sizing plugin spaces + engine keys."""
+    from src.futures_strategy.regimes import FUTURES_REGIME_REGISTRY
+    from src.futures_strategy.signals import FUTURES_SIGNAL_REGISTRY
+    from src.futures_strategy.sizing import FUTURES_SIZING_REGISTRY
+
+    out: Dict[str, Any] = {
+        "SIGNAL_TYPE": {
+            "type": "categorical",
+            "choices": tuple(sorted(FUTURES_SIGNAL_REGISTRY.keys())),
+        },
+        "REGIME_TYPE": {
+            "type": "categorical",
+            "choices": tuple(sorted(FUTURES_REGIME_REGISTRY.keys())),
+        },
+        "SIZING_METHOD": {
+            "type": "categorical",
+            "choices": tuple(sorted(FUTURES_SIZING_REGISTRY.keys())),
+        },
+    }
+    for name in sorted(FUTURES_SIGNAL_REGISTRY.keys()):
+        inst = FUTURES_SIGNAL_REGISTRY[name]
+        for k, spec in inst.param_space.items():
+            out.setdefault(k, dict(spec))
+    for name in sorted(FUTURES_REGIME_REGISTRY.keys()):
+        inst = FUTURES_REGIME_REGISTRY[name]
+        for k, spec in inst.param_space.items():
+            out.setdefault(k, dict(spec))
+    for name in sorted(FUTURES_SIZING_REGISTRY.keys()):
+        inst = FUTURES_SIZING_REGISTRY[name]
+        for k, spec in inst.param_space.items():
+            out.setdefault(k, dict(spec))
+    for k, spec in ENGINE_PARAM_SPACE_FUTURES.items():
+        out[k] = dict(spec)
+    return out
+
+
+def build_combined_param_space_futures(signal: str, regime: str, sizing: str) -> Dict[str, Any]:
+    """Locked combo space for combination screener / Phase C deep search."""
+    from src.futures_strategy.regimes import FUTURES_REGIME_REGISTRY
+    from src.futures_strategy.signals import FUTURES_SIGNAL_REGISTRY
+    from src.futures_strategy.sizing import FUTURES_SIZING_REGISTRY
+
+    st = str(signal).upper()
+    rt = str(regime).upper()
+    sm = str(sizing).lower()
+
+    space: Dict[str, Any] = {}
+    space["SIGNAL_TYPE"] = {"type": "categorical", "choices": (st,)}
+    space["REGIME_TYPE"] = {"type": "categorical", "choices": (rt,)}
+    space["SIZING_METHOD"] = {"type": "categorical", "choices": (sm,)}
+
+    sig = FUTURES_SIGNAL_REGISTRY[st]
+    reg = FUTURES_REGIME_REGISTRY[rt]
+    siz = FUTURES_SIZING_REGISTRY[sm]
+    for k, v in sig.param_space.items():
+        space[k] = dict(v)
+    for k, v in reg.param_space.items():
+        space[k] = dict(v)
+    for k, v in siz.param_space.items():
+        space[k] = dict(v)
+    for k, v in ENGINE_PARAM_SPACE_FUTURES.items():
+        space[k] = dict(v)
+    return space
+
 
 def suggest_params_futures(trial: optuna.Trial, space: Dict[str, Any], tf: str) -> Dict[str, Any]:
-    """
-    Suggests parameters for optimization based on the RSM-VT architecture.
-    """
+    """Flat search space; regime branch selects which params affect signals at runtime."""
     params: Dict[str, Any] = {"TIMEFRAME": tf}
-    
-    def _suggest(param_name: str) -> None:
-        if param_name not in space: return
-        spec = space[param_name]
-        t = spec["type"]
-        if t == "categorical": params[param_name] = trial.suggest_categorical(param_name, spec["choices"])
-        elif t == "int": params[param_name] = trial.suggest_int(param_name, spec["low"], spec["high"], step=spec.get("step", 1))
-        elif t == "float": params[param_name] = trial.suggest_float(param_name, spec["low"], spec["high"], step=spec.get("step"))
+    for name, spec in space.items():
+        params[name] = _suggest_one(trial, name, spec)
 
-    # --- 1. Macro Trend Filter ---
-    _suggest("MACRO_EMA_PERIOD")
-    
-    # --- 2. Squeeze Parameters ---
-    _suggest("KC_MULT")
-    _suggest("SQUEEZE_WINDOW")
-    
-    # --- 3. Momentum Breakout Trigger ---
-    _suggest("MOMENTUM_PERIOD")
-    _suggest("VOL_Z_THRESHOLD")
-    _suggest("EXHAUSTION_MULT")
-    
-    # --- 4. Exits (Asymmetric Hard Stop vs Fat-Tail Trail + Scale-out) ---
-    _suggest("ATR_PERIOD")
-    _suggest("LONG_ATR_MULT")
-    _suggest("LONG_TRAIL_MULT")
-    _suggest("LONG_SCALE_ATR_MULT")
-    _suggest("SHORT_ATR_MULT")
-    _suggest("SHORT_TP_MULT")
-    _suggest("SHORT_TRAIL_MULT")
-    
-    # --- 5. Portfolio Risk Sizing ---
-    _suggest("RISK_PER_TRADE")
-
-    # --- 6. Microstructure (CVD) Filters ---
-    _suggest("CVD_WINDOW")
-    _suggest("TAKER_RATIO_THRESHOLD")
-
-    # [INSTITUTIONAL] Leverage & Execution Config
     params["LEVERAGE"] = 20
     params["USE_COMPOUNDING"] = True
 

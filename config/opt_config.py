@@ -8,12 +8,79 @@ from typing import Any, Dict, List
 # ==============================================================================
 
 OPT_FUTURES_CONFIG: Dict[str, Any] = {
-    "total_trials": 5000,
-    "n_startup_trials": 150,
+    "total_trials": 1500,
+    "tpe_n_startup_trials": 256,
+    "combo_phase1_trials": 10,
+    "combo_phase2_trials": 28,
+    "FUTURES_COMBO_QUICK_TRIALS_MAX": 40,
+    "FUTURES_COMBO_PHASE1_MAX": 18,
+    "FUTURES_COMBO_AMBIGUITY_STD_RATIO": 0.15,
+    "FUTURES_COMBO_PHASE2_AMBIGUITY_BOOST": 4,
+    "FUTURES_COMBO_PRUNE_THR": -0.05,
+    "combo_top_k": 3,
+    "tpe_pruner_n_startup_trials": 10,
+    "tpe_pruner_n_warmup_steps": 8,
+    "tpe_pruner_patience": 2,
     "seeds": [42],
-    "n_jobs": 8,
-    "task_workers": 1,
+    "n_jobs": 3,
+    "task_workers": 3,
     "TARGET_TIMEFRAMES": ["4h"],
+    "FUTURES_CPCV_N_BLOCKS": 8,
+    "FUTURES_CPCV_K_TEST": 3,
+    "FUTURES_MIN_TRADES_PER_CPCV_SEGMENT": 5,
+    "FUTURES_OBJECTIVE_W_MEAN_LOG_TW": 0.7,
+    "FUTURES_CPCV_CVAR_ALPHA": 0.10,
+    "FUTURES_CPCV_CVAR_THRESHOLD": 0.05,
+    "FUTURES_CPCV_CVAR_WEIGHT": 0.80,
+    "FUTURES_CPCV_TEMPORAL_LAMBDA": 1.5,
+    "FUTURES_MIN_PF": 1.5,
+    "FUTURES_MAX_MDD": 20.0,
+    "FUTURES_MIN_ROMAD": 0.8,
+    "FUTURES_MIN_CAGR_PCT": 30.0,
+}
+
+# Phase C engine + risk (plugin union via build_full_discovery_space_futures).
+ENGINE_PARAM_SPACE_FUTURES: Dict[str, Dict[str, Any]] = {
+    "ATR_PERIOD": {"type": "int", "low": 10, "high": 20, "step": 2},
+    "MACRO_EMA_PERIOD": {"type": "int", "low": 50, "high": 200, "step": 10},
+    "LONG_ATR_MULT": {"type": "float", "low": 1.5, "high": 4.0, "step": 0.25},
+    "LONG_TRAIL_MULT": {"type": "float", "low": 2.0, "high": 5.0, "step": 0.5},
+    "LONG_SCALE_ATR_MULT": {"type": "float", "low": 1.5, "high": 4.0, "step": 0.5},
+    "SHORT_ATR_MULT": {"type": "float", "low": 1.0, "high": 3.5, "step": 0.25},
+    "SHORT_TP_MULT": {"type": "float", "low": 1.5, "high": 4.0, "step": 0.5},
+    "SHORT_TRAIL_MULT": {"type": "float", "low": 2.0, "high": 5.0, "step": 0.5},
+    "RISK_PER_TRADE": {"type": "float", "low": 0.005, "high": 0.06, "step": 0.005},
+    "MAX_EXPOSURE": {"type": "float", "low": 0.5, "high": 1.0, "step": 0.1},
+}
+
+# Legacy flat dict (superseded by plugin union); kept for grep / external refs.
+FUTURES_SEARCH_SPACE: Dict[str, Dict[str, Any]] = {
+    "MACRO_EMA_PERIOD": {"type": "int", "low": 50, "high": 200, "step": 10},
+    "KC_MULT": {"type": "float", "low": 1.0, "high": 2.5, "step": 0.25},
+    "SQUEEZE_WINDOW": {"type": "int", "low": 3, "high": 15, "step": 2},
+    "MOMENTUM_PERIOD": {"type": "int", "low": 10, "high": 30, "step": 5},
+    "VOL_Z_THRESHOLD": {"type": "float", "low": 1.0, "high": 3.0, "step": 0.5},
+    "EXHAUSTION_MULT": {"type": "float", "low": 2.0, "high": 5.0, "step": 0.5},
+    "CVD_WINDOW": {"type": "int", "low": 3, "high": 20, "step": 2},
+    "TAKER_RATIO_THRESHOLD": {"type": "float", "low": 0.4, "high": 0.7, "step": 0.05},
+    "REGIME_TYPE": {
+        "type": "categorical",
+        "choices": ("EMA_ATR", "FUNDING_RATE", "TREND_QUALITY", "MARKET_BREADTH", "NONE"),
+    },
+    "EMA_ATR_REGIME_SLOW": {"type": "int", "low": 50, "high": 200, "step": 10},
+    "ATR_REGIME_PERIOD": {"type": "int", "low": 10, "high": 30, "step": 5},
+    "VOL_PCT_WINDOW": {"type": "int", "low": 40, "high": 120, "step": 10},
+    "VOL_QUANTILE": {"type": "float", "low": 0.45, "high": 0.75, "step": 0.05},
+    "FUNDING_Z_WINDOW": {"type": "int", "low": 20, "high": 60, "step": 10},
+    "FUNDING_Z_THRESHOLD": {"type": "float", "low": 1.0, "high": 2.5, "step": 0.5},
+    "ATR_PERIOD": {"type": "int", "low": 10, "high": 20, "step": 2},
+    "LONG_ATR_MULT": {"type": "float", "low": 1.5, "high": 4.0, "step": 0.25},
+    "LONG_TRAIL_MULT": {"type": "float", "low": 2.0, "high": 5.0, "step": 0.5},
+    "LONG_SCALE_ATR_MULT": {"type": "float", "low": 1.5, "high": 4.0, "step": 0.5},
+    "SHORT_ATR_MULT": {"type": "float", "low": 1.0, "high": 3.5, "step": 0.25},
+    "SHORT_TP_MULT": {"type": "float", "low": 1.5, "high": 4.0, "step": 0.5},
+    "SHORT_TRAIL_MULT": {"type": "float", "low": 2.0, "high": 5.0, "step": 0.5},
+    "RISK_PER_TRADE": {"type": "float", "low": 0.005, "high": 0.06, "step": 0.005},
 }
 
 FUTURES_SYMBOLS: List[str] = [
@@ -28,6 +95,48 @@ FUTURES_SYMBOLS: List[str] = [
     "FET/USDT",
     "APT/USDT",
 ]
+
+FUTURES_ANCHOR_SYMBOLS: List[str] = [
+    "ETH/USDT",
+    "SOL/USDT",
+    "BTC/USDT",
+]
+
+FUTURES_DYNAMIC_CANDIDATE_POOL: List[str] = [
+    "AVAX/USDT",
+    "NEAR/USDT",
+    "LINK/USDT",
+    "DOGE/USDT",
+    "SUI/USDT",
+    "1000PEPE/USDT",
+    "FET/USDT",
+    "APT/USDT",
+    "INJ/USDT",
+    "ARB/USDT",
+    "OP/USDT",
+    "TIA/USDT",
+    "WIF/USDT",
+    "JTO/USDT",
+    "PYTH/USDT",
+    "SEI/USDT",
+]
+
+FUTURES_SCREENER_CONFIG: Dict[str, Any] = {
+    "ADV_MIN_USDT_DAY": 50_000_000.0,
+    "SCREENER_MIN_P25_BAR_USDT": 2_000_000.0,
+    "SCREENER_ATR_PERIOD": 14,
+    "SCREENER_ATR_PCT_MIN": 2.0,
+    "SCREENER_ATR_PCT_MAX": 12.0,
+    "MIN_HISTORY_BARS": 2000,
+    "SCREENER_MIN_TRADES_DYNAMIC": 3,
+    "SCREENER_MIN_PF": 1.10,
+    "FUNDING_EXTREME_THRESHOLD": 0.003,
+    "MP_MIN_SYMBOLS": 4,
+    "MP_MAX_SYMBOLS": 8,
+    "CANDIDATES_TOP_K": 12,
+    "BROAD_POOL_K": 60,
+    "COMBO_SAMPLE_K": 12,
+}
 
 # ==============================================================================
 # OPTIMIZATION SPOT SEARCH SPACE & CONFIGURATION (shared-cash + CPCV)
@@ -88,8 +197,8 @@ OPT_SPOT_CONFIG: Dict[str, Any] = {
     "tpe_pruner_n_warmup_steps": 8,
     "tpe_pruner_patience": 2,
     "seeds": [42],
-    "n_jobs": 6,
-    "task_workers": 0,
+    "n_jobs": 3,
+    "task_workers": 3,
     "TARGET_TIMEFRAMES": ["4h"],
     "SPOT_MAX_CONCURRENT_POSITIONS": 5,
     "CPCV_N_BLOCKS": 8,
@@ -224,9 +333,10 @@ SPOT_SHARED_PARAM_SPACE: Dict[str, Dict[str, Any]] = {
 
 
 def get_search_space_futures(tf: str) -> Dict[str, Dict[str, Any]]:
-    # Fallback to a default if not defined, but here we assume it might be needed by other files.
-    # We will use a dummy or existing one if we can find it.
-    return {}
+    _ = tf
+    from src.futures_strategy.opt_futures_utils.opt_params import build_full_discovery_space_futures
+
+    return build_full_discovery_space_futures()
 
 
 def get_search_space_spot(tf: str) -> Dict[str, Dict[str, Any]]:
