@@ -13,7 +13,7 @@ from .binance_client import BinanceClient
 # 프로젝트 루트 경로 추가 (모듈 import 문제 해결)
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
-from config.settings import DATA_DIR, FUTURES_BACKTEST_START_DATE, FUTURES_BACKTEST_END_DATE
+from config.settings import FUTURES_DATA_DIR, FUTURES_BACKTEST_START_DATE, FUTURES_BACKTEST_END_DATE
 from src.common.utils import setup_logger
 
 class DataValidator:
@@ -61,10 +61,10 @@ class DataCollector:
 
     def _cache_path(self, symbol, timeframe):
         safe_symbol = self._safe_symbol(symbol)
-        return DATA_DIR / f"{safe_symbol}_{timeframe}.parquet"
+        return FUTURES_DATA_DIR / f"{safe_symbol}_{timeframe}.parquet"
 
     def _meta_path(self):
-        return DATA_DIR / "parquet_cache_meta.json"
+        return FUTURES_DATA_DIR / "parquet_cache_meta.json"
 
     def _meta_key(self, symbol, timeframe):
         return f"{self._safe_symbol(symbol)}::{timeframe}"
@@ -134,7 +134,7 @@ class DataCollector:
     def _load_legacy_csv_seed(self, symbol, timeframe):
         safe_symbol = self._safe_symbol(symbol)
         pattern = f"{safe_symbol}_{timeframe}_*.csv"
-        candidates = sorted(DATA_DIR.glob(pattern))
+        candidates = sorted(FUTURES_DATA_DIR.glob(pattern))
         if not candidates:
             return pd.DataFrame()
 
@@ -329,7 +329,7 @@ class DataCollector:
         return self._slice_by_date(cache_df, start, end)
 
     def _funding_cache_path(self, symbol: str) -> Path:
-        return DATA_DIR / f"{self._safe_symbol(symbol)}_funding.parquet"
+        return FUTURES_DATA_DIR / f"{self._safe_symbol(symbol)}_funding.parquet"
 
     def ensure_funding_data(
         self,
@@ -363,13 +363,27 @@ class DataCollector:
                 cache_df = pd.DataFrame(columns=["timestamp", "funding_rate"])
 
         missing_ranges: list[tuple[pd.Timestamp, pd.Timestamp]] = []
+        mk = self._meta_key(symbol, "funding")
+        meta = self._load_meta()
+        earliest_known = None
+        if mk in meta and isinstance(meta[mk], dict):
+            v = meta[mk].get("earliest_available_funding")
+            if v:
+                try:
+                    earliest_known = pd.Timestamp(v).normalize()
+                except Exception:
+                    earliest_known = None
+
         if cache_df.empty:
             missing_ranges.append((req_start, req_end))
         else:
             cache_start = pd.to_datetime(cache_df["timestamp"].min(), unit="ms").normalize()
             cache_end = pd.to_datetime(cache_df["timestamp"].max(), unit="ms").normalize()
             if req_start < cache_start:
-                missing_ranges.append((req_start, cache_start - pd.Timedelta(days=1)))
+                if earliest_known is not None and req_start < earliest_known:
+                    pass
+                else:
+                    missing_ranges.append((req_start, cache_start - pd.Timedelta(days=1)))
             if req_end > cache_end:
                 missing_ranges.append((cache_end + pd.Timedelta(days=1), req_end))
 
@@ -379,7 +393,7 @@ class DataCollector:
                 continue
             s = range_start.strftime("%Y-%m-%d")
             e = range_end.strftime("%Y-%m-%d")
-            self.logger.info("Fetching funding rate for %s: %s ~ %s", symbol, s, e)
+            # redundant log (fetch_funding_rate logs it)
             try:
                 fr_df = self.client.fetch_funding_rate(symbol, s, e)
                 if not fr_df.empty:
@@ -398,6 +412,15 @@ class DataCollector:
             )
             self._write_parquet(path, merged)
             self.logger.info("Updated funding parquet cache: %s", path)
+            cache_df = merged
+
+        if not cache_df.empty:
+            earliest = pd.to_datetime(cache_df["timestamp"].min(), unit="ms").normalize().strftime("%Y-%m-%d")
+            if mk not in meta:
+                meta[mk] = {}
+            if meta[mk].get("earliest_available_funding") != earliest:
+                meta[mk]["earliest_available_funding"] = earliest
+                self._save_meta(meta)
 
     def collect_and_save(self, symbol, timeframe, start_date=None, end_date=None):
         """

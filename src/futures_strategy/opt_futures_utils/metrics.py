@@ -4,7 +4,7 @@
 """
 import numpy as np
 import pandas as pd
-from typing import Tuple
+from typing import Tuple, Sequence
 from config.settings import FUTURES_INITIAL_BALANCE
 
 def calc_profit_factor_from_pnl(pnl_series: pd.Series) -> float:
@@ -102,3 +102,60 @@ def calc_sortino_from_equity(equity_curve: np.ndarray, span_days: float) -> floa
     sortino = cagr_decimal / annual_downside_dev
     
     return float(sortino)
+
+
+def compute_pbo_from_cpcv_paths(
+    is_path_scores: Sequence[float],
+    oos_path_scores: Sequence[float],
+) -> tuple[float, float]:
+    """
+    PBO proxy from CPCV path IS vs OOS score ranks.
+    Returns (pbo_fraction, spearman_rho). PBO ~ 0.5 * (1 - rho).
+    """
+    is_arr = np.asarray(list(is_path_scores), dtype=np.float64)
+    oos_arr = np.asarray(list(oos_path_scores), dtype=np.float64)
+    if is_arr.size != oos_arr.size or is_arr.size < 2:
+        return (0.5, 0.0)
+    
+    ri = pd.Series(is_arr).rank(method="average").to_numpy(dtype=np.float64)
+    ro = pd.Series(oos_arr).rank(method="average").to_numpy(dtype=np.float64)
+    
+    if np.std(ri) < 1e-12 or np.std(ro) < 1e-12:
+        return (0.5, 0.0)
+    
+    rho = float(np.corrcoef(ri, ro)[0, 1])
+    if not np.isfinite(rho):
+        rho = 0.0
+    pbo = float(np.clip(0.5 * (1.0 - rho), 0.0, 1.0))
+    return (pbo, rho)
+
+
+def calc_cvar5_loss_pct_from_equity(equity_curve: np.ndarray) -> float:
+    """Portfolio CVaR(5%): mean of worst 5% bar returns as positive loss %."""
+    if equity_curve.size < 2:
+        return 0.0
+    eq = np.asarray(equity_curve, dtype=np.float64)
+    r = np.diff(eq) / np.clip(eq[:-1], 1e-9, None)
+    if r.size == 0:
+        return 0.0
+    sorted_r = np.sort(r)
+    k = max(1, int(len(sorted_r) * 0.05))
+    worst = sorted_r[:k]
+    return float(-np.mean(worst) * 100.0)
+
+
+def calc_max_underwater_days_from_equity(equity_curve: np.ndarray, hours_per_bar: float) -> float:
+    """Longest stretch below running peak, converted to days (4H -> hours_per_bar=4)."""
+    if equity_curve.size < 2:
+        return 0.0
+    peak = np.maximum.accumulate(equity_curve)
+    underwater = equity_curve < peak
+    max_run = 0
+    cur = 0
+    for u in underwater:
+        if u:
+            cur += 1
+            max_run = max(max_run, cur)
+        else:
+            cur = 0
+    return float(max_run * hours_per_bar / 24.0)
