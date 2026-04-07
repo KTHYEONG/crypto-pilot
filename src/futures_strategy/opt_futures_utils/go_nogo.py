@@ -26,6 +26,8 @@ def run_go_nogo_check(
     long_count: int,
     short_count: int,
     tf: str = "4h",
+    *,
+    long_short_ratio_oos: float = 0.0,
 ) -> GoNoGoResult:
     import numpy as np
 
@@ -66,11 +68,14 @@ def run_go_nogo_check(
         # Tier 3: 기준선 (PF 1.5 ~ 1.99). 철저하게 기본 횟수(10회) 충족 요구.
         trades_pass = total_trades >= base_req
 
+    ls_pass: bool = float(long_short_ratio_oos) >= 0.15
+
     details: Dict[str, bool] = {
         "1. Risk-Adjusted Return (RoMaD >= 0.8)": growth_pass,
         "2. Strict Volatility Limit (MDD <= 25%)": mdd_pass,
         f"3. Institutional Edge (PF >= {target_pf})": pf_pass,
         f"4. Dynamic Stat Edge (N-Tier Valid)": trades_pass,
+        "5. Long/Short balance (minority >= 15%)": ls_pass,
     }
 
     all_passed = all(details.values())
@@ -83,6 +88,7 @@ def run_go_nogo_check(
         "2. Strict Volatility Limit (MDD <= 25%)": f"MDD: {abs_mdd:.1f}%",
         f"3. Institutional Edge (PF >= {target_pf})": f"PF: {profit_factor:.2f}",
         f"4. Dynamic Stat Edge (N-Tier Valid)": f"N: {total_trades}",
+        "5. Long/Short balance (minority >= 15%)": f"L/S ratio: {long_short_ratio_oos:.2f}",
     }
 
     req_met: int = sum(1 for v in details.values() if v)
