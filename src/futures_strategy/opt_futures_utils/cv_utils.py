@@ -1,63 +1,133 @@
 """
-교차 검증(Cross-Validation)을 위해 데이터를 고정된 훈련 세트와 이후의 테스트 세트로 나누는 기능을 제공함.
-시계열 데이터의 과거 학습과 미래 검증 구간 분리를 위한 로직을 포함함.
+CPCV test paths for futures optimization (spot-aligned geometry, fresh-start-per-segment in evaluator).
 """
+from __future__ import annotations
+
 import logging
-import pandas as pd
+from itertools import combinations
 from typing import List, Tuple
+
+import pandas as pd
+
+from config.opt_config import OPT_FUTURES_CONFIG
 
 _logger: logging.Logger = logging.getLogger("opt_futures")
 
-# CV folds  : 4-tuple (train_start, train_end, test_start, test_end)
-# Holdout fold: 3-tuple (train_end, test_start, test_end)  ← evaluator unpacks via len() check
 CVFold = Tuple[int, int, int, int]
 HoldoutFold = Tuple[int, int, int]
+
+CPCVPath = List[Tuple[int, int]]
+
+
+def list_cpcv_block_ranges(n_bars: int, n_blocks: int, embargo: int = 0) -> List[Tuple[int, int]]:
+    """Physical IS blocks (IS-relative indices [start, end))."""
+    n = int(n_bars)
+    nb = int(n_blocks)
+    e = max(0, int(embargo))
+    if n < nb * 2 or nb < 1:
+        return []
+    base = n // nb
+    if base <= e:
+        return []
+    out: List[Tuple[int, int]] = []
+    for j in range(nb):
+        raw_start = j * base
+        end = (j + 1) * base if j < nb - 1 else n
+        start = raw_start + e
+        if end <= start:
+            return []
+        out.append((start, end))
+    return out
+
+
+def cpcv_complement_segments(test_path: CPCVPath, all_blocks: List[Tuple[int, int]]) -> List[Tuple[int, int]]:
+    test_set = {tuple(int(x) for x in pair) for pair in test_path}
+    norm_blocks = [tuple(int(x) for x in b) for b in all_blocks]
+    comp = [b for b in norm_blocks if b not in test_set]
+    return sorted(comp, key=lambda t: t[0])
 
 
 def build_purged_walk_forward_folds(
     df: pd.DataFrame,
-    n_folds: int = 6,
+    n_folds: int = 4,
     holdout_ratio: float = 0.20,
     embargo: int = 0,
 ) -> Tuple[List[CVFold], HoldoutFold]:
-    """
-    [CRITICAL FIX FOR TREND FOLLOWING]
-    Builds a single continuous In-Sample (IS) block for evaluation.
-    Chopping the timeline artificially cuts holding periods and forces arbitrary
-    position closures, which completely corrupts Trailing Stop metrics in Optuna.
-    Optuna must evaluate the entire dataset continuously.
-    """
-    # 1. 시계열 교차 검증 (4-Fold Walk-Forward)
-    # 데이터를 시간순으로 4개 구간으로 나누어 점진적으로 학습/검증 범위를 확장함.
+    """Legacy walk-forward splits (optional tooling / tests)."""
     n_bars: int = len(df)
     if n_bars < 500:
         return [], (0, 0, 0)
 
-    # 20%는 최종 Holdout(검증)으로 제외하고, 나머지 80% 내에서 n_folds 구성을 위해 인덱스 계산
     is_bars = int(n_bars * (1 - holdout_ratio))
-    
-    # 각 폴드의 테스트 구간 크기 계산 (Embargo 고려)
-    # 총 IS 범위 내에서 n_folds개의 테스트 구간이 들어갈 수 있도록 조정
-    # [is_bars = (fold_size * n_folds) + total_embargo_gaps] 가 되도록 설계
     usable_is_bars = is_bars - (n_folds * embargo)
-    if usable_is_bars <= 0: return [], (0, 0, 0) # Data too short
-    
+    if usable_is_bars <= 0:
+        return [], (0, 0, 0)
+
     fold_size = usable_is_bars // n_folds
-    if fold_size < 10: return [], (0, 0, 0) # Each fold must be meaningful
+    if fold_size < 10:
+        return [], (0, 0, 0)
 
     splits: List[CVFold] = []
     for i in range(1, n_folds + 1):
-        # 학습 종료 지점 산출
         train_end = i * fold_size + (i - 1) * embargo
         test_start = train_end + embargo
-        # 마지막 폴드라도 is_bars를 넘지 않도록 강제 (Leakage 방지)
         test_end = min(is_bars, test_start + fold_size)
-        
         if test_end > test_start:
             splits.append((0, train_end, test_start, test_end))
 
-    # 최종 검증 구간 (Holdout) - CV에서 단 한 번도 보지 못한 미래 데이터
     ho_start = min(n_bars, is_bars + embargo)
     holdout_fold: HoldoutFold = (is_bars, ho_start, n_bars)
 
     return splits, holdout_fold
+
+
+def build_cpcv_test_paths(
+    n_bars: int,
+    n_blocks: int,
+    k_test_blocks: int,
+    embargo: int = 0,
+) -> List[CPCVPath]:
+    n = int(n_bars)
+    nb = int(n_blocks)
+    k = int(k_test_blocks)
+    e = max(0, int(embargo))
+    if n < nb * 2 or k < 1 or k > nb:
+        return []
+
+    base = n // nb
+    if base <= e:
+        return []
+
+    block_starts: List[int] = []
+    block_ends: List[int] = []
+    for j in range(nb):
+        raw_start = j * base
+        end = (j + 1) * base if j < nb - 1 else n
+        start = raw_start + e
+        if end <= start:
+            return []
+        block_starts.append(start)
+        block_ends.append(end)
+
+    paths: List[CPCVPath] = []
+    for test_indices in combinations(range(nb), k):
+        segs = tuple((block_starts[j], block_ends[j]) for j in sorted(test_indices))
+        paths.append(list(segs))
+    return paths
+
+
+def build_cpcv_test_paths_with_fallback(
+    n_bars: int,
+    embargo: int = 0,
+) -> Tuple[List[CPCVPath], int, int]:
+    """Prefer N/K from OPT_FUTURES_CONFIG; fallback 6/2 then 4/2."""
+    n_primary = int(OPT_FUTURES_CONFIG.get("FUTURES_CPCV_N_BLOCKS", 8))
+    k_primary = int(OPT_FUTURES_CONFIG.get("FUTURES_CPCV_K_TEST", 3))
+    paths = build_cpcv_test_paths(n_bars, n_primary, k_primary, embargo=embargo)
+    if paths:
+        return paths, n_primary, k_primary
+    paths_fb62 = build_cpcv_test_paths(n_bars, 6, 2, embargo=embargo)
+    if paths_fb62:
+        return paths_fb62, 6, 2
+    paths_fb = build_cpcv_test_paths(n_bars, 4, 2, embargo=embargo)
+    return paths_fb, 4, 2
