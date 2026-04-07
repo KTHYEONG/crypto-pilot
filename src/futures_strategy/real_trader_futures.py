@@ -261,7 +261,6 @@ class StateManager:
 class RealTraderFutures:
     def __init__(self, enable_oracle_optimization: bool = False, dry_run: bool = False):
         self.client = BinanceClient(BINANCE_API_KEY, BINANCE_SECRET)
-        self.clients: Dict[str, BinanceClient] = {}
         self.strategies: Dict[str, UltimateStrategy] = {}
         self.params_map: Dict[str, dict] = {}
         self.symbols: list = []
@@ -297,9 +296,7 @@ class RealTraderFutures:
 
         self._db_write_lock = threading.Lock()
         self._time_sync_lock = threading.Lock()
-
-        self._executor: ThreadPoolExecutor | None = None
-
+        
         self._setup_signal_handlers()
 
     def _should_emit_log(
@@ -1132,7 +1129,7 @@ class RealTraderFutures:
         return False, last_amount
 
     def _get_client_for_symbol(self, symbol: str) -> BinanceClient:
-        return self.clients.get(symbol, self.client)
+        return self.client
 
     def initialize(self):
         logger.info("🤖 RealTrader Futures 2D Portfolio Bot Initializing...")
@@ -1153,13 +1150,9 @@ class RealTraderFutures:
             logger.error(f"❌ Failed to fetch balance: {e}")
 
         global_rate_limiter = OrderRateLimiter(max_orders_per_10s=80)
+        self.client.rate_limiter = global_rate_limiter
         for symbol in list(self.symbols):
-            self.clients[symbol] = BinanceClient(
-                BINANCE_API_KEY,
-                BINANCE_SECRET,
-                shared_rate_limiter=global_rate_limiter,
-            )
-            client = self._get_client_for_symbol(symbol)
+            client = self.client
             target_lev = self.params_map[symbol].get("LEVERAGE", 1)
             applied_lev = self._resolve_exchange_leverage(target_lev)
 
@@ -1200,10 +1193,6 @@ class RealTraderFutures:
             self.client.set_asset_mode(is_multi_asset=False)
         except Exception as e:
             logger.error(f"⚠️ Failed to set Single-Asset Mode: {e}")
-
-        if self._executor is None and self.symbols:
-            max_workers = min(3, len(self.symbols))
-            self._executor = ThreadPoolExecutor(max_workers=max_workers)
 
         if os.getenv("SKIP_NUMBA_WARMUP", "true").lower() != "true":
             try:
@@ -3273,62 +3262,30 @@ class RealTraderFutures:
                 # [2D 마진 공유 아키텍처] 3-Phase Execution
                 # ==============================================================
 
-                # Phase 1: Exit First (가용 마진 확보 최우선, 스레드풀 병렬 처리)
-                if self._executor is not None:
-                    future_exits = {
-                        self._executor.submit(self._process_exits, symbol): symbol
-                        for symbol in self.symbols
-                        if not self._shutdown_requested
-                    }
-                    for future in as_completed(future_exits):
-                        symbol = future_exits[future]
-                        try:
-                            future.result()
-                        except Exception as e:
-                            logger.error(
-                                "Error in Phase1 (exit) for %s: %s", symbol, e
-                            )
-                else:
-                    for symbol in self.symbols:
-                        if self._shutdown_requested:
-                            break
-                        try:
-                            self._process_exits(symbol)
-                        except Exception as e:
-                            logger.error(
-                                "Error in Phase1 fallback for %s: %s", symbol, e
-                            )
+                # Phase 1: Exit First (가용 마진 확보 최우선, Sequential 처리)
+                for symbol in self.symbols:
+                    if self._shutdown_requested:
+                        break
+                    try:
+                        self._process_exits(symbol)
+                    except Exception as e:
+                        logger.error(
+                            "Error in Phase1 for %s: %s", symbol, e
+                        )
 
-                # Phase 2: Signal Scan (동시 타점 스캔, 스레드풀 적용)
+                # Phase 2: Signal Scan (동시 타점 스캔, Sequential 처리)
                 entry_candidates: list[dict] = []
-                if self._executor is not None:
-                    future_to_symbol = {
-                        self._executor.submit(self._scan_entries, symbol): symbol
-                        for symbol in self.symbols
-                        if not self._shutdown_requested
-                    }
-                    for future in as_completed(future_to_symbol):
-                        symbol = future_to_symbol[future]
-                        try:
-                            candidate = future.result()
-                            if candidate is not None:
-                                entry_candidates.append(candidate)
-                        except Exception as e:
-                            logger.error(
-                                "Error in Phase2 (scan) for %s: %s", symbol, e
-                            )
-                else:
-                    for symbol in self.symbols:
-                        if self._shutdown_requested:
-                            break
-                        try:
-                            candidate = self._scan_entries(symbol)
-                            if candidate is not None:
-                                entry_candidates.append(candidate)
-                        except Exception as e:
-                            logger.error(
-                                "Error in Phase2 fallback for %s: %s", symbol, e
-                            )
+                for symbol in self.symbols:
+                    if self._shutdown_requested:
+                        break
+                    try:
+                        candidate = self._scan_entries(symbol)
+                        if candidate is not None:
+                            entry_candidates.append(candidate)
+                    except Exception as e:
+                        logger.error(
+                            "Error in Phase2 for %s: %s", symbol, e
+                        )
 
                 # Phase 3: Rank & Margin Allocation (백테스트와 동일한 심볼 순서 유지)
                 if entry_candidates:
@@ -3433,16 +3390,6 @@ class RealTraderFutures:
 
         if hasattr(self, "state_manager"):
             self.state_manager.flush_now()
-
-        if self._executor is not None:
-            try:
-                self._executor.shutdown(wait=True, cancel_futures=True)
-            except TypeError:
-                self._executor.shutdown(wait=True)
-            except Exception as e:
-                logger.warning(f"Failed to shutdown executor: {e}")
-            finally:
-                self._executor = None
 
         positions = self._get_current_positions()
         if positions:
