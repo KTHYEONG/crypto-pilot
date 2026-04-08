@@ -803,6 +803,7 @@ def objective_futures(
         trade_penalty = ((min_pf_trades_dynamic - avg_trades) / min_pf_trades_dynamic) ** 2 * 5.0
         
     sortino_bonus = 0.0
+    cagr_bonus = 0.0
     if path_arr.size >= 2:
         m_pt = float(np.mean(path_arr))
         s_pt = float(np.std(path_arr, ddof=1))
@@ -821,6 +822,11 @@ def objective_futures(
              sortino_bonus += min(0.5, (psort - 1.5) * 0.1)
         if tr_val > 1.5:
              sortino_bonus += min(0.5, (tr_val - 1.5) * 0.1)
+             
+        # Add CAGR bonus to force TPE to seek growth (up to 30%)
+        mean_path_ret_pct = float(np.mean(np.expm1(path_arr) * 100.0)) if path_arr.size else 0.0
+        if mean_path_ret_pct > 0:
+            cagr_bonus = min(1.0, mean_path_ret_pct / 30.0)
 
     objective_final = float(
         kelly_obj
@@ -830,6 +836,7 @@ def objective_futures(
         - temporal_decay_pen
         - trade_penalty
         + sortino_bonus
+        + cagr_bonus
     )
     if min_reg_cfg > 0.0 and w_reg_cfg > 0.0:
         objective_final -= max(0.0, min_reg_cfg - regime_on_rate) * w_reg_cfg
