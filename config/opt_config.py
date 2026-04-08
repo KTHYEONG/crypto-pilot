@@ -99,7 +99,6 @@ FUTURES_SYMBOLS: List[str] = [
     "ETH/USDT",
     "SOL/USDT",
     "BTC/USDT",
-    "ZEC/USDT",
 ]
 
 FUTURES_ANCHOR_SYMBOLS: List[str] = [
