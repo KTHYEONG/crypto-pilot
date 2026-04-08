@@ -697,7 +697,8 @@ def main() -> None:
             END_DATE,
             data_dir=FUTURES_DATA_DIR,
         )
-        symbols = broad_candidates # Initial symbols for data loading
+        anchors_to_add = [s for s in FUTURES_ANCHOR_SYMBOLS if s not in broad_candidates]
+        symbols = list(broad_candidates) + anchors_to_add # Initial symbols for data loading
     else:
         from config.opt_config import FUTURES_SYMBOLS
         symbols = list(dict.fromkeys(FUTURES_SYMBOLS))
@@ -799,9 +800,9 @@ def main() -> None:
             from config.opt_config import FUTURES_SYMBOLS
             
             # Re-filter data maps to only include refined symbols for Optuna
-            symbols = FUTURES_SYMBOLS
-            data_maps = {s: data_maps[s] for s in symbols if s in data_maps}
-            oos_data_maps = {s: oos_data_maps[s] for s in symbols if s in oos_data_maps}
+            symbols = [s for s in FUTURES_SYMBOLS if s in data_maps]
+            data_maps = {s: data_maps[s] for s in symbols}
+            oos_data_maps = {s: oos_data_maps[s] for s in symbols}
             _logger.info("Phase C: Selection finalized. Proceeding to Phase D (Optuna) with %d symbols.", len(symbols))
         _logger.info(
             "   Locked combos: SIGNAL choices=%s REGIME choices=%s SIZING choices=%s",

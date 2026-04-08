@@ -44,7 +44,7 @@ OPT_FUTURES_CONFIG: Dict[str, Any] = {
     "FUTURES_DISCOVERY_LEVERAGE": 8,
     "FUTURES_IS_CAGR_FLOOR": 5.0,
     "FUTURES_OBJECTIVE_FLOOR_WHEN_NO_EDGE": -2.0,
-    "FUTURES_MIN_REGIME_ON_RATE": 0.20,
+    "FUTURES_MIN_REGIME_ON_RATE": 0.10,
     "FUTURES_REGIME_ON_PENALTY_WEIGHT": 0.30,
     "FUTURES_NON_ANCHOR_SLIPPAGE_MULT": 2.0,
     "FUTURES_NON_ANCHOR_MIN_PF_PREMIUM": 0.15,
@@ -61,8 +61,8 @@ ENGINE_PARAM_SPACE_FUTURES: Dict[str, Dict[str, Any]] = {
     "SHORT_ATR_MULT": {"type": "float", "low": 1.0, "high": 3.0, "step": 0.25},
     "SHORT_TP_MULT": {"type": "float", "low": 1.0, "high": 3.5, "step": 0.5},
     "SHORT_TRAIL_MULT": {"type": "float", "low": 1.5, "high": 4.0, "step": 0.5},
-    "RISK_PER_TRADE": {"type": "float", "low": 0.005, "high": 0.05, "step": 0.005},
-    "MAX_EXPOSURE": {"type": "float", "low": 0.5, "high": 1.0, "step": 0.1},
+    "RISK_PER_TRADE": {"type": "float", "low": 0.01, "high": 0.08, "step": 0.01},
+    "MAX_EXPOSURE": {"type": "float", "low": 1.0, "high": 3.0, "step": 0.5},
 }
 
 # Legacy flat dict (superseded by plugin union); kept for grep / external refs.
@@ -136,7 +136,7 @@ FUTURES_SCREENER_CONFIG: Dict[str, Any] = {
     "SCREENER_MIN_TRADES_DYNAMIC": 3,
     "SCREENER_MIN_PF": 1.10,
     "FUNDING_EXTREME_THRESHOLD": 0.003,
-    "MP_MIN_SYMBOLS": 4,
+    "MP_MIN_SYMBOLS": 3,
     "MP_MAX_SYMBOLS": 8,
     "CANDIDATES_TOP_K": 12,
     "BROAD_POOL_K": 60,
