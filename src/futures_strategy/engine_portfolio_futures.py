@@ -49,7 +49,7 @@ class PortfolioBacktestEngineFast:
         atr_2d = self.data["atr"]
         garch_kelly_f = self.data["garch_kelly_f"]
         funding_rate = self.data["funding_rate_sum"]
-        print(f"Data: trend_dir sum={np.nansum(trend_dir)}, strength sum={np.nansum(strength_filter)}, kelly sum={np.nansum(garch_kelly_f)}, funding sum={np.nansum(funding_rate)}")
+        _logger.debug(f"Data: trend_dir sum={np.nansum(trend_dir)}, strength sum={np.nansum(strength_filter)}, kelly sum={np.nansum(garch_kelly_f)}, funding sum={np.nansum(funding_rate)}")
 
 
         l_atr_mult = float(self.params.get("LONG_ATR_MULT", 3.0))
@@ -100,7 +100,7 @@ class PortfolioBacktestEngineFast:
                 "funding_fee": float(t[9]),
             })
 
-        print(f"Engine Finished. Trades: {len(trades_list)}"); return pd.DataFrame(trades_list), equity_curve, final_balance
+        _logger.debug(f"Engine Finished. Trades: {len(trades_list)}"); return pd.DataFrame(trades_list), equity_curve, final_balance
 
 
 @njit(nogil=True, cache=True)
