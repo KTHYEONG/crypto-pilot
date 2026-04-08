@@ -24,6 +24,7 @@ from pathlib import Path
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 import concurrent.futures
+from collections import Counter
 from multiprocessing import Manager
 from tqdm import tqdm
 
@@ -79,6 +80,7 @@ from src.futures_strategy.opt_futures_utils.universe_screener_futures import (
     screen_futures_universe,
 )
 from src.futures_strategy.opt_futures_utils.combination_screener_futures import (
+    CombinationScoreFutures,
     run_combination_screening_futures,
 )
 from src.futures_strategy.opt_futures_utils.opt_params import (
@@ -343,10 +345,10 @@ def _select_best_trial_from_shortlist(
     def robust_key(t: optuna.trial.FrozenTrial) -> Tuple[float, float, float, float]:
         ua = t.user_attrs
         return (
+            float(ua.get("psr_paths", ua.get("gate1_psr", 0.0))),
             float(ua.get("gate1_sqn", 0.0)),
-            float(ua.get("gate1_path_sortino", 0.0)),
-            float(ua.get("gate1_tail_ratio", 0.0)),
             float(ua.get("gate1_dsr", 0.0)),
+            float(ua.get("gate1_tail_ratio", 0.0)),
         )
 
     return max(pool, key=robust_key)
@@ -676,8 +678,8 @@ def main() -> None:
     args = parser.parse_args()
 
     # [INFRA] Signal Cache & Memory Management (Alignment with Spot strategy)
-    os.environ.setdefault("OPT_FUTURES_SIGNAL_CACHE_MAX_GB", "12")
-    os.environ.setdefault("OPT_FUTURES_SIGNAL_MEM_CACHE_MAX", "64")
+    os.environ.setdefault("OPT_FUTURES_SIGNAL_CACHE_MAX_GB", "24")
+    os.environ.setdefault("OPT_FUTURES_SIGNAL_MEM_CACHE_MAX", "96")
     os.environ.setdefault("OPT_FUTURES_SIGNAL_CACHE_CLEANUP_INTERVAL_SEC", "300")
     
     FETCH_START_DATE, START_DATE, IS_END_DATE, END_DATE = get_quarterly_window(args.reference_date)
@@ -738,24 +740,43 @@ def main() -> None:
 
     locked_param_space: Optional[Dict[str, Any]] = None
     _logger.info("Combination screening (signal × regime × sizing)...")
-    
+    phase1_no_edge = False
+
     stage1_k = int(FUTURES_SCREENER_CONFIG.get("COMBO_SAMPLE_K", 12))
     stage1_syms = symbols[:stage1_k] if not args.skip_universe else symbols
     stage1_data_maps = {s: data_maps[s] for s in stage1_syms}
     _logger.info("Phase B: combination screening on N=%d broad candidates", len(stage1_syms))
 
-    top_combos = run_combination_screening_futures(
+    screening = run_combination_screening_futures(
         data_maps=stage1_data_maps,
         symbols=stage1_syms,
         tf=args.tf,
         project_root=project_root,
         signal_cache_dir=str(FUTURES_CACHE_DIR),
     )
-    
+    top_combos = screening.combos
+    phase1_no_edge = screening.phase1_no_edge
+
     if top_combos and not top_combos[0].disqualified:
-        # Ported from Spot: Explore top-5 combos instead of locking to the absolute #1
+        # Ported from Spot: Explore top-5 combos; cap duplicate signal AND sizing types (union space noise).
         max_combos = 5
-        valid_tops = [c for c in top_combos if not c.disqualified][:max_combos]
+        max_per_dim = int(OPT_FUTURES_CONFIG.get("FUTURES_STAGE2_MAX_PER_SIGNAL_TYPE", 2))
+        sig_ct: Counter[str] = Counter()
+        siz_ct: Counter[str] = Counter()
+        filtered_tops: List[CombinationScoreFutures] = []
+        for combo in top_combos:
+            if combo.disqualified:
+                continue
+            if (
+                sig_ct[combo.signal] < max_per_dim
+                and siz_ct[combo.sizing] < max_per_dim
+            ):
+                filtered_tops.append(combo)
+                sig_ct[combo.signal] += 1
+                siz_ct[combo.sizing] += 1
+            if len(filtered_tops) >= max_combos:
+                break
+        valid_tops = filtered_tops if filtered_tops else top_combos[:3]
         locked_param_space = build_multi_combo_param_space_futures(valid_tops)
         
         if not args.skip_universe:
@@ -813,6 +834,12 @@ def main() -> None:
         len(oos_data_maps[symbols[0]][args.tf]),
         len(symbols),
     )
+
+    if phase1_no_edge:
+        _obj_floor = float(OPT_FUTURES_CONFIG.get("FUTURES_OBJECTIVE_FLOOR_WHEN_NO_EDGE", -2.0))
+        for s_sym in symbols:
+            if s_sym in data_maps:
+                data_maps[s_sym]["_futures_opt_meta"] = {"objective_floor_strict": _obj_floor}
 
     tasks: List[Tuple[Any, str]] = [(tuple(symbols), args.tf)]
     plan = _resolve_futures_execution_plan(len(tasks), MODE_MULTI, args.jobs, args.task_workers)
@@ -942,11 +969,18 @@ def main() -> None:
         if not completed:
             continue
         ranked = sorted(completed, key=lambda tr: float(tr.value), reverse=True)[:50]
-        best_trial = _select_best_trial_from_shortlist(ranked)
+        viable = [
+            tr
+            for tr in ranked
+            if float(tr.user_attrs.get("min_path_terminal_wealth_ratio", 0.0)) >= 1.0
+        ]
+        shortlist_pool = viable if viable else ranked
+        best_trial = _select_best_trial_from_shortlist(shortlist_pool)
 
         params = best_trial.params.copy()
         params["TIMEFRAME"] = tf_eval
-        params["LEVERAGE"] = 20
+        _lev_def = int(OPT_FUTURES_CONFIG.get("FUTURES_DISCOVERY_LEVERAGE", 8))
+        params["LEVERAGE"] = int(os.getenv("FUTURES_DISCOVERY_LEVERAGE", str(_lev_def)))
         params["USE_COMPOUNDING"] = True
 
         target_symbols = sorted(list(target) if isinstance(target, tuple) else [target])
@@ -978,7 +1012,15 @@ def main() -> None:
             cache_root=FUTURES_CACHE_DIR,
             return_signal_dfs=False,
         )
-        is_portfolio_cagr: float = float(port_is["cagr_pct"])
+        is_portfolio_cagr: float = float(port_is.get("cagr_pct", -100.0))
+        is_cagr_floor = float(OPT_FUTURES_CONFIG.get("FUTURES_IS_CAGR_FLOOR", 0.0))
+        is_cagr_ok = is_portfolio_cagr >= is_cagr_floor
+        if not is_cagr_ok:
+            _logger.warning(
+                "IS portfolio CAGR=%.2f%% below floor %.2f%% (CPCV vs full IS mismatch risk).",
+                is_portfolio_cagr,
+                is_cagr_floor,
+            )
 
         # 2. OOS Margin-Shared Portfolio Run (Signal Cache & Integrity)
         oos_port = run_oos_margin_shared_portfolio(
@@ -1077,13 +1119,15 @@ def main() -> None:
         mw_gate = None
         mw_summary = ""
         if mw_enabled:
+            mw_subs = int(OPT_FUTURES_CONFIG.get("FUTURES_MULTI_WINDOW_OOS_SUBS", 3))
             mw_res = run_multi_window_oos_holdout(
                 params, target_symbols, tf_eval, oos_data_maps, 
-                n_sub_windows=2, cache_root=FUTURES_CACHE_DIR, full_holdout_result=oos_port
+                n_sub_windows=mw_subs, cache_root=FUTURES_CACHE_DIR, full_holdout_result=oos_port
             )
+            mw_min_pos = int(OPT_FUTURES_CONFIG.get("FUTURES_MULTI_WINDOW_MIN_POSITIVE", 3))
             mw_gate = run_multi_window_oos_gate(
                 window_results=mw_res["windows"],
-                min_positive_windows=2,
+                min_positive_windows=mw_min_pos,
                 min_median_cagr_pct=OOS_CAGR_TARGET,
                 max_worst_mdd_pct=OOS_MDD_LIMIT
             )
@@ -1135,8 +1179,15 @@ def main() -> None:
         # Ported from Spot: Accurate alpha decay using margin-shared portfolio CAGR
         oos_portfolio_cagr = float(oos_port["cagr_pct"])
         alpha_decay_pct = (
-            ((is_portfolio_cagr - oos_portfolio_cagr) / max(abs(is_portfolio_cagr), 1e-6)) * 100.0 
-            if is_portfolio_cagr != 0 else 0.0
+            (
+                (oos_portfolio_cagr - is_portfolio_cagr)
+                / max(abs(is_portfolio_cagr), abs(oos_portfolio_cagr), 1e-6)
+            )
+            * 100.0
+            if (
+                abs(is_portfolio_cagr) > 1e-12 or abs(oos_portfolio_cagr) > 1e-12
+            )
+            else 0.0
         )
 
         # Ported from Spot: Synchronization and Friction risk diagnostics
@@ -1181,8 +1232,10 @@ def main() -> None:
             min_portfolio_trades=MIN_TRADES_TOTAL
         )
 
-        gate_checks = [
+        pbo_gate_ok = bool(math.isfinite(pbo_val) and pbo_val <= pbo_max_cfg)
+        core_gate_checks = [
             veto.passed,
+            is_cagr_ok,
             float(ua.get("gate1_sqn", 0.0)) >= 2.0,
             float(ua.get("gate1_path_sortino", 0.0)) >= 1.5,
             float(ua.get("gate1_tail_ratio", 0.0)) >= 1.5,
@@ -1196,12 +1249,17 @@ def main() -> None:
             float(oos_port["profit_factor"]) >= OOS_PF_TARGET,
             alpha_decay_pct >= ALPHA_DECAY_FLOOR,
             float(oos_port["terminal_wealth_ratio"]) > 1.0,
-            (not pbo_hard or (math.isfinite(pbo_val) and pbo_val <= pbo_max_cfg)),
             (mw_gate.passed if mw_gate else True),
         ]
-        hard_passed = int(sum(1 for c in gate_checks if c))
-        hard_total = len(gate_checks)
-        is_all_passed = all(gate_checks)
+        core_passed_count = int(sum(1 for c in core_gate_checks if c))
+        if pbo_hard:
+            hard_total = len(core_gate_checks) + 1
+            hard_passed = core_passed_count + (1 if pbo_gate_ok else 0)
+            is_all_passed = all(core_gate_checks) and pbo_gate_ok
+        else:
+            hard_total = len(core_gate_checks)
+            hard_passed = core_passed_count
+            is_all_passed = all(core_gate_checks)
 
         report = run_futures_deployment_report(
             FuturesDeploymentReportInput(
@@ -1262,7 +1320,8 @@ def main() -> None:
         )
         _logger.info("\n%s", report)
 
-        should_save = bool(best_score_final > 0 and is_all_passed)
+        growth_save = float(ua.get("growth_score", 0.0))
+        should_save = bool(growth_save > 0.0 and is_all_passed)
         json_filename = f"{BEST_PARAMS_FUTURES_JSON_STEM}.json"
         pending_json_writes.append((json_filename, params, best_score_final, should_save))
 
