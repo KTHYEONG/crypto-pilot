@@ -49,7 +49,7 @@ def update_futures_config_file(symbols: List[str]) -> None:
         return
 
     content = config_path.read_text(encoding="utf-8")
-    pattern = r"FUTURES_SYMBOLS(?:: List\[str\])?\s*=\s*\[.*?\]"
+    pattern = r"FUTURES_SYMBOLS(?::\s*List\[str\])?\s*=\s*\[.*?\]"
     new_block = "FUTURES_SYMBOLS: List[str] = [\n"
     for s in symbols:
         new_block += f'    "{s}",\n'
