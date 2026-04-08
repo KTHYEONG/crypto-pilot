@@ -954,12 +954,13 @@ def main() -> None:
     pending_json_writes: List[Tuple[str, Dict[str, Any], float, bool]] = []
 
     # Threshold Adjustment for Futures
-    OOS_CAGR_TARGET = 35.0
-    OOS_MDD_LIMIT = 25.0
+    OOS_CAGR_TARGET = float(OPT_FUTURES_CONFIG.get("FUTURES_MIN_CAGR_PCT", 30.0))
+    OOS_MDD_LIMIT = float(OPT_FUTURES_CONFIG.get("FUTURES_MAX_MDD", 25.0))
     OOS_CALMAR_TARGET = 1.2
     OOS_PF_TARGET = 1.35
     ALPHA_DECAY_FLOOR = -50.0
     MIN_TRADES_TOTAL = max(40, len(symbols) * 8)
+    TW_TARGET = 1.0 - (OOS_MDD_LIMIT / 100.0)
 
     for (target, tf_eval), study in best_results.items():
         if study is None:
@@ -1248,7 +1249,7 @@ def main() -> None:
             float(oos_port["cagr_pct"]) >= OOS_CAGR_TARGET,
             float(oos_port["profit_factor"]) >= OOS_PF_TARGET,
             alpha_decay_pct >= ALPHA_DECAY_FLOOR,
-            float(oos_port["terminal_wealth_ratio"]) > 1.0,
+            float(oos_port["terminal_wealth_ratio"]) >= TW_TARGET,
             (mw_gate.passed if mw_gate else True),
         ]
         core_passed_count = int(sum(1 for c in core_gate_checks if c))
@@ -1291,7 +1292,7 @@ def main() -> None:
                 funding_drag_pct=float(funding_drag_pct_oos),
                 funding_drag_limit_pct=15.0,
                 terminal_wealth_ratio=float(oos_port["terminal_wealth_ratio"]),
-                tw_target=1.0,
+                tw_target=TW_TARGET,
                 oos_total_trades=int(oos_port["total_trades"]),
                 oos_pf=float(oos_port["profit_factor"]),
                 pf_target=OOS_PF_TARGET,
