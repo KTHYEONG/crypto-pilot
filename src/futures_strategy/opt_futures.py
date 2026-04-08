@@ -70,6 +70,10 @@ from src.futures_strategy.opt_futures_utils.go_nogo_futures import (
     run_multi_window_oos_gate,
     format_regime_oos_diagnostic_block,
 )
+from src.spot_strategy.opt_spot_utils.go_nogo import (
+    run_portfolio_discovery_veto,
+    run_holdout_portfolio_trade_floor,
+)
 from src.futures_strategy.opt_futures_utils.universe_screener_futures import (
     screen_futures_symbol_refinement,
     screen_futures_universe,
@@ -77,7 +81,10 @@ from src.futures_strategy.opt_futures_utils.universe_screener_futures import (
 from src.futures_strategy.opt_futures_utils.combination_screener_futures import (
     run_combination_screening_futures,
 )
-from src.futures_strategy.opt_futures_utils.opt_params import build_combined_param_space_futures
+from src.futures_strategy.opt_futures_utils.opt_params import (
+    build_combined_param_space_futures,
+    build_multi_combo_param_space_futures,
+)
 
 import warnings
 warnings.filterwarnings("ignore")
@@ -316,6 +323,35 @@ def _best_trial_from_study(study: optuna.Study) -> Optional[optuna.trial.FrozenT
         return None
 
 
+def _select_best_trial_from_shortlist(
+    ranked: List[optuna.trial.FrozenTrial],
+) -> optuna.trial.FrozenTrial:
+    """
+    Within ~2% of top objective value, prefer higher CPCV robustness (Spot parity).
+    """
+    if not ranked:
+        raise ValueError("ranked trials empty")
+    top_val = float(ranked[0].value if ranked[0].value is not None else -1e9)
+    band = max(abs(top_val) * 0.02, 0.02)
+    close_trials = [
+        t
+        for t in ranked
+        if t.value is not None and abs(float(t.value) - top_val) <= band
+    ]
+    pool = close_trials if close_trials else ranked[:1]
+
+    def robust_key(t: optuna.trial.FrozenTrial) -> Tuple[float, float, float, float]:
+        ua = t.user_attrs
+        return (
+            float(ua.get("gate1_sqn", 0.0)),
+            float(ua.get("gate1_path_sortino", 0.0)),
+            float(ua.get("gate1_tail_ratio", 0.0)),
+            float(ua.get("gate1_dsr", 0.0)),
+        )
+
+    return max(pool, key=robust_key)
+
+
 def _futures_tpe_worker_run(payload: Dict[str, Any]) -> None:
     import gc
 
@@ -430,7 +466,7 @@ def _futures_tpe_worker_run(payload: Dict[str, Any]) -> None:
 
 def _run_tf_optimization(
     task: Tuple[Any, str], ctx: _TfOptimizationContext
-) -> Tuple[Tuple[Any, str], Optional[optuna.trial.FrozenTrial]]:
+) -> Tuple[Tuple[Any, str], Optional[optuna.Study]]:
     target_obj, tf = task
     target_str = "_".join(target_obj) if isinstance(target_obj, (list, tuple)) else target_obj
     progress_key = _task_progress_key(target_obj, tf)
@@ -547,7 +583,7 @@ def _run_tf_optimization(
 
     remaining = int(ctx.n_trials) - n_qmc
     if remaining <= 0:
-        return (target_obj, tf), _best_trial_from_study(study)
+        return (target_obj, tf), study
 
     study = optuna.load_study(
         study_name=tf_study_name,
@@ -611,7 +647,7 @@ def _run_tf_optimization(
             study_name=tf_study_name,
             storage=_build_sqlite_storage(db_path),
         )
-        return (target_obj, tf), _best_trial_from_study(study_final)
+        return (target_obj, tf), study_final
 
     study.optimize(
         _objective_with_logging,
@@ -620,7 +656,7 @@ def _run_tf_optimization(
         catch=(Exception,),
         callbacks=callbacks,
     )
-    return (target_obj, tf), _best_trial_from_study(study)
+    return (target_obj, tf), study
 
 def main() -> None:
     import json
@@ -717,13 +753,16 @@ def main() -> None:
     )
     
     if top_combos and not top_combos[0].disqualified:
-        t0 = top_combos[0]
-        locked_param_space = build_combined_param_space_futures(t0.signal, t0.regime, t0.sizing)
+        # Ported from Spot: Explore top-5 combos instead of locking to the absolute #1
+        max_combos = 5
+        valid_tops = [c for c in top_combos if not c.disqualified][:max_combos]
+        locked_param_space = build_multi_combo_param_space_futures(valid_tops)
         
         if not args.skip_universe:
-            # Phase C: Refinement mini-backtest with winning combo
+            # Phase C: Refinement mini-backtest with winning combo (uses #1 for symbol refinement)
             from src.futures_strategy.opt_futures_utils.combination_screener_futures import _mid_params_from_space
-            winning_params = _mid_params_from_space(locked_param_space, args.tf)
+            t0_space = build_combined_param_space_futures(valid_tops[0].signal, valid_tops[0].regime, valid_tops[0].sizing)
+            winning_params = _mid_params_from_space(t0_space, args.tf)
             
             refined_symbols = screen_futures_symbol_refinement(
                 broad_candidates,
@@ -744,11 +783,10 @@ def main() -> None:
             oos_data_maps = {s: oos_data_maps[s] for s in symbols if s in oos_data_maps}
             _logger.info("Phase C: Selection finalized. Proceeding to Phase D (Optuna) with %d symbols.", len(symbols))
         _logger.info(
-            "   Locked combo: SIGNAL=%s REGIME=%s SIZING=%s (bar ls_ratio=%.3f)",
-            t0.signal,
-            t0.regime,
-            t0.sizing,
-            t0.ls_ratio,
+            "   Locked combos: SIGNAL choices=%s REGIME choices=%s SIZING choices=%s",
+            list(dict.fromkeys(c.signal for c in valid_tops)),
+            list(dict.fromkeys(c.regime for c in valid_tops)),
+            list(dict.fromkeys(c.sizing for c in valid_tops)),
         )
     else:
         _logger.warning("Phase B returned no valid combo; Phase C uses full discovery space.")
@@ -823,7 +861,7 @@ def main() -> None:
         progress_thread = threading.Thread(target=_progress_listener, daemon=True)
         progress_thread.start()
 
-    best_results: Dict[Tuple[Any, str], Optional[optuna.trial.FrozenTrial]] = {}
+    best_results: Dict[Tuple[Any, str], Optional[optuna.Study]] = {}
     try:
         if use_mp:
             with concurrent.futures.ProcessPoolExecutor(max_workers=plan.outer_task_workers) as exec:
@@ -854,11 +892,11 @@ def main() -> None:
                     for t in tasks
                 }
                 for f in concurrent.futures.as_completed(futures):
-                    t_res, bt = f.result()
-                    best_results[t_res] = bt
+                    t_res, study = f.result()
+                    best_results[t_res] = study
         else:
             for t in tasks:
-                t_res, bt = _run_tf_optimization(
+                t_res, study = _run_tf_optimization(
                     t,
                     _TfOptimizationContext(
                         clean_symbol=("_".join(t[0]) if isinstance(t[0], tuple) else t[0]).replace("/", ""),
@@ -878,7 +916,7 @@ def main() -> None:
                         locked_param_space=locked_param_space,
                     ),
                 )
-                best_results[t_res] = bt
+                best_results[t_res] = study
     finally:
         if progress_queue is not None:
             progress_queue.put(None)
@@ -888,9 +926,23 @@ def main() -> None:
 
     pending_json_writes: List[Tuple[str, Dict[str, Any], float, bool]] = []
 
-    for (target, tf_eval), best_trial in best_results.items():
-        if best_trial is None:
+    # Threshold Adjustment for Futures
+    OOS_CAGR_TARGET = 35.0
+    OOS_MDD_LIMIT = 25.0
+    OOS_CALMAR_TARGET = 1.2
+    OOS_PF_TARGET = 1.35
+    ALPHA_DECAY_FLOOR = -50.0
+    MIN_TRADES_TOTAL = max(40, len(symbols) * 8)
+
+    for (target, tf_eval), study in best_results.items():
+        if study is None:
             continue
+
+        completed = [t for t in study.get_trials(deepcopy=True) if t.state == TrialState.COMPLETE and t.value is not None]
+        if not completed:
+            continue
+        ranked = sorted(completed, key=lambda tr: float(tr.value), reverse=True)[:50]
+        best_trial = _select_best_trial_from_shortlist(ranked)
 
         params = best_trial.params.copy()
         params["TIMEFRAME"] = tf_eval
@@ -899,13 +951,56 @@ def main() -> None:
 
         target_symbols = sorted(list(target) if isinstance(target, tuple) else [target])
 
+        # Tier 1 Veto: Portfolio Discovery Rigor
+        ua = best_trial.user_attrs
+        psr_v = float(ua.get("gate1_psr", 0.0))
+        dsr_v = float(ua.get("gate1_dsr", 0.0))
+        gmgr_v = float(ua.get("gate1_p10_gmgr", 0.0))
+        veto = run_portfolio_discovery_veto(
+            psr=psr_v,
+            dsr=dsr_v,
+            p10_gmgr=gmgr_v,
+            psr_min=0.5,
+            dsr_min=0.25,
+        )
+
+        # 1. IS Margin-Shared Portfolio Run (Alpha Decay Rigor)
+        is_holdout_maps: Dict[str, Dict[str, Any]] = {}
+        for s_eval in target_symbols:
+            is_holdout_maps[s_eval] = dict(data_maps[s_eval])
+            is_holdout_maps[s_eval][f"oos_start_idx_{tf_eval}"] = data_maps[s_eval][f"is_start_idx_{tf_eval}"]
+
+        port_is = run_oos_margin_shared_portfolio(
+            target_symbols,
+            tf_eval,
+            params,
+            is_holdout_maps,
+            cache_root=FUTURES_CACHE_DIR,
+            return_signal_dfs=False,
+        )
+        is_portfolio_cagr: float = float(port_is["cagr_pct"])
+
+        # 2. OOS Margin-Shared Portfolio Run (Signal Cache & Integrity)
+        oos_port = run_oos_margin_shared_portfolio(
+            target_symbols,
+            tf_eval,
+            params,
+            oos_data_maps,
+            cache_root=FUTURES_CACHE_DIR,
+            return_signal_dfs=True,
+        )
+        post_full_signal_dfs: Dict[str, pd.DataFrame] = oos_port.get("full_signal_dfs", {})
+
         passed_count = 0
         symbol_gate_rows: List[FuturesSymbolGateRow] = []
         total_funding_oos = 0.0
         total_gross_oos = 0.0
         is_cagrs: List[float] = []
 
+        from src.spot_strategy.opt_spot_utils.evaluator import _segment_with_context
+
         for s_eval in target_symbols:
+            # IS Evaluation (Consistency check)
             s_is, r_is, m_is, t_is, wr_is, pf_is, lc_is, sc_is, _, _, _ = evaluate_symbol_fold(
                 UltimateStrategy(name=f"IS_{s_eval}", params=params),
                 params,
@@ -918,6 +1013,19 @@ def main() -> None:
                 data_maps[s_eval][f"is_start_idx_{tf_eval}"],
                 len(data_maps[s_eval][tf_eval]),
             )
+            
+            # OOS Evaluation (Using cached portfolio signals)
+            pre_oos_sig_full = post_full_signal_dfs.get(s_eval)
+            oos_start_idx = int(oos_data_maps[s_eval][f"oos_start_idx_{tf_eval}"])
+            oos_local_end = len(oos_data_maps[s_eval][tf_eval])
+            
+            if pre_oos_sig_full is not None:
+                pre_oos_sig, exec_start_oos = _segment_with_context(
+                    pre_oos_sig_full, oos_start_idx, oos_local_end
+                )
+            else:
+                pre_oos_sig, exec_start_oos = None, 0
+
             s_oos, r_oos, m_oos, t_oos, wr_oos, pf_oos, lc_oos, sc_oos, _, fp_oos, gr_oos = evaluate_symbol_fold(
                 UltimateStrategy(name=f"OOS_{s_eval}", params=params),
                 params,
@@ -927,9 +1035,12 @@ def main() -> None:
                 oos_data_maps[s_eval]["1d"],
                 oos_data_maps[s_eval][f"merge_idx_{tf_eval}"],
                 None,
-                oos_data_maps[s_eval][f"oos_start_idx_{tf_eval}"],
-                len(oos_data_maps[s_eval][tf_eval]),
+                oos_start_idx,
+                oos_local_end,
+                precomputed_signal_df=pre_oos_sig,
+                execution_start_idx=exec_start_oos,
             )
+            
             total_funding_oos += float(fp_oos)
             total_gross_oos += float(abs(gr_oos))
             is_cagrs.append(float(s_is))
@@ -959,17 +1070,7 @@ def main() -> None:
                 )
             )
 
-        is_all_passed = passed_count >= 4
         best_score_final = float(best_trial.value) if best_trial.value is not None else -100.0
-
-        oos_port = run_oos_margin_shared_portfolio(
-            target_symbols,
-            tf_eval,
-            params,
-            oos_data_maps,
-            cache_root=FUTURES_CACHE_DIR,
-            return_signal_dfs=True,
-        )
 
         # Multi-Window OOS Logic (Ported from Spot)
         mw_enabled = True
@@ -983,16 +1084,15 @@ def main() -> None:
             mw_gate = run_multi_window_oos_gate(
                 window_results=mw_res["windows"],
                 min_positive_windows=2,
-                min_median_cagr_pct=30.0,
-                max_worst_mdd_pct=20.0
+                min_median_cagr_pct=OOS_CAGR_TARGET,
+                max_worst_mdd_pct=OOS_MDD_LIMIT
             )
             mw_summary = mw_gate.summary
 
-        # PBO Evaluation (Tier 1 advisory)
+        # PBO Evaluation (Tier 1 advisory/hard)
         pbo_val: float = float("nan")
         rho_val: float = float("nan")
         pbo_n_paths = 0
-        ua = best_trial.user_attrs
         oos_log_tw = ua.get("cpcv_path_oos_log_tw")
         if isinstance(oos_log_tw, list) and oos_log_tw:
             ref_pbo_sym = target_symbols[0]
@@ -1016,6 +1116,7 @@ def main() -> None:
                     oos_path_scores=oos_log_tw,
                     signal_disk_cache_root=FUTURES_CACHE_DIR,
                     project_root=project_root,
+                    concurrency_penalty_scale=1.0,
                 )
 
         # Regime Diagnostic Logic (Tier 4 advisory)
@@ -1031,11 +1132,29 @@ def main() -> None:
         funding_drag_pct_oos = (
             (total_funding_oos / max(total_gross_oos, 1e-9)) * 100.0 if total_gross_oos > 0 else 0.0
         )
-        mean_is_cagr = float(np.mean(is_cagrs)) if is_cagrs else 0.0
-        mean_oos_cagr = float(np.mean([float(r.net_cagr_pct) for r in symbol_gate_rows])) if symbol_gate_rows else 0.0
+        # Ported from Spot: Accurate alpha decay using margin-shared portfolio CAGR
+        oos_portfolio_cagr = float(oos_port["cagr_pct"])
         alpha_decay_pct = (
-            ((mean_is_cagr - mean_oos_cagr) / max(abs(mean_is_cagr), 1e-6)) * 100.0 if is_cagrs else 0.0
+            ((is_portfolio_cagr - oos_portfolio_cagr) / max(abs(is_portfolio_cagr), 1e-6)) * 100.0 
+            if is_portfolio_cagr != 0 else 0.0
         )
+
+        # Ported from Spot: Synchronization and Friction risk diagnostics
+        portfolio_mdd_pct = float(oos_port["mdd_pct"])
+        if symbol_gate_rows:
+            max_sym_mdd = max(float(r.max_mdd_pct) for r in symbol_gate_rows)
+            if max_sym_mdd > 0.0 and abs(portfolio_mdd_pct) > 3.0 * max_sym_mdd:
+                 _logger.warning(
+                    "  ⚠ [SYNC RISK] Portfolio MDD(%.1f%%) > 3x max Symbol MDD(%.1f%%)",
+                    abs(portfolio_mdd_pct), max_sym_mdd
+                )
+
+        for row_fr in symbol_gate_rows:
+            if 0.0 < float(row_fr.net_cagr_pct) < 1.0 and float(row_fr.win_rate_pct) > 55.0:
+                 _logger.warning(
+                    "  ⚠ [FRICTION RISK] %s: WinRate %.1f%% vs CAGR %.1f%% (Noise dominated)",
+                    row_fr.symbol, row_fr.win_rate_pct, row_fr.net_cagr_pct
+                )
 
         oos_cagrs_pos = sorted([float(r.net_cagr_pct) for r in symbol_gate_rows if r.net_cagr_pct > 0.0], reverse=True)
         if oos_cagrs_pos:
@@ -1053,26 +1172,36 @@ def main() -> None:
         else:
             loso_warning = "N/A (OOS CAGR 비중 산출 불가)"
 
-        ua = best_trial.user_attrs
+        # Hard Gates Check
+        pbo_max_cfg = float(OPT_FUTURES_CONFIG.get("FUTURES_PBO_MAX", 0.45))
+        pbo_hard = bool(OPT_FUTURES_CONFIG.get("FUTURES_PBO_GATE_HARD", False))
+        
+        trade_floor = run_holdout_portfolio_trade_floor(
+            portfolio_long_trades=int(oos_port["total_trades"]),
+            min_portfolio_trades=MIN_TRADES_TOTAL
+        )
+
         gate_checks = [
+            veto.passed,
             float(ua.get("gate1_sqn", 0.0)) >= 2.0,
             float(ua.get("gate1_path_sortino", 0.0)) >= 1.5,
             float(ua.get("gate1_tail_ratio", 0.0)) >= 1.5,
-            float(ua.get("gate1_psr", 0.0)) >= 0.50,
-            float(ua.get("gate1_dsr", 0.0)) >= 0.25,
-            float(ua.get("gate1_p10_gmgr", -999.0)) >= -0.001,
-            abs(float(oos_port["mdd_pct"])) <= 25.0,
+            trade_floor.passed,
+            abs(float(oos_port["mdd_pct"])) <= OOS_MDD_LIMIT,
             float(oos_port["cvar_pct"]) <= 12.0,
             float(oos_port["hw_recovery_days"]) <= 180.0,
-            float(oos_port["calmar_ratio"]) >= 1.0,
+            float(oos_port["calmar_ratio"]) >= OOS_CALMAR_TARGET,
             funding_drag_pct_oos <= 15.0,
-            float(oos_port["cagr_pct"]) >= 15.0,
-            float(oos_port["profit_factor"]) >= 1.50,
-            alpha_decay_pct >= -50.0,
+            float(oos_port["cagr_pct"]) >= OOS_CAGR_TARGET,
+            float(oos_port["profit_factor"]) >= OOS_PF_TARGET,
+            alpha_decay_pct >= ALPHA_DECAY_FLOOR,
             float(oos_port["terminal_wealth_ratio"]) > 1.0,
+            (not pbo_hard or (math.isfinite(pbo_val) and pbo_val <= pbo_max_cfg)),
+            (mw_gate.passed if mw_gate else True),
         ]
         hard_passed = int(sum(1 for c in gate_checks if c))
         hard_total = len(gate_checks)
+        is_all_passed = all(gate_checks)
 
         report = run_futures_deployment_report(
             FuturesDeploymentReportInput(
@@ -1095,10 +1224,10 @@ def main() -> None:
                 oos_mdd_pct=float(oos_port["mdd_pct"]),
                 hw_recovery_days=float(oos_port["hw_recovery_days"]),
                 alpha_decay_pct=float(alpha_decay_pct),
-                oos_cagr_target_pct=30.0,
-                oos_mdd_limit_pct=20.0,
+                oos_cagr_target_pct=OOS_CAGR_TARGET,
+                oos_mdd_limit_pct=OOS_MDD_LIMIT,
                 hw_recovery_max_days=180.0,
-                alpha_decay_floor_pct=-50.0,
+                alpha_decay_floor_pct=ALPHA_DECAY_FLOOR,
                 oos_cvar_pct=float(oos_port["cvar_pct"]),
                 cvar_limit_pct=12.0,
                 funding_drag_pct=float(funding_drag_pct_oos),
@@ -1107,21 +1236,21 @@ def main() -> None:
                 tw_target=1.0,
                 oos_total_trades=int(oos_port["total_trades"]),
                 oos_pf=float(oos_port["profit_factor"]),
-                pf_target=1.50,
+                pf_target=OOS_PF_TARGET,
                 oos_calmar=float(oos_port["calmar_ratio"]),
-                calmar_target=1.0,
+                calmar_target=OOS_CALMAR_TARGET,
                 oos_win_rate_pct=float(oos_port["win_rate_pct"]),
                 oos_long_short_minority_pct=float(oos_port["oos_long_short_minority_pct"]),
                 symbol_rows=symbol_gate_rows,
                 loso_warning=loso_warning,
                 hard_passed=hard_passed,
                 hard_total=hard_total,
-                final_decision_go=bool(is_all_passed and (mw_gate.passed if mw_gate else True)),
+                final_decision_go=is_all_passed,
                 pbo=float(pbo_val),
                 spearman_rho=float(rho_val),
                 pbo_n_paths=int(pbo_n_paths),
-                pbo_gate_passed=bool(pbo_val <= float(OPT_FUTURES_CONFIG.get("FUTURES_PBO_MAX", 0.45))),
-                pbo_hard_gate=bool(OPT_FUTURES_CONFIG.get("FUTURES_PBO_GATE_HARD", False)),
+                pbo_gate_passed=bool(pbo_val <= pbo_max_cfg),
+                pbo_hard_gate=pbo_hard,
                 multi_window_passed=mw_gate.passed if mw_gate else True,
                 multi_window_summary=mw_summary,
                 regime_diagnostic_block=regime_block,
