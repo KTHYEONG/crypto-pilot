@@ -84,6 +84,46 @@ def build_combined_param_space_futures(signal: str, regime: str, sizing: str) ->
     return space
 
 
+from typing import Protocol, Sequence
+
+class _Stage1ComboLike(Protocol):
+    signal: str
+    regime: str
+    sizing: str
+
+
+def build_multi_combo_param_space_futures(tops: Sequence[_Stage1ComboLike]) -> Dict[str, Any]:
+    """Union param space for multiple Stage1 combos — allows TPE to choose signal/regime/sizing."""
+    from src.futures_strategy.regimes import FUTURES_REGIME_REGISTRY
+    from src.futures_strategy.signals import FUTURES_SIGNAL_REGISTRY
+    from src.futures_strategy.sizing import FUTURES_SIZING_REGISTRY
+
+    if not tops:
+        raise ValueError("build_multi_combo_param_space_futures requires at least one Stage1 combo.")
+
+    all_sigs = list(dict.fromkeys(t.signal for t in tops))
+    all_regs = list(dict.fromkeys(t.regime for t in tops))
+    all_sizs = list(dict.fromkeys(t.sizing for t in tops))
+
+    space: Dict[str, Any] = {
+        "SIGNAL_TYPE": {"type": "categorical", "choices": tuple(all_sigs)},
+        "REGIME_TYPE": {"type": "categorical", "choices": tuple(all_regs)},
+        "SIZING_METHOD": {"type": "categorical", "choices": tuple(all_sizs)},
+    }
+    for sig in all_sigs:
+        for k, v in FUTURES_SIGNAL_REGISTRY[sig].param_space.items():
+            space.setdefault(k, dict(v))
+    for reg in all_regs:
+        for k, v in FUTURES_REGIME_REGISTRY[reg].param_space.items():
+            space.setdefault(k, dict(v))
+    for siz in all_sizs:
+        for k, v in FUTURES_SIZING_REGISTRY[siz].param_space.items():
+            space.setdefault(k, dict(v))
+    for k, v in ENGINE_PARAM_SPACE_FUTURES.items():
+        space[k] = dict(v)
+    return space
+
+
 def suggest_params_futures(trial: optuna.Trial, space: Dict[str, Any], tf: str) -> Dict[str, Any]:
     """Flat search space; regime branch selects which params affect signals at runtime."""
     params: Dict[str, Any] = {"TIMEFRAME": tf}
