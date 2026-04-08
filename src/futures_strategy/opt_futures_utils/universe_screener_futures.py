@@ -26,8 +26,9 @@ from config.opt_config import (
     FUTURES_ANCHOR_SYMBOLS,
     FUTURES_DYNAMIC_CANDIDATE_POOL,
     FUTURES_SCREENER_CONFIG,
+    OPT_FUTURES_CONFIG,
 )
-from config.settings import FUTURES_DATA_DIR
+from config.settings import FUTURES_DATA_DIR, SLIPPAGE_RATE
 from src.futures_strategy.data_collector import DataCollector
 from src.futures_strategy.engine_futures import BacktestEngineFast
 from src.futures_strategy.funding_utils import merge_funding_into_ohlcv
@@ -323,6 +324,8 @@ def _run_mini_backtest_futures(
     df_tf: pd.DataFrame,
     df_1d: pd.DataFrame,
     params: Dict[str, Any],
+    *,
+    slippage_mult: float = 1.0,
 ) -> tuple[float, int, float]:
     """Quick IS backtest for symbol refinement."""
     strategy = UltimateStrategy(name=f"Screener_{sym}", params=params)
@@ -337,6 +340,7 @@ def _run_mini_backtest_futures(
             strategy=strategy,
             initial_balance=10000.0,
         )
+        engine.slippage_rate = float(SLIPPAGE_RATE) * float(slippage_mult)
         result = engine.run()
         trades = result.get("trades_df", pd.DataFrame())
         if trades is None or trades.empty:
@@ -381,6 +385,10 @@ def screen_futures_symbol_refinement(
 
     scored: List[Dict[str, Any]] = []
     tf = winning_params.get("TIMEFRAME", "4h")
+    pf_prem = float(OPT_FUTURES_CONFIG.get("FUTURES_NON_ANCHOR_MIN_PF_PREMIUM", 0.0))
+    slip_mult = float(OPT_FUTURES_CONFIG.get("FUTURES_NON_ANCHOR_SLIPPAGE_MULT", 1.0))
+    max_non_anchor = int(OPT_FUTURES_CONFIG.get("FUTURES_NON_ANCHOR_MAX_COUNT", 1))
+    anchor_set = {str(a) for a in anchors}
 
     for sym in broad_candidates:
         symbol_data = data_maps.get(sym, {})
@@ -389,10 +397,16 @@ def screen_futures_symbol_refinement(
         if df is None or df.empty or d1 is None or d1.empty:
             continue
 
-        pf, n_tr, ret = _run_mini_backtest_futures(sym, df, d1, winning_params)
+        is_anchor = sym in anchor_set
+        sm = 1.0 if is_anchor else slip_mult
+        pf, n_tr, ret = _run_mini_backtest_futures(
+            sym, df, d1, winning_params, slippage_mult=sm
+        )
 
-        # Criteria: at least some activity and not a total disaster
-        if n_tr < 3 or pf < 1.0:
+        min_pf = 1.1 if is_anchor else (1.2 + pf_prem)
+        if n_tr < 5 or pf < min_pf or ret < 0.0:
+            if sym == "ZEC/USDT" or not is_anchor:
+                 _logger.debug("Refinement rejected %s: PF=%.2f, Trades=%d, Ret=%.1f%%", sym, pf, n_tr, ret)
             continue
 
         scored.append(
@@ -413,11 +427,17 @@ def screen_futures_symbol_refinement(
         if a not in final_list:
             final_list.append(a)
 
-    # 2. Top performers from broad pool
+    # 2. Top performers from broad pool (cap non-anchor symbols per config)
+    non_anchor_added = 0
     for item in scored:
         s = str(item["symbol"])
-        if s not in final_list:
-            final_list.append(s)
+        if s in final_list:
+            continue
+        if s not in anchor_set and non_anchor_added >= max_non_anchor:
+            continue
+        final_list.append(s)
+        if s not in anchor_set:
+            non_anchor_added += 1
         if len(final_list) >= mp_max:
             break
 

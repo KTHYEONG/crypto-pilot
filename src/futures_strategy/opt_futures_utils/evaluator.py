@@ -258,13 +258,14 @@ _FUTURES_2D_REQUIRED_COLS: Tuple[str, ...] = (
     "atr",
     "garch_kelly_f",
     "funding_rate_sum",
+    "slot_rank_score",
 )
 
 
 def _dataframe_to_symbol_arrays(sig_df: pd.DataFrame) -> Dict[str, np.ndarray]:
     for c in _FUTURES_2D_REQUIRED_COLS:
         if c not in sig_df.columns:
-            if c in ("garch_kelly_f", "funding_rate_sum"):
+            if c in ("garch_kelly_f", "funding_rate_sum", "slot_rank_score"):
                 sig_df[c] = 0.0
             else:
                 raise ValueError(f"Missing required column {c} for futures 2D engine.")
@@ -280,6 +281,7 @@ def _dataframe_to_symbol_arrays(sig_df: pd.DataFrame) -> Dict[str, np.ndarray]:
     out["entry_lower"] = sig_df["entry_lower"].fillna(0.0).to_numpy(dtype=np.float64, copy=False)
     out["garch_kelly_f"] = sig_df["garch_kelly_f"].fillna(0.0).to_numpy(dtype=np.float64, copy=False)
     out["funding_rate_sum"] = sig_df["funding_rate_sum"].fillna(0.0).to_numpy(dtype=np.float64, copy=False)
+    out["slot_rank_score"] = sig_df["slot_rank_score"].fillna(0.0).to_numpy(dtype=np.float64, copy=False)
     return out
 
 
@@ -340,6 +342,7 @@ def align_data_for_2d_engine(
         "atr",
         "garch_kelly_f",
         "funding_rate_sum",
+        "slot_rank_score",
     ]
     aligned_data: Dict[str, np.ndarray] = {
         col: np.full((n_bars, n_syms), np.nan, dtype=np.float64) for col in target_cols
@@ -353,7 +356,7 @@ def align_data_for_2d_engine(
         for col in ["open", "high", "low", "close", "atr"]:
             if col in merged.columns:
                 aligned_data[col][:, s_idx] = merged[col].ffill().values
-        for col in ["strength_filter", "trend_direction", "garch_kelly_f", "funding_rate_sum"]:
+        for col in ["strength_filter", "trend_direction", "garch_kelly_f", "funding_rate_sum", "slot_rank_score"]:
             if col in merged.columns:
                 aligned_data[col][:, s_idx] = merged[col].fillna(0).values
         for col in ["entry_upper", "entry_lower"]:
@@ -548,6 +551,8 @@ def objective_futures(
 
     cfg: Dict[str, Any] = OPT_FUTURES_CONFIG
     min_seg_trades = int(cfg.get("FUTURES_MIN_TRADES_PER_CPCV_SEGMENT", 5))
+    min_pf_trades_dynamic = max(40, len(symbols) * 8)
+    
     w_mean = float(np.clip(float(cfg.get("FUTURES_OBJECTIVE_W_MEAN_LOG_TW", 0.7)), 0.0, 1.0))
     w_p10 = 1.0 - w_mean
     cvar_alpha = float(cfg.get("FUTURES_CPCV_CVAR_ALPHA", 0.10))
@@ -590,6 +595,7 @@ def objective_futures(
     all_seg_short: int = 0
     funding_ratios: List[float] = []
     sym_pf_accum: Dict[str, List[float]] = {s: [] for s in symbols}
+    path_terminal_wealth_ratios: List[float] = []
 
     for path_idx, path in enumerate(cpcv_paths):
         seg_raw_logs: List[float] = []
@@ -724,6 +730,11 @@ def objective_futures(
             seg_trades.append(total_trades_seg / n_sym)
             seg_fund_ratio.append(float(np.mean(sym_fund_r)) if sym_fund_r else 0.0)
 
+        if mode == "multi":
+            path_terminal_wealth_ratios.append(
+                float(running_balance / float(FUTURES_INITIAL_BALANCE))
+            )
+
         if not seg_raw_logs:
             raise optuna.TrialPruned()
 
@@ -772,7 +783,44 @@ def objective_futures(
     concentration_pen = max(0.0, cv_paths - 1.5) * 0.15
 
     mean_fund_r = float(np.mean(funding_ratios)) if funding_ratios else 0.0
-    funding_drag_pen = max(0.0, mean_fund_r - 0.15) * 2.0
+    # Penalize both excessive funding cost (>15%) and excessive funding income (< -15%, strong penalty to prevent yield-farming overfit)
+    funding_drag_pen = max(0.0, mean_fund_r - 0.15) * 2.0 + max(0.0, -mean_fund_r - 0.15) * 4.0
+
+    min_reg_cfg = float(cfg.get("FUTURES_MIN_REGIME_ON_RATE", 0.0))
+    w_reg_cfg = float(cfg.get("FUTURES_REGIME_ON_PENALTY_WEIGHT", 0.0))
+    regime_on_rate = 0.5
+    ref_sig_df = full_signal_dfs.get(ref_sym)
+    if ref_sig_df is not None and "regime_risk_mult" in ref_sig_df.columns:
+        rrm = ref_sig_df["regime_risk_mult"].to_numpy(dtype=np.float64)
+        if rrm.size > is_off:
+            rrm_is = rrm[is_off:]
+            regime_on_rate = float(np.mean(rrm_is > 0.5)) if rrm_is.size else 0.5
+
+    avg_trades = float(np.mean(path_trades)) if path_trades else 0.0
+    
+    trade_penalty = 0.0
+    if avg_trades < min_pf_trades_dynamic:
+        trade_penalty = ((min_pf_trades_dynamic - avg_trades) / min_pf_trades_dynamic) ** 2 * 5.0
+        
+    sortino_bonus = 0.0
+    if path_arr.size >= 2:
+        m_pt = float(np.mean(path_arr))
+        s_pt = float(np.std(path_arr, ddof=1))
+        neg_only = path_arr[path_arr < 0]
+        ddev = float(np.std(neg_only, ddof=1)) if neg_only.size > 1 else s_pt
+        psort = float(m_pt / (ddev + 1e-12)) if ddev > 0 else 0.0
+        pos_only = path_arr[path_arr > 0]
+        neg_mean = float(np.mean(neg_only)) if neg_only.size else -1e-9
+        tr_val = 0.0
+        if pos_only.size and neg_only.size:
+             tr_val = float(np.mean(pos_only) / (abs(neg_mean) + 1e-12))
+        elif pos_only.size and not neg_only.size:
+             tr_val = 5.0
+             
+        if psort > 1.5:
+             sortino_bonus += min(0.5, (psort - 1.5) * 0.1)
+        if tr_val > 1.5:
+             sortino_bonus += min(0.5, (tr_val - 1.5) * 0.1)
 
     objective_final = float(
         kelly_obj
@@ -780,11 +828,20 @@ def objective_futures(
         - funding_drag_pen
         - concentration_pen
         - temporal_decay_pen
+        - trade_penalty
+        + sortino_bonus
     )
+    if min_reg_cfg > 0.0 and w_reg_cfg > 0.0:
+        objective_final -= max(0.0, min_reg_cfg - regime_on_rate) * w_reg_cfg
+
+    _opt_meta = data_maps.get(ref_sym, {}).get("_futures_opt_meta")
+    if isinstance(_opt_meta, dict):
+        _obj_floor = _opt_meta.get("objective_floor_strict")
+        if _obj_floor is not None and objective_final < float(_obj_floor):
+            raise optuna.TrialPruned()
 
     avg_pf = float(np.mean(path_pfs)) if path_pfs else 1.0
     avg_win_rate = float(np.mean(path_wins)) if path_wins else 0.0
-    avg_trades = float(np.mean(path_trades)) if path_trades else 0.0
     avg_mdd = float(np.mean(path_mdds)) if path_mdds else 0.0
 
     if mode == "multi":
@@ -817,11 +874,12 @@ def objective_futures(
         gate1_path_sortino = float(m_pt / (ddev + 1e-12)) if ddev > 0 else 999.0
         pos_only = path_arr[path_arr > 0]
         neg_mean = float(np.mean(neg_only)) if neg_only.size else -1e-9
-        gate1_tail_ratio = (
-            float(np.mean(pos_only) / (abs(neg_mean) + 1e-12))
-            if pos_only.size and neg_only.size
-            else 0.0
-        )
+        if pos_only.size and neg_only.size:
+            gate1_tail_ratio = float(np.mean(pos_only) / (abs(neg_mean) + 1e-12))
+        elif pos_only.size and not neg_only.size:
+            gate1_tail_ratio = 10.0
+        else:
+            gate1_tail_ratio = 0.0
         gate1_psr = float(min(0.99, max(0.0, 0.5 + 0.12 * sharpe_paths)))
         gate1_dsr = float(
             min(
@@ -842,6 +900,29 @@ def objective_futures(
     gate1_p10_gmgr = float(p10_log_tw_path)
     funding_drag_pct_stat = float(mean_fund_r * 100.0)
 
+    if mode == "multi":
+        min_path_terminal_wealth_ratio = (
+            float(np.min(np.asarray(path_terminal_wealth_ratios, dtype=np.float64)))
+            if path_terminal_wealth_ratios
+            else 0.0
+        )
+        mean_path_terminal_wealth_ratio = (
+            float(np.mean(np.asarray(path_terminal_wealth_ratios, dtype=np.float64)))
+            if path_terminal_wealth_ratios
+            else 0.0
+        )
+    else:
+        tw_path_arr = np.asarray(
+            [float(np.exp(np.clip(x, -50.0, 50.0))) for x in path_compound_raw_log_tw],
+            dtype=np.float64,
+        )
+        min_path_terminal_wealth_ratio = (
+            float(np.min(tw_path_arr)) if tw_path_arr.size else 0.0
+        )
+        mean_path_terminal_wealth_ratio = (
+            float(np.mean(tw_path_arr)) if tw_path_arr.size else 0.0
+        )
+
     trial.set_user_attr("avg_cagr", float(np.mean(path_compound_raw_log_tw)))
     trial.set_user_attr("avg_mdd", avg_mdd)
     trial.set_user_attr("avg_trades", avg_trades)
@@ -855,6 +936,7 @@ def objective_futures(
     trial.set_user_attr("gate1_path_sortino", gate1_path_sortino)
     trial.set_user_attr("gate1_tail_ratio", gate1_tail_ratio)
     trial.set_user_attr("gate1_psr", gate1_psr)
+    trial.set_user_attr("regime_on_rate", float(regime_on_rate))
     trial.set_user_attr("gate1_dsr", gate1_dsr)
     trial.set_user_attr("gate1_p10_gmgr", gate1_p10_gmgr)
     trial.set_user_attr("cpcv_mean_path_return_pct", mean_path_ret_pct)
@@ -862,6 +944,10 @@ def objective_futures(
     trial.set_user_attr("n_cpcv_paths", n_cpcv_paths)
     trial.set_user_attr("mean_funding_drag_ratio_pct", funding_drag_pct_stat)
     trial.set_user_attr("cpcv_path_oos_log_tw", path_compound_raw_log_tw)
+    trial.set_user_attr("min_path_terminal_wealth_ratio", float(min_path_terminal_wealth_ratio))
+    trial.set_user_attr("mean_path_terminal_wealth_ratio", float(mean_path_terminal_wealth_ratio))
+    trial.set_user_attr("psr_paths", float(gate1_psr))
+    trial.set_user_attr("growth_score", float(objective_final))
 
     return objective_final
 
@@ -926,7 +1012,11 @@ def run_oos_margin_shared_portfolio(
     hw_days = float(calc_max_underwater_days_from_equity(equity_curve, tf_hours))
 
     moic = float(final_balance / FUTURES_INITIAL_BALANCE)
-    tw_ratio = moic
+    eq_np = np.asarray(equity_curve, dtype=np.float64).ravel()
+    min_eq_ratio = (
+        float(np.min(eq_np) / float(FUTURES_INITIAL_BALANCE)) if eq_np.size > 0 else moic
+    )
+    tw_ratio = float(min(moic, min_eq_ratio))
 
     long_c = int(len(trades_df[trades_df["side"] == "LONG"])) if not trades_df.empty else 0
     short_c = int(len(trades_df[trades_df["side"] == "SHORT"])) if not trades_df.empty else 0
@@ -953,6 +1043,7 @@ def run_oos_margin_shared_portfolio(
         "cvar_pct": cvar_pct,
         "hw_recovery_days": hw_days,
         "moic": moic,
+        "min_equity_wealth_ratio": min_eq_ratio,
         "terminal_wealth_ratio": tw_ratio,
         "long_trades": long_c,
         "short_trades": short_c,
@@ -1128,6 +1219,7 @@ def run_cpcv_complement_evaluation(
     oos_path_scores: Sequence[float],
     signal_disk_cache_root: Optional[Path] = None,
     project_root: Optional[str] = None,
+    concurrency_penalty_scale: float = 1.0,
 ) -> Tuple[float, float]:
     """
     Evaluate CPCV complement (train) segments for each path on fixed params; compare to stored OOS path scores.
@@ -1186,6 +1278,7 @@ def run_cpcv_complement_evaluation(
     for path in cpcv_paths:
         comp = cpcv_complement_segments(path, all_block_ranges)
         seg_raw_logs: List[float] = []
+        running_balance = float(FUTURES_INITIAL_BALANCE)
         for test_start, test_end in comp:
             adj_s = test_start + is_off
             adj_e = test_end + is_off
@@ -1197,17 +1290,19 @@ def run_cpcv_complement_evaluation(
                 seg_raw_logs.append(-10.0)
                 continue
 
+            segment_initial = max(running_balance, 1e-9)
             engine = PortfolioBacktestEngineFast(
                 aligned_data=aligned_data,
                 symbol_names=symbols,
                 strategy_params=p,
-                initial_balance=FUTURES_INITIAL_BALANCE,
+                initial_balance=segment_initial,
                 fee_rate=TRADING_FEE_RATE,
                 slippage_rate=SLIPPAGE_RATE,
             )
             _, equity_curve, final_balance = engine.run()
+            running_balance = max(float(final_balance), 1e-9)
 
-            ret_pct = float((final_balance / FUTURES_INITIAL_BALANCE - 1.0) * 100.0)
+            ret_pct = float((final_balance / segment_initial - 1.0) * 100.0)
             raw_log = _log_tw_from_ret_pct(ret_pct)
             mdd_seg = (
                 float(calc_mdd_from_equity(equity_curve)) if equity_curve.size > 0 else 0.0
