@@ -36,6 +36,14 @@ class CombinationScoreFutures:
     disqualified: bool
     reason: str = ""
 
+
+@dataclass(frozen=True)
+class CombinationScreeningResult:
+    """Phase B output: ranked combos + whether Phase 1 had no edge (strict floor in Phase D)."""
+
+    combos: List[CombinationScoreFutures]
+    phase1_no_edge: bool
+
 def _combo_search_dim(space: Dict[str, Any]) -> int:
     dim = 0
     for k, spec in space.items():
@@ -316,7 +324,7 @@ def run_combination_screening_futures(
     tf: str,
     project_root: str,
     signal_cache_dir: str = "",
-) -> List[CombinationScoreFutures]:
+) -> CombinationScreeningResult:
     from concurrent.futures import ProcessPoolExecutor
     from functools import partial
     from tqdm import tqdm
@@ -381,11 +389,14 @@ def run_combination_screening_futures(
 
     if not viable_items:
         _logger.warning("No viable futures combos after Phase 0; returning defaults.")
-        return [
-            CombinationScoreFutures(
-                "RSM_VT", "EMA_ATR", "vol_target", -1.0, 0.0, 0.0, True, "fallback"
-            )
-        ]
+        return CombinationScreeningResult(
+            combos=[
+                CombinationScoreFutures(
+                    "RSM_VT", "EMA_ATR", "vol_target", -1.0, 0.0, 0.0, True, "fallback"
+                )
+            ],
+            phase1_no_edge=False,
+        )
 
     viable_dims: List[int] = []
     for (sig, reg, siz), _, _ in viable_items:
@@ -460,12 +471,32 @@ def run_combination_screening_futures(
 
     _logger.info("Phase 1 complete: %d surviving / %d viable", len(surviving_items), len(viable_items))
 
+    phase1_no_edge = False
     if not surviving_items:
-        _logger.warning("Phase 1: all pruned. Relaxing threshold, keeping top-5.")
+        best_score = max(phase1_results) if phase1_results else -1e9
+        _logger.warning(
+            "Phase 1: all %d combos pruned (best=%.4f, thr=%.4f). "
+            "IS period may lack exploitable edge.",
+            len(viable_items),
+            best_score,
+            prune_thr,
+        )
+        relaxed_thr = 0.0
         surviving_items = [
-            x for _, x in sorted(zip(phase1_results, viable_items), reverse=True, key=lambda pair: pair[0])[:5]
+            item for item, score in zip(viable_items, phase1_results) if score > relaxed_thr
         ]
-        
+        if not surviving_items:
+            surviving_items = [
+                x
+                for _, x in sorted(
+                    zip(phase1_results, viable_items), reverse=True, key=lambda pair: pair[0]
+                )[:3]
+            ]
+            phase1_no_edge = True
+            _logger.error(
+                "No edge found after relaxed threshold. Using best-3 combos; Phase D applies strict objective floor."
+            )
+
     phase2_boost = _ambiguity_phase2_boost(phase1_results, top_k=max(1, top_k), cfg=cfg)
     if phase2_boost > 0:
         p2_cap = int(cfg.get("FUTURES_COMBO_QUICK_TRIALS_MAX", 40))
@@ -519,5 +550,5 @@ def run_combination_screening_futures(
         finals.append(s)
         
     valid_finals = [s for s in finals if not s.disqualified]
-    return valid_finals[:top_k]
+    return CombinationScreeningResult(combos=valid_finals[:top_k], phase1_no_edge=phase1_no_edge)
 
