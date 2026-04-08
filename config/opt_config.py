@@ -86,14 +86,8 @@ FUTURES_SEARCH_SPACE: Dict[str, Dict[str, Any]] = {
 FUTURES_SYMBOLS: List[str] = [
     "ETH/USDT",
     "SOL/USDT",
-    "AVAX/USDT",
-    "NEAR/USDT",
-    "LINK/USDT",
-    "DOGE/USDT",
-    "SUI/USDT",
-    "1000PEPE/USDT",
-    "FET/USDT",
-    "APT/USDT",
+    "BTC/USDT",
+    "ZEC/USDT",
 ]
 
 FUTURES_ANCHOR_SYMBOLS: List[str] = [

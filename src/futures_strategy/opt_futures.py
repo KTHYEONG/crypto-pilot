@@ -661,7 +661,8 @@ def main() -> None:
         )
         symbols = broad_candidates # Initial symbols for data loading
     else:
-        symbols = list(dict.fromkeys([*FUTURES_ANCHOR_SYMBOLS, *FUTURES_DYNAMIC_CANDIDATE_POOL[:5]]))
+        from config.opt_config import FUTURES_SYMBOLS
+        symbols = list(dict.fromkeys(FUTURES_SYMBOLS))
 
     _logger.info(
         "Loading Futures data for %d symbols (Mode: %s)...",
@@ -732,8 +733,13 @@ def main() -> None:
                 winning_params=winning_params
             )
             
+            import importlib
+            import config.opt_config
+            importlib.reload(config.opt_config)
+            from config.opt_config import FUTURES_SYMBOLS
+            
             # Re-filter data maps to only include refined symbols for Optuna
-            symbols = refined_symbols
+            symbols = FUTURES_SYMBOLS
             data_maps = {s: data_maps[s] for s in symbols if s in data_maps}
             oos_data_maps = {s: oos_data_maps[s] for s in symbols if s in oos_data_maps}
             _logger.info("Phase C: Selection finalized. Proceeding to Phase D (Optuna) with %d symbols.", len(symbols))
