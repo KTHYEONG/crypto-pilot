@@ -11,6 +11,8 @@ import numpy as np
 import pandas as pd
 from numba import njit
 
+from config.opt_config import OPT_FUTURES_CONFIG
+
 _logger: logging.Logger = logging.getLogger(__name__)
 
 
@@ -33,6 +35,10 @@ class PortfolioBacktestEngineFast:
 
         self.leverage = float(self.params.get("LEVERAGE", 1.0))
         self.risk_per_trade = float(self.params.get("RISK_PER_TRADE", 0.02))
+        self.max_exposure = float(self.params.get("MAX_EXPOSURE", 0.8))
+        
+        cfg = OPT_FUTURES_CONFIG
+        self.max_concurrent_positions = int(cfg.get("FUTURES_MAX_CONCURRENT_POSITIONS", 2))
 
     def run(
         self,
@@ -49,8 +55,9 @@ class PortfolioBacktestEngineFast:
         atr_2d = self.data["atr"]
         garch_kelly_f = self.data["garch_kelly_f"]
         funding_rate = self.data["funding_rate_sum"]
-        _logger.debug(f"Data: trend_dir sum={np.nansum(trend_dir)}, strength sum={np.nansum(strength_filter)}, kelly sum={np.nansum(garch_kelly_f)}, funding sum={np.nansum(funding_rate)}")
-
+        slot_rank_score = self.data["slot_rank_score"]
+        
+        _logger.debug(f"Engine Multi: symbols={self.symbols}, max_concurrent={self.max_concurrent_positions}")
 
         l_atr_mult = float(self.params.get("LONG_ATR_MULT", 3.0))
         l_trail_mult = float(self.params.get("LONG_TRAIL_MULT", 3.0))
@@ -71,6 +78,7 @@ class PortfolioBacktestEngineFast:
             atr_2d,
             garch_kelly_f,
             funding_rate,
+            slot_rank_score,
             self.initial_balance,
             self.leverage,
             self.fee_rate,
@@ -82,6 +90,8 @@ class PortfolioBacktestEngineFast:
             s_tp_mult,
             l_scale_atr,
             s_trail_mult,
+            self.max_concurrent_positions,
+            self.max_exposure,
         )
 
         trades_list: list[dict[str, Any]] = []
@@ -100,7 +110,8 @@ class PortfolioBacktestEngineFast:
                 "funding_fee": float(t[9]),
             })
 
-        _logger.debug(f"Engine Finished. Trades: {len(trades_list)}"); return pd.DataFrame(trades_list), equity_curve, final_balance
+        _logger.debug(f"Engine Finished. Trades: {len(trades_list)}")
+        return pd.DataFrame(trades_list), equity_curve, final_balance
 
 
 @njit(nogil=True, cache=True)
@@ -116,6 +127,7 @@ def backtest_portfolio_numba(
     atr_2d: np.ndarray,
     garch_kelly_f: np.ndarray,
     funding_rate: np.ndarray,
+    slot_rank_score: np.ndarray,
     initial_balance: float,
     leverage: float,
     fee_rate: float,
@@ -127,6 +139,8 @@ def backtest_portfolio_numba(
     s_tp_mult: float,
     l_scale_atr: float,
     s_trail_mult: float,
+    max_concurrent: int,
+    max_exposure: float,
 ) -> tuple[np.ndarray, float, np.ndarray]:
     n_bars = close_2d.shape[0]
     n_syms = close_2d.shape[1]
@@ -155,13 +169,15 @@ def backtest_portfolio_numba(
     for i in range(1, n_bars):
         unrealized_total = 0.0
         used_margin_total = 0.0
+        num_open_pos = 0
 
         for s in range(n_syms):
             if in_pos[s]:
+                num_open_pos += 1
                 if np.isnan(close_2d[i, s]):
                     continue
                 
-                # Apply funding fee (deducted from balance, accumulated for trade log)
+                # Apply funding fee
                 fund_fee = amount[s] * close_2d[i, s] * funding_rate[i, s] * pos_side[s]
                 fund_fee_stored[s] += fund_fee
                 balance -= fund_fee
@@ -177,6 +193,8 @@ def backtest_portfolio_numba(
             break
 
         free_margin = current_equity - used_margin_total
+        allowed_margin = max(0.0, (current_equity * max_exposure) - used_margin_total)
+        free_margin = min(free_margin, allowed_margin)
 
         # --- Exit logic ---
         for s in range(n_syms):
@@ -275,8 +293,6 @@ def backtest_portfolio_numba(
                     pnl = (entry_p[s] - exit_price) * amount[s]
                 fee = amount[s] * exit_price * fee_rate
                 
-                # fund_fee was already incrementally subtracted from balance.
-                # just add back margin + realize pnl.
                 balance += ((amount[s] * entry_p[s]) / leverage) + (pnl - fee)
 
                 trades[t_count] = [
@@ -285,6 +301,7 @@ def backtest_portfolio_numba(
                 ]
                 t_count += 1
                 in_pos[s] = False
+                num_open_pos -= 1
 
         unrealized_total = 0.0
         used_margin_total = 0.0
@@ -295,32 +312,53 @@ def backtest_portfolio_numba(
         current_equity = balance + unrealized_total
         free_margin = current_equity - used_margin_total
 
-        # --- Entry logic ---
-        prev_i = i - 1
-        for s in range(n_syms):
-            if in_pos[s]:
-                continue
-            if np.isnan(open_2d[i, s]) or np.isnan(strength_filter[prev_i, s]):
-                continue
-
-            sf = strength_filter[prev_i, s]
-            if sf > 0.0 and not np.isnan(sf):
-                c_open = open_2d[i, s]
-                do_entry = False
-                p_side = 0
-                fill_p = 0.0
-
-                if trend_dir[prev_i, s] == 1 and high_2d[i, s] > entry_upper[prev_i, s]:
-                    fill_p = max(c_open, entry_upper[prev_i, s]) * (1.0 + slippage_rate)
-                    p_side, do_entry = 1, True
-                elif trend_dir[prev_i, s] == -1 and low_2d[i, s] < entry_lower[prev_i, s]:
-                    fill_p = min(c_open, entry_lower[prev_i, s]) * (1.0 - slippage_rate)
-                    p_side, do_entry = -1, True
-
-                if do_entry:
+        # --- Entry logic with Concurrency limit and Rank Priority ---
+        if num_open_pos < max_concurrent:
+            prev_i = i - 1
+            
+            # 1. Collect potential candidates
+            candidates = []
+            for s in range(n_syms):
+                if in_pos[s]:
+                    continue
+                if np.isnan(open_2d[i, s]) or np.isnan(strength_filter[prev_i, s]):
+                    continue
+                
+                sf = strength_filter[prev_i, s]
+                if sf > 0.0 and not np.isnan(sf):
+                    c_open = open_2d[i, s]
+                    p_side = 0
+                    fill_p = 0.0
+                    
+                    if trend_dir[prev_i, s] == 1 and high_2d[i, s] > entry_upper[prev_i, s]:
+                        fill_p = max(c_open, entry_upper[prev_i, s]) * (1.0 + slippage_rate)
+                        p_side = 1
+                    elif trend_dir[prev_i, s] == -1 and low_2d[i, s] < entry_lower[prev_i, s]:
+                        fill_p = min(c_open, entry_lower[prev_i, s]) * (1.0 - slippage_rate)
+                        p_side = -1
+                        
+                    if p_side != 0:
+                        # Store rank score (slot_rank_score) and other info
+                        candidates.append((slot_rank_score[prev_i, s], s, p_side, fill_p, sf))
+            
+            if candidates:
+                # 2. Sort candidates by rank_score descending (using simple sort for Numba compatibility)
+                for c1 in range(len(candidates)):
+                    for c2 in range(c1 + 1, len(candidates)):
+                        if candidates[c1][0] < candidates[c2][0]:
+                            tmp = candidates[c1]
+                            candidates[c1] = candidates[c2]
+                            candidates[c2] = tmp
+                
+                # 3. Try to enter up to max_concurrent
+                for cand in candidates:
+                    if num_open_pos >= max_concurrent:
+                        break
+                        
+                    rs_val, s, p_side, fill_p, sf = cand
                     pos_atr = atr_2d[prev_i, s]
                     stop_dist = (pos_atr * l_atr_mult) if p_side == 1 else (pos_atr * s_atr_mult)
-
+                    
                     if stop_dist > 0:
                         kf = garch_kelly_f[prev_i, s]
                         if np.isnan(kf) or kf <= 0.0:
@@ -358,5 +396,7 @@ def backtest_portfolio_numba(
                             lowest[s] = fill_p
                             has_scaled[s] = False
                             stop_p[s] = fill_p - stop_dist if p_side == 1 else fill_p + stop_dist
+                            
+                            num_open_pos += 1
 
     return trades[:t_count], balance, equity_curve

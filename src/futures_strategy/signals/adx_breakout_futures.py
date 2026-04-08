@@ -16,13 +16,15 @@ class AdxBreakoutFuturesSignal:
     name: ClassVar[str] = "ADX_BREAKOUT"
     param_space: ClassVar[Dict[str, Any]] = {
         "ADX_KC_PERIOD": {"type": "int", "low": 15, "high": 40, "step": 5},
-        "ADX_KC_MULT": {"type": "float", "low": 0.5, "high": 2.0, "step": 0.25},
+        "ADX_LONG_KC_MULT": {"type": "float", "low": 0.5, "high": 2.5, "step": 0.25},
+        "ADX_SHORT_KC_MULT": {"type": "float", "low": 1.0, "high": 3.5, "step": 0.25},
         "ADX_THRESHOLD": {"type": "float", "low": 15.0, "high": 35.0, "step": 5.0},
     }
 
     def compute(self, df: pd.DataFrame, params: Dict[str, Any]) -> FuturesSignalOutput:
-        kc_p = int(params.get("ADX_KC_PERIOD", params.get("KC_PERIOD", 20)))
-        kc_m = float(params.get("ADX_KC_MULT", params.get("KC_MULT", 2.0)))
+        kc_p = int(params.get("ADX_KC_PERIOD", 20))
+        kc_m_long = float(params.get("ADX_LONG_KC_MULT", 2.0))
+        kc_m_short = float(params.get("ADX_SHORT_KC_MULT", 2.0))
         adx_threshold = float(params.get("ADX_THRESHOLD", 20.0))
         close = df["close"].to_numpy(dtype=np.float64)
         high = df["high"].to_numpy(dtype=np.float64)
@@ -39,8 +41,8 @@ class AdxBreakoutFuturesSignal:
             )
         atr = compute_atr_numpy(high, low, close, kc_p)
         ema_kc = compute_ema_numpy(close, kc_p)
-        kc_upper = ema_kc + kc_m * atr
-        kc_lower = ema_kc - kc_m * atr
+        kc_upper = ema_kc + kc_m_long * atr
+        kc_lower = ema_kc - kc_m_short * atr
         adx = compute_adx_numpy(high, low, close, kc_p)
         long_e = (close > kc_upper) & (adx > adx_threshold)
         short_e = (close < kc_lower) & (adx > adx_threshold)

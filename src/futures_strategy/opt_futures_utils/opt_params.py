@@ -4,7 +4,9 @@ from typing import Any, Dict
 
 import optuna
 
-from config.opt_config import ENGINE_PARAM_SPACE_FUTURES
+import os
+
+from config.opt_config import ENGINE_PARAM_SPACE_FUTURES, OPT_FUTURES_CONFIG
 
 
 def _suggest_one(trial: optuna.Trial, name: str, spec: Dict[str, Any]) -> Any:
@@ -130,7 +132,8 @@ def suggest_params_futures(trial: optuna.Trial, space: Dict[str, Any], tf: str) 
     for name, spec in space.items():
         params[name] = _suggest_one(trial, name, spec)
 
-    params["LEVERAGE"] = 20
+    _lev_default = int(OPT_FUTURES_CONFIG.get("FUTURES_DISCOVERY_LEVERAGE", 8))
+    params["LEVERAGE"] = int(os.getenv("FUTURES_DISCOVERY_LEVERAGE", str(_lev_default)))
     params["USE_COMPOUNDING"] = True
 
     return params
