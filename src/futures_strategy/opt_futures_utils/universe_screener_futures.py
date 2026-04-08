@@ -35,7 +35,32 @@ from src.futures_strategy.opt_futures_utils.evaluator import EMBARGO_BARS
 from src.futures_strategy.opt_futures_utils.metrics import calc_profit_factor_from_pnl
 from src.futures_strategy.strategies_futures import UltimateStrategy
 
+import re
+
 _logger: logging.Logger = logging.getLogger("universe_screener_futures")
+
+
+def update_futures_config_file(symbols: List[str]) -> None:
+    """Updates FUTURES_SYMBOLS in config/opt_config.py to persist selected universe."""
+    config_path = Path("config/opt_config.py")
+    if not config_path.exists():
+        _logger.error("config/opt_config.py not found.")
+        return
+
+    content = config_path.read_text(encoding="utf-8")
+    pattern = r"FUTURES_SYMBOLS(?:: List\[str\])?\s*=\s*\[.*?\]"
+    new_block = "FUTURES_SYMBOLS: List[str] = [\n"
+    for s in symbols:
+        new_block += f'    "{s}",\n'
+    new_block += "]"
+    
+    new_content = re.sub(pattern, new_block, content, count=1, flags=re.DOTALL)
+    if new_content == content:
+        _logger.warning("FUTURES_SYMBOLS pattern not found in opt_config.py; skipping update.")
+        return
+        
+    config_path.write_text(new_content, encoding="utf-8")
+    _logger.info("Successfully updated config/opt_config.py with %d FUTURES_SYMBOLS.", len(symbols))
 
 
 def _median_atr_percent(
@@ -408,4 +433,5 @@ def screen_futures_symbol_refinement(
                 break
 
     _logger.info("Refinement complete: %d symbols selected: %s", len(final_list), final_list)
+    update_futures_config_file(final_list[:mp_max])
     return final_list[:mp_max]
