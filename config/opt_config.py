@@ -339,14 +339,14 @@ SPOT_SHARED_PARAM_SPACE: Dict[str, Dict[str, Any]] = {
 
 def get_search_space_futures(tf: str) -> Dict[str, Dict[str, Any]]:
     _ = tf
-    from src.futures_strategy.opt_futures_utils.opt_params import build_full_discovery_space_futures
+    from src.domain.futures.opt_futures_utils.opt_params import build_full_discovery_space_futures
 
     return build_full_discovery_space_futures()
 
 
 def get_search_space_spot(tf: str) -> Dict[str, Dict[str, Any]]:
     _ = tf
-    from src.spot_strategy.opt_spot_utils.opt_params import build_full_discovery_space
+    from src.domain.spot.opt_spot_utils.opt_params import build_full_discovery_space
 
     return build_full_discovery_space()
 
