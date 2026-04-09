@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.spot_strategy.strategies_spot import UltimateSpotStrategy
+from src.domain.spot.strategies_spot import UltimateSpotStrategy
 
 
 def _sample_ohlcv(n: int = 480, seed: int = 7) -> pd.DataFrame:

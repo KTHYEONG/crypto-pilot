@@ -4,8 +4,8 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from src.spot_strategy.signals.rs_momentum import RSMomentumSignal
-from src.spot_strategy.signals.kc_pullback import KCPullbackSignal
+from src.domain.spot.signals.rs_momentum import RSMomentumSignal
+from src.domain.spot.signals.kc_pullback import KCPullbackSignal
 
 
 def _minimal_ohlcv(n: int = 300) -> pd.DataFrame:
@@ -68,7 +68,7 @@ def test_kc_pullback_rank_is_100_minus_rsi() -> None:
         "TP_MEAN_PERIOD": 20,
         "EMA_SLOPE_LAG": 10,
     }
-    from src.spot_strategy.signals.numpy_ops import compute_rsi_numpy
+    from src.core.indicators.numpy_ops_spot import compute_rsi_numpy
 
     out = KCPullbackSignal().compute(df, params)
     close = df["close"].to_numpy(dtype=np.float64)

@@ -10,7 +10,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.futures_strategy.funding_utils import merge_funding_into_ohlcv
+from src.domain.futures.funding_utils import merge_funding_into_ohlcv
 
 
 def test_merge_funding_assigns_boundary_event_to_same_bar(tmp_path: Path) -> None:
