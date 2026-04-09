@@ -1,8 +1,59 @@
-[tool.pyright]
-exclude = ["data", "legacy", "logs", "results", ".pytest_cache", ".git"]
+[project]
+name = "quant-trading-system"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "optuna",
+    "numba",
+    "numpy",
+    "pandas"
+    # 허용되지 않은 외부 라이브러리 임의 추가 금지
+]
 
 [tool.ruff]
-exclude = ["data", "legacy", "logs", "results", ".pytest_cache", ".git"]
+# AI가 작성한 코드를 즉각적으로 검증할 규칙 강제 (Action Harness)
+line-length = 100
+select = ["E", "F", "I", "N"] # PEP8, Import 정렬, Naming 컨벤션
+ignore = []
+exclude = [
+    "data", 
+    "legacy", 
+    "logs", 
+    "results", 
+    ".pytest_cache", 
+    ".git"
+]
+
+[tool.mypy]
+# AI에게 엄격한 Type Hinting 강제
+strict = true
+ignore_missing_imports = true
+exclude = [
+    "data", 
+    "legacy", 
+    "logs", 
+    "results", 
+    ".pytest_cache", 
+    ".git"
+]
+
+[tool.pyright]
+# 기존 Pyright 설정 유지
+exclude = [
+    "data", 
+    "legacy", 
+    "logs", 
+    "results", 
+    ".pytest_cache", 
+    ".git"
+]
 
 [tool.isort]
-skip = ["data", "legacy", "logs", "results"]
+# 기존 설정 유지 (단, Ruff의 'I' 옵션이 Import를 처리하므로 보조 수단으로 사용)
+skip = [
+    "data", 
+    "legacy", 
+    "logs", 
+    "results"
+]
+profile = "black"
