@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from src.spot_strategy.opt_spot_utils.cv_utils import (
+from src.domain.spot.opt_spot_utils.cv_utils import (
     build_cpcv_test_paths,
     build_cpcv_test_paths_with_fallback,
 )

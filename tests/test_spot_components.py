@@ -4,16 +4,16 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.spot_strategy.opt_spot_utils.combination_screener import params_disqualified_against_space
-from src.spot_strategy.opt_spot_utils.opt_params import build_combined_param_space
-from src.spot_strategy.signals.bb_squeeze import BBSqueezeSignal
-from src.spot_strategy.signals.macd_hist_div import MacdHistDivSignal
-from src.spot_strategy.signals.numpy_ops import rolling_ema_winsorize_volume
-from src.spot_strategy.signals.obv_ma_breakout import ObvMaBreakoutSignal
-from src.spot_strategy.signals.rsi2_pullback import RSI2PullbackSignal
-from src.spot_strategy.signals.rs_momentum import RSMomentumSignal
-from src.spot_strategy.signals.stochrsi_cross import StochRSICrossSignal
-from src.spot_strategy.signals.vix_fix import VIXFixSignal
+from src.domain.spot.opt_spot_utils.combination_screener import params_disqualified_against_space
+from src.domain.spot.opt_spot_utils.opt_params import build_combined_param_space
+from src.domain.spot.signals.bb_squeeze import BBSqueezeSignal
+from src.domain.spot.signals.macd_hist_div import MacdHistDivSignal
+from src.core.indicators.numpy_ops_spot import rolling_ema_winsorize_volume
+from src.domain.spot.signals.obv_ma_breakout import ObvMaBreakoutSignal
+from src.domain.spot.signals.rsi2_pullback import RSI2PullbackSignal
+from src.domain.spot.signals.rs_momentum import RSMomentumSignal
+from src.domain.spot.signals.stochrsi_cross import StochRSICrossSignal
+from src.domain.spot.signals.vix_fix import VIXFixSignal
 
 
 def test_rs_momentum_signal_compute_returns_signal_output() -> None:
