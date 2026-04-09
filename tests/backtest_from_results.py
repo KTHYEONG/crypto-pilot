@@ -11,17 +11,17 @@ project_root: str = str(Path(__file__).resolve().parents[1])
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-from src.futures_strategy.data_collector import DataCollector
-from src.futures_strategy.strategies_futures import UltimateStrategy
-from src.futures_strategy.funding_utils import merge_funding_into_ohlcv
-from src.futures_strategy.opt_futures_utils.evaluator import evaluate_symbol_fold as evaluate_symbol_fold_futures
+from src.domain.futures.data_collector import DataCollector
+from src.domain.futures.strategies_futures import UltimateStrategy
+from src.domain.futures.funding_utils import merge_funding_into_ohlcv
+from src.domain.futures.opt_futures_utils.evaluator import evaluate_symbol_fold as evaluate_symbol_fold_futures
 
 # Spot Imports
-from src.spot_strategy.data_collector_spot import DataCollectorSpot
-from src.spot_strategy.strategies_spot import UltimateSpotStrategy
-from src.spot_strategy.opt_spot_utils.evaluator import evaluate_symbol_fold as evaluate_symbol_fold_spot
+from src.domain.spot.data_collector_spot import DataCollectorSpot
+from src.domain.spot.strategies_spot import UltimateSpotStrategy
+from src.domain.spot.opt_spot_utils.evaluator import evaluate_symbol_fold as evaluate_symbol_fold_spot
 
-from src.optimization.opt_utils import compute_segment_merge_index
+from src.core.optimization.opt_utils import compute_segment_merge_index
 from config.settings import DATA_DIR
 from config.opt_config import get_quarterly_window
 
