@@ -1,31 +1,30 @@
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import logging
 import math
 import os
 import pickle
 import queue
-import tempfile
-import time
-import sys
-import threading
-import traceback
 import sqlite3
+import sys
+import tempfile
+import threading
+import time
+from collections import Counter
+from dataclasses import dataclass
+from multiprocessing import Manager
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+import numpy as np
 import optuna
+import pandas as pd
 from optuna.pruners import MedianPruner, PatientPruner
 from optuna.samplers import QMCSampler, TPESampler
 from optuna.storages import InMemoryStorage
 from optuna.trial import TrialState
-import pandas as pd
-import numpy as np
-from pathlib import Path
-from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Sequence, Tuple
-import concurrent.futures
-from collections import Counter
-from multiprocessing import Manager
 from tqdm import tqdm
 
 # Project Root Setup
@@ -33,64 +32,59 @@ project_root: str = str(Path(__file__).resolve().parents[2])
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-from src.domain.futures.data_collector import DataCollector
-from src.domain.futures.strategies_futures import FuturesPipelineStrategy
+import warnings
+
+from config.opt_config import (
+    FUTURES_ANCHOR_SYMBOLS,
+    FUTURES_SCREENER_CONFIG,
+    OPT_FUTURES_CONFIG,
+    get_quarterly_window,
+    get_search_space_futures,
+)
 from config.settings import (
     FUTURES_CACHE_DIR,
     FUTURES_DATA_DIR,
     FUTURES_INITIAL_BALANCE,
-    SLIPPAGE_RATE,
-    TRADING_FEE_RATE,
 )
-from config.opt_config import (
-    OPT_FUTURES_CONFIG,
-    FUTURES_ANCHOR_SYMBOLS,
-    FUTURES_DYNAMIC_CANDIDATE_POOL,
-    FUTURES_SCREENER_CONFIG,
-    get_quarterly_window,
-    get_search_space_futures,
-)
-
 from src.core.optimization.opt_utils import compute_segment_merge_index
+from src.domain.futures.data_collector import DataCollector
 from src.domain.futures.funding_utils import merge_funding_into_ohlcv
-
-from src.domain.futures.opt_futures_utils.db_utils import save_study_to_sqlite
+from src.domain.futures.opt_futures_utils.combination_screener_futures import (
+    CombinationScoreFutures,
+    run_combination_screening_futures,
+)
 from src.domain.futures.opt_futures_utils.cv_utils import build_cpcv_test_paths_with_fallback
+from src.domain.futures.opt_futures_utils.go_nogo import (
+    FuturesDeploymentReportInput,
+    FuturesSymbolGateRow,
+    format_regime_oos_diagnostic_block,
+    run_futures_deployment_report,
+    run_go_nogo_check,
+    run_multi_window_oos_gate,
+)
 from src.domain.futures.opt_futures_utils.objective import (
     objective_futures,
 )
 from src.domain.futures.opt_futures_utils.oos_evaluator import (
-    evaluate_symbol_fold,
-    run_oos_margin_shared_portfolio,
-    run_multi_window_oos_holdout,
     compute_regime_conditional_oos_metrics,
-)
-from src.domain.futures.opt_futures_utils.go_nogo import (
-    run_go_nogo_check,
-    FuturesDeploymentReportInput,
-    FuturesSymbolGateRow,
-    run_futures_deployment_report,
-    run_multi_window_oos_gate,
-    format_regime_oos_diagnostic_block,
-)
-from src.domain.spot.opt_spot_utils.go_nogo import (
-    run_portfolio_discovery_veto,
-    run_holdout_portfolio_trade_floor,
-)
-from src.domain.futures.opt_futures_utils.universe_screener_futures import (
-    screen_futures_symbol_refinement,
-    screen_futures_universe,
-)
-from src.domain.futures.opt_futures_utils.combination_screener_futures import (
-    CombinationScoreFutures,
-    run_combination_screening_futures,
+    evaluate_symbol_fold,
+    run_multi_window_oos_holdout,
+    run_oos_margin_shared_portfolio,
 )
 from src.domain.futures.opt_futures_utils.opt_params import (
     build_combined_param_space_futures,
     build_multi_combo_param_space_futures,
 )
+from src.domain.futures.opt_futures_utils.universe_screener_futures import (
+    screen_futures_symbol_refinement,
+    screen_futures_universe,
+)
+from src.domain.futures.strategies_futures import FuturesPipelineStrategy
+from src.domain.spot.opt_spot_utils.go_nogo import (
+    run_holdout_portfolio_trade_floor,
+    run_portfolio_discovery_veto,
+)
 
-import warnings
 warnings.filterwarnings("ignore")
 
 os.environ.setdefault("OMP_NUM_THREADS", "1")
@@ -815,9 +809,18 @@ def main() -> None:
         
         if not args.skip_universe:
             # Phase C: Refinement mini-backtest with winning combo (uses #1 for symbol refinement)
-            from src.domain.futures.opt_futures_utils.combination_screener_futures import _mid_params_from_space
-            t0_space = build_combined_param_space_futures(valid_tops[0].signal, valid_tops[0].regime, valid_tops[0].sizing)
-            winning_params = _mid_params_from_space(t0_space, args.tf)
+            winning_params = valid_tops[0].best_params.copy() if valid_tops[0].best_params else None
+            if not winning_params:
+                from src.domain.futures.opt_futures_utils.combination_screener_futures import (
+                    _mid_params_from_space,
+                )
+                t0_space = build_combined_param_space_futures(valid_tops[0].signal, valid_tops[0].regime, valid_tops[0].sizing)
+                winning_params = _mid_params_from_space(t0_space, args.tf)
+            else:
+                winning_params["TIMEFRAME"] = args.tf
+                _lev_def = int(OPT_FUTURES_CONFIG.get("FUTURES_DISCOVERY_LEVERAGE", 8))
+                winning_params["LEVERAGE"] = int(os.getenv("FUTURES_DISCOVERY_LEVERAGE", str(_lev_def)))
+                winning_params["USE_COMPOUNDING"] = True
             
             refined_symbols = screen_futures_symbol_refinement(
                 broad_candidates,
@@ -828,6 +831,7 @@ def main() -> None:
             )
             
             import importlib
+
             import config.opt_config
             importlib.reload(config.opt_config)
             from config.opt_config import FUTURES_SYMBOLS
@@ -1184,7 +1188,9 @@ def main() -> None:
             pbo_n_paths = len(cpcv_paths_pbo)
             all_blocks_pbo = list_cpcv_block_ranges(ref_len_pbo, nb_pbo, emb_pbo)
             if len(oos_log_tw) == pbo_n_paths and all_blocks_pbo:
-                from src.domain.futures.opt_futures_utils.oos_evaluator import run_cpcv_complement_evaluation
+                from src.domain.futures.opt_futures_utils.oos_evaluator import (
+                    run_cpcv_complement_evaluation,
+                )
                 pbo_val, rho_val = run_cpcv_complement_evaluation(
                     params,
                     target_symbols,
@@ -1362,6 +1368,7 @@ def main() -> None:
 
     if pending_json_writes:
         import json
+
         from src.core.utils.secure_config import encrypt_config, get_strategy_secret
         results_dir_p = Path(project_root) / "results"
         results_dir_p.mkdir(parents=True, exist_ok=True)
