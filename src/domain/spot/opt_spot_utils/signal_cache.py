@@ -25,13 +25,6 @@ from src.domain.spot.strategies_spot import UltimateSpotStrategy
 _logger: logging.Logger = logging.getLogger("opt_spot")
 
 # Optuna TPE `constraints_func`: each value <= 0 means satisfied (Gardner-style soft constraints).
-
-
-
-
-
-
-
 SIGNAL_CACHE_PARAM_KEYS: frozenset[str] = frozenset([
     "SIGNAL_TYPE",
     "REGIME_TYPE",
