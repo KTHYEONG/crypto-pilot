@@ -97,9 +97,10 @@ class BacktestEngineFastSpot:
         if getattr(self, "_warmup_bars_override", None) is not None:
             warmup_bars = self._warmup_bars_override
         else:
+            tf = self.strategy.params.get("TIMEFRAME", "1h")
             warmup_bars = getattr(df, "attrs", {}).get(
                 "warmup_bars",
-                self.strategy.get_required_warmup(freq="hourly") if hasattr(self.strategy, "get_required_warmup") else 100,
+                self.strategy.get_required_warmup(freq=tf) if hasattr(self.strategy, "get_required_warmup") else 100,
             )
         self._warmup_bars = warmup_bars  
         self._effective_start_idx = max(warmup_bars, self._execution_start_idx)
