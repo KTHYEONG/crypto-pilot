@@ -23,6 +23,7 @@ from src.domain.futures.opt_futures_utils.cv_utils import (
     build_cpcv_test_paths_with_fallback,
 )
 from src.domain.futures.opt_futures_utils.metrics import (
+    _log_tw_from_ret_pct,
     calc_mdd_from_equity,
     calc_profit_factor_from_pnl,
 )
@@ -94,25 +95,7 @@ EMBARGO_BARS: Dict[str, int] = {
 
 
 
-def calc_tail_ratio_from_equity(equity: np.ndarray) -> float:
-    """95th percentile return / abs(5th percentile return)."""
-    if equity.size < 2:
-        return 1.0
-    r = np.diff(equity) / np.clip(equity[:-1], 1e-12, None)
-    if r.size < 5:
-        return 1.0
-    val95 = float(np.percentile(r, 95.0))
-    val5 = float(np.percentile(r, 5.0))
-    if abs(val5) < 1e-12:
-        return 5.0 if val95 > 0 else 1.0
-    return float(val95 / abs(val5))
 
-
-def _log_tw_from_ret_pct(ret_pct: float) -> float:
-    r = 1.0 + float(ret_pct) / 100.0
-    if r <= 0.0 or not math.isfinite(r):
-        return -10.0
-    return float(math.log(max(r, 1e-9)))
 
 
 def objective_futures(
