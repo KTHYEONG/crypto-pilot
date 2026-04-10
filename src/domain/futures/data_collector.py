@@ -274,16 +274,24 @@ class DataCollector:
 
         missing_ranges = []
         if cache_df.empty:
-            missing_ranges.append((req_start, req_end))
+            # [[FIX]] Empty cache에서도 메타데이터(상장일)가 있다면 그 이전은 요청하지 않음
+            if earliest_known is not None:
+                eff_start = max(req_start, earliest_known)
+                if eff_start <= req_end:
+                    missing_ranges.append((eff_start, req_end))
+            else:
+                missing_ranges.append((req_start, req_end))
         else:
             cache_start = cache_df['datetime'].min().normalize()
             cache_end = cache_df['datetime'].max().normalize()
             if req_start < cache_start:
-                # If we already learned listing start (earliest_available), skip repeated pre-listing fetches.
-                if earliest_known is not None and req_start < earliest_known:
-                    pass
-                else:
-                    missing_ranges.append((req_start, cache_start - pd.Timedelta(days=1)))
+                # [[FIX]] 이미 알려진 상장일(earliest_available)보다 앞선 구간은 무시
+                eff_start = req_start
+                if earliest_known is not None:
+                    eff_start = max(req_start, earliest_known)
+                
+                if eff_start < cache_start:
+                    missing_ranges.append((eff_start, cache_start - pd.Timedelta(days=1)))
             if req_end > cache_end:
                 missing_ranges.append((cache_end + pd.Timedelta(days=1), req_end))
 
@@ -375,15 +383,23 @@ class DataCollector:
                     earliest_known = None
 
         if cache_df.empty:
-            missing_ranges.append((req_start, req_end))
+            # [[FIX]] 펀딩비도 상장일 메타데이터가 있다면 그 이전은 조회하지 않음
+            if earliest_known is not None:
+                eff_start = max(req_start, earliest_known)
+                if eff_start <= req_end:
+                    missing_ranges.append((eff_start, req_end))
+            else:
+                missing_ranges.append((req_start, req_end))
         else:
             cache_start = pd.to_datetime(cache_df["timestamp"].min(), unit="ms").normalize()
             cache_end = pd.to_datetime(cache_df["timestamp"].max(), unit="ms").normalize()
             if req_start < cache_start:
-                if earliest_known is not None and req_start < earliest_known:
-                    pass
-                else:
-                    missing_ranges.append((req_start, cache_start - pd.Timedelta(days=1)))
+                eff_start = req_start
+                if earliest_known is not None:
+                    eff_start = max(req_start, earliest_known)
+                
+                if eff_start < cache_start:
+                    missing_ranges.append((eff_start, cache_start - pd.Timedelta(days=1)))
             if req_end > cache_end:
                 missing_ranges.append((cache_end + pd.Timedelta(days=1), req_end))
 
