@@ -8,24 +8,23 @@ P0/P1 개선사항 적용:
 - Golden 6 심볼(AVAX, DOGE, ETH, LINK, NEAR, SUI) 필터링 자동화
 """
 
-import os
-import sys
-import time
-import math
-import signal
-import json
-import logging
 import gc
 import hashlib
-import uuid
+import json
+import math
+import os
+import signal
+import sys
 import threading
-import pandas as pd
-import numpy as np
+import time
+import uuid
 from datetime import datetime, timedelta
-from pathlib import Path
 from functools import wraps
-from typing import Optional, Dict, Any, Tuple
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
+from typing import Any, Dict, Optional, Tuple
+
+import numpy as np
+import pandas as pd
 
 try:
     import ccxt
@@ -51,28 +50,27 @@ except IndexError:
     sys.path.append(os.getcwd())
 
 from config.settings import (
+    API_RETRY_ATTEMPTS,
+    API_RETRY_WAIT_MAX,
+    API_RETRY_WAIT_MIN,
     BINANCE_API_KEY,
     BINANCE_SECRET,
-    LOG_DIR,
-    TRADE_HISTORY_DB,
-    HEARTBEAT_FILE,
-    API_RETRY_ATTEMPTS,
-    API_RETRY_WAIT_MIN,
-    API_RETRY_WAIT_MAX,
-    MIN_BALANCE_USDT,
-    MIN_BALANCE_FOR_TRADE,
-    MIN_ORDER_VALUE_USDT,
-    MAX_EXCHANGE_LEVERAGE,
-    LOOP_INTERVAL_SECONDS,
-    SYMBOL_DELAY_SECONDS,
-    FUTURES_STATE_FILE,
-    SLIPPAGE_RATE,
     FUTURES_LIVE_SYMBOLS,
+    FUTURES_STATE_FILE,
+    HEARTBEAT_FILE,
+    LOOP_INTERVAL_SECONDS,
+    MAX_EXCHANGE_LEVERAGE,
+    MIN_BALANCE_FOR_TRADE,
+    MIN_BALANCE_USDT,
+    MIN_ORDER_VALUE_USDT,
+    SLIPPAGE_RATE,
+    SYMBOL_DELAY_SECONDS,
+    TRADE_HISTORY_DB,
 )
 from src.core.exchange.binance_client import BinanceClient, OrderRateLimiter
-from src.domain.futures.strategies_futures import UltimateStrategy
+from src.core.utils.components import HealthCheckManager, TradeHistoryDB
 from src.core.utils.utils import setup_logger
-from src.core.utils.components import TradeHistoryDB, HealthCheckManager
+from src.domain.futures.strategies_futures import UltimateStrategy
 
 # Oracle Cloud 최적화 (선택적)
 try:
@@ -807,7 +805,7 @@ class RealTraderFutures:
                 stop_price,
                 client_order_id=client_order_id,
             )
-        except ccxt.RequestTimeout as e:
+        except ccxt.RequestTimeout:
             logger.warning(
                 "[%s] SL Order Timeout. Reconciling with exchange...", symbol
             )
@@ -877,7 +875,7 @@ class RealTraderFutures:
                 tp_price,
                 client_order_id=client_order_id,
             )
-        except ccxt.RequestTimeout as e:
+        except ccxt.RequestTimeout:
             logger.warning(
                 "[%s] TP Order Timeout. Reconciling with exchange...", symbol
             )

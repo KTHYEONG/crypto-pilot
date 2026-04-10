@@ -10,20 +10,16 @@ from __future__ import annotations
 
 import gc
 import json
-import logging
 import os
 import signal
-import sqlite3
 import sys
 import threading
-import hashlib
-import uuid
 import time
+import uuid
 from datetime import datetime, timedelta, timezone
 from functools import wraps
-from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple, List
+from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -51,15 +47,12 @@ try:
 except IndexError:
     sys.path.append(os.getcwd())
 
+from config.opt_config import SPOT_SYMBOLS
 from config.settings import (
     API_RETRY_ATTEMPTS,
     API_RETRY_WAIT_MAX,
     API_RETRY_WAIT_MIN,
-    CANDLE_SYNC_OFFSET_SECONDS,
     ERROR_SLEEP_SECONDS,
-    LOG_BACKUP_COUNT,
-    LOG_DIR,
-    LOG_MAX_BYTES,
     MAX_INVEST_CAP_KRW,
     MIN_ORDER_VALUE_KRW,
     MIN_POSITION_VALUE_KRW,
@@ -80,15 +73,13 @@ from config.settings import (
     UPBIT_SECRET_KEY,
     UPBIT_SPOT_TAKER_FEE_RATE,
 )
+from src.core.exchange.upbit_client import UpbitClient
 from src.core.utils.components import (
     HealthCheckManager,
     TradeHistoryDB,
-    calculate_candle_wait_time,
 )
 from src.core.utils.utils import setup_logger
 from src.domain.spot.strategies_spot import UltimateSpotStrategy, merge_exit_family_params
-from config.opt_config import SPOT_SYMBOLS
-from src.core.exchange.upbit_client import UpbitClient
 
 logger = setup_logger("SpotBot")
 
