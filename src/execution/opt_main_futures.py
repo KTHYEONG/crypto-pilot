@@ -56,15 +56,17 @@ from src.domain.futures.funding_utils import merge_funding_into_ohlcv
 
 from src.domain.futures.opt_futures_utils.db_utils import save_study_to_sqlite
 from src.domain.futures.opt_futures_utils.cv_utils import build_cpcv_test_paths_with_fallback
-from src.domain.futures.opt_futures_utils.evaluator import (
-    evaluate_symbol_fold,
+from src.domain.futures.opt_futures_utils.objective import (
     objective_futures,
+)
+from src.domain.futures.opt_futures_utils.oos_evaluator import (
+    evaluate_symbol_fold,
     run_oos_margin_shared_portfolio,
     run_multi_window_oos_holdout,
     compute_regime_conditional_oos_metrics,
 )
-from src.domain.futures.opt_futures_utils.go_nogo import run_go_nogo_check
-from src.domain.futures.opt_futures_utils.go_nogo_futures import (
+from src.domain.futures.opt_futures_utils.go_nogo import (
+    run_go_nogo_check,
     FuturesDeploymentReportInput,
     FuturesSymbolGateRow,
     run_futures_deployment_report,
@@ -1041,7 +1043,7 @@ def main() -> None:
         total_gross_oos = 0.0
         is_cagrs: List[float] = []
 
-        from src.domain.spot.opt_spot_utils.evaluator import _segment_with_context
+        from src.domain.spot.opt_spot_utils.data_utils import _segment_with_context
 
         for s_eval in target_symbols:
             # IS Evaluation (Consistency check)
@@ -1151,7 +1153,7 @@ def main() -> None:
             pbo_n_paths = len(cpcv_paths_pbo)
             all_blocks_pbo = list_cpcv_block_ranges(ref_len_pbo, nb_pbo, emb_pbo)
             if len(oos_log_tw) == pbo_n_paths and all_blocks_pbo:
-                from src.domain.futures.opt_futures_utils.evaluator import run_cpcv_complement_evaluation
+                from src.domain.futures.opt_futures_utils.oos_evaluator import run_cpcv_complement_evaluation
                 pbo_val, rho_val = run_cpcv_complement_evaluation(
                     params,
                     target_symbols,
