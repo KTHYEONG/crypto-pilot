@@ -50,7 +50,7 @@ _logger: logging.Logger = logging.getLogger("opt_futures")
 
 
 def compute_embargo_bars(tf: str, longest_indicator_period: int = 150) -> int:
-    fixed_min: Dict[str, int] = {"1h": 24, "4h": 6}
+    fixed_min: Dict[str, int] = {"1h": 24, "4h": 12}
     ratio_map: Dict[str, float] = {"1h": 0.08, "4h": 0.05}
     ratio: float = ratio_map.get(tf, 0.03)
     return max(fixed_min.get(tf, 2), int(longest_indicator_period * ratio))
@@ -225,6 +225,12 @@ def objective_futures(
                 if trades_df is None or trades_df.empty:
                     raise optuna.TrialPruned()
 
+                # 심볼별 최소 트레이드 수 체크: 특정 심볼이 0거래면 신호 미작동 → prune
+                if "symbol" in trades_df.columns and len(symbols) > 1:
+                    for _sym in symbols:
+                        if int((trades_df["symbol"] == _sym).sum()) == 0:
+                            raise optuna.TrialPruned()
+
                 ret_pct = float((final_balance / segment_initial - 1.0) * 100.0)
                 raw_log = _log_tw_from_ret_pct(ret_pct)
                 running_balance = max(float(final_balance), 1e-9)
@@ -289,7 +295,7 @@ def objective_futures(
                 )
                 lg = _log_tw_from_ret_pct(ret_pct)
                 if mdd_pct >= liq_mdd_thr:
-                    lg -= 1e9
+                    raise optuna.TrialPruned()
                 denom = max(abs(gross), 1e-9)
                 sym_fund_r.append(float(fpaid) / denom)
                 sym_logs.append(lg)
@@ -354,7 +360,12 @@ def objective_futures(
     n_p_raw = len(path_compound_raw_log_tw)
     temporal_decay_pen = 0.0
     if n_p_raw >= 4 and temporal_lambda > 0.0:
-        tw_raw_arr = np.asarray(path_compound_raw_log_tw, dtype=np.float64)
+        # 각 CPCV path의 test block 평균 중심 위치 기준으로 시간순 정렬
+        path_center_times = [
+            float(np.mean([(s + e) / 2.0 for s, e in p])) for p in cpcv_paths
+        ]
+        time_sort_idx = np.argsort(path_center_times)
+        tw_raw_arr = np.asarray(path_compound_raw_log_tw, dtype=np.float64)[time_sort_idx]
         k_recent = max(2, n_p_raw // 4)
         all_mean_tw = float(np.mean(tw_raw_arr))
         recent_mean_tw = float(np.mean(tw_raw_arr[-k_recent:]))
@@ -406,10 +417,10 @@ def objective_futures(
         if tr_val > 1.5:
              sortino_bonus += min(0.5, (tr_val - 1.5) * 0.1)
              
-        # Add CAGR bonus to force TPE to seek growth (up to 30%)
+        # CAGR bonus (상한 0.25: IS 과적합 억제)
         mean_path_ret_pct = float(np.mean(np.expm1(path_arr) * 100.0)) if path_arr.size else 0.0
         if mean_path_ret_pct > 0:
-            cagr_bonus = min(1.0, mean_path_ret_pct / 30.0)
+            cagr_bonus = min(0.25, mean_path_ret_pct / 30.0)
 
     objective_final = float(
         kelly_obj
@@ -447,6 +458,11 @@ def objective_futures(
     minority = float(min(tot_l, tot_s))
     majority = float(max(tot_l + tot_s, 1.0))
     ls_ratio = minority / majority
+
+    # Long/Short 불균형 페널티 (20% 초과 시 활성화, weight 2.0)
+    ls_imbalance = abs(tot_l - tot_s) / (tot_l + tot_s + 1e-9)
+    ls_balance_pen = max(0.0, ls_imbalance - 0.20) * 2.0
+    objective_final -= ls_balance_pen
 
     n_cpcv_paths = int(len(cpcv_paths))
     worst_seg_mdd_pct = float(np.max(path_mdds)) if path_mdds else 0.0
