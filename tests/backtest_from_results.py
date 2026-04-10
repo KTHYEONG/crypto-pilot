@@ -5,176 +5,219 @@ import argparse
 import pandas as pd
 import numpy as np
 from pathlib import Path
+from typing import Any, Dict, List, Optional
 
 # Project Root Setup
 project_root: str = str(Path(__file__).resolve().parents[1])
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-from src.domain.futures.data_collector import DataCollector
-from src.domain.futures.strategies_futures import UltimateStrategy
-from src.domain.futures.funding_utils import merge_funding_into_ohlcv
-from src.domain.futures.opt_futures_utils.oos_evaluator import evaluate_symbol_fold as evaluate_symbol_fold_futures
+from src.core.utils.secure_config import decrypt_config, get_strategy_secret
+from config.settings import DATA_DIR, SPOT_INITIAL_BALANCE
+from config.opt_config import (
+    get_quarterly_window, 
+    SPOT_SYMBOLS, 
+    FUTURES_SYMBOLS,
+    SPOT_ANCHOR_SYMBOLS,
+    FUTURES_ANCHOR_SYMBOLS
+)
 
 # Spot Imports
 from src.domain.spot.data_collector_spot import DataCollectorSpot
 from src.domain.spot.strategies_spot import UltimateSpotStrategy
-from src.domain.spot.opt_spot_utils.oos_evaluator import evaluate_symbol_fold as evaluate_symbol_fold_spot
+from src.domain.spot.opt_spot_utils.oos_evaluator import (
+    run_holdout_shared_cash_portfolio,
+    evaluate_symbol_fold as evaluate_symbol_fold_spot
+)
+from src.domain.spot.opt_spot_utils.data_utils import compute_segment_merge_index
 
-from src.core.optimization.opt_utils import compute_segment_merge_index
-from config.settings import DATA_DIR
-from config.opt_config import get_quarterly_window
+# Futures Imports
+from src.domain.futures.data_collector import DataCollector
+from src.domain.futures.strategies_futures import UltimateStrategy as UltimateFuturesStrategy
+from src.domain.futures.funding_utils import merge_funding_into_ohlcv
+from src.domain.futures.opt_futures_utils.oos_evaluator import (
+    run_oos_margin_shared_portfolio,
+    evaluate_symbol_fold as evaluate_symbol_fold_futures
+)
 
-def main():
-    parser = argparse.ArgumentParser(description="Run futures/spot backtests using results JSON files.")
-    parser.add_argument("--file", type=str, help="Comma-separated paths to JSON parameter files (e.g., results/file1.json,results/file2.json)")
-    parser.add_argument("--type", type=str, choices=["k", "u"], help="Type of strategies to backtest: 'k' for KRW/Spot (Upbit), 'u' for USDT/Futures (Binance)")
-    parser.add_argument("--reference-date", type=str, default=None, help="Reference date for quarterly window (YYYY-MM-DD)")
-    args = parser.parse_args()
-
-    # 1. Resolve File Paths
-    json_files = []
-    if args.file:
-        raw_paths = [p.strip() for p in args.file.split(',')]
-        for rp in raw_paths:
-            if rp:
-                p = Path(rp)
-                if p.exists():
-                    json_files.append(p)
-                else:
-                    print(f"Warning: File not found - {p}")
+def load_params(file_path: Path) -> Dict[str, Any]:
+    """Load parameters from JSON or ENC file."""
+    if file_path.suffix == ".enc":
+        secret = get_strategy_secret()
+        if not secret:
+            raise ValueError(f"STRATEGY_SECRET_KEY not set. Cannot decrypt {file_path}")
+        return decrypt_config(file_path.read_bytes(), secret)
     else:
-        # Default scan based on type
-        results_dir = Path(project_root) / "results"
-        if not results_dir.exists():
-            print(f"Results directory not found: {results_dir}")
-            return
-            
-        pattern = "*USDT*.json"
-        if args.type == "k":
-            pattern = "*KRW*.json"
-        elif args.type == "u":
-            pattern = "*USDT*.json"
-            
-        json_files = sorted(list(results_dir.glob(pattern)))
-        if json_files:
-            type_label = "USDT/Futures" if "USDT" in pattern else "KRW/Spot"
-            print(f"No files specified. Auto-detecting {len(json_files)} {type_label} result files...\n")
-        else:
-            print(f"No matching result files found in {results_dir} for pattern {pattern}")
-            return
+        with open(file_path, 'r', encoding='utf-8') as f:
+            return json.load(f)
 
-    if not json_files:
-        print("No valid parameter files to process.")
+def run_spot_portfolio(params: Dict[str, Any], reference_date: Optional[str] = None):
+    """Run portfolio backtest for Spot."""
+    FETCH_START, START, IS_END, END = get_quarterly_window(reference_date)
+    collector = DataCollectorSpot()
+    symbols = SPOT_SYMBOLS
+    tf = params.get("TIMEFRAME", "4h")
+    
+    data_maps = {}
+    print(f"Loading data for {len(symbols)} Spot symbols...")
+    
+    # 1. Collect all symbol data
+    for sym in symbols:
+        df_tf = collector.collect_and_save(sym, tf, FETCH_START, END)
+        df_1d = collector.collect_and_save(sym, "1d", FETCH_START, END)
+        if df_tf is None or df_tf.empty:
+            continue
+            
+        data_maps[sym] = {
+            tf: df_tf,
+            "1d": df_1d,
+        }
+
+    valid_symbols = list(data_maps.keys())
+    if not valid_symbols:
+        print("No valid data for symbols.")
         return
 
-    # 2. Setup Context
-    FETCH_START_DATE, START_DATE, IS_END_DATE, END_DATE = get_quarterly_window(args.reference_date)
-    
-    # Collectors
-    collector_futures = DataCollector()
-    collector_spot = DataCollectorSpot()
-    
-    # Cache for data
-    data_cache = {}
+    # 2. Add Benchmark (BTC/ETH) if available for regime/mb
+    for b_sym in ["KRW-BTC", "KRW-ETH"]:
+        if b_sym in valid_symbols:
+            b_data = data_maps[b_sym][tf][["datetime", "close"]].copy()
+            suffix = "btc_close" if "BTC" in b_sym else "eth_close"
+            b_data = b_data.rename(columns={"close": suffix})
+            for sym in valid_symbols:
+                if sym != b_sym:
+                    data_maps[sym][tf] = data_maps[sym][tf].merge(b_data, on="datetime", how="left")
 
-    for json_path in json_files:
-        with open(json_path, 'r', encoding='utf-8') as f:
-            params = json.load(f)
+    # 3. Setup Indices for OOS Evaluator
+    for sym in valid_symbols:
+        df = data_maps[sym][tf]
+        tz = df["datetime"].dt.tz
+        is_end_dt = pd.to_datetime(IS_END).tz_localize(tz) if tz else pd.to_datetime(IS_END)
+        m_oos = df["datetime"] >= is_end_dt
+        data_maps[sym][f"oos_start_idx_{tf}"] = int(m_oos.to_numpy().argmax()) if m_oos.any() else len(df)
+        data_maps[sym][f"merge_idx_{tf}"] = compute_segment_merge_index(df, data_maps[sym]["1d"])
 
-        filename = json_path.stem
-        
-        # Determine if it's Spot or Futures based on filename
-        is_spot = "KRW" in filename
-        current_type = "SPOT" if is_spot else "FUTURES"
-        
-        # Extract symbol
-        parts = filename.split('_')
-        symbol = "UNKNOWN"
-        for p in parts:
-            if "USDT" in p or "KRW" in p:
-                symbol = p
-                break
-        
-        tf = params.get("TIMEFRAME", "4h")
-        
-        # Clean symbol for Collector
-        clean_symbol = symbol
-        if "/" not in symbol:
-            if symbol.endswith("USDT"):
-                clean_symbol = f"{symbol[:-4]}/USDT"
-            elif symbol.startswith("KRW-"):
-                clean_symbol = symbol
-            elif symbol.startswith("KRW"):
-                clean_symbol = f"KRW-{symbol[3:]}"
-        
-        print(f"────────────────────────────────────────────────────────────────────────────────")
-        print(f"[{current_type}] {clean_symbol} ({tf}) | File: {json_path.name}")
-        
-        # 3. Load Data
-        cache_key = (clean_symbol, tf, current_type)
-        if cache_key not in data_cache:
-            try:
-                if is_spot:
-                    df_tf = collector_spot.collect_and_save(clean_symbol, tf, FETCH_START_DATE, END_DATE)
-                    df_1d = collector_spot.collect_and_save(clean_symbol, "1d", FETCH_START_DATE, END_DATE)
-                else:
-                    df_tf = collector_futures.collect_and_save(clean_symbol, tf, FETCH_START_DATE, END_DATE)
-                    df_1d = collector_futures.collect_and_save(clean_symbol, "1d", FETCH_START_DATE, END_DATE)
-                    df_tf = merge_funding_into_ohlcv(clean_symbol, df_tf, DATA_DIR)
-                data_cache[cache_key] = (df_tf, df_1d)
-            except Exception as e:
-                print(f"Error loading data for {clean_symbol}: {e}")
-                continue
-        
-        full_df_main, full_df_daily = data_cache[cache_key]
-        if full_df_main is None or full_df_main.empty:
-            print(f"Skipping {clean_symbol}: No data found.")
+    # 4. Run Portfolio Evaluator
+    print(f"Running Spot Portfolio Backtest (OOS from {IS_END} to {END})...")
+    res = run_holdout_shared_cash_portfolio(params, valid_symbols, tf, data_maps)
+    
+    print_portfolio_report(res, "SPOT")
+
+def run_futures_portfolio(params: Dict[str, Any], reference_date: Optional[str] = None):
+    """Run portfolio backtest for Futures."""
+    FETCH_START, START, IS_END, END = get_quarterly_window(reference_date)
+    collector = DataCollector()
+    symbols = FUTURES_SYMBOLS
+    tf = params.get("TIMEFRAME", "4h")
+    
+    oos_data_maps = {}
+    print(f"Loading data for {len(symbols)} Futures symbols...")
+    
+    for sym in symbols:
+        df_tf = collector.collect_and_save(sym, tf, FETCH_START, END)
+        if df_tf is None or df_tf.empty:
             continue
-
-        # Setup Indices
-        tz = full_df_main["datetime"].dt.tz
-        is_start_dt = pd.to_datetime(START_DATE).tz_localize(tz) if tz else pd.to_datetime(START_DATE)
-        is_end_dt = pd.to_datetime(IS_END_DATE).tz_localize(tz) if tz else pd.to_datetime(IS_END_DATE)
         
-        # IS Data
-        is_df_tf = full_df_main[full_df_main["datetime"] < is_end_dt].reset_index(drop=True)
-        is_df_1d = full_df_daily[full_df_daily["datetime"] < is_end_dt].reset_index(drop=True)
-        m = is_df_tf["datetime"] >= is_start_dt
-        is_start_idx = int(m.to_numpy().argmax()) if m.any() else 0
-        merge_idx_is = compute_segment_merge_index(is_df_tf, is_df_1d)
+        # Merge funding
+        df_tf = merge_funding_into_ohlcv(sym, df_tf, DATA_DIR)
         
-        # OOS Data
-        oos_start_m = full_df_main["datetime"] >= is_end_dt
-        oos_start_idx = int(oos_start_m.to_numpy().argmax()) if oos_start_m.any() else len(full_df_main)
-        merge_idx_oos = compute_segment_merge_index(full_df_main, full_df_daily)
+        tz = df_tf["datetime"].dt.tz
+        is_end_dt = pd.to_datetime(IS_END).tz_localize(tz) if tz else pd.to_datetime(IS_END)
+        m_oos = df_tf["datetime"] >= is_end_dt
+        
+        oos_data_maps[sym] = {
+            tf: df_tf,
+            f"oos_start_idx_{tf}": int(m_oos.to_numpy().argmax()) if m_oos.any() else len(df_tf)
+        }
 
-        # 4. Run Backtests
+    valid_symbols = list(oos_data_maps.keys())
+    if not valid_symbols:
+        print("No valid data for symbols.")
+        return
+
+    print(f"Running Futures Portfolio Backtest (OOS from {IS_END} to {END})...")
+    res = run_oos_margin_shared_portfolio(valid_symbols, tf, params, oos_data_maps)
+    
+    if res.get("ok"):
+        print_portfolio_report(res, "FUTURES")
+    else:
+        print("Futures portfolio backtest failed.")
+
+def print_portfolio_report(res: Dict[str, Any], mode: str):
+    """Print a clean report for portfolio backtest results."""
+    print(f"\n============================================================")
+    print(f" [{mode} PORTFOLIO BACKTEST REPORT]")
+    print(f"============================================================")
+    
+    if mode == "SPOT":
+        cagr = res.get("portfolio_cagr_pct", 0.0)
+        mdd = res.get("mdd_pct", 0.0)
+        pf = res.get("profit_factor", 0.0)
+        wr = res.get("win_rate_pct", 0.0)
+        trds = res.get("long_trades", 0)
+        moic = res.get("moic", 1.0)
+        tail = res.get("tail_ratio", 0.0)
+        calmar = res.get("calmar_ratio", 0.0)
+    else:
+        cagr = res.get("cagr_pct", 0.0)
+        mdd = res.get("mdd_pct", 0.0)
+        pf = res.get("profit_factor", 0.0)
+        wr = res.get("win_rate_pct", 0.0)
+        trds = res.get("total_trades", 0)
+        moic = res.get("moic", 1.0)
+        tail = res.get("tail_ratio", 0.0)
+        calmar = res.get("calmar_ratio", 0.0)
+
+    print(f" CAGR          : {cagr:>8.2f}%")
+    print(f" MDD           : {mdd:>8.2f}%")
+    print(f" Profit Factor : {pf:>8.2f}")
+    print(f" Win Rate      : {wr:>8.2f}%")
+    print(f" Total Trades  : {int(trds):>8}")
+    print(f" MOIC          : {moic:>8.2f}x")
+    print(f" Tail Ratio    : {tail:>8.2f}")
+    print(f" Calmar Ratio  : {calmar:>8.2f}")
+    print(f"============================================================\n")
+
+def main():
+    parser = argparse.ArgumentParser(description="Clean backtest runner from optimization results.")
+    parser.add_argument("--file", type=str, help="Path to result .json or .enc file")
+    parser.add_argument("--reference-date", type=str, default=None, help="Reference date (YYYY-MM-DD)")
+    args = parser.parse_args()
+
+    if not args.file:
+        print("Usage: python backtest_from_results.py --file results/best_spot_4h.json")
+        return
+
+    file_path = Path(args.file)
+    if not file_path.exists():
+        print(f"File not found: {file_path}")
+        return
+
+    try:
+        params = load_params(file_path)
+    except Exception as e:
+        print(f"Error loading params: {e}")
+        return
+
+    filename = file_path.name.lower()
+    
+    # Logic to determine if it's Spot or Futures and if it's Portfolio or Single
+    is_spot = "spot" in filename or "krw" in filename
+    is_portfolio = "best_spot" in filename or "best_futures" in filename or "multi" in filename
+
+    if is_portfolio:
         if is_spot:
-            # Spot logic
-            strat_is = UltimateSpotStrategy(name=f"IS_{clean_symbol}", params=params)
-            res_is = evaluate_symbol_fold_spot(strat_is, params, clean_symbol, tf, is_df_tf, is_df_1d, merge_idx_is, None, is_start_idx, len(is_df_tf))
-            
-            strat_oos = UltimateSpotStrategy(name=f"OOS_{clean_symbol}", params=params)
-            res_oos = evaluate_symbol_fold_spot(strat_oos, params, clean_symbol, tf, full_df_main, full_df_daily, merge_idx_oos, None, oos_start_idx, len(full_df_main))
+            run_spot_portfolio(params, args.reference_date)
         else:
-            # Futures logic
-            strat_is = UltimateStrategy(name=f"IS_{clean_symbol}", params=params)
-            res_is = evaluate_symbol_fold_futures(strat_is, params, clean_symbol, tf, is_df_tf, is_df_1d, merge_idx_is, None, is_start_idx, len(is_df_tf))
-            
-            strat_oos = UltimateStrategy(name=f"OOS_{clean_symbol}", params=params)
-            res_oos = evaluate_symbol_fold_futures(strat_oos, params, clean_symbol, tf, full_df_main, full_df_daily, merge_idx_oos, None, oos_start_idx, len(full_df_main))
-
-        # 5. Output Results
-        def format_res(res, spot=False):
-            # res: (cagr, ret_pct, mdd_pct, trd, wr, pf, lc, sc?, eq)
-            cagr, ret, mdd, trd, wr, pf = res[0], res[1], res[2], res[3], res[4], res[5]
-            return f"CAGR: {cagr:>7.2f}% | Ret: {ret:>5.1f}% | MDD: {mdd:>5.1f}% | Trd: {int(trd):>4} | PF: {pf:>4.2f} | Win: {wr:>4.1f}%"
-
-        print(f"  > IS : {format_res(res_is, is_spot)}")
-        print(f"  > OOS: {format_res(res_oos, is_spot)}")
-
-    print(f"────────────────────────────────────────────────────────────────────────────────\n")
+            run_futures_portfolio(params, args.reference_date)
+    else:
+        # Fallback to single symbol if possible (not requested but good to have)
+        print("Single symbol backtest detected (based on filename). Running simplified backtest...")
+        # For now, recommend using the portfolio mode for best_spot results.
+        if is_spot:
+            run_spot_portfolio(params, args.reference_date)
+        else:
+            run_futures_portfolio(params, args.reference_date)
 
 if __name__ == "__main__":
     main()
