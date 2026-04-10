@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from types import SimpleNamespace
+
 
 import numpy as np
 import pandas as pd
@@ -11,45 +11,10 @@ from src.domain.futures.sizing import FUTURES_SIZING_REGISTRY
 from src.strategy_base import (
     MasterStrategyBase,
     StrategyBase,
-    UltimateStrategyBase,
+    PipelineStrategyBase,
 )
 
-from src.core.indicators.indicators_advanced_futures import (
-    calculate_adx,
-    calculate_aroon,
-    calculate_atr,
-    calculate_bollinger_bands,
-    calculate_cci,
-    calculate_cmf,
-    calculate_dema,
-    calculate_dmi,
-    calculate_efficiency_ratio,
-    calculate_ema,
-    calculate_force_index,
-    calculate_garman_klass_vol,
-    calculate_hma,
-    calculate_hurst_exponent,
-    calculate_ichimoku,
-    calculate_keltner_channel,
-    calculate_keltner_channels,
-    calculate_macd,
-    calculate_mfi,
-    calculate_natr,
-    calculate_obv,
-    calculate_parabolic_sar,
-    calculate_rsi,
-    calculate_sma,
-    calculate_stoch_rsi,
-    calculate_stochastic,
-    calculate_supertrend,
-    calculate_tema,
-    calculate_vhf,
-    calculate_vwap,
-    calculate_vwma,
-    calculate_roc,
-    calculate_williams_r,
-)
-
+from src.core.indicators.indicators import get_indicator_engine
 
 class Strategy(StrategyBase):
     pass
@@ -59,44 +24,10 @@ class MasterStrategy(MasterStrategyBase):
     pass
 
 
-_FUTURES_INDICATORS = SimpleNamespace(
-    calculate_sma=calculate_sma,
-    calculate_ema=calculate_ema,
-    calculate_hma=calculate_hma,
-    calculate_dema=calculate_dema,
-    calculate_tema=calculate_tema,
-    calculate_supertrend=calculate_supertrend,
-    calculate_atr=calculate_atr,
-    calculate_bollinger_bands=calculate_bollinger_bands,
-    calculate_keltner_channel=calculate_keltner_channel,
-    calculate_keltner_channels=calculate_keltner_channels,
-    calculate_adx=calculate_adx,
-    calculate_vhf=calculate_vhf,
-    calculate_parabolic_sar=calculate_parabolic_sar,
-    calculate_rsi=calculate_rsi,
-    calculate_stochastic=calculate_stochastic,
-    calculate_stoch_rsi=calculate_stoch_rsi,
-    calculate_macd=calculate_macd,
-    calculate_ichimoku=calculate_ichimoku,
-    calculate_cci=calculate_cci,
-    calculate_mfi=calculate_mfi,
-    calculate_vwap=calculate_vwap,
-    calculate_cmf=calculate_cmf,
-    calculate_hurst_exponent=calculate_hurst_exponent,
-    calculate_efficiency_ratio=calculate_efficiency_ratio,
-    calculate_natr=calculate_natr,
-    calculate_garman_klass_vol=calculate_garman_klass_vol,
-    calculate_dmi=calculate_dmi,
-    calculate_aroon=calculate_aroon,
-    calculate_force_index=calculate_force_index,
-    calculate_williams_r=calculate_williams_r,
-    calculate_obv=calculate_obv,
-    calculate_roc=calculate_roc,
-    calculate_vwma=calculate_vwma,
-)
+_FUTURES_INDICATORS = get_indicator_engine(domain="futures")
 
 
-class UltimateStrategy(UltimateStrategyBase):
+class FuturesPipelineStrategy(PipelineStrategyBase):
     """
     Futures: plugin signal × regime × sizing dispatch.
     ENTRY_SHIFT: signal at i uses bar i-1 for entry columns (engine reads prev bar).
@@ -124,7 +55,6 @@ class UltimateStrategy(UltimateStrategyBase):
         long_e = sig_out.long_entry.astype(np.bool_)
         short_e = sig_out.short_entry.astype(np.bool_)
         close_a = df["close"].to_numpy(dtype=np.float64)
-        n = len(close_a)
         df["trend_direction"] = np.where(long_e, 1.0, np.where(short_e, -1.0, 0.0))
         df["entry_upper"] = np.where(long_e, 0.0, 999999.0)
         df["entry_lower"] = np.where(short_e, close_a, 0.0)
