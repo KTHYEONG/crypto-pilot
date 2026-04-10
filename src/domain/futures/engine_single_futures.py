@@ -6,6 +6,7 @@ import logging
 import numpy as np
 import pandas as pd
 from numba import njit
+from src.domain.futures.engine_logic_futures import process_long_scale_out, process_short_scale_out, check_long_exit, check_short_exit, calculate_position_size, check_intra_bar_stop
 
 from config.settings import TRADING_FEE_RATE, SLIPPAGE_RATE, FUNDING_FEE_RATE
 
@@ -358,67 +359,45 @@ def backtest_loop_numba(
                     highest = c_high
                 pos_atr = atr[entry_idx]
                 
-                # Long: scale-out 50% at ATR-based target from entry
                 if not has_scaled_out:
-                    scale_price = entry_price + (pos_atr * long_scale_atr_mult)
-                    if c_high >= scale_price:
-                        scale_exit_price = c_open if c_open >= scale_price else scale_price
-                        scale_amount = amount / 2.0
-                        pnl_scale = (scale_exit_price - entry_price) * scale_amount
-                        exit_fee_scale = scale_amount * scale_exit_price * fee_rate
-                        pnl_scale -= exit_fee_scale
-                        balance += (scale_amount * entry_price) / leverage + pnl_scale
+                    triggered, sc_price, sc_amount, pnl_scale, exit_fee_scale = process_long_scale_out(
+                        c_open, c_high, entry_price, pos_atr, long_scale_atr_mult, amount, fee_rate
+                    )
+                    if triggered:
+                        balance += (sc_amount * entry_price) / leverage + pnl_scale - exit_fee_scale
                         if trade_count < max_trades:
-                            trades[trade_count] = [entry_idx, i, pos_side, entry_price, scale_exit_price, pnl_scale, scale_amount, entry_fee_stored / 2.0]
+                            trades[trade_count] = [entry_idx, i, pos_side, entry_price, sc_price, pnl_scale - exit_fee_scale, sc_amount, entry_fee_stored / 2.0]
                             trade_count += 1
-                        amount -= scale_amount
+                        amount -= sc_amount
                         entry_fee_stored -= (entry_fee_stored / 2.0)
                         has_scaled_out = True
 
-                # Long trailing stop for remainder
-                if c_open <= stop_price:
-                    exit_price = c_open * (1 - slippage_rate)
-                    exit_triggered = True
-                elif c_low <= stop_price:
-                    exit_price = stop_price * (1 - slippage_rate)
-                    exit_triggered = True
-                if not exit_triggered:
-                    new_stop = highest - (pos_atr * long_trail_mult)
-                    if new_stop > stop_price:
-                        stop_price = new_stop
+                exit_triggered, exit_price, stop_price = check_long_exit(
+                    c_open, c_low, highest, pos_atr, stop_price, long_trail_mult, slippage_rate
+                )
 
             elif pos_side == -1:
                 if c_low < lowest:
                     lowest = c_low
-                tp_price = entry_price - (atr[entry_idx] * short_tp_mult)
+                pos_atr = atr[entry_idx]
 
                 if not has_scaled_out:
-                    if c_open <= tp_price or c_low <= tp_price:
-                        scale_exit_price = c_open if c_open <= tp_price else tp_price
-                        scale_amount = amount / 2.0
-                        pnl_scale = (entry_price - scale_exit_price) * scale_amount
-                        exit_fee_scale = scale_amount * scale_exit_price * fee_rate
-                        pnl_scale -= exit_fee_scale
-                        balance += (scale_amount * entry_price) / leverage + pnl_scale
+                    triggered, sc_price, sc_amount, pnl_scale, exit_fee_scale = process_short_scale_out(
+                        c_open, c_low, entry_price, pos_atr, short_tp_mult, amount, fee_rate
+                    )
+                    if triggered:
+                        balance += (sc_amount * entry_price) / leverage + pnl_scale - exit_fee_scale
                         if trade_count < max_trades:
-                            trades[trade_count] = [entry_idx, i, pos_side, entry_price, scale_exit_price, pnl_scale, scale_amount, entry_fee_stored / 2.0]
+                            trades[trade_count] = [entry_idx, i, pos_side, entry_price, sc_price, pnl_scale - exit_fee_scale, sc_amount, entry_fee_stored / 2.0]
                             trade_count += 1
-                        amount -= scale_amount
+                        amount -= sc_amount
                         entry_fee_stored -= (entry_fee_stored / 2.0)
                         has_scaled_out = True
-                        breakeven_price = entry_price - (entry_price * fee_rate * 2.0)
-                        stop_price = breakeven_price
+                        stop_price = entry_price - (entry_price * fee_rate * 2.0)
                 else:
-                    new_stop = lowest + (atr[entry_idx] * short_trail_mult)
-                    if new_stop < stop_price:
-                        stop_price = new_stop
-
-                if c_open >= stop_price:
-                    exit_price = c_open * (1 + slippage_rate)
-                    exit_triggered = True
-                elif c_high >= stop_price:
-                    exit_price = stop_price * (1 + slippage_rate)
-                    exit_triggered = True
+                    exit_triggered, exit_price, stop_price = check_short_exit(
+                        c_open, c_high, lowest, pos_atr, stop_price, short_trail_mult, slippage_rate
+                    )
 
             if exit_triggered:
                 if pos_side == 1: pnl = (exit_price - entry_price) * amount
@@ -476,17 +455,10 @@ def backtest_loop_numba(
                 stop_distance = abs(fill_price - stop_price)
                 if stop_distance > 0:
                     current_equity = max_capital_usage if use_compounding and balance > max_capital_usage else balance
-                    kf = garch_kelly_f[prev_i]
-                    if np.isnan(kf) or kf <= 0.0:
-                        kf = 1.0
-                    eff_risk = risk_per_trade * float(kf)
-                    amount = (current_equity * eff_risk) / stop_distance
-                    max_amount = (current_equity * leverage) / fill_price
-                    amount = min(amount, max_amount)
-                    sf_clamped = sf_raw if sf_raw <= 1.0 else 1.0
-                    if sf_clamped < 0.0:
-                        sf_clamped = 0.0
-                    amount *= sf_clamped
+                    amount = calculate_position_size(
+                        fill_price, stop_distance, current_equity, current_equity, 
+                        risk_per_trade, leverage, sf_raw, garch_kelly_f[prev_i]
+                    )
                     
                     required_margin = (amount * fill_price) / leverage
                     entry_fee = amount * fill_price * fee_rate
@@ -501,25 +473,14 @@ def backtest_loop_numba(
                         lowest = fill_price
                         has_scaled_out = False
 
-                        # Intra-bar instant stop check
-                        if pos_side == 1 and c_low <= stop_price:
-                            intra_exit_price = stop_price * (1 - slippage_rate)
-                            pnl = (intra_exit_price - entry_price) * amount
-                            exit_fee_intra = amount * intra_exit_price * fee_rate
-                            pnl -= exit_fee_intra
-                            balance += (amount * entry_price) / leverage + pnl
+                        triggered, intra_exit_price, pnl_intra, exit_fee_intra = check_intra_bar_stop(
+                            pos_side, c_high, c_low, stop_price, entry_price, amount, fee_rate, slippage_rate
+                        )
+                        if triggered:
+                            pnl_intra -= exit_fee_intra
+                            balance += (amount * entry_price) / leverage + pnl_intra
                             if trade_count < max_trades:
-                                trades[trade_count] = [entry_idx, i, pos_side, entry_price, intra_exit_price, pnl, amount, entry_fee_stored]
-                                trade_count += 1
-                            in_position = False
-                        elif pos_side == -1 and c_high >= stop_price:
-                            intra_exit_price = stop_price * (1 + slippage_rate)
-                            pnl = (entry_price - intra_exit_price) * amount
-                            exit_fee_intra = amount * intra_exit_price * fee_rate
-                            pnl -= exit_fee_intra
-                            balance += (amount * entry_price) / leverage + pnl
-                            if trade_count < max_trades:
-                                trades[trade_count] = [entry_idx, i, pos_side, entry_price, intra_exit_price, pnl, amount, entry_fee_stored]
+                                trades[trade_count] = [entry_idx, i, pos_side, entry_price, intra_exit_price, pnl_intra, amount, entry_fee_stored]
                                 trade_count += 1
                             in_position = False
 

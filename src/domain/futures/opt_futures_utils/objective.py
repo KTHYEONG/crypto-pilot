@@ -18,7 +18,7 @@ from config.settings import (
     SLIPPAGE_RATE,
     TRADING_FEE_RATE,
 )
-from src.domain.futures.engine_portfolio_futures import PortfolioBacktestEngineFast
+from src.domain.futures.engine_multi_futures import PortfolioBacktestEngineFast
 from src.domain.futures.opt_futures_utils.cv_utils import (
     build_cpcv_test_paths_with_fallback,
 )
@@ -557,13 +557,3 @@ def objective_futures(
     trial.set_user_attr("growth_score", float(objective_final))
 
     return objective_final
-
-
-
-
-
-
-
-
-
-
