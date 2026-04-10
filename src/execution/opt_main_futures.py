@@ -34,7 +34,7 @@ if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
 from src.domain.futures.data_collector import DataCollector
-from src.domain.futures.strategies_futures import UltimateStrategy
+from src.domain.futures.strategies_futures import FuturesPipelineStrategy
 from config.settings import (
     FUTURES_CACHE_DIR,
     FUTURES_DATA_DIR,
@@ -1048,7 +1048,7 @@ def main() -> None:
         for s_eval in target_symbols:
             # IS Evaluation (Consistency check)
             s_is, r_is, m_is, t_is, wr_is, pf_is, lc_is, sc_is, _, _, _ = evaluate_symbol_fold(
-                UltimateStrategy(name=f"IS_{s_eval}", params=params),
+                FuturesPipelineStrategy(name=f"IS_{s_eval}", params=params),
                 params,
                 s_eval,
                 tf_eval,
@@ -1073,7 +1073,7 @@ def main() -> None:
                 pre_oos_sig, exec_start_oos = None, 0
 
             s_oos, r_oos, m_oos, t_oos, wr_oos, pf_oos, lc_oos, sc_oos, _, fp_oos, gr_oos = evaluate_symbol_fold(
-                UltimateStrategy(name=f"OOS_{s_eval}", params=params),
+                FuturesPipelineStrategy(name=f"OOS_{s_eval}", params=params),
                 params,
                 s_eval,
                 tf_eval,

@@ -1,5 +1,5 @@
 """
-RSM-VT squeeze breakout (UltimateStrategyBase) adapted to FuturesSignalOutput.
+RSM-VT squeeze breakout (PipelineStrategyBase) adapted to FuturesSignalOutput.
 Causal; no positive shifts on price paths.
 """
 from __future__ import annotations
@@ -9,13 +9,13 @@ from typing import Any, ClassVar, Dict
 import numpy as np
 import pandas as pd
 
-from src.core.indicators.indicators_advanced_futures import (
-    calculate_atr,
-    calculate_ema,
-    calculate_sma,
-)
+from src.core.indicators.indicators import get_indicator_engine
 from src.domain.futures.signals.base import FuturesSignalOutput
 from src.domain.futures.signals.registry import register_futures_signal
+
+
+# Futures 전용 엔진 확보
+_ind = get_indicator_engine(domain="futures")
 
 
 @register_futures_signal
@@ -42,13 +42,13 @@ class RsmVtFuturesSignal:
         exhaustion_mult = float(params.get("EXHAUSTION_MULT", 4.0))
         squeeze_window = int(params.get("SQUEEZE_WINDOW", 5))
 
-        work["atr"] = calculate_atr(work, window=atr_period)
-        work["macro_ema"] = calculate_ema(work["close"], window=macro_ema_period)
-        work["bb_mid"] = calculate_sma(work["close"], window=20)
+        work["atr"] = _ind.calculate_atr(work, window=atr_period)
+        work["macro_ema"] = _ind.calculate_ema(work["close"], window=macro_ema_period)
+        work["bb_mid"] = _ind.calculate_sma(work["close"], window=20)
         std_dev = work["close"].rolling(window=20).std()
         work["bb_upper"] = work["bb_mid"] + (std_dev * 2.0)
         work["bb_lower"] = work["bb_mid"] - (std_dev * 2.0)
-        work["kc_mid"] = calculate_ema(work["close"], window=20)
+        work["kc_mid"] = _ind.calculate_ema(work["close"], window=20)
         work["kc_upper"] = work["kc_mid"] + (work["atr"] * kc_mult)
         work["kc_lower"] = work["kc_mid"] - (work["atr"] * kc_mult)
         work["is_squeezing"] = (work["bb_upper"] < work["kc_upper"]) & (work["bb_lower"] > work["kc_lower"])
