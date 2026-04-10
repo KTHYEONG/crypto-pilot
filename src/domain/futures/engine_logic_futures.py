@@ -1,0 +1,101 @@
+import numpy as np
+from numba import njit
+
+@njit(inline='always')
+def process_long_scale_out(
+    c_open: float, c_high: float, entry_price: float, pos_atr: float, 
+    l_scale_atr: float, amount: float, fee_rate: float
+):
+    scale_target = entry_price + (pos_atr * l_scale_atr)
+    if c_high >= scale_target:
+        sc_price = c_open if c_open >= scale_target else scale_target
+        sc_amount = amount / 2.0
+        pnl = (sc_price - entry_price) * sc_amount
+        fee = sc_amount * sc_price * fee_rate
+        return True, sc_price, sc_amount, pnl, fee
+    return False, 0.0, 0.0, 0.0, 0.0
+
+@njit(inline='always')
+def process_short_scale_out(
+    c_open: float, c_low: float, entry_price: float, pos_atr: float, 
+    s_tp_mult: float, amount: float, fee_rate: float
+):
+    tp_price = entry_price - (pos_atr * s_tp_mult)
+    if c_open <= tp_price or c_low <= tp_price:
+        sc_price = c_open if c_open <= tp_price else tp_price
+        sc_amount = amount / 2.0
+        pnl = (entry_price - sc_price) * sc_amount
+        fee = sc_amount * sc_price * fee_rate
+        return True, sc_price, sc_amount, pnl, fee
+    return False, 0.0, 0.0, 0.0, 0.0
+
+@njit(inline='always')
+def check_long_exit(
+    c_open: float, c_low: float, highest: float, pos_atr: float, 
+    stop_price: float, l_trail_mult: float, slippage_rate: float
+):
+    if c_open <= stop_price:
+        return True, c_open * (1.0 - slippage_rate), stop_price
+    elif c_low <= stop_price:
+        return True, stop_price * (1.0 - slippage_rate), stop_price
+    
+    new_stop = highest - (pos_atr * l_trail_mult)
+    if new_stop > stop_price:
+        stop_price = new_stop
+    return False, 0.0, stop_price
+
+@njit(inline='always')
+def check_short_exit(
+    c_open: float, c_high: float, lowest: float, pos_atr: float, 
+    stop_price: float, s_trail_mult: float, slippage_rate: float
+):
+    new_stop = lowest + (pos_atr * s_trail_mult)
+    if new_stop < stop_price:
+        stop_price = new_stop
+
+    if c_open >= stop_price:
+        return True, c_open * (1.0 + slippage_rate), stop_price
+    elif c_high >= stop_price:
+        return True, stop_price * (1.0 + slippage_rate), stop_price
+        
+    return False, 0.0, stop_price
+
+@njit(inline='always')
+def calculate_position_size(
+    fill_price: float, stop_distance: float, current_equity_for_risk: float, 
+    available_margin: float, risk_per_trade: float, leverage: float, 
+    sf: float, gk: float
+) -> float:
+    if np.isnan(gk) or gk <= 0.0:
+        gk = 1.0
+    eff_risk = risk_per_trade * float(gk)
+    risk_amt = current_equity_for_risk * eff_risk
+    target_qty = risk_amt / stop_distance
+    
+    max_qty = (available_margin * leverage) / fill_price
+    if max_qty < 0:
+        max_qty = 0.0
+    target_qty = min(target_qty, max_qty)
+
+    sf_c = sf if sf <= 1.0 else 1.0
+    if sf_c < 0.0:
+        sf_c = 0.0
+    target_qty *= sf_c
+    return target_qty
+
+@njit(inline='always')
+def check_intra_bar_stop(
+    pos_side: int, c_high: float, c_low: float, stop_price: float, 
+    entry_price: float, amount: float, fee_rate: float, slippage_rate: float
+):
+    if pos_side == 1 and c_low <= stop_price:
+        intra_exit_price = stop_price * (1.0 - slippage_rate)
+        pnl = (intra_exit_price - entry_price) * amount
+        exit_fee = amount * intra_exit_price * fee_rate
+        return True, intra_exit_price, pnl, exit_fee
+    elif pos_side == -1 and c_high >= stop_price:
+        intra_exit_price = stop_price * (1.0 + slippage_rate)
+        pnl = (entry_price - intra_exit_price) * amount
+        exit_fee = amount * intra_exit_price * fee_rate
+        return True, intra_exit_price, pnl, exit_fee
+    return False, 0.0, 0.0, 0.0
