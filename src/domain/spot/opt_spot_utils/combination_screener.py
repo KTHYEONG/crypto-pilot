@@ -18,7 +18,7 @@ from optuna.trial import TrialState
 
 from config.opt_config import OPT_SPOT_CONFIG, SPOT_EXCLUDED_SIZING_METHODS
 from src.domain.spot.opt_spot_utils.cv_utils import build_cpcv_test_paths_with_fallback
-from src.domain.spot.opt_spot_utils.evaluator import EMBARGO_BARS, objective_spot
+from src.domain.spot.opt_spot_utils.objective import EMBARGO_BARS, objective_spot
 from src.domain.spot.opt_spot_utils.opt_params import build_combined_param_space
 
 _logger = logging.getLogger("combination_screener")
