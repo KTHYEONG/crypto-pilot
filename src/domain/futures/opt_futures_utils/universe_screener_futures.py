@@ -427,14 +427,14 @@ def screen_futures_symbol_refinement(
             sym, df, d1, winning_params, slippage_mult=sm
         )
 
-        min_pf = 1.1 if is_anchor else (1.2 + pf_prem)
-        if n_tr < 5 or pf < min_pf or ret < 0.0:
+        min_pf = 1.0 if is_anchor else (1.1 + pf_prem)
+        if n_tr < 3 or pf < min_pf or ret < -10.0:
             _logger.debug(
                 "Refinement rejected %s: PF=%.2f, Trades=%d, Ret=%.1f%%",
                 sym, pf, n_tr, ret,
             )
             # fallback 후보: 완전 실패(n_tr<3 or ret<-5%)가 아닌 경우만 보관
-            if n_tr >= 3 and ret >= -5.0 and not is_anchor:
+            if n_tr >= 2 and ret >= -15.0 and not is_anchor:
                 marginal_fallback.append(
                     {"symbol": sym, "pf": pf, "n_trades": n_tr, "ret": ret}
                 )
