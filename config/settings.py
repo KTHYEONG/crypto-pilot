@@ -1,13 +1,14 @@
 import os
 import sys
 from pathlib import Path
+
 from dotenv import load_dotenv
 
 # Non-TTY (e.g. Docker -d)에서 stdout/stderr 블록 버퍼링 방지 → docker logs 즉시 반영
 if hasattr(sys.stdout, "reconfigure"):
     try:
         sys.stdout.reconfigure(line_buffering=True)
-        sys.stderr.reconfigure(line_buffering=True)
+        sys.stderr.reconfigure(line_buffering=True)  # type: ignore
     except Exception:
         pass
 
@@ -53,16 +54,10 @@ TRADING_FEE_RATE = 0.0005  # 0.05% (Taker 기준, 진입/청산 각각)
 SLIPPAGE_RATE = 0.0005  # 0.05% (시장가 주문 시 예상 슬리피지)
 
 # 스마트 주문 설정
-MAKER_FEE_RATE = 0.0002  # 0.02% (지정가 주문 성공 시)
-TAKER_FEE_RATE = 0.0005  # 0.05% (시장가 주문 시)
 SMART_ORDER_OFFSET = 0.0003  # 0.03% (공격적 지정가 오프셋 - Maker 수수료 절감 목적)
-SMART_ORDER_TIMEOUT = 10  # 10초 (지정가 체결 대기 시간)
 
 # 선물 펀딩비 설정 (Perpetual Futures Funding Fee)
 FUNDING_FEE_RATE = 0.0001  # 0.01% (8시간 마다, Binance Default)
-FUNDING_INTERVAL_HOURS = 8
-
-LOG_LEVEL = "DEBUG"
 
 # ============================================================
 # RealTrader Futures 설정
@@ -128,21 +123,6 @@ MAX_TOTAL_BALANCE_KRW = 500_000_000  # 총 운영 자금 상한 (5억원)
 SPOT_LOOP_INTERVAL_SECONDS = 10  # 메인 루프 간격 (10초)
 SPOT_SYMBOL_DELAY_SECONDS = 2  # 심볼 간 딜레이
 
-# --- 대상 심볼 (Upbit) ---
-# 데이터 기간(FETCH_START=2021-03-18) 충족 및 수익성 기반 5종 선정
-SPOT_TARGET_SYMBOLS = ["KRW-BTC", "KRW-ETH", "KRW-XRP", "KRW-ADA", "KRW-DOGE"]
-
-# --- 포지션 사이징 가중치 (Spot) ---
-SPOT_ALLOCATION_WEIGHTS = {
-    "KRW-BTC": 0.2, 
-    "KRW-ETH": 0.2, 
-    "KRW-XRP": 0.2, 
-    "KRW-ADA": 0.2, 
-    "KRW-DOGE": 0.2
-}
-
-# --- Optuna Study ---
-SPOT_OPTUNA_STUDY_NAME = "spot_strategy"
 
 # --- 백테스트 초기 잔고 (Futures) ---
 FUTURES_INITIAL_BALANCE = 800.0  # USDT, backtest/optimize/verify 공통
@@ -164,9 +144,7 @@ SPOT_ENTRY_SIGNAL_RETRY_MAX = 2
 # Futures 전용 설정
 FUTURES_BACKTEST_START_DATE = "2021-01-01"
 FUTURES_BACKTEST_END_DATE = "2026-02-17"
-FUTURES_TRAIN_CUTOFF_DATE = "2024-04-01"
 
 # Spot 전용 데이터 기간 (최적화: start~cutoff, 검증: cutoff~end)
 SPOT_BACKTEST_START_DATE = "2021-01-01"
 SPOT_BACKTEST_END_DATE = "2026-02-17"
-SPOT_TRAIN_CUTOFF_DATE = "2024-04-01"
