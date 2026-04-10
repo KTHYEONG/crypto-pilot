@@ -5,12 +5,14 @@ from typing import Any, Dict, Optional
 import numpy as np
 import pandas as pd
 
-from src.strategy_base.ultimate import UltimateStrategyBase
-from src.domain.futures.strategies_futures import _FUTURES_INDICATORS as _SPOT_INDICATORS
+from src.strategy_base.pipeline_base import PipelineStrategyBase
+from src.core.indicators.indicators import get_indicator_engine
 from src.domain.spot.regimes import REGIME_REGISTRY
 from src.domain.spot.signals import SIGNAL_REGISTRY
 from src.core.indicators.numpy_ops_spot import compute_atr_numpy, compute_rsi_numpy
 from src.domain.spot.sizing import SIZING_REGISTRY
+
+_SPOT_INDICATORS = get_indicator_engine(domain="spot")
 
 _REGIME_OFF_EPS: float = 1e-9
 _SOFT_FULL_SPLIT: float = 0.85
@@ -44,7 +46,7 @@ def merge_exit_family_params(params: Dict[str, Any]) -> Dict[str, Any]:
     return p
 
 
-class UltimateSpotStrategy(UltimateStrategyBase):
+class SpotPipelineStrategy(PipelineStrategyBase):
     """
     Thin orchestrator: Signal + Regime + Sizing plugins → engine columns.
     Set `_portfolio_eval_ctx` to ``{"data_maps": ..., "symbols": ..., "tf": ...}`` for

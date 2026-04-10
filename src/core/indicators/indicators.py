@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from typing import Any, Callable, Hashable
+from typing import Any, Callable
 
 import numpy as np
 import pandas as pd
 import talib
 from numba import njit
+import os
 
 
 CacheMode = str
@@ -745,3 +746,19 @@ class IndicatorEngine:
             return pv.rolling(window=window).sum() / df["volume"].rolling(window=window).sum()
 
         return self._cached_call("calculate_vwma", df, (int(window),), {}, _compute)
+
+
+def get_indicator_engine(domain: str = "generic") -> IndicatorEngine:
+    """
+    도메인별 환경 변수를 참조하여 IndicatorEngine 인스턴스를 생성하는 팩토리 함수.
+    """
+    env_suffix = domain.upper()
+    cache_mode = os.getenv(
+        f"{env_suffix}_INDICATOR_CACHE_MODE",
+        os.getenv("INDICATOR_CACHE_MODE", "signature")
+    )
+    return IndicatorEngine(cache_mode=cache_mode)
+
+
+# 기본 전역 인스턴스 (범용 사용)
+global_ind = get_indicator_engine()
