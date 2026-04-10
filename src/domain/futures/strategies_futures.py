@@ -1,20 +1,18 @@
 from __future__ import annotations
 
-
-
 import numpy as np
 import pandas as pd
 
+from src.core.indicators.indicators import get_indicator_engine
 from src.domain.futures.regimes import FUTURES_REGIME_REGISTRY
 from src.domain.futures.signals import FUTURES_SIGNAL_REGISTRY
 from src.domain.futures.sizing import FUTURES_SIZING_REGISTRY
 from src.strategy_base import (
     MasterStrategyBase,
-    StrategyBase,
     PipelineStrategyBase,
+    StrategyBase,
 )
 
-from src.core.indicators.indicators import get_indicator_engine
 
 class Strategy(StrategyBase):
     pass
@@ -27,7 +25,7 @@ class MasterStrategy(MasterStrategyBase):
 _FUTURES_INDICATORS = get_indicator_engine(domain="futures")
 
 
-class FuturesPipelineStrategy(PipelineStrategyBase):
+class UltimateStrategy(PipelineStrategyBase):
     """
     Futures: plugin signal × regime × sizing dispatch.
     ENTRY_SHIFT: signal at i uses bar i-1 for entry columns (engine reads prev bar).
@@ -88,3 +86,7 @@ class FuturesPipelineStrategy(PipelineStrategyBase):
         df["regime_risk_mult"] = long_mult.astype(np.float64)
 
         return df
+
+
+# Alias for backward compatibility
+FuturesPipelineStrategy = UltimateStrategy
