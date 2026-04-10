@@ -52,6 +52,11 @@ def calculate_required_warmup_bars(
         "VOLUME_MA_PERIOD",
         "CMF_PERIOD",
         "HURST_PERIOD",
+        # Futures-specific: regime and signal periods (prevent warmup underestimate)
+        "MACRO_EMA_PERIOD",
+        "EMA_ATR_REGIME_SLOW",
+        "ADX_KC_PERIOD",
+        "VOL_PCT_WINDOW",
     )
     max_period = 0
     for key in period_keys:
