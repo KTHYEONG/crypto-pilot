@@ -5,9 +5,9 @@ Optimized version: Ticker-based pre-filtering + parallel discovery + mini-BT ref
 from __future__ import annotations
 
 import logging
+import multiprocessing as mp
 import os
 import sys
-import time
 from concurrent.futures import ProcessPoolExecutor
 from functools import partial
 from pathlib import Path
@@ -22,21 +22,19 @@ project_root = str(Path(__file__).resolve().parents[3])
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
+import re
+
 from config.opt_config import (
     FUTURES_ANCHOR_SYMBOLS,
     FUTURES_DYNAMIC_CANDIDATE_POOL,
-    FUTURES_SCREENER_CONFIG,
     OPT_FUTURES_CONFIG,
 )
 from config.settings import FUTURES_DATA_DIR, SLIPPAGE_RATE
 from src.domain.futures.data_collector import DataCollector
 from src.domain.futures.engine_single_futures import BacktestEngineFast
 from src.domain.futures.funding_utils import merge_funding_into_ohlcv
-from src.domain.futures.opt_futures_utils.objective import EMBARGO_BARS
 from src.domain.futures.opt_futures_utils.metrics import calc_profit_factor_from_pnl
 from src.domain.futures.strategies_futures import UltimateStrategy
-
-import re
 
 _logger: logging.Logger = logging.getLogger("universe_screener_futures")
 
@@ -57,7 +55,10 @@ def update_futures_config_file(symbols: List[str]) -> None:
     
     new_content = re.sub(pattern, new_block, content, count=1, flags=re.DOTALL)
     if new_content == content:
-        _logger.warning("FUTURES_SYMBOLS pattern not found in opt_config.py; skipping update.")
+        if re.search(pattern, content, flags=re.DOTALL):
+            _logger.info("FUTURES_SYMBOLS unchanged; no update needed.")
+        else:
+            _logger.warning("FUTURES_SYMBOLS pattern not found in opt_config.py; skipping update.")
         return
         
     config_path.write_text(new_content, encoding="utf-8")
@@ -143,7 +144,6 @@ def _screen_worker(
     """Worker for parallel universe screening."""
     # Isolated import to avoid circular dependencies in workers
     from src.domain.futures.data_collector import DataCollector
-    from src.domain.futures.funding_utils import merge_funding_into_ohlcv
 
     collector = DataCollector()
     
@@ -261,7 +261,6 @@ def screen_futures_universe(
 
     # 2. Parallel History Screening
     def get_mp_ctx():
-        import multiprocessing as mp
 
         if sys.platform == "win32":
             return mp.get_context("spawn")
@@ -277,7 +276,6 @@ def screen_futures_universe(
         n_workers,
     )
 
-    import multiprocessing as mp
 
     worker_fn = partial(
         _screen_worker,

@@ -20,11 +20,14 @@ class StrategyBase(ABC):
         """
         Return required warmup bar count in the requested timeframe.
         freq='daily': daily-bar count (for strategies that run on daily data).
-        freq='hourly': hourly-bar count so that warmup duration matches daily (daily_bars * 24).
+        freq='1h' or 'hourly': hourly-bar count (daily_bars * 24).
+        freq='4h': 4h-bar count (daily_bars * 6).
         """
         daily_bars = self._compute_warmup_bars()
-        if freq == "hourly":
+        if freq in ("hourly", "1h"):
             return daily_bars * 24
+        elif freq == "4h":
+            return daily_bars * 6
         return daily_bars
 
     def _compute_warmup_bars(self) -> int:
