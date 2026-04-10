@@ -6,8 +6,12 @@ from typing import Any, ClassVar, Dict
 import numpy as np
 import pandas as pd
 
+from src.core.indicators.numpy_ops_futures import (
+    compute_adx_numpy,
+    compute_atr_numpy,
+    compute_ema_numpy,
+)
 from src.domain.futures.signals.base import FuturesSignalOutput
-from src.core.indicators.numpy_ops_futures import compute_adx_numpy, compute_atr_numpy, compute_ema_numpy
 from src.domain.futures.signals.registry import register_futures_signal
 
 
@@ -15,10 +19,10 @@ from src.domain.futures.signals.registry import register_futures_signal
 class AdxBreakoutFuturesSignal:
     name: ClassVar[str] = "ADX_BREAKOUT"
     param_space: ClassVar[Dict[str, Any]] = {
-        "ADX_KC_PERIOD": {"type": "int", "low": 15, "high": 40, "step": 5},
+        "ADX_KC_PERIOD": {"type": "int", "low": 10, "high": 35, "step": 5},
         "ADX_LONG_KC_MULT": {"type": "float", "low": 0.5, "high": 2.5, "step": 0.25},
         "ADX_SHORT_KC_MULT": {"type": "float", "low": 1.0, "high": 3.5, "step": 0.25},
-        "ADX_THRESHOLD": {"type": "float", "low": 15.0, "high": 35.0, "step": 5.0},
+        "ADX_THRESHOLD": {"type": "float", "low": 15.0, "high": 35.0, "step": 2.5},
     }
 
     def compute(self, df: pd.DataFrame, params: Dict[str, Any]) -> FuturesSignalOutput:
