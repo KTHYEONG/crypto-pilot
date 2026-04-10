@@ -1,9 +1,9 @@
 from .core import MasterStrategyBase, StrategyBase, calculate_required_warmup_bars
-from .ultimate import UltimateStrategyBase
+from .pipeline_base import PipelineStrategyBase
 
 __all__ = [
     "StrategyBase",
     "MasterStrategyBase",
-    "UltimateStrategyBase",
+    "PipelineStrategyBase",
     "calculate_required_warmup_bars",
 ]
