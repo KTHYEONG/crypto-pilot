@@ -16,41 +16,6 @@ _logger: logging.Logger = logging.getLogger("opt_spot")
 
 # Optuna TPE `constraints_func`: each value <= 0 means satisfied (Gardner-style soft constraints).
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 def _segment_with_context(
     full_signal_df: pd.DataFrame,
     exec_start_idx: int,
@@ -63,42 +28,6 @@ def _segment_with_context(
     if execution_start_idx == 0 and len(segment) > 1:
         execution_start_idx = 1
     return segment, execution_start_idx
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 def _dataframe_to_symbol_arrays(sig_df: pd.DataFrame) -> Dict[str, np.ndarray]:

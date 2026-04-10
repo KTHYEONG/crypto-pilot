@@ -53,76 +53,7 @@ _logger: logging.Logger = logging.getLogger("opt_spot")
 
 # Optuna TPE `constraints_func`: each value <= 0 means satisfied (Gardner-style soft constraints).
 
-
-
 SymbolFoldResult = Tuple[str, float, float, float, float, float, float, float, np.ndarray, float]
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 def evaluate_symbol_fold(
     strategy: UltimateSpotStrategy,
@@ -200,26 +131,6 @@ def evaluate_symbol_fold(
     tail_ratio = calc_tail_ratio_from_equity(equity_curve) if equity_curve.size > 1 else 0.0
 
     return cagr, ret_pct, mdd_pct, len(trades_df), win_rate, pf, long_count, equity_curve, tail_ratio
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 def _compute_signal_stats(sig_df: pd.DataFrame) -> Dict[str, float]:
     """OOS holdout: quantify signal vs regime gating on the execution window."""
