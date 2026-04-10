@@ -8,12 +8,12 @@ from typing import Any, Dict, List
 # ==============================================================================
 
 OPT_FUTURES_CONFIG: Dict[str, Any] = {
-    "total_trials": 1500,
-    "tpe_n_startup_trials": 256,
+    "total_trials": 2000,
+    "tpe_n_startup_trials": 384,
     "combo_phase1_trials": 10,
     "combo_phase2_trials": 28,
-    "FUTURES_COMBO_QUICK_TRIALS_MAX": 40,
-    "FUTURES_COMBO_PHASE1_MAX": 18,
+    "FUTURES_COMBO_QUICK_TRIALS_MAX": 60,
+    "FUTURES_COMBO_PHASE1_MAX": 30,
     "FUTURES_COMBO_AMBIGUITY_STD_RATIO": 0.15,
     "FUTURES_COMBO_PHASE2_AMBIGUITY_BOOST": 4,
     "FUTURES_COMBO_PRUNE_THR": -0.05,
@@ -33,7 +33,7 @@ OPT_FUTURES_CONFIG: Dict[str, Any] = {
     "FUTURES_CPCV_CVAR_THRESHOLD": 0.05,
     "FUTURES_CPCV_CVAR_WEIGHT": 0.80,
     "FUTURES_CPCV_TEMPORAL_LAMBDA": 3.0,
-    "FUTURES_MAX_CONCURRENT_POSITIONS": 2,
+    "FUTURES_MAX_CONCURRENT_POSITIONS": 3,
     "FUTURES_MIN_PF": 1.5,
     "FUTURES_MAX_MDD": 25.0,
     "FUTURES_MIN_ROMAD": 0.8,
@@ -47,28 +47,32 @@ OPT_FUTURES_CONFIG: Dict[str, Any] = {
     "FUTURES_MIN_REGIME_ON_RATE": 0.10,
     "FUTURES_REGIME_ON_PENALTY_WEIGHT": 0.30,
     "FUTURES_NON_ANCHOR_SLIPPAGE_MULT": 1.1,
-    "FUTURES_NON_ANCHOR_MIN_PF_PREMIUM": 0.0,
+    "FUTURES_NON_ANCHOR_MIN_PF_PREMIUM": 0.15,
     "FUTURES_NON_ANCHOR_MAX_COUNT": 4,
 }
 
 # Phase C engine + risk (plugin union via build_full_discovery_space_futures).
+# MACRO_EMA_PERIOD removed: unused by ADX_BREAKOUT; RSM_VT defines it in its own param_space.
 ENGINE_PARAM_SPACE_FUTURES: Dict[str, Dict[str, Any]] = {
     "ATR_PERIOD": {"type": "int", "low": 10, "high": 20, "step": 2},
-    "MACRO_EMA_PERIOD": {"type": "int", "low": 50, "high": 200, "step": 10},
     "LONG_ATR_MULT": {"type": "float", "low": 1.5, "high": 4.5, "step": 0.25},
     "LONG_TRAIL_MULT": {"type": "float", "low": 2.5, "high": 6.0, "step": 0.5},
     "LONG_SCALE_ATR_MULT": {"type": "float", "low": 1.5, "high": 4.0, "step": 0.5},
     "SHORT_ATR_MULT": {"type": "float", "low": 1.0, "high": 3.0, "step": 0.25},
     "SHORT_TP_MULT": {"type": "float", "low": 1.0, "high": 3.5, "step": 0.5},
-    "SHORT_TRAIL_MULT": {"type": "float", "low": 1.5, "high": 4.0, "step": 0.5},
-    "RISK_PER_TRADE": {"type": "float", "low": 0.01, "high": 0.05, "step": 0.01},
-    "MAX_EXPOSURE": {"type": "float", "low": 0.5, "high": 2.0, "step": 0.5},
+    "SHORT_TRAIL_MULT": {"type": "float", "low": 1.5, "high": 4.5, "step": 0.5},
+    "RISK_PER_TRADE": {"type": "float", "low": 0.01, "high": 0.05, "step": 0.005},
+    "MAX_EXPOSURE": {"type": "float", "low": 0.3, "high": 1.2, "step": 0.1},
 }
 
 
 FUTURES_SYMBOLS: List[str] = [
     "ETH/USDT",
     "SOL/USDT",
+    "FIL/USDT",
+    "ZEC/USDT",
+    "NEAR/USDT",
+    "DOT/USDT",
 ]
 
 FUTURES_ANCHOR_SYMBOLS: List[str] = [
@@ -102,8 +106,8 @@ FUTURES_SCREENER_CONFIG: Dict[str, Any] = {
     "SCREENER_ATR_PCT_MIN": 2.0,
     "SCREENER_ATR_PCT_MAX": 12.0,
     "MIN_HISTORY_BARS": 2000,
-    "SCREENER_MIN_TRADES_DYNAMIC": 3,
-    "SCREENER_MIN_PF": 1.10,
+    "SCREENER_MIN_TRADES_DYNAMIC": 8,
+    "SCREENER_MIN_PF": 1.35,
     "FUNDING_EXTREME_THRESHOLD": 0.003,
     "MP_MIN_SYMBOLS": 3,
     "MP_MAX_SYMBOLS": 8,
@@ -353,7 +357,7 @@ def get_quarterly_window(reference_date: Any = None) -> tuple[str, str, str, str
     oos_end: datetime.date = current_quarter_start - datetime.timedelta(days=1)
     oos_start: datetime.date = current_quarter_start - relativedelta(months=12)
     is_start: datetime.date = oos_start - relativedelta(months=24)
-    fetch_start: datetime.date = is_start - relativedelta(days=500)
+    fetch_start: datetime.date = is_start - relativedelta(days=700)
     return (
         fetch_start.strftime("%Y-%m-%d"),
         is_start.strftime("%Y-%m-%d"),
