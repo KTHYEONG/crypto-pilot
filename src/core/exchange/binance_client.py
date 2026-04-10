@@ -1,18 +1,20 @@
 
 from __future__ import annotations
 
-import ccxt
-import time
-import pandas as pd
-from datetime import datetime, timedelta
+import json
 import logging
-from collections import deque
 import sys
-from pathlib import Path
+import threading
+import time
 import urllib.parse
 import urllib.request
-import json
-import threading
+from collections import deque
+from datetime import datetime
+from pathlib import Path
+from typing import Optional
+
+import ccxt
+import pandas as pd
 
 # Project Root Setup
 try:
@@ -22,7 +24,8 @@ try:
 except IndexError:
     pass
 
-from config.settings import API_READ_TIMEOUT, API_ORDER_TIMEOUT, API_CHECK_TIMEOUT
+from config.settings import API_READ_TIMEOUT
+
 
 class OrderRateLimiter:
     """
@@ -850,6 +853,8 @@ class BinanceClient:
         except Exception as e:
             self.logger.error(f"Error in cancel_all_orders for {symbol}: {e}")
             return False
+
+    def place_order(self, symbol, side, amount, order_type='market', price=None, params=None):
         """
         기본 주문 실행 (내부 사용)
         side: 'buy' or 'sell'

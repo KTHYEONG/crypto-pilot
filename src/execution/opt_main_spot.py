@@ -36,7 +36,7 @@ if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
 from src.domain.spot.data_collector_spot import DataCollectorSpot
-from src.domain.spot.strategies_spot import UltimateSpotStrategy
+from src.domain.spot.strategies_spot import SpotPipelineStrategy
 from config.settings import SPOT_INITIAL_BALANCE
 from config.opt_config import (
     OPT_SPOT_CONFIG,
@@ -1369,7 +1369,7 @@ def main() -> None:
             
             # IS Evaluation (Global indexing)
             s_is, r_is, m_is, t_is, wr_is, pf_is, lc_is, _, tr_is = evaluate_symbol_fold(
-                UltimateSpotStrategy(name=f"IS_{s_eval}", params=params),
+                SpotPipelineStrategy(name=f"IS_{s_eval}", params=params),
                 params,
                 s_eval,
                 tf_eval,
@@ -1416,7 +1416,7 @@ def main() -> None:
                 pre_oos_sig, exec_start_oos = None, 0
 
             s_oos, r_oos, m_oos, _, _, pf_oos, lc_oos, _, tail_oos = evaluate_symbol_fold(
-                UltimateSpotStrategy(name=f"OOS_{s_eval}", params=params),
+                SpotPipelineStrategy(name=f"OOS_{s_eval}", params=params),
                 params,
                 s_eval,
                 tf_eval,
