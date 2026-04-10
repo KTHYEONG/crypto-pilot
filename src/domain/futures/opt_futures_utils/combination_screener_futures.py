@@ -15,7 +15,7 @@ from optuna.trial import TrialState
 
 from config.opt_config import OPT_FUTURES_CONFIG
 from src.domain.futures.opt_futures_utils.cv_utils import build_cpcv_test_paths_with_fallback
-from src.domain.futures.opt_futures_utils.evaluator import EMBARGO_BARS, objective_futures
+from src.domain.futures.opt_futures_utils.objective import EMBARGO_BARS, objective_futures
 from src.domain.futures.opt_futures_utils.opt_params import build_combined_param_space_futures
 from src.domain.futures.regimes import FUTURES_REGIME_REGISTRY
 from src.domain.futures.signals import FUTURES_SIGNAL_REGISTRY
@@ -104,7 +104,7 @@ def _warmup_numba(
     from src.domain.futures.regimes import FUTURES_REGIME_REGISTRY
     from src.domain.futures.signals import FUTURES_SIGNAL_REGISTRY
     from src.domain.futures.sizing import FUTURES_SIZING_REGISTRY
-    from src.domain.futures.opt_futures_utils.evaluator import objective_futures
+    from src.domain.futures.opt_futures_utils.objective import objective_futures
 
     sig = sorted(FUTURES_SIGNAL_REGISTRY.keys())[0]
     reg = sorted(FUTURES_REGIME_REGISTRY.keys())[0]
