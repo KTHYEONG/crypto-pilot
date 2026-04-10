@@ -431,20 +431,23 @@ def screen_futures_symbol_refinement(
                 "Refinement rejected %s: PF=%.2f, Trades=%d, Ret=%.1f%%",
                 sym, pf, n_tr, ret,
             )
-            # fallback 후보: 완전 실패(n_tr<3 or ret<-5%)가 아닌 경우만 보관
-            if n_tr >= 2 and ret >= -15.0 and not is_anchor:
+            # fallback 후보: 최소 기준(거래 수, 손실 한도)을 통과한 경우만 보관
+            min_fallback_trades = int(cfg.get("SCREENER_MIN_TRADES_DYNAMIC", 8))
+            if n_tr >= max(3, min_fallback_trades // 2) and ret >= -5.0 and not is_anchor:
                 marginal_fallback.append(
                     {"symbol": sym, "pf": pf, "n_trades": n_tr, "ret": ret}
                 )
             continue
 
+        # Score: PF × log(trades) × return multiplier (penalize near-zero returns)
+        ret_mult = max(0.1, 1.0 + ret / 100.0)
         scored.append(
             {
                 "symbol": sym,
                 "pf": pf,
                 "n_trades": n_tr,
                 "ret": ret,
-                "score": pf * np.log1p(n_tr),  # Relevance score
+                "score": pf * np.log1p(n_tr) * ret_mult,
             }
         )
 

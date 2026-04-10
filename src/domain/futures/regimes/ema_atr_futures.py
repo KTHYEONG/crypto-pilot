@@ -68,27 +68,25 @@ def compute_ema_atr_regime_labels(
     return (2 * trend_bull + vol_high).astype(np.int32)
 
 
-def labels_to_long_short_mult(labels: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """Map EMA-ATR labels to (long_mult, short_mult) per tmp.md."""
-    lab = labels.astype(np.int32, copy=False)
-    long_mult = np.where(lab == 3, 0.7, np.where(lab == 2, 0.4, 0.0))
-    short_mult = np.where(lab == 1, 0.7, np.where(lab == 0, 0.4, 0.0))
-    return long_mult.astype(np.float64), short_mult.astype(np.float64)
-
-
 @register_regime
 class EmaAtrFuturesRegime:
     name: ClassVar[str] = "EMA_ATR"
+    # EMA_ATR_REGIME_SLOW/VOL_PCT_WINDOW step compressed (20) to reduce dead search dims.
+    # REGIME_STRONG_MULT / REGIME_WEAK_MULT: parameterized so Optuna can tune size headroom.
     param_space: ClassVar[Dict[str, Any]] = {
-        "EMA_ATR_REGIME_SLOW": {"type": "int", "low": 50, "high": 200, "step": 10},
+        "EMA_ATR_REGIME_SLOW": {"type": "int", "low": 50, "high": 200, "step": 20},
         "ATR_REGIME_PERIOD": {"type": "int", "low": 10, "high": 30, "step": 5},
-        "VOL_PCT_WINDOW": {"type": "int", "low": 40, "high": 120, "step": 10},
+        "VOL_PCT_WINDOW": {"type": "int", "low": 40, "high": 120, "step": 20},
         "VOL_QUANTILE": {"type": "float", "low": 0.45, "high": 0.75, "step": 0.05},
+        "REGIME_STRONG_MULT": {"type": "float", "low": 0.7, "high": 1.0, "step": 0.1},
+        "REGIME_WEAK_MULT": {"type": "float", "low": 0.3, "high": 0.7, "step": 0.1},
     }
 
     def compute_long_short_mult(
         self, df: pd.DataFrame, params: Dict[str, Any]
     ) -> tuple[np.ndarray, np.ndarray]:
+        strong = float(params.get("REGIME_STRONG_MULT", 0.7))
+        weak = float(params.get("REGIME_WEAK_MULT", 0.4))
         atr_period = int(params.get("ATR_REGIME_PERIOD", 14))
         labels = compute_ema_atr_regime_labels(
             df,
@@ -97,4 +95,7 @@ class EmaAtrFuturesRegime:
             vol_pct_window=int(params.get("VOL_PCT_WINDOW", 60)),
             vol_quantile=float(params.get("VOL_QUANTILE", 0.60)),
         )
-        return labels_to_long_short_mult(labels)
+        lab = labels.astype(np.int32, copy=False)
+        long_mult = np.where(lab == 3, strong, np.where(lab == 2, weak, 0.0))
+        short_mult = np.where(lab == 1, strong, np.where(lab == 0, weak, 0.0))
+        return long_mult.astype(np.float64), short_mult.astype(np.float64)

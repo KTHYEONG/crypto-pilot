@@ -63,12 +63,15 @@ def _auto_combo_trials(
     d = max(1.0, float(median_dim))
     p1_floor = int(cfg.get("combo_phase1_trials", 10))
     p2_floor = int(cfg.get("combo_phase2_trials", 28))
-    p1_cap = max(p1_floor, int(cfg.get("FUTURES_COMBO_PHASE1_MAX", 18)))
-    p2_cap = max(p2_floor, int(cfg.get("FUTURES_COMBO_QUICK_TRIALS_MAX", 40)))
-    
-    phase1 = int(round(7.0 + 0.75 * math.log2(v + 1.0) + 0.20 * math.sqrt(d)))
-    phase2 = int(round(19.0 + 1.25 * math.log2(v + 1.0) + 0.45 * math.sqrt(d)))
-    
+    p1_cap = max(p1_floor, int(cfg.get("FUTURES_COMBO_PHASE1_MAX", 30)))
+    p2_cap = max(p2_floor, int(cfg.get("FUTURES_COMBO_QUICK_TRIALS_MAX", 60)))
+
+    # dim_factor: scales proportionally to sqrt(d) so high-dim signals get fair evaluation.
+    # At d=4 (ADX_BREAKOUT) → factor≈1.0; d=8 (RSM_VT) → factor≈1.41; d=12 → factor≈1.73
+    dim_factor = max(1.0, math.sqrt(d) / 2.0)
+    phase1 = int(round((7.0 + 0.75 * math.log2(v + 1.0)) * dim_factor))
+    phase2 = int(round((19.0 + 1.25 * math.log2(v + 1.0)) * dim_factor))
+
     phase1 = int(np.clip(phase1, p1_floor, p1_cap))
     phase2 = int(np.clip(phase2, p2_floor, p2_cap))
     if phase2 < phase1 + 12:
