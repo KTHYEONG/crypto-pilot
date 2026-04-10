@@ -65,35 +65,6 @@ ENGINE_PARAM_SPACE_FUTURES: Dict[str, Dict[str, Any]] = {
     "MAX_EXPOSURE": {"type": "float", "low": 1.0, "high": 3.0, "step": 0.5},
 }
 
-# Legacy flat dict (superseded by plugin union); kept for grep / external refs.
-FUTURES_SEARCH_SPACE: Dict[str, Dict[str, Any]] = {
-    "MACRO_EMA_PERIOD": {"type": "int", "low": 50, "high": 200, "step": 10},
-    "KC_MULT": {"type": "float", "low": 1.0, "high": 2.5, "step": 0.25},
-    "SQUEEZE_WINDOW": {"type": "int", "low": 3, "high": 15, "step": 2},
-    "MOMENTUM_PERIOD": {"type": "int", "low": 10, "high": 30, "step": 5},
-    "VOL_Z_THRESHOLD": {"type": "float", "low": 1.0, "high": 3.0, "step": 0.5},
-    "EXHAUSTION_MULT": {"type": "float", "low": 2.0, "high": 5.0, "step": 0.5},
-    "CVD_WINDOW": {"type": "int", "low": 3, "high": 20, "step": 2},
-    "TAKER_RATIO_THRESHOLD": {"type": "float", "low": 0.4, "high": 0.7, "step": 0.05},
-    "REGIME_TYPE": {
-        "type": "categorical",
-        "choices": ("EMA_ATR", "FUNDING_RATE", "TREND_QUALITY", "MARKET_BREADTH", "NONE"),
-    },
-    "EMA_ATR_REGIME_SLOW": {"type": "int", "low": 50, "high": 200, "step": 10},
-    "ATR_REGIME_PERIOD": {"type": "int", "low": 10, "high": 30, "step": 5},
-    "VOL_PCT_WINDOW": {"type": "int", "low": 40, "high": 120, "step": 10},
-    "VOL_QUANTILE": {"type": "float", "low": 0.45, "high": 0.75, "step": 0.05},
-    "FUNDING_Z_WINDOW": {"type": "int", "low": 20, "high": 60, "step": 10},
-    "FUNDING_Z_THRESHOLD": {"type": "float", "low": 1.0, "high": 2.5, "step": 0.5},
-    "ATR_PERIOD": {"type": "int", "low": 10, "high": 20, "step": 2},
-    "LONG_ATR_MULT": {"type": "float", "low": 1.5, "high": 4.0, "step": 0.25},
-    "LONG_TRAIL_MULT": {"type": "float", "low": 2.0, "high": 5.0, "step": 0.5},
-    "LONG_SCALE_ATR_MULT": {"type": "float", "low": 1.5, "high": 4.0, "step": 0.5},
-    "SHORT_ATR_MULT": {"type": "float", "low": 1.0, "high": 3.5, "step": 0.25},
-    "SHORT_TP_MULT": {"type": "float", "low": 1.5, "high": 4.0, "step": 0.5},
-    "SHORT_TRAIL_MULT": {"type": "float", "low": 2.0, "high": 5.0, "step": 0.5},
-    "RISK_PER_TRADE": {"type": "float", "low": 0.005, "high": 0.06, "step": 0.005},
-}
 
 FUTURES_SYMBOLS: List[str] = [
     "ETH/USDT",
@@ -161,7 +132,7 @@ SPOT_SYMBOLS: List[str] = [
     "KRW-HBAR",
 ]
 
-# Phase A universe screen output (broad ADV+ATR gate); refreshed by universe_screener / opt_spot Phase 0.
+# Phase A universe screen output; refreshed by universe_screener / opt_spot Phase 0.
 SPOT_BROAD_CANDIDATES: List[str] = [
     "KRW-XRP",
     "KRW-BTC",
@@ -211,7 +182,7 @@ OPT_SPOT_CONFIG: Dict[str, Any] = {
     "SPOT_SHORTLIST_TOP_K": 25,
     "SPOT_MIN_TRADES_PER_CPCV_SEGMENT": 8,
     "SPOT_SEGMENT_TRADE_FAIL_PENALTY": 2.0,
-    "SPOT_HOLDOUT_MIN_PORTFOLIO_LONG_TRADES": 50,  # Dynamically calculated in opt_spot.py but used as a fallback
+    "SPOT_HOLDOUT_MIN_PORTFOLIO_LONG_TRADES": 50,  # Defined in opt_spot.py; used as fallback
     "SPOT_HOLDOUT_MIN_TAIL_RATIO": 0.90,
     "SPOT_HOLDOUT_MIN_PROFIT_FACTOR": 1.2,
     "SPOT_HOLDOUT_MIN_CALMAR_RATIO": 1.2,
@@ -242,7 +213,7 @@ OPT_SPOT_CONFIG: Dict[str, Any] = {
     "SPOT_COMBO_MIN_SCREEN_SCORE": 0.0,
     "SPOT_COMBO_AMBIGUITY_STD_RATIO": 0.15,
     "SPOT_COMBO_PHASE2_AMBIGUITY_BOOST": 4,
-    "SPOT_STAGE1_BROAD_SAMPLE_K": 12,       # Stage1 uses top-K ADV symbols from broad pool (not all)
+    "SPOT_STAGE1_BROAD_SAMPLE_K": 12,       # Stage1 uses top-K ADV symbols
     "SPOT_STAGE1_TRIALS_PER_SIGNAL": 150,  # Stage1 ranking stability (tmp.md: 100→150)
     "SPOT_STAGE1_TOP_K": 3,
     "SPOT_STAGE1_MIN_P10_GMGR": -0.5,
@@ -284,8 +255,6 @@ OPT_SPOT_CONFIG: Dict[str, Any] = {
         },
 }
 
-TARGET_TIMEFRAMES: List[str] = ["4h"]
-WARMUP_PERIODS: Dict[str, int] = {"4h": 540}
 
 # Spot optimization: exclude institutional-only sizing for small KRW books (see tmp.md).
 SPOT_EXCLUDED_SIZING_METHODS: frozenset[str] = frozenset({"liquidity_adjusted"})
@@ -293,7 +262,7 @@ SPOT_EXCLUDED_SIZING_METHODS: frozenset[str] = frozenset({"liquidity_adjusted"})
 # Universe screener: theory-based thresholds (ADV floor, Hurst bootstrap, MP, mRMR).
 SPOT_SCREENER_CONFIG: dict[str, float | int | bool] = {
     "ADV_MIN_KRW_DAY": 2_000_000_000.0,  # 100M KRW scale: 10M position / 5% participation / 0.25×6
-    "SCREENER_MIN_P25_BAR_KRW": 80_000_000.0,  # p25 4H bar floor (100M / 5 symbols / 5% participation)
+    "SCREENER_MIN_P25_BAR_KRW": 80_000_000.0,  # p25 4H bar floor (100M/5 syms)
     "SCREENER_ATR_PERIOD": 14,
     "SCREENER_ATR_PCT_MIN": 1.0,
     "SCREENER_ATR_PCT_MAX": 8.0,
@@ -371,7 +340,7 @@ def get_spot_effective_independent_trials(
 def get_quarterly_window(reference_date: Any = None) -> tuple[str, str, str, str]:
     import datetime
 
-    from dateutil.relativedelta import relativedelta
+    from dateutil.relativedelta import relativedelta  # type: ignore[import-untyped]
 
     if reference_date is None:
         reference_date = datetime.date.today()
