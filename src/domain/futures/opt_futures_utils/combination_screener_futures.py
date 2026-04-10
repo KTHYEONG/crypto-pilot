@@ -3,14 +3,14 @@ from __future__ import annotations
 
 import itertools
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Sequence, Tuple
 
 import numpy as np
 import optuna
-from optuna.storages import InMemoryStorage
 from optuna.samplers import TPESampler
+from optuna.storages import InMemoryStorage
 from optuna.trial import TrialState
 
 from config.opt_config import OPT_FUTURES_CONFIG
@@ -35,6 +35,7 @@ class CombinationScoreFutures:
     mean_signal_rate: float
     disqualified: bool
     reason: str = ""
+    best_params: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -54,7 +55,9 @@ def _combo_search_dim(space: Dict[str, Any]) -> int:
         dim += 1
     return dim
 
-def _auto_combo_trials(viable_count: int, median_dim: float, cfg: Dict[str, Any]) -> tuple[int, int]:
+def _auto_combo_trials(
+    viable_count: int, median_dim: float, cfg: Dict[str, Any]
+) -> tuple[int, int]:
     import math
     v = max(1, int(viable_count))
     d = max(1.0, float(median_dim))
@@ -101,10 +104,10 @@ def _warmup_numba(
     project_root: str = "",
     signal_cache_dir: str = "",
 ) -> None:
+    from src.domain.futures.opt_futures_utils.objective import objective_futures
     from src.domain.futures.regimes import FUTURES_REGIME_REGISTRY
     from src.domain.futures.signals import FUTURES_SIGNAL_REGISTRY
     from src.domain.futures.sizing import FUTURES_SIZING_REGISTRY
-    from src.domain.futures.opt_futures_utils.objective import objective_futures
 
     sig = sorted(FUTURES_SIGNAL_REGISTRY.keys())[0]
     reg = sorted(FUTURES_REGIME_REGISTRY.keys())[0]
@@ -201,7 +204,7 @@ def _phase0_ls_ratio(
     return ls_ratio, mean_signal_rate, ""
 
 
-def _metrics_from_best_study(study: optuna.Study) -> Dict[str, float]:
+def _metrics_from_best_study(study: optuna.Study) -> Tuple[Dict[str, float], Dict[str, Any]]:
     completed = [t for t in study.trials if t.state == TrialState.COMPLETE and t.value is not None]
     if not completed:
         return {
@@ -209,16 +212,17 @@ def _metrics_from_best_study(study: optuna.Study) -> Dict[str, float]:
             "cpcv_p25_log_tw": -1e9,
             "cpcv_path_cv": 10.0,
             "p10_gmgr": -1e9,
-        }
+        }, {}
     completed.sort(key=lambda tr: float(tr.value or -1e9), reverse=True)
     best = completed[0]
     ua = best.user_attrs
-    return {
+    metrics = {
         "objective_final": float(best.value or -1e9),
         "cpcv_p25_log_tw": float(ua.get("cpcv_p25_log_tw", -1e9)),
         "cpcv_path_cv": float(ua.get("cpcv_path_cv", 10.0)),
         "p10_gmgr": float(ua.get("p10_gmgr", -1e9)),
     }
+    return metrics, best.params
 
 
 def run_quick_cpcv_for_combo_futures(
@@ -240,7 +244,9 @@ def run_quick_cpcv_for_combo_futures(
     if ref_df is not None and not ref_df.empty:
         ref_len = len(ref_df) - is_off
         if ref_len >= 200:
-            prebuilt = build_cpcv_test_paths_with_fallback(ref_len, embargo=int(EMBARGO_BARS.get(tf, 0)))
+            prebuilt = build_cpcv_test_paths_with_fallback(
+                ref_len, embargo=int(EMBARGO_BARS.get(tf, 0))
+            )
     study = optuna.create_study(
         direction="maximize",
         sampler=TPESampler(n_startup_trials=min(15, max(5, n_trials // 3)), seed=42),
@@ -282,7 +288,7 @@ def run_phase2_metrics_futures(
     n_trials: int,
     project_root: str,
     signal_cache_dir: str,
-) -> Dict[str, float]:
+) -> Tuple[Dict[str, float], Dict[str, Any]]:
     sig, reg, siz = combo
     space = build_combined_param_space_futures(sig, reg, siz)
     ref_sym = symbols[0]
@@ -292,7 +298,9 @@ def run_phase2_metrics_futures(
     if ref_df is not None and not ref_df.empty:
         ref_len = len(ref_df) - is_off
         if ref_len >= 200:
-            prebuilt = build_cpcv_test_paths_with_fallback(ref_len, embargo=int(EMBARGO_BARS.get(tf, 0)))
+            prebuilt = build_cpcv_test_paths_with_fallback(
+                ref_len, embargo=int(EMBARGO_BARS.get(tf, 0))
+            )
     study = optuna.create_study(
         direction="maximize",
         sampler=TPESampler(n_startup_trials=min(20, max(8, n_trials // 4)), seed=43),
@@ -325,12 +333,13 @@ def run_combination_screening_futures(
     project_root: str,
     signal_cache_dir: str = "",
 ) -> CombinationScreeningResult:
+    import multiprocessing as mp
+    import os
+    import sys
     from concurrent.futures import ProcessPoolExecutor
     from functools import partial
+
     from tqdm import tqdm
-    import multiprocessing as mp
-    import sys
-    import os
 
     cfg = OPT_FUTURES_CONFIG
     p1 = int(cfg.get("combo_phase1_trials", 30))
@@ -348,14 +357,16 @@ def run_combination_screening_futures(
         )
     )
     scored: List[CombinationScoreFutures] = []
-    viable_items: List[Tuple[Tuple[str, str, str], float]] = []
+    viable_items: List[Tuple[Tuple[str, str, str], float, float]] = []
 
     _logger.info("Phase 0: Screening %d combinations for ls_ratio >= %.2f...", len(combos), ls_min)
 
     min_rate_cfg = float(cfg.get("COMBO_MIN_SIGNAL_RATE", 0.005))
 
     for sig, reg, siz in combos:
-        ls_ratio, mean_signal_rate, reason = _phase0_ls_ratio(data_maps, symbols, tf, (sig, reg, siz))
+        ls_ratio, mean_signal_rate, reason = _phase0_ls_ratio(
+            data_maps, symbols, tf, (sig, reg, siz)
+        )
         if mean_signal_rate < min_rate_cfg:
             scored.append(
                 CombinationScoreFutures(
@@ -413,11 +424,13 @@ def run_combination_screening_futures(
     p2 = p2_dyn
 
     _logger.info("Warming up Numba JIT before process pool...")
-    _warmup_numba(data_maps, symbols, tf, project_root=project_root, signal_cache_dir=signal_cache_dir)
+    _warmup_numba(
+        data_maps, symbols, tf, project_root=project_root, signal_cache_dir=signal_cache_dir
+    )
 
     viable_combos = [item[0] for item in viable_items]
 
-    def get_mp_ctx():
+    def get_mp_ctx() -> Any:
         if sys.platform == "win32":
             return mp.get_context("spawn")
         try:
@@ -427,7 +440,10 @@ def run_combination_screening_futures(
 
     mp_ctx = get_mp_ctx()
     
-    _logger.info("Phase 1: Quick CPCV (%d trials × %d combos, %d workers)...", p1, len(viable_combos), n_workers)
+    _logger.info(
+        "Phase 1: Quick CPCV (%d trials × %d combos, %d workers)...",
+        p1, len(viable_combos), n_workers
+    )
     
     phase1_fn = partial(
         run_quick_cpcv_for_combo_futures,
@@ -469,7 +485,9 @@ def run_combination_screening_futures(
                 )
             )
 
-    _logger.info("Phase 1 complete: %d surviving / %d viable", len(surviving_items), len(viable_items))
+    _logger.info(
+        "Phase 1 complete: %d surviving / %d viable", len(surviving_items), len(viable_items)
+    )
 
     phase1_no_edge = False
     if not surviving_items:
@@ -494,18 +512,24 @@ def run_combination_screening_futures(
             ]
             phase1_no_edge = True
             _logger.error(
-                "No edge found after relaxed threshold. Using best-3 combos; Phase D applies strict objective floor."
+                "No edge found after relaxed threshold. Using best-3 combos; "
+                "Phase D applies strict objective floor."
             )
 
     phase2_boost = _ambiguity_phase2_boost(phase1_results, top_k=max(1, top_k), cfg=cfg)
     if phase2_boost > 0:
         p2_cap = int(cfg.get("FUTURES_COMBO_QUICK_TRIALS_MAX", 40))
         p2 = min(p2_cap, p2 + phase2_boost)
-        _logger.info("Phase 2 Ambiguity Boost applied (+%d trials) -> %d trials/combo", phase2_boost, p2)
+        _logger.info(
+            "Phase 2 Ambiguity Boost applied (+%d trials) -> %d trials/combo", phase2_boost, p2
+        )
 
     survivor_combos = [s[0] for s in surviving_items]
 
-    _logger.info("Phase 2: Full CPCV (%d trials × %d combos, %d workers)...", p2, len(survivor_combos), n_workers)
+    _logger.info(
+        "Phase 2: Full CPCV (%d trials × %d combos, %d workers)...",
+        p2, len(survivor_combos), n_workers
+    )
     
     phase2_fn = partial(
         run_phase2_metrics_futures,
@@ -528,7 +552,7 @@ def run_combination_screening_futures(
         )
 
     finals: List[CombinationScoreFutures] = []
-    for item, m in zip(surviving_items, phase2_results):
+    for item, (m, best_params) in zip(surviving_items, phase2_results):
         combo, ls_ratio, mean_signal_rate = item
         score = _p25_path_consistency_score(m)
         finals.append(
@@ -541,6 +565,7 @@ def run_combination_screening_futures(
                 mean_signal_rate=mean_signal_rate,
                 disqualified=False,
                 reason="",
+                best_params=best_params,
             )
         )
 
