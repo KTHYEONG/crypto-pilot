@@ -2,10 +2,11 @@
 백테스트 결과인 손익 데이터를 바탕으로 수익률, MDD, Sortino 등 정량적 성과 지표를 계산함.
 전략의 우수성을 판단하기 위해 단순 수익률뿐만 아니라 리스크 대비 효율성을 점수화하는 역할을 수행함.
 """
+from typing import Sequence
+
 import numpy as np
 import pandas as pd
-from typing import Tuple, Sequence
-from config.settings import FUTURES_INITIAL_BALANCE
+
 
 def calc_profit_factor_from_pnl(pnl_series: pd.Series) -> float:
     """Calculate Profit Factor from a pre-computed net PNL series (fee-deducted)."""
@@ -159,3 +160,24 @@ def calc_max_underwater_days_from_equity(equity_curve: np.ndarray, hours_per_bar
         else:
             cur = 0
     return float(max_run * hours_per_bar / 24.0)
+
+def calc_tail_ratio_from_equity(equity: np.ndarray) -> float:
+    """95th percentile return / abs(5th percentile return)."""
+    if equity.size < 2:
+        return 1.0
+    r = np.diff(equity) / np.clip(equity[:-1], 1e-12, None)
+    if r.size < 5:
+        return 1.0
+    val95 = float(np.percentile(r, 95.0))
+    val5 = float(np.percentile(r, 5.0))
+    if abs(val5) < 1e-12:
+        return 5.0 if val95 > 0 else 1.0
+    return float(val95 / abs(val5))
+
+
+def _log_tw_from_ret_pct(ret_pct: float) -> float:
+    import math
+    r = 1.0 + float(ret_pct) / 100.0
+    if r <= 0.0 or not math.isfinite(r):
+        return -10.0
+    return float(math.log(max(r, 1e-9)))
