@@ -32,7 +32,7 @@ from config.settings import FUTURES_DATA_DIR, SLIPPAGE_RATE
 from src.domain.futures.data_collector import DataCollector
 from src.domain.futures.engine_futures import BacktestEngineFast
 from src.domain.futures.funding_utils import merge_funding_into_ohlcv
-from src.domain.futures.opt_futures_utils.evaluator import EMBARGO_BARS
+from src.domain.futures.opt_futures_utils.objective import EMBARGO_BARS
 from src.domain.futures.opt_futures_utils.metrics import calc_profit_factor_from_pnl
 from src.domain.futures.strategies_futures import UltimateStrategy
 
