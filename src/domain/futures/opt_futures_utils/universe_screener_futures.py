@@ -146,6 +146,29 @@ def _screen_worker(
     from src.domain.futures.funding_utils import merge_funding_into_ohlcv
 
     collector = DataCollector()
+    
+    # [[FIX]] 데이터 수집 전 메타데이터 확인하여 히스토리가 너무 짧으면 즉시 제외
+    min_bars = int(cfg.get("MIN_HISTORY_BARS", 2000))
+    meta = collector._load_meta()
+    mk = collector._meta_key(sym, tf)
+    if mk in meta and isinstance(meta[mk], dict):
+        earliest = meta[mk].get("earliest_available")
+        if earliest:
+            try:
+                # 대략적인 기간 계산 (상장일부터 종료일까지의 바 개수 추정)
+                e_dt = pd.to_datetime(earliest)
+                end_dt = pd.to_datetime(end_date)
+                delta = end_dt - e_dt
+                
+                # 타임프레임별 바 개수 근사치
+                bars_per_day = {"1h": 24, "4h": 6, "1d": 1}.get(tf, 6)
+                est_bars = delta.days * bars_per_day
+                if est_bars < min_bars:
+                    _logger.debug(f"Skipping {sym}: Estimated bits {est_bars} < {min_bars} (Listed: {earliest})")
+                    return None
+            except Exception:
+                pass
+
     try:
         collector.ensure_funding_data(sym, fetch_start, end_date)
         df = collector.collect_and_save(sym, tf, fetch_start, end_date)
@@ -153,7 +176,6 @@ def _screen_worker(
     except Exception:
         return None
 
-    min_bars = int(cfg["MIN_HISTORY_BARS"])
     if df is None or df.empty or len(df) < min_bars:
         return None
 
@@ -384,6 +406,8 @@ def screen_futures_symbol_refinement(
     _logger.info("Phase C: Refining %d symbols via mini-backtest...", len(broad_candidates))
 
     scored: List[Dict[str, Any]] = []
+    # 거부된 심볼 중 최소 조건을 충족한 것만 fallback 후보로 보관
+    marginal_fallback: List[Dict[str, Any]] = []
     tf = winning_params.get("TIMEFRAME", "4h")
     pf_prem = float(OPT_FUTURES_CONFIG.get("FUTURES_NON_ANCHOR_MIN_PF_PREMIUM", 0.0))
     slip_mult = float(OPT_FUTURES_CONFIG.get("FUTURES_NON_ANCHOR_SLIPPAGE_MULT", 1.0))
@@ -405,8 +429,15 @@ def screen_futures_symbol_refinement(
 
         min_pf = 1.1 if is_anchor else (1.2 + pf_prem)
         if n_tr < 5 or pf < min_pf or ret < 0.0:
-            if sym == "ZEC/USDT" or not is_anchor:
-                 _logger.debug("Refinement rejected %s: PF=%.2f, Trades=%d, Ret=%.1f%%", sym, pf, n_tr, ret)
+            _logger.debug(
+                "Refinement rejected %s: PF=%.2f, Trades=%d, Ret=%.1f%%",
+                sym, pf, n_tr, ret,
+            )
+            # fallback 후보: 완전 실패(n_tr<3 or ret<-5%)가 아닌 경우만 보관
+            if n_tr >= 3 and ret >= -5.0 and not is_anchor:
+                marginal_fallback.append(
+                    {"symbol": sym, "pf": pf, "n_trades": n_tr, "ret": ret}
+                )
             continue
 
         scored.append(
@@ -442,15 +473,25 @@ def screen_futures_symbol_refinement(
             break
 
     if len(final_list) < mp_min:
-        _logger.warning(
-            "Refinement resulted in too few symbols (%d); adding back best broad candidates.",
-            len(final_list),
-        )
-        for s in broad_candidates:
+        # fallback: 품질 조건을 통과 못했지만 완전 실패는 아닌 심볼만 추가
+        marginal_fallback.sort(key=lambda x: x["ret"], reverse=True)
+        for item in marginal_fallback:
+            s = str(item["symbol"])
             if s not in final_list:
+                _logger.warning(
+                    "Fallback adding marginal symbol %s (pf=%.2f, trades=%d, ret=%.1f%%); "
+                    "insufficient qualified symbols.",
+                    s, item["pf"], item["n_trades"], item["ret"],
+                )
                 final_list.append(s)
             if len(final_list) >= mp_min:
                 break
+        if len(final_list) < mp_min:
+            _logger.warning(
+                "Refinement: only %d symbols qualified (< mp_min=%d); "
+                "proceeding with reduced symbol set.",
+                len(final_list), mp_min,
+            )
 
     _logger.info("Refinement complete: %d symbols selected: %s", len(final_list), final_list)
     update_futures_config_file(final_list[:mp_max])

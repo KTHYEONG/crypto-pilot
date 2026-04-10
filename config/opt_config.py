@@ -25,14 +25,14 @@ OPT_FUTURES_CONFIG: Dict[str, Any] = {
     "n_jobs": 3,
     "task_workers": 3,
     "TARGET_TIMEFRAMES": ["4h"],
-    "FUTURES_CPCV_N_BLOCKS": 8,
-    "FUTURES_CPCV_K_TEST": 3,
+    "FUTURES_CPCV_N_BLOCKS": 10,
+    "FUTURES_CPCV_K_TEST": 4,
     "FUTURES_MIN_TRADES_PER_CPCV_SEGMENT": 5,
     "FUTURES_OBJECTIVE_W_MEAN_LOG_TW": 0.7,
     "FUTURES_CPCV_CVAR_ALPHA": 0.10,
     "FUTURES_CPCV_CVAR_THRESHOLD": 0.05,
     "FUTURES_CPCV_CVAR_WEIGHT": 0.80,
-    "FUTURES_CPCV_TEMPORAL_LAMBDA": 1.5,
+    "FUTURES_CPCV_TEMPORAL_LAMBDA": 3.0,
     "FUTURES_MAX_CONCURRENT_POSITIONS": 2,
     "FUTURES_MIN_PF": 1.5,
     "FUTURES_MAX_MDD": 25.0,
@@ -61,21 +61,19 @@ ENGINE_PARAM_SPACE_FUTURES: Dict[str, Dict[str, Any]] = {
     "SHORT_ATR_MULT": {"type": "float", "low": 1.0, "high": 3.0, "step": 0.25},
     "SHORT_TP_MULT": {"type": "float", "low": 1.0, "high": 3.5, "step": 0.5},
     "SHORT_TRAIL_MULT": {"type": "float", "low": 1.5, "high": 4.0, "step": 0.5},
-    "RISK_PER_TRADE": {"type": "float", "low": 0.01, "high": 0.08, "step": 0.01},
-    "MAX_EXPOSURE": {"type": "float", "low": 1.0, "high": 3.0, "step": 0.5},
+    "RISK_PER_TRADE": {"type": "float", "low": 0.01, "high": 0.05, "step": 0.01},
+    "MAX_EXPOSURE": {"type": "float", "low": 0.5, "high": 2.0, "step": 0.5},
 }
 
 
 FUTURES_SYMBOLS: List[str] = [
     "ETH/USDT",
     "SOL/USDT",
-    "BTC/USDT",
 ]
 
 FUTURES_ANCHOR_SYMBOLS: List[str] = [
     "ETH/USDT",
     "SOL/USDT",
-    "BTC/USDT",
 ]
 
 FUTURES_DYNAMIC_CANDIDATE_POOL: List[str] = [
