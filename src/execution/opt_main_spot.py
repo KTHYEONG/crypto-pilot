@@ -51,16 +51,20 @@ from src.domain.spot.opt_spot_utils.cv_utils import (
     build_cpcv_test_paths_with_fallback,
     list_cpcv_block_ranges,
 )
-from src.domain.spot.opt_spot_utils.evaluator import (
+from src.domain.spot.opt_spot_utils.objective import (
     EMBARGO_BARS,
+    objective_spot,
+    spot_frozen_trial_constraints,
+)
+from src.domain.spot.opt_spot_utils.data_utils import (
     _segment_with_context,
+)
+from src.domain.spot.opt_spot_utils.oos_evaluator import (
     compute_regime_conditional_oos_metrics,
     evaluate_symbol_fold,
-    objective_spot,
     run_cpcv_complement_evaluation,
     run_holdout_shared_cash_portfolio,
     run_multi_window_oos_holdout,
-    spot_frozen_trial_constraints,
 )
 from src.domain.spot.opt_spot_utils.go_nogo import (
     FinalDeploymentReportInput,
