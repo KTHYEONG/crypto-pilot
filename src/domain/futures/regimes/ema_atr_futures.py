@@ -71,8 +71,8 @@ def compute_ema_atr_regime_labels(
 def labels_to_long_short_mult(labels: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Map EMA-ATR labels to (long_mult, short_mult) per tmp.md."""
     lab = labels.astype(np.int32, copy=False)
-    long_mult = np.where(lab == 2, 1.0, np.where(lab == 3, 0.5, np.where(lab == 1, 0.5, 0.0)))
-    short_mult = np.where(lab == 0, 1.0, np.where(lab == 1, 0.5, np.where(lab == 3, 0.5, 0.0)))
+    long_mult = np.where(lab == 3, 0.7, np.where(lab == 2, 0.4, 0.0))
+    short_mult = np.where(lab == 1, 0.7, np.where(lab == 0, 0.4, 0.0))
     return long_mult.astype(np.float64), short_mult.astype(np.float64)
 
 
