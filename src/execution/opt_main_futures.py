@@ -733,7 +733,9 @@ def main() -> None:
             insufficient = False
             for tf in [args.tf, "1d"]:
                 full_df = collector.collect_and_save(sym, tf, FETCH_START_DATE, END_DATE)
-                if full_df is None or len(full_df) < min_bars:
+                # 1D 바 수는 타임프레임 비율로 스케일 (4H=6bars/day → 1D=1bar/day)
+                bar_floor = min_bars if tf == args.tf else max(200, min_bars // 6)
+                if full_df is None or len(full_df) < bar_floor:
                     insufficient = True
                     break
                     
