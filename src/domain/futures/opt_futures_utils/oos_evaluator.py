@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -15,17 +15,19 @@ from config.settings import (
     SLIPPAGE_RATE,
     TRADING_FEE_RATE,
 )
-from src.domain.futures.engine_single_futures import BacktestEngineFast
 from src.domain.futures.engine_multi_futures import PortfolioBacktestEngineFast
+from src.domain.futures.engine_single_futures import BacktestEngineFast
 from src.domain.futures.opt_futures_utils.cv_utils import (
     CPCVPath,
     cpcv_complement_segments,
 )
 from src.domain.futures.opt_futures_utils.metrics import (
+    _log_tw_from_ret_pct,
     calc_cvar5_loss_pct_from_equity,
     calc_max_underwater_days_from_equity,
     calc_mdd_from_equity,
     calc_profit_factor_from_pnl,
+    calc_tail_ratio_from_equity,
     compute_pbo_from_cpcv_paths,
 )
 from src.domain.futures.strategies_futures import UltimateStrategy
@@ -36,7 +38,6 @@ from .data_utils import (
     _segment_with_context,
     align_data_for_2d_engine,
 )
-from .objective import _log_tw_from_ret_pct, calc_tail_ratio_from_equity
 from .signal_cache import (
     _ARRAYS_CACHE_MAXSIZE,
     _arrays_cache,
