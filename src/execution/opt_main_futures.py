@@ -720,26 +720,55 @@ def main() -> None:
 
     data_maps: Dict[str, Dict[str, Any]] = {}
     oos_data_maps: Dict[str, Dict[str, Any]] = {}
+    valid_symbols: List[str] = []
+    
+    min_bars = int(FUTURES_SCREENER_CONFIG.get("MIN_HISTORY_BARS", 2000))
+
     for sym in symbols:
-        data_maps[sym] = {}
-        oos_data_maps[sym] = {}
-        collector.ensure_funding_data(sym, FETCH_START_DATE, END_DATE)
-        for tf in [args.tf, "1d"]:
-            full_df = collector.collect_and_save(sym, tf, FETCH_START_DATE, END_DATE)
-            full_df = merge_funding_into_ohlcv(sym, full_df, FUTURES_DATA_DIR)
-            tz = full_df["datetime"].dt.tz
-            is_start_dt = pd.to_datetime(START_DATE).tz_localize(tz) if tz else pd.to_datetime(START_DATE)
-            is_end_dt = pd.to_datetime(IS_END_DATE).tz_localize(tz) if tz else pd.to_datetime(IS_END_DATE)
-            data_maps[sym][tf] = full_df[full_df["datetime"] < is_end_dt].reset_index(drop=True)
-            m = data_maps[sym][tf]["datetime"] >= is_start_dt
-            data_maps[sym][f"is_start_idx_{tf}"] = int(m.to_numpy().argmax()) if m.any() else 0
-            oos_data_maps[sym][tf] = full_df
-            m_oos = full_df["datetime"] >= is_end_dt
-            oos_data_maps[sym][f"oos_start_idx_{tf}"] = int(m_oos.to_numpy().argmax()) if m_oos.any() else len(full_df)
-        data_maps[sym][f"merge_idx_{args.tf}"] = compute_segment_merge_index(data_maps[sym][args.tf], data_maps[sym]["1d"])
-        oos_data_maps[sym][f"merge_idx_{args.tf}"] = compute_segment_merge_index(
-            oos_data_maps[sym][args.tf], oos_data_maps[sym]["1d"]
-        )
+        try:
+            temp_data = {}
+            temp_oos = {}
+            collector.ensure_funding_data(sym, FETCH_START_DATE, END_DATE)
+            
+            insufficient = False
+            for tf in [args.tf, "1d"]:
+                full_df = collector.collect_and_save(sym, tf, FETCH_START_DATE, END_DATE)
+                if full_df is None or len(full_df) < min_bars:
+                    insufficient = True
+                    break
+                    
+                full_df = merge_funding_into_ohlcv(sym, full_df, FUTURES_DATA_DIR)
+                tz = full_df["datetime"].dt.tz
+                is_start_dt = pd.to_datetime(START_DATE).tz_localize(tz) if tz else pd.to_datetime(START_DATE)
+                is_end_dt = pd.to_datetime(IS_END_DATE).tz_localize(tz) if tz else pd.to_datetime(IS_END_DATE)
+                
+                temp_data[tf] = full_df[full_df["datetime"] < is_end_dt].reset_index(drop=True)
+                m = temp_data[tf]["datetime"] >= is_start_dt
+                temp_data[f"is_start_idx_{tf}"] = int(m.to_numpy().argmax()) if m.any() else 0
+                temp_oos[tf] = full_df
+                m_oos = full_df["datetime"] >= is_end_dt
+                temp_oos[f"oos_start_idx_{tf}"] = int(m_oos.to_numpy().argmax()) if m_oos.any() else len(full_df)
+            
+            if insufficient:
+                _logger.warning("Symbol %s excluded: insufficient history (< %d bars)", sym, min_bars)
+                continue
+
+            temp_data[f"merge_idx_{args.tf}"] = compute_segment_merge_index(temp_data[args.tf], temp_data["1d"])
+            temp_oos[f"merge_idx_{args.tf}"] = compute_segment_merge_index(temp_oos[args.tf], temp_oos["1d"])
+            
+            data_maps[sym] = temp_data
+            oos_data_maps[sym] = temp_oos
+            valid_symbols.append(sym)
+            
+        except Exception as e:
+            _logger.error("Failed to load data for %s: %s", sym, e)
+            continue
+
+    symbols = valid_symbols
+    _logger.info("Data loading complete. %d symbols remaining in universe.", len(symbols))
+    if not symbols:
+        _logger.error("No valid symbols remaining after data loading. Exiting.")
+        return
 
     locked_param_space: Optional[Dict[str, Any]] = None
     _logger.info("Combination screening (signal × regime × sizing)...")
