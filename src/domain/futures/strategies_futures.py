@@ -83,7 +83,8 @@ class UltimateStrategy(PipelineStrategyBase):
         )
         
         # Expose continuous regime state for TIER 4 OOS diagnostic block
-        df["regime_risk_mult"] = long_mult.astype(np.float64)
+        # max(long, short): BEAR 레짐에서 long_mult=0이어도 short_mult가 있으면 "active"로 표시
+        df["regime_risk_mult"] = np.maximum(long_mult, short_mult).astype(np.float64)
 
         return df
 
