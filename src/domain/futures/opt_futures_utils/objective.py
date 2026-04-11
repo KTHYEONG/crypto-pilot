@@ -256,6 +256,12 @@ def objective_futures(
                 _gr = float(trades_df["pnl"].abs().sum())
                 funding_ratios.append(_fp / max(_gr, 1e-9))
 
+                # HHI 계산용: 심볼별 PnL 합산 축적 (multi mode)
+                if "symbol" in trades_df.columns:
+                    for _sx in symbols:
+                        _sx_pnl = float(trades_df.loc[trades_df["symbol"] == _sx, "pnl"].sum())
+                        sym_pf_accum[_sx].append(_sx_pnl)
+
                 if mdd_seg >= liq_mdd_thr:
                     raise optuna.TrialPruned()
 
@@ -370,6 +376,10 @@ def objective_futures(
         all_mean_tw = float(np.mean(tw_raw_arr))
         recent_mean_tw = float(np.mean(tw_raw_arr[-k_recent:]))
         temporal_decay_pen = max(0.0, all_mean_tw - recent_mean_tw) * temporal_lambda
+        # Recent IS gate (Spot SPOT_RECENT_IS_GATE_WEIGHT 패턴):
+        # IS 후반부(OOS 직전) 구간이 음수 log-return → 레짐 이탈 경고 → 추가 패널티
+        _recent_gate_w = float(cfg.get("FUTURES_RECENT_IS_GATE_WEIGHT", 0.25))
+        temporal_decay_pen += max(0.0, -recent_mean_tw) * _recent_gate_w
 
     mu_paths = float(np.mean(path_arr)) if path_arr.size > 0 else -10.0
     sd_paths = float(np.std(path_arr, ddof=1)) if path_arr.size > 1 else 10.0
@@ -422,6 +432,20 @@ def objective_futures(
         if mean_path_ret_pct > 0:
             cagr_bonus = min(0.25, mean_path_ret_pct / 30.0)
 
+    # HHI 집중도 패널티 (Spot 동일 패턴): 단일 심볼 수익 과집중 억제
+    # sym_pf_accum에 multi mode PnL 합산 축적됨 (세그먼트 루프에서 추가)
+    hhi_pen = 0.0
+    if len(symbols) > 1:
+        _sym_pnl_totals = [
+            max(0.0, float(np.sum(sym_pf_accum[s]))) if sym_pf_accum.get(s) else 0.0
+            for s in symbols
+        ]
+        _pnl_total = sum(_sym_pnl_totals) + 1e-9
+        _hhi_weights = [p / _pnl_total for p in _sym_pnl_totals]
+        _hhi = float(sum(w ** 2 for w in _hhi_weights))
+        _equal_w = 1.0 / len(symbols)
+        hhi_pen = max(0.0, _hhi - _equal_w) * 0.5  # Spot 동일 weight=0.5
+
     objective_final = float(
         kelly_obj
         - cvar_pen
@@ -429,6 +453,7 @@ def objective_futures(
         - concentration_pen
         - temporal_decay_pen
         - trade_penalty
+        - hhi_pen
         + sortino_bonus
         + cagr_bonus
     )
