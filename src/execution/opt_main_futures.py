@@ -36,6 +36,7 @@ import warnings
 
 from config.opt_config import (
     FUTURES_ANCHOR_SYMBOLS,
+    FUTURES_DYNAMIC_CANDIDATE_POOL,
     FUTURES_SCREENER_CONFIG,
     OPT_FUTURES_CONFIG,
     get_quarterly_window,
@@ -683,10 +684,17 @@ def main() -> None:
 
     broad_candidates: List[str] = []
     if not args.skip_universe:
-        # Pass empty pool to trigger dynamic all-market discovery
+        # Restrict Phase A to curated pool + anchors to prevent low-quality coins
+        # (e.g. ZEC, FIL, DOT) from entering via all-market scan.
+        # FUTURES_DYNAMIC_CANDIDATE_POOL is the SSOT for discoverable coins.
+        _initial_pool = list(
+            dict.fromkeys(
+                list(FUTURES_DYNAMIC_CANDIDATE_POOL) + list(FUTURES_ANCHOR_SYMBOLS)
+            )
+        )
         broad_candidates, _n_raw = screen_futures_universe(
             collector,
-            [], 
+            _initial_pool,
             args.tf,
             FUTURES_SCREENER_CONFIG,
             FETCH_START_DATE,
@@ -694,7 +702,7 @@ def main() -> None:
             data_dir=FUTURES_DATA_DIR,
         )
         anchors_to_add = [s for s in FUTURES_ANCHOR_SYMBOLS if s not in broad_candidates]
-        symbols = list(broad_candidates) + anchors_to_add # Initial symbols for data loading
+        symbols = list(broad_candidates) + anchors_to_add  # Initial symbols for data loading
     else:
         from config.opt_config import FUTURES_SYMBOLS
         symbols = list(dict.fromkeys(FUTURES_SYMBOLS))
@@ -770,10 +778,16 @@ def main() -> None:
     _logger.info("Combination screening (signal × regime × sizing)...")
     phase1_no_edge = False
 
-    stage1_k = int(FUTURES_SCREENER_CONFIG.get("COMBO_SAMPLE_K", 12))
-    stage1_syms = symbols[:stage1_k] if not args.skip_universe else symbols
+    # Phase B: anchor 심볼 전용으로 신호 선정 안정성 확보.
+    # anchor는 최고 ADV/품질 → Phase B winner의 재현성 보장.
+    # Phase C는 여전히 broad_candidates 전체를 평가.
+    phase_b_syms = [s for s in FUTURES_ANCHOR_SYMBOLS if s in data_maps]
+    if not phase_b_syms:
+        stage1_k = int(FUTURES_SCREENER_CONFIG.get("COMBO_SAMPLE_K", 12))
+        phase_b_syms = symbols[:stage1_k]
+    stage1_syms = phase_b_syms
     stage1_data_maps = {s: data_maps[s] for s in stage1_syms}
-    _logger.info("Phase B: combination screening on N=%d broad candidates", len(stage1_syms))
+    _logger.info("Phase B: combination screening on N=%d anchor symbols", len(stage1_syms))
 
     screening = run_combination_screening_futures(
         data_maps=stage1_data_maps,
@@ -808,19 +822,20 @@ def main() -> None:
         locked_param_space = build_multi_combo_param_space_futures(valid_tops)
         
         if not args.skip_universe:
-            # Phase C: Refinement mini-backtest with winning combo (uses #1 for symbol refinement)
-            winning_params = valid_tops[0].best_params.copy() if valid_tops[0].best_params else None
-            if not winning_params:
-                from src.domain.futures.opt_futures_utils.combination_screener_futures import (
-                    _mid_params_from_space,
-                )
-                t0_space = build_combined_param_space_futures(valid_tops[0].signal, valid_tops[0].regime, valid_tops[0].sizing)
-                winning_params = _mid_params_from_space(t0_space, args.tf)
-            else:
-                winning_params["TIMEFRAME"] = args.tf
-                _lev_def = int(OPT_FUTURES_CONFIG.get("FUTURES_DISCOVERY_LEVERAGE", 8))
-                winning_params["LEVERAGE"] = int(os.getenv("FUTURES_DISCOVERY_LEVERAGE", str(_lev_def)))
-                winning_params["USE_COMPOUNDING"] = True
+            # Phase C: mid-point params 사용 (best_params는 IS 데이터 편향 내포).
+            # Phase C는 "이 콤보가 합리적 파라미터에서 작동하는가"를 검증하는 단계이므로
+            # IS 최적 파라미터 대신 탐색 공간 중심값을 사용해 IS-편향 오염 차단.
+            from src.domain.futures.opt_futures_utils.combination_screener_futures import (
+                _mid_params_from_space,
+            )
+            t0_space = build_combined_param_space_futures(
+                valid_tops[0].signal, valid_tops[0].regime, valid_tops[0].sizing
+            )
+            winning_params = _mid_params_from_space(t0_space, args.tf)
+            winning_params["TIMEFRAME"] = args.tf
+            _lev_def = int(OPT_FUTURES_CONFIG.get("FUTURES_DISCOVERY_LEVERAGE", 8))
+            winning_params["LEVERAGE"] = int(os.getenv("FUTURES_DISCOVERY_LEVERAGE", str(_lev_def)))
+            winning_params["USE_COMPOUNDING"] = True
             
             refined_symbols = screen_futures_symbol_refinement(
                 broad_candidates,

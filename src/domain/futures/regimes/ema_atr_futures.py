@@ -78,8 +78,10 @@ class EmaAtrFuturesRegime:
         "ATR_REGIME_PERIOD": {"type": "int", "low": 10, "high": 30, "step": 5},
         "VOL_PCT_WINDOW": {"type": "int", "low": 40, "high": 120, "step": 20},
         "VOL_QUANTILE": {"type": "float", "low": 0.45, "high": 0.75, "step": 0.05},
-        "REGIME_STRONG_MULT": {"type": "float", "low": 0.7, "high": 1.0, "step": 0.1},
-        "REGIME_WEAK_MULT": {"type": "float", "low": 0.3, "high": 0.7, "step": 0.1},
+        # Strong mult capped at 0.85: prevents 40%+ notional/trade with leverage=8.
+        # At RISK_PER_TRADE=0.05, STRONG_MULT=0.85, lev=8 → 34% notional max per trade.
+        "REGIME_STRONG_MULT": {"type": "float", "low": 0.6, "high": 0.85, "step": 0.05},
+        "REGIME_WEAK_MULT": {"type": "float", "low": 0.2, "high": 0.6, "step": 0.05},
     }
 
     def compute_long_short_mult(
