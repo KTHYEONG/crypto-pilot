@@ -810,9 +810,8 @@ def main() -> None:
         # Restrict Phase A to curated pool + anchors to prevent low-quality coins
         # (e.g. ZEC, FIL, DOT) from entering via all-market scan.
         # FUTURES_DYNAMIC_CANDIDATE_POOL is the SSOT for discoverable coins.
-        _initial_pool = list(
-            dict.fromkeys(list(FUTURES_DYNAMIC_CANDIDATE_POOL) + list(FUTURES_ANCHOR_SYMBOLS))
-        )
+        # [IMPROVEMENT] Use [] to dynamically discover all Binance USDT perpetuals and filter structurally.
+        _initial_pool: List[str] = []
         broad_candidates, _n_raw = screen_futures_universe(
             collector,
             _initial_pool,
