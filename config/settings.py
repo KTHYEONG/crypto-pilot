@@ -10,7 +10,8 @@ if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(line_buffering=True)
         sys.stderr.reconfigure(line_buffering=True)  # type: ignore
     except Exception:
-        pass
+        # Standard stdout/stderr might not support reconfigure in some environments
+        ...
 
 # 로컬 환경 변수 로드 (.env 파일이 있다면)
 load_dotenv()
@@ -79,7 +80,7 @@ API_RETRY_WAIT_MAX = 30  # 최대 대기 시간 (초)
 MIN_BALANCE_USDT = 10.0  # 최소 운영 잔고 (USDT)
 MIN_BALANCE_FOR_TRADE = 5.0  # 최소 거래 가능 잔고
 MIN_ORDER_VALUE_USDT = 5.0  # Binance 최소 주문 금액 (바이낸스 규정 기반)
-MAX_EXCHANGE_LEVERAGE = 20  # 최대 허용 레버리지 
+MAX_EXCHANGE_LEVERAGE = 20  # 최대 허용 레버리지
 
 # --- 타이밍 설정 ---
 LOOP_INTERVAL_SECONDS = 10  # 메인 루프 간격

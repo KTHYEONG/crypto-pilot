@@ -4,6 +4,7 @@ Profit-factor Kelly sizing: f* = (W*R - (1-W)) / R from rolling win rate W and p
 W = share of positive bar returns in window; R = avg_win / avg_loss on signed returns.
 Causal; uses shared KELLY_FRACTION and MAX_EXPOSURE like rolling_kelly.
 """
+
 from __future__ import annotations
 
 from typing import Any, ClassVar, Dict

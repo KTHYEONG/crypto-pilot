@@ -1,6 +1,7 @@
 """
 Futures Optuna objective: CPCV paths, Kelly-CVaR scalar, disk+memory signal cache.
 """
+
 from __future__ import annotations
 
 import logging
@@ -118,8 +119,8 @@ def evaluate_symbol_fold(
     if trades_df is None or trades_df.empty:
         return -10.0, 0.0, 0.0, 0, 0.0, 0.0, 0, 0, np.array([]), 0.0, 0.0
 
-    long_count: int = int(len(trades_df[trades_df["side"] == "LONG"]))
-    short_count: int = int(len(trades_df[trades_df["side"] == "SHORT"]))
+    long_count: int = len(trades_df[trades_df["side"] == "LONG"])
+    short_count: int = len(trades_df[trades_df["side"] == "SHORT"])
 
     equity_curve = result.get("equity_curve", np.array([]))
     mdd_pct: float = abs(float(result.get("mdd_pct", 0.0)))
@@ -147,7 +148,9 @@ def evaluate_symbol_fold(
     pf = calc_profit_factor_from_pnl(true_pnl)
 
     total_ret_ratio = 1.0 + (ret_pct / 100.0)
-    cagr = ((total_ret_ratio ** (365.0 / span_days)) - 1.0) * 100.0 if total_ret_ratio > 0 else -100.0
+    cagr = (
+        ((total_ret_ratio ** (365.0 / span_days)) - 1.0) * 100.0 if total_ret_ratio > 0 else -100.0
+    )
 
     return (
         cagr,
@@ -162,12 +165,6 @@ def evaluate_symbol_fold(
         fund_paid,
         gross_abs,
     )
-
-
-
-
-
-
 
 
 def run_oos_margin_shared_portfolio(
@@ -202,6 +199,7 @@ def run_oos_margin_shared_portfolio(
         return {"ok": False}
 
     from config.settings import SLIPPAGE_RATE, TRADING_FEE_RATE
+
     engine = PortfolioBacktestEngineFast(
         aligned_data=aligned_data,
         symbol_names=symbols,
@@ -232,20 +230,18 @@ def run_oos_margin_shared_portfolio(
 
     moic = float(final_balance / FUTURES_INITIAL_BALANCE)
     eq_np = np.asarray(equity_curve, dtype=np.float64).ravel()
-    min_eq_ratio = (
-        float(np.min(eq_np) / float(FUTURES_INITIAL_BALANCE)) if eq_np.size > 0 else moic
-    )
+    min_eq_ratio = float(np.min(eq_np) / float(FUTURES_INITIAL_BALANCE)) if eq_np.size > 0 else moic
     tw_ratio = float(min(moic, min_eq_ratio))
 
-    long_c = int(len(trades_df[trades_df["side"] == "LONG"])) if not trades_df.empty else 0
-    short_c = int(len(trades_df[trades_df["side"] == "SHORT"])) if not trades_df.empty else 0
+    long_c = len(trades_df[trades_df["side"] == "LONG"]) if not trades_df.empty else 0
+    short_c = len(trades_df[trades_df["side"] == "SHORT"]) if not trades_df.empty else 0
     tot_t = long_c + short_c
     minority = float(min(long_c, short_c)) / float(max(tot_t, 1)) * 100.0
 
-    true_pnl = trades_df["pnl"] - trades_df["entry_fee"] if not trades_df.empty else pd.Series(dtype=float)
-    win_rate = (
-        float((len(true_pnl[true_pnl > 0]) / len(trades_df)) * 100.0) if tot_t > 0 else 0.0
+    true_pnl = (
+        trades_df["pnl"] - trades_df["entry_fee"] if not trades_df.empty else pd.Series(dtype=float)
     )
+    win_rate = float((len(true_pnl[true_pnl > 0]) / len(trades_df)) * 100.0) if tot_t > 0 else 0.0
     pf = float(calc_profit_factor_from_pnl(true_pnl)) if tot_t > 0 else 1.0
 
     # Directional Stats & EV/Cost Ratio (Futures Specific)
@@ -254,13 +250,14 @@ def run_oos_margin_shared_portfolio(
         short_pnl = true_pnl[trades_df["side"] == "SHORT"]
         long_pf = float(calc_profit_factor_from_pnl(long_pnl)) if len(long_pnl) > 0 else 0.0
         short_pf = float(calc_profit_factor_from_pnl(short_pnl)) if len(short_pnl) > 0 else 0.0
-        
+
         sw_cnt = len(short_pnl[short_pnl > 0])
         s_win_rate = (sw_cnt / len(short_pnl) * 100.0) if len(short_pnl) > 0 else 0.0
-        
+
         # EV/Cost Ratio: Avg Net PnL per trade / estimated round-trip cost
         # Cost = entry_fee + exit_fee(approx same as entry) + estimated slippage
         from config.settings import SLIPPAGE_RATE, TRADING_FEE_RATE
+
         avg_notional = (trades_df["entry_price"] * trades_df["amount"]).mean()
         avg_net_pnl = true_pnl.mean()
         cost_ratio = (TRADING_FEE_RATE * 2.0) + (SLIPPAGE_RATE * 2.0)
@@ -269,6 +266,7 @@ def run_oos_margin_shared_portfolio(
         long_pf, short_pf, s_win_rate, ev_cost_ratio = 0.0, 0.0, 0.0, 0.0
 
     from src.core.optimization.opt_utils import calc_ulcer_index_from_equity
+
     u_index = float(calc_ulcer_index_from_equity(equity_curve))
 
     gross_abs = float(trades_df["pnl"].abs().sum()) if not trades_df.empty else 0.0
@@ -325,7 +323,7 @@ def run_multi_window_oos_holdout(
     full_end = len(oos_data_maps[ref_sym][tf])
     # 4H data: ~6 bars/day. 4 mo: ~120 days * 6 = 720 bars.
     bars_per_sub = 720 if tf == "4h" else 2880
-    
+
     ends_raw: List[int] = []
     for i in range(1, n_sub_windows + 1):
         cap = oos_start + int(i * bars_per_sub)
@@ -371,16 +369,18 @@ def run_multi_window_oos_holdout(
                 cache_root=cache_root,
                 oos_end_idx=end,
             )
-            
+
         cagr_w = float(r.get("cagr_pct", -100.0))
         cagrs.append(cagr_w)
-        windows.append({
-            "end_idx": int(end),
-            "cagr_pct": cagr_w,
-            "mdd_pct": float(r.get("mdd_pct", 100.0)),
-            "pf": float(r.get("profit_factor", 1.0)),
-            "trades": float(r.get("total_trades", 0)),
-        })
+        windows.append(
+            {
+                "end_idx": int(end),
+                "cagr_pct": cagr_w,
+                "mdd_pct": float(r.get("mdd_pct", 100.0)),
+                "pf": float(r.get("profit_factor", 1.0)),
+                "trades": float(r.get("total_trades", 0)),
+            }
+        )
 
     med = float(np.median(cagrs)) if cagrs else -100.0
     worst_mdd = float(max((float(w["mdd_pct"]) for w in windows), default=100.0))
@@ -397,8 +397,10 @@ def run_multi_window_oos_holdout(
 
 
 def _regime_stress_label(mult: float) -> str:
-    if mult > 0.5: return "risk_on"
-    if mult > 0.0: return "cautious"
+    if mult > 0.5:
+        return "risk_on"
+    if mult > 0.0:
+        return "cautious"
     return "stress"
 
 
@@ -409,22 +411,25 @@ def compute_regime_conditional_oos_metrics(
     symbols: List[str],
 ) -> Dict[str, Dict[str, float]]:
     ref = symbols[0]
-    if ref not in full_signal_dfs: return {}
+    if ref not in full_signal_dfs:
+        return {}
     sig = full_signal_dfs[ref]
-    if "regime_risk_mult" not in sig.columns: return {}
-    
+    if "regime_risk_mult" not in sig.columns:
+        return {}
+
     eq = np.asarray(portfolio_equity_curve, dtype=np.float64).ravel()
     rrm = sig["regime_risk_mult"].to_numpy(dtype=np.float64)
     start = int(oos_start_idx)
     n = min(len(rrm) - start, len(eq))
-    if n < 2: return {}
-    
+    if n < 2:
+        return {}
+
     rrm_slice = rrm[start : start + n]
     eq_slice = eq[:n]
-    
+
     labels = [_regime_stress_label(float(rrm_slice[i])) for i in range(n)]
     log_ret = np.diff(np.log(np.maximum(eq_slice, 1e-12)))
-    
+
     keys = ("risk_on", "cautious", "stress")
     sum_log = {k: 0.0 for k in keys}
     bar_ct = {k: 0.0 for k in keys}
@@ -432,8 +437,8 @@ def compute_regime_conditional_oos_metrics(
         bar_ct[labels[j]] += 1.0
     for i in range(1, n):
         lab = labels[i]
-        sum_log[lab] += float(log_ret[i-1])
-        
+        sum_log[lab] += float(log_ret[i - 1])
+
     out = {}
     for lab in keys:
         bc = bar_ct[lab]
@@ -444,7 +449,7 @@ def compute_regime_conditional_oos_metrics(
         if len(idx) >= 2:
             sub_eq = eq_slice[np.asarray(idx, dtype=np.int64)]
             mdd_c = float(calc_mdd_from_equity(sub_eq))
-        
+
         avg_br = float((np.exp(slr / max(bc, 1.0)) - 1.0) * 100.0) if bc > 0 else 0.0
         out[lab] = {
             "bar_count": bc,
@@ -551,9 +556,7 @@ def run_cpcv_complement_evaluation(
 
             ret_pct = float((final_balance / segment_initial - 1.0) * 100.0)
             raw_log = _log_tw_from_ret_pct(ret_pct)
-            mdd_seg = (
-                float(calc_mdd_from_equity(equity_curve)) if equity_curve.size > 0 else 0.0
-            )
+            mdd_seg = float(calc_mdd_from_equity(equity_curve)) if equity_curve.size > 0 else 0.0
             if mdd_seg >= liq_mdd_thr:
                 raw_log -= 1e9
             seg_raw_logs.append(raw_log)

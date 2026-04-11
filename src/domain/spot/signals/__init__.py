@@ -1,23 +1,24 @@
 from __future__ import annotations
 
+from src.domain.spot.signals import (
+    adx_breakout,
+    bb_squeeze,
+    frama_evr_signal,
+    kc_pullback,
+    macd_hist_div,
+    obv_ma_breakout,
+    rs_momentum,
+    rsi2_pullback,
+    stochrsi_cross,
+    supertrend_signal,
+    vix_fix,
+)
+from src.domain.spot.signals.base import ISignal, SignalOutput
 from src.domain.spot.signals.registry import SIGNAL_REGISTRY, register_signal
 
-from src.domain.spot.signals import adx_breakout  # noqa: F401
-from src.domain.spot.signals import bb_squeeze  # noqa: F401
-from src.domain.spot.signals import frama_evr_signal  # noqa: F401
-from src.domain.spot.signals import kc_pullback  # noqa: F401
-from src.domain.spot.signals import macd_hist_div  # noqa: F401
-from src.domain.spot.signals import obv_ma_breakout  # noqa: F401
-from src.domain.spot.signals import rsi2_pullback  # noqa: F401
-from src.domain.spot.signals import rs_momentum  # noqa: F401
-from src.domain.spot.signals import stochrsi_cross  # noqa: F401
-from src.domain.spot.signals import supertrend_signal  # noqa: F401
-from src.domain.spot.signals import vix_fix  # noqa: F401
-from src.domain.spot.signals.base import ISignal, SignalOutput
-
 __all__ = [
-    "ISignal",
     "SIGNAL_REGISTRY",
+    "ISignal",
     "SignalOutput",
     "register_signal",
 ]

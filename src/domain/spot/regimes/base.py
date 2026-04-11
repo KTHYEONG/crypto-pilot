@@ -9,4 +9,6 @@ class IRegime(Protocol):
     name: ClassVar[str]
     param_space: ClassVar[Dict[str, Any]]
 
-    def compute(self, data_maps: Dict[str, Dict[str, Any]], params: Dict[str, Any]) -> np.ndarray: ...
+    def compute(
+        self, data_maps: Dict[str, Dict[str, Any]], params: Dict[str, Any]
+    ) -> np.ndarray: ...

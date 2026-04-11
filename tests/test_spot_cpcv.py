@@ -31,9 +31,9 @@ def test_cpcv_embargo_trims_block_starts() -> None:
     paths0 = build_cpcv_test_paths(n, 6, 2, embargo=0)
     paths7 = build_cpcv_test_paths(n, 6, 2, embargo=7)
     assert len(paths0) == len(paths7) == 15
-    for p0, p7 in zip(paths0, paths7):
+    for p0, p7 in zip(paths0, paths7, strict=True):
         assert len(p0) == len(p7)
-        for (s0, e0), (s7, e7) in zip(p0, p7):
+        for (s0, e0), (s7, e7) in zip(p0, p7, strict=True):
             assert e0 == e7
             assert s7 == s0 + 7
             assert 0 <= s7 < e7 <= n

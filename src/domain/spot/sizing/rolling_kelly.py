@@ -23,7 +23,7 @@ class RollingKellySizing:
         kelly_frac = float(params.get("KELLY_FRACTION", 0.25))
         # Hard Cap: 30% individual coin limit for wealth preservation.
         max_exp = float(min(params.get("MAX_EXPOSURE", 0.3), 0.3))
-        
+
         r_raw = pd.Series(close).pct_change().fillna(0).to_numpy(dtype=np.float64)
         entry_mask = (
             df["long_entry_signal"].to_numpy(dtype=np.float64)
@@ -44,14 +44,13 @@ class RollingKellySizing:
             .fillna(1e-8)
             .to_numpy(dtype=np.float64)
         )
-        
+
         # Regularization to prevent division by zero in flat periods.
         eps = 1e-8
         with np.errstate(divide="ignore", invalid="ignore"):
             f = np.where(var > eps, (mu / var) * kelly_frac, 0.0)
-        
+
         f = np.nan_to_num(f, nan=0.0, posinf=0.0, neginf=0.0)
         # Apply fractional size only on long signals.
         floored = np.where(entry_mask > 0.5, np.maximum(f, 0.0), 0.0)
         return np.clip(floored, 0.0, max_exp).astype(np.float64)
-

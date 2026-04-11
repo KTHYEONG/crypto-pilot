@@ -7,6 +7,7 @@ class Mock:
         is_take_profit = "TAKE_PROFIT" in ccxt_type or "TAKE_PROFIT" in raw_type
         return is_stop and not is_take_profit
 
+
 o1 = {"type": "market", "info": {"type": "STOP_MARKET"}}
 o2 = {"type": "market", "info": {"origType": "STOP_MARKET"}}
 o3 = {"type": "limit", "info": {"type": "STOP_MARKET"}}

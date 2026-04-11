@@ -178,9 +178,7 @@ def format_regime_oos_diagnostic_block(
         n = int(m.get("bar_count", 0.0))
         rp = float(m.get("return_pct", 0.0))
         mdd = float(m.get("mdd_pct", 0.0))
-        lines.append(
-            f"  - {labels[key]}: N={n} | return: {rp:.2f}% | MDD: {mdd:.2f}%"
-        )
+        lines.append(f"  - {labels[key]}: N={n} | return: {rp:.2f}% | MDD: {mdd:.2f}%")
     stress_mdd = float(regime_metrics.get("stress", {}).get("mdd_pct", 0.0))
     if stress_mdd > float(stress_mdd_warn_pct):
         lines.append(
@@ -350,7 +348,7 @@ def run_holdout_portfolio_shared_cash(
         c_alpha = alpha_decay_pct >= alpha_decay_floor_pct
 
     passed = all([c_tw, c_cagr, c_mdd, c_cvar, c_tr, c_hw, c_alpha, c_pf, c_calmar])
-    
+
     lines = [
         "[Spot Holdout Portfolio (shared-cash)]",
         f"  - Terminal wealth > {tw_need} | {'PASS' if c_tw else 'FAIL'} | obs={min_path_terminal_wealth_ratio:.4f}",
@@ -369,13 +367,19 @@ def run_holdout_portfolio_shared_cash(
         "-" * 55,
         f"  FINAL: {'GO' if passed else 'NO-GO'}",
     ]
-    
+
     details = {
-        "tw": c_tw, "cagr": c_cagr, "mdd": c_mdd, "cvar": c_cvar,
-        "tail_ratio": c_tr, "hw_recovery": c_hw, "alpha_decay": c_alpha,
-        "pf": c_pf, "calmar": c_calmar,
+        "tw": c_tw,
+        "cagr": c_cagr,
+        "mdd": c_mdd,
+        "cvar": c_cvar,
+        "tail_ratio": c_tr,
+        "hw_recovery": c_hw,
+        "alpha_decay": c_alpha,
+        "pf": c_pf,
+        "calmar": c_calmar,
     }
-    
+
     # We maintain CheckRecord for backward compatibility with existing reporting if needed
     checks = [
         CheckRecord("tw", "Wealth", min_path_terminal_wealth_ratio, tw_need, c_tw),
@@ -599,19 +603,33 @@ def run_final_deployment_report(ctx: FinalDeploymentReportInput) -> str:
     if not ctx.final_decision_go:
         lines.append("\n  ※ 주요 결격 사유 (Critical Failures):")
         if not psr_ok:
-            lines.append(f"    - TIER1: PSR 점수({ctx.gate1_psr:.4f})가 기준({ctx.psr_target}) 미달")
+            lines.append(
+                f"    - TIER1: PSR 점수({ctx.gate1_psr:.4f})가 기준({ctx.psr_target}) 미달"
+            )
         if not dsr_ok:
-            lines.append(f"    - TIER1: DSR 점수({ctx.gate1_dsr:.4f})가 기준({ctx.dsr_target}) 미달")
+            lines.append(
+                f"    - TIER1: DSR 점수({ctx.gate1_dsr:.4f})가 기준({ctx.dsr_target}) 미달"
+            )
         if not oos_mdd_ok:
-            lines.append(f"    - TIER2: OOS MDD({abs(ctx.oos_mdd_pct):.1f}%)가 제한({ctx.oos_mdd_limit_pct}%) 초과")
+            lines.append(
+                f"    - TIER2: OOS MDD({abs(ctx.oos_mdd_pct):.1f}%)가 제한({ctx.oos_mdd_limit_pct}%) 초과"
+            )
         if not calmar_ok:
-            lines.append(f"    - TIER2: Calmar Ratio({ctx.oos_calmar:.2f})가 기준({ctx.calmar_target}) 미달")
+            lines.append(
+                f"    - TIER2: Calmar Ratio({ctx.oos_calmar:.2f})가 기준({ctx.calmar_target}) 미달"
+            )
         if not oos_cagr_ok:
-            lines.append(f"    - TIER3: OOS CAGR({ctx.oos_net_cagr_pct:.1f}%)이 목표({ctx.oos_cagr_target_pct}%) 미달")
+            lines.append(
+                f"    - TIER3: OOS CAGR({ctx.oos_net_cagr_pct:.1f}%)이 목표({ctx.oos_cagr_target_pct}%) 미달"
+            )
         if not pf_ok:
-            lines.append(f"    - TIER3: Profit Factor({ctx.oos_pf:.2f})가 기준({ctx.pf_target}) 미달")
+            lines.append(
+                f"    - TIER3: Profit Factor({ctx.oos_pf:.2f})가 기준({ctx.pf_target}) 미달"
+            )
         if not ad_ok:
-            lines.append(f"    - TIER3: Alpha Decay({ctx.alpha_decay_pct:.1f}%)가 허용치({ctx.alpha_decay_floor_pct}%) 초과")
+            lines.append(
+                f"    - TIER3: Alpha Decay({ctx.alpha_decay_pct:.1f}%)가 허용치({ctx.alpha_decay_floor_pct}%) 초과"
+            )
 
     lines.append("=" * 71)
     return "\n".join(lines)
