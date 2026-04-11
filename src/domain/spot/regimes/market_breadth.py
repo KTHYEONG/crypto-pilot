@@ -5,6 +5,7 @@ Returns per-bar strength in [0, 1]: risk-off / BTC lock => 0; risk-on strength s
 with smoothed breadth signal so regime_state can be OFF / SOFT / FULL (strategies_spot).
 Causal only.
 """
+
 from __future__ import annotations
 
 from typing import Any, ClassVar, Dict, Mapping
@@ -53,10 +54,7 @@ def compute_market_breadth_regime(
     ema_each = np.empty_like(mat)
     for i in range(mat.shape[0]):
         ema_each[i] = (
-            pd.Series(mat[i])
-            .ewm(span=w_sig, adjust=False)
-            .mean()
-            .to_numpy(dtype=np.float64)
+            pd.Series(mat[i]).ewm(span=w_sig, adjust=False).mean().to_numpy(dtype=np.float64)
         )
     bull = (mat > ema_each).astype(np.float64)
     mb_t = np.mean(bull, axis=0)
@@ -64,7 +62,11 @@ def compute_market_breadth_regime(
     mb_s = pd.Series(mb_t)
     mb_inner = mb_s.ewm(span=inner_span, adjust=False).mean()
     signal_t = mb_inner.ewm(span=w_sig, adjust=False).mean().to_numpy(dtype=np.float64)
-    roll_std = mb_s.rolling(window=w_sig, min_periods=max(2, min(w_sig, n))).std().to_numpy(dtype=np.float64)
+    roll_std = (
+        mb_s.rolling(window=w_sig, min_periods=max(2, min(w_sig, n)))
+        .std()
+        .to_numpy(dtype=np.float64)
+    )
     roll_std = np.nan_to_num(roll_std, nan=0.0, posinf=0.0, neginf=0.0)
     eps_t = np.maximum(c_h * roll_std, eps_min)
 
@@ -109,7 +111,9 @@ class MarketBreadthRegime:
 
     def compute(self, data_maps: Dict[str, Dict[str, Any]], params: Dict[str, Any]) -> np.ndarray:
         tf = str(params.get("TIMEFRAME", "4h"))
-        symbols = sorted(s for s in data_maps if tf in data_maps[s] and data_maps[s][tf] is not None)
+        symbols = sorted(
+            s for s in data_maps if tf in data_maps[s] and data_maps[s][tf] is not None
+        )
         if not symbols:
             raise ValueError("market_breadth: empty data_maps")
         ref = data_maps[symbols[0]][tf]

@@ -1,4 +1,5 @@
 """ADX + Keltner: breakout above KC -> long, below KC -> short."""
+
 from __future__ import annotations
 
 from typing import Any, ClassVar, Dict

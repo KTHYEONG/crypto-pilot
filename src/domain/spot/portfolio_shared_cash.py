@@ -63,7 +63,9 @@ def run_shared_cash_multi_symbol(
     All symbol arrays must have length n.
     """
     if not symbols_ordered:
-        return SharedCashResult(equity_curve=np.array([]), final_balance=initial_balance, total_trades=0)
+        return SharedCashResult(
+            equity_curve=np.array([]), final_balance=initial_balance, total_trades=0
+        )
 
     try:
         from src.domain.spot.portfolio_shared_cash_numba import (
@@ -88,7 +90,7 @@ def run_shared_cash_multi_symbol(
             raise
         _logger.warning("Shared-cash Numba path failed; using Python loop: %s", exc, exc_info=True)
 
-    n = int(len(symbol_arrays[symbols_ordered[0]]["close"]))
+    n = len(symbol_arrays[symbols_ordered[0]]["close"])
     for s in symbols_ordered:
         if len(symbol_arrays[s]["close"]) != n:
             raise ValueError("Shared-cash requires identical bar counts per symbol.")
@@ -130,7 +132,9 @@ def run_shared_cash_multi_symbol(
     delta_gate = float(params.get("DELTA_GATE", 0.08))
     last_risk_pct_sym = [0.0] * n_sym
     gamma_base = float(params.get("SLIPPAGE_GAMMA_BASE", SLIPPAGE_GAMMA_BASE))
-    ref_adv_py = max(float(params.get("SLIPPAGE_REFERENCE_ADV_KRW", SLIPPAGE_REFERENCE_ADV_KRW)), 1.0)
+    ref_adv_py = max(
+        float(params.get("SLIPPAGE_REFERENCE_ADV_KRW", SLIPPAGE_REFERENCE_ADV_KRW)), 1.0
+    )
     pen_scale_py = float(concurrency_penalty_scale)
     adv_by_si = [0.0] * n_sym
     for si_a, sym_a in enumerate(symbols_ordered):
@@ -231,14 +235,14 @@ def run_shared_cash_multi_symbol(
             equity_curve[i] = _portfolio_equity(balance, slots, symbol_arrays, symbols_ordered, i)
             continue
 
-        def rank_key(si: int) -> float:
+        def rank_key(si: int, p_i: int = prev_i) -> float:
             if rank_scores is None:
                 return float(-si)
             sym = symbols_ordered[si]
             rs = rank_scores.get(sym)
-            if rs is None or len(rs) <= prev_i:
+            if rs is None or len(rs) <= p_i:
                 return 0.0
-            v = float(rs[prev_i])
+            v = float(rs[p_i])
             return v if np.isfinite(v) else 0.0
 
         candidates.sort(key=rank_key, reverse=True)
@@ -250,11 +254,11 @@ def run_shared_cash_multi_symbol(
         for si in candidates:
             if not free_slots:
                 break
-                
+
             # CIRCUIT BREAKER: Stop new entries if capital drops below 30% (Wealth Preservation).
             if balance < initial_balance * 0.3:
-                 break
-                 
+                break
+
             sym = symbols_ordered[si]
             arr = symbol_arrays[sym]
             j = free_slots[0]
@@ -295,10 +299,10 @@ def run_shared_cash_multi_symbol(
                 if spnl > 0:
                     per_symbol_wins[si] += 1
                 pnl_list.append(spnl)
-                
+
                 if not opened:
                     # Intra-SL: Churning Prevention
-                    sym_cooldown[si] = 1 
+                    sym_cooldown[si] = 1
                     sym_cooldown_skip[si] = True
             if opened:
                 st.sym_idx = si
@@ -333,14 +337,14 @@ def run_shared_cash_multi_symbol(
             if pnl > 0:
                 per_symbol_wins[done_si] += 1
             pnl_list.append(pnl)
-            
+
             slot.in_position = False
             slot.sym_idx = -1
         equity_curve[last_idx] = balance
 
     return SharedCashResult(
-        equity_curve=equity_curve, 
-        final_balance=float(balance), 
+        equity_curve=equity_curve,
+        final_balance=float(balance),
         total_trades=total_trades,
         pnl_array=np.array(pnl_list, dtype=np.float64),
         per_symbol_trades=per_symbol_trades,
@@ -424,7 +428,11 @@ def _process_in_position_bar(
         trades_delta += 1
         pnl_out = pnl
         slot.in_position = False
-        if sym_cooldown is not None and sym_cooldown_skip is not None and 0 <= sym_idx < len(sym_cooldown):
+        if (
+            sym_cooldown is not None
+            and sym_cooldown_skip is not None
+            and 0 <= sym_idx < len(sym_cooldown)
+        ):
             sym_cooldown[sym_idx] = int(kill_cooldown_bars)
             sym_cooldown_skip[sym_idx] = True
             if last_risk_pct_sym is not None and 0 <= sym_idx < len(last_risk_pct_sym):
@@ -529,11 +537,7 @@ def _process_in_position_bar(
             pos_atr = trail_atr
         dist = float(slot.highest - slot.entry_price)
         current_trail_mult = long_trail_mult
-        if (
-            trail_tighten is not None
-            and len(trail_tighten) > i
-            and float(trail_tighten[i]) > 0.5
-        ):
+        if trail_tighten is not None and len(trail_tighten) > i and float(trail_tighten[i]) > 0.5:
             current_trail_mult = long_trail_lock_mult
         elif dist > pos_atr * tp_lock_mult:
             current_trail_mult = long_trail_lock_mult
@@ -548,7 +552,7 @@ def _process_in_position_bar(
             rrm = float(regime_risk_mult[i])
             if rrm < 0.4:
                 adaptive_stop = max(1, time_stop_bars // 2)
-        
+
         if time_stop_bars > 0 and (i - slot.entry_idx) >= adaptive_stop:
             exit_price = c_open * (1.0 - slippage_rate)
             exit_triggered = True

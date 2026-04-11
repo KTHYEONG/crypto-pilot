@@ -2,6 +2,7 @@
 EMA x ATR volatility-trend regime for USDT perpetuals: directional size multipliers in [0, 1].
 Causal only (no lookahead).
 """
+
 from __future__ import annotations
 
 from typing import Any, ClassVar, Dict
@@ -27,10 +28,7 @@ def _atr_pct(
         lc = abs(float(low[i] - close[i - 1]))
         tr[i] = max(hl, hc, lc)
     atr = (
-        pd.Series(tr)
-        .ewm(span=max(2, int(period)), adjust=False)
-        .mean()
-        .to_numpy(dtype=np.float64)
+        pd.Series(tr).ewm(span=max(2, int(period)), adjust=False).mean().to_numpy(dtype=np.float64)
     )
     safe_close = np.where(close > 1e-12, close, 1.0)
     return atr / safe_close
@@ -60,7 +58,7 @@ def compute_ema_atr_regime_labels(
         .to_numpy(dtype=np.float64)
     )
     trend_bull = (close > ema).astype(np.int32)
-    
+
     # Choppy market check: distance to EMA
     safe_close = np.where(close > 1e-12, close, 1.0)
     ema_dist = np.abs(close - ema) / safe_close
@@ -103,7 +101,7 @@ class EmaAtrFuturesRegime:
         weak = float(params.get("REGIME_WEAK_MULT", 0.4))
         atr_period = int(params.get("ATR_REGIME_PERIOD", 14))
         trend_thresh = float(params.get("TREND_THRESHOLD", 0.01))
-        
+
         labels, is_choppy = compute_ema_atr_regime_labels(
             df,
             ema_slow=int(params.get("EMA_ATR_REGIME_SLOW", 120)),
@@ -115,9 +113,9 @@ class EmaAtrFuturesRegime:
         lab = labels.astype(np.int32, copy=False)
         long_mult = np.where(lab == 3, strong, np.where(lab == 2, weak, 0.0))
         short_mult = np.where(lab == 1, strong, np.where(lab == 0, weak, 0.0))
-        
+
         # Apply stress/choppy filter
         long_mult = np.where(is_choppy, 0.0, long_mult)
         short_mult = np.where(is_choppy, 0.0, short_mult)
-        
+
         return long_mult.astype(np.float64), short_mult.astype(np.float64)

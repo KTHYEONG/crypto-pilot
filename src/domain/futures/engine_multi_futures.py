@@ -2,6 +2,7 @@
 2D Portfolio backtest engine: single global balance, per-symbol state arrays.
 For use when mode=multi (aligned Time x Symbol matrix).
 """
+
 from __future__ import annotations
 
 import logging
@@ -44,7 +45,7 @@ class PortfolioBacktestEngineFast:
         self.leverage = float(self.params.get("LEVERAGE", 1.0))
         self.risk_per_trade = float(self.params.get("RISK_PER_TRADE", 0.02))
         self.max_exposure = float(self.params.get("MAX_EXPOSURE", 0.8))
-        
+
         cfg = OPT_FUTURES_CONFIG
         self.max_concurrent_positions = int(cfg.get("FUTURES_MAX_CONCURRENT_POSITIONS", 2))
 
@@ -64,8 +65,10 @@ class PortfolioBacktestEngineFast:
         garch_kelly_f = self.data["garch_kelly_f"]
         funding_rate = self.data["funding_rate_sum"]
         slot_rank_score = self.data["slot_rank_score"]
-        
-        _logger.debug(f"Engine Multi: symbols={self.symbols}, max_concurrent={self.max_concurrent_positions}")
+
+        _logger.debug(
+            f"Engine Multi: symbols={self.symbols}, max_concurrent={self.max_concurrent_positions}"
+        )
 
         l_atr_mult = float(self.params.get("LONG_ATR_MULT", 3.0))
         l_trail_mult = float(self.params.get("LONG_TRAIL_MULT", 3.0))
@@ -105,18 +108,20 @@ class PortfolioBacktestEngineFast:
         trades_list: list[dict[str, Any]] = []
         for t in trades_arr:
             sym_idx = int(t[0])
-            trades_list.append({
-                "symbol": self.symbols[sym_idx],
-                "entry_idx": int(t[1]),
-                "exit_idx": int(t[2]),
-                "side": "LONG" if t[3] == 1 else "SHORT",
-                "entry_price": float(t[4]),
-                "exit_price": float(t[5]),
-                "pnl": float(t[6]),
-                "amount": float(t[7]),
-                "entry_fee": float(t[8]),
-                "funding_fee": float(t[9]),
-            })
+            trades_list.append(
+                {
+                    "symbol": self.symbols[sym_idx],
+                    "entry_idx": int(t[1]),
+                    "exit_idx": int(t[2]),
+                    "side": "LONG" if t[3] == 1 else "SHORT",
+                    "entry_price": float(t[4]),
+                    "exit_price": float(t[5]),
+                    "pnl": float(t[6]),
+                    "amount": float(t[7]),
+                    "entry_fee": float(t[8]),
+                    "funding_fee": float(t[9]),
+                }
+            )
 
         _logger.debug(f"Engine Finished. Trades: {len(trades_list)}")
         return pd.DataFrame(trades_list), equity_curve, final_balance
@@ -185,7 +190,7 @@ def backtest_portfolio_numba(
                 num_open_pos += 1
                 if np.isnan(close_2d[i, s]):
                     continue
-                
+
                 # Apply funding fee
                 fund_fee = amount[s] * close_2d[i, s] * funding_rate[i, s] * pos_side[s]
                 fund_fee_stored[s] += fund_fee
@@ -224,16 +229,28 @@ def backtest_portfolio_numba(
                     highest[s] = c_high
 
                 if not has_scaled[s]:
-                    triggered, sc_price, sc_amount, pnl_scale, exit_fee_scale = process_long_scale_out(
-                        c_open, c_high, entry_p[s], pos_atr, l_scale_atr, amount[s], fee_rate
+                    triggered, sc_price, sc_amount, pnl_scale, exit_fee_scale = (
+                        process_long_scale_out(
+                            c_open, c_high, entry_p[s], pos_atr, l_scale_atr, amount[s], fee_rate
+                        )
                     )
                     if triggered:
                         sc_fund = fund_fee_stored[s] / 2.0
-                        balance += (sc_amount * entry_p[s]) / leverage + (pnl_scale - exit_fee_scale)
+                        balance += (sc_amount * entry_p[s]) / leverage + (
+                            pnl_scale - exit_fee_scale
+                        )
 
                         trades[t_count] = [
-                            s, entry_idx[s], i, 1.0, entry_p[s], sc_price,
-                            pnl_scale - exit_fee_scale - sc_fund, sc_amount, entry_fee_stored[s] / 2.0, sc_fund
+                            s,
+                            entry_idx[s],
+                            i,
+                            1.0,
+                            entry_p[s],
+                            sc_price,
+                            pnl_scale - exit_fee_scale - sc_fund,
+                            sc_amount,
+                            entry_fee_stored[s] / 2.0,
+                            sc_fund,
                         ]
                         t_count += 1
 
@@ -251,16 +268,28 @@ def backtest_portfolio_numba(
                     lowest[s] = c_low
 
                 if not has_scaled[s]:
-                    triggered, sc_price, sc_amount, pnl_scale, exit_fee_scale = process_short_scale_out(
-                        c_open, c_low, entry_p[s], pos_atr, s_tp_mult, amount[s], fee_rate
+                    triggered, sc_price, sc_amount, pnl_scale, exit_fee_scale = (
+                        process_short_scale_out(
+                            c_open, c_low, entry_p[s], pos_atr, s_tp_mult, amount[s], fee_rate
+                        )
                     )
                     if triggered:
                         sc_fund = fund_fee_stored[s] / 2.0
-                        balance += (sc_amount * entry_p[s]) / leverage + (pnl_scale - exit_fee_scale)
+                        balance += (sc_amount * entry_p[s]) / leverage + (
+                            pnl_scale - exit_fee_scale
+                        )
 
                         trades[t_count] = [
-                            s, entry_idx[s], i, -1.0, entry_p[s], sc_price,
-                            pnl_scale - exit_fee_scale - sc_fund, sc_amount, entry_fee_stored[s] / 2.0, sc_fund
+                            s,
+                            entry_idx[s],
+                            i,
+                            -1.0,
+                            entry_p[s],
+                            sc_price,
+                            pnl_scale - exit_fee_scale - sc_fund,
+                            sc_amount,
+                            entry_fee_stored[s] / 2.0,
+                            sc_fund,
                         ]
                         t_count += 1
 
@@ -280,12 +309,20 @@ def backtest_portfolio_numba(
                 else:
                     pnl = (entry_p[s] - exit_price) * amount[s]
                 fee = amount[s] * exit_price * fee_rate
-                
+
                 balance += ((amount[s] * entry_p[s]) / leverage) + (pnl - fee)
 
                 trades[t_count] = [
-                    s, entry_idx[s], i, float(pos_side[s]), entry_p[s],
-                    exit_price, pnl - fee - fund_fee_stored[s], amount[s], entry_fee_stored[s], fund_fee_stored[s]
+                    s,
+                    entry_idx[s],
+                    i,
+                    float(pos_side[s]),
+                    entry_p[s],
+                    exit_price,
+                    pnl - fee - fund_fee_stored[s],
+                    amount[s],
+                    entry_fee_stored[s],
+                    fund_fee_stored[s],
                 ]
                 t_count += 1
                 in_pos[s] = False
@@ -304,7 +341,7 @@ def backtest_portfolio_numba(
         # --- Entry logic with Concurrency limit and Rank Priority ---
         if num_open_pos < max_concurrent:
             prev_i = i - 1
-            
+
             # 1. Collect potential candidates
             candidates = []
             for s in range(n_syms):
@@ -312,24 +349,24 @@ def backtest_portfolio_numba(
                     continue
                 if np.isnan(open_2d[i, s]) or np.isnan(strength_filter[prev_i, s]):
                     continue
-                
+
                 sf = strength_filter[prev_i, s]
                 if sf > 0.0 and not np.isnan(sf):
                     c_open = open_2d[i, s]
                     p_side = 0
                     fill_p = 0.0
-                    
+
                     if trend_dir[prev_i, s] == 1 and high_2d[i, s] > entry_upper[prev_i, s]:
                         fill_p = max(c_open, entry_upper[prev_i, s]) * (1.0 + slippage_rate)
                         p_side = 1
                     elif trend_dir[prev_i, s] == -1 and low_2d[i, s] < entry_lower[prev_i, s]:
                         fill_p = min(c_open, entry_lower[prev_i, s]) * (1.0 - slippage_rate)
                         p_side = -1
-                        
+
                     if p_side != 0:
                         # Store rank score (slot_rank_score) and other info
                         candidates.append((slot_rank_score[prev_i, s], s, p_side, fill_p, sf))
-            
+
             if candidates:
                 # 2. Sort candidates by rank_score descending (using simple sort for Numba compatibility)
                 for c1 in range(len(candidates)):
@@ -338,20 +375,26 @@ def backtest_portfolio_numba(
                             tmp = candidates[c1]
                             candidates[c1] = candidates[c2]
                             candidates[c2] = tmp
-                
+
                 # 3. Try to enter up to max_concurrent
                 for cand in candidates:
                     if num_open_pos >= max_concurrent:
                         break
-                        
-                    rs_val, s, p_side, fill_p, sf = cand
+
+                    _rs_val, s, p_side, fill_p, sf = cand
                     pos_atr = atr_2d[prev_i, s]
                     stop_dist = (pos_atr * l_atr_mult) if p_side == 1 else (pos_atr * s_atr_mult)
-                    
+
                     if stop_dist > 0:
                         target_qty = calculate_position_size(
-                            fill_p, stop_dist, current_equity, free_margin, 
-                            risk_per_trade, leverage, sf, garch_kelly_f[prev_i, s]
+                            fill_p,
+                            stop_dist,
+                            current_equity,
+                            free_margin,
+                            risk_per_trade,
+                            leverage,
+                            sf,
+                            garch_kelly_f[prev_i, s],
                         )
 
                         max_margin_per_coin = current_equity / float(max_concurrent)
@@ -377,17 +420,34 @@ def backtest_portfolio_numba(
                             lowest[s] = fill_p
                             has_scaled[s] = False
                             stop_p[s] = fill_p - stop_dist if p_side == 1 else fill_p + stop_dist
-                            
-                            triggered, intra_exit_price, pnl_intra, exit_fee_intra = check_intra_bar_stop(
-                                p_side, high_2d[i, s], low_2d[i, s], stop_p[s], fill_p, target_qty, fee_rate, slippage_rate
+
+                            triggered, intra_exit_price, pnl_intra, exit_fee_intra = (
+                                check_intra_bar_stop(
+                                    p_side,
+                                    high_2d[i, s],
+                                    low_2d[i, s],
+                                    stop_p[s],
+                                    fill_p,
+                                    target_qty,
+                                    fee_rate,
+                                    slippage_rate,
+                                )
                             )
                             if triggered:
                                 pnl_intra -= exit_fee_intra
                                 balance += (target_qty * fill_p) / leverage + pnl_intra
                                 free_margin += (target_qty * fill_p) / leverage + pnl_intra
                                 trades[t_count] = [
-                                    s, i, i, float(p_side), fill_p, intra_exit_price, 
-                                    pnl_intra - fund_fee_stored[s], target_qty, entry_fee, fund_fee_stored[s]
+                                    s,
+                                    i,
+                                    i,
+                                    float(p_side),
+                                    fill_p,
+                                    intra_exit_price,
+                                    pnl_intra - fund_fee_stored[s],
+                                    target_qty,
+                                    entry_fee,
+                                    fund_fee_stored[s],
                                 ]
                                 t_count += 1
                                 in_pos[s] = False
@@ -405,13 +465,21 @@ def backtest_portfolio_numba(
                 else:
                     exit_price = c_last * (1.0 + slippage_rate)
                     pnl = (entry_p[s] - exit_price) * amount[s]
-                    
+
                 fee = amount[s] * exit_price * fee_rate
                 balance += ((amount[s] * entry_p[s]) / leverage) + (pnl - fee)
-                
+
                 trades[t_count] = [
-                    s, entry_idx[s], last_idx, float(pos_side[s]), entry_p[s],
-                    exit_price, pnl - fee - fund_fee_stored[s], amount[s], entry_fee_stored[s], fund_fee_stored[s]
+                    s,
+                    entry_idx[s],
+                    last_idx,
+                    float(pos_side[s]),
+                    entry_p[s],
+                    exit_price,
+                    pnl - fee - fund_fee_stored[s],
+                    amount[s],
+                    entry_fee_stored[s],
+                    fund_fee_stored[s],
                 ]
                 t_count += 1
                 in_pos[s] = False

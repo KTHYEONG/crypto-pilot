@@ -1,13 +1,15 @@
 """
 Backtest metrics: profit factor, MDD, Sortino, portfolio CAGR, CVaR, PSR/DSR, underwater duration.
 """
+
 from __future__ import annotations
 
 import math
-from typing import List, Sequence
+from typing import Sequence
 
 import numpy as np
 import pandas as pd
+
 
 def calc_profit_factor_from_pnl(pnl_series: pd.Series) -> float:
     if pnl_series.empty:
@@ -20,6 +22,7 @@ def calc_profit_factor_from_pnl(pnl_series: pd.Series) -> float:
         return 5.0 if gross_profit > 0 else 1.0
 
     return gross_profit / gross_loss
+
 
 def calc_pain_index_from_equity(equity_curve: np.ndarray) -> float:
     """Mean absolute drawdown depth (fraction of peak), O(T) pain area proxy."""
@@ -40,31 +43,32 @@ def calc_mdd_from_equity(equity_curve: np.ndarray) -> float:
     drawdown = (equity_curve - running_max) / running_max * 100.0
     return float(abs(np.min(np.nan_to_num(drawdown, nan=0.0))))
 
+
 def calc_sortino_from_equity(equity_curve: np.ndarray, span_days: float) -> float:
     if len(equity_curve) < 2 or span_days <= 0:
         return 0.0
-        
+
     start_eq = equity_curve[0] if equity_curve[0] > 0 else 1e-9
     end_eq = equity_curve[-1]
-    
+
     total_ret_ratio = max(end_eq / start_eq, 0.0001)
     cagr_decimal = (total_ret_ratio ** (365.0 / span_days)) - 1.0
-    
+
     safe_curve = np.clip(equity_curve, 1e-9, None)
     step_log_returns = np.log(safe_curve[1:] / safe_curve[:-1])
-    
+
     downside_log_returns = step_log_returns[step_log_returns < 0]
-    
+
     if len(downside_log_returns) == 0:
         return 999.0 if cagr_decimal > 0 else 0.0
-        
+
     step_downside_var = np.mean(downside_log_returns**2.0)
     bars_per_year = (len(equity_curve) / span_days) * 365.0
     annual_downside_dev = np.sqrt(step_downside_var * bars_per_year)
-    
+
     if annual_downside_dev == 0.0:
         return 999.0 if cagr_decimal > 0 else 0.0
-        
+
     sortino = cagr_decimal / annual_downside_dev
     return float(sortino)
 
@@ -134,7 +138,7 @@ def mean_of_worst_quartile(values: Sequence[float]) -> float:
     arr = np.asarray(sorted(values), dtype=np.float64)
     if arr.size == 0:
         return 0.0
-    k = max(1, int(math.ceil(0.25 * arr.size)))
+    k = max(1, math.ceil(0.25 * arr.size))
     return float(np.mean(arr[:k]))
 
 
@@ -152,7 +156,9 @@ def probabilistic_sharpe_ratio(
     excess_kurt = float(kurtosis) - 3.0
     denom = max(
         1e-12,
-        math.sqrt(1.0 - skewness * sharpe_estimate + (excess_kurt + 3.0 - 3.0) / 4.0 * sharpe_estimate**2),
+        math.sqrt(
+            1.0 - skewness * sharpe_estimate + (excess_kurt + 3.0 - 3.0) / 4.0 * sharpe_estimate**2
+        ),
     )
     z = sharpe_estimate * math.sqrt(n - 1.0) / denom
     return float(0.5 * (1.0 + math.erf(z / math.sqrt(2.0))))
@@ -178,7 +184,9 @@ def compute_dsr_from_path_values(path_values: Sequence[float], n_independent_tri
     return float((sr_hat - sr_star * math.sqrt(var_sr)) / (math.sqrt(var_sr) + 1e-12))
 
 
-def compute_dsr_from_path_sortinos(path_values: Sequence[float], n_independent_trials: int) -> float:
+def compute_dsr_from_path_sortinos(
+    path_values: Sequence[float], n_independent_trials: int
+) -> float:
     return compute_dsr_from_path_values(path_values, n_independent_trials)
 
 

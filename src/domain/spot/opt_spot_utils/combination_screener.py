@@ -1,4 +1,5 @@
 """Stage-1 screening: (signal × regime × sizing) combinations with fast CPCV."""
+
 from __future__ import annotations
 
 import itertools
@@ -12,8 +13,8 @@ from typing import Any, Dict, List, Sequence, Tuple
 
 import numpy as np
 import optuna
-from optuna.storages import InMemoryStorage
 from optuna.samplers import TPESampler
+from optuna.storages import InMemoryStorage
 from optuna.trial import TrialState
 
 from config.opt_config import OPT_SPOT_CONFIG, SPOT_EXCLUDED_SIZING_METHODS
@@ -259,12 +260,7 @@ def run_quick_cpcv_for_combo(
     ktop = max(1, len(completed) // 5)
     top_trials = completed[:ktop]
     mean_score = float(
-        np.mean(
-            [
-                float(t.user_attrs.get("cpcv_mean_path_return_pct", -1e9))
-                for t in top_trials
-            ]
-        )
+        np.mean([float(t.user_attrs.get("cpcv_mean_path_return_pct", -1e9)) for t in top_trials])
     )
     return mean_score
 
@@ -403,7 +399,7 @@ def _warmup_numba(
             show_progress_bar=False,
         )
     except Exception:
-        pass
+        ...
 
 
 def _process_pool_context():
@@ -429,10 +425,11 @@ def run_combination_screening(
     from concurrent.futures import ProcessPoolExecutor
     from functools import partial
 
+    from tqdm import tqdm
+
     from src.domain.spot.regimes import REGIME_REGISTRY
     from src.domain.spot.signals import SIGNAL_REGISTRY
     from src.domain.spot.sizing import SIZING_REGISTRY
-    from tqdm import tqdm
 
     min_rate = float(OPT_SPOT_CONFIG.get("SPOT_COMBO_MIN_SIGNAL_RATE", 0.005))
     n_quick_floor = int(OPT_SPOT_CONFIG.get("SPOT_COMBO_QUICK_TRIALS", 40))
@@ -446,7 +443,9 @@ def run_combination_screening(
     n_workers_base = n_workers_cfg if n_workers_cfg > 0 else max(1, (os.cpu_count() or 2) - 1)
     n_workers = max(1, min(n_workers_base, worker_cap))
 
-    sizing_for_screen = sorted(k for k in SIZING_REGISTRY.keys() if k not in SPOT_EXCLUDED_SIZING_METHODS)
+    sizing_for_screen = sorted(
+        k for k in SIZING_REGISTRY.keys() if k not in SPOT_EXCLUDED_SIZING_METHODS
+    )
     combinations = list(
         itertools.product(
             sorted(SIGNAL_REGISTRY.keys()),
@@ -518,7 +517,9 @@ def run_combination_screening(
     )
 
     _logger.info("Warming up Numba JIT before process pool...")
-    _warmup_numba(data_maps, symbols, tf, project_root=project_root, signal_cache_dir=signal_cache_dir)
+    _warmup_numba(
+        data_maps, symbols, tf, project_root=project_root, signal_cache_dir=signal_cache_dir
+    )
 
     mp_ctx = _process_pool_context()
 
@@ -549,7 +550,7 @@ def run_combination_screening(
         )
 
     surviving: List[tuple[str, str, str]] = []
-    for combo, score in zip(viable, phase1_results):
+    for combo, score in zip(viable, phase1_results, strict=True):
         sig, reg, siz = combo
         if score > prune_thr:
             surviving.append(combo)
@@ -570,7 +571,9 @@ def run_combination_screening(
 
     if not surviving:
         _logger.warning("Phase 1: all pruned. Relaxing threshold, keeping top-5.")
-        surviving = [c for _, c in sorted(zip(phase1_results, viable), reverse=True)[:5]]
+        surviving = [
+            c for _, c in sorted(zip(phase1_results, viable, strict=True), reverse=True)[:5]
+        ]
 
     phase2_boost = _ambiguity_phase2_boost(phase1_results, top_k=max(1, top_k), cfg=OPT_SPOT_CONFIG)
     if phase2_boost > 0:
@@ -611,7 +614,7 @@ def run_combination_screening(
         )
 
     scored_rows: List[Tuple[tuple[str, str, str], Dict[str, float]]] = list(
-        zip(surviving, phase2_results)
+        zip(surviving, phase2_results, strict=True)
     )
 
     def _robust_key(m: Dict[str, float]) -> float:
@@ -711,6 +714,8 @@ def run_combination_screening(
     positive = [s for s in qualified if s.p10_gmgr > min_screen]
     out_cap = max(1, top_k, len(bucket_order))
     if not positive:
-        _logger.warning("No combo cleared min_screen_score. Returning bucket-union best %d.", out_cap)
+        _logger.warning(
+            "No combo cleared min_screen_score. Returning bucket-union best %d.", out_cap
+        )
         return qualified[:out_cap]
     return positive[:out_cap]

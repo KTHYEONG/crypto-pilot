@@ -1,6 +1,7 @@
 """
 Rolling profit-factor Kelly on signed bar returns; funding subtracted from pct change.
 """
+
 from __future__ import annotations
 
 from typing import Any, ClassVar, Dict
@@ -42,7 +43,11 @@ class ProfitFactorKellyFuturesSizing:
             if "trend_direction" in df.columns
             else np.zeros(n, dtype=np.float64)
         )
-        signed_np = np.where(td > 0, net_r.to_numpy(dtype=np.float64), np.where(td < 0, -net_r.to_numpy(dtype=np.float64), 0.0))
+        signed_np = np.where(
+            td > 0,
+            net_r.to_numpy(dtype=np.float64),
+            np.where(td < 0, -net_r.to_numpy(dtype=np.float64), 0.0),
+        )
 
         s = pd.Series(signed_np)
         n_pos = s.gt(0.0).rolling(window, min_periods=window).sum()

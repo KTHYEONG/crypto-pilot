@@ -10,5 +10,6 @@ class IFuturesRegime(Protocol):
     name: ClassVar[str]
     param_space: ClassVar[Dict[str, Any]]
 
-    def compute_long_short_mult(self, df: pd.DataFrame, params: Dict[str, Any]) -> tuple[np.ndarray, np.ndarray]:
-        ...
+    def compute_long_short_mult(
+        self, df: pd.DataFrame, params: Dict[str, Any]
+    ) -> tuple[np.ndarray, np.ndarray]: ...

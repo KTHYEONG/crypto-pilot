@@ -25,41 +25,43 @@ from src.domain.spot.strategies_spot import UltimateSpotStrategy
 _logger: logging.Logger = logging.getLogger("opt_spot")
 
 # Optuna TPE `constraints_func`: each value <= 0 means satisfied (Gardner-style soft constraints).
-SIGNAL_CACHE_PARAM_KEYS: frozenset[str] = frozenset([
-    "SIGNAL_TYPE",
-    "REGIME_TYPE",
-    "EXIT_FAMILY",
-    "SIZING_METHOD",
-    "ATR_PERIOD",
-    "EMA_FAST_PERIOD",
-    "EMA_SLOW_PERIOD",
-    "RSI_PERIOD",
-    "RSI_LOW_THRESH",
-    "KC_PERIOD",
-    "KC_MULT",
-    "MOMENTUM_PERIOD",
-    "TP_MEAN_PERIOD",
-    "KELLY_WINDOW",
-    "W_SIGNAL",
-    "K_ACCEL",
-    "MB_FLOOR",
-    "C_HYST",
-    "EPSILON_MIN",
-    "K_COOL_DOWN",
-    "EMA_ATR_REGIME_SLOW",
-    "ATR_REGIME_PERIOD",
-    "VOL_PCT_WINDOW",
-    "VOL_QUANTILE",
-    "VOV_WINDOW",
-    "ST_ATR_PERIOD",
-    "ST_MULT",
-    "TQ_EMA_FAST",
-    "TQ_EMA_SLOW",
-    "TQ_ADX_PERIOD",
-    "TQ_ADX_THRESHOLD",
-    "PFK_WINDOW",
-    "PFK_MIN_F",
-])
+SIGNAL_CACHE_PARAM_KEYS: frozenset[str] = frozenset(
+    [
+        "SIGNAL_TYPE",
+        "REGIME_TYPE",
+        "EXIT_FAMILY",
+        "SIZING_METHOD",
+        "ATR_PERIOD",
+        "EMA_FAST_PERIOD",
+        "EMA_SLOW_PERIOD",
+        "RSI_PERIOD",
+        "RSI_LOW_THRESH",
+        "KC_PERIOD",
+        "KC_MULT",
+        "MOMENTUM_PERIOD",
+        "TP_MEAN_PERIOD",
+        "KELLY_WINDOW",
+        "W_SIGNAL",
+        "K_ACCEL",
+        "MB_FLOOR",
+        "C_HYST",
+        "EPSILON_MIN",
+        "K_COOL_DOWN",
+        "EMA_ATR_REGIME_SLOW",
+        "ATR_REGIME_PERIOD",
+        "VOL_PCT_WINDOW",
+        "VOL_QUANTILE",
+        "VOV_WINDOW",
+        "ST_ATR_PERIOD",
+        "ST_MULT",
+        "TQ_EMA_FAST",
+        "TQ_EMA_SLOW",
+        "TQ_ADX_PERIOD",
+        "TQ_ADX_THRESHOLD",
+        "PFK_WINDOW",
+        "PFK_MIN_F",
+    ]
+)
 
 _SIGNAL_CACHE_SCHEMA_VERSION: int = 15
 
@@ -104,6 +106,7 @@ def _signal_mem_cache_maxsize() -> int:
 def _arrays_mem_cache_maxsize() -> int:
     return max(16, _env_int("OPT_SPOT_ARRAYS_MEM_CACHE_MAX", 96))
 
+
 def _get_logic_hash() -> str:
     """Strategy logic fingerprinting via source code hashing."""
     global _STRATEGY_LOGIC_HASH
@@ -111,11 +114,13 @@ def _get_logic_hash() -> str:
         try:
             # Avoid circular import by local import
             from src.domain.spot.strategies_spot import UltimateSpotStrategy
+
             src = inspect.getsource(UltimateSpotStrategy.generate_signals)
             _STRATEGY_LOGIC_HASH = hashlib.sha256(src.encode("utf-8")).hexdigest()[:16]
         except Exception:
             _STRATEGY_LOGIC_HASH = "legacy"
     return _STRATEGY_LOGIC_HASH
+
 
 def _cleanup_old_cache(root: Path, *, force: bool = False) -> None:
     """Deletes expired cache files and trims total cache size with LRU-like mtime policy."""
@@ -136,13 +141,17 @@ def _cleanup_old_cache(root: Path, *, force: bool = False) -> None:
     if FileLock is not None:
         try:
             with FileLock(str(lock_path), timeout=0.1):
-                _cleanup_old_cache_impl(root, now, max_days=max_days, max_bytes=max_bytes, target_bytes=target_bytes)
+                _cleanup_old_cache_impl(
+                    root, now, max_days=max_days, max_bytes=max_bytes, target_bytes=target_bytes
+                )
             _CACHE_LAST_CLEANUP_TS = now
             return
         except Exception:
-            pass
+            ...
 
-    _cleanup_old_cache_impl(root, now, max_days=max_days, max_bytes=max_bytes, target_bytes=target_bytes)
+    _cleanup_old_cache_impl(
+        root, now, max_days=max_days, max_bytes=max_bytes, target_bytes=target_bytes
+    )
     _CACHE_LAST_CLEANUP_TS = now
 
 
@@ -179,7 +188,7 @@ def _cleanup_old_cache_impl(
             "Auto-cleaned %d expired cache files (>%d days, %.2f GB).",
             expired_count,
             max_days,
-            expired_bytes / (1024 ** 3),
+            expired_bytes / (1024**3),
         )
 
     _cleanup_stale_signal_type_dirs(root)
@@ -203,14 +212,15 @@ def _cleanup_old_cache_impl(
             _logger.info(
                 "Trimmed signal cache by %d files (%.2f GB) to stay within %.2f GB target.",
                 removed_count,
-                removed_bytes / (1024 ** 3),
-                trim_target / (1024 ** 3),
+                removed_bytes / (1024**3),
+                trim_target / (1024**3),
             )
 
 
 def _cleanup_stale_signal_type_dirs(root: Path) -> None:
     try:
         from src.domain.spot.signals import SIGNAL_REGISTRY
+
         valid = {str(k).lower() for k in SIGNAL_REGISTRY.keys()}
     except Exception:
         return
@@ -236,6 +246,7 @@ def _touch_cache_file(path: Path) -> None:
         path.touch(exist_ok=True)
     except OSError:
         pass
+
 
 _SignalCacheKey = Tuple[Tuple[Tuple[str, Any], ...], str, str, int, int, int, str]
 _SignalComponentCacheKey = Tuple[str, Tuple[Tuple[str, Any], ...], str, str, int, int, int, str]
@@ -271,10 +282,6 @@ _DISK_CACHE_READ_EXCEPTIONS: tuple[type[Exception], ...] = (
 )
 
 
-
-
-
-
 def _dataset_fingerprint_from_df(df: pd.DataFrame) -> int:
     """Lightweight cache invalidation when OHLCV rows change but length stays equal."""
     if "close" not in df.columns or df.empty:
@@ -306,6 +313,7 @@ def _params_for_component(params: Dict[str, Any], component: str) -> Set[str]:
 
     try:
         from src.domain.spot.signals import SIGNAL_REGISTRY
+
         st = str(params.get("SIGNAL_TYPE", "ADX_BREAKOUT")).upper()
         signal_keys.update({"SIGNAL_TYPE", "ATR_PERIOD"})
         if st in SIGNAL_REGISTRY:
@@ -315,6 +323,7 @@ def _params_for_component(params: Dict[str, Any], component: str) -> Set[str]:
 
     try:
         from src.domain.spot.regimes import REGIME_REGISTRY
+
         rt = str(params.get("REGIME_TYPE", "MARKET_BREADTH")).upper()
         regime_keys.add("REGIME_TYPE")
         if rt in REGIME_REGISTRY:
@@ -324,6 +333,7 @@ def _params_for_component(params: Dict[str, Any], component: str) -> Set[str]:
 
     try:
         from src.domain.spot.sizing import SIZING_REGISTRY
+
         sm = str(params.get("SIZING_METHOD", "vol_target")).lower()
         sizing_keys.add("SIZING_METHOD")
         if sm in SIZING_REGISTRY:
@@ -382,10 +392,7 @@ def _collect_component_specs(
         s = full_df[col]
         if s.empty:
             continue
-        if not (
-            np.issubdtype(s.dtype, np.number)
-            or np.issubdtype(s.dtype, np.bool_)
-        ):
+        if not (np.issubdtype(s.dtype, np.number) or np.issubdtype(s.dtype, np.bool_)):
             continue
         arr = s.to_numpy(copy=False)
         disk_dtype = _disk_dtype_for_array(arr)
@@ -402,7 +409,9 @@ def _collect_component_specs(
     return specs
 
 
-def _build_component_cache_key(cache_key: _SignalCacheKey, params: Dict[str, Any], component: str) -> _SignalComponentCacheKey:
+def _build_component_cache_key(
+    cache_key: _SignalCacheKey, params: Dict[str, Any], component: str
+) -> _SignalComponentCacheKey:
     _, sym, tf, data_len, fingerprint, version, logic_hash = cache_key
     names = _params_for_component(params, component)
     items: List[Tuple[str, Any]] = sorted(
@@ -451,7 +460,7 @@ def _write_component_cache(
         payload: Dict[str, Any] = {
             "schema": _SIGNAL_CACHE_SCHEMA_VERSION,
             "component": component,
-            "n": int(len(full_df)),
+            "n": len(full_df),
             "columns": col_specs,
             "arrays": _extract_component_arrays(full_df, component, col_specs),
         }
@@ -525,9 +534,7 @@ def _build_signal_cache_key(
     fingerprint: int,
 ) -> _SignalCacheKey:
     signal_items: List[Tuple[str, Any]] = sorted(
-        (k, _normalize_key_value(v))
-        for k, v in params.items()
-        if k not in _CACHE_PARAM_EXCLUDE
+        (k, _normalize_key_value(v)) for k, v in params.items() if k not in _CACHE_PARAM_EXCLUDE
     )
     return (
         tuple(signal_items),
@@ -571,11 +578,11 @@ def get_or_compute_signals(
                     _signal_cache[cache_key] = full_df
                 return full_df
             except Exception:
-                pass
+                ...
 
     # 2. 신규 계산
     full_df: pd.DataFrame = strategy.generate_signals(target_df.copy(deep=True))
-    
+
     # 3. 디스크 캐시 저장
     if disk_cache_root is not None:
         try:
@@ -593,35 +600,3 @@ def get_or_compute_signals(
             _signal_cache.popitem(last=False)
         _signal_cache[cache_key] = full_df
         return full_df
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

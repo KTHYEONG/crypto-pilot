@@ -1,6 +1,7 @@
 """
 CPCV test paths for futures optimization (spot-aligned geometry, fresh-start-per-segment in evaluator).
 """
+
 from __future__ import annotations
 
 import logging
@@ -40,7 +41,9 @@ def list_cpcv_block_ranges(n_bars: int, n_blocks: int, embargo: int = 0) -> List
     return out
 
 
-def cpcv_complement_segments(test_path: CPCVPath, all_blocks: List[Tuple[int, int]]) -> List[Tuple[int, int]]:
+def cpcv_complement_segments(
+    test_path: CPCVPath, all_blocks: List[Tuple[int, int]]
+) -> List[Tuple[int, int]]:
     test_set = {tuple(int(x) for x in pair) for pair in test_path}
     norm_blocks = [tuple(int(x) for x in b) for b in all_blocks]
     comp = [b for b in norm_blocks if b not in test_set]

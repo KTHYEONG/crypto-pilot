@@ -3,6 +3,7 @@ Windows Named Mutex lock for Optuna Journal storage.
 Cross-process safe: avoids PermissionError [WinError 32] and 'did not possess lock'
 when using JournalFileBackend with n_jobs > 1 on Windows.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -46,7 +47,9 @@ if sys.platform == "win32":
             # CreateMutexW(lpMutexAttributes, bInitialOwner, lpName)
             # bInitialOwner=False: do not take ownership on create; use WaitForSingleObject to acquire
             handle: wintypes.HANDLE = kernel32.CreateMutexW(
-                None, False, self._mutex_name  # type: ignore[arg-type]
+                None,
+                False,
+                self._mutex_name,  # type: ignore[arg-type]
             )
             if not handle:
                 err: int = ctypes.get_last_error()
@@ -59,7 +62,8 @@ if sys.platform == "win32":
             if self._handle is None:
                 self._handle = self._open_or_create_mutex()
             ret: int = kernel32.WaitForSingleObject(
-                self._handle, _INFINITE  # type: ignore[arg-type]
+                self._handle,
+                _INFINITE,  # type: ignore[arg-type]
             )
             if ret != _WAIT_OBJECT_0:
                 err = ctypes.get_last_error()
@@ -79,7 +83,7 @@ if sys.platform == "win32":
                 try:
                     ctypes.windll.kernel32.CloseHandle(self._handle)  # type: ignore[attr-defined]
                 except Exception:
-                    pass
+                    ...
                 self._handle = None
 
         def __getstate__(self) -> dict[str, Any]:

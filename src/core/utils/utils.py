@@ -1,24 +1,23 @@
-
-import os
-import sys
 import json
-import time
 import logging
+import sys
+import time
 from datetime import datetime
 from functools import wraps
-from pathlib import Path
 from logging.handlers import RotatingFileHandler
-from typing import Optional, Dict, Any, Union
+from pathlib import Path
+from typing import Optional
 
 # tenacity import check
 try:
     from tenacity import (
-        retry, 
-        stop_after_attempt, 
-        wait_exponential, 
+        before_sleep_log,
+        retry,
         retry_if_exception_type,
-        before_sleep_log
+        stop_after_attempt,
+        wait_exponential,
     )
+
     TENACITY_AVAILABLE = True
 except ImportError:
     TENACITY_AVAILABLE = False
@@ -33,19 +32,21 @@ except IndexError:
     pass
 
 from config.settings import (
+    API_RETRY_ATTEMPTS,
+    API_RETRY_WAIT_MAX,
+    API_RETRY_WAIT_MIN,
+    LOG_BACKUP_COUNT,
     LOG_DIR,
     LOG_MAX_BYTES,
-    LOG_BACKUP_COUNT,
-    API_RETRY_ATTEMPTS,
-    API_RETRY_WAIT_MIN,
-    API_RETRY_WAIT_MAX
 )
+
 
 # ============================================================
 # Structured JSON Logger
 # ============================================================
 class FlushingStreamHandler(logging.StreamHandler):
     """StreamHandler that flushes after every emit (Docker/non-TTY visibility)."""
+
     def emit(self, record: logging.LogRecord) -> None:
         super().emit(record)
         if self.stream and hasattr(self.stream, "flush"):
@@ -54,6 +55,7 @@ class FlushingStreamHandler(logging.StreamHandler):
 
 class JSONFormatter(logging.Formatter):
     """JSON 형식 로그 포맷터 (외부 모니터링 연동용)"""
+
     def format(self, record):
         log_obj = {
             "timestamp": datetime.utcnow().isoformat() + "Z",
@@ -61,7 +63,7 @@ class JSONFormatter(logging.Formatter):
             "logger": record.name,
             "message": record.getMessage(),
         }
-        if hasattr(record, 'extra_data'):
+        if hasattr(record, "extra_data"):
             log_obj["data"] = record.extra_data
         if record.exc_info:
             log_obj["exception"] = self.formatException(record.exc_info)
@@ -93,9 +95,7 @@ def setup_logger(
         return logger
 
     stream_handler = FlushingStreamHandler(sys.stdout)
-    stream_handler.setFormatter(logging.Formatter(
-        '%(asctime)s - %(levelname)s - %(message)s'
-    ))
+    stream_handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
     logger.addHandler(stream_handler)
 
     if not write_file:
@@ -106,7 +106,7 @@ def setup_logger(
 
     # 로그 파일명 자동 생성 (CamelCase -> snake_case)
     if log_prefix is None:
-        log_prefix = re.sub(r'(?<!^)(?=[A-Z])', '_', name).lower()
+        log_prefix = re.sub(r"(?<!^)(?=[A-Z])", "_", name).lower()
 
     # Human-readable .log (IDE/호스트에서 확인용)
     text_log_file = LOG_DIR / f"{log_prefix}.log"
@@ -114,9 +114,11 @@ def setup_logger(
         str(text_log_file),
         maxBytes=LOG_MAX_BYTES,
         backupCount=LOG_BACKUP_COUNT,
-        encoding='utf-8',
+        encoding="utf-8",
     )
-    text_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(name)s - %(message)s'))
+    text_handler.setFormatter(
+        logging.Formatter("%(asctime)s - %(levelname)s - %(name)s - %(message)s")
+    )
     logger.addHandler(text_handler)
 
     # JSON 로그 (모니터링 연동용) — 단일 파일만 유지
@@ -125,15 +127,17 @@ def setup_logger(
         str(json_log_file),
         maxBytes=LOG_MAX_BYTES,
         backupCount=LOG_BACKUP_COUNT,
-        encoding='utf-8',
+        encoding="utf-8",
     )
     json_handler.setFormatter(JSONFormatter())
     logger.addHandler(json_handler)
 
     return logger
 
+
 # 내부 로거 (Retry 로직용) — 파일 로그 불필요
 _internal_logger = setup_logger("CommonUtils", write_file=False)
+
 
 # ============================================================
 # Retry Decorator (API 재시도)
@@ -143,15 +147,11 @@ def create_retry_decorator():
     if TENACITY_AVAILABLE:
         return retry(
             stop=stop_after_attempt(API_RETRY_ATTEMPTS),
-            wait=wait_exponential(
-                multiplier=1, 
-                min=API_RETRY_WAIT_MIN, 
-                max=API_RETRY_WAIT_MAX
-            ),
+            wait=wait_exponential(multiplier=1, min=API_RETRY_WAIT_MIN, max=API_RETRY_WAIT_MAX),
             # ConnectionError, TimeoutError와 일반 Exception 포함
             retry=retry_if_exception_type((ConnectionError, TimeoutError, Exception)),
             before_sleep=before_sleep_log(_internal_logger, logging.WARNING),
-            reraise=True
+            reraise=True,
         )
     else:
         # Fallback: 단순 재시도 데코레이터 (tenacity 없을 때)
@@ -164,18 +164,17 @@ def create_retry_decorator():
                         return func(*args, **kwargs)
                     except Exception as e:
                         last_error = e
-                        wait_time = min(
-                            API_RETRY_WAIT_MIN * (2 ** attempt), 
-                            API_RETRY_WAIT_MAX
-                        )
+                        wait_time = min(API_RETRY_WAIT_MIN * (2**attempt), API_RETRY_WAIT_MAX)
                         _internal_logger.warning(
-                            f"⚠️ Retry {attempt+1}/{API_RETRY_ATTEMPTS}: {e}. Waiting {wait_time}s..."
+                            f"⚠️ Retry {attempt + 1}/{API_RETRY_ATTEMPTS}: {e}. Waiting {wait_time}s..."
                         )
                         time.sleep(wait_time)
                 raise last_error
+
             return wrapper
+
         return fallback_retry
+
 
 # 싱글톤으로 재사용 가능한 retry 데코레이터
 api_retry = create_retry_decorator()
-
