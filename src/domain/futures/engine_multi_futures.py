@@ -10,9 +10,16 @@ from typing import Any
 import numpy as np
 import pandas as pd
 from numba import njit
-from src.domain.futures.engine_logic_futures import process_long_scale_out, process_short_scale_out, check_long_exit, check_short_exit, calculate_position_size, check_intra_bar_stop
 
 from config.opt_config import OPT_FUTURES_CONFIG
+from src.domain.futures.engine_logic_futures import (
+    calculate_position_size,
+    check_intra_bar_stop,
+    check_long_exit,
+    check_short_exit,
+    process_long_scale_out,
+    process_short_scale_out,
+)
 
 _logger: logging.Logger = logging.getLogger(__name__)
 
@@ -346,6 +353,11 @@ def backtest_portfolio_numba(
                             fill_p, stop_dist, current_equity, free_margin, 
                             risk_per_trade, leverage, sf, garch_kelly_f[prev_i, s]
                         )
+
+                        max_margin_per_coin = current_equity / float(max_concurrent)
+                        max_qty_by_cap = (max_margin_per_coin * leverage) / fill_p
+                        if target_qty > max_qty_by_cap:
+                            target_qty = max_qty_by_cap
 
                         req_margin = (target_qty * fill_p) / leverage
                         entry_fee = target_qty * fill_p * fee_rate
