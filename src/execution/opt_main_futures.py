@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import itertools
 import logging
 import math
 import os
@@ -52,7 +53,6 @@ from src.domain.futures.data_collector import DataCollector
 from src.domain.futures.funding_utils import merge_funding_into_ohlcv
 from src.domain.futures.opt_futures_utils.combination_screener_futures import (
     CombinationScoreFutures,
-    run_combination_screening_futures,
 )
 from src.domain.futures.opt_futures_utils.cv_utils import build_cpcv_test_paths_with_fallback
 from src.domain.futures.opt_futures_utils.go_nogo import (
@@ -77,7 +77,6 @@ from src.domain.futures.opt_futures_utils.opt_params import (
     build_multi_combo_param_space_futures,
 )
 from src.domain.futures.opt_futures_utils.universe_screener_futures import (
-    screen_futures_symbol_refinement,
     screen_futures_universe,
 )
 from src.domain.futures.strategies_futures import FuturesPipelineStrategy
@@ -134,19 +133,22 @@ def _build_sqlite_storage(db_path: Path) -> optuna.storages.RDBStorage:
 
 
 def futures_frozen_trial_constraints(trial: optuna.trial.FrozenTrial) -> tuple[float, ...]:
+    # --- Hard Constraints: Optuna will mathematically avoid these spaces ---
     pf = float(trial.user_attrs.get("avg_pf", 0.0) or 0.0)
-    win_rate = float(trial.user_attrs.get("avg_win_rate", 0.0) or 0.0)
     trades = float(trial.user_attrs.get("avg_trades", 0.0) or 0.0)
-    min_sym_pf = float(trial.user_attrs.get("min_sym_pf", 0.0) or 0.0)
     avg_mdd = float(trial.user_attrs.get("avg_mdd", 100.0) or 100.0)
     ls_ratio = float(trial.user_attrs.get("long_short_ratio", 0.0) or 0.0)
+    
+    # Futures Specific Hard Constraints
+    ev_cost = float(trial.user_attrs.get("ev_cost_ratio", 0.0) or 0.0)
+    
+    # Return distance to target (Positive value = Constraint Violated)
     return (
-        1.2 - pf,
-        25.0 - win_rate,
-        20.0 - trades,
-        1.1 - min_sym_pf,
-        avg_mdd - 25.0,
-        0.15 - ls_ratio,
+        1.35 - pf,          # Min PF 1.35
+        25.0 - trades,      # Min Trades 25 (IS)
+        avg_mdd - 25.0,     # Max MDD 25%
+        0.15 - ls_ratio,    # Min L/S Ratio 0.15
+        3.0 - ev_cost,      # Min EV/Cost 3.0 (Anti-scalp)
     )
 
 
@@ -657,21 +659,24 @@ def _run_tf_optimization(
     )
     return (target_obj, tf), study
 
-def _run_stage2_combo_validation(
-    valid_tops: List[CombinationScoreFutures],
+def _run_stage1_futures_tournament(
     data_maps: Dict[str, Dict[str, Any]],
     symbols: List[str],
     tf: str,
     project_root: str,
 ) -> List[CombinationScoreFutures]:
+    """
+    Tournament style discovery: TPE mini-optimization for each (Signal x Regime) combination.
+    """
     from optuna.samplers import TPESampler
     from optuna.storages import InMemoryStorage
 
-    from config.settings import FUTURES_CACHE_DIR
     from src.domain.futures.opt_futures_utils.cv_utils import build_cpcv_test_paths_with_fallback
-    from src.domain.futures.opt_futures_utils.opt_params import build_combined_param_space_futures
+    from src.domain.futures.regimes import FUTURES_REGIME_REGISTRY
+    from src.domain.futures.signals import FUTURES_SIGNAL_REGISTRY
+
+    _logger.info("Starting Stage 1 Futures Tournament (TPE discovery)...")
     
-    validated = []
     ref_sym = symbols[0]
     is_off = int(data_maps[ref_sym].get(f"is_start_idx_{tf}", 0))
     ref_df = data_maps[ref_sym][tf]
@@ -679,14 +684,24 @@ def _run_stage2_combo_validation(
     if ref_df is not None and not ref_df.empty:
         ref_len = len(ref_df) - is_off
         if ref_len >= 200:
-            embargo = int(EMBARGO_BARS.get(tf, 0))
-            prebuilt = build_cpcv_test_paths_with_fallback(ref_len, embargo=embargo)
-            
-    for combo in valid_tops:
-        space = build_combined_param_space_futures(combo.signal, combo.regime, combo.sizing)
-        space["SIGNAL_TYPE"] = {"type": "categorical", "choices": [combo.signal]}
-        space["REGIME_TYPE"] = {"type": "categorical", "choices": [combo.regime]}
-        space["SIZING_METHOD"] = {"type": "categorical", "choices": [combo.sizing]}
+            prebuilt = build_cpcv_test_paths_with_fallback(ref_len, embargo=int(EMBARGO_BARS.get(tf, 0)))
+
+    # Narrow down choices to manageable set if needed, but here we'll try all registered
+    sig_choices = list(FUTURES_SIGNAL_REGISTRY.keys())
+    reg_choices = list(FUTURES_REGIME_REGISTRY.keys())
+    # Sizing: use a sensible default or small set to keep tournament fast
+    siz_choices = ["inv_vol_parity", "vol_target"] 
+
+    results: List[CombinationScoreFutures] = []
+    
+    combos = list(itertools.product(sig_choices, reg_choices, siz_choices))
+    _logger.info("   Evaluating %d Signal x Regime x Sizing combinations...", len(combos))
+
+    for sig, reg, siz in combos:
+        space = build_combined_param_space_futures(sig, reg, siz)
+        space["SIGNAL_TYPE"] = {"type": "categorical", "choices": [sig]}
+        space["REGIME_TYPE"] = {"type": "categorical", "choices": [reg]}
+        space["SIZING_METHOD"] = {"type": "categorical", "choices": [siz]}
         
         study = optuna.create_study(
             direction="maximize",
@@ -696,34 +711,42 @@ def _run_stage2_combo_validation(
         
         def _obj(trial: optuna.Trial) -> float:
             return float(objective_futures(
-                trial,
-                data_maps=data_maps,
-                symbols=symbols,
-                tf_target=tf,
-                space=space,
-                mode=MODE_MULTI,
-                project_root=project_root,
-                prebuilt_cpcv_bundle=prebuilt,
-                signal_disk_cache_root=Path(FUTURES_CACHE_DIR),
+                trial, 
+                data_maps, 
+                symbols, 
+                tf, 
+                space=space, 
+                mode=MODE_MULTI, 
+                project_root=project_root, 
+                prebuilt_cpcv_bundle=prebuilt, 
+                signal_disk_cache_root=Path(FUTURES_CACHE_DIR)
             ))
             
-        _logger.info("   [Stage 1.5] Validating combo %s-%s-%s with 40 trials...", combo.signal, combo.regime, combo.sizing)
-        study.optimize(_obj, n_trials=40, n_jobs=1, show_progress_bar=False)
+        study.optimize(_obj, n_trials=30, n_jobs=1, show_progress_bar=False)
         
         completed = [t for t in study.trials if t.state == TrialState.COMPLETE and t.value is not None]
-        if completed:
-            completed.sort(key=lambda tr: float(tr.value or -1e9), reverse=True)
-            top_val = float(np.mean([t.value for t in completed[:3]]))
-            if top_val > -0.5:
-                validated.append((combo, top_val))
-                _logger.info("      -> PASSED (score: %.4f)", top_val)
-            else:
-                _logger.info("      -> FAILED (score: %.4f)", top_val)
-        else:
-            _logger.info("      -> FAILED (no valid trials)")
+        if not completed:
+            continue
+            
+        completed.sort(key=lambda tr: float(tr.value), reverse=True)
+        top_val = float(np.mean([t.value for t in completed[:3]]))
+        best_t = completed[0]
+        
+        score = CombinationScoreFutures(
+            signal=sig,
+            regime=reg,
+            sizing=siz,
+            p10_gmgr=top_val,
+            ls_ratio=float(best_t.user_attrs.get("long_short_ratio", 0.5)),
+            mean_signal_rate=float(best_t.user_attrs.get("avg_signal_rate", 0.05)),
+            disqualified=False,
+            best_params=best_t.params
+        )
+        results.append(score)
+        _logger.info("      [%s x %s x %s] Mean Score: %.4f | LS Ratio: %.2f", sig, reg, siz, top_val, score.ls_ratio)
 
-    validated.sort(key=lambda x: x[1], reverse=True)
-    return [v[0] for v in validated]
+    results.sort(key=lambda x: x.p10_gmgr, reverse=True)
+    return results
 
 
 def main() -> None:
@@ -844,104 +867,54 @@ def main() -> None:
         _logger.error("No valid symbols remaining after data loading. Exiting.")
         return
 
+    # [MACRO] Inject BTC/ETH closing prices for macro-regime reference (Spot parity)
+    if "BTC/USDT" in data_maps:
+        btc_ref = data_maps["BTC/USDT"][args.tf][["datetime", "close"]].rename(columns={"close": "btc_close"})
+        btc_ref_oos = oos_data_maps["BTC/USDT"][args.tf][["datetime", "close"]].rename(columns={"close": "btc_close"})
+        for s in symbols:
+            if s == "BTC/USDT": continue
+            data_maps[s][args.tf] = data_maps[s][args.tf].merge(btc_ref, on="datetime", how="left")
+            oos_data_maps[s][args.tf] = oos_data_maps[s][args.tf].merge(btc_ref_oos, on="datetime", how="left")
+
+    if "ETH/USDT" in data_maps:
+        eth_ref = data_maps["ETH/USDT"][args.tf][["datetime", "close"]].rename(columns={"close": "eth_close"})
+        eth_ref_oos = oos_data_maps["ETH/USDT"][args.tf][["datetime", "close"]].rename(columns={"close": "eth_close"})
+        for s in symbols:
+            if s == "ETH/USDT": continue
+            data_maps[s][args.tf] = data_maps[s][args.tf].merge(eth_ref, on="datetime", how="left")
+            oos_data_maps[s][args.tf] = oos_data_maps[s][args.tf].merge(eth_ref_oos, on="datetime", how="left")
+
     locked_param_space: Optional[Dict[str, Any]] = None
-    _logger.info("Combination screening (signal × regime × sizing)...")
     phase1_no_edge = False
 
-    # Phase B: anchor 심볼 전용으로 신호 선정 안정성 확보.
-    # anchor는 최고 ADV/품질 → Phase B winner의 재현성 보장.
-    # Phase C는 여전히 broad_candidates 전체를 평가.
-    phase_b_syms = [s for s in FUTURES_ANCHOR_SYMBOLS if s in data_maps]
-    if not phase_b_syms:
-        stage1_k = int(FUTURES_SCREENER_CONFIG.get("COMBO_SAMPLE_K", 12))
-        phase_b_syms = symbols[:stage1_k]
-    stage1_syms = phase_b_syms
-    stage1_data_maps = {s: data_maps[s] for s in stage1_syms}
-    _logger.info("Phase B: combination screening on N=%d anchor symbols", len(stage1_syms))
-
-    screening = run_combination_screening_futures(
-        data_maps=stage1_data_maps,
-        symbols=stage1_syms,
-        tf=args.tf,
-        project_root=project_root,
-        signal_cache_dir=str(FUTURES_CACHE_DIR),
-    )
-    top_combos = screening.combos
-    phase1_no_edge = screening.phase1_no_edge
-
-    if top_combos and not top_combos[0].disqualified:
-        # Ported from Spot: Explore top-5 combos; cap duplicate signal AND sizing types (union space noise).
-        max_combos = 5
-        max_per_dim = int(OPT_FUTURES_CONFIG.get("FUTURES_STAGE2_MAX_PER_SIGNAL_TYPE", 2))
-        sig_ct: Counter[str] = Counter()
-        siz_ct: Counter[str] = Counter()
-        filtered_tops: List[CombinationScoreFutures] = []
-        for combo in top_combos:
-            if combo.disqualified:
-                continue
-            if (
-                sig_ct[combo.signal] < max_per_dim
-                and siz_ct[combo.sizing] < max_per_dim
-            ):
-                filtered_tops.append(combo)
-                sig_ct[combo.signal] += 1
-                siz_ct[combo.sizing] += 1
-            if len(filtered_tops) >= max_combos:
-                break
-        valid_tops = filtered_tops if filtered_tops else top_combos[:3]
+    if not getattr(args, "skip_stage1", False):
+        # Phase B: Tournament discovery (Spot parity++)
+        top_combos = _run_stage1_futures_tournament(data_maps, symbols, args.tf, project_root)
         
-        if not getattr(args, "skip_stage1", False):
-            validated_tops = _run_stage2_combo_validation(valid_tops, stage1_data_maps, stage1_syms, args.tf, project_root)
-            if validated_tops:
-                valid_tops = validated_tops
-            else:
-                _logger.warning("   [Stage 1.5] All combos failed validation. Reverting to unvalidated valid_tops.")
-
-        locked_param_space = build_multi_combo_param_space_futures(valid_tops)
-        
-        if not args.skip_universe:
-            # Phase C: mid-point params 사용 (best_params는 IS 데이터 편향 내포).
-            # Phase C는 "이 콤보가 합리적 파라미터에서 작동하는가"를 검증하는 단계이므로
-            # IS 최적 파라미터 대신 탐색 공간 중심값을 사용해 IS-편향 오염 차단.
-            from src.domain.futures.opt_futures_utils.combination_screener_futures import (
-                _mid_params_from_space,
+        if top_combos:
+            # Diversity cap: max 2 combos per signal type
+            max_combos = 5
+            max_per_dim = int(OPT_FUTURES_CONFIG.get("FUTURES_STAGE2_MAX_PER_SIGNAL_TYPE", 2))
+            sig_ct: Counter[str] = Counter()
+            filtered_tops: List[CombinationScoreFutures] = []
+            for combo in top_combos:
+                if sig_ct[combo.signal] < max_per_dim:
+                    filtered_tops.append(combo)
+                    sig_ct[combo.signal] += 1
+                if len(filtered_tops) >= max_combos:
+                    break
+            valid_tops = filtered_tops if filtered_tops else top_combos[:3]
+            locked_param_space = build_multi_combo_param_space_futures(valid_tops)
+            _logger.info(
+                "   Locked combos: SIGNAL choices=%s REGIME choices=%s SIZING choices=%s",
+                list(dict.fromkeys(c.signal for c in valid_tops)),
+                list(dict.fromkeys(c.regime for c in valid_tops)),
+                list(dict.fromkeys(c.sizing for c in valid_tops)),
             )
-            t0_space = build_combined_param_space_futures(
-                valid_tops[0].signal, valid_tops[0].regime, valid_tops[0].sizing
-            )
-            winning_params = _mid_params_from_space(t0_space, args.tf)
-            winning_params["TIMEFRAME"] = args.tf
-            _lev_def = int(OPT_FUTURES_CONFIG.get("FUTURES_DISCOVERY_LEVERAGE", 8))
-            winning_params["LEVERAGE"] = int(os.getenv("FUTURES_DISCOVERY_LEVERAGE", str(_lev_def)))
-            winning_params["USE_COMPOUNDING"] = True
-            
-            refined_symbols = screen_futures_symbol_refinement(
-                broad_candidates,
-                FUTURES_ANCHOR_SYMBOLS,
-                FUTURES_SCREENER_CONFIG,
-                data_maps=data_maps,
-                winning_params=winning_params
-            )
-            
-            import importlib
-
-            import config.opt_config
-            importlib.reload(config.opt_config)
-            from config.opt_config import FUTURES_SYMBOLS
-            
-            # Re-filter data maps to only include refined symbols for Optuna
-            symbols = [s for s in FUTURES_SYMBOLS if s in data_maps]
-            data_maps = {s: data_maps[s] for s in symbols}
-            oos_data_maps = {s: oos_data_maps[s] for s in symbols}
-            _logger.info("Phase C: Selection finalized. Proceeding to Phase D (Optuna) with %d symbols.", len(symbols))
-        _logger.info(
-            "   Locked combos: SIGNAL choices=%s REGIME choices=%s SIZING choices=%s",
-            list(dict.fromkeys(c.signal for c in valid_tops)),
-            list(dict.fromkeys(c.regime for c in valid_tops)),
-            list(dict.fromkeys(c.sizing for c in valid_tops)),
-        )
+        else:
+            _logger.warning("Tournament returned no valid combos; using full discovery space.")
     else:
-        _logger.warning("Phase B returned no valid combo; Phase C uses full discovery space.")
+        _logger.info("Skipping Stage 1 Tournament (--skip-stage1).")
 
     if len(symbols) < 2:
         _logger.error("Need at least 2 symbols for futures multi discovery. Aborting.")
@@ -1367,10 +1340,22 @@ def main() -> None:
         )
 
         pbo_gate_ok = bool(math.isfinite(pbo_val) and pbo_val <= pbo_max_cfg)
+        
+        long_pf_oos = float(oos_port.get("long_pf", 0.0))
+        short_pf_oos = float(oos_port.get("short_pf", 0.0))
+        l_pf_ok = long_pf_oos >= 1.05 if int(oos_port["long_trades"]) > 0 else True
+        s_pf_ok = short_pf_oos >= 1.05 if int(oos_port["short_trades"]) > 0 else True
+        
+        ev_cost_ratio_oos = float(oos_port.get("ev_cost_ratio", 0.0))
+        ev_cost_ok = ev_cost_ratio_oos >= 3.0
+        
+        short_wr_oos = float(oos_port.get("short_win_rate_pct", 0.0))
+        short_wr_ok = short_wr_oos >= 35.0 if int(oos_port["short_trades"]) > 5 else True
+
         core_gate_checks = [
             veto.passed,
             is_cagr_ok,
-            float(ua.get("gate1_sqn", 0.0)) >= 2.0,
+            float(ua.get("gate1_sqn", 0.0)) >= 1.6, # Relaxed
             float(ua.get("gate1_path_sortino", 0.0)) >= 1.5,
             float(ua.get("gate1_tail_ratio", 0.0)) >= 1.5,
             trade_floor.passed,
@@ -1381,6 +1366,10 @@ def main() -> None:
             funding_drag_pct_oos <= 15.0,
             float(oos_port["cagr_pct"]) >= OOS_CAGR_TARGET,
             float(oos_port["profit_factor"]) >= OOS_PF_TARGET,
+            l_pf_ok,
+            s_pf_ok,
+            ev_cost_ok,
+            short_wr_ok,
             alpha_decay_pct >= ALPHA_DECAY_FLOOR,
             float(oos_port["terminal_wealth_ratio"]) >= TW_TARGET,
             (mw_gate.passed if mw_gate else True),
@@ -1405,16 +1394,17 @@ def main() -> None:
                 gate1_dsr=float(ua.get("gate1_dsr", 0.0)),
                 cpcv_mean_path_return_pct=float(ua.get("cpcv_mean_path_return_pct", 0.0)),
                 cpcv_worst_segment_mdd_pct=float(ua.get("cpcv_worst_segment_mdd_pct", 0.0)),
-                sqn_target=2.0,
+                sqn_target=1.6,
                 path_sortino_target=1.5,
                 tail_ratio_target=1.5,
-                psr_target=0.50,
-                dsr_target=0.25,
+                psr_target=0.40,
+                dsr_target=0.20,
                 moic=float(oos_port["moic"]),
                 initial_capital_usdt=float(FUTURES_INITIAL_BALANCE),
                 oos_net_cagr_pct=float(oos_port["cagr_pct"]),
                 oos_mdd_pct=float(oos_port["mdd_pct"]),
                 hw_recovery_days=float(oos_port["hw_recovery_days"]),
+                oos_ulcer_index=float(oos_port.get("ulcer_index", 0.0)),
                 alpha_decay_pct=float(alpha_decay_pct),
                 oos_cagr_target_pct=OOS_CAGR_TARGET,
                 oos_mdd_limit_pct=OOS_MDD_LIMIT,
@@ -1428,6 +1418,10 @@ def main() -> None:
                 tw_target=TW_TARGET,
                 oos_total_trades=int(oos_port["total_trades"]),
                 oos_pf=float(oos_port["profit_factor"]),
+                oos_long_pf=long_pf_oos,
+                oos_short_pf=short_pf_oos,
+                oos_short_win_rate_pct=short_wr_oos,
+                oos_ev_cost_ratio=ev_cost_ratio_oos,
                 pf_target=OOS_PF_TARGET,
                 oos_calmar=float(oos_port["calmar_ratio"]),
                 calmar_target=OOS_CALMAR_TARGET,

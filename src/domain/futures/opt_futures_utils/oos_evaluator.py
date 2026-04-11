@@ -201,6 +201,7 @@ def run_oos_margin_shared_portfolio(
     if not aligned_data or master_dt.empty:
         return {"ok": False}
 
+    from config.settings import SLIPPAGE_RATE, TRADING_FEE_RATE
     engine = PortfolioBacktestEngineFast(
         aligned_data=aligned_data,
         symbol_names=symbols,
@@ -247,6 +248,29 @@ def run_oos_margin_shared_portfolio(
     )
     pf = float(calc_profit_factor_from_pnl(true_pnl)) if tot_t > 0 else 1.0
 
+    # Directional Stats & EV/Cost Ratio (Futures Specific)
+    if not trades_df.empty:
+        long_pnl = true_pnl[trades_df["side"] == "LONG"]
+        short_pnl = true_pnl[trades_df["side"] == "SHORT"]
+        long_pf = float(calc_profit_factor_from_pnl(long_pnl)) if len(long_pnl) > 0 else 0.0
+        short_pf = float(calc_profit_factor_from_pnl(short_pnl)) if len(short_pnl) > 0 else 0.0
+        
+        sw_cnt = len(short_pnl[short_pnl > 0])
+        s_win_rate = (sw_cnt / len(short_pnl) * 100.0) if len(short_pnl) > 0 else 0.0
+        
+        # EV/Cost Ratio: Avg Net PnL per trade / estimated round-trip cost
+        # Cost = entry_fee + exit_fee(approx same as entry) + estimated slippage
+        from config.settings import SLIPPAGE_RATE, TRADING_FEE_RATE
+        avg_notional = (trades_df["entry_price"] * trades_df["amount"]).mean()
+        avg_net_pnl = true_pnl.mean()
+        cost_ratio = (TRADING_FEE_RATE * 2.0) + (SLIPPAGE_RATE * 2.0)
+        ev_cost_ratio = (avg_net_pnl / avg_notional) / max(cost_ratio, 1e-6)
+    else:
+        long_pf, short_pf, s_win_rate, ev_cost_ratio = 0.0, 0.0, 0.0, 0.0
+
+    from src.core.optimization.opt_utils import calc_ulcer_index_from_equity
+    u_index = float(calc_ulcer_index_from_equity(equity_curve))
+
     gross_abs = float(trades_df["pnl"].abs().sum()) if not trades_df.empty else 0.0
 
     res = {
@@ -260,6 +284,7 @@ def run_oos_margin_shared_portfolio(
         "calmar_ratio": calmar,
         "cvar_pct": cvar_pct,
         "hw_recovery_days": hw_days,
+        "ulcer_index": u_index,
         "moic": moic,
         "min_equity_wealth_ratio": min_eq_ratio,
         "terminal_wealth_ratio": tw_ratio,
@@ -267,7 +292,11 @@ def run_oos_margin_shared_portfolio(
         "short_trades": short_c,
         "total_trades": tot_t,
         "win_rate_pct": win_rate,
+        "short_win_rate_pct": s_win_rate,
         "profit_factor": pf,
+        "long_pf": long_pf,
+        "short_pf": short_pf,
+        "ev_cost_ratio": ev_cost_ratio,
         "oos_long_short_minority_pct": minority,
         "gross_pnl_abs": gross_abs,
         "span_days": span_days,
