@@ -2,8 +2,9 @@
 최적화 도구인 Optuna의 학습 결과(Study)를 원격 DB(MySQL)에서 로컬 DB(SQLite)로 복사하고 관리하는 기능을 담당함.
 최적화된 파라미터를 실제 트레이딩 시스템에서 사용할 수 있도록 데이터베이스를 실시간으로 동기화함.
 """
-import os
+
 import logging
+import os
 from typing import Any, Dict, Optional
 
 import optuna
@@ -95,7 +96,7 @@ def fast_reset_study(
                 for table in child_tables:
                     try:
                         cursor.execute(
-                            f"DELETE FROM {table} WHERE trial_id IN ({fmt})",
+                            f"DELETE FROM {table} WHERE trial_id IN ({fmt})",  # nosec: S608
                             chunk,
                         )
                     except Exception as e:
@@ -115,7 +116,7 @@ def fast_reset_study(
         ):
             try:
                 cursor.execute(
-                    f"DELETE FROM {table} WHERE study_id = %s",  # noqa: S608
+                    f"DELETE FROM {table} WHERE study_id = %s",
                     (study_id,),
                 )
             except Exception as e:
@@ -140,17 +141,15 @@ def fast_reset_study(
             try:
                 conn.rollback()
             except Exception:
-                pass
-        _logger.warning(
-            "fast_reset_study: direct SQL deletion failed. Error: %s", exc
-        )
+                ...
+        _logger.warning("fast_reset_study: direct SQL deletion failed. Error: %s", exc)
         return False
     finally:
         if conn is not None:
             try:
                 conn.close()
             except Exception:
-                pass
+                ...
 
 
 def save_study_to_sqlite(
@@ -164,16 +163,16 @@ def save_study_to_sqlite(
     study_name: str = target_study_name if target_study_name is not None else study.study_name
     sqlite_path: str = os.path.join(project_root, "futures_strategy.db")
     sqlite_storage_url: str = f"sqlite:///{sqlite_path}"
-    
+
     _logger.info("  💾 Exporting BEST trial to local SQLite as '%s'...", study_name)
-    
+
     try:
         # 1. Delete existing local study to ensure fresh best trial
         try:
             optuna.delete_study(study_name=study_name, storage=sqlite_storage_url)
         except (KeyError, Exception):
             # Study may not exist yet or storage may be empty; both are safe to ignore.
-            pass
+            ...
 
         # 2. Create new local study
         create_kwargs: Dict[str, Any] = {

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict, Type, TypeVar
+from typing import Dict, Type, TypeVar
 
 from src.domain.spot.signals.base import ISignal
 

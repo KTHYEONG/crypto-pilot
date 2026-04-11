@@ -63,97 +63,23 @@ def spot_frozen_trial_constraints(trial: optuna.trial.FrozenTrial) -> tuple[floa
     return tuple(1.0 for _ in range(SPOT_OBJECTIVE_CONSTRAINT_DIM))
 
 
-
 def compute_embargo_bars(tf: str, longest_indicator_period: int = 150) -> int:
     fixed_min: Dict[str, int] = {"4h": 24}
     ratio_map: Dict[str, float] = {"4h": 0.05}
     ratio: float = ratio_map.get(tf, 0.03)
     return max(fixed_min.get(tf, 2), int(longest_indicator_period * ratio))
 
+
 EMBARGO_BARS: Dict[str, int] = {
     "4h": compute_embargo_bars("4h"),
 }
 
 
-
 _SPOT_OBJECTIVE_CAGR_WEIGHT: float = 0.0  # Abandoning additive CAGR
-_SPOT_OBJECTIVE_MIN_TRADES_HARD: float = 10.0 # Min trades per path to even consider
+_SPOT_OBJECTIVE_MIN_TRADES_HARD: float = 10.0  # Min trades per path to even consider
 _SPOT_OBJECTIVE_MIN_TRADES_SOFT: float = 40.0  # Target trades for statistical robustness
 _SPOT_OBJECTIVE_LOG_TWR_WEIGHT: float = 1.0
 _SPOT_OBJECTIVE_PATH_CV_PENALTY: float = 0.75  # Path CV penalty (Generalized Kelly λ≈0.75)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 def _compute_path_gmgr_high_moments(equity: np.ndarray) -> float:
@@ -438,7 +364,7 @@ def objective_spot(
                 else:
                     seg_mdds.append(0.0)
                     seg_cvars.append(0.0)
-                    
+
                 pnl = result.pnl_array
                 pos_pnl = float(np.sum(pnl[pnl > 0.0]))
                 neg_pnl = float(np.abs(np.sum(pnl[pnl < 0.0])))
@@ -467,24 +393,32 @@ def objective_spot(
             path_compound_raw_log_tw.append(float(np.sum(seg_raw_log_tw)))
             path_compound_tw_ratio.append(float(np.prod(seg_tw_ratio)) if seg_tw_ratio else 1.0)
             path_worst_mdd.append(float(np.max(seg_mdds)) if seg_mdds else 0.0)
-            
+
             # HARD HURDLE: If any path exceeds MDD limit, prune immediately.
             path_mdd_limit = float(OPT_SPOT_CONFIG.get("SPOT_HOLDOUT_MDD_LIMIT_PCT", 20.0))
             if path_worst_mdd[-1] > path_mdd_limit:
-                 raise optuna.TrialPruned()
-            
+                raise optuna.TrialPruned()
+
             # HARD HURDLE: Min trades per path for statistical relevance.
             if path_total_trades < _SPOT_OBJECTIVE_MIN_TRADES_HARD:
-                 raise optuna.TrialPruned()
+                raise optuna.TrialPruned()
 
             path_trades.append(path_total_trades)
             path_pfs.append(float(np.mean(seg_pfs)) if seg_pfs else 1.0)
 
-            path_eq = np.concatenate(path_eq_chunks) if path_eq_chunks else np.array([], dtype=np.float64)
-            path_level_tail = float(calc_tail_ratio_from_equity(path_eq)) if path_eq.size >= 2 else 1.0
+            path_eq = (
+                np.concatenate(path_eq_chunks) if path_eq_chunks else np.array([], dtype=np.float64)
+            )
+            path_level_tail = (
+                float(calc_tail_ratio_from_equity(path_eq)) if path_eq.size >= 2 else 1.0
+            )
             path_tail_ratios.append(path_level_tail)
             span_for_sortino = max(span_path_days, 1.0)
-            raw_ps = float(calc_sortino_from_equity(path_eq, span_for_sortino)) if path_eq.size >= 2 else 0.0
+            raw_ps = (
+                float(calc_sortino_from_equity(path_eq, span_for_sortino))
+                if path_eq.size >= 2
+                else 0.0
+            )
             if not np.isfinite(raw_ps):
                 raw_ps = 0.0
             path_sortino = float(np.clip(raw_ps, -path_sortino_clip, path_sortino_clip))
@@ -544,7 +478,9 @@ def objective_spot(
         mu_paths = float(np.mean(path_arr)) if path_arr.size > 0 else -10.0
         sd_paths = float(np.std(path_arr, ddof=1)) if path_arr.size > 1 else 10.0
         if n_paths_ct >= 2:
-            gate1_sqn = math.sqrt(float(n_paths_ct)) * mu_paths / sd_paths if sd_paths > 1e-12 else 0.0
+            gate1_sqn = (
+                math.sqrt(float(n_paths_ct)) * mu_paths / sd_paths if sd_paths > 1e-12 else 0.0
+            )
             cv_paths = sd_paths / (abs(mu_paths) + 1e-6)
         else:
             gate1_sqn = 0.0
@@ -591,16 +527,8 @@ def objective_spot(
         min_p10_cagr_req = float(cfg.get("SPOT_MIN_P10_GMGR_CAGR_PCT", 5.0))
         min_regime_floor = float(cfg.get("SPOT_MIN_REGIME_ON_RATE", 0.15))
         if n_paths_ct >= 3:
-            c_w25 = (
-                float(min_w25_cal_req - worst25_cal_gate)
-                if min_w25_cal_req > 1e-12
-                else 0.0
-            )
-            c_reg = (
-                float(min_regime_floor - mean_regime_on_rate)
-                if path_regime_rates
-                else 0.0
-            )
+            c_w25 = float(min_w25_cal_req - worst25_cal_gate) if min_w25_cal_req > 1e-12 else 0.0
+            c_reg = float(min_regime_floor - mean_regime_on_rate) if path_regime_rates else 0.0
             constraint_vec = (
                 float(psr_floor - psr_val),
                 float(dsr_floor - dsr_val),
@@ -674,7 +602,7 @@ def objective_spot(
         tail_bonus = math.log(max(mean_tail_gate, 0.5)) * w_tail_obj
         tail_penalty = tail_shortfall * 0.80
         tail_ratio_reward = tail_bonus - tail_penalty
-        
+
         # Metrics for Optuna attributes and transparency
         p25_log = float(np.percentile(path_returns, 25.0)) if path_returns.size else -10.0
         p10_log = float(np.percentile(path_returns, 10.0)) if path_returns.size else -10.0
@@ -694,11 +622,11 @@ def objective_spot(
             temporal_decay_pen = temporal_decay * temporal_decay_weight
 
         objective_final = float(
-            stat_lcb             # Core Risk-Adjusted Growth
+            stat_lcb  # Core Risk-Adjusted Growth
             + tail_ratio_reward  # CPCV path tail ratio (soft reward toward gate)
             - concentration_pen  # Path stability
-            - hhi_penalty        # Asset diversity
-            - trade_count_pen    # Statistical significance
+            - hhi_penalty  # Asset diversity
+            - trade_count_pen  # Statistical significance
             - temporal_decay_pen  # Recent CPCV paths must not collapse vs earlier paths
         )
 
@@ -741,12 +669,15 @@ def objective_spot(
                 objective_final = float(objective_final - fwd_pen)
 
         prior_scale = float(cfg.get("SPOT_EXIT_FAMILY_PRIOR_SCALE", 1.0))
-        prior_pen = float(
-            exit_family_prior_penalty(
-                str(params.get("SIGNAL_TYPE", "ADX_BREAKOUT")),
-                str(params.get("EXIT_FAMILY", "BALANCED")),
+        prior_pen = (
+            float(
+                exit_family_prior_penalty(
+                    str(params.get("SIGNAL_TYPE", "ADX_BREAKOUT")),
+                    str(params.get("EXIT_FAMILY", "BALANCED")),
+                )
             )
-        ) * prior_scale
+            * prior_scale
+        )
         objective_final = float(objective_final - prior_pen)
 
         worst_seg_mdd = float(np.max(path_worst_mdd)) if path_worst_mdd else 0.0
@@ -784,15 +715,3 @@ def objective_spot(
         return float(objective_final)
     finally:
         strategy._portfolio_eval_ctx = None
-
-
-
-
-
-
-
-
-
-
-
-

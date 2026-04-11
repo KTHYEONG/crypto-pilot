@@ -2,6 +2,7 @@
 Binance USDT perpetual universe screen: ADV, ATR%, history depth, funding stability.
 Optimized version: Ticker-based pre-filtering + parallel discovery + mini-BT refinement.
 """
+
 from __future__ import annotations
 
 import itertools
@@ -53,7 +54,7 @@ def update_futures_config_file(symbols: List[str]) -> None:
     for s in symbols:
         new_block += f'    "{s}",\n'
     new_block += "]"
-    
+
     new_content = re.sub(pattern, new_block, content, count=1, flags=re.DOTALL)
     if new_content == content:
         if re.search(pattern, content, flags=re.DOTALL):
@@ -61,7 +62,7 @@ def update_futures_config_file(symbols: List[str]) -> None:
         else:
             _logger.warning("FUTURES_SYMBOLS pattern not found in opt_config.py; skipping update.")
         return
-        
+
     config_path.write_text(new_content, encoding="utf-8")
     _logger.info("Successfully updated config/opt_config.py with %d FUTURES_SYMBOLS.", len(symbols))
 
@@ -102,18 +103,18 @@ def _calculate_adv_metrics(df: pd.DataFrame, tail_bars: int = 180) -> tuple[floa
     bar_vol = (t["volume"].astype(np.float64) * t["close"].astype(np.float64)).to_numpy()
     if bar_vol.size == 0:
         return 0.0, 0.0
-    
+
     med_bar = float(np.nanmedian(bar_vol))
     p25_bar = float(np.nanquantile(bar_vol, 0.25))
-    
+
     # Scale median bar to daily ADV: median × (bars per day)
     # Estimate bars per day: 1440 min / (mean diff between bars)
     try:
         diff_min = float(t["datetime"].diff().median().total_seconds() / 60.0)
         bars_per_day = 1440.0 / max(1.0, diff_min)
     except Exception:
-        bars_per_day = 6.0 # Fallback for 4h
-        
+        bars_per_day = 6.0  # Fallback for 4h
+
     return med_bar * bars_per_day, p25_bar
 
 
@@ -147,7 +148,7 @@ def _screen_worker(
     from src.domain.futures.data_collector import DataCollector
 
     collector = DataCollector()
-    
+
     # [[FIX]] 데이터 수집 전 메타데이터 확인하여 히스토리가 너무 짧으면 즉시 제외
     min_bars = int(cfg.get("MIN_HISTORY_BARS", 2000))
     meta = collector._load_meta()
@@ -160,15 +161,17 @@ def _screen_worker(
                 e_dt = pd.to_datetime(earliest)
                 end_dt = pd.to_datetime(end_date)
                 delta = end_dt - e_dt
-                
+
                 # 타임프레임별 바 개수 근사치
                 bars_per_day = {"1h": 24, "4h": 6, "1d": 1}.get(tf, 6)
                 est_bars = delta.days * bars_per_day
                 if est_bars < min_bars:
-                    _logger.debug(f"Skipping {sym}: Estimated bits {est_bars} < {min_bars} (Listed: {earliest})")
+                    _logger.debug(
+                        f"Skipping {sym}: Estimated bits {est_bars} < {min_bars} (Listed: {earliest})"
+                    )
                     return None
             except Exception:
-                pass
+                ...
 
     try:
         collector.ensure_funding_data(sym, fetch_start, end_date)
@@ -220,28 +223,28 @@ def screen_futures_universe(
     _logger.info("Discovering symbols and applying ticker pre-filter...")
     try:
         tickers = collector.client.exchange.fetch_tickers()
-        
+
         # Fast prune: must have at least 20% of min_adv in last 24h to even be considered
         pre_prune_threshold = min_adv * 0.2
         valid_candidates = []
-        
+
         # Use provided pool if it exists, otherwise scan all markets
         search_list = candidate_pool if candidate_pool else list(tickers.keys())
-        
+
         for sym in search_list:
             t = tickers.get(sym)
             if not t or t.get("active") is False:
                 continue
-            
+
             is_usdt_perp = sym.endswith("/USDT") or sym.endswith("/USDT:USDT")
             if not is_usdt_perp:
                 continue
-                
+
             norm_sym = sym.split(":")[0]
             if norm_sym in anchors:
                 valid_candidates.append(norm_sym)
                 continue
-                
+
             vol_24h = float(t.get("quoteVolume") or 0.0)
             if vol_24h >= pre_prune_threshold:
                 valid_candidates.append(norm_sym)
@@ -256,9 +259,7 @@ def screen_futures_universe(
     except Exception as exc:
         _logger.warning("Ticker-based pre-filter failed: %s. Using provided pool.", exc)
         if not candidate_pool:
-            candidate_pool = list(FUTURES_ANCHOR_SYMBOLS) + list(
-                FUTURES_DYNAMIC_CANDIDATE_POOL
-            )
+            candidate_pool = list(FUTURES_ANCHOR_SYMBOLS) + list(FUTURES_DYNAMIC_CANDIDATE_POOL)
 
     # 2. Parallel History Screening
     def get_mp_ctx():
@@ -276,7 +277,6 @@ def screen_futures_universe(
         len(candidate_pool),
         n_workers,
     )
-
 
     worker_fn = partial(
         _screen_worker,
@@ -298,7 +298,7 @@ def screen_futures_universe(
 
     rows: List[Dict[str, Any]] = []
     min_p25 = float(cfg.get("SCREENER_MIN_P25_BAR_USDT", 0.0))
-    
+
     for r in results:
         if r is None:
             continue
@@ -370,7 +370,10 @@ def _correlation_gate(
             _logger.warning(
                 "  [CORR WARN] %s vs %s: rho=%.2f >= %.2f threshold. "
                 "Portfolio diversification may be illusory.",
-                a, b, rho, threshold,
+                a,
+                b,
+                rho,
+                threshold,
             )
 
     if not warned_pairs:
@@ -447,7 +450,7 @@ def _run_mini_backtest_futures(
     try:
         # 1. Generate signals (indicators required by Fast engine)
         df_sig = strategy.generate_signals(df_tf.copy())
-        
+
         # 2. Run engine
         engine = BacktestEngineFast(
             hourly_df=df_sig,
@@ -530,7 +533,11 @@ def screen_futures_symbol_refinement(
         fold_min_pf = 1.0 if is_anchor else max(1.1, 1.0 + pf_prem)
 
         pass_count, total_folds, mean_pf, mean_ret = _walk_forward_passes(
-            sym, df, d1, winning_params, sm,
+            sym,
+            df,
+            d1,
+            winning_params,
+            sm,
             n_folds=n_folds,
             min_pf=fold_min_pf,
             min_trades=min_trades_per_fold,
@@ -541,20 +548,29 @@ def screen_futures_symbol_refinement(
         if pass_count < required_passes or mean_pf < overall_pf_gate or mean_ret < -10.0:
             _logger.debug(
                 "Refinement rejected %s: WF passes=%d/%d, mean_PF=%.2f, mean_Ret=%.1f%%",
-                sym, pass_count, total_folds, mean_pf, mean_ret,
+                sym,
+                pass_count,
+                total_folds,
+                mean_pf,
+                mean_ret,
             )
             # [개선 5] fallback 기준 강화: pf>=1.15, ret>=-2.0, trades >= max(8, min-2)
             fallback_min_tr = max(8, min_trades_total - 4)
             if (
                 not is_anchor
-                and pass_count >= 1          # 최소 1 fold 통과
-                and mean_pf >= 1.15          # 기존 1.0 → 1.15
-                and mean_ret >= -2.0         # 기존 -5.0 → -2.0
+                and pass_count >= 1  # 최소 1 fold 통과
+                and mean_pf >= 1.15  # 기존 1.0 → 1.15
+                and mean_ret >= -2.0  # 기존 -5.0 → -2.0
                 and min_trades_per_fold * n_folds >= fallback_min_tr
             ):
                 marginal_fallback.append(
-                    {"symbol": sym, "pf": mean_pf, "n_trades": min_trades_per_fold * n_folds,
-                     "ret": mean_ret, "passes": pass_count}
+                    {
+                        "symbol": sym,
+                        "pf": mean_pf,
+                        "n_trades": min_trades_per_fold * n_folds,
+                        "ret": mean_ret,
+                        "passes": pass_count,
+                    }
                 )
             continue
 
@@ -572,7 +588,11 @@ def screen_futures_symbol_refinement(
         )
         _logger.info(
             "  [WF OK] %s: passes=%d/%d, mean_PF=%.2f, mean_Ret=%.1f%%",
-            sym, pass_count, total_folds, mean_pf, mean_ret,
+            sym,
+            pass_count,
+            total_folds,
+            mean_pf,
+            mean_ret,
         )
 
     scored.sort(key=lambda x: x["score"], reverse=True)
@@ -608,7 +628,11 @@ def screen_futures_symbol_refinement(
                 _logger.warning(
                     "[MARGINAL] Fallback adding %s (mean_pf=%.2f, WF passes=%d/%d, ret=%.1f%%); "
                     "insufficient qualified symbols.",
-                    s, item["pf"], item["passes"], n_folds, item["ret"],
+                    s,
+                    item["pf"],
+                    item["passes"],
+                    n_folds,
+                    item["ret"],
                 )
                 final_list.append(s)
             if len(final_list) >= mp_min:
@@ -617,7 +641,8 @@ def screen_futures_symbol_refinement(
             _logger.warning(
                 "Refinement: only %d symbols qualified (< mp_min=%d); "
                 "proceeding with reduced symbol set.",
-                len(final_list), mp_min,
+                len(final_list),
+                mp_min,
             )
 
     _logger.info("Refinement complete: %d symbols selected: %s", len(final_list), final_list)

@@ -1,13 +1,12 @@
 from __future__ import annotations
 
+import os
 from typing import Any, Callable
 
 import numpy as np
 import pandas as pd
 import talib
 from numba import njit
-import os
-
 
 CacheMode = str
 
@@ -155,7 +154,9 @@ class IndicatorEngine:
             series,
             (int(window),),
             {},
-            lambda: pd.Series(talib.SMA(series.values.astype(np.float64), timeperiod=window), index=series.index),
+            lambda: pd.Series(
+                talib.SMA(series.values.astype(np.float64), timeperiod=window), index=series.index
+            ),
         )
 
     def calculate_ema(self, series: pd.Series, window: int) -> pd.Series:
@@ -164,7 +165,9 @@ class IndicatorEngine:
             series,
             (int(window),),
             {},
-            lambda: pd.Series(talib.EMA(series.values.astype(np.float64), timeperiod=window), index=series.index),
+            lambda: pd.Series(
+                talib.EMA(series.values.astype(np.float64), timeperiod=window), index=series.index
+            ),
         )
 
     def calculate_wma(self, series: pd.Series, window: int) -> pd.Series:
@@ -173,7 +176,9 @@ class IndicatorEngine:
             series,
             (int(window),),
             {},
-            lambda: pd.Series(talib.WMA(series.values.astype(np.float64), timeperiod=window), index=series.index),
+            lambda: pd.Series(
+                talib.WMA(series.values.astype(np.float64), timeperiod=window), index=series.index
+            ),
         )
 
     def calculate_hma(self, series: pd.Series, window: int) -> pd.Series:
@@ -194,7 +199,9 @@ class IndicatorEngine:
             series,
             (int(window),),
             {},
-            lambda: pd.Series(talib.DEMA(series.values.astype(np.float64), timeperiod=window), index=series.index),
+            lambda: pd.Series(
+                talib.DEMA(series.values.astype(np.float64), timeperiod=window), index=series.index
+            ),
         )
 
     def calculate_tema(self, series: pd.Series, window: int) -> pd.Series:
@@ -203,7 +210,9 @@ class IndicatorEngine:
             series,
             (int(window),),
             {},
-            lambda: pd.Series(talib.TEMA(series.values.astype(np.float64), timeperiod=window), index=series.index),
+            lambda: pd.Series(
+                talib.TEMA(series.values.astype(np.float64), timeperiod=window), index=series.index
+            ),
         )
 
     def calculate_atr(self, df: pd.DataFrame, window: int = 14) -> pd.Series:
@@ -214,10 +223,10 @@ class IndicatorEngine:
             {},
             lambda: pd.Series(
                 talib.ATR(
-                    df["high"].values.astype(np.float64), 
-                    df["low"].values.astype(np.float64), 
-                    df["close"].values.astype(np.float64), 
-                    timeperiod=window
+                    df["high"].values.astype(np.float64),
+                    df["low"].values.astype(np.float64),
+                    df["close"].values.astype(np.float64),
+                    timeperiod=window,
                 ),
                 index=df.index,
             ),
@@ -284,8 +293,10 @@ class IndicatorEngine:
             (int(window), float(atr_mult)),
             {},
             lambda: (
-                self.calculate_ema(df["close"], window) + (self.calculate_atr(df, window=window) * atr_mult),
-                self.calculate_ema(df["close"], window) - (self.calculate_atr(df, window=window) * atr_mult),
+                self.calculate_ema(df["close"], window)
+                + (self.calculate_atr(df, window=window) * atr_mult),
+                self.calculate_ema(df["close"], window)
+                - (self.calculate_atr(df, window=window) * atr_mult),
             ),
         )
 
@@ -346,8 +357,10 @@ class IndicatorEngine:
             series,
             (int(window),),
             {},
-            lambda: (series.rolling(window).max() - series.rolling(window).min()).abs()
-            / series.diff().abs().rolling(window).sum(),
+            lambda: (
+                (series.rolling(window).max() - series.rolling(window).min()).abs()
+                / series.diff().abs().rolling(window).sum()
+            ),
         )
 
     def calculate_adx(self, df: pd.DataFrame, window: int = 14) -> pd.Series:
@@ -358,32 +371,30 @@ class IndicatorEngine:
             {},
             lambda: pd.Series(
                 talib.ADX(
-                    df["high"].values.astype(np.float64), 
-                    df["low"].values.astype(np.float64), 
-                    df["close"].values.astype(np.float64), 
-                    timeperiod=window
+                    df["high"].values.astype(np.float64),
+                    df["low"].values.astype(np.float64),
+                    df["close"].values.astype(np.float64),
+                    timeperiod=window,
                 ),
                 index=df.index,
             ),
         )
 
-    def calculate_dmi(
-        self, df: pd.DataFrame, window: int = 14
-    ) -> tuple[pd.Series, pd.Series]:
+    def calculate_dmi(self, df: pd.DataFrame, window: int = 14) -> tuple[pd.Series, pd.Series]:
         """Directional Movement: +DI and -DI. Causal (Wilder smoothing uses past only)."""
 
         def _compute() -> tuple[pd.Series, pd.Series]:
             plus_di = talib.PLUS_DI(
-                df["high"].values.astype(np.float64), 
-                df["low"].values.astype(np.float64), 
-                df["close"].values.astype(np.float64), 
-                timeperiod=window
+                df["high"].values.astype(np.float64),
+                df["low"].values.astype(np.float64),
+                df["close"].values.astype(np.float64),
+                timeperiod=window,
             )
             minus_di = talib.MINUS_DI(
-                df["high"].values.astype(np.float64), 
-                df["low"].values.astype(np.float64), 
-                df["close"].values.astype(np.float64), 
-                timeperiod=window
+                df["high"].values.astype(np.float64),
+                df["low"].values.astype(np.float64),
+                df["close"].values.astype(np.float64),
+                timeperiod=window,
             )
             return (
                 pd.Series(plus_di, index=df.index),
@@ -392,9 +403,7 @@ class IndicatorEngine:
 
         return self._cached_call("calculate_dmi", df, (int(window),), {}, _compute)
 
-    def calculate_aroon(
-        self, df: pd.DataFrame, window: int = 14
-    ) -> tuple[pd.Series, pd.Series]:
+    def calculate_aroon(self, df: pd.DataFrame, window: int = 14) -> tuple[pd.Series, pd.Series]:
         """Aroon Up/Down. Causal (rolling window uses only past and current bar)."""
 
         def _compute() -> tuple[pd.Series, pd.Series]:
@@ -416,7 +425,9 @@ class IndicatorEngine:
             series,
             (int(window),),
             {},
-            lambda: pd.Series(talib.RSI(series.values.astype(np.float64), timeperiod=window), index=series.index),
+            lambda: pd.Series(
+                talib.RSI(series.values.astype(np.float64), timeperiod=window), index=series.index
+            ),
         )
 
     def calculate_stochastic(
@@ -511,12 +522,10 @@ class IndicatorEngine:
             high = df["high"].values.astype(np.float64)
             low = df["low"].values.astype(np.float64)
             tenkan_sen = (
-                talib.MAX(high, timeperiod=tenkan_window)
-                + talib.MIN(low, timeperiod=tenkan_window)
+                talib.MAX(high, timeperiod=tenkan_window) + talib.MIN(low, timeperiod=tenkan_window)
             ) / 2
             kijun_sen = (
-                talib.MAX(high, timeperiod=kijun_window)
-                + talib.MIN(low, timeperiod=kijun_window)
+                talib.MAX(high, timeperiod=kijun_window) + talib.MIN(low, timeperiod=kijun_window)
             ) / 2
             senkou_span_a = (tenkan_sen + kijun_sen) / 2
             sb_high = talib.MAX(high, timeperiod=senkou_span_b_window)
@@ -545,10 +554,10 @@ class IndicatorEngine:
             {},
             lambda: pd.Series(
                 talib.CCI(
-                    df["high"].values.astype(np.float64), 
-                    df["low"].values.astype(np.float64), 
-                    df["close"].values.astype(np.float64), 
-                    timeperiod=window
+                    df["high"].values.astype(np.float64),
+                    df["low"].values.astype(np.float64),
+                    df["close"].values.astype(np.float64),
+                    timeperiod=window,
                 ),
                 index=df.index,
             ),
@@ -586,9 +595,10 @@ class IndicatorEngine:
             lambda: (
                 pd.Series(
                     talib.SAR(
-                        df["high"].values.astype(np.float64), 
-                        df["low"].values.astype(np.float64), 
-                        acceleration=step, maximum=max_step
+                        df["high"].values.astype(np.float64),
+                        df["low"].values.astype(np.float64),
+                        acceleration=step,
+                        maximum=max_step,
                     ),
                     index=df.index,
                 ),
@@ -609,7 +619,10 @@ class IndicatorEngine:
                 vwap = tp_volume.cumsum() / df["volume"].cumsum()
                 vwap_std = typical_price.expanding().std()
             else:
-                vwap = tp_volume.rolling(window=window).sum() / df["volume"].rolling(window=window).sum()
+                vwap = (
+                    tp_volume.rolling(window=window).sum()
+                    / df["volume"].rolling(window=window).sum()
+                )
                 vwap_std = typical_price.rolling(window=window).std()
             vwap_upper = vwap + (vwap_std * std_mult)
             vwap_lower = vwap - (vwap_std * std_mult)
@@ -625,10 +638,14 @@ class IndicatorEngine:
 
     def calculate_cmf(self, df: pd.DataFrame, window: int = 20) -> pd.Series:
         def _compute() -> pd.Series:
-            mf_multiplier = ((df["close"] - df["low"]) - (df["high"] - df["close"])) / (df["high"] - df["low"])
+            mf_multiplier = ((df["close"] - df["low"]) - (df["high"] - df["close"])) / (
+                df["high"] - df["low"]
+            )
             mf_multiplier = mf_multiplier.replace([np.inf, -np.inf], 0).fillna(0)
             mf_volume = mf_multiplier * df["volume"]
-            return mf_volume.rolling(window=window).sum() / df["volume"].rolling(window=window).sum()
+            return (
+                mf_volume.rolling(window=window).sum() / df["volume"].rolling(window=window).sum()
+            )
 
         return self._cached_call(
             "calculate_cmf",
@@ -644,7 +661,9 @@ class IndicatorEngine:
             series,
             (int(window),),
             {},
-            lambda: pd.Series(_hurst_numba_logic(series.values.astype(np.float64), window), index=series.index),
+            lambda: pd.Series(
+                _hurst_numba_logic(series.values.astype(np.float64), window), index=series.index
+            ),
         )
 
     def calculate_efficiency_ratio(self, series: pd.Series, window: int = 10) -> pd.Series:
@@ -653,8 +672,10 @@ class IndicatorEngine:
             series,
             (int(window),),
             {},
-            lambda: (series - series.shift(window)).abs()
-            / (series - series.shift(1)).abs().rolling(window=window).sum().replace(0, 0.001),
+            lambda: (
+                (series - series.shift(window)).abs()
+                / (series - series.shift(1)).abs().rolling(window=window).sum().replace(0, 0.001)
+            ),
         )
 
     def calculate_natr(self, df: pd.DataFrame, window: int = 14) -> pd.Series:
@@ -681,9 +702,7 @@ class IndicatorEngine:
             _compute,
         )
 
-    def calculate_force_index(
-        self, df: pd.DataFrame, smooth_period: int = 2
-    ) -> pd.Series:
+    def calculate_force_index(self, df: pd.DataFrame, smooth_period: int = 2) -> pd.Series:
         """Force Index: (close - prev_close) * volume, then EMA smoothed. Causal."""
 
         def _compute() -> pd.Series:
@@ -695,9 +714,7 @@ class IndicatorEngine:
             )
             return smoothed
 
-        return self._cached_call(
-            "calculate_force_index", df, (int(smooth_period),), {}, _compute
-        )
+        return self._cached_call("calculate_force_index", df, (int(smooth_period),), {}, _compute)
 
     def calculate_williams_r(self, df: pd.DataFrame, window: int = 14) -> pd.Series:
         """Williams %%R: -100 * (HH - Close) / (HH - LL). Range [-100, 0]. Causal. Div-by-zero -> -50."""
@@ -715,9 +732,7 @@ class IndicatorEngine:
             out = out.replace([np.inf, -np.inf], np.nan).fillna(-50.0)
             return out.clip(-100.0, 0.0)
 
-        return self._cached_call(
-            "calculate_williams_r", df, (int(window),), {}, _compute
-        )
+        return self._cached_call("calculate_williams_r", df, (int(window),), {}, _compute)
 
     def calculate_obv(self, df: pd.DataFrame) -> pd.Series:
         """On Balance Volume: cumulative signed volume by close direction. Causal, no division."""
@@ -736,11 +751,14 @@ class IndicatorEngine:
             series,
             (int(window),),
             {},
-            lambda: pd.Series(talib.ROC(series.values.astype(np.float64), timeperiod=window), index=series.index),
+            lambda: pd.Series(
+                talib.ROC(series.values.astype(np.float64), timeperiod=window), index=series.index
+            ),
         )
 
     def calculate_vwma(self, df: pd.DataFrame, window: int = 20) -> pd.Series:
         """Volume Weighted Moving Average: sum(price * volume) / sum(volume) over rolling window."""
+
         def _compute() -> pd.Series:
             pv = df["close"] * df["volume"]
             return pv.rolling(window=window).sum() / df["volume"].rolling(window=window).sum()
@@ -754,8 +772,7 @@ def get_indicator_engine(domain: str = "generic") -> IndicatorEngine:
     """
     env_suffix = domain.upper()
     cache_mode = os.getenv(
-        f"{env_suffix}_INDICATOR_CACHE_MODE",
-        os.getenv("INDICATOR_CACHE_MODE", "signature")
+        f"{env_suffix}_INDICATOR_CACHE_MODE", os.getenv("INDICATOR_CACHE_MODE", "signature")
     )
     return IndicatorEngine(cache_mode=cache_mode)
 

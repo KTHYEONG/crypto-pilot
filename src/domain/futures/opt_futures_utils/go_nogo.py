@@ -52,9 +52,7 @@ def run_go_nogo_check(
     # --- 1. Return over Max Drawdown (RoMaD) - 리스크 대비 수익성 ---
     # 단순히 CAGR > 0이 아니라, "MDD 대비 수익률이 1.0배 이상인가?"를 검증
     romad = oos_cagr / abs_mdd
-    growth_pass: bool = (
-        oos_cagr > 5.0 and romad >= 0.8
-    )  # 최소 수익률 5% 보장 및 방어력 검증
+    growth_pass: bool = oos_cagr > 5.0 and romad >= 0.8  # 최소 수익률 5% 보장 및 방어력 검증
 
     # --- 2. Absolute Volatility Drag (MDD 한계치) ---
     # 상위 1% 레버리지 운용을 위해 MDD는 25%로 하향 압박 (기존 35%는 파산 리스크 농후)
@@ -121,9 +119,7 @@ def run_go_nogo_check(
     )
     summary_lines.append(f"  FINAL VERDICT: {final_status}")
 
-    return GoNoGoResult(
-        passed=all_passed, details=details, summary="\n".join(summary_lines)
-    )
+    return GoNoGoResult(passed=all_passed, details=details, summary="\n".join(summary_lines))
 
 
 @dataclass(frozen=True)
@@ -268,11 +264,11 @@ def run_futures_deployment_report(ctx: FuturesDeploymentReportInput) -> str:
     pf_ok = ctx.oos_pf >= ctx.pf_target
     l_pf_ok = ctx.oos_long_pf >= 1.05 if ctx.oos_long_trades > 0 else True
     s_pf_ok = ctx.oos_short_pf >= 1.05 if ctx.oos_short_trades > 0 else True
-    
+
     # New Futures Hard Gates
     ev_cost_ok = ctx.oos_ev_cost_ratio >= 3.0
     short_wr_ok = ctx.oos_short_win_rate_pct >= 35.0 if ctx.oos_short_trades > 5 else True
-    
+
     ad_ok = ctx.alpha_decay_pct >= ctx.alpha_decay_floor_pct
     tw_ok = ctx.terminal_wealth_ratio > ctx.tw_target
 
@@ -350,11 +346,7 @@ def run_futures_deployment_report(ctx: FuturesDeploymentReportInput) -> str:
     )
 
     tot_ls = int(ctx.oos_long_trades) + int(ctx.oos_short_trades)
-    ratio_txt = (
-        f"{ctx.oos_long_trades}/{ctx.oos_short_trades}"
-        if tot_ls > 0
-        else "0/0"
-    )
+    ratio_txt = f"{ctx.oos_long_trades}/{ctx.oos_short_trades}" if tot_ls > 0 else "0/0"
     drag_pct = (
         (ctx.funding_cost_total_usdt / max(ctx.gross_pnl_abs_usdt, 1e-9)) * 100.0
         if ctx.gross_pnl_abs_usdt > 0
@@ -376,28 +368,50 @@ def run_futures_deployment_report(ctx: FuturesDeploymentReportInput) -> str:
     if not ctx.final_decision_go:
         lines.append("\n  ※ 주요 결격 사유 (Critical Failures):")
         if not psr_ok:
-            lines.append(f"    - TIER1: PSR 점수({ctx.gate1_psr:.4f})가 기준({ctx.psr_target}) 미달")
+            lines.append(
+                f"    - TIER1: PSR 점수({ctx.gate1_psr:.4f})가 기준({ctx.psr_target}) 미달"
+            )
         if not dsr_ok:
-            lines.append(f"    - TIER1: DSR 점수({ctx.gate1_dsr:.4f})가 기준({ctx.dsr_target}) 미달")
+            lines.append(
+                f"    - TIER1: DSR 점수({ctx.gate1_dsr:.4f})가 기준({ctx.dsr_target}) 미달"
+            )
         if not oos_mdd_ok:
-            lines.append(f"    - TIER2: OOS MDD({abs(ctx.oos_mdd_pct):.1f}%)가 제한({ctx.oos_mdd_limit_pct}%) 초과")
+            lines.append(
+                f"    - TIER2: OOS MDD({abs(ctx.oos_mdd_pct):.1f}%)가 제한({ctx.oos_mdd_limit_pct}%) 초과"
+            )
         if not cvar_ok:
-            lines.append(f"    - TIER2: OOS CVaR({ctx.oos_cvar_pct:.2f}%)가 제한({ctx.cvar_limit_pct}%) 초과")
+            lines.append(
+                f"    - TIER2: OOS CVaR({ctx.oos_cvar_pct:.2f}%)가 제한({ctx.cvar_limit_pct}%) 초과"
+            )
         if not calmar_ok:
-            lines.append(f"    - TIER2: Calmar Ratio({ctx.oos_calmar:.2f})가 기준({ctx.calmar_target}) 미달")
+            lines.append(
+                f"    - TIER2: Calmar Ratio({ctx.oos_calmar:.2f})가 기준({ctx.calmar_target}) 미달"
+            )
         if not fund_ok:
-            lines.append(f"    - TIER2: Funding drag({ctx.funding_drag_pct:.2f}%)가 제한({ctx.funding_drag_limit_pct}%) 초과")
+            lines.append(
+                f"    - TIER2: Funding drag({ctx.funding_drag_pct:.2f}%)가 제한({ctx.funding_drag_limit_pct}%) 초과"
+            )
         if not oos_cagr_ok:
-            lines.append(f"    - TIER3: OOS CAGR({ctx.oos_net_cagr_pct:.1f}%)이 목표({ctx.oos_cagr_target_pct}%) 미달")
+            lines.append(
+                f"    - TIER3: OOS CAGR({ctx.oos_net_cagr_pct:.1f}%)이 목표({ctx.oos_cagr_target_pct}%) 미달"
+            )
         if not pf_ok:
-            lines.append(f"    - TIER3: Profit Factor({ctx.oos_pf:.2f})가 기준({ctx.pf_target}) 미달")
+            lines.append(
+                f"    - TIER3: Profit Factor({ctx.oos_pf:.2f})가 기준({ctx.pf_target}) 미달"
+            )
         if not l_pf_ok:
-            lines.append(f"    - TIER3: Long Profit Factor({ctx.oos_long_pf:.2f})가 1.05 미달 (방향성 엣지 붕괴)")
+            lines.append(
+                f"    - TIER3: Long Profit Factor({ctx.oos_long_pf:.2f})가 1.05 미달 (방향성 엣지 붕괴)"
+            )
         if not s_pf_ok:
-            lines.append(f"    - TIER3: Short Profit Factor({ctx.oos_short_pf:.2f})가 1.05 미달 (방향성 엣지 붕괴)")
+            lines.append(
+                f"    - TIER3: Short Profit Factor({ctx.oos_short_pf:.2f})가 1.05 미달 (방향성 엣지 붕괴)"
+            )
         if not ad_ok:
-            lines.append(f"    - TIER3: Alpha Decay({ctx.alpha_decay_pct:.1f}%)가 허용치({ctx.alpha_decay_floor_pct}%) 미달")
-    
+            lines.append(
+                f"    - TIER3: Alpha Decay({ctx.alpha_decay_pct:.1f}%)가 허용치({ctx.alpha_decay_floor_pct}%) 미달"
+            )
+
     if ctx.regime_diagnostic_block:
         lines.append("")
         lines.append(ctx.regime_diagnostic_block)
@@ -425,11 +439,11 @@ def run_multi_window_oos_gate(
     pos = int(sum(1 for c in cagrs if c > 0.0))
     med_c = float(median(cagrs)) if cagrs else -100.0
     worst_mdd = float(max(abs(float(w.get("mdd_pct", 0.0))) for w in window_results))
-    
+
     ok_pos = pos >= int(min_positive_windows)
     ok_med = med_c >= float(min_median_cagr_pct)
     ok_mdd = worst_mdd <= float(max_worst_mdd_pct)
-    
+
     passed = bool(ok_pos and ok_med and ok_mdd)
     lines = [
         "=" * 71,
@@ -476,12 +490,12 @@ def format_regime_oos_diagnostic_block(
         n = int(m.get("bar_count", 0.0))
         rp = float(m.get("return_pct", 0.0))
         mdd = float(m.get("mdd_pct", 0.0))
-        lines.append(
-            f"  - {labels[key]}: N={n:<4} | ret: {rp:>+.2f}% | MDD: {mdd:>5.2f}%"
-        )
+        lines.append(f"  - {labels[key]}: N={n:<4} | ret: {rp:>+.2f}% | MDD: {mdd:>5.2f}%")
     stress_mdd = float(regime_metrics.get("stress", {}).get("mdd_pct", 0.0))
     if stress_mdd > float(stress_mdd_warn_pct):
         lines.append("")
-        lines.append(f"  ⚠ WARNING: Stress-regime MDD ({stress_mdd:.2f}%) exceeds threshold ({stress_mdd_warn_pct}%)")
+        lines.append(
+            f"  ⚠ WARNING: Stress-regime MDD ({stress_mdd:.2f}%) exceeds threshold ({stress_mdd_warn_pct}%)"
+        )
     lines.append("=" * 71)
     return "\n".join(lines)
