@@ -67,20 +67,28 @@ ENGINE_PARAM_SPACE_FUTURES: Dict[str, Dict[str, Any]] = {
 
 
 FUTURES_SYMBOLS: List[str] = [
+    "BTC/USDT",
     "ETH/USDT",
     "SOL/USDT",
-    "FIL/USDT",
-    "ZEC/USDT",
-    "NEAR/USDT",
-    "DOT/USDT",
 ]
 
 FUTURES_ANCHOR_SYMBOLS: List[str] = [
+    "BTC/USDT",   # ADV $3B+, 독립 가격 동인, 슬리피지 최소
     "ETH/USDT",
     "SOL/USDT",
 ]
 
+# Manually curated: ADV > $150M/day, CMC Top-50, 상장 2년+.
+# ZEC/FIL/DOT 유형(유동성 감소 추세, CMC 100위 밖) 포함 금지.
 FUTURES_DYNAMIC_CANDIDATE_POOL: List[str] = [
+    # Legacy top-10 by market cap
+    "BNB/USDT",      # ADV $500M+, Binance 네이티브
+    "XRP/USDT",      # ADV $2B+, ETH 상관도 낮음
+    "ADA/USDT",      # ADV $200M+, 독립 베타
+    "ATOM/USDT",     # ADV $100M+, IBC 생태계
+    "LTC/USDT",      # ADV $300M+, 안정적 legacy 유동성
+    "POL/USDT",      # ADV $200M+, MATIC 리브랜딩 (2024-09); CMC Top-30
+    # 기존 pool 유지
     "AVAX/USDT",
     "NEAR/USDT",
     "LINK/USDT",
@@ -106,7 +114,7 @@ FUTURES_SCREENER_CONFIG: Dict[str, Any] = {
     "SCREENER_ATR_PCT_MIN": 2.0,
     "SCREENER_ATR_PCT_MAX": 12.0,
     "MIN_HISTORY_BARS": 2000,
-    "SCREENER_MIN_TRADES_DYNAMIC": 8,
+    "SCREENER_MIN_TRADES_DYNAMIC": 12,  # 4h 기준 2년 IS에서 최소 통계적 유의성 (Binomial n>=12)
     "SCREENER_MIN_PF": 1.35,
     "FUNDING_EXTREME_THRESHOLD": 0.003,
     "MP_MIN_SYMBOLS": 3,
