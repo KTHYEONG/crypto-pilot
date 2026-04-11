@@ -75,6 +75,14 @@ class UltimateStrategy(PipelineStrategyBase):
 
         kelly_f = sizer.compute(df, self.params)
         df["garch_kelly_f"] = kelly_f
+
+        # [MACRO FILTER] Suppress Longs if BTC is in clear downtrend (Spot parity philosophy)
+        if "btc_close" in df.columns:
+            btc_ema = _FUTURES_INDICATORS.calculate_ema(df["btc_close"], window=macro_ema_period)
+            btc_bull = (df["btc_close"] > btc_ema).to_numpy()
+            # If BTC is bear, kill all long conviction
+            long_mult = np.where(btc_bull, long_mult, 0.0)
+
         # Kelly scales risk in engine via garch_kelly_f; regime scales conviction here only.
         df["strength_filter"] = np.where(
             long_e,
