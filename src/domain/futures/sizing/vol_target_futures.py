@@ -17,14 +17,16 @@ class VolTargetFuturesSizing:
     }
 
     def compute(self, df: pd.DataFrame, params: Dict[str, Any]) -> np.ndarray:
-        close = df["close"].to_numpy(dtype=np.float64)
-        high = df["high"].to_numpy(dtype=np.float64)
-        low = df["low"].to_numpy(dtype=np.float64)
-        atr_p = int(params.get("ATR_PERIOD", 14))
-        atr = compute_atr_numpy(high, low, close, atr_p)
-        risk_per_trade = float(params.get("RISK_PER_TRADE", 0.02))
-        max_exp = float(params.get("MAX_EXPOSURE", 1.0))
+        """
+        [FIX] Double-Penalty Bug Removed.
+        The engine already implements Inverse Volatility Sizing (Risk / Stop_Distance).
+        This module now purely returns a Confidence Multiplier [0.0, 1.0].
+        """
         vol_scale = float(params.get("VOL_SCALE", 1.0))
-        atr_pct = np.where(close > 1e-12, atr / close, 0.01)
-        size = np.clip(risk_per_trade * vol_scale / (atr_pct + 1e-9), 0.0, max_exp)
-        return size.astype(np.float64)
+        n = len(df)
+        
+        # Vol scale represents the model's target conviction level.
+        # We clip it to [0.05, 1.0] to prevent zero-sizing and over-exposure.
+        conf_mult = np.full(n, np.clip(vol_scale, 0.05, 1.0), dtype=np.float64)
+        
+        return conf_mult
