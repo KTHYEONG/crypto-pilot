@@ -42,8 +42,13 @@ def compute_ema_atr_regime_labels(
     atr_period: int,
     vol_pct_window: int,
     vol_quantile: float,
-) -> np.ndarray:
-    """Labels in {0,1,2,3} = 2*trend_bull + vol_high."""
+    trend_threshold: float = 0.0,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Returns (labels, is_choppy)
+    Labels in {0,1,2,3} = 2*trend_bull + vol_high.
+    is_choppy is true if distance to EMA is less than trend_threshold.
+    """
     close = df["close"].to_numpy(dtype=np.float64)
     high = df["high"].to_numpy(dtype=np.float64)
     low = df["low"].to_numpy(dtype=np.float64)
@@ -55,6 +60,11 @@ def compute_ema_atr_regime_labels(
         .to_numpy(dtype=np.float64)
     )
     trend_bull = (close > ema).astype(np.int32)
+    
+    # Choppy market check: distance to EMA
+    safe_close = np.where(close > 1e-12, close, 1.0)
+    ema_dist = np.abs(close - ema) / safe_close
+    is_choppy = ema_dist < trend_threshold
 
     atr_pct = _atr_pct(close, high, low, atr_period)
     rolling_q = (
@@ -65,7 +75,7 @@ def compute_ema_atr_regime_labels(
     )
     vol_high = (atr_pct >= rolling_q).astype(np.int32)
 
-    return (2 * trend_bull + vol_high).astype(np.int32)
+    return (2 * trend_bull + vol_high).astype(np.int32), is_choppy
 
 
 @register_regime
@@ -78,6 +88,8 @@ class EmaAtrFuturesRegime:
         "ATR_REGIME_PERIOD": {"type": "int", "low": 10, "high": 30, "step": 5},
         "VOL_PCT_WINDOW": {"type": "int", "low": 40, "high": 120, "step": 20},
         "VOL_QUANTILE": {"type": "float", "low": 0.45, "high": 0.75, "step": 0.05},
+        # Trend threshold for choppy market rejection
+        "TREND_THRESHOLD": {"type": "float", "low": 0.00, "high": 0.05, "step": 0.01},
         # Strong mult capped at 0.85: prevents 40%+ notional/trade with leverage=8.
         # At RISK_PER_TRADE=0.05, STRONG_MULT=0.85, lev=8 → 34% notional max per trade.
         "REGIME_STRONG_MULT": {"type": "float", "low": 0.6, "high": 0.85, "step": 0.05},
@@ -90,14 +102,22 @@ class EmaAtrFuturesRegime:
         strong = float(params.get("REGIME_STRONG_MULT", 0.7))
         weak = float(params.get("REGIME_WEAK_MULT", 0.4))
         atr_period = int(params.get("ATR_REGIME_PERIOD", 14))
-        labels = compute_ema_atr_regime_labels(
+        trend_thresh = float(params.get("TREND_THRESHOLD", 0.01))
+        
+        labels, is_choppy = compute_ema_atr_regime_labels(
             df,
             ema_slow=int(params.get("EMA_ATR_REGIME_SLOW", 120)),
             atr_period=atr_period,
             vol_pct_window=int(params.get("VOL_PCT_WINDOW", 60)),
             vol_quantile=float(params.get("VOL_QUANTILE", 0.60)),
+            trend_threshold=trend_thresh,
         )
         lab = labels.astype(np.int32, copy=False)
         long_mult = np.where(lab == 3, strong, np.where(lab == 2, weak, 0.0))
         short_mult = np.where(lab == 1, strong, np.where(lab == 0, weak, 0.0))
+        
+        # Apply stress/choppy filter
+        long_mult = np.where(is_choppy, 0.0, long_mult)
+        short_mult = np.where(is_choppy, 0.0, short_mult)
+        
         return long_mult.astype(np.float64), short_mult.astype(np.float64)
