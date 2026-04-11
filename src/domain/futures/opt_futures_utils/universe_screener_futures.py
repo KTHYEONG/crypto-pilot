@@ -4,6 +4,7 @@ Optimized version: Ticker-based pre-filtering + parallel discovery + mini-BT ref
 """
 from __future__ import annotations
 
+import itertools
 import logging
 import multiprocessing as mp
 import os
@@ -339,6 +340,100 @@ def screen_futures_universe(
     return out, len(rows)
 
 
+def _correlation_gate(
+    final_list: List[str],
+    data_maps: Dict[str, Dict[str, Any]],
+    tf: str,
+    threshold: float = 0.85,
+) -> List[str]:
+    """
+    고상관 심볼 쌍 감지 후 경고 로그 출력.
+    앵커 심볼(BTC/ETH/SOL)은 제거하지 않고 non-anchor만 교체 후보 마킹.
+    실제 제거는 호출자가 판단 — 현재는 경고 only.
+    """
+    rets: Dict[str, pd.Series] = {}
+    for sym in final_list:
+        df = data_maps.get(sym, {}).get(tf)
+        if df is not None and not df.empty and len(df) >= 60:
+            rets[sym] = df["close"].pct_change().tail(180).dropna()
+
+    warned_pairs: List[Tuple[str, str]] = []
+    for a, b in itertools.combinations(final_list, 2):
+        if a not in rets or b not in rets:
+            continue
+        common = rets[a].index.intersection(rets[b].index)
+        if len(common) < 30:
+            continue
+        rho = float(rets[a].loc[common].corr(rets[b].loc[common]))
+        if rho > threshold:
+            warned_pairs.append((a, b))
+            _logger.warning(
+                "  [CORR WARN] %s vs %s: rho=%.2f >= %.2f threshold. "
+                "Portfolio diversification may be illusory.",
+                a, b, rho, threshold,
+            )
+
+    if not warned_pairs:
+        _logger.info("  [CORR OK] All symbol pairs below rho=%.2f threshold.", threshold)
+    return final_list  # 경고만 발행, 리스트 변경 없음
+
+
+def _walk_forward_passes(
+    sym: str,
+    df_tf: pd.DataFrame,
+    df_1d: pd.DataFrame,
+    params: Dict[str, Any],
+    slippage_mult: float,
+    n_folds: int = 3,
+    min_pf: float = 1.1,
+    min_trades: int = 4,
+) -> tuple[int, int, float, float]:
+    """
+    n_folds 분할 walk-forward mini-BT 수행.
+    Returns: (pass_count, total_folds, mean_pf, mean_ret)
+
+    각 fold: train = 앞 2/3, test = 뒤 1/3 (expanding window 아닌 순수 3분할).
+    fold 통과 기준: pf >= min_pf AND trades >= min_trades AND ret >= -10%.
+    """
+    n = len(df_tf)
+    if n < n_folds * 30:
+        return 0, n_folds, 0.0, -100.0
+
+    fold_size = n // n_folds
+    pass_count = 0
+    pf_list: List[float] = []
+    ret_list: List[float] = []
+
+    for fold_idx in range(n_folds):
+        start = fold_idx * fold_size
+        end = (fold_idx + 1) * fold_size if fold_idx < n_folds - 1 else n
+
+        fold_tf = df_tf.iloc[start:end].reset_index(drop=True)
+        # 1D 대응 구간: datetime 범위 기준으로 슬라이스
+        if df_1d is not None and not df_1d.empty and "datetime" in fold_tf.columns:
+            fold_start_dt = fold_tf["datetime"].iloc[0]
+            fold_end_dt = fold_tf["datetime"].iloc[-1]
+            fold_1d = df_1d[
+                (df_1d["datetime"] >= fold_start_dt) & (df_1d["datetime"] <= fold_end_dt)
+            ].reset_index(drop=True)
+            if len(fold_1d) < 10:
+                fold_1d = df_1d.reset_index(drop=True)
+        else:
+            fold_1d = df_1d
+
+        pf, n_tr, ret = _run_mini_backtest_futures(
+            sym, fold_tf, fold_1d, params, slippage_mult=slippage_mult
+        )
+        pf_list.append(pf)
+        ret_list.append(ret)
+        if pf >= min_pf and n_tr >= min_trades and ret >= -10.0:
+            pass_count += 1
+
+    mean_pf = float(np.mean(pf_list)) if pf_list else 0.0
+    mean_ret = float(np.mean(ret_list)) if ret_list else -100.0
+    return pass_count, n_folds, mean_pf, mean_ret
+
+
 def _run_mini_backtest_futures(
     sym: str,
     df_tf: pd.DataFrame,
@@ -401,16 +496,27 @@ def screen_futures_symbol_refinement(
                 break
         return out[:mp_max]
 
-    _logger.info("Phase C: Refining %d symbols via mini-backtest...", len(broad_candidates))
+    _logger.info(
+        "Phase C: Refining %d symbols via 3-fold walk-forward mini-BT...",
+        len(broad_candidates),
+    )
+
+    # Walk-forward 설정: n_folds 분할, 과반수(ceil(n_folds/2)) fold 통과 시 선정
+    n_folds = 3
+    required_passes = 2  # n_folds=3에서 다수결
 
     scored: List[Dict[str, Any]] = []
-    # 거부된 심볼 중 최소 조건을 충족한 것만 fallback 후보로 보관
     marginal_fallback: List[Dict[str, Any]] = []
     tf = winning_params.get("TIMEFRAME", "4h")
     pf_prem = float(OPT_FUTURES_CONFIG.get("FUTURES_NON_ANCHOR_MIN_PF_PREMIUM", 0.0))
     slip_mult = float(OPT_FUTURES_CONFIG.get("FUTURES_NON_ANCHOR_SLIPPAGE_MULT", 1.0))
     max_non_anchor = int(OPT_FUTURES_CONFIG.get("FUTURES_NON_ANCHOR_MAX_COUNT", 1))
     anchor_set = {str(a) for a in anchors}
+
+    base_min_pf = float(cfg.get("SCREENER_MIN_PF", 1.1))
+    min_trades_total = int(cfg.get("SCREENER_MIN_TRADES_DYNAMIC", 12))
+    # fold당 최소 거래 수: 전체 최소의 1/n_folds (최소 4)
+    min_trades_per_fold = max(4, min_trades_total // n_folds)
 
     for sym in broad_candidates:
         symbol_data = data_maps.get(sym, {})
@@ -421,45 +527,63 @@ def screen_futures_symbol_refinement(
 
         is_anchor = sym in anchor_set
         sm = 1.0 if is_anchor else slip_mult
-        pf, n_tr, ret = _run_mini_backtest_futures(
-            sym, df, d1, winning_params, slippage_mult=sm
+        fold_min_pf = 1.0 if is_anchor else max(1.1, 1.0 + pf_prem)
+
+        pass_count, total_folds, mean_pf, mean_ret = _walk_forward_passes(
+            sym, df, d1, winning_params, sm,
+            n_folds=n_folds,
+            min_pf=fold_min_pf,
+            min_trades=min_trades_per_fold,
         )
 
-        min_pf = 1.0 if is_anchor else (1.1 + pf_prem)
-        if n_tr < 3 or pf < min_pf or ret < -10.0:
+        overall_pf_gate = 1.0 if is_anchor else max(base_min_pf, 1.1 + pf_prem)
+
+        if pass_count < required_passes or mean_pf < overall_pf_gate or mean_ret < -10.0:
             _logger.debug(
-                "Refinement rejected %s: PF=%.2f, Trades=%d, Ret=%.1f%%",
-                sym, pf, n_tr, ret,
+                "Refinement rejected %s: WF passes=%d/%d, mean_PF=%.2f, mean_Ret=%.1f%%",
+                sym, pass_count, total_folds, mean_pf, mean_ret,
             )
-            # fallback 후보: 최소 기준(거래 수, 손실 한도)을 통과한 경우만 보관
-            min_fallback_trades = int(cfg.get("SCREENER_MIN_TRADES_DYNAMIC", 8))
-            if n_tr >= max(3, min_fallback_trades // 2) and ret >= -5.0 and not is_anchor:
+            # [개선 5] fallback 기준 강화: pf>=1.15, ret>=-2.0, trades >= max(8, min-2)
+            fallback_min_tr = max(8, min_trades_total - 4)
+            if (
+                not is_anchor
+                and pass_count >= 1          # 최소 1 fold 통과
+                and mean_pf >= 1.15          # 기존 1.0 → 1.15
+                and mean_ret >= -2.0         # 기존 -5.0 → -2.0
+                and min_trades_per_fold * n_folds >= fallback_min_tr
+            ):
                 marginal_fallback.append(
-                    {"symbol": sym, "pf": pf, "n_trades": n_tr, "ret": ret}
+                    {"symbol": sym, "pf": mean_pf, "n_trades": min_trades_per_fold * n_folds,
+                     "ret": mean_ret, "passes": pass_count}
                 )
             continue
 
-        # Score: PF × log(trades) × return multiplier (penalize near-zero returns)
-        ret_mult = max(0.1, 1.0 + ret / 100.0)
+        ret_mult = max(0.1, 1.0 + mean_ret / 100.0)
+        # WF 통과 횟수도 score에 반영 (pass_count/total_folds 보너스)
+        wf_bonus = pass_count / total_folds
         scored.append(
             {
                 "symbol": sym,
-                "pf": pf,
-                "n_trades": n_tr,
-                "ret": ret,
-                "score": pf * np.log1p(n_tr) * ret_mult,
+                "pf": mean_pf,
+                "ret": mean_ret,
+                "passes": pass_count,
+                "score": mean_pf * np.log1p(min_trades_per_fold * n_folds) * ret_mult * wf_bonus,
             }
+        )
+        _logger.info(
+            "  [WF OK] %s: passes=%d/%d, mean_PF=%.2f, mean_Ret=%.1f%%",
+            sym, pass_count, total_folds, mean_pf, mean_ret,
         )
 
     scored.sort(key=lambda x: x["score"], reverse=True)
 
     final_list: List[str] = []
-    # 1. Anchors first
+    # 1. Anchors first (항상 포함)
     for a in anchors:
         if a not in final_list:
             final_list.append(a)
 
-    # 2. Top performers from broad pool (cap non-anchor symbols per config)
+    # 2. Top performers from broad pool
     non_anchor_added = 0
     for item in scored:
         s = str(item["symbol"])
@@ -473,16 +597,18 @@ def screen_futures_symbol_refinement(
         if len(final_list) >= mp_max:
             break
 
+    # 3. [개선 3] Correlation gate (경고 발행)
+    _correlation_gate(final_list, data_maps, tf, threshold=0.85)
+
     if len(final_list) < mp_min:
-        # fallback: 품질 조건을 통과 못했지만 완전 실패는 아닌 심볼만 추가
         marginal_fallback.sort(key=lambda x: x["ret"], reverse=True)
         for item in marginal_fallback:
             s = str(item["symbol"])
             if s not in final_list:
                 _logger.warning(
-                    "Fallback adding marginal symbol %s (pf=%.2f, trades=%d, ret=%.1f%%); "
+                    "[MARGINAL] Fallback adding %s (mean_pf=%.2f, WF passes=%d/%d, ret=%.1f%%); "
                     "insufficient qualified symbols.",
-                    s, item["pf"], item["n_trades"], item["ret"],
+                    s, item["pf"], item["passes"], n_folds, item["ret"],
                 )
                 final_list.append(s)
             if len(final_list) >= mp_min:
