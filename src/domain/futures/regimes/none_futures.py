@@ -1,4 +1,5 @@
 """No regime adjustment: unit multipliers."""
+
 from __future__ import annotations
 
 from typing import Any, ClassVar, Dict

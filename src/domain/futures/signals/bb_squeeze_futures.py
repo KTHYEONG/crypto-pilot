@@ -1,4 +1,5 @@
 """BB squeeze release: long if momentum up, short if momentum down."""
+
 from __future__ import annotations
 
 from typing import Any, ClassVar, Dict
@@ -6,8 +7,8 @@ from typing import Any, ClassVar, Dict
 import numpy as np
 import pandas as pd
 
-from src.domain.futures.signals.base import FuturesSignalOutput
 from src.core.indicators.numpy_ops_futures import compute_atr_numpy, compute_ema_numpy
+from src.domain.futures.signals.base import FuturesSignalOutput
 from src.domain.futures.signals.registry import register_futures_signal
 
 

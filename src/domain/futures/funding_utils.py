@@ -2,12 +2,14 @@
 Merge per-symbol funding rate parquet (8h Binance schedule) into OHLCV DataFrames
 so BacktestEngineFast can apply causal, bar-aligned funding fees.
 """
+
 from __future__ import annotations
 
 import logging
 from pathlib import Path
-import pandas as pd
+
 import numpy as np
+import pandas as pd
 
 _logger = logging.getLogger(__name__)
 

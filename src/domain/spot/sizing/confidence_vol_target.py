@@ -1,4 +1,5 @@
 """Vol-target sizing scaled by normalized slot_rank_score (tmp.md confidence_vol_target)."""
+
 from __future__ import annotations
 
 from typing import Any, ClassVar, Dict
@@ -39,7 +40,9 @@ class ConfidenceVolTargetSizing:
                 .median()
                 .to_numpy(dtype=np.float64)
             )
-            med_atr = np.where(np.isfinite(med_atr) & (med_atr > 1e-12), med_atr, np.median(atr_pct) + 1e-12)
+            med_atr = np.where(
+                np.isfinite(med_atr) & (med_atr > 1e-12), med_atr, np.median(atr_pct) + 1e-12
+            )
             compress = np.clip(atr_pct / med_atr, 0.45, 1.0)
             base = np.clip(base * compress, 0.0, max_exp * 0.92)
         if "slot_rank_score" not in df.columns:

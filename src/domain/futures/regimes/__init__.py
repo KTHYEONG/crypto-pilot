@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
-from src.domain.futures.regimes.registry import FUTURES_REGIME_REGISTRY, register_regime
-
 # Side-effect: populate registry
-from src.domain.futures.regimes import ema_atr_futures  # noqa: F401
-from src.domain.futures.regimes import funding_rate_regime  # noqa: F401
-from src.domain.futures.regimes import market_breadth_futures  # noqa: F401
-from src.domain.futures.regimes import none_futures  # noqa: F401
-from src.domain.futures.regimes import trend_quality_futures  # noqa: F401
+from src.domain.futures.regimes import (
+    ema_atr_futures,
+    funding_rate_regime,
+    market_breadth_futures,
+    none_futures,
+    trend_quality_futures,
+)
+from src.domain.futures.regimes.registry import FUTURES_REGIME_REGISTRY, register_regime
 
 __all__ = [
     "FUTURES_REGIME_REGISTRY",

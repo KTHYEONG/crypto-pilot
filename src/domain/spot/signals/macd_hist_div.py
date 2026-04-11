@@ -5,8 +5,8 @@ from typing import Any, ClassVar, Dict
 import numpy as np
 import pandas as pd
 
-from src.domain.spot.signals.base import SignalOutput
 from src.core.indicators.numpy_ops_spot import compute_ema_numpy
+from src.domain.spot.signals.base import SignalOutput
 from src.domain.spot.signals.registry import register_signal
 
 
@@ -36,7 +36,9 @@ class MacdHistDivSignal:
         ema_f = compute_ema_numpy(close, max(2, fast_p))
         ema_s = compute_ema_numpy(close, max(slow_p, fast_p + 1))
         macd = ema_f - ema_s
-        sig = pd.Series(macd).ewm(span=max(2, sig_p), adjust=False).mean().to_numpy(dtype=np.float64)
+        sig = (
+            pd.Series(macd).ewm(span=max(2, sig_p), adjust=False).mean().to_numpy(dtype=np.float64)
+        )
         hist = macd - sig
         if lag >= n:
             lag = max(1, n // 4)

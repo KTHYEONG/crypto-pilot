@@ -1,4 +1,5 @@
 """Shared causal NumPy/Pandas indicator helpers for spot signals."""
+
 from __future__ import annotations
 
 import numpy as np
@@ -43,12 +44,7 @@ def rolling_ema_winsorize_volume(volume: np.ndarray, span: int, k: float = 3.0) 
 def compute_ema_numpy(close: np.ndarray, period: int) -> np.ndarray:
     if len(close) == 0:
         return np.array([], dtype=np.float64)
-    return (
-        pd.Series(close)
-        .ewm(span=max(2, period), adjust=False)
-        .mean()
-        .to_numpy(dtype=np.float64)
-    )
+    return pd.Series(close).ewm(span=max(2, period), adjust=False).mean().to_numpy(dtype=np.float64)
 
 
 def compute_rsi_numpy(close: np.ndarray, period: int) -> np.ndarray:
@@ -67,7 +63,9 @@ def compute_rsi_numpy(close: np.ndarray, period: int) -> np.ndarray:
     return np.where(np.isfinite(rsi), rsi, 50.0)
 
 
-def compute_atr_numpy(high: np.ndarray, low: np.ndarray, close: np.ndarray, period: int) -> np.ndarray:
+def compute_atr_numpy(
+    high: np.ndarray, low: np.ndarray, close: np.ndarray, period: int
+) -> np.ndarray:
     if len(close) == 0:
         return np.array([], dtype=np.float64)
     p = max(2, int(period))
@@ -80,7 +78,9 @@ def compute_atr_numpy(high: np.ndarray, low: np.ndarray, close: np.ndarray, peri
     return pd.Series(tr).ewm(span=p, adjust=False).mean().to_numpy(dtype=np.float64)
 
 
-def compute_adx_numpy(high: np.ndarray, low: np.ndarray, close: np.ndarray, period: int) -> np.ndarray:
+def compute_adx_numpy(
+    high: np.ndarray, low: np.ndarray, close: np.ndarray, period: int
+) -> np.ndarray:
     if len(close) == 0:
         return np.array([], dtype=np.float64)
     p = max(2, int(period))

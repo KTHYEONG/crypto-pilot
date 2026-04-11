@@ -1,6 +1,7 @@
 """
 Cross-validation helpers: purged walk-forward (legacy) and CPCV test paths for spot optimization.
 """
+
 from __future__ import annotations
 
 import logging
@@ -45,12 +46,15 @@ def list_cpcv_block_ranges(n_bars: int, n_blocks: int, embargo: int = 0) -> List
     return out
 
 
-def cpcv_complement_segments(test_path: CPCVPath, all_blocks: List[Tuple[int, int]]) -> List[Tuple[int, int]]:
+def cpcv_complement_segments(
+    test_path: CPCVPath, all_blocks: List[Tuple[int, int]]
+) -> List[Tuple[int, int]]:
     """Train/CPCV complement = all physical blocks not selected as test in this path."""
     test_set = {tuple(int(x) for x in pair) for pair in test_path}
     norm_blocks = [tuple(int(x) for x in b) for b in all_blocks]
     comp = [b for b in norm_blocks if b not in test_set]
     return sorted(comp, key=lambda t: t[0])
+
 
 def build_purged_walk_forward_folds(
     df: pd.DataFrame,
@@ -64,13 +68,15 @@ def build_purged_walk_forward_folds(
 
     # IS(In-Sample) 영역 계산
     is_bars = int(n_bars * (1 - holdout_ratio))
-    
+
     # 엠바고를 제외한 순수 사용 가능 IS 구간
     usable_is_bars = is_bars - (n_folds * embargo)
-    if usable_is_bars <= 0: return [], (0, 0, 0)
-    
+    if usable_is_bars <= 0:
+        return [], (0, 0, 0)
+
     fold_size = usable_is_bars // n_folds
-    if fold_size < 10: return [], (0, 0, 0)
+    if fold_size < 10:
+        return [], (0, 0, 0)
 
     splits: List[CVFold] = []
     for i in range(1, n_folds + 1):
@@ -79,7 +85,7 @@ def build_purged_walk_forward_folds(
         test_start = train_end + embargo
         # IS 경계를 절대 넘지 않도록 제한 (Leakage 방지)
         test_end = min(is_bars, test_start + fold_size)
-        
+
         if test_end > test_start:
             splits.append((0, train_end, test_start, test_end))
 

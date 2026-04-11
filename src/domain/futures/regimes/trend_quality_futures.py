@@ -1,4 +1,5 @@
 """Trend quality: separate long vs short quality using EMA stack + ADX (causal)."""
+
 from __future__ import annotations
 
 from typing import Any, ClassVar, Dict

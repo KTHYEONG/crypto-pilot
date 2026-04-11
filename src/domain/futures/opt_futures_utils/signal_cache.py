@@ -1,6 +1,7 @@
 """
 Futures Optuna objective: CPCV paths, Kelly-CVaR scalar, disk+memory signal cache.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -37,6 +38,7 @@ def _signal_cache_param_keys_futures() -> frozenset[str]:
         _FUTURES_SIGNAL_CACHE_KEYS = frozenset(build_full_discovery_space_futures().keys())
     return _FUTURES_SIGNAL_CACHE_KEYS
 
+
 _SIGNAL_CACHE_SCHEMA_VERSION: int = 1
 _cache_lock: threading.Lock = threading.Lock()
 _signal_cache: OrderedDict["_SignalCacheKey", pd.DataFrame] = OrderedDict()
@@ -46,9 +48,6 @@ _ARRAYS_CACHE_MAXSIZE: int = max(8, int(os.getenv("OPT_FUTURES_ARRAYS_MEM_CACHE_
 _CACHE_CLEANUP_DONE: bool = False
 _CACHE_LAST_CLEANUP_TS: float = 0.0
 _STRATEGY_LOGIC_HASH: Optional[str] = None
-
-
-
 
 
 _SignalCacheKey = Tuple[Tuple[Tuple[str, Any], ...], str, str, int, int, int, str]
@@ -127,7 +126,7 @@ def _cleanup_disk_cache_lru(root: Path) -> None:
     max_bytes = _signal_cache_max_bytes()
     if max_bytes <= 0 or not root.exists():
         return
-    
+
     # Gather file paths and their stats safely to handle race conditions
     file_info: List[Tuple[Path, float, int]] = []
     for p in root.rglob("*.joblib"):
@@ -145,7 +144,7 @@ def _cleanup_disk_cache_lru(root: Path) -> None:
 
     # Sort by mtime descending (newest first)
     file_info.sort(key=lambda x: x[1], reverse=True)
-    
+
     total = sum(info[2] for info in file_info)
     target = int(max_bytes * 0.8)
     if total <= target:
@@ -203,7 +202,7 @@ def get_or_compute_signals(
                 _signal_cache[cache_key] = full_df
             return full_df
         except Exception:
-            pass
+            ...
 
     full_df = strategy.generate_signals(target_df.copy(deep=True))
     try:
@@ -219,31 +218,3 @@ def get_or_compute_signals(
             _signal_cache.popitem(last=False)
         _signal_cache[cache_key] = full_df
         return full_df
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

@@ -3,6 +3,7 @@ EMA × ATR volatility-trend regime (EATF): labels 0–3 from trend × vol-high a
 
 All computations are causal (no lookahead).
 """
+
 from __future__ import annotations
 
 from typing import Any, ClassVar, Dict
@@ -28,10 +29,7 @@ def _atr_pct(
         lc = abs(float(low[i] - close[i - 1]))
         tr[i] = max(hl, hc, lc)
     atr = (
-        pd.Series(tr)
-        .ewm(span=max(2, int(period)), adjust=False)
-        .mean()
-        .to_numpy(dtype=np.float64)
+        pd.Series(tr).ewm(span=max(2, int(period)), adjust=False).mean().to_numpy(dtype=np.float64)
     )
     safe_close = np.where(close > 1e-12, close, 1.0)
     return atr / safe_close
@@ -85,7 +83,11 @@ class EmaAtrRegime:
         symbols = sorted(s for s in data_maps if tf in data_maps[s])
         if not symbols:
             raise ValueError("ema_atr regime: empty data_maps")
-        ref = "KRW-BTC" if "KRW-BTC" in data_maps and data_maps["KRW-BTC"].get(tf) is not None else symbols[0]
+        ref = (
+            "KRW-BTC"
+            if "KRW-BTC" in data_maps and data_maps["KRW-BTC"].get(tf) is not None
+            else symbols[0]
+        )
         df = data_maps[ref][tf]
         atr_period = int(params.get("ATR_REGIME_PERIOD", 14))
         labels = compute_ema_atr_regime_labels(
@@ -102,10 +104,7 @@ class EmaAtrRegime:
         atr_pct = _atr_pct(close, high, low, atr_period)
         vov_w = max(2, int(params.get("VOV_WINDOW", 40)))
         vov = (
-            pd.Series(atr_pct)
-            .rolling(window=vov_w, min_periods=1)
-            .std()
-            .to_numpy(dtype=np.float64)
+            pd.Series(atr_pct).rolling(window=vov_w, min_periods=1).std().to_numpy(dtype=np.float64)
         )
         roll_q = max(vov_w * 3, 60)
         vov_q75 = (

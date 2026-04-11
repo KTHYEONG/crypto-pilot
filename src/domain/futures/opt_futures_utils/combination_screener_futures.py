@@ -1,4 +1,5 @@
-"""Phase B: (signal × regime × sizing) screening with quick CPCV + balance gate."""
+"""Phase B: (signal x regime x sizing) screening with quick CPCV + balance gate."""
+
 from __future__ import annotations
 
 import itertools
@@ -45,6 +46,7 @@ class CombinationScreeningResult:
     combos: List[CombinationScoreFutures]
     phase1_no_edge: bool
 
+
 def _combo_search_dim(space: Dict[str, Any]) -> int:
     dim = 0
     for k, spec in space.items():
@@ -55,10 +57,12 @@ def _combo_search_dim(space: Dict[str, Any]) -> int:
         dim += 1
     return dim
 
+
 def _auto_combo_trials(
     viable_count: int, median_dim: float, cfg: Dict[str, Any]
 ) -> tuple[int, int]:
     import math
+
     v = max(1, int(viable_count))
     d = max(1.0, float(median_dim))
     p1_floor = int(cfg.get("combo_phase1_trials", 10))
@@ -145,7 +149,6 @@ def _warmup_numba(
         )
     except Exception as e:
         _logger.warning("Numba warmup failed, proceeding anyway: %s", e)
-
 
 
 def _p25_path_consistency_score(metrics: Dict[str, float]) -> float:
@@ -421,7 +424,10 @@ def run_combination_screening_futures(
     p1_dyn, p2_dyn = _auto_combo_trials(len(viable_items), median_dim, cfg)
     _logger.info(
         "Auto trials scale: phase1=%d, phase2=%d (viable=%d, median_dim=%.1f)",
-        p1_dyn, p2_dyn, len(viable_items), median_dim
+        p1_dyn,
+        p2_dyn,
+        len(viable_items),
+        median_dim,
     )
     p1 = p1_dyn
     p2 = p2_dyn
@@ -442,12 +448,14 @@ def run_combination_screening_futures(
             return mp.get_context("spawn")
 
     mp_ctx = get_mp_ctx()
-    
+
     _logger.info(
         "Phase 1: Quick CPCV (%d trials × %d combos, %d workers)...",
-        p1, len(viable_combos), n_workers
+        p1,
+        len(viable_combos),
+        n_workers,
     )
-    
+
     phase1_fn = partial(
         run_quick_cpcv_for_combo_futures,
         data_maps=data_maps,
@@ -457,7 +465,7 @@ def run_combination_screening_futures(
         project_root=project_root,
         signal_cache_dir=signal_cache_dir,
     )
-    
+
     with ProcessPoolExecutor(max_workers=n_workers, mp_context=mp_ctx) as pool:
         phase1_results = list(
             tqdm(
@@ -470,8 +478,10 @@ def run_combination_screening_futures(
 
     prune_thr = float(cfg.get("FUTURES_COMBO_PRUNE_THR", -0.05))
     surviving_items: List[Tuple[Tuple[str, str, str], float, float]] = []
-    
-    for (combo, ls_ratio, mean_signal_rate), score in zip(viable_items, phase1_results):
+
+    for (combo, ls_ratio, mean_signal_rate), score in zip(
+        viable_items, phase1_results, strict=True
+    ):
         if score > prune_thr:
             surviving_items.append((combo, ls_ratio, mean_signal_rate))
         else:
@@ -504,13 +514,17 @@ def run_combination_screening_futures(
         )
         relaxed_thr = 0.0
         surviving_items = [
-            item for item, score in zip(viable_items, phase1_results) if score > relaxed_thr
+            item
+            for item, score in zip(viable_items, phase1_results, strict=True)
+            if score > relaxed_thr
         ]
         if not surviving_items:
             surviving_items = [
                 x
                 for _, x in sorted(
-                    zip(phase1_results, viable_items), reverse=True, key=lambda pair: pair[0]
+                    zip(phase1_results, viable_items, strict=True),
+                    reverse=True,
+                    key=lambda pair: pair[0],
                 )[:3]
             ]
             phase1_no_edge = True
@@ -531,9 +545,11 @@ def run_combination_screening_futures(
 
     _logger.info(
         "Phase 2: Full CPCV (%d trials × %d combos, %d workers)...",
-        p2, len(survivor_combos), n_workers
+        p2,
+        len(survivor_combos),
+        n_workers,
     )
-    
+
     phase2_fn = partial(
         run_phase2_metrics_futures,
         data_maps=data_maps,
@@ -555,7 +571,7 @@ def run_combination_screening_futures(
         )
 
     finals: List[CombinationScoreFutures] = []
-    for item, (m, best_params) in zip(surviving_items, phase2_results):
+    for item, (m, best_params) in zip(surviving_items, phase2_results, strict=True):
         combo, ls_ratio, mean_signal_rate = item
         score = _p25_path_consistency_score(m)
         finals.append(
@@ -573,10 +589,9 @@ def run_combination_screening_futures(
         )
 
     finals.sort(key=lambda x: x.p10_gmgr, reverse=True)
-    
+
     for s in scored:
         finals.append(s)
-        
+
     valid_finals = [s for s in finals if not s.disqualified]
     return CombinationScreeningResult(combos=valid_finals[:top_k], phase1_no_edge=phase1_no_edge)
-

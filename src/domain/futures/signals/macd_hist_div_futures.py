@@ -1,4 +1,5 @@
 """MACD histogram divergence: bullish div -> long, bearish div -> short."""
+
 from __future__ import annotations
 
 from typing import Any, ClassVar, Dict
@@ -6,8 +7,8 @@ from typing import Any, ClassVar, Dict
 import numpy as np
 import pandas as pd
 
-from src.domain.futures.signals.base import FuturesSignalOutput
 from src.core.indicators.numpy_ops_futures import compute_ema_numpy
+from src.domain.futures.signals.base import FuturesSignalOutput
 from src.domain.futures.signals.registry import register_futures_signal
 
 
@@ -40,7 +41,9 @@ class MacdHistDivFuturesSignal:
         ema_f = compute_ema_numpy(close, max(2, fast_p))
         ema_s = compute_ema_numpy(close, max(slow_p, fast_p + 1))
         macd = ema_f - ema_s
-        sig = pd.Series(macd).ewm(span=max(2, sig_p), adjust=False).mean().to_numpy(dtype=np.float64)
+        sig = (
+            pd.Series(macd).ewm(span=max(2, sig_p), adjust=False).mean().to_numpy(dtype=np.float64)
+        )
         hist = macd - sig
         if lag >= n:
             lag = max(1, n // 4)

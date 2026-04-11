@@ -4,6 +4,7 @@ Triple-filter trend quality regime on the reference symbol (causal).
 Active when: close > EMA_slow AND EMA_fast > EMA_slow AND ADX > threshold.
 Returns {0.0, 1.0} as float64 risk multiplier series.
 """
+
 from __future__ import annotations
 
 from typing import Any, ClassVar, Dict
@@ -11,8 +12,8 @@ from typing import Any, ClassVar, Dict
 import numpy as np
 import pandas as pd
 
-from src.domain.spot.regimes.registry import register_regime
 from src.core.indicators.numpy_ops_spot import compute_adx_numpy, compute_ema_numpy
+from src.domain.spot.regimes.registry import register_regime
 
 
 @register_regime
@@ -27,10 +28,16 @@ class TrendQualityRegime:
 
     def compute(self, data_maps: Dict[str, Dict[str, Any]], params: Dict[str, Any]) -> np.ndarray:
         tf = str(params.get("TIMEFRAME", "4h"))
-        symbols = sorted(s for s in data_maps if tf in data_maps[s] and data_maps[s][tf] is not None)
+        symbols = sorted(
+            s for s in data_maps if tf in data_maps[s] and data_maps[s][tf] is not None
+        )
         if not symbols:
             raise ValueError("trend_quality regime: empty data_maps")
-        ref = "KRW-BTC" if "KRW-BTC" in data_maps and data_maps["KRW-BTC"].get(tf) is not None else symbols[0]
+        ref = (
+            "KRW-BTC"
+            if "KRW-BTC" in data_maps and data_maps["KRW-BTC"].get(tf) is not None
+            else symbols[0]
+        )
         df: pd.DataFrame = data_maps[ref][tf]
         close = df["close"].to_numpy(dtype=np.float64)
         high = df["high"].to_numpy(dtype=np.float64)

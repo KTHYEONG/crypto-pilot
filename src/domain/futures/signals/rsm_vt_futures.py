@@ -2,6 +2,7 @@
 RSM-VT squeeze breakout (PipelineStrategyBase) adapted to FuturesSignalOutput.
 Causal; no positive shifts on price paths.
 """
+
 from __future__ import annotations
 
 from typing import Any, ClassVar, Dict
@@ -12,7 +13,6 @@ import pandas as pd
 from src.core.indicators.indicators import get_indicator_engine
 from src.domain.futures.signals.base import FuturesSignalOutput
 from src.domain.futures.signals.registry import register_futures_signal
-
 
 # Futures 전용 엔진 확보
 _ind = get_indicator_engine(domain="futures")
@@ -51,7 +51,9 @@ class RsmVtFuturesSignal:
         work["kc_mid"] = _ind.calculate_ema(work["close"], window=20)
         work["kc_upper"] = work["kc_mid"] + (work["atr"] * kc_mult)
         work["kc_lower"] = work["kc_mid"] - (work["atr"] * kc_mult)
-        work["is_squeezing"] = (work["bb_upper"] < work["kc_upper"]) & (work["bb_lower"] > work["kc_lower"])
+        work["is_squeezing"] = (work["bb_upper"] < work["kc_upper"]) & (
+            work["bb_lower"] > work["kc_lower"]
+        )
         work["recent_squeeze"] = work["is_squeezing"].rolling(window=squeeze_window).sum() > 0
 
         if "datetime" in work.columns:
@@ -73,15 +75,21 @@ class RsmVtFuturesSignal:
         taker_ratio_threshold = float(params.get("TAKER_RATIO_THRESHOLD", 1.1))
 
         if "taker_buy_base_volume" in work.columns:
-            work["taker_buy_base_volume"] = work["taker_buy_base_volume"].astype(np.float64).clip(lower=0.0)
+            work["taker_buy_base_volume"] = (
+                work["taker_buy_base_volume"].astype(np.float64).clip(lower=0.0)
+            )
             work["volume"] = work["volume"].astype(np.float64).clip(lower=0.0)
-            work["taker_sell_volume"] = np.maximum(work["volume"] - work["taker_buy_base_volume"], 0.0)
+            work["taker_sell_volume"] = np.maximum(
+                work["volume"] - work["taker_buy_base_volume"], 0.0
+            )
             work["vol_delta"] = work["taker_buy_base_volume"] - work["taker_sell_volume"]
             work["cvd"] = work["vol_delta"].rolling(window=cvd_window).sum()
             safe_sell = work["taker_sell_volume"].replace(0.0, 1e-8)
             work["taker_ratio"] = work["taker_buy_base_volume"] / safe_sell
             cvd_bull_filter = (work["cvd"] > 0.0) & (work["taker_ratio"] >= taker_ratio_threshold)
-            cvd_bear_filter = (work["cvd"] < 0.0) & (work["taker_ratio"] <= (1.0 / taker_ratio_threshold))
+            cvd_bear_filter = (work["cvd"] < 0.0) & (
+                work["taker_ratio"] <= (1.0 / taker_ratio_threshold)
+            )
         else:
             cvd_bull_filter = pd.Series(True, index=work.index)
             cvd_bear_filter = pd.Series(True, index=work.index)

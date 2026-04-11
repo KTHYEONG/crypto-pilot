@@ -25,8 +25,8 @@ OPT_FUTURES_CONFIG: Dict[str, Any] = {
     "n_jobs": 3,
     "task_workers": 3,
     "TARGET_TIMEFRAMES": ["4h"],
-    "FUTURES_CPCV_N_BLOCKS": 8,   # 10→8: Spot 검증 설정 채택 (block당 91일, path당 통계 신뢰도 향상)
-    "FUTURES_CPCV_K_TEST": 3,     # 4→3: C(8,3)=56 paths (기존 210→56, overfitting 기회 74% 감소)
+    "FUTURES_CPCV_N_BLOCKS": 8,  # 10→8: Spot 검증 설정 채택 (block당 91일, path당 통계 신뢰도 향상)
+    "FUTURES_CPCV_K_TEST": 3,  # 4→3: C(8,3)=56 paths (기존 210→56, overfitting 기회 74% 감소)
     "FUTURES_MIN_TRADES_PER_CPCV_SEGMENT": 8,  # 5→8: Spot 기준(8) 적용
     "FUTURES_OBJECTIVE_W_MEAN_LOG_TW": 0.7,
     "FUTURES_CPCV_CVAR_ALPHA": 0.10,
@@ -44,7 +44,7 @@ OPT_FUTURES_CONFIG: Dict[str, Any] = {
     "FUTURES_DISCOVERY_LEVERAGE": 8,
     "FUTURES_IS_CAGR_FLOOR": 5.0,
     "FUTURES_OBJECTIVE_FLOOR_WHEN_NO_EDGE": -2.0,
-    "FUTURES_MIN_REGIME_ON_RATE": 0.20,   # 0.10→0.20: Spot 22% 기준에 맞춤, 가짜 신호 필터 강화
+    "FUTURES_MIN_REGIME_ON_RATE": 0.20,  # 0.10→0.20: Spot 22% 기준에 맞춤, 가짜 신호 필터 강화
     "FUTURES_REGIME_ON_PENALTY_WEIGHT": 0.30,
     "FUTURES_RECENT_IS_GATE_WEIGHT": 0.25,  # Spot SPOT_RECENT_IS_GATE_WEIGHT 패턴: IS 후반 손실 패널티
     "FUTURES_NON_ANCHOR_SLIPPAGE_MULT": 1.1,
@@ -74,7 +74,7 @@ FUTURES_SYMBOLS: List[str] = [
 ]
 
 FUTURES_ANCHOR_SYMBOLS: List[str] = [
-    "BTC/USDT",   # ADV $3B+, 독립 가격 동인, 슬리피지 최소
+    "BTC/USDT",  # ADV $3B+, 독립 가격 동인, 슬리피지 최소
     "ETH/USDT",
     "SOL/USDT",
 ]
@@ -83,12 +83,12 @@ FUTURES_ANCHOR_SYMBOLS: List[str] = [
 # ZEC/FIL/DOT 유형(유동성 감소 추세, CMC 100위 밖) 포함 금지.
 FUTURES_DYNAMIC_CANDIDATE_POOL: List[str] = [
     # Legacy top-10 by market cap
-    "BNB/USDT",      # ADV $500M+, Binance 네이티브
-    "XRP/USDT",      # ADV $2B+, ETH 상관도 낮음
-    "ADA/USDT",      # ADV $200M+, 독립 베타
-    "ATOM/USDT",     # ADV $100M+, IBC 생태계
-    "LTC/USDT",      # ADV $300M+, 안정적 legacy 유동성
-    "POL/USDT",      # ADV $200M+, MATIC 리브랜딩 (2024-09); CMC Top-30
+    "BNB/USDT",  # ADV $500M+, Binance 네이티브
+    "XRP/USDT",  # ADV $2B+, ETH 상관도 낮음
+    "ADA/USDT",  # ADV $200M+, 독립 베타
+    "ATOM/USDT",  # ADV $100M+, IBC 생태계
+    "LTC/USDT",  # ADV $300M+, 안정적 legacy 유동성
+    "POL/USDT",  # ADV $200M+, MATIC 리브랜딩 (2024-09); CMC Top-30
     # 기존 pool 유지
     "AVAX/USDT",
     "NEAR/USDT",
@@ -224,7 +224,7 @@ OPT_SPOT_CONFIG: Dict[str, Any] = {
     "SPOT_COMBO_MIN_SCREEN_SCORE": 0.0,
     "SPOT_COMBO_AMBIGUITY_STD_RATIO": 0.15,
     "SPOT_COMBO_PHASE2_AMBIGUITY_BOOST": 4,
-    "SPOT_STAGE1_BROAD_SAMPLE_K": 12,       # Stage1 uses top-K ADV symbols
+    "SPOT_STAGE1_BROAD_SAMPLE_K": 12,  # Stage1 uses top-K ADV symbols
     "SPOT_STAGE1_TRIALS_PER_SIGNAL": 150,  # Stage1 ranking stability (tmp.md: 100→150)
     "SPOT_STAGE1_TOP_K": 3,
     "SPOT_STAGE1_MIN_P10_GMGR": -0.5,
@@ -259,11 +259,11 @@ OPT_SPOT_CONFIG: Dict[str, Any] = {
     "SPOT_REGIME_DIAGNOSTIC_ENABLED": True,
     "SPOT_REGIME_STRESS_MAX_MDD_PCT": 40.0,
     "SPOT_SYMBOL_CLUSTER": {
-            "KRW-ETH": "mrmr_0",
-            "KRW-SOL": "mrmr_1",
-            "KRW-XRP": "mrmr_2",
-            "KRW-HBAR": "mrmr_3",
-        },
+        "KRW-ETH": "mrmr_0",
+        "KRW-SOL": "mrmr_1",
+        "KRW-XRP": "mrmr_2",
+        "KRW-HBAR": "mrmr_3",
+    },
 }
 
 
@@ -272,7 +272,7 @@ SPOT_EXCLUDED_SIZING_METHODS: frozenset[str] = frozenset({"liquidity_adjusted"})
 
 # Universe screener: theory-based thresholds (ADV floor, Hurst bootstrap, MP, mRMR).
 SPOT_SCREENER_CONFIG: dict[str, float | int | bool] = {
-    "ADV_MIN_KRW_DAY": 2_000_000_000.0,  # 100M KRW scale: 10M position / 5% participation / 0.25×6
+    "ADV_MIN_KRW_DAY": 2_000_000_000.0,  # 100M KRW scale: 10M position / 5% participation / 0.25x6
     "SCREENER_MIN_P25_BAR_KRW": 80_000_000.0,  # p25 4H bar floor (100M/5 syms)
     "SCREENER_ATR_PERIOD": 14,
     "SCREENER_ATR_PCT_MIN": 1.0,
@@ -344,7 +344,7 @@ def get_spot_effective_independent_trials(
     if n <= n0:
         return max(1, n)
     extra = n - n0
-    effective = n0 + int(math.ceil(extra**0.65))
+    effective = n0 + math.ceil(extra**0.65)
     return max(1, effective)
 
 

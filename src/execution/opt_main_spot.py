@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import logging
-from collections import Counter
 import os
 import pickle
 import queue
@@ -10,18 +10,19 @@ import sys
 import tempfile
 import threading
 import warnings
+from collections import Counter
+from dataclasses import dataclass
+from multiprocessing import Manager
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Sequence, Tuple
+
+import numpy as np
 import optuna
+import pandas as pd
 from optuna.pruners import MedianPruner, PatientPruner
 from optuna.samplers import QMCSampler, TPESampler
-from optuna.trial import TrialState
 from optuna.storages import InMemoryStorage
-import pandas as pd
-import numpy as np
-from pathlib import Path
-from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Sequence, Tuple
-import concurrent.futures
-from multiprocessing import Manager
+from optuna.trial import TrialState
 from tqdm import tqdm
 
 warnings.filterwarnings("ignore")
@@ -35,29 +36,39 @@ project_root: str = str(Path(__file__).resolve().parents[2])
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-from src.domain.spot.data_collector_spot import DataCollectorSpot
-from src.domain.spot.strategies_spot import SpotPipelineStrategy
-from config.settings import SPOT_INITIAL_BALANCE
 from config.opt_config import (
     OPT_SPOT_CONFIG,
     SPOT_ANCHOR_SYMBOLS,
-    SPOT_SYMBOLS,
-    get_search_space_spot,
     get_quarterly_window,
+    get_search_space_spot,
 )
+from config.settings import SPOT_INITIAL_BALANCE
 from src.core.optimization.opt_utils import compute_segment_merge_index
+from src.domain.spot.data_collector_spot import DataCollectorSpot
 from src.domain.spot.opt_spot_utils.cv_utils import (
     CPCVPath,
     build_cpcv_test_paths_with_fallback,
     list_cpcv_block_ranges,
 )
+from src.domain.spot.opt_spot_utils.data_utils import (
+    _segment_with_context,
+)
+from src.domain.spot.opt_spot_utils.go_nogo import (
+    FinalDeploymentReportInput,
+    GoNoGoResult,
+    SymbolGateRow,
+    format_regime_oos_diagnostic_block,
+    run_final_deployment_report,
+    run_holdout_portfolio_shared_cash,
+    run_holdout_portfolio_trade_floor,
+    run_multi_window_oos_gate,
+    run_pbo_gate,
+    run_portfolio_discovery_veto,
+)
 from src.domain.spot.opt_spot_utils.objective import (
     EMBARGO_BARS,
     objective_spot,
     spot_frozen_trial_constraints,
-)
-from src.domain.spot.opt_spot_utils.data_utils import (
-    _segment_with_context,
 )
 from src.domain.spot.opt_spot_utils.oos_evaluator import (
     compute_regime_conditional_oos_metrics,
@@ -66,19 +77,7 @@ from src.domain.spot.opt_spot_utils.oos_evaluator import (
     run_holdout_shared_cash_portfolio,
     run_multi_window_oos_holdout,
 )
-from src.domain.spot.opt_spot_utils.go_nogo import (
-    FinalDeploymentReportInput,
-    GoNoGoResult,
-    SymbolGateRow,
-    format_regime_oos_diagnostic_block,
-    run_final_deployment_report,
-    run_go_nogo_check,
-    run_holdout_portfolio_shared_cash,
-    run_holdout_portfolio_trade_floor,
-    run_multi_window_oos_gate,
-    run_pbo_gate,
-    run_portfolio_discovery_veto,
-)
+from src.domain.spot.strategies_spot import SpotPipelineStrategy
 
 os.environ.setdefault("OMP_NUM_THREADS", "1")
 os.environ.setdefault("MKL_NUM_THREADS", "1")
@@ -107,24 +106,28 @@ def _ensure_fresh_sqlite(db_path: Path) -> None:
     for suffix in ["", "-wal", "-shm"]:
         p = Path(str(db_path) + suffix)
         if p.exists():
-            try: p.unlink()
-            except OSError: pass
+            try:
+                p.unlink()
+            except OSError:
+                pass
+
 
 def _build_sqlite_storage(db_path: Path) -> optuna.storages.RDBStorage:
     """WSL2 환경 최적화: RAM Disk 경로에 SQLite WAL 모드를 활성화하여 RDBStorage 생성함."""
     import sqlite3
+
     url: str = f"sqlite:///{db_path.absolute()}"
     storage: optuna.storages.RDBStorage = optuna.storages.RDBStorage(
-        url=url,
-        engine_kwargs={"connect_args": {"timeout": 60}}
+        url=url, engine_kwargs={"connect_args": {"timeout": 60}}
     )
     # WAL 모드 강제 활성화 (병렬 성능 극대화)
     try:
         with sqlite3.connect(db_path) as conn:
             conn.execute("PRAGMA journal_mode=WAL;")
     except Exception:
-        pass
+        ...
     return storage
+
 
 def _get_effective_search_space_spot(
     tf: str,
@@ -158,6 +161,7 @@ class _TfOptimizationContext:
     fresh_journal: bool = True
     signal_cache_dir: str = ""
     narrowed_space: Optional[Dict[str, Dict[str, Any]]] = None
+
 
 @dataclass(frozen=True)
 class _SpotExecutionPlan:
@@ -259,9 +263,7 @@ def _rebuild_is_data_maps_from_aligned_oos(
         data_maps[sym][tf] = is_df
         m = is_df["datetime"] >= is_start_dt
         data_maps[sym][f"is_start_idx_{tf}"] = int(m.to_numpy().argmax()) if bool(m.any()) else 0
-        data_maps[sym][f"merge_idx_{tf}"] = compute_segment_merge_index(
-            is_df, data_maps[sym]["1d"]
-        )
+        data_maps[sym][f"merge_idx_{tf}"] = compute_segment_merge_index(is_df, data_maps[sym]["1d"])
 
 
 def _align_oos_dataframes_on_common_datetimes(
@@ -278,9 +280,7 @@ def _align_oos_dataframes_on_common_datetimes(
         return
 
     common = (
-        oos_data_maps[sym_list[0]][tf][["datetime"]]
-        .drop_duplicates(subset=["datetime"])
-        .copy()
+        oos_data_maps[sym_list[0]][tf][["datetime"]].drop_duplicates(subset=["datetime"]).copy()
     )
     for sym in sym_list[1:]:
         right = (
@@ -300,9 +300,7 @@ def _align_oos_dataframes_on_common_datetimes(
     for sym in sym_list:
         df = oos_data_maps[sym][tf]
         filtered = (
-            df[df["datetime"].isin(common_order)]
-            .sort_values("datetime")
-            .reset_index(drop=True)
+            df[df["datetime"].isin(common_order)].sort_values("datetime").reset_index(drop=True)
         )
         oos_data_maps[sym][tf] = filtered
         m_oos = filtered["datetime"] >= is_end_dt
@@ -316,6 +314,7 @@ def _align_oos_dataframes_on_common_datetimes(
 
 def _spot_tpe_worker_run(payload: Dict[str, Any]) -> None:
     import gc
+
     os.environ.setdefault("OMP_NUM_THREADS", "1")
     os.environ.setdefault("MKL_NUM_THREADS", "1")
     os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
@@ -334,7 +333,7 @@ def _spot_tpe_worker_run(payload: Dict[str, Any]) -> None:
     data_maps_file = str(payload.get("data_maps_file", ""))
     if data_maps_file and Path(data_maps_file).is_file():
         with Path(data_maps_file).open("rb") as f:
-            data_maps: Dict[str, Dict[str, Any]] = pickle.load(f)
+            data_maps: Dict[str, Dict[str, Any]] = pickle.load(f)  # nosec: S301
     else:
         data_maps = payload.get("data_maps", {})
     progress_queue = payload["progress_queue"]
@@ -344,7 +343,9 @@ def _spot_tpe_worker_run(payload: Dict[str, Any]) -> None:
         os.environ["OPT_SPOT_SIGNAL_CACHE_DIR"] = signal_cache_dir
     progress_key = str(payload["progress_key"])
     raw_narrow = payload.get("narrowed_space")
-    narrowed_w: Optional[Dict[str, Dict[str, Any]]] = raw_narrow if isinstance(raw_narrow, dict) else None
+    narrowed_w: Optional[Dict[str, Dict[str, Any]]] = (
+        raw_narrow if isinstance(raw_narrow, dict) else None
+    )
     tf_space = _get_effective_search_space_spot(tf, narrowed_w)
 
     sampler = _spot_tpe_sampler(seed)
@@ -392,6 +393,7 @@ def _spot_tpe_worker_run(payload: Dict[str, Any]) -> None:
     cache_root_opt = Path(signal_cache_dir) if signal_cache_dir else None
 
     def _objective_with_logging(trial: optuna.Trial) -> float:
+        nonlocal data_maps
         try:
             return objective_spot(
                 trial,
@@ -423,7 +425,9 @@ def _spot_tpe_worker_run(payload: Dict[str, Any]) -> None:
         gc.collect()
 
 
-def _run_tf_optimization(task: Tuple[Any, str], ctx: _TfOptimizationContext) -> Tuple[Tuple[Any, str], optuna.Study]:
+def _run_tf_optimization(
+    task: Tuple[Any, str], ctx: _TfOptimizationContext
+) -> Tuple[Tuple[Any, str], optuna.Study]:
     target_obj, tf = task
     target_str = "_".join(target_obj) if isinstance(target_obj, (list, tuple)) else target_obj
     progress_key = _task_progress_key(target_obj, tf)
@@ -432,7 +436,9 @@ def _run_tf_optimization(task: Tuple[Any, str], ctx: _TfOptimizationContext) -> 
     db_path: Path | None = None
     if ctx.use_journal_storage:
         # WSL2 성능 극대화: RAM Disk 경로에 SQLite DB 생성
-        db_path = Path("/dev/shm") / f"optuna_spot_{target_str.replace('/', '').replace('-', '')}_{tf}.db"
+        db_path = (
+            Path("/dev/shm") / f"optuna_spot_{target_str.replace('/', '').replace('-', '')}_{tf}.db"
+        )  # nosec: S108
         if ctx.fresh_journal:
             _ensure_fresh_sqlite(db_path)
 
@@ -441,12 +447,15 @@ def _run_tf_optimization(task: Tuple[Any, str], ctx: _TfOptimizationContext) -> 
 
     storage: optuna.storages.RDBStorage | InMemoryStorage
     if ctx.use_journal_storage:
-        assert db_path is not None
+        if db_path is None:
+            raise AssertionError("db_path must be set when using journal storage")
         storage = _build_sqlite_storage(db_path)
     else:
         storage = InMemoryStorage()
 
-    qmc_sampler = QMCSampler(qmc_type="sobol", scramble=True, seed=seed, warn_independent_sampling=False)
+    qmc_sampler = QMCSampler(
+        qmc_type="sobol", scramble=True, seed=seed, warn_independent_sampling=False
+    )
     base_pruner = MedianPruner(
         n_startup_trials=int(OPT_SPOT_CONFIG.get("tpe_pruner_n_startup_trials", 10)),
         n_warmup_steps=int(OPT_SPOT_CONFIG.get("tpe_pruner_n_warmup_steps", 8)),
@@ -477,7 +486,12 @@ def _run_tf_optimization(task: Tuple[Any, str], ctx: _TfOptimizationContext) -> 
             if cur_val > best_so_far:
                 best_so_far = cur_val
         ctx.progress_queue.put(
-            (progress_key, trial.number + 1, ctx.n_trials, 0.0 if best_so_far == float("-inf") else best_so_far)
+            (
+                progress_key,
+                trial.number + 1,
+                ctx.n_trials,
+                0.0 if best_so_far == float("-inf") else best_so_far,
+            )
         )
 
     tf_space = _get_effective_search_space_spot(tf, ctx.narrowed_space)
@@ -515,7 +529,13 @@ def _run_tf_optimization(task: Tuple[Any, str], ctx: _TfOptimizationContext) -> 
             raise
 
     _logger.info("[%s/%s] Spot QMC startup (Sobol) then TPE (CPCV discovery)...", target_str, tf)
-    study.optimize(_objective_with_logging, n_trials=n_qmc, n_jobs=ctx.n_jobs, catch=(Exception,), callbacks=[_progress_cb])
+    study.optimize(
+        _objective_with_logging,
+        n_trials=n_qmc,
+        n_jobs=ctx.n_jobs,
+        catch=(Exception,),
+        callbacks=[_progress_cb],
+    )
 
     remaining = int(ctx.n_trials) - n_qmc
     if remaining <= 0:
@@ -524,7 +544,8 @@ def _run_tf_optimization(task: Tuple[Any, str], ctx: _TfOptimizationContext) -> 
     tpe_sampler = _spot_tpe_sampler(seed)
 
     if ctx.use_journal_storage:
-        assert db_path is not None
+        if db_path is None:
+            raise AssertionError("db_path must be set when using journal storage")
         storage_tpe = _build_sqlite_storage(db_path)
     else:
         storage_tpe = storage
@@ -544,7 +565,8 @@ def _run_tf_optimization(task: Tuple[Any, str], ctx: _TfOptimizationContext) -> 
     )
 
     if use_inner_pool:
-        assert db_path is not None
+        if db_path is None:
+            raise AssertionError("db_path must be set for inner pool when using journal storage")
         n_workers = min(int(ctx.parallel_tpe_workers), int(remaining))
         splits = _split_tpe_trials(remaining, n_workers)
         data_maps_file = ""
@@ -613,7 +635,9 @@ def _merge_narrowed_space_dicts(
         return {k: dict(v) if isinstance(v, dict) else v for k, v in (override or {}).items()}
     if not override:
         return {k: dict(v) if isinstance(v, dict) else v for k, v in base.items()}
-    out: Dict[str, Dict[str, Any]] = {k: dict(v) if isinstance(v, dict) else v for k, v in base.items()}
+    out: Dict[str, Dict[str, Any]] = {
+        k: dict(v) if isinstance(v, dict) else v for k, v in base.items()
+    }
     for k, v in override.items():
         out[k] = dict(v) if isinstance(v, dict) else v
     return out
@@ -624,7 +648,9 @@ def _build_narrowed_space_for_signal_types(
     tf: str,
 ) -> Dict[str, Dict[str, Any]]:
     base = get_search_space_spot(tf)
-    out: Dict[str, Dict[str, Any]] = {k: dict(v) if isinstance(v, dict) else v for k, v in base.items()}
+    out: Dict[str, Dict[str, Any]] = {
+        k: dict(v) if isinstance(v, dict) else v for k, v in base.items()
+    }
     st_spec = out.get("SIGNAL_TYPE")
     if isinstance(st_spec, dict) and st_spec.get("type") == "categorical":
         out["SIGNAL_TYPE"] = {**st_spec, "choices": tuple(winning_types)}
@@ -651,7 +677,9 @@ def _run_stage1_structure_discovery(
     if ref_df is not None and not ref_df.empty:
         ref_len = len(ref_df) - is_off
         if ref_len >= 200:
-            prebuilt = build_cpcv_test_paths_with_fallback(ref_len, embargo=int(EMBARGO_BARS.get(tf, 0)))
+            prebuilt = build_cpcv_test_paths_with_fallback(
+                ref_len, embargo=int(EMBARGO_BARS.get(tf, 0))
+            )
     cache_root = Path(signal_cache_dir) if signal_cache_dir else None
     results: List[tuple[str, float]] = []
     n_tri = max(5, int(trials_per_signal))
@@ -666,7 +694,7 @@ def _run_stage1_structure_discovery(
             storage=InMemoryStorage(),
         )
 
-        def _obj(trial: optuna.Trial) -> float:
+        def _obj(trial: optuna.Trial, stage_space=stage_space) -> float:
             return objective_spot(
                 trial,
                 data_maps,
@@ -712,9 +740,7 @@ def _select_best_trial_from_shortlist(
     top_val = float(ranked[0].value if ranked[0].value is not None else -1e9)
     band = max(abs(top_val) * 0.02, 0.02)
     close_trials = [
-        t
-        for t in ranked
-        if t.value is not None and abs(float(t.value) - top_val) <= band
+        t for t in ranked if t.value is not None and abs(float(t.value) - top_val) <= band
     ]
     pool = close_trials if close_trials else ranked[:1]
 
@@ -770,7 +796,9 @@ def _load_spot_data_maps_for_symbols(
         if skip_symbol:
             continue
 
-        data_maps[sym][f"merge_idx_{tf}"] = compute_segment_merge_index(data_maps[sym][tf], data_maps[sym]["1d"])
+        data_maps[sym][f"merge_idx_{tf}"] = compute_segment_merge_index(
+            data_maps[sym][tf], data_maps[sym]["1d"]
+        )
         oos_data_maps[sym][f"merge_idx_{tf}"] = compute_segment_merge_index(
             oos_data_maps[sym][tf], oos_data_maps[sym]["1d"]
         )
@@ -785,7 +813,9 @@ def _load_spot_data_maps_for_symbols(
             if sym == "KRW-BTC":
                 continue
             data_maps[sym][tf] = data_maps[sym][tf].merge(btc_4h, on="datetime", how="left")
-            oos_data_maps[sym][tf] = oos_data_maps[sym][tf].merge(btc_oos, on="datetime", how="left")
+            oos_data_maps[sym][tf] = oos_data_maps[sym][tf].merge(
+                btc_oos, on="datetime", how="left"
+            )
 
     if "KRW-ETH" in valid_symbols:
         eth_4h = data_maps["KRW-ETH"][tf][["datetime", "close"]].copy()
@@ -796,7 +826,9 @@ def _load_spot_data_maps_for_symbols(
             if sym == "KRW-ETH":
                 continue
             data_maps[sym][tf] = data_maps[sym][tf].merge(eth_4h, on="datetime", how="left")
-            oos_data_maps[sym][tf] = oos_data_maps[sym][tf].merge(eth_oos, on="datetime", how="left")
+            oos_data_maps[sym][tf] = oos_data_maps[sym][tf].merge(
+                eth_oos, on="datetime", how="left"
+            )
 
     if len(valid_symbols) >= 2:
         ref_tz = oos_data_maps[valid_symbols[0]][tf]["datetime"].dt.tz
@@ -827,6 +859,7 @@ def _load_spot_data_maps_for_symbols(
 
 def main() -> None:
     import importlib
+
     import config.opt_config
 
     pre_parser = argparse.ArgumentParser(add_help=False)
@@ -849,11 +882,13 @@ def main() -> None:
             screen_symbol_refinement,
         )
 
-        FETCH_START_DATE, START_DATE, IS_END_DATE, END_DATE = get_quarterly_window(pre_args.reference_date)
+        fetch_start_date, start_date, is_end_date, end_date = get_quarterly_window(
+            pre_args.reference_date
+        )
         broad_candidates = screen_broad_universe(
-            is_start=START_DATE,
-            is_end=IS_END_DATE,
-            fetch_end=END_DATE,
+            is_start=start_date,
+            is_end=is_end_date,
+            fetch_end=end_date,
         )
         importlib.reload(config.opt_config)
         globals()["SPOT_SYMBOLS"] = config.opt_config.SPOT_SYMBOLS
@@ -872,10 +907,10 @@ def main() -> None:
         data_maps_broad, _, valid_broad = _load_spot_data_maps_for_symbols(
             all_symbols_for_load,
             tf0,
-            FETCH_START_DATE,
-            START_DATE,
-            IS_END_DATE,
-            END_DATE,
+            fetch_start_date,
+            start_date,
+            is_end_date,
+            end_date,
         )
         if len(valid_broad) < 2:
             _logger.error("Phase 0: fewer than 2 symbols with loadable data. Aborting.")
@@ -893,7 +928,7 @@ def main() -> None:
                 "Stage1 combination screening on N=%d/%d broad candidates (top ADV, is_end=%s)",
                 len(stage1_syms),
                 len(valid_broad),
-                IS_END_DATE,
+                is_end_date,
             )
             tops = run_combination_screening(
                 data_maps={s: data_maps_broad[s] for s in stage1_syms},
@@ -905,7 +940,9 @@ def main() -> None:
             if not tops:
                 _logger.error("Phase B: combination screening returned no tops. Aborting.")
                 return
-            max_per_sig = int(config.opt_config.OPT_SPOT_CONFIG.get("SPOT_STAGE2_MAX_PER_SIGNAL_TYPE", 2))
+            max_per_sig = int(
+                config.opt_config.OPT_SPOT_CONFIG.get("SPOT_STAGE2_MAX_PER_SIGNAL_TYPE", 2)
+            )
             filtered_tops: List[Any] = []  # CombinationScore rows
             sig_ct: Counter[str] = Counter()
             for combo in tops:
@@ -918,6 +955,7 @@ def main() -> None:
             phase0_narrowed_space = build_multi_combo_param_space(tops_for_stage2)
             _logger.info("Phase B winning SIGNAL_TYPE=%s", winning_signal_type)
             from src.domain.spot.opt_spot_utils.combination_screener import build_probe_params
+
             phase_b_params: Optional[Dict[str, Any]] = build_probe_params(tops_for_stage2[0], tf0)
         else:
             st_raw = pre_args.signal_type
@@ -925,10 +963,14 @@ def main() -> None:
                 winning_signal_type = str(st_raw).upper()
             else:
                 winning_signal_type = str(
-                    load_screener_fixed_params(Path(project_root)).get("SIGNAL_TYPE", "ADX_BREAKOUT")
+                    load_screener_fixed_params(Path(project_root)).get(
+                        "SIGNAL_TYPE", "ADX_BREAKOUT"
+                    )
                 )
             if pre_args.signal_type:
-                phase0_narrowed_space = _build_narrowed_space_for_signal_types((winning_signal_type,), tf0)
+                phase0_narrowed_space = _build_narrowed_space_for_signal_types(
+                    (winning_signal_type,), tf0
+                )
             _logger.info(
                 "Phase B skipped; using SIGNAL_TYPE=%s for refinement (search-space midpoints for Phase C).",
                 winning_signal_type,
@@ -944,7 +986,7 @@ def main() -> None:
         screen_symbol_refinement(
             refinement_symbols,
             winning_signal_type,
-            IS_END_DATE,
+            is_end_date,
             symbol_dfs_4h={s: data_maps_broad[s][tf0] for s in valid_broad if s in data_maps_broad},
             daily_dfs={s: data_maps_broad[s]["1d"] for s in valid_broad if s in data_maps_broad},
             phase_b_params=phase_b_params,
@@ -957,12 +999,21 @@ def main() -> None:
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--symbols", type=str, default=",".join(config.opt_config.SPOT_SYMBOLS))
-    parser.add_argument("--skip-universe", action="store_true", help="Skip the initial Phase 0 universe screening.")
+    parser.add_argument(
+        "--skip-universe", action="store_true", help="Skip the initial Phase 0 universe screening."
+    )
     parser.add_argument("--mode", type=str, choices=["single", "multi"], default="multi")
     parser.add_argument("--trials", type=int, default=OPT_SPOT_CONFIG["total_trials"])
     parser.add_argument("--jobs", type=int, default=3)
-    parser.add_argument("--task-workers", type=int, default=int(OPT_SPOT_CONFIG.get("task_workers", 0)))
-    parser.add_argument("--tf", type=str, choices=["4h"], default=OPT_SPOT_CONFIG.get("TARGET_TIMEFRAMES", ["4h"])[0])
+    parser.add_argument(
+        "--task-workers", type=int, default=int(OPT_SPOT_CONFIG.get("task_workers", 0))
+    )
+    parser.add_argument(
+        "--tf",
+        type=str,
+        choices=["4h"],
+        default=OPT_SPOT_CONFIG.get("TARGET_TIMEFRAMES", ["4h"])[0],
+    )
     parser.add_argument("--reference-date", type=str, default=None)
     parser.add_argument(
         "--narrowed-space-json",
@@ -1002,26 +1053,30 @@ def main() -> None:
         else:
             _logger.warning("narrowed-space-json path not found: %s", np_path)
 
-    FETCH_START_DATE, START_DATE, IS_END_DATE, END_DATE = get_quarterly_window(args.reference_date)
+    fetch_start_date, start_date, is_end_date, end_date = get_quarterly_window(args.reference_date)
     symbols = [s.strip() for s in args.symbols.split(",") if s.strip()]
 
     _logger.info("Loading Spot data for %d symbols (discovery + holdout)...", len(symbols))
     data_maps, oos_data_maps, valid_symbols = _load_spot_data_maps_for_symbols(
         symbols,
         args.tf,
-        FETCH_START_DATE,
-        START_DATE,
-        IS_END_DATE,
-        END_DATE,
+        fetch_start_date,
+        start_date,
+        is_end_date,
+        end_date,
     )
 
     if not valid_symbols:
         _logger.error("❌ No valid symbols with data found. Aborting optimization.")
         return
 
-    tasks = [(tuple(valid_symbols), args.tf)] if args.mode == "multi" else [(s, args.tf) for s in valid_symbols]
+    tasks = (
+        [(tuple(valid_symbols), args.tf)]
+        if args.mode == "multi"
+        else [(s, args.tf) for s in valid_symbols]
+    )
     plan = _resolve_spot_execution_plan(len(tasks), args.mode, args.jobs, args.task_workers)
-    
+
     # [수정] 메모리 절약을 위한 디스크 캐시 활성화
     signal_cache_dir = str(Path(project_root) / "data" / "cache_spot")
     Path(signal_cache_dir).mkdir(parents=True, exist_ok=True)
@@ -1043,7 +1098,9 @@ def main() -> None:
         if narrowed_space_file
         else None
     )
-    narrowed_space_effective = _merge_narrowed_space_dicts(phase0_narrowed_space, narrowed_space_effective)
+    narrowed_space_effective = _merge_narrowed_space_dicts(
+        phase0_narrowed_space, narrowed_space_effective
+    )
     if args.signal_type:
         forced = _build_narrowed_space_for_signal_types((str(args.signal_type).upper(),), args.tf)
         narrowed_space_effective = _merge_narrowed_space_dicts(forced, narrowed_space_effective)
@@ -1090,7 +1147,14 @@ def main() -> None:
             _logger.info(
                 "Stage1 combination screening top combos: %s",
                 [
-                    (x.signal, x.regime, x.sizing, round(x.p10_gmgr, 6), round(x.mean_signal_rate, 5), x.reason or "ok")
+                    (
+                        x.signal,
+                        x.regime,
+                        x.sizing,
+                        round(x.p10_gmgr, 6),
+                        round(x.mean_signal_rate, 5),
+                        x.reason or "ok",
+                    )
                     for x in tops_for_stage2
                 ],
             )
@@ -1109,7 +1173,9 @@ def main() -> None:
             project_root=project_root,
             signal_cache_dir=signal_cache_dir,
         )
-        narrowed_space_effective = _merge_narrowed_space_dicts(stage1_space, narrowed_space_effective)
+        narrowed_space_effective = _merge_narrowed_space_dicts(
+            stage1_space, narrowed_space_effective
+        )
 
     need_multiprocess_queue = plan.use_outer_process_pool or (
         args.mode == "multi" and plan.parallel_tpe_workers > 1
@@ -1130,30 +1196,39 @@ def main() -> None:
     def _progress_listener():
         while True:
             msg = progress_queue.get()
-            if msg is None: break
-            k, cur, tot, b_val = msg
+            if msg is None:
+                break
+            k, cur, _tot, b_val = msg
             bar = tf_bars[k]
             bar.n = cur
             bar.set_description(f"{k} | Best: {b_val:.2f}")
             bar.refresh()
 
-    progress_thread = threading.Thread(target=_progress_listener, daemon=True); progress_thread.start()
+    progress_thread = threading.Thread(target=_progress_listener, daemon=True)
+    progress_thread.start()
 
     best_results = {}
     pending_json_writes: List[Tuple[str, Dict[str, Any], float, bool]] = []
     try:
         if plan.use_outer_process_pool:
-            with concurrent.futures.ProcessPoolExecutor(max_workers=plan.outer_task_workers) as exec:
+            with concurrent.futures.ProcessPoolExecutor(
+                max_workers=plan.outer_task_workers
+            ) as exec:
                 futures = {
                     exec.submit(
                         _run_tf_optimization,
                         t,
                         _TfOptimizationContext(
-                            clean_symbol=("_".join(t[0]) if isinstance(t[0], tuple) else t[0]).replace("/", ""),
+                            clean_symbol=(
+                                "_".join(t[0]) if isinstance(t[0], tuple) else t[0]
+                            ).replace("/", ""),
                             seeds=OPT_SPOT_CONFIG["seeds"],
                             n_trials=args.trials,
                             n_jobs=plan.jobs_per_task,
-                            data_maps={s: data_maps[s] for s in (list(t[0]) if isinstance(t[0], tuple) else [t[0]])},
+                            data_maps={
+                                s: data_maps[s]
+                                for s in (list(t[0]) if isinstance(t[0], tuple) else [t[0]])
+                            },
                             symbols=(list(t[0]) if isinstance(t[0], tuple) else [t[0]]),
                             project_root=project_root,
                             progress_queue=progress_queue,
@@ -1176,7 +1251,9 @@ def main() -> None:
                 t_res, study = _run_tf_optimization(
                     t,
                     _TfOptimizationContext(
-                        clean_symbol=("_".join(t[0]) if isinstance(t[0], tuple) else t[0]).replace("/", ""),
+                        clean_symbol=("_".join(t[0]) if isinstance(t[0], tuple) else t[0]).replace(
+                            "/", ""
+                        ),
                         seeds=OPT_SPOT_CONFIG["seeds"],
                         n_trials=args.trials,
                         n_jobs=plan.jobs_per_task,
@@ -1186,7 +1263,9 @@ def main() -> None:
                         progress_queue=progress_queue,
                         mode=args.mode,
                         use_journal_storage=(args.mode == "multi"),
-                        parallel_tpe_workers=plan.parallel_tpe_workers if args.mode == "multi" else 1,
+                        parallel_tpe_workers=plan.parallel_tpe_workers
+                        if args.mode == "multi"
+                        else 1,
                         disable_inner_tpe_pool=plan.use_outer_process_pool,
                         fresh_journal=True,
                         signal_cache_dir=signal_cache_dir,
@@ -1195,13 +1274,14 @@ def main() -> None:
                 )
                 best_results[t_res] = study
     finally:
-        progress_queue.put(None); progress_thread.join(timeout=2.0)
-        if manager: manager.shutdown()
+        progress_queue.put(None)
+        progress_thread.join(timeout=2.0)
+        if manager:
+            manager.shutdown()
 
-    final_summaries = []
     top_k = int(OPT_SPOT_CONFIG.get("SPOT_SHORTLIST_TOP_K", 50))
     max_ho_cvar = float(OPT_SPOT_CONFIG.get("SPOT_HOLDOUT_MAX_CVAR_PCT", 25.0))
-    min_pf_trades = int(OPT_SPOT_CONFIG.get("SPOT_HOLDOUT_MIN_PORTFOLIO_LONG_TRADES", 8))
+    # min_pf_trades = int(OPT_SPOT_CONFIG.get("SPOT_HOLDOUT_MIN_PORTFOLIO_LONG_TRADES", 8))
     holdout_min_tail = float(OPT_SPOT_CONFIG.get("SPOT_HOLDOUT_MIN_TAIL_RATIO", 1.10))
     holdout_min_cagr = float(OPT_SPOT_CONFIG.get("SPOT_HOLDOUT_MIN_CAGR_PCT", 30.0))
     holdout_mdd_limit = float(OPT_SPOT_CONFIG.get("SPOT_HOLDOUT_MDD_LIMIT_PCT", 45.0))
@@ -1218,9 +1298,7 @@ def main() -> None:
         if study is None:
             continue
         completed = [
-            t
-            for t in study.trials
-            if t.state == TrialState.COMPLETE and t.value is not None
+            t for t in study.trials if t.state == TrialState.COMPLETE and t.value is not None
         ]
         if not completed:
             continue
@@ -1319,8 +1397,12 @@ def main() -> None:
             mw_gate = run_multi_window_oos_gate(
                 window_results=multi_win.get("windows", []),
                 min_positive_windows=int(OPT_SPOT_CONFIG.get("SPOT_MULTI_WINDOW_MIN_POSITIVE", 3)),
-                min_median_cagr_pct=float(OPT_SPOT_CONFIG.get("SPOT_MULTI_WINDOW_MIN_MEDIAN_CAGR_PCT", 20.0)),
-                max_worst_mdd_pct=float(OPT_SPOT_CONFIG.get("SPOT_MULTI_WINDOW_MAX_WORST_MDD_PCT", 25.0)),
+                min_median_cagr_pct=float(
+                    OPT_SPOT_CONFIG.get("SPOT_MULTI_WINDOW_MIN_MEDIAN_CAGR_PCT", 20.0)
+                ),
+                max_worst_mdd_pct=float(
+                    OPT_SPOT_CONFIG.get("SPOT_MULTI_WINDOW_MAX_WORST_MDD_PCT", 25.0)
+                ),
             )
             wins = multi_win.get("windows", [])
             if wins:
@@ -1346,7 +1428,10 @@ def main() -> None:
                 )
 
         regime_block = ""
-        if bool(OPT_SPOT_CONFIG.get("SPOT_REGIME_DIAGNOSTIC_ENABLED", True)) and post_full_signal_dfs:
+        if (
+            bool(OPT_SPOT_CONFIG.get("SPOT_REGIME_DIAGNOSTIC_ENABLED", True))
+            and post_full_signal_dfs
+        ):
             oos_start_reg = int(oos_data_maps[target_symbols[0]].get(f"oos_start_idx_{tf_eval}", 0))
             eq_arr = port_ho.get("equity_curve", np.array([]))
             rm = compute_regime_conditional_oos_metrics(
@@ -1366,9 +1451,9 @@ def main() -> None:
             # 1. In-Sample Segment (Global data_maps context)
             is_start_idx = int(data_maps[s_eval][f"is_start_idx_{tf_eval}"])
             is_end_idx = len(data_maps[s_eval][tf_eval])
-            
+
             # IS Evaluation (Global indexing)
-            s_is, r_is, m_is, t_is, wr_is, pf_is, lc_is, _, tr_is = evaluate_symbol_fold(
+            s_is, r_is, m_is, t_is, _wr_is, pf_is, _lc_is, _, _tr_is = evaluate_symbol_fold(
                 SpotPipelineStrategy(name=f"IS_{s_eval}", params=params),
                 params,
                 s_eval,
@@ -1382,30 +1467,32 @@ def main() -> None:
                 precomputed_signal_df=None,
                 execution_start_idx=0,
             )
-            
+
             oos_start_idx = int(oos_data_maps[s_eval].get(f"oos_start_idx_{tf_eval}", 0))
             oos_local_end = len(oos_data_maps[s_eval][tf_eval])
-            
+
             # Integrated OOS metrics from port_ho (shared-cash)
             si_idx = target_symbols.index(s_eval)
             trd_oos = int(port_ho["per_symbol_trades"][si_idx])
             wins_oos = int(port_ho["per_symbol_wins"][si_idx])
             pnl_total_oos = float(port_ho["per_symbol_pnl"][si_idx])
             wr_oos = (wins_oos / trd_oos * 100.0) if trd_oos > 0 else 0.0
-            
+
             # Contribution CAGR: How much this symbol added to the portfolio CAGR
             # (Total Symbol PnL / Initial Balance) / Years
             initial_bal = float(SPOT_INITIAL_BALANCE)
-            span_days_oos = float(port_ho.get("span_days", 365.0)) # Need to ensure span_days is in port_ho
+            span_days_oos = float(
+                port_ho.get("span_days", 365.0)
+            )  # Need to ensure span_days is in port_ho
             cagr_contrib = (pnl_total_oos / initial_bal) / (span_days_oos / 365.0) * 100.0
-            
+
             # Worst Trade % as a proxy for symbol risk within the portfolio
-            # We can't easily get MDD contribution without time-series PnL per symbol, 
+            # We can't easily get MDD contribution without time-series PnL per symbol,
             # so we use Worst Trade relative to balance at that time or just raw.
             # For now, let's use the standalone MDD but scaled or keep it if it's more intuitive.
             # Actually, let's use raw PnL sum to show absolute contribution.
-            
-            # For CAGR/MDD in shared context, we use the standalone engine but with portfolio constraints 
+
+            # For CAGR/MDD in shared context, we use the standalone engine but with portfolio constraints
             # to keep the "Potential" metric consistent, but we sync the TRADE counts.
             pre_oos_sig_full = post_full_signal_dfs.get(s_eval)
             if pre_oos_sig_full is not None:
@@ -1415,7 +1502,7 @@ def main() -> None:
             else:
                 pre_oos_sig, exec_start_oos = None, 0
 
-            s_oos, r_oos, m_oos, _, _, pf_oos, lc_oos, _, tail_oos = evaluate_symbol_fold(
+            s_oos, _r_oos, m_oos, _, _, pf_oos, lc_oos, _, tail_oos = evaluate_symbol_fold(
                 SpotPipelineStrategy(name=f"OOS_{s_eval}", params=params),
                 params,
                 s_eval,
@@ -1429,7 +1516,7 @@ def main() -> None:
                 precomputed_signal_df=pre_oos_sig,
                 execution_start_idx=exec_start_oos,
             )
-            
+
             is_cagr_vals.append(s_is)
             symbol_fold_payloads.append(
                 {
@@ -1438,7 +1525,9 @@ def main() -> None:
                     "oos": {
                         "cagr": cagr_contrib,
                         "ret": (pnl_total_oos / initial_bal) * 100.0,
-                        "mdd": m_oos / params.get("MAX_CAP_PER_COIN", 0.2) if params.get("MAX_CAP_PER_COIN", 0.2) > 0 else m_oos, 
+                        "mdd": m_oos / params.get("MAX_CAP_PER_COIN", 0.2)
+                        if params.get("MAX_CAP_PER_COIN", 0.2) > 0
+                        else m_oos,
                         "trd": trd_oos,
                         "wr": wr_oos,
                         "pf": pf_oos,
@@ -1451,7 +1540,9 @@ def main() -> None:
         is_holdout_maps: Dict[str, Dict[str, Any]] = {}
         for s_eval in target_symbols:
             is_holdout_maps[s_eval] = dict(data_maps[s_eval])
-            is_holdout_maps[s_eval][f"oos_start_idx_{tf_eval}"] = data_maps[s_eval][f"is_start_idx_{tf_eval}"]
+            is_holdout_maps[s_eval][f"oos_start_idx_{tf_eval}"] = data_maps[s_eval][
+                f"is_start_idx_{tf_eval}"
+            ]
 
         port_is = run_holdout_shared_cash_portfolio(
             params,
@@ -1566,9 +1657,7 @@ def main() -> None:
         if pos_cagrs_sorted:
             max_share = pos_cagrs_sorted[0] / pos_sum
             top2_share = (
-                sum(pos_cagrs_sorted[:2]) / pos_sum
-                if len(pos_cagrs_sorted) >= 2
-                else max_share
+                sum(pos_cagrs_sorted[:2]) / pos_sum if len(pos_cagrs_sorted) >= 2 else max_share
             )
             if max_share >= 0.4:
                 loso_warning = f"경고 (단일 심볼 OOS CAGR 비중 {max_share:.0%} >= 40%)"
@@ -1605,8 +1694,12 @@ def main() -> None:
                 gate1_max_ui=float(best_trial.user_attrs.get("max_ulcer_index", 0.0)),
                 gate1_psr=psr_v,
                 gate1_dsr=dsr_v,
-                cpcv_mean_path_return_pct=float(best_trial.user_attrs.get("cpcv_mean_path_return_pct", 0.0)),
-                cpcv_worst_segment_mdd_pct=float(best_trial.user_attrs.get("cpcv_worst_segment_mdd_pct", 0.0)),
+                cpcv_mean_path_return_pct=float(
+                    best_trial.user_attrs.get("cpcv_mean_path_return_pct", 0.0)
+                ),
+                cpcv_worst_segment_mdd_pct=float(
+                    best_trial.user_attrs.get("cpcv_worst_segment_mdd_pct", 0.0)
+                ),
                 sqn_target=gate1_sqn_min,
                 path_sortino_target=gate1_psort_min,
                 tail_ratio_target=gate1_tr_min,
@@ -1654,31 +1747,38 @@ def main() -> None:
         growth_score = float(best_trial.user_attrs.get("growth_score", 0.0))
         should_save = bool(growth_score > 0.0 and is_all_passed)
         # File name is required by downstream loaders; overwrite risk is limited to multi-mode.
-        clean_sym = str(target).replace("/", "").replace("-", "") if not isinstance(target, tuple) else ""
+        clean_sym = (
+            str(target).replace("/", "").replace("-", "") if not isinstance(target, tuple) else ""
+        )
         # FILENAME CHANGE: best_spot_{tf}.json / best_spot_{clean_sym}_{tf}.json
-        json_filename = f"best_spot_{tf_eval}.json" if args.mode == "multi" else f"best_spot_{clean_sym}_{tf_eval}.json"
+        json_filename = (
+            f"best_spot_{tf_eval}.json"
+            if args.mode == "multi"
+            else f"best_spot_{clean_sym}_{tf_eval}.json"
+        )
         pending_json_writes.append((json_filename, params, best_score_final, should_save))
 
     # JSON save logs last
     if pending_json_writes:
         import json
+
         from src.core.utils.secure_config import encrypt_config, get_strategy_secret
-        
+
         results_dir = Path(project_root) / "results"
         results_dir.mkdir(parents=True, exist_ok=True)
-        
+
         secret = get_strategy_secret()
-        
+
         for json_filename, params, best_score_final, should_save in pending_json_writes:
             json_path = results_dir / json_filename
             # ENCRYPTED FILENAME: result.json -> result.enc
             enc_path = json_path.with_suffix(".enc")
-            
+
             if should_save:
                 # 1. Plaintext JSON (Local use only)
                 json_path.write_text(json.dumps(params, indent=4), encoding="utf-8")
                 _logger.info("Saved config: %s", json_path.resolve())
-                
+
                 # 2. Encrypted JSON (For Git/Public repo)
                 if secret:
                     encrypted_data = encrypt_config(params, secret)
@@ -1691,6 +1791,7 @@ def main() -> None:
                     "JSON save skipped: criteria not met (growth_score / gates). objective=%.4f",
                     best_score_final,
                 )
+
 
 if __name__ == "__main__":
     main()

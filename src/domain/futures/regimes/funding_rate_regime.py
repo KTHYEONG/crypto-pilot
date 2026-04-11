@@ -2,6 +2,7 @@
 Funding rate z-score regime: extreme positive favors shorts; extreme negative favors longs.
 Uses merged `funding_rate` column (causal rolling stats).
 """
+
 from __future__ import annotations
 
 from typing import Any, ClassVar, Dict
@@ -25,14 +26,14 @@ def compute_funding_z_mult(
     z = ((s - mu) / sig).to_numpy(dtype=np.float64)
     zt = float(z_threshold)
     nt = float(neutral_threshold)
-    
+
     long_mult = np.where(z > zt, 0.5, np.where(z < -zt, 1.0, 1.0))
     short_mult = np.where(z < -zt, 0.5, np.where(z > zt, 1.0, 1.0))
-    
+
     is_neutral = (z >= -nt) & (z <= nt)
     long_mult = np.where(is_neutral, 0.0, long_mult)
     short_mult = np.where(is_neutral, 0.0, short_mult)
-    
+
     return long_mult.astype(np.float64), short_mult.astype(np.float64)
 
 
