@@ -228,11 +228,9 @@ def screen_futures_universe(
         pre_prune_threshold = min_adv * 0.2
         valid_candidates = []
 
-        # Use provided pool if it exists, otherwise scan all markets
-        search_list = candidate_pool if candidate_pool else list(tickers.keys())
+        pool_set = set(candidate_pool) if candidate_pool else None
 
-        for sym in search_list:
-            t = tickers.get(sym)
+        for sym, t in tickers.items():
             if not t or t.get("active") is False:
                 continue
 
@@ -241,6 +239,9 @@ def screen_futures_universe(
                 continue
 
             norm_sym = sym.split(":")[0]
+            if pool_set and norm_sym not in pool_set:
+                continue
+
             if norm_sym in anchors:
                 valid_candidates.append(norm_sym)
                 continue

@@ -163,8 +163,12 @@ class BacktestEngineFast:
         self._effective_start_idx = max(warmup_bars, self._execution_start_idx)
         datetime_values = df["datetime"].values
 
-        use_compounding = self.strategy.params.get("USE_COMPOUNDING", True)
-        max_capital_usage = self.strategy.params.get("MAX_CAPITAL_USAGE", 1e12)
+        use_compounding = bool(self.strategy.params.get("USE_COMPOUNDING", True))
+        max_capital_usage = float(self.strategy.params.get("MAX_CAPITAL_USAGE", 1e12))
+
+        # --- Dynamic Asset Management Params ---
+        max_exp_per_coin = float(self.strategy.params.get("MAX_EXPOSURE_PER_COIN", 1.5))
+        dd_scaling_threshold = float(self.strategy.params.get("DD_SCALING_THRESHOLD", 0.15))
 
         trades, final_balance, equity_curve, funding_paid_total = backtest_loop_numba(
             close,
@@ -195,6 +199,8 @@ class BacktestEngineFast:
             self._execution_start_idx,
             use_compounding,
             max_capital_usage,
+            max_exp_per_coin,
+            dd_scaling_threshold,
         )
 
         self.balance = final_balance
@@ -363,6 +369,8 @@ def backtest_loop_numba(
     execution_start_idx,
     use_compounding,
     max_capital_usage,
+    max_exp_per_coin,
+    dd_scaling_threshold,
 ):
     funding_paid_total = 0.0
     n = len(close)
@@ -395,6 +403,14 @@ def backtest_loop_numba(
         c_price = close[i]
         c_high = high[i]
         c_low = low[i]
+        
+        # --- Drawdown-Dependent Risk Scaling ---
+        current_dd = (peak_equity - equity_curve[i-1]) / peak_equity if peak_equity > 0 else 0.0
+        dd_factor = 1.0
+        if current_dd > dd_scaling_threshold:
+            dd_factor = max(0.1, 1.0 - (current_dd / 0.40))
+        effective_risk = risk_per_trade * dd_factor
+
         bar_processed = False
 
         # --- Bankruptcy Check ---
@@ -618,10 +634,11 @@ def backtest_loop_numba(
                         stop_distance,
                         current_equity,
                         current_equity,
-                        risk_per_trade,
+                        effective_risk,
                         leverage,
                         sf_raw,
                         garch_kelly_f[prev_i],
+                        max_exposure_per_coin=max_exp_per_coin,
                     )
 
                     required_margin = (amount * fill_price) / leverage
