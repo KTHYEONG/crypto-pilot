@@ -5,8 +5,12 @@ from typing import Any, ClassVar, Dict
 import numpy as np
 import pandas as pd
 
+from src.core.indicators.numpy_ops_spot import (
+    compute_atr_numpy,
+    compute_ema_numpy,
+    compute_rsi_numpy,
+)
 from src.domain.spot.signals.base import SignalOutput
-from src.core.indicators.numpy_ops_spot import compute_atr_numpy, compute_ema_numpy, compute_rsi_numpy
 from src.domain.spot.signals.registry import register_signal
 
 

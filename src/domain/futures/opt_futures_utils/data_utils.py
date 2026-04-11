@@ -1,6 +1,7 @@
 """
 Futures Optuna objective: CPCV paths, Kelly-CVaR scalar, disk+memory signal cache.
 """
+
 from __future__ import annotations
 
 from typing import Dict, List, Optional, Tuple
@@ -37,13 +38,25 @@ def _dataframe_to_symbol_arrays(sig_df: pd.DataFrame) -> Dict[str, np.ndarray]:
     out["low"] = sig_df["low"].to_numpy(dtype=np.float64, copy=False)
     out["close"] = sig_df["close"].to_numpy(dtype=np.float64, copy=False)
     out["atr"] = sig_df["atr"].ffill().to_numpy(dtype=np.float64, copy=False)
-    out["strength_filter"] = sig_df["strength_filter"].fillna(0.0).to_numpy(dtype=np.float64, copy=False)
-    out["trend_direction"] = sig_df["trend_direction"].fillna(0.0).to_numpy(dtype=np.float64, copy=False)
-    out["entry_upper"] = sig_df["entry_upper"].fillna(999999.0).to_numpy(dtype=np.float64, copy=False)
+    out["strength_filter"] = (
+        sig_df["strength_filter"].fillna(0.0).to_numpy(dtype=np.float64, copy=False)
+    )
+    out["trend_direction"] = (
+        sig_df["trend_direction"].fillna(0.0).to_numpy(dtype=np.float64, copy=False)
+    )
+    out["entry_upper"] = (
+        sig_df["entry_upper"].fillna(999999.0).to_numpy(dtype=np.float64, copy=False)
+    )
     out["entry_lower"] = sig_df["entry_lower"].fillna(0.0).to_numpy(dtype=np.float64, copy=False)
-    out["garch_kelly_f"] = sig_df["garch_kelly_f"].fillna(0.0).to_numpy(dtype=np.float64, copy=False)
-    out["funding_rate_sum"] = sig_df["funding_rate_sum"].fillna(0.0).to_numpy(dtype=np.float64, copy=False)
-    out["slot_rank_score"] = sig_df["slot_rank_score"].fillna(0.0).to_numpy(dtype=np.float64, copy=False)
+    out["garch_kelly_f"] = (
+        sig_df["garch_kelly_f"].fillna(0.0).to_numpy(dtype=np.float64, copy=False)
+    )
+    out["funding_rate_sum"] = (
+        sig_df["funding_rate_sum"].fillna(0.0).to_numpy(dtype=np.float64, copy=False)
+    )
+    out["slot_rank_score"] = (
+        sig_df["slot_rank_score"].fillna(0.0).to_numpy(dtype=np.float64, copy=False)
+    )
     return out
 
 
@@ -87,7 +100,12 @@ def align_data_for_2d_engine(
         empty: Dict[str, np.ndarray] = {}
         return empty, pd.Series(dtype="datetime64[ns]")
 
-    master_index = pd.concat(all_dates, ignore_index=True).drop_duplicates().sort_values().reset_index(drop=True)
+    master_index = (
+        pd.concat(all_dates, ignore_index=True)
+        .drop_duplicates()
+        .sort_values()
+        .reset_index(drop=True)
+    )
     master_df = pd.DataFrame({"datetime": master_index})
     n_bars = len(master_index)
     n_syms = len(symbols)
@@ -118,7 +136,13 @@ def align_data_for_2d_engine(
         for col in ["open", "high", "low", "close", "atr"]:
             if col in merged.columns:
                 aligned_data[col][:, s_idx] = merged[col].ffill().values
-        for col in ["strength_filter", "trend_direction", "garch_kelly_f", "funding_rate_sum", "slot_rank_score"]:
+        for col in [
+            "strength_filter",
+            "trend_direction",
+            "garch_kelly_f",
+            "funding_rate_sum",
+            "slot_rank_score",
+        ]:
             if col in merged.columns:
                 aligned_data[col][:, s_idx] = merged[col].fillna(0).values
         for col in ["entry_upper", "entry_lower"]:
@@ -141,21 +165,3 @@ def _segment_with_context(
     if execution_start_idx == 0 and len(segment) > 1:
         execution_start_idx = 1
     return segment, execution_start_idx
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

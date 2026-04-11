@@ -6,6 +6,7 @@ SpotBot - 24시간 자동 현물(Upbit) 트레이딩 봇
 - best_spot_4h.json[.enc] 단일 공유 파라미터 로드 (포트폴리오 전역 설정)
 - 백테스트 엔진(engine_spot.py)과 동일한 진입/청산/사이징 조건 적용
 """
+
 from __future__ import annotations
 
 import gc
@@ -138,12 +139,10 @@ def network_api_retry(func):
                 last_error = e
                 if attempt >= (max_attempts - 1):
                     break
-                wait_time = min(
-                    float(API_RETRY_WAIT_MIN) * (2**attempt), float(API_RETRY_WAIT_MAX)
-                )
+                wait_time = min(float(API_RETRY_WAIT_MIN) * (2**attempt), float(API_RETRY_WAIT_MAX))
                 logger.warning(
                     f"⚠️ API transient error in {func.__name__} "
-                    f"(attempt {attempt+1}/{max_attempts}): {e}. Waiting {wait_time:.1f}s"
+                    f"(attempt {attempt + 1}/{max_attempts}): {e}. Waiting {wait_time:.1f}s"
                 )
                 time.sleep(max(0.0, wait_time))
         raise (
@@ -201,7 +200,7 @@ class StateManager:
                 if tmp_file.exists():
                     tmp_file.unlink()
             except Exception:
-                pass
+                ...
 
     def get_symbol_state(self, symbol: str) -> dict:
         with self._thread_lock:
@@ -221,9 +220,7 @@ class StateManager:
             self._dirty = True
             self._maybe_flush()
 
-    def clear_symbol_state(
-        self, symbol: str, preserve_keys: Optional[list[str]] = None
-    ) -> None:
+    def clear_symbol_state(self, symbol: str, preserve_keys: Optional[list[str]] = None) -> None:
         with self._thread_lock:
             if not self._cache_initialized:
                 self._memory_cache = self._load_unlocked()
@@ -370,7 +367,9 @@ class SpotBot:
 
         preferred_symbols = list(SPOT_SYMBOLS)
         if not preferred_symbols:
-            raise ValueError("No live spot symbols configured. Check SPOT_SYMBOLS in config/opt_config.py")
+            raise ValueError(
+                "No live spot symbols configured. Check SPOT_SYMBOLS in config/opt_config.py"
+            )
         self.symbols = preferred_symbols.copy()
 
         results_dir = Path(project_root) / "results"
@@ -400,9 +399,7 @@ class SpotBot:
                 logger.error(f"❌ Failed to parse {json_path}: {e}")
 
         if shared_params is None:
-            raise RuntimeError(
-                f"No valid strategy config found (tried {json_path} and {enc_path})"
-            )
+            raise RuntimeError(f"No valid strategy config found (tried {json_path} and {enc_path})")
 
         # Apply exit-family adjustments (identical to backtest pipeline)
         shared_params = merge_exit_family_params(shared_params)
@@ -420,7 +417,9 @@ class SpotBot:
             clean_sym = symbol.replace("/", "").replace("-", "")
             self.params_map[symbol] = dict(shared_params)
             self.strategies[symbol] = UltimateSpotStrategy(f"RealSpot_{clean_sym}", shared_params)
-            logger.info(f"✅ [{symbol}] Strategy initialized | TF={shared_params.get('TIMEFRAME', '4h')}")
+            logger.info(
+                f"✅ [{symbol}] Strategy initialized | TF={shared_params.get('TIMEFRAME', '4h')}"
+            )
 
         shared_params = self.params_map.get(self.symbols[0], {}) if self.symbols else {}
         logger.info(
@@ -441,11 +440,15 @@ class SpotBot:
         return self.client.fetch_balance()
 
     @network_api_retry
-    def _fetch_ohlcv_safe(self, symbol: str, timeframe: str, start_str: str) -> Optional[pd.DataFrame]:
+    def _fetch_ohlcv_safe(
+        self, symbol: str, timeframe: str, start_str: str
+    ) -> Optional[pd.DataFrame]:
         return self.client.fetch_ohlcv(symbol, timeframe, start_date=start_str)
 
     @network_api_retry
-    def _fetch_recent_ohlcv_safe(self, symbol: str, timeframe: str, limit: int = 3) -> Optional[pd.DataFrame]:
+    def _fetch_recent_ohlcv_safe(
+        self, symbol: str, timeframe: str, limit: int = 3
+    ) -> Optional[pd.DataFrame]:
         return self.client.fetch_recent_ohlcv(symbol, timeframe, limit=limit)
 
     @network_api_retry
@@ -463,7 +466,9 @@ class SpotBot:
     #  Server time & candle slot                                           #
     # ------------------------------------------------------------------ #
 
-    def _sync_server_time_offset(self, force: bool = False, sync_interval_seconds: int = 60) -> None:
+    def _sync_server_time_offset(
+        self, force: bool = False, sync_interval_seconds: int = 60
+    ) -> None:
         with self._time_sync_lock:
             now = datetime.now(timezone.utc)
             minutes_in_4h_cycle = (now.hour * 60 + now.minute) % 240
@@ -576,9 +581,9 @@ class SpotBot:
             try:
                 df = self._fetch_ohlcv_safe(symbol, tf, start_str)
                 if df is not None and len(df) >= 50:
-                    df[["open", "high", "low", "close", "volume"]] = (
-                        df[["open", "high", "low", "close", "volume"]].astype(np.float64)
-                    )
+                    df[["open", "high", "low", "close", "volume"]] = df[
+                        ["open", "high", "low", "close", "volume"]
+                    ].astype(np.float64)
                     data_maps[symbol] = df
             except Exception as e:
                 logger.warning(f"[{symbol}] OHLCV prefetch failed: {e}")
@@ -724,16 +729,22 @@ class SpotBot:
             entry_price = float(pos.get("entryPrice", 0.0) or current_price or 0.0)
             if entry_price <= 0.0:
                 entry_price = current_price
-            
+
             entry_atr = float(atr) if np.isfinite(atr) and atr > 0 else 0.0
             long_atr_mult = float(params.get("LONG_ATR_MULT", 3.0))
-            
+
             # Use original sizing ATR if available, else current ATR
-            initial_stop = entry_price - (entry_atr * long_atr_mult) if entry_atr > 0 else entry_price * 0.85
-            
+            initial_stop = (
+                entry_price - (entry_atr * long_atr_mult) if entry_atr > 0 else entry_price * 0.85
+            )
+
             # Taking Profit price calculation if enabled
             long_tp_mult = float(params.get("LONG_TP_MULT", 0.0))
-            tp_price = entry_price + (entry_atr * long_tp_mult) if long_tp_mult > 1e-9 and entry_atr > 0 else 0.0
+            tp_price = (
+                entry_price + (entry_atr * long_tp_mult)
+                if long_tp_mult > 1e-9 and entry_atr > 0
+                else 0.0
+            )
 
             state_data = {
                 "entry_time": datetime.now(timezone.utc).isoformat(),
@@ -752,11 +763,13 @@ class SpotBot:
                 "exit_recovery_attempt_count": 0,
                 "exit_attempt_at": None,
             }
-            
+
             self.state_manager.update_symbol_state(symbol, state_data)
             logger.warning(
                 "🛡️ [%s] Local state bootstrapped from live position: Entry=%.2f, Stop=%.2f",
-                symbol, entry_price, initial_stop
+                symbol,
+                entry_price,
+                initial_stop,
             )
             return True
         except Exception as e:
@@ -775,16 +788,19 @@ class SpotBot:
         """
         if expected_qty <= 0 or actual_qty <= 0:
             return actual_qty > 0
-            
+
         min_fill_ratio = float(params.get("ENTRY_MIN_FILL_RATIO", 0.60))
         fill_ratio = actual_qty / expected_qty
-        
+
         if fill_ratio < min_fill_ratio:
             logger.warning(
                 "⚠️ [%s] Underfilled entry (Ratio: %.2f < %.2f). Actual: %.4f",
-                symbol, fill_ratio, min_fill_ratio, actual_qty
+                symbol,
+                fill_ratio,
+                min_fill_ratio,
+                actual_qty,
             )
-            # We still return True but log the warning. 
+            # We still return True but log the warning.
             # In some cases we might want to return False to abort if ratio is too low.
         return True
 
@@ -793,9 +809,11 @@ class SpotBot:
     # ------------------------------------------------------------------ #
 
     @network_api_retry
-    def _place_order_safe(self, symbol: str, side: str, qty: float, client_order_id: Optional[str] = None) -> Optional[dict]:
+    def _place_order_safe(
+        self, symbol: str, side: str, qty: float, client_order_id: Optional[str] = None
+    ) -> Optional[dict]:
         """
-        [ENHANCED] Order execution with dry-run support, reconciliation for timeouts, 
+        [ENHANCED] Order execution with dry-run support, reconciliation for timeouts,
         and idempotent behavior using clientOrderId (where supported) or balance tracking.
         """
         if self.dry_run:
@@ -805,8 +823,8 @@ class SpotBot:
 
         try:
             ccxt_symbol = self.client._normalize_symbol(symbol)
-            
-            # Upbit doesn't strictly support clientOrderId in the same way, 
+
+            # Upbit doesn't strictly support clientOrderId in the same way,
             # but we can pass it in params if the adapter supports it or for local tracking.
             params = {}
             if client_order_id:
@@ -826,11 +844,7 @@ class SpotBot:
                 )
             else:
                 order = self.client.exchange.create_order(
-                    symbol=ccxt_symbol,
-                    type="market",
-                    side="sell",
-                    amount=qty,
-                    params=params
+                    symbol=ccxt_symbol, type="market", side="sell", amount=qty, params=params
                 )
 
             logger.info(f"⚡ Order Placed: market {side} {qty} {ccxt_symbol}")
@@ -848,10 +862,12 @@ class SpotBot:
                     if client_order_id and o.get("clientOrderId") == client_order_id:
                         logger.info("Found timed-out order in open orders.")
                         return o
-                
+
                 # 2. Check balance change for buy, or check if position gone for sell
                 # (This is a simplified version of the logic in real_trader_futures.py)
-                logger.info("Reconciliation complete. No definitive order found. Re-checking balance in next cycle.")
+                logger.info(
+                    "Reconciliation complete. No definitive order found. Re-checking balance in next cycle."
+                )
                 return None
             except Exception as rec_e:
                 logger.error("❌ Reconciliation failed: %s", rec_e)
@@ -932,7 +948,7 @@ class SpotBot:
                 if (now - _parse_utc_dt(last_attempt_at)).total_seconds() < cooldown:
                     return False
             except Exception:
-                pass
+                ...
 
         recovery_attempts = int(state.get("exit_recovery_attempt_count", 0) or 0) + 1
         self.state_manager.update_symbol_state(
@@ -972,10 +988,7 @@ class SpotBot:
         entry_price = float(state.get("entry_price", 0.0) or 0.0)
         exit_price = float(current_price)
         exit_amt = float(
-            state.get("initial_amount")
-            or state.get("exit_remaining_amount")
-            or raw_amt
-            or 0.0
+            state.get("initial_amount") or state.get("exit_remaining_amount") or raw_amt or 0.0
         )
         if exit_amt <= 0.0:
             exit_amt = raw_amt
@@ -1164,7 +1177,7 @@ class SpotBot:
                 )
                 state = {}
 
-            trend_dir = int(cached.get("trend_direction", 0))
+            # trend_dir = int(cached.get("trend_direction", 0))
             atr = float(cached.get("atr", 0.0))
             kill_signal = float(cached.get("kill_signal", 0.0))
             bb_upper = float(cached.get("bb_upper", np.inf))
@@ -1202,7 +1215,9 @@ class SpotBot:
             entry_atr = float(state.get("entry_atr", atr))
             stop_price = float(state.get("active_stop_price", entry_price * 0.85))
 
-            long_trail_mult = float(params.get("TRAIL_ATR_MULT", params.get("LONG_TRAIL_MULT", 5.0)))
+            long_trail_mult = float(
+                params.get("TRAIL_ATR_MULT", params.get("LONG_TRAIL_MULT", 5.0))
+            )
             long_trail_lock_mult = float(params.get("LONG_TRAIL_LOCK_MULT", 1.5))
             tp_lock_atr_mult = float(params.get("TP_LOCK_ATR_MULT", 3.0))
             long_tp_mult = float(params.get("LONG_TP_MULT", 0.0))
@@ -1220,16 +1235,14 @@ class SpotBot:
                 new_stop = highest - (entry_atr * effective_trail_mult)
                 if new_stop > stop_price:
                     stop_price = new_stop
-                    self.state_manager.update_symbol_state(symbol, {"active_stop_price": stop_price})
+                    self.state_manager.update_symbol_state(
+                        symbol, {"active_stop_price": stop_price}
+                    )
 
-            tp_price = (
-                entry_price + (entry_atr * long_tp_mult) if long_tp_mult > 1e-9 else np.inf
-            )
+            tp_price = entry_price + (entry_atr * long_tp_mult) if long_tp_mult > 1e-9 else np.inf
 
             eff_time_stop = (
-                max(1, int(time_stop_bars * ts_regime_factor))
-                if time_stop_bars > 0
-                else 0
+                max(1, int(time_stop_bars * ts_regime_factor)) if time_stop_bars > 0 else 0
             )
 
             exit_triggered = False
@@ -1308,9 +1321,7 @@ class SpotBot:
                             datetime.now(timezone.utc) - entry_dt
                         ).total_seconds() / 60.0
                         tf_min = self._timeframe_to_minutes(indicator_tf)
-                        bars_elapsed = (
-                            int(elapsed_minutes / tf_min) if tf_min > 0 else 0
-                        )
+                        bars_elapsed = int(elapsed_minutes / tf_min) if tf_min > 0 else 0
                         if bars_elapsed >= eff_time_stop:
                             exit_triggered = True
                             reason = f"Time Stop ({bars_elapsed}>={eff_time_stop} bars, ts_reg={ts_regime_factor:.2f})"
@@ -1330,9 +1341,7 @@ class SpotBot:
             if not exit_triggered:
                 return
 
-            logger.warning(
-                f"🚨 [{symbol}] Exit Triggered: {reason}. Selling {amount:.4f}..."
-            )
+            logger.warning(f"🚨 [{symbol}] Exit Triggered: {reason}. Selling {amount:.4f}...")
             self.state_manager.update_symbol_state(
                 symbol,
                 {
@@ -1441,16 +1450,12 @@ class SpotBot:
                 return 0.0
 
             state = self.state_manager.get_symbol_state(symbol)
-            last_signal_ts = int(
-                state.get("last_entry_attempt_signal_candle_ts", 0) or 0
-            )
+            last_signal_ts = int(state.get("last_entry_attempt_signal_candle_ts", 0) or 0)
             attempt_count = int(state.get("entry_attempt_count_for_signal", 0) or 0)
             if last_signal_ts != signal_candle_ts:
                 attempt_count = 0
             if attempt_count >= int(SPOT_ENTRY_SIGNAL_RETRY_MAX):
                 return 0.0
-
-
 
             if not strength_ok or trend_dir != 1:
                 return 0.0
@@ -1480,11 +1485,7 @@ class SpotBot:
                     float(regime_risk_mult) if np.isfinite(regime_risk_mult) else 1.0,
                 ),
             )
-            gk = (
-                float(garch_kelly_f)
-                if np.isfinite(garch_kelly_f) and garch_kelly_f > 0.0
-                else 1.0
-            )
+            gk = float(garch_kelly_f) if np.isfinite(garch_kelly_f) and garch_kelly_f > 0.0 else 1.0
             eff_preview = rr * gk
             eff_preview = max(0.05, min(1.0, eff_preview))
             if 0.5 < regime_state_val < 1.5:
@@ -1509,7 +1510,7 @@ class SpotBot:
 
             tag = "Pullback (signal bar open)" if pullback_next_open else "Breakout"
             logger.info(
-                f"🟢 [{symbol}] {tag} | Regime={regime_gate:.2f} | Kelly×={garch_kelly_f:.2f} | "
+                f"🟢 [{symbol}] {tag} | Regime={regime_gate:.2f} | Kellyx={garch_kelly_f:.2f} | "
                 f"Buying {qty:.4f} @ {current_price:,.0f}"
             )
 
@@ -1678,7 +1679,7 @@ class SpotBot:
             self.state_manager.flush_now()
         except Exception as e:
             logger.warning("State flush on shutdown failed: %s", e)
-            
+
         open_positions = {}
         for symbol in self.symbols:
             try:
@@ -1694,12 +1695,12 @@ class SpotBot:
                     )
             except Exception as e:
                 logger.debug("Shutdown position check [%s]: %s", symbol, e)
-                
+
         try:
             self.health_manager.update_heartbeat(
-                status="stopped", 
+                status="stopped",
                 positions=open_positions,
-                extra={"shutdown_time": datetime.now(timezone.utc).isoformat()}
+                extra={"shutdown_time": datetime.now(timezone.utc).isoformat()},
             )
         except Exception as e:
             logger.warning("Heartbeat on shutdown failed: %s", e)
@@ -1725,9 +1726,7 @@ class SpotBot:
                         try:
                             self._refresh_indicators_if_needed(symbol, all_ohlcv)
                         except Exception as sym_e:
-                            logger.error(
-                                f"🚨 [{symbol}] Indicator refresh error: {sym_e}"
-                            )
+                            logger.error(f"🚨 [{symbol}] Indicator refresh error: {sym_e}")
                         time.sleep(SPOT_SYMBOL_DELAY_SECONDS)
 
                     for symbol in self.symbols:
@@ -1735,18 +1734,12 @@ class SpotBot:
                             break
                         try:
                             price = self._get_market_price_safe(symbol)
-                            if (
-                                price is None
-                                or not np.isfinite(float(price))
-                                or float(price) <= 0
-                            ):
+                            if price is None or not np.isfinite(float(price)) or float(price) <= 0:
                                 continue
                             cached = self._get_cached_indicators(symbol)
                             self._process_exit(symbol, float(price), cached)
                         except Exception as sym_e:
-                            logger.error(
-                                f"🚨 [{symbol}] Exit processing error: {sym_e}"
-                            )
+                            logger.error(f"🚨 [{symbol}] Exit processing error: {sym_e}")
                             self.health_manager.record_error(sym_e)
                         time.sleep(SPOT_SYMBOL_DELAY_SECONDS)
 
@@ -1756,28 +1749,18 @@ class SpotBot:
                             break
                         try:
                             price = self._get_market_price_safe(symbol)
-                            if (
-                                price is None
-                                or not np.isfinite(float(price))
-                                or float(price) <= 0
-                            ):
+                            if price is None or not np.isfinite(float(price)) or float(price) <= 0:
                                 continue
                             cached = self._get_cached_indicators(symbol)
-                            used = self._process_entry(
-                                symbol, float(price), cached, available_krw
-                            )
+                            used = self._process_entry(symbol, float(price), cached, available_krw)
                             available_krw -= used
                         except Exception as sym_e:
-                            logger.error(
-                                f"🚨 [{symbol}] Entry processing error: {sym_e}"
-                            )
+                            logger.error(f"🚨 [{symbol}] Entry processing error: {sym_e}")
                             self.health_manager.record_error(sym_e)
                         time.sleep(SPOT_SYMBOL_DELAY_SECONDS)
 
                     snap = self._get_positions_snapshot()
-                    self.health_manager.update_heartbeat(
-                        status="running", positions=snap
-                    )
+                    self.health_manager.update_heartbeat(status="running", positions=snap)
 
                     now_gc = time.time()
                     if now_gc - self._last_gc_time >= 1800.0:
@@ -1790,7 +1773,7 @@ class SpotBot:
 
                 elapsed = time.time() - cycle_start
                 sleep_time = max(0.5, SPOT_LOOP_INTERVAL_SECONDS - elapsed)
-                
+
                 start_wait = time.time()
                 while time.time() - start_wait < sleep_time:
                     if self._shutdown_requested:
@@ -1802,7 +1785,7 @@ class SpotBot:
             try:
                 self.health_manager.update_heartbeat(status="error")
             except Exception:
-                pass
+                ...
         finally:
             self._shutdown()
             logger.info("🛑 Bot Stopped.")

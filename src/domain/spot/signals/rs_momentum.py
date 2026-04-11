@@ -1,4 +1,5 @@
 """Relative strength momentum vs BTC/ETH anchor basket (vol-adjusted return spread, z-scored)."""
+
 from __future__ import annotations
 
 from typing import Any, ClassVar, Dict

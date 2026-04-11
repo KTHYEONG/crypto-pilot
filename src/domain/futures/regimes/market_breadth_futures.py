@@ -2,6 +2,7 @@
 Single-asset breadth proxy: rolling fraction of up closes vs EMA(W) -> long_mult / short_mult.
 Causal; multi-symbol basket not required.
 """
+
 from __future__ import annotations
 
 from typing import Any, ClassVar, Dict

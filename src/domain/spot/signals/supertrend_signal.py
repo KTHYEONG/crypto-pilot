@@ -1,12 +1,13 @@
 """SuperTrend-style signal using the same state machine as `IndicatorEngine.calculate_supertrend`."""
+
 from __future__ import annotations
 
 from typing import Any, ClassVar, Dict
 
 import numpy as np
 
-from src.domain.spot.signals.base import SignalOutput
 from src.core.indicators.numpy_ops_spot import compute_atr_numpy
+from src.domain.spot.signals.base import SignalOutput
 from src.domain.spot.signals.registry import register_signal
 
 

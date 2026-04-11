@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import json
@@ -32,12 +31,13 @@ class OrderRateLimiter:
     바이낸스 주문 횟수 제한 방어 (토큰 버킷 알고리즘)
     10초당 최대 80 orders (안전 마진 20%)
     """
+
     def __init__(self, max_orders_per_10s=80):
         self.max_orders = max_orders_per_10s
         self.order_timestamps = deque(maxlen=max_orders_per_10s)
         self.logger = logging.getLogger(__name__)
         self._lock = threading.Lock()
-    
+
     def can_place_order(self) -> bool:
         """주문 가능 여부 확인"""
         now = time.time()
@@ -52,12 +52,12 @@ class OrderRateLimiter:
                 return False
 
             return True
-    
+
     def record_order(self):
         """주문 기록"""
         with self._lock:
             self.order_timestamps.append(time.time())
-    
+
     def wait_if_needed(self):
         """필요시 대기 (원자성 보장)"""
         while True:
@@ -84,11 +84,12 @@ class OrderBookCache:
     호가창 캐싱 (TTL 기반)
     목적: 0.5초 내 중복 API 호출 방지 → 응답 속도 60% 개선
     """
+
     def __init__(self, ttl_seconds=0.3):
         self.cache = {}  # {symbol: (data, timestamp)}
         self.ttl = ttl_seconds
         self.logger = logging.getLogger(__name__)
-    
+
     def get(self, symbol):
         """캐시된 호가창 조회 (스레드 안전성 강화)"""
         cached_item = self.cache.get(symbol)
@@ -97,15 +98,15 @@ class OrderBookCache:
             age = time.time() - timestamp
 
             if age < self.ttl:
-                self.logger.debug(f"📦 Cache HIT: {symbol} (age: {age*1000:.0f}ms)")
+                self.logger.debug(f"📦 Cache HIT: {symbol} (age: {age * 1000:.0f}ms)")
                 return data
 
         return None
-    
+
     def set(self, symbol, data):
         """호가창 캐싱"""
         self.cache[symbol] = (data, time.time())
-    
+
     def invalidate(self, symbol=None):
         """캐시 무효화"""
         if symbol:
@@ -118,34 +119,37 @@ class BinanceClient:
     def __init__(self, api_key=None, secret=None, shared_rate_limiter=None):
         # 1. CCXT Exchange 인스턴스 생성
         # 타임아웃: 데이터 조회(READ) 기준으로 기본 설정 (20초)
-        self.exchange = ccxt.binanceusdm({
-            'apiKey': api_key,
-            'secret': secret,
-            'enableRateLimit': True,
-            'options': {
-                'defaultType': 'future',
-                'recvWindow': 5000,
-                'adjustForTimeDifference': True,  # 시간 동기화
-            },
-            'timeout': API_READ_TIMEOUT * 1000  # 밀리초 단위 (20초)
-        })
+        self.exchange = ccxt.binanceusdm(
+            {
+                "apiKey": api_key,
+                "secret": secret,
+                "enableRateLimit": True,
+                "options": {
+                    "defaultType": "future",
+                    "recvWindow": 5000,
+                    "adjustForTimeDifference": True,  # 시간 동기화
+                },
+                "timeout": API_READ_TIMEOUT * 1000,  # 밀리초 단위 (20초)
+            }
+        )
         from src.core.utils.utils import setup_logger
+
         self.logger = setup_logger("BinanceClient")
-        
+
         # Order Rate Limiter: 주입된 공유 Limiter 사용 또는 자체 생성
         self.rate_limiter = (
             shared_rate_limiter
             if shared_rate_limiter is not None
             else OrderRateLimiter(max_orders_per_10s=80)
         )
-        
+
         # Order Book Cache (0.3초 TTL - API 호출 60% 감소)
         self.orderbook_cache = OrderBookCache(ttl_seconds=0.3)
 
     def _ensure_markets_loaded(self):
         """Load market metadata once for precision/limits helpers."""
         try:
-            if not getattr(self.exchange, 'markets', None):
+            if not getattr(self.exchange, "markets", None):
                 self.exchange.load_markets()
         except Exception as e:
             self.logger.warning(f"⚠️ Failed to load markets metadata: {e}")
@@ -156,9 +160,9 @@ class BinanceClient:
         """
         self._ensure_markets_loaded()
         constraints = {
-            'min_amount': 0.0,
-            'min_cost': 0.0,
-            'tick_size': 0.0,
+            "min_amount": 0.0,
+            "min_cost": 0.0,
+            "tick_size": 0.0,
         }
 
         try:
@@ -166,19 +170,20 @@ class BinanceClient:
         except Exception:
             return constraints
 
-        limits = market.get('limits', {}) or {}
-        amount_limits = limits.get('amount', {}) or {}
-        cost_limits = limits.get('cost', {}) or {}
-        constraints['min_amount'] = float(amount_limits.get('min') or 0.0)
-        constraints['min_cost'] = float(cost_limits.get('min') or 0.0)
+        limits = market.get("limits", {}) or {}
+        amount_limits = limits.get("amount", {}) or {}
+        cost_limits = limits.get("cost", {}) or {}
+        constraints["min_amount"] = float(amount_limits.get("min") or 0.0)
+        constraints["min_cost"] = float(cost_limits.get("min") or 0.0)
 
         try:
-            filters = (market.get('info') or {}).get('filters', [])
+            filters = (market.get("info") or {}).get("filters", [])
             for f in filters:
-                if f.get('filterType') == 'PRICE_FILTER':
-                    constraints['tick_size'] = float(f.get('tickSize') or 0.0)
+                if f.get("filterType") == "PRICE_FILTER":
+                    constraints["tick_size"] = float(f.get("tickSize") or 0.0)
                     break
         except Exception:
+            self.logger.debug("Failed to fetch tick_size constraints from filters", exc_info=True)
             pass
 
         return constraints
@@ -186,7 +191,7 @@ class BinanceClient:
     def get_price_tick_size(self, symbol, fallback=0.01):
         """Return symbol tick size if available, else fallback."""
         constraints = self.get_symbol_constraints(symbol)
-        tick = float(constraints.get('tick_size') or 0.0)
+        tick = float(constraints.get("tick_size") or 0.0)
         return tick if tick > 0 else float(fallback)
 
     def round_price(self, symbol, price):
@@ -223,7 +228,7 @@ class BinanceClient:
             else:
                 start_iso = f"{start_str}T00:00:00Z"
         since = self.exchange.parse8601(start_iso)
-        
+
         if end_date:
             if isinstance(end_date, datetime):
                 end_iso = end_date.strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -240,7 +245,7 @@ class BinanceClient:
             end_timestamp = self.exchange.milliseconds()
 
         all_ohlcv = []
-        
+
         self.logger.info(f"Fetching {symbol} {timeframe} data from {start_date} to {end_date}...")
 
         max_iterations = 500
@@ -276,7 +281,9 @@ class BinanceClient:
                         break
                     since = new_since
 
-                    current_date = datetime.fromtimestamp(last_timestamp / 1000).strftime('%Y-%m-%d')
+                    current_date = datetime.fromtimestamp(last_timestamp / 1000).strftime(
+                        "%Y-%m-%d"
+                    )
                     self.logger.info(f"Measured up to {current_date} ({len(all_ohlcv)} candles)")
 
                     time.sleep(0.1)
@@ -291,13 +298,15 @@ class BinanceClient:
                     if retry_count >= 3:
                         raise RuntimeError(f"Data fetch failed persistently for {symbol}") from e
 
-        df = pd.DataFrame(all_ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        df['datetime'] = pd.to_datetime(df['timestamp'], unit='ms')
-        
+        df = pd.DataFrame(
+            all_ohlcv, columns=["timestamp", "open", "high", "low", "close", "volume"]
+        )
+        df["datetime"] = pd.to_datetime(df["timestamp"], unit="ms")
+
         # 중복 제거 및 기간 필터링
-        df = df.drop_duplicates(subset=['timestamp'])
-        df = df[(df['timestamp'] <= end_timestamp)]
-        
+        df = df.drop_duplicates(subset=["timestamp"])
+        df = df[(df["timestamp"] <= end_timestamp)]
+
         return df
 
     def fetch_ohlcv_with_taker(
@@ -349,9 +358,23 @@ class BinanceClient:
         except Exception:
             binance_symbol = str(symbol).replace("/", "")
 
-        interval_map = {"1m": "1m", "3m": "3m", "5m": "5m", "15m": "15m", "30m": "30m",
-                       "1h": "1h", "2h": "2h", "4h": "4h", "6h": "6h", "8h": "8h",
-                       "12h": "12h", "1d": "1d", "3d": "3d", "1w": "1w", "1M": "1M"}
+        interval_map = {
+            "1m": "1m",
+            "3m": "3m",
+            "5m": "5m",
+            "15m": "15m",
+            "30m": "30m",
+            "1h": "1h",
+            "2h": "2h",
+            "4h": "4h",
+            "6h": "6h",
+            "8h": "8h",
+            "12h": "12h",
+            "1d": "1d",
+            "3d": "3d",
+            "1w": "1w",
+            "1M": "1M",
+        }
         interval = interval_map.get(str(timeframe).strip().lower(), str(timeframe).strip().lower())
 
         all_rows: list[list[float | int]] = []
@@ -367,9 +390,11 @@ class BinanceClient:
                 }
                 qs = urllib.parse.urlencode(params)
                 url = f"{base_url}?{qs}"
-                req = urllib.request.Request(url, method="GET")
+                if not url.startswith(("http://", "https://")):
+                    raise ValueError(f"Invalid URL scheme: {url}")
+                req = urllib.request.Request(url, method="GET")  # noqa: S310
                 try:
-                    with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
+                    with urllib.request.urlopen(req, timeout=timeout_sec) as resp:  # noqa: S310
                         raw = resp.read().decode("utf-8")
                     data = json.loads(raw)
                 except Exception as e:
@@ -396,16 +421,18 @@ class BinanceClient:
                         continue
 
                     ts = int(row[0])
-                    all_rows.append([
-                        ts,
-                        float(row[1]),
-                        float(row[2]),
-                        float(row[3]),
-                        float(row[4]),
-                        float(row[5]),
-                        float(row[9]) if row[9] not in (None, "") else 0.0,
-                        float(row[10]) if row[10] not in (None, "") else 0.0,
-                    ])
+                    all_rows.append(
+                        [
+                            ts,
+                            float(row[1]),
+                            float(row[2]),
+                            float(row[3]),
+                            float(row[4]),
+                            float(row[5]),
+                            float(row[9]) if row[9] not in (None, "") else 0.0,
+                            float(row[10]) if row[10] not in (None, "") else 0.0,
+                        ]
+                    )
 
                 break
 
@@ -423,16 +450,29 @@ class BinanceClient:
         if not all_rows:
             return pd.DataFrame(
                 columns=[
-                    "timestamp", "open", "high", "low", "close", "volume",
-                    "taker_buy_base_volume", "taker_buy_quote_volume", "datetime",
+                    "timestamp",
+                    "open",
+                    "high",
+                    "low",
+                    "close",
+                    "volume",
+                    "taker_buy_base_volume",
+                    "taker_buy_quote_volume",
+                    "datetime",
                 ]
             )
 
         df = pd.DataFrame(
             all_rows,
             columns=[
-                "timestamp", "open", "high", "low", "close", "volume",
-                "taker_buy_base_volume", "taker_buy_quote_volume",
+                "timestamp",
+                "open",
+                "high",
+                "low",
+                "close",
+                "volume",
+                "taker_buy_base_volume",
+                "taker_buy_quote_volume",
             ],
         )
         df["datetime"] = pd.to_datetime(df["timestamp"], unit="ms")
@@ -445,9 +485,11 @@ class BinanceClient:
         try:
             rows = self.exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
             if not rows:
-                return pd.DataFrame(columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'datetime'])
-            df = pd.DataFrame(rows, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-            df['datetime'] = pd.to_datetime(df['timestamp'], unit='ms')
+                return pd.DataFrame(
+                    columns=["timestamp", "open", "high", "low", "close", "volume", "datetime"]
+                )
+            df = pd.DataFrame(rows, columns=["timestamp", "open", "high", "low", "close", "volume"])
+            df["datetime"] = pd.to_datetime(df["timestamp"], unit="ms")
             return df
         except Exception as e:
             self.logger.error(f"Error fetching recent OHLCV for {symbol} {timeframe}: {e}")
@@ -471,7 +513,6 @@ class BinanceClient:
         except Exception as e:
             self.logger.error(f"Error fetching ticker: {e}")
             return None
-    
 
     def fetch_server_time_ms(self):
         """Exchange server time in milliseconds."""
@@ -550,17 +591,17 @@ class BinanceClient:
             }
             qs = urllib.parse.urlencode(params)
             url = f"{base_url}?{qs}"
-            req = urllib.request.Request(url, method="GET")
+            if not url.startswith(("http://", "https://")):
+                raise ValueError(f"Invalid URL scheme: {url}")
+            req = urllib.request.Request(url, method="GET")  # noqa: S310
             try:
-                with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
+                with urllib.request.urlopen(req, timeout=timeout_sec) as resp:  # noqa: S310
                     raw = resp.read().decode("utf-8")
                 data = json.loads(raw)
                 retry_count = 0
             except Exception as e:
                 retry_count += 1
-                self.logger.error(
-                    "Error fetching funding rate (%d/3): %s", retry_count, e
-                )
+                self.logger.error("Error fetching funding rate (%d/3): %s", retry_count, e)
                 time.sleep(5)
                 if retry_count >= 3:
                     raise RuntimeError(
@@ -598,7 +639,9 @@ class BinanceClient:
             return pd.DataFrame(columns=["timestamp", "funding_rate"])
 
         df = pd.DataFrame(all_rows, columns=["timestamp", "funding_rate"])
-        df = df.drop_duplicates(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
+        df = (
+            df.drop_duplicates(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
+        )
         return df
 
     def fetch_balance(self):
@@ -606,7 +649,7 @@ class BinanceClient:
         try:
             balance = self.exchange.fetch_balance()
             # future wallet: total -> total margin balance, free -> available balance
-            return balance['total']['USDT'], balance['free']['USDT']
+            return balance["total"]["USDT"], balance["free"]["USDT"]
         except Exception as e:
             self.logger.error(f"Error fetching balance: {e}")
             raise RuntimeError("fetch_balance_failed") from e
@@ -619,7 +662,7 @@ class BinanceClient:
             self.logger.info(f"✅ Leverage set to {leverage}x for {symbol}")
             return True
         except Exception as e:
-            self.logger.error(f"❌ Error setting leverage (Value: {leverage}) | Detail: {str(e)}")
+            self.logger.error(f"❌ Error setting leverage (Value: {leverage}) | Detail: {e!s}")
             return False
 
     def set_position_mode(self, dual_side_position=False):
@@ -640,40 +683,39 @@ class BinanceClient:
                 return True
             # 일부 구버전 CCXT나 거래소 응답에 따라 직접 호출이 필요할 수 있음 (Fallback)
             try:
-                self.exchange.fapiPrivate_post_positionside_dual({
-                    'dualSidePosition': 'true' if dual_side_position else 'false'
-                })
+                self.exchange.fapiPrivate_post_positionside_dual(
+                    {"dualSidePosition": "true" if dual_side_position else "false"}
+                )
                 return True
             except Exception as e2:
                 self.logger.error(f"⚠️ Failed to set position mode: {e2}")
                 return False
-
 
     def set_asset_mode(self, is_multi_asset=False):
         """
         자산 모드 설정 (Single-Asset vs Multi-Asset)
         is_multi_asset=False -> Single-Asset Mode (USDT만 담보)
         is_multi_asset=True -> Multi-Asset Mode (타 코인도 담보 인정)
-        
+
         Note: 일부 CCXT 버전에서 미지원될 수 있음. 실패해도 봇 운영에 영향 없음.
         """
         try:
             # CCXT fapiPrivate 메서드 존재 확인
-            if not hasattr(self.exchange, 'fapiPrivate_get_multiassetsmargin'):
+            if not hasattr(self.exchange, "fapiPrivate_get_multiassetsmargin"):
                 self.logger.info("Asset mode API not available in this CCXT version. Skipping.")
                 return True
-            
+
             # 1. Check current mode
             res = self.exchange.fapiPrivate_get_multiassetsmargin()
-            current = str(res.get('multiAssetsMargin', 'false')).lower() == 'true'
-            
+            current = str(res.get("multiAssetsMargin", "false")).lower() == "true"
+
             if current == is_multi_asset:
                 return True
-                
-            # 2. Set mode  
-            self.exchange.fapiPrivate_post_multiassetsmargin({
-                'multiAssetsMargin': 'true' if is_multi_asset else 'false'
-            })
+
+            # 2. Set mode
+            self.exchange.fapiPrivate_post_multiassetsmargin(
+                {"multiAssetsMargin": "true" if is_multi_asset else "false"}
+            )
             mode_str = "Multi-Asset" if is_multi_asset else "Single-Asset"
             self.logger.info(f"Asset mode updated to {mode_str} Mode")
             return True
@@ -688,16 +730,14 @@ class BinanceClient:
             self.logger.warning(f"Asset mode setting skipped: {e}")
             return True  # 봇 계속 진행
 
-
-
-    def set_margin_type(self, symbol, margin_type='CROSSED'):
+    def set_margin_type(self, symbol, margin_type="CROSSED"):
         """
         마진 모드 설정 (ISOLATED / CROSSED)
         봇 운용 시 청산 방지를 위해 CROSSED 권장
         """
         try:
             # CCXT unified method: ISOLATED, CROSS
-            mode = 'CROSS' if margin_type == 'CROSSED' else margin_type
+            mode = "CROSS" if margin_type == "CROSSED" else margin_type
             self.exchange.set_margin_mode(mode, symbol)
             self.logger.info(f"Margin type set to {margin_type} for {symbol}")
             return True
@@ -707,8 +747,6 @@ class BinanceClient:
                 return True
             self.logger.error(f"⚠️ Failed to set margin type for {symbol}: {e}")
             return False
-
-
 
     def fetch_position(self, symbol):
         """
@@ -722,37 +760,37 @@ class BinanceClient:
         """
         try:
             positions = self.exchange.fetch_positions([symbol])
-            
+
             # [DEBUG] 모든 반환된 포지션 로깅
             self.logger.debug(f"[{symbol}] API returned {len(positions)} position(s)")
-            
+
             for pos in positions:
                 # Symbol Matching: Handle 'ETH/USDT:USDT' vs 'ETH/USDT'
                 # CCXT often returns 'BASE/QUOTE:SETTLE' for futures
-                p_symbol = pos['symbol']
-                contracts = float(pos['contracts'] or 0)
-                
+                p_symbol = pos["symbol"]
+                contracts = float(pos["contracts"] or 0)
+
                 # [DEBUG] 각 포지션 상세 로깅
                 self.logger.debug(
                     f"  → Symbol: {p_symbol}, Contracts: {contracts}, "
                     f"Side: {pos.get('side')}, Entry: {pos.get('entryPrice')}"
                 )
-                
-                if p_symbol == symbol or p_symbol.split(':')[0] == symbol:
+
+                if p_symbol == symbol or p_symbol.split(":")[0] == symbol:
                     # 0인 포지션 데이터는 건너뜀 (Binance는 모든 페어의 0포지션을 리턴하기도 함)
                     if contracts == 0:
                         continue
 
                     # [FIX] None-safe 처리 (API가 null을 반환하는 경우 대비)
-                    entry_price = float(pos.get('entryPrice') or 0)
-                    unrealized_pnl = float(pos.get('unrealizedPnl') or 0)
-                    leverage = int(pos.get('leverage') or 1)  # None이면 1로 기본값 설정
-                    
+                    entry_price = float(pos.get("entryPrice") or 0)
+                    unrealized_pnl = float(pos.get("unrealizedPnl") or 0)
+                    leverage = int(pos.get("leverage") or 1)  # None이면 1로 기본값 설정
+
                     result = {
-                        'amount': contracts * (1 if pos['side'] == 'long' else -1), 
-                        'entryPrice': entry_price,
-                        'unrealizedPnL': unrealized_pnl,
-                        'leverage': leverage
+                        "amount": contracts * (1 if pos["side"] == "long" else -1),
+                        "entryPrice": entry_price,
+                        "unrealizedPnL": unrealized_pnl,
+                        "leverage": leverage,
                     }
                     self.logger.info(
                         f"[{symbol}] Position Found: {result['amount']} contracts "
@@ -765,47 +803,49 @@ class BinanceClient:
 
         # 포지션 없으면 기본 0 반환
         self.logger.debug(f"[{symbol}] No active position found")
-        return {'amount': 0.0, 'entryPrice': 0.0, 'unrealizedPnL': 0.0, 'leverage': 1}
+        return {"amount": 0.0, "entryPrice": 0.0, "unrealizedPnL": 0.0, "leverage": 1}
 
     def fetch_open_orders(self, symbol):
         """미체결 주문 조회 (Standard + ALGO 주문 통합)"""
         try:
             # 1. 일반 주문 조회
             orders = self.exchange.fetch_open_orders(symbol)
-            
+
             # 2. ALGO 주문 조회 (STOP_MARKET, TAKE_PROFIT_MARKET 등)
             try:
-                # symbol format: AVAX/USDT -> AVAXUSDT for algo endpoint if needed, 
+                # symbol format: AVAX/USDT -> AVAXUSDT for algo endpoint if needed,
                 # but usually we can filter manually
                 algo_res = self.exchange.fapiPrivateGetOpenAlgoOrders()
-                
+
                 # AVAX/USDT -> AVAXUSDT (Binance raw symbol)
                 market = self.exchange.market(symbol)
-                raw_symbol = market['id']
-                
+                raw_symbol = market["id"]
+
                 for ao in algo_res:
-                    if ao.get('symbol') == raw_symbol:
+                    if ao.get("symbol") == raw_symbol:
                         # CCXT 스타일로 변환
                         algo_order = {
-                            'id': ao.get('algoId'),
-                            'symbol': symbol,
-                            'type': ao.get('orderType', '').lower(),
-                            'side': ao.get('side', '').lower(),
-                            'amount': float(ao.get('quantity') or 0),
-                            'price': float(ao.get('price') or 0),
-                            'stopPrice': float(ao.get('triggerPrice') or 0),
-                            'status': 'open' if ao.get('algoStatus') == 'NEW' else ao.get('algoStatus').lower(),
-                            'timestamp': int(ao.get('createTime', 0)),
-                            'datetime': self.exchange.iso8601(ao.get('createTime', 0)),
-                            'info': ao,
-                            'clientOrderId': ao.get('clientAlgoId'),
+                            "id": ao.get("algoId"),
+                            "symbol": symbol,
+                            "type": ao.get("orderType", "").lower(),
+                            "side": ao.get("side", "").lower(),
+                            "amount": float(ao.get("quantity") or 0),
+                            "price": float(ao.get("price") or 0),
+                            "stopPrice": float(ao.get("triggerPrice") or 0),
+                            "status": "open"
+                            if ao.get("algoStatus") == "NEW"
+                            else ao.get("algoStatus").lower(),
+                            "timestamp": int(ao.get("createTime", 0)),
+                            "datetime": self.exchange.iso8601(ao.get("createTime", 0)),
+                            "info": ao,
+                            "clientOrderId": ao.get("clientAlgoId"),
                         }
                         # 중복 방지 (이미 있으면 무시)
-                        if not any(o['id'] == algo_order['id'] for o in orders):
+                        if not any(o["id"] == algo_order["id"] for o in orders):
                             orders.append(algo_order)
             except Exception as ae:
                 self.logger.warning(f"Failed to fetch ALGO orders for {symbol}: {ae}")
-                
+
             return orders
         except Exception as e:
             self.logger.error(f"Error fetching open orders for {symbol}: {e}")
@@ -822,7 +862,7 @@ class BinanceClient:
                 # 일반 취소 실패 시 ALGO 주문으로 시도
                 if "Unknown order sent" in str(e) or "-2011" in str(e):
                     try:
-                        return self.exchange.fapiPrivateDeleteAlgoOrder({'algoId': order_id})
+                        return self.exchange.fapiPrivateDeleteAlgoOrder({"algoId": order_id})
                     except Exception as ae:
                         raise ae
                 raise e
@@ -843,18 +883,18 @@ class BinanceClient:
             # 2. ALGO 주문 개별 취소 (일괄 취소 API가 symbol별로 없을 수 있으므로)
             open_orders = self.fetch_open_orders(symbol)
             for o in open_orders:
-                if 'algoId' in o.get('info', {}):
+                if "algoId" in o.get("info", {}):
                     try:
-                        self.exchange.fapiPrivateDeleteAlgoOrder({'algoId': o['id']})
+                        self.exchange.fapiPrivateDeleteAlgoOrder({"algoId": o["id"]})
                     except Exception as ae:
                         self.logger.warning(f"Failed to cancel ALGO order {o['id']}: {ae}")
-            
+
             return True
         except Exception as e:
             self.logger.error(f"Error in cancel_all_orders for {symbol}: {e}")
             return False
 
-    def place_order(self, symbol, side, amount, order_type='market', price=None, params=None):
+    def place_order(self, symbol, side, amount, order_type="market", price=None, params=None):
         """
         기본 주문 실행 (내부 사용)
         side: 'buy' or 'sell'
@@ -867,9 +907,11 @@ class BinanceClient:
                 side=side,
                 amount=amount,
                 price=price,
-                params=(params or {})
+                params=(params or {}),
             )
-            self.logger.info(f"⚡ Order Placed: {order_type} {side} {amount} {symbol} @ {price if price else 'Market'}")
+            self.logger.info(
+                f"⚡ Order Placed: {order_type} {side} {amount} {symbol} @ {price if price else 'Market'}"
+            )
             return order
         except Exception as e:
             self.logger.error(f"❌ Order Failed: {e}")
@@ -905,9 +947,7 @@ class BinanceClient:
                 amount=amount,
                 params=params,
             )
-            self.logger.info(
-                f"🛡️ Server SL Placed: {symbol} {side} {amount} @ Stop {stop_price}"
-            )
+            self.logger.info(f"🛡️ Server SL Placed: {symbol} {side} {amount} @ Stop {stop_price}")
             return order
         except Exception as e:
             error_msg = str(e)
@@ -951,14 +991,14 @@ class BinanceClient:
                 amount=amount,
                 params=params,
             )
-            self.logger.info(
-                f"🎯 Server TP Placed: {symbol} {side} {amount} @ TP {tp_price}"
-            )
+            self.logger.info(f"🎯 Server TP Placed: {symbol} {side} {amount} @ TP {tp_price}")
             return order
         except Exception as e:
             error_msg = str(e)
             if "-4130" in error_msg:
-                self.logger.warning(f"⚠️ [-4130] TP would immediately trigger for {symbol}. Bypassing.")
+                self.logger.warning(
+                    f"⚠️ [-4130] TP would immediately trigger for {symbol}. Bypassing."
+                )
                 return {"id": "triggered_4130_tp", "status": "closed", "info": "-4130"}
             if "-2021" in error_msg:
                 return None
@@ -987,7 +1027,7 @@ class BinanceClient:
         """
         from config.settings import SMART_ORDER_OFFSET
 
-        tick_size = self.get_price_tick_size(symbol, fallback=(0.1 if 'BTC' in symbol else 0.01))
+        tick_size = self.get_price_tick_size(symbol, fallback=(0.1 if "BTC" in symbol else 0.01))
 
         def round_to_tick(price, tick):
             if tick <= 0:
@@ -1001,12 +1041,8 @@ class BinanceClient:
 
             try:
                 orderbook = self.exchange.fetch_order_book(symbol, limit=1)
-                best_bid = (
-                    orderbook["bids"][0][0] if orderbook["bids"] else current_price
-                )
-                best_ask = (
-                    orderbook["asks"][0][0] if orderbook["asks"] else current_price
-                )
+                best_bid = orderbook["bids"][0][0] if orderbook["bids"] else current_price
+                best_ask = orderbook["asks"][0][0] if orderbook["asks"] else current_price
                 self.orderbook_cache.set(f"{symbol}_ob", (best_bid, best_ask))
                 return best_bid, best_ask
             except Exception:
@@ -1031,12 +1067,12 @@ class BinanceClient:
         def build_params(base_params=None, *, order_tag: str | None = None):
             params = dict(base_params or {})
             if reduce_only:
-                params['reduceOnly'] = True
+                params["reduceOnly"] = True
             if client_order_id:
                 cid = client_order_id
                 if order_tag:
                     cid = f"{client_order_id}_{order_tag}"
-                params['clientOrderId'] = cid[:36]
+                params["clientOrderId"] = cid[:36]
             return params
 
         start_local_time_ms = int(time.time() * 1000)
@@ -1057,10 +1093,10 @@ class BinanceClient:
             if not order_obj:
                 return 0.0
             last_order = order_obj
-            filled = float(order_obj.get('filled') or 0.0)
+            filled = float(order_obj.get("filled") or 0.0)
             if request_amount > 0:
                 filled = min(filled, request_amount)
-            order_id = str(order_obj.get('id') or '')
+            order_id = str(order_obj.get("id") or "")
             if order_id:
                 prev_filled = float(order_fill_tracker.get(order_id, 0.0))
                 delta = max(0.0, filled - prev_filled)
@@ -1076,7 +1112,7 @@ class BinanceClient:
         def refresh_order(order_obj):
             if not isinstance(order_obj, dict):
                 return order_obj
-            order_id = order_obj.get('id')
+            order_id = order_obj.get("id")
             if not order_id:
                 return order_obj
             try:
@@ -1085,10 +1121,10 @@ class BinanceClient:
                 try:
                     open_orders = self.fetch_open_orders(symbol)
                     for o in open_orders:
-                        if str(o.get('id')) == str(order_id):
+                        if str(o.get("id")) == str(order_id):
                             return o
                 except Exception:
-                    pass
+                    ...
             return order_obj
 
         def wait_post_only_fill(order_obj, request_amount):
@@ -1104,25 +1140,25 @@ class BinanceClient:
                 time.sleep(poll_seconds)
                 latest = refresh_order(latest)
                 register_fill(latest, request_amount)
-                status = str(latest.get('status', '')).lower()
-                if status in ('closed', 'filled', 'canceled', 'cancelled') or remaining_amount <= 0:
+                status = str(latest.get("status", "")).lower()
+                if status in ("closed", "filled", "canceled", "cancelled") or remaining_amount <= 0:
                     break
             return latest
 
-        def build_partial_result(status='partial'):
+        def build_partial_result(status="partial"):
             result = {
-                'symbol': symbol,
-                'side': side,
-                'type': 'multi_tier',
-                'status': status,
-                'requested': requested_total,
-                'filled': total_filled,
-                'remaining': max(0.0, requested_total - total_filled),
-                'reduceOnly': bool(reduce_only),
+                "symbol": symbol,
+                "side": side,
+                "type": "multi_tier",
+                "status": status,
+                "requested": requested_total,
+                "filled": total_filled,
+                "remaining": max(0.0, requested_total - total_filled),
+                "reduceOnly": bool(reduce_only),
             }
             if isinstance(last_order, dict):
-                result['last_order_id'] = last_order.get('id')
-                result['average'] = last_order.get('average')
+                result["last_order_id"] = last_order.get("id")
+                result["average"] = last_order.get("average")
             return result
 
         high_volatility = False
@@ -1145,7 +1181,7 @@ class BinanceClient:
                     self.rate_limiter.wait_if_needed()
                     best_bid, best_ask = get_best_price_fresh()
 
-                    if side == 'buy':
+                    if side == "buy":
                         target_price = round_to_tick(best_bid + tick_size, tick_size)
                     else:
                         target_price = round_to_tick(best_ask - tick_size, tick_size)
@@ -1159,21 +1195,21 @@ class BinanceClient:
                     filled_before_round = total_filled
                     order = self.exchange.create_order(
                         symbol=symbol,
-                        type='limit',
+                        type="limit",
                         side=side,
                         amount=request_amount,
                         price=target_price,
                         params=build_params(
-                            {'postOnly': True},
+                            {"postOnly": True},
                             order_tag=f"T1{requote_idx}",
                         ),
                     )
                     register_fill(order, request_amount)
                     order = wait_post_only_fill(order, request_amount)
-                    status = str(order.get('status', '')).lower()
+                    status = str(order.get("status", "")).lower()
                     filled_this_round = max(0.0, total_filled - filled_before_round)
 
-                    if status in ('closed', 'filled') or remaining_amount <= 0:
+                    if status in ("closed", "filled") or remaining_amount <= 0:
                         self.logger.info(
                             f"Tier 1 Filled ({filled_this_round}/{request_amount}) @ "
                             f"{order.get('average', target_price)}"
@@ -1188,11 +1224,13 @@ class BinanceClient:
                         if remaining_amount <= 0:
                             return order
 
-                    if status in ('open', 'new'):
+                    if status in ("open", "new"):
                         try:
-                            self.exchange.cancel_order(order['id'], symbol)
+                            self.exchange.cancel_order(order["id"], symbol)
                             if requote_idx < max_requotes and not deadline_reached():
-                                self.logger.info("🔁 Tier 1 open order canceled. Requoting post-only.")
+                                self.logger.info(
+                                    "🔁 Tier 1 open order canceled. Requoting post-only."
+                                )
                                 continue
                             self.logger.info("⚠️ Tier 1 open order canceled. Escalating to Tier 2.")
                         except Exception as cancel_err:
@@ -1207,17 +1245,17 @@ class BinanceClient:
                                         f"❌ Tier 1 cancel reconciliation failed: {len(lingering)} open orders remain. "
                                         "Abort escalation to prevent orphan orders."
                                     )
-                                    return build_partial_result(status='cancel_failed_open')
+                                    return build_partial_result(status="cancel_failed_open")
                             except Exception as cleanup_err:
                                 self.logger.error(
                                     f"❌ Tier 1 cancel reconciliation exception: {cleanup_err}. "
                                     "Abort escalation to prevent orphan orders."
                                 )
-                                return build_partial_result(status='cancel_failed_open')
+                                return build_partial_result(status="cancel_failed_open")
                         break
 
                 except Exception as e:
-                    if 'timeout' in str(e).lower():
+                    if "timeout" in str(e).lower():
                         self.logger.warning("⚠️ Tier 1 Timeout -> Reconciling...")
                         try:
                             open_orders = self.fetch_open_orders(symbol)
@@ -1229,9 +1267,9 @@ class BinanceClient:
                                     self.logger.error(
                                         f"❌ Tier 1 timeout reconciliation incomplete: {len(lingering)} open orders remain."
                                     )
-                                    return build_partial_result(status='timeout_open_orders')
+                                    return build_partial_result(status="timeout_open_orders")
                         except Exception:
-                            pass
+                            ...
                     else:
                         self.logger.info(f"❌ Tier 1 Skipped ({e}) -> Tier 2")
                     break
@@ -1239,7 +1277,7 @@ class BinanceClient:
         if remaining_amount > 0 and deadline_reached():
             self.logger.warning("⏱️ Entry deadline reached before Tier 2. Skip further escalation.")
             if total_filled > 0:
-                return build_partial_result(status='deadline_partial')
+                return build_partial_result(status="deadline_partial")
             return None
 
         # Tier 2: IOC aggressive limit
@@ -1249,7 +1287,7 @@ class BinanceClient:
                 best_bid, best_ask = get_best_price_fresh()
 
                 offset = 0.001 if high_volatility else SMART_ORDER_OFFSET
-                if side == 'buy':
+                if side == "buy":
                     limit_price = round_to_tick(best_ask * (1 + offset), tick_size)
                 else:
                     limit_price = round_to_tick(best_bid * (1 - offset), tick_size)
@@ -1259,55 +1297,55 @@ class BinanceClient:
                 request_amount = remaining_amount
                 order = self.exchange.create_order(
                     symbol=symbol,
-                    type='limit',
+                    type="limit",
                     side=side,
                     amount=request_amount,
                     price=limit_price,
-                    params=build_params({'timeInForce': 'IOC'}, order_tag='T2'),
+                    params=build_params({"timeInForce": "IOC"}, order_tag="T2"),
                 )
                 filled = register_fill(order, request_amount)
 
                 if filled > 0:
                     fill_ratio = filled / request_amount if request_amount > 0 else 0.0
                     if remaining_amount <= 0 or fill_ratio >= 0.999:
-                        self.logger.info(f"Tier 2 Filled ({filled}/{request_amount}) @ {order.get('average', limit_price)}")
+                        self.logger.info(
+                            f"Tier 2 Filled ({filled}/{request_amount}) @ {order.get('average', limit_price)}"
+                        )
                         return order
 
                     self.logger.warning(
                         f"⚠️ Tier 2 Partial Fill: {filled}/{request_amount} "
-                        f"({fill_ratio*100:.1f}%). Remaining {remaining_amount}"
+                        f"({fill_ratio * 100:.1f}%). Remaining {remaining_amount}"
                     )
 
             except Exception as e:
                 self.logger.error(f"❌ Tier 2 Failed: {e}")
-                if 'timeout' in str(e).lower():
+                if "timeout" in str(e).lower():
                     try:
                         self.exchange.cancel_all_orders(symbol)
                     except Exception:
-                        pass
+                        ...
 
         if remaining_amount > 0 and deadline_reached():
             self.logger.warning("⏱️ Entry deadline reached before Tier 3. Skip market fallback.")
             if total_filled > 0:
-                return build_partial_result(status='deadline_partial')
+                return build_partial_result(status="deadline_partial")
             return None
 
         # Tier 3: market fallback for remaining qty
         try:
             if remaining_amount <= 0:
-                return last_order if last_order else build_partial_result(status='filled')
+                return last_order if last_order else build_partial_result(status="filled")
             if not allow_market_fallback:
                 self.logger.warning(
                     f"⚠️ Market fallback disabled for {symbol} {side}. Remaining unfilled: {remaining_amount}"
                 )
                 if total_filled > 0:
-                    return build_partial_result(status='partial_no_market')
+                    return build_partial_result(status="partial_no_market")
                 return None
             self.rate_limiter.wait_if_needed()
             if current_price and atr:
-                max_slip_ratio = min(
-                    0.01, (float(atr) * 0.2) / float(current_price)
-                )
+                max_slip_ratio = min(0.01, (float(atr) * 0.2) / float(current_price))
                 if side == "buy":
                     hard_limit_price = round_to_tick(
                         current_price * (1 + max_slip_ratio), tick_size
@@ -1325,7 +1363,7 @@ class BinanceClient:
                     side=side,
                     amount=remaining_amount,
                     price=hard_limit_price,
-                    params=build_params({"timeInForce": "IOC"}, order_tag='T3L'),
+                    params=build_params({"timeInForce": "IOC"}, order_tag="T3L"),
                 )
             else:
                 self.logger.warning(
@@ -1336,7 +1374,7 @@ class BinanceClient:
                     type="market",
                     side=side,
                     amount=remaining_amount,
-                    params=build_params(order_tag='T3M'),
+                    params=build_params(order_tag="T3M"),
                 )
             register_fill(order, remaining_amount)
             return order
@@ -1347,7 +1385,5 @@ class BinanceClient:
                     f"⚠️ Partial fill preserved despite final failure: "
                     f"{total_filled}/{requested_total} {symbol}"
                 )
-                return build_partial_result(status='partial_failed')
+                return build_partial_result(status="partial_failed")
             return None
-
-

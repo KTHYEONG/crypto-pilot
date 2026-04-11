@@ -1,11 +1,12 @@
 """rank_score direction vs entry_signal (tmp.md)."""
+
 from __future__ import annotations
 
 import numpy as np
 import pandas as pd
 
-from src.domain.spot.signals.rs_momentum import RSMomentumSignal
 from src.domain.spot.signals.kc_pullback import KCPullbackSignal
+from src.domain.spot.signals.rs_momentum import RSMomentumSignal
 
 
 def _minimal_ohlcv(n: int = 300) -> pd.DataFrame:
