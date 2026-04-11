@@ -95,22 +95,34 @@ def calculate_position_size(
     leverage: float,
     sf: float,
     gk: float,
+    max_exposure_per_coin: float = 1.5,
 ) -> float:
     if np.isnan(gk) or gk <= 0.0:
         gk = 1.0
     eff_risk = risk_per_trade * float(gk)
     risk_amt = current_equity_for_risk * eff_risk
+    
+    # Base quantity from Inverse Volatility (Risk / Distance)
     target_qty = risk_amt / stop_distance
 
-    max_qty = (available_margin * leverage) / fill_price
-    if max_qty < 0:
-        max_qty = 0.0
-    target_qty = min(target_qty, max_qty)
+    # --- Safety Layer 1: Max Notional Exposure Cap (Anti-Gap Protection) ---
+    # target_notional = target_qty * fill_price
+    # max_notional = current_equity_for_risk * max_exposure_per_coin
+    max_qty_by_exposure = (current_equity_for_risk * max_exposure_per_coin) / fill_price
+    target_qty = min(target_qty, max_qty_by_exposure)
 
+    # --- Safety Layer 2: Available Margin Constraint ---
+    max_qty_by_margin = (available_margin * leverage) / fill_price
+    if max_qty_by_margin < 0:
+        max_qty_by_margin = 0.0
+    target_qty = min(target_qty, max_qty_by_margin)
+
+    # Sizing module's confidence/edge weight
     sf_c = sf if sf <= 1.0 else 1.0
     if sf_c < 0.0:
         sf_c = 0.0
     target_qty *= sf_c
+    
     return target_qty
 
 
