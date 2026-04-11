@@ -12,7 +12,7 @@ import numpy as np
 from numba import njit
 
 from config.opt_config import OPT_SPOT_CONFIG, SLIPPAGE_GAMMA_BASE, SLIPPAGE_REFERENCE_ADV_KRW
-from config.settings import SPOT_INITIAL_BALANCE, SPOT_SLIPPAGE_RATE, UPBIT_SPOT_TAKER_FEE_RATE
+from config.settings import SPOT_SLIPPAGE_RATE, UPBIT_SPOT_TAKER_FEE_RATE
 
 
 def _max_position_pct_by_symbol(
@@ -146,7 +146,7 @@ def _run_shared_cash_packed_numba(
     wu = warmup_bars
     if execution_start_idx > wu:
         wu = execution_start_idx
-    
+
     max_trades = 50000
     pnl_array = np.zeros(max_trades, dtype=np.float64)
 
@@ -209,12 +209,7 @@ def _run_shared_cash_packed_numba(
                         ex_px = slot_tp[sj] * (1.0 - slippage_rate)
                         exit_triggered = True
                 bub = bb_upper[si, i]
-                if (
-                    (not exit_triggered)
-                    and np.isfinite(bub)
-                    and bub < 1e18
-                    and c_high >= bub
-                ):
+                if (not exit_triggered) and np.isfinite(bub) and bub < 1e18 and c_high >= bub:
                     ex_px = bub * (1.0 - slippage_rate)
                     exit_triggered = True
 
@@ -309,7 +304,9 @@ def _run_shared_cash_packed_numba(
                 if slot_in[sj] and (not exit_triggered):
                     rst_ts = regime_state[si, i]
                     ts_regime_factor = max(0.50, 1.0 - (2.0 - rst_ts) * 0.35)
-                    adaptive_stop = max(1, int(time_stop_bars * ts_regime_factor)) if time_stop_bars > 0 else 0
+                    adaptive_stop = (
+                        max(1, int(time_stop_bars * ts_regime_factor)) if time_stop_bars > 0 else 0
+                    )
 
                     if time_stop_bars > 0 and (i - slot_entry_idx[sj]) >= adaptive_stop:
                         ex_px = c_open * (1.0 - slippage_rate)
@@ -482,7 +479,10 @@ def _run_shared_cash_packed_numba(
             if eff > 1.0:
                 eff = 1.0
             new_risk_pct = risk_per_trade * eff
-            if last_risk_pct_sym[si] > 1e-12 and abs(new_risk_pct - last_risk_pct_sym[si]) < delta_gate:
+            if (
+                last_risk_pct_sym[si] > 1e-12
+                and abs(new_risk_pct - last_risk_pct_sym[si]) < delta_gate
+            ):
                 continue
 
             risk_budget = balance * new_risk_pct
@@ -512,7 +512,7 @@ def _run_shared_cash_packed_numba(
             # CIRCUIT BREAKER: If balance drops below 30% of initial capital, stop opening new positions (Wealth Preservation).
             if balance < initial_balance * 0.3:
                 break
-                
+
             if balance < total_required:
                 if balance <= 0.0:
                     continue
@@ -552,11 +552,11 @@ def _run_shared_cash_packed_numba(
                 per_symbol_pnl[si] += pnl
                 if pnl > 0.0:
                     per_symbol_wins[si] += 1
-                
+
                 # Intra-SL: Churning Prevention
-                sym_cooldown[si] = 1 
+                sym_cooldown[si] = 1
                 sym_cooldown_skip[si] = True
-                
+
                 slot_in[sj] = False
                 slot_sym[sj] = -1
             else:
@@ -595,9 +595,9 @@ def _run_shared_cash_packed_numba(
         equity_curve[last_idx] = balance
 
     return (
-        equity_curve, 
-        float(balance), 
-        total_trades, 
+        equity_curve,
+        float(balance),
+        total_trades,
         pnl_array[:total_trades],
         per_symbol_trades,
         per_symbol_wins,
@@ -744,6 +744,7 @@ def run_packed_from_symbol_arrays(
         max_position_pct_by_sym=max_position_pct_by_sym,
     )
     from src.domain.spot.portfolio_shared_cash import SharedCashResult
+
     return SharedCashResult(
         equity_curve=eq_curve,
         final_balance=fin_bal,

@@ -3,13 +3,13 @@ from __future__ import annotations
 import logging
 import os
 import re
+from dataclasses import dataclass
+from decimal import ROUND_FLOOR, Decimal
 from typing import Optional
 
 import numpy as np
 import optuna
 import pandas as pd
-from dataclasses import dataclass
-from decimal import Decimal, ROUND_FLOOR
 
 _logger = logging.getLogger(__name__)
 
@@ -37,13 +37,13 @@ def calc_ulcer_index_from_equity(equity_curve: np.ndarray) -> float:
     """
     if equity_curve.size < 2:
         return 0.0
-    
+
     # Calculate drawdown percentages
     hwm = np.maximum.accumulate(equity_curve)
     # Avoid division by zero
     safe_hwm = np.where(hwm > 1e-12, hwm, 1.0)
     dd_pct = (hwm - equity_curve) / safe_hwm
-    
+
     return float(np.sqrt(np.mean(np.square(dd_pct))) * 100.0)
 
 
@@ -81,7 +81,9 @@ def cleanup_orphan_studies(
     if total <= keep_recent:
         _logger.info(
             "cleanup_orphan_studies: nothing to delete (prefix=%s found=%d keep=%d)",
-            full_prefix, total, keep_recent,
+            full_prefix,
+            total,
+            keep_recent,
         )
         return
 
@@ -98,7 +100,10 @@ def cleanup_orphan_studies(
 
     _logger.info(
         "cleanup_orphan_studies: prefix=%s deleted=%d kept=%d total_before=%d",
-        full_prefix, deleted, total - deleted, total,
+        full_prefix,
+        deleted,
+        total - deleted,
+        total,
     )
 
 
@@ -113,7 +118,7 @@ def reclaim_mysql_space(storage_url: str) -> None:
         _logger.info("reclaim_mysql_space: non-MySQL storage, skipping OPTIMIZE TABLE")
         return
     try:
-        from sqlalchemy import create_engine, text  # noqa: PLC0415
+        from sqlalchemy import create_engine, text
     except ImportError:
         _logger.warning("reclaim_mysql_space: sqlalchemy unavailable, skipping OPTIMIZE TABLE")
         return
@@ -126,7 +131,9 @@ def reclaim_mysql_space(storage_url: str) -> None:
                     conn.execute(text(f"OPTIMIZE TABLE `{table}`"))
                     _logger.info("reclaim_mysql_space: OPTIMIZE TABLE `%s` OK", table)
                 except Exception as tbl_exc:
-                    _logger.debug("reclaim_mysql_space: OPTIMIZE TABLE `%s` skipped: %s", table, tbl_exc)
+                    _logger.debug(
+                        "reclaim_mysql_space: OPTIMIZE TABLE `%s` skipped: %s", table, tbl_exc
+                    )
     except Exception as exc:
         _logger.warning("reclaim_mysql_space: connection failed: %s", exc)
 
@@ -144,8 +151,8 @@ def get_db_size_mb(storage_url: str, db_name: Optional[str] = None) -> float:
     if not storage_url.startswith("mysql"):
         return 0.0
     try:
-        from sqlalchemy import create_engine, text  # noqa: PLC0415
-        from sqlalchemy.engine.url import make_url  # noqa: PLC0415
+        from sqlalchemy import create_engine, text
+        from sqlalchemy.engine.url import make_url
     except ImportError:
         return 0.0
 
@@ -189,7 +196,9 @@ _SCORE_COEF_FUT_TAIL: float = _env_float("FUT_TAIL_DRAG_COEF", 12.0)
 _SCORE_COEF_SPOT_GROWTH: float = _env_float("SPOT_GROWTH_BONUS_COEF", 18.0)
 _SCORE_COEF_SPOT_RISK: float = _env_float("SPOT_RISK_DRAG_COEF", 10.0)
 _SCORE_COEF_SPOT_TAIL: float = _env_float("SPOT_TAIL_DRAG_COEF", 10.0)
-_SCORE_COEF_SPOT_EXCESS_RETURN_BONUS_WEIGHT: float = _env_float("SPOT_EXCESS_RETURN_BONUS_WEIGHT", 12.0)
+_SCORE_COEF_SPOT_EXCESS_RETURN_BONUS_WEIGHT: float = _env_float(
+    "SPOT_EXCESS_RETURN_BONUS_WEIGHT", 12.0
+)
 _TF_TRADE_DENSITY: dict[str, float] = {
     "30m": 1.00,
     "4h": 0.40,
@@ -236,7 +245,9 @@ class ObjectiveConfig:
     negative_expectancy_penalty_mult: float = 120.0
     bonus_ret_weight: float = 28.0
     bonus_pf_weight: float = 8.0
-    bonus_ret_scale: float = 10.0  # Reduced from 25.0 for better resolution in small return differences
+    bonus_ret_scale: float = (
+        10.0  # Reduced from 25.0 for better resolution in small return differences
+    )
     bonus_pf_scale: float = 0.6
     bonus_pf_center: float = 1.2
 
@@ -321,11 +332,12 @@ def _load_objective_config():
 
 OBJECTIVE_CFG = _load_objective_config()
 
+
 def suggest_params(trial, search_space):
     """
     Generate trial parameters from search space with conditional dependency pruning.
     Only suggests parameters that are actually used by the selected strategy configuration.
-    
+
     Efficiency Gain: 60~70% reduction in search space by skipping irrelevant parameters.
     """
     params = {}
@@ -413,258 +425,306 @@ def suggest_params(trial, search_space):
             params[key] = int(spec.get("low", 0))
         elif typ == "float":
             params[key] = float(spec.get("low", 0.0))
-    
+
     # === Phase 1: Core Strategy Selection ===
-    for key in ['ENTRY_TYPE', 'TREND_FILTER_TYPE', 'STRENGTH_FILTER_TYPE', 'EXIT_TYPE', 
-                'STOP_LOSS_TYPE', 'USE_TAKE_PROFIT', 'USE_VOLUME_FILTER', 'TIMEFRAME',
-                'ENABLE_TREND_EXIT', 'REGIME_FILTER', 'USE_ADX']: # Added missing keys from strategies
+    for key in [
+        "ENTRY_TYPE",
+        "TREND_FILTER_TYPE",
+        "STRENGTH_FILTER_TYPE",
+        "EXIT_TYPE",
+        "STOP_LOSS_TYPE",
+        "USE_TAKE_PROFIT",
+        "USE_VOLUME_FILTER",
+        "TIMEFRAME",
+        "ENABLE_TREND_EXIT",
+        "REGIME_FILTER",
+        "USE_ADX",
+    ]:  # Added missing keys from strategies
         if key in search_space:
             spec = search_space[key]
-            if spec['type'] == 'categorical':
+            if spec["type"] == "categorical":
                 params[key] = _suggest_value(key, spec)
-    
+
     # === Phase 2: Entry-Type Dependent Parameters ===
-    entry_type = params.get('ENTRY_TYPE', 'DONCHIAN')
-    
-    if entry_type == 'BOLLINGER':
-        if 'BB_STD' in search_space:
-            params['BB_STD'] = _suggest_value('BB_STD', search_space['BB_STD'])
-            
-    elif entry_type == 'KELTNER':
-        if 'KELTNER_ATR_MULT' in search_space:
-            params['KELTNER_ATR_MULT'] = _suggest_value('KELTNER_ATR_MULT', search_space['KELTNER_ATR_MULT'])
-            
-    elif entry_type == 'CCI':
-        if 'CCI_THRESHOLD' in search_space:
-            params['CCI_THRESHOLD'] = _suggest_value('CCI_THRESHOLD', search_space['CCI_THRESHOLD'])
-    
+    entry_type = params.get("ENTRY_TYPE", "DONCHIAN")
+
+    if entry_type == "BOLLINGER":
+        if "BB_STD" in search_space:
+            params["BB_STD"] = _suggest_value("BB_STD", search_space["BB_STD"])
+
+    elif entry_type == "KELTNER":
+        if "KELTNER_ATR_MULT" in search_space:
+            params["KELTNER_ATR_MULT"] = _suggest_value(
+                "KELTNER_ATR_MULT", search_space["KELTNER_ATR_MULT"]
+            )
+
+    elif entry_type == "CCI":
+        if "CCI_THRESHOLD" in search_space:
+            params["CCI_THRESHOLD"] = _suggest_value("CCI_THRESHOLD", search_space["CCI_THRESHOLD"])
+
     # === Phase 3: Trend-Filter Dependent Parameters ===
-    trend_filter = params.get('TREND_FILTER_TYPE', 'EMA')
-    
-    if trend_filter == 'SUPERTREND':
-        for key in ['SUPERTREND_MULT', 'SUPERTREND_PERIOD']:
+    trend_filter = params.get("TREND_FILTER_TYPE", "EMA")
+
+    if trend_filter == "SUPERTREND":
+        for key in ["SUPERTREND_MULT", "SUPERTREND_PERIOD"]:
             if key in search_space:
                 params[key] = _suggest_value(key, search_space[key])
-    
-    elif trend_filter == 'MACD':
-        for key in ['MACD_FAST', 'MACD_SLOW', 'MACD_SIGNAL']:
+
+    elif trend_filter == "MACD":
+        for key in ["MACD_FAST", "MACD_SLOW", "MACD_SIGNAL"]:
             if key in search_space:
                 params[key] = _suggest_value(key, search_space[key])
-    
-    elif trend_filter == 'ICHIMOKU':
-        for key in ['ICHIMOKU_TENKAN', 'ICHIMOKU_KIJUN', 'ICHIMOKU_SENKOU_B']:
+
+    elif trend_filter == "ICHIMOKU":
+        for key in ["ICHIMOKU_TENKAN", "ICHIMOKU_KIJUN", "ICHIMOKU_SENKOU_B"]:
             if key in search_space:
                 params[key] = _suggest_value(key, search_space[key])
-    
-    elif trend_filter == 'VWAP':
-        if 'VWAP_STD_MULT' in search_space:
-            params['VWAP_STD_MULT'] = _suggest_value('VWAP_STD_MULT', search_space['VWAP_STD_MULT'])
-    elif trend_filter == 'DMI':
-        if 'DMI_PERIOD' in search_space:
-            params['DMI_PERIOD'] = _suggest_value('DMI_PERIOD', search_space['DMI_PERIOD'])
-    elif trend_filter == 'AROON':
-        if 'AROON_PERIOD' in search_space:
-            params['AROON_PERIOD'] = _suggest_value('AROON_PERIOD', search_space['AROON_PERIOD'])
-    
+
+    elif trend_filter == "VWAP":
+        if "VWAP_STD_MULT" in search_space:
+            params["VWAP_STD_MULT"] = _suggest_value("VWAP_STD_MULT", search_space["VWAP_STD_MULT"])
+    elif trend_filter == "DMI":
+        if "DMI_PERIOD" in search_space:
+            params["DMI_PERIOD"] = _suggest_value("DMI_PERIOD", search_space["DMI_PERIOD"])
+    elif trend_filter == "AROON":
+        if "AROON_PERIOD" in search_space:
+            params["AROON_PERIOD"] = _suggest_value("AROON_PERIOD", search_space["AROON_PERIOD"])
+
     # === Phase 4: Strength-Filter Dependent Parameters ===
-    strength_filter = params.get('STRENGTH_FILTER_TYPE', 'NONE')
-    
-    if strength_filter in ['ADX', 'VHF', 'MFI', 'RSI', 'STOCHASTIC', 'STOCH_RSI', 'ER', 'WILLIAMS_R']:
-        if 'STRENGTH_FILTER_PERIOD' in search_space:
-            params['STRENGTH_FILTER_PERIOD'] = _suggest_value('STRENGTH_FILTER_PERIOD', search_space['STRENGTH_FILTER_PERIOD'])
-    
-    if strength_filter == 'VHF':
-        if 'VHF_THRESHOLD' in search_space:
-            params['VHF_THRESHOLD'] = _suggest_value('VHF_THRESHOLD', search_space['VHF_THRESHOLD'])
-    
-    elif strength_filter == 'MFI':
-        if 'MFI_THRESHOLD' in search_space:
-            params['MFI_THRESHOLD'] = _suggest_value('MFI_THRESHOLD', search_space['MFI_THRESHOLD'])
-    
-    elif strength_filter == 'RSI':
-        for key in ['RSI_OVERBOUGHT', 'RSI_OVERSOLD', 'RSI_OVERBOUGHT_FUTURES']:
+    strength_filter = params.get("STRENGTH_FILTER_TYPE", "NONE")
+
+    if strength_filter in [
+        "ADX",
+        "VHF",
+        "MFI",
+        "RSI",
+        "STOCHASTIC",
+        "STOCH_RSI",
+        "ER",
+        "WILLIAMS_R",
+    ]:
+        if "STRENGTH_FILTER_PERIOD" in search_space:
+            params["STRENGTH_FILTER_PERIOD"] = _suggest_value(
+                "STRENGTH_FILTER_PERIOD", search_space["STRENGTH_FILTER_PERIOD"]
+            )
+
+    if strength_filter == "VHF":
+        if "VHF_THRESHOLD" in search_space:
+            params["VHF_THRESHOLD"] = _suggest_value("VHF_THRESHOLD", search_space["VHF_THRESHOLD"])
+
+    elif strength_filter == "MFI":
+        if "MFI_THRESHOLD" in search_space:
+            params["MFI_THRESHOLD"] = _suggest_value("MFI_THRESHOLD", search_space["MFI_THRESHOLD"])
+
+    elif strength_filter == "RSI":
+        for key in ["RSI_OVERBOUGHT", "RSI_OVERSOLD", "RSI_OVERBOUGHT_FUTURES"]:
             if key in search_space:
                 params[key] = _suggest_value(key, search_space[key])
-    
-    elif strength_filter == 'STOCHASTIC':
-        for key in ['STOCH_OVERBOUGHT', 'STOCH_OVERSOLD']:
+
+    elif strength_filter == "STOCHASTIC":
+        for key in ["STOCH_OVERBOUGHT", "STOCH_OVERSOLD"]:
             if key in search_space:
                 params[key] = _suggest_value(key, search_space[key])
-    
-    elif strength_filter == 'STOCH_RSI':
-        for key in ['STOCH_RSI_OVERBOUGHT', 'STOCH_RSI_OVERSOLD']:
+
+    elif strength_filter == "STOCH_RSI":
+        for key in ["STOCH_RSI_OVERBOUGHT", "STOCH_RSI_OVERSOLD"]:
             if key in search_space:
                 params[key] = _suggest_value(key, search_space[key])
-    
-    elif strength_filter == 'CMF':
-        for key in ['CMF_PERIOD', 'CMF_THRESHOLD']:
+
+    elif strength_filter == "CMF":
+        for key in ["CMF_PERIOD", "CMF_THRESHOLD"]:
             if key in search_space:
                 params[key] = _suggest_value(key, search_space[key])
-    
-    elif strength_filter == 'HURST':
+
+    elif strength_filter == "HURST":
         # 1. Period (Independent)
-        if 'HURST_PERIOD' in search_space:
-            params['HURST_PERIOD'] = _suggest_value('HURST_PERIOD', search_space['HURST_PERIOD'])
+        if "HURST_PERIOD" in search_space:
+            params["HURST_PERIOD"] = _suggest_value("HURST_PERIOD", search_space["HURST_PERIOD"])
 
         # 2. Random Threshold (Independent Base)
-        random_thresh = 0.5 # Default fallback
-        if 'HURST_RANDOM_THRESHOLD' in search_space:
-            params['HURST_RANDOM_THRESHOLD'] = _suggest_value('HURST_RANDOM_THRESHOLD', search_space['HURST_RANDOM_THRESHOLD'])
-            random_thresh = params['HURST_RANDOM_THRESHOLD']
-            
+        random_thresh = 0.5  # Default fallback
+        if "HURST_RANDOM_THRESHOLD" in search_space:
+            params["HURST_RANDOM_THRESHOLD"] = _suggest_value(
+                "HURST_RANDOM_THRESHOLD", search_space["HURST_RANDOM_THRESHOLD"]
+            )
+            random_thresh = params["HURST_RANDOM_THRESHOLD"]
+
         # 3. Trend Threshold (Dependent: Must be > Random)
-        if 'HURST_TREND_THRESHOLD' in search_space:
-            spec = search_space['HURST_TREND_THRESHOLD']
+        if "HURST_TREND_THRESHOLD" in search_space:
+            spec = search_space["HURST_TREND_THRESHOLD"]
             # Enforce Logical Safety: Trend > Random + Buffer (0.01)
             # This prevents logical contradictions even if search ranges overlap
-            safe_low = max(spec['low'], random_thresh + 0.01)
-            raw_trend = _suggest_value('HURST_TREND_THRESHOLD', spec)
+            safe_low = max(spec["low"], random_thresh + 0.01)
+            raw_trend = _suggest_value("HURST_TREND_THRESHOLD", spec)
             step = spec.get("step")
-            if safe_low < spec['high']:
+            if safe_low < spec["high"]:
                 if step is None:
-                    params['HURST_TREND_THRESHOLD'] = float(max(safe_low, min(spec['high'], raw_trend)))
+                    params["HURST_TREND_THRESHOLD"] = float(
+                        max(safe_low, min(spec["high"], raw_trend))
+                    )
                 else:
-                    low, high = _sanitize_float_step_bounds(safe_low, spec['high'], step)
+                    low, high = _sanitize_float_step_bounds(safe_low, spec["high"], step)
                     if high <= low:
-                        params['HURST_TREND_THRESHOLD'] = float(low)
+                        params["HURST_TREND_THRESHOLD"] = float(low)
                     else:
                         snapped = low + round((float(raw_trend) - low) / float(step)) * float(step)
-                        params['HURST_TREND_THRESHOLD'] = float(max(low, min(high, snapped)))
+                        params["HURST_TREND_THRESHOLD"] = float(max(low, min(high, snapped)))
             else:
-                params['HURST_TREND_THRESHOLD'] = float(safe_low)
+                params["HURST_TREND_THRESHOLD"] = float(safe_low)
 
-    elif strength_filter == 'ER':
-        if 'ER_THRESHOLD' in search_space:
-            params['ER_THRESHOLD'] = _suggest_value('ER_THRESHOLD', search_space['ER_THRESHOLD'])
-            
-    elif strength_filter == 'NATR':
-        if 'NATR_THRESHOLD' in search_space:
-            params['NATR_THRESHOLD'] = _suggest_value('NATR_THRESHOLD', search_space['NATR_THRESHOLD'])
-    elif strength_filter == 'GARMAN_KLASS':
-        for key in ['GK_PERIOD', 'GK_THRESHOLD']:
+    elif strength_filter == "ER":
+        if "ER_THRESHOLD" in search_space:
+            params["ER_THRESHOLD"] = _suggest_value("ER_THRESHOLD", search_space["ER_THRESHOLD"])
+
+    elif strength_filter == "NATR":
+        if "NATR_THRESHOLD" in search_space:
+            params["NATR_THRESHOLD"] = _suggest_value(
+                "NATR_THRESHOLD", search_space["NATR_THRESHOLD"]
+            )
+    elif strength_filter == "GARMAN_KLASS":
+        for key in ["GK_PERIOD", "GK_THRESHOLD"]:
             if key in search_space:
                 params[key] = _suggest_value(key, search_space[key])
-    elif strength_filter == 'FORCE_INDEX':
-        for key in ['FORCE_INDEX_PERIOD', 'FORCE_INDEX_THRESHOLD']:
+    elif strength_filter == "FORCE_INDEX":
+        for key in ["FORCE_INDEX_PERIOD", "FORCE_INDEX_THRESHOLD"]:
             if key in search_space:
                 params[key] = _suggest_value(key, search_space[key])
-    elif strength_filter == 'WILLIAMS_R':
-        for key in ['WILLR_OVERBOUGHT', 'WILLR_OVERSOLD']:
+    elif strength_filter == "WILLIAMS_R":
+        for key in ["WILLR_OVERBOUGHT", "WILLR_OVERSOLD"]:
             if key in search_space:
                 params[key] = _suggest_value(key, search_space[key])
-    elif strength_filter == 'OBV':
-        if 'OBV_MA_PERIOD' in search_space:
-            params['OBV_MA_PERIOD'] = _suggest_value('OBV_MA_PERIOD', search_space['OBV_MA_PERIOD'])
-    
+    elif strength_filter == "OBV":
+        if "OBV_MA_PERIOD" in search_space:
+            params["OBV_MA_PERIOD"] = _suggest_value("OBV_MA_PERIOD", search_space["OBV_MA_PERIOD"])
+
     # === Phase 5: Exit-Type Dependent Parameters ===
-    exit_type = params.get('EXIT_TYPE', 'ATR')
-    
-    if exit_type == 'PARABOLIC_SAR':
-        if 'SAR_STEP' in search_space:
-            params['SAR_STEP'] = _suggest_value('SAR_STEP', search_space['SAR_STEP'])
-    
+    exit_type = params.get("EXIT_TYPE", "ATR")
+
+    if exit_type == "PARABOLIC_SAR":
+        if "SAR_STEP" in search_space:
+            params["SAR_STEP"] = _suggest_value("SAR_STEP", search_space["SAR_STEP"])
+
     # === Phase 6: Common Parameters (Always Used) ===
     # [CRITICAL] Handle STOP_LOSS_TYPE logical conflict first
-    stop_loss_type = str(params.get('STOP_LOSS_TYPE', 'FIXED')).upper()
-    
-    if stop_loss_type == 'FIXED':
-        if 'STOP_LOSS_PCT' in search_space:
-            params['STOP_LOSS_PCT'] = _suggest_value('STOP_LOSS_PCT', search_space['STOP_LOSS_PCT'])
-        elif 'SL_PCT' in search_space:
+    stop_loss_type = str(params.get("STOP_LOSS_TYPE", "FIXED")).upper()
+
+    if stop_loss_type == "FIXED":
+        if "STOP_LOSS_PCT" in search_space:
+            params["STOP_LOSS_PCT"] = _suggest_value("STOP_LOSS_PCT", search_space["STOP_LOSS_PCT"])
+        elif "SL_PCT" in search_space:
             # Legacy alias support: always normalize to engine key STOP_LOSS_PCT.
-            params['STOP_LOSS_PCT'] = _suggest_value('SL_PCT', search_space['SL_PCT'])
-        params.pop('ATR_STOP_LOSS_MULT', None)
-    
-    elif stop_loss_type == 'ATR':
-        if 'ATR_STOP_LOSS_MULT' in search_space:
-            params['ATR_STOP_LOSS_MULT'] = _suggest_value('ATR_STOP_LOSS_MULT', search_space['ATR_STOP_LOSS_MULT'])
-        params.pop('STOP_LOSS_PCT', None)
-        params.pop('SL_PCT', None)
-    
+            params["STOP_LOSS_PCT"] = _suggest_value("SL_PCT", search_space["SL_PCT"])
+        params.pop("ATR_STOP_LOSS_MULT", None)
+
+    elif stop_loss_type == "ATR":
+        if "ATR_STOP_LOSS_MULT" in search_space:
+            params["ATR_STOP_LOSS_MULT"] = _suggest_value(
+                "ATR_STOP_LOSS_MULT", search_space["ATR_STOP_LOSS_MULT"]
+            )
+        params.pop("STOP_LOSS_PCT", None)
+        params.pop("SL_PCT", None)
+
     # [CRITICAL] Handle USE_TAKE_PROFIT logical conflict
-    use_take_profit = params.get('USE_TAKE_PROFIT', False)
-    
+    use_take_profit = params.get("USE_TAKE_PROFIT", False)
+
     if use_take_profit:
-        for key in ['TAKE_PROFIT_ATR_MULT', 'TAKE_PROFIT_ATR_MULT_FUTURES']:
+        for key in ["TAKE_PROFIT_ATR_MULT", "TAKE_PROFIT_ATR_MULT_FUTURES"]:
             if key in search_space:
                 params[key] = _suggest_value(key, search_space[key])
-    
+
     # [CRITICAL] Handle USE_VOLUME_FILTER logical conflict
-    use_volume_filter = params.get('USE_VOLUME_FILTER', False)
-    
+    use_volume_filter = params.get("USE_VOLUME_FILTER", False)
+
     if use_volume_filter:
-        for key in ['VOLUME_THRESHOLD_MULT', 'VOLUME_MA_PERIOD']:
+        for key in ["VOLUME_THRESHOLD_MULT", "VOLUME_MA_PERIOD"]:
             if key in search_space:
                 params[key] = _suggest_value(key, search_space[key])
-    
+
     # Other common parameters (no conflicts)
     common_keys = [
-        'ENTRY_PERIOD', 'MA_PERIOD', 'ATR_PERIOD',
-        'ATR_MULTIPLIER',
-        'ADX_THRESHOLD',
-        'RISK_PER_TRADE', 'LEVERAGE',
-        'MAX_HOLDING_BARS', 'TRAILING_ACTIVATION_ATR',
-        'TIME_EXIT_PROFIT_THRESHOLD',  # [NEW] Conditional time exit
-        'RSI_EXIT_THRESHOLD', # [NEW] Panic exit
-        'RSI_ENTRY_MAX', 'NATR_ENTRY_MIN', # [NEW] Entry Safety Filters
-        'ENABLE_SCALE_OUT',
-        'ENABLE_BREAKEVEN',
-        'ENABLE_PYRAMIDING',
-        'USE_DYNAMIC_RISK',
-        'RISK_PER_TRADE_SPOT'
+        "ENTRY_PERIOD",
+        "MA_PERIOD",
+        "ATR_PERIOD",
+        "ATR_MULTIPLIER",
+        "ADX_THRESHOLD",
+        "RISK_PER_TRADE",
+        "LEVERAGE",
+        "MAX_HOLDING_BARS",
+        "TRAILING_ACTIVATION_ATR",
+        "TIME_EXIT_PROFIT_THRESHOLD",  # [NEW] Conditional time exit
+        "RSI_EXIT_THRESHOLD",  # [NEW] Panic exit
+        "RSI_ENTRY_MAX",
+        "NATR_ENTRY_MIN",  # [NEW] Entry Safety Filters
+        "ENABLE_SCALE_OUT",
+        "ENABLE_BREAKEVEN",
+        "ENABLE_PYRAMIDING",
+        "USE_DYNAMIC_RISK",
+        "RISK_PER_TRADE_SPOT",
     ]
-    
+
     for key in common_keys:
         if key in search_space:
-            if key == 'MAX_HOLDING_BARS':
+            if key == "MAX_HOLDING_BARS":
                 params[key] = _suggest_timeframe_bounded_holding(search_space[key])
             else:
                 params[key] = _suggest_value(key, search_space[key])
 
     # [CRITICAL] Active position management dependencies
-    if params.get('ENABLE_SCALE_OUT', False):
-        for key in ['SCALE_OUT_TRIGGER_ATR', 'SCALE_OUT_RATIO']:
+    if params.get("ENABLE_SCALE_OUT", False):
+        for key in ["SCALE_OUT_TRIGGER_ATR", "SCALE_OUT_RATIO"]:
             if key in search_space:
                 params[key] = _suggest_value(key, search_space[key])
     else:
-        _set_inactive_default('SCALE_OUT_TRIGGER_ATR')
-        _set_inactive_default('SCALE_OUT_RATIO')
+        _set_inactive_default("SCALE_OUT_TRIGGER_ATR")
+        _set_inactive_default("SCALE_OUT_RATIO")
 
-    if params.get('ENABLE_BREAKEVEN', False):
-        if 'BREAKEVEN_BUFFER_PCT' in search_space:
-            params['BREAKEVEN_BUFFER_PCT'] = _suggest_value('BREAKEVEN_BUFFER_PCT', search_space['BREAKEVEN_BUFFER_PCT'])
+    if params.get("ENABLE_BREAKEVEN", False):
+        if "BREAKEVEN_BUFFER_PCT" in search_space:
+            params["BREAKEVEN_BUFFER_PCT"] = _suggest_value(
+                "BREAKEVEN_BUFFER_PCT", search_space["BREAKEVEN_BUFFER_PCT"]
+            )
     else:
-        _set_inactive_default('BREAKEVEN_BUFFER_PCT')
+        _set_inactive_default("BREAKEVEN_BUFFER_PCT")
 
-    if params.get('ENABLE_PYRAMIDING', False):
-        for key in ['PYRAMID_TRIGGER_ATR', 'PYRAMID_STEP_ATR', 'PYRAMID_RISK_RATIO', 'PYRAMID_MAX_ADDS']:
-            if key in search_space:
-                params[key] = _suggest_value(key, search_space[key])
-    else:
-        _set_inactive_default('PYRAMID_TRIGGER_ATR')
-        _set_inactive_default('PYRAMID_STEP_ATR')
-        _set_inactive_default('PYRAMID_RISK_RATIO')
-        _set_inactive_default('PYRAMID_MAX_ADDS')
-
-    # [CRITICAL] Dynamic-risk dependencies
-    if params.get('USE_DYNAMIC_RISK', False):
+    if params.get("ENABLE_PYRAMIDING", False):
         for key in [
-            'STRONG_REGIME_HURST', 'STRONG_REGIME_NATR', 'STRONG_REGIME_MULTIPLIER',
-            'WEAK_REGIME_HURST', 'WEAK_REGIME_MULTIPLIER',
-            'PANIC_REGIME_NATR', 'PANIC_REGIME_MULTIPLIER',
+            "PYRAMID_TRIGGER_ATR",
+            "PYRAMID_STEP_ATR",
+            "PYRAMID_RISK_RATIO",
+            "PYRAMID_MAX_ADDS",
         ]:
             if key in search_space:
                 params[key] = _suggest_value(key, search_space[key])
     else:
-        _set_inactive_default('STRONG_REGIME_HURST')
-        _set_inactive_default('STRONG_REGIME_NATR')
-        _set_inactive_default('STRONG_REGIME_MULTIPLIER')
-        _set_inactive_default('WEAK_REGIME_HURST')
-        _set_inactive_default('WEAK_REGIME_MULTIPLIER')
-        _set_inactive_default('PANIC_REGIME_NATR')
-        _set_inactive_default('PANIC_REGIME_MULTIPLIER')
-    
+        _set_inactive_default("PYRAMID_TRIGGER_ATR")
+        _set_inactive_default("PYRAMID_STEP_ATR")
+        _set_inactive_default("PYRAMID_RISK_RATIO")
+        _set_inactive_default("PYRAMID_MAX_ADDS")
+
+    # [CRITICAL] Dynamic-risk dependencies
+    if params.get("USE_DYNAMIC_RISK", False):
+        for key in [
+            "STRONG_REGIME_HURST",
+            "STRONG_REGIME_NATR",
+            "STRONG_REGIME_MULTIPLIER",
+            "WEAK_REGIME_HURST",
+            "WEAK_REGIME_MULTIPLIER",
+            "PANIC_REGIME_NATR",
+            "PANIC_REGIME_MULTIPLIER",
+        ]:
+            if key in search_space:
+                params[key] = _suggest_value(key, search_space[key])
+    else:
+        _set_inactive_default("STRONG_REGIME_HURST")
+        _set_inactive_default("STRONG_REGIME_NATR")
+        _set_inactive_default("STRONG_REGIME_MULTIPLIER")
+        _set_inactive_default("WEAK_REGIME_HURST")
+        _set_inactive_default("WEAK_REGIME_MULTIPLIER")
+        _set_inactive_default("PANIC_REGIME_NATR")
+        _set_inactive_default("PANIC_REGIME_MULTIPLIER")
+
     return params
+
 
 def soft_sigmoid(x, L, k, x0):
     """
@@ -672,7 +732,7 @@ def soft_sigmoid(x, L, k, x0):
     L: Maximum value (Asymptote)
     k: Steepness
     x0: Midpoint (Center of the S-curve)
-    
+
     Numerically stable implementation with overflow protection.
     """
     # Prevent overflow: clip exp argument to safe range [-500, 500]
@@ -716,7 +776,15 @@ def _blend_gates_with_floor(gates, weights, gate_floor):
     return floor + (1.0 - floor) * weighted
 
 
-def calculate_score(ret, mdd, trades_df, mode="UNIFIED", market_type="spot", timeframe=None, min_trades_override=None):
+def calculate_score(
+    ret,
+    mdd,
+    trades_df,
+    mode="UNIFIED",
+    market_type="spot",
+    timeframe=None,
+    min_trades_override=None,
+):
     """
     Overfitting-resistant objective (continuous-form):
     score = C(activity, consistency, Kelly, side-coverage) * (Growth + Quality - Risk)
@@ -731,10 +799,10 @@ def calculate_score(ret, mdd, trades_df, mode="UNIFIED", market_type="spot", tim
         return -10000.0
 
     N = len(trades_df)
-    if 'pnl' not in trades_df.columns or 'pnl_pct' not in trades_df.columns:
+    if "pnl" not in trades_df.columns or "pnl_pct" not in trades_df.columns:
         return -10000.0
 
-    returns = trades_df['pnl_pct'].values.astype(np.float64)
+    returns = trades_df["pnl_pct"].values.astype(np.float64)
 
     # --- 1) Base statistics ---
     r_avg = float(np.mean(returns))
@@ -832,7 +900,7 @@ def calculate_score(ret, mdd, trades_df, mode="UNIFIED", market_type="spot", tim
     # --- 3) Growth/Quality/Risk components ---
     mu = r_avg / 100.0
     sigma = r_std / 100.0
-    geom_growth = mu - 0.5 * (sigma ** 2)
+    geom_growth = mu - 0.5 * (sigma**2)
 
     growth_signal = _asinh_score(geom_growth, cfg.asinh_growth_scale, cfg.asinh_clip)
 
@@ -851,9 +919,7 @@ def calculate_score(ret, mdd, trades_df, mode="UNIFIED", market_type="spot", tim
     d_cvar = _asinh_score(cvar_abs, cfg.asinh_cvar_scale, cfg.asinh_clip)
     d_ulcer = _asinh_score(ulcer_proxy, cfg.asinh_ulcer_scale, cfg.asinh_clip)
     risk_signal = (
-        (cfg.w_risk_mdd * d_mdd)
-        + (cfg.w_risk_cvar * d_cvar)
-        + (cfg.w_risk_ulcer * d_ulcer)
+        (cfg.w_risk_mdd * d_mdd) + (cfg.w_risk_cvar * d_cvar) + (cfg.w_risk_ulcer * d_ulcer)
     )
 
     tail_excess = max(abs_mdd - target_mdd, 0.0)
@@ -872,7 +938,7 @@ def calculate_score(ret, mdd, trades_df, mode="UNIFIED", market_type="spot", tim
         # Futures: use default balanced weights
         w_growth = cfg.w_growth_signal
         w_risk = cfg.w_risk_signal
-    
+
     base_signal = (
         (w_growth * growth_scale * growth_signal)
         + (cfg.w_quality_signal * quality_signal)
@@ -936,11 +1002,15 @@ def calculate_score(ret, mdd, trades_df, mode="UNIFIED", market_type="spot", tim
     score = cfg.base_score_multiplier * confidence * combined_gate * base_signal
 
     # Risk Penalty (Leverage & MDD exposure)
-    leverage = float(trades_df['leverage'].iloc[0]) if 'leverage' in trades_df.columns and len(trades_df) > 0 else 1.0
+    leverage = (
+        float(trades_df["leverage"].iloc[0])
+        if "leverage" in trades_df.columns and len(trades_df) > 0
+        else 1.0
+    )
     risk_penalty = 0.0
     if leverage > 5.0 and abs_mdd > 15.0:
         risk_penalty = (leverage * abs_mdd) / 100.0
-        
+
     score -= risk_penalty * 50.0
 
     # --- 5) Smooth penalties/bonuses ---
@@ -955,7 +1025,7 @@ def calculate_score(ret, mdd, trades_df, mode="UNIFIED", market_type="spot", tim
         expectancy_threshold = cfg.expectancy_threshold_pct
         expectancy_penalty = cfg.expectancy_penalty_mult
         negative_expectancy_penalty = cfg.negative_expectancy_penalty_mult
-    
+
     expectancy_gap = max(expectancy_threshold - r_avg, 0.0)
     score -= expectancy_gap * expectancy_penalty
     score -= max(-r_avg, 0.0) * negative_expectancy_penalty
@@ -963,15 +1033,15 @@ def calculate_score(ret, mdd, trades_df, mode="UNIFIED", market_type="spot", tim
     # Base bonus for return and profit factor
     score += confidence * (
         cfg.bonus_ret_weight * _asinh_score(float(ret), cfg.bonus_ret_scale, cfg.asinh_clip)
-        + cfg.bonus_pf_weight * _asinh_score((pf - cfg.bonus_pf_center), cfg.bonus_pf_scale, cfg.asinh_clip)
+        + cfg.bonus_pf_weight
+        * _asinh_score((pf - cfg.bonus_pf_center), cfg.bonus_pf_scale, cfg.asinh_clip)
     )
-    
+
     # Spot-specific: per-trade return quality bonus (replaces calmar/abs_mdd proxy)
     if market_type == "spot":
         ret_per_trade = float(ret) / max(float(N), 1.0)
         excess_bonus = _SCORE_COEF_SPOT_EXCESS_RETURN_BONUS_WEIGHT
         score += confidence * excess_bonus * _asinh_score(ret_per_trade, 0.08, cfg.asinh_clip)
-
 
     if not np.isfinite(score):
         return -10000.0
@@ -982,7 +1052,9 @@ def compute_segment_merge_index(hourly_df: pd.DataFrame, daily_df: pd.DataFrame)
     """
     Build merge index for a sliced segment so engine can use fast index mapping.
     """
-    hourly_days = pd.to_datetime(hourly_df["datetime"]).dt.normalize().values.astype("datetime64[ns]")
+    hourly_days = (
+        pd.to_datetime(hourly_df["datetime"]).dt.normalize().values.astype("datetime64[ns]")
+    )
     daily_days = pd.to_datetime(daily_df["datetime"]).dt.normalize().values.astype("datetime64[ns]")
     if len(daily_days) == 0:
         return np.zeros(len(hourly_days), dtype=np.int32)

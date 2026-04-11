@@ -16,6 +16,7 @@ _logger: logging.Logger = logging.getLogger("opt_spot")
 
 # Optuna TPE `constraints_func`: each value <= 0 means satisfied (Gardner-style soft constraints).
 
+
 def _segment_with_context(
     full_signal_df: pd.DataFrame,
     exec_start_idx: int,
@@ -96,23 +97,3 @@ def _span_days_ref_slice(ref_df: pd.DataFrame, abs_start: int, abs_end: int) -> 
     dt1 = ref_df["datetime"].iloc[i1]
     sec = float((dt1 - dt0).total_seconds())
     return max(sec / 86400.0, 1.0 / 24.0)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

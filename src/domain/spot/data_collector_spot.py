@@ -1,18 +1,20 @@
-import pandas as pd
-from src.core.exchange.upbit_client import UpbitClient, UpbitOhlcvFetchError
-import sys
-import os
-import re
 import json
+import re
+import sys
 from pathlib import Path
+
+import pandas as pd
+
+from src.core.exchange.upbit_client import UpbitClient, UpbitOhlcvFetchError
 
 # 프로젝트 루트 경로 추가
 project_root = str(Path(__file__).resolve().parents[2])
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-from config.settings import DATA_DIR, SPOT_DATA_DIR, SPOT_BACKTEST_START_DATE, SPOT_BACKTEST_END_DATE
+from config.settings import SPOT_BACKTEST_END_DATE, SPOT_BACKTEST_START_DATE, SPOT_DATA_DIR
 from src.core.utils.utils import setup_logger
+
 
 class DataValidator:
     @staticmethod
@@ -22,32 +24,34 @@ class DataValidator:
         if df.isnull().any().any():
             missing_cols = df.columns[df.isnull().any()].tolist()
             issues.append(f"Missing values in columns: {missing_cols}")
-            
-        df.set_index('datetime', inplace=True, drop=False)
+
+        df.set_index("datetime", inplace=True, drop=False)
         df.sort_index(inplace=True)
-        
+
         expected_diff = {
             "1d": pd.Timedelta(days=1),
             "4h": pd.Timedelta(hours=4),
         }.get(timeframe)
-        
+
         if expected_diff:
             time_diff = df.index.to_series().diff().dropna()
             gaps = time_diff[time_diff != expected_diff]
             if not gaps.empty:
                 issues.append(f"Found {len(gaps)} time gaps. First gap at {gaps.index[0]}")
 
-        invalid_high_low = df[df['high'] < df['low']]
+        invalid_high_low = df[df["high"] < df["low"]]
         if not invalid_high_low.empty:
             issues.append(f"High < Low detected in {len(invalid_high_low)} rows")
-            
+
         return issues
+
 
 class DataCollectorSpot:
     """
     Upbit Spot Data Collector.
     Mimics DataCollector but uses UpbitClient.
     """
+
     def __init__(self, api_key=None, secret=None):
         self.client = UpbitClient(api_key, secret)
         self.logger = setup_logger("DataCollectorSpot")
@@ -55,7 +59,7 @@ class DataCollectorSpot:
     @staticmethod
     def _safe_symbol(symbol):
         # Upbit symbols KRW-BTC -> KRW_BTC
-        return symbol.replace('/', '_').replace('-', '_')
+        return symbol.replace("/", "_").replace("-", "_")
 
     def _cache_path(self, symbol, timeframe):
         safe_symbol = self._safe_symbol(symbol)
@@ -87,15 +91,21 @@ class DataCollectorSpot:
 
     def _normalize_df(self, df):
         if df is None or df.empty:
-            return pd.DataFrame(columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'datetime'])
+            return pd.DataFrame(
+                columns=["timestamp", "open", "high", "low", "close", "volume", "datetime"]
+            )
 
         out = df.copy()
-        if 'datetime' not in out.columns and 'timestamp' in out.columns:
-            out['datetime'] = pd.to_datetime(out['timestamp'], unit='ms')
-        elif 'datetime' in out.columns:
-            out['datetime'] = pd.to_datetime(out['datetime'])
+        if "datetime" not in out.columns and "timestamp" in out.columns:
+            out["datetime"] = pd.to_datetime(out["timestamp"], unit="ms")
+        elif "datetime" in out.columns:
+            out["datetime"] = pd.to_datetime(out["datetime"])
 
-        out = out.drop_duplicates(subset=['timestamp']).sort_values('timestamp').reset_index(drop=True)
+        out = (
+            out.drop_duplicates(subset=["timestamp"])
+            .sort_values("timestamp")
+            .reset_index(drop=True)
+        )
         return out
 
     def _read_parquet(self, path):
@@ -119,7 +129,7 @@ class DataCollectorSpot:
         end_ts = pd.Timestamp(end_date) + pd.Timedelta(days=1) - pd.Timedelta(milliseconds=1)
         if df.empty:
             return df
-        return df[(df['datetime'] >= start_ts) & (df['datetime'] <= end_ts)].copy()
+        return df[(df["datetime"] >= start_ts) & (df["datetime"] <= end_ts)].copy()
 
     def _timeframe_to_timedelta(self, timeframe):
         m = re.match(r"^(\d+)([mhdw])$", str(timeframe).strip().lower())
@@ -127,10 +137,14 @@ class DataCollectorSpot:
             return None
         n = int(m.group(1))
         u = m.group(2)
-        if u == "m": return pd.Timedelta(minutes=n)
-        if u == "h": return pd.Timedelta(hours=n)
-        if u == "d": return pd.Timedelta(days=n)
-        if u == "w": return pd.Timedelta(weeks=n)
+        if u == "m":
+            return pd.Timedelta(minutes=n)
+        if u == "h":
+            return pd.Timedelta(hours=n)
+        if u == "d":
+            return pd.Timedelta(days=n)
+        if u == "w":
+            return pd.Timedelta(weeks=n)
         return None
 
     def _fetch_ranges(self, symbol, timeframe, ranges):
@@ -159,7 +173,9 @@ class DataCollectorSpot:
                 validator = DataValidator()
                 issues = validator.validate(fetched.copy(), symbol, timeframe)
                 if issues:
-                    self.logger.warning(f"Data Validation Issues for {symbol} {timeframe}: {issues}")
+                    self.logger.warning(
+                        f"Data Validation Issues for {symbol} {timeframe}: {issues}"
+                    )
                 fetched_frames.append(fetched)
         return fetched_frames
 
@@ -172,7 +188,7 @@ class DataCollectorSpot:
         cache_path = self._cache_path(symbol, timeframe)
         meta = self._load_meta()
         mk = self._meta_key(symbol, timeframe)
-        
+
         cache_df = pd.DataFrame()
         if cache_path.exists():
             cache_df = self._read_parquet(cache_path)
@@ -181,9 +197,9 @@ class DataCollectorSpot:
         if cache_df.empty:
             missing_ranges.append((req_start, req_end))
         else:
-            cache_start = cache_df['datetime'].min().normalize()
-            cache_end = cache_df['datetime'].max().normalize()
-            
+            cache_start = cache_df["datetime"].min().normalize()
+            cache_end = cache_df["datetime"].max().normalize()
+
             if req_start < cache_start:
                 missing_ranges.append((req_start, cache_start - pd.Timedelta(days=1)))
             if req_end > cache_end:

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from pathlib import Path
 import sys
+from pathlib import Path
 
 import pandas as pd
 import pytest
@@ -22,9 +22,7 @@ def test_merge_funding_assigns_boundary_event_to_same_bar(tmp_path: Path) -> Non
             "low": [0.9, 1.0, 1.1],
             "close": [1.05, 1.15, 1.25],
             "volume": [10.0, 11.0, 12.0],
-            "datetime": pd.to_datetime(
-                [1640995200000, 1641009600000, 1641024000000], unit="ms"
-            ),
+            "datetime": pd.to_datetime([1640995200000, 1641009600000, 1641024000000], unit="ms"),
         }
     )
     funding = pd.DataFrame(
@@ -51,9 +49,7 @@ def test_merge_funding_keeps_legacy_last_known_rate_column(tmp_path: Path) -> No
             "low": [0.9, 1.0, 1.1],
             "close": [1.05, 1.15, 1.25],
             "volume": [10.0, 11.0, 12.0],
-            "datetime": pd.to_datetime(
-                [1640995200000, 1641009600000, 1641024000000], unit="ms"
-            ),
+            "datetime": pd.to_datetime([1640995200000, 1641009600000, 1641024000000], unit="ms"),
         }
     )
     funding = pd.DataFrame(

@@ -1,4 +1,5 @@
 """Optional diagnostics: shared-cash rank_score vs entry_signal alignment (tmp.md)."""
+
 from __future__ import annotations
 
 import numpy as np
@@ -27,7 +28,5 @@ def rank_entry_alignment_issues(
     mean_e = float(np.nanmean(rk[m_ent]))
     mean_n = float(np.nanmean(rk[~m_ent]))
     if mean_e + 1e-6 < mean_n:
-        issues.append(
-            f"mean_rank_on_entries({mean_e:.6f}) < mean_rank_off_entries({mean_n:.6f})"
-        )
+        issues.append(f"mean_rank_on_entries({mean_e:.6f}) < mean_rank_off_entries({mean_n:.6f})")
     return issues
