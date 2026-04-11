@@ -71,9 +71,9 @@ ENGINE_PARAM_SPACE_FUTURES: Dict[str, Dict[str, Any]] = {
 
 
 FUTURES_SYMBOLS: List[str] = [
-    "BTC/USDT",
-    "ETH/USDT",
-    "SOL/USDT",
+    "PIPPIN/USDT",
+    "GALA/USDT",
+    "FET/USDT",
 ]
 
 FUTURES_ANCHOR_SYMBOLS: List[str] = [
@@ -121,8 +121,8 @@ FUTURES_SCREENER_CONFIG: Dict[str, Any] = {
     "SCREENER_MIN_TRADES_DYNAMIC": 12,  # 4h 기준 2년 IS에서 최소 통계적 유의성 (Binomial n>=12)
     "SCREENER_MIN_PF": 1.35,
     "FUNDING_EXTREME_THRESHOLD": 0.003,
-    "MP_MIN_SYMBOLS": 3,
-    "MP_MAX_SYMBOLS": 8,
+    "MP_MIN_SYMBOLS": 1,
+    "MP_MAX_SYMBOLS": 5,
     "CANDIDATES_TOP_K": 12,
     "BROAD_POOL_K": 60,
     "COMBO_SAMPLE_K": 12,
