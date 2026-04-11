@@ -30,6 +30,23 @@ _OPTUNA_MYSQL_TABLES: tuple[str, ...] = (
 )
 
 
+def calc_ulcer_index_from_equity(equity_curve: np.ndarray) -> float:
+    """
+    Calculate Ulcer Index: sqrt(mean(drawdown_pct^2)).
+    Input equity_curve is absolute balance values.
+    """
+    if equity_curve.size < 2:
+        return 0.0
+    
+    # Calculate drawdown percentages
+    hwm = np.maximum.accumulate(equity_curve)
+    # Avoid division by zero
+    safe_hwm = np.where(hwm > 1e-12, hwm, 1.0)
+    dd_pct = (hwm - equity_curve) / safe_hwm
+    
+    return float(np.sqrt(np.mean(np.square(dd_pct))) * 100.0)
+
+
 def cleanup_orphan_studies(
     storage: optuna.storages.RDBStorage,
     base_study_name: str,
