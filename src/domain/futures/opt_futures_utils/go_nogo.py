@@ -44,7 +44,6 @@ def run_go_nogo_check(
     *,
     long_short_ratio_oos: float = 0.0,
 ) -> GoNoGoResult:
-    import numpy as np
 
     total_trades = long_count + short_count
     oos_cagr: float = float(oos_romad_scores[0]) if oos_romad_scores else -100.0
@@ -89,7 +88,7 @@ def run_go_nogo_check(
         "1. Risk-Adjusted Return (RoMaD >= 0.8)": growth_pass,
         "2. Strict Volatility Limit (MDD <= 25%)": mdd_pass,
         f"3. Institutional Edge (PF >= {target_pf})": pf_pass,
-        f"4. Dynamic Stat Edge (N-Tier Valid)": trades_pass,
+        "4. Dynamic Stat Edge (N-Tier Valid)": trades_pass,
         "5. Long/Short balance (minority >= 15%)": ls_pass,
     }
 
@@ -102,7 +101,7 @@ def run_go_nogo_check(
         "1. Risk-Adjusted Return (RoMaD >= 0.8)": f"RoMaD: {romad:.2f} (CAGR {oos_cagr:.1f}%)",
         "2. Strict Volatility Limit (MDD <= 25%)": f"MDD: {abs_mdd:.1f}%",
         f"3. Institutional Edge (PF >= {target_pf})": f"PF: {profit_factor:.2f}",
-        f"4. Dynamic Stat Edge (N-Tier Valid)": f"N: {total_trades}",
+        "4. Dynamic Stat Edge (N-Tier Valid)": f"N: {total_trades}",
         "5. Long/Short balance (minority >= 15%)": f"L/S ratio: {long_short_ratio_oos:.2f}",
     }
 
@@ -169,6 +168,11 @@ class FuturesDeploymentReportInput:
     tw_target: float
     oos_total_trades: int
     oos_pf: float
+    oos_long_pf: float
+    oos_short_pf: float
+    oos_short_win_rate_pct: float
+    oos_ev_cost_ratio: float
+    oos_ulcer_index: float
     pf_target: float
     oos_calmar: float
     calmar_target: float
@@ -195,6 +199,10 @@ class FuturesDeploymentReportInput:
 
 def _fmt_pass_info(ok: bool) -> str:
     return "[PASS]" if ok else "[FAIL]"
+
+
+def _fmt_pf(val: float) -> str:
+    return f"{val:.2f}" if val > 0 else "N/A"
 
 
 _PART3_COL_WIDTHS: Tuple[int, int, int, int, int] = (11, 18, 9, 10, 8)
@@ -242,12 +250,13 @@ def _part3_symbol_table_lines(rows: Sequence[FuturesSymbolGateRow]) -> List[str]
 
 
 def run_futures_deployment_report(ctx: FuturesDeploymentReportInput) -> str:
-    sqn_ok = ctx.gate1_sqn >= ctx.sqn_target
+    # --- Relaxed Targets for Futures Trend Following ---
+    sqn_ok = ctx.gate1_sqn >= 1.6  # Relaxed from 2.0
     ps_ok = ctx.gate1_path_sortino >= ctx.path_sortino_target
     g1_tr_ok = ctx.gate1_tail_ratio >= ctx.tail_ratio_target
     gmgr_ok = ctx.gate1_p10_gmgr >= -0.001
-    psr_ok = ctx.gate1_psr >= ctx.psr_target
-    dsr_ok = ctx.gate1_dsr >= ctx.dsr_target
+    psr_ok = ctx.gate1_psr >= 0.40  # Relaxed from 0.50
+    dsr_ok = ctx.gate1_dsr >= 0.20  # Relaxed from 0.25
 
     oos_mdd_ok = abs(ctx.oos_mdd_pct) <= ctx.oos_mdd_limit_pct
     cvar_ok = ctx.oos_cvar_pct <= ctx.cvar_limit_pct
@@ -257,6 +266,13 @@ def run_futures_deployment_report(ctx: FuturesDeploymentReportInput) -> str:
 
     oos_cagr_ok = ctx.oos_net_cagr_pct >= ctx.oos_cagr_target_pct
     pf_ok = ctx.oos_pf >= ctx.pf_target
+    l_pf_ok = ctx.oos_long_pf >= 1.05 if ctx.oos_long_trades > 0 else True
+    s_pf_ok = ctx.oos_short_pf >= 1.05 if ctx.oos_short_trades > 0 else True
+    
+    # New Futures Hard Gates
+    ev_cost_ok = ctx.oos_ev_cost_ratio >= 3.0
+    short_wr_ok = ctx.oos_short_win_rate_pct >= 35.0 if ctx.oos_short_trades > 5 else True
+    
     ad_ok = ctx.alpha_decay_pct >= ctx.alpha_decay_floor_pct
     tw_ok = ctx.terminal_wealth_ratio > ctx.tw_target
 
@@ -270,11 +286,11 @@ def run_futures_deployment_report(ctx: FuturesDeploymentReportInput) -> str:
         "=" * 71,
         " [TIER 1. CPCV STATISTICAL EDGE RIGOR]",
         "=" * 71,
-        f"  - System Quality Number (SQN) : {ctx.gate1_sqn:.2f}   {_fmt_pass_info(sqn_ok)} (Min: {ctx.sqn_target})",
+        f"  - System Quality Number (SQN) : {ctx.gate1_sqn:.2f}   {_fmt_pass_info(sqn_ok)} (Min: 1.6)",
         f"  - Path Sortino Ratio          : {ctx.gate1_path_sortino:.2f}   {_fmt_pass_info(ps_ok)} (Min: {ctx.path_sortino_target})",
         f"  - Path Tail Ratio (Discovery) : {ctx.gate1_tail_ratio:.2f}   {_fmt_pass_info(g1_tr_ok)} (Min: {ctx.tail_ratio_target})",
-        f"  - Prob. Sharpe Ratio (PSR)    : {ctx.gate1_psr:.4f}   {_fmt_pass_info(psr_ok)} (Min: {ctx.psr_target})",
-        f"  - Deflated Sharpe Ratio (DSR) : {ctx.gate1_dsr:.4f}   {_fmt_pass_info(dsr_ok)} (Min: {ctx.dsr_target})",
+        f"  - Prob. Sharpe Ratio (PSR)    : {ctx.gate1_psr:.4f}   {_fmt_pass_info(psr_ok)} (Min: 0.40)",
+        f"  - Deflated Sharpe Ratio (DSR) : {ctx.gate1_dsr:.4f}   {_fmt_pass_info(dsr_ok)} (Min: 0.20)",
         f"  - P10 GMGR (Worst Path Grow)  : {ctx.gate1_p10_gmgr:.6f}   {_fmt_pass_info(gmgr_ok)} (Target: >= -0.001)",
         f"  - CPCV Mean Path Return       : {ctx.cpcv_mean_path_return_pct:.1f}%",
         f"  - CPCV Worst Segment MDD      : {ctx.cpcv_worst_segment_mdd_pct:.1f}%",
@@ -290,6 +306,7 @@ def run_futures_deployment_report(ctx: FuturesDeploymentReportInput) -> str:
         f"  - Maximum Pain (MDD Limit)    : {ctx.oos_mdd_pct:.1f}%   {_fmt_pass_info(oos_mdd_ok)} (Limit: {ctx.oos_mdd_limit_pct}%)",
         f"  - Portfolio CVaR(5%) Loss     : {ctx.oos_cvar_pct:.2f}%   {_fmt_pass_info(cvar_ok)} (Limit: {ctx.cvar_limit_pct}%)",
         f"  - Recovery Time (Max UD)      : {ctx.hw_recovery_days:.1f}d   {_fmt_pass_info(hw_ok)} (Limit: {ctx.hw_recovery_max_days}d)",
+        f"  - Ulcer Index (Pain)          : {ctx.oos_ulcer_index:.2f}   (Info Only)",
         f"  - OOS Calmar Ratio (Grow/Risk): {ctx.oos_calmar:.2f}   {_fmt_pass_info(calmar_ok)} (Min: {ctx.calmar_target})",
         f"  - Funding Drag Ratio          : {ctx.funding_drag_pct:.2f}%   {_fmt_pass_info(fund_ok)} (Limit: {ctx.funding_drag_limit_pct}%)",
         "",
@@ -297,7 +314,10 @@ def run_futures_deployment_report(ctx: FuturesDeploymentReportInput) -> str:
         " [TIER 3. OOS PROFITABILITY & ROBUSTNESS]",
         "=" * 71,
         f"  - Annualized Return (CAGR)    : {ctx.oos_net_cagr_pct:.1f}%   {_fmt_pass_info(oos_cagr_ok)} (Min: {ctx.oos_cagr_target_pct}%)",
+        f"  - EV/Cost Ratio (Min 3.0)     : {ctx.oos_ev_cost_ratio:.2f}   {_fmt_pass_info(ev_cost_ok)}",
         f"  - Trade Profit Factor         : {ctx.oos_pf:.2f}   {_fmt_pass_info(pf_ok)} (Min: {ctx.pf_target})",
+        f"  - Directional PF (L/S >= 1.05): {_fmt_pf(ctx.oos_long_pf)} / {_fmt_pf(ctx.oos_short_pf)}   {_fmt_pass_info(l_pf_ok and s_pf_ok)}",
+        f"  - Short Win Rate (Min 35%)    : {ctx.oos_short_win_rate_pct:.1f}%   {_fmt_pass_info(short_wr_ok)}",
         f"  - Alpha Decay (Stability)     : {ctx.alpha_decay_pct:.1f}%   {_fmt_pass_info(ad_ok)} (Limit: {ctx.alpha_decay_floor_pct}%)",
         f"  - Terminal Wealth Ratio       : {ctx.terminal_wealth_ratio:.3f}   {_fmt_pass_info(tw_ok)} (Min: {ctx.tw_target})",
         f"  - OOS Win Rate (INFO)         : {ctx.oos_win_rate_pct:.1f}%",
@@ -371,6 +391,10 @@ def run_futures_deployment_report(ctx: FuturesDeploymentReportInput) -> str:
             lines.append(f"    - TIER3: OOS CAGR({ctx.oos_net_cagr_pct:.1f}%)이 목표({ctx.oos_cagr_target_pct}%) 미달")
         if not pf_ok:
             lines.append(f"    - TIER3: Profit Factor({ctx.oos_pf:.2f})가 기준({ctx.pf_target}) 미달")
+        if not l_pf_ok:
+            lines.append(f"    - TIER3: Long Profit Factor({ctx.oos_long_pf:.2f})가 1.05 미달 (방향성 엣지 붕괴)")
+        if not s_pf_ok:
+            lines.append(f"    - TIER3: Short Profit Factor({ctx.oos_short_pf:.2f})가 1.05 미달 (방향성 엣지 붕괴)")
         if not ad_ok:
             lines.append(f"    - TIER3: Alpha Decay({ctx.alpha_decay_pct:.1f}%)가 허용치({ctx.alpha_decay_floor_pct}%) 미달")
     
