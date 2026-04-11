@@ -1,14 +1,22 @@
 from __future__ import annotations
 
+import logging
 from typing import Optional
 
-import logging
 import numpy as np
 import pandas as pd
 from numba import njit
-from src.domain.futures.engine_logic_futures import process_long_scale_out, process_short_scale_out, check_long_exit, check_short_exit, calculate_position_size, check_intra_bar_stop
 
-from config.settings import TRADING_FEE_RATE, SLIPPAGE_RATE, FUNDING_FEE_RATE
+from config.settings import FUNDING_FEE_RATE, SLIPPAGE_RATE, TRADING_FEE_RATE
+from src.domain.futures.engine_logic_futures import (
+    calculate_position_size,
+    check_intra_bar_stop,
+    check_long_exit,
+    check_short_exit,
+    process_long_scale_out,
+    process_short_scale_out,
+)
+
 
 class BacktestEngineFast:
     def __init__(
@@ -33,7 +41,7 @@ class BacktestEngineFast:
 
         self.leverage = self.strategy.params.get("LEVERAGE", 1)
         self.risk_per_trade = self.strategy.params.get("RISK_PER_TRADE", 0.015)
-        self.funding_events_per_bar = 1  
+        self.funding_events_per_bar = 1
 
         self.fee_rate = TRADING_FEE_RATE
         self.slippage_rate = SLIPPAGE_RATE
@@ -44,62 +52,78 @@ class BacktestEngineFast:
         self.logger = logging.getLogger(__name__)
         self._prepare_data()
 
-    _REQUIRED_INDICATOR_COLS: frozenset[str] = frozenset({
-        "entry_upper", "entry_lower", "trend_direction", "strength_filter", "atr", "macro_ema",
-    })
+    _REQUIRED_INDICATOR_COLS: frozenset[str] = frozenset(
+        {
+            "entry_upper",
+            "entry_lower",
+            "trend_direction",
+            "strength_filter",
+            "atr",
+            "macro_ema",
+        }
+    )
     _OPTIONAL_MERGE_COLS: frozenset[str] = frozenset({"garch_kelly_f"})
 
     def _prepare_data(self) -> None:
-        exclude_cols = {"date_key", "datetime", "date", "open", "high", "low", "close", "volume", "timestamp"}
+        exclude_cols = {
+            "date_key",
+            "datetime",
+            "date",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "timestamp",
+        }
         if all(c in self.hourly_df.columns for c in self._REQUIRED_INDICATOR_COLS):
             signal_df = self.hourly_df
         else:
             signal_df = self.strategy.generate_signals(self.hourly_df.copy(deep=True))
 
         merge_keys = self._REQUIRED_INDICATOR_COLS | self._OPTIONAL_MERGE_COLS
-        indicator_cols = [
-            c for c in signal_df.columns
-            if c not in exclude_cols and c in merge_keys
-        ]
+        indicator_cols = [c for c in signal_df.columns if c not in exclude_cols and c in merge_keys]
 
         self.merged_df = self.hourly_df.copy(deep=False)
         for col in indicator_cols:
             self.merged_df[f"daily_{col}"] = signal_df[col].values
-    
+
     def run(self):
         self.logger.debug(f"Running RSM-VT FAST backtest for {self.strategy.name}...")
         df = self.merged_df
         n = len(df)
-        
-        open_prices = df['open'].values 
-        close = df['close'].values
-        high = df['high'].values
-        low = df['low'].values
-        
-        entry_upper = df['daily_entry_upper'].values
-        entry_lower = df['daily_entry_lower'].values
-        trend_dir = df['daily_trend_direction'].values
-        strength_filter = df['daily_strength_filter'].values
-        atr = df['daily_atr'].values
-        macro_ema = df['daily_macro_ema'].values
+
+        open_prices = df["open"].values
+        close = df["close"].values
+        high = df["high"].values
+        low = df["low"].values
+
+        entry_upper = df["daily_entry_upper"].values
+        entry_lower = df["daily_entry_lower"].values
+        trend_dir = df["daily_trend_direction"].values
+        strength_filter = df["daily_strength_filter"].values
+        atr = df["daily_atr"].values
+        macro_ema = df["daily_macro_ema"].values
         if "daily_garch_kelly_f" in df.columns:
             garch_kelly_f = np.asarray(df["daily_garch_kelly_f"].values, dtype=np.float64)
             if len(garch_kelly_f) < n:
-                garch_kelly_f = np.pad(garch_kelly_f, (0, n - len(garch_kelly_f)), constant_values=1.0)
+                garch_kelly_f = np.pad(
+                    garch_kelly_f, (0, n - len(garch_kelly_f)), constant_values=1.0
+                )
             garch_kelly_f = np.nan_to_num(garch_kelly_f[:n], nan=1.0, posinf=1.0, neginf=1.0)
         else:
             garch_kelly_f = np.ones(n, dtype=np.float64)
 
         # RSM-VT Params
-        long_atr_mult = float(self.strategy.params.get('LONG_ATR_MULT', 3.0))
-        long_trail_mult = float(self.strategy.params.get('LONG_TRAIL_MULT', 3.0))
-        short_atr_mult = float(self.strategy.params.get('SHORT_ATR_MULT', 2.0))
-        short_tp_mult = float(self.strategy.params.get('SHORT_TP_MULT', 3.0))
-        long_scale_atr_mult = float(self.strategy.params.get('LONG_SCALE_ATR_MULT', 3.0))
-        short_trail_mult = float(self.strategy.params.get('SHORT_TRAIL_MULT', 3.0))
+        long_atr_mult = float(self.strategy.params.get("LONG_ATR_MULT", 3.0))
+        long_trail_mult = float(self.strategy.params.get("LONG_TRAIL_MULT", 3.0))
+        short_atr_mult = float(self.strategy.params.get("SHORT_ATR_MULT", 2.0))
+        short_tp_mult = float(self.strategy.params.get("SHORT_TP_MULT", 3.0))
+        long_scale_atr_mult = float(self.strategy.params.get("LONG_SCALE_ATR_MULT", 3.0))
+        short_trail_mult = float(self.strategy.params.get("SHORT_TRAIL_MULT", 3.0))
         leverage = float(self.leverage)
-        
-        timestamps = df["timestamp"].values 
+
+        timestamps = df["timestamp"].values
 
         if "funding_rate_sum" in self.hourly_df.columns:
             _fr_sum = np.asarray(self.hourly_df["funding_rate_sum"].values, dtype=np.float64)
@@ -110,15 +134,23 @@ class BacktestEngineFast:
             if "funding_rate" in self.hourly_df.columns:
                 _fr = np.asarray(self.hourly_df["funding_rate"].values, dtype=np.float64)
                 if len(_fr) < n:
-                    _fr = np.pad(_fr, (0, n - len(_fr)), constant_values=_fr[-1] if len(_fr) > 0 else FUNDING_FEE_RATE)
+                    _fr = np.pad(
+                        _fr,
+                        (0, n - len(_fr)),
+                        constant_values=_fr[-1] if len(_fr) > 0 else FUNDING_FEE_RATE,
+                    )
                 funding_rates = np.nan_to_num(_fr[:n], nan=0.0, posinf=0.0, neginf=0.0)
             else:
                 funding_rates = np.full(n, FUNDING_FEE_RATE, dtype=np.float64)
 
             funding_hours = ((timestamps // 1000) % 86400 // 3600).astype(np.int64)
             is_funding_bar = np.isin(funding_hours, np.array([0, 8, 16], dtype=np.int64))
-            funding_rate_sums = funding_rates * is_funding_bar.astype(np.float64) * float(self.funding_events_per_bar)
-        
+            funding_rate_sums = (
+                funding_rates
+                * is_funding_bar.astype(np.float64)
+                * float(self.funding_events_per_bar)
+            )
+
         if getattr(self, "_warmup_bars_override", None) is not None:
             warmup_bars = self._warmup_bars_override
         else:
@@ -127,26 +159,44 @@ class BacktestEngineFast:
                 "warmup_bars",
                 self.strategy.get_required_warmup(freq=tf),
             )
-        self._warmup_bars = warmup_bars  
+        self._warmup_bars = warmup_bars
         self._effective_start_idx = max(warmup_bars, self._execution_start_idx)
-        datetime_values = df['datetime'].values
-        
-        use_compounding = self.strategy.params.get('USE_COMPOUNDING', True)
-        max_capital_usage = self.strategy.params.get('MAX_CAPITAL_USAGE', 1e12) 
+        datetime_values = df["datetime"].values
+
+        use_compounding = self.strategy.params.get("USE_COMPOUNDING", True)
+        max_capital_usage = self.strategy.params.get("MAX_CAPITAL_USAGE", 1e12)
 
         trades, final_balance, equity_curve, funding_paid_total = backtest_loop_numba(
-            close, high, low, open_prices,
-            entry_upper, entry_lower,
-            trend_dir, strength_filter, atr, macro_ema,
+            close,
+            high,
+            low,
+            open_prices,
+            entry_upper,
+            entry_lower,
+            trend_dir,
+            strength_filter,
+            atr,
+            macro_ema,
             garch_kelly_f,
-            self.initial_balance, leverage, self.fee_rate, self.slippage_rate,
-            self.risk_per_trade, timestamps, funding_rate_sums,
-            long_atr_mult, long_trail_mult, short_atr_mult, short_tp_mult,
-            long_scale_atr_mult, short_trail_mult,
-            warmup_bars, self._execution_start_idx,
-            use_compounding, max_capital_usage
+            self.initial_balance,
+            leverage,
+            self.fee_rate,
+            self.slippage_rate,
+            self.risk_per_trade,
+            timestamps,
+            funding_rate_sums,
+            long_atr_mult,
+            long_trail_mult,
+            short_atr_mult,
+            short_tp_mult,
+            long_scale_atr_mult,
+            short_trail_mult,
+            warmup_bars,
+            self._execution_start_idx,
+            use_compounding,
+            max_capital_usage,
         )
-        
+
         self.balance = final_balance
         self._equity_curve = equity_curve
         self._total_funding_paid = float(funding_paid_total)
@@ -154,24 +204,26 @@ class BacktestEngineFast:
         self.merged_df = None
         self.hourly_df = None
         self.daily_df = None
-        
+
         self.trades = []
         for i in range(len(trades)):
             entry_idx = int(trades[i][0])
             exit_idx = int(trades[i][1])
-            self.trades.append({
-                "entry_time": datetime_values[entry_idx],
-                "exit_time": datetime_values[exit_idx],
-                "side": "LONG" if trades[i][2] == 1 else "SHORT",
-                "entry_price": trades[i][3],
-                "exit_price": trades[i][4],
-                "pnl": trades[i][5],
-                "amount": trades[i][6],
-                "entry_fee": trades[i][7],
-            })
-        
+            self.trades.append(
+                {
+                    "entry_time": datetime_values[entry_idx],
+                    "exit_time": datetime_values[exit_idx],
+                    "side": "LONG" if trades[i][2] == 1 else "SHORT",
+                    "entry_price": trades[i][3],
+                    "exit_price": trades[i][4],
+                    "pnl": trades[i][5],
+                    "amount": trades[i][6],
+                    "entry_fee": trades[i][7],
+                }
+            )
+
         return self.get_results()
-    
+
     def get_results(self):
         if not np.isfinite(self.balance):
             return self._empty_result()
@@ -184,9 +236,15 @@ class BacktestEngineFast:
 
         n_trades = len(self.trades)
         pnl_arr = np.fromiter((t["pnl"] for t in self.trades), dtype=np.float64, count=n_trades)
-        entry_fee_arr = np.fromiter((t["entry_fee"] for t in self.trades), dtype=np.float64, count=n_trades)
-        entry_p = np.fromiter((t["entry_price"] for t in self.trades), dtype=np.float64, count=n_trades)
-        amount_arr = np.fromiter((t["amount"] for t in self.trades), dtype=np.float64, count=n_trades)
+        entry_fee_arr = np.fromiter(
+            (t["entry_fee"] for t in self.trades), dtype=np.float64, count=n_trades
+        )
+        entry_p = np.fromiter(
+            (t["entry_price"] for t in self.trades), dtype=np.float64, count=n_trades
+        )
+        amount_arr = np.fromiter(
+            (t["amount"] for t in self.trades), dtype=np.float64, count=n_trades
+        )
 
         equity = getattr(self, "_equity_curve", None)
         warmup_bars = getattr(self, "_warmup_bars", 0)
@@ -246,39 +304,65 @@ class BacktestEngineFast:
         gross_pnl_abs = float(np.sum(np.abs(true_pnl)))
 
         return {
-            'total_trades': n_trades,
-            'win_trades': win_trades,
-            'loss_trades': loss_trades,
-            'win_rate': win_rate,
-            'total_return_pct': total_return_pct,
-            'final_balance': self.balance,
-            'mdd_pct': mdd,
-            'trades_df': trades_df,
-            'equity_curve': equity_for_mdd,
-            'total_funding_paid': float(getattr(self, '_total_funding_paid', 0.0)),
-            'gross_pnl_abs': gross_pnl_abs,
+            "total_trades": n_trades,
+            "win_trades": win_trades,
+            "loss_trades": loss_trades,
+            "win_rate": win_rate,
+            "total_return_pct": total_return_pct,
+            "final_balance": self.balance,
+            "mdd_pct": mdd,
+            "trades_df": trades_df,
+            "equity_curve": equity_for_mdd,
+            "total_funding_paid": float(getattr(self, "_total_funding_paid", 0.0)),
+            "gross_pnl_abs": gross_pnl_abs,
         }
-        
+
     def _empty_result(self):
         return {
-            'total_trades': 0, 'win_trades': 0, 'loss_trades': 0, 'win_rate': 0,
-            'total_return_pct': 0, 'final_balance': self.initial_balance, 'mdd_pct': 0,
-            'trades_df': pd.DataFrame(), 'equity_curve': np.array([]),
-            'total_funding_paid': 0.0, 'gross_pnl_abs': 0.0,
+            "total_trades": 0,
+            "win_trades": 0,
+            "loss_trades": 0,
+            "win_rate": 0,
+            "total_return_pct": 0,
+            "final_balance": self.initial_balance,
+            "mdd_pct": 0,
+            "trades_df": pd.DataFrame(),
+            "equity_curve": np.array([]),
+            "total_funding_paid": 0.0,
+            "gross_pnl_abs": 0.0,
         }
+
 
 @njit(nogil=True, cache=True)
 def backtest_loop_numba(
-    close, high, low, open_prices,
-    entry_upper, entry_lower,
-    trend_dir, strength_filter, atr, macro_ema_arr,
+    close,
+    high,
+    low,
+    open_prices,
+    entry_upper,
+    entry_lower,
+    trend_dir,
+    strength_filter,
+    atr,
+    macro_ema_arr,
     garch_kelly_f,
-    initial_balance, leverage, fee_rate, slippage_rate,
-    risk_per_trade, timestamps, funding_rate_sums,
-    long_atr_mult, long_trail_mult, short_atr_mult, short_tp_mult,
-    long_scale_atr_mult, short_trail_mult,
-    warmup_bars, execution_start_idx,
-    use_compounding, max_capital_usage
+    initial_balance,
+    leverage,
+    fee_rate,
+    slippage_rate,
+    risk_per_trade,
+    timestamps,
+    funding_rate_sums,
+    long_atr_mult,
+    long_trail_mult,
+    short_atr_mult,
+    short_tp_mult,
+    long_scale_atr_mult,
+    short_trail_mult,
+    warmup_bars,
+    execution_start_idx,
+    use_compounding,
+    max_capital_usage,
 ):
     funding_paid_total = 0.0
     n = len(close)
@@ -301,7 +385,7 @@ def backtest_loop_numba(
     max_trades = 30000
     trades = np.zeros((max_trades, 8))
     trade_count = 0
-    
+
     for i in range(n):
         if i < warmup_bars or i < execution_start_idx:
             equity_curve[i] = initial_balance
@@ -316,16 +400,31 @@ def backtest_loop_numba(
         # --- Bankruptcy Check ---
         current_eq_check = balance
         if in_position:
-            current_eq_check = balance + (amount * entry_price) / leverage + (c_open - entry_price) * amount * pos_side
+            current_eq_check = (
+                balance
+                + (amount * entry_price) / leverage
+                + (c_open - entry_price) * amount * pos_side
+            )
         if current_eq_check <= 0:
             equity_curve[i] = current_eq_check
             if in_position:
                 exit_price = c_open
-                if pos_side == 1: pnl = (exit_price - entry_price) * amount
-                else:             pnl = (entry_price - exit_price) * amount
+                if pos_side == 1:
+                    pnl = (exit_price - entry_price) * amount
+                else:
+                    pnl = (entry_price - exit_price) * amount
                 exit_fee = amount * exit_price * fee_rate
                 if trade_count < max_trades:
-                    trades[trade_count] = [entry_idx, i, pos_side, entry_price, exit_price, pnl - exit_fee, amount, entry_fee_stored]
+                    trades[trade_count] = [
+                        entry_idx,
+                        i,
+                        pos_side,
+                        entry_price,
+                        exit_price,
+                        pnl - exit_fee,
+                        amount,
+                        entry_fee_stored,
+                    ]
                     trade_count += 1
                 in_position = False
                 balance = 0.0
@@ -339,19 +438,34 @@ def backtest_loop_numba(
                 funding_cost = (amount * c_open) * funding_rate_sum * pos_side
                 balance -= funding_cost
                 funding_paid_total += funding_cost
-                funding_eq_check = balance + (amount * entry_price) / leverage + (c_open - entry_price) * amount * pos_side
+                funding_eq_check = (
+                    balance
+                    + (amount * entry_price) / leverage
+                    + (c_open - entry_price) * amount * pos_side
+                )
                 if funding_eq_check <= 0:
                     exit_price = c_open
-                    if pos_side == 1: pnl = (exit_price - entry_price) * amount
-                    else:             pnl = (entry_price - exit_price) * amount
+                    if pos_side == 1:
+                        pnl = (exit_price - entry_price) * amount
+                    else:
+                        pnl = (entry_price - exit_price) * amount
                     exit_fee = amount * exit_price * fee_rate
                     if trade_count < max_trades:
-                        trades[trade_count] = [entry_idx, i, pos_side, entry_price, exit_price, pnl - exit_fee, amount, entry_fee_stored]
+                        trades[trade_count] = [
+                            entry_idx,
+                            i,
+                            pos_side,
+                            entry_price,
+                            exit_price,
+                            pnl - exit_fee,
+                            amount,
+                            entry_fee_stored,
+                        ]
                         trade_count += 1
                     in_position = False
                     balance = 0.0
                     break
-            
+
             exit_triggered = False
             exit_price = 0.0
 
@@ -359,18 +473,35 @@ def backtest_loop_numba(
                 if c_high > highest:
                     highest = c_high
                 pos_atr = atr[entry_idx]
-                
+
                 if not has_scaled_out:
-                    triggered, sc_price, sc_amount, pnl_scale, exit_fee_scale = process_long_scale_out(
-                        c_open, c_high, entry_price, pos_atr, long_scale_atr_mult, amount, fee_rate
+                    triggered, sc_price, sc_amount, pnl_scale, exit_fee_scale = (
+                        process_long_scale_out(
+                            c_open,
+                            c_high,
+                            entry_price,
+                            pos_atr,
+                            long_scale_atr_mult,
+                            amount,
+                            fee_rate,
+                        )
                     )
                     if triggered:
                         balance += (sc_amount * entry_price) / leverage + pnl_scale - exit_fee_scale
                         if trade_count < max_trades:
-                            trades[trade_count] = [entry_idx, i, pos_side, entry_price, sc_price, pnl_scale - exit_fee_scale, sc_amount, entry_fee_stored / 2.0]
+                            trades[trade_count] = [
+                                entry_idx,
+                                i,
+                                pos_side,
+                                entry_price,
+                                sc_price,
+                                pnl_scale - exit_fee_scale,
+                                sc_amount,
+                                entry_fee_stored / 2.0,
+                            ]
                             trade_count += 1
                         amount -= sc_amount
-                        entry_fee_stored -= (entry_fee_stored / 2.0)
+                        entry_fee_stored -= entry_fee_stored / 2.0
                         has_scaled_out = True
 
                 exit_triggered, exit_price, stop_price = check_long_exit(
@@ -383,16 +514,27 @@ def backtest_loop_numba(
                 pos_atr = atr[entry_idx]
 
                 if not has_scaled_out:
-                    triggered, sc_price, sc_amount, pnl_scale, exit_fee_scale = process_short_scale_out(
-                        c_open, c_low, entry_price, pos_atr, short_tp_mult, amount, fee_rate
+                    triggered, sc_price, sc_amount, pnl_scale, exit_fee_scale = (
+                        process_short_scale_out(
+                            c_open, c_low, entry_price, pos_atr, short_tp_mult, amount, fee_rate
+                        )
                     )
                     if triggered:
                         balance += (sc_amount * entry_price) / leverage + pnl_scale - exit_fee_scale
                         if trade_count < max_trades:
-                            trades[trade_count] = [entry_idx, i, pos_side, entry_price, sc_price, pnl_scale - exit_fee_scale, sc_amount, entry_fee_stored / 2.0]
+                            trades[trade_count] = [
+                                entry_idx,
+                                i,
+                                pos_side,
+                                entry_price,
+                                sc_price,
+                                pnl_scale - exit_fee_scale,
+                                sc_amount,
+                                entry_fee_stored / 2.0,
+                            ]
                             trade_count += 1
                         amount -= sc_amount
-                        entry_fee_stored -= (entry_fee_stored / 2.0)
+                        entry_fee_stored -= entry_fee_stored / 2.0
                         has_scaled_out = True
                         stop_price = entry_price - (entry_price * fee_rate * 2.0)
                 else:
@@ -401,16 +543,27 @@ def backtest_loop_numba(
                     )
 
             if exit_triggered:
-                if pos_side == 1: pnl = (exit_price - entry_price) * amount
-                else:             pnl = (entry_price - exit_price) * amount
-                
+                if pos_side == 1:
+                    pnl = (exit_price - entry_price) * amount
+                else:
+                    pnl = (entry_price - exit_price) * amount
+
                 exit_fee = amount * exit_price * fee_rate
                 pnl -= exit_fee
                 margin = (amount * entry_price) / leverage
                 balance += margin + pnl
-                
+
                 if trade_count < max_trades:
-                    trades[trade_count] = [entry_idx, i, pos_side, entry_price, exit_price, pnl, amount, entry_fee_stored]
+                    trades[trade_count] = [
+                        entry_idx,
+                        i,
+                        pos_side,
+                        entry_price,
+                        exit_price,
+                        pnl,
+                        amount,
+                        entry_fee_stored,
+                    ]
                     trade_count += 1
                 in_position = False
                 bar_processed = True
@@ -426,14 +579,14 @@ def backtest_loop_numba(
             do_entry = False
             fill_price = 0.0
             pending_side = 0
-            
+
             # Engine A: Bull Regime -> Long Breakout
             if trend_dir[prev_i] == 1:
                 if c_high > entry_upper[prev_i]:
                     fill_price = max(c_open, entry_upper[prev_i]) * (1 + slippage_rate)
                     pending_side = 1
                     do_entry = True
-                    
+
             # Engine B: Bear Regime -> Short Breakdown
             elif trend_dir[prev_i] == -1:
                 if c_low < entry_lower[prev_i]:
@@ -446,25 +599,35 @@ def backtest_loop_numba(
                 if np.isnan(prev_atr) or prev_atr <= 0.0:
                     equity_curve[i] = balance
                     continue
-                
+
                 # Fixed Stop Loss Distance for Sizing
                 if pending_side == 1:
                     stop_price = fill_price - (prev_atr * long_atr_mult)
                 else:
                     stop_price = fill_price + (prev_atr * short_atr_mult)
-                
+
                 stop_distance = abs(fill_price - stop_price)
                 if stop_distance > 0:
-                    current_equity = max_capital_usage if use_compounding and balance > max_capital_usage else balance
-                    amount = calculate_position_size(
-                        fill_price, stop_distance, current_equity, current_equity, 
-                        risk_per_trade, leverage, sf_raw, garch_kelly_f[prev_i]
+                    current_equity = (
+                        max_capital_usage
+                        if use_compounding and balance > max_capital_usage
+                        else balance
                     )
-                    
+                    amount = calculate_position_size(
+                        fill_price,
+                        stop_distance,
+                        current_equity,
+                        current_equity,
+                        risk_per_trade,
+                        leverage,
+                        sf_raw,
+                        garch_kelly_f[prev_i],
+                    )
+
                     required_margin = (amount * fill_price) / leverage
                     entry_fee = amount * fill_price * fee_rate
                     if balance >= required_margin + entry_fee:
-                        balance -= (required_margin + entry_fee)
+                        balance -= required_margin + entry_fee
                         entry_fee_stored = entry_fee
                         in_position = True
                         pos_side = pending_side
@@ -474,14 +637,32 @@ def backtest_loop_numba(
                         lowest = fill_price
                         has_scaled_out = False
 
-                        triggered, intra_exit_price, pnl_intra, exit_fee_intra = check_intra_bar_stop(
-                            pos_side, c_high, c_low, stop_price, entry_price, amount, fee_rate, slippage_rate
+                        triggered, intra_exit_price, pnl_intra, exit_fee_intra = (
+                            check_intra_bar_stop(
+                                pos_side,
+                                c_high,
+                                c_low,
+                                stop_price,
+                                entry_price,
+                                amount,
+                                fee_rate,
+                                slippage_rate,
+                            )
                         )
                         if triggered:
                             pnl_intra -= exit_fee_intra
                             balance += (amount * entry_price) / leverage + pnl_intra
                             if trade_count < max_trades:
-                                trades[trade_count] = [entry_idx, i, pos_side, entry_price, intra_exit_price, pnl_intra, amount, entry_fee_stored]
+                                trades[trade_count] = [
+                                    entry_idx,
+                                    i,
+                                    pos_side,
+                                    entry_price,
+                                    intra_exit_price,
+                                    pnl_intra,
+                                    amount,
+                                    entry_fee_stored,
+                                ]
                                 trade_count += 1
                             in_position = False
 
@@ -491,7 +672,7 @@ def backtest_loop_numba(
             equity_curve[i] = balance + margin + unrealized
         else:
             equity_curve[i] = balance
-            
+
         if equity_curve[i] > peak_equity:
             peak_equity = equity_curve[i]
 
@@ -510,7 +691,16 @@ def backtest_loop_numba(
         margin = (amount * entry_price) / leverage
         balance += margin + pnl
         if trade_count < max_trades:
-            trades[trade_count] = [entry_idx, last_idx, pos_side, entry_price, exit_price, pnl, amount, entry_fee_stored]
+            trades[trade_count] = [
+                entry_idx,
+                last_idx,
+                pos_side,
+                entry_price,
+                exit_price,
+                pnl,
+                amount,
+                entry_fee_stored,
+            ]
             trade_count += 1
 
     return trades[:trade_count], balance, equity_curve, funding_paid_total

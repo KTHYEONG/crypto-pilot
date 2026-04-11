@@ -1,4 +1,5 @@
 """Futures signal plugins: bidirectional entries + kill strengths + rank score."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass

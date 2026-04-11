@@ -55,6 +55,7 @@ _logger: logging.Logger = logging.getLogger("opt_spot")
 
 SymbolFoldResult = Tuple[str, float, float, float, float, float, float, float, np.ndarray, float]
 
+
 def evaluate_symbol_fold(
     strategy: UltimateSpotStrategy,
     params: Dict[str, Any],
@@ -77,7 +78,7 @@ def evaluate_symbol_fold(
 
     warmup_bars: int = 0
     sig_oos.attrs = {"warmup_bars": warmup_bars}
-    
+
     engine: BacktestEngineFastSpot = BacktestEngineFastSpot(
         hourly_df=sig_oos,
         daily_df=daily_df,
@@ -102,7 +103,7 @@ def evaluate_symbol_fold(
 
     if trades_df is None or trades_df.empty:
         return -10.0, 0.0, 0.0, 0, 0.0, 0.0, 0, np.array([]), 0.0
-        
+
     long_count: int = len(trades_df[trades_df["side"] == "LONG"])
 
     equity_curve = result.get("equity_curve", np.array([]))
@@ -114,23 +115,39 @@ def evaluate_symbol_fold(
             (
                 sig_oos["datetime"].iloc[-1]
                 - sig_oos["datetime"].iloc[min(execution_start_idx, len(sig_oos) - 1)]
-            ).total_seconds() / 86400.0
+            ).total_seconds()
+            / 86400.0
         )
         if "datetime" in sig_oos.columns and not sig_oos.empty
         else 1.0
     )
     span_days = max(span_days, 1.0)
-    
+
     true_pnl = trades_df["pnl"]
-    win_rate: float = float((len(trades_df[true_pnl > 0]) / len(trades_df)) * 100) if len(trades_df) > 0 else 0.0
+    win_rate: float = (
+        float((len(trades_df[true_pnl > 0]) / len(trades_df)) * 100) if len(trades_df) > 0 else 0.0
+    )
     pf = calc_profit_factor_from_pnl(true_pnl)
-    
+
     total_ret_ratio = 1.0 + (ret_pct / 100.0)
-    cagr = ((total_ret_ratio ** (365.0 / span_days)) - 1.0) * 100.0 if total_ret_ratio > 0 else -100.0
+    cagr = (
+        ((total_ret_ratio ** (365.0 / span_days)) - 1.0) * 100.0 if total_ret_ratio > 0 else -100.0
+    )
 
     tail_ratio = calc_tail_ratio_from_equity(equity_curve) if equity_curve.size > 1 else 0.0
 
-    return cagr, ret_pct, mdd_pct, len(trades_df), win_rate, pf, long_count, equity_curve, tail_ratio
+    return (
+        cagr,
+        ret_pct,
+        mdd_pct,
+        len(trades_df),
+        win_rate,
+        pf,
+        long_count,
+        equity_curve,
+        tail_ratio,
+    )
+
 
 def _compute_signal_stats(sig_df: pd.DataFrame) -> Dict[str, float]:
     """OOS holdout: quantify signal vs regime gating on the execution window."""
@@ -217,8 +234,12 @@ def run_holdout_shared_cash_portfolio(
     _logger.info(
         "Holdout OOS debug: oos_start=%d, slice_start=%d, slice_end=%d, "
         "exec_start=%d, seg_len=%d, n_symbols=%d",
-        oos_start, slice_start, slice_end, max(1, oos_start - slice_start),
-        slice_end - slice_start, len(symbols)
+        oos_start,
+        slice_start,
+        slice_end,
+        max(1, oos_start - slice_start),
+        slice_end - slice_start,
+        len(symbols),
     )
     if slice_end - slice_start < 5:
         _logger.warning("Holdout OOS segment too short (len < 5). Returning FAIL.")
@@ -265,9 +286,9 @@ def run_holdout_shared_cash_portfolio(
     )
     eq = res.equity_curve
     _logger.info(
-        "Holdout OOS result: final_balance=%.2f, total_trades=%d, "
-        "eq_first=%.2f, eq_last=%.2f",
-        res.final_balance, res.total_trades,
+        "Holdout OOS result: final_balance=%.2f, total_trades=%d, eq_first=%.2f, eq_last=%.2f",
+        res.final_balance,
+        res.total_trades,
         float(eq[0]) if eq.size > 0 else -1.0,
         float(eq[-1]) if eq.size > 0 else -1.0,
     )
@@ -377,7 +398,9 @@ def run_cpcv_complement_evaluation(
             if target_df_full is None or target_df_full.empty:
                 continue
             fp = _dataset_fingerprint_from_df(target_df_full)
-            cache_key: _SignalCacheKey = _build_signal_cache_key(p, sym, tf, len(target_df_full), fp)
+            cache_key: _SignalCacheKey = _build_signal_cache_key(
+                p, sym, tf, len(target_df_full), fp
+            )
             full_signal_dfs[sym] = get_or_compute_signals(
                 cache_key, target_df_full, strategy, disk_cache_root=cache_root
             )
@@ -526,7 +549,7 @@ def run_multi_window_oos_holdout(
         "median_cagr_pct": med,
         "worst_mdd_pct": worst_mdd,
         "positive_windows": pos,
-        "total_windows": int(len(windows)),
+        "total_windows": len(windows),
         "cagr_dispersion": disp,
         "full_window_result": full_res,
     }

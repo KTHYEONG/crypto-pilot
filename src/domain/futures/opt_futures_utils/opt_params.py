@@ -1,10 +1,9 @@
 from __future__ import annotations
 
+import os
 from typing import Any, Dict
 
 import optuna
-
-import os
 
 from config.opt_config import ENGINE_PARAM_SPACE_FUTURES, OPT_FUTURES_CONFIG
 
@@ -88,6 +87,7 @@ def build_combined_param_space_futures(signal: str, regime: str, sizing: str) ->
 
 from typing import Protocol, Sequence
 
+
 class _Stage1ComboLike(Protocol):
     signal: str
     regime: str
@@ -101,7 +101,9 @@ def build_multi_combo_param_space_futures(tops: Sequence[_Stage1ComboLike]) -> D
     from src.domain.futures.sizing import FUTURES_SIZING_REGISTRY
 
     if not tops:
-        raise ValueError("build_multi_combo_param_space_futures requires at least one Stage1 combo.")
+        raise ValueError(
+            "build_multi_combo_param_space_futures requires at least one Stage1 combo."
+        )
 
     all_sigs = list(dict.fromkeys(t.signal for t in tops))
     all_regs = list(dict.fromkeys(t.regime for t in tops))

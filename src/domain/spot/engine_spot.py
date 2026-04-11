@@ -1,10 +1,14 @@
 from __future__ import annotations
-from typing import Optional
+
 import logging
+from typing import Optional
+
 import numpy as np
 import pandas as pd
 from numba import njit
-from config.settings import TRADING_FEE_RATE, SLIPPAGE_RATE
+
+from config.settings import SLIPPAGE_RATE, TRADING_FEE_RATE
+
 
 class BacktestEngineFastSpot:
     def __init__(
@@ -38,79 +42,100 @@ class BacktestEngineFastSpot:
         self.logger = logging.getLogger(__name__)
         self._prepare_data()
 
-    _REQUIRED_INDICATOR_COLS: frozenset = frozenset({
-        "entry_upper",
-        "trend_direction",
-        "strength_filter",
-        "atr",
-        "regime_risk_mult",
-        "regime_state",
-        "kill_signal",
-        "garch_kelly_f",
-        "fractal_high_flag",
-        "bb_upper",
-        "trail_tighten_flag",
-    })
+    _REQUIRED_INDICATOR_COLS: frozenset = frozenset(
+        {
+            "entry_upper",
+            "trend_direction",
+            "strength_filter",
+            "atr",
+            "regime_risk_mult",
+            "regime_state",
+            "kill_signal",
+            "garch_kelly_f",
+            "fractal_high_flag",
+            "bb_upper",
+            "trail_tighten_flag",
+        }
+    )
 
     def _prepare_data(self) -> None:
-        exclude_cols = {"date_key", "datetime", "date", "open", "high", "low", "close", "volume", "timestamp"}
+        exclude_cols = {
+            "date_key",
+            "datetime",
+            "date",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "timestamp",
+        }
         if all(c in self.hourly_df.columns for c in self._REQUIRED_INDICATOR_COLS):
             signal_df = self.hourly_df
         else:
             signal_df = self.strategy.generate_signals(self.hourly_df.copy(deep=True))
 
         indicator_cols = [
-            c for c in signal_df.columns
+            c
+            for c in signal_df.columns
             if c not in exclude_cols and c in self._REQUIRED_INDICATOR_COLS
         ]
 
         self.merged_df = self.hourly_df.copy(deep=False)
         for col in indicator_cols:
             self.merged_df[f"daily_{col}"] = signal_df[col].values
-    
+
     def run(self):
         self.logger.debug(f"Running FAST backtest for Spot {self.strategy.name}...")
         df = self.merged_df
         n = len(df)
-        
-        open_prices = df['open'].values 
-        close = df['close'].values
-        high = df['high'].values
-        low = df['low'].values
-        
-        entry_upper = df['daily_entry_upper'].values
-        trend_dir = df['daily_trend_direction'].values
-        strength_filter = df['daily_strength_filter'].values
-        atr = df['daily_atr'].values
-        
-        long_atr_mult = float(self.strategy.params.get('LONG_ATR_MULT', 3.0))
-        long_trail_mult = float(
-            self.strategy.params.get('TRAIL_ATR_MULT', self.strategy.params.get('LONG_TRAIL_MULT', 3.0))
-        )
-        use_trailing_stop = 1 if bool(self.strategy.params.get('USE_TRAILING_STOP', True)) else 0
-        long_tp_mult = float(self.strategy.params.get('LONG_TP_MULT', 5.0))
-        long_trail_lock_mult = float(self.strategy.params.get('LONG_TRAIL_LOCK_MULT', 1.5))
-        tp_lock_mult = float(self.strategy.params.get('TP_LOCK_ATR_MULT', 3.0))
 
-        timestamps = df["timestamp"].values 
-        
+        open_prices = df["open"].values
+        close = df["close"].values
+        high = df["high"].values
+        low = df["low"].values
+
+        entry_upper = df["daily_entry_upper"].values
+        trend_dir = df["daily_trend_direction"].values
+        strength_filter = df["daily_strength_filter"].values
+        atr = df["daily_atr"].values
+
+        long_atr_mult = float(self.strategy.params.get("LONG_ATR_MULT", 3.0))
+        long_trail_mult = float(
+            self.strategy.params.get(
+                "TRAIL_ATR_MULT", self.strategy.params.get("LONG_TRAIL_MULT", 3.0)
+            )
+        )
+        use_trailing_stop = 1 if bool(self.strategy.params.get("USE_TRAILING_STOP", True)) else 0
+        long_tp_mult = float(self.strategy.params.get("LONG_TP_MULT", 5.0))
+        long_trail_lock_mult = float(self.strategy.params.get("LONG_TRAIL_LOCK_MULT", 1.5))
+        tp_lock_mult = float(self.strategy.params.get("TP_LOCK_ATR_MULT", 3.0))
+
+        timestamps = df["timestamp"].values
+
         if getattr(self, "_warmup_bars_override", None) is not None:
             warmup_bars = self._warmup_bars_override
         else:
             tf = self.strategy.params.get("TIMEFRAME", "1h")
             warmup_bars = getattr(df, "attrs", {}).get(
                 "warmup_bars",
-                self.strategy.get_required_warmup(freq=tf) if hasattr(self.strategy, "get_required_warmup") else 100,
+                self.strategy.get_required_warmup(freq=tf)
+                if hasattr(self.strategy, "get_required_warmup")
+                else 100,
             )
-        self._warmup_bars = warmup_bars  
+        self._warmup_bars = warmup_bars
         self._effective_start_idx = max(warmup_bars, self._execution_start_idx)
-        datetime_values = df['datetime'].values
-        
-        use_compounding = self.strategy.params.get('USE_COMPOUNDING', True)
-        max_capital_usage = self.strategy.params.get('MAX_CAPITAL_USAGE', 1e12) 
+        datetime_values = df["datetime"].values
+
+        use_compounding = self.strategy.params.get("USE_COMPOUNDING", True)
+        max_capital_usage = self.strategy.params.get("MAX_CAPITAL_USAGE", 1e12)
 
         n_bars = len(close)
-        regime_rm = df["daily_regime_risk_mult"].values if "daily_regime_risk_mult" in df.columns else np.ones(n_bars, dtype=np.float64)
+        regime_rm = (
+            df["daily_regime_risk_mult"].values
+            if "daily_regime_risk_mult" in df.columns
+            else np.ones(n_bars, dtype=np.float64)
+        )
         regime_entry_gate = (
             df["daily_regime_entry_gate"].values
             if "daily_regime_entry_gate" in df.columns
@@ -121,8 +146,16 @@ class BacktestEngineFastSpot:
             if "daily_regime_state" in df.columns
             else np.full(n_bars, 2.0, dtype=np.float64)
         )
-        garch_k = df["daily_garch_kelly_f"].values if "daily_garch_kelly_f" in df.columns else np.ones(n_bars, dtype=np.float64)
-        kill_sig = df["daily_kill_signal"].values if "daily_kill_signal" in df.columns else np.zeros(n_bars, dtype=np.float64)
+        garch_k = (
+            df["daily_garch_kelly_f"].values
+            if "daily_garch_kelly_f" in df.columns
+            else np.ones(n_bars, dtype=np.float64)
+        )
+        kill_sig = (
+            df["daily_kill_signal"].values
+            if "daily_kill_signal" in df.columns
+            else np.zeros(n_bars, dtype=np.float64)
+        )
         fractal_hf = (
             df["daily_fractal_high_flag"].values
             if "daily_fractal_high_flag" in df.columns
@@ -145,52 +178,70 @@ class BacktestEngineFastSpot:
         delta_gate = float(self.strategy.params.get("DELTA_GATE", 0.08))
 
         trades, final_balance, equity_curve = backtest_loop_numba_spot(
-            close, high, low, open_prices,
+            close,
+            high,
+            low,
+            open_prices,
             entry_upper,
-            trend_dir, strength_filter, atr,
-            regime_rm, garch_k, kill_sig,
+            trend_dir,
+            strength_filter,
+            atr,
+            regime_rm,
+            garch_k,
+            kill_sig,
             regime_entry_gate,
             regime_state_1d,
-            self.initial_balance, self.fee_rate, self.slippage_rate,
-            self.risk_per_trade, timestamps,
-            long_atr_mult, long_trail_mult, long_tp_mult,
-            long_trail_lock_mult, tp_lock_mult,
+            self.initial_balance,
+            self.fee_rate,
+            self.slippage_rate,
+            self.risk_per_trade,
+            timestamps,
+            long_atr_mult,
+            long_trail_mult,
+            long_tp_mult,
+            long_trail_lock_mult,
+            tp_lock_mult,
             use_trailing_stop,
-            warmup_bars, self._execution_start_idx,
-            use_compounding, max_capital_usage,
-            kill_cd, delta_gate,
+            warmup_bars,
+            self._execution_start_idx,
+            use_compounding,
+            max_capital_usage,
+            kill_cd,
+            delta_gate,
             fractal_hf,
             scale_out_ratio,
             time_stop_bars,
             bb_upper,
             trail_tighten,
-            float(self.strategy.params.get('MAX_CAP_PER_COIN', 1.0)),
+            float(self.strategy.params.get("MAX_CAP_PER_COIN", 1.0)),
         )
-        
+
         self.balance = final_balance
         self._equity_curve = equity_curve
 
         self.merged_df = None
         self.hourly_df = None
         self.daily_df = None
-        
+
         self.trades = []
         for i in range(len(trades)):
             entry_idx = int(trades[i][0])
             exit_idx = int(trades[i][1])
-            self.trades.append({
-                "entry_time": datetime_values[entry_idx],
-                "exit_time": datetime_values[exit_idx],
-                "side": "LONG",
-                "entry_price": trades[i][2],
-                "exit_price": trades[i][3],
-                "pnl": trades[i][4],
-                "amount": trades[i][5],
-                "entry_fee": trades[i][6],
-            })
-        
+            self.trades.append(
+                {
+                    "entry_time": datetime_values[entry_idx],
+                    "exit_time": datetime_values[exit_idx],
+                    "side": "LONG",
+                    "entry_price": trades[i][2],
+                    "exit_price": trades[i][3],
+                    "pnl": trades[i][4],
+                    "amount": trades[i][5],
+                    "entry_fee": trades[i][6],
+                }
+            )
+
         return self.get_results()
-    
+
     def get_results(self):
         if not np.isfinite(self.balance):
             return self._empty_result()
@@ -203,9 +254,15 @@ class BacktestEngineFastSpot:
 
         n_trades = len(self.trades)
         pnl_arr = np.fromiter((t["pnl"] for t in self.trades), dtype=np.float64, count=n_trades)
-        entry_fee_arr = np.fromiter((t["entry_fee"] for t in self.trades), dtype=np.float64, count=n_trades)
-        entry_p = np.fromiter((t["entry_price"] for t in self.trades), dtype=np.float64, count=n_trades)
-        amount_arr = np.fromiter((t["amount"] for t in self.trades), dtype=np.float64, count=n_trades)
+        entry_fee_arr = np.fromiter(
+            (t["entry_fee"] for t in self.trades), dtype=np.float64, count=n_trades
+        )
+        entry_p = np.fromiter(
+            (t["entry_price"] for t in self.trades), dtype=np.float64, count=n_trades
+        )
+        amount_arr = np.fromiter(
+            (t["amount"] for t in self.trades), dtype=np.float64, count=n_trades
+        )
 
         equity = getattr(self, "_equity_curve", None)
         warmup_bars = getattr(self, "_warmup_bars", 0)
@@ -237,7 +294,9 @@ class BacktestEngineFastSpot:
 
         true_pnl = pnl_arr
         capital_used = amount_arr * entry_p
-        capital_used = np.where(np.isfinite(capital_used) & (capital_used > 0), capital_used, np.nan)
+        capital_used = np.where(
+            np.isfinite(capital_used) & (capital_used > 0), capital_used, np.nan
+        )
 
         entry_fee_cumsum = np.concatenate(([0.0], np.cumsum(entry_fee_arr)[:-1]))
         pnl_cumsum = np.concatenate(([0.0], np.cumsum(pnl_arr)[:-1]))
@@ -262,40 +321,63 @@ class BacktestEngineFastSpot:
         trades_df["pnl_pct"] = pnl_pct
 
         return {
-            'total_trades': n_trades,
-            'win_trades': win_trades,
-            'loss_trades': loss_trades,
-            'win_rate': win_rate,
-            'total_return_pct': total_return_pct,
-            'final_balance': self.balance,
-            'mdd_pct': mdd,
-            'trades_df': trades_df,
-            'equity_curve': equity_for_mdd,
+            "total_trades": n_trades,
+            "win_trades": win_trades,
+            "loss_trades": loss_trades,
+            "win_rate": win_rate,
+            "total_return_pct": total_return_pct,
+            "final_balance": self.balance,
+            "mdd_pct": mdd,
+            "trades_df": trades_df,
+            "equity_curve": equity_for_mdd,
         }
-        
+
     def _empty_result(self):
         return {
-            'total_trades': 0, 'win_trades': 0, 'loss_trades': 0, 'win_rate': 0,
-            'total_return_pct': 0, 'final_balance': self.initial_balance, 'mdd_pct': 0,
-            'trades_df': pd.DataFrame(), 'equity_curve': np.array([]),
+            "total_trades": 0,
+            "win_trades": 0,
+            "loss_trades": 0,
+            "win_rate": 0,
+            "total_return_pct": 0,
+            "final_balance": self.initial_balance,
+            "mdd_pct": 0,
+            "trades_df": pd.DataFrame(),
+            "equity_curve": np.array([]),
         }
+
 
 @njit(nogil=True, cache=True)
 def backtest_loop_numba_spot(
-    close, high, low, open_prices,
+    close,
+    high,
+    low,
+    open_prices,
     entry_upper,
-    trend_dir, strength_filter, atr,
-    regime_risk_mult, garch_kelly_f, kill_signal,
+    trend_dir,
+    strength_filter,
+    atr,
+    regime_risk_mult,
+    garch_kelly_f,
+    kill_signal,
     regime_entry_gate,
     regime_state,
-    initial_balance, fee_rate, slippage_rate,
-    risk_per_trade, timestamps,
-    long_atr_mult, long_trail_mult, long_tp_mult,
-    long_trail_lock_mult, tp_lock_mult,
+    initial_balance,
+    fee_rate,
+    slippage_rate,
+    risk_per_trade,
+    timestamps,
+    long_atr_mult,
+    long_trail_mult,
+    long_tp_mult,
+    long_trail_lock_mult,
+    tp_lock_mult,
     use_trailing_stop,
-    warmup_bars, execution_start_idx,
-    use_compounding, max_capital_usage,
-    kill_cooldown_bars, delta_gate,
+    warmup_bars,
+    execution_start_idx,
+    use_compounding,
+    max_capital_usage,
+    kill_cooldown_bars,
+    delta_gate,
     fractal_high_flag,
     scale_out_ratio,
     time_stop_bars,
@@ -313,13 +395,13 @@ def backtest_loop_numba_spot(
     entry_idx = 0
     amount = 0.0
     entry_fee_stored = 0.0
-    
-    stop_price = 0.0 
+
+    stop_price = 0.0
     tp_price = 0.0
     highest = 0.0
-    
+
     max_trades = 30000
-    trades = np.zeros((max_trades, 7))  
+    trades = np.zeros((max_trades, 7))
     trade_count = 0
 
     cooldown_remaining = 0
@@ -348,7 +430,15 @@ def backtest_loop_numba_spot(
                 pnl = (exit_price - entry_price) * amount
                 exit_fee = amount * exit_price * fee_rate
                 if trade_count < max_trades:
-                    trades[trade_count] = [entry_idx, i, entry_price, exit_price, pnl - exit_fee, amount, entry_fee_stored]
+                    trades[trade_count] = [
+                        entry_idx,
+                        i,
+                        entry_price,
+                        exit_price,
+                        pnl - exit_fee,
+                        amount,
+                        entry_fee_stored,
+                    ]
                     trade_count += 1
                 in_position = False
                 fractal_scale_done = False
@@ -360,11 +450,7 @@ def backtest_loop_numba_spot(
             exit_price = 0.0
 
             # Causal: kill_signal[i] uses bar-i close; exits at bar-i open — use prior bar.
-            kill_now = (
-                (kill_signal[i - 1] > 0.5)
-                if i > 0 and i - 1 < len(kill_signal)
-                else False
-            )
+            kill_now = (kill_signal[i - 1] > 0.5) if i > 0 and i - 1 < len(kill_signal) else False
             if kill_now:
                 exit_price = c_open * (1.0 - slippage_rate)
                 exit_triggered = True
@@ -444,11 +530,7 @@ def backtest_loop_numba_spot(
             rst_ts = regime_state[i] if i < len(regime_state) else 2.0
             ts_regime_factor = max(0.50, 1.0 - (2.0 - rst_ts) * 0.35)
             eff_ts = max(1, int(time_stop_bars * ts_regime_factor)) if time_stop_bars > 0 else 0
-            if (
-                (not exit_triggered)
-                and time_stop_bars > 0
-                and (i - entry_idx) >= eff_ts
-            ):
+            if (not exit_triggered) and time_stop_bars > 0 and (i - entry_idx) >= eff_ts:
                 exit_price = c_open * (1.0 - slippage_rate)
                 exit_triggered = True
 
@@ -457,9 +539,17 @@ def backtest_loop_numba_spot(
                 exit_fee = amount * exit_price * fee_rate
                 pnl -= exit_fee
                 balance += (amount * entry_price) + pnl
-                
+
                 if trade_count < max_trades:
-                    trades[trade_count] = [entry_idx, i, entry_price, exit_price, pnl, amount, entry_fee_stored]
+                    trades[trade_count] = [
+                        entry_idx,
+                        i,
+                        entry_price,
+                        exit_price,
+                        pnl,
+                        amount,
+                        entry_fee_stored,
+                    ]
                     trade_count += 1
                 in_position = False
                 last_entry_risk_pct = 0.0
@@ -478,7 +568,7 @@ def backtest_loop_numba_spot(
 
             do_entry = False
             fill_price = 0.0
-            
+
             if trend_dir[prev_i] == 1:
                 eu_prev = entry_upper[prev_i]
                 if eu_prev < 1.0:
@@ -497,11 +587,15 @@ def backtest_loop_numba_spot(
                 if np.isnan(prev_atr) or prev_atr <= 0.0:
                     equity_curve[i] = balance
                     continue
-                
+
                 stop_price = fill_price - (prev_atr * long_atr_mult)
                 stop_distance = abs(fill_price - stop_price)
                 if stop_distance > 0:
-                    current_equity = max_capital_usage if use_compounding and balance > max_capital_usage else balance
+                    current_equity = (
+                        max_capital_usage
+                        if use_compounding and balance > max_capital_usage
+                        else balance
+                    )
 
                     rr = regime_risk_mult[prev_i] if prev_i < len(regime_risk_mult) else 1.0
                     gk = garch_kelly_f[prev_i] if prev_i < len(garch_kelly_f) else 1.0
@@ -525,29 +619,32 @@ def backtest_loop_numba_spot(
                         eff = 1.0
 
                     new_risk_pct = risk_per_trade * eff
-                    if last_entry_risk_pct > 1e-12 and abs(new_risk_pct - last_entry_risk_pct) < delta_gate:
+                    if (
+                        last_entry_risk_pct > 1e-12
+                        and abs(new_risk_pct - last_entry_risk_pct) < delta_gate
+                    ):
                         equity_curve[i] = balance
                         continue
-                    
+
                     # Spot Allocation: Align with shared-cash Risk-based sizing
                     risk_budget = current_equity * new_risk_pct
                     raw_amount = risk_budget / stop_distance
-                    
+
                     # Cap by max_position_pct (Portfolio-aligned)
                     max_notional = current_equity * max_position_pct
                     amount_pos_cap = max_notional / fill_price
-                    
+
                     # Prevent allocating more than we have (Buffer for fees)
                     max_affordable = (balance * 0.99) / (fill_price * (1.0 + fee_rate))
-                    
+
                     amount = min(raw_amount, amount_pos_cap, max_affordable)
-                    
+
                     if amount > 1e-12:
                         required_capital = amount * fill_price
                         entry_fee = required_capital * fee_rate
-                        
+
                         if balance >= required_capital + entry_fee:
-                            balance -= (required_capital + entry_fee)
+                            balance -= required_capital + entry_fee
                             entry_fee_stored = entry_fee
                             in_position = True
                             entry_price = fill_price
@@ -564,7 +661,15 @@ def backtest_loop_numba_spot(
                                 pnl -= exit_fee_intra
                                 balance += (amount * entry_price) + pnl
                                 if trade_count < max_trades:
-                                    trades[trade_count] = [entry_idx, i, entry_price, intra_exit_price, pnl, amount, entry_fee_stored]
+                                    trades[trade_count] = [
+                                        entry_idx,
+                                        i,
+                                        entry_price,
+                                        intra_exit_price,
+                                        pnl,
+                                        amount,
+                                        entry_fee_stored,
+                                    ]
                                     trade_count += 1
                                 in_position = False
                                 last_entry_risk_pct = 0.0
@@ -575,7 +680,7 @@ def backtest_loop_numba_spot(
             equity_curve[i] = balance + (amount * entry_price) + unrealized
         else:
             equity_curve[i] = balance
-            
+
         if equity_curve[i] > peak_equity:
             peak_equity = equity_curve[i]
 
@@ -593,7 +698,15 @@ def backtest_loop_numba_spot(
         pnl -= exit_fee
         balance += (amount * entry_price) + pnl
         if trade_count < max_trades:
-            trades[trade_count] = [entry_idx, last_idx, entry_price, exit_price, pnl, amount, entry_fee_stored]
+            trades[trade_count] = [
+                entry_idx,
+                last_idx,
+                entry_price,
+                exit_price,
+                pnl,
+                amount,
+                entry_fee_stored,
+            ]
             trade_count += 1
 
     return trades[:trade_count], balance, equity_curve

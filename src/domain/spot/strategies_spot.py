@@ -5,12 +5,12 @@ from typing import Any, Dict, Optional
 import numpy as np
 import pandas as pd
 
-from src.strategy_base.pipeline_base import PipelineStrategyBase
 from src.core.indicators.indicators import get_indicator_engine
+from src.core.indicators.numpy_ops_spot import compute_atr_numpy, compute_rsi_numpy
 from src.domain.spot.regimes import REGIME_REGISTRY
 from src.domain.spot.signals import SIGNAL_REGISTRY
-from src.core.indicators.numpy_ops_spot import compute_atr_numpy, compute_rsi_numpy
 from src.domain.spot.sizing import SIZING_REGISTRY
+from src.strategy_base.pipeline_base import PipelineStrategyBase
 
 _SPOT_INDICATORS = get_indicator_engine(domain="spot")
 

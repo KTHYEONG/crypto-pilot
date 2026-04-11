@@ -4,7 +4,11 @@ from typing import Any, Dict, Mapping, Protocol, Sequence
 
 import optuna
 
-from config.opt_config import ENGINE_PARAM_SPACE, SPOT_EXCLUDED_SIZING_METHODS, SPOT_SHARED_PARAM_SPACE
+from config.opt_config import (
+    ENGINE_PARAM_SPACE,
+    SPOT_EXCLUDED_SIZING_METHODS,
+    SPOT_SHARED_PARAM_SPACE,
+)
 
 
 def build_full_discovery_space() -> Dict[str, Any]:

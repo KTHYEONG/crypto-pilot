@@ -4,41 +4,43 @@ from typing import Any, ClassVar, Dict
 
 import numpy as np
 import pandas as pd
-
 from numba import njit
+
 from src.domain.spot.signals.base import SignalOutput
 from src.domain.spot.signals.registry import register_signal
 
 
 @njit(cache=True)
-def compute_frama_series(high: np.ndarray, low: np.ndarray, close: np.ndarray, period: int) -> np.ndarray:
+def compute_frama_series(
+    high: np.ndarray, low: np.ndarray, close: np.ndarray, period: int
+) -> np.ndarray:
     n = len(close)
     frama = np.copy(close)
     if n < period:
         return frama
-    
+
     half_p = period // 2
     for i in range(period, n):
         # First half
-        h1 = np.max(high[i - period:i - half_p])
-        l1 = np.min(low[i - period:i - half_p])
+        h1 = np.max(high[i - period : i - half_p])
+        l1 = np.min(low[i - period : i - half_p])
         n1 = (h1 - l1) / half_p
-        
+
         # Second half
-        h2 = np.max(high[i - half_p:i])
-        l2 = np.min(low[i - half_p:i])
+        h2 = np.max(high[i - half_p : i])
+        l2 = np.min(low[i - half_p : i])
         n2 = (h2 - l2) / half_p
-        
+
         # Total
-        h3 = np.max(high[i - period:i])
-        l3 = np.min(low[i - period:i])
+        h3 = np.max(high[i - period : i])
+        l3 = np.min(low[i - period : i])
         n3 = (h3 - l3) / period
-        
+
         if n1 > 0 and n2 > 0 and n3 > 0:
             d = (np.log(n1 + n2) - np.log(n3)) / np.log(2.0)
         else:
             d = 1.0
-        
+
         w = -4.6 * (d - 1.0)
         alpha = np.exp(w)
         alpha = min(max(alpha, 0.01), 1.0)
@@ -47,19 +49,26 @@ def compute_frama_series(high: np.ndarray, low: np.ndarray, close: np.ndarray, p
 
 
 @njit(cache=True)
-def compute_evr_zscore(open_p: np.ndarray, high: np.ndarray, low: np.ndarray, close: np.ndarray, volume: np.ndarray, window: int) -> np.ndarray:
+def compute_evr_zscore(
+    open_p: np.ndarray,
+    high: np.ndarray,
+    low: np.ndarray,
+    close: np.ndarray,
+    volume: np.ndarray,
+    window: int,
+) -> np.ndarray:
     # Elastic Volume Ratio (Proxy) - Ratio of returns weighted by volume spikes
     n = len(close)
     evr_z = np.zeros(n)
     if n < window:
         return evr_z
-    
+
     # Simple z-score of (Volume * Range / StdDev)
     price_range = np.abs(high - low)
     raw_evr = volume * price_range
-    
+
     for i in range(window, n):
-        win = raw_evr[i - window:i]
+        win = raw_evr[i - window : i]
         mean = np.mean(win)
         std = np.std(win)
         if std > 1e-12:

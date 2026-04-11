@@ -1,4 +1,5 @@
 """Causal NumPy helpers for futures signals (vectorized rolling)."""
+
 from __future__ import annotations
 
 import numpy as np
@@ -8,15 +9,12 @@ import pandas as pd
 def compute_ema_numpy(close: np.ndarray, period: int) -> np.ndarray:
     if len(close) == 0:
         return np.array([], dtype=np.float64)
-    return (
-        pd.Series(close)
-        .ewm(span=max(2, period), adjust=False)
-        .mean()
-        .to_numpy(dtype=np.float64)
-    )
+    return pd.Series(close).ewm(span=max(2, period), adjust=False).mean().to_numpy(dtype=np.float64)
 
 
-def compute_atr_numpy(high: np.ndarray, low: np.ndarray, close: np.ndarray, period: int) -> np.ndarray:
+def compute_atr_numpy(
+    high: np.ndarray, low: np.ndarray, close: np.ndarray, period: int
+) -> np.ndarray:
     if len(close) == 0:
         return np.array([], dtype=np.float64)
     p = max(2, int(period))
@@ -29,7 +27,9 @@ def compute_atr_numpy(high: np.ndarray, low: np.ndarray, close: np.ndarray, peri
     return pd.Series(tr).ewm(span=p, adjust=False).mean().to_numpy(dtype=np.float64)
 
 
-def compute_adx_numpy(high: np.ndarray, low: np.ndarray, close: np.ndarray, period: int) -> np.ndarray:
+def compute_adx_numpy(
+    high: np.ndarray, low: np.ndarray, close: np.ndarray, period: int
+) -> np.ndarray:
     if len(close) == 0:
         return np.array([], dtype=np.float64)
     p = max(2, int(period))

@@ -1,12 +1,11 @@
 """Weak prior penalty for mismatched SIGNAL_TYPE x EXIT_FAMILY (tmp.md)."""
+
 from __future__ import annotations
 
 _TRENDISH: frozenset[str] = frozenset(
     {"SUPERTREND", "FRAMA_EVR", "ADX_BREAKOUT", "OBV_MA", "RS_MOMENTUM"}
 )
-_MEANREV: frozenset[str] = frozenset(
-    {"RSI2_PULLBACK", "STOCHRSI_CROSS", "KC_PULLBACK", "VIX_FIX"}
-)
+_MEANREV: frozenset[str] = frozenset({"RSI2_PULLBACK", "STOCHRSI_CROSS", "KC_PULLBACK", "VIX_FIX"})
 _HYBRID: frozenset[str] = frozenset({"BB_SQUEEZE", "MACD_HIST_DIV"})
 
 

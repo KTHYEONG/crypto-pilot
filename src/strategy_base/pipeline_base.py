@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+
 import pandas as pd
 
-from .core import StrategyBase
 from src.core.indicators.indicators import IndicatorEngine
+
+from .core import StrategyBase
 
 
 class PipelineStrategyBase(StrategyBase):
@@ -29,4 +31,6 @@ class PipelineStrategyBase(StrategyBase):
         Plugin-based signal generation pipeline.
         Must be implemented by subclasses using REGISTRY objects.
         """
-        raise NotImplementedError("Subclasses must implement generate_signals using their respective registries.")
+        raise NotImplementedError(
+            "Subclasses must implement generate_signals using their respective registries."
+        )

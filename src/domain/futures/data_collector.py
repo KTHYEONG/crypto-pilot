@@ -11,32 +11,33 @@ import pandas as pd
 from src.core.exchange.binance_client import BinanceClient
 
 # 프로젝트 루트 경로 추가 (모듈 import 문제 해결)
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
-from config.settings import FUTURES_DATA_DIR, FUTURES_BACKTEST_START_DATE, FUTURES_BACKTEST_END_DATE
+from config.settings import FUTURES_BACKTEST_END_DATE, FUTURES_BACKTEST_START_DATE, FUTURES_DATA_DIR
 from src.core.utils.utils import setup_logger
+
 
 class DataValidator:
     @staticmethod
     def validate(df, symbol, timeframe):
         """데이터 무결성 검증"""
         issues = []
-        
+
         # 1. 결측치 확인
         if df.isnull().any().any():
             missing_cols = df.columns[df.isnull().any()].tolist()
             issues.append(f"Missing values in columns: {missing_cols}")
-            
+
         # 2. 시간 연속성 확인
-        df.set_index('datetime', inplace=True, drop=False)
+        df.set_index("datetime", inplace=True, drop=False)
         df.sort_index(inplace=True)
-        
+
         expected_diff = {
-            '1h': pd.Timedelta(hours=1),
-            '1d': pd.Timedelta(days=1),
-            '4h': pd.Timedelta(hours=4)
+            "1h": pd.Timedelta(hours=1),
+            "1d": pd.Timedelta(days=1),
+            "4h": pd.Timedelta(hours=4),
         }.get(timeframe)
-        
+
         if expected_diff:
             time_diff = df.index.to_series().diff().dropna()
             gaps = time_diff[time_diff != expected_diff]
@@ -44,11 +45,12 @@ class DataValidator:
                 issues.append(f"Found {len(gaps)} time gaps. First gap at {gaps.index[0]}")
 
         # 3. 논리적 오류 확인 (Low > High, Open/Close outside High/Low)
-        invalid_high_low = df[df['high'] < df['low']]
+        invalid_high_low = df[df["high"] < df["low"]]
         if not invalid_high_low.empty:
             issues.append(f"High < Low detected in {len(invalid_high_low)} rows")
-            
+
         return issues
+
 
 class DataCollector:
     def __init__(self, api_key=None, secret=None):
@@ -57,7 +59,7 @@ class DataCollector:
 
     @staticmethod
     def _safe_symbol(symbol):
-        return symbol.replace('/', '_')
+        return symbol.replace("/", "_")
 
     def _cache_path(self, symbol, timeframe):
         safe_symbol = self._safe_symbol(symbol)
@@ -109,7 +111,11 @@ class DataCollector:
         elif "datetime" in out.columns:
             out["datetime"] = pd.to_datetime(out["datetime"])
 
-        out = out.drop_duplicates(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
+        out = (
+            out.drop_duplicates(subset=["timestamp"])
+            .sort_values("timestamp")
+            .reset_index(drop=True)
+        )
         return out
 
     def _read_parquet(self, path):
@@ -142,7 +148,8 @@ class DataCollector:
         for p in candidates:
             try:
                 frames.append(pd.read_csv(p))
-            except Exception:
+            except Exception as e:
+                self.logger.warning(f"Failed to read CSV file {p}: {e}")
                 continue
 
         if not frames:
@@ -154,7 +161,7 @@ class DataCollector:
         end_ts = pd.Timestamp(end_date) + pd.Timedelta(days=1) - pd.Timedelta(milliseconds=1)
         if df.empty:
             return df
-        return df[(df['datetime'] >= start_ts) & (df['datetime'] <= end_ts)].copy()
+        return df[(df["datetime"] >= start_ts) & (df["datetime"] <= end_ts)].copy()
 
     def _timeframe_to_timedelta(self, timeframe):
         m = re.match(r"^(\d+)([mhdw])$", str(timeframe).strip().lower())
@@ -282,14 +289,14 @@ class DataCollector:
             else:
                 missing_ranges.append((req_start, req_end))
         else:
-            cache_start = cache_df['datetime'].min().normalize()
-            cache_end = cache_df['datetime'].max().normalize()
+            cache_start = cache_df["datetime"].min().normalize()
+            cache_end = cache_df["datetime"].max().normalize()
             if req_start < cache_start:
                 # [[FIX]] 이미 알려진 상장일(earliest_available)보다 앞선 구간은 무시
                 eff_start = req_start
                 if earliest_known is not None:
                     eff_start = max(req_start, earliest_known)
-                
+
                 if eff_start < cache_start:
                     missing_ranges.append((eff_start, cache_start - pd.Timedelta(days=1)))
             if req_end > cache_end:
@@ -365,7 +372,9 @@ class DataCollector:
                 if "timestamp" not in cache_df.columns or "funding_rate" not in cache_df.columns:
                     cache_df = pd.DataFrame(columns=["timestamp", "funding_rate"])
                 else:
-                    cache_df["timestamp"] = pd.to_numeric(cache_df["timestamp"], errors="coerce").astype("int64")
+                    cache_df["timestamp"] = pd.to_numeric(
+                        cache_df["timestamp"], errors="coerce"
+                    ).astype("int64")
             except Exception as e:
                 self.logger.warning("Failed to read funding parquet %s: %s", path, e)
                 cache_df = pd.DataFrame(columns=["timestamp", "funding_rate"])
@@ -397,7 +406,7 @@ class DataCollector:
                 eff_start = req_start
                 if earliest_known is not None:
                     eff_start = max(req_start, earliest_known)
-                
+
                 if eff_start < cache_start:
                     missing_ranges.append((eff_start, cache_start - pd.Timedelta(days=1)))
             if req_end > cache_end:
@@ -415,7 +424,9 @@ class DataCollector:
                 if not fr_df.empty:
                     fetched_frames.append(fr_df)
             except Exception as exc:
-                self.logger.warning("Funding rate fetch failed for %s %s..%s: %s", symbol, s, e, exc)
+                self.logger.warning(
+                    "Funding rate fetch failed for %s %s..%s: %s", symbol, s, e, exc
+                )
 
         if fetched_frames:
             all_frames = [cache_df] if not cache_df.empty else []
@@ -431,7 +442,11 @@ class DataCollector:
             cache_df = merged
 
         if not cache_df.empty:
-            earliest = pd.to_datetime(cache_df["timestamp"].min(), unit="ms").normalize().strftime("%Y-%m-%d")
+            earliest = (
+                pd.to_datetime(cache_df["timestamp"].min(), unit="ms")
+                .normalize()
+                .strftime("%Y-%m-%d")
+            )
             if mk not in meta:
                 meta[mk] = {}
             if meta[mk].get("earliest_available_funding") != earliest:
@@ -445,6 +460,7 @@ class DataCollector:
         Now stores/updates a single parquet cache and returns requested slice.
         """
         return self.ensure_data(symbol, timeframe, start_date, end_date)
+
 
 if __name__ == "__main__":
     # 테스트 실행

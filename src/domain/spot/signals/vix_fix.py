@@ -35,12 +35,7 @@ class VIXFixSignal:
         safe_rm = np.maximum(roll_max, 1e-12)
         wvf = (roll_max - low) / safe_rm
         wvf = np.clip(wvf, 0.0, 1.5)
-        thr = (
-            pd.Series(wvf)
-            .rolling(max(lb, p + 5))
-            .quantile(pct)
-            .to_numpy(dtype=np.float64)
-        )
+        thr = pd.Series(wvf).rolling(max(lb, p + 5)).quantile(pct).to_numpy(dtype=np.float64)
         spike = wvf > thr
         rev = np.zeros(n, dtype=np.bool_)
         rev[1:] = close[1:] > close[:-1]

@@ -20,11 +20,11 @@ if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
 from config.settings import SPOT_BACKTEST_END_DATE, SPOT_INITIAL_BALANCE
+from src.core.exchange.upbit_client import UpbitClient
 from src.domain.spot.data_collector_spot import DataCollectorSpot
 from src.domain.spot.engine_spot import BacktestEngineFastSpot
 from src.domain.spot.opt_spot_utils.metrics import calc_profit_factor_from_pnl
 from src.domain.spot.strategies_spot import UltimateSpotStrategy
-from src.core.exchange.upbit_client import UpbitClient
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 _logger = logging.getLogger("universe_screener")
@@ -36,9 +36,7 @@ def filter_by_adv_floor(stats_df: pd.DataFrame, min_adv_krw_day: float) -> pd.Da
     return stats_df[stats_df["adv"] >= float(min_adv_krw_day)].copy()
 
 
-def filter_by_p25_bar_liquidity(
-    stats_df: pd.DataFrame, min_p25_bar_krw: float
-) -> pd.DataFrame:
+def filter_by_p25_bar_liquidity(stats_df: pd.DataFrame, min_p25_bar_krw: float) -> pd.DataFrame:
     """Reject coins where p25 4H-bar KRW volume < min_p25_bar_krw.
     Prevents spike-dominant volume from passing ADV filter."""
     if stats_df.empty or "p25_bar_vol" not in stats_df.columns:
@@ -192,7 +190,7 @@ def _run_mini_backtest_window(
     if trades_df is None or trades_df.empty:
         return 0.0, 0, -100.0, 0.0, pd.Series(dtype=np.float64)
 
-    n_trades = int(len(trades_df))
+    n_trades = len(trades_df)
     pf = float(calc_profit_factor_from_pnl(trades_df["pnl"]))
     ret_pct = float(result.get("total_return_pct", 0.0))
 
@@ -279,7 +277,7 @@ def marchenko_pastur_n_factors(
         return int(min_n)
 
     rets = returns_aligned.dropna(how="any")
-    t_obs = int(len(rets))
+    t_obs = len(rets)
     n_dim = int(returns_aligned.shape[1])
     if t_obs < 2 or n_dim < 1:
         return int(min_n)
@@ -338,9 +336,7 @@ def select_by_mrmr(
         best_score = -np.inf
         for s in remaining:
             reds = [
-                float(corr.loc[s, s2])
-                for s2 in selected
-                if s in corr.index and s2 in corr.columns
+                float(corr.loc[s, s2]) for s2 in selected if s in corr.index and s2 in corr.columns
             ]
             red = float(np.mean(reds)) if reds else 0.0
             score = relevance.get(s, 0.0) - red
@@ -466,9 +462,9 @@ def screen_broad_universe(
     try:
         fetch_start_date, _, _, _ = get_quarterly_window()
     except Exception:
-        fetch_start_date = (pd.to_datetime(SPOT_BACKTEST_END_DATE) - timedelta(days=365 * 3)).strftime(
-            "%Y-%m-%d"
-        )
+        fetch_start_date = (
+            pd.to_datetime(SPOT_BACKTEST_END_DATE) - timedelta(days=365 * 3)
+        ).strftime("%Y-%m-%d")
 
     stats: list[dict[str, float | str]] = []
     symbol_dfs: Dict[str, pd.DataFrame] = {}
@@ -485,11 +481,13 @@ def screen_broad_universe(
             first_candle = None
             for retry in range(3):
                 try:
-                    first_candle = client.exchange.fetch_ohlcv(ccxt_sym, "1d", since=since_ms, limit=1)
+                    first_candle = client.exchange.fetch_ohlcv(
+                        ccxt_sym, "1d", since=since_ms, limit=1
+                    )
                     break
                 except Exception as e:
                     if "too_many_requests" in str(e).lower() and retry < 2:
-                        time.sleep(1.0 + random.random())
+                        time.sleep(1.0 + random.random())  # nosec: S311
                         continue
                     raise e
             if not first_candle:
@@ -587,9 +585,13 @@ def screen_symbol_refinement(
     top_k = int(cfg["CANDIDATES_TOP_K"])
     adaptive_adv = bool(cfg["ADAPTIVE_SLIPPAGE_REF_ADV"])
 
-    anchor_syms: List[str] = list(anchor_symbols) if anchor_symbols is not None else list(SPOT_ANCHOR_SYMBOLS)
+    anchor_syms: List[str] = (
+        list(anchor_symbols) if anchor_symbols is not None else list(SPOT_ANCHOR_SYMBOLS)
+    )
     anchor_set = set(anchor_syms)
-    phase_a_list: List[str] = list(phase_a_broad) if phase_a_broad is not None else list(broad_candidates)
+    phase_a_list: List[str] = (
+        list(phase_a_broad) if phase_a_broad is not None else list(broad_candidates)
+    )
 
     if phase_b_params is not None:
         fixed_params = dict(phase_b_params)
@@ -698,7 +700,9 @@ def screen_symbol_refinement(
             median_adv = float(adv_series.median())
 
         _logger.info("Final symbols (%s): %s", len(final_symbols), final_symbols)
-        _logger.info("Marchenko-Pastur n_select=%s, median ADV=%s KRW/day", n_select, f"{median_adv:,.0f}")
+        _logger.info(
+            "Marchenko-Pastur n_select=%s, median ADV=%s KRW/day", n_select, f"{median_adv:,.0f}"
+        )
 
         update_config_file(
             final_symbols,
@@ -729,7 +733,9 @@ def screen_symbol_refinement(
         min_cagr_pct=-1e9,
         signal_type=winning_signal_type,
     )
-    if (fit_anchor.empty or len(fit_anchor) < len(valid_anchors_ordered)) and phase_b_params is not None:
+    if (
+        fit_anchor.empty or len(fit_anchor) < len(valid_anchors_ordered)
+    ) and phase_b_params is not None:
         _logger.warning(
             "Phase C anchor tier: retrying mini-BT with default space midpoints (partial anchor pass)."
         )
@@ -841,7 +847,9 @@ def screen_symbol_refinement(
                 final_symbols = valid_anchors_ordered[:mp_max]
                 n_select = len(final_symbols)
             else:
-                returns_for_mp = pd.concat({s: strat_returns[s] for s in cand_syms}, axis=1, join="inner")
+                returns_for_mp = pd.concat(
+                    {s: strat_returns[s] for s in cand_syms}, axis=1, join="inner"
+                )
                 n_select = marchenko_pastur_n_factors(returns_for_mp, min_n=mp_min, max_n=mp_max)
                 picked = select_by_mrmr(pool, strat_returns, n_select)
                 final_symbols = picked if picked else valid_anchors_ordered[:mp_max]
@@ -854,7 +862,9 @@ def screen_symbol_refinement(
         if fit_dyn.empty:
             n_select = min(n_select, n_anchor)
             final_symbols = valid_anchors_ordered[:n_select]
-            _logger.info("Phase C: dynamic tier empty; anchor-only after MP clamp: %s", final_symbols)
+            _logger.info(
+                "Phase C: dynamic tier empty; anchor-only after MP clamp: %s", final_symbols
+            )
         else:
             n_dynamic_slots = max(1, int(n_select) - n_anchor)
             pool_dyn = fit_dyn.sort_values("relevance", ascending=False).head(top_k).copy()
@@ -873,7 +883,9 @@ def screen_symbol_refinement(
         median_adv = float(adv_series.median())
 
     _logger.info("Final symbols (%s): %s", len(final_symbols), final_symbols)
-    _logger.info("Marchenko-Pastur n_select=%s, median ADV=%s KRW/day", n_select, f"{median_adv:,.0f}")
+    _logger.info(
+        "Marchenko-Pastur n_select=%s, median ADV=%s KRW/day", n_select, f"{median_adv:,.0f}"
+    )
 
     update_config_file(
         final_symbols,
@@ -907,7 +919,9 @@ def screen_universe() -> None:
     symbol_dfs_4h: Dict[str, pd.DataFrame] = {}
     daily_dfs: Dict[str, pd.DataFrame] = {}
 
-    symbols_to_load = list(dict.fromkeys(list(broad) + [s for s in SPOT_ANCHOR_SYMBOLS if s not in broad]))
+    symbols_to_load = list(
+        dict.fromkeys(list(broad) + [s for s in SPOT_ANCHOR_SYMBOLS if s not in broad])
+    )
     for sym in tqdm(symbols_to_load, desc="Load 4H/1D for refinement"):
         try:
             time.sleep(0.08)
@@ -925,7 +939,10 @@ def screen_universe() -> None:
 
     loaded_ok = [s for s in symbols_to_load if s in symbol_dfs_4h and s in daily_dfs]
     refinement_symbols = list(
-        dict.fromkeys([s for s in broad if s in loaded_ok] + [s for s in SPOT_ANCHOR_SYMBOLS if s in loaded_ok])
+        dict.fromkeys(
+            [s for s in broad if s in loaded_ok]
+            + [s for s in SPOT_ANCHOR_SYMBOLS if s in loaded_ok]
+        )
     )
     if len(loaded_ok) < mp_min:
         _logger.error("After reload: insufficient symbols for refinement (%s).", len(loaded_ok))

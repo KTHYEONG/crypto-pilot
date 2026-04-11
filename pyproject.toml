@@ -11,10 +11,7 @@ dependencies = [
 ]
 
 [tool.ruff]
-# AI가 작성한 코드를 즉각적으로 검증할 규칙 강제 (Action Harness)
 line-length = 100
-select = ["E", "F", "I", "N"] # PEP8, Import 정렬, Naming 컨벤션
-ignore = []
 exclude = [
     "data", 
     "legacy", 
@@ -23,6 +20,22 @@ exclude = [
     ".pytest_cache", 
     ".git"
 ]
+
+[tool.ruff.lint]
+select = [
+    "E", "F", "I", "N", # PEP8, Pyflakes, Import 정렬, Naming 컨벤션
+    "B",    # Bugbear: 잠재적 버그 탐지
+    "S",    # Bandit: 보안 취약점 진단
+    "PERF", # Perflint: 성능 최적화 안티패턴 탐지
+    "RUF"   # Ruff: 고유 정적 분석 규칙
+]
+ignore = []
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S101", "E402", "N806"]
+
+[tool.ruff.format]
+# 필요한 경우 포맷팅 설정을 추가할 수 있습니다.
 
 [tool.mypy]
 # AI에게 엄격한 Type Hinting 강제
