@@ -657,6 +657,75 @@ def _run_tf_optimization(
     )
     return (target_obj, tf), study
 
+def _run_stage2_combo_validation(
+    valid_tops: List[CombinationScoreFutures],
+    data_maps: Dict[str, Dict[str, Any]],
+    symbols: List[str],
+    tf: str,
+    project_root: str,
+) -> List[CombinationScoreFutures]:
+    from optuna.samplers import TPESampler
+    from optuna.storages import InMemoryStorage
+
+    from config.settings import FUTURES_CACHE_DIR
+    from src.domain.futures.opt_futures_utils.cv_utils import build_cpcv_test_paths_with_fallback
+    from src.domain.futures.opt_futures_utils.opt_params import build_combined_param_space_futures
+    
+    validated = []
+    ref_sym = symbols[0]
+    is_off = int(data_maps[ref_sym].get(f"is_start_idx_{tf}", 0))
+    ref_df = data_maps[ref_sym][tf]
+    prebuilt = None
+    if ref_df is not None and not ref_df.empty:
+        ref_len = len(ref_df) - is_off
+        if ref_len >= 200:
+            embargo = int(EMBARGO_BARS.get(tf, 0))
+            prebuilt = build_cpcv_test_paths_with_fallback(ref_len, embargo=embargo)
+            
+    for combo in valid_tops:
+        space = build_combined_param_space_futures(combo.signal, combo.regime, combo.sizing)
+        space["SIGNAL_TYPE"] = {"type": "categorical", "choices": [combo.signal]}
+        space["REGIME_TYPE"] = {"type": "categorical", "choices": [combo.regime]}
+        space["SIZING_METHOD"] = {"type": "categorical", "choices": [combo.sizing]}
+        
+        study = optuna.create_study(
+            direction="maximize",
+            sampler=TPESampler(n_startup_trials=10, seed=42),
+            storage=InMemoryStorage(),
+        )
+        
+        def _obj(trial: optuna.Trial) -> float:
+            return float(objective_futures(
+                trial,
+                data_maps=data_maps,
+                symbols=symbols,
+                tf_target=tf,
+                space=space,
+                mode=MODE_MULTI,
+                project_root=project_root,
+                prebuilt_cpcv_bundle=prebuilt,
+                signal_disk_cache_root=Path(FUTURES_CACHE_DIR),
+            ))
+            
+        _logger.info("   [Stage 1.5] Validating combo %s-%s-%s with 40 trials...", combo.signal, combo.regime, combo.sizing)
+        study.optimize(_obj, n_trials=40, n_jobs=1, show_progress_bar=False)
+        
+        completed = [t for t in study.trials if t.state == TrialState.COMPLETE and t.value is not None]
+        if completed:
+            completed.sort(key=lambda tr: float(tr.value or -1e9), reverse=True)
+            top_val = float(np.mean([t.value for t in completed[:3]]))
+            if top_val > -0.5:
+                validated.append((combo, top_val))
+                _logger.info("      -> PASSED (score: %.4f)", top_val)
+            else:
+                _logger.info("      -> FAILED (score: %.4f)", top_val)
+        else:
+            _logger.info("      -> FAILED (no valid trials)")
+
+    validated.sort(key=lambda x: x[1], reverse=True)
+    return [v[0] for v in validated]
+
+
 def main() -> None:
     import json
 
@@ -672,6 +741,7 @@ def main() -> None:
     parser.add_argument("--tf", type=str, choices=["1h", "4h"], default=OPT_FUTURES_CONFIG.get("TARGET_TIMEFRAMES", ["4h"])[0])
     parser.add_argument("--reference-date", type=str, default=None)
     parser.add_argument("--no-progress", action="store_true")
+    parser.add_argument("--skip-stage1", action="store_true")
     args = parser.parse_args()
 
     # [INFRA] Signal Cache & Memory Management (Alignment with Spot strategy)
@@ -819,6 +889,14 @@ def main() -> None:
             if len(filtered_tops) >= max_combos:
                 break
         valid_tops = filtered_tops if filtered_tops else top_combos[:3]
+        
+        if not getattr(args, "skip_stage1", False):
+            validated_tops = _run_stage2_combo_validation(valid_tops, stage1_data_maps, stage1_syms, args.tf, project_root)
+            if validated_tops:
+                valid_tops = validated_tops
+            else:
+                _logger.warning("   [Stage 1.5] All combos failed validation. Reverting to unvalidated valid_tops.")
+
         locked_param_space = build_multi_combo_param_space_futures(valid_tops)
         
         if not args.skip_universe:
