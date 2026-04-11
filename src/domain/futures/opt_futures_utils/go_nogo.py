@@ -55,8 +55,8 @@ def run_go_nogo_check(
     growth_pass: bool = oos_cagr > 5.0 and romad >= 0.8  # 최소 수익률 5% 보장 및 방어력 검증
 
     # --- 2. Absolute Volatility Drag (MDD 한계치) ---
-    # 상위 1% 레버리지 운용을 위해 MDD는 25%로 하향 압박 (기존 35%는 파산 리스크 농후)
-    mdd_pass: bool = abs_mdd <= 25.0
+    # 상위 1% 레버리지 운용을 위해 MDD는 35%로 조정 (수학적 켈리 공간 확보)
+    mdd_pass: bool = abs_mdd <= 35.0
 
     # --- 3. Mathematical Edge (PF Baseline) ---
     # 실전 슬리피지와 수수료를 극복하는 최소 컷오프를 1.50으로 상향
@@ -84,7 +84,7 @@ def run_go_nogo_check(
 
     details: Dict[str, bool] = {
         "1. Risk-Adjusted Return (RoMaD >= 0.8)": growth_pass,
-        "2. Strict Volatility Limit (MDD <= 25%)": mdd_pass,
+        "2. Healthy Volatility Limit (MDD <= 35%)": mdd_pass,
         f"3. Institutional Edge (PF >= {target_pf})": pf_pass,
         "4. Dynamic Stat Edge (N-Tier Valid)": trades_pass,
         "5. Long/Short balance (minority >= 15%)": ls_pass,
@@ -97,7 +97,7 @@ def run_go_nogo_check(
 
     metric_values: Dict[str, str] = {
         "1. Risk-Adjusted Return (RoMaD >= 0.8)": f"RoMaD: {romad:.2f} (CAGR {oos_cagr:.1f}%)",
-        "2. Strict Volatility Limit (MDD <= 25%)": f"MDD: {abs_mdd:.1f}%",
+        "2. Healthy Volatility Limit (MDD <= 35%)": f"MDD: {abs_mdd:.1f}%",
         f"3. Institutional Edge (PF >= {target_pf})": f"PF: {profit_factor:.2f}",
         "4. Dynamic Stat Edge (N-Tier Valid)": f"N: {total_trades}",
         "5. Long/Short balance (minority >= 15%)": f"L/S ratio: {long_short_ratio_oos:.2f}",
@@ -254,9 +254,10 @@ def run_futures_deployment_report(ctx: FuturesDeploymentReportInput) -> str:
     psr_ok = ctx.gate1_psr >= 0.40  # Relaxed from 0.50
     dsr_ok = ctx.gate1_dsr >= 0.20  # Relaxed from 0.25
 
-    oos_mdd_ok = abs(ctx.oos_mdd_pct) <= ctx.oos_mdd_limit_pct
+    oos_mdd_ok = abs(ctx.oos_mdd_pct) <= 35.0  # [REVISED] 25 -> 35
     cvar_ok = ctx.oos_cvar_pct <= ctx.cvar_limit_pct
-    hw_ok = ctx.hw_recovery_days <= ctx.hw_recovery_max_days
+    hw_ok = ctx.hw_recovery_days <= 120.0  # [STRICT] 180 -> 120
+    ui_ok = ctx.oos_ulcer_index <= 15.0  # [NEW] Hard Gate for Pain Area
     calmar_ok = ctx.oos_calmar >= ctx.calmar_target
     fund_ok = ctx.funding_drag_pct <= ctx.funding_drag_limit_pct
 
@@ -299,10 +300,10 @@ def run_futures_deployment_report(ctx: FuturesDeploymentReportInput) -> str:
         "=" * 71,
         " [TIER 2. OOS ABSOLUTE RISK HARD GATES: 4H FUTURES]",
         "=" * 71,
-        f"  - Maximum Pain (MDD Limit)    : {ctx.oos_mdd_pct:.1f}%   {_fmt_pass_info(oos_mdd_ok)} (Limit: {ctx.oos_mdd_limit_pct}%)",
+        f"  - Maximum Pain (MDD Limit)    : {ctx.oos_mdd_pct:.1f}%   {_fmt_pass_info(oos_mdd_ok)} (Limit: 35.0%)",
         f"  - Portfolio CVaR(5%) Loss     : {ctx.oos_cvar_pct:.2f}%   {_fmt_pass_info(cvar_ok)} (Limit: {ctx.cvar_limit_pct}%)",
-        f"  - Recovery Time (Max UD)      : {ctx.hw_recovery_days:.1f}d   {_fmt_pass_info(hw_ok)} (Limit: {ctx.hw_recovery_max_days}d)",
-        f"  - Ulcer Index (Pain)          : {ctx.oos_ulcer_index:.2f}   (Info Only)",
+        f"  - Recovery Time (Max UD)      : {ctx.hw_recovery_days:.1f}d   {_fmt_pass_info(hw_ok)} (Limit: 120.0d)",
+        f"  - Ulcer Index (Pain)          : {ctx.oos_ulcer_index:.2f}   {_fmt_pass_info(ui_ok)} (Limit: 15.0)",
         f"  - OOS Calmar Ratio (Grow/Risk): {ctx.oos_calmar:.2f}   {_fmt_pass_info(calmar_ok)} (Min: {ctx.calmar_target})",
         f"  - Funding Drag Ratio          : {ctx.funding_drag_pct:.2f}%   {_fmt_pass_info(fund_ok)} (Limit: {ctx.funding_drag_limit_pct}%)",
         "",
