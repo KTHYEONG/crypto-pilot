@@ -1441,6 +1441,9 @@ def main() -> None:
 
         short_wr_oos = float(oos_port.get("short_win_rate_pct", 0.0))
         short_wr_ok = short_wr_oos >= 35.0 if int(oos_port["short_trades"]) > 5 else True
+        
+        ui_oos = float(oos_port.get("ulcer_index", 0.0))
+        ui_ok = ui_oos <= 15.0
 
         core_gate_checks = [
             veto.passed,
@@ -1449,9 +1452,10 @@ def main() -> None:
             float(ua.get("gate1_path_sortino", 0.0)) >= 1.5,
             float(ua.get("gate1_tail_ratio", 0.0)) >= 1.5,
             trade_floor.passed,
-            abs(float(oos_port["mdd_pct"])) <= oos_mdd_limit,
+            abs(float(oos_port["mdd_pct"])) <= 35.0, # Updated from 25
             float(oos_port["cvar_pct"]) <= 12.0,
-            float(oos_port["hw_recovery_days"]) <= 180.0,
+            float(oos_port["hw_recovery_days"]) <= 120.0, # Strict: 180 -> 120
+            ui_ok, # New Hard Gate
             float(oos_port["calmar_ratio"]) >= oos_calmar_target,
             funding_drag_pct_oos <= 15.0,
             float(oos_port["cagr_pct"]) >= oos_cagr_target,

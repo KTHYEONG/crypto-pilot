@@ -35,13 +35,14 @@ OPT_FUTURES_CONFIG: Dict[str, Any] = {
     "FUTURES_CPCV_TEMPORAL_LAMBDA": 3.0,
     "FUTURES_MAX_CONCURRENT_POSITIONS": 3,
     "FUTURES_MIN_PF": 1.5,
-    "FUTURES_MAX_MDD": 25.0,
+    "FUTURES_MAX_MDD": 35.0,
+    "FUTURES_MAX_UI": 15.0,  # 신규: Ulcer Index 고통 지수 제한
     "FUTURES_MIN_ROMAD": 0.8,
     "FUTURES_MIN_CAGR_PCT": 30.0,
     "FUTURES_STAGE2_MAX_PER_SIGNAL_TYPE": 2,
     "FUTURES_MULTI_WINDOW_OOS_SUBS": 3,
     "FUTURES_MULTI_WINDOW_MIN_POSITIVE": 3,
-    "FUTURES_DISCOVERY_LEVERAGE": 8,
+    "FUTURES_DISCOVERY_LEVERAGE": 20,
     "FUTURES_IS_CAGR_FLOOR": 5.0,
     "FUTURES_OBJECTIVE_FLOOR_WHEN_NO_EDGE": -2.0,
     "FUTURES_MIN_REGIME_ON_RATE": 0.20,  # 0.10→0.20: Spot 22% 기준에 맞춤, 가짜 신호 필터 강화
@@ -53,7 +54,8 @@ OPT_FUTURES_CONFIG: Dict[str, Any] = {
 }
 
 # Phase C engine + risk (plugin union via build_full_discovery_space_futures).
-# MACRO_EMA_PERIOD removed: unused by ADX_BREAKOUT; RSM_VT defines it in its own param_space.
+# LEVERAGE removed from optimization (anchored at 20).
+# MAX_EXPOSURE replaced with MAX_EXPOSURE_PER_COIN and DD_SCALING_THRESHOLD.
 ENGINE_PARAM_SPACE_FUTURES: Dict[str, Dict[str, Any]] = {
     "ATR_PERIOD": {"type": "int", "low": 10, "high": 20, "step": 2},
     "LONG_ATR_MULT": {"type": "float", "low": 1.5, "high": 4.5, "step": 0.25},
@@ -63,7 +65,8 @@ ENGINE_PARAM_SPACE_FUTURES: Dict[str, Dict[str, Any]] = {
     "SHORT_TP_MULT": {"type": "float", "low": 1.0, "high": 3.5, "step": 0.5},
     "SHORT_TRAIL_MULT": {"type": "float", "low": 1.5, "high": 4.5, "step": 0.5},
     "RISK_PER_TRADE": {"type": "float", "low": 0.01, "high": 0.05, "step": 0.005},
-    "MAX_EXPOSURE": {"type": "float", "low": 0.3, "high": 1.2, "step": 0.1},
+    "MAX_EXPOSURE_PER_COIN": {"type": "float", "low": 0.5, "high": 2.0, "step": 0.1},
+    "DD_SCALING_THRESHOLD": {"type": "float", "low": 0.10, "high": 0.25, "step": 0.05},
 }
 
 
