@@ -77,6 +77,10 @@ class PortfolioBacktestEngineFast:
         l_scale_atr = float(self.params.get("LONG_SCALE_ATR_MULT", 3.0))
         s_trail_mult = float(self.params.get("SHORT_TRAIL_MULT", 3.0))
 
+        # --- Dynamic Asset Management Params ---
+        max_exp_per_coin = float(self.params.get("MAX_EXPOSURE_PER_COIN", 1.5))
+        dd_scaling_threshold = float(self.params.get("DD_SCALING_THRESHOLD", 0.15))
+
         trades_arr, final_balance, equity_curve = backtest_portfolio_numba(
             close_2d,
             high_2d,
@@ -103,6 +107,8 @@ class PortfolioBacktestEngineFast:
             s_trail_mult,
             self.max_concurrent_positions,
             self.max_exposure,
+            max_exp_per_coin,
+            dd_scaling_threshold,
         )
 
         trades_list: list[dict[str, Any]] = []
@@ -154,6 +160,8 @@ def backtest_portfolio_numba(
     s_trail_mult: float,
     max_concurrent: int,
     max_exposure: float,
+    max_exp_per_coin: float,
+    dd_scaling_threshold: float,
 ) -> tuple[np.ndarray, float, np.ndarray]:
     n_bars = close_2d.shape[0]
     n_syms = close_2d.shape[1]
@@ -161,6 +169,7 @@ def backtest_portfolio_numba(
     balance = initial_balance
     equity_curve = np.zeros(n_bars, dtype=np.float64)
     equity_curve[0] = initial_balance
+    hwm = initial_balance
 
     in_pos = np.zeros(n_syms, dtype=np.bool_)
     pos_side = np.zeros(n_syms, dtype=np.int8)
@@ -202,9 +211,20 @@ def backtest_portfolio_numba(
 
         current_equity = balance + used_margin_total + unrealized_total
         equity_curve[i] = current_equity
+        if current_equity > hwm:
+            hwm = current_equity
 
         if current_equity <= 0:
             break
+
+        # --- Drawdown-Dependent Risk Scaling (Anti-Martingale) ---
+        current_dd = (hwm - current_equity) / hwm if hwm > 0 else 0.0
+        dd_scaling_factor = 1.0
+        if current_dd > dd_scaling_threshold:
+            # Linear scaling: 40% MDD -> risk halved (example logic)
+            dd_scaling_factor = max(0.1, 1.0 - (current_dd / 0.40))
+        
+        effective_risk_per_trade = risk_per_trade * dd_scaling_factor
 
         free_margin = current_equity - used_margin_total
         allowed_margin = max(0.0, (current_equity * max_exposure) - used_margin_total)
@@ -391,10 +411,11 @@ def backtest_portfolio_numba(
                             stop_dist,
                             current_equity,
                             free_margin,
-                            risk_per_trade,
+                            effective_risk_per_trade,
                             leverage,
                             sf,
                             garch_kelly_f[prev_i, s],
+                            max_exposure_per_coin=max_exp_per_coin,
                         )
 
                         max_margin_per_coin = current_equity / float(max_concurrent)
