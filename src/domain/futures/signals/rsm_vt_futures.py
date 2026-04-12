@@ -22,22 +22,20 @@ _ind = get_indicator_engine(domain="futures")
 class RsmVtFuturesSignal:
     name: ClassVar[str] = "RSM_VT"
     param_space: ClassVar[Dict[str, Any]] = {
-        "MACRO_EMA_PERIOD": {"type": "int", "low": 50, "high": 200, "step": 10},
-        "KC_MULT": {"type": "float", "low": 1.0, "high": 2.5, "step": 0.25},
-        "SQUEEZE_WINDOW": {"type": "int", "low": 3, "high": 15, "step": 2},
-        "MOMENTUM_PERIOD": {"type": "int", "low": 10, "high": 30, "step": 5},
-        "VOL_Z_THRESHOLD": {"type": "float", "low": 1.0, "high": 3.0, "step": 0.5},
-        "EXHAUSTION_MULT": {"type": "float", "low": 2.0, "high": 5.0, "step": 0.5},
-        "CVD_WINDOW": {"type": "int", "low": 3, "high": 20, "step": 2},
-        "TAKER_RATIO_THRESHOLD": {"type": "float", "low": 0.4, "high": 0.7, "step": 0.05},
+        # Compressed step to 50 for faster discovery
+        "MACRO_EMA_PERIOD": {"type": "int", "low": 50, "high": 250, "step": 50},
+        "KC_MULT": {"type": "float", "low": 1.0, "high": 2.5, "step": 0.5},
+        "SQUEEZE_WINDOW": {"type": "int", "low": 5, "high": 15, "step": 5},
+        "MOMENTUM_PERIOD": {"type": "int", "low": 10, "high": 40, "step": 10},
+        "VOL_Z_THRESHOLD": {"type": "float", "low": 1.5, "high": 3.0, "step": 0.5},
+        "EXHAUSTION_MULT": {"type": "float", "low": 2.0, "high": 5.0, "step": 1.0},
     }
 
     def compute(self, df: pd.DataFrame, params: Dict[str, Any]) -> FuturesSignalOutput:
-        work = df
+        work = df.copy()
         macro_ema_period = int(params.get("MACRO_EMA_PERIOD", 200))
-        momentum_period = int(params.get("MOMENTUM_PERIOD", 20))
         kc_mult = float(params.get("KC_MULT", 1.5))
-        atr_period = int(params.get("ATR_PERIOD", 20))
+        atr_period = 14 # Fixed for parameter reduction
         vol_z_threshold = float(params.get("VOL_Z_THRESHOLD", 1.5))
         exhaustion_mult = float(params.get("EXHAUSTION_MULT", 4.0))
         squeeze_window = int(params.get("SQUEEZE_WINDOW", 5))
@@ -56,46 +54,28 @@ class RsmVtFuturesSignal:
         )
         work["recent_squeeze"] = work["is_squeezing"].rolling(window=squeeze_window).sum() > 0
 
-        if "datetime" in work.columns:
-            hours = work["datetime"].dt.hour
-            grouped_vol = work.groupby(hours)["volume"]
-            vol_mean = grouped_vol.transform(lambda x: x.rolling(window=10, min_periods=3).mean())
-            vol_std = grouped_vol.transform(lambda x: x.rolling(window=10, min_periods=3).std())
-        else:
-            vol_mean = work["volume"].rolling(window=20).mean()
-            vol_std = work["volume"].rolling(window=20).std()
-
+        # Simplified Volume Z-Score (Daily Profile removed for robustness)
+        vol_mean = work["volume"].rolling(window=20).mean()
+        vol_std = work["volume"].rolling(window=20).std()
         vol_std = vol_std.replace(0, 1e-8)
         work["vol_zscore"] = (work["volume"] - vol_mean) / vol_std
         vol_spike = work["vol_zscore"] > vol_z_threshold
+        
         candle_range = work["high"] - work["low"]
         work["is_exhausted"] = candle_range > (work["atr"] * exhaustion_mult)
 
-        cvd_window = int(params.get("CVD_WINDOW", 5))
-        taker_ratio_threshold = float(params.get("TAKER_RATIO_THRESHOLD", 1.1))
-
+        # CVD / Taker Ratio: Simplified fallback logic
         if "taker_buy_base_volume" in work.columns:
-            work["taker_buy_base_volume"] = (
-                work["taker_buy_base_volume"].astype(np.float64).clip(lower=0.0)
-            )
-            work["volume"] = work["volume"].astype(np.float64).clip(lower=0.0)
             work["taker_sell_volume"] = np.maximum(
                 work["volume"] - work["taker_buy_base_volume"], 0.0
             )
             work["vol_delta"] = work["taker_buy_base_volume"] - work["taker_sell_volume"]
-            work["cvd"] = work["vol_delta"].rolling(window=cvd_window).sum()
-            safe_sell = work["taker_sell_volume"].replace(0.0, 1e-8)
-            work["taker_ratio"] = work["taker_buy_base_volume"] / safe_sell
-            cvd_bull_filter = (work["cvd"] > 0.0) & (work["taker_ratio"] >= taker_ratio_threshold)
-            cvd_bear_filter = (work["cvd"] < 0.0) & (
-                work["taker_ratio"] <= (1.0 / taker_ratio_threshold)
-            )
+            work["cvd"] = work["vol_delta"].rolling(window=5).sum()
+            cvd_bull_filter = (work["cvd"] > 0.0)
+            cvd_bear_filter = (work["cvd"] < 0.0)
         else:
             cvd_bull_filter = pd.Series(True, index=work.index)
             cvd_bear_filter = pd.Series(True, index=work.index)
-
-        work["dc_upper"] = work["high"].rolling(window=momentum_period).max()
-        work["dc_lower"] = work["low"].rolling(window=momentum_period).min()
 
         macro_uptrend = work["close"] > work["macro_ema"]
         macro_downtrend = work["close"] < work["macro_ema"]

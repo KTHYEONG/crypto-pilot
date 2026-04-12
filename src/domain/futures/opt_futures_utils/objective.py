@@ -158,6 +158,22 @@ def objective_futures(
     cvar_alpha = float(cfg.get("FUTURES_CPCV_CVAR_ALPHA", 0.10))
     cvar_thr_log = float(cfg.get("FUTURES_CPCV_CVAR_THRESHOLD_LOG", -0.05))  # Max log-loss allowed
 
+    # [REDESIGN] Pre-calculate Cross-Sectional Momentum Ranks if needed
+    ranks_df = None
+    if params.get("SIGNAL_TYPE") == "CS_MOMENTUM" and len(symbols) > 1:
+        lookback = int(params.get("CSM_LOOKBACK", 24))
+        # 1. Collect returns for all symbols
+        all_rets: Dict[str, pd.Series] = {}
+        for sym in symbols:
+            s_df = data_maps.get(sym, {}).get(tf)
+            if s_df is not None and not s_df.empty:
+                all_rets[sym] = s_df["close"].pct_change(periods=lookback)
+        
+        if all_rets:
+            # 2. Align in a single DF and rank cross-sectionally
+            rets_df = pd.DataFrame(all_rets)
+            ranks_df = rets_df.rank(axis=1, pct=True)
+
     cache_root = signal_disk_cache_root
     if cache_root is None and project_root is not None:
         cache_root = Path(project_root) / "cache_futures"
@@ -167,6 +183,14 @@ def objective_futures(
         target_df_full = data_maps.get(sym, {}).get(tf)
         if target_df_full is None or target_df_full.empty:
             continue
+            
+        # [REDESIGN] Inject ranking data for CS_MOMENTUM signals
+        csm_check = (params.get("SIGNAL_TYPE") == "CS_MOMENTUM")
+        has_ranks = ('ranks_df' in locals() and ranks_df is not None)
+        if csm_check and has_ranks and sym in ranks_df.columns:
+            target_df_full = target_df_full.copy()
+            target_df_full["cs_mom_rank"] = ranks_df[sym]
+
         fp = _dataset_fingerprint_from_df(target_df_full)
         cache_key = _build_signal_cache_key(params, sym, tf, len(target_df_full), fp)
         full_signal_dfs[sym] = get_or_compute_signals(
