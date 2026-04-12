@@ -98,6 +98,7 @@ SEP_WIDTH: int = 60
 PROGRESS_MIN_INTERVAL: float = 0.2
 MODE_MULTI: str = "multi"
 BEST_PARAMS_FUTURES_JSON_STEM: str = "best_futures_4h"
+_STAGE1_WORKER_CTX: Dict[str, Any] = {}
 
 EMBARGO_BARS: Dict[str, int] = {
     "1h": 24,
@@ -857,6 +858,42 @@ def _eval_combo_task(
     )
 
 
+def _init_stage1_worker_context(
+    data_maps: Dict[str, Dict[str, Any]],
+    symbols: List[str],
+    tf: str,
+    project_root: str,
+    prebuilt: Any,
+    alignment_info: Optional[Dict[str, Any]],
+) -> None:
+    _STAGE1_WORKER_CTX.clear()
+    _STAGE1_WORKER_CTX.update(
+        {
+            "data_maps": data_maps,
+            "symbols": symbols,
+            "tf": tf,
+            "project_root": project_root,
+            "prebuilt": prebuilt,
+            "alignment_info": alignment_info,
+        }
+    )
+
+
+def _eval_combo_task_from_context(sig: str, reg: str, siz: str) -> Optional[CombinationScoreFutures]:
+    ctx = _STAGE1_WORKER_CTX
+    return _eval_combo_task(
+        sig,
+        reg,
+        siz,
+        ctx["data_maps"],
+        ctx["symbols"],
+        ctx["tf"],
+        ctx["project_root"],
+        ctx["prebuilt"],
+        ctx.get("alignment_info"),
+    )
+
+
 def _run_stage1_futures_tournament(
     data_maps: Dict[str, Dict[str, Any]],
     symbols: List[str],
@@ -933,13 +970,17 @@ def _run_stage1_futures_tournament(
 
     _logger.info("   Stage 1 parallel workers: %d (64 samples per combo)", n_workers)
 
-    with concurrent.futures.ProcessPoolExecutor(max_workers=n_workers) as executor:
+    with concurrent.futures.ProcessPoolExecutor(
+        max_workers=n_workers,
+        initializer=_init_stage1_worker_context,
+        initargs=(data_maps, symbols, tf, project_root, prebuilt, alignment_info),
+    ) as executor:
         futures_map = {
             executor.submit(
-                _eval_combo_task,
-                sig, reg, siz,
-                data_maps, symbols, tf, project_root, prebuilt,
-                alignment_info  # [OPTIMIZATION]
+                _eval_combo_task_from_context,
+                sig,
+                reg,
+                siz,
             ): (sig, reg, siz)
             for sig, reg, siz in combos
         }

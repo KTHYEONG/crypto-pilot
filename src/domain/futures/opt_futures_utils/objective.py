@@ -110,7 +110,34 @@ def compute_multi_alignment_info(
         "alignment_offsets": alignment_offsets,
         "eff_ref_len": eff_ref_len,
         "cpcv_bundle": cpcv_bundle,
+        "csm_ranks_cache": _precalculate_csm_ranks(data_maps, symbols, tf),
     }
+
+def _precalculate_csm_ranks(data_maps: Dict[str, Any], symbols: List[str], tf: str) -> Dict[int, pd.DataFrame]:
+    """Pre-calculate cross-sectional ranks for all likely lookbacks to save time in trials."""
+    cache: Dict[int, pd.DataFrame] = {}
+    # CSM_LOOKBACK step is 12, range 12-72
+    lookbacks = [12, 24, 36, 48, 60, 72]
+    
+    # 1. Base returns for each symbol
+    rets: Dict[str, pd.DataFrame] = {}
+    for sym in symbols:
+        df = data_maps.get(sym, {}).get(tf)
+        if df is not None and not df.empty:
+            rets[sym] = df[["close"]] # Keep as DF to preserve index/alignment
+
+    if not rets or len(symbols) <= 1:
+        return {}
+
+    for lb in lookbacks:
+        all_rets: Dict[str, pd.Series] = {}
+        for sym, r_df in rets.items():
+            all_rets[sym] = r_df["close"].pct_change(periods=lb)
+        
+        rets_df = pd.DataFrame(all_rets)
+        cache[lb] = rets_df.rank(axis=1, pct=True)
+    
+    return cache
 
 
 def objective_futures(
@@ -158,25 +185,52 @@ def objective_futures(
     cvar_alpha = float(cfg.get("FUTURES_CPCV_CVAR_ALPHA", 0.10))
     cvar_thr_log = float(cfg.get("FUTURES_CPCV_CVAR_THRESHOLD_LOG", -0.05))  # Max log-loss allowed
 
-    # [REDESIGN] Pre-calculate Cross-Sectional Momentum Ranks if needed
+    # [REDESIGN] Pre-calculate or fetch Cross-Sectional Momentum Ranks
     ranks_df = None
     if params.get("SIGNAL_TYPE") == "CS_MOMENTUM" and len(symbols) > 1:
-        lookback = int(params.get("CSM_LOOKBACK", 24))
-        # 1. Collect returns for all symbols
-        all_rets: Dict[str, pd.Series] = {}
-        for sym in symbols:
-            s_df = data_maps.get(sym, {}).get(tf)
-            if s_df is not None and not s_df.empty:
-                all_rets[sym] = s_df["close"].pct_change(periods=lookback)
-        
-        if all_rets:
-            # 2. Align in a single DF and rank cross-sectionally
-            rets_df = pd.DataFrame(all_rets)
-            ranks_df = rets_df.rank(axis=1, pct=True)
+        lb = int(params.get("CSM_LOOKBACK", 24))
+        # 1. Try to get from cache (multi_alignment_info)
+        cache = (multi_alignment_info or {}).get("csm_ranks_cache")
+        if cache and lb in cache:
+            ranks_df = cache[lb]
+        else:
+            # Fallback (mostly for single-mode or unexpected lookback)
+            all_rets: Dict[str, pd.Series] = {}
+            for sym in symbols:
+                s_df = data_maps.get(sym, {}).get(tf)
+                if s_df is not None and not s_df.empty:
+                    all_rets[sym] = s_df["close"].pct_change(periods=lb)
+            if all_rets:
+                ranks_df = pd.DataFrame(all_rets).rank(axis=1, pct=True)
 
     cache_root = signal_disk_cache_root
     if cache_root is None and project_root is not None:
         cache_root = Path(project_root) / "cache_futures"
+ 
+    # [OPTIMIZATION] Build whitelist of relevant parameters to prevent cache pollution
+    # Unrelated parameters changing (e.g. RSM_VT params while testing MACD) should NOT break the cache.
+    relevant_keys = {"SIGNAL_TYPE", "REGIME_TYPE", "SIZING_METHOD", "ATR_PERIOD", "MACRO_EMA_PERIOD"}
+    
+    st_key = str(params.get("SIGNAL_TYPE", "RSM_VT")).upper()
+    rt_key = str(params.get("REGIME_TYPE", "EMA_ATR")).upper()
+    sm_key = str(params.get("SIZING_METHOD", "vol_target")).lower()
+    
+    from src.domain.futures.regimes import FUTURES_REGIME_REGISTRY
+    from src.domain.futures.signals import FUTURES_SIGNAL_REGISTRY
+    from src.domain.futures.sizing import FUTURES_SIZING_REGISTRY
+    
+    sig_mod = FUTURES_SIGNAL_REGISTRY.get(st_key)
+    reg_mod = FUTURES_REGIME_REGISTRY.get(rt_key)
+    siz_mod = FUTURES_SIZING_REGISTRY.get(sm_key)
+    
+    if sig_mod:
+        relevant_keys.update(sig_mod.param_space.keys())
+    if reg_mod:
+        relevant_keys.update(reg_mod.param_space.keys())
+    if siz_mod:
+        relevant_keys.update(siz_mod.param_space.keys())
+    
+    whitelist = frozenset(relevant_keys)
 
     full_signal_dfs: Dict[str, pd.DataFrame] = {}
     for sym in symbols:
@@ -192,7 +246,7 @@ def objective_futures(
             target_df_full["cs_mom_rank"] = ranks_df[sym]
 
         fp = _dataset_fingerprint_from_df(target_df_full)
-        cache_key = _build_signal_cache_key(params, sym, tf, len(target_df_full), fp)
+        cache_key = _build_signal_cache_key(params, sym, tf, len(target_df_full), fp, whitelist=whitelist)
         full_signal_dfs[sym] = get_or_compute_signals(
             cache_key, target_df_full, strategy, disk_cache_root=cache_root
         )
@@ -349,14 +403,32 @@ def objective_futures(
                         return -5.0
                     raise optuna.TrialPruned()
 
+                pnl_arr = trades_df["pnl"].to_numpy(dtype=np.float64, copy=False)
+                entry_fee_arr = trades_df["entry_fee"].to_numpy(dtype=np.float64, copy=False)
+                true_pnl_arr = pnl_arr - entry_fee_arr
+
+                side_arr = trades_df["side"].to_numpy(copy=False)
+                long_mask = side_arr == "LONG"
+                short_mask = side_arr == "SHORT"
+
+                sym_trade_counts: Dict[str, int] = {}
+                sym_pnl_sums: Dict[str, float] = {}
+                if "symbol" in trades_df.columns:
+                    sym_arr = trades_df["symbol"].to_numpy(copy=False)
+                    uniq_syms, inv_idx = np.unique(sym_arr, return_inverse=True)
+                    counts = np.bincount(inv_idx)
+                    pnl_sums = np.bincount(inv_idx, weights=pnl_arr)
+                    sym_trade_counts = {str(sym): int(counts[i]) for i, sym in enumerate(uniq_syms)}
+                    sym_pnl_sums = {str(sym): float(pnl_sums[i]) for i, sym in enumerate(uniq_syms)}
+
                 # 심볼별 최소 트레이드 수 체크
-                if "symbol" in trades_df.columns and len(symbols) > 1:
-                    for _sym in symbols:
-                        if int((trades_df["symbol"] == _sym).sum()) == 0:
-                            if relaxed_constraints:
-                                pass # Allow 0 trades on some symbols in relaxed mode
-                            else:
-                                raise optuna.TrialPruned()
+                if sym_trade_counts and len(symbols) > 1:
+                    missing_symbols = [s for s in symbols if sym_trade_counts.get(s, 0) == 0]
+                    if missing_symbols:
+                        if relaxed_constraints:
+                            pass  # Allow 0 trades on some symbols in relaxed mode
+                        else:
+                            raise optuna.TrialPruned()
 
                 ret_pct = float((final_balance / segment_initial - 1.0) * 100.0)
                 raw_log = _log_tw_from_ret_pct(ret_pct)
@@ -371,21 +443,18 @@ def objective_futures(
                     else:
                         raise optuna.TrialPruned()
 
-                true_pnl = trades_df["pnl"] - trades_df["entry_fee"]
-                pf_s = calc_profit_factor_from_pnl(true_pnl)
-                long_pnl_s = true_pnl[trades_df["side"] == "LONG"]
-                short_pnl_s = true_pnl[trades_df["side"] == "SHORT"]
-                all_long_pnls.extend(long_pnl_s.tolist())
-                all_short_pnls.extend(short_pnl_s.tolist())
+                pf_s = calc_profit_factor_from_pnl(true_pnl_arr)
+                all_long_pnls.extend(true_pnl_arr[long_mask].tolist())
+                all_short_pnls.extend(true_pnl_arr[short_mask].tolist())
 
                 win_rate_s = (
-                    float((len(trades_df[true_pnl > 0]) / len(trades_df)) * 100)
-                    if len(trades_df) > 0
+                    float(np.mean(true_pnl_arr > 0.0) * 100.0)
+                    if true_pnl_arr.size > 0
                     else 0.0
                 )
-                n_tr = len(trades_df)
-                lc = len(trades_df[trades_df["side"] == "LONG"])
-                sc = len(trades_df[trades_df["side"] == "SHORT"])
+                n_tr = int(true_pnl_arr.size)
+                lc = int(long_mask.sum())
+                sc = int(short_mask.sum())
                 all_seg_long += lc
                 all_seg_short += sc
                 seg_raw_logs.append(raw_log)
@@ -395,17 +464,17 @@ def objective_futures(
                 seg_trades.append(float(n_tr))
 
                 sum_ff = (
-                    float(trades_df["funding_fee"].sum())
+                    float(trades_df["funding_fee"].to_numpy(dtype=np.float64, copy=False).sum())
                     if "funding_fee" in trades_df.columns
                     else 0.0
                 )
-                sum_pnl_abs = float(trades_df["pnl"].abs().sum())
+                sum_pnl_abs = float(np.abs(pnl_arr).sum())
                 funding_ratios.append(sum_ff / max(sum_pnl_abs, 1e-9))
 
-                if "symbol" in trades_df.columns:
-                    for _sx in symbols:
-                        _sx_pnl = float(trades_df.loc[trades_df["symbol"] == _sx, "pnl"].sum())
-                        sym_pf_accum[_sx].append(_sx_pnl)
+                if sym_pnl_sums:
+                    for _sx, _sx_pnl in sym_pnl_sums.items():
+                        if _sx in sym_pf_accum:
+                            sym_pf_accum[_sx].append(_sx_pnl)
 
                 if n_tr < min_seg_trades:
                     if relaxed_constraints:
