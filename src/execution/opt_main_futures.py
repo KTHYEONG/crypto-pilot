@@ -890,8 +890,7 @@ def main() -> None:
             data_dir=FUTURES_DATA_DIR,
             n_workers_override=pre_universe_workers,
         )
-        anchors_to_add = [s for s in FUTURES_ANCHOR_SYMBOLS if s not in broad_candidates]
-        symbols = list(broad_candidates) + anchors_to_add  # Initial symbols for data loading
+        symbols = list(broad_candidates)  # Only symbols that passed gating are used
     else:
         from config.opt_config import FUTURES_SYMBOLS
 
