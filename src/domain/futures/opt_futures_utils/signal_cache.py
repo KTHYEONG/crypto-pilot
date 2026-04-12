@@ -81,10 +81,21 @@ def _dataset_fingerprint_from_df(df: pd.DataFrame) -> int:
 
 
 def _build_signal_cache_key(
-    params: Dict[str, Any], sym: str, tf: str, data_len: int, fingerprint: int
+    params: Dict[str, Any], sym: str, tf: str, data_len: int, fingerprint: int,
+    whitelist: Optional[frozenset[str]] = None
 ) -> _SignalCacheKey:
+    """
+    Builds a cache key. If whitelist is provided, only those keys are used from params.
+    Otherwise, all known discovery keys are used. 
+    Using a whitelist is CRITICAL for optimization to prevent unrelated params from breaking the cache.
+    """
+    if whitelist is not None:
+        target_keys = whitelist
+    else:
+        target_keys = _signal_cache_param_keys_futures()
+
     signal_items: Tuple[Tuple[str, Any], ...] = tuple(
-        sorted((k, params[k]) for k in _signal_cache_param_keys_futures() if k in params)
+        sorted((k, params[k]) for k in target_keys if k in params)
     )
     return (
         signal_items,
