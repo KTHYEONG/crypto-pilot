@@ -19,7 +19,8 @@ class MacdHistDivFuturesSignal:
         "MACD_FAST": {"type": "int", "low": 8, "high": 14, "step": 2},
         "MACD_SLOW": {"type": "int", "low": 20, "high": 30, "step": 2},
         "MACD_SIGNAL": {"type": "int", "low": 7, "high": 11, "step": 1},
-        "MACD_DIV_LAG": {"type": "int", "low": 3, "high": 8, "step": 1},
+        # Expanded lag range: 4H bars (20 hours to ~4 days) for structural divergence
+        "MACD_DIV_LAG": {"type": "int", "low": 5, "high": 25, "step": 5},
     }
 
     def compute(self, df: pd.DataFrame, params: Dict[str, Any]) -> FuturesSignalOutput:

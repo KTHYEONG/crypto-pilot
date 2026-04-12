@@ -42,6 +42,8 @@ class TrendQualityFuturesRegime:
         adx = compute_adx_numpy(high, low, close, adx_period)
         long_ok = (close > ema_s) & (ema_f > ema_s) & (adx > adx_th)
         short_ok = (close < ema_s) & (ema_f < ema_s) & (adx > adx_th)
-        long_mult = np.where(long_ok, 1.0, 0.5).astype(np.float64)
-        short_mult = np.where(short_ok, 1.0, 0.5).astype(np.float64)
+        
+        # [MODIFIED] Use 0.0 instead of 0.5 for poor quality to enforce strict gating
+        long_mult = np.where(long_ok, 1.0, 0.0).astype(np.float64)
+        short_mult = np.where(short_ok, 1.0, 0.0).astype(np.float64)
         return long_mult, short_mult
