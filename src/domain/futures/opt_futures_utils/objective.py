@@ -98,7 +98,6 @@ def objective_futures(
     # --- Hard Risk Thresholds ---
     cvar_alpha = float(cfg.get("FUTURES_CPCV_CVAR_ALPHA", 0.10))
     cvar_thr_log = float(cfg.get("FUTURES_CPCV_CVAR_THRESHOLD_LOG", -0.05))  # Max log-loss allowed
-    temporal_lambda = float(cfg.get("FUTURES_CPCV_TEMPORAL_LAMBDA", 1.5))
 
     cache_root = signal_disk_cache_root
     if cache_root is None and project_root is not None:
@@ -364,6 +363,15 @@ def objective_futures(
     cvar_log = float(np.mean(sorted_rtns[:k_worst])) if sorted_rtns.size > 0 else -1.0
     d_cvar = float(np.clip(1.0 - (max(0.0, cvar_thr_log - cvar_log) / 0.10), 0.0, 1.0))
 
+    # 6. MDD Soft Penalty (Linear Relaxation, Method C modified)
+    # [EXPLOSIVE GROWTH] We allow "rough gems" more room in Stage 1.
+    # Linear penalty from 18% to 35%, much gentler than the exponential strangle.
+    mean_path_mdd = float(np.mean(path_mdds)) if path_mdds else 0.0
+    if mean_path_mdd > 18.0:
+        d_mdd = float(np.clip(1.0 - (mean_path_mdd - 18.0) / 25.0, 0.05, 1.0))
+    else:
+        d_mdd = 1.0
+
     stability_bonus = 0.0
     if path_arr.size >= 2:
         neg_only = path_arr[path_arr < 0]
@@ -373,7 +381,8 @@ def objective_futures(
             stability_bonus += min(0.1, (psort - 1.5) * 0.05)
 
     objective_final = (
-        p10_gmgr * (d_fund * d_balance * d_stability * d_temporal * d_cvar) + stability_bonus
+        p10_gmgr * (d_fund * d_balance * d_stability * d_temporal * d_cvar * d_mdd)
+        + stability_bonus
     )
 
     # --- Export Metrics & Constraints ---
