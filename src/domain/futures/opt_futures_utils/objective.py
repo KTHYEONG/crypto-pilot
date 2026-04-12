@@ -36,9 +36,7 @@ from .data_utils import (
 )
 from .oos_evaluator import evaluate_symbol_fold
 from .signal_cache import (
-    _build_signal_cache_key,
     _dataset_fingerprint_from_df,
-    get_or_compute_signals,
 )
 
 _logger: logging.Logger = logging.getLogger("opt_futures")
@@ -63,12 +61,18 @@ def compute_multi_alignment_info(
     tf: str,
     embargo: int,
 ) -> Optional[Dict[str, Any]]:
-    """Precompute common datetime alignment for all symbols to avoid per-trial O(N) overhead."""
+    """Precompute alignment, fingerprints, and CSM ranks to avoid per-trial overhead."""
     is_start_dts_per_sym: Dict[str, Any] = {}
+    fingerprints: Dict[str, int] = {}
+
     for sym in symbols:
         sym_df = data_maps[sym].get(tf)
         if sym_df is None or sym_df.empty:
             continue
+        
+        # [OPTIMIZATION] Precompute fingerprint once per symbol
+        fingerprints[sym] = _dataset_fingerprint_from_df(sym_df)
+
         is_off = int(data_maps[sym].get(f"is_start_idx_{tf}", 0))
         if len(sym_df) > is_off and "datetime" in sym_df.columns:
             is_start_dts_per_sym[sym] = sym_df["datetime"].iloc[is_off]
@@ -85,14 +89,10 @@ def compute_multi_alignment_info(
         sym_df = data_maps[sym].get(tf)
         if sym_df is None or sym_df.empty or "datetime" not in sym_df.columns:
             continue
-        # Find first index where datetime >= common_is_start_dt
-        m = sym_df["datetime"] >= common_is_start_dt
-        if not m.any():
-            continue
-
-        start_idx = int(m.idxmax())
-        alignment_offsets[sym] = start_idx
-        eff_ref_lens.append(len(sym_df) - start_idx)
+        # [OPTIMIZATION] Using searchsorted for O(log N) instead of O(N) mask
+        start_idx = sym_df["datetime"].searchsorted(common_is_start_dt)
+        alignment_offsets[sym] = int(start_idx)
+        eff_ref_lens.append(len(sym_df) - int(start_idx))
 
     if not eff_ref_lens:
         return None
@@ -105,39 +105,30 @@ def compute_multi_alignment_info(
     if not cpcv_bundle[0]:
         return None
 
+    # [OPTIMIZATION] Pre-calculate and Inject CS Momentum Ranks into data_maps
+    lookbacks = [12, 24, 36, 48, 60, 72]
+    rets_series: Dict[str, pd.Series] = {}
+    for sym in symbols:
+        df = data_maps.get(sym, {}).get(tf)
+        if df is not None and not df.empty:
+            rets_series[sym] = df["close"]
+
+    if rets_series and len(symbols) > 1:
+        for lb in lookbacks:
+            all_rets = {s: r.pct_change(periods=lb) for s, r in rets_series.items()}
+            ranks_df = pd.DataFrame(all_rets).rank(axis=1, pct=True)
+            for sym in symbols:
+                if sym in ranks_df.columns:
+                    col_name = f"cs_mom_rank_{lb}"
+                    data_maps[sym][tf][col_name] = ranks_df[sym].astype(np.float64)
+
     return {
         "common_is_start_dt": common_is_start_dt,
         "alignment_offsets": alignment_offsets,
         "eff_ref_len": eff_ref_len,
         "cpcv_bundle": cpcv_bundle,
-        "csm_ranks_cache": _precalculate_csm_ranks(data_maps, symbols, tf),
+        "fingerprints": fingerprints,
     }
-
-def _precalculate_csm_ranks(data_maps: Dict[str, Any], symbols: List[str], tf: str) -> Dict[int, pd.DataFrame]:
-    """Pre-calculate cross-sectional ranks for all likely lookbacks to save time in trials."""
-    cache: Dict[int, pd.DataFrame] = {}
-    # CSM_LOOKBACK step is 12, range 12-72
-    lookbacks = [12, 24, 36, 48, 60, 72]
-    
-    # 1. Base returns for each symbol
-    rets: Dict[str, pd.DataFrame] = {}
-    for sym in symbols:
-        df = data_maps.get(sym, {}).get(tf)
-        if df is not None and not df.empty:
-            rets[sym] = df[["close"]] # Keep as DF to preserve index/alignment
-
-    if not rets or len(symbols) <= 1:
-        return {}
-
-    for lb in lookbacks:
-        all_rets: Dict[str, pd.Series] = {}
-        for sym, r_df in rets.items():
-            all_rets[sym] = r_df["close"].pct_change(periods=lb)
-        
-        rets_df = pd.DataFrame(all_rets)
-        cache[lb] = rets_df.rank(axis=1, pct=True)
-    
-    return cache
 
 
 def objective_futures(
@@ -155,6 +146,12 @@ def objective_futures(
     relaxed_constraints: bool = False,
 ) -> float:
     params: Dict[str, Any] = suggest_params_futures(trial, space, tf)
+    
+    # [OPTIMIZATION] CS_MOMENTUM column mapping to avoid per-trial DF copies
+    if params.get("SIGNAL_TYPE") == "CS_MOMENTUM" and len(symbols) > 1:
+        lb = int(params.get("CSM_LOOKBACK", 24))
+        params["CSM_RANK_COL"] = f"cs_mom_rank_{lb}"
+
     strategy: UltimateStrategy = UltimateStrategy(name="OptFutures", params=params)
 
     ref_sym = symbols[0]
@@ -165,15 +162,21 @@ def objective_futures(
 
     is_off = int(data_maps[ref_sym].get(f"is_start_idx_{tf}", 0))
     ref_len = len(ref_df) - is_off
-    if ref_len < 200:
-        trial.set_user_attr("prune_reason", f"ref_len_too_short:{ref_len}")
-        raise optuna.TrialPruned()
-
-    embargo = int(EMBARGO_BARS.get(tf, 0))
-    if prebuilt_cpcv_bundle is not None:
-        cpcv_paths, _, _ = prebuilt_cpcv_bundle
+    
+    # [OPTIMIZATION] Reuse precomputed alignment info if available
+    if multi_alignment_info:
+        ref_len = multi_alignment_info["eff_ref_len"]
+        cpcv_paths = multi_alignment_info["cpcv_bundle"][0]
     else:
-        cpcv_paths, _, _ = build_cpcv_test_paths_with_fallback(ref_len, embargo=embargo)
+        if ref_len < 200:
+            trial.set_user_attr("prune_reason", f"ref_len_too_short:{ref_len}")
+            raise optuna.TrialPruned()
+        embargo = int(EMBARGO_BARS.get(tf, 0))
+        if prebuilt_cpcv_bundle is not None:
+            cpcv_paths, _, _ = prebuilt_cpcv_bundle
+        else:
+            cpcv_paths, _, _ = build_cpcv_test_paths_with_fallback(ref_len, embargo=embargo)
+
     if not cpcv_paths:
         trial.set_user_attr("prune_reason", "no_cpcv_paths")
         raise optuna.TrialPruned()
@@ -183,79 +186,29 @@ def objective_futures(
 
     # --- Hard Risk Thresholds ---
     cvar_alpha = float(cfg.get("FUTURES_CPCV_CVAR_ALPHA", 0.10))
-    cvar_thr_log = float(cfg.get("FUTURES_CPCV_CVAR_THRESHOLD_LOG", -0.05))  # Max log-loss allowed
-
-    # [REDESIGN] Pre-calculate or fetch Cross-Sectional Momentum Ranks
-    ranks_df = None
-    if params.get("SIGNAL_TYPE") == "CS_MOMENTUM" and len(symbols) > 1:
-        lb = int(params.get("CSM_LOOKBACK", 24))
-        # 1. Try to get from cache (multi_alignment_info)
-        cache = (multi_alignment_info or {}).get("csm_ranks_cache")
-        if cache and lb in cache:
-            ranks_df = cache[lb]
-        else:
-            # Fallback (mostly for single-mode or unexpected lookback)
-            all_rets: Dict[str, pd.Series] = {}
-            for sym in symbols:
-                s_df = data_maps.get(sym, {}).get(tf)
-                if s_df is not None and not s_df.empty:
-                    all_rets[sym] = s_df["close"].pct_change(periods=lb)
-            if all_rets:
-                ranks_df = pd.DataFrame(all_rets).rank(axis=1, pct=True)
+    cvar_thr_log = float(cfg.get("FUTURES_CPCV_CVAR_THRESHOLD_LOG", -0.05))
 
     cache_root = signal_disk_cache_root
     if cache_root is None and project_root is not None:
         cache_root = Path(project_root) / "cache_futures"
  
-    # [OPTIMIZATION] Build whitelist of relevant parameters to prevent cache pollution
-    # Unrelated parameters changing (e.g. RSM_VT params while testing MACD) should NOT break the cache.
-    relevant_keys = {"SIGNAL_TYPE", "REGIME_TYPE", "SIZING_METHOD", "ATR_PERIOD", "MACRO_EMA_PERIOD"}
-    
-    st_key = str(params.get("SIGNAL_TYPE", "RSM_VT")).upper()
-    rt_key = str(params.get("REGIME_TYPE", "EMA_ATR")).upper()
-    sm_key = str(params.get("SIZING_METHOD", "vol_target")).lower()
-    
-    from src.domain.futures.regimes import FUTURES_REGIME_REGISTRY
-    from src.domain.futures.signals import FUTURES_SIGNAL_REGISTRY
-    from src.domain.futures.sizing import FUTURES_SIZING_REGISTRY
-    
-    sig_mod = FUTURES_SIGNAL_REGISTRY.get(st_key)
-    reg_mod = FUTURES_REGIME_REGISTRY.get(rt_key)
-    siz_mod = FUTURES_SIZING_REGISTRY.get(sm_key)
-    
-    if sig_mod:
-        relevant_keys.update(sig_mod.param_space.keys())
-    if reg_mod:
-        relevant_keys.update(reg_mod.param_space.keys())
-    if siz_mod:
-        relevant_keys.update(siz_mod.param_space.keys())
-    
-    whitelist = frozenset(relevant_keys)
+    from .signal_cache import get_tiered_signals
 
     full_signal_dfs: Dict[str, pd.DataFrame] = {}
     for sym in symbols:
-        target_df_full = data_maps.get(sym, {}).get(tf)
-        if target_df_full is None or target_df_full.empty:
+        target_df_raw = data_maps.get(sym, {}).get(tf)
+        if target_df_raw is None or target_df_raw.empty:
             continue
             
-        # [REDESIGN] Inject ranking data for CS_MOMENTUM signals
-        csm_check = (params.get("SIGNAL_TYPE") == "CS_MOMENTUM")
-        has_ranks = ('ranks_df' in locals() and ranks_df is not None)
-        if csm_check and has_ranks and sym in ranks_df.columns:
-            target_df_full = target_df_full.copy()
-            target_df_full["cs_mom_rank"] = ranks_df[sym]
-
-        fp = _dataset_fingerprint_from_df(target_df_full)
-        cache_key = _build_signal_cache_key(params, sym, tf, len(target_df_full), fp, whitelist=whitelist)
-        full_signal_dfs[sym] = get_or_compute_signals(
-            cache_key, target_df_full, strategy, disk_cache_root=cache_root
+        # [OPTIMIZATION] Use tiered caching instead of monolithic
+        full_signal_dfs[sym] = get_tiered_signals(
+            params, sym, tf, target_df_raw, strategy
         )
 
     if len(full_signal_dfs) != len(symbols):
         if not relaxed_constraints:
             raise optuna.TrialPruned()
         missing = [s for s in symbols if s not in full_signal_dfs]
-        _logger.debug("relaxed: signal missing for %s, continuing with subset", missing)
         symbols = [s for s in symbols if s in full_signal_dfs]
         if not symbols:
             trial.set_user_attr("prune_reason", "signal_fail:all_symbols")
@@ -292,7 +245,6 @@ def objective_futures(
                     is_start_dts_per_sym[sym] = sym_df["datetime"].iloc[sym_is_off]
 
             if is_start_dts_per_sym:
-                # Latest IS-start across all symbols = common intersection start
                 common_is_start_dt = max(is_start_dts_per_sym.values())
                 trimmed_dfs: Dict[str, pd.DataFrame] = {}
                 for sym in symbols:
@@ -312,22 +264,21 @@ def objective_futures(
                 for sym in symbols:
                     prebuilt_full_arrays[sym] = _dataframe_to_symbol_arrays(trimmed_dfs[sym])
 
-                # Recompute IS length and CPCV paths from the aligned (intersection) data
                 eff_ref_len = min(v["close"].shape[0] for v in prebuilt_full_arrays.values())
                 if eff_ref_len < 200:
                     trial.set_user_attr("prune_reason", f"aligned_is_too_short:{eff_ref_len}")
                     raise optuna.TrialPruned()
 
-                cpcv_paths, _, _ = build_cpcv_test_paths_with_fallback(eff_ref_len, embargo=embargo)
+                cpcv_paths, _, _ = build_cpcv_test_paths_with_fallback(
+                    eff_ref_len, embargo=int(EMBARGO_BARS.get(tf, 0))
+                )
                 if not cpcv_paths:
                     trial.set_user_attr("prune_reason", "no_cpcv_paths_aligned")
                     raise optuna.TrialPruned()
 
-                # Data already trimmed to IS start → offset = 0
                 is_off = 0
-                _stat_ref_len = eff_ref_len  # Update for annualization user_attr
+                _stat_ref_len = eff_ref_len
             else:
-                # Fallback when no datetime column: bar-index alignment
                 for sym in symbols:
                     prebuilt_full_arrays[sym] = _dataframe_to_symbol_arrays(full_signal_dfs[sym])
 
