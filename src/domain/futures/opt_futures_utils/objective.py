@@ -68,6 +68,7 @@ def objective_futures(
     project_root: Optional[str] = None,
     prebuilt_cpcv_bundle: Optional[Tuple[List[List[Tuple[int, int]]], int, int]] = None,
     signal_disk_cache_root: Optional[Path] = None,
+    relaxed_constraints: bool = False,
 ) -> float:
     params: Dict[str, Any] = suggest_params_futures(trial, space, tf_target)
     tf: str = tf_target
@@ -123,6 +124,9 @@ def objective_futures(
             prebuilt_full_arrays[sym] = _dataframe_to_symbol_arrays(full_signal_dfs[sym])
 
     liq_mdd_thr = float(cfg.get("FUTURES_MAX_MDD", 25.0))
+    if relaxed_constraints:
+        liq_mdd_thr = 100.0  # Bypass MDD constraint for robust mapping
+        min_seg_trades = 1   # Bypass trade count constraint
 
     path_compound_raw_log_tw: List[float] = []
     path_pfs: List[float] = []
@@ -177,16 +181,23 @@ def objective_futures(
                     trades_df, equity_curve, final_balance = engine.run()
                 except Exception as exc:
                     _logger.warning("Portfolio engine CPCV error: %s", exc, exc_info=True)
+                    if relaxed_constraints:
+                        return -5.0
                     raise optuna.TrialPruned() from exc
 
                 if trades_df is None or trades_df.empty:
+                    if relaxed_constraints:
+                        return -5.0
                     raise optuna.TrialPruned()
 
                 # 심볼별 최소 트레이드 수 체크
                 if "symbol" in trades_df.columns and len(symbols) > 1:
                     for _sym in symbols:
                         if int((trades_df["symbol"] == _sym).sum()) == 0:
-                            raise optuna.TrialPruned()
+                            if relaxed_constraints:
+                                pass # Allow 0 trades on some symbols in relaxed mode
+                            else:
+                                raise optuna.TrialPruned()
 
                 ret_pct = float((final_balance / segment_initial - 1.0) * 100.0)
                 raw_log = _log_tw_from_ret_pct(ret_pct)
@@ -196,7 +207,10 @@ def objective_futures(
                 )
 
                 if mdd_seg >= liq_mdd_thr:
-                    raise optuna.TrialPruned()
+                    if relaxed_constraints:
+                        pass
+                    else:
+                        raise optuna.TrialPruned()
 
                 true_pnl = trades_df["pnl"] - trades_df["entry_fee"]
                 pf_s = calc_profit_factor_from_pnl(true_pnl)
@@ -230,7 +244,10 @@ def objective_futures(
                         sym_pf_accum[_sx].append(_sx_pnl)
 
                 if n_tr < min_seg_trades:
-                    raise optuna.TrialPruned()
+                    if relaxed_constraints:
+                        pass
+                    else:
+                        raise optuna.TrialPruned()
 
                 continue
 
@@ -260,7 +277,10 @@ def objective_futures(
                     )
                 )
                 if mdd_pct >= liq_mdd_thr:
-                    raise optuna.TrialPruned()
+                    if relaxed_constraints:
+                        pass
+                    else:
+                        raise optuna.TrialPruned()
                 denom = max(abs(gross), 1e-9)
                 sym_fund_r.append(float(fpaid) / denom)
                 sym_logs.append(_log_tw_from_ret_pct(ret_pct))
@@ -272,7 +292,10 @@ def objective_futures(
                 sym_pf_accum[sym].append(pf)
 
             if np.sum(sym_trades) < min_seg_trades:
-                raise optuna.TrialPruned()
+                if relaxed_constraints:
+                    pass
+                else:
+                    raise optuna.TrialPruned()
             seg_raw_logs.append(float(np.mean(sym_logs)) if sym_logs else -10.0)
             seg_mdds.append(float(np.mean(sym_mdds)) if sym_mdds else 0.0)
             seg_pfs.append(float(np.mean(sym_pfs)) if sym_pfs else 1.0)
@@ -296,7 +319,7 @@ def objective_futures(
 
         if path_idx >= 4 and path_compound_raw_log_tw:
             trial.report(float(np.mean(path_compound_raw_log_tw)), step=path_idx)
-            if trial.should_prune():
+            if trial.should_prune() and not relaxed_constraints:
                 raise optuna.TrialPruned()
 
     # --- Hybrid Constrained Optimization: P10 GMGR as Core Objective ---

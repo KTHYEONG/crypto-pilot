@@ -745,6 +745,7 @@ def _eval_combo_task(
                 project_root=project_root,
                 prebuilt_cpcv_bundle=prebuilt,
                 signal_disk_cache_root=Path(FUTURES_CACHE_DIR),
+                relaxed_constraints=True,  # [REDESIGN] Allow actual performance distribution to be mapped
             )
         )
 
@@ -755,9 +756,6 @@ def _eval_combo_task(
         t for t in study.trials if t.state == TrialState.COMPLETE and t.value is not None
     ]
     if not completed:
-        # Debug: see what states are present
-        states = [t.state for t in study.trials]
-        print(f"DEBUG: No completed trials. States: {states}")
         return None
 
     # [REDESIGN] Robustness Scoring: Target "Broad Plateaus" instead of "Fragile Peaks"
@@ -859,10 +857,34 @@ def _run_stage1_futures_tournament(
 
     results.sort(key=lambda x: x.p10_gmgr, reverse=True)
     if results:
+        _logger.info("\n" + "=" * SEP_WIDTH)
+        _logger.info("🏆 STAGE 1 TOURNAMENT RANKING (Top 10)")
+        _logger.info("-" * SEP_WIDTH)
+        _logger.info(f"{'Rank':<4} {'Signal':<15} {'Regime':<15} {'Sizing':<15} {'Score':<8} {'Grade'}")
+        _logger.info("-" * SEP_WIDTH)
+        
+        for i, res in enumerate(results[:10]):
+            # Robustness Grading
+            if res.p10_gmgr > 1.5:
+                grade = "✨ EXCELLENT (Robust Plateau)"
+            elif res.p10_gmgr > 1.0:
+                grade = "✅ GOOD (Stable)"
+            elif res.p10_gmgr > 0.5:
+                grade = "🔶 FAIR (Narrow)"
+            elif res.p10_gmgr > 0.0:
+                grade = "⚠️ FRAGILE (Weak Edge)"
+            else:
+                grade = "❌ POOR (No Edge)"
+                
+            _logger.info(
+                f"{i+1:<4} {res.signal[:14]:<15} {res.regime[:14]:<15} {res.sizing[:14]:<15} {res.p10_gmgr:>8.4f} {grade}"
+            )
+        _logger.info("=" * SEP_WIDTH + "\n")
+
         top = results[0]
         _logger.info(
-            "   Stage 1 winner: [%s x %s x %s] Robust Score: %.4f",
-            top.signal, top.regime, top.sizing, top.p10_gmgr
+            "🚀 Stage 1 Winner: [%s x %s x %s] selected for Deep Optimization.",
+            top.signal, top.regime, top.sizing
         )
     return results
 
