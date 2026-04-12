@@ -40,7 +40,6 @@ from .data_utils import (
     align_data_for_2d_engine,
 )
 from .signal_cache import (
-    _dataset_fingerprint_from_df,
     get_tiered_signals,
 )
 
@@ -64,7 +63,9 @@ def evaluate_symbol_fold(
     if precomputed_signal_df is not None:
         sig_oos: pd.DataFrame = precomputed_signal_df
     else:
-        full_signal: pd.DataFrame = strategy.generate_signals(target_df.copy(deep=True))
+        # [OPTIMIZATION] generate_signals uses tiered caching/shallow copies internally.
+        # deep=True is redundant and creates memory pressure.
+        full_signal: pd.DataFrame = strategy.generate_signals(target_df)
         sig_oos, execution_start_idx = _segment_with_context(full_signal, test_start, test_end)
 
     warmup_bars: int = 0
@@ -80,7 +81,7 @@ def evaluate_symbol_fold(
         try:
             tf_hours = float(tf.replace("d", "")) * 24.0
         except ValueError:
-            tf_hours = 24.0
+            pass
 
     engine: BacktestEngineFast = BacktestEngineFast(
         hourly_df=sig_oos,
@@ -499,44 +500,38 @@ def run_cpcv_complement_evaluation(
     for sym in symbols:
         prebuilt_full_arrays[sym] = _dataframe_to_symbol_arrays(full_signal_dfs[sym])
 
-    liq_mdd_thr = float(p.get("LIQUIDATION_MDD_THRESHOLD", 20.0))
-    is_scores: List[float] = []
-
+    # --- Block Memoization for CPCV Complement (Priority 2) ---
+    unique_comp_blocks = set()
     for path in cpcv_paths:
         comp = cpcv_complement_segments(path, all_block_ranges)
-        seg_raw_logs: List[float] = []
-        running_balance = float(FUTURES_INITIAL_BALANCE)
-        for test_start, test_end in comp:
-            adj_s = test_start + is_off
-            adj_e = test_end + is_off
+        for b in comp: unique_comp_blocks.add(tuple(b))
+    
+    block_metrics: Dict[Tuple[int, int], float] = {}
+    for b_start, b_end in sorted(list(unique_comp_blocks), key=lambda x: x[0]):
+        adj_s, adj_e = b_start + is_off, b_end + is_off
+        aligned_data = _build_aligned_2d_from_prebuilt(prebuilt_full_arrays, symbols, adj_s, adj_e)
+        if aligned_data is None:
+            block_metrics[(b_start, b_end)] = -10.0; continue
 
-            aligned_data = _build_aligned_2d_from_prebuilt(
-                prebuilt_full_arrays, symbols, adj_s, adj_e
-            )
-            if aligned_data is None:
-                seg_raw_logs.append(-10.0)
-                continue
-
-            segment_initial = max(running_balance, 1e-9)
+        try:
             engine = PortfolioBacktestEngineFast(
-                aligned_data=aligned_data,
-                symbol_names=symbols,
-                strategy_params=p,
-                initial_balance=segment_initial,
-                fee_rate=TRADING_FEE_RATE,
-                slippage_rate=SLIPPAGE_RATE,
+                aligned_data=aligned_data, symbol_names=symbols, strategy_params=p,
+                initial_balance=float(FUTURES_INITIAL_BALANCE), fee_rate=TRADING_FEE_RATE, slippage_rate=SLIPPAGE_RATE,
             )
             _, equity_curve, final_balance = engine.run()
-            running_balance = max(float(final_balance), 1e-9)
-
-            ret_pct = float((final_balance / segment_initial - 1.0) * 100.0)
+            ret_pct = float((final_balance / FUTURES_INITIAL_BALANCE - 1.0) * 100.0)
             raw_log = _log_tw_from_ret_pct(ret_pct)
             mdd_seg = float(calc_mdd_from_equity(equity_curve)) if equity_curve.size > 0 else 0.0
-            if mdd_seg >= liq_mdd_thr:
-                raw_log -= 1e9
-            seg_raw_logs.append(raw_log)
+            if mdd_seg >= liq_mdd_thr: raw_log -= 1e9
+            block_metrics[(b_start, b_end)] = raw_log
+        except Exception:
+            block_metrics[(b_start, b_end)] = -10.0
 
-        is_scores.append(float(np.sum(seg_raw_logs)) if seg_raw_logs else -10.0)
+    is_scores: List[float] = []
+    for path in cpcv_paths:
+        comp = cpcv_complement_segments(path, all_block_ranges)
+        p_score = sum(block_metrics.get(tuple(b), -10.0) for b in comp)
+        is_scores.append(float(p_score))
 
     if any(not np.isfinite(x) for x in is_scores):
         return (0.5, 0.0)
