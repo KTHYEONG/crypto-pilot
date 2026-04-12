@@ -358,7 +358,7 @@ def backtest_portfolio_numba(
         current_equity = balance + used_margin_total + unrealized_total
         free_margin = current_equity - used_margin_total
 
-        # --- Entry logic with Concurrency limit and Rank Priority ---
+        # --- Entry logic with Concurrency limit and Pro-rata Allocation (Alternative 2) ---
         if num_open_pos < max_concurrent:
             prev_i = i - 1
 
@@ -384,31 +384,12 @@ def backtest_portfolio_numba(
                         p_side = -1
 
                     if p_side != 0:
-                        # Store rank score (slot_rank_score) and other info
-                        candidates.append((slot_rank_score[prev_i, s], s, p_side, fill_p, sf))
-
-            if candidates:
-                # 2. Sort candidates by rank_score descending (using simple sort for Numba compatibility)
-                for c1 in range(len(candidates)):
-                    for c2 in range(c1 + 1, len(candidates)):
-                        if candidates[c1][0] < candidates[c2][0]:
-                            tmp = candidates[c1]
-                            candidates[c1] = candidates[c2]
-                            candidates[c2] = tmp
-
-                # 3. Try to enter up to max_concurrent
-                for cand in candidates:
-                    if num_open_pos >= max_concurrent:
-                        break
-
-                    _rs_val, s, p_side, fill_p, sf = cand
-                    pos_atr = atr_2d[prev_i, s]
-                    stop_dist = (pos_atr * l_atr_mult) if p_side == 1 else (pos_atr * s_atr_mult)
-
-                    if stop_dist > 0:
+                        # [Alt 1] Target Volatility Sizing: use asset_atr_pct instead of stop_dist
+                        asset_atr_pct = atr_2d[prev_i, s] / max(close_2d[prev_i, s], 1e-12)
+                        
                         target_qty = calculate_position_size(
                             fill_p,
-                            stop_dist,
+                            asset_atr_pct,
                             current_equity,
                             free_margin,
                             effective_risk_per_trade,
@@ -417,63 +398,95 @@ def backtest_portfolio_numba(
                             garch_kelly_f[prev_i, s],
                             max_exposure_per_coin=max_exp_per_coin,
                         )
+                        
+                        if target_qty > 0:
+                            # Store (rank, s, side, fill_p, target_qty, stop_dist)
+                            pos_atr = atr_2d[prev_i, s]
+                            stop_dist = (pos_atr * l_atr_mult) if p_side == 1 else (pos_atr * s_atr_mult)
+                            candidates.append((slot_rank_score[prev_i, s], s, p_side, fill_p, target_qty, stop_dist))
 
-                        max_margin_per_coin = current_equity / float(max_concurrent)
-                        max_qty_by_cap = (max_margin_per_coin * leverage) / fill_p
-                        if target_qty > max_qty_by_cap:
-                            target_qty = max_qty_by_cap
+            if candidates:
+                # 2. Sort candidates by rank_score descending
+                for c1 in range(len(candidates)):
+                    for c2 in range(c1 + 1, len(candidates)):
+                        if candidates[c1][0] < candidates[c2][0]:
+                            tmp = candidates[c1]
+                            candidates[c1] = candidates[c2]
+                            candidates[c2] = tmp
 
-                        req_margin = (target_qty * fill_p) / leverage
-                        entry_fee = target_qty * fill_p * fee_rate
+                # 3. Select top candidates and calculate pro-rata scale
+                n_to_select = min(len(candidates), max_concurrent - num_open_pos)
+                selected_cands = candidates[:n_to_select]
+                
+                total_req_margin = 0.0
+                for cand in selected_cands:
+                    # cand: (rank, s, side, fill_p, qty, dist)
+                    total_req_margin += (cand[4] * cand[3]) / leverage
+                
+                scale_factor = 1.0
+                margin_ceiling = free_margin * 0.96  # 4% buffer for entry fees
+                if total_req_margin > margin_ceiling and total_req_margin > 0:
+                    scale_factor = margin_ceiling / total_req_margin
+                
+                # 4. Finalize entries
+                for cand in selected_cands:
+                    _, s, p_side, fill_p, target_qty, stop_dist = cand
+                    final_qty = target_qty * scale_factor
+                    
+                    if final_qty * fill_p < 10.0:  # Dust filter
+                        continue
+                        
+                    req_margin = (final_qty * fill_p) / leverage
+                    entry_fee = final_qty * fill_p * fee_rate
+                    
+                    if free_margin >= (req_margin + entry_fee):
+                        balance -= req_margin + entry_fee
+                        free_margin -= req_margin + entry_fee
 
-                        if target_qty > 0 and free_margin >= (req_margin + entry_fee):
-                            balance -= req_margin + entry_fee
-                            free_margin -= req_margin + entry_fee
+                        in_pos[s] = True
+                        pos_side[s] = p_side
+                        entry_p[s] = fill_p
+                        entry_idx[s] = i
+                        amount[s] = final_qty
+                        entry_fee_stored[s] = entry_fee
+                        fund_fee_stored[s] = 0.0
+                        highest[s] = fill_p
+                        lowest[s] = fill_p
+                        has_scaled[s] = False
+                        stop_p[s] = fill_p - stop_dist if p_side == 1 else fill_p + stop_dist
 
-                            in_pos[s] = True
-                            pos_side[s] = p_side
-                            entry_p[s] = fill_p
-                            entry_idx[s] = i
-                            amount[s] = target_qty
-                            entry_fee_stored[s] = entry_fee
-                            fund_fee_stored[s] = 0.0
-                            highest[s] = fill_p
-                            lowest[s] = fill_p
-                            has_scaled[s] = False
-                            stop_p[s] = fill_p - stop_dist if p_side == 1 else fill_p + stop_dist
-
-                            triggered, intra_exit_price, pnl_intra, exit_fee_intra = (
-                                check_intra_bar_stop(
-                                    p_side,
-                                    high_2d[i, s],
-                                    low_2d[i, s],
-                                    stop_p[s],
-                                    fill_p,
-                                    target_qty,
-                                    fee_rate,
-                                    slippage_rate,
-                                )
+                        triggered, intra_exit_price, pnl_intra, exit_fee_intra = (
+                            check_intra_bar_stop(
+                                int(p_side),
+                                high_2d[i, s],
+                                low_2d[i, s],
+                                stop_p[s],
+                                fill_p,
+                                final_qty,
+                                fee_rate,
+                                slippage_rate,
                             )
-                            if triggered:
-                                pnl_intra -= exit_fee_intra
-                                balance += (target_qty * fill_p) / leverage + pnl_intra
-                                free_margin += (target_qty * fill_p) / leverage + pnl_intra
-                                trades[t_count] = [
-                                    s,
-                                    i,
-                                    i,
-                                    float(p_side),
-                                    fill_p,
-                                    intra_exit_price,
-                                    pnl_intra - fund_fee_stored[s],
-                                    target_qty,
-                                    entry_fee,
-                                    fund_fee_stored[s],
-                                ]
-                                t_count += 1
-                                in_pos[s] = False
-                            else:
-                                num_open_pos += 1
+                        )
+                        if triggered:
+                            pnl_intra -= exit_fee_intra
+                            balance += (final_qty * fill_p) / leverage + pnl_intra
+                            free_margin += (final_qty * fill_p) / leverage + pnl_intra
+                            trades[t_count] = [
+                                float(s),
+                                float(i),
+                                float(i),
+                                float(p_side),
+                                fill_p,
+                                intra_exit_price,
+                                pnl_intra - fund_fee_stored[s],
+                                final_qty,
+                                entry_fee,
+                                fund_fee_stored[s],
+                            ]
+                            t_count += 1
+                            in_pos[s] = False
+                        else:
+                            num_open_pos += 1
 
     if n_bars > 0:
         last_idx = n_bars - 1
