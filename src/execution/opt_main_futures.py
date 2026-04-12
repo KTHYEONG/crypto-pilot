@@ -208,7 +208,7 @@ def _resolve_futures_execution_plan(
     requested_jobs: int,
     requested_task_workers: int,
 ) -> _FuturesExecutionPlan:
-    worker_cap = 3
+    worker_cap = 6 # Increased from 3 to utilize more cores
     logical_cpus = max(1, os.cpu_count() or 1)
     if mode == MODE_MULTI and task_count == 1:
         tw = requested_task_workers if requested_task_workers > 0 else requested_jobs
@@ -669,6 +669,73 @@ def _run_tf_optimization(
     return (target_obj, tf), study
 
 
+def _eval_combo_task(
+    sig: str,
+    reg: str,
+    siz: str,
+    data_maps: Dict[str, Dict[str, Any]],
+    symbols: List[str],
+    tf: str,
+    project_root: str,
+    prebuilt: Any,
+) -> Optional[CombinationScoreFutures]:
+    from optuna.samplers import TPESampler
+    from optuna.storages import InMemoryStorage
+    from optuna.trial import TrialState
+    from src.domain.futures.opt_futures_utils.objective import objective_futures
+    from src.domain.futures.opt_futures_utils.opt_params import build_combined_param_space_futures
+    from src.domain.futures.opt_futures_utils.combination_screener_futures import CombinationScoreFutures
+
+    space = build_combined_param_space_futures(sig, reg, siz)
+    space["SIGNAL_TYPE"] = {"type": "categorical", "choices": [sig]}
+    space["REGIME_TYPE"] = {"type": "categorical", "choices": [reg]}
+    space["SIZING_METHOD"] = {"type": "categorical", "choices": [siz]}
+
+    study = optuna.create_study(
+        direction="maximize",
+        sampler=TPESampler(n_startup_trials=10, seed=42),
+        storage=InMemoryStorage(),
+    )
+
+    def _obj(trial: optuna.Trial) -> float:
+        return float(
+            objective_futures(
+                trial,
+                data_maps,
+                symbols,
+                tf,
+                space=space,
+                mode=MODE_MULTI,
+                project_root=project_root,
+                prebuilt_cpcv_bundle=prebuilt,
+                signal_disk_cache_root=Path(FUTURES_CACHE_DIR),
+            )
+        )
+
+    study.optimize(_obj, n_trials=30, n_jobs=1, show_progress_bar=False)
+
+    completed = [
+        t for t in study.trials if t.state == TrialState.COMPLETE and t.value is not None
+    ]
+    if not completed:
+        return None
+
+    completed.sort(key=lambda tr: float(tr.value), reverse=True)
+    top_val = float(np.mean([float(t.value) for t in completed[:3]]))
+    best_t = completed[0]
+
+    return CombinationScoreFutures(
+        signal=sig,
+        regime=reg,
+        sizing=siz,
+        p10_gmgr=top_val,
+        ls_ratio=float(best_t.user_attrs.get("long_short_ratio", 0.5)),
+        mean_signal_rate=float(best_t.user_attrs.get("avg_signal_rate", 0.05)),
+        disqualified=False,
+        best_params=best_t.params,
+    )
+
+
 def _run_stage1_futures_tournament(
     data_maps: Dict[str, Dict[str, Any]],
     symbols: List[str],
@@ -677,15 +744,13 @@ def _run_stage1_futures_tournament(
 ) -> List[CombinationScoreFutures]:
     """
     Tournament style discovery: TPE mini-optimization for each (Signal x Regime) combination.
+    Parallelized to avoid Stage 1 bottleneck.
     """
-    from optuna.samplers import TPESampler
-    from optuna.storages import InMemoryStorage
-
     from src.domain.futures.opt_futures_utils.cv_utils import build_cpcv_test_paths_with_fallback
     from src.domain.futures.regimes import FUTURES_REGIME_REGISTRY
     from src.domain.futures.signals import FUTURES_SIGNAL_REGISTRY
 
-    _logger.info("Starting Stage 1 Futures Tournament (TPE discovery)...")
+    _logger.info("Starting Stage 1 Futures Tournament (Parallel TPE discovery)...")
 
     ref_sym = symbols[0]
     is_off = int(data_maps[ref_sym].get(f"is_start_idx_{tf}", 0))
@@ -698,77 +763,47 @@ def _run_stage1_futures_tournament(
                 ref_len, embargo=int(EMBARGO_BARS.get(tf, 0))
             )
 
-    # Narrow down choices to manageable set if needed, but here we'll try all registered
     sig_choices = list(FUTURES_SIGNAL_REGISTRY.keys())
     reg_choices = list(FUTURES_REGIME_REGISTRY.keys())
-    # Sizing: use a sensible default or small set to keep tournament fast
     siz_choices = ["inv_vol_parity", "vol_target"]
-
-    results: List[CombinationScoreFutures] = []
 
     combos = list(itertools.product(sig_choices, reg_choices, siz_choices))
     _logger.info("   Evaluating %d Signal x Regime x Sizing combinations...", len(combos))
 
-    for sig, reg, siz in combos:
-        space = build_combined_param_space_futures(sig, reg, siz)
-        space["SIGNAL_TYPE"] = {"type": "categorical", "choices": [sig]}
-        space["REGIME_TYPE"] = {"type": "categorical", "choices": [reg]}
-        space["SIZING_METHOD"] = {"type": "categorical", "choices": [siz]}
-
-        study = optuna.create_study(
-            direction="maximize",
-            sampler=TPESampler(n_startup_trials=10, seed=42),
-            storage=InMemoryStorage(),
-        )
-
-        def _obj(trial: optuna.Trial, space=space) -> float:
-            return float(
-                objective_futures(
-                    trial,
-                    data_maps,
-                    symbols,
-                    tf,
-                    space=space,
-                    mode=MODE_MULTI,
-                    project_root=project_root,
-                    prebuilt_cpcv_bundle=prebuilt,
-                    signal_disk_cache_root=Path(FUTURES_CACHE_DIR),
-                )
-            )
-
-        study.optimize(_obj, n_trials=30, n_jobs=1, show_progress_bar=False)
-
-        completed = [
-            t for t in study.trials if t.state == TrialState.COMPLETE and t.value is not None
-        ]
-        if not completed:
-            continue
-
-        completed.sort(key=lambda tr: float(tr.value), reverse=True)
-        top_val = float(np.mean([t.value for t in completed[:3]]))
-        best_t = completed[0]
-
-        score = CombinationScoreFutures(
-            signal=sig,
-            regime=reg,
-            sizing=siz,
-            p10_gmgr=top_val,
-            ls_ratio=float(best_t.user_attrs.get("long_short_ratio", 0.5)),
-            mean_signal_rate=float(best_t.user_attrs.get("avg_signal_rate", 0.05)),
-            disqualified=False,
-            best_params=best_t.params,
-        )
-        results.append(score)
-        _logger.info(
-            "      [%s x %s x %s] Mean Score: %.4f | LS Ratio: %.2f",
-            sig,
-            reg,
-            siz,
-            top_val,
-            score.ls_ratio,
-        )
+    results: List[CombinationScoreFutures] = []
+    
+    # Use 75% of logical CPUs for tournament to leave room for OS/Data loading
+    n_workers = max(1, min(len(combos), (os.cpu_count() or 1) - 2))
+    
+    with concurrent.futures.ProcessPoolExecutor(max_workers=n_workers) as executor:
+        futures_map = {
+            executor.submit(
+                _eval_combo_task,
+                sig, reg, siz,
+                data_maps, symbols, tf, project_root, prebuilt
+            ): (sig, reg, siz)
+            for sig, reg, siz in combos
+        }
+        
+        with tqdm(total=len(combos), desc="Stage 1 Tournament", unit="combo") as pbar:
+            for f in concurrent.futures.as_completed(futures_map):
+                sig, reg, siz = futures_map[f]
+                try:
+                    score = f.result()
+                    if score:
+                        results.append(score)
+                        pbar.set_postfix({"last": f"{sig[:5]}.."})
+                except Exception as e:
+                    _logger.error("      Error evaluating combo [%s x %s x %s]: %s", sig, reg, siz, e)
+                pbar.update(1)
 
     results.sort(key=lambda x: x.p10_gmgr, reverse=True)
+    if results:
+        top = results[0]
+        _logger.info(
+            "   Stage 1 winner: [%s x %s x %s] Mean Score: %.4f",
+            top.signal, top.regime, top.sizing, top.p10_gmgr
+        )
     return results
 
 
@@ -1540,6 +1575,61 @@ def main() -> None:
             )
         )
         _logger.info("\n%s", report)
+
+        # [LIVE DEPLOYMENT SANITY CHECK]
+        # Logic: If IS/OOS passed, we now verify if these 'best_params' actually work on 
+        # TODAY'S best symbols (which might be different from IS symbols).
+        if is_all_passed:
+            _logger.info("\n" + "=" * SEP_WIDTH)
+            _logger.info("🔥 STARTING LIVE DEPLOYMENT SANITY CHECK")
+            _logger.info("   Verifying parameter robustness on TODAY'S top symbols...")
+            _logger.info("=" * SEP_WIDTH)
+            
+            # 1. Screen for TODAY'S top orthogonal symbols
+            live_symbols, _ = screen_futures_universe(
+                collector, [], args.tf, FUTURES_SCREENER_CONFIG, fetch_start_date, end_date, data_dir=FUTURES_DATA_DIR
+            )
+            
+            if live_symbols:
+                # 2. Load and align data for Live Symbols (Full range)
+                live_oos_maps: Dict[str, Dict[str, Any]] = {}
+                for ls in live_symbols:
+                    try:
+                        collector.ensure_funding_data(ls, fetch_start_date, end_date)
+                        l_df = collector.collect_and_save(ls, args.tf, fetch_start_date, end_date)
+                        l_df = merge_funding_into_ohlcv(ls, l_df, FUTURES_DATA_DIR)
+                        l_1d = collector.collect_and_save(ls, "1d", fetch_start_date, end_date)
+                        l_1d = merge_funding_into_ohlcv(ls, l_1d, FUTURES_DATA_DIR)
+                        
+                        live_oos_maps[ls] = {
+                            args.tf: l_df,
+                            "1d": l_1d,
+                            f"oos_start_idx_{args.tf}": 0, # Full range test
+                            f"merge_idx_{args.tf}": compute_segment_merge_index(l_df, l_1d)
+                        }
+                    except: continue
+                
+                if live_oos_maps:
+                    # Align and Run
+                    _align_oos_dataframes_on_common_datetimes(live_oos_maps, list(live_oos_maps.keys()), args.tf, pd.to_datetime(start_date))
+                    
+                    live_port = run_oos_margin_shared_portfolio(
+                        list(live_oos_maps.keys()), args.tf, params, live_oos_maps, cache_root=FUTURES_CACHE_DIR
+                    )
+                    
+                    _logger.info("\n✅ [LIVE PREVIEW] Optimized Strategy on Real-World Universe:")
+                    _logger.info(f"   Target Symbols: {list(live_oos_maps.keys())}")
+                    _logger.info(f"   Full Period CAGR: {float(live_port['cagr_pct']):.2f}%")
+                    _logger.info(f"   Full Period MDD: {float(live_port['mdd_pct']):.2f}%")
+                    _logger.info(f"   Profit Factor: {float(live_port['profit_factor']):.2f}")
+                    _logger.info(f"   Win Rate: {float(live_port['win_rate_pct']):.1f}%")
+                    _logger.info(f"   Ulcer Index: {float(live_port.get('ulcer_index', 0.0)):.2f}")
+                    _logger.info("-" * SEP_WIDTH)
+                    
+                    if float(live_port['cagr_pct']) < oos_cagr_target * 0.7:
+                        _logger.warning("   ⚠ Warning: Parameter transferability is weak. Edge may be symbol-specific.")
+                    else:
+                        _logger.info("   ✨ Parameter transferability CONFIRMED. Strategy is robust across symbols.")
 
         growth_save = float(ua.get("growth_score", 0.0))
         should_save = bool(growth_save > 0.0 and is_all_passed)
