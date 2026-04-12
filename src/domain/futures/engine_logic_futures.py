@@ -88,36 +88,38 @@ def check_short_exit(
 @njit(inline="always")
 def calculate_position_size(
     fill_price: float,
-    stop_distance: float,
+    asset_atr_pct: float,        # 코인의 내재 변동성 (ATR / Price)
     current_equity_for_risk: float,
     available_margin: float,
-    risk_per_trade: float,
+    risk_per_trade: float,       # 포트폴리오 타겟 변동성 (기존 risk_per_trade 활용)
     leverage: float,
     sf: float,
     gk: float,
     max_exposure_per_coin: float = 1.5,
 ) -> float:
+    """
+    [RE-ENGINEERED] Target Volatility Sizing (Alternative 1)
+    Decouples Sizing from Stop-Loss distance to prevent 1/ATR^2 penalty.
+    """
     if np.isnan(gk) or gk <= 0.0:
         gk = 1.0
-    eff_risk = risk_per_trade * float(gk)
-    risk_amt = current_equity_for_risk * eff_risk
     
-    # Base quantity from Inverse Volatility (Risk / Distance)
-    target_qty = risk_amt / stop_distance
+    # 1. Target Volatility 기반 명목 자본 할당 (Notional Allocation)
+    # asset_atr_pct가 높을수록(변동성이 클수록) 할당 금액이 비례하여 감소 (단일 패널티)
+    vol_scalar = risk_per_trade / max(asset_atr_pct, 0.001)
+    target_notional = current_equity_for_risk * vol_scalar * gk
 
-    # --- Safety Layer 1: Max Notional Exposure Cap (Anti-Gap Protection) ---
-    # target_notional = target_qty * fill_price
-    # max_notional = current_equity_for_risk * max_exposure_per_coin
+    # 2. 명목 한도 캡 (Max Exposure / Anti-Gap Protection)
     max_qty_by_exposure = (current_equity_for_risk * max_exposure_per_coin) / fill_price
-    target_qty = min(target_qty, max_qty_by_exposure)
+    target_qty = min(target_notional / fill_price, max_qty_by_exposure)
 
-    # --- Safety Layer 2: Available Margin Constraint ---
+    # 3. 가용 증거금 한도 캡 (Margin Constraint)
     max_qty_by_margin = (available_margin * leverage) / fill_price
     if max_qty_by_margin < 0:
         max_qty_by_margin = 0.0
     target_qty = min(target_qty, max_qty_by_margin)
 
-    # Sizing module's confidence/edge weight
+    # 4. Sizing module's confidence multiplier (sf)
     sf_c = sf if sf <= 1.0 else 1.0
     if sf_c < 0.0:
         sf_c = 0.0
