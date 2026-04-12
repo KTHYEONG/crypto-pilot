@@ -77,11 +77,13 @@ def objective_futures(
     ref_sym = symbols[0]
     ref_df: Optional[pd.DataFrame] = data_maps.get(ref_sym, {}).get(tf)
     if ref_df is None or ref_df.empty:
+        trial.set_user_attr("prune_reason", "no_ref_data")
         raise optuna.TrialPruned()
 
     is_off = int(data_maps[ref_sym].get(f"is_start_idx_{tf}", 0))
     ref_len = len(ref_df) - is_off
     if ref_len < 200:
+        trial.set_user_attr("prune_reason", f"ref_len_too_short:{ref_len}")
         raise optuna.TrialPruned()
 
     embargo = int(EMBARGO_BARS.get(tf, 0))
@@ -90,6 +92,7 @@ def objective_futures(
     else:
         cpcv_paths, _, _ = build_cpcv_test_paths_with_fallback(ref_len, embargo=embargo)
     if not cpcv_paths:
+        trial.set_user_attr("prune_reason", "no_cpcv_paths")
         raise optuna.TrialPruned()
 
     cfg: Dict[str, Any] = OPT_FUTURES_CONFIG
@@ -115,12 +118,67 @@ def objective_futures(
         )
 
     if len(full_signal_dfs) != len(symbols):
-        raise optuna.TrialPruned()
+        if not relaxed_constraints:
+            raise optuna.TrialPruned()
+        missing = [s for s in symbols if s not in full_signal_dfs]
+        _logger.debug("relaxed: signal missing for %s, continuing with subset", missing)
+        symbols = [s for s in symbols if s in full_signal_dfs]
+        if not symbols:
+            trial.set_user_attr("prune_reason", "signal_fail:all_symbols")
+            raise optuna.TrialPruned()
+        trial.set_user_attr("prune_reason", f"signal_partial:{len(missing)}_missing")
 
     prebuilt_full_arrays: Dict[str, Dict[str, np.ndarray]] = {}
     if mode == "multi":
+        # [DATETIME ALIGNMENT] Align all symbols to the INTERSECTION of IS periods.
+        # Without this, symbols listed later (e.g. GALA, ID, ROSE) have shorter arrays
+        # than the ref symbol (e.g. ETC), causing slice_end > arr.shape[0] in
+        # _build_aligned_2d_from_prebuilt → every segment returns None → no valid paths.
+        is_start_dts_per_sym: Dict[str, Any] = {}
         for sym in symbols:
-            prebuilt_full_arrays[sym] = _dataframe_to_symbol_arrays(full_signal_dfs[sym])
+            sym_df = full_signal_dfs[sym]
+            sym_is_off = int(data_maps[sym].get(f"is_start_idx_{tf}", 0))
+            if len(sym_df) > sym_is_off and "datetime" in sym_df.columns:
+                is_start_dts_per_sym[sym] = sym_df["datetime"].iloc[sym_is_off]
+
+        if is_start_dts_per_sym:
+            # Latest IS-start across all symbols = common intersection start
+            common_is_start_dt = max(is_start_dts_per_sym.values())
+            trimmed_dfs: Dict[str, pd.DataFrame] = {}
+            for sym in symbols:
+                sym_df = full_signal_dfs[sym]
+                if "datetime" in sym_df.columns:
+                    m = sym_df["datetime"] >= common_is_start_dt
+                    if m.any():
+                        trimmed_dfs[sym] = sym_df[m].reset_index(drop=True)
+
+            if not trimmed_dfs:
+                trial.set_user_attr("prune_reason", "no_common_is_period")
+                raise optuna.TrialPruned()
+
+            if len(trimmed_dfs) < len(symbols):
+                symbols = [s for s in symbols if s in trimmed_dfs]
+
+            for sym in symbols:
+                prebuilt_full_arrays[sym] = _dataframe_to_symbol_arrays(trimmed_dfs[sym])
+
+            # Recompute IS length and CPCV paths from the aligned (intersection) data
+            eff_ref_len = min(v["close"].shape[0] for v in prebuilt_full_arrays.values())
+            if eff_ref_len < 200:
+                trial.set_user_attr("prune_reason", f"aligned_is_too_short:{eff_ref_len}")
+                raise optuna.TrialPruned()
+
+            cpcv_paths, _, _ = build_cpcv_test_paths_with_fallback(eff_ref_len, embargo=embargo)
+            if not cpcv_paths:
+                trial.set_user_attr("prune_reason", "no_cpcv_paths_aligned")
+                raise optuna.TrialPruned()
+
+            # Data already trimmed to IS start → offset = 0
+            is_off = 0
+        else:
+            # Fallback when no datetime column: bar-index alignment
+            for sym in symbols:
+                prebuilt_full_arrays[sym] = _dataframe_to_symbol_arrays(full_signal_dfs[sym])
 
     liq_mdd_thr = float(cfg.get("FUTURES_MAX_MDD", 25.0))
     if relaxed_constraints:
@@ -165,6 +223,9 @@ def objective_futures(
                     slice_end,
                 )
                 if not aligned_data:
+                    if relaxed_constraints:
+                        trial.set_user_attr("prune_reason", "aligned_data_fail")
+                        continue  # Skip this segment; don't abort entire trial
                     raise optuna.TrialPruned()
 
                 segment_initial = max(running_balance, 1e-9)
@@ -315,6 +376,8 @@ def objective_futures(
             )
 
         if not seg_raw_logs:
+            if relaxed_constraints:
+                continue  # Skip path with no valid segments; don't abort entire trial
             raise optuna.TrialPruned()
         path_compound_raw_log_tw.append(float(np.sum(seg_raw_logs)))
         path_pfs.append(float(np.mean(seg_pfs)))
@@ -329,6 +392,9 @@ def objective_futures(
                 raise optuna.TrialPruned()
 
     # --- Hybrid Constrained Optimization: P10 GMGR as Core Objective ---
+    if not path_compound_raw_log_tw:
+        trial.set_user_attr("prune_reason", "no_valid_paths")
+        raise optuna.TrialPruned()
     path_arr = np.asarray(path_compound_raw_log_tw, dtype=np.float64)
     p10_log_tw = (
         float(np.percentile(path_arr, 10.0)) if path_arr.size >= 10 else float(np.mean(path_arr))
