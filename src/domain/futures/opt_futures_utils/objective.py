@@ -57,21 +57,77 @@ EMBARGO_BARS: Dict[str, int] = {
 }
 
 
+def compute_multi_alignment_info(
+    data_maps: Dict[str, Dict[str, Any]],
+    symbols: List[str],
+    tf: str,
+    embargo: int,
+) -> Optional[Dict[str, Any]]:
+    """Precompute common datetime alignment for all symbols to avoid per-trial O(N) overhead."""
+    is_start_dts_per_sym: Dict[str, Any] = {}
+    for sym in symbols:
+        sym_df = data_maps[sym].get(tf)
+        if sym_df is None or sym_df.empty:
+            continue
+        is_off = int(data_maps[sym].get(f"is_start_idx_{tf}", 0))
+        if len(sym_df) > is_off and "datetime" in sym_df.columns:
+            is_start_dts_per_sym[sym] = sym_df["datetime"].iloc[is_off]
+
+    if not is_start_dts_per_sym:
+        return None
+
+    common_is_start_dt = max(is_start_dts_per_sym.values())
+
+    alignment_offsets: Dict[str, int] = {}
+    eff_ref_lens: List[int] = []
+
+    for sym in symbols:
+        sym_df = data_maps[sym].get(tf)
+        if sym_df is None or sym_df.empty or "datetime" not in sym_df.columns:
+            continue
+        # Find first index where datetime >= common_is_start_dt
+        m = sym_df["datetime"] >= common_is_start_dt
+        if not m.any():
+            continue
+
+        start_idx = int(m.idxmax())
+        alignment_offsets[sym] = start_idx
+        eff_ref_lens.append(len(sym_df) - start_idx)
+
+    if not eff_ref_lens:
+        return None
+
+    eff_ref_len = min(eff_ref_lens)
+    if eff_ref_len < 200:
+        return None
+
+    cpcv_bundle = build_cpcv_test_paths_with_fallback(eff_ref_len, embargo=embargo)
+    if not cpcv_bundle[0]:
+        return None
+
+    return {
+        "common_is_start_dt": common_is_start_dt,
+        "alignment_offsets": alignment_offsets,
+        "eff_ref_len": eff_ref_len,
+        "cpcv_bundle": cpcv_bundle,
+    }
+
+
 def objective_futures(
     trial: optuna.Trial,
     data_maps: Dict[str, Dict[str, Any]],
     symbols: List[str],
-    tf_target: str,
+    tf: str,
     *,
     space: Dict[str, Dict[str, Any]],
     mode: str = "single",
     project_root: Optional[str] = None,
     prebuilt_cpcv_bundle: Optional[Tuple[List[List[Tuple[int, int]]], int, int]] = None,
+    multi_alignment_info: Optional[Dict[str, Any]] = None,
     signal_disk_cache_root: Optional[Path] = None,
     relaxed_constraints: bool = False,
 ) -> float:
-    params: Dict[str, Any] = suggest_params_futures(trial, space, tf_target)
-    tf: str = tf_target
+    params: Dict[str, Any] = suggest_params_futures(trial, space, tf)
     strategy: UltimateStrategy = UltimateStrategy(name="OptFutures", params=params)
 
     ref_sym = symbols[0]
@@ -128,57 +184,74 @@ def objective_futures(
             raise optuna.TrialPruned()
         trial.set_user_attr("prune_reason", f"signal_partial:{len(missing)}_missing")
 
+    # Tracks effective IS length after datetime alignment; used for annualization downstream
+    _stat_ref_len: int = ref_len
+
     prebuilt_full_arrays: Dict[str, Dict[str, np.ndarray]] = {}
     if mode == "multi":
-        # [DATETIME ALIGNMENT] Align all symbols to the INTERSECTION of IS periods.
-        # Without this, symbols listed later (e.g. GALA, ID, ROSE) have shorter arrays
-        # than the ref symbol (e.g. ETC), causing slice_end > arr.shape[0] in
-        # _build_aligned_2d_from_prebuilt → every segment returns None → no valid paths.
-        is_start_dts_per_sym: Dict[str, Any] = {}
-        for sym in symbols:
-            sym_df = full_signal_dfs[sym]
-            sym_is_off = int(data_maps[sym].get(f"is_start_idx_{tf}", 0))
-            if len(sym_df) > sym_is_off and "datetime" in sym_df.columns:
-                is_start_dts_per_sym[sym] = sym_df["datetime"].iloc[sym_is_off]
+        if multi_alignment_info is not None:
+            # [OPTIMIZED PATH] Use precomputed common IS start and offsets
+            eff_ref_len = multi_alignment_info["eff_ref_len"]
+            cpcv_paths = multi_alignment_info["cpcv_bundle"][0]
+            alignment_offsets = multi_alignment_info["alignment_offsets"]
 
-        if is_start_dts_per_sym:
-            # Latest IS-start across all symbols = common intersection start
-            common_is_start_dt = max(is_start_dts_per_sym.values())
-            trimmed_dfs: Dict[str, pd.DataFrame] = {}
+            for sym in symbols:
+                if sym not in alignment_offsets:
+                    continue
+                start_idx = alignment_offsets[sym]
+                sym_df = full_signal_dfs[sym].iloc[start_idx:]
+                prebuilt_full_arrays[sym] = _dataframe_to_symbol_arrays(sym_df)
+
+            is_off = 0
+            _stat_ref_len = eff_ref_len
+        else:
+            # [LEGACY PATH] Align all symbols to the INTERSECTION of IS periods.
+            is_start_dts_per_sym: Dict[str, Any] = {}
             for sym in symbols:
                 sym_df = full_signal_dfs[sym]
-                if "datetime" in sym_df.columns:
-                    m = sym_df["datetime"] >= common_is_start_dt
-                    if m.any():
-                        trimmed_dfs[sym] = sym_df[m].reset_index(drop=True)
+                sym_is_off = int(data_maps[sym].get(f"is_start_idx_{tf}", 0))
+                if len(sym_df) > sym_is_off and "datetime" in sym_df.columns:
+                    is_start_dts_per_sym[sym] = sym_df["datetime"].iloc[sym_is_off]
 
-            if not trimmed_dfs:
-                trial.set_user_attr("prune_reason", "no_common_is_period")
-                raise optuna.TrialPruned()
+            if is_start_dts_per_sym:
+                # Latest IS-start across all symbols = common intersection start
+                common_is_start_dt = max(is_start_dts_per_sym.values())
+                trimmed_dfs: Dict[str, pd.DataFrame] = {}
+                for sym in symbols:
+                    sym_df = full_signal_dfs[sym]
+                    if "datetime" in sym_df.columns:
+                        m = sym_df["datetime"] >= common_is_start_dt
+                        if m.any():
+                            trimmed_dfs[sym] = sym_df[m].reset_index(drop=True)
 
-            if len(trimmed_dfs) < len(symbols):
-                symbols = [s for s in symbols if s in trimmed_dfs]
+                if not trimmed_dfs:
+                    trial.set_user_attr("prune_reason", "no_common_is_period")
+                    raise optuna.TrialPruned()
 
-            for sym in symbols:
-                prebuilt_full_arrays[sym] = _dataframe_to_symbol_arrays(trimmed_dfs[sym])
+                if len(trimmed_dfs) < len(symbols):
+                    symbols = [s for s in symbols if s in trimmed_dfs]
 
-            # Recompute IS length and CPCV paths from the aligned (intersection) data
-            eff_ref_len = min(v["close"].shape[0] for v in prebuilt_full_arrays.values())
-            if eff_ref_len < 200:
-                trial.set_user_attr("prune_reason", f"aligned_is_too_short:{eff_ref_len}")
-                raise optuna.TrialPruned()
+                for sym in symbols:
+                    prebuilt_full_arrays[sym] = _dataframe_to_symbol_arrays(trimmed_dfs[sym])
 
-            cpcv_paths, _, _ = build_cpcv_test_paths_with_fallback(eff_ref_len, embargo=embargo)
-            if not cpcv_paths:
-                trial.set_user_attr("prune_reason", "no_cpcv_paths_aligned")
-                raise optuna.TrialPruned()
+                # Recompute IS length and CPCV paths from the aligned (intersection) data
+                eff_ref_len = min(v["close"].shape[0] for v in prebuilt_full_arrays.values())
+                if eff_ref_len < 200:
+                    trial.set_user_attr("prune_reason", f"aligned_is_too_short:{eff_ref_len}")
+                    raise optuna.TrialPruned()
 
-            # Data already trimmed to IS start → offset = 0
-            is_off = 0
-        else:
-            # Fallback when no datetime column: bar-index alignment
-            for sym in symbols:
-                prebuilt_full_arrays[sym] = _dataframe_to_symbol_arrays(full_signal_dfs[sym])
+                cpcv_paths, _, _ = build_cpcv_test_paths_with_fallback(eff_ref_len, embargo=embargo)
+                if not cpcv_paths:
+                    trial.set_user_attr("prune_reason", "no_cpcv_paths_aligned")
+                    raise optuna.TrialPruned()
+
+                # Data already trimmed to IS start → offset = 0
+                is_off = 0
+                _stat_ref_len = eff_ref_len  # Update for annualization user_attr
+            else:
+                # Fallback when no datetime column: bar-index alignment
+                for sym in symbols:
+                    prebuilt_full_arrays[sym] = _dataframe_to_symbol_arrays(full_signal_dfs[sym])
 
     liq_mdd_thr = float(cfg.get("FUTURES_MAX_MDD", 25.0))
     if relaxed_constraints:
@@ -480,6 +553,7 @@ def objective_futures(
     )
 
     trial.set_user_attr("gate1_p10_gmgr", p10_gmgr)
+    trial.set_user_attr("gate1_eff_ref_len", _stat_ref_len)
     trial.set_user_attr("ev_cost_ratio", ev_cost_is)
     trial.set_user_attr("avg_pf", avg_pf)
     trial.set_user_attr("avg_mdd", avg_mdd)

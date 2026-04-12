@@ -63,9 +63,6 @@ from src.domain.futures.opt_futures_utils.go_nogo import (
     run_go_nogo_check,
     run_multi_window_oos_gate,
 )
-from src.domain.futures.opt_futures_utils.objective import (
-    objective_futures,
-)
 from src.domain.futures.opt_futures_utils.oos_evaluator import (
     compute_regime_conditional_oos_metrics,
     evaluate_symbol_fold,
@@ -464,8 +461,18 @@ def _futures_tpe_worker_run(payload: Dict[str, Any]) -> None:
 
     cache_root = Path(signal_cache_dir) if signal_cache_dir else FUTURES_CACHE_DIR
 
+    from src.domain.futures.opt_futures_utils.objective import (
+        objective_futures,
+        compute_multi_alignment_info,
+        EMBARGO_BARS,
+    )
+    alignment_info = payload.get("multi_alignment_info")
+    if alignment_info is None and mode == MODE_MULTI:
+        embargo = int(EMBARGO_BARS.get(tf, 0))
+        alignment_info = compute_multi_alignment_info(data_maps, symbols, tf, embargo)
+
     def _objective_with_logging(trial: optuna.Trial) -> float:
-        nonlocal data_maps
+        nonlocal data_maps, alignment_info
         try:
             return float(
                 objective_futures(
@@ -477,6 +484,7 @@ def _futures_tpe_worker_run(payload: Dict[str, Any]) -> None:
                     mode=mode,
                     project_root=project_root,
                     prebuilt_cpcv_bundle=prebuilt_cpcv_bundle,
+                    multi_alignment_info=alignment_info,
                     signal_disk_cache_root=cache_root,
                 )
             )
@@ -538,11 +546,22 @@ def _run_tf_optimization(
         patience=int(OPT_FUTURES_CONFIG.get("tpe_pruner_patience", 2)),
     )
 
+    from src.domain.futures.opt_futures_utils.objective import (
+        objective_futures,
+        compute_multi_alignment_info,
+        EMBARGO_BARS,
+    )
+    alignment_info = None
+    if ctx.mode == MODE_MULTI:
+        alignment_info = compute_multi_alignment_info(
+            ctx.data_maps, ctx.symbols, tf, int(EMBARGO_BARS.get(tf, 0))
+        )
+
     ref_sym0 = ctx.symbols[0]
     is_off0 = int(ctx.data_maps[ref_sym0].get(f"is_start_idx_{tf}", 0))
     ref_df0 = ctx.data_maps[ref_sym0][tf]
-    prebuilt_cpcv_bundle = None
-    if ref_df0 is not None and not ref_df0.empty:
+    prebuilt_cpcv_bundle = alignment_info["cpcv_bundle"] if alignment_info else None
+    if not prebuilt_cpcv_bundle and ref_df0 is not None and not ref_df0.empty:
         ref_len0 = len(ref_df0) - is_off0
         if ref_len0 >= 200:
             prebuilt_cpcv_bundle = build_cpcv_test_paths_with_fallback(
@@ -558,6 +577,7 @@ def _run_tf_optimization(
     )
 
     def _objective_with_logging(trial: optuna.Trial) -> float:
+        nonlocal alignment_info
         try:
             return float(
                 objective_futures(
@@ -569,6 +589,7 @@ def _run_tf_optimization(
                     mode=ctx.mode,
                     project_root=ctx.project_root,
                     prebuilt_cpcv_bundle=prebuilt_cpcv_bundle,
+                    multi_alignment_info=alignment_info,
                     signal_disk_cache_root=cache_root,
                 )
             )
@@ -675,6 +696,7 @@ def _run_tf_optimization(
                         "signal_cache_dir": ctx.signal_cache_dir,
                         "progress_key": progress_key,
                         "locked_param_space": ctx.locked_param_space,
+                        "multi_alignment_info": alignment_info,
                     }
                 )
             with concurrent.futures.ProcessPoolExecutor(max_workers=len(payloads)) as pool:
@@ -712,12 +734,14 @@ def _eval_combo_task(
     tf: str,
     project_root: str,
     prebuilt: Any,
+    multi_alignment_info: Optional[Dict[str, Any]] = None,
 ) -> Optional[CombinationScoreFutures]:
     from optuna.samplers import QMCSampler
     from optuna.storages import InMemoryStorage
     from optuna.trial import TrialState
     from src.domain.futures.opt_futures_utils.opt_params import build_combined_param_space_futures
     from src.domain.futures.opt_futures_utils.combination_screener_futures import CombinationScoreFutures
+    from src.domain.futures.opt_futures_utils.objective import objective_futures
 
     space = build_combined_param_space_futures(sig, reg, siz)
     space["SIGNAL_TYPE"] = {"type": "categorical", "choices": [sig]}
@@ -744,6 +768,7 @@ def _eval_combo_task(
                 mode=MODE_MULTI,
                 project_root=project_root,
                 prebuilt_cpcv_bundle=prebuilt,
+                multi_alignment_info=multi_alignment_info,
                 signal_disk_cache_root=Path(FUTURES_CACHE_DIR),
                 relaxed_constraints=True,  # [REDESIGN] Allow actual performance distribution to be mapped
             )
@@ -765,32 +790,52 @@ def _eval_combo_task(
         )
         if failed:
             reason_dist["__failed__"] = len(failed)
-        reason_str = str(dict(reason_dist)) if reason_dist else "no_trials"
+        completion_rate = len(completed) / max(len(study.trials), 1)
+        reason_str = (
+            f"completion={len(completed)}/{len(study.trials)} "
+            f"({completion_rate:.0%}); pruned={str(dict(reason_dist)) if reason_dist else 'none'}"
+        )
         return CombinationScoreFutures(
             signal=sig, regime=reg, sizing=siz,
             p10_gmgr=-1e9, ls_ratio=0.0, mean_signal_rate=0.0,
             disqualified=True, reason=reason_str,
         )
 
-    # [REDESIGN] Robustness Scoring: Target "Broad Plateaus" instead of "Fragile Peaks"
-    # [EXPLOSIVE GROWTH] Decouple from heavily penalized objective_final for structural evaluation.
-    # We use trial user_attrs to get the raw p10_gmgr before Desirability Penalties.
+    # [REDESIGN] Robustness Scoring — Annualized gate1_p10_gmgr for IS-period-invariant comparison.
+    # Raw gate1_p10_gmgr is compound GMGR over CPCV test paths (~K/N of IS period).
+    # Annualizing makes score comparable across different IS window lengths.
     raw_vals = np.array([float(t.user_attrs.get("gate1_p10_gmgr", 0.0)) for t in completed])
-    raw_vals_sorted = np.sort(raw_vals)[::-1]
-    
-    # 1. Stability: Mean of top 20% with variance penalty
+
+    # --- Annualization ---
+    n_blocks = int(OPT_FUTURES_CONFIG.get("FUTURES_CPCV_N_BLOCKS", 8))
+    k_test = int(OPT_FUTURES_CONFIG.get("FUTURES_CPCV_K_TEST", 3))
+    tf_hours = int(tf.replace("h", "")) if tf.endswith("h") else 4
+    bars_per_year = int(365 * 24 / tf_hours)
+    ref_lens = [int(t.user_attrs.get("gate1_eff_ref_len", 4380)) for t in completed]
+    avg_ref_len = int(np.mean(ref_lens)) if ref_lens else 4380
+    avg_test_bars = max(1, int(avg_ref_len / n_blocks * k_test))
+    ann_factor = bars_per_year / avg_test_bars
+
+    raw_vals_ann = np.array([
+        float(np.expm1(np.log1p(max(-0.9999, v)) * ann_factor))
+        for v in raw_vals
+    ])
+
+    raw_vals_sorted = np.sort(raw_vals_ann)[::-1]
+
+    # 1. Stability: Mean of top 20% with variance penalty (annualized)
     top_n = max(1, int(len(raw_vals_sorted) * 0.2))
     top_vals = raw_vals_sorted[:top_n]
     mean_top = np.mean(top_vals)
     std_top = np.std(top_vals) if len(top_vals) > 1 else 0.0
-    
-    # 2. Edge Density: Proportion of trials exceeding positive GMGR floor (0.10)
-    # Use raw_vals to judge signal quality, not objective_final which is for TPE steering.
-    pos_vals = raw_vals[raw_vals > 0.05]
+
+    # 2. Edge Density: Proportion of trials exceeding annualized GMGR floor (3%)
+    # Lowered from 5% compound to 3% annualized for broader sensitivity.
+    pos_vals = raw_vals_ann[raw_vals_ann > 0.03]
     edge_sharpe = np.mean(pos_vals) / (np.std(pos_vals) + 1e-9) if len(pos_vals) > 0 else 0.0
-    edge_density = (len(pos_vals) / len(raw_vals)) * min(1.0, edge_sharpe)
-    
-    # 3. Final Robust Score: High mean, Low variance, High density
+    edge_density = (len(pos_vals) / len(raw_vals_ann)) * min(1.0, edge_sharpe)
+
+    # 3. Final Robust Score (annualized): High mean, Low variance, High density
     robust_score = (mean_top - 0.5 * std_top) * (1.0 + edge_density)
     
     # Representative best trial for Stage 2 seeding
@@ -820,20 +865,51 @@ def _run_stage1_futures_tournament(
     Parallelized to identify robust structural edges.
     """
     from src.domain.futures.opt_futures_utils.cv_utils import build_cpcv_test_paths_with_fallback
+    from src.domain.futures.opt_futures_utils.objective import (
+        compute_multi_alignment_info,
+        EMBARGO_BARS,
+    )
     from src.domain.futures.regimes import FUTURES_REGIME_REGISTRY
     from src.domain.futures.signals import FUTURES_SIGNAL_REGISTRY
 
     _logger.info("Starting Stage 1 Futures Tournament (Robust Edge Discovery)...")
 
-    ref_sym = symbols[0]
-    is_off = int(data_maps[ref_sym].get(f"is_start_idx_{tf}", 0))
-    ref_df = data_maps[ref_sym][tf]
-    prebuilt = None
-    if ref_df is not None and not ref_df.empty:
-        ref_len = len(ref_df) - is_off
-        if ref_len >= 200:
-            prebuilt = build_cpcv_test_paths_with_fallback(
-                ref_len, embargo=int(EMBARGO_BARS.get(tf, 0))
+    # [OPTIMIZATION] Precompute multi-symbol alignment once for the entire tournament.
+    # This avoids O(N_trials * N_symbols) redundant datetime scans in objective_futures.
+    embargo = int(EMBARGO_BARS.get(tf, 0))
+    alignment_info = compute_multi_alignment_info(data_maps, symbols, tf, embargo)
+    prebuilt = alignment_info["cpcv_bundle"] if alignment_info else None
+
+    if alignment_info:
+        _logger.info(
+            "   [Alignment] Common Start: %s, Eff Ref Len: %d",
+            alignment_info["common_is_start_dt"],
+            alignment_info["eff_ref_len"],
+        )
+    else:
+        # Fallback to single-symbol ref_len if alignment fails or not multi
+        ref_sym = symbols[0]
+        is_off = int(data_maps[ref_sym].get(f"is_start_idx_{tf}", 0))
+        ref_df = data_maps[ref_sym][tf]
+        if ref_df is not None and not ref_df.empty:
+            ref_len = len(ref_df) - is_off
+            if ref_len >= 200:
+                prebuilt = build_cpcv_test_paths_with_fallback(ref_len, embargo=embargo)
+
+    # [Fix F] Pre-flight: funding_rate column coverage check
+    for sym in symbols:
+        sym_df = data_maps[sym].get(tf)
+        if sym_df is None or sym_df.empty:
+            continue
+        if "funding_rate" not in sym_df.columns:
+            _logger.warning(
+                "[Pre-flight] %s: funding_rate column missing → FUNDING_RATE regime unreliable", sym
+            )
+        elif sym_df["funding_rate"].isna().mean() > 0.5:
+            _logger.warning(
+                "[Pre-flight] %s: funding_rate NaN rate %.1f%% → FUNDING_RATE regime unreliable",
+                sym,
+                sym_df["funding_rate"].isna().mean() * 100,
             )
 
     sig_choices = list(FUTURES_SIGNAL_REGISTRY.keys())
@@ -854,7 +930,8 @@ def _run_stage1_futures_tournament(
             executor.submit(
                 _eval_combo_task,
                 sig, reg, siz,
-                data_maps, symbols, tf, project_root, prebuilt
+                data_maps, symbols, tf, project_root, prebuilt,
+                alignment_info  # [OPTIMIZATION]
             ): (sig, reg, siz)
             for sig, reg, siz in combos
         }
@@ -892,17 +969,17 @@ def _run_stage1_futures_tournament(
         _logger.info("-" * SEP_WIDTH)
         
         for i, res in enumerate(results[:10]):
-            # Robustness Grading
-            if res.p10_gmgr > 1.5:
-                grade = "✨ EXCELLENT (Robust Plateau)"
-            elif res.p10_gmgr > 1.0:
-                grade = "✅ GOOD (Stable)"
-            elif res.p10_gmgr > 0.5:
-                grade = "🔶 FAIR (Narrow)"
+            # Robustness Grading (annualized robust_score basis)
+            if res.p10_gmgr > 0.25:
+                grade = "✨ EXCELLENT (> 25% ann)"
+            elif res.p10_gmgr > 0.12:
+                grade = "✅ GOOD (> 12% ann)"
+            elif res.p10_gmgr > 0.05:
+                grade = "🔶 FAIR (> 5% ann)"
             elif res.p10_gmgr > 0.0:
-                grade = "⚠️ FRAGILE (Weak Edge)"
+                grade = "⚠️ FRAGILE (< 5% ann)"
             else:
-                grade = "❌ POOR (No Edge)"
+                grade = "❌ POOR (Negative)"
                 
             _logger.info(
                 f"{i+1:<4} {res.signal[:14]:<15} {res.regime[:14]:<15} {res.sizing[:14]:<15} {res.p10_gmgr:>8.4f} {grade}"

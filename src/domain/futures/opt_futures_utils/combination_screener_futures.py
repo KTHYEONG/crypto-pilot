@@ -241,18 +241,25 @@ def run_quick_cpcv_for_combo_futures(
     project_root: str,
     signal_cache_dir: str,
 ) -> float:
+    from src.domain.futures.opt_futures_utils.objective import (
+        compute_multi_alignment_info,
+    )
+
     sig, reg, siz = combo
     space = build_combined_param_space_futures(sig, reg, siz)
-    ref_sym = symbols[0]
-    is_off = int(data_maps[ref_sym].get(f"is_start_idx_{tf}", 0))
-    ref_df = data_maps[ref_sym][tf]
-    prebuilt = None
-    if ref_df is not None and not ref_df.empty:
-        ref_len = len(ref_df) - is_off
-        if ref_len >= 200:
-            prebuilt = build_cpcv_test_paths_with_fallback(
-                ref_len, embargo=int(EMBARGO_BARS.get(tf, 0))
-            )
+    embargo = int(EMBARGO_BARS.get(tf, 0))
+    alignment_info = compute_multi_alignment_info(data_maps, symbols, tf, embargo)
+    prebuilt = alignment_info["cpcv_bundle"] if alignment_info else None
+
+    if not prebuilt:
+        ref_sym = symbols[0]
+        is_off = int(data_maps[ref_sym].get(f"is_start_idx_{tf}", 0))
+        ref_df = data_maps[ref_sym][tf]
+        if ref_df is not None and not ref_df.empty:
+            ref_len = len(ref_df) - is_off
+            if ref_len >= 200:
+                prebuilt = build_cpcv_test_paths_with_fallback(ref_len, embargo=embargo)
+
     study = optuna.create_study(
         direction="maximize",
         sampler=TPESampler(n_startup_trials=min(15, max(5, n_trials // 3)), seed=42),
@@ -261,6 +268,7 @@ def run_quick_cpcv_for_combo_futures(
     cache_root = Path(signal_cache_dir) if signal_cache_dir else None
 
     def _obj(trial: optuna.Trial) -> float:
+        nonlocal alignment_info
         return objective_futures(
             trial,
             data_maps,
@@ -270,6 +278,7 @@ def run_quick_cpcv_for_combo_futures(
             mode="multi",
             project_root=project_root,
             prebuilt_cpcv_bundle=prebuilt,
+            multi_alignment_info=alignment_info,
             signal_disk_cache_root=cache_root,
         )
 
@@ -295,18 +304,25 @@ def run_phase2_metrics_futures(
     project_root: str,
     signal_cache_dir: str,
 ) -> Tuple[Dict[str, float], Dict[str, Any]]:
+    from src.domain.futures.opt_futures_utils.objective import (
+        compute_multi_alignment_info,
+    )
+
     sig, reg, siz = combo
     space = build_combined_param_space_futures(sig, reg, siz)
-    ref_sym = symbols[0]
-    is_off = int(data_maps[ref_sym].get(f"is_start_idx_{tf}", 0))
-    ref_df = data_maps[ref_sym][tf]
-    prebuilt = None
-    if ref_df is not None and not ref_df.empty:
-        ref_len = len(ref_df) - is_off
-        if ref_len >= 200:
-            prebuilt = build_cpcv_test_paths_with_fallback(
-                ref_len, embargo=int(EMBARGO_BARS.get(tf, 0))
-            )
+    embargo = int(EMBARGO_BARS.get(tf, 0))
+    alignment_info = compute_multi_alignment_info(data_maps, symbols, tf, embargo)
+    prebuilt = alignment_info["cpcv_bundle"] if alignment_info else None
+
+    if not prebuilt:
+        ref_sym = symbols[0]
+        is_off = int(data_maps[ref_sym].get(f"is_start_idx_{tf}", 0))
+        ref_df = data_maps[ref_sym][tf]
+        if ref_df is not None and not ref_df.empty:
+            ref_len = len(ref_df) - is_off
+            if ref_len >= 200:
+                prebuilt = build_cpcv_test_paths_with_fallback(ref_len, embargo=embargo)
+
     study = optuna.create_study(
         direction="maximize",
         sampler=TPESampler(n_startup_trials=min(20, max(8, n_trials // 4)), seed=43),
@@ -315,6 +331,7 @@ def run_phase2_metrics_futures(
     cache_root = Path(signal_cache_dir) if signal_cache_dir else None
 
     def _obj(trial: optuna.Trial) -> float:
+        nonlocal alignment_info
         return objective_futures(
             trial,
             data_maps,
@@ -324,6 +341,7 @@ def run_phase2_metrics_futures(
             mode="multi",
             project_root=project_root,
             prebuilt_cpcv_bundle=prebuilt,
+            multi_alignment_info=alignment_info,
             signal_disk_cache_root=cache_root,
         )
 
