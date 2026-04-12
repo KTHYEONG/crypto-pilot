@@ -134,6 +134,8 @@ def objective_futures(
     path_mdds: List[float] = []
     all_seg_long: int = 0
     all_seg_short: int = 0
+    all_long_pnls: List[float] = []
+    all_short_pnls: List[float] = []
     funding_ratios: List[float] = []
     sym_pf_accum: Dict[str, List[float]] = {s: [] for s in symbols}
     path_terminal_wealth_ratios: List[float] = []
@@ -213,6 +215,11 @@ def objective_futures(
 
                 true_pnl = trades_df["pnl"] - trades_df["entry_fee"]
                 pf_s = calc_profit_factor_from_pnl(true_pnl)
+                long_pnl_s = true_pnl[trades_df["side"] == "LONG"]
+                short_pnl_s = true_pnl[trades_df["side"] == "SHORT"]
+                all_long_pnls.extend(long_pnl_s.tolist())
+                all_short_pnls.extend(short_pnl_s.tolist())
+
                 win_rate_s = (
                     float((len(trades_df[true_pnl > 0]) / len(trades_df)) * 100)
                     if len(trades_df) > 0
@@ -363,14 +370,22 @@ def objective_futures(
     cvar_log = float(np.mean(sorted_rtns[:k_worst])) if sorted_rtns.size > 0 else -1.0
     d_cvar = float(np.clip(1.0 - (max(0.0, cvar_thr_log - cvar_log) / 0.10), 0.0, 1.0))
 
-    # 6. MDD Soft Penalty (Linear Relaxation, Method C modified)
-    # [EXPLOSIVE GROWTH] We allow "rough gems" more room in Stage 1.
-    # Linear penalty from 18% to 35%, much gentler than the exponential strangle.
-    mean_path_mdd = float(np.mean(path_mdds)) if path_mdds else 0.0
-    if mean_path_mdd > 18.0:
-        d_mdd = float(np.clip(1.0 - (mean_path_mdd - 18.0) / 25.0, 0.05, 1.0))
+    # 6. MDD Soft Penalty (Method C modified)
+    # [EXPLOSIVE GROWTH] P90 MDD 기반 지수 패널티 적용
+    if path_mdds:
+        p90_mdd = float(np.percentile(path_mdds, 90.0))
+        if p90_mdd > 20.0:
+            d_mdd = float(np.clip(np.exp(-(p90_mdd - 20.0) / 4.0), 0.01, 1.0))
+        else:
+            d_mdd = 1.0
     else:
         d_mdd = 1.0
+
+    # 7. Directional PF (Min 1.05 for Long & Short)
+    long_pf = calc_profit_factor_from_pnl(np.array(all_long_pnls)) if all_long_pnls else 1.5
+    short_pf = calc_profit_factor_from_pnl(np.array(all_short_pnls)) if all_short_pnls else 1.5
+    min_dir_pf = min(long_pf, short_pf)
+    d_directional = float(np.clip(1.0 - (max(0.0, 1.10 - min_dir_pf) / 0.10), 0.01, 1.0))
 
     stability_bonus = 0.0
     if path_arr.size >= 2:
@@ -381,7 +396,7 @@ def objective_futures(
             stability_bonus += min(0.1, (psort - 1.5) * 0.05)
 
     objective_final = (
-        p10_gmgr * (d_fund * d_balance * d_stability * d_temporal * d_cvar * d_mdd)
+        p10_gmgr * (d_fund * d_balance * d_stability * d_temporal * d_cvar * d_mdd * d_directional)
         + stability_bonus
     )
 
