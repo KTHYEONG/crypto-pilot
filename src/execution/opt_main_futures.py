@@ -713,10 +713,9 @@ def _eval_combo_task(
     project_root: str,
     prebuilt: Any,
 ) -> Optional[CombinationScoreFutures]:
-    from optuna.samplers import TPESampler
+    from optuna.samplers import QMCSampler
     from optuna.storages import InMemoryStorage
     from optuna.trial import TrialState
-    from src.domain.futures.opt_futures_utils.objective import objective_futures
     from src.domain.futures.opt_futures_utils.opt_params import build_combined_param_space_futures
     from src.domain.futures.opt_futures_utils.combination_screener_futures import CombinationScoreFutures
 
@@ -725,9 +724,12 @@ def _eval_combo_task(
     space["REGIME_TYPE"] = {"type": "categorical", "choices": [reg]}
     space["SIZING_METHOD"] = {"type": "categorical", "choices": [siz]}
 
+    # [REDESIGN] Use Sobol QMC for uniform distribution scanning (Robustness focus)
+    # Sobol provides better space coverage than TPE for structural discovery.
+    sampler = QMCSampler(qmc_type="sobol", seed=42, scramble=True)
     study = optuna.create_study(
         direction="maximize",
-        sampler=TPESampler(n_startup_trials=10, seed=42),
+        sampler=sampler,
         storage=InMemoryStorage(),
     )
 
@@ -746,23 +748,45 @@ def _eval_combo_task(
             )
         )
 
-    study.optimize(_obj, n_trials=30, n_jobs=1, show_progress_bar=False)
+    # Increased trials to 64 for statistical significance of the distribution
+    study.optimize(_obj, n_trials=64, n_jobs=1, show_progress_bar=False)
 
     completed = [
         t for t in study.trials if t.state == TrialState.COMPLETE and t.value is not None
     ]
     if not completed:
+        # Debug: see what states are present
+        states = [t.state for t in study.trials]
+        print(f"DEBUG: No completed trials. States: {states}")
         return None
 
-    completed.sort(key=lambda tr: float(tr.value), reverse=True)
-    top_val = float(np.mean([float(t.value) for t in completed[:3]]))
-    best_t = completed[0]
+    # [REDESIGN] Robustness Scoring: Target "Broad Plateaus" instead of "Fragile Peaks"
+    vals = np.array([float(t.value) for t in completed])
+    vals_sorted = np.sort(vals)[::-1]
+    
+    # 1. Stability: Mean of top 20% with variance penalty
+    top_n = max(1, int(len(vals_sorted) * 0.2))
+    top_vals = vals_sorted[:top_n]
+    mean_top = np.mean(top_vals)
+    std_top = np.std(top_vals) if len(top_vals) > 1 else 0.0
+    
+    # 2. Edge Density: Proportion of trials exceeding positive GMGR floor (0.10)
+    # Measures the probability of picking a profitable parameter set by chance.
+    edge_floor = 0.10
+    edge_density = np.sum(vals > edge_floor) / len(vals)
+    
+    # 3. Final Robust Score: High mean, Low variance, High density
+    # Formula: (Stable Alpha Area) * (Reliability Multiplier)
+    robust_score = (mean_top - 0.5 * std_top) * (1.0 + edge_density)
+    
+    # Representative best trial for Stage 2 seeding
+    best_t = max(completed, key=lambda tr: float(tr.value))
 
     return CombinationScoreFutures(
         signal=sig,
         regime=reg,
         sizing=siz,
-        p10_gmgr=top_val,
+        p10_gmgr=robust_score,
         ls_ratio=float(best_t.user_attrs.get("long_short_ratio", 0.5)),
         mean_signal_rate=float(best_t.user_attrs.get("avg_signal_rate", 0.05)),
         disqualified=False,
@@ -778,14 +802,14 @@ def _run_stage1_futures_tournament(
     n_workers: int,
 ) -> List[CombinationScoreFutures]:
     """
-    Tournament style discovery: TPE mini-optimization for each (Signal x Regime) combination.
-    Parallelized to avoid Stage 1 bottleneck.
+    Tournament style discovery: QMC distribution scanning for each (Signal x Regime) combination.
+    Parallelized to identify robust structural edges.
     """
     from src.domain.futures.opt_futures_utils.cv_utils import build_cpcv_test_paths_with_fallback
     from src.domain.futures.regimes import FUTURES_REGIME_REGISTRY
     from src.domain.futures.signals import FUTURES_SIGNAL_REGISTRY
 
-    _logger.info("Starting Stage 1 Futures Tournament (Parallel TPE discovery)...")
+    _logger.info("Starting Stage 1 Futures Tournament (Robust Edge Discovery)...")
 
     ref_sym = symbols[0]
     is_off = int(data_maps[ref_sym].get(f"is_start_idx_{tf}", 0))
@@ -803,13 +827,13 @@ def _run_stage1_futures_tournament(
     siz_choices = ["inv_vol_parity", "vol_target"]
 
     combos = list(itertools.product(sig_choices, reg_choices, siz_choices))
-    _logger.info("   Evaluating %d Signal x Regime x Sizing combinations...", len(combos))
+    _logger.info("   Scanning %d Combinations for Robustness Plateaus...", len(combos))
 
     logical_cpus = max(1, os.cpu_count() or 1)
     n_workers = max(1, min(int(n_workers), len(combos), logical_cpus, 6))
     results: List[CombinationScoreFutures] = []
 
-    _logger.info("   Stage 1 parallel workers: %d", n_workers)
+    _logger.info("   Stage 1 parallel workers: %d (64 samples per combo)", n_workers)
 
     with concurrent.futures.ProcessPoolExecutor(max_workers=n_workers) as executor:
         futures_map = {
@@ -821,14 +845,14 @@ def _run_stage1_futures_tournament(
             for sig, reg, siz in combos
         }
         
-        with tqdm(total=len(combos), desc="Stage 1 Tournament", unit="combo") as pbar:
+        with tqdm(total=len(combos), desc="Stage 1 Robustness Scan", unit="combo") as pbar:
             for f in concurrent.futures.as_completed(futures_map):
                 sig, reg, siz = futures_map[f]
                 try:
                     score = f.result()
                     if score:
                         results.append(score)
-                        pbar.set_postfix({"last": f"{sig[:5]}.."})
+                        pbar.set_postfix({"last": f"{sig[:5]}..", "robust_sc": f"{score.p10_gmgr:.3f}"})
                 except Exception as e:
                     _logger.error("      Error evaluating combo [%s x %s x %s]: %s", sig, reg, siz, e)
                 pbar.update(1)
@@ -837,7 +861,7 @@ def _run_stage1_futures_tournament(
     if results:
         top = results[0]
         _logger.info(
-            "   Stage 1 winner: [%s x %s x %s] Mean Score: %.4f",
+            "   Stage 1 winner: [%s x %s x %s] Robust Score: %.4f",
             top.signal, top.regime, top.sizing, top.p10_gmgr
         )
     return results
