@@ -3,19 +3,20 @@
 전략의 우수성을 판단하기 위해 단순 수익률뿐만 아니라 리스크 대비 효율성을 점수화하는 역할을 수행함.
 """
 
-from typing import Sequence
+from typing import Sequence, Union
 
 import numpy as np
 import pandas as pd
 
 
-def calc_profit_factor_from_pnl(pnl_series: pd.Series) -> float:
+def calc_profit_factor_from_pnl(pnl_series: Union[pd.Series, np.ndarray, Sequence[float]]) -> float:
     """Calculate Profit Factor from a pre-computed net PNL series (fee-deducted)."""
-    if pnl_series.empty:
+    pnl_arr = np.asarray(pnl_series)
+    if pnl_arr.size == 0:
         return 1.0
 
-    gross_profit: float = float(pnl_series[pnl_series > 0].sum())
-    gross_loss: float = abs(float(pnl_series[pnl_series < 0].sum()))
+    gross_profit: float = float(pnl_arr[pnl_arr > 0].sum())
+    gross_loss: float = abs(float(pnl_arr[pnl_arr < 0].sum()))
 
     if gross_loss == 0.0:
         return 5.0 if gross_profit > 0 else 1.0
@@ -60,7 +61,8 @@ def calc_sortino_from_equity(equity_curve: np.ndarray, span_days: float) -> floa
     [ALGO-TRADING & COMPOUNDING OPTIMIZED METHOD]
     기계식 매매와 복리(Compounding) 자산 증식의 수학적 특성을 완벽히 반영함.
     1. 스무딩 없음: 엔진이 반환한 틱/캔들 단위의 모든 궤적(Path) 고통을 그대로 측정.
-    2. 로그 수익률(Log Returns) 사용: 상하방 비대칭성을 제거하여 복리 환경에서의 실제 변동성 드래그를 정확히 산출.
+    2. 로그 수익률(Log Returns) 사용: 상하방 비대칭성을 제거하여 
+       복리 환경에서의 실제 변동성 드래그를 정확히 산출.
     """
     if len(equity_curve) < 2 or span_days <= 0:
         return 0.0
