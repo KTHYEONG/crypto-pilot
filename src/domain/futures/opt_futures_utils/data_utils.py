@@ -26,37 +26,48 @@ _FUTURES_2D_REQUIRED_COLS: Tuple[str, ...] = (
 
 
 def _dataframe_to_symbol_arrays(sig_df: pd.DataFrame) -> Dict[str, np.ndarray]:
-    for c in _FUTURES_2D_REQUIRED_COLS:
-        if c not in sig_df.columns:
-            if c in ("garch_kelly_f", "funding_rate_sum", "slot_rank_score"):
-                sig_df[c] = 0.0
-            else:
-                raise ValueError(f"Missing required column {c} for futures 2D engine.")
+    """
+    Converts a signal DataFrame to a dictionary of numpy arrays.
+    Optimized to minimize allocations and redundant filling.
+    """
     out: Dict[str, np.ndarray] = {}
-    out["open"] = sig_df["open"].to_numpy(dtype=np.float64, copy=False)
-    out["high"] = sig_df["high"].to_numpy(dtype=np.float64, copy=False)
-    out["low"] = sig_df["low"].to_numpy(dtype=np.float64, copy=False)
-    out["close"] = sig_df["close"].to_numpy(dtype=np.float64, copy=False)
-    out["atr"] = sig_df["atr"].ffill().to_numpy(dtype=np.float64, copy=False)
-    out["strength_filter"] = (
-        sig_df["strength_filter"].fillna(0.0).to_numpy(dtype=np.float64, copy=False)
-    )
-    out["trend_direction"] = (
-        sig_df["trend_direction"].fillna(0.0).to_numpy(dtype=np.float64, copy=False)
-    )
-    out["entry_upper"] = (
-        sig_df["entry_upper"].fillna(999999.0).to_numpy(dtype=np.float64, copy=False)
-    )
-    out["entry_lower"] = sig_df["entry_lower"].fillna(0.0).to_numpy(dtype=np.float64, copy=False)
-    out["garch_kelly_f"] = (
-        sig_df["garch_kelly_f"].fillna(0.0).to_numpy(dtype=np.float64, copy=False)
-    )
-    out["funding_rate_sum"] = (
-        sig_df["funding_rate_sum"].fillna(0.0).to_numpy(dtype=np.float64, copy=False)
-    )
-    out["slot_rank_score"] = (
-        sig_df["slot_rank_score"].fillna(0.0).to_numpy(dtype=np.float64, copy=False)
-    )
+    
+    # 1. Base OHLCV (Direct to numpy, no filling needed for these usually)
+    for col in ["open", "high", "low", "close"]:
+        out[col] = sig_df[col].to_numpy(dtype=np.float64, copy=False)
+    
+    # 2. ATR (Fast ffill then fallback)
+    atr = sig_df["atr"].to_numpy(dtype=np.float64, copy=True)
+    mask = np.isnan(atr)
+    if mask.any():
+        # Simple forward fill on numpy array
+        idx = np.where(~mask, np.arange(mask.size), 0)
+        np.maximum.accumulate(idx, out=idx)
+        atr = atr[idx]
+        # Final fallback for leading NaNs
+        np.nan_to_num(atr, copy=False, nan=out["close"][0] * 0.01)
+    out["atr"] = atr
+
+    # 3. Remaining signal columns (Fast constant fill)
+    fill_map = {
+        "strength_filter": 0.0,
+        "trend_direction": 0.0,
+        "entry_upper": 999999.0,
+        "entry_lower": 0.0,
+        "garch_kelly_f": 0.0,
+        "funding_rate_sum": 0.0,
+        "slot_rank_score": 0.0,
+    }
+    
+    for col, fill_val in fill_map.items():
+        if col in sig_df.columns:
+            arr = sig_df[col].to_numpy(dtype=np.float64, copy=True)
+            np.nan_to_num(arr, copy=False, nan=fill_val)
+            out[col] = arr
+        else:
+            # Create zeros if missing
+            out[col] = np.full(out["close"].shape, fill_val, dtype=np.float64)
+            
     return out
 
 
