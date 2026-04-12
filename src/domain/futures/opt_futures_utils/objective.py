@@ -69,7 +69,7 @@ def compute_multi_alignment_info(
         sym_df = data_maps[sym].get(tf)
         if sym_df is None or sym_df.empty:
             continue
-        
+
         # [OPTIMIZATION] Precompute fingerprint once per symbol
         fingerprints[sym] = _dataset_fingerprint_from_df(sym_df)
 
@@ -146,7 +146,7 @@ def objective_futures(
     relaxed_constraints: bool = False,
 ) -> float:
     params: Dict[str, Any] = suggest_params_futures(trial, space, tf)
-    
+
     # [OPTIMIZATION] CS_MOMENTUM column mapping to avoid per-trial DF copies
     if params.get("SIGNAL_TYPE") == "CS_MOMENTUM" and len(symbols) > 1:
         lb = int(params.get("CSM_LOOKBACK", 24))
@@ -162,7 +162,7 @@ def objective_futures(
 
     is_off = int(data_maps[ref_sym].get(f"is_start_idx_{tf}", 0))
     ref_len = len(ref_df) - is_off
-    
+
     # [OPTIMIZATION] Reuse precomputed alignment info if available
     if multi_alignment_info:
         ref_len = multi_alignment_info["eff_ref_len"]
@@ -191,7 +191,7 @@ def objective_futures(
     cache_root = signal_disk_cache_root
     if cache_root is None and project_root is not None:
         cache_root = Path(project_root) / "cache_futures"
- 
+
     from .signal_cache import get_tiered_signals
 
     full_signal_dfs: Dict[str, pd.DataFrame] = {}
@@ -199,7 +199,7 @@ def objective_futures(
         target_df_raw = data_maps.get(sym, {}).get(tf)
         if target_df_raw is None or target_df_raw.empty:
             continue
-            
+
         # [OPTIMIZATION] Use tiered caching instead of monolithic
         full_signal_dfs[sym] = get_tiered_signals(
             params, sym, tf, target_df_raw, strategy
@@ -287,223 +287,131 @@ def objective_futures(
         liq_mdd_thr = 100.0  # Bypass MDD constraint for robust mapping
         min_seg_trades = 1   # Bypass trade count constraint
 
-    path_compound_raw_log_tw: List[float] = []
-    path_pfs: List[float] = []
-    path_wins: List[float] = []
-    path_trades: List[float] = []
-    path_mdds: List[float] = []
-    all_seg_long: int = 0
-    all_seg_short: int = 0
-    all_long_pnls: List[float] = []
-    all_short_pnls: List[float] = []
-    funding_ratios: List[float] = []
-    sym_pf_accum: Dict[str, List[float]] = {s: [] for s in symbols}
-    path_terminal_wealth_ratios: List[float] = []
+    # --- CPCV Block Memoization (Priority 2) ---
+    from .cv_utils import list_cpcv_block_ranges
+    embargo = int(EMBARGO_BARS.get(tf, 0))
+    n_blocks_cpcv = 8
+    if multi_alignment_info:
+        n_blocks_cpcv = multi_alignment_info["cpcv_bundle"][1]
+    elif prebuilt_cpcv_bundle:
+        n_blocks_cpcv = prebuilt_cpcv_bundle[1]
 
-    for path_idx, path in enumerate(cpcv_paths):
-        seg_raw_logs: List[float] = []
-        seg_mdds: List[float] = []
-        seg_pfs: List[float] = []
-        seg_wins: List[float] = []
-        seg_trades: List[float] = []
-        seg_fund_ratio: List[float] = []
+    unique_blocks = list_cpcv_block_ranges(_stat_ref_len, n_blocks_cpcv, embargo=embargo)
 
-        running_balance = float(FUTURES_INITIAL_BALANCE)
+    block_results: Dict[Tuple[int, int], Dict[str, Any]] = {}
 
-        for test_start, test_end in path:
-            if mode == "multi":
-                abs_start = is_off + int(test_start)
-                abs_end = is_off + int(test_end)
-                slice_start = max(0, abs_start - 1)
-                slice_end = min(len(ref_df), abs_end)
-                if slice_end - slice_start < 2:
-                    continue
-                aligned_data = _build_aligned_2d_from_prebuilt(
-                    prebuilt_full_arrays,
-                    symbols,
-                    slice_start,
-                    slice_end,
-                )
-                if not aligned_data:
-                    if relaxed_constraints:
-                        trial.set_user_attr("prune_reason", "aligned_data_fail")
-                        continue  # Skip this segment; don't abort entire trial
-                    raise optuna.TrialPruned()
-
-                segment_initial = max(running_balance, 1e-9)
-                try:
-                    from config.settings import SLIPPAGE_RATE, TRADING_FEE_RATE
-
-                    engine = PortfolioBacktestEngineFast(
-                        aligned_data=aligned_data,
-                        symbol_names=symbols,
-                        strategy_params=params,
-                        initial_balance=segment_initial,
-                        fee_rate=TRADING_FEE_RATE,
-                        slippage_rate=SLIPPAGE_RATE,
-                    )
-                    trades_df, equity_curve, final_balance = engine.run()
-                except Exception as exc:
-                    _logger.warning("Portfolio engine CPCV error: %s", exc, exc_info=True)
-                    if relaxed_constraints:
-                        return -5.0
-                    raise optuna.TrialPruned() from exc
-
-                if trades_df is None or trades_df.empty:
-                    if relaxed_constraints:
-                        return -5.0
-                    raise optuna.TrialPruned()
-
-                pnl_arr = trades_df["pnl"].to_numpy(dtype=np.float64, copy=False)
-                entry_fee_arr = trades_df["entry_fee"].to_numpy(dtype=np.float64, copy=False)
-                true_pnl_arr = pnl_arr - entry_fee_arr
-
-                side_arr = trades_df["side"].to_numpy(copy=False)
-                long_mask = side_arr == "LONG"
-                short_mask = side_arr == "SHORT"
-
-                sym_trade_counts: Dict[str, int] = {}
-                sym_pnl_sums: Dict[str, float] = {}
-                if "symbol" in trades_df.columns:
-                    sym_arr = trades_df["symbol"].to_numpy(copy=False)
-                    uniq_syms, inv_idx = np.unique(sym_arr, return_inverse=True)
-                    counts = np.bincount(inv_idx)
-                    pnl_sums = np.bincount(inv_idx, weights=pnl_arr)
-                    sym_trade_counts = {str(sym): int(counts[i]) for i, sym in enumerate(uniq_syms)}
-                    sym_pnl_sums = {str(sym): float(pnl_sums[i]) for i, sym in enumerate(uniq_syms)}
-
-                # 심볼별 최소 트레이드 수 체크
-                if sym_trade_counts and len(symbols) > 1:
-                    missing_symbols = [s for s in symbols if sym_trade_counts.get(s, 0) == 0]
-                    if missing_symbols:
-                        if relaxed_constraints:
-                            pass  # Allow 0 trades on some symbols in relaxed mode
-                        else:
-                            raise optuna.TrialPruned()
-
-                ret_pct = float((final_balance / segment_initial - 1.0) * 100.0)
-                raw_log = _log_tw_from_ret_pct(ret_pct)
-                running_balance = max(float(final_balance), 1e-9)
-                mdd_seg = (
-                    float(calc_mdd_from_equity(equity_curve)) if equity_curve.size > 0 else 0.0
-                )
-
-                if mdd_seg >= liq_mdd_thr:
-                    if relaxed_constraints:
-                        pass
-                    else:
-                        raise optuna.TrialPruned()
-
-                pf_s = calc_profit_factor_from_pnl(true_pnl_arr)
-                all_long_pnls.extend(true_pnl_arr[long_mask].tolist())
-                all_short_pnls.extend(true_pnl_arr[short_mask].tolist())
-
-                win_rate_s = (
-                    float(np.mean(true_pnl_arr > 0.0) * 100.0)
-                    if true_pnl_arr.size > 0
-                    else 0.0
-                )
-                n_tr = int(true_pnl_arr.size)
-                lc = int(long_mask.sum())
-                sc = int(short_mask.sum())
-                all_seg_long += lc
-                all_seg_short += sc
-                seg_raw_logs.append(raw_log)
-                seg_mdds.append(mdd_seg)
-                seg_pfs.append(pf_s)
-                seg_wins.append(win_rate_s)
-                seg_trades.append(float(n_tr))
-
-                sum_ff = (
-                    float(trades_df["funding_fee"].to_numpy(dtype=np.float64, copy=False).sum())
-                    if "funding_fee" in trades_df.columns
-                    else 0.0
-                )
-                sum_pnl_abs = float(np.abs(pnl_arr).sum())
-                funding_ratios.append(sum_ff / max(sum_pnl_abs, 1e-9))
-
-                if sym_pnl_sums:
-                    for _sx, _sx_pnl in sym_pnl_sums.items():
-                        if _sx in sym_pf_accum:
-                            sym_pf_accum[_sx].append(_sx_pnl)
-
-                if n_tr < min_seg_trades:
-                    if relaxed_constraints:
-                        pass
-                    else:
-                        raise optuna.TrialPruned()
-
+    for b_start, b_end in unique_blocks:
+        if mode == "multi":
+            abs_start, abs_end = is_off + b_start, is_off + b_end
+            slice_start, slice_end = max(0, abs_start - 1), min(len(ref_df), abs_end)
+            if slice_end - slice_start < 2:
                 continue
 
-            # --- Single Mode (Legacy/Fallback) ---
-            sym_logs, sym_mdds, sym_pfs, sym_wins, sym_trades, sym_fund_r = [], [], [], [], [], []
-            for sym in symbols:
-                target_df = data_maps[sym][tf]
-                daily_df = data_maps[sym]["1d"]
-                merge_idx = data_maps[sym][f"merge_idx_{tf}"]
-                is_start_idx = int(data_maps[sym].get(f"is_start_idx_{tf}", 0))
-                adj_s, adj_e = test_start + is_start_idx, test_end + is_start_idx
-                seg, ex_idx = _segment_with_context(full_signal_dfs[sym], adj_s, adj_e)
-                _cagr, ret_pct, mdd_pct, ntr, wr, pf, lc, sc, _eq, fpaid, gross = (
-                    evaluate_symbol_fold(
-                        strategy,
-                        params,
-                        sym,
-                        tf,
-                        target_df,
-                        daily_df,
-                        merge_idx,
-                        None,
-                        adj_s,
-                        adj_e,
-                        seg,
-                        ex_idx,
-                    )
-                )
-                if mdd_pct >= liq_mdd_thr:
-                    if relaxed_constraints:
-                        pass
-                    else:
-                        raise optuna.TrialPruned()
-                denom = max(abs(gross), 1e-9)
-                sym_fund_r.append(float(fpaid) / denom)
-                sym_logs.append(_log_tw_from_ret_pct(ret_pct))
-                sym_mdds.append(mdd_pct)
-                sym_pfs.append(pf)
-                sym_wins.append(wr)
-                sym_trades.append(float(ntr))
-                all_seg_long, all_seg_short = all_seg_long + lc, all_seg_short + sc
-                sym_pf_accum[sym].append(pf)
-
-            if np.sum(sym_trades) < min_seg_trades:
-                if relaxed_constraints:
-                    pass
-                else:
-                    raise optuna.TrialPruned()
-            seg_raw_logs.append(float(np.mean(sym_logs)) if sym_logs else -10.0)
-            seg_mdds.append(float(np.mean(sym_mdds)) if sym_mdds else 0.0)
-            seg_pfs.append(float(np.mean(sym_pfs)) if sym_pfs else 1.0)
-            seg_wins.append(float(np.mean(sym_wins)) if sym_wins else 0.0)
-            seg_trades.append(np.sum(sym_trades) / max(len(sym_logs), 1))
-            seg_fund_ratio.append(float(np.mean(sym_fund_r)) if sym_fund_r else 0.0)
-
-        if mode == "multi":
-            path_terminal_wealth_ratios.append(
-                float(running_balance / float(FUTURES_INITIAL_BALANCE))
+            aligned_data = _build_aligned_2d_from_prebuilt(
+                prebuilt_full_arrays, symbols, slice_start, slice_end
             )
+            if not aligned_data:
+                continue
 
-        if not seg_raw_logs:
+            try:
+                from config.settings import SLIPPAGE_RATE, TRADING_FEE_RATE
+                engine = PortfolioBacktestEngineFast(
+                    aligned_data=aligned_data, symbol_names=symbols, strategy_params=params,
+                    initial_balance=float(FUTURES_INITIAL_BALANCE),
+                    fee_rate=TRADING_FEE_RATE, slippage_rate=SLIPPAGE_RATE,
+                )
+                trades_df, equity_curve, final_balance = engine.run()
+            except Exception as exc:
+                _logger.warning("Block backtest error: %s", exc)
+                continue
+
+            if trades_df is None or trades_df.empty:
+                block_results[(b_start, b_end)] = {"log_ret": -1.0, "mdd": 100.0, "trades": 0}
+                continue
+
+            pnl_arr = trades_df["pnl"].to_numpy(dtype=np.float64, copy=False)
+            true_pnl_arr = pnl_arr - trades_df["entry_fee"].to_numpy(dtype=np.float64, copy=False)
+            side_arr = trades_df["side"].to_numpy(copy=False)
+
+            block_results[(b_start, b_end)] = {
+                "log_ret": _log_tw_from_ret_pct(float((final_balance / FUTURES_INITIAL_BALANCE - 1.0) * 100.0)),
+                "mdd": float(calc_mdd_from_equity(equity_curve)) if equity_curve.size > 0 else 0.0,
+                "pf_info": (float(true_pnl_arr[true_pnl_arr > 0].sum()), float(abs(true_pnl_arr[true_pnl_arr < 0].sum()))),
+                "trades": int(true_pnl_arr.size),
+                "long_trades": int((side_arr == "LONG").sum()),
+                "short_trades": int((side_arr == "SHORT").sum()),
+                "long_pnls": true_pnl_arr[side_arr == "LONG"].tolist(),
+                "short_pnls": true_pnl_arr[side_arr == "SHORT"].tolist(),
+                "funding_ratio": float(trades_df["funding_fee"].sum() / max(np.abs(pnl_arr).sum(), 1e-9)) if "funding_fee" in trades_df.columns else 0.0
+            }
+        else:
+            # Single mode memoization
+            b_logs, b_mdds, b_ntrs, b_lc, b_sc, b_fund = [], [], [], [], [], []
+            for sym in symbols:
+                target_df, daily_df = data_maps[sym][tf], data_maps[sym]["1d"]
+                merge_idx = data_maps[sym][f"merge_idx_{tf}"]
+                sym_is_off = int(data_maps[sym].get(f"is_start_idx_{tf}", 0))
+                adj_s, adj_e = b_start + sym_is_off, b_end + sym_is_off
+                seg, ex_idx = _segment_with_context(full_signal_dfs[sym], adj_s, adj_e)
+                # Unpack all returns from evaluate_symbol_fold
+                res_is = evaluate_symbol_fold(
+                    strategy, params, sym, tf, target_df, daily_df, merge_idx, None, adj_s, adj_e, seg, ex_idx
+                )
+                ret_pct, mdd_pct, ntr, lc, sc, fpaid, gross = res_is[1], res_is[2], res_is[3], res_is[6], res_is[7], res_is[9], res_is[10]
+                
+                b_logs.append(_log_tw_from_ret_pct(ret_pct))
+                b_mdds.append(mdd_pct)
+                b_ntrs.append(ntr)
+                b_lc.append(lc)
+                b_sc.append(sc)
+                b_fund.append(float(fpaid) / max(abs(gross), 1e-9))
+
+            block_results[(b_start, b_end)] = {
+                "log_ret": float(np.mean(b_logs)), "mdd": float(np.mean(b_mdds)), "trades": int(np.sum(b_ntrs)),
+                "long_trades": int(np.sum(b_lc)), "short_trades": int(np.sum(b_sc)), "funding_ratio": float(np.mean(b_fund))
+            }
+
+    path_compound_raw_log_tw: List[float] = []
+    path_pfs, path_trades, path_mdds = [], [], []
+    all_seg_long, all_seg_short = 0, 0
+    all_long_pnls, all_short_pnls, funding_ratios = [], [], []
+
+    for path_idx, path in enumerate(cpcv_paths):
+        p_log_ret, p_mdd, p_trades = 0.0, 0.0, 0
+        p_l_prof, p_l_loss = 0.0, 0.0
+
+        valid_path = True
+        for b_key in path:
+            res = block_results.get(tuple(b_key)) if not isinstance(b_key, tuple) else block_results.get(b_key)
+            if res is None or res.get("mdd", 0) >= liq_mdd_thr or res.get("trades", 0) < min_seg_trades:
+                valid_path = False
+                break
+
+            p_log_ret += res["log_ret"]
+            p_mdd = max(p_mdd, res["mdd"])
+            p_trades += res["trades"]
+            all_seg_long += res.get("long_trades", 0)
+            all_seg_short += res.get("short_trades", 0)
+            if "pf_info" in res:
+                p_l_prof += res["pf_info"][0]
+                p_l_loss += res["pf_info"][1]
+            if "long_pnls" in res:
+                all_long_pnls.extend(res["long_pnls"])
+            if "short_pnls" in res:
+                all_short_pnls.extend(res["short_pnls"])
+            funding_ratios.append(res.get("funding_ratio", 0.0))
+
+        if not valid_path:
             if relaxed_constraints:
-                continue  # Skip path with no valid segments; don't abort entire trial
+                continue
             raise optuna.TrialPruned()
-        path_compound_raw_log_tw.append(float(np.sum(seg_raw_logs)))
-        path_pfs.append(float(np.mean(seg_pfs)))
-        path_wins.append(float(np.mean(seg_wins)))
-        path_trades.append(float(np.mean(seg_trades)))
-        path_mdds.append(float(np.max(seg_mdds)) if seg_mdds else 0.0)
-        funding_ratios.extend(seg_fund_ratio)
 
-        if path_idx >= 4 and path_compound_raw_log_tw:
+        path_compound_raw_log_tw.append(p_log_ret)
+        path_mdds.append(p_mdd)
+        path_trades.append(float(p_trades))
+        path_pfs.append(p_l_prof / max(p_l_loss, 1e-9) if p_l_loss > 0 else 1.5)
+
+        if path_idx >= 4:
             trial.report(float(np.mean(path_compound_raw_log_tw)), step=path_idx)
             if trial.should_prune() and not relaxed_constraints:
                 raise optuna.TrialPruned()
@@ -606,11 +514,7 @@ def objective_futures(
     trial.set_user_attr("mean_funding_drag_ratio_pct", float(mean_fund_r * 100.0))
     trial.set_user_attr("cpcv_path_oos_log_tw", [float(x) for x in path_compound_raw_log_tw])
 
-    tw_ratios = (
-        np.asarray(path_terminal_wealth_ratios, dtype=np.float64)
-        if mode == "multi"
-        else np.exp(np.clip(path_arr, -50.0, 50.0))
-    )
+    tw_ratios = np.exp(np.clip(path_arr, -50.0, 50.0))
     trial.set_user_attr(
         "min_path_terminal_wealth_ratio", float(np.min(tw_ratios)) if tw_ratios.size else 0.0
     )
