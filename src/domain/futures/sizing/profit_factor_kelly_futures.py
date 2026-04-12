@@ -19,6 +19,9 @@ class ProfitFactorKellyFuturesSizing:
         "PFK_WINDOW": {"type": "int", "low": 30, "high": 120, "step": 10},
         "PFK_MIN_F": {"type": "float", "low": 0.05, "high": 0.30, "step": 0.05},
         "KELLY_FRACTION": {"type": "float", "low": 0.2, "high": 0.8, "step": 0.1},
+        # Stress Regime Parameters
+        "STRESS_VOL_Z": {"type": "float", "low": 2.0, "high": 3.5, "step": 0.5},
+        "STRESS_FR_Z": {"type": "float", "low": 2.0, "high": 3.5, "step": 0.5},
     }
 
     def compute(self, df: pd.DataFrame, params: Dict[str, Any]) -> np.ndarray:
@@ -29,14 +32,36 @@ class ProfitFactorKellyFuturesSizing:
         kelly_frac = float(params.get("KELLY_FRACTION", 0.5))
         max_exp = float(params.get("MAX_EXPOSURE", 1.0))
         min_obs = int(max(10, window // 3))
+        
+        stress_vol_z_thr = float(params.get("STRESS_VOL_Z", 2.5))
+        stress_fr_z_thr = float(params.get("STRESS_FR_Z", 2.5))
 
-        r = pd.Series(close).pct_change()
+        r_series = pd.Series(close).pct_change()
         funding_adj = np.zeros(n, dtype=np.float64)
+        fr_series = pd.Series(np.zeros(n, dtype=np.float64))
         if "funding_rate" in df.columns:
+            fr_series = df["funding_rate"].fillna(0.0)
             funding_adj = np.nan_to_num(
-                df["funding_rate"].to_numpy(dtype=np.float64), nan=0.0, posinf=0.0, neginf=0.0
+                fr_series.to_numpy(dtype=np.float64), nan=0.0, posinf=0.0, neginf=0.0
             )
-        net_r = r - pd.Series(funding_adj)
+        net_r = r_series - pd.Series(funding_adj)
+
+        # --- Proactive Stress Regime Indicator ---
+        # 1. Volatility Spike (Crypto VIX)
+        vol = r_series.rolling(window=window).std()
+        vol_mean = vol.rolling(window=window * 2, min_periods=window).mean()
+        vol_std = vol.rolling(window=window * 2, min_periods=window).std()
+        vol_z = (vol - vol_mean) / np.maximum(vol_std, 1e-12)
+        
+        # 2. Funding Rate Extreme
+        fr_mean = fr_series.rolling(window=window).mean()
+        fr_std = fr_series.rolling(window=window).std()
+        fr_z = (fr_series - fr_mean) / np.maximum(fr_std, 1e-12)
+        fr_abs_extreme = fr_series.abs() > 0.0015  # Absolute extreme (approx > 164% APR)
+        
+        # Combine Stress Conditions
+        stress_regime = (vol_z > stress_vol_z_thr) | (fr_z.abs() > stress_fr_z_thr) | fr_abs_extreme
+        regime_penalty = np.where(stress_regime, 0.25, 1.0)  # 75% risk reduction during chaos
 
         td = (
             df["trend_direction"].to_numpy(dtype=np.float64)
@@ -71,7 +96,10 @@ class ProfitFactorKellyFuturesSizing:
             f_star = (w_win * r_payoff - (1.0 - w_win)) / np.maximum(r_payoff, 1e-12)
 
         f_star = np.nan_to_num(f_star, nan=0.0, posinf=0.0, neginf=0.0)
-        f = f_star * kelly_frac
+        
+        # Apply Kelly fraction and Regime Penalty
+        f = f_star * kelly_frac * regime_penalty
+        
         low_data = n_fin_a < float(min_obs)
         f = np.where(low_data, min_f, f)
         active = (td != 0.0).astype(np.float64)
