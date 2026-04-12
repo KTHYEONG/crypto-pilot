@@ -110,6 +110,10 @@ def _screen_worker_v2(
     hurst = _calculate_hurst_exponent(close_arr)
     last_price = close_arr[-1]
     
+    # [EXPLOSIVE GROWTH] Add directional momentum factor (180d) to ensure we aren't picking structural downtrends
+    lookback_180 = min(len(close_arr), 1080) # 180 days in 4h tf
+    mom_180d = (close_arr[-1] / close_arr[-lookback_180]) - 1.0 if len(close_arr) >= lookback_180 else 0.0
+    
     high, low = df["high"].to_numpy(), df["low"].to_numpy()
     tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close_arr, 1)), np.abs(low - np.roll(close_arr, 1))))
     atr_pct = (np.mean(tr[-14:]) / last_price) * 100.0
@@ -118,9 +122,10 @@ def _screen_worker_v2(
     funding = df["funding_rate"].to_numpy()
     mean_funding = np.mean(funding[-180:]) if len(funding) >= 180 else 0.0
     
-    # Score for Phase 3 ranking: Focus on pure edge quality
-    # Higher hurst, lower amihud.
-    quality_score = (hurst * 10.0) / (np.log1p(amihud) + 1.0)
+    # [EXPLOSIVE GROWTH] Quality Score now rewards trendiness + positive bias + liquidity
+    # We penalize negative momentum to avoid "smooth downtrend" traps.
+    bias_factor = np.clip(1.0 + mom_180d, 0.5, 2.0)
+    quality_score = (hurst * 10.0 * bias_factor) / (np.log1p(amihud) + 1.0)
 
     return {
         "symbol": sym,
@@ -128,6 +133,7 @@ def _screen_worker_v2(
         "amihud": amihud,
         "hurst": hurst,
         "atr_pct": atr_pct,
+        "mom_180d": mom_180d,
         "quality_score": quality_score,
         "returns": df["close"].pct_change().tail(500)
     }
@@ -181,14 +187,15 @@ def screen_futures_universe(
     # --- PHASE 1 & 2: NO FREE PASS GATING ---
     # Everyone (including Anchors) must qualify on Hurst and Volatility.
     final_candidates = []
-    atr_min, atr_max = 2.5, 12.0
-    amihud_limit = np.percentile([x["amihud"] for x in passed_rows], 85) if passed_rows else 999.0
+    # [EXPLOSIVE GROWTH] Remove ATR_MAX cap. Volatility is an opportunity, not a risk to be filtered out at screener level.
+    atr_min = 2.0
+    # [EXPLOSIVE GROWTH] Slightly lower Hurst floor to include budding trends (0.50)
+    hurst_floor = 0.50
+    amihud_limit = float(cfg.get("MAX_AMIHUD_ILLIQUIDITY", 10.0))
 
     for r in passed_rows:
-        # Adjusted Hurst for long-term time series (0.505)
-        if r["hurst"] < 0.505: continue 
-        # Removed EMA Point-in-time Bias
-        if not (atr_min <= r["atr_pct"] <= atr_max): continue
+        if r["hurst"] < hurst_floor: continue 
+        if r["atr_pct"] < atr_min: continue
         if r["amihud"] > amihud_limit: continue
         final_candidates.append(r)
 

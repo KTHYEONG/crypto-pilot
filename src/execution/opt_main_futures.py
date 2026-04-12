@@ -759,22 +759,24 @@ def _eval_combo_task(
         return None
 
     # [REDESIGN] Robustness Scoring: Target "Broad Plateaus" instead of "Fragile Peaks"
-    vals = np.array([float(t.value) for t in completed])
-    vals_sorted = np.sort(vals)[::-1]
+    # [EXPLOSIVE GROWTH] Decouple from heavily penalized objective_final for structural evaluation.
+    # We use trial user_attrs to get the raw p10_gmgr before Desirability Penalties.
+    raw_vals = np.array([float(t.user_attrs.get("gate1_p10_gmgr", 0.0)) for t in completed])
+    raw_vals_sorted = np.sort(raw_vals)[::-1]
     
     # 1. Stability: Mean of top 20% with variance penalty
-    top_n = max(1, int(len(vals_sorted) * 0.2))
-    top_vals = vals_sorted[:top_n]
+    top_n = max(1, int(len(raw_vals_sorted) * 0.2))
+    top_vals = raw_vals_sorted[:top_n]
     mean_top = np.mean(top_vals)
     std_top = np.std(top_vals) if len(top_vals) > 1 else 0.0
     
     # 2. Edge Density: Proportion of trials exceeding positive GMGR floor (0.10)
-    # Measures the probability of picking a profitable parameter set by chance.
-    edge_floor = 0.10
-    edge_density = np.sum(vals > edge_floor) / len(vals)
+    # Use raw_vals to judge signal quality, not objective_final which is for TPE steering.
+    pos_vals = raw_vals[raw_vals > 0.05]
+    edge_sharpe = np.mean(pos_vals) / (np.std(pos_vals) + 1e-9) if len(pos_vals) > 0 else 0.0
+    edge_density = (len(pos_vals) / len(raw_vals)) * min(1.0, edge_sharpe)
     
     # 3. Final Robust Score: High mean, Low variance, High density
-    # Formula: (Stable Alpha Area) * (Reliability Multiplier)
     robust_score = (mean_top - 0.5 * std_top) * (1.0 + edge_density)
     
     # Representative best trial for Stage 2 seeding
@@ -932,7 +934,7 @@ def main() -> None:
             args.tf,
             FUTURES_SCREENER_CONFIG,
             fetch_start_date,
-            end_date,
+            is_end_date,  # [FIX] Use In-sample end date to prevent look-ahead bias
             data_dir=FUTURES_DATA_DIR,
             n_workers_override=pre_universe_workers,
         )
