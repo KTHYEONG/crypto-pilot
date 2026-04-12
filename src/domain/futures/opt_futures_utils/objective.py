@@ -329,20 +329,28 @@ def objective_futures(
                 block_results[(b_start, b_end)] = {"log_ret": -1.0, "mdd": 100.0, "trades": 0}
                 continue
 
-            pnl_arr = trades_df["pnl"].to_numpy(dtype=np.float64, copy=False)
-            true_pnl_arr = pnl_arr - trades_df["entry_fee"].to_numpy(dtype=np.float64, copy=False)
+            p_arr = trades_df["pnl"].to_numpy(dtype=np.float64, copy=False)
+            f_arr = trades_df["entry_fee"].to_numpy(dtype=np.float64, copy=False)
+            true_pnl_arr = p_arr - f_arr
             side_arr = trades_df["side"].to_numpy(copy=False)
 
             block_results[(b_start, b_end)] = {
-                "log_ret": _log_tw_from_ret_pct(float((final_balance / FUTURES_INITIAL_BALANCE - 1.0) * 100.0)),
+                "log_ret": _log_tw_from_ret_pct(
+                    float((final_balance / FUTURES_INITIAL_BALANCE - 1.0) * 100.0)
+                ),
                 "mdd": float(calc_mdd_from_equity(equity_curve)) if equity_curve.size > 0 else 0.0,
-                "pf_info": (float(true_pnl_arr[true_pnl_arr > 0].sum()), float(abs(true_pnl_arr[true_pnl_arr < 0].sum()))),
+                "pf_info": (
+                    float(true_pnl_arr[true_pnl_arr > 0].sum()),
+                    float(abs(true_pnl_arr[true_pnl_arr < 0].sum()))
+                ),
                 "trades": int(true_pnl_arr.size),
                 "long_trades": int((side_arr == "LONG").sum()),
                 "short_trades": int((side_arr == "SHORT").sum()),
                 "long_pnls": true_pnl_arr[side_arr == "LONG"].tolist(),
                 "short_pnls": true_pnl_arr[side_arr == "SHORT"].tolist(),
-                "funding_ratio": float(trades_df["funding_fee"].sum() / max(np.abs(pnl_arr).sum(), 1e-9)) if "funding_fee" in trades_df.columns else 0.0
+                "funding_ratio": float(
+                    trades_df["funding_fee"].sum() / max(np.abs(p_arr).sum(), 1e-9)
+                ) if "funding_fee" in trades_df.columns else 0.0
             }
         else:
             # Single mode memoization
@@ -353,12 +361,13 @@ def objective_futures(
                 sym_is_off = int(data_maps[sym].get(f"is_start_idx_{tf}", 0))
                 adj_s, adj_e = b_start + sym_is_off, b_end + sym_is_off
                 seg, ex_idx = _segment_with_context(full_signal_dfs[sym], adj_s, adj_e)
-                # Unpack all returns from evaluate_symbol_fold
                 res_is = evaluate_symbol_fold(
-                    strategy, params, sym, tf, target_df, daily_df, merge_idx, None, adj_s, adj_e, seg, ex_idx
+                    strategy, params, sym, tf, target_df, daily_df,
+                    merge_idx, None, adj_s, adj_e, seg, ex_idx
                 )
-                ret_pct, mdd_pct, ntr, lc, sc, fpaid, gross = res_is[1], res_is[2], res_is[3], res_is[6], res_is[7], res_is[9], res_is[10]
-                
+                ret_pct, mdd_pct, ntr = res_is[1], res_is[2], res_is[3]
+                lc, sc, fpaid, gross = res_is[6], res_is[7], res_is[9], res_is[10]
+
                 b_logs.append(_log_tw_from_ret_pct(ret_pct))
                 b_mdds.append(mdd_pct)
                 b_ntrs.append(ntr)
@@ -367,8 +376,12 @@ def objective_futures(
                 b_fund.append(float(fpaid) / max(abs(gross), 1e-9))
 
             block_results[(b_start, b_end)] = {
-                "log_ret": float(np.mean(b_logs)), "mdd": float(np.mean(b_mdds)), "trades": int(np.sum(b_ntrs)),
-                "long_trades": int(np.sum(b_lc)), "short_trades": int(np.sum(b_sc)), "funding_ratio": float(np.mean(b_fund))
+                "log_ret": float(np.mean(b_logs)),
+                "mdd": float(np.mean(b_mdds)),
+                "trades": int(np.sum(b_ntrs)),
+                "long_trades": int(np.sum(b_lc)),
+                "short_trades": int(np.sum(b_sc)),
+                "funding_ratio": float(np.mean(b_fund))
             }
 
     path_compound_raw_log_tw: List[float] = []
@@ -382,8 +395,12 @@ def objective_futures(
 
         valid_path = True
         for b_key in path:
-            res = block_results.get(tuple(b_key)) if not isinstance(b_key, tuple) else block_results.get(b_key)
-            if res is None or res.get("mdd", 0) >= liq_mdd_thr or res.get("trades", 0) < min_seg_trades:
+            key = tuple(b_key) if not isinstance(b_key, tuple) else b_key
+            res = block_results.get(key)
+            if res is None:
+                valid_path = False
+                break
+            if res.get("mdd", 0) >= liq_mdd_thr or res.get("trades", 0) < min_seg_trades:
                 valid_path = False
                 break
 
@@ -427,16 +444,13 @@ def objective_futures(
     p10_gmgr = float(np.expm1(p10_log_tw))
 
     # --- Multiplicative Desirability Functions (0.0 to 1.0) ---
-    # 1. Funding Drag (Target <= 15%)
     mean_fund_r = float(np.mean(funding_ratios)) if funding_ratios else 0.0
     d_fund = float(np.clip(1.0 - (max(0.0, abs(mean_fund_r) - 0.15) / 0.10), 0.0, 1.0))
 
-    # 2. Long/Short Balance (Target imbalance <= 20%)
     tot_l, tot_s = float(all_seg_long), float(all_seg_short)
     ls_imbalance = abs(tot_l - tot_s) / (tot_l + tot_s + 1e-9)
     d_balance = float(np.clip(1.0 - (max(0.0, ls_imbalance - 0.20) / 0.30), 0.0, 1.0))
 
-    # 3. Path Stability (Coefficient of Variation)
     mu_paths, sd_paths = (
         float(np.mean(path_arr)),
         float(np.std(path_arr, ddof=1)) if path_arr.size > 1 else 1.0,
@@ -444,7 +458,6 @@ def objective_futures(
     cv_paths = sd_paths / (abs(mu_paths) + 1e-6)
     d_stability = float(np.clip(1.0 - (max(0.0, cv_paths - 1.5) / 1.0), 0.0, 1.0))
 
-    # 4. Temporal Decay (Recent performance consistency)
     d_temporal = 1.0
     if len(path_compound_raw_log_tw) >= 4:
         path_center_times = [float(np.mean([(s + e) / 2.0 for s, e in p])) for p in cpcv_paths]
@@ -455,14 +468,11 @@ def objective_futures(
             np.clip(1.0 - (max(0.0, mu_paths - recent_mean) / (abs(mu_paths) + 1e-6)), 0.0, 1.0)
         )
 
-    # 5. CVaR Log-Return (Tail Risk protection)
     sorted_rtns = np.sort(path_arr)
     k_worst = max(2, int(sorted_rtns.size * cvar_alpha))
     cvar_log = float(np.mean(sorted_rtns[:k_worst])) if sorted_rtns.size > 0 else -1.0
     d_cvar = float(np.clip(1.0 - (max(0.0, cvar_thr_log - cvar_log) / 0.10), 0.0, 1.0))
 
-    # 6. MDD Soft Penalty (Method C modified)
-    # [EXPLOSIVE GROWTH] P90 MDD 기반 지수 패널티 적용
     if path_mdds:
         p90_mdd = float(np.percentile(path_mdds, 90.0))
         if p90_mdd > 20.0:
@@ -472,10 +482,9 @@ def objective_futures(
     else:
         d_mdd = 1.0
 
-    # 7. Directional PF (Min 1.05 for Long & Short)
-    long_pf = calc_profit_factor_from_pnl(np.array(all_long_pnls)) if all_long_pnls else 1.5
-    short_pf = calc_profit_factor_from_pnl(np.array(all_short_pnls)) if all_short_pnls else 1.5
-    min_dir_pf = min(long_pf, short_pf)
+    l_pf = calc_profit_factor_from_pnl(np.array(all_long_pnls)) if all_long_pnls else 1.5
+    s_pf = calc_profit_factor_from_pnl(np.array(all_short_pnls)) if all_short_pnls else 1.5
+    min_dir_pf = min(l_pf, s_pf)
     d_directional = float(np.clip(1.0 - (max(0.0, 1.10 - min_dir_pf) / 0.10), 0.01, 1.0))
 
     stability_bonus = 0.0
