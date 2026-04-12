@@ -27,17 +27,45 @@ _FUTURES_INDICATORS = get_indicator_engine(domain="futures")
 
 class UltimateStrategy(PipelineStrategyBase):
     """
-    Futures: plugin signal × regime × sizing dispatch.
+    Futures: plugin signal x regime x sizing dispatch.
     ENTRY_SHIFT: signal at i uses bar i-1 for entry columns (engine reads prev bar).
     """
 
     INDICATORS = _FUTURES_INDICATORS
     ENTRY_SHIFT = False
 
-    def generate_signals(self, df: pd.DataFrame) -> pd.DataFrame:
+    def generate_base_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Tier 1: Fixed indicators independent of optimization params."""
         for col in ["open", "high", "low", "close", "volume"]:
             if col in df.columns:
                 df[col] = df[col].astype(np.float64)
+        
+        atr_period = int(self.params.get("ATR_PERIOD", 20))
+        macro_period = int(self.params.get("MACRO_EMA_PERIOD", 200))
+        ind = self._ind()
+        
+        if "atr" not in df.columns or df["atr"].isna().all():
+            df["atr"] = ind.calculate_atr(df, window=atr_period)
+        df["atr"] = df["atr"].ffill().fillna(df["close"] * 0.01)
+        
+        if "macro_ema" not in df.columns or df["macro_ema"].isna().all():
+            df["macro_ema"] = ind.calculate_ema(df["close"], window=macro_period)
+            
+        if "btc_close" in df.columns:
+            df["btc_ema"] = ind.calculate_ema(df["btc_close"], window=macro_period)
+            
+        return df
+
+    def compute_signal_regime_component(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Tier 2: Signal and Regime computation."""
+        # Ensure base indicators exist
+        if "atr" not in df.columns:
+            df = self.generate_base_indicators(df)
+
+        # Signal Mapping (Optimized CSM)
+        csm_rank_col = self.params.get("CSM_RANK_COL")
+        if csm_rank_col and csm_rank_col in df.columns:
+            df["cs_mom_rank"] = df[csm_rank_col]
 
         st_key = str(self.params.get("SIGNAL_TYPE", "RSM_VT")).upper()
         sig_engine = FUTURES_SIGNAL_REGISTRY.get(st_key) or FUTURES_SIGNAL_REGISTRY["RSM_VT"]
@@ -47,12 +75,10 @@ class UltimateStrategy(PipelineStrategyBase):
         reg_engine = FUTURES_REGIME_REGISTRY.get(rt_key) or FUTURES_REGIME_REGISTRY["EMA_ATR"]
         long_mult, short_mult = reg_engine.compute_long_short_mult(df, self.params)
 
-        sm_key = str(self.params.get("SIZING_METHOD", "vol_target")).lower()
-        sizer = FUTURES_SIZING_REGISTRY.get(sm_key) or FUTURES_SIZING_REGISTRY["vol_target"]
-
         long_e = sig_out.long_entry.astype(np.bool_)
         short_e = sig_out.short_entry.astype(np.bool_)
         close_a = df["close"].to_numpy(dtype=np.float64)
+        
         df["trend_direction"] = np.where(long_e, 1.0, np.where(short_e, -1.0, 0.0))
         df["entry_upper"] = np.where(long_e, 0.0, 999999.0)
         df["entry_lower"] = np.where(short_e, close_a, 0.0)
@@ -64,36 +90,31 @@ class UltimateStrategy(PipelineStrategyBase):
         df["kill_signal"] = np.where(td == 1.0, sig_out.kill_long, sig_out.kill_short)
         df["slot_rank_score"] = sig_out.rank_score
 
-        atr_period = int(self.params.get("ATR_PERIOD", 20))
-        macro_ema_period = int(self.params.get("MACRO_EMA_PERIOD", 200))
-        ind = self._ind()
-        if "atr" not in df.columns or df["atr"].isna().all():
-            df["atr"] = ind.calculate_atr(df, window=atr_period)
-        df["atr"] = df["atr"].ffill().fillna(df["close"] * 0.01)
-        if "macro_ema" not in df.columns or df["macro_ema"].isna().all():
-            df["macro_ema"] = ind.calculate_ema(df["close"], window=macro_ema_period)
-
-        kelly_f = sizer.compute(df, self.params)
-        df["garch_kelly_f"] = kelly_f
-
-        # [MACRO FILTER] Suppress Longs if BTC is in clear downtrend (Spot parity philosophy)
-        if "btc_close" in df.columns:
-            btc_ema = _FUTURES_INDICATORS.calculate_ema(df["btc_close"], window=macro_ema_period)
-            btc_bull = (df["btc_close"] > btc_ema).to_numpy()
-            # If BTC is bear, kill all long conviction
+        # Macro Filter
+        if "btc_close" in df.columns and "btc_ema" in df.columns:
+            btc_bull = (df["btc_close"] > df["btc_ema"]).to_numpy()
             long_mult = np.where(btc_bull, long_mult, 0.0)
 
-        # Kelly scales risk in engine via garch_kelly_f; regime scales conviction here only.
         df["strength_filter"] = np.where(
             long_e,
             long_mult.astype(np.float64),
             np.where(short_e, short_mult.astype(np.float64), 0.0),
         )
-
-        # Expose continuous regime state for TIER 4 OOS diagnostic block
-        # max(long, short): BEAR 레짐에서 long_mult=0이어도 short_mult가 있으면 "active"로 표시
         df["regime_risk_mult"] = np.maximum(long_mult, short_mult).astype(np.float64)
+        
+        return df
 
+    def compute_sizing_component(self, df: pd.DataFrame) -> pd.Series:
+        """Tier 3: Sizing computation."""
+        sm_key = str(self.params.get("SIZING_METHOD", "vol_target")).lower()
+        sizer = FUTURES_SIZING_REGISTRY.get(sm_key) or FUTURES_SIZING_REGISTRY["vol_target"]
+        return pd.Series(sizer.compute(df, self.params), index=df.index)
+
+    def generate_signals(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Legacy entry point for monolithic computation."""
+        df = self.generate_base_indicators(df)
+        df = self.compute_signal_regime_component(df)
+        df["garch_kelly_f"] = self.compute_sizing_component(df)
         return df
 
 

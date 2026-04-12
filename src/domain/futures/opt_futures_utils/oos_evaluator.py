@@ -40,13 +40,8 @@ from .data_utils import (
     align_data_for_2d_engine,
 )
 from .signal_cache import (
-    _ARRAYS_CACHE_MAXSIZE,
-    _arrays_cache,
-    _build_signal_cache_key,
-    _cache_lock,
     _dataset_fingerprint_from_df,
-    _SignalCacheKey,
-    get_or_compute_signals,
+    get_tiered_signals,
 )
 
 _logger: logging.Logger = logging.getLogger("opt_futures")
@@ -186,9 +181,8 @@ def run_oos_margin_shared_portfolio(
     for sym in symbols:
         full_df = oos_data_maps[sym][tf]
         oos_start = int(oos_data_maps[sym][f"oos_start_idx_{tf}"])
-        fp = _dataset_fingerprint_from_df(full_df)
-        cache_key = _build_signal_cache_key(params, sym, tf, len(full_df), fp)
-        full_sig = get_or_compute_signals(cache_key, full_df, strategy, disk_cache_root=cache_root)
+        # [OPTIMIZATION] Use tiered caching
+        full_sig = get_tiered_signals(params, sym, tf, full_df, strategy)
         end_cap = int(oos_end_idx) if oos_end_idx is not None else len(full_df)
         seg, _ = _segment_with_context(full_sig, oos_start, end_cap)
         full_signal_dfs[sym] = full_sig
@@ -495,34 +489,15 @@ def run_cpcv_complement_evaluation(
         target_df_full: Optional[pd.DataFrame] = data_maps.get(sym, {}).get(tf)
         if target_df_full is None or target_df_full.empty:
             continue
-        fp = _dataset_fingerprint_from_df(target_df_full)
-        cache_key: _SignalCacheKey = _build_signal_cache_key(p, sym, tf, len(target_df_full), fp)
-        full_signal_dfs[sym] = get_or_compute_signals(
-            cache_key, target_df_full, strategy, disk_cache_root=signal_disk_cache_root
-        )
+        # [OPTIMIZATION] Use tiered caching
+        full_signal_dfs[sym] = get_tiered_signals(p, sym, tf, target_df_full, strategy)
 
     if len(full_signal_dfs) != len(symbols):
         return (0.5, 0.0)
 
     prebuilt_full_arrays: Dict[str, Dict[str, np.ndarray]] = {}
     for sym in symbols:
-        target_df_full = data_maps.get(sym, {}).get(tf)
-        if target_df_full is None or target_df_full.empty:
-            return (0.5, 0.0)
-        fp = _dataset_fingerprint_from_df(target_df_full)
-        # Use string key for dictionary
-        sig_key = str(_build_signal_cache_key(p, sym, tf, len(target_df_full), fp))
-        with _cache_lock:
-            if sig_key in _arrays_cache:
-                _arrays_cache.move_to_end(sig_key)
-                prebuilt_full_arrays[sym] = _arrays_cache[sig_key]
-                continue
-        arrs = _dataframe_to_symbol_arrays(full_signal_dfs[sym])
-        with _cache_lock:
-            while len(_arrays_cache) >= _ARRAYS_CACHE_MAXSIZE:
-                _arrays_cache.popitem(last=False)
-            _arrays_cache[sig_key] = arrs
-        prebuilt_full_arrays[sym] = arrs
+        prebuilt_full_arrays[sym] = _dataframe_to_symbol_arrays(full_signal_dfs[sym])
 
     liq_mdd_thr = float(p.get("LIQUIDATION_MDD_THRESHOLD", 20.0))
     is_scores: List[float] = []

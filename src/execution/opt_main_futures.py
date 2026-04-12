@@ -202,23 +202,27 @@ class _FuturesParallelPolicy:
 
 def _resolve_futures_parallel_policy(symbol_count: int, tf: str) -> _FuturesParallelPolicy:
     logical_cpus = max(1, os.cpu_count() or 1)
-    cpu_cap = max(1, min(6, logical_cpus))
+    
+    # Increase CPU cap to allow better parallelization while preventing OOM (default max 8)
+    cpu_cap = max(1, min(8, logical_cpus))
 
     if symbol_count <= 4:
-        universe_target = 3
-        stage1_target = 3
-        qmc_target = 3
-        tpe_target = 3 if tf == "4h" else 2
-    elif symbol_count <= 5:
-        universe_target = 2
-        stage1_target = 2
-        qmc_target = 2
-        tpe_target = 2
+        universe_target = min(4, cpu_cap)
+        stage1_target = min(6, cpu_cap)
+        qmc_target = min(4, cpu_cap)
+        tpe_target = min(4, cpu_cap)
+    elif symbol_count <= 10:
+        universe_target = min(4, cpu_cap)
+        stage1_target = min(6, cpu_cap - 1) if cpu_cap > 2 else 2
+        qmc_target = min(3, cpu_cap - 1) if cpu_cap > 2 else 2
+        tpe_target = min(3, cpu_cap - 1) if cpu_cap > 2 else 2
     else:
-        universe_target = 2
-        stage1_target = 1
-        qmc_target = 1
-        tpe_target = 1
+        universe_target = min(3, cpu_cap - 1) if cpu_cap > 2 else 2
+        # CRITICAL FIX: Do not bottleneck Stage 1 to 1 worker. 
+        # Use available CPUs cautiously to prevent OOM but maximize throughput.
+        stage1_target = max(2, cpu_cap - 2)
+        qmc_target = max(2, cpu_cap - 2)
+        tpe_target = max(1, min(2, cpu_cap - 3)) if cpu_cap > 3 else 1
 
     return _FuturesParallelPolicy(
         cpu_cap=cpu_cap,

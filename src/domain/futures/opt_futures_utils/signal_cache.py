@@ -1,67 +1,195 @@
 """
-Futures Optuna objective: CPCV paths, Kelly-CVaR scalar, disk+memory signal cache.
+Tiered Signal Cache: Decoupled caching for Indicators, Signals/Regime, and Sizing.
+Uses /dev/shm (if available) for high-speed IPC and Numpy-specific serialization.
 """
 
 from __future__ import annotations
 
 import hashlib
-import inspect
 import logging
 import os
 import threading
 import time
-from collections import OrderedDict
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Optional
 
-import joblib
 import numpy as np
 import pandas as pd
 
-from config.settings import (
-    FUTURES_CACHE_DIR,
-)
+from config.settings import FUTURES_CACHE_DIR
 from src.domain.futures.strategies_futures import UltimateStrategy
 
 _logger: logging.Logger = logging.getLogger("opt_futures")
 
-_FUTURES_SIGNAL_CACHE_KEYS: frozenset[str] | None = None
+# --- Tiered Cache Configuration ---
+_MEM_CACHE: Dict[str, Any] = {}
+_MEM_CACHE_LOCK = threading.Lock()
+_MEM_CACHE_MAX_ENTRIES = 200
+
+# Try to use /dev/shm for ultra-fast disk cache (Shared Memory effectively)
+SHM_PATH = Path("/dev/shm/my_coin_traider_cache")  # noqa: S108
+if os.access("/dev/shm", os.W_OK):  # noqa: S108
+    DISK_CACHE_ROOT = SHM_PATH
+else:
+    DISK_CACHE_ROOT = FUTURES_CACHE_DIR / "tiered_cache"
+
+DISK_CACHE_ROOT.mkdir(parents=True, exist_ok=True)
 
 
-def _signal_cache_param_keys_futures() -> frozenset[str]:
-    global _FUTURES_SIGNAL_CACHE_KEYS
-    if _FUTURES_SIGNAL_CACHE_KEYS is None:
-        from src.domain.futures.opt_futures_utils.opt_params import (
-            build_full_discovery_space_futures,
-        )
-
-        _FUTURES_SIGNAL_CACHE_KEYS = frozenset(build_full_discovery_space_futures().keys())
-    return _FUTURES_SIGNAL_CACHE_KEYS
+def _get_param_hash(params: Dict[str, Any], whitelist: frozenset[str]) -> str:
+    """Helper to hash only relevant parameters."""
+    items = tuple(sorted((k, params[k]) for k in whitelist if k in params))
+    return hashlib.sha256(repr(items).encode("utf-8")).hexdigest()[:16]
 
 
-_SIGNAL_CACHE_SCHEMA_VERSION: int = 1
-_cache_lock: threading.Lock = threading.Lock()
-_signal_cache: OrderedDict["_SignalCacheKey", pd.DataFrame] = OrderedDict()
-_SIGNAL_CACHE_MAXSIZE: int = max(16, int(os.getenv("OPT_FUTURES_SIGNAL_MEM_CACHE_MAX", "48")))
-_arrays_cache: OrderedDict[str, Dict[str, np.ndarray]] = OrderedDict()
-_ARRAYS_CACHE_MAXSIZE: int = max(8, int(os.getenv("OPT_FUTURES_ARRAYS_MEM_CACHE_MAX", "32")))
-_CACHE_CLEANUP_DONE: bool = False
-_CACHE_LAST_CLEANUP_TS: float = 0.0
-_STRATEGY_LOGIC_HASH: Optional[str] = None
+def _save_npz(path: Path, data: Dict[str, np.ndarray]) -> None:
+    """Fast compressed numpy save."""
+    try:
+        tmp_path = path.with_suffix(f".tmp.{os.getpid()}")
+        np.savez_compressed(tmp_path, **data)  # type: ignore
+        tmp_path.replace(path)
+    except Exception as e:
+        _logger.warning("Cache write failed: %s", e)
 
 
-_SignalCacheKey = Tuple[Tuple[Tuple[str, Any], ...], str, str, int, int, int, str]
+def _load_npz(path: Path) -> Optional[Dict[str, np.ndarray]]:
+    """Fast numpy load."""
+    try:
+        with np.load(path) as data:
+            return {k: v for k, v in data.items()}
+    except Exception:
+        return None
 
 
-def _get_logic_hash() -> str:
-    global _STRATEGY_LOGIC_HASH
-    if _STRATEGY_LOGIC_HASH is None:
+def get_tiered_signals(
+    params: Dict[str, Any],
+    symbol: str,
+    tf: str,
+    df_raw: pd.DataFrame,
+    strategy: UltimateStrategy,
+) -> pd.DataFrame:
+    """
+    Tiered caching entry point.
+    1. Base Indicators (Tier 1)
+    2. Signals/Regime (Tier 2) - Depends on SIGNAL_TYPE, REGIME_TYPE
+    3. Sizing (Tier 3) - Depends on SIZING_METHOD
+    """
+    df = df_raw.copy(deep=False)
+    n_bars = len(df)
+
+    # --- Tier 1: Base Indicators (Static) ---
+    t1_whitelist = frozenset(["ATR_PERIOD", "MACRO_EMA_PERIOD"])
+    t1_hash = _get_param_hash(params, t1_whitelist)
+    t1_key = f"t1_{symbol}_{tf}_{n_bars}_{t1_hash}"
+
+    t1_path = DISK_CACHE_ROOT / f"{t1_key}.npz"
+    t1_data = None
+
+    with _MEM_CACHE_LOCK:
+        t1_data = _MEM_CACHE.get(t1_key)
+
+    if t1_data is None and t1_path.exists():
+        t1_data = _load_npz(t1_path)
+
+    if t1_data is None:
+        df = strategy.generate_base_indicators(df)
+        t1_data = {
+            "atr": df["atr"].to_numpy(dtype=np.float64),
+            "macro_ema": df["macro_ema"].to_numpy(dtype=np.float64),
+        }
+        if "btc_ema" in df.columns:
+            t1_data["btc_ema"] = df["btc_ema"].to_numpy(dtype=np.float64)
+        _save_npz(t1_path, t1_data)
+        with _MEM_CACHE_LOCK:
+            _MEM_CACHE[t1_key] = t1_data
+    else:
+        for k, v in t1_data.items():
+            df[k] = v
+
+    # --- Tier 2: Signal & Regime ---
+    from src.domain.futures.regimes import FUTURES_REGIME_REGISTRY
+    from src.domain.futures.signals import FUTURES_SIGNAL_REGISTRY
+
+    st_key = str(params.get("SIGNAL_TYPE", "RSM_VT")).upper()
+    rt_key = str(params.get("REGIME_TYPE", "EMA_ATR")).upper()
+
+    t2_keys = ["SIGNAL_TYPE", "REGIME_TYPE", "CSM_RANK_COL"]
+    if st_key in FUTURES_SIGNAL_REGISTRY:
+        t2_keys.extend(FUTURES_SIGNAL_REGISTRY[st_key].param_space.keys())
+    if rt_key in FUTURES_REGIME_REGISTRY:
+        t2_keys.extend(FUTURES_REGIME_REGISTRY[rt_key].param_space.keys())
+
+    t2_hash = _get_param_hash(params, frozenset(t2_keys))
+    t2_key = f"t2_{symbol}_{tf}_{n_bars}_{t1_hash}_{t2_hash}"
+
+    t2_path = DISK_CACHE_ROOT / f"{t2_key}.npz"
+    t2_data = None
+
+    with _MEM_CACHE_LOCK:
+        t2_data = _MEM_CACHE.get(t2_key)
+
+    if t2_data is None and t2_path.exists():
+        t2_data = _load_npz(t2_path)
+
+    if t2_data is None:
+        df = strategy.compute_signal_regime_component(df)
+        cols = [
+            "trend_direction", "entry_upper", "entry_lower",
+            "kill_signal", "slot_rank_score", "strength_filter", "regime_risk_mult"
+        ]
+        t2_data = {c: df[c].to_numpy(dtype=np.float64) for c in cols if c in df.columns}
+        _save_npz(t2_path, t2_data)
+        with _MEM_CACHE_LOCK:
+            _MEM_CACHE[t2_key] = t2_data
+    else:
+        for k, v in t2_data.items():
+            df[k] = v
+
+    # --- Tier 3: Sizing ---
+    from src.domain.futures.sizing import FUTURES_SIZING_REGISTRY
+    sm_key = str(params.get("SIZING_METHOD", "vol_target")).lower()
+    t3_keys = ["SIZING_METHOD"]
+    if sm_key in FUTURES_SIZING_REGISTRY:
+        t3_keys.extend(FUTURES_SIZING_REGISTRY[sm_key].param_space.keys())
+
+    t3_hash = _get_param_hash(params, frozenset(t3_keys))
+    t3_key = f"t3_{symbol}_{tf}_{n_bars}_{t1_hash}_{t3_hash}"
+
+    t3_path = DISK_CACHE_ROOT / f"{t3_key}.npz"
+    t3_data = None
+
+    with _MEM_CACHE_LOCK:
+        t3_data = _MEM_CACHE.get(t3_key)
+
+    if t3_data is None and t3_path.exists():
+        t3_data = _load_npz(t3_path)
+
+    if t3_data is None:
+        df["garch_kelly_f"] = strategy.compute_sizing_component(df)
+        t3_data = {"garch_kelly_f": df["garch_kelly_f"].to_numpy(dtype=np.float64)}
+        _save_npz(t3_path, t3_data)
+        with _MEM_CACHE_LOCK:
+            _MEM_CACHE[t3_key] = t3_data
+    else:
+        df["garch_kelly_f"] = t3_data["garch_kelly_f"]
+
+    if len(_MEM_CACHE) > _MEM_CACHE_MAX_ENTRIES:
+        with _MEM_CACHE_LOCK:
+            _MEM_CACHE.clear()
+
+    return df
+
+
+def cleanup_old_cache_files(max_age_days: int = 1) -> None:
+    """Non-blocking cleanup of old cache files."""
+    now = time.time()
+    max_age_sec = max_age_days * 86400
+    for p in DISK_CACHE_ROOT.glob("*.npz"):
         try:
-            src = inspect.getsource(UltimateStrategy.generate_signals)
-            _STRATEGY_LOGIC_HASH = hashlib.sha256(src.encode("utf-8")).hexdigest()[:16]
-        except Exception:
-            _STRATEGY_LOGIC_HASH = "legacy"
-    return _STRATEGY_LOGIC_HASH
+            if now - p.stat().st_mtime > max_age_sec:
+                p.unlink(missing_ok=True)
+        except Exception:  # noqa: S112
+            continue
 
 
 def _dataset_fingerprint_from_df(df: pd.DataFrame) -> int:
@@ -73,159 +201,8 @@ def _dataset_fingerprint_from_df(df: pd.DataFrame) -> int:
     if "close" in df.columns:
         c = df["close"].to_numpy(dtype=np.float64)
         head = c[: min(5, n)]
-        tail = c[max(0, n - 5) :]
+        tail = c[max(0, n - 5):]
         fp = hash((d0, d1, n, tuple(head.tolist()), tuple(tail.tolist())))
     else:
         fp = hash((d0, d1, n))
     return int(fp & ((1 << 63) - 1))
-
-
-def _build_signal_cache_key(
-    params: Dict[str, Any], sym: str, tf: str, data_len: int, fingerprint: int,
-    whitelist: Optional[frozenset[str]] = None
-) -> _SignalCacheKey:
-    """
-    Builds a cache key. If whitelist is provided, only those keys are used from params.
-    Otherwise, all known discovery keys are used. 
-    Using a whitelist is CRITICAL for optimization to prevent unrelated params from breaking the cache.
-    """
-    if whitelist is not None:
-        target_keys = whitelist
-    else:
-        target_keys = _signal_cache_param_keys_futures()
-
-    signal_items: Tuple[Tuple[str, Any], ...] = tuple(
-        sorted((k, params[k]) for k in target_keys if k in params)
-    )
-    return (
-        signal_items,
-        sym,
-        tf,
-        data_len,
-        int(fingerprint),
-        _SIGNAL_CACHE_SCHEMA_VERSION,
-        _get_logic_hash(),
-    )
-
-
-def _disk_cache_path(cache_key: _SignalCacheKey, root: Path) -> Path:
-    payload = repr(cache_key).encode("utf-8")
-    digest = hashlib.sha256(payload).hexdigest()
-    sym, tf = cache_key[1], cache_key[2]
-    folder = root / sym / tf
-    folder.mkdir(parents=True, exist_ok=True)
-    return folder / f"{digest}.joblib"
-
-
-def _env_int(name: str, default: int) -> int:
-    try:
-        return int(os.getenv(name, str(default)))
-    except (TypeError, ValueError):
-        return int(default)
-
-
-def _signal_cache_max_bytes() -> int:
-    max_gb = max(0, _env_int("OPT_FUTURES_SIGNAL_CACHE_MAX_GB", 4))
-    return max_gb * 1024 * 1024 * 1024
-
-
-def _signal_cache_cleanup_interval_sec() -> int:
-    return max(0, _env_int("OPT_FUTURES_SIGNAL_CACHE_CLEANUP_INTERVAL_SEC", 300))
-
-
-def _cleanup_disk_cache_lru(root: Path) -> None:
-    max_bytes = _signal_cache_max_bytes()
-    if max_bytes <= 0 or not root.exists():
-        return
-
-    # Gather file paths and their stats safely to handle race conditions
-    file_info: List[Tuple[Path, float, int]] = []
-    for p in root.rglob("*.joblib"):
-        if not p.is_file():
-            continue
-        try:
-            stat = p.stat()
-            file_info.append((p, stat.st_mtime, stat.st_size))
-        except OSError:
-            # File might have been deleted by another process/thread
-            continue
-
-    if not file_info:
-        return
-
-    # Sort by mtime descending (newest first)
-    file_info.sort(key=lambda x: x[1], reverse=True)
-
-    total = sum(info[2] for info in file_info)
-    target = int(max_bytes * 0.8)
-    if total <= target:
-        return
-
-    # Remove oldest files until total size is below target
-    for p, _, sz in reversed(file_info):
-        if total <= target:
-            break
-        try:
-            if p.exists():
-                p.unlink(missing_ok=True)
-                total -= sz
-        except OSError:
-            continue
-
-
-def _maybe_cleanup_disk_cache(root: Path, *, force: bool = False) -> None:
-    global _CACHE_LAST_CLEANUP_TS
-    now = time.time()
-    interval = _signal_cache_cleanup_interval_sec()
-    if not force and interval > 0 and (now - _CACHE_LAST_CLEANUP_TS) < interval:
-        return
-    _cleanup_disk_cache_lru(root)
-    _CACHE_LAST_CLEANUP_TS = now
-
-
-def get_or_compute_signals(
-    cache_key: _SignalCacheKey,
-    target_df: pd.DataFrame,
-    strategy: UltimateStrategy,
-    *,
-    disk_cache_root: Optional[Path] = None,
-) -> pd.DataFrame:
-    global _CACHE_CLEANUP_DONE
-    with _cache_lock:
-        if cache_key in _signal_cache:
-            _signal_cache.move_to_end(cache_key)
-            return _signal_cache[cache_key]
-
-    if disk_cache_root is None:
-        disk_cache_root = FUTURES_CACHE_DIR
-
-    if not _CACHE_CLEANUP_DONE:
-        _maybe_cleanup_disk_cache(disk_cache_root, force=True)
-        _CACHE_CLEANUP_DONE = True
-
-    path = _disk_cache_path(cache_key, disk_cache_root)
-    if path.exists():
-        try:
-            full_df: pd.DataFrame = joblib.load(path)
-            with _cache_lock:
-                while len(_signal_cache) >= _SIGNAL_CACHE_MAXSIZE:
-                    _signal_cache.popitem(last=False)
-                _signal_cache[cache_key] = full_df
-            return full_df
-        except Exception:
-            ...
-
-    full_df = strategy.generate_signals(target_df.copy(deep=True))
-    try:
-        tmp_p = path.with_suffix(f".tmp.{os.getpid()}")
-        joblib.dump(full_df, tmp_p, compress=3)
-        tmp_p.replace(path)
-    except Exception as exc:
-        _logger.warning("Futures signal disk cache write failed: %s", exc)
-    _maybe_cleanup_disk_cache(disk_cache_root, force=False)
-
-    with _cache_lock:
-        while len(_signal_cache) >= _SIGNAL_CACHE_MAXSIZE:
-            _signal_cache.popitem(last=False)
-        _signal_cache[cache_key] = full_df
-        return full_df
