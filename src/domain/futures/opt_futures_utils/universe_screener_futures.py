@@ -141,6 +141,7 @@ def screen_futures_universe(
     end_date: str,
     *,
     data_dir: Path | None = None,
+    n_workers_override: int | None = None,
 ) -> Tuple[List[str], int]:
     """
     Ultimate 4-Phase Screener with 'Conditional Anchor' System.
@@ -167,7 +168,10 @@ def screen_futures_universe(
         _logger.warning(f"Ticker pre-filter failed: {e}")
 
     # 2. Parallel History Screening
-    n_workers = max(1, min(int(os.cpu_count() or 4), 8))
+    if n_workers_override is None:
+        n_workers = max(1, min(int(os.cpu_count() or 4), 8))
+    else:
+        n_workers = max(1, min(int(n_workers_override), int(os.cpu_count() or 4), 8))
     worker_fn = partial(_screen_worker_v2, tf=tf, fetch_start=fetch_start, end_date=end_date, cfg=cfg, data_dir=dd)
     with ProcessPoolExecutor(max_workers=n_workers) as pool:
         raw_results = list(tqdm(pool.map(worker_fn, candidate_pool), total=len(candidate_pool), desc="[Universe Gates]"))
