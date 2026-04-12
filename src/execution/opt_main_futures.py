@@ -193,6 +193,44 @@ class _FuturesExecutionPlan:
     task_count: int
 
 
+@dataclass(frozen=True)
+class _FuturesParallelPolicy:
+    cpu_cap: int
+    universe_workers: int
+    stage1_workers: int
+    qmc_jobs: int
+    tpe_workers: int
+
+
+def _resolve_futures_parallel_policy(symbol_count: int, tf: str) -> _FuturesParallelPolicy:
+    logical_cpus = max(1, os.cpu_count() or 1)
+    cpu_cap = max(1, min(6, logical_cpus))
+
+    if symbol_count <= 4:
+        universe_target = 3
+        stage1_target = 3
+        qmc_target = 3
+        tpe_target = 3 if tf == "4h" else 2
+    elif symbol_count <= 5:
+        universe_target = 2
+        stage1_target = 2
+        qmc_target = 2
+        tpe_target = 2
+    else:
+        universe_target = 2
+        stage1_target = 1
+        qmc_target = 1
+        tpe_target = 1
+
+    return _FuturesParallelPolicy(
+        cpu_cap=cpu_cap,
+        universe_workers=max(1, min(universe_target, cpu_cap)),
+        stage1_workers=max(1, min(stage1_target, cpu_cap)),
+        qmc_jobs=max(1, min(qmc_target, cpu_cap)),
+        tpe_workers=max(1, min(tpe_target, cpu_cap)),
+    )
+
+
 def _split_tpe_trials(total: int, n_workers: int) -> List[int]:
     if total <= 0:
         return []
@@ -205,29 +243,25 @@ def _split_tpe_trials(total: int, n_workers: int) -> List[int]:
 def _resolve_futures_execution_plan(
     task_count: int,
     mode: str,
-    requested_jobs: int,
-    requested_task_workers: int,
+    qmc_jobs: int,
+    tpe_workers: int,
 ) -> _FuturesExecutionPlan:
-    worker_cap = 6 # Increased from 3 to utilize more cores
+    worker_cap = 6
     logical_cpus = max(1, os.cpu_count() or 1)
     if mode == MODE_MULTI and task_count == 1:
-        tw = requested_task_workers if requested_task_workers > 0 else requested_jobs
-        tw = max(1, min(int(tw), logical_cpus, worker_cap))
+        jobs = max(1, min(int(qmc_jobs), logical_cpus, worker_cap))
+        tw = max(1, min(int(tpe_workers), logical_cpus, worker_cap))
         return _FuturesExecutionPlan(
             outer_task_workers=1,
-            jobs_per_task=1,
+            jobs_per_task=jobs,
             parallel_tpe_workers=tw,
             use_outer_process_pool=False,
             logical_cpus=logical_cpus,
             task_count=task_count,
         )
 
-    jobs = max(1, min(int(requested_jobs), logical_cpus, worker_cap))
-    if requested_task_workers <= 0:
-        cpu_budget = max(1, 4 if logical_cpus > 2 else 1)
-        outer_tw = min(task_count, max(1, cpu_budget // jobs))
-    else:
-        outer_tw = min(task_count, int(requested_task_workers))
+    jobs = max(1, min(int(qmc_jobs), logical_cpus, worker_cap))
+    outer_tw = min(task_count, int(tpe_workers))
     outer_tw = max(1, min(outer_tw, worker_cap))
     use_outer = task_count > 1 and outer_tw > 1
     return _FuturesExecutionPlan(
@@ -741,6 +775,7 @@ def _run_stage1_futures_tournament(
     symbols: List[str],
     tf: str,
     project_root: str,
+    n_workers: int,
 ) -> List[CombinationScoreFutures]:
     """
     Tournament style discovery: TPE mini-optimization for each (Signal x Regime) combination.
@@ -770,11 +805,12 @@ def _run_stage1_futures_tournament(
     combos = list(itertools.product(sig_choices, reg_choices, siz_choices))
     _logger.info("   Evaluating %d Signal x Regime x Sizing combinations...", len(combos))
 
+    logical_cpus = max(1, os.cpu_count() or 1)
+    n_workers = max(1, min(int(n_workers), len(combos), logical_cpus, 6))
     results: List[CombinationScoreFutures] = []
-    
-    # Use 75% of logical CPUs for tournament to leave room for OS/Data loading
-    n_workers = max(1, min(len(combos), (os.cpu_count() or 1) - 2))
-    
+
+    _logger.info("   Stage 1 parallel workers: %d", n_workers)
+
     with concurrent.futures.ProcessPoolExecutor(max_workers=n_workers) as executor:
         futures_map = {
             executor.submit(
@@ -817,10 +853,6 @@ def main() -> None:
         help="Skip Phase A/B screening; use anchors + first 5 dynamic pool symbols.",
     )
     parser.add_argument("--trials", type=int, default=OPT_FUTURES_CONFIG["total_trials"])
-    parser.add_argument("--jobs", type=int, default=int(OPT_FUTURES_CONFIG.get("n_jobs", 10)))
-    parser.add_argument(
-        "--task-workers", type=int, default=int(OPT_FUTURES_CONFIG.get("task_workers", 1))
-    )
     parser.add_argument(
         "--tf",
         type=str,
@@ -839,6 +871,7 @@ def main() -> None:
 
     fetch_start_date, start_date, is_end_date, end_date = get_quarterly_window(args.reference_date)
     collector = DataCollector()
+    pre_universe_workers = max(1, min(2, 6, os.cpu_count() or 1))
 
     broad_candidates: List[str] = []
     if not args.skip_universe:
@@ -855,6 +888,7 @@ def main() -> None:
             fetch_start_date,
             end_date,
             data_dir=FUTURES_DATA_DIR,
+            n_workers_override=pre_universe_workers,
         )
         anchors_to_add = [s for s in FUTURES_ANCHOR_SYMBOLS if s not in broad_candidates]
         symbols = list(broad_candidates) + anchors_to_add  # Initial symbols for data loading
@@ -975,12 +1009,29 @@ def main() -> None:
                 eth_ref_oos, on="datetime", how="left"
             )
 
+    runtime_policy = _resolve_futures_parallel_policy(len(symbols), args.tf)
+    _logger.info(
+        "Parallel policy (symbols=%d, tf=%s): universe=%d, stage1=%d, qmc_jobs=%d, tpe_workers=%d",
+        len(symbols),
+        args.tf,
+        runtime_policy.universe_workers,
+        runtime_policy.stage1_workers,
+        runtime_policy.qmc_jobs,
+        runtime_policy.tpe_workers,
+    )
+
     locked_param_space: Optional[Dict[str, Any]] = None
     phase1_no_edge = False
 
     if not getattr(args, "skip_stage1", False):
         # Phase B: Tournament discovery (Spot parity++)
-        top_combos = _run_stage1_futures_tournament(data_maps, symbols, args.tf, project_root)
+        top_combos = _run_stage1_futures_tournament(
+            data_maps,
+            symbols,
+            args.tf,
+            project_root,
+            n_workers=runtime_policy.stage1_workers,
+        )
 
         if top_combos:
             # Diversity cap: max 2 combos per signal type
@@ -1037,7 +1088,12 @@ def main() -> None:
                 data_maps[s_sym]["_futures_opt_meta"] = {"objective_floor_strict": _obj_floor}
 
     tasks: List[Tuple[Any, str]] = [(tuple(symbols), args.tf)]
-    plan = _resolve_futures_execution_plan(len(tasks), MODE_MULTI, args.jobs, args.task_workers)
+    plan = _resolve_futures_execution_plan(
+        len(tasks),
+        MODE_MULTI,
+        runtime_policy.qmc_jobs,
+        runtime_policy.tpe_workers,
+    )
     use_mp = plan.use_outer_process_pool
     enable_progress = not args.no_progress
     _logger.info(
@@ -1587,7 +1643,14 @@ def main() -> None:
             
             # 1. Screen for TODAY'S top orthogonal symbols
             live_symbols, _ = screen_futures_universe(
-                collector, [], args.tf, FUTURES_SCREENER_CONFIG, fetch_start_date, end_date, data_dir=FUTURES_DATA_DIR
+                collector,
+                [],
+                args.tf,
+                FUTURES_SCREENER_CONFIG,
+                fetch_start_date,
+                end_date,
+                data_dir=FUTURES_DATA_DIR,
+                n_workers_override=runtime_policy.universe_workers,
             )
             
             if live_symbols:
