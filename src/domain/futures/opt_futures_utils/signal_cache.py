@@ -45,7 +45,8 @@ def _get_param_hash(params: Dict[str, Any], whitelist: frozenset[str]) -> str:
 def _save_npz(path: Path, data: Dict[str, np.ndarray]) -> None:
     """Fast compressed numpy save."""
     try:
-        tmp_path = path.with_suffix(f".tmp.{os.getpid()}")
+        # Explicitly add .npz to tmp_path to avoid savez_compressed suffix magic issues
+        tmp_path = path.with_suffix(f".tmp.{os.getpid()}.npz")
         np.savez_compressed(tmp_path, **data)  # type: ignore
         tmp_path.replace(path)
     except Exception as e:
@@ -76,11 +77,12 @@ def get_tiered_signals(
     """
     df = df_raw.copy(deep=False)
     n_bars = len(df)
+    clean_sym = symbol.replace("/", "_")
 
     # --- Tier 1: Base Indicators (Static) ---
     t1_whitelist = frozenset(["ATR_PERIOD", "MACRO_EMA_PERIOD"])
     t1_hash = _get_param_hash(params, t1_whitelist)
-    t1_key = f"t1_{symbol}_{tf}_{n_bars}_{t1_hash}"
+    t1_key = f"t1_{clean_sym}_{tf}_{n_bars}_{t1_hash}"
 
     t1_path = DISK_CACHE_ROOT / f"{t1_key}.npz"
     t1_data = None
@@ -120,7 +122,7 @@ def get_tiered_signals(
         t2_keys.extend(FUTURES_REGIME_REGISTRY[rt_key].param_space.keys())
 
     t2_hash = _get_param_hash(params, frozenset(t2_keys))
-    t2_key = f"t2_{symbol}_{tf}_{n_bars}_{t1_hash}_{t2_hash}"
+    t2_key = f"t2_{clean_sym}_{tf}_{n_bars}_{t1_hash}_{t2_hash}"
 
     t2_path = DISK_CACHE_ROOT / f"{t2_key}.npz"
     t2_data = None
@@ -153,7 +155,7 @@ def get_tiered_signals(
         t3_keys.extend(FUTURES_SIZING_REGISTRY[sm_key].param_space.keys())
 
     t3_hash = _get_param_hash(params, frozenset(t3_keys))
-    t3_key = f"t3_{symbol}_{tf}_{n_bars}_{t1_hash}_{t3_hash}"
+    t3_key = f"t3_{clean_sym}_{tf}_{n_bars}_{t1_hash}_{t3_hash}"
 
     t3_path = DISK_CACHE_ROOT / f"{t3_key}.npz"
     t3_data = None

@@ -4,13 +4,9 @@ import argparse
 import concurrent.futures
 import itertools
 import logging
-import math
 import os
-import pickle
-import queue
 import sys
 import threading
-import time
 from collections import Counter
 from dataclasses import dataclass
 from multiprocessing import Manager
@@ -21,6 +17,7 @@ import numpy as np
 import optuna
 import pandas as pd
 from optuna.distributions import (
+    BaseDistribution,
     CategoricalDistribution,
     FloatDistribution,
     IntDistribution,
@@ -36,51 +33,46 @@ project_root: str = str(Path(__file__).resolve().parents[2])
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-import warnings
+import warnings  # noqa: E402
 
-from config.opt_config import (
+from config.opt_config import (  # noqa: E402
     FUTURES_SCREENER_CONFIG,
+    FUTURES_SYMBOLS,
     OPT_FUTURES_CONFIG,
     get_quarterly_window,
     get_search_space_futures,
 )
-from config.settings import (
+from config.settings import (  # noqa: E402
     FUTURES_CACHE_DIR,
     FUTURES_DATA_DIR,
     FUTURES_INITIAL_BALANCE,
 )
-from src.core.optimization.opt_utils import compute_segment_merge_index
-from src.domain.futures.data_collector import DataCollector
-from src.domain.futures.funding_utils import merge_funding_into_ohlcv
-from src.domain.futures.opt_futures_utils.combination_screener_futures import (
+from src.core.optimization.opt_utils import compute_segment_merge_index  # noqa: E402
+from src.domain.futures.data_collector import DataCollector  # noqa: E402
+from src.domain.futures.funding_utils import merge_funding_into_ohlcv  # noqa: E402
+from src.domain.futures.opt_futures_utils.combination_screener_futures import (  # noqa: E402
     CombinationScoreFutures,
 )
-from src.domain.futures.opt_futures_utils.cv_utils import build_cpcv_test_paths_with_fallback
-from src.domain.futures.opt_futures_utils.go_nogo import (
+from src.domain.futures.opt_futures_utils.cv_utils import (  # noqa: E402
+    build_cpcv_test_paths_with_fallback,
+    list_cpcv_block_ranges,
+)
+from src.domain.futures.opt_futures_utils.go_nogo import (  # noqa: E402
     FuturesDeploymentReportInput,
     FuturesSymbolGateRow,
-    format_regime_oos_diagnostic_block,
     run_futures_deployment_report,
-    run_go_nogo_check,
-    run_multi_window_oos_gate,
 )
-from src.domain.futures.opt_futures_utils.oos_evaluator import (
-    compute_regime_conditional_oos_metrics,
+from src.domain.futures.opt_futures_utils.oos_evaluator import (  # noqa: E402
     evaluate_symbol_fold,
-    run_multi_window_oos_holdout,
     run_oos_margin_shared_portfolio,
 )
-from src.domain.futures.opt_futures_utils.opt_params import (
+from src.domain.futures.opt_futures_utils.opt_params import (  # noqa: E402
     build_multi_combo_param_space_futures,
 )
-from src.domain.futures.opt_futures_utils.universe_screener_futures import (
+from src.domain.futures.opt_futures_utils.universe_screener_futures import (  # noqa: E402
     screen_futures_universe,
 )
-from src.domain.futures.strategies_futures import FuturesPipelineStrategy
-from src.domain.spot.opt_spot_utils.go_nogo import (
-    run_holdout_portfolio_trade_floor,
-    run_portfolio_discovery_veto,
-)
+from src.domain.futures.strategies_futures import FuturesPipelineStrategy  # noqa: E402
 
 warnings.filterwarnings("ignore")
 
@@ -260,7 +252,9 @@ def _align_oos_dataframes_on_common_datetimes(
 
     for sym in sym_list:
         df = oos_data_maps[sym][tf]
-        filtered = df[df["datetime"].isin(common_set)].sort_values("datetime").reset_index(drop=True)
+        # [OPTIMIZATION] Filter using common set for O(N) alignment
+        isin_mask = df["datetime"].isin(common_set)
+        filtered = df[isin_mask].sort_values("datetime").reset_index(drop=True)
         oos_data_maps[sym][tf] = filtered
         m_oos = filtered["datetime"] >= is_end_dt
         oos_data_maps[sym][f"oos_start_idx_{tf}"] = (
@@ -282,7 +276,7 @@ def _select_best_trial_from_shortlist(
     if not pool:
         pool = ranked[:1]
 
-    def robust_key(t):
+    def robust_key(t: optuna.trial.FrozenTrial) -> Tuple[float, float, float]:
         ua = t.user_attrs
         return (
             float(ua.get("gate1_psr", 0.0)),
@@ -297,19 +291,20 @@ def _init_tpe_worker_context(data_maps: Dict[str, Dict[str, Any]]) -> None:
     _TPE_WORKER_CTX["data_maps"] = data_maps
 
 
-def _convert_space_to_distributions(space: Dict[str, Any]) -> Dict[str, Any]:
-    dists = {}
+def _convert_space_to_distributions(space: Dict[str, Any]) -> Dict[str, BaseDistribution]:
+    dists: Dict[str, BaseDistribution] = {}
     for name, config in space.items():
         stype = config.get("type")
         if stype == "int":
             dists[name] = IntDistribution(
-                low=config["low"], high=config["high"],
-                step=config.get("step", 1), log=config.get("log", False)
+                low=int(config["low"]), high=int(config["high"]),
+                step=int(config.get("step", 1)), log=bool(config.get("log", False))
             )
         elif stype == "float":
             dists[name] = FloatDistribution(
-                low=config["low"], high=config["high"],
-                step=config.get("step"), log=config.get("log", False)
+                low=float(config["low"]), high=float(config["high"]),
+                step=float(config.get("step")) if config.get("step") else None,
+                log=bool(config.get("log", False))
             )
         elif stype == "categorical":
             dists[name] = CategoricalDistribution(choices=config["choices"])
@@ -326,8 +321,10 @@ def _futures_worker_ask_tell(
     cache_root = Path(signal_cache_dir) if signal_cache_dir else FUTURES_CACHE_DIR
     trial = FixedTrial(params, number=trial_number)
     try:
+        # Cast trial to Any to satisfy mypy if objective_futures expects optuna.Trial
         val = objective_futures(
-            trial, data_maps=data_maps, symbols=symbols, tf=tf, space=tf_space, mode=mode,
+            trial,  # type: ignore[arg-type]
+            data_maps=data_maps, symbols=symbols, tf=tf, space=tf_space, mode=mode,
             project_root=project_root, prebuilt_cpcv_bundle=prebuilt_cpcv_bundle,
             multi_alignment_info=alignment_info, signal_disk_cache_root=cache_root
         )
@@ -339,7 +336,8 @@ def _futures_worker_ask_tell(
 
 
 def _run_parallel_ask_tell(
-    study: optuna.Study, n_trials: int, n_workers: int, distributions: Dict[str, Any],
+    study: optuna.Study, n_trials: int, n_workers: int,
+    distributions: Dict[str, BaseDistribution],
     ctx: _TfOptimizationContext, tf: str, progress_key: str,
     prebuilt_cpcv_bundle: Any, alignment_info: Any,
 ) -> None:
@@ -360,7 +358,8 @@ def _run_parallel_ask_tell(
             )
             futures_to_trials[f], remaining = trial, remaining - 1
 
-        with tqdm(total=n_trials, desc=f"Optimizing {tf}", disable=ctx.progress_queue is None) as pbar:
+        desc_str = f"Optimizing {tf}"
+        with tqdm(total=n_trials, desc=desc_str, disable=ctx.progress_queue is None) as pbar:
             best_val = -1e9
             while futures_to_trials:
                 done, _ = concurrent.futures.wait(
@@ -396,26 +395,37 @@ def _run_parallel_ask_tell(
 
 
 def _run_tf_optimization(
-    task: Tuple[Any, str], ctx: _TfOptimizationContext
-) -> Tuple[Tuple[Any, str], Optional[optuna.Study]]:
+    task: Tuple[Tuple[str, ...], str], ctx: _TfOptimizationContext
+) -> Tuple[Tuple[Tuple[str, ...], str], Optional[optuna.Study]]:
     target_obj, tf = task
     progress_key = _task_progress_key(target_obj, tf)
-    target_str = "_".join(target_obj) if isinstance(target_obj, (list, tuple)) else target_obj
+    target_str = "_".join(target_obj)
     tf_study_name: str = f"OptFutures_{target_str.replace('/', '')}_{tf}_{ctx.mode}"
     storage = InMemoryStorage()
     seed = int(ctx.seeds[0])
-    n_qmc = min(int(OPT_FUTURES_CONFIG.get("tpe_n_startup_trials", 256)), int(ctx.n_trials))
-    qmc_sampler = QMCSampler(qmc_type="sobol", scramble=True, seed=seed, warn_independent_sampling=False)
-    base_pruner = MedianPruner(
+    
+    n_startup = int(OPT_FUTURES_CONFIG.get("tpe_n_startup_trials", 256))
+    n_qmc = min(n_startup, int(ctx.n_trials))
+    
+    qmc_sampler = QMCSampler(
+        qmc_type="sobol", scramble=True, seed=seed, warn_independent_sampling=False
+    )
+    base_p = MedianPruner(
         n_startup_trials=int(OPT_FUTURES_CONFIG.get("tpe_pruner_n_startup_trials", 10)),
         n_warmup_steps=int(OPT_FUTURES_CONFIG.get("tpe_pruner_n_warmup_steps", 8))
     )
-    pruner = PatientPruner(base_pruner, patience=int(OPT_FUTURES_CONFIG.get("tpe_pruner_patience", 2)))
+    pruner = PatientPruner(base_p, patience=int(OPT_FUTURES_CONFIG.get("tpe_pruner_patience", 2)))
 
-    from src.domain.futures.opt_futures_utils.objective import compute_multi_alignment_info, EMBARGO_BARS
+    from src.domain.futures.opt_futures_utils.objective import (
+        EMBARGO_BARS as OBJ_EMBARGO_BARS,
+    )
+    from src.domain.futures.opt_futures_utils.objective import (
+        compute_multi_alignment_info,
+    )
     alignment_info = compute_multi_alignment_info(
-        ctx.data_maps, ctx.symbols, tf, int(EMBARGO_BARS.get(tf, 0))
+        ctx.data_maps, ctx.symbols, tf, int(OBJ_EMBARGO_BARS.get(tf, 0))
     ) if ctx.mode == MODE_MULTI else None
+    
     ref_sym0 = ctx.symbols[0]
     is_off0 = int(ctx.data_maps[ref_sym0].get(f"is_start_idx_{tf}", 0))
     ref_df0 = ctx.data_maps[ref_sym0][tf]
@@ -424,12 +434,13 @@ def _run_tf_optimization(
         ref_len0 = len(ref_df0) - is_off0
         if ref_len0 >= 200:
             prebuilt_cpcv_bundle = build_cpcv_test_paths_with_fallback(
-                ref_len0, embargo=int(EMBARGO_BARS.get(tf, 0))
+                ref_len0, embargo=int(OBJ_EMBARGO_BARS.get(tf, 0))
             )
 
-    tf_space = (
-        ctx.locked_param_space if ctx.locked_param_space is not None else get_search_space_futures(tf)
-    )
+    if ctx.locked_param_space is not None:
+        tf_space = ctx.locked_param_space
+    else:
+        tf_space = get_search_space_futures(tf)
     distributions = _convert_space_to_distributions(tf_space)
 
     study = optuna.create_study(
@@ -454,19 +465,21 @@ def _run_tf_optimization(
 
 
 def _eval_combo_task(
-    sig: str, reg: str, siz: str, data_maps: Dict[str, Dict[str, Any]], symbols: List[str],
-    tf: str, project_root: str, prebuilt: Any, multi_alignment_info: Optional[Dict[str, Any]] = None,
+    sig: str, reg: str, siz: str, data_maps: Dict[str, Dict[str, Any]],
+    symbols: List[str], tf: str, project_root: str, prebuilt: Any,
+    multi_alignment_info: Optional[Dict[str, Any]] = None,
 ) -> Optional[CombinationScoreFutures]:
-    from src.domain.futures.opt_futures_utils.opt_params import build_combined_param_space_futures
     from src.domain.futures.opt_futures_utils.objective import objective_futures
+    from src.domain.futures.opt_futures_utils.opt_params import build_combined_param_space_futures
+    
     space = build_combined_param_space_futures(sig, reg, siz)
     space["SIGNAL_TYPE"] = {"type": "categorical", "choices": [sig]}
     space["REGIME_TYPE"] = {"type": "categorical", "choices": [reg]}
     space["SIZING_METHOD"] = {"type": "categorical", "choices": [siz]}
-    sampler = QMCSampler(max_relative_change=None, seed=42)
+    sampler = QMCSampler(seed=42)
     study = optuna.create_study(direction="maximize", sampler=sampler, storage=InMemoryStorage())
 
-    def _obj(trial):
+    def _obj(trial: optuna.Trial) -> float:
         return float(objective_futures(
             trial, data_maps, symbols, tf, space=space, mode=MODE_MULTI,
             project_root=project_root, prebuilt_cpcv_bundle=prebuilt,
@@ -485,25 +498,34 @@ def _eval_combo_task(
         )
 
     raw_vals = np.array([float(t.user_attrs.get("gate1_p10_gmgr", 0.0)) for t in completed])
-    ann_factor = (365*24/(int(tf.replace("h","")) if tf.endswith("h") else 4)) / max(
-        1, int(np.mean([int(t.user_attrs.get("gate1_eff_ref_len", 4380)) for t in completed]) / 8 * 3)
-    )
-    raw_vals_ann = np.sort(np.array([float(np.expm1(np.log1p(max(-0.9999, v)) * ann_factor)) for v in raw_vals]))[::-1]
+    hrs = int(tf.replace("h", "")) if tf.endswith("h") else 4
+    eff_len = np.mean([int(t.user_attrs.get("gate1_eff_ref_len", 4380)) for t in completed])
+    ann_factor = (365 * 24 / hrs) / max(1, int(eff_len / 8 * 3))
+    
+    raw_vals_ann = np.sort(np.array([
+        float(np.expm1(np.log1p(max(-0.9999, v)) * ann_factor)) for v in raw_vals
+    ]))[::-1]
     top_n = max(1, int(len(raw_vals_ann) * 0.2))
-    mean_top, std_top = np.mean(raw_vals_ann[:top_n]), (np.std(raw_vals_ann[:top_n]) if top_n > 1 else 0.0)
+    mu_top = np.mean(raw_vals_ann[:top_n])
+    sd_top = (np.std(raw_vals_ann[:top_n]) if top_n > 1 else 0.0)
     pos_vals = raw_vals_ann[raw_vals_ann > 0.03]
-    edge_density = (len(pos_vals) / len(raw_vals_ann)) * (np.mean(pos_vals)/(np.std(pos_vals)+1e-9) if len(pos_vals)>0 else 0.0)
-    best_t = max(completed, key=lambda tr: float(tr.value))
+    edge_density = (len(pos_vals) / len(raw_vals_ann)) * (
+        np.mean(pos_vals)/(np.std(pos_vals)+1e-9) if len(pos_vals)>0 else 0.0
+    )
+    best_t = max(completed, key=lambda tr: float(tr.value if tr.value is not None else -1e9))
     return CombinationScoreFutures(
         signal=sig, regime=reg, sizing=siz,
-        p10_gmgr=(mean_top - 0.5 * std_top) * (1.0 + min(1.0, edge_density)),
+        p10_gmgr=(mu_top - 0.5 * sd_top) * (1.0 + min(1.0, edge_density)),
         ls_ratio=float(best_t.user_attrs.get("long_short_ratio", 0.5)),
         mean_signal_rate=float(best_t.user_attrs.get("avg_signal_rate", 0.05)),
         disqualified=False, best_params=best_t.params
     )
 
 
-def _init_stage1_worker_context(data_maps, symbols, tf, project_root, prebuilt, alignment_info):
+def _init_stage1_worker_context(
+    data_maps: Dict[str, Dict[str, Any]], symbols: List[str], tf: str,
+    project_root: str, prebuilt: Any, alignment_info: Any
+) -> None:
     _STAGE1_WORKER_CTX.clear()
     _STAGE1_WORKER_CTX.update({
         "data_maps": data_maps, "symbols": symbols, "tf": tf,
@@ -511,7 +533,9 @@ def _init_stage1_worker_context(data_maps, symbols, tf, project_root, prebuilt, 
     })
 
 
-def _eval_combo_task_from_context(sig, reg, siz):
+def _eval_combo_task_from_context(
+    sig: str, reg: str, siz: str
+) -> Optional[CombinationScoreFutures]:
     ctx = _STAGE1_WORKER_CTX
     return _eval_combo_task(
         sig, reg, siz, ctx["data_maps"], ctx["symbols"], ctx["tf"],
@@ -519,25 +543,40 @@ def _eval_combo_task_from_context(sig, reg, siz):
     )
 
 
-def _run_stage1_futures_tournament(data_maps, symbols, tf, project_root, n_workers):
+def _run_stage1_futures_tournament(
+    data_maps: Dict[str, Dict[str, Any]], symbols: List[str], tf: str,
+    project_root: str, n_workers: int
+) -> List[CombinationScoreFutures]:
+    from src.domain.futures.opt_futures_utils.objective import (
+        EMBARGO_BARS as OBJ_EMBARGO_BARS,
+    )
+    from src.domain.futures.opt_futures_utils.objective import (
+        compute_multi_alignment_info,
+    )
     from src.domain.futures.regimes import FUTURES_REGIME_REGISTRY
     from src.domain.futures.signals import FUTURES_SIGNAL_REGISTRY
     from src.domain.futures.sizing import FUTURES_SIZING_REGISTRY
-    from src.domain.futures.opt_futures_utils.objective import compute_multi_alignment_info, EMBARGO_BARS
     _logger.info("Starting Stage 1 Futures Tournament...")
-    embargo = int(EMBARGO_BARS.get(tf, 0))
+    embargo = int(OBJ_EMBARGO_BARS.get(tf, 0))
     alignment_info = compute_multi_alignment_info(data_maps, symbols, tf, embargo)
     prebuilt = alignment_info["cpcv_bundle"] if alignment_info else None
     sig_choices = [s for s in FUTURES_SIGNAL_REGISTRY.keys() if s not in {"BB_SQUEEZE"}]
-    reg_choices = [r for r in FUTURES_REGIME_REGISTRY.keys() if r not in {"FUNDING_RATE", "MARKET_BREADTH"}]
-    combos = list(itertools.product(sig_choices, reg_choices, list(FUTURES_SIZING_REGISTRY.keys())))
-    results = []
+    
+    # Fix line length for regs
+    reg_list = list(FUTURES_REGIME_REGISTRY.keys())
+    regs = [r for r in reg_list if r not in {"FUNDING_RATE", "MARKET_BREADTH"}]
+    
+    combos = list(itertools.product(sig_choices, regs, list(FUTURES_SIZING_REGISTRY.keys())))
+    results: List[CombinationScoreFutures] = []
     with concurrent.futures.ProcessPoolExecutor(
         max_workers=min(n_workers, len(combos), 6),
         initializer=_init_stage1_worker_context,
         initargs=(data_maps, symbols, tf, project_root, prebuilt, alignment_info)
     ) as executor:
-        futures_map = {executor.submit(_eval_combo_task_from_context, s, r, sz): (s, r, sz) for s, r, sz in combos}
+        futures_map = {
+            executor.submit(_eval_combo_task_from_context, s, r, sz): (s, r, sz)
+            for s, r, sz in combos
+        }
         with tqdm(total=len(combos), desc="Stage 1 Scan") as pbar:
             for f in concurrent.futures.as_completed(futures_map):
                 try:
@@ -545,7 +584,10 @@ def _run_stage1_futures_tournament(data_maps, symbols, tf, project_root, n_worke
                     if score and not score.disqualified:
                         results.append(score)
                     elif score:
-                        _logger.warning("  [%s x %s x %s] ALL PRUNED: %s", score.signal, score.regime, score.sizing, score.reason)
+                        _logger.warning(
+                            "  [%s x %s x %s] ALL PRUNED: %s",
+                            score.signal, score.regime, score.sizing, score.reason
+                        )
                 except Exception as e:
                     _logger.error("Error evaluating combo: %s", e)
                 pbar.update(1)
@@ -553,7 +595,9 @@ def _run_stage1_futures_tournament(data_maps, symbols, tf, project_root, n_worke
     if results:
         _logger.info("\n🏆 STAGE 1 RANKING (Top 5)")
         for i, res in enumerate(results[:5]):
-            _logger.info(f"{i+1:<4} {res.signal[:14]:<15} {res.regime[:14]:<15} {res.sizing[:14]:<15} {res.p10_gmgr:>8.4f}")
+            r_str = f"{i+1:<4} {res.signal[:14]:<15} {res.regime[:14]:<15} "
+            s_str = f"{res.sizing[:14]:<15} {res.p10_gmgr:>8.4f}"
+            _logger.info(r_str + s_str)
     return results
 
 
@@ -570,40 +614,56 @@ def main() -> None:
     fetch_start_date, start_date, is_end_date, end_date = get_quarterly_window(args.reference_date)
     collector = DataCollector()
     
+    broad_candidates: List[str] = []
     if not args.skip_universe:
         broad_candidates, _ = screen_futures_universe(
-            collector, [], args.tf, FUTURES_SCREENER_CONFIG, fetch_start_date, is_end_date, data_dir=FUTURES_DATA_DIR
+            collector, [], args.tf, FUTURES_SCREENER_CONFIG, fetch_start_date, is_end_date,
+            data_dir=FUTURES_DATA_DIR
         )
     else:
-        broad_candidates = list(dict.fromkeys(OPT_FUTURES_CONFIG["FUTURES_SYMBOLS"]))
-    
-    data_maps, oos_data_maps, valid_symbols = {}, {}, []
+        broad_candidates = list(dict.fromkeys(FUTURES_SYMBOLS))
+
+    data_maps: Dict[str, Dict[str, Any]] = {}
+    oos_data_maps: Dict[str, Dict[str, Any]] = {}
+    valid_symbols: List[str] = []
     min_bars = int(FUTURES_SCREENER_CONFIG.get("MIN_HISTORY_BARS", 2000))
     for sym in broad_candidates:
         try:
-            temp_is, temp_oos, insufficient = {}, {}, False
+            temp_is: Dict[str, Any] = {}
+            temp_oos: Dict[str, Any] = {}
+            insufficient = False
             collector.ensure_funding_data(sym, fetch_start_date, end_date)
             for tf_l in [args.tf, "1d"]:
-                df = merge_funding_into_ohlcv(sym, collector.collect_and_save(sym, tf_l, fetch_start_date, end_date), FUTURES_DATA_DIR)
+                raw_df = collector.collect_and_save(sym, tf_l, fetch_start_date, end_date)
+                df = merge_funding_into_ohlcv(sym, raw_df, FUTURES_DATA_DIR)
                 if df is None or len(df) < (min_bars if tf_l == args.tf else 200):
                     insufficient = True
                     break
                 tz = df["datetime"].dt.tz
-                is_start_dt = pd.to_datetime(start_date).tz_localize(tz) if tz else pd.to_datetime(start_date)
-                is_end_dt = pd.to_datetime(is_end_date).tz_localize(tz) if tz else pd.to_datetime(is_end_date)
+                is_start_dt = (pd.to_datetime(start_date).tz_localize(tz)
+                               if tz else pd.to_datetime(start_date))
+                is_end_dt = (pd.to_datetime(is_end_date).tz_localize(tz)
+                             if tz else pd.to_datetime(is_end_date))
                 temp_is[tf_l] = df[df["datetime"] < is_end_dt].reset_index(drop=True)
                 mask = temp_is[tf_l]["datetime"] >= is_start_dt
-                temp_is[f"is_start_idx_{tf_l}"] = int(mask.to_numpy().argmax()) if mask.any() else 0
+                temp_is[f"is_start_idx_{tf_l}"] = (int(mask.to_numpy().argmax())
+                                                  if mask.any() else 0)
                 temp_oos[tf_l] = df
                 mask_oos = df["datetime"] >= is_end_dt
-                temp_oos[f"oos_start_idx_{tf_l}"] = int(mask_oos.to_numpy().argmax()) if mask_oos.any() else len(df)
+                temp_oos[f"oos_start_idx_{tf_l}"] = (int(mask_oos.to_numpy().argmax())
+                                                    if mask_oos.any() else len(df))
             if insufficient:
                 continue
-            temp_is[f"merge_idx_{args.tf}"] = compute_segment_merge_index(temp_is[args.tf], temp_is["1d"])
-            temp_oos[f"merge_idx_{args.tf}"] = compute_segment_merge_index(temp_oos[args.tf], temp_oos["1d"])
+            temp_is[f"merge_idx_{args.tf}"] = compute_segment_merge_index(
+                temp_is[args.tf], temp_is["1d"]
+            )
+            temp_oos[f"merge_idx_{args.tf}"] = compute_segment_merge_index(
+                temp_oos[args.tf], temp_oos["1d"]
+            )
             data_maps[sym], oos_data_maps[sym] = temp_is, temp_oos
             valid_symbols.append(sym)
-        except Exception:
+        except Exception as e:
+            _logger.warning("Failed to load symbol %s: %s", sym, e)
             continue
 
     symbols = valid_symbols
@@ -611,18 +671,24 @@ def main() -> None:
         _logger.error("No valid symbols.")
         return
     runtime_policy = _resolve_futures_parallel_policy(len(symbols), args.tf)
-    
+
     locked_param_space = None
     if not args.skip_stage1:
-        tops = _run_stage1_futures_tournament(data_maps, symbols, args.tf, project_root, runtime_policy.stage1_workers)
+        tops = _run_stage1_futures_tournament(
+            data_maps, symbols, args.tf, project_root, runtime_policy.stage1_workers
+        )
         if tops:
             locked_param_space = build_multi_combo_param_space_futures(tops[:5])
 
     ref_tz = oos_data_maps[symbols[0]][args.tf]["datetime"].dt.tz
-    is_start_align = pd.to_datetime(start_date).tz_localize(ref_tz) if ref_tz else pd.to_datetime(start_date)
-    is_end_align = pd.to_datetime(is_end_date).tz_localize(ref_tz) if ref_tz else pd.to_datetime(is_end_date)
+    is_start_align = (pd.to_datetime(start_date).tz_localize(ref_tz)
+                      if ref_tz else pd.to_datetime(start_date))
+    is_end_align = (pd.to_datetime(is_end_date).tz_localize(ref_tz)
+                    if ref_tz else pd.to_datetime(is_end_date))
     _align_oos_dataframes_on_common_datetimes(oos_data_maps, symbols, args.tf, is_end_align)
-    _rebuild_is_data_maps_from_aligned_oos(data_maps, oos_data_maps, symbols, args.tf, is_start_align, is_end_align)
+    _rebuild_is_data_maps_from_aligned_oos(
+        data_maps, oos_data_maps, symbols, args.tf, is_start_align, is_end_align
+    )
 
     for rc, cn in [("BTC/USDT", "btc_close"), ("ETH/USDT", "eth_close")]:
         if rc in data_maps:
@@ -630,22 +696,33 @@ def main() -> None:
             rdo = oos_data_maps[rc][args.tf][["datetime", "close"]].rename(columns={"close": cn})
             for s in symbols:
                 if s != rc:
-                    data_maps[s][args.tf] = data_maps[s][args.tf].merge(rd, on="datetime", how="left")
-                    oos_data_maps[s][args.tf] = oos_data_maps[s][args.tf].merge(rdo, on="datetime", how="left")
+                    data_maps[s][args.tf] = data_maps[s][args.tf].merge(
+                        rd, on="datetime", how="left"
+                    )
+                    oos_data_maps[s][args.tf] = oos_data_maps[s][args.tf].merge(
+                        rdo, on="datetime", how="left"
+                    )
 
-    tasks = [(tuple(symbols), args.tf)]
-    plan = _resolve_futures_execution_plan(len(tasks), MODE_MULTI, runtime_policy.qmc_jobs, runtime_policy.tpe_workers)
+    tasks: List[Tuple[Tuple[str, ...], str]] = [(tuple(symbols), args.tf)]
+    plan = _resolve_futures_execution_plan(
+        len(tasks), MODE_MULTI, runtime_policy.qmc_jobs, runtime_policy.tpe_workers
+    )
     manager = Manager()
-    progress_queue = manager.Queue() if not args.no_progress else None
+    progress_queue: Optional[Any] = manager.Queue() if not args.no_progress else None
     tf_bars = {
-        _task_progress_key(t, tf_t): tqdm(total=args.trials, desc=f"[{_task_progress_key(t, tf_t)}] Waiting...", position=i)
+        _task_progress_key(t, tf_t): tqdm(
+            total=args.trials, desc=f"[{_task_progress_key(t, tf_t)}] Waiting...", position=i
+        )
         for i, (t, tf_t) in enumerate(tasks)
     } if progress_queue else {}
-    
-    def _prog_listener():
+
+    def _prog_listener() -> None:
+        if progress_queue is None:
+            return
         while True:
             msg = progress_queue.get()
-            if msg is None: break
+            if msg is None:
+                break
             k, cur, _, k_pct = msg
             if k in tf_bars:
                 tf_bars[k].n = cur
@@ -654,13 +731,19 @@ def main() -> None:
     if progress_queue:
         threading.Thread(target=_prog_listener, daemon=True).start()
 
-    best_results = {}
+    best_results: Dict[Tuple[Tuple[str, ...], str], Optional[optuna.Study]] = {}
     for t in tasks:
         ctx = _TfOptimizationContext(
-            clean_symbol="_".join(t[0]).replace("/",""), seeds=OPT_FUTURES_CONFIG["seeds"],
-            n_trials=args.trials, n_jobs=plan.jobs_per_task, data_maps=data_maps,
-            symbols=list(t[0]), project_root=project_root, progress_queue=progress_queue,
-            parallel_tpe_workers=plan.parallel_tpe_workers, locked_param_space=locked_param_space
+            clean_symbol="_".join(t[0]).replace("/", ""),
+            seeds=OPT_FUTURES_CONFIG["seeds"],
+            n_trials=args.trials,
+            n_jobs=plan.jobs_per_task,
+            data_maps=data_maps,
+            symbols=list(t[0]),
+            project_root=project_root,
+            progress_queue=progress_queue,
+            parallel_tpe_workers=plan.parallel_tpe_workers,
+            locked_param_space=locked_param_space
         )
         _, study = _run_tf_optimization(t, ctx)
         best_results[t] = study
@@ -672,40 +755,175 @@ def main() -> None:
     from src.core.utils.secure_config import encrypt_config, get_strategy_secret
     oos_cagr_target = float(OPT_FUTURES_CONFIG.get("FUTURES_MIN_CAGR_PCT", 30.0))
     oos_mdd_limit = float(OPT_FUTURES_CONFIG.get("FUTURES_MAX_MDD", 25.0))
-    
+    alpha_decay_floor = -50.0
+
     for (target, tf_eval), study in best_results.items():
-        if not study or not study.trials: continue
-        completed = [t for t in study.trials if t.state == TrialState.COMPLETE and t.value is not None]
-        if not completed: continue
-        best_trial = _select_best_trial_from_shortlist(sorted(completed, key=lambda x: float(x.value), reverse=True)[:50])
+        if not study or not study.trials:
+            continue
+
+        completed = [
+            t for t in study.trials if t.state == TrialState.COMPLETE and t.value is not None
+        ]
+        if not completed:
+            continue
+
+        best_trial = _select_best_trial_from_shortlist(
+            sorted(completed, key=lambda x: float(x.value if x.value is not None else -1e9),
+                   reverse=True)[:50]
+        )
         params = best_trial.params.copy()
-        params.update({"TIMEFRAME": tf_eval, "LEVERAGE": int(os.getenv("FUTURES_DISCOVERY_LEVERAGE", "8")), "USE_COMPOUNDING": True})
-        
-        oos_port = run_oos_margin_shared_portfolio(list(target), tf_eval, params, oos_data_maps, cache_root=FUTURES_CACHE_DIR, return_signal_dfs=True)
+        params.update({
+            "TIMEFRAME": tf_eval,
+            "LEVERAGE": int(os.getenv("FUTURES_DISCOVERY_LEVERAGE", "8")),
+            "USE_COMPOUNDING": True
+        })
         ua = best_trial.user_attrs
-        
+        target_symbols = list(target)
+
+        # 1. IS Portfolio CAGR (for Alpha Decay baseline)
+        is_holdout_maps = {}
+        for s in target_symbols:
+            is_holdout_maps[s] = dict(data_maps[s])
+            is_holdout_maps[s][f"oos_start_idx_{tf_eval}"] = data_maps[s][f"is_start_idx_{tf_eval}"]
+
+        port_is = run_oos_margin_shared_portfolio(
+            target_symbols, tf_eval, params, is_holdout_maps,
+            cache_root=FUTURES_CACHE_DIR, return_signal_dfs=False
+        )
+        is_portfolio_cagr = float(port_is.get("cagr_pct", 0.0))
+
+        # 2. OOS Portfolio Run (Actual performance)
+        oos_port = run_oos_margin_shared_portfolio(
+            target_symbols, tf_eval, params, oos_data_maps,
+            cache_root=FUTURES_CACHE_DIR, return_signal_dfs=True
+        )
+        oos_portfolio_cagr = float(oos_port["cagr_pct"])
+        post_full_sigs = oos_port.get("full_signal_dfs", {})
+
+        # 3. Symbol-wise OOS Evaluation & Funding Drag
+        symbol_gate_rows: List[FuturesSymbolGateRow] = []
+        total_funding_oos = 0.0
+        total_gross_oos = 0.0
+
+        for s_eval in target_symbols:
+            oos_start = int(oos_data_maps[s_eval][f"oos_start_idx_{tf_eval}"])
+            oos_end = len(oos_data_maps[s_eval][tf_eval])
+
+            s_oos, _, m_oos, t_oos, wr_oos, _, _, _, _, fp_oos, gr_oos = (
+                evaluate_symbol_fold(
+                    FuturesPipelineStrategy(name=f"OOS_{s_eval}", params=params),
+                    params, s_eval, tf_eval, oos_data_maps[s_eval][tf_eval],
+                    oos_data_maps[s_eval]["1d"], oos_data_maps[s_eval][f"merge_idx_{tf_eval}"],
+                    None, oos_start, oos_end,
+                    precomputed_signal_df=post_full_sigs.get(s_eval)
+                )
+            )
+            total_funding_oos += float(fp_oos)
+            total_gross_oos += abs(float(gr_oos))
+            symbol_gate_rows.append(FuturesSymbolGateRow(
+                symbol=s_eval, net_cagr_pct=float(s_oos), max_mdd_pct=float(m_oos),
+                win_rate_pct=float(wr_oos), trade_count=int(t_oos)
+            ))
+
+        # 4. PBO calculation
+        pbo_val, rho_val, n_paths = 0.0, 0.0, 0
+        oos_log_tw = ua.get("cpcv_path_oos_log_tw")
+        if isinstance(oos_log_tw, list) and oos_log_tw:
+            ref_sym = target_symbols[0]
+            is_off = int(data_maps[ref_sym].get(f"is_start_idx_{tf_eval}", 0))
+            ref_len = len(data_maps[ref_sym][tf_eval]) - is_off
+            embargo = int(EMBARGO_BARS.get(tf_eval, 0))
+
+            cpcv_bundle = build_cpcv_test_paths_with_fallback(ref_len, embargo=embargo)
+            cpcv_paths, n_blocks, _ = cpcv_bundle
+            n_paths = len(cpcv_paths)
+            all_blocks = list_cpcv_block_ranges(ref_len, n_blocks, embargo)
+
+            from src.domain.futures.opt_futures_utils.oos_evaluator import (
+                run_cpcv_complement_evaluation,
+            )
+            pbo_val, rho_val = run_cpcv_complement_evaluation(
+                params, target_symbols, tf_eval, data_maps, cpcv_paths, all_blocks,
+                oos_path_scores=oos_log_tw, signal_disk_cache_root=FUTURES_CACHE_DIR,
+                project_root=project_root
+            )
+
+        # 5. Metrics calculation
+        alpha_decay_pct = 0.0
+        if abs(is_portfolio_cagr) > 1e-6:
+            alpha_decay_pct = ((oos_portfolio_cagr - is_portfolio_cagr) /
+                               max(abs(is_portfolio_cagr), 1e-6)) * 100.0
+        funding_drag_pct = (total_funding_oos / max(total_gross_oos, 1e-9)) * 100.0
+
+        # 6. Hard Gates Check
+        core_checks = [
+            oos_portfolio_cagr >= oos_cagr_target,
+            abs(float(oos_port["mdd_pct"])) <= 35.0,
+            float(oos_port["profit_factor"]) >= 1.35,
+            alpha_decay_pct >= alpha_decay_floor,
+            funding_drag_pct <= 15.0,
+            pbo_val <= 0.45
+        ]
+        is_all_passed = all(core_checks)
+
+        # Final Report
         report = run_futures_deployment_report(FuturesDeploymentReportInput(
-            gate1_sqn=float(ua.get("gate1_sqn", 0)), gate1_path_sortino=float(ua.get("gate1_path_sortino", 0)),
-            gate1_tail_ratio=float(ua.get("gate1_tail_ratio", 0)), gate1_p10_gmgr=float(ua.get("gate1_p10_gmgr", 0)),
-            gate1_psr=float(ua.get("gate1_psr", 0)), gate1_dsr=float(ua.get("gate1_dsr", 0)),
+            gate1_sqn=float(ua.get("gate1_sqn", 0)),
+            gate1_path_sortino=float(ua.get("gate1_path_sortino", 0)),
+            gate1_tail_ratio=float(ua.get("gate1_tail_ratio", 0)),
+            gate1_p10_gmgr=float(ua.get("gate1_p10_gmgr", 0)),
+            gate1_psr=float(ua.get("gate1_psr", 0)),
+            gate1_dsr=float(ua.get("gate1_dsr", 0)),
             cpcv_mean_path_return_pct=float(ua.get("cpcv_mean_path_return_pct", 0)),
             cpcv_worst_segment_mdd_pct=float(ua.get("cpcv_worst_segment_mdd_pct", 0)),
-            moic=float(oos_port["moic"]), initial_capital_usdt=FUTURES_INITIAL_BALANCE,
-            oos_net_cagr_pct=float(oos_port["cagr_pct"]), oos_mdd_pct=float(oos_port["mdd_pct"]),
-            hw_recovery_days=float(oos_port["hw_recovery_days"]), oos_ulcer_index=float(oos_port.get("ulcer_index", 0)),
-            alpha_decay_pct=0.0, oos_cagr_target_pct=oos_cagr_target, oos_mdd_limit_pct=oos_mdd_limit,
-            hw_recovery_max_days=180.0, alpha_decay_floor_pct=-50.0, oos_cvar_pct=float(oos_port["cvar_pct"]),
-            cvar_limit_pct=12.0, funding_drag_pct=0.0, funding_drag_limit_pct=15.0,
-            terminal_wealth_ratio=float(oos_port["terminal_wealth_ratio"]), tw_target=1.0 - (oos_mdd_limit/100.0),
-            oos_total_trades=int(oos_port["total_trades"]), oos_pf=float(oos_port["profit_factor"]),
-            oos_long_pf=float(oos_port.get("long_pf", 0)), oos_short_pf=float(oos_port.get("short_pf", 0)),
-            oos_short_win_rate_pct=float(oos_port.get("short_win_rate_pct", 0)), oos_ev_cost_ratio=float(oos_port.get("ev_cost_ratio", 0)),
-            pf_target=1.35, oos_calmar=float(oos_port["calmar_ratio"]), calmar_target=1.2, oos_win_rate_pct=float(oos_port["win_rate_pct"]),
-            oos_long_short_minority_pct=float(oos_port["oos_long_short_minority_pct"]), symbol_rows=[], loso_warning="",
-            hard_passed=0, hard_total=10, final_decision_go=True, pbo=0.0, spearman_rho=0.0, pbo_n_paths=0,
-            pbo_gate_passed=True, pbo_hard_gate=False, multi_window_passed=True, multi_window_summary="",
-            regime_diagnostic_block="", oos_long_trades=int(oos_port["long_trades"]), oos_short_trades=int(oos_port["short_trades"]),
-            funding_cost_total_usdt=0.0, gross_pnl_abs_usdt=0.0
+            moic=float(oos_port["moic"]),
+            initial_capital_usdt=FUTURES_INITIAL_BALANCE,
+            oos_net_cagr_pct=oos_portfolio_cagr,
+            oos_mdd_pct=float(oos_port["mdd_pct"]),
+            hw_recovery_days=float(oos_port["hw_recovery_days"]),
+            oos_ulcer_index=float(oos_port.get("ulcer_index", 0)),
+            alpha_decay_pct=alpha_decay_pct,
+            oos_cagr_target_pct=oos_cagr_target,
+            oos_mdd_limit_pct=oos_mdd_limit,
+            hw_recovery_max_days=180.0,
+            alpha_decay_floor_pct=alpha_decay_floor,
+            oos_cvar_pct=float(oos_port["cvar_pct"]),
+            cvar_limit_pct=12.0,
+            funding_drag_pct=funding_drag_pct,
+            funding_drag_limit_pct=15.0,
+            terminal_wealth_ratio=float(oos_port["terminal_wealth_ratio"]),
+            tw_target=1.0 - (oos_mdd_limit / 100.0),
+            oos_total_trades=int(oos_port["total_trades"]),
+            oos_pf=float(oos_port["profit_factor"]),
+            oos_long_pf=float(oos_port.get("long_pf", 0)),
+            oos_short_pf=float(oos_port.get("short_pf", 0)),
+            oos_short_win_rate_pct=float(oos_port.get("short_win_rate_pct", 0)),
+            oos_ev_cost_ratio=float(oos_port.get("ev_cost_ratio", 0)),
+            pf_target=1.35,
+            oos_calmar=float(oos_port["calmar_ratio"]),
+            calmar_target=1.2,
+            oos_win_rate_pct=float(oos_port["win_rate_pct"]),
+            oos_long_short_minority_pct=float(oos_port["oos_long_short_minority_pct"]),
+            symbol_rows=symbol_gate_rows,
+            loso_warning="",
+            hard_passed=sum(core_checks),
+            hard_total=len(core_checks),
+            final_decision_go=is_all_passed,
+            pbo=pbo_val,
+            spearman_rho=rho_val,
+            pbo_n_paths=n_paths,
+            pbo_gate_passed=pbo_val <= 0.45,
+            pbo_hard_gate=False,
+            multi_window_passed=True,
+            multi_window_summary="",
+            regime_diagnostic_block="",
+            oos_long_trades=int(oos_port["long_trades"]),
+            oos_short_trades=int(oos_port["short_trades"]),
+            funding_cost_total_usdt=total_funding_oos,
+            gross_pnl_abs_usdt=total_gross_oos,
+            # Add missing targets to satisfy mypy
+            sqn_target=1.8, path_sortino_target=1.2, tail_ratio_target=0.8,
+            psr_target=0.5, dsr_target=0.5
         ))
         _logger.info("\n%s", report)
 
