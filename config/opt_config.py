@@ -69,8 +69,11 @@ ENGINE_PARAM_SPACE_FUTURES: Dict[str, Dict[str, Any]] = {
 
 
 FUTURES_SYMBOLS: List[str] = [
-    "PIPPIN/USDT",
+    "ETC/USDT",
     "GALA/USDT",
+    "ID/USDT",
+    "NEAR/USDT",
+    "ROSE/USDT",
 ]
 
 FUTURES_ANCHOR_SYMBOLS: List[str] = [
