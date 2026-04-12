@@ -479,7 +479,7 @@ def _futures_tpe_worker_run(payload: Dict[str, Any]) -> None:
                     trial,
                     data_maps=data_maps,
                     symbols=symbols,
-                    tf_target=tf,
+                    tf=tf,
                     space=tf_space,
                     mode=mode,
                     project_root=project_root,
@@ -584,7 +584,7 @@ def _run_tf_optimization(
                     trial,
                     data_maps=ctx.data_maps,
                     symbols=ctx.symbols,
-                    tf_target=tf,
+                    tf=tf,
                     space=tf_space,
                     mode=ctx.mode,
                     project_root=ctx.project_root,
@@ -774,8 +774,12 @@ def _eval_combo_task(
             )
         )
 
-    # Increased trials to 64 for statistical significance of the distribution
-    study.optimize(_obj, n_trials=64, n_jobs=1, show_progress_bar=False)
+    # [REDESIGN] Adaptive trials based on parameter space dimensionality
+    # 64-trial Sobol is insufficient for high-D spaces like RSM_VT (8 params).
+    n_params = len(space) - 3  # Exclude SIGNAL_TYPE, REGIME_TYPE, SIZING_METHOD
+    n_trials = max(64, min(256, n_params * 12))
+
+    study.optimize(_obj, n_trials=n_trials, n_jobs=1, show_progress_bar=False)
 
     completed = [
         t for t in study.trials if t.state == TrialState.COMPLETE and t.value is not None
@@ -871,6 +875,7 @@ def _run_stage1_futures_tournament(
     )
     from src.domain.futures.regimes import FUTURES_REGIME_REGISTRY
     from src.domain.futures.signals import FUTURES_SIGNAL_REGISTRY
+    from src.domain.futures.sizing import FUTURES_SIZING_REGISTRY
 
     _logger.info("Starting Stage 1 Futures Tournament (Robust Edge Discovery)...")
 
@@ -912,9 +917,12 @@ def _run_stage1_futures_tournament(
                 sym_df["funding_rate"].isna().mean() * 100,
             )
 
-    sig_choices = list(FUTURES_SIGNAL_REGISTRY.keys())
-    reg_choices = list(FUTURES_REGIME_REGISTRY.keys())
-    siz_choices = ["inv_vol_parity", "vol_target"]
+    exclude_sigs = {"BB_SQUEEZE"}
+    exclude_regs = {"FUNDING_RATE", "MARKET_BREADTH"}
+
+    sig_choices = [s for s in FUTURES_SIGNAL_REGISTRY.keys() if s not in exclude_sigs]
+    reg_choices = [r for r in FUTURES_REGIME_REGISTRY.keys() if r not in exclude_regs]
+    siz_choices = list(FUTURES_SIZING_REGISTRY.keys())
 
     combos = list(itertools.product(sig_choices, reg_choices, siz_choices))
     _logger.info("   Scanning %d Combinations for Robustness Plateaus...", len(combos))
