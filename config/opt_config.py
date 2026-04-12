@@ -22,8 +22,6 @@ OPT_FUTURES_CONFIG: Dict[str, Any] = {
     "tpe_pruner_n_warmup_steps": 8,
     "tpe_pruner_patience": 2,
     "seeds": [42],
-    "n_jobs": 3,
-    "task_workers": 3,
     "TARGET_TIMEFRAMES": ["4h"],
     "FUTURES_CPCV_N_BLOCKS": 8,  # 10→8: Spot 검증 설정 채택 (block당 91일, path당 통계 신뢰도 향상)
     "FUTURES_CPCV_K_TEST": 3,  # 4→3: C(8,3)=56 paths (기존 210→56, overfitting 기회 74% 감소)
