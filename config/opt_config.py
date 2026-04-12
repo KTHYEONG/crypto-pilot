@@ -20,7 +20,7 @@ OPT_FUTURES_CONFIG: Dict[str, Any] = {
     "combo_top_k": 3,
     "tpe_pruner_n_startup_trials": 10,
     "tpe_pruner_n_warmup_steps": 8,
-    "tpe_pruner_patience": 2,
+    "tpe_pruner_patience": 4,
     "seeds": [42],
     "TARGET_TIMEFRAMES": ["4h"],
     "FUTURES_CPCV_N_BLOCKS": 8,  # 10→8: Spot 검증 설정 채택 (block당 91일, path당 통계 신뢰도 향상)
@@ -40,7 +40,7 @@ OPT_FUTURES_CONFIG: Dict[str, Any] = {
     "FUTURES_STAGE2_MAX_PER_SIGNAL_TYPE": 2,
     "FUTURES_MULTI_WINDOW_OOS_SUBS": 3,
     "FUTURES_MULTI_WINDOW_MIN_POSITIVE": 3,
-    "FUTURES_DISCOVERY_LEVERAGE": 20,
+    "FUTURES_DISCOVERY_LEVERAGE": 5,
     "FUTURES_IS_CAGR_FLOOR": 5.0,
     "FUTURES_OBJECTIVE_FLOOR_WHEN_NO_EDGE": -2.0,
     "FUTURES_MIN_REGIME_ON_RATE": 0.20,  # 0.10→0.20: Spot 22% 기준에 맞춤, 가짜 신호 필터 강화
