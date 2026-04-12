@@ -756,7 +756,21 @@ def _eval_combo_task(
         t for t in study.trials if t.state == TrialState.COMPLETE and t.value is not None
     ]
     if not completed:
-        return None
+        # Collect prune/fail reasons and return them via disqualified CombinationScoreFutures
+        # so the MAIN PROCESS can log them (subprocess _logger is not forwarded to parent).
+        pruned = [t for t in study.trials if t.state == TrialState.PRUNED]
+        failed = [t for t in study.trials if t.state == TrialState.FAIL]
+        reason_dist: Counter[str] = Counter(
+            t.user_attrs.get("prune_reason", "unknown") for t in pruned
+        )
+        if failed:
+            reason_dist["__failed__"] = len(failed)
+        reason_str = str(dict(reason_dist)) if reason_dist else "no_trials"
+        return CombinationScoreFutures(
+            signal=sig, regime=reg, sizing=siz,
+            p10_gmgr=-1e9, ls_ratio=0.0, mean_signal_rate=0.0,
+            disqualified=True, reason=reason_str,
+        )
 
     # [REDESIGN] Robustness Scoring: Target "Broad Plateaus" instead of "Fragile Peaks"
     # [EXPLOSIVE GROWTH] Decouple from heavily penalized objective_final for structural evaluation.
@@ -850,14 +864,26 @@ def _run_stage1_futures_tournament(
                 sig, reg, siz = futures_map[f]
                 try:
                     score = f.result()
-                    if score:
+                    if score and not score.disqualified:
                         results.append(score)
                         pbar.set_postfix({"last": f"{sig[:5]}..", "robust_sc": f"{score.p10_gmgr:.3f}"})
+                    elif score and score.disqualified:
+                        # Disqualified = all trials pruned/failed in subprocess.
+                        # Log here in main process since subprocess logs are not forwarded.
+                        _logger.warning(
+                            "  [%s×%s×%s] ALL PRUNED: %s", sig, reg, siz, score.reason
+                        )
                 except Exception as e:
                     _logger.error("      Error evaluating combo [%s x %s x %s]: %s", sig, reg, siz, e)
                 pbar.update(1)
 
     results.sort(key=lambda x: x.p10_gmgr, reverse=True)
+    if not results:
+        _logger.warning(
+            "Stage 1: Tournament returned 0 valid combos across all %d combinations. "
+            "See [ALL PRUNED] lines above for exact prune_reason distribution per combo.",
+            len(combos),
+        )
     if results:
         _logger.info("\n" + "=" * SEP_WIDTH)
         _logger.info("🏆 STAGE 1 TOURNAMENT RANKING (Top 10)")
