@@ -392,7 +392,10 @@ class BinanceClient:
                 url = f"{base_url}?{qs}"
                 if not url.startswith(("http://", "https://")):
                     raise ValueError(f"Invalid URL scheme: {url}")
-                req = urllib.request.Request(url, method="GET")  # noqa: S310
+                headers = {
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+                }
+                req = urllib.request.Request(url, method="GET", headers=headers)
                 try:
                     with urllib.request.urlopen(req, timeout=timeout_sec) as resp:  # noqa: S310
                         raw = resp.read().decode("utf-8")
@@ -536,7 +539,7 @@ class BinanceClient:
         """
         base_url = "https://fapi.binance.com/fapi/v1/fundingRate"
         timeout_sec = API_READ_TIMEOUT
-        limit = 1000
+        limit = 500
 
         try:
             market = self.exchange.market(symbol)
@@ -593,7 +596,10 @@ class BinanceClient:
             url = f"{base_url}?{qs}"
             if not url.startswith(("http://", "https://")):
                 raise ValueError(f"Invalid URL scheme: {url}")
-            req = urllib.request.Request(url, method="GET")  # noqa: S310
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+            }
+            req = urllib.request.Request(url, method="GET", headers=headers)
             try:
                 with urllib.request.urlopen(req, timeout=timeout_sec) as resp:  # noqa: S310
                     raw = resp.read().decode("utf-8")

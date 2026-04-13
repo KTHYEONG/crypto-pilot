@@ -85,14 +85,20 @@ class DataCollector:
 
     def _save_meta(self, meta_updates: dict[str, Any]):
         """
-        Concurrency-aware metadata update.
-        Loads latest from disk, merges updates, and saves.
+        Concurrency-aware metadata update with deep merge.
+        Prevents losing 'earliest_available' when updating 'last_checked'.
         """
         path = self._meta_path()
         try:
-            # Reload to merge with potential changes from other processes/calls
             current_meta = self._load_meta()
-            current_meta.update(meta_updates)
+            
+            for mk, updates in meta_updates.items():
+                if mk not in current_meta:
+                    current_meta[mk] = {}
+                if isinstance(updates, dict) and isinstance(current_meta[mk], dict):
+                    current_meta[mk].update(updates)
+                else:
+                    current_meta[mk] = updates
             
             tmp = path.with_suffix(".tmp.json")
             with open(tmp, "w", encoding="utf-8") as f:
@@ -275,6 +281,8 @@ class DataCollector:
         meta = self._load_meta()
         mk = self._meta_key(symbol, timeframe)
         earliest_known = None
+        last_checked = None
+        
         if mk in meta and isinstance(meta[mk], dict):
             v = meta[mk].get("earliest_available")
             if v:
@@ -282,6 +290,13 @@ class DataCollector:
                     earliest_known = pd.Timestamp(v).normalize()
                 except Exception:
                     earliest_known = None
+            
+            lc = meta[mk].get("last_checked")
+            if lc:
+                try:
+                    last_checked = pd.Timestamp(lc).normalize()
+                except Exception:
+                    last_checked = None
 
         if cache_path.exists():
             cache_df = self._read_parquet(cache_path)
@@ -313,7 +328,9 @@ class DataCollector:
                     missing_ranges.append((eff_start, cache_start - pd.Timedelta(days=1)))
 
             if req_end > cache_end:
-                missing_ranges.append((cache_end + pd.Timedelta(days=1), req_end))
+                # [[FIX]] 상한선 체크: 이미 최근에 확인했다면 건너뜀
+                if last_checked is None or req_end > last_checked:
+                    missing_ranges.append((cache_end + pd.Timedelta(days=1), req_end))
 
         fetched_frames: list[pd.DataFrame] = []
         for s_dt, e_dt in missing_ranges:
@@ -331,6 +348,10 @@ class DataCollector:
             self._write_parquet(cache_path, merged)
             cache_df = merged
             self.logger.info(f"Updated parquet cache: {cache_path}")
+        
+        # Always update last_checked if we attempted a suffix fetch
+        if req_end > cache_end:
+            self._save_meta({mk: {"last_checked": req_end.strftime("%Y-%m-%d")}})
         elif not cache_path.exists() and not cache_df.empty:
             self._write_parquet(cache_path, cache_df)
 
@@ -401,9 +422,11 @@ class DataCollector:
                 cache_df = pd.DataFrame(columns=["timestamp", "funding_rate"])
 
         missing_ranges: list[tuple[pd.Timestamp, pd.Timestamp]] = []
-        mk = self._meta_key(symbol, "funding")
         meta = self._load_meta()
+        mk = self._meta_key(symbol, "funding")
         earliest_known = None
+        last_checked = None
+
         if mk in meta and isinstance(meta[mk], dict):
             v = meta[mk].get("earliest_available_funding")
             if v:
@@ -411,6 +434,12 @@ class DataCollector:
                     earliest_known = pd.Timestamp(v).normalize()
                 except Exception:
                     earliest_known = None
+            lc = meta[mk].get("last_checked_funding")
+            if lc:
+                try:
+                    last_checked = pd.Timestamp(lc).normalize()
+                except Exception:
+                    last_checked = None
         
         # [DIAGNOSTIC]
         self.logger.debug(f"[DEBUG] {symbol} funding mk={mk} v={v} earliest_known={earliest_known}")
@@ -434,7 +463,8 @@ class DataCollector:
                 if eff_start < cache_start:
                     missing_ranges.append((eff_start, cache_start - pd.Timedelta(days=1)))
             if req_end > cache_end:
-                missing_ranges.append((cache_end + pd.Timedelta(days=1), req_end))
+                if last_checked is None or req_end > last_checked:
+                    missing_ranges.append((cache_end + pd.Timedelta(days=1), req_end))
 
         fetched_frames: list[pd.DataFrame] = []
         for range_start, range_end in missing_ranges:
@@ -464,6 +494,9 @@ class DataCollector:
             self._write_parquet(path, merged)
             self.logger.info("Updated funding parquet cache: %s", path)
             cache_df = merged
+
+        if req_end > cache_end:
+            self._save_meta({mk: {"last_checked_funding": req_end.strftime("%Y-%m-%d")}})
 
         if not cache_df.empty:
             earliest_dt = pd.to_datetime(cache_df["timestamp"].min(), unit="ms").normalize()
