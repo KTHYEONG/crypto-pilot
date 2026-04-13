@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import copy
+import importlib
 import logging
 import multiprocessing
 import os
@@ -36,6 +37,7 @@ if project_root not in sys.path:
 
 import warnings  # noqa: E402
 
+import config.opt_config  # noqa: E402
 from config.opt_config import (  # noqa: E402
     FUTURES_ANCHOR_SYMBOLS,
     FUTURES_SCREENER_CONFIG,
@@ -259,14 +261,27 @@ def _align_oos_dataframes_on_common_datetimes(
     sym_list = list(symbols)
     if len(sym_list) < 2:
         return
-    dts = [set(oos_data_maps[s][tf]["datetime"]) for s in sym_list]
+    dts = []
+    for s in sym_list:
+        if tf in oos_data_maps[s]:
+            dts.append(set(oos_data_maps[s][tf]["datetime"]))
+        else:
+            _logger.warning(f"Symbol {s} missing timeframe {tf} in oos_data_maps")
+            
+    if not dts:
+        return
+
     common_set = set.intersection(*dts)
     if len(common_set) < 200:
-        raise ValueError("Insufficient overlapping bars in OOS maps after alignment.")
+        # Identify problematic symbols with low overlap
+        for s in sym_list:
+            s_dts = set(oos_data_maps[s][tf]["datetime"])
+            overlap = len(s_dts.intersection(common_set)) if common_set else 0
+            _logger.info(f"  - {s}: total={len(s_dts)}, overlap_with_common={overlap}")
+        raise ValueError(f"Insufficient overlapping bars ({len(common_set)}) in OOS maps.")
 
     for sym in sym_list:
         df = oos_data_maps[sym][tf]
-        # [OPTIMIZATION] Filter using common set for O(N) alignment
         isin_mask = df["datetime"].isin(common_set)
         filtered = df[isin_mask].sort_values("datetime").reset_index(drop=True)
         oos_data_maps[sym][tf] = filtered
@@ -681,7 +696,11 @@ def _load_futures_data_maps_for_symbols(
     valid_symbols: List[str] = []
     min_bars = int(FUTURES_SCREENER_CONFIG.get("MIN_HISTORY_BARS", 2000))
 
-    for sym in symbols:
+    # BTC/ETH를 항상 포함하여 로드 시도
+    essential = ["BTC/USDT", "ETH/USDT"]
+    load_symbols = list(dict.fromkeys(symbols + essential))
+
+    for sym in load_symbols:
         try:
             temp_is: Dict[str, Any] = {}
             temp_oos: Dict[str, Any] = {}
@@ -691,7 +710,6 @@ def _load_futures_data_maps_for_symbols(
                 raw_df = collector.collect_and_save(sym, tf_l, fetch_start, end)
                 df = merge_funding_into_ohlcv(sym, raw_df, FUTURES_DATA_DIR)
                 
-                # Check for minimum bars: anchor symbols can bypass the 2000 strict limit and just require 500
                 is_anchor = sym in FUTURES_ANCHOR_SYMBOLS
                 min_required = 500 if is_anchor and tf_l == tf else (min_bars if tf_l == tf else 200)
                 
@@ -714,12 +732,15 @@ def _load_futures_data_maps_for_symbols(
                 temp_oos[f"oos_start_idx_{tf_l}"] = int(mask_oos.to_numpy().argmax()) if mask_oos.any() else len(df)
             
             if insufficient:
+                if sym in essential and sym not in symbols:
+                    _logger.warning(f"Essential symbol {sym} has insufficient data but is required for macro indicators.")
                 continue
                 
             temp_is[f"merge_idx_{tf}"] = compute_segment_merge_index(temp_is[tf], temp_is["1d"])
             temp_oos[f"merge_idx_{tf}"] = compute_segment_merge_index(temp_oos[tf], temp_oos["1d"])
             data_maps[sym], oos_data_maps[sym] = temp_is, temp_oos
-            valid_symbols.append(sym)
+            if sym in symbols:
+                valid_symbols.append(sym)
         except Exception as e:
             _logger.warning("Failed to load symbol %s: %s", sym, e)
             continue
@@ -728,14 +749,17 @@ def _load_futures_data_maps_for_symbols(
         ref_tz = oos_data_maps[valid_symbols[0]][tf]["datetime"].dt.tz
         is_start_align = pd.to_datetime(start).tz_localize(ref_tz) if ref_tz else pd.to_datetime(start)
         is_end_align = pd.to_datetime(is_end).tz_localize(ref_tz) if ref_tz else pd.to_datetime(is_end)
-        _align_oos_dataframes_on_common_datetimes(oos_data_maps, valid_symbols, tf, is_end_align)
-        _rebuild_is_data_maps_from_aligned_oos(data_maps, oos_data_maps, valid_symbols, tf, is_start_align, is_end_align)
+        
+        # Align ALL loaded symbols including BTC/ETH
+        all_loaded = list(data_maps.keys())
+        _align_oos_dataframes_on_common_datetimes(oos_data_maps, all_loaded, tf, is_end_align)
+        _rebuild_is_data_maps_from_aligned_oos(data_maps, oos_data_maps, all_loaded, tf, is_start_align, is_end_align)
 
     for rc, cn in [("BTC/USDT", "btc_close"), ("ETH/USDT", "eth_close")]:
         if rc in data_maps:
             rd = data_maps[rc][tf][["datetime", "close"]].rename(columns={"close": cn})
             rdo = oos_data_maps[rc][tf][["datetime", "close"]].rename(columns={"close": cn})
-            for s in valid_symbols:
+            for s in data_maps:
                 if s != rc:
                     data_maps[s][tf] = data_maps[s][tf].merge(rd, on="datetime", how="left")
                     oos_data_maps[s][tf] = oos_data_maps[s][tf].merge(rdo, on="datetime", how="left")
@@ -753,10 +777,6 @@ def _load_futures_data_maps_for_symbols(
 
 
 def main() -> None:
-    import importlib
-
-    import config.opt_config
-
     pre_parser = argparse.ArgumentParser(add_help=False)
     pre_parser.add_argument("--skip-universe", action="store_true")
     pre_parser.add_argument("--reference-date", type=str, default=None)
@@ -765,22 +785,12 @@ def main() -> None:
     pre_parser.add_argument("--tf", type=str, default="4h")
     pre_args, _ = pre_parser.parse_known_args()
 
-    phase0_narrowed_space: Optional[Dict[str, Dict[str, Any]]] = None
-    
     # [수정] 메모리 절약을 위한 디스크 캐시 활성화
     signal_cache_dir = str(Path(project_root) / "data" / "cache_futures")
     Path(signal_cache_dir).mkdir(parents=True, exist_ok=True)
 
     if not pre_args.skip_universe:
-        from src.domain.futures.opt_futures_utils.combination_screener_futures import (
-            build_probe_params_futures,
-            run_combination_screening_futures,
-        )
-        from src.domain.futures.opt_futures_utils.opt_params import (
-            build_multi_combo_param_space_futures,
-        )
         from src.domain.futures.opt_futures_utils.universe_screener_futures import (
-            load_screener_fixed_params_futures,
             screen_futures_universe,
             screen_symbol_refinement_futures,
         )
@@ -788,20 +798,20 @@ def main() -> None:
         fetch_start_date, start_date, is_end_date, end_date = get_quarterly_window(pre_args.reference_date)
         
         collector = DataCollector()
+        # Phase A: Market-wide scan
         broad_candidates, _ = screen_futures_universe(
-            collector, [], pre_args.tf, config.opt_config.FUTURES_SCREENER_CONFIG, fetch_start_date, is_end_date, data_dir=FUTURES_DATA_DIR
+            collector, [], pre_args.tf, FUTURES_SCREENER_CONFIG, fetch_start_date, is_end_date, data_dir=FUTURES_DATA_DIR
         )
-        importlib.reload(config.opt_config)
 
         if not broad_candidates:
             _logger.error("Phase A returned no broad candidates. Aborting.")
             return
 
-        anchors_to_add = [s for s in config.opt_config.FUTURES_ANCHOR_SYMBOLS if s not in broad_candidates]
+        anchors_to_add = [s for s in FUTURES_ANCHOR_SYMBOLS if s not in broad_candidates]
         all_symbols_for_load = list(dict.fromkeys(list(broad_candidates) + anchors_to_add))
-        broad_candidates = all_symbols_for_load
 
-        data_maps_broad, _, valid_broad = _load_futures_data_maps_for_symbols(            all_symbols_for_load, pre_args.tf, fetch_start_date, start_date, is_end_date, end_date
+        data_maps_broad, _, valid_broad = _load_futures_data_maps_for_symbols(
+            all_symbols_for_load, pre_args.tf, fetch_start_date, start_date, is_end_date, end_date
         )
 
         if len(valid_broad) < 1:
@@ -809,28 +819,22 @@ def main() -> None:
             return
 
         # Phase C: MHRH (Microstructure-Homogeneous, Returns-Heterogeneous) Refinement
-        # This replaces the old Phase B + C combination screening with a purely
-        # statistical approach that ensures symbol compatibility and tail-risk protection.
         _logger.info("Phase C: MHRH statistical refinement (is_end=%s)", is_end_date)
         
-        # [V5 Logic] Determination of winning_signal_type is now deferred to Stage 1 tournament.
-        # We pass a placeholder to the screener as it no longer uses it for fit.
-        winning_signal_type = "MHRH_PROBE"
-        phase_b_params = None
-
-        screen_symbol_refinement_futures(
+        success = screen_symbol_refinement_futures(
             broad_candidates=list(broad_candidates),
-            winning_signal_type=winning_signal_type,
+            winning_signal_type="MHRH_PROBE",
             is_end_date=is_end_date,
             symbol_dfs_4h={s: data_maps_broad[s][pre_args.tf] for s in valid_broad},
             daily_dfs={s: data_maps_broad[s]["1d"] for s in valid_broad},
-            phase_b_params=phase_b_params,
-            anchor_symbols=config.opt_config.FUTURES_ANCHOR_SYMBOLS,
+            phase_b_params=None,
+            anchor_symbols=FUTURES_ANCHOR_SYMBOLS,
         )
+        if not success:
+            _logger.error("Phase C refinement returned failure. Aborting to prevent optimization with broken universe.")
+            return
 
         # Reload config to get the updated FUTURES_SYMBOLS written by Phase C
-        importlib.reload(config.opt_config)
-        globals()["FUTURES_SYMBOLS"] = config.opt_config.FUTURES_SYMBOLS
         importlib.reload(config.opt_config)
 
     parser = argparse.ArgumentParser()
@@ -858,8 +862,8 @@ def main() -> None:
 
     runtime_policy = _resolve_futures_parallel_policy(len(valid_symbols), args.tf)
     
-    narrowed_space_effective = phase0_narrowed_space
-    if not args.skip_stage1 and narrowed_space_effective is None:
+    narrowed_space_effective = None
+    if not args.skip_stage1:
         narrowed_space_effective = _run_stage1_structure_discovery(
             data_maps=data_maps,
             symbols=valid_symbols,
@@ -1001,9 +1005,15 @@ def main() -> None:
                     (_base ** (365.0 / max(days_oos, 1.0)) - 1.0) * 100.0
                     if sym_t_oos > 0 else 0.0
                 )
-                # C4: Per-symbol MDD needs per-symbol equity curve (not available from
-                # PortfolioBacktestEngineFast). Advisory only — not used for hard gating.
-                sym_m_oos = 0.0
+                # C4: Per-symbol MDD calculation from symbol-specific trades
+                s_pnl_arr = sym_trades["pnl"].to_numpy() - sym_trades["entry_fee"].to_numpy()
+                if len(s_pnl_arr) > 0:
+                    s_eq = np.cumsum(s_pnl_arr) + (FUTURES_INITIAL_BALANCE / len(target_symbols))
+                    peak = np.maximum.accumulate(s_eq)
+                    dd = (peak - s_eq) / np.maximum(peak, 1e-9)
+                    sym_m_oos = float(dd.max() * 100.0)
+                else:
+                    sym_m_oos = 0.0
             else:
                 sym_ann_cagr, sym_m_oos, sym_wr_oos, sym_t_oos = 0.0, 0.0, 0.0, 0
 
@@ -1113,9 +1123,9 @@ def main() -> None:
             oos_short_trades=int(oos_port["short_trades"]),
             funding_cost_total_usdt=total_funding_oos,
             gross_pnl_abs_usdt=total_gross_oos,
-            # Add missing targets to satisfy mypy
-            sqn_target=1.8, path_sortino_target=1.2, tail_ratio_target=0.8,
-            psr_target=0.5, dsr_target=0.5
+            # Add missing targets to satisfy mypy (aligned with go_nogo.py internal targets)
+            sqn_target=1.6, path_sortino_target=1.2, tail_ratio_target=0.8,
+            psr_target=0.4, dsr_target=0.2
         ))
         _logger.info("\n%s", report)
 
