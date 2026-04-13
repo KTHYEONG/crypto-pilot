@@ -346,19 +346,19 @@ def objective_futures(
                     initial_balance=float(FUTURES_INITIAL_BALANCE),
                     fee_rate=TRADING_FEE_RATE, slippage_rate=SLIPPAGE_RATE,
                 )
-                trades_df, equity_curve, final_balance = engine.run()
+                b_trades_df, equity_curve, final_balance = engine.run()
             except Exception as exc:
                 _logger.warning("Block backtest error: %s", exc)
                 continue
 
-            if trades_df is None or trades_df.empty:
+            if b_trades_df is None or b_trades_df.empty:
                 block_results[(b_start, b_end)] = {"log_ret": -1.0, "mdd": 100.0, "trades": 0}
                 continue
 
-            p_arr = trades_df["pnl"].to_numpy(dtype=np.float64, copy=False)
-            f_arr = trades_df["entry_fee"].to_numpy(dtype=np.float64, copy=False)
+            p_arr = b_trades_df["pnl"].to_numpy(dtype=np.float64, copy=False)
+            f_arr = b_trades_df["entry_fee"].to_numpy(dtype=np.float64, copy=False)
             true_pnl_arr = p_arr - f_arr
-            side_arr = trades_df["side"].to_numpy(copy=False)
+            side_arr = b_trades_df["side"].to_numpy(copy=False)
 
             block_results[(b_start, b_end)] = {
                 "log_ret": _log_tw_from_ret_pct(
@@ -375,8 +375,10 @@ def objective_futures(
                 "long_pnls": true_pnl_arr[side_arr == "LONG"].tolist(),
                 "short_pnls": true_pnl_arr[side_arr == "SHORT"].tolist(),
                 "funding_ratio": float(
-                    trades_df["funding_fee"].sum() / max(np.abs(p_arr).sum(), 1e-9)
-                ) if "funding_fee" in trades_df.columns else 0.0
+                    b_trades_df["funding_fee"].sum() / max(np.abs(p_arr).sum(), 1e-9)
+                ) if "funding_fee" in b_trades_df.columns else 0.0,
+                # Store full trades slice for per-symbol Min-Max evaluation
+                "trades_slice": b_trades_df
             }
         else:
             # Single mode memoization
@@ -515,7 +517,29 @@ def objective_futures(
     l_pf = calc_profit_factor_from_pnl(np.array(all_long_pnls)) if all_long_pnls else 1.5
     s_pf = calc_profit_factor_from_pnl(np.array(all_short_pnls)) if all_short_pnls else 1.5
     min_dir_pf = min(l_pf, s_pf)
-    d_directional = float(np.clip(1.0 - (max(0.0, 1.10 - min_dir_pf) / 0.10), 0.01, 1.0))
+    d_directional = float(np.clip(1.0 - (max(0.0, 1.15 - min_dir_pf) / 0.15), 0.01, 1.0))
+
+    # --- [New V5] Min-Max Symbol Penalty ---
+    # Ensure no single symbol is holding back the portfolio or being 'sacrificed'
+    d_min_sym_pf = 1.0
+    if mode == "multi":
+        sym_pfs = []
+        # Get all unique trades across memoized blocks
+        all_unique_trades_list = [res["trades_slice"] for res in block_results.values() if "trades_slice" in res]
+        if all_unique_trades_list:
+            all_is_trades = pd.concat(all_unique_trades_list)
+            for s_eval in symbols:
+                s_trades = all_is_trades[all_is_trades["symbol"] == s_eval]
+                if s_trades.empty:
+                    sym_pfs.append(0.0)
+                    continue
+                s_pnl = s_trades["pnl"].to_numpy() - s_trades["entry_fee"].to_numpy()
+                s_pf_val = calc_profit_factor_from_pnl(s_pnl)
+                sym_pfs.append(s_pf_val)
+            
+            min_s_pf = min(sym_pfs)
+            # Penalty starts if any individual symbol PF < 1.10
+            d_min_sym_pf = float(np.clip(min_s_pf / 1.10, 0.0, 1.0))
 
     stability_bonus = 0.0
     if path_arr.size >= 2:
@@ -526,7 +550,7 @@ def objective_futures(
             stability_bonus += min(0.1, (psort - 1.5) * 0.05)
 
     objective_final = (
-        p10_gmgr * (d_fund * d_balance * d_stability * d_temporal * d_cvar * d_mdd * d_directional)
+        p10_gmgr * (d_fund * d_balance * d_stability * d_temporal * d_cvar * d_mdd * d_directional * d_min_sym_pf)
         + stability_bonus
     )
 
