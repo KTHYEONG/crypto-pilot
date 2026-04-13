@@ -245,15 +245,18 @@ def _rebuild_is_data_maps_from_aligned_oos(
 ) -> None:
     for sym in symbols:
         full = oos_data_maps[sym][tf]
-        # [OPTIMIZATION] Use .copy() to prevent SettingWithCopyWarning and memory leaks between IS/OOS
+        # [OPTIMIZATION] Use .copy() to prevent SettingWithCopyWarning
+        # and memory leaks between IS/OOS
         is_mask = full["datetime"] < is_end_dt
         is_end_idx = int(is_mask.to_numpy().sum())
         is_df_view = full.iloc[:is_end_idx].copy()
-        
+
         data_maps[sym][tf] = is_df_view
         m = is_df_view["datetime"] >= is_start_dt
         data_maps[sym][f"is_start_idx_{tf}"] = int(m.to_numpy().argmax()) if bool(m.any()) else 0
-        data_maps[sym][f"merge_idx_{tf}"] = compute_segment_merge_index(is_df_view, data_maps[sym]["1d"])
+        data_maps[sym][f"merge_idx_{tf}"] = compute_segment_merge_index(
+            is_df_view, data_maps[sym]["1d"]
+        )
 
 
 def _align_oos_dataframes_on_common_datetimes(
@@ -451,7 +454,9 @@ def _run_tf_optimization(
             n_startup_trials=int(OPT_FUTURES_CONFIG.get("tpe_pruner_n_startup_trials", 10)),
             n_warmup_steps=int(OPT_FUTURES_CONFIG.get("tpe_pruner_n_warmup_steps", 8))
         )
-        pruner = PatientPruner(base_p, patience=int(OPT_FUTURES_CONFIG.get("tpe_pruner_patience", 2)))
+        pruner = PatientPruner(
+            base_p, patience=int(OPT_FUTURES_CONFIG.get("tpe_pruner_patience", 2))
+        )
 
     from src.domain.futures.opt_futures_utils.objective import (
         compute_multi_alignment_info,
@@ -1016,7 +1021,10 @@ def main() -> None:
         ))
         _logger.info("\n%s", report)
 
-        if float(ua.get("growth_score", 0)) > 0 or int(args.trials) <= 2:
+        growth_score = float(ua.get("growth_score", 0))
+        should_save = (growth_score > 0 and is_all_passed) or int(args.trials) <= 2
+
+        if should_save:
             res_dir = Path(project_root) / "results"
             res_dir.mkdir(parents=True, exist_ok=True)
             jp = res_dir / f"{BEST_PARAMS_FUTURES_JSON_STEM}.json"
@@ -1026,6 +1034,12 @@ def main() -> None:
             sec = get_strategy_secret()
             if sec:
                 jp.with_suffix(".enc").write_bytes(encrypt_config(params, sec))
+        else:
+            _logger.info(
+                "JSON save skipped: criteria not met (growth_score / gates). "
+                "growth_score=%.4f, gates_passed=%s",
+                growth_score, is_all_passed
+            )
 
 if __name__ == "__main__":
     main()
