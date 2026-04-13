@@ -119,7 +119,7 @@ def _screen_worker_v2(
     atr_pct = (np.mean(tr[-14:]) / last_price) * 100.0
 
     # --- Phase 4: Funding Stats ---
-    funding = df["funding_rate"].to_numpy()
+    funding = df["funding_rate"].to_numpy() if "funding_rate" in df.columns else np.zeros(len(df))
     mean_funding = np.mean(funding[-180:]) if len(funding) >= 180 else 0.0
     
     # [EXPLOSIVE GROWTH] Quality Score now rewards trendiness + positive bias + liquidity
