@@ -610,9 +610,9 @@ def _run_stage1_alpha_ic_discovery(
 ) -> tuple[str, float, Dict[str, Any]]:
     """Phase C-1: Optimize signal parameters for MAX Information Coefficient (IC)"""
     from src.domain.futures.opt_futures_utils.opt_params import suggest_params_futures
-    from src.domain.futures.signals import get_futures_signal
+    from src.domain.futures.signals import FUTURES_SIGNAL_REGISTRY
 
-    sig_class = get_futures_signal(sig_type)
+    sig_inst = FUTURES_SIGNAL_REGISTRY[sig_type]
     base_space = get_search_space_futures(tf)
     # Filter search space for this signal type only to speed up C-1
     stage_space = {
@@ -633,7 +633,6 @@ def _run_stage1_alpha_ic_discovery(
     def objective(trial: optuna.Trial) -> float:
         params = suggest_params_futures(trial, stage_space, tf)
         ics = []
-        sig_inst = sig_class()
         for sym in symbols:
             df = data_maps[sym][tf]
             out = sig_inst.compute(df, params)
@@ -656,27 +655,27 @@ def _run_stage1_regime_pairing(
     symbols: List[str],
 ) -> str:
     """Phase C-2: Find the best Regime for a proven Signal using Conditional IC Utility"""
-    from src.domain.futures.regimes import get_futures_regime_registry
-    from src.domain.futures.signals import get_futures_signal
+    from src.domain.futures.regimes import FUTURES_REGIME_REGISTRY
+    from src.domain.futures.signals import FUTURES_SIGNAL_REGISTRY
 
-    reg_registry = get_futures_regime_registry()
-    sig_inst = get_futures_signal(sig_type)()
+    sig_inst = FUTURES_SIGNAL_REGISTRY[sig_type]
 
     best_regime = "NONE"
     max_utility = -1e9
 
     target_map = {sym: compute_vol_adj_forward_returns(data_maps[sym][tf]) for sym in symbols}
 
-    for reg_name, reg_class in reg_registry.items():
+    for reg_name, reg_inst in FUTURES_REGIME_REGISTRY.items():
         utilities = []
-        reg_inst = reg_class()
         for sym in symbols:
             df = data_maps[sym][tf]
             # Use default regime params for initial pairing discovery
-            reg_mask = reg_inst.compute(df, {})
+            long_mult, short_mult = reg_inst.compute_long_short_mult(df, {})
+            # Active if either side is allowed
+            reg_mask = (long_mult + short_mult) > 1e-6
             sig_scores = sig_inst.compute(df, sig_params).rank_score
 
-            c_ic, cov = calculate_conditional_ic(sig_scores, target_map[sym], reg_mask)
+            c_ic, cov = calculate_conditional_ic(sig_scores, target_map[sym], reg_mask.astype(np.float64))
             # Utility = cIC * sqrt(Coverage) to penalize extremely rare regimes
             utility = c_ic * np.sqrt(max(0.01, cov))
             utilities.append(utility)
@@ -739,10 +738,11 @@ def _run_stage1_structure_discovery(
 
     discovery_results.sort(key=lambda x: x[1], reverse=True)
     
-    ic_threshold = 0.025
+    # Selection criteria: Select top_k signals that have a strictly positive IC
+    # Fallback: Always keep at least the absolute best signal even if IC <= 0
     winning = [
         (s, r, p) for s, ic, r, p in discovery_results 
-        if ic > ic_threshold or (s == discovery_results[0][0])
+        if ic > 0.0 or (s == discovery_results[0][0])
     ]
     winning = winning[:max(1, top_k)]
     winning_names = [w[0] for w in winning]
