@@ -23,7 +23,7 @@ class AdxBreakoutFuturesSignal:
         "ADX_KC_PERIOD": {"type": "int", "low": 10, "high": 35, "step": 5},
         "ADX_LONG_KC_MULT": {"type": "float", "low": 0.5, "high": 2.5, "step": 0.25},
         "ADX_SHORT_KC_MULT": {"type": "float", "low": 1.0, "high": 3.5, "step": 0.25},
-        "ADX_THRESHOLD": {"type": "float", "low": 15.0, "high": 35.0, "step": 2.5},
+        "ADX_THRESHOLD": {"type": "float", "low": 20.0, "high": 35.0, "step": 2.5},
     }
 
     def compute(self, df: pd.DataFrame, params: Dict[str, Any]) -> FuturesSignalOutput:
