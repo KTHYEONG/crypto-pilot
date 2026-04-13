@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import sys
@@ -82,12 +83,23 @@ class DataCollector:
         except Exception:
             return {}
 
-    def _save_meta(self, meta):
+    def _save_meta(self, meta_updates: dict[str, Any]):
+        """
+        Concurrency-aware metadata update.
+        Loads latest from disk, merges updates, and saves.
+        """
         path = self._meta_path()
-        tmp = path.with_suffix(".tmp.json")
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(meta, f, ensure_ascii=False, indent=2)
-        tmp.replace(path)
+        try:
+            # Reload to merge with potential changes from other processes/calls
+            current_meta = self._load_meta()
+            current_meta.update(meta_updates)
+            
+            tmp = path.with_suffix(".tmp.json")
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(current_meta, f, ensure_ascii=False, indent=2)
+            tmp.replace(path)
+        except Exception as e:
+            self.logger.error(f"Failed to save metadata: {e}")
 
     TAKE_COLUMNS = (
         "timestamp",
@@ -299,10 +311,18 @@ class DataCollector:
 
                 if eff_start < cache_start:
                     missing_ranges.append((eff_start, cache_start - pd.Timedelta(days=1)))
+
             if req_end > cache_end:
                 missing_ranges.append((cache_end + pd.Timedelta(days=1), req_end))
 
-        fetched_frames = self._fetch_ranges(symbol, timeframe, missing_ranges)
+        fetched_frames: list[pd.DataFrame] = []
+        for s_dt, e_dt in missing_ranges:
+            s_str = s_dt.strftime("%Y-%m-%d")
+            e_str = e_dt.strftime("%Y-%m-%d")
+            self.logger.info(f"Fetching missing range for {symbol} {timeframe}: {s_str} ~ {e_str}")
+            fetched = self.client.fetch_ohlcv_with_taker(symbol, timeframe, s_str, e_str)
+            if not fetched.empty:
+                fetched_frames.append(fetched)
 
         if fetched_frames:
             all_frames = [cache_df] if not cache_df.empty else []
@@ -331,15 +351,16 @@ class DataCollector:
 
         # Persist earliest available date to avoid repeated pre-listing downloads.
         if not cache_df.empty:
-            earliest = cache_df["datetime"].min().normalize().strftime("%Y-%m-%d")
-            prev = None
-            if mk in meta and isinstance(meta[mk], dict):
-                prev = meta[mk].get("earliest_available")
-            if prev != earliest:
-                if mk not in meta or not isinstance(meta[mk], dict):
-                    meta[mk] = {}
-                meta[mk]["earliest_available"] = earliest
-                self._save_meta(meta)
+            earliest_dt = cache_df["datetime"].min().normalize()
+            earliest_str = earliest_dt.strftime("%Y-%m-%d")
+            
+            # If we know it's earlier than what we have in meta, or meta is empty, update it.
+            if mk not in meta or meta[mk].get("earliest_available") != earliest_str:
+                self._save_meta({mk: {"earliest_available": earliest_str}})
+        elif earliest_known is None and not fetched_frames and missing_ranges:
+            # We tried to fetch the whole requested range and got nothing. 
+            # This is a dead coin or has no data in this range.
+            self._save_meta({mk: {"earliest_available": req_end.strftime("%Y-%m-%d")}})
 
         return self._slice_by_date(cache_df, start, end)
 
@@ -390,6 +411,9 @@ class DataCollector:
                     earliest_known = pd.Timestamp(v).normalize()
                 except Exception:
                     earliest_known = None
+        
+        # [DIAGNOSTIC]
+        self.logger.debug(f"[DEBUG] {symbol} funding mk={mk} v={v} earliest_known={earliest_known}")
 
         if cache_df.empty:
             # [[FIX]] 펀딩비도 상장일 메타데이터가 있다면 그 이전은 조회하지 않음
@@ -442,16 +466,13 @@ class DataCollector:
             cache_df = merged
 
         if not cache_df.empty:
-            earliest = (
-                pd.to_datetime(cache_df["timestamp"].min(), unit="ms")
-                .normalize()
-                .strftime("%Y-%m-%d")
-            )
-            if mk not in meta:
-                meta[mk] = {}
-            if meta[mk].get("earliest_available_funding") != earliest:
-                meta[mk]["earliest_available_funding"] = earliest
-                self._save_meta(meta)
+            earliest_dt = pd.to_datetime(cache_df["timestamp"].min(), unit="ms").normalize()
+            earliest_str = earliest_dt.strftime("%Y-%m-%d")
+            if mk not in meta or meta[mk].get("earliest_available_funding") != earliest_str:
+                self._save_meta({mk: {"earliest_available_funding": earliest_str}})
+        elif earliest_known is None and not fetched_frames and missing_ranges:
+            # Mark dead zone
+            self._save_meta({mk: {"earliest_available_funding": req_end.strftime("%Y-%m-%d")}})
 
     def collect_and_save(self, symbol, timeframe, start_date=None, end_date=None):
         """
