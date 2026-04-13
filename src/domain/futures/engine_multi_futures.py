@@ -291,10 +291,10 @@ def backtest_portfolio_numba(
                         fund_fee_stored[s] /= 2.0
                         has_scaled[s] = True
                         stop_p[s] = entry_p[s] - (entry_p[s] * fee_rate * 2.0)
-                else:
-                    exit_triggered, exit_price, stop_p[s] = check_short_exit(
-                        c_open, c_high, lowest[s], pos_atr, stop_p[s], s_trail_mult, slippage_rate
-                    )
+
+                exit_triggered, exit_price, stop_p[s] = check_short_exit(
+                    c_open, c_high, lowest[s], pos_atr, stop_p[s], s_trail_mult, slippage_rate
+                )
 
             if exit_triggered:
                 pnl = (exit_price - entry_p[s]) * amount[s] * pos_side[s]
