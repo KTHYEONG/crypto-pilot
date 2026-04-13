@@ -405,27 +405,33 @@ def screen_symbol_refinement_futures(
 
     cfg = FUTURES_SCREENER_CONFIG
     min_tr = int(cfg.get("SCREENER_MIN_TRADES_DYNAMIC", 12))
-    min_pf = float(cfg.get("SCREENER_MIN_PF", 1.35))
+    min_pf = float(cfg.get("SCREENER_MIN_PF", 1.15)) # Relaxed threshold
     mp_min = int(cfg.get("MP_MIN_SYMBOLS", 1))
     mp_max = int(cfg.get("MP_MAX_SYMBOLS", 5))
     top_k = int(cfg.get("CANDIDATES_TOP_K", 12))
 
     anchor_syms = list(anchor_symbols) if anchor_symbols is not None else list(FUTURES_ANCHOR_SYMBOLS)
+    anchor_set = set(anchor_syms)
     
     if phase_b_params is not None:
         fixed_params = dict(phase_b_params)
+        _logger.info("Phase C: using Phase-B probe params.")
     else:
         fixed_params = _default_screener_params_from_space_futures()
+        _logger.info("Phase C: using default space midpoints.")
     
     fixed_params["SIGNAL_TYPE"] = winning_signal_type
     fixed_params.setdefault("TIMEFRAME", "4h")
 
+    # Calculate ADV
     rows_adv: list[dict[str, float | str]] = []
-    for sym in broad_candidates:
+    # Make sure we evaluate everything, not just intersection
+    all_targets = list(dict.fromkeys(broad_candidates + anchor_syms))
+    for sym in all_targets:
         df4 = symbol_dfs_4h.get(sym)
         if df4 is None or df4.empty: continue
-        # Simple ADV calc
-        tail = df4.tail(180)
+        tail = _slice_df_to_is(df4, "1970-01-01", is_end_date).tail(180)
+        if tail.empty: continue
         adv = float((tail["close"] * tail["volume"]).median() * 6)
         rows_adv.append({"symbol": sym, "adv": adv})
 
@@ -434,20 +440,79 @@ def screen_symbol_refinement_futures(
         _logger.error("Phase C Futures: insufficient symbols with data.")
         return
 
-    fit_df, strat_returns = screen_by_strategy_fit_futures(
-        vol_df, symbol_dfs_4h, daily_dfs, fixed_params,
-        is_end_date=is_end_date, min_trades=min_tr, min_pf=min_pf, min_cagr_pct=0.0
-    )
+    sym_in_vol = set(str(s) for s in vol_df["symbol"].tolist())
+    valid_anchors_ordered = [s for s in anchor_syms if s in sym_in_vol]
+    
+    _logger.info("Phase C anchor: %s (%d valid anchors)", ", ".join(valid_anchors_ordered), len(valid_anchors_ordered))
 
-    if fit_df.empty or len(fit_df) < mp_min:
-        _logger.warning("Phase C Futures: no symbols passed strategy fit. Using anchors.")
-        final_symbols = [s for s in anchor_syms if s in broad_candidates][:mp_max]
+    anchor_vol = vol_df[vol_df["symbol"].isin(valid_anchors_ordered)].copy()
+    dynamic_sym_list = [s for s in all_targets if s not in anchor_set and s in sym_in_vol]
+    dyn_vol = vol_df[vol_df["symbol"].isin(dynamic_sym_list)].copy()
+
+    _logger.info("Phase C anchor vol count: %d, dyn vol count: %d", len(anchor_vol), len(dyn_vol))
+
+    # 1. Screen Anchors (Loose Criteria)
+    fit_anchor, ret_anchor = pd.DataFrame(), {}
+    if not anchor_vol.empty:
+        fit_anchor, ret_anchor = screen_by_strategy_fit_futures(
+            anchor_vol, symbol_dfs_4h, daily_dfs, fixed_params,
+            is_end_date=is_end_date, min_trades=1, min_pf=0.0, min_cagr_pct=-1e9
+        )
+
+    # 2. Screen Dynamics (Strict Criteria)
+    fit_dyn, ret_dyn = pd.DataFrame(), {}
+    if not dyn_vol.empty:
+        fit_dyn, ret_dyn = screen_by_strategy_fit_futures(
+            dyn_vol, symbol_dfs_4h, daily_dfs, fixed_params,
+            is_end_date=is_end_date, min_trades=min_tr, min_pf=min_pf, min_cagr_pct=0.0
+        )
+
+    # Fallback for dynamics if too few pass
+    if not dyn_vol.empty and (fit_dyn.empty or len(fit_dyn) < mp_min):
+        if phase_b_params is not None:
+            _logger.warning("Phase C dynamic tier: too few symbols passed. Retrying with default midpoints.")
+            fallback_params = _default_screener_params_from_space_futures()
+            fallback_params["SIGNAL_TYPE"] = winning_signal_type
+            fallback_params.setdefault("TIMEFRAME", "4h")
+            fit_dyn, ret_dyn = screen_by_strategy_fit_futures(
+                dyn_vol, symbol_dfs_4h, daily_dfs, fallback_params,
+                is_end_date=is_end_date, min_trades=min_tr, min_pf=min_pf, min_cagr_pct=0.0
+            )
+
+    n_dyn_pass = len(fit_dyn) if not fit_dyn.empty else 0
+    _logger.info("Phase C dynamic: %d symbols passed mini-BT", n_dyn_pass)
+
+    # Combine returns for MP
+    mp_cols: List[str] = []
+    for s in valid_anchors_ordered:
+        if s in ret_anchor and len(ret_anchor[s]) >= 30:
+            mp_cols.append(s)
+    if not fit_dyn.empty:
+        for s in fit_dyn["symbol"].tolist():
+            sym = str(s)
+            if sym in ret_dyn and sym not in mp_cols:
+                mp_cols.append(sym)
+
+    if len(mp_cols) < 2:
+        _logger.warning("Phase C: fewer than 2 return series for MP. Falling back to anchors.")
+        final_symbols = valid_anchors_ordered[:mp_max]
     else:
-        pool = fit_df.sort_values("relevance", ascending=False).head(top_k)
-        n_select = marchenko_pastur_n_factors(pd.DataFrame(strat_returns), min_n=mp_min, max_n=mp_max)
-        selected = select_by_mrmr(pool, strat_returns, n_select)
-        # Ensure anchors are prioritized if they passed
-        final_symbols = list(dict.fromkeys([s for s in anchor_syms if s in selected] + selected))[:mp_max]
+        strat_combined: Dict[str, pd.Series] = {**ret_anchor, **ret_dyn}
+        returns_for_mp = pd.concat({s: strat_combined[s] for s in mp_cols}, axis=1, join="inner")
+        n_select = marchenko_pastur_n_factors(returns_for_mp, min_n=mp_min, max_n=mp_max)
+        n_select = min(n_select, mp_max)
+        n_anchor = len(valid_anchors_ordered)
+        
+        if fit_dyn.empty:
+            n_select = min(n_select, n_anchor)
+            final_symbols = valid_anchors_ordered[:n_select]
+            _logger.info("Phase C: dynamic tier empty; anchor-only after MP clamp.")
+        else:
+            n_dynamic_slots = max(1, int(n_select) - n_anchor)
+            pool_dyn = fit_dyn.sort_values("relevance", ascending=False).head(top_k).copy()
+            dyn_picked = select_by_mrmr(pool_dyn, ret_dyn, min(n_dynamic_slots, len(pool_dyn)))
+            ordered_dyn = [s for s in dyn_picked if s not in anchor_set]
+            final_symbols = list(dict.fromkeys([*valid_anchors_ordered, *ordered_dyn]))[:mp_max]
 
     if not final_symbols:
         _logger.error("Phase C Futures: empty final symbol list.")
