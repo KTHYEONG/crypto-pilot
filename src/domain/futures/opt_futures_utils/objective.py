@@ -171,8 +171,11 @@ def objective_futures(
     params: Dict[str, Any] = suggest_params_futures(trial, space, tf)
 
     # [OPTIMIZATION] CS_MOMENTUM column mapping to avoid per-trial DF copies
+    # H5: Guard CSM_LOOKBACK to precomputed _CS_MOM_LOOKBACKS to prevent KeyError.
     if params.get("SIGNAL_TYPE") == "CS_MOMENTUM" and len(symbols) > 1:
         lb = int(params.get("CSM_LOOKBACK", 24))
+        if lb not in _CS_MOM_LOOKBACKS:
+            lb = min(_CS_MOM_LOOKBACKS, key=lambda x: abs(x - lb))
         params["CSM_RANK_COL"] = f"cs_mom_rank_{lb}"
 
     strategy: UltimateStrategy = UltimateStrategy(name="OptFutures", params=params)
