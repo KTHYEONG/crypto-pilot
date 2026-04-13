@@ -73,6 +73,7 @@ FUTURES_SYMBOLS: List[str] = [
     "BTC/USDT",
     "ETH/USDT",
     "XRP/USDT",
+    "CRV/USDT",
     "ADA/USDT",
     "SUI/USDT",
     "AAVE/USDT",
