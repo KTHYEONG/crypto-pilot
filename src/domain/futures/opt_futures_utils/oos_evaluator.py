@@ -197,7 +197,8 @@ def run_oos_margin_shared_portfolio(
     if not trades_df.empty:
         gains = trades_df[trades_df["pnl"] > 0]["pnl"].sum()
         losses = abs(trades_df[trades_df["pnl"] < 0]["pnl"].sum())
-        pf_val = gains / max(losses, 1e-9)
+        # L6: Cap pf_val to 5.0 (consistent with metrics.py calc_profit_factor).
+        pf_val = min(gains / max(losses, 1e-9), 5.0)
         wr = (trades_df["pnl"] > 0).mean() * 100.0
         lt = int((trades_df["side"] == "LONG").sum())
         st = int((trades_df["side"] == "SHORT").sum())
@@ -215,12 +216,13 @@ def run_oos_margin_shared_portfolio(
         short_wr = float((short_trades["pnl"] > 0).mean() * 100.0) if st > 0 else 0.0
         minority_pct = float(min(lt, st) / max(lt + st, 1) * 100.0)
 
-        # EV/cost ratio: avg net PnL per trade / round-trip transaction cost
+        # EV/cost ratio: avg net PnL / (avg |PnL| * round-trip fee rate).
+        # C5: Using avg |PnL| as proxy for trade notional avoids FUTURES_INITIAL_BALANCE
+        # unit contamination (initial balance ≠ per-trade position size).
         avg_net_pnl = float(trades_df["pnl"].mean())
-        round_trip_cost = (
-            (TRADING_FEE_RATE * 2.0 + SLIPPAGE_RATE * 2.0) * float(FUTURES_INITIAL_BALANCE)
-        )
-        ev_ratio = avg_net_pnl / max(round_trip_cost, 1e-9)
+        avg_abs_pnl = float(trades_df["pnl"].abs().mean())
+        round_trip_cost_rate = TRADING_FEE_RATE * 2.0 + SLIPPAGE_RATE * 2.0
+        ev_ratio = avg_net_pnl / max(avg_abs_pnl * round_trip_cost_rate, 1e-9)
     else:
         pf_val, wr, lt, st, l_pf, s_pf = 1.0, 0.0, 0, 0, 1.0, 1.0
         short_wr, minority_pct, ev_ratio = 0.0, 0.0, 0.0

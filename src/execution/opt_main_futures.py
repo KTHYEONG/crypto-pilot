@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import copy
 import logging
 import multiprocessing
 import os
@@ -659,8 +660,9 @@ def _run_stage1_structure_discovery(
         winning = [results[0][0]]
     _logger.info("Stage1 narrowed SIGNAL_TYPE choices: %s", winning)
     
-    # Update search space with narrowed signal types
-    final_space = get_search_space_futures(tf)
+    # H4: Deep-copy to prevent global state contamination if build_full_discovery_space_futures
+    # returns a cached/shared dict object.
+    final_space = copy.deepcopy(get_search_space_futures(tf))
     final_space["SIGNAL_TYPE"]["choices"] = tuple(winning)
     return final_space
 
@@ -832,10 +834,9 @@ def main() -> None:
                 fixed = load_screener_fixed_params_futures(Path(project_root))
                 winning_signal_type = fixed.get("SIGNAL_TYPE", "RSM_VT")
             
-            phase0_narrowed_space = get_search_space_futures(pre_args.tf)
+            # H4: Deep-copy to prevent global state contamination.
+            phase0_narrowed_space = copy.deepcopy(get_search_space_futures(pre_args.tf))
             phase0_narrowed_space["SIGNAL_TYPE"]["choices"] = (winning_signal_type,)
-
-        refinement_symbols = list(dict.fromkeys(broad_candidates + anchors_to_add))
 
         screen_symbol_refinement_futures(
             broad_candidates=list(broad_candidates),
@@ -1008,13 +1009,20 @@ def main() -> None:
                 sym_t_oos = len(sym_trades)
                 sym_wr_oos = (sym_trades["pnl"] > 0).mean() * 100.0 if sym_t_oos > 0 else 0.0
                 
-                # Calculate margin-shared PnL contribution
+                # C3: sym_pnl / FUTURES_INITIAL_BALANCE treats per-symbol PnL as if the symbol
+                # received the FULL initial capital. This under-states CAGR vs a standalone run,
+                # but correctly represents each symbol's *portfolio contribution CAGR*.
+                # Per-symbol true CAGR requires per-symbol equity curves from the engine.
                 sym_pnl = float(sym_trades["pnl"].sum())
                 hours_per_bar = int(tf_eval.replace("h", "")) if tf_eval.endswith("h") else 4
                 days_oos = ((oos_end - oos_start) * hours_per_bar) / 24.0
-                sym_ann_cagr = ((1.0 + sym_pnl / FUTURES_INITIAL_BALANCE) ** (365.0 / max(days_oos, 1.0)) - 1.0) * 100.0 if sym_t_oos > 0 else 0.0
-                
-                # For standalone MDD reference, we use 0.0 to save compute time (or we could extract from eq curve)
+                _base = 1.0 + sym_pnl / FUTURES_INITIAL_BALANCE
+                sym_ann_cagr = (
+                    (_base ** (365.0 / max(days_oos, 1.0)) - 1.0) * 100.0
+                    if sym_t_oos > 0 else 0.0
+                )
+                # C4: Per-symbol MDD needs per-symbol equity curve (not available from
+                # PortfolioBacktestEngineFast). Advisory only — not used for hard gating.
                 sym_m_oos = 0.0
             else:
                 sym_ann_cagr, sym_m_oos, sym_wr_oos, sym_t_oos = 0.0, 0.0, 0.0, 0
@@ -1030,7 +1038,12 @@ def main() -> None:
         if isinstance(oos_log_tw, list) and oos_log_tw:
             ref_sym = target_symbols[0]
             is_off = int(data_maps[ref_sym].get(f"is_start_idx_{tf_eval}", 0))
-            ref_len = len(data_maps[ref_sym][tf_eval]) - is_off
+            # C2: Must use the SAME eff_ref_len that generated cpcv_path_oos_log_tw.
+            # Optimization used multi_alignment_info["eff_ref_len"] (min across symbols
+            # after common-IS-start alignment). Using raw len(IS_df)-is_off would produce
+            # a different block count → cpcv_paths length mismatch → PBO always returns 0.5.
+            fallback_ref_len = len(data_maps[ref_sym][tf_eval]) - is_off
+            ref_len = int(ua.get("gate1_eff_ref_len", fallback_ref_len))
             embargo = int(EMBARGO_BARS.get(tf_eval, 0))
 
             cpcv_bundle = build_cpcv_test_paths_with_fallback(ref_len, embargo=embargo)
@@ -1057,7 +1070,7 @@ def main() -> None:
         # 6. Hard Gates Check
         core_checks = [
             oos_portfolio_cagr >= oos_cagr_target,
-            abs(float(oos_port["mdd_pct"])) <= 35.0,
+            abs(float(oos_port["mdd_pct"])) <= oos_mdd_limit,  # H1: use config var
             float(oos_port["profit_factor"]) >= 1.35,
             alpha_decay_pct >= alpha_decay_floor,
             funding_drag_pct <= 15.0,
