@@ -70,7 +70,11 @@ ENGINE_PARAM_SPACE_FUTURES: Dict[str, Dict[str, Any]] = {
 
 
 FUTURES_SYMBOLS: List[str] = [
+    "ETC/USDT",
+    "GALA/USDT",
+    "ID/USDT",
     "NEAR/USDT",
+    "DUSK/USDT",
 ]
 
 FUTURES_ANCHOR_SYMBOLS: List[str] = [
@@ -116,7 +120,7 @@ FUTURES_SCREENER_CONFIG: Dict[str, Any] = {
     "SCREENER_ATR_PCT_MAX": 12.0,
     "MIN_HISTORY_BARS": 2000,
     "SCREENER_MIN_TRADES_DYNAMIC": 12,  # 4h 기준 2년 IS에서 최소 통계적 유의성 (Binomial n>=12)
-    "SCREENER_MIN_PF": 1.35,
+    "SCREENER_MIN_PF": 1.15,
     "FUNDING_EXTREME_THRESHOLD": 0.003,
     "MP_MIN_SYMBOLS": 1,
     "MP_MAX_SYMBOLS": 5,
