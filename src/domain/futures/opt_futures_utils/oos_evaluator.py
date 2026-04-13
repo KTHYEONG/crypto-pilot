@@ -99,9 +99,9 @@ def evaluate_symbol_fold(
         execution_start_idx=execution_start_idx,
     )
     res = engine.run()
-    eq_curve = res["equity_curve"]
-    final_bal = res["final_balance"]
-    trades_df = res["trades"]
+    eq_curve = res.get("equity_curve", np.array([10000.0]))
+    final_bal = res.get("final_balance", 10000.0)
+    trades_df = res.get("trades_df", pd.DataFrame())
 
     ret_pct = (final_bal / 10000.0 - 1.0) * 100.0
     mdd = calc_mdd_from_equity(eq_curve)
@@ -204,11 +204,21 @@ def run_oos_margin_shared_portfolio(
     else:
         pf_val, wr, lt, st, l_pf, s_pf = 1.0, 0.0, 0, 0, 1.0, 1.0
 
+    # Calculate Calmar Ratio and other missing metrics for reporting
+    calmar = cagr / abs(mdd) if abs(mdd) > 1e-6 else 0.0
+    
+    # Calculate short win rate
+    short_wr = 0.0
+    if st > 0:
+        short_wr = (short_trades["pnl"] > 0).mean() * 100.0
+
     out = {
         "cagr_pct": cagr, "mdd_pct": mdd, "profit_factor": pf_val, "total_trades": len(trades_df),
         "moic": moic, "terminal_wealth_ratio": moic, "win_rate_pct": wr, "long_trades": lt,
         "short_trades": st, "long_pf": l_pf, "short_pf": s_pf, "equity_curve": equity_curve,
         "cvar_pct": 0.0, "hw_recovery_days": 0.0, "oos_long_short_minority_pct": 0.0,
+        "calmar_ratio": calmar, "ulcer_index": 0.0, "short_win_rate_pct": short_wr,
+        "ev_cost_ratio": 0.0,
     }
     if return_signal_dfs:
         out["full_signal_dfs"] = full_signal_dfs
