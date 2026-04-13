@@ -169,6 +169,15 @@ def calc_max_underwater_days_from_equity(equity_curve: np.ndarray, hours_per_bar
     return float(max_run * hours_per_bar / 24.0)
 
 
+def calc_ulcer_index_from_equity(equity_curve: np.ndarray) -> float:
+    """Ulcer Index: RMS of percentage drawdown from running peak."""
+    if equity_curve.size < 2:
+        return 0.0
+    peak = np.maximum.accumulate(equity_curve)
+    dd_pct = (equity_curve - peak) / np.clip(peak, 1e-9, None) * 100.0
+    return float(np.sqrt(np.mean(dd_pct ** 2.0)))
+
+
 def calc_tail_ratio_from_equity(equity: np.ndarray) -> float:
     """95th percentile return / abs(5th percentile return)."""
     if equity.size < 2:
