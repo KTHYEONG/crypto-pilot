@@ -713,7 +713,7 @@ def _load_futures_data_maps_for_symbols(
                 is_anchor = sym in FUTURES_ANCHOR_SYMBOLS
                 min_required = 500 if is_anchor and tf_l == tf else (min_bars if tf_l == tf else 200)
                 
-                if df is None or len(df) < min_required:
+                if df is None or df.empty:
                     insufficient = True
                     break
                 df.reset_index(drop=True, inplace=True)
@@ -723,6 +723,11 @@ def _load_futures_data_maps_for_symbols(
                 
                 is_mask = df["datetime"] < is_end_dt
                 is_end_idx = int(is_mask.to_numpy().sum())
+                
+                if is_end_idx < min_required:
+                    insufficient = True
+                    break
+                    
                 temp_is[tf_l] = df.iloc[:is_end_idx].copy()
                 
                 mask = temp_is[tf_l]["datetime"] >= is_start_dt
