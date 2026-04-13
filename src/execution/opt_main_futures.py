@@ -245,10 +245,10 @@ def _rebuild_is_data_maps_from_aligned_oos(
 ) -> None:
     for sym in symbols:
         full = oos_data_maps[sym][tf]
-        # [OPTIMIZATION] Use view instead of copy (Zero-copy slicing) to keep float64 precision
+        # [OPTIMIZATION] Use .copy() to prevent SettingWithCopyWarning and memory leaks between IS/OOS
         is_mask = full["datetime"] < is_end_dt
         is_end_idx = int(is_mask.to_numpy().sum())
-        is_df_view = full.iloc[:is_end_idx]
+        is_df_view = full.iloc[:is_end_idx].copy()
         
         data_maps[sym][tf] = is_df_view
         m = is_df_view["datetime"] >= is_start_dt
@@ -333,11 +333,13 @@ def _convert_space_to_distributions(space: Dict[str, Any]) -> Dict[str, BaseDist
 
 def _futures_worker_ask_tell(
     trial_number: int, params: Dict[str, Any], tf: str, symbols: List[str],
-    mode: str, project_root: str, prebuilt_cpcv_bundle: Any, alignment_info: Any,
-    signal_cache_dir: str, tf_space: Dict[str, Any],
+    mode: str, project_root: str, signal_cache_dir: str, tf_space: Dict[str, Any],
 ) -> Tuple[int, Optional[float], Dict[str, Any], TrialState]:
     from src.domain.futures.opt_futures_utils.objective import objective_futures
     data_maps = _TPE_WORKER_CTX.get("data_maps", {})
+    prebuilt_cpcv_bundle = _TPE_WORKER_CTX.get("prebuilt_cpcv_bundle")
+    alignment_info = _TPE_WORKER_CTX.get("alignment_info")
+    
     cache_root = Path(signal_cache_dir) if signal_cache_dir else FUTURES_CACHE_DIR
     trial = FixedTrial(params, number=trial_number)
     try:
@@ -360,7 +362,6 @@ def _run_parallel_ask_tell(
     study: optuna.Study, n_trials: int, n_workers: int,
     distributions: Dict[str, BaseDistribution],
     ctx: _TfOptimizationContext, tf: str, progress_key: str,
-    prebuilt_cpcv_bundle: Any, alignment_info: Any,
 ) -> None:
     if n_trials <= 0:
         return
@@ -377,7 +378,7 @@ def _run_parallel_ask_tell(
             trial = study.ask(distributions)
             f = executor.submit(
                 _futures_worker_ask_tell, trial.number, trial.params, tf, ctx.symbols, ctx.mode,
-                ctx.project_root, prebuilt_cpcv_bundle, alignment_info, ctx.signal_cache_dir, space
+                ctx.project_root, ctx.signal_cache_dir, space
             )
             futures_to_trials[f], remaining = trial, remaining - 1
 
@@ -419,8 +420,8 @@ def _run_parallel_ask_tell(
                         new_trial = study.ask(distributions)
                         new_f = executor.submit(
                             _futures_worker_ask_tell, new_trial.number, new_trial.params, tf,
-                            ctx.symbols, ctx.mode, ctx.project_root, prebuilt_cpcv_bundle,
-                            alignment_info, ctx.signal_cache_dir, space
+                            ctx.symbols, ctx.mode, ctx.project_root,
+                            ctx.signal_cache_dir, space
                         )
                         futures_to_trials[new_f], remaining = new_trial, remaining - 1
 
@@ -477,14 +478,19 @@ def _run_tf_optimization(
         tf_space = get_search_space_futures(tf)
     distributions = _convert_space_to_distributions(tf_space)
 
+    # Set Global Context for TPE Optimization (CoW)
+    _TPE_WORKER_CTX.clear()
+    _TPE_WORKER_CTX["data_maps"] = ctx.data_maps
+    _TPE_WORKER_CTX["alignment_info"] = alignment_info
+    _TPE_WORKER_CTX["prebuilt_cpcv_bundle"] = prebuilt_cpcv_bundle
+
     study = optuna.create_study(
         study_name=tf_study_name, storage=storage, direction="maximize",
         sampler=qmc_sampler, pruner=pruner
     )
     _logger.info("[%s/%s] Phase 1: QMC Startup...", target_str, tf)
     _run_parallel_ask_tell(
-        study, n_qmc, ctx.n_jobs, distributions, ctx, tf, progress_key,
-        prebuilt_cpcv_bundle, alignment_info
+        study, n_qmc, ctx.n_jobs, distributions, ctx, tf, progress_key
     )
 
     remaining = int(ctx.n_trials) - n_qmc
@@ -493,7 +499,7 @@ def _run_tf_optimization(
         study.sampler = _futures_tpe_sampler(seed)
         _run_parallel_ask_tell(
             study, remaining, ctx.parallel_tpe_workers, distributions, ctx, tf,
-            progress_key, prebuilt_cpcv_bundle, alignment_info
+            progress_key
         )
     return (target_obj, tf), study
 
@@ -534,7 +540,15 @@ def _eval_combo_task(
     raw_vals = np.array([float(t.user_attrs.get("gate1_p10_gmgr", 0.0)) for t in completed])
     hrs = int(tf.replace("h", "")) if tf.endswith("h") else 4
     eff_len = np.mean([int(t.user_attrs.get("gate1_eff_ref_len", 4380)) for t in completed])
-    ann_factor = (365 * 24 / hrs) / max(1, int(eff_len / 8 * 3))
+    
+    val_ratio = 3 / 8  # Default
+    if prebuilt is not None:
+        cpcv_paths, n_blocks, _ = prebuilt
+        if cpcv_paths and n_blocks:
+            n_test_blocks = len(cpcv_paths[0][1])
+            val_ratio = n_test_blocks / n_blocks
+            
+    ann_factor = (365 * 24 / hrs) / max(1, int(eff_len * val_ratio))
     
     raw_vals_ann = np.sort(np.array([
         float(np.expm1(np.log1p(max(-0.9999, v)) * ann_factor)) for v in raw_vals
@@ -680,10 +694,10 @@ def main() -> None:
                 is_end_dt = (pd.to_datetime(is_end_date).tz_localize(tz)
                              if tz else pd.to_datetime(is_end_date))
                 
-                # [OPTIMIZATION] Use view instead of copy (Zero-copy slicing)
+                # [OPTIMIZATION] Use .copy() to ensure memory separation between IS and OOS
                 is_mask = df["datetime"] < is_end_dt
                 is_end_idx = int(is_mask.to_numpy().sum())
-                temp_is[tf_l] = df.iloc[:is_end_idx]
+                temp_is[tf_l] = df.iloc[:is_end_idx].copy()
                 
                 mask = temp_is[tf_l]["datetime"] >= is_start_dt
                 temp_is[f"is_start_idx_{tf_l}"] = (int(mask.to_numpy().argmax())
@@ -738,6 +752,12 @@ def main() -> None:
                     oos_data_maps[s][args.tf] = oos_data_maps[s][args.tf].merge(
                         rdo, on="datetime", how="left"
                     )
+                else:
+                    # Fix: Ensure base symbols also have the reference close columns
+                    data_maps[s][args.tf] = data_maps[s][args.tf].copy()
+                    data_maps[s][args.tf][cn] = data_maps[s][args.tf]["close"]
+                    oos_data_maps[s][args.tf] = oos_data_maps[s][args.tf].copy()
+                    oos_data_maps[s][args.tf][cn] = oos_data_maps[s][args.tf]["close"]
 
     # Step 3: CS momentum rank injection (backward-looking, no look-ahead bias).
     # Must run after BTC/ETH merge which creates new DataFrames.
@@ -895,7 +915,7 @@ def main() -> None:
             ))
 
         # 4. PBO calculation
-        pbo_val, rho_val, n_paths = 0.0, 0.0, 0
+        pbo_val, rho_val, n_paths = 1.0, 0.0, 0  # Fail-Closed: Default to 100% PBO
         oos_log_tw = ua.get("cpcv_path_oos_log_tw")
         if isinstance(oos_log_tw, list) and oos_log_tw:
             ref_sym = target_symbols[0]
