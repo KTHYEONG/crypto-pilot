@@ -596,6 +596,36 @@ def _eval_combo_task_from_context(
     )
 
 
+def _compute_signal_regime_weights(micro_vec: np.ndarray) -> Dict[str, float]:
+    """
+    Phase B microstructure vector → signal type trial-budget weights.
+
+    **[Math/Quant Basis]**
+    - Hurst deviation from 0.5: H < 0.5 (anti-persistent) suppresses pure
+      trend-following edge; divergence/breakout signals retain value via
+      capturing mean-reversion overshoots.
+    - Excess kurtosis: fat-tailed returns generate large moves that favour
+      volume-filtered breakout strategies (RSM_VT).
+    - Weights are proportional multipliers on the per-signal trial budget;
+      minimum 0.2 prevents complete exclusion (false-negative guard).
+    """
+    hurst = float(np.clip(micro_vec[0], 0.1, 0.9))
+    kurt = float(micro_vec[1])
+
+    trend_score = float(np.clip((hurst - 0.5) * 6.0, -1.5, 1.5))
+    excess_kurt = float(np.clip((kurt - 3.0) / 5.0, 0.0, 1.0))
+
+    weights: Dict[str, float] = {
+        "RSM_VT":        1.2 + 0.4 * trend_score + 0.4 * excess_kurt,
+        "MACD_HIST_DIV": 1.2 - 0.3 * trend_score,
+        "SUPERTREND":    0.8 + 0.6 * trend_score,
+        "CS_MOMENTUM":   0.8,
+        "VWAP_MR":       0.5 - 0.4 * trend_score,   # shrinks further in strong trends
+        "ADX_BREAKOUT":  0.7 + 0.5 * trend_score,
+    }
+    return {k: max(0.2, v) for k, v in weights.items()}
+
+
 def _run_single_sig_type_discovery(
     sig_type: str,
     tf: str,
@@ -611,9 +641,9 @@ def _run_single_sig_type_discovery(
     base_space = get_search_space_futures(tf)
     stage_space = {k: dict(v) if isinstance(v, dict) else v for k, v in base_space.items()}
     stage_space["SIGNAL_TYPE"] = {"type": "categorical", "choices": (sig_type,)}
-    
+
     from src.domain.futures.opt_futures_utils.objective import objective_futures
-    
+
     study = optuna.create_study(
         direction="maximize",
         sampler=TPESampler(n_startup_trials=min(20, max(5, n_tri // 4)), seed=42),
@@ -635,16 +665,21 @@ def _run_single_sig_type_discovery(
         )
 
     study.optimize(_obj, n_trials=n_tri, n_jobs=1, show_progress_bar=False)
-    completed = [
-        t for t in study.trials if t.state == TrialState.COMPLETE and t.value is not None
-    ]
+    completed = [t for t in study.trials if t.state == TrialState.COMPLETE and t.value is not None]
     if not completed:
         return sig_type, -1e9
-    
-    completed.sort(key=lambda tr: float(tr.value or -1e9), reverse=True)
+
+    all_vals = sorted([float(t.value) for t in completed], reverse=True)
     ktop = max(1, n_tri // 10)
-    top_trials = completed[:ktop]
-    mean_obj = float(np.mean([float(t.value) for t in top_trials]))
+    top_mean = float(np.mean(all_vals[:ktop]))
+
+    # pass_rate: completed / total — low pass_rate indicates an unstable/noisy signal
+    pass_rate = float(len(all_vals) / max(1, len(study.trials)))
+    # cv_obj: coefficient of variation — high CV = high path variance = unstable
+    cv_obj = float(np.std(all_vals) / (abs(np.mean(all_vals)) + 1e-9))
+
+    # Compound quality: top-k performance x completion reliability x stability
+    mean_obj = top_mean * (0.6 + 0.4 * pass_rate) * max(0.3, 1.0 - 0.3 * min(cv_obj, 2.0))
     return sig_type, mean_obj
 
 
@@ -677,25 +712,51 @@ def _run_stage1_structure_discovery(
             
     cache_root = Path(signal_cache_dir) if signal_cache_dir else None
     results: List[tuple[str, float]] = []
-    n_tri = max(5, int(trials_per_signal))
-    
-    _logger.info("   [Phase C] Parallel Structure Discovery with %d signal types...", len(all_types))
-    
+    n_tri_base = max(5, int(trials_per_signal))
+
+    # --- Microstructure-informed trial budget ---
+    # Use Phase B BTC anchor vector to bias exploration toward regime-compatible signals.
+    try:
+        from src.domain.futures.opt_futures_utils.universe_screener_futures import (
+            calculate_microstructure_vector,
+        )
+        anchor = FUTURES_ANCHOR_SYMBOLS[0]
+        if anchor in data_maps and tf in data_maps[anchor]:
+            micro_vec = calculate_microstructure_vector(data_maps[anchor][tf])
+        else:
+            micro_vec = np.array([0.5, 3.0, 1.5])
+    except Exception:
+        micro_vec = np.array([0.5, 3.0, 1.5])
+
+    sig_weights = _compute_signal_regime_weights(micro_vec)
+    total_weight = sum(sig_weights.get(s, 1.0) for s in all_types)
+    sig_trial_budget: Dict[str, int] = {
+        s: max(5, int(n_tri_base * len(all_types) * sig_weights.get(s, 1.0) / total_weight))
+        for s in all_types
+    }
+    _logger.info(
+        "   [Phase C] Parallel Structure Discovery with %d signal types... "
+        "(Hurst=%.3f, Kurt=%.2f, ATR%%=%.3f)",
+        len(all_types), float(micro_vec[0]), float(micro_vec[1]), float(micro_vec[2]),
+    )
+
     # [OPTIMIZATION] Parallel optimization for each signal type
     # Using 'fork' context for memory efficiency (CoW)
     ctx = multiprocessing.get_context("fork")
     with concurrent.futures.ProcessPoolExecutor(
         max_workers=min(len(all_types), 8),
         mp_context=ctx,
-        initializer=_init_stage1_worker_context
+        initializer=_init_stage1_worker_context,
     ) as executor:
         f_to_sig = {
             executor.submit(
-                _run_single_sig_type_discovery, sig, tf, n_tri, data_maps, symbols,
-                project_root, prebuilt, alignment_info, cache_root
-            ): sig for sig in all_types
+                _run_single_sig_type_discovery,
+                sig, tf, sig_trial_budget[sig], data_maps, symbols,
+                project_root, prebuilt, alignment_info, cache_root,
+            ): sig
+            for sig in all_types
         }
-        
+
         for f in concurrent.futures.as_completed(f_to_sig):
             try:
                 sig_res, score = f.result()
@@ -706,21 +767,37 @@ def _run_stage1_structure_discovery(
                 results.append((sig_err, -1e9))
 
     results.sort(key=lambda x: x[1], reverse=True)
-    winning = [s for s, m in results[: max(1, top_k)] if m > min_p10_gmgr]
+
+    # --- Relative gap selection ---
+    # A signal is accepted only if its compound score is >= rel_gap x best score.
+    # This avoids the arbitrary top_k=2 cutoff while still pruning clearly inferior signals.
+    rel_gap = 0.35
+    best_score = results[0][1] if results else 0.0
+    winning = [
+        s for s, m in results
+        if m > min_p10_gmgr
+        and (best_score <= 0.0 or m / best_score >= rel_gap)
+    ]
+    winning = winning[:max(1, top_k)]
     if not winning:
         winning = [results[0][0]]
 
     # Enhanced Phase C summary logging
     _logger.info("======================================================================")
     _logger.info("[PHASE C] Signal Structure Discovery (Top Alpha Screening)")
+    _logger.info("  Regime: Hurst=%.3f | Kurt=%.2f | ATR%%=%.3f | REL_GAP>=%.0f%%",
+                 float(micro_vec[0]), float(micro_vec[1]), float(micro_vec[2]),
+                 rel_gap * 100)
     _logger.info("----------------------------------------------------------------------")
-    _logger.info("  %-20s | %-16s | %-8s", "Signal Strategy", "Mean Objective", "Status")
+    _logger.info("  %-20s | %-14s | %-6s | %-8s",
+                 "Signal Strategy", "Cmpd Objective", "Trials", "Status")
     _logger.info("----------------------------------------------------------------------")
     for sig, score in results:
         is_winner = sig in winning
         status = "[SELECTED]" if is_winner else "[DROPPED]"
         indicator = "▶" if is_winner else " "
-        _logger.info("  %s %-18s | %-16.6f | %-8s", indicator, sig, score, status)
+        n_used = sig_trial_budget.get(sig, n_tri_base)
+        _logger.info("  %s %-18s | %-16.6f | %-6d | %-8s", indicator, sig, score, n_used, status)
     _logger.info("----------------------------------------------------------------------")
     _logger.info("Phase C Summary: Narrowed choices to %s", winning)
     _logger.info("======================================================================")
