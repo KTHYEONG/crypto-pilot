@@ -73,8 +73,8 @@ FUTURES_SYMBOLS: List[str] = [
     "BTC/USDT",
     "ETH/USDT",
     "XRP/USDT",
-    "1000PEPE/USDT",
-    "WLD/USDT",
+    "BNB/USDT",
+    "ADA/USDT",
 ]
 
 FUTURES_ANCHOR_SYMBOLS: List[str] = [
@@ -125,7 +125,7 @@ FUTURES_SCREENER_CONFIG: Dict[str, Any] = {
     "MP_MIN_SYMBOLS": 1,
     "MP_MAX_SYMBOLS": 5,
     "CANDIDATES_TOP_K": 12,
-    "BROAD_POOL_K": 60,
+    "BROAD_POOL_K": 100,
     "COMBO_SAMPLE_K": 12,
 }
 
