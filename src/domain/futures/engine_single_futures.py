@@ -553,10 +553,10 @@ def backtest_loop_numba(
                         entry_fee_stored -= entry_fee_stored / 2.0
                         has_scaled_out = True
                         stop_price = entry_price - (entry_price * fee_rate * 2.0)
-                else:
-                    exit_triggered, exit_price, stop_price = check_short_exit(
-                        c_open, c_high, lowest, pos_atr, stop_price, short_trail_mult, slippage_rate
-                    )
+
+                exit_triggered, exit_price, stop_price = check_short_exit(
+                    c_open, c_high, lowest, pos_atr, stop_price, short_trail_mult, slippage_rate
+                )
 
             if exit_triggered:
                 if pos_side == 1:
