@@ -40,7 +40,7 @@ class ProfitFactorKellyFuturesSizing:
         funding_adj = np.zeros(n, dtype=np.float64)
         fr_series = pd.Series(np.zeros(n, dtype=np.float64))
         if "funding_rate" in df.columns:
-            fr_series = df["funding_rate"].fillna(0.0)
+            fr_series = df["funding_rate"].fillna(0.0).reset_index(drop=True)
             funding_adj = np.nan_to_num(
                 fr_series.to_numpy(dtype=np.float64), nan=0.0, posinf=0.0, neginf=0.0
             )

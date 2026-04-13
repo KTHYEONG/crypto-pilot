@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import itertools
 import logging
+import math
+import os
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Sequence, Tuple
@@ -34,9 +37,54 @@ class CombinationScoreFutures:
     p10_gmgr: float
     ls_ratio: float
     mean_signal_rate: float
-    disqualified: bool
+    disqualified: bool = False
     reason: str = ""
     best_params: Dict[str, Any] = field(default_factory=dict)
+
+
+def build_probe_params_futures(combo: "CombinationScoreFutures", tf: str) -> Dict[str, Any]:
+    """Return search-space midpoint params for a Phase-B combo (signal-agnostic for Phase C)."""
+    return _build_probe_params_futures(combo.signal, combo.regime, combo.sizing, tf)
+
+
+def _build_probe_params_futures(sig: str, reg: str, siz: str, tf: str) -> Dict[str, Any]:
+    combo_space = build_combined_param_space_futures(sig, reg, siz)
+    probe_params: Dict[str, Any] = {
+        "SIGNAL_TYPE": sig,
+        "REGIME_TYPE": reg,
+        "SIZING_METHOD": siz,
+        "TIMEFRAME": tf,
+        "LEVERAGE": 20,
+        "USE_COMPOUNDING": True,
+    }
+    for k, spec in combo_space.items():
+        if k in ("SIGNAL_TYPE", "REGIME_TYPE", "SIZING_METHOD", "TIMEFRAME", "LEVERAGE", "USE_COMPOUNDING"):
+            continue
+        if not isinstance(spec, dict) or "type" not in spec:
+            continue
+        if spec["type"] == "categorical":
+            probe_params[k] = spec["choices"][0]
+        else:
+            probe_params[k] = _mid_value_from_spec(spec)
+    return probe_params
+
+
+def _mid_value_from_spec(spec: Dict[str, Any]) -> int | float:
+    t = spec["type"]
+    if t == "int":
+        lo = int(spec["low"])
+        hi = int(spec["high"])
+        step = int(spec.get("step", 1))
+        mid = (lo + hi) // 2
+        if step > 1:
+            mid = lo + ((mid - lo) // step) * step
+        return int(np.clip(mid, lo, hi))
+    if t == "float":
+        return float((float(spec["low"]) + float(spec["high"])) / 2.0)
+    choices = spec.get("choices", ())
+    if not choices:
+        raise ValueError("categorical spec missing choices")
+    return choices[len(choices) // 2]
 
 
 @dataclass(frozen=True)
@@ -59,8 +107,15 @@ def _combo_search_dim(space: Dict[str, Any]) -> int:
 
 
 def _auto_combo_trials(
-    viable_count: int, median_dim: float, cfg: Dict[str, Any]
+    viable_count: int,
+    median_dim: float,
+    cfg: Dict[str, Any],
 ) -> tuple[int, int]:
+    """
+    Practical auto-sizing for Stage-1 quick CPCV.
+    Keep current config as floors, then scale mildly by viable combo count and
+    effective combo dimension so runtime stays bounded as the search space grows.
+    """
     import math
 
     v = max(1, int(viable_count))
@@ -70,11 +125,8 @@ def _auto_combo_trials(
     p1_cap = max(p1_floor, int(cfg.get("FUTURES_COMBO_PHASE1_MAX", 30)))
     p2_cap = max(p2_floor, int(cfg.get("FUTURES_COMBO_QUICK_TRIALS_MAX", 60)))
 
-    # dim_factor: scales proportionally to sqrt(d) so high-dim signals get fair evaluation.
-    # At d=4 (ADX_BREAKOUT) → factor≈1.0; d=8 (RSM_VT) → factor≈1.41; d=12 → factor≈1.73
-    dim_factor = max(1.0, math.sqrt(d) / 2.0)
-    phase1 = int(round((7.0 + 0.75 * math.log2(v + 1.0)) * dim_factor))
-    phase2 = int(round((19.0 + 1.25 * math.log2(v + 1.0)) * dim_factor))
+    phase1 = int(round(7.0 + 0.75 * math.log2(v + 1.0) + 0.20 * math.sqrt(d)))
+    phase2 = int(round(19.0 + 1.25 * math.log2(v + 1.0) + 0.45 * math.sqrt(d)))
 
     phase1 = int(np.clip(phase1, p1_floor, p1_cap))
     phase2 = int(np.clip(phase2, p2_floor, p2_cap))
@@ -88,6 +140,11 @@ def _ambiguity_phase2_boost(
     top_k: int,
     cfg: Dict[str, Any],
 ) -> int:
+    """
+    If the prune boundary is crowded, add a small Phase-2 budget bump.
+    This preserves fast default behavior while spending a bit more only when
+    combo ranking is genuinely ambiguous.
+    """
     arr = np.asarray([float(x) for x in phase1_scores if np.isfinite(float(x))], dtype=np.float64)
     if arr.size < max(6, top_k + 3):
         return 0
@@ -111,7 +168,7 @@ def _warmup_numba(
     project_root: str = "",
     signal_cache_dir: str = "",
 ) -> None:
-    from src.domain.futures.opt_futures_utils.objective import objective_futures
+    """Trigger Numba JIT in the parent before fork so children inherit compiled code."""
     from src.domain.futures.regimes import FUTURES_REGIME_REGISTRY
     from src.domain.futures.signals import FUTURES_SIGNAL_REGISTRY
     from src.domain.futures.sizing import FUTURES_SIZING_REGISTRY
@@ -152,31 +209,12 @@ def _warmup_numba(
 
 
 def _p25_path_consistency_score(metrics: Dict[str, float]) -> float:
+    """Stage-1 growth rank: p25 log-TWR scaled by inverse path CV (tmp.md: p25 / (1 + path_cv))."""
     p25 = float(metrics.get("cpcv_p25_log_tw", -1e9))
     if p25 <= -1e8:
         return p25
     cv = float(metrics.get("cpcv_path_cv", 10.0))
     return float(p25 * (1.0 / (1.0 + max(0.0, cv))))
-
-
-def _mid_params_from_space(space: Dict[str, Any], tf: str) -> Dict[str, Any]:
-    out: Dict[str, Any] = {"TIMEFRAME": tf, "LEVERAGE": 20, "USE_COMPOUNDING": True}
-    for k, spec in space.items():
-        if not isinstance(spec, dict) or "type" not in spec:
-            continue
-        t = spec["type"]
-        if t == "categorical":
-            ch = spec.get("choices", ())
-            out[k] = ch[0] if ch else None
-        elif t == "int":
-            lo = int(spec["low"])
-            hi = int(spec["high"])
-            step = int(spec.get("step", 1))
-            mid = lo + ((hi - lo) // 2 // step) * step
-            out[k] = int(np.clip(mid, lo, hi))
-        elif t == "float":
-            out[k] = float((float(spec["low"]) + float(spec["high"])) / 2.0)
-    return out
 
 
 def _phase0_ls_ratio(
@@ -187,7 +225,7 @@ def _phase0_ls_ratio(
 ) -> Tuple[float, float, str]:
     sig, reg, siz = combo
     space = build_combined_param_space_futures(sig, reg, siz)
-    probe = _mid_params_from_space(space, tf)
+    probe = _build_probe_params_futures(sig, reg, siz, tf)
     ref = symbols[0]
     target_df = data_maps[ref][tf]
     is_off = int(data_maps[ref].get(f"is_start_idx_{tf}", 0))
@@ -198,7 +236,8 @@ def _phase0_ls_ratio(
     try:
         out = strat.generate_signals(df)
     except Exception as exc:
-        _logger.warning("Phase0 signal probe failed: %s", exc)
+        import traceback
+        _logger.warning("Phase0 signal probe failed: %s\n%s", exc, traceback.format_exc())
         return 0.0, 0.0, "signal_error"
     long_b = (out["trend_direction"].to_numpy(dtype=np.float64) > 0).sum()
     short_b = (out["trend_direction"].to_numpy(dtype=np.float64) < 0).sum()
@@ -215,8 +254,11 @@ def _metrics_from_best_study(study: optuna.Study) -> Tuple[Dict[str, float], Dic
     if not completed:
         return {
             "objective_final": -1e9,
+            "cpcv_mean_path_return_pct": -1e9,
             "cpcv_p25_log_tw": -1e9,
             "cpcv_path_cv": 10.0,
+            "psr_paths": -1.0,
+            "dsr_paths": -1.0,
             "p10_gmgr": -1e9,
         }, {}
     completed.sort(key=lambda tr: float(tr.value or -1e9), reverse=True)
@@ -224,15 +266,18 @@ def _metrics_from_best_study(study: optuna.Study) -> Tuple[Dict[str, float], Dic
     ua = best.user_attrs
     metrics = {
         "objective_final": float(best.value or -1e9),
+        "cpcv_mean_path_return_pct": float(ua.get("cpcv_mean_path_return_pct", -1e9)),
         "cpcv_p25_log_tw": float(ua.get("cpcv_p25_log_tw", -1e9)),
         "cpcv_path_cv": float(ua.get("cpcv_path_cv", 10.0)),
+        "psr_paths": float(ua.get("psr_paths", 0.0)),
+        "dsr_paths": float(ua.get("dsr_paths", -1.0)),
         "p10_gmgr": float(ua.get("p10_gmgr", -1e9)),
     }
     return metrics, best.params
 
 
-def run_quick_cpcv_for_combo_futures(
-    combo: Tuple[str, str, str],
+def _phase1_worker(
+    combo: tuple[str, str, str],
     *,
     data_maps: Dict[str, Dict[str, Any]],
     symbols: List[str],
@@ -241,9 +286,8 @@ def run_quick_cpcv_for_combo_futures(
     project_root: str,
     signal_cache_dir: str,
 ) -> float:
-    from src.domain.futures.opt_futures_utils.objective import (
-        compute_multi_alignment_info,
-    )
+    """Quick Phase-1 CPCV; with fork, data_maps is shared read-only via CoW."""
+    from src.domain.futures.opt_futures_utils.objective import compute_multi_alignment_info
 
     sig, reg, siz = combo
     space = build_combined_param_space_futures(sig, reg, siz)
@@ -268,7 +312,6 @@ def run_quick_cpcv_for_combo_futures(
     cache_root = Path(signal_cache_dir) if signal_cache_dir else None
 
     def _obj(trial: optuna.Trial) -> float:
-        nonlocal alignment_info
         return objective_futures(
             trial,
             data_maps,
@@ -294,8 +337,8 @@ def run_quick_cpcv_for_combo_futures(
     )
 
 
-def run_phase2_metrics_futures(
-    combo: Tuple[str, str, str],
+def _phase2_worker(
+    combo: tuple[str, str, str],
     *,
     data_maps: Dict[str, Dict[str, Any]],
     symbols: List[str],
@@ -304,9 +347,8 @@ def run_phase2_metrics_futures(
     project_root: str,
     signal_cache_dir: str,
 ) -> Tuple[Dict[str, float], Dict[str, Any]]:
-    from src.domain.futures.opt_futures_utils.objective import (
-        compute_multi_alignment_info,
-    )
+    """Full-trial CPCV screen for surviving combinations."""
+    from src.domain.futures.opt_futures_utils.objective import compute_multi_alignment_info
 
     sig, reg, siz = combo
     space = build_combined_param_space_futures(sig, reg, siz)
@@ -331,7 +373,6 @@ def run_phase2_metrics_futures(
     cache_root = Path(signal_cache_dir) if signal_cache_dir else None
 
     def _obj(trial: optuna.Trial) -> float:
-        nonlocal alignment_info
         return objective_futures(
             trial,
             data_maps,
@@ -349,6 +390,18 @@ def run_phase2_metrics_futures(
     return _metrics_from_best_study(study)
 
 
+def _process_pool_context():
+    """Prefer fork on Linux (WSL2); fall back to spawn where fork is unavailable."""
+    import multiprocessing as mp
+
+    if sys.platform == "win32":
+        return mp.get_context("spawn")
+    try:
+        return mp.get_context("fork")
+    except ValueError:
+        return mp.get_context("spawn")
+
+
 def run_combination_screening_futures(
     *,
     data_maps: Dict[str, Dict[str, Any]],
@@ -357,7 +410,6 @@ def run_combination_screening_futures(
     project_root: str,
     signal_cache_dir: str = "",
 ) -> CombinationScreeningResult:
-    import multiprocessing as mp
     import os
     import sys
     from concurrent.futures import ProcessPoolExecutor
@@ -365,13 +417,22 @@ def run_combination_screening_futures(
 
     from tqdm import tqdm
 
+    from config.opt_config import FUTURES_ANCHOR_SYMBOLS
+
     cfg = OPT_FUTURES_CONFIG
-    p1 = int(cfg.get("combo_phase1_trials", 30))
-    p2 = int(cfg.get("combo_phase2_trials", 80))
-    top_k = int(cfg.get("combo_top_k", 3))
     ls_min = 0.15
-    n_workers = int(cfg.get("n_jobs", 3))
-    n_workers = max(1, min(n_workers, os.cpu_count() or 2))
+    prune_thr = float(cfg.get("FUTURES_COMBO_PRUNE_THR", -0.05))
+    top_k = int(cfg.get("combo_top_k", 3))
+    bucket_each = 2
+    n_workers_cfg = int(cfg.get("n_jobs", 3))
+    worker_cap = max(1, (os.cpu_count() or 2) - 1)
+    n_workers = max(1, min(n_workers_cfg, worker_cap))
+
+    # Use anchors for Phase B screening
+    screen_symbols = [s for s in FUTURES_ANCHOR_SYMBOLS if s in symbols]
+    if not screen_symbols:
+        _logger.warning("No anchor symbols found in data_maps for Phase B; falling back to all symbols.")
+        screen_symbols = symbols
 
     combos = list(
         itertools.product(
@@ -380,8 +441,10 @@ def run_combination_screening_futures(
             sorted(FUTURES_SIZING_REGISTRY.keys()),
         )
     )
-    scored: List[CombinationScoreFutures] = []
+
+    scores: List[CombinationScoreFutures] = []
     viable_items: List[Tuple[Tuple[str, str, str], float, float]] = []
+    viable_dims: List[int] = []
 
     _logger.info("Phase 0: Screening %d combinations for ls_ratio >= %.2f...", len(combos), ls_min)
 
@@ -389,10 +452,10 @@ def run_combination_screening_futures(
 
     for sig, reg, siz in combos:
         ls_ratio, mean_signal_rate, reason = _phase0_ls_ratio(
-            data_maps, symbols, tf, (sig, reg, siz)
+            data_maps, screen_symbols, tf, (sig, reg, siz)
         )
         if mean_signal_rate < min_rate_cfg:
-            scored.append(
+            scores.append(
                 CombinationScoreFutures(
                     signal=sig,
                     regime=reg,
@@ -405,7 +468,7 @@ def run_combination_screening_futures(
                 )
             )
         elif ls_ratio < ls_min:
-            scored.append(
+            scores.append(
                 CombinationScoreFutures(
                     signal=sig,
                     regime=reg,
@@ -419,91 +482,64 @@ def run_combination_screening_futures(
             )
         else:
             viable_items.append(((sig, reg, siz), ls_ratio, mean_signal_rate))
+            combo_space = build_combined_param_space_futures(sig, reg, siz)
+            viable_dims.append(_combo_search_dim(combo_space))
 
     _logger.info("Phase 0 complete: %d viable combinations", len(viable_items))
 
     if not viable_items:
-        _logger.warning("No viable futures combos after Phase 0; returning defaults.")
-        return CombinationScreeningResult(
-            combos=[
-                CombinationScoreFutures(
-                    "RSM_VT", "EMA_ATR", "vol_target", -1.0, 0.0, 0.0, True, "fallback"
-                )
-            ],
-            phase1_no_edge=False,
-        )
-
-    viable_dims: List[int] = []
-    for (sig, reg, siz), _, _ in viable_items:
-        combo_space = build_combined_param_space_futures(sig, reg, siz)
-        viable_dims.append(_combo_search_dim(combo_space))
+        _logger.error("Stage1: all combinations disqualified after Phase 0.")
+        return CombinationScreeningResult(combos=[], phase1_no_edge=True)
 
     median_dim = float(np.median(np.asarray(viable_dims, dtype=np.float64))) if viable_dims else 1.0
-    p1_dyn, p2_dyn = _auto_combo_trials(len(viable_items), median_dim, cfg)
+    n_phase1, n_quick = _auto_combo_trials(len(viable_items), median_dim, cfg)
     _logger.info(
-        "Auto trials scale: phase1=%d, phase2=%d (viable=%d, median_dim=%.1f)",
-        p1_dyn,
-        p2_dyn,
+        "Stage1 auto trials: phase1=%d, phase2=%d, viable=%d, median_dim=%.1f",
+        n_phase1,
+        n_quick,
         len(viable_items),
         median_dim,
     )
-    p1 = p1_dyn
-    p2 = p2_dyn
 
     _logger.info("Warming up Numba JIT before process pool...")
     _warmup_numba(
-        data_maps, symbols, tf, project_root=project_root, signal_cache_dir=signal_cache_dir
+        data_maps, screen_symbols, tf, project_root=project_root, signal_cache_dir=signal_cache_dir
     )
 
-    viable_combos = [item[0] for item in viable_items]
-
-    def get_mp_ctx() -> Any:
-        if sys.platform == "win32":
-            return mp.get_context("spawn")
-        try:
-            return mp.get_context("fork")
-        except ValueError:
-            return mp.get_context("spawn")
-
-    mp_ctx = get_mp_ctx()
-
-    _logger.info(
-        "Phase 1: Quick CPCV (%d trials × %d combos, %d workers)...",
-        p1,
-        len(viable_combos),
-        n_workers,
-    )
+    mp_ctx = _process_pool_context()
 
     phase1_fn = partial(
-        run_quick_cpcv_for_combo_futures,
+        _phase1_worker,
         data_maps=data_maps,
-        symbols=symbols,
+        symbols=screen_symbols,
         tf=tf,
-        n_trials=p1,
+        n_trials=n_phase1,
         project_root=project_root,
         signal_cache_dir=signal_cache_dir,
     )
 
+    _logger.info(
+        "Phase 1: quick screen (%d trials × %d combos, %d workers)...",
+        n_phase1,
+        len(viable_items),
+        n_workers,
+    )
     with ProcessPoolExecutor(max_workers=n_workers, mp_context=mp_ctx) as pool:
         phase1_results = list(
             tqdm(
-                pool.map(phase1_fn, viable_combos, chunksize=1),
-                total=len(viable_combos),
-                desc="[Futures Phase 1]",
+                pool.map(phase1_fn, [it[0] for it in viable_items], chunksize=2),
+                total=len(viable_items),
+                desc="[Combo Screen Phase-1]",
                 unit="combo",
             )
         )
 
-    prune_thr = float(cfg.get("FUTURES_COMBO_PRUNE_THR", -0.05))
     surviving_items: List[Tuple[Tuple[str, str, str], float, float]] = []
-
-    for (combo, ls_ratio, mean_signal_rate), score in zip(
-        viable_items, phase1_results, strict=True
-    ):
+    for (combo, ls_ratio, mean_signal_rate), score in zip(viable_items, phase1_results, strict=True):
         if score > prune_thr:
             surviving_items.append((combo, ls_ratio, mean_signal_rate))
         else:
-            scored.append(
+            scores.append(
                 CombinationScoreFutures(
                     signal=combo[0],
                     regime=combo[1],
@@ -516,100 +552,91 @@ def run_combination_screening_futures(
                 )
             )
 
-    _logger.info(
-        "Phase 1 complete: %d surviving / %d viable", len(surviving_items), len(viable_items)
-    )
+    _logger.info("Phase 1 complete: %d surviving / %d viable", len(surviving_items), len(viable_items))
 
     phase1_no_edge = False
     if not surviving_items:
-        best_score = max(phase1_results) if phase1_results else -1e9
-        _logger.warning(
-            "Phase 1: all %d combos pruned (best=%.4f, thr=%.4f). "
-            "IS period may lack exploitable edge.",
-            len(viable_items),
-            best_score,
-            prune_thr,
-        )
-        relaxed_thr = 0.0
+        _logger.warning("Phase 1: all pruned. Relaxing threshold, keeping top-5.")
         surviving_items = [
-            item
-            for item, score in zip(viable_items, phase1_results, strict=True)
-            if score > relaxed_thr
+            item for _, item in sorted(zip(phase1_results, viable_items, strict=True), reverse=True, key=lambda x: x[0])[:5]
         ]
-        if not surviving_items:
-            surviving_items = [
-                x
-                for _, x in sorted(
-                    zip(phase1_results, viable_items, strict=True),
-                    reverse=True,
-                    key=lambda pair: pair[0],
-                )[:3]
-            ]
-            phase1_no_edge = True
-            _logger.error(
-                "No edge found after relaxed threshold. Using best-3 combos; "
-                "Phase D applies strict objective floor."
-            )
+        phase1_no_edge = True
 
     phase2_boost = _ambiguity_phase2_boost(phase1_results, top_k=max(1, top_k), cfg=cfg)
     if phase2_boost > 0:
-        p2_cap = int(cfg.get("FUTURES_COMBO_QUICK_TRIALS_MAX", 40))
-        p2 = min(p2_cap, p2 + phase2_boost)
-        _logger.info(
-            "Phase 2 Ambiguity Boost applied (+%d trials) -> %d trials/combo", phase2_boost, p2
-        )
-
-    survivor_combos = [s[0] for s in surviving_items]
-
-    _logger.info(
-        "Phase 2: Full CPCV (%d trials × %d combos, %d workers)...",
-        p2,
-        len(survivor_combos),
-        n_workers,
-    )
+        p2_cap = int(cfg.get("FUTURES_COMBO_QUICK_TRIALS_MAX", 60))
+        n_quick = min(p2_cap, n_quick + phase2_boost)
+        _logger.info("Phase 1 boundary ambiguous: boosting phase2 trials by +%d -> %d", phase2_boost, n_quick)
 
     phase2_fn = partial(
-        run_phase2_metrics_futures,
+        _phase2_worker,
         data_maps=data_maps,
-        symbols=symbols,
+        symbols=screen_symbols,
         tf=tf,
-        n_trials=p2,
+        n_trials=n_quick,
         project_root=project_root,
         signal_cache_dir=signal_cache_dir,
     )
 
+    _logger.info(
+        "Phase 2: full screen (%d trials × %d combos, %d workers)...",
+        n_quick,
+        len(surviving_items),
+        n_workers,
+    )
     with ProcessPoolExecutor(max_workers=n_workers, mp_context=mp_ctx) as pool:
         phase2_results = list(
             tqdm(
-                pool.map(phase2_fn, survivor_combos, chunksize=1),
-                total=len(survivor_combos),
-                desc="[Futures Phase 2]",
+                pool.map(phase2_fn, [it[0] for it in surviving_items], chunksize=1),
+                total=len(surviving_items),
+                desc="[Combo Screen Phase-2]",
                 unit="combo",
             )
         )
 
-    finals: List[CombinationScoreFutures] = []
-    for item, (m, best_params) in zip(surviving_items, phase2_results, strict=True):
-        combo, ls_ratio, mean_signal_rate = item
-        score = _p25_path_consistency_score(m)
-        finals.append(
+    scored_rows: List[Tuple[Tuple[str, str, str], Dict[str, float], Dict[str, Any], float, float]] = []
+    for (combo, ls_ratio, mean_signal_rate), (m, best_params) in zip(surviving_items, phase2_results, strict=True):
+        scored_rows.append((combo, m, best_params, ls_ratio, mean_signal_rate))
+
+    def _robust_key(m: Dict[str, float]) -> float:
+        return float(m.get("psr_paths", 0.0)) + float(max(0.0, m.get("dsr_paths", 0.0)))
+
+    by_growth = sorted(scored_rows, key=lambda x: _p25_path_consistency_score(x[1]), reverse=True)[: max(1, bucket_each)]
+    by_robust = sorted(scored_rows, key=lambda x: _robust_key(x[1]), reverse=True)[: max(1, bucket_each)]
+    by_balance = sorted(scored_rows, key=lambda x: x[1].get("objective_final", -1e9), reverse=True)[: max(1, bucket_each)]
+
+    seen: set[tuple[str, str, str]] = set()
+    bucket_order: List[tuple[str, str, str]] = []
+    for bucket in (by_growth, by_robust, by_balance):
+        for combo, _, _, _, _ in bucket:
+            if combo not in seen:
+                seen.add(combo)
+                bucket_order.append(combo)
+
+    for combo in bucket_order:
+        row = next(r for r in scored_rows if r[0] == combo)
+        metrics, best_params, ls_ratio, sig_rate = row[1], row[2], row[3], row[4]
+        score = _p25_path_consistency_score(metrics)
+        scores.append(
             CombinationScoreFutures(
                 signal=combo[0],
                 regime=combo[1],
                 sizing=combo[2],
                 p10_gmgr=score,
                 ls_ratio=ls_ratio,
-                mean_signal_rate=mean_signal_rate,
+                mean_signal_rate=sig_rate,
                 disqualified=False,
-                reason="",
                 best_params=best_params,
             )
         )
 
-    finals.sort(key=lambda x: x.p10_gmgr, reverse=True)
+    qualified = [s for s in scores if not s.disqualified]
+    qualified.sort(key=lambda x: x.p10_gmgr, reverse=True)
 
-    for s in scored:
-        finals.append(s)
+    # Reporting (simplified)
+    _logger.info("Stage1: %d qualified combos found.", len(qualified))
+    if qualified:
+        best = qualified[0]
+        _logger.info("※ Winning Combo for Stage 2: %s | %s | %s (p10_gmgr=%.4f)", best.signal, best.regime, best.sizing, best.p10_gmgr)
 
-    valid_finals = [s for s in finals if not s.disqualified]
-    return CombinationScreeningResult(combos=valid_finals[:top_k], phase1_no_edge=phase1_no_edge)
+    return CombinationScreeningResult(combos=qualified[:max(top_k, len(bucket_order))], phase1_no_edge=phase1_no_edge)

@@ -590,211 +590,301 @@ def _eval_combo_task_from_context(
     )
 
 
-def _run_stage1_futures_tournament(
-    data_maps: Dict[str, Dict[str, Any]], symbols: List[str], tf: str,
-    project_root: str, n_workers: int
-) -> List[CombinationScoreFutures]:
-    from src.domain.futures.opt_futures_utils.objective import (
-        EMBARGO_BARS as OBJ_EMBARGO_BARS,
-    )
-    from src.domain.futures.opt_futures_utils.objective import (
-        compute_multi_alignment_info,
-    )
-    from src.domain.futures.regimes import FUTURES_REGIME_REGISTRY
-    from src.domain.futures.signals import FUTURES_SIGNAL_REGISTRY
-    from src.domain.futures.sizing import FUTURES_SIZING_REGISTRY
-    _logger.info("Starting Stage 1 Futures Tournament...")
-    embargo = int(OBJ_EMBARGO_BARS.get(tf, 0))
+def _run_stage1_structure_discovery(
+    *,
+    data_maps: Dict[str, Dict[str, Any]],
+    symbols: List[str],
+    tf: str,
+    trials_per_signal: int,
+    top_k: int,
+    min_p10_gmgr: float,
+    project_root: str,
+    signal_cache_dir: str,
+) -> Dict[str, Dict[str, Any]]:
+    """Per-SIGNAL_TYPE in-memory Optuna studies; narrow categorical to top performers."""
+    from src.domain.futures.opt_futures_utils.objective import objective_futures
+    from src.domain.futures.opt_futures_utils.opt_params import build_combined_param_space_futures
+
+    all_types = tuple(get_search_space_futures(tf)["SIGNAL_TYPE"]["choices"])
+    ref_sym = symbols[0]
+    is_off = int(data_maps[ref_sym].get(f"is_start_idx_{tf}", 0))
+    ref_df = data_maps[ref_sym][tf]
+    
+    embargo = int(EMBARGO_BARS.get(tf, 0))
+    from src.domain.futures.opt_futures_utils.objective import compute_multi_alignment_info
     alignment_info = compute_multi_alignment_info(data_maps, symbols, tf, embargo)
     prebuilt = alignment_info["cpcv_bundle"] if alignment_info else None
-    sig_choices = [s for s in FUTURES_SIGNAL_REGISTRY.keys() if s not in {"BB_SQUEEZE"}]
-    
-    # [OPTIMIZATION] Update global context with calculated info before pool starts
-    _STAGE1_WORKER_CTX.update({
-        "prebuilt": prebuilt,
-        "alignment_info": alignment_info
-    })
 
-    # Fix line length for regs
-    reg_list = list(FUTURES_REGIME_REGISTRY.keys())
-    regs = [r for r in reg_list if r not in {"FUNDING_RATE", "MARKET_BREADTH"}]
+    if not prebuilt and ref_df is not None and not ref_df.empty:
+        ref_len = len(ref_df) - is_off
+        if ref_len >= 200:
+            prebuilt = build_cpcv_test_paths_with_fallback(ref_len, embargo=embargo)
+            
+    cache_root = Path(signal_cache_dir) if signal_cache_dir else None
+    results: List[tuple[str, float]] = []
+    n_tri = max(5, int(trials_per_signal))
     
-    combos = list(itertools.product(sig_choices, regs, list(FUTURES_SIZING_REGISTRY.keys())))
-    results: List[CombinationScoreFutures] = []
-    with concurrent.futures.ProcessPoolExecutor(
-        max_workers=min(n_workers, len(combos), 6),
-        mp_context=multiprocessing.get_context("fork"),
-        initializer=_init_stage1_worker_context
-    ) as executor:
-        futures_map = {
-            executor.submit(_eval_combo_task_from_context, s, r, sz): (s, r, sz)
-            for s, r, sz in combos
-        }
-        with tqdm(total=len(combos), desc="Stage 1 Scan") as pbar:
-            for f in concurrent.futures.as_completed(futures_map):
-                try:
-                    score = f.result()
-                    if score and not score.disqualified:
-                        results.append(score)
-                    elif score:
-                        _logger.warning(
-                            "  [%s x %s x %s] ALL PRUNED: %s",
-                            score.signal, score.regime, score.sizing, score.reason
-                        )
-                except Exception as e:
-                    _logger.error("Error evaluating combo: %s", e)
-                pbar.update(1)
-    results.sort(key=lambda x: x.p10_gmgr, reverse=True)
-    if results:
-        _logger.info("\n🏆 STAGE 1 RANKING (Top 5)")
-        for i, res in enumerate(results[:5]):
-            r_str = f"{i+1:<4} {res.signal[:14]:<15} {res.regime[:14]:<15} "
-            s_str = f"{res.sizing[:14]:<15} {res.p10_gmgr:>8.4f}"
-            _logger.info(r_str + s_str)
-    return results
+    for sig_type in all_types:
+        # Build space for a single signal type
+        base_space = get_search_space_futures(tf)
+        stage_space = {k: dict(v) if isinstance(v, dict) else v for k, v in base_space.items()}
+        stage_space["SIGNAL_TYPE"] = {"type": "categorical", "choices": (sig_type,)}
+        
+        study = optuna.create_study(
+            direction="maximize",
+            sampler=TPESampler(n_startup_trials=min(20, max(5, n_tri // 4)), seed=42),
+            storage=InMemoryStorage(),
+        )
+
+        def _obj(trial: optuna.Trial, stage_space=stage_space) -> float:
+            return objective_futures(
+                trial,
+                data_maps,
+                symbols,
+                tf,
+                space=stage_space,
+                mode="multi",
+                project_root=project_root,
+                prebuilt_cpcv_bundle=prebuilt,
+                multi_alignment_info=alignment_info,
+                signal_disk_cache_root=cache_root,
+            )
+
+        study.optimize(_obj, n_trials=n_tri, n_jobs=1, show_progress_bar=False)
+        completed = [
+            t for t in study.trials if t.state == TrialState.COMPLETE and t.value is not None
+        ]
+        if not completed:
+            results.append((sig_type, -1e9))
+            continue
+        completed.sort(key=lambda tr: float(tr.value or -1e9), reverse=True)
+        ktop = max(1, n_tri // 10)
+        top_trials = completed[:ktop]
+        mean_obj = float(np.mean([float(t.value) for t in top_trials]))
+        results.append((sig_type, mean_obj))
+        _logger.info("Stage1 [%s]: top-%d mean objective=%.6f", sig_type, ktop, mean_obj)
+        
+    results.sort(key=lambda x: x[1], reverse=True)
+    winning = [s for s, m in results[: max(1, top_k)] if m > min_p10_gmgr]
+    if not winning:
+        winning = [results[0][0]]
+    _logger.info("Stage1 narrowed SIGNAL_TYPE choices: %s", winning)
+    
+    # Update search space with narrowed signal types
+    final_space = get_search_space_futures(tf)
+    final_space["SIGNAL_TYPE"]["choices"] = tuple(winning)
+    return final_space
+
+
+def _load_futures_data_maps_for_symbols(
+    symbols: List[str],
+    tf: str,
+    fetch_start: str,
+    start: str,
+    is_end: str,
+    end: str,
+) -> tuple[Dict[str, Dict[str, Any]], Dict[str, Dict[str, Any]], List[str]]:
+    collector = DataCollector()
+    data_maps: Dict[str, Dict[str, Any]] = {}
+    oos_data_maps: Dict[str, Dict[str, Any]] = {}
+    valid_symbols: List[str] = []
+    min_bars = int(FUTURES_SCREENER_CONFIG.get("MIN_HISTORY_BARS", 2000))
+
+    for sym in symbols:
+        try:
+            temp_is: Dict[str, Any] = {}
+            temp_oos: Dict[str, Any] = {}
+            insufficient = False
+            collector.ensure_funding_data(sym, fetch_start, end)
+            for tf_l in [tf, "1d"]:
+                raw_df = collector.collect_and_save(sym, tf_l, fetch_start, end)
+                df = merge_funding_into_ohlcv(sym, raw_df, FUTURES_DATA_DIR)
+                if df is None or len(df) < (min_bars if tf_l == tf else 200):
+                    insufficient = True
+                    break
+                df.reset_index(drop=True, inplace=True)
+                tz = df["datetime"].dt.tz
+                is_start_dt = pd.to_datetime(start).tz_localize(tz) if tz else pd.to_datetime(start)
+                is_end_dt = pd.to_datetime(is_end).tz_localize(tz) if tz else pd.to_datetime(is_end)
+                
+                is_mask = df["datetime"] < is_end_dt
+                is_end_idx = int(is_mask.to_numpy().sum())
+                temp_is[tf_l] = df.iloc[:is_end_idx].copy()
+                
+                mask = temp_is[tf_l]["datetime"] >= is_start_dt
+                temp_is[f"is_start_idx_{tf_l}"] = int(mask.to_numpy().argmax()) if mask.any() else 0
+                temp_oos[tf_l] = df
+                mask_oos = df["datetime"] >= is_end_dt
+                temp_oos[f"oos_start_idx_{tf_l}"] = int(mask_oos.to_numpy().argmax()) if mask_oos.any() else len(df)
+            
+            if insufficient:
+                continue
+                
+            temp_is[f"merge_idx_{tf}"] = compute_segment_merge_index(temp_is[tf], temp_is["1d"])
+            temp_oos[f"merge_idx_{tf}"] = compute_segment_merge_index(temp_oos[tf], temp_oos["1d"])
+            data_maps[sym], oos_data_maps[sym] = temp_is, temp_oos
+            valid_symbols.append(sym)
+        except Exception as e:
+            _logger.warning("Failed to load symbol %s: %s", sym, e)
+            continue
+
+    if len(valid_symbols) >= 2:
+        ref_tz = oos_data_maps[valid_symbols[0]][tf]["datetime"].dt.tz
+        is_start_align = pd.to_datetime(start).tz_localize(ref_tz) if ref_tz else pd.to_datetime(start)
+        is_end_align = pd.to_datetime(is_end).tz_localize(ref_tz) if ref_tz else pd.to_datetime(is_end)
+        _align_oos_dataframes_on_common_datetimes(oos_data_maps, valid_symbols, tf, is_end_align)
+        _rebuild_is_data_maps_from_aligned_oos(data_maps, oos_data_maps, valid_symbols, tf, is_start_align, is_end_align)
+
+    for rc, cn in [("BTC/USDT", "btc_close"), ("ETH/USDT", "eth_close")]:
+        if rc in data_maps:
+            rd = data_maps[rc][tf][["datetime", "close"]].rename(columns={"close": cn})
+            rdo = oos_data_maps[rc][tf][["datetime", "close"]].rename(columns={"close": cn})
+            for s in valid_symbols:
+                if s != rc:
+                    data_maps[s][tf] = data_maps[s][tf].merge(rd, on="datetime", how="left")
+                    oos_data_maps[s][tf] = oos_data_maps[s][tf].merge(rdo, on="datetime", how="left")
+                else:
+                    data_maps[s][tf] = data_maps[s][tf].copy()
+                    data_maps[s][tf][cn] = data_maps[s][tf]["close"]
+                    oos_data_maps[s][tf] = oos_data_maps[s][tf].copy()
+                    oos_data_maps[s][tf][cn] = oos_data_maps[s][tf]["close"]
+
+    if len(valid_symbols) > 1:
+        inject_cs_momentum_ranks(data_maps, valid_symbols, tf)
+        inject_cs_momentum_ranks(oos_data_maps, valid_symbols, tf)
+
+    return data_maps, oos_data_maps, valid_symbols
 
 
 def main() -> None:
+    import importlib
+    import config.opt_config
+
+    pre_parser = argparse.ArgumentParser(add_help=False)
+    pre_parser.add_argument("--skip-universe", action="store_true")
+    pre_parser.add_argument("--reference-date", type=str, default=None)
+    pre_parser.add_argument("--skip-stage1", action="store_true")
+    pre_parser.add_argument("--signal-type", type=str, default=None)
+    pre_parser.add_argument("--tf", type=str, default="4h")
+    pre_args, _ = pre_parser.parse_known_args()
+
+    phase0_narrowed_space: Optional[Dict[str, Dict[str, Any]]] = None
+    
+    # [수정] 메모리 절약을 위한 디스크 캐시 활성화
+    signal_cache_dir = str(Path(project_root) / "data" / "cache_futures")
+    Path(signal_cache_dir).mkdir(parents=True, exist_ok=True)
+
+    if not pre_args.skip_universe:
+        from src.domain.futures.opt_futures_utils.combination_screener_futures import run_combination_screening_futures, build_probe_params_futures
+        from src.domain.futures.opt_futures_utils.universe_screener_futures import screen_futures_universe, screen_symbol_refinement_futures, load_screener_fixed_params_futures
+        from src.domain.futures.opt_futures_utils.opt_params import build_multi_combo_param_space_futures
+
+        fetch_start_date, start_date, is_end_date, end_date = get_quarterly_window(pre_args.reference_date)
+        
+        collector = DataCollector()
+        broad_candidates, _ = screen_futures_universe(
+            collector, [], pre_args.tf, config.opt_config.FUTURES_SCREENER_CONFIG, fetch_start_date, is_end_date, data_dir=FUTURES_DATA_DIR
+        )
+        importlib.reload(config.opt_config)
+
+        if not broad_candidates:
+            _logger.error("Phase A returned no broad candidates. Aborting.")
+            return
+
+        anchors_to_add = [s for s in config.opt_config.FUTURES_ANCHOR_SYMBOLS if s not in broad_candidates]
+        all_symbols_for_load = list(broad_candidates) + anchors_to_add
+        
+        data_maps_broad, _, valid_broad = _load_futures_data_maps_for_symbols(
+            all_symbols_for_load, pre_args.tf, fetch_start_date, start_date, is_end_date, end_date
+        )
+
+        if len(valid_broad) < 1:
+            _logger.error("Phase 0: no symbols with loadable data. Aborting.")
+            return
+
+        winning_signal_type: str
+        phase_b_params: Optional[Dict[str, Any]] = None
+        if not pre_args.skip_stage1:
+            _logger.info("Phase B: combination screening on anchors (is_end=%s)", is_end_date)
+            res = run_combination_screening_futures(
+                data_maps=data_maps_broad,
+                symbols=valid_broad,
+                tf=pre_args.tf,
+                project_root=project_root,
+                signal_cache_dir=signal_cache_dir,
+            )
+            tops = res.combos
+            if not tops:
+                _logger.error("Phase B: combination screening returned no tops. Aborting.")
+                return
+            
+            winning_signal_type = tops[0].signal
+            phase0_narrowed_space = build_multi_combo_param_space_futures(tops)
+            phase_b_params = build_probe_params_futures(tops[0], pre_args.tf)
+        else:
+            if pre_args.signal_type:
+                winning_signal_type = pre_args.signal_type.upper()
+            else:
+                fixed = load_screener_fixed_params_futures(Path(project_root))
+                winning_signal_type = fixed.get("SIGNAL_TYPE", "RSM_VT")
+            
+            phase0_narrowed_space = get_search_space_futures(pre_args.tf)
+            phase0_narrowed_space["SIGNAL_TYPE"]["choices"] = (winning_signal_type,)
+
+        screen_symbol_refinement_futures(
+            broad_candidates,
+            winning_signal_type,
+            is_end_date,
+            symbol_dfs_4h={s: data_maps_broad[s][pre_args.tf] for s in valid_broad},
+            daily_dfs={s: data_maps_broad[s]["1d"] for s in valid_broad},
+            phase_b_params=phase_b_params,
+            anchor_symbols=config.opt_config.FUTURES_ANCHOR_SYMBOLS,
+        )
+        importlib.reload(config.opt_config)
+
     parser = argparse.ArgumentParser()
+    parser.add_argument("--symbols", type=str, default=",".join(config.opt_config.FUTURES_SYMBOLS))
     parser.add_argument("--skip-universe", action="store_true")
     parser.add_argument("--trials", type=int, default=OPT_FUTURES_CONFIG["total_trials"])
     parser.add_argument("--tf", type=str, choices=["1h", "4h"], default="4h")
     parser.add_argument("--reference-date", type=str, default=None)
     parser.add_argument("--no-progress", action="store_true")
     parser.add_argument("--skip-stage1", action="store_true")
+    parser.add_argument("--stage1-trials", type=int, default=80)
     args = parser.parse_args()
 
     fetch_start_date, start_date, is_end_date, end_date = get_quarterly_window(args.reference_date)
-    collector = DataCollector()
-    
-    broad_candidates: List[str] = []
-    if not args.skip_universe:
-        broad_candidates, _ = screen_futures_universe(
-            collector, [], args.tf, FUTURES_SCREENER_CONFIG, fetch_start_date, is_end_date,
-            data_dir=FUTURES_DATA_DIR
-        )
-    else:
-        broad_candidates = list(dict.fromkeys(FUTURES_SYMBOLS))
+    symbols = [s.strip() for s in args.symbols.split(",") if s.strip()]
 
-    data_maps: Dict[str, Dict[str, Any]] = {}
-    oos_data_maps: Dict[str, Dict[str, Any]] = {}
-    valid_symbols: List[str] = []
-    min_bars = int(FUTURES_SCREENER_CONFIG.get("MIN_HISTORY_BARS", 2000))
-    for sym in broad_candidates:
-        try:
-            temp_is: Dict[str, Any] = {}
-            temp_oos: Dict[str, Any] = {}
-            insufficient = False
-            collector.ensure_funding_data(sym, fetch_start_date, end_date)
-            for tf_l in [args.tf, "1d"]:
-                raw_df = collector.collect_and_save(sym, tf_l, fetch_start_date, end_date)
-                df = merge_funding_into_ohlcv(sym, raw_df, FUTURES_DATA_DIR)
-                if df is None or len(df) < (min_bars if tf_l == args.tf else 200):
-                    insufficient = True
-                    break
-                df.reset_index(drop=True, inplace=True) # Ensure 0-based indexing for views
-                tz = df["datetime"].dt.tz
-                is_start_dt = (pd.to_datetime(start_date).tz_localize(tz)
-                               if tz else pd.to_datetime(start_date))
-                is_end_dt = (pd.to_datetime(is_end_date).tz_localize(tz)
-                             if tz else pd.to_datetime(is_end_date))
-                
-                # [OPTIMIZATION] Use .copy() to ensure memory separation between IS and OOS
-                is_mask = df["datetime"] < is_end_dt
-                is_end_idx = int(is_mask.to_numpy().sum())
-                temp_is[tf_l] = df.iloc[:is_end_idx].copy()
-                
-                mask = temp_is[tf_l]["datetime"] >= is_start_dt
-                temp_is[f"is_start_idx_{tf_l}"] = (int(mask.to_numpy().argmax())
-                                                  if mask.any() else 0)
-                temp_oos[tf_l] = df # Full data
-                mask_oos = df["datetime"] >= is_end_dt
-                temp_oos[f"oos_start_idx_{tf_l}"] = (int(mask_oos.to_numpy().argmax())
-                                                    if mask_oos.any() else len(df))
-            if insufficient:
-                continue
-            temp_is[f"merge_idx_{args.tf}"] = compute_segment_merge_index(
-                temp_is[args.tf], temp_is["1d"]
-            )
-            temp_oos[f"merge_idx_{args.tf}"] = compute_segment_merge_index(
-                temp_oos[args.tf], temp_oos["1d"]
-            )
-            data_maps[sym], oos_data_maps[sym] = temp_is, temp_oos
-            valid_symbols.append(sym)
-            gc.collect() # Clean up temporary DataFrames after each symbol
-        except Exception as e:
-            _logger.warning("Failed to load symbol %s: %s", sym, e)
-            continue
-
-    symbols = valid_symbols
-    if not symbols:
-        _logger.error("No valid symbols.")
-        return
-    runtime_policy = _resolve_futures_parallel_policy(len(symbols), args.tf)
-
-    # Step 1: Align OOS datetimes and rebuild IS maps BEFORE Stage 1 tournament,
-    # so all stages operate on consistent, symbol-intersection-aligned data.
-    ref_tz = oos_data_maps[symbols[0]][args.tf]["datetime"].dt.tz
-    is_start_align = (pd.to_datetime(start_date).tz_localize(ref_tz)
-                      if ref_tz else pd.to_datetime(start_date))
-    is_end_align = (pd.to_datetime(is_end_date).tz_localize(ref_tz)
-                    if ref_tz else pd.to_datetime(is_end_date))
-    _align_oos_dataframes_on_common_datetimes(oos_data_maps, symbols, args.tf, is_end_align)
-    _rebuild_is_data_maps_from_aligned_oos(
-        data_maps, oos_data_maps, symbols, args.tf, is_start_align, is_end_align
+    _logger.info("Loading Futures data for %d symbols...", len(symbols))
+    data_maps, oos_data_maps, valid_symbols = _load_futures_data_maps_for_symbols(
+        symbols, args.tf, fetch_start_date, start_date, is_end_date, end_date
     )
 
-    # Step 2: BTC/ETH reference price merge (materialises views into new DataFrames).
-    for rc, cn in [("BTC/USDT", "btc_close"), ("ETH/USDT", "eth_close")]:
-        if rc in data_maps:
-            rd = data_maps[rc][args.tf][["datetime", "close"]].rename(columns={"close": cn})
-            rdo = oos_data_maps[rc][args.tf][["datetime", "close"]].rename(columns={"close": cn})
-            for s in symbols:
-                if s != rc:
-                    data_maps[s][args.tf] = data_maps[s][args.tf].merge(
-                        rd, on="datetime", how="left"
-                    )
-                    oos_data_maps[s][args.tf] = oos_data_maps[s][args.tf].merge(
-                        rdo, on="datetime", how="left"
-                    )
-                else:
-                    # Fix: Ensure base symbols also have the reference close columns
-                    data_maps[s][args.tf] = data_maps[s][args.tf].copy()
-                    data_maps[s][args.tf][cn] = data_maps[s][args.tf]["close"]
-                    oos_data_maps[s][args.tf] = oos_data_maps[s][args.tf].copy()
-                    oos_data_maps[s][args.tf][cn] = oos_data_maps[s][args.tf]["close"]
+    if not valid_symbols:
+        _logger.error("No valid symbols.")
+        return
 
-    # Step 3: CS momentum rank injection (backward-looking, no look-ahead bias).
-    # Must run after BTC/ETH merge which creates new DataFrames.
-    if len(symbols) > 1:
-        inject_cs_momentum_ranks(data_maps, symbols, args.tf)
-        inject_cs_momentum_ranks(oos_data_maps, symbols, args.tf)
-
-    # Step 4: Stage 1 Tournament on ALIGNED + MERGED + CS-ranked data.
-    # _STAGE1_WORKER_CTX["data_maps"] IS data_maps (same reference), so fork()
-    # workers inherit the fully prepared state without an extra copy.
-    _STAGE1_WORKER_CTX.clear()
-    _STAGE1_WORKER_CTX.update({
-        "data_maps": data_maps,
-        "symbols": symbols,
-        "tf": args.tf,
-        "project_root": project_root,
-        "prebuilt": None,
-        "alignment_info": None,
-    })
-
-    locked_param_space = None
-    if not args.skip_stage1:
-        tops = _run_stage1_futures_tournament(
-            data_maps, symbols, args.tf, project_root, runtime_policy.stage1_workers
+    runtime_policy = _resolve_futures_parallel_policy(len(valid_symbols), args.tf)
+    
+    narrowed_space_effective = phase0_narrowed_space
+    if not args.skip_stage1 and narrowed_space_effective is None:
+        narrowed_space_effective = _run_stage1_structure_discovery(
+            data_maps=data_maps,
+            symbols=valid_symbols,
+            tf=args.tf,
+            trials_per_signal=args.stage1_trials,
+            top_k=2,
+            min_p10_gmgr=-0.5,
+            project_root=project_root,
+            signal_cache_dir=signal_cache_dir,
         )
-        if tops:
-            locked_param_space = build_multi_combo_param_space_futures(tops[:5])
 
-    tasks: List[Tuple[Tuple[str, ...], str]] = [(tuple(symbols), args.tf)]
+    tasks: List[Tuple[Tuple[str, ...], str]] = [(tuple(valid_symbols), args.tf)]
     plan = _resolve_futures_execution_plan(
         len(tasks), MODE_MULTI, runtime_policy.qmc_jobs, runtime_policy.tpe_workers
     )
+    
     manager = Manager()
     progress_queue: Optional[Any] = manager.Queue() if not args.no_progress else None
     tf_bars = {
@@ -805,21 +895,19 @@ def main() -> None:
     } if progress_queue else {}
 
     def _prog_listener() -> None:
-        if progress_queue is None:
-            return
+        if progress_queue is None: return
         while True:
             msg = progress_queue.get()
-            if msg is None:
-                break
+            if msg is None: break
             k, cur, _, k_pct = msg
             if k in tf_bars:
                 tf_bars[k].n = cur
                 tf_bars[k].set_description(f"[{k}] Best Kelly: {k_pct:.2f}%")
                 tf_bars[k].refresh()
+    
     if progress_queue:
         threading.Thread(target=_prog_listener, daemon=True).start()
 
-    # Set Global Context for TPE Optimization (CoW)
     _TPE_WORKER_CTX.clear()
     _TPE_WORKER_CTX["data_maps"] = data_maps
 
@@ -835,7 +923,8 @@ def main() -> None:
             project_root=project_root,
             progress_queue=progress_queue,
             parallel_tpe_workers=plan.parallel_tpe_workers,
-            locked_param_space=locked_param_space
+            locked_param_space=narrowed_space_effective,
+            signal_cache_dir=signal_cache_dir
         )
         _, study = _run_tf_optimization(t, ctx)
         best_results[t] = study
