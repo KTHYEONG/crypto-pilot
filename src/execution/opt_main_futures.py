@@ -41,6 +41,7 @@ from config.opt_config import (  # noqa: E402
     FUTURES_SCREENER_CONFIG,
     FUTURES_SYMBOLS,
     OPT_FUTURES_CONFIG,
+    FUTURES_ANCHOR_SYMBOLS,
     get_quarterly_window,
     get_search_space_futures,
 )
@@ -699,7 +700,12 @@ def _load_futures_data_maps_for_symbols(
             for tf_l in [tf, "1d"]:
                 raw_df = collector.collect_and_save(sym, tf_l, fetch_start, end)
                 df = merge_funding_into_ohlcv(sym, raw_df, FUTURES_DATA_DIR)
-                if df is None or len(df) < (min_bars if tf_l == tf else 200):
+                
+                # Check for minimum bars: anchor symbols can bypass the 2000 strict limit and just require 500
+                is_anchor = sym in FUTURES_ANCHOR_SYMBOLS
+                min_required = 500 if is_anchor and tf_l == tf else (min_bars if tf_l == tf else 200)
+                
+                if df is None or len(df) < min_required:
                     insufficient = True
                     break
                 df.reset_index(drop=True, inplace=True)
@@ -792,10 +798,10 @@ def main() -> None:
             return
 
         anchors_to_add = [s for s in config.opt_config.FUTURES_ANCHOR_SYMBOLS if s not in broad_candidates]
-        all_symbols_for_load = list(broad_candidates) + anchors_to_add
-        
-        data_maps_broad, _, valid_broad = _load_futures_data_maps_for_symbols(
-            all_symbols_for_load, pre_args.tf, fetch_start_date, start_date, is_end_date, end_date
+        all_symbols_for_load = list(dict.fromkeys(list(broad_candidates) + anchors_to_add))
+        broad_candidates = all_symbols_for_load
+
+        data_maps_broad, _, valid_broad = _load_futures_data_maps_for_symbols(            all_symbols_for_load, pre_args.tf, fetch_start_date, start_date, is_end_date, end_date
         )
 
         if len(valid_broad) < 1:
@@ -831,15 +837,21 @@ def main() -> None:
             phase0_narrowed_space = get_search_space_futures(pre_args.tf)
             phase0_narrowed_space["SIGNAL_TYPE"]["choices"] = (winning_signal_type,)
 
+        refinement_symbols = list(dict.fromkeys(broad_candidates + anchors_to_add))
+
         screen_symbol_refinement_futures(
-            broad_candidates,
-            winning_signal_type,
-            is_end_date,
+            broad_candidates=list(broad_candidates),
+            winning_signal_type=winning_signal_type,
+            is_end_date=is_end_date,
             symbol_dfs_4h={s: data_maps_broad[s][pre_args.tf] for s in valid_broad},
             daily_dfs={s: data_maps_broad[s]["1d"] for s in valid_broad},
             phase_b_params=phase_b_params,
             anchor_symbols=config.opt_config.FUTURES_ANCHOR_SYMBOLS,
         )
+        
+        # Reload config to get the updated FUTURES_SYMBOLS written by Phase C
+        importlib.reload(config.opt_config)
+        globals()["FUTURES_SYMBOLS"] = config.opt_config.FUTURES_SYMBOLS
         importlib.reload(config.opt_config)
 
     parser = argparse.ArgumentParser()
