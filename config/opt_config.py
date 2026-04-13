@@ -79,8 +79,8 @@ FUTURES_SYMBOLS: List[str] = [
 FUTURES_ANCHOR_SYMBOLS: List[str] = [
     "BTC/USDT",  # ADV $3B+, 독립 가격 동인, 슬리피지 최소
     "ETH/USDT",
-    "SOL/USDT",
 ]
+
 
 # Manually curated: ADV > $150M/day, CMC Top-50, 상장 2년+.
 # ZEC/FIL/DOT 유형(유동성 감소 추세, CMC 100위 밖) 포함 금지.
