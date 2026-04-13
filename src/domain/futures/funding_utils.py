@@ -55,19 +55,28 @@ def merge_funding_into_ohlcv(
     if df is None or df.empty:
         return df.copy() if df is not None else pd.DataFrame()
 
+    out = df.copy()
+    # Initialize basic columns to ensure downstream robustness even if file missing
+    if "funding_rate" not in out.columns:
+        out["funding_rate"] = 0.0
+    if "funding_event_count" not in out.columns:
+        out["funding_event_count"] = 0
+    if "funding_rate_sum" not in out.columns:
+        out["funding_rate_sum"] = 0.0
+
     safe = _safe_symbol(symbol)
     path = Path(data_dir) / f"{safe}_funding.parquet"
     if not path.exists():
-        return df.copy()
+        return out
 
     try:
         fr_df = pd.read_parquet(path)
     except Exception as e:
         _logger.warning("Failed to load funding parquet %s: %s", path, e)
-        return df.copy()
+        return out
 
     if fr_df.empty or "funding_rate" not in fr_df.columns:
-        return df.copy()
+        return out
 
     # Normalize timestamp to int64 ms
     ts_col = "timestamp" if "timestamp" in fr_df.columns else "datetime"
