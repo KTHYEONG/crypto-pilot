@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import gc
 import itertools
 import logging
+import multiprocessing
 import os
 import sys
 import threading
@@ -75,6 +77,13 @@ from src.domain.futures.opt_futures_utils.universe_screener_futures import (  # 
 from src.domain.futures.strategies_futures import FuturesPipelineStrategy  # noqa: E402
 
 warnings.filterwarnings("ignore")
+
+# Force Linux 'fork' method for memory efficiency (CoW)
+if sys.platform != "win32":
+    try:
+        multiprocessing.set_start_method("fork", force=True)
+    except RuntimeError:
+        pass
 
 os.environ.setdefault("OMP_NUM_THREADS", "1")
 os.environ.setdefault("MKL_NUM_THREADS", "1")
@@ -229,11 +238,15 @@ def _rebuild_is_data_maps_from_aligned_oos(
 ) -> None:
     for sym in symbols:
         full = oos_data_maps[sym][tf]
-        is_df = full[full["datetime"] < is_end_dt].copy().reset_index(drop=True)
-        data_maps[sym][tf] = is_df
-        m = is_df["datetime"] >= is_start_dt
+        # [OPTIMIZATION] Use view instead of copy (Zero-copy slicing) to keep float64 precision
+        is_mask = full["datetime"] < is_end_dt
+        is_end_idx = int(is_mask.to_numpy().sum())
+        is_df_view = full.iloc[:is_end_idx]
+        
+        data_maps[sym][tf] = is_df_view
+        m = is_df_view["datetime"] >= is_start_dt
         data_maps[sym][f"is_start_idx_{tf}"] = int(m.to_numpy().argmax()) if bool(m.any()) else 0
-        data_maps[sym][f"merge_idx_{tf}"] = compute_segment_merge_index(is_df, data_maps[sym]["1d"])
+        data_maps[sym][f"merge_idx_{tf}"] = compute_segment_merge_index(is_df_view, data_maps[sym]["1d"])
 
 
 def _align_oos_dataframes_on_common_datetimes(
@@ -286,9 +299,9 @@ def _select_best_trial_from_shortlist(
     return max(pool, key=robust_key)
 
 
-def _init_tpe_worker_context(data_maps: Dict[str, Dict[str, Any]]) -> None:
-    _TPE_WORKER_CTX.clear()
-    _TPE_WORKER_CTX["data_maps"] = data_maps
+def _init_tpe_worker_context() -> None:
+    # [OPTIMIZATION] Rely on GLOBAL CoW inherited from main process via 'fork'
+    pass
 
 
 def _convert_space_to_distributions(space: Dict[str, Any]) -> Dict[str, BaseDistribution]:
@@ -347,7 +360,9 @@ def _run_parallel_ask_tell(
     n_workers = max(1, min(n_workers, n_trials))
     _logger.info("   [Parallel] Running %d trials (%d workers)...", n_trials, n_workers)
     with concurrent.futures.ProcessPoolExecutor(
-        max_workers=n_workers, initializer=_init_tpe_worker_context, initargs=(ctx.data_maps,)
+        max_workers=n_workers,
+        mp_context=multiprocessing.get_context("fork"), # Ensure CoW
+        initializer=_init_tpe_worker_context
     ) as executor:
         futures_to_trials, remaining = {}, n_trials
         space = ctx.locked_param_space if ctx.locked_param_space else get_search_space_futures(tf)
@@ -535,15 +550,9 @@ def _eval_combo_task(
     )
 
 
-def _init_stage1_worker_context(
-    data_maps: Dict[str, Dict[str, Any]], symbols: List[str], tf: str,
-    project_root: str, prebuilt: Any, alignment_info: Any
-) -> None:
-    _STAGE1_WORKER_CTX.clear()
-    _STAGE1_WORKER_CTX.update({
-        "data_maps": data_maps, "symbols": symbols, "tf": tf,
-        "project_root": project_root, "prebuilt": prebuilt, "alignment_info": alignment_info
-    })
+def _init_stage1_worker_context() -> None:
+    # [OPTIMIZATION] Inherit global context via CoW.
+    pass
 
 
 def _eval_combo_task_from_context(
@@ -575,6 +584,12 @@ def _run_stage1_futures_tournament(
     prebuilt = alignment_info["cpcv_bundle"] if alignment_info else None
     sig_choices = [s for s in FUTURES_SIGNAL_REGISTRY.keys() if s not in {"BB_SQUEEZE"}]
     
+    # [OPTIMIZATION] Update global context with calculated info before pool starts
+    _STAGE1_WORKER_CTX.update({
+        "prebuilt": prebuilt,
+        "alignment_info": alignment_info
+    })
+
     # Fix line length for regs
     reg_list = list(FUTURES_REGIME_REGISTRY.keys())
     regs = [r for r in reg_list if r not in {"FUNDING_RATE", "MARKET_BREADTH"}]
@@ -583,8 +598,8 @@ def _run_stage1_futures_tournament(
     results: List[CombinationScoreFutures] = []
     with concurrent.futures.ProcessPoolExecutor(
         max_workers=min(n_workers, len(combos), 6),
-        initializer=_init_stage1_worker_context,
-        initargs=(data_maps, symbols, tf, project_root, prebuilt, alignment_info)
+        mp_context=multiprocessing.get_context("fork"),
+        initializer=_init_stage1_worker_context
     ) as executor:
         futures_map = {
             executor.submit(_eval_combo_task_from_context, s, r, sz): (s, r, sz)
@@ -652,16 +667,22 @@ def main() -> None:
                 if df is None or len(df) < (min_bars if tf_l == args.tf else 200):
                     insufficient = True
                     break
+                df.reset_index(drop=True, inplace=True) # Ensure 0-based indexing for views
                 tz = df["datetime"].dt.tz
                 is_start_dt = (pd.to_datetime(start_date).tz_localize(tz)
                                if tz else pd.to_datetime(start_date))
                 is_end_dt = (pd.to_datetime(is_end_date).tz_localize(tz)
                              if tz else pd.to_datetime(is_end_date))
-                temp_is[tf_l] = df[df["datetime"] < is_end_dt].reset_index(drop=True)
+                
+                # [OPTIMIZATION] Use view instead of copy (Zero-copy slicing)
+                is_mask = df["datetime"] < is_end_dt
+                is_end_idx = int(is_mask.to_numpy().sum())
+                temp_is[tf_l] = df.iloc[:is_end_idx]
+                
                 mask = temp_is[tf_l]["datetime"] >= is_start_dt
                 temp_is[f"is_start_idx_{tf_l}"] = (int(mask.to_numpy().argmax())
                                                   if mask.any() else 0)
-                temp_oos[tf_l] = df
+                temp_oos[tf_l] = df # Full data
                 mask_oos = df["datetime"] >= is_end_dt
                 temp_oos[f"oos_start_idx_{tf_l}"] = (int(mask_oos.to_numpy().argmax())
                                                     if mask_oos.any() else len(df))
@@ -675,6 +696,7 @@ def main() -> None:
             )
             data_maps[sym], oos_data_maps[sym] = temp_is, temp_oos
             valid_symbols.append(sym)
+            gc.collect() # Clean up temporary DataFrames after each symbol
         except Exception as e:
             _logger.warning("Failed to load symbol %s: %s", sym, e)
             continue
@@ -684,6 +706,17 @@ def main() -> None:
         _logger.error("No valid symbols.")
         return
     runtime_policy = _resolve_futures_parallel_policy(len(symbols), args.tf)
+
+    # Set Global Context for Stage 1 Tournament (CoW)
+    _STAGE1_WORKER_CTX.clear()
+    _STAGE1_WORKER_CTX.update({
+        "data_maps": data_maps,
+        "symbols": symbols,
+        "tf": args.tf,
+        "project_root": project_root,
+        "prebuilt": None, # Will be computed or set if needed
+        "alignment_info": None
+    })
 
     locked_param_space = None
     if not args.skip_stage1:
@@ -743,6 +776,10 @@ def main() -> None:
                 tf_bars[k].refresh()
     if progress_queue:
         threading.Thread(target=_prog_listener, daemon=True).start()
+
+    # Set Global Context for TPE Optimization (CoW)
+    _TPE_WORKER_CTX.clear()
+    _TPE_WORKER_CTX["data_maps"] = data_maps
 
     best_results: Dict[Tuple[Tuple[str, ...], str], Optional[optuna.Study]] = {}
     for t in tasks:
