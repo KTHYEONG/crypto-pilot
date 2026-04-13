@@ -4,9 +4,8 @@ from __future__ import annotations
 
 import itertools
 import logging
-import math
-import os
 import sys
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Sequence, Tuple
@@ -250,28 +249,50 @@ def _phase0_ls_ratio(
 
 
 def _metrics_from_best_study(study: optuna.Study) -> Tuple[Dict[str, float], Dict[str, Any]]:
+    """Extract screening metrics from a completed Phase-2 study.
+
+    Key-name mapping (objective_futures sets → screener reads):
+      growth_score          → objective_final
+      gate1_p10_gmgr        → p10_gmgr
+      gate1_dsr             → dsr_paths
+      psr_paths             → psr_paths  (unchanged)
+      cpcv_path_oos_log_tw  → p25/mean/cv computed inline
+    """
     completed = [t for t in study.trials if t.state == TrialState.COMPLETE and t.value is not None]
     if not completed:
         return {
-            "objective_final": -1e9,
-            "cpcv_mean_path_return_pct": -1e9,
-            "cpcv_p25_log_tw": -1e9,
-            "cpcv_path_cv": 10.0,
-            "psr_paths": -1.0,
-            "dsr_paths": -1.0,
-            "p10_gmgr": -1e9,
+            "objective_final": -1e9, "cpcv_mean_path_return_pct": -1e9,
+            "cpcv_p25_log_tw": -1e9, "cpcv_path_cv": 10.0,
+            "psr_paths": -1.0, "dsr_paths": -1.0, "p10_gmgr": -1e9,
         }, {}
     completed.sort(key=lambda tr: float(tr.value or -1e9), reverse=True)
     best = completed[0]
     ua = best.user_attrs
-    metrics = {
+
+    # Reconstruct path-level statistics from the stored log-TW list.
+    raw_log_tw: List[float] = [float(x) for x in ua.get("cpcv_path_oos_log_tw", [])]
+    if raw_log_tw:
+        arr = np.asarray(raw_log_tw, dtype=np.float64)
+        p25_log_tw = float(np.percentile(arr, 25.0)) if arr.size >= 4 else float(np.mean(arr))
+        mean_ret_pct = float(np.mean(np.expm1(arr)) * 100.0)
+        mu = float(np.mean(arr))
+        sd = float(np.std(arr, ddof=1)) if arr.size > 1 else 0.0
+        path_cv = sd / (abs(mu) + 1e-6)
+    else:
+        p25_log_tw, mean_ret_pct, path_cv = -1e9, -1e9, 10.0
+
+    metrics: Dict[str, float] = {
+        # objective_futures stores final score as "growth_score"
         "objective_final": float(best.value or -1e9),
-        "cpcv_mean_path_return_pct": float(ua.get("cpcv_mean_path_return_pct", -1e9)),
-        "cpcv_p25_log_tw": float(ua.get("cpcv_p25_log_tw", -1e9)),
-        "cpcv_path_cv": float(ua.get("cpcv_path_cv", 10.0)),
+        "cpcv_mean_path_return_pct": mean_ret_pct,
+        "cpcv_p25_log_tw": p25_log_tw,
+        "cpcv_path_cv": path_cv,
+        # objective_futures uses "psr_paths" (identical name)
         "psr_paths": float(ua.get("psr_paths", 0.0)),
-        "dsr_paths": float(ua.get("dsr_paths", -1.0)),
-        "p10_gmgr": float(ua.get("p10_gmgr", -1e9)),
+        # objective_futures stores DSR as "gate1_dsr"
+        "dsr_paths": float(ua.get("gate1_dsr", -1.0)),
+        # objective_futures stores p10 GMGR as "gate1_p10_gmgr"
+        "p10_gmgr": float(ua.get("gate1_p10_gmgr", -1e9)),
     }
     return metrics, best.params
 
@@ -332,8 +353,10 @@ def _phase1_worker(
     completed.sort(key=lambda tr: float(tr.value or -1e9), reverse=True)
     ktop = max(1, len(completed) // 5)
     top_trials = completed[:ktop]
+    # Use "gate1_p10_gmgr" (the key objective_futures actually sets).
+    # Threshold FUTURES_COMBO_PRUNE_THR=-0.05 is in the same decimal-return units.
     return float(
-        np.mean([float(t.user_attrs.get("cpcv_mean_path_return_pct", -1e9)) for t in top_trials])
+        np.mean([float(t.user_attrs.get("gate1_p10_gmgr", -1e9)) for t in top_trials])
     )
 
 
@@ -411,7 +434,6 @@ def run_combination_screening_futures(
     signal_cache_dir: str = "",
 ) -> CombinationScreeningResult:
     import os
-    import sys
     from concurrent.futures import ProcessPoolExecutor
     from functools import partial
 
@@ -633,10 +655,65 @@ def run_combination_screening_futures(
     qualified = [s for s in scores if not s.disqualified]
     qualified.sort(key=lambda x: x.p10_gmgr, reverse=True)
 
-    # Reporting (simplified)
-    _logger.info("Stage1: %d qualified combos found.", len(qualified))
+    # ── Rich Screening Report ─────────────────────────────────────────────────
+    sep = "=" * 72
+    thin = "-" * 72
+
+    _logger.info("\n%s", sep)
+    _logger.info(" [STAGE 1. FUTURES COMBINATION SCREENING REPORT]")
+    _logger.info("%s", sep)
+
+    if qualified:
+        _logger.info("Qualified Combinations  (sort: p25_log_tw / (1 + path_cv))")
+        hdr = (
+            f"  {'Signal':<18} {'Regime':<18} {'Sizing':<16}"
+            f" {'Rate':>6} {'L/S':>5} {'p25/CV':>8}"
+        )
+        _logger.info("%s", hdr)
+        _logger.info("  %s", thin)
+        for c in qualified[:10]:
+            _logger.info(
+                "  %-18s %-18s %-16s %5.1f%% %4.2f %8.4f",
+                c.signal, c.regime, c.sizing,
+                c.mean_signal_rate * 100.0,
+                c.ls_ratio,
+                c.p10_gmgr,
+            )
+    else:
+        _logger.warning("  (no qualified combinations)")
+
+    # Disqualification breakdown
+    reason_counts = Counter(s.reason for s in scores if s.disqualified)
+    n_disq = sum(reason_counts.values())
+    _logger.info("%s", thin)
+    _logger.info("Exclusion Summary  (total=%d disqualified)", n_disq)
+    _label = {
+        "signal_sparse": f"Signal Sparse (rate < {min_rate_cfg * 100:.1f}%)",
+        "ls_ratio":      "L/S Imbalance (ls_ratio < 0.15)",
+        "short_history": "Insufficient History",
+        "signal_error":  "Signal Generation Error",
+        "no_signals":    "No Signals Produced",
+        "phase1_pruned": f"Phase-1 Pruned (p10_gmgr <= {prune_thr:.2f})",
+    }
+    for reason, cnt in reason_counts.most_common():
+        _logger.info("  - %-42s : %d", _label.get(reason, reason), cnt)
+    if phase1_no_edge:
+        _logger.warning(
+            "  Phase-1 no-edge: all combos pruned; top-5 relaxed for Phase-2."
+        )
+
+    _logger.info("%s", sep)
     if qualified:
         best = qualified[0]
-        _logger.info("※ Winning Combo for Stage 2: %s | %s | %s (p10_gmgr=%.4f)", best.signal, best.regime, best.sizing, best.p10_gmgr)
+        _logger.info(
+            "Winning Combo -> %s | %s | %s  (p25_score=%.4f, ls=%.2f, rate=%.1f%%)",
+            best.signal, best.regime, best.sizing,
+            best.p10_gmgr, best.ls_ratio, best.mean_signal_rate * 100.0,
+        )
+    _logger.info("%s\n", sep)
+    # ─────────────────────────────────────────────────────────────────────────
 
-    return CombinationScreeningResult(combos=qualified[:max(top_k, len(bucket_order))], phase1_no_edge=phase1_no_edge)
+    n_out = max(top_k, len(bucket_order))
+    return CombinationScreeningResult(
+        combos=qualified[:n_out], phase1_no_edge=phase1_no_edge
+    )
