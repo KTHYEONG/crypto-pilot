@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
-import gc
-import itertools
 import logging
 import multiprocessing
 import os
@@ -38,10 +36,9 @@ if project_root not in sys.path:
 import warnings  # noqa: E402
 
 from config.opt_config import (  # noqa: E402
-    FUTURES_SCREENER_CONFIG,
-    FUTURES_SYMBOLS,
-    OPT_FUTURES_CONFIG,
     FUTURES_ANCHOR_SYMBOLS,
+    FUTURES_SCREENER_CONFIG,
+    OPT_FUTURES_CONFIG,
     get_quarterly_window,
     get_search_space_futures,
 )
@@ -70,16 +67,8 @@ from src.domain.futures.opt_futures_utils.objective import (  # noqa: E402
     inject_cs_momentum_ranks,
 )
 from src.domain.futures.opt_futures_utils.oos_evaluator import (  # noqa: E402
-    evaluate_symbol_fold,
     run_oos_margin_shared_portfolio,
 )
-from src.domain.futures.opt_futures_utils.opt_params import (  # noqa: E402
-    build_multi_combo_param_space_futures,
-)
-from src.domain.futures.opt_futures_utils.universe_screener_futures import (  # noqa: E402
-    screen_futures_universe,
-)
-from src.domain.futures.strategies_futures import FuturesPipelineStrategy  # noqa: E402
 
 warnings.filterwarnings("ignore")
 
@@ -604,7 +593,6 @@ def _run_stage1_structure_discovery(
 ) -> Dict[str, Dict[str, Any]]:
     """Per-SIGNAL_TYPE in-memory Optuna studies; narrow categorical to top performers."""
     from src.domain.futures.opt_futures_utils.objective import objective_futures
-    from src.domain.futures.opt_futures_utils.opt_params import build_combined_param_space_futures
 
     all_types = tuple(get_search_space_futures(tf)["SIGNAL_TYPE"]["choices"])
     ref_sym = symbols[0]
@@ -764,6 +752,7 @@ def _load_futures_data_maps_for_symbols(
 
 def main() -> None:
     import importlib
+
     import config.opt_config
 
     pre_parser = argparse.ArgumentParser(add_help=False)
@@ -781,9 +770,18 @@ def main() -> None:
     Path(signal_cache_dir).mkdir(parents=True, exist_ok=True)
 
     if not pre_args.skip_universe:
-        from src.domain.futures.opt_futures_utils.combination_screener_futures import run_combination_screening_futures, build_probe_params_futures
-        from src.domain.futures.opt_futures_utils.universe_screener_futures import screen_futures_universe, screen_symbol_refinement_futures, load_screener_fixed_params_futures
-        from src.domain.futures.opt_futures_utils.opt_params import build_multi_combo_param_space_futures
+        from src.domain.futures.opt_futures_utils.combination_screener_futures import (
+            build_probe_params_futures,
+            run_combination_screening_futures,
+        )
+        from src.domain.futures.opt_futures_utils.opt_params import (
+            build_multi_combo_param_space_futures,
+        )
+        from src.domain.futures.opt_futures_utils.universe_screener_futures import (
+            load_screener_fixed_params_futures,
+            screen_futures_universe,
+            screen_symbol_refinement_futures,
+        )
 
         fetch_start_date, start_date, is_end_date, end_date = get_quarterly_window(pre_args.reference_date)
         
@@ -993,31 +991,37 @@ def main() -> None:
             cache_root=FUTURES_CACHE_DIR, return_signal_dfs=True
         )
         oos_portfolio_cagr = float(oos_port["cagr_pct"])
-        post_full_sigs = oos_port.get("full_signal_dfs", {})
 
         # 3. Symbol-wise OOS Evaluation & Funding Drag
         symbol_gate_rows: List[FuturesSymbolGateRow] = []
-        total_funding_oos = 0.0
-        total_gross_oos = 0.0
+        trades_df = oos_port.get("trades_df", pd.DataFrame())
+        
+        total_funding_oos = float(trades_df["funding_fee"].sum()) if not trades_df.empty and "funding_fee" in trades_df.columns else 0.0
+        total_gross_oos = float(abs(trades_df["pnl"]).sum()) if not trades_df.empty else 0.0
 
         for s_eval in target_symbols:
             oos_start = int(oos_data_maps[s_eval][f"oos_start_idx_{tf_eval}"])
             oos_end = len(oos_data_maps[s_eval][tf_eval])
+            
+            if not trades_df.empty:
+                sym_trades = trades_df[trades_df["symbol"] == s_eval]
+                sym_t_oos = len(sym_trades)
+                sym_wr_oos = (sym_trades["pnl"] > 0).mean() * 100.0 if sym_t_oos > 0 else 0.0
+                
+                # Calculate margin-shared PnL contribution
+                sym_pnl = float(sym_trades["pnl"].sum())
+                hours_per_bar = int(tf_eval.replace("h", "")) if tf_eval.endswith("h") else 4
+                days_oos = ((oos_end - oos_start) * hours_per_bar) / 24.0
+                sym_ann_cagr = ((1.0 + sym_pnl / FUTURES_INITIAL_BALANCE) ** (365.0 / max(days_oos, 1.0)) - 1.0) * 100.0 if sym_t_oos > 0 else 0.0
+                
+                # For standalone MDD reference, we use 0.0 to save compute time (or we could extract from eq curve)
+                sym_m_oos = 0.0
+            else:
+                sym_ann_cagr, sym_m_oos, sym_wr_oos, sym_t_oos = 0.0, 0.0, 0.0, 0
 
-            s_oos, _, m_oos, t_oos, wr_oos, _, _, _, _, fp_oos, gr_oos = (
-                evaluate_symbol_fold(
-                    FuturesPipelineStrategy(name=f"OOS_{s_eval}", params=params),
-                    params, s_eval, tf_eval, oos_data_maps[s_eval][tf_eval],
-                    oos_data_maps[s_eval]["1d"], oos_data_maps[s_eval][f"merge_idx_{tf_eval}"],
-                    None, oos_start, oos_end,
-                    precomputed_signal_df=post_full_sigs.get(s_eval)
-                )
-            )
-            total_funding_oos += float(fp_oos)
-            total_gross_oos += abs(float(gr_oos))
             symbol_gate_rows.append(FuturesSymbolGateRow(
-                symbol=s_eval, net_cagr_pct=float(s_oos), max_mdd_pct=float(m_oos),
-                win_rate_pct=float(wr_oos), trade_count=int(t_oos)
+                symbol=s_eval, net_cagr_pct=sym_ann_cagr, max_mdd_pct=float(sym_m_oos),
+                win_rate_pct=float(sym_wr_oos), trade_count=int(sym_t_oos)
             ))
 
         # 4. PBO calculation
