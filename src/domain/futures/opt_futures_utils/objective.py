@@ -54,6 +54,43 @@ EMBARGO_BARS: Dict[str, int] = {
     "4h": compute_embargo_bars("4h"),
 }
 
+# Cross-sectional momentum lookback periods precomputed for all trials.
+_CS_MOM_LOOKBACKS: List[int] = [12, 24, 36, 48, 60, 72]
+
+
+def inject_cs_momentum_ranks(
+    data_maps: Dict[str, Dict[str, Any]],
+    symbols: List[str],
+    tf: str,
+    lookbacks: Optional[List[int]] = None,
+) -> None:
+    """Inject cross-sectional momentum rank columns into data_maps[sym][tf].
+
+    Ranking at time t uses only pct_change(periods=lb) which is backward-looking
+    — no temporal look-ahead bias.  Safe to call on IS-only or full (IS+OOS) data.
+    """
+    if lookbacks is None:
+        lookbacks = _CS_MOM_LOOKBACKS
+    if len(symbols) < 2:
+        return
+
+    rets_series: Dict[str, pd.Series] = {}
+    for sym in symbols:
+        df = data_maps.get(sym, {}).get(tf)
+        if df is not None and not df.empty:
+            rets_series[sym] = df["close"]
+
+    if len(rets_series) < 2:
+        return
+
+    for lb in lookbacks:
+        all_rets = {s: r.pct_change(periods=lb) for s, r in rets_series.items()}
+        ranks_df = pd.DataFrame(all_rets).rank(axis=1, pct=True)
+        for sym in rets_series:
+            if sym in ranks_df.columns:
+                col_name = f"cs_mom_rank_{lb}"
+                data_maps[sym][tf][col_name] = ranks_df[sym].astype(np.float64)
+
 
 def compute_multi_alignment_info(
     data_maps: Dict[str, Dict[str, Any]],
@@ -106,21 +143,7 @@ def compute_multi_alignment_info(
         return None
 
     # [OPTIMIZATION] Pre-calculate and Inject CS Momentum Ranks into data_maps
-    lookbacks = [12, 24, 36, 48, 60, 72]
-    rets_series: Dict[str, pd.Series] = {}
-    for sym in symbols:
-        df = data_maps.get(sym, {}).get(tf)
-        if df is not None and not df.empty:
-            rets_series[sym] = df["close"]
-
-    if rets_series and len(symbols) > 1:
-        for lb in lookbacks:
-            all_rets = {s: r.pct_change(periods=lb) for s, r in rets_series.items()}
-            ranks_df = pd.DataFrame(all_rets).rank(axis=1, pct=True)
-            for sym in symbols:
-                if sym in ranks_df.columns:
-                    col_name = f"cs_mom_rank_{lb}"
-                    data_maps[sym][tf][col_name] = ranks_df[sym].astype(np.float64)
+    inject_cs_momentum_ranks(data_maps, symbols, tf)
 
     return {
         "common_is_start_dt": common_is_start_dt,
@@ -555,7 +578,25 @@ def objective_futures(
         psr_est = float(min(0.99, max(0.0, 0.5 + 0.15 * sharpe)))
         trial.set_user_attr("gate1_psr", psr_est)
         trial.set_user_attr("psr_paths", psr_est)
-        trial.set_user_attr("gate1_dsr", psr_est * 0.95)
+
+        # Deflated Sharpe Ratio (Bailey & Lopez-de-Prado, 2014) — scipy-free.
+        # Adjusts SR for multiple testing across n_paths CPCV paths.
+        # SR_b ~ sqrt(2*log(n)) from Gumbel extreme-value approximation.
+        n_paths_f = float(path_arr.size)
+        sk = float(np.mean(((path_arr - m_pt) / (s_pt + 1e-12)) ** 3))
+        ex_kurt = float(np.mean(((path_arr - m_pt) / (s_pt + 1e-12)) ** 4)) - 3.0
+        sr_var_denom = max(
+            1.0 - sk * sharpe + ((ex_kurt + 3.0 - 1.0) / 4.0) * sharpe ** 2,
+            1e-12,
+        )
+        sr_bench = math.sqrt(2.0 * math.log(max(n_paths_f, 2.0)))
+        z_dsr = (
+            (sharpe - sr_bench)
+            * math.sqrt(max(n_paths_f - 1.0, 1.0))
+            / math.sqrt(sr_var_denom)
+        )
+        dsr_val = float(0.5 * (1.0 + math.erf(z_dsr / math.sqrt(2.0))))
+        trial.set_user_attr("gate1_dsr", float(min(0.99, max(0.0, dsr_val))))
 
     trial.set_user_attr("kelly_score_pct", float(objective_final * 100.0))
     trial.set_user_attr("growth_score", float(objective_final))
