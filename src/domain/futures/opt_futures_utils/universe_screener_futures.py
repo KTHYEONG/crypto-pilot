@@ -138,6 +138,338 @@ def _screen_worker_v2(
         "returns": df["close"].pct_change().tail(500)
     }
 
+import json
+import random
+import time
+from datetime import timedelta
+from typing import Any, Dict, List, Optional, Tuple
+
+from src.domain.futures.opt_futures_utils.metrics import calc_profit_factor_from_pnl
+from src.domain.futures.opt_futures_utils.oos_evaluator import evaluate_symbol_fold
+from src.domain.futures.strategies_futures import FuturesPipelineStrategy
+from src.core.optimization.opt_utils import compute_segment_merge_index
+
+
+def _indices_is_last_year_futures(df: pd.DataFrame, is_end_date: pd.Timestamp | str) -> tuple[int, int]:
+    """Last ~365 days of in-sample rows strictly before is_end_date (OOS boundary)."""
+    if df.empty or "datetime" not in df.columns:
+        return 0, 0
+    dt = df["datetime"]
+    is_end = pd.to_datetime(is_end_date)
+    if dt.dt.tz is not None and is_end.tzinfo is None:
+        is_end = is_end.tz_localize(dt.dt.tz)
+    elif dt.dt.tz is None and is_end.tzinfo is not None:
+        is_end = is_end.tz_localize(None)
+
+    mask_before_oos = dt < is_end
+    if not mask_before_oos.any():
+        return 0, 0
+    last_is_pos = int(mask_before_oos.to_numpy().nonzero()[0][-1]) + 1
+    end_ts = dt.iloc[last_is_pos - 1]
+    start_ts = end_ts - pd.Timedelta(days=365)
+    mask_win = (dt >= start_ts) & (dt < is_end)
+    if not mask_win.any():
+        return 0, last_is_pos
+    is_start_idx = int(mask_win.to_numpy().argmax())
+    return is_start_idx, last_is_pos
+
+
+def _equity_simple_returns_futures(eq: np.ndarray, dt: pd.Series) -> pd.Series:
+    eq = np.asarray(eq, dtype=np.float64)
+    if len(eq) < 3 or len(dt) != len(eq):
+        return pd.Series(dtype=np.float64)
+    r = np.diff(eq) / np.maximum(eq[:-1], 1e-12)
+    idx = pd.to_datetime(dt.iloc[1:].values)
+    return pd.Series(r, index=idx, dtype=np.float64)
+
+
+def _run_mini_backtest_window_futures(
+    sym: str,
+    df_4h: pd.DataFrame,
+    df_1d: pd.DataFrame,
+    params: dict[str, Any],
+    test_start: int,
+    test_end: int,
+) -> tuple[float, int, float, float, pd.Series]:
+    """Single-symbol mini backtest for screening."""
+    strat = FuturesPipelineStrategy(name=f"Screener_{sym}", params=params)
+    merge_idx = compute_segment_merge_index(df_4h, df_1d)
+    
+    # evaluate_symbol_fold returns:
+    # cagr, ret_pct, mdd, trades, wins, pf, long_c, short_c, eq_curve, fpaid, gross_ret
+    res = evaluate_symbol_fold(
+        strat, params, sym, "4h", df_4h, df_1d, merge_idx, 
+        None, test_start, test_end
+    )
+    cagr, _, mdd, n_trades, _, pf, _, _, eq_curve, _, _ = res
+    
+    # Simple return series from equity curve for mRMR
+    if eq_curve is not None and len(eq_curve) > 1:
+        rets = np.diff(eq_curve) / np.maximum(eq_curve[:-1], 1e-12)
+        # Use dummy dates for now as we just need correlation
+        ret_ser = pd.Series(rets)
+    else:
+        ret_ser = pd.Series(dtype=np.float64)
+
+    rel = pf * float(np.log1p(float(n_trades)))
+    return pf, n_trades, cagr, rel, ret_ser
+
+
+def screen_by_strategy_fit_futures(
+    vol_df: pd.DataFrame,
+    symbol_dfs: Dict[str, pd.DataFrame],
+    daily_dfs: Dict[str, pd.DataFrame],
+    fixed_params: dict[str, Any],
+    *,
+    is_end_date: pd.Timestamp | str,
+    min_trades: int,
+    min_pf: float,
+    min_cagr_pct: float,
+    signal_type: str | None = None,
+) -> tuple[pd.DataFrame, Dict[str, pd.Series]]:
+    rows: list[dict[str, float | str]] = []
+    ret_map: Dict[str, pd.Series] = {}
+    fp_base = dict(fixed_params)
+    if signal_type is not None:
+        fp_base["SIGNAL_TYPE"] = str(signal_type)
+
+    for _, row in tqdm(vol_df.iterrows(), total=len(vol_df), desc="Strategy mini-BT (Futures)"):
+        sym = str(row["symbol"])
+        df4 = symbol_dfs.get(sym)
+        d1 = daily_dfs.get(sym)
+        if df4 is None or d1 is None:
+            continue
+        ts, te = _indices_is_last_year_futures(df4, is_end_date)
+        if te <= ts + 10:
+            continue
+
+        pf, n_tr, cagr, rel, ret_ser = _run_mini_backtest_window_futures(sym, df4, d1, fp_base, ts, te)
+        if n_tr < int(min_trades) or pf < float(min_pf) or cagr <= float(min_cagr_pct):
+            continue
+            
+        rows.append(
+            {
+                "symbol": sym,
+                "adv": float(row["adv"]),
+                "pf": pf,
+                "n_trades": float(n_tr),
+                "cagr_pct": cagr,
+                "relevance": rel,
+            }
+        )
+        ret_map[sym] = ret_ser
+
+    return pd.DataFrame(rows), ret_map
+
+
+def marchenko_pastur_n_factors(
+    returns_aligned: pd.DataFrame,
+    *,
+    min_n: int,
+    max_n: int,
+) -> int:
+    if returns_aligned.empty or returns_aligned.shape[1] < 2:
+        return int(min_n)
+
+    rets = returns_aligned.dropna(how="any")
+    t_obs = len(rets)
+    n_dim = int(returns_aligned.shape[1])
+    if t_obs < 2 or n_dim < 1:
+        return int(min_n)
+    if rets.shape[0] < n_dim + 2:
+        return int(min_n)
+
+    corr = rets.corr().to_numpy()
+    eigvals = np.linalg.eigvalsh(corr)
+    eigvals = np.sort(eigvals)[::-1]
+
+    gamma = n_dim / float(t_obs)
+    lambda_plus = (1.0 + np.sqrt(gamma)) ** 2
+    tol = 1e-9
+    signal_count = int(np.sum(eigvals > lambda_plus * (1.0 + tol)))
+
+    if signal_count <= 0:
+        return int(min_n)
+
+    return int(max(min_n, min(max_n, signal_count)))
+
+
+def select_by_mrmr(
+    candidates_df: pd.DataFrame,
+    strategy_returns: Dict[str, pd.Series],
+    n_select: int,
+) -> List[str]:
+    """Greedy mRMR on strategy equity returns: score = relevance - mean(|corr| to selected)."""
+    if candidates_df.empty:
+        return []
+
+    work = candidates_df.copy()
+    if "relevance" not in work.columns:
+        return []
+
+    symbols = [str(s) for s in work["symbol"].tolist()]
+    work = work.set_index("symbol", drop=False)
+
+    if len(symbols) <= n_select:
+        return work.sort_values("relevance", ascending=False)["symbol"].tolist()
+
+    # Align all return series
+    valid_rets = {s: strategy_returns[s] for s in symbols if not strategy_returns[s].empty}
+    if not valid_rets:
+        return work.sort_values("relevance", ascending=False)["symbol"].tolist()
+        
+    rets = pd.concat(valid_rets, axis=1).dropna(how='any')
+    if rets.shape[0] < 10:
+        return work.sort_values("relevance", ascending=False)["symbol"].tolist()
+
+    corr = rets.corr().abs()
+    relevance = {s: float(work.loc[s, "relevance"]) for s in symbols if s in work.index}
+
+    selected: List[str] = []
+    remaining = [s for s in symbols if s in corr.index]
+    if not remaining:
+        return work.sort_values("relevance", ascending=False)["symbol"].tolist()
+        
+    seed = max(remaining, key=lambda s: relevance.get(s, 0.0))
+    selected.append(seed)
+    remaining.remove(seed)
+
+    while len(selected) < n_select and remaining:
+        best_s: str | None = None
+        best_score = -np.inf
+        for s in remaining:
+            reds = [
+                float(corr.loc[s, s2]) for s2 in selected if s in corr.index and s2 in corr.columns
+            ]
+            red = float(np.mean(reds)) if reds else 0.0
+            score = relevance.get(s, 0.0) - red
+            if score > best_score:
+                best_score = score
+                best_s = s
+        if best_s is None:
+            break
+        selected.append(best_s)
+        remaining.remove(best_s)
+
+    return selected
+
+
+def load_screener_fixed_params_futures(
+    project_root: Path,
+    winning_signal_type: str | None = None,
+) -> dict[str, Any]:
+    path_json = project_root / "results" / "best_futures_4h.json"
+    if path_json.is_file():
+        try:
+            raw = json.loads(path_json.read_text(encoding="utf-8"))
+            if isinstance(raw, dict):
+                out = dict(raw)
+            else:
+                out = _default_screener_params_from_space_futures()
+        except:
+            out = _default_screener_params_from_space_futures()
+    else:
+        out = _default_screener_params_from_space_futures()
+    if winning_signal_type is not None:
+        out["SIGNAL_TYPE"] = str(winning_signal_type)
+    return out
+
+
+def _default_screener_params_from_space_futures() -> dict[str, Any]:
+    from src.domain.futures.opt_futures_utils.opt_params import build_full_discovery_space_futures
+    space = build_full_discovery_space_futures()
+    params: dict[str, Any] = {"TIMEFRAME": "4h", "LEVERAGE": 5, "USE_COMPOUNDING": True}
+    for name, spec in space.items():
+        t = spec.get("type")
+        if t == "categorical":
+            ch = tuple(spec.get("choices", ()))
+            params[name] = ch[0] if ch else None
+        elif t == "float":
+            params[name] = (float(spec["low"]) + float(spec["high"])) / 2.0
+        elif t == "int":
+            params[name] = (int(spec["low"]) + int(spec["high"])) // 2
+    return params
+
+
+def screen_symbol_refinement_futures(
+    broad_candidates: List[str],
+    winning_signal_type: str,
+    is_end_date: str,
+    *,
+    symbol_dfs_4h: Dict[str, pd.DataFrame],
+    daily_dfs: Dict[str, pd.DataFrame],
+    phase_b_params: Optional[Dict[str, Any]] = None,
+    anchor_symbols: Optional[List[str]] = None,
+) -> None:
+    from config.opt_config import FUTURES_ANCHOR_SYMBOLS, FUTURES_SCREENER_CONFIG
+
+    cfg = FUTURES_SCREENER_CONFIG
+    min_tr = int(cfg.get("SCREENER_MIN_TRADES_DYNAMIC", 12))
+    min_pf = float(cfg.get("SCREENER_MIN_PF", 1.35))
+    mp_min = int(cfg.get("MP_MIN_SYMBOLS", 1))
+    mp_max = int(cfg.get("MP_MAX_SYMBOLS", 5))
+    top_k = int(cfg.get("CANDIDATES_TOP_K", 12))
+
+    anchor_syms = list(anchor_symbols) if anchor_symbols is not None else list(FUTURES_ANCHOR_SYMBOLS)
+    
+    if phase_b_params is not None:
+        fixed_params = dict(phase_b_params)
+    else:
+        fixed_params = _default_screener_params_from_space_futures()
+    
+    fixed_params["SIGNAL_TYPE"] = winning_signal_type
+    fixed_params.setdefault("TIMEFRAME", "4h")
+
+    rows_adv: list[dict[str, float | str]] = []
+    for sym in broad_candidates:
+        df4 = symbol_dfs_4h.get(sym)
+        if df4 is None or df4.empty: continue
+        # Simple ADV calc
+        tail = df4.tail(180)
+        adv = float((tail["close"] * tail["volume"]).median() * 6)
+        rows_adv.append({"symbol": sym, "adv": adv})
+
+    vol_df = pd.DataFrame(rows_adv)
+    if len(vol_df) < mp_min:
+        _logger.error("Phase C Futures: insufficient symbols with data.")
+        return
+
+    fit_df, strat_returns = screen_by_strategy_fit_futures(
+        vol_df, symbol_dfs_4h, daily_dfs, fixed_params,
+        is_end_date=is_end_date, min_trades=min_tr, min_pf=min_pf, min_cagr_pct=0.0
+    )
+
+    if fit_df.empty or len(fit_df) < mp_min:
+        _logger.warning("Phase C Futures: no symbols passed strategy fit. Using anchors.")
+        final_symbols = [s for s in anchor_syms if s in broad_candidates][:mp_max]
+    else:
+        pool = fit_df.sort_values("relevance", ascending=False).head(top_k)
+        n_select = marchenko_pastur_n_factors(pd.DataFrame(strat_returns), min_n=mp_min, max_n=mp_max)
+        selected = select_by_mrmr(pool, strat_returns, n_select)
+        # Ensure anchors are prioritized if they passed
+        final_symbols = list(dict.fromkeys([s for s in anchor_syms if s in selected] + selected))[:mp_max]
+
+    if not final_symbols:
+        _logger.error("Phase C Futures: empty final symbol list.")
+        return
+
+    _logger.info("Final Futures symbols (%d): %s", len(final_symbols), final_symbols)
+    update_futures_config_file(final_symbols)
+
+
+def _slice_df_to_is(df: pd.DataFrame, is_start: str, is_end: str) -> pd.DataFrame:
+    if df.empty or "datetime" not in df.columns:
+        return df.iloc[0:0].copy()
+    is_s = pd.to_datetime(is_start)
+    is_e = pd.to_datetime(is_end)
+    dt = df["datetime"]
+    if dt.dt.tz is not None:
+        if is_s.tzinfo is None: is_s = is_s.tz_localize(dt.dt.tz)
+        if is_e.tzinfo is None: is_e = is_e.tz_localize(dt.dt.tz)
+    mask = (dt >= is_s) & (dt < is_e)
+    return df.loc[mask].reset_index(drop=True)
+
+
 def screen_futures_universe(
     collector: DataCollector,
     candidate_pool: List[str],
@@ -261,7 +593,6 @@ def screen_futures_universe(
                 final_list.append(r["symbol"])
 
     _logger.info(f"Refinement complete: {len(final_list)} symbols selected: {final_list}")
-    from .universe_screener_futures import update_futures_config_file
     update_futures_config_file(final_list)
     return final_list, len(final_candidates)
 
