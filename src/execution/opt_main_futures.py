@@ -56,6 +56,11 @@ from src.domain.futures.funding_utils import merge_funding_into_ohlcv  # noqa: E
 from src.domain.futures.opt_futures_utils.combination_screener_futures import (  # noqa: E402
     CombinationScoreFutures,
 )
+from src.domain.futures.opt_futures_utils.alpha_evaluator import (  # noqa: E402
+    calculate_conditional_ic,
+    calculate_spearman_ic,
+    compute_vol_adj_forward_returns,
+)
 from src.domain.futures.opt_futures_utils.cv_utils import (  # noqa: E402
     build_cpcv_test_paths_with_fallback,
     list_cpcv_block_ranges,
@@ -596,91 +601,92 @@ def _eval_combo_task_from_context(
     )
 
 
-def _compute_signal_regime_weights(micro_vec: np.ndarray) -> Dict[str, float]:
-    """
-    Phase B microstructure vector → signal type trial-budget weights.
-
-    **[Math/Quant Basis]**
-    - Hurst deviation from 0.5: H < 0.5 (anti-persistent) suppresses pure
-      trend-following edge; divergence/breakout signals retain value via
-      capturing mean-reversion overshoots.
-    - Excess kurtosis: fat-tailed returns generate large moves that favour
-      volume-filtered breakout strategies (RSM_VT).
-    - Weights are proportional multipliers on the per-signal trial budget;
-      minimum 0.2 prevents complete exclusion (false-negative guard).
-    """
-    hurst = float(np.clip(micro_vec[0], 0.1, 0.9))
-    kurt = float(micro_vec[1])
-
-    trend_score = float(np.clip((hurst - 0.5) * 6.0, -1.5, 1.5))
-    excess_kurt = float(np.clip((kurt - 3.0) / 5.0, 0.0, 1.0))
-
-    weights: Dict[str, float] = {
-        "RSM_VT":        1.2 + 0.4 * trend_score + 0.4 * excess_kurt,
-        "MACD_HIST_DIV": 1.2 - 0.3 * trend_score,
-        "SUPERTREND":    0.8 + 0.6 * trend_score,
-        "CS_MOMENTUM":   0.8,
-        "VWAP_MR":       0.5 - 0.4 * trend_score,   # shrinks further in strong trends
-        "ADX_BREAKOUT":  0.7 + 0.5 * trend_score,
-    }
-    return {k: max(0.2, v) for k, v in weights.items()}
-
-
-def _run_single_sig_type_discovery(
+def _run_stage1_alpha_ic_discovery(
     sig_type: str,
     tf: str,
-    n_tri: int,
     data_maps: Dict[str, Dict[str, Any]],
     symbols: List[str],
-    project_root: str,
-    prebuilt: Any,
-    alignment_info: Any,
-    cache_root: Any,
-) -> tuple[str, float]:
-    """Worker function for parallel Stage 1 discovery."""
+    n_tri: int = 40,
+) -> tuple[str, float, Dict[str, Any]]:
+    """Phase C-1: Optimize signal parameters for MAX Information Coefficient (IC)"""
+    from src.domain.futures.opt_futures_utils.opt_params import suggest_params_futures
+    from src.domain.futures.signals import get_futures_signal
+
+    sig_class = get_futures_signal(sig_type)
     base_space = get_search_space_futures(tf)
-    stage_space = {k: dict(v) if isinstance(v, dict) else v for k, v in base_space.items()}
+    # Filter search space for this signal type only to speed up C-1
+    stage_space = {
+        k: v for k, v in base_space.items() 
+        if k.startswith(f"{sig_type}_") or k == "SIGNAL_TYPE"
+    }
     stage_space["SIGNAL_TYPE"] = {"type": "categorical", "choices": (sig_type,)}
 
-    from src.domain.futures.opt_futures_utils.objective import objective_futures
+    # Pre-calculate target returns for all symbols
+    target_map = {sym: compute_vol_adj_forward_returns(data_maps[sym][tf]) for sym in symbols}
 
     study = optuna.create_study(
         direction="maximize",
-        sampler=TPESampler(n_startup_trials=min(20, max(5, n_tri // 4)), seed=42),
+        sampler=TPESampler(n_startup_trials=max(5, n_tri // 4), seed=42),
         storage=InMemoryStorage(),
     )
 
-    def _obj(trial: optuna.Trial) -> float:
-        return objective_futures(
-            trial,
-            data_maps,
-            symbols,
-            tf,
-            space=stage_space,
-            mode="multi",
-            project_root=project_root,
-            prebuilt_cpcv_bundle=prebuilt,
-            multi_alignment_info=alignment_info,
-            signal_disk_cache_root=cache_root,
-        )
+    def objective(trial: optuna.Trial) -> float:
+        params = suggest_params_futures(trial, stage_space, tf)
+        ics = []
+        sig_inst = sig_class()
+        for sym in symbols:
+            df = data_maps[sym][tf]
+            out = sig_inst.compute(df, params)
+            ic = calculate_spearman_ic(out.rank_score, target_map[sym])
+            ics.append(ic)
+        return float(np.mean(ics))  # Mean IC across symbols
 
-    study.optimize(_obj, n_trials=n_tri, n_jobs=1, show_progress_bar=False)
-    completed = [t for t in study.trials if t.state == TrialState.COMPLETE and t.value is not None]
-    if not completed:
-        return sig_type, -1e9
+    study.optimize(objective, n_trials=n_tri)
+    best_ic = float(study.best_value) if study.best_value is not None else 0.0
+    best_params = study.best_params
 
-    all_vals = sorted([float(t.value) for t in completed], reverse=True)
-    ktop = max(1, n_tri // 10)
-    top_mean = float(np.mean(all_vals[:ktop]))
+    return sig_type, best_ic, best_params
 
-    # pass_rate: completed / total — low pass_rate indicates an unstable/noisy signal
-    pass_rate = float(len(all_vals) / max(1, len(study.trials)))
-    # cv_obj: coefficient of variation — high CV = high path variance = unstable
-    cv_obj = float(np.std(all_vals) / (abs(np.mean(all_vals)) + 1e-9))
 
-    # Compound quality: top-k performance x completion reliability x stability
-    mean_obj = top_mean * (0.6 + 0.4 * pass_rate) * max(0.3, 1.0 - 0.3 * min(cv_obj, 2.0))
-    return sig_type, mean_obj
+def _run_stage1_regime_pairing(
+    sig_type: str,
+    sig_params: Dict[str, Any],
+    tf: str,
+    data_maps: Dict[str, Dict[str, Any]],
+    symbols: List[str],
+) -> str:
+    """Phase C-2: Find the best Regime for a proven Signal using Conditional IC Utility"""
+    from src.domain.futures.regimes import get_futures_regime_registry
+    from src.domain.futures.signals import get_futures_signal
+
+    reg_registry = get_futures_regime_registry()
+    sig_inst = get_futures_signal(sig_type)()
+
+    best_regime = "NONE"
+    max_utility = -1e9
+
+    target_map = {sym: compute_vol_adj_forward_returns(data_maps[sym][tf]) for sym in symbols}
+
+    for reg_name, reg_class in reg_registry.items():
+        utilities = []
+        reg_inst = reg_class()
+        for sym in symbols:
+            df = data_maps[sym][tf]
+            # Use default regime params for initial pairing discovery
+            reg_mask = reg_inst.compute(df, {})
+            sig_scores = sig_inst.compute(df, sig_params).rank_score
+
+            c_ic, cov = calculate_conditional_ic(sig_scores, target_map[sym], reg_mask)
+            # Utility = cIC * sqrt(Coverage) to penalize extremely rare regimes
+            utility = c_ic * np.sqrt(max(0.01, cov))
+            utilities.append(utility)
+
+        avg_utility = float(np.mean(utilities))
+        if avg_utility > max_utility:
+            max_utility = avg_utility
+            best_regime = reg_name
+
+    return best_regime
 
 
 def _run_stage1_structure_discovery(
@@ -694,118 +700,69 @@ def _run_stage1_structure_discovery(
     project_root: str,
     signal_cache_dir: str,
 ) -> Dict[str, Dict[str, Any]]:
-    """Per-SIGNAL_TYPE in-memory Optuna studies; narrow categorical to top performers."""
+    """Hierarchical IC-based Alpha Discovery (Phase C-1 & C-2)."""
     all_types = tuple(get_search_space_futures(tf)["SIGNAL_TYPE"]["choices"])
-    ref_sym = symbols[0]
-    is_off = int(data_maps[ref_sym].get(f"is_start_idx_{tf}", 0))
-    ref_df = data_maps[ref_sym][tf]
     
-    embargo = int(EMBARGO_BARS.get(tf, 0))
-    from src.domain.futures.opt_futures_utils.objective import compute_multi_alignment_info
-    alignment_info = compute_multi_alignment_info(data_maps, symbols, tf, embargo)
-    prebuilt = alignment_info["cpcv_bundle"] if alignment_info else None
+    _logger.info("======================================================================")
+    _logger.info("[PHASE C] Hierarchical Alpha Discovery (IC-based)")
+    _logger.info("  C-1: Pure Alpha Screening (IC) | C-2: Regime Pairing (cIC)")
+    _logger.info("----------------------------------------------------------------------")
+    _logger.info("  %-20s | %-14s | %-14s | %-8s", "Signal Strategy", "Mean IC", "Best Regime", "Status")
+    _logger.info("----------------------------------------------------------------------")
 
-    if not prebuilt and ref_df is not None and not ref_df.empty:
-        ref_len = len(ref_df) - is_off
-        if ref_len >= 200:
-            prebuilt = build_cpcv_test_paths_with_fallback(ref_len, embargo=embargo)
-            
-    cache_root = Path(signal_cache_dir) if signal_cache_dir else None
-    results: List[tuple[str, float]] = []
-    n_tri_base = max(5, int(trials_per_signal))
+    discovery_results: List[Tuple[str, float, str, Dict[str, Any]]] = []
+    n_tri = max(20, int(trials_per_signal))
 
-    # --- Microstructure-informed trial budget ---
-    # Use Phase B BTC anchor vector to bias exploration toward regime-compatible signals.
-    try:
-        from src.domain.futures.opt_futures_utils.universe_screener_futures import (
-            calculate_microstructure_vector,
-        )
-        anchor = FUTURES_ANCHOR_SYMBOLS[0]
-        if anchor in data_maps and tf in data_maps[anchor]:
-            micro_vec = calculate_microstructure_vector(data_maps[anchor][tf])
-        else:
-            micro_vec = np.array([0.5, 3.0, 1.5])
-    except Exception:
-        micro_vec = np.array([0.5, 3.0, 1.5])
-
-    sig_weights = _compute_signal_regime_weights(micro_vec)
-    total_weight = sum(sig_weights.get(s, 1.0) for s in all_types)
-    sig_trial_budget: Dict[str, int] = {
-        s: max(5, int(n_tri_base * len(all_types) * sig_weights.get(s, 1.0) / total_weight))
-        for s in all_types
-    }
-    _logger.info(
-        "   [Phase C] Parallel Structure Discovery with %d signal types... "
-        "(Hurst=%.3f, Kurt=%.2f, ATR%%=%.3f)",
-        len(all_types), float(micro_vec[0]), float(micro_vec[1]), float(micro_vec[2]),
-    )
-
-    # [OPTIMIZATION] Parallel optimization for each signal type
-    # Using 'fork' context for memory efficiency (CoW)
+    # Parallelize Phase C-1 (Signal IC Optimization)
     ctx = multiprocessing.get_context("fork")
     with concurrent.futures.ProcessPoolExecutor(
         max_workers=min(len(all_types), 8),
         mp_context=ctx,
-        initializer=_init_stage1_worker_context,
     ) as executor:
         f_to_sig = {
             executor.submit(
-                _run_single_sig_type_discovery,
-                sig, tf, sig_trial_budget[sig], data_maps, symbols,
-                project_root, prebuilt, alignment_info, cache_root,
+                _run_stage1_alpha_ic_discovery,
+                sig, tf, data_maps, symbols, n_tri
             ): sig
             for sig in all_types
         }
-
         for f in concurrent.futures.as_completed(f_to_sig):
             try:
-                sig_res, score = f.result()
-                results.append((sig_res, score))
+                sig_name, ic, params = f.result()
+                # Phase C-2: Pairing (Synchronous as it is extremely fast)
+                best_reg = _run_stage1_regime_pairing(sig_name, params, tf, data_maps, symbols)
+                discovery_results.append((sig_name, ic, best_reg, params))
             except Exception as e:
                 sig_err = f_to_sig[f]
-                _logger.error("Signal structure discovery failed for %s: %s", sig_err, e)
-                results.append((sig_err, -1e9))
+                _logger.error("Signal IC discovery failed for %s: %s", sig_err, e)
+                discovery_results.append((sig_err, -1.0, "NONE", {}))
 
-    results.sort(key=lambda x: x[1], reverse=True)
-
-    # --- Relative gap selection ---
-    # A signal is accepted only if its compound score is >= rel_gap x best score.
-    # This avoids the arbitrary top_k=2 cutoff while still pruning clearly inferior signals.
-    rel_gap = 0.35
-    best_score = results[0][1] if results else 0.0
+    discovery_results.sort(key=lambda x: x[1], reverse=True)
+    
+    ic_threshold = 0.025
     winning = [
-        s for s, m in results
-        if m > min_p10_gmgr
-        and (best_score <= 0.0 or m / best_score >= rel_gap)
+        (s, r, p) for s, ic, r, p in discovery_results 
+        if ic > ic_threshold or (s == discovery_results[0][0])
     ]
     winning = winning[:max(1, top_k)]
-    if not winning:
-        winning = [results[0][0]]
+    winning_names = [w[0] for w in winning]
 
-    # Enhanced Phase C summary logging
-    _logger.info("======================================================================")
-    _logger.info("[PHASE C] Signal Structure Discovery (Top Alpha Screening)")
-    _logger.info("  Regime: Hurst=%.3f | Kurt=%.2f | ATR%%=%.3f | REL_GAP>=%.0f%%",
-                 float(micro_vec[0]), float(micro_vec[1]), float(micro_vec[2]),
-                 rel_gap * 100)
-    _logger.info("----------------------------------------------------------------------")
-    _logger.info("  %-20s | %-14s | %-6s | %-8s",
-                 "Signal Strategy", "Cmpd Objective", "Trials", "Status")
-    _logger.info("----------------------------------------------------------------------")
-    for sig, score in results:
-        is_winner = sig in winning
+    for sig, ic, reg, _ in discovery_results:
+        is_winner = sig in winning_names
         status = "[SELECTED]" if is_winner else "[DROPPED]"
         indicator = "▶" if is_winner else " "
-        n_used = sig_trial_budget.get(sig, n_tri_base)
-        _logger.info("  %s %-18s | %-16.6f | %-6d | %-8s", indicator, sig, score, n_used, status)
+        _logger.info("  %s %-18s | %-14.6f | %-14s | %-8s", indicator, sig, ic, reg, status)
+
     _logger.info("----------------------------------------------------------------------")
-    _logger.info("Phase C Summary: Narrowed choices to %s", winning)
+    _logger.info("Phase C Summary: Narrowed to Top %d Alpha-Regime Pairs", len(winning))
     _logger.info("======================================================================")
-    
-    # H4: Deep-copy to prevent global state contamination if build_full_discovery_space_futures
-    # returns a cached/shared dict object.
+
     final_space = copy.deepcopy(get_search_space_futures(tf))
-    final_space["SIGNAL_TYPE"]["choices"] = tuple(winning)
+    final_space["SIGNAL_TYPE"]["choices"] = tuple(winning_names)
+    
+    paired_regimes = list(set([w[1] for w in winning]))
+    final_space["REGIME_TYPE"]["choices"] = tuple(paired_regimes)
+
     return final_space
 
 

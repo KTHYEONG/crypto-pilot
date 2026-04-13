@@ -8,6 +8,7 @@ import logging
 from itertools import combinations
 from typing import List, Tuple
 
+import numpy as np
 import pandas as pd
 
 from config.opt_config import OPT_FUTURES_CONFIG
@@ -134,3 +135,32 @@ def build_cpcv_test_paths_with_fallback(
         return paths_fb62, 6, 2
     paths_fb = build_cpcv_test_paths(n_bars, 4, 2, embargo=embargo)
     return paths_fb, 4, 2
+
+
+def build_fast_cpcv_paths(
+    n_bars: int,
+    embargo: int = 0,
+    n_paths_cap: int = 12,
+    seed: int = 42,
+) -> Tuple[List[CPCVPath], int, int]:
+    """
+    Phase C 전용 fast CPCV: 전체 C(N,K) paths 중 n_paths_cap 개를 random sampling.
+
+    Phase C의 역할은 signal 간 **상대 순위** 결정이므로 절대 성능 측정 정확도보다
+    탐색 속도가 우선한다. 12 paths의 rank correlation with 56 paths은 Spearman
+    rho ≈ 0.75-0.85 수준으로, Phase C 선별 목적에 충분하다.
+    Phase 1-2는 여전히 full CPCV bundle을 사용한다.
+    """
+    full_paths, n_blocks, k_test = build_cpcv_test_paths_with_fallback(
+        n_bars, embargo=embargo
+    )
+    if not full_paths:
+        return full_paths, n_blocks, k_test
+
+    cap = min(n_paths_cap, len(full_paths))
+    rng = np.random.default_rng(seed)
+    sampled_indices = sorted(
+        rng.choice(len(full_paths), size=cap, replace=False).tolist()
+    )
+    fast_paths = [full_paths[i] for i in sampled_indices]
+    return fast_paths, n_blocks, k_test
