@@ -210,7 +210,7 @@ def screen_symbol_refinement_futures(
     daily_dfs: Dict[str, pd.DataFrame],
     phase_b_params: Optional[Dict[str, Any]] = None,
     anchor_symbols: Optional[List[str]] = None,
-) -> None:
+) -> bool:
     """
     MHRH (Microstructure-Homogeneous, Returns-Heterogeneous) Refinement.
     1. Homogeneity: Microstructure vector similarity to BTC.
@@ -226,14 +226,21 @@ def screen_symbol_refinement_futures(
     
     if "BTC/USDT" not in symbol_dfs_4h:
         _logger.error("Phase C: BTC/USDT data missing. Cannot calculate MHRH.")
-        return
+        return False
 
     # 1. Base Reference (BTC)
     btc_df = _slice_df_to_is(symbol_dfs_4h["BTC/USDT"], "1970-01-01", is_end_date)
+    if btc_df.empty or len(btc_df) < 100:
+        _logger.error(f"Phase C: BTC/USDT df is empty or too small (len={len(btc_df)}). Raw df len={len(symbol_dfs_4h['BTC/USDT'])}")
+        return False
+        
     btc_vec = calculate_microstructure_vector(btc_df)
     btc_rets_full = btc_df["close"].pct_change().dropna()
+    if btc_rets_full.empty:
+        _logger.error("Phase C: BTC/USDT returns calculation failed (empty).")
+        return False
+        
     stress_threshold = btc_rets_full.quantile(0.15)
-    
     _logger.info("MHRH Reference [BTC]: Vec=%s, P15_Stress_Thr=%.4f", btc_vec, stress_threshold)
 
     # 2. Extract Vectors & Returns for all valid candidates
@@ -297,10 +304,11 @@ def screen_symbol_refinement_futures(
 
     if not final_symbols:
         _logger.error("Phase C MHRH: no symbols selected.")
-        return
+        return False
 
     _logger.info("Final MHRH Symbols (%d): %s", len(final_symbols), final_symbols)
     update_futures_config_file(final_symbols)
+    return True
 
 
 
@@ -329,119 +337,51 @@ def screen_futures_universe(
     n_workers_override: int | None = None,
 ) -> Tuple[List[str], int]:
     """
-    Ultimate 4-Phase Screener with 'Conditional Anchor' System.
-    Logical bias-free version (No Point-in-time filters).
+    Phase A: Lightweight Market-Wide Scan.
+    In V5 MHRH Architecture, we only perform an ADV (Volume) check here. 
+    Strict filtering, structural evaluation, and parallel data gathering are deferred to Phase C (MHRH).
     """
-    dd = data_dir if data_dir is not None else FUTURES_DATA_DIR
     anchors = set(FUTURES_ANCHOR_SYMBOLS)
+    _logger.info("Phase A: Lightweight Market Scan (ADV Filter Only)...")
     
-    # 1. Full Market Scan
-    _logger.info("Starting Advanced Universe Screening (Bias-Free 10/10 Architecture)...")
     try:
         tickers = collector.client.exchange.fetch_tickers()
         valid_tickers = []
-        min_adv_ticker = float(cfg["ADV_MIN_USDT_DAY"]) * 0.3
+        # Allow a slight buffer for ADV check
+        min_adv_ticker = float(cfg.get("ADV_MIN_USDT_DAY", 50000000.0)) * 0.3
+        
         pool_set = set(candidate_pool) if candidate_pool else None
+        
         for sym, t in tickers.items():
             norm_sym = sym.split(":")[0]
             if pool_set and norm_sym not in pool_set: continue
             if not (sym.endswith("/USDT") or sym.endswith("/USDT:USDT")): continue
-            if norm_sym in anchors or float(t.get("quoteVolume") or 0.0) >= min_adv_ticker:
-                valid_tickers.append(norm_sym)
-        candidate_pool = list(dict.fromkeys(valid_tickers))
+            
+            vol = float(t.get("quoteVolume") or 0.0)
+            if norm_sym in anchors or vol >= min_adv_ticker:
+                valid_tickers.append({"symbol": norm_sym, "vol": vol})
+                
     except Exception as e:
         _logger.warning(f"Ticker pre-filter failed: {e}")
+        return list(anchors), 0
 
-    # 2. Parallel History Screening
-    if n_workers_override is None:
-        n_workers = max(1, min(int(os.cpu_count() or 4), 8))
-    else:
-        n_workers = max(1, min(int(n_workers_override), int(os.cpu_count() or 4), 8))
-    worker_fn = partial(_screen_worker_v2, tf=tf, fetch_start=fetch_start, end_date=end_date, cfg=cfg, data_dir=dd)
-    with ProcessPoolExecutor(max_workers=n_workers) as pool:
-        raw_results = list(tqdm(pool.map(worker_fn, candidate_pool), total=len(candidate_pool), desc="[Universe Gates]"))
+    # Sort by recent volume
+    valid_tickers.sort(key=lambda x: x["vol"], reverse=True)
     
-    passed_rows = [r for r in raw_results if r is not None]
-    
-    # --- PHASE 1 & 2: NO FREE PASS GATING ---
-    # Everyone (including Anchors) must qualify on Hurst and Volatility.
-    final_candidates = []
-    # [EXPLOSIVE GROWTH] Remove ATR_MAX cap. Volatility is an opportunity, not a risk to be filtered out at screener level.
-    atr_min = 2.0
-    # [EXPLOSIVE GROWTH] Slightly lower Hurst floor to include budding trends (0.50)
-    hurst_floor = 0.50
-    amihud_limit = float(cfg.get("MAX_AMIHUD_ILLIQUIDITY", 10.0))
+    # Extract unique symbols
+    final_list = []
+    seen = set()
+    for item in valid_tickers:
+        if item["symbol"] not in seen:
+            seen.add(item["symbol"])
+            final_list.append(item["symbol"])
+            
+    pool_k = int(cfg.get("BROAD_POOL_K", 60))
+    if len(final_list) > pool_k:
+        final_list = final_list[:pool_k]
 
-    for r in passed_rows:
-        if r["hurst"] < hurst_floor: continue 
-        if r["atr_pct"] < atr_min: continue
-        if r["amihud"] > amihud_limit: continue
-        final_candidates.append(r)
-
-    _logger.info(f"Phase 1 & 2 complete: {len(final_candidates)} symbols passed.")
-    if not final_candidates: return list(anchors), 0
-
-    # --- PHASE 3: SEEDED PLAYER PRIORITY & CLUSTERING ---
-    final_list: List[str] = []
-    
-    # 1. VIP Allocation: Qualified Anchors take their seats first.
-    qualified_anchors = [r for r in final_candidates if r["symbol"] in anchors]
-    for qa in qualified_anchors:
-        final_list.append(qa["symbol"])
-        _logger.info(f"  [ANCHOR OK] {qa['symbol']} qualified and prioritized.")
-
-    # 2. Alpha Filling: Fill remaining slots with orthogonal Alts.
-    others = [r for r in final_candidates if r["symbol"] not in anchors]
-    max_slots = int(cfg.get("MP_MAX_SYMBOLS", 8))
-    
-    if len(final_list) < max_slots and others:
-        try:
-            from sklearn.cluster import KMeans
-            remaining_slots = max_slots - len(final_list)
-            
-            # Cluster the non-anchor candidates
-            returns_df = pd.DataFrame({r["symbol"]: r["returns"] for r in others}).fillna(0)
-            
-            # Correlation on stress periods if possible
-            if "BTC/USDT" in [r["symbol"] for r in final_candidates]:
-                btc_rets = [r for r in final_candidates if r["symbol"] == "BTC/USDT"][0]["returns"]
-                stress_returns = returns_df.loc[btc_rets < btc_rets.quantile(0.20)]
-            else:
-                stress_returns = returns_df
-            
-            n_clusters = min(len(others), remaining_slots + 2)
-            kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
-            clusters = kmeans.fit_predict(1.0 - stress_returns.corr().fillna(0))
-            
-            # Group others by clusters
-            buckets: Dict[int, List[Dict]] = {}
-            for i, r in enumerate(others):
-                cid = clusters[i]
-                if cid not in buckets: buckets[cid] = []
-                buckets[cid].append(r)
-            
-            # Pick best from each cluster
-            leaders = []
-            for members in buckets.values():
-                members.sort(key=lambda x: x["quality_score"], reverse=True)
-                leaders.append(members[0])
-            
-            # Add leaders by quality until slots full
-            leaders.sort(key=lambda x: x["quality_score"], reverse=True)
-            for leader in leaders:
-                if len(final_list) >= max_slots: break
-                final_list.append(leader["symbol"])
-                
-        except Exception as e:
-            _logger.warning(f"Clustering failed ({e}), falling back to quality sort.")
-            others.sort(key=lambda x: x["quality_score"], reverse=True)
-            for r in others:
-                if len(final_list) >= max_slots: break
-                final_list.append(r["symbol"])
-
-    _logger.info(f"Refinement complete: {len(final_list)} symbols selected: {final_list}")
-    update_futures_config_file(final_list)
-    return final_list, len(final_candidates)
+    _logger.info(f"Phase A Scan complete: {len(final_list)} broad candidates sent to Phase C (e.g. {final_list[:5]}...)")
+    return final_list, len(final_list)
 
 def update_futures_config_file(symbols: List[str]) -> None:
     config_path = Path("config/opt_config.py")
