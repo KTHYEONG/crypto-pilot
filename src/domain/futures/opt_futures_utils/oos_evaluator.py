@@ -195,20 +195,22 @@ def run_oos_margin_shared_portfolio(
     ulcer = calc_ulcer_index_from_equity(equity_curve)
 
     if not trades_df.empty:
-        total_pnl = trades_df["pnl"].sum()
-        total_losses = abs(trades_df[trades_df["pnl"] < 0]["pnl"].sum())
-        pf_val = total_pnl / max(total_losses, 1e-9)
+        gains = trades_df[trades_df["pnl"] > 0]["pnl"].sum()
+        losses = abs(trades_df[trades_df["pnl"] < 0]["pnl"].sum())
+        pf_val = gains / max(losses, 1e-9)
         wr = (trades_df["pnl"] > 0).mean() * 100.0
         lt = int((trades_df["side"] == "LONG").sum())
         st = int((trades_df["side"] == "SHORT").sum())
 
         long_trades = trades_df[trades_df["side"] == "LONG"]
+        l_gains = long_trades[long_trades["pnl"] > 0]["pnl"].sum()
         l_losses_sum = abs(long_trades[long_trades["pnl"] < 0]["pnl"].sum())
-        l_pf = long_trades["pnl"].sum() / max(l_losses_sum, 1e-9)
+        l_pf = l_gains / max(l_losses_sum, 1e-9)
 
         short_trades = trades_df[trades_df["side"] == "SHORT"]
+        s_gains = short_trades[short_trades["pnl"] > 0]["pnl"].sum()
         s_losses_sum = abs(short_trades[short_trades["pnl"] < 0]["pnl"].sum())
-        s_pf = short_trades["pnl"].sum() / max(s_losses_sum, 1e-9)
+        s_pf = s_gains / max(s_losses_sum, 1e-9)
 
         short_wr = float((short_trades["pnl"] > 0).mean() * 100.0) if st > 0 else 0.0
         minority_pct = float(min(lt, st) / max(lt + st, 1) * 100.0)
@@ -232,6 +234,7 @@ def run_oos_margin_shared_portfolio(
         "cvar_pct": cvar, "hw_recovery_days": hw_days, "oos_long_short_minority_pct": minority_pct,
         "calmar_ratio": calmar, "ulcer_index": ulcer, "short_win_rate_pct": short_wr,
         "ev_cost_ratio": ev_ratio,
+        "trades_df": trades_df,
     }
     if return_signal_dfs:
         out["full_signal_dfs"] = full_signal_dfs
