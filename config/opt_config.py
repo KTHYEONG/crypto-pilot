@@ -33,7 +33,8 @@ OPT_FUTURES_CONFIG: Dict[str, Any] = {
     "FUTURES_CPCV_TEMPORAL_LAMBDA": 3.0,
     "FUTURES_MAX_CONCURRENT_POSITIONS": 3,
     "FUTURES_MIN_PF": 1.5,
-    "FUTURES_MAX_MDD": 35.0,
+    "FUTURES_MAX_MDD": 35.0,           # per-segment CPCV pruning hard limit
+    "FUTURES_MAX_AVG_CPCV_MDD": 25.0,  # TPE constraint: avg MDD across valid CPCV paths
     "FUTURES_MAX_UI": 15.0,  # 신규: Ulcer Index 고통 지수 제한
     "FUTURES_MIN_ROMAD": 0.8,
     "FUTURES_MIN_CAGR_PCT": 30.0,
@@ -72,7 +73,7 @@ FUTURES_SYMBOLS: List[str] = [
     "ETC/USDT",
     "GALA/USDT",
     "ID/USDT",
-    "ETHFI/USDT",
+    "NEAR/USDT",
     "DUSK/USDT",
 ]
 

@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple, cast
 import numpy as np
 import pandas as pd
 
+from config.opt_config import OPT_FUTURES_CONFIG
 from config.settings import (
     FUTURES_INITIAL_BALANCE,
     SLIPPAGE_RATE,
@@ -26,7 +27,10 @@ from src.domain.futures.opt_futures_utils.cv_utils import (
 )
 from src.domain.futures.opt_futures_utils.metrics import (
     _log_tw_from_ret_pct,
+    calc_cvar5_loss_pct_from_equity,
+    calc_max_underwater_days_from_equity,
     calc_mdd_from_equity,
+    calc_ulcer_index_from_equity,
     compute_pbo_from_cpcv_paths,
 )
 from src.domain.futures.strategies_futures import (
@@ -181,18 +185,22 @@ def run_oos_margin_shared_portfolio(
     trades_df, equity_curve, final_balance = engine.run()
 
     # Metrics
-    n_days = (len(equity_curve) * (4 if tf == "4h" else 1)) / 24.0
+    hours_per_bar = int(tf.replace("h", "")) if tf.endswith("h") else 4
+    n_days = (len(equity_curve) * hours_per_bar) / 24.0
     cagr = ((final_balance / FUTURES_INITIAL_BALANCE) ** (365.0 / max(n_days, 1.0)) - 1.0) * 100.0
     mdd = calc_mdd_from_equity(equity_curve)
     moic = final_balance / FUTURES_INITIAL_BALANCE
+    cvar = calc_cvar5_loss_pct_from_equity(equity_curve)
+    hw_days = calc_max_underwater_days_from_equity(equity_curve, float(hours_per_bar))
+    ulcer = calc_ulcer_index_from_equity(equity_curve)
 
     if not trades_df.empty:
         total_pnl = trades_df["pnl"].sum()
         total_losses = abs(trades_df[trades_df["pnl"] < 0]["pnl"].sum())
         pf_val = total_pnl / max(total_losses, 1e-9)
         wr = (trades_df["pnl"] > 0).mean() * 100.0
-        lt = (trades_df["side"] == "LONG").sum()
-        st = (trades_df["side"] == "SHORT").sum()
+        lt = int((trades_df["side"] == "LONG").sum())
+        st = int((trades_df["side"] == "SHORT").sum())
 
         long_trades = trades_df[trades_df["side"] == "LONG"]
         l_losses_sum = abs(long_trades[long_trades["pnl"] < 0]["pnl"].sum())
@@ -201,24 +209,29 @@ def run_oos_margin_shared_portfolio(
         short_trades = trades_df[trades_df["side"] == "SHORT"]
         s_losses_sum = abs(short_trades[short_trades["pnl"] < 0]["pnl"].sum())
         s_pf = short_trades["pnl"].sum() / max(s_losses_sum, 1e-9)
+
+        short_wr = float((short_trades["pnl"] > 0).mean() * 100.0) if st > 0 else 0.0
+        minority_pct = float(min(lt, st) / max(lt + st, 1) * 100.0)
+
+        # EV/cost ratio: avg net PnL per trade / round-trip transaction cost
+        avg_net_pnl = float(trades_df["pnl"].mean())
+        round_trip_cost = (
+            (TRADING_FEE_RATE * 2.0 + SLIPPAGE_RATE * 2.0) * float(FUTURES_INITIAL_BALANCE)
+        )
+        ev_ratio = avg_net_pnl / max(round_trip_cost, 1e-9)
     else:
         pf_val, wr, lt, st, l_pf, s_pf = 1.0, 0.0, 0, 0, 1.0, 1.0
+        short_wr, minority_pct, ev_ratio = 0.0, 0.0, 0.0
 
-    # Calculate Calmar Ratio and other missing metrics for reporting
     calmar = cagr / abs(mdd) if abs(mdd) > 1e-6 else 0.0
-    
-    # Calculate short win rate
-    short_wr = 0.0
-    if st > 0:
-        short_wr = (short_trades["pnl"] > 0).mean() * 100.0
 
     out = {
         "cagr_pct": cagr, "mdd_pct": mdd, "profit_factor": pf_val, "total_trades": len(trades_df),
         "moic": moic, "terminal_wealth_ratio": moic, "win_rate_pct": wr, "long_trades": lt,
         "short_trades": st, "long_pf": l_pf, "short_pf": s_pf, "equity_curve": equity_curve,
-        "cvar_pct": 0.0, "hw_recovery_days": 0.0, "oos_long_short_minority_pct": 0.0,
-        "calmar_ratio": calmar, "ulcer_index": 0.0, "short_win_rate_pct": short_wr,
-        "ev_cost_ratio": 0.0,
+        "cvar_pct": cvar, "hw_recovery_days": hw_days, "oos_long_short_minority_pct": minority_pct,
+        "calmar_ratio": calmar, "ulcer_index": ulcer, "short_win_rate_pct": short_wr,
+        "ev_cost_ratio": ev_ratio,
     }
     if return_signal_dfs:
         out["full_signal_dfs"] = full_signal_dfs
@@ -313,7 +326,8 @@ def run_cpcv_complement_evaluation(
         for b in comp:
             unique_comp_blocks.add(tuple(b))
 
-    liq_mdd_thr = float(p.get("LIQUIDATION_MDD_THRESHOLD", 20.0))
+    # Use same MDD threshold as CPCV objective (FUTURES_MAX_MDD=35%) for consistent scoring.
+    liq_mdd_thr = float(OPT_FUTURES_CONFIG.get("FUTURES_MAX_MDD", 35.0))
     block_metrics: Dict[Tuple[int, int], float] = {}
     for b_range in sorted(list(unique_comp_blocks), key=lambda x: x[0]):
         b_start, b_end = cast(Tuple[int, int], b_range)
