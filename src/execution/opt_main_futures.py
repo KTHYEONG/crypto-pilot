@@ -64,6 +64,10 @@ from src.domain.futures.opt_futures_utils.go_nogo import (  # noqa: E402
     FuturesSymbolGateRow,
     run_futures_deployment_report,
 )
+from src.domain.futures.opt_futures_utils.objective import (  # noqa: E402
+    EMBARGO_BARS,
+    inject_cs_momentum_ranks,
+)
 from src.domain.futures.opt_futures_utils.oos_evaluator import (  # noqa: E402
     evaluate_symbol_fold,
     run_oos_margin_shared_portfolio,
@@ -102,10 +106,13 @@ BEST_PARAMS_FUTURES_JSON_STEM: str = "best_futures_4h"
 _STAGE1_WORKER_CTX: Dict[str, Any] = {}
 _TPE_WORKER_CTX: Dict[str, Any] = {}
 
-EMBARGO_BARS: Dict[str, int] = {
-    "1h": 24,
-    "4h": 6,
-}
+# EMBARGO_BARS is imported from objective.py (single source of truth).
+# Using compute_embargo_bars() values: {"1h": 24, "4h": 12}.
+
+# TPE constraint: avg MDD across valid CPCV paths (separate from per-segment limit).
+_MDD_CONSTRAINT_LIMIT: float = float(
+    OPT_FUTURES_CONFIG.get("FUTURES_MAX_AVG_CPCV_MDD", 25.0)
+)
 
 
 def futures_frozen_trial_constraints(trial: optuna.trial.FrozenTrial) -> tuple[float, ...]:
@@ -118,7 +125,7 @@ def futures_frozen_trial_constraints(trial: optuna.trial.FrozenTrial) -> tuple[f
     return (
         1.35 - pf,
         25.0 - trades,
-        avg_mdd - 25.0,
+        avg_mdd - _MDD_CONSTRAINT_LIMIT,
         0.15 - ls_ratio,
         3.0 - ev_cost,
     )
@@ -385,12 +392,12 @@ def _run_parallel_ask_tell(
                     trial = futures_to_trials.pop(f)
                     try:
                         t_num, val, user_attrs, state = f.result()
-                        
-                        # [FIX] user_attrs must be set BEFORE study.tell() to avoid UpdateFinishedTrialError
-                        trial_id = study.get_trials()[t_num]._trial_id
+
+                        # Set user_attrs via trial._trial_id (direct, number-safe)
+                        # before study.tell() to avoid UpdateFinishedTrialError.
                         for k, v in user_attrs.items():
-                            study._storage.set_trial_user_attr(trial_id, k, v)
-                        
+                            study._storage.set_trial_user_attr(trial._trial_id, k, v)
+
                         study.tell(trial, val, state=state)
 
                         if val is not None and val > best_val:
@@ -402,9 +409,10 @@ def _run_parallel_ask_tell(
                             ))
                     except Exception as e:
                         _logger.error("Trial worker failed: %s", e)
-                        # Only tell FAIL if the trial is not already finished
-                        current_trial = study.get_trials()[trial.number]
-                        if not current_trial.state.is_finished():
+                        # Look up by number to avoid index-vs-number confusion
+                        finished = {t.number: t for t in study.get_trials()}
+                        ft = finished.get(trial.number)
+                        if ft is None or not ft.state.is_finished():
                             study.tell(trial, state=TrialState.FAIL)
                     pbar.update(1)
                     if remaining > 0:
@@ -445,15 +453,13 @@ def _run_tf_optimization(
         pruner = PatientPruner(base_p, patience=int(OPT_FUTURES_CONFIG.get("tpe_pruner_patience", 2)))
 
     from src.domain.futures.opt_futures_utils.objective import (
-        EMBARGO_BARS as OBJ_EMBARGO_BARS,
-    )
-    from src.domain.futures.opt_futures_utils.objective import (
         compute_multi_alignment_info,
     )
+    # EMBARGO_BARS is imported at module level from objective.py (SSOT).
     alignment_info = compute_multi_alignment_info(
-        ctx.data_maps, ctx.symbols, tf, int(OBJ_EMBARGO_BARS.get(tf, 0))
+        ctx.data_maps, ctx.symbols, tf, int(EMBARGO_BARS.get(tf, 0))
     ) if ctx.mode == MODE_MULTI else None
-    
+
     ref_sym0 = ctx.symbols[0]
     is_off0 = int(ctx.data_maps[ref_sym0].get(f"is_start_idx_{tf}", 0))
     ref_df0 = ctx.data_maps[ref_sym0][tf]
@@ -462,7 +468,7 @@ def _run_tf_optimization(
         ref_len0 = len(ref_df0) - is_off0
         if ref_len0 >= 200:
             prebuilt_cpcv_bundle = build_cpcv_test_paths_with_fallback(
-                ref_len0, embargo=int(OBJ_EMBARGO_BARS.get(tf, 0))
+                ref_len0, embargo=int(EMBARGO_BARS.get(tf, 0))
             )
 
     if ctx.locked_param_space is not None:
@@ -707,25 +713,8 @@ def main() -> None:
         return
     runtime_policy = _resolve_futures_parallel_policy(len(symbols), args.tf)
 
-    # Set Global Context for Stage 1 Tournament (CoW)
-    _STAGE1_WORKER_CTX.clear()
-    _STAGE1_WORKER_CTX.update({
-        "data_maps": data_maps,
-        "symbols": symbols,
-        "tf": args.tf,
-        "project_root": project_root,
-        "prebuilt": None, # Will be computed or set if needed
-        "alignment_info": None
-    })
-
-    locked_param_space = None
-    if not args.skip_stage1:
-        tops = _run_stage1_futures_tournament(
-            data_maps, symbols, args.tf, project_root, runtime_policy.stage1_workers
-        )
-        if tops:
-            locked_param_space = build_multi_combo_param_space_futures(tops[:5])
-
+    # Step 1: Align OOS datetimes and rebuild IS maps BEFORE Stage 1 tournament,
+    # so all stages operate on consistent, symbol-intersection-aligned data.
     ref_tz = oos_data_maps[symbols[0]][args.tf]["datetime"].dt.tz
     is_start_align = (pd.to_datetime(start_date).tz_localize(ref_tz)
                       if ref_tz else pd.to_datetime(start_date))
@@ -736,6 +725,7 @@ def main() -> None:
         data_maps, oos_data_maps, symbols, args.tf, is_start_align, is_end_align
     )
 
+    # Step 2: BTC/ETH reference price merge (materialises views into new DataFrames).
     for rc, cn in [("BTC/USDT", "btc_close"), ("ETH/USDT", "eth_close")]:
         if rc in data_maps:
             rd = data_maps[rc][args.tf][["datetime", "close"]].rename(columns={"close": cn})
@@ -748,6 +738,33 @@ def main() -> None:
                     oos_data_maps[s][args.tf] = oos_data_maps[s][args.tf].merge(
                         rdo, on="datetime", how="left"
                     )
+
+    # Step 3: CS momentum rank injection (backward-looking, no look-ahead bias).
+    # Must run after BTC/ETH merge which creates new DataFrames.
+    if len(symbols) > 1:
+        inject_cs_momentum_ranks(data_maps, symbols, args.tf)
+        inject_cs_momentum_ranks(oos_data_maps, symbols, args.tf)
+
+    # Step 4: Stage 1 Tournament on ALIGNED + MERGED + CS-ranked data.
+    # _STAGE1_WORKER_CTX["data_maps"] IS data_maps (same reference), so fork()
+    # workers inherit the fully prepared state without an extra copy.
+    _STAGE1_WORKER_CTX.clear()
+    _STAGE1_WORKER_CTX.update({
+        "data_maps": data_maps,
+        "symbols": symbols,
+        "tf": args.tf,
+        "project_root": project_root,
+        "prebuilt": None,
+        "alignment_info": None,
+    })
+
+    locked_param_space = None
+    if not args.skip_stage1:
+        tops = _run_stage1_futures_tournament(
+            data_maps, symbols, args.tf, project_root, runtime_policy.stage1_workers
+        )
+        if tops:
+            locked_param_space = build_multi_combo_param_space_futures(tops[:5])
 
     tasks: List[Tuple[Tuple[str, ...], str]] = [(tuple(symbols), args.tf)]
     plan = _resolve_futures_execution_plan(
@@ -823,9 +840,10 @@ def main() -> None:
                    reverse=True)[:50]
         )
         params = best_trial.params.copy()
+        _leverage_default = str(OPT_FUTURES_CONFIG.get("FUTURES_DISCOVERY_LEVERAGE", 5))
         params.update({
             "TIMEFRAME": tf_eval,
-            "LEVERAGE": int(os.getenv("FUTURES_DISCOVERY_LEVERAGE", "8")),
+            "LEVERAGE": int(os.getenv("FUTURES_DISCOVERY_LEVERAGE", _leverage_default)),
             "USE_COMPOUNDING": True
         })
         ua = best_trial.user_attrs
@@ -964,7 +982,7 @@ def main() -> None:
             spearman_rho=rho_val,
             pbo_n_paths=n_paths,
             pbo_gate_passed=pbo_val <= 0.45,
-            pbo_hard_gate=False,
+            pbo_hard_gate=True,  # PBO is included in core_checks → treated as hard gate
             multi_window_passed=True,
             multi_window_summary="",
             regime_diagnostic_block="",
