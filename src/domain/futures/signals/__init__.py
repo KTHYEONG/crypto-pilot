@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 # Side-effect imports populate registry
-from src.domain.futures.signals import (
+from src.domain.futures.signals import (  # noqa: F401
     adx_breakout_futures,
     # bb_squeeze_futures, # Removed per redesign plan
-    cs_momentum_futures,
+    # cs_momentum_futures, # Removed: ranking signal != entry timing signal
+    funding_squeeze_futures,
     macd_hist_div_futures,
     rsm_vt_futures,
     supertrend_futures,
