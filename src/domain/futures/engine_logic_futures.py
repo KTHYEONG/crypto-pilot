@@ -73,14 +73,14 @@ def check_short_exit(
     s_trail_mult: float,
     slippage_rate: float,
 ):
-    new_stop = lowest + (pos_atr * s_trail_mult)
-    if new_stop < stop_price:
-        stop_price = new_stop
-
     if c_open >= stop_price:
         return True, c_open * (1.0 + slippage_rate), stop_price
     elif c_high >= stop_price:
         return True, stop_price * (1.0 + slippage_rate), stop_price
+
+    new_stop = lowest + (pos_atr * s_trail_mult)
+    if new_stop < stop_price:
+        stop_price = new_stop
 
     return False, 0.0, stop_price
 
