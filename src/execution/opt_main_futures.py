@@ -808,35 +808,15 @@ def main() -> None:
             _logger.error("Phase 0: no symbols with loadable data. Aborting.")
             return
 
-        winning_signal_type: str
-        phase_b_params: Optional[Dict[str, Any]] = None
-        if not pre_args.skip_stage1:
-            _logger.info("Phase B: combination screening on anchors (is_end=%s)", is_end_date)
-            res = run_combination_screening_futures(
-                data_maps=data_maps_broad,
-                symbols=valid_broad,
-                tf=pre_args.tf,
-                project_root=project_root,
-                signal_cache_dir=signal_cache_dir,
-            )
-            tops = res.combos
-            if not tops:
-                _logger.error("Phase B: combination screening returned no tops. Aborting.")
-                return
-            
-            winning_signal_type = tops[0].signal
-            phase0_narrowed_space = build_multi_combo_param_space_futures(tops)
-            phase_b_params = build_probe_params_futures(tops[0], pre_args.tf)
-        else:
-            if pre_args.signal_type:
-                winning_signal_type = pre_args.signal_type.upper()
-            else:
-                fixed = load_screener_fixed_params_futures(Path(project_root))
-                winning_signal_type = fixed.get("SIGNAL_TYPE", "RSM_VT")
-            
-            # H4: Deep-copy to prevent global state contamination.
-            phase0_narrowed_space = copy.deepcopy(get_search_space_futures(pre_args.tf))
-            phase0_narrowed_space["SIGNAL_TYPE"]["choices"] = (winning_signal_type,)
+        # Phase C: MHRH (Microstructure-Homogeneous, Returns-Heterogeneous) Refinement
+        # This replaces the old Phase B + C combination screening with a purely
+        # statistical approach that ensures symbol compatibility and tail-risk protection.
+        _logger.info("Phase C: MHRH statistical refinement (is_end=%s)", is_end_date)
+        
+        # [V5 Logic] Determination of winning_signal_type is now deferred to Stage 1 tournament.
+        # We pass a placeholder to the screener as it no longer uses it for fit.
+        winning_signal_type = "MHRH_PROBE"
+        phase_b_params = None
 
         screen_symbol_refinement_futures(
             broad_candidates=list(broad_candidates),
@@ -847,7 +827,7 @@ def main() -> None:
             phase_b_params=phase_b_params,
             anchor_symbols=config.opt_config.FUTURES_ANCHOR_SYMBOLS,
         )
-        
+
         # Reload config to get the updated FUTURES_SYMBOLS written by Phase C
         importlib.reload(config.opt_config)
         globals()["FUTURES_SYMBOLS"] = config.opt_config.FUTURES_SYMBOLS
