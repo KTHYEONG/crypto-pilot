@@ -5,19 +5,13 @@ Focus: Conditional Anchor logic, geometric growth, and orthogonal diversificatio
 
 from __future__ import annotations
 
-import itertools
 import logging
-import multiprocessing as mp
-import os
 import sys
-from concurrent.futures import ProcessPoolExecutor
-from functools import partial
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
 import numpy as np
 import pandas as pd
-from tqdm import tqdm
 from scipy import stats
 
 # Project Root Setup
@@ -26,11 +20,10 @@ if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
 import re
+
 from config.opt_config import (
     FUTURES_ANCHOR_SYMBOLS,
-    OPT_FUTURES_CONFIG,
 )
-from config.settings import FUTURES_DATA_DIR, SLIPPAGE_RATE
 from src.domain.futures.data_collector import DataCollector
 from src.domain.futures.funding_utils import merge_funding_into_ohlcv
 
@@ -120,7 +113,7 @@ def _screen_worker_v2(
 
     # --- Phase 4: Funding Stats ---
     funding = df["funding_rate"].to_numpy() if "funding_rate" in df.columns else np.zeros(len(df))
-    mean_funding = np.mean(funding[-180:]) if len(funding) >= 180 else 0.0
+    np.mean(funding[-180:]) if len(funding) >= 180 else 0.0
     
     # [EXPLOSIVE GROWTH] Quality Score now rewards trendiness + positive bias + liquidity
     # We penalize negative momentum to avoid "smooth downtrend" traps.
@@ -138,16 +131,7 @@ def _screen_worker_v2(
         "returns": df["close"].pct_change().tail(500)
     }
 
-import json
-import random
-import time
-from datetime import timedelta
-from typing import Any, Dict, List, Optional, Tuple
-
-from src.domain.futures.opt_futures_utils.metrics import calc_profit_factor_from_pnl
-from src.domain.futures.opt_futures_utils.oos_evaluator import evaluate_symbol_fold
-from src.domain.futures.strategies_futures import FuturesPipelineStrategy
-from src.core.optimization.opt_utils import compute_segment_merge_index
+from typing import Optional
 
 
 def calculate_microstructure_vector(df: pd.DataFrame) -> np.ndarray:
@@ -173,7 +157,9 @@ def calculate_microstructure_vector(df: pd.DataFrame) -> np.ndarray:
     atr_pct = (tr[1:] / close[1:]) * 100.0
     mean_atr_pct = np.mean(atr_pct[-500:]) if len(atr_pct) >= 500 else np.mean(atr_pct)
     
-    return np.array([hurst, kurt, mean_atr_pct])
+    # 4. Cleanup and return
+    vec = np.array([hurst, kurt, mean_atr_pct])
+    return np.nan_to_num(vec, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float64)
 
 
 def _calculate_stress_correlation(
@@ -194,11 +180,35 @@ def _calculate_stress_correlation(
     return float(s_base.corr(s_alt))
 
 
-def _calculate_cosine_similarity(v1: np.ndarray, v2: np.ndarray) -> float:
-    norm1, norm2 = np.linalg.norm(v1), np.linalg.norm(v2)
-    if norm1 < 1e-9 or norm2 < 1e-9:
-        return 0.0
-    return float(np.dot(v1, v2) / (norm1 * norm2))
+def _calculate_standardized_affinity(
+    pop_vectors: np.ndarray, 
+    ref_vec: np.ndarray, 
+    target_vec: np.ndarray
+) -> float:
+    """
+    Computes affinity based on Standardized Euclidean Distance.
+    Affinity = 1 / (1 + distance)
+    """
+    # 1. Calculate population stats for standardization
+    # Use nan-aware functions in case some vectors contain nans
+    means = np.nanmean(pop_vectors, axis=0)
+    stds = np.nanstd(pop_vectors, axis=0)
+    stds = np.where(stds < 1e-9, 1.0, stds)
+    
+    # Fill any remaining nans in means/stds with defaults
+    means = np.nan_to_num(means)
+    stds = np.nan_to_num(stds, nan=1.0)
+    
+    # 2. Standardize reference and target
+    z_ref = (ref_vec - means) / stds
+    z_target = (target_vec - means) / stds
+    
+    # 3. Euclidean Distance in standardized space
+    # z_target might still have nans if target_vec had a nan
+    diff = np.nan_to_num(z_ref - z_target)
+    dist = float(np.linalg.norm(diff))
+    
+    return 1.0 / (1.0 + dist)
 
 
 def screen_symbol_refinement_futures(
@@ -213,8 +223,9 @@ def screen_symbol_refinement_futures(
 ) -> bool:
     """
     MHRH (Microstructure-Homogeneous, Returns-Heterogeneous) Refinement.
-    1. Homogeneity: Microstructure vector similarity to BTC.
-    2. Heterogeneity: Stress-period correlation with BTC (Non-parametric P15).
+    1. Homogeneity: Standardized Affinity to BTC.
+    2. Heterogeneity: Stress-period correlation with BTC.
+    3. Growth: Directional momentum check.
     """
     from config.opt_config import FUTURES_ANCHOR_SYMBOLS, FUTURES_SCREENER_CONFIG
 
@@ -231,93 +242,99 @@ def screen_symbol_refinement_futures(
     # 1. Base Reference (BTC)
     btc_df = _slice_df_to_is(symbol_dfs_4h["BTC/USDT"], "1970-01-01", is_end_date)
     if btc_df.empty or len(btc_df) < 100:
-        raw_btc_len = len(symbol_dfs_4h.get("BTC/USDT", []))
-        _logger.error(
-            f"Phase C: BTC/USDT df is empty or too small (len={len(btc_df)}). "
-            f"Raw df len={raw_btc_len}. Available symbols: {list(symbol_dfs_4h.keys())}"
-        )
+        _logger.error("Phase C: BTC/USDT df is empty or too small.")
         return False
         
     btc_vec = calculate_microstructure_vector(btc_df)
     btc_rets_full = btc_df["close"].pct_change().dropna()
     if btc_rets_full.empty:
-        _logger.error("Phase C: BTC/USDT returns calculation failed (empty).")
+        _logger.error("Phase C: BTC/USDT returns calculation failed.")
         return False
         
     stress_threshold = btc_rets_full.quantile(0.15)
     
-    # [ENHANCED LOGGING] Reference BTC Microstructure
     _logger.info("=" * 70)
     _logger.info("[PHASE C] MHRH Statistical Refinement (Ref: BTC/USDT)")
     _logger.info("-" * 70)
-    _logger.info(
-        "  - Microstructure Vector : [Hurst: %.4f, Kurt: %.4f, ATR%%: %.4f]",
-        btc_vec[0], btc_vec[1], btc_vec[2]
-    )
-    _logger.info(
-        "  - P15 Stress Threshold  : %.4f (Returns below this = Market Stress)",
-        stress_threshold
-    )
+    _logger.info("  - Microstructure Vector : [Hurst: %.4f, Kurt: %.4f, ATR%%: %.4f]", 
+                 btc_vec[0], btc_vec[1], btc_vec[2])
+    _logger.info("  - P15 Stress Threshold  : %.4f", stress_threshold)
     _logger.info("-" * 70)
 
-    # 2. Extract Vectors & Returns for all valid candidates
+    # 2. Process all candidates
     stats_map: Dict[str, Dict[str, Any]] = {}
     all_targets = list(dict.fromkeys(broad_candidates + anchors))
+    all_vectors: List[np.ndarray] = []
     
     for sym in all_targets:
         df4 = symbol_dfs_4h.get(sym)
-        if df4 is None or df4.empty: continue
+        if df4 is None or df4.empty:
+            continue
         
         is_df = _slice_df_to_is(df4, "1970-01-01", is_end_date)
-        if len(is_df) < 300: continue
+        if len(is_df) < 300:
+            continue
         
+        # [HARD CUTOFF] 180d Momentum Check
+        close_arr = is_df["close"].to_numpy()
+        lookback_180 = min(len(close_arr), 1080)
+        mom_180d = float((close_arr[-1] / close_arr[-lookback_180]) - 1.0) if len(close_arr) >= 100 else 0.0
+        
+        if sym not in anchor_set and mom_180d < -0.50:
+            _logger.info(f"  - {sym}: Pruned (180d Mom = {mom_180d:.2%})")
+            continue
+            
         vec = calculate_microstructure_vector(is_df)
         rets = is_df["close"].pct_change()
-        
-        # ADV calculation for capacity gating
         tail_vol = is_df.tail(180)
-        # 6 * 4h = 1 day (approximation)
         adv = float((tail_vol["close"] * tail_vol["volume"]).median() * 6)
         
         stats_map[sym] = {
-            "vector": vec,
-            "rets": rets,
-            "adv": adv,
-            "cosine": _calculate_cosine_similarity(btc_vec, vec)
+            "vector": vec, "rets": rets, "adv": adv, "mom_180d": mom_180d
         }
+        all_vectors.append(vec)
 
-    # 3. MHRH Scoring
-    # [Homogeneity] Filter candidates similar to BTC
+    if not all_vectors or "BTC/USDT" not in stats_map:
+        _logger.error("Phase C: No valid candidates or BTC missing.")
+        return False
+
+    pop_vectors = np.stack(all_vectors)
     adv_min = float(cfg.get("ADV_MIN_USDT_DAY", 50_000_000.0))
-    filtered_dyn = []
-    for sym, res in stats_map.items():
-        if sym in anchor_set: continue
-        if res["cosine"] > 0.80 and res["adv"] >= adv_min:
-            filtered_dyn.append(sym)
-
-    _logger.info(f"[1/2] Homogeneity Filter: {len(filtered_dyn)} symbols pass (Cosine Sim > 0.80)")
-    _logger.info("[2/2] Heterogeneity Sort: Analyzing Stress-Period Correlation...")
-
-    # 4. [Heterogeneity] Minimal Tail correlation with BTC
+    
+    # 3. Homogeneity & Heterogeneity Scoring
     final_pool_stats = []
-    for sym in filtered_dyn:
-        res = stats_map[sym]
-        merged = pd.concat([btc_rets_full, res["rets"]], axis=1, join="inner").dropna()
-        if len(merged) < 50: continue
+    _logger.info("[1/2] Calculating Standardized Affinity & Stress Correlation...")
+    
+    for sym, res in stats_map.items():
+        if sym in anchor_set:
+            continue
+        if res["adv"] < adv_min:
+            continue
         
+        affinity = _calculate_standardized_affinity(pop_vectors, btc_vec, res["vector"])
+        if affinity < 0.35:
+            continue # Relaxed from 0.40 slightly for initial testing
+        
+        merged = pd.concat([btc_rets_full, res["rets"]], axis=1, join="inner").dropna()
+        if len(merged) < 50:
+            continue
         s_corr = _calculate_stress_correlation(merged.iloc[:, 0], merged.iloc[:, 1], stress_threshold)
-        # Logic: High similarity (Cosine) + Low stress correlation (1 - s_corr)
-        score = res["cosine"] + (1.0 - s_corr)
+        
+        # [MULTIPLICATIVE SCORE]
+        # Score = Affinity * (1 - s_corr) * max(1.0, 1 + mom)
+        score = affinity * (1.0 - s_corr) * max(1.0, 1.0 + res["mom_180d"])
+        
         final_pool_stats.append({
-            "symbol": sym, "score": score, "s_corr": s_corr, "cosine": res["cosine"]
+            "symbol": sym, "score": score, "s_corr": s_corr, "affinity": affinity
         })
 
     final_pool_stats.sort(key=lambda x: x["score"], reverse=True)
     
-    # 5. Assemble final list (Anchors + Top-K Dynamics)
+    # 5. Universe Assembly
     final_symbols = [a for a in anchors if a in stats_map]
     for item in final_pool_stats:
-        if len(final_symbols) >= mp_max: break
+        if len(final_symbols) >= mp_max:
+            break
         final_symbols.append(item["symbol"])
 
     if not final_symbols:
@@ -325,16 +342,15 @@ def screen_symbol_refinement_futures(
         return False
 
     _logger.info("-" * 70)
-    _logger.info("Final MHRH Selection Rationale:")
-    _logger.info("  | Symbol       | Cosine Sim | Stress Corr | MHRH Score | Decision")
+    _logger.info("Final MHRH Selection Rationale (Multiplicative Model):")
+    _logger.info("  | Symbol       | Affinity   | Stress Corr | MHRH Score | Decision")
     _logger.info("  | ------------ | ---------- | ----------- | ---------- | --------")
     
-    # Log rationales for candidates
-    for item in final_pool_stats[:mp_max + 3]: # Summary for top candidates
+    for item in final_pool_stats[:mp_max + 3]:
         decision = "SELECTED" if item["symbol"] in final_symbols else "REJECTED"
         _logger.info(
             "  | %-12s | %-10.3f | %-11.3f | %-10.3f | %s",
-            item["symbol"], item["cosine"], item["s_corr"], item["score"], decision
+            item["symbol"], item["affinity"], item["s_corr"], item["score"], decision
         )
 
     _logger.info("-" * 70)

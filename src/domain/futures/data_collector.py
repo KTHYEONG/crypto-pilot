@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 import pandas as pd
+from typing import Any
 
 from src.core.exchange.binance_client import BinanceClient
 
@@ -54,25 +55,25 @@ class DataValidator:
 
 
 class DataCollector:
-    def __init__(self, api_key=None, secret=None):
+    def __init__(self, api_key: str | None = None, secret: str | None = None) -> None:
         self.client = BinanceClient(api_key, secret)
         self.logger = setup_logger("DataCollector")
 
     @staticmethod
-    def _safe_symbol(symbol):
+    def _safe_symbol(symbol: str) -> str:
         return symbol.replace("/", "_")
 
-    def _cache_path(self, symbol, timeframe):
+    def _cache_path(self, symbol: str, timeframe: str) -> Path:
         safe_symbol = self._safe_symbol(symbol)
         return FUTURES_DATA_DIR / f"{safe_symbol}_{timeframe}.parquet"
 
-    def _meta_path(self):
+    def _meta_path(self) -> Path:
         return FUTURES_DATA_DIR / "parquet_cache_meta.json"
 
-    def _meta_key(self, symbol, timeframe):
+    def _meta_key(self, symbol: str, timeframe: str) -> str:
         return f"{self._safe_symbol(symbol)}::{timeframe}"
 
-    def _load_meta(self):
+    def _load_meta(self) -> dict[str, Any]:
         path = self._meta_path()
         if not path.exists():
             return {}
@@ -306,7 +307,9 @@ class DataCollector:
                 self.logger.info(f"Seeded parquet cache from legacy CSV files: {cache_path.name}")
                 self._write_parquet(cache_path, cache_df)
 
-        missing_ranges = []
+        missing_ranges: list[tuple[pd.Timestamp, pd.Timestamp]] = []
+        cache_start = pd.Timestamp("1970-01-01").normalize()
+        cache_end = pd.Timestamp("1970-01-01").normalize()
         if cache_df.empty:
             # [[FIX]] Empty cache에서도 메타데이터(상장일)가 있다면 그 이전은 요청하지 않음
             if earliest_known is not None:
@@ -445,6 +448,8 @@ class DataCollector:
         # [DIAGNOSTIC]
         self.logger.debug(f"[DEBUG] {symbol} funding mk={mk} v={v} earliest_known={earliest_known}")
 
+        cache_start = pd.Timestamp("1970-01-01").normalize()
+        cache_end = pd.Timestamp("1970-01-01").normalize()
         if cache_df.empty:
             # [[FIX]] 펀딩비도 상장일 메타데이터가 있다면 그 이전은 조회하지 않음
             if earliest_known is not None:
@@ -508,7 +513,13 @@ class DataCollector:
             # Mark dead zone
             self._save_meta({mk: {"earliest_available_funding": req_end.strftime("%Y-%m-%d")}})
 
-    def collect_and_save(self, symbol, timeframe, start_date=None, end_date=None):
+    def collect_and_save(
+        self,
+        symbol: str,
+        timeframe: str,
+        start_date: str | None = None,
+        end_date: str | None = None,
+    ) -> pd.DataFrame:
         """
         Backward-compatible API.
         Previously stored period-specific CSV files.
