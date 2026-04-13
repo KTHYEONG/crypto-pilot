@@ -245,7 +245,20 @@ def screen_symbol_refinement_futures(
         return False
         
     stress_threshold = btc_rets_full.quantile(0.15)
-    _logger.info("MHRH Reference [BTC]: Vec=%s, P15_Stress_Thr=%.4f", btc_vec, stress_threshold)
+    
+    # [ENHANCED LOGGING] Reference BTC Microstructure
+    _logger.info("=" * 70)
+    _logger.info("[PHASE C] MHRH Statistical Refinement (Ref: BTC/USDT)")
+    _logger.info("-" * 70)
+    _logger.info(
+        "  - Microstructure Vector : [Hurst: %.4f, Kurt: %.4f, ATR%%: %.4f]",
+        btc_vec[0], btc_vec[1], btc_vec[2]
+    )
+    _logger.info(
+        "  - P15 Stress Threshold  : %.4f (Returns below this = Market Stress)",
+        stress_threshold
+    )
+    _logger.info("-" * 70)
 
     # 2. Extract Vectors & Returns for all valid candidates
     stats_map: Dict[str, Dict[str, Any]] = {}
@@ -282,7 +295,8 @@ def screen_symbol_refinement_futures(
         if res["cosine"] > 0.80 and res["adv"] >= adv_min:
             filtered_dyn.append(sym)
 
-    _logger.info("Homogeneity Filter: %d dynamic symbols pass (Cosine > 0.80)", len(filtered_dyn))
+    _logger.info(f"[1/2] Homogeneity Filter: {len(filtered_dyn)} symbols pass (Cosine Sim > 0.80)")
+    _logger.info("[2/2] Heterogeneity Sort: Analyzing Stress-Period Correlation...")
 
     # 4. [Heterogeneity] Minimal Tail correlation with BTC
     final_pool_stats = []
@@ -310,7 +324,23 @@ def screen_symbol_refinement_futures(
         _logger.error("Phase C MHRH: no symbols selected.")
         return False
 
-    _logger.info("Final MHRH Symbols (%d): %s", len(final_symbols), final_symbols)
+    _logger.info("-" * 70)
+    _logger.info("Final MHRH Selection Rationale:")
+    _logger.info("  | Symbol       | Cosine Sim | Stress Corr | MHRH Score | Decision")
+    _logger.info("  | ------------ | ---------- | ----------- | ---------- | --------")
+    
+    # Log rationales for candidates
+    for item in final_pool_stats[:mp_max + 3]: # Summary for top candidates
+        decision = "SELECTED" if item["symbol"] in final_symbols else "REJECTED"
+        _logger.info(
+            "  | %-12s | %-10.3f | %-11.3f | %-10.3f | %s",
+            item["symbol"], item["cosine"], item["s_corr"], item["score"], decision
+        )
+
+    _logger.info("-" * 70)
+    _logger.info("Final Universe (%d): %s", len(final_symbols), final_symbols)
+    _logger.info("=" * 70)
+    
     update_futures_config_file(final_symbols)
     return True
 
