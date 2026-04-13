@@ -427,6 +427,7 @@ class DataCollector:
         earliest_known = None
         last_checked = None
 
+        v = None
         if mk in meta and isinstance(meta[mk], dict):
             v = meta[mk].get("earliest_available_funding")
             if v:
