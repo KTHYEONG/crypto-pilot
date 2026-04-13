@@ -322,21 +322,21 @@ def _init_tpe_worker_context() -> None:
 
 def _convert_space_to_distributions(space: Dict[str, Any]) -> Dict[str, BaseDistribution]:
     dists: Dict[str, BaseDistribution] = {}
-    for name, config in space.items():
-        stype = config.get("type")
+    for name, spec in space.items():
+        stype = spec.get("type")
         if stype == "int":
             dists[name] = IntDistribution(
-                low=int(config["low"]), high=int(config["high"]),
-                step=int(config.get("step", 1)), log=bool(config.get("log", False))
+                low=int(spec["low"]), high=int(spec["high"]),
+                step=int(spec.get("step", 1)), log=bool(spec.get("log", False))
             )
         elif stype == "float":
             dists[name] = FloatDistribution(
-                low=float(config["low"]), high=float(config["high"]),
-                step=float(config.get("step")) if config.get("step") else None,
-                log=bool(config.get("log", False))
+                low=float(spec["low"]), high=float(spec["high"]),
+                step=float(spec.get("step")) if spec.get("step") else None,
+                log=bool(spec.get("log", False))
             )
         elif stype == "categorical":
-            dists[name] = CategoricalDistribution(choices=config["choices"])
+            dists[name] = CategoricalDistribution(choices=spec["choices"])
     return dists
 
 
@@ -596,6 +596,58 @@ def _eval_combo_task_from_context(
     )
 
 
+def _run_single_sig_type_discovery(
+    sig_type: str,
+    tf: str,
+    n_tri: int,
+    data_maps: Dict[str, Dict[str, Any]],
+    symbols: List[str],
+    project_root: str,
+    prebuilt: Any,
+    alignment_info: Any,
+    cache_root: Any,
+) -> tuple[str, float]:
+    """Worker function for parallel Stage 1 discovery."""
+    base_space = get_search_space_futures(tf)
+    stage_space = {k: dict(v) if isinstance(v, dict) else v for k, v in base_space.items()}
+    stage_space["SIGNAL_TYPE"] = {"type": "categorical", "choices": (sig_type,)}
+    
+    from src.domain.futures.opt_futures_utils.objective import objective_futures
+    
+    study = optuna.create_study(
+        direction="maximize",
+        sampler=TPESampler(n_startup_trials=min(20, max(5, n_tri // 4)), seed=42),
+        storage=InMemoryStorage(),
+    )
+
+    def _obj(trial: optuna.Trial) -> float:
+        return objective_futures(
+            trial,
+            data_maps,
+            symbols,
+            tf,
+            space=stage_space,
+            mode="multi",
+            project_root=project_root,
+            prebuilt_cpcv_bundle=prebuilt,
+            multi_alignment_info=alignment_info,
+            signal_disk_cache_root=cache_root,
+        )
+
+    study.optimize(_obj, n_trials=n_tri, n_jobs=1, show_progress_bar=False)
+    completed = [
+        t for t in study.trials if t.state == TrialState.COMPLETE and t.value is not None
+    ]
+    if not completed:
+        return sig_type, -1e9
+    
+    completed.sort(key=lambda tr: float(tr.value or -1e9), reverse=True)
+    ktop = max(1, n_tri // 10)
+    top_trials = completed[:ktop]
+    mean_obj = float(np.mean([float(t.value) for t in top_trials]))
+    return sig_type, mean_obj
+
+
 def _run_stage1_structure_discovery(
     *,
     data_maps: Dict[str, Dict[str, Any]],
@@ -608,8 +660,6 @@ def _run_stage1_structure_discovery(
     signal_cache_dir: str,
 ) -> Dict[str, Dict[str, Any]]:
     """Per-SIGNAL_TYPE in-memory Optuna studies; narrow categorical to top performers."""
-    from src.domain.futures.opt_futures_utils.objective import objective_futures
-
     all_types = tuple(get_search_space_futures(tf)["SIGNAL_TYPE"]["choices"])
     ref_sym = symbols[0]
     is_off = int(data_maps[ref_sym].get(f"is_start_idx_{tf}", 0))
@@ -629,46 +679,32 @@ def _run_stage1_structure_discovery(
     results: List[tuple[str, float]] = []
     n_tri = max(5, int(trials_per_signal))
     
-    for sig_type in all_types:
-        # Build space for a single signal type
-        base_space = get_search_space_futures(tf)
-        stage_space = {k: dict(v) if isinstance(v, dict) else v for k, v in base_space.items()}
-        stage_space["SIGNAL_TYPE"] = {"type": "categorical", "choices": (sig_type,)}
+    _logger.info("   [Phase C] Parallel Structure Discovery with %d signal types...", len(all_types))
+    
+    # [OPTIMIZATION] Parallel optimization for each signal type
+    # Using 'fork' context for memory efficiency (CoW)
+    ctx = multiprocessing.get_context("fork")
+    with concurrent.futures.ProcessPoolExecutor(
+        max_workers=min(len(all_types), 8),
+        mp_context=ctx,
+        initializer=_init_stage1_worker_context
+    ) as executor:
+        f_to_sig = {
+            executor.submit(
+                _run_single_sig_type_discovery, sig, tf, n_tri, data_maps, symbols,
+                project_root, prebuilt, alignment_info, cache_root
+            ): sig for sig in all_types
+        }
         
-        study = optuna.create_study(
-            direction="maximize",
-            sampler=TPESampler(n_startup_trials=min(20, max(5, n_tri // 4)), seed=42),
-            storage=InMemoryStorage(),
-        )
+        for f in concurrent.futures.as_completed(f_to_sig):
+            try:
+                sig_res, score = f.result()
+                results.append((sig_res, score))
+            except Exception as e:
+                sig_err = f_to_sig[f]
+                _logger.error("Signal structure discovery failed for %s: %s", sig_err, e)
+                results.append((sig_err, -1e9))
 
-        def _obj(trial: optuna.Trial, stage_space=stage_space) -> float:
-            return objective_futures(
-                trial,
-                data_maps,
-                symbols,
-                tf,
-                space=stage_space,
-                mode="multi",
-                project_root=project_root,
-                prebuilt_cpcv_bundle=prebuilt,
-                multi_alignment_info=alignment_info,
-                signal_disk_cache_root=cache_root,
-            )
-
-        study.optimize(_obj, n_trials=n_tri, n_jobs=1, show_progress_bar=False)
-        completed = [
-            t for t in study.trials if t.state == TrialState.COMPLETE and t.value is not None
-        ]
-        if not completed:
-            results.append((sig_type, -1e9))
-            continue
-        completed.sort(key=lambda tr: float(tr.value or -1e9), reverse=True)
-        ktop = max(1, n_tri // 10)
-        top_trials = completed[:ktop]
-        mean_obj = float(np.mean([float(t.value) for t in top_trials]))
-        results.append((sig_type, mean_obj))
-        _logger.debug("Phase C [%-15s] : top-%d mean objective = %.6f", sig_type, ktop, mean_obj)
-        
     results.sort(key=lambda x: x[1], reverse=True)
     winning = [s for s, m in results[: max(1, top_k)] if m > min_p10_gmgr]
     if not winning:
@@ -696,6 +732,64 @@ def _run_stage1_structure_discovery(
     return final_space
 
 
+def _load_single_symbol_data(
+    sym: str,
+    tf: str,
+    fetch_start: str,
+    start: str,
+    is_end: str,
+    end: str,
+    min_bars: int,
+) -> tuple[str, Optional[Dict[str, Any]], Optional[Dict[str, Any]], bool]:
+    try:
+        temp_is: Dict[str, Any] = {}
+        temp_oos: Dict[str, Any] = {}
+        insufficient = False
+        collector = DataCollector()
+        collector.ensure_funding_data(sym, fetch_start, end)
+        for tf_l in [tf, "1d"]:
+            raw_df = collector.collect_and_save(sym, tf_l, fetch_start, end)
+            df = merge_funding_into_ohlcv(sym, raw_df, FUTURES_DATA_DIR)
+            
+            is_anchor = sym in FUTURES_ANCHOR_SYMBOLS
+            min_required = 500 if is_anchor and tf_l == tf else (min_bars if tf_l == tf else 200)
+            
+            if df is None or df.empty:
+                insufficient = True
+                break
+            df.reset_index(drop=True, inplace=True)
+            tz = df["datetime"].dt.tz
+            is_start_dt = pd.to_datetime(start).tz_localize(tz) if tz else pd.to_datetime(start)
+            is_end_dt = pd.to_datetime(is_end).tz_localize(tz) if tz else pd.to_datetime(is_end)
+            
+            is_mask = df["datetime"] < is_end_dt
+            is_end_idx = int(is_mask.to_numpy().sum())
+            
+            if is_end_idx < min_required:
+                insufficient = True
+                break
+                
+            temp_is[tf_l] = df.iloc[:is_end_idx].copy()
+            
+            mask = temp_is[tf_l]["datetime"] >= is_start_dt
+            temp_is[f"is_start_idx_{tf_l}"] = int(mask.to_numpy().argmax()) if mask.any() else 0
+            temp_oos[tf_l] = df
+            mask_oos = df["datetime"] >= is_end_dt
+            temp_oos[f"oos_start_idx_{tf_l}"] = (
+                int(mask_oos.to_numpy().argmax()) if mask_oos.any() else len(df)
+            )
+        
+        if insufficient:
+            return sym, None, None, True
+            
+        temp_is[f"merge_idx_{tf}"] = compute_segment_merge_index(temp_is[tf], temp_is["1d"])
+        temp_oos[f"merge_idx_{tf}"] = compute_segment_merge_index(temp_oos[tf], temp_oos["1d"])
+        return sym, temp_is, temp_oos, False
+    except Exception as e:
+        _logger.warning("Failed to load symbol %s: %s", sym, e)
+        return sym, None, None, False
+
+
 def _load_futures_data_maps_for_symbols(
     symbols: List[str],
     tf: str,
@@ -704,65 +798,30 @@ def _load_futures_data_maps_for_symbols(
     is_end: str,
     end: str,
 ) -> tuple[Dict[str, Dict[str, Any]], Dict[str, Dict[str, Any]], List[str]]:
-    collector = DataCollector()
     data_maps: Dict[str, Dict[str, Any]] = {}
     oos_data_maps: Dict[str, Dict[str, Any]] = {}
     valid_symbols: List[str] = []
     min_bars = int(FUTURES_SCREENER_CONFIG.get("MIN_HISTORY_BARS", 2000))
 
-    # BTC/ETH를 항상 포함하여 로드 시도
     essential = ["BTC/USDT", "ETH/USDT"]
     load_symbols = list(dict.fromkeys(symbols + essential))
 
-    for sym in load_symbols:
-        try:
-            temp_is: Dict[str, Any] = {}
-            temp_oos: Dict[str, Any] = {}
-            insufficient = False
-            collector.ensure_funding_data(sym, fetch_start, end)
-            for tf_l in [tf, "1d"]:
-                raw_df = collector.collect_and_save(sym, tf_l, fetch_start, end)
-                df = merge_funding_into_ohlcv(sym, raw_df, FUTURES_DATA_DIR)
-                
-                is_anchor = sym in FUTURES_ANCHOR_SYMBOLS
-                min_required = 500 if is_anchor and tf_l == tf else (min_bars if tf_l == tf else 200)
-                
-                if df is None or df.empty:
-                    insufficient = True
-                    break
-                df.reset_index(drop=True, inplace=True)
-                tz = df["datetime"].dt.tz
-                is_start_dt = pd.to_datetime(start).tz_localize(tz) if tz else pd.to_datetime(start)
-                is_end_dt = pd.to_datetime(is_end).tz_localize(tz) if tz else pd.to_datetime(is_end)
-                
-                is_mask = df["datetime"] < is_end_dt
-                is_end_idx = int(is_mask.to_numpy().sum())
-                
-                if is_end_idx < min_required:
-                    insufficient = True
-                    break
-                    
-                temp_is[tf_l] = df.iloc[:is_end_idx].copy()
-                
-                mask = temp_is[tf_l]["datetime"] >= is_start_dt
-                temp_is[f"is_start_idx_{tf_l}"] = int(mask.to_numpy().argmax()) if mask.any() else 0
-                temp_oos[tf_l] = df
-                mask_oos = df["datetime"] >= is_end_dt
-                temp_oos[f"oos_start_idx_{tf_l}"] = int(mask_oos.to_numpy().argmax()) if mask_oos.any() else len(df)
-            
+    # [OPTIMIZATION] Parallel loading using ThreadPoolExecutor
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(load_symbols), 8)) as executor:
+        futures = [
+            executor.submit(_load_single_symbol_data, sym, tf, fetch_start, start, is_end, end, min_bars)
+            for sym in load_symbols
+        ]
+        for f in concurrent.futures.as_completed(futures):
+            sym, t_is, t_oos, insufficient = f.result()
             if insufficient:
                 if sym in essential and sym not in symbols:
                     _logger.warning(f"Essential symbol {sym} has insufficient data but is required for macro indicators.")
                 continue
-                
-            temp_is[f"merge_idx_{tf}"] = compute_segment_merge_index(temp_is[tf], temp_is["1d"])
-            temp_oos[f"merge_idx_{tf}"] = compute_segment_merge_index(temp_oos[tf], temp_oos["1d"])
-            data_maps[sym], oos_data_maps[sym] = temp_is, temp_oos
-            if sym in symbols:
-                valid_symbols.append(sym)
-        except Exception as e:
-            _logger.warning("Failed to load symbol %s: %s", sym, e)
-            continue
+            if t_is and t_oos:
+                data_maps[sym], oos_data_maps[sym] = t_is, t_oos
+                if sym in symbols:
+                    valid_symbols.append(sym)
 
     if len(valid_symbols) >= 2:
         ref_tz = oos_data_maps[valid_symbols[0]][tf]["datetime"].dt.tz
