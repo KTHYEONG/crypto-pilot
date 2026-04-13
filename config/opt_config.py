@@ -72,8 +72,8 @@ FUTURES_SYMBOLS: List[str] = [
     "ETC/USDT",
     "GALA/USDT",
     "ID/USDT",
-    "NEAR/USDT",
-    "ROSE/USDT",
+    "ETHFI/USDT",
+    "DUSK/USDT",
 ]
 
 FUTURES_ANCHOR_SYMBOLS: List[str] = [

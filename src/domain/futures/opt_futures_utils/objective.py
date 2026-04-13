@@ -385,11 +385,13 @@ def objective_futures(
             }
 
     path_compound_raw_log_tw: List[float] = []
+    successful_path_center_times: List[float] = []
     path_pfs, path_trades, path_mdds = [], [], []
     all_seg_long, all_seg_short = 0, 0
     all_long_pnls, all_short_pnls, funding_ratios = [], [], []
 
     for path_idx, path in enumerate(cpcv_paths):
+        # ... (중략: 루프 내부 로직)
         p_log_ret, p_mdd, p_trades = 0.0, 0.0, 0
         p_l_prof, p_l_loss = 0.0, 0.0
 
@@ -427,6 +429,8 @@ def objective_futures(
         path_mdds.append(p_mdd)
         path_trades.append(float(p_trades))
         path_pfs.append(p_l_prof / max(p_l_loss, 1e-9) if p_l_loss > 0 else 1.5)
+        # Collect center time only for valid paths to match length of path_compound_raw_log_tw
+        successful_path_center_times.append(float(np.mean([(s + e) / 2.0 for s, e in path])))
 
         if path_idx >= 4:
             trial.report(float(np.mean(path_compound_raw_log_tw)), step=path_idx)
@@ -460,8 +464,8 @@ def objective_futures(
 
     d_temporal = 1.0
     if len(path_compound_raw_log_tw) >= 4:
-        path_center_times = [float(np.mean([(s + e) / 2.0 for s, e in p])) for p in cpcv_paths]
-        time_sort_idx = np.argsort(path_center_times)
+        # [FIX] Use successful_path_center_times to match length with path_compound_raw_log_tw
+        time_sort_idx = np.argsort(successful_path_center_times)
         tw_sorted = np.asarray(path_compound_raw_log_tw, dtype=np.float64)[time_sort_idx]
         recent_mean = float(np.mean(tw_sorted[-(len(tw_sorted) // 4) :]))
         d_temporal = float(
