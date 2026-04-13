@@ -667,13 +667,27 @@ def _run_stage1_structure_discovery(
         top_trials = completed[:ktop]
         mean_obj = float(np.mean([float(t.value) for t in top_trials]))
         results.append((sig_type, mean_obj))
-        _logger.info("Stage1 [%s]: top-%d mean objective=%.6f", sig_type, ktop, mean_obj)
+        _logger.debug("Phase C [%-15s] : top-%d mean objective = %.6f", sig_type, ktop, mean_obj)
         
     results.sort(key=lambda x: x[1], reverse=True)
     winning = [s for s, m in results[: max(1, top_k)] if m > min_p10_gmgr]
     if not winning:
         winning = [results[0][0]]
-    _logger.info("Stage1 narrowed SIGNAL_TYPE choices: %s", winning)
+
+    # Enhanced Phase C summary logging
+    _logger.info("======================================================================")
+    _logger.info("[PHASE C] Signal Structure Discovery (Top Alpha Screening)")
+    _logger.info("----------------------------------------------------------------------")
+    _logger.info("  %-20s | %-16s | %-8s", "Signal Strategy", "Mean Objective", "Status")
+    _logger.info("----------------------------------------------------------------------")
+    for sig, score in results:
+        is_winner = sig in winning
+        status = "[SELECTED]" if is_winner else "[DROPPED]"
+        indicator = "▶" if is_winner else " "
+        _logger.info("  %s %-18s | %-16.6f | %-8s", indicator, sig, score, status)
+    _logger.info("----------------------------------------------------------------------")
+    _logger.info("Phase C Summary: Narrowed choices to %s", winning)
+    _logger.info("======================================================================")
     
     # H4: Deep-copy to prevent global state contamination if build_full_discovery_space_futures
     # returns a cached/shared dict object.
@@ -823,8 +837,8 @@ def main() -> None:
             _logger.error("Phase 0: no symbols with loadable data. Aborting.")
             return
 
-        # Phase C: MHRH (Microstructure-Homogeneous, Returns-Heterogeneous) Refinement
-        _logger.info("Phase C: MHRH statistical refinement (is_end=%s)", is_end_date)
+        # Phase B: MHRH (Microstructure-Homogeneous, Returns-Heterogeneous) Refinement
+        _logger.info("Phase B: MHRH statistical refinement (is_end=%s)", is_end_date)
         
         success = screen_symbol_refinement_futures(
             broad_candidates=list(broad_candidates),
@@ -836,10 +850,10 @@ def main() -> None:
             anchor_symbols=FUTURES_ANCHOR_SYMBOLS,
         )
         if not success:
-            _logger.error("Phase C refinement returned failure. Aborting to prevent optimization with broken universe.")
+            _logger.error("Phase B refinement failed. Aborting to avoid broken universe.")
             return
 
-        # Reload config to get the updated FUTURES_SYMBOLS written by Phase C
+        # Reload config to get the updated FUTURES_SYMBOLS written by Phase B
         importlib.reload(config.opt_config)
 
     parser = argparse.ArgumentParser()

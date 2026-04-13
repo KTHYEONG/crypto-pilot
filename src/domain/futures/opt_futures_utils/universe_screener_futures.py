@@ -235,25 +235,25 @@ def screen_symbol_refinement_futures(
     anchor_set = set(anchors)
     
     if "BTC/USDT" not in symbol_dfs_4h:
-        _logger.error("Phase C: BTC/USDT data missing. Cannot calculate MHRH.")
+        _logger.error("Phase B: BTC/USDT data missing. Cannot calculate MHRH.")
         return False
 
     # 1. Base Reference (BTC)
     btc_df = _slice_df_to_is(symbol_dfs_4h["BTC/USDT"], "1970-01-01", is_end_date)
     if btc_df.empty or len(btc_df) < 100:
-        _logger.error("Phase C: BTC/USDT df is empty or too small.")
+        _logger.error("Phase B: BTC/USDT df is empty or too small.")
         return False
         
     btc_vec = calculate_microstructure_vector(btc_df)
     btc_rets_full = btc_df["close"].pct_change().dropna()
     if btc_rets_full.empty:
-        _logger.error("Phase C: BTC/USDT returns calculation failed.")
+        _logger.error("Phase B: BTC/USDT returns calculation failed.")
         return False
         
     stress_threshold = btc_rets_full.quantile(0.15)
     
     _logger.info("=" * 70)
-    _logger.info("[PHASE C] MHRH Statistical Refinement (Ref: BTC/USDT)")
+    _logger.info("[PHASE B] MHRH Statistical Refinement (Ref: BTC/USDT)")
     _logger.info("-" * 70)
     _logger.info("  - Microstructure Vector : [Hurst: %.4f, Kurt: %.4f, ATR%%: %.4f]", 
                  btc_vec[0], btc_vec[1], btc_vec[2])
@@ -295,7 +295,7 @@ def screen_symbol_refinement_futures(
         all_vectors.append(vec)
 
     if not all_vectors or "BTC/USDT" not in stats_map:
-        _logger.error("Phase C: No valid candidates or BTC missing.")
+        _logger.error("Phase B: No valid candidates or BTC missing.")
         return False
 
     pop_vectors = np.stack(all_vectors)
@@ -335,13 +335,13 @@ def screen_symbol_refinement_futures(
     final_symbols = [a for a in anchors if a in stats_map]
     
     if not final_symbols:
-        _logger.error("Phase C MHRH: no symbols selected (even anchors missing).")
+        _logger.error("Phase B MHRH: no symbols selected (even anchors missing).")
         return False
 
     # Calculate Baseline Geometric Growth (G = E[R] - 0.5*Var[R])
     port_rets_df = pd.concat([stats_map[s]["rets"] for s in final_symbols], axis=1).dropna()
     if port_rets_df.empty:
-        _logger.error("Phase C: Anchor returns data insufficient for alignment.")
+        _logger.error("Phase B: Anchor returns data insufficient for alignment.")
         return False
         
     avg_rets = port_rets_df.mean(axis=1)
@@ -378,9 +378,9 @@ def screen_symbol_refinement_futures(
             rejected_set.append(sym)
 
     if rejected_set:
-        _logger.info(f"- Rejected: {len(rejected_set)} symbols failed to improve G ({', '.join(rejected_set[:5])}...)")
+        _logger.info(f"- Rejected: {len(rejected_set)} symbols failed to improve G")
 
-    _logger.info(f"- Result: {len(final_symbols)} symbols selected (Final G: {current_G:.8f})")
+    _logger.info(f"- Result: {len(final_symbols)} symbols selected: {final_symbols} (Final G: {current_G:.8f})")
     _logger.info("=" * 70)
     
     update_futures_config_file(final_symbols)
@@ -415,10 +415,10 @@ def screen_futures_universe(
     """
     Phase A: Lightweight Market-Wide Scan.
     In V5 MHRH Architecture, we only perform an ADV (Volume) check here. 
-    Strict filtering, structural evaluation, and parallel data gathering are deferred to Phase C (MHRH).
+    Strict filtering, structural evaluation, and parallel data gathering are deferred to Phase B (MHRH).
     """
     anchors = set(FUTURES_ANCHOR_SYMBOLS)
-    _logger.info("Phase A: Lightweight Market Scan (ADV Filter Only)...")
+    _logger.info("Phase A: Market Scan...")
     
     try:
         tickers = collector.client.exchange.fetch_tickers()
@@ -456,7 +456,7 @@ def screen_futures_universe(
     if len(final_list) > pool_k:
         final_list = final_list[:pool_k]
 
-    _logger.info(f"Phase A Scan complete: {len(final_list)} broad candidates sent to Phase C (e.g. {final_list[:5]}...)")
+    _logger.info(f"Phase A Scan complete: SUCCESS ({len(final_list)} candidates sent to Phase B)")
     return final_list, len(final_list)
 
 def update_futures_config_file(symbols: List[str]) -> None:
