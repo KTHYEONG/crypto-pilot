@@ -63,7 +63,7 @@ class PortfolioBacktestEngineFast:
         strength_filter = self.data["strength_filter"]
         atr_2d = self.data["atr"]
         garch_kelly_f = self.data["garch_kelly_f"]
-        funding_rate = self.data["funding_rate_sum"]
+        funding_rate = self.data.get("funding_rate_sum", np.zeros_like(close_2d))
         slot_rank_score = self.data["slot_rank_score"]
 
         l_atr_mult = float(self.params.get("LONG_ATR_MULT", 3.0))
