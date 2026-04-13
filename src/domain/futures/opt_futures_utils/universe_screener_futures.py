@@ -230,7 +230,6 @@ def screen_symbol_refinement_futures(
     from config.opt_config import FUTURES_ANCHOR_SYMBOLS, FUTURES_SCREENER_CONFIG
 
     cfg = FUTURES_SCREENER_CONFIG
-    mp_max = int(cfg.get("MP_MAX_SYMBOLS", 5))
     
     anchors = list(anchor_symbols) if anchor_symbols is not None else list(FUTURES_ANCHOR_SYMBOLS)
     anchor_set = set(anchors)
@@ -266,6 +265,7 @@ def screen_symbol_refinement_futures(
     all_targets = list(dict.fromkeys(broad_candidates + anchors))
     all_vectors: List[np.ndarray] = []
     
+    pruned_count = 0
     for sym in all_targets:
         df4 = symbol_dfs_4h.get(sym)
         if df4 is None or df4.empty:
@@ -281,7 +281,7 @@ def screen_symbol_refinement_futures(
         mom_180d = float((close_arr[-1] / close_arr[-lookback_180]) - 1.0) if len(close_arr) >= 100 else 0.0
         
         if sym not in anchor_set and mom_180d < -0.50:
-            _logger.info(f"  - {sym}: Pruned (180d Mom = {mom_180d:.2%})")
+            pruned_count += 1
             continue
             
         vec = calculate_microstructure_vector(is_df)
@@ -330,31 +330,57 @@ def screen_symbol_refinement_futures(
 
     final_pool_stats.sort(key=lambda x: x["score"], reverse=True)
     
-    # 5. Universe Assembly
+    # 5. [METHOD B] Universe Assembly & Greedy Marginal Growth Test
+    # Start with anchors as the baseline portfolio
     final_symbols = [a for a in anchors if a in stats_map]
-    for item in final_pool_stats:
-        if len(final_symbols) >= mp_max:
-            break
-        final_symbols.append(item["symbol"])
-
+    
     if not final_symbols:
-        _logger.error("Phase C MHRH: no symbols selected.")
+        _logger.error("Phase C MHRH: no symbols selected (even anchors missing).")
         return False
 
-    _logger.info("-" * 70)
-    _logger.info("Final MHRH Selection Rationale (Multiplicative Model):")
-    _logger.info("  | Symbol       | Affinity   | Stress Corr | MHRH Score | Decision")
-    _logger.info("  | ------------ | ---------- | ----------- | ---------- | --------")
+    # Calculate Baseline Geometric Growth (G = E[R] - 0.5*Var[R])
+    port_rets_df = pd.concat([stats_map[s]["rets"] for s in final_symbols], axis=1).dropna()
+    if port_rets_df.empty:
+        _logger.error("Phase C: Anchor returns data insufficient for alignment.")
+        return False
+        
+    avg_rets = port_rets_df.mean(axis=1)
+    current_G = float(avg_rets.mean() - 0.5 * avg_rets.var())
     
-    for item in final_pool_stats[:mp_max + 3]:
-        decision = "SELECTED" if item["symbol"] in final_symbols else "REJECTED"
-        _logger.info(
-            "  | %-12s | %-10.3f | %-11.3f | %-10.3f | %s",
-            item["symbol"], item["affinity"], item["s_corr"], item["score"], decision
-        )
+    _logger.info(f"- Pruning: {pruned_count} symbols removed (Momentum < -50%)")
+    _logger.info(f"- Screening: {len(final_pool_stats)} valid candidates analyzed.")
+    _logger.info(f"- Baseline G: {current_G:.8f} (Anchors: {final_symbols})")
+    _logger.info("- Greedy Search Result:")
 
-    _logger.info("-" * 70)
-    _logger.info("Final Universe (%d): %s", len(final_symbols), final_symbols)
+    # Greedy Selection: Add candidate if it increases Portfolio G
+    abs_max_limit = 12
+    rejected_set = []
+    
+    for item in final_pool_stats:
+        if len(final_symbols) >= abs_max_limit:
+            break
+            
+        sym = item["symbol"]
+        test_df = pd.concat([port_rets_df, stats_map[sym]["rets"]], axis=1, join="inner").dropna()
+        if len(test_df) < 200:
+            continue
+            
+        test_avg_rets = test_df.mean(axis=1)
+        new_G = float(test_avg_rets.mean() - 0.5 * test_avg_rets.var())
+        
+        if new_G > current_G:
+            improvement = new_G - current_G
+            _logger.info(f"  [+] {sym}: G improved to {new_G:.8f} (+{improvement:.8f})")
+            current_G = new_G
+            final_symbols.append(sym)
+            port_rets_df = test_df # Update baseline
+        else:
+            rejected_set.append(sym)
+
+    if rejected_set:
+        _logger.info(f"- Rejected: {len(rejected_set)} symbols failed to improve G ({', '.join(rejected_set[:5])}...)")
+
+    _logger.info(f"- Result: {len(final_symbols)} symbols selected (Final G: {current_G:.8f})")
     _logger.info("=" * 70)
     
     update_futures_config_file(final_symbols)
