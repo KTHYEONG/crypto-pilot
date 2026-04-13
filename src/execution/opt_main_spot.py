@@ -713,19 +713,33 @@ def _run_stage1_structure_discovery(
         ]
         if not completed:
             results.append((sig_type, -1e9))
-            _logger.warning("Stage1 [%s]: no complete trials.", sig_type)
             continue
         completed.sort(key=lambda tr: float(tr.value or -1e9), reverse=True)
         ktop = max(1, n_tri // 10)
         top_trials = completed[:ktop]
         mean_obj = float(np.mean([float(t.value) for t in top_trials]))
         results.append((sig_type, mean_obj))
-        _logger.info("Stage1 [%s]: top-%d mean objective=%.6f", sig_type, ktop, mean_obj)
+        _logger.debug("Phase C [%-15s] : top-%d mean objective = %.6f", sig_type, ktop, mean_obj)
+        
     results.sort(key=lambda x: x[1], reverse=True)
     winning = [s for s, m in results[: max(1, top_k)] if m > min_p10_gmgr]
     if not winning:
         winning = [results[0][0]]
-    _logger.info("Stage1 narrowed SIGNAL_TYPE choices: %s", winning)
+
+    # Enhanced Phase C summary logging
+    _logger.info("======================================================================")
+    _logger.info("[PHASE C] Signal Structure Discovery (Top Alpha Screening)")
+    _logger.info("----------------------------------------------------------------------")
+    _logger.info("  %-20s | %-16s | %-8s", "Signal Strategy", "Mean Objective", "Status")
+    _logger.info("----------------------------------------------------------------------")
+    for sig, score in results:
+        is_winner = sig in winning
+        status = "[SELECTED]" if is_winner else "[DROPPED]"
+        indicator = "▶" if is_winner else " "
+        _logger.info("  %s %-18s | %-16.6f | %-8s", indicator, sig, score, status)
+    _logger.info("----------------------------------------------------------------------")
+    _logger.info("Phase C Summary: Narrowed choices to %s", winning)
+    _logger.info("======================================================================")
     return _build_narrowed_space_for_signal_types(tuple(winning), tf)
 
 
@@ -925,7 +939,7 @@ def main() -> None:
             if not stage1_syms:
                 stage1_syms = valid_broad[:stage1_k]
             _logger.info(
-                "Stage1 combination screening on N=%d/%d broad candidates (top ADV, is_end=%s)",
+                "Phase C combination screening on N=%d/%d broad candidates (top ADV, is_end=%s)",
                 len(stage1_syms),
                 len(valid_broad),
                 is_end_date,
@@ -1113,7 +1127,7 @@ def main() -> None:
         from src.domain.spot.opt_spot_utils.opt_params import build_multi_combo_param_space
 
         if phase0_narrowed_space is not None:
-            _logger.info("Using Stage1 narrowed space from Phase 0 (broad-universe pipeline).")
+            _logger.info("Using Phase C narrowed space from Phase 0 (broad-universe pipeline).")
         else:
             tops = run_combination_screening(
                 data_maps={s: data_maps[s] for s in valid_symbols},
@@ -1124,7 +1138,7 @@ def main() -> None:
             )
             if not tops:
                 _logger.error(
-                    "Stage1 combination screening found no viable combo (screen score <= threshold). "
+                    "Phase C combination screening found no viable combo (screen score <= threshold). "
                     "No edge detected in current data/symbols. Aborting optimization."
                 )
                 return
@@ -1145,7 +1159,7 @@ def main() -> None:
                 )
             tops_for_stage2 = filtered_tops if filtered_tops else tops
             _logger.info(
-                "Stage1 combination screening top combos: %s",
+                "Phase C combination screening top combos: %s",
                 [
                     (
                         x.signal,
