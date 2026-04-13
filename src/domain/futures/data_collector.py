@@ -311,9 +311,15 @@ class DataCollector:
         cache_start = pd.Timestamp("1970-01-01").normalize()
         cache_end = pd.Timestamp("1970-01-01").normalize()
         if cache_df.empty:
-            # [[FIX]] Empty cache에서도 메타데이터(상장일)가 있다면 그 이전은 요청하지 않음
-            if earliest_known is not None:
+            # [[FIX]] 이미 체크한 구간(last_checked)이거나 알려진 상장일 이전은 요청하지 않음
+            if last_checked is not None and req_end <= last_checked:
+                pass
+            elif earliest_known is not None:
+                # 상장일 이후만 요청하되, 이미 체크한 구간은 제외
                 eff_start = max(req_start, earliest_known)
+                if last_checked is not None:
+                    eff_start = max(eff_start, last_checked + pd.Timedelta(days=1))
+                
                 if eff_start <= req_end:
                     missing_ranges.append((eff_start, req_end))
             else:
@@ -451,9 +457,15 @@ class DataCollector:
         cache_start = pd.Timestamp("1970-01-01").normalize()
         cache_end = pd.Timestamp("1970-01-01").normalize()
         if cache_df.empty:
-            # [[FIX]] 펀딩비도 상장일 메타데이터가 있다면 그 이전은 조회하지 않음
-            if earliest_known is not None:
+            # [[FIX]] 이미 체크한 구간(last_checked_funding)이거나 알려진 상장일 이전은 요청하지 않음
+            if last_checked is not None and req_end <= last_checked:
+                pass
+            elif earliest_known is not None:
+                # 상장일 이후만 요청하되, 이미 체크한 구간은 제외
                 eff_start = max(req_start, earliest_known)
+                if last_checked is not None:
+                    eff_start = max(eff_start, last_checked + pd.Timedelta(days=1))
+                
                 if eff_start <= req_end:
                     missing_ranges.append((eff_start, req_end))
             else:
