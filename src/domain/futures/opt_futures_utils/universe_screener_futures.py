@@ -231,7 +231,11 @@ def screen_symbol_refinement_futures(
     # 1. Base Reference (BTC)
     btc_df = _slice_df_to_is(symbol_dfs_4h["BTC/USDT"], "1970-01-01", is_end_date)
     if btc_df.empty or len(btc_df) < 100:
-        _logger.error(f"Phase C: BTC/USDT df is empty or too small (len={len(btc_df)}). Raw df len={len(symbol_dfs_4h['BTC/USDT'])}")
+        raw_btc_len = len(symbol_dfs_4h.get("BTC/USDT", []))
+        _logger.error(
+            f"Phase C: BTC/USDT df is empty or too small (len={len(btc_df)}). "
+            f"Raw df len={raw_btc_len}. Available symbols: {list(symbol_dfs_4h.keys())}"
+        )
         return False
         
     btc_vec = calculate_microstructure_vector(btc_df)
