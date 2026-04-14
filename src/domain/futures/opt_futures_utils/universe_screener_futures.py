@@ -6,26 +6,24 @@ Focus: Conditional Anchor logic, geometric growth, and orthogonal diversificatio
 from __future__ import annotations
 
 import logging
+import re
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple, cast
 
 import numpy as np
 import pandas as pd
 from scipy import stats
+
+from config.opt_config import FUTURES_ANCHOR_SYMBOLS
+from src.domain.futures.data_collector import DataCollector
+from src.domain.futures.funding_utils import merge_funding_into_ohlcv
 
 # Project Root Setup
 project_root = str(Path(__file__).resolve().parents[3])
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-import re
-
-from config.opt_config import (
-    FUTURES_ANCHOR_SYMBOLS,
-)
-from src.domain.futures.data_collector import DataCollector
-from src.domain.futures.funding_utils import merge_funding_into_ohlcv
 
 _logger: logging.Logger = logging.getLogger("universe_screener_futures")
 
@@ -39,7 +37,7 @@ def _calculate_hurst_exponent(ts: np.ndarray) -> float:
     try:
         reg = np.polyfit(np.log(lags), np.log(tau), 1)
         return float(reg[0] * 2.0)
-    except:
+    except Exception:
         return 0.5
 
 # --- Phase 1: Capacity & Slippage Utilities ---
@@ -78,13 +76,14 @@ def _screen_worker_v2(
                 bars_per_day = {"1h": 24, "4h": 6, "1d": 1}.get(tf, 6)
                 if delta.days * bars_per_day < min_bars:
                     return None
-            except: pass
+            except Exception:
+                _logger.debug("History pruning check failed for %s", sym)
 
     try:
         collector.ensure_funding_data(sym, fetch_start, end_date)
         df = collector.collect_and_save(sym, tf, fetch_start, end_date)
         df = merge_funding_into_ohlcv(sym, df, data_dir)
-    except:
+    except Exception:
         return None
 
     if df is None or len(df) < min_bars:
@@ -94,7 +93,8 @@ def _screen_worker_v2(
     notional_vol = (df["volume"] * df["close"]).to_numpy()
     adv_90d = np.mean(notional_vol[-540:]) if len(notional_vol) >= 540 else np.mean(notional_vol)
     adv_7d = np.mean(notional_vol[-42:]) if len(notional_vol) >= 42 else adv_90d
-    if adv_7d < adv_90d * 0.4: return None # Prune zombie coins
+    if adv_7d < adv_90d * 0.4:
+        return None  # Prune zombie coins
     
     amihud = _calculate_amihud_illiquidity(df)
     
@@ -103,12 +103,18 @@ def _screen_worker_v2(
     hurst = _calculate_hurst_exponent(close_arr)
     last_price = close_arr[-1]
     
-    # [EXPLOSIVE GROWTH] Add directional momentum factor (180d) to ensure we aren't picking structural downtrends
-    lookback_180 = min(len(close_arr), 1080) # 180 days in 4h tf
-    mom_180d = (close_arr[-1] / close_arr[-lookback_180]) - 1.0 if len(close_arr) >= lookback_180 else 0.0
+    # [EXPLOSIVE GROWTH] Add directional momentum factor (180d)
+    # Ensure we aren't picking structural downtrends
+    lookback_180 = min(len(close_arr), 1080)  # 180 days in 4h tf
+    if len(close_arr) >= lookback_180:
+        mom_180d = (close_arr[-1] / close_arr[-lookback_180]) - 1.0
+    else:
+        mom_180d = 0.0
     
     high, low = df["high"].to_numpy(), df["low"].to_numpy()
-    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close_arr, 1)), np.abs(low - np.roll(close_arr, 1))))
+    side_diff = np.abs(high - np.roll(close_arr, 1))
+    side_diff_low = np.abs(low - np.roll(close_arr, 1))
+    tr = np.maximum(high - low, np.maximum(side_diff, side_diff_low))
     atr_pct = (np.mean(tr[-14:]) / last_price) * 100.0
 
     # --- Phase 4: Funding Stats ---
@@ -131,7 +137,7 @@ def _screen_worker_v2(
         "returns": df["close"].pct_change().tail(500)
     }
 
-from typing import Optional
+
 
 
 def calculate_microstructure_vector(df: pd.DataFrame) -> np.ndarray:
@@ -152,14 +158,16 @@ def calculate_microstructure_vector(df: pd.DataFrame) -> np.ndarray:
     kurt = stats.kurtosis(rets, fisher=True)
     
     # 3. Mean ATR Pct (Volatility Scale)
-    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
+    side_diff = np.abs(high - np.roll(close, 1))
+    side_diff_low = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(high - low, np.maximum(side_diff, side_diff_low))
     # Valid index excluding the roll wrap-around
     atr_pct = (tr[1:] / close[1:]) * 100.0
     mean_atr_pct = np.mean(atr_pct[-500:]) if len(atr_pct) >= 500 else np.mean(atr_pct)
     
     # 4. Cleanup and return
     vec = np.array([hurst, kurt, mean_atr_pct])
-    return np.nan_to_num(vec, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float64)
+    return cast(np.ndarray, np.nan_to_num(vec, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float64))
 
 
 def _calculate_stress_correlation(
@@ -278,7 +286,9 @@ def screen_symbol_refinement_futures(
         # [HARD CUTOFF] 180d Momentum Check
         close_arr = is_df["close"].to_numpy()
         lookback_180 = min(len(close_arr), 1080)
-        mom_180d = float((close_arr[-1] / close_arr[-lookback_180]) - 1.0) if len(close_arr) >= 100 else 0.0
+        mom_180d = 0.0
+        if len(close_arr) >= 100:
+            mom_180d = float((close_arr[-1] / close_arr[-lookback_180]) - 1.0)
         
         if sym not in anchor_set and mom_180d < -0.50:
             pruned_count += 1
@@ -318,7 +328,9 @@ def screen_symbol_refinement_futures(
         merged = pd.concat([btc_rets_full, res["rets"]], axis=1, join="inner").dropna()
         if len(merged) < 50:
             continue
-        s_corr = _calculate_stress_correlation(merged.iloc[:, 0], merged.iloc[:, 1], stress_threshold)
+        s_corr = _calculate_stress_correlation(
+            merged.iloc[:, 0], merged.iloc[:, 1], stress_threshold
+        )
         
         # [MULTIPLICATIVE SCORE]
         # Score = Affinity * (1 - s_corr) * max(1.0, 1 + mom)
@@ -345,11 +357,11 @@ def screen_symbol_refinement_futures(
         return False
         
     avg_rets = port_rets_df.mean(axis=1)
-    current_G = float(avg_rets.mean() - 0.5 * avg_rets.var())
+    current_g = float(avg_rets.mean() - 0.5 * avg_rets.var())
     
     _logger.info(f"- Pruning: {pruned_count} symbols removed (Momentum < -50%)")
     _logger.info(f"- Screening: {len(final_pool_stats)} valid candidates analyzed.")
-    _logger.info(f"- Baseline G: {current_G:.8f} (Anchors: {final_symbols})")
+    _logger.info(f"- Baseline G: {current_g:.8f} (Anchors: {final_symbols})")
     _logger.info("- Greedy Search Result:")
 
     # Greedy Selection: Add candidate if it increases Portfolio G
@@ -366,12 +378,12 @@ def screen_symbol_refinement_futures(
             continue
             
         test_avg_rets = test_df.mean(axis=1)
-        new_G = float(test_avg_rets.mean() - 0.5 * test_avg_rets.var())
+        new_g = float(test_avg_rets.mean() - 0.5 * test_avg_rets.var())
         
-        if new_G > current_G:
-            improvement = new_G - current_G
-            _logger.info(f"  [+] {sym}: G improved to {new_G:.8f} (+{improvement:.8f})")
-            current_G = new_G
+        if new_g > current_g:
+            improvement = new_g - current_g
+            _logger.info(f"  [+] {sym}: G improved to {new_g:.8f} (+{improvement:.8f})")
+            current_g = new_g
             final_symbols.append(sym)
             port_rets_df = test_df # Update baseline
         else:
@@ -380,7 +392,10 @@ def screen_symbol_refinement_futures(
     if rejected_set:
         _logger.info(f"- Rejected: {len(rejected_set)} symbols failed to improve G")
 
-    _logger.info(f"- Result: {len(final_symbols)} symbols selected: {final_symbols} (Final G: {current_G:.8f})")
+    _logger.info(
+        f"- Result: {len(final_symbols)} symbols selected: {final_symbols} "
+        f"(Final G: {current_g:.8f})"
+    )
     _logger.info("=" * 70)
     
     update_futures_config_file(final_symbols)
@@ -395,8 +410,10 @@ def _slice_df_to_is(df: pd.DataFrame, is_start: str, is_end: str) -> pd.DataFram
     is_e = pd.to_datetime(is_end)
     dt = df["datetime"]
     if dt.dt.tz is not None:
-        if is_s.tzinfo is None: is_s = is_s.tz_localize(dt.dt.tz)
-        if is_e.tzinfo is None: is_e = is_e.tz_localize(dt.dt.tz)
+        if is_s.tzinfo is None:
+            is_s = is_s.tz_localize(dt.dt.tz)
+        if is_e.tzinfo is None:
+            is_e = is_e.tz_localize(dt.dt.tz)
     mask = (dt >= is_s) & (dt < is_e)
     return df.loc[mask].reset_index(drop=True)
 
@@ -415,7 +432,7 @@ def screen_futures_universe(
     """
     Phase A: Lightweight Market-Wide Scan.
     In V5 MHRH Architecture, we only perform an ADV (Volume) check here. 
-    Strict filtering, structural evaluation, and parallel data gathering are deferred to Phase B (MHRH).
+    Strict filtering, structural evaluation and gathering are deferred to Phase B.
     """
     anchors = set(FUTURES_ANCHOR_SYMBOLS)
     _logger.info("Phase A: Market Scan...")
@@ -426,13 +443,14 @@ def screen_futures_universe(
         # Allow a slight buffer for ADV check
         min_adv_ticker = float(cfg.get("ADV_MIN_USDT_DAY", 50000000.0)) * 0.3
         
-        meta = collector._load_meta()
         pool_set = set(candidate_pool) if candidate_pool else None
         
         for sym, t in tickers.items():
             norm_sym = sym.split(":")[0]
-            if pool_set and norm_sym not in pool_set: continue
-            if not (sym.endswith("/USDT") or sym.endswith("/USDT:USDT")): continue
+            if pool_set and norm_sym not in pool_set:
+                continue
+            if not (sym.endswith("/USDT") or sym.endswith("/USDT:USDT")):
+                continue
             
             vol = float(t.get("quoteVolume") or 0.0)
             if norm_sym in anchors or vol >= min_adv_ticker:
@@ -464,11 +482,13 @@ def screen_futures_universe(
 
 def update_futures_config_file(symbols: List[str]) -> None:
     config_path = Path("config/opt_config.py")
-    if not config_path.exists(): return
+    if not config_path.exists():
+        return
     content = config_path.read_text(encoding="utf-8")
     pattern = r"FUTURES_SYMBOLS(?::\s*List\[str\])?\s*=\s*\[.*?\]"
     new_block = "FUTURES_SYMBOLS: List[str] = [\n"
-    for s in symbols: new_block += f'    "{s}",\n'
+    for s in symbols:
+        new_block += f'    "{s}",\n'
     new_block += "]"
     new_content = re.sub(pattern, new_block, content, count=1, flags=re.DOTALL)
     config_path.write_text(new_content, encoding="utf-8")

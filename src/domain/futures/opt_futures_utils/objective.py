@@ -538,22 +538,22 @@ def objective_futures(
 
     tot_l, tot_s = float(all_seg_long), float(all_seg_short)
     ls_imbalance = abs(tot_l - tot_s) / (tot_l + tot_s + 1e-9)
-    d_balance = float(np.clip(1.0 - (max(0.0, ls_imbalance - 0.20) / 0.30), 0.0, 1.0))
+    _d_balance = float(np.clip(1.0 - (max(0.0, ls_imbalance - 0.20) / 0.30), 0.0, 1.0))
 
     mu_paths, sd_paths = (
         float(np.mean(path_arr)),
         float(np.std(path_arr, ddof=1)) if path_arr.size > 1 else 1.0,
     )
     cv_paths = sd_paths / (abs(mu_paths) + 1e-6)
-    d_stability = float(np.clip(1.0 - (max(0.0, cv_paths - 1.5) / 1.0), 0.0, 1.0))
+    _d_stability = float(np.clip(1.0 - (max(0.0, cv_paths - 1.5) / 1.0), 0.0, 1.0))
 
-    d_temporal = 1.0
+    _d_temporal = 1.0
     if len(path_compound_raw_log_tw) >= 4:
         # [FIX] Use successful_path_center_times to match length with path_compound_raw_log_tw
         time_sort_idx = np.argsort(successful_path_center_times)
         tw_sorted = np.asarray(path_compound_raw_log_tw, dtype=np.float64)[time_sort_idx]
         recent_mean = float(np.mean(tw_sorted[-(len(tw_sorted) // 4) :]))
-        d_temporal = float(
+        _d_temporal = float(
             np.clip(1.0 - (max(0.0, mu_paths - recent_mean) / (abs(mu_paths) + 1e-6)), 0.0, 1.0)
         )
 
@@ -574,7 +574,7 @@ def objective_futures(
     l_pf = calc_profit_factor_from_pnl(np.array(all_long_pnls)) if all_long_pnls else 1.5
     s_pf = calc_profit_factor_from_pnl(np.array(all_short_pnls)) if all_short_pnls else 1.5
     min_dir_pf = min(l_pf, s_pf)
-    # [Refined] 1.05 threshold allows for defensive hedging in minority direction
+    # [Refined] 1.05 threshold allows for defensive hedging in minority direction (discard at 0.90)
     d_directional = float(np.clip(1.0 - (max(0.0, 1.05 - min_dir_pf) / 0.15), 0.01, 1.0))
 
     # --- [New V5] Min-Max Symbol Penalty ---
@@ -597,7 +597,7 @@ def objective_futures(
                 s_pf_val = calc_profit_factor_from_pnl(s_pnl)
                 sym_pfs.append(s_pf_val)
 
-            # [Refined] Penalty uses mean of worst 2 symbols to allow for minor statistical noise
+            # [Refined] Penalty uses mean of worst 2 symbols (discard at 0.80)
             worst_2_pf = float(np.mean(np.sort(sym_pfs)[:2])) if len(sym_pfs) >= 2 else min(sym_pfs)
             d_min_sym_pf = float(np.clip(1.0 - (max(0.0, 1.0 - worst_2_pf) / 0.20), 0.01, 1.0))
 
@@ -613,9 +613,9 @@ def objective_futures(
     # 1. d_fund: Funding drag protection (survival)
     # 2. d_cvar: Tail risk protection (CPCV bottom 10%)
     # 3. d_mdd: Max drawdown control (CPCV top 10%)
-    # 4. d_directional: Long/Short edge verification (PF > 1.15)
-    # 5. d_min_sym_pf: Individual symbol robustness (PF > 1.10)
-    # Note: d_balance, d_stability, d_temporal removed to prevent over-constraining and recency bias.
+    # 4. d_directional: Long/Short edge verification (PF > 1.05)
+    # 5. d_min_sym_pf: Individual symbol robustness (Avg Worst 2 PF > 1.0)
+    # Note: d_balance, d_stability, d_temporal removed to prevent over-constraining.
     
     raw_penalty = (
         d_fund
@@ -659,8 +659,14 @@ def objective_futures(
     trial.set_user_attr("long_short_ratio", (min(tot_l, tot_s) / max(tot_l + tot_s, 1.0)))
     trial.set_user_attr("mean_funding_drag_ratio_pct", float(mean_fund_r * 100.0))
     trial.set_user_attr("cpcv_path_oos_log_tw", [float(x) for x in path_compound_raw_log_tw])
-    trial.set_user_attr("cpcv_mean_path_return_pct", float(np.mean(np.expm1(path_arr)) * 100.0) if path_arr.size else 0.0)
-    trial.set_user_attr("cpcv_worst_segment_mdd_pct", float(np.max(path_mdds)) if path_mdds else 0.0)
+    trial.set_user_attr(
+        "cpcv_mean_path_return_pct",
+        float(np.mean(np.expm1(path_arr)) * 100.0) if path_arr.size else 0.0
+    )
+    trial.set_user_attr(
+        "cpcv_worst_segment_mdd_pct",
+        float(np.max(path_mdds)) if path_mdds else 0.0
+    )
 
     tw_ratios = np.exp(np.clip(path_arr, -50.0, 50.0))
     trial.set_user_attr(
