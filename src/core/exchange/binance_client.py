@@ -216,6 +216,13 @@ class BinanceClient:
         지정된 기간의 OHLCV 데이터를 수집합니다.
         Binance API 제한(limit=1000)을 고려하여 반복 호출합니다.
         """
+        self._ensure_markets_loaded()
+        try:
+            market = self.exchange.market(symbol)
+            resolved_symbol = market["symbol"]
+        except Exception:
+            resolved_symbol = symbol
+
         limit = 1000
         if isinstance(start_date, datetime):
             start_iso = start_date.strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -261,7 +268,7 @@ class BinanceClient:
             retry_count = 0
             while retry_count < 3:
                 try:
-                    ohlcv = self.exchange.fetch_ohlcv(symbol, timeframe, since, limit)
+                    ohlcv = self.exchange.fetch_ohlcv(resolved_symbol, timeframe, since, limit)
 
                     if not ohlcv:
                         since = end_timestamp
@@ -527,7 +534,7 @@ class BinanceClient:
             self.logger.warning(f"Failed to fetch exchange server time: {e}")
         return None
 
-    def fetch_funding_rate(
+    def fetch_funding_rate_history(
         self,
         symbol: str,
         start_date: str | datetime,
@@ -1281,7 +1288,7 @@ class BinanceClient:
                     break
 
         if remaining_amount > 0 and deadline_reached():
-            self.logger.warning("⏱️ Entry deadline reached before Tier 2. Skip further escalation.")
+            self.logger.warning("⏱️ Entry deadline reached before Tier 2. Stop escalating.")
             if total_filled > 0:
                 return build_partial_result(status="deadline_partial")
             return None

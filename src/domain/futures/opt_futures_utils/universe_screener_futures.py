@@ -426,6 +426,7 @@ def screen_futures_universe(
         # Allow a slight buffer for ADV check
         min_adv_ticker = float(cfg.get("ADV_MIN_USDT_DAY", 50000000.0)) * 0.3
         
+        meta = collector._load_meta()
         pool_set = set(candidate_pool) if candidate_pool else None
         
         for sym, t in tickers.items():
@@ -438,7 +439,9 @@ def screen_futures_universe(
                 valid_tickers.append({"symbol": norm_sym, "vol": vol})
                 
     except Exception as e:
-        _logger.warning(f"Ticker pre-filter failed: {e}")
+        import traceback
+        _logger.debug(f"Ticker pre-filter failed: {e}")
+        _logger.debug(traceback.format_exc())
         return list(anchors), 0
 
     # Sort by recent volume
