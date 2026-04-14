@@ -33,7 +33,7 @@ OPT_FUTURES_CONFIG: Dict[str, Any] = {
     "FUTURES_CPCV_TEMPORAL_LAMBDA": 3.0,
     "FUTURES_MAX_CONCURRENT_POSITIONS": 3,
     "FUTURES_MIN_PF": 1.5,
-    "FUTURES_MAX_MDD": 35.0,           # per-segment CPCV pruning hard limit
+    "FUTURES_MAX_MDD": 35.0,  # per-segment CPCV pruning hard limit
     "FUTURES_MAX_AVG_CPCV_MDD": 25.0,  # TPE constraint: avg MDD across valid CPCV paths
     "FUTURES_MAX_UI": 15.0,  # 신규: Ulcer Index 고통 지수 제한
     "FUTURES_MIN_ROMAD": 0.8,
@@ -46,16 +46,20 @@ OPT_FUTURES_CONFIG: Dict[str, Any] = {
     "FUTURES_OBJECTIVE_FLOOR_WHEN_NO_EDGE": -2.0,
     "FUTURES_MIN_REGIME_ON_RATE": 0.20,  # 0.10→0.20: Spot 22% 기준에 맞춤, 가짜 신호 필터 강화
     "FUTURES_REGIME_ON_PENALTY_WEIGHT": 0.30,
-    "FUTURES_RECENT_IS_GATE_WEIGHT": 0.25,  # Spot SPOT_RECENT_IS_GATE_WEIGHT 패턴: IS 후반 손실 패널티
+    # Spot RECENT_IS_GATE 패턴: IS 후반 손실 패널티
+    "FUTURES_RECENT_IS_GATE_WEIGHT": 0.25,
     "FUTURES_NON_ANCHOR_SLIPPAGE_MULT": 1.1,
     "FUTURES_NON_ANCHOR_MIN_PF_PREMIUM": 0.15,
     "FUTURES_NON_ANCHOR_MAX_COUNT": 4,
+    "FUTURES_STAGE1_TRIALS": 500,
+    "FUTURES_STAGE2_TRIALS": 300,
+    "FUTURES_STAGE1_IC_LOOKFORWARD_BARS": 12,
 }
 
 # Phase C engine + risk (plugin union via build_full_discovery_space_futures).
 # LEVERAGE removed from optimization (anchored at 20).
 # MAX_EXPOSURE replaced with MAX_EXPOSURE_PER_COIN and DD_SCALING_THRESHOLD.
-ENGINE_PARAM_SPACE_FUTURES: Dict[str, Dict[str, Any]] = {
+SIGNAL_PARAM_SPACE_FUTURES: Dict[str, Dict[str, Any]] = {
     "ATR_PERIOD": {"type": "int", "low": 10, "high": 20, "step": 2},
     "LONG_ATR_MULT": {"type": "float", "low": 1.5, "high": 4.5, "step": 0.25},
     "LONG_TRAIL_MULT": {"type": "float", "low": 2.5, "high": 6.0, "step": 0.5},
@@ -63,9 +67,17 @@ ENGINE_PARAM_SPACE_FUTURES: Dict[str, Dict[str, Any]] = {
     "SHORT_ATR_MULT": {"type": "float", "low": 1.0, "high": 3.0, "step": 0.25},
     "SHORT_TP_MULT": {"type": "float", "low": 1.0, "high": 3.5, "step": 0.5},
     "SHORT_TRAIL_MULT": {"type": "float", "low": 1.5, "high": 4.5, "step": 0.5},
+}
+
+PORTFOLIO_PARAM_SPACE_FUTURES: Dict[str, Dict[str, Any]] = {
     "RISK_PER_TRADE": {"type": "float", "low": 0.01, "high": 0.05, "step": 0.005},
     "MAX_EXPOSURE_PER_COIN": {"type": "float", "low": 0.5, "high": 2.0, "step": 0.1},
     "DD_SCALING_THRESHOLD": {"type": "float", "low": 0.10, "high": 0.25, "step": 0.05},
+}
+
+ENGINE_PARAM_SPACE_FUTURES: Dict[str, Dict[str, Any]] = {
+    **SIGNAL_PARAM_SPACE_FUTURES,
+    **PORTFOLIO_PARAM_SPACE_FUTURES,
 }
 
 
@@ -323,11 +335,19 @@ SPOT_SHARED_PARAM_SPACE: Dict[str, Dict[str, Any]] = {
 }
 
 
-def get_search_space_futures(tf: str) -> Dict[str, Dict[str, Any]]:
+def get_search_space_futures(tf: str, stage: int = 0) -> Dict[str, Dict[str, Any]]:
+    """stage=0: full single-stage space; 1: signal discovery; 2: portfolio-only (Stage 2 TPE)."""
     _ = tf
     from src.domain.futures.opt_futures_utils.opt_params import build_full_discovery_space_futures
 
-    return build_full_discovery_space_futures()
+    full = build_full_discovery_space_futures()
+    if stage == 1:
+        base = {k: v for k, v in full.items() if k not in ENGINE_PARAM_SPACE_FUTURES}
+        out: Dict[str, Dict[str, Any]] = {**base, **SIGNAL_PARAM_SPACE_FUTURES}
+        return out
+    if stage == 2:
+        return {k: dict(v) for k, v in PORTFOLIO_PARAM_SPACE_FUTURES.items()}
+    return full
 
 
 def get_search_space_spot(tf: str) -> Dict[str, Dict[str, Any]]:
@@ -350,7 +370,7 @@ def get_spot_effective_independent_trials(
     if n <= n0:
         return max(1, n)
     extra = n - n0
-    effective = n0 + math.ceil(extra**0.65)
+    effective = int(n0 + math.ceil(extra**0.65))
     return max(1, effective)
 
 
