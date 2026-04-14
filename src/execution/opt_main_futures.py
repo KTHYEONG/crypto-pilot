@@ -328,6 +328,7 @@ def _init_tpe_worker_context() -> None:
 def _convert_space_to_distributions(space: Dict[str, Any]) -> Dict[str, BaseDistribution]:
     dists: Dict[str, BaseDistribution] = {}
     for name, spec in space.items():
+        if name.startswith("_"): continue # Skip metadata
         stype = spec.get("type")
         if stype == "int":
             dists[name] = IntDistribution(
@@ -607,22 +608,29 @@ def _run_stage1_alpha_ic_discovery(
     data_maps: Dict[str, Dict[str, Any]],
     symbols: List[str],
     n_tri: int = 40,
-) -> tuple[str, float, Dict[str, Any]]:
-    """Phase C-1: Optimize signal parameters for MAX Information Coefficient (IC)"""
+) -> tuple[str, float, int, Dict[str, Any]]:
+    """Phase C-1: Optimize for MAX IC with Market Beta Scrubbing."""
     from src.domain.futures.opt_futures_utils.opt_params import suggest_params_futures
     from src.domain.futures.signals import FUTURES_SIGNAL_REGISTRY
 
     sig_inst = FUTURES_SIGNAL_REGISTRY[sig_type]
     base_space = get_search_space_futures(tf)
-    # Filter search space for this signal type only to speed up C-1
-    stage_space = {
-        k: v for k, v in base_space.items() 
-        if k.startswith(f"{sig_type}_") or k == "SIGNAL_TYPE"
-    }
+    stage_space = {k: v for k, v in base_space.items() if k.startswith(f"{sig_type}_") or k == "SIGNAL_TYPE"}
     stage_space["SIGNAL_TYPE"] = {"type": "categorical", "choices": (sig_type,)}
 
-    # Pre-calculate target returns for all symbols
-    target_map = {sym: compute_vol_adj_forward_returns(data_maps[sym][tf]) for sym in symbols}
+    horizons = [2, 6, 12]
+    
+    # Step 4: Market Beta Scrubbing (Idiosyncratic Alpha)
+    # Pre-calculate market returns using BTC/USDT as anchor
+    market_anchor = "BTC/USDT"
+    market_returns = None
+    if market_anchor in data_maps:
+        market_returns = compute_vol_adj_forward_returns(data_maps[market_anchor][tf], horizons)
+
+    target_maps = {
+        sym: compute_vol_adj_forward_returns(data_maps[sym][tf], horizons, market_returns) 
+        for sym in symbols
+    }
 
     study = optuna.create_study(
         direction="maximize",
@@ -632,60 +640,80 @@ def _run_stage1_alpha_ic_discovery(
 
     def objective(trial: optuna.Trial) -> float:
         params = suggest_params_futures(trial, stage_space, tf)
-        ics = []
-        for sym in symbols:
-            df = data_maps[sym][tf]
-            out = sig_inst.compute(df, params)
-            ic = calculate_spearman_ic(out.rank_score, target_map[sym])
-            ics.append(ic)
-        return float(np.mean(ics))  # Mean IC across symbols
+        h_ics = []
+        for h in horizons:
+            sym_ics = []
+            for sym in symbols:
+                df = data_maps[sym][tf]
+                out = sig_inst.compute(df, params)
+                ic = calculate_spearman_ic(out.rank_score, target_maps[sym][h])
+                sym_ics.append(ic)
+            h_ics.append(float(np.mean(sym_ics)))
+        
+        best_h_ic = max(h_ics)
+        trial.set_user_attr("best_h", horizons[np.argmax(h_ics)])
+        return best_h_ic
 
     study.optimize(objective, n_trials=n_tri)
     best_ic = float(study.best_value) if study.best_value is not None else 0.0
     best_params = study.best_params
+    best_h = int(study.best_trial.user_attrs.get("best_h", 6))
 
-    return sig_type, best_ic, best_params
+    return sig_type, best_ic, best_h, best_params
 
 
 def _run_stage1_regime_pairing(
     sig_type: str,
     sig_params: Dict[str, Any],
+    horizon: int,
     tf: str,
     data_maps: Dict[str, Dict[str, Any]],
     symbols: List[str],
-) -> str:
-    """Phase C-2: Find the best Regime for a proven Signal using Conditional IC Utility"""
+) -> tuple[str, Dict[str, float]]:
+    """Phase C-2: Dynamic Factor Timing (Step 3). Returns best regime and all-regime IC weights."""
     from src.domain.futures.regimes import FUTURES_REGIME_REGISTRY
     from src.domain.futures.signals import FUTURES_SIGNAL_REGISTRY
 
     sig_inst = FUTURES_SIGNAL_REGISTRY[sig_type]
+    
+    # Step 4: Use same market-scrubbed targets for pairing
+    market_returns = None
+    if "BTC/USDT" in data_maps:
+        market_returns = compute_vol_adj_forward_returns(data_maps["BTC/USDT"][tf], [horizon])
+    
+    target_map = {
+        sym: compute_vol_adj_forward_returns(data_maps[sym][tf], [horizon], market_returns)[horizon] 
+        for sym in symbols
+    }
 
+    regime_weights = {}
     best_regime = "NONE"
     max_utility = -1e9
-
-    target_map = {sym: compute_vol_adj_forward_returns(data_maps[sym][tf]) for sym in symbols}
 
     for reg_name, reg_inst in FUTURES_REGIME_REGISTRY.items():
         utilities = []
         for sym in symbols:
             df = data_maps[sym][tf]
-            # Use default regime params for initial pairing discovery
             long_mult, short_mult = reg_inst.compute_long_short_mult(df, {})
-            # Active if either side is allowed
             reg_mask = (long_mult + short_mult) > 1e-6
             sig_scores = sig_inst.compute(df, sig_params).rank_score
 
             c_ic, cov = calculate_conditional_ic(sig_scores, target_map[sym], reg_mask.astype(np.float64))
-            # Utility = cIC * sqrt(Coverage) to penalize extremely rare regimes
             utility = c_ic * np.sqrt(max(0.01, cov))
             utilities.append(utility)
 
         avg_utility = float(np.mean(utilities))
+        regime_weights[reg_name] = avg_utility
+        
         if avg_utility > max_utility:
             max_utility = avg_utility
             best_regime = reg_name
 
-    return best_regime
+    # Step 3: Normalize weights so that Best Regime has multiplier 1.0
+    # Negative utilities (wrong-way prediction) will result in negative weights
+    norm_weights = {k: v / (abs(max_utility) + 1e-9) for k, v in regime_weights.items()}
+
+    return best_regime, norm_weights
 
 
 def _run_stage1_structure_discovery(
@@ -699,69 +727,103 @@ def _run_stage1_structure_discovery(
     project_root: str,
     signal_cache_dir: str,
 ) -> Dict[str, Dict[str, Any]]:
-    """Hierarchical IC-based Alpha Discovery (Phase C-1 & C-2)."""
+    """Hierarchical Discovery with Multi-Horizon, Orthogonalization, Beta Scrubbing & Dynamic Weights."""
+    from src.domain.futures.opt_futures_utils.alpha_evaluator import calculate_residual_score
+    from src.domain.futures.signals import FUTURES_SIGNAL_REGISTRY
+
     all_types = tuple(get_search_space_futures(tf)["SIGNAL_TYPE"]["choices"])
     
     _logger.info("======================================================================")
-    _logger.info("[PHASE C] Hierarchical Alpha Discovery (IC-based)")
-    _logger.info("  C-1: Pure Alpha Screening (IC) | C-2: Regime Pairing (cIC)")
+    _logger.info("[PHASE C] Institutional Quant Discovery (Step 1-4)")
+    _logger.info("  C-1: Beta-Scrubbed Multi-Horizon Alpha | C-2: Orthogonal Ensemble")
     _logger.info("----------------------------------------------------------------------")
-    _logger.info("  %-20s | %-14s | %-14s | %-8s", "Signal Strategy", "Mean IC", "Best Regime", "Status")
+    _logger.info("  %-18s | %-8s | %-8s | %-12s | %-8s", "Signal Strategy", "Max IC", "Horizon", "Best Regime", "Status")
     _logger.info("----------------------------------------------------------------------")
 
-    discovery_results: List[Tuple[str, float, str, Dict[str, Any]]] = []
     n_tri = max(20, int(trials_per_signal))
+    discovery_results: List[Dict[str, Any]] = []
 
-    # Parallelize Phase C-1 (Signal IC Optimization)
+    # 1. Run C-1 IC Optimization
     ctx = multiprocessing.get_context("fork")
     with concurrent.futures.ProcessPoolExecutor(
         max_workers=min(len(all_types), 8),
         mp_context=ctx,
     ) as executor:
         f_to_sig = {
-            executor.submit(
-                _run_stage1_alpha_ic_discovery,
-                sig, tf, data_maps, symbols, n_tri
-            ): sig
+            executor.submit(_run_stage1_alpha_ic_discovery, sig, tf, data_maps, symbols, n_tri): sig
             for sig in all_types
         }
         for f in concurrent.futures.as_completed(f_to_sig):
             try:
-                sig_name, ic, params = f.result()
-                # Phase C-2: Pairing (Synchronous as it is extremely fast)
-                best_reg = _run_stage1_regime_pairing(sig_name, params, tf, data_maps, symbols)
-                discovery_results.append((sig_name, ic, best_reg, params))
+                name, ic, h, params = f.result()
+                discovery_results.append({"name": name, "ic": ic, "h": h, "params": params})
             except Exception as e:
-                sig_err = f_to_sig[f]
-                _logger.error("Signal IC discovery failed for %s: %s", sig_err, e)
-                discovery_results.append((sig_err, -1.0, "NONE", {}))
+                _logger.error("Signal IC discovery failed for %s: %s", f_to_sig[f], e)
+                discovery_results.append({"name": f_to_sig[f], "ic": -1.0, "h": 6, "params": {}})
 
-    discovery_results.sort(key=lambda x: x[1], reverse=True)
+    discovery_results.sort(key=lambda x: x["ic"], reverse=True)
     
-    # Selection criteria: Select top_k signals that have a strictly positive IC
-    # Fallback: Always keep at least the absolute best signal even if IC <= 0
-    winning = [
-        (s, r, p) for s, ic, r, p in discovery_results 
-        if ic > 0.0 or (s == discovery_results[0][0])
-    ]
-    winning = winning[:max(1, top_k)]
-    winning_names = [w[0] for w in winning]
+    # 2. Orthogonal Selection & Dynamic Weighting
+    primary = discovery_results[0]
+    primary["status"] = "[PRIMARY]"
+    primary["regime"], primary["regime_weights"] = _run_stage1_regime_pairing(
+        primary["name"], primary["params"], primary["h"], tf, data_maps, symbols
+    )
+    
+    winning_pool = [primary]
+    
+    if len(discovery_results) > 1 and top_k > 1:
+        residual_results = []
+        for cand in discovery_results[1:]:
+            if cand["ic"] <= 0: continue
+            
+            res_ics = []
+            # Calculate market-scrubbed targets for candidate
+            market_returns = None
+            if "BTC/USDT" in data_maps:
+                market_returns = compute_vol_adj_forward_returns(data_maps["BTC/USDT"][tf], [cand["h"]])
+            
+            for sym in symbols:
+                df = data_maps[sym][tf]
+                p_scores = FUTURES_SIGNAL_REGISTRY[primary["name"]].compute(df, primary["params"]).rank_score
+                c_scores = FUTURES_SIGNAL_REGISTRY[cand["name"]].compute(df, cand["params"]).rank_score
+                res_scores = calculate_residual_score(c_scores, p_scores)
+                
+                target = compute_vol_adj_forward_returns(df, [cand["h"]], market_returns)[cand["h"]]
+                res_ics.append(calculate_spearman_ic(res_scores, target))
+            
+            cand["residual_ic"] = float(np.mean(res_ics))
+            residual_results.append(cand)
+            
+        if residual_results:
+            residual_results.sort(key=lambda x: x.get("residual_ic", -1.0), reverse=True)
+            secondary = residual_results[0]
+            secondary["status"] = "[ORTHOGONAL]"
+            secondary["regime"], secondary["regime_weights"] = _run_stage1_regime_pairing(
+                secondary["name"], secondary["params"], secondary["h"], tf, data_maps, symbols
+            )
+            winning_pool.append(secondary)
 
-    for sig, ic, reg, _ in discovery_results:
-        is_winner = sig in winning_names
-        status = "[SELECTED]" if is_winner else "[DROPPED]"
-        indicator = "▶" if is_winner else " "
-        _logger.info("  %s %-18s | %-14.6f | %-14s | %-8s", indicator, sig, ic, reg, status)
+    # Final Logging
+    winning_names = [w["name"] for w in winning_pool]
+    for res in discovery_results:
+        w_found = [w for w in winning_pool if w["name"] == res["name"]]
+        status = w_found[0]["status"] if w_found else "[DROPPED]"
+        reg = w_found[0]["regime"] if w_found else "NONE"
+        _logger.info("  %-18s | %-8.6f | %-8d | %-12s | %-10s", res["name"], res["ic"], res["h"], reg, status)
 
     _logger.info("----------------------------------------------------------------------")
-    _logger.info("Phase C Summary: Narrowed to Top %d Alpha-Regime Pairs", len(winning))
+    _logger.info("Phase C Summary: Narrowed to Primary %s and Orthogonal %s", 
+                 winning_pool[0]["name"], winning_pool[1]["name"] if len(winning_pool) > 1 else "NONE")
     _logger.info("======================================================================")
 
     final_space = copy.deepcopy(get_search_space_futures(tf))
     final_space["SIGNAL_TYPE"]["choices"] = tuple(winning_names)
+    final_space["REGIME_TYPE"]["choices"] = tuple(list(set([w["regime"] for w in winning_pool])))
     
-    paired_regimes = list(set([w[1] for w in winning]))
-    final_space["REGIME_TYPE"]["choices"] = tuple(paired_regimes)
+    # [Step 3] Pass dynamic regime weights via user_attrs or fixed parameter injection
+    # For now, we'll store them in final_space to be used in Stage 2 TPE suggestions
+    final_space["_winning_configs"] = winning_pool
 
     return final_space
 

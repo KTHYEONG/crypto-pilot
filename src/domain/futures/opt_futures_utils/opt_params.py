@@ -132,6 +132,8 @@ def suggest_params_futures(trial: optuna.Trial, space: Dict[str, Any], tf: str) 
     """Flat search space; regime branch selects which params affect signals at runtime."""
     params: Dict[str, Any] = {"TIMEFRAME": tf}
     for name, spec in space.items():
+        if name.startswith("_"):
+            continue  # Skip metadata (Institutional Quant Phase C results)
         params[name] = _suggest_one(trial, name, spec)
 
     _lev_default = int(OPT_FUTURES_CONFIG.get("FUTURES_DISCOVERY_LEVERAGE", 8))
