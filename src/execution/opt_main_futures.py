@@ -93,9 +93,17 @@ os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 os.environ.setdefault("VECLIB_MAXIMUM_THREADS", "1")
 os.environ.setdefault("NUMBA_NUM_THREADS", "1")
 
+from src.core.utils.utils import setup_logger  # noqa: E402
+
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 logging.basicConfig(level=logging.INFO, format="%(message)s", force=True)
 _logger: logging.Logger = logging.getLogger("opt_futures")
+
+# Initialize and Suppress noisy data loading logs
+setup_logger("DataCollector")
+setup_logger("BinanceClient")
+logging.getLogger("DataCollector").setLevel(logging.WARNING)
+logging.getLogger("BinanceClient").setLevel(logging.WARNING)
 
 SEP_WIDTH: int = 60
 PROGRESS_MIN_INTERVAL: float = 0.2
@@ -847,13 +855,26 @@ def _load_single_symbol_data(
             raw_df = collector.collect_and_save(sym, tf_l, fetch_start, end)
             df = merge_funding_into_ohlcv(sym, raw_df, FUTURES_DATA_DIR)
             
-            is_anchor = sym in FUTURES_ANCHOR_SYMBOLS
-            min_required = 500 if is_anchor and tf_l == tf else (min_bars if tf_l == tf else 200)
-            
             if df is None or df.empty:
+                _logger.debug(f"Symbol {sym} {tf_l} data is None or empty.")
                 insufficient = True
                 break
+            if "datetime" not in df.columns:
+                _logger.debug(f"Symbol {sym} {tf_l} missing 'datetime' column.")
+                insufficient = True
+                break
+            
             df.reset_index(drop=True, inplace=True)
+            # Ensure datetime is timezone-aware to match localized start/end dates
+            if df["datetime"].dt.tz is None:
+                df["datetime"] = pd.to_datetime(df["datetime"], utc=True)
+            
+            # Coerce resolution to ns to avoid Invalid comparison errors (e.g. ms vs ns)
+            try:
+                df["datetime"] = df["datetime"].astype("datetime64[ns, UTC]")
+            except TypeError:
+                pass
+            
             tz = df["datetime"].dt.tz
             is_start_dt = pd.to_datetime(start).tz_localize(tz) if tz else pd.to_datetime(start)
             is_end_dt = pd.to_datetime(is_end).tz_localize(tz) if tz else pd.to_datetime(is_end)
@@ -861,7 +882,10 @@ def _load_single_symbol_data(
             is_mask = df["datetime"] < is_end_dt
             is_end_idx = int(is_mask.to_numpy().sum())
             
-            if is_end_idx < min_required:
+            # Adjust min indicator history for 1d vs target tf
+            eff_min = min_bars if tf_l == tf else 100
+            if is_end_idx < eff_min:
+                _logger.debug(f"Symbol {sym} {tf_l} insufficient history: {is_end_idx} < {eff_min}")
                 insufficient = True
                 break
                 
@@ -882,8 +906,9 @@ def _load_single_symbol_data(
         temp_oos[f"merge_idx_{tf}"] = compute_segment_merge_index(temp_oos[tf], temp_oos["1d"])
         return sym, temp_is, temp_oos, False
     except Exception as e:
-        _logger.warning("Failed to load symbol %s: %s", sym, e)
-        return sym, None, None, False
+        _logger.debug("Failed to load symbol %s: %s", sym, e)
+        # Mark as insufficient (True) so it gets properly counted as skipped
+        return sym, None, None, True
 
 
 def _load_futures_data_maps_for_symbols(
@@ -908,15 +933,18 @@ def _load_futures_data_maps_for_symbols(
             executor.submit(_load_single_symbol_data, sym, tf, fetch_start, start, is_end, end, min_bars)
             for sym in load_symbols
         ]
+        insufficient_count = 0
         for f in concurrent.futures.as_completed(futures):
             sym, t_is, t_oos, insufficient = f.result()
             if insufficient:
+                insufficient_count += 1
                 if sym in essential and sym not in symbols:
                     _logger.warning(f"Essential symbol {sym} has insufficient data but is required for macro indicators.")
                 continue
             if t_is and t_oos:
                 data_maps[sym], oos_data_maps[sym] = t_is, t_oos
-                if sym in symbols:
+                # Any successfully loaded symbol that is either a candidate or an essential anchor is valid
+                if sym in symbols or sym in essential:
                     valid_symbols.append(sym)
 
     if len(valid_symbols) >= 2:
@@ -947,6 +975,7 @@ def _load_futures_data_maps_for_symbols(
         inject_cs_momentum_ranks(data_maps, valid_symbols, tf)
         inject_cs_momentum_ranks(oos_data_maps, valid_symbols, tf)
 
+    _logger.info(f"Data loading complete: {len(valid_symbols)}/{len(symbols)} symbols valid, {insufficient_count} skipped.")
     return data_maps, oos_data_maps, valid_symbols
 
 
