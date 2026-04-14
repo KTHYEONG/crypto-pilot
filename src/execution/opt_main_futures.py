@@ -742,12 +742,10 @@ def _run_stage1_alpha_ic_discovery(
     from src.domain.futures.signals import FUTURES_SIGNAL_REGISTRY
 
     sig_inst = FUTURES_SIGNAL_REGISTRY[sig_type]
-    base_space = get_search_space_futures(tf)
-    stage_space = {
-        k: v for k, v in base_space.items() if k.startswith(f"{sig_type}_") or k == "SIGNAL_TYPE"
-    }
-    stage_space["SIGNAL_TYPE"] = {"type": "categorical", "choices": (sig_type,)}
-
+    # Use actual param_space from signal registry instead of broken prefix matching
+    sig_space = {k: v for k, v in sig_inst.param_space.items()}
+    stage_space = {**sig_space, "SIGNAL_TYPE": {"type": "categorical", "choices": (sig_type,)}}
+    
     horizons = [2, 6, 12]
 
     # Step 4: Market Beta Scrubbing (Idiosyncratic Alpha)
@@ -842,8 +840,8 @@ def _run_stage1_regime_pairing(
             best_regime = reg_name
 
     # Step 3: Normalize weights so that Best Regime has multiplier 1.0
-    # Negative utilities (wrong-way prediction) will result in negative weights
-    norm_weights = {k: v / (abs(max_utility) + 1e-9) for k, v in regime_weights.items()}
+    # Use max(0, v) to prevent trading in regimes that show negative IC (wrong-way prediction)
+    norm_weights = {k: max(0.0, v) / (abs(max_utility) + 1e-9) for k, v in regime_weights.items()}
 
     return best_regime, norm_weights
 
@@ -1345,6 +1343,7 @@ def main() -> None:
         locked_signal_params = dict(best_s1.params)
 
         stage2_space = get_search_space_futures(args.tf, stage=2)
+
         if narrowed_space_effective and "_winning_configs" in narrowed_space_effective:
             stage2_space = {
                 **stage2_space,
@@ -1417,7 +1416,10 @@ def main() -> None:
                 reverse=True,
             )[:50]
         )
-        params = best_trial.params.copy()
+        # [FIX] Merge Stage 1 locked signal params with Stage 2 optimized portfolio params
+        params = locked_signal_params.copy()
+        params.update(best_trial.params)
+        
         _leverage_default = str(OPT_FUTURES_CONFIG.get("FUTURES_DISCOVERY_LEVERAGE", 5))
         params.update(
             {
