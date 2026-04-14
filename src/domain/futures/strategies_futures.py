@@ -57,28 +57,65 @@ class UltimateStrategy(PipelineStrategyBase):
         return df
 
     def compute_signal_regime_component(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Tier 2: Signal and Regime computation."""
-        # Ensure base indicators exist
+        """Tier 2: Signal and Regime computation with Ensemble & Dynamic Weighting."""
         if "atr" not in df.columns:
             df = self.generate_base_indicators(df)
 
-        # Signal Mapping (Optimized CSM)
-        csm_rank_col = self.params.get("CSM_RANK_COL")
-        if csm_rank_col and csm_rank_col in df.columns:
-            df["cs_mom_rank"] = df[csm_rank_col]
-
         st_key = str(self.params.get("SIGNAL_TYPE", "RSM_VT")).upper()
-        sig_engine = FUTURES_SIGNAL_REGISTRY.get(st_key) or FUTURES_SIGNAL_REGISTRY["RSM_VT"]
-        sig_out = sig_engine.compute(df, self.params)
-
         rt_key = str(self.params.get("REGIME_TYPE", "EMA_ATR")).upper()
         reg_engine = FUTURES_REGIME_REGISTRY.get(rt_key) or FUTURES_REGIME_REGISTRY["EMA_ATR"]
         long_mult, short_mult = reg_engine.compute_long_short_mult(df, self.params)
 
-        long_e = sig_out.long_entry.astype(np.bool_)
-        short_e = sig_out.short_entry.astype(np.bool_)
+        # [Step 3] Dynamic Regime Weights (Chameleon Factor)
+        # If discovery phase provided weights for each regime, apply them here
+        reg_weights = self.params.get("REGIME_WEIGHTS")
+        if isinstance(reg_weights, dict):
+            # Scale multiplier based on current regime's proven IC performance
+            # rt_key is the active regime class; if we have weights for it, apply
+            w = float(reg_weights.get(rt_key, 1.0))
+            long_mult *= w
+            short_mult *= w
+
+        # [Step 2] Ensemble Support
+        # Check if we are running in ensemble mode (Multiple signals)
+        ensemble_sigs = self.params.get("ENSEMBLE_SIGNALS")
+        if isinstance(ensemble_sigs, list) and len(ensemble_sigs) > 1:
+            # Aggregate signals: For now, we take the mean rank_score and AND/OR for entry
+            # In institutional quant, we usually sum the Z-scores of signals
+            all_long = np.zeros(len(df), dtype=bool)
+            all_short = np.zeros(len(df), dtype=bool)
+            all_rank = np.zeros(len(df), dtype=np.float64)
+            all_kill_l = np.zeros(len(df), dtype=np.float64)
+            all_kill_s = np.zeros(len(df), dtype=np.float64)
+            
+            for s_info in ensemble_sigs:
+                s_name = s_info["name"]
+                s_params = {**self.params, **s_info.get("params", {})}
+                s_engine = FUTURES_SIGNAL_REGISTRY[s_name]
+                s_out = s_engine.compute(df, s_params)
+                
+                # Simple OR logic for entry, mean for rank
+                all_long |= s_out.long_entry
+                all_short |= s_out.short_entry
+                all_rank += s_out.rank_score
+                all_kill_l = np.maximum(all_kill_l, s_out.kill_long)
+                all_kill_s = np.maximum(all_kill_s, s_out.kill_short)
+            
+            long_e = all_long
+            short_e = all_short
+            rank_score = all_rank / len(ensemble_sigs)
+            kill_long = all_kill_l
+            kill_short = all_kill_s
+        else:
+            sig_engine = FUTURES_SIGNAL_REGISTRY.get(st_key) or FUTURES_SIGNAL_REGISTRY["RSM_VT"]
+            sig_out = sig_engine.compute(df, self.params)
+            long_e = sig_out.long_entry.astype(np.bool_)
+            short_e = sig_out.short_entry.astype(np.bool_)
+            rank_score = sig_out.rank_score
+            kill_long = sig_out.kill_long
+            kill_short = sig_out.kill_short
+
         close_a = df["close"].to_numpy(dtype=np.float64)
-        
         df["trend_direction"] = np.where(long_e, 1.0, np.where(short_e, -1.0, 0.0))
         df["entry_upper"] = np.where(long_e, 0.0, 999999.0)
         df["entry_lower"] = np.where(short_e, close_a, 0.0)
@@ -87,8 +124,8 @@ class UltimateStrategy(PipelineStrategyBase):
         df["entry_lower"] = self._shift_if_needed(df["entry_lower"])
 
         td = df["trend_direction"].to_numpy(dtype=np.float64)
-        df["kill_signal"] = np.where(td == 1.0, sig_out.kill_long, sig_out.kill_short)
-        df["slot_rank_score"] = sig_out.rank_score
+        df["kill_signal"] = np.where(td == 1.0, kill_long, kill_short)
+        df["slot_rank_score"] = rank_score
 
         # Macro Filter
         if "btc_close" in df.columns and "btc_ema" in df.columns:
