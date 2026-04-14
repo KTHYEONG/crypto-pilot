@@ -85,6 +85,7 @@ FUTURES_SYMBOLS: List[str] = [
     "BTC/USDT",
     "ETH/USDT",
     "XRP/USDT",
+    "CRV/USDT",
     "ADA/USDT",
     "SUI/USDT",
     "AAVE/USDT",
@@ -336,17 +337,38 @@ SPOT_SHARED_PARAM_SPACE: Dict[str, Dict[str, Any]] = {
 
 
 def get_search_space_futures(tf: str, stage: int = 0) -> Dict[str, Dict[str, Any]]:
-    """stage=0: full single-stage space; 1: signal discovery; 2: portfolio-only (Stage 2 TPE)."""
+    """stage=0: full; 1: alpha discovery (IC); 2: portfolio/execution (Stage 2 TPE)."""
     _ = tf
     from src.domain.futures.opt_futures_utils.opt_params import build_full_discovery_space_futures
 
     full = build_full_discovery_space_futures()
     if stage == 1:
-        base = {k: v for k, v in full.items() if k not in ENGINE_PARAM_SPACE_FUTURES}
-        out: Dict[str, Dict[str, Any]] = {**base, **SIGNAL_PARAM_SPACE_FUTURES}
-        return out
+        # Alpha-only: Parameters that define the "shape" of the signal/regime.
+        # Exclude sizing, risk, and entry/exit thresholds/multipliers.
+        alpha_keys = [
+            k for k, v in full.items()
+            if not any(term in k for term in [
+                "THRESHOLD", "MULT", "SQUEEZE", "OFFSET", "LIMIT", 
+                "METHOD", "RISK", "EXPOSURE", "DD_SCALING"
+            ])
+            or k in ["SIGNAL_TYPE", "REGIME_TYPE"]
+        ]
+        # Explicitly remove SIZING_METHOD from Stage 1 as it doesn't affect IC
+        alpha_space = {k: full[k] for k in alpha_keys if k != "SIZING_METHOD"}
+        return alpha_space
+    
     if stage == 2:
-        return {k: dict(v) for k, v in PORTFOLIO_PARAM_SPACE_FUTURES.items()}
+        # Portfolio/Execution: Parameters that define how we trade the discovered alpha.
+        portfolio_keys = [
+            k for k, v in full.items()
+            if any(term in k for term in [
+                "THRESHOLD", "MULT", "SQUEEZE", "OFFSET", "LIMIT", 
+                "METHOD", "RISK", "EXPOSURE", "DD_SCALING"
+            ])
+            or k == "SIZING_METHOD"
+        ]
+        return {k: full[k] for k in portfolio_keys}
+    
     return full
 
 
