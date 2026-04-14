@@ -63,6 +63,7 @@ class PortfolioBacktestEngineFast:
         strength_filter = self.data["strength_filter"]
         atr_2d = self.data["atr"]
         garch_kelly_f = self.data["garch_kelly_f"]
+        kill_signal = self.data.get("kill_signal", np.zeros_like(close_2d))
         funding_rate = self.data.get("funding_rate_sum", np.zeros_like(close_2d))
         slot_rank_score = self.data["slot_rank_score"]
 
@@ -87,6 +88,7 @@ class PortfolioBacktestEngineFast:
             strength_filter,
             atr_2d,
             garch_kelly_f,
+            kill_signal,
             funding_rate,
             slot_rank_score,
             self.initial_balance,
@@ -140,6 +142,7 @@ def backtest_portfolio_numba(
     strength_filter: np.ndarray,
     atr_2d: np.ndarray,
     garch_kelly_f: np.ndarray,
+    kill_signal: np.ndarray,
     funding_rate: np.ndarray,
     slot_rank_score: np.ndarray,
     initial_balance: float,
@@ -235,66 +238,73 @@ def backtest_portfolio_numba(
             pos_atr = atr_2d[entry_idx[s], s]
             exit_triggered, exit_price = False, 0.0
 
-            if pos_side[s] == 1:
-                if c_high > highest[s]:
-                    highest[s] = c_high
-                if not has_scaled[s]:
-                    triggered, sc_price, sc_amount, pnl_scale, exit_fee_scale = (
-                        process_long_scale_out(
-                            c_open, c_high, entry_p[s], pos_atr, l_scale_atr, amount[s], fee_rate
+            # --- [FIX] Handle immediate Kill Signal from strategy (e.g. Mean Reversion) ---
+            if i > 0 and kill_signal[i-1, s] > 0.5:
+                exit_triggered = True
+                exit_price = c_open * (1.0 - slippage_rate * pos_side[s])
+            
+            if not exit_triggered:
+                if pos_side[s] == 1:
+                    if c_high > highest[s]:
+                        highest[s] = c_high
+                    if not has_scaled[s]:
+                        triggered, sc_price, sc_amount, pnl_scale, exit_fee_scale = (
+                            process_long_scale_out(
+                                c_open, c_high, entry_p[s], pos_atr, 
+                                l_scale_atr, amount[s], fee_rate
+                            )
                         )
+                        if triggered:
+                            sc_fund = fund_fee_stored[s] / 2.0
+                            balance += (sc_amount * entry_p[s]) / leverage + (
+                                pnl_scale - exit_fee_scale
+                            )
+                            if t_count < max_trades:
+                                trades[t_count] = [
+                                    float(s), float(entry_idx[s]), float(i), 1.0, entry_p[s],
+                                    sc_price, pnl_scale - exit_fee_scale - sc_fund, sc_amount,
+                                    entry_fee_stored[s] / 2.0, sc_fund
+                                ]
+                                t_count += 1
+                            amount[s] -= sc_amount
+                            entry_fee_stored[s] /= 2.0
+                            fund_fee_stored[s] /= 2.0
+                            has_scaled[s] = True
+
+                    exit_triggered, exit_price, stop_p[s] = check_long_exit(
+                        c_open, c_low, highest[s], pos_atr, stop_p[s], l_trail_mult, slippage_rate
                     )
-                    if triggered:
-                        sc_fund = fund_fee_stored[s] / 2.0
-                        balance += (sc_amount * entry_p[s]) / leverage + (
-                            pnl_scale - exit_fee_scale
-                        )
-                        if t_count < max_trades:
-                            trades[t_count] = [
-                                float(s), float(entry_idx[s]), float(i), 1.0, entry_p[s],
-                                sc_price, pnl_scale - exit_fee_scale - sc_fund, sc_amount,
-                                entry_fee_stored[s] / 2.0, sc_fund
-                            ]
-                            t_count += 1
-                        amount[s] -= sc_amount
-                        entry_fee_stored[s] /= 2.0
-                        fund_fee_stored[s] /= 2.0
-                        has_scaled[s] = True
 
-                exit_triggered, exit_price, stop_p[s] = check_long_exit(
-                    c_open, c_low, highest[s], pos_atr, stop_p[s], l_trail_mult, slippage_rate
-                )
-
-            elif pos_side[s] == -1:
-                if c_low < lowest[s]:
-                    lowest[s] = c_low
-                if not has_scaled[s]:
-                    triggered, sc_price, sc_amount, pnl_scale, exit_fee_scale = (
-                        process_short_scale_out(
-                            c_open, c_low, entry_p[s], pos_atr, s_tp_mult, amount[s], fee_rate
+                elif pos_side[s] == -1:
+                    if c_low < lowest[s]:
+                        lowest[s] = c_low
+                    if not has_scaled[s]:
+                        triggered, sc_price, sc_amount, pnl_scale, exit_fee_scale = (
+                            process_short_scale_out(
+                                c_open, c_low, entry_p[s], pos_atr, s_tp_mult, amount[s], fee_rate
+                            )
                         )
+                        if triggered:
+                            sc_fund = fund_fee_stored[s] / 2.0
+                            balance += (sc_amount * entry_p[s]) / leverage + (
+                                pnl_scale - exit_fee_scale
+                            )
+                            if t_count < max_trades:
+                                trades[t_count] = [
+                                    float(s), float(entry_idx[s]), float(i), -1.0, entry_p[s],
+                                    sc_price, pnl_scale - exit_fee_scale - sc_fund, sc_amount,
+                                    entry_fee_stored[s] / 2.0, sc_fund
+                                ]
+                                t_count += 1
+                            amount[s] -= sc_amount
+                            entry_fee_stored[s] /= 2.0
+                            fund_fee_stored[s] /= 2.0
+                            has_scaled[s] = True
+                            stop_p[s] = entry_p[s] - (entry_p[s] * fee_rate * 2.0)
+
+                    exit_triggered, exit_price, stop_p[s] = check_short_exit(
+                        c_open, c_high, lowest[s], pos_atr, stop_p[s], s_trail_mult, slippage_rate
                     )
-                    if triggered:
-                        sc_fund = fund_fee_stored[s] / 2.0
-                        balance += (sc_amount * entry_p[s]) / leverage + (
-                            pnl_scale - exit_fee_scale
-                        )
-                        if t_count < max_trades:
-                            trades[t_count] = [
-                                float(s), float(entry_idx[s]), float(i), -1.0, entry_p[s],
-                                sc_price, pnl_scale - exit_fee_scale - sc_fund, sc_amount,
-                                entry_fee_stored[s] / 2.0, sc_fund
-                            ]
-                            t_count += 1
-                        amount[s] -= sc_amount
-                        entry_fee_stored[s] /= 2.0
-                        fund_fee_stored[s] /= 2.0
-                        has_scaled[s] = True
-                        stop_p[s] = entry_p[s] - (entry_p[s] * fee_rate * 2.0)
-
-                exit_triggered, exit_price, stop_p[s] = check_short_exit(
-                    c_open, c_high, lowest[s], pos_atr, stop_p[s], s_trail_mult, slippage_rate
-                )
 
             if exit_triggered:
                 pnl = (exit_price - entry_p[s]) * amount[s] * pos_side[s]

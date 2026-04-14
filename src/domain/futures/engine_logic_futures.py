@@ -101,8 +101,10 @@ def calculate_position_size(
     [RE-ENGINEERED] Target Volatility Sizing (Alternative 1)
     Decouples Sizing from Stop-Loss distance to prevent 1/ATR^2 penalty.
     """
-    if np.isnan(gk) or gk <= 0.0:
-        gk = 1.0
+    if np.isnan(gk):
+        gk = 0.0
+    if gk < 0.0:
+        gk = 0.0
     
     # 1. Target Volatility 기반 명목 자본 할당 (Notional Allocation)
     # asset_atr_pct가 높을수록(변동성이 클수록) 할당 금액이 비례하여 감소 (단일 패널티)
