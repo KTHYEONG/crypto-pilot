@@ -574,7 +574,8 @@ def objective_futures(
     l_pf = calc_profit_factor_from_pnl(np.array(all_long_pnls)) if all_long_pnls else 1.5
     s_pf = calc_profit_factor_from_pnl(np.array(all_short_pnls)) if all_short_pnls else 1.5
     min_dir_pf = min(l_pf, s_pf)
-    d_directional = float(np.clip(1.0 - (max(0.0, 1.15 - min_dir_pf) / 0.15), 0.01, 1.0))
+    # [Refined] 1.05 threshold allows for defensive hedging in minority direction
+    d_directional = float(np.clip(1.0 - (max(0.0, 1.05 - min_dir_pf) / 0.15), 0.01, 1.0))
 
     # --- [New V5] Min-Max Symbol Penalty ---
     # Ensure no single symbol is holding back the portfolio or being 'sacrificed'
@@ -596,9 +597,9 @@ def objective_futures(
                 s_pf_val = calc_profit_factor_from_pnl(s_pnl)
                 sym_pfs.append(s_pf_val)
 
-            min_s_pf = min(sym_pfs)
-            # Penalty starts if any individual symbol PF < 1.10
-            d_min_sym_pf = float(np.clip(min_s_pf / 1.10, 0.0, 1.0))
+            # [Refined] Penalty uses mean of worst 2 symbols to allow for minor statistical noise
+            worst_2_pf = float(np.mean(np.sort(sym_pfs)[:2])) if len(sym_pfs) >= 2 else min(sym_pfs)
+            d_min_sym_pf = float(np.clip(1.0 - (max(0.0, 1.0 - worst_2_pf) / 0.20), 0.01, 1.0))
 
     stability_bonus = 0.0
     if path_arr.size >= 2:
@@ -608,20 +609,33 @@ def objective_futures(
         if psort > 1.5:
             stability_bonus += min(0.1, (psort - 1.5) * 0.05)
 
-    objective_final = (
-        p10_gmgr
-        * (
-            d_fund
-            * d_balance
-            * d_stability
-            * d_temporal
-            * d_cvar
-            * d_mdd
-            * d_directional
-            * d_min_sym_pf
-        )
-        + stability_bonus
+    # --- [New] Refined 5-Factor Geometric Mean Penalty ---
+    # 1. d_fund: Funding drag protection (survival)
+    # 2. d_cvar: Tail risk protection (CPCV bottom 10%)
+    # 3. d_mdd: Max drawdown control (CPCV top 10%)
+    # 4. d_directional: Long/Short edge verification (PF > 1.15)
+    # 5. d_min_sym_pf: Individual symbol robustness (PF > 1.10)
+    # Note: d_balance, d_stability, d_temporal removed to prevent over-constraining and recency bias.
+    
+    raw_penalty = (
+        d_fund
+        * d_cvar
+        * d_mdd
+        * d_directional
+        * d_min_sym_pf
     )
+    
+    # Geometric Mean scale restoration (5 factors)
+    # This prevents the objective space from collapsing/flattening as factors increase.
+    num_factors = 5.0
+    smoothed_penalty = float(max(raw_penalty, 1e-12) ** (1.0 / num_factors))
+
+    if p10_gmgr >= 0:
+        # For positive GMGR, multiply by penalty (0~1) to reduce score
+        objective_final = p10_gmgr * smoothed_penalty + stability_bonus
+    else:
+        # For negative GMGR, divide by penalty (0~1) to make it more negative (punishment)
+        objective_final = p10_gmgr / max(smoothed_penalty, 1e-6) + stability_bonus
 
     # --- Export Metrics & Constraints ---
     avg_pf = float(np.mean(path_pfs)) if path_pfs else 1.0
@@ -645,6 +659,8 @@ def objective_futures(
     trial.set_user_attr("long_short_ratio", (min(tot_l, tot_s) / max(tot_l + tot_s, 1.0)))
     trial.set_user_attr("mean_funding_drag_ratio_pct", float(mean_fund_r * 100.0))
     trial.set_user_attr("cpcv_path_oos_log_tw", [float(x) for x in path_compound_raw_log_tw])
+    trial.set_user_attr("cpcv_mean_path_return_pct", float(np.mean(np.expm1(path_arr)) * 100.0) if path_arr.size else 0.0)
+    trial.set_user_attr("cpcv_worst_segment_mdd_pct", float(np.max(path_mdds)) if path_mdds else 0.0)
 
     tw_ratios = np.exp(np.clip(path_arr, -50.0, 50.0))
     trial.set_user_attr(
@@ -675,18 +691,23 @@ def objective_futures(
         trial.set_user_attr("gate1_psr", psr_est)
         trial.set_user_attr("psr_paths", psr_est)
 
-        # Deflated Sharpe Ratio (Bailey & Lopez-de-Prado, 2014) — scipy-free.
-        # Adjusts SR for multiple testing across n_paths CPCV paths.
-        # SR_b ~ sqrt(2*log(n)) from Gumbel extreme-value approximation.
-        n_paths_f = float(path_arr.size)
+        # [Correction] Deflated Sharpe Ratio (Bailey & Lopez-de-Prado, 2014)
+        # N: Total number of trials (multiple testing count). 
+        # T: Number of independent observations (using eff_ref_len / timeframe_hours).
+        n_trials_opt = float(cfg.get("total_trials", 1000))
+        hrs = int(tf.replace("h", "")) if tf.endswith("h") else 4
+        # Roughly 252 trading days equivalent for bars
+        t_samples = float(_stat_ref_len) / (24.0 / hrs) 
+        
         sk = float(np.mean(((path_arr - m_pt) / (s_pt + 1e-12)) ** 3))
         ex_kurt = float(np.mean(((path_arr - m_pt) / (s_pt + 1e-12)) ** 4)) - 3.0
         sr_var_denom = max(
-            1.0 - sk * sharpe + ((ex_kurt + 3.0 - 1.0) / 4.0) * sharpe**2,
+            1.0 - sk * sharpe + ((ex_kurt + 2.0) / 4.0) * sharpe**2,
             1e-12,
         )
-        sr_bench = math.sqrt(2.0 * math.log(max(n_paths_f, 2.0)))
-        z_dsr = (sharpe - sr_bench) * math.sqrt(max(n_paths_f - 1.0, 1.0)) / math.sqrt(sr_var_denom)
+        # Benchmark SR based on Gumbel EV distribution for N trials
+        sr_bench = math.sqrt(2.0 * math.log(max(n_trials_opt, 2.0)))
+        z_dsr = (sharpe - sr_bench) * math.sqrt(max(t_samples - 1.0, 1.0)) / math.sqrt(sr_var_denom)
         dsr_val = float(0.5 * (1.0 + math.erf(z_dsr / math.sqrt(2.0))))
         trial.set_user_attr("gate1_dsr", float(min(0.99, max(0.0, dsr_val))))
 
