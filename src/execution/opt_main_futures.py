@@ -1492,7 +1492,7 @@ def main() -> None:
                 # C4: Per-symbol MDD calculation from symbol-specific trades
                 s_pnl_arr = sym_trades["pnl"].to_numpy() - sym_trades["entry_fee"].to_numpy()
                 if len(s_pnl_arr) > 0:
-                    s_eq = np.cumsum(s_pnl_arr) + (FUTURES_INITIAL_BALANCE / len(target_symbols))
+                    s_eq = np.cumsum(s_pnl_arr) + FUTURES_INITIAL_BALANCE
                     peak = np.maximum.accumulate(s_eq)
                     dd = (peak - s_eq) / np.maximum(peak, 1e-9)
                     sym_m_oos = float(dd.max() * 100.0)
