@@ -87,12 +87,13 @@ def setup_logger(
     import re
 
     logger = logging.getLogger(name)
-    logger.setLevel(logging.INFO)
-    logger.propagate = False
-
-    # 이미 핸들러가 설정되어 있으면 중복 설정 방지
+    
+    # 이미 핸들러가 설정되어 있으면 중복 설정 방지 (레벨 초기화 방지)
     if logger.handlers:
         return logger
+
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
 
     stream_handler = FlushingStreamHandler(sys.stdout)
     stream_handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
