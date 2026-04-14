@@ -170,6 +170,19 @@ def objective_futures(
 ) -> float:
     params: Dict[str, Any] = suggest_params_futures(trial, space, tf)
 
+    # [Institutional Quant] Inject Phase C Ensemble & Weighting configs
+    winning_configs = space.get("_winning_configs")
+    if isinstance(winning_configs, list):
+        # If multiple signals were selected in Phase C, set up Ensemble
+        if len(winning_configs) > 1:
+            params["ENSEMBLE_SIGNALS"] = [
+                {"name": w["name"], "params": w["params"]} for w in winning_configs
+            ]
+        
+        # Inject the primary signal's discovered best regime weights
+        # (Assuming all winning signals share similar regime profiles or we use Primary's)
+        params["REGIME_WEIGHTS"] = winning_configs[0].get("regime_weights")
+
     # [OPTIMIZATION] CS_MOMENTUM column mapping to avoid per-trial DF copies
     # H5: Guard CSM_LOOKBACK to precomputed _CS_MOM_LOOKBACKS to prevent KeyError.
     if params.get("SIGNAL_TYPE") == "CS_MOMENTUM" and len(symbols) > 1:
