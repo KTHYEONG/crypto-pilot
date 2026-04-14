@@ -49,6 +49,13 @@ class AdxBreakoutFuturesSignal:
         kc_upper = ema_kc + kc_m_long * atr
         kc_lower = ema_kc - kc_m_short * atr
         adx = compute_adx_numpy(high, low, close, kc_p)
+        
+        # [FIX] Directional Rank Score for IC Discovery
+        # ADX is always positive; for IC we need a signed score (Positive=Long, Negative=Short)
+        # We sign the ADX strength by the price's position relative to the baseline (EMA)
+        direction = np.where(close > ema_kc, 1.0, -1.0)
+        rank_score = (adx * direction).astype(np.float64)
+
         long_e = (close > kc_upper) & (adx > adx_threshold)
         short_e = (close < kc_lower) & (adx > adx_threshold)
         kill_l = (close < kc_lower).astype(np.float64)
@@ -58,5 +65,5 @@ class AdxBreakoutFuturesSignal:
             short_entry=short_e.astype(np.bool_),
             kill_long=kill_l,
             kill_short=kill_s,
-            rank_score=adx.astype(np.float64),
+            rank_score=rank_score,
         )

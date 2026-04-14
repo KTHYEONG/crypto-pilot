@@ -507,6 +507,7 @@ def objective_futures(
         if not valid_path:
             if relaxed_constraints:
                 continue
+            trial.set_user_attr("prune_reason", f"invalid_path_segment_idx_{path_idx}")
             raise optuna.TrialPruned()
 
         path_compound_raw_log_tw.append(p_log_ret)
