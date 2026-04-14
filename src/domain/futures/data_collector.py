@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+import fcntl
 import json
-import logging
 import os
 import re
 import sys
@@ -11,12 +11,13 @@ import pandas as pd
 from typing import Any
 
 from src.core.exchange.binance_client import BinanceClient
+from src.core.utils.utils import setup_logger
+from config.settings import FUTURES_DATA_DIR
 
 # 프로젝트 루트 경로 추가 (모듈 import 문제 해결)
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
-
-from config.settings import FUTURES_BACKTEST_END_DATE, FUTURES_BACKTEST_START_DATE, FUTURES_DATA_DIR
-from src.core.utils.utils import setup_logger
+project_root = str(Path(__file__).resolve().parents[3])
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
 
 
 class DataValidator:
@@ -86,27 +87,46 @@ class DataCollector:
 
     def _save_meta(self, meta_updates: dict[str, Any]):
         """
-        Concurrency-aware metadata update with deep merge.
-        Prevents losing 'earliest_available' when updating 'last_checked'.
+        Concurrency-aware metadata update with deep merge and file locking.
+        Prevents losing 'earliest_available' when updating 'last_checked' 
+        and avoids race conditions during file replacement.
         """
         path = self._meta_path()
+        lock_path = path.with_suffix(".lock")
+
         try:
-            current_meta = self._load_meta()
-            
-            for mk, updates in meta_updates.items():
-                if mk not in current_meta:
-                    current_meta[mk] = {}
-                if isinstance(updates, dict) and isinstance(current_meta[mk], dict):
-                    current_meta[mk].update(updates)
-                else:
-                    current_meta[mk] = updates
-            
-            tmp = path.with_suffix(".tmp.json")
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(current_meta, f, ensure_ascii=False, indent=2)
-            tmp.replace(path)
+            # Use a separate lock file to coordinate access
+            with open(lock_path, "w") as lock_file:
+                # Acquire exclusive lock (blocking)
+                fcntl.flock(lock_file, fcntl.LOCK_EX)
+
+                current_meta = self._load_meta()
+
+                for mk, updates in meta_updates.items():
+                    if mk not in current_meta:
+                        current_meta[mk] = {}
+                    if isinstance(updates, dict) and isinstance(current_meta[mk], dict):
+                        current_meta[mk].update(updates)
+                    else:
+                        current_meta[mk] = updates
+
+                # Use process-unique temp file to avoid concurrent replace errors
+                tmp = path.with_suffix(f".tmp.{os.getpid()}.json")
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump(current_meta, f, ensure_ascii=False, indent=2)
+
+                # Atomic replace
+                os.replace(tmp, path)
         except Exception as e:
             self.logger.error(f"Failed to save metadata: {e}")
+        finally:
+            # Cleanup temp file if it exists
+            tmp_pattern = path.with_suffix(f".tmp.{os.getpid()}.json")
+            if tmp_pattern.exists():
+                try:
+                    tmp_pattern.unlink()
+                except Exception:
+                    pass
 
     TAKE_COLUMNS = (
         "timestamp",
@@ -120,428 +140,129 @@ class DataCollector:
         "taker_buy_quote_volume",
     )
 
-    def _normalize_df(self, df: pd.DataFrame | None) -> pd.DataFrame:
-        if df is None or df.empty:
-            return pd.DataFrame(columns=list(self.TAKE_COLUMNS))
-
-        out = df.copy()
-        if "datetime" not in out.columns and "timestamp" in out.columns:
-            out["datetime"] = pd.to_datetime(out["timestamp"], unit="ms")
-        elif "datetime" in out.columns:
-            out["datetime"] = pd.to_datetime(out["datetime"])
-
-        out = (
-            out.drop_duplicates(subset=["timestamp"])
-            .sort_values("timestamp")
-            .reset_index(drop=True)
-        )
-        return out
-
-    def _read_parquet(self, path):
+    def _load_cache(self, symbol: str, timeframe: str) -> pd.DataFrame:
+        path = self._cache_path(symbol, timeframe)
+        if not path.exists():
+            return pd.DataFrame()
         try:
             df = pd.read_parquet(path)
         except ImportError as e:
             raise RuntimeError(
-                "Parquet engine is not installed. Please install 'pyarrow' (recommended) or 'fastparquet'."
+                "Parquet engine is not installed. Install 'pyarrow' or 'fastparquet'."
             ) from e
         return self._normalize_df(df)
 
-    def _write_parquet(self, path, df):
+    def _save_cache(self, symbol: str, timeframe: str, df: pd.DataFrame):
+        path = self._cache_path(symbol, timeframe)
         temp_path = path.with_suffix(".tmp.parquet")
         try:
             df.to_parquet(temp_path, index=False)
         except ImportError as e:
             raise RuntimeError(
-                "Parquet engine is not installed. Please install 'pyarrow' (recommended) or 'fastparquet'."
+                "Parquet engine is not installed. Install 'pyarrow' or 'fastparquet'."
             ) from e
         temp_path.replace(path)
 
-    def _load_legacy_csv_seed(self, symbol, timeframe):
-        safe_symbol = self._safe_symbol(symbol)
-        pattern = f"{safe_symbol}_{timeframe}_*.csv"
-        candidates = sorted(FUTURES_DATA_DIR.glob(pattern))
-        if not candidates:
-            return pd.DataFrame()
-
-        frames = []
-        for p in candidates:
-            try:
-                frames.append(pd.read_csv(p))
-            except Exception as e:
-                self.logger.warning(f"Failed to read CSV file {p}: {e}")
-                continue
-
-        if not frames:
-            return pd.DataFrame()
-        return self._normalize_df(pd.concat(frames, ignore_index=True))
-
-    def _slice_by_date(self, df, start_date, end_date):
-        start_ts = pd.Timestamp(start_date)
-        end_ts = pd.Timestamp(end_date) + pd.Timedelta(days=1) - pd.Timedelta(milliseconds=1)
+    def _normalize_df(self, df: pd.DataFrame) -> pd.DataFrame:
         if df.empty:
             return df
-        return df[(df["datetime"] >= start_ts) & (df["datetime"] <= end_ts)].copy()
-
-    def _timeframe_to_timedelta(self, timeframe):
-        m = re.match(r"^(\d+)([mhdw])$", str(timeframe).strip().lower())
-        if not m:
-            return None
-        n = int(m.group(1))
-        u = m.group(2)
-        if u == "m":
-            return pd.Timedelta(minutes=n)
-        if u == "h":
-            return pd.Timedelta(hours=n)
-        if u == "d":
-            return pd.Timedelta(days=n)
-        if u == "w":
-            return pd.Timedelta(weeks=n)
-        return None
-
-    def _find_internal_gap_ranges(self, df, timeframe, start_date, end_date):
-        """
-        Detect missing internal candles and return fetch ranges as date pairs.
-        Note: API fetch granularity is date-level in this project, so ranges are day-based.
-        """
-        step = self._timeframe_to_timedelta(timeframe)
-        if step is None or df.empty:
-            return []
-
-        sliced = self._slice_by_date(df, start_date, end_date)
-        if sliced.empty:
-            return []
-
-        ts = sliced["timestamp"].drop_duplicates().sort_values().to_numpy(dtype="int64")
-        if len(ts) < 2:
-            return []
-
-        expected_ms = int(step / pd.Timedelta(milliseconds=1))
-        if expected_ms <= 0:
-            return []
-
-        gap_ranges = []
-        for i in range(1, len(ts)):
-            diff = int(ts[i] - ts[i - 1])
-            if diff > expected_ms:
-                gap_start_ms = ts[i - 1] + expected_ms
-                gap_end_ms = ts[i] - expected_ms
-                if gap_start_ms <= gap_end_ms:
-                    ds = pd.to_datetime(gap_start_ms, unit="ms").normalize()
-                    de = pd.to_datetime(gap_end_ms, unit="ms").normalize()
-                    gap_ranges.append((ds, de))
-
-        if not gap_ranges:
-            return []
-
-        # Merge overlapping/adjacent day ranges.
-        gap_ranges.sort(key=lambda x: x[0])
-        merged = [gap_ranges[0]]
-        for cur_s, cur_e in gap_ranges[1:]:
-            prev_s, prev_e = merged[-1]
-            if cur_s <= (prev_e + pd.Timedelta(days=1)):
-                merged[-1] = (prev_s, max(prev_e, cur_e))
-            else:
-                merged.append((cur_s, cur_e))
-        return merged
-
-    def _fetch_ranges(self, symbol, timeframe, ranges):
-        fetched_frames = []
-        for miss_start, miss_end in ranges:
-            if miss_start > miss_end:
-                continue
-            s = pd.Timestamp(miss_start).strftime("%Y-%m-%d")
-            e = pd.Timestamp(miss_end).strftime("%Y-%m-%d")
-            self.logger.info(f"Fetching missing range for {symbol} {timeframe}: {s} ~ {e}")
-            fetched = self.client.fetch_ohlcv_with_taker(symbol, timeframe, s, e)
-            fetched = self._normalize_df(fetched)
-            if not fetched.empty:
-                validator = DataValidator()
-                issues = validator.validate(fetched.copy(), symbol, timeframe)
-                if issues:
-                    self.logger.warning("Data Validation Issues Found:")
-                    for issue in issues:
-                        self.logger.warning(f"- {issue}")
-                fetched_frames.append(fetched)
-        return fetched_frames
-
-    def ensure_data(self, symbol, timeframe, start_date=None, end_date=None):
-        """
-        Parquet-based range cache with incremental fetch:
-        - cache file: data/{symbol}_{timeframe}.parquet
-        - only missing front/back date ranges are fetched from API
-        """
-        start = start_date or FUTURES_BACKTEST_START_DATE
-        end = end_date or FUTURES_BACKTEST_END_DATE
-        req_start = pd.Timestamp(start).normalize()
-        req_end = pd.Timestamp(end).normalize()
-
-        if req_start > req_end:
-            raise ValueError(f"Invalid date range: start={start}, end={end}")
-
-        cache_path = self._cache_path(symbol, timeframe)
-        meta = self._load_meta()
-        mk = self._meta_key(symbol, timeframe)
-        earliest_known = None
-        last_checked = None
-        
-        if mk in meta and isinstance(meta[mk], dict):
-            v = meta[mk].get("earliest_available")
-            if v:
-                try:
-                    earliest_known = pd.Timestamp(v).normalize()
-                except Exception:
-                    earliest_known = None
-            
-            lc = meta[mk].get("last_checked")
-            if lc:
-                try:
-                    last_checked = pd.Timestamp(lc).normalize()
-                except Exception:
-                    last_checked = None
-
-        if cache_path.exists():
-            cache_df = self._read_parquet(cache_path)
+        if "datetime" not in df.columns:
+            df["datetime"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
         else:
-            cache_df = self._load_legacy_csv_seed(symbol, timeframe)
-            if not cache_df.empty:
-                self.logger.info(f"Seeded parquet cache from legacy CSV files: {cache_path.name}")
-                self._write_parquet(cache_path, cache_df)
-
-        missing_ranges: list[tuple[pd.Timestamp, pd.Timestamp]] = []
-        cache_start = pd.Timestamp("1970-01-01").normalize()
-        cache_end = pd.Timestamp("1970-01-01").normalize()
-        if cache_df.empty:
-            # [[FIX]] 이미 체크한 구간(last_checked)이거나 알려진 상장일 이전은 요청하지 않음
-            if last_checked is not None and req_end <= last_checked:
-                pass
-            elif earliest_known is not None:
-                # 상장일 이후만 요청하되, 이미 체크한 구간은 제외
-                eff_start = max(req_start, earliest_known)
-                if last_checked is not None:
-                    eff_start = max(eff_start, last_checked + pd.Timedelta(days=1))
-                
-                if eff_start <= req_end:
-                    missing_ranges.append((eff_start, req_end))
-            else:
-                missing_ranges.append((req_start, req_end))
-        else:
-            cache_start = cache_df["datetime"].min().normalize()
-            cache_end = cache_df["datetime"].max().normalize()
-            if req_start < cache_start:
-                # [[FIX]] 이미 알려진 상장일(earliest_available)보다 앞선 구간은 무시
-                eff_start = req_start
-                if earliest_known is not None:
-                    eff_start = max(req_start, earliest_known)
-
-                if eff_start < cache_start:
-                    missing_ranges.append((eff_start, cache_start - pd.Timedelta(days=1)))
-
-            if req_end > cache_end:
-                # [[FIX]] 상한선 체크: 이미 최근에 확인했다면 건너뜀
-                if last_checked is None or req_end > last_checked:
-                    missing_ranges.append((cache_end + pd.Timedelta(days=1), req_end))
-
-        fetched_frames: list[pd.DataFrame] = []
-        for s_dt, e_dt in missing_ranges:
-            s_str = s_dt.strftime("%Y-%m-%d")
-            e_str = e_dt.strftime("%Y-%m-%d")
-            self.logger.info(f"Fetching missing range for {symbol} {timeframe}: {s_str} ~ {e_str}")
-            fetched = self.client.fetch_ohlcv_with_taker(symbol, timeframe, s_str, e_str)
-            if not fetched.empty:
-                fetched_frames.append(fetched)
-
-        if fetched_frames:
-            all_frames = [cache_df] if not cache_df.empty else []
-            all_frames.extend(fetched_frames)
-            merged = self._normalize_df(pd.concat(all_frames, ignore_index=True))
-            self._write_parquet(cache_path, merged)
-            cache_df = merged
-            self.logger.info(f"Updated parquet cache: {cache_path}")
-        
-        # Always update last_checked if we attempted a suffix fetch
-        if req_end > cache_end:
-            self._save_meta({mk: {"last_checked": req_end.strftime("%Y-%m-%d")}})
-        elif not cache_path.exists() and not cache_df.empty:
-            self._write_parquet(cache_path, cache_df)
-
-        # Internal gap backfill within the requested range.
-        internal_gap_ranges = self._find_internal_gap_ranges(cache_df, timeframe, start, end)
-        if internal_gap_ranges:
-            self.logger.info(
-                f"Detected {len(internal_gap_ranges)} internal gap range(s) for {symbol} {timeframe}. Backfilling."
-            )
-            gap_frames = self._fetch_ranges(symbol, timeframe, internal_gap_ranges)
-            if gap_frames:
-                all_frames = [cache_df]
-                all_frames.extend(gap_frames)
-                merged = self._normalize_df(pd.concat(all_frames, ignore_index=True))
-                self._write_parquet(cache_path, merged)
-                cache_df = merged
-                self.logger.info(f"Backfilled internal gaps and updated cache: {cache_path}")
-
-        # Persist earliest available date to avoid repeated pre-listing downloads.
-        if not cache_df.empty:
-            earliest_dt = cache_df["datetime"].min().normalize()
-            earliest_str = earliest_dt.strftime("%Y-%m-%d")
-            
-            # If we know it's earlier than what we have in meta, or meta is empty, update it.
-            if mk not in meta or meta[mk].get("earliest_available") != earliest_str:
-                self._save_meta({mk: {"earliest_available": earliest_str}})
-        elif earliest_known is None and not fetched_frames and missing_ranges:
-            # We tried to fetch the whole requested range and got nothing. 
-            # This is a dead coin or has no data in this range.
-            self._save_meta({mk: {"earliest_available": req_end.strftime("%Y-%m-%d")}})
-
-        return self._slice_by_date(cache_df, start, end)
-
-    def _funding_cache_path(self, symbol: str) -> Path:
-        return FUTURES_DATA_DIR / f"{self._safe_symbol(symbol)}_funding.parquet"
-
-    def ensure_funding_data(
-        self,
-        symbol: str,
-        start_date: str | None = None,
-        end_date: str | None = None,
-    ) -> None:
-        """
-        Ensure funding rate parquet exists for the symbol over [start_date, end_date].
-        Fetches from Binance /fapi/v1/fundingRate and merges into {symbol}_funding.parquet
-        so merge_funding_into_ohlcv can attach funding_rate / funding_rate_sum to OHLCV.
-        """
-        start = start_date or FUTURES_BACKTEST_START_DATE
-        end = end_date or FUTURES_BACKTEST_END_DATE
-        req_start = pd.Timestamp(start).normalize()
-        req_end = pd.Timestamp(end).normalize()
-        if req_start > req_end:
-            return
-
-        path = self._funding_cache_path(symbol)
-        cache_df = pd.DataFrame(columns=["timestamp", "funding_rate"])
-        if path.exists():
-            try:
-                cache_df = pd.read_parquet(path)
-                if "timestamp" not in cache_df.columns or "funding_rate" not in cache_df.columns:
-                    cache_df = pd.DataFrame(columns=["timestamp", "funding_rate"])
-                else:
-                    cache_df["timestamp"] = pd.to_numeric(
-                        cache_df["timestamp"], errors="coerce"
-                    ).astype("int64")
-            except Exception as e:
-                self.logger.warning("Failed to read funding parquet %s: %s", path, e)
-                cache_df = pd.DataFrame(columns=["timestamp", "funding_rate"])
-
-        missing_ranges: list[tuple[pd.Timestamp, pd.Timestamp]] = []
-        meta = self._load_meta()
-        mk = self._meta_key(symbol, "funding")
-        earliest_known = None
-        last_checked = None
-
-        v = None
-        if mk in meta and isinstance(meta[mk], dict):
-            v = meta[mk].get("earliest_available_funding")
-            if v:
-                try:
-                    earliest_known = pd.Timestamp(v).normalize()
-                except Exception:
-                    earliest_known = None
-            lc = meta[mk].get("last_checked_funding")
-            if lc:
-                try:
-                    last_checked = pd.Timestamp(lc).normalize()
-                except Exception:
-                    last_checked = None
-        
-        # [DIAGNOSTIC]
-        self.logger.debug(f"[DEBUG] {symbol} funding mk={mk} v={v} earliest_known={earliest_known}")
-
-        cache_start = pd.Timestamp("1970-01-01").normalize()
-        cache_end = pd.Timestamp("1970-01-01").normalize()
-        if cache_df.empty:
-            # [[FIX]] 이미 체크한 구간(last_checked_funding)이거나 알려진 상장일 이전은 요청하지 않음
-            if last_checked is not None and req_end <= last_checked:
-                pass
-            elif earliest_known is not None:
-                # 상장일 이후만 요청하되, 이미 체크한 구간은 제외
-                eff_start = max(req_start, earliest_known)
-                if last_checked is not None:
-                    eff_start = max(eff_start, last_checked + pd.Timedelta(days=1))
-                
-                if eff_start <= req_end:
-                    missing_ranges.append((eff_start, req_end))
-            else:
-                missing_ranges.append((req_start, req_end))
-        else:
-            cache_start = pd.to_datetime(cache_df["timestamp"].min(), unit="ms").normalize()
-            cache_end = pd.to_datetime(cache_df["timestamp"].max(), unit="ms").normalize()
-            if req_start < cache_start:
-                eff_start = req_start
-                if earliest_known is not None:
-                    eff_start = max(req_start, earliest_known)
-
-                if eff_start < cache_start:
-                    missing_ranges.append((eff_start, cache_start - pd.Timedelta(days=1)))
-            if req_end > cache_end:
-                if last_checked is None or req_end > last_checked:
-                    missing_ranges.append((cache_end + pd.Timedelta(days=1), req_end))
-
-        fetched_frames: list[pd.DataFrame] = []
-        for range_start, range_end in missing_ranges:
-            if range_start > range_end:
-                continue
-            s = range_start.strftime("%Y-%m-%d")
-            e = range_end.strftime("%Y-%m-%d")
-            # redundant log (fetch_funding_rate logs it)
-            try:
-                fr_df = self.client.fetch_funding_rate(symbol, s, e)
-                if not fr_df.empty:
-                    fetched_frames.append(fr_df)
-            except Exception as exc:
-                self.logger.warning(
-                    "Funding rate fetch failed for %s %s..%s: %s", symbol, s, e, exc
-                )
-
-        if fetched_frames:
-            all_frames = [cache_df] if not cache_df.empty else []
-            all_frames.extend(fetched_frames)
-            merged = (
-                pd.concat(all_frames, ignore_index=True)
-                .drop_duplicates(subset=["timestamp"])
-                .sort_values("timestamp")
-                .reset_index(drop=True)
-            )
-            self._write_parquet(path, merged)
-            self.logger.info("Updated funding parquet cache: %s", path)
-            cache_df = merged
-
-        if req_end > cache_end:
-            self._save_meta({mk: {"last_checked_funding": req_end.strftime("%Y-%m-%d")}})
-
-        if not cache_df.empty:
-            earliest_dt = pd.to_datetime(cache_df["timestamp"].min(), unit="ms").normalize()
-            earliest_str = earliest_dt.strftime("%Y-%m-%d")
-            if mk not in meta or meta[mk].get("earliest_available_funding") != earliest_str:
-                self._save_meta({mk: {"earliest_available_funding": earliest_str}})
-        elif earliest_known is None and not fetched_frames and missing_ranges:
-            # Mark dead zone
-            self._save_meta({mk: {"earliest_available_funding": req_end.strftime("%Y-%m-%d")}})
+            df["datetime"] = pd.to_datetime(df["datetime"], utc=True)
+        return df
 
     def collect_and_save(
-        self,
-        symbol: str,
-        timeframe: str,
-        start_date: str | None = None,
-        end_date: str | None = None,
+        self, symbol: str, timeframe: str, start_date: str, end_date: str
     ) -> pd.DataFrame:
-        """
-        Backward-compatible API.
-        Previously stored period-specific CSV files.
-        Now stores/updates a single parquet cache and returns requested slice.
-        """
-        return self.ensure_data(symbol, timeframe, start_date, end_date)
+        """데이터 수집, 로컬 캐시 결합 및 저장"""
+        self.logger.info(f"Collecting {symbol} {timeframe} ({start_date} ~ {end_date})")
 
+        # 1. 로컬 캐시 로드
+        cache_df = self._load_cache(symbol, timeframe)
+        req_start = pd.to_datetime(start_date, utc=True)
+        req_end = pd.to_datetime(end_date, utc=True)
 
-if __name__ == "__main__":
-    # 테스트 실행
-    collector = DataCollector()
-    collector.collect_and_save("BTC/USDT", "1d", "2022-01-01", "2024-12-31")
-    collector.collect_and_save("BTC/USDT", "1h", "2022-01-01", "2024-12-31")
+        # 2. 메타데이터 로드 (상장일 및 기 체크 정보)
+        meta_key = self._meta_key(symbol, timeframe)
+        meta = self._load_meta().get(meta_key, {})
+        earliest_available = meta.get("earliest_available")
+        if earliest_available:
+            earliest_available = pd.to_datetime(earliest_available, utc=True)
+            if req_start < earliest_available:
+                req_start = earliest_available
+
+        # 3. 필요한 구간 판단
+        fetch_needed = True
+        if not cache_df.empty:
+            c_start = cache_df["datetime"].min()
+            c_end = cache_df["datetime"].max()
+
+            # 요청 구간이 캐시 범위 내에 있으면 fetch 불필요
+            if c_start <= req_start and c_end >= req_end:
+                fetch_needed = False
+
+        new_df = pd.DataFrame()
+        if fetch_needed:
+            # 바이낸스에서 데이터 가져오기
+            new_df = self.client.fetch_ohlcv(symbol, timeframe, start_date, end_date)
+            if not new_df.empty:
+                new_df = self._normalize_df(new_df)
+                # 실제 데이터의 시작점 기록 (상장일 추정)
+                actual_start = new_df["datetime"].min()
+                if not earliest_available or actual_start < earliest_available:
+                    self._save_meta({meta_key: {"earliest_available": str(actual_start)}})
+
+        # 4. 데이터 병합 및 중복 제거
+        combined_df = pd.concat([cache_df, new_df]).drop_duplicates(subset=["timestamp"])
+        combined_df.sort_values("timestamp", inplace=True)
+
+        # 5. 캐시 저장
+        if not new_df.empty or cache_df.empty:
+            self._save_cache(symbol, timeframe, combined_df)
+            self._save_meta({meta_key: {"last_checked": str(pd.Timestamp.now(tz="UTC"))}})
+
+        # 6. 요청한 범위만 필터링하여 반환
+        mask = (combined_df["datetime"] >= req_start) & (combined_df["datetime"] <= req_end)
+        return combined_df.loc[mask].copy()
+
+    def _fetch_ranges(self, symbol: str, timeframe: str, ranges: list[tuple[pd.Timestamp, pd.Timestamp]]) -> list[pd.DataFrame]:
+        results = []
+        for start, end in ranges:
+            df = self.client.fetch_ohlcv(symbol, timeframe, str(start), str(end))
+            if not df.empty:
+                results.append(self._normalize_df(df))
+        return results
+
+    def ensure_funding_data(self, symbol: str, start_date: str, end_date: str):
+        """펀딩 데이터 수집 및 저장 (Binance 전용)"""
+        from config.settings import FUTURES_DATA_DIR
+        safe_symbol = self._safe_symbol(symbol)
+        path = FUTURES_DATA_DIR / f"{safe_symbol}_funding.parquet"
+        meta_key = f"{safe_symbol}::funding"
+
+        cache_df = pd.DataFrame()
+        if path.exists():
+            cache_df = self._normalize_df(pd.read_parquet(path))
+
+        last_checked = None
+        meta = self._load_meta().get(meta_key, {})
+        if "last_checked" in meta:
+            last_checked = pd.to_datetime(meta["last_checked"], utc=True)
+
+        req_start = pd.to_datetime(start_date, utc=True)
+        req_end = pd.to_datetime(end_date, utc=True)
+
+        if last_checked and req_end <= last_checked and not cache_df.empty:
+            return
+
+        self.logger.info(f"Fetching funding rate for {symbol} from {start_date} to {end_date}...")
+        new_funding = self.client.fetch_funding_rate_history(symbol, start_date, end_date)
+
+        if not new_funding.empty:
+            new_funding["datetime"] = pd.to_datetime(new_funding["timestamp"], unit="ms", utc=True)
+            combined = pd.concat([cache_df, new_funding]).drop_duplicates(subset=["timestamp"])
+            combined.sort_values("timestamp", inplace=True)
+            combined.to_parquet(path, index=False)
+            self._save_meta({meta_key: {"last_checked": str(pd.Timestamp.now(tz="UTC"))}})
+            self.logger.info(f"Updated funding parquet cache: {path}")
