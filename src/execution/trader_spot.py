@@ -86,11 +86,16 @@ logger = setup_logger("SpotBot")
 
 
 def _parse_utc_dt(s: str) -> datetime:
-    """Parse ISO datetime string, treating naive strings as UTC."""
-    dt = datetime.fromisoformat(s)
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt
+    """Parse ISO datetime string, treating naive strings as UTC aware."""
+    if not s:
+        return datetime.min.replace(tzinfo=timezone.utc)
+    try:
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except (ValueError, TypeError):
+        return datetime.min.replace(tzinfo=timezone.utc)
 
 
 _CCXT_TRANSIENT_ERRORS: Tuple[type, ...] = ()
@@ -114,7 +119,10 @@ def _is_retryable_api_exception(exc: Exception) -> bool:
     if _CCXT_TRANSIENT_ERRORS and isinstance(exc, _CCXT_TRANSIENT_ERRORS):
         return True
 
-    # [ENHANCED] Check for nested causes (e.g. underlying network error wrapped in CCXT exception)
+    # [ENHANCED] Handle wrapped exceptions from UpbitClient or CCXT
+    if isinstance(exc, RuntimeError) and "failed" in str(exc).lower():
+        return True
+
     cause = getattr(exc, "__cause__", None)
     if cause is not None:
         if isinstance(cause, (ConnectionError, TimeoutError)):
@@ -661,6 +669,11 @@ class SpotBot:
             return 0.0
 
         risk_per_trade = float(params.get("RISK_PER_TRADE", 0.05))
+
+        # [DEPENDABILITY] Internal Invariant Assertions
+        assert fill_price > 0, f"Critical Fault: Invalid fill_price={fill_price}"
+        assert entry_atr > 0, f"Critical Fault: Invalid entry_atr={entry_atr}"
+        assert risk_per_trade > 0, f"Critical Fault: Invalid risk_per_trade={risk_per_trade}"
 
         # Regime/Kelly 조정 (엔진과 동일)
         rr = max(0.05, min(1.0, float(regime_risk_mult) if np.isfinite(regime_risk_mult) else 1.0))
@@ -1342,6 +1355,7 @@ class SpotBot:
                 return
 
             logger.warning(f"🚨 [{symbol}] Exit Triggered: {reason}. Selling {amount:.4f}...")
+            # [FAIL-SAFE] Pre-emptively update state before order attempt
             self.state_manager.update_symbol_state(
                 symbol,
                 {
@@ -1349,11 +1363,15 @@ class SpotBot:
                     "exit_attempt_at": datetime.now(timezone.utc).isoformat(),
                     "exit_remaining_amount": float(amount),
                     "exit_recovery_attempt_count": 0,
-                    "exit_error": None,
+                    "exit_error": "initial_attempt",
                 },
             )
+
             order = self._place_order_safe(symbol, "sell", amount)
             if not order:
+                logger.error(
+                    f"❌ [{symbol}] Sell order failed. Marked as exit_pending for recovery."
+                )
                 self.state_manager.update_symbol_state(
                     symbol,
                     {
