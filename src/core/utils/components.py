@@ -102,7 +102,7 @@ class TradeHistoryDB:
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                         (
-                            datetime.utcnow().isoformat(),
+                            datetime.now(timezone.utc).isoformat(),
                             symbol,
                             side,
                             action,
@@ -160,7 +160,7 @@ class HealthCheckManager:
 
     def __init__(self, heartbeat_file: Path):
         self.heartbeat_file = heartbeat_file
-        self.start_time = datetime.utcnow()
+        self.start_time = datetime.now(timezone.utc)
         self.loop_count = 0
         self.last_error = None
 
@@ -169,10 +169,11 @@ class HealthCheckManager:
     ):
         """하트비트 파일 업데이트"""
         self.loop_count += 1
+        now = datetime.now(timezone.utc)
         heartbeat_data = {
             "status": status,
-            "timestamp": datetime.utcnow().isoformat() + "Z",
-            "uptime_seconds": (datetime.utcnow() - self.start_time).total_seconds(),
+            "timestamp": now.isoformat(),
+            "uptime_seconds": (now - self.start_time).total_seconds(),
             "loop_count": self.loop_count,
             "last_error": str(self.last_error) if self.last_error else None,
             "positions": positions or {},
@@ -230,7 +231,8 @@ def calculate_candle_wait_time(timeframe: str) -> int:
     다음 캔들 마감까지 대기 시간 계산 (초)
     정확한 봉 마감 시점에 로직 실행
     """
-    now = datetime.utcnow()
+    from datetime import timezone
+    now = datetime.now(timezone.utc)
 
     # 타임프레임별 분 단위 변환
     tf_minutes = 60  # default 1h
@@ -253,14 +255,14 @@ def calculate_candle_wait_time(timeframe: str) -> int:
         next_candle = (now + timedelta(days=1)).replace(
             hour=next_candle_minutes // 60,
             minute=next_candle_minutes % 60,
-            second=CANDLE_SYNC_OFFSET_SECONDS,
+            second=int(CANDLE_SYNC_OFFSET_SECONDS),
             microsecond=0,
         )
     else:
         next_candle = now.replace(
             hour=next_candle_minutes // 60,
             minute=next_candle_minutes % 60,
-            second=CANDLE_SYNC_OFFSET_SECONDS,
+            second=int(CANDLE_SYNC_OFFSET_SECONDS),
             microsecond=0,
         )
 
