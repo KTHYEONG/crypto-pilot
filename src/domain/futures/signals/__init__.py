@@ -9,6 +9,7 @@ from src.domain.futures.signals import (  # noqa: F401
     # cs_momentum_futures, # Removed: ranking signal != entry timing signal
     funding_squeeze_futures,
     macd_hist_div_futures,
+    ml_calib_prob_futures,
     rsm_vt_futures,
     supertrend_futures,
     vwap_mr_futures,
