@@ -8,10 +8,8 @@ import logging
 import multiprocessing
 import os
 import sys
-import threading
 from collections import Counter
 from dataclasses import dataclass
-from multiprocessing import Manager
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple, cast
 
@@ -25,7 +23,7 @@ from optuna.distributions import (
     IntDistribution,
 )
 from optuna.pruners import BasePruner, MedianPruner, PatientPruner
-from optuna.samplers import QMCSampler, TPESampler
+from optuna.samplers import NSGAIISampler, QMCSampler, TPESampler
 from optuna.storages import InMemoryStorage
 from optuna.trial import FixedTrial, TrialState
 from tqdm import tqdm
@@ -53,6 +51,7 @@ from config.settings import (  # noqa: E402
 from src.core.optimization.opt_utils import compute_segment_merge_index  # noqa: E402
 from src.domain.futures.data_collector import DataCollector  # noqa: E402
 from src.domain.futures.funding_utils import merge_funding_into_ohlcv  # noqa: E402
+from src.domain.futures.ml_pipeline import run_ml_pipeline  # noqa: E402
 from src.domain.futures.opt_futures_utils.alpha_evaluator import (  # noqa: E402
     calculate_conditional_ic,
     calculate_spearman_ic,
@@ -73,6 +72,12 @@ from src.domain.futures.opt_futures_utils.go_nogo import (  # noqa: E402
 from src.domain.futures.opt_futures_utils.objective import (  # noqa: E402
     EMBARGO_BARS,
     inject_cs_momentum_ranks,
+)
+from src.domain.futures.opt_futures_utils.objective_ml import (  # noqa: E402
+    MLPhaseDContext,
+    build_ml_phase_d_params,
+    objective_ml_phase_d,
+    topsis_select_best,
 )
 from src.domain.futures.opt_futures_utils.oos_evaluator import (  # noqa: E402
     run_oos_margin_shared_portfolio,
@@ -99,7 +104,8 @@ optuna.logging.set_verbosity(optuna.logging.WARNING)
 logging.basicConfig(level=logging.INFO, format="%(message)s", force=True)
 _logger: logging.Logger = logging.getLogger("opt_futures")
 
-# Initialize and Suppress noisy data loading logs
+# Data loading logs: WARNING to suppress verbose API progress (Collecting, Measured up to)
+# Show only errors/warnings, keep ML pipeline logs prominent
 setup_logger("DataCollector")
 setup_logger("BinanceClient")
 logging.getLogger("DataCollector").setLevel(logging.WARNING)
@@ -1007,19 +1013,13 @@ def _load_single_symbol_data(
                 break
 
             df.reset_index(drop=True, inplace=True)
-            # Ensure datetime is timezone-aware to match localized start/end dates
-            if df["datetime"].dt.tz is None:
-                df["datetime"] = pd.to_datetime(df["datetime"], utc=True)
+            # Normalize datetime to UTC regardless of original resolution (ms/us/ns).
+            # pd.to_datetime with utc=True handles all resolutions safely, avoiding
+            # "Invalid comparison between dtype=datetime64[ms] and Timestamp" errors.
+            df["datetime"] = pd.to_datetime(df["datetime"], utc=True)
 
-            # Coerce resolution to ns to avoid Invalid comparison errors (e.g. ms vs ns)
-            try:
-                df["datetime"] = df["datetime"].astype("datetime64[ns, UTC]")
-            except TypeError:
-                pass
-
-            tz = df["datetime"].dt.tz
-            is_start_dt = pd.to_datetime(start).tz_localize(tz) if tz else pd.to_datetime(start)
-            is_end_dt = pd.to_datetime(is_end).tz_localize(tz) if tz else pd.to_datetime(is_end)
+            is_start_dt = pd.Timestamp(start, tz="UTC")
+            is_end_dt = pd.Timestamp(is_end, tz="UTC")
 
             is_mask = df["datetime"] < is_end_dt
             is_end_idx = int(is_mask.to_numpy().sum())
@@ -1048,7 +1048,7 @@ def _load_single_symbol_data(
         temp_oos[f"merge_idx_{tf}"] = compute_segment_merge_index(temp_oos[tf], temp_oos["1d"])
         return sym, temp_is, temp_oos, False
     except Exception as e:
-        _logger.debug("Failed to load symbol %s: %s", sym, e)
+        _logger.warning("Failed to load symbol %s: %s", sym, e)
         # Mark as insufficient (True) so it gets properly counted as skipped
         return sym, None, None, True
 
@@ -1142,6 +1142,9 @@ def _load_futures_data_maps_for_symbols(
 def main() -> None:
     pre_parser = argparse.ArgumentParser(add_help=False)
     pre_parser.add_argument("--skip-universe", action="store_true")
+    pre_parser.add_argument(
+        "-tmp", "--tmp", action="store_true", help="Quick test mode with BTC/ETH only"
+    )
     pre_parser.add_argument("--reference-date", type=str, default=None)
     pre_parser.add_argument("--skip-stage1", action="store_true")
     pre_parser.add_argument("--signal-type", type=str, default=None)
@@ -1152,7 +1155,10 @@ def main() -> None:
     signal_cache_dir = str(Path(project_root) / "data" / "cache_futures")
     Path(signal_cache_dir).mkdir(parents=True, exist_ok=True)
 
-    if not pre_args.skip_universe:
+    if getattr(pre_args, "tmp", False):
+        _logger.info("[-tmp] mode: Skipping universe scan, forcing symbols to BTC/ETH only.")
+        config.opt_config.FUTURES_SYMBOLS = ["BTC/USDT", "ETH/USDT"]
+    elif not pre_args.skip_universe:
         from src.domain.futures.opt_futures_utils.universe_screener_futures import (
             screen_futures_universe,
             screen_symbol_refinement_futures,
@@ -1211,6 +1217,9 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--symbols", type=str, default=",".join(config.opt_config.FUTURES_SYMBOLS))
     parser.add_argument("--skip-universe", action="store_true")
+    parser.add_argument(
+        "-tmp", "--tmp", action="store_true", help="Quick test mode with BTC/ETH only"
+    )
     parser.add_argument("--trials", type=int, default=OPT_FUTURES_CONFIG["total_trials"])
     parser.add_argument("--tf", type=str, choices=["1h", "4h"], default="4h")
     parser.add_argument("--reference-date", type=str, default=None)
@@ -1231,166 +1240,47 @@ def main() -> None:
         _logger.error("No valid symbols.")
         return
 
-    runtime_policy = _resolve_futures_parallel_policy(len(valid_symbols), args.tf)
+    _resolve_futures_parallel_policy(len(valid_symbols), args.tf)
 
-    narrowed_space_effective = None
-    if not args.skip_stage1:
-        narrowed_space_effective = _run_stage1_structure_discovery(
-            data_maps=data_maps,
-            symbols=valid_symbols,
-            tf=args.tf,
-            trials_per_signal=args.stage1_trials,
-            top_k=2,
-            min_p10_gmgr=-0.5,
-            project_root=project_root,
-            signal_cache_dir=signal_cache_dir,
-        )
+    _logger.info("ML pipeline: GP / HMM / TBM / meta-labeler (1h + 1m fetch may be slow).")
+    run_ml_pipeline(
+        data_maps,
+        oos_data_maps,
+        valid_symbols,
+        args.tf,
+        dict(OPT_FUTURES_CONFIG),
+        fetch_start_date,
+        end_date,
+        is_end_date,
+        is_start=start_date,
+    )
 
     tasks: List[Tuple[Tuple[str, ...], str]] = [(tuple(valid_symbols), args.tf)]
 
-    n_stage1 = int(OPT_FUTURES_CONFIG.get("FUTURES_STAGE1_TRIALS", 500))
-    n_stage2 = int(OPT_FUTURES_CONFIG.get("FUTURES_STAGE2_TRIALS", 300))
+    n_ml_trials = int(OPT_FUTURES_CONFIG.get("FUTURES_ML_PHASE_D_TRIALS", 500))
     _default_total_trials = int(OPT_FUTURES_CONFIG.get("total_trials", 2000))
     if int(args.trials) != _default_total_trials:
-        n_stage2 = int(args.trials)
-
-    stage1_space = get_search_space_futures(args.tf, stage=1)
-    if narrowed_space_effective:
-        for _k in ("SIGNAL_TYPE", "REGIME_TYPE", "SIZING_METHOD"):
-            if _k in narrowed_space_effective:
-                stage1_space[_k] = narrowed_space_effective[_k]
-        if "_winning_configs" in narrowed_space_effective:
-            stage1_space["_winning_configs"] = narrowed_space_effective["_winning_configs"]
-
-    plan1 = _resolve_futures_execution_plan(
-        len(tasks), "single", runtime_policy.qmc_jobs, runtime_policy.tpe_workers
-    )
-    plan2 = _resolve_futures_execution_plan(
-        len(tasks), MODE_MULTI, runtime_policy.qmc_jobs, runtime_policy.tpe_workers
-    )
-
-    manager = Manager()
-    progress_queue: Optional[Any] = manager.Queue() if not args.no_progress else None
-    tf_bars = (
-        {
-            _task_progress_key(t, tf_t): tqdm(
-                total=n_stage1 + n_stage2,
-                desc=f"[{_task_progress_key(t, tf_t)}] Waiting...",
-                position=i,
-            )
-            for i, (t, tf_t) in enumerate(tasks)
-        }
-        if progress_queue
-        else {}
-    )
-
-    def _prog_listener() -> None:
-        if progress_queue is None:
-            return
-        while True:
-            msg = progress_queue.get()
-            if msg is None:
-                break
-            k, cur, _, k_pct = msg
-            if k in tf_bars:
-                tf_bars[k].n = cur
-                tf_bars[k].set_description(f"[{k}] Best Kelly: {k_pct:.2f}%")
-                tf_bars[k].refresh()
-
-    if progress_queue:
-        threading.Thread(target=_prog_listener, daemon=True).start()
-
-    _TPE_WORKER_CTX.clear()
-    _TPE_WORKER_CTX["data_maps"] = data_maps
+        n_ml_trials = int(args.trials)
 
     best_results: Dict[Tuple[Tuple[str, ...], str], Optional[optuna.Study]] = {}
     for t in tasks:
-        ctx1 = _TfOptimizationContext(
-            clean_symbol="_".join(t[0]).replace("/", ""),
-            seeds=OPT_FUTURES_CONFIG["seeds"],
-            n_trials=n_stage1,
-            n_jobs=plan1.jobs_per_task,
+        seed = int(OPT_FUTURES_CONFIG.get("seeds", [42])[0])
+        ml_ctx = MLPhaseDContext(
             data_maps=data_maps,
             symbols=list(t[0]),
-            project_root=project_root,
-            progress_queue=progress_queue,
-            mode="single",
-            parallel_tpe_workers=plan1.parallel_tpe_workers,
-            locked_param_space=stage1_space,
-            signal_cache_dir=signal_cache_dir,
-            stage=1,
-            use_discovery_objective=True,
+            tf=args.tf,
+            seed=seed,
         )
-        _, study1 = _run_tf_optimization(t, ctx1)
-
-        if study1 is None or not study1.trials:
-            _logger.error("Stage 1 (discovery): no study; skipping task.")
-            best_results[t] = None
-            continue
-
-        completed_s1 = [
-            tr for tr in study1.trials if tr.state == TrialState.COMPLETE and tr.value is not None
-        ]
-        if not completed_s1:
-            _logger.error("Stage 1 (discovery): no completed trials; skipping task.")
-            best_results[t] = None
-            continue
-
-        best_s1 = max(
-            completed_s1,
-            key=lambda x: float(x.value if x.value is not None else -1e9),
+        study_ml = optuna.create_study(
+            directions=["minimize", "minimize"],
+            sampler=NSGAIISampler(seed=seed),
         )
-        locked_signal_params = dict(best_s1.params)
-
-        stage2_space = get_search_space_futures(args.tf, stage=2)
-
-        if narrowed_space_effective and "_winning_configs" in narrowed_space_effective:
-            stage2_space = {
-                **stage2_space,
-                "_winning_configs": narrowed_space_effective["_winning_configs"],
-            }
-
-        ctx2 = _TfOptimizationContext(
-            clean_symbol="_".join(t[0]).replace("/", ""),
-            seeds=OPT_FUTURES_CONFIG["seeds"],
-            n_trials=n_stage2,
-            n_jobs=plan2.jobs_per_task,
-            data_maps=data_maps,
-            symbols=list(t[0]),
-            project_root=project_root,
-            progress_queue=progress_queue,
-            mode=MODE_MULTI,
-            parallel_tpe_workers=plan2.parallel_tpe_workers,
-            locked_param_space=stage2_space,
-            signal_cache_dir=signal_cache_dir,
-            stage=2,
-            locked_signal_params=locked_signal_params,
-            use_discovery_objective=False,
+        study_ml.optimize(
+            lambda tr, ctx=ml_ctx: objective_ml_phase_d(tr, ctx),
+            n_trials=n_ml_trials,
+            show_progress_bar=not args.no_progress,
         )
-        _, study2 = _run_tf_optimization(t, ctx2)
-        best_results[t] = study2
-
-        if study2 is not None:
-            completed_s2 = [
-                tr
-                for tr in study2.trials
-                if tr.state == TrialState.COMPLETE and tr.value is not None
-            ]
-            if not completed_s2:
-                pruned_s2 = [tr for tr in study2.trials if tr.state == TrialState.PRUNED]
-                if pruned_s2:
-                    reason_ct = Counter(
-                        tr.user_attrs.get("prune_reason", "unknown") for tr in pruned_s2
-                    )
-                    _logger.warning(
-                        "Stage 2 (portfolio): no completed trials. pruned=%d prune_reason=%s",
-                        len(pruned_s2),
-                        dict(reason_ct),
-                    )
-
-    if progress_queue:
-        progress_queue.put(None)
-        manager.shutdown()
+        best_results[t] = study_ml
 
     # Reporting & Saving
     from src.core.utils.secure_config import encrypt_config, get_strategy_secret
@@ -1404,22 +1294,22 @@ def main() -> None:
             continue
 
         completed = [
-            t for t in study.trials if t.state == TrialState.COMPLETE and t.value is not None
+            t
+            for t in study.trials
+            if t.state == TrialState.COMPLETE
+            and getattr(t, "values", None) is not None
+            and len(getattr(t, "values", ())) >= 2
         ]
         if not completed:
             continue
 
-        best_trial = _select_best_trial_from_shortlist(
-            sorted(
-                completed,
-                key=lambda x: float(x.value if x.value is not None else -1e9),
-                reverse=True,
-            )[:50]
-        )
-        # [FIX] Merge Stage 1 locked signal params with Stage 2 optimized portfolio params
-        params = locked_signal_params.copy()
-        params.update(best_trial.params)
-        
+        try:
+            best_trial = topsis_select_best(study.best_trials)
+        except Exception:
+            best_trial = completed[0]
+
+        params = build_ml_phase_d_params(dict(best_trial.params), tf_eval)
+
         _leverage_default = str(OPT_FUTURES_CONFIG.get("FUTURES_DISCOVERY_LEVERAGE", 5))
         params.update(
             {
@@ -1631,8 +1521,8 @@ def main() -> None:
         )
         _logger.info("\n%s", report)
 
-        growth_score = float(ua.get("growth_score", 0))
-        should_save = (growth_score > 0 and is_all_passed) or (n_stage1 + n_stage2) <= 4
+        growth_score = float(ua.get("growth_score", float(ua.get("ml_f1_stability", 0.0))))
+        should_save = (growth_score > 0 and is_all_passed) or n_ml_trials <= 4
 
         if should_save:
             res_dir = Path(project_root) / "results"

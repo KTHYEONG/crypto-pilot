@@ -36,6 +36,7 @@ class DataValidator:
         df.sort_index(inplace=True)
 
         expected_diff = {
+            "1m": pd.Timedelta(minutes=1),
             "1h": pd.Timedelta(hours=1),
             "1d": pd.Timedelta(days=1),
             "4h": pd.Timedelta(hours=4),
@@ -164,10 +165,13 @@ class DataCollector:
         temp_path.replace(path)
 
     def _normalize_df(self, df: pd.DataFrame) -> pd.DataFrame:
-        if df.empty:
-            return df
+        # Do NOT early-return on empty: dtype normalization must run even for empty DataFrames.
+        # An empty parquet (e.g. delisted symbol) retains its tz-naive datetime64[ms] schema;
+        # skipping normalization causes "Invalid comparison between dtype=datetime64[ms] and
+        # Timestamp" when the empty df is concat-ed with fetched data and then filtered.
         if "datetime" not in df.columns:
-            df["datetime"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
+            if "timestamp" in df.columns and not df.empty:
+                df["datetime"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
         else:
             df["datetime"] = pd.to_datetime(df["datetime"], utc=True)
         return df
@@ -234,6 +238,52 @@ class DataCollector:
                 results.append(self._normalize_df(df))
         return results
 
+    def collect_1m_ohlcv(self, symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
+        """
+        Load or fetch 1m OHLCV (Binance USDT-M futures); cache `{safe_symbol}_1m.parquet`.
+        Uses the same incremental merge pattern as collect_and_save.
+        """
+        timeframe = "1m"
+        self.logger.info("Collecting %s %s (%s ~ %s)", symbol, timeframe, start_date, end_date)
+        cache_df = self._load_cache(symbol, timeframe)
+        req_start = pd.to_datetime(start_date, utc=True)
+        req_end = pd.to_datetime(end_date, utc=True)
+
+        meta_key = self._meta_key(symbol, timeframe)
+        meta = self._load_meta().get(meta_key, {})
+        earliest_available = meta.get("earliest_available")
+        if earliest_available:
+            earliest_available = pd.to_datetime(earliest_available, utc=True)
+            if req_start < earliest_available:
+                req_start = earliest_available
+
+        fetch_needed = True
+        if not cache_df.empty:
+            c_start = cache_df["datetime"].min()
+            c_end = cache_df["datetime"].max()
+            if c_start <= req_start and c_end >= req_end:
+                fetch_needed = False
+
+        new_df = pd.DataFrame()
+        if fetch_needed:
+            new_df = self.client.fetch_ohlcv_with_taker(symbol, timeframe, start_date, end_date)
+            if not new_df.empty:
+                new_df = self._normalize_df(new_df)
+                actual_start = new_df["datetime"].min()
+                ea = pd.to_datetime(earliest_available, utc=True) if earliest_available else None
+                if not earliest_available or actual_start < ea:
+                    self._save_meta({meta_key: {"earliest_available": str(actual_start)}})
+
+        combined_df = pd.concat([cache_df, new_df]).drop_duplicates(subset=["timestamp"])
+        combined_df.sort_values("timestamp", inplace=True)
+
+        if not new_df.empty or cache_df.empty:
+            self._save_cache(symbol, timeframe, combined_df)
+            self._save_meta({meta_key: {"last_checked": str(pd.Timestamp.now(tz="UTC"))}})
+
+        mask = (combined_df["datetime"] >= req_start) & (combined_df["datetime"] <= req_end)
+        return combined_df.loc[mask].copy()
+
     def ensure_funding_data(self, symbol: str, start_date: str, end_date: str):
         """펀딩 데이터 수집 및 저장 (Binance 전용)"""
         from config.settings import FUTURES_DATA_DIR
@@ -250,7 +300,6 @@ class DataCollector:
         if "last_checked" in meta:
             last_checked = pd.to_datetime(meta["last_checked"], utc=True)
 
-        req_start = pd.to_datetime(start_date, utc=True)
         req_end = pd.to_datetime(end_date, utc=True)
 
         if last_checked and req_end <= last_checked and not cache_df.empty:

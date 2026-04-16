@@ -54,6 +54,17 @@ OPT_FUTURES_CONFIG: Dict[str, Any] = {
     "FUTURES_STAGE1_TRIALS": 500,
     "FUTURES_STAGE2_TRIALS": 300,
     "FUTURES_STAGE1_IC_LOOKFORWARD_BARS": 12,
+    # ML Pipeline Phase C+D
+    "FUTURES_PBO_MAX": 0.45,
+    "FUTURES_OBJECTIVE_DSR_TARGET": 1.5,
+    "FUTURES_ML_GP_POPULATION": 2000,
+    "FUTURES_ML_GP_GENERATIONS": 20,
+    "FUTURES_ML_GP_N_ALPHAS": 15,
+    "FUTURES_ML_HMM_N_STATES": 3,
+    "FUTURES_ML_TBM_TP_ATR_MULT": 1.0,
+    "FUTURES_ML_TBM_SL_ATR_MULT": 1.0,
+    "FUTURES_ML_TBM_TIME_STOP_H": 24,
+    "FUTURES_ML_PHASE_D_TRIALS": 500,
 }
 
 # Phase C engine + risk (plugin union via build_full_discovery_space_futures).
@@ -85,7 +96,6 @@ FUTURES_SYMBOLS: List[str] = [
     "BTC/USDT",
     "ETH/USDT",
     "XRP/USDT",
-    "CRV/USDT",
     "ADA/USDT",
     "SUI/USDT",
     "AAVE/USDT",
