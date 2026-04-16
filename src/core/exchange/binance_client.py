@@ -5,6 +5,7 @@ import logging
 import sys
 import threading
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from collections import deque
@@ -407,6 +408,27 @@ class BinanceClient:
                     with urllib.request.urlopen(req, timeout=timeout_sec) as resp:  # noqa: S310
                         raw = resp.read().decode("utf-8")
                     data = json.loads(raw)
+                except urllib.error.HTTPError as e:
+                    retry_count += 1
+                    if e.code == 429:
+                        wait_sec = 60 # 429 발생 시 1분 대기
+                        self.logger.warning(
+                            "⚠️ HTTP 429 Too Many Requests detected for %s. Waiting %ds...",
+                            symbol, wait_sec
+                        )
+                        time.sleep(wait_sec)
+                    else:
+                        self.logger.error(
+                            "Error fetching klines with taker (%d/3) for %s: %s",
+                            retry_count, symbol, e
+                        )
+                        time.sleep(5)
+                    
+                    if retry_count >= 3:
+                        raise RuntimeError(
+                            f"Data fetch with taker failed persistently for {symbol} (HTTP {e.code})"
+                        ) from e
+                    continue
                 except Exception as e:
                     retry_count += 1
                     self.logger.error(
