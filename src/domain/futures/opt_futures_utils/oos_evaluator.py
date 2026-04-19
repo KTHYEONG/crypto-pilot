@@ -149,6 +149,7 @@ def run_oos_margin_shared_portfolio(
     cache_root: Optional[Path] = None,
     return_signal_dfs: bool = False,
     oos_end_idx: Optional[int] = None,
+    oos_start_idx: Optional[int] = None,
 ) -> Dict[str, Any]:
     strategy = FuturesPipelineStrategy(name="OOS_Portfolio", params=params)
     full_signal_dfs: Dict[str, pd.DataFrame] = {}
@@ -157,8 +158,11 @@ def run_oos_margin_shared_portfolio(
     for sym in symbols:
         full_df = oos_data_maps[sym][tf]
         oos_start = int(oos_data_maps[sym][f"oos_start_idx_{tf}"])
+        if oos_start_idx is not None:
+            oos_start = int(oos_start_idx)
         # [OPTIMIZATION] Use tiered caching
         full_sig = get_tiered_signals(params, sym, tf, full_df, strategy)
+        
         end_cap = int(oos_end_idx) if oos_end_idx is not None else len(full_df)
         seg, _ = _segment_with_context(full_sig, oos_start, end_cap)
         full_signal_dfs[sym] = full_sig
@@ -368,4 +372,5 @@ def run_cpcv_complement_evaluation(
 
     if any(not np.isfinite(x) for x in is_scores):
         return (0.5, 0.0)
-    return compute_pbo_from_cpcv_paths(is_scores, oos_list)
+    pbo_rho = compute_pbo_from_cpcv_paths(is_scores, oos_list)
+    return cast(Tuple[float, float], pbo_rho)

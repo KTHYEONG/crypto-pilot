@@ -43,14 +43,19 @@ def _get_param_hash(params: Dict[str, Any], whitelist: frozenset[str]) -> str:
 
 
 def _save_npz(path: Path, data: Dict[str, np.ndarray]) -> None:
-    """Fast compressed numpy save."""
+    """Fast compressed numpy save with directory safety."""
     try:
-        # Explicitly add .npz to tmp_path to avoid savez_compressed suffix magic issues
+        # Ensure parent directory exists (handle potential deletion between initial check and write)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        
         tmp_path = path.with_suffix(f".tmp.{os.getpid()}.npz")
         np.savez_compressed(tmp_path, **data)  # type: ignore
-        tmp_path.replace(path)
+        
+        if tmp_path.exists():
+            tmp_path.replace(path)
     except Exception as e:
-        _logger.warning("Cache write failed: %s", e)
+        _logger.warning("Cache write failed for %s: %s", path.name, e)
+        # Fallback: if /dev/shm is problematic, don't crash, just proceed without disk cache
 
 
 def _load_npz(path: Path) -> Optional[Dict[str, np.ndarray]]:
