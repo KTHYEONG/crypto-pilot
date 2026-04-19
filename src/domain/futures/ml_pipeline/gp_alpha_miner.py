@@ -229,17 +229,6 @@ def _resolve_gp_feature_columns(panel_df: pd.DataFrame) -> list[str]:
     return [c for c in panel_df.columns if c not in blocked]
 
 
-def _should_apply_4h_downsample(dt_index: pd.Index) -> bool:
-    """If median bar spacing is already >= 3h, downsampling would mostly duplicate-drop 1h data."""
-    u = pd.Index(pd.to_datetime(dt_index, utc=True)).unique().sort_values()
-    if len(u) < 4:
-        return False
-    diffs = u[1:].asi8 - u[:-1].asi8
-    med_ns = float(np.median(diffs))
-    thr = 3 * 3600 * 1_000_000_000
-    return med_ns < thr
-
-
 @dataclass
 class GPAlphaMiner:
     n_features_to_select: int = 15
@@ -333,11 +322,8 @@ class GPAlphaMiner:
             sample_weight = sample_weight * is_mask
 
         dt_idx = aligned_df.index.get_level_values("datetime")
-        if _should_apply_4h_downsample(dt_idx):
-            downsample_mask = np.asarray(
-                pd.to_datetime(dt_idx, utc=True).hour % 4 == 0, dtype=bool
-            )
-            sample_weight = sample_weight * downsample_mask.astype(np.float64)
+        # [REFACTORED] Downsampling to 4h is removed to match 1h main architecture.
+        # Use full 1h panel for GP fitness calculation.
 
         # Internal 80/20 chronological holdout + drop NaN rows (CS grid: time x symbol)
         n_time = len(unique_times)

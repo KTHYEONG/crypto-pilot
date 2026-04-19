@@ -35,9 +35,8 @@ class VolTargetFuturesSizing:
         returns = np.log(close[1:] / close[:-1])
         returns = np.insert(returns, 0, 0.0) # Match length
         
-        # Rolling realized volatility (annualized)
-        # 4H data -> 6 bars per day -> 2190 bars per year
-        bars_per_year = 365 * 6
+        # [REFACTORED] 1H data -> 24 bars per day -> 8760 bars per year
+        bars_per_year = 365 * 24
         
         rolling_std = pd.Series(returns).rolling(window=lookback, min_periods=lookback//2).std().to_numpy()
         realized_ann_vol = rolling_std * np.sqrt(bars_per_year)

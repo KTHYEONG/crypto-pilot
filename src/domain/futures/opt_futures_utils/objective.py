@@ -48,16 +48,16 @@ _logger: logging.Logger = logging.getLogger("opt_futures")
 
 
 def compute_embargo_bars(tf: str, longest_indicator_period: int = 150) -> int:
-    fixed_min: Dict[str, int] = {"1h": 24, "4h": 12}
-    ratio_map: Dict[str, float] = {"1h": 0.08, "4h": 0.05}
-    ratio: float = ratio_map.get(tf, 0.03)
-    return max(fixed_min.get(tf, 2), int(longest_indicator_period * ratio))
+    fixed_min: Dict[str, int] = {"1h": 24}
+    ratio_map: Dict[str, float] = {"1h": 0.08}
+    ratio: float = ratio_map.get(tf, 0.05)
+    return max(fixed_min.get(tf, 12), int(longest_indicator_period * ratio))
 
 
 EMBARGO_BARS: Dict[str, int] = {
     "1h": compute_embargo_bars("1h"),
-    "4h": compute_embargo_bars("4h"),
 }
+
 
 
 def _merge_futures_params_fixed_then_suggest(
