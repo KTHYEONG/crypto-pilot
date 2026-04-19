@@ -234,7 +234,11 @@ def backtest_portfolio_numba(
             if not exit_triggered:
                 if pos_side[s] == 1:
                     if c_high > highest[s]: highest[s] = c_high
-                    if not has_scaled[s]:
+                    
+                    # [REFACTORED] Pessimistic Execution: Check Exit (SL) FIRST before Scale-out (TP)
+                    exit_triggered, exit_price, stop_p[s] = check_long_exit(c_open, c_low, highest[s], pos_atr, stop_p[s], l_trail_mult, slippage_rate)
+                    
+                    if not exit_triggered and not has_scaled[s]:
                         tr, sc_p, sc_a, pnl_s, fee_s = process_long_scale_out(c_open, c_high, entry_p[s], pos_atr, l_scale_atr, amount[s], fee_rate)
                         if tr:
                             sc_f = fund_fee_stored[s] / 2.0
@@ -244,10 +248,13 @@ def backtest_portfolio_numba(
                                 t_count += 1
                             amount[s] -= sc_a
                             entry_fee_stored[s] /= 2.0; fund_fee_stored[s] /= 2.0; has_scaled[s] = True
-                    exit_triggered, exit_price, stop_p[s] = check_long_exit(c_open, c_low, highest[s], pos_atr, stop_p[s], l_trail_mult, slippage_rate)
                 else:
                     if c_low < lowest[s]: lowest[s] = c_low
-                    if not has_scaled[s]:
+                    
+                    # [REFACTORED] Pessimistic Execution: Check Exit (SL) FIRST before Scale-out (TP)
+                    exit_triggered, exit_price, stop_p[s] = check_short_exit(c_open, c_high, lowest[s], pos_atr, stop_p[s], s_trail_mult, slippage_rate)
+                    
+                    if not exit_triggered and not has_scaled[s]:
                         tr, sc_p, sc_a, pnl_s, fee_s = process_short_scale_out(c_open, c_low, entry_p[s], pos_atr, s_tp_mult, amount[s], fee_rate)
                         if tr:
                             sc_f = fund_fee_stored[s] / 2.0
@@ -257,7 +264,6 @@ def backtest_portfolio_numba(
                                 t_count += 1
                             amount[s] -= sc_a
                             entry_fee_stored[s] /= 2.0; fund_fee_stored[s] /= 2.0; has_scaled[s] = True; stop_p[s] = entry_p[s] - (entry_p[s]*fee_rate*2.0)
-                    exit_triggered, exit_price, stop_p[s] = check_short_exit(c_open, c_high, lowest[s], pos_atr, stop_p[s], s_trail_mult, slippage_rate)
 
             if exit_triggered:
                 pnl = (exit_price - entry_p[s]) * amount[s] * pos_side[s]
