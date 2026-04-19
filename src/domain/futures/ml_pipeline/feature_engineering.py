@@ -192,86 +192,45 @@ def build_hmm_input_features(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def build_systemic_hmm_features(panel_df: pd.DataFrame, alpha_panel: pd.DataFrame) -> pd.DataFrame:
+def build_systemic_hmm_features(panel_df: pd.DataFrame, alpha_panel: pd.DataFrame | None = None) -> pd.DataFrame:
     """
-    Builds single-timeseries features for Market HMM using panel aggregates and GP performance.
+    Builds single-timeseries features for Macro Market HMM using systemic aggregates.
+    Independent of GP Alpha performance to avoid circular IS-overfitting.
     """
-    # 1. GP Alpha Long-Short Spread (Rolling IC proxy)
-    # Ensure time-series integrity by unstacking before shift
-    close_grid = panel_df["close"].unstack(level="symbol")
-    # Force UTC aware index for grid safety
-    if close_grid.index.tz is None:
-        close_grid.index = close_grid.index.tz_localize("UTC")
-    else:
-        close_grid.index = close_grid.index.tz_convert("UTC")
-
-    # 24h lag return (past-only): log(P_t / P_{t-24}) — no forward shift (avoid look-ahead)
-    ret_lag_grid = np.log(close_grid / close_grid.shift(24).clip(lower=1e-12))
-    
-    alpha_grid = alpha_panel["gp_alpha_00"].unstack(level="symbol")
-    if alpha_grid.index.tz is None:
-        alpha_grid.index = alpha_grid.index.tz_localize("UTC")
-    else:
-        alpha_grid.index = alpha_grid.index.tz_convert("UTC")
-    
-    # Align both grids to the same index to avoid failures
-    common_idx = alpha_grid.index.intersection(ret_lag_grid.index)
-    alpha_grid = alpha_grid.reindex(common_idx)
-    ret_lag_grid = ret_lag_grid.reindex(common_idx)
-    
-    # --- Vectorized LS Spread Calculation ---
-    # 1. Rank symbols cross-sectionally at each time step
-    ranks_grid = alpha_grid.rank(axis=1, pct=True, method='first')
-    
-    # 2. Identify Top and Bottom symbols
-    # [FIX] For small universes, 20% (0.8/0.2) is too restrictive. 
-    # Use 33% (0.67/0.33) to ensure we have at least one symbol in each bucket for 3-symbol test.
-    n_syms = alpha_grid.shape[1]
-    thr = 0.8 if n_syms >= 10 else 0.65
-    bot_thr = 0.2 if n_syms >= 10 else 0.35
-    
-    top_mask = ranks_grid >= thr
-    bot_mask = ranks_grid <= bot_thr
-    
-    top_mean_ret = ret_lag_grid[top_mask].mean(axis=1)
-    bot_mean_ret = ret_lag_grid[bot_mask].mean(axis=1)
-    
-    ls_spread = (top_mean_ret - bot_mean_ret).fillna(0.0)
-    
-    # [DEBUG] Data Integrity Check
-    import logging
-    debug_logger = logging.getLogger("ml_pipeline")
-    
-    debug_logger.info(" [DEBUG] Grid Alignment: common_idx_len=%d", len(common_idx))
-    debug_logger.info(" [DEBUG] LS Spread Stats: min=%.6f, max=%.6f, mean=%.6f, non_zero=%d", 
-                 ls_spread.min(), ls_spread.max(), ls_spread.mean(), (ls_spread != 0).sum())
-    
-    # 2. Aggregated Market Features from panel_df
-    # (already calculated by CrossSectionalPipelineUtils)
-    # Since these are duplicated for all symbols, we just take the first per datetime
+    # 1. Market Aggregates from panel_df (already calculated by CrossSectionalPipelineUtils)
     market_feats = (
-        panel_df[["cs_dispersion", "market_breadth"]]
-        .groupby(level="datetime")
-        .first()
+        panel_df.groupby(level="datetime")
+        .agg({
+            "cs_dispersion": "first",
+            "market_breadth": "first",
+            "funding_rate": "mean"
+        })
     )
     
-    # 3. BTC Volatility Ratio (Anchor Vol)
-    has_btc = "BTCUSDT" in panel_df.index.get_level_values("symbol")
-    btc_df = panel_df.xs("BTCUSDT", level="symbol") if has_btc else None
-    if btc_df is not None:
+    # 2. BTC Baseline (Macro Anchor)
+    # Get BTC data for trend and vol proxy
+    btc_sym = next((s for s in panel_df.index.get_level_values("symbol").unique() if "BTC" in s), None)
+    if btc_sym:
+        btc_df = panel_df.xs(btc_sym, level="symbol")
+        btc_close = btc_df["close"].astype(np.float64)
+        # BTC 24h Trend (log return)
+        btc_trend = np.log(btc_close / btc_close.shift(24).clip(lower=1e-12)).fillna(0.0)
+        
+        # BTC Volatility Ratio (Parkinson)
         h_hi = btc_df["high"].astype(np.float64)
         h_lo = btc_df["low"].astype(np.float64) + 1e-12
         hl = np.log((h_hi / h_lo).clip(lower=1e-12))
         park = np.sqrt(np.maximum(1.0 / (4.0 * np.log(2.0)) * (hl**2), 0.0))
         btc_vol_ratio = (park.rolling(24).mean() / (park.rolling(168).mean() + 1e-12)).fillna(1.0)
     else:
+        btc_trend = pd.Series(0.0, index=market_feats.index)
         btc_vol_ratio = pd.Series(1.0, index=market_feats.index)
         
     out = pd.DataFrame(index=market_feats.index)
-    # ewm might cause the entire series to be 0 if the first few are 0. Use rolling mean instead.
-    out["GP_LS_Spread"] = ls_spread.rolling(12, min_periods=1).mean().fillna(0.0)
+    out["BTC_Trend_24h"] = btc_trend
     out["CS_Dispersion"] = market_feats["cs_dispersion"]
     out["Market_Breadth"] = market_feats["market_breadth"]
+    out["Avg_Funding_Rate"] = market_feats["funding_rate"].ffill().fillna(0.0)
     out["BTC_Vol_Ratio"] = btc_vol_ratio
     
     return out.fillna(0.0)
