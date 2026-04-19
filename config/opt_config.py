@@ -70,37 +70,10 @@ FUTURES_ANCHOR_SYMBOLS: List[str] = [
 
 # This list will be overwritten by the dynamic screener
 FUTURES_SYMBOLS: List[str] = [
-    "ALPHA/USDT",
-    "AMB/USDT",
-    "FTM/USDT",
-    "LEVER/USDT",
-    "LINA/USDT",
     "BTC/USDT",
     "ETH/USDT",
-    "SOL/USDT",
     "XRP/USDT",
-    "BNB/USDT",
-    "DOGE/USDT",
-    "ADA/USDT",
-    "LINK/USDT",
-    "BCH/USDT",
-    "AVAX/USDT",
-    "LTC/USDT",
-    "AAVE/USDT",
-    "FIL/USDT",
-    "DOT/USDT",
-    "NEAR/USDT",
-    "1000SHIB/USDT",
-    "ARB/USDT",
-    "APT/USDT",
-    "CRV/USDT",
-    "FET/USDT",
-    "LDO/USDT",
-    "GALA/USDT",
-    "CHZ/USDT",
-    "ARKM/USDT",
-    "API3/USDT",
-    "ALICE/USDT",
+    "SOL/USDT",
 ]
 
 FUTURES_SCREENER_CONFIG: Dict[str, Any] = {
