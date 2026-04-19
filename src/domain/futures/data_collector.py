@@ -597,27 +597,48 @@ class DataCollector:
         path = FUTURES_DATA_DIR / f"{safe_symbol}_funding.parquet"
         meta_key = f"{safe_symbol}::funding"
 
+        # 1. 로컬 캐시 로드
         cache_df = pd.DataFrame()
         if path.exists():
-            cache_df = self._normalize_df(pd.read_parquet(path))
+            try:
+                cache_df = self._normalize_df(pd.read_parquet(path))
+            except Exception as e:
+                self.logger.warning("Failed to load funding cache for %s: %s", symbol, e)
 
-        last_checked = None
-        meta = self._load_meta().get(meta_key, {})
-        if "last_checked" in meta:
-            last_checked = pd.to_datetime(meta["last_checked"], utc=True)
-
+        req_start = pd.to_datetime(start_date, utc=True)
         req_end = pd.to_datetime(end_date, utc=True)
+        
+        # 2. 수집 필요성 판단 (캐시 데이터의 시간 범위 기준)
+        fetch_start = req_start
+        if not cache_df.empty:
+            c_start = cache_df["datetime"].min()
+            c_end = cache_df["datetime"].max()
+            
+            # 이미 요청된 범위가 캐시에 포함되어 있는지 확인 (약간의 버퍼 8시간 부여)
+            if req_start >= c_start and req_end <= (c_end + pd.Timedelta(hours=8)):
+                self.logger.debug("Funding cache hit for %s (%s ~ %s)", symbol, start_date, end_date)
+                return
+            
+            # 캐시가 있다면 캐시 종료 시점부터 수집 시작
+            if req_end > c_end:
+                fetch_start = c_end - pd.Timedelta(hours=8) # 중첩 허용하여 누락 방지
 
-        if last_checked and req_end <= last_checked and not cache_df.empty:
-            return
+        self.logger.info(
+            "Fetching funding rate for %s: %s ~ %s (Cache ends at %s)", 
+            symbol, fetch_start.date(), req_end.date(), 
+            cache_df["datetime"].max().date() if not cache_df.empty else "None"
+        )
+        
+        # 3. API 수집 수행
+        new_funding = self.client.fetch_funding_rate_history(symbol, str(fetch_start), str(req_end))
 
-        self.logger.info(f"Fetching funding rate for {symbol} from {start_date} to {end_date}...")
-        new_funding = self.client.fetch_funding_rate_history(symbol, start_date, end_date)
-
+        # 4. 데이터 병합 및 저장
         if not new_funding.empty:
             new_funding["datetime"] = pd.to_datetime(new_funding["timestamp"], unit="ms", utc=True)
             combined = pd.concat([cache_df, new_funding]).drop_duplicates(subset=["timestamp"])
             combined.sort_values("timestamp", inplace=True)
             combined.to_parquet(path, index=False)
             self._save_meta({meta_key: {"last_checked": str(pd.Timestamp.now(tz="UTC"))}})
-            self.logger.info(f"Updated funding parquet cache: {path}")
+            self.logger.info("Updated funding parquet cache: %s (%d rows)", path, len(combined))
+        else:
+            self.logger.warning("No new funding data returned for %s", symbol)

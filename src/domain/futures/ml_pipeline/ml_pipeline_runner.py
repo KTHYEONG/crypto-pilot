@@ -13,8 +13,10 @@ from typing import Any, NamedTuple, cast
 import numpy as np
 import pandas as pd
 
-from config.settings import FUTURES_CACHE_DIR
+from config.settings import FUTURES_CACHE_DIR, FUTURES_DATA_DIR
 from src.domain.futures.data_collector import DataCollector
+from src.domain.futures.funding_utils import merge_funding_into_ohlcv
+from src.domain.futures.metrics_utils import merge_metrics_into_ohlcv
 from src.domain.futures.ml_pipeline.cross_sectional_utils import CrossSectionalPipelineUtils
 from src.domain.futures.ml_pipeline.feature_engineering import (
     GP_ENGINEERED_FEATURE_NAMES,
@@ -382,6 +384,7 @@ def run_ml_pipeline_for_universe(
     is_end_date: str | None = None,
     is_start_date: str | None = None,
     gp_only: bool = False,
+    hmm_only: bool = False,
 ) -> MLPipelineOutput:
     """
     [Phase 2] Universal Cross-Sectional ML Pipeline.
@@ -401,6 +404,15 @@ def run_ml_pipeline_for_universe(
             df_tf = collector.collect_and_save(sym, tf, fetch_start, end)
             df_1h = collector.collect_and_save(sym, "1h", fetch_start, end)
             if df_tf is not None and df_1h is not None:
+                # IMPORTANT: Merge funding and metrics before ML feature engineering
+                df_tf = merge_funding_into_ohlcv(sym, df_tf, Path(FUTURES_DATA_DIR))
+                df_tf = merge_metrics_into_ohlcv(sym, df_tf, Path(FUTURES_DATA_DIR))
+                if tf != "1h":
+                    df_1h = merge_funding_into_ohlcv(sym, df_1h, Path(FUTURES_DATA_DIR))
+                    df_1h = merge_metrics_into_ohlcv(sym, df_1h, Path(FUTURES_DATA_DIR))
+                else:
+                    df_1h = df_tf
+                
                 try:
                     df_1h_enriched = _merge_gp_into_1h(df_1h)
                 except Exception as e:
@@ -566,6 +578,85 @@ def run_ml_pipeline_for_universe(
             ),
         }
     )
+
+    if hmm_only:
+        _logger.info("\n" + "=" * 85)
+        _logger.info(" [PHASE 3] HMM REGIME ANALYSIS RESULTS (HMM-ONLY MODE)")
+        _logger.info("=" * 85)
+        
+        # 1. Input Data Diagnostics
+        _logger.info(" [1] INPUT DATA DIAGNOSTICS")
+        total_rows = len(market_hmm_feats)
+        nan_count = market_hmm_feats.isna().sum().sum()
+        zero_var_feats = [c for c in market_hmm_feats.columns if market_hmm_feats[c].std() < 1e-6]
+        _logger.info(f"   - Total Samples:      {total_rows}")
+        _logger.info(f"   - Total NaNs:         {nan_count}")
+        _logger.info(f"   - Zero Var Features:  {zero_var_feats}")
+        _logger.info("-" * 85)
+        
+        # 2. State Distribution & Financial Impact
+        _logger.info(" [2] SEMANTIC STATE PROFILING & FINANCIAL IMPACT")
+        from src.domain.futures.ml_pipeline.feature_engineering import HMM_SEMANTIC_PROB_COLUMNS
+        cols = [c for c in HMM_SEMANTIC_PROB_COLUMNS if c in market_probs.columns]
+        
+        if cols and len(market_probs) == len(market_hmm_feats):
+            # Align everything
+            df_eval = market_probs[['datetime'] + cols].copy()
+            df_eval['dominant_state'] = df_eval[cols].idxmax(axis=1)
+            
+            # Merge Modulator
+            df_eval = pd.merge(df_eval, hmm_modulator[['datetime', 'hmm_modulator']], on='datetime', how='left')
+            
+            # Merge Features
+            feat_tmp = market_hmm_feats.copy().reset_index()
+            df_eval = pd.merge(df_eval, feat_tmp[['datetime', 'btc_trend_vol_adj_24h', 'realized_vol_regime']], on='datetime', how='left')
+            
+            # Calculate BTC 24h Forward Return if available
+            has_return = False
+            if btc_1h is not None and not btc_1h.empty:
+                btc_tmp = btc_1h[['datetime', 'close']].copy()
+                btc_tmp['datetime'] = pd.to_datetime(btc_tmp['datetime'], utc=True)
+                btc_tmp['fwd_ret_24h'] = btc_tmp['close'].pct_change(24).shift(-24)
+                df_eval = pd.merge(df_eval, btc_tmp[['datetime', 'fwd_ret_24h']], on='datetime', how='left')
+                has_return = True
+            
+            # Print Global Averages
+            _logger.info("  [Global Averages]")
+            means = market_probs[cols].mean()
+            for c, m in means.items():
+                _logger.info(f"   - {c:<25}: {m:.4f}")
+            _logger.info(f"   - Global Kelly Modulator : {df_eval['hmm_modulator'].mean():.4f}")
+            _logger.info("-" * 40)
+            
+            # Print Per-State Profile
+            _logger.info("  [Per-State Financial Profile]")
+            for state in cols:
+                g = df_eval[df_eval['dominant_state'] == state]
+                pct = len(g) / len(df_eval) * 100
+                if len(g) > 0:
+                    avg_trend = g['btc_trend_vol_adj_24h'].mean()
+                    avg_vol = g['realized_vol_regime'].mean()
+                    avg_mod = g['hmm_modulator'].mean()
+                    
+                    ret_str = "N/A"
+                    if has_return:
+                        avg_ret = g['fwd_ret_24h'].mean() * 100
+                        ret_str = f"{avg_ret:>+6.2f}%"
+                        
+                    _logger.info(f"   ► {state.replace('hmm_prob_', '').upper():<11} ({pct:>5.1f}% time)")
+                    _logger.info(f"      Kelly Mod: {avg_mod:.2f} | 24h Fwd Ret: {ret_str}")
+                    _logger.info(f"      Avg Trend: {avg_trend:>+5.2f} | Avg Vol:     {avg_vol:.2f}")
+                else:
+                    _logger.info(f"   ► {state.replace('hmm_prob_', '').upper():<11} (  0.0% time)")
+
+        _logger.info("-" * 85)
+        _logger.info(" [RESULT] HMM-Only analysis complete. Skipping Fusion.")
+        _logger.info("=" * 85 + "\n")
+        
+        out = MLPipelineOutput()
+        out.alpha_panel = alpha_panel
+        return out
+
     
     out = MLPipelineOutput()
     
