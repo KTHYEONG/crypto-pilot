@@ -324,12 +324,13 @@ def run_ml_pipeline_for_universe(
     n_jobs: int = 4,
     is_end_date: str | None = None,
     is_start_date: str | None = None,
+    gp_only: bool = False,
 ) -> MLPipelineOutput:
     """
-    [Phase 4] Universal Cross-Sectional ML Pipeline.
+    [Phase 2] Universal Cross-Sectional ML Pipeline.
     """
     _logger.info("=" * 85)
-    _logger.info(" [PHASE 4] Starting Universal Cross-Sectional ML Pipeline")
+    _logger.info(" [PHASE 2] Starting Universal Cross-Sectional ML Pipeline")
     _logger.info("=" * 85)
 
     collector = DataCollector()
@@ -424,6 +425,40 @@ def run_ml_pipeline_for_universe(
         is_end_date=is_end_date,
         filter_options=filter_opts,
     )
+
+    if gp_only:
+        # Step 2 이후 즉시 종료 (HMM 및 Fusion 스킵)
+        best_fitness = alpha_panel.attrs.get("best_fitness", 0.0)
+        filter_meta = alpha_panel.attrs.get("gp_alpha_filter", {})
+        
+        _logger.info("\n" + "-" * 85)
+        _logger.info(" [PHASE 2] GP IC VALIDATION RESULTS (GP-ONLY MODE)")
+        _logger.info("-" * 85)
+        _logger.info(f" IS Best Fitness (Composite ICIR): {best_fitness:.6f}")
+        _logger.info(f" GP Alpha Components Tried:      {filter_meta.get('n_components', 0):.0f}")
+        _logger.info(f" GP Alpha Components Surviving:   {filter_meta.get('n_surviving', 0):.0f}")
+        
+        _logger.info("-" * 85)
+        _logger.info(" [DIAGNOSTICS] Elimination Breakdown:")
+        _logger.info(f"   - Failed FDR (Stat. Luck):    {filter_meta.get('fail_fdr', 0):.0f}")
+        _logger.info(f"   - Failed DSR (Risk/Reward):   {filter_meta.get('fail_dsr', 0):.0f}")
+        _logger.info(f"   - Failed OOS (Overfit):       {filter_meta.get('fail_oos', 0):.0f}")
+        _logger.info(f"   - Failed Half-Life (Noise):   {filter_meta.get('fail_half_life', 0):.0f}")
+        _logger.info(f"   - Failed Symbol Balance:      {filter_meta.get('fail_sym_bal', 0):.0f}")
+        _logger.info(f"   - Failed Regime Consistency:  {filter_meta.get('fail_regime', 0):.0f}")
+        
+        _logger.info("-" * 85)
+        _logger.info(" [BEST ALPHA (gp_alpha_00) METRICS]")
+        _logger.info(f"   - IS Mean IC:           {filter_meta.get('primary_is_mu', 0.0):.4f}")
+        _logger.info(f"   - OOS Mean IC:          {filter_meta.get('primary_oos_mu', 0.0):.4f}")
+        _logger.info(f"   - Raw T-Stat:           {filter_meta.get('primary_t_stat', 0.0):.2f}")
+        _logger.info("-" * 85)
+        _logger.info(" [RESULT] GP-Only analysis complete. Skipping HMM & Fusion.")
+        _logger.info("=" * 85 + "\n")
+        
+        out = MLPipelineOutput()
+        out.alpha_panel = alpha_panel
+        return out
 
     # --- Step 3: Systemic Market HMM & Bayesian Alpha Fusion ---
     _logger.info("Step 3/4: Training Systemic Macro HMM (GP-Independent)...")
@@ -523,18 +558,44 @@ def run_ml_pipeline_for_universe(
         out.calib_prob_short_by_symbol[res.sym] = res.cp_short
         out.calib_prob_by_symbol[res.sym] = res.cp_long
 
-    # --- Final Health Report ---
-    _logger.info("=" * 85)
-    _logger.info(" [ML Pipeline Health Report]")
+    # --- Final GP IC Validation Results ---
+    best_fitness = alpha_panel.attrs.get("best_fitness", 0.0)
+    filter_meta = alpha_panel.attrs.get("gp_alpha_filter", {})
+
+    _logger.info("\n" + "-" * 85)
+    _logger.info(" [PHASE 2] GP IC VALIDATION RESULTS")
     _logger.info("-" * 85)
-    # 1. GP Quality (IC)
-    try:
-        ic_val = float(alpha_panel.attrs.get("best_fitness", 0.0))
-        _logger.info(f" Universal CS-GP IC: {ic_val:.4f}")
-    except Exception:  # noqa: S110
-        pass
+    _logger.info(f" IS Best Fitness (Composite ICIR): {best_fitness:.6f}")
+    _logger.info(f" GP Alpha Components Tried:      {filter_meta.get('n_components', 0):.0f}")
+    _logger.info(f" GP Alpha Components Surviving:   {filter_meta.get('n_surviving', 0):.0f}")
+    neu_p = bool(filter_meta.get("neutralize_primary", 0))
+    _logger.info(f" Primary Alpha Neutralized:       {neu_p}")
+    
     _logger.info("-" * 85)
-    _logger.info(" [PHASE 4] Universal Pipeline Processing Complete")
-    _logger.info("=" * 85)
+    _logger.info(" [DIAGNOSTICS] Elimination Breakdown (Why they failed):")
+    _logger.info(f"   - Failed FDR (Stat. Luck):    {filter_meta.get('fail_fdr', 0):.0f}")
+    _logger.info(f"   - Failed DSR (Risk/Reward):   {filter_meta.get('fail_dsr', 0):.0f}")
+    _logger.info(f"   - Failed OOS (Overfit):       {filter_meta.get('fail_oos', 0):.0f}")
+    _logger.info(f"   - Failed Half-Life (Noise):   {filter_meta.get('fail_half_life', 0):.0f}")
+    _logger.info(f"   - Failed Symbol Balance:      {filter_meta.get('fail_sym_bal', 0):.0f}")
+    _logger.info(f"   - Failed Regime Consistency:  {filter_meta.get('fail_regime', 0):.0f}")
+    
+    _logger.info("-" * 85)
+    _logger.info(" [BEST ALPHA (gp_alpha_00) METRICS]")
+    _logger.info(f"   - IS Mean IC:           {filter_meta.get('primary_is_mu', 0.0):.4f}")
+    _logger.info(f"   - OOS Mean IC:          {filter_meta.get('primary_oos_mu', 0.0):.4f}")
+    _logger.info(f"   - IC Half-Life:         {filter_meta.get('primary_half_life', 0.0):.1f} bars")
+    _logger.info(f"   - Symbol IC Dispersion: {filter_meta.get('primary_sym_dispersion', 0.0):.2f}")
+    _logger.info(f"   - Raw T-Stat:           {filter_meta.get('primary_t_stat', 0.0):.2f}")
+    _logger.info("-" * 85)
+
+    if best_fitness > 0.01:
+        _logger.info(" [RESULT] Reasonable IC/Fitness detected. Track A is healthy.")
+    else:
+        _logger.warning(" [RESULT] Low Fitness detected. Check market volatility or features.")
+
+    _logger.info("-" * 85)
+    _logger.info(" [PHASE 2] Universal Pipeline Processing Complete")
+    _logger.info("=" * 85 + "\n")
     out.alpha_panel = alpha_panel
     return out

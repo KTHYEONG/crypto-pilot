@@ -165,13 +165,32 @@ class DataCollector:
             return pd.DataFrame()
         try:
             df = pd.read_parquet(path)
+            # [CRITICAL FIX] 데이터 손상 감지: 필수 컬럼이 없거나 비어있는 경우
+            if df.empty or ("timestamp" not in df.columns and "datetime" not in df.columns):
+                self.logger.warning(f"Corrupted cache detected for {symbol} {timeframe}. Deleting.")
+                path.unlink()
+                return pd.DataFrame()
         except ImportError as e:
             raise RuntimeError(
                 "Parquet engine is not installed. Install 'pyarrow' or 'fastparquet'."
             ) from e
+        except Exception as e:
+            self.logger.warning(f"Failed to read cache {path}: {e}. Deleting.")
+            try:
+                path.unlink()
+            except Exception:  # noqa: S110
+                pass
+            return pd.DataFrame()
+
         return self._normalize_df(df)
 
     def _save_cache(self, symbol: str, timeframe: str, df: pd.DataFrame) -> None:
+        if df.empty or ("timestamp" not in df.columns and "datetime" not in df.columns):
+            self.logger.warning(
+                f"Attempted to save empty or invalid data for {symbol} {timeframe}."
+            )
+            return
+
         path = self._cache_path(symbol, timeframe)
         temp_path = path.with_suffix(".tmp.parquet")
         try:
@@ -184,12 +203,17 @@ class DataCollector:
 
     def _normalize_df(self, df: pd.DataFrame) -> pd.DataFrame:
         # Avoid redundant work but ensure datetime exists and is UTC-aware.
-        # Crucial for preventing "Invalid comparison between dtype=datetime64[ns] and Timestamp".
+        if df.empty:
+            return df
+
         if "timestamp" in df.columns:
-            # Re-generate from internal integer timestamp to fix any naive/bad resoluton datetime
+            # Re-generate from internal integer timestamp to fix any naive/bad resolution datetime
             df["datetime"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
         elif "datetime" in df.columns:
             df["datetime"] = pd.to_datetime(df["datetime"], utc=True)
+        else:
+            # 필수 컬럼 부재 시 빈 데이터프레임 반환하여 상위 로직에서 에러 감지 유도
+            return pd.DataFrame()
         return df
 
     @staticmethod
@@ -459,46 +483,67 @@ class DataCollector:
         meta_key = self._meta_key(symbol, "1h")
         meta = self._load_meta().get(meta_key, {})
         earliest_available = meta.get("earliest_available")
+
+        effective_start = req_start
         if earliest_available:
             ea_dt = pd.to_datetime(earliest_available, utc=True)
             if req_start < ea_dt:
-                req_start = ea_dt
-                self.logger.info(f"Adjusting {symbol} metrics start to earliest available: {ea_dt.date()}")
+                effective_start = ea_dt
+                self.logger.info(
+                    f"Adjusting {symbol} metrics start to earliest available: {ea_dt.date()}"
+                )
 
         # 3. 데이터 부족 여부 확인 (30일 분기점 계산)
         api_cutoff = pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=28) # 안전마진 28일
-        
+
         vision_needed = False
         api_needed = False
-        
+
         if cache_df.empty:
-            vision_needed = req_start < api_cutoff
+            vision_needed = effective_start < api_cutoff
             api_needed = req_end >= api_cutoff
         else:
-            c_start = cache_df["datetime"].min()
-            c_end = cache_df["datetime"].max()
-            if req_start < c_start:
+            c_min = cache_df["datetime"].min()
+            c_max = cache_df["datetime"].max()
+
+            # Ensure c_min/c_max are tz-aware for comparison
+            if c_min.tzinfo is None:
+                c_min = c_min.tz_localize("UTC")
+            if c_max.tzinfo is None:
+                c_max = c_max.tz_localize("UTC")
+
+            # [Optimization] 만약 캐시의 시작점이 상장일(ea_dt)과 거의 같다면 
+            # (예: 1시간 이내 오차) 더 이상의 Vision 다운로드는 불필요함.
+            # HYPEUSDT처럼 실제 첫 데이터가 ea_dt(10:00)보다 약간 늦은(10:35) 경우 방지.
+            if effective_start < (c_min - pd.Timedelta(hours=1)) and effective_start < api_cutoff:
                 vision_needed = True
-            if req_end > c_end:
+
+            if req_end > c_max:
                 api_needed = True
 
+        if not vision_needed and not api_needed:
+            self.logger.info(
+                f" [CACHE] {symbol} metrics already covered " f"({c_min.date()} ~ {c_max.date()})"
+            )
+            mask = (cache_df["datetime"] >= effective_start) & (cache_df["datetime"] <= req_end)
+            return cache_df.loc[mask].copy()
+
         new_parts = []
-        
+
         # 4. Vision 수집 (30일 이전)
         if vision_needed:
-            v_start = req_start
+            v_start = effective_start
             if not cache_df.empty:
-                v_end = min(cache_df["datetime"].min(), api_cutoff)
+                v_end = min(c_min, api_cutoff)
             else:
                 v_end = min(req_end, api_cutoff)
-                
+
             if v_start < v_end:
                 downloader = BinanceVisionDownloader()
-                # symbol.replace("/", "") is already handled by downloader or should be here
                 v_df = downloader.fetch_range_metrics(symbol.replace("/", ""), v_start, v_end)
                 if not v_df.empty:
                     new_parts.append(self._normalize_metrics_df(v_df))
-                
+
         # 4. API 수집 (최근 30일)
         if api_needed:
             a_start = max(req_start, api_cutoff)
@@ -537,7 +582,9 @@ class DataCollector:
             combined[float_cols] = combined[float_cols].astype("float32")
             
             combined.to_parquet(path, index=False)
-            self.logger.info(f"Updated metrics parquet cache (optimized): {path} | Size reduced via float32")
+            self.logger.info(
+                f"Updated metrics parquet cache (optimized): {path} | Size reduced via float32"
+            )
             cache_df = combined
 
         mask = (cache_df["datetime"] >= req_start) & (cache_df["datetime"] <= req_end)
