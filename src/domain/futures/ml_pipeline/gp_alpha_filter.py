@@ -38,11 +38,11 @@ def _benjamini_hochberg_reject(p_values: Sequence[float], q: float) -> np.ndarra
 
 def _newey_west_se(x: np.ndarray, lag: int | None = None) -> float:
     """Newey–West HAC standard error of the mean (Bartlett kernel)."""
-    n = int(len(x))
+    n = len(x)
     if n < 2:
         return float("nan")
     if lag is None:
-        lag = max(1, int(math.floor(4.0 * (n / 100.0) ** (2.0 / 9.0))))
+        lag = max(1, math.floor(4.0 * (n / 100.0) ** (2.0 / 9.0)))
     mu = float(np.mean(x))
     e = x - mu
     gamma_0 = float(np.dot(e, e)) / float(n)
@@ -98,47 +98,43 @@ def _deflated_sharpe_threshold(
     return bool(sr_adj > 0.0 and sharpe > 0.0)
 
 
-def _tail_decile_ic_series(base: pd.DataFrame, col: str, *, min_symbols: int = 8) -> list[float]:
-    """Per-datetime Spearman IC on top/bottom decile of alpha (cross-section)."""
-    out: list[float] = []
-    for _, g in base.groupby(level="datetime", sort=False):
-        if len(g) < min_symbols:
-            continue
-        r = g[col].rank(pct=True, method="average")
-        m = (r >= 0.9) | (r <= 0.1)
-        if int(m.sum()) < 3:
-            continue
-        sub = g.loc[m, [col, "target"]].dropna()
-        if len(sub) < 3:
-            continue
-        out.append(float(sub[col].corr(sub["target"], method="spearman")))
-    return out
+def _tail_decile_ic_series_fast(
+    u_c: pd.DataFrame, u_tgt: pd.DataFrame, min_symbols: int = 8
+) -> list[float]:
+    valid_mask = u_c.notna() & u_tgt.notna()
+    counts = valid_mask.sum(axis=1)
+    mask_min = counts >= min_symbols
+    uc_valid = u_c[mask_min]
+    ut_valid = u_tgt[mask_min]
+    if uc_valid.empty:
+        return []
+    pct_r = uc_valid.rank(axis=1, pct=True)
+    mask_tail = (pct_r >= 0.9) | (pct_r <= 0.1)
+    tail_counts = mask_tail.sum(axis=1)
+    valid_tails = tail_counts >= 3
+    uc_tail = uc_valid[mask_tail][valid_tails]
+    ut_tail = ut_valid[mask_tail][valid_tails]
+    if uc_tail.empty:
+        return []
+    r_c = uc_tail.rank(axis=1)
+    r_t = ut_tail.rank(axis=1)
+    ic = r_c.corrwith(r_t, axis=1).dropna()
+    return ic.tolist()
 
 
-def _regime_consistency_ok(is_sub: pd.DataFrame, col: str) -> bool:
-    """
-    Per tmp.md 4-C: all regime mean IC > 0, or worst-regime IC > -0.5 * best-regime IC.
-    """
+def _regime_consistency_ok_fast(is_sub: pd.DataFrame, col: str, ic_series: pd.Series) -> bool:
     if "__regime" not in is_sub.columns:
         return True
-    regs = np.sort(np.unique(is_sub["__regime"].to_numpy()))
+    regime_s = is_sub.groupby("datetime")["__regime"].first()
+    df = pd.DataFrame({"ic": ic_series, "regime": regime_s}).dropna()
+    regs = np.sort(np.unique(df["regime"].to_numpy()))
     if len(regs) < 2:
         return True
     mus: list[float] = []
     for r in regs:
-        sub = is_sub[is_sub["__regime"] == r]
-        if len(sub) < 30:
-            continue
-        ic_list: list[float] = []
-        for _, g in sub.groupby(level="datetime", sort=False):
-            if len(g) < 3:
-                continue
-            ic_list.append(float(g[col].corr(g["target"], method="spearman")))
-        arr = np.asarray(ic_list, dtype=np.float64)
-        arr = arr[np.isfinite(arr)]
-        if arr.size < 5:
-            continue
-        mus.append(float(np.mean(arr)))
+        arr = df.loc[df["regime"] == r, "ic"].to_numpy(dtype=np.float64)
+        if arr.size >= 5:
+            mus.append(float(np.mean(arr)))
     if len(mus) < 2:
         return True
     best = max(mus)
@@ -248,18 +244,26 @@ def filter_gp_alpha_columns(
         regime_ok.append(False)
         sym_bal_ok.append(False)
 
+    u_tgt = is_sub["target"].unstack(level="symbol")
+    u_tgt_oos = None
+    if oos_time_set:
+        oos_sub = is_sub[is_sub.index.get_level_values("datetime").isin(oos_time_set)]
+        u_tgt_oos = oos_sub["target"].unstack(level="symbol")
+
     for c in cols:
-        ic_list: list[float] = []
-        for _, g in is_sub.groupby(level="datetime", sort=False):
-            if len(g) < 3:
-                continue
-            ic_list.append(float(g[c].corr(g["target"], method="spearman")))
-        ic_arr = np.asarray(ic_list, dtype=np.float64)
-        ic_arr = ic_arr[np.isfinite(ic_arr)]
+        u_c = is_sub[c].unstack(level="symbol")
+        valid_mask = u_c.notna() & u_tgt.notna()
+        counts = valid_mask.sum(axis=1)
+        r_c = u_c.rank(axis=1)
+        r_tgt = u_tgt.rank(axis=1)
+        ic_series = r_c.corrwith(r_tgt, axis=1)
+        ic_arr = ic_series[counts >= 3].dropna().to_numpy(dtype=np.float64)
+        
         n_ic = int(ic_arr.size)
         if n_ic < 10:
             _append_failed()
             continue
+            
         mu = float(np.mean(ic_arr))
         sd = float(np.std(ic_arr, ddof=1))
         mu_for_t = mu
@@ -280,36 +284,36 @@ def filter_gp_alpha_columns(
         hl = _ic_half_life_bars(ic_arr)
         half_life_ok.append(bool(hl > 4.0 or n_ic < 50))
 
-        tails = _tail_decile_ic_series(is_sub, c, min_symbols=8)
+        tails = _tail_decile_ic_series_fast(u_c, u_tgt, min_symbols=8)
         tail_mu = float(np.mean(tails)) if tails else mu
         tail_ok.append(bool(tail_mu > -0.05 or len(tails) < 5))
 
-        if oos_time_set:
-            oos_sub = is_sub[
-                is_sub.index.get_level_values("datetime").isin(oos_time_set)
-            ]
-            ic_oos_list: list[float] = []
-            for _, g in oos_sub.groupby(level="datetime", sort=False):
-                if len(g) < 3:
-                    continue
-                ic_oos_list.append(float(g[c].corr(g["target"], method="spearman")))
-            oos_arr = np.asarray(ic_oos_list, dtype=np.float64)
-            oos_arr = oos_arr[np.isfinite(oos_arr)]
+        if oos_time_set and u_tgt_oos is not None:
+            u_c_oos = oos_sub[c].unstack(level="symbol")
+            v_mask_oos = u_c_oos.notna() & u_tgt_oos.notna()
+            c_oos = v_mask_oos.sum(axis=1)
+            r_c_oos = u_c_oos.rank(axis=1)
+            r_t_oos = u_tgt_oos.rank(axis=1)
+            ic_oos_series = r_c_oos.corrwith(r_t_oos, axis=1)
+            oos_arr = ic_oos_series[c_oos >= 3].dropna().to_numpy(dtype=np.float64)
             mu_oos = float(np.mean(oos_arr)) if oos_arr.size > 0 else mu
         else:
             mu_oos = mu
+            
         blend = 0.5 * mu + 0.5 * mu_oos
         if mu > 1e-6:
             oos_ok.append(bool(mu_oos >= 0.45 * mu and blend > -0.02))
         else:
             oos_ok.append(True)
+            
         if c == "gp_alpha_00" and mu > 1e-6 and mu_oos < 0.5 * mu:
             neutralize_primary = True
 
         if require_regime_gate:
-            regime_ok.append(_regime_consistency_ok(is_sub, c))
+            regime_ok.append(_regime_consistency_ok_fast(is_sub, c, ic_series))
         else:
             regime_ok.append(True)
+            
         sym_bal_ok.append(
             _symbol_ic_balance_ok(is_sub, c, max_ratio=symbol_balance_max)
         )
