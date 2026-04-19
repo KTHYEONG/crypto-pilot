@@ -72,7 +72,16 @@ FUTURES_ANCHOR_SYMBOLS: List[str] = [
 FUTURES_SYMBOLS: List[str] = [
     "BTC/USDT",
     "ETH/USDT",
+    "SOL/USDT",
     "XRP/USDT",
+    "BNB/USDT",
+    "ADA/USDT",
+    "BCH/USDT",
+    "LINK/USDT",
+    "LTC/USDT",
+    "AAVE/USDT",
+    "FIL/USDT",
+    "DOT/USDT",
 ]
 
 FUTURES_SCREENER_CONFIG: Dict[str, Any] = {
