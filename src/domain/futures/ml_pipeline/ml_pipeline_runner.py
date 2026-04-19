@@ -38,6 +38,7 @@ class MLPipelineOutput:
     calib_prob_short_by_symbol: dict[str, pd.Series] = field(default_factory=dict)
     meta_feature_frame_by_symbol: dict[str, pd.DataFrame] = field(default_factory=dict)
     health_metrics_by_symbol: dict[str, dict[str, float]] = field(default_factory=dict)
+    alpha_panel: pd.DataFrame = field(default_factory=pd.DataFrame)
 
 
 def _sorted_hmm_prob_columns(df: pd.DataFrame) -> list[str]:
@@ -535,4 +536,5 @@ def run_ml_pipeline_for_universe(
     _logger.info("-" * 85)
     _logger.info(" [PHASE 4] Universal Pipeline Processing Complete")
     _logger.info("=" * 85)
+    out.alpha_panel = alpha_panel
     return out
