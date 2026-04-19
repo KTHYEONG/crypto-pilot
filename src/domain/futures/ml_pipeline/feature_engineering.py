@@ -6,6 +6,26 @@ import numpy as np
 import pandas as pd
 
 # Columns produced by build_gp_input_features (for CS-rank / imputation in pipeline).
+# Systemic HMM input (8-dim; order fixed for centroid labeling in hmm_state_inferrer).
+SYSTEMIC_HMM_FEATURE_COLUMNS: tuple[str, ...] = (
+    "btc_trend_vol_adj_24h",
+    "realized_vol_regime",
+    "cs_dispersion_z",
+    "cross_corr_alt_btc",
+    "funding_level",
+    "funding_skew",
+    "vol_of_vol",
+    "market_breadth",
+)
+
+# Posterior columns aligned to stable semantic labels (order for MetaLabeler).
+HMM_SEMANTIC_PROB_COLUMNS: tuple[str, ...] = (
+    "hmm_prob_bull_trend",
+    "hmm_prob_bear_trend",
+    "hmm_prob_chop",
+    "hmm_prob_crisis",
+)
+
 GP_ENGINEERED_FEATURE_NAMES: tuple[str, ...] = (
     "ret_1",
     "ret_3",
@@ -46,13 +66,13 @@ def _log_modulus(z: pd.Series) -> pd.Series:
 def _yang_zhang_vol_24(
     open_: pd.Series, high: pd.Series, low: pd.Series, close: pd.Series, window: int = 24
 ) -> pd.Series:
-    """Rolling Yang–Zhang-style volatility (OHLC), sqrt variance per bar."""
+    """Rolling Yang-Zhang-style volatility (OHLC), sqrt variance per bar."""
     o = open_.astype(np.float64)
     h = high.astype(np.float64)
-    l = low.astype(np.float64)
+    low_s = low.astype(np.float64)
     c = close.astype(np.float64)
     log_ho = np.log((h / o).clip(lower=1e-12))
-    log_lo = np.log((l / o).clip(lower=1e-12))
+    log_lo = np.log((low_s / o).clip(lower=1e-12))
     log_co = np.log((c / o).clip(lower=1e-12))
     log_cc = np.log((c / c.shift(1)).clip(lower=1e-12))
     log_oo = np.log((o / c.shift(1)).clip(lower=1e-12))
@@ -192,45 +212,88 @@ def build_hmm_input_features(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def build_systemic_hmm_features(panel_df: pd.DataFrame, alpha_panel: pd.DataFrame | None = None) -> pd.DataFrame:
+def build_systemic_hmm_features(
+    panel_df: pd.DataFrame, alpha_panel: pd.DataFrame | None = None
+) -> pd.DataFrame:
     """
     Builds single-timeseries features for Macro Market HMM using systemic aggregates.
     Independent of GP Alpha performance to avoid circular IS-overfitting.
+
+    8-dim design (tmp.md): trend/vol-adjusted BTC trend, vol regime, CS stress, alt-BTC
+    correlation, funding level & cross-sectional dispersion of funding, vol-of-vol, breadth.
     """
-    # 1. Market Aggregates from panel_df (already calculated by CrossSectionalPipelineUtils)
-    market_feats = (
-        panel_df.groupby(level="datetime")
-        .agg({
+    _ = alpha_panel  # Reserved: do not couple HMM features to mined alphas.
+
+    market_feats = panel_df.groupby(level="datetime").agg(
+        {
             "cs_dispersion": "first",
             "market_breadth": "first",
-            "funding_rate": "mean"
-        })
+        }
     )
-    
-    # 2. BTC Baseline (Macro Anchor)
-    # Get BTC data for trend and vol proxy
-    btc_sym = next((s for s in panel_df.index.get_level_values("symbol").unique() if "BTC" in s), None)
+    if "funding_rate" in panel_df.columns:
+        funding_mean = panel_df["funding_rate"].groupby(level="datetime").mean()
+        funding_skew = panel_df["funding_rate"].groupby(level="datetime").std()
+    else:
+        funding_mean = pd.Series(0.0, index=market_feats.index)
+        funding_skew = pd.Series(0.0, index=market_feats.index)
+
+    idx = market_feats.index
+    syms = panel_df.index.get_level_values("symbol").unique()
+    btc_sym = next((s for s in syms if "BTC" in s), None)
     if btc_sym:
         btc_df = panel_df.xs(btc_sym, level="symbol")
         btc_close = btc_df["close"].astype(np.float64)
-        # BTC 24h Trend (log return)
-        btc_trend = np.log(btc_close / btc_close.shift(24).clip(lower=1e-12)).fillna(0.0)
-        
-        # BTC Volatility Ratio (Parkinson)
         h_hi = btc_df["high"].astype(np.float64)
         h_lo = btc_df["low"].astype(np.float64) + 1e-12
         hl = np.log((h_hi / h_lo).clip(lower=1e-12))
-        park = np.sqrt(np.maximum(1.0 / (4.0 * np.log(2.0)) * (hl**2), 0.0))
-        btc_vol_ratio = (park.rolling(24).mean() / (park.rolling(168).mean() + 1e-12)).fillna(1.0)
+        hl_np = hl.to_numpy(dtype=np.float64)
+        park_inner = np.sqrt(
+            np.maximum(1.0 / (4.0 * np.log(2.0)) * (hl_np**2), 0.0)
+        )
+        park = pd.Series(park_inner, index=btc_df.index)
+        park_24 = park.rolling(24, min_periods=12).mean()
+        park_168 = park.rolling(168, min_periods=24).mean()
+        rv_short = park_24 + 1e-12
+        rv_long = park_168 + 1e-12
+        log_ret_1 = np.log(btc_close / btc_close.shift(1).clip(lower=1e-12))
+        sig_24 = log_ret_1.rolling(24, min_periods=12).std() + 1e-12
+        btc_ret_24h = np.log(btc_close / btc_close.shift(24).clip(lower=1e-12))
+        btc_trend_vol_adj = btc_ret_24h / sig_24
+        realized_vol_regime = rv_short / rv_long
+        vol_of_vol = park_24.rolling(168, min_periods=48).std()
+        close_all = panel_df["close"].unstack(level="symbol")
+        log_ret_all = np.log(close_all / close_all.shift(1))
+        r_btc = log_ret_all[btc_sym]
+        corr_cols: list[pd.Series] = []
+        for sym in log_ret_all.columns:
+            if sym == btc_sym:
+                continue
+            cser = log_ret_all[sym].rolling(24, min_periods=12).corr(r_btc)
+            corr_cols.append(cser)
+        if corr_cols:
+            cross_corr_alt_btc = pd.concat(corr_cols, axis=1).mean(axis=1).reindex(idx).fillna(0.0)
+        else:
+            cross_corr_alt_btc = pd.Series(0.0, index=idx)
     else:
-        btc_trend = pd.Series(0.0, index=market_feats.index)
-        btc_vol_ratio = pd.Series(1.0, index=market_feats.index)
-        
-    out = pd.DataFrame(index=market_feats.index)
-    out["BTC_Trend_24h"] = btc_trend
-    out["CS_Dispersion"] = market_feats["cs_dispersion"]
-    out["Market_Breadth"] = market_feats["market_breadth"]
-    out["Avg_Funding_Rate"] = market_feats["funding_rate"].ffill().fillna(0.0)
-    out["BTC_Vol_Ratio"] = btc_vol_ratio
-    
-    return out.fillna(0.0)
+        btc_trend_vol_adj = pd.Series(0.0, index=idx)
+        realized_vol_regime = pd.Series(1.0, index=idx)
+        vol_of_vol = pd.Series(0.0, index=idx)
+        cross_corr_alt_btc = pd.Series(0.0, index=idx)
+
+    cs_disp_raw = market_feats["cs_dispersion"].reindex(idx).astype(np.float64)
+    med_cs = cs_disp_raw.rolling(500, min_periods=50).median()
+    mad_cs = (cs_disp_raw - med_cs).abs().rolling(500, min_periods=50).median()
+    cs_dispersion_z = (cs_disp_raw - med_cs) / (mad_cs * 1.4826 + 1e-12)
+
+    out = pd.DataFrame(index=idx)
+    out["btc_trend_vol_adj_24h"] = btc_trend_vol_adj.reindex(idx).fillna(0.0)
+    out["realized_vol_regime"] = realized_vol_regime.reindex(idx).fillna(1.0)
+    out["cs_dispersion_z"] = cs_dispersion_z.reindex(idx).fillna(0.0)
+    out["cross_corr_alt_btc"] = cross_corr_alt_btc.reindex(idx).fillna(0.0)
+    out["funding_level"] = funding_mean.reindex(idx).fillna(0.0)
+    out["funding_skew"] = funding_skew.reindex(idx).fillna(0.0)
+    out["vol_of_vol"] = vol_of_vol.reindex(idx).fillna(0.0)
+    out["market_breadth"] = market_feats["market_breadth"].reindex(idx).fillna(0.0)
+
+    out = out[list(SYSTEMIC_HMM_FEATURE_COLUMNS)]
+    return out.replace([np.inf, -np.inf], np.nan).fillna(0.0)
