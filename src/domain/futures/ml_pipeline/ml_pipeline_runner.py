@@ -23,10 +23,6 @@ from src.domain.futures.ml_pipeline.feature_engineering import (
 from src.domain.futures.ml_pipeline.gp_alpha_miner import GPAlphaMiner
 from src.domain.futures.ml_pipeline.gp_multiobjective import is_deap_available
 from src.domain.futures.ml_pipeline.hmm_state_inferrer import HMMStateInferrer
-from src.domain.futures.ml_pipeline.market_regime_pre_gp import (
-    attach_regime_pre_to_panel,
-    infer_pre_gp_regime_ids,
-)
 from src.domain.futures.ml_pipeline.meta_labeler import MetaLabeler
 from src.domain.futures.ml_pipeline.triple_barrier import label_triple_barrier
 
@@ -401,17 +397,7 @@ def run_ml_pipeline_for_universe(
     impute_cols = [c for c in GP_ENGINEERED_FEATURE_NAMES if c in panel_df.columns]
     if impute_cols:
         panel_df = utils.cs_median_impute_panel(panel_df, impute_cols)
-    if bool(cfg.get("FUTURES_ML_PRE_GP_REGIME", True)):
-        try:
-            n_reg = int(cfg.get("FUTURES_ML_PRE_GP_REGIME_STATES", 3))
-            rser = infer_pre_gp_regime_ids(
-                panel_df, is_end_date=is_end_date, n_states=max(2, n_reg)
-            )
-            panel_df = attach_regime_pre_to_panel(panel_df, rser)
-        except Exception as e:
-            _logger.warning("pre-GP regime HMM skipped: %s", e)
-            panel_df = panel_df.copy()
-            panel_df["regime_pre_hmm"] = np.int64(0)
+
     raw_h = cfg.get("FUTURES_ML_GP_HORIZONS", (3, 6, 12, 24))
     horizons = tuple(int(x) for x in (raw_h if isinstance(raw_h, (list, tuple)) else (3, 6, 12, 24)))
     panel_df["target"] = utils.create_multi_horizon_rank_targets(panel_df, horizons=horizons)
@@ -448,10 +434,11 @@ def run_ml_pipeline_for_universe(
     )
 
     # --- Step 3: Systemic Market HMM & Bayesian Alpha Fusion ---
-    _logger.info("Step 3/4: Training Systemic Market HMM & Bayesian Alpha Fusion...")
+    _logger.info("Step 3/4: Training Systemic Macro HMM (GP-Independent)...")
     from src.domain.futures.ml_pipeline.feature_engineering import build_systemic_hmm_features
     
-    market_hmm_feats = build_systemic_hmm_features(panel_df, alpha_panel)
+    # HMM is now independent of alpha_panel to avoid circular IS overfitting.
+    market_hmm_feats = build_systemic_hmm_features(panel_df, None)
     if market_hmm_feats.index.tz is None:
         market_hmm_feats.index = market_hmm_feats.index.tz_localize("UTC")
     else:
@@ -467,9 +454,10 @@ def run_ml_pipeline_for_universe(
     )
     is_end_idx_market = int((market_hmm_feats.index < is_end_utc).sum())
 
+    # Use BTC_Trend_24h as the performance proxy for state ordering (instead of GP LS Spread)
     market_probs = hmm_inferrer.fit_predict_systemic(
         market_hmm_feats,
-        market_hmm_feats["GP_LS_Spread"],
+        market_hmm_feats["BTC_Trend_24h"],
         is_end_idx=is_end_idx_market,
     )
     market_probs = _ensure_datetime_column(market_probs)
