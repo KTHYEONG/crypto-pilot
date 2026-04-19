@@ -26,18 +26,18 @@ OPT_FUTURES_CONFIG: Dict[str, Any] = {
     "FUTURES_ML_GP_HORIZONS": (3, 6, 12, 24),
     "FUTURES_ML_GP_PARSIMONY": 0.001,
     "FUTURES_ML_GP_USE_TBM_WEIGHT": True,
-    "FUTURES_ML_PRE_GP_REGIME": True,
+    "FUTURES_ML_PRE_GP_REGIME": False,
     "FUTURES_ML_PRE_GP_REGIME_STATES": 3,
     "FUTURES_ML_IC_FILTER_USE_HAC": False,
     "FUTURES_ML_IC_FILTER_USE_EWMA": False,
     "FUTURES_ML_IC_EWMA_HALF_LIFE": 540.0,
     "FUTURES_ML_IC_SYMBOL_BALANCE_MAX": 3.0,
-    "FUTURES_ML_IC_REGIME_GATE": True,
+    "FUTURES_ML_IC_REGIME_GATE": False,
     "FUTURES_ML_IC_FDR_Q": 0.10,
     "FUTURES_ML_GP_NSGA2_ENABLED": False,
     "FUTURES_ML_PHASE_D_TRIALS": 500,
     "FUTURES_CPCV_N_BLOCKS": 6,
-    "FUTURES_CPCV_K_TEST": 3,
+    "FUTURES_CPCV_K_TEST": 2,
     "FUTURES_WF_OOS_LEGS": 3,
 }
 
@@ -135,7 +135,7 @@ def get_quarterly_window(reference_date: Any = None) -> tuple[str, str, str, str
     current_quarter_start_month: int = ((reference_date.month - 1) // 3) * 3 + 1
     current_quarter_start: datetime.date = datetime.date(reference_date.year, current_quarter_start_month, 1)
     oos_end: datetime.date = current_quarter_start - datetime.timedelta(days=1)
-    oos_start: datetime.date = current_quarter_start - relativedelta(months=12)
-    is_start: datetime.date = oos_start - relativedelta(months=24)
-    fetch_start: datetime.date = is_start - relativedelta(days=700)
+    oos_start: datetime.date = current_quarter_start - relativedelta(months=3)
+    is_start: datetime.date = oos_start - relativedelta(months=15)
+    fetch_start: datetime.date = is_start - relativedelta(days=365)
     return (fetch_start.strftime("%Y-%m-%d"), is_start.strftime("%Y-%m-%d"), oos_start.strftime("%Y-%m-%d"), oos_end.strftime("%Y-%m-%d"))
