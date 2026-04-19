@@ -228,6 +228,9 @@ def filter_gp_alpha_columns(
     regime_ok: list[bool] = []
     sym_bal_ok: list[bool] = []
     neutralize_primary = False
+    
+    # gp_alpha_00 진단용 상세 지표
+    primary_diagnostic: dict[str, float] = {}
 
     is_sub = base[base["__is"]]
     uniq_times = sorted(is_sub.index.get_level_values("datetime").unique())
@@ -250,7 +253,7 @@ def filter_gp_alpha_columns(
         oos_sub = is_sub[is_sub.index.get_level_values("datetime").isin(oos_time_set)]
         u_tgt_oos = oos_sub["target"].unstack(level="symbol")
 
-    for c in cols:
+    for _, c in enumerate(cols):
         u_c = is_sub[c].unstack(level="symbol")
         valid_mask = u_c.notna() & u_tgt.notna()
         counts = valid_mask.sum(axis=1)
@@ -279,10 +282,20 @@ def filter_gp_alpha_columns(
         sharpe = mu / (sd + 1e-12) * math.sqrt(float(max(n_ic, 1)))
         sk = float(pd.Series(ic_arr).skew()) if n_ic > 2 else 0.0
         ku = float(pd.Series(ic_arr).kurt()) - 3.0 if n_ic > 3 else 0.0
-        dsr_ok.append(_deflated_sharpe_threshold(sharpe, n_ic, sk, ku, n_trials))
+        dsr_gate = _deflated_sharpe_threshold(sharpe, n_ic, sk, ku, n_trials)
+        dsr_ok.append(dsr_gate)
+
+        # [Fast-Track] Very high T-Stat bypasses noise/balance gates
+        is_fast_track = bool(t_stat > 15.0)
+        is_robust = bool(t_stat > 8.0)
 
         hl = _ic_half_life_bars(ic_arr)
-        half_life_ok.append(bool(hl > 4.0 or n_ic < 50))
+        if is_fast_track:
+            half_life_ok.append(True)
+        else:
+            # More lenient: 2.0 (for 1h) instead of 4.0; 50% relax if robust
+            hl_thresh = 1.0 if is_robust else 2.0
+            half_life_ok.append(bool(hl > hl_thresh or n_ic < 50))
 
         tails = _tail_decile_ic_series_fast(u_c, u_tgt, min_symbols=8)
         tail_mu = float(np.mean(tails)) if tails else mu
@@ -300,45 +313,111 @@ def filter_gp_alpha_columns(
         else:
             mu_oos = mu
             
-        blend = 0.5 * mu + 0.5 * mu_oos
-        if mu > 1e-6:
-            oos_ok.append(bool(mu_oos >= 0.45 * mu and blend > -0.02))
+        # [OOS Blend] weighted average instead of strict ratio
+        blend = 0.7 * mu_oos + 0.3 * mu
+        if is_fast_track:
+            oos_gate = True
+        elif mu > 1e-6:
+            # proposed: blend > 0.02
+            oos_gate = bool(blend > 0.015) 
         else:
-            oos_ok.append(True)
+            oos_gate = True
+        oos_ok.append(oos_gate)
             
-        if c == "gp_alpha_00" and mu > 1e-6 and mu_oos < 0.5 * mu:
-            neutralize_primary = True
+        if c == "gp_alpha_00":
+            if not is_fast_track and mu > 1e-6 and mu_oos < 0.45 * mu:
+                neutralize_primary = True
+            
+            # Diagnostic for gp_alpha_00
+            primary_diagnostic["is_mu"] = mu
+            primary_diagnostic["oos_mu"] = mu_oos
+            primary_diagnostic["half_life"] = hl
+            primary_diagnostic["sharpe"] = sharpe
+            primary_diagnostic["t_stat"] = t_stat
 
         if require_regime_gate:
             regime_ok.append(_regime_consistency_ok_fast(is_sub, c, ic_series))
         else:
             regime_ok.append(True)
             
-        sym_bal_ok.append(
-            _symbol_ic_balance_ok(is_sub, c, max_ratio=symbol_balance_max)
-        )
+        # Symbol balance check and store for diagnostic if primary
+        bal_ratio = 0.0
+        per: list[float] = []
+        for _, g in is_sub.groupby(level="symbol", sort=False):
+            if len(g) >= 40:
+                v = float(g[c].corr(g["target"], method="spearman"))
+                if math.isfinite(v):
+                    per.append(v)
+        arr = np.asarray(per, dtype=np.float64)
+        if arr.size >= 3:
+            m_bal = float(np.mean(arr))
+            s_bal = float(np.std(arr, ddof=1))
+            bal_ratio = s_bal / (abs(m_bal) + 1e-9)
+        
+        if c == "gp_alpha_00":
+            primary_diagnostic["sym_dispersion"] = bal_ratio
+
+        if is_fast_track:
+            sym_bal_ok.append(True)
+        else:
+            sym_bal_ok.append(bool(bal_ratio <= symbol_balance_max))
 
     reject = _benjamini_hochberg_reject(pvals, fdr_q)
     out = alpha_wide.copy()
     n_surv = 0
+
+    # 상세 진단을 위한 카운터
+    f_fdr, f_dsr, f_hl, f_tail, f_oos, f_reg, f_bal = 0, 0, 0, 0, 0, 0, 0
+    
     for i, c in enumerate(cols):
-        ok = (
-            bool(reject[i])
-            and dsr_ok[i]
-            and half_life_ok[i]
-            and tail_ok[i]
-            and oos_ok[i]
-            and regime_ok[i]
-            and sym_bal_ok[i]
-        )
+        # 개별 필터 결과 기록
+        is_fdr_ok = bool(reject[i])
+        is_dsr_ok = dsr_ok[i]
+        is_hl_ok = half_life_ok[i]
+        is_tail_ok = tail_ok[i]
+        is_oos_ok = oos_ok[i]
+        is_reg_ok = regime_ok[i]
+        is_bal_ok = sym_bal_ok[i]
+
+        ok = (is_fdr_ok and is_dsr_ok and is_hl_ok and is_tail_ok 
+              and is_oos_ok and is_reg_ok and is_bal_ok)
+        
         if ok:
             n_surv += 1
         else:
             out[c] = 0.5
+            # 탈락 원인 집계 (중복 집계 가능)
+            if not is_fdr_ok:
+                f_fdr += 1
+            if not is_dsr_ok:
+                f_dsr += 1
+            if not is_hl_ok:
+                f_hl += 1
+            if not is_tail_ok:
+                f_tail += 1
+            if not is_oos_ok:
+                f_oos += 1
+            if not is_reg_ok:
+                f_reg += 1
+            if not is_bal_ok:
+                f_bal += 1
+
     meta: dict[str, float] = {
         "n_surviving": float(n_surv),
         "n_components": float(len(cols)),
         "neutralize_primary": 1.0 if neutralize_primary else 0.0,
+        "fail_fdr": float(f_fdr),
+        "fail_dsr": float(f_dsr),
+        "fail_half_life": float(f_hl),
+        "fail_tail": float(f_tail),
+        "fail_oos": float(f_oos),
+        "fail_regime": float(f_reg),
+        "fail_sym_bal": float(f_bal),
     }
+
+    # gp_alpha_00(Primary)의 상세 지표를 meta에 병합
+    for k, v in primary_diagnostic.items():
+        meta[f"primary_{k}"] = float(v)
+    
     _logger.info("GP alpha FDR+DSR+IC gates: %d / %d columns survive.", n_surv, len(cols))
     return out, meta

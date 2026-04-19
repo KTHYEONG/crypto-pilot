@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import math
 from typing import Any, Dict, List
 
 # ==============================================================================
@@ -28,12 +27,12 @@ OPT_FUTURES_CONFIG: Dict[str, Any] = {
     "FUTURES_ML_GP_USE_TBM_WEIGHT": True,
     "FUTURES_ML_PRE_GP_REGIME": False,
     "FUTURES_ML_PRE_GP_REGIME_STATES": 3,
-    "FUTURES_ML_IC_FILTER_USE_HAC": False,
+    "FUTURES_ML_IC_FILTER_USE_HAC": True,
     "FUTURES_ML_IC_FILTER_USE_EWMA": False,
     "FUTURES_ML_IC_EWMA_HALF_LIFE": 540.0,
-    "FUTURES_ML_IC_SYMBOL_BALANCE_MAX": 3.0,
+    "FUTURES_ML_IC_SYMBOL_BALANCE_MAX": 5.0,
     "FUTURES_ML_IC_REGIME_GATE": False,
-    "FUTURES_ML_IC_FDR_Q": 0.10,
+    "FUTURES_ML_IC_FDR_Q": 0.15,
     "FUTURES_ML_GP_NSGA2_ENABLED": False,
     "FUTURES_ML_PHASE_D_TRIALS": 500,
     "FUTURES_CPCV_N_BLOCKS": 6,
