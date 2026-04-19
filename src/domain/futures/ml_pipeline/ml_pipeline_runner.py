@@ -40,17 +40,6 @@ class MLPipelineOutput:
     health_metrics_by_symbol: dict[str, dict[str, float]] = field(default_factory=dict)
 
 
-def _align_asof_1h_to_tf(df_tf: pd.DataFrame, df_1h_feats: pd.DataFrame) -> pd.DataFrame:
-    left = df_tf[["datetime"]].drop_duplicates().sort_values("datetime").copy()
-    right = df_1h_feats.copy()
-    if "datetime" not in right.columns and right.index.name == "datetime":
-        right = right.reset_index()
-    right = right.sort_values("datetime")
-    left["datetime"] = pd.to_datetime(left["datetime"], utc=True)
-    right["datetime"] = pd.to_datetime(right["datetime"], utc=True)
-    return pd.merge_asof(left, right, on="datetime", direction="backward")
-
-
 def _sorted_hmm_prob_columns(df: pd.DataFrame) -> list[str]:
     cols = [c for c in df.columns if str(c).startswith("hmm_prob_")]
     return sorted(cols, key=lambda x: int(str(x).split("_")[-1]))
@@ -137,7 +126,7 @@ def _try_tbm_labels_per_1h_row(
     df_1m: pd.DataFrame | None = None,
     collector: DataCollector | None = None,
 ) -> np.ndarray | None:
-    """Triple-barrier labels aligned to each 1h row (merge_asof backward from 4h)."""
+    """Triple-barrier labels aligned to each 1h row."""
     try:
         need = {"open", "high", "low", "close"}
         if not need.issubset(set(df_1h.columns)):
@@ -148,27 +137,28 @@ def _try_tbm_labels_per_1h_row(
             df_1m = collector.collect_1m_ohlcv(sym, fetch_start, end)
         if df_1m is None or len(df_1m) < 200:
             return None
+        
+        # [REFACTORED] Use 1h directly for TBM labeling (No 4h resampling)
         d1 = df_1h[[*list(need), "datetime"]].sort_values("datetime").copy()
         d1["datetime"] = pd.to_datetime(d1["datetime"], utc=True)
-        d1i = d1.set_index("datetime")
-        df_4h = (
-            d1i.resample("4h", label="left", closed="left")
-            .agg({"open": "first", "high": "max", "low": "min", "close": "last"})
-            .dropna(how="any")
-            .reset_index()
-        )
-        if len(df_4h) < 30:
+        
+        if len(d1) < 30:
             return None
-        tbm = label_triple_barrier(df_4h, df_1m)
+            
+        tbm = label_triple_barrier(d1, df_1m)
         if tbm is None or len(tbm) == 0:
             return None
+            
         lab = tbm.rename("tbm_label").reset_index()
         lab["datetime"] = pd.to_datetime(lab["datetime"], utc=True)
         lab = lab.sort_values("datetime")
+        
         tmp = df_1h[["datetime"]].copy()
         tmp["_ord"] = np.arange(len(tmp), dtype=np.int64)
         tmp["datetime"] = pd.to_datetime(tmp["datetime"], utc=True)
         tmp = tmp.sort_values("datetime")
+        
+        # Align labels back to 1h rows
         merged = pd.merge_asof(tmp, lab, on="datetime", direction="backward")
         merged = merged.sort_values("_ord")
         return cast(np.ndarray, merged["tbm_label"].to_numpy(dtype=np.float64))
@@ -301,7 +291,8 @@ def _step4_fusion_one_symbol(
 
         df_tf_full = data_maps[sym][tf].copy()
         df_tf_full["datetime"] = pd.to_datetime(df_tf_full["datetime"], utc=True)
-        aligned_tf = _align_asof_1h_to_tf(df_tf_full, wide_1h)
+        # Direct merge since main TF is now 1h (same as features)
+        aligned_tf = pd.merge(df_tf_full, wide_1h, on="datetime", how="left").fillna(0.0)
 
         _apply_ml_calib_probs(
             aligned_tf,

@@ -456,7 +456,7 @@ class DataCollector:
                 self.logger.warning(f"Failed to read metrics cache {path}: {e}")
             
         # 2. 메타데이터에서 실제 상장일 확인 (OHLCV 수집 시 기록됨)
-        meta_key = self._meta_key(symbol, "4h")
+        meta_key = self._meta_key(symbol, "1h")
         meta = self._load_meta().get(meta_key, {})
         earliest_available = meta.get("earliest_available")
         if earliest_available:
@@ -507,8 +507,9 @@ class DataCollector:
             
             if a_start < req_end:
                 since_ms = int(a_start.timestamp() * 1000)
-                oi_df = self.client.fetch_open_interest_history(symbol, "4h", since_ms)
-                lsr_df = self.client.fetch_long_short_ratio_history(symbol, "4h", since_ms)
+                # [REFACTORED] Fetch 1h metrics for better resolution
+                oi_df = self.client.fetch_open_interest_history(symbol, "1h", since_ms)
+                lsr_df = self.client.fetch_long_short_ratio_history(symbol, "1h", since_ms)
                 
                 if not oi_df.empty and not lsr_df.empty:
                     merged_api = pd.merge(oi_df, lsr_df, on="timestamp", how="outer")
