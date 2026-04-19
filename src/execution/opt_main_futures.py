@@ -126,6 +126,7 @@ def _load_single_symbol_data(
     start: str,
     is_end: str,
     end: str,
+    skip_metrics: bool = False,
 ) -> tuple[str, Optional[Dict[str, Any]], Optional[Dict[str, Any]], bool]:
     try:
         temp_is: Dict[str, Any] = {}
@@ -133,13 +134,15 @@ def _load_single_symbol_data(
         insufficient = False
         collector = DataCollector()
         collector.ensure_funding_data(sym, fetch_start, end)
-        collector.ensure_metrics_data(sym, fetch_start, end)
+        if not skip_metrics:
+            collector.ensure_metrics_data(sym, fetch_start, end)
+            
         for tf_l in [tf, "1d"]:
             raw_df = collector.collect_and_save(sym, tf_l, fetch_start, end)
             df = merge_funding_into_ohlcv(sym, raw_df, Path(FUTURES_DATA_DIR))
             df = merge_metrics_into_ohlcv(sym, df, Path(FUTURES_DATA_DIR))
 
-            if df is None or df.empty:
+            if df is None or df.empty or "datetime" not in df.columns:
                 insufficient = True
                 break
             
@@ -186,14 +189,20 @@ def _load_futures_data_maps_for_symbols(
     start: str,
     is_end: str,
     end: str,
+    skip_metrics: bool = False,
 ) -> tuple[Dict[str, Dict[str, Any]], Dict[str, Dict[str, Any]], List[str]]:
     data_maps: Dict[str, Dict[str, Any]] = {}
     oos_data_maps: Dict[str, Dict[str, Any]] = {}
     valid_symbols: List[str] = []
+    
+    # [Fix] Filter out non-ASCII symbols before processing
+    symbols = [s for s in symbols if all(ord(c) < 128 for c in s)]
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
         futures = [
-            executor.submit(_load_single_symbol_data, sym, tf, fetch_start, start, is_end, end)
+            executor.submit(
+                _load_single_symbol_data, sym, tf, fetch_start, start, is_end, end, skip_metrics
+            )
             for sym in symbols
         ]
         for f in concurrent.futures.as_completed(futures):
@@ -242,7 +251,13 @@ def main() -> None:
             return
 
         data_maps_broad, _, valid_broad = _load_futures_data_maps_for_symbols(
-            broad_candidates, pre_args.tf, fetch_start_date, start_date, is_end_date, end_date
+            broad_candidates,
+            pre_args.tf,
+            fetch_start_date,
+            start_date,
+            is_end_date,
+            end_date,
+            skip_metrics=True,
         )
 
         success = screen_symbol_refinement_futures(
@@ -264,6 +279,7 @@ def main() -> None:
     parser.add_argument("--trials", type=int, default=OPT_FUTURES_CONFIG["total_trials"])
     parser.add_argument("--tf", type=str, choices=["1h", "4h"], default="1h")
     parser.add_argument("--reference-date", type=str, default=None)
+    parser.add_argument("--gp-only", action="store_true", help="Stop after GP IC calculation")
     args = parser.parse_args(remaining_args)
 
     fetch_start_date, start_date, is_end_date, end_date = get_quarterly_window(args.reference_date)
@@ -290,7 +306,12 @@ def main() -> None:
         n_jobs=ml_n_jobs,
         is_end_date=is_end_date,
         is_start_date=start_date,
+        gp_only=args.gp_only,
     )
+
+    if args.gp_only:
+        _logger.info(" [GP-ONLY] Analysis complete. Exiting as requested.")
+        return
 
     # Update data_maps with ranked ML features
     for sym in valid_symbols:
