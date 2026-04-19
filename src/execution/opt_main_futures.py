@@ -82,7 +82,7 @@ logging.getLogger("BinanceClient").setLevel(logging.WARNING)
 SEP_WIDTH: int = 60
 PROGRESS_MIN_INTERVAL: float = 0.2
 MODE_MULTI: str = "multi"
-BEST_PARAMS_FUTURES_JSON_STEM: str = "best_futures_4h"
+BEST_PARAMS_FUTURES_JSON_STEM: str = "best_futures_1h"
 
 _MDD_CONSTRAINT_LIMIT: float = float(OPT_FUTURES_CONFIG.get("FUTURES_MAX_AVG_CPCV_MDD", 25.0))
 
@@ -210,7 +210,7 @@ def main() -> None:
     pre_parser = argparse.ArgumentParser(add_help=False)
     pre_parser.add_argument("--skip-universe", action="store_true")
     pre_parser.add_argument("--reference-date", type=str, default=None)
-    pre_parser.add_argument("--tf", type=str, default="4h")
+    pre_parser.add_argument("--tf", type=str, default="1h")
     pre_args, remaining_args = pre_parser.parse_known_args()
 
     if not pre_args.skip_universe:
@@ -257,7 +257,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--symbols", type=str, default=",".join(config.opt_config.FUTURES_SYMBOLS))
     parser.add_argument("--trials", type=int, default=OPT_FUTURES_CONFIG["total_trials"])
-    parser.add_argument("--tf", type=str, choices=["1h", "4h"], default="4h")
+    parser.add_argument("--tf", type=str, choices=["1h", "4h"], default="1h")
     parser.add_argument("--reference-date", type=str, default=None)
     args = parser.parse_args(remaining_args)
 
