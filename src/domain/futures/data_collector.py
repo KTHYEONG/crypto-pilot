@@ -3,16 +3,18 @@ from __future__ import annotations
 import fcntl
 import json
 import os
-import re
 import sys
+import threading
+from datetime import datetime
 from pathlib import Path
-
-import pandas as pd
 from typing import Any
 
-from src.core.exchange.binance_client import BinanceClient
-from src.core.utils.utils import setup_logger
+import pandas as pd
+
 from config.settings import FUTURES_DATA_DIR
+from src.core.exchange.binance_client import BinanceClient
+from src.core.utils.binance_vision import BinanceVisionDownloader
+from src.core.utils.utils import setup_logger
 
 # 프로젝트 루트 경로 추가 (모듈 import 문제 해결)
 project_root = str(Path(__file__).resolve().parents[3])
@@ -22,7 +24,7 @@ if project_root not in sys.path:
 
 class DataValidator:
     @staticmethod
-    def validate(df, symbol, timeframe):
+    def validate(df: pd.DataFrame, symbol: str, timeframe: str) -> list[str]:
         """데이터 무결성 검증"""
         issues = []
 
@@ -57,6 +59,10 @@ class DataValidator:
 
 
 class DataCollector:
+    _meta_lock = threading.Lock()
+    # 스마트 스로틀링이 적용되었으므로 동시 수집 숫자를 3개로 확대하여 효율성 극대화
+    _collect_1m_semaphore = threading.Semaphore(3)
+
     def __init__(self, api_key: str | None = None, secret: str | None = None) -> None:
         self.client = BinanceClient(api_key, secret)
         self.logger = setup_logger("DataCollector")
@@ -68,6 +74,18 @@ class DataCollector:
     def _cache_path(self, symbol: str, timeframe: str) -> Path:
         safe_symbol = self._safe_symbol(symbol)
         return FUTURES_DATA_DIR / f"{safe_symbol}_{timeframe}.parquet"
+
+    def list_cached_parquet_symbols(self, timeframe: str) -> list[str]:
+        """Symbols with an existing OHLCV parquet under FUTURES_DATA_DIR (delisted survivors)."""
+        suf = f"_{timeframe}.parquet"
+        out: list[str] = []
+        for p in FUTURES_DATA_DIR.glob(f"*{suf}"):
+            stem = p.name[: -len(suf)]
+            if "_" not in stem:
+                continue
+            base, quote = stem.rsplit("_", 1)
+            out.append(f"{base}/{quote}")
+        return sorted(set(out))
 
     def _meta_path(self) -> Path:
         return FUTURES_DATA_DIR / "parquet_cache_meta.json"
@@ -86,7 +104,7 @@ class DataCollector:
         except Exception:
             return {}
 
-    def _save_meta(self, meta_updates: dict[str, Any]):
+    def _save_meta(self, meta_updates: dict[str, Any]) -> None:
         """
         Concurrency-aware metadata update with deep merge and file locking.
         Prevents losing 'earliest_available' when updating 'last_checked' 
@@ -95,39 +113,40 @@ class DataCollector:
         path = self._meta_path()
         lock_path = path.with_suffix(".lock")
 
-        try:
-            # Use a separate lock file to coordinate access
-            with open(lock_path, "w") as lock_file:
-                # Acquire exclusive lock (blocking)
-                fcntl.flock(lock_file, fcntl.LOCK_EX)
+        with self._meta_lock:
+            try:
+                # Use a separate lock file to coordinate access across processes
+                with open(lock_path, "w") as lock_file:
+                    # Acquire exclusive lock (blocking)
+                    fcntl.flock(lock_file, fcntl.LOCK_EX)
 
-                current_meta = self._load_meta()
+                    current_meta = self._load_meta()
 
-                for mk, updates in meta_updates.items():
-                    if mk not in current_meta:
-                        current_meta[mk] = {}
-                    if isinstance(updates, dict) and isinstance(current_meta[mk], dict):
-                        current_meta[mk].update(updates)
-                    else:
-                        current_meta[mk] = updates
+                    for mk, updates in meta_updates.items():
+                        if mk not in current_meta:
+                            current_meta[mk] = {}
+                        if isinstance(updates, dict) and isinstance(current_meta[mk], dict):
+                            current_meta[mk].update(updates)
+                        else:
+                            current_meta[mk] = updates
 
-                # Use process-unique temp file to avoid concurrent replace errors
-                tmp = path.with_suffix(f".tmp.{os.getpid()}.json")
-                with open(tmp, "w", encoding="utf-8") as f:
-                    json.dump(current_meta, f, ensure_ascii=False, indent=2)
+                    # Use thread-unique temp file to avoid concurrent replace errors within process
+                    tmp = path.with_suffix(f".tmp.{os.getpid()}.{threading.get_ident()}.json")
+                    with open(tmp, "w", encoding="utf-8") as f:
+                        json.dump(current_meta, f, ensure_ascii=False, indent=2)
 
-                # Atomic replace
-                os.replace(tmp, path)
-        except Exception as e:
-            self.logger.error(f"Failed to save metadata: {e}")
-        finally:
-            # Cleanup temp file if it exists
-            tmp_pattern = path.with_suffix(f".tmp.{os.getpid()}.json")
-            if tmp_pattern.exists():
-                try:
-                    tmp_pattern.unlink()
-                except Exception:
-                    pass
+                    # Atomic replace
+                    os.replace(tmp, path)
+            except Exception as e:
+                self.logger.error(f"Failed to save metadata: {e}")
+            finally:
+                # Cleanup temp file if it exists
+                tmp_clean = path.with_suffix(f".tmp.{os.getpid()}.{threading.get_ident()}.json")
+                if tmp_clean.exists():
+                    try:
+                        tmp_clean.unlink()
+                    except Exception:  # noqa: S110
+                        pass
 
     TAKE_COLUMNS = (
         "timestamp",
@@ -153,7 +172,7 @@ class DataCollector:
             ) from e
         return self._normalize_df(df)
 
-    def _save_cache(self, symbol: str, timeframe: str, df: pd.DataFrame):
+    def _save_cache(self, symbol: str, timeframe: str, df: pd.DataFrame) -> None:
         path = self._cache_path(symbol, timeframe)
         temp_path = path.with_suffix(".tmp.parquet")
         try:
@@ -165,72 +184,132 @@ class DataCollector:
         temp_path.replace(path)
 
     def _normalize_df(self, df: pd.DataFrame) -> pd.DataFrame:
-        # Do NOT early-return on empty: dtype normalization must run even for empty DataFrames.
-        # An empty parquet (e.g. delisted symbol) retains its tz-naive datetime64[ms] schema;
-        # skipping normalization causes "Invalid comparison between dtype=datetime64[ms] and
-        # Timestamp" when the empty df is concat-ed with fetched data and then filtered.
-        if "datetime" not in df.columns:
-            if "timestamp" in df.columns and not df.empty:
-                df["datetime"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
-        else:
+        # Avoid redundant work but ensure datetime exists and is UTC-aware.
+        # Crucial for preventing "Invalid comparison between dtype=datetime64[ns] and Timestamp".
+        if "timestamp" in df.columns:
+            # Re-generate from internal integer timestamp to fix any naive/bad resoluton datetime
+            df["datetime"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
+        elif "datetime" in df.columns:
             df["datetime"] = pd.to_datetime(df["datetime"], utc=True)
         return df
+
+    @staticmethod
+    def _get_timeframe_delta(timeframe: str) -> pd.Timedelta:
+        """타임프레임 문자열(1m, 1h, 1d 등)을 pd.Timedelta로 변환"""
+        import re
+        match = re.match(r"(\d+)([mhdDwW])", timeframe)
+        if not match:
+            # 매칭 실패 시 기본값 (1m)
+            return pd.Timedelta(minutes=1)
+        
+        val, unit = int(match.group(1)), match.group(2).lower()
+        mapping = {"m": "T", "h": "H", "d": "D", "w": "W"}
+        return pd.Timedelta(f"{val}{mapping.get(unit, 'T')}")
+
+    def _identify_middle_gaps(
+        self, df: pd.DataFrame, timeframe: str, start_bound: pd.Timestamp, end_bound: pd.Timestamp
+    ) -> list[tuple[pd.Timestamp, pd.Timestamp]]:
+        """데이터프레임 내에서 중간에 누락된 구간(Holes)을 찾아 리스트로 반환"""
+        if df.empty:
+            return []
+        
+        expected_delta = self._get_timeframe_delta(timeframe)
+        # 요청 범위 내의 데이터만 필터링하여 정렬
+        mask = (df["datetime"] >= start_bound) & (df["datetime"] <= end_bound)
+        sub_df = df.loc[mask].sort_values("datetime")
+        
+        if len(sub_df) < 2:
+            return []
+
+        # 시간 차이 계산
+        diffs = sub_df["datetime"].diff()
+        # 기대되는 시간 간격보다 1.5배 이상 큰 경우 구멍으로 판단 (네트워크 지연 등 고려)
+        gap_mask = diffs > (expected_delta * 1.5)
+        gap_indices = diffs[gap_mask].index
+        
+        gaps = []
+        for idx in gap_indices:
+            gap_end = sub_df.loc[idx, "datetime"]
+            # 이전 행의 시간이 구멍의 시작점
+            gap_start = sub_df.loc[sub_df.index.get_loc(idx) - 1, "datetime"]
+            gaps.append((gap_start, gap_end))
+            self.logger.warning(
+                f"Found middle gap in {timeframe} data: {gap_start} ~ {gap_end}"
+            )
+        
+        return gaps
 
     def collect_and_save(
         self, symbol: str, timeframe: str, start_date: str, end_date: str
     ) -> pd.DataFrame:
-        """데이터 수집, 로컬 캐시 결합 및 저장"""
-        self.logger.info(f"Collecting {symbol} {timeframe} ({start_date} ~ {end_date})")
-
-        # 1. 로컬 캐시 로드
-        cache_df = self._load_cache(symbol, timeframe)
+        """데이터 수집, 로컬 캐시 결합 및 저장 (Taker Volume 포함)"""
         req_start = pd.to_datetime(start_date, utc=True)
         req_end = pd.to_datetime(end_date, utc=True)
 
-        # 2. 메타데이터 로드 (상장일 및 기 체크 정보)
+        # 1. 로컬 캐시 로드
+        cache_df = self._load_cache(symbol, timeframe)
+
+        # 2. 메타데이터 로드
         meta_key = self._meta_key(symbol, timeframe)
         meta = self._load_meta().get(meta_key, {})
         earliest_available = meta.get("earliest_available")
         if earliest_available:
-            earliest_available = pd.to_datetime(earliest_available, utc=True)
-            if req_start < earliest_available:
-                req_start = earliest_available
+            ea_dt = pd.to_datetime(earliest_available, utc=True)
+            if req_start < ea_dt:
+                req_start = ea_dt
 
-        # 3. 필요한 구간 판단
-        fetch_needed = True
-        if not cache_df.empty:
+        # 3. 필요한 구간 판단 (Incremental + Gap Filling)
+        fetch_tasks: list[tuple[pd.Timestamp, pd.Timestamp]] = []
+        if cache_df.empty:
+            fetch_tasks.append((req_start, req_end))
+        else:
             c_start = cache_df["datetime"].min()
             c_end = cache_df["datetime"].max()
+            
+            # 3a. 과거/미래 확장
+            if req_start < c_start:
+                fetch_tasks.append((req_start, c_start))
+            if req_end > c_end:
+                fetch_tasks.append((c_end, req_end))
+            
+            # 3b. 중간 구멍 탐지 (Self-Healing)
+            middle_gaps = self._identify_middle_gaps(cache_df, timeframe, req_start, req_end)
+            fetch_tasks.extend(middle_gaps)
 
-            # 요청 구간이 캐시 범위 내에 있으면 fetch 불필요
-            if c_start <= req_start and c_end >= req_end:
-                fetch_needed = False
-
-        new_df = pd.DataFrame()
-        if fetch_needed:
-            # 바이낸스에서 데이터 가져오기
-            new_df = self.client.fetch_ohlcv(symbol, timeframe, start_date, end_date)
-            if not new_df.empty:
-                new_df = self._normalize_df(new_df)
-                # 실제 데이터의 시작점 기록 (상장일 추정)
-                actual_start = new_df["datetime"].min()
-                if not earliest_available or actual_start < earliest_available:
-                    self._save_meta({meta_key: {"earliest_available": str(actual_start)}})
+        new_dfs: list[pd.DataFrame] = []
+        for f_start, f_end in fetch_tasks:
+            self.logger.info(f"Fetching {symbol} {timeframe} task (with taker): {f_start} ~ {f_end}")
+            # Use fetch_ohlcv_with_taker to include CVD/microstructure data for GP
+            chunk = self.client.fetch_ohlcv_with_taker(symbol, timeframe, str(f_start), str(f_end))
+            if not chunk.empty:
+                new_dfs.append(self._normalize_df(chunk))
 
         # 4. 데이터 병합 및 중복 제거
-        combined_df = pd.concat([cache_df, new_df]).drop_duplicates(subset=["timestamp"])
-        combined_df.sort_values("timestamp", inplace=True)
-
-        # 5. 캐시 저장
-        if not new_df.empty or cache_df.empty:
+        if new_dfs:
+            combined_df = pd.concat([cache_df, *new_dfs]).drop_duplicates(subset=["timestamp"])
+            combined_df.sort_values("timestamp", inplace=True)
+            
+            # 실제 데이터의 시작점 기록 (상장일 추정)
+            actual_start = combined_df["datetime"].min()
+            ea_dt_meta = (
+                pd.to_datetime(earliest_available, utc=True)
+                if earliest_available else None
+            )
+            if not earliest_available or (ea_dt_meta and actual_start < ea_dt_meta):
+                self._save_meta({meta_key: {"earliest_available": str(actual_start)}})
+            
+            # 캐시 저장
             self._save_cache(symbol, timeframe, combined_df)
             self._save_meta({meta_key: {"last_checked": str(pd.Timestamp.now(tz="UTC"))}})
+            cache_df = combined_df
 
         # 6. 요청한 범위만 필터링하여 반환
-        mask = (combined_df["datetime"] >= req_start) & (combined_df["datetime"] <= req_end)
-        return combined_df.loc[mask].copy()
+        mask = (cache_df["datetime"] >= req_start) & (cache_df["datetime"] <= req_end)
+        return cache_df.loc[mask].copy()
 
-    def _fetch_ranges(self, symbol: str, timeframe: str, ranges: list[tuple[pd.Timestamp, pd.Timestamp]]) -> list[pd.DataFrame]:
+    def _fetch_ranges(
+        self, symbol: str, timeframe: str, ranges: list[tuple[pd.Timestamp, pd.Timestamp]]
+    ) -> list[pd.DataFrame]:
         results = []
         for start, end in ranges:
             df = self.client.fetch_ohlcv(symbol, timeframe, str(start), str(end))
@@ -241,50 +320,201 @@ class DataCollector:
     def collect_1m_ohlcv(self, symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
         """
         Load or fetch 1m OHLCV (Binance USDT-M futures); cache `{safe_symbol}_1m.parquet`.
-        Uses the same incremental merge pattern as collect_and_save.
+        누락된 구간만 증분 수집하여 병목 현상 해결.
         """
         timeframe = "1m"
-        self.logger.info("Collecting %s %s (%s ~ %s)", symbol, timeframe, start_date, end_date)
-        cache_df = self._load_cache(symbol, timeframe)
         req_start = pd.to_datetime(start_date, utc=True)
         req_end = pd.to_datetime(end_date, utc=True)
 
+        # 1. 로컬 캐시 로드
+        cache_df = self._load_cache(symbol, timeframe)
+
+        # 2. 메타데이터 로드
         meta_key = self._meta_key(symbol, timeframe)
         meta = self._load_meta().get(meta_key, {})
         earliest_available = meta.get("earliest_available")
         if earliest_available:
-            earliest_available = pd.to_datetime(earliest_available, utc=True)
-            if req_start < earliest_available:
-                req_start = earliest_available
+            ea_dt = pd.to_datetime(earliest_available, utc=True)
+            if req_start < ea_dt:
+                req_start = ea_dt
 
-        fetch_needed = True
-        if not cache_df.empty:
+        # 3. 필요한 구간 판단
+        fetch_tasks: list[tuple[pd.Timestamp, pd.Timestamp]] = []
+        if cache_df.empty:
+            fetch_tasks.append((req_start, req_end))
+            self.logger.info("1m cache miss for %s — fetching (%s ~ %s)",
+                             symbol, start_date, end_date)
+        else:
             c_start = cache_df["datetime"].min()
             c_end = cache_df["datetime"].max()
-            if c_start <= req_start and c_end >= req_end:
-                fetch_needed = False
+            
+            # 3a. 과거/미래 확장
+            if req_start < c_start:
+                fetch_tasks.append((req_start, c_start))
+            if req_end > c_end:
+                fetch_tasks.append((c_end, req_end))
+            
+            # 3b. 중간 구멍 탐지 (Self-Healing)
+            middle_gaps = self._identify_middle_gaps(cache_df, timeframe, req_start, req_end)
+            fetch_tasks.extend(middle_gaps)
+            
+            if fetch_tasks:
+                for f_s, f_e in fetch_tasks:
+                    self.logger.warning(
+                        "1m data task for %s: missing [%s, %s]; will fetch via API.",
+                        symbol, f_s, f_e
+                    )
+            else:
+                self.logger.debug("1m cache hit for %s (%s ~ %s)", symbol, start_date, end_date)
 
-        new_df = pd.DataFrame()
-        if fetch_needed:
-            new_df = self.client.fetch_ohlcv_with_taker(symbol, timeframe, start_date, end_date)
-            if not new_df.empty:
-                new_df = self._normalize_df(new_df)
-                actual_start = new_df["datetime"].min()
-                ea = pd.to_datetime(earliest_available, utc=True) if earliest_available else None
-                if not earliest_available or actual_start < ea:
-                    self._save_meta({meta_key: {"earliest_available": str(actual_start)}})
+        new_dfs: list[pd.DataFrame] = []
+        if fetch_tasks:
+            # 세마포어를 사용하여 최대 2개 심볼만 동시에 API 호출 수행
+            with self._collect_1m_semaphore:
+                for idx, (f_start, f_end) in enumerate(fetch_tasks):
+                    total_days = (f_end - f_start).days + 1
+                    self.logger.info(
+                        " [%s] Fetching 1m gap %d/%d: %s ~ %s (approx. %d days)",
+                        symbol, idx + 1, len(fetch_tasks), f_start.date(), f_end.date(), total_days
+                    )
+                    chunk = self.client.fetch_ohlcv_with_taker(
+                        symbol, timeframe, str(f_start), str(f_end)
+                    )
+                    if not chunk.empty:
+                        chunk = self._normalize_df(chunk)
+                        new_dfs.append(chunk)
+                        self.logger.info(" [%s] OK. Fetched %d rows.", symbol, len(chunk))
 
-        combined_df = pd.concat([cache_df, new_df]).drop_duplicates(subset=["timestamp"])
-        combined_df.sort_values("timestamp", inplace=True)
-
-        if not new_df.empty or cache_df.empty:
+        # 4. 데이터 병합 및 중복 제거
+        if new_dfs:
+            combined_df = pd.concat([cache_df, *new_dfs]).drop_duplicates(subset=["timestamp"])
+            combined_df.sort_values("timestamp", inplace=True)
+            
+            actual_start = combined_df["datetime"].min()
+            ea_dt_meta_1m = (
+                pd.to_datetime(earliest_available, utc=True)
+                if earliest_available else None
+            )
+            if not earliest_available or (ea_dt_meta_1m and actual_start < ea_dt_meta_1m):
+                self._save_meta({meta_key: {"earliest_available": str(actual_start)}})
+            
             self._save_cache(symbol, timeframe, combined_df)
             self._save_meta({meta_key: {"last_checked": str(pd.Timestamp.now(tz="UTC"))}})
+            cache_df = combined_df
 
-        mask = (combined_df["datetime"] >= req_start) & (combined_df["datetime"] <= req_end)
-        return combined_df.loc[mask].copy()
+        mask = (cache_df["datetime"] >= req_start) & (cache_df["datetime"] <= req_end)
+        return cache_df.loc[mask].copy()
 
-    def ensure_funding_data(self, symbol: str, start_date: str, end_date: str):
+    def _normalize_metrics_df(self, df: pd.DataFrame) -> pd.DataFrame:
+        """metrics 데이터의 timestamp를 integer ms로 통일"""
+        if df.empty:
+            return df
+        
+        df = df.copy()
+        
+        # 1. datetime 컬럼 확보
+        if "datetime" in df.columns:
+            df["datetime"] = pd.to_datetime(df["datetime"], utc=True, errors="coerce")
+        elif "timestamp" in df.columns:
+            s_ts = pd.to_numeric(df["timestamp"], errors="coerce")
+            if s_ts.isna().all():
+                df["datetime"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
+            else:
+                val = s_ts.dropna().iloc[0]
+                if val < 1e11: # seconds
+                    df["datetime"] = pd.to_datetime(s_ts, unit="s", utc=True)
+                elif val < 1e14: # ms
+                    df["datetime"] = pd.to_datetime(s_ts, unit="ms", utc=True)
+                else: # ns
+                    df["datetime"] = pd.to_datetime(s_ts, unit="ns", utc=True)
+        elif "create_time" in df.columns:
+            df["datetime"] = pd.to_datetime(df["create_time"], utc=True, errors="coerce")
+            
+        # 2. datetime -> ms (가장 확실한 방법)
+        if "datetime" in df.columns:
+            df = df.dropna(subset=["datetime"])
+            # x.timestamp() returns seconds (float), * 1000 -> ms
+            df["timestamp"] = (df["datetime"].apply(lambda x: x.timestamp()) * 1000).astype("int64")
+            
+        return df
+
+    def ensure_metrics_data(self, symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
+        """미결제약정(OI) 및 롱숏비율(LSR) 데이터를 Vision + API 조합으로 수집하여 parquet 저장"""
+        safe_symbol = self._safe_symbol(symbol)
+        path = FUTURES_DATA_DIR / f"{safe_symbol}_metrics.parquet"
+        
+        req_start = pd.to_datetime(start_date, utc=True)
+        req_end = pd.to_datetime(end_date, utc=True)
+        
+        # 1. 로컬 캐시 로드
+        cache_df = pd.DataFrame()
+        if path.exists():
+            try:
+                cache_df = self._normalize_metrics_df(pd.read_parquet(path))
+            except Exception as e:
+                self.logger.warning(f"Failed to read metrics cache {path}: {e}")
+            
+        # 2. 데이터 부족 여부 확인 (30일 분기점 계산)
+        api_cutoff = pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=28) # 안전마진 28일
+        
+        vision_needed = False
+        api_needed = False
+        
+        if cache_df.empty:
+            vision_needed = req_start < api_cutoff
+            api_needed = req_end >= api_cutoff
+        else:
+            c_start = cache_df["datetime"].min()
+            c_end = cache_df["datetime"].max()
+            if req_start < c_start:
+                vision_needed = True
+            if req_end > c_end:
+                api_needed = True
+
+        new_parts = []
+        
+        # 3. Vision 수집 (30일 이전)
+        if vision_needed:
+            v_start = req_start
+            if not cache_df.empty:
+                v_end = min(cache_df["datetime"].min(), api_cutoff)
+            else:
+                v_end = min(req_end, api_cutoff)
+                
+            if v_start < v_end:
+                downloader = BinanceVisionDownloader()
+                v_df = downloader.fetch_range_metrics(symbol.replace("/", ""), v_start, v_end)
+                if not v_df.empty:
+                    new_parts.append(self._normalize_metrics_df(v_df))
+                
+        # 4. API 수집 (최근 30일)
+        if api_needed:
+            a_start = max(req_start, api_cutoff)
+            if not cache_df.empty:
+                a_start = max(a_start, cache_df["datetime"].max())
+            
+            if a_start < req_end:
+                since_ms = int(a_start.timestamp() * 1000)
+                oi_df = self.client.fetch_open_interest_history(symbol, "4h", since_ms)
+                lsr_df = self.client.fetch_long_short_ratio_history(symbol, "4h", since_ms)
+                
+                if not oi_df.empty and not lsr_df.empty:
+                    merged_api = pd.merge(oi_df, lsr_df, on="timestamp", how="outer")
+                    new_parts.append(self._normalize_metrics_df(merged_api))
+
+        # 5. 병합 및 저장
+        if new_parts:
+            combined = pd.concat([cache_df, *new_parts]).drop_duplicates(subset=["timestamp"])
+            combined["timestamp"] = combined["timestamp"].astype("int64")
+            combined.sort_values("timestamp", inplace=True)
+            combined.to_parquet(path, index=False)
+            self.logger.info(f"Updated metrics parquet cache: {path}")
+            cache_df = combined
+
+        mask = (cache_df["datetime"] >= req_start) & (cache_df["datetime"] <= req_end)
+        return cache_df.loc[mask].copy()
+
+    def ensure_funding_data(self, symbol: str, start_date: str, end_date: str) -> None:
         """펀딩 데이터 수집 및 저장 (Binance 전용)"""
         from config.settings import FUTURES_DATA_DIR
         safe_symbol = self._safe_symbol(symbol)
