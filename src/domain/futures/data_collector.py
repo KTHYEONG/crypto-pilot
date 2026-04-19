@@ -520,8 +520,24 @@ class DataCollector:
             combined = pd.concat([cache_df, *new_parts]).drop_duplicates(subset=["timestamp"])
             combined["timestamp"] = combined["timestamp"].astype("int64")
             combined.sort_values("timestamp", inplace=True)
+            
+            # [Institutional Optimization] Select only core alpha metrics & downcast to float32
+            # These columns are standard for GP Miner / HMM regime filtering
+            core_cols = [
+                "timestamp", "datetime",
+                "sum_open_interest", "sum_open_interest_value",
+                "long_short_ratio", "top_trader_long_short_ratio",
+                "taker_buy_sell_vol_value"
+            ]
+            existing_cols = [c for c in core_cols if c in combined.columns]
+            combined = combined[existing_cols].copy()
+            
+            # Downcast floating point numbers to float32 (reduces size by ~50% with negligible loss)
+            float_cols = combined.select_dtypes(include=["float64"]).columns
+            combined[float_cols] = combined[float_cols].astype("float32")
+            
             combined.to_parquet(path, index=False)
-            self.logger.info(f"Updated metrics parquet cache: {path}")
+            self.logger.info(f"Updated metrics parquet cache (optimized): {path} | Size reduced via float32")
             cache_df = combined
 
         mask = (cache_df["datetime"] >= req_start) & (cache_df["datetime"] <= req_end)

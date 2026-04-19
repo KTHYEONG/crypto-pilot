@@ -152,7 +152,11 @@ def _load_single_symbol_data(
             is_mask = df["datetime"] < is_end_dt
             is_end_idx = int(is_mask.to_numpy().sum())
 
-            if is_end_idx < 300:
+            # [Dynamic Quality Gate] 1h requires more bars than 4h/1d
+            min_bars_map = {"1h": 2000, "4h": 500, "1d": 300}
+            min_bars_threshold = min_bars_map.get(tf_l, 300)
+            
+            if is_end_idx < min_bars_threshold:
                 insufficient = True
                 break
 
@@ -245,6 +249,7 @@ def main() -> None:
             broad_candidates=list(broad_candidates),
             winning_signal_type="CS_RANK",
             is_end_date=is_end_date,
+            tf=pre_args.tf,
             symbol_dfs_4h={s: data_maps_broad[s][pre_args.tf] for s in valid_broad},
             daily_dfs={s: data_maps_broad[s]["1d"] for s in valid_broad},
             phase_b_params=None,
