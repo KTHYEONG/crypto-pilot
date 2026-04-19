@@ -5,6 +5,8 @@ Learns a universal formula across multiple symbols using panel data and CS-IC fi
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
@@ -12,6 +14,32 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+
+
+def _generate_smart_cache_stem(
+    pop: int, gen: int, horizons: tuple[int, ...], symbols: list[str], is_end_date: str | None
+) -> str:
+    """
+    직관적인 Prefix와 고유 설정을 조합한 스마트 캐시 파일명 생성.
+    Prefix: gp_univ_s{n_sym}_h{horizons}
+    Hash: Pop, Gen, Symbols, Date를 조합하여 무결성 보장.
+    """
+    h_str = "-".join(map(str, horizons))
+    prefix = f"gp_univ_s{len(symbols)}_h{h_str}"
+
+    # 무결성을 결정짓는 'DNA' 문자열 생성
+    dna = {
+        "pop": pop,
+        "gen": gen,
+        "horizons": horizons,
+        "symbols": sorted(symbols),
+        "is_end_date": is_end_date,
+        "version": "v8_vectorized", # 최적화 알고리즘 버전 관리
+    }
+    dna_json = json.dumps(dna, sort_keys=True)
+    short_hash = hashlib.md5(dna_json.encode()).hexdigest()[:8]
+
+    return f"{prefix}_{short_hash}"
 from gplearn.fitness import make_fitness
 from gplearn.functions import make_function
 from gplearn.genetic import SymbolicTransformer
@@ -179,9 +207,6 @@ _GP_FUNCTION_SET = [
 ]
 
 
-def _cache_stem_suffix(population_size: int, generations: int, horizons: tuple[int, ...]) -> str:
-    hkey = "-".join(str(h) for h in horizons)
-    return f"v10_icir_p{population_size}_g{generations}_h{hkey}"
 
 
 def _pct_uniform_cs_is_fit(unstacked: pd.DataFrame, is_row_mask: np.ndarray) -> pd.DataFrame:
@@ -233,6 +258,26 @@ class GPAlphaMiner:
     n_jobs: int = 1
     parsimony_coefficient: float = 0.001
 
+    def _cleanup_old_caches(self, cache_path: Path, max_age_days: int = 7) -> None:
+        """Removes GP cache files older than max_age_days to manage storage efficiently."""
+        try:
+            import time
+            now = time.time()
+            cache_dir = cache_path.parent
+            if not cache_dir.exists():
+                return
+            # Cleanup both old-style filtered caches and new raw caches
+            patterns = ["gp_univ_*", "raw_gp_univ_*"]
+            for pattern in patterns:
+                for f in cache_dir.glob(pattern):
+                    if f.is_file() and (now - f.stat().st_mtime) > (max_age_days * 86400):
+                        try:
+                            f.unlink()
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+
     def mine_alphas_cs(
         self,
         panel_df: pd.DataFrame,
@@ -253,24 +298,34 @@ class GPAlphaMiner:
         if src_cols:
             work_panel = CrossSectionalPipelineUtils.cs_rank_transform(work_panel, src_cols)
 
-        # Cache check
+        # 1. Cache Check (Raw Alphas only)
         versioned_cache: Path | None = None
+        raw_alpha_df: pd.DataFrame | None = None
         if cache_path is not None:
-            n_syms = work_panel.index.get_level_values("symbol").nunique()
-            tag = _cache_stem_suffix(
-                self.population_size, self.generations, self.target_horizons
+            # Storage Management: Remove old caches
+            self._cleanup_old_caches(cache_path)
+
+            symbols = list(work_panel.index.get_level_values("symbol").unique())
+            # Use 'raw_' prefix to separate from filtered caches
+            tag = "raw_" + _generate_smart_cache_stem(
+                self.population_size, self.generations, self.target_horizons, symbols, is_end_date
             )
-            versioned_cache = cache_path.with_stem(f"{cache_path.stem}_{tag}_s{n_syms}")
+            versioned_cache = cache_path.with_name(f"{tag}.parquet")
+            meta_cache = versioned_cache.with_suffix(".json")
             if versioned_cache.exists():
                 try:
                     loaded = pd.read_parquet(versioned_cache)
                     if len(loaded) == len(panel_df):
-                        _logger.info("GP CS Cache Hit: %s.", versioned_cache.name)
-                        return loaded
+                        _logger.info("GP CS Cache Hit (RAW): %s.", versioned_cache.name)
+                        # Restore attrs from JSON if exists
+                        if meta_cache.exists():
+                            with open(meta_cache, "r") as f:
+                                loaded.attrs.update(json.load(f))
+                        raw_alpha_df = loaded
                 except Exception as e:
-                    _logger.debug("GP Cache load failed: %s", e)
+                    _logger.debug("GP Raw Cache load failed: %s", e)
 
-        # 1. Prepare Rectangular Grid
+        # Prepare Grid (needed for training or mapping)
         unstacked_y = work_panel["target"].unstack(level="symbol")
         unique_times = unstacked_y.index
         unique_symbols = unstacked_y.columns
@@ -290,91 +345,107 @@ class GPAlphaMiner:
             [unique_times, unique_symbols], names=["datetime", "symbol"]
         )
 
-        feat_cols = _resolve_gp_feature_columns(work_panel)
-        template = pd.DataFrame(index=full_grid_index)
-        join_cols = [*feat_cols, "target"]
-        if "tbm_gp_weight" in work_panel.columns:
-            join_cols = [*feat_cols, "tbm_gp_weight", "target"]
-        aligned_df = template.join(work_panel[join_cols]).fillna(np.nan)
+        # 2. GP Training (Skip if Raw Cache Hit)
+        if raw_alpha_df is None:
+            feat_cols = _resolve_gp_feature_columns(work_panel)
+            template = pd.DataFrame(index=full_grid_index)
+            join_cols = [*feat_cols, "target"]
+            if "tbm_gp_weight" in work_panel.columns:
+                join_cols = [*feat_cols, "tbm_gp_weight", "target"]
+            aligned_df = template.join(work_panel[join_cols]).fillna(np.nan)
 
-        y_raw = aligned_df["target"].values
-        x_grid = aligned_df[feat_cols].values
+            y_raw = aligned_df["target"].values
+            x_grid = aligned_df[feat_cols].values
 
-        # Determine training mask
-        sample_weight = np.where(pd.isna(y_raw), 0.0, 1.0)
-        if "tbm_gp_weight" in aligned_df.columns:
-            tw = aligned_df["tbm_gp_weight"].fillna(1.0).to_numpy(dtype=np.float64)
-            sample_weight = sample_weight * np.clip(tw, 0.25, 3.0)
-        if is_end_date:
-            times = aligned_df.index.get_level_values("datetime")
-            if times.tz is None:
-                times = times.tz_localize("UTC")
-            else:
-                times = times.tz_convert("UTC")
-            cutoff_dt = pd.to_datetime(is_end_date, utc=True)
-            is_mask = np.asarray(times < cutoff_dt)
-            sample_weight = sample_weight * is_mask
+            # Determine training mask
+            sample_weight = np.where(pd.isna(y_raw), 0.0, 1.0)
+            if "tbm_gp_weight" in aligned_df.columns:
+                tw = aligned_df["tbm_gp_weight"].fillna(1.0).to_numpy(dtype=np.float64)
+                sample_weight = sample_weight * np.clip(tw, 0.25, 3.0)
+            if is_end_date:
+                times = aligned_df.index.get_level_values("datetime")
+                if times.tz is None:
+                    times = times.tz_localize("UTC")
+                else:
+                    times = times.tz_convert("UTC")
+                cutoff_dt = pd.to_datetime(is_end_date, utc=True)
+                is_mask = np.asarray(times < cutoff_dt)
+                sample_weight = sample_weight * is_mask
 
-        # [REFACTORED] Downsampling to 4h is removed to match 1h main architecture.
-        # Use full 1h panel for GP fitness calculation.
+            # Internal 80/20 chronological holdout + drop NaN rows
+            n_time = len(unique_times)
+            train_t_limit = max(1, int(n_time * 0.8))
+            row_t: np.ndarray = np.arange(len(aligned_df), dtype=np.int64) // n_symbols
+            fit_time_ok = row_t < train_t_limit
+            nan_row = np.isnan(x_grid).any(axis=1) | np.isnan(y_raw)
+            w_fit = fit_time_ok.astype(np.float64)
+            w_nan = (~nan_row).astype(np.float64)
+            sample_weight = sample_weight * w_fit * w_nan
 
-        # Internal 80/20 chronological holdout + drop NaN rows (CS grid: time x symbol)
-        n_time = len(unique_times)
-        train_t_limit = max(1, int(n_time * 0.8))
-        row_t: np.ndarray = np.arange(len(aligned_df), dtype=np.int64) // n_symbols
-        fit_time_ok = row_t < train_t_limit
-        nan_row = np.isnan(x_grid).any(axis=1) | np.isnan(y_raw)
-        w_fit = fit_time_ok.astype(np.float64)
-        w_nan = (~nan_row).astype(np.float64)
-        sample_weight = sample_weight * w_fit * w_nan
+            sample_weight[0] = float(n_symbols)
 
-        sample_weight[0] = float(n_symbols)  # Hint for fitness (row 0 only; see docstring)
+            st = SymbolicTransformer(
+                feature_names=feat_cols,
+                function_set=_GP_FUNCTION_SET,
+                metric=_CS_FITNESS,
+                population_size=self.population_size,
+                generations=self.generations,
+                stopping_criteria=0.08,
+                n_components=self.n_features_to_select,
+                random_state=42,
+                n_jobs=self.n_jobs,
+                verbose=1,
+                parsimony_coefficient=self.parsimony_coefficient,
+                init_depth=(2, 5),
+                p_crossover=0.7,
+                p_subtree_mutation=0.15,
+                p_hoist_mutation=0.05,
+                p_point_mutation=0.05,
+            )
 
-        # 2. GP Training
-        st = SymbolicTransformer(
-            feature_names=feat_cols,
-            function_set=_GP_FUNCTION_SET,
-            metric=_CS_FITNESS,
-            population_size=self.population_size,
-            generations=self.generations,
-            stopping_criteria=0.08,
-            n_components=self.n_features_to_select,
-            random_state=42,
-            n_jobs=self.n_jobs,
-            verbose=1,
-            parsimony_coefficient=self.parsimony_coefficient,
-            init_depth=(2, 5),
-            p_crossover=0.7,
-            p_subtree_mutation=0.15,
-            p_hoist_mutation=0.05,
-            p_point_mutation=0.05,
-        )
+            x_clean = np.where(np.isfinite(x_grid), x_grid, 0.0)
+            y_clean = np.where(np.isfinite(y_raw), y_raw, 0.0)
+            st.fit(x_clean, y_clean, sample_weight=sample_weight)
 
-        x_clean = np.where(np.isfinite(x_grid), x_grid, 0.0)
-        y_clean = np.where(np.isfinite(y_raw), y_raw, 0.0)
-        st.fit(x_clean, y_clean, sample_weight=sample_weight)
+            # 3. Predict and Map back
+            self._st = st
+            out_grid = st.transform(x_clean)
+            cols = [f"gp_alpha_{i:02d}" for i in range(self.n_features_to_select)]
+            full_alpha_df = pd.DataFrame(out_grid, index=full_grid_index, columns=cols)
 
-        # 3. Predict and Map back
-        self._st = st
-        out_grid = st.transform(x_clean)
-        cols = [f"gp_alpha_{i:02d}" for i in range(self.n_features_to_select)]
-        full_alpha_df = pd.DataFrame(out_grid, index=full_grid_index, columns=cols)
+            alpha_series_list = []
+            for col in cols:
+                unstacked = full_alpha_df[col].unstack(level="symbol")
+                if unstacked.std(axis=1).mean() < 1e-12:
+                    s = pd.Series(0.5, index=full_grid_index, name=col)
+                else:
+                    ranked = _pct_uniform_cs_is_fit(unstacked, is_row_mask_utc)
+                    s = ranked.stack(future_stack=True)
+                    s.name = col
+                alpha_series_list.append(s)
 
-        alpha_series_list = []
-        for col in cols:
-            unstacked = full_alpha_df[col].unstack(level="symbol")
-            if unstacked.std(axis=1).mean() < 1e-12:
-                s = pd.Series(0.5, index=full_grid_index, name=col)
-            else:
-                ranked = _pct_uniform_cs_is_fit(unstacked, is_row_mask_utc)
-                s = ranked.stack(future_stack=True)
-                s.name = col
-            alpha_series_list.append(s)
+            raw_alpha_df = pd.concat(alpha_series_list, axis=1)
 
-        alpha_df_all = pd.concat(alpha_series_list, axis=1)
+            best_fitness = 0.0
+            if hasattr(st, "_best_programs") and len(st._best_programs) > 0:
+                best_fitness = st._best_programs[0].fitness_
+            raw_alpha_df.attrs["best_fitness"] = float(best_fitness)
+
+            # Save Raw Cache
+            if versioned_cache is not None:
+                try:
+                    versioned_cache.parent.mkdir(parents=True, exist_ok=True)
+                    raw_alpha_df.to_parquet(versioned_cache)
+                    meta_cache = versioned_cache.with_suffix(".json")
+                    with open(meta_cache, "w") as f:
+                        json.dump(dict(raw_alpha_df.attrs), f, indent=2)
+                except Exception as e:
+                    _logger.warning("GP Raw Cache Write Failed: %s", e)
+
+        # 4. Dynamic Filtering (Always run)
         fo = filter_options or {}
         alpha_df_all, filt_meta = filter_gp_alpha_columns(
-            alpha_df_all,
+            raw_alpha_df.copy(),
             panel_df,
             is_end_date=is_end_date,
             n_trials=self.n_features_to_select,
@@ -385,23 +456,13 @@ class GPAlphaMiner:
             symbol_balance_max=float(fo.get("symbol_balance_max", 3.0)),
             require_regime_gate=bool(fo.get("require_regime_gate", True)),
         )
+
         if float(filt_meta.get("neutralize_primary", 0.0)) > 0.5:
             alpha_df_all["gp_alpha_00"] = 0.5
 
         alpha_df = alpha_df_all.reindex(panel_df.index).fillna(0.5)
-
-        best_fitness = 0.0
-        if hasattr(st, "_best_programs") and len(st._best_programs) > 0:
-            best_fitness = st._best_programs[0].fitness_
-        alpha_df.attrs["best_fitness"] = float(best_fitness)
+        alpha_df.attrs["best_fitness"] = raw_alpha_df.attrs.get("best_fitness", 0.0)
         alpha_df.attrs["gp_alpha_filter"] = filt_meta
-
-        if versioned_cache is not None:
-            try:
-                versioned_cache.parent.mkdir(parents=True, exist_ok=True)
-                alpha_df.to_parquet(versioned_cache)
-            except Exception as e:
-                _logger.warning("GP CS Cache Write Failed: %s", e)
 
         return alpha_df
 

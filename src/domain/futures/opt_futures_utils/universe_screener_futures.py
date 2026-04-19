@@ -78,11 +78,20 @@ def _calculate_amihud_illiquidity(df: pd.DataFrame, tail_bars: int = 180) -> flo
 def _slice_df_to_is(df: pd.DataFrame, is_start: str, is_end: str) -> pd.DataFrame:
     if df.empty or "datetime" not in df.columns:
         return df.iloc[0:0].copy()
-    is_s = pd.to_datetime(is_start).tz_localize("UTC") if pd.to_datetime(is_start).tzinfo is None else pd.to_datetime(is_start)
-    is_e = pd.to_datetime(is_end).tz_localize("UTC") if pd.to_datetime(is_end).tzinfo is None else pd.to_datetime(is_end)
+    is_s = (
+        pd.to_datetime(is_start).tz_localize("UTC")
+        if pd.to_datetime(is_start).tzinfo is None
+        else pd.to_datetime(is_start)
+    )
+    is_e = (
+        pd.to_datetime(is_end).tz_localize("UTC")
+        if pd.to_datetime(is_end).tzinfo is None
+        else pd.to_datetime(is_end)
+    )
     dt = pd.to_datetime(df["datetime"], utc=True)
     mask = (dt >= is_s) & (dt < is_e)
-    return df.loc[mask].reset_index(drop=True)
+    return df.loc[mask].copy()
+
 
 
 def _mean_abs_funding(daily_df: pd.DataFrame) -> float:
@@ -130,6 +139,11 @@ def screen_futures_universe(
         for sym, t in tickers.items():
             if not (sym.endswith("/USDT") or sym.endswith("/USDT:USDT")):
                 continue
+            
+            # [Fix] Filter out non-ASCII symbols (e.g. Chinese characters)
+            if not all(ord(c) < 128 for c in sym):
+                continue
+                
             vol = float(t.get("quoteVolume") or 0.0)
             if vol >= min_adv:
                 valid_tickers.append({"symbol": sym.split(":")[0], "vol": vol})
@@ -203,7 +217,8 @@ def screen_symbol_refinement_futures(
             continue
             
         # [Institutional Gate] Funding Rate Crowding
-        if _mean_abs_funding(daily_dfs.get(sym, pd.DataFrame())) > cfg.get("FUNDING_RATE_MAX_ABS", 0.0008):
+        f_max = cfg.get("FUNDING_RATE_MAX_ABS", 0.0008)
+        if _mean_abs_funding(daily_dfs.get(sym, pd.DataFrame())) > f_max:
             if sym not in anchors:
                 continue
         
@@ -213,12 +228,16 @@ def screen_symbol_refinement_futures(
             continue
         
         # [Risk Gates] Beta & Correlation vs BTC
-        beta = np.cov(merged.iloc[:, 0], merged.iloc[:, 1])[0, 1] / (np.var(merged.iloc[:, 0]) + 1e-12)
+        beta = np.cov(merged.iloc[:, 0], merged.iloc[:, 1])[0, 1] / (
+            np.var(merged.iloc[:, 0]) + 1e-12
+        )
         corr = merged.iloc[:, 0].corr(merged.iloc[:, 1])
         
         adv = (is_df["close"] * is_df["volume"]).tail(tail_adv_bars).mean() * adv_multiplier
         amihud = _calculate_amihud_illiquidity(is_df, tail_bars=tail_amihud_bars)
-        candidate_stats.append({"symbol": sym, "beta": beta, "corr": corr, "adv": adv, "amihud": amihud})
+        candidate_stats.append(
+            {"symbol": sym, "beta": beta, "corr": corr, "adv": adv, "amihud": amihud}
+        )
 
     # Liquidity Sort (Top 60)
     candidate_stats.sort(key=lambda x: x["adv"], reverse=True)
@@ -254,5 +273,6 @@ def update_futures_config_file(symbols: List[str]) -> None:
         return
     content = path.read_text(encoding="utf-8")
     pattern = r"FUTURES_SYMBOLS(?::\s*List\[str\])?\s*=\s*\[.*?\]"
-    new_block = "FUTURES_SYMBOLS: List[str] = [\n" + "".join([f'    "{s}",\n' for s in symbols]) + "]"
+    lines = [f'    "{s}",\n' for s in symbols]
+    new_block = "FUTURES_SYMBOLS: List[str] = [\n" + "".join(lines) + "]"
     path.write_text(re.sub(pattern, new_block, content, count=1, flags=re.DOTALL), encoding="utf-8")
