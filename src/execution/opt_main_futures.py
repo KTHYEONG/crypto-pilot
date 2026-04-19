@@ -40,6 +40,9 @@ from src.domain.futures.metrics_utils import merge_metrics_into_ohlcv  # noqa: E
 from src.domain.futures.ml_pipeline import (  # noqa: E402
     run_ml_pipeline_for_universe,
 )
+from src.domain.futures.ml_pipeline.feature_engineering import (  # noqa: E402
+    HMM_SEMANTIC_PROB_COLUMNS,
+)
 from src.domain.futures.opt_futures_utils.objective import (  # noqa: E402
     inject_cs_momentum_ranks,
 )
@@ -327,10 +330,12 @@ def main() -> None:
                 cutoff_dt = cutoff_dt.tz_convert("UTC")
             
             # Extract only the newly added ML features to merge into the existing map
-            hmm_dyn = sorted(
-                (c for c in mff.columns if str(c).startswith("hmm_prob_")),
-                key=lambda x: int(str(x).split("_")[-1]),
-            )
+            hmm_dyn = [c for c in HMM_SEMANTIC_PROB_COLUMNS if c in mff.columns]
+            if not hmm_dyn:
+                hmm_dyn = sorted(
+                    (c for c in mff.columns if str(c).startswith("hmm_prob_")),
+                    key=lambda x: int(str(x).split("_")[-1]),
+                )
             ml_cols = [
                 "datetime",
                 "gp_alpha_00",
