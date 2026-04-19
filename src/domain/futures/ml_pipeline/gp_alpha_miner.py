@@ -26,34 +26,18 @@ _logger = logging.getLogger(__name__)
 
 
 @njit(cache=True, fastmath=True)  # type: ignore[untyped-decorator]
-def _numba_corr(x: np.ndarray, y: np.ndarray) -> float:
-    n = len(x)
-    if n < 2:
+def _spearman_fast(ry: np.ndarray, rp: np.ndarray, cnt: int) -> float:
+    """O(N) calculation of Spearman correlation using ordinal ranks 1..N"""
+    if cnt < 2:
         return 0.0
-    mx = np.mean(x)
-    my = np.mean(y)
-    num = 0.0
-    den_x = 0.0
-    den_y = 0.0
-    for i in range(n):
-        dx = x[i] - mx
-        dy = y[i] - my
-        num += dx * dy
-        den_x += dx * dx
-        den_y += dy * dy
-    den = np.sqrt(den_x * den_y)
-    return num / den if den > 1e-12 else 0.0
-
-
-@njit(cache=True, fastmath=True)  # type: ignore[untyped-decorator]
-def _rank_values(x: np.ndarray) -> np.ndarray:
-    """Numba-friendly order-statistic ranks (1..n); ties get distinct ordinal ranks."""
-    n = len(x)
-    order = np.argsort(x)
-    ranks = np.empty(n, dtype=np.float64)
-    for pos in range(n):
-        ranks[order[pos]] = float(pos + 1)
-    return ranks
+    sum_d2 = 0.0
+    for i in range(cnt):
+        d = ry[i] - rp[i]
+        sum_d2 += d * d
+    den = float(cnt) * (float(cnt) * float(cnt) - 1.0)
+    if den < 1e-12:
+        return 0.0
+    return 1.0 - (6.0 * sum_d2) / den
 
 
 @njit(cache=True, fastmath=True)  # type: ignore[untyped-decorator]
@@ -97,6 +81,8 @@ def cs_icir_fitness(
     yv = np.empty(n_symbols, dtype=np.float64)
     pv = np.empty(n_symbols, dtype=np.float64)
     wv = np.empty(n_symbols, dtype=np.float64)
+    ry_full = np.empty(n_symbols, dtype=np.float64)
+    rp_full = np.empty(n_symbols, dtype=np.float64)
 
     for t in range(n_time):
         s = t * n_symbols
@@ -118,9 +104,17 @@ def cs_icir_fitness(
 
         y_valid = yv[:cnt]
         p_valid = pv[:cnt]
-        ry = _rank_values(y_valid)
-        rp = _rank_values(p_valid)
-        ic = _numba_corr(ry, rp)
+        
+        order_y = np.argsort(y_valid)
+        for pos in range(cnt):
+            ry_full[order_y[pos]] = float(pos + 1)
+            
+        order_p = np.argsort(p_valid)
+        for pos in range(cnt):
+            rp_full[order_p[pos]] = float(pos + 1)
+            
+        ic = _spearman_fast(ry_full, rp_full, cnt)
+        
         if not np.isfinite(ic):
             continue
         w_bar = 0.0
@@ -321,7 +315,6 @@ class GPAlphaMiner:
             is_mask = np.asarray(times < cutoff_dt)
             sample_weight = sample_weight * is_mask
 
-        dt_idx = aligned_df.index.get_level_values("datetime")
         # [REFACTORED] Downsampling to 4h is removed to match 1h main architecture.
         # Use full 1h panel for GP fitness calculation.
 
