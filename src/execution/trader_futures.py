@@ -352,10 +352,10 @@ class RealTraderFutures:
         return math.ceil(target_lev)
 
     def load_strategies_from_json(self):
-        """results 폴더의 전용 파일(best_futures_4h)에서 최적화된 파라미터 로드"""
+        """results 폴더의 전용 파일(best_futures_1h)에서 최적화된 파라미터 로드"""
         results_dir = Path(project_root) / "results"
-        json_path = results_dir / "best_futures_4h.json"
-        enc_path = results_dir / "best_futures_4h.enc"
+        json_path = results_dir / "best_futures_1h.json"
+        enc_path = results_dir / "best_futures_1h.enc"
 
         if enc_path.exists() or json_path.exists():
             try:
@@ -386,8 +386,8 @@ class RealTraderFutures:
             for symbol in self.symbols:
                 clean_sym = symbol.replace("/", "")
                 symbol_params = dict(base_params)
-                symbol_params.setdefault("TIMEFRAME", "4h")
-                symbol_params.setdefault("INDICATOR_TIMEFRAME", "4h")
+                symbol_params.setdefault("TIMEFRAME", "1h")
+                symbol_params.setdefault("INDICATOR_TIMEFRAME", "1h")
                 self.params_map[symbol] = symbol_params
                 strategy_name = f"Real_{clean_sym}"
                 self.strategies[symbol] = UltimateStrategy(strategy_name, symbol_params)
@@ -445,8 +445,9 @@ class RealTraderFutures:
     def _sync_server_time_offset(self, force: bool = False, sync_interval_seconds: int = 60):
         with self._time_sync_lock:
             now = datetime.utcnow()
-            minutes_in_4h_cycle = (now.hour * 60 + now.minute) % 240
-            near_boundary = minutes_in_4h_cycle >= 239 or minutes_in_4h_cycle <= 0
+            # [REFACTORED] Use 1h cycle (60 mins) for time synchronization
+            minutes_in_1h_cycle = now.minute % 60
+            near_boundary = minutes_in_1h_cycle >= 59 or minutes_in_1h_cycle <= 0
             effective_interval = 5 if near_boundary else max(5, int(sync_interval_seconds))
             elapsed = (now - self._last_server_time_sync).total_seconds()
             if (not force) and elapsed < effective_interval:
@@ -891,7 +892,7 @@ class RealTraderFutures:
 
     def _resolve_timeframes(self, params: dict) -> Tuple[str, str]:
         execution_tf = str(params.get("TIMEFRAME", "1h"))
-        indicator_tf = str(params.get("INDICATOR_TIMEFRAME", "4h"))
+        indicator_tf = str(params.get("INDICATOR_TIMEFRAME", "1h"))
         return execution_tf, indicator_tf
 
     def _timeframe_to_minutes(self, timeframe: str) -> int:
