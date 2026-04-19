@@ -126,7 +126,7 @@ def _tbm_bidirectional_numba(
 
 
 def label_triple_barrier(
-    df_4h: pd.DataFrame,
+    df_1h: pd.DataFrame,
     df_1m: pd.DataFrame,
     atr_period: int = 14,
     tp_atr_mult: float = 1.5,
@@ -135,44 +135,43 @@ def label_triple_barrier(
     bidirectional: bool = True,
 ) -> pd.Series:
     """
-    Per 4h bar: entry at open; TP/SL from ATR on 4h; scan 1m candles until hit or time stop.
+    Per 1h bar: entry at open; TP/SL from ATR on 1h; scan 1m candles until hit or time stop.
 
     Args:
-        tp_atr_mult: TP width multiplier (default 1.5 -> R:R=1.5:1, increases positive class ratio).
+        tp_atr_mult: TP width multiplier (default 1.5).
         sl_atr_mult: SL width multiplier (default 1.0).
-        time_stop_bars: 1m bars before time barrier (default 2880 = 48h x 60min, 2x previous).
+        time_stop_bars: 1m bars before time barrier (default 2880 = 48h).
         bidirectional: If True, returns +1/-1/0 labels for independent Long/Short classifiers.
-            If False (legacy), returns 1/0 (Long TP only).
     """
-    if df_4h.empty or df_1m.empty or len(df_4h) < atr_period + 2:
+    if df_1h.empty or df_1m.empty or len(df_1h) < atr_period + 2:
         return pd.Series(dtype=np.float64)
 
-    df4 = df_4h.sort_values("datetime").reset_index(drop=True)
+    df1 = df_1h.sort_values("datetime").reset_index(drop=True)
     m1 = df_1m.sort_values("datetime").reset_index(drop=True)
 
     m1_ts = m1["datetime"].astype("int64").to_numpy()
     m1_high = m1["high"].to_numpy(dtype=np.float64)
     m1_low = m1["low"].to_numpy(dtype=np.float64)
 
-    dt4 = df4["datetime"].astype("int64").to_numpy()
-    high4 = df4["high"].to_numpy(dtype=np.float64)
-    low4 = df4["low"].to_numpy(dtype=np.float64)
-    close4 = df4["close"].to_numpy(dtype=np.float64)
-    open4 = df4["open"].to_numpy(dtype=np.float64) if "open" in df4.columns else close4
+    dt1 = df1["datetime"].astype("int64").to_numpy()
+    high1 = df1["high"].to_numpy(dtype=np.float64)
+    low1 = df1["low"].to_numpy(dtype=np.float64)
+    close1 = df1["close"].to_numpy(dtype=np.float64)
+    open1 = df1["open"].to_numpy(dtype=np.float64) if "open" in df1.columns else close1
 
-    atr4 = compute_atr_numpy(high4, low4, close4, atr_period)
+    atr1 = compute_atr_numpy(high1, low1, close1, atr_period)
 
     if bidirectional:
         labels = _tbm_bidirectional_numba(
-            dt4, open4, atr4, high4, low4,
+            dt1, open1, atr1, high1, low1,
             m1_ts, m1_high, m1_low,
             float(tp_atr_mult), float(sl_atr_mult), int(time_stop_bars),
         )
     else:
         labels = _tbm_inner_loop_numba(
-            dt4, open4, atr4, high4, low4,
+            dt1, open1, atr1, high1, low1,
             m1_ts, m1_high, m1_low,
             float(tp_atr_mult), float(sl_atr_mult), int(time_stop_bars),
         )
 
-    return pd.Series(labels, index=df4["datetime"], name="tbm_label")
+    return pd.Series(labels, index=df1["datetime"], name="tbm_label")
