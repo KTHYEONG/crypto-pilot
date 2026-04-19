@@ -73,13 +73,18 @@ FUTURES_SYMBOLS: List[str] = [
     "BTC/USDT",
     "ETH/USDT",
     "XRP/USDT",
-    "SOL/USDT",
 ]
 
 FUTURES_SCREENER_CONFIG: Dict[str, Any] = {
-    "ADV_MIN_USDT_DAY": 50_000_000.0,
-    "MIN_HISTORY_BARS": 2000,
     "BROAD_POOL_K": 80,
+    "FINAL_POOL_K": 40,
+    "MIN_ADV_USDT": 25_000_000,
+    "MIN_CORR_BTC": 0.50,
+    "MAX_BETA_BTC": 1.40,
+    "MIN_BETA_BTC": 0.60,
+    "FUNDING_RATE_MAX_ABS": 0.0008,
+    "AMIHUD_PRUNE_RATIO": 0.75,
+    "MIN_VOL_CV": 0.3,
 }
 
 # ==============================================================================
