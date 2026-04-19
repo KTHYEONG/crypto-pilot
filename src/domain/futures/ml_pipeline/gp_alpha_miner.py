@@ -1,226 +1,450 @@
-"""Symbolic regression (gplearn) walk-forward alpha mining with NW-adjusted IC fitness."""
+"""
+GP Alpha Miner - Cross-Sectional Ranking Edition.
+Learns a universal formula across multiple symbols using panel data and CS-IC fitness.
+"""
 
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd
 from gplearn.fitness import make_fitness
+from gplearn.functions import make_function
 from gplearn.genetic import SymbolicTransformer
 from numba import njit
+from sklearn.preprocessing import QuantileTransformer
+
+from src.domain.futures.ml_pipeline.cross_sectional_utils import CrossSectionalPipelineUtils
+from src.domain.futures.ml_pipeline.feature_engineering import GP_ENGINEERED_FEATURE_NAMES
+from src.domain.futures.ml_pipeline.gp_alpha_filter import filter_gp_alpha_columns
 
 _logger = logging.getLogger(__name__)
 
 
-@njit  # type: ignore
-def _fast_rank_average(a: np.ndarray) -> np.ndarray:
-    """Numba-accelerated ranking with 'average' method for ties."""
-    n = len(a)
+@njit(cache=True, fastmath=True)  # type: ignore[untyped-decorator]
+def _numba_corr(x: np.ndarray, y: np.ndarray) -> float:
+    n = len(x)
+    if n < 2:
+        return 0.0
+    mx = np.mean(x)
+    my = np.mean(y)
+    num = 0.0
+    den_x = 0.0
+    den_y = 0.0
+    for i in range(n):
+        dx = x[i] - mx
+        dy = y[i] - my
+        num += dx * dy
+        den_x += dx * dx
+        den_y += dy * dy
+    den = np.sqrt(den_x * den_y)
+    return num / den if den > 1e-12 else 0.0
+
+
+@njit(cache=True, fastmath=True)  # type: ignore[untyped-decorator]
+def _rank_values(x: np.ndarray) -> np.ndarray:
+    """Numba-friendly order-statistic ranks (1..n); ties get distinct ordinal ranks."""
+    n = len(x)
+    order = np.argsort(x)
     ranks = np.empty(n, dtype=np.float64)
-    idx = np.argsort(a)
-    i = 0
-    while i < n:
-        j = i + 1
-        while j < n and a[idx[j]] == a[idx[i]]:
-            j += 1
-        # Average rank for the tie group (1-based)
-        avg_rank = (i + j + 1) / 2.0
-        for k in range(i, j):
-            ranks[idx[k]] = avg_rank
-        i = j
+    for pos in range(n):
+        ranks[order[pos]] = float(pos + 1)
     return ranks
 
 
-@njit  # type: ignore
-def _ols_nw_tstat(y: np.ndarray, x: np.ndarray, lag: int) -> float:
-    """Numba-accelerated OLS with Newey-West (HAC) adjusted t-stat for simple regression."""
-    n = len(y)
-    if n < 2:
-        return 0.0
-
-    sum_x = np.sum(x)
-    sum_y = np.sum(y)
-    sum_x2 = np.sum(x * x)
-    sum_xy = np.sum(x * y)
-
-    denom = n * sum_x2 - sum_x * sum_x
-    if abs(denom) < 1e-15:
-        return 0.0
-
-    b1 = (n * sum_xy - sum_x * sum_y) / denom
-    b0 = (sum_y - b1 * sum_x) / n
-    resid = y - (b0 + b1 * x)
-
-    # Var(b) = (X'X)^-1 * S * (X'X)^-1
-    # For simple regression, we only need the variance of b1 (slope)
-    d01 = -sum_x / denom
-    d11 = n / denom
-
-    s00, s01, s11 = 0.0, 0.0, 0.0
-    for j in range(lag + 1):
-        weight = 1.0 - j / (lag + 1.0)
-        if j == 0:
-            for t in range(n):
-                ee = resid[t] * resid[t]
-                s00 += ee
-                s01 += ee * x[t]
-                s11 += ee * x[t] * x[t]
-        else:
-            g00, g01, g11 = 0.0, 0.0, 0.0
-            for t in range(j, n):
-                ee = resid[t] * resid[t - j]
-                g00 += 2.0 * ee
-                g01 += ee * (x[t] + x[t - j])
-                g11 += 2.0 * ee * x[t] * x[t - j]
-            s00 += weight * g00
-            s01 += weight * g01
-            s11 += weight * g11
-
-    var_b1 = d01 * d01 * s00 + 2.0 * d01 * d11 * s01 + d11 * d11 * s11
-    if var_b1 <= 1e-15:
-        return 0.0
-
-    return float(b1 / np.sqrt(var_b1))
+@njit(cache=True, fastmath=True)  # type: ignore[untyped-decorator]
+def _n_valid_required(n_sym: int) -> int:
+    if n_sym >= 15:
+        frac = 0.3
+    else:
+        frac = max(0.5, 5.0 / max(float(n_sym), 1.0))
+    req = int(np.ceil(frac * float(n_sym)))
+    if req < 2:
+        req = 2
+    if req > n_sym:
+        req = n_sym
+    return req
 
 
-def newey_west_ic_fitness(
+@njit(cache=True, fastmath=True)  # type: ignore[untyped-decorator]
+def cs_icir_fitness(
     y: np.ndarray,
     y_pred: np.ndarray,
-    sample_weight: np.ndarray | None,
+    sample_weight: np.ndarray,
 ) -> float:
     """
-    Spearman IC proxy with HAC (Newey-West) t-stat on ranked series.
-    Optimized via Numba to bypass Pandas/Statsmodels overhead.
+    Spearman CS-IC (time-weighted by sample_weight rows, e.g. TBM) + ICIR-style term.
+    sample_weight[0] encodes n_symbols; grid position (t=0,s=0) is hint-only and skipped for IC.
     """
-    del sample_weight
-    y_arr = np.asarray(y, dtype=np.float64).ravel()
-    p_arr = np.asarray(y_pred, dtype=np.float64).ravel()
-
-    mask = np.isfinite(y_arr) & np.isfinite(p_arr)
-    n_valid = int(np.sum(mask))
-    if n_valid < 40:
+    n_symbols = int(sample_weight[0])
+    n_total = len(y)
+    if n_total < 100 or n_symbols < 2:
+        return -1.0
+    n_time = n_total // n_symbols
+    if n_time < 1 or n_symbols * n_time != n_total:
         return -1.0
 
-    y_valid = y_arr[mask]
-    p_valid = p_arr[mask]
+    n_req = _n_valid_required(n_symbols)
 
-    # 1. Fast Ranking
-    yr = _fast_rank_average(y_valid)
-    pr = _fast_rank_average(p_valid)
+    ic_buf = np.empty(n_time, dtype=np.float64)
+    wt_buf = np.empty(n_time, dtype=np.float64)
+    ic_cnt = 0
 
-    # 2. HAC Lag Selection
-    lag = int(max(1, min(int(4.0 * (n_valid / 100.0) ** (2.0 / 9.0)), 50)))
+    yv = np.empty(n_symbols, dtype=np.float64)
+    pv = np.empty(n_symbols, dtype=np.float64)
+    wv = np.empty(n_symbols, dtype=np.float64)
 
-    # 3. Fast NW t-stat
-    try:
-        tstat = float(_ols_nw_tstat(yr, pr, lag))
-        return tstat if np.isfinite(tstat) else 0.0
-    except Exception:
-        # Fallback to simple correlation if NW fails
-        corr = float(np.corrcoef(yr, pr)[0, 1])
-        return corr if np.isfinite(corr) else 0.0
+    for t in range(n_time):
+        s = t * n_symbols
+        y_slice = y[s : s + n_symbols]
+        p_slice = y_pred[s : s + n_symbols]
+        w_slice = sample_weight[s : s + n_symbols]
+        cnt = 0
+        for i in range(n_symbols):
+            if t == 0 and i == 0:
+                continue
+            wi = w_slice[i]
+            if wi > 0.0 and np.isfinite(y_slice[i]) and np.isfinite(p_slice[i]):
+                yv[cnt] = y_slice[i]
+                pv[cnt] = p_slice[i]
+                wv[cnt] = wi
+                cnt += 1
+        if cnt < n_req:
+            continue
+
+        y_valid = yv[:cnt]
+        p_valid = pv[:cnt]
+        ry = _rank_values(y_valid)
+        rp = _rank_values(p_valid)
+        ic = _numba_corr(ry, rp)
+        if not np.isfinite(ic):
+            continue
+        w_bar = 0.0
+        for j in range(cnt):
+            w_bar += wv[j]
+        w_bar /= float(cnt)
+        ic_buf[ic_cnt] = ic
+        wt_buf[ic_cnt] = w_bar
+        ic_cnt += 1
+
+    if ic_cnt < 30:
+        return -1.0
+
+    sum_w = 0.0
+    sum_wic = 0.0
+    for i in range(ic_cnt):
+        sum_w += wt_buf[i]
+        sum_wic += ic_buf[i] * wt_buf[i]
+    mu = sum_wic / (sum_w + 1e-18)
+
+    var_w = 0.0
+    for i in range(ic_cnt):
+        d = ic_buf[i] - mu
+        var_w += wt_buf[i] * d * d
+    var_w /= sum_w + 1e-18
+    sd = np.sqrt(var_w) + 1e-9
+    icir = mu / sd
+    icir_sr = icir * np.sqrt(2190.0)
+    sign = 1.0 if mu >= 0.0 else -1.0
+    capped = min(abs(icir_sr), 5.0) / 5.0
+    return 0.4 * mu + 0.6 * sign * capped
 
 
-_NW_FITNESS = make_fitness(function=newey_west_ic_fitness, greater_is_better=True, wrap=True)
+_CS_FITNESS = make_fitness(function=cs_icir_fitness, greater_is_better=True, wrap=True)
+
+
+def _signed_log_arr(x: np.ndarray) -> np.ndarray:
+    return np.sign(x) * np.log1p(np.abs(x))
+
+
+def _signed_sqrt_arr(x: np.ndarray) -> np.ndarray:
+    return np.sign(x) * np.sqrt(np.abs(x))
+
+
+signed_log = make_function(function=_signed_log_arr, name="slog", arity=1, wrap=False)
+signed_sqrt = make_function(function=_signed_sqrt_arr, name="ssqrt", arity=1, wrap=False)
+
+_GP_FUNCTION_SET = [
+    "add",
+    "sub",
+    "mul",
+    "div",
+    "sqrt",
+    "log",
+    "abs",
+    "neg",
+    "inv",
+    "max",
+    "min",
+    signed_log,
+    signed_sqrt,
+]
+
+
+def _cache_stem_suffix(population_size: int, generations: int, horizons: tuple[int, ...]) -> str:
+    hkey = "-".join(str(h) for h in horizons)
+    return f"v10_icir_p{population_size}_g{generations}_h{hkey}"
+
+
+def _pct_uniform_cs_is_fit(unstacked: pd.DataFrame, is_row_mask: np.ndarray) -> pd.DataFrame:
+    """
+    Replace full-panel rank(pct) with IS-fitted empirical CDF → uniform [0,1] on all rows
+    (frozen CDF applied to OOS rows; no cross-time OOS leakage into IS ranks).
+    """
+    if unstacked.shape[1] < 2 or len(unstacked) != int(is_row_mask.shape[0]):
+        return pd.DataFrame(0.5, index=unstacked.index, columns=unstacked.columns)
+    mat = unstacked.to_numpy(dtype=np.float64)
+    is_rows = np.asarray(is_row_mask, dtype=bool)[: mat.shape[0]]
+    is_vals = mat[is_rows, :].ravel()
+    is_vals = is_vals[np.isfinite(is_vals)]
+    if is_vals.size < 100 or float(np.nanstd(is_vals)) < 1e-14:
+        return pd.DataFrame(0.5, index=unstacked.index, columns=unstacked.columns)
+    nq = int(min(1000, max(10, is_vals.size)))
+    qt = QuantileTransformer(
+        n_quantiles=nq,
+        output_distribution="uniform",
+        random_state=42,
+        subsample=min(50_000, int(is_vals.size)),
+    )
+    qt.fit(is_vals.reshape(-1, 1))
+    flat = np.where(np.isfinite(mat), mat, np.nan).reshape(-1, 1)
+    out_flat = np.full(flat.shape[0], 0.5, dtype=np.float64)
+    m = np.isfinite(flat[:, 0])
+    if m.any():
+        out_flat[m] = qt.transform(flat[m, :].reshape(-1, 1)).ravel()
+    out = out_flat.reshape(mat.shape)
+    return pd.DataFrame(out, index=unstacked.index, columns=unstacked.columns)
+
+
+def _resolve_gp_feature_columns(panel_df: pd.DataFrame) -> list[str]:
+    blocked = {"target", "close", "tbm_gp_weight", "regime_pre_hmm"}
+    cs_names = sorted(c for c in panel_df.columns if c.startswith("cs_"))
+    if cs_names:
+        extras = [c for c in ("cross_vol_rank", "cross_ret_24h_rank") if c in panel_df.columns]
+        return sorted({c for c in cs_names + extras if c not in blocked})
+    return [c for c in panel_df.columns if c not in blocked]
+
+
+def _should_apply_4h_downsample(dt_index: pd.Index) -> bool:
+    """If median bar spacing is already >= 3h, downsampling would mostly duplicate-drop 1h data."""
+    u = pd.Index(pd.to_datetime(dt_index, utc=True)).unique().sort_values()
+    if len(u) < 4:
+        return False
+    diffs = u[1:].asi8 - u[:-1].asi8
+    med_ns = float(np.median(diffs))
+    thr = 3 * 3600 * 1_000_000_000
+    return med_ns < thr
 
 
 @dataclass
 class GPAlphaMiner:
     n_features_to_select: int = 15
-    population_size: int = 2000
+    population_size: int = 1000
     generations: int = 20
-    walk_forward_window: int = 8760
-    step_size: int = 2190
-    target_horizon: int = 24
+    target_horizon: int = 6
+    target_horizons: tuple[int, ...] = (3, 6, 12, 24)
     n_jobs: int = 1
+    parsimony_coefficient: float = 0.001
 
-    def mine_alphas(self, df: pd.DataFrame, cache_path: Path | None = None) -> pd.DataFrame:
+    def mine_alphas_cs(
+        self,
+        panel_df: pd.DataFrame,
+        cache_path: Path | None = None,
+        is_end_date: str | None = None,
+        filter_options: dict[str, Any] | None = None,
+    ) -> pd.DataFrame:
         """
-        Offline walk-forward SymbolicTransformer; outputs gp_alpha_00.. columns on 1h index.
+        Learns ONE universal formula across symbols using Panel Data.
+        panel_df: MultiIndex (datetime, symbol).
+        is_end_date: If provided, only data BEFORE this date is used for fitness.
         """
-        if df.empty or len(df) < self.walk_forward_window + self.target_horizon + 10:
-            _logger.warning("GP: insufficient 1h bars; returning zeros.")
-            return self._empty_alpha_df(df)
+        if panel_df.empty:
+            return pd.DataFrame()
 
-        if cache_path is not None and cache_path.exists():
-            try:
-                loaded = pd.read_parquet(cache_path)
-                if len(loaded) == len(df) and loaded.index.equals(df.index):
-                    _logger.info("GP cache hit: %s (%d rows)", cache_path.name, len(loaded))
-                    return loaded
-            except Exception as e:
-                _logger.debug("GP cache read failed: %s", e)
+        work_panel = panel_df.copy()
+        src_cols = [c for c in GP_ENGINEERED_FEATURE_NAMES if c in work_panel.columns]
+        if src_cols:
+            work_panel = CrossSectionalPipelineUtils.cs_rank_transform(work_panel, src_cols)
 
-        feats = df.copy()
-        if "close" not in feats.columns:
-            return self._empty_alpha_df(df)
-        feat_cols = [
-            c
-            for c in feats.columns
-            if c not in ("datetime", "close") and np.issubdtype(feats[c].dtype, np.number)
-        ]
-        if not feat_cols:
-            return self._empty_alpha_df(df)
-
-        x_all = feats[feat_cols].replace([np.inf, -np.inf], np.nan).fillna(0.0).to_numpy(
-            dtype=np.float64
-        )
-        close = feats["close"].astype(np.float64).to_numpy()
-        n = len(df)
-        h = self.target_horizon
-        y_all = np.full(n, np.nan, dtype=np.float64)
-        for i in range(n - h):
-            y_all[i] = float(np.log(max(close[i + h], 1e-12) / max(close[i], 1e-12)))
-        out = np.zeros((n, self.n_features_to_select), dtype=np.float64)
-
-        total_folds = max(1, (n - self.step_size - self.walk_forward_window) // self.step_size)
-        fold_idx = 0
-        for t_end in range(self.walk_forward_window, n - self.step_size, self.step_size):
-            fold_idx += 1
-            _logger.info(
-                "GP fold %d/%d (t_end=%d, pop=%d, gen=%d)...",
-                fold_idx, total_folds, t_end, self.population_size, self.generations,
-            )
-            a0 = t_end - self.walk_forward_window
-            x_tr = x_all[a0:t_end]
-            y_tr = y_all[a0:t_end]
-            m = np.isfinite(y_tr) & np.all(np.isfinite(x_tr), axis=1)
-            if int(m.sum()) < 200:
-                continue
-            x_tr, y_tr = x_tr[m], y_tr[m]
-            try:
-                st = SymbolicTransformer(
-                    population_size=min(self.population_size, len(x_tr)),
-                    generations=min(self.generations, 30),
-                    hall_of_fame=100,
-                    n_components=self.n_features_to_select,
-                    metric=_NW_FITNESS,
-                    parsimony_coefficient=0.001,
-                    max_samples=0.9,
-                    random_state=42,
-                    n_jobs=self.n_jobs,
-                    verbose=0,
-                )
-                st.fit(x_tr, y_tr)
-                x_te = x_all[t_end : t_end + self.step_size]
-                part = st.transform(x_te)
-                out[t_end : t_end + self.step_size, :] = part
-            except Exception as e:
-                _logger.debug("GP fold failed at %s: %s", t_end, e)
-
-        cols = [f"gp_alpha_{i:02d}" for i in range(self.n_features_to_select)]
-        alpha_df = pd.DataFrame(out, index=df.index, columns=cols)
+        # Cache check
+        versioned_cache: Path | None = None
         if cache_path is not None:
+            n_syms = work_panel.index.get_level_values("symbol").nunique()
+            tag = _cache_stem_suffix(
+                self.population_size, self.generations, self.target_horizons
+            )
+            versioned_cache = cache_path.with_stem(f"{cache_path.stem}_{tag}_s{n_syms}")
+            if versioned_cache.exists():
+                try:
+                    loaded = pd.read_parquet(versioned_cache)
+                    if len(loaded) == len(panel_df):
+                        _logger.info("GP CS Cache Hit: %s.", versioned_cache.name)
+                        return loaded
+                except Exception as e:
+                    _logger.debug("GP Cache load failed: %s", e)
+
+        # 1. Prepare Rectangular Grid
+        unstacked_y = work_panel["target"].unstack(level="symbol")
+        unique_times = unstacked_y.index
+        unique_symbols = unstacked_y.columns
+        n_symbols = len(unique_symbols)
+
+        if is_end_date:
+            _cut = pd.to_datetime(is_end_date, utc=True)
+            if getattr(unique_times, "tz", None) is None:
+                _ut = pd.to_datetime(unique_times, utc=True)
+            else:
+                _ut = unique_times.tz_convert("UTC")
+            is_row_mask_utc = np.asarray(_ut < _cut, dtype=bool)
+        else:
+            is_row_mask_utc = np.ones(len(unique_times), dtype=bool)
+
+        full_grid_index = pd.MultiIndex.from_product(
+            [unique_times, unique_symbols], names=["datetime", "symbol"]
+        )
+
+        feat_cols = _resolve_gp_feature_columns(work_panel)
+        template = pd.DataFrame(index=full_grid_index)
+        join_cols = [*feat_cols, "target"]
+        if "tbm_gp_weight" in work_panel.columns:
+            join_cols = [*feat_cols, "tbm_gp_weight", "target"]
+        aligned_df = template.join(work_panel[join_cols]).fillna(np.nan)
+
+        y_raw = aligned_df["target"].values
+        x_grid = aligned_df[feat_cols].values
+
+        # Determine training mask
+        sample_weight = np.where(pd.isna(y_raw), 0.0, 1.0)
+        if "tbm_gp_weight" in aligned_df.columns:
+            tw = aligned_df["tbm_gp_weight"].fillna(1.0).to_numpy(dtype=np.float64)
+            sample_weight = sample_weight * np.clip(tw, 0.25, 3.0)
+        if is_end_date:
+            times = aligned_df.index.get_level_values("datetime")
+            if times.tz is None:
+                times = times.tz_localize("UTC")
+            else:
+                times = times.tz_convert("UTC")
+            cutoff_dt = pd.to_datetime(is_end_date, utc=True)
+            is_mask = np.asarray(times < cutoff_dt)
+            sample_weight = sample_weight * is_mask
+
+        dt_idx = aligned_df.index.get_level_values("datetime")
+        if _should_apply_4h_downsample(dt_idx):
+            downsample_mask = np.asarray(
+                pd.to_datetime(dt_idx, utc=True).hour % 4 == 0, dtype=bool
+            )
+            sample_weight = sample_weight * downsample_mask.astype(np.float64)
+
+        # Internal 80/20 chronological holdout + drop NaN rows (CS grid: time x symbol)
+        n_time = len(unique_times)
+        train_t_limit = max(1, int(n_time * 0.8))
+        row_t: np.ndarray = np.arange(len(aligned_df), dtype=np.int64) // n_symbols
+        fit_time_ok = row_t < train_t_limit
+        nan_row = np.isnan(x_grid).any(axis=1) | np.isnan(y_raw)
+        w_fit = fit_time_ok.astype(np.float64)
+        w_nan = (~nan_row).astype(np.float64)
+        sample_weight = sample_weight * w_fit * w_nan
+
+        sample_weight[0] = float(n_symbols)  # Hint for fitness (row 0 only; see docstring)
+
+        # 2. GP Training
+        st = SymbolicTransformer(
+            feature_names=feat_cols,
+            function_set=_GP_FUNCTION_SET,
+            metric=_CS_FITNESS,
+            population_size=self.population_size,
+            generations=self.generations,
+            stopping_criteria=0.08,
+            n_components=self.n_features_to_select,
+            random_state=42,
+            n_jobs=self.n_jobs,
+            verbose=1,
+            parsimony_coefficient=self.parsimony_coefficient,
+            init_depth=(2, 5),
+            p_crossover=0.7,
+            p_subtree_mutation=0.15,
+            p_hoist_mutation=0.05,
+            p_point_mutation=0.05,
+        )
+
+        x_clean = np.where(np.isfinite(x_grid), x_grid, 0.0)
+        y_clean = np.where(np.isfinite(y_raw), y_raw, 0.0)
+        st.fit(x_clean, y_clean, sample_weight=sample_weight)
+
+        # 3. Predict and Map back
+        self._st = st
+        out_grid = st.transform(x_clean)
+        cols = [f"gp_alpha_{i:02d}" for i in range(self.n_features_to_select)]
+        full_alpha_df = pd.DataFrame(out_grid, index=full_grid_index, columns=cols)
+
+        alpha_series_list = []
+        for col in cols:
+            unstacked = full_alpha_df[col].unstack(level="symbol")
+            if unstacked.std(axis=1).mean() < 1e-12:
+                s = pd.Series(0.5, index=full_grid_index, name=col)
+            else:
+                ranked = _pct_uniform_cs_is_fit(unstacked, is_row_mask_utc)
+                s = ranked.stack(future_stack=True)
+                s.name = col
+            alpha_series_list.append(s)
+
+        alpha_df_all = pd.concat(alpha_series_list, axis=1)
+        fo = filter_options or {}
+        alpha_df_all, filt_meta = filter_gp_alpha_columns(
+            alpha_df_all,
+            panel_df,
+            is_end_date=is_end_date,
+            n_trials=self.n_features_to_select,
+            fdr_q=float(fo.get("fdr_q", 0.10)),
+            use_newey_west=bool(fo.get("use_newey_west", False)),
+            use_ewma_ic_stat=bool(fo.get("use_ewma_ic_stat", False)),
+            ewma_half_life=float(fo.get("ewma_half_life", 540.0)),
+            symbol_balance_max=float(fo.get("symbol_balance_max", 3.0)),
+            require_regime_gate=bool(fo.get("require_regime_gate", True)),
+        )
+        if float(filt_meta.get("neutralize_primary", 0.0)) > 0.5:
+            alpha_df_all["gp_alpha_00"] = 0.5
+
+        alpha_df = alpha_df_all.reindex(panel_df.index).fillna(0.5)
+
+        best_fitness = 0.0
+        if hasattr(st, "_best_programs") and len(st._best_programs) > 0:
+            best_fitness = st._best_programs[0].fitness_
+        alpha_df.attrs["best_fitness"] = float(best_fitness)
+        alpha_df.attrs["gp_alpha_filter"] = filt_meta
+
+        if versioned_cache is not None:
             try:
-                cache_path.parent.mkdir(parents=True, exist_ok=True)
-                alpha_df.to_parquet(cache_path)
+                versioned_cache.parent.mkdir(parents=True, exist_ok=True)
+                alpha_df.to_parquet(versioned_cache)
             except Exception as e:
-                _logger.warning("GP cache write failed: %s", e)
+                _logger.warning("GP CS Cache Write Failed: %s", e)
+
         return alpha_df
 
-    def _empty_alpha_df(self, df: pd.DataFrame) -> pd.DataFrame:
+    def transform_cs(self, panel_df: pd.DataFrame, cache_path: Path | None = None) -> pd.DataFrame:
+        """
+        Applies a previously trained universal model to a new panel.
+        """
+        if panel_df.empty:
+            return pd.DataFrame()
+
+        work = panel_df.copy()
+        src_cols = [c for c in GP_ENGINEERED_FEATURE_NAMES if c in work.columns]
+        if src_cols:
+            work = CrossSectionalPipelineUtils.cs_rank_transform(work, src_cols)
+        feat_cols = _resolve_gp_feature_columns(work)
+        x = work[feat_cols].fillna(0.0).to_numpy(dtype=np.float64)
+
+        if hasattr(self, "_st") and self._st is not None:
+            out_arr = self._st.transform(x)
+            cols = [f"gp_alpha_{i:02d}" for i in range(self.n_features_to_select)]
+            return pd.DataFrame(out_arr, index=panel_df.index, columns=cols)
+
+        _logger.warning("transform_cs: _st is missing. Returning neutral features.")
         cols = [f"gp_alpha_{i:02d}" for i in range(self.n_features_to_select)]
-        return pd.DataFrame(0.0, index=df.index, columns=cols)
+        return pd.DataFrame(0.5, index=panel_df.index, columns=cols)

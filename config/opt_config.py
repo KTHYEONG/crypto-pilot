@@ -4,77 +4,48 @@ import math
 from typing import Any, Dict, List
 
 # ==============================================================================
-# OPTIMIZATION FUTURES SEARCH SPACE & CONFIGURATION
+# OPTIMIZATION FUTURES SEARCH SPACE & CONFIGURATION (Cross-Sectional Ranking Edition)
 # ==============================================================================
 
 OPT_FUTURES_CONFIG: Dict[str, Any] = {
     "total_trials": 2000,
     "tpe_n_startup_trials": 384,
-    "combo_phase1_trials": 10,
-    "combo_phase2_trials": 28,
-    "FUTURES_COMBO_QUICK_TRIALS_MAX": 60,
-    "FUTURES_COMBO_PHASE1_MAX": 30,
-    "FUTURES_COMBO_AMBIGUITY_STD_RATIO": 0.15,
-    "FUTURES_COMBO_PHASE2_AMBIGUITY_BOOST": 4,
-    "FUTURES_COMBO_PRUNE_THR": -0.05,
-    "combo_top_k": 3,
-    "tpe_pruner_n_startup_trials": 10,
-    "tpe_pruner_n_warmup_steps": 8,
-    "tpe_pruner_patience": 4,
     "seeds": [42],
     "TARGET_TIMEFRAMES": ["4h"],
-    "FUTURES_CPCV_N_BLOCKS": 8,  # 10→8: Spot 검증 설정 채택 (block당 91일, path당 통계 신뢰도 향상)
-    "FUTURES_CPCV_K_TEST": 3,  # 4→3: C(8,3)=56 paths (기존 210→56, overfitting 기회 74% 감소)
-    "FUTURES_MIN_TRADES_PER_CPCV_SEGMENT": 8,  # 5→8: Spot 기준(8) 적용
-    "FUTURES_OBJECTIVE_W_MEAN_LOG_TW": 0.7,
-    "FUTURES_CPCV_CVAR_ALPHA": 0.10,
-    "FUTURES_CPCV_CVAR_THRESHOLD": 0.05,
-    "FUTURES_CPCV_CVAR_WEIGHT": 0.80,
-    "FUTURES_CPCV_TEMPORAL_LAMBDA": 3.0,
+    # Risk & Portfolio (Phase D)
     "FUTURES_MAX_CONCURRENT_POSITIONS": 3,
-    "FUTURES_MIN_PF": 1.5,
-    "FUTURES_MAX_MDD": 35.0,  # per-segment CPCV pruning hard limit
-    "FUTURES_MAX_AVG_CPCV_MDD": 25.0,  # TPE constraint: avg MDD across valid CPCV paths
-    "FUTURES_MAX_UI": 15.0,  # 신규: Ulcer Index 고통 지수 제한
-    "FUTURES_MIN_ROMAD": 0.8,
+    "FUTURES_MIN_PF": 1.35,
+    "FUTURES_MAX_MDD": 25.0,
     "FUTURES_MIN_CAGR_PCT": 30.0,
-    "FUTURES_STAGE2_MAX_PER_SIGNAL_TYPE": 2,
-    "FUTURES_MULTI_WINDOW_OOS_SUBS": 3,
-    "FUTURES_MULTI_WINDOW_MIN_POSITIVE": 3,
     "FUTURES_DISCOVERY_LEVERAGE": 5,
-    "FUTURES_IS_CAGR_FLOOR": 5.0,
-    "FUTURES_OBJECTIVE_FLOOR_WHEN_NO_EDGE": -2.0,
-    "FUTURES_MIN_REGIME_ON_RATE": 0.20,  # 0.10→0.20: Spot 22% 기준에 맞춤, 가짜 신호 필터 강화
-    "FUTURES_REGIME_ON_PENALTY_WEIGHT": 0.30,
-    # Spot RECENT_IS_GATE 패턴: IS 후반 손실 패널티
-    "FUTURES_RECENT_IS_GATE_WEIGHT": 0.25,
-    "FUTURES_NON_ANCHOR_SLIPPAGE_MULT": 1.1,
-    "FUTURES_NON_ANCHOR_MIN_PF_PREMIUM": 0.15,
-    "FUTURES_NON_ANCHOR_MAX_COUNT": 4,
-    "FUTURES_STAGE1_TRIALS": 500,
-    "FUTURES_STAGE2_TRIALS": 300,
-    "FUTURES_STAGE1_IC_LOOKFORWARD_BARS": 12,
-    # ML Pipeline Phase C+D
     "FUTURES_PBO_MAX": 0.45,
-    "FUTURES_OBJECTIVE_DSR_TARGET": 1.5,
-    "FUTURES_ML_GP_POPULATION": 2000,
+    # Universal Cross-Sectional GP Miner Settings
+    "FUTURES_ML_GP_POPULATION": 1000,
     "FUTURES_ML_GP_GENERATIONS": 20,
-    "FUTURES_ML_GP_N_ALPHAS": 15,
-    "FUTURES_ML_HMM_N_STATES": 3,
-    "FUTURES_ML_TBM_TP_ATR_MULT": 1.0,
-    "FUTURES_ML_TBM_SL_ATR_MULT": 1.0,
-    "FUTURES_ML_TBM_TIME_STOP_H": 24,
+    "FUTURES_ML_GP_TARGET_HORIZON": 6,
+    "FUTURES_ML_GP_HORIZONS": (3, 6, 12, 24),
+    "FUTURES_ML_GP_PARSIMONY": 0.001,
+    "FUTURES_ML_GP_USE_TBM_WEIGHT": True,
+    "FUTURES_ML_PRE_GP_REGIME": True,
+    "FUTURES_ML_PRE_GP_REGIME_STATES": 3,
+    "FUTURES_ML_IC_FILTER_USE_HAC": False,
+    "FUTURES_ML_IC_FILTER_USE_EWMA": False,
+    "FUTURES_ML_IC_EWMA_HALF_LIFE": 540.0,
+    "FUTURES_ML_IC_SYMBOL_BALANCE_MAX": 3.0,
+    "FUTURES_ML_IC_REGIME_GATE": True,
+    "FUTURES_ML_IC_FDR_Q": 0.10,
+    "FUTURES_ML_GP_NSGA2_ENABLED": False,
     "FUTURES_ML_PHASE_D_TRIALS": 500,
+    "FUTURES_CPCV_N_BLOCKS": 6,
+    "FUTURES_CPCV_K_TEST": 3,
+    "FUTURES_WF_OOS_LEGS": 3,
 }
 
-# Phase C engine + risk (plugin union via build_full_discovery_space_futures).
-# LEVERAGE removed from optimization (anchored at 20).
-# MAX_EXPOSURE replaced with MAX_EXPOSURE_PER_COIN and DD_SCALING_THRESHOLD.
+# Cross-Sectional Strategy Parameter Space
 SIGNAL_PARAM_SPACE_FUTURES: Dict[str, Dict[str, Any]] = {
     "ATR_PERIOD": {"type": "int", "low": 10, "high": 20, "step": 2},
     "LONG_ATR_MULT": {"type": "float", "low": 1.5, "high": 4.5, "step": 0.25},
     "LONG_TRAIL_MULT": {"type": "float", "low": 2.5, "high": 6.0, "step": 0.5},
-    "LONG_SCALE_ATR_MULT": {"type": "float", "low": 1.5, "high": 4.0, "step": 0.5},
     "SHORT_ATR_MULT": {"type": "float", "low": 1.0, "high": 3.0, "step": 0.25},
     "SHORT_TP_MULT": {"type": "float", "low": 1.0, "high": 3.5, "step": 0.5},
     "SHORT_TRAIL_MULT": {"type": "float", "low": 1.5, "high": 4.5, "step": 0.5},
@@ -91,343 +62,80 @@ ENGINE_PARAM_SPACE_FUTURES: Dict[str, Dict[str, Any]] = {
     **PORTFOLIO_PARAM_SPACE_FUTURES,
 }
 
-
-FUTURES_SYMBOLS: List[str] = [
+# Dynamic Universe Anchor Symbols
+FUTURES_ANCHOR_SYMBOLS: List[str] = [
     "BTC/USDT",
     "ETH/USDT",
-    "XRP/USDT",
-    "ADA/USDT",
-    "SUI/USDT",
-    "AAVE/USDT",
-    "1000PEPE/USDT",
 ]
 
-FUTURES_ANCHOR_SYMBOLS: List[str] = [
-    "BTC/USDT",  # ADV $3B+, 독립 가격 동인, 슬리피지 최소
+# This list will be overwritten by the dynamic screener
+FUTURES_SYMBOLS: List[str] = [
+    "FTM/USDT",
+    "DGB/USDT",
+    "BTC/USDT",
     "ETH/USDT",
-]
-
-
-# Manually curated: ADV > $150M/day, CMC Top-50, 상장 2년+.
-# ZEC/FIL/DOT 유형(유동성 감소 추세, CMC 100위 밖) 포함 금지.
-FUTURES_DYNAMIC_CANDIDATE_POOL: List[str] = [
-    # Legacy top-10 by market cap
-    "BNB/USDT",  # ADV $500M+, Binance 네이티브
-    "XRP/USDT",  # ADV $2B+, ETH 상관도 낮음
-    "ADA/USDT",  # ADV $200M+, 독립 베타
-    "ATOM/USDT",  # ADV $100M+, IBC 생태계
-    "LTC/USDT",  # ADV $300M+, 안정적 legacy 유동성
-    "POL/USDT",  # ADV $200M+, MATIC 리브랜딩 (2024-09); CMC Top-30
-    # 기존 pool 유지
-    "AVAX/USDT",
-    "NEAR/USDT",
-    "LINK/USDT",
+    "SOL/USDT",
+    "XRP/USDT",
     "DOGE/USDT",
-    "SUI/USDT",
-    "1000PEPE/USDT",
-    "FET/USDT",
-    "APT/USDT",
-    "INJ/USDT",
-    "ARB/USDT",
-    "OP/USDT",
-    "TIA/USDT",
-    "WIF/USDT",
-    "JTO/USDT",
-    "PYTH/USDT",
-    "SEI/USDT",
+    "BNB/USDT",
+    "ADA/USDT",
+    "LTC/USDT",
+    "LINK/USDT",
+    "AVAX/USDT",
+    "AAVE/USDT",
+    "BCH/USDT",
+    "DOT/USDT",
+    "FIL/USDT",
+    "NEAR/USDT",
+    "CRV/USDT",
+    "CHZ/USDT",
+    "ALICE/USDT",
+    "LINA/USDT",
 ]
 
 FUTURES_SCREENER_CONFIG: Dict[str, Any] = {
     "ADV_MIN_USDT_DAY": 50_000_000.0,
-    "SCREENER_MIN_P25_BAR_USDT": 2_000_000.0,
-    "SCREENER_ATR_PERIOD": 14,
-    "SCREENER_ATR_PCT_MIN": 2.0,
-    "SCREENER_ATR_PCT_MAX": 12.0,
     "MIN_HISTORY_BARS": 2000,
-    "SCREENER_MIN_TRADES_DYNAMIC": 12,  # 4h 기준 2년 IS에서 최소 통계적 유의성 (Binomial n>=12)
-    "SCREENER_MIN_PF": 1.15,
-    "FUNDING_EXTREME_THRESHOLD": 0.003,
-    "MP_MIN_SYMBOLS": 1,
-    "MP_MAX_SYMBOLS": 5,
-    "CANDIDATES_TOP_K": 12,
-    "BROAD_POOL_K": 100,
-    "COMBO_SAMPLE_K": 12,
+    "BROAD_POOL_K": 80,
 }
 
 # ==============================================================================
-# OPTIMIZATION SPOT SEARCH SPACE & CONFIGURATION (shared-cash + CPCV)
+# SPOT CONFIGURATION (Unchanged)
 # ==============================================================================
-
-# Manually curated; Phase C mini-BT bypass for inclusion (anchor tier).
-SPOT_ANCHOR_SYMBOLS: List[str] = [
-    "KRW-ETH",
-    "KRW-SOL",
-    "KRW-XRP",
-]
-
-SPOT_SYMBOLS: List[str] = [
-    "KRW-ETH",
-    "KRW-SOL",
-    "KRW-XRP",
-    "KRW-HBAR",
-]
-
-# Phase A universe screen output; refreshed by universe_screener / opt_spot Phase 0.
-SPOT_BROAD_CANDIDATES: List[str] = [
-    "KRW-XRP",
-    "KRW-BTC",
-    "KRW-DOGE",
-    "KRW-ETH",
-    "KRW-SOL",
-    "KRW-ADA",
-    "KRW-AWE",
-    "KRW-HBAR",
-    "KRW-LINK",
-    "KRW-XLM",
-    "KRW-TRX",
-    "KRW-STX",
-    "KRW-AAVE",
-    "KRW-WAVES",
-    "KRW-ETC",
-    "KRW-SAND",
-    "KRW-BCH",
-    "KRW-CRO",
-    "KRW-DOT",
-    "KRW-POL",
-    "KRW-A",
-    "KRW-IOTA",
-    "KRW-NEO",
-    "KRW-GLM",
-    "KRW-KAVA",
-    "KRW-AQT",
-    "KRW-VET",
-    "KRW-HIVE",
-    "KRW-BTT",
-    "KRW-ARK",
-]
+SPOT_ANCHOR_SYMBOLS: List[str] = ["KRW-ETH", "KRW-SOL", "KRW-XRP"]
+SPOT_SYMBOLS: List[str] = ["KRW-ETH", "KRW-SOL", "KRW-XRP", "KRW-HBAR"]
 
 OPT_SPOT_CONFIG: Dict[str, Any] = {
     "total_trials": 1500,
-    "tpe_n_startup_trials": 256,  # Sweet spot: 26~35D combo-space에서 초기 커버리지/예산 균형
-    "tpe_pruner_n_startup_trials": 10,
-    "tpe_pruner_n_warmup_steps": 8,
-    "tpe_pruner_patience": 2,
+    "tpe_n_startup_trials": 256,
     "seeds": [42],
     "n_jobs": 3,
-    "task_workers": 3,
     "TARGET_TIMEFRAMES": ["4h"],
-    "SPOT_MAX_CONCURRENT_POSITIONS": 5,
     "CPCV_N_BLOCKS": 8,
     "CPCV_K_TEST": 3,
-    "SPOT_SHORTLIST_TOP_K": 25,
-    "SPOT_MIN_TRADES_PER_CPCV_SEGMENT": 8,
-    "SPOT_SEGMENT_TRADE_FAIL_PENALTY": 2.0,
-    "SPOT_HOLDOUT_MIN_PORTFOLIO_LONG_TRADES": 50,  # Defined in opt_spot.py; used as fallback
-    "SPOT_HOLDOUT_MIN_TAIL_RATIO": 0.90,
-    "SPOT_HOLDOUT_MIN_PROFIT_FACTOR": 1.2,
-    "SPOT_HOLDOUT_MIN_CALMAR_RATIO": 1.2,
-    "SPOT_HOLDOUT_MIN_CAGR_PCT": 18.0,
-    "SPOT_HOLDOUT_MDD_LIMIT_PCT": 35.0,
-    "SPOT_HOLDOUT_HWM_RECOVERY_MAX_DAYS": 270.0,
-    "SPOT_HOLDOUT_MAX_CVAR_PCT": 10.0,
-    "SPOT_HOLDOUT_ALPHA_DECAY_FLOOR_PCT": -75.0,
-    "SPOT_GATE1_SQN_MIN": 2.0,
-    "SPOT_GATE1_PATH_SORTINO_MIN": 0.5,
-    "SPOT_GATE1_TAIL_RATIO_MIN": 1.1,
-    "SPOT_OBJECTIVE_W_MEAN_LOG_TW": 0.7,
-    "SPOT_OBJECTIVE_TAIL_RATIO_TARGET": 1.1,
-    "SPOT_OBJECTIVE_INFEASIBLE_RETURN": -1.0e9,
-    "SPOT_DISCOVERY_DSR_MIN": 0.35,
-    "SPOT_OBJECTIVE_DSR_TARGET": 0.35,
-    "SPOT_OBJECTIVE_LAMBDA_UI": 0.02,
-    "SPOT_OBJECTIVE_W_TRADE": 0.06,
-    "SPOT_OBJECTIVE_W_SQN": 0.02,
-    "SPOT_COMBO_TOP_K": 3,
-    "SPOT_COMBO_QUICK_TRIALS": 55,
-    "SPOT_COMBO_MIN_SIGNAL_RATE": 0.005,
-    "SPOT_COMBO_QUICK_TRIALS_PHASE1": 18,
-    "SPOT_COMBO_QUICK_TRIALS_PHASE1_MAX": 30,
-    "SPOT_COMBO_QUICK_TRIALS_MAX": 70,
-    "SPOT_COMBO_PRUNE_THRESHOLD": -0.5,
-    "SPOT_COMBO_N_WORKERS": 6,
-    "SPOT_COMBO_MIN_SCREEN_SCORE": 0.0,
-    "SPOT_COMBO_AMBIGUITY_STD_RATIO": 0.15,
-    "SPOT_COMBO_PHASE2_AMBIGUITY_BOOST": 4,
-    "SPOT_STAGE1_BROAD_SAMPLE_K": 12,  # Stage1 uses top-K ADV symbols
-    "SPOT_STAGE1_TRIALS_PER_SIGNAL": 150,  # Stage1 ranking stability (tmp.md: 100→150)
-    "SPOT_STAGE1_TOP_K": 3,
-    "SPOT_STAGE1_MIN_P10_GMGR": -0.5,
-    "SPOT_BUCKET_TOP_EACH": 2,
-    "SPOT_CONSTRAINT_PSR_FLOOR": 0.08,
-    "SPOT_CONSTRAINT_DSR_FLOOR": 0.0,
-    "SPOT_CONSTRAINT_MIN_MEAN_TRADES": 30.0,
-    "SPOT_CONSTRAINT_MIN_PATH_TW_RATIO": 0.92,
-    "SPOT_CONSTRAINT_MIN_MEAN_PF": 1.05,
-    "SPOT_CONSTRAINT_MIN_MEAN_PATH_TAIL": 1.10,
-    "SPOT_CONSTRAINT_MIN_WORST25_CALMAR": 0.2,
-    "SPOT_OBJECTIVE_W_TAIL_RATIO": 0.60,
-    "SPOT_CPCV_CVAR_ALPHA": 0.10,
-    "SPOT_CPCV_CVAR_THRESHOLD": 0.05,
-    "SPOT_CPCV_CVAR_WEIGHT": 0.80,
-    "SPOT_CPCV_TEMPORAL_LAMBDA": 1.5,
-    "SPOT_RECENT_IS_GATE_WEIGHT": 0.25,
-    "SPOT_MIN_REGIME_ON_RATE": 0.22,
-    "SPOT_REGIME_ON_RATE_PENALTY_WEIGHT": 0.25,
-    "SPOT_MIN_P10_GMGR_CAGR_PCT": 5.0,
-    "SPOT_STAGE2_MAX_PER_SIGNAL_TYPE": 2,
-    "SPOT_EXIT_FAMILY_PRIOR_SCALE": 1.0,
-    "SPOT_OBJECTIVE_W_CALMAR": 0.10,
-    "SPOT_PBO_MAX": 0.85,
-    "SPOT_PBO_GATE_HARD": False,
-    "SPOT_MULTI_WINDOW_OOS_ENABLED": True,
-    "SPOT_MULTI_WINDOW_OOS_SUBS": 3,
-    "SPOT_MULTI_WINDOW_BARS_PER_MONTH": 180,
-    "SPOT_MULTI_WINDOW_MIN_POSITIVE": 3,
-    "SPOT_MULTI_WINDOW_MIN_MEDIAN_CAGR_PCT": 15.0,
-    "SPOT_MULTI_WINDOW_MAX_WORST_MDD_PCT": 35.0,
-    "SPOT_REGIME_DIAGNOSTIC_ENABLED": True,
-    "SPOT_REGIME_STRESS_MAX_MDD_PCT": 40.0,
-    "SPOT_SYMBOL_CLUSTER": {
-        "KRW-ETH": "mrmr_0",
-        "KRW-SOL": "mrmr_1",
-        "KRW-XRP": "mrmr_2",
-        "KRW-HBAR": "mrmr_3",
-    },
 }
-
-
-# Spot optimization: exclude institutional-only sizing for small KRW books (see tmp.md).
-SPOT_EXCLUDED_SIZING_METHODS: frozenset[str] = frozenset({"liquidity_adjusted"})
-
-# Universe screener: theory-based thresholds (ADV floor, Hurst bootstrap, MP, mRMR).
-SPOT_SCREENER_CONFIG: dict[str, float | int | bool] = {
-    "ADV_MIN_KRW_DAY": 2_000_000_000.0,  # 100M KRW scale: 10M position / 5% participation / 0.25x6
-    "SCREENER_MIN_P25_BAR_KRW": 80_000_000.0,  # p25 4H bar floor (100M/5 syms)
-    "SCREENER_ATR_PERIOD": 14,
-    "SCREENER_ATR_PCT_MIN": 1.0,
-    "SCREENER_ATR_PCT_MAX": 8.0,
-    "SCREENER_MIN_TRADES": 8,
-    "SCREENER_MIN_TRADES_DYNAMIC": 3,
-    "SCREENER_MIN_PF": 1.10,
-    "MP_MIN_SYMBOLS": 4,
-    "MP_MAX_SYMBOLS": 10,
-    "CANDIDATES_TOP_K": 20,
-    "ADAPTIVE_SLIPPAGE_REF_ADV": True,
-}
-
-# Shared-cash concurrency slippage (Reference ADV anchor; universe_screener may set adaptively).
-SLIPPAGE_GAMMA_BASE: float = 0.03
-SLIPPAGE_REFERENCE_ADV_KRW: float = 78796702448.02948
-
-ENGINE_PARAM_SPACE: Dict[str, Dict[str, Any]] = {
-    "EXIT_FAMILY": {
-        "type": "categorical",
-        "choices": ("TREND_HOLD", "BALANCED", "FAST_REALIZE"),
-    },
-    "LONG_ATR_MULT": {"type": "float", "low": 1.5, "high": 4.0, "step": 0.25},
-    "TRAIL_ATR_MULT": {"type": "float", "low": 2.5, "high": 6.0, "step": 0.5},
-    "USE_TRAILING_STOP": {"type": "categorical", "choices": (True, False)},
-    "LONG_SCALE_ATR_MULT": {"type": "float", "low": 1.0, "high": 4.0, "step": 0.5},
-    "SCALE_OUT_PCT": {"type": "float", "low": 0.25, "high": 0.60, "step": 0.05},
-    "TIME_STOP_BARS": {"type": "int", "low": 0, "high": 168, "step": 12},
-    "RISK_PER_TRADE": {"type": "float", "low": 0.005, "high": 0.08},
-    "MAX_EXPOSURE": {"type": "float", "low": 0.5, "high": 1.0, "step": 0.1},
-    "RSI_EXIT_THRESHOLD": {"type": "float", "low": 75.0, "high": 92.0, "step": 1.0},
-    "RSI_EXIT_PERIOD": {"type": "int", "low": 10, "high": 21, "step": 1},
-    "BB_EXIT_PERIOD": {"type": "int", "low": 14, "high": 50, "step": 2},
-    "BB_EXIT_STD": {"type": "float", "low": 1.5, "high": 3.0, "step": 0.25},
-}
-
-SPOT_SHARED_PARAM_SPACE: Dict[str, Dict[str, Any]] = {
-    "ATR_PERIOD": {"type": "int", "low": 10, "high": 20, "step": 2},
-    "KELLY_FRACTION": {"type": "float", "low": 0.2, "high": 0.8, "step": 0.1},
-    "MAX_CAP_PER_COIN": {"type": "float", "low": 0.10, "high": 0.35},
-    "MAX_PARTICIPATION_RATE": {"type": "float", "low": 0.005, "high": 0.05, "step": 0.005},
-}
-
 
 def get_search_space_futures(tf: str, stage: int = 0) -> Dict[str, Dict[str, Any]]:
-    """stage=0: full; 1: alpha discovery (IC); 2: portfolio/execution (Stage 2 TPE)."""
     _ = tf
     from src.domain.futures.opt_futures_utils.opt_params import build_full_discovery_space_futures
-
-    full = build_full_discovery_space_futures()
-    if stage == 1:
-        # Alpha-only: Parameters that define the "shape" of the signal/regime.
-        # Exclude sizing, risk, and entry/exit thresholds/multipliers.
-        alpha_keys = [
-            k for k, v in full.items()
-            if not any(term in k for term in [
-                "THRESHOLD", "MULT", "SQUEEZE", "OFFSET", "LIMIT", 
-                "METHOD", "RISK", "EXPOSURE", "DD_SCALING"
-            ])
-            or k in ["SIGNAL_TYPE", "REGIME_TYPE"]
-        ]
-        # Explicitly remove SIZING_METHOD from Stage 1 as it doesn't affect IC
-        alpha_space = {k: full[k] for k in alpha_keys if k != "SIZING_METHOD"}
-        return alpha_space
-    
-    if stage == 2:
-        # Portfolio/Execution: Parameters that define how we trade the discovered alpha.
-        portfolio_keys = [
-            k for k, v in full.items()
-            if any(term in k for term in [
-                "THRESHOLD", "MULT", "SQUEEZE", "OFFSET", "LIMIT", 
-                "METHOD", "RISK", "EXPOSURE", "DD_SCALING"
-            ])
-            or k == "SIZING_METHOD"
-        ]
-        return {k: full[k] for k in portfolio_keys}
-    
-    return full
-
+    return build_full_discovery_space_futures()
 
 def get_search_space_spot(tf: str) -> Dict[str, Dict[str, Any]]:
     _ = tf
     from src.domain.spot.opt_spot_utils.opt_params import build_full_discovery_space
-
     return build_full_discovery_space()
-
-
-def get_spot_effective_independent_trials(
-    n_completed_trials: int,
-    n_startup_trials: int,
-) -> int:
-    """
-    Conservative effective independent trials under TPE autocorrelation (spot_enhance7).
-    """
-    n = max(0, int(n_completed_trials))
-    n0 = max(1, int(n_startup_trials))
-    # Penalize post-startup trials more: treat correlated trials as partially redundant.
-    if n <= n0:
-        return max(1, n)
-    extra = n - n0
-    effective = int(n0 + math.ceil(extra**0.65))
-    return max(1, effective)
-
 
 def get_quarterly_window(reference_date: Any = None) -> tuple[str, str, str, str]:
     import datetime
-
-    from dateutil.relativedelta import relativedelta  # type: ignore[import-untyped]
-
+    from dateutil.relativedelta import relativedelta
     if reference_date is None:
         reference_date = datetime.date.today()
     elif isinstance(reference_date, str):
         reference_date = datetime.datetime.strptime(reference_date, "%Y-%m-%d").date()
-    elif isinstance(reference_date, datetime.datetime):
-        reference_date = reference_date.date()
     current_quarter_start_month: int = ((reference_date.month - 1) // 3) * 3 + 1
-    current_quarter_start: datetime.date = datetime.date(
-        reference_date.year, current_quarter_start_month, 1
-    )
+    current_quarter_start: datetime.date = datetime.date(reference_date.year, current_quarter_start_month, 1)
     oos_end: datetime.date = current_quarter_start - datetime.timedelta(days=1)
     oos_start: datetime.date = current_quarter_start - relativedelta(months=12)
     is_start: datetime.date = oos_start - relativedelta(months=24)
     fetch_start: datetime.date = is_start - relativedelta(days=700)
-    return (
-        fetch_start.strftime("%Y-%m-%d"),
-        is_start.strftime("%Y-%m-%d"),
-        oos_start.strftime("%Y-%m-%d"),
-        oos_end.strftime("%Y-%m-%d"),
-    )
+    return (fetch_start.strftime("%Y-%m-%d"), is_start.strftime("%Y-%m-%d"), oos_start.strftime("%Y-%m-%d"), oos_end.strftime("%Y-%m-%d"))

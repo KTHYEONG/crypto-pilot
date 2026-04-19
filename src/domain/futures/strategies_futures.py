@@ -127,8 +127,8 @@ class UltimateStrategy(PipelineStrategyBase):
         df["kill_signal"] = np.where(td == 1.0, kill_long, kill_short)
         df["slot_rank_score"] = rank_score
 
-        # Macro Filter
-        if "btc_close" in df.columns and "btc_ema" in df.columns:
+        # Macro Filter - Skip if using direct ML signals or NONE regime to avoid interference
+        if rt_key != "NONE" and "btc_close" in df.columns and "btc_ema" in df.columns:
             btc_bull = (df["btc_close"] > df["btc_ema"]).to_numpy()
             long_mult = np.where(btc_bull, long_mult, 0.0)
 
