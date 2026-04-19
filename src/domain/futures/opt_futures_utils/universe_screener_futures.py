@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
-from config.opt_config import FUTURES_ANCHOR_SYMBOLS
+from config.opt_config import FUTURES_ANCHOR_SYMBOLS, FUTURES_SCREENER_CONFIG
 from src.domain.futures.data_collector import DataCollector
 
 _logger = logging.getLogger(__name__)
@@ -66,13 +66,14 @@ def _point_in_time_symbols_from_history(
     return best_syms
 
 
-def _calculate_amihud_illiquidity(df: pd.DataFrame) -> float:
+def _calculate_amihud_illiquidity(df: pd.DataFrame, tail_bars: int = 180) -> float:
     if df.empty or len(df) < 20:
         return 999.0
     returns = df["close"].pct_change().abs()
     notional_vol = df["volume"] * df["close"]
     illiq = returns / notional_vol.replace(0, 1e-9)
-    return float(illiq.tail(180).mean() * 1e6)
+    return float(illiq.tail(tail_bars).mean() * 1e6)
+
 
 def _slice_df_to_is(df: pd.DataFrame, is_start: str, is_end: str) -> pd.DataFrame:
     if df.empty or "datetime" not in df.columns:
@@ -82,6 +83,28 @@ def _slice_df_to_is(df: pd.DataFrame, is_start: str, is_end: str) -> pd.DataFram
     dt = pd.to_datetime(df["datetime"], utc=True)
     mask = (dt >= is_s) & (dt < is_e)
     return df.loc[mask].reset_index(drop=True)
+
+
+def _mean_abs_funding(daily_df: pd.DataFrame) -> float:
+    """Institutional Gate: Detect crowded positions via funding rates (last 90d)."""
+    if daily_df.empty or "funding_rate" not in daily_df.columns:
+        return 0.0
+    return float(daily_df["funding_rate"].abs().tail(90).mean())
+
+
+def _has_regime_diversity(df: pd.DataFrame, tf: str = "4h", min_vol_cv: float = 0.3) -> bool:
+    """ML Gate: Ensure symbol has multiple regimes for HMM/GP to learn effectively."""
+    if df.empty or "close" not in df.columns:
+        return True
+    rets = np.log1p(df["close"].pct_change().dropna())
+    # Use 4-day rolling window for volatility variability check
+    rolling_window = 96 if tf == "1h" else 24
+    rolling_vol = rets.rolling(rolling_window).std().dropna()
+    if len(rolling_vol) < 50:
+        return True
+    cv = rolling_vol.std() / (rolling_vol.mean() + 1e-9)
+    return float(cv) >= min_vol_cv
+
 
 def screen_futures_universe(
     collector: DataCollector,
@@ -102,7 +125,8 @@ def screen_futures_universe(
     try:
         tickers = collector.client.exchange.fetch_tickers()
         valid_tickers = []
-        min_adv = float(cfg.get("ADV_MIN_USDT_DAY", 50_000_000.0)) * 0.5
+        # Use MIN_ADV_USDT from new config structure
+        min_adv = float(cfg.get("MIN_ADV_USDT", 25_000_000))
         for sym, t in tickers.items():
             if not (sym.endswith("/USDT") or sym.endswith("/USDT:USDT")):
                 continue
@@ -134,19 +158,33 @@ def screen_futures_universe(
     final_list = merged[:k]
     return final_list, len(final_list)
 
+
 def screen_symbol_refinement_futures(
     broad_candidates: List[str],
     winning_signal_type: str,
     is_end_date: str,
+    tf: str = "1h",
     *,
     symbol_dfs_4h: Dict[str, pd.DataFrame],
     daily_dfs: Dict[str, pd.DataFrame],
     phase_b_params: Optional[Dict[str, Any]] = None,
     anchor_symbols: Optional[List[str]] = None,
 ) -> bool:
-    """Phase B: Cross-Sectional Beta & Correlation Alignment."""
+    """Phase B: Institutional Risk Filtering (Beta, Corr, Funding, Diversity)."""
     anchors = list(anchor_symbols) if anchor_symbols else FUTURES_ANCHOR_SYMBOLS
-    if "BTC/USDT" not in symbol_dfs_4h: return False
+    if "BTC/USDT" not in symbol_dfs_4h:
+        _logger.error("BTC/USDT missing from symbol_dfs. Cannot refine universe.")
+        return False
+    
+    cfg = FUTURES_SCREENER_CONFIG
+    
+    # [Dynamic Thresholds] 1h vs 4h
+    min_total_bars = 4000 if tf == "1h" else 1000
+    min_is_bars = 2000 if tf == "1h" else 500
+    min_corr_pairs = 800 if tf == "1h" else 200
+    tail_adv_bars = 2160 if tf == "1h" else 540
+    tail_amihud_bars = 720 if tf == "1h" else 180
+    adv_multiplier = 24 if tf == "1h" else 6
     
     btc_df = _slice_df_to_is(symbol_dfs_4h["BTC/USDT"], "1970-01-01", is_end_date)
     btc_rets = btc_df["close"].pct_change().fillna(0.0)
@@ -154,36 +192,66 @@ def screen_symbol_refinement_futures(
     candidate_stats = []
     for sym in list(dict.fromkeys(broad_candidates + anchors)):
         df = symbol_dfs_4h.get(sym)
-        if df is None or len(df) < 1000: continue
+        if df is None or len(df) < min_total_bars:
+            continue
         is_df = _slice_df_to_is(df, "1970-01-01", is_end_date)
-        if len(is_df) < 500: continue
+        if len(is_df) < min_is_bars:
+            continue
+        
+        # [ML Gate] Regime Diversity
+        if not _has_regime_diversity(is_df, tf=tf, min_vol_cv=cfg.get("MIN_VOL_CV", 0.3)):
+            continue
+            
+        # [Institutional Gate] Funding Rate Crowding
+        if _mean_abs_funding(daily_dfs.get(sym, pd.DataFrame())) > cfg.get("FUNDING_RATE_MAX_ABS", 0.0008):
+            if sym not in anchors:
+                continue
         
         rets = is_df["close"].pct_change().fillna(0.0)
         merged = pd.concat([btc_rets, rets], axis=1, join="inner").dropna()
-        if len(merged) < 200: continue
+        if len(merged) < min_corr_pairs:
+            continue
         
-        beta = np.cov(merged.iloc[:,0], merged.iloc[:,1])[0,1] / (np.var(merged.iloc[:,0]) + 1e-12)
-        corr = merged.iloc[:,0].corr(merged.iloc[:,1])
-        adv = (is_df["close"] * is_df["volume"]).tail(540).mean() * 6
-        amihud = _calculate_amihud_illiquidity(is_df)
+        # [Risk Gates] Beta & Correlation vs BTC
+        beta = np.cov(merged.iloc[:, 0], merged.iloc[:, 1])[0, 1] / (np.var(merged.iloc[:, 0]) + 1e-12)
+        corr = merged.iloc[:, 0].corr(merged.iloc[:, 1])
+        
+        adv = (is_df["close"] * is_df["volume"]).tail(tail_adv_bars).mean() * adv_multiplier
+        amihud = _calculate_amihud_illiquidity(is_df, tail_bars=tail_amihud_bars)
         candidate_stats.append({"symbol": sym, "beta": beta, "corr": corr, "adv": adv, "amihud": amihud})
 
+    # Liquidity Sort (Top 60)
     candidate_stats.sort(key=lambda x: x["adv"], reverse=True)
     pool = candidate_stats[:60]
+    
+    # Amihud Pruning (Keep Top 75%)
     pool.sort(key=lambda x: x["amihud"])
-    pool = pool[:int(len(pool)*0.85)] # Prune illiquid tail
+    prune_ratio = float(cfg.get("AMIHUD_PRUNE_RATIO", 0.75))
+    pool = pool[:int(len(pool) * prune_ratio)]
     
-    final = [c["symbol"] for c in pool if 0.6 <= c["beta"] <= 1.6 and c["corr"] > 0.35 or c["symbol"] in anchors]
-    final_symbols = list(dict.fromkeys(final))[:40]
-    if "BTC/USDT" not in final_symbols: final_symbols.insert(0, "BTC/USDT")
+    # Final Strict Thresholds
+    min_corr = float(cfg.get("MIN_CORR_BTC", 0.50))
+    max_beta = float(cfg.get("MAX_BETA_BTC", 1.40))
+    min_beta = float(cfg.get("MIN_BETA_BTC", 0.60))
     
-    _logger.info(f"Final Universe: {final_symbols}")
+    final = [
+        c["symbol"] for c in pool 
+        if (min_beta <= c["beta"] <= max_beta and c["corr"] > min_corr) or c["symbol"] in anchors
+    ]
+    
+    final_symbols = list(dict.fromkeys(final))[:int(cfg.get("FINAL_POOL_K", 40))]
+    if "BTC/USDT" not in final_symbols:
+        final_symbols.insert(0, "BTC/USDT")
+    
+    _logger.info(f"Final Refined Universe ({tf}): {final_symbols}")
     update_futures_config_file(final_symbols)
     return True
 
+
 def update_futures_config_file(symbols: List[str]) -> None:
     path = Path("config/opt_config.py")
-    if not path.exists(): return
+    if not path.exists():
+        return
     content = path.read_text(encoding="utf-8")
     pattern = r"FUTURES_SYMBOLS(?::\s*List\[str\])?\s*=\s*\[.*?\]"
     new_block = "FUTURES_SYMBOLS: List[str] = [\n" + "".join([f'    "{s}",\n' for s in symbols]) + "]"
