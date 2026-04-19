@@ -18,6 +18,7 @@ from src.domain.futures.data_collector import DataCollector
 from src.domain.futures.ml_pipeline.cross_sectional_utils import CrossSectionalPipelineUtils
 from src.domain.futures.ml_pipeline.feature_engineering import (
     GP_ENGINEERED_FEATURE_NAMES,
+    HMM_SEMANTIC_PROB_COLUMNS,
     build_gp_input_features,
 )
 from src.domain.futures.ml_pipeline.gp_alpha_miner import GPAlphaMiner
@@ -42,8 +43,11 @@ class MLPipelineOutput:
 
 
 def _sorted_hmm_prob_columns(df: pd.DataFrame) -> list[str]:
-    cols = [c for c in df.columns if str(c).startswith("hmm_prob_")]
-    return sorted(cols, key=lambda x: int(str(x).split("_")[-1]))
+    sem = [c for c in HMM_SEMANTIC_PROB_COLUMNS if c in df.columns]
+    if sem:
+        return sem
+    legacy = [c for c in df.columns if str(c).startswith("hmm_prob_")]
+    return sorted(legacy, key=lambda x: int(str(x).split("_")[-1]))
 
 
 def _meta_feature_column_names(wide_1h: pd.DataFrame) -> tuple[str, ...]:
@@ -97,26 +101,79 @@ def _ensure_datetime_column(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def _hmm_modulator_values(market_probs: pd.DataFrame) -> np.ndarray:
+def _is_kelly_per_semantic_state(
+    p_mat: np.ndarray,
+    factor_ret: np.ndarray,
+    is_mask: np.ndarray,
+    n_states: int,
+) -> np.ndarray:
+    """IS-only Kelly fraction per semantic state (hard argmax assignment)."""
+    kelly: np.ndarray = np.zeros(n_states, dtype=np.float64)
+    state_hard = np.argmax(p_mat, axis=1).astype(np.int64)
+    for s in range(n_states):
+        m = is_mask & (state_hard == s)
+        r = factor_ret[m]
+        if np.sum(m) < 30:
+            kelly[s] = 0.0
+            continue
+        mu = float(np.mean(r))
+        v = float(np.var(r, ddof=1)) + 1e-12
+        kelly[s] = float(np.clip(mu / v, -1.0, 1.0))
+    return kelly
+
+
+def _hmm_modulator_kelly_values(
+    market_probs: pd.DataFrame,
+    alpha_panel: pd.DataFrame,
+    is_end_utc: pd.Timestamp,
+    btc_df: pd.DataFrame | None,
+    shrink: float,
+    crisis_thr: float,
+) -> np.ndarray:
+    """Posterior-weighted Kelly modulator + crisis kill switch (tmp.md Layer 2)."""
     cols = _sorted_hmm_prob_columns(market_probs)
-    if not cols:
-        return np.full(len(market_probs), 0.8, dtype=np.float64)
-    mp = market_probs[cols].replace([np.inf, -np.inf], np.nan).fillna(1.0 / float(len(cols)))
-    if len(cols) >= 3:
-        mod = (
-            mp.iloc[:, 2].to_numpy(dtype=np.float64, copy=False) * 1.4
-            + mp.iloc[:, 1].to_numpy(dtype=np.float64, copy=False) * 1.0
-            + mp.iloc[:, 0].to_numpy(dtype=np.float64, copy=False) * 0.4
+    n = len(market_probs)
+    if not cols or btc_df is None or len(btc_df) < 80:
+        return np.full(n, 1.0, dtype=np.float64)
+    k_states = len(cols)
+    ap = alpha_panel.reset_index()
+    if "gp_alpha_00" not in ap.columns:
+        return np.full(n, 1.0, dtype=np.float64)
+    ap["datetime"] = pd.to_datetime(ap["datetime"], utc=True)
+    g_mean = ap.groupby("datetime", sort=False)["gp_alpha_00"].mean()
+
+    b = btc_df.sort_values("datetime").copy()
+    b["datetime"] = pd.to_datetime(b["datetime"], utc=True)
+    c = b["close"].astype(np.float64)
+    b["btc_r"] = np.log(c / c.shift(1).clip(lower=1e-12)).fillna(0.0)
+
+    mp = market_probs[["datetime", *cols]].copy()
+    mp["datetime"] = pd.to_datetime(mp["datetime"], utc=True)
+    merged = mp.merge(b[["datetime", "btc_r"]], on="datetime", how="left")
+    merged["gp_m"] = merged["datetime"].map(g_mean).fillna(0.0)
+    merged["btc_r"] = merged["btc_r"].fillna(0.0)
+    merged["factor_ret"] = merged["gp_m"].to_numpy(dtype=np.float64) * merged["btc_r"].to_numpy(
+        dtype=np.float64
+    )
+
+    factor_ret = merged["factor_ret"].to_numpy(dtype=np.float64)
+    p_mat = (
+        merged[cols].replace([np.inf, -np.inf], np.nan).fillna(1.0 / float(k_states)).to_numpy()
+    )
+    dt_mp = pd.to_datetime(merged["datetime"], utc=True)
+    is_mask = (dt_mp < is_end_utc).to_numpy()
+    k_vec = _is_kelly_per_semantic_state(p_mat, factor_ret, is_mask, k_states)
+    blend = 1.0 + float(shrink) * (p_mat @ k_vec)
+    mod = np.clip(blend, 0.3, 1.8).astype(np.float64, copy=False)
+    if "hmm_prob_crisis" in market_probs.columns:
+        pc = (
+            market_probs["hmm_prob_crisis"]
+            .replace([np.inf, -np.inf], np.nan)
+            .fillna(0.0)
+            .to_numpy(dtype=np.float64)
         )
-    elif len(cols) == 2:
-        mod = (
-            mp.iloc[:, 1].to_numpy(dtype=np.float64, copy=False) * 1.15
-            + mp.iloc[:, 0].to_numpy(dtype=np.float64, copy=False) * 0.55
-        )
-    else:
-        mod = mp.iloc[:, 0].to_numpy(dtype=np.float64, copy=False)
-    clipped = np.clip(mod, 0.3, 1.8).astype(np.float64, copy=False)
-    return cast(np.ndarray, clipped)
+        mod = np.where(pc > float(crisis_thr), 0.3, mod)
+    return cast(np.ndarray, mod)
 
 
 def _try_tbm_labels_per_1h_row(
@@ -258,7 +315,7 @@ def _step4_fusion_one_symbol(
         df_1h["datetime"] = pd.to_datetime(df_1h["datetime"], utc=True)
 
         hmm_cols_ref = _sorted_hmm_prob_columns(market_probs)
-        k_fb = len(hmm_cols_ref) if hmm_cols_ref else 3
+        k_fb = len(hmm_cols_ref) if hmm_cols_ref else len(HMM_SEMANTIC_PROB_COLUMNS)
 
         if sym not in valid_alpha_set:
             wide_1h = df_1h.copy()
@@ -272,8 +329,8 @@ def _step4_fusion_one_symbol(
                 for c in hmm_cols_ref:
                     wide_1h[c] = wide_1h[c].fillna(1.0 / float(k_fb))
             else:
-                for i in range(k_fb):
-                    wide_1h[f"hmm_prob_{i}"] = 1.0 / float(k_fb)
+                for c in HMM_SEMANTIC_PROB_COLUMNS:
+                    wide_1h[c] = 1.0 / float(len(HMM_SEMANTIC_PROB_COLUMNS))
         else:
             sym_alpha = alpha_by_sym[sym].copy()
             sym_alpha["datetime"] = pd.to_datetime(sym_alpha["datetime"], utc=True)
@@ -287,8 +344,8 @@ def _step4_fusion_one_symbol(
                 for c in hmm_cols_ref:
                     wide_1h[c] = wide_1h[c].fillna(1.0 / float(k_fb))
             else:
-                for i in range(max(1, k_fb)):
-                    wide_1h[f"hmm_prob_{i}"] = 1.0 / float(max(1, k_fb))
+                for c in HMM_SEMANTIC_PROB_COLUMNS:
+                    wide_1h[c] = 1.0 / float(len(HMM_SEMANTIC_PROB_COLUMNS))
 
         df_tf_full = data_maps[sym][tf].copy()
         df_tf_full["datetime"] = pd.to_datetime(df_tf_full["datetime"], utc=True)
@@ -392,7 +449,9 @@ def run_ml_pipeline_for_universe(
         panel_df = utils.cs_median_impute_panel(panel_df, impute_cols)
 
     raw_h = cfg.get("FUTURES_ML_GP_HORIZONS", (3, 6, 12, 24))
-    horizons = tuple(int(x) for x in (raw_h if isinstance(raw_h, (list, tuple)) else (3, 6, 12, 24)))
+    default_h = (3, 6, 12, 24)
+    h_src = raw_h if isinstance(raw_h, (list, tuple)) else default_h
+    horizons = tuple(int(x) for x in h_src)
     panel_df["target"] = utils.create_multi_horizon_rank_targets(panel_df, horizons=horizons)
 
     # --- Step 2: Universal GP Model Training (Cross-Sectional IC) ---
@@ -471,7 +530,8 @@ def run_ml_pipeline_for_universe(
     else:
         market_hmm_feats.index = market_hmm_feats.index.tz_convert("UTC")
 
-    hmm_inferrer = HMMStateInferrer(n_states=0)
+    hmm_k = int(cfg.get("FUTURES_HMM_K_STATES", 4))
+    hmm_inferrer = HMMStateInferrer(n_states=hmm_k)
 
     is_end_dt = pd.to_datetime(is_end_date or end)
     is_end_utc = (
@@ -484,15 +544,26 @@ def run_ml_pipeline_for_universe(
     # Use BTC_Trend_24h as the performance proxy for state ordering (instead of GP LS Spread)
     market_probs = hmm_inferrer.fit_predict_systemic(
         market_hmm_feats,
-        market_hmm_feats["BTC_Trend_24h"],
+        market_hmm_feats["btc_trend_vol_adj_24h"],
         is_end_idx=is_end_idx_market,
+        symbol="Market",
+        tf=tf,
     )
     market_probs = _ensure_datetime_column(market_probs)
     market_probs["datetime"] = pd.to_datetime(market_probs["datetime"], utc=True)
+    btc_anchor = next((s for s in symbols if "BTC" in s), None)
+    btc_1h = prefetched_1h.get(btc_anchor) if btc_anchor else None
     hmm_modulator = pd.DataFrame(
         {
             "datetime": market_probs["datetime"],
-            "hmm_modulator": _hmm_modulator_values(market_probs),
+            "hmm_modulator": _hmm_modulator_kelly_values(
+                market_probs,
+                alpha_panel,
+                is_end_utc,
+                btc_1h,
+                float(cfg.get("FUTURES_HMM_KELLY_SHRINKAGE", 0.4)),
+                float(cfg.get("FUTURES_HMM_CRISIS_THRESHOLD", 0.6)),
+            ),
         }
     )
     
