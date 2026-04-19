@@ -5,7 +5,6 @@ import json
 import os
 import sys
 import threading
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -278,7 +277,9 @@ class DataCollector:
 
         new_dfs: list[pd.DataFrame] = []
         for f_start, f_end in fetch_tasks:
-            self.logger.info(f"Fetching {symbol} {timeframe} task (with taker): {f_start} ~ {f_end}")
+            self.logger.info(
+                f"Fetching {symbol} {timeframe} task (with taker): {f_start} ~ {f_end}"
+            )
             # Use fetch_ohlcv_with_taker to include CVD/microstructure data for GP
             chunk = self.client.fetch_ohlcv_with_taker(symbol, timeframe, str(f_start), str(f_end))
             if not chunk.empty:
@@ -454,7 +455,17 @@ class DataCollector:
             except Exception as e:
                 self.logger.warning(f"Failed to read metrics cache {path}: {e}")
             
-        # 2. 데이터 부족 여부 확인 (30일 분기점 계산)
+        # 2. 메타데이터에서 실제 상장일 확인 (OHLCV 수집 시 기록됨)
+        meta_key = self._meta_key(symbol, "4h")
+        meta = self._load_meta().get(meta_key, {})
+        earliest_available = meta.get("earliest_available")
+        if earliest_available:
+            ea_dt = pd.to_datetime(earliest_available, utc=True)
+            if req_start < ea_dt:
+                req_start = ea_dt
+                self.logger.info(f"Adjusting {symbol} metrics start to earliest available: {ea_dt.date()}")
+
+        # 3. 데이터 부족 여부 확인 (30일 분기점 계산)
         api_cutoff = pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=28) # 안전마진 28일
         
         vision_needed = False
@@ -473,7 +484,7 @@ class DataCollector:
 
         new_parts = []
         
-        # 3. Vision 수집 (30일 이전)
+        # 4. Vision 수집 (30일 이전)
         if vision_needed:
             v_start = req_start
             if not cache_df.empty:
@@ -483,6 +494,7 @@ class DataCollector:
                 
             if v_start < v_end:
                 downloader = BinanceVisionDownloader()
+                # symbol.replace("/", "") is already handled by downloader or should be here
                 v_df = downloader.fetch_range_metrics(symbol.replace("/", ""), v_start, v_end)
                 if not v_df.empty:
                     new_parts.append(self._normalize_metrics_df(v_df))
