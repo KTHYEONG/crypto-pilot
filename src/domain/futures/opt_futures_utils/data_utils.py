@@ -22,6 +22,8 @@ _FUTURES_2D_REQUIRED_COLS: Tuple[str, ...] = (
     "garch_kelly_f",
     "funding_rate_sum",
     "slot_rank_score",
+    "ml_calib_prob",
+    "dyn_leverage",
 )
 
 
@@ -54,9 +56,11 @@ def _dataframe_to_symbol_arrays(sig_df: pd.DataFrame) -> Dict[str, np.ndarray]:
         "trend_direction": 0.0,
         "entry_upper": 999999.0,
         "entry_lower": 0.0,
-        "garch_kelly_f": 0.0,
+        "garch_kelly_f": 1.0,
         "funding_rate_sum": 0.0,
         "slot_rank_score": 0.0,
+        "ml_calib_prob": 0.0,
+        "dyn_leverage": 5.0,
     }
     
     for col, fill_val in fill_map.items():
@@ -134,6 +138,8 @@ def align_data_for_2d_engine(
         "garch_kelly_f",
         "funding_rate_sum",
         "slot_rank_score",
+        "ml_calib_prob",
+        "dyn_leverage",
     ]
     aligned_data: Dict[str, np.ndarray] = {
         col: np.full((n_bars, n_syms), np.nan, dtype=np.float64) for col in target_cols
@@ -153,9 +159,12 @@ def align_data_for_2d_engine(
             "garch_kelly_f",
             "funding_rate_sum",
             "slot_rank_score",
+            "ml_calib_prob",
         ]:
             if col in merged.columns:
                 aligned_data[col][:, s_idx] = merged[col].fillna(0).values
+        if "dyn_leverage" in merged.columns:
+            aligned_data["dyn_leverage"][:, s_idx] = merged["dyn_leverage"].fillna(5.0).values
         for col in ["entry_upper", "entry_lower"]:
             if col in merged.columns:
                 default_val = 999999.0 if col == "entry_upper" else 0.0
