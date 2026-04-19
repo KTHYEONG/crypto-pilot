@@ -16,6 +16,7 @@ from config.settings import FUTURES_INITIAL_BALANCE, SLIPPAGE_RATE, TRADING_FEE_
 from src.domain.futures.engine_multi_futures import (
     backtest_portfolio_numba,
 )
+from src.domain.futures.ml_pipeline.feature_engineering import HMM_SEMANTIC_PROB_COLUMNS
 from src.domain.futures.opt_futures_utils.cv_utils import (
     build_cpcv_test_paths_with_fallback,
     list_cpcv_block_ranges,
@@ -54,34 +55,62 @@ class MLPhaseDContext:
     multi_alignment_info: Optional[Dict[str, Any]] = None
 
 
-def _inject_dyn_leverage_trimmed(trimmed_sig: pd.DataFrame, raw_full: pd.DataFrame) -> None:
-    """P3.B: HMM argmax state → dynamic leverage (2..LEVERAGE cap) for Numba margin."""
-    hmm_cols = sorted(
-        (c for c in raw_full.columns if str(c).startswith("hmm_prob_")),
+def _hmm_columns_for_dyn_leverage(df: pd.DataFrame) -> list[str]:
+    sem = [c for c in HMM_SEMANTIC_PROB_COLUMNS if c in df.columns]
+    if sem:
+        return sem
+    leg = sorted(
+        (c for c in df.columns if str(c).startswith("hmm_prob_")),
         key=lambda x: int(str(x).split("_")[-1]),
     )
-    base_lev = float(OPT_FUTURES_CONFIG.get("FUTURES_DISCOVERY_LEVERAGE", 5))
+    return leg
+
+
+def _inject_dyn_leverage_trimmed(trimmed_sig: pd.DataFrame, raw_full: pd.DataFrame) -> None:
+    """Expected Kelly quality x entropy discount + crisis de-risk (tmp.md Layer 2.2)."""
+    cfg = OPT_FUTURES_CONFIG
+    hmm_cols = _hmm_columns_for_dyn_leverage(raw_full)
+    base_lev = float(cfg.get("FUTURES_DISCOVERY_LEVERAGE", 5))
+    crisis_thr = float(cfg.get("FUTURES_HMM_CRISIS_THRESHOLD", 0.6))
     if not hmm_cols:
         trimmed_sig["dyn_leverage"] = float(base_lev)
         return
+    k = len(hmm_cols)
     p_mat = (
         raw_full[hmm_cols]
         .replace([np.inf, -np.inf], np.nan)
-        .fillna(1.0 / float(len(hmm_cols)))
+        .fillna(1.0 / float(k))
         .to_numpy(dtype=np.float64)
     )
-    state_id = np.argmax(p_mat, axis=1).astype(np.float64)
-    k = len(hmm_cols)
+    close = raw_full["close"].astype(np.float64)
+    r = np.log(close / close.shift(1).clip(lower=1e-12)).fillna(0.0).to_numpy(dtype=np.float64)
+    g = (
+        raw_full["gp_alpha_00"].fillna(0.0).to_numpy(dtype=np.float64)
+        if "gp_alpha_00" in raw_full.columns
+        else np.zeros(len(raw_full), dtype=np.float64)
+    )
+    factor_ret = g * r
+    state_hard = np.argmax(p_mat, axis=1).astype(np.int64)
+    k_vec: np.ndarray = np.zeros(k, dtype=np.float64)
+    for s in range(k):
+        sel = state_hard == s
+        rr = factor_ret[sel]
+        if np.sum(sel) > 30:
+            k_vec[s] = float(np.clip(np.mean(rr) / (np.var(rr, ddof=1) + 1e-12), -1.0, 1.0))
+    k_min, k_max = float(np.min(k_vec)), float(np.max(k_vec))
+    k_qual = (k_vec - k_min) / (k_max - k_min + 1e-12)
+    log_k = float(np.log(max(k, 2)))
+    ent = -np.sum(p_mat * np.log(np.clip(p_mat, 1e-12, 1.0)), axis=1)
+    ent_disc = np.clip(1.0 - (ent / log_k), 0.0, 1.0)
+    exp_q = p_mat @ k_qual
     lev_min = 2.0
     lev_max = max(base_lev, lev_min)
-    if k <= 1:
-        levs: np.ndarray = np.full(len(state_id), lev_max, dtype=np.float64)
-    else:
-        levs = np.asarray(
-            lev_min + (lev_max - lev_min) * (state_id / float(k - 1)),
-            dtype=np.float64,
-        )
-    trimmed_sig["dyn_leverage"] = levs
+    levs = lev_min + (lev_max - lev_min) * exp_q * ent_disc
+    levs = np.clip(levs, lev_min, lev_max)
+    if "hmm_prob_crisis" in raw_full.columns:
+        pc = raw_full["hmm_prob_crisis"].fillna(0.0).to_numpy(dtype=np.float64)
+        levs = np.where(pc > crisis_thr, 1.0, levs)
+    trimmed_sig["dyn_leverage"] = levs.astype(np.float64, copy=False)
 
 
 def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
