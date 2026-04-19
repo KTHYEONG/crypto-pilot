@@ -69,7 +69,7 @@ HEARTBEAT_FILE = LOG_DIR / "trader_heartbeat.json"
 FUTURES_STATE_FILE = DATA_DIR / "futures_trading_state.json"
 
 # --- API 재시도 및 타임아웃 정책 ---
-API_READ_TIMEOUT = 20  # 데이터 조회 (OHLCV, 잔고 등)
+API_READ_TIMEOUT = 30  # 데이터 조회 (OHLCV, 잔고 등)
 API_ORDER_TIMEOUT = 10  # 주문 제출/취소
 API_CHECK_TIMEOUT = 5  # 주문 상태 확인/조회
 API_RETRY_ATTEMPTS = 3  # 최대 재시도 횟수

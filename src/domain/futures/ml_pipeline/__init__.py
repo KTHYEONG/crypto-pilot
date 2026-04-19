@@ -8,15 +8,16 @@ from src.domain.futures.ml_pipeline.feature_engineering import (
 )
 from src.domain.futures.ml_pipeline.gp_alpha_miner import GPAlphaMiner
 from src.domain.futures.ml_pipeline.hmm_state_inferrer import HMMStateInferrer
-from src.domain.futures.ml_pipeline.meta_labeler import MetaLabeler
-from src.domain.futures.ml_pipeline.ml_pipeline_runner import MLPipelineOutput, run_ml_pipeline
+from src.domain.futures.ml_pipeline.ml_pipeline_runner import (
+    MLPipelineOutput,
+    run_ml_pipeline_for_universe,
+)
 
 __all__ = [
     "GPAlphaMiner",
     "HMMStateInferrer",
     "MLPipelineOutput",
-    "MetaLabeler",
     "build_gp_input_features",
     "build_hmm_input_features",
-    "run_ml_pipeline",
+    "run_ml_pipeline_for_universe",
 ]
