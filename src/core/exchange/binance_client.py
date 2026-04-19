@@ -11,7 +11,6 @@ import urllib.request
 from collections import deque
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
 import ccxt
 import pandas as pd
@@ -267,9 +266,12 @@ class BinanceClient:
                 )
                 break
             retry_count = 0
+            current_limit = limit
             while retry_count < 3:
                 try:
-                    ohlcv = self.exchange.fetch_ohlcv(resolved_symbol, timeframe, since, limit)
+                    ohlcv = self.exchange.fetch_ohlcv(
+                        resolved_symbol, timeframe, since, current_limit
+                    )
 
                     if not ohlcv:
                         since = end_timestamp
@@ -294,15 +296,23 @@ class BinanceClient:
                     )
                     self.logger.info(f"Measured up to {current_date} ({len(all_ohlcv)} candles)")
 
-                    time.sleep(0.1)
+                    time.sleep(0.2)
 
                     if last_timestamp >= end_timestamp:
                         since = end_timestamp
                     break
                 except Exception as e:
                     retry_count += 1
-                    self.logger.error(f"Error fetching data ({retry_count}/3): {e}")
-                    time.sleep(5)
+                    # 타임아웃 발생 시 데이터량을 줄여서 재시도 (안정성 확보)
+                    if "timed out" in str(e).lower():
+                        current_limit = max(200, current_limit // 2)
+
+                    wait_sec = 2 * retry_count
+                    self.logger.error(
+                        "Error fetching data (%d/3) for %s (limit=%d): %s. Waiting %ds...",
+                        retry_count, symbol, current_limit, e, wait_sec
+                    )
+                    time.sleep(wait_sec)
                     if retry_count >= 3:
                         raise RuntimeError(f"Data fetch failed persistently for {symbol}") from e
 
@@ -326,8 +336,6 @@ class BinanceClient:
     ) -> pd.DataFrame:
         """
         Fetch OHLCV plus taker buy base/quote volume from Binance /fapi/v1/klines.
-        Returns DataFrame with columns: timestamp, open, high, low, close, volume,
-        taker_buy_base_volume, taker_buy_quote_volume, datetime.
         """
         limit = 1000
         base_url = "https://fapi.binance.com/fapi/v1/klines"
@@ -367,81 +375,67 @@ class BinanceClient:
             binance_symbol = str(symbol).replace("/", "")
 
         interval_map = {
-            "1m": "1m",
-            "3m": "3m",
-            "5m": "5m",
-            "15m": "15m",
-            "30m": "30m",
-            "1h": "1h",
-            "2h": "2h",
-            "4h": "4h",
-            "6h": "6h",
-            "8h": "8h",
-            "12h": "12h",
-            "1d": "1d",
-            "3d": "3d",
-            "1w": "1w",
-            "1M": "1M",
+            "1m": "1m", "3m": "3m", "5m": "5m", "15m": "15m", "30m": "30m",
+            "1h": "1h", "2h": "2h", "4h": "4h", "6h": "6h", "8h": "8h",
+            "12h": "12h", "1d": "1d", "3d": "3d", "1w": "1w", "1M": "1M",
         }
         interval = interval_map.get(str(timeframe).strip().lower(), str(timeframe).strip().lower())
 
         all_rows: list[list[float | int]] = []
         while since < end_timestamp:
             retry_count = 0
-            while retry_count < 3:
+            used_weight = 0
+            while retry_count < 5:
                 params = {
-                    "symbol": binance_symbol,
-                    "interval": interval,
-                    "startTime": since,
-                    "endTime": end_timestamp,
-                    "limit": limit,
+                    "symbol": binance_symbol, "interval": interval,
+                    "startTime": since, "endTime": end_timestamp, "limit": limit,
                 }
                 qs = urllib.parse.urlencode(params)
                 url = f"{base_url}?{qs}"
                 if not url.startswith(("http://", "https://")):
                     raise ValueError(f"Invalid URL scheme: {url}")
                 headers = {
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+                    "User-Agent": (
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/91.0.4472.124 Safari/537.36"
+                    )
                 }
-                req = urllib.request.Request(url, method="GET", headers=headers)
+                req = urllib.request.Request(url, method="GET", headers=headers)  # noqa: S310
                 try:
                     with urllib.request.urlopen(req, timeout=timeout_sec) as resp:  # noqa: S310
                         raw = resp.read().decode("utf-8")
+                        used_weight_str = resp.headers.get("x-mbx-used-weight-1m", "0")
+                        used_weight = int(used_weight_str) if used_weight_str.isdigit() else 0
+                        
                     data = json.loads(raw)
+                    retry_count = 0 # Success
                 except urllib.error.HTTPError as e:
                     retry_count += 1
                     if e.code == 429:
-                        wait_sec = 60 # 429 발생 시 1분 대기
-                        self.logger.warning(
-                            "⚠️ HTTP 429 Too Many Requests detected for %s. Waiting %ds...",
-                            symbol, wait_sec
-                        )
+                        wait_sec = 120
+                        self.logger.warning(f"⚠️ HTTP 429 for {symbol}. Wait {wait_sec}s...")
                         time.sleep(wait_sec)
                     else:
-                        self.logger.error(
-                            "Error fetching klines with taker (%d/3) for %s: %s",
-                            retry_count, symbol, e
-                        )
-                        time.sleep(5)
-                    
-                    if retry_count >= 3:
-                        raise RuntimeError(
-                            f"Data fetch with taker failed persistently for {symbol} (HTTP {e.code})"
-                        ) from e
+                        wait_sec = 2 * retry_count
+                        self.logger.error(f"Error ({retry_count}/5) for {symbol}: {e}")
+                        time.sleep(wait_sec)
+                    if retry_count >= 5:
+                        self.logger.error(f"Failed chunks for {symbol}. Skipping.")
+                        break
                     continue
                 except Exception as e:
                     retry_count += 1
-                    self.logger.error(
-                        "Error fetching klines with taker (%d/3) for %s: %s",
-                        retry_count,
-                        symbol,
-                        e,
-                    )
-                    time.sleep(5)
-                    if retry_count >= 3:
-                        raise RuntimeError(
-                            f"Data fetch with taker failed persistently for {symbol}"
-                        ) from e
+                    wait_sec = 1 * retry_count
+                    if "timed out" in str(e).lower() or "connection reset" in str(e).lower():
+                        self.logger.warning(f"Retry ({retry_count}/5) for {symbol}")
+                    else:
+                        self.logger.error(f"Error ({retry_count}/5) for {symbol}: {e}")
+                    
+                    if retry_count >= 5:
+                        self.logger.error(f"Persistent exception for {symbol}. Skipping.")
+                        break
+                    time.sleep(wait_sec)
                     continue
 
                 if not data:
@@ -451,62 +445,47 @@ class BinanceClient:
                 for row in data:
                     if not isinstance(row, (list, tuple)) or len(row) < 11:
                         continue
-
                     ts = int(row[0])
-                    all_rows.append(
-                        [
-                            ts,
-                            float(row[1]),
-                            float(row[2]),
-                            float(row[3]),
-                            float(row[4]),
-                            float(row[5]),
-                            float(row[9]) if row[9] not in (None, "") else 0.0,
-                            float(row[10]) if row[10] not in (None, "") else 0.0,
-                        ]
-                    )
-
+                    all_rows.append([
+                        ts, float(row[1]), float(row[2]), float(row[3]), float(row[4]),
+                        float(row[5]),
+                        float(row[9]) if row[9] not in (None, "") else 0.0,
+                        float(row[10]) if row[10] not in (None, "") else 0.0,
+                    ])
                 break
 
             if not data:
                 break
-
             last_ts = int(data[-1][0])
             since = last_ts + 1
-            current_date = datetime.fromtimestamp(last_ts / 1000).strftime("%Y-%m-%d")
-            self.logger.info("Klines with taker up to %s (%d candles)", current_date, len(all_rows))
+            cur_d = datetime.fromtimestamp(last_ts / 1000).strftime("%Y-%m-%d")
+            self.logger.info("Klines with taker up to %s (%d candles)", cur_d, len(all_rows))
             if last_ts >= end_timestamp:
                 break
-            time.sleep(0.1)
+            
+            # Smart Throttling based on Binance 1m used weight (Max: 2400)
+            if used_weight > 2000:
+                self.logger.warning(
+                    f"⚠️ High API weight ({used_weight}/2400) for {symbol}. Sleeping 10s..."
+                )
+                time.sleep(10)
+            elif used_weight > 1500:
+                time.sleep(2.0)
+            elif used_weight > 1000:
+                time.sleep(0.5)
+            else:
+                time.sleep(0.1)
 
         if not all_rows:
-            return pd.DataFrame(
-                columns=[
-                    "timestamp",
-                    "open",
-                    "high",
-                    "low",
-                    "close",
-                    "volume",
-                    "taker_buy_base_volume",
-                    "taker_buy_quote_volume",
-                    "datetime",
-                ]
-            )
+            return pd.DataFrame(columns=[
+                "timestamp", "open", "high", "low", "close", "volume",
+                "taker_buy_base_volume", "taker_buy_quote_volume", "datetime"
+            ])
 
-        df = pd.DataFrame(
-            all_rows,
-            columns=[
-                "timestamp",
-                "open",
-                "high",
-                "low",
-                "close",
-                "volume",
-                "taker_buy_base_volume",
-                "taker_buy_quote_volume",
-            ],
-        )
+        df = pd.DataFrame(all_rows, columns=[
+            "timestamp", "open", "high", "low", "close", "volume",
+            "taker_buy_base_volume", "taker_buy_quote_volume",
+        ])
         df["datetime"] = pd.to_datetime(df["timestamp"], unit="ms")
         df = df.drop_duplicates(subset=["timestamp"])
         df = df[df["timestamp"] <= end_timestamp].copy()
@@ -564,7 +543,6 @@ class BinanceClient:
     ) -> pd.DataFrame:
         """
         Fetch funding rate history from Binance GET /fapi/v1/fundingRate.
-        Returns DataFrame with columns: timestamp (ms), funding_rate.
         """
         base_url = "https://fapi.binance.com/fapi/v1/fundingRate"
         timeout_sec = API_READ_TIMEOUT
@@ -605,7 +583,6 @@ class BinanceClient:
 
         all_rows: list[tuple[int, float]] = []
         since = start_ts
-        retry_count = 0
 
         self.logger.info(
             "Fetching funding rate for %s from %s to %s...",
@@ -616,9 +593,7 @@ class BinanceClient:
 
         while since < end_ts:
             params = {
-                "symbol": binance_symbol,
-                "startTime": since,
-                "endTime": end_ts,
+                "symbol": binance_symbol, "startTime": since, "endTime": end_ts,
                 "limit": limit,
             }
             qs = urllib.parse.urlencode(params)
@@ -626,23 +601,20 @@ class BinanceClient:
             if not url.startswith(("http://", "https://")):
                 raise ValueError(f"Invalid URL scheme: {url}")
             headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/91.0.4472.124 Safari/537.36"
+                )
             }
-            req = urllib.request.Request(url, method="GET", headers=headers)
+            req = urllib.request.Request(url, method="GET", headers=headers)  # noqa: S310
             try:
                 with urllib.request.urlopen(req, timeout=timeout_sec) as resp:  # noqa: S310
                     raw = resp.read().decode("utf-8")
                 data = json.loads(raw)
-                retry_count = 0
             except Exception as e:
-                retry_count += 1
-                self.logger.error("Error fetching funding rate (%d/3): %s", retry_count, e)
-                time.sleep(5)
-                if retry_count >= 3:
-                    raise RuntimeError(
-                        f"Funding rate fetch failed persistently for {symbol}"
-                    ) from e
-                continue
+                self.logger.error(f"Error fetching funding rate for {symbol}: {e}")
+                break
 
             if not data:
                 break
@@ -660,9 +632,6 @@ class BinanceClient:
                 except (TypeError, ValueError):
                     continue
                 all_rows.append((ts, rate))
-
-            if not data:
-                break
 
             last_ts = int(data[-1]["fundingTime"])
             since = last_ts + 1
@@ -683,7 +652,6 @@ class BinanceClient:
         """USDT 선물 지갑 잔고 조회"""
         try:
             balance = self.exchange.fetch_balance()
-            # future wallet: total -> total margin balance, free -> available balance
             return balance["total"]["USDT"], balance["free"]["USDT"]
         except Exception as e:
             self.logger.error(f"Error fetching balance: {e}")
@@ -692,31 +660,23 @@ class BinanceClient:
     def set_leverage(self, symbol, leverage):
         """레버리지 설정"""
         try:
-            # use standard ccxt method for better compatibility
             self.exchange.set_leverage(leverage, symbol)
             self.logger.info(f"✅ Leverage set to {leverage}x for {symbol}")
             return True
         except Exception as e:
-            self.logger.error(f"❌ Error setting leverage (Value: {leverage}) | Detail: {e!s}")
+            self.logger.error(f"❌ Error setting leverage {leverage} | {e}")
             return False
 
     def set_position_mode(self, dual_side_position=False):
-        """
-        포지션 모드 설정 (봇의 안정성을 위해 필수)
-        dual_side_position=False -> One-Way Mode (단방향)
-        dual_side_position=True -> Hedge Mode (양방향)
-        """
+        """포지션 모드 설정"""
         try:
-            # CCXT unified method
             self.exchange.set_position_mode(hedged=dual_side_position)
             mode_str = "Hedge" if dual_side_position else "One-Way"
             self.logger.info(f"Position mode set to {mode_str} Mode")
             return True
         except Exception as e:
-            # 이미 설정됨 등 무시 가능한 에러 처리
             if "No need to change" in str(e) or "already" in str(e).lower():
                 return True
-            # 일부 구버전 CCXT나 거래소 응답에 따라 직접 호출이 필요할 수 있음 (Fallback)
             try:
                 self.exchange.fapiPrivate_post_positionside_dual(
                     {"dualSidePosition": "true" if dual_side_position else "false"}
@@ -727,195 +687,124 @@ class BinanceClient:
                 return False
 
     def set_asset_mode(self, is_multi_asset=False):
-        """
-        자산 모드 설정 (Single-Asset vs Multi-Asset)
-        is_multi_asset=False -> Single-Asset Mode (USDT만 담보)
-        is_multi_asset=True -> Multi-Asset Mode (타 코인도 담보 인정)
-
-        Note: 일부 CCXT 버전에서 미지원될 수 있음. 실패해도 봇 운영에 영향 없음.
-        """
+        """자산 모드 설정"""
         try:
-            # CCXT fapiPrivate 메서드 존재 확인
             if not hasattr(self.exchange, "fapiPrivate_get_multiassetsmargin"):
-                self.logger.info("Asset mode API not available in this CCXT version. Skipping.")
                 return True
-
-            # 1. Check current mode
             res = self.exchange.fapiPrivate_get_multiassetsmargin()
             current = str(res.get("multiAssetsMargin", "false")).lower() == "true"
-
             if current == is_multi_asset:
                 return True
-
-            # 2. Set mode
             self.exchange.fapiPrivate_post_multiassetsmargin(
                 {"multiAssetsMargin": "true" if is_multi_asset else "false"}
             )
             mode_str = "Multi-Asset" if is_multi_asset else "Single-Asset"
             self.logger.info(f"Asset mode updated to {mode_str} Mode")
             return True
-        except AttributeError:
-            # CCXT 버전 문제로 메서드 미존재
-            self.logger.info("Asset mode API not available. Skipping (non-critical).")
-            return True
         except Exception as e:
             if "No need to change" in str(e):
                 return True
-            # 실패해도 봇 운영에 지장 없으므로 WARNING 레벨로 변경
             self.logger.warning(f"Asset mode setting skipped: {e}")
-            return True  # 봇 계속 진행
+            return True
 
     def set_margin_type(self, symbol, margin_type="CROSSED"):
-        """
-        마진 모드 설정 (ISOLATED / CROSSED)
-        봇 운용 시 청산 방지를 위해 CROSSED 권장
-        """
+        """마진 모드 설정"""
         try:
-            # CCXT unified method: ISOLATED, CROSS
             mode = "CROSS" if margin_type == "CROSSED" else margin_type
             self.exchange.set_margin_mode(mode, symbol)
             self.logger.info(f"Margin type set to {margin_type} for {symbol}")
             return True
         except Exception as e:
-            # 이미 설정되어 있거나 포지션이 있으면 에러 발생 (무시 가능)
             if "No need to change" in str(e) or "already exists" in str(e).lower():
                 return True
             self.logger.error(f"⚠️ Failed to set margin type for {symbol}: {e}")
             return False
 
     def fetch_position(self, symbol):
-        """
-        현재 포지션 조회
-        Returns: {
-            'amount': 0.0,
-            'entryPrice': 0.0,
-            'unrealizedPnL': 0.0,
-            'leverage': 1
-        }
-        """
+        """현재 포지션 조회"""
         try:
             positions = self.exchange.fetch_positions([symbol])
-
-            # [DEBUG] 모든 반환된 포지션 로깅
-            self.logger.debug(f"[{symbol}] API returned {len(positions)} position(s)")
-
             for pos in positions:
-                # Symbol Matching: Handle 'ETH/USDT:USDT' vs 'ETH/USDT'
-                # CCXT often returns 'BASE/QUOTE:SETTLE' for futures
                 p_symbol = pos["symbol"]
                 contracts = float(pos["contracts"] or 0)
-
-                # [DEBUG] 각 포지션 상세 로깅
-                self.logger.debug(
-                    f"  → Symbol: {p_symbol}, Contracts: {contracts}, "
-                    f"Side: {pos.get('side')}, Entry: {pos.get('entryPrice')}"
-                )
-
                 if p_symbol == symbol or p_symbol.split(":")[0] == symbol:
-                    # 0인 포지션 데이터는 건너뜀 (Binance는 모든 페어의 0포지션을 리턴하기도 함)
                     if contracts == 0:
                         continue
-
-                    # [FIX] None-safe 처리 (API가 null을 반환하는 경우 대비)
-                    entry_price = float(pos.get("entryPrice") or 0)
-                    unrealized_pnl = float(pos.get("unrealizedPnl") or 0)
-                    leverage = int(pos.get("leverage") or 1)  # None이면 1로 기본값 설정
-
+                    entry_p = float(pos.get("entryPrice") or 0)
+                    upnl = float(pos.get("unrealizedPnl") or 0)
+                    lev = int(pos.get("leverage") or 1)
                     result = {
                         "amount": contracts * (1 if pos["side"] == "long" else -1),
-                        "entryPrice": entry_price,
-                        "unrealizedPnL": unrealized_pnl,
-                        "leverage": leverage,
+                        "entryPrice": entry_p, "unrealizedPnL": upnl, "leverage": lev,
                     }
-                    self.logger.info(
-                        f"[{symbol}] Position Found: {result['amount']} contracts "
-                        f"@ {result['entryPrice']:.2f} (PnL: {result['unrealizedPnL']:.2f} USDT, Lev: {leverage}x)"
+                    msg = (
+                        f"[{symbol}] Pos: {result['amount']} contracts @ "
+                        f"{result['entryPrice']:.2f} "
+                        f"(PnL: {result['unrealizedPnL']:.2f}, Lev: {lev}x)"
                     )
+                    self.logger.info(msg)
                     return result
         except Exception as e:
             self.logger.error(f"Error fetching position for {symbol}: {e}")
             raise RuntimeError(f"fetch_position_failed:{symbol}") from e
-
-        # 포지션 없으면 기본 0 반환
-        self.logger.debug(f"[{symbol}] No active position found")
         return {"amount": 0.0, "entryPrice": 0.0, "unrealizedPnL": 0.0, "leverage": 1}
 
     def fetch_open_orders(self, symbol):
         """미체결 주문 조회 (Standard + ALGO 주문 통합)"""
         try:
-            # 1. 일반 주문 조회
             orders = self.exchange.fetch_open_orders(symbol)
-
-            # 2. ALGO 주문 조회 (STOP_MARKET, TAKE_PROFIT_MARKET 등)
             try:
-                # symbol format: AVAX/USDT -> AVAXUSDT for algo endpoint if needed,
-                # but usually we can filter manually
                 algo_res = self.exchange.fapiPrivateGetOpenAlgoOrders()
-
-                # AVAX/USDT -> AVAXUSDT (Binance raw symbol)
                 market = self.exchange.market(symbol)
                 raw_symbol = market["id"]
-
                 for ao in algo_res:
                     if ao.get("symbol") == raw_symbol:
-                        # CCXT 스타일로 변환
                         algo_order = {
-                            "id": ao.get("algoId"),
-                            "symbol": symbol,
+                            "id": ao.get("algoId"), "symbol": symbol,
                             "type": ao.get("orderType", "").lower(),
                             "side": ao.get("side", "").lower(),
                             "amount": float(ao.get("quantity") or 0),
                             "price": float(ao.get("price") or 0),
                             "stopPrice": float(ao.get("triggerPrice") or 0),
-                            "status": "open"
-                            if ao.get("algoStatus") == "NEW"
-                            else ao.get("algoStatus").lower(),
+                            "status": (
+                                "open" if ao.get("algoStatus") == "NEW"
+                                else ao.get("algoStatus").lower()
+                            ),
                             "timestamp": int(ao.get("createTime", 0)),
                             "datetime": self.exchange.iso8601(ao.get("createTime", 0)),
-                            "info": ao,
-                            "clientOrderId": ao.get("clientAlgoId"),
+                            "info": ao, "clientOrderId": ao.get("clientAlgoId"),
                         }
-                        # 중복 방지 (이미 있으면 무시)
                         if not any(o["id"] == algo_order["id"] for o in orders):
                             orders.append(algo_order)
             except Exception as ae:
                 self.logger.warning(f"Failed to fetch ALGO orders for {symbol}: {ae}")
-
             return orders
         except Exception as e:
             self.logger.error(f"Error fetching open orders for {symbol}: {e}")
             raise RuntimeError(f"fetch_open_orders_failed:{symbol}") from e
 
     def cancel_order(self, order_id, symbol):
-        """주문 취소 (일반 및 ALGO 주문 대응)"""
+        """주문 취소"""
         try:
             self.rate_limiter.wait_if_needed()
-            # 먼저 일반 주문으로 취소 시도
             try:
                 return self.exchange.cancel_order(order_id, symbol)
             except Exception as e:
-                # 일반 취소 실패 시 ALGO 주문으로 시도
                 if "Unknown order sent" in str(e) or "-2011" in str(e):
-                    try:
-                        return self.exchange.fapiPrivateDeleteAlgoOrder({"algoId": order_id})
-                    except Exception as ae:
-                        raise ae
+                    return self.exchange.fapiPrivateDeleteAlgoOrder({"algoId": order_id})
                 raise e
         except Exception as e:
-            self.logger.error(f"Error cancelling order {order_id} for {symbol}: {e}")
+            self.logger.error(f"Error cancelling order {order_id}: {e}")
             return False
 
     def cancel_all_orders(self, symbol):
-        """모든 오픈 주문 취소 (Standard + ALGO 주문 통합)"""
+        """모든 오픈 주문 취소"""
         try:
             self.rate_limiter.wait_if_needed()
-            # 1. 일반 주문 일괄 취소
             try:
                 self.exchange.cancel_all_orders(symbol)
             except Exception as e:
-                self.logger.warning(f"Standard cancel_all_orders failed for {symbol}: {e}")
-
-            # 2. ALGO 주문 개별 취소 (일괄 취소 API가 symbol별로 없을 수 있으므로)
+                self.logger.warning(f"Standard cancel failed for {symbol}: {e}")
             open_orders = self.fetch_open_orders(symbol)
             for o in open_orders:
                 if "algoId" in o.get("info", {}):
@@ -923,157 +812,148 @@ class BinanceClient:
                         self.exchange.fapiPrivateDeleteAlgoOrder({"algoId": o["id"]})
                     except Exception as ae:
                         self.logger.warning(f"Failed to cancel ALGO order {o['id']}: {ae}")
-
             return True
         except Exception as e:
-            self.logger.error(f"Error in cancel_all_orders for {symbol}: {e}")
+            self.logger.error(f"Error in cancel_all_orders: {e}")
             return False
 
+    def fetch_open_interest_history(
+        self,
+        symbol: str,
+        timeframe: str = "4h",
+        since: int | None = None,
+        limit: int = 500,
+    ) -> pd.DataFrame:
+        """Fetch historical Open Interest from Binance API (Recent 30 days limit)."""
+        try:
+            rows = self.exchange.fetch_open_interest_history(symbol, timeframe, since, limit)
+            if not rows:
+                return pd.DataFrame()
+            df = pd.DataFrame(rows)
+            # CCXT usually returns 'openInterestAmount' or similar. 
+            # We map the most common Binance field names to our standard 'sum_open_interest'.
+            possible_cols = ["openInterestAmount", "openInterest", "amount"]
+            for col in possible_cols:
+                if col in df.columns:
+                    df["sum_open_interest"] = df[col].astype(float)
+                    break
+            
+            if "sum_open_interest" not in df.columns:
+                self.logger.warning(f"No OI column found in API response for {symbol}. Cols: {df.columns.tolist()}")
+                return pd.DataFrame()
+
+            return df[["timestamp", "sum_open_interest"]]
+        except Exception as e:
+            self.logger.warning(f"Failed to fetch Open Interest for {symbol}: {e}")
+            return pd.DataFrame()
+
+    def fetch_long_short_ratio_history(
+        self,
+        symbol: str,
+        timeframe: str = "4h",
+        since: int | None = None,
+        limit: int = 500,
+    ) -> pd.DataFrame:
+        """Fetch historical Long/Short Ratio from Binance API (Recent 30 days limit)."""
+        try:
+            rows = self.exchange.fetch_long_short_ratio_history(symbol, timeframe, since, limit)
+            if not rows:
+                return pd.DataFrame()
+            df = pd.DataFrame(rows)
+            # Map possible LSR columns to our standard 'count_toptrader_long_short_ratio'
+            possible_cols = ["longShortRatio", "ratio", "value"]
+            for col in possible_cols:
+                if col in df.columns:
+                    df["count_toptrader_long_short_ratio"] = df[col].astype(float)
+                    break
+
+            if "count_toptrader_long_short_ratio" not in df.columns:
+                self.logger.warning(f"No LSR column found in API response for {symbol}. Cols: {df.columns.tolist()}")
+                return pd.DataFrame()
+
+            return df[["timestamp", "count_toptrader_long_short_ratio"]]
+        except Exception as e:
+            self.logger.warning(f"Failed to fetch Long/Short Ratio for {symbol}: {e}")
+            return pd.DataFrame()
+
     def place_order(self, symbol, side, amount, order_type="market", price=None, params=None):
-        """
-        기본 주문 실행 (내부 사용)
-        side: 'buy' or 'sell'
-        amount: 코인 수량 (USDT 아님)
-        """
+        """기본 주문 실행"""
         try:
             order = self.exchange.create_order(
-                symbol=symbol,
-                type=order_type,
-                side=side,
-                amount=amount,
-                price=price,
-                params=(params or {}),
+                symbol=symbol, type=order_type, side=side,
+                amount=amount, price=price, params=(params or {}),
             )
-            self.logger.info(
-                f"⚡ Order Placed: {order_type} {side} {amount} {symbol} @ {price if price else 'Market'}"
-            )
+            msg = f"⚡ {order_type} {side} {amount} {symbol} @ {price if price else 'Market'}"
+            self.logger.info(msg)
             return order
         except Exception as e:
             self.logger.error(f"❌ Order Failed: {e}")
             return None
 
     def place_stop_market_order(
-        self,
-        symbol: str,
-        side: str,
-        amount: float,
-        stop_price: float,
-        client_order_id: Optional[str] | None = None,
+        self, symbol: str, side: str, amount: float,
+        stop_price: float, client_order_id: str | None = None
     ):
-        """
-        서버 사이드 Stop Market 주문 (손절용)
-        side: 'buy' (숏 손절용) or 'sell' (롱 손절용)
-        stop_price: 트리거 가격
-        """
+        """서버 사이드 Stop Market 주문 (손절용)"""
         try:
             self.rate_limiter.wait_if_needed()
-
-            params: dict[str, object] = {
-                "stopPrice": float(stop_price),
-                "reduceOnly": True,
-            }
+            params: dict[str, object] = {"stopPrice": float(stop_price), "reduceOnly": True}
             if client_order_id:
                 params["clientOrderId"] = client_order_id
-
             order = self.exchange.create_order(
-                symbol=symbol,
-                type="STOP_MARKET",
-                side=side,
-                amount=amount,
-                params=params,
+                symbol=symbol, type="STOP_MARKET", side=side,
+                amount=amount, params=params
             )
-            self.logger.info(f"🛡️ Server SL Placed: {symbol} {side} {amount} @ Stop {stop_price}")
+            msg = f"🛡️ Server SL Placed: {symbol} {side} {amount} @ Stop {stop_price}"
+            self.logger.info(msg)
             return order
         except Exception as e:
-            error_msg = str(e)
-            if "-4130" in error_msg:
-                self.logger.warning(
-                    f"⚠️ [-4130] SL would immediately trigger for {symbol}. Returning None."
-                )
+            if "-4130" in str(e) or "-2021" in str(e):
                 return None
-            if "-2021" in error_msg:
-                return None
-            self.logger.error(f"❌ Failed to place Server SL for {symbol}: {e}")
+            self.logger.error(f"❌ Failed Server SL for {symbol}: {e}")
             return None
 
     def place_take_profit_market_order(
-        self,
-        symbol: str,
-        side: str,
-        amount: float,
-        tp_price: float,
-        client_order_id: Optional[str] | None = None,
+        self, symbol: str, side: str, amount: float,
+        tp_price: float, client_order_id: str | None = None
     ):
-        """
-        서버 사이드 Take Profit Market 주문 (익절용)
-        side: 'buy' (숏 익절용) or 'sell' (롱 익절용)
-        tp_price: 트리거 가격
-        """
+        """서버 사이드 Take Profit Market 주문 (익절용)"""
         try:
             self.rate_limiter.wait_if_needed()
-
-            params: dict[str, object] = {
-                "stopPrice": float(tp_price),
-                "reduceOnly": True,
-            }
+            params: dict[str, object] = {"stopPrice": float(tp_price), "reduceOnly": True}
             if client_order_id:
                 params["clientOrderId"] = client_order_id
-
             order = self.exchange.create_order(
-                symbol=symbol,
-                type="TAKE_PROFIT_MARKET",
-                side=side,
-                amount=amount,
-                params=params,
+                symbol=symbol, type="TAKE_PROFIT_MARKET", side=side,
+                amount=amount, params=params
             )
-            self.logger.info(f"🎯 Server TP Placed: {symbol} {side} {amount} @ TP {tp_price}")
+            msg = f"🎯 Server TP Placed: {symbol} {side} {amount} @ TP {tp_price}"
+            self.logger.info(msg)
             return order
         except Exception as e:
-            error_msg = str(e)
-            if "-4130" in error_msg:
-                self.logger.warning(
-                    f"⚠️ [-4130] TP would immediately trigger for {symbol}. Bypassing."
-                )
+            if "-4130" in str(e):
                 return {"id": "triggered_4130_tp", "status": "closed", "info": "-4130"}
-            if "-2021" in error_msg:
+            if "-2021" in str(e):
                 return None
-            self.logger.error(f"❌ Failed to place Server TP for {symbol}: {e}")
+            self.logger.error(f"❌ Failed Server TP for {symbol}: {e}")
             return None
 
     def place_order_smart(
-        self,
-        symbol,
-        side,
-        amount,
-        atr=None,
-        current_price=None,
-        reduce_only=False,
-        allow_market_fallback=True,
-        order_deadline_ms=None,
-        post_only_wait_seconds=1.2,
-        post_only_requote_max=2,
-        client_order_id: str | None = None,
+        self, symbol, side, amount, atr=None, current_price=None,
+        reduce_only=False, allow_market_fallback=True, order_deadline_ms=None,
+        post_only_wait_seconds=1.2, post_only_requote_max=2, client_order_id: str | None = None
     ):
-        """
-        Production waterfall order executor.
-        - Tier 1: Post-only limit
-        - Tier 2: IOC aggressive limit
-        - Tier 3: Market fallback
-        """
+        """Production waterfall order executor."""
         from config.settings import SMART_ORDER_OFFSET
-
         tick_size = self.get_price_tick_size(symbol, fallback=(0.1 if "BTC" in symbol else 0.01))
 
         def round_to_tick(price, tick):
-            if tick <= 0:
-                return float(price)
-            return round(float(price) / tick) * tick
+            return round(float(price) / tick) * tick if tick > 0 else float(price)
 
-        def get_best_price_fresh():
+        def get_best_fresh():
             cached_ob = self.orderbook_cache.get(f"{symbol}_ob")
             if cached_ob:
                 return cached_ob[0], cached_ob[1]
-
             try:
                 orderbook = self.exchange.fetch_order_book(symbol, limit=1)
                 best_bid = orderbook["bids"][0][0] if orderbook["bids"] else current_price
@@ -1086,13 +966,11 @@ class BinanceClient:
         if not current_price:
             current_price = self.get_market_price(symbol)
         if not current_price:
-            self.logger.error(f"❌ Unable to fetch market price for smart order: {symbol}")
             return None
 
         requested_total = float(amount)
         remaining_amount = requested_total
         if remaining_amount <= 0:
-            self.logger.error(f"❌ Invalid order amount: {amount}")
             return None
 
         total_filled = 0.0
@@ -1100,45 +978,39 @@ class BinanceClient:
         order_fill_tracker = {}
 
         def build_params(base_params=None, *, order_tag: str | None = None):
-            params = dict(base_params or {})
+            p = dict(base_params or {})
             if reduce_only:
-                params["reduceOnly"] = True
+                p["reduceOnly"] = True
             if client_order_id:
                 cid = client_order_id
                 if order_tag:
                     cid = f"{client_order_id}_{order_tag}"
-                params["clientOrderId"] = cid[:36]
-            return params
-
-        start_local_time_ms = int(time.time() * 1000)
+                p["clientOrderId"] = cid[:36]
+            return p
 
         def deadline_reached():
             if order_deadline_ms is None:
                 return False
             try:
-                elapsed_ms = int(time.time() * 1000) - start_local_time_ms
-                _ = elapsed_ms  # keep for potential future use
-                current_synced_ms = self.exchange.milliseconds()
-                return current_synced_ms >= int(order_deadline_ms)
+                return self.exchange.milliseconds() >= int(order_deadline_ms)
             except Exception:
                 return False
 
-        def register_fill(order_obj, request_amount):
+        def register_fill(order_obj, req_amt):
             nonlocal remaining_amount, total_filled, last_order
             if not order_obj:
                 return 0.0
             last_order = order_obj
-            filled = float(order_obj.get("filled") or 0.0)
-            if request_amount > 0:
-                filled = min(filled, request_amount)
-            order_id = str(order_obj.get("id") or "")
-            if order_id:
-                prev_filled = float(order_fill_tracker.get(order_id, 0.0))
-                delta = max(0.0, filled - prev_filled)
-                order_fill_tracker[order_id] = max(prev_filled, filled)
+            f = float(order_obj.get("filled") or 0.0)
+            if req_amt > 0:
+                f = min(f, req_amt)
+            oid = str(order_obj.get("id") or "")
+            if oid:
+                prev_f = float(order_fill_tracker.get(oid, 0.0))
+                delta = max(0.0, f - prev_f)
+                order_fill_tracker[oid] = max(prev_f, f)
             else:
-                delta = max(0.0, filled)
-
+                delta = max(0.0, f)
             if delta > 0:
                 total_filled += delta
                 remaining_amount = max(0.0, requested_total - total_filled)
@@ -1147,212 +1019,137 @@ class BinanceClient:
         def refresh_order(order_obj):
             if not isinstance(order_obj, dict):
                 return order_obj
-            order_id = order_obj.get("id")
-            if not order_id:
+            oid = order_obj.get("id")
+            if not oid:
                 return order_obj
             try:
-                return self.exchange.fetch_order(order_id, symbol)
+                return self.exchange.fetch_order(oid, symbol)
             except Exception:
                 try:
-                    open_orders = self.fetch_open_orders(symbol)
-                    for o in open_orders:
-                        if str(o.get("id")) == str(order_id):
+                    for o in self.fetch_open_orders(symbol):
+                        if str(o.get("id")) == str(oid):
                             return o
                 except Exception:
                     ...
             return order_obj
 
-        def wait_post_only_fill(order_obj, request_amount):
-            wait_seconds = max(0.0, float(post_only_wait_seconds or 0.0))
-            if wait_seconds <= 0:
+        def wait_post_only(order_obj, req_amt):
+            wait_sec = max(0.0, float(post_only_wait_seconds or 0.0))
+            if wait_sec <= 0:
                 return order_obj
-            poll_seconds = 0.2
-            wait_deadline = time.time() + wait_seconds
+            wait_dl = time.time() + wait_sec
             latest = order_obj
-            while time.time() < wait_deadline and remaining_amount > 0:
+            while time.time() < wait_dl and remaining_amount > 0:
                 if deadline_reached():
                     break
-                time.sleep(poll_seconds)
+                time.sleep(0.2)
                 latest = refresh_order(latest)
-                register_fill(latest, request_amount)
-                status = str(latest.get("status", "")).lower()
-                if status in ("closed", "filled", "canceled", "cancelled") or remaining_amount <= 0:
+                register_fill(latest, req_amt)
+                st = str(latest.get("status", "")).lower()
+                if st in ("closed", "filled", "canceled", "cancelled") or remaining_amount <= 0:
                     break
             return latest
 
-        def build_partial_result(status="partial"):
-            result = {
-                "symbol": symbol,
-                "side": side,
-                "type": "multi_tier",
-                "status": status,
-                "requested": requested_total,
-                "filled": total_filled,
-                "remaining": max(0.0, requested_total - total_filled),
+        def build_partial_res(status="partial"):
+            res = {
+                "symbol": symbol, "side": side, "type": "multi_tier",
+                "status": status, "requested": requested_total,
+                "filled": total_filled, "remaining": max(0.0, requested_total - total_filled),
                 "reduceOnly": bool(reduce_only),
             }
             if isinstance(last_order, dict):
-                result["last_order_id"] = last_order.get("id")
-                result["average"] = last_order.get("average")
-            return result
+                res["last_order_id"] = last_order.get("id")
+                res["average"] = last_order.get("average")
+            return res
 
-        high_volatility = False
+        high_vol = False
         if atr and current_price:
-            volatility_pct = (atr / current_price) * 100
-            if volatility_pct > 1.0:
-                high_volatility = True
-                self.logger.info(f"🔥 High Volatility ({volatility_pct:.2f}%) -> Aggressive Mode")
+            vol_pct = (atr / current_price) * 100
+            if vol_pct > 1.0:
+                high_vol = True
+                self.logger.info(f"🔥 High Vol ({vol_pct:.2f}%) -> Aggressive")
 
-        # Tier 1: Post-only limit
-        if not high_volatility and remaining_amount > 0:
-            max_requotes = max(0, int(post_only_requote_max or 0))
-            for requote_idx in range(max_requotes + 1):
-                if remaining_amount <= 0:
-                    break
-                if deadline_reached():
-                    self.logger.warning("⏱️ Entry deadline reached during Tier 1. Stop escalating.")
+        if not high_vol and remaining_amount > 0:
+            max_req = max(0, int(post_only_requote_max or 0))
+            for req_idx in range(max_req + 1):
+                if remaining_amount <= 0 or deadline_reached():
                     break
                 try:
                     self.rate_limiter.wait_if_needed()
-                    best_bid, best_ask = get_best_price_fresh()
-
-                    if side == "buy":
-                        target_price = round_to_tick(best_bid + tick_size, tick_size)
-                    else:
-                        target_price = round_to_tick(best_ask - tick_size, tick_size)
-
-                    self.logger.info(
-                        f"📦 Tier 1: Post-Only {side} @ {target_price} "
-                        f"(requote {requote_idx + 1}/{max_requotes + 1})"
+                    b_bid, b_ask = get_best_fresh()
+                    target_p = round_to_tick(
+                        b_bid + tick_size if side == "buy" else b_ask - tick_size, tick_size
                     )
-
-                    request_amount = remaining_amount
-                    filled_before_round = total_filled
+                    msg_t1 = (
+                        f"📦 Tier 1: Post-Only {side} @ {target_p} "
+                        f"({req_idx + 1}/{max_req + 1})"
+                    )
+                    self.logger.info(msg_t1)
+                    req_amt = remaining_amount
+                    f_before = total_filled
                     order = self.exchange.create_order(
-                        symbol=symbol,
-                        type="limit",
-                        side=side,
-                        amount=request_amount,
-                        price=target_price,
-                        params=build_params(
-                            {"postOnly": True},
-                            order_tag=f"T1{requote_idx}",
-                        ),
+                        symbol=symbol, type="limit", side=side, amount=req_amt,
+                        price=target_p,
+                        params=build_params({"postOnly": True}, order_tag=f"T1{req_idx}")
                     )
-                    register_fill(order, request_amount)
-                    order = wait_post_only_fill(order, request_amount)
-                    status = str(order.get("status", "")).lower()
-                    filled_this_round = max(0.0, total_filled - filled_before_round)
-
-                    if status in ("closed", "filled") or remaining_amount <= 0:
-                        self.logger.info(
-                            f"Tier 1 Filled ({filled_this_round}/{request_amount}) @ "
-                            f"{order.get('average', target_price)}"
-                        )
+                    register_fill(order, req_amt)
+                    order = wait_post_only(order, req_amt)
+                    st = str(order.get("status", "")).lower()
+                    f_round = max(0.0, total_filled - f_before)
+                    if st in ("closed", "filled") or remaining_amount <= 0:
+                        self.logger.info(f"Tier 1 Filled ({f_round}/{req_amt})")
                         return order
-
-                    if filled_this_round > 0:
-                        self.logger.warning(
-                            f"⚠️ Tier 1 Partial Fill: {filled_this_round}/{request_amount}. "
-                            f"Remaining {remaining_amount}"
-                        )
-                        if remaining_amount <= 0:
-                            return order
-
-                    if status in ("open", "new"):
+                    if f_round > 0:
+                        self.logger.warning(f"⚠️ T1 Partial: {f_round}/{req_amt}")
+                    if st in ("open", "new"):
                         try:
                             self.exchange.cancel_order(order["id"], symbol)
-                            if requote_idx < max_requotes and not deadline_reached():
-                                self.logger.info(
-                                    "🔁 Tier 1 open order canceled. Requoting post-only."
-                                )
+                            if req_idx < max_req and not deadline_reached():
                                 continue
-                            self.logger.info("⚠️ Tier 1 open order canceled. Escalating to Tier 2.")
                         except Exception as cancel_err:
-                            self.logger.warning(
-                                f"🗑️ Tier 1 cancel failed: {cancel_err}. Forcing cancel_all reconciliation..."
-                            )
+                            msg = f"🗑️ T1 cancel failed: {cancel_err}."
+                            self.logger.warning(f"{msg} Reconciling...")
                             try:
                                 self.exchange.cancel_all_orders(symbol)
-                                lingering = self.exchange.fetch_open_orders(symbol)
-                                if lingering:
-                                    self.logger.error(
-                                        f"❌ Tier 1 cancel reconciliation failed: {len(lingering)} open orders remain. "
-                                        "Abort escalation to prevent orphan orders."
-                                    )
-                                    return build_partial_result(status="cancel_failed_open")
-                            except Exception as cleanup_err:
-                                self.logger.error(
-                                    f"❌ Tier 1 cancel reconciliation exception: {cleanup_err}. "
-                                    "Abort escalation to prevent orphan orders."
-                                )
-                                return build_partial_result(status="cancel_failed_open")
+                                if self.fetch_open_orders(symbol):
+                                    return build_partial_res(status="cancel_failed_open")
+                            except Exception:
+                                return build_partial_res(status="cancel_failed_open")
                         break
-
                 except Exception as e:
                     if "timeout" in str(e).lower():
-                        self.logger.warning("⚠️ Tier 1 Timeout -> Reconciling...")
                         try:
-                            open_orders = self.fetch_open_orders(symbol)
-                            if open_orders:
+                            if self.fetch_open_orders(symbol):
                                 self.exchange.cancel_all_orders(symbol)
-                                self.logger.info("🗑️ Zombie Order Canceled")
-                                lingering = self.exchange.fetch_open_orders(symbol)
-                                if lingering:
-                                    self.logger.error(
-                                        f"❌ Tier 1 timeout reconciliation incomplete: {len(lingering)} open orders remain."
-                                    )
-                                    return build_partial_result(status="timeout_open_orders")
+                                if self.fetch_open_orders(symbol):
+                                    return build_partial_res(status="timeout_open_orders")
                         except Exception:
                             ...
-                    else:
-                        self.logger.info(f"❌ Tier 1 Skipped ({e}) -> Tier 2")
                     break
 
-        if remaining_amount > 0 and deadline_reached():
-            self.logger.warning("⏱️ Entry deadline reached before Tier 2. Stop escalating.")
-            if total_filled > 0:
-                return build_partial_result(status="deadline_partial")
-            return None
-
-        # Tier 2: IOC aggressive limit
         if remaining_amount > 0:
+            if deadline_reached():
+                if total_filled > 0:
+                    return build_partial_res(status="deadline_partial")
+                return None
             try:
                 self.rate_limiter.wait_if_needed()
-                best_bid, best_ask = get_best_price_fresh()
-
-                offset = 0.001 if high_volatility else SMART_ORDER_OFFSET
-                if side == "buy":
-                    limit_price = round_to_tick(best_ask * (1 + offset), tick_size)
-                else:
-                    limit_price = round_to_tick(best_bid * (1 - offset), tick_size)
-
-                self.logger.info(f"📦 Tier 2: IOC Limit {side} @ {limit_price}")
-
-                request_amount = remaining_amount
-                order = self.exchange.create_order(
-                    symbol=symbol,
-                    type="limit",
-                    side=side,
-                    amount=request_amount,
-                    price=limit_price,
-                    params=build_params({"timeInForce": "IOC"}, order_tag="T2"),
+                b_bid, b_ask = get_best_fresh()
+                off = 0.001 if high_vol else SMART_ORDER_OFFSET
+                limit_p = round_to_tick(
+                    b_ask * (1 + off) if side == "buy" else b_bid * (1 - off), tick_size
                 )
-                filled = register_fill(order, request_amount)
-
+                self.logger.info(f"📦 Tier 2: Aggressive IOC {side} @ {limit_p}")
+                req_amt = remaining_amount
+                order = self.exchange.create_order(
+                    symbol=symbol, type="limit", side=side, amount=req_amt,
+                    price=limit_p, params=build_params({"timeInForce": "IOC"}, order_tag="T2")
+                )
+                filled = register_fill(order, req_amt)
                 if filled > 0:
-                    fill_ratio = filled / request_amount if request_amount > 0 else 0.0
-                    if remaining_amount <= 0 or fill_ratio >= 0.999:
-                        self.logger.info(
-                            f"Tier 2 Filled ({filled}/{request_amount}) @ {order.get('average', limit_price)}"
-                        )
+                    if remaining_amount <= 0 or (filled / req_amt) >= 0.999:
+                        self.logger.info(f"Tier 2 Filled ({filled}/{req_amt})")
                         return order
-
-                    self.logger.warning(
-                        f"⚠️ Tier 2 Partial Fill: {filled}/{request_amount} "
-                        f"({fill_ratio * 100:.1f}%). Remaining {remaining_amount}"
-                    )
-
             except Exception as e:
                 self.logger.error(f"❌ Tier 2 Failed: {e}")
                 if "timeout" in str(e).lower():
@@ -1361,64 +1158,41 @@ class BinanceClient:
                     except Exception:
                         ...
 
-        if remaining_amount > 0 and deadline_reached():
-            self.logger.warning("⏱️ Entry deadline reached before Tier 3. Skip market fallback.")
-            if total_filled > 0:
-                return build_partial_result(status="deadline_partial")
-            return None
-
-        # Tier 3: market fallback for remaining qty
-        try:
-            if remaining_amount <= 0:
-                return last_order if last_order else build_partial_result(status="filled")
-            if not allow_market_fallback:
-                self.logger.warning(
-                    f"⚠️ Market fallback disabled for {symbol} {side}. Remaining unfilled: {remaining_amount}"
-                )
+        if remaining_amount > 0:
+            if deadline_reached():
                 if total_filled > 0:
-                    return build_partial_result(status="partial_no_market")
+                    return build_partial_res(status="deadline_partial")
                 return None
-            self.rate_limiter.wait_if_needed()
-            if current_price and atr:
-                max_slip_ratio = min(0.01, (float(atr) * 0.2) / float(current_price))
-                if side == "buy":
-                    hard_limit_price = round_to_tick(
-                        current_price * (1 + max_slip_ratio), tick_size
+            try:
+                if not allow_market_fallback:
+                    self.logger.warning(f"⚠️ Market fallback disabled for {symbol}")
+                    if total_filled > 0:
+                        return build_partial_res(status="partial_no_market")
+                    return None
+                self.rate_limiter.wait_if_needed()
+                if current_price and atr:
+                    slip = min(0.01, (float(atr) * 0.2) / float(current_price))
+                    h_limit_p = round_to_tick(
+                        current_price * (1 + slip) if side == "buy" else current_price * (1 - slip),
+                        tick_size
+                    )
+                    self.logger.warning(f"🚨 Tier 3: Capped Market {side} @ {h_limit_p}")
+                    order = self.exchange.create_order(
+                        symbol=symbol, type="limit", side=side, amount=remaining_amount,
+                        price=h_limit_p,
+                        params=build_params({"timeInForce": "IOC"}, order_tag="T3L")
                     )
                 else:
-                    hard_limit_price = round_to_tick(
-                        current_price * (1 - max_slip_ratio), tick_size
+                    self.logger.warning(f"🚨 Tier 3: Market Order {side}")
+                    order = self.exchange.create_order(
+                        symbol=symbol, type="market", side=side, amount=remaining_amount,
+                        params=build_params(order_tag="T3M")
                     )
-                self.logger.warning(
-                    f"🚨 Tier 3: Capped Market Order (Limit IOC fallback) {side} @ {hard_limit_price}"
-                )
-                order = self.exchange.create_order(
-                    symbol=symbol,
-                    type="limit",
-                    side=side,
-                    amount=remaining_amount,
-                    price=hard_limit_price,
-                    params=build_params({"timeInForce": "IOC"}, order_tag="T3L"),
-                )
-            else:
-                self.logger.warning(
-                    f"🚨 Tier 3: Market Order {side} (remaining: {remaining_amount})"
-                )
-                order = self.exchange.create_order(
-                    symbol=symbol,
-                    type="market",
-                    side=side,
-                    amount=remaining_amount,
-                    params=build_params(order_tag="T3M"),
-                )
-            register_fill(order, remaining_amount)
-            return order
-        except Exception as e:
-            self.logger.error(f"❌ All Tiers Failed: {e}")
-            if total_filled > 0:
-                self.logger.warning(
-                    f"⚠️ Partial fill preserved despite final failure: "
-                    f"{total_filled}/{requested_total} {symbol}"
-                )
-                return build_partial_result(status="partial_failed")
-            return None
+                register_fill(order, remaining_amount)
+                return order
+            except Exception as e:
+                self.logger.error(f"❌ All Tiers Failed: {e}")
+                if total_filled > 0:
+                    return build_partial_res(status="partial_failed")
+                return None
+        return last_order if last_order else build_partial_res(status="filled")

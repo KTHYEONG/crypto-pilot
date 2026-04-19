@@ -1,0 +1,340 @@
+"""Multiple-testing guard for GP cross-sectional alpha components (IS + OOS diagnostics)."""
+
+from __future__ import annotations
+
+import logging
+import math
+from typing import Sequence, cast
+
+import numpy as np
+import pandas as pd
+
+_logger = logging.getLogger(__name__)
+
+
+def _norm_sf(x: float) -> float:
+    """Survival function 1 - Phi(x) for standard normal."""
+    return 0.5 * math.erfc(x / math.sqrt(2.0))
+
+
+def _benjamini_hochberg_reject(p_values: Sequence[float], q: float) -> np.ndarray:
+    """Returns boolean mask: True where null rejected at FDR <= q (BH step-up)."""
+    p = np.clip(np.asarray(p_values, dtype=np.float64), 1e-15, 1.0)
+    m = int(p.size)
+    if m == 0:
+        return np.zeros(0, dtype=bool)
+    order = np.argsort(p)
+    sort_p = p[order]
+    rank_idx: np.ndarray = np.arange(1, m + 1, dtype=np.float64)
+    thresh = q * rank_idx / float(m)
+    ok = sort_p <= thresh
+    if not ok.any():
+        return np.zeros(m, dtype=bool)
+    k = int(np.where(ok)[0].max())
+    cutoff = float(sort_p[k])
+    out = np.asarray(p <= cutoff, dtype=bool)
+    return cast(np.ndarray, out)
+
+
+def _newey_west_se(x: np.ndarray, lag: int | None = None) -> float:
+    """Newey–West HAC standard error of the mean (Bartlett kernel)."""
+    n = int(len(x))
+    if n < 2:
+        return float("nan")
+    if lag is None:
+        lag = max(1, int(math.floor(4.0 * (n / 100.0) ** (2.0 / 9.0))))
+    mu = float(np.mean(x))
+    e = x - mu
+    gamma_0 = float(np.dot(e, e)) / float(n)
+    var = gamma_0
+    for k in range(1, lag + 1):
+        w = 1.0 - k / (lag + 1)
+        gamma_k = float(np.dot(e[:-k], e[k:])) / float(n)
+        var += 2.0 * w * gamma_k
+    return float(math.sqrt(max(var, 1e-12) / float(n)))
+
+
+def _ewma_ic_stats(ic_arr: np.ndarray, half_life: float = 540.0) -> tuple[float, float]:
+    n = int(ic_arr.size)
+    lam = math.log(2.0) / max(half_life, 1e-6)
+    w = np.exp(-lam * np.arange(n - 1, -1, -1, dtype=np.float64))
+    w = w / (float(np.sum(w)) + 1e-18)
+    mu = float(np.dot(w, ic_arr))
+    var = float(np.dot(w, (ic_arr - mu) ** 2))
+    return mu, math.sqrt(max(var, 1e-18))
+
+
+def _ic_half_life_bars(ic_arr: np.ndarray) -> float:
+    """AR(1) half-life in bars; 0 if non-stationary / ill-defined."""
+    n = int(ic_arr.size)
+    if n < 5:
+        return 0.0
+    a = ic_arr[:-1]
+    b = ic_arr[1:]
+    if float(np.std(a)) < 1e-12 or float(np.std(b)) < 1e-12:
+        return 0.0
+    rho = float(np.corrcoef(a, b)[0, 1])
+    if not math.isfinite(rho) or rho <= 0.0 or rho >= 1.0:
+        return 0.0
+    return float(-math.log(2.0) / math.log(rho))
+
+
+def _deflated_sharpe_threshold(
+    sharpe: float,
+    n: int,
+    skew: float,
+    kurt_excess: float,
+    n_trials: int,
+) -> bool:
+    """
+    Bailey & López de Prado (2014) style gate: SR minus expected max H0 SR under multiplicity.
+    """
+    if n < 5 or not np.isfinite(sharpe):
+        return False
+    var_sr = (1.0 - skew * sharpe + (kurt_excess / 4.0) * sharpe * sharpe) / max(n - 1, 1)
+    var_sr = max(float(var_sr), 1e-12)
+    e_max_h0 = float(math.sqrt(2.0 * math.log(max(n_trials, 2)))) * math.sqrt(var_sr)
+    sr_adj = sharpe - e_max_h0
+    return bool(sr_adj > 0.0 and sharpe > 0.0)
+
+
+def _tail_decile_ic_series(base: pd.DataFrame, col: str, *, min_symbols: int = 8) -> list[float]:
+    """Per-datetime Spearman IC on top/bottom decile of alpha (cross-section)."""
+    out: list[float] = []
+    for _, g in base.groupby(level="datetime", sort=False):
+        if len(g) < min_symbols:
+            continue
+        r = g[col].rank(pct=True, method="average")
+        m = (r >= 0.9) | (r <= 0.1)
+        if int(m.sum()) < 3:
+            continue
+        sub = g.loc[m, [col, "target"]].dropna()
+        if len(sub) < 3:
+            continue
+        out.append(float(sub[col].corr(sub["target"], method="spearman")))
+    return out
+
+
+def _regime_consistency_ok(is_sub: pd.DataFrame, col: str) -> bool:
+    """
+    Per tmp.md 4-C: all regime mean IC > 0, or worst-regime IC > -0.5 * best-regime IC.
+    """
+    if "__regime" not in is_sub.columns:
+        return True
+    regs = np.sort(np.unique(is_sub["__regime"].to_numpy()))
+    if len(regs) < 2:
+        return True
+    mus: list[float] = []
+    for r in regs:
+        sub = is_sub[is_sub["__regime"] == r]
+        if len(sub) < 30:
+            continue
+        ic_list: list[float] = []
+        for _, g in sub.groupby(level="datetime", sort=False):
+            if len(g) < 3:
+                continue
+            ic_list.append(float(g[col].corr(g["target"], method="spearman")))
+        arr = np.asarray(ic_list, dtype=np.float64)
+        arr = arr[np.isfinite(arr)]
+        if arr.size < 5:
+            continue
+        mus.append(float(np.mean(arr)))
+    if len(mus) < 2:
+        return True
+    best = max(mus)
+    worst = min(mus)
+    all_pos = all(m > 0.0 for m in mus)
+    alt = worst > -0.5 * max(best, 1e-9)
+    return bool(all_pos or alt)
+
+
+def _symbol_ic_balance_ok(
+    is_sub: pd.DataFrame, col: str, *, max_ratio: float, min_per_symbol: int = 40
+) -> bool:
+    """Per tmp.md 4-E: penalize alpha driven by a single symbol (time-series Spearman IC dispersion)."""
+    per: list[float] = []
+    for _, g in is_sub.groupby(level="symbol", sort=False):
+        if len(g) < min_per_symbol:
+            continue
+        v = float(g[col].corr(g["target"], method="spearman"))
+        if math.isfinite(v):
+            per.append(v)
+    arr = np.asarray(per, dtype=np.float64)
+    if arr.size < 3:
+        return True
+    m = float(np.mean(arr))
+    s = float(np.std(arr, ddof=1))
+    ratio = s / (abs(m) + 1e-9)
+    return bool(ratio <= max_ratio)
+
+
+def filter_gp_alpha_columns(
+    alpha_wide: pd.DataFrame,
+    panel_df: pd.DataFrame,
+    *,
+    is_end_date: str | None,
+    n_trials: int = 15,
+    fdr_q: float = 0.10,
+    alpha_cols: Sequence[str] | None = None,
+    use_newey_west: bool = False,
+    use_ewma_ic_stat: bool = False,
+    ewma_half_life: float = 540.0,
+    symbol_balance_max: float = 3.0,
+    require_regime_gate: bool = True,
+) -> tuple[pd.DataFrame, dict[str, float]]:
+    """
+    Zero-out GP alpha columns that fail DSR-style SR gate, BH-FDR, and practical IC gates.
+
+    Expects alpha_wide indexed like panel_df (MultiIndex datetime, symbol).
+    """
+    if use_ewma_ic_stat:
+        _logger.debug("use_ewma_ic_stat=True: EWMA mean used for reported t-stat only.")
+    if alpha_wide.empty or panel_df.empty or "target" not in panel_df.columns:
+        return alpha_wide, {"n_surviving": 0.0, "neutralize_primary": 0.0}
+
+    cols = (
+        list(alpha_cols)
+        if alpha_cols is not None
+        else [c for c in alpha_wide.columns if c.startswith("gp_alpha_")]
+    )
+    if not cols:
+        return alpha_wide, {"n_surviving": 0.0, "neutralize_primary": 0.0}
+
+    times = panel_df.index.get_level_values("datetime")
+    if is_end_date:
+        cut = pd.to_datetime(is_end_date, utc=True)
+        if getattr(times, "tz", None) is None:
+            times_utc = pd.to_datetime(times, utc=True)
+        else:
+            times_utc = times.tz_convert("UTC")
+        is_ix = np.asarray(times_utc < cut, dtype=bool)
+    else:
+        is_ix = np.ones(len(panel_df), dtype=bool)
+
+    common = alpha_wide.index.intersection(panel_df.index)
+    if len(common) < 50:
+        return alpha_wide, {"n_surviving": float(len(cols)), "neutralize_primary": 0.0}
+
+    base = panel_df.loc[common, ["target"]].copy()
+    base["__is"] = is_ix[panel_df.index.get_indexer(common)]
+    if "regime_pre_hmm" in panel_df.columns:
+        base["__regime"] = panel_df.loc[common, "regime_pre_hmm"].to_numpy()
+    else:
+        base["__regime"] = np.zeros(len(base), dtype=np.int64)
+    for c in cols:
+        base[c] = alpha_wide.loc[common, c]
+
+    pvals: list[float] = []
+    dsr_ok: list[bool] = []
+    half_life_ok: list[bool] = []
+    tail_ok: list[bool] = []
+    oos_ok: list[bool] = []
+    regime_ok: list[bool] = []
+    sym_bal_ok: list[bool] = []
+    neutralize_primary = False
+
+    is_sub = base[base["__is"]]
+    uniq_times = sorted(is_sub.index.get_level_values("datetime").unique())
+    oos_time_set: set[pd.Timestamp] = set()
+    if len(uniq_times) >= 10:
+        oos_time_set = set(uniq_times[int(len(uniq_times) * 0.8) :])
+
+    def _append_failed() -> None:
+        pvals.append(1.0)
+        dsr_ok.append(False)
+        half_life_ok.append(False)
+        tail_ok.append(False)
+        oos_ok.append(False)
+        regime_ok.append(False)
+        sym_bal_ok.append(False)
+
+    for c in cols:
+        ic_list: list[float] = []
+        for _, g in is_sub.groupby(level="datetime", sort=False):
+            if len(g) < 3:
+                continue
+            ic_list.append(float(g[c].corr(g["target"], method="spearman")))
+        ic_arr = np.asarray(ic_list, dtype=np.float64)
+        ic_arr = ic_arr[np.isfinite(ic_arr)]
+        n_ic = int(ic_arr.size)
+        if n_ic < 10:
+            _append_failed()
+            continue
+        mu = float(np.mean(ic_arr))
+        sd = float(np.std(ic_arr, ddof=1))
+        mu_for_t = mu
+        if use_ewma_ic_stat:
+            mu_for_t, _sd_ew = _ewma_ic_stats(ic_arr, half_life=ewma_half_life)
+            _ = _sd_ew
+        if use_newey_west:
+            se = _newey_west_se(ic_arr)
+            t_stat = mu_for_t / (se + 1e-12) if math.isfinite(se) and se > 0 else 0.0
+        else:
+            t_stat = mu_for_t / (sd / math.sqrt(n_ic) + 1e-12) if sd > 1e-12 else 0.0
+        pvals.append(float(2.0 * min(_norm_sf(abs(t_stat)), 1.0 - 1e-15)))
+        sharpe = mu / (sd + 1e-12) * math.sqrt(float(max(n_ic, 1)))
+        sk = float(pd.Series(ic_arr).skew()) if n_ic > 2 else 0.0
+        ku = float(pd.Series(ic_arr).kurt()) - 3.0 if n_ic > 3 else 0.0
+        dsr_ok.append(_deflated_sharpe_threshold(sharpe, n_ic, sk, ku, n_trials))
+
+        hl = _ic_half_life_bars(ic_arr)
+        half_life_ok.append(bool(hl > 4.0 or n_ic < 50))
+
+        tails = _tail_decile_ic_series(is_sub, c, min_symbols=8)
+        tail_mu = float(np.mean(tails)) if tails else mu
+        tail_ok.append(bool(tail_mu > -0.05 or len(tails) < 5))
+
+        if oos_time_set:
+            oos_sub = is_sub[
+                is_sub.index.get_level_values("datetime").isin(oos_time_set)
+            ]
+            ic_oos_list: list[float] = []
+            for _, g in oos_sub.groupby(level="datetime", sort=False):
+                if len(g) < 3:
+                    continue
+                ic_oos_list.append(float(g[c].corr(g["target"], method="spearman")))
+            oos_arr = np.asarray(ic_oos_list, dtype=np.float64)
+            oos_arr = oos_arr[np.isfinite(oos_arr)]
+            mu_oos = float(np.mean(oos_arr)) if oos_arr.size > 0 else mu
+        else:
+            mu_oos = mu
+        blend = 0.5 * mu + 0.5 * mu_oos
+        if mu > 1e-6:
+            oos_ok.append(bool(mu_oos >= 0.45 * mu and blend > -0.02))
+        else:
+            oos_ok.append(True)
+        if c == "gp_alpha_00" and mu > 1e-6 and mu_oos < 0.5 * mu:
+            neutralize_primary = True
+
+        if require_regime_gate:
+            regime_ok.append(_regime_consistency_ok(is_sub, c))
+        else:
+            regime_ok.append(True)
+        sym_bal_ok.append(
+            _symbol_ic_balance_ok(is_sub, c, max_ratio=symbol_balance_max)
+        )
+
+    reject = _benjamini_hochberg_reject(pvals, fdr_q)
+    out = alpha_wide.copy()
+    n_surv = 0
+    for i, c in enumerate(cols):
+        ok = (
+            bool(reject[i])
+            and dsr_ok[i]
+            and half_life_ok[i]
+            and tail_ok[i]
+            and oos_ok[i]
+            and regime_ok[i]
+            and sym_bal_ok[i]
+        )
+        if ok:
+            n_surv += 1
+        else:
+            out[c] = 0.5
+    meta: dict[str, float] = {
+        "n_surviving": float(n_surv),
+        "n_components": float(len(cols)),
+        "neutralize_primary": 1.0 if neutralize_primary else 0.0,
+    }
+    _logger.info("GP alpha FDR+DSR+IC gates: %d / %d columns survive.", n_surv, len(cols))
+    return out, meta
