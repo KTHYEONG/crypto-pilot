@@ -1,10 +1,8 @@
+import importlib
 import logging
 import sys
-import os
-import importlib
-from pathlib import Path
-import pandas as pd
 import warnings
+from pathlib import Path
 
 # 프로젝트 루트 설정
 project_root = str(Path(__file__).resolve().parents[1])
@@ -13,9 +11,9 @@ if project_root not in sys.path:
 
 import config.opt_config
 from config.opt_config import (
-    OPT_FUTURES_CONFIG,
-    FUTURES_SCREENER_CONFIG,
     FUTURES_ANCHOR_SYMBOLS,
+    FUTURES_SCREENER_CONFIG,
+    OPT_FUTURES_CONFIG,
     get_quarterly_window,
 )
 from config.settings import FUTURES_DATA_DIR
@@ -60,7 +58,7 @@ def run_universe_to_gp_test():
 
     # 3. Data Loading for Refinement
     data_maps_broad, _, valid_broad = _load_futures_data_maps_for_symbols(
-        list(broad_candidates), tf, fetch_start, start, is_end, end
+        list(broad_candidates), tf, fetch_start, start, is_end, end, skip_metrics=True
     )
     
     # 4. Refinement (Winning Signal Type: CS_RANK)
@@ -116,7 +114,8 @@ def run_universe_to_gp_test():
     _logger.info(f" IS Best Fitness (Composite ICIR): {best_fitness:.6f}")
     _logger.info(f" GP Alpha Components Tried:      {filter_meta.get('n_components', 0)}")
     _logger.info(f" GP Alpha Components Surviving:   {filter_meta.get('n_surviving', 0)}")
-    _logger.info(f" Primary Alpha Neutralized:       {bool(filter_meta.get('neutralize_primary', 0))}")
+    neu_p = bool(filter_meta.get("neutralize_primary", 0))
+    _logger.info(f" Primary Alpha Neutralized:       {neu_p}")
     _logger.info("-" * 70)
     
     if best_fitness > 0.01: # ICIR 기반이므로 0.01 이상이면 유의미
