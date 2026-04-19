@@ -283,6 +283,7 @@ def main() -> None:
     parser.add_argument("--tf", type=str, choices=["1h", "4h"], default="1h")
     parser.add_argument("--reference-date", type=str, default=None)
     parser.add_argument("--gp-only", action="store_true", help="Stop after GP IC calculation")
+    parser.add_argument("--hmm-only", action="store_true", help="Stop after HMM regime inference")
     args = parser.parse_args(remaining_args)
 
     fetch_start_date, start_date, is_end_date, end_date = get_quarterly_window(args.reference_date)
@@ -310,10 +311,15 @@ def main() -> None:
         is_end_date=is_end_date,
         is_start_date=start_date,
         gp_only=args.gp_only,
+        hmm_only=args.hmm_only,
     )
 
     if args.gp_only:
         _logger.info(" [GP-ONLY] Analysis complete. Exiting as requested.")
+        return
+
+    if args.hmm_only:
+        _logger.info(" [HMM-ONLY] Analysis complete. Exiting as requested.")
         return
 
     # Update data_maps with ranked ML features
