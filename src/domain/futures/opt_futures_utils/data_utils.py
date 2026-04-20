@@ -182,9 +182,16 @@ def align_data_for_2d_engine(
             "hmm_modulator_short",
         ]:
             if col in merged.columns:
-                aligned_data[col][:, s_idx] = merged[col].fillna(0).values
+                val = merged[col].fillna(0).values
+                if col.startswith("hmm_modulator"):
+                    val = merged[col].fillna(1.0).values
+                aligned_data[col][:, s_idx] = val
+            else:
+                aligned_data[col][:, s_idx] = 1.0 if col.startswith("hmm_modulator") else 0.0
         if "dyn_leverage" in merged.columns:
             aligned_data["dyn_leverage"][:, s_idx] = merged["dyn_leverage"].fillna(5.0).values
+        else:
+            aligned_data["dyn_leverage"][:, s_idx] = 5.0
         for col in ["entry_upper", "entry_lower"]:
             if col in merged.columns:
                 default_val = 999999.0 if col == "entry_upper" else 0.0

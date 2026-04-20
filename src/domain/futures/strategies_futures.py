@@ -144,7 +144,10 @@ class UltimateStrategy(PipelineStrategyBase):
             long_e = np.zeros(n, dtype=np.bool_)
             short_e = np.zeros(n, dtype=np.bool_)
             rank_score = df["xs_score_long"].to_numpy(dtype=np.float64, copy=False)
-            df["trend_direction"] = 0.0
+            gp_centered = gp - 0.5
+            # Use small threshold to avoid noise at neutral 0.5
+            gp_sign = np.where(np.abs(gp_centered) > 0.01, np.sign(gp_centered), 0.0)
+            df["trend_direction"] = gp_sign
             df["entry_upper"] = 0.0
             df["entry_lower"] = 999999.0
         else:

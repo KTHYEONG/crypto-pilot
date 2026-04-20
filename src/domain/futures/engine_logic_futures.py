@@ -101,6 +101,9 @@ def calculate_position_size(
     [RE-ENGINEERED] Target Volatility Sizing (Alternative 1)
     Decouples Sizing from Stop-Loss distance to prevent 1/ATR^2 penalty.
     """
+    # 0. NaN Protection
+    if np.isnan(asset_atr_pct) or np.isnan(current_equity_for_risk) or np.isnan(fill_price):
+        return 0.0
     if np.isnan(gk):
         gk = 0.0
     if gk < 0.0:
@@ -110,13 +113,17 @@ def calculate_position_size(
     # asset_atr_pct가 높을수록(변동성이 클수록) 할당 금액이 비례하여 감소 (단일 패널티)
     vol_scalar = risk_per_trade / max(asset_atr_pct, 0.001)
     target_notional = current_equity_for_risk * vol_scalar * gk
+    
+    # [SAFETY] 전체 가용 레버리지 용량의 70%를 초과하는 명목 가치 설정 금지 (Margin Fail 방지 핵심)
+    max_safe_notional = max(current_equity_for_risk, 0.0) * leverage * 0.70
+    target_notional = min(target_notional, max_safe_notional)
 
     # 2. 명목 한도 캡 (Max Exposure / Anti-Gap Protection)
     max_qty_by_exposure = (current_equity_for_risk * max_exposure_per_coin) / fill_price
     target_qty = min(target_notional / fill_price, max_qty_by_exposure)
 
-    # 3. 가용 증거금 한도 캡 (Margin Constraint)
-    max_qty_by_margin = (available_margin * leverage) / fill_price
+    # 3. 가용 증거금 한도 캡 (Margin Constraint) - 수수료 예비분 2% 제외
+    max_qty_by_margin = (available_margin * 0.98 * leverage) / fill_price
     if max_qty_by_margin < 0:
         max_qty_by_margin = 0.0
     target_qty = min(target_qty, max_qty_by_margin)
