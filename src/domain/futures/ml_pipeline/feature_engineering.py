@@ -6,15 +6,16 @@ import numpy as np
 import pandas as pd
 
 # Columns produced by build_gp_input_features (for CS-rank / imputation in pipeline).
-# Systemic HMM input (7-dim optimized for directional asymmetry).
+# Systemic HMM input (8-dim: Structural Trend, Risk, and Energy markers).
 SYSTEMIC_HMM_FEATURE_COLUMNS: tuple[str, ...] = (
     "btc_trend_vol_adj_24h",
+    "btc_trend_vol_adj_168h",
     "realized_vol_regime",
-    "ret_skewness_24h",
-    "cs_dispersion_z",
+    "downside_vol_ratio",
+    "btc_ma_dist_168h",
+    "volume_momentum_24h",
     "market_breadth",
     "funding_level",
-    "funding_momentum_24h",
 )
 
 # Posterior columns aligned to stable semantic labels (order for MetaLabeler).
@@ -216,12 +217,9 @@ def build_systemic_hmm_features(
 ) -> pd.DataFrame:
     """
     Builds single-timeseries features for Macro Market HMM using systemic aggregates.
-    Independent of GP Alpha performance to avoid circular IS-overfitting.
-
-    8-dim design (tmp.md): trend/vol-adjusted BTC trend, vol regime, CS stress, alt-BTC
-    correlation, funding level & cross-sectional dispersion of funding, vol-of-vol, breadth.
+    8-dim: Trend (24h/168h), Vol Regime, Downside Risk, Distance, Energy, Breadth, Funding.
     """
-    _ = alpha_panel  # Reserved: do not couple HMM features to mined alphas.
+    _ = alpha_panel
 
     market_feats = panel_df.groupby(level="datetime").agg(
         {
@@ -231,58 +229,58 @@ def build_systemic_hmm_features(
     )
     if "funding_rate" in panel_df.columns:
         funding_mean = panel_df["funding_rate"].groupby(level="datetime").mean()
-        funding_skew = panel_df["funding_rate"].groupby(level="datetime").std()
     else:
         funding_mean = pd.Series(0.0, index=market_feats.index)
-        funding_skew = pd.Series(0.0, index=market_feats.index)
 
     idx = market_feats.index
     syms = panel_df.index.get_level_values("symbol").unique()
     btc_sym = next((s for s in syms if "BTC" in s), None)
+    
     if btc_sym:
         btc_df = panel_df.xs(btc_sym, level="symbol")
         btc_close = btc_df["close"].astype(np.float64)
+        log_ret_1 = np.log(btc_close / btc_close.shift(1).clip(lower=1e-12))
+        sig_24 = log_ret_1.rolling(24, min_periods=12).std() + 1e-12
+        
+        # 1. Trend (Short/Long)
+        btc_trend_24h = (np.log(btc_close / btc_close.shift(24).clip(lower=1e-12))) / sig_24
+        btc_trend_168h = (np.log(btc_close / btc_close.shift(168).clip(lower=1e-12))) / (sig_24 * np.sqrt(7.0))
+        
+        # 2. Volatility Regime
         h_hi = btc_df["high"].astype(np.float64)
         h_lo = btc_df["low"].astype(np.float64) + 1e-12
         hl = np.log((h_hi / h_lo).clip(lower=1e-12))
-        hl_np = hl.to_numpy(dtype=np.float64)
-        park_inner = np.sqrt(
-            np.maximum(1.0 / (4.0 * np.log(2.0)) * (hl_np**2), 0.0)
-        )
-        park = pd.Series(park_inner, index=btc_df.index)
-        park_24 = park.rolling(24, min_periods=12).mean()
-        park_168 = park.rolling(168, min_periods=24).mean()
-        rv_short = park_24 + 1e-12
-        rv_long = park_168 + 1e-12
-        log_ret_1 = np.log(btc_close / btc_close.shift(1).clip(lower=1e-12))
-        sig_24 = log_ret_1.rolling(24, min_periods=12).std() + 1e-12
-        btc_ret_24h = np.log(btc_close / btc_close.shift(24).clip(lower=1e-12))
+        park = pd.Series(np.sqrt(np.maximum(1.0 / (4.0 * np.log(2.0)) * (hl**2), 0.0)), index=btc_df.index)
+        rv_regime = park.rolling(24).mean() / (park.rolling(168).mean() + 1e-12)
         
-        # [NEW] Statistical Moments & Directional Markers
-        btc_trend_vol_adj = btc_ret_24h / sig_24
-        realized_vol_regime = rv_short / rv_long
-        ret_skewness_24h = log_ret_1.rolling(24, min_periods=12).skew()
+        # 3. Downside Risk
+        neg_ret = log_ret_1.clip(upper=0.0)
+        downside_vol_ratio = (neg_ret.rolling(24).std() / (log_ret_1.rolling(24).std() + 1e-12)).fillna(0.5)
+        
+        # 4. Structural Distance (Capitulation)
+        ma_168 = btc_close.rolling(168, min_periods=24).mean()
+        btc_ma_dist_168h = (btc_close / (ma_168 + 1e-12)) - 1.0
+        
+        # 5. Energy (Squeeze Precursor)
+        btc_vol = btc_df["volume"].astype(np.float64)
+        vol_energy = btc_vol.rolling(24).mean() / (btc_vol.rolling(168).mean() + 1e-12) - 1.0
     else:
-        btc_trend_vol_adj = pd.Series(0.0, index=idx)
-        realized_vol_regime = pd.Series(1.0, index=idx)
-        ret_skewness_24h = pd.Series(0.0, index=idx)
-
-    cs_disp_raw = market_feats["cs_dispersion"].reindex(idx).astype(np.float64)
-    med_cs = cs_disp_raw.rolling(500, min_periods=50).median()
-    mad_cs = (cs_disp_raw - med_cs).abs().rolling(500, min_periods=50).median()
-    cs_dispersion_z = (cs_disp_raw - med_cs) / (mad_cs * 1.4826 + 1e-12)
-
-    # [NEW] Funding Momentum: 24h change in systemic funding level
-    funding_momentum_24h = funding_mean.diff(24).fillna(0.0)
+        btc_trend_24h = pd.Series(0.0, index=idx)
+        btc_trend_168h = pd.Series(0.0, index=idx)
+        rv_regime = pd.Series(1.0, index=idx)
+        downside_vol_ratio = pd.Series(0.5, index=idx)
+        btc_ma_dist_168h = pd.Series(0.0, index=idx)
+        vol_energy = pd.Series(0.0, index=idx)
 
     out = pd.DataFrame(index=idx)
-    out["btc_trend_vol_adj_24h"] = btc_trend_vol_adj.reindex(idx).fillna(0.0)
-    out["realized_vol_regime"] = realized_vol_regime.reindex(idx).fillna(1.0)
-    out["ret_skewness_24h"] = ret_skewness_24h.reindex(idx).fillna(0.0)
-    out["cs_dispersion_z"] = cs_dispersion_z.reindex(idx).fillna(0.0)
+    out["btc_trend_vol_adj_24h"] = btc_trend_24h.reindex(idx).fillna(0.0)
+    out["btc_trend_vol_adj_168h"] = btc_trend_168h.reindex(idx).fillna(0.0)
+    out["realized_vol_regime"] = rv_regime.reindex(idx).fillna(1.0)
+    out["downside_vol_ratio"] = downside_vol_ratio.reindex(idx).fillna(0.5)
+    out["btc_ma_dist_168h"] = btc_ma_dist_168h.reindex(idx).fillna(0.0)
+    out["volume_momentum_24h"] = vol_energy.reindex(idx).fillna(0.0)
     out["market_breadth"] = market_feats["market_breadth"].reindex(idx).fillna(0.0)
     out["funding_level"] = funding_mean.reindex(idx).fillna(0.0)
-    out["funding_momentum_24h"] = funding_momentum_24h.reindex(idx).fillna(0.0)
 
     out = out[list(SYSTEMIC_HMM_FEATURE_COLUMNS)]
     return out.replace([np.inf, -np.inf], np.nan).fillna(0.0)

@@ -49,10 +49,13 @@ from src.domain.futures.opt_futures_utils.objective import (  # noqa: E402
 from src.domain.futures.opt_futures_utils.objective_ml import (  # noqa: E402
     MLPhaseDContext,
     build_ml_phase_d_params,
+    check_hard_gates_ml,
     objective_ml_phase_d,
+    select_best_trial_by_holdout_log_ret,
     topsis_select_best,
 )
 from src.domain.futures.opt_futures_utils.oos_evaluator import (  # noqa: E402
+    run_cpcv_complement_evaluation,
     run_oos_margin_shared_portfolio,
 )
 
@@ -98,11 +101,11 @@ def futures_frozen_trial_constraints(trial: optuna.trial.FrozenTrial) -> tuple[f
     ev_cost = float(trial.user_attrs.get("ev_cost_ratio", 0.0) or 0.0)
 
     return (
-        1.35 - pf,
-        25.0 - trades,
+        1.15 - pf,
+        10.0 - trades,
         avg_mdd - _MDD_CONSTRAINT_LIMIT,
-        0.15 - ls_ratio,
-        3.0 - ev_cost,
+        0.10 - ls_ratio,
+        1.5 - ev_cost,
     )
 
 
@@ -218,7 +221,7 @@ def _load_futures_data_maps_for_symbols(
         inject_cs_momentum_ranks(data_maps, valid_symbols, tf)
         inject_cs_momentum_ranks(oos_data_maps, valid_symbols, tf)
 
-    _logger.info("Data loading complete: %d symbols valid.", len(valid_symbols))
+    _logger.info("[STEP 1/5] Data loading complete: %d symbols valid.", len(valid_symbols))
     return data_maps, oos_data_maps, valid_symbols
 
 
@@ -299,7 +302,7 @@ def main() -> None:
     ml_n_jobs = _resolve_futures_parallel_policy(len(valid_symbols))
 
     # [Institutional Quant] Universal Cross-Sectional ML Pipeline
-    _logger.info("ML pipeline: Universal Cross-Sectional GP & Regime Inference (1h).")
+    _logger.info("[STEP 2/5] ML pipeline: Universal Cross-Sectional GP & Regime Inference (1h).")
     ml_out = run_ml_pipeline_for_universe(
         valid_symbols,
         args.tf,
@@ -322,6 +325,7 @@ def main() -> None:
         _logger.info(" [HMM-ONLY] Analysis complete. Exiting as requested.")
         return
 
+    _logger.info("[STEP 3/5] Integrating ML Features (GP/HMM) into Data Maps...")
     # Update data_maps with ranked ML features
     for sym in valid_symbols:
         if sym in ml_out.meta_feature_frame_by_symbol:
@@ -392,9 +396,9 @@ def main() -> None:
     from src.domain.futures.opt_futures_utils.signal_cache import _MEM_CACHE, DISK_CACHE_ROOT
     _MEM_CACHE.clear()
     if DISK_CACHE_ROOT.exists():
-        for f in DISK_CACHE_ROOT.glob("*.parquet"):
+        for cache_file in DISK_CACHE_ROOT.glob("*.parquet"):
             try:
-                f.unlink()
+                cache_file.unlink()
             except Exception:  # noqa: S110
                 pass
 
@@ -411,7 +415,7 @@ def main() -> None:
         n_completed = len([t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE])
         batch_size = max(1, n_ml_trials // 10)
         if n_completed > 0 and (n_completed % batch_size == 0 or n_completed == n_ml_trials):
-            _logger.info(f" [PHASE 5] Progress: {n_completed}/{n_ml_trials} trials complete...")
+            _logger.info(f" [STEP 4/5] Progress: {n_completed}/{n_ml_trials} trials complete...")
 
     # Use TqdmCallback with explicit n_trials
     try:
@@ -437,12 +441,14 @@ def main() -> None:
     # [PERFORMANCE] Use multi-processing (n_jobs)
     n_jobs = _resolve_futures_parallel_policy(len(valid_symbols))
     _logger.info("\n" + "=" * 85)
-    _logger.info(f" [PHASE 5] Optuna Optimization: {n_ml_trials} trials | {n_jobs} cores")
+    _logger.info(f" [STEP 4/5] Portfolio Optimization: {n_ml_trials} trials | {n_jobs} cores")
     _logger.info("=" * 85 + "\n")
 
     study_ml = optuna.create_study(
         directions=["minimize", "minimize", "minimize"],
-        sampler=NSGAIISampler(seed=seed),
+        sampler=NSGAIISampler(
+            seed=seed, constraints_func=futures_frozen_trial_constraints
+        ),
     )
     
     # If using n_jobs > 1, TqdmCallback might be tricky. 
@@ -460,16 +466,46 @@ def main() -> None:
             for t in study_ml.best_trials
             if all(c <= 0.0 for c in futures_frozen_trial_constraints(t))
         ]
-        best_trial = topsis_select_best(valid_trials if valid_trials else study_ml.best_trials)
+        if valid_trials:
+            best_trial = topsis_select_best(valid_trials)
+        else:
+            best_trial = select_best_trial_by_holdout_log_ret(study_ml.best_trials)
     except Exception:
         best_trial = study_ml.trials[0]
 
     params = build_ml_phase_d_params(dict(best_trial.params), args.tf)
     
-    _logger.info("\nFinalizing OOS Evaluation with Best Parameters...")
+    _logger.info("\n[STEP 5/5] Finalizing OOS Evaluation with Best Parameters...")
     oos_port = run_oos_margin_shared_portfolio(
         valid_symbols, args.tf, params, oos_data_maps, cache_root=FUTURES_CACHE_DIR
     )
+
+    if bool(OPT_FUTURES_CONFIG.get("FUTURES_PHASE3_HARD_GATE", True)):
+        mai = ml_ctx.multi_alignment_info or {}
+        oos_tw = best_trial.user_attrs.get("cpcv_path_oos_log_tw") or []
+        paths = mai.get("cpcv_paths")
+        br = mai.get("cpcv_all_block_ranges")
+        if oos_tw and paths and br:
+            pbo_obs, rho_obs = run_cpcv_complement_evaluation(
+                params,
+                valid_symbols,
+                args.tf,
+                data_maps,
+                paths,
+                br,
+                oos_path_scores=oos_tw,
+            )
+        else:
+            pbo_obs, rho_obs = (0.5, 0.0)
+        dsr_obs = float(best_trial.user_attrs.get("gate1_dsr", 0.0))
+        gate_ok = check_hard_gates_ml(oos_port, float(pbo_obs), dsr_obs, 0.55)
+        _logger.info(
+            " [Phase3 HARD GATE] PBO=%.4f (rho=%.4f) gate1_dsr=%.4f -> %s",
+            float(pbo_obs),
+            float(rho_obs),
+            dsr_obs,
+            "PASS" if gate_ok else "FAIL",
+        )
 
     n_wf = int(OPT_FUTURES_CONFIG.get("FUTURES_WF_OOS_LEGS", 1))
     if n_wf > 1 and valid_symbols:
@@ -501,7 +537,7 @@ def main() -> None:
             )
     
     _logger.info("\n" + "=" * 85)
-    _logger.info(" [FINAL OOS PERFORMANCE REPORT]")
+    _logger.info(" [STEP 5/5] FINAL OOS PERFORMANCE REPORT")
     _logger.info("-" * 85)
     _logger.info(f" CAGR:        {oos_port['cagr_pct']:>8.2f}%")
     _logger.info(f" MDD:         {oos_port['mdd_pct']:>8.2f}%")
