@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, cast
 
@@ -14,6 +15,7 @@ from optuna.trial import FrozenTrial
 from config.opt_config import OPT_FUTURES_CONFIG
 from config.settings import FUTURES_INITIAL_BALANCE, SLIPPAGE_RATE, TRADING_FEE_RATE
 from src.domain.futures.engine_multi_futures import (
+    _recompute_cs_dirs_numba,
     backtest_portfolio_numba,
 )
 from src.domain.futures.ml_pipeline.feature_engineering import HMM_SEMANTIC_PROB_COLUMNS
@@ -38,6 +40,7 @@ from src.domain.futures.opt_futures_utils.signal_cache import get_tiered_signals
 from src.domain.futures.strategies_futures import UltimateStrategy
 
 _logger = logging.getLogger(__name__)
+_PRECOMPUTE_LOCK = threading.Lock()
 
 @dataclass
 class MLPhaseDContext:
@@ -80,7 +83,12 @@ def _inject_dyn_leverage_trimmed(trimmed_sig: pd.DataFrame, raw_full: pd.DataFra
             .to_numpy(dtype=np.float64)
         )
     except Exception as e:
-        _logger.error("Error creating p_mat: %s. hmm_cols=%s, columns=%s", e, hmm_cols, list(raw_full.columns))
+        _logger.error(
+            "Error creating p_mat: %s. hmm_cols=%s, columns=%s",
+            e,
+            hmm_cols,
+            list(raw_full.columns),
+        )
         raise
     
     if p_mat.shape[1] != k:
@@ -120,85 +128,168 @@ def _inject_dyn_leverage_trimmed(trimmed_sig: pd.DataFrame, raw_full: pd.DataFra
 
 def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
     """Pre-align and pre-slice all data before Optuna starts to eliminate trial overhead."""
-    # 1. Alignment & Baseline Signals
-    pre_ml = {
-        "TRAILING_ACTIVATION_ATR": 1.0,
-        "BAYESIAN_C": 10.0,
-        "KELLY_SHRINKAGE": 0.3,
-        "K_LONG": 2,
-        "K_SHORT": 2,
-        "REBALANCE_BARS": 6,
-        "MIN_SCORE_PERCENTILE": 0.65,
-        "CRISIS_GATE_PROB": float(OPT_FUTURES_CONFIG.get("FUTURES_CRISIS_GATE_PROB_DEFAULT", 0.7)),
-        "USE_CS_RANK_ENGINE": True,
-    }
-    params = _base_engine_params(pre_ml, ctx.tf)
-    strategy = UltimateStrategy(name="Precompute", params=params)
+    with _PRECOMPUTE_LOCK:
+        if ctx.cpcv_block_slices is not None:
+            return
 
-    emb = int(EMBARGO_BARS.get(ctx.tf, 12))
-    info = compute_multi_alignment_info(ctx.data_maps, ctx.symbols, ctx.tf, emb)
-    if info is None:
-        return
-    ctx.multi_alignment_info = info
-    
-    full_signal_dfs: Dict[str, pd.DataFrame] = {}
-    for sym in ctx.symbols:
-        raw = ctx.data_maps[sym][ctx.tf]
-        full_signal_dfs[sym] = get_tiered_signals(params, sym, ctx.tf, raw, strategy)
+        # 1. Alignment & Baseline Signals
+        pre_ml = {
+            "TRAILING_ACTIVATION_ATR": 1.0,
+            "BAYESIAN_C": 10.0,
+            "KELLY_SHRINKAGE": 0.3,
+            "K_LONG": 2,
+            "K_SHORT": 2,
+            "REBALANCE_BARS": 6,
+            "MIN_SCORE_PERCENTILE": 0.55,
+            "CRISIS_GAMMA": 1.0,
+            "USE_CS_RANK_ENGINE": True,
+        }
+        params = _base_engine_params(pre_ml, ctx.tf)
+        strategy = UltimateStrategy(name="Precompute", params=params)
 
-    # 2. Build Global Aligned Arrays
-    prebuilt_full: Dict[str, Dict[str, np.ndarray]] = {}
-    eff_len = int(info["eff_ref_len"])
-    for sym in ctx.symbols:
-        start_idx = int(info["alignment_offsets"][sym])
-        trimmed_sig = full_signal_dfs[sym].iloc[start_idx:start_idx+eff_len].copy()
+        emb = int(EMBARGO_BARS.get(ctx.tf, 12))
+        info = compute_multi_alignment_info(ctx.data_maps, ctx.symbols, ctx.tf, emb)
+        if info is None:
+            return
+        ctx.multi_alignment_info = info
         
-        # [DYNAMIC FIX] Re-calculate trend_direction and strength WITHOUT threshold bias
-        # This allows Numba to apply the threshold dynamically.
-        raw_full = ctx.data_maps[sym][ctx.tf].iloc[start_idx:start_idx+eff_len]
-        if "funding_rate_sum" in raw_full.columns:
-            trimmed_sig["funding_rate_sum"] = raw_full["funding_rate_sum"].to_numpy(
-                dtype=np.float64, copy=False
+        full_signal_dfs: Dict[str, pd.DataFrame] = {}
+        for sym in ctx.symbols:
+            raw = ctx.data_maps[sym][ctx.tf]
+            full_signal_dfs[sym] = get_tiered_signals(params, sym, ctx.tf, raw, strategy)
+
+        # 2. Build Global Aligned Arrays
+        prebuilt_full: Dict[str, Dict[str, np.ndarray]] = {}
+        eff_len = int(info["eff_ref_len"])
+        for sym in ctx.symbols:
+            start_idx = int(info["alignment_offsets"][sym])
+            trimmed_sig = full_signal_dfs[sym].iloc[start_idx:start_idx+eff_len].copy()
+            
+            # [DYNAMIC FIX] Re-calculate trend_direction and strength WITHOUT threshold bias
+            # This allows Numba to apply the threshold dynamically.
+            raw_full = ctx.data_maps[sym][ctx.tf].iloc[start_idx:start_idx+eff_len]
+            if "funding_rate_sum" in raw_full.columns:
+                trimmed_sig["funding_rate_sum"] = raw_full["funding_rate_sum"].to_numpy(
+                    dtype=np.float64, copy=False
+                )
+            trimmed_sig["ml_calib_prob"] = 1.0
+            trimmed_sig["ml_calib_prob_long"] = 1.0
+            trimmed_sig["ml_calib_prob_short"] = 1.0
+            gp_pre = (
+                raw_full["gp_alpha_00"].to_numpy(dtype=np.float64, copy=False)
+                if "gp_alpha_00" in raw_full.columns
+                else np.zeros(len(trimmed_sig), dtype=np.float64)
             )
-        trimmed_sig["ml_calib_prob"] = 1.0
-        trimmed_sig["ml_calib_prob_long"] = 1.0
-        trimmed_sig["ml_calib_prob_short"] = 1.0
-        trimmed_sig["trend_direction"] = 0.0
-        trimmed_sig["entry_upper"] = 0.0
-        trimmed_sig["entry_lower"] = 999999.0
-        _xs_cols = (
-            "xs_score_long",
-            "xs_score_short",
-            "hmm_prob_crisis",
-            "hmm_modulator_long",
-            "hmm_modulator_short",
+            trimmed_sig["trend_direction"] = np.sign(gp_pre).astype(np.float64)
+            trimmed_sig["entry_upper"] = 0.0
+            trimmed_sig["entry_lower"] = 999999.0
+            _xs_cols = (
+                "xs_score_long",
+                "xs_score_short",
+                "hmm_prob_crisis",
+                "hmm_modulator_long",
+                "hmm_modulator_short",
+            )
+            for col in _xs_cols:
+                if col in raw_full.columns:
+                    trimmed_sig[col] = raw_full[col].to_numpy(dtype=np.float64, copy=False)
+
+            _inject_dyn_leverage_trimmed(trimmed_sig, raw_full)
+
+            prebuilt_full[sym] = _dataframe_to_symbol_arrays(trimmed_sig)
+
+        # 3. CPCV Zone & Holdout Slicing
+        _holdout_ratio = 0.20
+        cpcv_zone_len = max(200, int(eff_len * (1.0 - _holdout_ratio)))
+        embargo = int(EMBARGO_BARS.get(ctx.tf, 12))
+        cpcv_bundle = build_cpcv_test_paths_with_fallback(cpcv_zone_len, embargo=embargo)
+        unique_blocks = list_cpcv_block_ranges(cpcv_zone_len, cpcv_bundle[1], embargo=embargo)
+        
+        ctx.cpcv_block_slices = []
+        for b_start, b_end in unique_blocks:
+            s_start, s_end = max(0, b_start - 1), min(eff_len, b_end)
+            aligned = _build_aligned_2d_from_prebuilt(prebuilt_full, ctx.symbols, s_start, s_end)
+            ctx.cpcv_block_slices.append({"range": (b_start, b_end), "data": aligned})
+        
+        # Holdout Slice
+        h_start, h_end = max(0, cpcv_zone_len - 1), eff_len
+        ctx.holdout_slice = _build_aligned_2d_from_prebuilt(
+            prebuilt_full, ctx.symbols, h_start, h_end
         )
-        for col in _xs_cols:
-            if col in raw_full.columns:
-                trimmed_sig[col] = raw_full[col].to_numpy(dtype=np.float64, copy=False)
+        ctx.multi_alignment_info["cpcv_paths"] = cpcv_bundle[0]
+        ctx.multi_alignment_info["cpcv_all_block_ranges"] = unique_blocks
 
-        _inject_dyn_leverage_trimmed(trimmed_sig, raw_full)
+    if ctx.cpcv_block_slices:
+        aligned0 = ctx.cpcv_block_slices[0]["data"]
+        xl0 = aligned0.get("xs_score_long")
+        if xl0 is not None and getattr(xl0, "size", 0) > 0:
+            xs_std = float(np.nanstd(np.asarray(xl0, dtype=np.float64)))
+            ctx.multi_alignment_info["xs_score_aligned_std"] = xs_std
+            if xs_std < 0.05:
+                _logger.warning(
+                    "[ML_OPT] xs_score dispersion low (std=%.6f); check GP/CS merge path.",
+                    xs_std,
+                )
 
-        prebuilt_full[sym] = _dataframe_to_symbol_arrays(trimmed_sig)
+        _log_precompute_computed_dir_sample(
+            aligned0,
+            int(pre_ml["K_LONG"]),
+            int(pre_ml["K_SHORT"]),
+            float(pre_ml["CRISIS_GAMMA"]),
+        )
 
-    # 3. CPCV Zone & Holdout Slicing
-    _holdout_ratio = 0.20
-    cpcv_zone_len = max(200, int(eff_len * (1.0 - _holdout_ratio)))
-    embargo = int(EMBARGO_BARS.get(ctx.tf, 12))
-    cpcv_bundle = build_cpcv_test_paths_with_fallback(cpcv_zone_len, embargo=embargo)
-    unique_blocks = list_cpcv_block_ranges(cpcv_zone_len, cpcv_bundle[1], embargo=embargo)
-    
-    ctx.cpcv_block_slices = []
-    for b_start, b_end in unique_blocks:
-        s_start, s_end = max(0, b_start - 1), min(eff_len, b_end)
-        aligned = _build_aligned_2d_from_prebuilt(prebuilt_full, ctx.symbols, s_start, s_end)
-        ctx.cpcv_block_slices.append({"range": (b_start, b_end), "data": aligned})
-    
-    # Holdout Slice
-    h_start, h_end = max(0, cpcv_zone_len - 1), eff_len
-    ctx.holdout_slice = _build_aligned_2d_from_prebuilt(prebuilt_full, ctx.symbols, h_start, h_end)
-    ctx.multi_alignment_info["cpcv_paths"] = cpcv_bundle[0]
-    ctx.multi_alignment_info["cpcv_all_block_ranges"] = unique_blocks
+
+def _log_precompute_computed_dir_sample(
+    aligned0: Dict[str, Any],
+    k_long: int,
+    k_short: int,
+    crisis_gamma: float,
+) -> None:
+    """Single-bar sample of |computed_dir| dispersion (block 0, mid time index)."""
+    xl = aligned0.get("xs_score_long")
+    xs = aligned0.get("xs_score_short")
+    hy = aligned0.get("hmm_prob_crisis")
+    if xl is None or xs is None or hy is None or getattr(xl, "size", 0) == 0:
+        return
+    arr_l = np.ascontiguousarray(xl, dtype=np.float64)
+    arr_s = np.ascontiguousarray(xs, dtype=np.float64)
+    arr_h = np.ascontiguousarray(hy, dtype=np.float64)
+    n_b, n_sy = arr_l.shape[0], arr_l.shape[1]
+    prev_i = min(n_b - 1, max(0, n_b // 2))
+    out = np.zeros(n_sy, dtype=np.float64)
+    _recompute_cs_dirs_numba(
+        prev_i,
+        n_sy,
+        arr_l,
+        arr_s,
+        arr_h,
+        crisis_gamma,
+        k_long,
+        k_short,
+        out,
+    )
+    mags = np.abs(out)
+    _logger.info(
+        "[ML_OPT][precompute] computed_dir |.| mid_bar=%d "
+        "std=%.6f mean=%.6f max=%.6f nonzero_frac=%.4f",
+        prev_i,
+        float(np.nanstd(mags)),
+        float(np.nanmean(mags)),
+        float(np.nanmax(mags)),
+        float(np.mean(mags > 1e-12)),
+    )
+    flat_l = arr_l[prev_i, :].ravel()
+    q1, q50, q99 = (
+        float(np.nanpercentile(flat_l, 1)),
+        float(np.nanpercentile(flat_l, 50)),
+        float(np.nanpercentile(flat_l, 99)),
+    )
+    _logger.info(
+        "[ML_OPT][precompute] xs_score_long row quantiles p01/p50/p99=%.6f/%.6f/%.6f",
+        q1,
+        q50,
+        q99,
+    )
 
 
 def _suggest_ml_phase_d(trial: optuna.Trial) -> Dict[str, Any]:
@@ -208,8 +299,7 @@ def _suggest_ml_phase_d(trial: optuna.Trial) -> Dict[str, Any]:
     k_long = int(trial.suggest_int("K_LONG", 1, 4))
     k_short = int(trial.suggest_int("K_SHORT", 1, 4))
     reb = int(trial.suggest_categorical("REBALANCE_BARS", [1, 3, 6, 12]))
-    min_pct = float(trial.suggest_float("MIN_SCORE_PERCENTILE", 0.50, 0.85))
-    crisis = float(trial.suggest_float("CRISIS_GATE_PROB", 0.50, 0.85))
+    crisis = float(trial.suggest_float("CRISIS_GAMMA", 0.5, 3.0))
     atr_p = int(trial.suggest_int("ATR_PERIOD", 10, 20, step=2))
     l_atr = float(trial.suggest_float("LONG_ATR_MULT", 1.5, 4.5, step=0.25))
     l_trail = float(trial.suggest_float("LONG_TRAIL_MULT", 2.5, 6.0, step=0.5))
@@ -227,8 +317,8 @@ def _suggest_ml_phase_d(trial: optuna.Trial) -> Dict[str, Any]:
         "K_LONG": k_long,
         "K_SHORT": k_short,
         "REBALANCE_BARS": reb,
-        "MIN_SCORE_PERCENTILE": min_pct,
-        "CRISIS_GATE_PROB": crisis,
+        "MIN_SCORE_PERCENTILE": 0.55,
+        "CRISIS_GAMMA": crisis,
         "ATR_PERIOD": atr_p,
         "LONG_ATR_MULT": l_atr,
         "LONG_TRAIL_MULT": l_trail,
@@ -281,8 +371,9 @@ def _base_engine_params(ml: Dict[str, Any], tf: str) -> Dict[str, Any]:
         "K_LONG": int(ml.get("K_LONG", 2)),
         "K_SHORT": int(ml.get("K_SHORT", 2)),
         "REBALANCE_BARS": max(1, int(ml.get("REBALANCE_BARS", 6))),
-        "MIN_SCORE_PERCENTILE": float(ml.get("MIN_SCORE_PERCENTILE", 0.65)),
-        "CRISIS_GATE_PROB": float(ml.get("CRISIS_GATE_PROB", 0.7)),
+        "MIN_SCORE_PERCENTILE": float(ml.get("MIN_SCORE_PERCENTILE", 0.55)),
+        "CRISIS_GAMMA": float(ml.get("CRISIS_GAMMA", ml.get("CRISIS_GATE_PROB", 1.0))),
+        "CRISIS_GATE_PROB": float(ml.get("CRISIS_GAMMA", ml.get("CRISIS_GATE_PROB", 1.0))),
         "LONG_TRAIL_MULT": trail * 3.0,
         "SHORT_TRAIL_MULT": trail * 3.0,
         "FK_FRACTION": fk_frac,
@@ -340,7 +431,7 @@ def _run_portfolio_numba_block(
     zkill: Any,
     zfund: Any,
     lev_blk: Any,
-) -> tuple[np.ndarray, float, np.ndarray]:
+) -> tuple[np.ndarray, float, np.ndarray, np.ndarray]:
     strength_g = aligned["ml_calib_prob"]
     use_cs = 1 if bool(params.get("USE_CS_RANK_ENGINE", True)) else 0
     out_bt = backtest_portfolio_numba(
@@ -380,11 +471,10 @@ def _run_portfolio_numba_block(
         int(params["K_LONG"]),
         int(params["K_SHORT"]),
         max(1, int(params["REBALANCE_BARS"])),
-        float(params["MIN_SCORE_PERCENTILE"]),
-        float(params["CRISIS_GATE_PROB"]),
+        float(params.get("CRISIS_GAMMA", params.get("CRISIS_GATE_PROB", 1.0))),
         use_cs,
     )
-    return cast(tuple[np.ndarray, float, np.ndarray], out_bt)
+    return cast(tuple[np.ndarray, float, np.ndarray, np.ndarray], out_bt)
 
 
 def objective_ml_phase_d(trial: optuna.Trial, ctx: MLPhaseDContext) -> float:
@@ -398,6 +488,20 @@ def objective_ml_phase_d(trial: optuna.Trial, ctx: MLPhaseDContext) -> float:
     ml = _suggest_ml_phase_d(trial)
     params = _base_engine_params(ml, ctx.tf)
     cfg = OPT_FUTURES_CONFIG
+    if trial.number < 10 and block_slices:
+        ad0 = block_slices[0].get("data") or {}
+        xl = ad0.get("xs_score_long")
+        hy = ad0.get("hmm_prob_crisis")
+        if xl is not None and hy is not None and getattr(xl, "size", 0) > 0:
+            disp = float(np.nanstd(np.asarray(xl, dtype=np.float64)))
+            cclip = np.clip(np.asarray(hy, dtype=np.float64), 0.0, 1.0)
+            gamma = float(params.get("CRISIS_GAMMA", params.get("CRISIS_GATE_PROB", 1.0)))
+            soft_m = float(np.mean((1.0 - cclip) ** gamma))
+            thr = float(cfg.get("FUTURES_HMM_CRISIS_THRESHOLD", 0.6))
+            rej_r = float(np.mean(np.max(hy, axis=1) > thr))
+            trial.set_user_attr("xs_score_dispersion_mean", disp)
+            trial.set_user_attr("crisis_soft_weight_mean", soft_m)
+            trial.set_user_attr("crisis_gate_rejection_rate", rej_r)
     liq_mdd_thr = float(cfg.get("FUTURES_MAX_MDD", 25.0))
     min_trades_target = int(cfg.get("FUTURES_MIN_TRADES_TARGET", 10))
 
@@ -410,15 +514,37 @@ def objective_ml_phase_d(trial: optuna.Trial, ctx: MLPhaseDContext) -> float:
             continue
 
         zkill, zfund, lev_blk = _cached_kill_fund_lev(aligned, params)
-        b_trades_raw, b_bal, b_equity = _run_portfolio_numba_block(
+        b_trades_raw, b_bal, b_equity, b_diag = _run_portfolio_numba_block(
             params, aligned, zkill, zfund, lev_blk
         )
 
         n_tr = int(b_trades_raw.shape[0])
         all_trades_chunks.append(b_trades_raw)
+        if trial.number < 3:
+            _logger.info(
+                "[ML_OPT][trial=%d] CPCV block=%s trades=%d "
+                "diag[dust,margin,tdir0,pside0]=[%d,%d,%d,%d]",
+                trial.number,
+                b_range,
+                n_tr,
+                int(b_diag[0]),
+                int(b_diag[1]),
+                int(b_diag[2]),
+                int(b_diag[3]),
+            )
         if not first_bt_done:
             first_bt_done = True
             if n_tr == 0:
+                _logger.error(
+                    "[ML_OPT][trial=%d] Prune: first CPCV block %s produced 0 trades. "
+                    "diag[dust,margin,tdir0,pside0]=[%d,%d,%d,%d]",
+                    trial.number,
+                    b_range,
+                    int(b_diag[0]),
+                    int(b_diag[1]),
+                    int(b_diag[2]),
+                    int(b_diag[3]),
+                )
                 raise optuna.TrialPruned()
 
         mdd = float(calc_mdd_from_equity(b_equity)) if b_equity.size > 0 else 100.0
@@ -493,7 +619,9 @@ def objective_ml_phase_d(trial: optuna.Trial, ctx: MLPhaseDContext) -> float:
     if ctx.holdout_slice:
         h = ctx.holdout_slice
         hz_cached, zfund_cached, lev_h_cached = _cached_kill_fund_lev(h, params)
-        _, h_bal, _ = _run_portfolio_numba_block(params, h, hz_cached, zfund_cached, lev_h_cached)
+        _, h_bal, _, _ = _run_portfolio_numba_block(
+            params, h, hz_cached, zfund_cached, lev_h_cached
+        )
         h_ret_pct = float((h_bal / FUTURES_INITIAL_BALANCE - 1.0) * 100.0)
         holdout_log_ret = _log_tw_from_ret_pct(h_ret_pct)
 
