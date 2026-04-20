@@ -6,16 +6,15 @@ import numpy as np
 import pandas as pd
 
 # Columns produced by build_gp_input_features (for CS-rank / imputation in pipeline).
-# Systemic HMM input (8-dim; order fixed for centroid labeling in hmm_state_inferrer).
+# Systemic HMM input (7-dim optimized for directional asymmetry).
 SYSTEMIC_HMM_FEATURE_COLUMNS: tuple[str, ...] = (
     "btc_trend_vol_adj_24h",
     "realized_vol_regime",
+    "ret_skewness_24h",
     "cs_dispersion_z",
-    "cross_corr_alt_btc",
-    "funding_level",
-    "funding_skew",
-    "vol_of_vol",
     "market_breadth",
+    "funding_level",
+    "funding_momentum_24h",
 )
 
 # Posterior columns aligned to stable semantic labels (order for MetaLabeler).
@@ -258,42 +257,32 @@ def build_systemic_hmm_features(
         log_ret_1 = np.log(btc_close / btc_close.shift(1).clip(lower=1e-12))
         sig_24 = log_ret_1.rolling(24, min_periods=12).std() + 1e-12
         btc_ret_24h = np.log(btc_close / btc_close.shift(24).clip(lower=1e-12))
+        
+        # [NEW] Statistical Moments & Directional Markers
         btc_trend_vol_adj = btc_ret_24h / sig_24
         realized_vol_regime = rv_short / rv_long
-        vol_of_vol = park_24.rolling(168, min_periods=48).std()
-        close_all = panel_df["close"].unstack(level="symbol")
-        log_ret_all = np.log(close_all / close_all.shift(1))
-        r_btc = log_ret_all[btc_sym]
-        corr_cols: list[pd.Series] = []
-        for sym in log_ret_all.columns:
-            if sym == btc_sym:
-                continue
-            cser = log_ret_all[sym].rolling(24, min_periods=12).corr(r_btc)
-            corr_cols.append(cser)
-        if corr_cols:
-            cross_corr_alt_btc = pd.concat(corr_cols, axis=1).mean(axis=1).reindex(idx).fillna(0.0)
-        else:
-            cross_corr_alt_btc = pd.Series(0.0, index=idx)
+        ret_skewness_24h = log_ret_1.rolling(24, min_periods=12).skew()
     else:
         btc_trend_vol_adj = pd.Series(0.0, index=idx)
         realized_vol_regime = pd.Series(1.0, index=idx)
-        vol_of_vol = pd.Series(0.0, index=idx)
-        cross_corr_alt_btc = pd.Series(0.0, index=idx)
+        ret_skewness_24h = pd.Series(0.0, index=idx)
 
     cs_disp_raw = market_feats["cs_dispersion"].reindex(idx).astype(np.float64)
     med_cs = cs_disp_raw.rolling(500, min_periods=50).median()
     mad_cs = (cs_disp_raw - med_cs).abs().rolling(500, min_periods=50).median()
     cs_dispersion_z = (cs_disp_raw - med_cs) / (mad_cs * 1.4826 + 1e-12)
 
+    # [NEW] Funding Momentum: 24h change in systemic funding level
+    funding_momentum_24h = funding_mean.diff(24).fillna(0.0)
+
     out = pd.DataFrame(index=idx)
     out["btc_trend_vol_adj_24h"] = btc_trend_vol_adj.reindex(idx).fillna(0.0)
     out["realized_vol_regime"] = realized_vol_regime.reindex(idx).fillna(1.0)
+    out["ret_skewness_24h"] = ret_skewness_24h.reindex(idx).fillna(0.0)
     out["cs_dispersion_z"] = cs_dispersion_z.reindex(idx).fillna(0.0)
-    out["cross_corr_alt_btc"] = cross_corr_alt_btc.reindex(idx).fillna(0.0)
-    out["funding_level"] = funding_mean.reindex(idx).fillna(0.0)
-    out["funding_skew"] = funding_skew.reindex(idx).fillna(0.0)
-    out["vol_of_vol"] = vol_of_vol.reindex(idx).fillna(0.0)
     out["market_breadth"] = market_feats["market_breadth"].reindex(idx).fillna(0.0)
+    out["funding_level"] = funding_mean.reindex(idx).fillna(0.0)
+    out["funding_momentum_24h"] = funding_momentum_24h.reindex(idx).fillna(0.0)
 
     out = out[list(SYSTEMIC_HMM_FEATURE_COLUMNS)]
     return out.replace([np.inf, -np.inf], np.nan).fillna(0.0)

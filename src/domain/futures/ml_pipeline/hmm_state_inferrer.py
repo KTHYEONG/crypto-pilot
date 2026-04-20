@@ -90,12 +90,14 @@ def _robust_fit_scale(X: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray
     med = np.asarray(np.median(X, axis=0), dtype=np.float64)
     mad = np.asarray(np.median(np.abs(X - med), axis=0) * 1.4826 + 1e-12, dtype=np.float64)
     Xs = np.asarray((X - med) / mad, dtype=np.float64)
+    Xs = np.clip(Xs, -10.0, 10.0)  # [FIX] Prevent FP underflow from extreme black swans
     return Xs, med, mad
 
 
 def _robust_transform(X: np.ndarray, med: np.ndarray, mad: np.ndarray) -> np.ndarray:
     mad_safe = np.asarray(np.where(mad < 1e-12, 1.0, mad), dtype=np.float64)
     out = np.asarray((X - med) / mad_safe, dtype=np.float64)
+    out = np.clip(out, -10.0, 10.0)  # [FIX] Prevent FP underflow
     return cast(np.ndarray, out)
 
 
@@ -111,24 +113,39 @@ def _blend_transition(
     T_fit: np.ndarray, n_states: int, alpha: float, self_p: float = 0.9
 ) -> np.ndarray:
     T_prior = _sticky_transmat_prior(n_states, self_p=self_p)
-    T_new = np.asarray((1.0 - alpha) * T_fit + alpha * T_prior, dtype=np.float64)
+    T_fit_safe = np.nan_to_num(T_fit, nan=1.0 / n_states)
+    T_new = np.asarray((1.0 - alpha) * T_fit_safe + alpha * T_prior, dtype=np.float64)
     row_sums = np.asarray(T_new.sum(axis=1)[:, np.newaxis], dtype=np.float64)
+    # Ensure no division by zero
+    row_sums = np.where(row_sums < 1e-12, 1.0, row_sums)
     return cast(np.ndarray, T_new / row_sums)
 
 
 def _assign_state_semantic_labels(means: np.ndarray, X_ref: np.ndarray) -> dict[int, str]:
     """Map raw HMM state index → semantic label (once per mapping file)."""
     k = int(means.shape[0])
+    # [REFACTORED] Direction-Aware Crisis Score with Trend Penalty (P1 + P3)
+    # Adding -0.5 * trend ensures that high-volatility BULL moves (God Candles)
+    # are NOT mislabeled as Crisis.
+    # index 0: trend, 1: realized_vol_regime, 3: cs_dispersion_z, 2: skewness, 6: momentum
     crisis_scores = np.array(
-        [max(float(means[i, 1]), float(means[i, 2]), float(means[i, 6])) for i in range(k)],
+        [
+            0.4 * float(means[i, 1]) + 0.2 * float(means[i, 3])
+            - 0.2 * float(means[i, 2]) - 0.2 * float(means[i, 6])
+            - 0.5 * float(means[i, 0])
+            for i in range(k)
+        ],
         dtype=np.float64,
     )
     crisis_s = int(np.argmax(crisis_scores))
     rem = [i for i in range(k) if i != crisis_s]
-    bear_s = int(rem[int(np.argmin([means[i, 0] for i in rem]))])
-    rem2 = [i for i in rem if i != bear_s]
-    bull_s = int(rem2[int(np.argmax([means[i, 0] for i in rem2]))])
-    chop_s = next(i for i in rem2 if i != bull_s)
+    # Among the remaining 3 states, sort by trend (index 0)
+    # Lowest trend = bear, Highest trend = bull, Middle = chop
+    sorted_rem = sorted(rem, key=lambda x: float(means[x, 0]))
+    bear_s = int(sorted_rem[0])
+    chop_s = int(sorted_rem[1])
+    bull_s = int(sorted_rem[2])
+    
     return {crisis_s: "crisis", bear_s: "bear_trend", bull_s: "bull_trend", chop_s: "chop"}
 
 
@@ -180,29 +197,38 @@ def _load_or_build_state_labels(
 def _centroid_label_drift_warn(
     means: np.ndarray, X_ref_scaled: np.ndarray, state_to_label: dict[int, str]
 ) -> None:
-    """If centroids strongly violate crisis/trend heuristics, log warning (scaled feature space)."""
+    """Check if HMM semantic labels still match the underlying centroid characteristics."""
     try:
-        stack = np.maximum.reduce(
-            [X_ref_scaled[:, 1], X_ref_scaled[:, 2], X_ref_scaled[:, 6]]
+        # index 1: vol, 3: dispersion, 2: skewness, 6: momentum
+        # Direction-Aware Crisis Score (P1 + P3)
+        c_scores = np.array(
+            [
+                0.4 * float(means[i, 1]) + 0.2 * float(means[i, 3])
+                - 0.2 * float(means[i, 2]) - 0.2 * float(means[i, 6])
+                for i in range(means.shape[0])
+            ]
         )
-        q75 = float(np.percentile(stack, 75))
     except Exception:
         return
+
     for si, lab in state_to_label.items():
-        mx = max(float(means[si, 1]), float(means[si, 2]), float(means[si, 6]))
-        if lab == "crisis" and mx < q75 * 0.5:
+        if lab == "crisis" and c_scores[si] < -0.2:
             _logger.warning(
-                "HMM label drift: state %d crisis label but max(vol,cs_z,vov)=%.4f vs q75=%.4f",
+                "HMM label drift: state %d crisis label but directional risk score=%.4f",
                 si,
-                mx,
-                q75,
+                c_scores[si],
             )
-        if lab in ("bull_trend", "bear_trend") and float(means[si, 1]) > q75:
+        if lab == "bull_trend" and float(means[si, 0]) < -0.5:
             _logger.warning(
-                "HMM label drift: state %d labeled %s but high vol-regime=%.4f",
+                "HMM label drift: state %d bull_trend but negative trend=%.4f",
                 si,
-                lab,
-                float(means[si, 1]),
+                float(means[si, 0]),
+            )
+        if lab == "bear_trend" and float(means[si, 0]) > 0.5:
+            _logger.warning(
+                "HMM label drift: state %d bear_trend but positive trend=%.4f",
+                si,
+                float(means[si, 0]),
             )
 
 
@@ -311,8 +337,9 @@ class HMMStateInferrer:
                 if prev_model is not None:
                     try:
                         model.n_features = prev_model.n_features
-                        model.startprob_ = prev_model.startprob_
+                        model.startprob_ = np.nan_to_num(prev_model.startprob_, nan=1.0 / self.n_states)
                         tm = prev_model.transmat_.copy()
+                        tm = np.nan_to_num(tm, nan=1.0 / self.n_states)
                         tm = np.clip(tm, 1e-3, None)
                         model.transmat_ = tm / tm.sum(axis=1)[:, np.newaxis]
                         model.means_ = prev_model.means_
@@ -347,6 +374,55 @@ class HMMStateInferrer:
                         if cv_after.ndim == 3:
                             cv_after = np.array([np.diag(c) for c in cv_after])
                         model.covars_ = np.clip(cv_after, self.min_covar, None)
+                    
+                    # [P0] Prevent Degenerate startprob_ from absorbing inference
+                    sp = model.startprob_.copy()
+                    sp = np.nan_to_num(sp, nan=1.0 / self.n_states)
+                    sp = sp + 1e-4
+                    s_sum = sp.sum()
+                    if s_sum > 1e-12:
+                        model.startprob_ = sp / s_sum
+                    else:
+                        model.startprob_ = np.full(self.n_states, 1.0 / self.n_states)
+
+                    # [P0] Occupancy floor check & State Re-initialization
+                    try:
+                        hard_states = model.predict(X_train)
+                        occ = np.bincount(hard_states, minlength=self.n_states) / len(hard_states)
+                        # Relax floor to 2% for better flexibility in shorter windows
+                        if np.any(occ < 0.02):
+                            _logger.info(
+                                "[%s] HMM State Collapse detected (min occ %.4f). "
+                                "Re-initializing...",
+                                symbol,
+                                np.min(occ),
+                            )
+                            dominant_s = int(np.argmax(occ))
+                            collapsed_indices = np.where(occ < 0.02)[0]
+                            
+                            new_means = model.means_.copy()
+                            for ci in collapsed_indices:
+                                # Slightly lower noise (0.3 instead of 0.5) for more stable perturbation
+                                noise = np.random.normal(0, 0.3, size=model.n_features)
+                                new_means[ci] = model.means_[dominant_s] + noise
+                            
+                            model.means_ = new_means
+                            # Reset core params with strict normalization
+                            model.startprob_ = np.full(self.n_states, 1.0 / self.n_states)
+                            model.transmat_ = _sticky_transmat_prior(self.n_states, self_p=0.8)
+                            if self.covariance_type == "diag":
+                                model.covars_ = np.ones((self.n_states, model.n_features))
+                            
+                            # Force re-labeling because centroids moved
+                            state_to_label = None
+                            if label_path.exists():
+                                try:
+                                    label_path.unlink()
+                                except Exception as e:
+                                    _logger.debug("Failed to delete label file: %s", e)
+                    except Exception as e:
+                        _logger.debug("Occupancy check failed: %s", e)
+                    
                     fit_ok = True
                     consecutive_fails = 0
                 except Exception as e:
@@ -387,9 +463,12 @@ class HMMStateInferrer:
                 continue
 
             try:
-                x1 = X_raw[t - 1 : t, :]
-                x1s = _robust_transform(x1, med, mad)
-                last_p_raw = model.predict_proba(x1s.reshape(1, -1))[0]
+                win_start = max(0, t - max_window)
+                win_end = max(1, t - 1)
+                x_seq = X_raw[win_start : win_end, :]
+                x_seq_s = _robust_transform(x_seq, med, mad)
+                p_seq = model.predict_proba(x_seq_s)
+                last_p_raw = p_seq[-1]
                 ps = _raw_posterior_to_semantic(last_p_raw, state_to_label)
                 probs_sem[t - 1, :] = ps
             except Exception as e:
