@@ -14,6 +14,7 @@ import numpy as np
 import pandas as pd
 from sklearn.isotonic import IsotonicRegression
 
+from config.opt_config import OPT_FUTURES_CONFIG
 from config.settings import FUTURES_CACHE_DIR, FUTURES_DATA_DIR
 from src.domain.futures.data_collector import DataCollector
 from src.domain.futures.funding_utils import merge_funding_into_ohlcv
@@ -112,64 +113,80 @@ def _is_kelly_per_semantic_state(
     cols: list[str],
 ) -> tuple[np.ndarray, np.ndarray]:
     """
-    [REFACTORED] Asymmetric Long/Short Kelly with Isotonic constraints (P0 + P2).
-    Based on raw market forward returns instead of GP alpha product.
+    James-Stein shrunk Kelly on global variance, plus soft Isotonic blend (tmp v4).
     """
     kelly_long: np.ndarray = np.zeros(n_states, dtype=np.float64)
     kelly_short: np.ndarray = np.zeros(n_states, dtype=np.float64)
     state_hard = np.argmax(p_mat, axis=1).astype(np.int64)
-    
+
+    fwd_is = fwd_ret[is_mask]
+    if fwd_is.size < 2:
+        return kelly_long, kelly_short
+    global_mu = float(np.mean(fwd_is))
+    global_v = float(np.var(fwd_is, ddof=1)) + 1e-12
+
     for s in range(n_states):
         m = is_mask & (state_hard == s)
-        if np.sum(m) < 30:
+        n_s = int(np.sum(m))
+        if n_s < 30:
             continue
-            
         r = fwd_ret[m]
         mu = float(np.mean(r))
-        v = float(np.var(r, ddof=1)) + 1e-12
-        # Use 1.5 as clip to allow for stronger conviction in Bull/Bear
-        kelly_long[s] = float(np.clip(mu / v, -1.5, 1.5))
         
-        mu_s = float(np.mean(-r))
-        kelly_short[s] = float(np.clip(mu_s / v, -1.5, 1.5))
+        # [REFACTORED] Stronger Relative Kelly (Demeaning)
+        # Subtract FULL market average to force alpha-only Longs.
+        mu_relative = mu - global_mu
         
-    # Apply Isotonic Constraints for semantic ordering
-    # BULL=0, CHOP=1, BEAR=2, CRISIS=3 in HMM_SEMANTIC_PROB_COLUMNS
+        # James-Stein shrink towards zero (neutral)
+        alpha_js = 30.0 / (30.0 + float(n_s))
+        mu_shrunk = alpha_js * 0.0 + (1.0 - alpha_js) * mu_relative
+        
+        kelly_long[s] = float(np.clip(mu_shrunk / global_v, -1.0, 1.0))
+        kelly_short[s] = float(np.clip(-mu_shrunk / global_v, -1.0, 1.0))
+
+    alpha_iso = 0.5
     try:
-        # monotone decreasing: BULL >= CHOP >= BEAR >= CRISIS
         ir = IsotonicRegression(increasing=False)
-        
+
         idx_bull = cols.index("hmm_prob_bull_trend") if "hmm_prob_bull_trend" in cols else -1
         idx_chop = cols.index("hmm_prob_chop") if "hmm_prob_chop" in cols else -1
         idx_bear = cols.index("hmm_prob_bear_trend") if "hmm_prob_bear_trend" in cols else -1
         idx_crisis = cols.index("hmm_prob_crisis") if "hmm_prob_crisis" in cols else -1
-        
+
         if all(i >= 0 for i in [idx_bull, idx_chop, idx_bear, idx_crisis]):
-            # Long Mono: BULL >= CHOP >= BEAR >= CRISIS
-            x = np.array([0, 1, 2, 3])
-            y_l = np.array([
-                kelly_long[idx_bull],
-                kelly_long[idx_chop],
-                kelly_long[idx_bear],
-                kelly_long[idx_crisis]
-            ])
+            x = np.array([0, 1, 2, 3], dtype=np.float64)
+            y_l = np.array(
+                [
+                    kelly_long[idx_bull],
+                    kelly_long[idx_chop],
+                    kelly_long[idx_bear],
+                    kelly_long[idx_crisis],
+                ],
+                dtype=np.float64,
+            )
             y_l_adj = ir.fit_transform(x, y_l)
-            kelly_long[idx_bull], kelly_long[idx_chop], \
-                kelly_long[idx_bear], kelly_long[idx_crisis] = y_l_adj
-            
-            # Short Mono: BEAR >= CHOP >= BULL >= CRISIS
-            y_s = np.array([
-                kelly_short[idx_bear],
-                kelly_short[idx_chop],
-                kelly_short[idx_bull],
-                kelly_short[idx_crisis]
-            ])
+            kelly_long[idx_bull] = (1.0 - alpha_iso) * y_l[0] + alpha_iso * y_l_adj[0]
+            kelly_long[idx_chop] = (1.0 - alpha_iso) * y_l[1] + alpha_iso * y_l_adj[1]
+            kelly_long[idx_bear] = (1.0 - alpha_iso) * y_l[2] + alpha_iso * y_l_adj[2]
+            kelly_long[idx_crisis] = (1.0 - alpha_iso) * y_l[3] + alpha_iso * y_l_adj[3]
+
+            y_s = np.array(
+                [
+                    kelly_short[idx_bear],
+                    kelly_short[idx_chop],
+                    kelly_short[idx_bull],
+                    kelly_short[idx_crisis],
+                ],
+                dtype=np.float64,
+            )
             y_s_adj = ir.fit_transform(x, y_s)
-            kelly_short[idx_bear], kelly_short[idx_chop], \
-                kelly_short[idx_bull], kelly_short[idx_crisis] = y_s_adj
+            kelly_short[idx_bear] = (1.0 - alpha_iso) * y_s[0] + alpha_iso * y_s_adj[0]
+            kelly_short[idx_chop] = (1.0 - alpha_iso) * y_s[1] + alpha_iso * y_s_adj[1]
+            kelly_short[idx_bull] = (1.0 - alpha_iso) * y_s[2] + alpha_iso * y_s_adj[2]
+            kelly_short[idx_crisis] = (1.0 - alpha_iso) * y_s[3] + alpha_iso * y_s_adj[3]
     except Exception as e:
         _logger.warning("Isotonic Kelly adjustment failed: %s", e)
-        
+
     return kelly_long, kelly_short
 
 
@@ -197,8 +214,9 @@ def _hmm_modulator_kelly_values(
     b = btc_df.sort_values("datetime").copy()
     b["datetime"] = pd.to_datetime(b["datetime"], utc=True)
     c = b["close"].astype(np.float64)
-    # Forward return for Kelly calculation (Shifted back by 1)
-    b["fwd_ret"] = np.log(c.shift(-1) / c.clip(lower=1e-12)).fillna(0.0)
+    fwd_1h = np.log(c.shift(-1) / c.clip(lower=1e-12)).fillna(0.0)
+    fwd_24h = np.log(c.shift(-24) / c.clip(lower=1e-12)).fillna(0.0) / np.sqrt(24.0)
+    b["fwd_ret"] = 0.3 * fwd_1h + 0.7 * fwd_24h
 
     mp = market_probs[["datetime", *cols]].copy()
     mp["datetime"] = pd.to_datetime(mp["datetime"], utc=True)
@@ -218,12 +236,31 @@ def _hmm_modulator_kelly_values(
     mod_long = np.clip(1.0 + float(shrink) * (p_mat @ k_long), 0.3, 2.0).astype(np.float64)
     mod_short = np.clip(1.0 + float(shrink) * (p_mat @ k_short), 0.3, 2.0).astype(np.float64)
     
-    # Apply Crisis Kill-Switch
+    # [NEW] Asymmetric Regime Override (Hard Capping & Boosting)
+    p_bull = merged["hmm_prob_bull_trend"].to_numpy(dtype=np.float64)
+    p_bear = merged["hmm_prob_bear_trend"].to_numpy(dtype=np.float64)
+    p_chop = merged["hmm_prob_chop"].to_numpy(dtype=np.float64)
+    p_crisis = merged["hmm_prob_crisis"].to_numpy(dtype=np.float64)
+
+    # BEAR_TREND Override: Aggressively cap long, allow short boost
+    mod_long = np.where(p_bear > 0.25, np.minimum(mod_long, 0.6), mod_long)
+    mod_short = np.where(p_bear > 0.25, np.maximum(mod_short, 1.2), mod_short)
+
+    # BULL_TREND Override: Allow long boost, cap short
+    mod_long = np.where(p_bull > 0.25, np.maximum(mod_long, 1.2), mod_long)
+    mod_short = np.where(p_bull > 0.25, np.minimum(mod_short, 0.6), mod_short)
+
+    # CHOP Override: Defensive sizing for both
+    mod_long = np.where(p_chop > 0.4, np.minimum(mod_long, 0.8), mod_long)
+    mod_short = np.where(p_chop > 0.4, np.minimum(mod_short, 0.8), mod_short)
+
+    # Apply Crisis Kill-Switch (Safety First)
     if "hmm_prob_crisis" in market_probs.columns:
-        pc = market_probs["hmm_prob_crisis"].fillna(0.0).to_numpy(dtype=np.float64)
-        # In crisis, both directions are forced down to 0.3
+        pc = p_crisis
         mod_long = np.where(pc > float(crisis_thr), 0.3, mod_long)
-        mod_short = np.where(pc > float(crisis_thr), 0.3, mod_short)
+        mod_short = np.where(
+            pc > float(crisis_thr), np.minimum(mod_short, 1.1), mod_short
+        )
         
     return pd.DataFrame({
         "hmm_modulator_long": mod_long,
@@ -258,7 +295,12 @@ def _try_tbm_labels_per_1h_row(
         if len(d1) < 30:
             return None
             
-        tbm = label_triple_barrier(d1, df_1m)
+        tbm = label_triple_barrier(
+            d1,
+            df_1m,
+            time_stop_bars=int(OPT_FUTURES_CONFIG.get("FUTURES_TBM_TIME_STOP_BARS", 1440)),
+            vol_scale_window=int(OPT_FUTURES_CONFIG.get("FUTURES_TBM_VOL_SCALE_WINDOW", 24)),
+        )
         if tbm is None or len(tbm) == 0:
             return None
             
@@ -279,6 +321,63 @@ def _try_tbm_labels_per_1h_row(
         return None
 
 
+def _meta_probs_wf_refit(
+    X_w: pd.DataFrame,
+    y_ser: pd.Series,
+    aligned_tf: pd.DataFrame,
+    meta_feats: tuple[str, ...],
+    hmm_m_long: np.ndarray,
+    hmm_m_short: np.ndarray,
+    is_end_idx: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Phase 3: expanding-window MetaLabeler refit on each WF-OOS segment (no softmax)."""
+    cfg = OPT_FUTURES_CONFIG
+    n_rows = len(X_w)
+    feats = list(meta_feats)
+    vb = int(cfg.get("FUTURES_META_VERTICAL_BARRIER_BARS", 24))
+    mi = int(cfg.get("FUTURES_META_MIN_POS_ISOTONIC", 200))
+    wf_on = bool(cfg.get("FUTURES_ML_WF_REFIT_ENABLED", True))
+    n_wf = max(1, int(cfg.get("FUTURES_ML_WF_REFIT_LEGS", 3)))
+
+    pl_out: np.ndarray = np.zeros(n_rows, dtype=np.float64)
+    ps_out: np.ndarray = np.zeros(n_rows, dtype=np.float64)
+
+    if not wf_on or n_wf <= 1 or is_end_idx >= n_rows - 1:
+        meta = MetaLabeler(vertical_barrier_bars=vb, min_pos_isotonic=mi)
+        meta.fit(X_w, y_ser, is_end_idx)
+        X_a = aligned_tf[feats].replace([np.inf, -np.inf], np.nan).fillna(0.0)
+        pl, ps = meta.predict_proba_calibrated(X_a)
+        rl = np.clip(pl.astype(np.float64) * hmm_m_long, 0.0, 1.0)
+        rs = np.clip(ps.astype(np.float64) * hmm_m_short, 0.0, 1.0)
+        return rl, rs
+
+    meta = MetaLabeler(vertical_barrier_bars=vb, min_pos_isotonic=mi)
+    meta.fit(X_w.iloc[:is_end_idx], y_ser.iloc[:is_end_idx], is_end_idx=is_end_idx)
+    X_is = aligned_tf.iloc[:is_end_idx][feats].replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    pl_i, ps_i = meta.predict_proba_calibrated(X_is)
+    pl_out[:is_end_idx] = np.clip(pl_i.astype(np.float64) * hmm_m_long[:is_end_idx], 0.0, 1.0)
+    ps_out[:is_end_idx] = np.clip(ps_i.astype(np.float64) * hmm_m_short[:is_end_idx], 0.0, 1.0)
+
+    n_seg = min(n_wf, max(2, n_rows - is_end_idx))
+    edges = np.linspace(is_end_idx, n_rows, n_seg + 1)
+    edges_i = np.unique(np.clip(np.round(edges).astype(np.int64), 0, n_rows))
+
+    for k in range(len(edges_i) - 1):
+        t0, t1 = int(edges_i[k]), int(edges_i[k + 1])
+        if t1 <= t0 or t0 < is_end_idx:
+            continue
+        train_end = t0
+        if train_end < 80:
+            continue
+        meta.fit(X_w.iloc[:train_end], y_ser.iloc[:train_end], is_end_idx=train_end)
+        X_seg = aligned_tf.iloc[t0:t1][feats].replace([np.inf, -np.inf], np.nan).fillna(0.0)
+        pl_s, ps_s = meta.predict_proba_calibrated(X_seg)
+        pl_out[t0:t1] = np.clip(pl_s.astype(np.float64) * hmm_m_long[t0:t1], 0.0, 1.0)
+        ps_out[t0:t1] = np.clip(ps_s.astype(np.float64) * hmm_m_short[t0:t1], 0.0, 1.0)
+
+    return pl_out, ps_out
+
+
 def _apply_ml_calib_probs(
     aligned_tf: pd.DataFrame,
     wide_1h: pd.DataFrame,
@@ -290,11 +389,10 @@ def _apply_ml_calib_probs(
     use_meta: bool,
     df_1m_prefetch: pd.DataFrame | None = None,
 ) -> None:
-    """Set ml_calib_prob_{long,short} via MetaLabeler (+ softmax) or GP x HMM softmax only."""
-    # [REFACTORED] Use Asymmetric Long/Short Modulators
+    """Phase 3: raw calibrated prob x HMM modulator (no softmax); optional WF-OOS refit."""
     hmm_m_long = aligned_tf["hmm_modulator_long"].to_numpy(dtype=np.float64)
     hmm_m_short = aligned_tf["hmm_modulator_short"].to_numpy(dtype=np.float64)
-    
+
     raw_long: np.ndarray | None = None
     raw_short: np.ndarray | None = None
 
@@ -321,28 +419,27 @@ def _apply_ml_calib_probs(
         is_end_idx = int((wdt < is_end_utc).sum())
         if is_end_idx >= 80:
             try:
-                meta = MetaLabeler(vertical_barrier_bars=48)
-                meta.fit(X_w, y_ser, is_end_idx)
-                X_a = aligned_tf[list(meta_feats)].replace([np.inf, -np.inf], np.nan).fillna(0.0)
-                pl, ps = meta.predict_proba_calibrated(X_a)
-                # Apply asymmetric modulators
-                raw_long = np.clip(pl.astype(np.float64) * hmm_m_long, 0.0, None)
-                raw_short = np.clip(ps.astype(np.float64) * hmm_m_short, 0.0, None)
+                raw_long, raw_short = _meta_probs_wf_refit(
+                    X_w,
+                    y_ser,
+                    aligned_tf,
+                    meta_feats,
+                    hmm_m_long,
+                    hmm_m_short,
+                    is_end_idx,
+                )
             except Exception:
                 raw_long = None
                 raw_short = None
 
     if raw_long is None or raw_short is None:
         gp = aligned_tf["gp_alpha_00"].to_numpy(dtype=np.float64)
-        raw_long = np.clip(gp * hmm_m_long, 0.0, None)
-        raw_short = np.clip((1.0 - gp) * hmm_m_short, 0.0, None)
+        raw_long = np.clip(gp * hmm_m_long, 0.0, 1.0)
+        raw_short = np.clip((1.0 - gp) * hmm_m_short, 0.0, 1.0)
 
-    denom = raw_long + raw_short + 1e-12
-    aligned_tf["ml_calib_prob_long"] = raw_long / denom
-    aligned_tf["ml_calib_prob_short"] = raw_short / denom
-    aligned_tf["ml_calib_prob"] = np.maximum(
-        aligned_tf["ml_calib_prob_long"], aligned_tf["ml_calib_prob_short"]
-    )
+    aligned_tf["ml_calib_prob_long"] = raw_long
+    aligned_tf["ml_calib_prob_short"] = raw_short
+    aligned_tf["ml_calib_prob"] = np.maximum(raw_long, raw_short)
 
 
 class _Step4FusionOutcome(NamedTuple):
@@ -368,7 +465,7 @@ def _step4_fusion_one_symbol(
     df_1m_prefetch: pd.DataFrame | None,
     collector: DataCollector,
 ) -> _Step4FusionOutcome:
-    """Per-symbol merge + asof alignment + MetaLabeler/softmax."""
+    """Per-symbol merge + asof alignment + MetaLabeler (Phase 3: raw x modulator, WF refit)."""
     try:
         df_1h = prefetched_1h[sym].copy()
         df_1h["datetime"] = pd.to_datetime(df_1h["datetime"], utc=True)
@@ -437,6 +534,100 @@ def _step4_fusion_one_symbol(
         return _Step4FusionOutcome(sym, aligned_tf, cp_long, cp_short, None)
     except Exception as e:
         return _Step4FusionOutcome(sym, None, None, None, str(e))
+
+
+def _print_hmm_summary(
+    market_probs: pd.DataFrame,
+    market_hmm_feats: pd.DataFrame,
+    hmm_modulator: pd.DataFrame,
+    btc_1h: pd.DataFrame | None,
+    mode_label: str = "",
+) -> None:
+    """Prints a detailed financial and semantic profile of the HMM states."""
+    _logger.info("\n" + "=" * 85)
+    _logger.info(f" [PHASE 3] HMM REGIME ANALYSIS RESULTS {mode_label}")
+    _logger.info("=" * 85)
+
+    # 1. Input Data Diagnostics
+    _logger.info(" [1] INPUT DATA DIAGNOSTICS")
+    total_rows = len(market_hmm_feats)
+    nan_count = market_hmm_feats.isna().sum().sum()
+    zero_var_feats = [c for c in market_hmm_feats.columns if market_hmm_feats[c].std() < 1e-6]
+    _logger.info(f"   - Total Samples:      {total_rows}")
+    _logger.info(f"   - Total NaNs:         {nan_count}")
+    _logger.info(f"   - Zero Var Features:  {zero_var_feats}")
+    _logger.info("-" * 85)
+
+    # 2. State Distribution & Financial Impact
+    _logger.info(" [2] SEMANTIC STATE PROFILING & FINANCIAL IMPACT")
+    cols = [c for c in HMM_SEMANTIC_PROB_COLUMNS if c in market_probs.columns]
+
+    if cols and len(market_probs) == len(market_hmm_feats):
+        # Align everything
+        df_eval = market_probs[["datetime", *cols]].copy()
+        df_eval["dominant_state"] = df_eval[cols].idxmax(axis=1)
+
+        # Merge Modulator
+        df_eval = pd.merge(df_eval, hmm_modulator, on="datetime", how="left")
+
+        # Merge Features
+        feat_tmp = market_hmm_feats.copy().reset_index()
+        feat_cols_to_merge = ["datetime", "btc_trend_vol_adj_24h", "realized_vol_regime"]
+        df_eval = pd.merge(df_eval, feat_tmp[feat_cols_to_merge], on="datetime", how="left")
+
+        # Calculate BTC 24h Forward Return if available
+        has_return = False
+        if btc_1h is not None and not btc_1h.empty:
+            btc_tmp = btc_1h[["datetime", "close"]].copy()
+            btc_tmp["datetime"] = pd.to_datetime(btc_tmp["datetime"], utc=True)
+            btc_tmp["fwd_ret_24h"] = btc_tmp["close"].pct_change(24).shift(-24)
+            df_eval = pd.merge(
+                df_eval, btc_tmp[["datetime", "fwd_ret_24h"]], on="datetime", how="left"
+            )
+            has_return = True
+
+        # Print Global Averages
+        _logger.info("  [Global Averages]")
+        means = market_probs[cols].mean()
+        for c, m in means.items():
+            _logger.info(f"   - {c:<25}: {m:.4f}")
+        avg_mod_l = df_eval["hmm_modulator_long"].mean()
+        avg_mod_s = df_eval["hmm_modulator_short"].mean()
+        _logger.info(f"   - Global Modulator (L/S): {avg_mod_l:.2f} / {avg_mod_s:.2f}")
+        _logger.info("-" * 40)
+
+        # Print Per-State Profile
+        _logger.info("  [Per-State Financial Profile]")
+        for state in cols:
+            g = df_eval[df_eval["dominant_state"] == state]
+            pct = len(g) / len(df_eval) * 100
+            if len(g) > 0:
+                avg_trend = g["btc_trend_vol_adj_24h"].mean()
+                avg_vol = g["realized_vol_regime"].mean()
+                avg_mod_l = g["hmm_modulator_long"].mean()
+                avg_mod_s = g["hmm_modulator_short"].mean()
+
+                ret_str = "N/A"
+                if has_return:
+                    avg_ret = g["fwd_ret_24h"].mean() * 100
+                    ret_str = f"{avg_ret:>+6.2f}%"
+
+                st_name = state.replace("hmm_prob_", "").upper()
+                _logger.info(f"   ► {st_name:<11} ({pct:>5.1f}% time)")
+                _logger.info(
+                    f"      Kelly Mod (L/S): {avg_mod_l:.2f} / {avg_mod_s:.2f} | "
+                    f"24h Fwd Ret: {ret_str}"
+                )
+                _logger.info(
+                    f"      Avg Trend: {avg_trend:>+5.2f} | Avg Vol:     {avg_vol:.2f}"
+                )
+            else:
+                st_name = state.replace("hmm_prob_", "").upper()
+                _logger.info(f"   ► {st_name:<11} (  0.0% time)")
+
+    _logger.info("-" * 85)
+    _logger.info(f" [RESULT] HMM analysis complete {mode_label}")
+    _logger.info("=" * 85 + "\n")
 
 
 def run_ml_pipeline_for_universe(
@@ -563,36 +754,46 @@ def run_ml_pipeline_for_universe(
         filter_options=filter_opts,
     )
 
+    # --- Print GP IC Validation Results immediately after Step 2 ---
+    best_fitness = alpha_panel.attrs.get("best_fitness", 0.0)
+    filter_meta = alpha_panel.attrs.get("gp_alpha_filter", {})
+
+    _logger.info("\n" + "-" * 85)
+    _logger.info(" [PHASE 2] GP IC VALIDATION RESULTS")
+    _logger.info("-" * 85)
+    _logger.info(f" IS Best Fitness (Composite ICIR): {best_fitness:.6f}")
+    _logger.info(f" GP Alpha Components Tried:      {filter_meta.get('n_components', 0):.0f}")
+    _logger.info(f" GP Alpha Components Surviving:   {filter_meta.get('n_surviving', 0):.0f}")
+    neu_p = bool(filter_meta.get("neutralize_primary", 0))
+    _logger.info(f" Primary Alpha Neutralized:       {neu_p}")
+    
+    _logger.info("-" * 85)
+    _logger.info(" [DIAGNOSTICS] Elimination Breakdown (Why they failed):")
+    _logger.info(f"   - Failed FDR (Stat. Luck):    {filter_meta.get('fail_fdr', 0):.0f}")
+    _logger.info(f"   - Failed DSR (Risk/Reward):   {filter_meta.get('fail_dsr', 0):.0f}")
+    _logger.info(f"   - Failed OOS (Overfit):       {filter_meta.get('fail_oos', 0):.0f}")
+    _logger.info(f"   - Failed Half-Life (Noise):   {filter_meta.get('fail_half_life', 0):.0f}")
+    _logger.info(f"   - Failed Symbol Balance:      {filter_meta.get('fail_sym_bal', 0):.0f}")
+    _logger.info(f"   - Failed Regime Consistency:  {filter_meta.get('fail_regime', 0):.0f}")
+    
+    _logger.info("-" * 85)
+    _logger.info(" [BEST ALPHA (gp_alpha_00) METRICS]")
+    _logger.info(f"   - IS Mean IC:           {filter_meta.get('primary_is_mu', 0.0):.4f}")
+    _logger.info(f"   - OOS Mean IC:          {filter_meta.get('primary_oos_mu', 0.0):.4f}")
+    _logger.info(f"   - IC Half-Life:         {filter_meta.get('primary_half_life', 0.0):.1f} bars")
+    _logger.info(f"   - Symbol IC Dispersion: {filter_meta.get('primary_sym_dispersion', 0.0):.2f}")
+    _logger.info(f"   - Raw T-Stat:           {filter_meta.get('primary_t_stat', 0.0):.2f}")
+    _logger.info("-" * 85)
+
+    if best_fitness > 0.01:
+        _logger.info(" [RESULT] Reasonable IC/Fitness detected. Track A is healthy.")
+    else:
+        _logger.warning(" [RESULT] Low Fitness detected. Check market volatility or features.")
+
     if gp_only:
-        # Step 2 이후 즉시 종료 (HMM 및 Fusion 스킵)
-        best_fitness = alpha_panel.attrs.get("best_fitness", 0.0)
-        filter_meta = alpha_panel.attrs.get("gp_alpha_filter", {})
-        
-        _logger.info("\n" + "-" * 85)
-        _logger.info(" [PHASE 2] GP IC VALIDATION RESULTS (GP-ONLY MODE)")
-        _logger.info("-" * 85)
-        _logger.info(f" IS Best Fitness (Composite ICIR): {best_fitness:.6f}")
-        _logger.info(f" GP Alpha Components Tried:      {filter_meta.get('n_components', 0):.0f}")
-        _logger.info(f" GP Alpha Components Surviving:   {filter_meta.get('n_surviving', 0):.0f}")
-        
-        _logger.info("-" * 85)
-        _logger.info(" [DIAGNOSTICS] Elimination Breakdown:")
-        _logger.info(f"   - Failed FDR (Stat. Luck):    {filter_meta.get('fail_fdr', 0):.0f}")
-        _logger.info(f"   - Failed DSR (Risk/Reward):   {filter_meta.get('fail_dsr', 0):.0f}")
-        _logger.info(f"   - Failed OOS (Overfit):       {filter_meta.get('fail_oos', 0):.0f}")
-        _logger.info(f"   - Failed Half-Life (Noise):   {filter_meta.get('fail_half_life', 0):.0f}")
-        _logger.info(f"   - Failed Symbol Balance:      {filter_meta.get('fail_sym_bal', 0):.0f}")
-        _logger.info(f"   - Failed Regime Consistency:  {filter_meta.get('fail_regime', 0):.0f}")
-        
-        _logger.info("-" * 85)
-        _logger.info(" [BEST ALPHA (gp_alpha_00) METRICS]")
-        _logger.info(f"   - IS Mean IC:           {filter_meta.get('primary_is_mu', 0.0):.4f}")
-        _logger.info(f"   - OOS Mean IC:          {filter_meta.get('primary_oos_mu', 0.0):.4f}")
-        _logger.info(f"   - Raw T-Stat:           {filter_meta.get('primary_t_stat', 0.0):.2f}")
-        _logger.info("-" * 85)
+        # Step 2 이후 즉시 종료
         _logger.info(" [RESULT] GP-Only analysis complete. Skipping HMM & Fusion.")
         _logger.info("=" * 85 + "\n")
-        
         out = MLPipelineOutput()
         out.alpha_panel = alpha_panel
         return out
@@ -643,93 +844,16 @@ def run_ml_pipeline_for_universe(
     )
     hmm_modulator["datetime"] = market_probs["datetime"]
 
-    if hmm_only:
-        _logger.info("\n" + "=" * 85)
-        _logger.info(" [PHASE 3] HMM REGIME ANALYSIS RESULTS (HMM-ONLY MODE)")
-        _logger.info("=" * 85)
-        
-        # 1. Input Data Diagnostics
-        _logger.info(" [1] INPUT DATA DIAGNOSTICS")
-        total_rows = len(market_hmm_feats)
-        nan_count = market_hmm_feats.isna().sum().sum()
-        zero_var_feats = [c for c in market_hmm_feats.columns if market_hmm_feats[c].std() < 1e-6]
-        _logger.info(f"   - Total Samples:      {total_rows}")
-        _logger.info(f"   - Total NaNs:         {nan_count}")
-        _logger.info(f"   - Zero Var Features:  {zero_var_feats}")
-        _logger.info("-" * 85)
-        
-        # 2. State Distribution & Financial Impact
-        _logger.info(" [2] SEMANTIC STATE PROFILING & FINANCIAL IMPACT")
-        from src.domain.futures.ml_pipeline.feature_engineering import HMM_SEMANTIC_PROB_COLUMNS
-        cols = [c for c in HMM_SEMANTIC_PROB_COLUMNS if c in market_probs.columns]
-        
-        if cols and len(market_probs) == len(market_hmm_feats):
-            # Align everything
-            df_eval = market_probs[['datetime', *cols]].copy()
-            df_eval['dominant_state'] = df_eval[cols].idxmax(axis=1)
-            
-            # Merge Modulator
-            df_eval = pd.merge(df_eval, hmm_modulator, on='datetime', how='left')
-            
-            # Merge Features
-            feat_tmp = market_hmm_feats.copy().reset_index()
-            feat_cols_to_merge = ['datetime', 'btc_trend_vol_adj_24h', 'realized_vol_regime']
-            df_eval = pd.merge(df_eval, feat_tmp[feat_cols_to_merge], on='datetime', how='left')
-            
-            # Calculate BTC 24h Forward Return if available
-            has_return = False
-            if btc_1h is not None and not btc_1h.empty:
-                btc_tmp = btc_1h[['datetime', 'close']].copy()
-                btc_tmp['datetime'] = pd.to_datetime(btc_tmp['datetime'], utc=True)
-                btc_tmp['fwd_ret_24h'] = btc_tmp['close'].pct_change(24).shift(-24)
-                df_eval = pd.merge(
-                    df_eval, btc_tmp[['datetime', 'fwd_ret_24h']], on='datetime', how='left'
-                )
-                has_return = True
-            
-            # Print Global Averages
-            _logger.info("  [Global Averages]")
-            means = market_probs[cols].mean()
-            for c, m in means.items():
-                _logger.info(f"   - {c:<25}: {m:.4f}")
-            avg_mod_l = df_eval['hmm_modulator_long'].mean()
-            avg_mod_s = df_eval['hmm_modulator_short'].mean()
-            _logger.info(f"   - Global Modulator (L/S): {avg_mod_l:.2f} / {avg_mod_s:.2f}")
-            _logger.info("-" * 40)
-            
-            # Print Per-State Profile
-            _logger.info("  [Per-State Financial Profile]")
-            for state in cols:
-                g = df_eval[df_eval['dominant_state'] == state]
-                pct = len(g) / len(df_eval) * 100
-                if len(g) > 0:
-                    avg_trend = g['btc_trend_vol_adj_24h'].mean()
-                    avg_vol = g['realized_vol_regime'].mean()
-                    avg_mod_l = g['hmm_modulator_long'].mean()
-                    avg_mod_s = g['hmm_modulator_short'].mean()
-                    
-                    ret_str = "N/A"
-                    if has_return:
-                        avg_ret = g['fwd_ret_24h'].mean() * 100
-                        ret_str = f"{avg_ret:>+6.2f}%"
-                        
-                    st_name = state.replace('hmm_prob_', '').upper()
-                    _logger.info(f"   ► {st_name:<11} ({pct:>5.1f}% time)")
-                    _logger.info(
-                        f"      Kelly Mod (L/S): {avg_mod_l:.2f} / {avg_mod_s:.2f} | "
-                        f"24h Fwd Ret: {ret_str}"
-                    )
-                    _logger.info(
-                        f"      Avg Trend: {avg_trend:>+5.2f} | Avg Vol:     {avg_vol:.2f}"
-                    )
-                else:
-                    st_name = state.replace('hmm_prob_', '').upper()
-                    _logger.info(f"   ► {st_name:<11} (  0.0% time)")
+    # --- Print HMM Summary (Always if we reach here) ---
+    _print_hmm_summary(
+        market_probs,
+        market_hmm_feats,
+        hmm_modulator,
+        btc_1h,
+        mode_label="(HMM-ONLY MODE)" if hmm_only else "",
+    )
 
-        _logger.info("-" * 85)
-        _logger.info(" [RESULT] HMM-Only analysis complete. Skipping Fusion.")
-        _logger.info("=" * 85 + "\n")
-        
+    if hmm_only:
         out = MLPipelineOutput()
         out.alpha_panel = alpha_panel
         return out
@@ -796,42 +920,6 @@ def run_ml_pipeline_for_universe(
         out.calib_prob_long_by_symbol[res.sym] = res.cp_long
         out.calib_prob_short_by_symbol[res.sym] = res.cp_short
         out.calib_prob_by_symbol[res.sym] = res.cp_long
-
-    # --- Final GP IC Validation Results ---
-    best_fitness = alpha_panel.attrs.get("best_fitness", 0.0)
-    filter_meta = alpha_panel.attrs.get("gp_alpha_filter", {})
-
-    _logger.info("\n" + "-" * 85)
-    _logger.info(" [PHASE 2] GP IC VALIDATION RESULTS")
-    _logger.info("-" * 85)
-    _logger.info(f" IS Best Fitness (Composite ICIR): {best_fitness:.6f}")
-    _logger.info(f" GP Alpha Components Tried:      {filter_meta.get('n_components', 0):.0f}")
-    _logger.info(f" GP Alpha Components Surviving:   {filter_meta.get('n_surviving', 0):.0f}")
-    neu_p = bool(filter_meta.get("neutralize_primary", 0))
-    _logger.info(f" Primary Alpha Neutralized:       {neu_p}")
-    
-    _logger.info("-" * 85)
-    _logger.info(" [DIAGNOSTICS] Elimination Breakdown (Why they failed):")
-    _logger.info(f"   - Failed FDR (Stat. Luck):    {filter_meta.get('fail_fdr', 0):.0f}")
-    _logger.info(f"   - Failed DSR (Risk/Reward):   {filter_meta.get('fail_dsr', 0):.0f}")
-    _logger.info(f"   - Failed OOS (Overfit):       {filter_meta.get('fail_oos', 0):.0f}")
-    _logger.info(f"   - Failed Half-Life (Noise):   {filter_meta.get('fail_half_life', 0):.0f}")
-    _logger.info(f"   - Failed Symbol Balance:      {filter_meta.get('fail_sym_bal', 0):.0f}")
-    _logger.info(f"   - Failed Regime Consistency:  {filter_meta.get('fail_regime', 0):.0f}")
-    
-    _logger.info("-" * 85)
-    _logger.info(" [BEST ALPHA (gp_alpha_00) METRICS]")
-    _logger.info(f"   - IS Mean IC:           {filter_meta.get('primary_is_mu', 0.0):.4f}")
-    _logger.info(f"   - OOS Mean IC:          {filter_meta.get('primary_oos_mu', 0.0):.4f}")
-    _logger.info(f"   - IC Half-Life:         {filter_meta.get('primary_half_life', 0.0):.1f} bars")
-    _logger.info(f"   - Symbol IC Dispersion: {filter_meta.get('primary_sym_dispersion', 0.0):.2f}")
-    _logger.info(f"   - Raw T-Stat:           {filter_meta.get('primary_t_stat', 0.0):.2f}")
-    _logger.info("-" * 85)
-
-    if best_fitness > 0.01:
-        _logger.info(" [RESULT] Reasonable IC/Fitness detected. Track A is healthy.")
-    else:
-        _logger.warning(" [RESULT] Low Fitness detected. Check market volatility or features.")
 
     _logger.info("-" * 85)
     _logger.info(" [PHASE 2] Universal Pipeline Processing Complete")

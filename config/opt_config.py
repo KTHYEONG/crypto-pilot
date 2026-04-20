@@ -43,6 +43,19 @@ OPT_FUTURES_CONFIG: Dict[str, Any] = {
     "FUTURES_CPCV_N_BLOCKS": 6,
     "FUTURES_CPCV_K_TEST": 2,
     "FUTURES_WF_OOS_LEGS": 3,
+    # Phase 2: entry gate (rolling quantile), TBM horizon (1m bars), meta purge alignment
+    "ENTRY_QUANTILE_WINDOW": 240,
+    "FUTURES_ENTRY_NUMBA_THRESHOLD": 0.5,
+    "FUTURES_TBM_TIME_STOP_BARS": 1440,
+    "FUTURES_TBM_VOL_SCALE_WINDOW": 24,
+    "FUTURES_META_VERTICAL_BARRIER_BARS": 24,
+    "FUTURES_META_MIN_POS_ISOTONIC": 200,
+    # Phase 3: no softmax on ML probs; WF MetaLabeler refit; optional PBO/DSR hard gate after Optuna
+    "FUTURES_ML_WF_REFIT_ENABLED": True,
+    "FUTURES_ML_WF_REFIT_LEGS": 3,
+    "FUTURES_PHASE3_HARD_GATE": True,
+    # gate1_dsr ∈ [0,1] from CPCV paths (Bailey & López de Prado style)
+    "FUTURES_ML_GATE1_DSR_MIN": 0.20,
 }
 
 # Cross-Sectional Strategy Parameter Space
