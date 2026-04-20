@@ -1,11 +1,12 @@
-"""LightGBM meta-labeler with isotonic calibration and purged time-series CV.
+"""LightGBM meta-labeler with Platt (default) or isotonic calibration and purged CV.
 
 Dual-classifier design (Q1 decision):
   - MetaLabeler trains two independent LGBMClassifiers:
       _lgb_long:  y = (tbm_label == +1) → calib_prob_long (Long edge probability)
       _lgb_short: y = (tbm_label == -1) → calib_prob_short (Short edge probability)
-  - scale_pos_weight auto-set from class frequencies (mitigates 9~10% positive ratio).
-  - F1-optimal threshold replaces fixed 0.5 (threshold_mode='f1_optimal').
+  - Phase 2: Platt scaling when calibration positives < min_pos_isotonic;
+    IsotonicRegression when calibration positives ≥ min_pos_isotonic.
+  - Concurrent-uniqueness weights on train rows (inverse sqrt rolling label density).
 """
 
 from __future__ import annotations
@@ -17,7 +18,18 @@ import lightgbm as lgb
 import numpy as np
 import pandas as pd
 from sklearn.calibration import IsotonicRegression
+from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import f1_score
+
+
+def _uniq_weights_binary(y: np.ndarray, horizon: int) -> np.ndarray:
+    """Soft concurrent-uniqueness: down-weight dense label clusters."""
+    if len(y) == 0:
+        return np.ones(0, dtype=np.float64)
+    win = max(2, min(int(horizon), len(y)))
+    roll = pd.Series(y).rolling(win, min_periods=1).sum()
+    out = (1.0 / np.sqrt(1.0 + roll.to_numpy(dtype=np.float64))).astype(np.float64)
+    return cast(np.ndarray, out)
 
 
 @dataclass
@@ -28,15 +40,18 @@ class MetaLabeler:
     reg_lambda: float = 5.0
     min_child_samples: int = 30
     threshold_mode: str = "f1_optimal"   # "fixed_0.5" | "f1_optimal"
-    vertical_barrier_bars: int = 48  # TBM horizon in label rows (48 @ 1h ≈ 48h)
+    vertical_barrier_bars: int = 24  # purge horizon in label rows (~24h @ 1h vs 1440x1m)
+    min_pos_isotonic: int = 200
 
     # Long classifier internals
     _iso_long: IsotonicRegression | None = field(default=None, repr=False)
+    _platt_long: LogisticRegression | None = field(default=None, repr=False)
     _lgb_long: lgb.LGBMClassifier | None = field(default=None, repr=False)
     _thr_long: float = field(default=0.5, repr=False)
 
     # Short classifier internals
     _iso_short: IsotonicRegression | None = field(default=None, repr=False)
+    _platt_short: LogisticRegression | None = field(default=None, repr=False)
     _lgb_short: lgb.LGBMClassifier | None = field(default=None, repr=False)
     _thr_short: float = field(default=0.5, repr=False)
 
@@ -68,17 +83,24 @@ class MetaLabeler:
         self,
         X_is: pd.DataFrame,
         y_is: pd.Series,
-    ) -> tuple[lgb.LGBMClassifier | None, IsotonicRegression, float]:
-        """Fit a single directional classifier. Returns (lgb, iso, threshold)."""
+    ) -> tuple[
+        lgb.LGBMClassifier | None,
+        IsotonicRegression | None,
+        LogisticRegression | None,
+        float,
+    ]:
+        """Fit a single directional classifier. Returns (lgb, iso, platt, threshold)."""
         m = y_is.notna() & np.isfinite(X_is.to_numpy()).all(axis=1)
         X_clean = X_is[m]
         y_clean = y_is[m]
 
-        # Fallback: degenerate calibrator
         _fallback_iso = IsotonicRegression(out_of_bounds="clip")
         _fallback_iso.fit(np.array([0.5]), np.array([0.5]))
+        _fallback_lr = LogisticRegression(solver="lbfgs", max_iter=500, random_state=42)
+        _fallback_lr.fit(np.array([[0.5]]), np.array([0]))
+
         if len(X_clean) < 80:
-            return None, _fallback_iso, 0.5
+            return None, _fallback_iso, None, 0.5
 
         n = len(X_clean)
         train_end, _, calib_start = MetaLabeler.purged_train_calib_bounds(
@@ -90,12 +112,14 @@ class MetaLabeler:
         X_calib = X_clean.iloc[calib_start:]
         y_calib = y_clean.iloc[calib_start:]
         if len(X_train) < 30 or len(X_calib) < 10:
-            return None, _fallback_iso, 0.5
+            return None, _fallback_iso, None, 0.5
 
-        # Imbalance correction: scale_pos_weight balances minority class
         pos = int(y_train.sum())
         neg = int(len(y_train) - pos)
         scale_pos = float(neg) / max(pos, 1)
+
+        horizon = max(3, min(int(self.vertical_barrier_bars), len(y_train)))
+        sample_w = _uniq_weights_binary(y_train.to_numpy(dtype=np.float64), horizon)
 
         lgb_model = lgb.LGBMClassifier(
             n_estimators=self.n_estimators,
@@ -103,28 +127,39 @@ class MetaLabeler:
             learning_rate=self.learning_rate,
             reg_lambda=self.reg_lambda,
             min_child_samples=self.min_child_samples,
-            scale_pos_weight=scale_pos,  # Imbalance correction
+            scale_pos_weight=scale_pos,
             verbosity=-1,
             random_state=42,
         )
-        lgb_model.fit(X_train, y_train)
+        lgb_model.fit(X_train, y_train, sample_weight=sample_w)
 
         raw_calib = lgb_model.predict_proba(X_calib)[:, 1]
-        iso = IsotonicRegression(out_of_bounds="clip")
-        iso.fit(raw_calib, y_calib.to_numpy())
+        y_calib_np = y_calib.to_numpy()
+        n_pos_calib = int(np.sum(y_calib_np))
 
-        # --- F1-optimal threshold on calibration set ---
-        calibrated = iso.predict(raw_calib)
+        use_isotonic = n_pos_calib >= int(self.min_pos_isotonic)
+        iso: IsotonicRegression | None = None
+        platt: LogisticRegression | None = None
+
+        if use_isotonic:
+            iso = IsotonicRegression(out_of_bounds="clip")
+            iso.fit(raw_calib, y_calib_np)
+            calibrated = iso.predict(raw_calib)
+        else:
+            platt = LogisticRegression(solver="lbfgs", max_iter=1000, random_state=42)
+            platt.fit(raw_calib.reshape(-1, 1), y_calib_np)
+            calibrated = platt.predict_proba(raw_calib.reshape(-1, 1))[:, 1]
+
         threshold = 0.5
         if self.threshold_mode == "f1_optimal" and len(y_calib) >= 10:
             best_f1 = 0.0
             for thr in np.arange(0.20, 0.81, 0.05):
                 preds = (calibrated >= thr).astype(int)
-                f1 = float(f1_score(y_calib.to_numpy(), preds, zero_division=0.0))
+                f1 = float(f1_score(y_calib_np, preds, zero_division=0.0))
                 if f1 > best_f1:
                     best_f1, threshold = f1, float(thr)
 
-        return lgb_model, iso, threshold
+        return lgb_model, iso, platt, threshold
 
     def fit(
         self,
@@ -143,13 +178,15 @@ class MetaLabeler:
         X_is = X.iloc[:is_end_idx].replace([np.inf, -np.inf], np.nan).fillna(0.0)
         y_is = y.iloc[:is_end_idx].astype(np.float64)
 
-        # Long: y=1 when Long TP hit
         y_long = (y_is == 1.0).astype(np.float64)
-        # Short: y=1 when Short TP hit (= Long SL / price went down)
         y_short = (y_is == -1.0).astype(np.float64)
 
-        self._lgb_long, self._iso_long, self._thr_long = self._fit_one(X_is, y_long)
-        self._lgb_short, self._iso_short, self._thr_short = self._fit_one(X_is, y_short)
+        self._lgb_long, self._iso_long, self._platt_long, self._thr_long = self._fit_one(
+            X_is, y_long
+        )
+        self._lgb_short, self._iso_short, self._platt_short, self._thr_short = (
+            self._fit_one(X_is, y_short)
+        )
 
         return self
 
@@ -158,9 +195,6 @@ class MetaLabeler:
     ) -> tuple[np.ndarray, np.ndarray]:
         """
         Returns (calib_prob_long, calib_prob_short) arrays of shape (N,).
-
-        Values represent the probability of each directional edge being present.
-        Use these independently for long_entry and short_entry signals.
         """
         Xv = X.replace([np.inf, -np.inf], np.nan).fillna(0.0)
         n = len(Xv)
@@ -168,16 +202,21 @@ class MetaLabeler:
         def _predict(
             lgb_m: lgb.LGBMClassifier | None,
             iso: IsotonicRegression | None,
+            platt_m: LogisticRegression | None,
         ) -> np.ndarray:
-            if lgb_m is None or iso is None:
+            if lgb_m is None:
                 return np.full(n, 0.5, dtype=np.float64)
             raw = lgb_m.predict_proba(Xv)[:, 1]
-            cal = iso.predict(raw)
-            out = np.asarray(cal, dtype=np.float64)
-            return cast(np.ndarray, out)
+            if platt_m is not None:
+                cal = platt_m.predict_proba(raw.reshape(-1, 1))[:, 1]
+            elif iso is not None:
+                cal = iso.predict(raw)
+            else:
+                return np.full(n, 0.5, dtype=np.float64)
+            return cast(np.ndarray, np.asarray(cal, dtype=np.float64))
 
-        prob_long = _predict(self._lgb_long, self._iso_long)
-        prob_short = _predict(self._lgb_short, self._iso_short)
+        prob_long = _predict(self._lgb_long, self._iso_long, self._platt_long)
+        prob_short = _predict(self._lgb_short, self._iso_short, self._platt_short)
         return prob_long, prob_short
 
     @property

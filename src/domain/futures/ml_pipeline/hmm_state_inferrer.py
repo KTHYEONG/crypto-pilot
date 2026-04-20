@@ -29,6 +29,35 @@ _logger = logging.getLogger(__name__)
 _SEMANTIC_ORDER = list(HMM_SEMANTIC_PROB_COLUMNS)
 
 
+def _bull_semantic_score(means: np.ndarray, state_i: int) -> float:
+    """Composite bull score: trend strength (24h/168h) + volume energy (index 5)."""
+    t24 = float(means[state_i, 0])
+    t168 = float(means[state_i, 1])
+    energy = float(means[state_i, 5])  # volume_momentum_24h
+    br = float(means[state_i, 6])      # market_breadth
+    
+    # Structural stability (168h) prioritized over short-term (24h)
+    composite_trend = 0.3 * t24 + 0.5 * t168 + 0.2 * energy
+    secondary = float(np.clip(0.1 * br, -0.2, 0.2))
+    return composite_trend + secondary
+
+
+def _crisis_semantic_scores(means: np.ndarray) -> np.ndarray:
+    """Crisis score: high vol + high downside risk + extreme negative distance (index 4)."""
+    k = int(means.shape[0])
+    out: np.ndarray = np.empty(k, dtype=np.float64)
+    for i in range(k):
+        t24 = float(means[i, 0])
+        t168 = float(means[i, 1])
+        vol = float(means[i, 2])
+        down_ratio = float(means[i, 3])
+        dist = float(means[i, 4])  # btc_ma_dist_168h (capitulation bottom marker)
+        
+        # Crisis = (Vol & Downside risk high) AND (Price far below long-term MA)
+        out[i] = (vol + down_ratio) - (t24 + t168 + dist)
+    return out
+
+
 @njit  # type: ignore
 def _winsorize_cols_numba(X: np.ndarray, pct: float = 0.01) -> np.ndarray:
     """Numba-accelerated winsorization for feature matrix (per-symbol HMM path)."""
@@ -122,30 +151,32 @@ def _blend_transition(
 
 
 def _assign_state_semantic_labels(means: np.ndarray, X_ref: np.ndarray) -> dict[int, str]:
-    """Map raw HMM state index → semantic label (once per mapping file)."""
+    """Map raw HMM state index → semantic label using structural trend and risk markers."""
     k = int(means.shape[0])
-    # [REFACTORED] Direction-Aware Crisis Score with Trend Penalty (P1 + P3)
-    # Adding -0.5 * trend ensures that high-volatility BULL moves (God Candles)
-    # are NOT mislabeled as Crisis.
-    # index 0: trend, 1: realized_vol_regime, 3: cs_dispersion_z, 2: skewness, 6: momentum
-    crisis_scores = np.array(
-        [
-            0.4 * float(means[i, 1]) + 0.2 * float(means[i, 3])
-            - 0.2 * float(means[i, 2]) - 0.2 * float(means[i, 6])
-            - 0.5 * float(means[i, 0])
-            for i in range(k)
-        ],
-        dtype=np.float64,
-    )
+    crisis_scores = _crisis_semantic_scores(means)
     crisis_s = int(np.argmax(crisis_scores))
-    rem = [i for i in range(k) if i != crisis_s]
-    # Among the remaining 3 states, sort by trend (index 0)
-    # Lowest trend = bear, Highest trend = bull, Middle = chop
-    sorted_rem = sorted(rem, key=lambda x: float(means[x, 0]))
-    bear_s = int(sorted_rem[0])
-    chop_s = int(sorted_rem[1])
-    bull_s = int(sorted_rem[2])
     
+    rem = [i for i in range(k) if i != crisis_s]
+    
+    # Primary sort by long-term 168h trend (index 1)
+    if len(rem) == 3:
+        # Sort by composite bull score (which considers 24h and 168h)
+        sorted_rem = sorted(rem, key=lambda x: _bull_semantic_score(means, x))
+        bear_s = int(sorted_rem[0])
+        chop_s = int(sorted_rem[1])
+        bull_s = int(sorted_rem[2])
+    else:
+        # Fallback for k != 4
+        sorted_rem = sorted(rem, key=lambda x: float(means[x, 1]))
+        bear_s = int(sorted_rem[0])
+        bull_s = int(sorted_rem[-1])
+        chop_s = int(sorted_rem[len(sorted_rem) // 2]) if len(sorted_rem) > 1 else bear_s
+
+    # [Safety Check] If "Bear" state has a strong positive long-term trend, warn.
+    if float(means[bear_s, 1]) > 0.5:
+        _logger.warning("HMM Bear state assignment anomaly: state %d has positive 168h trend %.4f", 
+                        bear_s, float(means[bear_s, 1]))
+
     return {crisis_s: "crisis", bear_s: "bear_trend", bull_s: "bull_trend", chop_s: "chop"}
 
 
@@ -168,6 +199,9 @@ def _regime_entropy(p: np.ndarray) -> float:
     return float(-np.sum(p * np.log(p)))
 
 
+LABEL_VERSION = "v5"
+
+
 def _load_or_build_state_labels(
     label_path: Path,
     means: np.ndarray,
@@ -179,15 +213,35 @@ def _load_or_build_state_labels(
             with open(label_path, "rb") as f:
                 blob = pickle.load(f)  # noqa: S301
             mapping = blob.get("state_to_label", blob)
+            n_feat = blob.get("n_features")
             if isinstance(mapping, dict) and len(mapping) == k:
-                _logger.info("Loaded HMM state label mapping from %s", label_path)
-                return {int(a): str(b) for a, b in mapping.items()}
+                need_rebuild = (
+                    n_feat is None
+                    or int(n_feat) != int(means.shape[1])
+                    or blob.get("label_version") != LABEL_VERSION
+                )
+                if not need_rebuild:
+                    _logger.info("Loaded HMM state label mapping from %s", label_path)
+                    return {int(a): str(b) for a, b in mapping.items()}
+                _logger.info(
+                    "HMM state labels invalidated (n_features=%s vs %s); rebuilding.",
+                    n_feat,
+                    int(means.shape[1]),
+                )
         except Exception as e:
             _logger.warning("Failed to load state labels: %s", e)
     m = _assign_state_semantic_labels(means, X_ref_scaled)
     try:
         with open(label_path, "wb") as f:
-            pickle.dump({"state_to_label": m, "k_states": k}, f)
+            pickle.dump(
+                {
+                    "state_to_label": m,
+                    "k_states": k,
+                    "n_features": int(means.shape[1]),
+                    "label_version": LABEL_VERSION,
+                },
+                f,
+            )
         _logger.info("Saved HMM state label mapping to %s", label_path)
     except Exception as e:
         _logger.warning("Failed to save state labels: %s", e)
@@ -199,31 +253,29 @@ def _centroid_label_drift_warn(
 ) -> None:
     """Check if HMM semantic labels still match the underlying centroid characteristics."""
     try:
-        # index 1: vol, 3: dispersion, 2: skewness, 6: momentum
-        # Direction-Aware Crisis Score (P1 + P3)
-        c_scores = np.array(
-            [
-                0.4 * float(means[i, 1]) + 0.2 * float(means[i, 3])
-                - 0.2 * float(means[i, 2]) - 0.2 * float(means[i, 6])
-                for i in range(means.shape[0])
-            ]
-        )
+        c_scores = _crisis_semantic_scores(means)
+        median_trend = float(np.median([float(means[i, 0]) for i in range(means.shape[0])]))
     except Exception:
         return
 
     for si, lab in state_to_label.items():
-        if lab == "crisis" and c_scores[si] < -0.2:
+        if lab == "crisis" and float(means[si, 0]) > median_trend:
             _logger.warning(
-                "HMM label drift: state %d crisis label but directional risk score=%.4f",
-                si,
-                c_scores[si],
-            )
-        if lab == "bull_trend" and float(means[si, 0]) < -0.5:
-            _logger.warning(
-                "HMM label drift: state %d bull_trend but negative trend=%.4f",
+                "HMM label drift: state %d crisis label trend=%.4f > median=%.4f "
+                "(crisis_score=%.4f)",
                 si,
                 float(means[si, 0]),
+                median_trend,
+                float(c_scores[si]),
             )
+        if lab == "bull_trend":
+            b_score = _bull_semantic_score(means, si)
+            if b_score < -0.2:
+                _logger.warning(
+                    "HMM label drift: state %d bull_trend but low composite score=%.4f",
+                    si,
+                    b_score,
+                )
         if lab == "bear_trend" and float(means[si, 0]) > 0.5:
             _logger.warning(
                 "HMM label drift: state %d bear_trend but positive trend=%.4f",
@@ -259,7 +311,9 @@ class HMMStateInferrer:
         self.n_states = max(2, k_cfg)
         tr_alpha = float(OPT_FUTURES_CONFIG.get("FUTURES_HMM_TRANSITION_PRIOR_ALPHA", 0.2))
 
-        cache_fname = f"HMM_systemic_{symbol}_{tf}_is{is_end_idx}_n{self.n_states}_v3stable.parquet"
+        cache_fname = (
+            f"HMM_systemic_{symbol}_{tf}_is{is_end_idx}_n{self.n_states}_v4multihz.parquet"
+        )
         cache_path = FUTURES_CACHE_DIR / cache_fname
         label_path = FUTURES_CACHE_DIR / f"{symbol}_{tf}_state_labels.pkl"
 
@@ -290,12 +344,20 @@ class HMMStateInferrer:
         degraded = False
         state_to_label: dict[int, str] | None = None
         k_st = int(self.n_states)
+        n_feat_expected = len(feat_cols)
         if label_path.exists():
             try:
                 with open(label_path, "rb") as f:
                     blob = pickle.load(f)  # noqa: S301
                 loaded = blob.get("state_to_label", blob)
-                if isinstance(loaded, dict) and len(loaded) == k_st:
+                n_feat = blob.get("n_features")
+                if (
+                    isinstance(loaded, dict)
+                    and len(loaded) == k_st
+                    and n_feat is not None
+                    and int(n_feat) == n_feat_expected
+                    and blob.get("label_version") == LABEL_VERSION
+                ):
                     state_to_label = {int(a): str(b) for a, b in loaded.items()}
                     _logger.info("Using existing HMM state label mapping from %s", label_path)
             except Exception as e:
@@ -337,7 +399,9 @@ class HMMStateInferrer:
                 if prev_model is not None:
                     try:
                         model.n_features = prev_model.n_features
-                        model.startprob_ = np.nan_to_num(prev_model.startprob_, nan=1.0 / self.n_states)
+                        model.startprob_ = np.nan_to_num(
+                            prev_model.startprob_, nan=1.0 / self.n_states
+                        )
                         tm = prev_model.transmat_.copy()
                         tm = np.nan_to_num(tm, nan=1.0 / self.n_states)
                         tm = np.clip(tm, 1e-3, None)
@@ -402,7 +466,7 @@ class HMMStateInferrer:
                             
                             new_means = model.means_.copy()
                             for ci in collapsed_indices:
-                                # Slightly lower noise (0.3 instead of 0.5) for more stable perturbation
+                                # Slightly lower noise (0.3 instead of 0.5) for stability
                                 noise = np.random.normal(0, 0.3, size=model.n_features)
                                 new_means[ci] = model.means_[dominant_s] + noise
                             
@@ -445,19 +509,17 @@ class HMMStateInferrer:
                             "uniform posteriors; check features."
                         )
 
-                if fit_ok and model is not None and state_to_label is None:
+                if fit_ok and model is not None:
                     try:
                         means_f = model.means_.copy()
-                        state_to_label = _load_or_build_state_labels(
-                            label_path, means_f, X_train, self.n_states
-                        )
+                        if t <= is_end_idx:
+                            state_to_label = _assign_state_semantic_labels(means_f, X_train)
+                        elif state_to_label is None:
+                            state_to_label = _assign_state_semantic_labels(means_f, X_train)
+                        else:
+                            _centroid_label_drift_warn(means_f, X_train, state_to_label)
                     except Exception as e:
                         _logger.warning("HMM label assignment warning: %s", e)
-                elif fit_ok and model is not None and state_to_label is not None:
-                    try:
-                        _centroid_label_drift_warn(model.means_.copy(), X_train, state_to_label)
-                    except Exception as e:
-                        _logger.debug("HMM centroid drift check failed: %s", e)
 
             if model is None or state_to_label is None:
                 continue

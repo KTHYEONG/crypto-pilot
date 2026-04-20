@@ -6,6 +6,7 @@ import pandas as pd
 from src.core.indicators.indicators import get_indicator_engine
 from src.domain.futures.regimes import FUTURES_REGIME_REGISTRY
 from src.domain.futures.signals import FUTURES_SIGNAL_REGISTRY
+from src.domain.futures.signals.ml_calib_prob_futures import apply_ml_calib_gate_column
 from src.domain.futures.sizing import FUTURES_SIZING_REGISTRY
 from src.strategy_base import (
     MasterStrategyBase,
@@ -114,6 +115,9 @@ class UltimateStrategy(PipelineStrategyBase):
             rank_score = sig_out.rank_score
             kill_long = sig_out.kill_long
             kill_short = sig_out.kill_short
+
+        if st_key == "ML_CALIB_PROB":
+            apply_ml_calib_gate_column(df, self.params)
 
         close_a = df["close"].to_numpy(dtype=np.float64)
         df["trend_direction"] = np.where(long_e, 1.0, np.where(short_e, -1.0, 0.0))
