@@ -13,7 +13,8 @@ from typing import Any, Dict, List, Optional
 
 import optuna
 import pandas as pd
-from optuna.samplers import NSGAIISampler, TPESampler
+from optuna.samplers import TPESampler
+from optuna.trial import TrialState
 
 # Project Root Setup
 project_root: str = str(Path(__file__).resolve().parents[2])
@@ -38,10 +39,11 @@ from src.domain.futures.data_collector import DataCollector  # noqa: E402
 from src.domain.futures.funding_utils import merge_funding_into_ohlcv  # noqa: E402
 from src.domain.futures.metrics_utils import merge_metrics_into_ohlcv  # noqa: E402
 from src.domain.futures.ml_pipeline import (  # noqa: E402
+    copy_data_maps_tf_clone,
+    merge_ml_output_into_data_maps,
+    merge_ml_output_into_is_and_oos,
+    run_hmm_fusion_for_is_end,
     run_ml_pipeline_for_universe,
-)
-from src.domain.futures.ml_pipeline.feature_engineering import (  # noqa: E402
-    HMM_SEMANTIC_PROB_COLUMNS,
 )
 from src.domain.futures.opt_futures_utils.objective import (  # noqa: E402
     inject_cs_momentum_ranks,
@@ -52,7 +54,6 @@ from src.domain.futures.opt_futures_utils.objective_ml import (  # noqa: E402
     check_hard_gates_ml,
     objective_ml_phase_d,
     select_best_trial_by_holdout_log_ret,
-    topsis_select_best,
 )
 from src.domain.futures.opt_futures_utils.oos_evaluator import (  # noqa: E402
     run_cpcv_complement_evaluation,
@@ -90,34 +91,31 @@ PROGRESS_MIN_INTERVAL: float = 0.2
 MODE_MULTI: str = "multi"
 BEST_PARAMS_FUTURES_JSON_STEM: str = "best_futures_1h"
 
-_MDD_CONSTRAINT_LIMIT: float = float(OPT_FUTURES_CONFIG.get("FUTURES_MAX_AVG_CPCV_MDD", 25.0))
-
-
-def futures_frozen_trial_constraints(trial: optuna.trial.FrozenTrial) -> tuple[float, ...]:
-    pf = float(trial.user_attrs.get("avg_pf", 0.0) or 0.0)
-    trades = float(trial.user_attrs.get("avg_trades", 0.0) or 0.0)
-    avg_mdd = float(trial.user_attrs.get("avg_mdd", 100.0) or 100.0)
-    ls_ratio = float(trial.user_attrs.get("long_short_ratio", 0.0) or 0.0)
-    ev_cost = float(trial.user_attrs.get("ev_cost_ratio", 0.0) or 0.0)
-
-    return (
-        1.15 - pf,
-        10.0 - trades,
-        avg_mdd - _MDD_CONSTRAINT_LIMIT,
-        0.10 - ls_ratio,
-        1.5 - ev_cost,
-    )
-
-
-def _futures_tpe_sampler(seed: int) -> TPESampler:
+def _ml_phase_d_tpe_sampler(seed: int) -> TPESampler:
     return TPESampler(
         seed=seed,
-        n_startup_trials=0,
+        n_startup_trials=200,
         multivariate=True,
         group=True,
         constant_liar=True,
-        constraints_func=futures_frozen_trial_constraints,
+        n_ei_candidates=24,
     )
+
+
+def _ml_trial_passes_hard_gates(
+    trial: optuna.trial.FrozenTrial, pbo_obs: float = 0.0, check_pbo: bool = True
+) -> bool:
+    cfg = OPT_FUTURES_CONFIG
+    if check_pbo and float(pbo_obs) >= float(cfg.get("FUTURES_PBO_MAX", 0.45)):
+        return False
+    dsr = float(trial.user_attrs.get("gate1_dsr", -9.0))
+    if dsr < float(cfg.get("FUTURES_ML_GATE1_DSR_MIN", 0.20)):
+        return False
+    if float(trial.user_attrs.get("ml_worst_mdd_cpcv", 999.0)) >= 25.0:
+        return False
+    if float(trial.user_attrs.get("avg_trades", 0.0)) < 10.0:
+        return False
+    return True
 
 
 def _resolve_futures_parallel_policy(symbol_count: int) -> int:
@@ -326,71 +324,7 @@ def main() -> None:
         return
 
     _logger.info("[STEP 3/5] Integrating ML Features (GP/HMM) into Data Maps...")
-    # Update data_maps with ranked ML features
-    for sym in valid_symbols:
-        if sym in ml_out.meta_feature_frame_by_symbol:
-            mff = ml_out.meta_feature_frame_by_symbol[sym].copy()
-            # Ensure mff['datetime'] is tz-aware UTC for comparison
-            mff["datetime"] = pd.to_datetime(mff["datetime"], utc=True)
-            
-            cutoff_dt = pd.to_datetime(is_end_date or end_date)
-            if cutoff_dt.tzinfo is None:
-                cutoff_dt = cutoff_dt.tz_localize("UTC")
-            else:
-                cutoff_dt = cutoff_dt.tz_convert("UTC")
-            
-            # Extract only the newly added ML features to merge into the existing map
-            hmm_dyn = [c for c in HMM_SEMANTIC_PROB_COLUMNS if c in mff.columns]
-            if not hmm_dyn:
-                hmm_dyn = sorted(
-                    (c for c in mff.columns if str(c).startswith("hmm_prob_")),
-                    key=lambda x: int(str(x).split("_")[-1]),
-                )
-            ml_cols = [
-                "datetime",
-                "gp_alpha_00",
-                "hmm_modulator",
-                "slot_rank_score",
-                "ml_calib_prob",
-                "ml_calib_prob_long",
-                "ml_calib_prob_short",
-                *hmm_dyn,
-            ]
-            ml_cols = [c for c in ml_cols if c in mff.columns]
-            ml_features = mff[ml_cols].copy()
-            
-            # [FIX] Avoid column name collisions by dropping existing ML columns before merge
-            drop_cols = [c for c in ml_cols if c != "datetime"]
-            
-            # Update IS Data
-            original_is_df = data_maps[sym][args.tf]
-            is_cols_to_drop = [c for c in drop_cols if c in original_is_df.columns]
-            if is_cols_to_drop:
-                original_is_df = original_is_df.drop(columns=is_cols_to_drop)
-            
-            merged_is = pd.merge(
-                original_is_df, ml_features, on="datetime", how="left"
-            ).sort_values("datetime")
-            
-            if "gp_alpha_00" in merged_is.columns:
-                nan_pct = float(merged_is["gp_alpha_00"].isna().mean() * 100.0)
-                _logger.info(f" [MERGE] IS {sym} gp_alpha_00 NaN ratio: {nan_pct:.4f}%")
-            data_maps[sym][args.tf] = merged_is.fillna(0.0)
-
-            # Update OOS Data
-            original_oos_df = oos_data_maps[sym][args.tf]
-            oos_cols_to_drop = [c for c in drop_cols if c in original_oos_df.columns]
-            if oos_cols_to_drop:
-                original_oos_df = original_oos_df.drop(columns=oos_cols_to_drop)
-            
-            merged_oos = pd.merge(
-                original_oos_df, ml_features, on="datetime", how="left"
-            ).sort_values("datetime")
-            
-            if "gp_alpha_00" in merged_oos.columns:
-                nan_pct_oos = float(merged_oos["gp_alpha_00"].isna().mean() * 100.0)
-                _logger.info(f" [MERGE] OOS {sym} gp_alpha_00 NaN ratio: {nan_pct_oos:.4f}%")
-            oos_data_maps[sym][args.tf] = merged_oos.fillna(0.0)
+    merge_ml_output_into_is_and_oos(ml_out, data_maps, oos_data_maps, valid_symbols, args.tf)
 
     # Safe Cache Cleanup (Avoid rmtree hang)
     from src.domain.futures.opt_futures_utils.signal_cache import _MEM_CACHE, DISK_CACHE_ROOT
@@ -411,8 +345,11 @@ def main() -> None:
     optuna.logging.set_verbosity(optuna.logging.WARNING)
     
     # Custom Progress Callback for visibility in non-TTY environments
+    _trial_counter = {"n": 0}
     def progress_callback(study: optuna.study.Study, trial: optuna.trial.FrozenTrial) -> None:
-        n_completed = len([t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE])
+        if trial.state == optuna.trial.TrialState.COMPLETE:
+            _trial_counter["n"] += 1
+        n_completed = _trial_counter["n"]
         batch_size = max(1, n_ml_trials // 10)
         if n_completed > 0 and (n_completed % batch_size == 0 or n_completed == n_ml_trials):
             _logger.info(f" [STEP 4/5] Progress: {n_completed}/{n_ml_trials} trials complete...")
@@ -439,39 +376,68 @@ def main() -> None:
         callbacks.append(tqdm_cb)
 
     # [PERFORMANCE] Use multi-processing (n_jobs)
-    n_jobs = _resolve_futures_parallel_policy(len(valid_symbols))
+    n_jobs = min(4, _resolve_futures_parallel_policy(len(valid_symbols)))
     _logger.info("\n" + "=" * 85)
     _logger.info(f" [STEP 4/5] Portfolio Optimization: {n_ml_trials} trials | {n_jobs} cores")
     _logger.info("=" * 85 + "\n")
 
     study_ml = optuna.create_study(
-        directions=["minimize", "minimize", "minimize"],
-        sampler=NSGAIISampler(
-            seed=seed, constraints_func=futures_frozen_trial_constraints
-        ),
-    )
-    
-    # If using n_jobs > 1, TqdmCallback might be tricky. 
-    study_ml.optimize(
-        lambda tr: objective_ml_phase_d(tr, ml_ctx), 
-        n_trials=n_ml_trials, 
-        callbacks=callbacks,
-        n_jobs=n_jobs
+        direction="minimize",
+        sampler=_ml_phase_d_tpe_sampler(seed),
     )
 
-    # Final Report & Saving
-    try:
-        valid_trials = [
-            t
-            for t in study_ml.best_trials
-            if all(c <= 0.0 for c in futures_frozen_trial_constraints(t))
-        ]
-        if valid_trials:
-            best_trial = topsis_select_best(valid_trials)
-        else:
-            best_trial = select_best_trial_by_holdout_log_ret(study_ml.best_trials)
-    except Exception:
-        best_trial = study_ml.trials[0]
+    study_ml.optimize(
+        lambda tr: objective_ml_phase_d(tr, ml_ctx),
+        n_trials=n_ml_trials,
+        callbacks=callbacks,
+        n_jobs=n_jobs,
+    )
+
+    completed = [t for t in study_ml.trials if t.state == TrialState.COMPLETE]
+    completed.sort(key=lambda tr: tr.value if tr.value is not None else 1e18)
+    mai = ml_ctx.multi_alignment_info or {}
+    paths = mai.get("cpcv_paths")
+    br = mai.get("cpcv_all_block_ranges")
+    best_trial: optuna.trial.FrozenTrial | None = None
+    _logger.info(" [STEP 4.5/5] Filtering top trials with Hard Gates (Lazy PBO)...")
+    iter_limit = min(300, len(completed))
+    for i in range(iter_limit):
+        t = completed[i]
+        # 1. Cheap checks first (DSR, MDD, Trades)
+        if not _ml_trial_passes_hard_gates(t, check_pbo=False):
+            continue
+
+        # 2. Expensive PBO check only if cheap gates pass
+        p_params = build_ml_phase_d_params(dict(t.params), args.tf)
+        pbo_obs = 1.0
+        if paths and br:
+            oos_tw = t.user_attrs.get("cpcv_path_oos_log_tw") or []
+            if len(oos_tw) == len(paths):
+                _logger.info(f"  Evaluating Top Trial {i+1}/{iter_limit}: Checking PBO...")
+                pbo_obs, _rho = run_cpcv_complement_evaluation(
+                    p_params,
+                    valid_symbols,
+                    args.tf,
+                    data_maps,
+                    paths,
+                    br,
+                    oos_path_scores=oos_tw,
+                )
+        
+        if _ml_trial_passes_hard_gates(t, float(pbo_obs), check_pbo=True):
+            _logger.info(f"  --> Best Trial found at rank {i+1} (PBO={pbo_obs:.4f})")
+            best_trial = t
+            break
+    if best_trial is None and completed:
+        best_trial = select_best_trial_by_holdout_log_ret(completed)
+        _logger.warning(
+            "All completed trials fail PBO/DSR/MDD/trade gates; falling back to best holdout."
+        )
+    elif best_trial is None:
+        cand = [t for t in study_ml.trials if t.params]
+        best_trial = cand[0] if cand else None
+    if best_trial is None:
+        raise RuntimeError("Optuna study produced no usable trials for best-params export.")
 
     params = build_ml_phase_d_params(dict(best_trial.params), args.tf)
     
@@ -508,32 +474,85 @@ def main() -> None:
         )
 
     n_wf = int(OPT_FUTURES_CONFIG.get("FUTURES_WF_OOS_LEGS", 1))
+    wf_hmm_refit = bool(OPT_FUTURES_CONFIG.get("FUTURES_WF_HMM_LEG_REFIT", True))
+    wf_tw_floor = float(OPT_FUTURES_CONFIG.get("FUTURES_WF_LEG_TW_MIN_ALL", 1.0))
+    wf_tw_mean_min = float(OPT_FUTURES_CONFIG.get("FUTURES_WF_LEG_TW_MEAN_MIN", 1.05))
     if n_wf > 1 and valid_symbols:
         ref_sym = valid_symbols[0]
         ref_df = oos_data_maps[ref_sym][args.tf]
         o0 = int(oos_data_maps[ref_sym][f"oos_start_idx_{args.tf}"])
         span = max(0, len(ref_df) - o0)
         leg_w = max(1, span // n_wf)
+        wf_tw_sum = 0.0
+        tw_legs: List[float] = []
         for leg in range(n_wf):
             ls = o0 + leg * leg_w
             le = o0 + (leg + 1) * leg_w if leg < n_wf - 1 else len(ref_df)
+            oos_maps_leg = oos_data_maps
+            if wf_hmm_refit and ml_out.alpha_panel is not None and not ml_out.alpha_panel.empty:
+                leg_anchor = pd.to_datetime(ref_df["datetime"].iloc[ls], utc=True)
+                pref_1h = {
+                    s: oos_data_maps[s]["1h"].copy()
+                    for s in valid_symbols
+                    if s in oos_data_maps and "1h" in oos_data_maps[s]
+                }
+                coll = DataCollector()
+                ml_leg = run_hmm_fusion_for_is_end(
+                    valid_symbols,
+                    args.tf,
+                    fetch_start_date,
+                    end_date,
+                    dict(OPT_FUTURES_CONFIG),
+                    oos_data_maps,
+                    pref_1h,
+                    None,
+                    ml_out.alpha_panel,
+                    leg_anchor,
+                    coll,
+                    workers=ml_n_jobs,
+                    n_jobs=ml_n_jobs,
+                    include_fusion=True,
+                    summary_mode_label=f" (WF leg {leg + 1}/{n_wf})",
+                    prefetch_label_start=start_date,
+                )
+                ml_leg.alpha_panel = ml_out.alpha_panel
+                oos_maps_leg = copy_data_maps_tf_clone(oos_data_maps, valid_symbols, args.tf)
+                merge_ml_output_into_data_maps(
+                    ml_leg, oos_maps_leg, valid_symbols, args.tf, log_tag=f" WF{leg + 1}"
+                )
             leg_port = run_oos_margin_shared_portfolio(
                 valid_symbols,
                 args.tf,
                 params,
-                oos_data_maps,
+                oos_maps_leg,
                 cache_root=FUTURES_CACHE_DIR,
                 oos_start_idx=ls,
                 oos_end_idx=le,
             )
             tw = float(leg_port.get("terminal_wealth_ratio", 1.0))
+            wf_tw_sum += tw
+            tw_legs.append(tw)
+            _suffix = " [HMM reanchored]" if wf_hmm_refit else ""
             _logger.info(
-                " [WF] OOS leg %d/%d idx [%d,%d) terminal_wealth_ratio=%.4f",
+                " [WF] OOS leg %d/%d idx [%d,%d) terminal_wealth_ratio=%.4f%s",
                 leg + 1,
                 n_wf,
                 ls,
                 le,
                 tw,
+                _suffix,
+            )
+        _logger.info(" [WF] sum terminal_wealth_ratio (all legs)=%.4f", wf_tw_sum)
+        if wf_hmm_refit and tw_legs:
+            all_ok = all(t >= wf_tw_floor for t in tw_legs)
+            mean_ok = (sum(tw_legs) / len(tw_legs)) >= wf_tw_mean_min
+            _logger.info(
+                " [WF HARD GATE] all legs >= %.2f: %s | mean >= %.2f: %s -> %s",
+                wf_tw_floor,
+                all_ok,
+                wf_tw_mean_min,
+                mean_ok,
+                "PASS" if (all_ok and mean_ok) else "FAIL",
             )
     
     _logger.info("\n" + "=" * 85)

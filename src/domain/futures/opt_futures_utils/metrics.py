@@ -3,6 +3,9 @@
 전략의 우수성을 판단하기 위해 단순 수익률뿐만 아니라 리스크 대비 효율성을 점수화하는 역할을 수행함.
 """
 
+from __future__ import annotations
+
+import math
 from typing import Sequence, Union
 
 import numpy as np
@@ -115,6 +118,8 @@ def calc_sortino_from_equity(equity_curve: np.ndarray, span_days: float) -> floa
 def compute_pbo_from_cpcv_paths(
     is_path_scores: Sequence[float],
     oos_path_scores: Sequence[float],
+    *,
+    min_paths: int = 6,
 ) -> tuple[float, float]:
     """
     PBO proxy from CPCV path IS vs OOS score ranks.
@@ -122,8 +127,8 @@ def compute_pbo_from_cpcv_paths(
     """
     is_arr = np.asarray(list(is_path_scores), dtype=np.float64)
     oos_arr = np.asarray(list(oos_path_scores), dtype=np.float64)
-    if is_arr.size != oos_arr.size or is_arr.size < 2:
-        return (0.5, 0.0)
+    if is_arr.size != oos_arr.size or is_arr.size < int(min_paths):
+        return (1.0, 0.0)
 
     ri = pd.Series(is_arr).rank(method="average").to_numpy(dtype=np.float64)
     ro = pd.Series(oos_arr).rank(method="average").to_numpy(dtype=np.float64)
@@ -193,9 +198,38 @@ def calc_tail_ratio_from_equity(equity: np.ndarray) -> float:
 
 
 def _log_tw_from_ret_pct(ret_pct: float) -> float:
-    import math
-
     r = 1.0 + float(ret_pct) / 100.0
     if r <= 0.0 or not math.isfinite(r):
         return -10.0
     return float(math.log(max(r, 1e-9)))
+
+
+def calc_gate1_dsr_from_path_log_tw(
+    path_arr: np.ndarray,
+    tf: str,
+    stat_ref_len: float,
+    n_trials_opt: float,
+) -> float:
+    """
+    Deflated Sharpe (Bailey & López de Prado) on CPCV path log-TWR samples.
+    Returns probability in [0, 0.99] or sentinel -1.0 if path std is degenerate.
+    """
+    if path_arr.size < 2:
+        return 0.0
+    m_pt = float(np.mean(path_arr))
+    s_pt = float(np.std(path_arr, ddof=1))
+    if not math.isfinite(s_pt) or s_pt < 1e-6:
+        return -1.0
+    sharpe = m_pt / (s_pt + 1e-12)
+    hrs = int(tf.replace("h", "")) if tf.endswith("h") else 4
+    t_samples = float(stat_ref_len) / (24.0 / float(hrs))
+    sk = float(np.mean(((path_arr - m_pt) / (s_pt + 1e-12)) ** 3))
+    ex_kurt = float(np.mean(((path_arr - m_pt) / (s_pt + 1e-12)) ** 4)) - 3.0
+    sr_var_denom = max(
+        1.0 - sk * sharpe + ((ex_kurt + 2.0) / 4.0) * sharpe**2,
+        1e-12,
+    )
+    sr_bench = math.sqrt(2.0 * math.log(max(n_trials_opt, 2.0)))
+    z_dsr = (sharpe - sr_bench) * math.sqrt(max(t_samples - 1.0, 1.0)) / math.sqrt(sr_var_denom)
+    dsr_val = float(0.5 * (1.0 + math.erf(z_dsr / math.sqrt(2.0))))
+    return float(min(0.99, max(0.0, dsr_val)))
