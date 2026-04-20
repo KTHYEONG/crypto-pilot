@@ -390,7 +390,7 @@ def objective_futures(
                     fee_rate=TRADING_FEE_RATE,
                     slippage_rate=SLIPPAGE_RATE,
                 )
-                b_trades_df, equity_curve, final_balance = engine.run()
+                b_trades_df, equity_curve, final_balance, _bt_diag = engine.run()
             except Exception as exc:
                 _logger.warning("Block backtest error: %s", exc)
                 continue

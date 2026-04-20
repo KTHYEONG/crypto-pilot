@@ -126,7 +126,7 @@ SPOT_SYMBOL_DELAY_SECONDS = 2  # 심볼 간 딜레이
 
 
 # --- 백테스트 초기 잔고 (Futures) ---
-FUTURES_INITIAL_BALANCE = 800.0  # USDT, backtest/optimize/verify 공통
+FUTURES_INITIAL_BALANCE = 10000.0  # USDT, backtest/optimize/verify 공통
 
 # --- Spot backtest / shared-cash (KRW) ---
 SPOT_INITIAL_BALANCE = 10_000_000.0
