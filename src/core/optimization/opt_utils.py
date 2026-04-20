@@ -1059,8 +1059,9 @@ def compute_segment_merge_index(hourly_df: pd.DataFrame, daily_df: pd.DataFrame)
     if len(daily_days) == 0:
         return np.zeros(len(hourly_days), dtype=np.int32)
 
-    # As-of backward mapping: use the most recent available daily bar for each intraday bar.
-    # This is safer than forcing missing keys to index 0.
-    pos = np.searchsorted(daily_days, hourly_days, side="right") - 1
+    # [FIX] side="left" ensures we get the index of the daily bar strictly BEFORE current day.
+    # searchsorted(daily_days, hourly_days, side="left") returns first index i where daily_days[i] >= hourly_days.
+    # Subtracting 1 gives the index of the last daily_days[i] < hourly_days.
+    pos = np.searchsorted(daily_days, hourly_days, side="left") - 1
     pos = np.clip(pos, 0, len(daily_days) - 1).astype(np.int32)
     return pos
