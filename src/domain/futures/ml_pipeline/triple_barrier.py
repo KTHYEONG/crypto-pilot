@@ -131,8 +131,9 @@ def label_triple_barrier(
     atr_period: int = 14,
     tp_atr_mult: float = 1.5,
     sl_atr_mult: float = 1.0,
-    time_stop_bars: int = 2880,
+    time_stop_bars: int = 1440,
     bidirectional: bool = True,
+    vol_scale_window: int = 24,
 ) -> pd.Series:
     """
     Per 1h bar: entry at open; TP/SL from ATR on 1h; scan 1m candles until hit or time stop.
@@ -140,8 +141,9 @@ def label_triple_barrier(
     Args:
         tp_atr_mult: TP width multiplier (default 1.5).
         sl_atr_mult: SL width multiplier (default 1.0).
-        time_stop_bars: 1m bars before time barrier (default 2880 = 48h).
+        time_stop_bars: 1m bars before time barrier (default 1440 ≈ 24h on 1m).
         bidirectional: If True, returns +1/-1/0 labels for independent Long/Short classifiers.
+        vol_scale_window: rolling mean ATR window; ATR_effective = ATR * clip(ATR / ATR_ma).
     """
     if df_1h.empty or df_1m.empty or len(df_1h) < atr_period + 2:
         return pd.Series(dtype=np.float64)
@@ -160,16 +162,27 @@ def label_triple_barrier(
     open1 = df1["open"].to_numpy(dtype=np.float64) if "open" in df1.columns else close1
 
     atr1 = compute_atr_numpy(high1, low1, close1, atr_period)
+    vw = max(4, int(vol_scale_window))
+    atr_ma = (
+        pd.Series(atr1)
+        .rolling(vw, min_periods=max(2, vw // 3))
+        .mean()
+        .bfill()
+        .to_numpy(dtype=np.float64)
+    )
+    vol_ratio = atr1 / np.maximum(atr_ma, 1e-12)
+    vol_ratio = np.clip(vol_ratio, 0.75, 1.45)
+    atr_eff = atr1 * vol_ratio
 
     if bidirectional:
         labels = _tbm_bidirectional_numba(
-            dt1, open1, atr1, high1, low1,
+            dt1, open1, atr_eff, high1, low1,
             m1_ts, m1_high, m1_low,
             float(tp_atr_mult), float(sl_atr_mult), int(time_stop_bars),
         )
     else:
         labels = _tbm_inner_loop_numba(
-            dt1, open1, atr1, high1, low1,
+            dt1, open1, atr_eff, high1, low1,
             m1_ts, m1_high, m1_low,
             float(tp_atr_mult), float(sl_atr_mult), int(time_stop_bars),
         )
