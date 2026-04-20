@@ -24,6 +24,11 @@ _FUTURES_2D_REQUIRED_COLS: Tuple[str, ...] = (
     "slot_rank_score",
     "ml_calib_prob",
     "dyn_leverage",
+    "xs_score_long",
+    "xs_score_short",
+    "hmm_prob_crisis",
+    "hmm_modulator_long",
+    "hmm_modulator_short",
 )
 
 
@@ -59,8 +64,13 @@ def _dataframe_to_symbol_arrays(sig_df: pd.DataFrame) -> Dict[str, np.ndarray]:
         "garch_kelly_f": 1.0,
         "funding_rate_sum": 0.0,
         "slot_rank_score": 0.0,
-        "ml_calib_prob": 0.0,
+        "ml_calib_prob": 1.0,
         "dyn_leverage": 5.0,
+        "xs_score_long": 0.0,
+        "xs_score_short": 0.0,
+        "hmm_prob_crisis": 0.0,
+        "hmm_modulator_long": 1.0,
+        "hmm_modulator_short": 1.0,
     }
     
     for col, fill_val in fill_map.items():
@@ -140,6 +150,11 @@ def align_data_for_2d_engine(
         "slot_rank_score",
         "ml_calib_prob",
         "dyn_leverage",
+        "xs_score_long",
+        "xs_score_short",
+        "hmm_prob_crisis",
+        "hmm_modulator_long",
+        "hmm_modulator_short",
     ]
     aligned_data: Dict[str, np.ndarray] = {
         col: np.full((n_bars, n_syms), np.nan, dtype=np.float64) for col in target_cols
@@ -160,6 +175,11 @@ def align_data_for_2d_engine(
             "funding_rate_sum",
             "slot_rank_score",
             "ml_calib_prob",
+            "xs_score_long",
+            "xs_score_short",
+            "hmm_prob_crisis",
+            "hmm_modulator_long",
+            "hmm_modulator_short",
         ]:
             if col in merged.columns:
                 aligned_data[col][:, s_idx] = merged[col].fillna(0).values

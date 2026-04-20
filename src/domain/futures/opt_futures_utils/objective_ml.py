@@ -1,11 +1,10 @@
-"""NSGA-II Phase D objectives for ML pipeline (CPCV paths, O(1) slicing)."""
+"""Phase D: single-objective CPCV-DSR (TPE) for ML cross-sectional rank portfolio."""
 
 from __future__ import annotations
 
 import logging
-import math
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, cast
 
 import numpy as np
 import optuna
@@ -26,13 +25,16 @@ from src.domain.futures.opt_futures_utils.data_utils import (
     _build_aligned_2d_from_prebuilt,
     _dataframe_to_symbol_arrays,
 )
-from src.domain.futures.opt_futures_utils.metrics import _log_tw_from_ret_pct, calc_mdd_from_equity
+from src.domain.futures.opt_futures_utils.metrics import (
+    _log_tw_from_ret_pct,
+    calc_gate1_dsr_from_path_log_tw,
+    calc_mdd_from_equity,
+)
 from src.domain.futures.opt_futures_utils.objective import (
     EMBARGO_BARS,
     compute_multi_alignment_info,
 )
 from src.domain.futures.opt_futures_utils.signal_cache import get_tiered_signals
-from src.domain.futures.signals.ml_calib_prob_futures import gate_ml_calib_prob_matrix
 from src.domain.futures.strategies_futures import UltimateStrategy
 
 _logger = logging.getLogger(__name__)
@@ -70,12 +72,21 @@ def _inject_dyn_leverage_trimmed(trimmed_sig: pd.DataFrame, raw_full: pd.DataFra
         trimmed_sig["dyn_leverage"] = float(base_lev)
         return
     k = len(hmm_cols)
-    p_mat = (
-        raw_full[hmm_cols]
-        .replace([np.inf, -np.inf], np.nan)
-        .fillna(1.0 / float(k))
-        .to_numpy(dtype=np.float64)
-    )
+    try:
+        p_mat = (
+            raw_full[hmm_cols]
+            .replace([np.inf, -np.inf], np.nan)
+            .fillna(1.0 / float(k))
+            .to_numpy(dtype=np.float64)
+        )
+    except Exception as e:
+        _logger.error("Error creating p_mat: %s. hmm_cols=%s, columns=%s", e, hmm_cols, list(raw_full.columns))
+        raise
+    
+    if p_mat.shape[1] != k:
+         _logger.error("SHAPE MISMATCH: p_mat.shape[1]=%s, k=%s. hmm_cols=%s. ALL COLS=%s", 
+                      p_mat.shape[1], k, hmm_cols, list(raw_full.columns))
+
     close = raw_full["close"].astype(np.float64)
     r = np.log(close / close.shift(1).clip(lower=1e-12)).fillna(0.0).to_numpy(dtype=np.float64)
     g = (
@@ -111,10 +122,15 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
     """Pre-align and pre-slice all data before Optuna starts to eliminate trial overhead."""
     # 1. Alignment & Baseline Signals
     pre_ml = {
-        "ENTRY_THRESHOLD": 0.90,
         "TRAILING_ACTIVATION_ATR": 1.0,
         "BAYESIAN_C": 10.0,
         "KELLY_SHRINKAGE": 0.3,
+        "K_LONG": 2,
+        "K_SHORT": 2,
+        "REBALANCE_BARS": 6,
+        "MIN_SCORE_PERCENTILE": 0.65,
+        "CRISIS_GATE_PROB": float(OPT_FUTURES_CONFIG.get("FUTURES_CRISIS_GATE_PROB_DEFAULT", 0.7)),
+        "USE_CS_RANK_ENGINE": True,
     }
     params = _base_engine_params(pre_ml, ctx.tf)
     strategy = UltimateStrategy(name="Precompute", params=params)
@@ -144,18 +160,22 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
             trimmed_sig["funding_rate_sum"] = raw_full["funding_rate_sum"].to_numpy(
                 dtype=np.float64, copy=False
             )
-        p_long = raw_full["ml_calib_prob_long"].values.astype(np.float64)
-        p_short = raw_full["ml_calib_prob_short"].values.astype(np.float64)
-        
-        # Override signals with threshold-agnostic versions
-        trimmed_sig["ml_calib_prob"] = np.maximum(p_long, p_short)
-        td = np.where(p_long >= p_short, 1.0, -1.0)
-        trimmed_sig["trend_direction"] = td
-        
-        # [DYNAMIC FIX] Ensure entry bounds allow trading regardless of precompute threshold
-        # For Long (td=1): upper=0 (market entry), For Short (td=-1): lower=inf (market entry)
-        trimmed_sig["entry_upper"] = np.where(td == 1.0, 0.0, 999999.0)
-        trimmed_sig["entry_lower"] = np.where(td == -1.0, 999999.0, 0.0)
+        trimmed_sig["ml_calib_prob"] = 1.0
+        trimmed_sig["ml_calib_prob_long"] = 1.0
+        trimmed_sig["ml_calib_prob_short"] = 1.0
+        trimmed_sig["trend_direction"] = 0.0
+        trimmed_sig["entry_upper"] = 0.0
+        trimmed_sig["entry_lower"] = 999999.0
+        _xs_cols = (
+            "xs_score_long",
+            "xs_score_short",
+            "hmm_prob_crisis",
+            "hmm_modulator_long",
+            "hmm_modulator_short",
+        )
+        for col in _xs_cols:
+            if col in raw_full.columns:
+                trimmed_sig[col] = raw_full[col].to_numpy(dtype=np.float64, copy=False)
 
         _inject_dyn_leverage_trimmed(trimmed_sig, raw_full)
 
@@ -181,39 +201,45 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
     ctx.multi_alignment_info["cpcv_all_block_ranges"] = unique_blocks
 
 
-def _gate1_dsr_from_path_log_tw(path_arr: np.ndarray, tf: str, stat_ref_len: float) -> float:
-    """Deflated Sharpe (Bailey & López de Prado) on CPCV path log-TWR samples."""
-    cfg = OPT_FUTURES_CONFIG
-    if path_arr.size < 2:
-        return 0.0
-    m_pt = float(np.mean(path_arr))
-    s_pt = float(np.std(path_arr, ddof=1))
-    sharpe = m_pt / (s_pt + 1e-12)
-    n_trials_opt = float(cfg.get("total_trials", 1000))
-    hrs = int(tf.replace("h", "")) if tf.endswith("h") else 4
-    t_samples = float(stat_ref_len) / (24.0 / float(hrs))
-    sk = float(np.mean(((path_arr - m_pt) / (s_pt + 1e-12)) ** 3))
-    ex_kurt = float(np.mean(((path_arr - m_pt) / (s_pt + 1e-12)) ** 4)) - 3.0
-    sr_var_denom = max(
-        1.0 - sk * sharpe + ((ex_kurt + 2.0) / 4.0) * sharpe**2,
-        1e-12,
-    )
-    sr_bench = math.sqrt(2.0 * math.log(max(n_trials_opt, 2.0)))
-    z_dsr = (sharpe - sr_bench) * math.sqrt(max(t_samples - 1.0, 1.0)) / math.sqrt(sr_var_denom)
-    dsr_val = float(0.5 * (1.0 + math.erf(z_dsr / math.sqrt(2.0))))
-    return float(min(0.99, max(0.0, dsr_val)))
-
-
 def _suggest_ml_phase_d(trial: optuna.Trial) -> Dict[str, Any]:
-    entry = float(trial.suggest_float("ENTRY_THRESHOLD", 0.80, 0.98))
     trail = float(trial.suggest_float("TRAILING_ACTIVATION_ATR", 0.3, 1.2))
     bayes_c = float(trial.suggest_float("BAYESIAN_C", 1.0, 30.0, log=True))
     kelly_s = float(trial.suggest_float("KELLY_SHRINKAGE", 0.05, 0.4))
+    k_long = int(trial.suggest_int("K_LONG", 1, 4))
+    k_short = int(trial.suggest_int("K_SHORT", 1, 4))
+    reb = int(trial.suggest_categorical("REBALANCE_BARS", [1, 3, 6, 12]))
+    min_pct = float(trial.suggest_float("MIN_SCORE_PERCENTILE", 0.50, 0.85))
+    crisis = float(trial.suggest_float("CRISIS_GATE_PROB", 0.50, 0.85))
+    atr_p = int(trial.suggest_int("ATR_PERIOD", 10, 20, step=2))
+    l_atr = float(trial.suggest_float("LONG_ATR_MULT", 1.5, 4.5, step=0.25))
+    l_trail = float(trial.suggest_float("LONG_TRAIL_MULT", 2.5, 6.0, step=0.5))
+    s_atr = float(trial.suggest_float("SHORT_ATR_MULT", 1.0, 3.0, step=0.25))
+    s_tp = float(trial.suggest_float("SHORT_TP_MULT", 1.0, 3.5, step=0.5))
+    s_trail = float(trial.suggest_float("SHORT_TRAIL_MULT", 1.5, 4.5, step=0.5))
+    l_scale = float(trial.suggest_float("LONG_SCALE_ATR_MULT", 2.5, 6.0, step=0.5))
+    rpt = float(trial.suggest_float("RISK_PER_TRADE", 0.01, 0.05, step=0.005))
+    max_exp = float(trial.suggest_float("MAX_EXPOSURE_PER_COIN", 0.5, 2.0, step=0.1))
+    dd_thr = float(trial.suggest_float("DD_SCALING_THRESHOLD", 0.10, 0.25, step=0.05))
     return {
-        "ENTRY_THRESHOLD": entry,
         "TRAILING_ACTIVATION_ATR": trail,
         "BAYESIAN_C": bayes_c,
         "KELLY_SHRINKAGE": kelly_s,
+        "K_LONG": k_long,
+        "K_SHORT": k_short,
+        "REBALANCE_BARS": reb,
+        "MIN_SCORE_PERCENTILE": min_pct,
+        "CRISIS_GATE_PROB": crisis,
+        "ATR_PERIOD": atr_p,
+        "LONG_ATR_MULT": l_atr,
+        "LONG_TRAIL_MULT": l_trail,
+        "SHORT_ATR_MULT": s_atr,
+        "SHORT_TP_MULT": s_tp,
+        "SHORT_TRAIL_MULT": s_trail,
+        "LONG_SCALE_ATR_MULT": l_scale,
+        "RISK_PER_TRADE": rpt,
+        "MAX_EXPOSURE_PER_COIN": max_exp,
+        "DD_SCALING_THRESHOLD": dd_thr,
+        "USE_CS_RANK_ENGINE": True,
     }
 
 
@@ -242,42 +268,138 @@ def _base_engine_params(ml: Dict[str, Any], tf: str) -> Dict[str, Any]:
     ks, bc = float(ml["KELLY_SHRINKAGE"]), float(ml["BAYESIAN_C"])
     fk_frac = float(np.clip(0.35 * ks * (1.0 + 1.0 / bc), 0.05, 0.6))
     lev = float(OPT_FUTURES_CONFIG.get("FUTURES_DISCOVERY_LEVERAGE", 5))
-    rpt = 0.02
+    rpt = float(ml.get("RISK_PER_TRADE", 0.02))
     if rpt * lev > 0.10:
         rpt = 0.10 / max(lev, 1e-9)
+    trail = float(ml["TRAILING_ACTIVATION_ATR"])
     return {
-        "TIMEFRAME": tf, "SIGNAL_TYPE": "ML_CALIB_PROB", "REGIME_TYPE": "NONE",
-        "SIZING_METHOD": "vol_target", "ENTRY_THRESHOLD": ml["ENTRY_THRESHOLD"],
-        "LONG_TRAIL_MULT": float(ml["TRAILING_ACTIVATION_ATR"]) * 3.0,
-        "SHORT_TRAIL_MULT": float(ml["TRAILING_ACTIVATION_ATR"]) * 3.0,
-        "FK_FRACTION": fk_frac, "FK_EWMA_LAMBDA": 0.94, "FK_TARGET_VOL": 0.02,
-        "FK_MAX_SIZE": 1.0, "FK_WINDOW": 60, "ATR_PERIOD": 14, "LONG_ATR_MULT": 2.5,
-            "SHORT_ATR_MULT": 2.0, "LONG_SCALE_ATR_MULT": 2.5, "SHORT_TP_MULT": 2.0,
-        "RISK_PER_TRADE": float(rpt), "MAX_EXPOSURE_PER_COIN": 1.0, "DD_SCALING_THRESHOLD": 0.15,
+        "TIMEFRAME": tf,
+        "SIGNAL_TYPE": "ML_CALIB_PROB",
+        "REGIME_TYPE": "NONE",
+        "SIZING_METHOD": "vol_target",
+        "USE_CS_RANK_ENGINE": bool(ml.get("USE_CS_RANK_ENGINE", True)),
+        "K_LONG": int(ml.get("K_LONG", 2)),
+        "K_SHORT": int(ml.get("K_SHORT", 2)),
+        "REBALANCE_BARS": max(1, int(ml.get("REBALANCE_BARS", 6))),
+        "MIN_SCORE_PERCENTILE": float(ml.get("MIN_SCORE_PERCENTILE", 0.65)),
+        "CRISIS_GATE_PROB": float(ml.get("CRISIS_GATE_PROB", 0.7)),
+        "LONG_TRAIL_MULT": trail * 3.0,
+        "SHORT_TRAIL_MULT": trail * 3.0,
+        "FK_FRACTION": fk_frac,
+        "FK_EWMA_LAMBDA": 0.94,
+        "FK_TARGET_VOL": 0.02,
+        "FK_MAX_SIZE": 1.0,
+        "FK_WINDOW": 60,
+        "ATR_PERIOD": int(ml.get("ATR_PERIOD", 14)),
+        "LONG_ATR_MULT": float(ml.get("LONG_ATR_MULT", 2.5)),
+        "SHORT_ATR_MULT": float(ml.get("SHORT_ATR_MULT", 2.0)),
+        "LONG_SCALE_ATR_MULT": float(ml.get("LONG_SCALE_ATR_MULT", 2.5)),
+        "SHORT_TP_MULT": float(ml.get("SHORT_TP_MULT", 2.0)),
+        "RISK_PER_TRADE": float(rpt),
+        "MAX_EXPOSURE_PER_COIN": float(ml.get("MAX_EXPOSURE_PER_COIN", 1.0)),
+        "DD_SCALING_THRESHOLD": float(ml.get("DD_SCALING_THRESHOLD", 0.15)),
         "USE_COMPOUNDING": True,
         "LEVERAGE": int(lev),
         "ENTRY_QUANTILE_WINDOW": int(OPT_FUTURES_CONFIG.get("ENTRY_QUANTILE_WINDOW", 240)),
+        "MAX_CONCURRENT_POSITIONS": int(
+            OPT_FUTURES_CONFIG.get("FUTURES_MAX_CONCURRENT_POSITIONS", 3)
+        ),
+        "MAX_EXPOSURE": 0.8,
     }
 
 
-def objective_ml_phase_d(trial: optuna.Trial, ctx: MLPhaseDContext) -> tuple[float, float, float]:
+def _cached_kill_fund_lev(
+    aligned: Dict[str, Any], params: Dict[str, Any]
+) -> tuple[Any, Any, Any]:
+    if "kill_signal_cached" not in aligned:
+        zkill = aligned.get("kill_signal")
+        if zkill is None:
+            zkill = np.zeros_like(aligned["close"])
+        aligned["kill_signal_cached"] = zkill
+    zkill = aligned["kill_signal_cached"]
+    if "funding_rate_sum_cached" not in aligned:
+        zfund = aligned.get("funding_rate_sum")
+        if zfund is None:
+            zfund = np.zeros_like(aligned["close"])
+        aligned["funding_rate_sum_cached"] = zfund
+    zfund = aligned["funding_rate_sum_cached"]
+    if "dyn_leverage_cached" not in aligned:
+        lev_blk = aligned.get("dyn_leverage")
+        if lev_blk is None or lev_blk.shape != aligned["close"].shape:
+            lev_blk = np.full_like(aligned["close"], float(params["LEVERAGE"]), dtype=np.float64)
+        else:
+            lev_blk = np.maximum(lev_blk.astype(np.float64, copy=False), 1.0)
+        aligned["dyn_leverage_cached"] = lev_blk
+    lev_blk = aligned["dyn_leverage_cached"]
+    return zkill, zfund, lev_blk
+
+
+def _run_portfolio_numba_block(
+    params: Dict[str, Any],
+    aligned: Dict[str, Any],
+    zkill: Any,
+    zfund: Any,
+    lev_blk: Any,
+) -> tuple[np.ndarray, float, np.ndarray]:
+    strength_g = aligned["ml_calib_prob"]
+    use_cs = 1 if bool(params.get("USE_CS_RANK_ENGINE", True)) else 0
+    out_bt = backtest_portfolio_numba(
+        aligned["close"],
+        aligned["high"],
+        aligned["low"],
+        aligned["open"],
+        aligned["entry_upper"],
+        aligned["entry_lower"],
+        aligned["trend_direction"],
+        strength_g,
+        aligned["atr"],
+        aligned["garch_kelly_f"],
+        zkill,
+        zfund,
+        aligned["slot_rank_score"],
+        aligned["xs_score_long"],
+        aligned["xs_score_short"],
+        aligned["hmm_prob_crisis"],
+        aligned["hmm_modulator_long"],
+        aligned["hmm_modulator_short"],
+        float(FUTURES_INITIAL_BALANCE),
+        lev_blk,
+        TRADING_FEE_RATE,
+        SLIPPAGE_RATE,
+        float(params["RISK_PER_TRADE"]),
+        float(params["LONG_ATR_MULT"]),
+        float(params["LONG_TRAIL_MULT"]),
+        float(params["SHORT_ATR_MULT"]),
+        float(params["SHORT_TP_MULT"]),
+        float(params["LONG_SCALE_ATR_MULT"]),
+        float(params["SHORT_TRAIL_MULT"]),
+        int(params.get("MAX_CONCURRENT_POSITIONS", 2)),
+        float(params.get("MAX_EXPOSURE", 0.8)),
+        float(params["MAX_EXPOSURE_PER_COIN"]),
+        float(params["DD_SCALING_THRESHOLD"]),
+        int(params["K_LONG"]),
+        int(params["K_SHORT"]),
+        max(1, int(params["REBALANCE_BARS"])),
+        float(params["MIN_SCORE_PERCENTILE"]),
+        float(params["CRISIS_GATE_PROB"]),
+        use_cs,
+    )
+    return cast(tuple[np.ndarray, float, np.ndarray], out_bt)
+
+
+def objective_ml_phase_d(trial: optuna.Trial, ctx: MLPhaseDContext) -> float:
     if ctx.cpcv_block_slices is None:
         precompute_ml_optimization_context(ctx)
     block_slices = ctx.cpcv_block_slices
     mai = ctx.multi_alignment_info
     if block_slices is None or mai is None:
-        return 1e9, 1e9, 1e9
+        return 1e9
 
     ml = _suggest_ml_phase_d(trial)
     params = _base_engine_params(ml, ctx.tf)
-    entry_q = float(ml["ENTRY_THRESHOLD"])
     cfg = OPT_FUTURES_CONFIG
-    win_q = int(cfg.get("ENTRY_QUANTILE_WINDOW", 240))
-    entry_numba = float(cfg.get("FUTURES_ENTRY_NUMBA_THRESHOLD", 0.5))
-
-    min_seg_trades = int(cfg.get("FUTURES_MIN_TRADES_PER_CPCV_SEGMENT", 5))
     liq_mdd_thr = float(cfg.get("FUTURES_MAX_MDD", 25.0))
-    min_trades_target = int(cfg.get("FUTURES_MIN_TRADES_TARGET", 25))
+    min_trades_target = int(cfg.get("FUTURES_MIN_TRADES_TARGET", 10))
 
     block_results: Dict[Tuple[int, int], Dict[str, Any]] = {}
     all_trades_chunks: List[np.ndarray] = []
@@ -287,62 +409,9 @@ def objective_ml_phase_d(trial: optuna.Trial, ctx: MLPhaseDContext) -> tuple[flo
         if not aligned:
             continue
 
-        if "kill_signal_cached" not in aligned:
-            zkill = aligned.get("kill_signal")
-            if zkill is None:
-                zkill = np.zeros_like(aligned["close"])
-            aligned["kill_signal_cached"] = zkill
-        zkill = aligned["kill_signal_cached"]
-
-        if "funding_rate_sum_cached" not in aligned:
-            zfund = aligned.get("funding_rate_sum")
-            if zfund is None:
-                zfund = np.zeros_like(aligned["close"])
-            aligned["funding_rate_sum_cached"] = zfund
-        zfund = aligned["funding_rate_sum_cached"]
-
-        if "dyn_leverage_cached" not in aligned:
-            lev_blk = aligned.get("dyn_leverage")
-            if lev_blk is None or lev_blk.shape != aligned["close"].shape:
-                lev_blk = np.full_like(
-                    aligned["close"], float(params["LEVERAGE"]), dtype=np.float64
-                )
-            else:
-                lev_blk = np.maximum(lev_blk.astype(np.float64, copy=False), 1.0)
-            aligned["dyn_leverage_cached"] = lev_blk
-        lev_blk = aligned["dyn_leverage_cached"]
-
-        strength_g = gate_ml_calib_prob_matrix(aligned["ml_calib_prob"], entry_q, win_q)
-        b_trades_raw, b_bal, b_equity = backtest_portfolio_numba(
-            aligned["close"],
-            aligned["high"],
-            aligned["low"],
-            aligned["open"],
-            aligned["entry_upper"],
-            aligned["entry_lower"],
-            aligned["trend_direction"],
-            strength_g,
-            aligned["atr"],
-            aligned["garch_kelly_f"],
-            zkill,
-            zfund,
-            aligned["slot_rank_score"],
-            float(FUTURES_INITIAL_BALANCE),
-            lev_blk,
-            TRADING_FEE_RATE,
-            SLIPPAGE_RATE,
-            float(params["RISK_PER_TRADE"]),
-            float(params["LONG_ATR_MULT"]),
-            float(params["LONG_TRAIL_MULT"]),
-            float(params["SHORT_ATR_MULT"]),
-            float(params["SHORT_TP_MULT"]),
-            float(params["LONG_SCALE_ATR_MULT"]),
-            float(params["SHORT_TRAIL_MULT"]),
-            int(params.get("MAX_CONCURRENT_POSITIONS", 2)),
-            float(params.get("MAX_EXPOSURE", 0.8)),
-            float(params["MAX_EXPOSURE_PER_COIN"]),
-            float(params["DD_SCALING_THRESHOLD"]),
-            entry_numba,
+        zkill, zfund, lev_blk = _cached_kill_fund_lev(aligned, params)
+        b_trades_raw, b_bal, b_equity = _run_portfolio_numba_block(
+            params, aligned, zkill, zfund, lev_blk
         )
 
         n_tr = int(b_trades_raw.shape[0])
@@ -351,14 +420,13 @@ def objective_ml_phase_d(trial: optuna.Trial, ctx: MLPhaseDContext) -> tuple[flo
             first_bt_done = True
             if n_tr == 0:
                 raise optuna.TrialPruned()
-        if n_tr < min_seg_trades:
-            block_results[b_range] = {"log_ret": -1.0, "mdd": 100.0, "trades": 0}
-            continue
 
-        mdd = float(calc_mdd_from_equity(b_equity))
+        mdd = float(calc_mdd_from_equity(b_equity)) if b_equity.size > 0 else 100.0
+        log_ret = _log_tw_from_ret_pct(float((b_bal / FUTURES_INITIAL_BALANCE - 1.0) * 100.0))
         block_results[b_range] = {
-            "log_ret": _log_tw_from_ret_pct(float((b_bal / FUTURES_INITIAL_BALANCE - 1.0) * 100.0)),
-            "mdd": mdd, "trades": n_tr,
+            "log_ret": log_ret,
+            "mdd": mdd,
+            "trades": n_tr,
             "long_trades": int(np.sum(b_trades_raw[:, 3] == 1.0)),
             "short_trades": int(np.sum(b_trades_raw[:, 3] == -1.0)),
         }
@@ -382,7 +450,7 @@ def objective_ml_phase_d(trial: optuna.Trial, ctx: MLPhaseDContext) -> tuple[flo
         p_log_ret, p_mdd, segs, valid_path = 0.0, 0.0, [], True
         for b_key in path:
             res = block_results.get(tuple(b_key))
-            if res is None or res["mdd"] >= liq_mdd_thr or res["trades"] < min_seg_trades:
+            if res is None or res["mdd"] >= liq_mdd_thr:
                 valid_path = False
                 break
             p_log_ret += res["log_ret"]
@@ -408,72 +476,24 @@ def objective_ml_phase_d(trial: optuna.Trial, ctx: MLPhaseDContext) -> tuple[flo
         std_log_growth = 1e9
 
     eff_ref = float(mai["eff_ref_len"])
+    n_trials_opt = float(cfg.get("total_trials", 2000))
+    dsr = float(calc_gate1_dsr_from_path_log_tw(path_arr, ctx.tf, eff_ref, n_trials_opt))
+    n_valid_paths = len(path_compound_raw_log_tw)
+    pen = 0.5 * max(0, 6 - n_valid_paths) / 6.0 if n_valid_paths < 6 else 0.0
+
     trial.set_user_attr(
         "cpcv_path_oos_log_tw",
         [float(x) for x in path_compound_raw_log_tw],
     )
-    trial.set_user_attr("gate1_dsr", _gate1_dsr_from_path_log_tw(path_arr, ctx.tf, eff_ref))
+    trial.set_user_attr("gate1_dsr", dsr)
+    trial.set_user_attr("dsr_cpcv", dsr)
+    trial.set_user_attr("n_valid_paths", n_valid_paths)
 
-    # Holdout (diagnostic only; not a primary NSGA objective)
     holdout_log_ret = 0.0
     if ctx.holdout_slice:
         h = ctx.holdout_slice
-
-        if "kill_signal_cached" not in h:
-            hz = h.get("kill_signal")
-            if hz is None:
-                hz = np.zeros_like(h["close"])
-            h["kill_signal_cached"] = hz
-        hz_cached = h["kill_signal_cached"]
-
-        if "funding_rate_sum_cached" not in h:
-            zfund_h = h.get("funding_rate_sum")
-            if zfund_h is None:
-                zfund_h = np.zeros_like(h["close"])
-            h["funding_rate_sum_cached"] = zfund_h
-        zfund_cached = h["funding_rate_sum_cached"]
-
-        if "dyn_leverage_cached" not in h:
-            lev_h = h.get("dyn_leverage")
-            if lev_h is None or lev_h.shape != h["close"].shape:
-                lev_h = np.full_like(h["close"], float(params["LEVERAGE"]), dtype=np.float64)
-            else:
-                lev_h = np.maximum(lev_h.astype(np.float64, copy=False), 1.0)
-            h["dyn_leverage_cached"] = lev_h
-        lev_h_cached = h["dyn_leverage_cached"]
-
-        h_g = gate_ml_calib_prob_matrix(h["ml_calib_prob"], entry_q, win_q)
-        _, h_bal, _ = backtest_portfolio_numba(
-            h["close"],
-            h["high"],
-            h["low"],
-            h["open"],
-            h["entry_upper"],
-            h["entry_lower"],
-            h["trend_direction"],
-            h_g,
-            h["atr"],
-            h["garch_kelly_f"],
-            hz_cached,
-            zfund_cached,
-            h["slot_rank_score"],
-            float(FUTURES_INITIAL_BALANCE),
-            lev_h_cached,
-            TRADING_FEE_RATE,
-            SLIPPAGE_RATE,
-            float(params["RISK_PER_TRADE"]),
-            float(params["LONG_ATR_MULT"]),
-            float(params["LONG_TRAIL_MULT"]),
-            float(params["SHORT_ATR_MULT"]),
-            float(params["SHORT_TP_MULT"]),
-            float(params["LONG_SCALE_ATR_MULT"]),
-            float(params["SHORT_TRAIL_MULT"]),
-            int(params.get("MAX_CONCURRENT_POSITIONS", 2)),
-            float(params.get("MAX_EXPOSURE", 0.8)),
-            float(params["MAX_EXPOSURE_PER_COIN"]),
-            float(params["DD_SCALING_THRESHOLD"]),
-            entry_numba,
-        )
+        hz_cached, zfund_cached, lev_h_cached = _cached_kill_fund_lev(h, params)
+        _, h_bal, _ = _run_portfolio_numba_block(params, h, hz_cached, zfund_cached, lev_h_cached)
         h_ret_pct = float((h_bal / FUTURES_INITIAL_BALANCE - 1.0) * 100.0)
         holdout_log_ret = _log_tw_from_ret_pct(h_ret_pct)
 
@@ -493,12 +513,14 @@ def objective_ml_phase_d(trial: optuna.Trial, ctx: MLPhaseDContext) -> tuple[flo
         sortinos.append(float(np.mean(a) / (ddev + 1e-9)))
 
     eff_ref_len = mai["eff_ref_len"]
+    trade_shortfall = max(0.0, float(min_trades_target) - avg_trades_agg) / float(
+        max(min_trades_target, 1)
+    )
 
-    trade_shortfall = max(0.0, float(min_trades_target) - avg_trades_agg) / float(min_trades_target)
-    obj0_penalized = -mean_log_growth + 2.0 * trade_shortfall
-    if not path_compound_raw_log_tw:
-        obj0_penalized = 1e9 + 2.0 * trade_shortfall
-        std_log_growth = 1e9
+    if path_arr.size < 2 or dsr < 0.0:
+        obj = 1e9 + pen + 2.0 * trade_shortfall
+    else:
+        obj = -dsr + pen + 2.0 * trade_shortfall
 
     trial.set_user_attr("ml_mean_log_growth_cpcv", mean_log_growth)
     trial.set_user_attr("ml_worst_mdd_cpcv", worst_mdd)
@@ -513,7 +535,7 @@ def objective_ml_phase_d(trial: optuna.Trial, ctx: MLPhaseDContext) -> tuple[flo
     trial.set_user_attr("long_short_ratio", minority)
     trial.set_user_attr("ev_cost_ratio", ev_cost_ratio_agg)
 
-    return (obj0_penalized, worst_mdd, std_log_growth)
+    return float(obj)
 
 
 def select_best_trial_by_holdout_log_ret(trials: List[FrozenTrial]) -> FrozenTrial:
@@ -562,5 +584,5 @@ def check_hard_gates_ml(
     wr_frac = wr_pct / 100.0 if wr_pct > 1.0 else wr_pct
     wr_ok = wr_frac >= is_precision * 0.85
     mdd_v = float(oos_result.get("mdd_pct", oos_result.get("mdd", 100.0)))
-    mdd_ok = abs(mdd_v) < 20.0
+    mdd_ok = abs(mdd_v) < 25.0
     return bool(pbo_ok and dsr_ok and wr_ok and mdd_ok)

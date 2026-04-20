@@ -116,13 +116,43 @@ class UltimateStrategy(PipelineStrategyBase):
             kill_long = sig_out.kill_long
             kill_short = sig_out.kill_short
 
-        if st_key == "ML_CALIB_PROB":
-            apply_ml_calib_gate_column(df, self.params)
-
         close_a = df["close"].to_numpy(dtype=np.float64)
-        df["trend_direction"] = np.where(long_e, 1.0, np.where(short_e, -1.0, 0.0))
-        df["entry_upper"] = np.where(long_e, 0.0, 999999.0)
-        df["entry_lower"] = np.where(short_e, close_a, 0.0)
+        if st_key == "ML_CALIB_PROB" and bool(self.params.get("USE_CS_RANK_ENGINE", True)):
+            n = len(df)
+            gp = (
+                df["gp_alpha_00"].to_numpy(dtype=np.float64, copy=False)
+                if "gp_alpha_00" in df.columns
+                else np.zeros(n, dtype=np.float64)
+            )
+            hml = (
+                df["hmm_modulator_long"].to_numpy(dtype=np.float64, copy=False)
+                if "hmm_modulator_long" in df.columns
+                else np.ones(n, dtype=np.float64)
+            )
+            hms = (
+                df["hmm_modulator_short"].to_numpy(dtype=np.float64, copy=False)
+                if "hmm_modulator_short" in df.columns
+                else np.ones(n, dtype=np.float64)
+            )
+            df["xs_score_long"] = gp * hml
+            df["xs_score_short"] = (-gp) * hms
+            if "hmm_prob_crisis" not in df.columns:
+                df["hmm_prob_crisis"] = 0.0
+            df["ml_calib_prob"] = 1.0
+            df["ml_calib_prob_long"] = 1.0
+            df["ml_calib_prob_short"] = 1.0
+            long_e = np.zeros(n, dtype=np.bool_)
+            short_e = np.zeros(n, dtype=np.bool_)
+            rank_score = df["xs_score_long"].to_numpy(dtype=np.float64, copy=False)
+            df["trend_direction"] = 0.0
+            df["entry_upper"] = 0.0
+            df["entry_lower"] = 999999.0
+        else:
+            if st_key == "ML_CALIB_PROB":
+                apply_ml_calib_gate_column(df, self.params)
+            df["trend_direction"] = np.where(long_e, 1.0, np.where(short_e, -1.0, 0.0))
+            df["entry_upper"] = np.where(long_e, 0.0, 999999.0)
+            df["entry_lower"] = np.where(short_e, close_a, 0.0)
 
         df["entry_upper"] = self._shift_if_needed(df["entry_upper"])
         df["entry_lower"] = self._shift_if_needed(df["entry_lower"])

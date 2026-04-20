@@ -133,6 +133,10 @@ def cs_icir_fitness(
         y_valid = yv[:cnt]
         p_valid = pv[:cnt]
         
+        # Guard against constant predictions which give fake IC via rank order
+        if np.abs(np.max(p_valid) - np.min(p_valid)) < 1e-12:
+            continue
+
         order_y = np.argsort(y_valid)
         for pos in range(cnt):
             ry_full[order_y[pos]] = float(pos + 1)
@@ -457,7 +461,24 @@ class GPAlphaMiner:
             require_regime_gate=bool(fo.get("require_regime_gate", True)),
         )
 
+        # [NEW] Surviving Alpha Promotion: If gp_alpha_00 is dead but others survive, promote the best survivor to slot 00.
+        # This prevents the '0-signal' bottleneck when the primary program fails OOS or FDR gates.
+        surviving_cols = [c for c in alpha_df_all.columns if c.startswith("gp_alpha_") 
+                          and alpha_df_all[c].std() > 1e-6]
+        
+        if "gp_alpha_00" not in surviving_cols and surviving_cols:
+            best_surv = surviving_cols[0] # filter_gp_alpha_columns preserves order of input (rank)
+            _logger.info(" [PROMOTION] gp_alpha_00 failed gates. Promoting %s to slot 00.", best_surv)
+            # Swap data
+            tmp = alpha_df_all["gp_alpha_00"].copy()
+            alpha_df_all["gp_alpha_00"] = alpha_df_all[best_surv]
+            alpha_df_all[best_surv] = tmp
+            # Update best_fitness attr to reflect promoted alpha
+            # In filter_gp_alpha_columns, we don't have per-alpha fitness, but we know the order is by fitness.
+            # So the first surviving one is the best among survivors.
+
         if float(filt_meta.get("neutralize_primary", 0.0)) > 0.5:
+            _logger.warning(" [FILTER] gp_alpha_00 neutralized due to OOS decay.")
             alpha_df_all["gp_alpha_00"] = 0.5
 
         alpha_df = alpha_df_all.reindex(panel_df.index).fillna(0.5)
