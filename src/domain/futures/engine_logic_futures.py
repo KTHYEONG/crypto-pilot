@@ -85,7 +85,7 @@ def check_short_exit(
     return False, 0.0, stop_price
 
 
-@njit(inline="always")
+@njit(inline="always")  # type: ignore[untyped-decorator]
 def calculate_position_size(
     fill_price: float,
     asset_atr_pct: float,        # 코인의 내재 변동성 (ATR / Price)
@@ -133,6 +133,15 @@ def calculate_position_size(
     if sf_c < 0.0:
         sf_c = 0.0
     target_qty *= sf_c
+
+    # 5. 소액 계좌(예: $1000)를 위한 최소 먼지(Dust) 한도 보정 ($6.0 보장)
+    # Target Qty가 0보다는 크지만 최소 명목 가치에 미달할 경우 최소 사이즈로 끌어올림
+    if target_qty > 0.0 and (target_qty * fill_price) < 6.0:
+        min_qty = 6.0 / fill_price
+        if min_qty <= max_qty_by_margin:
+            target_qty = min_qty
+        else:
+            target_qty = 0.0
     
     return target_qty
 
