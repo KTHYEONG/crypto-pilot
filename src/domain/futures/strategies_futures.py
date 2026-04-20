@@ -135,7 +135,7 @@ class UltimateStrategy(PipelineStrategyBase):
                 else np.ones(n, dtype=np.float64)
             )
             df["xs_score_long"] = gp * hml
-            df["xs_score_short"] = (-gp) * hms
+            df["xs_score_short"] = gp * hms
             if "hmm_prob_crisis" not in df.columns:
                 df["hmm_prob_crisis"] = 0.0
             df["ml_calib_prob"] = 1.0
