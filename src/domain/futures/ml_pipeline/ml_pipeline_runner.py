@@ -745,7 +745,8 @@ def merge_ml_output_into_data_maps(
         drop_cols = [c for c in ml_cols if c != "datetime"]
         if sym not in maps or tf not in maps[sym]:
             continue
-        original_df = maps[sym][tf]
+        original_df = maps[sym][tf].copy()
+        original_df["datetime"] = pd.to_datetime(original_df["datetime"], utc=True)
         
         # Aggressively drop any existing ML/HMM columns to prevent _x, _y suffixes
         reserved_patterns = [

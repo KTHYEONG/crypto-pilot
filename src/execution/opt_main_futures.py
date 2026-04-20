@@ -53,6 +53,7 @@ from src.domain.futures.opt_futures_utils.objective_ml import (  # noqa: E402
     build_ml_phase_d_params,
     check_hard_gates_ml,
     objective_ml_phase_d,
+    precompute_ml_optimization_context,
     select_best_trial_by_holdout_log_ret,
 )
 from src.domain.futures.opt_futures_utils.oos_evaluator import (  # noqa: E402
@@ -100,6 +101,61 @@ def _ml_phase_d_tpe_sampler(seed: int) -> TPESampler:
         constant_liar=True,
         n_ei_candidates=24,
     )
+
+
+def _feature_slice_stats(series: pd.Series) -> tuple[float, float, float]:
+    arr = pd.to_numeric(series, errors="coerce")
+    n = max(int(arr.shape[0]), 1)
+    nan_pct = float(arr.isna().mean()) * 100.0
+    zero_pct = float((arr.notna() & (arr == 0.0)).mean()) * 100.0
+    std_v = float(arr.std(ddof=0)) if n > 0 else 0.0
+    return std_v, nan_pct, zero_pct
+
+
+def _log_ml_merge_feature_stats(
+    oos_data_maps: Dict[str, Dict[str, Any]],
+    valid_symbols: List[str],
+    tf: str,
+) -> None:
+    cols = ("gp_alpha_00", "xs_score_long", "hmm_modulator_long")
+    for col in cols:
+        for sym in valid_symbols[: min(8, len(valid_symbols))]:
+            df = oos_data_maps[sym][tf]
+            if col not in df.columns:
+                _logger.warning("[ML_MERGE] %s missing column %s", sym, col)
+                continue
+            o0 = int(oos_data_maps[sym][f"oos_start_idx_{tf}"])
+            is_ser, oos_ser = df[col].iloc[:o0], df[col].iloc[o0:]
+            is_std, is_nan, is_z = _feature_slice_stats(is_ser)
+            oos_std, oos_nan, oos_z = _feature_slice_stats(oos_ser)
+            _logger.info(
+                "[ML_MERGE] %s %s IS std=%.6f nan%%=%.2f zero%%=%.2f | "
+                "OOS std=%.6f nan%%=%.2f zero%%=%.2f",
+                sym,
+                col,
+                is_std,
+                is_nan,
+                is_z,
+                oos_std,
+                oos_nan,
+                oos_z,
+            )
+
+
+def _assert_oos_gp_signal_alive(
+    oos_data_maps: Dict[str, Dict[str, Any]], valid_symbols: List[str], tf: str
+) -> None:
+    for sym in valid_symbols[: min(5, len(valid_symbols))]:
+        df = oos_data_maps[sym][tf]
+        if "gp_alpha_00" not in df.columns:
+            raise RuntimeError(f"Pre-OOS: {sym} missing gp_alpha_00.")
+        gp = df["gp_alpha_00"]
+        if not pd.api.types.is_numeric_dtype(gp):
+            raise RuntimeError(f"Pre-OOS: {sym} gp_alpha_00 non-numeric dtype={gp.dtype}")
+        o0 = int(oos_data_maps[sym][f"oos_start_idx_{tf}"])
+        oos_std = float(pd.to_numeric(gp.iloc[o0:], errors="coerce").std(ddof=0) or 0.0)
+        if oos_std < 1e-6:
+            raise RuntimeError(f"Pre-OOS: {sym} OOS gp_alpha_00 std={oos_std:.2e} (dead signal).")
 
 
 def _ml_trial_passes_hard_gates(
@@ -325,21 +381,32 @@ def main() -> None:
 
     _logger.info("[STEP 3/5] Integrating ML Features (GP/HMM) into Data Maps...")
     merge_ml_output_into_is_and_oos(ml_out, data_maps, oos_data_maps, valid_symbols, args.tf)
+    if args.tf != "1h":
+        merge_ml_output_into_is_and_oos(ml_out, data_maps, oos_data_maps, valid_symbols, "1h")
 
-    # Safe Cache Cleanup (Avoid rmtree hang)
-    from src.domain.futures.opt_futures_utils.signal_cache import _MEM_CACHE, DISK_CACHE_ROOT
-    _MEM_CACHE.clear()
-    if DISK_CACHE_ROOT.exists():
-        for cache_file in DISK_CACHE_ROOT.glob("*.parquet"):
-            try:
-                cache_file.unlink()
-            except Exception:  # noqa: S110
-                pass
+    _log_ml_merge_feature_stats(oos_data_maps, valid_symbols, args.tf)
+
+    for sym in valid_symbols[:3]:
+        df = oos_data_maps[sym][args.tf]
+        if "gp_alpha_00" not in df.columns:
+            _logger.error("[SIG CHECK] %s: no gp_alpha_00 column.", sym)
+            raise RuntimeError(f"OOS merge missing gp_alpha_00 for {sym}.")
+        o0 = int(oos_data_maps[sym][f"oos_start_idx_{args.tf}"])
+        gp = pd.to_numeric(df["gp_alpha_00"], errors="coerce")
+        is_std = float(gp.iloc[:o0].std(ddof=0) or 0.0)
+        oos_std = float(gp.iloc[o0:].std(ddof=0) or 0.0)
+        _logger.info("[SIG CHECK] %s IS gp_std=%.6f OOS gp_std=%.6f", sym, is_std, oos_std)
+        if oos_std < 1e-4:
+            _logger.error("[ABORT] %s OOS gp_alpha_00 std < 1e-4. Check merge/tz.", sym)
+            raise RuntimeError(f"OOS signal dead for {sym}.")
 
     # [PHASE 5] Optuna Portfolio Optimization Starting
     n_ml_trials = int(args.trials)
     seed = int(OPT_FUTURES_CONFIG.get("seeds", [42])[0])
     ml_ctx = MLPhaseDContext(data_maps=data_maps, symbols=valid_symbols, tf=args.tf, seed=seed)
+    
+    # [PERFORMANCE] Precompute context upfront to avoid race conditions and per-trial overhead
+    precompute_ml_optimization_context(ml_ctx)
     
     # [VISIBILITY] Silence individual trial logs for a clean progress bar
     optuna.logging.set_verbosity(optuna.logging.WARNING)
@@ -356,7 +423,7 @@ def main() -> None:
 
     # Use TqdmCallback with explicit n_trials
     try:
-        from optuna.integration import TqdmCallback
+        from optuna.integration import TqdmCallback  # type: ignore[attr-defined]
     except ImportError:
         try:
             from optuna_integration import TqdmCallback
@@ -395,6 +462,21 @@ def main() -> None:
 
     completed = [t for t in study_ml.trials if t.state == TrialState.COMPLETE]
     completed.sort(key=lambda tr: tr.value if tr.value is not None else 1e18)
+    pruned_n = sum(1 for t in study_ml.trials if t.state == TrialState.PRUNED)
+    n_trials_all = len(study_ml.trials)
+    _logger.info(
+        "[STEP 4.5/5] completed=%d pruned=%d (zero-trade proxy: %.1f%%)",
+        len(completed),
+        pruned_n,
+        100.0 * pruned_n / max(1, n_trials_all),
+    )
+    if pruned_n >= 0.8 * max(1, n_trials_all):
+        _logger.error(
+            "[ABORT] Pruned ratio >= 80%%. Suspect signal path. "
+            "Review xs_score, gp_alpha_00, computed_dir logs.",
+        )
+        raise RuntimeError("Optimization signal path broken: mass-pruning detected.")
+
     mai = ml_ctx.multi_alignment_info or {}
     paths = mai.get("cpcv_paths")
     br = mai.get("cpcv_all_block_ranges")
@@ -428,19 +510,29 @@ def main() -> None:
             _logger.info(f"  --> Best Trial found at rank {i+1} (PBO={pbo_obs:.4f})")
             best_trial = t
             break
-    if best_trial is None and completed:
-        best_trial = select_best_trial_by_holdout_log_ret(completed)
-        _logger.warning(
-            "All completed trials fail PBO/DSR/MDD/trade gates; falling back to best holdout."
-        )
-    elif best_trial is None:
-        cand = [t for t in study_ml.trials if t.params]
-        best_trial = cand[0] if cand else None
     if best_trial is None:
-        raise RuntimeError("Optuna study produced no usable trials for best-params export.")
+        trade_ok = [
+            t
+            for t in completed
+            if float(t.user_attrs.get("avg_trades", 0.0)) >= 10.0
+        ]
+        if trade_ok:
+            best_trial = select_best_trial_by_holdout_log_ret(trade_ok)
+            _logger.warning(
+                "PBO/DSR/MDD gates failed → avg_trades>=10 fallback (n=%d).",
+                len(trade_ok),
+            )
+        else:
+            _logger.error(
+                "[ABORT] All completed trials have avg_trades < 10 (or none completed). "
+                "Signal path likely broken."
+            )
+            raise RuntimeError("No trial produced tradeable output.")
 
     params = build_ml_phase_d_params(dict(best_trial.params), args.tf)
-    
+
+    _assert_oos_gp_signal_alive(oos_data_maps, valid_symbols, args.tf)
+
     _logger.info("\n[STEP 5/5] Finalizing OOS Evaluation with Best Parameters...")
     oos_port = run_oos_margin_shared_portfolio(
         valid_symbols, args.tf, params, oos_data_maps, cache_root=FUTURES_CACHE_DIR
@@ -563,6 +655,13 @@ def main() -> None:
     _logger.info(f" Profit Factor: {oos_port['profit_factor']:>8.2f}")
     _logger.info(f" Win Rate:     {oos_port['win_rate_pct']:>8.2f}%")
     _logger.info(f" Total Trades: {oos_port['total_trades']:>8d}")
+    _logger.info(
+        " [OOS_BT_DIAG] dust_skip=%d margin_fail=%d t_dir_zero=%d p_side_zero=%d",
+        int(oos_port.get("bt_dust_skip_cnt", 0)),
+        int(oos_port.get("bt_margin_fail_cnt", 0)),
+        int(oos_port.get("bt_t_dir_zero_cnt", 0)),
+        int(oos_port.get("bt_p_side_zero_cnt", 0)),
+    )
     _logger.info(f" Calmar Ratio: {oos_port['calmar_ratio']:>8.2f}")
     _logger.info(f" Ulcer Index:  {oos_port['ulcer_index']:>8.2f}")
     _logger.info(f" DSR (Target): {best_trial.user_attrs.get('gate1_dsr', 0.0):>8.4f}")

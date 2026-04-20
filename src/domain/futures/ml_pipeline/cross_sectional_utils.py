@@ -28,10 +28,13 @@ class CrossSectionalPipelineUtils:
             if df is None or df.empty:
                 continue
             
-            # Ensure index is datetime
+            # Ensure index is datetime and UTC
             tmp = df.copy()
             if "datetime" in tmp.columns:
+                tmp["datetime"] = pd.to_datetime(tmp["datetime"], utc=True)
                 tmp.set_index("datetime", inplace=True)
+            elif tmp.index.name == "datetime":
+                tmp.index = pd.to_datetime(tmp.index, utc=True)
             
             tmp["symbol"] = sym
             all_dfs.append(tmp)

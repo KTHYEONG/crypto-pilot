@@ -73,7 +73,7 @@ def evaluate_symbol_fold(
     else:
         # [OPTIMIZATION] Use tiered signals for caching support
         full_signal: pd.DataFrame = get_tiered_signals(
-            params, symbol, tf, target_df, cast(UltimateStrategy, strategy)
+            params, symbol, tf, target_df, strategy
         )
         sig_oos, execution_start_idx = _segment_with_context(full_signal, test_start, test_end)
 
@@ -102,7 +102,7 @@ def evaluate_symbol_fold(
         merge_index_map=merge_idx,
         execution_start_idx=execution_start_idx,
     )
-    res = engine.run()
+    res = engine.run()  # type: ignore[no-untyped-call]
     eq_curve = res.get("equity_curve", np.array([10000.0]))
     final_bal = res.get("final_balance", 10000.0)
     trades_df = res.get("trades_df", pd.DataFrame())
@@ -176,6 +176,10 @@ def run_oos_margin_shared_portfolio(
             "cvar_pct": 100.0, "hw_recovery_days": 999.0, "win_rate_pct": 0.0,
             "oos_long_short_minority_pct": 0.0, "long_trades": 0, "short_trades": 0,
             "equity_curve": np.array([FUTURES_INITIAL_BALANCE]),
+            "bt_dust_skip_cnt": 0,
+            "bt_margin_fail_cnt": 0,
+            "bt_t_dir_zero_cnt": 0,
+            "bt_p_side_zero_cnt": 0,
         }
 
     engine = PortfolioBacktestEngineFast(
@@ -186,7 +190,7 @@ def run_oos_margin_shared_portfolio(
         fee_rate=TRADING_FEE_RATE,
         slippage_rate=SLIPPAGE_RATE,
     )
-    trades_df, equity_curve, final_balance = engine.run()
+    trades_df, equity_curve, final_balance, bt_diag = engine.run()
 
     # Metrics
     hours_per_bar = int(tf.replace("h", "")) if tf.endswith("h") else 4
@@ -241,6 +245,10 @@ def run_oos_margin_shared_portfolio(
         "calmar_ratio": calmar, "ulcer_index": ulcer, "short_win_rate_pct": short_wr,
         "ev_cost_ratio": ev_ratio,
         "trades_df": trades_df,
+        "bt_dust_skip_cnt": int(bt_diag[0]),
+        "bt_margin_fail_cnt": int(bt_diag[1]),
+        "bt_t_dir_zero_cnt": int(bt_diag[2]),
+        "bt_p_side_zero_cnt": int(bt_diag[3]),
     }
     if return_signal_dfs:
         out["full_signal_dfs"] = full_signal_dfs
@@ -354,7 +362,7 @@ def run_cpcv_complement_evaluation(
                 initial_balance=float(FUTURES_INITIAL_BALANCE),
                 fee_rate=TRADING_FEE_RATE, slippage_rate=SLIPPAGE_RATE,
             )
-            _, equity_curve, final_balance = engine.run()
+            _, equity_curve, final_balance, _ = engine.run()
             ret_pct = float((final_balance / FUTURES_INITIAL_BALANCE - 1.0) * 100.0)
             raw_log = _log_tw_from_ret_pct(ret_pct)
             mdd_seg = float(calc_mdd_from_equity(equity_curve)) if equity_curve.size > 0 else 0.0
@@ -373,4 +381,4 @@ def run_cpcv_complement_evaluation(
     if any(not np.isfinite(x) for x in is_scores):
         return (0.5, 0.0)
     pbo_rho = compute_pbo_from_cpcv_paths(is_scores, oos_list)
-    return cast(Tuple[float, float], pbo_rho)
+    return pbo_rho
