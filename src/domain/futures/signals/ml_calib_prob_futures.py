@@ -112,9 +112,7 @@ def _rolling_pass_mask(p: np.ndarray, q: float, window: int) -> np.ndarray:
 @register_futures_signal
 class MlCalibProbFuturesSignal:
     name: ClassVar[str] = "ML_CALIB_PROB"
-    param_space: ClassVar[Dict[str, Any]] = {
-        "ENTRY_THRESHOLD": {"type": "float", "low": 0.80, "high": 0.98, "step": 0.02},
-    }
+    param_space: ClassVar[Dict[str, Any]] = {}
 
     def compute(self, df: pd.DataFrame, params: Dict[str, Any]) -> FuturesSignalOutput:
         q = float(params.get("ENTRY_THRESHOLD", 0.90))
