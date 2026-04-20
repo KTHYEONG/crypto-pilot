@@ -442,12 +442,16 @@ def backtest_portfolio_numba(
                     continue
 
                 c_open, p_side, fill_p = open_2d[i, s], 0, 0.0
-                if t_dir > 0.0 and high_2d[i, s] > entry_upper[prev_i, s]:
-                    fill_p = max(c_open, entry_upper[prev_i, s]) * (1.0 + slippage_rate)
-                    p_side = 1
-                elif t_dir < 0.0 and low_2d[i, s] < entry_lower[prev_i, s]:
-                    fill_p = min(c_open, entry_lower[prev_i, s]) * (1.0 - slippage_rate)
-                    p_side = -1
+                if t_dir > 0.0:
+                    if entry_upper[prev_i, s] <= 1e-9 or high_2d[i, s] > entry_upper[prev_i, s]:
+                        base_p = c_open if entry_upper[prev_i, s] <= 1e-9 else max(c_open, entry_upper[prev_i, s])
+                        fill_p = base_p * (1.0 + slippage_rate)
+                        p_side = 1
+                elif t_dir < 0.0:
+                    if entry_lower[prev_i, s] <= 1e-9 or entry_lower[prev_i, s] >= 999998.0 or low_2d[i, s] < entry_lower[prev_i, s]:
+                        base_p = c_open if (entry_lower[prev_i, s] <= 1e-9 or entry_lower[prev_i, s] >= 999998.0) else min(c_open, entry_lower[prev_i, s])
+                        fill_p = base_p * (1.0 - slippage_rate)
+                        p_side = -1
 
                 if p_side == 0:
                     if use_cs_rank != 0:
