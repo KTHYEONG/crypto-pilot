@@ -37,7 +37,7 @@ OPT_FUTURES_CONFIG: Dict[str, Any] = {
     # HMM stable regime (fixed hyperparameters; not in Optuna search space)
     "FUTURES_HMM_K_STATES": 4,
     "FUTURES_HMM_KELLY_SHRINKAGE": 0.4,
-    "FUTURES_HMM_CRISIS_THRESHOLD": 0.60,
+    "FUTURES_HMM_CRISIS_THRESHOLD": 0.70,
     "FUTURES_HMM_TRANSITION_PRIOR_ALPHA": 0.2,
     "FUTURES_ML_PHASE_D_TRIALS": 500,
     "FUTURES_CPCV_N_BLOCKS": 6,

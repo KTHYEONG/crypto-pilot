@@ -12,6 +12,7 @@ from typing import Any, NamedTuple, cast
 
 import numpy as np
 import pandas as pd
+from sklearn.isotonic import IsotonicRegression
 
 from config.settings import FUTURES_CACHE_DIR, FUTURES_DATA_DIR
 from src.domain.futures.data_collector import DataCollector
@@ -105,23 +106,71 @@ def _ensure_datetime_column(df: pd.DataFrame) -> pd.DataFrame:
 
 def _is_kelly_per_semantic_state(
     p_mat: np.ndarray,
-    factor_ret: np.ndarray,
+    fwd_ret: np.ndarray,
     is_mask: np.ndarray,
     n_states: int,
-) -> np.ndarray:
-    """IS-only Kelly fraction per semantic state (hard argmax assignment)."""
-    kelly: np.ndarray = np.zeros(n_states, dtype=np.float64)
+    cols: list[str],
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    [REFACTORED] Asymmetric Long/Short Kelly with Isotonic constraints (P0 + P2).
+    Based on raw market forward returns instead of GP alpha product.
+    """
+    kelly_long: np.ndarray = np.zeros(n_states, dtype=np.float64)
+    kelly_short: np.ndarray = np.zeros(n_states, dtype=np.float64)
     state_hard = np.argmax(p_mat, axis=1).astype(np.int64)
+    
     for s in range(n_states):
         m = is_mask & (state_hard == s)
-        r = factor_ret[m]
         if np.sum(m) < 30:
-            kelly[s] = 0.0
             continue
+            
+        r = fwd_ret[m]
         mu = float(np.mean(r))
         v = float(np.var(r, ddof=1)) + 1e-12
-        kelly[s] = float(np.clip(mu / v, -1.0, 1.0))
-    return kelly
+        # Use 1.5 as clip to allow for stronger conviction in Bull/Bear
+        kelly_long[s] = float(np.clip(mu / v, -1.5, 1.5))
+        
+        mu_s = float(np.mean(-r))
+        kelly_short[s] = float(np.clip(mu_s / v, -1.5, 1.5))
+        
+    # Apply Isotonic Constraints for semantic ordering
+    # BULL=0, CHOP=1, BEAR=2, CRISIS=3 in HMM_SEMANTIC_PROB_COLUMNS
+    try:
+        # monotone decreasing: BULL >= CHOP >= BEAR >= CRISIS
+        ir = IsotonicRegression(increasing=False)
+        
+        idx_bull = cols.index("hmm_prob_bull_trend") if "hmm_prob_bull_trend" in cols else -1
+        idx_chop = cols.index("hmm_prob_chop") if "hmm_prob_chop" in cols else -1
+        idx_bear = cols.index("hmm_prob_bear_trend") if "hmm_prob_bear_trend" in cols else -1
+        idx_crisis = cols.index("hmm_prob_crisis") if "hmm_prob_crisis" in cols else -1
+        
+        if all(i >= 0 for i in [idx_bull, idx_chop, idx_bear, idx_crisis]):
+            # Long Mono: BULL >= CHOP >= BEAR >= CRISIS
+            x = np.array([0, 1, 2, 3])
+            y_l = np.array([
+                kelly_long[idx_bull],
+                kelly_long[idx_chop],
+                kelly_long[idx_bear],
+                kelly_long[idx_crisis]
+            ])
+            y_l_adj = ir.fit_transform(x, y_l)
+            kelly_long[idx_bull], kelly_long[idx_chop], \
+                kelly_long[idx_bear], kelly_long[idx_crisis] = y_l_adj
+            
+            # Short Mono: BEAR >= CHOP >= BULL >= CRISIS
+            y_s = np.array([
+                kelly_short[idx_bear],
+                kelly_short[idx_chop],
+                kelly_short[idx_bull],
+                kelly_short[idx_crisis]
+            ])
+            y_s_adj = ir.fit_transform(x, y_s)
+            kelly_short[idx_bear], kelly_short[idx_chop], \
+                kelly_short[idx_bull], kelly_short[idx_crisis] = y_s_adj
+    except Exception as e:
+        _logger.warning("Isotonic Kelly adjustment failed: %s", e)
+        
+    return kelly_long, kelly_short
 
 
 def _hmm_modulator_kelly_values(
@@ -131,51 +180,55 @@ def _hmm_modulator_kelly_values(
     btc_df: pd.DataFrame | None,
     shrink: float,
     crisis_thr: float,
-) -> np.ndarray:
-    """Posterior-weighted Kelly modulator + crisis kill switch (tmp.md Layer 2)."""
+) -> pd.DataFrame:
+    """
+    [REFACTORED] Posterior-weighted asymmetric modulators (Long/Short).
+    Returns DataFrame with columns ['hmm_modulator_long', 'hmm_modulator_short'].
+    """
     cols = _sorted_hmm_prob_columns(market_probs)
     n = len(market_probs)
     if not cols or btc_df is None or len(btc_df) < 80:
-        return np.full(n, 1.0, dtype=np.float64)
+        return pd.DataFrame({
+            "hmm_modulator_long": np.full(n, 1.0, dtype=np.float64),
+            "hmm_modulator_short": np.full(n, 1.0, dtype=np.float64)
+        })
+        
     k_states = len(cols)
-    ap = alpha_panel.reset_index()
-    if "gp_alpha_00" not in ap.columns:
-        return np.full(n, 1.0, dtype=np.float64)
-    ap["datetime"] = pd.to_datetime(ap["datetime"], utc=True)
-    g_mean = ap.groupby("datetime", sort=False)["gp_alpha_00"].mean()
-
     b = btc_df.sort_values("datetime").copy()
     b["datetime"] = pd.to_datetime(b["datetime"], utc=True)
     c = b["close"].astype(np.float64)
-    b["btc_r"] = np.log(c / c.shift(1).clip(lower=1e-12)).fillna(0.0)
+    # Forward return for Kelly calculation (Shifted back by 1)
+    b["fwd_ret"] = np.log(c.shift(-1) / c.clip(lower=1e-12)).fillna(0.0)
 
     mp = market_probs[["datetime", *cols]].copy()
     mp["datetime"] = pd.to_datetime(mp["datetime"], utc=True)
-    merged = mp.merge(b[["datetime", "btc_r"]], on="datetime", how="left")
-    merged["gp_m"] = merged["datetime"].map(g_mean).fillna(0.0)
-    merged["btc_r"] = merged["btc_r"].fillna(0.0)
-    merged["factor_ret"] = merged["gp_m"].to_numpy(dtype=np.float64) * merged["btc_r"].to_numpy(
-        dtype=np.float64
-    )
+    merged = mp.merge(b[["datetime", "fwd_ret"]], on="datetime", how="left")
+    merged["fwd_ret"] = merged["fwd_ret"].fillna(0.0)
 
-    factor_ret = merged["factor_ret"].to_numpy(dtype=np.float64)
+    fwd_ret = merged["fwd_ret"].to_numpy(dtype=np.float64)
     p_mat = (
         merged[cols].replace([np.inf, -np.inf], np.nan).fillna(1.0 / float(k_states)).to_numpy()
     )
     dt_mp = pd.to_datetime(merged["datetime"], utc=True)
     is_mask = (dt_mp < is_end_utc).to_numpy()
-    k_vec = _is_kelly_per_semantic_state(p_mat, factor_ret, is_mask, k_states)
-    blend = 1.0 + float(shrink) * (p_mat @ k_vec)
-    mod = np.clip(blend, 0.3, 1.8).astype(np.float64, copy=False)
+    
+    k_long, k_short = _is_kelly_per_semantic_state(p_mat, fwd_ret, is_mask, k_states, cols)
+    
+    # Apply shrink to deviations from 1.0
+    mod_long = np.clip(1.0 + float(shrink) * (p_mat @ k_long), 0.3, 2.0).astype(np.float64)
+    mod_short = np.clip(1.0 + float(shrink) * (p_mat @ k_short), 0.3, 2.0).astype(np.float64)
+    
+    # Apply Crisis Kill-Switch
     if "hmm_prob_crisis" in market_probs.columns:
-        pc = (
-            market_probs["hmm_prob_crisis"]
-            .replace([np.inf, -np.inf], np.nan)
-            .fillna(0.0)
-            .to_numpy(dtype=np.float64)
-        )
-        mod = np.where(pc > float(crisis_thr), 0.3, mod)
-    return cast(np.ndarray, mod)
+        pc = market_probs["hmm_prob_crisis"].fillna(0.0).to_numpy(dtype=np.float64)
+        # In crisis, both directions are forced down to 0.3
+        mod_long = np.where(pc > float(crisis_thr), 0.3, mod_long)
+        mod_short = np.where(pc > float(crisis_thr), 0.3, mod_short)
+        
+    return pd.DataFrame({
+        "hmm_modulator_long": mod_long,
+        "hmm_modulator_short": mod_short
+    })
 
 
 def _try_tbm_labels_per_1h_row(
@@ -238,7 +291,10 @@ def _apply_ml_calib_probs(
     df_1m_prefetch: pd.DataFrame | None = None,
 ) -> None:
     """Set ml_calib_prob_{long,short} via MetaLabeler (+ softmax) or GP x HMM softmax only."""
-    hmm_m = aligned_tf["hmm_modulator"].to_numpy(dtype=np.float64)
+    # [REFACTORED] Use Asymmetric Long/Short Modulators
+    hmm_m_long = aligned_tf["hmm_modulator_long"].to_numpy(dtype=np.float64)
+    hmm_m_short = aligned_tf["hmm_modulator_short"].to_numpy(dtype=np.float64)
+    
     raw_long: np.ndarray | None = None
     raw_short: np.ndarray | None = None
 
@@ -269,16 +325,17 @@ def _apply_ml_calib_probs(
                 meta.fit(X_w, y_ser, is_end_idx)
                 X_a = aligned_tf[list(meta_feats)].replace([np.inf, -np.inf], np.nan).fillna(0.0)
                 pl, ps = meta.predict_proba_calibrated(X_a)
-                raw_long = np.clip(pl.astype(np.float64) * hmm_m, 0.0, None)
-                raw_short = np.clip(ps.astype(np.float64) * hmm_m, 0.0, None)
+                # Apply asymmetric modulators
+                raw_long = np.clip(pl.astype(np.float64) * hmm_m_long, 0.0, None)
+                raw_short = np.clip(ps.astype(np.float64) * hmm_m_short, 0.0, None)
             except Exception:
                 raw_long = None
                 raw_short = None
 
     if raw_long is None or raw_short is None:
         gp = aligned_tf["gp_alpha_00"].to_numpy(dtype=np.float64)
-        raw_long = np.clip(gp * hmm_m, 0.0, None)
-        raw_short = np.clip((1.0 - gp) * hmm_m, 0.0, None)
+        raw_long = np.clip(gp * hmm_m_long, 0.0, None)
+        raw_short = np.clip((1.0 - gp) * hmm_m_short, 0.0, None)
 
     denom = raw_long + raw_short + 1e-12
     aligned_tf["ml_calib_prob_long"] = raw_long / denom
@@ -322,9 +379,12 @@ def _step4_fusion_one_symbol(
         if sym not in valid_alpha_set:
             wide_1h = df_1h.copy()
             wide_1h["gp_alpha_00"] = 0.0
-            wide_1h["slot_rank_score"] = 0.0
+            # [REFACTORED] Merge asymmetric modulators
             wide_1h = pd.merge(wide_1h, hmm_modulator, on="datetime", how="left")
-            wide_1h["hmm_modulator"] = wide_1h["hmm_modulator"].fillna(0.8)
+            wide_1h["hmm_modulator_long"] = wide_1h["hmm_modulator_long"].fillna(0.8)
+            wide_1h["hmm_modulator_short"] = wide_1h["hmm_modulator_short"].fillna(0.8)
+            wide_1h["slot_rank_score"] = 0.0
+            
             if hmm_cols_ref:
                 mp_h = market_probs[["datetime", *hmm_cols_ref]]
                 wide_1h = wide_1h.merge(mp_h, on="datetime", how="left")
@@ -337,9 +397,16 @@ def _step4_fusion_one_symbol(
             sym_alpha = alpha_by_sym[sym].copy()
             sym_alpha["datetime"] = pd.to_datetime(sym_alpha["datetime"], utc=True)
             wide_1h = pd.merge(df_1h, sym_alpha, on="datetime", how="left").fillna(0.0)
+            
+            # [REFACTORED] Merge asymmetric modulators
             wide_1h = pd.merge(wide_1h, hmm_modulator, on="datetime", how="left")
-            wide_1h["hmm_modulator"] = wide_1h["hmm_modulator"].fillna(0.8)
-            wide_1h["slot_rank_score"] = wide_1h["gp_alpha_00"] * wide_1h["hmm_modulator"]
+            wide_1h["hmm_modulator_long"] = wide_1h["hmm_modulator_long"].fillna(0.8)
+            wide_1h["hmm_modulator_short"] = wide_1h["hmm_modulator_short"].fillna(0.8)
+            
+            # Use mean of long/short modulator for ranking score
+            m_avg = (wide_1h["hmm_modulator_long"] + wide_1h["hmm_modulator_short"]) / 2.0
+            wide_1h["slot_rank_score"] = wide_1h["gp_alpha_00"] * m_avg
+            
             if hmm_cols_ref:
                 mp_h = market_probs[["datetime", *hmm_cols_ref]]
                 wide_1h = wide_1h.merge(mp_h, on="datetime", how="left")
@@ -351,7 +418,6 @@ def _step4_fusion_one_symbol(
 
         df_tf_full = data_maps[sym][tf].copy()
         df_tf_full["datetime"] = pd.to_datetime(df_tf_full["datetime"], utc=True)
-        # Direct merge since main TF is now 1h (same as features)
         aligned_tf = pd.merge(df_tf_full, wide_1h, on="datetime", how="left").fillna(0.0)
 
         _apply_ml_calib_probs(
@@ -565,19 +631,17 @@ def run_ml_pipeline_for_universe(
     market_probs["datetime"] = pd.to_datetime(market_probs["datetime"], utc=True)
     btc_anchor = next((s for s in symbols if "BTC" in s), None)
     btc_1h = prefetched_1h.get(btc_anchor) if btc_anchor else None
-    hmm_modulator = pd.DataFrame(
-        {
-            "datetime": market_probs["datetime"],
-            "hmm_modulator": _hmm_modulator_kelly_values(
-                market_probs,
-                alpha_panel,
-                is_end_utc,
-                btc_1h,
-                float(cfg.get("FUTURES_HMM_KELLY_SHRINKAGE", 0.4)),
-                float(cfg.get("FUTURES_HMM_CRISIS_THRESHOLD", 0.6)),
-            ),
-        }
+    
+    # [REFACTORED] Calculate Asymmetric Modulators
+    hmm_modulator = _hmm_modulator_kelly_values(
+        market_probs,
+        alpha_panel,
+        is_end_utc,
+        btc_1h,
+        float(cfg.get("FUTURES_HMM_KELLY_SHRINKAGE", 0.4)),
+        float(cfg.get("FUTURES_HMM_CRISIS_THRESHOLD", 0.7)),
     )
+    hmm_modulator["datetime"] = market_probs["datetime"]
 
     if hmm_only:
         _logger.info("\n" + "=" * 85)
@@ -601,15 +665,16 @@ def run_ml_pipeline_for_universe(
         
         if cols and len(market_probs) == len(market_hmm_feats):
             # Align everything
-            df_eval = market_probs[['datetime'] + cols].copy()
+            df_eval = market_probs[['datetime', *cols]].copy()
             df_eval['dominant_state'] = df_eval[cols].idxmax(axis=1)
             
             # Merge Modulator
-            df_eval = pd.merge(df_eval, hmm_modulator[['datetime', 'hmm_modulator']], on='datetime', how='left')
+            df_eval = pd.merge(df_eval, hmm_modulator, on='datetime', how='left')
             
             # Merge Features
             feat_tmp = market_hmm_feats.copy().reset_index()
-            df_eval = pd.merge(df_eval, feat_tmp[['datetime', 'btc_trend_vol_adj_24h', 'realized_vol_regime']], on='datetime', how='left')
+            feat_cols_to_merge = ['datetime', 'btc_trend_vol_adj_24h', 'realized_vol_regime']
+            df_eval = pd.merge(df_eval, feat_tmp[feat_cols_to_merge], on='datetime', how='left')
             
             # Calculate BTC 24h Forward Return if available
             has_return = False
@@ -617,7 +682,9 @@ def run_ml_pipeline_for_universe(
                 btc_tmp = btc_1h[['datetime', 'close']].copy()
                 btc_tmp['datetime'] = pd.to_datetime(btc_tmp['datetime'], utc=True)
                 btc_tmp['fwd_ret_24h'] = btc_tmp['close'].pct_change(24).shift(-24)
-                df_eval = pd.merge(df_eval, btc_tmp[['datetime', 'fwd_ret_24h']], on='datetime', how='left')
+                df_eval = pd.merge(
+                    df_eval, btc_tmp[['datetime', 'fwd_ret_24h']], on='datetime', how='left'
+                )
                 has_return = True
             
             # Print Global Averages
@@ -625,7 +692,9 @@ def run_ml_pipeline_for_universe(
             means = market_probs[cols].mean()
             for c, m in means.items():
                 _logger.info(f"   - {c:<25}: {m:.4f}")
-            _logger.info(f"   - Global Kelly Modulator : {df_eval['hmm_modulator'].mean():.4f}")
+            avg_mod_l = df_eval['hmm_modulator_long'].mean()
+            avg_mod_s = df_eval['hmm_modulator_short'].mean()
+            _logger.info(f"   - Global Modulator (L/S): {avg_mod_l:.2f} / {avg_mod_s:.2f}")
             _logger.info("-" * 40)
             
             # Print Per-State Profile
@@ -636,18 +705,26 @@ def run_ml_pipeline_for_universe(
                 if len(g) > 0:
                     avg_trend = g['btc_trend_vol_adj_24h'].mean()
                     avg_vol = g['realized_vol_regime'].mean()
-                    avg_mod = g['hmm_modulator'].mean()
+                    avg_mod_l = g['hmm_modulator_long'].mean()
+                    avg_mod_s = g['hmm_modulator_short'].mean()
                     
                     ret_str = "N/A"
                     if has_return:
                         avg_ret = g['fwd_ret_24h'].mean() * 100
                         ret_str = f"{avg_ret:>+6.2f}%"
                         
-                    _logger.info(f"   ► {state.replace('hmm_prob_', '').upper():<11} ({pct:>5.1f}% time)")
-                    _logger.info(f"      Kelly Mod: {avg_mod:.2f} | 24h Fwd Ret: {ret_str}")
-                    _logger.info(f"      Avg Trend: {avg_trend:>+5.2f} | Avg Vol:     {avg_vol:.2f}")
+                    st_name = state.replace('hmm_prob_', '').upper()
+                    _logger.info(f"   ► {st_name:<11} ({pct:>5.1f}% time)")
+                    _logger.info(
+                        f"      Kelly Mod (L/S): {avg_mod_l:.2f} / {avg_mod_s:.2f} | "
+                        f"24h Fwd Ret: {ret_str}"
+                    )
+                    _logger.info(
+                        f"      Avg Trend: {avg_trend:>+5.2f} | Avg Vol:     {avg_vol:.2f}"
+                    )
                 else:
-                    _logger.info(f"   ► {state.replace('hmm_prob_', '').upper():<11} (  0.0% time)")
+                    st_name = state.replace('hmm_prob_', '').upper()
+                    _logger.info(f"   ► {st_name:<11} (  0.0% time)")
 
         _logger.info("-" * 85)
         _logger.info(" [RESULT] HMM-Only analysis complete. Skipping Fusion.")
