@@ -142,7 +142,9 @@ def get_tiered_signals(
         df = strategy.compute_signal_regime_component(df)
         cols = [
             "trend_direction", "entry_upper", "entry_lower",
-            "kill_signal", "slot_rank_score", "strength_filter", "regime_risk_mult"
+            "kill_signal", "slot_rank_score", "strength_filter", "regime_risk_mult",
+            "xs_score_long", "xs_score_short", "hmm_prob_crisis",
+            "hmm_modulator_long", "hmm_modulator_short",
         ]
         t2_data = {c: df[c].to_numpy(dtype=np.float64) for c in cols if c in df.columns}
         _save_npz(t2_path, t2_data)
