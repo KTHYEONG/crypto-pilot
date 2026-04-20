@@ -40,9 +40,13 @@ OPT_FUTURES_CONFIG: Dict[str, Any] = {
     "FUTURES_HMM_CRISIS_THRESHOLD": 0.70,
     "FUTURES_HMM_TRANSITION_PRIOR_ALPHA": 0.2,
     "FUTURES_ML_PHASE_D_TRIALS": 500,
-    "FUTURES_CPCV_N_BLOCKS": 6,
-    "FUTURES_CPCV_K_TEST": 2,
+    "FUTURES_CPCV_N_BLOCKS": 8,
+    "FUTURES_CPCV_K_TEST": 3,
     "FUTURES_WF_OOS_LEGS": 3,
+    # R-6: per WF OOS leg, retrain systemic HMM on data strictly before leg start (GP frozen).
+    "FUTURES_WF_HMM_LEG_REFIT": True,
+    "FUTURES_WF_LEG_TW_MIN_ALL": 1.0,
+    "FUTURES_WF_LEG_TW_MEAN_MIN": 1.05,
     # Phase 2: entry gate (rolling quantile), TBM horizon (1m bars), meta purge alignment
     "ENTRY_QUANTILE_WINDOW": 240,
     "FUTURES_ENTRY_NUMBA_THRESHOLD": 0.5,
@@ -50,7 +54,10 @@ OPT_FUTURES_CONFIG: Dict[str, Any] = {
     "FUTURES_TBM_VOL_SCALE_WINDOW": 24,
     "FUTURES_META_VERTICAL_BARRIER_BARS": 24,
     "FUTURES_META_MIN_POS_ISOTONIC": 200,
-    # Phase 3: no softmax on ML probs; WF MetaLabeler refit; optional PBO/DSR hard gate after Optuna
+    "FUTURES_USE_META_LABELER": False,
+    "FUTURES_CRISIS_GATE_PROB_DEFAULT": 0.7,
+    "FUTURES_MIN_TRADES_TARGET": 10,
+    # Phase 3: WF refit HMM-only when Meta disabled; optional PBO/DSR hard gate after Optuna
     "FUTURES_ML_WF_REFIT_ENABLED": True,
     "FUTURES_ML_WF_REFIT_LEGS": 3,
     "FUTURES_PHASE3_HARD_GATE": True,
@@ -77,6 +84,11 @@ PORTFOLIO_PARAM_SPACE_FUTURES: Dict[str, Dict[str, Any]] = {
 ENGINE_PARAM_SPACE_FUTURES: Dict[str, Dict[str, Any]] = {
     **SIGNAL_PARAM_SPACE_FUTURES,
     **PORTFOLIO_PARAM_SPACE_FUTURES,
+    "K_LONG": {"type": "int", "low": 1, "high": 4, "step": 1},
+    "K_SHORT": {"type": "int", "low": 1, "high": 4, "step": 1},
+    "REBALANCE_BARS": {"type": "categorical", "choices": (1, 3, 6, 12)},
+    "MIN_SCORE_PERCENTILE": {"type": "float", "low": 0.50, "high": 0.85, "step": 0.05},
+    "CRISIS_GATE_PROB": {"type": "float", "low": 0.50, "high": 0.85, "step": 0.05},
 }
 
 # Dynamic Universe Anchor Symbols

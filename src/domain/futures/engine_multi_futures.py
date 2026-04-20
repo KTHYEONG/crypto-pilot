@@ -24,6 +24,30 @@ from src.domain.futures.engine_logic_futures import (
 _logger: logging.Logger = logging.getLogger(__name__)
 
 
+@njit(cache=True)  # type: ignore[untyped-decorator]
+def _insertion_sort_asc_buf(buf: np.ndarray, n: int) -> None:
+    for i in range(1, n):
+        key = buf[i]
+        j = i - 1
+        while j >= 0 and buf[j] > key:
+            buf[j + 1] = buf[j]
+            j -= 1
+        buf[j + 1] = key
+
+
+@njit(cache=True)  # type: ignore[untyped-decorator]
+def _linear_quantile_sorted(buf: np.ndarray, n: int, q: float) -> float:
+    if n <= 0:
+        return 0.0
+    qq = 0.0 if q < 0.0 else (1.0 if q > 1.0 else q)
+    idx = int((n - 1) * qq)
+    if idx < 0:
+        idx = 0
+    if idx >= n:
+        idx = n - 1
+    return float(buf[idx])
+
+
 class PortfolioBacktestEngineFast:
     def __init__(
         self,
@@ -60,12 +84,29 @@ class PortfolioBacktestEngineFast:
         entry_lower = self.data["entry_lower"]
         trend_dir = self.data["trend_direction"]
         # In optimized design, strength_filter is the raw probability
-        strength_filter_raw = self.data.get("ml_calib_prob", self.data.get("strength_filter", np.zeros_like(close_2d)))
+        strength_filter_raw = self.data.get(
+            "ml_calib_prob", self.data.get("strength_filter", np.zeros_like(close_2d))
+        )
         atr_2d = self.data["atr"]
         garch_kelly_f = self.data["garch_kelly_f"]
         kill_signal = self.data.get("kill_signal", np.zeros_like(close_2d))
         funding_rate = self.data.get("funding_rate_sum", np.zeros_like(close_2d))
         slot_rank_score = self.data["slot_rank_score"]
+        xs_long = self.data.get("xs_score_long")
+        xs_short = self.data.get("xs_score_short")
+        hmm_crisis = self.data.get("hmm_prob_crisis")
+        hmm_mod_l = self.data.get("hmm_modulator_long")
+        hmm_mod_s = self.data.get("hmm_modulator_short")
+        if xs_long is None or xs_long.shape != close_2d.shape:
+            xs_long = np.zeros_like(close_2d, dtype=np.float64)
+        if xs_short is None or xs_short.shape != close_2d.shape:
+            xs_short = np.zeros_like(close_2d, dtype=np.float64)
+        if hmm_crisis is None or hmm_crisis.shape != close_2d.shape:
+            hmm_crisis = np.zeros_like(close_2d, dtype=np.float64)
+        if hmm_mod_l is None or hmm_mod_l.shape != close_2d.shape:
+            hmm_mod_l = np.ones_like(close_2d, dtype=np.float64)
+        if hmm_mod_s is None or hmm_mod_s.shape != close_2d.shape:
+            hmm_mod_s = np.ones_like(close_2d, dtype=np.float64)
 
         l_atr_mult = float(self.params.get("LONG_ATR_MULT", 3.0))
         l_trail_mult = float(self.params.get("LONG_TRAIL_MULT", 3.0))
@@ -76,7 +117,12 @@ class PortfolioBacktestEngineFast:
 
         max_exp_per_coin = float(self.params.get("MAX_EXPOSURE_PER_COIN", 1.5))
         dd_scaling_threshold = float(self.params.get("DD_SCALING_THRESHOLD", 0.15))
-        entry_threshold = float(self.params.get("ENTRY_THRESHOLD", 0.5))
+        k_long = int(self.params.get("K_LONG", 2))
+        k_short = int(self.params.get("K_SHORT", 2))
+        rebalance_bars = max(1, int(self.params.get("REBALANCE_BARS", 6)))
+        min_score_pct = float(self.params.get("MIN_SCORE_PERCENTILE", 0.65))
+        crisis_gate = float(self.params.get("CRISIS_GATE_PROB", 0.70))
+        use_cs_rank = 1 if bool(self.params.get("USE_CS_RANK_ENGINE", True)) else 0
 
         lev_2d = self.data.get("dyn_leverage")
         if lev_2d is None or lev_2d.shape != close_2d.shape:
@@ -98,6 +144,11 @@ class PortfolioBacktestEngineFast:
             kill_signal,
             funding_rate,
             slot_rank_score,
+            np.ascontiguousarray(xs_long, dtype=np.float64),
+            np.ascontiguousarray(xs_short, dtype=np.float64),
+            np.ascontiguousarray(hmm_crisis, dtype=np.float64),
+            np.ascontiguousarray(hmm_mod_l, dtype=np.float64),
+            np.ascontiguousarray(hmm_mod_s, dtype=np.float64),
             self.initial_balance,
             lev_2d,
             self.fee_rate,
@@ -113,7 +164,12 @@ class PortfolioBacktestEngineFast:
             self.max_exposure,
             max_exp_per_coin,
             dd_scaling_threshold,
-            entry_threshold,
+            k_long,
+            k_short,
+            rebalance_bars,
+            min_score_pct,
+            crisis_gate,
+            use_cs_rank,
         )
 
         if trades_arr.size == 0:
@@ -137,6 +193,90 @@ class PortfolioBacktestEngineFast:
 
 
 @njit(nogil=True, cache=True)  # type: ignore[untyped-decorator]
+def _recompute_cs_dirs_numba(
+    prev_i: int,
+    n_syms: int,
+    xs_long: np.ndarray,
+    xs_short: np.ndarray,
+    hmm_crisis: np.ndarray,
+    crisis_thr: float,
+    k_long: int,
+    k_short: int,
+    min_score_pct: float,
+    computed_dir: np.ndarray,
+    work_buf: np.ndarray,
+) -> None:
+    """Cross-sectional rank top-K + percentile; conflict by |long| vs |short|; crisis blocks all."""
+    computed_dir[:] = 0.0
+    crisis_max = 0.0
+    for s in range(n_syms):
+        c = float(hmm_crisis[prev_i, s])
+        if np.isfinite(c) and c > crisis_max:
+            crisis_max = c
+    if crisis_max > crisis_thr:
+        return
+
+    n_l = 0
+    for s in range(n_syms):
+        v = xs_long[prev_i, s]
+        if np.isfinite(v):
+            work_buf[n_l] = v
+            n_l += 1
+    q_long = 0.0
+    if n_l > 0:
+        _insertion_sort_asc_buf(work_buf, n_l)
+        q_long = _linear_quantile_sorted(work_buf, n_l, min_score_pct)
+
+    n_s = 0
+    for s in range(n_syms):
+        v = xs_short[prev_i, s]
+        if np.isfinite(v):
+            work_buf[n_s] = v
+            n_s += 1
+    q_short = 0.0
+    if n_s > 0:
+        _insertion_sort_asc_buf(work_buf, n_s)
+        # For negative scores, the 'best' are the most negative (lowest quantile).
+        # min_score_pct=0.7 means we want top 30% of strength.
+        q_short = _linear_quantile_sorted(work_buf, n_s, 1.0 - min_score_pct)
+
+    for s in range(n_syms):
+        sl = xs_long[prev_i, s]
+        ss = xs_short[prev_i, s]
+        if not np.isfinite(sl) or not np.isfinite(ss):
+            continue
+
+        rank_l = 1
+        for t in range(n_syms):
+            if t == s:
+                continue
+            vt = xs_long[prev_i, t]
+            if np.isfinite(vt) and vt > sl:
+                rank_l += 1
+
+        rank_s = 1
+        for t in range(n_syms):
+            if t == s:
+                continue
+            vt = xs_short[prev_i, t]
+            if np.isfinite(vt) and vt < ss:
+                rank_s += 1
+
+        long_ok = rank_l <= k_long and sl >= q_long
+        # For shorts, strength is more negative, so ss <= q_short
+        short_ok = rank_s <= k_short and ss <= q_short
+        if long_ok and short_ok:
+            if abs(sl) > abs(ss):
+                computed_dir[s] = 1.0
+            else:
+                computed_dir[s] = -1.0
+        elif long_ok:
+            computed_dir[s] = 1.0
+        elif short_ok:
+            computed_dir[s] = -1.0
+
+
+@njit(nogil=True, cache=True)  # type: ignore[untyped-decorator]
 def backtest_portfolio_numba(
     close_2d: np.ndarray,
     high_2d: np.ndarray,
@@ -151,6 +291,11 @@ def backtest_portfolio_numba(
     kill_signal: np.ndarray,
     funding_rate: np.ndarray,
     slot_rank_score: np.ndarray,
+    xs_long: np.ndarray,
+    xs_short: np.ndarray,
+    hmm_crisis: np.ndarray,
+    hmm_mod_long: np.ndarray,
+    hmm_mod_short: np.ndarray,
     initial_balance: float,
     lev_2d: np.ndarray,
     fee_rate: float,
@@ -166,10 +311,19 @@ def backtest_portfolio_numba(
     max_exposure: float,
     max_exp_per_coin: float,
     dd_scaling_threshold: float,
-    entry_threshold: float,
+    k_long: int,
+    k_short: int,
+    rebalance_bars: int,
+    min_score_pct: float,
+    crisis_gate: float,
+    use_cs_rank: int,
 ) -> tuple[np.ndarray, float, np.ndarray]:
     n_bars = close_2d.shape[0]
     n_syms = close_2d.shape[1]
+
+    computed_dir = np.zeros(n_syms, dtype=np.float64)
+    work_rank = np.empty(n_syms, dtype=np.float64)
+    prev_rebalance_bucket = -999999
 
     balance = initial_balance
     equity_curve = np.zeros(n_bars, dtype=np.float64)
@@ -278,21 +432,43 @@ def backtest_portfolio_numba(
         free_margin = current_equity - used_margin_total
         if num_open_pos < max_concurrent:
             prev_i, n_cands = i - 1, 0
+            if use_cs_rank != 0 and prev_i >= 0:
+                bucket = prev_i // rebalance_bars if rebalance_bars > 0 else prev_i
+                if bucket != prev_rebalance_bucket:
+                    prev_rebalance_bucket = bucket
+                    _recompute_cs_dirs_numba(
+                        prev_i,
+                        n_syms,
+                        xs_long,
+                        xs_short,
+                        hmm_crisis,
+                        crisis_gate,
+                        k_long,
+                        k_short,
+                        min_score_pct,
+                        computed_dir,
+                        work_rank,
+                    )
+
             for s in range(n_syms):
                 if in_pos[s] or just_exited[s] or np.isnan(open_2d[i, s]): continue
-                
-                sf_raw = strength_filter_raw[prev_i, s]
-                if sf_raw < entry_threshold: continue
-                
-                sf = 1.0 
-                t_dir = trend_dir[prev_i, s]
-                if t_dir == 0: continue
-                
+
+                sf = 1.0
+                if use_cs_rank != 0:
+                    t_dir = computed_dir[s]
+                else:
+                    sf_raw = strength_filter_raw[prev_i, s]
+                    if sf_raw < 0.5:
+                        continue
+                    t_dir = trend_dir[prev_i, s]
+                if t_dir == 0.0:
+                    continue
+
                 c_open, p_side, fill_p = open_2d[i, s], 0, 0.0
-                if t_dir == 1 and high_2d[i, s] > entry_upper[prev_i, s]:
+                if t_dir == 1.0 and high_2d[i, s] > entry_upper[prev_i, s]:
                     fill_p = max(c_open, entry_upper[prev_i, s]) * (1.0 + slippage_rate)
                     p_side = 1
-                elif t_dir == -1 and low_2d[i, s] < entry_lower[prev_i, s]:
+                elif t_dir == -1.0 and low_2d[i, s] < entry_lower[prev_i, s]:
                     fill_p = min(c_open, entry_lower[prev_i, s]) * (1.0 - slippage_rate)
                     p_side = -1
 
@@ -301,7 +477,24 @@ def backtest_portfolio_numba(
                     lev_entry = float(lev_2d[i, s])
                     if lev_entry < 1.0:
                         lev_entry = 1.0
-                    target_qty = calculate_position_size(fill_p, atr_p, current_equity, free_margin, effective_risk_per_trade, lev_entry, sf, garch_kelly_f[prev_i, s], max_exp_per_coin)
+                    gk0 = garch_kelly_f[prev_i, s]
+                    if p_side == 1:
+                        gk_use = gk0 * hmm_mod_long[prev_i, s]
+                    else:
+                        gk_use = gk0 * hmm_mod_short[prev_i, s]
+                    if not np.isfinite(gk_use) or gk_use < 0.0:
+                        gk_use = 0.0
+                    target_qty = calculate_position_size(
+                        fill_p,
+                        atr_p,
+                        current_equity,
+                        free_margin,
+                        effective_risk_per_trade,
+                        lev_entry,
+                        sf,
+                        gk_use,
+                        max_exp_per_coin,
+                    )
                     if target_qty > 0:
                         # Sort key: |rank| so strong SHORT (negative rank) competes fairly vs weak LONG
                         candidate_pool[n_cands] = [
