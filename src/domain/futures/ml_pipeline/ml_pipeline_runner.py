@@ -767,7 +767,7 @@ def merge_ml_output_into_data_maps(
         merged = merged.sort_values("datetime")
         if "gp_alpha_00" in merged.columns:
             nan_pct = float(merged["gp_alpha_00"].isna().mean() * 100.0)
-            _logger.info(
+            _logger.debug(
                 " [MERGE%s] %s %s gp_alpha_00 NaN ratio: %.4f%%",
                 log_tag,
                 sym,
