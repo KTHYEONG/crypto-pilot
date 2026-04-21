@@ -244,6 +244,7 @@ def run_oos_margin_shared_portfolio(
         "cvar_pct": cvar, "hw_recovery_days": hw_days, "oos_long_short_minority_pct": minority_pct,
         "calmar_ratio": calmar, "ulcer_index": ulcer, "short_win_rate_pct": short_wr,
         "ev_cost_ratio": ev_ratio,
+        "avg_trade_pnl_pct": float(trades_df["pnl"].mean() * 100.0) if not trades_df.empty else 0.0,
         "trades_df": trades_df,
         "bt_dust_skip_cnt": int(bt_diag[0]),
         "bt_margin_fail_cnt": int(bt_diag[1]),
