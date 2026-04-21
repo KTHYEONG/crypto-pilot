@@ -269,7 +269,7 @@ def _log_precompute_computed_dir_sample(
         out,
     )
     mags = np.abs(out)
-    _logger.info(
+    _logger.debug(
         "[ML_OPT][precompute] computed_dir |.| mid_bar=%d "
         "std=%.6f mean=%.6f max=%.6f nonzero_frac=%.4f",
         prev_i,
@@ -284,7 +284,7 @@ def _log_precompute_computed_dir_sample(
         float(np.nanpercentile(flat_l, 50)),
         float(np.nanpercentile(flat_l, 99)),
     )
-    _logger.info(
+    _logger.debug(
         "[ML_OPT][precompute] xs_score_long row quantiles p01/p50/p99=%.6f/%.6f/%.6f",
         q1,
         q50,
@@ -529,7 +529,7 @@ def objective_ml_phase_d(trial: optuna.Trial, ctx: MLPhaseDContext) -> float:
         n_tr = int(b_trades_raw.shape[0])
         all_trades_chunks.append(b_trades_raw)
         if trial.number < 3:
-            _logger.info(
+            _logger.debug(
                 "[ML_OPT][trial=%d] CPCV block=%s trades=%d "
                 "diag[dust,margin,tdir0,pside0]=[%d,%d,%d,%d]",
                 trial.number,
@@ -543,7 +543,7 @@ def objective_ml_phase_d(trial: optuna.Trial, ctx: MLPhaseDContext) -> float:
         if not first_bt_done:
             first_bt_done = True
             if n_tr == 0:
-                _logger.error(
+                _logger.debug(
                     "[ML_OPT][trial=%d] Prune: first CPCV block %s produced 0 trades. "
                     "diag[dust,margin,tdir0,pside0]=[%d,%d,%d,%d]",
                     trial.number,

@@ -148,7 +148,7 @@ class PortfolioBacktestEngineFast:
             use_cs_rank,
         )
 
-        _logger.info(
+        _logger.debug(
             "[BT_DIAG] dust_skip=%d margin_fail=%d t_dir_zero=%d p_side_zero=%d",
             int(bt_diag[0]),
             int(bt_diag[1]),
