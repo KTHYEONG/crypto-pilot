@@ -1,0 +1,21 @@
+# Gemini-specific ignore patterns
+# This file allows Gemini CLI to access .gemini and .agents folders 
+# while they remain ignored by Git.
+
+# Include common ignores from .gitignore
+node_modules/
+__pycache__/
+*.pyc
+.DS_Store
+
+# Explicitly ALLOW skills folders
+!.gemini/
+!.gemini/skills/
+!.agents/
+!.agents/skills/
+
+# Keep other things ignored if needed
+.env
+.venv
+logs/
+data/
