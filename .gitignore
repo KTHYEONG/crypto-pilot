@@ -11,6 +11,9 @@ data/
 CLAUDE.md
 .claude/
 
+# gemini
+.gemini/
+
 # cache
 .spot_signal_cache/
 
