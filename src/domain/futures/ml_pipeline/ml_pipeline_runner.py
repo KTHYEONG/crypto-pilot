@@ -410,7 +410,9 @@ def _apply_ml_calib_probs(
         else np.zeros(len(aligned_tf), dtype=np.float64)
     )
     aligned_tf["xs_score_long"] = gp * hmm_m_long
-    aligned_tf["xs_score_short"] = gp * hmm_m_short
+    # Invert hms for short ranking: lower xs_short = better short in numba CS ranker.
+    # BEAR/CRISIS (hms>1): gp/hms < gp → lower → ranked higher as short. ✓
+    aligned_tf["xs_score_short"] = gp / np.maximum(hmm_m_short, 0.1)
 
     meta_on = bool(use_meta) and bool(OPT_FUTURES_CONFIG.get("FUTURES_USE_META_LABELER", False))
 
