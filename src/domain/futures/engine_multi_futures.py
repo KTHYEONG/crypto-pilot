@@ -194,6 +194,32 @@ def _recompute_cs_dirs_numba(
     fk = float(k_long)
     fks = float(k_short)
 
+    # 1. Compute cross-sectional mean and std for Z-scoring
+    mean_l, mean_s = 0.0, 0.0
+    count_l, count_s = 0, 0
+    for s in range(n_syms):
+        vl = float(xs_long[prev_i, s])
+        if np.isfinite(vl):
+            mean_l += vl
+            count_l += 1
+        vs = float(xs_short[prev_i, s])
+        if np.isfinite(vs):
+            mean_s += vs
+            count_s += 1
+    if count_l > 0: mean_l /= count_l
+    if count_s > 0: mean_s /= count_s
+
+    std_l, std_s = 0.0, 0.0
+    for s in range(n_syms):
+        vl = float(xs_long[prev_i, s])
+        if np.isfinite(vl): std_l += (vl - mean_l)**2
+        vs = float(xs_short[prev_i, s])
+        if np.isfinite(vs): std_s += (vs - mean_s)**2
+    if count_l > 1: std_l = np.sqrt(std_l / (count_l - 1))
+    if count_s > 1: std_s = np.sqrt(std_s / (count_s - 1))
+    std_l = std_l if std_l > 1e-9 else 1e-9
+    std_s = std_s if std_s > 1e-9 else 1e-9
+
     for s in range(n_syms):
         sl = float(xs_long[prev_i, s])
         ss = float(xs_short[prev_i, s])
@@ -226,23 +252,20 @@ def _recompute_cs_dirs_numba(
         binary_l = 1.0 if float(rank_l) <= fk else 0.0
         binary_s = 1.0 if float(rank_s) <= fks else 0.0
 
-        long_mag = binary_l * max(sl, 0.0) * crisis_w
-        short_mag = binary_s * max(-ss, 0.0) * crisis_w
+        # Z-score magnitudes: clip between 0 and 3, then scale to max 1.0
+        z_l = (sl - mean_l) / std_l
+        z_s = (mean_s - ss) / std_s  # Lower ss is better, so mean - ss
+
+        mag_l = z_l / 3.0 if z_l > 0 else 0.0
+        mag_s = z_s / 3.0 if z_s > 0 else 0.0
+
+        long_mag = binary_l * min(max(mag_l, 0.05), 1.0) * crisis_w
+        short_mag = binary_s * min(max(mag_s, 0.05), 1.0) * crisis_w
 
         if long_mag >= short_mag and long_mag > 0.0:
-            mag = long_mag
-            if mag < 0.05:
-                mag = 0.05
-            elif mag > 1.0:
-                mag = 1.0
-            computed_dir[s] = 1.0 * mag
+            computed_dir[s] = 1.0 * long_mag
         elif short_mag > long_mag and short_mag > 0.0:
-            mag = short_mag
-            if mag < 0.05:
-                mag = 0.05
-            elif mag > 1.0:
-                mag = 1.0
-            computed_dir[s] = -1.0 * mag
+            computed_dir[s] = -1.0 * short_mag
         else:
             computed_dir[s] = 0.0
 
