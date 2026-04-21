@@ -36,10 +36,15 @@ else:
 DISK_CACHE_ROOT.mkdir(parents=True, exist_ok=True)
 
 
+# Bump this version whenever signal computation logic changes to auto-invalidate cache.
+_SIGNAL_CODE_VERSION = "v4"  # combine surviving GP features; xs_score_short = gp/hms
+
+
 def _get_param_hash(params: Dict[str, Any], whitelist: frozenset[str]) -> str:
     """Helper to hash only relevant parameters."""
     items = tuple(sorted((k, params[k]) for k in whitelist if k in params))
-    return hashlib.sha256(repr(items).encode("utf-8")).hexdigest()[:16]
+    raw = repr(items) + _SIGNAL_CODE_VERSION
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
 
 def _save_npz(path: Path, data: Dict[str, np.ndarray]) -> None:
