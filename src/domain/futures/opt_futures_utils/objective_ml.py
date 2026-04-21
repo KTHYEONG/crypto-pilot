@@ -295,24 +295,19 @@ def _log_precompute_computed_dir_sample(
 def _suggest_ml_phase_d(trial: optuna.Trial) -> Dict[str, Any]:
     trail = float(trial.suggest_float("TRAILING_ACTIVATION_ATR", 0.3, 1.2))
     bayes_c = float(trial.suggest_float("BAYESIAN_C", 1.0, 30.0, log=True))
-    kelly_s = float(trial.suggest_float("KELLY_SHRINKAGE", 0.05, 0.4))
-    # K_LONG/K_SHORT free [1,4]: IS(2024-25) has bear phases → K_SHORT=4 IS-optimal.
-    # Restricting K_SHORT≤2 removes IS profitable shorts → all CPCV paths negative → DSR=0.
-    k_long = int(trial.suggest_int("K_LONG", 1, 4))
-    k_short = int(trial.suggest_int("K_SHORT", 1, 4))
-    # IC half-life=3.3h: 12h rebalancing decays IC by 97% → exclude 12 from search.
+    kelly_s = float(trial.suggest_float("KELLY_SHRINKAGE", 0.15, 0.4))
+    k_long = int(trial.suggest_int("K_LONG", 1, 3))
+    k_short = int(trial.suggest_int("K_SHORT", 1, 3))
     reb = int(trial.suggest_categorical("REBALANCE_BARS", [1, 3, 6]))
-    # CRISIS_GAMMA cap at 2.0: gamma>2 causes extreme suppression → few trades → noise.
     crisis = float(trial.suggest_float("CRISIS_GAMMA", 0.5, 2.0))
-    atr_p = int(trial.suggest_int("ATR_PERIOD", 10, 20, step=2))
+    atr_p = int(trial.suggest_int("ATR_PERIOD", 14, 20, step=2))
     l_atr = float(trial.suggest_float("LONG_ATR_MULT", 1.5, 4.5, step=0.25))
     l_trail = float(trial.suggest_float("LONG_TRAIL_MULT", 2.5, 6.0, step=0.5))
-    # SHORT_ATR_MULT min 1.5: prevents tight-short trap in rising markets.
     s_atr = float(trial.suggest_float("SHORT_ATR_MULT", 1.5, 3.0, step=0.25))
     s_tp = float(trial.suggest_float("SHORT_TP_MULT", 1.0, 3.5, step=0.5))
     s_trail = float(trial.suggest_float("SHORT_TRAIL_MULT", 1.5, 4.5, step=0.5))
     l_scale = float(trial.suggest_float("LONG_SCALE_ATR_MULT", 2.5, 6.0, step=0.5))
-    max_exp = float(trial.suggest_float("MAX_EXPOSURE_PER_COIN", 0.5, 2.0, step=0.1))
+    max_exp = float(trial.suggest_float("MAX_EXP_PER_COIN", 0.5, 2.0, step=0.1))
     dd_thr = float(trial.suggest_float("DD_SCALING_THRESHOLD", 0.10, 0.25, step=0.05))
     return {
         "TRAILING_ACTIVATION_ATR": trail,
