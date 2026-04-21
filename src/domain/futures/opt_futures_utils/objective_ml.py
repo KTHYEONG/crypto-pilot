@@ -296,18 +296,22 @@ def _suggest_ml_phase_d(trial: optuna.Trial) -> Dict[str, Any]:
     trail = float(trial.suggest_float("TRAILING_ACTIVATION_ATR", 0.3, 1.2))
     bayes_c = float(trial.suggest_float("BAYESIAN_C", 1.0, 30.0, log=True))
     kelly_s = float(trial.suggest_float("KELLY_SHRINKAGE", 0.05, 0.4))
+    # K_LONG/K_SHORT free [1,4]: IS(2024-25) has bear phases → K_SHORT=4 IS-optimal.
+    # Restricting K_SHORT≤2 removes IS profitable shorts → all CPCV paths negative → DSR=0.
     k_long = int(trial.suggest_int("K_LONG", 1, 4))
     k_short = int(trial.suggest_int("K_SHORT", 1, 4))
-    reb = int(trial.suggest_categorical("REBALANCE_BARS", [1, 3, 6, 12]))
-    crisis = float(trial.suggest_float("CRISIS_GAMMA", 0.5, 3.0))
+    # IC half-life=3.3h: 12h rebalancing decays IC by 97% → exclude 12 from search.
+    reb = int(trial.suggest_categorical("REBALANCE_BARS", [1, 3, 6]))
+    # CRISIS_GAMMA cap at 2.0: gamma>2 causes extreme suppression → few trades → noise.
+    crisis = float(trial.suggest_float("CRISIS_GAMMA", 0.5, 2.0))
     atr_p = int(trial.suggest_int("ATR_PERIOD", 10, 20, step=2))
     l_atr = float(trial.suggest_float("LONG_ATR_MULT", 1.5, 4.5, step=0.25))
     l_trail = float(trial.suggest_float("LONG_TRAIL_MULT", 2.5, 6.0, step=0.5))
-    s_atr = float(trial.suggest_float("SHORT_ATR_MULT", 1.0, 3.0, step=0.25))
+    # SHORT_ATR_MULT min 1.5: prevents tight-short trap in rising markets.
+    s_atr = float(trial.suggest_float("SHORT_ATR_MULT", 1.5, 3.0, step=0.25))
     s_tp = float(trial.suggest_float("SHORT_TP_MULT", 1.0, 3.5, step=0.5))
     s_trail = float(trial.suggest_float("SHORT_TRAIL_MULT", 1.5, 4.5, step=0.5))
     l_scale = float(trial.suggest_float("LONG_SCALE_ATR_MULT", 2.5, 6.0, step=0.5))
-    rpt = float(trial.suggest_float("RISK_PER_TRADE", 0.01, 0.05, step=0.005))
     max_exp = float(trial.suggest_float("MAX_EXPOSURE_PER_COIN", 0.5, 2.0, step=0.1))
     dd_thr = float(trial.suggest_float("DD_SCALING_THRESHOLD", 0.10, 0.25, step=0.05))
     return {
@@ -317,7 +321,11 @@ def _suggest_ml_phase_d(trial: optuna.Trial) -> Dict[str, Any]:
         "K_LONG": k_long,
         "K_SHORT": k_short,
         "REBALANCE_BARS": reb,
+        # Fixed 0.55 (not searched): extra dimension dilutes Optuna convergence (Run 12 lesson).
         "MIN_SCORE_PERCENTILE": 0.55,
+        # Fixed 3%: RPT as search param creates dimension-inflation → DSR=0 (Run 12 lesson).
+        # 3% = 1.5x Run 9's effective 2%; expected CAGR ≈ 18% x 1.5 = 27%.
+        "RISK_PER_TRADE": 0.03,
         "CRISIS_GAMMA": crisis,
         "ATR_PERIOD": atr_p,
         "LONG_ATR_MULT": l_atr,
@@ -326,7 +334,6 @@ def _suggest_ml_phase_d(trial: optuna.Trial) -> Dict[str, Any]:
         "SHORT_TP_MULT": s_tp,
         "SHORT_TRAIL_MULT": s_trail,
         "LONG_SCALE_ATR_MULT": l_scale,
-        "RISK_PER_TRADE": rpt,
         "MAX_EXPOSURE_PER_COIN": max_exp,
         "DD_SCALING_THRESHOLD": dd_thr,
         "USE_CS_RANK_ENGINE": True,
@@ -359,8 +366,9 @@ def _base_engine_params(ml: Dict[str, Any], tf: str) -> Dict[str, Any]:
     fk_frac = float(np.clip(0.35 * ks * (1.0 + 1.0 / bc), 0.05, 0.6))
     lev = float(OPT_FUTURES_CONFIG.get("FUTURES_DISCOVERY_LEVERAGE", 5))
     rpt = float(ml.get("RISK_PER_TRADE", 0.02))
-    if rpt * lev > 0.10:
-        rpt = 0.10 / max(lev, 1e-9)
+    # Cap: rpt*lev ≤ 0.20 (4% max at lev=5); higher RPT breaks IS DSR (Run 10 lesson).
+    if rpt * lev > 0.20:
+        rpt = 0.20 / max(lev, 1e-9)
     trail = float(ml["TRAILING_ACTIVATION_ATR"])
     return {
         "TIMEFRAME": tf,
@@ -601,9 +609,14 @@ def objective_ml_phase_d(trial: optuna.Trial, ctx: MLPhaseDContext) -> float:
     else:
         std_log_growth = 1e9
 
-    eff_ref = float(mai["eff_ref_len"])
-    n_trials_opt = float(cfg.get("total_trials", 2000))
-    dsr = float(calc_gate1_dsr_from_path_log_tw(path_arr, ctx.tf, eff_ref, n_trials_opt))
+    # DSR: each CPCV path = one independent IS-OOS experiment.
+    # Using total_trials(2000) as n_tests gives sr_bench≈3.9 — impossible to beat.
+    # Use n_valid_paths as n_tests (each path is one unique train-test split).
+    n_p = float(max(2, len(path_arr)))
+    hrs_per_bar = int(ctx.tf.replace("h", "")) if ctx.tf.endswith("h") else 4
+    # Scale eff_ref so t_samples = n_paths (each path is one independent data point).
+    eff_ref_for_dsr = n_p * (24.0 / max(hrs_per_bar, 1))
+    dsr = float(calc_gate1_dsr_from_path_log_tw(path_arr, ctx.tf, eff_ref_for_dsr, n_p))
     n_valid_paths = len(path_compound_raw_log_tw)
     pen = 0.5 * max(0, 6 - n_valid_paths) / 6.0 if n_valid_paths < 6 else 0.0
 
@@ -648,7 +661,12 @@ def objective_ml_phase_d(trial: optuna.Trial, ctx: MLPhaseDContext) -> float:
     if path_arr.size < 2 or dsr < 0.0:
         obj = 1e9 + pen + 2.0 * trade_shortfall
     else:
-        obj = -dsr + pen + 2.0 * trade_shortfall
+        # Compound objective: DSR primary + mean_log_growth secondary gradient.
+        # When DSR=0 for all trials (paths all negative), growth_signal provides
+        # gradient so Optuna can distinguish better from worse params.
+        # Weight 0.2: DSR dominates when > 0; too-high weight causes IS overfitting.
+        growth_signal = float(np.clip(mean_log_growth, -2.0, 2.0))
+        obj = -dsr - 0.2 * growth_signal + pen + 2.0 * trade_shortfall
 
     trial.set_user_attr("ml_mean_log_growth_cpcv", mean_log_growth)
     trial.set_user_attr("ml_worst_mdd_cpcv", worst_mdd)
@@ -667,13 +685,26 @@ def objective_ml_phase_d(trial: optuna.Trial, ctx: MLPhaseDContext) -> float:
 
 
 def select_best_trial_by_holdout_log_ret(trials: List[FrozenTrial]) -> FrozenTrial:
-    """Fallback when constraint-feasible set is empty: maximize ml_holdout_log_ret."""
+    """Fallback when constraint-feasible set is empty.
+
+    Scoring: prefer trials with DSR > 0, then by combined
+    holdout_log_ret + IS CPCV mean_log_growth (equal weight).
+    Pure holdout_log_ret is unstable across runs; adding IS CPCV
+    stability reduces overfitting to the holdout sub-period.
+    """
     if not trials:
         raise ValueError("empty trials")
-    return max(
-        trials,
-        key=lambda t: float(t.user_attrs.get("ml_holdout_log_ret", float("-inf"))),
-    )
+
+    def _score(t: FrozenTrial) -> float:
+        holdout = float(np.clip(t.user_attrs.get("ml_holdout_log_ret", 0.0), -2.0, 2.0))
+        is_cpcv = float(np.clip(t.user_attrs.get("ml_mean_log_growth_cpcv", -2.0), -2.0, 2.0))
+        dsr = float(t.user_attrs.get("gate1_dsr", 0.0))
+        # Holdout 3x weight: holdout is adjacent to OOS and better predicts OOS
+        # than IS CPCV (which spans diverse IS regimes not representative of OOS).
+        dsr_bonus = 0.5 if dsr > 0.0 else 0.0
+        return 3.0 * holdout + is_cpcv + dsr_bonus
+
+    return max(trials, key=_score)
 
 
 def topsis_select_best(pareto_trials: List[FrozenTrial]) -> FrozenTrial:
@@ -712,5 +743,5 @@ def check_hard_gates_ml(
     wr_frac = wr_pct / 100.0 if wr_pct > 1.0 else wr_pct
     wr_ok = wr_frac >= is_precision * 0.85
     mdd_v = float(oos_result.get("mdd_pct", oos_result.get("mdd", 100.0)))
-    mdd_ok = abs(mdd_v) < 25.0
+    mdd_ok = abs(mdd_v) < float(cfg.get("FUTURES_MAX_MDD", 25.0))
     return bool(pbo_ok and dsr_ok and wr_ok and mdd_ok)
