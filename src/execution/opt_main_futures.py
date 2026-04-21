@@ -654,7 +654,8 @@ def main() -> None:
     _logger.info(f" MDD:         {oos_port['mdd_pct']:>8.2f}%")
     _logger.info(f" Profit Factor: {oos_port['profit_factor']:>8.2f}")
     _logger.info(f" Win Rate:     {oos_port['win_rate_pct']:>8.2f}%")
-    _logger.info(f" Total Trades: {oos_port['total_trades']:>8d}")
+    _logger.info(f" Avg PnL %:    {oos_port.get('avg_trade_pnl_pct', 0.0):>8.2f}%")
+    _logger.info(f" Total Trades: {oos_port['total_trades']:>8d} (L: {oos_port['long_trades']} / S: {oos_port['short_trades']})")
     _logger.info(
         " [OOS_BT_DIAG] dust_skip=%d margin_fail=%d t_dir_zero=%d p_side_zero=%d",
         int(oos_port.get("bt_dust_skip_cnt", 0)),
