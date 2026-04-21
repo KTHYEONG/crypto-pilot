@@ -11,6 +11,7 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import numpy as np
 import optuna
 import pandas as pd
 from optuna.samplers import TPESampler
@@ -33,6 +34,7 @@ from config.opt_config import (  # noqa: E402
 from config.settings import (  # noqa: E402
     FUTURES_CACHE_DIR,
     FUTURES_DATA_DIR,
+    FUTURES_INITIAL_BALANCE,
 )
 from src.core.optimization.opt_utils import compute_segment_merge_index  # noqa: E402
 from src.domain.futures.data_collector import DataCollector  # noqa: E402
@@ -103,6 +105,88 @@ def _ml_phase_d_tpe_sampler(seed: int) -> TPESampler:
     )
 
 
+def _print_performance_report(
+    title: str,
+    port: Dict[str, Any],
+    dsr: Optional[float] = None,
+    pbo: Optional[float] = None,
+    tf: str = "1h",
+) -> None:
+    # --- Extra Metrics Calculation ---
+    eq = port.get("equity_curve", np.array([FUTURES_INITIAL_BALANCE]))
+    trades = port.get("trades_df", pd.DataFrame())
+
+    # 1. Volatility & Sharpe/Sortino
+    rets = np.diff(eq) / np.maximum(eq[:-1], 1e-9)
+    hrs = int(tf.replace("h", "")) if tf.endswith("h") else 4
+    ann_factor = (365 * 24) / hrs
+    
+    ann_vol = np.std(rets) * np.sqrt(ann_factor) * 100.0 if rets.size > 0 else 0.0
+    sharpe = 0.0
+    if rets.size > 0 and np.std(rets) > 1e-9:
+        sharpe = (np.mean(rets) / np.std(rets)) * np.sqrt(ann_factor)
+    
+    downside = rets[rets < 0]
+    sortino = (np.mean(rets) / np.std(downside)) * np.sqrt(ann_factor) if downside.size > 0 else 0.0
+    
+    # 2. t-stat of Avg Trade
+    t_stat = 0.0
+    if not trades.empty:
+        pnl_arr = trades["pnl"].to_numpy()
+        mu_pnl = np.mean(pnl_arr)
+        std_pnl = np.std(pnl_arr, ddof=1)
+        if std_pnl > 1e-9:
+            t_stat = mu_pnl / (std_pnl / np.sqrt(len(pnl_arr)))
+
+    # 3. Market Exposure (%)
+    # Estimate based on avg durations * trades / symbols / total bars
+    exposure = 0.0
+    n_syms = max(1, len(port.get("symbol_names", [])))
+    if not trades.empty and len(eq) > 1:
+        exposure = (trades["exit_idx"] - trades["entry_idx"]).sum() / (len(eq) * n_syms)
+
+    _logger.info("\n" + "=" * 85)
+    _logger.info(f" {title}")
+    _logger.info("-" * 85)
+    _logger.info(
+        f" CAGR:        {port['cagr_pct']:>8.2f}% | MDD:         {port['mdd_pct']:>8.2f}% | "
+        f"Win Rate:     {port['win_rate_pct']:>8.2f}%"
+    )
+    _logger.info(
+        f" Sharpe:      {sharpe:>8.2f}  | Sortino:     {sortino:>8.2f}  | "
+        f"Ann. Vol:    {ann_vol:>8.2f}%"
+    )
+    _logger.info(
+        f" Profit Factor: {port['profit_factor']:>8.2f} | t-stat (Tr): {t_stat:>8.2f}  | "
+        f"Avg PnL %:    {port.get('avg_trade_pnl_pct', 0.0):>8.2f}%"
+    )
+    _logger.info(
+        f" Total Trades: {port['total_trades']:>8d} | "
+        f"L/S Minority: {port['oos_long_short_minority_pct']:>8.2f}% | "
+        f"Exposure:    {exposure * 100.0:>8.2f}%"
+    )
+    _logger.debug(
+        " [%s_BT_DIAG] dust_skip=%d margin_fail=%d t_dir_zero=%d p_side_zero=%d",
+        title.split()[0],
+        int(port.get("bt_dust_skip_cnt", 0)),
+        int(port.get("bt_margin_fail_cnt", 0)),
+        int(port.get("bt_t_dir_zero_cnt", 0)),
+        int(port.get("bt_p_side_zero_cnt", 0)),
+    )
+    _logger.info(
+        f" Calmar Ratio: {port['calmar_ratio']:>8.2f}  | Ulcer Index:  {port['ulcer_index']:>8.2f}"
+    )
+    if dsr is not None or pbo is not None:
+        dsr_str = f"{dsr:>8.4f}" if dsr is not None else "   N/A  "
+        pbo_str = f"{pbo:>8.4f}" if pbo is not None else "   N/A  "
+        _logger.info(f" DSR (IS Ref): {dsr_str} | PBO (IS Ref): {pbo_str}")
+
+    _logger.info("-" * 85)
+    _logger.info(f" Net PnL / Trading Cost Ratio: {port.get('ev_cost_ratio', 0.0):.2f}")
+    _logger.info("=" * 85 + "\n")
+
+
+
 def _feature_slice_stats(series: pd.Series) -> tuple[float, float, float]:
     arr = pd.to_numeric(series, errors="coerce")
     n = max(int(arr.shape[0]), 1)
@@ -128,7 +212,7 @@ def _log_ml_merge_feature_stats(
             is_ser, oos_ser = df[col].iloc[:o0], df[col].iloc[o0:]
             is_std, is_nan, is_z = _feature_slice_stats(is_ser)
             oos_std, oos_nan, oos_z = _feature_slice_stats(oos_ser)
-            _logger.info(
+            _logger.debug(
                 "[ML_MERGE] %s %s IS std=%.6f nan%%=%.2f zero%%=%.2f | "
                 "OOS std=%.6f nan%%=%.2f zero%%=%.2f",
                 sym,
@@ -396,7 +480,7 @@ def main() -> None:
         gp = pd.to_numeric(df["gp_alpha_00"], errors="coerce")
         is_std = float(gp.iloc[:o0].std(ddof=0) or 0.0)
         oos_std = float(gp.iloc[o0:].std(ddof=0) or 0.0)
-        _logger.info("[SIG CHECK] %s IS gp_std=%.6f OOS gp_std=%.6f", sym, is_std, oos_std)
+        _logger.debug("[SIG CHECK] %s IS gp_std=%.6f OOS gp_std=%.6f", sym, is_std, oos_std)
         if oos_std < 1e-4:
             _logger.error("[ABORT] %s OOS gp_alpha_00 std < 1e-4. Check merge/tz.", sym)
             raise RuntimeError(f"OOS signal dead for {sym}.")
@@ -482,6 +566,7 @@ def main() -> None:
     paths = mai.get("cpcv_paths")
     br = mai.get("cpcv_all_block_ranges")
     best_trial: optuna.trial.FrozenTrial | None = None
+    pbo_obs = 0.5 # Default IS-PBO reference
     _logger.info(" [STEP 4.5/5] Filtering top trials with Hard Gates (Lazy PBO)...")
     iter_limit = min(300, len(completed))
     for i in range(iter_limit):
@@ -647,36 +732,67 @@ def main() -> None:
                 mean_ok,
                 "PASS" if (all_ok and mean_ok) else "FAIL",
             )
-    
-    _logger.info("\n" + "=" * 85)
-    _logger.info(" [STEP 5/5] FINAL OOS PERFORMANCE REPORT")
-    _logger.info("-" * 85)
-    _logger.info(f" CAGR:        {oos_port['cagr_pct']:>8.2f}%")
-    _logger.info(f" MDD:         {oos_port['mdd_pct']:>8.2f}%")
-    _logger.info(f" Profit Factor: {oos_port['profit_factor']:>8.2f}")
-    _logger.info(f" Win Rate:     {oos_port['win_rate_pct']:>8.2f}%")
-    _logger.info(f" Avg PnL %:    {oos_port.get('avg_trade_pnl_pct', 0.0):>8.2f}%")
-    _logger.info(f" Total Trades: {oos_port['total_trades']:>8d} (L: {oos_port['long_trades']} / S: {oos_port['short_trades']})")
-    _logger.info(
-        " [OOS_BT_DIAG] dust_skip=%d margin_fail=%d t_dir_zero=%d p_side_zero=%d",
-        int(oos_port.get("bt_dust_skip_cnt", 0)),
-        int(oos_port.get("bt_margin_fail_cnt", 0)),
-        int(oos_port.get("bt_t_dir_zero_cnt", 0)),
-        int(oos_port.get("bt_p_side_zero_cnt", 0)),
+
+    # [STEP 5.1/5] IS & Hold-out Evaluation
+    _logger.info("[STEP 5.1/5] Evaluating IS and Hold-out Performance...")
+    is_data_maps: Dict[str, Dict[str, Any]] = {}
+    ho_data_maps: Dict[str, Dict[str, Any]] = {}
+
+    mai = ml_ctx.multi_alignment_info or {}
+    alignment_offsets = mai.get("alignment_offsets", {})
+    eff_len = mai.get("eff_ref_len", 0)
+    ho_ratio = 0.20
+    cpcv_zone_len = max(200, int(eff_len * (1.0 - ho_ratio)))
+
+    for sym in valid_symbols:
+        # Get perfectly aligned IS start used during model training
+        sym_is_start = data_maps[sym].get(f"is_start_idx_{args.tf}", 0)
+        aligned_is_start = alignment_offsets.get(sym, sym_is_start)
+
+        # IS: Evaluated on the same aligned range as model training
+        is_dm = data_maps[sym].copy()
+        is_dm[f"oos_start_idx_{args.tf}"] = aligned_is_start
+        is_data_maps[sym] = is_dm
+
+        # Hold-out: Final 20% of the aligned IS period (consistent datetime across symbols)
+        ho_dm = data_maps[sym].copy()
+        # Safety: Ensure hold-out start doesn't exceed data length
+        ho_start = min(aligned_is_start + cpcv_zone_len, len(ho_dm[args.tf]) - 2)
+        ho_dm[f"oos_start_idx_{args.tf}"] = max(aligned_is_start, ho_start)
+        ho_data_maps[sym] = ho_dm
+
+    is_port = run_oos_margin_shared_portfolio(
+        valid_symbols, args.tf, params, is_data_maps, cache_root=FUTURES_CACHE_DIR
     )
-    _logger.info(f" Calmar Ratio: {oos_port['calmar_ratio']:>8.2f}")
-    _logger.info(f" Ulcer Index:  {oos_port['ulcer_index']:>8.2f}")
-    _logger.info(f" DSR (Target): {best_trial.user_attrs.get('gate1_dsr', 0.0):>8.4f}")
-    _logger.info(f" L/S Minority: {oos_port['oos_long_short_minority_pct']:>8.2f}%")
-    _logger.info("-" * 85)
-    _logger.info(f" Net PnL / Trading Cost: {oos_port.get('ev_cost_ratio', 0.0):.2f}")
-    _logger.info("=" * 85 + "\n")
+    ho_port = run_oos_margin_shared_portfolio(
+        valid_symbols, args.tf, params, ho_data_maps, cache_root=FUTURES_CACHE_DIR
+    )
+
+    # [STEP 5.2/5] Final Performance Reports
+    dsr_obs = float(best_trial.user_attrs.get("gate1_dsr", 0.0))
+    # pbo_obs might have been calculated in the Hard Gate check block, let's ensure it's available
+    pbo_val = locals().get("pbo_obs", None)
+    
+    is_port["symbol_names"] = valid_symbols
+    ho_port["symbol_names"] = valid_symbols
+    oos_port["symbol_names"] = valid_symbols
+
+    _print_performance_report(
+        "IS (In-Sample) PERFORMANCE REPORT", is_port, dsr=dsr_obs, pbo=pbo_val, tf=args.tf
+    )
+    _print_performance_report(
+        "Hold-out PERFORMANCE REPORT", ho_port, dsr=dsr_obs, pbo=pbo_val, tf=args.tf
+    )
+    _print_performance_report(
+        "FINAL OOS PERFORMANCE REPORT", oos_port, dsr=dsr_obs, pbo=pbo_val, tf=args.tf
+    )
 
     res_dir = Path(project_root) / "results"
     res_dir.mkdir(parents=True, exist_ok=True)
     with open(res_dir / f"{BEST_PARAMS_FUTURES_JSON_STEM}.json", "w") as f:
         json.dump(params, f, indent=4)
     _logger.info(f"Best parameters saved to results/{BEST_PARAMS_FUTURES_JSON_STEM}.json")
+
 
 if __name__ == "__main__":
     main()
