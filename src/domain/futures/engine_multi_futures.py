@@ -358,11 +358,10 @@ def backtest_portfolio_numba(
             if in_pos[s]:
                 if np.isnan(close_2d[i, s]): continue
                 cur_p = close_2d[i, s]
-                notional = amount[s] * cur_p
-                used_margin_total += notional / entry_lev[s]
+                used_margin_total += (amount[s] * cur_p) / entry_lev[s]
                 num_open_pos += 1
                 unrealized_total += (cur_p - entry_p[s]) * amount[s] * pos_side[s]
-                fund_fee = notional * funding_rate[i, s] * pos_side[s]
+                fund_fee = amount[s] * cur_p * funding_rate[i, s] * pos_side[s]
                 fund_fee_stored[s] += fund_fee
 
         current_equity = balance + used_margin_total + unrealized_total
