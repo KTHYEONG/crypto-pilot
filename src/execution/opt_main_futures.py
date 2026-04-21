@@ -167,7 +167,8 @@ def _ml_trial_passes_hard_gates(
     dsr = float(trial.user_attrs.get("gate1_dsr", -9.0))
     if dsr < float(cfg.get("FUTURES_ML_GATE1_DSR_MIN", 0.20)):
         return False
-    if float(trial.user_attrs.get("ml_worst_mdd_cpcv", 999.0)) >= 25.0:
+    mdd_limit = float(cfg.get("FUTURES_MAX_MDD", 25.0))
+    if float(trial.user_attrs.get("ml_worst_mdd_cpcv", 999.0)) >= mdd_limit:
         return False
     if float(trial.user_attrs.get("avg_trades", 0.0)) < 10.0:
         return False
