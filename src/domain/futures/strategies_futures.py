@@ -119,11 +119,18 @@ class UltimateStrategy(PipelineStrategyBase):
         close_a = df["close"].to_numpy(dtype=np.float64)
         if st_key == "ML_CALIB_PROB" and bool(self.params.get("USE_CS_RANK_ENGINE", True)):
             n = len(df)
-            gp = (
-                df["gp_alpha_00"].to_numpy(dtype=np.float64, copy=False)
-                if "gp_alpha_00" in df.columns
-                else np.zeros(n, dtype=np.float64)
-            )
+            # Combine all surviving GP features (non-neutral: std > 1e-6).
+            # Failed features were set to 0.5 constant by IC filter → zero variance.
+            surviving_gp_cols = [
+                c for c in df.columns
+                if c.startswith("gp_alpha_") and float(df[c].std()) > 1e-6
+            ]
+            if surviving_gp_cols:
+                gp = df[surviving_gp_cols].mean(axis=1).to_numpy(dtype=np.float64)
+            elif "gp_alpha_00" in df.columns:
+                gp = df["gp_alpha_00"].to_numpy(dtype=np.float64, copy=False)
+            else:
+                gp = np.zeros(n, dtype=np.float64)
             hml = (
                 df["hmm_modulator_long"].to_numpy(dtype=np.float64, copy=False)
                 if "hmm_modulator_long" in df.columns
@@ -135,7 +142,10 @@ class UltimateStrategy(PipelineStrategyBase):
                 else np.ones(n, dtype=np.float64)
             )
             df["xs_score_long"] = gp * hml
-            df["xs_score_short"] = gp * hms
+            # Invert hms: LOWER xs_short = BETTER short in numba ranker.
+            # In BEAR/CRISIS (hms>1): gp/hms < gp → lower → ranked higher as short. ✓
+            # In BULL (hms<1):        gp/hms > gp → higher → ranked lower as short. ✓
+            df["xs_score_short"] = gp / np.maximum(hms, 0.1)
             if "hmm_prob_crisis" not in df.columns:
                 df["hmm_prob_crisis"] = 0.0
             df["ml_calib_prob"] = 1.0
