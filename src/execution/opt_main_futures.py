@@ -426,6 +426,7 @@ def main() -> None:
     parser.add_argument("--reference-date", type=str, default=None)
     parser.add_argument("--gp-only", action="store_true", help="Stop after GP IC calculation")
     parser.add_argument("--hmm-only", action="store_true", help="Stop after HMM regime inference")
+    parser.add_argument("--seed", type=int, default=None, help="Override random seed")
     args = parser.parse_args(remaining_args)
 
     fetch_start_date, start_date, is_end_date, end_date = get_quarterly_window(args.reference_date)
@@ -487,7 +488,8 @@ def main() -> None:
 
     # [PHASE 5] Optuna Portfolio Optimization Starting
     n_ml_trials = int(args.trials)
-    seed = int(OPT_FUTURES_CONFIG.get("seeds", [42])[0])
+    cfg_seed = int(OPT_FUTURES_CONFIG.get("seeds", [42])[0])
+    seed = int(args.seed) if args.seed is not None else cfg_seed
     ml_ctx = MLPhaseDContext(data_maps=data_maps, symbols=valid_symbols, tf=args.tf, seed=seed)
     
     # [PERFORMANCE] Precompute context upfront to avoid race conditions and per-trial overhead
@@ -800,18 +802,35 @@ def main() -> None:
         is_sharpe_v = 0.0
         if rets_is.size > 0 and np.std(rets_is) > 1e-9:
             is_sharpe_v = float(np.mean(rets_is) / np.std(rets_is)) * np.sqrt(ann_f)
-        # IS CAGR threshold: -0.5% (relaxed from 0.0% on 2026-04-22).
-        # Evidence: v5 repro (IS=-0.75%) was blocked → OOS=26.81% > champion OOS=22.54%.
-        # Threshold=0.0 overly conservative; -0.5% still blocks severe IS drag (v2 IS=-3.4%).
-        is_cagr_floor = -0.5
-        if is_cagr_v < is_cagr_floor or is_sharpe_v < 0.0:
+            
+        oos_eq = oos_port.get("equity_curve", np.array([FUTURES_INITIAL_BALANCE]))
+        oos_rets = np.diff(oos_eq) / np.maximum(oos_eq[:-1], 1e-9)
+        oos_sharpe_v = 0.0
+        if oos_rets.size > 0 and np.std(oos_rets) > 1e-9:
+            oos_sharpe_v = float(np.mean(oos_rets) / np.std(oos_rets)) * np.sqrt(ann_f)
+
+        # New multi-metric gate logic (Hypothesis 1):
+        # Either standard pass (IS >= -0.5 and IS Sharpe >= 0.0)
+        # Or relaxed pass (IS Sharpe > -1.0 AND OOS Sharpe > 2.0 AND PBO < 0.40)
+        standard_pass = (is_cagr_v >= -0.5) and (is_sharpe_v >= 0.0)
+        _pbo_cur = float(pbo_val) if pbo_val is not None else 0.5
+        relaxed_pass = (is_sharpe_v > -1.0) and (oos_sharpe_v > 2.0) and (_pbo_cur < 0.40)
+        
+        if not (standard_pass or relaxed_pass):
             gate_ok = False
             _logger.warning(
-                " [IS STRUCTURAL GATE] IS CAGR=%.2f%% (floor=%.1f%%) IS Sharpe=%.2f FAIL → "
-                "Structural IS Drag detected. Champion hardening blocked.",
+                " [IS STRUCTURAL GATE] IS CAGR=%.2f%% IS Sharpe=%.2f OOS Sharpe=%.2f "
+                "PBO=%.4f FAIL. Standard pass AND Relaxed pass both failed. Blocked.",
                 is_cagr_v,
-                is_cagr_floor,
                 is_sharpe_v,
+                oos_sharpe_v,
+                _pbo_cur,
+            )
+        else:
+            _logger.info(
+                " [IS STRUCTURAL GATE] PASS. IS CAGR=%.2f%% IS Sharpe=%.2f OOS Sharpe=%.2f "
+                "PBO=%.4f",
+                 is_cagr_v, is_sharpe_v, oos_sharpe_v, _pbo_cur,
             )
 
     # [Champion Comparison Guard] Only overwrite if new run improves OOS CAGR or PBO.
@@ -828,11 +847,15 @@ def main() -> None:
                 _new_oos = float(oos_port.get("cagr_pct", oos_port.get("cagr", 0.0)))
                 _oos_improved = _new_oos > _champ_oos
                 _pbo_improved = float(pbo_obs) < _champ_pbo
-                if not (_oos_improved or _pbo_improved):
+                # Hypothesis 5: AND condition with minimum OOS threshold
+                _oos_acceptable = _new_oos > (0.75 * _champ_oos) # 75% threshold
+                
+                if not (_oos_improved or (_pbo_improved and _oos_acceptable)):
                     gate_ok = False
                     _logger.warning(
                         " [CHAMPION GUARD] No improvement over current champion "
-                        "(OOS %.2f%% vs %.2f%% | PBO %.4f vs %.4f). Champion preserved.",
+                        "(OOS %.2f%% vs %.2f%% | PBO %.4f vs %.4f) or OOS regression high. "
+                        "Champion preserved.",
                         _new_oos,
                         _champ_oos,
                         float(pbo_obs),

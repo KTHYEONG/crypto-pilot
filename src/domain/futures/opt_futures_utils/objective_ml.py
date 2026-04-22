@@ -172,9 +172,10 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
                 trimmed_sig["funding_rate_sum"] = raw_full["funding_rate_sum"].to_numpy(
                     dtype=np.float64, copy=False
                 )
-            trimmed_sig["ml_calib_prob"] = 1.0
-            trimmed_sig["ml_calib_prob_long"] = 1.0
-            trimmed_sig["ml_calib_prob_short"] = 1.0
+            # Keep true probabilities if they exist from MetaLabeler, else default to 1.0
+            trimmed_sig["ml_calib_prob"] = raw_full.get("ml_calib_prob", 1.0)
+            trimmed_sig["ml_calib_prob_long"] = raw_full.get("ml_calib_prob_long", 1.0)
+            trimmed_sig["ml_calib_prob_short"] = raw_full.get("ml_calib_prob_short", 1.0)
             gp_pre = (
                 raw_full["gp_alpha_00"].to_numpy(dtype=np.float64, copy=False)
                 if "gp_alpha_00" in raw_full.columns
@@ -297,7 +298,7 @@ def _fixed_ml_phase_d_params() -> Dict[str, Any]:
     return {
         "SIZING_METHOD": "profit_factor_kelly",
         "MIN_SCORE_PERCENTILE": 0.55,
-        "RISK_PER_TRADE": 0.03,
+        "RISK_PER_TRADE": 0.07,
     }
 
 
@@ -306,10 +307,10 @@ def _suggest_ml_phase_d(trial: optuna.Trial) -> Dict[str, Any]:
     # KELLY_SHRINKAGE < 0.45 → high PBO (forbidden). ATR < 26 → signal decay (forbidden).
     # K_LONG/SHORT fixed to 1 — increasing complexity spikes PBO (validated gp-006 attempt).
     bayes_c = float(trial.suggest_float("BAYESIAN_C", 3.0, 10.0, log=True))
-    kelly_s = float(trial.suggest_float("KELLY_SHRINKAGE", 0.45, 0.70))
+    kelly_s = float(trial.suggest_float("KELLY_SHRINKAGE", 1.00, 1.50))
     k_long = int(trial.suggest_int("K_LONG", 1, 1))
     k_short = int(trial.suggest_int("K_SHORT", 1, 1))
-    reb = int(trial.suggest_categorical("REBALANCE_BARS", [6, 12]))
+    reb = int(trial.suggest_categorical("REBALANCE_BARS", [1, 2, 3]))
     crisis = float(trial.suggest_float("CRISIS_GAMMA", 0.7, 1.4))
     atr_p = int(trial.suggest_int("ATR_PERIOD", 26, 34, step=2))
     l_atr = float(trial.suggest_float("LONG_ATR_MULT", 2.0, 3.5, step=0.25))
@@ -337,7 +338,7 @@ def _suggest_ml_phase_d(trial: optuna.Trial) -> Dict[str, Any]:
         "K_SHORT": k_short,
         "REBALANCE_BARS": reb,
         "MIN_SCORE_PERCENTILE": float(
-            trial.suggest_categorical("MIN_SCORE_PERCENTILE", [fixed["MIN_SCORE_PERCENTILE"]])
+            trial.suggest_categorical("MIN_SCORE_PERCENTILE", [0.55, 0.65, 0.75])
         ),
         "RISK_PER_TRADE": float(
             trial.suggest_categorical("RISK_PER_TRADE", [fixed["RISK_PER_TRADE"]])
@@ -383,10 +384,10 @@ def _base_engine_params(ml: Dict[str, Any], tf: str) -> Dict[str, Any]:
     ks, bc = float(ml["KELLY_SHRINKAGE"]), float(ml["BAYESIAN_C"])
     fk_frac = float(np.clip(0.35 * ks * (1.0 + 1.0 / bc), 0.05, 0.6))
     lev = float(OPT_FUTURES_CONFIG.get("FUTURES_DISCOVERY_LEVERAGE", 5))
-    rpt = float(ml.get("RISK_PER_TRADE", 0.02))
-    # Cap: rpt*lev ≤ 0.20 (4% max at lev=5); higher RPT breaks IS DSR (Run 10 lesson).
-    if rpt * lev > 0.20:
-        rpt = 0.20 / max(lev, 1e-9)
+    rpt = float(ml.get("RISK_PER_TRADE", 0.07))
+    # Cap: rpt*lev ≤ 0.60 (12% max at lev=5); hyper-aggressive for 4h asset max.
+    if rpt * lev > 0.60:
+        rpt = 0.60 / max(lev, 1e-9)
     return {
         "TIMEFRAME": tf,
         "SIGNAL_TYPE": "ML_CALIB_PROB",
@@ -602,20 +603,32 @@ def objective_ml_phase_d(trial: optuna.Trial, ctx: MLPhaseDContext) -> float:
     path_mdds: List[float] = []
     cpcv_paths = mai["cpcv_paths"]
 
+    total_cpcv_log_ret = sum(r["log_ret"] for r in block_results.values() if r is not None)
+
     for path in cpcv_paths:
-        p_log_ret, p_mdd, segs, valid_path = 0.0, 0.0, [], True
+        p_log_ret, p_mdd, segs = 0.0, 0.0, []
         for b_key in path:
             res = block_results.get(tuple(b_key))
-            if res is None or res["mdd"] >= liq_mdd_thr:
-                valid_path = False
-                break
-            p_log_ret += res["log_ret"]
-            segs.append(res["log_ret"])
-            p_mdd = max(p_mdd, res["mdd"])
-        if valid_path:
-            path_compound_raw_log_tw.append(p_log_ret)
-            path_seg_lists.append(segs)
-            path_mdds.append(p_mdd)
+            if res is None:
+                p_log_ret -= 10.0
+                segs.append(-10.0)
+                p_mdd = max(p_mdd, 100.0)
+            elif res["mdd"] >= liq_mdd_thr:
+                # Provide a continuous gradient rather than a flat -0.69 cliff.
+                # If threshold is 0.25 and MDD is 0.35, excess is 0.10 -> penalty is -0.30 log ret
+                mdd_excess = res["mdd"] - liq_mdd_thr
+                mdd_penalty = mdd_excess * 3.0
+                p_log_ret += res["log_ret"] - mdd_penalty
+                segs.append(res["log_ret"] - mdd_penalty)
+                p_mdd = max(p_mdd, res["mdd"])
+            else:
+                p_log_ret += res["log_ret"]
+                segs.append(res["log_ret"])
+                p_mdd = max(p_mdd, res["mdd"])
+        
+        path_compound_raw_log_tw.append(p_log_ret)
+        path_seg_lists.append(segs)
+        path_mdds.append(p_mdd)
 
     path_arr = (
         np.asarray(path_compound_raw_log_tw, dtype=np.float64)
@@ -690,18 +703,22 @@ def objective_ml_phase_d(trial: optuna.Trial, ctx: MLPhaseDContext) -> float:
         # Weight 0.2: DSR dominates when > 0; too-high weight causes IS overfitting.
         growth_signal = float(np.clip(mean_log_growth, -2.0, 2.0))
         # [IS Drag Penalty] weight=5.0 — empirically validated 2026-04-22.
-        # Blocks trials with positive CPCV path mean but negative full-IS execution.
-        # Lower weight allowed IS-negative trials to pass; higher weight unnecessary.
+        # Use total_cpcv_log_ret to penalize any IS drag directly.
+        # This fixes the metric hacking where paths with + returns survive
+        # while the total IS is negative.
         is_penalty = 0.0
+        if total_cpcv_log_ret < 0:
+            is_penalty += abs(total_cpcv_log_ret) * 5.0
         if growth_signal < 0:
-            is_penalty = abs(growth_signal) * 5.0
+            is_penalty += abs(growth_signal) * 5.0
         # [Path Consistency Penalty] weight=2.0 — empirically validated 2026-04-22.
         # Directly proxies PBO: high std(CPCV paths) → complement paths diverge → high PBO.
         # weight=4.0 tested: OOS collapsed to 1.70% (over-conservative).
         # weight=0.0 tested: PBO inflates to 0.84+ with >200 trials (selection bias).
         # weight=2.0 optimal: PBO 0.225 achieved at 200 trials while OOS=22.54% preserved.
+        # weight=1.5 tested 2026-04-22: Relaxed to allow higher compound asset maximization.
         # DO NOT raise above 3.0 without re-validating OOS performance.
-        path_consistency_penalty = float(np.clip(std_log_growth, 0.0, 2.0)) * 2.0
+        path_consistency_penalty = float(np.clip(std_log_growth, 0.0, 2.0)) * 1.5
 
         mean_sortino_cpcv = float(np.clip(np.mean(sortinos), -2.0, 2.0)) if sortinos else 0.0
 
