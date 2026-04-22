@@ -680,6 +680,7 @@ def objective_ml_phase_d(trial: optuna.Trial, ctx: MLPhaseDContext) -> float:
         max(min_trades_target, 1)
     )
 
+    mean_sortino_cpcv = 0.0
     if path_arr.size < 2 or dsr < 0.0:
         obj = 1e9 + pen + 2.0 * trade_shortfall
     else:
@@ -702,6 +703,8 @@ def objective_ml_phase_d(trial: optuna.Trial, ctx: MLPhaseDContext) -> float:
         # DO NOT raise above 3.0 without re-validating OOS performance.
         path_consistency_penalty = float(np.clip(std_log_growth, 0.0, 2.0)) * 2.0
 
+        mean_sortino_cpcv = float(np.clip(np.mean(sortinos), -2.0, 2.0)) if sortinos else 0.0
+
         obj = (
             -dsr
             - 0.2 * growth_signal
@@ -717,6 +720,7 @@ def objective_ml_phase_d(trial: optuna.Trial, ctx: MLPhaseDContext) -> float:
     trial.set_user_attr("ml_holdout_log_ret", holdout_log_ret)
     trial.set_user_attr("ml_ls_minority_frac", minority)
     trial.set_user_attr("ml_mean_sortino_seg", float(np.mean(sortinos)) if sortinos else 0.0)
+    trial.set_user_attr("mean_sortino_cpcv", mean_sortino_cpcv)
     trial.set_user_attr("gate1_eff_ref_len", eff_ref_len)
     trial.set_user_attr("avg_trades", avg_trades_agg)
     trial.set_user_attr("avg_pf", avg_pf_agg)
