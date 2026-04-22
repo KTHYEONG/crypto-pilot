@@ -210,6 +210,9 @@ class GPAlphaMiner:
             y_clean = np.where(np.isfinite(y_raw), y_raw, 0.0)
 
             # --- LightGBM Model ---
+            # Hyperparams fixed (not in Optuna space). Replaced GP 2026-04-22 after GP produced
+            # DSR=0.0 across 12+ attempts. LightGBM achieved IS IC=0.183, OOS IC=0.122 immediately.
+            # Next hypothesis: add n_estimators/num_leaves/learning_rate to _suggest_ml_phase_d.
             _logger.info("Training LightGBM Regressor for alpha generation...")
             lgbm = LGBMRegressor(
                 objective="regression",
@@ -223,7 +226,7 @@ class GPAlphaMiner:
                 n_jobs=self.n_jobs,
                 random_state=42,
             )
-            
+
             mask = sample_weight > 0
             if mask.sum() > 100:
                 lgbm.fit(x_clean[mask], y_clean[mask], sample_weight=sample_weight[mask])
@@ -232,9 +235,9 @@ class GPAlphaMiner:
                 lgbm.fit(x_clean[:100], y_clean[:100])
 
             self._st = lgbm
-            
+
             out_pred = lgbm.predict(x_clean)
-            
+
             cols = [f"gp_alpha_{i:02d}" for i in range(self.n_features_to_select)]
             full_alpha_df = pd.DataFrame(0.5, index=full_grid_index, columns=cols)
             full_alpha_df["gp_alpha_00"] = out_pred
@@ -279,11 +282,11 @@ class GPAlphaMiner:
             require_regime_gate=bool(fo.get("require_regime_gate", True)),
         )
 
-        surviving_cols = [c for c in alpha_df_all.columns if c.startswith("gp_alpha_") 
+        surviving_cols = [c for c in alpha_df_all.columns if c.startswith("gp_alpha_")
                           and alpha_df_all[c].std() > 1e-6]
-        
+
         if "gp_alpha_00" not in surviving_cols and surviving_cols:
-            best_surv = surviving_cols[0] 
+            best_surv = surviving_cols[0]
             _logger.info(
                 " [PROMOTION] gp_alpha_00 failed gates. Promoting %s to slot 00.", best_surv
             )

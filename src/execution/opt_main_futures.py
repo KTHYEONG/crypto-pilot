@@ -788,6 +788,27 @@ def main() -> None:
         "FINAL OOS PERFORMANCE REPORT", oos_port, dsr=dsr_obs, pbo=pbo_val, tf=args.tf
     )
 
+    # [IS Structural Balance Gate] Added 2026-04-22 after lgbm-200-v2 wrongly saved IS=-3.4%.
+    # Root cause: CPCV path mean (used in objective) can be positive while full-IS CAGR is
+    # negative — partial CPCV test folds cover only favorable sub-periods. This gate catches
+    # the divergence. Validated: v5 repro (IS=-0.75%) correctly blocked, v4 champion preserved.
+    if gate_ok:
+        is_cagr_v = float(is_port.get("cagr_pct", is_port.get("cagr", 0.0)))
+        rets_is = np.diff(is_port.get("equity_curve", np.array([FUTURES_INITIAL_BALANCE])))
+        hrs_is = int(args.tf.replace("h", "")) if args.tf.endswith("h") else 4
+        ann_f = (365 * 24) / hrs_is
+        is_sharpe_v = 0.0
+        if rets_is.size > 0 and np.std(rets_is) > 1e-9:
+            is_sharpe_v = float(np.mean(rets_is) / np.std(rets_is)) * np.sqrt(ann_f)
+        if is_cagr_v < 0.0 or is_sharpe_v < 0.0:
+            gate_ok = False
+            _logger.warning(
+                " [IS STRUCTURAL GATE] IS CAGR=%.2f%% IS Sharpe=%.2f FAIL → "
+                "Structural IS Drag detected. Champion hardening blocked.",
+                is_cagr_v,
+                is_sharpe_v,
+            )
+
     res_dir = Path(project_root) / "results"
     res_dir.mkdir(parents=True, exist_ok=True)
     best_params_path = res_dir / f"{BEST_PARAMS_FUTURES_JSON_STEM}.json"
