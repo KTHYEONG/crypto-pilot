@@ -26,6 +26,10 @@ HMM_SEMANTIC_PROB_COLUMNS: tuple[str, ...] = (
     "hmm_prob_crisis",
 )
 
+# Bump when GP feature semantics change without renaming columns so raw GP
+# caches are invalidated and Tier 2 retraining actually happens.
+GP_FEATURE_SCHEMA_VERSION: str = "v2"
+
 GP_ENGINEERED_FEATURE_NAMES: tuple[str, ...] = (
     "ret_1",
     "ret_3",
@@ -101,7 +105,7 @@ def build_gp_input_features(df: pd.DataFrame) -> pd.DataFrame:
     open_ = df["open"].astype(np.float64) if "open" in df.columns else close.shift(1).fillna(close)
 
     # 1. Price Momentum (log-modulus of log returns; tmp.md 1-D stationarity)
-    for h in [1, 3, 6, 12, 24]:
+    for h in [1, 3, 6, 12, 24, 48, 72, 168]:
         raw_ret = pd.Series(
             np.log(close / close.shift(int(h)).clip(lower=1e-12)),
             index=out.index,
