@@ -1071,11 +1071,11 @@ def run_ml_pipeline_for_universe(
     filter_meta = alpha_panel.attrs.get("gp_alpha_filter", {})
 
     _logger.info("\n" + "-" * 85)
-    _logger.info(" [PHASE 2] GP IC VALIDATION RESULTS")
+    _logger.info(" [PHASE 2] LIGHTGBM IC VALIDATION RESULTS")
     _logger.info("-" * 85)
     _logger.info(f" IS Best Fitness (Composite ICIR): {best_fitness:.6f}")
-    _logger.info(f" GP Alpha Components Tried:      {filter_meta.get('n_components', 0):.0f}")
-    _logger.info(f" GP Alpha Components Surviving:   {filter_meta.get('n_surviving', 0):.0f}")
+    _logger.info(f" Alpha Components Tried:          {filter_meta.get('n_components', 0):.0f}")
+    _logger.info(f" Alpha Components Surviving:       {filter_meta.get('n_surviving', 0):.0f}")
     neu_p = bool(filter_meta.get("neutralize_primary", 0))
     _logger.info(f" Primary Alpha Neutralized:       {neu_p}")
     
