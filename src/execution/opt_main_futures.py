@@ -624,6 +624,7 @@ def main() -> None:
         valid_symbols, args.tf, params, oos_data_maps, cache_root=FUTURES_CACHE_DIR
     )
 
+    gate_ok = True
     if bool(OPT_FUTURES_CONFIG.get("FUTURES_PHASE3_HARD_GATE", True)):
         mai = ml_ctx.multi_alignment_info or {}
         oos_tw = best_trial.user_attrs.get("cpcv_path_oos_log_tw") or []
@@ -789,9 +790,17 @@ def main() -> None:
 
     res_dir = Path(project_root) / "results"
     res_dir.mkdir(parents=True, exist_ok=True)
-    with open(res_dir / f"{BEST_PARAMS_FUTURES_JSON_STEM}.json", "w") as f:
-        json.dump(params, f, indent=4)
-    _logger.info(f"Best parameters saved to results/{BEST_PARAMS_FUTURES_JSON_STEM}.json")
+    best_params_path = res_dir / f"{BEST_PARAMS_FUTURES_JSON_STEM}.json"
+    if gate_ok:
+        with open(best_params_path, "w") as f:
+            json.dump(params, f, indent=4)
+        _logger.info(f"Best parameters saved to results/{BEST_PARAMS_FUTURES_JSON_STEM}.json")
+    else:
+        _logger.warning(
+            "Best parameters NOT persisted because Phase3 hard gate failed. "
+            "Preserving existing results/%s.json artifact.",
+            BEST_PARAMS_FUTURES_JSON_STEM,
+        )
 
 
 if __name__ == "__main__":
