@@ -249,8 +249,8 @@ def _recompute_cs_dirs_numba(
             if np.isfinite(vt) and vt < ss:
                 rank_s += 1
 
-        binary_l = 1.0 if float(rank_l) <= fk else 0.0
-        binary_s = 1.0 if float(rank_s) <= fks else 0.0
+        binary_l = 1.0 if (float(rank_l) <= fk and sl > 0.5) else 0.0
+        binary_s = 1.0 if (float(rank_s) <= fks and ss < 0.5) else 0.0
 
         # Z-score magnitudes: clip between 0 and 3, then scale to max 1.0
         z_l = (sl - mean_l) / std_l
