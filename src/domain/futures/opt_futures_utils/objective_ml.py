@@ -90,9 +90,9 @@ def _inject_dyn_leverage_trimmed(trimmed_sig: pd.DataFrame, raw_full: pd.DataFra
             list(raw_full.columns),
         )
         raise
-    
+
     if p_mat.shape[1] != k:
-         _logger.error("SHAPE MISMATCH: p_mat.shape[1]=%s, k=%s. hmm_cols=%s. ALL COLS=%s", 
+         _logger.error("SHAPE MISMATCH: p_mat.shape[1]=%s, k=%s. hmm_cols=%s. ALL COLS=%s",
                       p_mat.shape[1], k, hmm_cols, list(raw_full.columns))
 
     close = raw_full["close"].astype(np.float64)
@@ -152,7 +152,7 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
         if info is None:
             return
         ctx.multi_alignment_info = info
-        
+
         full_signal_dfs: Dict[str, pd.DataFrame] = {}
         for sym in ctx.symbols:
             raw = ctx.data_maps[sym][ctx.tf]
@@ -164,7 +164,7 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
         for sym in ctx.symbols:
             start_idx = int(info["alignment_offsets"][sym])
             trimmed_sig = full_signal_dfs[sym].iloc[start_idx:start_idx+eff_len].copy()
-            
+
             # [DYNAMIC FIX] Re-calculate trend_direction and strength WITHOUT threshold bias
             # This allows Numba to apply the threshold dynamically.
             raw_full = ctx.data_maps[sym][ctx.tf].iloc[start_idx:start_idx+eff_len]
@@ -204,13 +204,13 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
         embargo = int(EMBARGO_BARS.get(ctx.tf, 12))
         cpcv_bundle = build_cpcv_test_paths_with_fallback(cpcv_zone_len, embargo=embargo)
         unique_blocks = list_cpcv_block_ranges(cpcv_zone_len, cpcv_bundle[1], embargo=embargo)
-        
+
         ctx.cpcv_block_slices = []
         for b_start, b_end in unique_blocks:
             s_start, s_end = max(0, b_start - 1), min(eff_len, b_end)
             aligned = _build_aligned_2d_from_prebuilt(prebuilt_full, ctx.symbols, s_start, s_end)
             ctx.cpcv_block_slices.append({"range": (b_start, b_end), "data": aligned})
-        
+
         # Holdout Slice
         h_start, h_end = max(0, cpcv_zone_len - 1), eff_len
         ctx.holdout_slice = _build_aligned_2d_from_prebuilt(
@@ -302,6 +302,9 @@ def _fixed_ml_phase_d_params() -> Dict[str, Any]:
 
 
 def _suggest_ml_phase_d(trial: optuna.Trial) -> Dict[str, Any]:
+    # Search bounds validated empirically. See logs/CURRENT_STATE.md > Forbidden Zones.
+    # KELLY_SHRINKAGE < 0.45 → high PBO (forbidden). ATR < 26 → signal decay (forbidden).
+    # K_LONG/SHORT fixed to 1 — increasing complexity spikes PBO (validated gp-006 attempt).
     bayes_c = float(trial.suggest_float("BAYESIAN_C", 3.0, 10.0, log=True))
     kelly_s = float(trial.suggest_float("KELLY_SHRINKAGE", 0.45, 0.70))
     k_long = int(trial.suggest_int("K_LONG", 1, 1))
@@ -685,13 +688,28 @@ def objective_ml_phase_d(trial: optuna.Trial, ctx: MLPhaseDContext) -> float:
         # gradient so Optuna can distinguish better from worse params.
         # Weight 0.2: DSR dominates when > 0; too-high weight causes IS overfitting.
         growth_signal = float(np.clip(mean_log_growth, -2.0, 2.0))
-        # [NEW] Structural IS Drag Penalty: If mean CPCV log growth is negative, heavily penalize
-        # to prevent trials with strong holdout/OOS but negative IS from being chosen.
+        # [IS Drag Penalty] weight=5.0 — empirically validated 2026-04-22.
+        # Blocks trials with positive CPCV path mean but negative full-IS execution.
+        # Lower weight allowed IS-negative trials to pass; higher weight unnecessary.
         is_penalty = 0.0
         if growth_signal < 0:
             is_penalty = abs(growth_signal) * 5.0
-            
-        obj = -dsr - 0.2 * growth_signal + pen + 2.0 * trade_shortfall + is_penalty
+        # [Path Consistency Penalty] weight=2.0 — empirically validated 2026-04-22.
+        # Directly proxies PBO: high std(CPCV paths) → complement paths diverge → high PBO.
+        # weight=4.0 tested: OOS collapsed to 1.70% (over-conservative).
+        # weight=0.0 tested: PBO inflates to 0.84+ with >200 trials (selection bias).
+        # weight=2.0 optimal: PBO 0.225 achieved at 200 trials while OOS=22.54% preserved.
+        # DO NOT raise above 3.0 without re-validating OOS performance.
+        path_consistency_penalty = float(np.clip(std_log_growth, 0.0, 2.0)) * 2.0
+
+        obj = (
+            -dsr
+            - 0.2 * growth_signal
+            + pen
+            + 2.0 * trade_shortfall
+            + is_penalty
+            + path_consistency_penalty
+        )
 
     trial.set_user_attr("ml_mean_log_growth_cpcv", mean_log_growth)
     trial.set_user_attr("ml_worst_mdd_cpcv", worst_mdd)
@@ -718,19 +736,22 @@ def select_best_trial_by_holdout_log_ret(trials: List[FrozenTrial]) -> FrozenTri
     if not trials:
         raise ValueError("empty trials")
 
-    def _score(t: FrozenTrial) -> tuple[float, float, float, float]:
+    def _score(t: FrozenTrial) -> tuple[float, float, float, float, float]:
         holdout = float(np.clip(t.user_attrs.get("ml_holdout_log_ret", 0.0), -2.0, 2.0))
         is_cpcv = float(np.clip(t.user_attrs.get("ml_mean_log_growth_cpcv", -2.0), -2.0, 2.0))
         dsr = float(t.user_attrs.get("gate1_dsr", 0.0))
         worst_mdd = float(t.user_attrs.get("ml_worst_mdd_cpcv", 999.0))
-        
-        # [NEW] Structural IS Drag Penalty in Fallback
+        # Prefer low-variance paths (proxy for low PBO) in fallback as well.
+        path_std = float(np.clip(t.user_attrs.get("ml_std_log_growth_cpcv", 1.0), 0.0, 2.0))
+
+        # IS drag penalty: discount holdout when IS CPCV is negative.
         if is_cpcv < 0:
             holdout = holdout - abs(is_cpcv) * 2.0
 
         return (
             dsr,
             is_cpcv,
+            -path_std,
             -worst_mdd,
             holdout,
         )

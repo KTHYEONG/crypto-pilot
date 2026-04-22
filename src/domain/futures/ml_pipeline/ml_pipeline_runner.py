@@ -52,7 +52,7 @@ def _sorted_hmm_prob_columns(df: pd.DataFrame) -> list[str]:
         return sem
     # Only include columns where the last part is a digit to avoid ValueError (e.g., hmm_prob_0_x)
     legacy = [
-        c for c in df.columns 
+        c for c in df.columns
         if str(c).startswith("hmm_prob_") and str(c).split("_")[-1].isdigit()
     ]
     return sorted(legacy, key=lambda x: int(str(x).split("_")[-1]))
@@ -136,15 +136,15 @@ def _is_kelly_per_semantic_state(
             continue
         r = fwd_ret[m]
         mu = float(np.mean(r))
-        
+
         # [REFACTORED] Stronger Relative Kelly (Demeaning)
         # Subtract FULL market average to force alpha-only Longs.
         mu_relative = mu - global_mu
-        
+
         # James-Stein shrink towards zero (neutral)
         alpha_js = 30.0 / (30.0 + float(n_s))
         mu_shrunk = alpha_js * 0.0 + (1.0 - alpha_js) * mu_relative
-        
+
         kelly_long[s] = float(np.clip(mu_shrunk / global_v, -1.0, 1.0))
         kelly_short[s] = float(np.clip(-mu_shrunk / global_v, -1.0, 1.0))
 
@@ -213,7 +213,7 @@ def _hmm_modulator_kelly_values(
             "hmm_modulator_long": np.full(n, 1.0, dtype=np.float64),
             "hmm_modulator_short": np.full(n, 1.0, dtype=np.float64)
         })
-        
+
     k_states = len(cols)
     b = btc_df.sort_values("datetime").copy()
     b["datetime"] = pd.to_datetime(b["datetime"], utc=True)
@@ -233,13 +233,13 @@ def _hmm_modulator_kelly_values(
     )
     dt_mp = pd.to_datetime(merged["datetime"], utc=True)
     is_mask = (dt_mp < is_end_utc).to_numpy()
-    
+
     k_long, k_short = _is_kelly_per_semantic_state(p_mat, fwd_ret, is_mask, k_states, cols)
-    
+
     # Apply shrink to deviations from 1.0
     mod_long = np.clip(1.0 + float(shrink) * (p_mat @ k_long), 0.3, 2.0).astype(np.float64)
     mod_short = np.clip(1.0 + float(shrink) * (p_mat @ k_short), 0.3, 2.0).astype(np.float64)
-    
+
     # [NEW] Asymmetric Regime Override (Hard Capping & Boosting)
     p_bull = merged["hmm_prob_bull_trend"].to_numpy(dtype=np.float64)
     p_bear = merged["hmm_prob_bear_trend"].to_numpy(dtype=np.float64)
@@ -265,7 +265,7 @@ def _hmm_modulator_kelly_values(
         mod_short = np.where(
             pc > float(crisis_thr), np.minimum(mod_short, 1.1), mod_short
         )
-        
+
     return pd.DataFrame({
         "hmm_modulator_long": mod_long,
         "hmm_modulator_short": mod_short
@@ -291,14 +291,14 @@ def _try_tbm_labels_per_1h_row(
             df_1m = collector.collect_1m_ohlcv(sym, fetch_start, end)
         if df_1m is None or len(df_1m) < 200:
             return None
-        
+
         # [REFACTORED] Use 1h directly for TBM labeling (No 4h resampling)
         d1 = df_1h[[*list(need), "datetime"]].sort_values("datetime").copy()
         d1["datetime"] = pd.to_datetime(d1["datetime"], utc=True)
-        
+
         if len(d1) < 30:
             return None
-            
+
         tbm = label_triple_barrier(
             d1,
             df_1m,
@@ -307,16 +307,16 @@ def _try_tbm_labels_per_1h_row(
         )
         if tbm is None or len(tbm) == 0:
             return None
-            
+
         lab = tbm.rename("tbm_label").reset_index()
         lab["datetime"] = pd.to_datetime(lab["datetime"], utc=True)
         lab = lab.sort_values("datetime")
-        
+
         tmp = df_1h[["datetime"]].copy()
         tmp["_ord"] = np.arange(len(tmp), dtype=np.int64)
         tmp["datetime"] = pd.to_datetime(tmp["datetime"], utc=True)
         tmp = tmp.sort_values("datetime")
-        
+
         # Align labels back to 1h rows
         merged = pd.merge_asof(tmp, lab, on="datetime", direction="backward")
         merged = merged.sort_values("_ord")
@@ -517,7 +517,7 @@ def _step4_fusion_one_symbol(
             wide_1h["hmm_modulator_long"] = wide_1h["hmm_modulator_long"].fillna(0.8)
             wide_1h["hmm_modulator_short"] = wide_1h["hmm_modulator_short"].fillna(0.8)
             wide_1h["slot_rank_score"] = 0.0
-            
+
             if hmm_cols_ref:
                 mp_h = market_probs[["datetime", *hmm_cols_ref]]
                 wide_1h = wide_1h.merge(mp_h, on="datetime", how="left")
@@ -535,9 +535,9 @@ def _step4_fusion_one_symbol(
                     sym, list(sym_alpha.columns)
                 )
                 sym_alpha["gp_alpha_00"] = 0.0
-                
+
             wide_1h = pd.merge(df_1h, sym_alpha, on="datetime", how="left").fillna(0.0)
-            
+
             # [REFACTORED] Merge asymmetric modulators
             wide_1h = pd.merge(wide_1h, hmm_modulator, on="datetime", how="left")
             if "hmm_modulator_long" not in wide_1h.columns:
@@ -548,11 +548,11 @@ def _step4_fusion_one_symbol(
                  )
             wide_1h["hmm_modulator_long"] = wide_1h["hmm_modulator_long"].fillna(0.8)
             wide_1h["hmm_modulator_short"] = wide_1h["hmm_modulator_short"].fillna(0.8)
-            
+
             # Use mean of long/short modulator for ranking score
             m_avg = (wide_1h["hmm_modulator_long"] + wide_1h["hmm_modulator_short"]) / 2.0
             wide_1h["slot_rank_score"] = wide_1h["gp_alpha_00"] * m_avg
-            
+
             if hmm_cols_ref:
                 mp_h = market_probs[["datetime", *hmm_cols_ref]]
                 wide_1h = wide_1h.merge(mp_h, on="datetime", how="left")
@@ -741,7 +741,7 @@ def merge_ml_output_into_data_maps(
         # Ensure hmm_prob_crisis is there even if not in hmm_dyn, but only once
         if "hmm_prob_crisis" in mff.columns and "hmm_prob_crisis" not in ml_cols:
             ml_cols.append("hmm_prob_crisis")
-            
+
         ml_cols = [c for c in ml_cols if c in mff.columns]
         ml_features = mff[ml_cols].copy()
         drop_cols = [c for c in ml_cols if c != "datetime"]
@@ -749,18 +749,18 @@ def merge_ml_output_into_data_maps(
             continue
         original_df = maps[sym][tf].copy()
         original_df["datetime"] = pd.to_datetime(original_df["datetime"], utc=True)
-        
+
         # Aggressively drop any existing ML/HMM columns to prevent _x, _y suffixes
         reserved_patterns = [
             "gp_alpha_", "hmm_modulator", "ml_calib_prob", "xs_score_", "slot_rank_"
         ]
         exist_ml_cols = [
-            c for c in original_df.columns 
+            c for c in original_df.columns
             if any(p in str(c) for p in reserved_patterns) or str(c).startswith("hmm_prob_")
         ]
         to_drop = list(set(drop_cols + exist_ml_cols))
         is_cols_to_drop = [c for c in to_drop if c in original_df.columns]
-        
+
         if is_cols_to_drop:
             original_df = original_df.drop(columns=is_cols_to_drop)
         merged = pd.merge(original_df, ml_features, on="datetime", how="left")
@@ -973,7 +973,7 @@ def run_ml_pipeline_for_universe(
     collector = DataCollector()
     data_maps: dict[str, dict[str, Any]] = {}
     prefetched_1h: dict[str, pd.DataFrame] = {}
-    
+
     # --- Step 1: Market-Wide Data Collection & Panel Building ---
     _logger.info("Step 1/4: Collecting panel data for %d symbols...", len(symbols))
     for sym in symbols:
@@ -989,7 +989,7 @@ def run_ml_pipeline_for_universe(
                     df_1h = merge_metrics_into_ohlcv(sym, df_1h, Path(FUTURES_DATA_DIR))
                 else:
                     df_1h = df_tf
-                
+
                 try:
                     df_1h_enriched = _merge_gp_into_1h(df_1h)
                 except Exception as e:
@@ -1078,7 +1078,7 @@ def run_ml_pipeline_for_universe(
     _logger.info(f" Alpha Components Surviving:       {filter_meta.get('n_surviving', 0):.0f}")
     neu_p = bool(filter_meta.get("neutralize_primary", 0))
     _logger.info(f" Primary Alpha Neutralized:       {neu_p}")
-    
+
     _logger.info("-" * 85)
     _logger.info(" [DIAGNOSTICS] Elimination Breakdown (Why they failed):")
     _logger.info(f"   - Failed FDR (Stat. Luck):    {filter_meta.get('fail_fdr', 0):.0f}")
@@ -1087,7 +1087,7 @@ def run_ml_pipeline_for_universe(
     _logger.info(f"   - Failed Half-Life (Noise):   {filter_meta.get('fail_half_life', 0):.0f}")
     _logger.info(f"   - Failed Symbol Balance:      {filter_meta.get('fail_sym_bal', 0):.0f}")
     _logger.info(f"   - Failed Regime Consistency:  {filter_meta.get('fail_regime', 0):.0f}")
-    
+
     _logger.info("-" * 85)
     _logger.info(" [BEST ALPHA (gp_alpha_00) METRICS]")
     _logger.info(f"   - IS Mean IC:           {filter_meta.get('primary_is_mu', 0.0):.4f}")
