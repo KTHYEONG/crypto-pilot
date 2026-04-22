@@ -248,10 +248,10 @@ def _hmm_modulator_kelly_values(
 
     # BEAR_TREND Override: Aggressively cap long, allow short boost
     mod_long = np.where(p_bear > 0.25, np.minimum(mod_long, 0.6), mod_long)
-    mod_short = np.where(p_bear > 0.25, np.maximum(mod_short, 1.2), mod_short)
+    mod_short = np.where(p_bear > 0.25, np.maximum(mod_short, 1.5), mod_short)
 
     # BULL_TREND Override: Allow long boost, cap short
-    mod_long = np.where(p_bull > 0.25, np.maximum(mod_long, 1.2), mod_long)
+    mod_long = np.where(p_bull > 0.25, np.maximum(mod_long, 1.5), mod_long)
     mod_short = np.where(p_bull > 0.25, np.minimum(mod_short, 0.6), mod_short)
 
     # CHOP Override: Defensive sizing for both
@@ -432,6 +432,10 @@ def _apply_ml_calib_probs(
         and len(_sorted_hmm_prob_columns(wide_1h)) > 0
         and all(c in aligned_tf.columns for c in meta_feats)
     )
+    n = len(aligned_tf)
+    pl = np.ones(n, dtype=np.float64)
+    ps = np.ones(n, dtype=np.float64)
+
     if can_meta:
         X_w = wide_1h[list(meta_feats)].replace([np.inf, -np.inf], np.nan).fillna(0.0)
         y_ser = pd.Series(y_tbm, index=wide_1h.index)
@@ -439,7 +443,7 @@ def _apply_ml_calib_probs(
         is_end_idx = int((wdt < is_end_utc).sum())
         if is_end_idx >= 80:
             try:
-                _ = _meta_probs_wf_refit(
+                pl, ps = _meta_probs_wf_refit(
                     X_w,
                     y_ser,
                     aligned_tf,
@@ -451,10 +455,9 @@ def _apply_ml_calib_probs(
             except Exception as exc:
                 _logger.debug("MetaLabeler WF refit skipped: %s", exc)
 
-    n = len(aligned_tf)
-    aligned_tf["ml_calib_prob_long"] = np.ones(n, dtype=np.float64)
-    aligned_tf["ml_calib_prob_short"] = np.ones(n, dtype=np.float64)
-    aligned_tf["ml_calib_prob"] = np.ones(n, dtype=np.float64)
+    aligned_tf["ml_calib_prob_long"] = pl
+    aligned_tf["ml_calib_prob_short"] = ps
+    aligned_tf["ml_calib_prob"] = np.maximum(pl, ps)
 
 
 class _Step4FusionOutcome(NamedTuple):

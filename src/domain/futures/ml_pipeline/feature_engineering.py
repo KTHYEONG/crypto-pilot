@@ -28,7 +28,7 @@ HMM_SEMANTIC_PROB_COLUMNS: tuple[str, ...] = (
 
 # Bump when GP feature semantics change without renaming columns so raw GP
 # caches are invalidated and Tier 2 retraining actually happens.
-GP_FEATURE_SCHEMA_VERSION: str = "v2"
+GP_FEATURE_SCHEMA_VERSION: str = "v4"
 
 GP_ENGINEERED_FEATURE_NAMES: tuple[str, ...] = (
     "ret_1",
@@ -52,6 +52,11 @@ GP_ENGINEERED_FEATURE_NAMES: tuple[str, ...] = (
     "liq_proxy_6",
     "vol_skew_24",
     "mom_proxy_12",
+    "vwap_dist_24",
+    "vol_surface_24_168",
+    "funding_mom_24",
+    "acceleration_24",
+    "tail_risk_24",
 )
 
 
@@ -164,6 +169,32 @@ def build_gp_input_features(df: pd.DataFrame) -> pd.DataFrame:
     out["vol_skew_24"] = log_ret_1.rolling(24, min_periods=12).skew().fillna(0.0)
     ma_12 = close.rolling(12, min_periods=6).mean()
     out["mom_proxy_12"] = (close / (ma_12 + 1e-12)) - 1.0
+
+    # --- New Alpha Injections ---
+    # 1. VWAP Distance 24h
+    typ_price = (high + low + close) / 3.0
+    pv = typ_price * vol
+    vwap_24 = pv.rolling(24, min_periods=6).sum() / (vol.rolling(24, min_periods=6).sum() + 1e-12)
+    out["vwap_dist_24"] = (close / (vwap_24 + 1e-12)) - 1.0
+
+    # 2. Volatility Surface 24h vs 168h
+    vol_yz_168 = _yang_zhang_vol_24(open_, high, low, close, 168)
+    out["vol_surface_24_168"] = out["realized_vol_yz_24"] / (vol_yz_168 + 1e-12)
+
+    # 3. Funding Momentum 24h
+    if "funding_rate" in df.columns:
+        out["funding_mom_24"] = out["funding_rate"].diff(24)
+    else:
+        out["funding_mom_24"] = np.nan
+
+    # 4. Acceleration 24h (Momentum of momentum)
+    out["acceleration_24"] = out["ret_24"] - out["ret_24"].shift(24)
+
+    # 5. Tail Risk 24h (Downside semivariance / Total variance)
+    neg_ret = log_ret_1.clip(upper=0.0)
+    down_var = neg_ret.rolling(24, min_periods=12).var()
+    tot_var = log_ret_1.rolling(24, min_periods=12).var()
+    out["tail_risk_24"] = (down_var / (tot_var + 1e-12)).fillna(0.5)
 
     # vol_ratio / buy_sell_ratio: keep finite defaults; ret/ma_dist/funding left NaN for CS impute
     out = out.replace([np.inf, -np.inf], np.nan)
