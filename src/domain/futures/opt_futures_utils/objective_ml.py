@@ -292,35 +292,53 @@ def _log_precompute_computed_dir_sample(
     )
 
 
-def _suggest_ml_phase_d(trial: optuna.Trial) -> Dict[str, Any]:
-    trail = float(trial.suggest_float("TRAILING_ACTIVATION_ATR", 0.3, 1.2))
-    bayes_c = float(trial.suggest_float("BAYESIAN_C", 1.0, 30.0, log=True))
-    kelly_s = float(trial.suggest_float("KELLY_SHRINKAGE", 0.15, 0.4))
-    k_long = int(trial.suggest_int("K_LONG", 1, 3))
-    k_short = int(trial.suggest_int("K_SHORT", 1, 3))
-    reb = int(trial.suggest_categorical("REBALANCE_BARS", [1, 3, 6]))
-    crisis = float(trial.suggest_float("CRISIS_GAMMA", 0.5, 2.0))
-    atr_p = int(trial.suggest_int("ATR_PERIOD", 14, 20, step=2))
-    l_atr = float(trial.suggest_float("LONG_ATR_MULT", 1.5, 4.5, step=0.25))
-    l_trail = float(trial.suggest_float("LONG_TRAIL_MULT", 2.5, 6.0, step=0.5))
-    s_atr = float(trial.suggest_float("SHORT_ATR_MULT", 1.5, 3.0, step=0.25))
-    s_tp = float(trial.suggest_float("SHORT_TP_MULT", 1.0, 3.5, step=0.5))
-    s_trail = float(trial.suggest_float("SHORT_TRAIL_MULT", 1.5, 4.5, step=0.5))
-    l_scale = float(trial.suggest_float("LONG_SCALE_ATR_MULT", 2.5, 6.0, step=0.5))
-    max_exp = float(trial.suggest_float("MAX_EXP_PER_COIN", 0.5, 2.0, step=0.1))
-    dd_thr = float(trial.suggest_float("DD_SCALING_THRESHOLD", 0.10, 0.25, step=0.05))
+def _fixed_ml_phase_d_params() -> Dict[str, Any]:
+    """Constants that must stay aligned between optimization and final evaluation."""
     return {
-        "TRAILING_ACTIVATION_ATR": trail,
+        "SIZING_METHOD": "profit_factor_kelly",
+        "MIN_SCORE_PERCENTILE": 0.55,
+        "RISK_PER_TRADE": 0.03,
+    }
+
+
+def _suggest_ml_phase_d(trial: optuna.Trial) -> Dict[str, Any]:
+    bayes_c = float(trial.suggest_float("BAYESIAN_C", 3.0, 10.0, log=True))
+    kelly_s = float(trial.suggest_float("KELLY_SHRINKAGE", 0.45, 0.70))
+    k_long = int(trial.suggest_int("K_LONG", 1, 1))
+    k_short = int(trial.suggest_int("K_SHORT", 1, 1))
+    reb = int(trial.suggest_categorical("REBALANCE_BARS", [6, 12]))
+    crisis = float(trial.suggest_float("CRISIS_GAMMA", 0.7, 1.4))
+    atr_p = int(trial.suggest_int("ATR_PERIOD", 26, 34, step=2))
+    l_atr = float(trial.suggest_float("LONG_ATR_MULT", 2.0, 3.5, step=0.25))
+    l_trail = float(trial.suggest_float("LONG_TRAIL_MULT", 1.5, 3.5, step=0.5))
+    s_atr = float(trial.suggest_float("SHORT_ATR_MULT", 1.25, 2.25, step=0.25))
+    s_tp = float(trial.suggest_float("SHORT_TP_MULT", 1.0, 2.5, step=0.5))
+    s_trail = float(trial.suggest_float("SHORT_TRAIL_MULT", 1.0, 3.0, step=0.5))
+    l_scale = float(trial.suggest_float("LONG_SCALE_ATR_MULT", 2.0, 3.5, step=0.5))
+    max_exp = float(trial.suggest_float("MAX_EXP_PER_COIN", 0.4, 1.0, step=0.1))
+    dd_thr = float(trial.suggest_float("DD_SCALING_THRESHOLD", 0.05, 0.15, step=0.01))
+
+    # Keep search around the last validated champion regime instead of reopening failed axes.
+    fixed = _fixed_ml_phase_d_params()
+    sizing_m = str(trial.suggest_categorical("SIZING_METHOD", [fixed["SIZING_METHOD"]]))
+    pfk_win = int(trial.suggest_categorical("PFK_WINDOW", [40, 60, 80]))
+    stress_vol = float(trial.suggest_float("STRESS_VOL_Z", 2.5, 4.0, step=0.5))
+
+    return {
+        "SIZING_METHOD": sizing_m,
+        "PFK_WINDOW": pfk_win,
+        "STRESS_VOL_Z": stress_vol,
         "BAYESIAN_C": bayes_c,
         "KELLY_SHRINKAGE": kelly_s,
         "K_LONG": k_long,
         "K_SHORT": k_short,
         "REBALANCE_BARS": reb,
-        # Fixed 0.55 (not searched): extra dimension dilutes Optuna convergence (Run 12 lesson).
-        "MIN_SCORE_PERCENTILE": 0.55,
-        # Fixed 3%: RPT as search param creates dimension-inflation → DSR=0 (Run 12 lesson).
-        # 3% = 1.5x Run 9's effective 2%; expected CAGR ≈ 18% x 1.5 = 27%.
-        "RISK_PER_TRADE": 0.03,
+        "MIN_SCORE_PERCENTILE": float(
+            trial.suggest_categorical("MIN_SCORE_PERCENTILE", [fixed["MIN_SCORE_PERCENTILE"]])
+        ),
+        "RISK_PER_TRADE": float(
+            trial.suggest_categorical("RISK_PER_TRADE", [fixed["RISK_PER_TRADE"]])
+        ),
         "CRISIS_GAMMA": crisis,
         "ATR_PERIOD": atr_p,
         "LONG_ATR_MULT": l_atr,
@@ -336,7 +354,9 @@ def _suggest_ml_phase_d(trial: optuna.Trial) -> Dict[str, Any]:
 
 
 def build_ml_phase_d_params(trial_params: Dict[str, Any], tf: str) -> Dict[str, Any]:
-    return _base_engine_params(trial_params, tf)
+    merged = dict(_fixed_ml_phase_d_params())
+    merged.update(trial_params)
+    return _base_engine_params(merged, tf)
 
 
 def _pf_and_ev_cost_from_trades(all_trades: np.ndarray) -> tuple[float, float]:
@@ -364,12 +384,11 @@ def _base_engine_params(ml: Dict[str, Any], tf: str) -> Dict[str, Any]:
     # Cap: rpt*lev ≤ 0.20 (4% max at lev=5); higher RPT breaks IS DSR (Run 10 lesson).
     if rpt * lev > 0.20:
         rpt = 0.20 / max(lev, 1e-9)
-    trail = float(ml["TRAILING_ACTIVATION_ATR"])
     return {
         "TIMEFRAME": tf,
         "SIGNAL_TYPE": "ML_CALIB_PROB",
         "REGIME_TYPE": "NONE",
-        "SIZING_METHOD": "vol_target",
+        "SIZING_METHOD": str(ml.get("SIZING_METHOD", "vol_target")),
         "USE_CS_RANK_ENGINE": bool(ml.get("USE_CS_RANK_ENGINE", True)),
         "K_LONG": int(ml.get("K_LONG", 2)),
         "K_SHORT": int(ml.get("K_SHORT", 2)),
@@ -377,8 +396,13 @@ def _base_engine_params(ml: Dict[str, Any], tf: str) -> Dict[str, Any]:
         "MIN_SCORE_PERCENTILE": float(ml.get("MIN_SCORE_PERCENTILE", 0.55)),
         "CRISIS_GAMMA": float(ml.get("CRISIS_GAMMA", ml.get("CRISIS_GATE_PROB", 1.0))),
         "CRISIS_GATE_PROB": float(ml.get("CRISIS_GAMMA", ml.get("CRISIS_GATE_PROB", 1.0))),
-        "LONG_TRAIL_MULT": trail * 3.0,
-        "SHORT_TRAIL_MULT": trail * 3.0,
+        "LONG_TRAIL_MULT": float(ml.get("LONG_TRAIL_MULT", 3.0)),
+        "SHORT_TRAIL_MULT": float(ml.get("SHORT_TRAIL_MULT", 3.0)),
+        "PFK_WINDOW": int(ml.get("PFK_WINDOW", 60)),
+        "PFK_MIN_F": 0.1,
+        "KELLY_FRACTION": fk_frac,
+        "STRESS_VOL_Z": float(ml.get("STRESS_VOL_Z", 2.5)),
+        "STRESS_FR_Z": float(ml.get("STRESS_VOL_Z", 2.5)),
         "FK_FRACTION": fk_frac,
         "FK_EWMA_LAMBDA": 0.94,
         "FK_TARGET_VOL": 0.02,
@@ -398,7 +422,7 @@ def _base_engine_params(ml: Dict[str, Any], tf: str) -> Dict[str, Any]:
         "MAX_CONCURRENT_POSITIONS": int(
             OPT_FUTURES_CONFIG.get("FUTURES_MAX_CONCURRENT_POSITIONS", 3)
         ),
-        "MAX_EXPOSURE": 0.8,
+        "MAX_EXPOSURE": 0.6,
     }
 
 
@@ -682,22 +706,23 @@ def objective_ml_phase_d(trial: optuna.Trial, ctx: MLPhaseDContext) -> float:
 def select_best_trial_by_holdout_log_ret(trials: List[FrozenTrial]) -> FrozenTrial:
     """Fallback when constraint-feasible set is empty.
 
-    Scoring: prefer trials with DSR > 0, then by combined
-    holdout_log_ret + IS CPCV mean_log_growth (equal weight).
-    Pure holdout_log_ret is unstable across runs; adding IS CPCV
-    stability reduces overfitting to the holdout sub-period.
+    Fallback must remain CPCV-first. Pure or overweighted hold-out ranking
+    is unstable across reruns and was selecting fallback artifacts.
     """
     if not trials:
         raise ValueError("empty trials")
 
-    def _score(t: FrozenTrial) -> float:
+    def _score(t: FrozenTrial) -> tuple[float, float, float, float]:
         holdout = float(np.clip(t.user_attrs.get("ml_holdout_log_ret", 0.0), -2.0, 2.0))
         is_cpcv = float(np.clip(t.user_attrs.get("ml_mean_log_growth_cpcv", -2.0), -2.0, 2.0))
         dsr = float(t.user_attrs.get("gate1_dsr", 0.0))
-        # Holdout 3x weight: holdout is adjacent to OOS and better predicts OOS
-        # than IS CPCV (which spans diverse IS regimes not representative of OOS).
-        dsr_bonus = 0.5 if dsr > 0.0 else 0.0
-        return 3.0 * holdout + is_cpcv + dsr_bonus
+        worst_mdd = float(t.user_attrs.get("ml_worst_mdd_cpcv", 999.0))
+        return (
+            dsr,
+            is_cpcv,
+            -worst_mdd,
+            holdout,
+        )
 
     return max(trials, key=_score)
 
