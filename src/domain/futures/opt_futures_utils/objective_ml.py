@@ -685,7 +685,13 @@ def objective_ml_phase_d(trial: optuna.Trial, ctx: MLPhaseDContext) -> float:
         # gradient so Optuna can distinguish better from worse params.
         # Weight 0.2: DSR dominates when > 0; too-high weight causes IS overfitting.
         growth_signal = float(np.clip(mean_log_growth, -2.0, 2.0))
-        obj = -dsr - 0.2 * growth_signal + pen + 2.0 * trade_shortfall
+        # [NEW] Structural IS Drag Penalty: If mean CPCV log growth is negative, heavily penalize
+        # to prevent trials with strong holdout/OOS but negative IS from being chosen.
+        is_penalty = 0.0
+        if growth_signal < 0:
+            is_penalty = abs(growth_signal) * 5.0
+            
+        obj = -dsr - 0.2 * growth_signal + pen + 2.0 * trade_shortfall + is_penalty
 
     trial.set_user_attr("ml_mean_log_growth_cpcv", mean_log_growth)
     trial.set_user_attr("ml_worst_mdd_cpcv", worst_mdd)
@@ -717,6 +723,11 @@ def select_best_trial_by_holdout_log_ret(trials: List[FrozenTrial]) -> FrozenTri
         is_cpcv = float(np.clip(t.user_attrs.get("ml_mean_log_growth_cpcv", -2.0), -2.0, 2.0))
         dsr = float(t.user_attrs.get("gate1_dsr", 0.0))
         worst_mdd = float(t.user_attrs.get("ml_worst_mdd_cpcv", 999.0))
+        
+        # [NEW] Structural IS Drag Penalty in Fallback
+        if is_cpcv < 0:
+            holdout = holdout - abs(is_cpcv) * 2.0
+
         return (
             dsr,
             is_cpcv,
