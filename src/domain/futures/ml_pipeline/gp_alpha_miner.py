@@ -14,6 +14,20 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+from gplearn.fitness import make_fitness
+from gplearn.functions import make_function
+from gplearn.genetic import SymbolicTransformer
+from numba import njit
+from sklearn.preprocessing import QuantileTransformer
+
+from src.domain.futures.ml_pipeline.cross_sectional_utils import CrossSectionalPipelineUtils
+from src.domain.futures.ml_pipeline.feature_engineering import (
+    GP_ENGINEERED_FEATURE_NAMES,
+    GP_FEATURE_SCHEMA_VERSION,
+)
+from src.domain.futures.ml_pipeline.gp_alpha_filter import filter_gp_alpha_columns
+
+_logger = logging.getLogger(__name__)
 
 
 def _generate_smart_cache_stem(
@@ -27,30 +41,21 @@ def _generate_smart_cache_stem(
     h_str = "-".join(map(str, horizons))
     prefix = f"gp_univ_s{len(symbols)}_h{h_str}"
 
-    # 무결성을 결정짓는 'DNA' 문자열 생성
+    # 피처 스키마까지 캐시 DNA에 포함해 Tier 2 변경이 실제 재학습으로 이어지게 한다.
     dna = {
         "pop": pop,
         "gen": gen,
         "horizons": horizons,
         "symbols": sorted(symbols),
         "is_end_date": is_end_date,
-        "version": "v8_vectorized", # 최적화 알고리즘 버전 관리
+        "version": "v8_vectorized",
+        "feature_schema_version": GP_FEATURE_SCHEMA_VERSION,
+        "feature_columns": list(GP_ENGINEERED_FEATURE_NAMES),
     }
     dna_json = json.dumps(dna, sort_keys=True)
     short_hash = hashlib.md5(dna_json.encode()).hexdigest()[:8]
 
     return f"{prefix}_{short_hash}"
-from gplearn.fitness import make_fitness
-from gplearn.functions import make_function
-from gplearn.genetic import SymbolicTransformer
-from numba import njit
-from sklearn.preprocessing import QuantileTransformer
-
-from src.domain.futures.ml_pipeline.cross_sectional_utils import CrossSectionalPipelineUtils
-from src.domain.futures.ml_pipeline.feature_engineering import GP_ENGINEERED_FEATURE_NAMES
-from src.domain.futures.ml_pipeline.gp_alpha_filter import filter_gp_alpha_columns
-
-_logger = logging.getLogger(__name__)
 
 
 @njit(cache=True, fastmath=True)  # type: ignore[untyped-decorator]
