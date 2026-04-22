@@ -30,8 +30,8 @@ OPT_FUTURES_CONFIG: Dict[str, Any] = {
     "FUTURES_ML_IC_FILTER_USE_HAC": True,
     "FUTURES_ML_IC_FILTER_USE_EWMA": False,
     "FUTURES_ML_IC_EWMA_HALF_LIFE": 540.0,
-    "FUTURES_ML_IC_SYMBOL_BALANCE_MAX": 5.0,
-    "FUTURES_ML_IC_REGIME_GATE": False,
+    "FUTURES_ML_IC_SYMBOL_BALANCE_MAX": 3.0,
+    "FUTURES_ML_IC_REGIME_GATE": True,
     "FUTURES_ML_IC_FDR_Q": 0.15,
     "FUTURES_ML_GP_NSGA2_ENABLED": False,
     # HMM stable regime (fixed hyperparameters; not in Optuna search space)
