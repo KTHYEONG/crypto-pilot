@@ -46,6 +46,8 @@ GP_ENGINEERED_FEATURE_NAMES: tuple[str, ...] = (
     "ret_vol_adj_6",
     "ret_vol_adj_24",
     "liq_proxy_6",
+    "vol_skew_24",
+    "mom_proxy_12",
 )
 
 
@@ -155,6 +157,10 @@ def build_gp_input_features(df: pd.DataFrame) -> pd.DataFrame:
     roll_low_min = low.rolling(6, min_periods=2).min()
     out["liq_proxy_6"] = (roll_low_min - close) / (close + 1e-12)
 
+    out["vol_skew_24"] = log_ret_1.rolling(24, min_periods=12).skew().fillna(0.0)
+    ma_12 = close.rolling(12, min_periods=6).mean()
+    out["mom_proxy_12"] = (close / (ma_12 + 1e-12)) - 1.0
+
     # vol_ratio / buy_sell_ratio: keep finite defaults; ret/ma_dist/funding left NaN for CS impute
     out = out.replace([np.inf, -np.inf], np.nan)
     return out
@@ -244,18 +250,25 @@ def build_systemic_hmm_features(
         
         # 1. Trend (Short/Long)
         btc_trend_24h = (np.log(btc_close / btc_close.shift(24).clip(lower=1e-12))) / sig_24
-        btc_trend_168h = (np.log(btc_close / btc_close.shift(168).clip(lower=1e-12))) / (sig_24 * np.sqrt(7.0))
+        btc_trend_168h = (np.log(btc_close / btc_close.shift(168).clip(lower=1e-12))) / (
+            sig_24 * np.sqrt(7.0)
+        )
         
         # 2. Volatility Regime
         h_hi = btc_df["high"].astype(np.float64)
         h_lo = btc_df["low"].astype(np.float64) + 1e-12
         hl = np.log((h_hi / h_lo).clip(lower=1e-12))
-        park = pd.Series(np.sqrt(np.maximum(1.0 / (4.0 * np.log(2.0)) * (hl**2), 0.0)), index=btc_df.index)
+        park = pd.Series(
+            np.sqrt(np.maximum(1.0 / (4.0 * np.log(2.0)) * (hl**2), 0.0)),
+            index=btc_df.index,
+        )
         rv_regime = park.rolling(24).mean() / (park.rolling(168).mean() + 1e-12)
         
         # 3. Downside Risk
         neg_ret = log_ret_1.clip(upper=0.0)
-        downside_vol_ratio = (neg_ret.rolling(24).std() / (log_ret_1.rolling(24).std() + 1e-12)).fillna(0.5)
+        downside_vol_ratio = (
+            neg_ret.rolling(24).std() / (log_ret_1.rolling(24).std() + 1e-12)
+        ).fillna(0.5)
         
         # 4. Structural Distance (Capitulation)
         ma_168 = btc_close.rolling(168, min_periods=24).mean()
