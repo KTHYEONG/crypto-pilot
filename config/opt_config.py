@@ -10,7 +10,7 @@ OPT_FUTURES_CONFIG: Dict[str, Any] = {
     "total_trials": 2000,
     "tpe_n_startup_trials": 384,
     "seeds": [42],
-    "TARGET_TIMEFRAMES": ["1h"],
+    "TARGET_TIMEFRAMES": ["4h"],
     # Risk & Portfolio (Phase D)
     "FUTURES_MAX_CONCURRENT_POSITIONS": 3,
     "FUTURES_MIN_PF": 1.35,
@@ -105,12 +105,17 @@ FUTURES_SYMBOLS: List[str] = [
     "XRP/USDT",
     "BNB/USDT",
     "ADA/USDT",
-    "BCH/USDT",
     "LINK/USDT",
+    "BCH/USDT",
     "LTC/USDT",
     "AAVE/USDT",
+    "UNI/USDT",
     "FIL/USDT",
     "DOT/USDT",
+    "1000SHIB/USDT",
+    "XLM/USDT",
+    "APT/USDT",
+    "CRV/USDT",
 ]
 
 FUTURES_SCREENER_CONFIG: Dict[str, Any] = {
