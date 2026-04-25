@@ -596,9 +596,10 @@ def _print_hmm_summary(
     mode_label: str = "",
 ) -> None:
     """Prints a detailed financial and semantic profile of the HMM states."""
-    _logger.info("\n" + "=" * 85)
-    _logger.info(f" [PHASE 3] HMM REGIME ANALYSIS RESULTS {mode_label}")
-    _logger.info("=" * 85)
+    _logger.info("-" * 85)
+    _logger.info(f" [HMM AUDIT] Semantic State Profile {mode_label}")
+    _logger.info("-" * 85)
+
 
     # 1. Input Data Diagnostics
     _logger.info(" [1] INPUT DATA DIAGNOSTICS")
@@ -678,8 +679,8 @@ def _print_hmm_summary(
                 _logger.info(f"   ► {st_name:<11} (  0.0% time)")
 
     _logger.info("-" * 85)
-    _logger.info(f" [RESULT] HMM analysis complete {mode_label}")
-    _logger.info("=" * 85 + "\n")
+    _logger.info("-" * 85 + "\n")
+
 
 
 def _build_panel_with_targets(
@@ -835,11 +836,8 @@ def run_hmm_fusion_for_is_end(
     if panel_df is None:
         panel_df = _build_panel_with_targets(data_maps, cfg)
 
-    _logger.info(
-        " [R-6/HMM] Systemic HMM + fusion (is_end=%s, fusion=%s)...",
-        is_end_date,
-        include_fusion,
-    )
+    _logger.info("  --> Systemic HMM Inference (is_end=%s)...", is_end_date)
+
     market_hmm_feats = build_systemic_hmm_features(panel_df, None)
     if market_hmm_feats.index.tz is None:
         market_hmm_feats.index = market_hmm_feats.index.tz_localize("UTC")
@@ -969,16 +967,17 @@ def run_ml_pipeline_for_universe(
     """
     [Phase 2] Universal Cross-Sectional ML Pipeline.
     """
-    _logger.info("=" * 85)
-    _logger.info(" [PHASE 2] Starting Universal Cross-Sectional ML Pipeline")
-    _logger.info("=" * 85)
+    _logger.info("  --> Initiating Universal Cross-Sectional ML Pipeline")
+
 
     collector = DataCollector()
     data_maps: dict[str, dict[str, Any]] = {}
     prefetched_1h: dict[str, pd.DataFrame] = {}
 
     # --- Step 1: Market-Wide Data Collection & Panel Building ---
-    _logger.info("Step 1/4: Collecting panel data for %d symbols...", len(symbols))
+    _logger.info("  --> Step 1: Panel Construction & Asset Screening (%d symbols)", len(symbols))
+
+
     for sym in symbols:
         try:
             df_tf = collector.collect_and_save(sym, tf, fetch_start, end)
@@ -1009,7 +1008,9 @@ def run_ml_pipeline_for_universe(
 
     label_start = is_start_date or fetch_start
     if bool(cfg.get("FUTURES_ML_GP_USE_TBM_WEIGHT", True)):
-        _logger.info("Step 1b: prefetch 1m for TBM-based GP sample weights...")
+        _logger.info("  --> Step 1b: Triple-Barrier Micro-Weighting (1m prefetch)")
+
+
         one_m_gp: dict[str, pd.DataFrame | None] = {}
         for sym in list(data_maps.keys()):
             try:
@@ -1039,7 +1040,9 @@ def run_ml_pipeline_for_universe(
     horizons = tuple(int(x) for x in h_src)
 
     # --- Step 2: Universal GP Model Training (Cross-Sectional IC) ---
-    _logger.info("Step 2/4: Training Universal Cross-Sectional GP Model...")
+    _logger.info("  --> Step 2: Training Cross-Sectional GP Alpha Model")
+
+
     if bool(cfg.get("FUTURES_ML_GP_NSGA2_ENABLED", False)) and not is_deap_available():
         _logger.warning(
             "FUTURES_ML_GP_NSGA2_ENABLED=True but `deap` is not installed; "
@@ -1073,9 +1076,10 @@ def run_ml_pipeline_for_universe(
     best_fitness = alpha_panel.attrs.get("best_fitness", 0.0)
     filter_meta = alpha_panel.attrs.get("gp_alpha_filter", {})
 
-    _logger.info("\n" + "-" * 85)
-    _logger.info(" [PHASE 2] LIGHTGBM IC VALIDATION RESULTS")
     _logger.info("-" * 85)
+    _logger.info(" [GP AUDIT] LightGBM IC Validation")
+    _logger.info("-" * 85)
+
     _logger.info(f" IS Best Fitness (Composite ICIR): {best_fitness:.6f}")
     _logger.info(f" Alpha Components Tried:          {filter_meta.get('n_components', 0):.0f}")
     _logger.info(f" Alpha Components Surviving:       {filter_meta.get('n_surviving', 0):.0f}")
@@ -1107,13 +1111,15 @@ def run_ml_pipeline_for_universe(
 
     if gp_only:
         # Step 2 이후 즉시 종료
-        _logger.info(" [RESULT] GP-Only analysis complete. Skipping HMM & Fusion.")
-        _logger.info("=" * 85 + "\n")
+        _logger.info("  [SUCCESS] GP-Only analysis complete.")
+
         out = MLPipelineOutput()
         out.alpha_panel = alpha_panel
         return out
 
-    _logger.info("Step 3/4: Systemic HMM + fusion (GP frozen; is_end=%s)...", is_end_date or end)
+    _logger.info("  --> Step 3: HMM Regime Fusion & Meta-Labeling")
+
+
     out = run_hmm_fusion_for_is_end(
         list(data_maps.keys()),
         tf,
@@ -1134,13 +1140,11 @@ def run_ml_pipeline_for_universe(
     )
     out.alpha_panel = alpha_panel
     if hmm_only:
-        _logger.info("-" * 85)
-        _logger.info(" [PHASE 2] Universal Pipeline Processing Complete (HMM-only)")
-        _logger.info("=" * 85 + "\n")
+        _logger.info("  [SUCCESS] Pipeline complete (HMM-only).")
         return out
 
-    _logger.info("-" * 85)
-    _logger.info(" [PHASE 2] Universal Pipeline Processing Complete")
-    _logger.info("=" * 85 + "\n")
+
+    _logger.info("  [SUCCESS] Universal ML Pipeline processing complete.")
+
     out.alpha_panel = alpha_panel
     return out

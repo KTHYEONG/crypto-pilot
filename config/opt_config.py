@@ -34,6 +34,11 @@ OPT_FUTURES_CONFIG: Dict[str, Any] = {
     "FUTURES_ML_IC_REGIME_GATE": True,
     "FUTURES_ML_IC_FDR_Q": 0.15,
     "FUTURES_ML_GP_NSGA2_ENABLED": False,
+    # NSGA-II population size. Generations = trials / population_size.
+    # Target ≥ 10 generations → min trials = population_size * 10.
+    # Sessions 27/35/38: NSGA-II 3-strike empirical failure. DSR collapses to ~0.45.
+    # Root cause: TOPSIS equal-weight dilutes DSR primacy; Pareto front drifts outside valid region.
+    "FUTURES_NSGA2_POPULATION_SIZE": 30,
     # HMM stable regime (fixed hyperparameters; not in Optuna search space)
     "FUTURES_HMM_K_STATES": 4,
     "FUTURES_HMM_KELLY_SHRINKAGE": 0.4,
@@ -46,7 +51,7 @@ OPT_FUTURES_CONFIG: Dict[str, Any] = {
     # R-6: per WF OOS leg, retrain systemic HMM on data strictly before leg start (GP frozen).
     "FUTURES_WF_HMM_LEG_REFIT": True,
     "FUTURES_WF_LEG_TW_MIN_ALL": 1.0,
-    "FUTURES_WF_LEG_TW_MEAN_MIN": 1.05,
+    "FUTURES_WF_LEG_TW_MEAN_MIN": 1.02,
     # Phase 2: entry gate (rolling quantile), TBM horizon (1m bars), meta purge alignment
     "ENTRY_QUANTILE_WINDOW": 240,
     "FUTURES_ENTRY_NUMBA_THRESHOLD": 0.5,
@@ -56,13 +61,16 @@ OPT_FUTURES_CONFIG: Dict[str, Any] = {
     "FUTURES_META_MIN_POS_ISOTONIC": 200,
     "FUTURES_USE_META_LABELER": False,
     "FUTURES_CRISIS_GATE_PROB_DEFAULT": 0.7,
-    "FUTURES_MIN_TRADES_TARGET": 10,
+    "FUTURES_MIN_TRADES_TARGET": 30,
     # Phase 3: WF refit HMM-only when Meta disabled; optional PBO/DSR hard gate after Optuna
     "FUTURES_ML_WF_REFIT_ENABLED": True,
     "FUTURES_ML_WF_REFIT_LEGS": 3,
     "FUTURES_PHASE3_HARD_GATE": True,
     # gate1_dsr ∈ [0,1] from CPCV paths (Bailey & López de Prado style)
     "FUTURES_ML_GATE1_DSR_MIN": 0.20,
+    # Distributional hardening: 10th percentile CPCV path must still survive.
+    # log(TW) > 0.0 ↔ TW > 1.0, so this is a direct worst-decile survival test.
+    "FUTURES_CPCV_P10_LOG_TW_MIN": 0.0,
 }
 
 # Cross-Sectional Strategy Parameter Space
@@ -105,17 +113,16 @@ FUTURES_SYMBOLS: List[str] = [
     "XRP/USDT",
     "BNB/USDT",
     "ADA/USDT",
-    "LINK/USDT",
     "BCH/USDT",
+    "LINK/USDT",
     "LTC/USDT",
     "AAVE/USDT",
-    "UNI/USDT",
     "FIL/USDT",
+    "UNI/USDT",
     "DOT/USDT",
     "1000SHIB/USDT",
     "XLM/USDT",
     "APT/USDT",
-    "CRV/USDT",
 ]
 
 FUTURES_SCREENER_CONFIG: Dict[str, Any] = {

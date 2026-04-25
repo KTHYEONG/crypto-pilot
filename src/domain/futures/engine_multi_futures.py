@@ -21,7 +21,7 @@ from src.domain.futures.engine_logic_futures import (
     process_short_scale_out,
 )
 
-_logger: logging.Logger = logging.getLogger(__name__)
+_logger: logging.Logger = logging.getLogger("opt_futures")
 
 
 class PortfolioBacktestEngineFast:
@@ -73,6 +73,9 @@ class PortfolioBacktestEngineFast:
         hmm_crisis = self.data.get("hmm_prob_crisis")
         hmm_mod_l = self.data.get("hmm_modulator_long")
         hmm_mod_s = self.data.get("hmm_modulator_short")
+        if hmm_mod_l is not None:
+            _logger.debug("[ENGINE] hmm_mod_l mean: %.4f, std: %.4f", np.mean(hmm_mod_l), np.std(hmm_mod_l))
+        
         if xs_long is None or xs_long.shape != close_2d.shape:
             xs_long = np.zeros_like(close_2d, dtype=np.float64)
         if xs_short is None or xs_short.shape != close_2d.shape:
@@ -149,11 +152,12 @@ class PortfolioBacktestEngineFast:
         )
 
         _logger.debug(
-            "[BT_DIAG] dust_skip=%d margin_fail=%d t_dir_zero=%d p_side_zero=%d",
+            "[BT_DIAG] dust_skip=%d margin_fail=%d t_dir_zero=%d p_side_zero=%d mod_skip=%d",
             int(bt_diag[0]),
             int(bt_diag[1]),
             int(bt_diag[2]),
             int(bt_diag[3]),
+            int(bt_diag[4]),
         )
 
         if trades_arr.size == 0:
@@ -183,12 +187,18 @@ def _recompute_cs_dirs_numba(
     xs_long: np.ndarray,
     xs_short: np.ndarray,
     hmm_crisis: np.ndarray,
+    hmm_mod_long: np.ndarray,
+    hmm_mod_short: np.ndarray,
     crisis_gamma: float,
     k_long: int,
     k_short: int,
     computed_dir: np.ndarray,
 ) -> None:
-    """Hard top-K CS dirs: binary top-K, crisis (1-p)^gamma, |mag| in [0.05,1]."""
+    """Hard top-K CS dirs: binary top-K, crisis (1-p)^gamma, |mag| in [0.05,1].
+    
+    [Session 12] Asymmetric Gating: Skip entries if hmm_modulator < 0.5.
+    This prevents 'paper cut' losses in regimes where the HMM is bearish/crisis.
+    """
     computed_dir[:] = 0.0
     gam = crisis_gamma if crisis_gamma > 1e-9 else 1e-9
     fk = float(k_long)
@@ -225,6 +235,11 @@ def _recompute_cs_dirs_numba(
         ss = float(xs_short[prev_i, s])
         if not np.isfinite(sl) or not np.isfinite(ss):
             continue
+        
+        # [NEW] Asymmetric Entry Filter: Skip if HMM modulator is too low
+        mod_l = float(hmm_mod_long[prev_i, s])
+        mod_s = float(hmm_mod_short[prev_i, s])
+        
         c_raw = float(hmm_crisis[prev_i, s])
         if not np.isfinite(c_raw):
             c_raw = 0.0
@@ -249,8 +264,8 @@ def _recompute_cs_dirs_numba(
             if np.isfinite(vt) and vt < ss:
                 rank_s += 1
 
-        binary_l = 1.0 if (float(rank_l) <= fk and sl > 0.5) else 0.0
-        binary_s = 1.0 if (float(rank_s) <= fks and ss < 0.5) else 0.0
+        binary_l = 1.0 if (float(rank_l) <= fk and sl > 0.7 and mod_l >= 0.5) else 0.0
+        binary_s = 1.0 if (float(rank_s) <= fks and ss < 0.3 and mod_s >= 0.5) else 0.0
 
         # Z-score magnitudes: clip between 0 and 3, then scale to max 1.0
         z_l = (sl - mean_l) / std_l
@@ -320,6 +335,7 @@ def backtest_portfolio_numba(
     margin_fail_cnt = 0
     t_dir_zero_cnt = 0
     p_side_zero_cnt = 0
+    mod_skip_cnt = 0
     min_notional = max(5.0, 0.0005 * initial_balance) if initial_balance > 0.0 else 5.0
 
     balance = initial_balance
@@ -438,6 +454,8 @@ def backtest_portfolio_numba(
                         xs_long,
                         xs_short,
                         hmm_crisis,
+                        hmm_mod_long,
+                        hmm_mod_short,
                         crisis_gamma,
                         k_long,
                         k_short,
@@ -479,6 +497,13 @@ def backtest_portfolio_numba(
                     if use_cs_rank != 0:
                         p_side_zero_cnt += 1
                     continue
+
+                # [NEW] Check for modulator skip before expensive sizing
+                if use_cs_rank != 0:
+                    t_dir_raw = computed_dir[s]
+                    if (t_dir_raw > 0 and hmm_mod_long[prev_i, s] < 0.5) or (t_dir_raw < 0 and hmm_mod_short[prev_i, s] < 0.5):
+                        mod_skip_cnt += 1
+                        continue
 
                 atr_p = atr_2d[prev_i, s] / max(close_2d[prev_i, s], 1e-12)
                 lev_entry = float(lev_2d[i, s])
@@ -573,9 +598,10 @@ def backtest_portfolio_numba(
                     t_count += 1
                 in_pos[s] = False
 
-    diag_out = np.empty(4, dtype=np.int64)
+    diag_out = np.empty(5, dtype=np.int64)
     diag_out[0] = dust_skip_cnt
     diag_out[1] = margin_fail_cnt
     diag_out[2] = t_dir_zero_cnt
     diag_out[3] = p_side_zero_cnt
+    diag_out[4] = mod_skip_cnt
     return trades[:t_count], balance, equity_curve, diag_out
