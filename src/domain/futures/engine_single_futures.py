@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Optional
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -23,13 +23,13 @@ class BacktestEngineFast:
         self,
         hourly_df: pd.DataFrame,
         daily_df: pd.DataFrame,
-        strategy,
+        strategy: Any,
         initial_balance: float = 1_000_000,
-        merge_index_map=None,
-        precomputed_daily_df: Optional[pd.DataFrame] = None,
-        warmup_bars: Optional[int] = None,
+        merge_index_map: dict[str, int] | None = None,
+        precomputed_daily_df: pd.DataFrame | None = None,
+        warmup_bars: int | None = None,
         execution_start_idx: int = 0,
-    ):
+    ) -> None:
         self.hourly_df = hourly_df.copy(deep=False)
         self.daily_df = daily_df.copy(deep=False)
         self.strategy = strategy
@@ -39,8 +39,8 @@ class BacktestEngineFast:
         self._warmup_bars_override = warmup_bars
         self._execution_start_idx = max(0, int(execution_start_idx))
 
-        self.leverage = self.strategy.params.get("LEVERAGE", 1)
-        self.risk_per_trade = self.strategy.params.get("RISK_PER_TRADE", 0.015)
+        self.leverage: float = self.strategy.params.get("LEVERAGE", 1.0)
+        self.risk_per_trade: float = self.strategy.params.get("RISK_PER_TRADE", 0.015)
         self.funding_events_per_bar = 1
 
         self.fee_rate = TRADING_FEE_RATE
@@ -88,7 +88,7 @@ class BacktestEngineFast:
         for col in indicator_cols:
             self.merged_df[f"daily_{col}"] = signal_df[col].values
 
-    def run(self):
+    def run(self) -> dict[str, Any]:
         self.logger.debug(f"Running RSM-VT FAST backtest for {self.strategy.name}...")
         df = self.merged_df
         n = len(df)
@@ -152,12 +152,14 @@ class BacktestEngineFast:
             )
 
         if getattr(self, "_warmup_bars_override", None) is not None:
-            warmup_bars = self._warmup_bars_override
+            warmup_bars = int(self._warmup_bars_override)
         else:
             tf = self.strategy.params.get("TIMEFRAME", "1h")
-            warmup_bars = getattr(df, "attrs", {}).get(
-                "warmup_bars",
-                self.strategy.get_required_warmup(freq=tf),
+            warmup_bars = int(
+                getattr(df, "attrs", {}).get(
+                    "warmup_bars",
+                    self.strategy.get_required_warmup(freq=tf),
+                )
             )
         self._warmup_bars = warmup_bars
         self._effective_start_idx = max(warmup_bars, self._execution_start_idx)
@@ -230,7 +232,7 @@ class BacktestEngineFast:
 
         return self.get_results()
 
-    def get_results(self):
+    def get_results(self) -> dict[str, Any]:
         if not np.isfinite(self.balance):
             return self._empty_result()
 
@@ -323,7 +325,7 @@ class BacktestEngineFast:
             "gross_pnl_abs": gross_pnl_abs,
         }
 
-    def _empty_result(self):
+    def _empty_result(self) -> dict[str, Any]:
         return {
             "total_trades": 0,
             "win_trades": 0,
@@ -339,39 +341,39 @@ class BacktestEngineFast:
         }
 
 
-@njit(nogil=True, cache=True)
+@njit(nogil=True, cache=True)  # type: ignore[untyped-decorator]
 def backtest_loop_numba(
-    close,
-    high,
-    low,
-    open_prices,
-    entry_upper,
-    entry_lower,
-    trend_dir,
-    strength_filter,
-    atr,
-    macro_ema_arr,
-    garch_kelly_f,
-    initial_balance,
-    leverage,
-    fee_rate,
-    slippage_rate,
-    risk_per_trade,
-    timestamps,
-    funding_rate_sums,
-    long_atr_mult,
-    long_trail_mult,
-    short_atr_mult,
-    short_tp_mult,
-    long_scale_atr_mult,
-    short_trail_mult,
-    warmup_bars,
-    execution_start_idx,
-    use_compounding,
-    max_capital_usage,
-    max_exp_per_coin,
-    dd_scaling_threshold,
-):
+    close: np.ndarray,
+    high: np.ndarray,
+    low: np.ndarray,
+    open_prices: np.ndarray,
+    entry_upper: np.ndarray,
+    entry_lower: np.ndarray,
+    trend_dir: np.ndarray,
+    strength_filter: np.ndarray,
+    atr: np.ndarray,
+    macro_ema_arr: np.ndarray,
+    garch_kelly_f: np.ndarray,
+    initial_balance: float,
+    leverage: float,
+    fee_rate: float,
+    slippage_rate: float,
+    risk_per_trade: float,
+    timestamps: np.ndarray,
+    funding_rate_sums: np.ndarray,
+    long_atr_mult: float,
+    long_trail_mult: float,
+    short_atr_mult: float,
+    short_tp_mult: float,
+    long_scale_atr_mult: float,
+    short_trail_mult: float,
+    warmup_bars: int,
+    execution_start_idx: int,
+    use_compounding: bool,
+    max_capital_usage: float,
+    max_exp_per_coin: float,
+    dd_scaling_threshold: float,
+) -> tuple[np.ndarray, float, np.ndarray, float]:
     funding_paid_total = 0.0
     n = len(close)
     balance = initial_balance

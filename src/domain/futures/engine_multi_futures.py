@@ -1,5 +1,5 @@
-"""
-2D Portfolio backtest engine: single global balance, per-symbol state arrays.
+"""2D Portfolio backtest engine: single global balance, per-symbol state arrays.
+
 For use when mode=multi (aligned Time x Symbol matrix).
 """
 
@@ -25,6 +25,8 @@ _logger: logging.Logger = logging.getLogger("opt_futures")
 
 
 class PortfolioBacktestEngineFast:
+    """Fast vectorised backtest engine for multi-symbol futures portfolios."""
+
     def __init__(
         self,
         aligned_data: dict[str, np.ndarray],
@@ -34,6 +36,7 @@ class PortfolioBacktestEngineFast:
         fee_rate: float = 0.0004,
         slippage_rate: float = 0.001,
     ) -> None:
+        """Initialize the engine with market data and strategy parameters."""
         self.data = aligned_data
         self.symbols = symbol_names
         self.params = strategy_params
@@ -51,6 +54,7 @@ class PortfolioBacktestEngineFast:
     def run(
         self,
     ) -> tuple[pd.DataFrame, np.ndarray, float, np.ndarray]:
+        """Run the backtest and return results as a DataFrame of trades, equity curve, etc."""
         close_2d = self.data["close"]
         high_2d = self.data["high"]
         low_2d = self.data["low"]

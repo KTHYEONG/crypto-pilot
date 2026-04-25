@@ -6,9 +6,10 @@ import itertools
 import logging
 import sys
 from collections import Counter
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Sequence, Tuple
+from typing import Any
 
 import numpy as np
 import optuna
@@ -30,6 +31,8 @@ _logger = logging.getLogger("combination_screener_futures")
 
 @dataclass
 class CombinationScoreFutures:
+    """선물 조합 스크리닝 결과 점수 및 파라미터를 저장하는 데이터 클래스."""
+
     signal: str
     regime: str
     sizing: str
@@ -38,17 +41,17 @@ class CombinationScoreFutures:
     mean_signal_rate: float
     disqualified: bool = False
     reason: str = ""
-    best_params: Dict[str, Any] = field(default_factory=dict)
+    best_params: dict[str, Any] = field(default_factory=dict)
 
 
-def build_probe_params_futures(combo: "CombinationScoreFutures", tf: str) -> Dict[str, Any]:
+def build_probe_params_futures(combo: CombinationScoreFutures, tf: str) -> dict[str, Any]:
     """Return search-space midpoint params for a Phase-B combo (signal-agnostic for Phase C)."""
     return _build_probe_params_futures(combo.signal, combo.regime, combo.sizing, tf)
 
 
-def _build_probe_params_futures(sig: str, reg: str, siz: str, tf: str) -> Dict[str, Any]:
+def _build_probe_params_futures(sig: str, reg: str, siz: str, tf: str) -> dict[str, Any]:
     combo_space = build_combined_param_space_futures(sig, reg, siz)
-    probe_params: Dict[str, Any] = {
+    probe_params: dict[str, Any] = {
         "SIGNAL_TYPE": sig,
         "REGIME_TYPE": reg,
         "SIZING_METHOD": siz,
@@ -57,7 +60,14 @@ def _build_probe_params_futures(sig: str, reg: str, siz: str, tf: str) -> Dict[s
         "USE_COMPOUNDING": True,
     }
     for k, spec in combo_space.items():
-        if k in ("SIGNAL_TYPE", "REGIME_TYPE", "SIZING_METHOD", "TIMEFRAME", "LEVERAGE", "USE_COMPOUNDING"):
+        if k in (
+            "SIGNAL_TYPE",
+            "REGIME_TYPE",
+            "SIZING_METHOD",
+            "TIMEFRAME",
+            "LEVERAGE",
+            "USE_COMPOUNDING",
+        ):
             continue
         if not isinstance(spec, dict) or "type" not in spec:
             continue
@@ -68,7 +78,7 @@ def _build_probe_params_futures(sig: str, reg: str, siz: str, tf: str) -> Dict[s
     return probe_params
 
 
-def _mid_value_from_spec(spec: Dict[str, Any]) -> int | float:
+def _mid_value_from_spec(spec: dict[str, Any]) -> int | float:
     t = spec["type"]
     if t == "int":
         lo = int(spec["low"])
@@ -90,11 +100,11 @@ def _mid_value_from_spec(spec: Dict[str, Any]) -> int | float:
 class CombinationScreeningResult:
     """Phase B output: ranked combos + whether Phase 1 had no edge (strict floor in Phase D)."""
 
-    combos: List[CombinationScoreFutures]
+    combos: list[CombinationScoreFutures]
     phase1_no_edge: bool
 
 
-def _combo_search_dim(space: Dict[str, Any]) -> int:
+def _combo_search_dim(space: dict[str, Any]) -> int:
     dim = 0
     for k, spec in space.items():
         if k in ("SIGNAL_TYPE", "REGIME_TYPE", "SIZING_METHOD"):
@@ -108,10 +118,10 @@ def _combo_search_dim(space: Dict[str, Any]) -> int:
 def _auto_combo_trials(
     viable_count: int,
     median_dim: float,
-    cfg: Dict[str, Any],
+    cfg: dict[str, Any],
 ) -> tuple[int, int]:
-    """
-    Practical auto-sizing for Stage-1 quick CPCV.
+    """Practical auto-sizing for Stage-1 quick CPCV.
+
     Keep current config as floors, then scale mildly by viable combo count and
     effective combo dimension so runtime stays bounded as the search space grows.
     """
@@ -137,10 +147,10 @@ def _auto_combo_trials(
 def _ambiguity_phase2_boost(
     phase1_scores: Sequence[float],
     top_k: int,
-    cfg: Dict[str, Any],
+    cfg: dict[str, Any],
 ) -> int:
-    """
-    If the prune boundary is crowded, add a small Phase-2 budget bump.
+    """If the prune boundary is crowded, add a small Phase-2 budget bump.
+
     This preserves fast default behavior while spending a bit more only when
     combo ranking is genuinely ambiguous.
     """
@@ -159,16 +169,14 @@ def _ambiguity_phase2_boost(
         return int(cfg.get("FUTURES_COMBO_PHASE2_AMBIGUITY_BOOST", 4))
     return 0
 
-
 def _warmup_numba(
-    data_maps: Dict[str, Dict[str, Any]],
-    symbols: List[str],
+    data_maps: dict[str, dict[str, Any]],
+    symbols: Sequence[str],
     tf: str,
     project_root: str = "",
     signal_cache_dir: str = "",
 ) -> None:
     """Trigger Numba JIT in the parent before fork so children inherit compiled code."""
-    from src.domain.futures.regimes import FUTURES_REGIME_REGISTRY
     from src.domain.futures.signals import FUTURES_SIGNAL_REGISTRY
     from src.domain.futures.sizing import FUTURES_SIZING_REGISTRY
 
@@ -207,7 +215,7 @@ def _warmup_numba(
         _logger.warning("Numba warmup failed, proceeding anyway: %s", e)
 
 
-def _p25_path_consistency_score(metrics: Dict[str, float]) -> float:
+def _p25_path_consistency_score(metrics: dict[str, float]) -> float:
     """Stage-1 growth rank: p25 log-TWR scaled by inverse path CV (tmp.md: p25 / (1 + path_cv))."""
     p25 = float(metrics.get("cpcv_p25_log_tw", -1e9))
     if p25 <= -1e8:
@@ -217,11 +225,11 @@ def _p25_path_consistency_score(metrics: Dict[str, float]) -> float:
 
 
 def _phase0_ls_ratio(
-    data_maps: Dict[str, Dict[str, Any]],
+    data_maps: dict[str, dict[str, Any]],
     symbols: Sequence[str],
     tf: str,
-    combo: Tuple[str, str, str],
-) -> Tuple[float, float, str]:
+    combo: tuple[str, str, str],
+) -> tuple[float, float, str]:
     sig, reg, siz = combo
     space = build_combined_param_space_futures(sig, reg, siz)
     probe = _build_probe_params_futures(sig, reg, siz, tf)
@@ -248,7 +256,7 @@ def _phase0_ls_ratio(
     return ls_ratio, mean_signal_rate, ""
 
 
-def _metrics_from_best_study(study: optuna.Study) -> Tuple[Dict[str, float], Dict[str, Any]]:
+def _metrics_from_best_study(study: optuna.Study) -> tuple[dict[str, float], dict[str, Any]]:
     """Extract screening metrics from a completed Phase-2 study.
 
     Key-name mapping (objective_futures sets → screener reads):
@@ -270,7 +278,7 @@ def _metrics_from_best_study(study: optuna.Study) -> Tuple[Dict[str, float], Dic
     ua = best.user_attrs
 
     # Reconstruct path-level statistics from the stored log-TW list.
-    raw_log_tw: List[float] = [float(x) for x in ua.get("cpcv_path_oos_log_tw", [])]
+    raw_log_tw: list[float] = [float(x) for x in ua.get("cpcv_path_oos_log_tw", [])]
     if raw_log_tw:
         arr = np.asarray(raw_log_tw, dtype=np.float64)
         p25_log_tw = float(np.percentile(arr, 25.0)) if arr.size >= 4 else float(np.mean(arr))
@@ -281,7 +289,7 @@ def _metrics_from_best_study(study: optuna.Study) -> Tuple[Dict[str, float], Dic
     else:
         p25_log_tw, mean_ret_pct, path_cv = -1e9, -1e9, 10.0
 
-    metrics: Dict[str, float] = {
+    metrics: dict[str, float] = {
         # objective_futures stores final score as "growth_score"
         "objective_final": float(best.value or -1e9),
         "cpcv_mean_path_return_pct": mean_ret_pct,
@@ -300,8 +308,8 @@ def _metrics_from_best_study(study: optuna.Study) -> Tuple[Dict[str, float], Dic
 def _phase1_worker(
     combo: tuple[str, str, str],
     *,
-    data_maps: Dict[str, Dict[str, Any]],
-    symbols: List[str],
+    data_maps: dict[str, dict[str, Any]],
+    symbols: list[str],
     tf: str,
     n_trials: int,
     project_root: str,
@@ -363,13 +371,13 @@ def _phase1_worker(
 def _phase2_worker(
     combo: tuple[str, str, str],
     *,
-    data_maps: Dict[str, Dict[str, Any]],
-    symbols: List[str],
+    data_maps: dict[str, dict[str, Any]],
+    symbols: list[str],
     tf: str,
     n_trials: int,
     project_root: str,
     signal_cache_dir: str,
-) -> Tuple[Dict[str, float], Dict[str, Any]]:
+) -> tuple[dict[str, float], dict[str, Any]]:
     """Full-trial CPCV screen for surviving combinations."""
     from src.domain.futures.opt_futures_utils.objective import compute_multi_alignment_info
 
@@ -413,7 +421,7 @@ def _phase2_worker(
     return _metrics_from_best_study(study)
 
 
-def _process_pool_context():
+def _process_pool_context() -> Any:
     """Prefer fork on Linux (WSL2); fall back to spawn where fork is unavailable."""
     import multiprocessing as mp
 
@@ -427,8 +435,8 @@ def _process_pool_context():
 
 def run_combination_screening_futures(
     *,
-    data_maps: Dict[str, Dict[str, Any]],
-    symbols: List[str],
+    data_maps: dict[str, dict[str, Any]],
+    symbols: list[str],
     tf: str,
     project_root: str,
     signal_cache_dir: str = "",
@@ -464,9 +472,9 @@ def run_combination_screening_futures(
         )
     )
 
-    scores: List[CombinationScoreFutures] = []
-    viable_items: List[Tuple[Tuple[str, str, str], float, float]] = []
-    viable_dims: List[int] = []
+    scores: list[CombinationScoreFutures] = []
+    viable_items: list[tuple[tuple[str, str, str], float, float]] = []
+    viable_dims: list[int] = []
 
     _logger.info("Phase 0: Screening %d combinations for ls_ratio >= %.2f...", len(combos), ls_min)
 
@@ -556,7 +564,7 @@ def run_combination_screening_futures(
             )
         )
 
-    surviving_items: List[Tuple[Tuple[str, str, str], float, float]] = []
+    surviving_items: list[tuple[tuple[str, str, str], float, float]] = []
     for (combo, ls_ratio, mean_signal_rate), score in zip(viable_items, phase1_results, strict=True):
         if score > prune_thr:
             surviving_items.append((combo, ls_ratio, mean_signal_rate))
@@ -616,11 +624,11 @@ def run_combination_screening_futures(
             )
         )
 
-    scored_rows: List[Tuple[Tuple[str, str, str], Dict[str, float], Dict[str, Any], float, float]] = []
+    scored_rows: list[tuple[tuple[str, str, str], dict[str, float], dict[str, Any], float, float]] = []
     for (combo, ls_ratio, mean_signal_rate), (m, best_params) in zip(surviving_items, phase2_results, strict=True):
         scored_rows.append((combo, m, best_params, ls_ratio, mean_signal_rate))
 
-    def _robust_key(m: Dict[str, float]) -> float:
+    def _robust_key(m: dict[str, float]) -> float:
         return float(m.get("psr_paths", 0.0)) + float(max(0.0, m.get("dsr_paths", 0.0)))
 
     by_growth = sorted(scored_rows, key=lambda x: _p25_path_consistency_score(x[1]), reverse=True)[: max(1, bucket_each)]
@@ -628,7 +636,7 @@ def run_combination_screening_futures(
     by_balance = sorted(scored_rows, key=lambda x: x[1].get("objective_final", -1e9), reverse=True)[: max(1, bucket_each)]
 
     seen: set[tuple[str, str, str]] = set()
-    bucket_order: List[tuple[str, str, str]] = []
+    bucket_order: list[tuple[str, str, str]] = []
     for bucket in (by_growth, by_robust, by_balance):
         for combo, _, _, _, _ in bucket:
             if combo not in seen:

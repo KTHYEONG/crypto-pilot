@@ -22,9 +22,16 @@ if project_root not in sys.path:
 
 
 class DataValidator:
+    """Validator for data integrity of OHLCV DataFrames."""
+
     @staticmethod
     def validate(df: pd.DataFrame, symbol: str, timeframe: str) -> list[str]:
-        """데이터 무결성 검증"""
+        """데이터 무결성 검증.
+
+        1. 결측치 확인
+        2. 시간 연속성 확인
+        3. 논리적 오류 확인 (Low > High, Open/Close outside High/Low)
+        """
         issues = []
 
         # 1. 결측치 확인
@@ -58,11 +65,14 @@ class DataValidator:
 
 
 class DataCollector:
+    """Collector for futures market data from Binance API and Vision."""
+
     _meta_lock = threading.Lock()
     # 스마트 스로틀링이 적용되었으므로 동시 수집 숫자를 3개로 확대하여 효율성 극대화
     _collect_1m_semaphore = threading.Semaphore(3)
 
     def __init__(self, api_key: str | None = None, secret: str | None = None) -> None:
+        """Initialize DataCollector."""
         self.client = BinanceClient(api_key, secret)
         self.logger = setup_logger("DataCollector")
 
@@ -97,16 +107,16 @@ class DataCollector:
         if not path.exists():
             return {}
         try:
-            with open(path, "r", encoding="utf-8") as f:
+            with open(path, encoding="utf-8") as f:
                 data = json.load(f)
             return data if isinstance(data, dict) else {}
         except Exception:
             return {}
 
     def _save_meta(self, meta_updates: dict[str, Any]) -> None:
-        """
-        Concurrency-aware metadata update with deep merge and file locking.
-        Prevents losing 'earliest_available' when updating 'last_checked' 
+        """Concurrency-aware metadata update with deep merge and file locking.
+
+        Prevents losing 'earliest_available' when updating 'last_checked'
         and avoids race conditions during file replacement.
         """
         path = self._meta_path()
@@ -218,7 +228,7 @@ class DataCollector:
 
     @staticmethod
     def _get_timeframe_delta(timeframe: str) -> pd.Timedelta:
-        """타임프레임 문자열(1m, 1h, 1d 등)을 pd.Timedelta로 변환"""
+        """타임프레임 문자열(1m, 1h, 1d 등)을 pd.Timedelta로 변환."""
         import re
         match = re.match(r"(\d+)([mhdDwW])", timeframe)
         if not match:
@@ -232,7 +242,7 @@ class DataCollector:
     def _identify_middle_gaps(
         self, df: pd.DataFrame, timeframe: str, start_bound: pd.Timestamp, end_bound: pd.Timestamp
     ) -> list[tuple[pd.Timestamp, pd.Timestamp]]:
-        """데이터프레임 내에서 중간에 누락된 구간(Holes)을 찾아 리스트로 반환"""
+        """데이터프레임 내에서 중간에 누락된 구간(Holes)을 찾아 리스트로 반환."""
         if df.empty:
             return []
         
@@ -265,7 +275,7 @@ class DataCollector:
     def collect_and_save(
         self, symbol: str, timeframe: str, start_date: str, end_date: str
     ) -> pd.DataFrame:
-        """데이터 수집, 로컬 캐시 결합 및 저장 (Taker Volume 포함)"""
+        """데이터 수집, 로컬 캐시 결합 및 저장 (Taker Volume 포함)."""
         req_start = pd.to_datetime(start_date, utc=True)
         req_end = pd.to_datetime(end_date, utc=True)
 
@@ -343,8 +353,8 @@ class DataCollector:
         return results
 
     def collect_1m_ohlcv(self, symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
-        """
-        Load or fetch 1m OHLCV (Binance USDT-M futures); cache `{safe_symbol}_1m.parquet`.
+        """Load or fetch 1m OHLCV (Binance USDT-M futures); cache `{safe_symbol}_1m.parquet`.
+
         누락된 구간만 증분 수집하여 병목 현상 해결.
         """
         timeframe = "1m"
@@ -431,7 +441,7 @@ class DataCollector:
         return cache_df.loc[mask].copy()
 
     def _normalize_metrics_df(self, df: pd.DataFrame) -> pd.DataFrame:
-        """metrics 데이터의 timestamp를 integer ms로 통일"""
+        """Metrics 데이터의 timestamp를 integer ms로 통일."""
         if df.empty:
             return df
         
@@ -464,7 +474,7 @@ class DataCollector:
         return df
 
     def ensure_metrics_data(self, symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
-        """미결제약정(OI) 및 롱숏비율(LSR) 데이터를 Vision + API 조합으로 수집하여 parquet 저장"""
+        """미결제약정(OI) 및 롱숏비율(LSR) 데이터를 Vision + API 조합으로 수집하여 parquet 저장."""
         safe_symbol = self._safe_symbol(symbol)
         path = FUTURES_DATA_DIR / f"{safe_symbol}_metrics.parquet"
         
@@ -591,7 +601,7 @@ class DataCollector:
         return cache_df.loc[mask].copy()
 
     def ensure_funding_data(self, symbol: str, start_date: str, end_date: str) -> None:
-        """펀딩 데이터 수집 및 저장 (Binance 전용)"""
+        """펀딩 데이터 수집 및 저장 (Binance 전용)."""
         from config.settings import FUTURES_DATA_DIR
         safe_symbol = self._safe_symbol(symbol)
         path = FUTURES_DATA_DIR / f"{safe_symbol}_funding.parquet"
@@ -616,7 +626,9 @@ class DataCollector:
             
             # 이미 요청된 범위가 캐시에 포함되어 있는지 확인 (약간의 버퍼 8시간 부여)
             if req_start >= c_start and req_end <= (c_end + pd.Timedelta(hours=8)):
-                self.logger.debug("Funding cache hit for %s (%s ~ %s)", symbol, start_date, end_date)
+                self.logger.debug(
+                    "Funding cache hit for %s (%s ~ %s)", symbol, start_date, end_date
+                )
                 return
             
             # 캐시가 있다면 캐시 종료 시점부터 수집 시작

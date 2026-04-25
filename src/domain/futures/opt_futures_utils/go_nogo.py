@@ -1,5 +1,5 @@
-"""
-상위 1% 기관급 자산 증식을 위한 OOS 심층 검증 (RoMaD 및 계단식 PF 필터 적용)
+"""상위 1% 기관급 자산 증식을 위한 OOS 심층 검증 (RoMaD 및 계단식 PF 필터 적용).
+
 Futures deployment report: same layout as Spot `run_final_deployment_report`, futures thresholds.
 """
 
@@ -7,15 +7,18 @@ from __future__ import annotations
 
 import logging
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from statistics import median
-from typing import Any, Dict, List, Sequence, Tuple
+from typing import Any
 
 _logger: logging.Logger = logging.getLogger("opt_futures")
 
 
 @dataclass
 class CheckRecord:
+    """개별 검사항목의 결과와 임계값을 기록하는 클래스."""
+
     check_id: str
     label: str
     observed: float
@@ -25,17 +28,19 @@ class CheckRecord:
 
 @dataclass
 class GoNoGoResult:
+    """Go/No-Go 검사 최종 결과와 상세 내역을 포함하는 클래스."""
+
     passed: bool
-    details: Dict[str, bool]
+    details: dict[str, bool]
     summary: str
-    checks: List[CheckRecord] = field(default_factory=list)
-    advisory: Dict[str, Any] = field(default_factory=dict)
+    checks: list[CheckRecord] = field(default_factory=list)
+    advisory: dict[str, Any] = field(default_factory=dict)
 
 
 def run_go_nogo_check(
-    cv_fold_scores: List[float],
+    cv_fold_scores: list[float],
     holdout_score: float,
-    oos_romad_scores: List[float],
+    oos_romad_scores: list[float],
     max_mdd_pct: float,
     profit_factor: float,
     long_count: int,
@@ -82,7 +87,7 @@ def run_go_nogo_check(
 
     ls_pass: bool = float(long_short_ratio_oos) >= 0.15
 
-    details: Dict[str, bool] = {
+    details: dict[str, bool] = {
         "1. Risk-Adjusted Return (RoMaD >= 0.8)": growth_pass,
         "2. Healthy Volatility Limit (MDD <= 35%)": mdd_pass,
         f"3. Institutional Edge (PF >= {target_pf})": pf_pass,
@@ -93,9 +98,9 @@ def run_go_nogo_check(
     all_passed = all(details.values())
 
     # --- Summary Formatting ---
-    summary_lines: List[str] = ["[Elite 1% Wealth Compounding Checklist]"]
+    summary_lines: list[str] = ["[Elite 1% Wealth Compounding Checklist]"]
 
-    metric_values: Dict[str, str] = {
+    metric_values: dict[str, str] = {
         "1. Risk-Adjusted Return (RoMaD >= 0.8)": f"RoMaD: {romad:.2f} (CAGR {oos_cagr:.1f}%)",
         "2. Healthy Volatility Limit (MDD <= 35%)": f"MDD: {abs_mdd:.1f}%",
         f"3. Institutional Edge (PF >= {target_pf})": f"PF: {profit_factor:.2f}",
@@ -124,6 +129,8 @@ def run_go_nogo_check(
 
 @dataclass(frozen=True)
 class FuturesSymbolGateRow:
+    """개별 심볼별 게이트 통과 지표를 저장하는 데이터 클래스."""
+
     symbol: str
     net_cagr_pct: float
     max_mdd_pct: float
@@ -133,6 +140,8 @@ class FuturesSymbolGateRow:
 
 @dataclass(frozen=True)
 class FuturesDeploymentReportInput:
+    """선물 배포 리포트 생성을 위한 입력 데이터를 집계하는 데이터 클래스."""
+
     gate1_sqn: float
     gate1_path_sortino: float
     gate1_tail_ratio: float
@@ -201,10 +210,10 @@ def _fmt_pf(val: float) -> str:
     return f"{val:.2f}" if val > 0 else "N/A"
 
 
-_PART3_COL_WIDTHS: Tuple[int, int, int, int, int] = (11, 18, 9, 10, 8)
+_PART3_COL_WIDTHS: tuple[int, int, int, int, int] = (11, 18, 9, 10, 8)
 
 
-def _part3_symbol_table_lines(rows: Sequence[FuturesSymbolGateRow]) -> List[str]:
+def _part3_symbol_table_lines(rows: Sequence[FuturesSymbolGateRow]) -> list[str]:
     w = _PART3_COL_WIDTHS
     header = (
         "  | "
@@ -227,7 +236,7 @@ def _part3_symbol_table_lines(rows: Sequence[FuturesSymbolGateRow]) -> List[str]
         + "-" * w[4]
         + " |"
     )
-    out: List[str] = [header, rule]
+    out: list[str] = [header, rule]
     for row in rows:
         sym = row.symbol if len(row.symbol) <= w[0] else row.symbol[: w[0] - 2] + ".."
         pnl = f"{row.net_cagr_pct:+.1f}%"
@@ -279,16 +288,22 @@ def run_futures_deployment_report(ctx: FuturesDeploymentReportInput) -> str:
     pbo_disp = f"{ctx.pbo:.4f}" if math.isfinite(ctx.pbo) else "N/A"
     rho_disp = f"{ctx.spearman_rho:.4f}" if math.isfinite(ctx.spearman_rho) else "N/A"
 
-    lines: List[str] = [
+    lines: list[str] = [
         "=" * 71,
         " [TIER 1. CPCV STATISTICAL EDGE RIGOR]",
         "=" * 71,
-        f"  - System Quality Number (SQN) : {ctx.gate1_sqn:.2f}   {_fmt_pass_info(sqn_ok)} (Min: 1.6)",
-        f"  - Path Sortino Ratio          : {ctx.gate1_path_sortino:.2f}   {_fmt_pass_info(ps_ok)} (Min: {ctx.path_sortino_target})",
-        f"  - Path Tail Ratio (Discovery) : {ctx.gate1_tail_ratio:.2f}   {_fmt_pass_info(g1_tr_ok)} (Min: {ctx.tail_ratio_target})",
-        f"  - Prob. Sharpe Ratio (PSR)    : {ctx.gate1_psr:.4f}   {_fmt_pass_info(psr_ok)} (Min: 0.40)",
-        f"  - Deflated Sharpe Ratio (DSR) : {ctx.gate1_dsr:.4f}   {_fmt_pass_info(dsr_ok)} (Min: 0.20)",
-        f"  - P10 GMGR (Worst Path Grow)  : {ctx.gate1_p10_gmgr:.6f}   {_fmt_pass_info(gmgr_ok)} (Target: >= -0.001)",
+        f"  - System Quality Number (SQN) : {ctx.gate1_sqn:.2f}   "
+        f"{_fmt_pass_info(sqn_ok)} (Min: 1.6)",
+        f"  - Path Sortino Ratio          : {ctx.gate1_path_sortino:.2f}   "
+        f"{_fmt_pass_info(ps_ok)} (Min: {ctx.path_sortino_target})",
+        f"  - Path Tail Ratio (Discovery) : {ctx.gate1_tail_ratio:.2f}   "
+        f"{_fmt_pass_info(g1_tr_ok)} (Min: {ctx.tail_ratio_target})",
+        f"  - Prob. Sharpe Ratio (PSR)    : {ctx.gate1_psr:.4f}   "
+        f"{_fmt_pass_info(psr_ok)} (Min: 0.40)",
+        f"  - Deflated Sharpe Ratio (DSR) : {ctx.gate1_dsr:.4f}   "
+        f"{_fmt_pass_info(dsr_ok)} (Min: 0.20)",
+        f"  - P10 GMGR (Worst Path Grow)  : {ctx.gate1_p10_gmgr:.6f}   "
+        f"{_fmt_pass_info(gmgr_ok)} (Target: >= -0.001)",
         f"  - CPCV Mean Path Return       : {ctx.cpcv_mean_path_return_pct:.1f}%",
         f"  - CPCV Worst Segment MDD      : {ctx.cpcv_worst_segment_mdd_pct:.1f}%",
         "",
@@ -300,23 +315,36 @@ def run_futures_deployment_report(ctx: FuturesDeploymentReportInput) -> str:
         "=" * 71,
         " [TIER 2. OOS ABSOLUTE RISK HARD GATES: 4H FUTURES]",
         "=" * 71,
-        f"  - Maximum Pain (MDD Limit)    : {ctx.oos_mdd_pct:.1f}%   {_fmt_pass_info(oos_mdd_ok)} (Limit: 35.0%)",
-        f"  - Portfolio CVaR(5%) Loss     : {ctx.oos_cvar_pct:.2f}%   {_fmt_pass_info(cvar_ok)} (Limit: {ctx.cvar_limit_pct}%)",
-        f"  - Recovery Time (Max UD)      : {ctx.hw_recovery_days:.1f}d   {_fmt_pass_info(hw_ok)} (Limit: 120.0d)",
-        f"  - Ulcer Index (Pain)          : {ctx.oos_ulcer_index:.2f}   {_fmt_pass_info(ui_ok)} (Limit: 15.0)",
-        f"  - OOS Calmar Ratio (Grow/Risk): {ctx.oos_calmar:.2f}   {_fmt_pass_info(calmar_ok)} (Min: {ctx.calmar_target})",
-        f"  - Funding Drag Ratio          : {ctx.funding_drag_pct:.2f}%   {_fmt_pass_info(fund_ok)} (Limit: {ctx.funding_drag_limit_pct}%)",
+        f"  - Maximum Pain (MDD Limit)    : {ctx.oos_mdd_pct:.1f}%   "
+        f"{_fmt_pass_info(oos_mdd_ok)} (Limit: 35.0%)",
+        f"  - Portfolio CVaR(5%) Loss     : {ctx.oos_cvar_pct:.2f}%   "
+        f"{_fmt_pass_info(cvar_ok)} (Limit: {ctx.cvar_limit_pct}%)",
+        f"  - Recovery Time (Max UD)      : {ctx.hw_recovery_days:.1f}d   "
+        f"{_fmt_pass_info(hw_ok)} (Limit: 120.0d)",
+        f"  - Ulcer Index (Pain)          : {ctx.oos_ulcer_index:.2f}   "
+        f"{_fmt_pass_info(ui_ok)} (Limit: 15.0)",
+        f"  - OOS Calmar Ratio (Grow/Risk): {ctx.oos_calmar:.2f}   "
+        f"{_fmt_pass_info(calmar_ok)} (Min: {ctx.calmar_target})",
+        f"  - Funding Drag Ratio          : {ctx.funding_drag_pct:.2f}%   "
+        f"{_fmt_pass_info(fund_ok)} (Limit: {ctx.funding_drag_limit_pct}%)",
         "",
         "=" * 71,
         " [TIER 3. OOS PROFITABILITY & ROBUSTNESS]",
         "=" * 71,
-        f"  - Annualized Return (CAGR)    : {ctx.oos_net_cagr_pct:.1f}%   {_fmt_pass_info(oos_cagr_ok)} (Min: {ctx.oos_cagr_target_pct}%)",
-        f"  - EV/Cost Ratio (Min 3.0)     : {ctx.oos_ev_cost_ratio:.2f}   {_fmt_pass_info(ev_cost_ok)}",
-        f"  - Trade Profit Factor         : {ctx.oos_pf:.2f}   {_fmt_pass_info(pf_ok)} (Min: {ctx.pf_target})",
-        f"  - Directional PF (L/S >= 1.05): {_fmt_pf(ctx.oos_long_pf)} / {_fmt_pf(ctx.oos_short_pf)}   {_fmt_pass_info(l_pf_ok and s_pf_ok)}",
-        f"  - Short Win Rate (Min 35%)    : {ctx.oos_short_win_rate_pct:.1f}%   {_fmt_pass_info(short_wr_ok)}",
-        f"  - Alpha Decay (Stability)     : {ctx.alpha_decay_pct:.1f}%   {_fmt_pass_info(ad_ok)} (Limit: {ctx.alpha_decay_floor_pct}%)",
-        f"  - Terminal Wealth Ratio       : {ctx.terminal_wealth_ratio:.3f}   {_fmt_pass_info(tw_ok)} (Min: {ctx.tw_target})",
+        f"  - Annualized Return (CAGR)    : {ctx.oos_net_cagr_pct:.1f}%   "
+        f"{_fmt_pass_info(oos_cagr_ok)} (Min: {ctx.oos_cagr_target_pct}%)",
+        f"  - EV/Cost Ratio (Min 3.0)     : {ctx.oos_ev_cost_ratio:.2f}   "
+        f"{_fmt_pass_info(ev_cost_ok)}",
+        f"  - Trade Profit Factor         : {ctx.oos_pf:.2f}   "
+        f"{_fmt_pass_info(pf_ok)} (Min: {ctx.pf_target})",
+        f"  - Directional PF (L/S >= 1.05): {_fmt_pf(ctx.oos_long_pf)} / "
+        f"{_fmt_pf(ctx.oos_short_pf)}   {_fmt_pass_info(l_pf_ok and s_pf_ok)}",
+        f"  - Short Win Rate (Min 35%)    : {ctx.oos_short_win_rate_pct:.1f}%   "
+        f"{_fmt_pass_info(short_wr_ok)}",
+        f"  - Alpha Decay (Stability)     : {ctx.alpha_decay_pct:.1f}%   "
+        f"{_fmt_pass_info(ad_ok)} (Limit: {ctx.alpha_decay_floor_pct}%)",
+        f"  - Terminal Wealth Ratio       : {ctx.terminal_wealth_ratio:.3f}   "
+        f"{_fmt_pass_info(tw_ok)} (Min: {ctx.tw_target})",
         f"  - OOS Win Rate (INFO)         : {ctx.oos_win_rate_pct:.1f}%",
         f"  - Long/Short Ratio (INFO)     : {ctx.oos_long_short_minority_pct:.1f}% minority direction",
         "",
@@ -423,7 +451,7 @@ def run_futures_deployment_report(ctx: FuturesDeploymentReportInput) -> str:
 
 def run_multi_window_oos_gate(
     *,
-    window_results: List[Dict[str, Any]],
+    window_results: list[dict[str, Any]],
     min_positive_windows: int,
     min_median_cagr_pct: float,
     max_worst_mdd_pct: float,
@@ -471,11 +499,11 @@ def run_multi_window_oos_gate(
 
 
 def format_regime_oos_diagnostic_block(
-    regime_metrics: Dict[str, Dict[str, float]],
+    regime_metrics: dict[str, dict[str, float]],
     stress_mdd_warn_pct: float,
 ) -> str:
     """Advisory TIER 4 text block for futures deployment log."""
-    lines: List[str] = [
+    lines: list[str] = [
         "=" * 71,
         " [TIER 4. REGIME ROBUSTNESS DIAGNOSTIC (advisory)]",
         "=" * 71,

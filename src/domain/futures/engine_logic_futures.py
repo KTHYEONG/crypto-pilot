@@ -2,7 +2,7 @@ import numpy as np
 from numba import njit
 
 
-@njit(inline="always")
+@njit(inline="always")  # type: ignore[untyped-decorator]
 def process_long_scale_out(
     c_open: float,
     c_high: float,
@@ -11,7 +11,7 @@ def process_long_scale_out(
     l_scale_atr: float,
     amount: float,
     fee_rate: float,
-):
+) -> tuple[bool, float, float, float, float]:
     scale_target = entry_price + (pos_atr * l_scale_atr)
     if c_high >= scale_target:
         sc_price = c_open if c_open >= scale_target else scale_target
@@ -22,7 +22,7 @@ def process_long_scale_out(
     return False, 0.0, 0.0, 0.0, 0.0
 
 
-@njit(inline="always")
+@njit(inline="always")  # type: ignore[untyped-decorator]
 def process_short_scale_out(
     c_open: float,
     c_low: float,
@@ -31,7 +31,7 @@ def process_short_scale_out(
     s_tp_mult: float,
     amount: float,
     fee_rate: float,
-):
+) -> tuple[bool, float, float, float, float]:
     tp_price = entry_price - (pos_atr * s_tp_mult)
     if c_open <= tp_price or c_low <= tp_price:
         sc_price = c_open if c_open <= tp_price else tp_price
@@ -42,7 +42,7 @@ def process_short_scale_out(
     return False, 0.0, 0.0, 0.0, 0.0
 
 
-@njit(inline="always")
+@njit(inline="always")  # type: ignore[untyped-decorator]
 def check_long_exit(
     c_open: float,
     c_low: float,
@@ -51,7 +51,7 @@ def check_long_exit(
     stop_price: float,
     l_trail_mult: float,
     slippage_rate: float,
-):
+) -> tuple[bool, float, float]:
     if c_open <= stop_price:
         return True, c_open * (1.0 - slippage_rate), stop_price
     elif c_low <= stop_price:
@@ -63,7 +63,7 @@ def check_long_exit(
     return False, 0.0, stop_price
 
 
-@njit(inline="always")
+@njit(inline="always")  # type: ignore[untyped-decorator]
 def check_short_exit(
     c_open: float,
     c_high: float,
@@ -72,7 +72,7 @@ def check_short_exit(
     stop_price: float,
     s_trail_mult: float,
     slippage_rate: float,
-):
+) -> tuple[bool, float, float]:
     if c_open >= stop_price:
         return True, c_open * (1.0 + slippage_rate), stop_price
     elif c_high >= stop_price:
@@ -97,8 +97,7 @@ def calculate_position_size(
     gk: float,
     max_exposure_per_coin: float = 1.5,
 ) -> float:
-    """
-    [RE-ENGINEERED] Target Volatility Sizing (Alternative 1)
+    """[RE-ENGINEERED] Target Volatility Sizing (Alternative 1)
     Decouples Sizing from Stop-Loss distance to prevent 1/ATR^2 penalty.
     """
     # 0. NaN Protection
@@ -146,7 +145,7 @@ def calculate_position_size(
     return target_qty
 
 
-@njit(inline="always")
+@njit(inline="always")  # type: ignore[untyped-decorator]
 def check_intra_bar_stop(
     pos_side: int,
     c_high: float,
@@ -156,7 +155,7 @@ def check_intra_bar_stop(
     amount: float,
     fee_rate: float,
     slippage_rate: float,
-):
+) -> tuple[bool, float, float, float]:
     if pos_side == 1 and c_low <= stop_price:
         intra_exit_price = stop_price * (1.0 - slippage_rate)
         pnl = (intra_exit_price - entry_price) * amount
