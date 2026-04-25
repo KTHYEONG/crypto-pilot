@@ -94,10 +94,20 @@ PROGRESS_MIN_INTERVAL: float = 0.2
 MODE_MULTI: str = "multi"
 BEST_PARAMS_FUTURES_JSON_STEM: str = "best_futures_1h"
 
-def _ml_phase_d_tpe_sampler(seed: int) -> TPESampler:
+def _ml_phase_d_sampler(seed: int, n_trials: int = 200) -> optuna.samplers.BaseSampler:
+    # NSGA-II: 2-obj Pareto (Growth | Stability). population_size from config.
+    # Required: n_trials ≥ population_size * 10 (≥10 generations) for convergence.
+    if OPT_FUTURES_CONFIG.get("FUTURES_ML_GP_NSGA2_ENABLED", False):
+        pop = int(OPT_FUTURES_CONFIG.get("FUTURES_NSGA2_POPULATION_SIZE", 30))
+        return optuna.samplers.NSGAIISampler(
+            seed=seed,
+            population_size=pop,
+            crossover_prob=0.9,
+            mutation_prob=0.1,
+        )
     return TPESampler(
         seed=seed,
-        n_startup_trials=200,
+        n_startup_trials=n_trials,
         multivariate=True,
         group=True,
         constant_liar=True,
@@ -139,51 +149,106 @@ def _print_performance_report(
             t_stat = mu_pnl / (std_pnl / np.sqrt(len(pnl_arr)))
 
     # 3. Market Exposure (%)
-    # Estimate based on avg durations * trades / symbols / total bars
     exposure = 0.0
     n_syms = max(1, len(port.get("symbol_names", [])))
     if not trades.empty and len(eq) > 1:
         exposure = (trades["exit_idx"] - trades["entry_idx"]).sum() / (len(eq) * n_syms)
 
-    _logger.info("\n" + "=" * 85)
-    _logger.info(f" {title}")
-    _logger.info("-" * 85)
+    _logger.info("\n" + "╔" + "═" * 83 + "╗")
+    _logger.info(f"║ {title:<81} ║")
+    _logger.info("╠" + "═" * 83 + "╣")
+    
+    # Section A: COMPOUNDING (Wealth Expansion)
+    _logger.info(f"║ [A] COMPOUNDING (Wealth Expansion) {' ':<46} ║")
     _logger.info(
-        f" CAGR:        {port['cagr_pct']:>8.2f}% | MDD:         {port['mdd_pct']:>8.2f}% | "
-        f"Win Rate:     {port['win_rate_pct']:>8.2f}%"
-    )
-    _logger.info(
-        f" Sharpe:      {sharpe:>8.2f}  | Sortino:     {sortino:>8.2f}  | "
-        f"Ann. Vol:    {ann_vol:>8.2f}%"
-    )
-    _logger.info(
-        f" Profit Factor: {port['profit_factor']:>8.2f} | t-stat (Tr): {t_stat:>8.2f}  | "
-        f"Avg PnL %:    {port.get('avg_trade_pnl_pct', 0.0):>8.2f}%"
+        f"║   CAGR:        {port['cagr_pct']:>8.2f}% | MDD:         {port['mdd_pct']:>8.2f}% | "
+        f"Win Rate:     {port['win_rate_pct']:>8.2f}% ║"
     )
     _logger.info(
-        f" Total Trades: {port['total_trades']:>8d} | "
-        f"L/S Minority: {port['oos_long_short_minority_pct']:>8.2f}% | "
-        f"Exposure:    {exposure * 100.0:>8.2f}%"
+        f"║   Terminal TW: {port.get('terminal_wealth_ratio', 1.0):>8.2f}x | "
+        f"Profit Factor:{port['profit_factor']:>8.2f}  | Avg PnL %:    {port.get('avg_trade_pnl_pct', 0.0):>8.2f}% ║"  # noqa: E501
     )
-    _logger.debug(
-        " [%s_BT_DIAG] dust_skip=%d margin_fail=%d t_dir_zero=%d p_side_zero=%d",
-        title.split()[0],
-        int(port.get("bt_dust_skip_cnt", 0)),
-        int(port.get("bt_margin_fail_cnt", 0)),
-        int(port.get("bt_t_dir_zero_cnt", 0)),
-        int(port.get("bt_p_side_zero_cnt", 0)),
+    _logger.info("╟" + "─" * 83 + "╢")
+    
+    # Section B: ROBUSTNESS (Risk & Stability)
+    _logger.info(f"║ [B] ROBUSTNESS (Risk & Stability) {' ':<47} ║")
+    _logger.info(
+        f"║   Sharpe:      {sharpe:>8.2f}  | Sortino:     {sortino:>8.2f}  | Ann. Vol:    {ann_vol:>8.2f}% ║"  # noqa: E501
     )
     _logger.info(
-        f" Calmar Ratio: {port['calmar_ratio']:>8.2f}  | Ulcer Index:  {port['ulcer_index']:>8.2f}"
+        f"║   Calmar:      {port['calmar_ratio']:>8.2f}  | Ulcer Index: {port['ulcer_index']:>8.2f}  | t-stat (Tr): {t_stat:>8.2f} ║"  # noqa: E501
     )
+    _logger.info(
+        f"║   Exposure:    {exposure * 100.0:>8.2f}% {' ':<56} ║"
+    )
+
+    
     if dsr is not None or pbo is not None:
         dsr_str = f"{dsr:>8.4f}" if dsr is not None else "   N/A  "
         pbo_str = f"{pbo:>8.4f}" if pbo is not None else "   N/A  "
-        _logger.info(f" DSR (IS Ref): {dsr_str} | PBO (IS Ref): {pbo_str}")
+        _logger.info(f"║   DSR (IS Ref): {dsr_str} | PBO (IS Ref): {pbo_str} {' ':<28} ║")
 
-    _logger.info("-" * 85)
-    _logger.info(f" Net PnL / Trading Cost Ratio: {port.get('ev_cost_ratio', 0.0):.2f}")
-    _logger.info("=" * 85 + "\n")
+    _logger.info("╟" + "─" * 83 + "╢")
+    _logger.info(
+        f"║   Total Trades: {port['total_trades']:>8d} | L/S Minority: {port['oos_long_short_minority_pct']:>8.2f}% | "  # noqa: E501
+        f"PnL/Cost:     {port.get('ev_cost_ratio', 0.0):>8.2f}  ║"
+    )
+
+    _logger.info("╚" + "═" * 83 + "╝\n")
+
+
+
+
+def _print_dual_audit_dashboard(
+    new_m: Dict[str, Any],
+    champ_m: Dict[str, Any],
+    gate_status: str,
+) -> None:
+    _logger.info("\n" + "╔" + "═" * 93 + "╗")
+    _logger.info(f"║ [FINAL STRATEGY AUDIT] Candidate vs Current Champion {' ':<39} ║")
+    _logger.info("╠" + "═" * 93 + "╣")
+    _logger.info(
+        "║ CATEGORY          | METRIC                | CHAMPION    | CANDIDATE   | DELTA (Δ)   ║"
+    )
+    _logger.info("╟" + "─" * 19 + "┼" + "─" * 23 + "┼" + "─" * 13 + "┼" + "─" * 13 + "┼" + "─" * 13 + "╢")  # noqa: E501
+    
+    # 1. Reliability (AI's Eye)
+    pbo_c, pbo_n = champ_m.get("pbo", 0.5), new_m.get("pbo", 0.5)
+    p10_c, p10_n = champ_m.get("p10", 0.0), new_m.get("p10", 0.0)
+    dsr_c, dsr_n = champ_m.get("dsr", 0.0), new_m.get("dsr", 0.0)
+    
+    _logger.info(
+        f"║ RELIABILITY (AI)  | PBO (Lower is Better) | {pbo_c:>11.4f} | {pbo_n:>11.4f} | {pbo_n - pbo_c:>+11.4f} ║"  # noqa: E501
+    )
+    _logger.info(
+        f"║                   | CPCV P10 (Survival)   | {p10_c:>11.4f} | {p10_n:>11.4f} | {p10_n - p10_c:>+11.4f} ║"  # noqa: E501
+    )
+    _logger.info(
+        f"║                   | DSR (Stability)       | {dsr_c:>11.4f} | {dsr_n:>11.4f} | {dsr_n - dsr_c:>+11.4f} ║"  # noqa: E501
+    )
+    _logger.info("╟" + "─" * 19 + "┼" + "─" * 23 + "┼" + "─" * 13 + "┼" + "─" * 13 + "┼" + "─" * 13 + "╢")  # noqa: E501
+    
+    # 2. Compounding (User's Eye)
+
+    tw_c, tw_n = champ_m.get("tw", 1.0), new_m.get("tw", 1.0)
+    cagr_c, cagr_n = champ_m.get("cagr", 0.0), new_m.get("cagr", 0.0)
+    mdd_c, mdd_n = champ_m.get("mdd", 0.0), new_m.get("mdd", 0.0)
+    
+    _logger.info(
+        f"║ COMPOUNDING (OOS) | Terminal Wealth (TW)  | {tw_c:>11.2f}x | {tw_n:>11.2f}x | {tw_n - tw_c:>+11.2f}x ║"  # noqa: E501
+    )
+    _logger.info(
+        f"║                   | CAGR (%)              | {cagr_c:>11.2f}% | {cagr_n:>11.2f}% | {cagr_n - cagr_c:>+11.2f}%p ║"  # noqa: E501
+    )
+    _logger.info(
+        f"║                   | Max Drawdown (%)      | {mdd_c:>11.2f}% | {mdd_n:>11.2f}% | {mdd_n - mdd_c:>+11.2f}%p ║"  # noqa: E501
+    )
+    _logger.info("╠" + "═" * 93 + "╣")
+
+    _logger.info(f"║ FINAL VERDICT: {gate_status:<78} ║")
+    _logger.info("╚" + "═" * 93 + "╝\n")
+
+
 
 
 
@@ -250,6 +315,10 @@ def _ml_trial_passes_hard_gates(
         return False
     dsr = float(trial.user_attrs.get("gate1_dsr", -9.0))
     if dsr < float(cfg.get("FUTURES_ML_GATE1_DSR_MIN", 0.20)):
+        return False
+    p10_floor = float(cfg.get("FUTURES_CPCV_P10_LOG_TW_MIN", 0.0))
+    p10_cpcv = float(trial.user_attrs.get("ml_p10_log_growth_cpcv", -999.0))
+    if p10_cpcv <= p10_floor:
         return False
     mdd_limit = float(cfg.get("FUTURES_MAX_MDD", 25.0))
     if float(trial.user_attrs.get("ml_worst_mdd_cpcv", 999.0)) >= mdd_limit:
@@ -360,8 +429,10 @@ def _load_futures_data_maps_for_symbols(
         inject_cs_momentum_ranks(data_maps, valid_symbols, tf)
         inject_cs_momentum_ranks(oos_data_maps, valid_symbols, tf)
 
-    _logger.info("[STEP 1/5] Data loading complete: %d symbols valid.", len(valid_symbols))
     return data_maps, oos_data_maps, valid_symbols
+
+
+
 
 
 def main() -> None:
@@ -372,6 +443,10 @@ def main() -> None:
     pre_args, remaining_args = pre_parser.parse_known_args()
 
     if not pre_args.skip_universe:
+        _logger.info("\n" + "═" * 85)
+        _logger.info(" [STEP 1/5] UNIVERSE DISCOVERY & DATA LOADING")
+        _logger.info("═" * 85)
+        
         from src.domain.futures.opt_futures_utils.universe_screener_futures import (
             screen_futures_universe,
             screen_symbol_refinement_futures,
@@ -432,17 +507,31 @@ def main() -> None:
     fetch_start_date, start_date, is_end_date, end_date = get_quarterly_window(args.reference_date)
     symbols = [s.strip() for s in args.symbols.split(",") if s.strip()]
 
+    if pre_args.skip_universe:
+        _logger.info("\n" + "═" * 85)
+        _logger.info(" [STEP 1/5] DATA LOADING & INTEGRITY CHECK")
+        _logger.info("═" * 85)
+
     data_maps, oos_data_maps, valid_symbols = _load_futures_data_maps_for_symbols(
         symbols, args.tf, fetch_start_date, start_date, is_end_date, end_date
     )
 
     if not valid_symbols:
+        _logger.error(" [FAIL] No valid symbols loaded. Aborting.")
         return
+    
+    _logger.info(f" [SUCCESS] Data integrity check complete ({len(valid_symbols)} symbols).")
+
+
 
     ml_n_jobs = _resolve_futures_parallel_policy(len(valid_symbols))
 
     # [Institutional Quant] Universal Cross-Sectional ML Pipeline
-    _logger.info("[STEP 2/5] ML pipeline: Universal Cross-Sectional GP & Regime Inference (1h).")
+    _logger.info("\n" + "═" * 85)
+    _logger.info(" [STEP 2/5] ML PIPELINE: Universal Cross-Sectional GP & Regime Inference")
+    _logger.info("═" * 85)
+
+    
     ml_out = run_ml_pipeline_for_universe(
         valid_symbols,
         args.tf,
@@ -457,6 +546,7 @@ def main() -> None:
         hmm_only=args.hmm_only,
     )
 
+
     if args.gp_only:
         _logger.info(" [GP-ONLY] Analysis complete. Exiting as requested.")
         return
@@ -465,12 +555,22 @@ def main() -> None:
         _logger.info(" [HMM-ONLY] Analysis complete. Exiting as requested.")
         return
 
-    _logger.info("[STEP 3/5] Integrating ML Features (GP/HMM) into Data Maps...")
+    _logger.info("\n" + "═" * 85)
+    _logger.info(" [STEP 3/5] FEATURE INTEGRATION & SIGNAL QUALITY AUDIT")
+    _logger.info("═" * 85)
+    
+    _logger.info("  --> Merging ML features into panel data maps...")
     merge_ml_output_into_is_and_oos(ml_out, data_maps, oos_data_maps, valid_symbols, args.tf)
+
     if args.tf != "1h":
+        _logger.debug("  --> Syncing ML features to 1h base...")
         merge_ml_output_into_is_and_oos(ml_out, data_maps, oos_data_maps, valid_symbols, "1h")
 
+    _logger.info("  --> Running Signal Quality Audit (IS vs OOS stability)...")
     _log_ml_merge_feature_stats(oos_data_maps, valid_symbols, args.tf)
+    
+    _logger.info("  [SUCCESS] Signal integration and quality audit complete.")
+
 
     for sym in valid_symbols[:3]:
         df = oos_data_maps[sym][args.tf]
@@ -488,6 +588,15 @@ def main() -> None:
 
     # [PHASE 5] Optuna Portfolio Optimization Starting
     n_ml_trials = int(args.trials)
+    if OPT_FUTURES_CONFIG.get("FUTURES_ML_GP_NSGA2_ENABLED", False):
+        pop = int(OPT_FUTURES_CONFIG.get("FUTURES_NSGA2_POPULATION_SIZE", 30))
+        min_nsga2_trials = pop * 10
+        if n_ml_trials < min_nsga2_trials:
+            _logger.warning(
+                "[NSGA-II] trials=%d < pop*10=%d → auto-bumped to %d for ≥10 generations.",
+                n_ml_trials, min_nsga2_trials, min_nsga2_trials,
+            )
+            n_ml_trials = min_nsga2_trials
     cfg_seed = int(OPT_FUTURES_CONFIG.get("seeds", [42])[0])
     seed = int(args.seed) if args.seed is not None else cfg_seed
     ml_ctx = MLPhaseDContext(data_maps=data_maps, symbols=valid_symbols, tf=args.tf, seed=seed)
@@ -529,15 +638,17 @@ def main() -> None:
     if tqdm_cb:
         callbacks.append(tqdm_cb)
 
-    # [PERFORMANCE] Use multi-processing (n_jobs)
-    n_jobs = min(4, _resolve_futures_parallel_policy(len(valid_symbols)))
-    _logger.info("\n" + "=" * 85)
-    _logger.info(f" [STEP 4/5] Portfolio Optimization: {n_ml_trials} trials | {n_jobs} cores")
-    _logger.info("=" * 85 + "\n")
+    is_nsga2 = OPT_FUTURES_CONFIG.get("FUTURES_ML_GP_NSGA2_ENABLED", False)
+    # NSGA-II: n_jobs=1 (genetic evolution requires sequential population updates)
+    n_jobs = 1 if is_nsga2 else min(4, _resolve_futures_parallel_policy(len(valid_symbols)))
+    _logger.info("\n" + "═" * 85)
+    _logger.info(f" [STEP 4/5] PORTFOLIO OPTIMIZATION: {n_ml_trials} Trials | {n_jobs} Cores")
+    _logger.info("═" * 85 + "\n")
+
 
     study_ml = optuna.create_study(
-        direction="minimize",
-        sampler=_ml_phase_d_tpe_sampler(seed),
+        directions=["minimize", "minimize"] if is_nsga2 else ["minimize"],
+        sampler=_ml_phase_d_sampler(seed, n_ml_trials),
     )
 
     study_ml.optimize(
@@ -548,7 +659,18 @@ def main() -> None:
     )
 
     completed = [t for t in study_ml.trials if t.state == TrialState.COMPLETE]
-    completed.sort(key=lambda tr: tr.value if tr.value is not None else 1e18)
+    if OPT_FUTURES_CONFIG.get("FUTURES_ML_GP_NSGA2_ENABLED", False):
+        from src.domain.futures.opt_futures_utils.objective_ml import topsis_select_best
+        # Sort by topsis distance to ideal point for multi-objective
+        try:
+            best_nsga = topsis_select_best(completed)
+            # Put the best NSGA-II trial at the front so the loop considers it first
+            completed.sort(key=lambda tr: 0 if tr.number == best_nsga.number else 1)
+        except Exception as e:
+            _logger.warning("TOPSIS sorting failed: %s. Falling back to obj1 sort.", e)
+            completed.sort(key=lambda tr: tr.values[0] if tr.values else 1e18)
+    else:
+        completed.sort(key=lambda tr: tr.value if tr.value is not None else 1e18)
     pruned_n = sum(1 for t in study_ml.trials if t.state == TrialState.PRUNED)
     n_trials_all = len(study_ml.trials)
     _logger.info(
@@ -569,7 +691,10 @@ def main() -> None:
     br = mai.get("cpcv_all_block_ranges")
     best_trial: optuna.trial.FrozenTrial | None = None
     pbo_obs = 0.5 # Default IS-PBO reference
-    _logger.info(" [STEP 4.5/5] Filtering top trials with Hard Gates (Lazy PBO)...")
+    _logger.info("\n" + "═" * 85)
+    _logger.info(" [STEP 4.5/5] ROBUSTNESS AUDIT (Hard Gates & CPCV PBO)")
+    _logger.info("═" * 85)
+    
     iter_limit = min(300, len(completed))
     for i in range(iter_limit):
         t = completed[i]
@@ -583,7 +708,7 @@ def main() -> None:
         if paths and br:
             oos_tw = t.user_attrs.get("cpcv_path_oos_log_tw") or []
             if len(oos_tw) == len(paths):
-                _logger.info(f"  Evaluating Top Trial {i+1}/{iter_limit}: Checking PBO...")
+                _logger.info(f"  Evaluating Rank {i+1}: Checking PBO stability...")
                 pbo_obs, _rho = run_cpcv_complement_evaluation(
                     p_params,
                     valid_symbols,
@@ -595,9 +720,10 @@ def main() -> None:
                 )
         
         if _ml_trial_passes_hard_gates(t, float(pbo_obs), check_pbo=True):
-            _logger.info(f"  --> Best Trial found at rank {i+1} (PBO={pbo_obs:.4f})")
+            _logger.info(f"  [PASS] Best Trial found at rank {i+1} (PBO={pbo_obs:.4f})")
             best_trial = t
             break
+    
     if best_trial is None:
         trade_ok = [
             t
@@ -606,22 +732,18 @@ def main() -> None:
         ]
         if trade_ok:
             best_trial = select_best_trial_by_holdout_log_ret(trade_ok)
-            _logger.warning(
-                "PBO/DSR/MDD gates failed → avg_trades>=10 fallback (n=%d).",
-                len(trade_ok),
-            )
+            _logger.warning(" [WARNING] PBO/DSR gates failed. Falling back to trade-volume filter.")
         else:
-            _logger.error(
-                "[ABORT] All completed trials have avg_trades < 10 (or none completed). "
-                "Signal path likely broken."
-            )
+            _logger.error(" [ABORT] Signal path broken: no tradeable trials.")
             raise RuntimeError("No trial produced tradeable output.")
 
     params = build_ml_phase_d_params(dict(best_trial.params), args.tf)
-
     _assert_oos_gp_signal_alive(oos_data_maps, valid_symbols, args.tf)
 
-    _logger.info("\n[STEP 5/5] Finalizing OOS Evaluation with Best Parameters...")
+    _logger.info("\n" + "═" * 85)
+    _logger.info(" [STEP 5/5] FINAL OOS EVALUATION & WF ADAPTATION")
+    _logger.info("═" * 85)
+    
     oos_port = run_oos_margin_shared_portfolio(
         valid_symbols, args.tf, params, oos_data_maps, cache_root=FUTURES_CACHE_DIR
     )
@@ -647,12 +769,12 @@ def main() -> None:
         dsr_obs = float(best_trial.user_attrs.get("gate1_dsr", 0.0))
         gate_ok = check_hard_gates_ml(oos_port, float(pbo_obs), dsr_obs, 0.55)
         _logger.info(
-            " [Phase3 HARD GATE] PBO=%.4f (rho=%.4f) gate1_dsr=%.4f -> %s",
+            " [PHASE 3 AUDIT] PBO=%.4f | DSR=%.4f | RESULT: %s",
             float(pbo_obs),
-            float(rho_obs),
             dsr_obs,
             "PASS" if gate_ok else "FAIL",
         )
+
 
     n_wf = int(OPT_FUTURES_CONFIG.get("FUTURES_WF_OOS_LEGS", 1))
     wf_hmm_refit = bool(OPT_FUTURES_CONFIG.get("FUTURES_WF_HMM_LEG_REFIT", True))
@@ -723,6 +845,23 @@ def main() -> None:
                 tw,
                 _suffix,
             )
+            # CRISIS% diagnostic per WF leg — uses original OOS HMM (pre-refit) for comparison.
+            # ref_df already has hmm_prob_crisis from main pipeline merge.
+            if "hmm_prob_crisis" in ref_df.columns:
+                _crisis_thr = float(OPT_FUTURES_CONFIG.get("FUTURES_HMM_CRISIS_THRESHOLD", 0.6))
+                _leg_pc = ref_df["hmm_prob_crisis"].iloc[ls:le].to_numpy(dtype=np.float64)
+                _crisis_hard_pct = float(np.mean(_leg_pc > _crisis_thr)) * 100.0
+                _crisis_avg_pct = float(np.mean(_leg_pc)) * 100.0
+                _logger.info(
+                    " [WF CRISIS] leg %d/%d [%d,%d): bars_above_thr(%.2f)=%.1f%% avg_prob=%.1f%%",
+                    leg + 1,
+                    n_wf,
+                    ls,
+                    le,
+                    _crisis_thr,
+                    _crisis_hard_pct,
+                    _crisis_avg_pct,
+                )
         _logger.info(" [WF] sum terminal_wealth_ratio (all legs)=%.4f", wf_tw_sum)
         if wf_hmm_refit and tw_legs:
             all_ok = all(t >= wf_tw_floor for t in tw_legs)
@@ -735,6 +874,13 @@ def main() -> None:
                 mean_ok,
                 "PASS" if (all_ok and mean_ok) else "FAIL",
             )
+            if not (all_ok and mean_ok):
+                gate_ok = False
+                _logger.warning(
+                    " [WF HARD GATE] Persist blocked (all legs >= %.2f and mean >= %.2f required).",
+                    wf_tw_floor,
+                    wf_tw_mean_min,
+                )
 
     # [STEP 5.1/5] IS & Hold-out Evaluation
     _logger.info("[STEP 5.1/5] Evaluating IS and Hold-out Performance...")
@@ -809,18 +955,20 @@ def main() -> None:
         if oos_rets.size > 0 and np.std(oos_rets) > 1e-9:
             oos_sharpe_v = float(np.mean(oos_rets) / np.std(oos_rets)) * np.sqrt(ann_f)
 
-        # New multi-metric gate logic (Hypothesis 1):
-        # Either standard pass (IS >= -0.5 and IS Sharpe >= 0.0)
-        # Or relaxed pass (IS Sharpe > -1.0 AND OOS Sharpe > 2.0 AND PBO < 0.40)
-        standard_pass = (is_cagr_v >= -0.5) and (is_sharpe_v >= 0.0)
+        # P4: Gate on CPCV growth_signal, not sequential IS CAGR. Use IS CAGR as sanity check only.
+        cpcv_growth = float(best_trial.user_attrs.get("ml_mean_log_growth_cpcv", 0.0))
         _pbo_cur = float(pbo_val) if pbo_val is not None else 0.5
-        relaxed_pass = (is_sharpe_v > -1.0) and (oos_sharpe_v > 2.0) and (_pbo_cur < 0.40)
         
-        if not (standard_pass or relaxed_pass):
+        # Unbiased proxy pass: CPCV log-TW growth > -0.10 AND sequential IS sanity check > -6.0%
+        cpcv_pass = (cpcv_growth > -0.10) and (is_cagr_v > -6.0)
+        
+        if not cpcv_pass:
             gate_ok = False
             _logger.warning(
-                " [IS STRUCTURAL GATE] IS CAGR=%.2f%% IS Sharpe=%.2f OOS Sharpe=%.2f "
-                "PBO=%.4f FAIL. Standard pass AND Relaxed pass both failed. Blocked.",
+                " [IS STRUCTURAL GATE] CPCV Growth=%.4f IS CAGR=%.2f%% "
+                "IS Sharpe=%.2f OOS Sharpe=%.2f "
+                "PBO=%.4f FAIL. CPCV Growth must be > -0.10 and IS CAGR > -6.0%%. Blocked.",
+                cpcv_growth,
                 is_cagr_v,
                 is_sharpe_v,
                 oos_sharpe_v,
@@ -828,9 +976,37 @@ def main() -> None:
             )
         else:
             _logger.info(
-                " [IS STRUCTURAL GATE] PASS. IS CAGR=%.2f%% IS Sharpe=%.2f OOS Sharpe=%.2f "
+                " [IS STRUCTURAL GATE] PASS. CPCV Growth=%.4f IS CAGR=%.2f%% "
+                "IS Sharpe=%.2f OOS Sharpe=%.2f "
                 "PBO=%.4f",
-                 is_cagr_v, is_sharpe_v, oos_sharpe_v, _pbo_cur,
+                 cpcv_growth, is_cagr_v, is_sharpe_v, oos_sharpe_v, _pbo_cur,
+            )
+
+        p10_cpcv = float(best_trial.user_attrs.get("ml_p10_log_growth_cpcv", -10.0))
+        cvar10_cpcv = float(best_trial.user_attrs.get("ml_cvar10_log_growth_cpcv", -10.0))
+        worst_path_cpcv = float(
+            best_trial.user_attrs.get("ml_worst_path_log_growth_cpcv", -10.0)
+        )
+        p10_tw = float(np.exp(p10_cpcv))
+        p10_floor = float(OPT_FUTURES_CONFIG.get("FUTURES_CPCV_P10_LOG_TW_MIN", 0.0))
+        dist_ok = p10_cpcv > p10_floor
+        _logger.info(
+            " [CPCV HARDENING] p10_log_tw=%.4f tw=%.4f | cvar10=%.4f | worst=%.4f | "
+            "floor=%.4f -> %s",
+            p10_cpcv,
+            p10_tw,
+            cvar10_cpcv,
+            worst_path_cpcv,
+            p10_floor,
+            "PASS" if dist_ok else "FAIL",
+        )
+        if not dist_ok:
+            gate_ok = False
+            _logger.warning(
+                " [CPCV HARDENING] Persist blocked. 10th percentile CPCV path must satisfy "
+                "log(TW) > %.4f (TW > %.4f).",
+                p10_floor,
+                float(np.exp(p10_floor)),
             )
 
     # [Champion Comparison Guard] Only overwrite if new run improves OOS CAGR or PBO.
@@ -845,34 +1021,91 @@ def main() -> None:
                 _champ_oos = float(_champ.get("metrics", {}).get("oos_cagr_pct", -999.0))
                 _champ_pbo = float(_champ.get("metrics", {}).get("pbo", 1.0))
                 _new_oos = float(oos_port.get("cagr_pct", oos_port.get("cagr", 0.0)))
+                _new_ho = float(ho_port.get("cagr_pct", ho_port.get("cagr", 0.0)))
+                _champ_ho = float(_champ.get("metrics", {}).get("holdout_cagr_pct", -999.0))
+                
                 _oos_improved = _new_oos > _champ_oos
                 _pbo_improved = float(pbo_obs) < _champ_pbo
-                # Hypothesis 5: AND condition with minimum OOS threshold
-                _oos_acceptable = _new_oos > (0.75 * _champ_oos) # 75% threshold
-                
-                if not (_oos_improved or (_pbo_improved and _oos_acceptable)):
+                _oos_acceptable = _new_oos > (0.75 * _champ_oos)
+
+                _robustness_upgrade = (_champ_ho < 0) and (_new_ho > 0) and (float(pbo_obs) < 0.35)
+
+                _pbo_strict = float(pbo_obs) <= 0.40
+                # Session 25: Reject candidates that regress PBO by >0.05 unless OOS jumps >=10%.
+                _pbo_regression = float(pbo_obs) > (_champ_pbo + 0.05)
+                _oos_large_jump = _new_oos >= (_champ_oos + 10.0)
+                _holdout_regression = (_champ_ho > 0) and (_new_ho < 0.5 * _champ_ho)
+
+                _base_condition = (
+                    _oos_improved or (_pbo_improved and _oos_acceptable) or _robustness_upgrade
+                )
+                if _pbo_regression and not _oos_large_jump:
+                    _base_condition = False
+                if _holdout_regression and not _oos_large_jump:
+                    _base_condition = False
+                if not (_base_condition and _pbo_strict):
                     gate_ok = False
                     _logger.warning(
                         " [CHAMPION GUARD] No improvement over current champion "
-                        "(OOS %.2f%% vs %.2f%% | PBO %.4f vs %.4f) or OOS regression high. "
+                        "(OOS %.2f%% vs %.2f%% | PBO %.4f vs %.4f | HO %.2f%% vs %.2f%%). "
                         "Champion preserved.",
                         _new_oos,
                         _champ_oos,
                         float(pbo_obs),
                         _champ_pbo,
+                        _new_ho,
+                        _champ_ho,
                     )
                 else:
+                    _label = "Robustness Upgrade" if _robustness_upgrade else "Improvement"
                     _logger.info(
-                        " [CHAMPION GUARD] Improvement: OOS %.2f%%->%.2f%% | PBO %.4f->%.4f.",
+                        " [CHAMPION GUARD] %s: OOS %.2f%%->%.2f%% | PBO %.4f->%.4f | "
+                        "HO %.2f%%->%.2f%%.",
+                        _label,
                         _champ_oos,
                         _new_oos,
                         _champ_pbo,
                         float(pbo_obs),
+                        _champ_ho,
+                        _new_ho,
                     )
             except Exception as _ce:
                 _logger.warning(
                     " [CHAMPION GUARD] champion.json read failed (%s). Guard skipped.", _ce
                 )
+
+    # [Dual-Audit Dashboard] Integrated Performance & Reliability side-by-side
+    champion_json_path = Path(project_root) / "logs" / "experiments" / "champion.json"
+    champ_m: Dict[str, Any] = {
+        "pbo": 0.5, "p10": 0.0, "dsr": 0.0, "tw": 1.0, "cagr": 0.0, "mdd": 0.0
+    }
+    if champion_json_path.exists():
+        try:
+            with open(champion_json_path) as _cf:
+                _c = json.load(_cf)
+            _met = _c.get("metrics", {})
+            champ_m = {
+                "pbo": float(_met.get("pbo", 0.5)),
+                "p10": float(_met.get("cpcv_p10_log_tw", 0.0)),
+                "dsr": float(_met.get("dsr", 0.0)),
+                "tw": float(_met.get("oos_terminal_wealth", 1.0)), # Adjusted key
+                "cagr": float(_met.get("oos_cagr_pct", 0.0)),
+                "mdd": float(_met.get("oos_mdd_pct", 0.0)),
+            }
+        except Exception as _ce:
+            _logger.debug("Champion metrics parse failed: %s", _ce)
+
+    new_m = {
+        "pbo": float(pbo_obs) if 'pbo_obs' in locals() else 0.5,
+        "p10": float(best_trial.user_attrs.get("ml_p10_log_growth_cpcv", 0.0)),
+        "dsr": float(best_trial.user_attrs.get("gate1_dsr", 0.0)),
+        "tw": float(oos_port.get("terminal_wealth_ratio", 1.0)),
+        "cagr": float(oos_port.get("cagr_pct", 0.0)),
+        "mdd": float(oos_port.get("mdd_pct", 0.0)),
+    }
+    
+    _verdict = "PROMOTE ✅" if gate_ok else "HOLD ❌"
+    _print_dual_audit_dashboard(new_m, champ_m, _verdict)
 
     res_dir = Path(project_root) / "results"
     res_dir.mkdir(parents=True, exist_ok=True)
@@ -883,7 +1116,7 @@ def main() -> None:
         _logger.info(f"Best parameters saved to results/{BEST_PARAMS_FUTURES_JSON_STEM}.json")
     else:
         _logger.warning(
-            "Best parameters NOT persisted because Phase3 hard gate failed. "
+            "Best parameters NOT persisted (Phase3, WF legs, IS structural, or champion guard). "
             "Preserving existing results/%s.json artifact.",
             BEST_PARAMS_FUTURES_JSON_STEM,
         )
