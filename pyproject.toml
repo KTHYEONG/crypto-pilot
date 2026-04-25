@@ -21,6 +21,7 @@ nsga2 = ["deap>=1.4"]
 
 [tool.ruff]
 line-length = 100
+target-version = "py311"
 exclude = [
     "data", 
     "legacy", 
@@ -32,25 +33,33 @@ exclude = [
 
 [tool.ruff.lint]
 select = [
-    "E", "F", "I", "N", # PEP8, Pyflakes, Import 정렬, Naming 컨벤션
-    "B",    # Bugbear: 잠재적 버그 탐지
-    "S",    # Bandit: 보안 취약점 진단
-    "PERF", # Perflint: 성능 최적화 안티패턴 탐지
-    "RUF"   # Ruff: 고유 정적 분석 규칙
+    "E", "F", "I", "N", # PEP8, Pyflakes, Import, Naming
+    "B",    # Bugbear
+    "S",    # Bandit
+    "PERF", # Perflint
+    "RUF",  # Ruff-specific
+    "UP",   # pyupgrade
+    "D",    # pydocstyle
+    "TID",  # flake8-tidy-imports
+    "ASYNC" # flake8-async
 ]
-ignore = []
+ignore = [
+    "D100", "D104", "D103", # Missing docstrings (AI efficiency)
+    "S101",                 # Allow assert
+]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["S101", "E402", "N806"]
 "src/domain/futures/ml_pipeline/**/*.py" = ["N803", "N806"]
 "src/domain/futures/engine_multi_futures.py" = ["E501", "E701", "E702"]
 
-[tool.ruff.format]
-# 필요한 경우 포맷팅 설정을 추가할 수 있습니다.
-
 [tool.mypy]
 # AI에게 엄격한 Type Hinting 강제
 strict = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+check_untyped_defs = true
+show_error_codes = true
 ignore_missing_imports = true
 exclude = [
     "data", 
@@ -62,7 +71,6 @@ exclude = [
 ]
 
 [tool.pyright]
-# 기존 Pyright 설정 유지
 exclude = [
     "data", 
     "legacy", 
@@ -72,12 +80,7 @@ exclude = [
     ".git"
 ]
 
-[tool.isort]
-# 기존 설정 유지 (단, Ruff의 'I' 옵션이 Import를 처리하므로 보조 수단으로 사용)
-skip = [
-    "data", 
-    "legacy", 
-    "logs", 
-    "results"
-]
-profile = "black"
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-ra -q"

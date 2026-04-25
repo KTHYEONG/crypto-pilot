@@ -29,6 +29,8 @@ _FUTURES_2D_REQUIRED_COLS: Tuple[str, ...] = (
     "hmm_prob_crisis",
     "hmm_modulator_long",
     "hmm_modulator_short",
+    "hmm_modulator_base_long",
+    "btc_trend_vol_adj_24h",
 )
 
 
@@ -71,6 +73,8 @@ def _dataframe_to_symbol_arrays(sig_df: pd.DataFrame) -> Dict[str, np.ndarray]:
         "hmm_prob_crisis": 0.0,
         "hmm_modulator_long": 1.0,
         "hmm_modulator_short": 1.0,
+        "hmm_modulator_base_long": 1.0,
+        "btc_trend_vol_adj_24h": 0.0,
     }
     
     for col, fill_val in fill_map.items():

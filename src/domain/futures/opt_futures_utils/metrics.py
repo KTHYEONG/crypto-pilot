@@ -233,3 +233,70 @@ def calc_gate1_dsr_from_path_log_tw(
     z_dsr = (sharpe - sr_bench) * math.sqrt(max(t_samples - 1.0, 1.0)) / math.sqrt(sr_var_denom)
     dsr_val = float(0.5 * (1.0 + math.erf(z_dsr / math.sqrt(2.0))))
     return float(min(0.99, max(0.0, dsr_val)))
+
+
+def calc_time_to_target_wealth(
+    path_log_returns: np.ndarray,
+    target_multiplier: float,
+    bars_per_year: float,
+) -> tuple[float, float]:
+    """
+    [Path A] Probability-weighted time to target assets (e.g., 2x or 10x).
+    Returns (expected_years, ci_upper_years).
+    """
+    if path_log_returns.size < 2:
+        return 999.0, 999.0
+    
+    mu = float(np.mean(path_log_returns)) * bars_per_year
+    sigma = float(np.std(path_log_returns, ddof=1)) * math.sqrt(bars_per_year)
+    
+    if mu <= 1e-6:
+        return 999.0, 999.0
+        
+    log_target = math.log(max(1.0001, target_multiplier))
+    expected_years = log_target / mu
+    
+    # 95% CI upper bound using normal approximation
+    z = 1.645
+    n_years = float(len(path_log_returns)) / bars_per_year
+    drift_ci_lower = mu - z * sigma / math.sqrt(max(1.0, n_years))
+    
+    if drift_ci_lower <= 1e-6:
+        ci_upper_years = 999.0
+    else:
+        ci_upper_years = log_target / drift_ci_lower
+        
+    return float(expected_years), float(ci_upper_years)
+
+
+def calc_net_alpha_with_friction(
+    equity_curve: np.ndarray,
+    benchmark_cagr: float,
+    bars_per_year: float,
+    avg_funding_rate_bps: float = 1.0,
+    avg_slippage_bps: float = 2.0,
+    turnover_per_bar: float = 0.1,
+) -> float:
+    """
+    [Path C] Net Alpha accounting for liquidity-depth (slippage) and funding-rate friction.
+    """
+    if len(equity_curve) < 2:
+        return 0.0
+    
+    start_eq = equity_curve[0] if equity_curve[0] > 0 else 1e-9
+    end_eq = equity_curve[-1]
+    total_ret_ratio = max(end_eq / start_eq, 0.0001)
+    
+    years = len(equity_curve) / max(1.0, bars_per_year)
+    if years <= 0:
+        return 0.0
+        
+    cagr_decimal = (total_ret_ratio ** (1.0 / years)) - 1.0
+    
+    annual_turnover = turnover_per_bar * bars_per_year
+    annual_slippage_cost = annual_turnover * (avg_slippage_bps / 10000.0)
+    annual_funding_cost = bars_per_year * (avg_funding_rate_bps / 10000.0) * 0.5
+    
+    net_cagr = cagr_decimal - annual_slippage_cost - annual_funding_cost
+    return float(net_cagr - benchmark_cagr)
+

@@ -8,7 +8,14 @@ from typing import Any, Dict, List
 
 OPT_FUTURES_CONFIG: Dict[str, Any] = {
     "total_trials": 2000,
+    # Phase-D TPESampler: random trials before TPE; must be < n_ml_trials (see opt_main_futures).
     "tpe_n_startup_trials": 384,
+    # Caps startup at this fraction of Phase-D n_trials (prevents 384/500 ~77% random when
+    # total_trials-oriented tpe_n_startup is reused for FUTURES_ML_PHASE_D_TRIALS=500).
+    "FUTURES_ML_PHASE_D_TPE_STARTUP_FRAC": 0.30,
+    # Phase-D: trial 0 = deploy JSON in search space (TPE anchor; counts toward n_trials).
+    "FUTURES_ML_PHASE_D_ENQUEUE_DEPLOY_JSON": True,
+    "FUTURES_ML_PHASE_D_DEPLOY_JSON_REL": "results/best_futures_1h.json",
     "seeds": [42],
     "TARGET_TIMEFRAMES": ["4h"],
     # Risk & Portfolio (Phase D)
@@ -18,9 +25,23 @@ OPT_FUTURES_CONFIG: Dict[str, Any] = {
     "FUTURES_MIN_CAGR_PCT": 30.0,
     "FUTURES_DISCOVERY_LEVERAGE": 5,
     "FUTURES_PBO_MAX": 0.45,
+    # Hardening: candidate PBO must be ≤ this to beat champion.json (skill P4 strict guard).
+    "FUTURES_CHAMPION_PBO_STRICT_MAX": 0.40,
+    # futures-opt Phase 3: trial-count PBO ceiling (-step per bucket); clamp avoids overkill.
+    "FUTURES_MC_GATE_TRIAL_ADJUST_ENABLED": False,
+    "FUTURES_MC_GATE_BUCKET_TRIALS": 100,
+    "FUTURES_MC_PBO_STEP_PER_BUCKET": 0.01,
+    "FUTURES_MC_PBO_CEILING_CLAMP_MIN": 0.38,
+    # Optional: raise FUTURES_ML_GATE1_DSR_MIN with trials (off by default — base 0.20 is low).
+    "FUTURES_MC_DSR_TRIAL_ADJUST_ENABLED": False,
+    "FUTURES_MC_DSR_STEP_PER_BUCKET": 0.02,
+    "FUTURES_MC_DSR_FLOOR_CAP": 0.95,
+    # Path A: True + PBO_MAX 0.50 for exploration; default off (session 42: 300t HOLD).
+    "FUTURES_TIER1_SHIELD_MODE": False,
     # Universal Cross-Sectional GP Miner Settings
     "FUTURES_ML_GP_POPULATION": 1000,
-    "FUTURES_ML_GP_GENERATIONS": 20,
+    # Tier 2: +2 generations for marginal symbolic-regression diversity (cheap vs full schema lift).
+    "FUTURES_ML_GP_GENERATIONS": 22,
     "FUTURES_ML_GP_TARGET_HORIZON": 6,
     "FUTURES_ML_GP_HORIZONS": (6, 12, 24, 48),
     "FUTURES_ML_GP_PARSIMONY": 0.001,
@@ -30,9 +51,11 @@ OPT_FUTURES_CONFIG: Dict[str, Any] = {
     "FUTURES_ML_IC_FILTER_USE_HAC": True,
     "FUTURES_ML_IC_FILTER_USE_EWMA": False,
     "FUTURES_ML_IC_EWMA_HALF_LIFE": 540.0,
-    "FUTURES_ML_IC_SYMBOL_BALANCE_MAX": 3.0,
+    # Tier 2 discovery: slightly relax cross-section balance cap (4h panels were 1/15 GP survival).
+    "FUTURES_ML_IC_SYMBOL_BALANCE_MAX": 3.5,
     "FUTURES_ML_IC_REGIME_GATE": True,
-    "FUTURES_ML_IC_FDR_Q": 0.15,
+    # Tier 2 discovery: mild FDR relaxation vs 0.15 (still conservative vs test_gp_ic 0.3).
+    "FUTURES_ML_IC_FDR_Q": 0.18,
     "FUTURES_ML_GP_NSGA2_ENABLED": False,
     # NSGA-II population size. Generations = trials / population_size.
     # Target ≥ 10 generations → min trials = population_size * 10.
@@ -41,9 +64,15 @@ OPT_FUTURES_CONFIG: Dict[str, Any] = {
     "FUTURES_NSGA2_POPULATION_SIZE": 30,
     # HMM stable regime (fixed hyperparameters; not in Optuna search space)
     "FUTURES_HMM_K_STATES": 4,
-    "FUTURES_HMM_KELLY_SHRINKAGE": 0.4,
-    "FUTURES_HMM_CRISIS_THRESHOLD": 0.70,
-    "FUTURES_HMM_TRANSITION_PRIOR_ALPHA": 0.2,
+    # Deployment floor: ≥0.45 (align HMM systemic prior with Phase D Kelly band).
+    "FUTURES_HMM_KELLY_SHRINKAGE": 0.45,
+    # Session 41 sweep: 0.65-0.68 heuristically best; 0.66 compromise vs 0.70 default.
+    "FUTURES_HMM_CRISIS_THRESHOLD": 0.66,
+    # Slightly stronger sticky transitions → stabler systemic HMM under leg refit (Path C).
+    "FUTURES_HMM_TRANSITION_PRIOR_ALPHA": 0.24,
+    # Session 39: recovery override abandoned (P10 -0.027, DSR collapse). Keep disabled.
+    "CRISIS_RECOVERY_TREND_THR": 1e9,
+    "CRISIS_RECOVERY_FLOOR": 0.30,
     "FUTURES_ML_PHASE_D_TRIALS": 500,
     "FUTURES_CPCV_N_BLOCKS": 8,
     "FUTURES_CPCV_K_TEST": 3,
@@ -52,6 +81,9 @@ OPT_FUTURES_CONFIG: Dict[str, Any] = {
     "FUTURES_WF_HMM_LEG_REFIT": True,
     "FUTURES_WF_LEG_TW_MIN_ALL": 1.0,
     "FUTURES_WF_LEG_TW_MEAN_MIN": 1.02,
+    # futures-opt P4: log reference + optional soft warn (not a hard gate).
+    "FUTURES_ERGODICITY_GUIDELINE_PCT": 15.0,
+    "FUTURES_ERGODICITY_SOFT_WARN_ENABLED": True,
     # Phase 2: entry gate (rolling quantile), TBM horizon (1m bars), meta purge alignment
     "ENTRY_QUANTILE_WINDOW": 240,
     "FUTURES_ENTRY_NUMBA_THRESHOLD": 0.5,
@@ -75,7 +107,8 @@ OPT_FUTURES_CONFIG: Dict[str, Any] = {
 
 # Cross-Sectional Strategy Parameter Space
 SIGNAL_PARAM_SPACE_FUTURES: Dict[str, Dict[str, Any]] = {
-    "ATR_PERIOD": {"type": "int", "low": 10, "high": 20, "step": 2},
+    # Multi-session stability: lower bound ≥26 (matches ML Phase D discovery band).
+    "ATR_PERIOD": {"type": "int", "low": 26, "high": 40, "step": 2},
     "LONG_ATR_MULT": {"type": "float", "low": 1.5, "high": 4.5, "step": 0.25},
     "LONG_TRAIL_MULT": {"type": "float", "low": 2.5, "high": 6.0, "step": 0.5},
     "SHORT_ATR_MULT": {"type": "float", "low": 1.0, "high": 3.0, "step": 0.25},

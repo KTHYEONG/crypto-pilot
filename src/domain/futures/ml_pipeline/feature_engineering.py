@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+from typing import cast
+
 import numpy as np
 import pandas as pd
+from numba import njit
 
 # Columns produced by build_gp_input_features (for CS-rank / imputation in pipeline).
 # Systemic HMM input (8-dim: Structural Trend, Risk, and Energy markers).
@@ -28,7 +31,7 @@ HMM_SEMANTIC_PROB_COLUMNS: tuple[str, ...] = (
 
 # Bump when GP feature semantics change without renaming columns so raw GP
 # caches are invalidated and Tier 2 retraining actually happens.
-GP_FEATURE_SCHEMA_VERSION: str = "v4"
+GP_FEATURE_SCHEMA_VERSION: str = "v6"
 
 GP_ENGINEERED_FEATURE_NAMES: tuple[str, ...] = (
     "ret_1",
@@ -57,18 +60,40 @@ GP_ENGINEERED_FEATURE_NAMES: tuple[str, ...] = (
     "funding_mom_24",
     "acceleration_24",
     "tail_risk_24",
+    "amihud_illiq_24",
+    "range_pos_24",
+    "frac_diff_04",
+    "hurst_24",
 )
 
 
 def _rolling_robust_z(series: pd.Series, window: int) -> pd.Series:
-    """Rolling median/MAD Z-score (causal)."""
+    """Calculate rolling median/MAD Z-score (causal).
+
+    Args:
+        series: Input price or feature series.
+        window: Rolling window size.
+
+    Returns:
+        Z-scored series.
+
+    """
     med = series.rolling(window=window, min_periods=max(10, window // 10)).median()
     mad = (series - med).abs().rolling(window=window, min_periods=max(10, window // 10)).median()
-    z = (series - med) / (mad * 1.4826 + 1e-12)
+    z: pd.Series = (series - med) / (mad * 1.4826 + 1e-12)
     return z
 
 
 def _log_modulus(z: pd.Series) -> pd.Series:
+    """Apply log-modulus transformation to preserve sign while compressing tails.
+
+    Args:
+        z: Input series.
+
+    Returns:
+        Transformed series.
+
+    """
     s = np.sign(z.to_numpy(dtype=np.float64))
     a = np.log(np.abs(z.to_numpy(dtype=np.float64)) + 1.0)
     return pd.Series(s * a, index=z.index)
@@ -77,7 +102,19 @@ def _log_modulus(z: pd.Series) -> pd.Series:
 def _yang_zhang_vol_24(
     open_: pd.Series, high: pd.Series, low: pd.Series, close: pd.Series, window: int = 24
 ) -> pd.Series:
-    """Rolling Yang-Zhang-style volatility (OHLC), sqrt variance per bar."""
+    """Calculate rolling Yang-Zhang volatility (OHLC).
+
+    Args:
+        open_: Open price series.
+        high: High price series.
+        low: Low price series.
+        close: Close price series.
+        window: Rolling window size.
+
+    Returns:
+        Volatility series (sqrt variance per bar).
+
+    """
     o = open_.astype(np.float64)
     h = high.astype(np.float64)
     low_s = low.astype(np.float64)
@@ -93,14 +130,151 @@ def _yang_zhang_vol_24(
     close_vol = log_cc.rolling(int(window), min_periods=max(12, int(window) // 4)).var()
     overnight_vol = log_oo.rolling(int(window), min_periods=max(12, int(window) // 4)).var()
     rs_mean = rs.rolling(int(window), min_periods=max(12, int(window) // 4)).mean()
-    var_yz = overnight_vol + k * close_vol + (1.0 - k) * rs_mean
-    return np.sqrt(var_yz.clip(lower=0.0))
+    var_yz: pd.Series = overnight_vol + k * close_vol + (1.0 - k) * rs_mean
+    return cast(pd.Series, np.sqrt(var_yz.clip(lower=0.0)))
+
+
+@njit(cache=True, fastmath=True)  # type: ignore[untyped-decorator]
+def _get_frac_weights(d: float, size: int) -> np.ndarray:
+    """Generate weights for fractional differentiation.
+
+    Args:
+        d: Differentiation order.
+        size: Number of weights to generate.
+
+    Returns:
+        Array of weights.
+
+    """
+    w = np.empty(size, dtype=np.float64)
+    w[0] = 1.0
+    for k in range(1, size):
+        w[k] = -w[k - 1] * (d - k + 1) / k
+    return w
+
+
+@njit(cache=True, fastmath=True)  # type: ignore[untyped-decorator]
+def _fast_frac_diff(series: np.ndarray, w: np.ndarray, tau: float) -> np.ndarray:
+    """Apply fractional differentiation using Numba for speed.
+
+    Args:
+        series: Input price array.
+        w: Weight array.
+        tau: Weight threshold for truncation.
+
+    Returns:
+        Differentiated array.
+
+    """
+    n = len(series)
+    out = np.full(n, np.nan, dtype=np.float64)
+    w_abs = np.abs(w)
+    active_len = len(w)
+    for i in range(len(w)):
+        if w_abs[i] < tau:
+            active_len = i
+            break
+
+    w_active = w[:active_len]
+
+    for i in range(active_len - 1, n):
+        val = 0.0
+        for j in range(active_len):
+            val += w_active[j] * series[i - j]
+        out[i] = val
+    return out
+
+
+def fractional_differentiation(series: pd.Series, d: float, tau: float = 1e-5) -> pd.Series:
+    """Apply fractional differentiation to achieve stationarity while preserving memory.
+
+    Uses a fixed-window approach to balance memory preservation and data loss.
+
+    Args:
+        series: Input price series.
+        d: Differentiation order.
+        tau: Weight threshold.
+
+    Returns:
+        Stationary series.
+
+    """
+    if d == 0.0:
+        return series
+    if d == 1.0:
+        return series.diff()
+
+    arr = series.to_numpy(dtype=np.float64)
+    # Limit weights to max 250 bars to preserve more data
+    n_weights = min(len(arr), 250)
+    w = _get_frac_weights(d, n_weights)
+    diff_arr = _fast_frac_diff(arr, w, tau)
+    return pd.Series(diff_arr, index=series.index)
+
+
+@njit(cache=True, fastmath=True)  # type: ignore[untyped-decorator]
+def _rolling_hurst_rs(prices: np.ndarray, window: int) -> np.ndarray:
+    """Calculate rolling Hurst exponent using R/S approximation.
+
+    Args:
+        prices: Input price array.
+        window: Rolling window size.
+
+    Returns:
+        Hurst exponent array.
+
+    """
+    n = len(prices)
+    out = np.full(n, np.nan, dtype=np.float64)
+    if window < 4:
+        return out
+
+    # Fast localized Hurst approximation using variance ratio
+    for i in range(window, n):
+        m1 = 0.0
+        for j in range(window):
+            v1 = prices[i - window + j + 1] - prices[i - window + j]
+            m1 += v1
+        m1 /= window
+
+        var1 = 0.0
+        for j in range(window):
+            v1 = prices[i - window + j + 1] - prices[i - window + j]
+            var1 += (v1 - m1) ** 2
+        var1 /= window
+
+        m_2 = 0.0
+        for j in range(window - 1):
+            v2 = prices[i - window + j + 2] - prices[i - window + j]
+            m_2 += v2
+        m_2 /= window - 1
+
+        var2 = 0.0
+        for j in range(window - 1):
+            v2 = prices[i - window + j + 2] - prices[i - window + j]
+            var2 += (v2 - m_2) ** 2
+        var2 /= window - 1
+
+        if var1 > 1e-12 and var2 > 1e-12:
+            h = 0.5 * np.log(var2 / var1) / np.log(2.0)
+            out[i] = h
+        else:
+            out[i] = 0.5
+
+    return out
 
 
 def build_gp_input_features(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Build features for GP SymbolicTransformer input.
+    """Build features for GP SymbolicTransformer input.
+
     Enhanced with momentum, MA distances, volatility markers, and microstructure.
+
+    Args:
+        df: Input OHLCV dataframe.
+
+    Returns:
+        Dataframe containing engineered GP features.
+
     """
     out = pd.DataFrame(index=df.index)
     close = df["close"].astype(np.float64)
@@ -123,9 +297,9 @@ def build_gp_input_features(df: pd.DataFrame) -> pd.DataFrame:
         out[f"ma_dist_{w}"] = (close / (ma + 1e-12)) - 1.0
 
     # 3. Volume Intensity
-    for w in [24, 168]:
-        vma = vol.rolling(window=w, min_periods=w // 4).mean()
-        out[f"vol_ratio_{w}"] = (vol / (vma + 1e-12)).fillna(1.0)
+    for w_vol in [24, 168]:
+        vma = vol.rolling(window=w_vol, min_periods=w_vol // 4).mean()
+        out[f"vol_ratio_{w_vol}"] = (vol / (vma + 1e-12)).fillna(1.0)
 
     # 4. HL Spread (Volatility proxy) — long-tail compression
     raw_hl = (high - low) / (close + 1e-9)
@@ -196,22 +370,41 @@ def build_gp_input_features(df: pd.DataFrame) -> pd.DataFrame:
     tot_var = log_ret_1.rolling(24, min_periods=12).var()
     out["tail_risk_24"] = (down_var / (tot_var + 1e-12)).fillna(0.5)
 
+    # v5: microstructure + range (low overlap with v4 hl_yz / funding vol paths)
+    dollar_vol = (close * vol).clip(lower=1.0)
+    out["amihud_illiq_24"] = (
+        (log_ret_1.abs() / dollar_vol).rolling(24, min_periods=12).mean()
+    )
+    high_24 = high.rolling(24, min_periods=12).max()
+    low_24 = low.rolling(24, min_periods=12).min()
+    out["range_pos_24"] = (close - low_24) / (high_24 - low_24 + 1e-12)
+
+    # v6: fractional differentiation and hurst exponent
+    out["frac_diff_04"] = fractional_differentiation(close, 0.4)
+    out["hurst_24"] = pd.Series(
+        _rolling_hurst_rs(close.to_numpy(dtype=np.float64), 24), index=out.index
+    )
+
     # vol_ratio / buy_sell_ratio: keep finite defaults; ret/ma_dist/funding left NaN for CS impute
     out = out.replace([np.inf, -np.inf], np.nan)
     return out
 
 
 def build_hmm_input_features(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    GaussianHMM features designed for regime structural detection.
+    """Build GaussianHMM features designed for regime structural detection.
 
     Design (HMM improvement):
-    - Log_Return → EMA-smoothed (removes high-frequency noise that collapses transition probs)
-    - Vol_Ratio: short-term/long-term Parkinson volatility ratio (expansion vs contraction)
-    - Volume_Momentum: 24h vs 168h MA ratio (trend vs mean-reversion regime marker)
-    - Funding_Cum_Dev: cumulative deviation from rolling mean (macro regime shift indicator)
+    - Log_Return → EMA-smoothed (removes high-frequency noise)
+    - Vol_Ratio: short-term/long-term Parkinson volatility ratio
+    - Volume_Momentum: 24h vs 168h MA ratio
+    - Funding_Spread_Z: deviation from rolling mean
 
-    Fat tails mitigated via winsorize in inferrer.
+    Args:
+        df: Input OHLCV dataframe.
+
+    Returns:
+        Dataframe containing HMM input features.
+
     """
     close = df["close"].astype(np.float64)
     log_ret = np.log(close / close.shift(1))
@@ -256,9 +449,17 @@ def build_hmm_input_features(df: pd.DataFrame) -> pd.DataFrame:
 def build_systemic_hmm_features(
     panel_df: pd.DataFrame, alpha_panel: pd.DataFrame | None = None
 ) -> pd.DataFrame:
-    """
-    Builds single-timeseries features for Macro Market HMM using systemic aggregates.
+    """Build single-timeseries features for Macro Market HMM using systemic aggregates.
+
     8-dim: Trend (24h/168h), Vol Regime, Downside Risk, Distance, Energy, Breadth, Funding.
+
+    Args:
+        panel_df: Input panel dataframe.
+        alpha_panel: Optional alpha panel dataframe.
+
+    Returns:
+        Dataframe containing systemic HMM features.
+
     """
     _ = alpha_panel
 
@@ -276,19 +477,19 @@ def build_systemic_hmm_features(
     idx = market_feats.index
     syms = panel_df.index.get_level_values("symbol").unique()
     btc_sym = next((s for s in syms if "BTC" in s), None)
-    
+
     if btc_sym:
         btc_df = panel_df.xs(btc_sym, level="symbol")
         btc_close = btc_df["close"].astype(np.float64)
         log_ret_1 = np.log(btc_close / btc_close.shift(1).clip(lower=1e-12))
         sig_24 = log_ret_1.rolling(24, min_periods=12).std() + 1e-12
-        
+
         # 1. Trend (Short/Long)
         btc_trend_24h = (np.log(btc_close / btc_close.shift(24).clip(lower=1e-12))) / sig_24
         btc_trend_168h = (np.log(btc_close / btc_close.shift(168).clip(lower=1e-12))) / (
             sig_24 * np.sqrt(7.0)
         )
-        
+
         # 2. Volatility Regime
         h_hi = btc_df["high"].astype(np.float64)
         h_lo = btc_df["low"].astype(np.float64) + 1e-12
@@ -298,17 +499,17 @@ def build_systemic_hmm_features(
             index=btc_df.index,
         )
         rv_regime = park.rolling(24).mean() / (park.rolling(168).mean() + 1e-12)
-        
+
         # 3. Downside Risk
         neg_ret = log_ret_1.clip(upper=0.0)
         downside_vol_ratio = (
             neg_ret.rolling(24).std() / (log_ret_1.rolling(24).std() + 1e-12)
         ).fillna(0.5)
-        
+
         # 4. Structural Distance (Capitulation)
         ma_168 = btc_close.rolling(168, min_periods=24).mean()
         btc_ma_dist_168h = (btc_close / (ma_168 + 1e-12)) - 1.0
-        
+
         # 5. Energy (Squeeze Precursor)
         btc_vol = btc_df["volume"].astype(np.float64)
         vol_energy = btc_vol.rolling(24).mean() / (btc_vol.rolling(168).mean() + 1e-12) - 1.0

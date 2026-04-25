@@ -1,14 +1,15 @@
 from __future__ import annotations
 
 import os
-from typing import Any, Dict
+from collections.abc import Sequence
+from typing import Any, Protocol
 
 import optuna
 
 from config.opt_config import ENGINE_PARAM_SPACE_FUTURES, OPT_FUTURES_CONFIG
 
 
-def _suggest_one(trial: optuna.Trial, name: str, spec: Dict[str, Any]) -> Any:
+def _suggest_one(trial: optuna.Trial, name: str, spec: dict[str, Any]) -> Any:
     t = spec["type"]
     if t == "categorical":
         return trial.suggest_categorical(name, spec["choices"])
@@ -19,13 +20,13 @@ def _suggest_one(trial: optuna.Trial, name: str, spec: Dict[str, Any]) -> Any:
     raise ValueError(f"Unknown param type: {t}")
 
 
-def build_full_discovery_space_futures() -> Dict[str, Any]:
+def build_full_discovery_space_futures() -> dict[str, Any]:
     """Union of signal / regime / sizing plugin spaces + engine keys."""
     from src.domain.futures.regimes import FUTURES_REGIME_REGISTRY
     from src.domain.futures.signals import FUTURES_SIGNAL_REGISTRY
     from src.domain.futures.sizing import FUTURES_SIZING_REGISTRY
 
-    out: Dict[str, Any] = {
+    out: dict[str, Any] = {
         "SIGNAL_TYPE": {
             "type": "categorical",
             "choices": tuple(sorted(FUTURES_SIGNAL_REGISTRY.keys())),
@@ -40,23 +41,23 @@ def build_full_discovery_space_futures() -> Dict[str, Any]:
         },
     }
     for name in sorted(FUTURES_SIGNAL_REGISTRY.keys()):
-        inst = FUTURES_SIGNAL_REGISTRY[name]
-        for k, spec in inst.param_space.items():
+        sig_inst = FUTURES_SIGNAL_REGISTRY[name]
+        for k, spec in sig_inst.param_space.items():
             out.setdefault(k, dict(spec))
     for name in sorted(FUTURES_REGIME_REGISTRY.keys()):
-        inst = FUTURES_REGIME_REGISTRY[name]
-        for k, spec in inst.param_space.items():
+        reg_inst = FUTURES_REGIME_REGISTRY[name]
+        for k, spec in reg_inst.param_space.items():
             out.setdefault(k, dict(spec))
     for name in sorted(FUTURES_SIZING_REGISTRY.keys()):
-        inst = FUTURES_SIZING_REGISTRY[name]
-        for k, spec in inst.param_space.items():
+        siz_inst = FUTURES_SIZING_REGISTRY[name]
+        for k, spec in siz_inst.param_space.items():
             out.setdefault(k, dict(spec))
     for k, spec in ENGINE_PARAM_SPACE_FUTURES.items():
         out[k] = dict(spec)
     return out
 
 
-def build_combined_param_space_futures(signal: str, regime: str, sizing: str) -> Dict[str, Any]:
+def build_combined_param_space_futures(signal: str, regime: str, sizing: str) -> dict[str, Any]:
     """Locked combo space for combination screener / Phase C deep search."""
     from src.domain.futures.regimes import FUTURES_REGIME_REGISTRY
     from src.domain.futures.signals import FUTURES_SIGNAL_REGISTRY
@@ -66,7 +67,7 @@ def build_combined_param_space_futures(signal: str, regime: str, sizing: str) ->
     rt = str(regime).upper()
     sm = str(sizing).lower()
 
-    space: Dict[str, Any] = {}
+    space: dict[str, Any] = {}
     space["SIGNAL_TYPE"] = {"type": "categorical", "choices": (st,)}
     space["REGIME_TYPE"] = {"type": "categorical", "choices": (rt,)}
     space["SIZING_METHOD"] = {"type": "categorical", "choices": (sm,)}
@@ -85,16 +86,13 @@ def build_combined_param_space_futures(signal: str, regime: str, sizing: str) ->
     return space
 
 
-from typing import Protocol, Sequence
-
-
 class _Stage1ComboLike(Protocol):
     signal: str
     regime: str
     sizing: str
 
 
-def build_multi_combo_param_space_futures(tops: Sequence[_Stage1ComboLike]) -> Dict[str, Any]:
+def build_multi_combo_param_space_futures(tops: Sequence[_Stage1ComboLike]) -> dict[str, Any]:
     """Union param space for multiple Stage1 combos — allows TPE to choose signal/regime/sizing."""
     from src.domain.futures.regimes import FUTURES_REGIME_REGISTRY
     from src.domain.futures.signals import FUTURES_SIGNAL_REGISTRY
@@ -109,7 +107,7 @@ def build_multi_combo_param_space_futures(tops: Sequence[_Stage1ComboLike]) -> D
     all_regs = list(dict.fromkeys(t.regime for t in tops))
     all_sizs = list(dict.fromkeys(t.sizing for t in tops))
 
-    space: Dict[str, Any] = {
+    space: dict[str, Any] = {
         "SIGNAL_TYPE": {"type": "categorical", "choices": tuple(all_sigs)},
         "REGIME_TYPE": {"type": "categorical", "choices": tuple(all_regs)},
         "SIZING_METHOD": {"type": "categorical", "choices": tuple(all_sizs)},
@@ -128,9 +126,9 @@ def build_multi_combo_param_space_futures(tops: Sequence[_Stage1ComboLike]) -> D
     return space
 
 
-def suggest_params_futures(trial: optuna.Trial, space: Dict[str, Any], tf: str) -> Dict[str, Any]:
+def suggest_params_futures(trial: optuna.Trial, space: dict[str, Any], tf: str) -> dict[str, Any]:
     """Flat search space; regime branch selects which params affect signals at runtime."""
-    params: Dict[str, Any] = {"TIMEFRAME": tf}
+    params: dict[str, Any] = {"TIMEFRAME": tf}
     for name, spec in space.items():
         if name.startswith("_"):
             continue  # Skip metadata (Institutional Quant Phase C results)

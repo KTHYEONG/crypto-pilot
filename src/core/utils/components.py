@@ -5,9 +5,9 @@ import sqlite3
 import sys
 import threading
 import time
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 # Import configuration
 try:
@@ -26,16 +26,17 @@ logger = logging.getLogger(__name__)
 # Trade History DB Manager
 # ============================================================
 class TradeHistoryDB:
-    """거래 기록 영속화 매니저"""
+    """거래 기록 영속화 매니저."""
 
-    def __init__(self, db_path: Path):
+    def __init__(self, db_path: Path) -> None:
+        """DB 매니저 초기화 및 테이블 생성."""
         self.db_path = db_path
-        self._conn: Optional[sqlite3.Connection] = None
+        self._conn: sqlite3.Connection | None = None
         self._lock = threading.Lock()
         self._init_db()
 
-    def _init_db(self):
-        """거래 기록 테이블 생성 (WAL 모드 활성화)"""
+    def _init_db(self) -> None:
+        """거래 기록 테이블 생성 (WAL 모드 활성화)."""
         with sqlite3.connect(self.db_path, timeout=30.0) as conn:
             # WAL 모드 활성화 (동시 읽기/쓰기 성능 향상)
             conn.execute("PRAGMA journal_mode=WAL")
@@ -86,9 +87,9 @@ class TradeHistoryDB:
         pnl: float | None = None,
         pnl_pct: float | None = None,
         reason: str | None = None,
-        params: dict | None = None,
-    ):
-        """거래 기록 저장 (동시 접근 대응)"""
+        params: dict[str, Any] | None = None,
+    ) -> None:
+        """거래 기록 저장 (동시 접근 대응)."""
         max_retries = 3
         for attempt in range(max_retries):
             try:
@@ -102,7 +103,7 @@ class TradeHistoryDB:
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                         (
-                            datetime.now(timezone.utc).isoformat(),
+                            datetime.now(UTC).isoformat(),
                             symbol,
                             side,
                             action,
@@ -123,7 +124,8 @@ class TradeHistoryDB:
                     if attempt < max_retries - 1:
                         wait_time = 0.5 * (2**attempt)  # Exponential backoff
                         logger.warning(
-                            f"⚠️ DB locked, retrying in {wait_time}s... ({attempt + 1}/{max_retries})"
+                            f"⚠️ DB locked, retrying in {wait_time}s... "
+                            f"({attempt + 1}/{max_retries})"
                         )
                         time.sleep(wait_time)
                     else:
@@ -135,8 +137,10 @@ class TradeHistoryDB:
                 logger.error(f"❌ Failed to record trade: {e}")
                 break
 
-    def get_recent_trades(self, symbol: str | None = None, limit: int = 100) -> list:
-        """최근 거래 조회"""
+    def get_recent_trades(
+        self, symbol: str | None = None, limit: int = 100
+    ) -> list[dict[str, Any]]:
+        """최근 거래 조회."""
         with self._lock:
             conn = self._get_conn()
             conn.row_factory = sqlite3.Row
@@ -156,20 +160,24 @@ class TradeHistoryDB:
 # Health Check Manager
 # ============================================================
 class HealthCheckManager:
-    """봇 생존 확인 매니저"""
+    """봇 생존 확인 매니저."""
 
-    def __init__(self, heartbeat_file: Path):
+    def __init__(self, heartbeat_file: Path) -> None:
+        """하트비트 매니저 초기화."""
         self.heartbeat_file = heartbeat_file
-        self.start_time = datetime.now(timezone.utc)
+        self.start_time = datetime.now(UTC)
         self.loop_count = 0
-        self.last_error = None
+        self.last_error: Exception | None = None
 
     def update_heartbeat(
-        self, status: str = "running", positions: dict | None = None, extra: dict | None = None
-    ):
-        """하트비트 파일 업데이트"""
+        self,
+        status: str = "running",
+        positions: dict[str, Any] | None = None,
+        extra: dict[str, Any] | None = None,
+    ) -> None:
+        """하트비트 파일 업데이트."""
         self.loop_count += 1
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         heartbeat_data = {
             "status": status,
             "timestamp": now.isoformat(),
@@ -188,8 +196,8 @@ class HealthCheckManager:
         except Exception as e:
             logger.error(f"❌ Failed to update heartbeat: {e}")
 
-    def record_error(self, error: Exception):
-        """에러 기록"""
+    def record_error(self, error: Exception) -> None:
+        """에러 기록."""
         self.last_error = error
 
 
@@ -197,9 +205,9 @@ class HealthCheckManager:
 # Utility Functions
 # ============================================================
 def parse_balance(ret: Any) -> float:
-    """
-    BinanceClient.fetch_balance() 반환값 파싱
-    다양한 반환 형식 처리 (dict, tuple)
+    """BinanceClient.fetch_balance() 반환값 파싱.
+
+    다양한 반환 형식 처리 (dict, tuple).
     """
     usdt_free = 0.0
 
@@ -227,12 +235,11 @@ def parse_balance(ret: Any) -> float:
 
 
 def calculate_candle_wait_time(timeframe: str) -> int:
+    """다음 캔들 마감까지 대기 시간 계산 (초).
+
+    정확한 봉 마감 시점에 로직 실행.
     """
-    다음 캔들 마감까지 대기 시간 계산 (초)
-    정확한 봉 마감 시점에 로직 실행
-    """
-    from datetime import timezone
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     # 타임프레임별 분 단위 변환
     tf_minutes = 60  # default 1h

@@ -2,11 +2,12 @@ import json
 import logging
 import sys
 import time
-from datetime import datetime
+from collections.abc import Callable
+from datetime import UTC, datetime
 from functools import wraps
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import Optional
+from typing import Any, TypeVar, cast
 
 # tenacity import check
 try:
@@ -40,25 +41,29 @@ from config.settings import (
     LOG_MAX_BYTES,
 )
 
+F = TypeVar("F", bound=Callable[..., Any])
+
 
 # ============================================================
 # Structured JSON Logger
 # ============================================================
-class FlushingStreamHandler(logging.StreamHandler):
+class FlushingStreamHandler(logging.StreamHandler[Any]):
     """StreamHandler that flushes after every emit (Docker/non-TTY visibility)."""
 
     def emit(self, record: logging.LogRecord) -> None:
+        """로그 기록 후 명시적 플러시."""
         super().emit(record)
         if self.stream and hasattr(self.stream, "flush"):
             self.stream.flush()
 
 
 class JSONFormatter(logging.Formatter):
-    """JSON 형식 로그 포맷터 (외부 모니터링 연동용)"""
+    """JSON 형식 로그 포맷터 (외부 모니터링 연동용)."""
 
-    def format(self, record):
+    def format(self, record: logging.LogRecord) -> str:
+        """로그 레코드를 JSON 문자열로 변환."""
         log_obj = {
-            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "timestamp": datetime.now(UTC).isoformat(),
             "level": record.levelname,
             "logger": record.name,
             "message": record.getMessage(),
@@ -72,22 +77,25 @@ class JSONFormatter(logging.Formatter):
 
 def setup_logger(
     name: str,
-    log_prefix: Optional[str] = None,
+    log_prefix: str | None = None,
     write_file: bool = True,
 ) -> logging.Logger:
-    """
-    통합 로거 설정 (동적 로그 파일명)
+    """통합 로거 설정 (동적 로그 파일명).
 
     Args:
         name: 로거 이름 (예: "RealTraderFutures", "RealTraderSpot")
         log_prefix: 로그 파일 접두사 (None이면 name을 snake_case로 변환하여 사용)
         write_file: True이면 .jsonl 파일 핸들러를 추가함.
                     False이면 콘솔(StreamHandler)만 사용 — 최적화/검증 프로세스 전용.
+
+    Returns:
+        logging.Logger: 설정된 로거 객체.
+
     """
     import re
 
     logger = logging.getLogger(name)
-    
+
     # 이미 핸들러가 설정되어 있으면 중복 설정 방지 (레벨 초기화 방지)
     if logger.handlers:
         return logger
@@ -143,8 +151,8 @@ _internal_logger = setup_logger("CommonUtils", write_file=False)
 # ============================================================
 # Retry Decorator (API 재시도)
 # ============================================================
-def create_retry_decorator():
-    """tenacity 기반 재시도 데코레이터 생성 (설정값 사용)"""
+def create_retry_decorator() -> Any:
+    """Tenacity 기반 재시도 데코레이터 생성 (설정값 사용)."""
     if TENACITY_AVAILABLE:
         return retry(
             stop=stop_after_attempt(API_RETRY_ATTEMPTS),
@@ -156,10 +164,10 @@ def create_retry_decorator():
         )
     else:
         # Fallback: 단순 재시도 데코레이터 (tenacity 없을 때)
-        def fallback_retry(func):
+        def fallback_retry(func: F) -> F:
             @wraps(func)
-            def wrapper(*args, **kwargs):
-                last_error = None
+            def wrapper(*args: Any, **kwargs: Any) -> Any:
+                last_error: Exception | None = None
                 for attempt in range(API_RETRY_ATTEMPTS):
                     try:
                         return func(*args, **kwargs)
@@ -167,12 +175,15 @@ def create_retry_decorator():
                         last_error = e
                         wait_time = min(API_RETRY_WAIT_MIN * (2**attempt), API_RETRY_WAIT_MAX)
                         _internal_logger.warning(
-                            f"⚠️ Retry {attempt + 1}/{API_RETRY_ATTEMPTS}: {e}. Waiting {wait_time}s..."
+                            f"⚠️ Retry {attempt + 1}/{API_RETRY_ATTEMPTS}: {e}. "
+                            f"Waiting {wait_time}s..."
                         )
                         time.sleep(wait_time)
-                raise last_error
+                if last_error:
+                    raise last_error
+                raise RuntimeError("API_RETRY_ATTEMPTS must be > 0")
 
-            return wrapper
+            return cast(F, wrapper)
 
         return fallback_retry
 

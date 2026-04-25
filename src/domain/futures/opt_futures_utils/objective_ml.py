@@ -193,6 +193,8 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
                 "hmm_prob_crisis",
                 "hmm_modulator_long",
                 "hmm_modulator_short",
+                "hmm_modulator_base_long",
+                "btc_trend_vol_adj_24h",
             )
             for col in _xs_cols:
                 if col in raw_full.columns:
@@ -318,24 +320,121 @@ def _fixed_ml_phase_d_params() -> Dict[str, Any]:
     }
 
 
+def infer_kelly_shrinkage_bayesian_c_for_enqueue(
+    fk_target: float, *, shield: bool
+) -> tuple[float, float]:
+    """Grid BAYESIAN_C so fk from _base_engine_params matches deploy KELLY_FRACTION."""
+    fk_t = float(np.clip(float(fk_target), 0.05, 0.6))
+    ks_lo, ks_hi = (0.52, 1.02) if shield else (0.45, 1.20)
+    bc_lo, bc_hi = (5.0, 14.0) if shield else (5.0, 15.0)
+    best_err = 1e9
+    best_bc, best_ks = 10.0, float(np.clip(fk_t / (0.35 * (1.0 + 0.1)), ks_lo, ks_hi))
+    for i in range(2001):
+        bc = bc_lo + (bc_hi - bc_lo) * (i / 2000.0)
+        denom = 0.35 * (1.0 + 1.0 / bc)
+        if denom < 1e-12:
+            continue
+        raw_ks = fk_t / denom
+        ks = float(np.clip(raw_ks, ks_lo, ks_hi))
+        pred = float(np.clip(0.35 * ks * (1.0 + 1.0 / bc), 0.05, 0.6))
+        err = abs(pred - fk_t)
+        if err < best_err:
+            best_err = err
+            best_bc, best_ks = float(bc), ks
+    return best_bc, best_ks
+
+
+def build_phase_d_enqueue_params_from_deploy_json(
+    deploy: dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    """Map deploy JSON to Optuna enqueue_trial param dict (single-objective Phase-D)."""
+    shield = bool(OPT_FUTURES_CONFIG.get("FUTURES_TIER1_SHIELD_MODE", False))
+    fk_raw = deploy.get("KELLY_FRACTION", deploy.get("FK_FRACTION"))
+    if fk_raw is None:
+        return None
+    fixed = _fixed_ml_phase_d_params()
+    try:
+        bc, ks = infer_kelly_shrinkage_bayesian_c_for_enqueue(float(fk_raw), shield=shield)
+        reb = int(deploy["REBALANCE_BARS"])
+        k_long = int(deploy["K_LONG"])
+        k_short = int(deploy["K_SHORT"])
+        crisis = float(deploy.get("CRISIS_GAMMA", deploy.get("CRISIS_GATE_PROB", 1.3)))
+        atr_p = int(deploy["ATR_PERIOD"])
+        l_atr = float(deploy["LONG_ATR_MULT"])
+        l_trail = float(deploy["LONG_TRAIL_MULT"])
+        s_atr = float(deploy["SHORT_ATR_MULT"])
+        s_tp = float(deploy["SHORT_TP_MULT"])
+        s_trail = float(deploy["SHORT_TRAIL_MULT"])
+        l_scale = float(deploy["LONG_SCALE_ATR_MULT"])
+        max_exp = float(deploy.get("MAX_EXPOSURE_PER_COIN", 1.0))
+        dd_thr = float(deploy["DD_SCALING_THRESHOLD"])
+        pfk_win = int(deploy.get("PFK_WINDOW", 40))
+        stress = float(deploy.get("STRESS_VOL_Z", 2.5))
+        rpt = float(deploy.get("RISK_PER_TRADE", fixed["RISK_PER_TRADE"]))
+    except (KeyError, TypeError, ValueError):
+        return None
+    if rpt != float(fixed["RISK_PER_TRADE"]):
+        return None
+    if pfk_win not in (40, 60):
+        return None
+    return {
+        "BAYESIAN_C": bc,
+        "KELLY_SHRINKAGE": ks,
+        "K_LONG": k_long,
+        "K_SHORT": k_short,
+        "REBALANCE_BARS": reb,
+        "CRISIS_GAMMA": crisis,
+        "ATR_PERIOD": atr_p,
+        "LONG_ATR_MULT": l_atr,
+        "LONG_TRAIL_MULT": l_trail,
+        "SHORT_ATR_MULT": s_atr,
+        "SHORT_TP_MULT": s_tp,
+        "SHORT_TRAIL_MULT": s_trail,
+        "LONG_SCALE_ATR_MULT": l_scale,
+        "MAX_EXP_PER_COIN": max_exp,
+        "DD_SCALING_THRESHOLD": dd_thr,
+        "PFK_WINDOW": pfk_win,
+        "STRESS_VOL_Z": stress,
+        "RISK_PER_TRADE": rpt,
+    }
+
+
 def _suggest_ml_phase_d(trial: optuna.Trial) -> Dict[str, Any]:
     # Session 37: v42 정합 search space (KELLY [0.45,1.20], DD [0.15,0.25]).
-    # Why: v42 implied ks=0.96, DD=0.20. 기존 범위 [0.25,0.50]/[0.10,0.14]는 champion 배제.
-    bayes_c = float(trial.suggest_float("BAYESIAN_C", 5.0, 15.0, log=True))
-    kelly_s = float(trial.suggest_float("KELLY_SHRINKAGE", 0.45, 1.20))
-    k_long = int(trial.suggest_int("K_LONG", 1, 1))
-    k_short = int(trial.suggest_int("K_SHORT", 1, 1))
-    reb = int(trial.suggest_categorical("REBALANCE_BARS", [1, 2, 3]))
-    crisis = float(trial.suggest_float("CRISIS_GAMMA", 1.1, 1.5, step=0.1))
-    atr_p = int(trial.suggest_int("ATR_PERIOD", 26, 40, step=2))
-    l_atr = float(trial.suggest_float("LONG_ATR_MULT", 2.0, 3.0, step=0.25))
-    l_trail = float(trial.suggest_float("LONG_TRAIL_MULT", 2.5, 3.5, step=0.5))
-    s_atr = float(trial.suggest_float("SHORT_ATR_MULT", 1.75, 2.5, step=0.25))
-    s_tp = float(trial.suggest_float("SHORT_TP_MULT", 1.0, 2.0, step=0.5))
-    s_trail = float(trial.suggest_float("SHORT_TRAIL_MULT", 1.5, 2.5, step=0.5))
-    l_scale = float(trial.suggest_float("LONG_SCALE_ATR_MULT", 2.0, 3.0, step=0.5))
-    max_exp = float(trial.suggest_float("MAX_EXP_PER_COIN", 0.8, 1.0, step=0.1))
-    dd_thr = float(trial.suggest_float("DD_SCALING_THRESHOLD", 0.15, 0.25, step=0.01))
+    # Path A Shield: v42-anchored bands (tighter trail, capped KS) + DD early de-risk.
+    shield = bool(OPT_FUTURES_CONFIG.get("FUTURES_TIER1_SHIELD_MODE", False))
+    if shield:
+        bayes_c = float(trial.suggest_float("BAYESIAN_C", 5.0, 14.0, log=True))
+        kelly_s = float(trial.suggest_float("KELLY_SHRINKAGE", 0.52, 1.02))
+        k_long = int(trial.suggest_int("K_LONG", 1, 1))
+        k_short = int(trial.suggest_int("K_SHORT", 1, 1))
+        reb = int(trial.suggest_categorical("REBALANCE_BARS", [1, 2, 3]))
+        crisis = float(trial.suggest_float("CRISIS_GAMMA", 1.2, 1.5, step=0.05))
+        atr_p = int(trial.suggest_int("ATR_PERIOD", 26, 36, step=2))
+        l_atr = float(trial.suggest_float("LONG_ATR_MULT", 2.0, 2.75, step=0.25))
+        l_trail = float(trial.suggest_float("LONG_TRAIL_MULT", 2.5, 3.0, step=0.5))
+        s_atr = float(trial.suggest_float("SHORT_ATR_MULT", 1.75, 2.5, step=0.25))
+        s_tp = float(trial.suggest_float("SHORT_TP_MULT", 1.0, 1.5, step=0.5))
+        s_trail = float(trial.suggest_float("SHORT_TRAIL_MULT", 1.5, 2.0, step=0.5))
+        l_scale = float(trial.suggest_float("LONG_SCALE_ATR_MULT", 2.0, 2.5, step=0.5))
+        max_exp = float(trial.suggest_float("MAX_EXP_PER_COIN", 0.8, 1.0, step=0.1))
+        dd_thr = float(trial.suggest_float("DD_SCALING_THRESHOLD", 0.16, 0.24, step=0.01))
+    else:
+        bayes_c = float(trial.suggest_float("BAYESIAN_C", 5.0, 15.0, log=True))
+        kelly_s = float(trial.suggest_float("KELLY_SHRINKAGE", 0.45, 1.20))
+        k_long = int(trial.suggest_int("K_LONG", 1, 1))
+        k_short = int(trial.suggest_int("K_SHORT", 1, 1))
+        reb = int(trial.suggest_categorical("REBALANCE_BARS", [1, 2, 3]))
+        crisis = float(trial.suggest_float("CRISIS_GAMMA", 1.1, 1.5, step=0.05))
+        atr_p = int(trial.suggest_int("ATR_PERIOD", 26, 40, step=2))
+        l_atr = float(trial.suggest_float("LONG_ATR_MULT", 2.0, 3.0, step=0.25))
+        l_trail = float(trial.suggest_float("LONG_TRAIL_MULT", 2.5, 3.5, step=0.5))
+        s_atr = float(trial.suggest_float("SHORT_ATR_MULT", 1.75, 2.5, step=0.25))
+        s_tp = float(trial.suggest_float("SHORT_TP_MULT", 1.0, 2.0, step=0.5))
+        s_trail = float(trial.suggest_float("SHORT_TRAIL_MULT", 1.5, 2.5, step=0.5))
+        l_scale = float(trial.suggest_float("LONG_SCALE_ATR_MULT", 2.0, 3.0, step=0.5))
+        max_exp = float(trial.suggest_float("MAX_EXP_PER_COIN", 0.8, 1.0, step=0.1))
+        dd_thr = float(trial.suggest_float("DD_SCALING_THRESHOLD", 0.15, 0.25, step=0.01))
 
     fixed = _fixed_ml_phase_d_params()
     sizing_m = "profit_factor_kelly"
@@ -771,6 +870,10 @@ def objective_ml_phase_d(trial: optuna.Trial, ctx: MLPhaseDContext) -> float | T
         if worst_path_log_growth < 0.0:
             worst_path_penalty = abs(worst_path_log_growth) * 3.0
 
+        p10_tail_penalty = 0.0
+        if bool(cfg.get("FUTURES_TIER1_SHIELD_MODE", False)) and p10_log_growth < 0.0:
+            p10_tail_penalty = abs(p10_log_growth) * 2.0
+
         mean_sortino_cpcv = float(np.clip(np.mean(sortinos), -2.0, 2.0)) if sortinos else 0.0
 
         # growth_signal weight 0.50: P1 compliance (compound growth primary driver).
@@ -786,6 +889,7 @@ def objective_ml_phase_d(trial: optuna.Trial, ctx: MLPhaseDContext) -> float | T
             + exposure_floor_penalty
             + holdout_neg_penalty
             + worst_path_penalty
+            + p10_tail_penalty
         )
 
     trial.set_user_attr("ml_mean_log_growth_cpcv", mean_log_growth)
@@ -817,7 +921,11 @@ def objective_ml_phase_d(trial: optuna.Trial, ctx: MLPhaseDContext) -> float | T
             + is_penalty
             + exposure_floor_penalty
         )
-        obj2 = path_consistency_penalty + worst_path_penalty + holdout_neg_penalty
+        _p10_pen = 0.0
+        _shield = bool(OPT_FUTURES_CONFIG.get("FUTURES_TIER1_SHIELD_MODE", False))
+        if _shield and p10_log_growth < 0.0:
+            _p10_pen = abs(p10_log_growth) * 2.0
+        obj2 = path_consistency_penalty + worst_path_penalty + holdout_neg_penalty + _p10_pen
         return float(obj1), float(obj2)
 
     return float(obj)
@@ -884,10 +992,22 @@ def check_hard_gates_ml(
     pbo_val: float,
     dsr_val: float,
     is_precision: float,
+    *,
+    pbo_max_override: float | None = None,
+    dsr_min_override: float | None = None,
 ) -> bool:
     cfg = OPT_FUTURES_CONFIG
-    pbo_ok = pbo_val < float(cfg.get("FUTURES_PBO_MAX", 0.45))
-    dsr_floor = float(cfg.get("FUTURES_ML_GATE1_DSR_MIN", 0.20))
+    if pbo_max_override is not None:
+        _pbo_src = pbo_max_override
+    else:
+        _pbo_src = cfg.get("FUTURES_PBO_MAX", 0.45)
+    pbo_lim = float(_pbo_src)
+    pbo_ok = pbo_val < pbo_lim
+    if dsr_min_override is not None:
+        _dsr_src = dsr_min_override
+    else:
+        _dsr_src = cfg.get("FUTURES_ML_GATE1_DSR_MIN", 0.20)
+    dsr_floor = float(_dsr_src)
     dsr_ok = dsr_val >= dsr_floor
     wr_pct = float(oos_result.get("win_rate_pct", oos_result.get("win_rate", 0.0)))
     wr_frac = wr_pct / 100.0 if wr_pct > 1.0 else wr_pct
