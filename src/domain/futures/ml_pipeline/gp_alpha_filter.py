@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import logging
 import math
-from typing import Sequence, cast
+from collections.abc import Sequence
+from typing import cast
 
 import numpy as np
 import pandas as pd
@@ -13,12 +14,29 @@ _logger = logging.getLogger(__name__)
 
 
 def _norm_sf(x: float) -> float:
-    """Survival function 1 - Phi(x) for standard normal."""
+    """Calculate survival function 1 - Phi(x) for standard normal.
+
+    Args:
+        x: Input value.
+
+    Returns:
+        Survival function value.
+
+    """
     return 0.5 * math.erfc(x / math.sqrt(2.0))
 
 
 def _benjamini_hochberg_reject(p_values: Sequence[float], q: float) -> np.ndarray:
-    """Returns boolean mask: True where null rejected at FDR <= q (BH step-up)."""
+    """Determine boolean mask for rejected null hypotheses using Benjamini-Hochberg.
+
+    Args:
+        p_values: Sequence of p-values.
+        q: False Discovery Rate threshold.
+
+    Returns:
+        Boolean mask where True means null rejected.
+
+    """
     p = np.clip(np.asarray(p_values, dtype=np.float64), 1e-15, 1.0)
     m = int(p.size)
     if m == 0:
@@ -32,12 +50,23 @@ def _benjamini_hochberg_reject(p_values: Sequence[float], q: float) -> np.ndarra
         return np.zeros(m, dtype=bool)
     k = int(np.where(ok)[0].max())
     cutoff = float(sort_p[k])
-    out = np.asarray(p <= cutoff, dtype=bool)
-    return cast(np.ndarray, out)
+    out = p <= cutoff
+    return out
 
 
 def _newey_west_se(x: np.ndarray, lag: int | None = None) -> float:
-    """Newey–West HAC standard error of the mean (Bartlett kernel)."""
+    """Calculate Newey-West HAC standard error of the mean.
+
+    Uses Bartlett kernel.
+
+    Args:
+        x: Input data array.
+        lag: Number of lags to consider. Defaults to rule-of-thumb if None.
+
+    Returns:
+        Standard error of the mean.
+
+    """
     n = len(x)
     if n < 2:
         return float("nan")
@@ -55,6 +84,16 @@ def _newey_west_se(x: np.ndarray, lag: int | None = None) -> float:
 
 
 def _ewma_ic_stats(ic_arr: np.ndarray, half_life: float = 540.0) -> tuple[float, float]:
+    """Calculate EWMA mean and volatility of IC.
+
+    Args:
+        ic_arr: Array of IC values.
+        half_life: Decay half-life in bars.
+
+    Returns:
+        Tuple of (EWMA mean, EWMA volatility).
+
+    """
     n = int(ic_arr.size)
     lam = math.log(2.0) / max(half_life, 1e-6)
     w = np.exp(-lam * np.arange(n - 1, -1, -1, dtype=np.float64))
@@ -65,7 +104,17 @@ def _ewma_ic_stats(ic_arr: np.ndarray, half_life: float = 540.0) -> tuple[float,
 
 
 def _ic_half_life_bars(ic_arr: np.ndarray) -> float:
-    """AR(1) half-life in bars; 0 if non-stationary / ill-defined."""
+    """Calculate AR(1) half-life in bars.
+
+    Returns 0 if non-stationary or ill-defined.
+
+    Args:
+        ic_arr: Array of IC values.
+
+    Returns:
+        Half-life in bars.
+
+    """
     n = int(ic_arr.size)
     if n < 5:
         return 0.0
@@ -86,8 +135,20 @@ def _deflated_sharpe_threshold(
     kurt_excess: float,
     n_trials: int,
 ) -> bool:
-    """
-    Bailey & López de Prado (2014) style gate: SR minus expected max H0 SR under multiplicity.
+    """Apply DSR-style gate to filter components.
+
+    Bailey & López de Prado (2014) style gate: SR minus expected max H0 SR.
+
+    Args:
+        sharpe: Calculated Sharpe Ratio.
+        n: Sample size.
+        skew: Skewness of returns.
+        kurt_excess: Excess kurtosis of returns.
+        n_trials: Number of trials (multiplicity).
+
+    Returns:
+        True if the component passes the gate.
+
     """
     if n < 5 or not np.isfinite(sharpe):
         return False
@@ -101,6 +162,17 @@ def _deflated_sharpe_threshold(
 def _tail_decile_ic_series_fast(
     u_c: pd.DataFrame, u_tgt: pd.DataFrame, min_symbols: int = 8
 ) -> list[float]:
+    """Calculate IC series focusing on tail deciles.
+
+    Args:
+        u_c: Unstacked component values.
+        u_tgt: Unstacked target values.
+        min_symbols: Minimum symbols required per bar.
+
+    Returns:
+        List of tail IC values.
+
+    """
     valid_mask = u_c.notna() & u_tgt.notna()
     counts = valid_mask.sum(axis=1)
     mask_min = counts >= min_symbols
@@ -119,10 +191,21 @@ def _tail_decile_ic_series_fast(
     r_c = uc_tail.rank(axis=1)
     r_t = ut_tail.rank(axis=1)
     ic = r_c.corrwith(r_t, axis=1).dropna()
-    return ic.tolist()
+    return cast(list[float], ic.tolist())
 
 
 def _regime_consistency_ok_fast(is_sub: pd.DataFrame, col: str, ic_series: pd.Series) -> bool:
+    """Check if IC performance is consistent across different market regimes.
+
+    Args:
+        is_sub: In-sample panel data.
+        col: Component column name.
+        ic_series: Time series of cross-sectional IC.
+
+    Returns:
+        True if performance is consistent.
+
+    """
     if "__regime" not in is_sub.columns:
         return True
     regime_s = is_sub.groupby("datetime")["__regime"].first()
@@ -147,7 +230,20 @@ def _regime_consistency_ok_fast(is_sub: pd.DataFrame, col: str, ic_series: pd.Se
 def _symbol_ic_balance_ok(
     is_sub: pd.DataFrame, col: str, *, max_ratio: float, min_per_symbol: int = 40
 ) -> bool:
-    """Per tmp.md 4-E: penalize alpha driven by a single symbol (time-series Spearman IC dispersion)."""
+    """Penalize alpha driven by a single symbol.
+
+    Follows tmp.md 4-E guidelines for IC dispersion.
+
+    Args:
+        is_sub: In-sample panel data.
+        col: Component column name.
+        max_ratio: Maximum allowed dispersion ratio.
+        min_per_symbol: Minimum bars per symbol for inclusion.
+
+    Returns:
+        True if the symbol balance is acceptable.
+
+    """
     per: list[float] = []
     for _, g in is_sub.groupby(level="symbol", sort=False):
         if len(g) < min_per_symbol:
@@ -178,10 +274,26 @@ def filter_gp_alpha_columns(
     symbol_balance_max: float = 3.0,
     require_regime_gate: bool = True,
 ) -> tuple[pd.DataFrame, dict[str, float]]:
-    """
-    Zero-out GP alpha columns that fail DSR-style SR gate, BH-FDR, and practical IC gates.
+    """Zero-out GP alpha columns that fail various statistical and practical gates.
 
     Expects alpha_wide indexed like panel_df (MultiIndex datetime, symbol).
+
+    Args:
+        alpha_wide: Wide-form component dataframe.
+        panel_df: Input panel dataframe containing target.
+        is_end_date: Cutoff date for In-Sample data.
+        n_trials: Number of trials for DSR calculation.
+        fdr_q: FDR threshold for Benjamini-Hochberg.
+        alpha_cols: Subset of columns to filter.
+        use_newey_west: Whether to use HAC SE.
+        use_ewma_ic_stat: Whether to use EWMA stats for reported t-stat.
+        ewma_half_life: EWMA decay half-life.
+        symbol_balance_max: Maximum allowed symbol IC dispersion.
+        require_regime_gate: Whether to enforce consistency across regimes.
+
+    Returns:
+        Tuple of (filtered dataframe, metadata dictionary).
+
     """
     if use_ewma_ic_stat:
         _logger.debug("use_ewma_ic_stat=True: EWMA mean used for reported t-stat only.")
@@ -228,7 +340,7 @@ def filter_gp_alpha_columns(
     regime_ok: list[bool] = []
     sym_bal_ok: list[bool] = []
     neutralize_primary = False
-    
+
     # gp_alpha_00 진단용 상세 지표
     primary_diagnostic: dict[str, float] = {}
 
@@ -261,12 +373,12 @@ def filter_gp_alpha_columns(
         r_tgt = u_tgt.rank(axis=1)
         ic_series = r_c.corrwith(r_tgt, axis=1)
         ic_arr = ic_series[counts >= 3].dropna().to_numpy(dtype=np.float64)
-        
+
         n_ic = int(ic_arr.size)
         if n_ic < 10:
             _append_failed()
             continue
-            
+
         mu = float(np.mean(ic_arr))
         sd = float(np.std(ic_arr, ddof=1))
         mu_for_t = mu
@@ -302,6 +414,7 @@ def filter_gp_alpha_columns(
         tail_ok.append(bool(tail_mu > -0.05 or len(tails) < 5))
 
         if oos_time_set and u_tgt_oos is not None:
+            oos_sub = is_sub[is_sub.index.get_level_values("datetime").isin(oos_time_set)]
             u_c_oos = oos_sub[c].unstack(level="symbol")
             v_mask_oos = u_c_oos.notna() & u_tgt_oos.notna()
             c_oos = v_mask_oos.sum(axis=1)
@@ -312,22 +425,22 @@ def filter_gp_alpha_columns(
             mu_oos = float(np.mean(oos_arr)) if oos_arr.size > 0 else mu
         else:
             mu_oos = mu
-            
+
         # [OOS Blend] weighted average instead of strict ratio
         blend = 0.7 * mu_oos + 0.3 * mu
         if is_fast_track:
             oos_gate = True
         elif mu > 1e-6:
-            # proposed: blend > 0.02
-            oos_gate = bool(blend > 0.015) 
+            # proposed: blend > 0.015
+            oos_gate = bool(blend > 0.015)
         else:
             oos_gate = True
         oos_ok.append(oos_gate)
-            
+
         if c == "gp_alpha_00":
             if not is_fast_track and mu > 1e-6 and mu_oos < 0.45 * mu:
                 neutralize_primary = True
-            
+
             # Diagnostic for gp_alpha_00
             primary_diagnostic["is_mu"] = mu
             primary_diagnostic["oos_mu"] = mu_oos
@@ -339,7 +452,7 @@ def filter_gp_alpha_columns(
             regime_ok.append(_regime_consistency_ok_fast(is_sub, c, ic_series))
         else:
             regime_ok.append(True)
-            
+
         # Symbol balance check and store for diagnostic if primary
         bal_ratio = 0.0
         per: list[float] = []
@@ -348,12 +461,12 @@ def filter_gp_alpha_columns(
                 v = float(g[c].corr(g["target"], method="spearman"))
                 if math.isfinite(v):
                     per.append(v)
-        arr = np.asarray(per, dtype=np.float64)
-        if arr.size >= 3:
-            m_bal = float(np.mean(arr))
-            s_bal = float(np.std(arr, ddof=1))
+        arr_bal = np.asarray(per, dtype=np.float64)
+        if arr_bal.size >= 3:
+            m_bal = float(np.mean(arr_bal))
+            s_bal = float(np.std(arr_bal, ddof=1))
             bal_ratio = s_bal / (abs(m_bal) + 1e-9)
-        
+
         if c == "gp_alpha_00":
             primary_diagnostic["sym_dispersion"] = bal_ratio
 
@@ -368,7 +481,7 @@ def filter_gp_alpha_columns(
 
     # 상세 진단을 위한 카운터
     f_fdr, f_dsr, f_hl, f_tail, f_oos, f_reg, f_bal = 0, 0, 0, 0, 0, 0, 0
-    
+
     for i, c in enumerate(cols):
         # 개별 필터 결과 기록
         is_fdr_ok = bool(reject[i])
@@ -379,9 +492,16 @@ def filter_gp_alpha_columns(
         is_reg_ok = regime_ok[i]
         is_bal_ok = sym_bal_ok[i]
 
-        ok = (is_fdr_ok and is_dsr_ok and is_hl_ok and is_tail_ok 
-              and is_oos_ok and is_reg_ok and is_bal_ok)
-        
+        ok = (
+            is_fdr_ok
+            and is_dsr_ok
+            and is_hl_ok
+            and is_tail_ok
+            and is_oos_ok
+            and is_reg_ok
+            and is_bal_ok
+        )
+
         if ok:
             n_surv += 1
         else:
@@ -416,8 +536,8 @@ def filter_gp_alpha_columns(
     }
 
     # gp_alpha_00(Primary)의 상세 지표를 meta에 병합
-    for k, v in primary_diagnostic.items():
-        meta[f"primary_{k}"] = float(v)
-    
+    for k_diag, v_diag in primary_diagnostic.items():
+        meta[f"primary_{k_diag}"] = float(v_diag)
+
     _logger.info("GP alpha FDR+DSR+IC gates: %d / %d columns survive.", n_surv, len(cols))
     return out, meta

@@ -115,7 +115,12 @@ def _calculate_ordered_probs_numba(
 
 
 def _robust_fit_scale(X: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Median / MAD scaling (per column)."""
+    """Perform robust scaling using Median and MAD.
+    
+    Returns:
+        tuple: (scaled_matrix, median, mad)
+
+    """
     med = np.asarray(np.median(X, axis=0), dtype=np.float64)
     mad = np.asarray(np.median(np.abs(X - med), axis=0) * 1.4826 + 1e-12, dtype=np.float64)
     Xs = np.asarray((X - med) / mad, dtype=np.float64)
@@ -124,6 +129,7 @@ def _robust_fit_scale(X: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray
 
 
 def _robust_transform(X: np.ndarray, med: np.ndarray, mad: np.ndarray) -> np.ndarray:
+    """Apply robust scaling to new data using pre-computed median and MAD."""
     mad_safe = np.asarray(np.where(mad < 1e-12, 1.0, mad), dtype=np.float64)
     out = np.asarray((X - med) / mad_safe, dtype=np.float64)
     out = np.clip(out, -10.0, 10.0)  # [FIX] Prevent FP underflow
@@ -131,6 +137,7 @@ def _robust_transform(X: np.ndarray, med: np.ndarray, mad: np.ndarray) -> np.nda
 
 
 def _sticky_transmat_prior(n_states: int, self_p: float = 0.9) -> np.ndarray:
+    """Create a transition matrix prior with high self-transition probability."""
     off = (1.0 - self_p) / max(n_states - 1, 1)
     t_mat: np.ndarray = np.full((n_states, n_states), off, dtype=np.float64)
     np.fill_diagonal(t_mat, self_p)
@@ -141,6 +148,7 @@ def _sticky_transmat_prior(n_states: int, self_p: float = 0.9) -> np.ndarray:
 def _blend_transition(
     T_fit: np.ndarray, n_states: int, alpha: float, self_p: float = 0.9
 ) -> np.ndarray:
+    """Blend fitted transition matrix with a sticky prior."""
     T_prior = _sticky_transmat_prior(n_states, self_p=self_p)
     T_fit_safe = np.nan_to_num(T_fit, nan=1.0 / n_states)
     T_new = np.asarray((1.0 - alpha) * T_fit_safe + alpha * T_prior, dtype=np.float64)
@@ -195,6 +203,7 @@ def _raw_posterior_to_semantic(
 
 
 def _regime_entropy(p: np.ndarray) -> float:
+    """Calculate Shannon entropy of regime probabilities."""
     p = np.clip(p, 1e-12, 1.0)
     return float(-np.sum(p * np.log(p)))
 
@@ -208,6 +217,7 @@ def _load_or_build_state_labels(
     X_ref_scaled: np.ndarray,
     k: int,
 ) -> dict[int, str]:
+    """Load semantic labels from disk or build them if missing/invalid."""
     if label_path.exists():
         try:
             with open(label_path, "rb") as f:
@@ -286,6 +296,12 @@ def _centroid_label_drift_warn(
 
 @dataclass
 class HMMStateInferrer:
+    """Infers market regimes using Gaussian Hidden Markov Models.
+    
+    Provides both systemic (market-wide) and per-symbol regime detection
+    with stable semantic labels (crisis, bear_trend, bull_trend, chop).
+    """
+
     n_states: int = 4
     max_states: int = 4
     covariance_type: str = "diag"
@@ -302,9 +318,7 @@ class HMMStateInferrer:
         symbol: str = "Market",
         tf: str = "1h",
     ) -> pd.DataFrame:
-        """
-        Expanding-window systemic HMM with stable semantic posteriors.
-        """
+        """Expanding-window systemic HMM with stable semantic posteriors."""
         _ = returns_ser  # GP-independent; ordering uses centroid labels only.
 
         k_cfg = int(OPT_FUTURES_CONFIG.get("FUTURES_HMM_K_STATES", self.n_states))
@@ -721,6 +735,7 @@ class HMMStateInferrer:
         return out
 
     def _zeros_semantic(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Return a DataFrame of uniform semantic probabilities."""
         u = 1.0 / float(len(_SEMANTIC_ORDER))
         out = pd.DataFrame(
             np.full((len(df), len(_SEMANTIC_ORDER)), u),
@@ -733,6 +748,7 @@ class HMMStateInferrer:
         return out
 
     def _zeros(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Return a DataFrame of uniform numeric probabilities."""
         k = int(self.n_states)
         cols = [f"hmm_prob_{i}" for i in range(k)]
         return pd.DataFrame(
