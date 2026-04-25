@@ -1,6 +1,4 @@
-"""
-ML pipeline execution orchestration for Cross-Sectional Ranking Portfolio.
-"""
+"""ML pipeline execution orchestration for Cross-Sectional Ranking Portfolio."""
 
 from __future__ import annotations
 
@@ -115,10 +113,8 @@ def _is_kelly_per_semantic_state(
     is_mask: np.ndarray,
     n_states: int,
     cols: list[str],
-) -> tuple[np.ndarray, np.ndarray]:
-    """
-    James-Stein shrunk Kelly on global variance, plus soft Isotonic blend (tmp v4).
-    """
+    ) -> tuple[np.ndarray, np.ndarray]:
+    """James-Stein shrunk Kelly on global variance, plus soft Isotonic blend (tmp v4)."""
     kelly_long: np.ndarray = np.zeros(n_states, dtype=np.float64)
     kelly_short: np.ndarray = np.zeros(n_states, dtype=np.float64)
     state_hard = np.argmax(p_mat, axis=1).astype(np.int64)
@@ -201,17 +197,22 @@ def _hmm_modulator_kelly_values(
     btc_df: pd.DataFrame | None,
     shrink: float,
     crisis_thr: float,
+    market_hmm_feats: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
-    """
-    [REFACTORED] Posterior-weighted asymmetric modulators (Long/Short).
-    Returns DataFrame with columns ['hmm_modulator_long', 'hmm_modulator_short'].
+    """[REFACTORED] Posterior-weighted asymmetric modulators (Long/Short).
+
+    Returns DataFrame with columns ['hmm_modulator_long', 'hmm_modulator_short',
+    'hmm_modulator_base_long', 'btc_trend_vol_adj_24h'].
+    hmm_modulator_base_long = pre-crisis-kill modulator (for probe replay).
     """
     cols = _sorted_hmm_prob_columns(market_probs)
     n = len(market_probs)
     if not cols or btc_df is None or len(btc_df) < 80:
         return pd.DataFrame({
             "hmm_modulator_long": np.full(n, 1.0, dtype=np.float64),
-            "hmm_modulator_short": np.full(n, 1.0, dtype=np.float64)
+            "hmm_modulator_short": np.full(n, 1.0, dtype=np.float64),
+            "hmm_modulator_base_long": np.full(n, 1.0, dtype=np.float64),
+            "btc_trend_vol_adj_24h": np.zeros(n, dtype=np.float64),
         })
 
     k_states = len(cols)
@@ -258,6 +259,9 @@ def _hmm_modulator_kelly_values(
     mod_long = np.where(p_chop > 0.4, np.minimum(mod_long, 0.8), mod_long)
     mod_short = np.where(p_chop > 0.4, np.minimum(mod_short, 0.8), mod_short)
 
+    # Capture pre-kill state for probe replay (before crisis suppression)
+    mod_long_base: np.ndarray = mod_long.copy()
+
     # Apply Crisis Kill-Switch (Safety First)
     if "hmm_prob_crisis" in market_probs.columns:
         pc = p_crisis
@@ -266,9 +270,31 @@ def _hmm_modulator_kelly_values(
             pc > float(crisis_thr), np.minimum(mod_short, 1.1), mod_short
         )
 
+    # RECOVERY Override: crisis label + positive 24h trend → partial lift
+    # Activated only when CRISIS_RECOVERY_TREND_THR < 1e8 in OPT_FUTURES_CONFIG.
+    trend_24h: np.ndarray = np.zeros(n, dtype=np.float64)
+    if market_hmm_feats is not None and "btc_trend_vol_adj_24h" in market_hmm_feats.columns:
+        feat_tmp = market_hmm_feats[["btc_trend_vol_adj_24h"]].copy()
+        feat_tmp.index = pd.to_datetime(feat_tmp.index, utc=True)
+        feat_tmp = feat_tmp.reset_index()
+        idx_col = str(feat_tmp.columns[0])
+        if idx_col != "datetime":
+            feat_tmp = feat_tmp.rename(columns={idx_col: "datetime"})
+        feat_tmp["datetime"] = pd.to_datetime(feat_tmp["datetime"], utc=True)
+        merged_rec = merged[["datetime"]].merge(feat_tmp, on="datetime", how="left")
+        trend_24h = merged_rec["btc_trend_vol_adj_24h"].fillna(0.0).to_numpy(dtype=np.float64)
+
+    rec_thr = float(OPT_FUTURES_CONFIG.get("CRISIS_RECOVERY_TREND_THR", 1e9))
+    rec_floor = float(OPT_FUTURES_CONFIG.get("CRISIS_RECOVERY_FLOOR", 0.30))
+    if rec_thr < 1e8 and "hmm_prob_crisis" in market_probs.columns:
+        is_recovery = (p_crisis > float(crisis_thr)) & (trend_24h > rec_thr)
+        mod_long = np.where(is_recovery, np.maximum(mod_long, rec_floor), mod_long)
+
     return pd.DataFrame({
         "hmm_modulator_long": mod_long,
-        "hmm_modulator_short": mod_short
+        "hmm_modulator_short": mod_short,
+        "hmm_modulator_base_long": mod_long_base,
+        "btc_trend_vol_adj_24h": trend_24h,
     })
 
 
@@ -595,7 +621,7 @@ def _print_hmm_summary(
     btc_1h: pd.DataFrame | None,
     mode_label: str = "",
 ) -> None:
-    """Prints a detailed financial and semantic profile of the HMM states."""
+    """Print a detailed financial and semantic profile of the HMM states."""
     _logger.info("-" * 85)
     _logger.info(f" [HMM AUDIT] Semantic State Profile {mode_label}")
     _logger.info("-" * 85)
@@ -620,8 +646,10 @@ def _print_hmm_summary(
         df_eval = market_probs[["datetime", *cols]].copy()
         df_eval["dominant_state"] = df_eval[cols].idxmax(axis=1)
 
-        # Merge Modulator
-        df_eval = pd.merge(df_eval, hmm_modulator, on="datetime", how="left")
+        # Merge Modulator only (feat_tmp will supply btc_trend_vol_adj_24h to avoid _x/_y collision)
+        mod_cols = ["datetime", "hmm_modulator_long", "hmm_modulator_short"]
+        mod_tmp = hmm_modulator[[c for c in mod_cols if c in hmm_modulator.columns]]
+        df_eval = pd.merge(df_eval, mod_tmp, on="datetime", how="left")
 
         # Merge Features
         feat_tmp = market_hmm_feats.copy().reset_index()
@@ -734,6 +762,8 @@ def merge_ml_output_into_data_maps(
             "hmm_modulator",
             "hmm_modulator_long",
             "hmm_modulator_short",
+            "hmm_modulator_base_long",
+            "btc_trend_vol_adj_24h",
             "slot_rank_score",
             "ml_calib_prob",
             "ml_calib_prob_long",
@@ -827,8 +857,9 @@ def run_hmm_fusion_for_is_end(
     summary_mode_label: str = "",
     prefetch_label_start: str | None = None,
 ) -> MLPipelineOutput:
-    """
-    Walk-forward leg anchor: retrain systemic HMM with is_end_date cutoff; GP alpha_panel frozen.
+    """Walk-forward leg anchor: retrain systemic HMM with is_end_date cutoff.
+
+    GP alpha_panel frozen.
     When include_fusion=False (hmm_only preview), skips per-symbol fusion.
     """
     from src.domain.futures.ml_pipeline.feature_engineering import build_systemic_hmm_features
@@ -874,6 +905,7 @@ def run_hmm_fusion_for_is_end(
         btc_1h,
         float(cfg.get("FUTURES_HMM_KELLY_SHRINKAGE", 0.4)),
         float(cfg.get("FUTURES_HMM_CRISIS_THRESHOLD", 0.7)),
+        market_hmm_feats,
     )
     hmm_modulator["datetime"] = market_probs["datetime"]
 
@@ -964,9 +996,7 @@ def run_ml_pipeline_for_universe(
     gp_only: bool = False,
     hmm_only: bool = False,
 ) -> MLPipelineOutput:
-    """
-    [Phase 2] Universal Cross-Sectional ML Pipeline.
-    """
+    """[Phase 2] Universal Cross-Sectional ML Pipeline."""
     _logger.info("  --> Initiating Universal Cross-Sectional ML Pipeline")
 
 

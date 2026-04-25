@@ -15,10 +15,11 @@ class BinanceVisionDownloader:
     BASE_URL = "https://data.binance.vision/data/futures/um/daily/metrics"
 
     def __init__(self) -> None:
+        """Binance Vision 다운로더 초기화."""
         self.logger = logging.getLogger("BinanceVision")
 
     def fetch_daily_metrics(self, symbol: str, date: datetime) -> pd.DataFrame:
-        """특정 날짜의 metrics ZIP 파일을 다운로드하여 DataFrame으로 반환."""
+        """특정 날짜의 metrics ZIP 파일을 다운로드하여 DataFrame으로 반환합니다."""
         date_str = date.strftime("%Y-%m-%d")
         
         # [Fix] URL 인코딩 처리 (비 ASCII 문자 포함 시 오류 방지)
@@ -64,7 +65,7 @@ class BinanceVisionDownloader:
     def fetch_range_metrics(
         self, symbol: str, start_date: datetime, end_date: datetime
     ) -> pd.DataFrame:
-        """지정된 기간 전체의 metrics 수집 및 병합"""
+        """지정된 기간 전체의 metrics 수집 및 병합합니다."""
         all_dfs = []
         current = start_date
         while current <= end_date:

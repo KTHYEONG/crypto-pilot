@@ -11,6 +11,7 @@ import urllib.request
 from collections import deque
 from datetime import datetime
 from pathlib import Path
+from typing import Any, cast
 
 import ccxt
 import pandas as pd
@@ -27,19 +28,20 @@ from config.settings import API_READ_TIMEOUT
 
 
 class OrderRateLimiter:
-    """
-    바이낸스 주문 횟수 제한 방어 (토큰 버킷 알고리즘)
+    """바이낸스 주문 횟수 제한 방어 (토큰 버킷 알고리즘).
+
     10초당 최대 80 orders (안전 마진 20%)
     """
 
-    def __init__(self, max_orders_per_10s=80):
+    def __init__(self, max_orders_per_10s: int = 80) -> None:
+        """Initialize OrderRateLimiter."""
         self.max_orders = max_orders_per_10s
-        self.order_timestamps = deque(maxlen=max_orders_per_10s)
+        self.order_timestamps: deque[float] = deque(maxlen=max_orders_per_10s)
         self.logger = logging.getLogger(__name__)
         self._lock = threading.Lock()
 
     def can_place_order(self) -> bool:
-        """주문 가능 여부 확인"""
+        """주문 가능 여부 확인."""
         now = time.time()
         with self._lock:
             while self.order_timestamps and now - self.order_timestamps[0] > 10:
@@ -53,13 +55,13 @@ class OrderRateLimiter:
 
             return True
 
-    def record_order(self):
-        """주문 기록"""
+    def record_order(self) -> None:
+        """주문 기록."""
         with self._lock:
             self.order_timestamps.append(time.time())
 
-    def wait_if_needed(self):
-        """필요시 대기 (원자성 보장)"""
+    def wait_if_needed(self) -> None:
+        """필요시 대기 (원자성 보장)."""
         while True:
             now = time.time()
             wait_time = 0.0
@@ -80,18 +82,19 @@ class OrderRateLimiter:
 
 
 class OrderBookCache:
-    """
-    호가창 캐싱 (TTL 기반)
+    """호가창 캐싱 (TTL 기반).
+
     목적: 0.5초 내 중복 API 호출 방지 → 응답 속도 60% 개선
     """
 
-    def __init__(self, ttl_seconds=0.3):
-        self.cache = {}  # {symbol: (data, timestamp)}
+    def __init__(self, ttl_seconds: float = 0.3) -> None:
+        """Initialize OrderBookCache."""
+        self.cache: dict[str, tuple[Any, float]] = {}  # {symbol: (data, timestamp)}
         self.ttl = ttl_seconds
         self.logger = logging.getLogger(__name__)
 
-    def get(self, symbol):
-        """캐시된 호가창 조회 (스레드 안전성 강화)"""
+    def get(self, symbol: str) -> Any | None:
+        """캐시된 호가창 조회 (스레드 안전성 강화)."""
         cached_item = self.cache.get(symbol)
         if cached_item is not None:
             data, timestamp = cached_item
@@ -103,12 +106,12 @@ class OrderBookCache:
 
         return None
 
-    def set(self, symbol, data):
-        """호가창 캐싱"""
+    def set(self, symbol: str, data: Any) -> None:
+        """호가창 캐싱."""
         self.cache[symbol] = (data, time.time())
 
-    def invalidate(self, symbol=None):
-        """캐시 무효화"""
+    def invalidate(self, symbol: str | None = None) -> None:
+        """캐시 무효화."""
         if symbol:
             self.cache.pop(symbol, None)
         else:
@@ -116,7 +119,15 @@ class OrderBookCache:
 
 
 class BinanceClient:
-    def __init__(self, api_key=None, secret=None, shared_rate_limiter=None):
+    """Binance API Client for futures trading."""
+
+    def __init__(
+        self,
+        api_key: str | None = None,
+        secret: str | None = None,
+        shared_rate_limiter: OrderRateLimiter | None = None,
+    ) -> None:
+        """Initialize BinanceClient."""
         # 1. CCXT Exchange 인스턴스 생성
         # 타임아웃: 데이터 조회(READ) 기준으로 기본 설정 (20초)
         self.exchange = ccxt.binanceusdm(
@@ -146,7 +157,7 @@ class BinanceClient:
         # Order Book Cache (0.3초 TTL - API 호출 60% 감소)
         self.orderbook_cache = OrderBookCache(ttl_seconds=0.3)
 
-    def _ensure_markets_loaded(self):
+    def _ensure_markets_loaded(self) -> None:
         """Load market metadata once for precision/limits helpers."""
         try:
             if not getattr(self.exchange, "markets", None):
@@ -154,10 +165,8 @@ class BinanceClient:
         except Exception as e:
             self.logger.warning(f"⚠️ Failed to load markets metadata: {e}")
 
-    def get_symbol_constraints(self, symbol):
-        """
-        Return exchange precision/limit constraints for a symbol.
-        """
+    def get_symbol_constraints(self, symbol: str) -> dict[str, float]:
+        """Return exchange precision/limit constraints for a symbol."""
         self._ensure_markets_loaded()
         constraints = {
             "min_amount": 0.0,
@@ -188,13 +197,13 @@ class BinanceClient:
 
         return constraints
 
-    def get_price_tick_size(self, symbol, fallback=0.01):
+    def get_price_tick_size(self, symbol: str, fallback: float = 0.01) -> float:
         """Return symbol tick size if available, else fallback."""
         constraints = self.get_symbol_constraints(symbol)
         tick = float(constraints.get("tick_size") or 0.0)
         return tick if tick > 0 else float(fallback)
 
-    def round_price(self, symbol, price):
+    def round_price(self, symbol: str, price: float) -> float:
         """Round price to exchange precision."""
         try:
             rounded = self.exchange.price_to_precision(symbol, price)
@@ -203,7 +212,7 @@ class BinanceClient:
             tick = self.get_price_tick_size(symbol, fallback=0.01)
             return round(float(price) / tick) * tick
 
-    def round_amount(self, symbol, amount):
+    def round_amount(self, symbol: str, amount: float) -> float:
         """Round quantity to exchange precision."""
         try:
             rounded = self.exchange.amount_to_precision(symbol, amount)
@@ -211,9 +220,15 @@ class BinanceClient:
         except Exception:
             return float(amount)
 
-    def fetch_ohlcv(self, symbol, timeframe, start_date, end_date=None):
-        """
-        지정된 기간의 OHLCV 데이터를 수집합니다.
+    def fetch_ohlcv(
+        self,
+        symbol: str,
+        timeframe: str,
+        start_date: str | datetime,
+        end_date: str | datetime | None = None,
+    ) -> pd.DataFrame:
+        """지정된 기간의 OHLCV 데이터를 수집합니다.
+
         Binance API 제한(limit=1000)을 고려하여 반복 호출합니다.
         """
         self._ensure_markets_loaded()
@@ -251,7 +266,7 @@ class BinanceClient:
         else:
             end_timestamp = self.exchange.milliseconds()
 
-        all_ohlcv = []
+        all_ohlcv: list[list[float]] = []
 
         self.logger.info(f"Fetching {symbol} {timeframe} data from {start_date} to {end_date}...")
 
@@ -280,7 +295,7 @@ class BinanceClient:
                     all_ohlcv.extend(ohlcv)
 
                     last_timestamp = ohlcv[-1][0]
-                    new_since = last_timestamp + 1
+                    new_since = int(last_timestamp) + 1
                     if new_since <= since:
                         self.logger.warning(
                             "Timestamp not advancing (%d -> %d). Breaking.",
@@ -334,9 +349,7 @@ class BinanceClient:
         start_date: str | datetime,
         end_date: str | datetime | None = None,
     ) -> pd.DataFrame:
-        """
-        Fetch OHLCV plus taker buy base/quote volume from Binance /fapi/v1/klines.
-        """
+        """Fetch OHLCV plus taker buy base/quote volume from Binance /fapi/v1/klines."""
         limit = 1000
         base_url = "https://fapi.binance.com/fapi/v1/klines"
         timeout_sec = API_READ_TIMEOUT
@@ -491,7 +504,7 @@ class BinanceClient:
         df = df[df["timestamp"] <= end_timestamp].copy()
         return df
 
-    def fetch_recent_ohlcv(self, symbol, timeframe, limit=3):
+    def fetch_recent_ohlcv(self, symbol: str, timeframe: str, limit: int = 3) -> pd.DataFrame:
         """Fetch small recent OHLCV window for live signal timing."""
         try:
             rows = self.exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
@@ -506,11 +519,11 @@ class BinanceClient:
             self.logger.error(f"Error fetching recent OHLCV for {symbol} {timeframe}: {e}")
             raise
 
-    def get_market_price(self, symbol):
-        """현재 시장가 조회 (캐시 적용)"""
+    def get_market_price(self, symbol: str) -> float | None:
+        """현재 시장가 조회 (캐시 적용)."""
         cached_price = self.orderbook_cache.get(f"{symbol}_ticker")
         if cached_price is not None:
-            return cached_price
+            return float(cached_price)
 
         try:
             ticker = self.exchange.fetch_ticker(symbol)
@@ -518,14 +531,14 @@ class BinanceClient:
             if price is None:
                 self.logger.warning("Ticker 'last' is None for %s", symbol)
                 return None
-            price = float(price)
-            self.orderbook_cache.set(f"{symbol}_ticker", price)
-            return price
+            price_val = float(price)
+            self.orderbook_cache.set(f"{symbol}_ticker", price_val)
+            return price_val
         except Exception as e:
             self.logger.error(f"Error fetching ticker: {e}")
             return None
 
-    def fetch_server_time_ms(self):
+    def fetch_server_time_ms(self) -> int | None:
         """Exchange server time in milliseconds."""
         try:
             server_ms = self.exchange.fetch_time()
@@ -541,9 +554,7 @@ class BinanceClient:
         start_date: str | datetime,
         end_date: str | datetime | None = None,
     ) -> pd.DataFrame:
-        """
-        Fetch funding rate history from Binance GET /fapi/v1/fundingRate.
-        """
+        """Fetch funding rate history from Binance GET /fapi/v1/fundingRate."""
         base_url = "https://fapi.binance.com/fapi/v1/fundingRate"
         timeout_sec = API_READ_TIMEOUT
         limit = 500
@@ -648,17 +659,19 @@ class BinanceClient:
         )
         return df
 
-    def fetch_balance(self):
-        """USDT 선물 지갑 잔고 조회"""
+    def fetch_balance(self) -> tuple[float, float]:
+        """USDT 선물 지갑 잔고 조회."""
         try:
             balance = self.exchange.fetch_balance()
-            return balance["total"]["USDT"], balance["free"]["USDT"]
+            total_bal: float = float(balance["total"]["USDT"])
+            free_bal: float = float(balance["free"]["USDT"])
+            return total_bal, free_bal
         except Exception as e:
             self.logger.error(f"Error fetching balance: {e}")
             raise RuntimeError("fetch_balance_failed") from e
 
-    def set_leverage(self, symbol, leverage):
-        """레버리지 설정"""
+    def set_leverage(self, symbol: str, leverage: int) -> bool:
+        """레버리지 설정."""
         try:
             self.exchange.set_leverage(leverage, symbol)
             self.logger.info(f"✅ Leverage set to {leverage}x for {symbol}")
@@ -667,8 +680,8 @@ class BinanceClient:
             self.logger.error(f"❌ Error setting leverage {leverage} | {e}")
             return False
 
-    def set_position_mode(self, dual_side_position=False):
-        """포지션 모드 설정"""
+    def set_position_mode(self, dual_side_position: bool = False) -> bool:
+        """포지션 모드 설정."""
         try:
             self.exchange.set_position_mode(hedged=dual_side_position)
             mode_str = "Hedge" if dual_side_position else "One-Way"
@@ -686,8 +699,8 @@ class BinanceClient:
                 self.logger.error(f"⚠️ Failed to set position mode: {e2}")
                 return False
 
-    def set_asset_mode(self, is_multi_asset=False):
-        """자산 모드 설정"""
+    def set_asset_mode(self, is_multi_asset: bool = False) -> bool:
+        """자산 모드 설정."""
         try:
             if not hasattr(self.exchange, "fapiPrivate_get_multiassetsmargin"):
                 return True
@@ -707,8 +720,8 @@ class BinanceClient:
             self.logger.warning(f"Asset mode setting skipped: {e}")
             return True
 
-    def set_margin_type(self, symbol, margin_type="CROSSED"):
-        """마진 모드 설정"""
+    def set_margin_type(self, symbol: str, margin_type: str = "CROSSED") -> bool:
+        """마진 모드 설정."""
         try:
             mode = "CROSS" if margin_type == "CROSSED" else margin_type
             self.exchange.set_margin_mode(mode, symbol)
@@ -720,12 +733,12 @@ class BinanceClient:
             self.logger.error(f"⚠️ Failed to set margin type for {symbol}: {e}")
             return False
 
-    def fetch_position(self, symbol):
-        """현재 포지션 조회"""
+    def fetch_position(self, symbol: str) -> dict[str, Any]:
+        """현재 포지션 조회."""
         try:
             positions = self.exchange.fetch_positions([symbol])
             for pos in positions:
-                p_symbol = pos["symbol"]
+                p_symbol = str(pos["symbol"])
                 contracts = float(pos["contracts"] or 0)
                 if p_symbol == symbol or p_symbol.split(":")[0] == symbol:
                     if contracts == 0:
@@ -749,10 +762,10 @@ class BinanceClient:
             raise RuntimeError(f"fetch_position_failed:{symbol}") from e
         return {"amount": 0.0, "entryPrice": 0.0, "unrealizedPnL": 0.0, "leverage": 1}
 
-    def fetch_open_orders(self, symbol):
-        """미체결 주문 조회 (Standard + ALGO 주문 통합)"""
+    def fetch_open_orders(self, symbol: str) -> list[dict[str, Any]]:
+        """미체결 주문 조회 (Standard + ALGO 주문 통합)."""
         try:
-            orders = self.exchange.fetch_open_orders(symbol)
+            orders: list[dict[str, Any]] = list(self.exchange.fetch_open_orders(symbol))
             try:
                 algo_res = self.exchange.fapiPrivateGetOpenAlgoOrders()
                 market = self.exchange.market(symbol)
@@ -783,22 +796,24 @@ class BinanceClient:
             self.logger.error(f"Error fetching open orders for {symbol}: {e}")
             raise RuntimeError(f"fetch_open_orders_failed:{symbol}") from e
 
-    def cancel_order(self, order_id, symbol):
-        """주문 취소"""
+    def cancel_order(self, order_id: str, symbol: str) -> bool:
+        """주문 취소."""
         try:
             self.rate_limiter.wait_if_needed()
             try:
-                return self.exchange.cancel_order(order_id, symbol)
+                res = self.exchange.cancel_order(order_id, symbol)
+                return bool(res)
             except Exception as e:
                 if "Unknown order sent" in str(e) or "-2011" in str(e):
-                    return self.exchange.fapiPrivateDeleteAlgoOrder({"algoId": order_id})
+                    res_algo = self.exchange.fapiPrivateDeleteAlgoOrder({"algoId": order_id})
+                    return bool(res_algo)
                 raise e
         except Exception as e:
             self.logger.error(f"Error cancelling order {order_id}: {e}")
             return False
 
-    def cancel_all_orders(self, symbol):
-        """모든 오픈 주문 취소"""
+    def cancel_all_orders(self, symbol: str) -> bool:
+        """모든 오픈 주문 취소."""
         try:
             self.rate_limiter.wait_if_needed()
             try:
@@ -839,7 +854,10 @@ class BinanceClient:
                     break
             
             if "sum_open_interest" not in df.columns:
-                self.logger.warning(f"No OI column found in API response for {symbol}. Cols: {df.columns.tolist()}")
+                self.logger.warning(
+                    f"No OI column found in API response for {symbol}. "
+                    f"Cols: {df.columns.tolist()}"
+                )
                 return pd.DataFrame()
 
             return df[["timestamp", "sum_open_interest"]]
@@ -868,7 +886,10 @@ class BinanceClient:
                     break
 
             if "count_toptrader_long_short_ratio" not in df.columns:
-                self.logger.warning(f"No LSR column found in API response for {symbol}. Cols: {df.columns.tolist()}")
+                self.logger.warning(
+                    f"No LSR column found in API response for {symbol}. "
+                    f"Cols: {df.columns.tolist()}"
+                )
                 return pd.DataFrame()
 
             return df[["timestamp", "count_toptrader_long_short_ratio"]]
@@ -876,10 +897,18 @@ class BinanceClient:
             self.logger.warning(f"Failed to fetch Long/Short Ratio for {symbol}: {e}")
             return pd.DataFrame()
 
-    def place_order(self, symbol, side, amount, order_type="market", price=None, params=None):
-        """기본 주문 실행"""
+    def place_order(
+        self,
+        symbol: str,
+        side: str,
+        amount: float,
+        order_type: str = "market",
+        price: float | None = None,
+        params: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        """기본 주문 실행."""
         try:
-            order = self.exchange.create_order(
+            order: dict[str, Any] = self.exchange.create_order(
                 symbol=symbol, type=order_type, side=side,
                 amount=amount, price=price, params=(params or {}),
             )
@@ -891,16 +920,20 @@ class BinanceClient:
             return None
 
     def place_stop_market_order(
-        self, symbol: str, side: str, amount: float,
-        stop_price: float, client_order_id: str | None = None
-    ):
-        """서버 사이드 Stop Market 주문 (손절용)"""
+        self,
+        symbol: str,
+        side: str,
+        amount: float,
+        stop_price: float,
+        client_order_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        """서버 사이드 Stop Market 주문 (손절용)."""
         try:
             self.rate_limiter.wait_if_needed()
             params: dict[str, object] = {"stopPrice": float(stop_price), "reduceOnly": True}
             if client_order_id:
                 params["clientOrderId"] = client_order_id
-            order = self.exchange.create_order(
+            order: dict[str, Any] = self.exchange.create_order(
                 symbol=symbol, type="STOP_MARKET", side=side,
                 amount=amount, params=params
             )
@@ -914,16 +947,20 @@ class BinanceClient:
             return None
 
     def place_take_profit_market_order(
-        self, symbol: str, side: str, amount: float,
-        tp_price: float, client_order_id: str | None = None
-    ):
-        """서버 사이드 Take Profit Market 주문 (익절용)"""
+        self,
+        symbol: str,
+        side: str,
+        amount: float,
+        tp_price: float,
+        client_order_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        """서버 사이드 Take Profit Market 주문 (익절용)."""
         try:
             self.rate_limiter.wait_if_needed()
             params: dict[str, object] = {"stopPrice": float(tp_price), "reduceOnly": True}
             if client_order_id:
                 params["clientOrderId"] = client_order_id
-            order = self.exchange.create_order(
+            order: dict[str, Any] = self.exchange.create_order(
                 symbol=symbol, type="TAKE_PROFIT_MARKET", side=side,
                 amount=amount, params=params
             )
@@ -939,29 +976,46 @@ class BinanceClient:
             return None
 
     def place_order_smart(
-        self, symbol, side, amount, atr=None, current_price=None,
-        reduce_only=False, allow_market_fallback=True, order_deadline_ms=None,
-        post_only_wait_seconds=1.2, post_only_requote_max=2, client_order_id: str | None = None
-    ):
+        self,
+        symbol: str,
+        side: str,
+        amount: float,
+        atr: float | None = None,
+        current_price: float | None = None,
+        reduce_only: bool = False,
+        allow_market_fallback: bool = True,
+        order_deadline_ms: int | None = None,
+        post_only_wait_seconds: float = 1.2,
+        post_only_requote_max: int = 2,
+        client_order_id: str | None = None,
+    ) -> dict[str, Any] | None:
         """Production waterfall order executor."""
         from config.settings import SMART_ORDER_OFFSET
         tick_size = self.get_price_tick_size(symbol, fallback=(0.1 if "BTC" in symbol else 0.01))
 
-        def round_to_tick(price, tick):
+        def round_to_tick(price: float, tick: float) -> float:
             return round(float(price) / tick) * tick if tick > 0 else float(price)
 
-        def get_best_fresh():
+        def get_best_fresh() -> tuple[float, float]:
             cached_ob = self.orderbook_cache.get(f"{symbol}_ob")
             if cached_ob:
-                return cached_ob[0], cached_ob[1]
+                return float(cached_ob[0]), float(cached_ob[1])
             try:
                 orderbook = self.exchange.fetch_order_book(symbol, limit=1)
-                best_bid = orderbook["bids"][0][0] if orderbook["bids"] else current_price
-                best_ask = orderbook["asks"][0][0] if orderbook["asks"] else current_price
+                best_bid = (
+                    float(orderbook["bids"][0][0])
+                    if orderbook["bids"]
+                    else float(current_price or 0)
+                )
+                best_ask = (
+                    float(orderbook["asks"][0][0])
+                    if orderbook["asks"]
+                    else float(current_price or 0)
+                )
                 self.orderbook_cache.set(f"{symbol}_ob", (best_bid, best_ask))
                 return best_bid, best_ask
             except Exception:
-                return current_price, current_price
+                return float(current_price or 0), float(current_price or 0)
 
         if not current_price:
             current_price = self.get_market_price(symbol)
@@ -975,9 +1029,13 @@ class BinanceClient:
 
         total_filled = 0.0
         last_order = None
-        order_fill_tracker = {}
+        order_fill_tracker: dict[str, float] = {}
 
-        def build_params(base_params=None, *, order_tag: str | None = None):
+        def build_params(
+            base_params: dict[str, Any] | None = None,
+            *,
+            order_tag: str | None = None,
+        ) -> dict[str, Any]:
             p = dict(base_params or {})
             if reduce_only:
                 p["reduceOnly"] = True
@@ -988,15 +1046,16 @@ class BinanceClient:
                 p["clientOrderId"] = cid[:36]
             return p
 
-        def deadline_reached():
+        def deadline_reached() -> bool:
             if order_deadline_ms is None:
                 return False
             try:
-                return self.exchange.milliseconds() >= int(order_deadline_ms)
+                ms = self.exchange.milliseconds()
+                return bool(ms >= int(order_deadline_ms))
             except Exception:
                 return False
 
-        def register_fill(order_obj, req_amt):
+        def register_fill(order_obj: dict[str, Any] | None, req_amt: float) -> float:
             nonlocal remaining_amount, total_filled, last_order
             if not order_obj:
                 return 0.0
@@ -1016,14 +1075,15 @@ class BinanceClient:
                 remaining_amount = max(0.0, requested_total - total_filled)
             return delta
 
-        def refresh_order(order_obj):
+        def refresh_order(order_obj: dict[str, Any] | None) -> dict[str, Any] | None:
             if not isinstance(order_obj, dict):
                 return order_obj
             oid = order_obj.get("id")
             if not oid:
                 return order_obj
             try:
-                return self.exchange.fetch_order(oid, symbol)
+                refreshed: dict[str, Any] = self.exchange.fetch_order(oid, symbol)
+                return refreshed
             except Exception:
                 try:
                     for o in self.fetch_open_orders(symbol):
@@ -1033,7 +1093,7 @@ class BinanceClient:
                     ...
             return order_obj
 
-        def wait_post_only(order_obj, req_amt):
+        def wait_post_only(order_obj: dict[str, Any], req_amt: float) -> dict[str, Any]:
             wait_sec = max(0.0, float(post_only_wait_seconds or 0.0))
             if wait_sec <= 0:
                 return order_obj
@@ -1043,14 +1103,16 @@ class BinanceClient:
                 if deadline_reached():
                     break
                 time.sleep(0.2)
-                latest = refresh_order(latest)
+                latest_ref = refresh_order(latest)
+                if latest_ref:
+                    latest = latest_ref
                 register_fill(latest, req_amt)
                 st = str(latest.get("status", "")).lower()
                 if st in ("closed", "filled", "canceled", "cancelled") or remaining_amount <= 0:
                     break
             return latest
 
-        def build_partial_res(status="partial"):
+        def build_partial_res(status: str = "partial") -> dict[str, Any]:
             res = {
                 "symbol": symbol, "side": side, "type": "multi_tier",
                 "status": status, "requested": requested_total,
@@ -1087,23 +1149,23 @@ class BinanceClient:
                     self.logger.info(msg_t1)
                     req_amt = remaining_amount
                     f_before = total_filled
-                    order = self.exchange.create_order(
+                    order_limit = self.exchange.create_order(
                         symbol=symbol, type="limit", side=side, amount=req_amt,
                         price=target_p,
                         params=build_params({"postOnly": True}, order_tag=f"T1{req_idx}")
                     )
-                    register_fill(order, req_amt)
-                    order = wait_post_only(order, req_amt)
-                    st = str(order.get("status", "")).lower()
+                    register_fill(order_limit, req_amt)
+                    order_limit = wait_post_only(order_limit, req_amt)
+                    st = str(order_limit.get("status", "")).lower()
                     f_round = max(0.0, total_filled - f_before)
                     if st in ("closed", "filled") or remaining_amount <= 0:
                         self.logger.info(f"Tier 1 Filled ({f_round}/{req_amt})")
-                        return order
+                        return cast("dict[str, Any] | None", order_limit)
                     if f_round > 0:
                         self.logger.warning(f"⚠️ T1 Partial: {f_round}/{req_amt}")
                     if st in ("open", "new"):
                         try:
-                            self.exchange.cancel_order(order["id"], symbol)
+                            self.exchange.cancel_order(str(order_limit["id"]), symbol)
                             if req_idx < max_req and not deadline_reached():
                                 continue
                         except Exception as cancel_err:
@@ -1140,16 +1202,16 @@ class BinanceClient:
                     b_ask * (1 + off) if side == "buy" else b_bid * (1 - off), tick_size
                 )
                 self.logger.info(f"📦 Tier 2: Aggressive IOC {side} @ {limit_p}")
-                req_amt = remaining_amount
-                order = self.exchange.create_order(
-                    symbol=symbol, type="limit", side=side, amount=req_amt,
+                req_amt_t2 = remaining_amount
+                order_t2 = self.exchange.create_order(
+                    symbol=symbol, type="limit", side=side, amount=req_amt_t2,
                     price=limit_p, params=build_params({"timeInForce": "IOC"}, order_tag="T2")
                 )
-                filled = register_fill(order, req_amt)
+                filled = register_fill(order_t2, req_amt_t2)
                 if filled > 0:
-                    if remaining_amount <= 0 or (filled / req_amt) >= 0.999:
-                        self.logger.info(f"Tier 2 Filled ({filled}/{req_amt})")
-                        return order
+                    if remaining_amount <= 0 or (filled / req_amt_t2) >= 0.999:
+                        self.logger.info(f"Tier 2 Filled ({filled}/{req_amt_t2})")
+                        return cast("dict[str, Any] | None", order_t2)
             except Exception as e:
                 self.logger.error(f"❌ Tier 2 Failed: {e}")
                 if "timeout" in str(e).lower():
@@ -1177,22 +1239,23 @@ class BinanceClient:
                         tick_size
                     )
                     self.logger.warning(f"🚨 Tier 3: Capped Market {side} @ {h_limit_p}")
-                    order = self.exchange.create_order(
+                    order_t3 = self.exchange.create_order(
                         symbol=symbol, type="limit", side=side, amount=remaining_amount,
                         price=h_limit_p,
                         params=build_params({"timeInForce": "IOC"}, order_tag="T3L")
                     )
                 else:
                     self.logger.warning(f"🚨 Tier 3: Market Order {side}")
-                    order = self.exchange.create_order(
+                    order_t3 = self.exchange.create_order(
                         symbol=symbol, type="market", side=side, amount=remaining_amount,
                         params=build_params(order_tag="T3M")
                     )
-                register_fill(order, remaining_amount)
-                return order
+                register_fill(order_t3, remaining_amount)
+                return cast("dict[str, Any] | None", order_t3)
             except Exception as e:
                 self.logger.error(f"❌ All Tiers Failed: {e}")
                 if total_filled > 0:
                     return build_partial_res(status="partial_failed")
                 return None
-        return last_order if last_order else build_partial_res(status="filled")
+        final_res = last_order if last_order else build_partial_res(status="filled")
+        return cast("dict[str, Any] | None", final_res)
