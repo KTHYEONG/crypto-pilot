@@ -1,0 +1,21 @@
+# AI Development Harness & Rules
+
+This project follows a strict **Harness Engineering** protocol for self-validation and high-quality Python development.
+
+## 🚀 MANDATORY ACTION HARNESS (Self-Correction Loop)
+Before reporting task completion, you MUST:
+1.  `conda activate crypto`
+2.  `ruff check <file_path> --fix`
+3.  `mypy <file_path>`
+
+## 📋 RULES DIRECTORY
+Refer to the following for detailed instructions:
+- **Persona & Communication**: See `.cursor/rules/persona.mdc`
+- **Validation Protocol**: See `.cursor/rules/harness.mdc`
+- **Python Quality**: See `.cursor/rules/python_quality.mdc`
+
+## 🎯 CORE OBJECTIVES
+- **Maximize Code Quality:** Strict types, 0 linter errors.
+- **Minimize Token Consumption:** Snippet-first output, no pleasantries.
+- **Self-Validation:** Fix your own errors before the user sees them.
+- **Language:** Respond in Korean (technical terms in English).

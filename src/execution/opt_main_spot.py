@@ -11,10 +11,11 @@ import tempfile
 import threading
 import warnings
 from collections import Counter
+from collections.abc import Sequence
 from dataclasses import dataclass
 from multiprocessing import Manager
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any
 
 import numpy as np
 import optuna
@@ -36,24 +37,24 @@ project_root: str = str(Path(__file__).resolve().parents[2])
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-from config.opt_config import (
+from config.opt_config import (  # noqa: E402
     OPT_SPOT_CONFIG,
     SPOT_ANCHOR_SYMBOLS,
     get_quarterly_window,
     get_search_space_spot,
 )
-from config.settings import SPOT_INITIAL_BALANCE
-from src.core.optimization.opt_utils import compute_segment_merge_index
-from src.domain.spot.data_collector_spot import DataCollectorSpot
-from src.domain.spot.opt_spot_utils.cv_utils import (
+from config.settings import SPOT_INITIAL_BALANCE  # noqa: E402
+from src.core.optimization.opt_utils import compute_segment_merge_index  # noqa: E402
+from src.domain.spot.data_collector_spot import DataCollectorSpot  # noqa: E402
+from src.domain.spot.opt_spot_utils.cv_utils import (  # noqa: E402
     CPCVPath,
     build_cpcv_test_paths_with_fallback,
     list_cpcv_block_ranges,
 )
-from src.domain.spot.opt_spot_utils.data_utils import (
+from src.domain.spot.opt_spot_utils.data_utils import (  # noqa: E402
     _segment_with_context,
 )
-from src.domain.spot.opt_spot_utils.go_nogo import (
+from src.domain.spot.opt_spot_utils.go_nogo import (  # noqa: E402
     FinalDeploymentReportInput,
     GoNoGoResult,
     SymbolGateRow,
@@ -65,19 +66,19 @@ from src.domain.spot.opt_spot_utils.go_nogo import (
     run_pbo_gate,
     run_portfolio_discovery_veto,
 )
-from src.domain.spot.opt_spot_utils.objective import (
+from src.domain.spot.opt_spot_utils.objective import (  # noqa: E402
     EMBARGO_BARS,
     objective_spot,
     spot_frozen_trial_constraints,
 )
-from src.domain.spot.opt_spot_utils.oos_evaluator import (
+from src.domain.spot.opt_spot_utils.oos_evaluator import (  # noqa: E402
     compute_regime_conditional_oos_metrics,
     evaluate_symbol_fold,
     run_cpcv_complement_evaluation,
     run_holdout_shared_cash_portfolio,
     run_multi_window_oos_holdout,
 )
-from src.domain.spot.strategies_spot import SpotPipelineStrategy
+from src.domain.spot.strategies_spot import SpotPipelineStrategy  # noqa: E402
 
 os.environ.setdefault("OMP_NUM_THREADS", "1")
 os.environ.setdefault("MKL_NUM_THREADS", "1")
@@ -131,12 +132,12 @@ def _build_sqlite_storage(db_path: Path) -> optuna.storages.RDBStorage:
 
 def _get_effective_search_space_spot(
     tf: str,
-    narrowed_override: Optional[Dict[str, Dict[str, Any]]],
-) -> Dict[str, Dict[str, Any]]:
+    narrowed_override: dict[str, dict[str, Any]] | None,
+) -> dict[str, dict[str, Any]]:
     base = get_search_space_spot(tf)
     if not narrowed_override:
         return dict(base)
-    out: Dict[str, Dict[str, Any]] = {}
+    out: dict[str, dict[str, Any]] = {}
     for k, v in base.items():
         out[k] = dict(v) if isinstance(v, dict) else v
     for k, spec in narrowed_override.items():
@@ -147,11 +148,11 @@ def _get_effective_search_space_spot(
 @dataclass
 class _TfOptimizationContext:
     clean_symbol: str
-    seeds: List[int]
+    seeds: list[int]
     n_trials: int
     n_jobs: int
-    data_maps: Dict[str, Dict[str, Any]]
-    symbols: List[str]
+    data_maps: dict[str, dict[str, Any]]
+    symbols: list[str]
     project_root: str
     progress_queue: Any
     mode: str = "single"
@@ -160,7 +161,7 @@ class _TfOptimizationContext:
     disable_inner_tpe_pool: bool = False
     fresh_journal: bool = True
     signal_cache_dir: str = ""
-    narrowed_space: Optional[Dict[str, Dict[str, Any]]] = None
+    narrowed_space: dict[str, dict[str, Any]] | None = None
 
 
 @dataclass(frozen=True)
@@ -173,7 +174,7 @@ class _SpotExecutionPlan:
     task_count: int
 
 
-def _split_tpe_trials(total: int, n_workers: int) -> List[int]:
+def _split_tpe_trials(total: int, n_workers: int) -> list[int]:
     if total <= 0:
         return []
     n_workers = max(1, min(int(n_workers), int(total)))
@@ -232,7 +233,7 @@ def _build_precomputed_segment(
     full_signal_df: Any,
     exec_start_idx: int,
     exec_end_idx: int,
-) -> Tuple[pd.DataFrame | None, int]:
+) -> tuple[pd.DataFrame | None, int]:
     if not isinstance(full_signal_df, pd.DataFrame) or full_signal_df.empty:
         return None, 0
     n = len(full_signal_df)
@@ -249,8 +250,8 @@ def _build_precomputed_segment(
 
 
 def _rebuild_is_data_maps_from_aligned_oos(
-    data_maps: Dict[str, Dict[str, Any]],
-    oos_data_maps: Dict[str, Dict[str, Any]],
+    data_maps: dict[str, dict[str, Any]],
+    oos_data_maps: dict[str, dict[str, Any]],
     symbols: Sequence[str],
     tf: str,
     is_start_dt: pd.Timestamp,
@@ -267,14 +268,12 @@ def _rebuild_is_data_maps_from_aligned_oos(
 
 
 def _align_oos_dataframes_on_common_datetimes(
-    oos_data_maps: Dict[str, Dict[str, Any]],
+    oos_data_maps: dict[str, dict[str, Any]],
     symbols: Sequence[str],
     tf: str,
     is_end_dt: pd.Timestamp,
 ) -> None:
-    """
-    Same bar alignment as IS, for full OHLCV (IS+OOS) used in holdout shared-cash.
-    """
+    """Align bars same as IS, for full OHLCV (IS+OOS) used in holdout shared-cash."""
     sym_list = list(symbols)
     if len(sym_list) < 2:
         return
@@ -312,7 +311,7 @@ def _align_oos_dataframes_on_common_datetimes(
         )
 
 
-def _spot_tpe_worker_run(payload: Dict[str, Any]) -> None:
+def _spot_tpe_worker_run(payload: dict[str, Any]) -> None:
     import gc
 
     os.environ.setdefault("OMP_NUM_THREADS", "1")
@@ -333,7 +332,7 @@ def _spot_tpe_worker_run(payload: Dict[str, Any]) -> None:
     data_maps_file = str(payload.get("data_maps_file", ""))
     if data_maps_file and Path(data_maps_file).is_file():
         with Path(data_maps_file).open("rb") as f:
-            data_maps: Dict[str, Dict[str, Any]] = pickle.load(f)  # nosec: S301
+            data_maps: dict[str, dict[str, Any]] = pickle.load(f)  # noqa: S301
     else:
         data_maps = payload.get("data_maps", {})
     progress_queue = payload["progress_queue"]
@@ -343,7 +342,7 @@ def _spot_tpe_worker_run(payload: Dict[str, Any]) -> None:
         os.environ["OPT_SPOT_SIGNAL_CACHE_DIR"] = signal_cache_dir
     progress_key = str(payload["progress_key"])
     raw_narrow = payload.get("narrowed_space")
-    narrowed_w: Optional[Dict[str, Dict[str, Any]]] = (
+    narrowed_w: dict[str, dict[str, Any]] | None = (
         raw_narrow if isinstance(raw_narrow, dict) else None
     )
     tf_space = _get_effective_search_space_spot(tf, narrowed_w)
@@ -426,8 +425,8 @@ def _spot_tpe_worker_run(payload: Dict[str, Any]) -> None:
 
 
 def _run_tf_optimization(
-    task: Tuple[Any, str], ctx: _TfOptimizationContext
-) -> Tuple[Tuple[Any, str], optuna.Study]:
+    task: tuple[Any, str], ctx: _TfOptimizationContext
+) -> tuple[tuple[Any, str], optuna.Study]:
     target_obj, tf = task
     target_str = "_".join(target_obj) if isinstance(target_obj, (list, tuple)) else target_obj
     progress_key = _task_progress_key(target_obj, tf)
@@ -437,8 +436,9 @@ def _run_tf_optimization(
     if ctx.use_journal_storage:
         # WSL2 성능 극대화: RAM Disk 경로에 SQLite DB 생성
         db_path = (
-            Path("/dev/shm") / f"optuna_spot_{target_str.replace('/', '').replace('-', '')}_{tf}.db"
-        )  # nosec: S108
+            Path("/dev/shm")  # noqa: S108
+            / f"optuna_spot_{target_str.replace('/', '').replace('-', '')}_{tf}.db"
+        )
         if ctx.fresh_journal:
             _ensure_fresh_sqlite(db_path)
 
@@ -542,7 +542,7 @@ def _run_tf_optimization(
         return (target_obj, tf), study
 
     tpe_sampler = _spot_tpe_sampler(seed)
-
+    storage_tpe: optuna.storages.BaseStorage
     if ctx.use_journal_storage:
         if db_path is None:
             raise AssertionError("db_path must be set when using journal storage")
@@ -576,7 +576,7 @@ def _run_tf_optimization(
         ) as dm_tmp:
             data_maps_file = dm_tmp.name
             pickle.dump(ctx.data_maps, dm_tmp, protocol=pickle.HIGHEST_PROTOCOL)
-        payloads: List[Dict[str, Any]] = []
+        payloads: list[dict[str, Any]] = []
         try:
             for i, nt in enumerate(splits):
                 if nt <= 0:
@@ -626,16 +626,16 @@ def _run_tf_optimization(
 
 
 def _merge_narrowed_space_dicts(
-    base: Optional[Dict[str, Dict[str, Any]]],
-    override: Optional[Dict[str, Dict[str, Any]]],
-) -> Optional[Dict[str, Dict[str, Any]]]:
+    base: dict[str, dict[str, Any]] | None,
+    override: dict[str, dict[str, Any]] | None,
+) -> dict[str, dict[str, Any]] | None:
     if not base and not override:
         return None
     if not base:
         return {k: dict(v) if isinstance(v, dict) else v for k, v in (override or {}).items()}
     if not override:
         return {k: dict(v) if isinstance(v, dict) else v for k, v in base.items()}
-    out: Dict[str, Dict[str, Any]] = {
+    out: dict[str, dict[str, Any]] = {
         k: dict(v) if isinstance(v, dict) else v for k, v in base.items()
     }
     for k, v in override.items():
@@ -646,9 +646,9 @@ def _merge_narrowed_space_dicts(
 def _build_narrowed_space_for_signal_types(
     winning_types: tuple[str, ...],
     tf: str,
-) -> Dict[str, Dict[str, Any]]:
+) -> dict[str, dict[str, Any]]:
     base = get_search_space_spot(tf)
-    out: Dict[str, Dict[str, Any]] = {
+    out: dict[str, dict[str, Any]] = {
         k: dict(v) if isinstance(v, dict) else v for k, v in base.items()
     }
     st_spec = out.get("SIGNAL_TYPE")
@@ -659,21 +659,21 @@ def _build_narrowed_space_for_signal_types(
 
 def _run_stage1_structure_discovery(
     *,
-    data_maps: Dict[str, Dict[str, Any]],
-    symbols: List[str],
+    data_maps: dict[str, dict[str, Any]],
+    symbols: list[str],
     tf: str,
     trials_per_signal: int,
     top_k: int,
     min_p10_gmgr: float,
     project_root: str,
     signal_cache_dir: str,
-) -> Dict[str, Dict[str, Any]]:
+) -> dict[str, dict[str, Any]]:
     """Per-SIGNAL_TYPE in-memory Optuna studies; narrow categorical to top performers."""
     all_types = tuple(get_search_space_spot(tf)["SIGNAL_TYPE"]["choices"])
     ref_sym = symbols[0]
     is_off = int(data_maps[ref_sym].get(f"is_start_idx_{tf}", 0))
     ref_df = data_maps[ref_sym][tf]
-    prebuilt: Optional[Tuple[List[CPCVPath], int, int]] = None
+    prebuilt: tuple[list[CPCVPath], int, int] | None = None
     if ref_df is not None and not ref_df.empty:
         ref_len = len(ref_df) - is_off
         if ref_len >= 200:
@@ -681,7 +681,7 @@ def _run_stage1_structure_discovery(
                 ref_len, embargo=int(EMBARGO_BARS.get(tf, 0))
             )
     cache_root = Path(signal_cache_dir) if signal_cache_dir else None
-    results: List[tuple[str, float]] = []
+    results: list[tuple[str, float]] = []
     n_tri = max(5, int(trials_per_signal))
     for sig_type in all_types:
         stage_space = _build_narrowed_space_for_signal_types((sig_type,), tf)
@@ -694,7 +694,7 @@ def _run_stage1_structure_discovery(
             storage=InMemoryStorage(),
         )
 
-        def _obj(trial: optuna.Trial, stage_space=stage_space) -> float:
+        def _obj(trial: optuna.Trial, stage_space: dict[str, Any] = stage_space) -> float:
             return objective_spot(
                 trial,
                 data_maps,
@@ -714,10 +714,12 @@ def _run_stage1_structure_discovery(
         if not completed:
             results.append((sig_type, -1e9))
             continue
-        completed.sort(key=lambda tr: float(tr.value or -1e9), reverse=True)
+        completed.sort(
+            key=lambda tr: float(tr.value if tr.value is not None else -1e9), reverse=True
+        )
         ktop = max(1, n_tri // 10)
         top_trials = completed[:ktop]
-        mean_obj = float(np.mean([float(t.value) for t in top_trials]))
+        mean_obj = float(np.mean([float(t.value if t.value is not None else 0.0) for t in top_trials]))
         results.append((sig_type, mean_obj))
         _logger.debug("Phase C [%-15s] : top-%d mean objective = %.6f", sig_type, ktop, mean_obj)
         
@@ -744,11 +746,9 @@ def _run_stage1_structure_discovery(
 
 
 def _select_best_trial_from_shortlist(
-    ranked: List[optuna.trial.FrozenTrial],
+    ranked: list[optuna.trial.FrozenTrial],
 ) -> optuna.trial.FrozenTrial:
-    """
-    Within ~2% of top objective value, prefer higher CPCV robustness (tmp.md tie-break).
-    """
+    """Within ~2% of top objective value, prefer higher CPCV robustness (tmp.md tie-break)."""
     if not ranked:
         raise ValueError("ranked trials empty")
     top_val = float(ranked[0].value if ranked[0].value is not None else -1e9)
@@ -758,7 +758,7 @@ def _select_best_trial_from_shortlist(
     ]
     pool = close_trials if close_trials else ranked[:1]
 
-    def robust_key(t: optuna.trial.FrozenTrial) -> Tuple[float, float, float, float]:
+    def robust_key(t: optuna.trial.FrozenTrial) -> tuple[float, float, float, float]:
         ua = t.user_attrs
         return (
             float(ua.get("gate1_sqn", 0.0)),
@@ -771,18 +771,18 @@ def _select_best_trial_from_shortlist(
 
 
 def _load_spot_data_maps_for_symbols(
-    symbols: List[str],
+    symbols: list[str],
     tf: str,
     fetch_start: str,
     start: str,
     is_end: str,
     end: str,
-) -> tuple[Dict[str, Dict[str, Any]], Dict[str, Dict[str, Any]], List[str]]:
+) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]], list[str]]:
     """Load IS + full OHLCV maps and align (same contract as opt_spot main discovery path)."""
     collector = DataCollectorSpot()
-    data_maps: Dict[str, Dict[str, Any]] = {}
-    oos_data_maps: Dict[str, Dict[str, Any]] = {}
-    valid_symbols: List[str] = []
+    data_maps: dict[str, dict[str, Any]] = {}
+    oos_data_maps: dict[str, dict[str, Any]] = {}
+    valid_symbols: list[str] = []
     for sym in symbols:
         data_maps[sym] = {}
         oos_data_maps[sym] = {}
@@ -885,7 +885,7 @@ def main() -> None:
     pre_parser.add_argument("--tf", type=str, default="4h")
     pre_args, _ = pre_parser.parse_known_args()
 
-    phase0_narrowed_space: Optional[Dict[str, Dict[str, Any]]] = None
+    phase0_narrowed_space: dict[str, dict[str, Any]] | None = None
 
     if not pre_args.skip_universe:
         from src.domain.spot.opt_spot_utils.combination_screener import run_combination_screening
@@ -957,7 +957,7 @@ def main() -> None:
             max_per_sig = int(
                 config.opt_config.OPT_SPOT_CONFIG.get("SPOT_STAGE2_MAX_PER_SIGNAL_TYPE", 2)
             )
-            filtered_tops: List[Any] = []  # CombinationScore rows
+            filtered_tops: list[Any] = []  # CombinationScore rows
             sig_ct: Counter[str] = Counter()
             for combo in tops:
                 sig = str(combo.signal)
@@ -970,7 +970,7 @@ def main() -> None:
             _logger.info("Phase B winning SIGNAL_TYPE=%s", winning_signal_type)
             from src.domain.spot.opt_spot_utils.combination_screener import build_probe_params
 
-            phase_b_params: Optional[Dict[str, Any]] = build_probe_params(tops_for_stage2[0], tf0)
+            phase_b_params: dict[str, Any] | None = build_probe_params(tops_for_stage2[0], tf0)
         else:
             st_raw = pre_args.signal_type
             if st_raw:
@@ -986,7 +986,8 @@ def main() -> None:
                     (winning_signal_type,), tf0
                 )
             _logger.info(
-                "Phase B skipped; using SIGNAL_TYPE=%s for refinement (search-space midpoints for Phase C).",
+                "Phase B skipped; using SIGNAL_TYPE=%s for refinement "
+                "(search-space midpoints for Phase C).",
                 winning_signal_type,
             )
             phase_b_params = None  # fallback to _default_screener_params_from_space in Phase C
@@ -1033,7 +1034,10 @@ def main() -> None:
         "--narrowed-space-json",
         type=str,
         default=None,
-        help="Path to JSON dict merged into spot search space (overrides combination-screener output).",
+        help=(
+            "Path to JSON dict merged into spot search space "
+            "(overrides combination-screener output)."
+        ),
     )
     parser.add_argument(
         "--skip-stage1",
@@ -1044,7 +1048,10 @@ def main() -> None:
         "--signal-type",
         type=str,
         default=None,
-        help="Force a single SIGNAL_TYPE (narrows categorical); merged with --narrowed-space-json if set.",
+        help=(
+            "Force a single SIGNAL_TYPE (narrows categorical); "
+            "merged with --narrowed-space-json if set."
+        ),
     )
     parser.add_argument(
         "--stage1-trials",
@@ -1054,7 +1061,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    narrowed_space_file: Optional[Dict[str, Dict[str, Any]]] = None
+    narrowed_space_file: dict[str, dict[str, Any]] | None = None
     if args.narrowed_space_json:
         np_path = Path(args.narrowed_space_json)
         if np_path.is_file():
@@ -1107,7 +1114,7 @@ def main() -> None:
         os.getenv("OPT_SPOT_SIGNAL_CACHE_CLEANUP_INTERVAL_SEC", "0"),
     )
 
-    narrowed_space_effective: Optional[Dict[str, Dict[str, Any]]] = (
+    narrowed_space_effective: dict[str, dict[str, Any]] | None = (
         {k: dict(v) if isinstance(v, dict) else v for k, v in narrowed_space_file.items()}
         if narrowed_space_file
         else None
@@ -1121,7 +1128,6 @@ def main() -> None:
         _logger.info("Applied --signal-type narrowed space: %s", str(args.signal_type).upper())
     elif not args.skip_stage1 and args.mode == "multi":
         from src.domain.spot.opt_spot_utils.combination_screener import (
-            CombinationScore,
             run_combination_screening,
         )
         from src.domain.spot.opt_spot_utils.opt_params import build_multi_combo_param_space
@@ -1138,13 +1144,14 @@ def main() -> None:
             )
             if not tops:
                 _logger.error(
-                    "Phase C combination screening found no viable combo (screen score <= threshold). "
+                    "Phase C combination screening found no viable combo "
+                    "(screen score <= threshold). "
                     "No edge detected in current data/symbols. Aborting optimization."
                 )
                 return
             max_per_sig = int(OPT_SPOT_CONFIG.get("SPOT_STAGE2_MAX_PER_SIGNAL_TYPE", 2))
-            filtered_tops: List[CombinationScore] = []
-            sig_ct: Counter[str] = Counter()
+            filtered_tops = []
+            sig_ct = Counter()
             for combo in tops:
                 sig = str(combo.signal)
                 if sig_ct[sig] < max_per_sig:
@@ -1207,7 +1214,7 @@ def main() -> None:
             leave=True,
         )
 
-    def _progress_listener():
+    def _progress_listener() -> None:
         while True:
             msg = progress_queue.get()
             if msg is None:
@@ -1222,7 +1229,7 @@ def main() -> None:
     progress_thread.start()
 
     best_results = {}
-    pending_json_writes: List[Tuple[str, Dict[str, Any], float, bool]] = []
+    pending_json_writes: list[tuple[str, dict[str, Any], float, bool]] = []
     try:
         if plan.use_outer_process_pool:
             with concurrent.futures.ProcessPoolExecutor(
@@ -1316,7 +1323,11 @@ def main() -> None:
         ]
         if not completed:
             continue
-        ranked = sorted(completed, key=lambda tr: float(tr.value), reverse=True)[:top_k]
+        ranked = sorted(
+            completed,
+            key=lambda tr: float(tr.value if tr.value is not None else -1e9),
+            reverse=True,
+        )[:top_k]
         viable = [
             tr
             for tr in ranked
@@ -1389,11 +1400,11 @@ def main() -> None:
             return_signal_dfs=True,
             concurrency_penalty_scale=1.0,
         )
-        post_full_signal_dfs: Dict[str, pd.DataFrame] = port_ho.get("full_signal_dfs", {})
+        post_full_signal_dfs: dict[str, pd.DataFrame] = port_ho.get("full_signal_dfs", {})
         oos_dd_days = float(port_ho["dd_bars"]) / 6.0
 
         mw_enabled = bool(OPT_SPOT_CONFIG.get("SPOT_MULTI_WINDOW_OOS_ENABLED", True))
-        multi_win: Dict[str, Any] = {}
+        multi_win: dict[str, Any] = {}
         mw_gate = GoNoGoResult(passed=True, details={}, summary="", checks=[])
         mw_summary = ""
         if mw_enabled:
@@ -1459,8 +1470,8 @@ def main() -> None:
                 float(OPT_SPOT_CONFIG.get("SPOT_REGIME_STRESS_MAX_MDD_PCT", 30.0)),
             )
 
-        symbol_fold_payloads: List[Dict[str, Any]] = []
-        is_cagr_vals: List[float] = []
+        symbol_fold_payloads: list[dict[str, Any]] = []
+        is_cagr_vals: list[float] = []
         for s_eval in target_symbols:
             # 1. In-Sample Segment (Global data_maps context)
             is_start_idx = int(data_maps[s_eval][f"is_start_idx_{tf_eval}"])
@@ -1506,8 +1517,9 @@ def main() -> None:
             # For now, let's use the standalone MDD but scaled or keep it if it's more intuitive.
             # Actually, let's use raw PnL sum to show absolute contribution.
 
-            # For CAGR/MDD in shared context, we use the standalone engine but with portfolio constraints
-            # to keep the "Potential" metric consistent, but we sync the TRADE counts.
+            # For CAGR/MDD in shared context, we use the standalone engine but with
+            # portfolio constraints to keep the "Potential" metric consistent,
+            # but we sync the TRADE counts.
             pre_oos_sig_full = post_full_signal_dfs.get(s_eval)
             if pre_oos_sig_full is not None:
                 pre_oos_sig, exec_start_oos = _segment_with_context(
@@ -1551,7 +1563,7 @@ def main() -> None:
                     },
                 }
             )
-        is_holdout_maps: Dict[str, Dict[str, Any]] = {}
+        is_holdout_maps: dict[str, dict[str, Any]] = {}
         for s_eval in target_symbols:
             is_holdout_maps[s_eval] = dict(data_maps[s_eval])
             is_holdout_maps[s_eval][f"oos_start_idx_{tf_eval}"] = data_maps[s_eval][
@@ -1619,7 +1631,7 @@ def main() -> None:
             if mw_enabled:
                 _logger.info("\n%s", mw_gate.summary)
 
-        symbol_gate_rows: List[SymbolGateRow] = []
+        symbol_gate_rows: list[SymbolGateRow] = []
         for pl in symbol_fold_payloads:
             s_eval = pl["sym"]
             o = pl["oos"]

@@ -9,7 +9,7 @@ import multiprocessing
 import os
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import numpy as np
 import optuna
@@ -47,12 +47,21 @@ from src.domain.futures.ml_pipeline import (  # noqa: E402
     run_hmm_fusion_for_is_end,
     run_ml_pipeline_for_universe,
 )
+from src.domain.futures.opt_futures_utils.mc_gate_adjust import (  # noqa: E402
+    resolve_adjusted_gates,
+    wf_path_ergodicity_deviation_pct,
+)
+from src.domain.futures.opt_futures_utils.metrics import (  # noqa: E402
+    calc_net_alpha_with_friction,
+    calc_time_to_target_wealth,
+)
 from src.domain.futures.opt_futures_utils.objective import (  # noqa: E402
     inject_cs_momentum_ranks,
 )
 from src.domain.futures.opt_futures_utils.objective_ml import (  # noqa: E402
     MLPhaseDContext,
     build_ml_phase_d_params,
+    build_phase_d_enqueue_params_from_deploy_json,
     check_hard_gates_ml,
     objective_ml_phase_d,
     precompute_ml_optimization_context,
@@ -105,9 +114,16 @@ def _ml_phase_d_sampler(seed: int, n_trials: int = 200) -> optuna.samplers.BaseS
             crossover_prob=0.9,
             mutation_prob=0.1,
         )
+    # Session 36/41: n_startup_trials=n_trials ⇒ pure RandomSearch (TPE dead).
+    # Honor tpe_n_startup_trials; cap below n_trials so ≥1 post-startup trial when n_trials>1.
+    cfg_startup = int(OPT_FUTURES_CONFIG.get("tpe_n_startup_trials", 50))
+    frac = float(OPT_FUTURES_CONFIG.get("FUTURES_ML_PHASE_D_TPE_STARTUP_FRAC", 1.0))
+    frac = max(0.01, min(1.0, frac))
+    from_frac = max(1, int(float(n_trials) * frac))
+    n_startup = max(1, min(cfg_startup, from_frac, max(1, n_trials - 1)))
     return TPESampler(
         seed=seed,
-        n_startup_trials=n_trials,
+        n_startup_trials=n_startup,
         multivariate=True,
         group=True,
         constant_liar=True,
@@ -117,9 +133,9 @@ def _ml_phase_d_sampler(seed: int, n_trials: int = 200) -> optuna.samplers.BaseS
 
 def _print_performance_report(
     title: str,
-    port: Dict[str, Any],
-    dsr: Optional[float] = None,
-    pbo: Optional[float] = None,
+    port: dict[str, Any],
+    dsr: float | None = None,
+    pbo: float | None = None,
     tf: str = "1h",
 ) -> None:
     # --- Extra Metrics Calculation ---
@@ -200,8 +216,8 @@ def _print_performance_report(
 
 
 def _print_dual_audit_dashboard(
-    new_m: Dict[str, Any],
-    champ_m: Dict[str, Any],
+    new_m: dict[str, Any],
+    champ_m: dict[str, Any],
     gate_status: str,
 ) -> None:
     _logger.info("\n" + "╔" + "═" * 93 + "╗")
@@ -243,6 +259,22 @@ def _print_dual_audit_dashboard(
     _logger.info(
         f"║                   | Max Drawdown (%)      | {mdd_c:>11.2f}% | {mdd_n:>11.2f}% | {mdd_n - mdd_c:>+11.2f}%p ║"  # noqa: E501
     )
+    _logger.info("╟" + "─" * 19 + "┼" + "─" * 23 + "┼" + "─" * 13 + "┼" + "─" * 13 + "┼" + "─" * 13 + "╢")  # noqa: E501
+
+    # 3. SOTA WEALTH (futures-opt)
+    t2x_c, t2x_n = champ_m.get("time_2x", 999.0), new_m.get("time_2x", 999.0)
+    cvar_c, cvar_n = champ_m.get("cvar", 0.0), new_m.get("cvar", 0.0)
+    nalpha_c, nalpha_n = champ_m.get("net_alpha", 0.0), new_m.get("net_alpha", 0.0)
+    
+    _logger.info(
+        f"║ SOTA WEALTH (OPT) | Time to 2x (Years)    | {t2x_c:>11.2f}y | {t2x_n:>11.2f}y | {t2x_n - t2x_c:>+11.2f}y ║"  # noqa: E501
+    )
+    _logger.info(
+        f"║                   | CVaR(5%) Tail Risk    | {cvar_c:>11.2f}% | {cvar_n:>11.2f}% | {cvar_n - cvar_c:>+11.2f}%p ║"  # noqa: E501
+    )
+    _logger.info(
+        f"║                   | Net Alpha (vs Frict)  | {nalpha_c:>11.2f}% | {nalpha_n:>11.2f}% | {nalpha_n - nalpha_c:>+11.2f}%p ║"  # noqa: E501
+    )
     _logger.info("╠" + "═" * 93 + "╣")
 
     _logger.info(f"║ FINAL VERDICT: {gate_status:<78} ║")
@@ -262,8 +294,8 @@ def _feature_slice_stats(series: pd.Series) -> tuple[float, float, float]:
 
 
 def _log_ml_merge_feature_stats(
-    oos_data_maps: Dict[str, Dict[str, Any]],
-    valid_symbols: List[str],
+    oos_data_maps: dict[str, dict[str, Any]],
+    valid_symbols: list[str],
     tf: str,
 ) -> None:
     cols = ("gp_alpha_00", "xs_score_long", "hmm_modulator_long")
@@ -292,7 +324,7 @@ def _log_ml_merge_feature_stats(
 
 
 def _assert_oos_gp_signal_alive(
-    oos_data_maps: Dict[str, Dict[str, Any]], valid_symbols: List[str], tf: str
+    oos_data_maps: dict[str, dict[str, Any]], valid_symbols: list[str], tf: str
 ) -> None:
     for sym in valid_symbols[: min(5, len(valid_symbols))]:
         df = oos_data_maps[sym][tf]
@@ -308,13 +340,20 @@ def _assert_oos_gp_signal_alive(
 
 
 def _ml_trial_passes_hard_gates(
-    trial: optuna.trial.FrozenTrial, pbo_obs: float = 0.0, check_pbo: bool = True
+    trial: optuna.trial.FrozenTrial,
+    pbo_obs: float = 0.0,
+    check_pbo: bool = True,
+    *,
+    pbo_max: float | None = None,
+    dsr_min: float | None = None,
 ) -> bool:
     cfg = OPT_FUTURES_CONFIG
-    if check_pbo and float(pbo_obs) >= float(cfg.get("FUTURES_PBO_MAX", 0.45)):
+    pbo_lim = float(pbo_max if pbo_max is not None else cfg.get("FUTURES_PBO_MAX", 0.45))
+    if check_pbo and float(pbo_obs) >= pbo_lim:
         return False
     dsr = float(trial.user_attrs.get("gate1_dsr", -9.0))
-    if dsr < float(cfg.get("FUTURES_ML_GATE1_DSR_MIN", 0.20)):
+    dsr_floor = float(dsr_min if dsr_min is not None else cfg.get("FUTURES_ML_GATE1_DSR_MIN", 0.20))
+    if dsr < dsr_floor:
         return False
     p10_floor = float(cfg.get("FUTURES_CPCV_P10_LOG_TW_MIN", 0.0))
     p10_cpcv = float(trial.user_attrs.get("ml_p10_log_growth_cpcv", -999.0))
@@ -341,10 +380,10 @@ def _load_single_symbol_data(
     is_end: str,
     end: str,
     skip_metrics: bool = False,
-) -> tuple[str, Optional[Dict[str, Any]], Optional[Dict[str, Any]], bool]:
+) -> tuple[str, dict[str, Any] | None, dict[str, Any] | None, bool]:
     try:
-        temp_is: Dict[str, Any] = {}
-        temp_oos: Dict[str, Any] = {}
+        temp_is: dict[str, Any] = {}
+        temp_oos: dict[str, Any] = {}
         insufficient = False
         collector = DataCollector()
         collector.ensure_funding_data(sym, fetch_start, end)
@@ -397,17 +436,17 @@ def _load_single_symbol_data(
 
 
 def _load_futures_data_maps_for_symbols(
-    symbols: List[str],
+    symbols: list[str],
     tf: str,
     fetch_start: str,
     start: str,
     is_end: str,
     end: str,
     skip_metrics: bool = False,
-) -> tuple[Dict[str, Dict[str, Any]], Dict[str, Dict[str, Any]], List[str]]:
-    data_maps: Dict[str, Dict[str, Any]] = {}
-    oos_data_maps: Dict[str, Dict[str, Any]] = {}
-    valid_symbols: List[str] = []
+) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]], list[str]]:
+    data_maps: dict[str, dict[str, Any]] = {}
+    oos_data_maps: dict[str, dict[str, Any]] = {}
+    valid_symbols: list[str] = []
     
     # [Fix] Filter out non-ASCII symbols before processing
     symbols = [s for s in symbols if all(ord(c) < 128 for c in s)]
@@ -597,6 +636,17 @@ def main() -> None:
                 n_ml_trials, min_nsga2_trials, min_nsga2_trials,
             )
             n_ml_trials = min_nsga2_trials
+    pbo_max_eff, dsr_min_eff, pbo_champ_eff = resolve_adjusted_gates(
+        OPT_FUTURES_CONFIG, n_ml_trials
+    )
+    if bool(OPT_FUTURES_CONFIG.get("FUTURES_MC_GATE_TRIAL_ADJUST_ENABLED", False)):
+        _logger.info(
+            "[MC-GATE] trial_budget=%d PBO_max=%.4f DSR_min=%.4f champion_PBO_max=%.4f",
+            n_ml_trials,
+            pbo_max_eff,
+            dsr_min_eff,
+            pbo_champ_eff,
+        )
     cfg_seed = int(OPT_FUTURES_CONFIG.get("seeds", [42])[0])
     seed = int(args.seed) if args.seed is not None else cfg_seed
     ml_ctx = MLPhaseDContext(data_maps=data_maps, symbols=valid_symbols, tf=args.tf, seed=seed)
@@ -651,6 +701,36 @@ def main() -> None:
         sampler=_ml_phase_d_sampler(seed, n_ml_trials),
     )
 
+    if not is_nsga2 and bool(
+        OPT_FUTURES_CONFIG.get("FUTURES_ML_PHASE_D_ENQUEUE_DEPLOY_JSON", False)
+    ):
+        rel = str(
+            OPT_FUTURES_CONFIG.get(
+                "FUTURES_ML_PHASE_D_DEPLOY_JSON_REL", "results/best_futures_1h.json"
+            )
+        )
+        deploy_path = Path(project_root) / rel
+        if deploy_path.is_file():
+            try:
+                with open(deploy_path, encoding="utf-8") as bf:
+                    deploy_data = json.load(bf)
+                enq = build_phase_d_enqueue_params_from_deploy_json(deploy_data)
+                if enq is not None:
+                    study_ml.enqueue_trial(enq)
+                    _logger.info(
+                        "[PHASE-D] Enqueued deploy baseline from %s (warm-start; in n_trials).",
+                        rel,
+                    )
+                else:
+                    _logger.warning(
+                        "[PHASE-D] Deploy enqueue skipped: map %s → Phase-D params failed.",
+                        rel,
+                    )
+            except (OSError, json.JSONDecodeError, TypeError) as _enq_e:
+                _logger.warning("[PHASE-D] Deploy enqueue read failed: %s", _enq_e)
+        else:
+            _logger.info("[PHASE-D] Deploy enqueue skipped: missing file %s", rel)
+
     study_ml.optimize(
         lambda tr: objective_ml_phase_d(tr, ml_ctx),
         n_trials=n_ml_trials,
@@ -699,7 +779,9 @@ def main() -> None:
     for i in range(iter_limit):
         t = completed[i]
         # 1. Cheap checks first (DSR, MDD, Trades)
-        if not _ml_trial_passes_hard_gates(t, check_pbo=False):
+        if not _ml_trial_passes_hard_gates(
+            t, check_pbo=False, pbo_max=pbo_max_eff, dsr_min=dsr_min_eff
+        ):
             continue
 
         # 2. Expensive PBO check only if cheap gates pass
@@ -719,7 +801,9 @@ def main() -> None:
                     oos_path_scores=oos_tw,
                 )
         
-        if _ml_trial_passes_hard_gates(t, float(pbo_obs), check_pbo=True):
+        if _ml_trial_passes_hard_gates(
+            t, float(pbo_obs), check_pbo=True, pbo_max=pbo_max_eff, dsr_min=dsr_min_eff
+        ):
             _logger.info(f"  [PASS] Best Trial found at rank {i+1} (PBO={pbo_obs:.4f})")
             best_trial = t
             break
@@ -767,7 +851,14 @@ def main() -> None:
         else:
             pbo_obs, rho_obs = (0.5, 0.0)
         dsr_obs = float(best_trial.user_attrs.get("gate1_dsr", 0.0))
-        gate_ok = check_hard_gates_ml(oos_port, float(pbo_obs), dsr_obs, 0.55)
+        gate_ok = check_hard_gates_ml(
+            oos_port,
+            float(pbo_obs),
+            dsr_obs,
+            0.55,
+            pbo_max_override=pbo_max_eff,
+            dsr_min_override=dsr_min_eff,
+        )
         _logger.info(
             " [PHASE 3 AUDIT] PBO=%.4f | DSR=%.4f | RESULT: %s",
             float(pbo_obs),
@@ -787,7 +878,7 @@ def main() -> None:
         span = max(0, len(ref_df) - o0)
         leg_w = max(1, span // n_wf)
         wf_tw_sum = 0.0
-        tw_legs: List[float] = []
+        tw_legs: list[float] = []
         for leg in range(n_wf):
             ls = o0 + leg * leg_w
             le = o0 + (leg + 1) * leg_w if leg < n_wf - 1 else len(ref_df)
@@ -863,6 +954,24 @@ def main() -> None:
                     _crisis_avg_pct,
                 )
         _logger.info(" [WF] sum terminal_wealth_ratio (all legs)=%.4f", wf_tw_sum)
+        if len(tw_legs) >= 2:
+            _erg = wf_path_ergodicity_deviation_pct(tw_legs)
+            _eguide = float(OPT_FUTURES_CONFIG.get("FUTURES_ERGODICITY_GUIDELINE_PCT", 15.0))
+            _logger.info(
+                " [ERGODICITY] wf_leg_tw max_deviation_from_mean=%.2f%% "
+                "(guideline %.1f%%)",
+                _erg,
+                _eguide,
+            )
+            if bool(OPT_FUTURES_CONFIG.get("FUTURES_ERGODICITY_SOFT_WARN_ENABLED", True)):
+                if _erg > _eguide:
+                    _logger.warning(
+                        " [ERGODICITY HARD GATE] max_deviation %.2f%% "
+                        "exceeds guideline %.1f%%. Failing gate.",
+                        _erg,
+                        _eguide,
+                    )
+                    gate_ok = False
         if wf_hmm_refit and tw_legs:
             all_ok = all(t >= wf_tw_floor for t in tw_legs)
             mean_ok = (sum(tw_legs) / len(tw_legs)) >= wf_tw_mean_min
@@ -884,8 +993,8 @@ def main() -> None:
 
     # [STEP 5.1/5] IS & Hold-out Evaluation
     _logger.info("[STEP 5.1/5] Evaluating IS and Hold-out Performance...")
-    is_data_maps: Dict[str, Dict[str, Any]] = {}
-    ho_data_maps: Dict[str, Dict[str, Any]] = {}
+    is_data_maps: dict[str, dict[str, Any]] = {}
+    ho_data_maps: dict[str, dict[str, Any]] = {}
 
     mai = ml_ctx.multi_alignment_info or {}
     alignment_offsets = mai.get("alignment_offsets", {})
@@ -1028,9 +1137,12 @@ def main() -> None:
                 _pbo_improved = float(pbo_obs) < _champ_pbo
                 _oos_acceptable = _new_oos > (0.75 * _champ_oos)
 
-                _robustness_upgrade = (_champ_ho < 0) and (_new_ho > 0) and (float(pbo_obs) < 0.35)
+                _pbo_champ_max = float(pbo_champ_eff)
+                _robustness_upgrade = (_champ_ho < 0) and (_new_ho > 0) and (
+                    float(pbo_obs) < (_pbo_champ_max - 0.05)
+                )
 
-                _pbo_strict = float(pbo_obs) <= 0.40
+                _pbo_strict = float(pbo_obs) <= _pbo_champ_max
                 # Session 25: Reject candidates that regress PBO by >0.05 unless OOS jumps >=10%.
                 _pbo_regression = float(pbo_obs) > (_champ_pbo + 0.05)
                 _oos_large_jump = _new_oos >= (_champ_oos + 10.0)
@@ -1076,8 +1188,9 @@ def main() -> None:
 
     # [Dual-Audit Dashboard] Integrated Performance & Reliability side-by-side
     champion_json_path = Path(project_root) / "logs" / "experiments" / "champion.json"
-    champ_m: Dict[str, Any] = {
-        "pbo": 0.5, "p10": 0.0, "dsr": 0.0, "tw": 1.0, "cagr": 0.0, "mdd": 0.0
+    champ_m: dict[str, Any] = {
+        "pbo": 0.5, "p10": 0.0, "dsr": 0.0, "tw": 1.0, "cagr": 0.0, "mdd": 0.0,
+        "time_2x": 999.0, "cvar": 0.0, "net_alpha": 0.0
     }
     if champion_json_path.exists():
         try:
@@ -1091,9 +1204,23 @@ def main() -> None:
                 "tw": float(_met.get("oos_terminal_wealth", 1.0)), # Adjusted key
                 "cagr": float(_met.get("oos_cagr_pct", 0.0)),
                 "mdd": float(_met.get("oos_mdd_pct", 0.0)),
+                "time_2x": float(_met.get("oos_time_to_2x", 999.0)),
+                "cvar": float(_met.get("oos_cvar_pct", 0.0)),
+                "net_alpha": float(_met.get("oos_net_alpha_pct", 0.0)),
             }
         except Exception as _ce:
             _logger.debug("Champion metrics parse failed: %s", _ce)
+
+    # SOTA WEALTH (futures-opt) calculation for Candidate
+    eq_arr = np.asarray(oos_port.get("equity_curve", []), dtype=np.float64)
+    hrs = int(args.tf.replace("h", "")) if args.tf.endswith("h") else 4
+    bpy = (24.0 / hrs) * 365.0
+    if eq_arr.size > 1:
+        step_log = np.log(np.clip(eq_arr[1:] / eq_arr[:-1], 1e-9, None))
+        t2x_n, _ = calc_time_to_target_wealth(step_log, 2.0, bpy)
+        nalpha_n = calc_net_alpha_with_friction(eq_arr, 0.0, bpy)
+    else:
+        t2x_n, nalpha_n = 999.0, 0.0
 
     new_m = {
         "pbo": float(pbo_obs) if 'pbo_obs' in locals() else 0.5,
@@ -1102,6 +1229,9 @@ def main() -> None:
         "tw": float(oos_port.get("terminal_wealth_ratio", 1.0)),
         "cagr": float(oos_port.get("cagr_pct", 0.0)),
         "mdd": float(oos_port.get("mdd_pct", 0.0)),
+        "time_2x": float(t2x_n),
+        "cvar": float(oos_port.get("cvar_pct", 0.0)),
+        "net_alpha": float(nalpha_n * 100.0),
     }
     
     _verdict = "PROMOTE ✅" if gate_ok else "HOLD ❌"

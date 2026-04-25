@@ -34,6 +34,12 @@ def _uniq_weights_binary(y: np.ndarray, horizon: int) -> np.ndarray:
 
 @dataclass
 class MetaLabeler:
+    """
+    Directional meta-labeling model using LightGBM and probability calibration.
+    
+    Trains independent classifiers for Long and Short directions, providing
+    calibrated probabilities for trade execution.
+    """
     n_estimators: int = 500
     max_depth: int = 4
     learning_rate: float = 0.05
@@ -61,7 +67,8 @@ class MetaLabeler:
         vertical_barrier_bars: int,
     ) -> tuple[int, int, int]:
         """
-        Returns (train_end, calib_split, calib_start) row counts for time-ordered split.
+        Calculate (train_end, calib_split, calib_start) row counts for time-ordered split.
+
         Labels must not leak across [train_end, calib_start).
         """
         purge = max(0, int(vertical_barrier_bars))
@@ -166,15 +173,16 @@ class MetaLabeler:
         X: pd.DataFrame,
         y: pd.Series,
         is_end_idx: int,
-    ) -> "MetaLabeler":
-        """
-        Fit dual directional classifiers on IS data.
+    ) -> MetaLabeler:
+        """Fit dual directional classifiers on IS data.
 
         Args:
             X: Feature matrix (gp_alpha + hmm_prob columns).
             y: TBM labels: +1 (Long TP), -1 (Short TP), 0 (neutral), 0.5 (fallback).
             is_end_idx: IS/OOS split index.
+
         """
+
         X_is = X.iloc[:is_end_idx].replace([np.inf, -np.inf], np.nan).fillna(0.0)
         y_is = y.iloc[:is_end_idx].astype(np.float64)
 
@@ -193,9 +201,7 @@ class MetaLabeler:
     def predict_proba_calibrated(
         self, X: pd.DataFrame
     ) -> tuple[np.ndarray, np.ndarray]:
-        """
-        Returns (calib_prob_long, calib_prob_short) arrays of shape (N,).
-        """
+        """Compute (calib_prob_long, calib_prob_short) arrays of shape (N,)."""
         Xv = X.replace([np.inf, -np.inf], np.nan).fillna(0.0)
         n = len(Xv)
 
@@ -213,7 +219,7 @@ class MetaLabeler:
                 cal = iso.predict(raw)
             else:
                 return np.full(n, 0.5, dtype=np.float64)
-            return cast(np.ndarray, np.asarray(cal, dtype=np.float64))
+            return np.asarray(cal, dtype=np.float64)
 
         prob_long = _predict(self._lgb_long, self._iso_long, self._platt_long)
         prob_short = _predict(self._lgb_short, self._iso_short, self._platt_short)
@@ -221,8 +227,10 @@ class MetaLabeler:
 
     @property
     def threshold_long(self) -> float:
+        """Optimal probability threshold for Long signals."""
         return self._thr_long
 
     @property
     def threshold_short(self) -> float:
+        """Optimal probability threshold for Short signals."""
         return self._thr_short
