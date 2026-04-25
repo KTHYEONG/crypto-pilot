@@ -1,5 +1,5 @@
-"""
-GP Alpha Miner - Cross-Sectional Ranking Edition (LightGBM Architecture Swap).
+"""GP Alpha Miner - Cross-Sectional Ranking Edition (LightGBM Architecture Swap).
+
 Learns a universal formula across multiple symbols using panel data and CS-IC fitness.
 """
 
@@ -8,9 +8,9 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import pandas as pd
@@ -30,6 +30,19 @@ _logger = logging.getLogger(__name__)
 def _generate_smart_cache_stem(
     pop: int, gen: int, horizons: tuple[int, ...], symbols: list[str], is_end_date: str | None
 ) -> str:
+    """Generate a unique cache stem based on miner configuration and data scope.
+
+    Args:
+        pop: Population size.
+        gen: Number of generations.
+        horizons: Target horizons.
+        symbols: List of symbols used.
+        is_end_date: Cutoff date for In-Sample data.
+
+    Returns:
+        A hash-tagged string stem for filenames.
+
+    """
     h_str = "-".join(map(str, horizons))
     prefix = f"lgbm_univ_s{len(symbols)}_h{h_str}"
 
@@ -50,9 +63,15 @@ def _generate_smart_cache_stem(
 
 
 def _pct_uniform_cs_is_fit(unstacked: pd.DataFrame, is_row_mask: np.ndarray) -> pd.DataFrame:
-    """
-    Replace full-panel rank(pct) with IS-fitted empirical CDF → uniform [0,1] on all rows
-    (frozen CDF applied to OOS rows; no cross-time OOS leakage into IS ranks).
+    """Apply IS-fitted empirical CDF to achieve uniform [0,1] distribution across rows.
+
+    Args:
+        unstacked: Wide-form dataframe of component values.
+        is_row_mask: Boolean mask for In-Sample rows.
+
+    Returns:
+        Transformed uniform dataframe.
+
     """
     if unstacked.shape[1] < 2 or len(unstacked) != int(is_row_mask.shape[0]):
         return pd.DataFrame(0.5, index=unstacked.index, columns=unstacked.columns)
@@ -80,6 +99,15 @@ def _pct_uniform_cs_is_fit(unstacked: pd.DataFrame, is_row_mask: np.ndarray) -> 
 
 
 def _resolve_gp_feature_columns(panel_df: pd.DataFrame) -> list[str]:
+    """Identify columns to be used as features for the GP/ML model.
+
+    Args:
+        panel_df: Input panel dataframe.
+
+    Returns:
+        List of feature column names.
+
+    """
     blocked = {"target", "close", "tbm_gp_weight", "regime_pre_hmm"}
     cs_names = sorted(c for c in panel_df.columns if c.startswith("cs_"))
     if cs_names:
@@ -90,6 +118,11 @@ def _resolve_gp_feature_columns(panel_df: pd.DataFrame) -> list[str]:
 
 @dataclass
 class GPAlphaMiner:
+    """Miner for evolving cross-sectional alpha components using LightGBM.
+
+    Replaces gplearn for improved performance and robustness.
+    """
+
     n_features_to_select: int = 15
     population_size: int = 1000
     generations: int = 20
@@ -98,9 +131,24 @@ class GPAlphaMiner:
     n_jobs: int = 1
     parsimony_coefficient: float = 0.001
 
+    # Internal state
+    _st: LGBMRegressor | None = field(default=None, init=False)
+    _kept_indices: list[int] | None = field(default=None, init=False)
+    _mp_mean: np.ndarray | None = field(default=None, init=False)
+    _mp_std: np.ndarray | float | None = field(default=None, init=False)
+    _mp_evecs: np.ndarray | None = field(default=None, init=False)
+
     def _cleanup_old_caches(self, cache_path: Path, max_age_days: int = 7) -> None:
+        """Remove stale cache files.
+
+        Args:
+            cache_path: Path to cache file (used for directory resolution).
+            max_age_days: Maximum age of cache files in days.
+
+        """
         try:
             import time
+
             now = time.time()
             cache_dir = cache_path.parent
             if not cache_dir.exists():
@@ -123,6 +171,18 @@ class GPAlphaMiner:
         is_end_date: str | None = None,
         filter_options: dict[str, Any] | None = None,
     ) -> pd.DataFrame:
+        """Train and select alpha components using a cross-sectional approach.
+
+        Args:
+            panel_df: Input panel dataframe.
+            cache_path: Optional path for caching raw results.
+            is_end_date: Cutoff date for In-Sample data.
+            filter_options: Options for alpha component filtering.
+
+        Returns:
+            Dataframe of selected and filtered alpha components.
+
+        """
         if panel_df.empty:
             return pd.DataFrame()
 
@@ -147,7 +207,7 @@ class GPAlphaMiner:
                     if len(loaded) == len(panel_df):
                         _logger.info("LightGBM CS Cache Hit (RAW): %s.", versioned_cache.name)
                         if meta_cache.exists():
-                            with open(meta_cache, "r") as f:
+                            with open(meta_cache) as f:
                                 loaded.attrs.update(json.load(f))
                         raw_alpha_df = loaded
                 except Exception as e:
@@ -209,10 +269,77 @@ class GPAlphaMiner:
             x_clean = np.where(np.isfinite(x_grid), x_grid, 0.0)
             y_clean = np.where(np.isfinite(y_raw), y_raw, 0.0)
 
+            mask = sample_weight > 0
+            # --- MI Audit & MP Denoising ---
+            if mask.sum() > 100:
+                from sklearn.feature_selection import mutual_info_regression
+
+                x_fit = x_clean[mask]
+                y_fit = y_clean[mask]
+
+                # 1. MI Audit
+                n_samples_fit = x_fit.shape[0]
+                sample_size = min(10000, n_samples_fit)
+                idx = np.random.choice(n_samples_fit, sample_size, replace=False)
+                mi_scores = mutual_info_regression(x_fit[idx], y_fit[idx], random_state=42)
+                max_mi = float(np.max(mi_scores)) if len(mi_scores) > 0 else 0.0
+
+                if max_mi < 0.001:
+                    _logger.warning(
+                        " [STAGNATION DETECTED] Max MI is %.5f. Plateau reached.", max_mi
+                    )
+
+                kept_indices = [i for i, score in enumerate(mi_scores) if score > 1e-4]
+                if len(kept_indices) < max(5, len(feat_cols) // 4):
+                    kept_indices = cast(
+                        list[int], np.argsort(mi_scores)[-max(5, len(feat_cols) // 4) :].tolist()
+                    )
+
+                _logger.info(
+                    " [MI AUDIT] Kept %d/%d features based on MI. Max MI=%.5f",
+                    len(kept_indices),
+                    len(feat_cols),
+                    max_mi,
+                )
+
+                # Subset features
+                x_clean = x_clean[:, kept_indices]
+                x_fit = x_fit[:, kept_indices]
+                self._kept_indices = kept_indices  # Store for transform
+
+                # 2. Marchenko-Pastur Denoising
+                n_s, n_f = x_fit.shape
+                if n_s > n_f and n_f > 1:
+                    x_mean = np.mean(x_fit, axis=0)
+                    x_std = np.std(x_fit, axis=0)
+                    x_std[x_std == 0] = 1.0
+                    x_norm = (x_fit - x_mean) / x_std
+
+                    corr = np.dot(x_norm.T, x_norm) / n_s
+                    evals, evecs = np.linalg.eigh(corr)
+
+                    q = n_s / float(n_f)
+                    e_max = (1 + np.sqrt(1 / q)) ** 2
+
+                    n_facts = int(np.sum(evals > e_max))
+                    if 0 < n_facts < n_f:
+                        _logger.info(
+                            " [MP DENOISE] Keeping %d PCs out of %d",
+                            n_facts,
+                            n_f,
+                        )
+                        evecs_kept = evecs[:, -n_facts:]
+                        x_clean_norm = (x_clean - x_mean) / x_std
+                        x_clean_denoised = np.dot(np.dot(x_clean_norm, evecs_kept), evecs_kept.T)
+                        x_clean = x_clean_denoised * x_std + x_mean
+                        self._mp_mean = x_mean
+                        self._mp_std = x_std
+                        self._mp_evecs = evecs_kept
+            else:
+                self._kept_indices = list(range(len(feat_cols)))
+                self._mp_mean = None
+
             # --- LightGBM Model ---
-            # Hyperparams fixed (not in Optuna space). Replaced GP 2026-04-22 after GP produced
-            # DSR=0.0 across 12+ attempts. LightGBM achieved IS IC=0.183, OOS IC=0.122 immediately.
-            # Next hypothesis: add n_estimators/num_leaves/learning_rate to _suggest_ml_phase_d.
             _logger.info("Training LightGBM Regressor for alpha generation...")
             lgbm = LGBMRegressor(
                 objective="regression",
@@ -282,20 +409,21 @@ class GPAlphaMiner:
             require_regime_gate=bool(fo.get("require_regime_gate", True)),
         )
 
-        surviving_cols = [c for c in alpha_df_all.columns if c.startswith("gp_alpha_")
-                          and alpha_df_all[c].std() > 1e-6]
+        surviving_cols = [
+            c
+            for c in alpha_df_all.columns
+            if c.startswith("gp_alpha_") and alpha_df_all[c].std() > 1e-6
+        ]
 
         if "gp_alpha_00" not in surviving_cols and surviving_cols:
             best_surv = surviving_cols[0]
-            _logger.info(
-                " [PROMOTION] gp_alpha_00 failed gates. Promoting %s to slot 00.", best_surv
-            )
+            _logger.info(" [PROMOTION] Promoting %s to slot 00.", best_surv)
             tmp = alpha_df_all["gp_alpha_00"].copy()
             alpha_df_all["gp_alpha_00"] = alpha_df_all[best_surv]
             alpha_df_all[best_surv] = tmp
 
         if float(filt_meta.get("neutralize_primary", 0.0)) > 0.5:
-            _logger.warning(" [FILTER] gp_alpha_00 neutralized due to OOS decay.")
+            _logger.warning(" [FILTER] gp_alpha_00 neutralized.")
             alpha_df_all["gp_alpha_00"] = 0.5
 
         alpha_df = alpha_df_all.reindex(panel_df.index).fillna(0.5)
@@ -305,6 +433,17 @@ class GPAlphaMiner:
         return alpha_df
 
     def transform_cs(self, panel_df: pd.DataFrame, cache_path: Path | None = None) -> pd.DataFrame:
+        """Transform panel features using the trained alpha model.
+
+        Args:
+            panel_df: Input panel dataframe.
+            cache_path: Optional path to cache (not used in transform currently).
+
+        Returns:
+            Dataframe of predicted alpha components.
+
+        """
+        _ = cache_path
         if panel_df.empty:
             return pd.DataFrame()
 
@@ -316,6 +455,18 @@ class GPAlphaMiner:
         x = work[feat_cols].fillna(0.0).to_numpy(dtype=np.float64)
 
         if hasattr(self, "_st") and self._st is not None:
+            kept = getattr(self, "_kept_indices", list(range(x.shape[1])))
+            if x.shape[1] >= len(kept):
+                x = x[:, kept]
+
+            mp_mean = getattr(self, "_mp_mean", None)
+            mp_evecs = getattr(self, "_mp_evecs", None)
+            if mp_mean is not None and mp_evecs is not None:
+                mp_std = getattr(self, "_mp_std", 1.0)
+                x_norm = (x - mp_mean) / mp_std
+                x_denoised = np.dot(np.dot(x_norm, mp_evecs), mp_evecs.T)
+                x = x_denoised * mp_std + mp_mean
+
             out_arr = self._st.predict(x)
             cols = [f"gp_alpha_{i:02d}" for i in range(self.n_features_to_select)]
             out_grid = np.full((x.shape[0], self.n_features_to_select), 0.5, dtype=np.float64)

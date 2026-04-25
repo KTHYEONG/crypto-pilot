@@ -1,5 +1,5 @@
-"""
-SpotBot - 24시간 자동 현물(Upbit) 트레이딩 봇
+"""SpotBot - 24시간 자동 현물(Upbit) 트레이딩 봇.
+
 ===================================================
 - Upbit 현물 시장 특화 (Long-Only, 1x Leverage, KRW 마켓)
 - 숏(Short), 레버리지, 펀딩비 관련 로직 완벽 제거
@@ -17,28 +17,39 @@ import sys
 import threading
 import time
 import uuid
-from datetime import datetime, timedelta, timezone
+from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
 from functools import wraps
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, ParamSpec, TypeVar, cast
 
 import numpy as np
 import pandas as pd
 
-try:
-    import ccxt
-except ImportError:
-    ccxt = None
+P = ParamSpec("P")
+T = TypeVar("T")
 
+ccxt: Any = None
 try:
-    import msvcrt
+    import ccxt as ccxt_lib
+    ccxt = ccxt_lib
 except ImportError:
-    msvcrt = None
+            pass
+    
 
+msvcrt: Any = None
 try:
-    import fcntl
+    import msvcrt  # noqa: F401
 except ImportError:
-    fcntl = None
+            pass
+    
+
+fcntl: Any = None
+try:
+    import fcntl  # noqa: F401
+except ImportError:
+            pass
+    
 
 # Project Root Setup
 try:
@@ -48,8 +59,8 @@ try:
 except IndexError:
     sys.path.append(os.getcwd())
 
-from config.opt_config import SPOT_SYMBOLS
-from config.settings import (
+from config.opt_config import SPOT_SYMBOLS  # noqa: E402
+from config.settings import (  # noqa: E402
     API_RETRY_ATTEMPTS,
     API_RETRY_WAIT_MAX,
     API_RETRY_WAIT_MIN,
@@ -74,13 +85,16 @@ from config.settings import (
     UPBIT_SECRET_KEY,
     UPBIT_SPOT_TAKER_FEE_RATE,
 )
-from src.core.exchange.upbit_client import UpbitClient
-from src.core.utils.components import (
+from src.core.exchange.upbit_client import UpbitClient  # noqa: E402
+from src.core.utils.components import (  # noqa: E402
     HealthCheckManager,
     TradeHistoryDB,
 )
-from src.core.utils.utils import setup_logger
-from src.domain.spot.strategies_spot import UltimateSpotStrategy, merge_exit_family_params
+from src.core.utils.utils import setup_logger  # noqa: E402
+from src.domain.spot.strategies_spot import (  # noqa: E402
+    SpotPipelineStrategy,
+    merge_exit_family_params,
+)
 
 logger = setup_logger("SpotBot")
 
@@ -88,17 +102,18 @@ logger = setup_logger("SpotBot")
 def _parse_utc_dt(s: str) -> datetime:
     """Parse ISO datetime string, treating naive strings as UTC aware."""
     if not s:
-        return datetime.min.replace(tzinfo=timezone.utc)
+        return datetime.min.replace(tzinfo=UTC)
     try:
         dt = datetime.fromisoformat(s)
         if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return dt.astimezone(timezone.utc)
+            dt = dt.replace(tzinfo=UTC)
+        return dt.astimezone(UTC)
     except (ValueError, TypeError):
-        return datetime.min.replace(tzinfo=timezone.utc)
+        pass
+        return datetime.min.replace(tzinfo=UTC)
 
 
-_CCXT_TRANSIENT_ERRORS: Tuple[type, ...] = ()
+_CCXT_TRANSIENT_ERRORS: tuple[type, ...] = ()
 if ccxt is not None:
     _CCXT_TRANSIENT_ERRORS = tuple(
         err
@@ -133,15 +148,17 @@ def _is_retryable_api_exception(exc: Exception) -> bool:
     return False
 
 
-def network_api_retry(func):
+def network_api_retry(func: Callable[P, T]) -> Callable[P, T]:
+    """Retry logic for network API calls."""
     @wraps(func)
-    def wrapper(*args, **kwargs):
-        last_error: Optional[Exception] = None
+    def wrapper(*args: P.args, **kwargs: P.kwargs) -> T:
+        last_error: Exception | None = None
         max_attempts = max(1, int(API_RETRY_ATTEMPTS))
         for attempt in range(max_attempts):
             try:
                 return func(*args, **kwargs)
             except Exception as e:
+                pass
                 if not _is_retryable_api_exception(e):
                     raise
                 last_error = e
@@ -163,11 +180,12 @@ def network_api_retry(func):
 
 
 class StateManager:
-    """Spot 전용 거래 상태 관리 (JSON 파일 기반)"""
+    """Spot 전용 거래 상태 관리 (JSON 파일 기반)."""
 
     def __init__(self, state_file: Path) -> None:
+        """Initialize StateManager with JSON file path."""
         self.state_file = Path(state_file)
-        self._memory_cache: Dict[str, Any] = {}
+        self._memory_cache: dict[str, Any] = {}
         self._cache_initialized: bool = False
         self._thread_lock = threading.Lock()
         self._dirty: bool = False
@@ -180,15 +198,16 @@ class StateManager:
             self.state_file.parent.mkdir(parents=True, exist_ok=True)
             self._save_unlocked({})
 
-    def _load_unlocked(self) -> dict:
+    def _load_unlocked(self) -> dict[str, Any]:
         try:
-            with open(self.state_file, "r", encoding="utf-8") as f:
-                return json.load(f)
+            with open(self.state_file, encoding="utf-8") as f:
+                return cast(dict[str, Any], json.load(f))
         except Exception as e:
+            pass
             logger.error(f"⚠️ State load error: {e}")
             return {}
 
-    def _save_unlocked(self, state: dict) -> None:
+    def _save_unlocked(self, state: dict[str, Any]) -> None:
         tmp_file = self.state_file.with_suffix(self.state_file.suffix + ".tmp")
         try:
             self.state_file.parent.mkdir(parents=True, exist_ok=True)
@@ -199,25 +218,31 @@ class StateManager:
             try:
                 os.replace(tmp_file, self.state_file)
             except OSError:
+                pass
                 if self.state_file.exists():
                     self.state_file.unlink()
                 os.rename(tmp_file, self.state_file)
         except Exception as e:
+            pass
             logger.error(f"⚠️ State save error: {e}")
             try:
                 if tmp_file.exists():
                     tmp_file.unlink()
-            except Exception:
+            except Exception as e:
+                pass
+                logger.debug(f"Ignored error: {e}")
                 ...
 
-    def get_symbol_state(self, symbol: str) -> dict:
+    def get_symbol_state(self, symbol: str) -> dict[str, Any]:
+        """Get trading state for a specific symbol."""
         with self._thread_lock:
             if not self._cache_initialized:
                 self._memory_cache = self._load_unlocked()
                 self._cache_initialized = True
             return dict(self._memory_cache.get(symbol, {}))
 
-    def update_symbol_state(self, symbol: str, data: dict) -> None:
+    def update_symbol_state(self, symbol: str, data: dict[str, Any]) -> None:
+        """Update trading state for a specific symbol."""
         with self._thread_lock:
             if not self._cache_initialized:
                 self._memory_cache = self._load_unlocked()
@@ -228,13 +253,14 @@ class StateManager:
             self._dirty = True
             self._maybe_flush()
 
-    def clear_symbol_state(self, symbol: str, preserve_keys: Optional[list[str]] = None) -> None:
+    def clear_symbol_state(self, symbol: str, preserve_keys: list[str] | None = None) -> None:
+        """Clear trading state for a specific symbol."""
         with self._thread_lock:
             if not self._cache_initialized:
                 self._memory_cache = self._load_unlocked()
                 self._cache_initialized = True
             if symbol in self._memory_cache:
-                preserved: Dict[str, Any] = {}
+                preserved: dict[str, Any] = {}
                 if preserve_keys:
                     preserved = {
                         k: self._memory_cache[symbol].get(k)
@@ -246,6 +272,7 @@ class StateManager:
                 self._maybe_flush()
 
     def list_all_symbols(self) -> list[str]:
+        """List all symbols in the state file."""
         with self._thread_lock:
             if not self._cache_initialized:
                 self._memory_cache = self._load_unlocked()
@@ -262,6 +289,7 @@ class StateManager:
             self._last_flush = now
 
     def flush_now(self) -> None:
+        """Flush memory cache to disk immediately."""
         with self._thread_lock:
             if self._dirty:
                 self._save_unlocked(self._memory_cache)
@@ -270,13 +298,14 @@ class StateManager:
 
 
 class SpotBot:
-    """Production-grade 업비트 현물 트레이딩 봇"""
+    """Production-grade 업비트 현물 트레이딩 봇."""
 
     def __init__(self) -> None:
+        """Initialize SpotBot with clients and managers."""
         self.client = UpbitClient(UPBIT_ACCESS_KEY, UPBIT_SECRET_KEY)
-        self.strategies: Dict[str, UltimateSpotStrategy] = {}
-        self.params_map: Dict[str, dict] = {}
-        self.symbols: list = []
+        self.strategies: dict[str, SpotPipelineStrategy] = {}
+        self.params_map: dict[str, dict[str, Any]] = {}
+        self.symbols: list[str] = []
 
         self.trade_db = TradeHistoryDB(SPOT_STRATEGY_DB)
         self.health_manager = HealthCheckManager(SPOT_HEARTBEAT_FILE)
@@ -288,21 +317,21 @@ class SpotBot:
         self._loop_count: int = 0
         self._last_gc_time: float = 0.0
         self._db_write_lock = threading.Lock()
-        self._last_entry_risk_pct: Dict[str, float] = {}
+        self._last_entry_risk_pct: dict[str, float] = {}
 
-        self.last_calc_candle: Dict[str, str] = {}
+        self.last_calc_candle: dict[str, str] = {}
         self._server_time_offset_ms: int = 0
-        self._last_server_time_sync: datetime = datetime.min.replace(tzinfo=timezone.utc)
+        self._last_server_time_sync: datetime = datetime.min.replace(tzinfo=UTC)
 
-        self._log_last_emit_ts: Dict[str, float] = {}
-        self._log_last_message: Dict[str, str] = {}
+        self._log_last_emit_ts: dict[str, float] = {}
+        self._log_last_message: dict[str, str] = {}
         self._log_throttle_lock = threading.Lock()
         self._time_sync_lock = threading.Lock()
 
         self._setup_signal_handlers()
 
     def _clear_symbol_state_tracked(
-        self, symbol: str, preserve_keys: Optional[list[str]] = None
+        self, symbol: str, preserve_keys: list[str] | None = None
     ) -> None:
         self.state_manager.clear_symbol_state(symbol, preserve_keys=preserve_keys)
         self._last_entry_risk_pct.pop(symbol, None)
@@ -315,7 +344,7 @@ class SpotBot:
         self,
         key: str,
         interval_seconds: float = 0.0,
-        message: Optional[str] = None,
+        message: str | None = None,
         emit_on_change: bool = False,
     ) -> bool:
         with self._log_throttle_lock:
@@ -352,7 +381,7 @@ class SpotBot:
         getattr(logger, level, logger.info)(message)
 
     def _setup_signal_handlers(self) -> None:
-        def signal_handler(signum, frame):
+        def signal_handler(signum: int, frame: Any) -> None:
             logger.info(f"🛑 Received signal {signum}. Initiating graceful shutdown...")
             self._shutdown_requested = True
 
@@ -366,10 +395,10 @@ class SpotBot:
     # ------------------------------------------------------------------ #
 
     def load_strategies_from_json(self) -> None:
-        """
-        best_spot_4h.json[.enc] 단일 공유 파라미터를 로드하여
-        모든 대상 심볼에 동일 전략 파라미터 적용.
-        merge_exit_family_params 적용(백테스트 엔진과 동일 로직).
+        """Load single shared parameters from best_spot_4h.json[.enc].
+
+        Applies same strategy parameters to all target symbols.
+        Applies merge_exit_family_params (same logic as backtest engine).
         """
         logger.info("📂 Loading Spot strategy from best_spot_4h[.enc]...")
 
@@ -387,7 +416,7 @@ class SpotBot:
         from src.core.utils.secure_config import decrypt_config, get_strategy_secret
 
         secret = get_strategy_secret()
-        shared_params: Optional[Dict[str, Any]] = None
+        shared_params: dict[str, Any] | None = None
 
         # 1. Try encrypted first
         if enc_path.exists() and secret:
@@ -395,15 +424,17 @@ class SpotBot:
                 shared_params = decrypt_config(enc_path.read_bytes(), secret)
                 logger.info(f"🛡️ Loaded from encrypted config: {enc_path}")
             except Exception as e:
+                pass
                 logger.error(f"❌ Failed to decrypt {enc_path}: {e}")
 
         # 2. Fallback to plaintext
         if shared_params is None and json_path.exists():
             try:
-                with open(json_path, "r", encoding="utf-8") as f:
+                with open(json_path, encoding="utf-8") as f:
                     shared_params = json.load(f)
                 logger.info(f"📂 Loaded from plaintext config: {json_path}")
             except Exception as e:
+                pass
                 logger.error(f"❌ Failed to parse {json_path}: {e}")
 
         if shared_params is None:
@@ -424,7 +455,7 @@ class SpotBot:
         for symbol in self.symbols:
             clean_sym = symbol.replace("/", "").replace("-", "")
             self.params_map[symbol] = dict(shared_params)
-            self.strategies[symbol] = UltimateSpotStrategy(f"RealSpot_{clean_sym}", shared_params)
+            self.strategies[symbol] = SpotPipelineStrategy(f"RealSpot_{clean_sym}", shared_params)
             logger.info(
                 f"✅ [{symbol}] Strategy initialized | TF={shared_params.get('TIMEFRAME', '4h')}"
             )
@@ -443,25 +474,30 @@ class SpotBot:
     # ------------------------------------------------------------------ #
 
     @network_api_retry
-    def _fetch_balance_safe(self) -> tuple:
-        """Returns (total_krw, free_krw)"""
+    def _fetch_balance_safe(self) -> tuple[float, float]:
+        """Fetch balance from exchange (total_krw, free_krw)."""
         return self.client.fetch_balance()
 
     @network_api_retry
     def _fetch_ohlcv_safe(
         self, symbol: str, timeframe: str, start_str: str
-    ) -> Optional[pd.DataFrame]:
-        return self.client.fetch_ohlcv(symbol, timeframe, start_date=start_str)
+    ) -> pd.DataFrame:
+        """Fetch all OHLCV data."""
+        start_ts = int(pd.Timestamp(start_str).timestamp() * 1000)
+        return self.client.fetch_ohlcv_all(symbol, timeframe, start_timestamp=start_ts)
 
     @network_api_retry
     def _fetch_recent_ohlcv_safe(
         self, symbol: str, timeframe: str, limit: int = 3
-    ) -> Optional[pd.DataFrame]:
+    ) -> pd.DataFrame:
+        """Fetch recent OHLCV data."""
         return self.client.fetch_recent_ohlcv(symbol, timeframe, limit=limit)
 
     @network_api_retry
     def _get_market_price_safe(self, symbol: str) -> float:
-        return self.client.get_market_price(symbol)
+        """Get current market price."""
+        price = self.client.get_market_price(symbol)
+        return float(price if price is not None else 0.0)
 
     @network_api_retry
     def _fetch_server_time_ms_safe(self) -> int:
@@ -478,7 +514,7 @@ class SpotBot:
         self, force: bool = False, sync_interval_seconds: int = 60
     ) -> None:
         with self._time_sync_lock:
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             minutes_in_4h_cycle = (now.hour * 60 + now.minute) % 240
             near_boundary = minutes_in_4h_cycle >= 239 or minutes_in_4h_cycle <= 0
             effective_interval = 5 if near_boundary else max(5, int(sync_interval_seconds))
@@ -492,12 +528,13 @@ class SpotBot:
                     self._server_time_offset_ms = int(server_ms - local_ms)
                     self._last_server_time_sync = now
             except Exception as e:
+                pass
                 self._last_server_time_sync = now
                 logger.debug(f"[time-sync] Server time sync failed: {e}")
 
     def _get_reference_now_ms(self) -> int:
         self._sync_server_time_offset(force=False)
-        return int(datetime.now(timezone.utc).timestamp() * 1000) + int(self._server_time_offset_ms)
+        return int(datetime.now(UTC).timestamp() * 1000) + int(self._server_time_offset_ms)
 
     def _timeframe_to_minutes(self, timeframe: str) -> int:
         tf_raw = str(timeframe or "").strip()
@@ -514,6 +551,7 @@ class SpotBot:
             if tf.endswith("w"):
                 return max(1, int(tf[:-1]) * 10080)
         except ValueError:
+            pass
             return -1
         return -1
 
@@ -526,7 +564,7 @@ class SpotBot:
         slot_start_ms = now_ms - (now_ms % interval_ms)
         return f"{timeframe}_{slot_start_ms}"
 
-    def _select_last_closed_candle(self, df: pd.DataFrame, timeframe: str) -> Optional[pd.Series]:
+    def _select_last_closed_candle(self, df: pd.DataFrame, timeframe: str) -> pd.Series | None:
         if df is None or df.empty:
             return None
         if "timestamp" not in df.columns:
@@ -543,25 +581,26 @@ class SpotBot:
             return df.loc[closed_indices[-1]]
         return df.iloc[-2] if len(df) >= 2 else df.iloc[-1]
 
-    def _extract_candle_timestamp_ms(self, candle: Optional[pd.Series]) -> int:
+    def _extract_candle_timestamp_ms(self, candle: pd.Series | None) -> int:
         if candle is None:
             return 0
         raw_ts = candle.get("timestamp", 0)
         try:
             return int(raw_ts) if not pd.isna(raw_ts) else 0
-        except Exception:
-            return 0
+        except Exception as e:
+            logger.debug(f"Ignored error: {e}")
+        return 0
 
     # ------------------------------------------------------------------ #
     #  Indicator cache                                                     #
     # ------------------------------------------------------------------ #
 
-    def _cache_indicators(self, symbol: str, data: dict) -> None:
+    def _cache_indicators(self, symbol: str, data: dict[str, Any]) -> None:
         if not hasattr(self, "_ind_cache"):
-            self._ind_cache: Dict[str, dict] = {}
+            self._ind_cache: dict[str, dict[str, Any]] = {}
         self._ind_cache[symbol] = data
 
-    def _get_cached_indicators(self, symbol: str) -> dict:
+    def _get_cached_indicators(self, symbol: str) -> dict[str, Any]:
         if not hasattr(self, "_ind_cache"):
             self._ind_cache = {}
         return self._ind_cache.get(symbol, {})
@@ -570,10 +609,10 @@ class SpotBot:
     #  OHLCV prefetch for market breadth regime                           #
     # ------------------------------------------------------------------ #
 
-    def _prefetch_all_ohlcv(self) -> Dict[str, pd.DataFrame]:
-        """
-        Market Breadth Regime를 위해 모든 심볼의 OHLCV를 일괄 수집.
-        Returns {symbol: df} mapping (실패한 심볼은 제외).
+    def _prefetch_all_ohlcv(self) -> dict[str, pd.DataFrame]:
+        """Fetch OHLCV for all symbols in batch for Market Breadth Regime.
+
+        Returns {symbol: df} mapping (excluding failed symbols).
         """
         if not self.symbols:
             return {}
@@ -581,10 +620,10 @@ class SpotBot:
         tf_min = self._timeframe_to_minutes(tf)
         limit = 310
         lookback_days = (limit * tf_min) / 1440
-        start_dt = datetime.now(timezone.utc) - timedelta(days=lookback_days + 2)
+        start_dt = datetime.now(UTC) - timedelta(days=lookback_days + 2)
         start_str = start_dt.strftime("%Y-%m-%d %H:%M:%S")
 
-        data_maps: Dict[str, pd.DataFrame] = {}
+        data_maps: dict[str, pd.DataFrame] = {}
         for symbol in self.symbols:
             try:
                 df = self._fetch_ohlcv_safe(symbol, tf, start_str)
@@ -594,6 +633,7 @@ class SpotBot:
                     ].astype(np.float64)
                     data_maps[symbol] = df
             except Exception as e:
+                pass
                 logger.warning(f"[{symbol}] OHLCV prefetch failed: {e}")
 
         logger.debug(f"Prefetched OHLCV for {len(data_maps)}/{len(self.symbols)} symbols")
@@ -603,8 +643,8 @@ class SpotBot:
     #  Position query                                                      #
     # ------------------------------------------------------------------ #
 
-    def _get_current_position(self, symbol: str, current_price: float) -> dict:
-        """Upbit 잔고 조회로 특정 코인의 보유 포지션 반환"""
+    def _get_current_position(self, symbol: str, current_price: float) -> dict[str, Any]:
+        """Upbit 잔고 조회로 특정 코인의 보유 포지션 반환."""
         try:
             base_coin = symbol.split("-")[1] if "-" in symbol else symbol.split("/")[0]
             balance = self.client.fetch_balance_dict()
@@ -625,6 +665,7 @@ class SpotBot:
 
             return {"amount": amount, "entryPrice": entry_price, "value": value_krw}
         except Exception as e:
+            pass
             logger.error(f"[{symbol}] Failed to fetch Spot position: {e}")
             return {"amount": 0.0, "entryPrice": 0.0, "value": 0.0}
 
@@ -639,6 +680,7 @@ class SpotBot:
                 balance["used"].get(base_coin, 0.0)
             )
         except Exception as e:
+            pass
             logger.error("[%s] Failed to read base coin amount: %s", symbol, e)
             return 0.0
 
@@ -650,16 +692,16 @@ class SpotBot:
         self,
         fill_price: float,
         entry_atr: float,
-        params: dict,
+        params: dict[str, Any],
         balance_krw: float,
         regime_risk_mult: float,
         garch_kelly_f: float,
         regime_state: float = 2.0,
     ) -> float:
-        """
-        백테스트 엔진과 동일한 리스크 기반 포지션 사이징.
+        """Calculate risk-based position sizing identical to backtest engine.
+
         risk_budget = balance * RISK_PER_TRADE * regime_risk_mult * garch_kelly_f
-        amount = risk_budget / stop_distance  (stop_distance = ATR * LONG_ATR_MULT)
+        amount = risk_budget / stop_distance (stop_distance = ATR * LONG_ATR_MULT).
         """
         long_atr_mult = float(params.get("LONG_ATR_MULT", 3.0))
         stop_distance = entry_atr * long_atr_mult
@@ -729,13 +771,13 @@ class SpotBot:
         self,
         symbol: str,
         amount: float,
-        pos: dict,
+        pos: dict[str, Any],
         current_price: float,
-        params: dict,
+        params: dict[str, Any],
         atr: float,
     ) -> bool:
-        """
-        [ENHANCED] Bootstraps local StateManager from live exchange position.
+        """Bootstrap local StateManager from live exchange position [ENHANCED].
+
         Called when a position is found on Upbit but no corresponding state is in spot_state.json.
         """
         try:
@@ -760,7 +802,7 @@ class SpotBot:
             )
 
             state_data = {
-                "entry_time": datetime.now(timezone.utc).isoformat(),
+                "entry_time": datetime.now(UTC).isoformat(),
                 "entry_price": float(entry_price),
                 "entry_atr": float(entry_atr),
                 "side": "LONG",
@@ -786,6 +828,7 @@ class SpotBot:
             )
             return True
         except Exception as e:
+            pass
             logger.error("❌ [%s] Failed to bootstrap state: %s", symbol, e)
             return False
 
@@ -794,11 +837,9 @@ class SpotBot:
         symbol: str,
         expected_qty: float,
         actual_qty: float,
-        params: dict,
+        params: dict[str, Any],
     ) -> bool:
-        """
-        [ENHANCED] Guards against underfilled orders that might lead to state divergence.
-        """
+        """[ENHANCED] Guards against underfilled orders that might lead to state divergence."""
         if expected_qty <= 0 or actual_qty <= 0:
             return actual_qty > 0
 
@@ -823,11 +864,12 @@ class SpotBot:
 
     @network_api_retry
     def _place_order_safe(
-        self, symbol: str, side: str, qty: float, client_order_id: Optional[str] = None
-    ) -> Optional[dict]:
-        """
-        [ENHANCED] Order execution with dry-run support, reconciliation for timeouts,
-        and idempotent behavior using clientOrderId (where supported) or balance tracking.
+        self, symbol: str, side: str, qty: float, client_order_id: str | None = None
+    ) -> dict[str, Any] | None:
+        """Execute order with dry-run support and reconciliation [ENHANCED].
+
+        Order execution with reconciliation for timeouts, and idempotent behavior
+        using clientOrderId (where supported) or balance tracking.
         """
         if self.dry_run:
             px = float(self.client.get_market_price(symbol) or 0.0)
@@ -838,7 +880,7 @@ class SpotBot:
             ccxt_symbol = self.client._normalize_symbol(symbol)
 
             # Upbit doesn't strictly support clientOrderId in the same way,
-            # but we can pass it in params if the adapter supports it or for local tracking.
+            # but we can  it in params if the adapter supports it or for local tracking.
             params = {}
             if client_order_id:
                 params["clientOrderId"] = client_order_id
@@ -861,9 +903,10 @@ class SpotBot:
                 )
 
             logger.info(f"⚡ Order Placed: market {side} {qty} {ccxt_symbol}")
-            return order
+            return cast(dict[str, Any], order)
 
         except ccxt.RequestTimeout:
+            pass
             # [RECONCILIATION] Special handling for timeouts to avoid double entry or orphaned positions
             logger.warning("⚠️ [%s] Order timeout. Reconciling with exchange...", symbol)
             try:
@@ -883,10 +926,12 @@ class SpotBot:
                 )
                 return None
             except Exception as rec_e:
+                pass
                 logger.error("❌ Reconciliation failed: %s", rec_e)
                 return None
 
         except Exception as e:
+            pass
             logger.error(f"❌ Order Failed for {symbol}: {e}")
             return None
 
@@ -896,7 +941,7 @@ class SpotBot:
         expected_qty: float,
         retries: int = SPOT_EXIT_CONFIRM_RETRIES,
         sleep_sec: float = SPOT_EXIT_CONFIRM_SLEEP_SEC,
-    ) -> Tuple[bool, float]:
+    ) -> tuple[bool, float]:
         if self.dry_run:
             return True, float(expected_qty)
         min_fill = max(0.0, float(expected_qty) * 0.95)
@@ -914,7 +959,7 @@ class SpotBot:
         symbol: str,
         retries: int = SPOT_EXIT_CONFIRM_RETRIES,
         sleep_sec: float = SPOT_EXIT_CONFIRM_SLEEP_SEC,
-    ) -> Tuple[bool, float]:
+    ) -> tuple[bool, float]:
         if self.dry_run:
             return True, 0.0
         last_amt = 0.0
@@ -923,7 +968,9 @@ class SpotBot:
                 time.sleep(max(0.0, sleep_sec))
             try:
                 px = self._get_market_price_safe(symbol)
-            except Exception:
+            except Exception as e:
+                pass
+                logger.debug(f"Ignored error: {e}")
                 px = 0.0
             last_amt = self._get_spot_coin_amount_raw(symbol)
             value_krw = last_amt * px
@@ -940,8 +987,9 @@ class SpotBot:
         raw_amt = self._get_spot_coin_amount_raw(symbol)
         try:
             px_chk = self._get_market_price_safe(symbol)
-        except Exception:
-            px_chk = float(current_price)
+        except Exception as e:
+            logger.debug(f"Ignored error: {e}")
+        px_chk = float(current_price)
         value_krw = raw_amt * px_chk if px_chk > 0 else 0.0
         if raw_amt < 1e-12 or value_krw < float(MIN_POSITION_VALUE_KRW):
             self._clear_symbol_state_tracked(
@@ -953,14 +1001,16 @@ class SpotBot:
             )
             return True
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         last_attempt_at = str(state.get("exit_attempt_at") or "")
         cooldown = float(SPOT_EXIT_RECOVERY_COOLDOWN_SEC)
         if last_attempt_at:
             try:
                 if (now - _parse_utc_dt(last_attempt_at)).total_seconds() < cooldown:
                     return False
-            except Exception:
+            except Exception as e:
+                pass
+                logger.debug(f"Ignored error: {e}")
                 ...
 
         recovery_attempts = int(state.get("exit_recovery_attempt_count", 0) or 0) + 1
@@ -980,7 +1030,7 @@ class SpotBot:
                 symbol,
                 {
                     "exit_error": "recovery_order_failed",
-                    "exit_attempt_at": datetime.now(timezone.utc).isoformat(),
+                    "exit_attempt_at": datetime.now(UTC).isoformat(),
                 },
             )
             return False
@@ -993,7 +1043,7 @@ class SpotBot:
                     "exit_pending": True,
                     "exit_error": f"not_flat_after_recovery:{remaining:.8f}",
                     "exit_remaining_amount": float(remaining),
-                    "exit_attempt_at": datetime.now(timezone.utc).isoformat(),
+                    "exit_attempt_at": datetime.now(UTC).isoformat(),
                 },
             )
             return False
@@ -1042,6 +1092,7 @@ class SpotBot:
     # ------------------------------------------------------------------ #
 
     def initialize(self) -> None:
+        """Initialize SpotBot (Upbit)."""
         logger.info("🤖 SpotBot (Upbit) Initializing...")
         self._sync_server_time_offset(force=True)
 
@@ -1055,6 +1106,7 @@ class SpotBot:
             if free_krw < MIN_ORDER_VALUE_KRW:
                 logger.warning(f"⚠️ Low KRW balance (< {MIN_ORDER_VALUE_KRW} KRW)!")
         except Exception as e:
+            pass
             logger.error(f"❌ Failed to fetch balance: {e}")
 
         self.health_manager.update_heartbeat(status="initialized")
@@ -1065,8 +1117,8 @@ class SpotBot:
     # ------------------------------------------------------------------ #
 
     def _refresh_indicators_if_needed(
-        self, symbol: str, all_ohlcv: Dict[str, pd.DataFrame]
-    ) -> dict:
+        self, symbol: str, all_ohlcv: dict[str, pd.DataFrame]
+    ) -> dict[str, Any]:
         """Compute and cache indicators. Returns cached indicator dict."""
         if symbol not in self.params_map or symbol not in self.strategies:
             return {}
@@ -1115,7 +1167,7 @@ class SpotBot:
                 return cached
 
         min_len = min(len(df) for df in all_ohlcv.values())
-        aligned_maps: Dict[str, Dict[str, pd.DataFrame]] = {
+        aligned_maps: dict[str, dict[str, pd.DataFrame]] = {
             s: {indicator_tf: df.iloc[-min_len:].reset_index(drop=True)}
             for s, df in all_ohlcv.items()
         }
@@ -1156,7 +1208,7 @@ class SpotBot:
         self.last_calc_candle[symbol] = current_slot
         return self._get_cached_indicators(symbol)
 
-    def _process_exit(self, symbol: str, current_price: float, cached: dict) -> None:
+    def _process_exit(self, symbol: str, current_price: float, cached: dict[str, Any]) -> None:
         """Exit-only path (includes bootstrap and exit_pending recovery)."""
         try:
             if symbol not in self.params_map or symbol not in self.strategies:
@@ -1331,23 +1383,27 @@ class SpotBot:
                     try:
                         entry_dt = _parse_utc_dt(entry_time_str)
                         elapsed_minutes = (
-                            datetime.now(timezone.utc) - entry_dt
+                            datetime.now(UTC) - entry_dt
                         ).total_seconds() / 60.0
                         tf_min = self._timeframe_to_minutes(indicator_tf)
                         bars_elapsed = int(elapsed_minutes / tf_min) if tf_min > 0 else 0
                         if bars_elapsed >= eff_time_stop:
                             exit_triggered = True
-                            reason = f"Time Stop ({bars_elapsed}>={eff_time_stop} bars, ts_reg={ts_regime_factor:.2f})"
-                    except Exception:
+                            reason = (f"Time Stop ({bars_elapsed}>={eff_time_stop} bars, "
+                                      f"ts_reg={ts_regime_factor:.2f})")
+                    except Exception as e:
                         pass
+                        logger.debug(f"[{symbol}] Ignored error in time-stop calc: {e}")
+                        
 
             self._log_throttled(
                 "debug",
                 f"{symbol}:pos",
                 f"📊 [{symbol}] Holding {amount:.4f} | Cur: {current_price:,.0f} | "
                 f"Stop: {stop_price:,.0f} | BB: {bb_upper:,.0f} | "
-                f"Trail×: {effective_trail_mult:.2f} | trf={trail_regime_factor:.2f} | "
-                f"tsf={ts_regime_factor:.2f} | TP: {'off' if tp_price == np.inf else f'{tp_price:,.0f}'}",
+                f"Trail x: {effective_trail_mult:.2f} | trf={trail_regime_factor:.2f} | "
+                f"tsf={ts_regime_factor:.2f} | "
+                f"TP: {'off' if tp_price == np.inf else f'{tp_price:,.0f}'}",
                 600.0,
             )
 
@@ -1360,7 +1416,7 @@ class SpotBot:
                 symbol,
                 {
                     "exit_pending": True,
-                    "exit_attempt_at": datetime.now(timezone.utc).isoformat(),
+                    "exit_attempt_at": datetime.now(UTC).isoformat(),
                     "exit_remaining_amount": float(amount),
                     "exit_recovery_attempt_count": 0,
                     "exit_error": "initial_attempt",
@@ -1376,7 +1432,7 @@ class SpotBot:
                     symbol,
                     {
                         "exit_error": "sell_order_failed",
-                        "exit_attempt_at": datetime.now(timezone.utc).isoformat(),
+                        "exit_attempt_at": datetime.now(UTC).isoformat(),
                     },
                 )
                 return
@@ -1389,7 +1445,7 @@ class SpotBot:
                         "exit_pending": True,
                         "exit_remaining_amount": float(remaining),
                         "exit_error": "sell_not_confirmed_flat",
-                        "exit_attempt_at": datetime.now(timezone.utc).isoformat(),
+                        "exit_attempt_at": datetime.now(UTC).isoformat(),
                     },
                 )
                 return
@@ -1426,6 +1482,7 @@ class SpotBot:
             )
 
         except Exception as e:
+            pass
             logger.error(f"🚨 Error in exit logic for {symbol}: {e}")
             self.health_manager.record_error(e)
 
@@ -1433,7 +1490,7 @@ class SpotBot:
         self,
         symbol: str,
         current_price: float,
-        cached: dict,
+        cached: dict[str, Any],
         available_krw: float,
     ) -> float:
         """Entry-only path. Returns KRW consumed (0.0 if no entry)."""
@@ -1567,7 +1624,7 @@ class SpotBot:
             self.state_manager.update_symbol_state(
                 symbol,
                 {
-                    "entry_time": datetime.now(timezone.utc).isoformat(),
+                    "entry_time": datetime.now(UTC).isoformat(),
                     "entry_price": fill_price,
                     "entry_atr": atr,
                     "side": "LONG",
@@ -1602,6 +1659,7 @@ class SpotBot:
             return krw_used
 
         except Exception as e:
+            pass
             logger.error(f"🚨 Error in entry logic for {symbol}: {e}")
             self.health_manager.record_error(e)
             return 0.0
@@ -1620,6 +1678,7 @@ class SpotBot:
             try:
                 price = self._get_market_price_safe(symbol)
             except Exception as e:
+                pass
                 logger.warning("[%s] Reconcile skipped (price): %s", symbol, e)
                 continue
             try:
@@ -1670,11 +1729,12 @@ class SpotBot:
                         ],
                     )
             except Exception as ex:
+                pass
                 logger.error("[%s] Reconcile error: %s", symbol, ex)
 
-    def _get_positions_snapshot(self) -> dict:
+    def _get_positions_snapshot(self) -> dict[str, Any]:
         """Lightweight positions summary for heartbeat."""
-        out: Dict[str, dict] = {}
+        out: dict[str, dict[str, Any]] = {}
         for symbol in self.symbols:
             try:
                 price = self._get_market_price_safe(symbol)
@@ -1687,7 +1747,9 @@ class SpotBot:
                     "entry_price": ep,
                     "active_stop_price": sp,
                 }
-            except Exception:
+            except Exception as e:
+                pass
+                logger.debug(f"Ignored error: {e}")
                 out[symbol] = {}
         return out
 
@@ -1696,6 +1758,7 @@ class SpotBot:
         try:
             self.state_manager.flush_now()
         except Exception as e:
+            pass
             logger.warning("State flush on shutdown failed: %s", e)
 
         open_positions = {}
@@ -1712,15 +1775,17 @@ class SpotBot:
                         amount,
                     )
             except Exception as e:
+                pass
                 logger.debug("Shutdown position check [%s]: %s", symbol, e)
 
         try:
             self.health_manager.update_heartbeat(
                 status="stopped",
                 positions=open_positions,
-                extra={"shutdown_time": datetime.now(timezone.utc).isoformat()},
+                extra={"shutdown_time": datetime.now(UTC).isoformat()},
             )
         except Exception as e:
+            pass
             logger.warning("Heartbeat on shutdown failed: %s", e)
 
     # ------------------------------------------------------------------ #
@@ -1728,6 +1793,7 @@ class SpotBot:
     # ------------------------------------------------------------------ #
 
     def run(self) -> None:
+        """Run the bot."""
         try:
             self.initialize()
             logger.info(f"▶️ Starting Main Loop (Interval: {SPOT_LOOP_INTERVAL_SECONDS}s)")
@@ -1744,6 +1810,7 @@ class SpotBot:
                         try:
                             self._refresh_indicators_if_needed(symbol, all_ohlcv)
                         except Exception as sym_e:
+                            pass
                             logger.error(f"🚨 [{symbol}] Indicator refresh error: {sym_e}")
                         time.sleep(SPOT_SYMBOL_DELAY_SECONDS)
 
@@ -1757,6 +1824,7 @@ class SpotBot:
                             cached = self._get_cached_indicators(symbol)
                             self._process_exit(symbol, float(price), cached)
                         except Exception as sym_e:
+                            pass
                             logger.error(f"🚨 [{symbol}] Exit processing error: {sym_e}")
                             self.health_manager.record_error(sym_e)
                         time.sleep(SPOT_SYMBOL_DELAY_SECONDS)
@@ -1773,6 +1841,7 @@ class SpotBot:
                             used = self._process_entry(symbol, float(price), cached, available_krw)
                             available_krw -= used
                         except Exception as sym_e:
+                            pass
                             logger.error(f"🚨 [{symbol}] Entry processing error: {sym_e}")
                             self.health_manager.record_error(sym_e)
                         time.sleep(SPOT_SYMBOL_DELAY_SECONDS)
@@ -1786,6 +1855,7 @@ class SpotBot:
                         self._last_gc_time = now_gc
 
                 except Exception as loop_e:
+                    pass
                     logger.error(f"💥 Unexpected error in Main Loop cycle: {loop_e}")
                     time.sleep(ERROR_SLEEP_SECONDS)
 
@@ -1799,10 +1869,13 @@ class SpotBot:
                     time.sleep(0.5)
 
         except Exception as e:
+            pass
             logger.critical(f"💥 Critical Failure during Initialization/Run: {e}")
             try:
                 self.health_manager.update_heartbeat(status="error")
-            except Exception:
+            except Exception as e:
+                pass
+                logger.debug(f"Ignored error: {e}")
                 ...
         finally:
             self._shutdown()

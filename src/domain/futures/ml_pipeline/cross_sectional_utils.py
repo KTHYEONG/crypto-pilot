@@ -1,12 +1,12 @@
-"""
-Cross-Sectional ML Pipeline Utilities.
+"""Cross-Sectional ML Pipeline Utilities.
+
 Handles Panel data creation, Z-Score targeting, and cross-sectional normalization.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import Dict, Iterable, Sequence
+from collections.abc import Iterable, Sequence
 
 import numpy as np
 import pandas as pd
@@ -15,13 +15,13 @@ _logger = logging.getLogger(__name__)
 
 
 class CrossSectionalPipelineUtils:
+    """Utilities for cross-sectional data processing in ML pipelines."""
+
     @staticmethod
     def build_panel_df(
-        data_map: Dict[str, Dict[str, pd.DataFrame]], tf: str = "1h"
+        data_map: dict[str, dict[str, pd.DataFrame]], tf: str = "1h"
     ) -> pd.DataFrame:
-        """
-        Merges multiple symbol DataFrames into a single MultiIndex DataFrame (datetime, symbol).
-        """
+        """Merge multiple symbol DataFrames into a single MultiIndex DataFrame."""
         all_dfs = []
         for sym, tf_map in data_map.items():
             df = tf_map.get(tf)
@@ -52,8 +52,8 @@ class CrossSectionalPipelineUtils:
         panel_df: pd.DataFrame, 
         horizon: int = 6
     ) -> pd.Series:
-        """
-        Calculates forward returns and applies cross-sectional Z-Score normalization.
+        """Calculate forward returns and apply cross-sectional Z-Score normalization.
+
         Y = (Ret_i - Mean_Cross) / Std_Cross
         """
         # 1. Calculate forward log returns per symbol
@@ -84,6 +84,7 @@ class CrossSectionalPipelineUtils:
 
     @staticmethod
     def cs_median_impute_panel(panel_df: pd.DataFrame, cols: Sequence[str]) -> pd.DataFrame:
+        """Apply cross-sectional median imputation to multiple columns in a panel."""
         out = panel_df.copy()
         for c in cols:
             if c in out.columns:
@@ -110,9 +111,7 @@ class CrossSectionalPipelineUtils:
         horizons: tuple[int, ...] = (3, 6, 12, 24),
         weights: tuple[float, ...] | None = None,
     ) -> pd.Series:
-        """
-        Vol-adjusted forward log returns per horizon, cross-sectional rank blend, mapped to [-1,1].
-        """
+        """Calculate vol-adjusted rank targets across multiple horizons."""
         close = panel_df["close"].unstack(level="symbol")
         h_list = tuple(horizons)
         if weights is None:
@@ -145,9 +144,7 @@ class CrossSectionalPipelineUtils:
 
     @staticmethod
     def add_cross_sectional_features(panel_df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Adds features relative to the universe (e.g. Volume Rank, Relative Momentum).
-        """
+        """Add features relative to the universe (e.g. Volume Rank, Relative Momentum)."""
         df = panel_df.copy()
         
         # Example: Cross-sectional Volume Rank (0.0 to 1.0)
@@ -165,8 +162,8 @@ class CrossSectionalPipelineUtils:
 
     @staticmethod
     def add_systemic_features(panel_df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Adds market-wide systemic features to the panel.
+        """Add market-wide systemic features to the panel.
+
         - CS Dispersion: Std of cross-sectional log returns.
         - Market Breadth: Pct of symbols with close > 20h SMA.
         """

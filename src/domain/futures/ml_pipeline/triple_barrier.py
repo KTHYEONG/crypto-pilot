@@ -9,7 +9,7 @@ from numba import njit
 from src.core.indicators.numpy_ops_futures import compute_atr_numpy
 
 
-@njit(cache=True)
+@njit(cache=True)  # type: ignore[untyped-decorator]
 def _tbm_inner_loop_numba(
     dt4: np.ndarray,
     open_: np.ndarray,
@@ -63,7 +63,7 @@ def _tbm_inner_loop_numba(
     return labels
 
 
-@njit(cache=True)
+@njit(cache=True)  # type: ignore[untyped-decorator]
 def _tbm_bidirectional_numba(
     dt4: np.ndarray,
     open_: np.ndarray,
@@ -77,8 +77,7 @@ def _tbm_bidirectional_numba(
     sl_atr_mult: float,
     time_stop_bars: int,
 ) -> np.ndarray:
-    """
-    Bidirectional TBM: simultaneously evaluates Long and Short barriers.
+    """Bidirectional TBM: simultaneously evaluates Long and Short barriers.
 
     Returns labels:
       +1.0 = Long TP hit first  → calib_prob_long training target
@@ -135,15 +134,21 @@ def label_triple_barrier(
     bidirectional: bool = True,
     vol_scale_window: int = 24,
 ) -> pd.Series:
-    """
-    Per 1h bar: entry at open; TP/SL from ATR on 1h; scan 1m candles until hit or time stop.
+    """Per 1h bar: entry at open; TP/SL from ATR on 1h; scan 1m candles until hit or time stop.
 
     Args:
+        df_1h: 1h timeframe DataFrame containing high, low, close, and optionally open.
+        df_1m: 1m timeframe DataFrame containing high, low, and datetime for path scanning.
+        atr_period: Period for ATR calculation (default 14).
         tp_atr_mult: TP width multiplier (default 1.5).
         sl_atr_mult: SL width multiplier (default 1.0).
         time_stop_bars: 1m bars before time barrier (default 1440 ≈ 24h on 1m).
         bidirectional: If True, returns +1/-1/0 labels for independent Long/Short classifiers.
         vol_scale_window: rolling mean ATR window; ATR_effective = ATR * clip(ATR / ATR_ma).
+
+    Returns:
+        pd.Series containing triple barrier labels.
+
     """
     if df_1h.empty or df_1m.empty or len(df_1h) < atr_period + 2:
         return pd.Series(dtype=np.float64)
