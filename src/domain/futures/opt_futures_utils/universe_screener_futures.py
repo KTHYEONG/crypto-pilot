@@ -130,7 +130,8 @@ def screen_futures_universe(
     _ = candidate_pool
     _ = fetch_start
     _ = data_dir
-    _logger.info("Phase A: Market Scan (ADV check) + PIT/cache universe merge...")
+    _logger.info("  --> Phase A: Market Liquidity Scan (ADV/PIT)...")
+
     try:
         tickers = collector.client.exchange.fetch_tickers()
         valid_tickers = []
@@ -155,13 +156,15 @@ def screen_futures_universe(
     by_vol = [item["symbol"] for item in valid_tickers]
     pit_syms = _point_in_time_symbols_from_history(end_date, universe_history_path)
     if pit_syms:
-        _logger.info("PIT universe_history: merged %d symbols (<= %s).", len(pit_syms), end_date)
+        _logger.debug("PIT history: merged %d symbols.", len(pit_syms))
+
     try:
         cached_syms = collector.list_cached_parquet_symbols(tf)
     except Exception:
         cached_syms = []
     if cached_syms:
-        _logger.info("Cached parquet symbols on %s: %d", tf, len(cached_syms))
+        _logger.debug("Cached symbols on %s: %d", tf, len(cached_syms))
+
 
     merged = list(
         dict.fromkeys(
@@ -261,8 +264,12 @@ def screen_symbol_refinement_futures(
     final_symbols = list(dict.fromkeys(final))[:int(cfg.get("FINAL_POOL_K", 40))]
     if "BTC/USDT" not in final_symbols:
         final_symbols.insert(0, "BTC/USDT")
-    
-    _logger.info(f"Final Refined Universe ({tf}): {final_symbols}")
+    _logger.info(f"  [SUCCESS] Universe Refinement Complete: {len(final_symbols)} symbols selected.")  # noqa: E501
+    _logger.info(f"  Selected: {final_symbols}")
+
+
+
+
     update_futures_config_file(final_symbols)
     return True
 

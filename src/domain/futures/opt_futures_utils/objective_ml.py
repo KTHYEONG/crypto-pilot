@@ -181,7 +181,10 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
                 if "gp_alpha_00" in raw_full.columns
                 else np.zeros(len(trimmed_sig), dtype=np.float64)
             )
-            trimmed_sig["trend_direction"] = np.sign(gp_pre).astype(np.float64)
+            gp_centered = gp_pre - 0.5
+            trimmed_sig["trend_direction"] = np.where(
+                np.abs(gp_centered) > 0.01, np.sign(gp_centered), 0.0
+            ).astype(np.float64)
             trimmed_sig["entry_upper"] = 0.0
             trimmed_sig["entry_lower"] = 999999.0
             _xs_cols = (
@@ -250,11 +253,23 @@ def _log_precompute_computed_dir_sample(
     xl = aligned0.get("xs_score_long")
     xs = aligned0.get("xs_score_short")
     hy = aligned0.get("hmm_prob_crisis")
-    if xl is None or xs is None or hy is None or getattr(xl, "size", 0) == 0:
+    ml_l = aligned0.get("hmm_modulator_long")
+    ml_s = aligned0.get("hmm_modulator_short")
+    if (
+        xl is None
+        or xs is None
+        or hy is None
+        or ml_l is None
+        or ml_s is None
+        or getattr(xl, "size", 0) == 0
+    ):
         return
     arr_l = np.ascontiguousarray(xl, dtype=np.float64)
     arr_s = np.ascontiguousarray(xs, dtype=np.float64)
     arr_h = np.ascontiguousarray(hy, dtype=np.float64)
+    arr_ml_l = np.ascontiguousarray(ml_l, dtype=np.float64)
+    arr_ml_s = np.ascontiguousarray(ml_s, dtype=np.float64)
+
     n_b, n_sy = arr_l.shape[0], arr_l.shape[1]
     prev_i = min(n_b - 1, max(0, n_b // 2))
     out = np.zeros(n_sy, dtype=np.float64)
@@ -264,6 +279,8 @@ def _log_precompute_computed_dir_sample(
         arr_l,
         arr_s,
         arr_h,
+        arr_ml_l,
+        arr_ml_s,
         crisis_gamma,
         k_long,
         k_short,
@@ -296,37 +313,34 @@ def _log_precompute_computed_dir_sample(
 def _fixed_ml_phase_d_params() -> Dict[str, Any]:
     """Constants that must stay aligned between optimization and final evaluation."""
     return {
-        "SIZING_METHOD": "profit_factor_kelly",
         "MIN_SCORE_PERCENTILE": 0.55,
-        "RISK_PER_TRADE": 0.07,
+        "RISK_PER_TRADE": 0.05,
     }
 
 
 def _suggest_ml_phase_d(trial: optuna.Trial) -> Dict[str, Any]:
-    # Search bounds validated empirically. See logs/CURRENT_STATE.md > Forbidden Zones.
-    # KELLY_SHRINKAGE < 0.45 → high PBO (forbidden). ATR < 26 → signal decay (forbidden).
-    # K_LONG/SHORT fixed to 1 — increasing complexity spikes PBO (validated gp-006 attempt).
-    bayes_c = float(trial.suggest_float("BAYESIAN_C", 3.0, 10.0, log=True))
-    kelly_s = float(trial.suggest_float("KELLY_SHRINKAGE", 1.00, 1.50))
+    # Session 37: v42 정합 search space (KELLY [0.45,1.20], DD [0.15,0.25]).
+    # Why: v42 implied ks=0.96, DD=0.20. 기존 범위 [0.25,0.50]/[0.10,0.14]는 champion 배제.
+    bayes_c = float(trial.suggest_float("BAYESIAN_C", 5.0, 15.0, log=True))
+    kelly_s = float(trial.suggest_float("KELLY_SHRINKAGE", 0.45, 1.20))
     k_long = int(trial.suggest_int("K_LONG", 1, 1))
     k_short = int(trial.suggest_int("K_SHORT", 1, 1))
     reb = int(trial.suggest_categorical("REBALANCE_BARS", [1, 2, 3]))
-    crisis = float(trial.suggest_float("CRISIS_GAMMA", 0.7, 1.4))
-    atr_p = int(trial.suggest_int("ATR_PERIOD", 26, 34, step=2))
-    l_atr = float(trial.suggest_float("LONG_ATR_MULT", 2.0, 3.5, step=0.25))
-    l_trail = float(trial.suggest_float("LONG_TRAIL_MULT", 1.5, 3.5, step=0.5))
-    s_atr = float(trial.suggest_float("SHORT_ATR_MULT", 1.25, 2.25, step=0.25))
-    s_tp = float(trial.suggest_float("SHORT_TP_MULT", 1.0, 2.5, step=0.5))
-    s_trail = float(trial.suggest_float("SHORT_TRAIL_MULT", 1.0, 3.0, step=0.5))
-    l_scale = float(trial.suggest_float("LONG_SCALE_ATR_MULT", 2.0, 3.5, step=0.5))
-    max_exp = float(trial.suggest_float("MAX_EXP_PER_COIN", 0.4, 1.0, step=0.1))
-    dd_thr = float(trial.suggest_float("DD_SCALING_THRESHOLD", 0.05, 0.15, step=0.01))
+    crisis = float(trial.suggest_float("CRISIS_GAMMA", 1.1, 1.5, step=0.1))
+    atr_p = int(trial.suggest_int("ATR_PERIOD", 26, 40, step=2))
+    l_atr = float(trial.suggest_float("LONG_ATR_MULT", 2.0, 3.0, step=0.25))
+    l_trail = float(trial.suggest_float("LONG_TRAIL_MULT", 2.5, 3.5, step=0.5))
+    s_atr = float(trial.suggest_float("SHORT_ATR_MULT", 1.75, 2.5, step=0.25))
+    s_tp = float(trial.suggest_float("SHORT_TP_MULT", 1.0, 2.0, step=0.5))
+    s_trail = float(trial.suggest_float("SHORT_TRAIL_MULT", 1.5, 2.5, step=0.5))
+    l_scale = float(trial.suggest_float("LONG_SCALE_ATR_MULT", 2.0, 3.0, step=0.5))
+    max_exp = float(trial.suggest_float("MAX_EXP_PER_COIN", 0.8, 1.0, step=0.1))
+    dd_thr = float(trial.suggest_float("DD_SCALING_THRESHOLD", 0.15, 0.25, step=0.01))
 
-    # Keep search around the last validated champion regime instead of reopening failed axes.
     fixed = _fixed_ml_phase_d_params()
-    sizing_m = str(trial.suggest_categorical("SIZING_METHOD", [fixed["SIZING_METHOD"]]))
-    pfk_win = int(trial.suggest_categorical("PFK_WINDOW", [40, 60, 80]))
-    stress_vol = float(trial.suggest_float("STRESS_VOL_Z", 2.5, 4.0, step=0.5))
+    sizing_m = "profit_factor_kelly"
+    pfk_win = int(trial.suggest_categorical("PFK_WINDOW", [40, 60]))
+    stress_vol = float(trial.suggest_float("STRESS_VOL_Z", 2.5, 3.5, step=0.5))
 
     return {
         "SIZING_METHOD": sizing_m,
@@ -337,9 +351,7 @@ def _suggest_ml_phase_d(trial: optuna.Trial) -> Dict[str, Any]:
         "K_LONG": k_long,
         "K_SHORT": k_short,
         "REBALANCE_BARS": reb,
-        "MIN_SCORE_PERCENTILE": float(
-            trial.suggest_categorical("MIN_SCORE_PERCENTILE", [0.55, 0.65, 0.75])
-        ),
+        "MIN_SCORE_PERCENTILE": 0.55,
         "RISK_PER_TRADE": float(
             trial.suggest_categorical("RISK_PER_TRADE", [fixed["RISK_PER_TRADE"]])
         ),
@@ -384,15 +396,15 @@ def _base_engine_params(ml: Dict[str, Any], tf: str) -> Dict[str, Any]:
     ks, bc = float(ml["KELLY_SHRINKAGE"]), float(ml["BAYESIAN_C"])
     fk_frac = float(np.clip(0.35 * ks * (1.0 + 1.0 / bc), 0.05, 0.6))
     lev = float(OPT_FUTURES_CONFIG.get("FUTURES_DISCOVERY_LEVERAGE", 5))
-    rpt = float(ml.get("RISK_PER_TRADE", 0.07))
-    # Cap: rpt*lev ≤ 0.60 (12% max at lev=5); hyper-aggressive for 4h asset max.
-    if rpt * lev > 0.60:
-        rpt = 0.60 / max(lev, 1e-9)
+    rpt = float(ml.get("RISK_PER_TRADE", 0.05))
+    # Cap: rpt*lev ≤ 0.40 (8% max at lev=5); v24 Goldilocks validated bound.
+    if rpt * lev > 0.40:
+        rpt = 0.40 / max(lev, 1e-9)
     return {
         "TIMEFRAME": tf,
         "SIGNAL_TYPE": "ML_CALIB_PROB",
         "REGIME_TYPE": "NONE",
-        "SIZING_METHOD": str(ml.get("SIZING_METHOD", "vol_target")),
+        "SIZING_METHOD": str(ml.get("SIZING_METHOD", "profit_factor_kelly")),
         "USE_CS_RANK_ENGINE": bool(ml.get("USE_CS_RANK_ENGINE", True)),
         "K_LONG": int(ml.get("K_LONG", 2)),
         "K_SHORT": int(ml.get("K_SHORT", 2)),
@@ -420,6 +432,8 @@ def _base_engine_params(ml: Dict[str, Any], tf: str) -> Dict[str, Any]:
         "RISK_PER_TRADE": float(rpt),
         "MAX_EXPOSURE_PER_COIN": float(ml.get("MAX_EXPOSURE_PER_COIN", 1.0)),
         "DD_SCALING_THRESHOLD": float(ml.get("DD_SCALING_THRESHOLD", 0.15)),
+        "TARGET_ANN_VOL": float(ml.get("TARGET_ANN_VOL", 0.75)),
+        "VOL_LOOKBACK": int(ml.get("VOL_LOOKBACK", 30)),
         "USE_COMPOUNDING": True,
         "LEVERAGE": int(lev),
         "ENTRY_QUANTILE_WINDOW": int(OPT_FUTURES_CONFIG.get("ENTRY_QUANTILE_WINDOW", 240)),
@@ -508,13 +522,13 @@ def _run_portfolio_numba_block(
     return cast(tuple[np.ndarray, float, np.ndarray, np.ndarray], out_bt)
 
 
-def objective_ml_phase_d(trial: optuna.Trial, ctx: MLPhaseDContext) -> float:
+def objective_ml_phase_d(trial: optuna.Trial, ctx: MLPhaseDContext) -> float | Tuple[float, float]:
     if ctx.cpcv_block_slices is None:
         precompute_ml_optimization_context(ctx)
     block_slices = ctx.cpcv_block_slices
     mai = ctx.multi_alignment_info
     if block_slices is None or mai is None:
-        return 1e9
+        return (1e9, 1e9) if OPT_FUTURES_CONFIG.get("FUTURES_ML_GP_NSGA2_ENABLED", False) else 1e9
 
     ml = _suggest_ml_phase_d(trial)
     params = _base_engine_params(ml, ctx.tf)
@@ -534,7 +548,7 @@ def objective_ml_phase_d(trial: optuna.Trial, ctx: MLPhaseDContext) -> float:
             trial.set_user_attr("crisis_soft_weight_mean", soft_m)
             trial.set_user_attr("crisis_gate_rejection_rate", rej_r)
     liq_mdd_thr = float(cfg.get("FUTURES_MAX_MDD", 25.0))
-    min_trades_target = int(cfg.get("FUTURES_MIN_TRADES_TARGET", 10))
+    min_trades_target = int(cfg.get("FUTURES_MIN_TRADES_TARGET", 30))
 
     block_results: Dict[Tuple[int, int], Dict[str, Any]] = {}
     all_trades_chunks: List[np.ndarray] = []
@@ -580,12 +594,22 @@ def objective_ml_phase_d(trial: optuna.Trial, ctx: MLPhaseDContext) -> float:
 
         mdd = float(calc_mdd_from_equity(b_equity)) if b_equity.size > 0 else 100.0
         log_ret = _log_tw_from_ret_pct(float((b_bal / FUTURES_INITIAL_BALANCE - 1.0) * 100.0))
+        # [Session 12] Compute per-block exposure for exposure floor penalty.
+        # trades col1=entry_idx, col2=exit_idx.
+        # exposure = sum(holding_bars) / (block_bars * n_syms)
+        b_exposure = 0.0
+        b_bars = max(1, b_range[1] - b_range[0])
+        n_syms_ctx = max(1, len(ctx.symbols))
+        if n_tr > 0:
+            holding_bars = np.sum(b_trades_raw[:, 2] - b_trades_raw[:, 1])
+            b_exposure = float(holding_bars) / float(b_bars * n_syms_ctx)
         block_results[b_range] = {
             "log_ret": log_ret,
             "mdd": mdd,
             "trades": n_tr,
             "long_trades": int(np.sum(b_trades_raw[:, 3] == 1.0)),
             "short_trades": int(np.sum(b_trades_raw[:, 3] == -1.0)),
+            "exposure": b_exposure,
         }
 
     all_trades = (
@@ -635,6 +659,14 @@ def objective_ml_phase_d(trial: optuna.Trial, ctx: MLPhaseDContext) -> float:
         if path_compound_raw_log_tw
         else np.asarray([], dtype=np.float64)
     )
+    p10_log_growth = float(np.percentile(path_arr, 10.0)) if path_arr.size > 0 else -10.0
+    worst_path_log_growth = float(np.min(path_arr)) if path_arr.size > 0 else -10.0
+    if path_arr.size > 0:
+        sorted_path_arr = np.sort(path_arr)
+        k_worst = max(1, int(np.ceil(sorted_path_arr.size * 0.10)))
+        cvar10_log_growth = float(np.mean(sorted_path_arr[:k_worst]))
+    else:
+        cvar10_log_growth = -10.0
     worst_mdd = float(np.max(path_mdds)) if path_mdds else worst_mdd_blocks
     mean_log_growth = float(np.mean(path_arr)) if path_arr.size > 0 else 0.0
     if path_arr.size > 1:
@@ -693,9 +725,18 @@ def objective_ml_phase_d(trial: optuna.Trial, ctx: MLPhaseDContext) -> float:
         max(min_trades_target, 1)
     )
 
+    # [Session 12] Exposure floor penalty: avg CPCV block exposure < 5% = sizing hack.
+    # v30a exposed this: IS exposure 4.09% passed trade_shortfall (574 trades) but
+    # positions were dust-sized. This penalty forces the optimizer to find configs
+    # that actively hold positions, not just open/close micro-positions.
+    exposure_vals = [float(v.get("exposure", 0.0)) for v in block_results.values()]
+    avg_exposure = float(np.mean(exposure_vals)) if exposure_vals else 0.0
+    exposure_floor = 0.05  # 5% minimum IS exposure (Session 12 hypothesis 2: softer penalty)
+    exposure_floor_penalty = max(0.0, exposure_floor - avg_exposure) / exposure_floor * 1.0
+
     mean_sortino_cpcv = 0.0
     if path_arr.size < 2 or dsr < 0.0:
-        obj = 1e9 + pen + 2.0 * trade_shortfall
+        obj = 1e9 + pen + 3.0 * trade_shortfall + exposure_floor_penalty
     else:
         # Compound objective: DSR primary + mean_log_growth secondary gradient.
         # When DSR=0 for all trials (paths all negative), growth_signal provides
@@ -711,27 +752,46 @@ def objective_ml_phase_d(trial: optuna.Trial, ctx: MLPhaseDContext) -> float:
             is_penalty += abs(total_cpcv_log_ret) * 5.0
         if growth_signal < 0:
             is_penalty += abs(growth_signal) * 5.0
-        # [Path Consistency Penalty] weight=2.0 — empirically validated 2026-04-22.
+        # [Path Consistency Penalty] weight=3.25 — v33 champion setting.
         # Directly proxies PBO: high std(CPCV paths) → complement paths diverge → high PBO.
-        # weight=4.0 tested: OOS collapsed to 1.70% (over-conservative).
-        # weight=0.0 tested: PBO inflates to 0.84+ with >200 trials (selection bias).
-        # weight=2.0 optimal: PBO 0.225 achieved at 200 trials while OOS=22.54% preserved.
-        # weight=1.5 tested 2026-04-22: Relaxed to allow higher compound asset maximization.
-        # DO NOT raise above 3.0 without re-validating OOS performance.
-        path_consistency_penalty = float(np.clip(std_log_growth, 0.0, 2.0)) * 1.5
+        path_consistency_penalty = float(np.clip(std_log_growth, 0.0, 2.0)) * 3.25
+
+        # v30b weight=3.0 → IS overfit (OOS -36%). v30d weight=1.5 → Hold-out -42% at 1000t TPE.
+        # v30c weight=1.5 at 200t all-random → IS/Hold-out/OOS all positive (BALANCED).
+        # Session 12: Restored from 1.5 to 2.0 — 1.5 allowed v30a IS/Hold-out collapse.
+        # Session 15: Increased weight to 2.0 and threshold to 0.0
+        # to strictly enforce positive holdout.
+        holdout_neg_penalty = 0.0
+        if holdout_log_ret < 0.0:
+            holdout_neg_penalty = abs(holdout_log_ret) * 2.0
+
+        # Session 25 revision: Worst-path penalty (WF leg 3 proxy).
+        # Penalize if min CPCV path log-growth < 0 to avoid WF leg failures.
+        worst_path_penalty = 0.0
+        if worst_path_log_growth < 0.0:
+            worst_path_penalty = abs(worst_path_log_growth) * 3.0
 
         mean_sortino_cpcv = float(np.clip(np.mean(sortinos), -2.0, 2.0)) if sortinos else 0.0
 
+        # growth_signal weight 0.50: P1 compliance (compound growth primary driver).
+        # is_penalty already penalizes negative growth at 5.0x — 0.50 reward is the
+        # positive-side gradient that guides TPE toward compound-growth configs.
         obj = (
             -dsr
-            - 0.2 * growth_signal
+            - 0.50 * growth_signal
             + pen
-            + 2.0 * trade_shortfall
+            + 3.0 * trade_shortfall
             + is_penalty
             + path_consistency_penalty
+            + exposure_floor_penalty
+            + holdout_neg_penalty
+            + worst_path_penalty
         )
 
     trial.set_user_attr("ml_mean_log_growth_cpcv", mean_log_growth)
+    trial.set_user_attr("ml_p10_log_growth_cpcv", p10_log_growth)
+    trial.set_user_attr("ml_cvar10_log_growth_cpcv", cvar10_log_growth)
+    trial.set_user_attr("ml_worst_path_log_growth_cpcv", worst_path_log_growth)
     trial.set_user_attr("ml_worst_mdd_cpcv", worst_mdd)
     trial.set_user_attr("ml_std_log_growth_cpcv", std_log_growth)
     trial.set_user_attr("ml_holdout_log_ret", holdout_log_ret)
@@ -744,6 +804,21 @@ def objective_ml_phase_d(trial: optuna.Trial, ctx: MLPhaseDContext) -> float:
     trial.set_user_attr("avg_mdd", worst_mdd)
     trial.set_user_attr("long_short_ratio", minority)
     trial.set_user_attr("ev_cost_ratio", ev_cost_ratio_agg)
+    trial.set_user_attr("avg_exposure", avg_exposure)
+
+    if OPT_FUTURES_CONFIG.get("FUTURES_ML_GP_NSGA2_ENABLED", False):
+        # Obj 1: Growth (DSR + CPCV mean log growth)
+        # Obj 2: Stability (path consistency + worst path + holdout neg)
+        obj1 = (
+            -dsr
+            - 0.50 * growth_signal
+            + pen
+            + 3.0 * trade_shortfall
+            + is_penalty
+            + exposure_floor_penalty
+        )
+        obj2 = path_consistency_penalty + worst_path_penalty + holdout_neg_penalty
+        return float(obj1), float(obj2)
 
     return float(obj)
 
@@ -757,9 +832,10 @@ def select_best_trial_by_holdout_log_ret(trials: List[FrozenTrial]) -> FrozenTri
     if not trials:
         raise ValueError("empty trials")
 
-    def _score(t: FrozenTrial) -> tuple[float, float, float, float, float]:
+    def _score(t: FrozenTrial) -> tuple[float, float, float, float, float, float]:
         holdout = float(np.clip(t.user_attrs.get("ml_holdout_log_ret", 0.0), -2.0, 2.0))
         is_cpcv = float(np.clip(t.user_attrs.get("ml_mean_log_growth_cpcv", -2.0), -2.0, 2.0))
+        p10_cpcv = float(np.clip(t.user_attrs.get("ml_p10_log_growth_cpcv", -2.0), -2.0, 2.0))
         dsr = float(t.user_attrs.get("gate1_dsr", 0.0))
         worst_mdd = float(t.user_attrs.get("ml_worst_mdd_cpcv", 999.0))
         # Prefer low-variance paths (proxy for low PBO) in fallback as well.
@@ -772,6 +848,7 @@ def select_best_trial_by_holdout_log_ret(trials: List[FrozenTrial]) -> FrozenTri
         return (
             dsr,
             is_cpcv,
+            p10_cpcv,
             -path_std,
             -worst_mdd,
             holdout,
