@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import Any
 
 # ==============================================================================
 # OPTIMIZATION FUTURES SEARCH SPACE & CONFIGURATION (Cross-Sectional Ranking Edition)
 # ==============================================================================
 
-OPT_FUTURES_CONFIG: Dict[str, Any] = {
+OPT_FUTURES_CONFIG: dict[str, Any] = {
     "total_trials": 2000,
     # Phase-D TPESampler: random trials before TPE; must be < n_ml_trials (see opt_main_futures).
     "tpe_n_startup_trials": 384,
@@ -28,12 +28,12 @@ OPT_FUTURES_CONFIG: Dict[str, Any] = {
     # Hardening: candidate PBO must be ≤ this to beat champion.json (skill P4 strict guard).
     "FUTURES_CHAMPION_PBO_STRICT_MAX": 0.40,
     # futures-opt Phase 3: trial-count PBO ceiling (-step per bucket); clamp avoids overkill.
-    "FUTURES_MC_GATE_TRIAL_ADJUST_ENABLED": False,
+    "FUTURES_MC_GATE_TRIAL_ADJUST_ENABLED": True,
     "FUTURES_MC_GATE_BUCKET_TRIALS": 100,
     "FUTURES_MC_PBO_STEP_PER_BUCKET": 0.01,
     "FUTURES_MC_PBO_CEILING_CLAMP_MIN": 0.38,
     # Optional: raise FUTURES_ML_GATE1_DSR_MIN with trials (off by default — base 0.20 is low).
-    "FUTURES_MC_DSR_TRIAL_ADJUST_ENABLED": False,
+    "FUTURES_MC_DSR_TRIAL_ADJUST_ENABLED": True,
     "FUTURES_MC_DSR_STEP_PER_BUCKET": 0.02,
     "FUTURES_MC_DSR_FLOOR_CAP": 0.95,
     # Path A: True + PBO_MAX 0.50 for exploration; default off (session 42: 300t HOLD).
@@ -106,7 +106,7 @@ OPT_FUTURES_CONFIG: Dict[str, Any] = {
 }
 
 # Cross-Sectional Strategy Parameter Space
-SIGNAL_PARAM_SPACE_FUTURES: Dict[str, Dict[str, Any]] = {
+SIGNAL_PARAM_SPACE_FUTURES: dict[str, dict[str, Any]] = {
     # Multi-session stability: lower bound ≥26 (matches ML Phase D discovery band).
     "ATR_PERIOD": {"type": "int", "low": 26, "high": 40, "step": 2},
     "LONG_ATR_MULT": {"type": "float", "low": 1.5, "high": 4.5, "step": 0.25},
@@ -116,13 +116,13 @@ SIGNAL_PARAM_SPACE_FUTURES: Dict[str, Dict[str, Any]] = {
     "SHORT_TRAIL_MULT": {"type": "float", "low": 1.5, "high": 4.5, "step": 0.5},
 }
 
-PORTFOLIO_PARAM_SPACE_FUTURES: Dict[str, Dict[str, Any]] = {
+PORTFOLIO_PARAM_SPACE_FUTURES: dict[str, dict[str, Any]] = {
     "RISK_PER_TRADE": {"type": "float", "low": 0.01, "high": 0.05, "step": 0.005},
     "MAX_EXPOSURE_PER_COIN": {"type": "float", "low": 0.5, "high": 2.0, "step": 0.1},
     "DD_SCALING_THRESHOLD": {"type": "float", "low": 0.10, "high": 0.25, "step": 0.05},
 }
 
-ENGINE_PARAM_SPACE_FUTURES: Dict[str, Dict[str, Any]] = {
+ENGINE_PARAM_SPACE_FUTURES: dict[str, dict[str, Any]] = {
     **SIGNAL_PARAM_SPACE_FUTURES,
     **PORTFOLIO_PARAM_SPACE_FUTURES,
     "K_LONG": {"type": "int", "low": 1, "high": 4, "step": 1},
@@ -133,13 +133,13 @@ ENGINE_PARAM_SPACE_FUTURES: Dict[str, Dict[str, Any]] = {
 }
 
 # Dynamic Universe Anchor Symbols
-FUTURES_ANCHOR_SYMBOLS: List[str] = [
+FUTURES_ANCHOR_SYMBOLS: list[str] = [
     "BTC/USDT",
     "ETH/USDT",
 ]
 
 # This list will be overwritten by the dynamic screener
-FUTURES_SYMBOLS: List[str] = [
+FUTURES_SYMBOLS: list[str] = [
     "BTC/USDT",
     "ETH/USDT",
     "SOL/USDT",
@@ -158,7 +158,7 @@ FUTURES_SYMBOLS: List[str] = [
     "APT/USDT",
 ]
 
-FUTURES_SCREENER_CONFIG: Dict[str, Any] = {
+FUTURES_SCREENER_CONFIG: dict[str, Any] = {
     "BROAD_POOL_K": 80,
     "FINAL_POOL_K": 40,
     "MIN_ADV_USDT": 25_000_000,
@@ -173,10 +173,10 @@ FUTURES_SCREENER_CONFIG: Dict[str, Any] = {
 # ==============================================================================
 # SPOT CONFIGURATION (Unchanged)
 # ==============================================================================
-SPOT_ANCHOR_SYMBOLS: List[str] = ["KRW-ETH", "KRW-SOL", "KRW-XRP"]
-SPOT_SYMBOLS: List[str] = ["KRW-ETH", "KRW-SOL", "KRW-XRP", "KRW-HBAR"]
+SPOT_ANCHOR_SYMBOLS: list[str] = ["KRW-ETH", "KRW-SOL", "KRW-XRP"]
+SPOT_SYMBOLS: list[str] = ["KRW-ETH", "KRW-SOL", "KRW-XRP", "KRW-HBAR"]
 
-OPT_SPOT_CONFIG: Dict[str, Any] = {
+OPT_SPOT_CONFIG: dict[str, Any] = {
     "total_trials": 1500,
     "tpe_n_startup_trials": 256,
     "seeds": [42],
@@ -186,12 +186,12 @@ OPT_SPOT_CONFIG: Dict[str, Any] = {
     "CPCV_K_TEST": 3,
 }
 
-def get_search_space_futures(tf: str, stage: int = 0) -> Dict[str, Dict[str, Any]]:
+def get_search_space_futures(tf: str, stage: int = 0) -> dict[str, dict[str, Any]]:
     _ = tf
     from src.domain.futures.opt_futures_utils.opt_params import build_full_discovery_space_futures
     return build_full_discovery_space_futures()
 
-def get_search_space_spot(tf: str) -> Dict[str, Dict[str, Any]]:
+def get_search_space_spot(tf: str) -> dict[str, dict[str, Any]]:
     _ = tf
     from src.domain.spot.opt_spot_utils.opt_params import build_full_discovery_space
     return build_full_discovery_space()
