@@ -221,60 +221,67 @@ def _print_dual_audit_dashboard(
     gate_status: str,
 ) -> None:
     _logger.info("\n" + "╔" + "═" * 93 + "╗")
-    _logger.info(f"║ [FINAL STRATEGY AUDIT] Candidate vs Current Champion {' ':<39} ║")
+    _logger.info(f"║ [FINAL STRATEGY AUDIT] Candidate vs Current Champion (OOS METRICS ONLY) {' ':<14} ║")  # noqa: E501
     _logger.info("╠" + "═" * 93 + "╣")
     _logger.info(
-        "║ CATEGORY          | METRIC                | CHAMPION    | CANDIDATE   | DELTA (Δ)   ║"
+        "║ CATEGORY          | METRIC (OOS)          | CHAMPION    | CANDIDATE   | DELTA (Δ)   ║"
     )
     _logger.info("╟" + "─" * 19 + "┼" + "─" * 23 + "┼" + "─" * 13 + "┼" + "─" * 13 + "┼" + "─" * 13 + "╢")  # noqa: E501
     
-    # 1. Reliability (AI's Eye)
+    # 1. Reliability (Statistical)
     pbo_c, pbo_n = champ_m.get("pbo", 0.5), new_m.get("pbo", 0.5)
-    p10_c, p10_n = champ_m.get("p10", 0.0), new_m.get("p10", 0.0)
     dsr_c, dsr_n = champ_m.get("dsr", 0.0), new_m.get("dsr", 0.0)
     
     _logger.info(
-        f"║ RELIABILITY (AI)  | PBO (Lower is Better) | {pbo_c:>11.4f} | {pbo_n:>11.4f} | {pbo_n - pbo_c:>+11.4f} ║"  # noqa: E501
+        f"║ RELIABILITY       | PBO (Lower is Better) | {pbo_c:>11.4f} | {pbo_n:>11.4f} | {pbo_n - pbo_c:>+11.4f} ║"  # noqa: E501
     )
     _logger.info(
-        f"║                   | CPCV P10 (Survival)   | {p10_c:>11.4f} | {p10_n:>11.4f} | {p10_n - p10_c:>+11.4f} ║"  # noqa: E501
-    )
-    _logger.info(
-        f"║                   | DSR (Stability)       | {dsr_c:>11.4f} | {dsr_n:>11.4f} | {dsr_n - dsr_c:>+11.4f} ║"  # noqa: E501
+        f"║ (Statistical)     | DSR (Stability)       | {dsr_c:>11.4f} | {dsr_n:>11.4f} | {dsr_n - dsr_c:>+11.4f} ║"  # noqa: E501
     )
     _logger.info("╟" + "─" * 19 + "┼" + "─" * 23 + "┼" + "─" * 13 + "┼" + "─" * 13 + "┼" + "─" * 13 + "╢")  # noqa: E501
     
-    # 2. Compounding (User's Eye)
-
-    tw_c, tw_n = champ_m.get("tw", 1.0), new_m.get("tw", 1.0)
+    # 2. Compounding (Wealth & Risk)
     cagr_c, cagr_n = champ_m.get("cagr", 0.0), new_m.get("cagr", 0.0)
     mdd_c, mdd_n = champ_m.get("mdd", 0.0), new_m.get("mdd", 0.0)
+    cvar_c, cvar_n = champ_m.get("cvar", 0.0), new_m.get("cvar", 0.0)
     
     _logger.info(
-        f"║ COMPOUNDING (OOS) | Terminal Wealth (TW)  | {tw_c:>11.2f}x | {tw_n:>11.2f}x | {tw_n - tw_c:>+11.2f}x ║"  # noqa: E501
+        f"║ COMPOUNDING       | CAGR (%)              | {cagr_c:>11.2f}% | {cagr_n:>11.2f}% | {cagr_n - cagr_c:>+11.2f}%p ║"  # noqa: E501
     )
     _logger.info(
-        f"║                   | CAGR (%)              | {cagr_c:>11.2f}% | {cagr_n:>11.2f}% | {cagr_n - cagr_c:>+11.2f}%p ║"  # noqa: E501
+        f"║ (Wealth & Risk)   | Max Drawdown (%)      | {mdd_c:>11.2f}% | {mdd_n:>11.2f}% | {mdd_n - mdd_c:>+11.2f}%p ║"  # noqa: E501
     )
     _logger.info(
-        f"║                   | Max Drawdown (%)      | {mdd_c:>11.2f}% | {mdd_n:>11.2f}% | {mdd_n - mdd_c:>+11.2f}%p ║"  # noqa: E501
+        f"║                   | CVaR 5% (Tail Risk)   | {cvar_c:>11.2f}% | {cvar_n:>11.2f}% | {cvar_n - cvar_c:>+11.2f}%p ║"  # noqa: E501
     )
     _logger.info("╟" + "─" * 19 + "┼" + "─" * 23 + "┼" + "─" * 13 + "┼" + "─" * 13 + "┼" + "─" * 13 + "╢")  # noqa: E501
 
-    # 3. SOTA WEALTH (futures-opt)
-    t2x_c, t2x_n = champ_m.get("time_2x", 999.0), new_m.get("time_2x", 999.0)
-    cvar_c, cvar_n = champ_m.get("cvar", 0.0), new_m.get("cvar", 0.0)
-    nalpha_c, nalpha_n = champ_m.get("net_alpha", 0.0), new_m.get("net_alpha", 0.0)
+    # 3. Microstructure (Friction Proof)
+    apnl_c, apnl_n = champ_m.get("avg_pnl", 0.0), new_m.get("avg_pnl", 0.0)
+    pf_c, pf_n = champ_m.get("pf", 1.0), new_m.get("pf", 1.0)
     
     _logger.info(
-        f"║ SOTA WEALTH (OPT) | Time to 2x (Years)    | {t2x_c:>11.2f}y | {t2x_n:>11.2f}y | {t2x_n - t2x_c:>+11.2f}y ║"  # noqa: E501
+        f"║ MICROSTRUCTURE    | Avg Trade PnL (%)     | {apnl_c:>11.2f}% | {apnl_n:>11.2f}% | {apnl_n - apnl_c:>+11.2f}%p ║"  # noqa: E501
     )
     _logger.info(
-        f"║                   | CVaR(5%) Tail Risk    | {cvar_c:>11.2f}% | {cvar_n:>11.2f}% | {cvar_n - cvar_c:>+11.2f}%p ║"  # noqa: E501
+        f"║ (Friction Proof)  | Profit Factor         | {pf_c:>11.2f}  | {pf_n:>11.2f}  | {pf_n - pf_c:>+11.2f}  ║"  # noqa: E501
     )
-    _logger.info(
-        f"║                   | Net Alpha (vs Frict)  | {nalpha_c:>11.2f}% | {nalpha_n:>11.2f}% | {nalpha_n - nalpha_c:>+11.2f}%p ║"  # noqa: E501
-    )
+    _logger.info("╠" + "═" * 93 + "╣")
+    
+    # 4. Sanity & Degradation Check
+    is_cagr = new_m.get("is_cagr", 0.0)
+    ho_cagr = new_m.get("ho_cagr", 0.0)
+    retention = (new_m.get("cagr", 0.0) / is_cagr * 100.0) if abs(is_cagr) > 1e-6 else 0.0
+    
+    is_status = "PASS" if is_cagr > 80.0 else "FAIL"
+    ho_status = "PASS" if ho_cagr > 60.0 else "FAIL"
+    ret_label = "HEALTHY" if retention > 60.0 else "WARNING"
+    
+    _logger.info(f"║ [SANITY & DEGRADATION CHECK] (IS / Hold-out Reference) {' ':<39} ║")
+    _logger.info("╟" + "─" * 93 + "╢")
+    _logger.info(f"║ IS Path Survival : {is_status:<4} (IS CAGR: {is_cagr:>6.1f}% > 80.0%) {' ':<36} ║")  # noqa: E501
+    _logger.info(f"║ Recent Regime    : {ho_status:<4} (Hold-out CAGR: {ho_cagr:>6.1f}% > 60.0%) {' ':<31} ║")  # noqa: E501
+    _logger.info(f"║ OOS Degradation  : {ret_label:<7} (OOS CAGR {new_m['cagr']:>5.1f}% / IS CAGR {is_cagr:>5.1f}% = {retention:>3.0f}% Retention) {' ':<14} ║")  # noqa: E501
     _logger.info("╠" + "═" * 93 + "╣")
 
     _logger.info(f"║ FINAL VERDICT: {gate_status:<78} ║")
@@ -348,21 +355,21 @@ def _ml_trial_passes_hard_gates(
     dsr_min: float | None = None,
 ) -> bool:
     cfg = OPT_FUTURES_CONFIG
-    pbo_lim = float(pbo_max if pbo_max is not None else cfg.get("FUTURES_PBO_MAX", 0.45))
+    pbo_lim = float(pbo_max if pbo_max is not None else cfg.get("FUTURES_PBO_MAX", 0.40))
     if check_pbo and float(pbo_obs) >= pbo_lim:
         return False
     dsr = float(trial.user_attrs.get("gate1_dsr", -9.0))
-    dsr_floor = float(dsr_min if dsr_min is not None else cfg.get("FUTURES_ML_GATE1_DSR_MIN", 0.20))
+    dsr_floor = float(dsr_min if dsr_min is not None else cfg.get("FUTURES_ML_GATE1_DSR_MIN", 0.80))
     if dsr < dsr_floor:
         return False
-    p10_floor = float(cfg.get("FUTURES_CPCV_P10_LOG_TW_MIN", 0.0))
+    p10_floor = float(cfg.get("FUTURES_CPCV_P10_LOG_TW_MIN", 0.05))
     p10_cpcv = float(trial.user_attrs.get("ml_p10_log_growth_cpcv", -999.0))
     if p10_cpcv <= p10_floor:
         return False
-    mdd_limit = float(cfg.get("FUTURES_MAX_MDD", 25.0))
+    mdd_limit = float(cfg.get("FUTURES_MAX_MDD", 22.0))
     if float(trial.user_attrs.get("ml_worst_mdd_cpcv", 999.0)) >= mdd_limit:
         return False
-    if float(trial.user_attrs.get("avg_trades", 0.0)) < 10.0:
+    if float(trial.user_attrs.get("avg_trades", 0.0)) < 12.0:
         return False
     return True
 
@@ -1068,15 +1075,15 @@ def main() -> None:
         cpcv_growth = float(best_trial.user_attrs.get("ml_mean_log_growth_cpcv", 0.0))
         _pbo_cur = float(pbo_val) if pbo_val is not None else 0.5
         
-        # Unbiased proxy pass: CPCV log-TW growth > -0.10 AND sequential IS sanity check > -6.0%
-        cpcv_pass = (cpcv_growth > -0.10) and (is_cagr_v > -6.0)
-        
+        # IS sanity: CPCV log-TW growth > 0.05 AND sequential IS CAGR > 30%
+        cpcv_pass = (cpcv_growth > 0.05) and (is_cagr_v > 30.0)
+
         if not cpcv_pass:
             gate_ok = False
             _logger.warning(
                 " [IS STRUCTURAL GATE] CPCV Growth=%.4f IS CAGR=%.2f%% "
                 "IS Sharpe=%.2f OOS Sharpe=%.2f "
-                "PBO=%.4f FAIL. CPCV Growth must be > -0.10 and IS CAGR > -6.0%%. Blocked.",
+                "PBO=%.4f FAIL. CPCV Growth must be > 0.05 and IS CAGR > 30.0%%. Blocked.",
                 cpcv_growth,
                 is_cagr_v,
                 is_sharpe_v,
@@ -1122,13 +1129,14 @@ def main() -> None:
     # Prevents regression from gate-passing runs that are still worse than the current champion.
     # Reads metrics from logs/experiments/champion.json (updated by hardening workflow).
     if gate_ok:
-        champion_json_path = Path(project_root) / "logs" / "experiments" / "champion.json"
+        champion_json_path = Path(project_root) / "logs" / "champion.json"
         if champion_json_path.exists():
             try:
                 with open(champion_json_path) as _cf:
                     _champ = json.load(_cf)
                 _champ_oos = float(_champ.get("metrics", {}).get("oos_cagr_pct", -999.0))
-                _champ_pbo = float(_champ.get("metrics", {}).get("pbo", 1.0))
+                _met_g = _champ.get("metrics", {})
+                _champ_pbo = float(_met_g.get("pbo_paired", _met_g.get("pbo", 1.0)))
                 _new_oos = float(oos_port.get("cagr_pct", oos_port.get("cagr", 0.0)))
                 _new_ho = float(ho_port.get("cagr_pct", ho_port.get("cagr", 0.0)))
                 _champ_ho = float(_champ.get("metrics", {}).get("holdout_cagr_pct", -999.0))
@@ -1143,17 +1151,18 @@ def main() -> None:
                 )
 
                 _pbo_strict = float(pbo_obs) <= _pbo_champ_max
-                # Session 25: Reject candidates that regress PBO by >0.05 unless OOS jumps >=10%.
+                # Reject if hold-out regresses below max(50% of champion, 8% floor).
+                # Absolute 15% gate blocks champion-level candidates; relative avoids Catch-22.
+                _holdout_fail = (_champ_ho > 0.0) and (_new_ho < max(0.5 * _champ_ho, 8.0))
                 _pbo_regression = float(pbo_obs) > (_champ_pbo + 0.05)
                 _oos_large_jump = _new_oos >= (_champ_oos + 10.0)
-                _holdout_regression = (_champ_ho > 0) and (_new_ho < 0.5 * _champ_ho)
 
                 _base_condition = (
                     _oos_improved or (_pbo_improved and _oos_acceptable) or _robustness_upgrade
                 )
                 if _pbo_regression and not _oos_large_jump:
                     _base_condition = False
-                if _holdout_regression and not _oos_large_jump:
+                if _holdout_fail:
                     _base_condition = False
                 if not (_base_condition and _pbo_strict):
                     gate_ok = False
@@ -1187,10 +1196,10 @@ def main() -> None:
                 )
 
     # [Dual-Audit Dashboard] Integrated Performance & Reliability side-by-side
-    champion_json_path = Path(project_root) / "logs" / "experiments" / "champion.json"
+    champion_json_path = Path(project_root) / "logs" / "champion.json"
     champ_m: dict[str, Any] = {
         "pbo": 0.5, "p10": 0.0, "dsr": 0.0, "tw": 1.0, "cagr": 0.0, "mdd": 0.0,
-        "time_2x": 999.0, "cvar": 0.0, "net_alpha": 0.0
+        "time_2x": 999.0, "cvar": 0.0, "net_alpha": 0.0, "avg_pnl": 0.0, "pf": 1.0
     }
     if champion_json_path.exists():
         try:
@@ -1198,15 +1207,17 @@ def main() -> None:
                 _c = json.load(_cf)
             _met = _c.get("metrics", {})
             champ_m = {
-                "pbo": float(_met.get("pbo", 0.5)),
+                "pbo": float(_met.get("pbo_paired", _met.get("pbo", 0.5))),
                 "p10": float(_met.get("cpcv_p10_log_tw", 0.0)),
                 "dsr": float(_met.get("dsr", 0.0)),
-                "tw": float(_met.get("oos_terminal_wealth", 1.0)), # Adjusted key
+                "tw": float(_met.get("oos_terminal_wealth", 1.0)),
                 "cagr": float(_met.get("oos_cagr_pct", 0.0)),
                 "mdd": float(_met.get("oos_mdd_pct", 0.0)),
                 "time_2x": float(_met.get("oos_time_to_2x", 999.0)),
                 "cvar": float(_met.get("oos_cvar_pct", 0.0)),
                 "net_alpha": float(_met.get("oos_net_alpha_pct", 0.0)),
+                "avg_pnl": float(_met.get("oos_avg_trade_pnl_pct", 0.0)),
+                "pf": float(_met.get("oos_profit_factor", 1.0)),
             }
         except Exception as _ce:
             _logger.debug("Champion metrics parse failed: %s", _ce)
@@ -1232,6 +1243,10 @@ def main() -> None:
         "time_2x": float(t2x_n),
         "cvar": float(oos_port.get("cvar_pct", 0.0)),
         "net_alpha": float(nalpha_n * 100.0),
+        "avg_pnl": float(oos_port.get("avg_trade_pnl_pct", 0.0)),
+        "pf": float(oos_port.get("profit_factor", 1.0)),
+        "is_cagr": float(is_port.get("cagr_pct", 0.0)),
+        "ho_cagr": float(ho_port.get("cagr_pct", 0.0)),
     }
     
     _verdict = "PROMOTE ✅" if gate_ok else "HOLD ❌"
