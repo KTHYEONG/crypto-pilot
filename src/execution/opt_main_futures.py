@@ -5,6 +5,7 @@ import concurrent.futures
 import importlib
 import json
 import logging
+import math
 import multiprocessing
 import os
 import sys
@@ -137,8 +138,8 @@ def _print_performance_report(
     dsr: float | None = None,
     pbo: float | None = None,
     tf: str = "1h",
+    benchmark_cagr: float | None = None,
 ) -> None:
-    # --- Extra Metrics Calculation ---
     eq = port.get("equity_curve", np.array([FUTURES_INITIAL_BALANCE]))
     trades = port.get("trades_df", pd.DataFrame())
 
@@ -146,16 +147,29 @@ def _print_performance_report(
     rets = np.diff(eq) / np.maximum(eq[:-1], 1e-9)
     hrs = int(tf.replace("h", "")) if tf.endswith("h") else 4
     ann_factor = (365 * 24) / hrs
-    
+
     ann_vol = np.std(rets) * np.sqrt(ann_factor) * 100.0 if rets.size > 0 else 0.0
     sharpe = 0.0
     if rets.size > 0 and np.std(rets) > 1e-9:
         sharpe = (np.mean(rets) / np.std(rets)) * np.sqrt(ann_factor)
-    
+
     downside = rets[rets < 0]
     sortino = (np.mean(rets) / np.std(downside)) * np.sqrt(ann_factor) if downside.size > 0 else 0.0
-    
-    # 2. t-stat of Avg Trade
+
+    # 2. PSR (Probabilistic Sharpe Ratio) — López de Prado 2012
+    # Adjusts for skewness and excess kurtosis of per-bar returns.
+    # Answers: P(true SR > 0) after non-normality correction.
+    psr = 0.5
+    if rets.size >= 4:
+        _sr_hat = float(np.mean(rets)) / (float(np.std(rets, ddof=1)) + 1e-12)
+        _sk = float(np.nan_to_num(pd.Series(rets).skew()))
+        _ex_k = float(np.nan_to_num(pd.Series(rets).kurt()))
+        _denom = max(1e-12, 1.0 - _sk * _sr_hat + ((_ex_k + 2.0) / 4.0) * _sr_hat**2)
+        _se_sr = math.sqrt(_denom / max(int(rets.size) - 1, 1))
+        _z_psr = _sr_hat / (_se_sr + 1e-12)
+        psr = float(0.5 * (1.0 + math.erf(_z_psr / math.sqrt(2.0))))
+
+    # 3. t-stat of Avg Trade
     t_stat = 0.0
     if not trades.empty:
         pnl_arr = trades["pnl"].to_numpy()
@@ -164,7 +178,7 @@ def _print_performance_report(
         if std_pnl > 1e-9:
             t_stat = mu_pnl / (std_pnl / np.sqrt(len(pnl_arr)))
 
-    # 3. Market Exposure (%)
+    # 4. Market Exposure (%)
     exposure = 0.0
     n_syms = max(1, len(port.get("symbol_names", [])))
     if not trades.empty and len(eq) > 1:
@@ -173,7 +187,7 @@ def _print_performance_report(
     _logger.info("\n" + "╔" + "═" * 83 + "╗")
     _logger.info(f"║ {title:<81} ║")
     _logger.info("╠" + "═" * 83 + "╣")
-    
+
     # Section A: COMPOUNDING (Wealth Expansion)
     _logger.info(f"║ [A] COMPOUNDING (Wealth Expansion) {' ':<46} ║")
     _logger.info(
@@ -185,7 +199,7 @@ def _print_performance_report(
         f"Profit Factor:{port['profit_factor']:>8.2f}  | Avg PnL %:    {port.get('avg_trade_pnl_pct', 0.0):>8.2f}% ║"  # noqa: E501
     )
     _logger.info("╟" + "─" * 83 + "╢")
-    
+
     # Section B: ROBUSTNESS (Risk & Stability)
     _logger.info(f"║ [B] ROBUSTNESS (Risk & Stability) {' ':<47} ║")
     _logger.info(
@@ -198,11 +212,21 @@ def _print_performance_report(
         f"║   Exposure:    {exposure * 100.0:>8.2f}% {' ':<56} ║"
     )
 
-    
     if dsr is not None or pbo is not None:
         dsr_str = f"{dsr:>8.4f}" if dsr is not None else "   N/A  "
         pbo_str = f"{pbo:>8.4f}" if pbo is not None else "   N/A  "
         _logger.info(f"║   DSR (IS Ref): {dsr_str} | PBO (IS Ref): {pbo_str} {' ':<28} ║")
+
+    # Section C: MARKET-RELATIVE ALPHA
+    if benchmark_cagr is not None:
+        _net_alpha = float(port.get("cagr_pct", 0.0)) - benchmark_cagr
+        _logger.info(
+            f"║   PSR (BLP):   {psr:>8.4f}  | Benchmark:  {benchmark_cagr:>7.1f}%  | Net Alpha:  {_net_alpha:>+7.1f}%  ║"  # noqa: E501
+        )
+    else:
+        _logger.info(
+            f"║   PSR (BLP):   {psr:>8.4f} {' ':<62} ║"
+        )
 
     _logger.info("╟" + "─" * 83 + "╢")
     _logger.info(
@@ -220,72 +244,138 @@ def _print_dual_audit_dashboard(
     champ_m: dict[str, Any],
     gate_status: str,
 ) -> None:
-    _logger.info("\n" + "╔" + "═" * 93 + "╗")
-    _logger.info(f"║ [FINAL STRATEGY AUDIT] Candidate vs Current Champion (OOS METRICS ONLY) {' ':<14} ║")  # noqa: E501
-    _logger.info("╠" + "═" * 93 + "╣")
-    _logger.info(
-        "║ CATEGORY          | METRIC (OOS)          | CHAMPION    | CANDIDATE   | DELTA (Δ)   ║"
+    """SOTA Dashboard for Strategy Promotion Audit.
+
+    Uses ANSI colors and calculated alignment for professional CLI output.
+    """
+    c_grn = "\033[92m"
+    c_red = "\033[91m"
+    c_ylw = "\033[93m"
+    c_rst = "\033[0m"
+    c_bld = "\033[1m"
+
+    # Column widths
+    w_cat = 18
+    w_met = 22
+    w_val = 12
+    # Total content width: borders and separators included
+    l_fmt = (
+        "║ {:<" + str(w_cat) + "} │ {:<" + str(w_met) + "} │ "
+        "{:>" + str(w_val) + "} │ {:>" + str(w_val) + "} │ {} ║"
     )
-    _logger.info("╟" + "─" * 19 + "┼" + "─" * 23 + "┼" + "─" * 13 + "┼" + "─" * 13 + "┼" + "─" * 13 + "╢")  # noqa: E501
     
-    # 1. Reliability (Statistical)
+    def get_delta_str(val: float, is_pct: bool = False, lower_is_better: bool = False) -> str:
+        suffix = "%p" if is_pct else ""
+        precision = ".2f" if is_pct else ".4f"
+        
+        # 1. Create the raw numeric string with sign
+        raw_val = f"{val:>{precision}}"
+        if val > 1e-9:
+            raw_val = "+" + raw_val
+            
+        # 2. Add suffix and pad to w_val BEFORE applying color
+        full_str = raw_val + suffix
+        padded_val = f"{full_str:>{w_val}}"
+        
+        if abs(val) < 1e-7:
+            return padded_val
+        
+        # 3. Apply color
+        is_good = (val < 0) if lower_is_better else (val > 0)
+        color = c_grn if is_good else c_red
+        return f"{color}{padded_val}{c_rst}"
+
+    border_top = "╔" + "═" * 85 + "╗"
+    border_mid = "╠" + "═" * 85 + "╣"
+    border_sep = (
+        "╟" + "─" * (w_cat+1) + "┼" + "─" * (w_met+2) + "┼" + "─" * (w_val+2) + 
+        "┼" + "─" * (w_val+2) + "┼" + "─" * (w_val+2) + "╢"
+    )
+    border_bot = "╚" + "═" * 85 + "╝"
+
+    _logger.info("\n" + border_top)
+    h_text = "[FINAL STRATEGY AUDIT] Candidate vs Champion (OOS ONLY)"
+    _logger.info(f"║ {c_bld}{h_text:<83}{c_rst} ║")
+    _logger.info(border_mid)
+    
+    # Table Header
+    h_row = (
+        f"║ {'CATEGORY':<{w_cat}} │ {'METRIC (OOS)':<{w_met}} │ "
+        f"{'CHAMPION':>{w_val}} │ {'CANDIDATE':>{w_val}} │ {'DELTA (Δ)':>{w_val}} ║"
+    )
+    _logger.info(h_row)
+    _logger.info(border_sep)
+    
+    # 1. Reliability
     pbo_c, pbo_n = champ_m.get("pbo", 0.5), new_m.get("pbo", 0.5)
     dsr_c, dsr_n = champ_m.get("dsr", 0.0), new_m.get("dsr", 0.0)
     
-    _logger.info(
-        f"║ RELIABILITY       | PBO (Lower is Better) | {pbo_c:>11.4f} | {pbo_n:>11.4f} | {pbo_n - pbo_c:>+11.4f} ║"  # noqa: E501
-    )
-    _logger.info(
-        f"║ (Statistical)     | DSR (Stability)       | {dsr_c:>11.4f} | {dsr_n:>11.4f} | {dsr_n - dsr_c:>+11.4f} ║"  # noqa: E501
-    )
-    _logger.info("╟" + "─" * 19 + "┼" + "─" * 23 + "┼" + "─" * 13 + "┼" + "─" * 13 + "┼" + "─" * 13 + "╢")  # noqa: E501
+    _logger.info(l_fmt.format(
+        "RELIABILITY", "PBO (Lower Better)", f"{pbo_c:.4f}", f"{pbo_n:.4f}", 
+        get_delta_str(pbo_n - pbo_c, lower_is_better=True)
+    ))
+    _logger.info(l_fmt.format(
+        "(Statistical)", "DSR (Stability)", f"{dsr_c:.4f}", f"{dsr_n:.4f}", 
+        get_delta_str(dsr_n - dsr_c)
+    ))
+    _logger.info(border_sep)
     
-    # 2. Compounding (Wealth & Risk)
+    # 2. Compounding
     cagr_c, cagr_n = champ_m.get("cagr", 0.0), new_m.get("cagr", 0.0)
     mdd_c, mdd_n = champ_m.get("mdd", 0.0), new_m.get("mdd", 0.0)
-    cvar_c, cvar_n = champ_m.get("cvar", 0.0), new_m.get("cvar", 0.0)
-    
-    _logger.info(
-        f"║ COMPOUNDING       | CAGR (%)              | {cagr_c:>11.2f}% | {cagr_n:>11.2f}% | {cagr_n - cagr_c:>+11.2f}%p ║"  # noqa: E501
-    )
-    _logger.info(
-        f"║ (Wealth & Risk)   | Max Drawdown (%)      | {mdd_c:>11.2f}% | {mdd_n:>11.2f}% | {mdd_n - mdd_c:>+11.2f}%p ║"  # noqa: E501
-    )
-    _logger.info(
-        f"║                   | CVaR 5% (Tail Risk)   | {cvar_c:>11.2f}% | {cvar_n:>11.2f}% | {cvar_n - cvar_c:>+11.2f}%p ║"  # noqa: E501
-    )
-    _logger.info("╟" + "─" * 19 + "┼" + "─" * 23 + "┼" + "─" * 13 + "┼" + "─" * 13 + "┼" + "─" * 13 + "╢")  # noqa: E501
-
-    # 3. Microstructure (Friction Proof)
-    apnl_c, apnl_n = champ_m.get("avg_pnl", 0.0), new_m.get("avg_pnl", 0.0)
     pf_c, pf_n = champ_m.get("pf", 1.0), new_m.get("pf", 1.0)
     
-    _logger.info(
-        f"║ MICROSTRUCTURE    | Avg Trade PnL (%)     | {apnl_c:>11.2f}% | {apnl_n:>11.2f}% | {apnl_n - apnl_c:>+11.2f}%p ║"  # noqa: E501
-    )
-    _logger.info(
-        f"║ (Friction Proof)  | Profit Factor         | {pf_c:>11.2f}  | {pf_n:>11.2f}  | {pf_n - pf_c:>+11.2f}  ║"  # noqa: E501
-    )
-    _logger.info("╠" + "═" * 93 + "╣")
-    
-    # 4. Sanity & Degradation Check
+    _logger.info(l_fmt.format(
+        "COMPOUNDING", "CAGR (%)", f"{cagr_c:.2f}%", f"{cagr_n:.2f}%", 
+        get_delta_str(cagr_n - cagr_c, is_pct=True)
+    ))
+    _logger.info(l_fmt.format(
+        "(Wealth & Risk)", "Max Drawdown (%)", f"{mdd_c:.2f}%", f"{mdd_n:.2f}%", 
+        get_delta_str(mdd_n - mdd_c, is_pct=True, lower_is_better=True)
+    ))
+    _logger.info(l_fmt.format(
+        "", "Profit Factor", f"{pf_c:.2f}", f"{pf_n:.2f}", get_delta_str(pf_n - pf_c)
+    ))
+    _logger.info(border_mid)
+
+    # 3. Sanity
     is_cagr = new_m.get("is_cagr", 0.0)
     ho_cagr = new_m.get("ho_cagr", 0.0)
     retention = (new_m.get("cagr", 0.0) / is_cagr * 100.0) if abs(is_cagr) > 1e-6 else 0.0
     
-    is_status = "PASS" if is_cagr > 80.0 else "FAIL"
-    ho_status = "PASS" if ho_cagr > 60.0 else "FAIL"
-    ret_label = "HEALTHY" if retention > 60.0 else "WARNING"
-    
-    _logger.info(f"║ [SANITY & DEGRADATION CHECK] (IS / Hold-out Reference) {' ':<39} ║")
-    _logger.info("╟" + "─" * 93 + "╢")
-    _logger.info(f"║ IS Path Survival : {is_status:<4} (IS CAGR: {is_cagr:>6.1f}% > 80.0%) {' ':<36} ║")  # noqa: E501
-    _logger.info(f"║ Recent Regime    : {ho_status:<4} (Hold-out CAGR: {ho_cagr:>6.1f}% > 60.0%) {' ':<31} ║")  # noqa: E501
-    _logger.info(f"║ OOS Degradation  : {ret_label:<7} (OOS CAGR {new_m['cagr']:>5.1f}% / IS CAGR {is_cagr:>5.1f}% = {retention:>3.0f}% Retention) {' ':<14} ║")  # noqa: E501
-    _logger.info("╠" + "═" * 93 + "╣")
+    def get_status_tag(val: float, threshold: float) -> str:
+        color = c_grn if val >= threshold else c_red
+        status = "PASS" if val >= threshold else "FAIL"
+        return f"{color}{status}{c_rst}"
 
-    _logger.info(f"║ FINAL VERDICT: {gate_status:<78} ║")
-    _logger.info("╚" + "═" * 93 + "╝\n")
+    _logger.info(f"║ [SANITY & DEGRADATION CHECK] {' ':<56} ║")
+    _logger.info(
+        f"║  - IS Path Survival : {get_status_tag(is_cagr, 80.0):<{4+9}} "
+        f"(IS CAGR: {is_cagr:>5.1f}%) {' ':<40} ║"
+    )
+    _logger.info(
+        f"║  - Recent Regime    : {get_status_tag(ho_cagr, 60.0):<{4+9}} "
+        f"(HO CAGR: {ho_cagr:>5.1f}%) {' ':<40} ║"
+    )
+    
+    ret_color = c_grn if retention > 60.0 else c_ylw if retention > 40.0 else c_red
+    ret_txt = f"{ret_color}{retention:>5.1f}%{c_rst}"
+    _logger.info(
+        f"║  - OOS Retention    : {ret_txt:<{6+9}} of IS Performance {' ':<43} ║"
+    )
+    _logger.info(border_mid)
+
+    # Verdict
+    v_color = c_grn if "PROMOTE" in gate_status else c_red
+    v_msg = f"FINAL VERDICT: {v_color}{c_bld}{gate_status}{c_rst}"
+    _logger.info(f"║ {v_msg:<{83 + 13}} ║")
+    _logger.info(border_bot + "\n")
+
+
+
+
+
+
 
 
 
@@ -369,7 +459,13 @@ def _ml_trial_passes_hard_gates(
     mdd_limit = float(cfg.get("FUTURES_MAX_MDD", 22.0))
     if float(trial.user_attrs.get("ml_worst_mdd_cpcv", 999.0)) >= mdd_limit:
         return False
-    if float(trial.user_attrs.get("avg_trades", 0.0)) < 12.0:
+    # Dynamic trade density: scale minimum trades with IS span to avoid regime-size bias.
+    # FUTURES_BARS_PER_TRADE_EST = expected bars between trades (default 200).
+    # gate1_eff_ref_len is stored by objective_ml per trial.
+    span_bars = int(trial.user_attrs.get("gate1_eff_ref_len", 0))
+    bars_per_trade_est = float(cfg.get("FUTURES_BARS_PER_TRADE_EST", 200))
+    min_trades_dynamic = max(12.0, float(span_bars) / bars_per_trade_est) if span_bars > 0 else 12.0
+    if float(trial.user_attrs.get("avg_trades", 0.0)) < min_trades_dynamic:
         return False
     return True
 
@@ -761,7 +857,7 @@ def main() -> None:
     pruned_n = sum(1 for t in study_ml.trials if t.state == TrialState.PRUNED)
     n_trials_all = len(study_ml.trials)
     _logger.info(
-        "[STEP 4.5/5] completed=%d pruned=%d (zero-trade proxy: %.1f%%)",
+        "[OPT] completed=%d / pruned=%d (%.1f%%)",
         len(completed),
         pruned_n,
         100.0 * pruned_n / max(1, n_trials_all),
@@ -797,7 +893,7 @@ def main() -> None:
         if paths and br:
             oos_tw = t.user_attrs.get("cpcv_path_oos_log_tw") or []
             if len(oos_tw) == len(paths):
-                _logger.info(f"  Evaluating Rank {i+1}: Checking PBO stability...")
+                _logger.debug(f"  Evaluating Rank {i+1}: PBO check...")
                 pbo_obs, _rho = run_cpcv_complement_evaluation(
                     p_params,
                     valid_symbols,
@@ -878,6 +974,9 @@ def main() -> None:
     wf_hmm_refit = bool(OPT_FUTURES_CONFIG.get("FUTURES_WF_HMM_LEG_REFIT", True))
     wf_tw_floor = float(OPT_FUTURES_CONFIG.get("FUTURES_WF_LEG_TW_MIN_ALL", 1.0))
     wf_tw_mean_min = float(OPT_FUTURES_CONFIG.get("FUTURES_WF_LEG_TW_MEAN_MIN", 1.05))
+    # Purging: skip first N bars of each WF leg to prevent IS/train-set leakage.
+    # Covers positions opened near IS boundary that close into the evaluation window.
+    wf_purge_bars = int(OPT_FUTURES_CONFIG.get("FUTURES_WF_PURGE_BARS", 24))
     if n_wf > 1 and valid_symbols:
         ref_sym = valid_symbols[0]
         ref_df = oos_data_maps[ref_sym][args.tf]
@@ -889,6 +988,8 @@ def main() -> None:
         for leg in range(n_wf):
             ls = o0 + leg * leg_w
             le = o0 + (leg + 1) * leg_w if leg < n_wf - 1 else len(ref_df)
+            # Apply purging: evaluation starts wf_purge_bars after leg boundary.
+            ls_eval = min(ls + wf_purge_bars, le - 1)
             oos_maps_leg = oos_data_maps
             if wf_hmm_refit and ml_out.alpha_panel is not None and not ml_out.alpha_panel.empty:
                 leg_anchor = pd.to_datetime(ref_df["datetime"].iloc[ls], utc=True)
@@ -927,7 +1028,7 @@ def main() -> None:
                 params,
                 oos_maps_leg,
                 cache_root=FUTURES_CACHE_DIR,
-                oos_start_idx=ls,
+                oos_start_idx=ls_eval,
                 oos_end_idx=le,
             )
             tw = float(leg_port.get("terminal_wealth_ratio", 1.0))
@@ -935,10 +1036,11 @@ def main() -> None:
             tw_legs.append(tw)
             _suffix = " [HMM reanchored]" if wf_hmm_refit else ""
             _logger.info(
-                " [WF] OOS leg %d/%d idx [%d,%d) terminal_wealth_ratio=%.4f%s",
+                " [WF] OOS leg %d/%d idx [%d+%d(purge),%d) terminal_wealth_ratio=%.4f%s",
                 leg + 1,
                 n_wf,
                 ls,
+                wf_purge_bars,
                 le,
                 tw,
                 _suffix,
@@ -950,7 +1052,7 @@ def main() -> None:
                 _leg_pc = ref_df["hmm_prob_crisis"].iloc[ls:le].to_numpy(dtype=np.float64)
                 _crisis_hard_pct = float(np.mean(_leg_pc > _crisis_thr)) * 100.0
                 _crisis_avg_pct = float(np.mean(_leg_pc)) * 100.0
-                _logger.info(
+                _logger.debug(
                     " [WF CRISIS] leg %d/%d [%d,%d): bars_above_thr(%.2f)=%.1f%% avg_prob=%.1f%%",
                     leg + 1,
                     n_wf,
@@ -970,7 +1072,7 @@ def main() -> None:
                 _erg,
                 _eguide,
             )
-            if bool(OPT_FUTURES_CONFIG.get("FUTURES_ERGODICITY_SOFT_WARN_ENABLED", True)):
+            if bool(OPT_FUTURES_CONFIG.get("FUTURES_ERGODICITY_HARD_GATE_ENABLED", True)):
                 if _erg > _eguide:
                     _logger.warning(
                         " [ERGODICITY HARD GATE] max_deviation %.2f%% "
@@ -998,8 +1100,7 @@ def main() -> None:
                     wf_tw_mean_min,
                 )
 
-    # [STEP 5.1/5] IS & Hold-out Evaluation
-    _logger.info("[STEP 5.1/5] Evaluating IS and Hold-out Performance...")
+    # IS & Hold-out Evaluation
     is_data_maps: dict[str, dict[str, Any]] = {}
     ho_data_maps: dict[str, dict[str, Any]] = {}
 
@@ -1037,19 +1138,44 @@ def main() -> None:
     dsr_obs = float(best_trial.user_attrs.get("gate1_dsr", 0.0))
     # pbo_obs might have been calculated in the Hard Gate check block, let's ensure it's available
     pbo_val = locals().get("pbo_obs", None)
-    
+
+    # BTC buy-and-hold CAGR over the OOS period as market benchmark.
+    # Used for Net Alpha display only — not a gate. IS-boundary safe (no look-ahead).
+    _btc_benchmark_oos: float | None = None
+    _btc_benchmark_is: float | None = None
+    _btc_sym = next((s for s in valid_symbols if "BTC" in s.upper()), None)
+    if _btc_sym and _btc_sym in oos_data_maps:
+        _hrs_tf = int(args.tf.replace("h", "")) if args.tf.endswith("h") else 4
+        _btc_tf_df = oos_data_maps[_btc_sym][args.tf]
+        _btc_o0 = int(oos_data_maps[_btc_sym][f"oos_start_idx_{args.tf}"])
+        _slices: list[tuple[str, np.ndarray, str]] = [
+            ("OOS", _btc_tf_df["close"].iloc[_btc_o0:].to_numpy(dtype=np.float64), "_btc_benchmark_oos"),  # noqa: E501
+            ("IS", _btc_tf_df["close"].iloc[:_btc_o0].to_numpy(dtype=np.float64), "_btc_benchmark_is"),  # noqa: E501
+        ]
+        for _label, _arr_slice, _out_var in _slices:
+            if _arr_slice.size > 1 and _arr_slice[0] > 0:
+                _years = _arr_slice.size * _hrs_tf / (365.0 * 24.0)
+                if _years > 0.01:
+                    _cagr = (float(_arr_slice[-1]) / float(_arr_slice[0])) ** (1.0 / _years) - 1.0
+                    if _out_var == "_btc_benchmark_oos":
+                        _btc_benchmark_oos = _cagr * 100.0
+                    else:
+                        _btc_benchmark_is = _cagr * 100.0
+
     is_port["symbol_names"] = valid_symbols
     ho_port["symbol_names"] = valid_symbols
     oos_port["symbol_names"] = valid_symbols
 
     _print_performance_report(
-        "IS (In-Sample) PERFORMANCE REPORT", is_port, dsr=dsr_obs, pbo=pbo_val, tf=args.tf
+        "IS (In-Sample) PERFORMANCE REPORT", is_port, dsr=dsr_obs, pbo=pbo_val, tf=args.tf,
+        benchmark_cagr=_btc_benchmark_is,
     )
     _print_performance_report(
-        "Hold-out PERFORMANCE REPORT", ho_port, dsr=dsr_obs, pbo=pbo_val, tf=args.tf
+        "Hold-out PERFORMANCE REPORT", ho_port, dsr=dsr_obs, pbo=pbo_val, tf=args.tf,
     )
     _print_performance_report(
-        "FINAL OOS PERFORMANCE REPORT", oos_port, dsr=dsr_obs, pbo=pbo_val, tf=args.tf
+        "FINAL OOS PERFORMANCE REPORT", oos_port, dsr=dsr_obs, pbo=pbo_val, tf=args.tf,
+        benchmark_cagr=_btc_benchmark_oos,
     )
 
     # [IS Structural Balance Gate] Added 2026-04-22 after lgbm-200-v2 wrongly saved IS=-3.4%.
