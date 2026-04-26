@@ -32,7 +32,7 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     "FUTURES_MC_GATE_BUCKET_TRIALS": 100,
     "FUTURES_MC_PBO_STEP_PER_BUCKET": 0.01,
     "FUTURES_MC_PBO_CEILING_CLAMP_MIN": 0.38,
-    # Optional: raise FUTURES_ML_GATE1_DSR_MIN with trials (off by default — base 0.20 is low).
+    # DSR base: +0.02 per 100-trial bucket (MC-DSR); at 500t→0.55, 2000t→0.85 (cap 0.95).
     "FUTURES_MC_DSR_TRIAL_ADJUST_ENABLED": True,
     "FUTURES_MC_DSR_STEP_PER_BUCKET": 0.02,
     "FUTURES_MC_DSR_FLOOR_CAP": 0.95,
@@ -73,17 +73,16 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     # Session 39: recovery override abandoned (P10 -0.027, DSR collapse). Keep disabled.
     "CRISIS_RECOVERY_TREND_THR": 1e9,
     "CRISIS_RECOVERY_FLOOR": 0.30,
-    "FUTURES_ML_PHASE_D_TRIALS": 500,
     "FUTURES_CPCV_N_BLOCKS": 8,
     "FUTURES_CPCV_K_TEST": 3,
     "FUTURES_WF_OOS_LEGS": 3,
     # R-6: per WF OOS leg, retrain systemic HMM on data strictly before leg start (GP frozen).
     "FUTURES_WF_HMM_LEG_REFIT": True,
     "FUTURES_WF_LEG_TW_MIN_ALL": 1.0,
-    "FUTURES_WF_LEG_TW_MEAN_MIN": 1.02,
+    "FUTURES_WF_LEG_TW_MEAN_MIN": 1.10,
     # futures-opt P4: log reference + optional soft warn (not a hard gate).
     "FUTURES_ERGODICITY_GUIDELINE_PCT": 15.0,
-    "FUTURES_ERGODICITY_SOFT_WARN_ENABLED": True,
+    "FUTURES_ERGODICITY_HARD_GATE_ENABLED": True,
     # Phase 2: entry gate (rolling quantile), TBM horizon (1m bars), meta purge alignment
     "ENTRY_QUANTILE_WINDOW": 240,
     "FUTURES_ENTRY_NUMBA_THRESHOLD": 0.5,
@@ -99,7 +98,7 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     "FUTURES_ML_WF_REFIT_LEGS": 3,
     "FUTURES_PHASE3_HARD_GATE": True,
     # gate1_dsr ∈ [0,1] from CPCV paths (Bailey & López de Prado style)
-    "FUTURES_ML_GATE1_DSR_MIN": 0.20,
+    "FUTURES_ML_GATE1_DSR_MIN": 0.45,
     # Distributional hardening: 10th percentile CPCV path must still survive.
     # log(TW) > 0.0 ↔ TW > 1.0, so this is a direct worst-decile survival test.
     "FUTURES_CPCV_P10_LOG_TW_MIN": 0.0,
