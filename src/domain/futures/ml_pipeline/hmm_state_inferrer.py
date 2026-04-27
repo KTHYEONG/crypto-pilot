@@ -30,16 +30,16 @@ _SEMANTIC_ORDER = list(HMM_SEMANTIC_PROB_COLUMNS)
 
 
 def _bull_semantic_score(means: np.ndarray, state_i: int) -> float:
-    """Composite bull score: trend strength (24h/168h) + volume energy (index 5)."""
+    """Composite bull score: trend strength (24h/168h) + volume energy (index 5) + breadth."""
     t24 = float(means[state_i, 0])
     t168 = float(means[state_i, 1])
     energy = float(means[state_i, 5])  # volume_momentum_24h
     br = float(means[state_i, 6])      # market_breadth
     
-    # Structural stability (168h) prioritized over short-term (24h)
-    composite_trend = 0.3 * t24 + 0.5 * t168 + 0.2 * energy
-    secondary = float(np.clip(0.1 * br, -0.2, 0.2))
-    return composite_trend + secondary
+    # Structural stability (168h) prioritized: 0.6 vs 0.2 short-term
+    # Market breadth is a key filter for healthy universal bull runs
+    composite_trend = 0.2 * t24 + 0.6 * t168 + 0.1 * energy + 0.1 * br
+    return composite_trend
 
 
 def _crisis_semantic_scores(means: np.ndarray) -> np.ndarray:
@@ -55,11 +55,11 @@ def _crisis_semantic_scores(means: np.ndarray) -> np.ndarray:
         funding = float(means[i, 7]) # funding_level
         
         # Crisis = (Vol & Downside risk high) AND (Price far below long-term MA)
-        # Added: Funding inversion (highly negative) or extreme overheating (highly positive)
-        # Absolute funding level > 0.1% (daily) is extreme for market-wide index
-        f_stress = float(np.abs(funding) * 5.0) 
+        # Higher penalty for high volatility and extreme funding inversion
+        f_stress = float(np.abs(funding) * 10.0) 
+        vol_penalty = float(vol * 2.0)
         
-        out[i] = (vol + down_ratio + f_stress) - (t24 + t168 + dist)
+        out[i] = (vol_penalty + down_ratio + f_stress) - (0.5 * t24 + 1.5 * t168 + dist)
     return out
 
 

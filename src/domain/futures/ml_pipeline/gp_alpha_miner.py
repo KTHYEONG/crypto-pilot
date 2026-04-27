@@ -258,12 +258,16 @@ class GPAlphaMiner:
                 sample_weight = sample_weight * np.clip(tw, 0.25, 3.0)
 
             # --- Ergodicity Weighting (Regime-Aware Sample Selection) ---
-            # Penalize samples during high-volatility/crisis to prevent noise overfitting.
+            # Penalize samples during high-volatility/crisis or noisy chop to prevent overfitting.
             if "hmm_prob_crisis" in aligned_df.columns:
                 p_crisis = aligned_df["hmm_prob_crisis"].fillna(0.0).to_numpy(dtype=np.float64)
-                # Relaxed soft-kill weighting: weight = max(0.4, 1.0 - p_crisis * 0.6)
-                # This keeps more signal from volatile regimes while still favoring stability.
-                erg_weight = np.clip(1.0 - p_crisis * 0.6, 0.4, 1.0)
+                p_chop_ser = aligned_df.get(
+                    "hmm_prob_chop", pd.Series(0.0, index=aligned_df.index)
+                )
+                p_chop = p_chop_ser.fillna(0.0).to_numpy(dtype=np.float64)
+                
+                # Aggressive penalty for crisis and moderate penalty for chop
+                erg_weight = np.clip(1.0 - (p_crisis * 0.8 + p_chop * 0.4), 0.1, 1.0)
                 sample_weight = sample_weight * erg_weight
 
             if is_end_date:
@@ -363,15 +367,16 @@ class GPAlphaMiner:
             lgbm = LGBMRegressor(
                 boosting_type="dart",  # DART booster for better generalization
                 objective="huber",     # Huber loss for fat-tail/outlier robustness
-                n_estimators=100,
-                learning_rate=0.05,
-                num_leaves=31,
-                max_depth=6,
-                min_child_samples=50,
-                subsample=0.8,
-                colsample_bytree=0.8,
-                reg_alpha=0.5,         # Increased L1 regularization
-                reg_lambda=0.5,        # Increased L2 regularization
+                n_estimators=150,      # Slightly more estimators for DART
+                learning_rate=0.03,    # Slower learning rate for stability
+                num_leaves=24,         # Smaller trees for better stability
+                max_depth=5,
+                min_child_samples=100, # Increased to prevent split on noise
+                subsample=0.7,
+                colsample_bytree=0.7,
+                reg_alpha=2.0,         # High L1 regularization
+                reg_lambda=2.0,        # High L2 regularization
+                extra_trees=True,      # Keep extra trees for variance reduction
                 n_jobs=self.n_jobs,
                 random_state=42,
             )
