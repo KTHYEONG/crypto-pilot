@@ -9,7 +9,7 @@ import pandas as pd
 from numba import njit
 
 # Columns produced by build_gp_input_features (for CS-rank / imputation in pipeline).
-# Systemic HMM input (8-dim: Structural Trend, Risk, and Energy markers).
+# Systemic HMM input (10-dim: Trend, Risk, Energy, Breadth, Funding, Dispersion, RS).
 SYSTEMIC_HMM_FEATURE_COLUMNS: tuple[str, ...] = (
     "btc_trend_vol_adj_24h",
     "btc_trend_vol_adj_168h",
@@ -19,6 +19,8 @@ SYSTEMIC_HMM_FEATURE_COLUMNS: tuple[str, ...] = (
     "volume_momentum_24h",
     "market_breadth",
     "funding_level",
+    "cs_dispersion",
+    "eth_btc_rs",
 )
 
 # Posterior columns aligned to stable semantic labels (order for MetaLabeler).
@@ -31,7 +33,7 @@ HMM_SEMANTIC_PROB_COLUMNS: tuple[str, ...] = (
 
 # Bump when GP feature semantics change without renaming columns so raw GP
 # caches are invalidated and Tier 2 retraining actually happens.
-GP_FEATURE_SCHEMA_VERSION: str = "v6"
+GP_FEATURE_SCHEMA_VERSION: str = "v7"
 
 GP_ENGINEERED_FEATURE_NAMES: tuple[str, ...] = (
     "ret_1",
@@ -64,6 +66,11 @@ GP_ENGINEERED_FEATURE_NAMES: tuple[str, ...] = (
     "range_pos_24",
     "frac_diff_04",
     "hurst_24",
+    "vol_of_vol_24",
+    "tail_rejection_24",
+    "dist_from_high_24",
+    "corr_btc_24",
+    "vpin_proxy_12",
 )
 
 
@@ -385,6 +392,31 @@ def build_gp_input_features(df: pd.DataFrame) -> pd.DataFrame:
         _rolling_hurst_rs(close.to_numpy(dtype=np.float64), 24), index=out.index
     )
 
+    # v7: new alpha injections (vol-of-vol, tail rejection, session distance, btc correlation, vpin)
+    out["vol_of_vol_24"] = out["realized_vol_yz_24"].rolling(24, min_periods=12).std()
+    
+    shadows = (high - np.maximum(open_, close)) + (np.minimum(open_, close) - low)
+    out["tail_rejection_24"] = (
+        (shadows / (high - low + 1e-12)).rolling(24, min_periods=12).mean().fillna(0.0)
+    )
+    
+    high_24 = high.rolling(24, min_periods=12).max()
+    low_24 = low.rolling(24, min_periods=12).min()
+    out["dist_from_high_24"] = (high_24 - close) / (high_24 - low_24 + 1e-12)
+
+    if "btc_close" in df.columns:
+        btc_log_ret = np.log(df["btc_close"] / df["btc_close"].shift(1).clip(lower=1e-12))
+        out["corr_btc_24"] = log_ret_1.rolling(24, min_periods=12).corr(btc_log_ret).fillna(0.0)
+    else:
+        out["corr_btc_24"] = 0.0
+
+    buy_vol = tbq / (close + 1e-9)
+    sell_vol = tsq / (close + 1e-9)
+    out["vpin_proxy_12"] = (
+        (buy_vol - sell_vol).abs().rolling(12, min_periods=6).sum() / 
+        (vol.rolling(12, min_periods=6).sum() + 1e-12)
+    ).fillna(0.0)
+
     # vol_ratio / buy_sell_ratio: keep finite defaults; ret/ma_dist/funding left NaN for CS impute
     out = out.replace([np.inf, -np.inf], np.nan)
     return out
@@ -530,6 +562,19 @@ def build_systemic_hmm_features(
     out["volume_momentum_24h"] = vol_energy.reindex(idx).fillna(0.0)
     out["market_breadth"] = market_feats["market_breadth"].reindex(idx).fillna(0.0)
     out["funding_level"] = funding_mean.reindex(idx).fillna(0.0)
+    
+    # 6. Cross-Sectional Dispersion
+    out["cs_dispersion"] = market_feats["cs_dispersion"].reindex(idx).fillna(0.0)
+    
+    # 7. ETH/BTC Relative Strength (Risk-on/off proxy)
+    eth_sym = next((s for s in syms if "ETH" in s), None)
+    if btc_sym and eth_sym:
+        eth_close = panel_df.xs(eth_sym, level="symbol")["close"].astype(np.float64)
+        rs = eth_close / btc_close
+        rs_ema = rs.ewm(span=24).mean()
+        out["eth_btc_rs"] = (rs / (rs_ema + 1e-12)) - 1.0
+    else:
+        out["eth_btc_rs"] = 0.0
 
     out = out[list(SYSTEMIC_HMM_FEATURE_COLUMNS)]
     return out.replace([np.inf, -np.inf], np.nan).fillna(0.0)

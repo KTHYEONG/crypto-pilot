@@ -112,17 +112,37 @@ class CrossSectionalPipelineUtils:
         weights: tuple[float, ...] | None = None,
     ) -> pd.Series:
         """Calculate vol-adjusted rank targets across multiple horizons."""
+        # Use OHLC for more accurate volatility adjustment (Yang-Zhang proxy)
         close = panel_df["close"].unstack(level="symbol")
+        open_ = (
+            panel_df["open"].unstack(level="symbol")
+            if "open" in panel_df.columns
+            else close.shift(1).fillna(close)
+        )
+        high = (
+            panel_df["high"].unstack(level="symbol") if "high" in panel_df.columns else close
+        )
+        low = (
+            panel_df["low"].unstack(level="symbol") if "low" in panel_df.columns else close
+        )
+
         h_list = tuple(horizons)
+        # Use more balanced weighting (decaying but not as aggressive as 1/sqrt(h))
+        # to prioritize medium-term horizons (6h-12h) while keeping 24h as anchor.
         if weights is None:
-            w_arr = np.array([1.0 / np.sqrt(float(h)) for h in h_list], dtype=np.float64)
+            w_arr = np.array([1.0 / (float(h) ** 0.35) for h in h_list], dtype=np.float64)
         else:
             w_arr = np.asarray(weights, dtype=np.float64)
         w_norm = w_arr / np.sum(w_arr)
 
         rank_panels: list[pd.DataFrame] = []
-        log_ret_1 = np.log(close / close.shift(1))
-        vol_base = log_ret_1.rolling(24, min_periods=12).std()
+        # Calculate a more robust 24h volatility (Yang-Zhang approximation)
+        log_ho = np.log((high / open_).clip(lower=1e-12))
+        log_lo = np.log((low / open_).clip(lower=1e-12))
+        log_co = np.log((close / open_).clip(lower=1e-12))
+        # Rogers-Satchell variance proxy
+        rs_var = log_ho * (log_ho - log_co) + log_lo * (log_lo - log_co)
+        vol_base = np.sqrt(rs_var.rolling(24, min_periods=12).mean().clip(lower=1e-9))
 
         for h, w in zip(h_list, w_norm, strict=True):
             fwd = np.log(close.shift(-h) / close)
@@ -132,13 +152,17 @@ class CrossSectionalPipelineUtils:
                     "(h=%s); check close grid / lookahead.",
                     h,
                 )
+            # Normalize by horizon-scaled volatility
             vol = vol_base * np.sqrt(float(h))
             adj = fwd / (vol + 1e-9)
+            
+            # Cross-sectional rank of risk-adjusted returns
             rank = adj.rank(axis=1, pct=True, method="average")
             rank_panels.append(rank * float(w))
 
         composite = sum(rank_panels)
         final = composite.rank(axis=1, pct=True, method="average")
+        # Scale to [-1, 1] for regression objective compatibility
         stacked = ((final - 0.5) * 2.0).stack(future_stack=True).reindex(panel_df.index)
         return stacked
 
