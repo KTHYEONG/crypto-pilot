@@ -240,8 +240,9 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
         ctx.multi_alignment_info["cpcv_all_block_ranges"] = unique_blocks
         ctx.multi_alignment_info["awf_legs"] = awf_legs
 
-    if ctx.cpcv_block_slices:
-        aligned0 = ctx.cpcv_block_slices[0]["data"]
+    # Diagnostic on AWF leg 0 (replaces CPCV block 0 after paradigm shift).
+    if ctx.awf_leg_slices:
+        aligned0 = ctx.awf_leg_slices[0].get("data") or {}
         xl0 = aligned0.get("xs_score_long")
         if xl0 is not None and getattr(xl0, "size", 0) > 0:
             xs_std = float(np.nanstd(np.asarray(xl0, dtype=np.float64)))
