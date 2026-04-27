@@ -43,7 +43,7 @@ def _bull_semantic_score(means: np.ndarray, state_i: int) -> float:
 
 
 def _crisis_semantic_scores(means: np.ndarray) -> np.ndarray:
-    """Crisis score: high vol + high downside risk + extreme negative distance (index 4)."""
+    """Crisis score: vol + downside risk + extreme distance + funding inversion."""
     k = int(means.shape[0])
     out: np.ndarray = np.empty(k, dtype=np.float64)
     for i in range(k):
@@ -51,10 +51,15 @@ def _crisis_semantic_scores(means: np.ndarray) -> np.ndarray:
         t168 = float(means[i, 1])
         vol = float(means[i, 2])
         down_ratio = float(means[i, 3])
-        dist = float(means[i, 4])  # btc_ma_dist_168h (capitulation bottom marker)
+        dist = float(means[i, 4])  # btc_ma_dist_168h
+        funding = float(means[i, 7]) # funding_level
         
         # Crisis = (Vol & Downside risk high) AND (Price far below long-term MA)
-        out[i] = (vol + down_ratio) - (t24 + t168 + dist)
+        # Added: Funding inversion (highly negative) or extreme overheating (highly positive)
+        # Absolute funding level > 0.1% (daily) is extreme for market-wide index
+        f_stress = float(np.abs(funding) * 5.0) 
+        
+        out[i] = (vol + down_ratio + f_stress) - (t24 + t168 + dist)
     return out
 
 
