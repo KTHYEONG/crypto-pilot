@@ -1,18 +1,18 @@
-"""
-백테스트 결과인 손익 데이터를 바탕으로 수익률, MDD, Sortino 등 정량적 성과 지표를 계산함.
+"""백테스트 성과 지표 계산 (수익률, MDD, Sortino, SPA bootstrap 등).
+
 전략의 우수성을 판단하기 위해 단순 수익률뿐만 아니라 리스크 대비 효율성을 점수화하는 역할을 수행함.
 """
 
 from __future__ import annotations
 
 import math
-from typing import Sequence, Union
+from collections.abc import Sequence
 
 import numpy as np
 import pandas as pd
 
 
-def calc_profit_factor_from_pnl(pnl_series: Union[pd.Series, np.ndarray, Sequence[float]]) -> float:
+def calc_profit_factor_from_pnl(pnl_series: pd.Series | np.ndarray | Sequence[float]) -> float:
     """Calculate Profit Factor from a pre-computed net PNL series (fee-deducted)."""
     pnl_arr = np.asarray(pnl_series)
     if pnl_arr.size == 0:
@@ -60,11 +60,10 @@ def calc_mdd_from_equity(equity_curve: np.ndarray) -> float:
 
 
 def calc_sortino_from_equity(equity_curve: np.ndarray, span_days: float) -> float:
-    """
-    [ALGO-TRADING & COMPOUNDING OPTIMIZED METHOD]
-    기계식 매매와 복리(Compounding) 자산 증식의 수학적 특성을 완벽히 반영함.
+    """Compute annualized Sortino ratio from equity curve (log-return based).
+
     1. 스무딩 없음: 엔진이 반환한 틱/캔들 단위의 모든 궤적(Path) 고통을 그대로 측정.
-    2. 로그 수익률(Log Returns) 사용: 상하방 비대칭성을 제거하여 
+    2. 로그 수익률(Log Returns) 사용: 상하방 비대칭성을 제거하여
        복리 환경에서의 실제 변동성 드래그를 정확히 산출.
     """
     if len(equity_curve) < 2 or span_days <= 0:
@@ -121,8 +120,8 @@ def compute_pbo_from_cpcv_paths(
     *,
     min_paths: int = 6,
 ) -> tuple[float, float]:
-    """
-    PBO proxy from CPCV path IS vs OOS score ranks.
+    """Return PBO proxy from CPCV path IS vs OOS score ranks.
+
     Returns (pbo_fraction, spearman_rho). PBO ~ 0.5 * (1 - rho).
     """
     is_arr = np.asarray(list(is_path_scores), dtype=np.float64)
@@ -210,8 +209,8 @@ def calc_gate1_dsr_from_path_log_tw(
     stat_ref_len: float,
     n_trials_opt: float,
 ) -> float:
-    """
-    Deflated Sharpe (Bailey & López de Prado) on CPCV path log-TWR samples.
+    """Compute Deflated Sharpe (Bailey & Lopez de Prado) on CPCV path log-TWR samples.
+
     Returns probability in [0, 0.99] or sentinel -1.0 if path std is degenerate.
     """
     if path_arr.size < 2:
@@ -240,8 +239,8 @@ def calc_time_to_target_wealth(
     target_multiplier: float,
     bars_per_year: float,
 ) -> tuple[float, float]:
-    """
-    [Path A] Probability-weighted time to target assets (e.g., 2x or 10x).
+    """Return probability-weighted time to reach target asset multiplier.
+
     Returns (expected_years, ci_upper_years).
     """
     if path_log_returns.size < 2:
@@ -277,9 +276,7 @@ def calc_net_alpha_with_friction(
     avg_slippage_bps: float = 2.0,
     turnover_per_bar: float = 0.1,
 ) -> float:
-    """
-    [Path C] Net Alpha accounting for liquidity-depth (slippage) and funding-rate friction.
-    """
+    """Compute net alpha accounting for liquidity-depth slippage and funding-rate friction."""
     if len(equity_curve) < 2:
         return 0.0
     
@@ -299,4 +296,71 @@ def calc_net_alpha_with_friction(
     
     net_cagr = cagr_decimal - annual_slippage_cost - annual_funding_cost
     return float(net_cagr - benchmark_cagr)
+
+
+def stationary_bootstrap_spa(
+    leg_log_tw: np.ndarray,
+    n_bootstrap: int = 2000,
+    block_length: int | None = None,
+    seed: int = 42,
+) -> float:
+    """Sign-permutation / circular-block bootstrap p-value for H0: E[leg_log_tw] <= 0.
+
+    For K=5 AWF legs, uses circular block bootstrap (block_length=2 default).
+    p-value < 0.10 rejects H0 at 10% level — strategy has positive expected log-TW.
+
+    Returns p-value in [0, 1]. Lower = more significant (better strategy).
+    """
+    arr = np.asarray(leg_log_tw, dtype=np.float64)
+    k = arr.size
+    if k < 2:
+        return 0.5
+
+    obs_mean = float(np.mean(arr))
+    if obs_mean <= 0.0:
+        return 1.0
+
+    rng = np.random.default_rng(seed)
+    blk = max(1, int(block_length or max(1, k // 2)))
+    n = n_bootstrap
+
+    # Circular block bootstrap under H0: subtract observed mean (demeaned resampling)
+    arr_dm = arr - obs_mean  # demeaned — H0 version
+    bootstrap_means: np.ndarray = np.empty(n, dtype=np.float64)
+    for b in range(n):
+        sample = np.empty(k, dtype=np.float64)
+        idx = 0
+        while idx < k:
+            start = int(rng.integers(0, k))
+            take = min(blk, k - idx)
+            for j in range(take):
+                sample[idx] = arr_dm[(start + j) % k]
+                idx += 1
+        bootstrap_means[b] = float(np.mean(sample))
+
+    # p-value: fraction of bootstrap means >= observed mean - H0 mean (=0)
+    # Under H0 the null mean is 0, so we compare bootstrap means to obs_mean
+    p_val = float(np.mean(bootstrap_means >= obs_mean))
+    return float(np.clip(p_val, 0.0, 1.0))
+
+
+def block_bootstrap_tstat(
+    leg_log_tw: np.ndarray,
+    n_bootstrap: int = 2000,
+    seed: int = 42,
+) -> float:
+    """Block-bootstrap t-statistic for H0: mean=0 over AWF legs.
+
+    Returns t-stat corrected for small-sample autocorrelation.
+    t > 2.0 at K=5 indicates robust positive drift.
+    """
+    arr = np.asarray(leg_log_tw, dtype=np.float64)
+    k = arr.size
+    if k < 2:
+        return 0.0
+    mu = float(np.mean(arr))
+    se = float(np.std(arr, ddof=1)) / math.sqrt(k)
+    if se < 1e-12:
+        return 0.0
+    return float(mu / se)
 

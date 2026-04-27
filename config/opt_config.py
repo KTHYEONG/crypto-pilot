@@ -7,9 +7,11 @@ from typing import Any
 # ==============================================================================
 
 OPT_FUTURES_CONFIG: dict[str, Any] = {
-    "total_trials": 2000,
+    # Reduced from 2000: CAWF-R has K=5 independent legs; more trials = more selection bias.
+    # Bonferroni SR_bench = sqrt(2*ln(400))≈3.46 vs sqrt(2*ln(2000))≈5.30 — honest deflation.
+    "total_trials": 400,
     # Phase-D TPESampler: random trials before TPE; must be < n_ml_trials (see opt_main_futures).
-    "tpe_n_startup_trials": 384,
+    "tpe_n_startup_trials": 120,
     # Caps startup at this fraction of Phase-D n_trials (prevents 384/500 ~77% random when
     # total_trials-oriented tpe_n_startup is reused for FUTURES_ML_PHASE_D_TRIALS=500).
     "FUTURES_ML_PHASE_D_TPE_STARTUP_FRAC": 0.30,
@@ -73,9 +75,21 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     # Session 39: recovery override abandoned (P10 -0.027, DSR collapse). Keep disabled.
     "CRISIS_RECOVERY_TREND_THR": 1e9,
     "CRISIS_RECOVERY_FLOOR": 0.30,
+    # CAWF-R: K=5 chronological AWF legs replace reshuffled CPCV paths.
+    "FUTURES_AWF_K_LEGS": 5,
+    "FUTURES_AWF_MIN_TRAIN_FRAC": 0.40,  # first leg trains on 40% of IS bars
+    # PLGD objective weights (see objective_ml.py).
+    "FUTURES_PLGD_LAMBDA_DEF": 0.5,   # Bonferroni trial-deflation strength
+    "FUTURES_PLGD_LAMBDA_TAIL": 2.0,  # worst-leg tail penalty multiplier
+    "FUTURES_AWF_NET_EDGE_MIN": 1.5,   # min EV/cost ratio (avg PnL / round-trip cost)
+    # SPA bootstrap for post-run diagnostics (not used per-trial).
+    "FUTURES_SPA_N_BOOTSTRAP": 2000,
+    "FUTURES_SPA_P_VALUE_MAX": 0.10,   # SPA p-value ≤ 0.10 → reject H0: zero alpha
+    # CPCV legacy params (kept for cv_utils compat; not used in AWF objective).
     "FUTURES_CPCV_N_BLOCKS": 8,
     "FUTURES_CPCV_K_TEST": 3,
-    "FUTURES_WF_OOS_LEGS": 3,
+    # Increased from 3: 5 WF OOS legs provide regime-diverse robustness verification.
+    "FUTURES_WF_OOS_LEGS": 5,
     # R-6: per WF OOS leg, retrain systemic HMM on data strictly before leg start (GP frozen).
     "FUTURES_WF_HMM_LEG_REFIT": True,
     "FUTURES_WF_LEG_TW_MIN_ALL": 1.0,
@@ -98,10 +112,14 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     "FUTURES_ML_WF_REFIT_LEGS": 3,
     "FUTURES_PHASE3_HARD_GATE": True,
     # gate1_dsr ∈ [0,1] from CPCV paths (Bailey & López de Prado style)
-    "FUTURES_ML_GATE1_DSR_MIN": 0.45,
+    # AWF gate1_dsr = awf_pos_frac (fraction of legs with positive log-TW).
+    # 0.40 → at least 2/5 legs positive (floor). MC adjustment raises to 0.48 at 400 trials.
+    "FUTURES_ML_GATE1_DSR_MIN": 0.40,
     # Distributional hardening: 10th percentile CPCV path must still survive.
     # log(TW) > 0.0 ↔ TW > 1.0, so this is a direct worst-decile survival test.
-    "FUTURES_CPCV_P10_LOG_TW_MIN": 0.0,
+    # AWF worst-leg floor: ≥-0.05 means at most 5% log loss on worst single leg.
+    # Changed from 0.0 (CPCV p10 > 0 gate) — AWF k=5 allows 1 bad leg.
+    "FUTURES_CPCV_P10_LOG_TW_MIN": -0.05,
 }
 
 # Cross-Sectional Strategy Parameter Space
