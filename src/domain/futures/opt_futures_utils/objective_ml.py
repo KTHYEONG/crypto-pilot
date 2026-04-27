@@ -778,15 +778,11 @@ def objective_ml_phase_d(trial: optuna.Trial, ctx: MLPhaseDContext) -> float | t
     trade_shortfall = max(0.0, float(min_trades_target) - avg_trades_agg) / float(
         max(min_trades_target, 1)
     )
-    total_awf_log_ret = float(np.sum(leg_arr))
-    is_penalty = 0.0
-    if total_awf_log_ret < 0.0:
-        is_penalty += abs(total_awf_log_ret) * 5.0
-    if mu_log < 0.0:
-        is_penalty += abs(mu_log) * 5.0
-
-    # Path consistency: std across AWF legs (proxies IS-OOS stability; replaces CPCV std pen)
-    path_consistency_penalty = float(np.clip(sigma_log, 0.0, 2.0)) * 3.25
+    # is_penalty(5x|mu|) removed: PLGD naturally penalizes negative mu; 5x cliff creates
+    # discontinuous TPE gradient and double-counts with variance_drag + tail_pen.
+    # path_consistency_penalty(3.25*sigma) removed: PLGD deflation (Bonferroni)
+    # already covers cross-leg sigma correction; 3.25*sigma would triple-penalize sigma.
+    path_consistency_penalty = 0.0
 
     ev_cost_min = float(cfg.get("FUTURES_AWF_NET_EDGE_MIN", 1.5))
     ev_cost_penalty = max(0.0, ev_cost_min - ev_cost_ratio_agg) * 2.0
@@ -800,12 +796,12 @@ def objective_ml_phase_d(trial: optuna.Trial, ctx: MLPhaseDContext) -> float | t
     if leg_arr.size < 2 or dsr_awf < 0.0:
         obj = float(1e9 + pen + 3.0 * trade_shortfall + exposure_floor_penalty)
     else:
-        # Minimize negative PLGD + auxiliary penalties
+        # Minimize negative PLGD + auxiliary penalties.
+        # path_consistency_penalty = 0.0 (see above). is_penalty removed.
         obj = float(
             -plgd
             + pen
             + 3.0 * trade_shortfall
-            + is_penalty
             + path_consistency_penalty
             + ev_cost_penalty
             + exposure_floor_penalty
@@ -839,8 +835,8 @@ def objective_ml_phase_d(trial: optuna.Trial, ctx: MLPhaseDContext) -> float | t
     trial.set_user_attr("awf_sigma_log", sigma_log)
 
     if OPT_FUTURES_CONFIG.get("FUTURES_ML_GP_NSGA2_ENABLED", False):
-        obj1 = float(-plgd + pen + 3.0 * trade_shortfall + is_penalty + exposure_floor_penalty)
-        obj2 = float(path_consistency_penalty + ev_cost_penalty)
+        obj1 = float(-plgd + pen + 3.0 * trade_shortfall + exposure_floor_penalty)
+        obj2 = float(ev_cost_penalty)   # path_consistency removed; deflation handles sigma
         return obj1, obj2
 
     return float(obj)
