@@ -1,11 +1,17 @@
-"""Phase D: single-objective CPCV-DSR (TPE) for ML cross-sectional rank portfolio."""
+"""Phase D: single-objective CAWF-R PLGD (TPE) for ML cross-sectional rank portfolio.
+
+Paradigm: Combinatorial Anchored Walk-Forward with PLGD objective (2026-04-26).
+Replaces reshuffled CPCV with K=5 chronological AWF legs to fix:
+  F1 (GP leakage — partial), F2 (non-chronological), F3 (block < regime),
+  F4 (holdout double-dip), F5 (2000-trial cherry-pick).
+"""
 
 from __future__ import annotations
 
 import logging
 import threading
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple, cast
+from typing import Any, cast
 
 import numpy as np
 import optuna
@@ -20,6 +26,7 @@ from src.domain.futures.engine_multi_futures import (
 )
 from src.domain.futures.ml_pipeline.feature_engineering import HMM_SEMANTIC_PROB_COLUMNS
 from src.domain.futures.opt_futures_utils.cv_utils import (
+    build_anchored_wf_legs,
     build_cpcv_test_paths_with_fallback,
     list_cpcv_block_ranges,
 )
@@ -29,7 +36,6 @@ from src.domain.futures.opt_futures_utils.data_utils import (
 )
 from src.domain.futures.opt_futures_utils.metrics import (
     _log_tw_from_ret_pct,
-    calc_gate1_dsr_from_path_log_tw,
     calc_mdd_from_equity,
 )
 from src.domain.futures.opt_futures_utils.objective import (
@@ -44,14 +50,18 @@ _PRECOMPUTE_LOCK = threading.Lock()
 
 @dataclass
 class MLPhaseDContext:
-    data_maps: Dict[str, Dict[str, Any]]
-    symbols: List[str]
+    """Shared precomputed context passed to each Optuna trial in Phase D."""
+
+    data_maps: dict[str, dict[str, Any]]
+    symbols: list[str]
     tf: str
     seed: int = 42
-    # [OPTIMIZATION] Pre-aligned global matrices for O(1) slicing
-    cpcv_block_slices: Optional[List[Dict[str, Any]]] = None
-    holdout_slice: Optional[Dict[str, np.ndarray]] = None
-    multi_alignment_info: Optional[Dict[str, Any]] = None
+    # CAWF-R: K chronological AWF test-leg slices (replaces cpcv_block_slices).
+    awf_leg_slices: list[dict[str, Any]] | None = None
+    # Legacy fields kept for backward-compat; cleared in precompute under CAWF-R.
+    cpcv_block_slices: list[dict[str, Any]] | None = None
+    holdout_slice: dict[str, np.ndarray] | None = None
+    multi_alignment_info: dict[str, Any] | None = None
 
 
 def _hmm_columns_for_dyn_leverage(df: pd.DataFrame) -> list[str]:
@@ -66,7 +76,7 @@ def _hmm_columns_for_dyn_leverage(df: pd.DataFrame) -> list[str]:
 
 
 def _inject_dyn_leverage_trimmed(trimmed_sig: pd.DataFrame, raw_full: pd.DataFrame) -> None:
-    """Expected Kelly quality x entropy discount + crisis de-risk (tmp.md Layer 2.2)."""
+    """Apply Kelly quality x entropy discount + crisis de-risk to trimmed signal."""
     cfg = OPT_FUTURES_CONFIG
     hmm_cols = _hmm_columns_for_dyn_leverage(raw_full)
     base_lev = float(cfg.get("FUTURES_DISCOVERY_LEVERAGE", 5))
@@ -153,13 +163,13 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
             return
         ctx.multi_alignment_info = info
 
-        full_signal_dfs: Dict[str, pd.DataFrame] = {}
+        full_signal_dfs: dict[str, pd.DataFrame] = {}
         for sym in ctx.symbols:
             raw = ctx.data_maps[sym][ctx.tf]
             full_signal_dfs[sym] = get_tiered_signals(params, sym, ctx.tf, raw, strategy)
 
         # 2. Build Global Aligned Arrays
-        prebuilt_full: Dict[str, Dict[str, np.ndarray]] = {}
+        prebuilt_full: dict[str, dict[str, np.ndarray]] = {}
         eff_len = int(info["eff_ref_len"])
         for sym in ctx.symbols:
             start_idx = int(info["alignment_offsets"][sym])
@@ -204,26 +214,31 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
 
             prebuilt_full[sym] = _dataframe_to_symbol_arrays(trimmed_sig)
 
-        # 3. CPCV Zone & Holdout Slicing
-        _holdout_ratio = 0.20
-        cpcv_zone_len = max(200, int(eff_len * (1.0 - _holdout_ratio)))
+        # 3. CAWF-R: Build K chronological AWF test-leg slices.
+        # Each leg is a contiguous test window with expanding train prefix.
+        # GP/HMM features are pre-computed on full IS (known limitation: F1 GP leakage).
+        # Per-leg GP refit is deferred — cost O(K x GP_fit) per trial.
         embargo = int(EMBARGO_BARS.get(ctx.tf, 12))
+        k_legs = int(OPT_FUTURES_CONFIG.get("FUTURES_AWF_K_LEGS", 5))
+        min_train_frac = float(OPT_FUTURES_CONFIG.get("FUTURES_AWF_MIN_TRAIN_FRAC", 0.40))
+        awf_legs = build_anchored_wf_legs(
+            eff_len, k=k_legs, min_train_frac=min_train_frac, embargo=embargo
+        )
+
+        ctx.awf_leg_slices = []
+        for _train_s, _train_e, test_s, test_e in awf_legs:
+            aligned = _build_aligned_2d_from_prebuilt(prebuilt_full, ctx.symbols, test_s, test_e)
+            ctx.awf_leg_slices.append({"leg_range": (test_s, test_e), "data": aligned})
+
+        # Legacy CPCV paths preserved for downstream PBO-check compat only.
+        cpcv_zone_len = max(200, int(eff_len * 0.80))
         cpcv_bundle = build_cpcv_test_paths_with_fallback(cpcv_zone_len, embargo=embargo)
         unique_blocks = list_cpcv_block_ranges(cpcv_zone_len, cpcv_bundle[1], embargo=embargo)
-
-        ctx.cpcv_block_slices = []
-        for b_start, b_end in unique_blocks:
-            s_start, s_end = max(0, b_start - 1), min(eff_len, b_end)
-            aligned = _build_aligned_2d_from_prebuilt(prebuilt_full, ctx.symbols, s_start, s_end)
-            ctx.cpcv_block_slices.append({"range": (b_start, b_end), "data": aligned})
-
-        # Holdout Slice
-        h_start, h_end = max(0, cpcv_zone_len - 1), eff_len
-        ctx.holdout_slice = _build_aligned_2d_from_prebuilt(
-            prebuilt_full, ctx.symbols, h_start, h_end
-        )
+        ctx.cpcv_block_slices = []  # not used in AWF objective
+        ctx.holdout_slice = None    # last AWF leg covers holdout zone
         ctx.multi_alignment_info["cpcv_paths"] = cpcv_bundle[0]
         ctx.multi_alignment_info["cpcv_all_block_ranges"] = unique_blocks
+        ctx.multi_alignment_info["awf_legs"] = awf_legs
 
     if ctx.cpcv_block_slices:
         aligned0 = ctx.cpcv_block_slices[0]["data"]
@@ -246,7 +261,7 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
 
 
 def _log_precompute_computed_dir_sample(
-    aligned0: Dict[str, Any],
+    aligned0: dict[str, Any],
     k_long: int,
     k_short: int,
     crisis_gamma: float,
@@ -312,7 +327,7 @@ def _log_precompute_computed_dir_sample(
     )
 
 
-def _fixed_ml_phase_d_params() -> Dict[str, Any]:
+def _fixed_ml_phase_d_params() -> dict[str, Any]:
     """Constants that must stay aligned between optimization and final evaluation."""
     return {
         "MIN_SCORE_PERCENTILE": 0.55,
@@ -346,7 +361,7 @@ def infer_kelly_shrinkage_bayesian_c_for_enqueue(
 
 def build_phase_d_enqueue_params_from_deploy_json(
     deploy: dict[str, Any],
-) -> Optional[Dict[str, Any]]:
+) -> dict[str, Any] | None:
     """Map deploy JSON to Optuna enqueue_trial param dict (single-objective Phase-D)."""
     shield = bool(OPT_FUTURES_CONFIG.get("FUTURES_TIER1_SHIELD_MODE", False))
     fk_raw = deploy.get("KELLY_FRACTION", deploy.get("FK_FRACTION"))
@@ -399,7 +414,7 @@ def build_phase_d_enqueue_params_from_deploy_json(
     }
 
 
-def _suggest_ml_phase_d(trial: optuna.Trial) -> Dict[str, Any]:
+def _suggest_ml_phase_d(trial: optuna.Trial) -> dict[str, Any]:
     # Session 37: v42 정합 search space (KELLY [0.45,1.20], DD [0.15,0.25]).
     # Path A Shield: v42-anchored bands (tighter trail, capped KS) + DD early de-risk.
     shield = bool(OPT_FUTURES_CONFIG.get("FUTURES_TIER1_SHIELD_MODE", False))
@@ -468,7 +483,7 @@ def _suggest_ml_phase_d(trial: optuna.Trial) -> Dict[str, Any]:
     }
 
 
-def build_ml_phase_d_params(trial_params: Dict[str, Any], tf: str) -> Dict[str, Any]:
+def build_ml_phase_d_params(trial_params: dict[str, Any], tf: str) -> dict[str, Any]:
     merged = dict(_fixed_ml_phase_d_params())
     merged.update(trial_params)
     return _base_engine_params(merged, tf)
@@ -491,7 +506,7 @@ def _pf_and_ev_cost_from_trades(all_trades: np.ndarray) -> tuple[float, float]:
     return avg_pf, ev_cost_ratio
 
 
-def _base_engine_params(ml: Dict[str, Any], tf: str) -> Dict[str, Any]:
+def _base_engine_params(ml: dict[str, Any], tf: str) -> dict[str, Any]:
     ks, bc = float(ml["KELLY_SHRINKAGE"]), float(ml["BAYESIAN_C"])
     fk_frac = float(np.clip(0.35 * ks * (1.0 + 1.0 / bc), 0.05, 0.6))
     lev = float(OPT_FUTURES_CONFIG.get("FUTURES_DISCOVERY_LEVERAGE", 5))
@@ -544,7 +559,7 @@ def _base_engine_params(ml: Dict[str, Any], tf: str) -> Dict[str, Any]:
 
 
 def _cached_kill_fund_lev(
-    aligned: Dict[str, Any], params: Dict[str, Any]
+    aligned: dict[str, Any], params: dict[str, Any]
 ) -> tuple[Any, Any, Any]:
     if "kill_signal_cached" not in aligned:
         zkill = aligned.get("kill_signal")
@@ -570,8 +585,8 @@ def _cached_kill_fund_lev(
 
 
 def _run_portfolio_numba_block(
-    params: Dict[str, Any],
-    aligned: Dict[str, Any],
+    params: dict[str, Any],
+    aligned: dict[str, Any],
     zkill: Any,
     zfund: Any,
     lev_blk: Any,
@@ -621,19 +636,22 @@ def _run_portfolio_numba_block(
     return cast(tuple[np.ndarray, float, np.ndarray, np.ndarray], out_bt)
 
 
-def objective_ml_phase_d(trial: optuna.Trial, ctx: MLPhaseDContext) -> float | Tuple[float, float]:
-    if ctx.cpcv_block_slices is None:
+def objective_ml_phase_d(trial: optuna.Trial, ctx: MLPhaseDContext) -> float | tuple[float, float]:
+    """CAWF-R PLGD objective: K=5 chronological AWF legs → Penalized Log-Geometric Drift."""
+    if ctx.awf_leg_slices is None:
         precompute_ml_optimization_context(ctx)
-    block_slices = ctx.cpcv_block_slices
+    awf_slices = ctx.awf_leg_slices
     mai = ctx.multi_alignment_info
-    if block_slices is None or mai is None:
+    if not awf_slices or mai is None:
         return (1e9, 1e9) if OPT_FUTURES_CONFIG.get("FUTURES_ML_GP_NSGA2_ENABLED", False) else 1e9
 
     ml = _suggest_ml_phase_d(trial)
     params = _base_engine_params(ml, ctx.tf)
     cfg = OPT_FUTURES_CONFIG
-    if trial.number < 10 and block_slices:
-        ad0 = block_slices[0].get("data") or {}
+
+    # Early debug: xs_score dispersion on first leg
+    if trial.number < 10 and awf_slices:
+        ad0 = awf_slices[0].get("data") or {}
         xl = ad0.get("xs_score_long")
         hy = ad0.get("hmm_prob_crisis")
         if xl is not None and hy is not None and getattr(xl, "size", 0) > 0:
@@ -646,292 +664,188 @@ def objective_ml_phase_d(trial: optuna.Trial, ctx: MLPhaseDContext) -> float | T
             trial.set_user_attr("xs_score_dispersion_mean", disp)
             trial.set_user_attr("crisis_soft_weight_mean", soft_m)
             trial.set_user_attr("crisis_gate_rejection_rate", rej_r)
+
     liq_mdd_thr = float(cfg.get("FUTURES_MAX_MDD", 25.0))
     min_trades_target = int(cfg.get("FUTURES_MIN_TRADES_TARGET", 30))
+    n_syms_ctx = max(1, len(ctx.symbols))
 
-    block_results: Dict[Tuple[int, int], Dict[str, Any]] = {}
-    all_trades_chunks: List[np.ndarray] = []
-    first_bt_done = False
-    for block in block_slices:
-        b_range, aligned = block["range"], block["data"]
+    # --- CAWF-R: evaluate each chronological test leg ---
+    leg_log_tw: list[float] = []
+    leg_mdds: list[float] = []
+    all_trades_chunks: list[np.ndarray] = []
+    leg_trade_counts: list[float] = []
+    leg_long_counts: list[int] = []
+    leg_short_counts: list[int] = []
+    leg_exposures: list[float] = []
+    first_leg_done = False
+
+    for leg_idx, leg in enumerate(awf_slices):
+        aligned = leg.get("data")
+        leg_range: tuple[int, int] = leg["leg_range"]
         if not aligned:
+            leg_log_tw.append(-10.0)
+            leg_mdds.append(100.0)
+            leg_trade_counts.append(0.0)
+            leg_exposures.append(0.0)
             continue
 
-        zkill, zfund, lev_blk = _cached_kill_fund_lev(aligned, params)
+        zkill, zfund, lev_leg = _cached_kill_fund_lev(aligned, params)
         b_trades_raw, b_bal, b_equity, b_diag = _run_portfolio_numba_block(
-            params, aligned, zkill, zfund, lev_blk
+            params, aligned, zkill, zfund, lev_leg
         )
 
         n_tr = int(b_trades_raw.shape[0])
         all_trades_chunks.append(b_trades_raw)
-        if trial.number < 3:
-            _logger.debug(
-                "[ML_OPT][trial=%d] CPCV block=%s trades=%d "
-                "diag[dust,margin,tdir0,pside0]=[%d,%d,%d,%d]",
-                trial.number,
-                b_range,
-                n_tr,
-                int(b_diag[0]),
-                int(b_diag[1]),
-                int(b_diag[2]),
-                int(b_diag[3]),
-            )
-        if not first_bt_done:
-            first_bt_done = True
+
+        if not first_leg_done:
+            first_leg_done = True
             if n_tr == 0:
                 _logger.debug(
-                    "[ML_OPT][trial=%d] Prune: first CPCV block %s produced 0 trades. "
+                    "[AWF][trial=%d] Prune: first leg %s 0 trades "
                     "diag[dust,margin,tdir0,pside0]=[%d,%d,%d,%d]",
-                    trial.number,
-                    b_range,
-                    int(b_diag[0]),
-                    int(b_diag[1]),
-                    int(b_diag[2]),
-                    int(b_diag[3]),
+                    trial.number, leg_range,
+                    int(b_diag[0]), int(b_diag[1]), int(b_diag[2]), int(b_diag[3]),
                 )
                 raise optuna.TrialPruned()
 
         mdd = float(calc_mdd_from_equity(b_equity)) if b_equity.size > 0 else 100.0
         log_ret = _log_tw_from_ret_pct(float((b_bal / FUTURES_INITIAL_BALANCE - 1.0) * 100.0))
-        # [Session 12] Compute per-block exposure for exposure floor penalty.
-        # trades col1=entry_idx, col2=exit_idx.
-        # exposure = sum(holding_bars) / (block_bars * n_syms)
-        b_exposure = 0.0
-        b_bars = max(1, b_range[1] - b_range[0])
-        n_syms_ctx = max(1, len(ctx.symbols))
-        if n_tr > 0:
-            holding_bars = np.sum(b_trades_raw[:, 2] - b_trades_raw[:, 1])
-            b_exposure = float(holding_bars) / float(b_bars * n_syms_ctx)
-        block_results[b_range] = {
-            "log_ret": log_ret,
-            "mdd": mdd,
-            "trades": n_tr,
-            "long_trades": int(np.sum(b_trades_raw[:, 3] == 1.0)),
-            "short_trades": int(np.sum(b_trades_raw[:, 3] == -1.0)),
-            "exposure": b_exposure,
-        }
 
+        # Soft MDD penalty (continuous gradient vs hard prune)
+        if mdd >= liq_mdd_thr:
+            log_ret -= (mdd - liq_mdd_thr) * 3.0
+
+        b_bars = max(1, leg_range[1] - leg_range[0])
+        b_exposure = 0.0
+        n_long, n_short = 0, 0
+        if n_tr > 0:
+            holding_bars = float(np.sum(b_trades_raw[:, 2] - b_trades_raw[:, 1]))
+            b_exposure = holding_bars / float(b_bars * n_syms_ctx)
+            n_long = int(np.sum(b_trades_raw[:, 3] == 1.0))
+            n_short = int(np.sum(b_trades_raw[:, 3] == -1.0))
+
+        leg_log_tw.append(log_ret)
+        leg_mdds.append(mdd)
+        leg_trade_counts.append(float(n_tr))
+        leg_long_counts.append(n_long)
+        leg_short_counts.append(n_short)
+        leg_exposures.append(b_exposure)
+
+        # Intermediate pruning: report after 2nd leg
+        if leg_idx >= 1:
+            trial.report(float(np.mean(leg_log_tw)), step=leg_idx)
+            if trial.should_prune():
+                raise optuna.TrialPruned()
+
+    # --- Aggregate ---
+    leg_arr = np.asarray(leg_log_tw, dtype=np.float64)
     all_trades = (
-        np.vstack(all_trades_chunks)
-        if all_trades_chunks
+        np.vstack(all_trades_chunks) if all_trades_chunks
         else np.zeros((0, 10), dtype=np.float64)
     )
     avg_pf_agg, ev_cost_ratio_agg = _pf_and_ev_cost_from_trades(all_trades)
-    trade_counts = [float(v["trades"]) for v in block_results.values()]
-    avg_trades_agg = float(np.mean(trade_counts)) if trade_counts else 0.0
-    worst_mdd_blocks = float(max((r["mdd"] for r in block_results.values()), default=100.0))
-
-    path_compound_raw_log_tw: List[float] = []
-    path_seg_lists: List[List[float]] = []
-    path_mdds: List[float] = []
-    cpcv_paths = mai["cpcv_paths"]
-
-    total_cpcv_log_ret = sum(r["log_ret"] for r in block_results.values() if r is not None)
-
-    for path in cpcv_paths:
-        p_log_ret, p_mdd, segs = 0.0, 0.0, []
-        for b_key in path:
-            res = block_results.get(tuple(b_key))
-            if res is None:
-                p_log_ret -= 10.0
-                segs.append(-10.0)
-                p_mdd = max(p_mdd, 100.0)
-            elif res["mdd"] >= liq_mdd_thr:
-                # Provide a continuous gradient rather than a flat -0.69 cliff.
-                # If threshold is 0.25 and MDD is 0.35, excess is 0.10 -> penalty is -0.30 log ret
-                mdd_excess = res["mdd"] - liq_mdd_thr
-                mdd_penalty = mdd_excess * 3.0
-                p_log_ret += res["log_ret"] - mdd_penalty
-                segs.append(res["log_ret"] - mdd_penalty)
-                p_mdd = max(p_mdd, res["mdd"])
-            else:
-                p_log_ret += res["log_ret"]
-                segs.append(res["log_ret"])
-                p_mdd = max(p_mdd, res["mdd"])
-        
-        path_compound_raw_log_tw.append(p_log_ret)
-        path_seg_lists.append(segs)
-        path_mdds.append(p_mdd)
-
-    path_arr = (
-        np.asarray(path_compound_raw_log_tw, dtype=np.float64)
-        if path_compound_raw_log_tw
-        else np.asarray([], dtype=np.float64)
-    )
-    p10_log_growth = float(np.percentile(path_arr, 10.0)) if path_arr.size > 0 else -10.0
-    worst_path_log_growth = float(np.min(path_arr)) if path_arr.size > 0 else -10.0
-    if path_arr.size > 0:
-        sorted_path_arr = np.sort(path_arr)
-        k_worst = max(1, int(np.ceil(sorted_path_arr.size * 0.10)))
-        cvar10_log_growth = float(np.mean(sorted_path_arr[:k_worst]))
-    else:
-        cvar10_log_growth = -10.0
-    worst_mdd = float(np.max(path_mdds)) if path_mdds else worst_mdd_blocks
-    mean_log_growth = float(np.mean(path_arr)) if path_arr.size > 0 else 0.0
-    if path_arr.size > 1:
-        std_log_growth = float(np.std(path_arr))
-    elif path_arr.size == 1:
-        std_log_growth = 0.0
-    else:
-        std_log_growth = 1e9
-
-    # DSR: each CPCV path = one independent IS-OOS experiment.
-    # Using total_trials(2000) as n_tests gives sr_bench≈3.9 — impossible to beat.
-    # Use n_valid_paths as n_tests (each path is one unique train-test split).
-    n_p = float(max(2, len(path_arr)))
-    hrs_per_bar = int(ctx.tf.replace("h", "")) if ctx.tf.endswith("h") else 4
-    # Scale eff_ref so t_samples = n_paths (each path is one independent data point).
-    eff_ref_for_dsr = n_p * (24.0 / max(hrs_per_bar, 1))
-    dsr = float(calc_gate1_dsr_from_path_log_tw(path_arr, ctx.tf, eff_ref_for_dsr, n_p))
-    n_valid_paths = len(path_compound_raw_log_tw)
-    pen = 0.5 * max(0, 6 - n_valid_paths) / 6.0 if n_valid_paths < 6 else 0.0
-
-    trial.set_user_attr(
-        "cpcv_path_oos_log_tw",
-        [float(x) for x in path_compound_raw_log_tw],
-    )
-    trial.set_user_attr("gate1_dsr", dsr)
-    trial.set_user_attr("dsr_cpcv", dsr)
-    trial.set_user_attr("n_valid_paths", n_valid_paths)
-
-    holdout_log_ret = 0.0
-    if ctx.holdout_slice:
-        h = ctx.holdout_slice
-        hz_cached, zfund_cached, lev_h_cached = _cached_kill_fund_lev(h, params)
-        _, h_bal, _, _ = _run_portfolio_numba_block(
-            params, h, hz_cached, zfund_cached, lev_h_cached
-        )
-        h_ret_pct = float((h_bal / FUTURES_INITIAL_BALANCE - 1.0) * 100.0)
-        holdout_log_ret = _log_tw_from_ret_pct(h_ret_pct)
-
-    total_long = sum(r.get("long_trades", 0) for r in block_results.values())
-    total_short = sum(r.get("short_trades", 0) for r in block_results.values())
+    avg_trades_agg = float(np.mean(leg_trade_counts)) if leg_trade_counts else 0.0
+    worst_mdd_legs = float(max(leg_mdds, default=100.0))
+    avg_exposure = float(np.mean(leg_exposures)) if leg_exposures else 0.0
+    total_long = sum(leg_long_counts)
+    total_short = sum(leg_short_counts)
     total_dir = total_long + total_short
     minority = float(min(total_long, total_short) / total_dir) if total_dir > 0 else 0.0
 
-    sortinos = []
-    for segs in path_seg_lists:
-        a = np.asarray(segs)
-        if a.size < 2:
-            sortinos.append(float(np.mean(a)))
-            continue
-        neg = a[a < 0]
-        ddev = float(np.std(neg, ddof=1)) if neg.size > 1 else float(np.std(a, ddof=1))
-        sortinos.append(float(np.mean(a) / (ddev + 1e-9)))
+    # --- PLGD Objective ---
+    import math as _math
+    k_legs_n = float(max(len(leg_arr), 1))
+    mu_log = float(np.mean(leg_arr)) if leg_arr.size > 0 else -10.0
+    sigma_log = float(np.std(leg_arr, ddof=1)) if leg_arr.size > 1 else 0.0
+    n_trials_cfg = float(cfg.get("total_trials", 400))
+    lambda_def = float(cfg.get("FUTURES_PLGD_LAMBDA_DEF", 0.5))
+    lambda_tail = float(cfg.get("FUTURES_PLGD_LAMBDA_TAIL", 2.0))
 
-    eff_ref_len = mai["eff_ref_len"]
+    variance_drag = 0.5 * sigma_log ** 2
+    sr_bench = _math.sqrt(2.0 * _math.log(max(n_trials_cfg, 2.0)))
+    deflation = lambda_def * sr_bench * sigma_log / _math.sqrt(max(k_legs_n, 1.0))
+    worst_leg = float(np.min(leg_arr)) if leg_arr.size > 0 else -10.0
+    tail_pen = lambda_tail * max(0.0, -worst_leg)
+    plgd = mu_log - variance_drag - deflation - tail_pen
+
+    # DSR proxy: fraction of legs with positive log-TW (maps 0.0→1.0, higher=better).
+    # gate1_dsr=0.40 gate → awf_pos_frac ≥ 0.40 → ≥2/5 legs positive minimum.
+    awf_pos_frac = float(np.sum(leg_arr > 0.0)) / k_legs_n
+    dsr_awf = float(min(0.99, max(0.0, awf_pos_frac)))
+
+    # --- Penalties ---
     trade_shortfall = max(0.0, float(min_trades_target) - avg_trades_agg) / float(
         max(min_trades_target, 1)
     )
+    total_awf_log_ret = float(np.sum(leg_arr))
+    is_penalty = 0.0
+    if total_awf_log_ret < 0.0:
+        is_penalty += abs(total_awf_log_ret) * 5.0
+    if mu_log < 0.0:
+        is_penalty += abs(mu_log) * 5.0
 
-    # [Session 12] Exposure floor penalty: avg CPCV block exposure < 5% = sizing hack.
-    # v30a exposed this: IS exposure 4.09% passed trade_shortfall (574 trades) but
-    # positions were dust-sized. This penalty forces the optimizer to find configs
-    # that actively hold positions, not just open/close micro-positions.
-    exposure_vals = [float(v.get("exposure", 0.0)) for v in block_results.values()]
-    avg_exposure = float(np.mean(exposure_vals)) if exposure_vals else 0.0
-    exposure_floor = 0.05  # 5% minimum IS exposure (Session 12 hypothesis 2: softer penalty)
-    exposure_floor_penalty = max(0.0, exposure_floor - avg_exposure) / exposure_floor * 1.0
+    # Path consistency: std across AWF legs (proxies IS-OOS stability; replaces CPCV std pen)
+    path_consistency_penalty = float(np.clip(sigma_log, 0.0, 2.0)) * 3.25
 
-    mean_sortino_cpcv = 0.0
-    if path_arr.size < 2 or dsr < 0.0:
-        obj = 1e9 + pen + 3.0 * trade_shortfall + exposure_floor_penalty
+    ev_cost_min = float(cfg.get("FUTURES_AWF_NET_EDGE_MIN", 1.5))
+    ev_cost_penalty = max(0.0, ev_cost_min - ev_cost_ratio_agg) * 2.0
+
+    exposure_floor_penalty = max(0.0, 0.05 - avg_exposure) / 0.05 * 1.0
+
+    # Fewer-than-k-valid-legs penalty
+    n_valid_legs = int(np.sum(leg_arr > -5.0))
+    pen = 0.5 * max(0, 3 - n_valid_legs) / 3.0
+
+    if leg_arr.size < 2 or dsr_awf < 0.0:
+        obj = float(1e9 + pen + 3.0 * trade_shortfall + exposure_floor_penalty)
     else:
-        # Compound objective: DSR primary + mean_log_growth secondary gradient.
-        # When DSR=0 for all trials (paths all negative), growth_signal provides
-        # gradient so Optuna can distinguish better from worse params.
-        # Weight 0.2: DSR dominates when > 0; too-high weight causes IS overfitting.
-        growth_signal = float(np.clip(mean_log_growth, -2.0, 2.0))
-        # [IS Drag Penalty] weight=5.0 — empirically validated 2026-04-22.
-        # Use total_cpcv_log_ret to penalize any IS drag directly.
-        # This fixes the metric hacking where paths with + returns survive
-        # while the total IS is negative.
-        is_penalty = 0.0
-        if total_cpcv_log_ret < 0:
-            is_penalty += abs(total_cpcv_log_ret) * 5.0
-        if growth_signal < 0:
-            is_penalty += abs(growth_signal) * 5.0
-        # [Path Consistency Penalty] weight=3.25 — v33 champion setting.
-        # Directly proxies PBO: high std(CPCV paths) → complement paths diverge → high PBO.
-        path_consistency_penalty = float(np.clip(std_log_growth, 0.0, 2.0)) * 3.25
-
-        # v30b weight=3.0 → IS overfit (OOS -36%). v30d weight=1.5 → Hold-out -42% at 1000t TPE.
-        # v30c weight=1.5 at 200t all-random → IS/Hold-out/OOS all positive (BALANCED).
-        # Session 12: Restored from 1.5 to 2.0 — 1.5 allowed v30a IS/Hold-out collapse.
-        # Session 15: Increased weight to 2.0 and threshold to 0.0
-        # to strictly enforce positive holdout.
-        holdout_neg_penalty = 0.0
-        if holdout_log_ret < 0.0:
-            holdout_neg_penalty = abs(holdout_log_ret) * 2.0
-
-        # Session 25 revision: Worst-path penalty (WF leg 3 proxy).
-        # Penalize if min CPCV path log-growth < 0 to avoid WF leg failures.
-        worst_path_penalty = 0.0
-        if worst_path_log_growth < 0.0:
-            worst_path_penalty = abs(worst_path_log_growth) * 3.0
-
-        p10_tail_penalty = 0.0
-        if bool(cfg.get("FUTURES_TIER1_SHIELD_MODE", False)) and p10_log_growth < 0.0:
-            p10_tail_penalty = abs(p10_log_growth) * 2.0
-
-        mean_sortino_cpcv = float(np.clip(np.mean(sortinos), -2.0, 2.0)) if sortinos else 0.0
-
-        # growth_signal weight 0.50: P1 compliance (compound growth primary driver).
-        # is_penalty already penalizes negative growth at 5.0x — 0.50 reward is the
-        # positive-side gradient that guides TPE toward compound-growth configs.
-        obj = (
-            -dsr
-            - 0.50 * growth_signal
+        # Minimize negative PLGD + auxiliary penalties
+        obj = float(
+            -plgd
             + pen
             + 3.0 * trade_shortfall
             + is_penalty
             + path_consistency_penalty
+            + ev_cost_penalty
             + exposure_floor_penalty
-            + holdout_neg_penalty
-            + worst_path_penalty
-            + p10_tail_penalty
         )
 
-    trial.set_user_attr("ml_mean_log_growth_cpcv", mean_log_growth)
-    trial.set_user_attr("ml_p10_log_growth_cpcv", p10_log_growth)
-    trial.set_user_attr("ml_cvar10_log_growth_cpcv", cvar10_log_growth)
-    trial.set_user_attr("ml_worst_path_log_growth_cpcv", worst_path_log_growth)
-    trial.set_user_attr("ml_worst_mdd_cpcv", worst_mdd)
-    trial.set_user_attr("ml_std_log_growth_cpcv", std_log_growth)
-    trial.set_user_attr("ml_holdout_log_ret", holdout_log_ret)
+    # --- User attrs (backward-compat names preserved for downstream gate logic) ---
+    trial.set_user_attr("cpcv_path_oos_log_tw", [float(x) for x in leg_log_tw])
+    trial.set_user_attr("gate1_dsr", dsr_awf)
+    trial.set_user_attr("dsr_cpcv", dsr_awf)
+    trial.set_user_attr("n_valid_paths", n_valid_legs)
+    trial.set_user_attr("ml_mean_log_growth_cpcv", mu_log)
+    # worst_leg replaces p10 (k=5: p10 = min)
+    trial.set_user_attr("ml_p10_log_growth_cpcv", worst_leg)
+    trial.set_user_attr("ml_cvar10_log_growth_cpcv", worst_leg)
+    trial.set_user_attr("ml_worst_path_log_growth_cpcv", worst_leg)
+    trial.set_user_attr("ml_worst_mdd_cpcv", worst_mdd_legs)
+    trial.set_user_attr("ml_std_log_growth_cpcv", sigma_log)
+    # Last AWF leg = holdout-zone proxy (report only)
+    trial.set_user_attr("ml_holdout_log_ret", float(leg_log_tw[-1]) if leg_log_tw else 0.0)
     trial.set_user_attr("ml_ls_minority_frac", minority)
-    trial.set_user_attr("ml_mean_sortino_seg", float(np.mean(sortinos)) if sortinos else 0.0)
-    trial.set_user_attr("mean_sortino_cpcv", mean_sortino_cpcv)
-    trial.set_user_attr("gate1_eff_ref_len", eff_ref_len)
+    trial.set_user_attr("gate1_eff_ref_len", int(mai.get("eff_ref_len", 0)))
     trial.set_user_attr("avg_trades", avg_trades_agg)
     trial.set_user_attr("avg_pf", avg_pf_agg)
-    trial.set_user_attr("avg_mdd", worst_mdd)
+    trial.set_user_attr("avg_mdd", worst_mdd_legs)
     trial.set_user_attr("long_short_ratio", minority)
     trial.set_user_attr("ev_cost_ratio", ev_cost_ratio_agg)
     trial.set_user_attr("avg_exposure", avg_exposure)
+    trial.set_user_attr("awf_pos_frac", awf_pos_frac)
+    trial.set_user_attr("awf_plgd", plgd)
+    trial.set_user_attr("awf_mu_log", mu_log)
+    trial.set_user_attr("awf_sigma_log", sigma_log)
 
     if OPT_FUTURES_CONFIG.get("FUTURES_ML_GP_NSGA2_ENABLED", False):
-        # Obj 1: Growth (DSR + CPCV mean log growth)
-        # Obj 2: Stability (path consistency + worst path + holdout neg)
-        obj1 = (
-            -dsr
-            - 0.50 * growth_signal
-            + pen
-            + 3.0 * trade_shortfall
-            + is_penalty
-            + exposure_floor_penalty
-        )
-        _p10_pen = 0.0
-        _shield = bool(OPT_FUTURES_CONFIG.get("FUTURES_TIER1_SHIELD_MODE", False))
-        if _shield and p10_log_growth < 0.0:
-            _p10_pen = abs(p10_log_growth) * 2.0
-        obj2 = path_consistency_penalty + worst_path_penalty + holdout_neg_penalty + _p10_pen
-        return float(obj1), float(obj2)
+        obj1 = float(-plgd + pen + 3.0 * trade_shortfall + is_penalty + exposure_floor_penalty)
+        obj2 = float(path_consistency_penalty + ev_cost_penalty)
+        return obj1, obj2
 
     return float(obj)
 
 
-def select_best_trial_by_holdout_log_ret(trials: List[FrozenTrial]) -> FrozenTrial:
+def select_best_trial_by_holdout_log_ret(trials: list[FrozenTrial]) -> FrozenTrial:
     """Fallback when constraint-feasible set is empty.
 
     Fallback must remain CPCV-first. Pure or overweighted hold-out ranking
@@ -965,7 +879,7 @@ def select_best_trial_by_holdout_log_ret(trials: List[FrozenTrial]) -> FrozenTri
     return max(trials, key=_score)
 
 
-def topsis_select_best(pareto_trials: List[FrozenTrial]) -> FrozenTrial:
+def topsis_select_best(pareto_trials: list[FrozenTrial]) -> FrozenTrial:
     if not pareto_trials:
         raise ValueError("empty pareto_trials")
     if len(pareto_trials) == 1:
@@ -988,7 +902,7 @@ def topsis_select_best(pareto_trials: List[FrozenTrial]) -> FrozenTrial:
 
 
 def check_hard_gates_ml(
-    oos_result: Dict[str, Any],
+    oos_result: dict[str, Any],
     pbo_val: float,
     dsr_val: float,
     is_precision: float,
