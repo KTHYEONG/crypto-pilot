@@ -396,6 +396,8 @@ def _print_dual_audit_dashboard(
     cagr_c, cagr_n = champ_m.get("cagr", 0.0), new_m.get("cagr", 0.0)
     mdd_c, mdd_n = champ_m.get("mdd", 0.0), new_m.get("mdd", 0.0)
     pf_c, pf_n = champ_m.get("pf", 1.0), new_m.get("pf", 1.0)
+    nalpha_c, nalpha_n = champ_m.get("net_alpha", 0.0), new_m.get("net_alpha", 0.0)
+    pnl_c, pnl_n = champ_m.get("avg_pnl", 0.0), new_m.get("avg_pnl", 0.0)
     
     _logger.info(l_fmt.format(
         "COMPOUNDING", "CAGR (%)", f"{cagr_c:.2f}%", f"{cagr_n:.2f}%", 
@@ -407,6 +409,12 @@ def _print_dual_audit_dashboard(
     ))
     _logger.info(l_fmt.format(
         "", "Profit Factor", f"{pf_c:.2f}", f"{pf_n:.2f}", get_delta_str(pf_n - pf_c)
+    ))
+    _logger.info(l_fmt.format(
+        "", "Net Alpha (%)", f"{nalpha_c:.2f}%", f"{nalpha_n:.2f}%", get_delta_str(nalpha_n - nalpha_c, is_pct=True)
+    ))
+    _logger.info(l_fmt.format(
+        "", "Avg Trade PnL (%)", f"{pnl_c:.2f}%", f"{pnl_n:.2f}%", get_delta_str(pnl_n - pnl_c, is_pct=True)
     ))
     _logger.info(border_mid)
 
@@ -1191,8 +1199,10 @@ def main() -> None:
                     _crisis_avg_pct,
                 )
         _logger.info(" [WF] sum terminal_wealth_ratio (all legs)=%.4f", wf_tw_sum)
+        _erg_dev_val = 0.0
         if len(tw_legs) >= 2:
             _erg = wf_path_ergodicity_deviation_pct(tw_legs)
+            _erg_dev_val = float(_erg)
             _eguide = float(OPT_FUTURES_CONFIG.get("FUTURES_ERGODICITY_GUIDELINE_PCT", 15.0))
             _logger.info(
                 " [ERGODICITY] wf_leg_tw max_deviation_from_mean=%.2f%% "
@@ -1489,6 +1499,11 @@ def main() -> None:
         "pf": float(oos_port.get("profit_factor", 1.0)),
         "is_cagr": float(is_port.get("cagr_pct", 0.0)),
         "ho_cagr": float(ho_port.get("cagr_pct", 0.0)),
+        "awf_pos_frac": float(best_trial.user_attrs.get("awf_pos_frac", 0.0)),
+        "mu_awf": float(best_trial.user_attrs.get("awf_mu_log", 0.0)),
+        "sig_awf": float(best_trial.user_attrs.get("awf_sigma_log", 0.0)),
+        "plgd": float(best_trial.user_attrs.get("awf_plgd", 0.0)),
+        "erg_dev": float(locals().get("_erg_dev_val", 0.0)),
     }
     
     _verdict = "PROMOTE ✅" if gate_ok else "HOLD ❌"
@@ -1523,6 +1538,45 @@ def main() -> None:
         with open(best_params_path, "w") as f:
             json.dump(params, f, indent=4)
         _logger.info(f"Best parameters saved to results/{BEST_PARAMS_FUTURES_JSON_STEM}.json")
+
+        # [Champion Update] Persist to logs/champion.json for AI-driven improvement
+        champion_data = {
+            "id": f"cawf-r-{args.tf}-{pd.Timestamp.now().strftime('%Y%m%d-%H%M')}",
+            "promoted_at": pd.Timestamp.now().strftime("%Y-%m-%d"),
+            "note": f"Promoted via opt_main_futures.py with {args.trials} trials.",
+            "architecture": "CAWF-R (K=5 chronological AWF + PLGD objective)",
+            "parameters": params,
+            "metrics": {
+                "pbo_paired": new_m["pbo"],
+                "dsr": new_m["dsr"],
+                "awf_pos_frac": new_m["awf_pos_frac"],
+                "awf_mu_log": new_m["mu_awf"],
+                "awf_sig_log": new_m["sig_awf"],
+                "awf_plgd": new_m["plgd"],
+                "awf_worst_leg_log_tw": new_m["p10"],
+                "wf_mean_tw": new_m["tw"],
+                "wf_erg_dev": new_m["erg_dev"],
+                "holdout_cagr_pct": new_m["ho_cagr"],
+                "oos_cagr_pct": new_m["cagr"],
+                "oos_mdd_pct": new_m["mdd"],
+                "oos_net_alpha_pct": new_m["net_alpha"],
+                "oos_avg_trade_pnl_pct": new_m["avg_pnl"],
+                "oos_profit_factor": new_m["pf"],
+                "oos_time_to_2x": new_m["time_2x"],
+                "oos_cvar_pct": new_m["cvar"],
+                "is_cagr_pct": new_m["is_cagr"]
+            },
+            "gates": {
+                "pbo_strict_guard": "PASS",
+                "awf_pos_frac_gate": "PASS",
+                "awf_worst_leg_hardening": "PASS",
+                "wf_stability_gate": "PASS"
+            }
+        }
+        champion_json_path = Path(project_root) / "logs" / "champion.json"
+        with open(champion_json_path, "w") as f:
+            json.dump(champion_data, f, indent=4)
+        _logger.info(f"Champion successfully updated at {champion_json_path}")
     else:
         _logger.warning(
             "Best parameters NOT persisted (Phase3, WF legs, IS structural, or champion guard). "
