@@ -109,11 +109,20 @@ def _resolve_gp_feature_columns(panel_df: pd.DataFrame) -> list[str]:
 
     """
     blocked = {"target", "close", "tbm_gp_weight", "regime_pre_hmm"}
+    # Include HMM probability features if present
+    hmm_cols = [c for c in panel_df.columns if c.startswith("hmm_prob_")]
     cs_names = sorted(c for c in panel_df.columns if c.startswith("cs_"))
+
+    base_features = set()
     if cs_names:
         extras = [c for c in ("cross_vol_rank", "cross_ret_24h_rank") if c in panel_df.columns]
-        return sorted({c for c in cs_names + extras if c not in blocked})
-    return [c for c in panel_df.columns if c not in blocked]
+        base_features = {c for c in cs_names + extras if c not in blocked}
+    else:
+        base_features = {
+            c for c in panel_df.columns if c not in blocked and not c.startswith("hmm_prob_")
+        }
+
+    return sorted(base_features | set(hmm_cols))
 
 
 @dataclass
@@ -247,6 +256,15 @@ class GPAlphaMiner:
             if "tbm_gp_weight" in aligned_df.columns:
                 tw = aligned_df["tbm_gp_weight"].fillna(1.0).to_numpy(dtype=np.float64)
                 sample_weight = sample_weight * np.clip(tw, 0.25, 3.0)
+
+            # --- Ergodicity Weighting (Regime-Aware Sample Selection) ---
+            # Penalize samples during high-volatility/crisis to prevent noise overfitting.
+            if "hmm_prob_crisis" in aligned_df.columns:
+                p_crisis = aligned_df["hmm_prob_crisis"].fillna(0.0).to_numpy(dtype=np.float64)
+                # Soft-kill weighting: weight = max(0.1, 1.0 - p_crisis)
+                erg_weight = np.clip(1.0 - p_crisis, 0.1, 1.0)
+                sample_weight = sample_weight * erg_weight
+
             if is_end_date:
                 times = aligned_df.index.get_level_values("datetime")
                 if times.tz is None:
@@ -339,9 +357,10 @@ class GPAlphaMiner:
                 self._kept_indices = list(range(len(feat_cols)))
                 self._mp_mean = None
 
-            # --- LightGBM Model ---
-            _logger.info("Training LightGBM Regressor for alpha generation...")
+            # --- LightGBM Model (DART Booster & Regularization) ---
+            _logger.info("Training LightGBM Regressor (DART) for alpha generation...")
             lgbm = LGBMRegressor(
+                boosting_type="dart",  # DART booster for better generalization
                 objective="regression",
                 n_estimators=100,
                 learning_rate=0.05,
@@ -350,6 +369,8 @@ class GPAlphaMiner:
                 min_child_samples=50,
                 subsample=0.8,
                 colsample_bytree=0.8,
+                reg_alpha=0.1,         # L1 regularization
+                reg_lambda=0.1,        # L2 regularization
                 n_jobs=self.n_jobs,
                 random_state=42,
             )
