@@ -925,7 +925,7 @@ def main() -> None:
         # gate1_dsr == awf_pos_frac in CAWF-R paradigm (backward-compat attr name kept).
         dsr_obs = float(best_trial.user_attrs.get("gate1_dsr", 0.0))
         # Optional SPA post-run diagnostic (not a hard gate — informational only).
-        _awf_leg_log_tw = best_trial.user_attrs.get("awf_leg_log_tw") or []
+        _awf_leg_log_tw = best_trial.user_attrs.get("cpcv_path_oos_log_tw") or []
         if len(_awf_leg_log_tw) >= 3:
             _spa_p = stationary_bootstrap_spa(np.asarray(_awf_leg_log_tw, dtype=np.float64))
             _spa_max = float(OPT_FUTURES_CONFIG.get("FUTURES_SPA_P_VALUE_MAX", 0.10))
