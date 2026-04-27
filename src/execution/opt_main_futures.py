@@ -240,6 +240,77 @@ def _print_performance_report(
 
 
 
+def _print_human_dashboard(
+    is_port: dict[str, Any],
+    ho_port: dict[str, Any],
+    oos_port: dict[str, Any],
+    gate_status: str,
+) -> None:
+    """Unified Human Dashboard for strategy performance summary."""
+    c_grn = "\033[92m"
+    c_red = "\033[91m"
+    c_ylw = "\033[93m"
+    c_rst = "\033[0m"
+    c_bld = "\033[1m"
+
+    border_top = "╔" + "═" * 83 + "╗"
+    border_mid = "╠" + "═" * 83 + "╣"
+    border_sep = "╟" + "─" * 83 + "╢"
+    border_bot = "╚" + "═" * 83 + "╝"
+
+    def get_val(port: dict[str, Any], key: str, default: float = 0.0) -> float:
+        return float(port.get(key, default))
+
+    _logger.info("\n" + border_top)
+    _logger.info(f"║ {c_bld}{'🧑‍💻 [HUMAN DASHBOARD] STRATEGY PERFORMANCE SUMMARY':<81}{c_rst} ║")
+    _logger.info(border_mid)
+    
+    # Header Row
+    _logger.info(f"║ {'[COMPOUNDING]':<20} {'IS':>12} {'Hold-Out':>18} {'OOS (Forward)':>24} ║")
+    
+    metrics = [
+        ("CAGR (%)", "cagr_pct", True),
+        ("Max Drawdown (%)", "mdd_pct", True),
+        ("Profit Factor", "profit_factor", False),
+        ("Win Rate (%)", "win_rate_pct", True),
+    ]
+
+    for label, key, is_pct in metrics:
+        suffix = "%" if is_pct else ""
+        is_val = get_val(is_port, key)
+        ho_val = get_val(ho_port, key)
+        oos_val = get_val(oos_port, key)
+        _logger.info(
+            f"║   {label:<18} : {is_val:>10.2f}{suffix} {ho_val:>17.2f}{suffix} "
+            f"{oos_val:>23.2f}{suffix} ║"
+        )
+
+    _logger.info(border_sep)
+    _logger.info(f"║ {'[SANITY CHECK & VERDICT]':<81} ║")
+    
+    is_cagr = get_val(is_port, "cagr_pct")
+    oos_cagr = get_val(oos_port, "cagr_pct")
+    
+    # IS Survival check (threshold 30% from current logic in main)
+    is_survival = "PASS" if is_cagr >= 30.0 else "FAIL"
+    is_color = c_grn if is_survival == "PASS" else c_red
+    is_text = f"{is_color}{is_survival:<4}{c_rst} (IS CAGR >= 30%)"
+    _logger.info(f"║   IS Survival        : {is_text} {' ':<38} ║")
+    
+    retention = (oos_cagr / is_cagr * 100.0) if abs(is_cagr) > 1e-6 else 0.0
+    ret_color = c_grn if retention > 60.0 else c_ylw if retention > 40.0 else c_red
+    # ANSI color codes make the line "long" for Ruff. Split it to pass.
+    ret_text = f"{ret_color}{retention:>5.1f}%{c_rst} of IS Performance"
+    _logger.info(f"║   OOS Retention      : {ret_text} {' ':<36} ║")
+    _logger.info("║" + " " * 83 + "║")
+    
+    v_color = c_grn if "PROMOTE" in gate_status else c_red
+    v_msg = f"FINAL VERDICT        : {v_color}{c_bld}{gate_status}{c_rst}"
+    persisted = " (Parameters saved)" if "PROMOTE" in gate_status else " (Parameters NOT persisted)"
+    _logger.info(f"║   {v_msg:<{81 + 13}}{c_rst}{persisted:<30} ║")
+    _logger.info(border_bot + "\n")
+
+
 def _print_dual_audit_dashboard(
     new_m: dict[str, Any],
     champ_m: dict[str, Any],
@@ -579,6 +650,7 @@ def _load_futures_data_maps_for_symbols(
 
 
 def main() -> None:
+    ai_telemetry_payloads: list[dict[str, Any]] = []
     pre_parser = argparse.ArgumentParser(add_help=False)
     pre_parser.add_argument("--skip-universe", action="store_true")
     pre_parser.add_argument("--reference-date", type=str, default=None)
@@ -647,6 +719,13 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=None, help="Override random seed")
     args = parser.parse_args(remaining_args)
 
+    ai_telemetry_payloads.append({
+        "stage": "execution_context",
+        "tf": args.tf,
+        "trials": args.trials,
+        "seed": args.seed,
+    })
+
     fetch_start_date, start_date, is_end_date, end_date = get_quarterly_window(args.reference_date)
     symbols = [s.strip() for s in args.symbols.split(",") if s.strip()]
 
@@ -688,6 +767,36 @@ def main() -> None:
         gp_only=args.gp_only,
         hmm_only=args.hmm_only,
     )
+
+    # [TELEMETRY] ML Pipeline Audit
+    if ml_out.alpha_panel is not None and hasattr(ml_out.alpha_panel, "attrs"):
+        best_fitness = ml_out.alpha_panel.attrs.get("best_fitness", 0.0)
+        rep = ml_out.alpha_panel.attrs.get("gp_alpha_filter", {})
+        if rep:
+            ai_telemetry_payloads.append({
+                "stage": "gp_audit",
+                "is_best_fitness": float(best_fitness),
+                "n_tried": int(rep.get("n_components", 0)),
+                "n_survived": int(rep.get("n_surviving", 0)),
+                "is_mean_ic": float(rep.get("primary_is_mu", 0.0)),
+                "oos_mean_ic": float(rep.get("primary_oos_mu", 0.0)),
+                "ic_half_life": float(rep.get("primary_half_life", 0.0)),
+                "fail_fdr": int(rep.get("fail_fdr", 0)),
+                "fail_dsr": int(rep.get("fail_dsr", 0)),
+                "fail_oos": int(rep.get("fail_oos", 0)),
+                "fail_half_life": int(rep.get("fail_half_life", 0)),
+                "fail_sym_bal": int(rep.get("fail_sym_bal", 0)),
+                "fail_regime": int(rep.get("fail_regime", 0)),
+            })
+    if hasattr(ml_out, "hmm_report") and ml_out.hmm_report:
+        h_rep = ml_out.hmm_report
+        ai_telemetry_payloads.append({
+            "stage": "hmm_audit",
+            "bull_prob": float(h_rep.get("hmm_prob_bull_trend", 0)),
+            "bear_prob": float(h_rep.get("hmm_prob_bear_trend", 0)),
+            "chop_prob": float(h_rep.get("hmm_prob_chop", 0)),
+            "crisis_prob": float(h_rep.get("hmm_prob_crisis", 0)),
+        })
 
 
     if args.gp_only:
@@ -767,7 +876,8 @@ def main() -> None:
         if trial.state == optuna.trial.TrialState.COMPLETE:
             _trial_counter["n"] += 1
         n_completed = _trial_counter["n"]
-        batch_size = max(1, n_ml_trials // 10)
+        # Reduced noise: log every 25% instead of 10%
+        batch_size = max(1, n_ml_trials // 4)
         if n_completed > 0 and (n_completed % batch_size == 0 or n_completed == n_ml_trials):
             _logger.info(f" [STEP 4/5] Progress: {n_completed}/{n_ml_trials} trials complete...")
 
@@ -906,6 +1016,43 @@ def main() -> None:
             _logger.error(" [ABORT] Signal path broken: no tradeable trials.")
             raise RuntimeError("No trial produced tradeable output.")
 
+    # [PLGD Breakdown + AWF Leg Matrix] — AI diagnostic + user sanity check
+    _leg_tws = best_trial.user_attrs.get("cpcv_path_oos_log_tw", [])
+    _mu_awf  = float(best_trial.user_attrs.get("awf_mu_log", 0.0))
+    _sig_awf = float(best_trial.user_attrs.get("awf_sigma_log", 0.0))
+    _plgd_v  = float(best_trial.user_attrs.get("awf_plgd", 0.0))
+    _n_tr_cfg = float(OPT_FUTURES_CONFIG.get("total_trials", 400))
+    _ldef = float(OPT_FUTURES_CONFIG.get("FUTURES_PLGD_LAMBDA_DEF", 0.5))
+    _ltail = float(OPT_FUTURES_CONFIG.get("FUTURES_PLGD_LAMBDA_TAIL", 2.0))
+    _sr_b = math.sqrt(2.0 * math.log(max(_n_tr_cfg, 2.0)))
+    _vd   = 0.5 * _sig_awf ** 2
+    _def  = _ldef * _sr_b * _sig_awf / math.sqrt(max(float(len(_leg_tws)), 1.0))
+    _wl   = min(_leg_tws) if _leg_tws else 0.0
+    _tp   = _ltail * max(0.0, -_wl)
+    _logger.info(
+        "  [PLGD] mu=%.4f  var_drag=%.4f  deflation=%.4f  tail=%.4f  plgd=%.4f",
+        _mu_awf, _vd, _def, _tp, _plgd_v,
+    )
+    if _leg_tws:
+        _logger.info("  [AWF LEGS]  leg   log_tw     TW%%")
+        for _li, _ltw in enumerate(_leg_tws):
+            _tw_pct = (math.exp(float(_ltw)) - 1.0) * 100.0
+            _flag = "✓" if _ltw > 0.0 else "✗"
+            _logger.info(
+                "    %d/%d     %+.4f    %+.2f%%  %s",
+                _li + 1, len(_leg_tws), _ltw, _tw_pct, _flag,
+            )
+
+    # [TELEMETRY] Optimization & AWF Audit
+    ai_telemetry_payloads.append({
+        "stage": "awf_audit",
+        "plgd": float(_plgd_v),
+        "mu_awf": float(_mu_awf),
+        "sig_awf": float(_sig_awf),
+        "leg_tws": [float(t) for t in _leg_tws],
+        "awf_pos_frac": float(best_trial.user_attrs.get("awf_pos_frac", 0.0)),
+    })
+
     params = build_ml_phase_d_params(dict(best_trial.params), args.tf)
     _assert_oos_gp_signal_alive(oos_data_maps, valid_symbols, args.tf)
 
@@ -918,6 +1065,7 @@ def main() -> None:
     )
 
     gate_ok = True
+    gate_failures: list[str] = []
     if bool(OPT_FUTURES_CONFIG.get("FUTURES_PHASE3_HARD_GATE", True)):
         # AWF: pseudo-PBO = 1 - awf_pos_frac (stored per-trial by objective_ml_phase_d).
         _awf_pos_best = float(best_trial.user_attrs.get("awf_pos_frac", 0.0))
@@ -946,6 +1094,8 @@ def main() -> None:
             _awf_pos_best, float(pbo_obs), dsr_obs,
             "PASS" if gate_ok else "FAIL",
         )
+        if not gate_ok:
+            gate_failures.append("PHASE3_HARD_GATE")
 
 
     n_wf = int(OPT_FUTURES_CONFIG.get("FUTURES_WF_OOS_LEGS", 1))
@@ -1050,6 +1200,13 @@ def main() -> None:
                 _erg,
                 _eguide,
             )
+            # [TELEMETRY] Walk-Forward Ergodicity
+            ai_telemetry_payloads.append({
+                "stage": "wf_ergodicity",
+                "erg_dev": float(_erg),
+                "guideline": float(_eguide),
+                "tw_legs": [float(t) for t in tw_legs],
+            })
             if bool(OPT_FUTURES_CONFIG.get("FUTURES_ERGODICITY_HARD_GATE_ENABLED", True)):
                 if _erg > _eguide:
                     _logger.warning(
@@ -1059,6 +1216,7 @@ def main() -> None:
                         _eguide,
                     )
                     gate_ok = False
+                    gate_failures.append("ERGODICITY_HARD_GATE")
         if wf_hmm_refit and tw_legs:
             all_ok = all(t >= wf_tw_floor for t in tw_legs)
             mean_ok = (sum(tw_legs) / len(tw_legs)) >= wf_tw_mean_min
@@ -1144,18 +1302,6 @@ def main() -> None:
     ho_port["symbol_names"] = valid_symbols
     oos_port["symbol_names"] = valid_symbols
 
-    _print_performance_report(
-        "IS (In-Sample) PERFORMANCE REPORT", is_port, dsr=dsr_obs, pbo=pbo_val, tf=args.tf,
-        benchmark_cagr=_btc_benchmark_is,
-    )
-    _print_performance_report(
-        "Hold-out PERFORMANCE REPORT", ho_port, dsr=dsr_obs, pbo=pbo_val, tf=args.tf,
-    )
-    _print_performance_report(
-        "FINAL OOS PERFORMANCE REPORT", oos_port, dsr=dsr_obs, pbo=pbo_val, tf=args.tf,
-        benchmark_cagr=_btc_benchmark_oos,
-    )
-
     # [IS Structural Balance Gate] AWF mu_log sanity check replaces CPCV path mean.
     # AWF mu_log is computed on chronological non-overlapping legs, so it does not suffer
     # from partial-fold favorable sub-period selection bias that CPCV had.
@@ -1213,6 +1359,7 @@ def main() -> None:
         )
         if not dist_ok:
             gate_ok = False
+            gate_failures.append("AWF_HARDENING_GATE")
             _logger.warning(
                 " [AWF HARDENING] Persist blocked. Worst AWF leg must satisfy "
                 "log(TW) > %.4f (TW > %.4f).",
@@ -1345,6 +1492,28 @@ def main() -> None:
     }
     
     _verdict = "PROMOTE ✅" if gate_ok else "HOLD ❌"
+
+    # [TELEMETRY] Final Gate Status & Comprehensive Evaluation
+    eval_payload = {
+        "stage": "eval_audit",
+        "gate_ok": bool(gate_ok),
+        "gate_failures": gate_failures,
+        "total_trades": int(oos_port.get("total_trades", 0)),
+    }
+    # Merge all numerical metrics from new_m (which tracks Candidate stats)
+    eval_payload.update(new_m)
+    ai_telemetry_payloads.append(eval_payload)
+
+    # [HUMAN DASHBOARD] Unified Performance View
+    _print_human_dashboard(is_port, ho_port, oos_port, _verdict)
+
+    # [AI TELEMETRY DUMP] Structured JSON Lines for AI parsing
+    _logger.info("\n--- 🤖 [AI_TELEMETRY_START] ---")
+    for payload in ai_telemetry_payloads:
+        _logger.info(json.dumps(payload))
+    _logger.info("--- [AI_TELEMETRY_END] ---\n")
+
+    # [CHAMPION AUDIT] Side-by-side with current champion
     _print_dual_audit_dashboard(new_m, champ_m, _verdict)
 
     res_dir = Path(project_root) / "results"
