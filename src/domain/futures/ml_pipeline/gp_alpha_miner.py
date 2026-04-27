@@ -261,8 +261,9 @@ class GPAlphaMiner:
             # Penalize samples during high-volatility/crisis to prevent noise overfitting.
             if "hmm_prob_crisis" in aligned_df.columns:
                 p_crisis = aligned_df["hmm_prob_crisis"].fillna(0.0).to_numpy(dtype=np.float64)
-                # Soft-kill weighting: weight = max(0.1, 1.0 - p_crisis)
-                erg_weight = np.clip(1.0 - p_crisis, 0.1, 1.0)
+                # Relaxed soft-kill weighting: weight = max(0.4, 1.0 - p_crisis * 0.6)
+                # This keeps more signal from volatile regimes while still favoring stability.
+                erg_weight = np.clip(1.0 - p_crisis * 0.6, 0.4, 1.0)
                 sample_weight = sample_weight * erg_weight
 
             if is_end_date:
@@ -361,7 +362,7 @@ class GPAlphaMiner:
             _logger.info("Training LightGBM Regressor (DART) for alpha generation...")
             lgbm = LGBMRegressor(
                 boosting_type="dart",  # DART booster for better generalization
-                objective="regression",
+                objective="huber",     # Huber loss for fat-tail/outlier robustness
                 n_estimators=100,
                 learning_rate=0.05,
                 num_leaves=31,
@@ -369,8 +370,8 @@ class GPAlphaMiner:
                 min_child_samples=50,
                 subsample=0.8,
                 colsample_bytree=0.8,
-                reg_alpha=0.1,         # L1 regularization
-                reg_lambda=0.1,        # L2 regularization
+                reg_alpha=0.5,         # Increased L1 regularization
+                reg_lambda=0.5,        # Increased L2 regularization
                 n_jobs=self.n_jobs,
                 random_state=42,
             )
