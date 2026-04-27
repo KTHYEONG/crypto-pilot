@@ -1069,8 +1069,44 @@ def run_ml_pipeline_for_universe(
     h_src = raw_h if isinstance(raw_h, (list, tuple)) else default_h
     horizons = tuple(int(x) for x in h_src)
 
-    # --- Step 2: Universal GP Model Training (Cross-Sectional IC) ---
-    _logger.info("  --> Step 2: Training Cross-Sectional GP Alpha Model")
+    # --- Step 2a: Early Systemic HMM Inference (Regime-Aware Features) ---
+    _logger.info("  --> Step 2a: Early Systemic HMM Inference for Regime-Aware Alpha")
+    from src.domain.futures.ml_pipeline.feature_engineering import build_systemic_hmm_features
+
+    market_hmm_feats = build_systemic_hmm_features(panel_df, None)
+    if market_hmm_feats.index.tz is None:
+        market_hmm_feats.index = market_hmm_feats.index.tz_localize("UTC")
+    else:
+        market_hmm_feats.index = market_hmm_feats.index.tz_convert("UTC")
+
+    hmm_k = int(cfg.get("FUTURES_HMM_K_STATES", 4))
+    hmm_inferrer = HMMStateInferrer(n_states=hmm_k)
+    is_end_dt = pd.to_datetime(is_end_date or end)
+    if is_end_dt.tzinfo is None:
+        is_end_utc = is_end_dt.tz_localize("UTC")
+    else:
+        is_end_utc = is_end_dt.tz_convert("UTC")
+    is_end_idx_market = int((market_hmm_feats.index < is_end_utc).sum())
+
+    market_probs = hmm_inferrer.fit_predict_systemic(
+        market_hmm_feats,
+        market_hmm_feats["btc_trend_vol_adj_24h"],
+        is_end_idx=is_end_idx_market,
+        symbol="Market",
+        tf=tf,
+    )
+    market_probs = _ensure_datetime_column(market_probs)
+    market_probs["datetime"] = pd.to_datetime(market_probs["datetime"], utc=True)
+
+    # Inject HMM features into panel_df
+    _logger.info("  --> Injecting HMM features into panel_df for LightGBM...")
+    mp_cols = [c for c in market_probs.columns if "hmm_prob_" in c]
+    mp_feats = market_probs.set_index("datetime")[mp_cols]
+    # Merge on datetime level of MultiIndex
+    panel_df = panel_df.join(mp_feats, on="datetime", how="left").fillna(1.0 / float(hmm_k))
+
+    # --- Step 2b: Universal GP Model Training (Cross-Sectional IC) ---
+    _logger.info("  --> Step 2b: Training Cross-Sectional LightGBM Alpha Model")
 
 
     if bool(cfg.get("FUTURES_ML_GP_NSGA2_ENABLED", False)) and not is_deap_available():
