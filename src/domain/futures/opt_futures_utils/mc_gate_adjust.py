@@ -54,6 +54,16 @@ def wf_path_ergodicity_deviation_pct(leg_tw: Sequence[float]) -> float:
     return float(np.max(np.abs(arr - m)) / m * 100.0)
 
 
+def awf_pos_frac_to_pseudo_pbo(pos_frac: float) -> float:
+    """Map AWF positive-leg fraction to PBO-compatible scale (lower = better).
+
+    pos_frac=1.0 (all legs positive) → pseudo_pbo=0.0 (perfect).
+    pos_frac=0.6 (3/5 positive)      → pseudo_pbo=0.4 (borderline pass at FUTURES_PBO_MAX=0.40).
+    Enables reuse of existing champion-guard PBO comparison logic.
+    """
+    return float(np.clip(1.0 - float(pos_frac), 0.0, 1.0))
+
+
 def resolve_adjusted_gates(cfg: dict[str, Any], n_trials: int) -> tuple[float, float, float]:
     """Return (pbo_max_hard, dsr_min_hard, pbo_champion_max) after optional trial adjustment."""
     raw_pbo_max = float(cfg.get("FUTURES_PBO_MAX", 0.45))
