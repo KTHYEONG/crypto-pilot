@@ -49,12 +49,14 @@ from src.domain.futures.ml_pipeline import (  # noqa: E402
     run_ml_pipeline_for_universe,
 )
 from src.domain.futures.opt_futures_utils.mc_gate_adjust import (  # noqa: E402
+    awf_pos_frac_to_pseudo_pbo,
     resolve_adjusted_gates,
     wf_path_ergodicity_deviation_pct,
 )
 from src.domain.futures.opt_futures_utils.metrics import (  # noqa: E402
     calc_net_alpha_with_friction,
     calc_time_to_target_wealth,
+    stationary_bootstrap_spa,
 )
 from src.domain.futures.opt_futures_utils.objective import (  # noqa: E402
     inject_cs_momentum_ranks,
@@ -69,7 +71,6 @@ from src.domain.futures.opt_futures_utils.objective_ml import (  # noqa: E402
     select_best_trial_by_holdout_log_ret,
 )
 from src.domain.futures.opt_futures_utils.oos_evaluator import (  # noqa: E402
-    run_cpcv_complement_evaluation,
     run_oos_margin_shared_portfolio,
 )
 
@@ -869,45 +870,26 @@ def main() -> None:
         )
         raise RuntimeError("Optimization signal path broken: mass-pruning detected.")
 
-    mai = ml_ctx.multi_alignment_info or {}
-    paths = mai.get("cpcv_paths")
-    br = mai.get("cpcv_all_block_ranges")
     best_trial: optuna.trial.FrozenTrial | None = None
-    pbo_obs = 0.5 # Default IS-PBO reference
+    pbo_obs = 0.5  # AWF pseudo-PBO (1 - awf_pos_frac); lower = better
     _logger.info("\n" + "═" * 85)
-    _logger.info(" [STEP 4.5/5] ROBUSTNESS AUDIT (Hard Gates & CPCV PBO)")
+    _logger.info(" [STEP 4.5/5] ROBUSTNESS AUDIT (Hard Gates & AWF pos_frac)")
     _logger.info("═" * 85)
-    
+
     iter_limit = min(300, len(completed))
     for i in range(iter_limit):
         t = completed[i]
-        # 1. Cheap checks first (DSR, MDD, Trades)
-        if not _ml_trial_passes_hard_gates(
-            t, check_pbo=False, pbo_max=pbo_max_eff, dsr_min=dsr_min_eff
-        ):
-            continue
-
-        # 2. Expensive PBO check only if cheap gates pass
-        p_params = build_ml_phase_d_params(dict(t.params), args.tf)
-        pbo_obs = 1.0
-        if paths and br:
-            oos_tw = t.user_attrs.get("cpcv_path_oos_log_tw") or []
-            if len(oos_tw) == len(paths):
-                _logger.debug(f"  Evaluating Rank {i+1}: PBO check...")
-                pbo_obs, _rho = run_cpcv_complement_evaluation(
-                    p_params,
-                    valid_symbols,
-                    args.tf,
-                    data_maps,
-                    paths,
-                    br,
-                    oos_path_scores=oos_tw,
-                )
-        
+        # Derive pseudo-PBO directly from AWF positive-fraction stored by objective_ml_phase_d.
+        # No re-evaluation needed — each trial already logged awf_pos_frac per-leg chronologically.
+        _awf_pos = float(t.user_attrs.get("awf_pos_frac", 0.0))
+        pbo_obs = awf_pos_frac_to_pseudo_pbo(_awf_pos)
         if _ml_trial_passes_hard_gates(
             t, float(pbo_obs), check_pbo=True, pbo_max=pbo_max_eff, dsr_min=dsr_min_eff
         ):
-            _logger.info(f"  [PASS] Best Trial found at rank {i+1} (PBO={pbo_obs:.4f})")
+            _logger.info(
+                "  [PASS] Best Trial at rank %d (awf_pos_frac=%.4f pseudo_pbo=%.4f)",
+                i + 1, _awf_pos, pbo_obs,
+            )
             best_trial = t
             break
     
@@ -937,23 +919,20 @@ def main() -> None:
 
     gate_ok = True
     if bool(OPT_FUTURES_CONFIG.get("FUTURES_PHASE3_HARD_GATE", True)):
-        mai = ml_ctx.multi_alignment_info or {}
-        oos_tw = best_trial.user_attrs.get("cpcv_path_oos_log_tw") or []
-        paths = mai.get("cpcv_paths")
-        br = mai.get("cpcv_all_block_ranges")
-        if oos_tw and paths and br:
-            pbo_obs, rho_obs = run_cpcv_complement_evaluation(
-                params,
-                valid_symbols,
-                args.tf,
-                data_maps,
-                paths,
-                br,
-                oos_path_scores=oos_tw,
-            )
-        else:
-            pbo_obs, rho_obs = (0.5, 0.0)
+        # AWF: pseudo-PBO = 1 - awf_pos_frac (stored per-trial by objective_ml_phase_d).
+        _awf_pos_best = float(best_trial.user_attrs.get("awf_pos_frac", 0.0))
+        pbo_obs = awf_pos_frac_to_pseudo_pbo(_awf_pos_best)
+        # gate1_dsr == awf_pos_frac in CAWF-R paradigm (backward-compat attr name kept).
         dsr_obs = float(best_trial.user_attrs.get("gate1_dsr", 0.0))
+        # Optional SPA post-run diagnostic (not a hard gate — informational only).
+        _awf_leg_log_tw = best_trial.user_attrs.get("awf_leg_log_tw") or []
+        if len(_awf_leg_log_tw) >= 3:
+            _spa_p = stationary_bootstrap_spa(np.asarray(_awf_leg_log_tw, dtype=np.float64))
+            _spa_max = float(OPT_FUTURES_CONFIG.get("FUTURES_SPA_P_VALUE_MAX", 0.10))
+            _logger.info(
+                " [SPA] H0(zero alpha) p-value=%.4f (threshold=%.2f) -> %s",
+                _spa_p, _spa_max, "REJECT H0" if _spa_p <= _spa_max else "FAIL-TO-REJECT",
+            )
         gate_ok = check_hard_gates_ml(
             oos_port,
             float(pbo_obs),
@@ -963,9 +942,8 @@ def main() -> None:
             dsr_min_override=dsr_min_eff,
         )
         _logger.info(
-            " [PHASE 3 AUDIT] PBO=%.4f | DSR=%.4f | RESULT: %s",
-            float(pbo_obs),
-            dsr_obs,
+            " [PHASE 3 AUDIT] awf_pos_frac=%.4f pseudo_pbo=%.4f | DSR=%.4f | RESULT: %s",
+            _awf_pos_best, float(pbo_obs), dsr_obs,
             "PASS" if gate_ok else "FAIL",
         )
 
@@ -1017,7 +995,7 @@ def main() -> None:
                     summary_mode_label=f" (WF leg {leg + 1}/{n_wf})",
                     prefetch_label_start=start_date,
                 )
-                ml_leg.alpha_panel = ml_out.alpha_panel
+                # run_hmm_fusion_for_is_end already propagates alpha_panel internally.
                 oos_maps_leg = copy_data_maps_tf_clone(oos_data_maps, valid_symbols, args.tf)
                 merge_ml_output_into_data_maps(
                     ml_leg, oos_maps_leg, valid_symbols, args.tf, log_tag=f" WF{leg + 1}"
@@ -1178,10 +1156,9 @@ def main() -> None:
         benchmark_cagr=_btc_benchmark_oos,
     )
 
-    # [IS Structural Balance Gate] Added 2026-04-22 after lgbm-200-v2 wrongly saved IS=-3.4%.
-    # Root cause: CPCV path mean (used in objective) can be positive while full-IS CAGR is
-    # negative — partial CPCV test folds cover only favorable sub-periods. This gate catches
-    # the divergence. Validated: v5 repro (IS=-0.75%) correctly blocked, v4 champion preserved.
+    # [IS Structural Balance Gate] AWF mu_log sanity check replaces CPCV path mean.
+    # AWF mu_log is computed on chronological non-overlapping legs, so it does not suffer
+    # from partial-fold favorable sub-period selection bias that CPCV had.
     if gate_ok:
         is_cagr_v = float(is_port.get("cagr_pct", is_port.get("cagr", 0.0)))
         rets_is = np.diff(is_port.get("equity_curve", np.array([FUTURES_INITIAL_BALANCE])))
@@ -1190,62 +1167,54 @@ def main() -> None:
         is_sharpe_v = 0.0
         if rets_is.size > 0 and np.std(rets_is) > 1e-9:
             is_sharpe_v = float(np.mean(rets_is) / np.std(rets_is)) * np.sqrt(ann_f)
-            
+
         oos_eq = oos_port.get("equity_curve", np.array([FUTURES_INITIAL_BALANCE]))
         oos_rets = np.diff(oos_eq) / np.maximum(oos_eq[:-1], 1e-9)
         oos_sharpe_v = 0.0
         if oos_rets.size > 0 and np.std(oos_rets) > 1e-9:
             oos_sharpe_v = float(np.mean(oos_rets) / np.std(oos_rets)) * np.sqrt(ann_f)
 
-        # P4: Gate on CPCV growth_signal, not sequential IS CAGR. Use IS CAGR as sanity check only.
-        cpcv_growth = float(best_trial.user_attrs.get("ml_mean_log_growth_cpcv", 0.0))
+        # ml_mean_log_growth_cpcv attr now stores awf_mu_log (backward-compat name preserved).
+        awf_mu_log = float(best_trial.user_attrs.get("ml_mean_log_growth_cpcv", 0.0))
         _pbo_cur = float(pbo_val) if pbo_val is not None else 0.5
-        
-        # IS sanity: CPCV log-TW growth > 0.05 AND sequential IS CAGR > 30%
-        cpcv_pass = (cpcv_growth > 0.05) and (is_cagr_v > 30.0)
 
-        if not cpcv_pass:
+        # IS sanity: AWF mu_log > 0.05 AND sequential IS CAGR > 30%
+        awf_pass = (awf_mu_log > 0.05) and (is_cagr_v > 30.0)
+
+        if not awf_pass:
             gate_ok = False
             _logger.warning(
-                " [IS STRUCTURAL GATE] CPCV Growth=%.4f IS CAGR=%.2f%% "
+                " [IS STRUCTURAL GATE] AWF mu_log=%.4f IS CAGR=%.2f%% "
                 "IS Sharpe=%.2f OOS Sharpe=%.2f "
-                "PBO=%.4f FAIL. CPCV Growth must be > 0.05 and IS CAGR > 30.0%%. Blocked.",
-                cpcv_growth,
-                is_cagr_v,
-                is_sharpe_v,
-                oos_sharpe_v,
-                _pbo_cur,
+                "pseudo_pbo=%.4f FAIL. AWF mu_log must be > 0.05 and IS CAGR > 30.0%%. Blocked.",
+                awf_mu_log, is_cagr_v, is_sharpe_v, oos_sharpe_v, _pbo_cur,
             )
         else:
             _logger.info(
-                " [IS STRUCTURAL GATE] PASS. CPCV Growth=%.4f IS CAGR=%.2f%% "
-                "IS Sharpe=%.2f OOS Sharpe=%.2f "
-                "PBO=%.4f",
-                 cpcv_growth, is_cagr_v, is_sharpe_v, oos_sharpe_v, _pbo_cur,
+                " [IS STRUCTURAL GATE] PASS. AWF mu_log=%.4f IS CAGR=%.2f%% "
+                "IS Sharpe=%.2f OOS Sharpe=%.2f pseudo_pbo=%.4f",
+                awf_mu_log, is_cagr_v, is_sharpe_v, oos_sharpe_v, _pbo_cur,
             )
 
-        p10_cpcv = float(best_trial.user_attrs.get("ml_p10_log_growth_cpcv", -10.0))
-        cvar10_cpcv = float(best_trial.user_attrs.get("ml_cvar10_log_growth_cpcv", -10.0))
-        worst_path_cpcv = float(
+        # ml_p10_log_growth_cpcv now stores worst AWF leg log-TW (backward-compat name).
+        worst_leg = float(best_trial.user_attrs.get("ml_p10_log_growth_cpcv", -10.0))
+        cvar10_awf = float(best_trial.user_attrs.get("ml_cvar10_log_growth_cpcv", -10.0))
+        worst_path_awf = float(
             best_trial.user_attrs.get("ml_worst_path_log_growth_cpcv", -10.0)
         )
-        p10_tw = float(np.exp(p10_cpcv))
-        p10_floor = float(OPT_FUTURES_CONFIG.get("FUTURES_CPCV_P10_LOG_TW_MIN", 0.0))
-        dist_ok = p10_cpcv > p10_floor
+        worst_tw = float(np.exp(worst_leg))
+        p10_floor = float(OPT_FUTURES_CONFIG.get("FUTURES_CPCV_P10_LOG_TW_MIN", -0.05))
+        dist_ok = worst_leg > p10_floor
         _logger.info(
-            " [CPCV HARDENING] p10_log_tw=%.4f tw=%.4f | cvar10=%.4f | worst=%.4f | "
+            " [AWF HARDENING] worst_leg_log_tw=%.4f tw=%.4f | cvar10=%.4f | worst_path=%.4f | "
             "floor=%.4f -> %s",
-            p10_cpcv,
-            p10_tw,
-            cvar10_cpcv,
-            worst_path_cpcv,
-            p10_floor,
+            worst_leg, worst_tw, cvar10_awf, worst_path_awf, p10_floor,
             "PASS" if dist_ok else "FAIL",
         )
         if not dist_ok:
             gate_ok = False
             _logger.warning(
-                " [CPCV HARDENING] Persist blocked. 10th percentile CPCV path must satisfy "
+                " [AWF HARDENING] Persist blocked. Worst AWF leg must satisfy "
                 "log(TW) > %.4f (TW > %.4f).",
                 p10_floor,
                 float(np.exp(p10_floor)),

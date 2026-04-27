@@ -1,12 +1,10 @@
-"""
-CPCV test paths for futures optimization (spot-aligned geometry, fresh-start-per-segment in evaluator).
-"""
+"""CPCV/CAWF-R walk-forward leg builders for futures optimization."""
 
 from __future__ import annotations
 
 import logging
 from itertools import combinations
-from typing import List, Tuple
+from typing import cast
 
 import numpy as np
 import pandas as pd
@@ -15,13 +13,16 @@ from config.opt_config import OPT_FUTURES_CONFIG
 
 _logger: logging.Logger = logging.getLogger("opt_futures")
 
-CVFold = Tuple[int, int, int, int]
-HoldoutFold = Tuple[int, int, int]
+CVFold = tuple[int, int, int, int]
+HoldoutFold = tuple[int, int, int]
 
-CPCVPath = List[Tuple[int, int]]
+CPCVPath = list[tuple[int, int]]
+
+# (train_start, train_end, test_start, test_end)
+AWFLeg = tuple[int, int, int, int]
 
 
-def list_cpcv_block_ranges(n_bars: int, n_blocks: int, embargo: int = 0) -> List[Tuple[int, int]]:
+def list_cpcv_block_ranges(n_bars: int, n_blocks: int, embargo: int = 0) -> list[tuple[int, int]]:
     """Physical IS blocks (IS-relative indices [start, end))."""
     n = int(n_bars)
     nb = int(n_blocks)
@@ -31,7 +32,7 @@ def list_cpcv_block_ranges(n_bars: int, n_blocks: int, embargo: int = 0) -> List
     base = n // nb
     if base <= e:
         return []
-    out: List[Tuple[int, int]] = []
+    out: list[tuple[int, int]] = []
     for j in range(nb):
         raw_start = j * base
         end = (j + 1) * base if j < nb - 1 else n
@@ -43,10 +44,10 @@ def list_cpcv_block_ranges(n_bars: int, n_blocks: int, embargo: int = 0) -> List
 
 
 def cpcv_complement_segments(
-    test_path: CPCVPath, all_blocks: List[Tuple[int, int]]
-) -> List[Tuple[int, int]]:
+    test_path: CPCVPath, all_blocks: list[tuple[int, int]]
+) -> list[tuple[int, int]]:
     test_set = {tuple(int(x) for x in pair) for pair in test_path}
-    norm_blocks = [tuple(int(x) for x in b) for b in all_blocks]
+    norm_blocks = [cast(tuple[int, int], tuple(int(x) for x in b)) for b in all_blocks]
     comp = [b for b in norm_blocks if b not in test_set]
     return sorted(comp, key=lambda t: t[0])
 
@@ -56,7 +57,7 @@ def build_purged_walk_forward_folds(
     n_folds: int = 4,
     holdout_ratio: float = 0.20,
     embargo: int = 0,
-) -> Tuple[List[CVFold], HoldoutFold]:
+) -> tuple[list[CVFold], HoldoutFold]:
     """Legacy walk-forward splits (optional tooling / tests)."""
     n_bars: int = len(df)
     if n_bars < 500:
@@ -71,7 +72,7 @@ def build_purged_walk_forward_folds(
     if fold_size < 10:
         return [], (0, 0, 0)
 
-    splits: List[CVFold] = []
+    splits: list[CVFold] = []
     for i in range(1, n_folds + 1):
         train_end = i * fold_size + (i - 1) * embargo
         test_start = train_end + embargo
@@ -90,7 +91,7 @@ def build_cpcv_test_paths(
     n_blocks: int,
     k_test_blocks: int,
     embargo: int = 0,
-) -> List[CPCVPath]:
+) -> list[CPCVPath]:
     n = int(n_bars)
     nb = int(n_blocks)
     k = int(k_test_blocks)
@@ -102,8 +103,8 @@ def build_cpcv_test_paths(
     if base <= e:
         return []
 
-    block_starts: List[int] = []
-    block_ends: List[int] = []
+    block_starts: list[int] = []
+    block_ends: list[int] = []
     for j in range(nb):
         raw_start = j * base
         end = (j + 1) * base if j < nb - 1 else n
@@ -113,7 +114,7 @@ def build_cpcv_test_paths(
         block_starts.append(start)
         block_ends.append(end)
 
-    paths: List[CPCVPath] = []
+    paths: list[CPCVPath] = []
     for test_indices in combinations(range(nb), k):
         segs = tuple((block_starts[j], block_ends[j]) for j in sorted(test_indices))
         paths.append(list(segs))
@@ -123,7 +124,7 @@ def build_cpcv_test_paths(
 def build_cpcv_test_paths_with_fallback(
     n_bars: int,
     embargo: int = 0,
-) -> Tuple[List[CPCVPath], int, int]:
+) -> tuple[list[CPCVPath], int, int]:
     """Prefer N/K from OPT_FUTURES_CONFIG; fallback 6/2 then 4/2."""
     n_primary = int(OPT_FUTURES_CONFIG.get("FUTURES_CPCV_N_BLOCKS", 8))
     k_primary = int(OPT_FUTURES_CONFIG.get("FUTURES_CPCV_K_TEST", 3))
@@ -137,14 +138,50 @@ def build_cpcv_test_paths_with_fallback(
     return paths_fb, 4, 2
 
 
+def build_anchored_wf_legs(
+    n_bars: int,
+    k: int = 5,
+    min_train_frac: float = 0.40,
+    embargo: int = 0,
+) -> list[AWFLeg]:
+    """Chronological expanding-window walk-forward legs (CAWF-R paradigm).
+
+    Each leg: train=[0, anchor_i], test=[anchor_i+embargo, anchor_i+leg_width].
+    Anchors are evenly spaced from n_bars*min_train_frac to n_bars.
+
+    Fixes CPCV F2 (non-chronological compounding) and F3 (block shorter
+    than crypto regime cycle). With k=5 and min_train_frac=0.40 on 2700 IS bars:
+    each test leg ≈ 324 bars ≈ 54 days at 4h — one sub-cycle length.
+    """
+    n = int(n_bars)
+    k = max(2, int(k))
+    e = max(0, int(embargo))
+
+    test_span = n - max(1, int(n * min_train_frac))
+    leg_width = test_span // k
+    if leg_width <= e or leg_width < 20:
+        return []
+
+    legs: list[AWFLeg] = []
+    first_anchor = max(1, int(n * min_train_frac))
+    for i in range(k):
+        anchor = first_anchor + i * leg_width
+        test_start = anchor + e
+        test_end = (anchor + leg_width) if i < k - 1 else n
+        if test_end <= test_start or anchor <= 0:
+            continue
+        legs.append((0, anchor, test_start, test_end))
+
+    return legs
+
+
 def build_fast_cpcv_paths(
     n_bars: int,
     embargo: int = 0,
     n_paths_cap: int = 12,
     seed: int = 42,
-) -> Tuple[List[CPCVPath], int, int]:
-    """
-    Phase C 전용 fast CPCV: 전체 C(N,K) paths 중 n_paths_cap 개를 random sampling.
+) -> tuple[list[CPCVPath], int, int]:
+    """Phase C 전용 fast CPCV: 전체 C(N,K) paths 중 n_paths_cap 개를 random sampling.
 
     Phase C의 역할은 signal 간 **상대 순위** 결정이므로 절대 성능 측정 정확도보다
     탐색 속도가 우선한다. 12 paths의 rank correlation with 56 paths은 Spearman
