@@ -56,11 +56,28 @@ def _sorted_hmm_prob_columns(df: pd.DataFrame) -> list[str]:
     return sorted(legacy, key=lambda x: int(str(x).split("_")[-1]))
 
 
+_META_EXTRA_FEATS: tuple[str, ...] = (
+    "funding_z_72",
+    "realized_vol_yz_24",
+    "vol_surface_24_168",
+    "corr_btc_24",
+    "vpin_proxy_12",
+    "ret_vol_adj_24",
+)
+
+
 def _meta_feature_column_names(wide_1h: pd.DataFrame) -> tuple[str, ...]:
+    """Resolves which columns to use as features for the meta-labeler."""
     hmm_cols = _sorted_hmm_prob_columns(wide_1h)
+    base: list[str] = []
     if "gp_alpha_00" in wide_1h.columns:
-        return ("gp_alpha_00", *hmm_cols)
-    return tuple(hmm_cols)
+        base.append("gp_alpha_00")
+    base.extend(hmm_cols)
+    # 추가 피처: wide_1h에 실제 존재하는 것만 포함
+    for c in _META_EXTRA_FEATS:
+        if c in wide_1h.columns and c not in base:
+            base.append(c)
+    return tuple(base)
 
 
 def _attach_tbm_gp_weights(
