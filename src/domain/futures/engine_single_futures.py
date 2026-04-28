@@ -172,6 +172,10 @@ class BacktestEngineFast:
         max_exp_per_coin = float(self.strategy.params.get("MAX_EXPOSURE_PER_COIN", 1.5))
         dd_scaling_threshold = float(self.strategy.params.get("DD_SCALING_THRESHOLD", 0.15))
 
+        # --- HMM Regime Columns ---
+        hmm_crisis = df["hmm_prob_crisis"].values if "hmm_prob_crisis" in df.columns else np.zeros(n)
+        hmm_mod_long = df["hmm_modulator_long"].values if "hmm_modulator_long" in df.columns else np.ones(n)
+
         trades, final_balance, equity_curve, funding_paid_total = backtest_loop_numba(
             close,
             high,
@@ -203,6 +207,8 @@ class BacktestEngineFast:
             max_capital_usage,
             max_exp_per_coin,
             dd_scaling_threshold,
+            hmm_crisis,
+            hmm_mod_long,
         )
 
         self.balance = final_balance
@@ -373,6 +379,8 @@ def backtest_loop_numba(
     max_capital_usage: float,
     max_exp_per_coin: float,
     dd_scaling_threshold: float,
+    hmm_crisis: np.ndarray,
+    hmm_mod_long: np.ndarray,
 ) -> tuple[np.ndarray, float, np.ndarray, float]:
     funding_paid_total = 0.0
     n = len(close)
@@ -620,7 +628,15 @@ def backtest_loop_numba(
 
                 # Fixed Stop Loss Distance for Sizing
                 if pending_side == 1:
-                    stop_price = fill_price - (prev_atr * long_atr_mult)
+                    # [Asymmetric Stop Tightening] P3: Directional Balance
+                    stop_mult = long_atr_mult
+                    # If crisis probability > 20%, tighten stop by 40%
+                    if hmm_crisis[prev_i] > 0.2:
+                        stop_mult *= 0.6
+                    # If HMM modulator is weak (< 0.7), tighten stop by 20%
+                    elif hmm_mod_long[prev_i] < 0.7:
+                        stop_mult *= 0.8
+                    stop_price = fill_price - (prev_atr * stop_mult)
                 else:
                     stop_price = fill_price + (prev_atr * short_atr_mult)
 

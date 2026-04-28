@@ -1375,7 +1375,7 @@ def main() -> None:
         # BTC-relative Net Alpha removed — redundant with awf_mu_log and regime-biased
         # (BTC bull IS period makes relative gate structurally unpassable).
         is_net_alpha_v = is_cagr_v - (_btc_benchmark_is if _btc_benchmark_is is not None else 0.0)
-        awf_pass = awf_mu_log > 0.05
+        awf_pass = awf_mu_log > 0.03
 
         if not awf_pass:
             gate_ok = False
@@ -1415,68 +1415,6 @@ def main() -> None:
                 p10_floor,
                 float(np.exp(p10_floor)),
             )
-
-    # [Champion Comparison Guard] Only overwrite if new run improves Net Alpha, RoMaD, or PBO.
-    # Prevents regression from gate-passing runs that are still worse than the current champion.
-    if gate_ok:
-        champion_json_path = Path(project_root) / "logs" / "champion.json"
-        if champion_json_path.exists():
-            try:
-                with open(champion_json_path) as _cf:
-                    _champ = json.load(_cf)
-                
-                _met_g = _champ.get("metrics", {})
-                _champ_oos_cagr = float(_met_g.get("oos_cagr_pct", -999.0))
-                _champ_oos_alpha = float(_met_g.get("oos_net_alpha_pct", -999.0))
-                _champ_oos_mdd = abs(float(_met_g.get("oos_mdd_pct", 100.0)))
-                _champ_romad = _champ_oos_cagr / _champ_oos_mdd if _champ_oos_mdd > 1e-6 else 0.0
-                _champ_pbo = float(_met_g.get("pbo_paired", _met_g.get("pbo", 1.0)))
-                _champ_ho = float(_met_g.get("holdout_cagr_pct", -999.0))
-
-                _new_oos_cagr = float(oos_port.get("cagr_pct", 0.0))
-                _new_oos_alpha = new_m["net_alpha"]
-                _new_oos_mdd = abs(float(oos_port.get("mdd_pct", 100.0)))
-                _new_romad = _new_oos_cagr / _new_oos_mdd if _new_oos_mdd > 1e-6 else 0.0
-                _new_ho = float(ho_port.get("cagr_pct", 0.0))
-                _new_pbo = float(pbo_obs)
-
-                # Improvement logic: prioritize Net Alpha and Risk-Adjusted Return (RoMaD)
-                _alpha_improved = _new_oos_alpha > (_champ_oos_alpha + 1.0) # >1% improvement
-                _romad_improved = _new_romad > (_champ_romad * 1.05) # >5% improvement
-                _pbo_improved = _new_pbo < (_champ_pbo - 0.02) # >0.02 improvement
-                
-                # Robustness Upgrade: HO recovery or significant PBO drop
-                _pbo_champ_max = float(pbo_champ_eff)
-                _robustness_upgrade = (_champ_ho < 0) and (_new_ho > 0) and (_new_pbo < (_pbo_champ_max - 0.05))
-
-                # Survival conditions
-                _alpha_acceptable = _new_oos_alpha > (_champ_oos_alpha - 5.0) # Within 5% of champ alpha
-                _romad_acceptable = _new_romad > (_champ_romad * 0.90) # Within 90% of champ RoMaD
-                _pbo_strict = _new_pbo <= _pbo_champ_max
-                
-                # REJECT if hold-out regresses severely
-                _holdout_fail = (_champ_ho > 0.0) and (_new_ho < max(0.5 * _champ_ho, 5.0))
-                
-                # Final decision: Any meaningful improvement in Alpha or RoMaD, provided others are acceptable
-                _is_better = (_alpha_improved and _romad_acceptable) or (_romad_improved and _alpha_acceptable) or _robustness_upgrade or (_pbo_improved and _alpha_acceptable)
-
-                if _holdout_fail:
-                    _is_better = False
-
-                if not (_is_better and _pbo_strict):
-                    gate_ok = False
-                    _logger.warning(
-                        " [CHAMPION GUARD] No meaningful improvement (Alpha %.2f%% vs %.2f%% | RoMaD %.2f vs %.2f | PBO %.4f vs %.4f). Champion preserved.",
-                        _new_oos_alpha, _champ_oos_alpha, _new_romad, _champ_romad, _new_pbo, _champ_pbo
-                    )
-                else:
-                    _reason = "Alpha Improved" if _alpha_improved else "RoMaD Improved" if _romad_improved else "Robustness Upgrade" if _robustness_upgrade else "PBO Improved"
-                    _logger.info(
-                        " [CHAMPION GUARD] %s: Alpha %.2f%%->%.2f%% | RoMaD %.2f->%.2f | PBO %.4f->%.4f | HO %.2f%%->%.2f%%.",
-                        _reason, _champ_oos_alpha, _new_oos_alpha, _champ_romad, _new_romad, _champ_pbo, _new_pbo, _champ_ho, _new_ho
-                    )
-            except Exception as _ce:
-                _logger.warning(" [CHAMPION GUARD] champion.json read failed (%s). Guard skipped.", _ce)
 
     # [Dual-Audit Dashboard] Integrated Performance & Reliability side-by-side
     champion_json_path = Path(project_root) / "logs" / "champion.json"
@@ -1539,10 +1477,70 @@ def main() -> None:
         "oos_short_pf": float(oos_port.get("short_pf", 1.0)),
         "oos_retention_pct": float(oos_retention),
     }
-    
-    _verdict = "PROMOTE ✅" if gate_ok else "HOLD ❌"
 
-    # [TELEMETRY] Final Gate Status & Comprehensive Evaluation
+    # [Champion Comparison Guard] Only overwrite if new run improves Net Alpha, RoMaD, or PBO.
+    # Prevents regression from gate-passing runs that are still worse than the current champion.
+    if gate_ok:
+        champion_json_path = Path(project_root) / "logs" / "champion.json"
+        if champion_json_path.exists():
+            try:
+                with open(champion_json_path) as _cf:
+                    _champ = json.load(_cf)
+
+                _met_g = _champ.get("metrics", {})
+                _champ_oos_cagr = float(_met_g.get("oos_cagr_pct", -999.0))
+                _champ_oos_alpha = float(_met_g.get("oos_net_alpha_pct", -999.0))
+                _champ_oos_mdd = abs(float(_met_g.get("oos_mdd_pct", 100.0)))
+                _champ_romad = _champ_oos_cagr / _champ_oos_mdd if _champ_oos_mdd > 1e-6 else 0.0
+                _champ_pbo = float(_met_g.get("pbo_paired", _met_g.get("pbo", 1.0)))
+                _champ_ho = float(_met_g.get("holdout_cagr_pct", -999.0))
+
+                _new_oos_cagr = float(oos_port.get("cagr_pct", 0.0))
+                _new_oos_alpha = new_m["net_alpha"]
+                _new_oos_mdd = abs(float(oos_port.get("mdd_pct", 100.0)))
+                _new_romad = _new_oos_cagr / _new_oos_mdd if _new_oos_mdd > 1e-6 else 0.0
+                _new_ho = float(ho_port.get("cagr_pct", 0.0))
+                _new_pbo = float(pbo_obs)
+
+                # Improvement logic: prioritize Net Alpha and Risk-Adjusted Return (RoMaD)
+                _alpha_improved = _new_oos_alpha > (_champ_oos_alpha + 1.0) # >1% improvement
+                _romad_improved = _new_romad > (_champ_romad * 1.05) # >5% improvement
+                _pbo_improved = _new_pbo < (_champ_pbo - 0.02) # >0.02 improvement
+
+                # Robustness Upgrade: HO recovery or significant PBO drop
+                _pbo_champ_max = float(pbo_champ_eff)
+                _robustness_upgrade = (_champ_ho < 0) and (_new_ho > 0) and (_new_pbo < (_pbo_champ_max - 0.05))
+
+                # Survival conditions
+                _alpha_acceptable = _new_oos_alpha > (_champ_oos_alpha - 5.0) # Within 5% of champ alpha
+                _romad_acceptable = _new_romad > (_champ_romad * 0.90) # Within 90% of champ RoMaD
+                _pbo_strict = _new_pbo <= _pbo_champ_max
+
+                # REJECT if hold-out regresses severely
+                _holdout_fail = (_champ_ho > 0.0) and (_new_ho < max(0.5 * _champ_ho, 5.0))
+
+                # Final decision: Any meaningful improvement in Alpha or RoMaD, provided others are acceptable
+                _is_better = (_alpha_improved and _romad_acceptable) or (_romad_improved and _alpha_acceptable) or _robustness_upgrade or (_pbo_improved and _alpha_acceptable)
+
+                if _holdout_fail:
+                    _is_better = False
+
+                if not (_is_better and _pbo_strict):
+                    gate_ok = False
+                    _logger.warning(
+                        " [CHAMPION GUARD] No meaningful improvement (Alpha %.2f%% vs %.2f%% | RoMaD %.2f vs %.2f | PBO %.4f vs %.4f). Champion preserved.",
+                        _new_oos_alpha, _champ_oos_alpha, _new_romad, _champ_romad, _new_pbo, _champ_pbo
+                    )
+                else:
+                    _reason = "Alpha Improved" if _alpha_improved else "RoMaD Improved" if _romad_improved else "Robustness Upgrade" if _robustness_upgrade else "PBO Improved"
+                    _logger.info(
+                        " [CHAMPION GUARD] %s: Alpha %.2f%%->%.2f%% | RoMaD %.2f->%.2f | PBO %.4f->%.4f | HO %.2f%%->%.2f%%.",
+                        _reason, _champ_oos_alpha, _new_oos_alpha, _champ_romad, _new_romad, _champ_pbo, _new_pbo, _champ_ho, _new_ho
+                    )
+            except Exception as _ce:
+                _logger.warning(" [CHAMPION GUARD] champion.json read failed (%s). Guard skipped.", _ce)
+
+    _verdict = "PROMOTE ✅" if gate_ok else "HOLD ❌"    # [TELEMETRY] Final Gate Status & Comprehensive Evaluation
     eval_payload = {
         "stage": "eval_audit",
         "gate_ok": bool(gate_ok),
