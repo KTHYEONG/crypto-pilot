@@ -80,7 +80,7 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     "FUTURES_AWF_MIN_TRAIN_FRAC": 0.40,  # first leg trains on 40% of IS bars
     # PLGD objective weights (see objective_ml.py).
     "FUTURES_PLGD_LAMBDA_DEF": 0.5,   # Bonferroni trial-deflation strength
-    "FUTURES_PLGD_LAMBDA_TAIL": 1.0,  # worst-leg tail penalty multiplier (k=5: 1 bad leg allowed)
+    "FUTURES_PLGD_LAMBDA_TAIL": 0.7,  # worst-leg tail penalty multiplier (k=5: 1 bad leg allowed)
     "FUTURES_AWF_NET_EDGE_MIN": 1.5,   # min EV/cost ratio (avg PnL / round-trip cost)
     # SPA bootstrap for post-run diagnostics (not used per-trial).
     "FUTURES_SPA_N_BOOTSTRAP": 2000,
@@ -92,8 +92,8 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     "FUTURES_WF_OOS_LEGS": 5,
     # R-6: per WF OOS leg, retrain systemic HMM on data strictly before leg start (GP frozen).
     "FUTURES_WF_HMM_LEG_REFIT": True,
-    "FUTURES_WF_LEG_TW_MIN_ALL": 1.0,
-    "FUTURES_WF_LEG_TW_MEAN_MIN": 1.10,
+    "FUTURES_WF_LEG_TW_MIN_ALL": 0.93,
+    "FUTURES_WF_LEG_TW_MEAN_MIN": 0.98,
     # futures-opt P4: log reference + optional soft warn (not a hard gate).
     "FUTURES_ERGODICITY_GUIDELINE_PCT": 15.0,
     "FUTURES_ERGODICITY_HARD_GATE_ENABLED": True,
