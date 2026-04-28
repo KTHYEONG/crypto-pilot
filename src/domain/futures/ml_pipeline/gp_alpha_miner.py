@@ -12,9 +12,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, cast
 
+import lightgbm as lgb
 import numpy as np
 import pandas as pd
 from lightgbm import LGBMRegressor
+from scipy.special import softmax
+from scipy.stats import spearmanr
 from sklearn.preprocessing import QuantileTransformer
 
 from src.domain.futures.ml_pipeline.cross_sectional_utils import CrossSectionalPipelineUtils
@@ -225,7 +228,6 @@ class GPAlphaMiner:
         unstacked_y = work_panel["target"].unstack(level="symbol")
         unique_times = unstacked_y.index
         unique_symbols = unstacked_y.columns
-        n_symbols = len(unique_symbols)
 
         if is_end_date:
             _cut = pd.to_datetime(is_end_date, utc=True)
@@ -242,156 +244,141 @@ class GPAlphaMiner:
         )
 
         if raw_alpha_df is None:
+            # --- Multi-Horizon Ensemble ---
+            horizons = (3, 6, 12, 24)
             feat_cols = _resolve_gp_feature_columns(work_panel)
             template = pd.DataFrame(index=full_grid_index)
-            join_cols = [*feat_cols, "target"]
+            
+            # OHLC for multi-horizon target calculation
+            ohlc_cols = [c for c in ["close", "open", "high", "low"] if c in work_panel.columns]
+            join_cols = [*feat_cols, *ohlc_cols, "target"]
             if "tbm_gp_weight" in work_panel.columns:
-                join_cols = [*feat_cols, "tbm_gp_weight", "target"]
+                join_cols = [*feat_cols, *ohlc_cols, "tbm_gp_weight", "target"]
+            
             aligned_df = template.join(work_panel[join_cols]).fillna(np.nan)
-
-            y_raw = aligned_df["target"].values
             x_grid = aligned_df[feat_cols].values
-
-            sample_weight = np.where(pd.isna(y_raw), 0.0, 1.0)
+            
+            # Base sample weight (non-NaN features)
+            base_sw = np.ones(len(aligned_df), dtype=np.float64)
             if "tbm_gp_weight" in aligned_df.columns:
                 tw = aligned_df["tbm_gp_weight"].fillna(1.0).to_numpy(dtype=np.float64)
-                sample_weight = sample_weight * np.clip(tw, 0.25, 3.0)
+                base_sw = base_sw * np.clip(tw, 0.25, 3.0)
 
-            # --- Ergodicity Weighting (Regime-Aware Sample Selection) ---
-            # Penalize samples during high-volatility/crisis or noisy chop to prevent overfitting.
+            # --- Ergodicity & Time Decay Weighting ---
             if "hmm_prob_crisis" in aligned_df.columns:
                 p_crisis = aligned_df["hmm_prob_crisis"].fillna(0.0).to_numpy(dtype=np.float64)
-                p_chop_ser = aligned_df.get(
-                    "hmm_prob_chop", pd.Series(0.0, index=aligned_df.index)
-                )
-                p_chop = p_chop_ser.fillna(0.0).to_numpy(dtype=np.float64)
-                
-                # Aggressive penalty for crisis and moderate penalty for chop
+                p_chop = aligned_df.get("hmm_prob_chop", pd.Series(0.0, index=aligned_df.index)).fillna(0.0).to_numpy(dtype=np.float64)
                 erg_weight = np.clip(1.0 - (p_crisis * 0.8 + p_chop * 0.4), 0.1, 1.0)
-                sample_weight = sample_weight * erg_weight
+                base_sw *= erg_weight
 
             if is_end_date:
-                times = aligned_df.index.get_level_values("datetime")
-                if times.tz is None:
-                    times = times.tz_localize("UTC")
+                times_arr = aligned_df.index.get_level_values("datetime")
+                if times_arr.tz is None:
+                    times_arr = times_arr.tz_localize("UTC")
                 else:
-                    times = times.tz_convert("UTC")
-                cutoff_dt = pd.to_datetime(is_end_date, utc=True)
-                is_mask = np.asarray(times < cutoff_dt)
-                sample_weight = sample_weight * is_mask
+                    times_arr = times_arr.tz_convert("UTC")
+                cutoff_ts = pd.to_datetime(is_end_date, utc=True)
+                delta_ns = (cutoff_ts - times_arr).total_seconds() / 3600.0
+                tau = 8760.0  # 1 year decay
+                time_decay = np.exp(-np.clip(delta_ns, 0.0, None) / tau).astype(np.float64)
+                base_sw *= np.asarray(times_arr < cutoff_ts) * time_decay
 
-            n_time = len(unique_times)
-            train_t_limit = max(1, int(n_time * 0.8))
-            row_t: np.ndarray = np.arange(len(aligned_df), dtype=np.int64) // n_symbols
-            fit_time_ok = row_t < train_t_limit
-            nan_row = np.isnan(x_grid).any(axis=1) | np.isnan(y_raw)
-            w_fit = fit_time_ok.astype(np.float64)
-            w_nan = (~nan_row).astype(np.float64)
-            sample_weight = sample_weight * w_fit * w_nan
-
+            nan_row = np.isnan(x_grid).any(axis=1)
+            base_sw *= (~nan_row).astype(np.float64)
             x_clean = np.where(np.isfinite(x_grid), x_grid, 0.0)
-            y_clean = np.where(np.isfinite(y_raw), y_raw, 0.0)
 
-            mask = sample_weight > 0
-            # --- MI Audit & MP Denoising ---
-            if mask.sum() > 100:
+            # --- MI Audit & MP Denoising (representative target) ---
+            y_audit = aligned_df["target"].fillna(0.0).values
+            mask_audit = (base_sw > 0) & (~np.isnan(aligned_df["target"]))
+            
+            if mask_audit.sum() > 100:
                 from sklearn.feature_selection import mutual_info_regression
-
-                x_fit = x_clean[mask]
-                y_fit = y_clean[mask]
-
-                # 1. MI Audit
-                n_samples_fit = x_fit.shape[0]
-                sample_size = min(10000, n_samples_fit)
+                x_fit_audit = x_clean[mask_audit]
+                y_fit_audit = y_audit[mask_audit]
+                n_samples_fit = x_fit_audit.shape[0]
+                sample_size = min(5000, n_samples_fit)
                 idx = np.random.choice(n_samples_fit, sample_size, replace=False)
-                mi_scores = mutual_info_regression(x_fit[idx], y_fit[idx], random_state=42)
-                max_mi = float(np.max(mi_scores)) if len(mi_scores) > 0 else 0.0
-
-                if max_mi < 0.001:
-                    _logger.warning(
-                        " [STAGNATION DETECTED] Max MI is %.5f. Plateau reached.", max_mi
-                    )
-
-                kept_indices = [i for i, score in enumerate(mi_scores) if score > 1e-4]
+                mi_scores = mutual_info_regression(x_fit_audit[idx], y_fit_audit[idx], random_state=42)
+                kept_indices = [i for i, s in enumerate(mi_scores) if s > 1e-4]
                 if len(kept_indices) < max(5, len(feat_cols) // 4):
                     kept_indices = cast(
-                        list[int], np.argsort(mi_scores)[-max(5, len(feat_cols) // 4) :].tolist()
+                        list[int],
+                        np.argsort(mi_scores)[-max(5, len(feat_cols) // 4) :].tolist()
                     )
-
-                _logger.info(
-                    " [MI AUDIT] Kept %d/%d features based on MI. Max MI=%.5f",
-                    len(kept_indices),
-                    len(feat_cols),
-                    max_mi,
-                )
-
-                # Subset features
                 x_clean = x_clean[:, kept_indices]
-                x_fit = x_fit[:, kept_indices]
-                self._kept_indices = kept_indices  # Store for transform
-
-                # 2. Marchenko-Pastur Denoising
-                n_s, n_f = x_fit.shape
-                if n_s > n_f and n_f > 1:
-                    x_mean = np.mean(x_fit, axis=0)
-                    x_std = np.std(x_fit, axis=0)
-                    x_std[x_std == 0] = 1.0
-                    x_norm = (x_fit - x_mean) / x_std
-
-                    corr = np.dot(x_norm.T, x_norm) / n_s
-                    evals, evecs = np.linalg.eigh(corr)
-
-                    q = n_s / float(n_f)
-                    e_max = (1 + np.sqrt(1 / q)) ** 2
-
-                    n_facts = int(np.sum(evals > e_max))
-                    if 0 < n_facts < n_f:
-                        _logger.info(
-                            " [MP DENOISE] Keeping %d PCs out of %d",
-                            n_facts,
-                            n_f,
-                        )
-                        evecs_kept = evecs[:, -n_facts:]
-                        x_clean_norm = (x_clean - x_mean) / x_std
-                        x_clean_denoised = np.dot(np.dot(x_clean_norm, evecs_kept), evecs_kept.T)
-                        x_clean = x_clean_denoised * x_std + x_mean
-                        self._mp_mean = x_mean
-                        self._mp_std = x_std
-                        self._mp_evecs = evecs_kept
+                self._kept_indices = kept_indices
+                _logger.info(
+                    " [Phase C] Kept %d/%d features via MI Audit.",
+                    len(kept_indices),
+                    len(feat_cols)
+                )
             else:
                 self._kept_indices = list(range(len(feat_cols)))
-                self._mp_mean = None
 
-            # --- LightGBM Model (DART Booster & Regularization) ---
-            _logger.info("Training LightGBM Regressor (DART) for alpha generation...")
-            lgbm = LGBMRegressor(
-                boosting_type="dart",  # DART booster for better generalization
-                objective="huber",     # Huber loss for fat-tail/outlier robustness
-                n_estimators=150,      # Slightly more estimators for DART
-                learning_rate=0.03,    # Slower learning rate for stability
-                num_leaves=24,         # Smaller trees for better stability
-                max_depth=5,
-                min_child_samples=70,  # Surgical relaxation from 100
-                subsample=0.7,
-                colsample_bytree=0.7,
-                reg_alpha=1.2,         # Surgical relaxation from 2.0
-                reg_lambda=1.2,        # Surgical relaxation from 2.0
-                extra_trees=True,      # Keep extra trees for variance reduction
-                n_jobs=self.n_jobs,
-                random_state=42,
-            )
+            # --- Multi-Horizon Loop ---
+            ensemble_preds = np.zeros(len(aligned_df), dtype=np.float64)
+            horizon_ics = []
+            close_ser = aligned_df.get("close", pd.Series(np.nan, index=aligned_df.index))
+            lgbm_h = None
+            
+            for h in horizons:
+                # 1. Target Construction for horizon h
+                if "close" in aligned_df.columns:
+                    close_wide = close_ser.unstack(level="symbol")
+                    fwd_ret = np.log(close_wide.shift(-h) / close_wide)
+                    vol = close_wide.pct_change().rolling(max(24, h*2)).std().bfill()
+                    target_h_wide = fwd_ret / (vol * np.sqrt(h) + 1e-9)
+                    target_h = (
+                        target_h_wide.rank(axis=1, pct=True)
+                        .stack(future_stack=True)
+                        .reindex(aligned_df.index)
+                        .fillna(0.5)
+                        .values
+                    )
+                else:
+                    target_h = aligned_df["target"].values
+                
+                y_h = np.where(np.isfinite(target_h), target_h, 0.5)
+                sw_h = base_sw * (~np.isnan(target_h)).astype(np.float64)
+                mask_h = sw_h > 0
+                
+                if mask_h.sum() < 200:
+                    continue
+                
+                mask_idx = np.where(mask_h)[0]
+                val_cutoff = int(len(mask_idx) * 0.80)
+                tr_idx, val_idx = mask_idx[:val_cutoff], mask_idx[val_cutoff:]
+                
+                lgbm_h = LGBMRegressor(
+                    boosting_type="gbdt", objective="huber", n_estimators=300,
+                    learning_rate=0.03, num_leaves=24, max_depth=5,
+                    min_child_samples=70, subsample=0.7, colsample_bytree=0.7,
+                    reg_alpha=1.2, reg_lambda=1.2, extra_trees=True,
+                    n_jobs=self.n_jobs, random_state=42,
+                )
+                lgbm_h.fit(
+                    x_clean[tr_idx], y_h[tr_idx], sample_weight=sw_h[tr_idx],
+                    eval_set=[(x_clean[val_idx], y_h[val_idx])],
+                    callbacks=[lgb.early_stopping(stopping_rounds=20, verbose=False)],
+                )
+                
+                pred_h = lgbm_h.predict(x_clean)
+                is_mask = (sw_h > 0) & (np.arange(len(sw_h)) < len(sw_h) * 0.8)
+                if is_mask.sum() > 50:
+                    ic_h, _ = spearmanr(pred_h[is_mask], y_h[is_mask])
+                else:
+                    ic_h = 0.0
+                
+                horizon_ics.append(max(0.001, ic_h))
+                ensemble_preds += pred_h * max(0.001, ic_h)
+                _logger.info(" [Phase C] Horizon h=%d: IS Rank-IC = %.4f", h, ic_h)
 
-            mask = sample_weight > 0
-            if mask.sum() > 100:
-                lgbm.fit(x_clean[mask], y_clean[mask], sample_weight=sample_weight[mask])
+            if sum(horizon_ics) > 0:
+                out_pred = ensemble_preds / sum(horizon_ics)
             else:
-                _logger.warning("Not enough samples to train LightGBM!")
-                lgbm.fit(x_clean[:100], y_clean[:100])
-
-            self._st = lgbm
-
-            out_pred = lgbm.predict(x_clean)
-
+                out_pred = np.zeros(len(aligned_df)) + 0.5
+            
+            self._st = lgbm_h 
             cols = [f"gp_alpha_{i:02d}" for i in range(self.n_features_to_select)]
             full_alpha_df = pd.DataFrame(0.5, index=full_grid_index, columns=cols)
             full_alpha_df["gp_alpha_00"] = out_pred
