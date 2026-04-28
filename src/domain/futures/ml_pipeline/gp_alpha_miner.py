@@ -371,11 +371,11 @@ class GPAlphaMiner:
                 learning_rate=0.03,    # Slower learning rate for stability
                 num_leaves=24,         # Smaller trees for better stability
                 max_depth=5,
-                min_child_samples=100, # Increased to prevent split on noise
+                min_child_samples=70,  # Surgical relaxation from 100
                 subsample=0.7,
                 colsample_bytree=0.7,
-                reg_alpha=2.0,         # High L1 regularization
-                reg_lambda=2.0,        # High L2 regularization
+                reg_alpha=1.2,         # Surgical relaxation from 2.0
+                reg_lambda=1.2,        # Surgical relaxation from 2.0
                 extra_trees=True,      # Keep extra trees for variance reduction
                 n_jobs=self.n_jobs,
                 random_state=42,
