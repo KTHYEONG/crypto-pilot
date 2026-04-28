@@ -12,6 +12,7 @@ dependencies = [
     "gplearn>=0.4.2",
     "hmmlearn>=0.3.2",
     "lightgbm>=4.3.0",
+    "catboost>=1.2.0",
     "statsmodels>=0.14.0",
     "pyarrow",
 ]
