@@ -15,8 +15,8 @@ from typing import Any, cast
 import lightgbm as lgb
 import numpy as np
 import pandas as pd
+from catboost import CatBoostRegressor
 from lightgbm import LGBMRegressor
-from scipy.special import softmax
 from scipy.stats import spearmanr
 from sklearn.preprocessing import QuantileTransformer
 
@@ -267,8 +267,7 @@ class GPAlphaMiner:
             # --- Ergodicity & Time Decay Weighting ---
             if "hmm_prob_crisis" in aligned_df.columns:
                 p_crisis = aligned_df["hmm_prob_crisis"].fillna(0.0).to_numpy(dtype=np.float64)
-                p_chop = aligned_df.get("hmm_prob_chop", pd.Series(0.0, index=aligned_df.index)).fillna(0.0).to_numpy(dtype=np.float64)
-                erg_weight = np.clip(1.0 - (p_crisis * 0.8 + p_chop * 0.4), 0.1, 1.0)
+                erg_weight = np.clip(1.0 - p_crisis * 0.7, 0.1, 1.0)
                 base_sw *= erg_weight
 
             if is_end_date:
@@ -279,7 +278,7 @@ class GPAlphaMiner:
                     times_arr = times_arr.tz_convert("UTC")
                 cutoff_ts = pd.to_datetime(is_end_date, utc=True)
                 delta_ns = (cutoff_ts - times_arr).total_seconds() / 3600.0
-                tau = 8760.0  # 1 year decay
+                tau = 13140.0  # 1.5 year decay — better preserves IS=15mo distribution
                 time_decay = np.exp(-np.clip(delta_ns, 0.0, None) / tau).astype(np.float64)
                 base_sw *= np.asarray(times_arr < cutoff_ts) * time_decay
 
@@ -298,7 +297,9 @@ class GPAlphaMiner:
                 n_samples_fit = x_fit_audit.shape[0]
                 sample_size = min(5000, n_samples_fit)
                 idx = np.random.choice(n_samples_fit, sample_size, replace=False)
-                mi_scores = mutual_info_regression(x_fit_audit[idx], y_fit_audit[idx], random_state=42)
+                mi_scores = mutual_info_regression(
+                    x_fit_audit[idx], y_fit_audit[idx], random_state=42
+                )
                 kept_indices = [i for i, s in enumerate(mi_scores) if s > 1e-4]
                 if len(kept_indices) < max(5, len(feat_cols) // 4):
                     kept_indices = cast(
@@ -326,7 +327,13 @@ class GPAlphaMiner:
                 if "close" in aligned_df.columns:
                     close_wide = close_ser.unstack(level="symbol")
                     fwd_ret = np.log(close_wide.shift(-h) / close_wide)
-                    vol = close_wide.pct_change().rolling(max(24, h*2)).std().bfill()
+                    vol = (
+                        close_wide.pct_change()
+                        .rolling(max(24, h * 2), min_periods=h + 5)
+                        .std()
+                        .ffill()
+                        .fillna(0.01)
+                    )
                     target_h_wide = fwd_ret / (vol * np.sqrt(h) + 1e-9)
                     target_h = (
                         target_h_wide.rank(axis=1, pct=True)
@@ -351,9 +358,9 @@ class GPAlphaMiner:
                 
                 lgbm_h = LGBMRegressor(
                     boosting_type="gbdt", objective="huber", n_estimators=300,
-                    learning_rate=0.03, num_leaves=24, max_depth=5,
+                    learning_rate=0.03, num_leaves=31, max_depth=6,
                     min_child_samples=70, subsample=0.7, colsample_bytree=0.7,
-                    reg_alpha=1.2, reg_lambda=1.2, extra_trees=True,
+                    reg_alpha=1.2, reg_lambda=1.2,
                     n_jobs=self.n_jobs, random_state=42,
                 )
                 lgbm_h.fit(
@@ -362,16 +369,34 @@ class GPAlphaMiner:
                     callbacks=[lgb.early_stopping(stopping_rounds=20, verbose=False)],
                 )
                 
-                pred_h = lgbm_h.predict(x_clean)
+                # --- CatBoost Ensemble (Phase D) ---
+                cb_h = CatBoostRegressor(
+                    iterations=300, learning_rate=0.03, depth=5,
+                    loss_function="Huber:delta=1.35", eval_metric="RMSE",
+                    random_seed=42, verbose=0, od_type="Iter", od_wait=20,
+                    allow_writing_files=False
+                )
+                cb_h.fit(
+                    x_clean[tr_idx], y_h[tr_idx], sample_weight=sw_h[tr_idx],
+                    eval_set=(x_clean[val_idx], y_h[val_idx]),
+                    use_best_model=True
+                )
+                
+                # Blend: 0.6 * LGBM + 0.4 * CatBoost
+                pred_h = 0.6 * lgbm_h.predict(x_clean) + 0.4 * cb_h.predict(x_clean)
+                
                 is_mask = (sw_h > 0) & (np.arange(len(sw_h)) < len(sw_h) * 0.8)
                 if is_mask.sum() > 50:
                     ic_h, _ = spearmanr(pred_h[is_mask], y_h[is_mask])
                 else:
                     ic_h = 0.0
                 
-                horizon_ics.append(max(0.001, ic_h))
-                ensemble_preds += pred_h * max(0.001, ic_h)
-                _logger.info(" [Phase C] Horizon h=%d: IS Rank-IC = %.4f", h, ic_h)
+                _logger.info(" [Phase D] Horizon h=%d: Blended IS Rank-IC = %.4f", h, ic_h)
+                if ic_h <= 0.0:
+                    _logger.info(" [Phase D] Horizon h=%d skipped (non-positive IC)", h)
+                    continue
+                horizon_ics.append(ic_h)
+                ensemble_preds += pred_h * ic_h
 
             if sum(horizon_ics) > 0:
                 out_pred = ensemble_preds / sum(horizon_ics)
