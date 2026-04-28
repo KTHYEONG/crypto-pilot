@@ -19,7 +19,6 @@ import numpy as np
 import pandas as pd
 from sklearn.calibration import IsotonicRegression
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import f1_score
 
 
 def _uniq_weights_binary(y: np.ndarray, horizon: int) -> np.ndarray:
@@ -34,12 +33,12 @@ def _uniq_weights_binary(y: np.ndarray, horizon: int) -> np.ndarray:
 
 @dataclass
 class MetaLabeler:
-    """
-    Directional meta-labeling model using LightGBM and probability calibration.
+    """Directional meta-labeling model using LightGBM and probability calibration.
     
     Trains independent classifiers for Long and Short directions, providing
     calibrated probabilities for trade execution.
     """
+
     n_estimators: int = 500
     max_depth: int = 4
     learning_rate: float = 0.05
@@ -66,8 +65,7 @@ class MetaLabeler:
         n: int,
         vertical_barrier_bars: int,
     ) -> tuple[int, int, int]:
-        """
-        Calculate (train_end, calib_split, calib_start) row counts for time-ordered split.
+        """Calculate (train_end, calib_split, calib_start) row counts for time-ordered split.
 
         Labels must not leak across [train_end, calib_start).
         """
@@ -159,12 +157,19 @@ class MetaLabeler:
 
         threshold = 0.5
         if self.threshold_mode == "f1_optimal" and len(y_calib) >= 10:
-            best_f1 = 0.0
+            # Phase B-3: Expected Utility Optimization (Asymmetric FP Penalty)
+            best_score = float("inf")
             for thr in np.arange(0.20, 0.81, 0.05):
                 preds = (calibrated >= thr).astype(int)
-                f1 = float(f1_score(y_calib_np, preds, zero_division=0.0))
-                if f1 > best_f1:
-                    best_f1, threshold = f1, float(thr)
+                # tp: true positive, fp: false positive, fn: false negative
+                tp = float(np.sum((preds == 1) & (y_calib_np == 1)))
+                fp = float(np.sum((preds == 1) & (y_calib_np == 0)))
+                fn = float(np.sum((preds == 0) & (y_calib_np == 1)))
+                
+                # Expected utility: Wrong entry (FP) is penalized 2x more than missed entry (FN)
+                score = -(tp - 2.0 * fp - fn)
+                if score < best_score:
+                    best_score, threshold = score, float(thr)
 
         return lgb_model, iso, platt, threshold
 
@@ -182,7 +187,6 @@ class MetaLabeler:
             is_end_idx: IS/OOS split index.
 
         """
-
         X_is = X.iloc[:is_end_idx].replace([np.inf, -np.inf], np.nan).fillna(0.0)
         y_is = y.iloc[:is_end_idx].astype(np.float64)
 

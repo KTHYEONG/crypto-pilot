@@ -548,10 +548,19 @@ class HMMStateInferrer:
                 win_end = max(1, t - 1)
                 x_seq = X_raw[win_start : win_end, :]
                 x_seq_s = _robust_transform(x_seq, med, mad)
-                p_seq = model.predict_proba(x_seq_s)
-                last_p_raw = p_seq[-1]
-                ps = _raw_posterior_to_semantic(last_p_raw, state_to_label)
-                probs_sem[t - 1, :] = ps
+                
+                # 개선: predict_step 범위(최대 24bar) 전체에 posterior 적용
+                p_seq = model.predict_proba(x_seq_s)   # shape: (window_size, n_states)
+                
+                # 최근 predict_step bars만 소급 적용
+                apply_start = max(0, t - self.predict_step)
+                apply_end = t  # exclusive upper bound
+                seq_slice = p_seq[-(apply_end - apply_start):]  # 최근 predict_step bars
+                
+                for bar_offset, raw_p in enumerate(seq_slice):
+                    bar_idx = apply_start + bar_offset
+                    if 0 <= bar_idx < n:
+                        probs_sem[bar_idx, :] = _raw_posterior_to_semantic(raw_p, state_to_label)
             except Exception as e:
                 _logger.debug("HMM systemic inference failed at t=%d: %s", t, e)
 
