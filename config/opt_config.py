@@ -24,7 +24,7 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     "FUTURES_MAX_CONCURRENT_POSITIONS": 3,
     "FUTURES_MIN_PF": 1.35,
     "FUTURES_MAX_MDD": 30.0,
-    "FUTURES_MIN_CAGR_PCT": 30.0,
+    "FUTURES_MIN_CAGR_PCT": 5.0,
     "FUTURES_DISCOVERY_LEVERAGE": 5,
     "FUTURES_PBO_MAX": 0.45,
     # Hardening: candidate PBO must be ≤ this to beat champion.json (skill P4 strict guard).

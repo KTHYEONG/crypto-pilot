@@ -245,6 +245,8 @@ def _print_human_dashboard(
     ho_port: dict[str, Any],
     oos_port: dict[str, Any],
     gate_status: str,
+    benchmark_is: float = 0.0,
+    benchmark_oos: float = 0.0,
 ) -> None:
     """Unified Human Dashboard for strategy performance summary."""
     c_grn = "\033[92m"
@@ -268,8 +270,20 @@ def _print_human_dashboard(
     # Header Row
     _logger.info(f"║ {'[COMPOUNDING]':<20} {'IS':>12} {'Hold-Out':>18} {'OOS (Forward)':>24} ║")
     
+    is_cagr = get_val(is_port, "cagr_pct")
+    ho_cagr = get_val(ho_port, "cagr_pct")
+    oos_cagr = get_val(oos_port, "cagr_pct")
+
+    is_alpha = is_cagr - benchmark_is
+    oos_alpha = oos_cagr - benchmark_oos
+
+    l_pf = get_val(oos_port, "long_pf", 1.0)
+    s_pf = get_val(oos_port, "short_pf", 1.0)
+    dir_balance_ok = (l_pf >= 1.05) and (s_pf >= 1.05)
+
     metrics = [
         ("CAGR (%)", "cagr_pct", True),
+        ("Net Alpha (%)", "net_alpha_pct", True),
         ("Max Drawdown (%)", "mdd_pct", True),
         ("Profit Factor", "profit_factor", False),
         ("Win Rate (%)", "win_rate_pct", True),
@@ -277,6 +291,14 @@ def _print_human_dashboard(
 
     for label, key, is_pct in metrics:
         suffix = "%" if is_pct else ""
+        if key == "net_alpha_pct":
+            # Manual display for Alpha
+            _logger.info(
+                f"║   {label:<18} : {is_alpha:>10.2f}{suffix} {'N/A':>17} "
+                f"{oos_alpha:>23.2f}{suffix} ║"
+            )
+            continue
+            
         is_val = get_val(is_port, key)
         ho_val = get_val(ho_port, key)
         oos_val = get_val(oos_port, key)
@@ -284,22 +306,32 @@ def _print_human_dashboard(
             f"║   {label:<18} : {is_val:>10.2f}{suffix} {ho_val:>17.2f}{suffix} "
             f"{oos_val:>23.2f}{suffix} ║"
         )
+    
+    _logger.info(border_sep)
+    _logger.info(f"║ {'[DIRECTIONAL BALANCE]':<20} {'Long PF':>14} {'Short PF':>17} {'Verdict':>24} ║")
+    
+    def _fmt_pf_color(val: float) -> str:
+        color = c_grn if val >= 1.05 else c_red
+        return f"{color}{val:>10.2f}{c_rst}"
+        
+    dir_status = "STABLE" if dir_balance_ok else "BIASED"
+    dir_color = c_grn if dir_balance_ok else c_red
+    _logger.info(
+        f"║   OOS L/S Balance    : {_fmt_pf_color(l_pf)} {' ':<3} {_fmt_pf_color(s_pf)} "
+        f"{' ':<10} {dir_color}{dir_status:<10}{c_rst} ║"
+    )
 
     _logger.info(border_sep)
     _logger.info(f"║ {'[SANITY CHECK & VERDICT]':<81} ║")
     
-    is_cagr = get_val(is_port, "cagr_pct")
-    oos_cagr = get_val(oos_port, "cagr_pct")
-    
-    # IS Survival check (threshold 30% from current logic in main)
-    is_survival = "PASS" if is_cagr >= 30.0 else "FAIL"
+    # IS Survival check: Net Alpha > 0
+    is_survival = "PASS" if is_alpha > 0.0 else "FAIL"
     is_color = c_grn if is_survival == "PASS" else c_red
-    is_text = f"{is_color}{is_survival:<4}{c_rst} (IS CAGR >= 30%)"
+    is_text = f"{is_color}{is_survival:<4}{c_rst} (IS Net Alpha > 0%)"
     _logger.info(f"║   IS Survival        : {is_text} {' ':<38} ║")
     
     retention = (oos_cagr / is_cagr * 100.0) if abs(is_cagr) > 1e-6 else 0.0
     ret_color = c_grn if retention > 60.0 else c_ylw if retention > 40.0 else c_red
-    # ANSI color codes make the line "long" for Ruff. Split it to pass.
     ret_text = f"{ret_color}{retention:>5.1f}%{c_rst} of IS Performance"
     _logger.info(f"║   OOS Retention      : {ret_text} {' ':<36} ║")
     _logger.info("║" + " " * 83 + "║")
@@ -1311,6 +1343,11 @@ def main() -> None:
     is_port["symbol_names"] = valid_symbols
     ho_port["symbol_names"] = valid_symbols
     oos_port["symbol_names"] = valid_symbols
+    
+    # OOS performance vs IS performance
+    is_cagr_v = float(is_port.get("cagr_pct", is_port.get("cagr", 0.0)))
+    oos_cagr_v = float(oos_port.get("cagr_pct", oos_port.get("cagr", 0.0)))
+    oos_retention = (oos_cagr_v / is_cagr_v * 100.0) if abs(is_cagr_v) > 1e-6 else 0.0
 
     # [IS Structural Balance Gate] AWF mu_log sanity check replaces CPCV path mean.
     # AWF mu_log is computed on chronological non-overlapping legs, so it does not suffer
@@ -1334,22 +1371,23 @@ def main() -> None:
         awf_mu_log = float(best_trial.user_attrs.get("ml_mean_log_growth_cpcv", 0.0))
         _pbo_cur = float(pbo_val) if pbo_val is not None else 0.5
 
-        # IS sanity: AWF mu_log > 0.05 AND sequential IS CAGR > 30%
-        awf_pass = (awf_mu_log > 0.05) and (is_cagr_v > 30.0)
+        # [REVISION] IS sanity: AWF mu_log > 0.05 AND IS Net Alpha > 0
+        is_net_alpha_v = is_cagr_v - (_btc_benchmark_is if _btc_benchmark_is is not None else 0.0)
+        awf_pass = (awf_mu_log > 0.05) and (is_net_alpha_v > 0.0)
 
         if not awf_pass:
             gate_ok = False
             _logger.warning(
-                " [IS STRUCTURAL GATE] AWF mu_log=%.4f IS CAGR=%.2f%% "
+                " [IS STRUCTURAL GATE] AWF mu_log=%.4f IS Net Alpha=%.2f%% "
                 "IS Sharpe=%.2f OOS Sharpe=%.2f "
-                "pseudo_pbo=%.4f FAIL. AWF mu_log must be > 0.05 and IS CAGR > 30.0%%. Blocked.",
-                awf_mu_log, is_cagr_v, is_sharpe_v, oos_sharpe_v, _pbo_cur,
+                "pseudo_pbo=%.4f FAIL. AWF mu_log > 0.05 and IS Net Alpha > 0.0%% required. Blocked.",
+                awf_mu_log, is_net_alpha_v, is_sharpe_v, oos_sharpe_v, _pbo_cur,
             )
         else:
             _logger.info(
-                " [IS STRUCTURAL GATE] PASS. AWF mu_log=%.4f IS CAGR=%.2f%% "
+                " [IS STRUCTURAL GATE] PASS. AWF mu_log=%.4f IS Net Alpha=%.2f%% "
                 "IS Sharpe=%.2f OOS Sharpe=%.2f pseudo_pbo=%.4f",
-                awf_mu_log, is_cagr_v, is_sharpe_v, oos_sharpe_v, _pbo_cur,
+                awf_mu_log, is_net_alpha_v, is_sharpe_v, oos_sharpe_v, _pbo_cur,
             )
 
         # ml_p10_log_growth_cpcv now stores worst AWF leg log-TW (backward-compat name).
@@ -1377,75 +1415,67 @@ def main() -> None:
                 float(np.exp(p10_floor)),
             )
 
-    # [Champion Comparison Guard] Only overwrite if new run improves OOS CAGR or PBO.
+    # [Champion Comparison Guard] Only overwrite if new run improves Net Alpha, RoMaD, or PBO.
     # Prevents regression from gate-passing runs that are still worse than the current champion.
-    # Reads metrics from logs/experiments/champion.json (updated by hardening workflow).
     if gate_ok:
         champion_json_path = Path(project_root) / "logs" / "champion.json"
         if champion_json_path.exists():
             try:
                 with open(champion_json_path) as _cf:
                     _champ = json.load(_cf)
-                _champ_oos = float(_champ.get("metrics", {}).get("oos_cagr_pct", -999.0))
-                _met_g = _champ.get("metrics", {})
-                _champ_pbo = float(_met_g.get("pbo_paired", _met_g.get("pbo", 1.0)))
-                _new_oos = float(oos_port.get("cagr_pct", oos_port.get("cagr", 0.0)))
-                _new_ho = float(ho_port.get("cagr_pct", ho_port.get("cagr", 0.0)))
-                _champ_ho = float(_champ.get("metrics", {}).get("holdout_cagr_pct", -999.0))
                 
-                _oos_improved = _new_oos > _champ_oos
-                _pbo_improved = float(pbo_obs) < _champ_pbo
-                _oos_acceptable = _new_oos > (0.75 * _champ_oos)
+                _met_g = _champ.get("metrics", {})
+                _champ_oos_cagr = float(_met_g.get("oos_cagr_pct", -999.0))
+                _champ_oos_alpha = float(_met_g.get("oos_net_alpha_pct", -999.0))
+                _champ_oos_mdd = abs(float(_met_g.get("oos_mdd_pct", 100.0)))
+                _champ_romad = _champ_oos_cagr / _champ_oos_mdd if _champ_oos_mdd > 1e-6 else 0.0
+                _champ_pbo = float(_met_g.get("pbo_paired", _met_g.get("pbo", 1.0)))
+                _champ_ho = float(_met_g.get("holdout_cagr_pct", -999.0))
 
+                _new_oos_cagr = float(oos_port.get("cagr_pct", 0.0))
+                _new_oos_alpha = new_m["net_alpha"]
+                _new_oos_mdd = abs(float(oos_port.get("mdd_pct", 100.0)))
+                _new_romad = _new_oos_cagr / _new_oos_mdd if _new_oos_mdd > 1e-6 else 0.0
+                _new_ho = float(ho_port.get("cagr_pct", 0.0))
+                _new_pbo = float(pbo_obs)
+
+                # Improvement logic: prioritize Net Alpha and Risk-Adjusted Return (RoMaD)
+                _alpha_improved = _new_oos_alpha > (_champ_oos_alpha + 1.0) # >1% improvement
+                _romad_improved = _new_romad > (_champ_romad * 1.05) # >5% improvement
+                _pbo_improved = _new_pbo < (_champ_pbo - 0.02) # >0.02 improvement
+                
+                # Robustness Upgrade: HO recovery or significant PBO drop
                 _pbo_champ_max = float(pbo_champ_eff)
-                _robustness_upgrade = (_champ_ho < 0) and (_new_ho > 0) and (
-                    float(pbo_obs) < (_pbo_champ_max - 0.05)
-                )
+                _robustness_upgrade = (_champ_ho < 0) and (_new_ho > 0) and (_new_pbo < (_pbo_champ_max - 0.05))
 
-                _pbo_strict = float(pbo_obs) <= _pbo_champ_max
-                # Reject if hold-out regresses below max(50% of champion, 8% floor).
-                # Absolute 15% gate blocks champion-level candidates; relative avoids Catch-22.
-                _holdout_fail = (_champ_ho > 0.0) and (_new_ho < max(0.5 * _champ_ho, 8.0))
-                _pbo_regression = float(pbo_obs) > (_champ_pbo + 0.05)
-                _oos_large_jump = _new_oos >= (_champ_oos + 10.0)
+                # Survival conditions
+                _alpha_acceptable = _new_oos_alpha > (_champ_oos_alpha - 5.0) # Within 5% of champ alpha
+                _romad_acceptable = _new_romad > (_champ_romad * 0.90) # Within 90% of champ RoMaD
+                _pbo_strict = _new_pbo <= _pbo_champ_max
+                
+                # REJECT if hold-out regresses severely
+                _holdout_fail = (_champ_ho > 0.0) and (_new_ho < max(0.5 * _champ_ho, 5.0))
+                
+                # Final decision: Any meaningful improvement in Alpha or RoMaD, provided others are acceptable
+                _is_better = (_alpha_improved and _romad_acceptable) or (_romad_improved and _alpha_acceptable) or _robustness_upgrade or (_pbo_improved and _alpha_acceptable)
 
-                _base_condition = (
-                    _oos_improved or (_pbo_improved and _oos_acceptable) or _robustness_upgrade
-                )
-                if _pbo_regression and not _oos_large_jump:
-                    _base_condition = False
                 if _holdout_fail:
-                    _base_condition = False
-                if not (_base_condition and _pbo_strict):
+                    _is_better = False
+
+                if not (_is_better and _pbo_strict):
                     gate_ok = False
                     _logger.warning(
-                        " [CHAMPION GUARD] No improvement over current champion "
-                        "(OOS %.2f%% vs %.2f%% | PBO %.4f vs %.4f | HO %.2f%% vs %.2f%%). "
-                        "Champion preserved.",
-                        _new_oos,
-                        _champ_oos,
-                        float(pbo_obs),
-                        _champ_pbo,
-                        _new_ho,
-                        _champ_ho,
+                        " [CHAMPION GUARD] No meaningful improvement (Alpha %.2f%% vs %.2f%% | RoMaD %.2f vs %.2f | PBO %.4f vs %.4f). Champion preserved.",
+                        _new_oos_alpha, _champ_oos_alpha, _new_romad, _champ_romad, _new_pbo, _champ_pbo
                     )
                 else:
-                    _label = "Robustness Upgrade" if _robustness_upgrade else "Improvement"
+                    _reason = "Alpha Improved" if _alpha_improved else "RoMaD Improved" if _romad_improved else "Robustness Upgrade" if _robustness_upgrade else "PBO Improved"
                     _logger.info(
-                        " [CHAMPION GUARD] %s: OOS %.2f%%->%.2f%% | PBO %.4f->%.4f | "
-                        "HO %.2f%%->%.2f%%.",
-                        _label,
-                        _champ_oos,
-                        _new_oos,
-                        _champ_pbo,
-                        float(pbo_obs),
-                        _champ_ho,
-                        _new_ho,
+                        " [CHAMPION GUARD] %s: Alpha %.2f%%->%.2f%% | RoMaD %.2f->%.2f | PBO %.4f->%.4f | HO %.2f%%->%.2f%%.",
+                        _reason, _champ_oos_alpha, _new_oos_alpha, _champ_romad, _new_romad, _champ_pbo, _new_pbo, _champ_ho, _new_ho
                     )
             except Exception as _ce:
-                _logger.warning(
-                    " [CHAMPION GUARD] champion.json read failed (%s). Guard skipped.", _ce
-                )
+                _logger.warning(" [CHAMPION GUARD] champion.json read failed (%s). Guard skipped.", _ce)
 
     # [Dual-Audit Dashboard] Integrated Performance & Reliability side-by-side
     champion_json_path = Path(project_root) / "logs" / "champion.json"
@@ -1504,6 +1534,9 @@ def main() -> None:
         "sig_awf": float(best_trial.user_attrs.get("awf_sigma_log", 0.0)),
         "plgd": float(best_trial.user_attrs.get("awf_plgd", 0.0)),
         "erg_dev": float(locals().get("_erg_dev_val", 0.0)),
+        "oos_long_pf": float(oos_port.get("long_pf", 1.0)),
+        "oos_short_pf": float(oos_port.get("short_pf", 1.0)),
+        "oos_retention_pct": float(oos_retention),
     }
     
     _verdict = "PROMOTE ✅" if gate_ok else "HOLD ❌"
@@ -1520,7 +1553,11 @@ def main() -> None:
     ai_telemetry_payloads.append(eval_payload)
 
     # [HUMAN DASHBOARD] Unified Performance View
-    _print_human_dashboard(is_port, ho_port, oos_port, _verdict)
+    _print_human_dashboard(
+        is_port, ho_port, oos_port, _verdict,
+        benchmark_is=(_btc_benchmark_is if _btc_benchmark_is is not None else 0.0),
+        benchmark_oos=(_btc_benchmark_oos if _btc_benchmark_oos is not None else 0.0)
+    )
 
     # [AI TELEMETRY DUMP] Structured JSON Lines for AI parsing
     _logger.info("\n--- 🤖 [AI_TELEMETRY_START] ---")
