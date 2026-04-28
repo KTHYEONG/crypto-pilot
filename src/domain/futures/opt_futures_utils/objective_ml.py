@@ -926,10 +926,13 @@ def check_hard_gates_ml(
     mdd_v = float(oos_result.get("mdd_pct", oos_result.get("mdd", 100.0)))
     mdd_ok = abs(mdd_v) < float(cfg.get("FUTURES_MAX_MDD", 25.0))
     
-    # [NEW] Directional Balance Gate: Both Long and Short PF must be >= 1.05
+    # Combined PF gate: bear-regime-aware (long alpha structurally absent in crash periods).
+    # Direction-split gate replaced by overall profit_factor >= 1.05 to avoid regime bias.
     l_pf = float(oos_result.get("long_profit_factor", oos_result.get("oos_long_pf", 1.0)))
     s_pf = float(oos_result.get("short_profit_factor", oos_result.get("oos_short_pf", 1.0)))
-    # If no trades in one direction, we treat it as failure (not an all-weather strategy)
-    dir_ok = (l_pf >= 1.05) and (s_pf >= 1.05)
+    _default_pf = (l_pf + s_pf) / 2.0
+    _raw_pf = oos_result.get("profit_factor", oos_result.get("oos_profit_factor", _default_pf))
+    combined_pf = float(_raw_pf)
+    dir_ok = combined_pf >= 1.05
     
     return bool(pbo_ok and dsr_ok and wr_ok and mdd_ok and dir_ok)

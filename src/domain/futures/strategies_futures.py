@@ -67,6 +67,18 @@ class UltimateStrategy(PipelineStrategyBase):
         reg_engine = FUTURES_REGIME_REGISTRY.get(rt_key) or FUTURES_REGIME_REGISTRY["EMA_ATR"]
         long_mult, short_mult = reg_engine.compute_long_short_mult(df, self.params)
 
+        # [Structural Long-Bias Fix] P3: Directional Balance (SKILL.md)
+        # Aggressively penalize LONG signals in Bear/Crisis HMM states to improve Long PF.
+        if "hmm_prob_bear_trend" in df.columns:
+            p_bear = df["hmm_prob_bear_trend"].to_numpy(dtype=np.float64)
+            # Bear Trend: Reduce LONG strength by 50% if prob > 35%
+            long_mult = np.where(p_bear > 0.35, long_mult * 0.5, long_mult)
+        
+        if "hmm_prob_crisis" in df.columns:
+            p_crisis = df["hmm_prob_crisis"].to_numpy(dtype=np.float64)
+            # Crisis: Reduce LONG strength by 80% if prob > 25%
+            long_mult = np.where(p_crisis > 0.25, long_mult * 0.2, long_mult)
+
         # [Step 3] Dynamic Regime Weights (Chameleon Factor)
         # If discovery phase provided weights for each regime, apply them here
         reg_weights = self.params.get("REGIME_WEIGHTS")
