@@ -1,10 +1,8 @@
-"""
-Rolling profit-factor Kelly on signed bar returns; funding subtracted from pct change.
-"""
+"""Rolling profit-factor Kelly on signed bar returns."""
 
 from __future__ import annotations
 
-from typing import Any, ClassVar, Dict
+from typing import Any, ClassVar
 
 import numpy as np
 import pandas as pd
@@ -14,8 +12,10 @@ from src.domain.futures.sizing.registry import register_futures_sizing
 
 @register_futures_sizing
 class ProfitFactorKellyFuturesSizing:
+    """Rolling profit-factor Kelly sizing with regime-conditional overrides."""
+
     name: ClassVar[str] = "profit_factor_kelly"
-    param_space: ClassVar[Dict[str, Any]] = {
+    param_space: ClassVar[dict[str, Any]] = {
         "PFK_WINDOW": {"type": "int", "low": 30, "high": 120, "step": 10},
         "PFK_MIN_F": {"type": "float", "low": 0.05, "high": 0.30, "step": 0.05},
         "KELLY_FRACTION": {"type": "float", "low": 0.2, "high": 0.8, "step": 0.1},
@@ -24,7 +24,8 @@ class ProfitFactorKellyFuturesSizing:
         "STRESS_FR_Z": {"type": "float", "low": 2.0, "high": 3.5, "step": 0.5},
     }
 
-    def compute(self, df: pd.DataFrame, params: Dict[str, Any]) -> np.ndarray:
+    def compute(self, df: pd.DataFrame, params: dict[str, Any]) -> np.ndarray:
+        """Compute Kelly-based position sizes with HMM-based regime overrides."""
         close = df["close"].to_numpy(dtype=np.float64)
         n = len(close)
         window = int(max(5, params.get("PFK_WINDOW", 60)))
@@ -99,6 +100,27 @@ class ProfitFactorKellyFuturesSizing:
         
         # Apply Kelly fraction and Regime Penalty
         f = f_star * kelly_frac * regime_penalty
+
+        # [NEW] Regime-Conditional Sizing (HMM Override)
+        # Fixes long-bias by aggressively reducing exposure in high-risk HMM states
+        hmm_cols = [
+            "hmm_prob_bull_trend", "hmm_prob_bear_trend", "hmm_prob_chop", "hmm_prob_crisis"
+        ]
+        if all(col in df.columns for col in hmm_cols):
+            p_bear = df["hmm_prob_bear_trend"].to_numpy(dtype=np.float64)
+            p_crisis = df["hmm_prob_crisis"].to_numpy(dtype=np.float64)
+            p_chop = df["hmm_prob_chop"].to_numpy(dtype=np.float64)
+
+            # 1. Bear Trend Override: Cap Long (0.5x), Boost Short (1.5x)
+            f = np.where((td > 0) & (p_bear > 0.25), f * 0.5, f)
+            f = np.where((td < 0) & (p_bear > 0.25), f * 1.5, f)
+
+            # 2. Crisis Override: Aggressive cap (Long 0.3x, Short 0.6x)
+            f = np.where((td > 0) & (p_crisis > 0.3), f * 0.3, f)
+            f = np.where((td < 0) & (p_crisis > 0.3), f * 0.6, f)
+
+            # 3. Chop Override: Defensive sizing (0.7x for both)
+            f = np.where(p_chop > 0.4, f * 0.7, f)
         
         low_data = n_fin_a < float(min_obs)
         f = np.where(low_data, min_f, f)

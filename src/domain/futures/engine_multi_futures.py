@@ -520,6 +520,17 @@ def backtest_portfolio_numba(
                     gk_use = gk0 * hmm_mod_short[prev_i, s]
                 if not np.isfinite(gk_use) or gk_use < 0.0:
                     gk_use = 0.0
+                # [Asymmetric Stop Tightening] P3: Directional Balance
+                # Tighten LONG stop during Crisis/Bear regimes to protect capital.
+                stop_mult = l_atr_mult if p_side == 1 else s_atr_mult
+                if p_side == 1:
+                    # If crisis probability > 20%, tighten stop by 40%
+                    if hmm_crisis[prev_i, s] > 0.2:
+                        stop_mult *= 0.6
+                    # If HMM modulator is weak (< 0.7), tighten stop by 20%
+                    elif hmm_mod_long[prev_i, s] < 0.7:
+                        stop_mult *= 0.8
+
                 target_qty = calculate_position_size(
                     fill_p,
                     atr_p,
@@ -541,7 +552,7 @@ def backtest_portfolio_numba(
                         float(p_side),
                         fill_p,
                         target_qty,
-                        atr_2d[prev_i, s] * (l_atr_mult if p_side == 1 else s_atr_mult),
+                        atr_2d[prev_i, s] * stop_mult,
                     ]
                     n_cands += 1
 
