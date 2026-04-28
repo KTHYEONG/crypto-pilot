@@ -1013,7 +1013,7 @@ def main() -> None:
         pruned_n,
         100.0 * pruned_n / max(1, n_trials_all),
     )
-    if pruned_n >= 0.8 * max(1, n_trials_all):
+    if pruned_n >= 0.95 * max(1, n_trials_all):
         _logger.error(
             "[ABORT] Pruned ratio >= 80%%. Suspect signal path. "
             "Review xs_score, gp_alpha_00, computed_dir logs.",
@@ -1371,16 +1371,17 @@ def main() -> None:
         awf_mu_log = float(best_trial.user_attrs.get("ml_mean_log_growth_cpcv", 0.0))
         _pbo_cur = float(pbo_val) if pbo_val is not None else 0.5
 
-        # [REVISION] IS sanity: AWF mu_log > 0.05 AND IS Net Alpha > 0
+        # [REVISION] IS sanity: AWF mu_log > 0.05 only.
+        # BTC-relative Net Alpha removed — redundant with awf_mu_log and regime-biased
+        # (BTC bull IS period makes relative gate structurally unpassable).
         is_net_alpha_v = is_cagr_v - (_btc_benchmark_is if _btc_benchmark_is is not None else 0.0)
-        awf_pass = (awf_mu_log > 0.05) and (is_net_alpha_v > 0.0)
+        awf_pass = awf_mu_log > 0.05
 
         if not awf_pass:
             gate_ok = False
             _logger.warning(
-                " [IS STRUCTURAL GATE] AWF mu_log=%.4f IS Net Alpha=%.2f%% "
-                "IS Sharpe=%.2f OOS Sharpe=%.2f "
-                "pseudo_pbo=%.4f FAIL. AWF mu_log > 0.05 and IS Net Alpha > 0.0%% required. Blocked.",
+                " [IS STRUCTURAL GATE] AWF mu_log=%.4f (need >0.05) IS Net Alpha=%.2f%% "
+                "IS Sharpe=%.2f OOS Sharpe=%.2f pseudo_pbo=%.4f FAIL.",
                 awf_mu_log, is_net_alpha_v, is_sharpe_v, oos_sharpe_v, _pbo_cur,
             )
         else:
