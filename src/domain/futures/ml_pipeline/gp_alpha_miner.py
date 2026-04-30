@@ -118,9 +118,14 @@ def _resolve_gp_feature_columns(panel_df: pd.DataFrame) -> list[str]:
 
     base_features = set()
     if cs_names:
-        extras = [c for c in ("cross_vol_rank", "cross_ret_24h_rank") if c in panel_df.columns]
+        # T2: "market_breadth" 제거 — feature_engineering.py 미구현 zombie feature
+        extras = [
+            c for c in ("cross_vol_rank", "cross_ret_24h_rank")
+            if c in panel_df.columns
+        ]
         base_features = {c for c in cs_names + extras if c not in blocked}
     else:
+        # T2: market_breadth for-loop 제거 — 미구현 feature 참조 차단
         base_features = {
             c for c in panel_df.columns if c not in blocked and not c.startswith("hmm_prob_")
         }
@@ -248,16 +253,16 @@ class GPAlphaMiner:
             horizons = (3, 6, 12, 24)
             feat_cols = _resolve_gp_feature_columns(work_panel)
             template = pd.DataFrame(index=full_grid_index)
-            
+
             # OHLC for multi-horizon target calculation
             ohlc_cols = [c for c in ["close", "open", "high", "low"] if c in work_panel.columns]
             join_cols = [*feat_cols, *ohlc_cols, "target"]
             if "tbm_gp_weight" in work_panel.columns:
                 join_cols = [*feat_cols, *ohlc_cols, "tbm_gp_weight", "target"]
-            
+
             aligned_df = template.join(work_panel[join_cols]).fillna(np.nan)
             x_grid = aligned_df[feat_cols].values
-            
+
             # Base sample weight (non-NaN features)
             base_sw = np.ones(len(aligned_df), dtype=np.float64)
             if "tbm_gp_weight" in aligned_df.columns:
@@ -289,7 +294,7 @@ class GPAlphaMiner:
             # --- MI Audit & MP Denoising (representative target) ---
             y_audit = aligned_df["target"].fillna(0.0).values
             mask_audit = (base_sw > 0) & (~np.isnan(aligned_df["target"]))
-            
+
             if mask_audit.sum() > 100:
                 from sklearn.feature_selection import mutual_info_regression
                 x_fit_audit = x_clean[mask_audit]
@@ -321,7 +326,7 @@ class GPAlphaMiner:
             horizon_ics = []
             close_ser = aligned_df.get("close", pd.Series(np.nan, index=aligned_df.index))
             lgbm_h = None
-            
+
             for h in horizons:
                 # 1. Target Construction for horizon h
                 if "close" in aligned_df.columns:
@@ -344,18 +349,18 @@ class GPAlphaMiner:
                     )
                 else:
                     target_h = aligned_df["target"].values
-                
+
                 y_h = np.where(np.isfinite(target_h), target_h, 0.5)
                 sw_h = base_sw * (~np.isnan(target_h)).astype(np.float64)
                 mask_h = sw_h > 0
-                
+
                 if mask_h.sum() < 200:
                     continue
-                
+
                 mask_idx = np.where(mask_h)[0]
                 val_cutoff = int(len(mask_idx) * 0.80)
                 tr_idx, val_idx = mask_idx[:val_cutoff], mask_idx[val_cutoff:]
-                
+
                 lgbm_h = LGBMRegressor(
                     boosting_type="gbdt", objective="huber", n_estimators=300,
                     learning_rate=0.03, num_leaves=31, max_depth=6,
@@ -368,7 +373,7 @@ class GPAlphaMiner:
                     eval_set=[(x_clean[val_idx], y_h[val_idx])],
                     callbacks=[lgb.early_stopping(stopping_rounds=20, verbose=False)],
                 )
-                
+
                 # --- CatBoost Ensemble (Phase D) ---
                 cb_h = CatBoostRegressor(
                     iterations=300, learning_rate=0.03, depth=5,
@@ -381,16 +386,16 @@ class GPAlphaMiner:
                     eval_set=(x_clean[val_idx], y_h[val_idx]),
                     use_best_model=True
                 )
-                
+
                 # Blend: 0.6 * LGBM + 0.4 * CatBoost
                 pred_h = 0.6 * lgbm_h.predict(x_clean) + 0.4 * cb_h.predict(x_clean)
-                
+
                 is_mask = (sw_h > 0) & (np.arange(len(sw_h)) < len(sw_h) * 0.8)
                 if is_mask.sum() > 50:
                     ic_h, _ = spearmanr(pred_h[is_mask], y_h[is_mask])
                 else:
                     ic_h = 0.0
-                
+
                 _logger.info(" [Phase D] Horizon h=%d: Blended IS Rank-IC = %.4f", h, ic_h)
                 if ic_h <= 0.0:
                     _logger.info(" [Phase D] Horizon h=%d skipped (non-positive IC)", h)
@@ -402,8 +407,8 @@ class GPAlphaMiner:
                 out_pred = ensemble_preds / sum(horizon_ics)
             else:
                 out_pred = np.zeros(len(aligned_df)) + 0.5
-            
-            self._st = lgbm_h 
+
+            self._st = lgbm_h
             cols = [f"gp_alpha_{i:02d}" for i in range(self.n_features_to_select)]
             full_alpha_df = pd.DataFrame(0.5, index=full_grid_index, columns=cols)
             full_alpha_df["gp_alpha_00"] = out_pred

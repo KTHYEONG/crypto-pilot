@@ -677,7 +677,10 @@ def objective_ml_phase_d(trial: optuna.Trial, ctx: MLPhaseDContext) -> float | t
     leg_trade_counts: list[float] = []
     leg_long_counts: list[int] = []
     leg_short_counts: list[int] = []
+    leg_l_pf: list[float] = []
+    leg_s_pf: list[float] = []
     leg_exposures: list[float] = []
+    leg_crisis_mean: list[float] = []
     first_leg_done = False
 
     for leg_idx, leg in enumerate(awf_slices):
@@ -688,6 +691,7 @@ def objective_ml_phase_d(trial: optuna.Trial, ctx: MLPhaseDContext) -> float | t
             leg_mdds.append(100.0)
             leg_trade_counts.append(0.0)
             leg_exposures.append(0.0)
+            leg_crisis_mean.append(0.0)
             continue
 
         zkill, zfund, lev_leg = _cached_kill_fund_lev(aligned, params)
@@ -724,6 +728,34 @@ def objective_ml_phase_d(trial: optuna.Trial, ctx: MLPhaseDContext) -> float | t
             b_exposure = holding_bars / float(b_bars * n_syms_ctx)
             n_long = int(np.sum(b_trades_raw[:, 3] == 1.0))
             n_short = int(np.sum(b_trades_raw[:, 3] == -1.0))
+
+        if n_tr > 0 and b_trades_raw.size > 0:
+            _pnl_arr = b_trades_raw[:, 6].astype(np.float64, copy=False)
+            _dir_arr = b_trades_raw[:, 3]
+            _l_pnl = _pnl_arr[_dir_arr == 1.0]
+            _s_pnl = _pnl_arr[_dir_arr == -1.0]
+            _l_win = float(np.sum(_l_pnl[_l_pnl > 0.0]))
+            _l_loss = float(np.sum(np.abs(_l_pnl[_l_pnl < 0.0])))
+            _s_win = float(np.sum(_s_pnl[_s_pnl > 0.0]))
+            _s_loss = float(np.sum(np.abs(_s_pnl[_s_pnl < 0.0])))
+            _lpf = _l_win / max(_l_loss, 1e-9) if _l_loss > 0 else (1.5 if _l_win > 0 else 1.0)
+            _spf = _s_win / max(_s_loss, 1e-9) if _s_loss > 0 else (1.5 if _s_win > 0 else 1.0)
+        else:
+            _lpf, _spf = 1.0, 1.0
+        leg_l_pf.append(_lpf)
+        leg_s_pf.append(_spf)
+
+        _hy_arr = aligned.get("hmm_prob_crisis") if aligned else None
+        if _hy_arr is not None:
+            try:
+                _hy_np = np.asarray(_hy_arr, dtype=np.float64)
+                if _hy_np.ndim > 1:
+                    _hy_np = _hy_np[:, 0]
+                leg_crisis_mean.append(float(np.nanmean(_hy_np)))
+            except Exception:
+                leg_crisis_mean.append(0.0)
+        else:
+            leg_crisis_mean.append(0.0)
 
         leg_log_tw.append(log_ret)
         leg_mdds.append(mdd)
@@ -789,12 +821,43 @@ def objective_ml_phase_d(trial: optuna.Trial, ctx: MLPhaseDContext) -> float | t
 
     exposure_floor_penalty = max(0.0, 0.05 - avg_exposure) / 0.05 * 1.0
 
+    # Calculate directional PF for penalty
+    l_pf_agg, s_pf_agg = 1.0, 1.0
+    if all_trades.size > 0:
+        pnl_arr = all_trades[:, 6].astype(np.float64, copy=False)
+        dir_arr = all_trades[:, 3]
+        l_mask = dir_arr == 1.0
+        s_mask = dir_arr == -1.0
+        
+        l_pnl = pnl_arr[l_mask]
+        l_win = float(np.sum(l_pnl[l_pnl > 0.0]))
+        l_loss = float(np.sum(np.abs(l_pnl[l_pnl < 0.0])))
+        l_pf_agg = l_win / max(l_loss, 1e-9) if l_loss > 0 else 1.0
+        
+        s_pnl = pnl_arr[s_mask]
+        s_win = float(np.sum(s_pnl[s_pnl > 0.0]))
+        s_loss = float(np.sum(np.abs(s_pnl[s_pnl < 0.0])))
+        s_pf_agg = s_win / max(s_loss, 1e-9) if s_loss > 0 else 1.0
+
+    # Directional balance penalty (minor nudge — plgd-scale aligned)
+    dir_balance_penalty = 0.0
+    if l_pf_agg < 1.05:
+        dir_balance_penalty += (1.05 - l_pf_agg) * 0.1
+    if s_pf_agg < 1.05:
+        dir_balance_penalty += (1.05 - s_pf_agg) * 0.1
+
     # Fewer-than-k-valid-legs penalty
     n_valid_legs = int(np.sum(leg_arr > -5.0))
     pen = 0.5 * max(0, 3 - n_valid_legs) / 3.0
 
     if leg_arr.size < 2 or dsr_awf < 0.0:
-        obj = float(1e9 + pen + 3.0 * trade_shortfall + exposure_floor_penalty)
+        obj = float(
+            1e9
+            + pen
+            + 3.0 * trade_shortfall
+            + exposure_floor_penalty
+            + dir_balance_penalty
+        )
     else:
         # Minimize negative PLGD + auxiliary penalties.
         # path_consistency_penalty = 0.0 (see above). is_penalty removed.
@@ -805,10 +868,18 @@ def objective_ml_phase_d(trial: optuna.Trial, ctx: MLPhaseDContext) -> float | t
             + path_consistency_penalty
             + ev_cost_penalty
             + exposure_floor_penalty
+            + dir_balance_penalty
         )
 
     # --- User attrs (backward-compat names preserved for downstream gate logic) ---
     trial.set_user_attr("cpcv_path_oos_log_tw", [float(x) for x in leg_log_tw])
+    trial.set_user_attr("n_negative_legs", int(np.sum(leg_arr < 0.0)))
+    trial.set_user_attr("leg_l_pf", [round(x, 4) for x in leg_l_pf])
+    trial.set_user_attr("leg_s_pf", [round(x, 4) for x in leg_s_pf])
+    trial.set_user_attr("leg_long_counts", leg_long_counts)
+    trial.set_user_attr("leg_short_counts", leg_short_counts)
+    trial.set_user_attr("leg_log_tw_list", [round(x, 4) for x in leg_log_tw])
+    trial.set_user_attr("leg_crisis_mean", [round(x, 4) for x in leg_crisis_mean])
     trial.set_user_attr("gate1_dsr", dsr_awf)
     trial.set_user_attr("dsr_cpcv", dsr_awf)
     trial.set_user_attr("n_valid_paths", n_valid_legs)
@@ -833,6 +904,7 @@ def objective_ml_phase_d(trial: optuna.Trial, ctx: MLPhaseDContext) -> float | t
     trial.set_user_attr("awf_plgd", plgd)
     trial.set_user_attr("awf_mu_log", mu_log)
     trial.set_user_attr("awf_sigma_log", sigma_log)
+    trial.set_user_attr("dir_balance_penalty", dir_balance_penalty)
 
     if OPT_FUTURES_CONFIG.get("FUTURES_ML_GP_NSGA2_ENABLED", False):
         obj1 = float(-plgd + pen + 3.0 * trade_shortfall + exposure_floor_penalty)

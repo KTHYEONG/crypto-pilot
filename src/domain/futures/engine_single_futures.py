@@ -173,8 +173,16 @@ class BacktestEngineFast:
         dd_scaling_threshold = float(self.strategy.params.get("DD_SCALING_THRESHOLD", 0.15))
 
         # --- HMM Regime Columns ---
-        hmm_crisis = df["hmm_prob_crisis"].values if "hmm_prob_crisis" in df.columns else np.zeros(n)
-        hmm_mod_long = df["hmm_modulator_long"].values if "hmm_modulator_long" in df.columns else np.ones(n)
+        hmm_crisis = (
+            df["hmm_prob_crisis"].values if "hmm_prob_crisis" in df.columns else np.zeros(n)
+        )
+        # T3: Long modulator floor — bear_trend regime suppresses hmm_modulator_long to ~0.61,
+        # causing structural long sizing degradation. Apply floor=0.70 to prevent full suppression
+        # while keeping bull-regime behavior unchanged (modulator > 0.70 is unaffected).
+        _raw_mod_long = (
+            df["hmm_modulator_long"].values if "hmm_modulator_long" in df.columns else np.ones(n)
+        )
+        hmm_mod_long = np.maximum(_raw_mod_long, 0.70)
 
         trades, final_balance, equity_curve, funding_paid_total = backtest_loop_numba(
             close,
@@ -413,7 +421,7 @@ def backtest_loop_numba(
         c_price = close[i]
         c_high = high[i]
         c_low = low[i]
-        
+
         # --- Drawdown-Dependent Risk Scaling ---
         current_dd = (peak_equity - equity_curve[i-1]) / peak_equity if peak_equity > 0 else 0.0
         dd_factor = 1.0
