@@ -90,7 +90,8 @@ class PortfolioBacktestEngineFast:
             hmm_mod_l = np.ones_like(close_2d, dtype=np.float64)
         # T3: Long modulator floor=0.70 — bear_trend hmm_modulator_long ~0.61 구조적 억압 방지.
         # bull regime (modulator > 0.70)은 영향 없음.
-        hmm_mod_l = np.maximum(hmm_mod_l, 0.70)
+        long_mod_floor = float(self.params.get("LONG_MOD_FLOOR", 0.70))
+        hmm_mod_l = np.maximum(hmm_mod_l, long_mod_floor)
         if hmm_mod_s is None or hmm_mod_s.shape != close_2d.shape:
             hmm_mod_s = np.ones_like(close_2d, dtype=np.float64)
 
