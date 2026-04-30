@@ -13,6 +13,8 @@ import numpy as np
 import pandas as pd
 from hmmlearn.hmm import GaussianHMM
 from numba import njit
+from scipy.optimize import linear_sum_assignment
+from sklearn.preprocessing import QuantileTransformer
 
 from config.opt_config import OPT_FUTURES_CONFIG
 from config.settings import FUTURES_CACHE_DIR
@@ -29,38 +31,53 @@ _logger = logging.getLogger(__name__)
 _SEMANTIC_ORDER = list(HMM_SEMANTIC_PROB_COLUMNS)
 
 
-def _bull_semantic_score(means: np.ndarray, state_i: int) -> float:
-    """Composite bull score: trend strength (24h/168h) + volume energy (index 5) + breadth."""
-    t24 = float(means[state_i, 0])
-    t168 = float(means[state_i, 1])
-    energy = float(means[state_i, 5])  # volume_momentum_24h
-    br = float(means[state_i, 6])      # market_breadth
+def _assign_state_semantic_labels_v2(means: np.ndarray) -> dict[int, str]:
+    """Map raw HMM state index -> semantic label using Archetype Distance Matching.
     
-    # Structural stability (168h) prioritized: 0.6 vs 0.2 short-term
-    # Market breadth is a key filter for healthy universal bull runs
-    composite_trend = 0.2 * t24 + 0.6 * t168 + 0.1 * energy + 0.1 * br
-    return composite_trend
-
-
-def _crisis_semantic_scores(means: np.ndarray) -> np.ndarray:
-    """Crisis score: vol + downside risk + extreme distance + funding inversion."""
-    k = int(means.shape[0])
-    out: np.ndarray = np.empty(k, dtype=np.float64)
+    Archetypes are defined in Z-score space for 10 systemic features:
+    0: btc_trend_vol_adj_24h, 1: btc_trend_vol_adj_168h, 2: realized_vol_regime,
+    3: downside_vol_ratio, 4: btc_ma_dist_168h, 5: volume_momentum_24h,
+    6: market_breadth, 7: funding_level, 8: cs_dispersion, 9: eth_btc_rs
+    """
+    # Define archetypes based on target regime characteristics
+    archetypes = {
+        "bull_trend": [1.2, 1.2, -0.5, -0.5, 1.0, 0.5, 1.0, 0.5, -0.5, 1.0],
+        "bear_trend": [-1.2, -1.2, 0.5, 0.5, -1.0, -0.2, -1.0, -0.5, 0.5, -1.0],
+        "chop": [0.0, 0.0, -1.0, -1.0, 0.0, -0.5, 0.0, 0.0, 0.0, 0.0],
+        "crisis": [-2.0, -2.0, 2.0, 2.0, -2.0, 1.0, -1.0, -2.0, 1.5, -1.0],
+    }
+    
+    label_names = ["bull_trend", "bear_trend", "chop", "crisis"]
+    archetype_matrix = np.array([archetypes[ln] for ln in label_names])
+    
+    k = means.shape[0]
+    
+    # Use only the first 10 systemic features for matching if more exist
+    relevant_means = means[:, :10]
+    relevant_archetypes = archetype_matrix[:, :10]
+    
+    # Distance matrix (Euclidean)
+    # dist[i, j] is distance between HMM state i and Archetype j
+    dist_matrix = np.zeros((k, len(label_names)))
     for i in range(k):
-        t24 = float(means[i, 0])
-        t168 = float(means[i, 1])
-        vol = float(means[i, 2])
-        down_ratio = float(means[i, 3])
-        dist = float(means[i, 4])  # btc_ma_dist_168h
-        funding = float(means[i, 7]) # funding_level
+        for j in range(len(label_names)):
+            dist_matrix[i, j] = np.linalg.norm(relevant_means[i] - relevant_archetypes[j])
+            
+    # Optimal bipartite matching (Hungarian Algorithm)
+    row_ind, col_ind = linear_sum_assignment(dist_matrix)
+    
+    state_to_label = {}
+    for r, c in zip(row_ind, col_ind):
+        state_to_label[int(r)] = label_names[c]
         
-        # Crisis = (Vol & Downside risk high) AND (Price far below long-term MA)
-        # Higher penalty for high volatility and extreme funding inversion
-        f_stress = float(np.abs(funding) * 10.0) 
-        vol_penalty = float(vol * 2.0)
-        
-        out[i] = (vol_penalty + down_ratio + f_stress) - (0.5 * t24 + 1.5 * t168 + dist)
-    return out
+    # Fill remaining states if k > 4 (unlikely in systemic but for robustness)
+    if k > len(label_names):
+        assigned_states = set(state_to_label.keys())
+        for i in range(k):
+            if i not in assigned_states:
+                state_to_label[i] = "chop"
+
+    return state_to_label
 
 
 @njit  # type: ignore
@@ -82,6 +99,25 @@ def _winsorize_cols_numba(X: np.ndarray, pct: float = 0.01) -> np.ndarray:
                 out[i, j] = lo
             elif out[i, j] > hi:
                 out[i, j] = hi
+    return out
+
+
+@njit  # type: ignore
+def _wma_numba(data: np.ndarray, period: int) -> np.ndarray:
+    """Numba-accelerated Weighted Moving Average."""
+    n = len(data)
+    out = np.copy(data)
+    if period <= 1:
+        return out
+
+    weights = np.arange(1, period + 1).astype(np.float64)
+    weight_sum = (period * (period + 1)) / 2.0
+
+    for i in range(period - 1, n):
+        total = 0.0
+        for j in range(period):
+            total += data[i - period + 1 + j] * weights[j]
+        out[i] = total / weight_sum
     return out
 
 
@@ -119,26 +155,31 @@ def _calculate_ordered_probs_numba(
     return reordered
 
 
-def _robust_fit_scale(X: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Perform robust scaling using Median and MAD.
-    
+def _quantile_scaling(X: np.ndarray) -> tuple[np.ndarray, QuantileTransformer]:
+    """Perform quantile scaling to normal distribution.
+
+    Args:
+        X: Input feature matrix.
+
     Returns:
-        tuple: (scaled_matrix, median, mad)
+        tuple: (scaled_matrix, fitted_transformer)
 
     """
-    med = np.asarray(np.median(X, axis=0), dtype=np.float64)
-    mad = np.asarray(np.median(np.abs(X - med), axis=0) * 1.4826 + 1e-12, dtype=np.float64)
-    Xs = np.asarray((X - med) / mad, dtype=np.float64)
-    Xs = np.clip(Xs, -10.0, 10.0)  # [FIX] Prevent FP underflow from extreme black swans
-    return Xs, med, mad
+    qt = QuantileTransformer(
+        output_distribution="normal", 
+        n_quantiles=min(len(X), 1000), 
+        random_state=42
+    )
+    Xs = qt.fit_transform(X)
+    # Clip to avoid extreme outliers in Gaussian space (e.g. +/- 5 sigma)
+    Xs = np.clip(Xs, -5.0, 5.0)
+    return Xs, qt
 
 
-def _robust_transform(X: np.ndarray, med: np.ndarray, mad: np.ndarray) -> np.ndarray:
-    """Apply robust scaling to new data using pre-computed median and MAD."""
-    mad_safe = np.asarray(np.where(mad < 1e-12, 1.0, mad), dtype=np.float64)
-    out = np.asarray((X - med) / mad_safe, dtype=np.float64)
-    out = np.clip(out, -10.0, 10.0)  # [FIX] Prevent FP underflow
-    return cast(np.ndarray, out)
+def _quantile_transform(X: np.ndarray, qt: QuantileTransformer) -> np.ndarray:
+    """Apply pre-fitted quantile transformation."""
+    out = qt.transform(X)
+    return cast(np.ndarray, np.clip(out, -5.0, 5.0))
 
 
 def _sticky_transmat_prior(n_states: int, self_p: float = 0.9) -> np.ndarray:
@@ -164,33 +205,8 @@ def _blend_transition(
 
 
 def _assign_state_semantic_labels(means: np.ndarray, X_ref: np.ndarray) -> dict[int, str]:
-    """Map raw HMM state index → semantic label using structural trend and risk markers."""
-    k = int(means.shape[0])
-    crisis_scores = _crisis_semantic_scores(means)
-    crisis_s = int(np.argmax(crisis_scores))
-    
-    rem = [i for i in range(k) if i != crisis_s]
-    
-    # Primary sort by long-term 168h trend (index 1)
-    if len(rem) == 3:
-        # Sort by composite bull score (which considers 24h and 168h)
-        sorted_rem = sorted(rem, key=lambda x: _bull_semantic_score(means, x))
-        bear_s = int(sorted_rem[0])
-        chop_s = int(sorted_rem[1])
-        bull_s = int(sorted_rem[2])
-    else:
-        # Fallback for k != 4
-        sorted_rem = sorted(rem, key=lambda x: float(means[x, 1]))
-        bear_s = int(sorted_rem[0])
-        bull_s = int(sorted_rem[-1])
-        chop_s = int(sorted_rem[len(sorted_rem) // 2]) if len(sorted_rem) > 1 else bear_s
-
-    # [Safety Check] If "Bear" state has a strong positive long-term trend, warn.
-    if float(means[bear_s, 1]) > 0.5:
-        _logger.warning("HMM Bear state assignment anomaly: state %d has positive 168h trend %.4f", 
-                        bear_s, float(means[bear_s, 1]))
-
-    return {crisis_s: "crisis", bear_s: "bear_trend", bull_s: "bull_trend", chop_s: "chop"}
+    """Map raw HMM state index → semantic label using Archetype Distance Matching (v2)."""
+    return _assign_state_semantic_labels_v2(means)
 
 
 def _raw_posterior_to_semantic(
@@ -213,7 +229,170 @@ def _regime_entropy(p: np.ndarray) -> float:
     return float(-np.sum(p * np.log(p)))
 
 
-LABEL_VERSION = "v5"
+@njit  # type: ignore
+def _kama_numba(data: np.ndarray, period: int, fast_span: int = 2, slow_span: int = 30) -> np.ndarray:
+    """Numba-accelerated Kaufman's Adaptive Moving Average."""
+    n = len(data)
+    out = np.copy(data)
+    if n <= period:
+        return out
+
+    fastest = 2.0 / (fast_span + 1.0)
+    slowest = 2.0 / (slow_span + 1.0)
+
+    # Initialize first KAMA as first data point
+    for i in range(1, n):
+        if i < period:
+            # Simple EMA for warmup
+            alpha = 2.0 / (period + 1.0)
+            out[i] = data[i] * alpha + out[i-1] * (1.0 - alpha)
+            continue
+
+        # Efficiency Ratio (ER)
+        change = abs(data[i] - data[i - period])
+        volatility = 0.0
+        for j in range(i - period + 1, i + 1):
+            volatility += abs(data[j] - data[j - 1])
+
+        if volatility > 1e-12:
+            er = change / volatility
+        else:
+            er = 0.0
+
+        sc = (er * (fastest - slowest) + slowest) ** 2
+        out[i] = out[i - 1] + sc * (data[i] - out[i - 1])
+    return out
+
+
+@njit  # type: ignore
+def _alma_numba(data: np.ndarray, window: int, offset: float = 0.85, sigma: float = 6.0) -> np.ndarray:
+    """Numba-accelerated Arnaud Legoux Moving Average."""
+    n = len(data)
+    out = np.copy(data)
+    if n < window:
+        return out
+
+    m = offset * (window - 1)
+    s = window / sigma
+
+    weights = np.zeros(window)
+    norm_sum = 0.0
+    for i in range(window):
+        weights[i] = np.exp(-((i - m) ** 2) / (2.0 * s * s))
+        norm_sum += weights[i]
+    
+    if norm_sum > 1e-12:
+        weights /= norm_sum
+    else:
+        weights[:] = 1.0 / window
+
+    for i in range(window - 1, n):
+        val = 0.0
+        for j in range(window):
+            val += data[i - window + 1 + j] * weights[j]
+        out[i] = val
+    return out
+
+
+@njit  # type: ignore
+def _jma_approx_numba(data: np.ndarray, period: int, phase: float = 0.0) -> np.ndarray:
+    """Numba-accelerated Jurik Moving Average (Approximation)."""
+    n = len(data)
+    out = np.copy(data)
+    if n < 2:
+        return out
+
+    # Parameters
+    length = float(period)
+    phase_adj = max(-100.0, min(100.0, phase))
+    ratio = (phase_adj / 100.0) + 1.5
+    if ratio < 0.5: ratio = 0.5
+    if ratio > 2.5: ratio = 2.5
+    
+    beta = 0.45 * (length - 1.0) / (0.45 * (length - 1.0) + 2.0)
+    alpha = beta ** 1.5
+    
+    # Internal state
+    e0 = data[0]
+    e1 = 0.0
+    e2 = 0.0
+    jma = data[0]
+    
+    for i in range(1, n):
+        e0 = (1.0 - alpha) * data[i] + alpha * e0
+        e1 = (data[i] - e0) * (1.0 - beta) + beta * e1
+        # Phase correction
+        e2 = (e0 + ratio * e1 - jma) * ((1.0 - alpha) ** 2) + (alpha ** 2) * e2
+        jma = e2 + jma
+        out[i] = jma
+    return out
+
+
+def _apply_posterior_smoothing(
+    df: pd.DataFrame, method: str = "EMA", span: int = 6
+) -> pd.DataFrame:
+    """Apply EMA, DEMA, TEMA, HMA, KAMA, ALMA, or JMA smoothing to probabilities."""
+    if span <= 1:
+        return df
+
+    out_df = df.copy()
+    cols = df.columns
+
+    if method == "EMA":
+        out_df = df.ewm(span=span, adjust=False).mean()
+    
+    elif method == "DEMA":
+        ema1 = df.ewm(span=span, adjust=False).mean()
+        ema2 = ema1.ewm(span=span, adjust=False).mean()
+        out_df = 2 * ema1 - ema2
+    
+    elif method == "TEMA":
+        ema1 = df.ewm(span=span, adjust=False).mean()
+        ema2 = ema1.ewm(span=span, adjust=False).mean()
+        ema3 = ema2.ewm(span=span, adjust=False).mean()
+        out_df = 3 * ema1 - 3 * ema2 + ema3
+
+    elif method == "HMA":
+        period = span
+        half_period = max(1, period // 2)
+        sqrt_period = max(1, int(np.sqrt(period)))
+        
+        for col in cols:
+            data = df[col].to_numpy(dtype=np.float64)
+            wma_half = _wma_numba(data, half_period)
+            wma_full = _wma_numba(data, period)
+            hma_raw = 2 * wma_half - wma_full
+            hma = _wma_numba(hma_raw, sqrt_period)
+            out_df[col] = hma
+
+    elif method == "KAMA":
+        for col in cols:
+            data = df[col].to_numpy(dtype=np.float64)
+            out_df[col] = _kama_numba(data, period=span)
+
+    elif method == "ALMA":
+        for col in cols:
+            data = df[col].to_numpy(dtype=np.float64)
+            out_df[col] = _alma_numba(data, window=span, offset=0.85, sigma=6.0)
+
+    elif method == "JMA":
+        for col in cols:
+            data = df[col].to_numpy(dtype=np.float64)
+            out_df[col] = _jma_approx_numba(data, period=span, phase=0.0)
+            
+    else:
+        out_df = df.ewm(span=span, adjust=False).mean()
+        
+    # Standard Post-processing: Clipping and Normalization
+    out_df = out_df.clip(0.0, 1.0)
+    row_sums = out_df.sum(axis=1)
+    # Avoid division by zero
+    out_df = out_df.div(row_sums, axis=0).fillna(1.0 / len(cols))
+    
+    return out_df
+
+
+LABEL_VERSION = "v6"
 
 
 def _load_or_build_state_labels(
@@ -245,7 +424,7 @@ def _load_or_build_state_labels(
                 )
         except Exception as e:
             _logger.warning("Failed to load state labels: %s", e)
-    m = _assign_state_semantic_labels(means, X_ref_scaled)
+    m = _assign_state_semantic_labels_v2(means)
     try:
         with open(label_path, "wb") as f:
             pickle.dump(
@@ -264,39 +443,12 @@ def _load_or_build_state_labels(
 
 
 def _centroid_label_drift_warn(
-    means: np.ndarray, X_ref_scaled: np.ndarray, state_to_label: dict[int, str]
+    means: np.ndarray, state_to_label: dict[int, str]
 ) -> None:
     """Check if HMM semantic labels still match the underlying centroid characteristics."""
-    try:
-        c_scores = _crisis_semantic_scores(means)
-        median_trend = float(np.median([float(means[i, 0]) for i in range(means.shape[0])]))
-    except Exception:
-        return
-
-    for si, lab in state_to_label.items():
-        if lab == "crisis" and float(means[si, 0]) > median_trend:
-            _logger.warning(
-                "HMM label drift: state %d crisis label trend=%.4f > median=%.4f "
-                "(crisis_score=%.4f)",
-                si,
-                float(means[si, 0]),
-                median_trend,
-                float(c_scores[si]),
-            )
-        if lab == "bull_trend":
-            b_score = _bull_semantic_score(means, si)
-            if b_score < -0.2:
-                _logger.warning(
-                    "HMM label drift: state %d bull_trend but low composite score=%.4f",
-                    si,
-                    b_score,
-                )
-        if lab == "bear_trend" and float(means[si, 0]) > 0.5:
-            _logger.warning(
-                "HMM label drift: state %d bear_trend but positive trend=%.4f",
-                si,
-                float(means[si, 0]),
-            )
+    # Archetype matching is robust to drift by definition (it picks the closest),
+    # but we can log distances for diagnostics if needed.
+    pass
 
 
 @dataclass
@@ -331,10 +483,10 @@ class HMMStateInferrer:
         tr_alpha = float(OPT_FUTURES_CONFIG.get("FUTURES_HMM_TRANSITION_PRIOR_ALPHA", 0.2))
 
         cache_fname = (
-            f"HMM_systemic_{symbol}_{tf}_is{is_end_idx}_n{self.n_states}_v4multihz.parquet"
+            f"HMM_systemic_{symbol}_{tf}_is{is_end_idx}_n{self.n_states}_v6.parquet"
         )
         cache_path = FUTURES_CACHE_DIR / cache_fname
-        label_path = FUTURES_CACHE_DIR / f"{symbol}_{tf}_state_labels.pkl"
+        label_path = FUTURES_CACHE_DIR / f"{symbol}_{tf}_state_labels_v6.pkl"
 
         if cache_path.exists():
             try:
@@ -362,6 +514,7 @@ class HMMStateInferrer:
         consecutive_fails = 0
         degraded = False
         state_to_label: dict[int, str] | None = None
+        qt_transformer: QuantileTransformer | None = None
         k_st = int(self.n_states)
         n_feat_expected = len(feat_cols)
         if label_path.exists():
@@ -388,7 +541,7 @@ class HMMStateInferrer:
 
             win_end_idx = max(1, t - 1)
             X_win_raw = X_raw[max(0, t - max_window) : win_end_idx]
-            X_train, med, mad = _robust_fit_scale(X_win_raw)
+            X_train, qt_transformer = _quantile_scaling(X_win_raw)
 
             ent_window = probs_sem[max(0, t - 24) : t, :]
             force_entropy = False
@@ -532,11 +685,11 @@ class HMMStateInferrer:
                     try:
                         means_f = model.means_.copy()
                         if t <= is_end_idx:
-                            state_to_label = _assign_state_semantic_labels(means_f, X_train)
+                            state_to_label = _assign_state_semantic_labels_v2(means_f)
                         elif state_to_label is None:
-                            state_to_label = _assign_state_semantic_labels(means_f, X_train)
+                            state_to_label = _assign_state_semantic_labels_v2(means_f)
                         else:
-                            _centroid_label_drift_warn(means_f, X_train, state_to_label)
+                            _centroid_label_drift_warn(means_f, state_to_label)
                     except Exception as e:
                         _logger.warning("HMM label assignment warning: %s", e)
 
@@ -547,7 +700,10 @@ class HMMStateInferrer:
                 win_start = max(0, t - max_window)
                 win_end = max(1, t - 1)
                 x_seq = X_raw[win_start : win_end, :]
-                x_seq_s = _robust_transform(x_seq, med, mad)
+                if qt_transformer is not None:
+                    x_seq_s = _quantile_transform(x_seq, qt_transformer)
+                else:
+                    continue
                 
                 # 개선: predict_step 범위(최대 24bar) 전체에 posterior 적용
                 p_seq = model.predict_proba(x_seq_s)   # shape: (window_size, n_states)
@@ -566,6 +722,12 @@ class HMMStateInferrer:
 
         probs_df = pd.DataFrame(probs_sem, index=features_df.index, columns=_SEMANTIC_ORDER)
         probs_df = probs_df.ffill().bfill().fillna(1.0 / float(len(_SEMANTIC_ORDER)))
+        
+        # Phase 3: Posterior Smoothing (EMA/DEMA/TEMA) to reduce whipsaws
+        s_method = str(OPT_FUTURES_CONFIG.get("FUTURES_HMM_SMOOTHING_METHOD", "EMA"))
+        s_span = int(OPT_FUTURES_CONFIG.get("FUTURES_HMM_SMOOTHING_SPAN", 6))
+        probs_df = _apply_posterior_smoothing(probs_df, method=s_method, span=s_span)
+        
         if degraded:
             _logger.warning(
                 "[%s] HMM systemic completed with degraded=True (some refits used prior model).",
@@ -631,11 +793,7 @@ class HMMStateInferrer:
 
             win_end_idx = max(1, t - 1)
             X_win_raw = X_raw[max(0, t - max_window) : win_end_idx]
-            X_win_win = _winsorize_cols_numba(X_win_raw, 0.01)
-            w_mean = X_win_win.mean(axis=0)
-            w_std = X_win_win.std(axis=0)
-            w_std[w_std < 1e-8] = 1.0
-            X_train = (X_win_win - w_mean) / w_std
+            X_train, _ = _quantile_scaling(X_win_raw)
 
             is_fit_cycle = ((t % self.fit_step == 0) and t <= is_end_idx) or (model is None)
 

@@ -33,7 +33,7 @@ HMM_SEMANTIC_PROB_COLUMNS: tuple[str, ...] = (
 
 # Bump when GP feature semantics change without renaming columns so raw GP
 # caches are invalidated and Tier 2 retraining actually happens.
-GP_FEATURE_SCHEMA_VERSION: str = "v7"
+GP_FEATURE_SCHEMA_VERSION: str = "v9"
 
 GP_ENGINEERED_FEATURE_NAMES: tuple[str, ...] = (
     "ret_1",
@@ -71,6 +71,7 @@ GP_ENGINEERED_FEATURE_NAMES: tuple[str, ...] = (
     "dist_from_high_24",
     "corr_btc_24",
     "vpin_proxy_12",
+    "funding_trap_24",
 )
 
 
@@ -417,6 +418,16 @@ def build_gp_input_features(df: pd.DataFrame) -> pd.DataFrame:
         (vol.rolling(12, min_periods=6).sum() + 1e-12)
     ).fillna(0.0)
 
+    # v9: Structural Alpha Features (funding_trap_24 only; funding_squeeze_24 removed — IC≈0)
+    if "funding_rate" in df.columns:
+        f_rate = df["funding_rate"].astype(np.float64)
+        out["funding_trap_24"] = (
+            ((close > close.shift(24)) & (f_rate < f_rate.shift(24)))
+            .astype(np.float64)
+        )
+    else:
+        out["funding_trap_24"] = 0.0
+
     # vol_ratio / buy_sell_ratio: keep finite defaults; ret/ma_dist/funding left NaN for CS impute
     out = out.replace([np.inf, -np.inf], np.nan)
     return out
@@ -426,10 +437,10 @@ def build_hmm_input_features(df: pd.DataFrame) -> pd.DataFrame:
     """Build GaussianHMM features designed for regime structural detection.
 
     Design (HMM improvement):
-    - Log_Return → EMA-smoothed (removes high-frequency noise)
-    - Vol_Ratio: short-term/long-term Parkinson volatility ratio
-    - Volume_Momentum: 24h vs 168h MA ratio
-    - Funding_Spread_Z: deviation from rolling mean
+    - Frac_Diff_04: fractional_differentiation(close, d=0.4) for stationarity + memory.
+    - Vol_Ratio: short-term/long-term Parkinson volatility ratio.
+    - Volume_Momentum: 24h vs 168h MA ratio.
+    - Funding_Inversion_Intensity: Intensity of negative funding during price drops.
 
     Args:
         df: Input OHLCV dataframe.
@@ -439,12 +450,12 @@ def build_hmm_input_features(df: pd.DataFrame) -> pd.DataFrame:
 
     """
     close = df["close"].astype(np.float64)
-    log_ret = np.log(close / close.shift(1))
+    log_ret = np.log(close / close.shift(1).clip(lower=1e-12))
 
     out = pd.DataFrame(index=df.index)
 
-    # 1. EMA-smoothed log return (span=12h removes tick noise)
-    out["Log_Return_Smooth"] = log_ret.ewm(span=12, min_periods=5).mean()
+    # 1. Fractional Differentiation (d=0.4) - Stationarity + Memory
+    out["Frac_Diff_04"] = fractional_differentiation(close, d=0.4)
 
     # 2. Short/long volatility ratio (Parkinson estimator)
     h_hi = df["high"].astype(np.float64)
@@ -455,7 +466,6 @@ def build_hmm_input_features(df: pd.DataFrame) -> pd.DataFrame:
     short_vol = pser.rolling(window=24, min_periods=5).mean()
     long_vol = pser.rolling(window=168, min_periods=20).mean()
     # Vol ratio > 1 = volatility expanding (trending/crisis), < 1 = compressing (range)
-    # Numerical safety: replace Inf/NaN with 1.0 (neutral) to suppress warnings
     out["Vol_Ratio"] = (short_vol / (long_vol + 1e-12)).replace([np.inf, -np.inf], 1.0).fillna(1.0)
 
     # 3. Volume momentum: 24h vs 168h MA (buying pressure trend)
@@ -464,16 +474,17 @@ def build_hmm_input_features(df: pd.DataFrame) -> pd.DataFrame:
     vol_ma_l = vol.rolling(168, min_periods=20).mean()
     out["Volume_Momentum"] = (vol_ma_s / (vol_ma_l + 1e-12)) - 1.0
 
-    # 4. Funding rate spread (Short vs Long mean) - Stationary
+    # 4. Funding Inversion Intensity: capture bearish extreme/stress
     if "funding_rate" in df.columns:
         fr = df["funding_rate"].astype(np.float64).ffill().fillna(0.0)
-        fr_short = fr.rolling(24, min_periods=5).mean().fillna(0.0)
-        fr_long = fr.rolling(168, min_periods=20).mean().fillna(0.0)
-        fr_spread = fr_short - fr_long
-        roll_std = fr_spread.rolling(168, min_periods=20).std().fillna(1e-6)
-        out["Funding_Spread_Z"] = (fr_spread / roll_std).clip(-3.0, 3.0)
+        # Intensity = abs(funding) * abs(return) only when both are negative
+        # Captures strength of shorts paying longs during active price decline
+        inversion = np.where((fr < 0) & (log_ret < 0), np.abs(fr * log_ret), 0.0)
+        # Use EWM to smooth intensity for HMM stability
+        intensity_ser = pd.Series(inversion, index=df.index)
+        out["Funding_Inversion_Intensity"] = intensity_ser.ewm(span=12).mean()
     else:
-        out["Funding_Spread_Z"] = 0.0
+        out["Funding_Inversion_Intensity"] = 0.0
 
     return out
 
