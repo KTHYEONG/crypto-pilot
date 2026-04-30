@@ -137,5 +137,6 @@ def suggest_params_futures(trial: optuna.Trial, space: dict[str, Any], tf: str) 
     _lev_default = int(OPT_FUTURES_CONFIG.get("FUTURES_DISCOVERY_LEVERAGE", 8))
     params["LEVERAGE"] = int(os.getenv("FUTURES_DISCOVERY_LEVERAGE", str(_lev_default)))
     params["USE_COMPOUNDING"] = True
+    params["LONG_MOD_FLOOR"] = trial.suggest_float("LONG_MOD_FLOOR", 0.60, 0.85)
 
     return params
