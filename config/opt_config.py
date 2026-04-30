@@ -80,7 +80,7 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     "FUTURES_AWF_MIN_TRAIN_FRAC": 0.40,  # first leg trains on 40% of IS bars
     # PLGD objective weights (see objective_ml.py).
     "FUTURES_PLGD_LAMBDA_DEF": 0.5,   # Bonferroni trial-deflation strength
-    "FUTURES_PLGD_LAMBDA_TAIL": 0.7,  # worst-leg tail penalty multiplier (k=5: 1 bad leg allowed)
+    "FUTURES_PLGD_LAMBDA_TAIL": 1.0,  # worst-leg tail penalty multiplier (k=5: 1 bad leg allowed)
     "FUTURES_AWF_NET_EDGE_MIN": 1.5,   # min EV/cost ratio (avg PnL / round-trip cost)
     # SPA bootstrap for post-run diagnostics (not used per-trial).
     "FUTURES_SPA_N_BOOTSTRAP": 2000,
@@ -119,7 +119,7 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     # log(TW) > 0.0 ↔ TW > 1.0, so this is a direct worst-decile survival test.
     # AWF worst-leg floor: ≥-0.05 means at most 5% log loss on worst single leg.
     # Changed from 0.0 (CPCV p10 > 0 gate) — AWF k=5 allows 1 bad leg.
-    "FUTURES_CPCV_P10_LOG_TW_MIN": -0.05,
+    "FUTURES_CPCV_P10_LOG_TW_MIN": -0.03,
 }
 
 # Cross-Sectional Strategy Parameter Space
