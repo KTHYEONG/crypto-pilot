@@ -72,6 +72,9 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     "FUTURES_HMM_CRISIS_THRESHOLD": 0.66,
     # Slightly stronger sticky transitions → stabler systemic HMM under leg refit (Path C).
     "FUTURES_HMM_TRANSITION_PRIOR_ALPHA": 0.24,
+    # HMM Posterior Smoothing (EMA, DEMA, TEMA, HMA, KAMA, ALMA, JMA)
+    "FUTURES_HMM_SMOOTHING_METHOD": "KAMA",
+    "FUTURES_HMM_SMOOTHING_SPAN": 6,
     # Session 39: recovery override abandoned (P10 -0.027, DSR collapse). Keep disabled.
     "CRISIS_RECOVERY_TREND_THR": 1e9,
     "CRISIS_RECOVERY_FLOOR": 0.30,
