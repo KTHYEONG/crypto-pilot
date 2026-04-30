@@ -79,7 +79,7 @@ class PortfolioBacktestEngineFast:
         hmm_mod_s = self.data.get("hmm_modulator_short")
         if hmm_mod_l is not None:
             _logger.debug("[ENGINE] hmm_mod_l mean: %.4f, std: %.4f", np.mean(hmm_mod_l), np.std(hmm_mod_l))
-        
+
         if xs_long is None or xs_long.shape != close_2d.shape:
             xs_long = np.zeros_like(close_2d, dtype=np.float64)
         if xs_short is None or xs_short.shape != close_2d.shape:
@@ -88,6 +88,9 @@ class PortfolioBacktestEngineFast:
             hmm_crisis = np.zeros_like(close_2d, dtype=np.float64)
         if hmm_mod_l is None or hmm_mod_l.shape != close_2d.shape:
             hmm_mod_l = np.ones_like(close_2d, dtype=np.float64)
+        # T3: Long modulator floor=0.70 — bear_trend hmm_modulator_long ~0.61 구조적 억압 방지.
+        # bull regime (modulator > 0.70)은 영향 없음.
+        hmm_mod_l = np.maximum(hmm_mod_l, 0.70)
         if hmm_mod_s is None or hmm_mod_s.shape != close_2d.shape:
             hmm_mod_s = np.ones_like(close_2d, dtype=np.float64)
 
@@ -239,11 +242,11 @@ def _recompute_cs_dirs_numba(
         ss = float(xs_short[prev_i, s])
         if not np.isfinite(sl) or not np.isfinite(ss):
             continue
-        
+
         # [NEW] Asymmetric Entry Filter: Skip if HMM modulator is too low
         mod_l = float(hmm_mod_long[prev_i, s])
         mod_s = float(hmm_mod_short[prev_i, s])
-        
+
         c_raw = float(hmm_crisis[prev_i, s])
         if not np.isfinite(c_raw):
             c_raw = 0.0
@@ -400,14 +403,14 @@ def backtest_portfolio_numba(
 
             if kill_signal[i-1, s] > 0.5:
                 exit_triggered, exit_price = True, c_open * (1.0 - slippage_rate * pos_side[s])
-            
+
             if not exit_triggered:
                 if pos_side[s] == 1:
                     if c_high > highest[s]: highest[s] = c_high
-                    
+
                     # [REFACTORED] Pessimistic Execution: Check Exit (SL) FIRST before Scale-out (TP)
                     exit_triggered, exit_price, stop_p[s] = check_long_exit(c_open, c_low, highest[s], pos_atr, stop_p[s], l_trail_mult, slippage_rate)
-                    
+
                     if not exit_triggered and not has_scaled[s]:
                         tr, sc_p, sc_a, pnl_s, fee_s = process_long_scale_out(c_open, c_high, entry_p[s], pos_atr, l_scale_atr, amount[s], fee_rate)
                         if tr:
@@ -420,10 +423,10 @@ def backtest_portfolio_numba(
                             entry_fee_stored[s] /= 2.0; fund_fee_stored[s] /= 2.0; has_scaled[s] = True
                 else:
                     if c_low < lowest[s]: lowest[s] = c_low
-                    
+
                     # [REFACTORED] Pessimistic Execution: Check Exit (SL) FIRST before Scale-out (TP)
                     exit_triggered, exit_price, stop_p[s] = check_short_exit(c_open, c_high, lowest[s], pos_atr, stop_p[s], s_trail_mult, slippage_rate)
-                    
+
                     if not exit_triggered and not has_scaled[s]:
                         tr, sc_p, sc_a, pnl_s, fee_s = process_short_scale_out(c_open, c_low, entry_p[s], pos_atr, s_tp_mult, amount[s], fee_rate)
                         if tr:
@@ -597,7 +600,7 @@ def backtest_portfolio_numba(
                         )
                     else:
                         margin_fail_cnt += 1
-    
+
     # Force close all positions at end
     if n_bars > 0:
         last_idx = n_bars - 1
