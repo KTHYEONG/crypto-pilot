@@ -182,7 +182,8 @@ class BacktestEngineFast:
         _raw_mod_long = (
             df["hmm_modulator_long"].values if "hmm_modulator_long" in df.columns else np.ones(n)
         )
-        hmm_mod_long = np.maximum(_raw_mod_long, 0.70)
+        long_mod_floor = float(self.strategy.params.get("LONG_MOD_FLOOR", 0.70))
+        hmm_mod_long = np.maximum(_raw_mod_long, long_mod_floor)
 
         trades, final_balance, equity_curve, funding_paid_total = backtest_loop_numba(
             close,
