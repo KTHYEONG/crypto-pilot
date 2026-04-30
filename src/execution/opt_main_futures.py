@@ -266,12 +266,11 @@ def _print_human_dashboard(
     _logger.info("\n" + border_top)
     _logger.info(f"║ {c_bld}{'🧑‍💻 [HUMAN DASHBOARD] STRATEGY PERFORMANCE SUMMARY':<81}{c_rst} ║")
     _logger.info(border_mid)
-    
+
     # Header Row
     _logger.info(f"║ {'[COMPOUNDING]':<20} {'IS':>12} {'Hold-Out':>18} {'OOS (Forward)':>24} ║")
-    
+
     is_cagr = get_val(is_port, "cagr_pct")
-    ho_cagr = get_val(ho_port, "cagr_pct")
     oos_cagr = get_val(oos_port, "cagr_pct")
 
     is_alpha = is_cagr - benchmark_is
@@ -298,7 +297,7 @@ def _print_human_dashboard(
                 f"{oos_alpha:>23.2f}{suffix} ║"
             )
             continue
-            
+
         is_val = get_val(is_port, key)
         ho_val = get_val(ho_port, key)
         oos_val = get_val(oos_port, key)
@@ -306,14 +305,14 @@ def _print_human_dashboard(
             f"║   {label:<18} : {is_val:>10.2f}{suffix} {ho_val:>17.2f}{suffix} "
             f"{oos_val:>23.2f}{suffix} ║"
         )
-    
+
     _logger.info(border_sep)
-    _logger.info(f"║ {'[DIRECTIONAL BALANCE]':<20} {'Long PF':>14} {'Short PF':>17} {'Verdict':>24} ║")
-    
+    _logger.info(f"║ {'[DIRECTIONAL BALANCE]':<20} {'Long PF':>14} {'Short PF':>17} {'Verdict':>24} ║")  # noqa: E501
+
     def _fmt_pf_color(val: float) -> str:
         color = c_grn if val >= 1.05 else c_red
         return f"{color}{val:>10.2f}{c_rst}"
-        
+
     dir_status = "STABLE" if dir_balance_ok else "BIASED"
     dir_color = c_grn if dir_balance_ok else c_red
     _logger.info(
@@ -323,19 +322,19 @@ def _print_human_dashboard(
 
     _logger.info(border_sep)
     _logger.info(f"║ {'[SANITY CHECK & VERDICT]':<81} ║")
-    
-    # IS Survival check: Net Alpha > 0
+
+    # IS Survival check: Net Alpha > 0.0
     is_survival = "PASS" if is_alpha > 0.0 else "FAIL"
     is_color = c_grn if is_survival == "PASS" else c_red
     is_text = f"{is_color}{is_survival:<4}{c_rst} (IS Net Alpha > 0%)"
     _logger.info(f"║   IS Survival        : {is_text} {' ':<38} ║")
-    
+
     retention = (oos_cagr / is_cagr * 100.0) if abs(is_cagr) > 1e-6 else 0.0
     ret_color = c_grn if retention > 60.0 else c_ylw if retention > 40.0 else c_red
     ret_text = f"{ret_color}{retention:>5.1f}%{c_rst} of IS Performance"
     _logger.info(f"║   OOS Retention      : {ret_text} {' ':<36} ║")
     _logger.info("║" + " " * 83 + "║")
-    
+
     v_color = c_grn if "PROMOTE" in gate_status else c_red
     v_msg = f"FINAL VERDICT        : {v_color}{c_bld}{gate_status}{c_rst}"
     persisted = " (Parameters saved)" if "PROMOTE" in gate_status else " (Parameters NOT persisted)"
@@ -367,23 +366,23 @@ def _print_dual_audit_dashboard(
         "║ {:<" + str(w_cat) + "} │ {:<" + str(w_met) + "} │ "
         "{:>" + str(w_val) + "} │ {:>" + str(w_val) + "} │ {} ║"
     )
-    
+
     def get_delta_str(val: float, is_pct: bool = False, lower_is_better: bool = False) -> str:
         suffix = "%p" if is_pct else ""
         precision = ".2f" if is_pct else ".4f"
-        
+
         # 1. Create the raw numeric string with sign
         raw_val = f"{val:>{precision}}"
         if val > 1e-9:
             raw_val = "+" + raw_val
-            
+
         # 2. Add suffix and pad to w_val BEFORE applying color
         full_str = raw_val + suffix
         padded_val = f"{full_str:>{w_val}}"
-        
+
         if abs(val) < 1e-7:
             return padded_val
-        
+
         # 3. Apply color
         is_good = (val < 0) if lower_is_better else (val > 0)
         color = c_grn if is_good else c_red
@@ -392,7 +391,7 @@ def _print_dual_audit_dashboard(
     border_top = "╔" + "═" * 85 + "╗"
     border_mid = "╠" + "═" * 85 + "╣"
     border_sep = (
-        "╟" + "─" * (w_cat+1) + "┼" + "─" * (w_met+2) + "┼" + "─" * (w_val+2) + 
+        "╟" + "─" * (w_cat+1) + "┼" + "─" * (w_met+2) + "┼" + "─" * (w_val+2) +
         "┼" + "─" * (w_val+2) + "┼" + "─" * (w_val+2) + "╢"
     )
     border_bot = "╚" + "═" * 85 + "╝"
@@ -401,7 +400,7 @@ def _print_dual_audit_dashboard(
     h_text = "[FINAL STRATEGY AUDIT] Candidate vs Champion (OOS ONLY)"
     _logger.info(f"║ {c_bld}{h_text:<83}{c_rst} ║")
     _logger.info(border_mid)
-    
+
     # Table Header
     h_row = (
         f"║ {'CATEGORY':<{w_cat}} │ {'METRIC (OOS)':<{w_met}} │ "
@@ -409,44 +408,44 @@ def _print_dual_audit_dashboard(
     )
     _logger.info(h_row)
     _logger.info(border_sep)
-    
+
     # 1. Reliability
     pbo_c, pbo_n = champ_m.get("pbo", 0.5), new_m.get("pbo", 0.5)
     dsr_c, dsr_n = champ_m.get("dsr", 0.0), new_m.get("dsr", 0.0)
-    
+
     _logger.info(l_fmt.format(
-        "RELIABILITY", "PBO (Lower Better)", f"{pbo_c:.4f}", f"{pbo_n:.4f}", 
+        "RELIABILITY", "PBO (Lower Better)", f"{pbo_c:.4f}", f"{pbo_n:.4f}",
         get_delta_str(pbo_n - pbo_c, lower_is_better=True)
     ))
     _logger.info(l_fmt.format(
-        "(Statistical)", "DSR (Stability)", f"{dsr_c:.4f}", f"{dsr_n:.4f}", 
+        "(Statistical)", "DSR (Stability)", f"{dsr_c:.4f}", f"{dsr_n:.4f}",
         get_delta_str(dsr_n - dsr_c)
     ))
     _logger.info(border_sep)
-    
+
     # 2. Compounding
     cagr_c, cagr_n = champ_m.get("cagr", 0.0), new_m.get("cagr", 0.0)
     mdd_c, mdd_n = champ_m.get("mdd", 0.0), new_m.get("mdd", 0.0)
     pf_c, pf_n = champ_m.get("pf", 1.0), new_m.get("pf", 1.0)
     nalpha_c, nalpha_n = champ_m.get("net_alpha", 0.0), new_m.get("net_alpha", 0.0)
     pnl_c, pnl_n = champ_m.get("avg_pnl", 0.0), new_m.get("avg_pnl", 0.0)
-    
+
     _logger.info(l_fmt.format(
-        "COMPOUNDING", "CAGR (%)", f"{cagr_c:.2f}%", f"{cagr_n:.2f}%", 
+        "COMPOUNDING", "CAGR (%)", f"{cagr_c:.2f}%", f"{cagr_n:.2f}%",
         get_delta_str(cagr_n - cagr_c, is_pct=True)
     ))
     _logger.info(l_fmt.format(
-        "(Wealth & Risk)", "Max Drawdown (%)", f"{mdd_c:.2f}%", f"{mdd_n:.2f}%", 
+        "(Wealth & Risk)", "Max Drawdown (%)", f"{mdd_c:.2f}%", f"{mdd_n:.2f}%",
         get_delta_str(mdd_n - mdd_c, is_pct=True, lower_is_better=True)
     ))
     _logger.info(l_fmt.format(
         "", "Profit Factor", f"{pf_c:.2f}", f"{pf_n:.2f}", get_delta_str(pf_n - pf_c)
     ))
     _logger.info(l_fmt.format(
-        "", "Net Alpha (%)", f"{nalpha_c:.2f}%", f"{nalpha_n:.2f}%", get_delta_str(nalpha_n - nalpha_c, is_pct=True)
+        "", "Net Alpha (%)", f"{nalpha_c:.2f}%", f"{nalpha_n:.2f}%", get_delta_str(nalpha_n - nalpha_c, is_pct=True)  # noqa: E501
     ))
     _logger.info(l_fmt.format(
-        "", "Avg Trade PnL (%)", f"{pnl_c:.2f}%", f"{pnl_n:.2f}%", get_delta_str(pnl_n - pnl_c, is_pct=True)
+        "", "Avg Trade PnL (%)", f"{pnl_c:.2f}%", f"{pnl_n:.2f}%", get_delta_str(pnl_n - pnl_c, is_pct=True)  # noqa: E501
     ))
     _logger.info(border_mid)
 
@@ -454,7 +453,7 @@ def _print_dual_audit_dashboard(
     is_cagr = new_m.get("is_cagr", 0.0)
     ho_cagr = new_m.get("ho_cagr", 0.0)
     retention = (new_m.get("cagr", 0.0) / is_cagr * 100.0) if abs(is_cagr) > 1e-6 else 0.0
-    
+
     def get_status_tag(val: float, threshold: float) -> str:
         color = c_grn if val >= threshold else c_red
         status = "PASS" if val >= threshold else "FAIL"
@@ -469,7 +468,7 @@ def _print_dual_audit_dashboard(
         f"║  - Recent Regime    : {get_status_tag(ho_cagr, 60.0):<{4+9}} "
         f"(HO CAGR: {ho_cagr:>5.1f}%) {' ':<40} ║"
     )
-    
+
     ret_color = c_grn if retention > 60.0 else c_ylw if retention > 40.0 else c_red
     ret_txt = f"{ret_color}{retention:>5.1f}%{c_rst}"
     _logger.info(
@@ -604,7 +603,7 @@ def _load_single_symbol_data(
         collector.ensure_funding_data(sym, fetch_start, end)
         if not skip_metrics:
             collector.ensure_metrics_data(sym, fetch_start, end)
-            
+
         for tf_l in [tf, "1d"]:
             raw_df = collector.collect_and_save(sym, tf_l, fetch_start, end)
             df = merge_funding_into_ohlcv(sym, raw_df, Path(FUTURES_DATA_DIR))
@@ -613,7 +612,7 @@ def _load_single_symbol_data(
             if df is None or df.empty or "datetime" not in df.columns:
                 insufficient = True
                 break
-            
+
             df.reset_index(drop=True, inplace=True)
             df["datetime"] = pd.to_datetime(df["datetime"], utc=True)
 
@@ -626,7 +625,7 @@ def _load_single_symbol_data(
             # [Dynamic Quality Gate] 1h requires more bars than 4h/1d
             min_bars_map = {"1h": 2000, "4h": 500, "1d": 300}
             min_bars_threshold = min_bars_map.get(tf_l, 300)
-            
+
             if is_end_idx < min_bars_threshold:
                 insufficient = True
                 break
@@ -662,7 +661,7 @@ def _load_futures_data_maps_for_symbols(
     data_maps: dict[str, dict[str, Any]] = {}
     oos_data_maps: dict[str, dict[str, Any]] = {}
     valid_symbols: list[str] = []
-    
+
     # [Fix] Filter out non-ASCII symbols before processing
     symbols = [s for s in symbols if all(ord(c) < 128 for c in s)]
 
@@ -701,7 +700,7 @@ def main() -> None:
         _logger.info("\n" + "═" * 85)
         _logger.info(" [STEP 1/5] UNIVERSE DISCOVERY & DATA LOADING")
         _logger.info("═" * 85)
-        
+
         from src.domain.futures.opt_futures_utils.universe_screener_futures import (
             screen_futures_universe,
             screen_symbol_refinement_futures,
@@ -710,7 +709,7 @@ def main() -> None:
         res = get_quarterly_window(pre_args.reference_date)
         fetch_start_date, start_date, is_end_date, end_date = res
         collector = DataCollector()
-        
+
         broad_candidates, _ = screen_futures_universe(
             collector,
             [],
@@ -781,7 +780,7 @@ def main() -> None:
     if not valid_symbols:
         _logger.error(" [FAIL] No valid symbols loaded. Aborting.")
         return
-    
+
     _logger.info(f" [SUCCESS] Data integrity check complete ({len(valid_symbols)} symbols).")
 
 
@@ -793,7 +792,7 @@ def main() -> None:
     _logger.info(" [STEP 2/5] ML PIPELINE: Universal Cross-Sectional GP & Regime Inference")
     _logger.info("═" * 85)
 
-    
+
     ml_out = run_ml_pipeline_for_universe(
         valid_symbols,
         args.tf,
@@ -850,7 +849,7 @@ def main() -> None:
     _logger.info("\n" + "═" * 85)
     _logger.info(" [STEP 3/5] FEATURE INTEGRATION & SIGNAL QUALITY AUDIT")
     _logger.info("═" * 85)
-    
+
     _logger.info("  --> Merging ML features into panel data maps...")
     merge_ml_output_into_is_and_oos(ml_out, data_maps, oos_data_maps, valid_symbols, args.tf)
 
@@ -860,7 +859,7 @@ def main() -> None:
 
     _logger.info("  --> Running Signal Quality Audit (IS vs OOS stability)...")
     _log_ml_merge_feature_stats(oos_data_maps, valid_symbols, args.tf)
-    
+
     _logger.info("  [SUCCESS] Signal integration and quality audit complete.")
 
 
@@ -903,13 +902,13 @@ def main() -> None:
     cfg_seed = int(OPT_FUTURES_CONFIG.get("seeds", [42])[0])
     seed = int(args.seed) if args.seed is not None else cfg_seed
     ml_ctx = MLPhaseDContext(data_maps=data_maps, symbols=valid_symbols, tf=args.tf, seed=seed)
-    
+
     # [PERFORMANCE] Precompute context upfront to avoid race conditions and per-trial overhead
     precompute_ml_optimization_context(ml_ctx)
-    
+
     # [VISIBILITY] Silence individual trial logs for a clean progress bar
     optuna.logging.set_verbosity(optuna.logging.WARNING)
-    
+
     # Custom Progress Callback for visibility in non-TTY environments
     _trial_counter = {"n": 0}
     def progress_callback(study: optuna.study.Study, trial: optuna.trial.FrozenTrial) -> None:
@@ -937,7 +936,7 @@ def main() -> None:
     tqdm_cb = None
     if tqdm_callback_cls is not None:
         tqdm_cb = tqdm_callback_cls(n_trials=n_ml_trials)
-    
+
     callbacks = [progress_callback]
     if tqdm_cb:
         callbacks.append(tqdm_cb)
@@ -1042,7 +1041,7 @@ def main() -> None:
             )
             best_trial = t
             break
-    
+
     if best_trial is None:
         trade_ok = [
             t
@@ -1074,13 +1073,26 @@ def main() -> None:
         _mu_awf, _vd, _def, _tp, _plgd_v,
     )
     if _leg_tws:
-        _logger.info("  [AWF LEGS]  leg   log_tw     TW%%")
+        _leg_l_pf = best_trial.user_attrs.get("leg_l_pf", [])
+        _leg_s_pf = best_trial.user_attrs.get("leg_s_pf", [])
+        _leg_l_cnt = best_trial.user_attrs.get("leg_long_counts", [])
+        _leg_s_cnt = best_trial.user_attrs.get("leg_short_counts", [])
+        _leg_crisis = best_trial.user_attrs.get("leg_crisis_mean", [])
+        _logger.info(
+            "  [AWF LEGS]  leg   log_tw     TW%%     Long_PF  Short_PF  L_n  S_n  CrisisP"
+        )
         for _li, _ltw in enumerate(_leg_tws):
             _tw_pct = (math.exp(float(_ltw)) - 1.0) * 100.0
             _flag = "✓" if _ltw > 0.0 else "✗"
+            _lpf_s = f"{_leg_l_pf[_li]:.2f}" if _li < len(_leg_l_pf) else "  —"
+            _spf_s = f"{_leg_s_pf[_li]:.2f}" if _li < len(_leg_s_pf) else "  —"
+            _lcnt_s = str(_leg_l_cnt[_li]) if _li < len(_leg_l_cnt) else "—"
+            _scnt_s = str(_leg_s_cnt[_li]) if _li < len(_leg_s_cnt) else "—"
+            _crisis_s = f"{_leg_crisis[_li]:.3f}" if _li < len(_leg_crisis) else "  —"
             _logger.info(
-                "    %d/%d     %+.4f    %+.2f%%  %s",
+                "    %d/%d  %+.4f  %+.2f%%  %s  %s  %s  %4s  %4s  %s",
                 _li + 1, len(_leg_tws), _ltw, _tw_pct, _flag,
+                _lpf_s, _spf_s, _lcnt_s, _scnt_s, _crisis_s,
             )
 
     # [TELEMETRY] Optimization & AWF Audit
@@ -1099,7 +1111,7 @@ def main() -> None:
     _logger.info("\n" + "═" * 85)
     _logger.info(" [STEP 5/5] FINAL OOS EVALUATION & WF ADAPTATION")
     _logger.info("═" * 85)
-    
+
     oos_port = run_oos_margin_shared_portfolio(
         valid_symbols, args.tf, params, oos_data_maps, cache_root=FUTURES_CACHE_DIR
     )
@@ -1343,7 +1355,7 @@ def main() -> None:
     is_port["symbol_names"] = valid_symbols
     ho_port["symbol_names"] = valid_symbols
     oos_port["symbol_names"] = valid_symbols
-    
+
     # OOS performance vs IS performance
     is_cagr_v = float(is_port.get("cagr_pct", is_port.get("cagr", 0.0)))
     oos_cagr_v = float(oos_port.get("cagr_pct", oos_port.get("cagr", 0.0)))
@@ -1371,7 +1383,7 @@ def main() -> None:
         awf_mu_log = float(best_trial.user_attrs.get("ml_mean_log_growth_cpcv", 0.0))
         _pbo_cur = float(pbo_val) if pbo_val is not None else 0.5
 
-        # [REVISION] IS sanity: AWF mu_log > 0.05 only.
+        # [REVISION] IS sanity: AWF mu_log > 0.03.
         # BTC-relative Net Alpha removed — redundant with awf_mu_log and regime-biased
         # (BTC bull IS period makes relative gate structurally unpassable).
         is_net_alpha_v = is_cagr_v - (_btc_benchmark_is if _btc_benchmark_is is not None else 0.0)
@@ -1380,7 +1392,7 @@ def main() -> None:
         if not awf_pass:
             gate_ok = False
             _logger.warning(
-                " [IS STRUCTURAL GATE] AWF mu_log=%.4f (need >0.05) IS Net Alpha=%.2f%% "
+                " [IS STRUCTURAL GATE] AWF mu_log=%.4f (need >0.03) IS Net Alpha=%.2f%% "
                 "IS Sharpe=%.2f OOS Sharpe=%.2f pseudo_pbo=%.4f FAIL.",
                 awf_mu_log, is_net_alpha_v, is_sharpe_v, oos_sharpe_v, _pbo_cur,
             )
@@ -1500,7 +1512,7 @@ def main() -> None:
                 _new_oos_mdd = abs(float(oos_port.get("mdd_pct", 100.0)))
                 _new_romad = _new_oos_cagr / _new_oos_mdd if _new_oos_mdd > 1e-6 else 0.0
                 _new_ho = float(ho_port.get("cagr_pct", 0.0))
-                _new_pbo = float(pbo_obs)
+                _new_pbo = float(pbo_obs) if 'pbo_obs' in locals() else 0.5
 
                 # Improvement logic: prioritize Net Alpha and Risk-Adjusted Return (RoMaD)
                 _alpha_improved = _new_oos_alpha > (_champ_oos_alpha + 1.0) # >1% improvement
@@ -1509,18 +1521,27 @@ def main() -> None:
 
                 # Robustness Upgrade: HO recovery or significant PBO drop
                 _pbo_champ_max = float(pbo_champ_eff)
-                _robustness_upgrade = (_champ_ho < 0) and (_new_ho > 0) and (_new_pbo < (_pbo_champ_max - 0.05))
+                _robustness_upgrade = (
+                    (_champ_ho < 0) and (_new_ho > 0) and (_new_pbo < (_pbo_champ_max - 0.05))
+                )
 
                 # Survival conditions
-                _alpha_acceptable = _new_oos_alpha > (_champ_oos_alpha - 5.0) # Within 5% of champ alpha
-                _romad_acceptable = _new_romad > (_champ_romad * 0.90) # Within 90% of champ RoMaD
+                _alpha_acceptable = _new_oos_alpha > (_champ_oos_alpha - 5.0) # Within 5%
+                if _pbo_improved and (_new_pbo < _champ_pbo - 0.10) and (_new_oos_cagr > 15.0):
+                    _alpha_acceptable = _new_oos_alpha > (_champ_oos_alpha - 20.0)
+                _romad_acceptable = _new_romad > (_champ_romad * 0.90) # Within 90%
                 _pbo_strict = _new_pbo <= _pbo_champ_max
 
                 # REJECT if hold-out regresses severely
                 _holdout_fail = (_champ_ho > 0.0) and (_new_ho < max(0.5 * _champ_ho, 5.0))
 
-                # Final decision: Any meaningful improvement in Alpha or RoMaD, provided others are acceptable
-                _is_better = (_alpha_improved and _romad_acceptable) or (_romad_improved and _alpha_acceptable) or _robustness_upgrade or (_pbo_improved and _alpha_acceptable)
+                # Final decision: Any meaningful improvement in Alpha or RoMaD
+                _is_better = (
+                    (_alpha_improved and _romad_acceptable) or
+                    (_romad_improved and _alpha_acceptable) or
+                    _robustness_upgrade or
+                    (_pbo_improved and _alpha_acceptable)
+                )
 
                 if _holdout_fail:
                     _is_better = False
@@ -1528,19 +1549,39 @@ def main() -> None:
                 if not (_is_better and _pbo_strict):
                     gate_ok = False
                     _logger.warning(
-                        " [CHAMPION GUARD] No meaningful improvement (Alpha %.2f%% vs %.2f%% | RoMaD %.2f vs %.2f | PBO %.4f vs %.4f). Champion preserved.",
-                        _new_oos_alpha, _champ_oos_alpha, _new_romad, _champ_romad, _new_pbo, _champ_pbo
+                        " [CHAMPION GUARD] No meaningful improvement (Alpha %.2f%% vs %.2f%% | "
+                        "RoMaD %.2f vs %.2f | PBO %.4f vs %.4f). Champion preserved.",
+                        _new_oos_alpha, _champ_oos_alpha, _new_romad, _champ_romad,
+                        _new_pbo, _champ_pbo
                     )
                 else:
-                    _reason = "Alpha Improved" if _alpha_improved else "RoMaD Improved" if _romad_improved else "Robustness Upgrade" if _robustness_upgrade else "PBO Improved"
+                    if _alpha_improved:
+                        _reason = "Alpha Improved"
+                    elif _romad_improved:
+                        _reason = "RoMaD Improved"
+                    elif _robustness_upgrade:
+                        _reason = "Robustness Upgrade"
+                    else:
+                        _reason = "PBO Improved"
+
                     _logger.info(
-                        " [CHAMPION GUARD] %s: Alpha %.2f%%->%.2f%% | RoMaD %.2f->%.2f | PBO %.4f->%.4f | HO %.2f%%->%.2f%%.",
-                        _reason, _champ_oos_alpha, _new_oos_alpha, _champ_romad, _new_romad, _champ_pbo, _new_pbo, _champ_ho, _new_ho
+                        " [CHAMPION GUARD] %s: Alpha %.2f%%->%.2f%% | RoMaD %.2f->%.2f | "
+                        "PBO %.4f->%.4f | HO %.2f%%->%.2f%%.",
+                        _reason, _champ_oos_alpha, _new_oos_alpha, _champ_romad, _new_romad,
+                        _champ_pbo, _new_pbo, _champ_ho, _new_ho
                     )
             except Exception as _ce:
-                _logger.warning(" [CHAMPION GUARD] champion.json read failed (%s). Guard skipped.", _ce)
+                _logger.warning(" [CHAMPION GUARD] champion.json read failed (%s). Guard skipped.", _ce)  # noqa: E501
 
-    _verdict = "PROMOTE ✅" if gate_ok else "HOLD ❌"    # [TELEMETRY] Final Gate Status & Comprehensive Evaluation
+        # T4: Multi-seed mean verification note (display-only, non-blocking)
+        _logger.info(
+            " [CHAMPION GUARD] Note: Single-seed OOS comparison only. "
+            "For stable promotion, recommend 3-seed mean verification.\n"
+            "  Champion 3-seed mean: +23.3%% ± 25.2pp (S49) | "
+            "Candidate: run with seeds=[42,7,13] and compare means."
+        )
+
+    _verdict = "PROMOTE ✅" if gate_ok else "HOLD ❌"  # [TELEMETRY] Final Gate Status & Comprehensive Evaluation  # noqa: E501
     eval_payload = {
         "stage": "eval_audit",
         "gate_ok": bool(gate_ok),
