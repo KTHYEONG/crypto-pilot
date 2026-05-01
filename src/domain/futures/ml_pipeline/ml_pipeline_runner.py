@@ -63,6 +63,7 @@ _META_EXTRA_FEATS: tuple[str, ...] = (
     "corr_btc_24",
     "vpin_proxy_12",
     "ret_vol_adj_24",
+    "downside_jump_24",
 )
 
 
@@ -307,6 +308,23 @@ def _hmm_modulator_kelly_values(
         is_recovery = (p_crisis > float(crisis_thr)) & (trend_24h > rec_thr)
         mod_long = np.where(is_recovery, np.maximum(mod_long, rec_floor), mod_long)
 
+    # [NEW] Pragmatic Alternative 4: Post-HMM Volatility Overlay
+    # Suppress position sizes by 50% if raw BTC volatility is in the extreme top 5% (Fat-tail).
+    # This prevents the Gaussian HMM from being blinded by outlier magnitudes.
+    atr_24 = (b["high"] - b["low"]).rolling(24).mean()
+    atr_pct = (atr_24 / b["close"].shift(1).clip(lower=1e-12))
+    # Aligned to merged dataframe via datetime
+    b_vol = b[["datetime"]].copy()
+    b_vol["atr_pct"] = atr_pct.fillna(0.0)
+    # 500h causal window for quantile to adapt to market regime shifts
+    b_vol["vol_q95"] = b_vol["atr_pct"].rolling(500, min_periods=100).quantile(0.95).fillna(1e9)
+    
+    merged_vol = merged[["datetime"]].merge(b_vol, on="datetime", how="left")
+    is_extreme_vol = (merged_vol["atr_pct"] > merged_vol["vol_q95"]).to_numpy()
+    
+    mod_long = np.where(is_extreme_vol, mod_long * 0.5, mod_long)
+    mod_short = np.where(is_extreme_vol, mod_short * 0.5, mod_short)
+
     return pd.DataFrame({
         "hmm_modulator_long": mod_long,
         "hmm_modulator_short": mod_short,
@@ -538,10 +556,15 @@ def _step4_fusion_one_symbol(
             "ml_calib_prob", "ml_calib_prob_long", "ml_calib_prob_short",
             "hmm_prob_bull_trend", "hmm_prob_bear_trend", "hmm_prob_chop", "hmm_prob_crisis"
         ]
+        # Dynamically add all potential feature columns to drop list
+        all_feat_cols = list(ml_reserved)
+        all_feat_cols.extend(GP_ENGINEERED_FEATURE_NAMES)
+        all_feat_cols.extend(_META_EXTRA_FEATS)
+        
         # Also drop any legacy or dynamic HMM probability columns
         hmm_to_drop = [c for c in df_1h.columns if str(c).startswith("hmm_prob_")]
 
-        drop_exist = list(set(ml_reserved + hmm_to_drop))
+        drop_exist = list(set(all_feat_cols + hmm_to_drop))
         drop_exist = [c for c in drop_exist if c in df_1h.columns]
 
         if drop_exist:
@@ -769,17 +792,9 @@ def merge_ml_output_into_data_maps(
                 c for c in mff.columns
                 if str(c).startswith("hmm_prob_") and str(c).split("_")[-1].isdigit()
             ]
-            hmm_dyn = sorted(
-                hmm_candidates,
-                key=lambda x: int(str(x).split("_")[-1]),
-            )
+        hmm_dyn = _sorted_hmm_prob_columns(mff)
         ml_cols = [
-            "datetime",
             "gp_alpha_00",
-            "hmm_modulator",
-            "hmm_modulator_long",
-            "hmm_modulator_short",
-            "hmm_modulator_base_long",
             "btc_trend_vol_adj_24h",
             "slot_rank_score",
             "ml_calib_prob",
@@ -789,6 +804,11 @@ def merge_ml_output_into_data_maps(
             "xs_score_short",
             *hmm_dyn,
         ]
+        # Include extra features for auditing/MetaLabeler (Pragmatic Alternative 2)
+        for c in _META_EXTRA_FEATS:
+            if c not in ml_cols:
+                ml_cols.append(c)
+
         # Ensure hmm_prob_crisis is there even if not in hmm_dyn, but only once
         if "hmm_prob_crisis" in mff.columns and "hmm_prob_crisis" not in ml_cols:
             ml_cols.append("hmm_prob_crisis")
