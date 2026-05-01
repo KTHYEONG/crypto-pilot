@@ -25,7 +25,7 @@ from src.domain.futures.ml_pipeline.feature_engineering import (
     GP_ENGINEERED_FEATURE_NAMES,
     GP_FEATURE_SCHEMA_VERSION,
 )
-from src.domain.futures.ml_pipeline.gp_alpha_filter import filter_gp_alpha_columns
+from src.domain.futures.ml_pipeline.alpha_component_filter import filter_alpha_components
 
 _logger = logging.getLogger(__name__)
 
@@ -258,7 +258,7 @@ def _resolve_gp_feature_columns(panel_df: pd.DataFrame) -> list[str]:
 
 
 @dataclass
-class GPAlphaMiner:
+class MLAlphaMiner:
     n_features_to_select: int = 15
     population_size: int = 1000
     generations: int = 20
@@ -453,7 +453,7 @@ class GPAlphaMiner:
 
         # 4. Dynamic Filtering (Always run)
         fo = filter_options or {}
-        alpha_df_all, filt_meta = filter_gp_alpha_columns(
+        alpha_df_all, filt_meta = filter_alpha_components(
             raw_alpha_df.copy(),
             panel_df,
             is_end_date=is_end_date,
@@ -472,14 +472,14 @@ class GPAlphaMiner:
                           and alpha_df_all[c].std() > 1e-6]
         
         if "gp_alpha_00" not in surviving_cols and surviving_cols:
-            best_surv = surviving_cols[0] # filter_gp_alpha_columns preserves order of input (rank)
+            best_surv = surviving_cols[0] # filter_alpha_components preserves order of input (rank)
             _logger.info(" [PROMOTION] gp_alpha_00 failed gates. Promoting %s to slot 00.", best_surv)
             # Swap data
             tmp = alpha_df_all["gp_alpha_00"].copy()
             alpha_df_all["gp_alpha_00"] = alpha_df_all[best_surv]
             alpha_df_all[best_surv] = tmp
             # Update best_fitness attr to reflect promoted alpha
-            # In filter_gp_alpha_columns, we don't have per-alpha fitness, but we know the order is by fitness.
+            # In filter_alpha_components, we don't have per-alpha fitness, but we know the order is by fitness.
             # So the first surviving one is the best among survivors.
 
         if float(filt_meta.get("neutralize_primary", 0.0)) > 0.5:
@@ -488,7 +488,7 @@ class GPAlphaMiner:
 
         alpha_df = alpha_df_all.reindex(panel_df.index).fillna(0.5)
         alpha_df.attrs["best_fitness"] = raw_alpha_df.attrs.get("best_fitness", 0.0)
-        alpha_df.attrs["gp_alpha_filter"] = filt_meta
+        alpha_df.attrs["alpha_component_filter"] = filt_meta
 
         return alpha_df
 

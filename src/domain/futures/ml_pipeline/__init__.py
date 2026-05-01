@@ -6,7 +6,7 @@ from src.domain.futures.ml_pipeline.feature_engineering import (
     build_gp_input_features,
     build_hmm_input_features,
 )
-from src.domain.futures.ml_pipeline.gp_alpha_miner import GPAlphaMiner
+from src.domain.futures.ml_pipeline.ml_alpha_miner import MLAlphaMiner
 from src.domain.futures.ml_pipeline.hmm_state_inferrer import HMMStateInferrer
 from src.domain.futures.ml_pipeline.ml_pipeline_runner import (
     MLPipelineOutput,
@@ -18,7 +18,7 @@ from src.domain.futures.ml_pipeline.ml_pipeline_runner import (
 )
 
 __all__ = [
-    "GPAlphaMiner",
+    "MLAlphaMiner",
     "HMMStateInferrer",
     "MLPipelineOutput",
     "build_gp_input_features",

@@ -260,7 +260,7 @@ def _symbol_ic_balance_ok(
     return bool(ratio <= max_ratio)
 
 
-def filter_gp_alpha_columns(
+def filter_alpha_components(
     alpha_wide: pd.DataFrame,
     panel_df: pd.DataFrame,
     *,
