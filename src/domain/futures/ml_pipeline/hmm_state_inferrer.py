@@ -67,7 +67,7 @@ def _assign_state_semantic_labels_v2(means: np.ndarray) -> dict[int, str]:
     row_ind, col_ind = linear_sum_assignment(dist_matrix)
     
     state_to_label = {}
-    for r, c in zip(row_ind, col_ind):
+    for r, c in zip(row_ind, col_ind, strict=False):
         state_to_label[int(r)] = label_names[c]
         
     # Fill remaining states if k > 4 (unlikely in systemic but for robustness)
@@ -230,7 +230,9 @@ def _regime_entropy(p: np.ndarray) -> float:
 
 
 @njit  # type: ignore
-def _kama_numba(data: np.ndarray, period: int, fast_span: int = 2, slow_span: int = 30) -> np.ndarray:
+def _kama_numba(
+    data: np.ndarray, period: int, fast_span: int = 2, slow_span: int = 30
+) -> np.ndarray:
     """Numba-accelerated Kaufman's Adaptive Moving Average."""
     n = len(data)
     out = np.copy(data)
@@ -265,7 +267,9 @@ def _kama_numba(data: np.ndarray, period: int, fast_span: int = 2, slow_span: in
 
 
 @njit  # type: ignore
-def _alma_numba(data: np.ndarray, window: int, offset: float = 0.85, sigma: float = 6.0) -> np.ndarray:
+def _alma_numba(
+    data: np.ndarray, window: int, offset: float = 0.85, sigma: float = 6.0
+) -> np.ndarray:
     """Numba-accelerated Arnaud Legoux Moving Average."""
     n = len(data)
     out = np.copy(data)
@@ -306,8 +310,10 @@ def _jma_approx_numba(data: np.ndarray, period: int, phase: float = 0.0) -> np.n
     length = float(period)
     phase_adj = max(-100.0, min(100.0, phase))
     ratio = (phase_adj / 100.0) + 1.5
-    if ratio < 0.5: ratio = 0.5
-    if ratio > 2.5: ratio = 2.5
+    if ratio < 0.5:
+        ratio = 0.5
+    if ratio > 2.5:
+        ratio = 2.5
     
     beta = 0.45 * (length - 1.0) / (0.45 * (length - 1.0) + 2.0)
     alpha = beta ** 1.5
@@ -633,14 +639,29 @@ class HMMStateInferrer:
                                 symbol,
                                 np.min(occ),
                             )
-                            dominant_s = int(np.argmax(occ))
                             collapsed_indices = np.where(occ < 0.02)[0]
                             
+                            # Archetype Anchoring for State Recovery
+                            archetypes = {
+                                "bull_trend": [
+                                    1.2, 1.2, -0.5, -0.5, 1.0, 0.5, 1.0, 0.5, -0.5, 1.0
+                                ],
+                                "bear_trend": [
+                                    -1.2, -1.2, 0.5, 0.5, -1.0, -0.2, -1.0, -0.5, 0.5, -1.0
+                                ],
+                                "chop": [0.0, 0.0, -1.0, -1.0, 0.0, -0.5, 0.0, 0.0, 0.0, 0.0],
+                                "crisis": [
+                                    -2.0, -2.0, 2.0, 2.0, -2.0, 1.0, -1.0, -2.0, 1.5, -1.0
+                                ],
+                            }
+                            label_names = ["bull_trend", "bear_trend", "chop", "crisis"]
+                            archetype_matrix = np.array([archetypes[ln] for ln in label_names])
+
                             new_means = model.means_.copy()
                             for ci in collapsed_indices:
-                                # Slightly lower noise (0.3 instead of 0.5) for stability
-                                noise = np.random.normal(0, 0.3, size=model.n_features)
-                                new_means[ci] = model.means_[dominant_s] + noise
+                                # Reset collapsed state's mean using archetypes (cyclic fallback)
+                                arch_idx = ci % len(label_names)
+                                new_means[ci] = archetype_matrix[arch_idx]
                             
                             model.means_ = new_means
                             # Reset core params with strict normalization
