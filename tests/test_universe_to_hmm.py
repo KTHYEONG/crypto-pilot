@@ -53,12 +53,12 @@ def audit_hmm_logic_changes(ml_out, symbols):
         _logger.info(" [OK] All v6 semantic columns found.")
 
     # 2. Modulator Audit
-    mod_cols = ["hmm_modulator_long", "hmm_modulator_short", "btc_trend_vol_adj_24h"]
+    mod_cols = ["hmm_modulator_long", "hmm_modulator_short", "btc_trend_vol_adj_24h", "downside_jump_24"]
     for c in mod_cols:
         if c in mff.columns:
             mean_val = mff[c].mean()
             std_val = mff[c].std()
-            _logger.info(f" [MODULATOR] {c:<25}: Mean={mean_val:.4f}, Std={std_val:.4f}")
+            _logger.info(f" [FEAT/MOD] {c:<25}: Mean={mean_val:.4f}, Std={std_val:.4f}")
         else:
             _logger.warning(f" [MISSING] {c} not found in meta feature frame.")
 
