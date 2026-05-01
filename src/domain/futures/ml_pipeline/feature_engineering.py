@@ -33,7 +33,7 @@ HMM_SEMANTIC_PROB_COLUMNS: tuple[str, ...] = (
 
 # Bump when GP feature semantics change without renaming columns so raw GP
 # caches are invalidated and Tier 2 retraining actually happens.
-GP_FEATURE_SCHEMA_VERSION: str = "v10"
+GP_FEATURE_SCHEMA_VERSION: str = "v11"
 
 GP_ENGINEERED_FEATURE_NAMES: tuple[str, ...] = (
     "ret_1",
@@ -73,6 +73,18 @@ GP_ENGINEERED_FEATURE_NAMES: tuple[str, ...] = (
     "vpin_proxy_12",
     "funding_trap_24",
     "downside_jump_24",
+    "oi_momentum_4h",
+    "oi_momentum_24h",
+    "oi_price_divergence_24h",
+    "oi_funding_trap_24h",
+    "top_trader_lsr_z_24h",
+    "global_lsr_z_24h",
+    "lsr_spread_12h",
+    "taker_buy_sell_ratio_12h",
+    "cvd_divergence_24h",
+    "taker_acceleration_24h",
+    "funding_intensity_24h",
+    "absorption_ratio_12h",
 )
 
 
@@ -434,6 +446,75 @@ def build_gp_input_features(df: pd.DataFrame) -> pd.DataFrame:
     out["downside_jump_24"] = (
         (log_ret_1 / (sig_24 + 1e-12)).clip(upper=0.0).rolling(24).min().abs()
     )
+
+    # v11: Institutional Metrics (OI, LSR, Microstructure, Stress)
+    # OI Based
+    if "sum_open_interest" in df.columns:
+        oi = df["sum_open_interest"].astype(np.float64)
+        oi_mom_4 = np.log(oi / oi.shift(4).clip(lower=1e-12))
+        oi_mom_24 = np.log(oi / oi.shift(24).clip(lower=1e-12))
+        out["oi_momentum_4h"] = _log_modulus(oi_mom_4)
+        out["oi_momentum_24h"] = _log_modulus(oi_mom_24)
+        out["oi_price_divergence_24h"] = out["ret_24"] - out["oi_momentum_24h"]
+        
+        # oi_funding_trap_24h: Price down, OI up, Funding negative -> potential short trap
+        f_rate = df["funding_rate"].astype(np.float64) if "funding_rate" in df.columns else 0.0
+        out["oi_funding_trap_24h"] = (
+            ((out["ret_24"] < -0.01) & (oi_mom_24 > 0.02) & (f_rate < 0))
+            .astype(np.float64)
+        )
+    else:
+        oi_cols = [
+            "oi_momentum_4h", "oi_momentum_24h", "oi_price_divergence_24h", "oi_funding_trap_24h"
+        ]
+        for c in oi_cols:
+            out[c] = 0.0
+
+    # LSR Based
+    if "top_trader_long_short_ratio" in df.columns:
+        tt_lsr = df["top_trader_long_short_ratio"].astype(np.float64)
+        out["top_trader_lsr_z_24h"] = _rolling_robust_z(tt_lsr, 24)
+    else:
+        out["top_trader_lsr_z_24h"] = 0.0
+
+    if "long_short_ratio" in df.columns:
+        g_lsr = df["long_short_ratio"].astype(np.float64)
+        out["global_lsr_z_24h"] = _rolling_robust_z(g_lsr, 24)
+    else:
+        out["global_lsr_z_24h"] = 0.0
+
+    if "top_trader_long_short_ratio" in df.columns and "long_short_ratio" in df.columns:
+        out["lsr_spread_12h"] = (
+            (df["top_trader_long_short_ratio"] - df["long_short_ratio"])
+            .rolling(12, min_periods=6).mean().fillna(0.0)
+        )
+    else:
+        out["lsr_spread_12h"] = 0.0
+
+    # Microstructure
+    tbq_12 = tbq.rolling(12, min_periods=6).sum()
+    tsq_12 = tsq.rolling(12, min_periods=6).sum()
+    out["taker_buy_sell_ratio_12h"] = (tbq_12 / (tsq_12 + 1e-9)).fillna(1.0)
+    
+    cvd_rolling = (tbq - tsq).rolling(24, min_periods=12).sum()
+    cvd_norm = cvd_rolling / (vol.rolling(24, min_periods=12).sum() + 1e-9)
+    out["cvd_divergence_24h"] = out["ret_24"] - _log_modulus(cvd_norm)
+    
+    imb_24 = (tbq - tsq) / (vol + 1e-9)
+    out["taker_acceleration_24h"] = imb_24.diff(24).fillna(0.0)
+
+    # Stress
+    if "funding_rate" in df.columns:
+        out["funding_intensity_24h"] = (
+            df["funding_rate"].abs() * out["realized_vol_yz_24"]
+        ).rolling(24, min_periods=12).mean().fillna(0.0)
+    else:
+        out["funding_intensity_24h"] = 0.0
+        
+    # absorption_ratio_12h: proxy for price discovery efficiency (Return / Volatility / Volume)
+    out["absorption_ratio_12h"] = (
+        out["ret_12"].abs() / (out["realized_vol_yz_24"] * out["vol_ratio_24"] + 1e-9)
+    ).fillna(0.0)
 
     # vol_ratio / buy_sell_ratio: keep finite defaults; ret/ma_dist/funding left NaN for CS impute
     out = out.replace([np.inf, -np.inf], np.nan)

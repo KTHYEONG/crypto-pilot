@@ -441,11 +441,21 @@ class DataCollector:
         return cache_df.loc[mask].copy()
 
     def _normalize_metrics_df(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Metrics 데이터의 timestamp를 integer ms로 통일."""
+        """Metrics 데이터의 timestamp를 integer ms로 통일 및 컬럼명 표준화."""
         if df.empty:
             return df
         
         df = df.copy()
+
+        # [Institutional Mapping] Map Vision CSV column names to system standards
+        mapping = {
+            "count_long_short_ratio": "long_short_ratio",
+            "count_toptrader_long_short_ratio": "top_trader_long_short_ratio",
+            "sum_taker_long_short_vol_ratio": "taker_buy_sell_vol_value"
+        }
+        for old_col, new_col in mapping.items():
+            if old_col in df.columns:
+                df[new_col] = df[old_col]
         
         # 1. datetime 컬럼 확보
         if "datetime" in df.columns:
@@ -564,10 +574,16 @@ class DataCollector:
                 since_ms = int(a_start.timestamp() * 1000)
                 # [REFACTORED] Fetch 1h metrics for better resolution
                 oi_df = self.client.fetch_open_interest_history(symbol, "1h", since_ms)
-                lsr_df = self.client.fetch_long_short_ratio_history(symbol, "1h", since_ms)
+                tt_lsr_df = self.client.fetch_long_short_ratio_history(symbol, "1h", since_ms)
+                g_lsr_df = self.client.fetch_global_long_short_ratio_history(symbol, "1h", since_ms)
                 
-                if not oi_df.empty and not lsr_df.empty:
-                    merged_api = pd.merge(oi_df, lsr_df, on="timestamp", how="outer")
+                if not oi_df.empty:
+                    merged_api = oi_df
+                    if not tt_lsr_df.empty:
+                        merged_api = pd.merge(merged_api, tt_lsr_df, on="timestamp", how="outer")
+                    if not g_lsr_df.empty:
+                        merged_api = pd.merge(merged_api, g_lsr_df, on="timestamp", how="outer")
+                    
                     new_parts.append(self._normalize_metrics_df(merged_api))
 
         # 5. 병합 및 저장

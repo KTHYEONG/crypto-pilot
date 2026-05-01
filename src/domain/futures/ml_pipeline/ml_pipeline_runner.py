@@ -23,10 +23,10 @@ from src.domain.futures.ml_pipeline.feature_engineering import (
     HMM_SEMANTIC_PROB_COLUMNS,
     build_gp_input_features,
 )
-from src.domain.futures.ml_pipeline.gp_alpha_miner import GPAlphaMiner
 from src.domain.futures.ml_pipeline.gp_multiobjective import is_deap_available
 from src.domain.futures.ml_pipeline.hmm_state_inferrer import HMMStateInferrer
 from src.domain.futures.ml_pipeline.meta_labeler import MetaLabeler
+from src.domain.futures.ml_pipeline.ml_alpha_miner import MLAlphaMiner
 from src.domain.futures.ml_pipeline.triple_barrier import label_triple_barrier
 
 _logger = logging.getLogger(__name__)
@@ -68,7 +68,7 @@ _META_EXTRA_FEATS: tuple[str, ...] = (
 
 
 def _meta_feature_column_names(wide_1h: pd.DataFrame) -> tuple[str, ...]:
-    """Resolves which columns to use as features for the meta-labeler."""
+    """Resolve which columns to use as features for the meta-labeler."""
     hmm_cols = _sorted_hmm_prob_columns(wide_1h)
     base: list[str] = []
     if "gp_alpha_00" in wide_1h.columns:
@@ -788,14 +788,18 @@ def merge_ml_output_into_data_maps(
         if not hmm_dyn:
             # Only include columns where the last part is a digit to avoid ValueError
             # (e.g., hmm_prob_0_x)
-            hmm_candidates = [
-                c for c in mff.columns
-                if str(c).startswith("hmm_prob_") and str(c).split("_")[-1].isdigit()
-            ]
-        hmm_dyn = _sorted_hmm_prob_columns(mff)
+            mff = mff.drop(
+                columns=[
+                    c for c in mff.columns
+                    if str(c).startswith("hmm_prob_") and str(c).split("_")[-1].isdigit()
+                ]
+            )
         ml_cols = [
+            "datetime",
             "gp_alpha_00",
             "btc_trend_vol_adj_24h",
+            "hmm_modulator_long",
+            "hmm_modulator_short",
             "slot_rank_score",
             "ml_calib_prob",
             "ml_calib_prob_long",
@@ -1151,7 +1155,7 @@ def run_ml_pipeline_for_universe(
             "FUTURES_ML_GP_NSGA2_ENABLED=True but `deap` is not installed; "
             "continuing with scalarized gplearn fitness (see gp_multiobjective.py)."
         )
-    miner = GPAlphaMiner(
+    miner = MLAlphaMiner(
         population_size=int(cfg.get("FUTURES_ML_GP_POPULATION", 1000)),
         generations=int(cfg.get("FUTURES_ML_GP_GENERATIONS", 20)),
         n_jobs=n_jobs,
@@ -1177,7 +1181,7 @@ def run_ml_pipeline_for_universe(
 
     # --- Print GP IC Validation Results immediately after Step 2 ---
     best_fitness = alpha_panel.attrs.get("best_fitness", 0.0)
-    filter_meta = alpha_panel.attrs.get("gp_alpha_filter", {})
+    filter_meta = alpha_panel.attrs.get("alpha_component_filter", {})
 
     _logger.info("-" * 85)
     _logger.info(" [GP AUDIT] LightGBM IC Validation")
