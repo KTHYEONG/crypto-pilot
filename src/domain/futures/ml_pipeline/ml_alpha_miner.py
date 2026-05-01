@@ -21,6 +21,7 @@ from scipy.stats import spearmanr
 from sklearn.preprocessing import QuantileTransformer
 
 from config.opt_config import OPT_FUTURES_CONFIG
+from src.core.utils.cache_manager import CacheManager
 from src.domain.futures.ml_pipeline.alpha_component_filter import filter_alpha_components
 from src.domain.futures.ml_pipeline.cross_sectional_utils import CrossSectionalPipelineUtils
 from src.domain.futures.ml_pipeline.feature_engineering import (
@@ -29,42 +30,6 @@ from src.domain.futures.ml_pipeline.feature_engineering import (
 )
 
 _logger = logging.getLogger(__name__)
-
-
-def _generate_smart_cache_stem(
-    pop: int, gen: int, horizons: tuple[int, ...], symbols: list[str], is_end_date: str | None
-) -> str:
-    """Generate a unique cache stem based on miner configuration and data scope.
-
-    Args:
-        pop: Population size.
-        gen: Number of generations.
-        horizons: Target horizons.
-        symbols: List of symbols used.
-        is_end_date: Cutoff date for In-Sample data.
-
-    Returns:
-        A hash-tagged string stem for filenames.
-
-    """
-    h_str = "-".join(map(str, horizons))
-    prefix = f"lgbm_univ_s{len(symbols)}_h{h_str}"
-
-    dna = {
-        "pop": pop,
-        "gen": gen,
-        "horizons": horizons,
-        "symbols": sorted(symbols),
-        "is_end_date": is_end_date,
-        "version": "v1_lgbm_asym",
-        "long_bias": float(OPT_FUTURES_CONFIG.get("FUTURES_GP_LONG_BIAS", 1.0)),
-        "feature_schema_version": GP_FEATURE_SCHEMA_VERSION,
-        "feature_columns": list(GP_ENGINEERED_FEATURE_NAMES),
-    }
-    dna_json = json.dumps(dna, sort_keys=True)
-    short_hash = hashlib.sha256(dna_json.encode()).hexdigest()[:8]
-
-    return f"{prefix}_{short_hash}"
 
 
 def _pct_uniform_cs_is_fit(unstacked: pd.DataFrame, is_row_mask: np.ndarray) -> pd.DataFrame:
@@ -163,32 +128,6 @@ class MLAlphaMiner:
     _mp_std: np.ndarray | float | None = field(default=None, init=False)
     _mp_evecs: np.ndarray | None = field(default=None, init=False)
 
-    def _cleanup_old_caches(self, cache_path: Path, max_age_days: int = 7) -> None:
-        """Remove stale cache files.
-
-        Args:
-            cache_path: Path to cache file (used for directory resolution).
-            max_age_days: Maximum age of cache files in days.
-
-        """
-        try:
-            import time
-
-            now = time.time()
-            cache_dir = cache_path.parent
-            if not cache_dir.exists():
-                return
-            patterns = ["lgbm_univ_*", "raw_lgbm_univ_*", "gp_univ_*", "raw_gp_univ_*"]
-            for pattern in patterns:
-                for f in cache_dir.glob(pattern):
-                    if f.is_file() and (now - f.stat().st_mtime) > (max_age_days * 86400):
-                        try:
-                            f.unlink()
-                        except Exception as e:
-                            _logger.debug("Failed to unlink old cache: %s", e)
-        except Exception as e:
-            _logger.debug("Cleanup failed: %s", e)
-
     def mine_alphas_cs(
         self,
         panel_df: pd.DataFrame,
@@ -219,30 +158,51 @@ class MLAlphaMiner:
         versioned_cache: Path | None = None
         raw_alpha_df: pd.DataFrame | None = None
         force_retrain = bool(OPT_FUTURES_CONFIG.get("FUTURES_ML_FORCE_RETRAIN_ALPHA", False))
+        
         if cache_path is not None:
-            self._cleanup_old_caches(cache_path)
-            symbols = list(work_panel.index.get_level_values("symbol").unique())
-            tag = "raw_" + _generate_smart_cache_stem(
-                self.population_size, self.generations, self.target_horizons, symbols, is_end_date
-            )
-            versioned_cache = cache_path.with_name(f"{tag}.parquet")
+            # SOTA: Dependency-Aware Hashing & LRU Cleanup
+            cm = CacheManager(cache_path.parent, max_files=10, max_size_mb=1000.0)
+            cm.cleanup_lru(pattern="raw_lgbm_univ_*")
+            
+            symbols = sorted(list(work_panel.index.get_level_values("symbol").unique()))
+            h_str = "-".join(map(str, self.target_horizons))
+            prefix = f"lgbm_univ_s{len(symbols)}_h{h_str}"
+            
+            deps = {
+                "pop": self.population_size,
+                "gen": self.generations,
+                "horizons": self.target_horizons,
+                "symbols": symbols,
+                "is_end_date": is_end_date,
+                "long_bias": float(OPT_FUTURES_CONFIG.get("FUTURES_GP_LONG_BIAS", 1.0)),
+                "feature_schema_version": GP_FEATURE_SCHEMA_VERSION,
+                "feature_columns": sorted(list(GP_ENGINEERED_FEATURE_NAMES)),
+                "ver": "v2_smart_lru"
+            }
+            # Track relevant source files for automatic invalidation
+            src_files = [
+                Path(__file__).resolve(),
+                Path(__file__).resolve().parent / "alpha_component_filter.py",
+                Path(__file__).resolve().parent / "feature_engineering.py"
+            ]
+            
+            tag = cm.generate_hash(deps, source_files=src_files)
+            versioned_cache = cm.get_cache_path(f"raw_{prefix}", ".parquet", tag)
             meta_cache = versioned_cache.with_suffix(".json")
+
             if force_retrain and versioned_cache.exists():
-                _logger.info(
-                    "LightGBM CS Cache Bypass (RAW): force retrain enabled; skipping %s.",
-                    versioned_cache.name,
-                )
+                _logger.info("LightGBM CS Cache Bypass: force retrain enabled.")
             elif versioned_cache.exists():
                 try:
                     loaded = pd.read_parquet(versioned_cache)
                     if len(loaded) == len(panel_df):
-                        _logger.info("LightGBM CS Cache Hit (RAW): %s.", versioned_cache.name)
+                        _logger.info("LightGBM CS Cache Hit (SOTA): %s.", versioned_cache.name)
                         if meta_cache.exists():
                             with open(meta_cache) as f:
                                 loaded.attrs.update(json.load(f))
                         raw_alpha_df = loaded
                 except Exception as e:
-                    _logger.debug("LightGBM Raw Cache load failed: %s", e)
+                    _logger.debug("LightGBM Smart Cache load failed: %s", e)
 
         unstacked_y = work_panel["target"].unstack(level="symbol")
         unique_times = unstacked_y.index
@@ -577,8 +537,9 @@ class MLAlphaMiner:
                 out_pred = np.zeros(len(aligned_df)) + 0.5
                 out_pred_long = np.zeros(len(aligned_df)) + 0.5
                 out_pred_short = np.zeros(len(aligned_df)) + 0.5
+
             slot_components.insert(0, out_pred)
-            long_components.insert(0, out_pred)
+            long_components.insert(0, out_pred_long)
             short_components.insert(0, out_pred_short)
 
             self._st_global = lgbm_h
@@ -607,6 +568,7 @@ class MLAlphaMiner:
             raw_alpha_df = pd.concat(alpha_series_list, axis=1)
             raw_alpha_df["gp_alpha_long_raw"] = pd.Series(out_pred_long, index=full_grid_index)
             raw_alpha_df["gp_alpha_short_raw"] = pd.Series(out_pred_short, index=full_grid_index)
+            raw_alpha_df = raw_alpha_df.loc[:, ~raw_alpha_df.columns.duplicated()].copy()
 
             best_fitness = 1.0
             raw_alpha_df.attrs["best_fitness"] = float(best_fitness)
@@ -657,15 +619,26 @@ class MLAlphaMiner:
             for c in alpha_df_all.columns
             if c.startswith("gp_alpha_") and c[-2:].isdigit() and alpha_df_all[c].std() > 1e-6
         ]
+        _logger.warning(" [CRITICAL_DEBUG] Reached mine_alphas_cs with unique run marker.")
+        if alpha_df_all.columns.duplicated().any():
+            _logger.warning(" [FILTER] Post-filter duplicate columns detected; cleaning. Cols: %s", list(alpha_df_all.columns))
+            alpha_df_all = alpha_df_all.loc[:, ~alpha_df_all.columns.duplicated()].copy()
+
+        _logger.info(" [FILTER] alpha_df_all columns: %s", list(alpha_df_all.columns))
         if {"gp_alpha_long_raw", "gp_alpha_short_raw"}.issubset(alpha_df_all.columns):
-            if float(filt_meta.get("neutralize_long_head", 0.0)) > 0.5:
-                alpha_df_all["gp_alpha_long_raw"] = 0.5
-                _logger.warning(" [FILTER] gp_alpha_long_raw neutralized.")
-            if float(filt_meta.get("neutralize_short_head", 0.0)) > 0.5:
-                alpha_df_all["gp_alpha_short_raw"] = 0.5
-                _logger.warning(" [FILTER] gp_alpha_short_raw neutralized.")
-            alpha_df_all["gp_alpha_long"] = alpha_df_all["gp_alpha_long_raw"].clip(0.0, 1.0)
-            alpha_df_all["gp_alpha_short"] = alpha_df_all["gp_alpha_short_raw"].clip(0.0, 1.0)
+            val_long = alpha_df_all["gp_alpha_long_raw"]
+            _logger.info(" [FILTER] gp_alpha_long_raw type: %s, shape: %s", type(val_long), getattr(val_long, "shape", "N/A"))
+            if isinstance(val_long, pd.DataFrame):
+                _logger.warning(" [FILTER] gp_alpha_long_raw is still a DataFrame! Columns: %s", list(val_long.columns))
+                alpha_df_all["gp_alpha_long"] = val_long.iloc[:, 0].clip(0.0, 1.0)
+            else:
+                alpha_df_all["gp_alpha_long"] = val_long.clip(0.0, 1.0)
+
+            val_short = alpha_df_all["gp_alpha_short_raw"]
+            if isinstance(val_short, pd.DataFrame):
+                alpha_df_all["gp_alpha_short"] = 1.0 - val_short.iloc[:, 0].clip(0.0, 1.0)
+            else:
+                alpha_df_all["gp_alpha_short"] = 1.0 - val_short.clip(0.0, 1.0)
         elif surviving_cols:
             alpha_df_all["gp_alpha_long"] = alpha_df_all[surviving_cols].mean(axis=1)
             alpha_df_all["gp_alpha_short"] = 1.0 - alpha_df_all[surviving_cols].mean(axis=1)

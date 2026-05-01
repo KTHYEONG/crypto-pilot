@@ -300,10 +300,15 @@ def filter_alpha_components(
     if alpha_wide.empty or panel_df.empty or "target" not in panel_df.columns:
         return alpha_wide, {"n_surviving": 0.0, "neutralize_primary": 0.0}
 
+    # Ensure unique columns in input
+    if alpha_wide.columns.duplicated().any():
+        _logger.warning("Duplicate columns detected in alpha_wide; dropping duplicates.")
+        alpha_wide = alpha_wide.loc[:, ~alpha_wide.columns.duplicated()].copy()
+
     cols = (
         list(alpha_cols)
         if alpha_cols is not None
-        else [c for c in alpha_wide.columns if c.startswith("gp_alpha_")]
+        else [c for c in alpha_wide.columns if c.startswith("gp_alpha_") and c[-2:].isdigit()]
     )
     if not cols:
         return alpha_wide, {"n_surviving": 0.0, "neutralize_primary": 0.0}
@@ -476,7 +481,8 @@ def filter_alpha_components(
             sym_bal_ok.append(bool(bal_ratio <= symbol_balance_max))
 
     reject = _benjamini_hochberg_reject(pvals, fdr_q)
-    out = alpha_wide.copy()
+    output_cols = list(dict.fromkeys(cols + [c for c in ("gp_alpha_long_raw", "gp_alpha_short_raw") if c in alpha_wide.columns]))
+    out = alpha_wide[output_cols].copy()
     n_surv = 0
 
     # 상세 진단을 위한 카운터

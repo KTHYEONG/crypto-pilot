@@ -759,7 +759,12 @@ def main() -> None:
     parser.add_argument(
         "--force-retrain-alpha",
         action="store_true",
-        help="Bypass GP raw cache and force alpha retraining for this run.",
+        help="Bypass GP raw cache and alpha retraining.",
+    )
+    parser.add_argument(
+        "--bypass-champion-guard",
+        action="store_true",
+        help="Force promotion regardless of champion comparison.",
     )
     args = parser.parse_args(remaining_args)
 
@@ -1555,7 +1560,12 @@ def main() -> None:
                 if _holdout_fail:
                     _is_better = False
 
-                if not (_is_better and _pbo_strict):
+                if args.bypass_champion_guard:
+                    _logger.info(" [CHAMPION GUARD] Bypassing comparison due to --bypass-champion-guard.")
+                    _is_better = True
+                    _pbo_strict = True
+                    _reason = "Manual Bypass"
+                elif not (_is_better and _pbo_strict):
                     gate_ok = False
                     _logger.warning(
                         " [CHAMPION GUARD] No meaningful improvement (Alpha %.2f%% vs %.2f%% | "
