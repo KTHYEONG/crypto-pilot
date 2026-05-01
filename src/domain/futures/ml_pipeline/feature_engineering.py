@@ -33,7 +33,7 @@ HMM_SEMANTIC_PROB_COLUMNS: tuple[str, ...] = (
 
 # Bump when GP feature semantics change without renaming columns so raw GP
 # caches are invalidated and Tier 2 retraining actually happens.
-GP_FEATURE_SCHEMA_VERSION: str = "v9"
+GP_FEATURE_SCHEMA_VERSION: str = "v10"
 
 GP_ENGINEERED_FEATURE_NAMES: tuple[str, ...] = (
     "ret_1",
@@ -72,6 +72,7 @@ GP_ENGINEERED_FEATURE_NAMES: tuple[str, ...] = (
     "corr_btc_24",
     "vpin_proxy_12",
     "funding_trap_24",
+    "downside_jump_24",
 )
 
 
@@ -427,6 +428,12 @@ def build_gp_input_features(df: pd.DataFrame) -> pd.DataFrame:
         )
     else:
         out["funding_trap_24"] = 0.0
+
+    # v10: Jump / Tail Features (Pragmatic Alternative 2)
+    # downside_jump_24: capture extreme negative movements (z-score < -3)
+    out["downside_jump_24"] = (
+        (log_ret_1 / (sig_24 + 1e-12)).clip(upper=0.0).rolling(24).min().abs()
+    )
 
     # vol_ratio / buy_sell_ratio: keep finite defaults; ret/ma_dist/funding left NaN for CS impute
     out = out.replace([np.inf, -np.inf], np.nan)
