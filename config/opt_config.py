@@ -49,6 +49,8 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     "FUTURES_ML_GP_GENERATIONS": 22,
     "FUTURES_ML_GP_TARGET_HORIZON": 6,
     "FUTURES_ML_GP_HORIZONS": (6, 12, 24, 48),
+    # Cache-control refit: when True, bypass GP raw cache and force alpha retraining.
+    "FUTURES_ML_FORCE_RETRAIN_ALPHA": False,
     "FUTURES_ML_GP_PARSIMONY": 0.001,
     "FUTURES_ML_GP_USE_TBM_WEIGHT": True,
     "FUTURES_ML_PRE_GP_REGIME": False,

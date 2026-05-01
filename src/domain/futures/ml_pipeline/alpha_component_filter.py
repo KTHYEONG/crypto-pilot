@@ -341,7 +341,7 @@ def filter_alpha_components(
     sym_bal_ok: list[bool] = []
     neutralize_primary = False
 
-    # gp_alpha_00 진단용 상세 지표
+    # gp_alpha_00 diagnostic metrics
     primary_diagnostic: dict[str, float] = {}
 
     is_sub = base[base["__is"]]
@@ -538,6 +538,52 @@ def filter_alpha_components(
     # gp_alpha_00(Primary)의 상세 지표를 meta에 병합
     for k_diag, v_diag in primary_diagnostic.items():
         meta[f"primary_{k_diag}"] = float(v_diag)
+
+    # Direction-aware head diagnostics (minimal gate for long/short raw heads).
+    def _direction_head_stats(
+        col_name: str,
+        target_arr: np.ndarray,
+        prefix: str,
+    ) -> None:
+        if col_name not in base.columns:
+            return
+
+        is_mask = base["__is"].to_numpy(dtype=bool)
+        pred_all = base[col_name].to_numpy(dtype=np.float64)
+        if target_arr.shape[0] != pred_all.shape[0]:
+            return
+
+        def _calc_mu(mask: np.ndarray) -> float:
+            if int(mask.sum()) < 20:
+                return 0.0
+            sub = base.loc[mask]
+            u_pred = sub[col_name].unstack(level="symbol")
+            u_tgt = pd.Series(target_arr[mask], index=sub.index).unstack(level="symbol")
+            valid = u_pred.notna() & u_tgt.notna()
+            cnt = valid.sum(axis=1)
+            ic_s = u_pred.rank(axis=1).corrwith(u_tgt.rank(axis=1), axis=1)
+            arr = ic_s[cnt >= 3].dropna().to_numpy(dtype=np.float64)
+            return float(np.mean(arr)) if arr.size > 0 else 0.0
+
+        mu_is = _calc_mu(is_mask)
+        mu_oos = 0.0
+        if oos_time_set:
+            oos_mask = is_mask & base.index.get_level_values("datetime").isin(oos_time_set)
+            mu_oos = _calc_mu(oos_mask)
+        else:
+            mu_oos = mu_is
+
+        # Minimal stable gate: both IS/OOS means should be non-negative.
+        head_pass = bool(mu_is >= 0.0 and mu_oos >= 0.0)
+        meta[f"{prefix}_is_ic_mean"] = float(mu_is)
+        meta[f"{prefix}_oos_ic_mean"] = float(mu_oos)
+        meta[f"{prefix}_pass"] = 1.0 if head_pass else 0.0
+        meta[f"neutralize_{prefix}"] = 0.0 if head_pass else 1.0
+
+    target_long = base["target"].to_numpy(dtype=np.float64)
+    target_short = 1.0 - target_long
+    _direction_head_stats("gp_alpha_long_raw", target_long, "long_head")
+    _direction_head_stats("gp_alpha_short_raw", target_short, "short_head")
 
     _logger.info("GP alpha FDR+DSR+IC gates: %d / %d columns survive.", n_surv, len(cols))
     return out, meta

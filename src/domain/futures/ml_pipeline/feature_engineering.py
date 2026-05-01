@@ -85,6 +85,11 @@ GP_ENGINEERED_FEATURE_NAMES: tuple[str, ...] = (
     "taker_acceleration_24h",
     "funding_intensity_24h",
     "absorption_ratio_12h",
+    "motif_crowded_long_unwind",
+    "motif_funding_short_squeeze",
+    "motif_taker_absorption",
+    "motif_oi_price_dislocation",
+    "motif_liq_pressure",
 )
 
 
@@ -514,6 +519,24 @@ def build_gp_input_features(df: pd.DataFrame) -> pd.DataFrame:
     # absorption_ratio_12h: proxy for price discovery efficiency (Return / Volatility / Volume)
     out["absorption_ratio_12h"] = (
         out["ret_12"].abs() / (out["realized_vol_yz_24"] * out["vol_ratio_24"] + 1e-9)
+    ).fillna(0.0)
+
+    # v12: low-DoF structural motif features from existing v11 primitives
+    out["motif_crowded_long_unwind"] = (
+        out["global_lsr_z_24h"]
+        + out["top_trader_lsr_z_24h"]
+        + out["oi_momentum_24h"]
+        - out["taker_imbalance_z_24"]
+    ).fillna(0.0)
+    out["motif_funding_short_squeeze"] = (
+        -out["funding_z_72"] + out["oi_momentum_24h"] - out["ret_12"]
+    ).fillna(0.0)
+    out["motif_taker_absorption"] = (
+        _log_modulus(out["taker_buy_sell_ratio_12h"] - 1.0) - out["ret_vol_adj_6"]
+    ).fillna(0.0)
+    out["motif_oi_price_dislocation"] = (out["oi_momentum_24h"] - out["ret_24"]).fillna(0.0)
+    out["motif_liq_pressure"] = (
+        out["downside_jump_24"] + out["tail_risk_24"] - out["range_pos_24"]
     ).fillna(0.0)
 
     # vol_ratio / buy_sell_ratio: keep finite defaults; ret/ma_dist/funding left NaN for CS impute

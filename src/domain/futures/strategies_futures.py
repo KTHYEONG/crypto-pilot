@@ -135,7 +135,7 @@ class UltimateStrategy(PipelineStrategyBase):
             # Failed features were set to 0.5 constant by IC filter → zero variance.
             surviving_gp_cols = [
                 c for c in df.columns
-                if c.startswith("gp_alpha_") and float(df[c].std()) > 1e-6
+                if c.startswith("gp_alpha_") and c[-2:].isdigit() and float(df[c].std()) > 1e-6
             ]
             if surviving_gp_cols:
                 gp = df[surviving_gp_cols].mean(axis=1).to_numpy(dtype=np.float64)
@@ -143,6 +143,16 @@ class UltimateStrategy(PipelineStrategyBase):
                 gp = df["gp_alpha_00"].to_numpy(dtype=np.float64, copy=False)
             else:
                 gp = np.zeros(n, dtype=np.float64)
+            gp_long = (
+                df["gp_alpha_long"].to_numpy(dtype=np.float64, copy=False)
+                if "gp_alpha_long" in df.columns
+                else gp
+            )
+            gp_short = (
+                df["gp_alpha_short"].to_numpy(dtype=np.float64, copy=False)
+                if "gp_alpha_short" in df.columns
+                else gp
+            )
             hml = (
                 df["hmm_modulator_long"].to_numpy(dtype=np.float64, copy=False)
                 if "hmm_modulator_long" in df.columns
@@ -153,11 +163,11 @@ class UltimateStrategy(PipelineStrategyBase):
                 if "hmm_modulator_short" in df.columns
                 else np.ones(n, dtype=np.float64)
             )
-            df["xs_score_long"] = gp * hml
+            df["xs_score_long"] = gp_long * hml
             # Invert hms: LOWER xs_short = BETTER short in numba ranker.
             # In BEAR/CRISIS (hms>1): gp/hms < gp → lower → ranked higher as short. ✓
             # In BULL (hms<1):        gp/hms > gp → higher → ranked lower as short. ✓
-            df["xs_score_short"] = gp / np.maximum(hms, 0.1)
+            df["xs_score_short"] = gp_short / np.maximum(hms, 0.1)
             if "hmm_prob_crisis" not in df.columns:
                 df["hmm_prob_crisis"] = 0.0
             df["ml_calib_prob"] = 1.0
