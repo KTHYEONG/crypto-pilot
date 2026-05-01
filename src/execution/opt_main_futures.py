@@ -810,7 +810,7 @@ def main() -> None:
     # [TELEMETRY] ML Pipeline Audit
     if ml_out.alpha_panel is not None and hasattr(ml_out.alpha_panel, "attrs"):
         best_fitness = ml_out.alpha_panel.attrs.get("best_fitness", 0.0)
-        rep = ml_out.alpha_panel.attrs.get("gp_alpha_filter", {})
+        rep = ml_out.alpha_panel.attrs.get("alpha_component_filter", {})
         if rep:
             ai_telemetry_payloads.append({
                 "stage": "gp_audit",

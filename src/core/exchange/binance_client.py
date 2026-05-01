@@ -878,23 +878,57 @@ class BinanceClient:
             if not rows:
                 return pd.DataFrame()
             df = pd.DataFrame(rows)
-            # Map possible LSR columns to our standard 'count_toptrader_long_short_ratio'
+            # Map possible LSR columns to our standard 'top_trader_long_short_ratio'
             possible_cols = ["longShortRatio", "ratio", "value"]
             for col in possible_cols:
                 if col in df.columns:
-                    df["count_toptrader_long_short_ratio"] = df[col].astype(float)
+                    df["top_trader_long_short_ratio"] = df[col].astype(float)
                     break
 
-            if "count_toptrader_long_short_ratio" not in df.columns:
+            if "top_trader_long_short_ratio" not in df.columns:
                 self.logger.warning(
                     f"No LSR column found in API response for {symbol}. "
                     f"Cols: {df.columns.tolist()}"
                 )
                 return pd.DataFrame()
 
-            return df[["timestamp", "count_toptrader_long_short_ratio"]]
+            return df[["timestamp", "top_trader_long_short_ratio"]]
         except Exception as e:
             self.logger.warning(f"Failed to fetch Long/Short Ratio for {symbol}: {e}")
+            return pd.DataFrame()
+
+    def fetch_global_long_short_ratio_history(
+        self,
+        symbol: str,
+        timeframe: str = "4h",
+        since: int | None = None,
+        limit: int = 500,
+    ) -> pd.DataFrame:
+        """Fetch historical Global Long/Short Ratio from Binance API."""
+        try:
+            # fapiPrivateGetGlobalLongShortAccountRatio or public equivalent
+            market = self.exchange.market(symbol)
+            params = {
+                "symbol": market["id"],
+                "period": timeframe,
+                "limit": limit
+            }
+            if since:
+                params["startTime"] = since
+            
+            rows = self.exchange.fapiPublicGetGlobalLongShortAccountRatio(params)
+            if not rows:
+                return pd.DataFrame()
+            df = pd.DataFrame(rows)
+            if "longShortRatio" in df.columns:
+                df["long_short_ratio"] = df["longShortRatio"].astype(float)
+            
+            if "long_short_ratio" not in df.columns:
+                return pd.DataFrame()
+                
+            return df[["timestamp", "long_short_ratio"]]
+        except Exception as e:
+            self.logger.warning(f"Failed to fetch Global Long/Short Ratio for {symbol}: {e}")
             return pd.DataFrame()
 
     def place_order(

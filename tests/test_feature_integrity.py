@@ -231,7 +231,7 @@ def test_backtest_alignment_and_signals(sample_ohlcv: pd.DataFrame) -> None:
     
 def test_gp_alpha_mining_lookahead_mock():
     """
-    Speculative: Check if GPAlphaMiner's target creation has a shift bug.
+    Speculative: Check if MLAlphaMiner's target creation has a shift bug.
     Alphas should predict FUTURE returns, not current ones.
     """
     from src.domain.futures.ml_pipeline.cross_sectional_utils import CrossSectionalPipelineUtils
