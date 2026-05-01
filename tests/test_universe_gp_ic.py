@@ -106,7 +106,7 @@ def run_universe_to_gp_test():
     
     # 6. 결과 보고
     best_fitness = ml_out.alpha_panel.attrs.get("best_fitness", 0.0)
-    filter_meta = ml_out.alpha_panel.attrs.get("gp_alpha_filter", {})
+    filter_meta = ml_out.alpha_panel.attrs.get("alpha_component_filter", {})
     
     _logger.info("\n" + "-" * 70)
     _logger.info(" [GP IC VALIDATION RESULTS]")
