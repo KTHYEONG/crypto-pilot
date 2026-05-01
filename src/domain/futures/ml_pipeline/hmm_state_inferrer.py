@@ -18,6 +18,7 @@ from sklearn.preprocessing import QuantileTransformer
 
 from config.opt_config import OPT_FUTURES_CONFIG
 from config.settings import FUTURES_CACHE_DIR
+from src.core.utils.cache_manager import CacheManager
 from src.domain.futures.ml_pipeline.feature_engineering import (
     HMM_SEMANTIC_PROB_COLUMNS,
     SYSTEMIC_HMM_FEATURE_COLUMNS,
@@ -488,19 +489,37 @@ class HMMStateInferrer:
         self.n_states = max(2, k_cfg)
         tr_alpha = float(OPT_FUTURES_CONFIG.get("FUTURES_HMM_TRANSITION_PRIOR_ALPHA", 0.2))
 
-        cache_fname = (
-            f"HMM_systemic_{symbol}_{tf}_is{is_end_idx}_n{self.n_states}_v6.parquet"
-        )
-        cache_path = FUTURES_CACHE_DIR / cache_fname
+        # SOTA: Dependency-Aware Hashing & LRU Cleanup
+        cm = CacheManager(FUTURES_CACHE_DIR, max_files=15, max_size_mb=1000.0)
+        cm.cleanup_lru(pattern="HMM_systemic_*")
+
+        deps = {
+            "symbol": symbol,
+            "tf": tf,
+            "is_end_idx": is_end_idx,
+            "n_states": self.n_states,
+            "tr_alpha": tr_alpha,
+            "covariance_type": self.covariance_type,
+            "smooth_method": str(OPT_FUTURES_CONFIG.get("FUTURES_HMM_SMOOTHING_METHOD", "EMA")),
+            "smooth_span": int(OPT_FUTURES_CONFIG.get("FUTURES_HMM_SMOOTHING_SPAN", 6)),
+            "feat_cols": sorted(list(SYSTEMIC_HMM_FEATURE_COLUMNS)),
+            "ver": "v2_smart_lru"
+        }
+        # Track HMM source file for automatic invalidation
+        src_files = [Path(__file__).resolve()]
+        
+        tag = cm.generate_hash(deps, source_files=src_files)
+        prefix = f"HMM_systemic_{symbol}_{tf}_is{is_end_idx}"
+        cache_path = cm.get_cache_path(prefix, ".parquet", tag)
         label_path = FUTURES_CACHE_DIR / f"{symbol}_{tf}_state_labels_v6.pkl"
 
         if cache_path.exists():
             try:
                 cached_df = pd.read_parquet(cache_path)
-                _logger.info("[%s] HMM Systemic probabilities loaded from cache.", symbol)
+                _logger.info("[%s] HMM Systemic probabilities loaded from SOTA cache.", symbol)
                 return cached_df
             except Exception as e:
-                _logger.debug("Failed to load HMM cache: %s", e)
+                _logger.debug("Failed to load HMM Smart cache: %s", e)
 
         feat_cols = list(SYSTEMIC_HMM_FEATURE_COLUMNS)
         for c in feat_cols:
