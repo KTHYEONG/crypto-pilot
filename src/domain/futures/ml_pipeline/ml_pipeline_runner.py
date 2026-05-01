@@ -465,15 +465,25 @@ def _apply_ml_calib_probs(
         if "hmm_modulator_short" in aligned_tf.columns
         else np.ones(len(aligned_tf), dtype=np.float64)
     )
-    gp = (
+    gp_base = (
         aligned_tf["gp_alpha_00"].to_numpy(dtype=np.float64)
         if "gp_alpha_00" in aligned_tf.columns
         else np.zeros(len(aligned_tf), dtype=np.float64)
     )
-    aligned_tf["xs_score_long"] = gp * hmm_m_long
+    gp_long = (
+        aligned_tf["gp_alpha_long"].to_numpy(dtype=np.float64)
+        if "gp_alpha_long" in aligned_tf.columns
+        else gp_base
+    )
+    gp_short = (
+        aligned_tf["gp_alpha_short"].to_numpy(dtype=np.float64)
+        if "gp_alpha_short" in aligned_tf.columns
+        else gp_base
+    )
+    aligned_tf["xs_score_long"] = gp_long * hmm_m_long
     # Invert hms for short ranking: lower xs_short = better short in numba CS ranker.
     # BEAR/CRISIS (hms>1): gp/hms < gp → lower → ranked higher as short. ✓
-    aligned_tf["xs_score_short"] = gp / np.maximum(hmm_m_short, 0.1)
+    aligned_tf["xs_score_short"] = gp_short / np.maximum(hmm_m_short, 0.1)
 
     meta_on = bool(use_meta) and bool(OPT_FUTURES_CONFIG.get("FUTURES_USE_META_LABELER", False))
 

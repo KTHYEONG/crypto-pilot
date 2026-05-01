@@ -218,6 +218,7 @@ class MLAlphaMiner:
 
         versioned_cache: Path | None = None
         raw_alpha_df: pd.DataFrame | None = None
+        force_retrain = bool(OPT_FUTURES_CONFIG.get("FUTURES_ML_FORCE_RETRAIN_ALPHA", False))
         if cache_path is not None:
             self._cleanup_old_caches(cache_path)
             symbols = list(work_panel.index.get_level_values("symbol").unique())
@@ -226,7 +227,12 @@ class MLAlphaMiner:
             )
             versioned_cache = cache_path.with_name(f"{tag}.parquet")
             meta_cache = versioned_cache.with_suffix(".json")
-            if versioned_cache.exists():
+            if force_retrain and versioned_cache.exists():
+                _logger.info(
+                    "LightGBM CS Cache Bypass (RAW): force retrain enabled; skipping %s.",
+                    versioned_cache.name,
+                )
+            elif versioned_cache.exists():
                 try:
                     loaded = pd.read_parquet(versioned_cache)
                     if len(loaded) == len(panel_df):
@@ -258,7 +264,7 @@ class MLAlphaMiner:
 
         if raw_alpha_df is None:
             # --- Multi-Horizon Ensemble ---
-            horizons = (3, 6, 12, 24)
+            horizons = tuple(int(h) for h in self.target_horizons) or (3, 6, 12, 24)
             feat_cols = _resolve_gp_feature_columns(work_panel)
             template = pd.DataFrame(index=full_grid_index)
 
@@ -277,11 +283,37 @@ class MLAlphaMiner:
                 tw = aligned_df["tbm_gp_weight"].fillna(1.0).to_numpy(dtype=np.float64)
                 base_sw = base_sw * np.clip(tw, 0.25, 3.0)
 
-            # --- Ergodicity & Time Decay Weighting ---
-            if "hmm_prob_crisis" in aligned_df.columns:
-                p_crisis = aligned_df["hmm_prob_crisis"].fillna(0.0).to_numpy(dtype=np.float64)
-                erg_weight = np.clip(1.0 - p_crisis * 0.7, 0.1, 1.0)
-                base_sw *= erg_weight
+            # --- Regime-balanced weighting (inverse-frequency soft assignment) ---
+            p_bull = aligned_df.get(
+                "hmm_prob_bull_trend", pd.Series(0.0, index=aligned_df.index)
+            ).fillna(0.0).to_numpy(dtype=np.float64)
+            p_bear = aligned_df.get(
+                "hmm_prob_bear_trend", pd.Series(0.0, index=aligned_df.index)
+            ).fillna(0.0).to_numpy(dtype=np.float64)
+            p_crisis = aligned_df.get(
+                "hmm_prob_crisis", pd.Series(0.0, index=aligned_df.index)
+            ).fillna(0.0).to_numpy(dtype=np.float64)
+            p_chop = aligned_df.get(
+                "hmm_prob_chop", pd.Series(0.0, index=aligned_df.index)
+            ).fillna(0.0).to_numpy(dtype=np.float64)
+            p_sum = np.clip(p_bull + p_bear + p_crisis + p_chop, 1e-9, None)
+            p_bull = p_bull / p_sum
+            p_bear = p_bear / p_sum
+            p_crisis = p_crisis / p_sum
+            p_chop = p_chop / p_sum
+
+            m_bull = float(np.sum(base_sw * p_bull))
+            m_bear = float(np.sum(base_sw * p_bear))
+            m_crisis = float(np.sum(base_sw * p_crisis))
+            m_chop = float(np.sum(base_sw * p_chop))
+            masses = np.array([m_bull, m_bear, m_crisis, m_chop], dtype=np.float64)
+            freqs = masses / (np.sum(masses) + 1e-12)
+            inv = 1.0 / (freqs + 1e-6)
+            inv = inv / (np.mean(inv) + 1e-12)
+            reg_weight = (
+                (p_bull * inv[0]) + (p_bear * inv[1]) + (p_crisis * inv[2]) + (p_chop * inv[3])
+            )
+            base_sw *= np.clip(reg_weight, 0.6, 1.8)
 
             if is_end_date:
                 times_arr = aligned_df.index.get_level_values("datetime")
@@ -332,7 +364,13 @@ class MLAlphaMiner:
             # --- Multi-Horizon Loop ---
             ensemble_preds = np.zeros(len(aligned_df), dtype=np.float64)
             horizon_ics = []
+            slot_components: list[np.ndarray] = []
+            long_components: list[np.ndarray] = []
+            short_components: list[np.ndarray] = []
             close_ser = aligned_df.get("close", pd.Series(np.nan, index=aligned_df.index))
+            ensemble_preds_long = np.zeros(len(aligned_df), dtype=np.float64)
+            ensemble_preds_short = np.zeros(len(aligned_df), dtype=np.float64)
+            horizon_scores: list[float] = []
 
             reg_cfg = OPT_FUTURES_CONFIG.get("FUTURES_GP_REGIME_SPECIFIC_LEARNING", False)
             regime_learning = bool(reg_cfg)
@@ -378,6 +416,55 @@ class MLAlphaMiner:
                 )
                 return l_m, c_m
 
+            def _fit_predict_horizon(
+                y_vec: np.ndarray, sw_vec: np.ndarray
+            ) -> tuple[np.ndarray, LGBMRegressor, CatBoostRegressor, LGBMRegressor, CatBoostRegressor, LGBMRegressor, CatBoostRegressor]:
+                mask_vec = sw_vec > 0
+                if regime_learning:
+                    bull_mask = (p_bull_arr > 0.4) & mask_vec
+                    bear_mask = (p_bear_arr > 0.4) & mask_vec
+
+                    lgbm_m, cb_m = _train_ml_pair(np.where(mask_vec)[0], x_clean, y_vec, sw_vec)
+                    pred_global_m = 0.6 * lgbm_m.predict(x_clean) + 0.4 * cb_m.predict(x_clean)
+
+                    if bull_mask.sum() > 500:
+                        lgbm_bull_m, cb_bull_m = _train_ml_pair(
+                            np.where(bull_mask)[0], x_clean, y_vec, sw_vec
+                        )
+                        pred_bull_m = 0.6 * lgbm_bull_m.predict(x_clean) + 0.4 * cb_bull_m.predict(x_clean)
+                    else:
+                        lgbm_bull_m, cb_bull_m = lgbm_m, cb_m
+                        pred_bull_m = pred_global_m
+
+                    if bear_mask.sum() > 500:
+                        lgbm_bear_m, cb_bear_m = _train_ml_pair(
+                            np.where(bear_mask)[0], x_clean, y_vec, sw_vec
+                        )
+                        pred_bear_m = 0.6 * lgbm_bear_m.predict(x_clean) + 0.4 * cb_bear_m.predict(x_clean)
+                    else:
+                        lgbm_bear_m, cb_bear_m = lgbm_m, cb_m
+                        pred_bear_m = pred_global_m
+
+                    p_ch = 1.0 - p_bull_arr - p_bear_arr
+                    pred_m = (p_bull_arr * pred_bull_m) + (p_bear_arr * pred_bear_m) + (p_ch * pred_global_m)
+                    return pred_m, lgbm_m, cb_m, lgbm_bull_m, cb_bull_m, lgbm_bear_m, cb_bear_m
+
+                lgbm_m, cb_m = _train_ml_pair(np.where(mask_vec)[0], x_clean, y_vec, sw_vec)
+                pred_m = 0.6 * lgbm_m.predict(x_clean) + 0.4 * cb_m.predict(x_clean)
+                return pred_m, lgbm_m, cb_m, lgbm_m, cb_m, lgbm_m, cb_m
+
+            times_arr_utc = pd.to_datetime(
+                aligned_df.index.get_level_values("datetime"), utc=True
+            )
+            bar_delta = pd.Timedelta(hours=4)
+            if len(unique_times) >= 2:
+                uniq_t = pd.to_datetime(unique_times, utc=True)
+                diffs = uniq_t.to_series().diff().dropna()
+                if not diffs.empty:
+                    med = diffs.median()
+                    if pd.notna(med) and med > pd.Timedelta(0):
+                        bar_delta = med
+
             for h in horizons:
                 # 1. Target Construction for horizon h
                 if "close" in aligned_df.columns:
@@ -401,100 +488,98 @@ class MLAlphaMiner:
                 else:
                     target_h = aligned_df["target"].values
 
+                target_h_short = 1.0 - target_h
                 y_h = np.where(np.isfinite(target_h), target_h, 0.5)
+                y_h_short = np.where(np.isfinite(target_h_short), target_h_short, 0.5)
                 sw_h = base_sw * (~np.isnan(target_h)).astype(np.float64)
 
-                # Apply Asymmetric Alpha Training (Long Bias)
-                long_bias = float(OPT_FUTURES_CONFIG.get("FUTURES_GP_LONG_BIAS", 1.0))
-                if long_bias != 1.0:
-                    sw_h = np.where(target_h > 0.5, sw_h * long_bias, sw_h)
+                # Tail-focused emphasis: increase weight near top/bottom quantiles.
+                tail_dist = np.abs(y_h - 0.5)
+                tail_w = np.clip(1.0 + 1.6 * (tail_dist / 0.5), 1.0, 1.8)
+                sw_h = sw_h * tail_w
 
-                mask_h = sw_h > 0
+                if is_end_date:
+                    cutoff_ts = pd.to_datetime(is_end_date, utc=True)
+                    safe_mask = (times_arr_utc + (bar_delta * int(h))) < cutoff_ts
+                    sw_h = sw_h * safe_mask.astype(np.float64)
+
+                # Apply Asymmetric Alpha Training with directional separation.
+                # Long head keeps long bias, short head applies the reciprocal side to avoid collapse.
+                long_bias = float(OPT_FUTURES_CONFIG.get("FUTURES_GP_LONG_BIAS", 1.0))
+                inv_bias = 1.0 / max(long_bias, 1e-6)
+                sw_h_long = sw_h.copy()
+                sw_h_short = sw_h.copy()
+                if long_bias != 1.0:
+                    sw_h_long = np.where(target_h > 0.5, sw_h_long * long_bias, sw_h_long)
+                    sw_h_short = np.where(target_h <= 0.5, sw_h_short * inv_bias, sw_h_short)
+
+                mask_h = (sw_h_long > 0) | (sw_h_short > 0)
                 if mask_h.sum() < 200:
                     continue
 
-                if regime_learning:
-                    # Regime-Specific Training
-                    bull_mask = (p_bull_arr > 0.4) & mask_h
-                    bear_mask = (p_bear_arr > 0.4) & mask_h
+                pred_h_long, lgbm_h, cb_h, lgbm_bull, cb_bull, lgbm_bear, cb_bear = _fit_predict_horizon(
+                    y_h, sw_h_long
+                )
+                pred_h_short, _, _, _, _, _, _ = _fit_predict_horizon(y_h_short, sw_h_short)
 
-                    # Global Model (Anchor)
-                    lgbm_h, cb_h = _train_ml_pair(np.where(mask_h)[0], x_clean, y_h, sw_h)
-                    pred_global = 0.6 * lgbm_h.predict(x_clean) + 0.4 * cb_h.predict(x_clean)
+                is_mask = (sw_h_long > 0) & (sw_h_short > 0)
+                if is_mask.sum() > 80:
+                    idx_is = np.where(is_mask)[0]
+                    n_chunks = 5 if len(idx_is) >= 250 else 4
+                    edges = np.linspace(0, len(idx_is), num=n_chunks + 1, dtype=int)
+                    chunk_scores: list[float] = []
+                    for i in range(n_chunks):
+                        c_idx = idx_is[edges[i]:edges[i + 1]]
+                        if len(c_idx) < 20:
+                            continue
+                        ic_l, _ = spearmanr(pred_h_long[c_idx], y_h[c_idx])
+                        ic_s, _ = spearmanr(pred_h_short[c_idx], y_h_short[c_idx])
+                        ic_l = float(ic_l) if np.isfinite(ic_l) else 0.0
+                        ic_s = float(ic_s) if np.isfinite(ic_s) else 0.0
+                        chunk_scores.append(0.5 * (ic_l + ic_s))
 
-                    # Bull Model
-                    if bull_mask.sum() > 500:
-                        lgbm_bull, cb_bull = _train_ml_pair(
-                            np.where(bull_mask)[0], x_clean, y_h, sw_h
-                        )
-                        p_l = 0.6 * lgbm_bull.predict(x_clean)
-                        p_c = 0.4 * cb_bull.predict(x_clean)
-                        pred_bull = p_l + p_c
-                    else:
-                        lgbm_bull, cb_bull = lgbm_h, cb_h
-                        pred_bull = pred_global
-
-                    # Bear Model
-                    if bear_mask.sum() > 500:
-                        lgbm_bear, cb_bear = _train_ml_pair(
-                            np.where(bear_mask)[0], x_clean, y_h, sw_h
-                        )
-                        p_l = 0.6 * lgbm_bear.predict(x_clean)
-                        p_c = 0.4 * cb_bear.predict(x_clean)
-                        pred_bear = p_l + p_c
-                    else:
-                        lgbm_bear, cb_bear = lgbm_h, cb_h
-                        pred_bear = pred_global
-
-                    # Regime Blending
-                    p_ch = 1.0 - p_bull_arr - p_bear_arr
-                    pred_h = (
-                        (p_bull_arr * pred_bull) + (p_bear_arr * pred_bear) + (p_ch * pred_global)
-                    )
-                else:
-                    # Standard Global Training
-                    lgbm_h, cb_h = _train_ml_pair(np.where(mask_h)[0], x_clean, y_h, sw_h)
-                    pred_h = 0.6 * lgbm_h.predict(x_clean) + 0.4 * cb_h.predict(x_clean)
-                    lgbm_bull, cb_bull = lgbm_h, cb_h
-                    lgbm_bear, cb_bear = lgbm_h, cb_h
-
-                is_mask = (sw_h > 0) & (np.arange(len(sw_h)) < len(sw_h) * 0.8)
-                if is_mask.sum() > 50:
-                    ic_global, _ = spearmanr(pred_h[is_mask], y_h[is_mask])
-
-                    # Asymmetric Alpha Target Training
-                    long_mask = is_mask & (y_h > 0.5)
-                    if long_mask.sum() > 20:
-                        ic_long, _ = spearmanr(pred_h[long_mask], y_h[long_mask])
-                    else:
-                        ic_long = 0.0
-
-                    asym_cfg = OPT_FUTURES_CONFIG.get("FUTURES_GP_ASYMMETRIC_FITNESS_WEIGHT", 0.0)
-                    asym_weight = float(asym_cfg)
-                    long_bias = float(OPT_FUTURES_CONFIG.get("FUTURES_GP_LONG_BIAS", 1.0))
-
-                    if asym_weight > 0 and long_bias > 1.0 and ic_long > 0:
-                        ic_h = (asym_weight * ic_long) + ((1.0 - asym_weight) * ic_global)
+                    if chunk_scores:
+                        score_arr = np.asarray(chunk_scores, dtype=np.float64)
+                        mean_ic = float(np.mean(score_arr))
+                        std_ic = float(np.std(score_arr))
+                        worst_ic = float(np.min(score_arr))
+                        # Penalize directional imbalance to reduce one-sided legs.
+                        long_share = float(np.mean(pred_h_long[idx_is] > 0.5))
+                        short_share = float(np.mean(pred_h_short[idx_is] > 0.5))
+                        imbalance = abs(long_share - short_share)
+                        robust_score = mean_ic - (0.5 * std_ic) + min(0.0, worst_ic) - (0.10 * imbalance)
                         _logger.info(
-                            " [Phase D] Horizon h=%d: Asymmetric IC = %.4f (L-IC=%.4f, G-IC=%.4f)",
-                            h, ic_h, ic_long, ic_global
+                            " [Phase D] Horizon h=%d: robust=%.4f (mean=%.4f std=%.4f worst=%.4f imb=%.3f)",
+                            h, robust_score, mean_ic, std_ic, worst_ic, imbalance
                         )
                     else:
-                        ic_h = ic_global
-                        _logger.info(" [Phase D] Horizon h=%d: Blended IS Rank-IC = %.4f", h, ic_h)
+                        robust_score = 0.0
                 else:
-                    ic_h = 0.0
+                    robust_score = 0.0
 
-                if ic_h <= 0.0:
-                    _logger.info(" [Phase D] Horizon h=%d skipped (non-positive IC)", h)
+                if robust_score <= 0.0:
+                    _logger.info(" [Phase D] Horizon h=%d skipped (non-positive robust score)", h)
                     continue
-                horizon_ics.append(ic_h)
-                ensemble_preds += pred_h * ic_h
+                horizon_ics.append(robust_score)
+                horizon_scores.append(robust_score)
+                ensemble_preds += pred_h_long * robust_score
+                ensemble_preds_long += pred_h_long * robust_score
+                ensemble_preds_short += pred_h_short * robust_score
+                slot_components.append(pred_h_long)
+                long_components.append(pred_h_long)
+                short_components.append(pred_h_short)
 
-            if sum(horizon_ics) > 0:
-                out_pred = ensemble_preds / sum(horizon_ics)
+            if sum(horizon_scores) > 0:
+                out_pred = ensemble_preds / sum(horizon_scores)
+                out_pred_long = ensemble_preds_long / sum(horizon_scores)
+                out_pred_short = ensemble_preds_short / sum(horizon_scores)
             else:
                 out_pred = np.zeros(len(aligned_df)) + 0.5
+                out_pred_long = np.zeros(len(aligned_df)) + 0.5
+                out_pred_short = np.zeros(len(aligned_df)) + 0.5
+            slot_components.insert(0, out_pred)
+            long_components.insert(0, out_pred)
+            short_components.insert(0, out_pred_short)
 
             self._st_global = lgbm_h
             self._cb_global = cb_h
@@ -505,7 +590,8 @@ class MLAlphaMiner:
 
             cols = [f"gp_alpha_{i:02d}" for i in range(self.n_features_to_select)]
             full_alpha_df = pd.DataFrame(0.5, index=full_grid_index, columns=cols)
-            full_alpha_df["gp_alpha_00"] = out_pred
+            for i, comp in enumerate(slot_components[: self.n_features_to_select]):
+                full_alpha_df[f"gp_alpha_{i:02d}"] = comp
 
             alpha_series_list = []
             for col in cols:
@@ -519,6 +605,8 @@ class MLAlphaMiner:
                 alpha_series_list.append(s)
 
             raw_alpha_df = pd.concat(alpha_series_list, axis=1)
+            raw_alpha_df["gp_alpha_long_raw"] = pd.Series(out_pred_long, index=full_grid_index)
+            raw_alpha_df["gp_alpha_short_raw"] = pd.Series(out_pred_short, index=full_grid_index)
 
             best_fitness = 1.0
             raw_alpha_df.attrs["best_fitness"] = float(best_fitness)
@@ -550,7 +638,7 @@ class MLAlphaMiner:
         surviving_cols = [
             c
             for c in alpha_df_all.columns
-            if c.startswith("gp_alpha_") and alpha_df_all[c].std() > 1e-6
+            if c.startswith("gp_alpha_") and c[-2:].isdigit() and alpha_df_all[c].std() > 1e-6
         ]
 
         if "gp_alpha_00" not in surviving_cols and surviving_cols:
@@ -563,6 +651,31 @@ class MLAlphaMiner:
         if float(filt_meta.get("neutralize_primary", 0.0)) > 0.5:
             _logger.warning(" [FILTER] gp_alpha_00 neutralized.")
             alpha_df_all["gp_alpha_00"] = 0.5
+
+        surviving_cols = [
+            c
+            for c in alpha_df_all.columns
+            if c.startswith("gp_alpha_") and c[-2:].isdigit() and alpha_df_all[c].std() > 1e-6
+        ]
+        if {"gp_alpha_long_raw", "gp_alpha_short_raw"}.issubset(alpha_df_all.columns):
+            if float(filt_meta.get("neutralize_long_head", 0.0)) > 0.5:
+                alpha_df_all["gp_alpha_long_raw"] = 0.5
+                _logger.warning(" [FILTER] gp_alpha_long_raw neutralized.")
+            if float(filt_meta.get("neutralize_short_head", 0.0)) > 0.5:
+                alpha_df_all["gp_alpha_short_raw"] = 0.5
+                _logger.warning(" [FILTER] gp_alpha_short_raw neutralized.")
+            alpha_df_all["gp_alpha_long"] = alpha_df_all["gp_alpha_long_raw"].clip(0.0, 1.0)
+            alpha_df_all["gp_alpha_short"] = alpha_df_all["gp_alpha_short_raw"].clip(0.0, 1.0)
+        elif surviving_cols:
+            alpha_df_all["gp_alpha_long"] = alpha_df_all[surviving_cols].mean(axis=1)
+            alpha_df_all["gp_alpha_short"] = 1.0 - alpha_df_all[surviving_cols].mean(axis=1)
+        else:
+            alpha_df_all["gp_alpha_long"] = 0.5
+            alpha_df_all["gp_alpha_short"] = 0.5
+
+        for tmp_col in ("gp_alpha_long_raw", "gp_alpha_short_raw"):
+            if tmp_col in alpha_df_all.columns:
+                alpha_df_all.drop(columns=[tmp_col], inplace=True)
 
         alpha_df = alpha_df_all.reindex(panel_df.index).fillna(0.5)
         alpha_df.attrs["best_fitness"] = raw_alpha_df.attrs.get("best_fitness", 0.0)
@@ -644,8 +757,14 @@ class MLAlphaMiner:
             cols = [f"gp_alpha_{i:02d}" for i in range(self.n_features_to_select)]
             out_grid = np.full((x.shape[0], self.n_features_to_select), 0.5, dtype=np.float64)
             out_grid[:, 0] = out_arr
-            return pd.DataFrame(out_grid, index=panel_df.index, columns=cols)
+            out_df = pd.DataFrame(out_grid, index=panel_df.index, columns=cols)
+            out_df["gp_alpha_long"] = out_arr
+            out_df["gp_alpha_short"] = 1.0 - out_arr
+            return out_df
 
         _logger.warning("transform_cs: _st_global is missing. Returning neutral features.")
         cols = [f"gp_alpha_{i:02d}" for i in range(self.n_features_to_select)]
-        return pd.DataFrame(0.5, index=panel_df.index, columns=cols)
+        out_df = pd.DataFrame(0.5, index=panel_df.index, columns=cols)
+        out_df["gp_alpha_long"] = 0.5
+        out_df["gp_alpha_short"] = 0.5
+        return out_df
