@@ -807,6 +807,8 @@ def merge_ml_output_into_data_maps(
         ml_cols = [
             "datetime",
             "gp_alpha_00",
+            "gp_alpha_long",
+            "gp_alpha_short",
             "btc_trend_vol_adj_24h",
             "hmm_modulator_long",
             "hmm_modulator_short",
@@ -1211,6 +1213,7 @@ def run_ml_pipeline_for_universe(
     _logger.info(f"   - Failed Half-Life (Noise):   {filter_meta.get('fail_half_life', 0):.0f}")
     _logger.info(f"   - Failed Symbol Balance:      {filter_meta.get('fail_sym_bal', 0):.0f}")
     _logger.info(f"   - Failed Regime Consistency:  {filter_meta.get('fail_regime', 0):.0f}")
+    _logger.info(f"   - Failed Orthogonality:       {filter_meta.get('fail_ortho', 0):.0f}")
 
     _logger.info("-" * 85)
     _logger.info(" [BEST ALPHA (gp_alpha_00) METRICS]")
