@@ -756,7 +756,16 @@ def main() -> None:
     parser.add_argument("--gp-only", action="store_true", help="Stop after GP IC calculation")
     parser.add_argument("--hmm-only", action="store_true", help="Stop after HMM regime inference")
     parser.add_argument("--seed", type=int, default=None, help="Override random seed")
+    parser.add_argument(
+        "--force-retrain-alpha",
+        action="store_true",
+        help="Bypass GP raw cache and force alpha retraining for this run.",
+    )
     args = parser.parse_args(remaining_args)
+
+    if args.force_retrain_alpha:
+        OPT_FUTURES_CONFIG["FUTURES_ML_FORCE_RETRAIN_ALPHA"] = True
+        _logger.info("[ML] FORCE_RETRAIN_ALPHA enabled via CLI; raw GP cache will be bypassed.")
 
     ai_telemetry_payloads.append({
         "stage": "execution_context",
