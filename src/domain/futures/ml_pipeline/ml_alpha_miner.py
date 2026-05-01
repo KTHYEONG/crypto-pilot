@@ -20,12 +20,13 @@ from lightgbm import LGBMRegressor
 from scipy.stats import spearmanr
 from sklearn.preprocessing import QuantileTransformer
 
+from config.opt_config import OPT_FUTURES_CONFIG
+from src.domain.futures.ml_pipeline.alpha_component_filter import filter_alpha_components
 from src.domain.futures.ml_pipeline.cross_sectional_utils import CrossSectionalPipelineUtils
 from src.domain.futures.ml_pipeline.feature_engineering import (
     GP_ENGINEERED_FEATURE_NAMES,
     GP_FEATURE_SCHEMA_VERSION,
 )
-from src.domain.futures.ml_pipeline.gp_alpha_filter import filter_gp_alpha_columns
 
 _logger = logging.getLogger(__name__)
 
@@ -55,7 +56,8 @@ def _generate_smart_cache_stem(
         "horizons": horizons,
         "symbols": sorted(symbols),
         "is_end_date": is_end_date,
-        "version": "v1_lgbm",
+        "version": "v1_lgbm_asym",
+        "long_bias": float(OPT_FUTURES_CONFIG.get("FUTURES_GP_LONG_BIAS", 1.0)),
         "feature_schema_version": GP_FEATURE_SCHEMA_VERSION,
         "feature_columns": list(GP_ENGINEERED_FEATURE_NAMES),
     }
@@ -134,7 +136,7 @@ def _resolve_gp_feature_columns(panel_df: pd.DataFrame) -> list[str]:
 
 
 @dataclass
-class GPAlphaMiner:
+class MLAlphaMiner:
     """Miner for evolving cross-sectional alpha components using LightGBM.
 
     Replaces gplearn for improved performance and robustness.
@@ -149,7 +151,13 @@ class GPAlphaMiner:
     parsimony_coefficient: float = 0.001
 
     # Internal state
-    _st: LGBMRegressor | None = field(default=None, init=False)
+    _st_global: LGBMRegressor | None = field(default=None, init=False)
+    _st_bull: LGBMRegressor | None = field(default=None, init=False)
+    _st_bear: LGBMRegressor | None = field(default=None, init=False)
+    _cb_global: CatBoostRegressor | None = field(default=None, init=False)
+    _cb_bull: CatBoostRegressor | None = field(default=None, init=False)
+    _cb_bear: CatBoostRegressor | None = field(default=None, init=False)
+
     _kept_indices: list[int] | None = field(default=None, init=False)
     _mp_mean: np.ndarray | None = field(default=None, init=False)
     _mp_std: np.ndarray | float | None = field(default=None, init=False)
@@ -325,7 +333,50 @@ class GPAlphaMiner:
             ensemble_preds = np.zeros(len(aligned_df), dtype=np.float64)
             horizon_ics = []
             close_ser = aligned_df.get("close", pd.Series(np.nan, index=aligned_df.index))
-            lgbm_h = None
+
+            reg_cfg = OPT_FUTURES_CONFIG.get("FUTURES_GP_REGIME_SPECIFIC_LEARNING", False)
+            regime_learning = bool(reg_cfg)
+            p_bull_ser = aligned_df.get(
+                "hmm_prob_bull_trend", pd.Series(0.0, index=aligned_df.index)
+            )
+            p_bull_arr = p_bull_ser.fillna(0.0).to_numpy()
+            p_bear_ser = aligned_df.get(
+                "hmm_prob_bear_trend", pd.Series(0.0, index=aligned_df.index)
+            )
+            p_bear_arr = p_bear_ser.fillna(0.0).to_numpy()
+
+            lgbm_h = cb_h = lgbm_bull = cb_bull = lgbm_bear = cb_bear = None
+
+            def _train_ml_pair(
+                idx: np.ndarray, x_mat: np.ndarray, y_vec: np.ndarray, sw_vec: np.ndarray
+            ) -> tuple[LGBMRegressor, CatBoostRegressor]:
+                v_cut = int(len(idx) * 0.80)
+                t_idx, v_idx = idx[:v_cut], idx[v_cut:]
+
+                l_m = LGBMRegressor(
+                    boosting_type="gbdt", objective="huber", n_estimators=300,
+                    learning_rate=0.03, num_leaves=31, max_depth=6,
+                    min_child_samples=70, subsample=0.7, colsample_bytree=0.7,
+                    reg_alpha=1.2, reg_lambda=1.2,
+                    n_jobs=self.n_jobs, random_state=42,
+                )
+                l_m.fit(
+                    x_mat[t_idx], y_vec[t_idx], sample_weight=sw_vec[t_idx],
+                    eval_set=[(x_mat[v_idx], y_vec[v_idx])],
+                    callbacks=[lgb.early_stopping(stopping_rounds=20, verbose=False)],
+                )
+                c_m = CatBoostRegressor(
+                    iterations=300, learning_rate=0.03, depth=5,
+                    loss_function="Huber:delta=1.35", eval_metric="RMSE",
+                    random_seed=42, verbose=0, od_type="Iter", od_wait=20,
+                    allow_writing_files=False
+                )
+                c_m.fit(
+                    x_mat[t_idx], y_vec[t_idx], sample_weight=sw_vec[t_idx],
+                    eval_set=(x_mat[v_idx], y_vec[v_idx]),
+                    use_best_model=True
+                )
+                return l_m, c_m
 
             for h in horizons:
                 # 1. Target Construction for horizon h
@@ -352,51 +403,88 @@ class GPAlphaMiner:
 
                 y_h = np.where(np.isfinite(target_h), target_h, 0.5)
                 sw_h = base_sw * (~np.isnan(target_h)).astype(np.float64)
-                mask_h = sw_h > 0
 
+                # Apply Asymmetric Alpha Training (Long Bias)
+                long_bias = float(OPT_FUTURES_CONFIG.get("FUTURES_GP_LONG_BIAS", 1.0))
+                if long_bias != 1.0:
+                    sw_h = np.where(target_h > 0.5, sw_h * long_bias, sw_h)
+
+                mask_h = sw_h > 0
                 if mask_h.sum() < 200:
                     continue
 
-                mask_idx = np.where(mask_h)[0]
-                val_cutoff = int(len(mask_idx) * 0.80)
-                tr_idx, val_idx = mask_idx[:val_cutoff], mask_idx[val_cutoff:]
+                if regime_learning:
+                    # Regime-Specific Training
+                    bull_mask = (p_bull_arr > 0.4) & mask_h
+                    bear_mask = (p_bear_arr > 0.4) & mask_h
 
-                lgbm_h = LGBMRegressor(
-                    boosting_type="gbdt", objective="huber", n_estimators=300,
-                    learning_rate=0.03, num_leaves=31, max_depth=6,
-                    min_child_samples=70, subsample=0.7, colsample_bytree=0.7,
-                    reg_alpha=1.2, reg_lambda=1.2,
-                    n_jobs=self.n_jobs, random_state=42,
-                )
-                lgbm_h.fit(
-                    x_clean[tr_idx], y_h[tr_idx], sample_weight=sw_h[tr_idx],
-                    eval_set=[(x_clean[val_idx], y_h[val_idx])],
-                    callbacks=[lgb.early_stopping(stopping_rounds=20, verbose=False)],
-                )
+                    # Global Model (Anchor)
+                    lgbm_h, cb_h = _train_ml_pair(np.where(mask_h)[0], x_clean, y_h, sw_h)
+                    pred_global = 0.6 * lgbm_h.predict(x_clean) + 0.4 * cb_h.predict(x_clean)
 
-                # --- CatBoost Ensemble (Phase D) ---
-                cb_h = CatBoostRegressor(
-                    iterations=300, learning_rate=0.03, depth=5,
-                    loss_function="Huber:delta=1.35", eval_metric="RMSE",
-                    random_seed=42, verbose=0, od_type="Iter", od_wait=20,
-                    allow_writing_files=False
-                )
-                cb_h.fit(
-                    x_clean[tr_idx], y_h[tr_idx], sample_weight=sw_h[tr_idx],
-                    eval_set=(x_clean[val_idx], y_h[val_idx]),
-                    use_best_model=True
-                )
+                    # Bull Model
+                    if bull_mask.sum() > 500:
+                        lgbm_bull, cb_bull = _train_ml_pair(
+                            np.where(bull_mask)[0], x_clean, y_h, sw_h
+                        )
+                        p_l = 0.6 * lgbm_bull.predict(x_clean)
+                        p_c = 0.4 * cb_bull.predict(x_clean)
+                        pred_bull = p_l + p_c
+                    else:
+                        lgbm_bull, cb_bull = lgbm_h, cb_h
+                        pred_bull = pred_global
 
-                # Blend: 0.6 * LGBM + 0.4 * CatBoost
-                pred_h = 0.6 * lgbm_h.predict(x_clean) + 0.4 * cb_h.predict(x_clean)
+                    # Bear Model
+                    if bear_mask.sum() > 500:
+                        lgbm_bear, cb_bear = _train_ml_pair(
+                            np.where(bear_mask)[0], x_clean, y_h, sw_h
+                        )
+                        p_l = 0.6 * lgbm_bear.predict(x_clean)
+                        p_c = 0.4 * cb_bear.predict(x_clean)
+                        pred_bear = p_l + p_c
+                    else:
+                        lgbm_bear, cb_bear = lgbm_h, cb_h
+                        pred_bear = pred_global
+
+                    # Regime Blending
+                    p_ch = 1.0 - p_bull_arr - p_bear_arr
+                    pred_h = (
+                        (p_bull_arr * pred_bull) + (p_bear_arr * pred_bear) + (p_ch * pred_global)
+                    )
+                else:
+                    # Standard Global Training
+                    lgbm_h, cb_h = _train_ml_pair(np.where(mask_h)[0], x_clean, y_h, sw_h)
+                    pred_h = 0.6 * lgbm_h.predict(x_clean) + 0.4 * cb_h.predict(x_clean)
+                    lgbm_bull, cb_bull = lgbm_h, cb_h
+                    lgbm_bear, cb_bear = lgbm_h, cb_h
 
                 is_mask = (sw_h > 0) & (np.arange(len(sw_h)) < len(sw_h) * 0.8)
                 if is_mask.sum() > 50:
-                    ic_h, _ = spearmanr(pred_h[is_mask], y_h[is_mask])
+                    ic_global, _ = spearmanr(pred_h[is_mask], y_h[is_mask])
+
+                    # Asymmetric Alpha Target Training
+                    long_mask = is_mask & (y_h > 0.5)
+                    if long_mask.sum() > 20:
+                        ic_long, _ = spearmanr(pred_h[long_mask], y_h[long_mask])
+                    else:
+                        ic_long = 0.0
+
+                    asym_cfg = OPT_FUTURES_CONFIG.get("FUTURES_GP_ASYMMETRIC_FITNESS_WEIGHT", 0.0)
+                    asym_weight = float(asym_cfg)
+                    long_bias = float(OPT_FUTURES_CONFIG.get("FUTURES_GP_LONG_BIAS", 1.0))
+
+                    if asym_weight > 0 and long_bias > 1.0 and ic_long > 0:
+                        ic_h = (asym_weight * ic_long) + ((1.0 - asym_weight) * ic_global)
+                        _logger.info(
+                            " [Phase D] Horizon h=%d: Asymmetric IC = %.4f (L-IC=%.4f, G-IC=%.4f)",
+                            h, ic_h, ic_long, ic_global
+                        )
+                    else:
+                        ic_h = ic_global
+                        _logger.info(" [Phase D] Horizon h=%d: Blended IS Rank-IC = %.4f", h, ic_h)
                 else:
                     ic_h = 0.0
 
-                _logger.info(" [Phase D] Horizon h=%d: Blended IS Rank-IC = %.4f", h, ic_h)
                 if ic_h <= 0.0:
                     _logger.info(" [Phase D] Horizon h=%d skipped (non-positive IC)", h)
                     continue
@@ -408,7 +496,13 @@ class GPAlphaMiner:
             else:
                 out_pred = np.zeros(len(aligned_df)) + 0.5
 
-            self._st = lgbm_h
+            self._st_global = lgbm_h
+            self._cb_global = cb_h
+            self._st_bull = lgbm_bull
+            self._cb_bull = cb_bull
+            self._st_bear = lgbm_bear
+            self._cb_bear = cb_bear
+
             cols = [f"gp_alpha_{i:02d}" for i in range(self.n_features_to_select)]
             full_alpha_df = pd.DataFrame(0.5, index=full_grid_index, columns=cols)
             full_alpha_df["gp_alpha_00"] = out_pred
@@ -440,7 +534,7 @@ class GPAlphaMiner:
                     _logger.warning("LightGBM Raw Cache Write Failed: %s", e)
 
         fo = filter_options or {}
-        alpha_df_all, filt_meta = filter_gp_alpha_columns(
+        alpha_df_all, filt_meta = filter_alpha_components(
             raw_alpha_df.copy(),
             panel_df,
             is_end_date=is_end_date,
@@ -472,7 +566,7 @@ class GPAlphaMiner:
 
         alpha_df = alpha_df_all.reindex(panel_df.index).fillna(0.5)
         alpha_df.attrs["best_fitness"] = raw_alpha_df.attrs.get("best_fitness", 0.0)
-        alpha_df.attrs["gp_alpha_filter"] = filt_meta
+        alpha_df.attrs["alpha_component_filter"] = filt_meta
 
         return alpha_df
 
@@ -498,7 +592,7 @@ class GPAlphaMiner:
         feat_cols = _resolve_gp_feature_columns(work)
         x = work[feat_cols].fillna(0.0).to_numpy(dtype=np.float64)
 
-        if hasattr(self, "_st") and self._st is not None:
+        if hasattr(self, "_st_global") and self._st_global is not None:
             kept = getattr(self, "_kept_indices", list(range(x.shape[1])))
             if x.shape[1] >= len(kept):
                 x = x[:, kept]
@@ -511,12 +605,47 @@ class GPAlphaMiner:
                 x_denoised = np.dot(np.dot(x_norm, mp_evecs), mp_evecs.T)
                 x = x_denoised * mp_std + mp_mean
 
-            out_arr = self._st.predict(x)
+            # Prediction with regime blending
+            p_bull_ser = work.get("hmm_prob_bull_trend", pd.Series(0.0, index=work.index))
+            p_bull = p_bull_ser.fillna(0.0).values
+            p_bear_ser = work.get("hmm_prob_bear_trend", pd.Series(0.0, index=work.index))
+            p_bear = p_bear_ser.fillna(0.0).values
+            
+            # Global prediction
+            pred_global = 0.6 * self._st_global.predict(x)
+            if self._cb_global is not None:
+                pred_global += 0.4 * self._cb_global.predict(x)
+            else:
+                pred_global = pred_global / 0.6
+            
+            # Bull prediction
+            if self._st_bull is not None:
+                pred_bull = 0.6 * self._st_bull.predict(x)
+                if self._cb_bull is not None:
+                    pred_bull += 0.4 * self._cb_bull.predict(x)
+                else:
+                    pred_bull = pred_bull / 0.6
+            else:
+                pred_bull = pred_global
+                
+            # Bear prediction
+            if self._st_bear is not None:
+                pred_bear = 0.6 * self._st_bear.predict(x)
+                if self._cb_bear is not None:
+                    pred_bear += 0.4 * self._cb_bear.predict(x)
+                else:
+                    pred_bear = pred_bear / 0.6
+            else:
+                pred_bear = pred_global
+                
+            p_ch = 1.0 - p_bull - p_bear
+            out_arr = (p_bull * pred_bull) + (p_bear * pred_bear) + (p_ch * pred_global)
+
             cols = [f"gp_alpha_{i:02d}" for i in range(self.n_features_to_select)]
             out_grid = np.full((x.shape[0], self.n_features_to_select), 0.5, dtype=np.float64)
             out_grid[:, 0] = out_arr
             return pd.DataFrame(out_grid, index=panel_df.index, columns=cols)
 
-        _logger.warning("transform_cs: _st is missing. Returning neutral features.")
+        _logger.warning("transform_cs: _st_global is missing. Returning neutral features.")
         cols = [f"gp_alpha_{i:02d}" for i in range(self.n_features_to_select)]
         return pd.DataFrame(0.5, index=panel_df.index, columns=cols)
