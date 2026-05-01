@@ -93,7 +93,7 @@ def run_gp_pipeline_validation():
     total_time = time.time() - t0
 
     best_fitness = ml_out.alpha_panel.attrs.get("best_fitness", 0.0)
-    filter_meta = ml_out.alpha_panel.attrs.get("gp_alpha_filter", {})
+    filter_meta = ml_out.alpha_panel.attrs.get("alpha_component_filter", {})
 
     _logger.info(f" Pipeline Execution Time: {total_time:.2f}s")
     _logger.info(f" Best Fitness (IS):       {best_fitness:.6f}")

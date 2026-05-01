@@ -42,6 +42,9 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     "FUTURES_TIER1_SHIELD_MODE": False,
     # Universal Cross-Sectional GP Miner Settings
     "FUTURES_ML_GP_POPULATION": 1000,
+    "FUTURES_GP_LONG_BIAS": 1.5,
+    "FUTURES_GP_ASYMMETRIC_FITNESS_WEIGHT": 0.7,
+    "FUTURES_GP_REGIME_SPECIFIC_LEARNING": True,
     # Tier 2: +2 generations for marginal symbolic-regression diversity (cheap vs full schema lift).
     "FUTURES_ML_GP_GENERATIONS": 22,
     "FUTURES_ML_GP_TARGET_HORIZON": 6,
