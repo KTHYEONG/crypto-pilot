@@ -112,6 +112,9 @@ class CrossSectionalPipelineUtils:
         weights: tuple[float, ...] | None = None,
     ) -> pd.Series:
         """Calculate vol-adjusted rank targets across multiple horizons."""
+        if panel_df.empty or "close" not in panel_df.columns:
+            return pd.Series(dtype=np.float64)
+
         # Use OHLC for more accurate volatility adjustment (Yang-Zhang proxy)
         close = panel_df["close"].unstack(level="symbol")
         open_ = (
@@ -172,15 +175,25 @@ class CrossSectionalPipelineUtils:
         df = panel_df.copy()
         
         # Example: Cross-sectional Volume Rank (0.0 to 1.0)
-        vol = df["volume"].unstack(level="symbol")
-        vol_rank = vol.rank(axis=1, pct=True)
-        df["cross_vol_rank"] = vol_rank.stack(future_stack=True).reindex(df.index)
+        if "volume" in df.columns:
+            vol = df["volume"].unstack(level="symbol")
+            vol_rank = vol.rank(axis=1, pct=True)
+            df["cross_vol_rank"] = vol_rank.stack(future_stack=True).reindex(df.index)
+        elif "Volume" in df.columns:
+            vol = df["Volume"].unstack(level="symbol")
+            vol_rank = vol.rank(axis=1, pct=True)
+            df["cross_vol_rank"] = vol_rank.stack(future_stack=True).reindex(df.index)
+        else:
+            df["cross_vol_rank"] = 0.5
         
         # Example: Cross-sectional 24h Return Rank
-        close = df["close"].unstack(level="symbol")
-        ret_24h = np.log(close / close.shift(24))
-        ret_rank = ret_24h.rank(axis=1, pct=True)
-        df["cross_ret_24h_rank"] = ret_rank.stack(future_stack=True).reindex(df.index)
+        if "close" in df.columns:
+            close = df["close"].unstack(level="symbol")
+            ret_24h = np.log(close / close.shift(24))
+            ret_rank = ret_24h.rank(axis=1, pct=True)
+            df["cross_ret_24h_rank"] = ret_rank.stack(future_stack=True).reindex(df.index)
+        else:
+            df["cross_ret_24h_rank"] = 0.5
         
         return df.fillna(0.0)
 
@@ -192,6 +205,15 @@ class CrossSectionalPipelineUtils:
         - Market Breadth: Pct of symbols with close > 20h SMA.
         """
         df = panel_df.copy()
+        if df.empty:
+            return df
+            
+        if "close" not in df.columns:
+            # If close is missing (e.g. somehow stripped), add dummy features
+            df["cs_dispersion"] = 0.0
+            df["market_breadth"] = 0.0
+            return df
+            
         close = df["close"].unstack(level="symbol")
         
         # 1. Cross-sectional Dispersion (1h)
