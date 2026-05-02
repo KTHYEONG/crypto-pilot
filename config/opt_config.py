@@ -9,12 +9,12 @@ from typing import Any
 OPT_FUTURES_CONFIG: dict[str, Any] = {
     # Reduced from 2000: CAWF-R has K=5 independent legs; more trials = more selection bias.
     # Bonferroni SR_bench = sqrt(2*ln(400))≈3.46 vs sqrt(2*ln(2000))≈5.30 — honest deflation.
-    "total_trials": 400,
+    "total_trials": 1000,
     # Phase-D TPESampler: random trials before TPE; must be < n_ml_trials (see opt_main_futures).
-    "tpe_n_startup_trials": 120,
+    "tpe_n_startup_trials": 200,
     # Caps startup at this fraction of Phase-D n_trials (prevents 384/500 ~77% random when
     # total_trials-oriented tpe_n_startup is reused for FUTURES_ML_PHASE_D_TRIALS=500).
-    "FUTURES_ML_PHASE_D_TPE_STARTUP_FRAC": 0.15,
+    "FUTURES_ML_PHASE_D_TPE_STARTUP_FRAC": 0.20,
     # Phase-D: trial 0 = deploy JSON in search space (TPE anchor; counts toward n_trials).
     "FUTURES_ML_PHASE_D_ENQUEUE_DEPLOY_JSON": True,
     "FUTURES_ML_PHASE_D_DEPLOY_JSON_REL": "results/best_futures_1h.json",
@@ -88,7 +88,7 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     "FUTURES_AWF_MIN_TRAIN_FRAC": 0.40,  # first leg trains on 40% of IS bars
     # PLGD objective weights (see objective_ml.py).
     "FUTURES_PLGD_LAMBDA_DEF": 0.5,   # Bonferroni trial-deflation strength
-    "FUTURES_PLGD_LAMBDA_TAIL": 1.0,  # worst-leg tail penalty multiplier (k=5: 1 bad leg allowed)
+    "FUTURES_PLGD_LAMBDA_TAIL": 0.7,  # worst-leg tail penalty multiplier (k=5: 1 bad leg allowed)
     "FUTURES_AWF_NET_EDGE_MIN": 1.5,   # min EV/cost ratio (avg PnL / round-trip cost)
     # SPA bootstrap for post-run diagnostics (not used per-trial).
     "FUTURES_SPA_N_BOOTSTRAP": 2000,
