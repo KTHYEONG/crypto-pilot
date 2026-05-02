@@ -918,7 +918,21 @@ def run_hmm_fusion_for_is_end(
     from src.domain.futures.ml_pipeline.feature_engineering import build_systemic_hmm_features
 
     if panel_df is None:
-        panel_df = _build_panel_with_targets(data_maps, cfg)
+        if prefetched_1h:
+            _logger.info(
+                "  --> USING prefetched_1h to build panel_df. Keys: %s",
+                list(prefetched_1h.keys())
+            )
+
+            tmp_maps = {sym: {"1h": df} for sym, df in prefetched_1h.items()}
+            panel_df = _build_panel_with_targets(tmp_maps, cfg)
+        else:
+            _logger.info("  --> prefetched_1h is EMPTY. USING data_maps.")
+            panel_df = _build_panel_with_targets(data_maps, cfg)
+        _logger.info(
+            "  --> panel_df len after build: %d",
+            len(panel_df) if panel_df is not None else 0
+        )
 
     _logger.info("  --> Systemic HMM Inference (is_end=%s)...", is_end_date)
 

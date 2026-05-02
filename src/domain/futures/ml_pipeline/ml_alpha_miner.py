@@ -5,7 +5,6 @@ Learns a universal formula across multiple symbols using panel data and CS-IC fi
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 from dataclasses import dataclass, field
@@ -79,8 +78,6 @@ def _resolve_gp_feature_columns(panel_df: pd.DataFrame) -> list[str]:
 
     """
     blocked = {"target", "close", "tbm_gp_weight", "regime_pre_hmm"}
-    # Include HMM probability features if present
-    hmm_cols = [c for c in panel_df.columns if c.startswith("hmm_prob_")]
     cs_names = sorted(c for c in panel_df.columns if c.startswith("cs_"))
 
     base_features = set()
@@ -97,7 +94,7 @@ def _resolve_gp_feature_columns(panel_df: pd.DataFrame) -> list[str]:
             c for c in panel_df.columns if c not in blocked and not c.startswith("hmm_prob_")
         }
 
-    return sorted(base_features | set(hmm_cols))
+    return sorted(base_features)
 
 
 @dataclass
@@ -353,9 +350,9 @@ class MLAlphaMiner:
 
                 l_m = LGBMRegressor(
                     boosting_type="gbdt", objective="huber", n_estimators=300,
-                    learning_rate=0.03, num_leaves=31, max_depth=6,
-                    min_child_samples=70, subsample=0.7, colsample_bytree=0.7,
-                    reg_alpha=1.2, reg_lambda=1.2,
+                    learning_rate=0.03, num_leaves=7, max_depth=3,
+                    min_child_samples=200, subsample=0.7, colsample_bytree=0.7,
+                    reg_alpha=2.0, reg_lambda=2.0,
                     n_jobs=self.n_jobs, random_state=42,
                 )
                 l_m.fit(
@@ -364,7 +361,7 @@ class MLAlphaMiner:
                     callbacks=[lgb.early_stopping(stopping_rounds=20, verbose=False)],
                 )
                 c_m = CatBoostRegressor(
-                    iterations=300, learning_rate=0.03, depth=5,
+                    iterations=300, learning_rate=0.03, depth=3,
                     loss_function="Huber:delta=1.35", eval_metric="RMSE",
                     random_seed=42, verbose=0, od_type="Iter", od_wait=20,
                     allow_writing_files=False
@@ -446,7 +443,8 @@ class MLAlphaMiner:
                         .values
                     )
                 else:
-                    target_h = aligned_df["target"].values
+                    # Normalize [-1, 1] target from panel to [0, 1] for Alpha Miner compatibility
+                    target_h = ((aligned_df["target"] + 1.0) / 2.0).values
 
                 target_h_short = 1.0 - target_h
                 y_h = np.where(np.isfinite(target_h), target_h, 0.5)
@@ -566,8 +564,16 @@ class MLAlphaMiner:
                 alpha_series_list.append(s)
 
             raw_alpha_df = pd.concat(alpha_series_list, axis=1)
-            raw_alpha_df["gp_alpha_long_raw"] = pd.Series(out_pred_long, index=full_grid_index)
-            raw_alpha_df["gp_alpha_short_raw"] = pd.Series(out_pred_short, index=full_grid_index)
+
+            # Apply rank-transformation to directional components to avoid signal collapse from raw LightGBM clustering.
+            for key, arr in [("gp_alpha_long_raw", out_pred_long), ("gp_alpha_short_raw", out_pred_short)]:
+                tmp_df = pd.Series(arr, index=full_grid_index).unstack(level="symbol")
+                if tmp_df.std(axis=1).mean() < 1e-12:
+                    raw_alpha_df[key] = 0.5
+                else:
+                    ranked = _pct_uniform_cs_is_fit(tmp_df, is_row_mask_utc)
+                    raw_alpha_df[key] = ranked.stack(future_stack=True)
+
             raw_alpha_df = raw_alpha_df.loc[:, ~raw_alpha_df.columns.duplicated()].copy()
 
             best_fitness = 1.0
@@ -725,7 +731,12 @@ class MLAlphaMiner:
                 pred_bear = pred_global
                 
             p_ch = 1.0 - p_bull - p_bear
-            out_arr = (p_bull * pred_bull) + (p_bear * pred_bear) + (p_ch * pred_global)
+            out_arr_raw = (p_bull * pred_bull) + (p_bear * pred_bear) + (p_ch * pred_global)
+            
+            # Rank-transform raw output to get uniform distribution, matching training logic
+            unstacked = pd.Series(out_arr_raw, index=panel_df.index).unstack(level="symbol")
+            ranked = unstacked.rank(axis=1, pct=True)
+            out_arr = ranked.stack(future_stack=True).reindex(panel_df.index).fillna(0.5)
 
             cols = [f"gp_alpha_{i:02d}" for i in range(self.n_features_to_select)]
             out_grid = np.full((x.shape[0], self.n_features_to_select), 0.5, dtype=np.float64)
