@@ -91,15 +91,14 @@ def audit_hmm_logic_changes(ml_out, symbols):
 
     _logger.info("=" * 85)
 
-def test_universe_gp_hmm_flow():
+def test_universe_gp_hmm_flow(tf="1h"):
     _logger.info("=" * 85)
-    _logger.info(" [TEST] Universe -> GP Alpha -> HMM Regime Flow (Integrated)")
+    _logger.info(f" [TEST] Universe -> GP Alpha -> HMM Regime Flow (Integrated) TF: {tf}")
     _logger.info("=" * 85)
     
     # 1. Window Setup (Reduced for speed)
     res = get_quarterly_window()
     fetch_start, start, is_end, end = res
-    tf = "1h"
     collector = DataCollector()
     
     # Adjust window to be smaller for testing (last 500 bars of IS)
@@ -174,4 +173,5 @@ def test_universe_gp_hmm_flow():
     _logger.info("=" * 85)
 
 if __name__ == "__main__":
-    test_universe_gp_hmm_flow()
+    test_universe_gp_hmm_flow("1h")
+    test_universe_gp_hmm_flow("4h")

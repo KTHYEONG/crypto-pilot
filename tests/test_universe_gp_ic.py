@@ -27,15 +27,14 @@ warnings.filterwarnings("ignore")
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 _logger = logging.getLogger("test_full_universe_gp")
 
-def run_universe_to_gp_test():
+def run_universe_to_gp_test(tf="1h"):
     _logger.info("=" * 70)
-    _logger.info(" [PHASE 1] Universe Filtering (Broad + Refinement)")
+    _logger.info(f" [PHASE 1] Universe Filtering (Broad + Refinement) TF: {tf}")
     _logger.info("=" * 70)
     
     # 1. 분기 윈도우 설정
     res = get_quarterly_window()
     fetch_start, start, is_end, end = res
-    tf = "1h"
     collector = DataCollector()
     
     # 2. Broad Screening
@@ -125,4 +124,5 @@ def run_universe_to_gp_test():
     _logger.info("=" * 70)
 
 if __name__ == "__main__":
-    run_universe_to_gp_test()
+    run_universe_to_gp_test("1h")
+    run_universe_to_gp_test("4h")
