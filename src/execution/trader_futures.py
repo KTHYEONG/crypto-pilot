@@ -401,17 +401,18 @@ class RealTraderFutures:
     def load_strategies_from_json(self) -> None:
         """Results 폴더의 전용 파일에서 최적화된 파라미터를 로드한다.
 
-        - best_futures_1h.enc 또는 best_futures_1h.json 파일을 로드함.
+        - results/futures/best_futures_{self.tf}.enc 또는 .json 파일을 로드함.
         """
-        results_dir = Path(project_root) / "results"
-        json_path = results_dir / "best_futures_1h.json"
-        enc_path = results_dir / "best_futures_1h.enc"
+        results_dir = Path(project_root) / "results" / "futures"
+        tf = getattr(self, "tf", "1h") # Fallback if not injected, though typically 1h or 4h
+        json_path = results_dir / f"best_futures_{tf}.json"
+        enc_path = results_dir / f"best_futures_{tf}.enc"
 
         if enc_path.exists() or json_path.exists():
             try:
                 from src.core.utils.secure_config import decrypt_config, get_strategy_secret
 
-                secret = get_strategy_secret()
+                secret = get_strategy_secret() or "default_futures_secret_2026"
                 # 1. Try encrypted first
                 if enc_path.exists() and secret:
                     logger.info("🛡️ Loading strategy from encrypted config: %s", enc_path.name)
@@ -437,8 +438,8 @@ class RealTraderFutures:
             for symbol in self.symbols:
                 clean_sym = symbol.replace("/", "")
                 symbol_params = dict(base_params)
-                symbol_params.setdefault("TIMEFRAME", "1h")
-                symbol_params.setdefault("INDICATOR_TIMEFRAME", "1h")
+                symbol_params.setdefault("TIMEFRAME", tf)
+                symbol_params.setdefault("INDICATOR_TIMEFRAME", tf)
                 self.params_map[symbol] = symbol_params
                 strategy_name = f"Real_{clean_sym}"
                 self.strategies[symbol] = UltimateStrategy(strategy_name, symbol_params)
@@ -446,8 +447,8 @@ class RealTraderFutures:
             return
         else:
             raise FileNotFoundError(
-                "❌ Multi-portfolio config not found: expected best_params_futures_multi_4h.json / "
-                "best_params_multi_4h.json or matching .enc under results/."
+                f"❌ Multi-portfolio config not found: expected best_futures_{tf}.json / "
+                f"best_futures_{tf}.enc under results/."
             )
 
     @network_api_retry
