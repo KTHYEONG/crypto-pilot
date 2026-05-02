@@ -539,6 +539,7 @@ def build_gp_input_features(df: pd.DataFrame) -> pd.DataFrame:
         out["downside_jump_24"] + out["tail_risk_24"] - out["range_pos_24"]
     ).fillna(0.0)
 
+
     # vol_ratio / buy_sell_ratio: keep finite defaults; ret/ma_dist/funding left NaN for CS impute
     out = out.replace([np.inf, -np.inf], np.nan)
     return out
@@ -616,6 +617,16 @@ def build_systemic_hmm_features(
 
     """
     _ = alpha_panel
+
+    if panel_df.empty:
+        # Return empty dataframe with expected columns
+        cols = [
+            "btc_trend_24h", "btc_trend_168h", "vol_ratio", "downside_vol_ratio",
+            "btc_ma_dist_168h", "volume_momentum_24h", "market_breadth", "funding_mean"
+        ]
+        # Return a dataframe with datetime index to avoid KeyError later
+        idx = pd.DatetimeIndex([], name="datetime")
+        return pd.DataFrame(columns=cols, index=idx)
 
     market_feats = panel_df.groupby(level="datetime").agg(
         {
