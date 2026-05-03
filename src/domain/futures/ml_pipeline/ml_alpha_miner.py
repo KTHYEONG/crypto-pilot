@@ -205,16 +205,6 @@ class MLAlphaMiner:
         unique_times = unstacked_y.index
         unique_symbols = unstacked_y.columns
 
-        if is_end_date:
-            _cut = pd.to_datetime(is_end_date, utc=True)
-            if getattr(unique_times, "tz", None) is None:
-                _ut = pd.to_datetime(unique_times, utc=True)
-            else:
-                _ut = unique_times.tz_convert("UTC")
-            is_row_mask_utc = np.asarray(_ut < _cut, dtype=bool)
-        else:
-            is_row_mask_utc = np.ones(len(unique_times), dtype=bool)
-
         full_grid_index = pd.MultiIndex.from_product(
             [unique_times, unique_symbols], names=["datetime", "symbol"]
         )
@@ -298,7 +288,7 @@ class MLAlphaMiner:
                 y_fit_audit = y_audit[mask_audit]
                 n_samples_fit = x_fit_audit.shape[0]
                 sample_size = min(5000, n_samples_fit)
-                idx = np.random.choice(n_samples_fit, sample_size, replace=False)
+                idx = np.random.default_rng(42).choice(n_samples_fit, sample_size, replace=False)
                 mi_scores = mutual_info_regression(
                     x_fit_audit[idx], y_fit_audit[idx], random_state=42
                 )
@@ -558,7 +548,7 @@ class MLAlphaMiner:
                 if unstacked.std(axis=1).mean() < 1e-12:
                     s = pd.Series(0.5, index=full_grid_index, name=col)
                 else:
-                    ranked = _pct_uniform_cs_is_fit(unstacked, is_row_mask_utc)
+                    ranked = unstacked.rank(axis=1, pct=True)
                     s = ranked.stack(future_stack=True)
                     s.name = col
                 alpha_series_list.append(s)
@@ -571,7 +561,7 @@ class MLAlphaMiner:
                 if tmp_df.std(axis=1).mean() < 1e-12:
                     raw_alpha_df[key] = 0.5
                 else:
-                    ranked = _pct_uniform_cs_is_fit(tmp_df, is_row_mask_utc)
+                    ranked = tmp_df.rank(axis=1, pct=True)
                     raw_alpha_df[key] = ranked.stack(future_stack=True)
 
             raw_alpha_df = raw_alpha_df.loc[:, ~raw_alpha_df.columns.duplicated()].copy()
