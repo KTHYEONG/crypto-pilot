@@ -108,8 +108,8 @@ def _inject_dyn_leverage_trimmed(trimmed_sig: pd.DataFrame, raw_full: pd.DataFra
     close = raw_full["close"].astype(np.float64)
     r = np.log(close / close.shift(1).clip(lower=1e-12)).fillna(0.0).to_numpy(dtype=np.float64)
     g = (
-        raw_full["gp_alpha_00"].fillna(0.0).to_numpy(dtype=np.float64)
-        if "gp_alpha_00" in raw_full.columns
+        raw_full["ml_alpha_00"].fillna(0.0).to_numpy(dtype=np.float64)
+        if "ml_alpha_00" in raw_full.columns
         else np.zeros(len(raw_full), dtype=np.float64)
     )
     factor_ret = g * r
@@ -187,8 +187,8 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
             trimmed_sig["ml_calib_prob_long"] = raw_full.get("ml_calib_prob_long", 1.0)
             trimmed_sig["ml_calib_prob_short"] = raw_full.get("ml_calib_prob_short", 1.0)
             gp_pre = (
-                raw_full["gp_alpha_00"].to_numpy(dtype=np.float64, copy=False)
-                if "gp_alpha_00" in raw_full.columns
+                raw_full["ml_alpha_00"].to_numpy(dtype=np.float64, copy=False)
+                if "ml_alpha_00" in raw_full.columns
                 else np.zeros(len(trimmed_sig), dtype=np.float64)
             )
             gp_centered = gp_pre - 0.5
@@ -652,7 +652,7 @@ def objective_ml_phase_d(trial: optuna.Trial, ctx: MLPhaseDContext) -> float | t
     awf_slices = ctx.awf_leg_slices
     mai = ctx.multi_alignment_info
     if not awf_slices or mai is None:
-        return (1e9, 1e9) if OPT_FUTURES_CONFIG.get("FUTURES_ML_GP_NSGA2_ENABLED", False) else 1e9
+        return (1e9, 1e9) if OPT_FUTURES_CONFIG.get("FUTURES_ML_ALPHA_NSGA2_ENABLED", False) else 1e9
 
     ml = _suggest_ml_phase_d(trial)
     params = _base_engine_params(ml, ctx.tf)
@@ -941,7 +941,7 @@ def objective_ml_phase_d(trial: optuna.Trial, ctx: MLPhaseDContext) -> float | t
     trial.set_user_attr("awf_sigma_log", sigma_log)
     trial.set_user_attr("dir_balance_penalty", dir_balance_penalty)
 
-    if OPT_FUTURES_CONFIG.get("FUTURES_ML_GP_NSGA2_ENABLED", False):
+    if OPT_FUTURES_CONFIG.get("FUTURES_ML_ALPHA_NSGA2_ENABLED", False):
         obj1 = float(-plgd + pen + 3.0 * trade_shortfall + exposure_floor_penalty)
         obj2 = float(ev_cost_penalty)   # path_consistency removed; deflation handles sigma
         return obj1, obj2

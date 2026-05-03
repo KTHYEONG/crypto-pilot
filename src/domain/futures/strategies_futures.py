@@ -131,26 +131,26 @@ class UltimateStrategy(PipelineStrategyBase):
         close_a = df["close"].to_numpy(dtype=np.float64)
         if st_key == "ML_CALIB_PROB" and bool(self.params.get("USE_CS_RANK_ENGINE", True)):
             n = len(df)
-            # Combine all surviving GP features (non-neutral: std > 1e-6).
+            # Combine all surviving ALPHA features (non-neutral: std > 1e-6).
             # Failed features were set to 0.5 constant by IC filter → zero variance.
             surviving_gp_cols = [
                 c for c in df.columns
-                if c.startswith("gp_alpha_") and c[-2:].isdigit() and float(df[c].std()) > 1e-6
+                if c.startswith("ml_alpha_") and c[-2:].isdigit() and float(df[c].std()) > 1e-6
             ]
             if surviving_gp_cols:
                 gp = df[surviving_gp_cols].mean(axis=1).to_numpy(dtype=np.float64)
-            elif "gp_alpha_00" in df.columns:
-                gp = df["gp_alpha_00"].to_numpy(dtype=np.float64, copy=False)
+            elif "ml_alpha_00" in df.columns:
+                gp = df["ml_alpha_00"].to_numpy(dtype=np.float64, copy=False)
             else:
                 gp = np.zeros(n, dtype=np.float64)
             gp_long = (
-                df["gp_alpha_long"].to_numpy(dtype=np.float64, copy=False)
-                if "gp_alpha_long" in df.columns
+                df["ml_alpha_long"].to_numpy(dtype=np.float64, copy=False)
+                if "ml_alpha_long" in df.columns
                 else gp
             )
             gp_short = (
-                df["gp_alpha_short"].to_numpy(dtype=np.float64, copy=False)
-                if "gp_alpha_short" in df.columns
+                df["ml_alpha_short"].to_numpy(dtype=np.float64, copy=False)
+                if "ml_alpha_short" in df.columns
                 else gp
             )
             hml = (
