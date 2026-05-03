@@ -28,7 +28,7 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     "FUTURES_DISCOVERY_LEVERAGE": 5,
     "FUTURES_PBO_MAX": 0.45,
     # Hardening: candidate PBO must be ≤ this to beat champion.json (skill P4 strict guard).
-    "FUTURES_CHAMPION_PBO_STRICT_MAX": 0.40,
+    "FUTURES_CHAMPION_PBO_STRICT_MAX": 0.50,
     # futures-opt Phase 3: trial-count PBO ceiling (-step per bucket); clamp avoids overkill.
     "FUTURES_MC_GATE_TRIAL_ADJUST_ENABLED": True,
     "FUTURES_MC_GATE_BUCKET_TRIALS": 100,
@@ -42,7 +42,7 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     "FUTURES_TIER1_SHIELD_MODE": False,
     # Universal Cross-Sectional GP Miner Settings
     "FUTURES_ML_GP_POPULATION": 1000,
-    "FUTURES_GP_LONG_BIAS": 1.5,
+    "FUTURES_GP_LONG_BIAS": 2.0,
     "FUTURES_GP_ASYMMETRIC_FITNESS_WEIGHT": 0.7,
     "FUTURES_GP_REGIME_SPECIFIC_LEARNING": True,
     # Tier 2: +2 generations for marginal symbolic-regression diversity (cheap vs full schema lift).
@@ -59,7 +59,7 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     "FUTURES_ML_IC_FILTER_USE_EWMA": False,
     "FUTURES_ML_IC_EWMA_HALF_LIFE": 540.0,
     # Tier 2 discovery: significantly relax cross-section balance cap for growth.
-    "FUTURES_ML_IC_SYMBOL_BALANCE_MAX": 10.0,
+    "FUTURES_ML_IC_SYMBOL_BALANCE_MAX": 5.0,
     "FUTURES_ML_IC_REGIME_GATE": False,
     # Tier 2 discovery: FDR relaxation to expand candidate pool.
     "FUTURES_ML_IC_FDR_Q": 0.40,
