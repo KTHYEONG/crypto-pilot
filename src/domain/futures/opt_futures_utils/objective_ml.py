@@ -777,9 +777,12 @@ def objective_ml_phase_d(trial: optuna.Trial, ctx: MLPhaseDContext) -> float | t
             cum_log_tw = float(np.sum(leg_log_tw))
             max_leg_mdd = float(np.max(leg_mdds))
             if cum_log_tw < -0.05 or max_leg_mdd > liq_mdd_thr:
-                 _logger.debug("[AWF][trial=%d] Aggressive Pruning at Leg %d: cum_log_tw=%.4f, max_mdd=%.2f",
-                              trial.number, leg_idx, cum_log_tw, max_leg_mdd)
-                 return -100.0
+                _logger.debug(
+                    "[AWF][trial=%d] Aggressive Pruning at Leg %d: "
+                    "cum_log_tw=%.4f, max_mdd=%.2f",
+                    trial.number, leg_idx, cum_log_tw, max_leg_mdd,
+                )
+                return -100.0
 
             trial.report(float(np.mean(leg_log_tw)), step=leg_idx)
             if trial.should_prune():
@@ -820,8 +823,8 @@ def objective_ml_phase_d(trial: optuna.Trial, ctx: MLPhaseDContext) -> float | t
         tw_legs = np.exp(leg_arr)
         _raw_stability = 1.0 - (float(np.std(tw_legs)) / (float(np.mean(tw_legs)) + 1e-9))
         stability = float(np.clip(_raw_stability, 0.0, 1.0))
-        # mu_log is adjusted downward if stability is low
-        mu_log = float(mu_log * (1.0 - leg_stability_weight + leg_stability_weight * stability))
+        # Additive penalty: instability reduces mu_log by (1-stability)*sigma_log regardless of sign
+        mu_log = float(mu_log - leg_stability_weight * (1.0 - stability) * sigma_log)
 
     # [Improvement 4] Virtual Friction Penalty
     # Penalize high-frequency strategies to prioritize high-edge signals
