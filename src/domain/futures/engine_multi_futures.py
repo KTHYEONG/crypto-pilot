@@ -95,17 +95,15 @@ class PortfolioBacktestEngineFast:
         if hmm_mod_s is None or hmm_mod_s.shape != close_2d.shape:
             hmm_mod_s = np.ones_like(close_2d, dtype=np.float64)
 
-        l_atr_mult = float(self.params.get("LONG_ATR_MULT", 3.0))
-        l_trail_mult = float(self.params.get("LONG_TRAIL_MULT", 3.0))
-        s_atr_mult = float(self.params.get("SHORT_ATR_MULT", 2.0))
-        s_tp_mult = float(self.params.get("SHORT_TP_MULT", 3.0))
+        atr_mult = float(self.params.get("ATR_MULT", 3.0))
+        trail_mult = float(self.params.get("TRAIL_MULT", 3.0))
+        tp_mult = float(self.params.get("SHORT_TP_MULT", 3.0))
         l_scale_atr = float(self.params.get("LONG_SCALE_ATR_MULT", 3.0))
-        s_trail_mult = float(self.params.get("SHORT_TRAIL_MULT", 3.0))
 
         max_exp_per_coin = float(self.params.get("MAX_EXPOSURE_PER_COIN", 1.5))
         dd_scaling_threshold = float(self.params.get("DD_SCALING_THRESHOLD", 0.15))
-        k_long = int(self.params.get("K_LONG", 2))
-        k_short = int(self.params.get("K_SHORT", 2))
+        k_rank = int(self.params.get("K_RANK", 2))
+        cs_z_threshold = float(self.params.get("CS_Z_SCORE_THRESHOLD", 0.0))
         rebalance_bars = max(1, int(self.params.get("REBALANCE_BARS", 6)))
         crisis_gamma = float(
             self.params.get("CRISIS_GAMMA", self.params.get("CRISIS_GATE_PROB", 1.0))
@@ -142,18 +140,19 @@ class PortfolioBacktestEngineFast:
             self.fee_rate,
             self.slippage_rate,
             self.risk_per_trade,
-            l_atr_mult,
-            l_trail_mult,
-            s_atr_mult,
-            s_tp_mult,
+            atr_mult,
+            trail_mult,
+            atr_mult,
+            tp_mult,
             l_scale_atr,
-            s_trail_mult,
+            trail_mult,
             self.max_concurrent_positions,
             self.max_exposure,
             max_exp_per_coin,
             dd_scaling_threshold,
-            k_long,
-            k_short,
+            k_rank,
+            k_rank,
+            cs_z_threshold,
             rebalance_bars,
             crisis_gamma,
             use_cs_rank,
@@ -198,19 +197,19 @@ def _recompute_cs_dirs_numba(
     hmm_mod_long: np.ndarray,
     hmm_mod_short: np.ndarray,
     crisis_gamma: float,
-    k_long: int,
-    k_short: int,
+    k_rank: int,
+    cs_z_threshold: float,
     computed_dir: np.ndarray,
 ) -> None:
     """Hard top-K CS dirs: binary top-K, crisis (1-p)^gamma, |mag| in [0.05,1].
     
     [Session 12] Asymmetric Gating: Skip entries if hmm_modulator < 0.5.
     This prevents 'paper cut' losses in regimes where the HMM is bearish/crisis.
+    [Refactor] Added Z-Score threshold filtering for Top/Bottom assets.
     """
     computed_dir[:] = 0.0
     gam = crisis_gamma if crisis_gamma > 1e-9 else 1e-9
-    fk = float(k_long)
-    fks = float(k_short)
+    fk = float(k_rank)
 
     # 1. Compute cross-sectional mean and std for Z-scoring
     mean_l, mean_s = 0.0, 0.0
@@ -272,12 +271,12 @@ def _recompute_cs_dirs_numba(
             if np.isfinite(vt) and vt < ss:
                 rank_s += 1
 
-        binary_l = 1.0 if (float(rank_l) <= fk and sl > 0.7 and mod_l >= 0.5) else 0.0
-        binary_s = 1.0 if (float(rank_s) <= fks and ss < 0.3 and mod_s >= 0.5) else 0.0
-
         # Z-score magnitudes: clip between 0 and 3, then scale to max 1.0
         z_l = (sl - mean_l) / std_l
         z_s = (mean_s - ss) / std_s  # Lower ss is better, so mean - ss
+
+        binary_l = 1.0 if (float(rank_l) <= fk and sl > 0.7 and mod_l >= 0.5 and z_l >= cs_z_threshold) else 0.0
+        binary_s = 1.0 if (float(rank_s) <= fk and ss < 0.3 and mod_s >= 0.5 and z_s >= cs_z_threshold) else 0.0
 
         mag_l = z_l / 3.0 if z_l > 0 else 0.0
         mag_s = z_s / 3.0 if z_s > 0 else 0.0
@@ -318,18 +317,19 @@ def backtest_portfolio_numba(
     fee_rate: float,
     slippage_rate: float,
     risk_per_trade: float,
-    l_atr_mult: float,
-    l_trail_mult: float,
-    s_atr_mult: float,
+    atr_mult: float,
+    trail_mult: float,
+    l_atr_mult_unused: float,
     s_tp_mult: float,
     l_scale_atr: float,
-    s_trail_mult: float,
+    s_trail_mult_unused: float,
     max_concurrent: int,
     max_exposure: float,
     max_exp_per_coin: float,
     dd_scaling_threshold: float,
-    k_long: int,
-    k_short: int,
+    k_rank_long: int,
+    k_rank_short: int,
+    cs_z_threshold: float,
     rebalance_bars: int,
     crisis_gamma: float,
     use_cs_rank: int,
@@ -410,7 +410,7 @@ def backtest_portfolio_numba(
                     if c_high > highest[s]: highest[s] = c_high
 
                     # [REFACTORED] Pessimistic Execution: Check Exit (SL) FIRST before Scale-out (TP)
-                    exit_triggered, exit_price, stop_p[s] = check_long_exit(c_open, c_low, highest[s], pos_atr, stop_p[s], l_trail_mult, slippage_rate)
+                    exit_triggered, exit_price, stop_p[s] = check_long_exit(c_open, c_low, highest[s], pos_atr, stop_p[s], trail_mult, slippage_rate)
 
                     if not exit_triggered and not has_scaled[s]:
                         tr, sc_p, sc_a, pnl_s, fee_s = process_long_scale_out(c_open, c_high, entry_p[s], pos_atr, l_scale_atr, amount[s], fee_rate)
@@ -426,7 +426,7 @@ def backtest_portfolio_numba(
                     if c_low < lowest[s]: lowest[s] = c_low
 
                     # [REFACTORED] Pessimistic Execution: Check Exit (SL) FIRST before Scale-out (TP)
-                    exit_triggered, exit_price, stop_p[s] = check_short_exit(c_open, c_high, lowest[s], pos_atr, stop_p[s], s_trail_mult, slippage_rate)
+                    exit_triggered, exit_price, stop_p[s] = check_short_exit(c_open, c_high, lowest[s], pos_atr, stop_p[s], trail_mult, slippage_rate)
 
                     if not exit_triggered and not has_scaled[s]:
                         tr, sc_p, sc_a, pnl_s, fee_s = process_short_scale_out(c_open, c_low, entry_p[s], pos_atr, s_tp_mult, amount[s], fee_rate)
@@ -465,8 +465,8 @@ def backtest_portfolio_numba(
                         hmm_mod_long,
                         hmm_mod_short,
                         crisis_gamma,
-                        k_long,
-                        k_short,
+                        k_rank_long,
+                        cs_z_threshold,
                         computed_dir,
                     )
 
@@ -526,7 +526,7 @@ def backtest_portfolio_numba(
                     gk_use = 0.0
                 # [Asymmetric Stop Tightening] P3: Directional Balance
                 # Tighten LONG stop during Crisis/Bear regimes to protect capital.
-                stop_mult = l_atr_mult if p_side == 1 else s_atr_mult
+                stop_mult = atr_mult
                 if p_side == 1:
                     # If crisis probability > 20%, tighten stop by 40%
                     if hmm_crisis[prev_i, s] > 0.2:

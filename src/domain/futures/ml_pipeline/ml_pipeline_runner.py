@@ -101,14 +101,14 @@ def _attach_tbm_gp_weights(
     return out
 
 
-def _merge_gp_into_1h(df_1h: pd.DataFrame) -> pd.DataFrame:
-    """Append GP microstructure / momentum columns to 1h OHLCV (sorted by datetime)."""
-    out = df_1h.copy()
+def _enrich_with_gp_features(df: pd.DataFrame, tf: str = "1h") -> pd.DataFrame:
+    """Append GP microstructure / momentum columns to OHLCV (sorted by datetime)."""
+    out = df.copy()
     if "open" not in out.columns:
         out["open"] = pd.to_numeric(out["close"], errors="coerce").shift(1).fillna(out["close"])
     w = out.sort_values("datetime").reset_index(drop=True)
     idx = pd.DatetimeIndex(pd.to_datetime(w["datetime"], utc=True))
-    gp = build_gp_input_features(w.set_index(idx))
+    gp = build_gp_input_features(w.set_index(idx), tf=tf)
     for col in gp.columns:
         w[col] = gp[col].to_numpy()
     return w
@@ -255,9 +255,17 @@ def _hmm_modulator_kelly_values(
 
     k_long, k_short = _is_kelly_per_semantic_state(p_mat, fwd_ret, is_mask, k_states, cols)
 
-    # Apply shrink to deviations from 1.0
-    mod_long = np.clip(1.0 + float(shrink) * (p_mat @ k_long), 0.3, 2.0).astype(np.float64)
-    mod_short = np.clip(1.0 + float(shrink) * (p_mat @ k_short), 0.3, 2.0).astype(np.float64)
+    # [Improvement 2] Dynamic Kelly Scaling
+    if bool(OPT_FUTURES_CONFIG.get("FUTURES_HMM_DYNAMIC_KELLY_ENABLED", False)):
+        p_max = np.max(p_mat, axis=1)
+        # multiplier: certainty relative to uniform distribution (1/k_states)
+        conf_multiplier = np.clip(p_max * float(k_states), 0.5, 1.5)
+        mod_long = np.clip(1.0 + float(shrink) * conf_multiplier * (p_mat @ k_long), 0.1, 2.5).astype(np.float64)
+        mod_short = np.clip(1.0 + float(shrink) * conf_multiplier * (p_mat @ k_short), 0.1, 2.5).astype(np.float64)
+    else:
+        # Apply shrink to deviations from 1.0
+        mod_long = np.clip(1.0 + float(shrink) * (p_mat @ k_long), 0.3, 2.0).astype(np.float64)
+        mod_short = np.clip(1.0 + float(shrink) * (p_mat @ k_short), 0.3, 2.0).astype(np.float64)
 
     # [NEW] Asymmetric Regime Override (Hard Capping & Boosting)
     p_bull = merged["hmm_prob_bull_trend"].to_numpy(dtype=np.float64)
@@ -480,10 +488,24 @@ def _apply_ml_calib_probs(
         if "gp_alpha_short" in aligned_tf.columns
         else gp_base
     )
-    aligned_tf["xs_score_long"] = gp_long * hmm_m_long
-    # Invert hms for short ranking: lower xs_short = better short in numba CS ranker.
-    # BEAR/CRISIS (hms>1): gp/hms < gp → lower → ranked higher as short. ✓
-    aligned_tf["xs_score_short"] = gp_short / np.maximum(hmm_m_short, 0.1)
+    # [Improvement 1] Friction-Aware EV Hurdle
+    hurdle_ratio = float(OPT_FUTURES_CONFIG.get("FUTURES_ML_EV_HURDLE_RATIO", 0.0))
+    if hurdle_ratio > 0:
+        from config.settings import SLIPPAGE_RATE, TRADING_FEE_RATE
+        # Round-trip cost (Taker fee + Slippage) * 2
+        rt_cost = (TRADING_FEE_RATE + SLIPPAGE_RATE) * 2.0
+        # Heuristic: 0.1% expected return corresponds to ~0.02 deviation from 0.5 in rank space.
+        score_hurdle = hurdle_ratio * rt_cost * 10.0
+        
+        # Zero out signals that don't clear the hurdle
+        gp_long_mask = (gp_long > (0.5 + score_hurdle)).astype(np.float64)
+        gp_short_mask = (gp_short < (0.5 - score_hurdle)).astype(np.float64)
+        
+        aligned_tf["xs_score_long"] = gp_long * hmm_m_long * gp_long_mask
+        aligned_tf["xs_score_short"] = (gp_short / np.maximum(hmm_m_short, 0.1)) * gp_short_mask + (1.0 * (1.0 - gp_short_mask))
+    else:
+        aligned_tf["xs_score_long"] = gp_long * hmm_m_long
+        aligned_tf["xs_score_short"] = gp_short / np.maximum(hmm_m_short, 0.1)
 
     meta_on = bool(use_meta) and bool(OPT_FUTURES_CONFIG.get("FUTURES_USE_META_LABELER", False))
 
@@ -566,15 +588,12 @@ def _step4_fusion_one_symbol(
             "ml_calib_prob", "ml_calib_prob_long", "ml_calib_prob_short",
             "hmm_prob_bull_trend", "hmm_prob_bear_trend", "hmm_prob_chop", "hmm_prob_crisis"
         ]
-        # Dynamically add all potential feature columns to drop list
-        all_feat_cols = list(ml_reserved)
-        all_feat_cols.extend(GP_ENGINEERED_FEATURE_NAMES)
-        all_feat_cols.extend(_META_EXTRA_FEATS)
-        
         # Also drop any legacy or dynamic HMM probability columns
         hmm_to_drop = [c for c in df_1h.columns if str(c).startswith("hmm_prob_")]
 
-        drop_exist = list(set(all_feat_cols + hmm_to_drop))
+        # [FIX] Do NOT drop GP_ENGINEERED_FEATURE_NAMES or _META_EXTRA_FEATS here.
+        # We want to preserve these microstructure features for the MetaLabeler/Audit.
+        drop_exist = list(set(ml_reserved + hmm_to_drop))
         drop_exist = [c for c in drop_exist if c in df_1h.columns]
 
         if drop_exist:
@@ -672,92 +691,58 @@ def _print_hmm_summary(
     mode_label: str = "",
 ) -> None:
     """Print a detailed financial and semantic profile of the HMM states."""
-    _logger.info("-" * 85)
-    _logger.info(f" [HMM AUDIT] Semantic State Profile {mode_label}")
-    _logger.info("-" * 85)
+    _logger.info(" ┌───────────────────────────────────────────────────────────────────────────────────┐")
+    _logger.info(f" │ [HMM AUDIT] Semantic State Profile {mode_label:<46} │")
+    _logger.info(" ├───────────────────────────────────────────────────────────────────────────────────┤")
 
-
-    # 1. Input Data Diagnostics
-    _logger.info(" [1] INPUT DATA DIAGNOSTICS")
     total_rows = len(market_hmm_feats)
     nan_count = market_hmm_feats.isna().sum().sum()
-    zero_var_feats = [c for c in market_hmm_feats.columns if market_hmm_feats[c].std() < 1e-6]
-    _logger.info(f"   - Total Samples:      {total_rows}")
-    _logger.info(f"   - Total NaNs:         {nan_count}")
-    _logger.info(f"   - Zero Var Features:  {zero_var_feats}")
-    _logger.info("-" * 85)
-
-    # 2. State Distribution & Financial Impact
-    _logger.info(" [2] SEMANTIC STATE PROFILING & FINANCIAL IMPACT")
+    _logger.info(f" │ [DATA] {total_rows} samples, {nan_count} NaNs{' '*45} │")
+    
     cols = [c for c in HMM_SEMANTIC_PROB_COLUMNS if c in market_probs.columns]
 
     if cols and len(market_probs) == len(market_hmm_feats):
-        # Align everything
         df_eval = market_probs[["datetime", *cols]].copy()
         df_eval["dominant_state"] = df_eval[cols].idxmax(axis=1)
 
-        # Merge Modulator only (feat_tmp will supply btc_trend_vol_adj_24h to avoid _x/_y collision)
         mod_cols = ["datetime", "hmm_modulator_long", "hmm_modulator_short"]
         mod_tmp = hmm_modulator[[c for c in mod_cols if c in hmm_modulator.columns]]
         df_eval = pd.merge(df_eval, mod_tmp, on="datetime", how="left")
 
-        # Merge Features
         feat_tmp = market_hmm_feats.copy().reset_index()
         feat_cols_to_merge = ["datetime", "btc_trend_vol_adj_24h", "realized_vol_regime"]
         df_eval = pd.merge(df_eval, feat_tmp[feat_cols_to_merge], on="datetime", how="left")
 
-        # Calculate BTC 24h Forward Return if available
         has_return = False
         if btc_1h is not None and not btc_1h.empty:
             btc_tmp = btc_1h[["datetime", "close"]].copy()
             btc_tmp["datetime"] = pd.to_datetime(btc_tmp["datetime"], utc=True)
             btc_tmp["fwd_ret_24h"] = btc_tmp["close"].pct_change(24).shift(-24)
-            df_eval = pd.merge(
-                df_eval, btc_tmp[["datetime", "fwd_ret_24h"]], on="datetime", how="left"
-            )
+            df_eval = pd.merge(df_eval, btc_tmp[["datetime", "fwd_ret_24h"]], on="datetime", how="left")
             has_return = True
 
-        # Print Global Averages
-        _logger.info("  [Global Averages]")
-        means = market_probs[cols].mean()
-        for c, m in means.items():
-            _logger.info(f"   - {c:<25}: {m:.4f}")
         avg_mod_l = df_eval["hmm_modulator_long"].mean()
         avg_mod_s = df_eval["hmm_modulator_short"].mean()
-        _logger.info(f"   - Global Modulator (L/S): {avg_mod_l:.2f} / {avg_mod_s:.2f}")
-        _logger.info("-" * 40)
+        _logger.info(f" │ [GLOBAL] Modulator L/S: {avg_mod_l:.2f} / {avg_mod_s:.2f}{' '*41} │")
+        _logger.info(" ├────────────┬────────┬─────────────┬───────────┬─────────┬───────────────┤")
+        _logger.info(" │ REGIME     │ TIME % │ MOD (L / S) │ AVG TREND │ AVG VOL │ FWD RET (24h) │")
+        _logger.info(" ├────────────┼────────┼─────────────┼───────────┼─────────┼───────────────┤")
 
-        # Print Per-State Profile
-        _logger.info("  [Per-State Financial Profile]")
         for state in cols:
             g = df_eval[df_eval["dominant_state"] == state]
             pct = len(g) / len(df_eval) * 100
+            st_name = state.replace("hmm_prob_", "").upper()
             if len(g) > 0:
                 avg_trend = g["btc_trend_vol_adj_24h"].mean()
                 avg_vol = g["realized_vol_regime"].mean()
-                avg_mod_l = g["hmm_modulator_long"].mean()
-                avg_mod_s = g["hmm_modulator_short"].mean()
-
-                ret_str = "N/A"
-                if has_return:
-                    avg_ret = g["fwd_ret_24h"].mean() * 100
-                    ret_str = f"{avg_ret:>+6.2f}%"
-
-                st_name = state.replace("hmm_prob_", "").upper()
-                _logger.info(f"   ► {st_name:<11} ({pct:>5.1f}% time)")
-                _logger.info(
-                    f"      Kelly Mod (L/S): {avg_mod_l:.2f} / {avg_mod_s:.2f} | "
-                    f"24h Fwd Ret: {ret_str}"
-                )
-                _logger.info(
-                    f"      Avg Trend: {avg_trend:>+5.2f} | Avg Vol:     {avg_vol:.2f}"
-                )
+                m_l = g["hmm_modulator_long"].mean()
+                m_s = g["hmm_modulator_short"].mean()
+                ret_str = f"{g['fwd_ret_24h'].mean() * 100:>+6.2f}%" if has_return else "   N/A"
+                _logger.info(f" │ {st_name:<10} │ {pct:>5.1f}% │ {m_l:.2f} / {m_s:.2f} │ {avg_trend:>+9.2f} │ {avg_vol:>7.2f} │ {ret_str:<13} │")
             else:
-                st_name = state.replace("hmm_prob_", "").upper()
-                _logger.info(f"   ► {st_name:<11} (  0.0% time)")
+                _logger.info(f" │ {st_name:<10} │   0.0% │ ---- / ---- │      ---- │    ---- │           --- │")
 
-    _logger.info("-" * 85)
-    _logger.info("-" * 85 + "\n")
+    _logger.info(" └────────────┴────────┴─────────────┴───────────┴─────────┴───────────────┘\n")
 
 
 
@@ -919,24 +904,25 @@ def run_hmm_fusion_for_is_end(
 
     if panel_df is None:
         if prefetched_1h:
-            _logger.info(
+            _logger.debug(
                 "  --> USING prefetched_1h to build panel_df. Keys: %s",
                 list(prefetched_1h.keys())
             )
-
             tmp_maps = {sym: {"1h": df} for sym, df in prefetched_1h.items()}
             panel_df = _build_panel_with_targets(tmp_maps, cfg)
         else:
-            _logger.info("  --> prefetched_1h is EMPTY. USING data_maps.")
+            _logger.debug("  --> prefetched_1h is EMPTY. USING data_maps.")
             panel_df = _build_panel_with_targets(data_maps, cfg)
-        _logger.info(
+        
+        _logger.debug(
             "  --> panel_df len after build: %d",
             len(panel_df) if panel_df is not None else 0
         )
 
+
     _logger.info("  --> Systemic HMM Inference (is_end=%s)...", is_end_date)
 
-    market_hmm_feats = build_systemic_hmm_features(panel_df, None)
+    market_hmm_feats = build_systemic_hmm_features(panel_df, None, tf="1h")
     if market_hmm_feats.index.tz is None:
         market_hmm_feats.index = market_hmm_feats.index.tz_localize("UTC")
     else:
@@ -1087,14 +1073,22 @@ def run_ml_pipeline_for_universe(
                     df_1h = merge_funding_into_ohlcv(sym, df_1h, Path(FUTURES_DATA_DIR))
                     df_1h = merge_metrics_into_ohlcv(sym, df_1h, Path(FUTURES_DATA_DIR))
                 else:
-                    df_1h = df_tf
+                    # Target is 1h, but we keep df_tf unenriched to avoid merge collisions later
+                    df_1h = df_tf.copy()
 
                 try:
-                    df_1h_enriched = _merge_gp_into_1h(df_1h)
+                    # Enrich 1h with GP features (primary source for panel/HMM)
+                    df_1h_enriched = _enrich_with_gp_features(df_1h, tf="1h")
                 except Exception as e:
-                    _logger.warning("[%s] GP feature merge failed: %s", sym, e)
+                    _logger.warning("[%s] GP feature enrichment failed: %s", sym, e)
                     df_1h_enriched = df_1h
-                data_maps[sym] = {tf: df_tf, "1h": df_1h_enriched}
+                # Store target TF and 1h-enriched frames separately.
+                # If tf=='1h', data_maps[sym][tf] MUST remain unenriched to avoid merge collisions.
+                if tf != "1h":
+                    data_maps[sym] = {tf: df_tf, "1h": df_1h_enriched}
+                else:
+                    data_maps[sym] = {tf: df_tf}
+                
                 prefetched_1h[sym] = df_1h_enriched
         except Exception as e:
             _logger.warning("[%s] Data fetch failed: %s", sym, e)
@@ -1107,30 +1101,37 @@ def run_ml_pipeline_for_universe(
     if bool(cfg.get("FUTURES_ML_GP_USE_TBM_WEIGHT", True)):
         _logger.info("  --> Step 1b: Triple-Barrier Micro-Weighting (1m prefetch)")
 
-
         one_m_gp: dict[str, pd.DataFrame | None] = {}
         for sym in list(data_maps.keys()):
             try:
                 one_m_gp[sym] = collector.collect_1m_ohlcv(sym, label_start, end)
             except Exception:
                 one_m_gp[sym] = None
+
+        # Apply TBM weights to BOTH prefetched_1h (enriched) and data_maps entries
         for sym in list(data_maps.keys()):
             try:
-                data_maps[sym]["1h"] = _attach_tbm_gp_weights(
-                    sym,
-                    data_maps[sym]["1h"],
-                    label_start,
-                    end,
-                    collector,
-                    one_m_gp.get(sym),
-                )
+                # 1. Update data_maps target TF (if 1h) or data_maps['1h']
+                for k in [tf, "1h"]:
+                    if k in data_maps[sym]:
+                        data_maps[sym][k] = _attach_tbm_gp_weights(
+                            sym, data_maps[sym][k], label_start, end, collector, one_m_gp.get(sym)
+                        )
+                # 2. Update prefetched_1h (enriched master)
+                if sym in prefetched_1h:
+                    prefetched_1h[sym] = _attach_tbm_gp_weights(
+                        sym, prefetched_1h[sym], label_start, end, collector, one_m_gp.get(sym)
+                    )
             except Exception as e:
                 _logger.warning("[%s] TBM weight attach failed: %s", sym, e)
-        for sym in prefetched_1h:
-            if sym in data_maps and "1h" in data_maps[sym]:
-                prefetched_1h[sym] = data_maps[sym]["1h"]
 
-    panel_df = _build_panel_with_targets(data_maps, cfg)
+    # Use prefetched_1h (enriched master) to build panel_df if available
+    if prefetched_1h:
+        tmp_enriched_maps = {sym: {"1h": df} for sym, df in prefetched_1h.items()}
+        panel_df = _build_panel_with_targets(tmp_enriched_maps, cfg)
+    else:
+        panel_df = _build_panel_with_targets(data_maps, cfg)
+
     raw_h = cfg.get("FUTURES_ML_GP_HORIZONS", (3, 6, 12, 24))
     default_h = (3, 6, 12, 24)
     h_src = raw_h if isinstance(raw_h, (list, tuple)) else default_h
@@ -1140,7 +1141,7 @@ def run_ml_pipeline_for_universe(
     _logger.info("  --> Step 2a: Early Systemic HMM Inference for Regime-Aware Alpha")
     from src.domain.futures.ml_pipeline.feature_engineering import build_systemic_hmm_features
 
-    market_hmm_feats = build_systemic_hmm_features(panel_df, None)
+    market_hmm_feats = build_systemic_hmm_features(panel_df, None, tf="1h")
     if market_hmm_feats.index.tz is None:
         market_hmm_feats.index = market_hmm_feats.index.tz_localize("UTC")
     else:
@@ -1208,40 +1209,30 @@ def run_ml_pipeline_for_universe(
     # --- Print GP IC Validation Results immediately after Step 2 ---
     best_fitness = alpha_panel.attrs.get("best_fitness", 0.0)
     filter_meta = alpha_panel.attrs.get("alpha_component_filter", {})
-
-    _logger.info("-" * 85)
-    _logger.info(" [GP AUDIT] LightGBM IC Validation")
-    _logger.info("-" * 85)
-
-    _logger.info(f" IS Best Fitness (Composite ICIR): {best_fitness:.6f}")
-    _logger.info(f" Alpha Components Tried:          {filter_meta.get('n_components', 0):.0f}")
-    _logger.info(f" Alpha Components Surviving:       {filter_meta.get('n_surviving', 0):.0f}")
     neu_p = bool(filter_meta.get("neutralize_primary", 0))
-    _logger.info(f" Primary Alpha Neutralized:       {neu_p}")
 
-    _logger.info("-" * 85)
-    _logger.info(" [DIAGNOSTICS] Elimination Breakdown (Why they failed):")
-    _logger.info(f"   - Failed FDR (Stat. Luck):    {filter_meta.get('fail_fdr', 0):.0f}")
-    _logger.info(f"   - Failed DSR (Risk/Reward):   {filter_meta.get('fail_dsr', 0):.0f}")
-    _logger.info(f"   - Failed OOS (Overfit):       {filter_meta.get('fail_oos', 0):.0f}")
-    _logger.info(f"   - Failed Half-Life (Noise):   {filter_meta.get('fail_half_life', 0):.0f}")
-    _logger.info(f"   - Failed Symbol Balance:      {filter_meta.get('fail_sym_bal', 0):.0f}")
-    _logger.info(f"   - Failed Regime Consistency:  {filter_meta.get('fail_regime', 0):.0f}")
-    _logger.info(f"   - Failed Orthogonality:       {filter_meta.get('fail_ortho', 0):.0f}")
-
-    _logger.info("-" * 85)
-    _logger.info(" [BEST ALPHA (gp_alpha_00) METRICS]")
-    _logger.info(f"   - IS Mean IC:           {filter_meta.get('primary_is_mu', 0.0):.4f}")
-    _logger.info(f"   - OOS Mean IC:          {filter_meta.get('primary_oos_mu', 0.0):.4f}")
-    _logger.info(f"   - IC Half-Life:         {filter_meta.get('primary_half_life', 0.0):.1f} bars")
-    _logger.info(f"   - Symbol IC Dispersion: {filter_meta.get('primary_sym_dispersion', 0.0):.2f}")
-    _logger.info(f"   - Raw T-Stat:           {filter_meta.get('primary_t_stat', 0.0):.2f}")
-    _logger.info("-" * 85)
+    _logger.info(" ┌───────────────────────────────────────────────────────────────────────────────────┐")
+    _logger.info(" │ [GP AUDIT] LightGBM IC Validation (Cross-Sectional Alpha)                         │")
+    _logger.info(" ├───────────────────────────────────────────────────────────────────────────────────┤")
+    _logger.info(f" │ [OVERVIEW] Fitness: {best_fitness:.4f} | Survived: {filter_meta.get('n_surviving', 0):.0f}/{filter_meta.get('n_components', 0):.0f} | Neutralized: {neu_p} │")
+    _logger.info(" ├───────────────────────────────────────────────────────────────────────────────────┤")
+    _logger.info(" │ [BEST ALPHA] IS IC: {:>6.4f} | OOS IC: {:>6.4f} | Half-Life: {:>4.1f} | T-Stat: {:>5.2f} │".format(
+        filter_meta.get('primary_is_mu', 0.0), filter_meta.get('primary_oos_mu', 0.0),
+        filter_meta.get('primary_half_life', 0.0), filter_meta.get('primary_t_stat', 0.0)
+    ))
+    _logger.info(" ├───────────────────────────────────────────────────────────────────────────────────┤")
+    _logger.info(" │ [FAILURES] FDR:{fail_fdr:<2.0f} DSR:{fail_dsr:<2.0f} OOS:{fail_oos:<2.0f} HL:{fail_half_life:<2.0f} SYM:{fail_sym_bal:<2.0f} REG:{fail_regime:<2.0f} ORT:{fail_ortho:<2.0f} │".format(
+        fail_fdr=filter_meta.get('fail_fdr', 0), fail_dsr=filter_meta.get('fail_dsr', 0),
+        fail_oos=filter_meta.get('fail_oos', 0), fail_half_life=filter_meta.get('fail_half_life', 0),
+        fail_sym_bal=filter_meta.get('fail_sym_bal', 0), fail_regime=filter_meta.get('fail_regime', 0),
+        fail_ortho=filter_meta.get('fail_ortho', 0)
+    ))
+    _logger.info(" └───────────────────────────────────────────────────────────────────────────────────┘")
 
     if best_fitness > 0.01:
-        _logger.info(" [RESULT] Reasonable IC/Fitness detected. Track A is healthy.")
+        _logger.info("  [SUCCESS] Reasonable IC/Fitness detected. Track A is healthy.")
     else:
-        _logger.warning(" [RESULT] Low Fitness detected. Check market volatility or features.")
+        _logger.warning("  [WARNING] Low Fitness detected. Check market volatility or features.")
 
     if gp_only:
         # Step 2 이후 즉시 종료

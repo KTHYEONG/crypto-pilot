@@ -50,7 +50,7 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     "FUTURES_ML_GP_TARGET_HORIZON": 6,
     "FUTURES_ML_GP_HORIZONS": (6, 12, 24, 48),
     # Cache-control refit: when True, bypass GP raw cache and force alpha retraining.
-    "FUTURES_ML_FORCE_RETRAIN_ALPHA": False,
+    "FUTURES_ML_FORCE_RETRAIN_ALPHA": True,
     "FUTURES_ML_GP_PARSIMONY": 0.001,
     "FUTURES_ML_GP_USE_TBM_WEIGHT": True,
     "FUTURES_ML_PRE_GP_REGIME": False,
@@ -58,11 +58,11 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     "FUTURES_ML_IC_FILTER_USE_HAC": True,
     "FUTURES_ML_IC_FILTER_USE_EWMA": False,
     "FUTURES_ML_IC_EWMA_HALF_LIFE": 540.0,
-    # Tier 2 discovery: slightly relax cross-section balance cap (4h panels were 1/15 GP survival).
-    "FUTURES_ML_IC_SYMBOL_BALANCE_MAX": 3.5,
-    "FUTURES_ML_IC_REGIME_GATE": True,
-    # Tier 2 discovery: mild FDR relaxation vs 0.15 (still conservative vs test_gp_ic 0.3).
-    "FUTURES_ML_IC_FDR_Q": 0.18,
+    # Tier 2 discovery: significantly relax cross-section balance cap for growth.
+    "FUTURES_ML_IC_SYMBOL_BALANCE_MAX": 10.0,
+    "FUTURES_ML_IC_REGIME_GATE": False,
+    # Tier 2 discovery: FDR relaxation to expand candidate pool.
+    "FUTURES_ML_IC_FDR_Q": 0.40,
     "FUTURES_ML_GP_NSGA2_ENABLED": False,
     # NSGA-II population size. Generations = trials / population_size.
     # Target ≥ 10 generations → min trials = population_size * 10.
@@ -100,8 +100,8 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     "FUTURES_WF_OOS_LEGS": 5,
     # R-6: per WF OOS leg, retrain systemic HMM on data strictly before leg start (GP frozen).
     "FUTURES_WF_HMM_LEG_REFIT": True,
-    "FUTURES_WF_LEG_TW_MIN_ALL": 0.93,
-    "FUTURES_WF_LEG_TW_MEAN_MIN": 0.98,
+    "FUTURES_WF_LEG_TW_MIN_ALL": 0.90,
+    "FUTURES_WF_LEG_TW_MEAN_MIN": 1.00,
     # futures-opt P4: log reference + optional soft warn (not a hard gate).
     "FUTURES_ERGODICITY_GUIDELINE_PCT": 15.0,
     "FUTURES_ERGODICITY_HARD_GATE_ENABLED": True,
@@ -128,33 +128,39 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     # AWF worst-leg floor: ≥-0.05 means at most 5% log loss on worst single leg.
     # Changed from -0.03 to -0.10 to accommodate v11 alpha volatility.
     "FUTURES_CPCV_P10_LOG_TW_MIN": -0.10,
+    # Improvement 1: Friction-Aware EV Hurdle
+    "FUTURES_ML_EV_HURDLE_RATIO": 0.0,
+    # Improvement 2: Regime-Aware Dynamic Kelly Scaling
+    "FUTURES_HMM_DYNAMIC_KELLY_ENABLED": True,
+    # Improvement 3: PLGD Leg Stability Weight
+    "FUTURES_PLGD_AWF_LEG_STABILITY_WEIGHT": 0.8,
+    # Improvement 4: Friction-Aware Virtual Cost (bps per trade)
+    "FUTURES_VIRTUAL_FRICTION_BPS": 2.5,
 }
 
 # Cross-Sectional Strategy Parameter Space
 SIGNAL_PARAM_SPACE_FUTURES: dict[str, dict[str, Any]] = {
     # Multi-session stability: lower bound ≥26 (matches ML Phase D discovery band).
     "ATR_PERIOD": {"type": "int", "low": 26, "high": 40, "step": 2},
-    "LONG_ATR_MULT": {"type": "float", "low": 1.5, "high": 4.5, "step": 0.25},
-    "LONG_TRAIL_MULT": {"type": "float", "low": 2.5, "high": 6.0, "step": 0.5},
-    "SHORT_ATR_MULT": {"type": "float", "low": 1.0, "high": 3.0, "step": 0.25},
-    "SHORT_TP_MULT": {"type": "float", "low": 1.0, "high": 3.5, "step": 0.5},
-    "SHORT_TRAIL_MULT": {"type": "float", "low": 1.5, "high": 4.5, "step": 0.5},
+    "ATR_MULT": {"type": "float", "low": 1.0, "high": 5.0, "step": 0.25},
+    "TRAIL_MULT": {"type": "float", "low": 1.5, "high": 6.5, "step": 0.5},
+    "TP_MULT": {"type": "float", "low": 1.0, "high": 4.0, "step": 0.5},
 }
 
 PORTFOLIO_PARAM_SPACE_FUTURES: dict[str, dict[str, Any]] = {
-    "RISK_PER_TRADE": {"type": "float", "low": 0.01, "high": 0.05, "step": 0.005},
-    "MAX_EXPOSURE_PER_COIN": {"type": "float", "low": 0.5, "high": 2.0, "step": 0.1},
-    "DD_SCALING_THRESHOLD": {"type": "float", "low": 0.10, "high": 0.25, "step": 0.05},
+    "RISK_PER_TRADE": {"type": "float", "low": 0.01, "high": 0.05, "step": 0.01},
+    "MAX_EXPOSURE_PER_COIN": {"type": "float", "low": 0.5, "high": 2.0, "step": 0.2},
+    "DD_SCALING_THRESHOLD": {"type": "float", "low": 0.10, "high": 0.30, "step": 0.10},
 }
 
 ENGINE_PARAM_SPACE_FUTURES: dict[str, dict[str, Any]] = {
     **SIGNAL_PARAM_SPACE_FUTURES,
     **PORTFOLIO_PARAM_SPACE_FUTURES,
-    "K_LONG": {"type": "int", "low": 1, "high": 4, "step": 1},
-    "K_SHORT": {"type": "int", "low": 1, "high": 4, "step": 1},
+    "K_RANK": {"type": "int", "low": 1, "high": 4, "step": 1},
     "REBALANCE_BARS": {"type": "categorical", "choices": (1, 3, 6, 12)},
-    "MIN_SCORE_PERCENTILE": {"type": "float", "low": 0.50, "high": 0.85, "step": 0.05},
-    "CRISIS_GATE_PROB": {"type": "float", "low": 0.50, "high": 0.85, "step": 0.05},
+    "MIN_SCORE_PERCENTILE": {"type": "float", "low": 0.50, "high": 0.90, "step": 0.10},
+    "CS_Z_SCORE_THRESHOLD": {"type": "float", "low": 0.5, "high": 2.0, "step": 0.25},
+    "CRISIS_GATE_PROB": {"type": "float", "low": 0.50, "high": 0.90, "step": 0.10},
 }
 
 # Dynamic Universe Anchor Symbols

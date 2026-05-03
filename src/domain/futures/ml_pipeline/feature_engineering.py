@@ -35,6 +35,24 @@ HMM_SEMANTIC_PROB_COLUMNS: tuple[str, ...] = (
 # caches are invalidated and Tier 2 retraining actually happens.
 GP_FEATURE_SCHEMA_VERSION: str = "v11"
 
+def _tf_to_hours(tf: str) -> float:
+    """Convert timeframe string to decimal hours."""
+    if tf.endswith("h"):
+        return float(tf[:-1])
+    if tf.endswith("m"):
+        return float(tf[:-1]) / 60.0
+    if tf.endswith("d"):
+        return float(tf[:-1]) * 24.0
+    return 1.0
+
+
+def _get_window(hours: int, tf: str) -> int:
+    """Calculate bar count for a given hour-horizon in a specific timeframe."""
+    tf_h = _tf_to_hours(tf)
+    res = int(round(hours / tf_h))
+    return max(1, res)
+
+
 GP_ENGINEERED_FEATURE_NAMES: tuple[str, ...] = (
     "ret_1",
     "ret_3",
@@ -104,8 +122,9 @@ def _rolling_robust_z(series: pd.Series, window: int) -> pd.Series:
         Z-scored series.
 
     """
-    med = series.rolling(window=window, min_periods=max(10, window // 10)).median()
-    mad = (series - med).abs().rolling(window=window, min_periods=max(10, window // 10)).median()
+    min_p = max(1, window // 10)
+    med = series.rolling(window=window, min_periods=min_p).median()
+    mad = (series - med).abs().rolling(window=window, min_periods=min_p).median()
     z: pd.Series = (series - med) / (mad * 1.4826 + 1e-12)
     return z
 
@@ -153,9 +172,10 @@ def _yang_zhang_vol_24(
     rs = log_ho * (log_ho - log_co) + log_lo * (log_lo - log_co)
     w = float(window)
     k = 0.34 / (1.34 + (w + 1.0) / max(w - 1.0, 1.0))
-    close_vol = log_cc.rolling(int(window), min_periods=max(12, int(window) // 4)).var()
-    overnight_vol = log_oo.rolling(int(window), min_periods=max(12, int(window) // 4)).var()
-    rs_mean = rs.rolling(int(window), min_periods=max(12, int(window) // 4)).mean()
+    min_p = max(2, int(window) // 4)
+    close_vol = log_cc.rolling(int(window), min_periods=min_p).var()
+    overnight_vol = log_oo.rolling(int(window), min_periods=min_p).var()
+    rs_mean = rs.rolling(int(window), min_periods=min_p).mean()
     var_yz: pd.Series = overnight_vol + k * close_vol + (1.0 - k) * rs_mean
     return cast(pd.Series, np.sqrt(var_yz.clip(lower=0.0)))
 
@@ -290,13 +310,14 @@ def _rolling_hurst_rs(prices: np.ndarray, window: int) -> np.ndarray:
     return out
 
 
-def build_gp_input_features(df: pd.DataFrame) -> pd.DataFrame:
+def build_gp_input_features(df: pd.DataFrame, tf: str = "1h") -> pd.DataFrame:
     """Build features for GP SymbolicTransformer input.
 
     Enhanced with momentum, MA distances, volatility markers, and microstructure.
 
     Args:
         df: Input OHLCV dataframe.
+        tf: Timeframe of the input dataframe.
 
     Returns:
         Dataframe containing engineered GP features.
@@ -309,38 +330,44 @@ def build_gp_input_features(df: pd.DataFrame) -> pd.DataFrame:
     vol = df["volume"].astype(np.float64)
     open_ = df["open"].astype(np.float64) if "open" in df.columns else close.shift(1).fillna(close)
 
-    # 1. Price Momentum (log-modulus of log returns; tmp.md 1-D stationarity)
-    for h in [1, 3, 6, 12, 24, 48, 72, 168]:
+    # 1. Price Momentum (log-modulus of log returns)
+    # Using fixed hour horizons: 1h, 3h, 6h, 12h, 24h, 48h, 72h, 168h
+    for h_hours in [1, 3, 6, 12, 24, 48, 72, 168]:
+        w = _get_window(h_hours, tf)
         raw_ret = pd.Series(
-            np.log(close / close.shift(int(h)).clip(lower=1e-12)),
+            np.log(close / close.shift(w).clip(lower=1e-12)),
             index=out.index,
         )
-        out[f"ret_{h}"] = _log_modulus(raw_ret)
+        out[f"ret_{h_hours}"] = _log_modulus(raw_ret)
 
     # 2. Moving Average Distance (Mean Reversion markers)
-    for w in [24, 168]:
-        ma = close.rolling(window=w, min_periods=w // 4).mean()
-        out[f"ma_dist_{w}"] = (close / (ma + 1e-12)) - 1.0
+    for h_hours in [24, 168]:
+        w = _get_window(h_hours, tf)
+        ma = close.rolling(window=w, min_periods=max(1, w // 4)).mean()
+        out[f"ma_dist_{h_hours}"] = (close / (ma + 1e-12)) - 1.0
 
     # 3. Volume Intensity
-    for w_vol in [24, 168]:
-        vma = vol.rolling(window=w_vol, min_periods=w_vol // 4).mean()
-        out[f"vol_ratio_{w_vol}"] = (vol / (vma + 1e-12)).fillna(1.0)
+    for h_hours in [24, 168]:
+        w = _get_window(h_hours, tf)
+        vma = vol.rolling(window=w, min_periods=max(1, w // 4)).mean()
+        out[f"vol_ratio_{h_hours}"] = (vol / (vma + 1e-12)).fillna(1.0)
 
     # 4. HL Spread (Volatility proxy) — long-tail compression
     raw_hl = (high - low) / (close + 1e-9)
     out["hl_spread"] = np.log1p(raw_hl.clip(lower=0.0))
 
-    # 5. Funding Rate (no ffill: stale funding avoided; panel CS median impute later)
+    # 5. Funding Rate
     if "funding_rate" in df.columns:
         out["funding_rate"] = df["funding_rate"].astype(np.float64)
     else:
         out["funding_rate"] = np.nan
 
-    out["funding_z_72"] = _rolling_robust_z(out["funding_rate"], 72)
-    out["funding_chg_8"] = out["funding_rate"].diff(8)
+    w72 = _get_window(72, tf)
+    w8 = _get_window(8, tf)
+    out["funding_z_72"] = _rolling_robust_z(out["funding_rate"], w72)
+    out["funding_chg_8"] = out["funding_rate"].diff(w8)
 
-    # 6. Buy/Sell Ratio (Order Flow Imbalance proxy)
+    # 6. Buy/Sell Ratio
     if "quote_volume" in df.columns:
         qv = df["quote_volume"].astype(np.float64)
     else:
@@ -354,193 +381,171 @@ def build_gp_input_features(df: pd.DataFrame) -> pd.DataFrame:
     tsq = qv - tbq
     out["buy_sell_ratio"] = (tbq / (tsq + 1e-9)).fillna(1.0)
     imb = out["buy_sell_ratio"] - 1.0
-    out["taker_imbalance_z_24"] = _rolling_robust_z(imb, 24)
+    
+    w24 = _get_window(24, tf)
+    out["taker_imbalance_z_24"] = _rolling_robust_z(imb, w24)
 
-    out["realized_vol_yz_24"] = _yang_zhang_vol_24(open_, high, low, close, 24)
+    out["realized_vol_yz_24"] = _yang_zhang_vol_24(open_, high, low, close, w24)
 
     log_ret_1 = np.log(close / close.shift(1).clip(lower=1e-12))
-    sig_24 = log_ret_1.rolling(24, min_periods=12).std() + 1e-12
-    out["ret_vol_adj_6"] = out["ret_6"] / (sig_24 * np.sqrt(6.0))
-    out["ret_vol_adj_24"] = out["ret_24"] / (sig_24 * np.sqrt(24.0))
+    sig_24 = log_ret_1.rolling(w24, min_periods=max(2, w24 // 2)).std() + 1e-12
+    
+    w6 = _get_window(6, tf)
+    out["ret_vol_adj_6"] = out[f"ret_6"] / (sig_24 * np.sqrt(w6) + 1e-12)
+    out["ret_vol_adj_24"] = out[f"ret_24"] / (sig_24 * np.sqrt(w24) + 1e-12)
 
-    roll_low_min = low.rolling(6, min_periods=2).min()
-    out["liq_proxy_6"] = (roll_low_min - close) / (close + 1e-12)
+    out["liq_proxy_6"] = (low.rolling(w6, min_periods=max(1, w6 // 2)).min() - close) / (close + 1e-12)
 
-    out["vol_skew_24"] = log_ret_1.rolling(24, min_periods=12).skew().fillna(0.0)
-    ma_12 = close.rolling(12, min_periods=6).mean()
+    out["vol_skew_24"] = log_ret_1.rolling(w24, min_periods=max(2, w24 // 2)).skew().fillna(0.0)
+    
+    w12 = _get_window(12, tf)
+    ma_12 = close.rolling(w12, min_periods=max(1, w12 // 2)).mean()
     out["mom_proxy_12"] = (close / (ma_12 + 1e-12)) - 1.0
 
-    # --- New Alpha Injections ---
-    # 1. VWAP Distance 24h
+    # VWAP Distance 24h
     typ_price = (high + low + close) / 3.0
     pv = typ_price * vol
-    vwap_24 = pv.rolling(24, min_periods=6).sum() / (vol.rolling(24, min_periods=6).sum() + 1e-12)
+    vwap_24 = pv.rolling(w24, min_periods=max(1, w24 // 4)).sum() / (vol.rolling(w24, min_periods=max(1, w24 // 4)).sum() + 1e-12)
     out["vwap_dist_24"] = (close / (vwap_24 + 1e-12)) - 1.0
 
-    # 2. Volatility Surface 24h vs 168h
-    vol_yz_168 = _yang_zhang_vol_24(open_, high, low, close, 168)
+    # Volatility Surface 24h vs 168h
+    w168 = _get_window(168, tf)
+    vol_yz_168 = _yang_zhang_vol_24(open_, high, low, close, w168)
     out["vol_surface_24_168"] = out["realized_vol_yz_24"] / (vol_yz_168 + 1e-12)
 
-    # 3. Funding Momentum 24h
+    # Funding Momentum 24h
     if "funding_rate" in df.columns:
-        out["funding_mom_24"] = out["funding_rate"].diff(24)
+        out["funding_mom_24"] = out["funding_rate"].diff(w24)
     else:
         out["funding_mom_24"] = np.nan
 
-    # 4. Acceleration 24h (Momentum of momentum)
-    out["acceleration_24"] = out["ret_24"] - out["ret_24"].shift(24)
+    # Acceleration 24h
+    out["acceleration_24"] = out[f"ret_24"] - out[f"ret_24"].shift(w24)
 
-    # 5. Tail Risk 24h (Downside semivariance / Total variance)
+    # Tail Risk 24h
     neg_ret = log_ret_1.clip(upper=0.0)
-    down_var = neg_ret.rolling(24, min_periods=12).var()
-    tot_var = log_ret_1.rolling(24, min_periods=12).var()
+    down_var = neg_ret.rolling(w24, min_periods=max(2, w24 // 2)).var()
+    tot_var = log_ret_1.rolling(w24, min_periods=max(2, w24 // 2)).var()
     out["tail_risk_24"] = (down_var / (tot_var + 1e-12)).fillna(0.5)
 
-    # v5: microstructure + range (low overlap with v4 hl_yz / funding vol paths)
+    # microstructure + range
     dollar_vol = (close * vol).clip(lower=1.0)
     out["amihud_illiq_24"] = (
-        (log_ret_1.abs() / dollar_vol).rolling(24, min_periods=12).mean()
+        (log_ret_1.abs() / dollar_vol).rolling(w24, min_periods=max(1, w24 // 2)).mean()
     )
-    high_24 = high.rolling(24, min_periods=12).max()
-    low_24 = low.rolling(24, min_periods=12).min()
+    high_24 = high.rolling(w24, min_periods=max(1, w24 // 2)).max()
+    low_24 = low.rolling(w24, min_periods=max(1, w24 // 2)).min()
     out["range_pos_24"] = (close - low_24) / (high_24 - low_24 + 1e-12)
 
-    # v6: fractional differentiation and hurst exponent
+    # fractional differentiation and hurst exponent
     out["frac_diff_04"] = fractional_differentiation(close, 0.4)
     out["hurst_24"] = pd.Series(
-        _rolling_hurst_rs(close.to_numpy(dtype=np.float64), 24), index=out.index
+        _rolling_hurst_rs(close.to_numpy(dtype=np.float64), w24), index=out.index
     )
 
-    # v7: new alpha injections (vol-of-vol, tail rejection, session distance, btc correlation, vpin)
-    out["vol_of_vol_24"] = out["realized_vol_yz_24"].rolling(24, min_periods=12).std()
+    # vol-of-vol, tail rejection, session distance, btc correlation, vpin
+    out["vol_of_vol_24"] = out["realized_vol_yz_24"].rolling(w24, min_periods=max(1, w24 // 2)).std()
     
     shadows = (high - np.maximum(open_, close)) + (np.minimum(open_, close) - low)
     out["tail_rejection_24"] = (
-        (shadows / (high - low + 1e-12)).rolling(24, min_periods=12).mean().fillna(0.0)
+        (shadows / (high - low + 1e-12)).rolling(w24, min_periods=max(1, w24 // 2)).mean().fillna(0.0)
     )
     
-    high_24 = high.rolling(24, min_periods=12).max()
-    low_24 = low.rolling(24, min_periods=12).min()
     out["dist_from_high_24"] = (high_24 - close) / (high_24 - low_24 + 1e-12)
 
     if "btc_close" in df.columns:
         btc_log_ret = np.log(df["btc_close"] / df["btc_close"].shift(1).clip(lower=1e-12))
-        out["corr_btc_24"] = log_ret_1.rolling(24, min_periods=12).corr(btc_log_ret).fillna(0.0)
+        out["corr_btc_24"] = log_ret_1.rolling(w24, min_periods=max(2, w24 // 2)).corr(btc_log_ret).fillna(0.0)
     else:
         out["corr_btc_24"] = 0.0
 
     buy_vol = tbq / (close + 1e-9)
     sell_vol = tsq / (close + 1e-9)
     out["vpin_proxy_12"] = (
-        (buy_vol - sell_vol).abs().rolling(12, min_periods=6).sum() / 
-        (vol.rolling(12, min_periods=6).sum() + 1e-12)
+        (buy_vol - sell_vol).abs().rolling(w12, min_periods=max(1, w12 // 2)).sum() / 
+        (vol.rolling(w12, min_periods=max(1, w12 // 2)).sum() + 1e-12)
     ).fillna(0.0)
 
-    # v9: Structural Alpha Features (funding_trap_24 only; funding_squeeze_24 removed — IC≈0)
+    # Structural Alpha Features
     if "funding_rate" in df.columns:
         f_rate = df["funding_rate"].astype(np.float64)
         out["funding_trap_24"] = (
-            ((close > close.shift(24)) & (f_rate < f_rate.shift(24)))
+            ((close > close.shift(w24)) & (f_rate < f_rate.shift(w24)))
             .astype(np.float64)
         )
     else:
         out["funding_trap_24"] = 0.0
 
-    # v10: Jump / Tail Features (Pragmatic Alternative 2)
-    # downside_jump_24: capture extreme negative movements (z-score < -3)
+    # downside_jump_24: capture extreme negative movements
     out["downside_jump_24"] = (
-        (log_ret_1 / (sig_24 + 1e-12)).clip(upper=0.0).rolling(24).min().abs()
+        (log_ret_1 / (sig_24 + 1e-12)).clip(upper=0.0).rolling(w24).min().abs()
     )
 
-    # v11: Institutional Metrics (OI, LSR, Microstructure, Stress)
     # OI Based
     if "sum_open_interest" in df.columns:
         oi = df["sum_open_interest"].astype(np.float64)
-        oi_mom_4 = np.log(oi / oi.shift(4).clip(lower=1e-12))
-        oi_mom_24 = np.log(oi / oi.shift(24).clip(lower=1e-12))
+        w4 = _get_window(4, tf)
+        oi_mom_4 = np.log(oi / oi.shift(w4).clip(lower=1e-12))
+        oi_mom_24 = np.log(oi / oi.shift(w24).clip(lower=1e-12))
         out["oi_momentum_4h"] = _log_modulus(oi_mom_4)
         out["oi_momentum_24h"] = _log_modulus(oi_mom_24)
-        out["oi_price_divergence_24h"] = out["ret_24"] - out["oi_momentum_24h"]
+        out["oi_price_divergence_24h"] = out[f"ret_24"] - out["oi_momentum_24h"]
         
-        # oi_funding_trap_24h: Price down, OI up, Funding negative -> potential short trap
         f_rate = df["funding_rate"].astype(np.float64) if "funding_rate" in df.columns else 0.0
         out["oi_funding_trap_24h"] = (
-            ((out["ret_24"] < -0.01) & (oi_mom_24 > 0.02) & (f_rate < 0))
+            ((out[f"ret_24"] < -0.01) & (oi_mom_24 > 0.02) & (f_rate < 0))
             .astype(np.float64)
         )
     else:
-        oi_cols = [
-            "oi_momentum_4h", "oi_momentum_24h", "oi_price_divergence_24h", "oi_funding_trap_24h"
-        ]
-        for c in oi_cols:
+        for c in ["oi_momentum_4h", "oi_momentum_24h", "oi_price_divergence_24h", "oi_funding_trap_24h"]:
             out[c] = 0.0
 
-    # LSR Based
     if "top_trader_long_short_ratio" in df.columns:
-        tt_lsr = df["top_trader_long_short_ratio"].astype(np.float64)
-        out["top_trader_lsr_z_24h"] = _rolling_robust_z(tt_lsr, 24)
+        out["top_trader_lsr_z_24h"] = _rolling_robust_z(df["top_trader_long_short_ratio"], w24)
     else:
         out["top_trader_lsr_z_24h"] = 0.0
 
     if "long_short_ratio" in df.columns:
-        g_lsr = df["long_short_ratio"].astype(np.float64)
-        out["global_lsr_z_24h"] = _rolling_robust_z(g_lsr, 24)
+        out["global_lsr_z_24h"] = _rolling_robust_z(df["long_short_ratio"], w24)
     else:
         out["global_lsr_z_24h"] = 0.0
 
     if "top_trader_long_short_ratio" in df.columns and "long_short_ratio" in df.columns:
         out["lsr_spread_12h"] = (
             (df["top_trader_long_short_ratio"] - df["long_short_ratio"])
-            .rolling(12, min_periods=6).mean().fillna(0.0)
+            .rolling(w12, min_periods=max(1, w12 // 2)).mean().fillna(0.0)
         )
     else:
         out["lsr_spread_12h"] = 0.0
 
-    # Microstructure
-    tbq_12 = tbq.rolling(12, min_periods=6).sum()
-    tsq_12 = tsq.rolling(12, min_periods=6).sum()
-    out["taker_buy_sell_ratio_12h"] = (tbq_12 / (tsq_12 + 1e-9)).fillna(1.0)
+    out["taker_buy_sell_ratio_12h"] = (
+        tbq.rolling(w12, min_periods=max(1, w12 // 2)).sum() / 
+        (tsq.rolling(w12, min_periods=max(1, w12 // 2)).sum() + 1e-9)
+    ).fillna(1.0)
     
-    cvd_rolling = (tbq - tsq).rolling(24, min_periods=12).sum()
-    cvd_norm = cvd_rolling / (vol.rolling(24, min_periods=12).sum() + 1e-9)
-    out["cvd_divergence_24h"] = out["ret_24"] - _log_modulus(cvd_norm)
+    cvd_rolling = (tbq - tsq).rolling(w24, min_periods=max(2, w24 // 2)).sum()
+    cvd_norm = cvd_rolling / (vol.rolling(w24, min_periods=max(2, w24 // 2)).sum() + 1e-9)
+    out["cvd_divergence_24h"] = out[f"ret_24"] - _log_modulus(cvd_norm)
     
-    imb_24 = (tbq - tsq) / (vol + 1e-9)
-    out["taker_acceleration_24h"] = imb_24.diff(24).fillna(0.0)
+    out["taker_acceleration_24h"] = ((tbq - tsq) / (vol + 1e-9)).diff(w24).fillna(0.0)
 
-    # Stress
     if "funding_rate" in df.columns:
         out["funding_intensity_24h"] = (
             df["funding_rate"].abs() * out["realized_vol_yz_24"]
-        ).rolling(24, min_periods=12).mean().fillna(0.0)
+        ).rolling(w24, min_periods=max(2, w24 // 2)).mean().fillna(0.0)
     else:
         out["funding_intensity_24h"] = 0.0
         
-    # absorption_ratio_12h: proxy for price discovery efficiency (Return / Volatility / Volume)
     out["absorption_ratio_12h"] = (
-        out["ret_12"].abs() / (out["realized_vol_yz_24"] * out["vol_ratio_24"] + 1e-9)
+        out[f"ret_12"].abs() / (out["realized_vol_yz_24"] * out["vol_ratio_24"] + 1e-9)
     ).fillna(0.0)
 
-    # v12: low-DoF structural motif features from existing v11 primitives
-    out["motif_crowded_long_unwind"] = (
-        out["global_lsr_z_24h"]
-        + out["top_trader_lsr_z_24h"]
-        + out["oi_momentum_24h"]
-        - out["taker_imbalance_z_24"]
-    ).fillna(0.0)
-    out["motif_funding_short_squeeze"] = (
-        -out["funding_z_72"] + out["oi_momentum_24h"] - out["ret_12"]
-    ).fillna(0.0)
-    out["motif_taker_absorption"] = (
-        _log_modulus(out["taker_buy_sell_ratio_12h"] - 1.0) - out["ret_vol_adj_6"]
-    ).fillna(0.0)
-    out["motif_oi_price_dislocation"] = (out["oi_momentum_24h"] - out["ret_24"]).fillna(0.0)
-    out["motif_liq_pressure"] = (
-        out["downside_jump_24"] + out["tail_risk_24"] - out["range_pos_24"]
-    ).fillna(0.0)
+    out["motif_crowded_long_unwind"] = (out["global_lsr_z_24h"] + out["top_trader_lsr_z_24h"] + out["oi_momentum_24h"] - out["taker_imbalance_z_24"]).fillna(0.0)
+    out["motif_funding_short_squeeze"] = (-out["funding_z_72"] + out["oi_momentum_24h"] - out[f"ret_12"]).fillna(0.0)
+    out["motif_taker_absorption"] = (_log_modulus(out["taker_buy_sell_ratio_12h"] - 1.0) - out["ret_vol_adj_6"]).fillna(0.0)
+    out["motif_oi_price_dislocation"] = (out["oi_momentum_24h"] - out[f"ret_24"]).fillna(0.0)
+    out["motif_liq_pressure"] = (out["downside_jump_24"] + out["tail_risk_24"] - out["range_pos_24"]).fillna(0.0)
 
-
-    # vol_ratio / buy_sell_ratio: keep finite defaults; ret/ma_dist/funding left NaN for CS impute
     out = out.replace([np.inf, -np.inf], np.nan)
     return out
 
@@ -602,7 +607,7 @@ def build_hmm_input_features(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def build_systemic_hmm_features(
-    panel_df: pd.DataFrame, alpha_panel: pd.DataFrame | None = None
+    panel_df: pd.DataFrame, alpha_panel: pd.DataFrame | None = None, tf: str = "1h"
 ) -> pd.DataFrame:
     """Build single-timeseries features for Macro Market HMM using systemic aggregates.
 
@@ -611,6 +616,7 @@ def build_systemic_hmm_features(
     Args:
         panel_df: Input panel dataframe.
         alpha_panel: Optional alpha panel dataframe.
+        tf: Timeframe of the input dataframe.
 
     Returns:
         Dataframe containing systemic HMM features.
@@ -647,12 +653,16 @@ def build_systemic_hmm_features(
         btc_df = panel_df.xs(btc_sym, level="symbol")
         btc_close = btc_df["close"].astype(np.float64)
         log_ret_1 = np.log(btc_close / btc_close.shift(1).clip(lower=1e-12))
-        sig_24 = log_ret_1.rolling(24, min_periods=12).std() + 1e-12
+        
+        w24 = _get_window(24, tf)
+        w168 = _get_window(168, tf)
+        
+        sig_24 = log_ret_1.rolling(w24, min_periods=max(2, w24 // 2)).std() + 1e-12
 
         # 1. Trend (Short/Long)
-        btc_trend_24h = (np.log(btc_close / btc_close.shift(24).clip(lower=1e-12))) / sig_24
-        btc_trend_168h = (np.log(btc_close / btc_close.shift(168).clip(lower=1e-12))) / (
-            sig_24 * np.sqrt(7.0)
+        btc_trend_24h = (np.log(btc_close / btc_close.shift(w24).clip(lower=1e-12))) / sig_24
+        btc_trend_168h = (np.log(btc_close / btc_close.shift(w168).clip(lower=1e-12))) / (
+            sig_24 * np.sqrt(w168 / w24)
         )
 
         # 2. Volatility Regime
@@ -663,21 +673,21 @@ def build_systemic_hmm_features(
             np.sqrt(np.maximum(1.0 / (4.0 * np.log(2.0)) * (hl**2), 0.0)),
             index=btc_df.index,
         )
-        rv_regime = park.rolling(24).mean() / (park.rolling(168).mean() + 1e-12)
+        rv_regime = park.rolling(w24, min_periods=max(1, w24 // 4)).mean() / (park.rolling(w168, min_periods=max(1, w168 // 4)).mean() + 1e-12)
 
         # 3. Downside Risk
         neg_ret = log_ret_1.clip(upper=0.0)
         downside_vol_ratio = (
-            neg_ret.rolling(24).std() / (log_ret_1.rolling(24).std() + 1e-12)
+            neg_ret.rolling(w24, min_periods=max(2, w24 // 2)).std() / (log_ret_1.rolling(w24, min_periods=max(2, w24 // 2)).std() + 1e-12)
         ).fillna(0.5)
 
         # 4. Structural Distance (Capitulation)
-        ma_168 = btc_close.rolling(168, min_periods=24).mean()
+        ma_168 = btc_close.rolling(w168, min_periods=max(1, w168 // 4)).mean()
         btc_ma_dist_168h = (btc_close / (ma_168 + 1e-12)) - 1.0
 
         # 5. Energy (Squeeze Precursor)
         btc_vol = btc_df["volume"].astype(np.float64)
-        vol_energy = btc_vol.rolling(24).mean() / (btc_vol.rolling(168).mean() + 1e-12) - 1.0
+        vol_energy = btc_vol.rolling(w24, min_periods=max(1, w24 // 4)).mean() / (btc_vol.rolling(w168, min_periods=max(1, w168 // 4)).mean() + 1e-12) - 1.0
     else:
         btc_trend_24h = pd.Series(0.0, index=idx)
         btc_trend_168h = pd.Series(0.0, index=idx)
@@ -704,7 +714,8 @@ def build_systemic_hmm_features(
     if btc_sym and eth_sym:
         eth_close = panel_df.xs(eth_sym, level="symbol")["close"].astype(np.float64)
         rs = eth_close / btc_close
-        rs_ema = rs.ewm(span=24).mean()
+        w24_ema = _get_window(24, tf)
+        rs_ema = rs.ewm(span=w24_ema).mean()
         out["eth_btc_rs"] = (rs / (rs_ema + 1e-12)) - 1.0
     else:
         out["eth_btc_rs"] = 0.0
