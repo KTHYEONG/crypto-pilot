@@ -300,8 +300,8 @@ def _log_precompute_computed_dir_sample(
         arr_ml_l,
         arr_ml_s,
         crisis_gamma,
-        k_long,
-        k_short,
+        k_long, # Using k_long as k_rank (they are symmetric now)
+        1.0,    # cs_z_threshold (Default 1.0 for diagnostic)
         out,
     )
     mags = np.abs(out)
@@ -373,17 +373,18 @@ def build_phase_d_enqueue_params_from_deploy_json(
         bc, ks = infer_kelly_shrinkage_bayesian_c_for_enqueue(float(fk_raw), shield=shield)
         reb = int(deploy["REBALANCE_BARS"])
         k_long = int(deploy["K_LONG"])
-        k_short = int(deploy["K_SHORT"])
         crisis = float(deploy.get("CRISIS_GAMMA", deploy.get("CRISIS_GATE_PROB", 1.3)))
         atr_p = int(deploy["ATR_PERIOD"])
-        l_atr = float(deploy["LONG_ATR_MULT"])
-        l_trail = float(deploy["LONG_TRAIL_MULT"])
-        s_atr = float(deploy["SHORT_ATR_MULT"])
+        
+        # Symmetric Mapping for Enqueue
+        atr_m = float(deploy.get("ATR_MULT", deploy.get("LONG_ATR_MULT", 2.5)))
+        trail_m = float(deploy.get("TRAIL_MULT", deploy.get("LONG_TRAIL_MULT", 3.0)))
+        
         s_tp = float(deploy["SHORT_TP_MULT"])
-        s_trail = float(deploy["SHORT_TRAIL_MULT"])
         l_scale = float(deploy["LONG_SCALE_ATR_MULT"])
         max_exp = float(deploy.get("MAX_EXPOSURE_PER_COIN", 1.0))
         dd_thr = float(deploy["DD_SCALING_THRESHOLD"])
+        cs_z_thr = float(deploy.get("CS_Z_SCORE_THRESHOLD", 1.0))
         pfk_win = int(deploy.get("PFK_WINDOW", 40))
         stress = float(deploy.get("STRESS_VOL_Z", 2.5))
         rpt = float(deploy.get("RISK_PER_TRADE", fixed["RISK_PER_TRADE"]))
@@ -396,19 +397,17 @@ def build_phase_d_enqueue_params_from_deploy_json(
     return {
         "BAYESIAN_C": bc,
         "KELLY_SHRINKAGE": ks,
-        "K_LONG": k_long,
-        "K_SHORT": k_short,
+        "K_RANK": k_long,
         "REBALANCE_BARS": reb,
         "CRISIS_GAMMA": crisis,
         "ATR_PERIOD": atr_p,
-        "LONG_ATR_MULT": l_atr,
-        "LONG_TRAIL_MULT": l_trail,
-        "SHORT_ATR_MULT": s_atr,
+        "ATR_MULT": atr_m,
+        "TRAIL_MULT": trail_m,
         "SHORT_TP_MULT": s_tp,
-        "SHORT_TRAIL_MULT": s_trail,
         "LONG_SCALE_ATR_MULT": l_scale,
         "MAX_EXP_PER_COIN": max_exp,
         "DD_SCALING_THRESHOLD": dd_thr,
+        "CS_Z_SCORE_THRESHOLD": cs_z_thr,
         "PFK_WINDOW": pfk_win,
         "STRESS_VOL_Z": stress,
         "RISK_PER_TRADE": rpt,
@@ -422,35 +421,41 @@ def _suggest_ml_phase_d(trial: optuna.Trial) -> dict[str, Any]:
     if shield:
         bayes_c = float(trial.suggest_float("BAYESIAN_C", 5.0, 14.0, log=True))
         kelly_s = float(trial.suggest_float("KELLY_SHRINKAGE", 0.52, 1.02))
-        k_long = int(trial.suggest_int("K_LONG", 1, 1))
-        k_short = int(trial.suggest_int("K_SHORT", 1, 1))
+        k_rank = int(trial.suggest_int("K_RANK", 1, 2))
+        k_long = k_rank
+        k_short = k_rank
         reb = int(trial.suggest_categorical("REBALANCE_BARS", [1, 2, 3, 6]))
         crisis = float(trial.suggest_float("CRISIS_GAMMA", 1.2, 1.5, step=0.05))
         atr_p = int(trial.suggest_int("ATR_PERIOD", 26, 36, step=2))
-        l_atr = float(trial.suggest_float("LONG_ATR_MULT", 2.0, 2.75, step=0.25))
-        l_trail = float(trial.suggest_float("LONG_TRAIL_MULT", 2.5, 3.0, step=0.5))
-        s_atr = float(trial.suggest_float("SHORT_ATR_MULT", 1.75, 2.5, step=0.25))
+        
+        # Symmetric Parameters
+        atr_m = float(trial.suggest_float("ATR_MULT", 2.0, 2.75, step=0.25))
+        trail_m = float(trial.suggest_float("TRAIL_MULT", 2.5, 3.5, step=0.5))
+        
         s_tp = float(trial.suggest_float("SHORT_TP_MULT", 1.0, 1.5, step=0.5))
-        s_trail = float(trial.suggest_float("SHORT_TRAIL_MULT", 1.5, 2.0, step=0.5))
         l_scale = float(trial.suggest_float("LONG_SCALE_ATR_MULT", 2.0, 2.5, step=0.5))
         max_exp = float(trial.suggest_float("MAX_EXP_PER_COIN", 0.8, 1.0, step=0.1))
         dd_thr = float(trial.suggest_float("DD_SCALING_THRESHOLD", 0.16, 0.24, step=0.01))
+        cs_z_thr = float(trial.suggest_float("CS_Z_SCORE_THRESHOLD", 0.5, 2.0, step=0.25))
     else:
         bayes_c = float(trial.suggest_float("BAYESIAN_C", 5.0, 15.0, log=True))
         kelly_s = float(trial.suggest_float("KELLY_SHRINKAGE", 0.45, 1.20))
-        k_long = int(trial.suggest_int("K_LONG", 1, 1))
-        k_short = int(trial.suggest_int("K_SHORT", 1, 1))
+        k_rank = int(trial.suggest_int("K_RANK", 1, 2))
+        k_long = k_rank
+        k_short = k_rank
         reb = int(trial.suggest_categorical("REBALANCE_BARS", [1, 2, 3, 6]))
         crisis = float(trial.suggest_float("CRISIS_GAMMA", 1.1, 1.5, step=0.05))
         atr_p = int(trial.suggest_int("ATR_PERIOD", 26, 40, step=2))
-        l_atr = float(trial.suggest_float("LONG_ATR_MULT", 2.0, 3.0, step=0.25))
-        l_trail = float(trial.suggest_float("LONG_TRAIL_MULT", 2.5, 3.5, step=0.5))
-        s_atr = float(trial.suggest_float("SHORT_ATR_MULT", 1.75, 2.5, step=0.25))
+        
+        # Symmetric Parameters
+        atr_m = float(trial.suggest_float("ATR_MULT", 2.0, 3.0, step=0.25))
+        trail_m = float(trial.suggest_float("TRAIL_MULT", 2.5, 4.0, step=0.5))
+        
         s_tp = float(trial.suggest_float("SHORT_TP_MULT", 1.0, 2.0, step=0.5))
-        s_trail = float(trial.suggest_float("SHORT_TRAIL_MULT", 1.5, 2.5, step=0.5))
         l_scale = float(trial.suggest_float("LONG_SCALE_ATR_MULT", 2.0, 3.0, step=0.5))
         max_exp = float(trial.suggest_float("MAX_EXP_PER_COIN", 0.8, 1.0, step=0.1))
         dd_thr = float(trial.suggest_float("DD_SCALING_THRESHOLD", 0.15, 0.25, step=0.01))
+        cs_z_thr = float(trial.suggest_float("CS_Z_SCORE_THRESHOLD", 0.5, 2.0, step=0.25))
 
     fixed = _fixed_ml_phase_d_params()
     sizing_m = "profit_factor_kelly"
@@ -472,14 +477,13 @@ def _suggest_ml_phase_d(trial: optuna.Trial) -> dict[str, Any]:
         ),
         "CRISIS_GAMMA": crisis,
         "ATR_PERIOD": atr_p,
-        "LONG_ATR_MULT": l_atr,
-        "LONG_TRAIL_MULT": l_trail,
-        "SHORT_ATR_MULT": s_atr,
+        "ATR_MULT": atr_m,
+        "TRAIL_MULT": trail_m,
         "SHORT_TP_MULT": s_tp,
-        "SHORT_TRAIL_MULT": s_trail,
         "LONG_SCALE_ATR_MULT": l_scale,
         "MAX_EXPOSURE_PER_COIN": max_exp,
         "DD_SCALING_THRESHOLD": dd_thr,
+        "CS_Z_SCORE_THRESHOLD": cs_z_thr,
         "USE_CS_RANK_ENGINE": True,
     }
 
@@ -521,14 +525,13 @@ def _base_engine_params(ml: dict[str, Any], tf: str) -> dict[str, Any]:
         "REGIME_TYPE": "NONE",
         "SIZING_METHOD": str(ml.get("SIZING_METHOD", "profit_factor_kelly")),
         "USE_CS_RANK_ENGINE": bool(ml.get("USE_CS_RANK_ENGINE", True)),
-        "K_LONG": int(ml.get("K_LONG", 2)),
-        "K_SHORT": int(ml.get("K_SHORT", 2)),
+        "K_LONG": int(ml.get("K_LONG", ml.get("K_RANK", 2))),
+        "K_SHORT": int(ml.get("K_SHORT", ml.get("K_RANK", 2))),
         "REBALANCE_BARS": max(1, int(ml.get("REBALANCE_BARS", 6))),
         "MIN_SCORE_PERCENTILE": float(ml.get("MIN_SCORE_PERCENTILE", 0.55)),
         "CRISIS_GAMMA": float(ml.get("CRISIS_GAMMA", ml.get("CRISIS_GATE_PROB", 1.0))),
         "CRISIS_GATE_PROB": float(ml.get("CRISIS_GAMMA", ml.get("CRISIS_GATE_PROB", 1.0))),
-        "LONG_TRAIL_MULT": float(ml.get("LONG_TRAIL_MULT", 3.0)),
-        "SHORT_TRAIL_MULT": float(ml.get("SHORT_TRAIL_MULT", 3.0)),
+        "TRAIL_MULT": float(ml.get("TRAIL_MULT", 3.0)),
         "PFK_WINDOW": int(ml.get("PFK_WINDOW", 60)),
         "PFK_MIN_F": 0.1,
         "KELLY_FRACTION": fk_frac,
@@ -540,8 +543,7 @@ def _base_engine_params(ml: dict[str, Any], tf: str) -> dict[str, Any]:
         "FK_MAX_SIZE": 1.0,
         "FK_WINDOW": 60,
         "ATR_PERIOD": int(ml.get("ATR_PERIOD", 14)),
-        "LONG_ATR_MULT": float(ml.get("LONG_ATR_MULT", 2.5)),
-        "SHORT_ATR_MULT": float(ml.get("SHORT_ATR_MULT", 2.0)),
+        "ATR_MULT": float(ml.get("ATR_MULT", 2.5)),
         "LONG_SCALE_ATR_MULT": float(ml.get("LONG_SCALE_ATR_MULT", 2.5)),
         "SHORT_TP_MULT": float(ml.get("SHORT_TP_MULT", 2.0)),
         "RISK_PER_TRADE": float(rpt),
@@ -594,6 +596,11 @@ def _run_portfolio_numba_block(
 ) -> tuple[np.ndarray, float, np.ndarray, np.ndarray]:
     strength_g = aligned["ml_calib_prob"]
     use_cs = 1 if bool(params.get("USE_CS_RANK_ENGINE", True)) else 0
+    
+    # Symmetric Mapping
+    atr_m = float(params["ATR_MULT"])
+    trail_m = float(params["TRAIL_MULT"])
+    
     out_bt = backtest_portfolio_numba(
         aligned["close"],
         aligned["high"],
@@ -618,18 +625,19 @@ def _run_portfolio_numba_block(
         TRADING_FEE_RATE,
         SLIPPAGE_RATE,
         float(params["RISK_PER_TRADE"]),
-        float(params["LONG_ATR_MULT"]),
-        float(params["LONG_TRAIL_MULT"]),
-        float(params["SHORT_ATR_MULT"]),
+        atr_m,
+        trail_m,
+        atr_m,
         float(params["SHORT_TP_MULT"]),
         float(params["LONG_SCALE_ATR_MULT"]),
-        float(params["SHORT_TRAIL_MULT"]),
+        trail_m,
         int(params.get("MAX_CONCURRENT_POSITIONS", 2)),
         float(params.get("MAX_EXPOSURE", 0.8)),
         float(params["MAX_EXPOSURE_PER_COIN"]),
         float(params["DD_SCALING_THRESHOLD"]),
         int(params["K_LONG"]),
         int(params["K_SHORT"]),
+        float(params.get("CS_Z_SCORE_THRESHOLD", 1.0)),
         max(1, int(params["REBALANCE_BARS"])),
         float(params.get("CRISIS_GAMMA", params.get("CRISIS_GATE_PROB", 1.0))),
         use_cs,
@@ -764,8 +772,15 @@ def objective_ml_phase_d(trial: optuna.Trial, ctx: MLPhaseDContext) -> float | t
         leg_short_counts.append(n_short)
         leg_exposures.append(b_exposure)
 
-        # Intermediate pruning: report after 2nd leg
+        # [NEW] Aggressive Pruning: after Leg 2 (index 1)
         if leg_idx >= 1:
+            cum_log_tw = float(np.sum(leg_log_tw))
+            max_leg_mdd = float(np.max(leg_mdds))
+            if cum_log_tw < -0.05 or max_leg_mdd > liq_mdd_thr:
+                 _logger.debug("[AWF][trial=%d] Aggressive Pruning at Leg %d: cum_log_tw=%.4f, max_mdd=%.2f",
+                              trial.number, leg_idx, cum_log_tw, max_leg_mdd)
+                 return -100.0
+
             trial.report(float(np.mean(leg_log_tw)), step=leg_idx)
             if trial.should_prune():
                 raise optuna.TrialPruned()
@@ -798,6 +813,23 @@ def objective_ml_phase_d(trial: optuna.Trial, ctx: MLPhaseDContext) -> float | t
     sr_bench = _math.sqrt(2.0 * _math.log(max(n_trials_cfg, 2.0)))
     deflation = lambda_def * sr_bench * sigma_log / _math.sqrt(max(k_legs_n, 1.0))
     worst_leg = float(np.min(leg_arr)) if leg_arr.size > 0 else -10.0
+
+    # [Improvement 3] PLGD Leg Stability Weight
+    leg_stability_weight = float(cfg.get("FUTURES_PLGD_AWF_LEG_STABILITY_WEIGHT", 0.0))
+    if leg_stability_weight > 0 and leg_arr.size > 1:
+        tw_legs = np.exp(leg_arr)
+        _raw_stability = 1.0 - (float(np.std(tw_legs)) / (float(np.mean(tw_legs)) + 1e-9))
+        stability = float(np.clip(_raw_stability, 0.0, 1.0))
+        # mu_log is adjusted downward if stability is low
+        mu_log = float(mu_log * (1.0 - leg_stability_weight + leg_stability_weight * stability))
+
+    # [Improvement 4] Virtual Friction Penalty
+    # Penalize high-frequency strategies to prioritize high-edge signals
+    virtual_friction_bps = float(cfg.get("FUTURES_VIRTUAL_FRICTION_BPS", 0.0))
+    if virtual_friction_bps > 0:
+        # Subtract bps per trade from the mean log-return
+        mu_log = float(mu_log - (avg_trades_agg * virtual_friction_bps / 10000.0))
+
     tail_pen = lambda_tail * max(0.0, -worst_leg)
     plgd = mu_log - variance_drag - deflation - tail_pen
 

@@ -115,12 +115,10 @@ class BacktestEngineFast:
             garch_kelly_f = np.ones(n, dtype=np.float64)
 
         # RSM-VT Params
-        long_atr_mult = float(self.strategy.params.get("LONG_ATR_MULT", 3.0))
-        long_trail_mult = float(self.strategy.params.get("LONG_TRAIL_MULT", 3.0))
-        short_atr_mult = float(self.strategy.params.get("SHORT_ATR_MULT", 2.0))
+        atr_mult = float(self.strategy.params.get("ATR_MULT", 3.0))
+        trail_mult = float(self.strategy.params.get("TRAIL_MULT", 3.0))
         short_tp_mult = float(self.strategy.params.get("SHORT_TP_MULT", 3.0))
         long_scale_atr_mult = float(self.strategy.params.get("LONG_SCALE_ATR_MULT", 3.0))
-        short_trail_mult = float(self.strategy.params.get("SHORT_TRAIL_MULT", 3.0))
         leverage = float(self.leverage)
 
         timestamps = df["timestamp"].values
@@ -204,12 +202,12 @@ class BacktestEngineFast:
             self.risk_per_trade,
             timestamps,
             funding_rate_sums,
-            long_atr_mult,
-            long_trail_mult,
-            short_atr_mult,
+            atr_mult,
+            trail_mult,
+            atr_mult,
             short_tp_mult,
             long_scale_atr_mult,
-            short_trail_mult,
+            trail_mult,
             warmup_bars,
             self._execution_start_idx,
             use_compounding,
@@ -376,12 +374,12 @@ def backtest_loop_numba(
     risk_per_trade: float,
     timestamps: np.ndarray,
     funding_rate_sums: np.ndarray,
-    long_atr_mult: float,
-    long_trail_mult: float,
-    short_atr_mult: float,
-    short_tp_mult: float,
-    long_scale_atr_mult: float,
-    short_trail_mult: float,
+    atr_mult: float,
+    trail_mult: float,
+    l_atr_mult_unused: float,
+    s_tp_mult: float,
+    l_scale_atr: float,
+    s_trail_mult_unused: float,
     warmup_bars: int,
     execution_start_idx: int,
     use_compounding: bool,
@@ -516,7 +514,7 @@ def backtest_loop_numba(
                             c_high,
                             entry_price,
                             pos_atr,
-                            long_scale_atr_mult,
+                            l_scale_atr,
                             amount,
                             fee_rate,
                         )
@@ -540,7 +538,7 @@ def backtest_loop_numba(
                         has_scaled_out = True
 
                 exit_triggered, exit_price, stop_price = check_long_exit(
-                    c_open, c_low, highest, pos_atr, stop_price, long_trail_mult, slippage_rate
+                    c_open, c_low, highest, pos_atr, stop_price, trail_mult, slippage_rate
                 )
 
             elif pos_side == -1:
@@ -551,7 +549,7 @@ def backtest_loop_numba(
                 if not has_scaled_out:
                     triggered, sc_price, sc_amount, pnl_scale, exit_fee_scale = (
                         process_short_scale_out(
-                            c_open, c_low, entry_price, pos_atr, short_tp_mult, amount, fee_rate
+                            c_open, c_low, entry_price, pos_atr, s_tp_mult, amount, fee_rate
                         )
                     )
                     if triggered:
@@ -574,7 +572,7 @@ def backtest_loop_numba(
                         stop_price = entry_price - (entry_price * fee_rate * 2.0)
 
                 exit_triggered, exit_price, stop_price = check_short_exit(
-                    c_open, c_high, lowest, pos_atr, stop_price, short_trail_mult, slippage_rate
+                    c_open, c_high, lowest, pos_atr, stop_price, trail_mult, slippage_rate
                 )
 
             if exit_triggered:
@@ -638,16 +636,16 @@ def backtest_loop_numba(
                 # Fixed Stop Loss Distance for Sizing
                 if pending_side == 1:
                     # [Asymmetric Stop Tightening] P3: Directional Balance
-                    stop_mult = long_atr_mult
+                    stop_mult_val = atr_mult
                     # If crisis probability > 20%, tighten stop by 40%
                     if hmm_crisis[prev_i] > 0.2:
-                        stop_mult *= 0.6
+                        stop_mult_val *= 0.6
                     # If HMM modulator is weak (< 0.7), tighten stop by 20%
                     elif hmm_mod_long[prev_i] < 0.7:
-                        stop_mult *= 0.8
-                    stop_price = fill_price - (prev_atr * stop_mult)
+                        stop_mult_val *= 0.8
+                    stop_price = fill_price - (prev_atr * stop_mult_val)
                 else:
-                    stop_price = fill_price + (prev_atr * short_atr_mult)
+                    stop_price = fill_price + (prev_atr * atr_mult)
 
                 stop_distance = abs(fill_price - stop_price)
                 if stop_distance > 0:

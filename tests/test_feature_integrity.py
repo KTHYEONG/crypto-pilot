@@ -49,14 +49,14 @@ def sample_ohlcv() -> pd.DataFrame:
 def test_gp_features_lookahead_bias(sample_ohlcv: pd.DataFrame) -> None:
     """Ensure future data does not leak into current feature values."""
     df_base = sample_ohlcv.copy()
-    features_base = build_gp_input_features(df_base)
+    features_base = build_gp_input_features(df_base, tf="1h")
     
     # Modify data from index 250 onwards
     df_future = sample_ohlcv.copy()
     df_future.iloc[250:, df_future.columns.get_loc("close")] *= 2.0
     df_future.iloc[250:, df_future.columns.get_loc("high")] *= 2.0
     
-    features_future = build_gp_input_features(df_future)
+    features_future = build_gp_input_features(df_future, tf="1h")
     
     # Features before index 250 should be EXACTLY identical
     pd.testing.assert_frame_equal(
@@ -90,7 +90,7 @@ def test_gp_features_nan_propagation(sample_ohlcv: pd.DataFrame) -> None:
     # Introduce NaN in the middle
     df_nan.iloc[100:105, df_nan.columns.get_loc("close")] = np.nan
     
-    features = build_gp_input_features(df_nan)
+    features = build_gp_input_features(df_nan, tf="1h")
     
     # The output should have the same length
     assert len(features) == len(df_nan)
@@ -105,7 +105,7 @@ def test_systemic_hmm_features_lookahead_bias(sample_ohlcv: pd.DataFrame) -> Non
     panel["cs_dispersion"] = 0.05
     panel["market_breadth"] = 0.6
     
-    feats_base = build_systemic_hmm_features(panel)
+    feats_base = build_systemic_hmm_features(panel, tf="1h")
     
     # Modify future data
     panel_future = panel.copy()
@@ -113,7 +113,7 @@ def test_systemic_hmm_features_lookahead_bias(sample_ohlcv: pd.DataFrame) -> Non
     pf_reset.loc[250:, "close"] *= 1.5
     panel_future = pf_reset.set_index(["datetime", "symbol"])
     
-    feats_future = build_systemic_hmm_features(panel_future)
+    feats_future = build_systemic_hmm_features(panel_future, tf="1h")
     
     pd.testing.assert_frame_equal(
         feats_base.iloc[:250],
