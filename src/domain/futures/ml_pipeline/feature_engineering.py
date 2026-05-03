@@ -31,7 +31,7 @@ HMM_SEMANTIC_PROB_COLUMNS: tuple[str, ...] = (
     "hmm_prob_crisis",
 )
 
-# Bump when GP feature semantics change without renaming columns so raw GP
+# Bump when ALPHA feature semantics change without renaming columns so raw GP
 # caches are invalidated and Tier 2 retraining actually happens.
 GP_FEATURE_SCHEMA_VERSION: str = "v11"
 
@@ -53,7 +53,7 @@ def _get_window(hours: int, tf: str) -> int:
     return max(1, res)
 
 
-GP_ENGINEERED_FEATURE_NAMES: tuple[str, ...] = (
+ALPHA_ENGINEERED_FEATURE_NAMES: tuple[str, ...] = (
     "ret_1",
     "ret_3",
     "ret_6",
@@ -320,7 +320,7 @@ def build_gp_input_features(df: pd.DataFrame, tf: str = "1h") -> pd.DataFrame:
         tf: Timeframe of the input dataframe.
 
     Returns:
-        Dataframe containing engineered GP features.
+        Dataframe containing engineered ALPHA features.
 
     """
     out = pd.DataFrame(index=df.index)
