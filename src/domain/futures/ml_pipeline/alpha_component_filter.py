@@ -308,7 +308,7 @@ def filter_alpha_components(
     cols = (
         list(alpha_cols)
         if alpha_cols is not None
-        else [c for c in alpha_wide.columns if c.startswith("gp_alpha_") and c[-2:].isdigit()]
+        else [c for c in alpha_wide.columns if c.startswith("ml_alpha_") and c[-2:].isdigit()]
     )
     if not cols:
         return alpha_wide, {"n_surviving": 0.0, "neutralize_primary": 0.0}
@@ -346,7 +346,7 @@ def filter_alpha_components(
     sym_bal_ok: list[bool] = []
     neutralize_primary = False
 
-    # gp_alpha_00 diagnostic metrics
+    # ml_alpha_00 diagnostic metrics
     primary_diagnostic: dict[str, float] = {}
 
     is_sub = base[base["__is"]]
@@ -442,11 +442,11 @@ def filter_alpha_components(
             oos_gate = True
         oos_ok.append(oos_gate)
 
-        if c == "gp_alpha_00":
+        if c == "ml_alpha_00":
             if not is_fast_track and mu > 1e-6 and mu_oos < 0.45 * mu:
                 neutralize_primary = True
 
-            # Diagnostic for gp_alpha_00
+            # Diagnostic for ml_alpha_00
             primary_diagnostic["is_mu"] = mu
             primary_diagnostic["oos_mu"] = mu_oos
             primary_diagnostic["half_life"] = hl
@@ -472,7 +472,7 @@ def filter_alpha_components(
             s_bal = float(np.std(arr_bal, ddof=1))
             bal_ratio = s_bal / (abs(m_bal) + 1e-9)
 
-        if c == "gp_alpha_00":
+        if c == "ml_alpha_00":
             primary_diagnostic["sym_dispersion"] = bal_ratio
 
         if is_fast_track:
@@ -481,7 +481,7 @@ def filter_alpha_components(
             sym_bal_ok.append(bool(bal_ratio <= symbol_balance_max))
 
     reject = _benjamini_hochberg_reject(pvals, fdr_q)
-    output_cols = list(dict.fromkeys(cols + [c for c in ("gp_alpha_long_raw", "gp_alpha_short_raw") if c in alpha_wide.columns]))
+    output_cols = list(dict.fromkeys(cols + [c for c in ("ml_alpha_long_raw", "ml_alpha_short_raw") if c in alpha_wide.columns]))
     out = alpha_wide[output_cols].copy()
     n_surv = 0
 
@@ -541,7 +541,7 @@ def filter_alpha_components(
         "fail_sym_bal": float(f_bal),
     }
 
-    # gp_alpha_00(Primary)의 상세 지표를 meta에 병합
+    # ml_alpha_00(Primary)의 상세 지표를 meta에 병합
     for k_diag, v_diag in primary_diagnostic.items():
         meta[f"primary_{k_diag}"] = float(v_diag)
 
@@ -588,8 +588,8 @@ def filter_alpha_components(
 
     target_long = base["target"].to_numpy(dtype=np.float64)
     target_short = 1.0 - target_long
-    _direction_head_stats("gp_alpha_long_raw", target_long, "long_head")
-    _direction_head_stats("gp_alpha_short_raw", target_short, "short_head")
+    _direction_head_stats("ml_alpha_long_raw", target_long, "long_head")
+    _direction_head_stats("ml_alpha_short_raw", target_short, "short_head")
 
-    _logger.info("GP alpha FDR+DSR+IC gates: %d / %d columns survive.", n_surv, len(cols))
+    _logger.info("ML alpha FDR+DSR+IC gates: %d / %d columns survive.", n_surv, len(cols))
     return out, meta

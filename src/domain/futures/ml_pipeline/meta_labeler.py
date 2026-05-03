@@ -182,7 +182,7 @@ class MetaLabeler:
         """Fit dual directional classifiers on IS data.
 
         Args:
-            X: Feature matrix (gp_alpha + hmm_prob columns).
+            X: Feature matrix (ml_alpha + hmm_prob columns).
             y: TBM labels: +1 (Long TP), -1 (Short TP), 0 (neutral), 0.5 (fallback).
             is_end_idx: IS/OOS split index.
 

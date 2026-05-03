@@ -40,21 +40,21 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     "FUTURES_MC_DSR_FLOOR_CAP": 0.95,
     # Path A: True + PBO_MAX 0.50 for exploration; default off (session 42: 300t HOLD).
     "FUTURES_TIER1_SHIELD_MODE": False,
-    # Universal Cross-Sectional GP Miner Settings
-    "FUTURES_ML_GP_POPULATION": 1000,
-    "FUTURES_GP_LONG_BIAS": 2.0,
-    "FUTURES_GP_ASYMMETRIC_FITNESS_WEIGHT": 0.7,
-    "FUTURES_GP_REGIME_SPECIFIC_LEARNING": True,
+    # Universal Cross-Sectional Alpha Miner Settings
+    "FUTURES_ML_ALPHA_POPULATION": 1000,
+    "FUTURES_ALPHA_LONG_BIAS": 2.0,
+    "FUTURES_ALPHA_ASYMMETRIC_FITNESS_WEIGHT": 0.7,
+    "FUTURES_ALPHA_REGIME_SPECIFIC_LEARNING": True,
     # Tier 2: +2 generations for marginal symbolic-regression diversity (cheap vs full schema lift).
-    "FUTURES_ML_GP_GENERATIONS": 22,
-    "FUTURES_ML_GP_TARGET_HORIZON": 6,
-    "FUTURES_ML_GP_HORIZONS": (6, 12, 24, 48),
-    # Cache-control refit: when True, bypass GP raw cache and force alpha retraining.
+    "FUTURES_ML_ALPHA_GENERATIONS": 22,
+    "FUTURES_ML_ALPHA_TARGET_HORIZON": 6,
+    "FUTURES_ML_ALPHA_HORIZONS": (6, 12, 24, 48),
+    # Cache-control refit: when True, bypass Alpha raw cache and force alpha retraining.
     "FUTURES_ML_FORCE_RETRAIN_ALPHA": True,
-    "FUTURES_ML_GP_PARSIMONY": 0.001,
-    "FUTURES_ML_GP_USE_TBM_WEIGHT": True,
-    "FUTURES_ML_PRE_GP_REGIME": False,
-    "FUTURES_ML_PRE_GP_REGIME_STATES": 3,
+    "FUTURES_ML_ALPHA_PARSIMONY": 0.001,
+    "FUTURES_ML_ALPHA_USE_TBM_WEIGHT": True,
+    "FUTURES_ML_PRE_ALPHA_REGIME": False,
+    "FUTURES_ML_PRE_ALPHA_REGIME_STATES": 3,
     "FUTURES_ML_IC_FILTER_USE_HAC": True,
     "FUTURES_ML_IC_FILTER_USE_EWMA": False,
     "FUTURES_ML_IC_EWMA_HALF_LIFE": 540.0,
@@ -63,7 +63,7 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     "FUTURES_ML_IC_REGIME_GATE": False,
     # Tier 2 discovery: FDR relaxation to expand candidate pool.
     "FUTURES_ML_IC_FDR_Q": 0.40,
-    "FUTURES_ML_GP_NSGA2_ENABLED": False,
+    "FUTURES_ML_ALPHA_NSGA2_ENABLED": False,
     # NSGA-II population size. Generations = trials / population_size.
     # Target ≥ 10 generations → min trials = population_size * 10.
     # Sessions 27/35/38: NSGA-II 3-strike empirical failure. DSR collapses to ~0.45.
