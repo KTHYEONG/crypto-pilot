@@ -19,7 +19,7 @@ from src.domain.futures.funding_utils import merge_funding_into_ohlcv
 from src.domain.futures.metrics_utils import merge_metrics_into_ohlcv
 from src.domain.futures.ml_pipeline.cross_sectional_utils import CrossSectionalPipelineUtils
 from src.domain.futures.ml_pipeline.feature_engineering import (
-    GP_ENGINEERED_FEATURE_NAMES,
+    ALPHA_ENGINEERED_FEATURE_NAMES,
     HMM_SEMANTIC_PROB_COLUMNS,
     build_gp_input_features,
 )
@@ -71,8 +71,8 @@ def _meta_feature_column_names(wide_1h: pd.DataFrame) -> tuple[str, ...]:
     """Resolve which columns to use as features for the meta-labeler."""
     hmm_cols = _sorted_hmm_prob_columns(wide_1h)
     base: list[str] = []
-    if "gp_alpha_00" in wide_1h.columns:
-        base.append("gp_alpha_00")
+    if "ml_alpha_00" in wide_1h.columns:
+        base.append("ml_alpha_00")
     base.extend(hmm_cols)
     # 추가 피처: wide_1h에 실제 존재하는 것만 포함
     for c in _META_EXTRA_FEATS:
@@ -461,18 +461,18 @@ def _apply_ml_calib_probs(
         else np.ones(len(aligned_tf), dtype=np.float64)
     )
     gp_base = (
-        aligned_tf["gp_alpha_00"].to_numpy(dtype=np.float64)
-        if "gp_alpha_00" in aligned_tf.columns
+        aligned_tf["ml_alpha_00"].to_numpy(dtype=np.float64)
+        if "ml_alpha_00" in aligned_tf.columns
         else np.zeros(len(aligned_tf), dtype=np.float64)
     )
     gp_long = (
-        aligned_tf["gp_alpha_long"].to_numpy(dtype=np.float64)
-        if "gp_alpha_long" in aligned_tf.columns
+        aligned_tf["ml_alpha_long"].to_numpy(dtype=np.float64)
+        if "ml_alpha_long" in aligned_tf.columns
         else gp_base
     )
     gp_short = (
-        aligned_tf["gp_alpha_short"].to_numpy(dtype=np.float64)
-        if "gp_alpha_short" in aligned_tf.columns
+        aligned_tf["ml_alpha_short"].to_numpy(dtype=np.float64)
+        if "ml_alpha_short" in aligned_tf.columns
         else gp_base
     )
     # [Improvement 1] Friction-Aware EV Hurdle
@@ -570,7 +570,7 @@ def _step4_fusion_one_symbol(
 
         # Clear any existing ML/HMM columns to prevent merge collisions (_x, _y)
         ml_reserved = [
-            "gp_alpha_00", "hmm_modulator_long", "hmm_modulator_short",
+            "ml_alpha_00", "hmm_modulator_long", "hmm_modulator_short",
             "slot_rank_score", "xs_score_long", "xs_score_short",
             "ml_calib_prob", "ml_calib_prob_long", "ml_calib_prob_short",
             "hmm_prob_bull_trend", "hmm_prob_bear_trend", "hmm_prob_chop", "hmm_prob_crisis"
@@ -578,7 +578,7 @@ def _step4_fusion_one_symbol(
         # Also drop any legacy or dynamic HMM probability columns
         hmm_to_drop = [c for c in df_1h.columns if str(c).startswith("hmm_prob_")]
 
-        # [FIX] Do NOT drop GP_ENGINEERED_FEATURE_NAMES or _META_EXTRA_FEATS here.
+        # [FIX] Do NOT drop ALPHA_ENGINEERED_FEATURE_NAMES or _META_EXTRA_FEATS here.
         # We want to preserve these microstructure features for the MetaLabeler/Audit.
         drop_exist = list(set(ml_reserved + hmm_to_drop))
         drop_exist = [c for c in drop_exist if c in df_1h.columns]
@@ -590,7 +590,7 @@ def _step4_fusion_one_symbol(
 
         if sym not in valid_alpha_set:
             wide_1h = df_1h.copy()
-            wide_1h["gp_alpha_00"] = 0.0
+            wide_1h["ml_alpha_00"] = 0.0
             # [REFACTORED] Merge asymmetric modulators
             wide_1h = pd.merge(wide_1h, hmm_modulator, on="datetime", how="left")
             if "hmm_modulator_long" not in wide_1h.columns:
@@ -614,12 +614,12 @@ def _step4_fusion_one_symbol(
         else:
             sym_alpha = alpha_by_sym[sym].copy()
             sym_alpha["datetime"] = pd.to_datetime(sym_alpha["datetime"], utc=True)
-            if "gp_alpha_00" not in sym_alpha.columns:
+            if "ml_alpha_00" not in sym_alpha.columns:
                 _logger.warning(
-                    "[%s] gp_alpha_00 missing in sym_alpha. cols=%s",
+                    "[%s] ml_alpha_00 missing in sym_alpha. cols=%s",
                     sym, list(sym_alpha.columns)
                 )
-                sym_alpha["gp_alpha_00"] = 0.0
+                sym_alpha["ml_alpha_00"] = 0.0
 
             wide_1h = pd.merge(df_1h, sym_alpha, on="datetime", how="left").fillna(0.0)
 
@@ -636,7 +636,7 @@ def _step4_fusion_one_symbol(
 
             # Use mean of long/short modulator for ranking score
             m_avg = (wide_1h["hmm_modulator_long"] + wide_1h["hmm_modulator_short"]) / 2.0
-            wide_1h["slot_rank_score"] = wide_1h["gp_alpha_00"] * m_avg
+            wide_1h["slot_rank_score"] = wide_1h["ml_alpha_00"] * m_avg
 
             if hmm_cols_ref:
                 mp_h = market_probs[["datetime", *hmm_cols_ref]]
@@ -741,10 +741,10 @@ def _build_panel_with_targets(
     panel_df = utils.build_panel_df(data_maps, tf="1h")
     panel_df = utils.add_cross_sectional_features(panel_df)
     panel_df = utils.add_systemic_features(panel_df)
-    impute_cols = [c for c in GP_ENGINEERED_FEATURE_NAMES if c in panel_df.columns]
+    impute_cols = [c for c in ALPHA_ENGINEERED_FEATURE_NAMES if c in panel_df.columns]
     if impute_cols:
         panel_df = utils.cs_median_impute_panel(panel_df, impute_cols)
-    raw_h = cfg.get("FUTURES_ML_GP_HORIZONS", (3, 6, 12, 24))
+    raw_h = cfg.get("FUTURES_ML_ALPHA_HORIZONS", (3, 6, 12, 24))
     default_h = (3, 6, 12, 24)
     h_src = raw_h if isinstance(raw_h, (list, tuple)) else default_h
     horizons = tuple(int(x) for x in h_src)
@@ -778,9 +778,9 @@ def merge_ml_output_into_data_maps(
             )
         ml_cols = [
             "datetime",
-            "gp_alpha_00",
-            "gp_alpha_long",
-            "gp_alpha_short",
+            "ml_alpha_00",
+            "ml_alpha_long",
+            "ml_alpha_short",
             "btc_trend_vol_adj_24h",
             "hmm_modulator_long",
             "hmm_modulator_short",
@@ -811,7 +811,7 @@ def merge_ml_output_into_data_maps(
 
         # Aggressively drop any existing ML/HMM columns to prevent _x, _y suffixes
         reserved_patterns = [
-            "gp_alpha_", "hmm_modulator", "ml_calib_prob", "xs_score_", "slot_rank_"
+            "ml_alpha_", "hmm_modulator", "ml_calib_prob", "xs_score_", "slot_rank_"
         ]
         exist_ml_cols = [
             c for c in original_df.columns
@@ -824,10 +824,10 @@ def merge_ml_output_into_data_maps(
             original_df = original_df.drop(columns=is_cols_to_drop)
         merged = pd.merge(original_df, ml_features, on="datetime", how="left")
         merged = merged.sort_values("datetime")
-        if "gp_alpha_00" in merged.columns:
-            nan_pct = float(merged["gp_alpha_00"].isna().mean() * 100.0)
+        if "ml_alpha_00" in merged.columns:
+            nan_pct = float(merged["ml_alpha_00"].isna().mean() * 100.0)
             _logger.debug(
-                " [MERGE%s] %s %s gp_alpha_00 NaN ratio: %.4f%%",
+                " [MERGE%s] %s %s ml_alpha_00 NaN ratio: %.4f%%",
                 log_tag,
                 sym,
                 tf,
@@ -1064,10 +1064,10 @@ def run_ml_pipeline_for_universe(
                     df_1h = df_tf.copy()
 
                 try:
-                    # Enrich 1h with GP features (primary source for panel/HMM)
+                    # Enrich 1h with ALPHA features (primary source for panel/HMM)
                     df_1h_enriched = _enrich_with_gp_features(df_1h, tf="1h")
                 except Exception as e:
-                    _logger.warning("[%s] GP feature enrichment failed: %s", sym, e)
+                    _logger.warning("[%s] ALPHA feature enrichment failed: %s", sym, e)
                     df_1h_enriched = df_1h
                 # Store target TF and 1h-enriched frames separately.
                 # If tf=='1h', data_maps[sym][tf] MUST remain unenriched to avoid merge collisions.
@@ -1085,7 +1085,7 @@ def run_ml_pipeline_for_universe(
         return MLPipelineOutput()
 
     label_start = is_start_date or fetch_start
-    if bool(cfg.get("FUTURES_ML_GP_USE_TBM_WEIGHT", True)):
+    if bool(cfg.get("FUTURES_ML_ALPHA_USE_TBM_WEIGHT", True)):
         _logger.info("  --> Step 1b: Triple-Barrier Micro-Weighting (1m prefetch)")
 
         one_m_gp: dict[str, pd.DataFrame | None] = {}
@@ -1119,7 +1119,7 @@ def run_ml_pipeline_for_universe(
     else:
         panel_df = _build_panel_with_targets(data_maps, cfg)
 
-    raw_h = cfg.get("FUTURES_ML_GP_HORIZONS", (3, 6, 12, 24))
+    raw_h = cfg.get("FUTURES_ML_ALPHA_HORIZONS", (3, 6, 12, 24))
     default_h = (3, 6, 12, 24)
     h_src = raw_h if isinstance(raw_h, (list, tuple)) else default_h
     horizons = tuple(int(x) for x in h_src)
@@ -1153,31 +1153,31 @@ def run_ml_pipeline_for_universe(
     market_probs = _ensure_datetime_column(market_probs)
     market_probs["datetime"] = pd.to_datetime(market_probs["datetime"], utc=True)
 
-    # Inject HMM features into panel_df
-    _logger.info("  --> Injecting HMM features into panel_df for LightGBM...")
+    # Inject HMM and Systemic features into panel_df
+    _logger.info("  --> Injecting HMM and Systemic features into panel_df for LightGBM...")
     mp_cols = [c for c in market_probs.columns if "hmm_prob_" in c]
     mp_feats = market_probs.set_index("datetime")[mp_cols]
+    
     # Merge on datetime level of MultiIndex
     panel_df = panel_df.join(mp_feats, on="datetime", how="left").fillna(1.0 / float(hmm_k))
+    # Inject raw systemic features (btc_trend_vol_adj_24h, realized_vol_regime, etc.)
+    panel_df = panel_df.join(market_hmm_feats, on="datetime", how="left", rsuffix="_sys").fillna(0.0)
 
-    # --- Step 2b: Universal GP Model Training (Cross-Sectional IC) ---
+    # --- Step 2b: Universal ALPHA Model Training (Cross-Sectional IC) ---
     _logger.info("  --> Step 2b: Training Cross-Sectional LightGBM Alpha Model")
 
 
-    if bool(cfg.get("FUTURES_ML_GP_NSGA2_ENABLED", False)) and not is_deap_available():
+    if bool(cfg.get("FUTURES_ML_ALPHA_NSGA2_ENABLED", False)) and not is_deap_available():
         _logger.warning(
-            "FUTURES_ML_GP_NSGA2_ENABLED=True but `deap` is not installed; "
+            "FUTURES_ML_ALPHA_NSGA2_ENABLED=True but `deap` is not installed; "
             "continuing with scalarized gplearn fitness (see gp_multiobjective.py)."
         )
     miner = MLAlphaMiner(
-        population_size=int(cfg.get("FUTURES_ML_GP_POPULATION", 1000)),
-        generations=int(cfg.get("FUTURES_ML_GP_GENERATIONS", 20)),
         n_jobs=n_jobs,
         target_horizons=horizons,
-        parsimony_coefficient=float(cfg.get("FUTURES_ML_GP_PARSIMONY", 0.001)),
     )
 
-    gp_cache = Path(FUTURES_CACHE_DIR) / "universal_cs_gp_v8.parquet"
+    alpha_cache = Path(FUTURES_CACHE_DIR) / "universal_cs_gp_v8.parquet"
     filter_opts = {
         "use_newey_west": bool(cfg.get("FUTURES_ML_IC_FILTER_USE_HAC", False)),
         "use_ewma_ic_stat": bool(cfg.get("FUTURES_ML_IC_FILTER_USE_EWMA", False)),
@@ -1188,18 +1188,18 @@ def run_ml_pipeline_for_universe(
     }
     alpha_panel = miner.mine_alphas_cs(
         panel_df,
-        cache_path=gp_cache,
+        cache_path=alpha_cache,
         is_end_date=is_end_date,
         filter_options=filter_opts,
     )
 
-    # --- Print GP IC Validation Results immediately after Step 2 ---
+    # --- Print ALPHA IC Validation Results immediately after Step 2 ---
     best_fitness = alpha_panel.attrs.get("best_fitness", 0.0)
     filter_meta = alpha_panel.attrs.get("alpha_component_filter", {})
     neu_p = bool(filter_meta.get("neutralize_primary", 0))
 
     _logger.info(" ┌───────────────────────────────────────────────────────────────────────────────────┐")
-    _logger.info(" │ [GP AUDIT] LightGBM IC Validation (Cross-Sectional Alpha)                         │")
+    _logger.info(" │ [ALPHA AUDIT] LightGBM IC Validation (Cross-Sectional Alpha)                     │")
     _logger.info(" ├───────────────────────────────────────────────────────────────────────────────────┤")
     _logger.info(f" │ [OVERVIEW] Fitness: {best_fitness:.4f} | Survived: {filter_meta.get('n_surviving', 0):.0f}/{filter_meta.get('n_components', 0):.0f} | Neutralized: {neu_p} │")
     _logger.info(" ├───────────────────────────────────────────────────────────────────────────────────┤")
