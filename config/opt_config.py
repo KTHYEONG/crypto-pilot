@@ -135,7 +135,7 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     # Improvement 3: PLGD Leg Stability Weight
     "FUTURES_PLGD_AWF_LEG_STABILITY_WEIGHT": 0.8,
     # Improvement 4: Friction-Aware Virtual Cost (bps per trade)
-    "FUTURES_VIRTUAL_FRICTION_BPS": 2.5,
+    "FUTURES_VIRTUAL_FRICTION_BPS": 3.5,
 }
 
 # Cross-Sectional Strategy Parameter Space
