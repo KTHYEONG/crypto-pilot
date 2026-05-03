@@ -187,6 +187,8 @@ def _is_kelly_per_semantic_state(
             kelly_long[idx_chop] = (1.0 - alpha_iso) * y_l[1] + alpha_iso * y_l_adj[1]
             kelly_long[idx_bear] = (1.0 - alpha_iso) * y_l[2] + alpha_iso * y_l_adj[2]
             kelly_long[idx_crisis] = (1.0 - alpha_iso) * y_l[3] + alpha_iso * y_l_adj[3]
+            # BULL long must not suppress longs — floor at 0.0 (economic invariant)
+            kelly_long[idx_bull] = float(max(0.0, kelly_long[idx_bull]))
 
             y_s = np.array(
                 [
@@ -267,23 +269,8 @@ def _hmm_modulator_kelly_values(
         mod_long = np.clip(1.0 + float(shrink) * (p_mat @ k_long), 0.3, 2.0).astype(np.float64)
         mod_short = np.clip(1.0 + float(shrink) * (p_mat @ k_short), 0.3, 2.0).astype(np.float64)
 
-    # [NEW] Asymmetric Regime Override (Hard Capping & Boosting)
-    p_bull = merged["hmm_prob_bull_trend"].to_numpy(dtype=np.float64)
-    p_bear = merged["hmm_prob_bear_trend"].to_numpy(dtype=np.float64)
-    p_chop = merged["hmm_prob_chop"].to_numpy(dtype=np.float64)
+    # Crisis prob for kill-switch (regime override removed — IS-Kelly drives modulators)
     p_crisis = merged["hmm_prob_crisis"].to_numpy(dtype=np.float64)
-
-    # BEAR_TREND Override: Aggressively cap long, allow short boost
-    mod_long = np.where(p_bear > 0.25, np.minimum(mod_long, 0.6), mod_long)
-    mod_short = np.where(p_bear > 0.25, np.maximum(mod_short, 1.5), mod_short)
-
-    # BULL_TREND Override: Allow long boost, cap short
-    mod_long = np.where(p_bull > 0.25, np.maximum(mod_long, 1.5), mod_long)
-    mod_short = np.where(p_bull > 0.25, np.minimum(mod_short, 0.6), mod_short)
-
-    # CHOP Override: Defensive sizing for both
-    mod_long = np.where(p_chop > 0.4, np.minimum(mod_long, 0.8), mod_long)
-    mod_short = np.where(p_chop > 0.4, np.minimum(mod_short, 0.8), mod_short)
 
     # Capture pre-kill state for probe replay (before crisis suppression)
     mod_long_base: np.ndarray = mod_long.copy()
@@ -291,7 +278,7 @@ def _hmm_modulator_kelly_values(
     # Apply Crisis Kill-Switch (Safety First)
     if "hmm_prob_crisis" in market_probs.columns:
         pc = p_crisis
-        mod_long = np.where(pc > float(crisis_thr), 0.3, mod_long)
+        mod_long = np.where(pc > float(crisis_thr), 0.5, mod_long)
         mod_short = np.where(
             pc > float(crisis_thr), np.minimum(mod_short, 1.1), mod_short
         )
@@ -326,7 +313,7 @@ def _hmm_modulator_kelly_values(
     b_vol["atr_pct"] = atr_pct.fillna(0.0)
     # 500h causal window for quantile to adapt to market regime shifts
     b_vol["vol_q95"] = b_vol["atr_pct"].rolling(500, min_periods=100).quantile(0.95).fillna(1e9)
-    
+
     merged_vol = merged[["datetime"]].merge(b_vol, on="datetime", how="left")
     is_extreme_vol = (merged_vol["atr_pct"] > merged_vol["vol_q95"]).to_numpy()
     

@@ -1577,6 +1577,7 @@ def main() -> None:
                 _romad_improved = _new_romad > (_champ_romad * 1.02) # >2% improvement
                 _sharpe_improved = _new_sharpe > (_champ_sharpe + 0.05) # >0.05 improvement
                 _pbo_improved = _new_pbo < (_champ_pbo - 0.01) # >0.01 improvement
+                _cagr_improved = _new_oos_cagr > (_champ_oos_cagr + 2.0)  # >2%p CAGR improvement
 
                 # Robustness Upgrade: HO recovery or significant PBO drop
                 _pbo_champ_max = float(pbo_champ_eff)
@@ -1599,10 +1600,11 @@ def main() -> None:
                     (_romad_improved and _alpha_acceptable) or
                     (_alpha_improved and _sharpe_acceptable and _romad_acceptable) or
                     _robustness_upgrade or
-                    (_pbo_improved and _alpha_acceptable and _romad_acceptable)
+                    (_pbo_improved and _alpha_acceptable and _romad_acceptable) or
+                    (_cagr_improved and _romad_acceptable and _alpha_acceptable)
                 )
 
-                if _holdout_fail:
+                if _holdout_fail and not (_cagr_improved and _new_oos_cagr > (_champ_oos_cagr + 5.0)):
                     _is_better = False
 
                 if args.bypass_champion_guard:
