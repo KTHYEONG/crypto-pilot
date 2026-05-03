@@ -310,7 +310,7 @@ class MLAlphaMiner:
                     )
                 x_clean = x_clean[:, kept_indices]
                 self._kept_indices = kept_indices
-                _logger.info(
+                _logger.debug(
                     " [Phase C] Kept %d/%d features via MI Audit.",
                     len(kept_indices),
                     len(feat_cols)
@@ -353,7 +353,7 @@ class MLAlphaMiner:
                     learning_rate=0.03, num_leaves=7, max_depth=3,
                     min_child_samples=200, subsample=0.7, colsample_bytree=0.7,
                     reg_alpha=2.0, reg_lambda=2.0,
-                    n_jobs=self.n_jobs, random_state=42,
+                    n_jobs=self.n_jobs, random_state=42, verbosity=-1,
                 )
                 l_m.fit(
                     x_mat[t_idx], y_vec[t_idx], sample_weight=sw_vec[t_idx],
@@ -506,7 +506,7 @@ class MLAlphaMiner:
                         short_share = float(np.mean(pred_h_short[idx_is] > 0.5))
                         imbalance = abs(long_share - short_share)
                         robust_score = mean_ic - (0.5 * std_ic) + min(0.0, worst_ic) - (0.10 * imbalance)
-                        _logger.info(
+                        _logger.debug(
                             " [Phase D] Horizon h=%d: robust=%.4f (mean=%.4f std=%.4f worst=%.4f imb=%.3f)",
                             h, robust_score, mean_ic, std_ic, worst_ic, imbalance
                         )
@@ -516,7 +516,7 @@ class MLAlphaMiner:
                     robust_score = 0.0
 
                 if robust_score <= 0.0:
-                    _logger.info(" [Phase D] Horizon h=%d skipped (non-positive robust score)", h)
+                    _logger.debug(" [Phase D] Horizon h=%d skipped (non-positive robust score)", h)
                     continue
                 horizon_ics.append(robust_score)
                 horizon_scores.append(robust_score)
