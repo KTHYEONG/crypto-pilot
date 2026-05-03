@@ -108,7 +108,7 @@ BEST_PARAMS_FUTURES_JSON_STEM: str = "best_futures_1h"
 def _ml_phase_d_sampler(seed: int, n_trials: int = 200) -> optuna.samplers.BaseSampler:
     # NSGA-II: 2-obj Pareto (Growth | Stability). population_size from config.
     # Required: n_trials ≥ population_size * 10 (≥10 generations) for convergence.
-    if OPT_FUTURES_CONFIG.get("FUTURES_ML_GP_NSGA2_ENABLED", False):
+    if OPT_FUTURES_CONFIG.get("FUTURES_ML_ALPHA_NSGA2_ENABLED", False):
         pop = int(OPT_FUTURES_CONFIG.get("FUTURES_NSGA2_POPULATION_SIZE", 30))
         return optuna.samplers.NSGAIISampler(
             seed=seed,
@@ -540,7 +540,7 @@ def _log_ml_merge_feature_stats(
     valid_symbols: list[str],
     tf: str,
 ) -> None:
-    cols = ("gp_alpha_00", "xs_score_long", "hmm_modulator_long")
+    cols = ("ml_alpha_00", "xs_score_long", "hmm_modulator_long")
     for col in cols:
         for sym in valid_symbols[: min(8, len(valid_symbols))]:
             df = oos_data_maps[sym][tf]
@@ -570,15 +570,15 @@ def _assert_oos_gp_signal_alive(
 ) -> None:
     for sym in valid_symbols[: min(5, len(valid_symbols))]:
         df = oos_data_maps[sym][tf]
-        if "gp_alpha_00" not in df.columns:
-            raise RuntimeError(f"Pre-OOS: {sym} missing gp_alpha_00.")
-        gp = df["gp_alpha_00"]
+        if "ml_alpha_00" not in df.columns:
+            raise RuntimeError(f"Pre-OOS: {sym} missing ml_alpha_00.")
+        gp = df["ml_alpha_00"]
         if not pd.api.types.is_numeric_dtype(gp):
-            raise RuntimeError(f"Pre-OOS: {sym} gp_alpha_00 non-numeric dtype={gp.dtype}")
+            raise RuntimeError(f"Pre-OOS: {sym} ml_alpha_00 non-numeric dtype={gp.dtype}")
         o0 = int(oos_data_maps[sym][f"oos_start_idx_{tf}"])
         oos_std = float(pd.to_numeric(gp.iloc[o0:], errors="coerce").std(ddof=0) or 0.0)
         if oos_std < 1e-6:
-            raise RuntimeError(f"Pre-OOS: {sym} OOS gp_alpha_00 std={oos_std:.2e} (dead signal).")
+            raise RuntimeError(f"Pre-OOS: {sym} OOS ml_alpha_00 std={oos_std:.2e} (dead signal).")
 
 
 def _ml_trial_passes_hard_gates(
@@ -790,13 +790,13 @@ def main() -> None:
     parser.add_argument("--trials", type=int, default=OPT_FUTURES_CONFIG["total_trials"])
     parser.add_argument("--tf", type=str, choices=["1h", "4h"], default=pre_args.tf)
     parser.add_argument("--reference-date", type=str, default=pre_args.reference_date)
-    parser.add_argument("--gp-only", action="store_true", help="Stop after GP IC calculation")
+    parser.add_argument("--alpha-only", action="store_true", help="Stop after ALPHA IC calculation")
     parser.add_argument("--hmm-only", action="store_true", help="Stop after HMM regime inference")
     parser.add_argument("--seed", type=int, default=None, help="Override random seed")
     parser.add_argument(
         "--force-retrain-alpha",
         action="store_true",
-        help="Bypass GP raw cache and alpha retraining.",
+        help="Bypass Alpha raw cache and alpha retraining.",
     )
     parser.add_argument(
         "--bypass-champion-guard",
@@ -807,7 +807,7 @@ def main() -> None:
 
     if args.force_retrain_alpha:
         OPT_FUTURES_CONFIG["FUTURES_ML_FORCE_RETRAIN_ALPHA"] = True
-        _logger.info("[ML] FORCE_RETRAIN_ALPHA enabled via CLI; raw GP cache will be bypassed.")
+        _logger.info("[ML] FORCE_RETRAIN_ALPHA enabled via CLI; raw Alpha cache will be bypassed.")
 
     ai_telemetry_payloads.append({
         "stage": "execution_context",
@@ -840,7 +840,7 @@ def main() -> None:
 
     # [Institutional Quant] Universal Cross-Sectional ML Pipeline
     _logger.info("\n" + "═" * 85)
-    _logger.info(" [STEP 2/5] ML PIPELINE: Universal Cross-Sectional GP & Regime Inference")
+    _logger.info(" [STEP 2/5] ML PIPELINE: Universal Cross-Sectional Alpha & Regime Inference")
     _logger.info("═" * 85)
 
 
@@ -854,7 +854,7 @@ def main() -> None:
         n_jobs=ml_n_jobs,
         is_end_date=is_end_date,
         is_start_date=start_date,
-        gp_only=args.gp_only,
+        gp_only=args.alpha_only,
         hmm_only=args.hmm_only,
     )
 
@@ -864,7 +864,7 @@ def main() -> None:
         rep = ml_out.alpha_panel.attrs.get("alpha_component_filter", {})
         if rep:
             ai_telemetry_payloads.append({
-                "stage": "gp_audit",
+                "stage": "alpha_audit_ml",
                 "is_best_fitness": float(best_fitness),
                 "n_tried": int(rep.get("n_components", 0)),
                 "n_survived": int(rep.get("n_surviving", 0)),
@@ -889,8 +889,8 @@ def main() -> None:
         })
 
 
-    if args.gp_only:
-        _logger.info(" [GP-ONLY] Analysis complete. Exiting as requested.")
+    if args.alpha_only:
+        _logger.info(" [ALPHA-ONLY] Analysis complete. Exiting as requested.")
         return
 
     if args.hmm_only:
@@ -916,16 +916,16 @@ def main() -> None:
 
     for sym in valid_symbols[:3]:
         df = oos_data_maps[sym][args.tf]
-        if "gp_alpha_00" not in df.columns:
-            _logger.error("[SIG CHECK] %s: no gp_alpha_00 column.", sym)
-            raise RuntimeError(f"OOS merge missing gp_alpha_00 for {sym}.")
+        if "ml_alpha_00" not in df.columns:
+            _logger.error("[SIG CHECK] %s: no ml_alpha_00 column.", sym)
+            raise RuntimeError(f"OOS merge missing ml_alpha_00 for {sym}.")
         o0 = int(oos_data_maps[sym][f"oos_start_idx_{args.tf}"])
-        gp = pd.to_numeric(df["gp_alpha_00"], errors="coerce")
+        gp = pd.to_numeric(df["ml_alpha_00"], errors="coerce")
         is_std = float(gp.iloc[:o0].std(ddof=0) or 0.0)
         oos_std = float(gp.iloc[o0:].std(ddof=0) or 0.0)
         _logger.debug("[SIG CHECK] %s IS gp_std=%.6f OOS gp_std=%.6f", sym, is_std, oos_std)
         if oos_std < 1e-4:
-            _logger.error("[ABORT] %s OOS gp_alpha_00 std < 1e-4. Check merge/tz.", sym)
+            _logger.error("[ABORT] %s OOS ml_alpha_00 std < 1e-4. Check merge/tz.", sym)
             raise RuntimeError(f"OOS signal dead for {sym}.")
 
     # [PHASE 5] Optuna Portfolio Optimization Starting

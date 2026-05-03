@@ -22,7 +22,7 @@ from sklearn.preprocessing import QuantileTransformer
 
 from src.domain.futures.ml_pipeline.cross_sectional_utils import CrossSectionalPipelineUtils
 from src.domain.futures.ml_pipeline.feature_engineering import (
-    GP_ENGINEERED_FEATURE_NAMES,
+    ALPHA_ENGINEERED_FEATURE_NAMES,
     GP_FEATURE_SCHEMA_VERSION,
 )
 from src.domain.futures.ml_pipeline.alpha_component_filter import filter_alpha_components
@@ -50,7 +50,7 @@ def _generate_smart_cache_stem(
         "is_end_date": is_end_date,
         "version": "v8_vectorized",
         "feature_schema_version": GP_FEATURE_SCHEMA_VERSION,
-        "feature_columns": list(GP_ENGINEERED_FEATURE_NAMES),
+        "feature_columns": list(ALPHA_ENGINEERED_FEATURE_NAMES),
     }
     dna_json = json.dumps(dna, sort_keys=True)
     short_hash = hashlib.md5(dna_json.encode()).hexdigest()[:8]
@@ -303,7 +303,7 @@ class MLAlphaMiner:
             return pd.DataFrame()
 
         work_panel = panel_df.copy()
-        src_cols = [c for c in GP_ENGINEERED_FEATURE_NAMES if c in work_panel.columns]
+        src_cols = [c for c in ALPHA_ENGINEERED_FEATURE_NAMES if c in work_panel.columns]
         if src_cols:
             work_panel = CrossSectionalPipelineUtils.cs_rank_transform(work_panel, src_cols)
 
@@ -419,7 +419,7 @@ class MLAlphaMiner:
             # 3. Predict and Map back
             self._st = st
             out_grid = st.transform(x_clean)
-            cols = [f"gp_alpha_{i:02d}" for i in range(self.n_features_to_select)]
+            cols = [f"ml_alpha_{i:02d}" for i in range(self.n_features_to_select)]
             full_alpha_df = pd.DataFrame(out_grid, index=full_grid_index, columns=cols)
 
             alpha_series_list = []
@@ -466,25 +466,25 @@ class MLAlphaMiner:
             require_regime_gate=bool(fo.get("require_regime_gate", True)),
         )
 
-        # [NEW] Surviving Alpha Promotion: If gp_alpha_00 is dead but others survive, promote the best survivor to slot 00.
+        # [NEW] Surviving Alpha Promotion: If ml_alpha_00 is dead but others survive, promote the best survivor to slot 00.
         # This prevents the '0-signal' bottleneck when the primary program fails OOS or FDR gates.
-        surviving_cols = [c for c in alpha_df_all.columns if c.startswith("gp_alpha_") 
+        surviving_cols = [c for c in alpha_df_all.columns if c.startswith("ml_alpha_") 
                           and alpha_df_all[c].std() > 1e-6]
         
-        if "gp_alpha_00" not in surviving_cols and surviving_cols:
+        if "ml_alpha_00" not in surviving_cols and surviving_cols:
             best_surv = surviving_cols[0] # filter_alpha_components preserves order of input (rank)
-            _logger.info(" [PROMOTION] gp_alpha_00 failed gates. Promoting %s to slot 00.", best_surv)
+            _logger.info(" [PROMOTION] ml_alpha_00 failed gates. Promoting %s to slot 00.", best_surv)
             # Swap data
-            tmp = alpha_df_all["gp_alpha_00"].copy()
-            alpha_df_all["gp_alpha_00"] = alpha_df_all[best_surv]
+            tmp = alpha_df_all["ml_alpha_00"].copy()
+            alpha_df_all["ml_alpha_00"] = alpha_df_all[best_surv]
             alpha_df_all[best_surv] = tmp
             # Update best_fitness attr to reflect promoted alpha
             # In filter_alpha_components, we don't have per-alpha fitness, but we know the order is by fitness.
             # So the first surviving one is the best among survivors.
 
         if float(filt_meta.get("neutralize_primary", 0.0)) > 0.5:
-            _logger.warning(" [FILTER] gp_alpha_00 neutralized due to OOS decay.")
-            alpha_df_all["gp_alpha_00"] = 0.5
+            _logger.warning(" [FILTER] ml_alpha_00 neutralized due to OOS decay.")
+            alpha_df_all["ml_alpha_00"] = 0.5
 
         alpha_df = alpha_df_all.reindex(panel_df.index).fillna(0.5)
         alpha_df.attrs["best_fitness"] = raw_alpha_df.attrs.get("best_fitness", 0.0)
@@ -500,7 +500,7 @@ class MLAlphaMiner:
             return pd.DataFrame()
 
         work = panel_df.copy()
-        src_cols = [c for c in GP_ENGINEERED_FEATURE_NAMES if c in work.columns]
+        src_cols = [c for c in ALPHA_ENGINEERED_FEATURE_NAMES if c in work.columns]
         if src_cols:
             work = CrossSectionalPipelineUtils.cs_rank_transform(work, src_cols)
         feat_cols = _resolve_gp_feature_columns(work)
@@ -508,9 +508,9 @@ class MLAlphaMiner:
 
         if hasattr(self, "_st") and self._st is not None:
             out_arr = self._st.transform(x)
-            cols = [f"gp_alpha_{i:02d}" for i in range(self.n_features_to_select)]
+            cols = [f"ml_alpha_{i:02d}" for i in range(self.n_features_to_select)]
             return pd.DataFrame(out_arr, index=panel_df.index, columns=cols)
 
         _logger.warning("transform_cs: _st is missing. Returning neutral features.")
-        cols = [f"gp_alpha_{i:02d}" for i in range(self.n_features_to_select)]
+        cols = [f"ml_alpha_{i:02d}" for i in range(self.n_features_to_select)]
         return pd.DataFrame(0.5, index=panel_df.index, columns=cols)
