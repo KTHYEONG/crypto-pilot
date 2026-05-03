@@ -421,11 +421,11 @@ def _suggest_ml_phase_d(trial: optuna.Trial) -> dict[str, Any]:
     if shield:
         bayes_c = float(trial.suggest_float("BAYESIAN_C", 5.0, 14.0, log=True))
         kelly_s = float(trial.suggest_float("KELLY_SHRINKAGE", 0.52, 1.02))
-        k_rank = int(trial.suggest_int("K_RANK", 1, 2))
+        k_rank = int(trial.suggest_int("K_RANK", 1, 3))
         k_long = k_rank
         k_short = k_rank
-        reb = int(trial.suggest_categorical("REBALANCE_BARS", [1, 2, 3, 6]))
-        crisis = float(trial.suggest_float("CRISIS_GAMMA", 1.2, 1.5, step=0.05))
+        reb = int(trial.suggest_categorical("REBALANCE_BARS", [1, 3, 6, 12]))
+        crisis = float(trial.suggest_float("CRISIS_GAMMA", 1.0, 1.4, step=0.05))
         atr_p = int(trial.suggest_int("ATR_PERIOD", 26, 36, step=2))
         
         # Symmetric Parameters
@@ -440,11 +440,11 @@ def _suggest_ml_phase_d(trial: optuna.Trial) -> dict[str, Any]:
     else:
         bayes_c = float(trial.suggest_float("BAYESIAN_C", 5.0, 15.0, log=True))
         kelly_s = float(trial.suggest_float("KELLY_SHRINKAGE", 0.45, 1.20))
-        k_rank = int(trial.suggest_int("K_RANK", 1, 2))
+        k_rank = int(trial.suggest_int("K_RANK", 1, 3))
         k_long = k_rank
         k_short = k_rank
-        reb = int(trial.suggest_categorical("REBALANCE_BARS", [1, 2, 3, 6]))
-        crisis = float(trial.suggest_float("CRISIS_GAMMA", 1.1, 1.5, step=0.05))
+        reb = int(trial.suggest_categorical("REBALANCE_BARS", [1, 3, 6, 12]))
+        crisis = float(trial.suggest_float("CRISIS_GAMMA", 1.0, 1.4, step=0.05))
         atr_p = int(trial.suggest_int("ATR_PERIOD", 26, 40, step=2))
         
         # Symmetric Parameters
@@ -522,7 +522,7 @@ def _base_engine_params(ml: dict[str, Any], tf: str) -> dict[str, Any]:
     return {
         "TIMEFRAME": tf,
         "SIGNAL_TYPE": "ML_CALIB_PROB",
-        "REGIME_TYPE": "NONE",
+        "REGIME_TYPE": "EMA_ATR",
         "SIZING_METHOD": str(ml.get("SIZING_METHOD", "profit_factor_kelly")),
         "USE_CS_RANK_ENGINE": bool(ml.get("USE_CS_RANK_ENGINE", True)),
         "K_LONG": int(ml.get("K_LONG", ml.get("K_RANK", 2))),
@@ -555,9 +555,9 @@ def _base_engine_params(ml: dict[str, Any], tf: str) -> dict[str, Any]:
         "LEVERAGE": int(lev),
         "ENTRY_QUANTILE_WINDOW": int(OPT_FUTURES_CONFIG.get("ENTRY_QUANTILE_WINDOW", 240)),
         "MAX_CONCURRENT_POSITIONS": int(
-            OPT_FUTURES_CONFIG.get("FUTURES_MAX_CONCURRENT_POSITIONS", 3)
+            ml.get("MAX_CONCURRENT_POSITIONS", int(ml.get("K_RANK", 2)) * 2)
         ),
-        "MAX_EXPOSURE": 0.6,
+        "MAX_EXPOSURE": 1.0,
     }
 
 

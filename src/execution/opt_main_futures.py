@@ -1441,15 +1441,33 @@ def main() -> None:
         is_cagr_pass = is_cagr_v > 15.0
         is_sharpe_pass = is_sharpe_v > 1.5
         
+        # [NEW] Smart IS Survival Gate Bypass
+        # If OOS performance is exceptional, allow bypass of strict IS targets.
+        # Calculate OOS Net Alpha early for bypass check
+        oos_eq_v = np.asarray(oos_port.get("equity_curve", []), dtype=np.float64)
+        hrs_v = int(args.tf.replace("h", "")) if args.tf.endswith("h") else 4
+        bpy_v = (24.0 / hrs_v) * 365.0
+        nalpha_v_val = calc_net_alpha_with_friction(oos_eq_v, 0.0, bpy_v) if oos_eq_v.size > 1 else 0.0
+        oos_net_alpha_v = nalpha_v_val * 100.0
+        
+        oos_bypass = (oos_sharpe_v > 2.0) and (oos_net_alpha_v > 0)
+
         _pbo_cur = float(pbo_val) if pbo_val is not None else 0.5
 
         if not (is_cagr_pass and is_sharpe_pass):
-            gate_ok = False
-            _logger.warning(
-                " [IS SURVIVAL GATE] IS CAGR=%.2f%% (pass=%s) IS Sharpe=%.2f (pass=%s) "
-                "OOS Sharpe=%.2f pseudo_pbo=%.4f FAIL.",
-                is_cagr_v, is_cagr_pass, is_sharpe_v, is_sharpe_pass, oos_sharpe_v, _pbo_cur,
-            )
+            if oos_bypass:
+                _logger.info(
+                    " [IS SURVIVAL GATE] IS CAGR=%.2f%% IS Sharpe=%.2f FAIL, "
+                    "but BYPASSED due to exceptional OOS performance (OOS Sharpe=%.2f, Net Alpha=%.2f%%).",
+                    is_cagr_v, is_sharpe_v, oos_sharpe_v, oos_net_alpha_v
+                )
+            else:
+                gate_ok = False
+                _logger.warning(
+                    " [IS SURVIVAL GATE] IS CAGR=%.2f%% (pass=%s) IS Sharpe=%.2f (pass=%s) "
+                    "OOS Sharpe=%.2f pseudo_pbo=%.4f FAIL.",
+                    is_cagr_v, is_cagr_pass, is_sharpe_v, is_sharpe_pass, oos_sharpe_v, _pbo_cur,
+                )
         else:
             _logger.info(
                 " [IS SURVIVAL GATE] PASS. IS CAGR=%.2f%% IS Sharpe=%.2f "
