@@ -37,7 +37,7 @@ DISK_CACHE_ROOT.mkdir(parents=True, exist_ok=True)
 
 
 # Bump this version whenever signal computation logic changes to auto-invalidate cache.
-_SIGNAL_CODE_VERSION = "v4"  # combine surviving GP features; xs_score_short = gp/hms
+_SIGNAL_CODE_VERSION = "v4"  # combine surviving ALPHA features; xs_score_short = gp/hms
 
 
 def _get_param_hash(params: Dict[str, Any], whitelist: frozenset[str]) -> str:
