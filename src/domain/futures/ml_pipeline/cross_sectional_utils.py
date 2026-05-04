@@ -170,31 +170,42 @@ class CrossSectionalPipelineUtils:
         return stacked
 
     @staticmethod
+    def cs_robust_zscore_series(s: pd.Series, clip: float = 3.0) -> pd.Series:
+        """Cross-sectional Robust Z-Score (Median/MAD) per datetime.
+        
+        Z = (x - median) / (mad * 1.4826)
+        Clips to [-clip, clip] (Winsorization).
+        """
+        if s.index.nlevels < 2 or "symbol" not in s.index.names:
+            return s
+        wide = s.unstack(level="symbol")
+        med = wide.median(axis=1)
+        mad = (wide.sub(med, axis=0)).abs().median(axis=1)
+        
+        z = wide.sub(med, axis=0).div(mad * 1.4826 + 1e-12, axis=0)
+        z = z.clip(-clip, clip)
+        
+        return z.stack(future_stack=True).reindex(s.index).fillna(0.0)
+
+    @staticmethod
     def add_cross_sectional_features(panel_df: pd.DataFrame) -> pd.DataFrame:
-        """Add features relative to the universe (e.g. Volume Rank, Relative Momentum)."""
+        """Add features relative to the universe and apply Robust Z-Scoring."""
         df = panel_df.copy()
         
-        # Example: Cross-sectional Volume Rank (0.0 to 1.0)
+        # 1. Base CS Ranks
         if "volume" in df.columns:
             vol = df["volume"].unstack(level="symbol")
-            vol_rank = vol.rank(axis=1, pct=True)
-            df["cross_vol_rank"] = vol_rank.stack(future_stack=True).reindex(df.index)
-        elif "Volume" in df.columns:
-            vol = df["Volume"].unstack(level="symbol")
-            vol_rank = vol.rank(axis=1, pct=True)
-            df["cross_vol_rank"] = vol_rank.stack(future_stack=True).reindex(df.index)
-        else:
-            df["cross_vol_rank"] = 0.5
+            df["cross_vol_rank"] = vol.rank(axis=1, pct=True).stack(future_stack=True).reindex(df.index)
         
-        # Example: Cross-sectional 24h Return Rank
-        if "close" in df.columns:
-            close = df["close"].unstack(level="symbol")
-            ret_24h = np.log(close / close.shift(24))
-            ret_rank = ret_24h.rank(axis=1, pct=True)
-            df["cross_ret_24h_rank"] = ret_rank.stack(future_stack=True).reindex(df.index)
-        else:
-            df["cross_ret_24h_rank"] = 0.5
+        # 2. [NEW] Universal Robust Z-Scoring for Alpha Features
+        # This implements 개편안 A-1 (전면적 횡단면 정규화)
+        from src.domain.futures.ml_pipeline.feature_engineering import ALPHA_ENGINEERED_FEATURE_NAMES
         
+        target_cols = [c for c in ALPHA_ENGINEERED_FEATURE_NAMES if c in df.columns]
+        for col in target_cols:
+            # Beta-Neutral Momentum (A-2) is handled here naturally as Z-Score removes market-wide trend
+            df[col] = CrossSectionalPipelineUtils.cs_robust_zscore_series(df[col])
+            
         return df.fillna(0.0)
 
     @staticmethod

@@ -93,48 +93,50 @@ def calculate_position_size(
     available_margin: float,
     risk_per_trade: float,       # 포트폴리오 타겟 변동성 (기존 risk_per_trade 활용)
     leverage: float,
-    sf: float,
+    sf: float,                   # Confidence multiplier (Z-Score driven Alpha multiplier)
     gk: float,
     max_exposure_per_coin: float = 1.5,
 ) -> float:
-    """[RE-ENGINEERED] Target Volatility Sizing (Alternative 1)
-    Decouples Sizing from Stop-Loss distance to prevent 1/ATR^2 penalty.
+    """[RE-ENGINEERED] Alpha-Driven Kelly & Dynamic Portfolio Scaling.
+
+    Fuses ML Z-Score Alpha (sf) with Target Volatility Sizing.
     """
     # 0. NaN Protection
     if np.isnan(asset_atr_pct) or np.isnan(current_equity_for_risk) or np.isnan(fill_price):
         return 0.0
-    if np.isnan(gk):
-        gk = 0.0
-    if gk < 0.0:
-        gk = 0.0
     
     # 1. Target Volatility 기반 명목 자본 할당 (Notional Allocation)
-    # asset_atr_pct가 높을수록(변동성이 클수록) 할당 금액이 비례하여 감소 (단일 패널티)
+    # asset_atr_pct가 높을수록 할당 금액이 감소 (단일 패널티)
     vol_scalar = risk_per_trade / max(asset_atr_pct, 0.001)
-    target_notional = current_equity_for_risk * vol_scalar * gk
     
-    # [SAFETY] 전체 가용 레버리지 용량의 70%를 초과하는 명목 가치 설정 금지 (Margin Fail 방지 핵심)
-    max_safe_notional = max(current_equity_for_risk, 0.0) * leverage * 0.70
-    target_notional = min(target_notional, max_safe_notional)
+    # [NEW] Alpha-Driven Confidence mapping
+    # sf는 이미 engine_multi에서 (Z - Thr)/(3 - Thr)로 계산되어 옴.
+    conf_mult = max(min(sf, 1.0), 0.0)
+    
+    # Garch-Kelly inhibitor (optional but kept for robustness)
+    gk_use = max(min(gk, 1.0), 0.0)
+    
+    target_notional = current_equity_for_risk * vol_scalar * conf_mult * gk_use
+    
+    # 2. [ROBUST MARGIN PROTECTION]
+    # 전체 Equity 대비 70% 캡 + 가용 증거금 대비 80% 캡 중 보수적인 값 선택
+    # 이는 급격한 변동성 상황에서 마진콜을 방지하기 위함
+    max_safe_by_equity = max(current_equity_for_risk, 0.0) * leverage * 0.70
+    max_safe_by_margin = max(available_margin, 0.0) * leverage * 0.80
+    
+    target_notional = min(target_notional, min(max_safe_by_equity, max_safe_by_margin))
 
-    # 2. 명목 한도 캡 (Max Exposure / Anti-Gap Protection)
+    # 3. 명목 한도 캡 (Max Exposure / Anti-Gap Protection)
     max_qty_by_exposure = (current_equity_for_risk * max_exposure_per_coin) / fill_price
     target_qty = min(target_notional / fill_price, max_qty_by_exposure)
 
-    # 3. 가용 증거금 한도 캡 (Margin Constraint) - 수수료 예비분 2% 제외
-    max_qty_by_margin = (available_margin * 0.98 * leverage) / fill_price
+    # 4. 가용 증거금 실질 한도 캡 (Margin Constraint) - 수수료 예비분 3% 제외 (더 보수적으로 변경)
+    max_qty_by_margin = (available_margin * 0.97 * leverage) / fill_price
     if max_qty_by_margin < 0:
         max_qty_by_margin = 0.0
     target_qty = min(target_qty, max_qty_by_margin)
 
-    # 4. Sizing module's confidence multiplier (sf)
-    sf_c = sf if sf <= 1.0 else 1.0
-    if sf_c < 0.0:
-        sf_c = 0.0
-    target_qty *= sf_c
-
     # 5. 소액 계좌(예: $1000)를 위한 최소 먼지(Dust) 한도 보정 ($6.0 보장)
-    # Target Qty가 0보다는 크지만 최소 명목 가치에 미달할 경우 최소 사이즈로 끌어올림
     if target_qty > 0.0 and (target_qty * fill_price) < 6.0:
         min_qty = 6.0 / fill_price
         if min_qty <= max_qty_by_margin:
