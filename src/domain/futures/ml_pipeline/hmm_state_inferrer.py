@@ -32,7 +32,11 @@ _logger = logging.getLogger(__name__)
 _SEMANTIC_ORDER = list(HMM_SEMANTIC_PROB_COLUMNS)
 
 
-def _assign_state_semantic_labels_v2(means: np.ndarray) -> dict[int, str]:
+def _assign_state_semantic_labels_v2(
+    means: np.ndarray, 
+    state_returns: np.ndarray | None = None,
+    state_vols: np.ndarray | None = None
+) -> dict[int, str]:
     """Map raw HMM state index -> semantic label using Archetype Distance Matching.
     
     Archetypes are defined in Z-score space for 10 systemic features:
@@ -58,12 +62,43 @@ def _assign_state_semantic_labels_v2(means: np.ndarray) -> dict[int, str]:
     relevant_archetypes = archetype_matrix[:, :10]
     
     # Distance matrix (Euclidean)
-    # dist[i, j] is distance between HMM state i and Archetype j
     dist_matrix = np.zeros((k, len(label_names)))
     for i in range(k):
         for j in range(len(label_names)):
             dist_matrix[i, j] = np.linalg.norm(relevant_means[i] - relevant_archetypes[j])
             
+    # [Task Fix] Return-based Correction Gate
+    # The user noted Bull/Bear inversion. We override the distance matrix
+    # for Bull/Bear archetypes using empirical returns if available.
+    if state_returns is not None and len(state_returns) == k:
+        bull_idx_empirical = np.argmax(state_returns)
+        bear_idx_empirical = np.argmin(state_returns)
+        
+        # Penalize non-matching Bull/Bear returns in the distance matrix
+        # (Hungarian Algorithm will still try to find global optimum)
+        for i in range(k):
+            # BULL_TREND is at index 0 in label_names
+            if i == bull_idx_empirical:
+                dist_matrix[i, 0] *= 0.1  # Highly encourage
+            else:
+                dist_matrix[i, 0] *= 2.0  # Discourage
+                
+            # BEAR_TREND is at index 1 in label_names
+            if i == bear_idx_empirical:
+                dist_matrix[i, 1] *= 0.1  # Highly encourage
+            else:
+                dist_matrix[i, 1] *= 2.0  # Discourage
+
+    # CRISIS matching: Prioritize Volatility (feature index 2: realized_vol_regime)
+    if state_vols is not None and len(state_vols) == k:
+        crisis_idx_empirical = np.argmax(state_vols)
+        # CRISIS is at index 3 in label_names
+        for i in range(k):
+            if i == crisis_idx_empirical:
+                dist_matrix[i, 3] *= 0.5
+            else:
+                dist_matrix[i, 3] *= 1.5
+
     # Optimal bipartite matching (Hungarian Algorithm)
     row_ind, col_ind = linear_sum_assignment(dist_matrix)
     
@@ -71,7 +106,7 @@ def _assign_state_semantic_labels_v2(means: np.ndarray) -> dict[int, str]:
     for r, c in zip(row_ind, col_ind, strict=False):
         state_to_label[int(r)] = label_names[c]
         
-    # Fill remaining states if k > 4 (unlikely in systemic but for robustness)
+    # Fill remaining states if k > 4
     if k > len(label_names):
         assigned_states = set(state_to_label.keys())
         for i in range(k):
@@ -205,9 +240,14 @@ def _blend_transition(
     return cast(np.ndarray, T_new / row_sums)
 
 
-def _assign_state_semantic_labels(means: np.ndarray, X_ref: np.ndarray) -> dict[int, str]:
+def _assign_state_semantic_labels(
+    means: np.ndarray, 
+    X_ref: np.ndarray,
+    state_returns: np.ndarray | None = None,
+    state_vols: np.ndarray | None = None
+) -> dict[int, str]:
     """Map raw HMM state index → semantic label using Archetype Distance Matching (v2)."""
-    return _assign_state_semantic_labels_v2(means)
+    return _assign_state_semantic_labels_v2(means, state_returns, state_vols)
 
 
 def _raw_posterior_to_semantic(
@@ -399,7 +439,7 @@ def _apply_posterior_smoothing(
     return out_df
 
 
-LABEL_VERSION = "v6"
+LABEL_VERSION = "v7"
 
 
 def _load_or_build_state_labels(
@@ -407,6 +447,8 @@ def _load_or_build_state_labels(
     means: np.ndarray,
     X_ref_scaled: np.ndarray,
     k: int,
+    state_returns: np.ndarray | None = None,
+    state_vols: np.ndarray | None = None,
 ) -> dict[int, str]:
     """Load semantic labels from disk or build them if missing/invalid."""
     if label_path.exists():
@@ -431,7 +473,7 @@ def _load_or_build_state_labels(
                 )
         except Exception as e:
             _logger.warning("Failed to load state labels: %s", e)
-    m = _assign_state_semantic_labels_v2(means)
+    m = _assign_state_semantic_labels_v2(means, state_returns, state_vols)
     try:
         with open(label_path, "wb") as f:
             pickle.dump(
@@ -483,8 +525,6 @@ class HMMStateInferrer:
         tf: str = "1h",
     ) -> pd.DataFrame:
         """Expanding-window systemic HMM with stable semantic posteriors."""
-        _ = returns_ser  # GP-independent; ordering uses centroid labels only.
-
         k_cfg = int(OPT_FUTURES_CONFIG.get("FUTURES_HMM_K_STATES", self.n_states))
         self.n_states = max(2, k_cfg)
         tr_alpha = float(OPT_FUTURES_CONFIG.get("FUTURES_HMM_TRANSITION_PRIOR_ALPHA", 0.2))
@@ -532,6 +572,9 @@ class HMMStateInferrer:
             return self._zeros_semantic(features_df)
 
         X_raw = X_frame.to_numpy(dtype=np.float64)
+        # Ensure returns_ser is aligned with X_raw (using reindex for safety)
+        ret_raw = returns_ser.reindex(features_df.index).fillna(0.0).to_numpy(dtype=np.float64)
+
         probs_sem: np.ndarray = np.full((n, len(_SEMANTIC_ORDER)), np.nan, dtype=np.float64)
         min_train = 500
         max_window = 8760
@@ -542,30 +585,15 @@ class HMMStateInferrer:
         qt_transformer: QuantileTransformer | None = None
         k_st = int(self.n_states)
         n_feat_expected = len(feat_cols)
-        if label_path.exists():
-            try:
-                with open(label_path, "rb") as f:
-                    blob = pickle.load(f)  # noqa: S301
-                loaded = blob.get("state_to_label", blob)
-                n_feat = blob.get("n_features")
-                if (
-                    isinstance(loaded, dict)
-                    and len(loaded) == k_st
-                    and n_feat is not None
-                    and int(n_feat) == n_feat_expected
-                    and blob.get("label_version") == LABEL_VERSION
-                ):
-                    state_to_label = {int(a): str(b) for a, b in loaded.items()}
-                    _logger.info("Using existing HMM state label mapping from %s", label_path)
-            except Exception as e:
-                _logger.debug("No usable label pickle: %s", e)
 
         for t in range(self.predict_step, n, self.predict_step):
             if t < min_train:
                 continue
 
             win_end_idx = max(1, t - 1)
-            X_win_raw = X_raw[max(0, t - max_window) : win_end_idx]
+            win_start_idx = max(0, t - max_window)
+            X_win_raw = X_raw[win_start_idx : win_end_idx]
+            ret_win = ret_raw[win_start_idx : win_end_idx]
             X_train, qt_transformer = _quantile_scaling(X_win_raw)
 
             ent_window = probs_sem[max(0, t - 24) : t, :]
@@ -724,10 +752,22 @@ class HMMStateInferrer:
                 if fit_ok and model is not None:
                     try:
                         means_f = model.means_.copy()
-                        if t <= is_end_idx:
-                            state_to_label = _assign_state_semantic_labels_v2(means_f)
-                        elif state_to_label is None:
-                            state_to_label = _assign_state_semantic_labels_v2(means_f)
+                        # Calculate empirical state characteristics
+                        hard_states = model.predict(X_train)
+                        state_returns = np.zeros(self.n_states)
+                        state_vols = np.zeros(self.n_states)
+                        for s in range(self.n_states):
+                            mask = (hard_states == s)
+                            if np.any(mask):
+                                state_returns[s] = np.mean(ret_win[mask])
+                                # Use feature index 2 (realized_vol_regime) as vol proxy if available
+                                if X_train.shape[1] > 2:
+                                    state_vols[s] = np.mean(X_train[mask, 2])
+
+                        if t <= is_end_idx or state_to_label is None:
+                            state_to_label = _assign_state_semantic_labels_v2(
+                                means_f, state_returns, state_vols
+                            )
                         else:
                             _centroid_label_drift_warn(means_f, state_to_label)
                     except Exception as e:
