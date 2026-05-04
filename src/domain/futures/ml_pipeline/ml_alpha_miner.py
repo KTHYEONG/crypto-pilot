@@ -26,9 +26,10 @@ _logger = logging.getLogger(__name__)
 
 # v5 Theme Subspacing Definitions
 THEME_GROUPS = {
-    0: [  # Group 1: Trend/Momentum (Slots 00-04)
+    0: [  # Group 1: Trend/Momentum (Slots 00-04) + Vol-Adjusted
         "ret_1", "ret_3", "ret_6", "ret_12", "ret_24", 
-        "ma_dist_24", "ma_dist_168", "btc_trend_vol_adj_24h"
+        "ma_dist_24", "ma_dist_168", "btc_trend_vol_adj_24h",
+        "realized_vol_yz_24", "orderflow_price_divergence"
     ],
     1: [  # Group 2: Volatility/Mean-Reversion (Slots 05-09)
         "vol_ratio_24", "vol_ratio_168", "realized_vol_regime", 
@@ -54,14 +55,29 @@ class MLAlphaMiner:
     _models: dict[int, LGBMRanker] = field(default_factory=dict, init=False)
     _feature_sets: dict[int, list[str]] = field(default_factory=dict, init=False)
 
-    def _prepare_labels(self, target: pd.Series) -> np.ndarray:
-        """Convert continuous rank targets [-1, 1] into discrete LambdaRank labels {0, 1, 2}."""
-        # panel_df["target"] is ((final_rank - 0.5) * 2.0)
-        # Top 15% -> rank > 0.85 -> target > 0.7
-        # Top 15%-30% -> rank > 0.70 -> target > 0.4
+    def _prepare_labels(self, target: pd.Series, dispersion: pd.Series | None = None) -> np.ndarray:
+        """Convert continuous rank targets [-1, 1] into discrete LambdaRank labels {0, 1, 2, 3}.
+        
+        Plan B: Nonlinear Magnitude Amplification.
+        - Label 3: Super Winners (Top 5%, target > 0.85)
+        - Label 2: Winners (Top 5-15%, target 0.7-0.85)
+        - Label 1: Mild Outperformers (Top 15-30%, target 0.4-0.7)
+        - Label 0: Others
+        """
         labels = np.zeros(len(target), dtype=np.int32)
-        labels[target > 0.7] = 2
+        labels[target > 0.85] = 3
+        labels[(target > 0.7) & (target <= 0.85)] = 2
         labels[(target > 0.4) & (target <= 0.7)] = 1
+        
+        # C: Dynamic Target Thresholding
+        # Suppress labels in quiet regimes (low dispersion) to avoid learning noise.
+        if dispersion is not None:
+            # Use 20th percentile as quiet threshold if not fixed
+            threshold = dispersion.quantile(0.20)
+            # Re-index dispersion to match target if needed, but here they should align
+            disp_mask = dispersion < threshold
+            labels[disp_mask.to_numpy()] = 0
+            
         return labels
 
     def mine_alphas_cs(
@@ -87,24 +103,27 @@ class MLAlphaMiner:
                 "symbols": symbols,
                 "is_end_date": is_end_date,
                 "feature_schema_version": GP_FEATURE_SCHEMA_VERSION,
-                "miner_version": "v5_lambdarank"
+                "miner_version": "v6_lambdarank_dart"
             }
             tag = cm.generate_hash(deps, source_files=[Path(__file__).resolve()])
-            versioned_cache = cm.get_cache_path("raw_lgbm_v5", ".parquet", tag)
-            
+            versioned_cache = cm.get_cache_path("raw_lgbm_v6", ".parquet", tag)
+
             if not force_retrain and versioned_cache.exists():
                 try:
                     raw_alpha_df = pd.read_parquet(versioned_cache)
-                    _logger.info("MLAlphaMiner v5 Cache Hit: %s", versioned_cache.name)
+                    _logger.info("MLAlphaMiner v6 Cache Hit: %s", versioned_cache.name)
                 except Exception as e:
                     _logger.warning("Cache load failed: %s", e)
 
         if raw_alpha_df is None:
-            _logger.info("Training MLAlphaMiner v5 (LambdaRank + Theme Subspacing)...")
+            _logger.info("Training MLAlphaMiner v6 (DART + Dynamic Labeling)...")
             
             # Sort by datetime for group calculation
             work_df = panel_df.sort_index(level="datetime")
-            y_labels = self._prepare_labels(work_df["target"])
+            
+            # C: Get dispersion for dynamic thresholding
+            dispersion = work_df["cs_dispersion"] if "cs_dispersion" in work_df.columns else None
+            y_labels = self._prepare_labels(work_df["target"], dispersion=dispersion)
             
             # In-Sample Masking
             if is_end_date:
@@ -112,6 +131,13 @@ class MLAlphaMiner:
                 is_mask = work_df.index.get_level_values("datetime") < cutoff
             else:
                 is_mask = np.ones(len(work_df), dtype=bool)
+
+            # [Plan B-1] Sample Weighting (Magnitude-Aware)
+            # Higher weight on bars with large cross-sectional dispersion or high absolute returns.
+            # Here we use absolute target value as a proxy for profit opportunity.
+            raw_weights = work_df["target"].abs().to_numpy()
+            # Normalize weights to mean 1.0 to maintain learning rate stability
+            sample_weights_all = raw_weights / (raw_weights.mean() + 1e-12)
 
             # Features are combined from theme + HMM probabilities
             slots_df = pd.DataFrame(index=work_df.index)
@@ -128,16 +154,19 @@ class MLAlphaMiner:
                 
                 X = work_df[feat_cols].values
                 y = y_labels
-                
+
                 # Filter to In-Sample for training
                 X_is = X[is_mask]
                 y_is = y[is_mask]
+                w_is = sample_weights_all[is_mask]
                 
                 # For LambdaRank, we need to recalculate group sizes for IS data
                 is_df = work_df[is_mask]
                 is_group_sizes = is_df.groupby("datetime").size().to_numpy()
 
+                # B-1: DART Booster for better generalization
                 model = LGBMRanker(
+                    boosting_type="dart",
                     objective="lambdarank",
                     metric="ndcg",
                     eval_at=[1, 3],
@@ -149,12 +178,15 @@ class MLAlphaMiner:
                     deterministic=True,
                     n_jobs=self.n_jobs,
                     importance_type="gain",
-                    verbosity=-1
+                    verbosity=-1,
+                    drop_rate=0.1,
+                    skip_drop=0.5
                 )
                 
                 model.fit(
                     X_is, y_is,
-                    group=is_group_sizes
+                    group=is_group_sizes,
+                    sample_weight=w_is
                 )
                 
                 self._models[slot_idx] = model
@@ -186,10 +218,31 @@ class MLAlphaMiner:
             require_regime_gate=bool(filter_opts.get("require_regime_gate", True)),
         )
 
-        # Directional Promotion (Slot 00)
+        # B-2: IC-Weighted Ensemble (instead of simple mean)
         surviving = [c for c in alpha_df_all.columns if c.startswith("ml_alpha_") and alpha_df_all[c].std() > 1e-6]
         if surviving:
-            alpha_df_all["ml_alpha_long"] = alpha_df_all[surviving].mean(axis=1)
+            weights = []
+            is_sub = panel_df.loc[alpha_df_all.index]
+            if is_end_date:
+                cut = pd.to_datetime(is_end_date, utc=True)
+                is_mask_ens = is_sub.index.get_level_values("datetime") < cut
+                is_sub = is_sub[is_mask_ens]
+                alpha_is = alpha_df_all[is_mask_ens]
+            else:
+                alpha_is = alpha_df_all
+
+            for c in surviving:
+                ic = is_sub["target"].corr(alpha_is[c], method="spearman")
+                weights.append(max(0.0, ic) ** 2)
+
+            w_arr = np.array(weights)
+            if w_arr.sum() > 1e-9:
+                w_norm = w_arr / w_arr.sum()
+                _logger.info("Ensembling %d components with IC weights: %s", len(surviving), w_norm)
+                alpha_df_all["ml_alpha_long"] = (alpha_df_all[surviving] * w_norm).sum(axis=1)
+            else:
+                alpha_df_all["ml_alpha_long"] = alpha_df_all[surviving].mean(axis=1)
+
             alpha_df_all["ml_alpha_short"] = 1.0 - alpha_df_all["ml_alpha_long"]
         else:
             alpha_df_all["ml_alpha_long"] = 0.5
@@ -205,7 +258,8 @@ class MLAlphaMiner:
         """Apply trained v5 models to new panel data."""
         if panel_df.empty or not self._models:
             _logger.warning("transform_cs: No models trained or empty panel.")
-            return pd.DataFrame(0.5, index=panel_df.index, columns=[f"ml_alpha_{i:02d}" for i in range(self.n_features_to_select)])
+            cols = [f"ml_alpha_{i:02d}" for i in range(self.n_features_to_select)]
+            return pd.DataFrame(0.5, index=panel_df.index, columns=cols)
 
         out_df = pd.DataFrame(index=panel_df.index)
         
@@ -222,7 +276,8 @@ class MLAlphaMiner:
             scores_ser = pd.Series(raw_scores, index=panel_df.index)
             unstacked = scores_ser.unstack(level="symbol")
             ranked = unstacked.rank(axis=1, pct=True)
-            out_df[f"ml_alpha_{slot_idx:02d}"] = ranked.stack(future_stack=True).reindex(panel_df.index).fillna(0.5)
+            t_vals = ranked.stack(future_stack=True)
+            out_df[f"ml_alpha_{slot_idx:02d}"] = t_vals.reindex(panel_df.index).fillna(0.5)
 
         surviving = [c for c in out_df.columns if c.startswith("ml_alpha_") and out_df[c].std() > 1e-6]
         if surviving:
