@@ -33,7 +33,7 @@ HMM_SEMANTIC_PROB_COLUMNS: tuple[str, ...] = (
 
 # Bump when ALPHA feature semantics change without renaming columns so raw GP
 # caches are invalidated and Tier 2 retraining actually happens.
-GP_FEATURE_SCHEMA_VERSION: str = "v11"
+GP_FEATURE_SCHEMA_VERSION: str = "v13"
 
 def _tf_to_hours(tf: str) -> float:
     """Convert timeframe string to decimal hours."""
@@ -108,6 +108,17 @@ ALPHA_ENGINEERED_FEATURE_NAMES: tuple[str, ...] = (
     "motif_taker_absorption",
     "motif_oi_price_dislocation",
     "motif_liq_pressure",
+    # F-A: OI Delta + Acceleration
+    "oi_delta_4h",
+    "oi_accel_24h",
+    # F-B: Funding x Realized-Vol Interaction
+    "funding_vol_interaction",
+    # F-C: Perp-Spot Basis Proxy (rolling mean deviation)
+    "perp_basis_proxy",
+    # F-D: High-Order Interactions (Quant Institutional Sniper Edition)
+    "orderflow_price_divergence",
+    "beta_neutral_momentum",
+    "vol_structural_squeeze",
 )
 
 
@@ -391,8 +402,8 @@ def build_gp_input_features(df: pd.DataFrame, tf: str = "1h") -> pd.DataFrame:
     sig_24 = log_ret_1.rolling(w24, min_periods=max(2, w24 // 2)).std() + 1e-12
     
     w6 = _get_window(6, tf)
-    out["ret_vol_adj_6"] = out[f"ret_6"] / (sig_24 * np.sqrt(w6) + 1e-12)
-    out["ret_vol_adj_24"] = out[f"ret_24"] / (sig_24 * np.sqrt(w24) + 1e-12)
+    out["ret_vol_adj_6"] = out["ret_6"] / (sig_24 * np.sqrt(w6) + 1e-12)
+    out["ret_vol_adj_24"] = out["ret_24"] / (sig_24 * np.sqrt(w24) + 1e-12)
 
     out["liq_proxy_6"] = (low.rolling(w6, min_periods=max(1, w6 // 2)).min() - close) / (close + 1e-12)
 
@@ -420,7 +431,7 @@ def build_gp_input_features(df: pd.DataFrame, tf: str = "1h") -> pd.DataFrame:
         out["funding_mom_24"] = np.nan
 
     # Acceleration 24h
-    out["acceleration_24"] = out[f"ret_24"] - out[f"ret_24"].shift(w24)
+    out["acceleration_24"] = out["ret_24"] - out["ret_24"].shift(w24)
 
     # Tail Risk 24h
     neg_ret = log_ret_1.clip(upper=0.0)
@@ -489,11 +500,11 @@ def build_gp_input_features(df: pd.DataFrame, tf: str = "1h") -> pd.DataFrame:
         oi_mom_24 = np.log(oi / oi.shift(w24).clip(lower=1e-12))
         out["oi_momentum_4h"] = _log_modulus(oi_mom_4)
         out["oi_momentum_24h"] = _log_modulus(oi_mom_24)
-        out["oi_price_divergence_24h"] = out[f"ret_24"] - out["oi_momentum_24h"]
+        out["oi_price_divergence_24h"] = out["ret_24"] - out["oi_momentum_24h"]
         
         f_rate = df["funding_rate"].astype(np.float64) if "funding_rate" in df.columns else 0.0
         out["oi_funding_trap_24h"] = (
-            ((out[f"ret_24"] < -0.01) & (oi_mom_24 > 0.02) & (f_rate < 0))
+            ((out["ret_24"] < -0.01) & (oi_mom_24 > 0.02) & (f_rate < 0))
             .astype(np.float64)
         )
     else:
@@ -525,7 +536,7 @@ def build_gp_input_features(df: pd.DataFrame, tf: str = "1h") -> pd.DataFrame:
     
     cvd_rolling = (tbq - tsq).rolling(w24, min_periods=max(2, w24 // 2)).sum()
     cvd_norm = cvd_rolling / (vol.rolling(w24, min_periods=max(2, w24 // 2)).sum() + 1e-9)
-    out["cvd_divergence_24h"] = out[f"ret_24"] - _log_modulus(cvd_norm)
+    out["cvd_divergence_24h"] = out["ret_24"] - _log_modulus(cvd_norm)
     
     out["taker_acceleration_24h"] = ((tbq - tsq) / (vol + 1e-9)).diff(w24).fillna(0.0)
 
@@ -537,14 +548,58 @@ def build_gp_input_features(df: pd.DataFrame, tf: str = "1h") -> pd.DataFrame:
         out["funding_intensity_24h"] = 0.0
         
     out["absorption_ratio_12h"] = (
-        out[f"ret_12"].abs() / (out["realized_vol_yz_24"] * out["vol_ratio_24"] + 1e-9)
+        out["ret_12"].abs() / (out["realized_vol_yz_24"] * out["vol_ratio_24"] + 1e-9)
     ).fillna(0.0)
 
     out["motif_crowded_long_unwind"] = (out["global_lsr_z_24h"] + out["top_trader_lsr_z_24h"] + out["oi_momentum_24h"] - out["taker_imbalance_z_24"]).fillna(0.0)
-    out["motif_funding_short_squeeze"] = (-out["funding_z_72"] + out["oi_momentum_24h"] - out[f"ret_12"]).fillna(0.0)
+    out["motif_funding_short_squeeze"] = (-out["funding_z_72"] + out["oi_momentum_24h"] - out["ret_12"]).fillna(0.0)
     out["motif_taker_absorption"] = (_log_modulus(out["taker_buy_sell_ratio_12h"] - 1.0) - out["ret_vol_adj_6"]).fillna(0.0)
-    out["motif_oi_price_dislocation"] = (out["oi_momentum_24h"] - out[f"ret_24"]).fillna(0.0)
+    out["motif_oi_price_dislocation"] = (out["oi_momentum_24h"] - out["ret_24"]).fillna(0.0)
     out["motif_liq_pressure"] = (out["downside_jump_24"] + out["tail_risk_24"] - out["range_pos_24"]).fillna(0.0)
+
+    # F-A: OI Delta + OI Acceleration
+    # oi_delta_4h: 4-bar log-diff of OI, normalized by rolling std (stationarity 보장)
+    # oi_accel_24h: oi_delta_4h의 24h-window 추가 diff (position build/unwind 가속도)
+    if "sum_open_interest" in df.columns:
+        oi = df["sum_open_interest"].astype(np.float64)
+        w4 = _get_window(4, tf)
+        oi_log_diff = np.log(oi / oi.shift(1).clip(lower=1e-12))
+        oi_delta_raw = oi_log_diff.rolling(w4, min_periods=max(1, w4 // 2)).sum()
+        out["oi_delta_4h"] = _rolling_robust_z(oi_delta_raw, w24)
+        out["oi_accel_24h"] = (out["oi_delta_4h"] - out["oi_delta_4h"].shift(w24)).fillna(0.0)
+    else:
+        out["oi_delta_4h"] = 0.0
+        out["oi_accel_24h"] = 0.0
+
+    # F-B: Funding x Realized-Vol Interaction
+    # funding_z_72 (기존) x realized_vol_yz_24 z-score: high funding + high vol = extremum
+    if "funding_rate" in df.columns:
+        realized_vol_z = _rolling_robust_z(out["realized_vol_yz_24"], w24)
+        out["funding_vol_interaction"] = (out["funding_z_72"] * realized_vol_z).fillna(0.0)
+    else:
+        out["funding_vol_interaction"] = 0.0
+
+    # F-C: Perp-Spot Basis Proxy
+    # Spot 데이터 미제공 → close의 168h rolling mean 대비 deviation을 carry proxy로 사용
+    # perp_basis_proxy = close / rolling_mean(close, 168h) - 1 (non-stationary 방지: ratio 형태)
+    w168_basis = _get_window(168, tf)
+    rolling_mean_168 = close.rolling(w168_basis, min_periods=max(1, w168_basis // 4)).mean()
+    out["perp_basis_proxy"] = ((close / (rolling_mean_168 + 1e-12)) - 1.0).fillna(0.0)
+
+    # [NEW] F-D: High-Order Interactions
+    # 1. Orderflow-Price Divergence: VPIN * Return Vol Adj
+    # If VPIN is high (toxicity) and return is negative, it indicates high sell pressure absorption.
+    out["orderflow_price_divergence"] = (out["vpin_proxy_12"] * out["ret_vol_adj_24"]).fillna(0.0)
+
+    # 2. Beta-Neutral Momentum (Initial raw return, will be cross-sectionally neutralized in Step 2)
+    # Using 24h as base
+    out["beta_neutral_momentum"] = out["ret_24"]
+
+    # 3. Vol-Structural Squeeze: HL Spread Z * Funding Z
+    # If HL spread is rising (vol spike) while funding is extreme (imbalance), squeeze is likely.
+    hl_spread = (high - low) / (close.shift(1).clip(lower=1e-12))
+    hl_spread_z = _rolling_robust_z(hl_spread, w24)
+    out["vol_structural_squeeze"] = (hl_spread_z * out["funding_z_72"]).fillna(0.0)
 
     out = out.replace([np.inf, -np.inf], np.nan)
     return out
