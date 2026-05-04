@@ -51,15 +51,16 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     "FUTURES_ML_ALPHA_HORIZONS": (6, 12, 24, 48),
     # Cache-control refit: when True, bypass Alpha raw cache and force alpha retraining.
     "FUTURES_ML_FORCE_RETRAIN_ALPHA": True,
-    "FUTURES_ML_ALPHA_PARSIMONY": 0.001,
+    "FUTURES_ML_ALPHA_PARSIMONY": 0.02,
     "FUTURES_ML_ALPHA_USE_TBM_WEIGHT": True,
     "FUTURES_ML_PRE_ALPHA_REGIME": False,
     "FUTURES_ML_PRE_ALPHA_REGIME_STATES": 3,
     "FUTURES_ML_IC_FILTER_USE_HAC": True,
     "FUTURES_ML_IC_FILTER_USE_EWMA": False,
     "FUTURES_ML_IC_EWMA_HALF_LIFE": 540.0,
+    "FUTURES_ML_IC_HALF_LIFE": 2.3,
     # Tier 2 discovery: significantly relax cross-section balance cap for growth.
-    "FUTURES_ML_IC_SYMBOL_BALANCE_MAX": 5.0,
+    "FUTURES_ML_IC_SYMBOL_BALANCE_MAX": 3.0,
     "FUTURES_ML_IC_REGIME_GATE": False,
     # Tier 2 discovery: FDR relaxation to expand candidate pool.
     "FUTURES_ML_IC_FDR_Q": 0.40,
@@ -148,8 +149,8 @@ SIGNAL_PARAM_SPACE_FUTURES: dict[str, dict[str, Any]] = {
 }
 
 PORTFOLIO_PARAM_SPACE_FUTURES: dict[str, dict[str, Any]] = {
-    "RISK_PER_TRADE": {"type": "float", "low": 0.01, "high": 0.05, "step": 0.01},
-    "MAX_EXPOSURE_PER_COIN": {"type": "float", "low": 0.5, "high": 2.0, "step": 0.2},
+    "RISK_PER_TRADE": {"type": "float", "low": 0.02, "high": 0.10, "step": 0.01},
+    "MAX_EXPOSURE_PER_COIN": {"type": "float", "low": 0.5, "high": 2.5, "step": 0.25},
     "DD_SCALING_THRESHOLD": {"type": "float", "low": 0.10, "high": 0.30, "step": 0.10},
 }
 
@@ -160,6 +161,7 @@ ENGINE_PARAM_SPACE_FUTURES: dict[str, dict[str, Any]] = {
     "REBALANCE_BARS": {"type": "categorical", "choices": (1, 3, 6, 12)},
     "MIN_SCORE_PERCENTILE": {"type": "float", "low": 0.50, "high": 0.90, "step": 0.10},
     "CS_Z_SCORE_THRESHOLD": {"type": "float", "low": 0.5, "high": 2.0, "step": 0.25},
+    "CRISIS_GAMMA": {"type": "float", "low": 1.0, "high": 5.0, "step": 1.0},
     "CRISIS_GATE_PROB": {"type": "float", "low": 0.50, "high": 0.90, "step": 0.10},
 }
 
