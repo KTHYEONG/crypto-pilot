@@ -19,6 +19,7 @@ class ProfitFactorKellyFuturesSizing:
         "PFK_WINDOW": {"type": "int", "low": 30, "high": 120, "step": 10},
         "PFK_MIN_F": {"type": "float", "low": 0.05, "high": 0.30, "step": 0.05},
         "KELLY_FRACTION": {"type": "float", "low": 0.2, "high": 0.8, "step": 0.1},
+        "PFK_TARGET_VOL": {"type": "float", "low": 0.005, "high": 0.020, "step": 0.005},
         # Stress Regime Parameters
         "STRESS_VOL_Z": {"type": "float", "low": 2.0, "high": 3.5, "step": 0.5},
         "STRESS_FR_Z": {"type": "float", "low": 2.0, "high": 3.5, "step": 0.5},
@@ -34,6 +35,7 @@ class ProfitFactorKellyFuturesSizing:
         max_exp = float(params.get("MAX_EXPOSURE", 1.0))
         min_obs = int(max(10, window // 3))
         
+        target_vol = float(params.get("PFK_TARGET_VOL", 0.01))
         stress_vol_z_thr = float(params.get("STRESS_VOL_Z", 2.5))
         stress_fr_z_thr = float(params.get("STRESS_FR_Z", 2.5))
 
@@ -53,6 +55,11 @@ class ProfitFactorKellyFuturesSizing:
         vol_mean = vol.rolling(window=window * 2, min_periods=window).mean()
         vol_std = vol.rolling(window=window * 2, min_periods=window).std()
         vol_z = (vol - vol_mean) / np.maximum(vol_std, 1e-12)
+        
+        # --- Volatility Targeting Scaling ---
+        # final_f = f * (target_vol / current_realized_vol)
+        vol_scaler = (target_vol / np.maximum(vol.to_numpy(dtype=np.float64), 1e-12))
+        vol_scaler = np.nan_to_num(vol_scaler, nan=1.0)
         
         # 2. Funding Rate Extreme
         fr_mean = fr_series.rolling(window=window).mean()
@@ -98,8 +105,9 @@ class ProfitFactorKellyFuturesSizing:
 
         f_star = np.nan_to_num(f_star, nan=0.0, posinf=0.0, neginf=0.0)
         
-        # Apply Kelly fraction and Regime Penalty
-        f = f_star * kelly_frac * regime_penalty
+        # Apply Kelly fraction, Volatility Scaling and Regime Penalty
+        f = f_star * kelly_frac * vol_scaler * regime_penalty
+
 
         # [NEW] Regime-Conditional Sizing (HMM Override)
         # Fixes long-bias by aggressively reducing exposure in high-risk HMM states

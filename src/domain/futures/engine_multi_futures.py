@@ -271,18 +271,19 @@ def _recompute_cs_dirs_numba(
             if np.isfinite(vt) and vt < ss:
                 rank_s += 1
 
-        # Z-score magnitudes: clip between 0 and 3, then scale to max 1.0
+        # Z-score magnitudes: scale linearly with distance above threshold
+        # Formula: size_mult = min(max((Z - Threshold) / (3.0 - Threshold), 0.1), 1.0)
         z_l = (sl - mean_l) / std_l
         z_s = (mean_s - ss) / std_s  # Lower ss is better, so mean - ss
 
         binary_l = 1.0 if (float(rank_l) <= fk and sl > 0.7 and mod_l >= 0.5 and z_l >= cs_z_threshold) else 0.0
         binary_s = 1.0 if (float(rank_s) <= fk and ss < 0.3 and mod_s >= 0.5 and z_s >= cs_z_threshold) else 0.0
 
-        mag_l = z_l / 3.0 if z_l > 0 else 0.0
-        mag_s = z_s / 3.0 if z_s > 0 else 0.0
+        mag_l = (z_l - cs_z_threshold) / (3.0 - cs_z_threshold) if z_l >= cs_z_threshold else 0.0
+        mag_s = (z_s - cs_z_threshold) / (3.0 - cs_z_threshold) if z_s >= cs_z_threshold else 0.0
 
-        long_mag = binary_l * min(max(mag_l, 0.05), 1.0) * crisis_w
-        short_mag = binary_s * min(max(mag_s, 0.05), 1.0) * crisis_w
+        long_mag = binary_l * min(max(mag_l, 0.1), 1.0) * crisis_w
+        short_mag = binary_s * min(max(mag_s, 0.1), 1.0) * crisis_w
 
         if long_mag >= short_mag and long_mag > 0.0:
             computed_dir[s] = 1.0 * long_mag
@@ -392,9 +393,16 @@ def backtest_portfolio_numba(
         equity_curve[i] = current_equity
         if current_equity > hwm: hwm = current_equity
 
+        # [NEW] Alpha-Driven Dynamic Portfolio Scaling
+        # Fuses Equity Drawdown Scaling with Systemic Crisis Scaling
         dd = (hwm - current_equity) / hwm if hwm > 1e-9 else 0.0
-        risk_scale = max(0.0, 1.0 - (dd / dd_scaling_threshold)) if dd_scaling_threshold > 1e-9 else 1.0
-        effective_risk_per_trade = risk_per_trade * risk_scale
+        dd_scale = max(0.0, 1.0 - (dd / dd_scaling_threshold)) if dd_scaling_threshold > 1e-9 else 1.0
+        
+        # Systemic Crisis Scaling (using first symbol as proxy for systemic HMM)
+        c_prob = float(hmm_crisis[i, 0])
+        crisis_scale = (1.0 - c_prob) ** crisis_gamma
+        
+        effective_risk_per_trade = risk_per_trade * dd_scale * crisis_scale
 
         for s in range(n_syms):
             if not in_pos[s]: continue

@@ -958,6 +958,7 @@ def main() -> None:
         study_ml = optuna.create_study(
             directions=["minimize"],
             sampler=_ml_phase_d_sampler(seed, n_ml_trials),
+            pruner=optuna.pruners.MedianPruner(n_startup_trials=20, n_warmup_steps=2),
         )
 
         # Enqueue baseline if enabled
