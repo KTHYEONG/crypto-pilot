@@ -748,7 +748,9 @@ def _build_panel_with_targets(
     default_h = (3, 6, 12, 24)
     h_src = raw_h if isinstance(raw_h, (list, tuple)) else default_h
     horizons = tuple(int(x) for x in h_src)
-    panel_df["target"] = utils.create_multi_horizon_rank_targets(panel_df, horizons=horizons)
+    _ic_hl = float(OPT_FUTURES_CONFIG.get("FUTURES_ML_IC_HALF_LIFE", 2.3))
+    _h_weights = tuple(float(np.exp(-h / _ic_hl)) for h in horizons)
+    panel_df["target"] = utils.create_multi_horizon_rank_targets(panel_df, horizons=horizons, weights=_h_weights)
     return panel_df
 
 
