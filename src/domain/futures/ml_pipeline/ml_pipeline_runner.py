@@ -42,6 +42,7 @@ class MLPipelineOutput:
     meta_feature_frame_by_symbol: dict[str, pd.DataFrame] = field(default_factory=dict)
     health_metrics_by_symbol: dict[str, dict[str, float]] = field(default_factory=dict)
     alpha_panel: pd.DataFrame = field(default_factory=pd.DataFrame)
+    hmm_report: dict[str, float] = field(default_factory=dict)
 
 
 def _sorted_hmm_prob_columns(df: pd.DataFrame) -> list[str]:
@@ -278,10 +279,12 @@ def _hmm_modulator_kelly_values(
     # Apply Crisis Kill-Switch (Safety First)
     if "hmm_prob_crisis" in market_probs.columns:
         pc = p_crisis
-        mod_long = np.where(pc > float(crisis_thr), 0.5, mod_long)
-        mod_short = np.where(
-            pc > float(crisis_thr), np.minimum(mod_short, 1.1), mod_short
-        )
+        gamma = float(OPT_FUTURES_CONFIG.get("CRISIS_GAMMA", 2.0))
+        # Soft-decay: factor = (1 - pc)^gamma
+        soft_factor = np.power(1.0 - pc, gamma)
+        mod_long = mod_long * soft_factor
+        # Shorts are less suppressed: (1 - pc)^(gamma/2)
+        mod_short = mod_short * np.power(1.0 - pc, gamma / 2.0)
 
     # RECOVERY Override: crisis label + positive 24h trend → partial lift
     # Activated only when CRISIS_RECOVERY_TREND_THR < 1e8 in OPT_FUTURES_CONFIG.
@@ -576,7 +579,7 @@ def _step4_fusion_one_symbol(
             "hmm_prob_bull_trend", "hmm_prob_bear_trend", "hmm_prob_chop", "hmm_prob_crisis"
         ]
         # Also drop any legacy or dynamic HMM probability columns
-        hmm_to_drop = [c for c in df_1h.columns if str(c).startswith("hmm_prob_")]
+        hmm_to_drop = [c for c in df_1h.columns if str(c).startswith("hmm_")]
 
         # [FIX] Do NOT drop ALPHA_ENGINEERED_FEATURE_NAMES or _META_EXTRA_FEATS here.
         # We want to preserve these microstructure features for the MetaLabeler/Audit.
@@ -603,11 +606,16 @@ def _step4_fusion_one_symbol(
             wide_1h["hmm_modulator_short"] = wide_1h["hmm_modulator_short"].fillna(0.8)
             wide_1h["slot_rank_score"] = 0.0
 
-            if hmm_cols_ref:
-                mp_h = market_probs[["datetime", *hmm_cols_ref]]
+            # [NEW] Merge all HMM related columns
+            hmm_cols_all = [c for c in market_probs.columns if str(c).startswith("hmm_")]
+            if hmm_cols_all:
+                mp_h = market_probs[["datetime", *hmm_cols_all]]
                 wide_1h = wide_1h.merge(mp_h, on="datetime", how="left")
-                for c in hmm_cols_ref:
-                    wide_1h[c] = wide_1h[c].fillna(1.0 / float(k_fb))
+                # Fill probabilities with uniform, others with 0
+                prob_cols = [c for c in hmm_cols_all if "prob_" in c]
+                other_hmm_cols = [c for c in hmm_cols_all if "prob_" not in c]
+                wide_1h[prob_cols] = wide_1h[prob_cols].fillna(1.0 / float(k_fb))
+                wide_1h[other_hmm_cols] = wide_1h[other_hmm_cols].fillna(0.0)
             else:
                 for c in HMM_SEMANTIC_PROB_COLUMNS:
                     wide_1h[c] = 1.0 / float(len(HMM_SEMANTIC_PROB_COLUMNS))
@@ -638,11 +646,16 @@ def _step4_fusion_one_symbol(
             m_avg = (wide_1h["hmm_modulator_long"] + wide_1h["hmm_modulator_short"]) / 2.0
             wide_1h["slot_rank_score"] = wide_1h["ml_alpha_00"] * m_avg
 
-            if hmm_cols_ref:
-                mp_h = market_probs[["datetime", *hmm_cols_ref]]
+            # [NEW] Merge all HMM related columns
+            hmm_cols_all = [c for c in market_probs.columns if str(c).startswith("hmm_")]
+            if hmm_cols_all:
+                mp_h = market_probs[["datetime", *hmm_cols_all]]
                 wide_1h = wide_1h.merge(mp_h, on="datetime", how="left")
-                for c in hmm_cols_ref:
-                    wide_1h[c] = wide_1h[c].fillna(1.0 / float(k_fb))
+                # Fill probabilities with uniform, others with 0
+                prob_cols = [c for c in hmm_cols_all if "prob_" in c]
+                other_hmm_cols = [c for c in hmm_cols_all if "prob_" not in c]
+                wide_1h[prob_cols] = wide_1h[prob_cols].fillna(1.0 / float(k_fb))
+                wide_1h[other_hmm_cols] = wide_1h[other_hmm_cols].fillna(0.0)
             else:
                 for c in HMM_SEMANTIC_PROB_COLUMNS:
                     wide_1h[c] = 1.0 / float(len(HMM_SEMANTIC_PROB_COLUMNS))
@@ -676,74 +689,117 @@ def _print_hmm_summary(
     hmm_modulator: pd.DataFrame,
     btc_1h: pd.DataFrame | None,
     mode_label: str = "",
-) -> None:
-    """Print a detailed financial and semantic profile of the HMM states."""
+) -> dict[str, float]:
+    """Print institutional-grade audit of HMM states and return report metrics."""
     _logger.info(" ┌───────────────────────────────────────────────────────────────────────────────────┐")
-    _logger.info(f" │ [HMM AUDIT] Semantic State Profile {mode_label:<46} │")
+    _logger.info(f" │ [HMM INSTITUTIONAL AUDIT] Log-Wealth & Tail-Risk Analysis {mode_label:<24} │")
     _logger.info(" ├───────────────────────────────────────────────────────────────────────────────────┤")
 
-    total_rows = len(market_hmm_feats)
-    nan_count = market_hmm_feats.isna().sum().sum()
-    _logger.info(f" │ [DATA] {total_rows} samples, {nan_count} NaNs{' '*45} │")
-    
+    report: dict[str, float] = {}
     cols = [c for c in HMM_SEMANTIC_PROB_COLUMNS if c in market_probs.columns]
+    if not (cols and len(market_probs) == len(market_hmm_feats)):
+        _logger.warning(" │ [WARN] HMM data alignment failed for audit.                                    │")
+        _logger.info(" └───────────────────────────────────────────────────────────────────────────────────┘")
+        return report
 
-    if cols and len(market_probs) == len(market_hmm_feats):
-        df_eval = market_probs[["datetime", *cols]].copy()
-        df_eval["dominant_state"] = df_eval[cols].idxmax(axis=1)
+    df_eval = market_probs[["datetime", *cols]].copy()
+    df_eval["dominant_state"] = df_eval[cols].idxmax(axis=1)
 
-        mod_cols = ["datetime", "hmm_modulator_long", "hmm_modulator_short"]
-        mod_tmp = hmm_modulator[[c for c in mod_cols if c in hmm_modulator.columns]]
-        df_eval = pd.merge(df_eval, mod_tmp, on="datetime", how="left")
+    mod_cols = ["datetime", "hmm_modulator_long", "hmm_modulator_short"]
+    mod_tmp = hmm_modulator[[c for c in mod_cols if c in hmm_modulator.columns]]
+    df_eval = pd.merge(df_eval, mod_tmp, on="datetime", how="left")
 
-        feat_tmp = market_hmm_feats.copy().reset_index()
-        feat_cols_to_merge = ["datetime", "btc_trend_vol_adj_24h", "realized_vol_regime"]
-        df_eval = pd.merge(df_eval, feat_tmp[feat_cols_to_merge], on="datetime", how="left")
+    feat_tmp = market_hmm_feats.copy().reset_index()
+    # [v15 Alignment] Use new macro features for diagnostic merge
+    target_feats = ["macro_vol_24h", "macro_cost_168h"]
+    feat_cols_to_merge = ["datetime"] + [f for f in target_feats if f in feat_tmp.columns]
+    df_eval = pd.merge(df_eval, feat_tmp[feat_cols_to_merge], on="datetime", how="left")
 
-        has_return = False
-        if btc_1h is not None and not btc_1h.empty:
-            btc_tmp = btc_1h[["datetime", "close"]].copy()
-            btc_tmp["datetime"] = pd.to_datetime(btc_tmp["datetime"], utc=True)
-            btc_tmp["fwd_ret_24h"] = btc_tmp["close"].pct_change(24).shift(-24)
-            df_eval = pd.merge(df_eval, btc_tmp[["datetime", "fwd_ret_24h"]], on="datetime", how="left")
-            has_return = True
+    if btc_1h is not None and not btc_1h.empty:
+        btc_tmp = btc_1h[["datetime", "close"]].copy()
+        btc_tmp["datetime"] = pd.to_datetime(btc_tmp["datetime"], utc=True)
+        btc_tmp["ret"] = btc_tmp["close"].pct_change().fillna(0.0)
+        df_eval = pd.merge(df_eval, btc_tmp[["datetime", "ret"]], on="datetime", how="left")
 
-        avg_mod_l = df_eval["hmm_modulator_long"].mean()
-        avg_mod_s = df_eval["hmm_modulator_short"].mean()
-        _logger.info(f" │ [GLOBAL] Modulator L/S: {avg_mod_l:.2f} / {avg_mod_s:.2f}{' '*41} │")
-        _logger.info(" ├────────────┬────────┬─────────────┬───────────┬─────────┬───────────────┤")
-        _logger.info(" │ REGIME     │ TIME % │ MOD (L / S) │ AVG TREND │ AVG VOL │ FWD RET (24h) │")
-        _logger.info(" ├────────────┼────────┼─────────────┼───────────┼─────────┼───────────────┤")
+    # 1. Log-Wealth Dispersion
+    _logger.info(" │ [A] LOG-WEALTH DISPERSION (g = mu - 0.5*sigma^2)                                 │")
+    _logger.info(" ├────────────┬────────┬─────────────┬───────────┬───────────┬───────────┬──────────┤")
+    _logger.info(" │ REGIME     │ TIME % │ MOD (L / S) │ MU (%)    │ SIG (%)   │ G_LOG (%) │ VERDICT  │")
+    _logger.info(" ├────────────┼────────┼─────────────┼───────────┼───────────┼───────────┼──────────┤")
 
-        for state in cols:
-            g = df_eval[df_eval["dominant_state"] == state]
-            pct = len(g) / len(df_eval) * 100
-            st_name = state.replace("hmm_prob_", "").upper()
-            if len(g) > 0:
-                avg_trend = g["btc_trend_vol_adj_24h"].mean()
-                avg_vol = g["realized_vol_regime"].mean()
-                m_l = g["hmm_modulator_long"].mean()
-                m_s = g["hmm_modulator_short"].mean()
-                ret_str = f"{g['fwd_ret_24h'].mean() * 100:>+6.2f}%" if has_return else "   N/A"
-                _logger.info(f" │ {st_name:<10} │ {pct:>5.1f}% │ {m_l:.2f} / {m_s:.2f} │ {avg_trend:>+9.2f} │ {avg_vol:>7.2f} │ {ret_str:<13} │")
-            else:
-                _logger.info(f" │ {st_name:<10} │   0.0% │ ---- / ---- │      ---- │    ---- │           --- │")
+    for state in cols:
+        g_df = df_eval[df_eval["dominant_state"] == state]
+        pct = len(g_df) / len(df_eval) * 100
+        st_name = state.replace("hmm_prob_", "").upper()
+        report[state] = pct
 
-    _logger.info(" └────────────┴────────┴─────────────┴───────────┴─────────┴───────────────┘\n")
+        if len(g_df) > 0:
+            m_l = float(g_df["hmm_modulator_long"].mean())
+            m_s = float(g_df["hmm_modulator_short"].mean())
+            
+            mu = 0.0
+            sig = 0.0
+            g_log = 0.0
+            if "ret" in g_df.columns:
+                mu = float(g_df["ret"].mean() * 100.0)
+                sig = float(g_df["ret"].std() * 100.0)
+                # Geometric Growth Approximation
+                g_log = mu - 0.5 * (float(g_df["ret"].var()) * 100.0)
+            
+            verdict = "CHOP"
+            if g_log > 0.05: verdict = "BULL"
+            if g_log < -0.10: verdict = "CRISIS"
+            if st_name == "CRISIS": report["hmm_crisis_g_log"] = g_log
+            if st_name == "BULL_TREND": report["hmm_bull_g_log"] = g_log
+
+            _logger.info(f" │ {st_name:<10} │ {pct:>5.1f}% │ {m_l:.2f} / {m_s:.2f} │ {mu:>9.3f} │ {sig:>9.3f} │ {g_log:>9.3f} │ {verdict:<8} │")
+        else:
+            _logger.info(f" │ {st_name:<10} │   0.0% │ ---- / ---- │      ---- │      ---- │      ---- │ -------- │")
+
+    # 2. Tail Capture
+    if "ret" in df_eval.columns:
+        _logger.info(" ├────────────┴────────┴─────────────┴───────────┴───────────┴───────────┴──────────┤")
+        q05 = float(df_eval["ret"].quantile(0.05))
+        worst_mask = df_eval["ret"] <= q05
+        worst_df = df_eval[worst_mask]
+        if not worst_df.empty:
+            capture = float((worst_df["dominant_state"].isin(["hmm_prob_crisis", "hmm_prob_bear_trend"])).mean() * 100.0)
+            report["hmm_tail_capture"] = capture
+            _logger.info(f" │ [B] LEFT-TAIL CAPTURE (Worst 5%): {capture:>5.1f}% Caught in CRISIS/BEAR {' '*20} │")
+
+    # 3. Friction & Stability
+    switches = int((df_eval["dominant_state"] != df_eval["dominant_state"].shift(1)).sum())
+    avg_dur = float(len(df_eval) / max(1, switches))
+    report["hmm_switches"] = float(switches)
+    report["hmm_avg_duration"] = avg_dur
+    _logger.info(f" │ [C] STABILITY: {switches} Switches | Avg Duration: {avg_dur:>6.1f} bars {' '*31} │")
+    _logger.info(" └───────────────────────────────────────────────────────────────────────────────────┘\n")
+
+    return report
 
 
 
 def _build_panel_with_targets(
     data_maps: dict[str, dict[str, Any]],
     cfg: dict[str, Any],
+    *,
+    skip_targets: bool = False,
 ) -> pd.DataFrame:
     utils = CrossSectionalPipelineUtils()
     panel_df = utils.build_panel_df(data_maps, tf="1h")
+    
+    if skip_targets:
+        # For HMM inference, we only need systemic features (market breadth, dispersion)
+        # We can completely skip the expensive cross-sectional Z-scoring and imputation
+        panel_df = utils.add_systemic_features(panel_df)
+        return panel_df
+
     panel_df = utils.add_cross_sectional_features(panel_df)
     panel_df = utils.add_systemic_features(panel_df)
     impute_cols = [c for c in ALPHA_ENGINEERED_FEATURE_NAMES if c in panel_df.columns]
     if impute_cols:
         panel_df = utils.cs_median_impute_panel(panel_df, impute_cols)
+
     raw_h = cfg.get("FUTURES_ML_ALPHA_HORIZONS", (3, 6, 12, 24))
     default_h = (3, 6, 12, 24)
     h_src = raw_h if isinstance(raw_h, (list, tuple)) else default_h
@@ -768,16 +824,10 @@ def merge_ml_output_into_data_maps(
             continue
         mff = ml_out.meta_feature_frame_by_symbol[sym].copy()
         mff["datetime"] = pd.to_datetime(mff["datetime"], utc=True)
-        hmm_dyn = [c for c in HMM_SEMANTIC_PROB_COLUMNS if c in mff.columns]
-        if not hmm_dyn:
-            # Only include columns where the last part is a digit to avoid ValueError
-            # (e.g., hmm_prob_0_x)
-            mff = mff.drop(
-                columns=[
-                    c for c in mff.columns
-                    if str(c).startswith("hmm_prob_") and str(c).split("_")[-1].isdigit()
-                ]
-            )
+        
+        # [NEW] Dynamically capture all HMM related columns (probabilities, entropy, durations, etc.)
+        hmm_cols_in_mff = [c for c in mff.columns if str(c).startswith("hmm_")]
+        
         ml_cols = [
             "datetime",
             "ml_alpha_00",
@@ -792,18 +842,22 @@ def merge_ml_output_into_data_maps(
             "ml_calib_prob_short",
             "xs_score_long",
             "xs_score_short",
-            *hmm_dyn,
+            *hmm_cols_in_mff,
         ]
         # Include extra features for auditing/MetaLabeler (Pragmatic Alternative 2)
         for c in _META_EXTRA_FEATS:
             if c not in ml_cols:
                 ml_cols.append(c)
 
-        # Ensure hmm_prob_crisis is there even if not in hmm_dyn, but only once
-        if "hmm_prob_crisis" in mff.columns and "hmm_prob_crisis" not in ml_cols:
-            ml_cols.append("hmm_prob_crisis")
-
-        ml_cols = [c for c in ml_cols if c in mff.columns]
+        # Ensure uniqueness of columns while preserving order
+        unique_ml_cols = []
+        seen = set()
+        for x in ml_cols:
+            if x in mff.columns and x not in seen:
+                unique_ml_cols.append(x)
+                seen.add(x)
+        ml_cols = unique_ml_cols
+        
         ml_features = mff[ml_cols].copy()
         drop_cols = [c for c in ml_cols if c != "datetime"]
         if sym not in maps or tf not in maps[sym]:
@@ -817,7 +871,7 @@ def merge_ml_output_into_data_maps(
         ]
         exist_ml_cols = [
             c for c in original_df.columns
-            if any(p in str(c) for p in reserved_patterns) or str(c).startswith("hmm_prob_")
+            if any(p in str(c) for p in reserved_patterns) or str(c).startswith("hmm_")
         ]
         to_drop = list(set(drop_cols + exist_ml_cols))
         is_cols_to_drop = [c for c in to_drop if c in original_df.columns]
@@ -883,6 +937,7 @@ def run_hmm_fusion_for_is_end(
     include_fusion: bool = True,
     summary_mode_label: str = "",
     prefetch_label_start: str | None = None,
+    prefetched_1m: dict[str, pd.DataFrame] | None = None,
 ) -> MLPipelineOutput:
     """Walk-forward leg anchor: retrain systemic HMM with is_end_date cutoff.
 
@@ -898,10 +953,10 @@ def run_hmm_fusion_for_is_end(
                 list(prefetched_1h.keys())
             )
             tmp_maps = {sym: {"1h": df} for sym, df in prefetched_1h.items()}
-            panel_df = _build_panel_with_targets(tmp_maps, cfg)
+            panel_df = _build_panel_with_targets(tmp_maps, cfg, skip_targets=True)
         else:
             _logger.debug("  --> prefetched_1h is EMPTY. USING data_maps.")
-            panel_df = _build_panel_with_targets(data_maps, cfg)
+            panel_df = _build_panel_with_targets(data_maps, cfg, skip_targets=True)
         
         _logger.debug(
             "  --> panel_df len after build: %d",
@@ -909,7 +964,7 @@ def run_hmm_fusion_for_is_end(
         )
 
 
-    _logger.info("  --> Systemic HMM Inference (is_end=%s)...", is_end_date)
+    _logger.info("  --> Systemic HMM Inference (is_end=%s)%s...", is_end_date, summary_mode_label)
 
     market_hmm_feats = build_systemic_hmm_features(panel_df, None, tf="1h")
     if market_hmm_feats.index.tz is None:
@@ -930,7 +985,7 @@ def run_hmm_fusion_for_is_end(
 
     market_probs = hmm_inferrer.fit_predict_systemic(
         market_hmm_feats,
-        market_hmm_feats["btc_trend_vol_adj_24h"],
+        market_hmm_feats["macro_trend_168h"],
         is_end_idx=is_end_idx_market,
         symbol="Market",
         tf=tf,
@@ -951,7 +1006,7 @@ def run_hmm_fusion_for_is_end(
     )
     hmm_modulator["datetime"] = market_probs["datetime"]
 
-    _print_hmm_summary(
+    h_rep = _print_hmm_summary(
         market_probs,
         market_hmm_feats,
         hmm_modulator,
@@ -960,6 +1015,7 @@ def run_hmm_fusion_for_is_end(
     )
 
     out = MLPipelineOutput()
+    out.hmm_report = h_rep
     out.alpha_panel = alpha_panel
     if not include_fusion:
         return out
@@ -979,7 +1035,11 @@ def run_hmm_fusion_for_is_end(
 
     prefetch_workers = max(1, min(len(need_1m) or 1, 4))
     one_m_cache: dict[str, pd.DataFrame | None] = {}
-    if need_1m:
+    
+    if prefetched_1m is not None:
+        # Use existing memory cache if provided (Smart bypass)
+        one_m_cache = prefetched_1m
+    elif need_1m:
         with ThreadPoolExecutor(max_workers=prefetch_workers) as ex:
             one_m_cache = {s: dm for s, dm in ex.map(_prefetch_1m, need_1m)}
 
@@ -1028,7 +1088,7 @@ def run_hmm_fusion_for_is_end(
 def run_ml_pipeline_for_universe(
     symbols: list[str],
     tf: str,
-    fetch_start: str,
+    fetch_start_date: str,
     end: str,
     cfg: dict[str, Any],
     workers: int = 4,
@@ -1052,8 +1112,8 @@ def run_ml_pipeline_for_universe(
 
     for sym in symbols:
         try:
-            df_tf = collector.collect_and_save(sym, tf, fetch_start, end)
-            df_1h = collector.collect_and_save(sym, "1h", fetch_start, end)
+            df_tf = collector.collect_and_save(sym, tf, fetch_start_date, end)
+            df_1h = collector.collect_and_save(sym, "1h", fetch_start_date, end)
             if df_tf is not None and df_1h is not None:
                 # IMPORTANT: Merge funding and metrics before ML feature engineering
                 df_tf = merge_funding_into_ohlcv(sym, df_tf, Path(FUTURES_DATA_DIR))
@@ -1086,7 +1146,7 @@ def run_ml_pipeline_for_universe(
         _logger.error("No data collected. Pipeline aborted.")
         return MLPipelineOutput()
 
-    label_start = is_start_date or fetch_start
+    label_start = is_start_date or fetch_start_date
     if bool(cfg.get("FUTURES_ML_ALPHA_USE_TBM_WEIGHT", True)):
         _logger.info("  --> Step 1b: Triple-Barrier Micro-Weighting (1m prefetch)")
 
@@ -1147,7 +1207,7 @@ def run_ml_pipeline_for_universe(
 
     market_probs = hmm_inferrer.fit_predict_systemic(
         market_hmm_feats,
-        market_hmm_feats["btc_trend_vol_adj_24h"],
+        market_hmm_feats["macro_trend_168h"],
         is_end_idx=is_end_idx_market,
         symbol="Market",
         tf=tf,
@@ -1157,12 +1217,18 @@ def run_ml_pipeline_for_universe(
 
     # Inject HMM and Systemic features into panel_df
     _logger.info("  --> Injecting HMM and Systemic features into panel_df for LightGBM...")
-    mp_cols = [c for c in market_probs.columns if "hmm_prob_" in c]
-    mp_feats = market_probs.set_index("datetime")[mp_cols]
+    hmm_cols_all = [c for c in market_probs.columns if str(c).startswith("hmm_")]
+    mp_feats = market_probs.set_index("datetime")[hmm_cols_all]
     
     # Merge on datetime level of MultiIndex
-    panel_df = panel_df.join(mp_feats, on="datetime", how="left").fillna(1.0 / float(hmm_k))
-    # Inject raw systemic features (btc_trend_vol_adj_24h, realized_vol_regime, etc.)
+    panel_df = panel_df.join(mp_feats, on="datetime", how="left")
+    # Fill probabilities with uniform, others with 0
+    prob_cols = [c for c in hmm_cols_all if "prob_" in c]
+    other_hmm_cols = [c for c in hmm_cols_all if "prob_" not in c]
+    panel_df[prob_cols] = panel_df[prob_cols].fillna(1.0 / float(hmm_k))
+    panel_df[other_hmm_cols] = panel_df[other_hmm_cols].fillna(0.0)
+    
+    # Inject raw systemic features (macro_trend_168h, macro_vol_24h, etc.)
     panel_df = panel_df.join(market_hmm_feats, on="datetime", how="left", rsuffix="_sys").fillna(0.0)
 
     # --- Step 2b: Universal ALPHA Model Training (Cross-Sectional IC) ---
@@ -1237,7 +1303,7 @@ def run_ml_pipeline_for_universe(
     out = run_hmm_fusion_for_is_end(
         list(data_maps.keys()),
         tf,
-        fetch_start,
+        fetch_start_date,
         end,
         cfg,
         data_maps,
@@ -1250,7 +1316,7 @@ def run_ml_pipeline_for_universe(
         n_jobs,
         include_fusion=not hmm_only,
         summary_mode_label="(HMM-ONLY MODE)" if hmm_only else "",
-        prefetch_label_start=is_start_date or fetch_start,
+        prefetch_label_start=is_start_date or fetch_start_date,
     )
     out.alpha_panel = alpha_panel
     if hmm_only:

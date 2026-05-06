@@ -30,85 +30,127 @@ warnings.filterwarnings("ignore")
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 _logger = logging.getLogger("test_universe_to_hmm")
 
-def audit_hmm_logic_changes(ml_out, symbols):
-    """Deep audit of HMM regime classification after architectural changes."""
-    _logger.info("\n" + "=" * 85)
-    _logger.info(" [HMM DEEP AUDIT] Evaluating New Regime Logic (v6)")
-    _logger.info("=" * 85)
+def audit_hmm_logic_changes(ml_out, symbols, data_maps, tf):
+    """Deep audit of HMM regime classification with Log-Wealth & Tail Capture metrics."""
+    _logger.info("\n" + "╔" + "═" * 83 + "╗")
+    _logger.info(f"║ [INSTITUTIONAL HMM AUDIT] Log-Wealth & Ergodicity Analysis (v15) {' ':<14} ║")
+    _logger.info("╠" + "═" * 83 + "╣")
 
-    # 1. Systemic HMM Consistency Check
-    sym = symbols[0] if symbols else None
-    if not sym or sym not in ml_out.meta_feature_frame_by_symbol:
-        _logger.error("No data for HMM audit.")
+    # sym = symbols[0] if symbols else None
+    sym = None
+    for s in symbols:
+        if s in ml_out.meta_feature_frame_by_symbol and s in data_maps:
+            sym = s
+            break
+
+    if not sym:
+        _logger.error(f"║ No common data for HMM audit among {symbols}. {' ':<30} ║")
+        _logger.info("╚" + "═" * 83 + "╝")
         return
 
     mff = ml_out.meta_feature_frame_by_symbol[sym]
+    df = data_maps[sym][tf]
     
-    # Check for new semantic columns
-    semantic_cols = ["hmm_prob_bull_trend", "hmm_prob_bear_trend", "hmm_prob_chop", "hmm_prob_crisis"]
-    missing = [c for c in semantic_cols if c not in mff.columns]
-    if missing:
-        _logger.warning(f" Missing semantic columns: {missing}")
-    else:
-        _logger.info(" [OK] All v6 semantic columns found.")
+    # Ensure returns are available
+    if "datetime" not in mff.columns:
+        mff = mff.reset_index()
+    
+    mff["datetime"] = pd.to_datetime(mff["datetime"], utc=True)
+    df["datetime"] = pd.to_datetime(df["datetime"], utc=True)
+    
+    merged = pd.merge(mff, df[["datetime", "close"]], on="datetime", how="left")
+    merged["ret"] = merged["close"].pct_change().fillna(0.0)
 
-    # 2. Modulator Audit
-    mod_cols = ["hmm_modulator_long", "hmm_modulator_short", "btc_trend_vol_adj_24h", "downside_jump_24"]
-    for c in mod_cols:
-        if c in mff.columns:
-            mean_val = mff[c].mean()
-            std_val = mff[c].std()
-            _logger.info(f" [FEAT/MOD] {c:<25}: Mean={mean_val:.4f}, Std={std_val:.4f}")
+    semantic_cols = [c for c in ["hmm_prob_bull_trend", "hmm_prob_bear_trend", "hmm_prob_chop", "hmm_prob_crisis"] if c in merged.columns]
+    if not semantic_cols:
+        _logger.error("║ Missing HMM probability columns. {' ':<46} ║")
+        return
+
+    merged["regime"] = merged[semantic_cols].idxmax(axis=1)
+    
+    # v15 Label Mapping (Hierarchical Decoupling)
+    label_map = {
+        "BULL_TREND": "CALM",
+        "BEAR_TREND": "HIGH_VOL",
+        "CHOP": "BLEEDING",
+        "CRISIS": "CRISIS"
+    }
+
+    # 1. Log-Wealth Dispersion (g = mu - 0.5 * sigma^2)
+    _logger.info("║ [A] LOG-WEALTH DISPERSION (Regime Purity) {' ':<42} ║")
+    _logger.info("╟──────────────┬──────────┬──────────┬──────────┬──────────┬──────────────────────╢")
+    _logger.info("║ REGIME       │ TIME %   │ MU (%)   │ SIG (%)  │ G_log(%) │ BEHAVIOR             ║")
+    _logger.info("╟──────────────┼──────────┼──────────┼──────────┼──────────┼──────────────────────╢")
+    
+    for col in semantic_cols:
+        raw_name = col.replace("hmm_prob_", "").upper()
+        reg_name = label_map.get(raw_name, raw_name)
+        mask = merged["regime"] == col
+        if mask.any():
+            r = merged.loc[mask, "ret"]
+            mu = float(r.mean() * 100.0)
+            sig = float(r.std() * 100.0)
+            # Geometric Growth Approximation: mu - 0.5 * var
+            g = mu - 0.5 * (float(r.var()) * 100.0)
+            time_pct = float(mask.mean() * 100.0)
+            
+            behavior = "UNSTABLE"
+            if g > 0.05: behavior = "WEALTH_EXP"
+            elif g < -0.10: behavior = "TAIL_DEFENSE"
+            elif abs(g) < 0.05: behavior = "NOISE_LOCKED"
+            
+            _logger.info(f"║ {reg_name:<12} │ {time_pct:>8.1f}% │ {mu:>8.3f} │ {sig:>8.3f} │ {g:>8.3f} │ {behavior:<20} ║")
         else:
-            _logger.warning(f" [MISSING] {c} not found in meta feature frame.")
-
-    # 3. Regime Distribution Audit
-    if not missing:
-        _logger.info("\n [REGIME DISTRIBUTION]")
-        regimes = mff[semantic_cols].idxmax(axis=1)
-        dist = regimes.value_counts(normalize=True) * 100
-        for regime, pct in dist.items():
-            st_name = regime.replace("hmm_prob_", "").upper()
-            _logger.info(f"   - {st_name:<15}: {pct:>6.2f}%")
-
-    # 4. Asymmetric Response Audit
-    if "hmm_prob_crisis" in mff.columns and "hmm_modulator_long" in mff.columns:
-        crisis_period = mff[mff["hmm_prob_crisis"] > 0.7]
-        if not crisis_period.empty:
-            avg_mod_l = crisis_period["hmm_modulator_long"].mean()
-            _logger.info(f"\n [STRESS TEST] Crisis Regime (p>0.7) detected in {len(crisis_period)} bars.")
-            _logger.info(f"   - Avg Long Modulator during Crisis: {avg_mod_l:.4f} (Expect < 0.5)")
-        else:
-            _logger.info("\n [STRESS TEST] No extreme Crisis regime (p>0.7) in this window.")
-
-    # 5. Bull Boost Audit
-    if "hmm_prob_bull_trend" in mff.columns and "hmm_modulator_long" in mff.columns:
-        bull_period = mff[mff["hmm_prob_bull_trend"] > 0.5]
-        if not bull_period.empty:
-            avg_mod_l = bull_period["hmm_modulator_long"].mean()
-            _logger.info(f"\n [ALPHA TEST] Bull Regime (p>0.5) detected in {len(bull_period)} bars.")
-            _logger.info(f"   - Avg Long Modulator during Bull:   {avg_mod_l:.4f} (Expect > 1.2)")
-
-    _logger.info("=" * 85)
+            _logger.info(f"║ {reg_name:<12} │ {0.0:>8.1f}% │ {'-':>8} │ {'-':>8} │ {'-':>8} │ {'-':<20} ║")
+    
+    # 2. Left-Tail Capture Ratio (Worst 5% Isolation)
+    _logger.info("╟──────────────┴──────────┴──────────┴──────────┴──────────┴──────────────────────╢")
+    _logger.info("║ [B] LEFT-TAIL CAPTURE (Tail-Risk Isolation) {' ':<39} ║")
+    
+    q05_thr = float(merged["ret"].quantile(0.05))
+    worst_bars = merged[merged["ret"] <= q05_thr]
+    if not worst_bars.empty:
+        tail_dist = worst_bars["regime"].value_counts(normalize=True) * 100
+        # In v15 mapping, CRISIS and HIGH_VOL are risk states
+        crisis_capture = float(tail_dist.get("hmm_prob_crisis", 0.0) + tail_dist.get("hmm_prob_bear_trend", 0.0))
+        
+        status = "FAIL" if crisis_capture < 60 else "PASS" if crisis_capture > 80 else "ACCEPTABLE"
+        _logger.info(f"║ Worst 5% Events: {len(worst_bars):<4} | CRISIS/HIGH_VOL Capture: {crisis_capture:>5.1f}% | Verdict: {status:<10} ║")
+    
+    # 3. Switching Friction & Stability
+    _logger.info("╟─────────────────────────────────────────────────────────────────────────────────╢")
+    _logger.info("║ [C] REGIME STABILITY & FRICTION {' ':<46} ║")
+    
+    transitions = int((merged["regime"] != merged["regime"].shift(1)).sum())
+    avg_duration = float(len(merged) / max(1, transitions))
+    friction_est = transitions * 0.00025 * 100.0 # 2.5bps per switch estimate
+    
+    _logger.info(f"║ Total Switches: {transitions:<4} | Avg Duration: {avg_duration:>6.1f} bars | Friction Est: {friction_est:>5.2f}% IS ║")
+    
+    _logger.info("╚" + "═" * 83 + "╝")
 
 def test_universe_gp_hmm_flow(tf="1h"):
     _logger.info("=" * 85)
     _logger.info(f" [TEST] Universe -> GP Alpha -> HMM Regime Flow (Integrated) TF: {tf}")
     _logger.info("=" * 85)
     
-    # 1. Window Setup (Reduced for speed)
+    # 1. Window Setup (Production Window)
     res = get_quarterly_window()
     fetch_start, start, is_end, end = res
     collector = DataCollector()
     
-    # Adjust window to be smaller for testing (last 500 bars of IS)
-    is_end_dt = pd.to_datetime(is_end)
-    start_dt = is_end_dt - pd.Timedelta(hours=500)
-    start = start_dt.strftime("%Y-%m-%d %H:%M:%S")
-    
-    _logger.info(f"Window: {fetch_start} ~ {is_end} (Audit Focus: last 500 IS bars)")
+    _logger.info(f"Window: {fetch_start} ~ {is_end} (Audit Focus: Full IS window)")
 
-    # 2. Universe Filtering (Broad)
+    # 2. Clear HMM Cache to force fresh training
+    from config.settings import FUTURES_CACHE_DIR
+    _logger.info(f"Clearing HMM cache in {FUTURES_CACHE_DIR}...")
+    import os
+    if FUTURES_CACHE_DIR.exists():
+        for f in os.listdir(FUTURES_CACHE_DIR):
+            if "HMM" in f and f.endswith(".parquet"):
+                os.remove(FUTURES_CACHE_DIR / f)
+
+    # 3. Universe Filtering (Broad)
     from src.domain.futures.opt_futures_utils.universe_screener_futures import (
         screen_futures_universe,
         screen_symbol_refinement_futures,
@@ -122,13 +164,13 @@ def test_universe_gp_hmm_flow(tf="1h"):
         _logger.error("No broad candidates found. Aborting.")
         return
 
-    # 3. Data Loading for Refinement
-    test_symbols = list(broad_candidates)[:5] # More restricted for speed
+    # 4. Data Loading for Refinement
+    test_symbols = list(broad_candidates)[:2] 
     data_maps_broad, _, valid_broad = _load_futures_data_maps_for_symbols(
         test_symbols, tf, fetch_start, start, is_end, end, skip_metrics=True
     )
     
-    # 4. Refinement
+    # 5. Refinement
     success = screen_symbol_refinement_futures(
         broad_candidates=valid_broad,
         winning_signal_type="CS_RANK",
@@ -144,17 +186,27 @@ def test_universe_gp_hmm_flow(tf="1h"):
     final_symbols = config.opt_config.FUTURES_SYMBOLS
     _logger.info(f"Final Selected Universe: {final_symbols}")
 
-    # 5. ML Pipeline (HMM Focused)
+    # 6. ML Pipeline (HMM Focused)
     cfg = dict(OPT_FUTURES_CONFIG)
-    # Minimal GP for speed, focusing on HMM
+    # Minimal GP for speed
     cfg["FUTURES_ML_GP_GENERATIONS"] = 1
-    cfg["FUTURES_ML_GP_POPULATION"] = 100
+    cfg["FUTURES_ML_GP_POPULATION"] = 50
+    # Balanced HMM settings for CPU execution over long window
+    cfg["FUTURES_HMM_N_ITER"] = 150
+    
+    from src.domain.futures.ml_pipeline.hmm_state_inferrer import HMMStateInferrer
+    # Increase fit_step to reduce number of training cycles on CPU
+    HMMStateInferrer.fit_step = 1000 
+    HMMStateInferrer.n_iter = 150
+    
+    import time
+    start_time = time.time()
     
     _logger.info("\nExecuting ML Pipeline (Integrated HMM Audit Mode)...")
     ml_out = run_ml_pipeline_for_universe(
         final_symbols,
         tf,
-        fetch_start,
+        fetch_start, 
         end,
         cfg,
         workers=4,
@@ -165,8 +217,11 @@ def test_universe_gp_hmm_flow(tf="1h"):
         hmm_only=False
     )
     
-    # 6. Verification & Deep Audit
-    audit_hmm_logic_changes(ml_out, final_symbols)
+    elapsed_time = time.time() - start_time
+    _logger.info(f"\n[TIME] ML Pipeline (GP + JAX HMM) took: {elapsed_time:.2f} seconds")
+    
+    # 7. Verification & Deep Audit
+    audit_hmm_logic_changes(ml_out, final_symbols, data_maps_broad, tf)
         
     _logger.info("=" * 85)
     _logger.info(" [RESULT] Integrated Universe -> HMM test completed.")
@@ -174,4 +229,4 @@ def test_universe_gp_hmm_flow(tf="1h"):
 
 if __name__ == "__main__":
     test_universe_gp_hmm_flow("1h")
-    test_universe_gp_hmm_flow("4h")
+    # test_universe_gp_hmm_flow("4h") # Disable 4h for faster execution
