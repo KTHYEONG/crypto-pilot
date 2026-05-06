@@ -16,7 +16,6 @@ TA-Lib>=0.4.32
 scikit-learn>=1.6.0
 lightgbm>=4.5.0
 gplearn>=0.4.3
-hmmlearn>=0.3.2
 
 # Optimization
 optuna>=4.1.0
@@ -43,3 +42,8 @@ joblib>=1.4.0
 
 # Testing
 pytest>=8.0.0
+jax
+jaxlib
+dynamax
+optax
+tensorflow-probability

@@ -91,12 +91,13 @@ def run_universe_to_gp_test(tf="1h"):
     cfg["FUTURES_ML_GP_GENERATIONS"] = 5
     cfg["FUTURES_ML_GP_POPULATION"] = 500
     
+    _logger.info("\nExecuting ML Pipeline (Institutional Alpha Audit Mode)...")
     ml_out = run_ml_pipeline_for_universe(
         final_symbols,
         tf,
-        fetch_start,
-        end,
-        cfg,
+        fetch_start_date=fetch_start,  # v15 Decoupling
+        end=end,
+        cfg=cfg,
         workers=4,
         n_jobs=4,
         is_end_date=is_end,
@@ -108,19 +109,22 @@ def run_universe_to_gp_test(tf="1h"):
     filter_meta = ml_out.alpha_panel.attrs.get("alpha_component_filter", {})
     
     _logger.info("\n" + "-" * 70)
-    _logger.info(" [GP IC VALIDATION RESULTS]")
+    _logger.info(" [ALPHA IC AUDIT - 3.5bps Friction Environment]")
     _logger.info("-" * 70)
-    _logger.info(f" IS Best Fitness (Composite ICIR): {best_fitness:.6f}")
-    _logger.info(f" GP Alpha Components Tried:      {filter_meta.get('n_components', 0)}")
-    _logger.info(f" GP Alpha Components Surviving:   {filter_meta.get('n_surviving', 0)}")
+    _logger.info(f" IS Mean IC:                     {filter_meta.get('primary_is_mu', 0.0):>8.4f}")
+    _logger.info(f" OOS Mean IC:                    {filter_meta.get('primary_oos_mu', 0.0):>8.4f}")
+    _logger.info(f" IS Best Fitness (Composite):    {best_fitness:>8.4f}")
+    _logger.info(f" Components Tried:               {filter_meta.get('n_components', 0):>8.0f}")
+    _logger.info(f" Components Surviving:            {filter_meta.get('n_surviving', 0):>8.0f}")
+    _logger.info(f" Alpha Half-Life (Bars):         {filter_meta.get('primary_half_life', 0.0):>8.2f}")
     neu_p = bool(filter_meta.get("neutralize_primary", 0))
     _logger.info(f" Primary Alpha Neutralized:       {neu_p}")
     _logger.info("-" * 70)
     
-    if best_fitness > 0.01: # ICIR 기반이므로 0.01 이상이면 유의미
-        _logger.info(" [RESULT] Reasonable IC/Fitness detected. Track A is healthy.")
+    if filter_meta.get('primary_is_mu', 0.0) > 0.02 and filter_meta.get('primary_oos_mu', 0.0) > 0.01:
+        _logger.info(" [RESULT] SOTA Alpha performance detected. Track A is healthy.")
     else:
-        _logger.warning(" [RESULT] Low Fitness detected. Check market volatility or features.")
+        _logger.warning(" [RESULT] Alpha strength below SOTA targets. Check features.")
     _logger.info("=" * 70)
 
 if __name__ == "__main__":
