@@ -108,28 +108,6 @@ class ProfitFactorKellyFuturesSizing:
         # Apply Kelly fraction, Volatility Scaling and Regime Penalty
         f = f_star * kelly_frac * vol_scaler * regime_penalty
 
-
-        # [NEW] Regime-Conditional Sizing (HMM Override)
-        # Fixes long-bias by aggressively reducing exposure in high-risk HMM states
-        hmm_cols = [
-            "hmm_prob_bull_trend", "hmm_prob_bear_trend", "hmm_prob_chop", "hmm_prob_crisis"
-        ]
-        if all(col in df.columns for col in hmm_cols):
-            p_bear = df["hmm_prob_bear_trend"].to_numpy(dtype=np.float64)
-            p_crisis = df["hmm_prob_crisis"].to_numpy(dtype=np.float64)
-            p_chop = df["hmm_prob_chop"].to_numpy(dtype=np.float64)
-
-            # 1. Bear Trend Override: Cap Long (0.5x), Boost Short (1.5x)
-            f = np.where((td > 0) & (p_bear > 0.25), f * 0.5, f)
-            f = np.where((td < 0) & (p_bear > 0.25), f * 1.5, f)
-
-            # 2. Crisis Override: Aggressive cap (Long 0.3x, Short 0.6x)
-            f = np.where((td > 0) & (p_crisis > 0.3), f * 0.3, f)
-            f = np.where((td < 0) & (p_crisis > 0.3), f * 0.6, f)
-
-            # 3. Chop Override: Defensive sizing (0.7x for both)
-            f = np.where(p_chop > 0.4, f * 0.7, f)
-        
         low_data = n_fin_a < float(min_obs)
         f = np.where(low_data, min_f, f)
         active = (td != 0.0).astype(np.float64)

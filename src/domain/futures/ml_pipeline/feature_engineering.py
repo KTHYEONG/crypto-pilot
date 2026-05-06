@@ -9,18 +9,20 @@ import pandas as pd
 from numba import njit
 
 # Columns produced by build_gp_input_features (for CS-rank / imputation in pipeline).
-# Systemic HMM input (10-dim: Trend, Risk, Energy, Breadth, Funding, Dispersion, RS).
+# Systemic HMM input (4-dim: Macro Decoupling Spec v15)
 SYSTEMIC_HMM_FEATURE_COLUMNS: tuple[str, ...] = (
-    "btc_trend_vol_adj_24h",
-    "btc_trend_vol_adj_168h",
-    "realized_vol_regime",
-    "downside_vol_ratio",
-    "btc_ma_dist_168h",
-    "volume_momentum_24h",
-    "market_breadth",
-    "funding_level",
-    "cs_dispersion",
-    "eth_btc_rs",
+    "macro_trend_168h",
+    "macro_vol_24h",
+    "macro_liq_24h",
+    "macro_cost_168h",
+    "macro_downside_vol_24h",   # T1-B: semi-vol of negative returns
+    "macro_cs_dispersion_24h",  # T1-D: cross-sectional return dispersion
+    "macro_breadth_168h",       # T1-D: market breadth (fraction above 168h MA)
+    "macro_oi_delta_24h",       # P2-C: OI momentum (sign-preserved)
+    "macro_liq_proxy_24h",      # P2-C: liquidation cascade proxy
+    # [NEW] Phase 3: LSR Features for improved state separation
+    "macro_lsr_168h",           # Long-Short Ratio average
+    "macro_lsr_delta_24h",     # Long-Short Ratio momentum
 )
 
 # Posterior columns aligned to stable semantic labels (order for MetaLabeler).
@@ -33,7 +35,7 @@ HMM_SEMANTIC_PROB_COLUMNS: tuple[str, ...] = (
 
 # Bump when ALPHA feature semantics change without renaming columns so raw GP
 # caches are invalidated and Tier 2 retraining actually happens.
-GP_FEATURE_SCHEMA_VERSION: str = "v13"
+GP_FEATURE_SCHEMA_VERSION: str = "v18"
 
 def _tf_to_hours(tf: str) -> float:
     """Convert timeframe string to decimal hours."""
@@ -49,7 +51,7 @@ def _tf_to_hours(tf: str) -> float:
 def _get_window(hours: int, tf: str) -> int:
     """Calculate bar count for a given hour-horizon in a specific timeframe."""
     tf_h = _tf_to_hours(tf)
-    res = int(round(hours / tf_h))
+    res = round(hours / tf_h)
     return max(1, res)
 
 
@@ -125,6 +127,9 @@ ALPHA_ENGINEERED_FEATURE_NAMES: tuple[str, ...] = (
 def _rolling_robust_z(series: pd.Series, window: int) -> pd.Series:
     """Calculate rolling median/MAD Z-score (causal).
 
+    When MAD ≈ 0 (constant-like series, e.g. 8h funding repeated on 1h bars),
+    falls back to rolling std to prevent divide-by-near-zero explosion.
+
     Args:
         series: Input price or feature series.
         window: Rolling window size.
@@ -136,7 +141,10 @@ def _rolling_robust_z(series: pd.Series, window: int) -> pd.Series:
     min_p = max(1, window // 10)
     med = series.rolling(window=window, min_periods=min_p).median()
     mad = (series - med).abs().rolling(window=window, min_periods=min_p).median()
-    z: pd.Series = (series - med) / (mad * 1.4826 + 1e-12)
+    # Fallback denominator: use rolling std when MAD is near-zero (repeated values)
+    std = series.rolling(window=window, min_periods=min_p).std().fillna(0.0)
+    denom = np.where(mad * 1.4826 > 1e-8, mad * 1.4826, std + 1e-12)
+    z: pd.Series = (series - med) / pd.Series(denom, index=series.index)
     return z
 
 
@@ -595,11 +603,48 @@ def build_gp_input_features(df: pd.DataFrame, tf: str = "1h") -> pd.DataFrame:
     # Using 24h as base
     out["beta_neutral_momentum"] = out["ret_24"]
 
-    # 3. Vol-Structural Squeeze: HL Spread Z * Funding Z
-    # If HL spread is rising (vol spike) while funding is extreme (imbalance), squeeze is likely.
-    hl_spread = (high - low) / (close.shift(1).clip(lower=1e-12))
-    hl_spread_z = _rolling_robust_z(hl_spread, w24)
-    out["vol_structural_squeeze"] = (hl_spread_z * out["funding_z_72"]).fillna(0.0)
+    # [NEW] Macro Decoupling Features (Spec v15)
+    w168 = _get_window(168, tf)
+    # macro_trend_168h: BTC-like trend proxy (if btc_close not in df, use own close)
+    ref_close = df["btc_close"] if "btc_close" in df.columns else close
+    out["macro_trend_168h"] = np.log(ref_close / ref_close.shift(w168).clip(lower=1e-12))
+    
+    # macro_vol_24h: Yang-Zhang Volatility
+    out["macro_vol_24h"] = _yang_zhang_vol_24(open_, high, low, close, w24)
+    
+    # macro_liq_24h: Volume Momentum (Liquidity Proxy)
+    vma_24 = vol.rolling(w24).mean()
+    vma_168 = vol.rolling(w168).mean()
+    out["macro_liq_24h"] = (vma_24 / (vma_168 + 1e-12)) - 1.0
+    
+    # macro_cost_168h: Rolling Funding Mean
+    if "funding_rate" in df.columns:
+        out["macro_cost_168h"] = df["funding_rate"].rolling(w168).mean()
+    else:
+        out["macro_cost_168h"] = 0.0
+
+    # [Mixed Normalization] Vol features: Log+RobustScaler; others: Rank-Gauss [T1-A]
+    from sklearn.preprocessing import QuantileTransformer
+    from sklearn.preprocessing import RobustScaler as _RobustScaler
+
+    _vol_macro_cols = [
+        c for c in ["macro_vol_24h", "macro_downside_vol_24h", "macro_cs_dispersion_24h"]
+        if c in out.columns
+    ]
+    if _vol_macro_cols:
+        _vol_data = out[_vol_macro_cols].fillna(0.0).to_numpy()
+        _vol_data_log = np.log1p(np.maximum(_vol_data, 0.0))
+        _rs = _RobustScaler()
+        out[_vol_macro_cols] = _rs.fit_transform(_vol_data_log)
+
+    _other_macro_cols = [c for c in SYSTEMIC_HMM_FEATURE_COLUMNS if c not in _vol_macro_cols and c in out.columns]
+    if _other_macro_cols:
+        _qt = QuantileTransformer(
+            output_distribution="normal",
+            n_quantiles=min(len(out), 1000),
+            random_state=42,
+        )
+        out[_other_macro_cols] = _qt.fit_transform(out[_other_macro_cols].fillna(0.0))
 
     out = out.replace([np.inf, -np.inf], np.nan)
     return out
@@ -664,9 +709,7 @@ def build_hmm_input_features(df: pd.DataFrame) -> pd.DataFrame:
 def build_systemic_hmm_features(
     panel_df: pd.DataFrame, alpha_panel: pd.DataFrame | None = None, tf: str = "1h"
 ) -> pd.DataFrame:
-    """Build single-timeseries features for Macro Market HMM using systemic aggregates.
-
-    8-dim: Trend (24h/168h), Vol Regime, Downside Risk, Distance, Energy, Breadth, Funding.
+    """Build systemic macro features for HMM (Decoupling Spec v15).
 
     Args:
         panel_df: Input panel dataframe.
@@ -674,106 +717,175 @@ def build_systemic_hmm_features(
         tf: Timeframe of the input dataframe.
 
     Returns:
-        Dataframe containing systemic HMM features.
+        Dataframe containing systemic HMM features (4-dim).
 
     """
     _ = alpha_panel
 
     if panel_df.empty:
-        # Return empty dataframe with expected columns
-        cols = [
-            "btc_trend_24h", "btc_trend_168h", "vol_ratio", "downside_vol_ratio",
-            "btc_ma_dist_168h", "volume_momentum_24h", "market_breadth", "funding_mean"
-        ]
-        # Return a dataframe with datetime index to avoid KeyError later
-        idx = pd.DatetimeIndex([], name="datetime")
-        return pd.DataFrame(columns=cols, index=idx)
+        return pd.DataFrame(columns=list(SYSTEMIC_HMM_FEATURE_COLUMNS))
 
-    market_feats = panel_df.groupby(level="datetime").agg(
-        {
-            "cs_dispersion": "first",
-            "market_breadth": "first",
-        }
-    )
-    if "funding_rate" in panel_df.columns:
-        funding_mean = panel_df["funding_rate"].groupby(level="datetime").mean()
-    else:
-        funding_mean = pd.Series(0.0, index=market_feats.index)
-
-    idx = market_feats.index
+    idx = panel_df.index.get_level_values("datetime").unique().sort_values()
     syms = panel_df.index.get_level_values("symbol").unique()
     btc_sym = next((s for s in syms if "BTC" in s), None)
 
+    out = pd.DataFrame(index=idx)
+    
     if btc_sym:
         btc_df = panel_df.xs(btc_sym, level="symbol")
         btc_close = btc_df["close"].astype(np.float64)
-        log_ret_1 = np.log(btc_close / btc_close.shift(1).clip(lower=1e-12))
-        
+        btc_high = btc_df["high"].astype(np.float64)
+        btc_low = btc_df["low"].astype(np.float64)
+        btc_open = btc_df["open"].astype(np.float64) if "open" in btc_df.columns else btc_close.shift(1).fillna(btc_close)
+        btc_vol = btc_df["volume"].astype(np.float64)
+
         w24 = _get_window(24, tf)
         w168 = _get_window(168, tf)
-        
-        sig_24 = log_ret_1.rolling(w24, min_periods=max(2, w24 // 2)).std() + 1e-12
 
-        # 1. Trend (Short/Long)
-        btc_trend_24h = (np.log(btc_close / btc_close.shift(w24).clip(lower=1e-12))) / sig_24
-        btc_trend_168h = (np.log(btc_close / btc_close.shift(w168).clip(lower=1e-12))) / (
-            sig_24 * np.sqrt(w168 / w24)
+        # 1. macro_trend_168h
+        out["macro_trend_168h"] = np.log(btc_close / btc_close.shift(w168).clip(lower=1e-12))
+
+        # 2. macro_vol_24h (Yang-Zhang)
+        out["macro_vol_24h"] = _yang_zhang_vol_24(btc_open, btc_high, btc_low, btc_close, w24)
+
+        # 3. macro_liq_24h (Volume Momentum)
+        vma_24 = btc_vol.rolling(w24).mean()
+        vma_168 = btc_vol.rolling(w168).mean()
+        out["macro_liq_24h"] = (vma_24 / (vma_168 + 1e-12)) - 1.0
+
+        # 4. macro_cost_168h (Funding)
+        if "funding_rate" in btc_df.columns:
+            out["macro_cost_168h"] = btc_df["funding_rate"].rolling(w168).mean()
+        else:
+            out["macro_cost_168h"] = 0.0
+
+        # 5. macro_downside_vol_24h (Semi-Vol: downside only) [T1-B]
+        btc_log_ret = np.log(btc_close / btc_close.shift(1).clip(lower=1e-12)).fillna(0.0)
+        neg_ret = btc_log_ret.where(btc_log_ret < 0, 0.0)
+        out["macro_downside_vol_24h"] = neg_ret.rolling(
+            w24, min_periods=max(5, w24 // 4)
+        ).std().fillna(0.0)
+
+        # 8. macro_oi_delta_24h: BTC OI 24h % change (sign-preserved momentum) [P2-C]
+        if "sum_open_interest" in btc_df.columns:
+            oi = btc_df["sum_open_interest"].astype(np.float64).replace(0, np.nan).ffill().fillna(0.0)
+            oi_chg = oi.pct_change(w24).fillna(0.0)
+            out["macro_oi_delta_24h"] = oi_chg.clip(-1.0, 1.0)
+        else:
+            out["macro_oi_delta_24h"] = 0.0
+
+        # 9. macro_liq_proxy_24h: volume surge ratio during negative-return bars [P2-C]
+        btc_log_ret_1h = np.log(btc_close / btc_close.shift(1).clip(lower=1e-12)).fillna(0.0)
+        neg_vol = btc_vol.where(btc_log_ret_1h < 0, 0.0)
+        neg_vol_ma = neg_vol.rolling(w24, min_periods=max(5, w24 // 4)).mean()
+        total_vol_ma = btc_vol.rolling(w24, min_periods=max(5, w24 // 4)).mean()
+        out["macro_liq_proxy_24h"] = (neg_vol_ma / (total_vol_ma + 1e-12)).fillna(0.5)
+
+        # 10-11. macro_lsr (Long-Short Ratio) [NEW Phase 3]
+        if "long_short_ratio" in btc_df.columns:
+            lsr = btc_df["long_short_ratio"].astype(np.float64)
+            out["macro_lsr_168h"] = lsr.rolling(w168).mean()
+            out["macro_lsr_delta_24h"] = lsr.pct_change(w24)
+        else:
+            out["macro_lsr_168h"] = 1.0
+            out["macro_lsr_delta_24h"] = 0.0
+    else:
+        # Fallback to market average if BTC not present
+        m_close = panel_df["close"].groupby(level="datetime").mean()
+        m_vol = panel_df["volume"].groupby(level="datetime").mean()
+        w24 = _get_window(24, tf)
+        w168 = _get_window(168, tf)
+
+        out["macro_trend_168h"] = np.log(m_close / m_close.shift(w168).clip(lower=1e-12))
+        out["macro_vol_24h"] = m_close.rolling(w24).std() / (m_close + 1e-12)  # Proxy
+        out["macro_liq_24h"] = (m_vol.rolling(w24).mean() / (m_vol.rolling(w168).mean() + 1e-12)) - 1.0
+        if "funding_rate" in panel_df.columns:
+            out["macro_cost_168h"] = panel_df["funding_rate"].groupby(level="datetime").mean().rolling(w168).mean()
+        else:
+            out["macro_cost_168h"] = 0.0
+
+        # 5. macro_downside_vol_24h fallback [T1-B]
+        m_log_ret = np.log(m_close / m_close.shift(1).clip(lower=1e-12)).fillna(0.0)
+        neg_ret_m = m_log_ret.where(m_log_ret < 0, 0.0)
+        out["macro_downside_vol_24h"] = neg_ret_m.rolling(
+            w24, min_periods=max(5, w24 // 4)
+        ).std().fillna(0.0)
+
+        # 8. macro_oi_delta_24h: OI momentum fallback [P2-C]
+        if "sum_open_interest" in panel_df.columns:
+            oi_panel = panel_df["sum_open_interest"].groupby(level="datetime").mean()
+            oi_panel = oi_panel.replace(0, np.nan).ffill().fillna(0.0)
+            oi_chg = oi_panel.pct_change(w24).fillna(0.0)
+            out["macro_oi_delta_24h"] = oi_chg.clip(-1.0, 1.0).reindex(idx).fillna(0.0)
+        else:
+            out["macro_oi_delta_24h"] = 0.0
+
+        # 9. macro_liq_proxy_24h: liquidation cascade proxy fallback [P2-C]
+        m_log_ret2 = np.log(m_close / m_close.shift(1).clip(lower=1e-12)).fillna(0.0)
+        m_neg_vol = m_vol.where(m_log_ret2 < 0, 0.0)
+        m_neg_vol_ma = m_neg_vol.rolling(w24, min_periods=max(5, w24 // 4)).mean()
+        m_total_vol_ma = m_vol.rolling(w24, min_periods=max(5, w24 // 4)).mean()
+        out["macro_liq_proxy_24h"] = (
+            (m_neg_vol_ma / (m_total_vol_ma + 1e-12)).fillna(0.5).reindex(idx).fillna(0.5)
         )
 
-        # 2. Volatility Regime
-        h_hi = btc_df["high"].astype(np.float64)
-        h_lo = btc_df["low"].astype(np.float64) + 1e-12
-        hl = np.log((h_hi / h_lo).clip(lower=1e-12))
-        park = pd.Series(
-            np.sqrt(np.maximum(1.0 / (4.0 * np.log(2.0)) * (hl**2), 0.0)),
-            index=btc_df.index,
+        # 10-11. macro_lsr fallback
+        if "long_short_ratio" in panel_df.columns:
+            m_lsr = panel_df["long_short_ratio"].groupby(level="datetime").mean()
+            out["macro_lsr_168h"] = m_lsr.rolling(w168).mean().reindex(idx).fillna(1.0)
+            out["macro_lsr_delta_24h"] = m_lsr.pct_change(w24).reindex(idx).fillna(0.0)
+        else:
+            out["macro_lsr_168h"] = 1.0
+            out["macro_lsr_delta_24h"] = 0.0
+
+    # 6. macro_cs_dispersion_24h: cross-sectional 1h log-return std [T1-D]
+    if not panel_df.empty and isinstance(panel_df.index, pd.MultiIndex):
+        close_panel = panel_df["close"].unstack(level="symbol")
+        cs_log_ret = np.log(close_panel / close_panel.shift(1).clip(lower=1e-12))
+        w24_bars = _get_window(24, tf)
+        cs_disp = (
+            cs_log_ret.rolling(w24_bars, min_periods=max(2, w24_bars // 4))
+            .std(ddof=0)
+            .mean(axis=1)
         )
-        rv_regime = park.rolling(w24, min_periods=max(1, w24 // 4)).mean() / (park.rolling(w168, min_periods=max(1, w168 // 4)).mean() + 1e-12)
-
-        # 3. Downside Risk
-        neg_ret = log_ret_1.clip(upper=0.0)
-        downside_vol_ratio = (
-            neg_ret.rolling(w24, min_periods=max(2, w24 // 2)).std() / (log_ret_1.rolling(w24, min_periods=max(2, w24 // 2)).std() + 1e-12)
-        ).fillna(0.5)
-
-        # 4. Structural Distance (Capitulation)
-        ma_168 = btc_close.rolling(w168, min_periods=max(1, w168 // 4)).mean()
-        btc_ma_dist_168h = (btc_close / (ma_168 + 1e-12)) - 1.0
-
-        # 5. Energy (Squeeze Precursor)
-        btc_vol = btc_df["volume"].astype(np.float64)
-        vol_energy = btc_vol.rolling(w24, min_periods=max(1, w24 // 4)).mean() / (btc_vol.rolling(w168, min_periods=max(1, w168 // 4)).mean() + 1e-12) - 1.0
+        out["macro_cs_dispersion_24h"] = cs_disp.reindex(idx).fillna(0.0)
     else:
-        btc_trend_24h = pd.Series(0.0, index=idx)
-        btc_trend_168h = pd.Series(0.0, index=idx)
-        rv_regime = pd.Series(1.0, index=idx)
-        downside_vol_ratio = pd.Series(0.5, index=idx)
-        btc_ma_dist_168h = pd.Series(0.0, index=idx)
-        vol_energy = pd.Series(0.0, index=idx)
+        out["macro_cs_dispersion_24h"] = 0.0
 
-    out = pd.DataFrame(index=idx)
-    out["btc_trend_vol_adj_24h"] = btc_trend_24h.reindex(idx).fillna(0.0)
-    out["btc_trend_vol_adj_168h"] = btc_trend_168h.reindex(idx).fillna(0.0)
-    out["realized_vol_regime"] = rv_regime.reindex(idx).fillna(1.0)
-    out["downside_vol_ratio"] = downside_vol_ratio.reindex(idx).fillna(0.5)
-    out["btc_ma_dist_168h"] = btc_ma_dist_168h.reindex(idx).fillna(0.0)
-    out["volume_momentum_24h"] = vol_energy.reindex(idx).fillna(0.0)
-    out["market_breadth"] = market_feats["market_breadth"].reindex(idx).fillna(0.0)
-    out["funding_level"] = funding_mean.reindex(idx).fillna(0.0)
-    
-    # 6. Cross-Sectional Dispersion
-    out["cs_dispersion"] = market_feats["cs_dispersion"].reindex(idx).fillna(0.0)
-    
-    # 7. ETH/BTC Relative Strength (Risk-on/off proxy)
-    eth_sym = next((s for s in syms if "ETH" in s), None)
-    if btc_sym and eth_sym:
-        eth_close = panel_df.xs(eth_sym, level="symbol")["close"].astype(np.float64)
-        rs = eth_close / btc_close
-        w24_ema = _get_window(24, tf)
-        rs_ema = rs.ewm(span=w24_ema).mean()
-        out["eth_btc_rs"] = (rs / (rs_ema + 1e-12)) - 1.0
+    # 7. macro_breadth_168h: fraction of symbols above their 168h MA [T1-D]
+    if not panel_df.empty and isinstance(panel_df.index, pd.MultiIndex):
+        close_panel_b = panel_df["close"].unstack(level="symbol")
+        w168_bars = _get_window(168, tf)
+        ma_168 = close_panel_b.rolling(w168_bars, min_periods=max(20, w168_bars // 4)).mean()
+        breadth = (close_panel_b > ma_168).mean(axis=1)
+        out["macro_breadth_168h"] = breadth.reindex(idx).fillna(0.5)
     else:
-        out["eth_btc_rs"] = 0.0
+        out["macro_breadth_168h"] = 0.5
 
-    out = out[list(SYSTEMIC_HMM_FEATURE_COLUMNS)]
+    # Mixed normalization [T1-A]:
+    #   Vol-like features (always positive): Log + RobustScaler (magnitude 보존)
+    #   Other features: Rank-Gauss (QuantileTransformer)
+    from sklearn.preprocessing import QuantileTransformer, RobustScaler
+
+    vol_feat_cols = [
+        c for c in ["macro_vol_24h", "macro_downside_vol_24h", "macro_cs_dispersion_24h"]
+        if c in out.columns
+    ]
+    if vol_feat_cols:
+        vol_data = out[vol_feat_cols].fillna(0.0).to_numpy()
+        vol_data_log = np.log1p(np.maximum(vol_data, 0.0))
+        rs = RobustScaler()
+        out[vol_feat_cols] = rs.fit_transform(vol_data_log)
+
+    other_cols = [c for c in SYSTEMIC_HMM_FEATURE_COLUMNS if c not in vol_feat_cols]
+    if other_cols:
+        # Robustly handle NaNs and Infs before QuantileTransformer
+        clean_other = out[other_cols].replace([np.inf, -np.inf], np.nan).fillna(0.0)
+        qt = QuantileTransformer(
+            output_distribution="normal",
+            n_quantiles=min(len(out), 1000),
+            random_state=42,
+        )
+        out[other_cols] = qt.fit_transform(clean_other)
+
     return out.replace([np.inf, -np.inf], np.nan).fillna(0.0)
