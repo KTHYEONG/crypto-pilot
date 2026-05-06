@@ -9,7 +9,7 @@ data/
 
 # claude
 CLAUDE.md
-.claude/
+# .claude/
 
 # gemini
 .gemini/
@@ -166,7 +166,7 @@ logs/
 Explain/
 
 # agent
-.agents/
+# .agents/
 AGENTS.md
 
 # docs
