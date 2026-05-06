@@ -14,6 +14,8 @@ dependencies = [
     "catboost>=1.2.0",
     "statsmodels>=0.14.0",
     "pyarrow",
+    "jax[cuda12-pip,cuda13]>=0.10.0",
+    "optax>=0.2.8",
 ]
 
 [project.optional-dependencies]
