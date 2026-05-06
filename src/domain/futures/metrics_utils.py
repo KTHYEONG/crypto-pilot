@@ -55,6 +55,7 @@ def merge_metrics_into_ohlcv(
     # Identify metrics columns to merge
     exclude = ["timestamp", "datetime", "create_time", "symbol"]
     feature_cols = [c for c in metrics_df.columns if c not in exclude]
+    # print(f"DEBUG: {symbol} feature_cols={feature_cols}")
     
     if not feature_cols:
         return out

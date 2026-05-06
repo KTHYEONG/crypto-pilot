@@ -1,20 +1,32 @@
-"""Gaussian HMM regime probabilities with walk-forward refit and stable semantic labels."""
+"""JAX-based Skewed Student-t HMM regime probabilities with SGD optimization and sticky priors."""
 
 from __future__ import annotations
 
 import logging
-import pickle
+import os
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
+import jax
+import jax.numpy as jnp
 import numpy as np
+
+# Control JAX memory preallocation and log backend info
+os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
+_logger = logging.getLogger(__name__)
+
+try:
+    _logger.info("JAX Backend: %s", jax.default_backend())
+    _logger.info("JAX Devices: %s", jax.devices())
+except Exception as e:
+    _logger.warning("JAX initialization info failed: %s", e)
+
+import optax
 import pandas as pd
-from hmmlearn.hmm import GaussianHMM
-from numba import njit
-from scipy.optimize import linear_sum_assignment
-from sklearn.preprocessing import QuantileTransformer
+from jax.scipy.special import betainc, gammaln
+from sklearn.preprocessing import QuantileTransformer, RobustScaler
 
 from config.opt_config import OPT_FUTURES_CONFIG
 from config.settings import FUTURES_CACHE_DIR
@@ -24,497 +36,291 @@ from src.domain.futures.ml_pipeline.feature_engineering import (
     SYSTEMIC_HMM_FEATURE_COLUMNS,
 )
 
-warnings.filterwarnings("ignore", message=".*overwritten during initialization.*")
 warnings.filterwarnings("ignore", category=RuntimeWarning, message=".*divide by zero.*")
 
 _logger = logging.getLogger(__name__)
 
 _SEMANTIC_ORDER = list(HMM_SEMANTIC_PROB_COLUMNS)
 
+# --- JAX Skewed Student-t Distribution Implementation ---
 
-def _assign_state_semantic_labels_v2(
-    means: np.ndarray, 
-    state_returns: np.ndarray | None = None,
-    state_vols: np.ndarray | None = None
-) -> dict[int, str]:
-    """Map raw HMM state index -> semantic label using Archetype Distance Matching.
-    
-    Archetypes are defined in Z-score space for 10 systemic features:
-    0: btc_trend_vol_adj_24h, 1: btc_trend_vol_adj_168h, 2: realized_vol_regime,
-    3: downside_vol_ratio, 4: btc_ma_dist_168h, 5: volume_momentum_24h,
-    6: market_breadth, 7: funding_level, 8: cs_dispersion, 9: eth_btc_rs
+@jax.jit
+def _student_t_log_pdf(
+    x: jnp.ndarray, loc: jnp.ndarray, scale: jnp.ndarray, df: jnp.ndarray
+) -> jnp.ndarray:
+    """Compute Student-t log-pdf."""
+    y = (x - loc) / scale
+    log_c = (
+        gammaln((df + 1.0) / 2.0)
+        - gammaln(df / 2.0)
+        - 0.5 * jnp.log(jnp.pi * df)
+        - jnp.log(scale)
+    )
+    return log_c - (df + 1.0) / 2.0 * jnp.log1p(y**2 / df)
+
+
+@jax.jit
+def _student_t_cdf(x: jnp.ndarray, df: jnp.ndarray) -> jnp.ndarray:
+    """Compute Student-t CDF using regularized incomplete beta function (betainc).
+
+    Note: stop_gradient is used on df because jax.scipy.special.betainc
+    does not support gradients w.r.t. a and b.
     """
-    # Define archetypes based on target regime characteristics
-    archetypes = {
-        "bull_trend": [1.2, 1.2, -0.5, -0.5, 1.0, 0.5, 1.0, 0.5, -0.5, 1.0],
-        "bear_trend": [-1.2, -1.2, 0.5, 0.5, -1.0, -0.2, -1.0, -0.5, 0.5, -1.0],
-        "chop": [0.0, 0.0, -1.0, -1.0, 0.0, -0.5, 0.0, 0.0, 0.0, 0.0],
-        "crisis": [-2.0, -2.0, 2.0, 2.0, -2.0, 1.0, -1.0, -2.0, 1.5, -1.0],
-    }
+    df_stop = jax.lax.stop_gradient(df)
+    fac = df_stop / (df_stop + x**2)
+    bi = betainc(df_stop / 2.0, 0.5, fac)
+    return jnp.where(x > 0, 1.0 - 0.5 * bi, 0.5 * bi)
+
+@jax.jit
+def _skew_student_t_log_pdf(
+    x: jnp.ndarray, loc: jnp.ndarray, scale: jnp.ndarray, skew: jnp.ndarray, df: jnp.ndarray
+) -> jnp.ndarray:
+    """Azzalini Skew-t log-pdf."""
+    # x: (D,), loc: (D,), scale: (D,), skew: (D,), df: (1,)
+    x_norm = (x - loc) / scale
+    log_t = _student_t_log_pdf(x, loc, scale, df)
     
-    label_names = ["bull_trend", "bear_trend", "chop", "crisis"]
-    archetype_matrix = np.array([archetypes[ln] for ln in label_names])
+    # Skewness adjustment: 2 * t(x) * T(alpha * x_norm * sqrt((df+1)/(df + x_norm^2)))
+    adj = skew * x_norm * jnp.sqrt((df + 1.0) / (df + x_norm**2))
+    log_T = jnp.log(jnp.clip(_student_t_cdf(adj, df + 1.0), 1e-12, 1.0))
     
+    return jnp.log(2.0) + log_t + log_T
+
+@jax.jit
+def _multivariate_skew_t_log_pdf(
+    x: jnp.ndarray, loc: jnp.ndarray, scale: jnp.ndarray, skew: jnp.ndarray, df: jnp.ndarray
+) -> jnp.ndarray:
+    """Diagonal Multivariate Skew-t log-pdf (sum of univariate)."""
+    # x: (D,), loc: (D,), scale: (D,), skew: (D,), df: scalar
+    return jnp.sum(_skew_student_t_log_pdf(x, loc, scale, skew, df))
+
+# --- JAX HMM Core Functions ---
+
+@jax.jit
+def _forward_pass(
+    observations: jnp.ndarray,
+    log_init_probs: jnp.ndarray,
+    log_trans_mat: jnp.ndarray,
+    locs: jnp.ndarray,
+    scales: jnp.ndarray,
+    skews: jnp.ndarray,
+    dfs: jnp.ndarray,
+) -> jnp.ndarray:
+    """Run Forward algorithm in log-space."""
+    num_states = log_init_probs.shape[0]
+
+    def scan_fn(
+        log_alpha_prev: jnp.ndarray, x: jnp.ndarray
+    ) -> tuple[jnp.ndarray, jnp.ndarray]:
+        # Log emissions for each state: (K,)
+        log_emissions = jax.vmap(
+            lambda k: _multivariate_skew_t_log_pdf(x, locs[k], scales[k], skews[k], dfs[k])
+        )(jnp.arange(num_states))
+        # log_alpha_prev: (K,), log_trans_mat: (K, K)
+        combined = log_alpha_prev[:, None] + log_trans_mat
+        log_alpha_next = jax.scipy.special.logsumexp(combined, axis=0) + log_emissions
+        return log_alpha_next, log_alpha_next
+
+    # Initial step
+    initial_emissions = jax.vmap(
+        lambda k: _multivariate_skew_t_log_pdf(observations[0], locs[k], scales[k], skews[k], dfs[k])
+    )(jnp.arange(num_states))
+    log_alpha_0 = log_init_probs + initial_emissions
+
+    _, log_alphas = jax.lax.scan(scan_fn, log_alpha_0, observations[1:])
+    log_alphas = jnp.concatenate([log_alpha_0[None, :], log_alphas], axis=0)
+
+    return log_alphas
+
+
+@jax.jit
+def _compute_nll(
+    params: dict[str, Any], observations: jnp.ndarray, sticky_alpha: float = 0.95
+) -> jnp.ndarray:
+    """Compute Negative Log-Likelihood with Sticky Prior penalty."""
+    log_alphas = _forward_pass(
+        observations,
+        jax.nn.log_softmax(params["initial"]),
+        jax.nn.log_softmax(params["transition"], axis=1),
+        params["locs"],
+        jnp.exp(params["log_scales"]),
+        params["skews"],
+        jnp.exp(params["log_dfs"]),
+    )
+    ll = jax.scipy.special.logsumexp(log_alphas[-1])
+
+    # Sticky Prior: Encourage high diagonal in transition matrix
+    trans_mat = jax.nn.softmax(params["transition"], axis=1)
+    sticky_penalty = -10.0 * jnp.sum(jnp.log(jnp.diag(trans_mat) + 1e-6))
+
+    return -ll + sticky_penalty
+
+# --- Utility Functions ---
+
+def _assign_state_semantic_labels_v5(
+    means: np.ndarray,
+    state_returns: np.ndarray | None = None,
+    state_vols: np.ndarray | None = None,
+) -> dict[int, str]:
+    """Map HMM state index to semantic label via G_LOG based Logic (v15.6 SOTA)."""
     k = means.shape[0]
-    
-    # Use only the first 10 systemic features for matching if more exist
-    relevant_means = means[:, :10]
-    relevant_archetypes = archetype_matrix[:, :10]
-    
-    # Distance matrix (Euclidean)
-    dist_matrix = np.zeros((k, len(label_names)))
-    for i in range(k):
-        for j in range(len(label_names)):
-            dist_matrix[i, j] = np.linalg.norm(relevant_means[i] - relevant_archetypes[j])
-            
-    # [Task Fix] Return-based Correction Gate
-    # The user noted Bull/Bear inversion. We override the distance matrix
-    # for Bull/Bear archetypes using empirical returns if available.
-    if state_returns is not None and len(state_returns) == k:
-        bull_idx_empirical = np.argmax(state_returns)
-        bear_idx_empirical = np.argmin(state_returns)
-        
-        # Penalize non-matching Bull/Bear returns in the distance matrix
-        # (Hungarian Algorithm will still try to find global optimum)
-        for i in range(k):
-            # BULL_TREND is at index 0 in label_names
-            if i == bull_idx_empirical:
-                dist_matrix[i, 0] *= 0.1  # Highly encourage
-            else:
-                dist_matrix[i, 0] *= 2.0  # Discourage
-                
-            # BEAR_TREND is at index 1 in label_names
-            if i == bear_idx_empirical:
-                dist_matrix[i, 1] *= 0.1  # Highly encourage
-            else:
-                dist_matrix[i, 1] *= 2.0  # Discourage
+    trend_idx = 0         # macro_trend_168h
+    vol_idx = 1           # macro_vol_24h
+    downside_vol_idx = 4  # macro_downside_vol_24h
 
-    # CRISIS matching: Prioritize Volatility (feature index 2: realized_vol_regime)
-    if state_vols is not None and len(state_vols) == k:
-        crisis_idx_empirical = np.argmax(state_vols)
-        # CRISIS is at index 3 in label_names
-        for i in range(k):
-            if i == crisis_idx_empirical:
-                dist_matrix[i, 3] *= 0.5
-            else:
-                dist_matrix[i, 3] *= 1.5
+    state_to_label: dict[int, str] = {}
+    remaining = list(range(k))
 
-    # Optimal bipartite matching (Hungarian Algorithm)
-    row_ind, col_ind = linear_sum_assignment(dist_matrix)
-    
-    state_to_label = {}
-    for r, c in zip(row_ind, col_ind, strict=False):
-        state_to_label[int(r)] = label_names[c]
-        
-    # Fill remaining states if k > 4
-    if k > len(label_names):
-        assigned_states = set(state_to_label.keys())
-        for i in range(k):
-            if i not in assigned_states:
-                state_to_label[i] = "chop"
+    vol_means = means[:, vol_idx]
+    down_vol_means = (
+        means[:, downside_vol_idx] if means.shape[1] > downside_vol_idx else vol_means
+    )
+    composite_risk = (vol_means + down_vol_means) / 2.0
+
+    crisis_idx = int(remaining[int(np.argmax(composite_risk[remaining]))])
+    state_to_label[crisis_idx] = "crisis"
+    remaining.remove(crisis_idx)
+
+    if state_returns is not None and state_vols is not None:
+        mu = np.asarray(state_returns, dtype=np.float64)
+        sigma = np.asarray(state_vols, dtype=np.float64)
+        proxy_g_log = mu - 0.5 * (sigma**2)
+    else:
+        proxy_g_log = means[:, trend_idx] - 0.5 * (means[:, vol_idx] ** 2)
+
+    bull_idx_rel = int(np.argmax(proxy_g_log[remaining]))
+    bull_idx = remaining[bull_idx_rel]
+    state_to_label[bull_idx] = "bull_trend"
+    remaining.remove(bull_idx)
+
+    if remaining:
+        bear_idx_rel = int(np.argmin(proxy_g_log[remaining]))
+        bear_idx = remaining[bear_idx_rel]
+        state_to_label[bear_idx] = "bear_trend"
+        remaining.remove(bear_idx)
+
+    for idx in remaining:
+        state_to_label[idx] = "chop"
 
     return state_to_label
 
 
-@njit  # type: ignore
-def _winsorize_cols_numba(X: np.ndarray, pct: float = 0.01) -> np.ndarray:
-    """Numba-accelerated winsorization for feature matrix (per-symbol HMM path)."""
-    n_rows, n_cols = X.shape
-    out = X.copy()
-    for j in range(n_cols):
-        col = X[:, j]
-        lo_idx = int(n_rows * pct)
-        hi_idx = int(n_rows * (1.0 - pct))
-        if hi_idx >= n_rows:
-            hi_idx = n_rows - 1
-        tmp = np.sort(col)
-        lo = tmp[lo_idx]
-        hi = tmp[hi_idx]
-        for i in range(n_rows):
-            if out[i, j] < lo:
-                out[i, j] = lo
-            elif out[i, j] > hi:
-                out[i, j] = hi
-    return out
+def _quantile_scaling(X: np.ndarray) -> tuple[np.ndarray, dict]:  # type: ignore[type-arg]
+    """Perform mixed scaling: Log+RobustScaler for vol features, Rank-Gauss for others."""
+    feat_cols = list(SYSTEMIC_HMM_FEATURE_COLUMNS)
+    vol_indices = [
+        i for i, c in enumerate(feat_cols)
+        if "vol" in c or "cs_dispersion" in c
+    ]
+    other_indices = [i for i in range(X.shape[1]) if i not in vol_indices]
+
+    X_clean = X.copy()
+    transformers: dict = {}  # type: ignore[type-arg]
+
+    if vol_indices:
+        X_vol = np.log1p(np.maximum(X_clean[:, vol_indices], 0.0))
+        rs = RobustScaler()
+        X_clean[:, vol_indices] = rs.fit_transform(X_vol)
+        transformers["vol_indices"] = vol_indices
+        transformers["vol_rs"] = rs
+
+    if other_indices:
+        X_other = X_clean[:, other_indices].copy()
+        for i_rel in range(X_other.shape[1]):
+            col_data = X_other[:, i_rel]
+            mu = np.mean(col_data)
+            std = np.std(col_data) + 1e-12
+            X_other[:, i_rel] = np.clip(col_data, mu - 3.0 * std, mu + 3.0 * std)
+        qt = QuantileTransformer(
+            output_distribution="normal",
+            n_quantiles=min(len(X_other), 1000),
+            random_state=42,
+        )
+        X_clean[:, other_indices] = qt.fit_transform(X_other)
+        transformers["other_indices"] = other_indices
+        transformers["other_qt"] = qt
+
+    X_clean = np.clip(X_clean, -5.0, 5.0)
+    return X_clean, transformers
 
 
-@njit  # type: ignore
-def _wma_numba(data: np.ndarray, period: int) -> np.ndarray:
-    """Numba-accelerated Weighted Moving Average."""
-    n = len(data)
-    out = np.copy(data)
-    if period <= 1:
-        return out
-
-    weights = np.arange(1, period + 1).astype(np.float64)
-    weight_sum = (period * (period + 1)) / 2.0
-
-    for i in range(period - 1, n):
-        total = 0.0
-        for j in range(period):
-            total += data[i - period + 1 + j] * weights[j]
-        out[i] = total / weight_sum
-    return out
-
-
-@njit  # type: ignore
-def _calculate_ordered_probs_numba(
-    state_seq: np.ndarray,
-    lr: np.ndarray,
-    last_p: np.ndarray,
-    n_states: int,
-) -> np.ndarray:
-    """Sharpe-like ordering for legacy per-symbol HMM path."""
-    scores: np.ndarray = np.zeros(n_states, dtype=np.float64)
-    for s in range(n_states):
-        count = 0
-        total = 0.0
-        for i in range(len(state_seq)):
-            if state_seq[i] == s:
-                total += lr[i]
-                count += 1
-        if count > 5:
-            mean = total / count
-            var = 0.0
-            for i in range(len(state_seq)):
-                if state_seq[i] == s:
-                    var += (lr[i] - mean) ** 2
-            var /= count
-            std = np.sqrt(var) + 1e-12
-            scores[s] = mean / std
-        else:
-            scores[s] = -1e9
-    order = np.argsort(scores)
-    reordered: np.ndarray = np.zeros(n_states, dtype=np.float64)
-    for i in range(n_states):
-        reordered[i] = last_p[order[i]]
-    return reordered
-
-
-def _quantile_scaling(X: np.ndarray) -> tuple[np.ndarray, QuantileTransformer]:
-    """Perform quantile scaling to normal distribution.
-
-    Args:
-        X: Input feature matrix.
-
-    Returns:
-        tuple: (scaled_matrix, fitted_transformer)
-
-    """
-    qt = QuantileTransformer(
-        output_distribution="normal", 
-        n_quantiles=min(len(X), 1000), 
-        random_state=42
-    )
-    Xs = qt.fit_transform(X)
-    # Clip to avoid extreme outliers in Gaussian space (e.g. +/- 5 sigma)
-    Xs = np.clip(Xs, -5.0, 5.0)
-    return Xs, qt
-
-
-def _quantile_transform(X: np.ndarray, qt: QuantileTransformer) -> np.ndarray:
-    """Apply pre-fitted quantile transformation."""
-    out = qt.transform(X)
-    return cast(np.ndarray, np.clip(out, -5.0, 5.0))
-
-
-def _sticky_transmat_prior(n_states: int, self_p: float = 0.9) -> np.ndarray:
-    """Create a transition matrix prior with high self-transition probability."""
-    off = (1.0 - self_p) / max(n_states - 1, 1)
-    t_mat: np.ndarray = np.full((n_states, n_states), off, dtype=np.float64)
-    np.fill_diagonal(t_mat, self_p)
-    row_sums = np.asarray(t_mat.sum(axis=1)[:, np.newaxis], dtype=np.float64)
-    return cast(np.ndarray, t_mat / row_sums)
-
-
-def _blend_transition(
-    T_fit: np.ndarray, n_states: int, alpha: float, self_p: float = 0.9
-) -> np.ndarray:
-    """Blend fitted transition matrix with a sticky prior."""
-    T_prior = _sticky_transmat_prior(n_states, self_p=self_p)
-    T_fit_safe = np.nan_to_num(T_fit, nan=1.0 / n_states)
-    T_new = np.asarray((1.0 - alpha) * T_fit_safe + alpha * T_prior, dtype=np.float64)
-    row_sums = np.asarray(T_new.sum(axis=1)[:, np.newaxis], dtype=np.float64)
-    # Ensure no division by zero
-    row_sums = np.where(row_sums < 1e-12, 1.0, row_sums)
-    return cast(np.ndarray, T_new / row_sums)
-
-
-def _assign_state_semantic_labels(
-    means: np.ndarray, 
-    X_ref: np.ndarray,
-    state_returns: np.ndarray | None = None,
-    state_vols: np.ndarray | None = None
-) -> dict[int, str]:
-    """Map raw HMM state index → semantic label using Archetype Distance Matching (v2)."""
-    return _assign_state_semantic_labels_v2(means, state_returns, state_vols)
-
-
-def _raw_posterior_to_semantic(
-    raw_p: np.ndarray, state_to_label: dict[int, str]
-) -> np.ndarray:
-    """raw_p shape (k,); output shape (4,) in _SEMANTIC_ORDER."""
-    out: np.ndarray = np.zeros(len(_SEMANTIC_ORDER), dtype=np.float64)
-    for si, p_s in enumerate(raw_p):
-        lab = state_to_label.get(si, "chop")
-        prob_col = f"hmm_prob_{lab}"
-        if prob_col in _SEMANTIC_ORDER:
-            j = _SEMANTIC_ORDER.index(prob_col)
-            out[j] += float(p_s)
-    return out
-
-
-def _regime_entropy(p: np.ndarray) -> float:
-    """Calculate Shannon entropy of regime probabilities."""
-    p = np.clip(p, 1e-12, 1.0)
-    return float(-np.sum(p * np.log(p)))
-
-
-@njit  # type: ignore
-def _kama_numba(
-    data: np.ndarray, period: int, fast_span: int = 2, slow_span: int = 30
-) -> np.ndarray:
-    """Numba-accelerated Kaufman's Adaptive Moving Average."""
-    n = len(data)
-    out = np.copy(data)
-    if n <= period:
-        return out
-
-    fastest = 2.0 / (fast_span + 1.0)
-    slowest = 2.0 / (slow_span + 1.0)
-
-    # Initialize first KAMA as first data point
-    for i in range(1, n):
-        if i < period:
-            # Simple EMA for warmup
-            alpha = 2.0 / (period + 1.0)
-            out[i] = data[i] * alpha + out[i-1] * (1.0 - alpha)
-            continue
-
-        # Efficiency Ratio (ER)
-        change = abs(data[i] - data[i - period])
-        volatility = 0.0
-        for j in range(i - period + 1, i + 1):
-            volatility += abs(data[j] - data[j - 1])
-
-        if volatility > 1e-12:
-            er = change / volatility
-        else:
-            er = 0.0
-
-        sc = (er * (fastest - slowest) + slowest) ** 2
-        out[i] = out[i - 1] + sc * (data[i] - out[i - 1])
-    return out
-
-
-@njit  # type: ignore
-def _alma_numba(
-    data: np.ndarray, window: int, offset: float = 0.85, sigma: float = 6.0
-) -> np.ndarray:
-    """Numba-accelerated Arnaud Legoux Moving Average."""
-    n = len(data)
-    out = np.copy(data)
-    if n < window:
-        return out
-
-    m = offset * (window - 1)
-    s = window / sigma
-
-    weights = np.zeros(window)
-    norm_sum = 0.0
-    for i in range(window):
-        weights[i] = np.exp(-((i - m) ** 2) / (2.0 * s * s))
-        norm_sum += weights[i]
-    
-    if norm_sum > 1e-12:
-        weights /= norm_sum
-    else:
-        weights[:] = 1.0 / window
-
-    for i in range(window - 1, n):
-        val = 0.0
-        for j in range(window):
-            val += data[i - window + 1 + j] * weights[j]
-        out[i] = val
-    return out
-
-
-@njit  # type: ignore
-def _jma_approx_numba(data: np.ndarray, period: int, phase: float = 0.0) -> np.ndarray:
-    """Numba-accelerated Jurik Moving Average (Approximation)."""
-    n = len(data)
-    out = np.copy(data)
-    if n < 2:
-        return out
-
-    # Parameters
-    length = float(period)
-    phase_adj = max(-100.0, min(100.0, phase))
-    ratio = (phase_adj / 100.0) + 1.5
-    if ratio < 0.5:
-        ratio = 0.5
-    if ratio > 2.5:
-        ratio = 2.5
-    
-    beta = 0.45 * (length - 1.0) / (0.45 * (length - 1.0) + 2.0)
-    alpha = beta ** 1.5
-    
-    # Internal state
-    e0 = data[0]
-    e1 = 0.0
-    e2 = 0.0
-    jma = data[0]
-    
-    for i in range(1, n):
-        e0 = (1.0 - alpha) * data[i] + alpha * e0
-        e1 = (data[i] - e0) * (1.0 - beta) + beta * e1
-        # Phase correction
-        e2 = (e0 + ratio * e1 - jma) * ((1.0 - alpha) ** 2) + (alpha ** 2) * e2
-        jma = e2 + jma
-        out[i] = jma
-    return out
+def _quantile_transform(X: np.ndarray, transformers: dict) -> np.ndarray:  # type: ignore[type-arg]
+    """Apply pre-fitted mixed transformations."""
+    X_out = X.copy()
+    vol_indices: list[int] = transformers.get("vol_indices", [])
+    if vol_indices:
+        rs: RobustScaler = transformers["vol_rs"]
+        X_vol = np.log1p(np.maximum(X_out[:, vol_indices], 0.0))
+        X_out[:, vol_indices] = rs.transform(X_vol)
+    other_indices: list[int] = transformers.get("other_indices", [])
+    if other_indices:
+        qt: QuantileTransformer = transformers["other_qt"]
+        X_out[:, other_indices] = qt.transform(X_out[:, other_indices])
+    return cast(np.ndarray, np.clip(X_out, -5.0, 5.0))
 
 
 def _apply_posterior_smoothing(
     df: pd.DataFrame, method: str = "EMA", span: int = 6
 ) -> pd.DataFrame:
-    """Apply EMA, DEMA, TEMA, HMA, KAMA, ALMA, or JMA smoothing to probabilities."""
+    """Apply smoothing to probabilities to reduce whipsaws."""
     if span <= 1:
         return df
-
-    out_df = df.copy()
-    cols = df.columns
-
-    if method == "EMA":
-        out_df = df.ewm(span=span, adjust=False).mean()
-    
-    elif method == "DEMA":
-        ema1 = df.ewm(span=span, adjust=False).mean()
-        ema2 = ema1.ewm(span=span, adjust=False).mean()
-        out_df = 2 * ema1 - ema2
-    
-    elif method == "TEMA":
-        ema1 = df.ewm(span=span, adjust=False).mean()
-        ema2 = ema1.ewm(span=span, adjust=False).mean()
-        ema3 = ema2.ewm(span=span, adjust=False).mean()
-        out_df = 3 * ema1 - 3 * ema2 + ema3
-
-    elif method == "HMA":
-        period = span
-        half_period = max(1, period // 2)
-        sqrt_period = max(1, int(np.sqrt(period)))
-        
-        for col in cols:
-            data = df[col].to_numpy(dtype=np.float64)
-            wma_half = _wma_numba(data, half_period)
-            wma_full = _wma_numba(data, period)
-            hma_raw = 2 * wma_half - wma_full
-            hma = _wma_numba(hma_raw, sqrt_period)
-            out_df[col] = hma
-
-    elif method == "KAMA":
-        for col in cols:
-            data = df[col].to_numpy(dtype=np.float64)
-            out_df[col] = _kama_numba(data, period=span)
-
-    elif method == "ALMA":
-        for col in cols:
-            data = df[col].to_numpy(dtype=np.float64)
-            out_df[col] = _alma_numba(data, window=span, offset=0.85, sigma=6.0)
-
-    elif method == "JMA":
-        for col in cols:
-            data = df[col].to_numpy(dtype=np.float64)
-            out_df[col] = _jma_approx_numba(data, period=span, phase=0.0)
-            
-    else:
-        out_df = df.ewm(span=span, adjust=False).mean()
-        
-    # Standard Post-processing: Clipping and Normalization
+    out_df = df.ewm(span=span, adjust=False).mean()
     out_df = out_df.clip(0.0, 1.0)
     row_sums = out_df.sum(axis=1)
-    # Avoid division by zero
-    out_df = out_df.div(row_sums, axis=0).fillna(1.0 / len(cols))
-    
+    out_df = out_df.div(row_sums, axis=0).fillna(1.0 / len(df.columns))
     return out_df
 
 
-LABEL_VERSION = "v7"
+def _apply_sticky_posterior(
+    regime_labels: np.ndarray,
+    posteriors: np.ndarray,
+    smoothing_window: int = 6,
+    min_duration: int = 12,
+) -> np.ndarray:
+    """Posterior smoothing + min-duration constraint to reduce regime flip noise."""
+    t_len = posteriors.shape[0]
+    if t_len == 0:
+        return regime_labels.copy()
+    smoothed = np.zeros_like(posteriors)
+    w = max(1, smoothing_window)
+    for i in range(t_len):
+        start = max(0, i - w + 1)
+        smoothed[i] = posteriors[start : i + 1].mean(axis=0)
+    labels_smooth: np.ndarray = np.argmax(smoothed, axis=1).astype(np.int32)
+    if min_duration <= 1 or t_len < 2:
+        return labels_smooth
+    result = labels_smooth.copy()
+    i = 0
+    while i < t_len:
+        current_state = result[i]
+        j = i + 1
+        while j < t_len and result[j] == current_state:
+            j += 1
+        run_len = j - i
+        if run_len < min_duration and i > 0:
+            prev_state = result[i - 1]
+            result[i:j] = prev_state
+            i = max(0, i - 1)
+            while i > 0 and result[i - 1] == prev_state:
+                i -= 1
+        else:
+            i = j
+    return result
 
 
-def _load_or_build_state_labels(
-    label_path: Path,
-    means: np.ndarray,
-    X_ref_scaled: np.ndarray,
-    k: int,
-    state_returns: np.ndarray | None = None,
-    state_vols: np.ndarray | None = None,
-) -> dict[int, str]:
-    """Load semantic labels from disk or build them if missing/invalid."""
-    if label_path.exists():
-        try:
-            with open(label_path, "rb") as f:
-                blob = pickle.load(f)  # noqa: S301
-            mapping = blob.get("state_to_label", blob)
-            n_feat = blob.get("n_features")
-            if isinstance(mapping, dict) and len(mapping) == k:
-                need_rebuild = (
-                    n_feat is None
-                    or int(n_feat) != int(means.shape[1])
-                    or blob.get("label_version") != LABEL_VERSION
-                )
-                if not need_rebuild:
-                    _logger.info("Loaded HMM state label mapping from %s", label_path)
-                    return {int(a): str(b) for a, b in mapping.items()}
-                _logger.info(
-                    "HMM state labels invalidated (n_features=%s vs %s); rebuilding.",
-                    n_feat,
-                    int(means.shape[1]),
-                )
-        except Exception as e:
-            _logger.warning("Failed to load state labels: %s", e)
-    m = _assign_state_semantic_labels_v2(means, state_returns, state_vols)
-    try:
-        with open(label_path, "wb") as f:
-            pickle.dump(
-                {
-                    "state_to_label": m,
-                    "k_states": k,
-                    "n_features": int(means.shape[1]),
-                    "label_version": LABEL_VERSION,
-                },
-                f,
-            )
-        _logger.info("Saved HMM state label mapping to %s", label_path)
-    except Exception as e:
-        _logger.warning("Failed to save state labels: %s", e)
-    return m
-
-
-def _centroid_label_drift_warn(
-    means: np.ndarray, state_to_label: dict[int, str]
-) -> None:
-    """Check if HMM semantic labels still match the underlying centroid characteristics."""
-    # Archetype matching is robust to drift by definition (it picks the closest),
-    # but we can log distances for diagnostics if needed.
-    pass
+LABEL_VERSION = "v16_jax_skew_t"
 
 
 @dataclass
 class HMMStateInferrer:
-    """Infers market regimes using Gaussian Hidden Markov Models.
-    
-    Provides both systemic (market-wide) and per-symbol regime detection
-    with stable semantic labels (crisis, bear_trend, bull_trend, chop).
-    """
+    """Infers market regimes using JAX-based Skewed Student-t HMM (v16 SOTA)."""
 
     n_states: int = 4
     max_states: int = 4
-    covariance_type: str = "diag"
-    n_iter: int = 200
+    n_iter: int = 500      # JAX SGD iterations
     predict_step: int = 24
-    fit_step: int = 168
-    min_covar: float = 1e-3
+    fit_step: int = 252
 
     def fit_predict_systemic(
         self,
@@ -524,487 +330,220 @@ class HMMStateInferrer:
         symbol: str = "Market",
         tf: str = "1h",
     ) -> pd.DataFrame:
-        """Expanding-window systemic HMM with stable semantic posteriors."""
+        """Expanding-window systemic HMM with JAX Skew-t logic."""
         k_cfg = int(OPT_FUTURES_CONFIG.get("FUTURES_HMM_K_STATES", self.n_states))
-        self.n_states = max(2, k_cfg)
-        tr_alpha = float(OPT_FUTURES_CONFIG.get("FUTURES_HMM_TRANSITION_PRIOR_ALPHA", 0.2))
-
-        # SOTA: Dependency-Aware Hashing & LRU Cleanup
+        self.n_states = max(4, k_cfg)
+        
         cm = CacheManager(FUTURES_CACHE_DIR, max_files=15, max_size_mb=1000.0)
-        cm.cleanup_lru(pattern="HMM_systemic_*")
-
         deps = {
             "symbol": symbol,
             "tf": tf,
-            "is_end_idx": is_end_idx,
+            "data_len": len(features_df),
             "n_states": self.n_states,
-            "tr_alpha": tr_alpha,
-            "covariance_type": self.covariance_type,
-            "smooth_method": str(OPT_FUTURES_CONFIG.get("FUTURES_HMM_SMOOTHING_METHOD", "EMA")),
-            "smooth_span": int(OPT_FUTURES_CONFIG.get("FUTURES_HMM_SMOOTHING_SPAN", 6)),
+            "ver": LABEL_VERSION,
             "feat_cols": sorted(list(SYSTEMIC_HMM_FEATURE_COLUMNS)),
-            "ver": "v2_smart_lru"
         }
-        # Track HMM source file for automatic invalidation
         src_files = [Path(__file__).resolve()]
-        
         tag = cm.generate_hash(deps, source_files=src_files)
-        prefix = f"HMM_systemic_{symbol}_{tf}_is{is_end_idx}"
+        prefix = f"HMM_v16_sys_{symbol}_{tf}_len{len(features_df)}"
         cache_path = cm.get_cache_path(prefix, ".parquet", tag)
-        label_path = FUTURES_CACHE_DIR / f"{symbol}_{tf}_state_labels_v6.pkl"
 
         if cache_path.exists():
             try:
                 cached_df = pd.read_parquet(cache_path)
-                _logger.info("[%s] HMM Systemic probabilities loaded from SOTA cache.", symbol)
+                _logger.info("[%s] JAX Skew-t HMM loaded from cache.", symbol)
                 return cached_df
             except Exception as e:
-                _logger.debug("Failed to load HMM Smart cache: %s", e)
+                _logger.warning("Failed to load HMM cache for %s: %s", symbol, e)
 
         feat_cols = list(SYSTEMIC_HMM_FEATURE_COLUMNS)
-        for c in feat_cols:
-            if c not in features_df.columns:
-                raise ValueError(f"Missing systemic HMM column: {c}")
         X_frame = features_df[feat_cols].replace([np.inf, -np.inf], np.nan).fillna(0.0)
-
         n = len(X_frame)
         if n < 200:
             return self._zeros_semantic(features_df)
 
         X_raw = X_frame.to_numpy(dtype=np.float64)
-        # Ensure returns_ser is aligned with X_raw (using reindex for safety)
         ret_raw = returns_ser.reindex(features_df.index).fillna(0.0).to_numpy(dtype=np.float64)
 
-        probs_sem: np.ndarray = np.full((n, len(_SEMANTIC_ORDER)), np.nan, dtype=np.float64)
+        out_cols = [
+            *_SEMANTIC_ORDER,
+            "hmm_entropy",
+            "hmm_expected_duration",
+            "hmm_current_duration",
+        ]
+        results: np.ndarray = np.full((n, len(out_cols)), np.nan, dtype=np.float64)
+
         min_train = 500
-        max_window = 8760
-        model: GaussianHMM | None = None
-        consecutive_fails = 0
-        degraded = False
-        state_to_label: dict[int, str] | None = None
-        qt_transformer: QuantileTransformer | None = None
-        k_st = int(self.n_states)
-        n_feat_expected = len(feat_cols)
+        max_window = 5040
+        params: dict[str, Any] | None = None
+        hmm_transformers: dict[str, Any] | None = None
+        map_matrix: np.ndarray | None = None
 
         for t in range(self.predict_step, n, self.predict_step):
             if t < min_train:
                 continue
 
-            win_end_idx = max(1, t - 1)
-            win_start_idx = max(0, t - max_window)
-            X_win_raw = X_raw[win_start_idx : win_end_idx]
-            ret_win = ret_raw[win_start_idx : win_end_idx]
-            X_train, qt_transformer = _quantile_scaling(X_win_raw)
-
-            ent_window = probs_sem[max(0, t - 24) : t, :]
-            force_entropy = False
-            if t <= is_end_idx and np.isfinite(ent_window).all() and ent_window.size > 0:
-                ent_rows = [_regime_entropy(ent_window[i]) for i in range(len(ent_window))]
-                mean_h = float(np.mean(ent_rows))
-                h_max = float(np.log(max(self.n_states, 2)))
-                if mean_h > 0.95 * h_max:
-                    force_entropy = True
-
-            is_fit_cycle = (
-                ((t % self.fit_step == 0) and t <= is_end_idx)
-                or (model is None)
-                or (force_entropy and t <= is_end_idx)
-            )
+            is_fit_cycle = (t % self.fit_step == 0) or (params is None)
 
             if is_fit_cycle:
-                prev_model = model
-                model = GaussianHMM(
-                    n_components=self.n_states,
-                    covariance_type=self.covariance_type,
-                    n_iter=self.n_iter if prev_model is None else 10,
-                    random_state=42,
-                    init_params="" if prev_model is not None else "stmc",
-                    min_covar=self.min_covar,
+                win_end = max(1, t - 1)
+                X_win = X_raw[max(0, t - max_window) : win_end]
+                ret_win = ret_raw[max(0, t - max_window) : win_end]
+
+                X_train_raw, new_transformers = _quantile_scaling(X_win)
+                X_train_jax = jnp.array(X_train_raw)
+
+                # Initialize Params
+                num_feats = X_train_jax.shape[1]
+                rng = jax.random.PRNGKey(42)
+                k1, k2, _, _, _ = jax.random.split(rng, 5)
+
+                # Heuristic init
+                initial_params = {
+                    "initial": jnp.zeros(self.n_states),
+                    "transition": jnp.eye(self.n_states) * 5.0,  # Strong diagonal init
+                    "locs": jax.random.normal(k1, (self.n_states, num_feats)),
+                    "log_scales": jnp.zeros((self.n_states, num_feats)),
+                    "skews": jax.random.normal(k2, (self.n_states, num_feats)) * 0.1,
+                    "log_dfs": jnp.ones(self.n_states) * 3.0,  # DoF ~ 20 init
+                }
+
+                # Optax SGD optimization
+                optimizer = optax.adam(learning_rate=0.01)
+                opt_state = optimizer.init(initial_params)
+
+                @jax.jit
+                def step(p: Any, opt_s: Any, x: jnp.ndarray) -> tuple[Any, Any]:
+                    _, grads = jax.value_and_grad(_compute_nll)(p, x)
+                    updates, new_opt_s = optimizer.update(grads, opt_s, p)
+                    new_p = optax.apply_updates(p, updates)
+                    return new_p, new_opt_s
+
+                curr_params = initial_params
+                for _ in range(self.n_iter):
+                    curr_params, opt_state = step(curr_params, opt_state, X_train_jax)
+
+                params = curr_params
+                hmm_transformers = new_transformers
+
+                # Post-fit Labeling
+                log_alphas = _forward_pass(
+                    X_train_jax,
+                    jax.nn.log_softmax(params["initial"]),
+                    jax.nn.log_softmax(params["transition"], axis=1),
+                    params["locs"],
+                    jnp.exp(params["log_scales"]),
+                    params["skews"],
+                    jnp.exp(params["log_dfs"]),
                 )
-                if prev_model is not None:
-                    try:
-                        model.n_features = prev_model.n_features
-                        model.startprob_ = np.nan_to_num(
-                            prev_model.startprob_, nan=1.0 / self.n_states
-                        )
-                        tm = prev_model.transmat_.copy()
-                        tm = np.nan_to_num(tm, nan=1.0 / self.n_states)
-                        tm = np.clip(tm, 1e-3, None)
-                        model.transmat_ = tm / tm.sum(axis=1)[:, np.newaxis]
-                        model.means_ = prev_model.means_
-                        cv = prev_model.covars_.copy()
-                        if self.covariance_type == "diag":
-                            # [FIX] hmmlearn 0.3.3 returns 3D even for 'diag', but setter expects 2D
-                            if cv.ndim == 3:
-                                cv = np.array([np.diag(c) for c in cv])
-                            cv = np.clip(cv, self.min_covar, None)
-                        elif self.covariance_type == "full":
-                            for i in range(self.n_states):
-                                cv[i] = (cv[i] + cv[i].T) / 2.0
-                                cv[i] += np.eye(cv[i].shape[0]) * 1e-9
-                        model.covars_ = cv
-                    except Exception as e:
-                        _logger.debug("HMM param injection failed: %s", e)
-                        model.init_params = "stmc"
+                posteriors = jax.nn.softmax(log_alphas, axis=1)
+                hard_states = np.argmax(np.asarray(posteriors), axis=1)
 
-                fit_ok = False
-                try:
-                    with warnings.catch_warnings():
-                        warnings.filterwarnings(
-                            "ignore", message=".*overwritten during initialization.*"
-                        )
-                        model.fit(X_train)
-                    tm = model.transmat_.copy()
-                    tm = _blend_transition(tm, self.n_states, tr_alpha, self_p=0.9)
-                    model.transmat_ = tm
-                    if self.covariance_type == "diag":
-                        # [FIX] hmmlearn 0.3.3 returns 3D even for 'diag', but setter expects 2D
-                        cv_after = model.covars_
-                        if cv_after.ndim == 3:
-                            cv_after = np.array([np.diag(c) for c in cv_after])
-                        model.covars_ = np.clip(cv_after, self.min_covar, None)
-                    
-                    # [P0] Prevent Degenerate startprob_ from absorbing inference
-                    sp = model.startprob_.copy()
-                    sp = np.nan_to_num(sp, nan=1.0 / self.n_states)
-                    sp = sp + 1e-4
-                    s_sum = sp.sum()
-                    if s_sum > 1e-12:
-                        model.startprob_ = sp / s_sum
-                    else:
-                        model.startprob_ = np.full(self.n_states, 1.0 / self.n_states)
+                st_returns = np.zeros(self.n_states)
+                st_vols = np.zeros(self.n_states)
+                for s in range(self.n_states):
+                    mask = hard_states == s
+                    if np.any(mask):
+                        st_returns[s] = float(np.mean(ret_win[mask]))
+                        if X_train_raw.shape[1] > 2:
+                            st_vols[s] = float(np.mean(X_train_raw[mask, 2]))
 
-                    # [P0] Occupancy floor check & State Re-initialization
-                    try:
-                        hard_states = model.predict(X_train)
-                        occ = np.bincount(hard_states, minlength=self.n_states) / len(hard_states)
-                        # Relax floor to 2% for better flexibility in shorter windows
-                        if np.any(occ < 0.02):
-                            _logger.info(
-                                "[%s] HMM State Collapse detected (min occ %.4f). "
-                                "Re-initializing...",
-                                symbol,
-                                np.min(occ),
-                            )
-                            collapsed_indices = np.where(occ < 0.02)[0]
-                            
-                            # Archetype Anchoring for State Recovery
-                            archetypes = {
-                                "bull_trend": [
-                                    1.2, 1.2, -0.5, -0.5, 1.0, 0.5, 1.0, 0.5, -0.5, 1.0
-                                ],
-                                "bear_trend": [
-                                    -1.2, -1.2, 0.5, 0.5, -1.0, -0.2, -1.0, -0.5, 0.5, -1.0
-                                ],
-                                "chop": [0.0, 0.0, -1.0, -1.0, 0.0, -0.5, 0.0, 0.0, 0.0, 0.0],
-                                "crisis": [
-                                    -2.0, -2.0, 2.0, 2.0, -2.0, 1.0, -1.0, -2.0, 1.5, -1.0
-                                ],
-                            }
-                            label_names = ["bull_trend", "bear_trend", "chop", "crisis"]
-                            archetype_matrix = np.array([archetypes[ln] for ln in label_names])
+                state_to_label = _assign_state_semantic_labels_v5(
+                    np.asarray(params["locs"]), st_returns, st_vols
+                )
+                map_matrix = np.zeros((self.n_states, len(_SEMANTIC_ORDER)), dtype=np.float64)
+                for si in range(self.n_states):
+                    lab = state_to_label.get(si, "chop")
+                    prob_col = f"hmm_prob_{lab}"
+                    if prob_col in _SEMANTIC_ORDER:
+                        map_matrix[si, _SEMANTIC_ORDER.index(prob_col)] = 1.0
 
-                            new_means = model.means_.copy()
-                            for ci in collapsed_indices:
-                                # Reset collapsed state's mean using archetypes (cyclic fallback)
-                                arch_idx = ci % len(label_names)
-                                new_means[ci] = archetype_matrix[arch_idx]
-                            
-                            model.means_ = new_means
-                            # Reset core params with strict normalization
-                            model.startprob_ = np.full(self.n_states, 1.0 / self.n_states)
-                            model.transmat_ = _sticky_transmat_prior(self.n_states, self_p=0.8)
-                            if self.covariance_type == "diag":
-                                model.covars_ = np.ones((self.n_states, model.n_features))
-                            
-                            # Force re-labeling because centroids moved
-                            state_to_label = None
-                            if label_path.exists():
-                                try:
-                                    label_path.unlink()
-                                except Exception as e:
-                                    _logger.debug("Failed to delete label file: %s", e)
-                    except Exception as e:
-                        _logger.debug("Occupancy check failed: %s", e)
-                    
-                    fit_ok = True
-                    consecutive_fails = 0
-                except Exception as e:
-                    consecutive_fails += 1
-                    _logger.warning(
-                        "HMM systemic fit failed at t=%d (%s); consecutive_fails=%d",
-                        t,
-                        e,
-                        consecutive_fails,
-                    )
-                    if prev_model is not None:
-                        model = prev_model
-                        degraded = True
-                        _logger.warning("HMM degraded mode: retaining previous model at t=%d", t)
-                    else:
-                        model = None
-                    if consecutive_fails >= 2 and model is None:
-                        _logger.error(
-                            "HMM systemic: repeated fit failure - "
-                            "uniform posteriors; check features."
-                        )
-
-                if fit_ok and model is not None:
-                    try:
-                        means_f = model.means_.copy()
-                        # Calculate empirical state characteristics
-                        hard_states = model.predict(X_train)
-                        state_returns = np.zeros(self.n_states)
-                        state_vols = np.zeros(self.n_states)
-                        for s in range(self.n_states):
-                            mask = (hard_states == s)
-                            if np.any(mask):
-                                state_returns[s] = np.mean(ret_win[mask])
-                                # Use feature index 2 (realized_vol_regime) as vol proxy if available
-                                if X_train.shape[1] > 2:
-                                    state_vols[s] = np.mean(X_train[mask, 2])
-
-                        if t <= is_end_idx or state_to_label is None:
-                            state_to_label = _assign_state_semantic_labels_v2(
-                                means_f, state_returns, state_vols
-                            )
-                        else:
-                            _centroid_label_drift_warn(means_f, state_to_label)
-                    except Exception as e:
-                        _logger.warning("HMM label assignment warning: %s", e)
-
-            if model is None or state_to_label is None:
+            if params is None or hmm_transformers is None or map_matrix is None:
                 continue
 
             try:
-                win_start = max(0, t - max_window)
-                win_end = max(1, t - 1)
-                x_seq = X_raw[win_start : win_end, :]
-                if qt_transformer is not None:
-                    x_seq_s = _quantile_transform(x_seq, qt_transformer)
-                else:
-                    continue
-                
-                # 개선: predict_step 범위(최대 24bar) 전체에 posterior 적용
-                p_seq = model.predict_proba(x_seq_s)   # shape: (window_size, n_states)
-                
-                # 최근 predict_step bars만 소급 적용
+                x_seq_qt = _quantile_transform(
+                    X_raw[max(0, t - self.predict_step) : t], hmm_transformers
+                )
+                x_seq_jax = jnp.array(x_seq_qt)
+
+                log_alphas = _forward_pass(
+                    x_seq_jax,
+                    jax.nn.log_softmax(params["initial"]),
+                    jax.nn.log_softmax(params["transition"], axis=1),
+                    params["locs"],
+                    jnp.exp(params["log_scales"]),
+                    params["skews"],
+                    jnp.exp(params["log_dfs"]),
+                )
+                p_seq = np.asarray(jax.nn.softmax(log_alphas, axis=1))
+                semantic_probs = p_seq @ map_matrix
+
+                p_clip = np.clip(p_seq, 1e-12, 1.0)
+                entropy = -np.sum(p_clip * np.log(p_clip), axis=1) / jnp.log(max(2, self.n_states))
+
+                trans_mat = np.asarray(jax.nn.softmax(params["transition"], axis=1))
+                durations = 1.0 / (1.0 - np.diag(trans_mat).clip(0.0, 0.999))
+                current_durations = durations[np.argmax(p_seq, axis=1)]
+
                 apply_start = max(0, t - self.predict_step)
-                apply_end = t  # exclusive upper bound
-                seq_slice = p_seq[-(apply_end - apply_start):]  # 최근 predict_step bars
-                
-                for bar_offset, raw_p in enumerate(seq_slice):
-                    bar_idx = apply_start + bar_offset
-                    if 0 <= bar_idx < n:
-                        probs_sem[bar_idx, :] = _raw_posterior_to_semantic(raw_p, state_to_label)
+                results[apply_start:t, : len(_SEMANTIC_ORDER)] = semantic_probs
+                results[apply_start:t, len(_SEMANTIC_ORDER)] = entropy
+                results[apply_start:t, len(_SEMANTIC_ORDER) + 1] = current_durations
             except Exception as e:
-                _logger.debug("HMM systemic inference failed at t=%d: %s", t, e)
+                _logger.error("HMM Inference failed at t=%d: %s", t, e)
 
-        probs_df = pd.DataFrame(probs_sem, index=features_df.index, columns=_SEMANTIC_ORDER)
-        probs_df = probs_df.ffill().bfill().fillna(1.0 / float(len(_SEMANTIC_ORDER)))
+        probs_df = pd.DataFrame(results, index=features_df.index, columns=out_cols)
+        probs_df = probs_df.ffill().bfill().fillna(0.0)
         
-        # Phase 3: Posterior Smoothing (EMA/DEMA/TEMA) to reduce whipsaws
-        s_method = str(OPT_FUTURES_CONFIG.get("FUTURES_HMM_SMOOTHING_METHOD", "EMA"))
-        s_span = int(OPT_FUTURES_CONFIG.get("FUTURES_HMM_SMOOTHING_SPAN", 6))
-        probs_df = _apply_posterior_smoothing(probs_df, method=s_method, span=s_span)
-        
-        if degraded:
-            _logger.warning(
-                "[%s] HMM systemic completed with degraded=True (some refits used prior model).",
-                symbol,
-            )
+        sem_cols = _SEMANTIC_ORDER
+        probs_df[sem_cols] = _apply_posterior_smoothing(
+            probs_df[sem_cols], span=int(OPT_FUTURES_CONFIG.get("FUTURES_HMM_SMOOTHING_SPAN", 12))
+        )
 
-        out = probs_df.copy()
-        out = out.reset_index()
+        sem_probs_np = probs_df[sem_cols].to_numpy(dtype=np.float64)
+        raw_hard_states = np.argmax(sem_probs_np, axis=1).astype(np.int32)
+        sticky_hard_states = _apply_sticky_posterior(
+            raw_hard_states,
+            sem_probs_np,
+            smoothing_window=int(OPT_FUTURES_CONFIG.get("FUTURES_HMM_SMOOTHING_SPAN", 12)),
+            min_duration=6,
+        )
+        
+        sticky_onehot = np.zeros_like(sem_probs_np)
+        sticky_onehot[np.arange(len(sticky_hard_states)), sticky_hard_states] = 1.0
+        blended = 0.8 * sticky_onehot + 0.2 * sem_probs_np
+        row_sums = blended.sum(axis=1, keepdims=True)
+        row_sums = np.where(row_sums < 1e-12, 1.0, row_sums)
+        probs_df[sem_cols] = blended / row_sums
+
+        hard_states = np.argmax(probs_df[sem_cols].to_numpy(), axis=1)
+        dur_arr = np.zeros(len(hard_states), dtype=np.float64)
+        if len(hard_states) > 0:
+            c = 1.0
+            dur_arr[0] = c
+            for i in range(1, len(hard_states)):
+                if hard_states[i] == hard_states[i-1]:
+                    c += 1.0
+                else:
+                    c = 1.0
+                dur_arr[i] = c
+        probs_df["hmm_current_duration"] = dur_arr
+        
+        out = probs_df.reset_index()
         if "datetime" not in out.columns:
             out = out.rename(columns={out.columns[0]: "datetime"})
-
+        
         try:
             out.to_parquet(cache_path)
-        except Exception as e:
-            _logger.debug("Failed to cache HMM: %s", e)
-        return out
-
-    def fit_predict(
-        self, df: pd.DataFrame, is_end_idx: int, symbol: str = "Unknown", tf: str = "1h"
-    ) -> pd.DataFrame:
-        """Per-symbol HMM (legacy Sharpe ordering); uses winsorize + Z-scale."""
-        cache_sym = symbol.replace("/", "_")
-        cache_fname = f"HMM_probs_{cache_sym}_{tf}_is{is_end_idx}_n{self.n_states}.parquet"
-        cache_path = FUTURES_CACHE_DIR / cache_fname
-
-        if cache_path.exists():
-            try:
-                cached_df = pd.read_parquet(cache_path)
-                if len(cached_df) == len(df):
-                    _logger.info("[%s] HMM probabilities loaded from cache: %s", symbol, cache_path)
-                    return cached_df
-                _logger.warning(
-                    "[%s] Cache length mismatch (%d vs %d). Re-calculating...",
-                    symbol,
-                    len(cached_df),
-                    len(df),
-                )
-            except Exception as e:
-                _logger.error("[%s] Failed to load HMM cache: %s", symbol, e)
-
-        n = len(df)
-        if n < 200:
-            return self._zeros(df)
-
-        from src.domain.futures.ml_pipeline.feature_engineering import build_hmm_input_features
-
-        hmm_feat = build_hmm_input_features(df.iloc[:n])
-        X_raw = hmm_feat.replace([np.inf, -np.inf], np.nan).fillna(0.0)
-        X_raw = X_raw.to_numpy(dtype=np.float64)
-
-        probs: np.ndarray = np.full((len(df), self.n_states), np.nan, dtype=np.float64)
-        min_train = max(self.predict_step * 5, 500)
-        max_window = 8760
-
-        model: GaussianHMM | None = None
-        curr_step = 0
-        tr_alpha = float(OPT_FUTURES_CONFIG.get("FUTURES_HMM_TRANSITION_PRIOR_ALPHA", 0.2))
-
-        for t in range(self.predict_step, n, self.predict_step):
-            curr_step += 1
-            if t < min_train:
-                continue
-
-            win_end_idx = max(1, t - 1)
-            X_win_raw = X_raw[max(0, t - max_window) : win_end_idx]
-            X_train, _ = _quantile_scaling(X_win_raw)
-
-            is_fit_cycle = ((t % self.fit_step == 0) and t <= is_end_idx) or (model is None)
-
-            if is_fit_cycle:
-                if curr_step % 200 == 0 or model is None:
-                    _logger.info(
-                        "[%s] HMM fit at t=%d (Warm-start: %s)...",
-                        symbol,
-                        t,
-                        "Yes" if model is not None else "No",
-                    )
-
-                prev_model = model
-                model = GaussianHMM(
-                    n_components=self.n_states,
-                    covariance_type=self.covariance_type,
-                    n_iter=self.n_iter if prev_model is None else 10,
-                    tol=1e-3,
-                    random_state=42,
-                    init_params="" if prev_model is not None else "stmc",
-                    min_covar=self.min_covar,
-                )
-
-                if prev_model is not None:
-                    model.init_params = ""
-                    try:
-                        model.startprob_ = prev_model.startprob_
-                        tm = prev_model.transmat_.copy()
-                        tm = np.clip(tm, 1e-3, None)
-                        model.transmat_ = tm / tm.sum(axis=1)[:, np.newaxis]
-                        model.means_ = prev_model.means_
-                        cv = prev_model.covars_.copy()
-                        if self.covariance_type == "diag":
-                            # [FIX] hmmlearn 0.3.3 returns 3D even for 'diag', but setter expects 2D
-                            if cv.ndim == 3:
-                                cv = np.array([np.diag(c) for c in cv])
-                            cv = np.clip(cv, self.min_covar, None)
-                        elif self.covariance_type == "full":
-                            for i in range(self.n_states):
-                                cv[i] = (cv[i] + cv[i].T) / 2.0
-                                cv[i] += np.eye(cv[i].shape[0]) * 1e-9
-                        model.covars_ = cv
-                    except Exception as e:
-                        _logger.debug("[%s] HMM warm-start param injection failed: %s", symbol, e)
-                        model.init_params = "stmc"
-
-                try:
-                    with warnings.catch_warnings():
-                        warnings.filterwarnings(
-                            "ignore", message=".*overwritten during initialization.*"
-                        )
-                        model.fit(X_train)
-                    tm = model.transmat_.copy()
-                    tm = _blend_transition(tm, self.n_states, tr_alpha, self_p=0.9)
-                    model.transmat_ = tm
-                    if self.covariance_type == "diag":
-                        # [FIX] hmmlearn 0.3.3 returns 3D even for 'diag', but setter expects 2D
-                        cv_after = model.covars_
-                        if cv_after.ndim == 3:
-                            cv_after = np.array([np.diag(c) for c in cv_after])
-                        model.covars_ = np.clip(cv_after, self.min_covar, None)
-                    try:
-                        tm2 = model.transmat_.copy()
-                        tm_sum = tm2.sum(axis=1)
-                        zero_rows = np.where(tm_sum < 1e-10)[0]
-                        if len(zero_rows) > 0:
-                            tm2[zero_rows, :] = 1.0 / self.n_states
-                        model.transmat_ = tm2 / tm2.sum(axis=1)[:, np.newaxis]
-                        sp = model.startprob_.copy()
-                        if sp.sum() < 1e-10:
-                            sp[:] = 1.0 / self.n_states
-                        model.startprob_ = sp / sp.sum()
-                    except (AttributeError, ValueError):
-                        pass
-                except Exception as e:
-                    _logger.debug("[%s] HMM fit failed at %d: %s", symbol, t, e)
-                    if prev_model is not None:
-                        model = prev_model
-                    else:
-                        continue
-
-            if model is None:
-                continue
-
-            try:
-                last_p_raw = model.predict_proba(X_train[-1:].reshape(1, -1))[0]
-                state_seq = model.predict(X_train)
-                win_start = max(0, t - max_window)
-                win_end_idx = max(1, t - 1)
-                c_win = df["close"].astype(np.float64).iloc[win_start:win_end_idx].to_numpy()
-                w_len = len(X_train)
-                lr_win: np.ndarray = np.zeros(w_len, dtype=np.float64)
-                lr_win[1:] = np.log(np.clip(c_win[1:] / np.maximum(c_win[:-1], 1e-12), 1e-12, None))
-                probs[t - 1, :] = _calculate_ordered_probs_numba(
-                    state_seq, lr_win, last_p_raw, self.n_states
-                )
-            except Exception as e:
-                _logger.debug("[%s] HMM inference failed at %d: %s", symbol, t, e)
-
-        probs_df = pd.DataFrame(probs, index=df.index).ffill().bfill().fillna(1.0 / self.n_states)
-        cols = [f"hmm_prob_{i}" for i in range(self.n_states)]
-        out = pd.DataFrame({c: probs_df.iloc[:, i] for i, c in enumerate(cols)})
-        out.index = df.index
-
-        try:
-            out.to_parquet(cache_path)
-            _logger.info("[%s] HMM probabilities cached to %s", symbol, cache_path)
-        except Exception as e:
-            _logger.warning("[%s] Failed to cache HMM: %s", symbol, e)
-
+        except Exception:
+            pass
         return out
 
     def _zeros_semantic(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Return a DataFrame of uniform semantic probabilities."""
         u = 1.0 / float(len(_SEMANTIC_ORDER))
-        out = pd.DataFrame(
-            np.full((len(df), len(_SEMANTIC_ORDER)), u),
-            index=df.index,
-            columns=_SEMANTIC_ORDER,
-        )
-        out = out.reset_index()
-        if "datetime" not in out.columns:
-            out = out.rename(columns={out.columns[0]: "datetime"})
-        return out
-
-    def _zeros(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Return a DataFrame of uniform numeric probabilities."""
-        k = int(self.n_states)
-        cols = [f"hmm_prob_{i}" for i in range(k)]
-        return pd.DataFrame(
-            np.full((len(df), k), 1.0 / float(k)),
-            index=df.index,
-            columns=cols,
-        )
+        cols = [*_SEMANTIC_ORDER, "hmm_entropy", "hmm_expected_duration", "hmm_current_duration"]
+        out = pd.DataFrame(np.zeros((len(df), len(cols))), index=df.index, columns=cols)
+        for c in _SEMANTIC_ORDER:
+            out[c] = u
+        return out.reset_index().rename(columns={out.index.name or "index": "datetime"})
