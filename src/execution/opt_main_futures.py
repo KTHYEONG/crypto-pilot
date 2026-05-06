@@ -886,6 +886,10 @@ def main() -> None:
             "bear_prob": float(h_rep.get("hmm_prob_bear_trend", 0)),
             "chop_prob": float(h_rep.get("hmm_prob_chop", 0)),
             "crisis_prob": float(h_rep.get("hmm_prob_crisis", 0)),
+            "bull_g_log": float(h_rep.get("hmm_bull_g_log", 0)),
+            "crisis_g_log": float(h_rep.get("hmm_crisis_g_log", 0)),
+            "tail_capture": float(h_rep.get("hmm_tail_capture", 0)),
+            "avg_duration": float(h_rep.get("hmm_avg_duration", 0)),
         })
 
 
@@ -1205,6 +1209,28 @@ def main() -> None:
     # Purging: skip first N bars of each WF leg to prevent IS/train-set leakage.
     # Covers positions opened near IS boundary that close into the evaluation window.
     wf_purge_bars = int(OPT_FUTURES_CONFIG.get("FUTURES_WF_PURGE_BARS", 24))
+
+    # [SMART] Prefetch 1m data once before WF loop to avoid redundant I/O in each leg
+    prefetched_1m_cache: dict[str, pd.DataFrame] = {}
+    meta_on = bool(OPT_FUTURES_CONFIG.get("FUTURES_USE_META_LABELER", False))
+    if n_wf > 1 and valid_symbols and wf_hmm_refit and meta_on and ml_out.alpha_panel is not None:
+        _logger.info("  --> [WF] Prefetching 1m OHLCV for MetaLabeler audit (once)...")
+        valid_alpha_set = set(ml_out.alpha_panel.index.get_level_values("symbol").unique())
+        need_1m = [s for s in valid_symbols if s in valid_alpha_set]
+
+        def _load_1m_job(s):
+            try:
+                coll = DataCollector()
+                return s, coll.collect_1m_ohlcv(s, start_date, end_date)
+            except Exception:
+                return s, None
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=ml_n_jobs) as ex:
+            prefetched_1m_cache = {
+                sym: df_1m for sym, df_1m in ex.map(_load_1m_job, need_1m)
+                if df_1m is not None and len(df_1m) >= 200
+            }
+
     if n_wf > 1 and valid_symbols:
         ref_sym = valid_symbols[0]
         ref_df = oos_data_maps[ref_sym][args.tf]
@@ -1244,6 +1270,7 @@ def main() -> None:
                     include_fusion=True,
                     summary_mode_label=f" (WF leg {leg + 1}/{n_wf})",
                     prefetch_label_start=start_date,
+                    prefetched_1m=prefetched_1m_cache if prefetched_1m_cache else None,
                 )
                 # run_hmm_fusion_for_is_end already propagates alpha_panel internally.
                 oos_maps_leg = copy_data_maps_tf_clone(oos_data_maps, valid_symbols, args.tf)

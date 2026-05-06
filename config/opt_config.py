@@ -77,10 +77,10 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     # Session 41 sweep: 0.65-0.68 heuristically best; 0.66 compromise vs 0.70 default.
     "FUTURES_HMM_CRISIS_THRESHOLD": 0.66,
     # Slightly stronger sticky transitions → stabler systemic HMM under leg refit (Path C).
-    "FUTURES_HMM_TRANSITION_PRIOR_ALPHA": 0.24,
+    "FUTURES_HMM_TRANSITION_PRIOR_ALPHA": 0.50,
     # HMM Posterior Smoothing (EMA, DEMA, TEMA, HMA, KAMA, ALMA, JMA)
     "FUTURES_HMM_SMOOTHING_METHOD": "KAMA",
-    "FUTURES_HMM_SMOOTHING_SPAN": 6,
+    "FUTURES_HMM_SMOOTHING_SPAN": 12,
     # Session 39: recovery override abandoned (P10 -0.027, DSR collapse). Keep disabled.
     "CRISIS_RECOVERY_TREND_THR": 1e9,
     "CRISIS_RECOVERY_FLOOR": 0.30,

@@ -276,14 +276,26 @@ def _recompute_cs_dirs_numba(
         z_l = (sl - mean_l) / std_l
         z_s = (mean_s - ss) / std_s  # Lower ss is better, so mean - ss
 
+        # [NEW] Hierarchical Decoupling (Spec v15)
+        # 1. Hard Kill if CRISIS probability is too high
+        c_prob = float(hmm_crisis[prev_i, s])
+        if c_prob > 0.5:
+            computed_dir[s] = 0.0
+            continue
+
         binary_l = 1.0 if (float(rank_l) <= fk and sl > 0.7 and mod_l >= 0.5 and z_l >= cs_z_threshold) else 0.0
         binary_s = 1.0 if (float(rank_s) <= fk and ss < 0.3 and mod_s >= 0.5 and z_s >= cs_z_threshold) else 0.0
 
-        mag_l = (z_l - cs_z_threshold) / (3.0 - cs_z_threshold) if z_l >= cs_z_threshold else 0.0
-        mag_s = (z_s - cs_z_threshold) / (3.0 - cs_z_threshold) if z_s >= cs_z_threshold else 0.0
+        # 2. Exposure Discount: (1 - p_crisis)
+        exposure_discount = (1.0 - c_prob)
 
-        long_mag = binary_l * min(max(mag_l, 0.1), 1.0) * crisis_w
-        short_mag = binary_s * min(max(mag_s, 0.1), 1.0) * crisis_w
+        # 3. 1.5-power Convex Kelly Magnitude
+        # Scaling magnitude by (Z - threshold)^1.5 and applying HMM discount
+        mag_l = ((z_l - cs_z_threshold) / (3.0 - cs_z_threshold)) ** 1.5 if z_l >= cs_z_threshold else 0.0
+        mag_s = ((z_s - cs_z_threshold) / (3.0 - cs_z_threshold)) ** 1.5 if z_s >= cs_z_threshold else 0.0
+
+        long_mag = binary_l * min(max(mag_l, 0.1), 1.0) * exposure_discount
+        short_mag = binary_s * min(max(mag_s, 0.1), 1.0) * exposure_discount
 
         if long_mag >= short_mag and long_mag > 0.0:
             computed_dir[s] = 1.0 * long_mag
