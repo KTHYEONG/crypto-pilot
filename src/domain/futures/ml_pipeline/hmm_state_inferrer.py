@@ -73,6 +73,11 @@ def _multivariate_student_t_log_pdf(
 
 MAX_HMM_WINDOW = 1500
 
+# Indices of features used as exogenous drivers for TVTP (subset of SYSTEMIC_HMM_FEATURE_COLUMNS)
+# Uses: cs_dispersion(4), oi_delta(5), funding_mom(6), liq_proxy(7), lsr_delta(8)
+_TVTP_FEATURE_INDICES: tuple[int, ...] = (4, 5, 6, 7, 8)
+_N_TVTP_FEATS: int = len(_TVTP_FEATURE_INDICES)
+
 @jax.jit
 def _batched_student_t_log_pdf(
     x: jnp.ndarray, locs: jnp.ndarray, scales: jnp.ndarray, dfs: jnp.ndarray
@@ -141,14 +146,58 @@ def _forward_pass(
 
 
 @jax.jit
+def _viterbi_decode(
+    observations: jnp.ndarray,
+    mask: jnp.ndarray,
+    log_init_probs: jnp.ndarray,
+    log_trans_mats: jnp.ndarray,
+    locs: jnp.ndarray,
+    scales: jnp.ndarray,
+    dfs: jnp.ndarray,
+) -> jnp.ndarray:
+    """Viterbi decoding in log-space to find the most likely hard state sequence."""
+    K = log_init_probs.shape[0]
+
+    def forward_step(prev_log_prob, val):
+        x, m, log_trans_mat = val
+        log_emissions = _batched_student_t_log_pdf(x, locs, scales, dfs)
+        combined = prev_log_prob[:, None] + log_trans_mat
+        max_log_prob = jnp.max(combined, axis=0) + log_emissions
+        argmax_state = jnp.argmax(combined, axis=0)
+        
+        # Mask handling: if masked, keep previous probabilities and dummy argmax
+        res_log_prob = jnp.where(m, max_log_prob, prev_log_prob)
+        res_argmax = jnp.where(m, argmax_state, jnp.arange(K))
+        return res_log_prob, res_argmax
+
+    initial_emissions = _batched_student_t_log_pdf(observations[0], locs, scales, dfs)
+    log_delta_0 = log_init_probs + initial_emissions
+    
+    final_log_probs, backpointers = jax.lax.scan(
+        forward_step, log_delta_0, (observations[1:], mask[1:], log_trans_mats[1:])
+    )
+    
+    def backward_step(best_next_state, bp):
+        best_curr_state = bp[best_next_state]
+        return best_curr_state, best_curr_state
+
+    last_state = jnp.argmax(final_log_probs, axis=0)
+    _, best_path_tail = jax.lax.scan(backward_step, last_state, backpointers, reverse=True)
+    
+    best_path = jnp.concatenate([best_path_tail, last_state[None]], axis=0)
+    return jax.nn.one_hot(best_path, K)
+
+
+@jax.jit
 def _compute_nll(
-    params: dict[str, Any], 
-    observations: jnp.ndarray, 
+    params: dict[str, Any],
+    observations: jnp.ndarray,
     mask: jnp.ndarray,
     guidance_mask: jnp.ndarray,
 ) -> jnp.ndarray:
     """Compute Negative Log-Likelihood with TVTP, Sticky Prior, and Guidance."""
-    log_trans_mats = _compute_tvtp_matrices(observations, params["tvtp_W"], params["tvtp_b"])
+    tvtp_z = observations[:, jnp.array(_TVTP_FEATURE_INDICES)]
+    log_trans_mats = _compute_tvtp_matrices(tvtp_z, params["tvtp_W"], params["tvtp_b"])
     log_alphas, incremental_lls = _forward_pass(
         observations,
         mask,
@@ -159,27 +208,36 @@ def _compute_nll(
         jnp.exp(params["log_dfs"]) + 2.0,
     )
     ll = jnp.sum(incremental_lls)
+    T = jnp.sum(mask) + 1e-9
+
+    # LL-adaptive scale: penalties proportional to |ll|/T so they don't dominate
+    ll_scale = jnp.abs(ll) / T
 
     avg_trans_mat = jnp.exp(jax.scipy.special.logsumexp(log_trans_mats, axis=0) - jnp.log(log_trans_mats.shape[0]))
-    sticky_penalty = -5.0 * jnp.sum(jnp.log(jnp.diag(avg_trans_mat) + 1e-6))
-    
+    sticky_penalty = -30.0 * jnp.sum(jnp.log(jnp.diag(avg_trans_mat) + 1e-6))
+
     locs = params["locs"]
-    # Semantic Penalties: Bull > Chop > Bear > Crisis
-    p_bull_max = jnp.maximum(0.0, jnp.max(locs[1:, 0]) - locs[0, 0] + 1.0)
-    p_bear_crisis = jnp.maximum(0.0, locs[3, 0] - locs[1, 0] + 1.0)
-    p_crisis_val = jnp.maximum(0.0, locs[3, 0] + 2.0)
-    
+    # Semantic Penalties: Bull(0) > Chop(2) > Bear(1) > Crisis(3)
+    # Use squared penalty for stronger enforcement when violated
+    p_02 = jnp.square(jnp.maximum(0.0, locs[2, 0] - locs[0, 0] + 1.5))
+    p_21 = jnp.square(jnp.maximum(0.0, locs[1, 0] - locs[2, 0] + 1.5))
+    p_13 = jnp.square(jnp.maximum(0.0, locs[3, 0] - locs[1, 0] + 1.5))
+    p_crisis_val = jnp.square(jnp.maximum(0.0, locs[3, 0] + 3.0)) # Force deeper crisis MU (Phase 4.1)
+
     # Volatility Penalties: Crisis > Bear > Others
-    p_crisis_vol = jnp.maximum(0.0, jnp.max(locs[:3, 2]) - locs[3, 2] + 2.0)
-    
-    semantic_penalty = 50000.0 * (p_bull_max + p_bear_crisis + p_crisis_val + p_crisis_vol)
+    p_crisis_vol = jnp.square(jnp.maximum(0.0, jnp.max(locs[:3, 2]) - locs[3, 2] + 2.0))
+
+    # Adaptive: 10000x ll_scale — extremely strong directional ordering enforcement
+    semantic_penalty = 10000.0 * ll_scale * (p_02 + p_21 + p_13 + p_crisis_val + p_crisis_vol)
 
     posteriors = jax.nn.softmax(log_alphas, axis=1)
-    guidance_loss = 100000.0 * jnp.mean(mask * (posteriors[:, 3] - guidance_mask)**2)
-    
+    # Adaptive: 10000x ll_scale for guidance (Phase 4 Final Push - Double strength)
+    guidance_loss = 10000.0 * ll_scale * jnp.mean(mask * (posteriors[:, 3] - guidance_mask)**2)
+
     # State Frequency Penalty: CRISIS (state 3) should be < 20%
     crisis_freq = jnp.mean(posteriors[:, 3] * mask) / (jnp.mean(mask) + 1e-9)
-    freq_penalty = 10000.0 * jnp.maximum(0.0, crisis_freq - 0.20)
+    # Adaptive: 10x ll_scale
+    freq_penalty = 10.0 * ll_scale * jnp.maximum(0.0, crisis_freq - 0.20)
 
     l2_penalty = 0.01 * jnp.sum(params["tvtp_W"]**2)
     return -ll + sticky_penalty + semantic_penalty + guidance_loss + freq_penalty + l2_penalty
@@ -222,9 +280,10 @@ def _jax_inference(
     mask: jnp.ndarray,
     params: dict[str, Any],
 ) -> jnp.ndarray:
-    """Consolidated JAX inference call with TVTP."""
-    log_trans_mats = _compute_tvtp_matrices(observations, params["tvtp_W"], params["tvtp_b"])
-    log_alphas, _ = _forward_pass(
+    """Consolidated JAX inference call with TVTP using Viterbi decoding."""
+    tvtp_z = observations[:, jnp.array(_TVTP_FEATURE_INDICES)]
+    log_trans_mats = _compute_tvtp_matrices(tvtp_z, params["tvtp_W"], params["tvtp_b"])
+    return _viterbi_decode(
         observations,
         mask,
         jax.nn.log_softmax(params["initial"]),
@@ -233,7 +292,6 @@ def _jax_inference(
         jnp.exp(params["log_scales"]),
         jnp.exp(params["log_dfs"]) + 2.0,
     )
-    return jax.nn.softmax(log_alphas, axis=1)
 
 
 # --- Utility Functions ---
@@ -374,6 +432,7 @@ def _apply_sticky_posterior(regime_labels: np.ndarray, posteriors: np.ndarray, s
 @dataclass
 class HMMStateInferrer:
     """Infers market regimes using Guided 4-State TVTP-HMM (Phase 1)."""
+
     n_states: int = 4
     max_states: int = 4
     n_iter: int = 2000
@@ -384,10 +443,9 @@ class HMMStateInferrer:
     _last_opt: Any | None = None
 
     def _generate_stress_mask(self, features_df: pd.DataFrame, returns_ser: pd.Series) -> np.ndarray:
-        """Generate guidance_mask using actual return tails (Worst 15%)."""
-        thresh = returns_ser.quantile(0.15)
-        stress_cond = (returns_ser < thresh)
-        
+        """Generate guidance_mask using expanding-window return tails (Worst 15%, walk-forward clean)."""
+        expanding_thresh = returns_ser.expanding(min_periods=200).quantile(0.15).bfill()
+        stress_cond = (returns_ser < expanding_thresh)
         stress_mask_raw = stress_cond.astype(np.float32).to_numpy()
         return _numba_sticky_labels(stress_mask_raw.astype(np.int32), min_duration=4).astype(np.float32)
 
@@ -396,10 +454,11 @@ class HMMStateInferrer:
         if self._warmed_up: return
         _logger.info("Warming up JAX HMM JIT cache (4-states, TVTP, Guided, FEATS=%d)...", n_feats)
         dummy_obs, dummy_mask, dummy_gm = jnp.zeros((MAX_HMM_WINDOW, n_feats)), jnp.zeros(MAX_HMM_WINDOW), jnp.zeros(MAX_HMM_WINDOW)
-        params = {"initial": jnp.zeros(4), "tvtp_W": jnp.zeros((4, 4, n_feats)), "tvtp_b": jnp.eye(4) * 4.0, "locs": jnp.zeros((4, n_feats)), "log_scales": jnp.zeros((4, n_feats)), "log_dfs": jnp.ones(4) * 3.0}
+        params = {"initial": jnp.zeros(4), "tvtp_W": jnp.zeros((4, 4, _N_TVTP_FEATS)), "tvtp_b": jnp.eye(4) * 1.0, "locs": jnp.zeros((4, n_feats)), "log_scales": jnp.zeros((4, n_feats)), "log_dfs": jnp.array([1.0, 1.0, 1.0, 0.5])}
         optimizer = optax.adam(learning_rate=0.01)
         opt_state = optimizer.init(params)
-        log_trans_mats = _compute_tvtp_matrices(dummy_obs, params["tvtp_W"], params["tvtp_b"])
+        dummy_tvtp_z = dummy_obs[:, jnp.array(_TVTP_FEATURE_INDICES)]
+        log_trans_mats = _compute_tvtp_matrices(dummy_tvtp_z, params["tvtp_W"], params["tvtp_b"])
         _ = _forward_pass(dummy_obs, dummy_mask, jax.nn.log_softmax(params["initial"]), log_trans_mats, params["locs"], jnp.exp(params["log_scales"]), jnp.exp(params["log_dfs"]) + 2.0)
         _ = _compute_nll(params, dummy_obs, dummy_mask, dummy_gm)
         _, _, _, _ = _train_hmm_loop(dummy_obs, dummy_mask, dummy_gm, params, opt_state, 1, 1e-4, optimizer)
@@ -409,9 +468,9 @@ class HMMStateInferrer:
     def fit_predict_systemic(self, features_df: pd.DataFrame, returns_ser: pd.Series, is_end_idx: int, symbol: str = "Market", tf: str = "1h") -> pd.DataFrame:
         """Expanding-window Guided 4-State TVTP-HMM."""
         cm = CacheManager(FUTURES_CACHE_DIR, max_files=15, max_size_mb=1000.0)
-        deps = {"symbol": symbol, "tf": tf, "data_len": len(features_df), "ver": "v19_guided_v9", "feat_cols": sorted(list(SYSTEMIC_HMM_FEATURE_COLUMNS))}
+        deps = {"symbol": symbol, "tf": tf, "data_len": len(features_df), "ver": "v23_viterbi_hard_p4", "feat_cols": sorted(list(SYSTEMIC_HMM_FEATURE_COLUMNS))}
         tag = cm.generate_hash(deps, source_files=[Path(__file__).resolve()])
-        cache_path = cm.get_cache_path(f"HMM_v19_guided_{symbol}_{tf}_len{len(features_df)}", ".parquet", tag)
+        cache_path = cm.get_cache_path(f"HMM_v23_viterbi_{symbol}_{tf}_len{len(features_df)}", ".parquet", tag)
         if cache_path.exists():
             try: return pd.read_parquet(cache_path)
             except Exception: pass
@@ -432,37 +491,61 @@ class HMMStateInferrer:
                 X_train_raw, transformers = _quantile_scaling(X_win)
                 X_pad, M_pad, GM_pad = np.zeros((MAX_HMM_WINDOW, num_feats)), np.zeros(MAX_HMM_WINDOW), np.zeros(MAX_HMM_WINDOW)
                 X_pad[:L], M_pad[:L], GM_pad[:L] = X_train_raw, 1.0, gm_win
-                if self._last_params: curr_p, curr_o, iters = self._last_params, self._last_opt, 100
+                if self._last_params:
+                    curr_p = self._last_params
+                    curr_o = optimizer.init(curr_p)
+                    iters = 100
                 else:
                     locs = np.zeros((4, num_feats), dtype=np.float32)
-                    locs[0, 0], locs[0, 2], locs[1, 0], locs[1, 2], locs[2, 0], locs[2, 2], locs[3, 0], locs[3, 2] = 1.2, -0.8, -1.0, 0.8, 0.0, -1.2, -3.0, 3.0
-                    W_init = np.zeros((4, 4, num_feats), dtype=np.float32)
-                    W_init[:, 3, 3], W_init[:, 3, 5] = 3.0, -2.5
-                    curr_p = {"initial": jnp.zeros(4), "tvtp_W": jnp.array(W_init), "tvtp_b": jnp.eye(4) * 4.0, "locs": jnp.array(locs), "log_scales": jnp.zeros((4, num_feats)), "log_dfs": jnp.ones(4) * 3.0}
+                    # BULL (0), BEAR (1), CHOP (2), CRISIS (3)
+                    # macro_trend_168h (0), macro_vol_24h (2), macro_downside_vol_24h (3)
+                    locs[0, 0], locs[0, 2], locs[0, 3] = 2.5, -1.0, -1.0
+                    locs[1, 0], locs[1, 2], locs[1, 3] = -1.5, 1.0, 1.0
+                    locs[2, 0], locs[2, 2], locs[2, 3] = 0.0, -1.0, -1.0
+                    locs[3, 0], locs[3, 2], locs[3, 3] = -3.5, 3.5, 3.5
+                    
+                    W_init = np.zeros((4, 4, _N_TVTP_FEATS), dtype=np.float32)
+                    # TVTP indices: cs_dispersion(0→4), oi_delta(1→5), funding_mom(2→6), liq_proxy(3→7), lsr_delta(4→8)
+                    # Crisis entry driven by oi_delta(local idx 1) and liq_proxy(local idx 3)
+                    W_init[:, 3, 1], W_init[:, 3, 3] = 3.0, -2.5
+                    curr_p = {"initial": jnp.zeros(4), "tvtp_W": jnp.array(W_init), "tvtp_b": jnp.eye(4) * 7.0, "locs": jnp.array(locs), "log_scales": jnp.zeros((4, num_feats)), "log_dfs": jnp.array([1.0, 1.0, 1.0, 0.5])}
                     curr_o, iters = optimizer.init(curr_p), self.n_iter
                 params, self._last_opt, _, _ = _train_hmm_loop(jnp.array(X_pad), jnp.array(M_pad), jnp.array(GM_pad), curr_p, curr_o, iters, 1e-4, optimizer)
+                if self._last_params is not None:
+                    params = jax.tree_util.tree_map(
+                        lambda new, old: 0.7 * new + 0.3 * old, params, self._last_params
+                    )
                 self._last_params = params
             try:
-                apply_start = max(0, t - self.predict_step)
-                X_inf_raw = _quantile_transform(X_raw[apply_start:t], transformers)
+                inf_start = max(0, t - MAX_HMM_WINDOW)
+                write_start = max(0, t - self.predict_step)
+                X_inf_raw = _quantile_transform(X_raw[inf_start:t], transformers)
                 L_inf = len(X_inf_raw)
                 X_inf_pad, M_inf_pad = np.zeros((MAX_HMM_WINDOW, num_feats)), np.zeros(MAX_HMM_WINDOW)
                 X_inf_pad[:L_inf], M_inf_pad[:L_inf] = X_inf_raw, 1.0
-                combined_probs = np.asarray(_jax_inference(jnp.array(X_inf_pad), jnp.array(M_inf_pad), params))[:L_inf]
+                all_probs = np.asarray(_jax_inference(jnp.array(X_inf_pad), jnp.array(M_inf_pad), params))[:L_inf]
+                write_offset = write_start - inf_start
+                combined_probs = all_probs[write_offset:]
                 p_clip = np.clip(combined_probs, 1e-12, 1.0)
                 entropy = -np.sum(p_clip * np.log(p_clip), axis=1) / np.log(4)
-                trans_mats = np.asarray(jnp.exp(_compute_tvtp_matrices(jnp.array(X_inf_pad[:L_inf]), params["tvtp_W"], params["tvtp_b"])))
-                expected_dur = np.array([1.0 / (1.0 - np.diag(trans_mats[i]).clip(0.0, 0.999))[np.argmax(combined_probs[i])] for i in range(L_inf)])
-                results[apply_start:t, :4], results[apply_start:t, 4], results[apply_start:t, 5] = combined_probs, entropy, expected_dur
+                trans_mats = np.asarray(jnp.exp(_compute_tvtp_matrices(jnp.array(X_inf_raw[write_offset:, :][:, list(_TVTP_FEATURE_INDICES)]), params["tvtp_W"], params["tvtp_b"])))
+                L_write = len(combined_probs)
+                expected_dur = np.array([1.0 / (1.0 - np.diag(trans_mats[i]).clip(0.0, 0.95))[np.argmax(combined_probs[i])] for i in range(L_write)])
+                results[write_start:t, :4], results[write_start:t, 4], results[write_start:t, 5] = combined_probs, entropy, expected_dur
             except Exception as e: _logger.error("HMM Inference failed: %s", e)
         probs_df = pd.DataFrame(results, index=features_df.index, columns=out_cols).ffill().bfill().fillna(0.0)
-        probs_df[_SEMANTIC_ORDER] = _apply_posterior_smoothing(probs_df[_SEMANTIC_ORDER], span=int(OPT_FUTURES_CONFIG.get("FUTURES_HMM_SMOOTHING_SPAN", 12)))
+        
+        # Viterbi decoding already returns one-hot; apply min-duration (sticky) constraint
         sem_probs_np = probs_df[_SEMANTIC_ORDER].to_numpy()
-        sticky_hard_states = _apply_sticky_posterior(np.argmax(sem_probs_np, axis=1).astype(np.int32), sem_probs_np, smoothing_window=int(OPT_FUTURES_CONFIG.get("FUTURES_HMM_SMOOTHING_SPAN", 12)), min_duration=6)
-        sticky_onehot = np.zeros_like(sem_probs_np); sticky_onehot[np.arange(len(sticky_hard_states)), sticky_hard_states] = 1.0
-        blended = 0.8 * sticky_onehot + 0.2 * sem_probs_np
-        probs_df[_SEMANTIC_ORDER] = blended / blended.sum(axis=1, keepdims=True)
-        probs_df["hmm_current_duration"] = _numba_current_duration(np.argmax(probs_df[_SEMANTIC_ORDER].to_numpy(), axis=1).astype(np.int32))
+        hard_states = np.argmax(sem_probs_np, axis=1).astype(np.int32)
+        sticky_hard_states = _numba_sticky_labels(hard_states, min_duration=12)
+        
+        # Convert back to one-hot for output consistency
+        viterbi_onehot = np.zeros_like(sem_probs_np)
+        viterbi_onehot[np.arange(len(sticky_hard_states)), sticky_hard_states] = 1.0
+        probs_df[_SEMANTIC_ORDER] = viterbi_onehot
+        
+        probs_df["hmm_current_duration"] = _numba_current_duration(sticky_hard_states)
         out = probs_df.reset_index().rename(columns={probs_df.index.name or "index": "datetime"})
         try: out.to_parquet(cache_path)
         except Exception: pass
