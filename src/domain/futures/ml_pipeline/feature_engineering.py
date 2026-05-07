@@ -9,20 +9,13 @@ import pandas as pd
 from numba import njit
 
 # Columns produced by build_gp_input_features (for CS-rank / imputation in pipeline).
-# Systemic HMM input (4-dim: Macro Decoupling Spec v15)
+# Systemic HMM input (5-dim: Core Macro Features)
 SYSTEMIC_HMM_FEATURE_COLUMNS: tuple[str, ...] = (
     "macro_trend_168h",
     "macro_vol_24h",
-    "macro_liq_24h",
-    "macro_cost_168h",
-    "macro_downside_vol_24h",   # T1-B: semi-vol of negative returns
-    "macro_cs_dispersion_24h",  # T1-D: cross-sectional return dispersion
-    "macro_breadth_168h",       # T1-D: market breadth (fraction above 168h MA)
-    "macro_oi_delta_24h",       # P2-C: OI momentum (sign-preserved)
-    "macro_liq_proxy_24h",      # P2-C: liquidation cascade proxy
-    # [NEW] Phase 3: LSR Features for improved state separation
-    "macro_lsr_168h",           # Long-Short Ratio average
-    "macro_lsr_delta_24h",     # Long-Short Ratio momentum
+    "macro_downside_vol_24h",
+    "macro_cs_dispersion_24h",
+    "macro_oi_delta_24h",
 )
 
 # Posterior columns aligned to stable semantic labels (order for MetaLabeler).
