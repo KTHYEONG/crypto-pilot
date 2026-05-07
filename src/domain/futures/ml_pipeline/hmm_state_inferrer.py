@@ -27,6 +27,7 @@ except Exception as e:
 
 import optax
 import pandas as pd
+from numba import njit
 from sklearn.preprocessing import QuantileTransformer, RobustScaler
 
 from config.opt_config import OPT_FUTURES_CONFIG
@@ -73,6 +74,23 @@ def _multivariate_student_t_log_pdf(
 MAX_HMM_WINDOW = 2500
 
 @jax.jit
+def _batched_student_t_log_pdf(
+    x: jnp.ndarray, locs: jnp.ndarray, scales: jnp.ndarray, dfs: jnp.ndarray
+) -> jnp.ndarray:
+    """Vectorized Multivariate Student-t log-pdf for all states at once (Zero-Loop)."""
+    # x: (D,), locs: (K, D), scales: (K, D), dfs: (K,)
+    y = (x[None, :] - locs) / scales
+    dfs_expanded = dfs[:, None]
+    log_c = (
+        jax.scipy.special.gammaln((dfs_expanded + 1.0) / 2.0)
+        - jax.scipy.special.gammaln(dfs_expanded / 2.0)
+        - 0.5 * jnp.log(jnp.pi * dfs_expanded)
+        - jnp.log(scales)
+    )
+    return jnp.sum(log_c - (dfs_expanded + 1.0) / 2.0 * jnp.log1p(y**2 / dfs_expanded), axis=1)
+
+
+@jax.jit
 def _forward_pass(
     observations: jnp.ndarray,
     mask: jnp.ndarray,
@@ -90,9 +108,7 @@ def _forward_pass(
     ) -> tuple[jnp.ndarray, jnp.ndarray]:
         x, m = val
         # Log emissions for each state: (K,)
-        log_emissions = jax.vmap(
-            lambda k: _multivariate_student_t_log_pdf(x, locs[k], scales[k], dfs[k])
-        )(jnp.arange(num_states))
+        log_emissions = _batched_student_t_log_pdf(x, locs, scales, dfs)
         # log_alpha_prev: (K,), log_trans_mat: (K, K)
         combined = log_alpha_prev[:, None] + log_trans_mat
         log_alpha_next_calc = jax.scipy.special.logsumexp(combined, axis=0) + log_emissions
@@ -110,9 +126,7 @@ def _forward_pass(
         return log_alpha_next, (log_alpha_next, incremental_ll)
 
     # Initial step
-    initial_emissions = jax.vmap(
-        lambda k: _multivariate_student_t_log_pdf(observations[0], locs[k], scales[k], dfs[k])
-    )(jnp.arange(num_states))
+    initial_emissions = _batched_student_t_log_pdf(observations[0], locs, scales, dfs)
     log_alpha_0_calc = log_init_probs + initial_emissions
     ll_0 = jax.scipy.special.logsumexp(log_alpha_0_calc)
     log_alpha_0_normalized = log_alpha_0_calc - ll_0
@@ -190,7 +204,98 @@ def _train_hmm_loop(
     
     return final_val[1], final_val[2], final_val[3], final_val[5]
 
+
+@jax.jit
+def _jax_inference(
+    observations: jnp.ndarray,
+    mask: jnp.ndarray,
+    params: dict[str, Any],
+) -> jnp.ndarray:
+    """Consolidated JAX inference call."""
+    log_alphas, _ = _forward_pass(
+        observations,
+        mask,
+        jax.nn.log_softmax(params["initial"]),
+        jax.nn.log_softmax(params["transition"], axis=1),
+        params["locs"],
+        jnp.exp(params["log_scales"]),
+        jnp.exp(params["log_dfs"]) + 2.0,
+    )
+    return jax.nn.softmax(log_alphas, axis=1)
+
+
 # --- Utility Functions ---
+
+@njit(cache=True, fastmath=True)
+def _numba_ema_2d(data: np.ndarray, span: int) -> np.ndarray:
+    """Vectorized EMA for 2D arrays (time, features)."""
+    alpha = 2.0 / (span + 1.0)
+    n, m = data.shape
+    out = np.empty((n, m), dtype=np.float64)
+    if n == 0:
+        return out
+    out[0] = data[0]
+    for i in range(1, n):
+        for j in range(m):
+            out[i, j] = data[i, j] * alpha + out[i - 1, j] * (1.0 - alpha)
+    return out
+
+
+@njit(cache=True, fastmath=True)
+def _numba_sliding_mean_2d(data: np.ndarray, window: int) -> np.ndarray:
+    """Fast sliding mean for 2D arrays (Zero-Loop Policy compliant)."""
+    n, m = data.shape
+    out = np.empty((n, m), dtype=np.float64)
+    for i in range(n):
+        start = max(0, i - window + 1)
+        count = i - start + 1
+        for j in range(m):
+            s = 0.0
+            for k in range(start, i + 1):
+                s += data[k, j]
+            out[i, j] = s / count
+    return out
+
+
+@njit(cache=True, fastmath=True)
+def _numba_sticky_labels(labels: np.ndarray, min_duration: int) -> np.ndarray:
+    """Min-duration constraint to reduce regime flip noise (Numba optimized)."""
+    n = len(labels)
+    if n < 2 or min_duration <= 1:
+        return labels
+    result = labels.copy()
+    i = 0
+    while i < n:
+        curr = result[i]
+        j = i + 1
+        while j < n and result[j] == curr:
+            j += 1
+        run_len = j - i
+        if run_len < min_duration and i > 0:
+            prev = result[i - 1]
+            for k in range(i, j):
+                result[k] = prev
+        i = j
+    return result
+
+
+@njit(cache=True, fastmath=True)
+def _numba_current_duration(hard_states: np.ndarray) -> np.ndarray:
+    """Calculate run length of states (Numba optimized)."""
+    n = len(hard_states)
+    dur_arr = np.zeros(n, dtype=np.float64)
+    if n == 0:
+        return dur_arr
+    c = 1.0
+    dur_arr[0] = c
+    for i in range(1, n):
+        if hard_states[i] == hard_states[i - 1]:
+            c += 1.0
+        else:
+            c = 1.0
+        dur_arr[i] = c
+    return dur_arr
+
 
 def _assign_state_semantic_labels_v5(
     means: np.ndarray,
@@ -295,16 +400,27 @@ def _quantile_transform(X: np.ndarray, transformers: dict) -> np.ndarray:  # typ
 
 
 def _apply_posterior_smoothing(
-    df: pd.DataFrame, method: str = "EMA", span: int = 6
-) -> pd.DataFrame:
-    """Apply smoothing to probabilities to reduce whipsaws."""
+    probs: np.ndarray | pd.DataFrame, span: int = 6
+) -> np.ndarray | pd.DataFrame:
+    """Apply smoothing to probabilities using Numba (Zero-Loop)."""
     if span <= 1:
-        return df
-    out_df = df.ewm(span=span, adjust=False).mean()
-    out_df = out_df.clip(0.0, 1.0)
-    row_sums = out_df.sum(axis=1)
-    out_df = out_df.div(row_sums, axis=0).fillna(1.0 / len(df.columns))
-    return out_df
+        return probs
+
+    is_df = isinstance(probs, pd.DataFrame)
+    data = probs.to_numpy() if is_df else probs
+
+    # 1. EMA via Numba
+    smoothed = _numba_ema_2d(data.astype(np.float64), span)
+
+    # 2. Vectorized Clip and Normalize
+    smoothed = np.clip(smoothed, 0.0, 1.0)
+    row_sums = np.sum(smoothed, axis=1).reshape(-1, 1)
+    row_sums = np.where(row_sums < 1e-12, 1.0, row_sums)
+    out = smoothed / row_sums
+
+    if is_df:
+        return pd.DataFrame(out, index=probs.index, columns=probs.columns)
+    return out
 
 
 def _apply_sticky_posterior(
@@ -313,35 +429,19 @@ def _apply_sticky_posterior(
     smoothing_window: int = 6,
     min_duration: int = 12,
 ) -> np.ndarray:
-    """Posterior smoothing + min-duration constraint to reduce regime flip noise."""
+    """Posterior smoothing + min-duration constraint using Numba."""
     t_len = posteriors.shape[0]
     if t_len == 0:
         return regime_labels.copy()
-    smoothed = np.zeros_like(posteriors)
-    w = max(1, smoothing_window)
-    for i in range(t_len):
-        start = max(0, i - w + 1)
-        smoothed[i] = posteriors[start : i + 1].mean(axis=0)
-    labels_smooth: np.ndarray = np.argmax(smoothed, axis=1).astype(np.int32)
-    if min_duration <= 1 or t_len < 2:
-        return labels_smooth
-    result = labels_smooth.copy()
-    i = 0
-    while i < t_len:
-        current_state = result[i]
-        j = i + 1
-        while j < t_len and result[j] == current_state:
-            j += 1
-        run_len = j - i
-        if run_len < min_duration and i > 0:
-            prev_state = result[i - 1]
-            result[i:j] = prev_state
-            i = max(0, i - 1)
-            while i > 0 and result[i - 1] == prev_state:
-                i -= 1
-        else:
-            i = j
-    return result
+
+    # 1. Sliding Mean (Numba)
+    smoothed = _numba_sliding_mean_2d(posteriors.astype(np.float64), max(1, smoothing_window))
+
+    # 2. Argmax to get smooth labels
+    labels_smooth = np.argmax(smoothed, axis=1).astype(np.int32)
+
+    # 3. Sticky Logic (Numba)
+    return _numba_sticky_labels(labels_smooth, min_duration)
 
 
 LABEL_VERSION = "v18_jax_student_t"
@@ -393,6 +493,9 @@ class HMMStateInferrer:
         _, _, _, _ = _train_hmm_loop(
             dummy_obs, dummy_mask, params, opt_state, 1, 1e-4, optimizer
         )
+        
+        # Test inference
+        _ = _jax_inference(dummy_obs, dummy_mask, params)
         
         self._warmed_up = True
 
@@ -510,6 +613,10 @@ class HMMStateInferrer:
 
                 _logger.debug("HMM Fit at t=%d: Loss=%.4f, Converged=%s", t, last_loss, converged)
 
+                # Pre-calculate durations for inference
+                trans_mat_inf = np.asarray(jax.nn.softmax(params["transition"], axis=1))
+                durations_inf = 1.0 / (1.0 - np.diag(trans_mat_inf).clip(0.0, 0.999))
+
                 # Post-fit Labeling
                 log_alphas, _ = _forward_pass(
                     X_train_jax,
@@ -523,16 +630,18 @@ class HMMStateInferrer:
                 # Only use valid steps for labeling
                 posteriors_full = jax.nn.softmax(log_alphas, axis=1)
                 posteriors = np.asarray(posteriors_full[:L])
-                hard_states = np.argmax(posteriors, axis=1)
+                hard_states = np.argmax(posteriors, axis=1).astype(np.int32)
 
-                st_returns = np.zeros(self.n_states)
-                st_vols = np.zeros(self.n_states)
-                for s in range(self.n_states):
-                    mask_s = hard_states == s
-                    if np.any(mask_s):
-                        st_returns[s] = float(np.mean(ret_win[mask_s]))
-                        if X_train_raw.shape[1] > 2:
-                            st_vols[s] = float(np.mean(X_train_raw[mask_s, 2]))
+                # Vectorized state-wise returns and volumes
+                counts = np.bincount(hard_states, minlength=self.n_states)
+                sums_ret = np.bincount(hard_states, weights=ret_win, minlength=self.n_states)
+                st_returns = np.where(counts > 0, sums_ret / counts, 0.0)
+
+                if X_train_raw.shape[1] > 2:
+                    sums_vol = np.bincount(hard_states, weights=X_train_raw[:, 2], minlength=self.n_states)
+                    st_vols = np.where(counts > 0, sums_vol / counts, 0.0)
+                else:
+                    st_vols = np.zeros(self.n_states)
 
                 state_to_label = _assign_state_semantic_labels_v5(
                     np.asarray(params["locs"]), st_returns, st_vols
@@ -559,20 +668,10 @@ class HMMStateInferrer:
                 X_inf_padded[:L_inf] = x_seq_qt
                 X_inf_mask = np.zeros(MAX_HMM_WINDOW, dtype=np.float64)
                 X_inf_mask[:L_inf] = 1.0
-                
-                x_seq_jax = jnp.array(X_inf_padded)
-                m_inf_jax = jnp.array(X_inf_mask)
 
-                log_alphas, _ = _forward_pass(
-                    x_seq_jax,
-                    m_inf_jax,
-                    jax.nn.log_softmax(params["initial"]),
-                    jax.nn.log_softmax(params["transition"], axis=1),
-                    params["locs"],
-                    jnp.exp(params["log_scales"]),
-                    jnp.exp(params["log_dfs"]) + 2.0,
-                )
-                p_seq_full = np.asarray(jax.nn.softmax(log_alphas, axis=1))
+                p_seq_full = np.asarray(_jax_inference(
+                    jnp.array(X_inf_padded), jnp.array(X_inf_mask), params
+                ))
                 p_seq = p_seq_full[:L_inf]
                 
                 semantic_probs = p_seq @ map_matrix
@@ -580,9 +679,7 @@ class HMMStateInferrer:
                 p_clip = np.clip(p_seq, 1e-12, 1.0)
                 entropy = -np.sum(p_clip * np.log(p_clip), axis=1) / jnp.log(max(2, self.n_states))
 
-                trans_mat = np.asarray(jax.nn.softmax(params["transition"], axis=1))
-                durations = 1.0 / (1.0 - np.diag(trans_mat).clip(0.0, 0.999))
-                current_durations = durations[np.argmax(p_seq, axis=1)]
+                current_durations = durations_inf[np.argmax(p_seq, axis=1)]
 
                 results[apply_start:t, : len(_SEMANTIC_ORDER)] = semantic_probs
                 results[apply_start:t, len(_SEMANTIC_ORDER)] = entropy
@@ -614,18 +711,8 @@ class HMMStateInferrer:
         row_sums = np.where(row_sums < 1e-12, 1.0, row_sums)
         probs_df[sem_cols] = blended / row_sums
 
-        hard_states = np.argmax(probs_df[sem_cols].to_numpy(), axis=1)
-        dur_arr = np.zeros(len(hard_states), dtype=np.float64)
-        if len(hard_states) > 0:
-            c = 1.0
-            dur_arr[0] = c
-            for i in range(1, len(hard_states)):
-                if hard_states[i] == hard_states[i-1]:
-                    c += 1.0
-                else:
-                    c = 1.0
-                dur_arr[i] = c
-        probs_df["hmm_current_duration"] = dur_arr
+        hard_states_final = np.argmax(probs_df[sem_cols].to_numpy(), axis=1).astype(np.int32)
+        probs_df["hmm_current_duration"] = _numba_current_duration(hard_states_final)
         
         out = probs_df.reset_index()
         if "datetime" not in out.columns:
