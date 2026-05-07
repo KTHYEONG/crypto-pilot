@@ -88,6 +88,8 @@ os.environ.setdefault("MKL_NUM_THREADS", "1")
 os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 os.environ.setdefault("VECLIB_MAXIMUM_THREADS", "1")
 os.environ.setdefault("NUMBA_NUM_THREADS", "1")
+os.environ["CUDA_VISIBLE_DEVICES"] = ""
+os.environ["JAX_PLATFORMS"] = "cpu"
 
 from src.core.utils.utils import setup_logger  # noqa: E402
 
@@ -634,25 +636,38 @@ def _load_single_symbol_data(
         temp_oos: dict[str, Any] = {}
         insufficient = False
         collector = DataCollector()
-        collector.ensure_funding_data(sym, fetch_start, end)
-        if not skip_metrics:
-            collector.ensure_metrics_data(sym, fetch_start, end)
+        
+        # Ensure data exist (Internal error handling)
+        try:
+            collector.ensure_funding_data(sym, fetch_start, end)
+            if not skip_metrics:
+                collector.ensure_metrics_data(sym, fetch_start, end)
+        except Exception as e:
+            _logger.debug("[%s] Metadata (funding/metrics) check failed: %s", sym, e)
 
-        # Use a set to ensure unique timeframes are processed
         tfs_to_load = set([tf, "1d", "1h"])
         for tf_l in tfs_to_load:
-                
             raw_df = collector.collect_and_save(sym, tf_l, fetch_start, end)
             if raw_df is None or raw_df.empty:
-                print(f"DEBUG: {sym} {tf_l} raw_df is empty or None")
                 insufficient = True
                 break
             
-            df = merge_funding_into_ohlcv(sym, raw_df, Path(FUTURES_DATA_DIR))
-            df = merge_metrics_into_ohlcv(sym, df, Path(FUTURES_DATA_DIR))
+            # Standardizing Column names check
+            if "datetime" not in raw_df.columns:
+                raw_df = raw_df.reset_index()
+                if "datetime" not in raw_df.columns and len(raw_df.columns) > 0:
+                    raw_df = raw_df.rename(columns={str(raw_df.columns[0]): "datetime"})
+
+            try:
+                # Core Merge logic with explicit Error Handling
+                df = merge_funding_into_ohlcv(sym, raw_df, Path(FUTURES_DATA_DIR))
+                df = merge_metrics_into_ohlcv(sym, df, Path(FUTURES_DATA_DIR))
+            except Exception as e:
+                _logger.debug("[%s] Merge failed (Format mismatch): %s", sym, e)
+                insufficient = True
+                break
 
             if df is None or df.empty or "datetime" not in df.columns:
-                print(f"DEBUG: {sym} {tf_l} df after merge is empty or None")
                 insufficient = True
                 break
 
@@ -665,12 +680,12 @@ def _load_single_symbol_data(
             is_mask = df["datetime"] < is_end_dt
             is_end_idx = int(is_mask.to_numpy().sum())
 
-            # [Dynamic Quality Gate] 1h requires more bars than 4h/1d
+            # [Dynamic Quality Gate]
             min_bars_map = {"1h": 2000, "4h": 500, "1d": 300}
             min_bars_threshold = min_bars_map.get(tf_l, 300)
 
             if is_end_idx < min_bars_threshold:
-                print(f"DEBUG: {sym} {tf_l} is_end_idx ({is_end_idx}) < threshold ({min_bars_threshold})")
+                _logger.debug("[%s] %s history too short (%d < %d)", sym, tf_l, is_end_idx, min_bars_threshold)
                 insufficient = True
                 break
 
@@ -689,8 +704,7 @@ def _load_single_symbol_data(
         temp_oos[f"merge_idx_{tf}"] = compute_segment_merge_index(temp_oos[tf], temp_oos["1d"])
         return sym, temp_is, temp_oos, False
     except Exception as e:
-        print(f"DEBUG: {sym} failed with error: {e}")
-        _logger.warning("Failed to load symbol %s: %s", sym, e)
+        _logger.debug("[%s] Critical load failure: %s", sym, e)
         return sym, None, None, True
 
 
