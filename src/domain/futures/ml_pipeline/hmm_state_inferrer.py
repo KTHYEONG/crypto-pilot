@@ -62,13 +62,6 @@ def _student_t_log_pdf(
     return log_c - (df + 1.0) / 2.0 * jnp.log1p(y**2 / df)
 
 
-@jax.jit
-def _multivariate_student_t_log_pdf(
-    x: jnp.ndarray, loc: jnp.ndarray, scale: jnp.ndarray, df: jnp.ndarray
-) -> jnp.ndarray:
-    """Diagonal Multivariate Student-t log-pdf (sum of univariate)."""
-    return jnp.sum(_student_t_log_pdf(x, loc, scale, df))
-
 # --- JAX HMM Core Functions ---
 
 MAX_HMM_WINDOW = 1500
@@ -227,19 +220,22 @@ def _compute_nll(
     # Volatility Penalties: Crisis > Bear > Others
     p_crisis_vol = jnp.square(jnp.maximum(0.0, jnp.max(locs[:3, 2]) - locs[3, 2] + 2.0))
 
-    # Adaptive: 10000x ll_scale — extremely strong directional ordering enforcement
-    semantic_penalty = 10000.0 * ll_scale * (p_02 + p_21 + p_13 + p_crisis_val + p_crisis_vol)
+    # Adaptive: 1000x ll_scale — directional ordering enforcement (recalibrated from 10000x)
+    semantic_penalty = 1000.0 * ll_scale * (p_02 + p_21 + p_13 + p_crisis_val + p_crisis_vol)
 
     posteriors = jax.nn.softmax(log_alphas, axis=1)
-    # Adaptive: 10000x ll_scale for guidance (Phase 4 Final Push - Double strength)
-    guidance_loss = 10000.0 * ll_scale * jnp.mean(mask * (posteriors[:, 3] - guidance_mask)**2)
+    # Adaptive: 2000x ll_scale for guidance (recalibrated from 10000x)
+    guidance_loss = 2000.0 * ll_scale * jnp.mean(mask * (posteriors[:, 3] - guidance_mask)**2)
 
-    # State Frequency Penalty: CRISIS (state 3) should be < 20%
+    # State Frequency Penalty: CRISIS (state 3) target 3~7% (bidirectional)
     crisis_freq = jnp.mean(posteriors[:, 3] * mask) / (jnp.mean(mask) + 1e-9)
-    # Adaptive: 10x ll_scale
-    freq_penalty = 10.0 * ll_scale * jnp.maximum(0.0, crisis_freq - 0.20)
+    # Adaptive: 10x ll_scale — bidirectional cap+floor
+    freq_penalty = 10.0 * ll_scale * (
+        jnp.maximum(0.0, crisis_freq - 0.07) +   # cap at 7%
+        jnp.maximum(0.0, 0.03 - crisis_freq)       # floor at 3%
+    )
 
-    l2_penalty = 0.01 * jnp.sum(params["tvtp_W"]**2)
+    l2_penalty = 0.001 * jnp.sum(params["tvtp_W"]**2)
     return -ll + sticky_penalty + semantic_penalty + guidance_loss + freq_penalty + l2_penalty
 
 
@@ -408,27 +404,6 @@ def _quantile_transform(X: np.ndarray, transformers: dict) -> np.ndarray:
     return cast(np.ndarray, np.clip(X_out, -5.0, 5.0))
 
 
-def _apply_posterior_smoothing(probs: np.ndarray | pd.DataFrame, span: int = 6) -> np.ndarray | pd.DataFrame:
-    """Apply smoothing to probabilities using Numba."""
-    if span <= 1: return probs
-    is_df = isinstance(probs, pd.DataFrame)
-    data = probs.to_numpy() if is_df else probs
-    smoothed = _numba_ema_2d(data.astype(np.float64), span)
-    smoothed = np.clip(smoothed, 0.0, 1.0)
-    row_sums = np.sum(smoothed, axis=1).reshape(-1, 1)
-    row_sums = np.where(row_sums < 1e-12, 1.0, row_sums)
-    out = smoothed / row_sums
-    return pd.DataFrame(out, index=probs.index, columns=probs.columns) if is_df else out
-
-
-def _apply_sticky_posterior(regime_labels: np.ndarray, posteriors: np.ndarray, smoothing_window: int = 6, min_duration: int = 12) -> np.ndarray:
-    """Posterior smoothing + min-duration constraint using Numba."""
-    if posteriors.shape[0] == 0: return regime_labels.copy()
-    smoothed = _numba_sliding_mean_2d(posteriors.astype(np.float64), max(1, smoothing_window))
-    labels_smooth = np.argmax(smoothed, axis=1).astype(np.int32)
-    return _numba_sticky_labels(labels_smooth, min_duration)
-
-
 @dataclass
 class HMMStateInferrer:
     """Infers market regimes using Guided 4-State TVTP-HMM (Phase 1)."""
@@ -443,10 +418,25 @@ class HMMStateInferrer:
     _last_opt: Any | None = None
 
     def _generate_stress_mask(self, features_df: pd.DataFrame, returns_ser: pd.Series) -> np.ndarray:
-        """Generate guidance_mask using expanding-window return tails (Worst 15%, walk-forward clean)."""
-        expanding_thresh = returns_ser.expanding(min_periods=200).quantile(0.15).bfill()
-        stress_cond = (returns_ser < expanding_thresh)
-        stress_mask_raw = stress_cond.astype(np.float32).to_numpy()
+        """Generate guidance_mask: multi-modal AND condition — directional crash + macro stress."""
+        expanding_ret_thresh = returns_ser.expanding(min_periods=200).quantile(0.15).fillna(0.0)
+        ret_stress = (returns_ser < expanding_ret_thresh)
+
+        # Vol spike: macro_vol_24h > expanding 85th percentile
+        vol_series = features_df.get("macro_vol_24h", pd.Series(0.0, index=features_df.index))
+        expanding_vol_thresh = vol_series.expanding(min_periods=200).quantile(0.85).fillna(
+            vol_series.expanding().median().fillna(0.0)
+        )
+        vol_stress = (vol_series > expanding_vol_thresh)
+
+        # OI surge: macro_oi_delta_24h > expanding 85th percentile (OI spike = panic positioning)
+        oi_series = features_df.get("macro_oi_delta_24h", pd.Series(0.0, index=features_df.index))
+        expanding_oi_thresh = oi_series.abs().expanding(min_periods=200).quantile(0.85).fillna(0.0)
+        oi_stress = (oi_series.abs() > expanding_oi_thresh)
+
+        # Multi-modal: directional crash AND (vol spike OR OI surge)
+        combined_stress = ret_stress & (vol_stress | oi_stress)
+        stress_mask_raw = combined_stress.astype(np.float32).to_numpy()
         return _numba_sticky_labels(stress_mask_raw.astype(np.int32), min_duration=4).astype(np.float32)
 
     def _warmup_jit(self, n_feats: int) -> None:
@@ -468,9 +458,9 @@ class HMMStateInferrer:
     def fit_predict_systemic(self, features_df: pd.DataFrame, returns_ser: pd.Series, is_end_idx: int, symbol: str = "Market", tf: str = "1h") -> pd.DataFrame:
         """Expanding-window Guided 4-State TVTP-HMM."""
         cm = CacheManager(FUTURES_CACHE_DIR, max_files=15, max_size_mb=1000.0)
-        deps = {"symbol": symbol, "tf": tf, "data_len": len(features_df), "ver": "v23_viterbi_hard_p4", "feat_cols": sorted(list(SYSTEMIC_HMM_FEATURE_COLUMNS))}
+        deps = {"symbol": symbol, "tf": tf, "data_len": len(features_df), "ver": "v24_p5_ortho", "feat_cols": sorted(list(SYSTEMIC_HMM_FEATURE_COLUMNS))}
         tag = cm.generate_hash(deps, source_files=[Path(__file__).resolve()])
-        cache_path = cm.get_cache_path(f"HMM_v23_viterbi_{symbol}_{tf}_len{len(features_df)}", ".parquet", tag)
+        cache_path = cm.get_cache_path(f"HMM_v24_p5_{symbol}_{tf}_len{len(features_df)}", ".parquet", tag)
         if cache_path.exists():
             try: return pd.read_parquet(cache_path)
             except Exception: pass
@@ -494,7 +484,7 @@ class HMMStateInferrer:
                 if self._last_params:
                     curr_p = self._last_params
                     curr_o = optimizer.init(curr_p)
-                    iters = 100
+                    iters = 300
                 else:
                     locs = np.zeros((4, num_feats), dtype=np.float32)
                     # BULL (0), BEAR (1), CHOP (2), CRISIS (3)
@@ -503,17 +493,24 @@ class HMMStateInferrer:
                     locs[1, 0], locs[1, 2], locs[1, 3] = -1.5, 1.0, 1.0
                     locs[2, 0], locs[2, 2], locs[2, 3] = 0.0, -1.0, -1.0
                     locs[3, 0], locs[3, 2], locs[3, 3] = -3.5, 3.5, 3.5
-                    
+
                     W_init = np.zeros((4, 4, _N_TVTP_FEATS), dtype=np.float32)
                     # TVTP indices: cs_dispersion(0→4), oi_delta(1→5), funding_mom(2→6), liq_proxy(3→7), lsr_delta(4→8)
                     # Crisis entry driven by oi_delta(local idx 1) and liq_proxy(local idx 3)
                     W_init[:, 3, 1], W_init[:, 3, 3] = 3.0, -2.5
-                    curr_p = {"initial": jnp.zeros(4), "tvtp_W": jnp.array(W_init), "tvtp_b": jnp.eye(4) * 7.0, "locs": jnp.array(locs), "log_scales": jnp.zeros((4, num_feats)), "log_dfs": jnp.array([1.0, 1.0, 1.0, 0.5])}
+                    curr_p = {
+                        "initial": jnp.zeros(4),
+                        "tvtp_W": jnp.array(W_init),
+                        "tvtp_b": jnp.eye(4) * 3.0,  # Weakened prior (was 7.0): TVTP exogenous learning space
+                        "locs": jnp.array(locs),
+                        "log_scales": jnp.zeros((4, num_feats)),
+                        "log_dfs": jnp.array([1.5, 1.5, 1.5, 1.0]),  # df≈[6.5,6.5,6.5,4.7]: CRISIS kurtosis defined
+                    }
                     curr_o, iters = optimizer.init(curr_p), self.n_iter
                 params, self._last_opt, _, _ = _train_hmm_loop(jnp.array(X_pad), jnp.array(M_pad), jnp.array(GM_pad), curr_p, curr_o, iters, 1e-4, optimizer)
                 if self._last_params is not None:
                     params = jax.tree_util.tree_map(
-                        lambda new, old: 0.7 * new + 0.3 * old, params, self._last_params
+                        lambda new, old: 0.9 * new + 0.1 * old, params, self._last_params  # EMA: lag minimized (was 0.7/0.3)
                     )
                 self._last_params = params
             try:

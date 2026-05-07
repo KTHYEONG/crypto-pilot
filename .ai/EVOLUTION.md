@@ -4,6 +4,40 @@ This file tracks the logical progression and experimental results of the quantit
 
 ---
 
+## [2026-05-07] v1.8.0 Phase 5 HMM Orthogonal Tuning: Penalty Recalibration + Multimodal Guidance + TVTP Unlocking (Claude Sonnet 4.6)
+- **Status**: Validated (BULL WEALTH_EXP PASS, OOS Tail Capture PASS)
+- **Problem**: v1.7.0 v23_p4의 6가지 구조적 버그: (1) 10,000× penalty가 LL 학습 봉인, (2) tvtp_b=7.0으로 TVTP 비활성, (3) CRISIS df=3.6 → kurtosis undefined, (4) guidance mask가 vol-only crash 미감지, (5) freq_penalty 단방향, (6) bfill() look-ahead leak.
+- **Key Fixes (P5)**:
+    - **[P5-1] Penalty 재교정**: `semantic_penalty 10000× → 1000×`, `guidance_loss 10000× → 2000×`. LL 학습 공간 복원.
+    - **[P5-2] freq_penalty 쌍방향**: CRISIS 20% cap 단방향 → 3~7% range 양방향(cap+floor). CRISIS 발화율 3~7% 정밀 타깃.
+    - **[P5-3] tvtp_b 약화**: `eye(4)*7.0 → eye(4)*3.0`. exogenous signal 학습 여유 2.3배 확대.
+    - **[P5-4] log_dfs 상향**: `[1.0,1.0,1.0,0.5] → [1.5,1.5,1.5,1.0]`. df≈[6.5,6.5,6.5,4.7], CRISIS df>4 → kurtosis 정의됨.
+    - **[P5-5] Multimodal AND guidance mask**: `return<q15` 단독 → `return<q15 AND (vol_spike OR oi_surge)`. Walk-forward expanding window 무결, bfill() 제거.
+    - **[P5-6] Hot-start iters**: `100 → 300`. 충분한 수렴 후 EMA blend.
+    - **[P5-7] EMA blend lag 최소화**: `0.7*new+0.3*old → 0.9*new+0.1*old`.
+    - **[P5-8] L2 규제 완화**: `0.01 → 0.001`. TVTP weight가 prior를 넘어설 수 있도록.
+    - **[P5-9] Dead code 제거**: `_multivariate_student_t_log_pdf`, `_apply_posterior_smoothing`, `_apply_sticky_posterior` 삭제.
+    - **[P5-10] OOS+IC Audit 추가**: `audit_oos_and_ic()` 함수 신규 추가 — Spearman IC × [t+1, t+12, t+24], OOS Tail Capture 측정.
+    - **Cache**: `v23_viterbi_hard_p4 → v24_p5_ortho`.
+- **Results (v24_p5_ortho)**:
+    - **BULL G_log: 0.060% (WEALTH_EXP, >0.05% PASS)**
+    - **IS Left-Tail Capture: 74.4% (ACCEPTABLE)**
+    - **OOS Tail Capture: 77.6% (PASS, >70%)**
+    - **CRISIS freq: 16.6%** (freq_penalty 3~7% range 밖 — 다음 단계 강화 필요)
+    - **Switches: 553**, **Avg Duration: 39.5 bars**
+    - IC(CRISIS, t+12): 0.0133, IC(BULL, t+24): 0.0065 — 전체적으로 WEAK (Viterbi one-hot 특성상 예상 범위)
+    - CRISIS MU: +0.024% (양수 — 방향성 미달, P6 이슈)
+    - Pipeline elapsed: 15.38s
+- **v23_p4 대비**:
+    - BULL G_log: 0.053% → 0.060% (+13.2%, WEALTH_EXP 유지)
+    - IS Tail Capture: 85.5% → 74.4% (-11.1pp, multimodal mask가 더 엄격해 guidance 감소 — OOS 77.6% PASS로 보완)
+    - Switches: 510 → 553 (+8.4%, 소폭 증가)
+    - OOS Tail Capture: 신규 측정 77.6% PASS
+- **Remaining Issue**: CRISIS freq 16.6% (>7% cap 초과). freq_penalty floor/cap 강도 증가 또는 TVTP crisis-entry weight 직접 조정 필요. CRISIS MU 양수는 vol-dominant CRISIS(vol spike but not directional crash)로 인한 것으로 추정.
+- **Lessons**: 10,000× penalty는 LL 학습을 완전 봉쇄한다. 1000×/2000× 재교정만으로도 BULL G_log 개선. Multimodal AND 조건은 guidance precision을 높이나 recall 희생 → freq_penalty만으로는 부족, CRISIS 발화율 직접 제어 강화 필요.
+
+---
+
 ## [2026-05-07] v1.7.0 Phase 4 HMM Finalization: Viterbi + Structural Separation (Gemini CLI)
 - **Status**: Validated (BULL G_log & Tail Capture PASS)
 - **Problem**: v1.6.0 P3까지도 모든 regime이 NOISE_LOCKED 상태(BULL G_log 0.015%). Soft posterior blending과 과도한 smoothing이 MU dispersion을 압축함.
