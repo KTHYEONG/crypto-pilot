@@ -297,61 +297,6 @@ def _numba_current_duration(hard_states: np.ndarray) -> np.ndarray:
     return dur_arr
 
 
-def _assign_state_semantic_labels_v5(
-    means: np.ndarray,
-    state_returns: np.ndarray | None = None,
-    state_vols: np.ndarray | None = None,
-) -> dict[int, str]:
-    """Map HMM state index to semantic label via G_LOG based Logic (v15.6 SOTA)."""
-    k = means.shape[0]
-    trend_idx = 0         # macro_trend_168h
-    vol_idx = 1           # macro_vol_24h
-    downside_vol_idx = 2  # macro_downside_vol_24h
-
-    state_to_label: dict[int, str] = {}
-    remaining = list(range(k))
-
-    vol_means = means[:, vol_idx]
-    down_vol_means = (
-        means[:, downside_vol_idx] if means.shape[1] > downside_vol_idx else vol_means
-    )
-    # Crisis is high vol + high downside vol
-    composite_risk = (vol_means + down_vol_means) / 2.0
-
-    crisis_idx = int(remaining[int(np.argmax(composite_risk[remaining]))])
-    state_to_label[crisis_idx] = "crisis"
-    remaining.remove(crisis_idx)
-
-    if state_returns is not None and state_vols is not None:
-        mu = np.asarray(state_returns, dtype=np.float64)
-        sigma = np.asarray(state_vols, dtype=np.float64)
-        # Fix scale mismatch: ensure mu has enough weight against sigma^2
-        # If mu is in decimal (e.g. 0.001) and sigma is in decimal (e.g. 0.02),
-        # mu - 0.5 * sigma^2 is correct. 
-        # But for normalized locs, we need to be careful.
-        proxy_g_log = mu - 0.5 * (sigma**2)
-    else:
-        # For normalized locs (Rank-Gauss), Trend (index 0) should be dominant.
-        # We use a weighted mu to overcome the variance penalty if needed.
-        proxy_g_log = 2.0 * means[:, trend_idx] - 0.5 * (means[:, vol_idx] ** 2)
-
-    bull_idx_rel = int(np.argmax(proxy_g_log[remaining]))
-    bull_idx = remaining[bull_idx_rel]
-    state_to_label[bull_idx] = "bull_trend"
-    remaining.remove(bull_idx)
-
-    if remaining:
-        bear_idx_rel = int(np.argmin(proxy_g_log[remaining]))
-        bear_idx = remaining[bear_idx_rel]
-        state_to_label[bear_idx] = "bear_trend"
-        remaining.remove(bear_idx)
-
-    for idx in remaining:
-        state_to_label[idx] = "chop"
-
-    return state_to_label
-
-
 def _quantile_scaling(X: np.ndarray) -> tuple[np.ndarray, dict]:  # type: ignore[type-arg]
     """Perform mixed scaling: Log+RobustScaler for vol features, Rank-Gauss for others."""
     feat_cols = list(SYSTEMIC_HMM_FEATURE_COLUMNS)
@@ -451,37 +396,57 @@ def _apply_sticky_posterior(
     return _numba_sticky_labels(labels_smooth, min_duration)
 
 
-LABEL_VERSION = "v18_jax_student_t"
+LABEL_VERSION = "v18_hier_stress_v1"
 
 
 @dataclass
 class HMMStateInferrer:
-    """Infers market regimes using JAX-based Student-t HMM (v18 Optimized)."""
+    """Infers market regimes using Stress-Isolating Hierarchical HMM (Phase 3.2)."""
 
-    n_states: int = 4
-    max_states: int = 4
+    n_states: int = 3  # Normal states: Bull, Bear, Chop
+    max_states: int = 3
     n_iter: int = 500      # Default JAX SGD iterations
     predict_step: int = 24
     fit_step: int = 252
     _warmed_up: bool = False
     _last_params: dict[str, Any] | None = None
-    _last_opt_state: Any | None = None
+    _last_opt: Any | None = None
+
+    def _generate_stress_mask(self, features_df: pd.DataFrame) -> np.ndarray:
+        """Generate sticky stress_mask (1: Crisis, 0: Normal) using Vol_Z and Trend_Scaled."""
+        feat_cols = list(SYSTEMIC_HMM_FEATURE_COLUMNS)
+        trend_col = feat_cols[0]  # macro_trend_168h
+        vol_col = feat_cols[1]    # macro_vol_24h
+        
+        trend_series = features_df[trend_col]
+        vol_series = features_df[vol_col]
+        
+        # Vol_Z: rolling 24h Z-score of macro_vol_24h
+        vol_mean = vol_series.rolling(window=24, min_periods=1).mean()
+        vol_std = vol_series.rolling(window=24, min_periods=1).std()
+        vol_z = (vol_series - vol_mean) / (vol_std + 1e-9)
+        
+        # Stress Mask: (Vol_Z > 1.5) & (Trend_Scaled < -0.5)
+        stress_mask_raw = ((vol_z > 1.5) & (trend_series < -0.5)).astype(np.int32).to_numpy()
+        
+        # Apply sticky labels with min_duration=4
+        return _numba_sticky_labels(stress_mask_raw, min_duration=4)
 
     def _warmup_jit(self, n_feats: int) -> None:
-        """Run a dummy 1-iteration optimization to warm up JIT cache."""
+        """Run a dummy 1-iteration optimization to warm up JIT cache for 3-state HMM."""
         if self._warmed_up:
             return
-        _logger.info("Warming up JAX HMM JIT cache (MAX_WINDOW=%d, FEATS=%d)...", MAX_HMM_WINDOW, n_feats)
+        _logger.info("Warming up JAX HMM JIT cache (3-states, FEATS=%d)...", n_feats)
         dummy_obs = jnp.zeros((MAX_HMM_WINDOW, n_feats))
         dummy_mask = jnp.zeros(MAX_HMM_WINDOW)
         
-        # Simple dummy params
+        # 3-state HMM params
         params = {
-            "initial": jnp.zeros(self.n_states),
-            "transition": jnp.eye(self.n_states),
-            "locs": jnp.zeros((self.n_states, n_feats)),
-            "log_scales": jnp.zeros((self.n_states, n_feats)),
-            "log_dfs": jnp.ones(self.n_states) * 3.0,
+            "initial": jnp.zeros(3),
+            "transition": jnp.eye(3),
+            "locs": jnp.zeros((3, n_feats)),
+            "log_scales": jnp.zeros((3, n_feats)),
+            "log_dfs": jnp.ones(3) * 3.0,
         }
         
         optimizer = optax.adam(learning_rate=0.01)
@@ -514,25 +479,24 @@ class HMMStateInferrer:
         symbol: str = "Market",
         tf: str = "1h",
     ) -> pd.DataFrame:
-        """Expanding-window systemic HMM with Optimized JAX logic."""
+        """Expanding-window Stress-Isolating Hierarchical HMM (Phase 3.2)."""
         cm = CacheManager(FUTURES_CACHE_DIR, max_files=15, max_size_mb=1000.0)
         deps = {
             "symbol": symbol,
             "tf": tf,
             "data_len": len(features_df),
-            "n_states": self.n_states,
-            "ver": "v18_jax_student_t",
+            "ver": "v18_hier_stress_v1",
             "feat_cols": sorted(list(SYSTEMIC_HMM_FEATURE_COLUMNS)),
         }
         src_files = [Path(__file__).resolve()]
         tag = cm.generate_hash(deps, source_files=src_files)
-        prefix = f"HMM_v18_sys_{symbol}_{tf}_len{len(features_df)}"
+        prefix = f"HMM_v18_hier_stress_{symbol}_{tf}_len{len(features_df)}"
         cache_path = cm.get_cache_path(prefix, ".parquet", tag)
 
         if cache_path.exists():
             try:
                 cached_df = pd.read_parquet(cache_path)
-                _logger.info("[%s] JAX Student-t HMM loaded from cache.", symbol)
+                _logger.info("[%s] Stress-Isolating HMM loaded from cache.", symbol)
                 return cached_df
             except Exception as e:
                 _logger.warning("Failed to load HMM cache for %s: %s", symbol, e)
@@ -547,7 +511,7 @@ class HMMStateInferrer:
         self._warmup_jit(num_feats)
 
         X_raw = X_frame.to_numpy(dtype=np.float64)
-        ret_raw = returns_ser.reindex(features_df.index).fillna(0.0).to_numpy(dtype=np.float64)
+        stress_mask = self._generate_stress_mask(features_df)
 
         out_cols = [
             *_SEMANTIC_ORDER,
@@ -555,12 +519,11 @@ class HMMStateInferrer:
             "hmm_expected_duration",
             "hmm_current_duration",
         ]
-        results: np.ndarray = np.full((n, len(out_cols)), np.nan, dtype=np.float64)
+        results: np.ndarray = np.full((n, len(out_cols)), 0.0, dtype=np.float64)
 
         min_train = 500
         params: dict[str, Any] | None = None
-        hmm_transformers: dict[str, Any] | None = None
-        map_matrix: np.ndarray | None = None
+        transformers: dict[str, Any] | None = None
 
         optimizer = optax.adam(learning_rate=0.01)
 
@@ -574,10 +537,11 @@ class HMMStateInferrer:
                 win_end = max(1, t - 1)
                 win_start = max(0, t - MAX_HMM_WINDOW)
                 X_win = X_raw[win_start : win_end]
-                ret_win = ret_raw[win_start : win_end]
+                sm_win = stress_mask[win_start : win_end]
                 
                 L = len(X_win)
                 X_train_raw, new_transformers = _quantile_scaling(X_win)
+                transformers = new_transformers
                 
                 # Static Shape Padding
                 X_padded = np.zeros((MAX_HMM_WINDOW, num_feats), dtype=np.float64)
@@ -585,124 +549,86 @@ class HMMStateInferrer:
                 X_mask = np.zeros(MAX_HMM_WINDOW, dtype=np.float64)
                 X_mask[:L] = 1.0
                 
+                sm_padded = np.zeros(MAX_HMM_WINDOW, dtype=np.float64)
+                sm_padded[:L] = sm_win
+                
                 X_train_jax = jnp.array(X_padded)
                 X_mask_jax = jnp.array(X_mask)
+                sm_jax = jnp.array(sm_padded)
 
-                # Warm-start logic
+                # --- Train 3-State HMM on Normal Data (stress_mask == 0) ---
+                mask_normal = X_mask_jax * (1.0 - sm_jax)
+                
                 if self._last_params is not None:
-                    curr_params = self._last_params
-                    curr_opt_state = self._last_opt_state
-                    iterations = 50  # Reduce iterations for warm-start
+                    curr_p, curr_o, iters = self._last_params, self._last_opt, 50
                 else:
-                    # Heuristic Semi-supervised init
-                    # State 0 (Bull): Trend +1.0, Vol -0.5
-                    # State 1 (Bear): Trend -1.0, Vol -0.5
-                    # State 2 (Chop): Trend 0.0, Vol -1.0
-                    # State 3 (Crisis): Trend 0.0, Vol +1.5
-                    locs_init = np.zeros((self.n_states, num_feats), dtype=np.float32)
-                    if self.n_states >= 4:
-                        locs_init[0, 0], locs_init[0, 1] = 1.0, -0.5  # Bull
-                        locs_init[1, 0], locs_init[1, 1] = -1.0, -0.5 # Bear
-                        locs_init[2, 0], locs_init[2, 1] = 0.0, -1.0  # Chop
-                        locs_init[3, 0], locs_init[3, 1] = 0.0, 1.5   # Crisis
-                    
-                    curr_params = {
-                        "initial": jnp.zeros(self.n_states),
-                        "transition": jnp.eye(self.n_states) * 5.0,  # Strong diagonal init
-                        "locs": jnp.array(locs_init),
-                        "log_scales": jnp.zeros((self.n_states, num_feats)),
-                        "log_dfs": jnp.ones(self.n_states) * 3.0,  # DoF ~ exp(3)+2 init
+                    # Init 3-state HMM: Bull, Bear, Chop
+                    locs = np.zeros((3, num_feats), dtype=np.float32)
+                    locs[0, 0], locs[0, 1] = 1.0, -1.0   # BULL_TREND: +Trend, -Vol
+                    locs[1, 0], locs[1, 1] = -1.0, 1.0  # BEAR_TREND: -Trend, +Vol
+                    locs[2, 0], locs[2, 1] = 0.0, -1.0  # CHOP: 0 Trend, -Vol
+                    curr_p = {
+                        "initial": jnp.zeros(3),
+                        "transition": jnp.eye(3) * 5.0,
+                        "locs": jnp.array(locs),
+                        "log_scales": jnp.zeros((3, num_feats)),
+                        "log_dfs": jnp.ones(3) * 3.0,
                     }
-                    curr_opt_state = optimizer.init(curr_params)
-                    iterations = self.n_iter
-
-                # Run compiled training loop
-                new_params, new_opt_state, last_loss, converged = _train_hmm_loop(
-                    X_train_jax, X_mask_jax, curr_params, curr_opt_state, 
-                    iterations, 1e-4, optimizer
+                    curr_o = optimizer.init(curr_p)
+                    iters = self.n_iter
+                
+                params, self._last_opt, _, _ = _train_hmm_loop(
+                    X_train_jax, mask_normal, curr_p, curr_o, iters, 1e-4, optimizer
                 )
+                self._last_params = params
 
-                self._last_params = new_params
-                self._last_opt_state = new_opt_state
-                params = new_params
-                hmm_transformers = new_transformers
-
-                _logger.debug("HMM Fit at t=%d: Loss=%.4f, Converged=%s", t, last_loss, converged)
-
-                # Pre-calculate durations for inference
-                trans_mat_inf = np.asarray(jax.nn.softmax(params["transition"], axis=1))
-                durations_inf = 1.0 / (1.0 - np.diag(trans_mat_inf).clip(0.0, 0.999))
-
-                # Post-fit Labeling
-                log_alphas, _ = _forward_pass(
-                    X_train_jax,
-                    X_mask_jax,
-                    jax.nn.log_softmax(params["initial"]),
-                    jax.nn.log_softmax(params["transition"], axis=1),
-                    params["locs"],
-                    jnp.exp(params["log_scales"]),
-                    jnp.exp(params["log_dfs"]) + 2.0,
-                )
-                # Only use valid steps for labeling
-                posteriors_full = jax.nn.softmax(log_alphas, axis=1)
-                posteriors = np.asarray(posteriors_full[:L])
-                hard_states = np.argmax(posteriors, axis=1).astype(np.int32)
-
-                # Vectorized state-wise returns and volumes
-                counts = np.bincount(hard_states, minlength=self.n_states)
-                sums_ret = np.bincount(hard_states, weights=ret_win, minlength=self.n_states)
-                st_returns = np.where(counts > 0, sums_ret / counts, 0.0)
-
-                # [FIX] Use macro_vol_24h (index 1) for st_vols calculation
-                if X_train_raw.shape[1] > 1:
-                    sums_vol = np.bincount(hard_states, weights=X_train_raw[:, 1], minlength=self.n_states)
-                    st_vols = np.where(counts > 0, sums_vol / counts, 0.0)
-                else:
-                    st_vols = np.zeros(self.n_states)
-
-                state_to_label = _assign_state_semantic_labels_v5(
-                    np.asarray(params["locs"]), st_returns, st_vols
-                )
-                map_matrix = np.zeros((self.n_states, len(_SEMANTIC_ORDER)), dtype=np.float64)
-                for si in range(self.n_states):
-                    lab = state_to_label.get(si, "chop")
-                    prob_col = f"hmm_prob_{lab}"
-                    if prob_col in _SEMANTIC_ORDER:
-                        map_matrix[si, _SEMANTIC_ORDER.index(prob_col)] = 1.0
-
-            if params is None or hmm_transformers is None or map_matrix is None:
+            if params is None or transformers is None:
                 continue
 
             try:
                 apply_start = max(0, t - self.predict_step)
-                x_seq_qt = _quantile_transform(
-                    X_raw[apply_start : t], hmm_transformers
-                )
+                x_seq = X_raw[apply_start : t]
+                sm_seq = stress_mask[apply_start : t]
+                x_seq_qt = _quantile_transform(x_seq, transformers)
                 L_inf = len(x_seq_qt)
                 
-                # Padding for Inference
                 X_inf_padded = np.zeros((MAX_HMM_WINDOW, num_feats), dtype=np.float64)
                 X_inf_padded[:L_inf] = x_seq_qt
                 X_inf_mask = np.zeros(MAX_HMM_WINDOW, dtype=np.float64)
                 X_inf_mask[:L_inf] = 1.0
+                X_inf_jax = jnp.array(X_inf_padded)
+                M_inf_jax = jnp.array(X_inf_mask)
 
-                p_seq_full = np.asarray(_jax_inference(
-                    jnp.array(X_inf_padded), jnp.array(X_inf_mask), params
-                ))
-                p_seq = p_seq_full[:L_inf]
+                # Inference on Normal HMM
+                p_hmm = np.asarray(_jax_inference(X_inf_jax, M_inf_jax, params))[:L_inf]
                 
-                semantic_probs = p_seq @ map_matrix
+                # Combine into 4 states: [bull_trend, bear_trend, chop, crisis]
+                combined_probs = np.zeros((L_inf, 4), dtype=np.float64)
+                
+                normal_idx = (sm_seq == 0)
+                stress_idx = (sm_seq == 1)
+                
+                combined_probs[normal_idx, :3] = p_hmm[normal_idx]
+                combined_probs[stress_idx, 3] = 1.0 # Static Crisis
 
-                p_clip = np.clip(p_seq, 1e-12, 1.0)
-                entropy = -np.sum(p_clip * np.log(p_clip), axis=1) / jnp.log(max(2, self.n_states))
+                # Entropy
+                p_clip = np.clip(combined_probs, 1e-12, 1.0)
+                entropy = -np.sum(p_clip * np.log(p_clip), axis=1) / np.log(4)
 
-                current_durations = durations_inf[np.argmax(p_seq, axis=1)]
+                # Expected duration
+                trans = np.asarray(jax.nn.softmax(params["transition"], axis=1))
+                dur = 1.0 / (1.0 - np.diag(trans).clip(0.0, 0.999))
+                
+                expected_dur = np.zeros(L_inf)
+                if np.any(normal_idx):
+                    expected_dur[normal_idx] = dur[np.argmax(p_hmm[normal_idx], axis=1)]
+                expected_dur[stress_idx] = 4.0 # Min duration for crisis
 
-                results[apply_start:t, : len(_SEMANTIC_ORDER)] = semantic_probs
-                results[apply_start:t, len(_SEMANTIC_ORDER)] = entropy
-                results[apply_start:t, len(_SEMANTIC_ORDER) + 1] = current_durations
+                results[apply_start:t, :4] = combined_probs
+                results[apply_start:t, 4] = entropy
+                results[apply_start:t, 5] = expected_dur
             except Exception as e:
-                _logger.error("HMM Inference failed at t=%d: %s", t, e)
+                _logger.error("Stress-Isolating HMM Inference failed at t=%d: %s", t, e)
 
         probs_df = pd.DataFrame(results, index=features_df.index, columns=out_cols)
         probs_df = probs_df.ffill().bfill().fillna(0.0)
