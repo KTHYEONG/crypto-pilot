@@ -989,9 +989,15 @@ def run_hmm_fusion_for_is_end(
     )
     is_end_idx_market = int((market_hmm_feats.index < is_end_utc).sum())
 
+    _btc_for_returns = next((s for s in symbols if "BTC" in s), None)
+    _btc_df = prefetched_1h.get(_btc_for_returns) if _btc_for_returns else None
+    if _btc_df is not None and "close" in _btc_df.columns:
+        _btc_returns = _btc_df.set_index("datetime")["close"].pct_change().reindex(market_hmm_feats.index).fillna(0.0)
+    else:
+        _btc_returns = market_hmm_feats["macro_trend_168h"]
     market_probs = hmm_inferrer.fit_predict_systemic(
         market_hmm_feats,
-        market_hmm_feats["macro_trend_168h"],
+        _btc_returns,
         is_end_idx=is_end_idx_market,
         symbol="Market",
         tf=tf,
@@ -1217,9 +1223,15 @@ def run_ml_pipeline_for_universe(
         is_end_utc = is_end_dt.tz_convert("UTC")
     is_end_idx_market = int((market_hmm_feats.index < is_end_utc).sum())
 
+    _btc_for_returns2 = next((s for s in symbols if "BTC" in s), None)
+    _btc_df2 = prefetched_1h.get(_btc_for_returns2) if _btc_for_returns2 else None
+    if _btc_df2 is not None and "close" in _btc_df2.columns:
+        _btc_returns2 = _btc_df2.set_index("datetime")["close"].pct_change().reindex(market_hmm_feats.index).fillna(0.0)
+    else:
+        _btc_returns2 = market_hmm_feats["macro_trend_168h"]
     market_probs = hmm_inferrer.fit_predict_systemic(
         market_hmm_feats,
-        market_hmm_feats["macro_trend_168h"],
+        _btc_returns2,
         is_end_idx=is_end_idx_market,
         symbol="Market",
         tf=tf,
