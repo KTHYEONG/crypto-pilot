@@ -98,8 +98,8 @@ def audit_hmm_logic_changes(ml_out, symbols, data_maps, tf):
             r = merged.loc[mask, "ret"]
             mu = float(r.mean() * 100.0)
             sig = float(r.std() * 100.0)
-            # Geometric Growth Approximation: mu - 0.5 * var
-            g = mu - 0.5 * (float(r.var()) * 100.0)
+            # Geometric Growth Approximation in % units: mu - 0.5 * (sig^2 / 100)
+            g = mu - 0.5 * (sig**2 / 100.0)
             time_pct = float(mask.mean() * 100.0)
             
             behavior = "UNSTABLE"
