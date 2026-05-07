@@ -973,7 +973,13 @@ def run_hmm_fusion_for_is_end(
         market_hmm_feats.index = market_hmm_feats.index.tz_convert("UTC")
 
     hmm_k = int(cfg.get("FUTURES_HMM_K_STATES", 4))
-    hmm_inferrer = HMMStateInferrer(n_states=hmm_k)
+    hmm_n_iter = int(cfg.get("FUTURES_HMM_N_ITER", 500))
+    hmm_fit_step = int(cfg.get("FUTURES_HMM_FIT_STEP", 252))
+    hmm_inferrer = HMMStateInferrer(
+        n_states=hmm_k,
+        n_iter=hmm_n_iter,
+        fit_step=hmm_fit_step
+    )
 
     is_end_dt = pd.to_datetime(is_end_date)
     is_end_utc = (
@@ -1197,7 +1203,13 @@ def run_ml_pipeline_for_universe(
         market_hmm_feats.index = market_hmm_feats.index.tz_convert("UTC")
 
     hmm_k = int(cfg.get("FUTURES_HMM_K_STATES", 4))
-    hmm_inferrer = HMMStateInferrer(n_states=hmm_k)
+    hmm_n_iter = int(cfg.get("FUTURES_HMM_N_ITER", 500))
+    hmm_fit_step = int(cfg.get("FUTURES_HMM_FIT_STEP", 252))
+    hmm_inferrer = HMMStateInferrer(
+        n_states=hmm_k,
+        n_iter=hmm_n_iter,
+        fit_step=hmm_fit_step
+    )
     is_end_dt = pd.to_datetime(is_end_date or end)
     if is_end_dt.tzinfo is None:
         is_end_utc = is_end_dt.tz_localize("UTC")

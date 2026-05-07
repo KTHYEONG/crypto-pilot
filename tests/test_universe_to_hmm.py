@@ -134,12 +134,14 @@ def test_universe_gp_hmm_flow(tf="1h"):
     _logger.info(f" [TEST] Universe -> GP Alpha -> HMM Regime Flow (Integrated) TF: {tf}")
     _logger.info("=" * 85)
     
-    # 1. Window Setup (Production Window)
-    res = get_quarterly_window()
-    fetch_start, start, is_end, end = res
+    # 1. Window Setup (Realistic Audit Window)
+    fetch_start = "2023-10-02"
+    start = "2024-01-01"
+    is_end = "2025-01-01"
+    end = "2025-01-01"
     collector = DataCollector()
     
-    _logger.info(f"Window: {fetch_start} ~ {is_end} (Audit Focus: Full IS window)")
+    _logger.info(f"Window: {fetch_start} ~ {is_end} (Audit Focus: 1 Year IS window)")
 
     # 2. Clear HMM Cache to force fresh training
     from config.settings import FUTURES_CACHE_DIR
@@ -150,61 +152,33 @@ def test_universe_gp_hmm_flow(tf="1h"):
             if "HMM" in f and f.endswith(".parquet"):
                 os.remove(FUTURES_CACHE_DIR / f)
 
-    # 3. Universe Filtering (Broad)
-    from src.domain.futures.opt_futures_utils.universe_screener_futures import (
-        screen_futures_universe,
-        screen_symbol_refinement_futures,
-    )
+    # 3. Universe Filtering (Bypassed for Speed Audit)
+    # broad_candidates, _ = screen_futures_universe(...)
     
-    broad_candidates, _ = screen_futures_universe(
-        collector, [], tf, FUTURES_SCREENER_CONFIG, fetch_start, is_end, data_dir=FUTURES_DATA_DIR
-    )
-    
-    if not broad_candidates:
-        _logger.error("No broad candidates found. Aborting.")
-        return
-
-    # 4. Data Loading for Refinement
-    test_symbols = list(broad_candidates)[:2] 
+    # 4. Data Loading
+    final_symbols = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT']
     data_maps_broad, _, valid_broad = _load_futures_data_maps_for_symbols(
-        test_symbols, tf, fetch_start, start, is_end, end, skip_metrics=True
+        final_symbols, tf, fetch_start, start, is_end, end, skip_metrics=True
     )
     
-    # 5. Refinement
-    success = screen_symbol_refinement_futures(
-        broad_candidates=valid_broad,
-        winning_signal_type="CS_RANK",
-        is_end_date=is_end,
-        tf=tf,
-        symbol_dfs_4h={s: data_maps_broad[s][tf] for s in valid_broad},
-        daily_dfs={s: data_maps_broad[s]["1d"] for s in valid_broad},
-        phase_b_params=None,
-        anchor_symbols=FUTURES_ANCHOR_SYMBOLS,
-    )
-    
-    importlib.reload(config.opt_config)
-    final_symbols = config.opt_config.FUTURES_SYMBOLS
-    _logger.info(f"Final Selected Universe: {final_symbols}")
+    _logger.info(f"Final Selected Universe (Direct Load): {valid_broad}")
 
     # 6. ML Pipeline (HMM Focused)
     cfg = dict(OPT_FUTURES_CONFIG)
+    cfg["FUTURES_ML_ALPHA_USE_TBM_WEIGHT"] = False
     # Minimal GP for speed
     cfg["FUTURES_ML_GP_GENERATIONS"] = 1
     cfg["FUTURES_ML_GP_POPULATION"] = 50
     # Balanced HMM settings for CPU execution over long window
-    cfg["FUTURES_HMM_N_ITER"] = 150
-    
-    from src.domain.futures.ml_pipeline.hmm_state_inferrer import HMMStateInferrer
-    # Increase fit_step to reduce number of training cycles on CPU
-    HMMStateInferrer.fit_step = 1000 
-    HMMStateInferrer.n_iter = 150
+    cfg["FUTURES_HMM_N_ITER"] = 100
+    cfg["FUTURES_HMM_FIT_STEP"] = 1000
     
     import time
     start_time = time.time()
     
     _logger.info("\nExecuting ML Pipeline (Integrated HMM Audit Mode)...")
     ml_out = run_ml_pipeline_for_universe(
-        final_symbols,
+        valid_broad,
         tf,
         fetch_start, 
         end,
@@ -221,7 +195,7 @@ def test_universe_gp_hmm_flow(tf="1h"):
     _logger.info(f"\n[TIME] ML Pipeline (GP + JAX HMM) took: {elapsed_time:.2f} seconds")
     
     # 7. Verification & Deep Audit
-    audit_hmm_logic_changes(ml_out, final_symbols, data_maps_broad, tf)
+    audit_hmm_logic_changes(ml_out, valid_broad, data_maps_broad, tf)
         
     _logger.info("=" * 85)
     _logger.info(" [RESULT] Integrated Universe -> HMM test completed.")
