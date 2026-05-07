@@ -247,6 +247,3 @@ results/**/*.enc
 !results/**/best_futures_*.enc
 !results/**/best_params_*.enc
 !results/**/best_spot_*.enc
-
-# codex
-.codex
