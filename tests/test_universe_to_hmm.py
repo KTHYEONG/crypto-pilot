@@ -137,6 +137,89 @@ def audit_hmm_logic_changes(ml_out, symbols, data_maps, tf):
     
     _logger.info("╚" + "═" * 83 + "╝")
 
+def audit_oos_and_ic(ml_out, symbols, is_data_maps, oos_data_maps, tf):
+    """OOS Holdout Audit + IC vs Forward Returns."""
+    _logger.info("\n" + "╔" + "═" * 83 + "╗")
+    _logger.info(f"║ [OOS + IC AUDIT] Predictive Power & Generalization Check              {' ':<10} ║")
+    _logger.info("╠" + "═" * 83 + "╣")
+
+    sym = None
+    for s in symbols:
+        if s in ml_out.meta_feature_frame_by_symbol and s in is_data_maps and s in oos_data_maps:
+            sym = s
+            break
+    if not sym:
+        _logger.info("║ No symbol with full IS+OOS data for IC audit.                              ║")
+        _logger.info("╚" + "═" * 83 + "╝")
+        return
+
+    mff = ml_out.meta_feature_frame_by_symbol[sym]
+    if "datetime" not in mff.columns:
+        mff = mff.reset_index()
+    mff["datetime"] = pd.to_datetime(mff["datetime"], utc=True)
+
+    semantic_cols = [c for c in ["hmm_prob_bull_trend", "hmm_prob_bear_trend", "hmm_prob_chop", "hmm_prob_crisis"] if c in mff.columns]
+    if not semantic_cols:
+        _logger.info("║ Missing HMM columns for IC audit.                                          ║")
+        _logger.info("╚" + "═" * 83 + "╝")
+        return
+
+    # IS data for IC computation
+    is_df = is_data_maps[sym][tf].copy()
+    is_df["datetime"] = pd.to_datetime(is_df["datetime"], utc=True)
+    merged_is = pd.merge(mff, is_df[["datetime", "close"]], on="datetime", how="inner")
+    merged_is = merged_is.sort_values("datetime").reset_index(drop=True)
+    merged_is["ret"] = merged_is["close"].pct_change().fillna(0.0)
+
+    # IC: Spearman correlation between hmm_prob_crisis and forward returns
+    _logger.info("║ [A] INFORMATION COEFFICIENT (IC) vs Forward Returns                         ║")
+    _logger.info("╟──────────────┬──────────┬──────────┬──────────┬──────────────────────────────╢")
+    _logger.info("║ Predictor    │ IC(t+1)  │ IC(t+12) │ IC(t+24) │ Interpretation               ║")
+    _logger.info("╟──────────────┼──────────┼──────────┼──────────┼──────────────────────────────╢")
+
+    from scipy.stats import spearmanr
+    for col in ["hmm_prob_crisis", "hmm_prob_bull_trend"]:
+        if col not in merged_is.columns:
+            continue
+        tag = "CRISIS_P" if "crisis" in col else "BULL_P"
+        sign = -1 if "crisis" in col else 1  # crisis should predict negative return
+        ics = []
+        for horizon in [1, 12, 24]:
+            fwd = merged_is["ret"].shift(-horizon)
+            valid = merged_is[col].notna() & fwd.notna()
+            if valid.sum() > 100:
+                ic, _ = spearmanr(merged_is.loc[valid, col], fwd[valid])
+                ics.append(float(ic * sign))  # sign-adjusted: expect positive IC
+            else:
+                ics.append(float("nan"))
+        interp = "PREDICTIVE" if len([x for x in ics if not np.isnan(x) and x > 0.02]) >= 2 else "WEAK"
+        _logger.info(f"║ {tag:<12} │ {ics[0]:>8.4f} │ {ics[1]:>8.4f} │ {ics[2]:>8.4f} │ {interp:<28} ║")
+
+    # OOS Tail Capture
+    oos_df = oos_data_maps[sym][tf].copy()
+    oos_df["datetime"] = pd.to_datetime(oos_df["datetime"], utc=True)
+    merged_oos = pd.merge(mff, oos_df[["datetime", "close"]], on="datetime", how="inner")
+
+    if len(merged_oos) > 100:
+        merged_oos = merged_oos.sort_values("datetime").reset_index(drop=True)
+        merged_oos["ret"] = merged_oos["close"].pct_change().fillna(0.0)
+        merged_oos["regime"] = merged_oos[semantic_cols].idxmax(axis=1)
+        q05 = float(merged_oos["ret"].quantile(0.05))
+        worst_oos = merged_oos[merged_oos["ret"] <= q05]
+        if not worst_oos.empty:
+            tail_dist = worst_oos["regime"].value_counts(normalize=True) * 100
+            capture = float(tail_dist.get("hmm_prob_crisis", 0.0) + tail_dist.get("hmm_prob_bear_trend", 0.0))
+            verdict = "PASS" if capture > 70 else "ACCEPTABLE" if capture > 50 else "FAIL"
+            _logger.info(f"╟─────────────────────────────────────────────────────────────────────────────╢")
+            _logger.info(f"║ [B] OOS Tail Capture ({len(oos_df)} bars): CRISIS+BEAR = {capture:5.1f}% | Verdict: {verdict:<10}       ║")
+        else:
+            _logger.info("║ [B] OOS: No tail events found.                                              ║")
+    else:
+        _logger.info("║ [B] OOS: Insufficient data overlap for holdout audit.                       ║")
+
+    _logger.info("╚" + "═" * 83 + "╝")
+
+
 def test_universe_gp_hmm_flow(tf="1h"):
     _logger.info("=" * 85)
     _logger.info(f" [TEST] Universe -> GP Alpha -> HMM Regime Flow (Integrated) TF: {tf}")
@@ -245,7 +328,10 @@ def test_universe_gp_hmm_flow(tf="1h"):
     # 6. Verification & Deep Audit
     # We use data_maps (IS only) for audit consistency
     audit_hmm_logic_changes(ml_out, valid_ml_symbols, data_maps, tf)
-        
+
+    # 7. OOS + IC Audit
+    audit_oos_and_ic(ml_out, valid_ml_symbols, data_maps, oos_data_maps, tf)
+
     _logger.info("=" * 85)
     _logger.info(" [RESULT] Integrated Universe -> HMM test completed.")
     _logger.info("=" * 85)
