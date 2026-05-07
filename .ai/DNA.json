@@ -1,19 +1,37 @@
 {
     "project": "my-coin-traider",
-    "version": "1.3.0",
+    "version": "1.7.0",
     "last_evolution_date": "2026-05-07",
+    "previous_state_hash": "v1.6.0",
     "current_logic": {
         "universe_selection": "CS_RANK based filtering",
-        "regime_classification": "Guided 4-State TVTP-HMM (JAX-based Semi-supervised)",
+        "regime_classification": "Guided 4-State TVTP-HMM v23_p4 (Viterbi Hard-Decoding + Structural Locs Separation)",
         "alpha_generation": "ML-based Cross-Sectional Alpha",
         "optimization": "Optuna with NSGA-II/TPE (Growth & Stability Pareto)",
         "risk_management": "CAWF-R (Chronological Adaptive Walk-Forward with Robustness)"
     },
     "key_parameters": {
-        "hmm_architecture": "Guided TVTP (Phase 1 Final)",
-        "hmm_guidance_mask": "Worst 15% Returns",
-        "hmm_semantic_penalty": "Extreme Directional Weight (50000x)",
+        "hmm_architecture": "Guided 4-State TVTP-HMM v23_p4 (Viterbi Hard-Decoding + Structural Locs + Squared Penalty)",
+        "hmm_viterbi_enabled": true,
+        "hmm_guidance_mask": "Expanding-Window Worst 15% Returns (walk-forward clean)",
+        "hmm_guidance_source": "BTC/USDT actual price returns (pct_change), fallback to macro_trend_168h",
+        "hmm_penalty_mode": "LL-adaptive scaling (|ll|/T * 10000/10000/10 for guidance/semantic/freq)",
+        "hmm_sticky_penalty": "-30.0 (강화, P4)",
+        "hmm_optimizer_reset": "hot-start 시 optimizer.init(curr_p) — stale momentum 제거",
+        "hmm_ema_blend": "0.7 * new_params + 0.3 * old_params (refit 경계 안정화)",
         "hmm_systemic_features": 9,
-        "hmm_n_iter": 2000
+        "hmm_tvtp_features": 5,
+        "hmm_tvtp_feature_indices": [4, 5, 6, 7, 8],
+        "hmm_tvtp_feature_names": ["cs_dispersion", "oi_delta", "funding_mom", "liq_proxy", "lsr_delta"],
+        "hmm_tvtp_bias_init": "eye(4) * 7.0",
+        "hmm_inference_window": "MAX_HMM_WINDOW (1500 bars, full history)",
+        "hmm_log_dfs_init": "[1.0, 1.0, 1.0, 0.5] (df≈4.7 for BULL/BEAR/CHOP, df≈3.6 for CRISIS)",
+        "hmm_output_sticky_min_duration": 12,
+        "hmm_n_iter": 2000,
+        "hmm_cache_version": "v23_viterbi_hard_p4"
+    },
+    "known_issues": {
+        "regime_stability": "510 switches (Avg 42.9 bars) — 목표 <400 / >50 bars 미달, Viterbi smoothing 또는 cost function 내 duration penalty 통합 필요",
+        "crisis_purity": "CRISIS MU -0.017% — 목표 -0.10% 미달, CRISIS 특화 emission 피처(Liq/Funding) 강화 필요"
     }
 }
