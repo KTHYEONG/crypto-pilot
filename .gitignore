@@ -7,10 +7,6 @@ data/
 # .vscode
 .vscode/
 
-# claude
-CLAUDE.md
-# .claude/
-
 # gemini
 .gemini/
 
@@ -164,10 +160,6 @@ logs/
 
 # Explain
 Explain/
-
-# agent
-# .agents/
-AGENTS.md
 
 # docs
 docs/
