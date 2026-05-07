@@ -306,7 +306,7 @@ def _assign_state_semantic_labels_v5(
     k = means.shape[0]
     trend_idx = 0         # macro_trend_168h
     vol_idx = 1           # macro_vol_24h
-    downside_vol_idx = 4  # macro_downside_vol_24h
+    downside_vol_idx = 2  # macro_downside_vol_24h
 
     state_to_label: dict[int, str] = {}
     remaining = list(range(k))
@@ -315,6 +315,7 @@ def _assign_state_semantic_labels_v5(
     down_vol_means = (
         means[:, downside_vol_idx] if means.shape[1] > downside_vol_idx else vol_means
     )
+    # Crisis is high vol + high downside vol
     composite_risk = (vol_means + down_vol_means) / 2.0
 
     crisis_idx = int(remaining[int(np.argmax(composite_risk[remaining]))])
@@ -324,9 +325,15 @@ def _assign_state_semantic_labels_v5(
     if state_returns is not None and state_vols is not None:
         mu = np.asarray(state_returns, dtype=np.float64)
         sigma = np.asarray(state_vols, dtype=np.float64)
+        # Fix scale mismatch: ensure mu has enough weight against sigma^2
+        # If mu is in decimal (e.g. 0.001) and sigma is in decimal (e.g. 0.02),
+        # mu - 0.5 * sigma^2 is correct. 
+        # But for normalized locs, we need to be careful.
         proxy_g_log = mu - 0.5 * (sigma**2)
     else:
-        proxy_g_log = means[:, trend_idx] - 0.5 * (means[:, vol_idx] ** 2)
+        # For normalized locs (Rank-Gauss), Trend (index 0) should be dominant.
+        # We use a weighted mu to overcome the variance penalty if needed.
+        proxy_g_log = 2.0 * means[:, trend_idx] - 0.5 * (means[:, vol_idx] ** 2)
 
     bull_idx_rel = int(np.argmax(proxy_g_log[remaining]))
     bull_idx = remaining[bull_idx_rel]
@@ -587,13 +594,22 @@ class HMMStateInferrer:
                     curr_opt_state = self._last_opt_state
                     iterations = 50  # Reduce iterations for warm-start
                 else:
-                    # Heuristic init
-                    rng = jax.random.PRNGKey(42)
-                    k1, _, _, _, _ = jax.random.split(rng, 5)
+                    # Heuristic Semi-supervised init
+                    # State 0 (Bull): Trend +1.0, Vol -0.5
+                    # State 1 (Bear): Trend -1.0, Vol -0.5
+                    # State 2 (Chop): Trend 0.0, Vol -1.0
+                    # State 3 (Crisis): Trend 0.0, Vol +1.5
+                    locs_init = np.zeros((self.n_states, num_feats), dtype=np.float32)
+                    if self.n_states >= 4:
+                        locs_init[0, 0], locs_init[0, 1] = 1.0, -0.5  # Bull
+                        locs_init[1, 0], locs_init[1, 1] = -1.0, -0.5 # Bear
+                        locs_init[2, 0], locs_init[2, 1] = 0.0, -1.0  # Chop
+                        locs_init[3, 0], locs_init[3, 1] = 0.0, 1.5   # Crisis
+                    
                     curr_params = {
                         "initial": jnp.zeros(self.n_states),
                         "transition": jnp.eye(self.n_states) * 5.0,  # Strong diagonal init
-                        "locs": jax.random.normal(k1, (self.n_states, num_feats)),
+                        "locs": jnp.array(locs_init),
                         "log_scales": jnp.zeros((self.n_states, num_feats)),
                         "log_dfs": jnp.ones(self.n_states) * 3.0,  # DoF ~ exp(3)+2 init
                     }
@@ -637,8 +653,9 @@ class HMMStateInferrer:
                 sums_ret = np.bincount(hard_states, weights=ret_win, minlength=self.n_states)
                 st_returns = np.where(counts > 0, sums_ret / counts, 0.0)
 
-                if X_train_raw.shape[1] > 2:
-                    sums_vol = np.bincount(hard_states, weights=X_train_raw[:, 2], minlength=self.n_states)
+                # [FIX] Use macro_vol_24h (index 1) for st_vols calculation
+                if X_train_raw.shape[1] > 1:
+                    sums_vol = np.bincount(hard_states, weights=X_train_raw[:, 1], minlength=self.n_states)
                     st_vols = np.where(counts > 0, sums_vol / counts, 0.0)
                 else:
                     st_vols = np.zeros(self.n_states)
