@@ -643,10 +643,16 @@ def _load_single_symbol_data(
         for tf_l in tfs_to_load:
                 
             raw_df = collector.collect_and_save(sym, tf_l, fetch_start, end)
+            if raw_df is None or raw_df.empty:
+                print(f"DEBUG: {sym} {tf_l} raw_df is empty or None")
+                insufficient = True
+                break
+            
             df = merge_funding_into_ohlcv(sym, raw_df, Path(FUTURES_DATA_DIR))
             df = merge_metrics_into_ohlcv(sym, df, Path(FUTURES_DATA_DIR))
 
             if df is None or df.empty or "datetime" not in df.columns:
+                print(f"DEBUG: {sym} {tf_l} df after merge is empty or None")
                 insufficient = True
                 break
 
@@ -664,6 +670,7 @@ def _load_single_symbol_data(
             min_bars_threshold = min_bars_map.get(tf_l, 300)
 
             if is_end_idx < min_bars_threshold:
+                print(f"DEBUG: {sym} {tf_l} is_end_idx ({is_end_idx}) < threshold ({min_bars_threshold})")
                 insufficient = True
                 break
 
@@ -682,6 +689,7 @@ def _load_single_symbol_data(
         temp_oos[f"merge_idx_{tf}"] = compute_segment_merge_index(temp_oos[tf], temp_oos["1d"])
         return sym, temp_is, temp_oos, False
     except Exception as e:
+        print(f"DEBUG: {sym} failed with error: {e}")
         _logger.warning("Failed to load symbol %s: %s", sym, e)
         return sym, None, None, True
 
