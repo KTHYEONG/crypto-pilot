@@ -6,6 +6,10 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import os
+
+os.environ["CUDA_VISIBLE_DEVICES"] = ""
+os.environ["JAX_PLATFORMS"] = "cpu"
 
 # Project Root Setup
 project_root = str(Path(__file__).resolve().parents[1])
@@ -23,6 +27,10 @@ from config.settings import FUTURES_DATA_DIR
 from src.domain.futures.data_collector import DataCollector
 from src.domain.futures.ml_pipeline.ml_pipeline_runner import run_ml_pipeline_for_universe
 from src.execution.opt_main_futures import _load_futures_data_maps_for_symbols
+from src.domain.futures.opt_futures_utils.universe_screener_futures import (
+    screen_futures_universe,
+    screen_symbol_refinement_futures,
+)
 
 warnings.filterwarnings("ignore")
 
@@ -134,36 +142,76 @@ def test_universe_gp_hmm_flow(tf="1h"):
     _logger.info(f" [TEST] Universe -> GP Alpha -> HMM Regime Flow (Integrated) TF: {tf}")
     _logger.info("=" * 85)
     
-    # 1. Window Setup (Realistic Audit Window)
-    fetch_start = "2023-10-02"
-    start = "2024-01-01"
-    is_end = "2025-01-01"
-    end = "2025-01-01"
+    # 1. Window Setup (Aligned with opt_main_futures.py)
+    fetch_start_date, start_date, is_end_date, end_date = get_quarterly_window(None)
     collector = DataCollector()
     
-    _logger.info(f"Window: {fetch_start} ~ {is_end} (Audit Focus: 1 Year IS window)")
+    _logger.info(f"Window: {fetch_start_date} ~ {end_date} (IS End: {is_end_date})")
 
-    # 2. Clear HMM Cache to force fresh training
+    # 2. Universe Discovery & Filtering (Aligned with opt_main_futures.py)
+    _logger.info("\n[STEP] Universe Discovery & Filtering...")
+    broad_candidates, _ = screen_futures_universe(
+        collector,
+        [],
+        tf,
+        FUTURES_SCREENER_CONFIG,
+        fetch_start_date,
+        is_end_date,
+        data_dir=FUTURES_DATA_DIR,
+    )
+    
+    if not broad_candidates:
+        _logger.error("No broad candidates found. Aborting.")
+        return
+
+    data_maps_broad, _, valid_broad = _load_futures_data_maps_for_symbols(
+        broad_candidates,
+        tf,
+        fetch_start_date,
+        start_date,
+        is_end_date,
+        end_date,
+        skip_metrics=True,
+    )
+
+    success = screen_symbol_refinement_futures(
+        broad_candidates=list(broad_candidates),
+        winning_signal_type="CS_RANK",
+        is_end_date=is_end_date,
+        tf=tf,
+        symbol_dfs_4h={s: data_maps_broad[s][tf] for s in valid_broad},
+        daily_dfs={s: data_maps_broad[s]["1d"] for s in valid_broad},
+        phase_b_params=None,
+        anchor_symbols=FUTURES_ANCHOR_SYMBOLS,
+    )
+    if not success:
+        _logger.error("Universe refinement failed.")
+        return
+    
+    importlib.reload(config.opt_config)
+    final_symbols = config.opt_config.FUTURES_SYMBOLS[:3] # Limit to top 3 for speed
+    _logger.info(f"Final Symbols (Top 3 for Audit): {final_symbols}")
+
+    # 3. Clear HMM Cache to force fresh training
     from config.settings import FUTURES_CACHE_DIR
     _logger.info(f"Clearing HMM cache in {FUTURES_CACHE_DIR}...")
     import os
     if FUTURES_CACHE_DIR.exists():
         for f in os.listdir(FUTURES_CACHE_DIR):
             if "HMM" in f and f.endswith(".parquet"):
-                os.remove(FUTURES_CACHE_DIR / f)
+                try:
+                    os.remove(FUTURES_CACHE_DIR / f)
+                except Exception:
+                    pass
 
-    # 3. Universe Filtering (Bypassed for Speed Audit)
-    # broad_candidates, _ = screen_futures_universe(...)
-    
-    # 4. Data Loading
-    final_symbols = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT']
-    data_maps_broad, _, valid_broad = _load_futures_data_maps_for_symbols(
-        final_symbols, tf, fetch_start, start, is_end, end, skip_metrics=True
+    # 4. Data Loading for ML (Only for selected symbols)
+    data_maps, oos_data_maps, valid_ml_symbols = _load_futures_data_maps_for_symbols(
+        final_symbols, tf, fetch_start_date, start_date, is_end_date, end_date
     )
     
-    _logger.info(f"Final Selected Universe (Direct Load): {valid_broad}")
+    _logger.info(f"ML Ready Universe: {valid_ml_symbols}")
 
-    # 6. ML Pipeline (HMM Focused)
+    # 5. ML Pipeline (HMM Focused)
     cfg = dict(OPT_FUTURES_CONFIG)
     cfg["FUTURES_ML_ALPHA_USE_TBM_WEIGHT"] = False
     # Minimal GP for speed
@@ -178,15 +226,15 @@ def test_universe_gp_hmm_flow(tf="1h"):
     
     _logger.info("\nExecuting ML Pipeline (Integrated HMM Audit Mode)...")
     ml_out = run_ml_pipeline_for_universe(
-        valid_broad,
+        valid_ml_symbols,
         tf,
-        fetch_start, 
-        end,
+        fetch_start_date, 
+        end_date,
         cfg,
         workers=4,
         n_jobs=4,
-        is_end_date=is_end,
-        is_start_date=start,
+        is_end_date=is_end_date,
+        is_start_date=start_date,
         gp_only=False,
         hmm_only=False
     )
@@ -194,8 +242,9 @@ def test_universe_gp_hmm_flow(tf="1h"):
     elapsed_time = time.time() - start_time
     _logger.info(f"\n[TIME] ML Pipeline (GP + JAX HMM) took: {elapsed_time:.2f} seconds")
     
-    # 7. Verification & Deep Audit
-    audit_hmm_logic_changes(ml_out, valid_broad, data_maps_broad, tf)
+    # 6. Verification & Deep Audit
+    # We use data_maps (IS only) for audit consistency
+    audit_hmm_logic_changes(ml_out, valid_ml_symbols, data_maps, tf)
         
     _logger.info("=" * 85)
     _logger.info(" [RESULT] Integrated Universe -> HMM test completed.")
@@ -203,4 +252,3 @@ def test_universe_gp_hmm_flow(tf="1h"):
 
 if __name__ == "__main__":
     test_universe_gp_hmm_flow("1h")
-    # test_universe_gp_hmm_flow("4h") # Disable 4h for faster execution
