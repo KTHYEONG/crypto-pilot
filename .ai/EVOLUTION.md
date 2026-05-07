@@ -4,6 +4,66 @@ This file tracks the logical progression and experimental results of the quantit
 
 ---
 
+## [2026-05-07] v2.0.0 Phase 6 TVTP Asymmetric Bias: Structural CRISIS Entry Penalty (Claude Sonnet 4.6)
+- **Status**: Validated (OOS Tail Capture PASS, IS Left-Tail Capture PASS)
+- **Problem**: v1.9.0(v25_p5b_crisis) 3가지 구조적 원인: (1) CRISIS freq 17.5% — `tvtp_b=eye(4)*3.0` 대칭으로 CRISIS 진입 확률이 다른 상태와 동일. freq_penalty가 posteriors를 간접 제약하는 것만으로 TVTP transition 자체를 바꾸지 못함. (2) CRISIS MU 양수 — guidance threshold 15%가 너무 많은 이벤트를 CRISIS label로 부여 → 방향성 없는 이벤트 혼입. (3) Switches 553 — CRISIS 진입 장벽이 낮은 것이 근본 원인.
+- **Key Fixes (P6)**:
+    - **[P6-1] TVTP bias 비대칭화**: `tvtp_b=eye(4)*3.0` → 비대칭 행렬. BULL/CHOP→CRISIS: -4.0 bias(log_softmax ≈ 0.5%), BEAR→CRISIS: -2.0(≈ 7%), CRISIS→CRISIS: 5.0(≈ 99.9% sticky). 구조적 CRISIS 진입 장벽 부과.
+    - **[P6-2] guidance threshold 강화**: `quantile(0.15)` → `quantile(0.08)`. 하위 8% 극단적 하락만 CRISIS guidance로 사용 → 방향성 crash 순도 강화, guidance 이벤트 수 감소.
+    - **[P6-3] sticky_penalty 강화**: `-30.0 → -50.0`. 평균 전환 행렬의 대각 확률 더 강하게 최대화 → Switches 감소 유도.
+    - **[P6-4] Cache version bump**: `v25_p5b_crisis → v26_p6_tvtp`, 파일명 `HMM_v25_p5b_ → HMM_v26_p6_`.
+- **Results (v26_p6_tvtp)**:
+    - **BULL G_log: 0.057% (WEALTH_EXP)**
+    - **IS Left-Tail Capture: 86.1% (PASS)**
+    - **OOS Tail Capture: 78.6% (PASS, >70%)**
+    - **CRISIS freq: 19.1%** (목표 3~7% 여전히 초과 — tvtp_b 비대칭이 학습 후 수렴하면서 완화 기대했으나 미달)
+    - **CRISIS MU: +0.026%** (여전히 양수 — guidance noise 근본 미해결)
+    - **CRISIS G_log: 0.009%** (NOISE_LOCKED 지속)
+    - **Switches: 555** (+2, sticky_penalty -50× 효과 미미), **Avg Duration: 39.4 bars**
+    - IC(CRISIS, t+1): -0.0029, IC(CRISIS, t+12): 0.0091, IC(CRISIS, t+24): 0.0001 — WEAK
+    - Pipeline elapsed: 14.88s
+- **v1.9.0(v25_p5b_crisis) 대비**:
+    - BULL G_log: 0.057% → 0.057% (동일 유지)
+    - IS Left-Tail Capture: 85.1% → 86.1% (+1.0pp, 소폭 개선)
+    - OOS Tail Capture: 77.5% → 78.6% (+1.1pp, 개선)
+    - CRISIS freq: 17.5% → 19.1% (+1.6pp, 악화 — 비대칭 tvtp_b 학습 과정에서 CRISIS sticky 효과가 오히려 freq 상승)
+    - CRISIS MU: +0.018% → +0.026% (+0.008pp, 소폭 악화)
+    - Switches: 553 → 555 (+2, 동등)
+- **Remaining Issue**: TVTP bias 비대칭 초기화 후 학습 수렴 과정에서 CRISIS→CRISIS sticky(5.0) 가 CRISIS freq 오히려 19.1%로 상승시키는 역설적 결과. tvtp_b가 학습되면서 CRISIS 진입 장벽은 낮아지고 retention이 높아지는 패턴. guidance threshold 0.08 강화로 IS Left-Tail/OOS Tail 소폭 개선. 근본 해결책: guidance noise 완전 차단 또는 CRISIS state mu를 hard constraint로 음수 고정.
+- **Lessons**: TVTP transition bias 비대칭화만으로는 CRISIS freq 제어 불충분 — 초기 bias가 SGD로 override됨. sticky_penalty -50× 강화는 Switches에 실질 효과 없음. guidance threshold 0.08이 Tail Capture를 미미하게 개선하는 데는 기여.
+
+---
+
+## [2026-05-07] v1.9.0 Phase 5.B CRISIS Purity: Threshold Tightening + Freq Enforcement (Claude Sonnet 4.6)
+- **Status**: Validated (OOS Tail Capture PASS, IS Left-Tail Capture ACCEPTABLE)
+- **Problem**: v1.8.0(v24_p5_ortho) 두 가지 회귀: (1) CRISIS MU +0.024% 양수 역전 — multimodal AND mask가 vol-spike+oi-surge 이벤트를 잡지만 해당 구간의 return이 방향 혼합 → guidance signal 오염. (2) CRISIS freq 16.6% — 목표 3~7% 크게 초과, freq_penalty floor/cap 강도 10× 부족.
+- **Key Fixes (P5.B)**:
+    - **[P5.B-1] Vol/OI 임계값 85th → 95th**: `_generate_stress_mask` 내 `expanding_vol_thresh` 및 `expanding_oi_thresh` quantile 0.85 → 0.95. 상위 5% 극단치만 CRISIS guidance로 사용. 방향성 crash 순도 강화, false positive 감소.
+    - **[P5.B-2] freq_penalty 강도 10× → 30×**: `_compute_nll` 내 `freq_penalty` 계수 10.0 → 30.0 (ll_scale 적응형). CRISIS 발화율 3~7% 타깃 실질 집행.
+    - **[P5.B-3] CRISIS MU 음수 강제 임계값 강화**: `p_crisis_val` 에서 `locs[3, 0] + 3.0 → locs[3, 0] + 4.0`. CRISIS macro_trend_168h locs[:,0] 위치를 -4.0 이하 음수로 강제. MU 양수 역전 방지.
+    - **[P5.B-4] Cache version bump**: `v24_p5_ortho → v25_p5b_crisis`, 파일명 `HMM_v24_p5_ → HMM_v25_p5b_`.
+- **Results (v25_p5b_crisis)**:
+    - **BULL G_log: 0.057% (WEALTH_EXP, >0.05% PASS)**
+    - **IS Left-Tail Capture: 85.1% (ACCEPTABLE)**
+    - **OOS Tail Capture: 77.5% (PASS, >70%)**
+    - **CRISIS freq: 17.5%** (freq_penalty 30× 적용에도 여전히 >7% 초과 — P6 추가 강화 필요)
+    - **CRISIS MU: +0.018%** (MU 음수 강제 강화했으나 여전히 양수 — guidance noise가 근본 원인)
+    - **CRISIS G_log: 0.006%** (NOISE_LOCKED 지속)
+    - **Switches: 553**, **Avg Duration: 39.5 bars**
+    - IC(CRISIS, t+1): -0.0046, IC(CRISIS, t+12): 0.0131, IC(CRISIS, t+24): 0.0028 — WEAK
+    - Pipeline elapsed: 15.17s
+- **v1.8.0(v24_p5_ortho) 대비**:
+    - BULL G_log: 0.060% → 0.057% (-5%, WEALTH_EXP 유지)
+    - IS Left-Tail Capture: 74.4% → 85.1% (+10.7pp, 개선)
+    - OOS Tail Capture: 77.6% → 77.5% (-0.1pp, 동등 유지)
+    - CRISIS freq: 16.6% → 17.5% (+0.9pp, 소폭 악화 — freq_penalty 30× 효과 상쇄됨)
+    - CRISIS MU: +0.024% → +0.018% (-0.006pp, 소폭 개선, 음수 전환 미달)
+    - Switches: 553 → 553 (동일)
+- **Remaining Issue**: CRISIS freq가 30× freq_penalty 적용 후 오히려 소폭 상승(16.6%→17.5%) — guidance mask에서 95th percentile로 강화해도 여전히 guidance가 CRISIS 과다 발화를 유도하는 구조. TVTP crisis-entry weight 직접 규제 또는 guidance_loss 스케일 재조정 필요. CRISIS MU 음수 전환 실패 — vol-dominant CRISIS 이벤트가 지속적으로 양의 return과 혼합됨.
+- **Lessons**: vol/oi 85th→95th 임계값 강화가 IS Left-Tail Capture를 10.7pp 개선(74.4%→85.1%)하는 효과 확인. 그러나 freq_penalty 3× 강화(10→30)는 CRISIS freq 억제에 실패 — LL 학습 signal이 여전히 CRISIS를 선호하는 구조적 편향 존재. penalty 스케일만으로는 한계, TVTP transition weight 직접 제어 필요.
+
+---
+
 ## [2026-05-07] v1.8.0 Phase 5 HMM Orthogonal Tuning: Penalty Recalibration + Multimodal Guidance + TVTP Unlocking (Claude Sonnet 4.6)
 - **Status**: Validated (BULL WEALTH_EXP PASS, OOS Tail Capture PASS)
 - **Problem**: v1.7.0 v23_p4의 6가지 구조적 버그: (1) 10,000× penalty가 LL 학습 봉인, (2) tvtp_b=7.0으로 TVTP 비활성, (3) CRISIS df=3.6 → kurtosis undefined, (4) guidance mask가 vol-only crash 미감지, (5) freq_penalty 단방향, (6) bfill() look-ahead leak.

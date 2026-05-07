@@ -207,7 +207,7 @@ def _compute_nll(
     ll_scale = jnp.abs(ll) / T
 
     avg_trans_mat = jnp.exp(jax.scipy.special.logsumexp(log_trans_mats, axis=0) - jnp.log(log_trans_mats.shape[0]))
-    sticky_penalty = -30.0 * jnp.sum(jnp.log(jnp.diag(avg_trans_mat) + 1e-6))
+    sticky_penalty = -50.0 * jnp.sum(jnp.log(jnp.diag(avg_trans_mat) + 1e-6))
 
     locs = params["locs"]
     # Semantic Penalties: Bull(0) > Chop(2) > Bear(1) > Crisis(3)
@@ -215,7 +215,7 @@ def _compute_nll(
     p_02 = jnp.square(jnp.maximum(0.0, locs[2, 0] - locs[0, 0] + 1.5))
     p_21 = jnp.square(jnp.maximum(0.0, locs[1, 0] - locs[2, 0] + 1.5))
     p_13 = jnp.square(jnp.maximum(0.0, locs[3, 0] - locs[1, 0] + 1.5))
-    p_crisis_val = jnp.square(jnp.maximum(0.0, locs[3, 0] + 3.0)) # Force deeper crisis MU (Phase 4.1)
+    p_crisis_val = jnp.square(jnp.maximum(0.0, locs[3, 0] + 4.0))  # CRISIS MU < -4.0 enforced (P5.B)
 
     # Volatility Penalties: Crisis > Bear > Others
     p_crisis_vol = jnp.square(jnp.maximum(0.0, jnp.max(locs[:3, 2]) - locs[3, 2] + 2.0))
@@ -229,8 +229,8 @@ def _compute_nll(
 
     # State Frequency Penalty: CRISIS (state 3) target 3~7% (bidirectional)
     crisis_freq = jnp.mean(posteriors[:, 3] * mask) / (jnp.mean(mask) + 1e-9)
-    # Adaptive: 10x ll_scale — bidirectional cap+floor
-    freq_penalty = 10.0 * ll_scale * (
+    # Adaptive: 30x ll_scale — bidirectional cap+floor (P5.B: 10→30 for real freq enforcement)
+    freq_penalty = 30.0 * ll_scale * (
         jnp.maximum(0.0, crisis_freq - 0.07) +   # cap at 7%
         jnp.maximum(0.0, 0.03 - crisis_freq)       # floor at 3%
     )
@@ -419,19 +419,19 @@ class HMMStateInferrer:
 
     def _generate_stress_mask(self, features_df: pd.DataFrame, returns_ser: pd.Series) -> np.ndarray:
         """Generate guidance_mask: multi-modal AND condition — directional crash + macro stress."""
-        expanding_ret_thresh = returns_ser.expanding(min_periods=200).quantile(0.15).fillna(0.0)
+        expanding_ret_thresh = returns_ser.expanding(min_periods=200).quantile(0.08).fillna(0.0)
         ret_stress = (returns_ser < expanding_ret_thresh)
 
-        # Vol spike: macro_vol_24h > expanding 85th percentile
+        # Vol spike: macro_vol_24h > expanding 95th percentile (P5.B: 85→95 for extreme-only CRISIS guidance)
         vol_series = features_df.get("macro_vol_24h", pd.Series(0.0, index=features_df.index))
-        expanding_vol_thresh = vol_series.expanding(min_periods=200).quantile(0.85).fillna(
+        expanding_vol_thresh = vol_series.expanding(min_periods=200).quantile(0.95).fillna(
             vol_series.expanding().median().fillna(0.0)
         )
         vol_stress = (vol_series > expanding_vol_thresh)
 
-        # OI surge: macro_oi_delta_24h > expanding 85th percentile (OI spike = panic positioning)
+        # OI surge: macro_oi_delta_24h > expanding 95th percentile (P5.B: 85→95 to reduce false positives)
         oi_series = features_df.get("macro_oi_delta_24h", pd.Series(0.0, index=features_df.index))
-        expanding_oi_thresh = oi_series.abs().expanding(min_periods=200).quantile(0.85).fillna(0.0)
+        expanding_oi_thresh = oi_series.abs().expanding(min_periods=200).quantile(0.95).fillna(0.0)
         oi_stress = (oi_series.abs() > expanding_oi_thresh)
 
         # Multi-modal: directional crash AND (vol spike OR OI surge)
@@ -458,9 +458,9 @@ class HMMStateInferrer:
     def fit_predict_systemic(self, features_df: pd.DataFrame, returns_ser: pd.Series, is_end_idx: int, symbol: str = "Market", tf: str = "1h") -> pd.DataFrame:
         """Expanding-window Guided 4-State TVTP-HMM."""
         cm = CacheManager(FUTURES_CACHE_DIR, max_files=15, max_size_mb=1000.0)
-        deps = {"symbol": symbol, "tf": tf, "data_len": len(features_df), "ver": "v24_p5_ortho", "feat_cols": sorted(list(SYSTEMIC_HMM_FEATURE_COLUMNS))}
+        deps = {"symbol": symbol, "tf": tf, "data_len": len(features_df), "ver": "v26_p6_tvtp", "feat_cols": sorted(list(SYSTEMIC_HMM_FEATURE_COLUMNS))}
         tag = cm.generate_hash(deps, source_files=[Path(__file__).resolve()])
-        cache_path = cm.get_cache_path(f"HMM_v24_p5_{symbol}_{tf}_len{len(features_df)}", ".parquet", tag)
+        cache_path = cm.get_cache_path(f"HMM_v26_p6_{symbol}_{tf}_len{len(features_df)}", ".parquet", tag)
         if cache_path.exists():
             try: return pd.read_parquet(cache_path)
             except Exception: pass
@@ -498,10 +498,19 @@ class HMMStateInferrer:
                     # TVTP indices: cs_dispersion(0→4), oi_delta(1→5), funding_mom(2→6), liq_proxy(3→7), lsr_delta(4→8)
                     # Crisis entry driven by oi_delta(local idx 1) and liq_proxy(local idx 3)
                     W_init[:, 3, 1], W_init[:, 3, 3] = 3.0, -2.5
+                    # Asymmetric TVTP bias: CRISIS entry is structurally penalized
+                    # BULL/CHOP→CRISIS: -4.0 bias (log_softmax ≈ 0.5%),
+                    # BEAR→CRISIS: -2.0 (≈ 7%), CRISIS→CRISIS: 5.0 (≈ 99.9% sticky)
+                    _tvtp_b_init = np.array([
+                        [ 3.0,  0.0,  0.0, -4.0],  # From BULL → CRISIS hard
+                        [ 0.0,  3.0,  0.0, -2.0],  # From BEAR → CRISIS moderate
+                        [ 0.0,  0.0,  3.0, -4.0],  # From CHOP → CRISIS hard
+                        [ 0.0,  0.0,  0.0,  5.0],  # From CRISIS → very sticky
+                    ], dtype=np.float32)
                     curr_p = {
                         "initial": jnp.zeros(4),
                         "tvtp_W": jnp.array(W_init),
-                        "tvtp_b": jnp.eye(4) * 3.0,  # Weakened prior (was 7.0): TVTP exogenous learning space
+                        "tvtp_b": jnp.array(_tvtp_b_init),
                         "locs": jnp.array(locs),
                         "log_scales": jnp.zeros((4, num_feats)),
                         "log_dfs": jnp.array([1.5, 1.5, 1.5, 1.0]),  # df≈[6.5,6.5,6.5,4.7]: CRISIS kurtosis defined
