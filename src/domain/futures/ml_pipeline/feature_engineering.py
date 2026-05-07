@@ -9,13 +9,17 @@ import pandas as pd
 from numba import njit
 
 # Columns produced by build_gp_input_features (for CS-rank / imputation in pipeline).
-# Systemic HMM input (5-dim: Core Macro Features)
+# Systemic HMM input (8-dim: Core Macro Features + TVTP Exogenous)
 SYSTEMIC_HMM_FEATURE_COLUMNS: tuple[str, ...] = (
     "macro_trend_168h",
+    "macro_trend_24h",
     "macro_vol_24h",
     "macro_downside_vol_24h",
     "macro_cs_dispersion_24h",
     "macro_oi_delta_24h",
+    "macro_funding_mom_24h",
+    "macro_liq_proxy_24h",
+    "macro_lsr_delta_24h",
 )
 
 # Posterior columns aligned to stable semantic labels (order for MetaLabeler).
@@ -735,8 +739,9 @@ def build_systemic_hmm_features(
         w24 = _get_window(24, tf)
         w168 = _get_window(168, tf)
 
-        # 1. macro_trend_168h
+        # 1. macro_trend_168h & macro_trend_24h
         out["macro_trend_168h"] = np.log(btc_close / btc_close.shift(w168).clip(lower=1e-12))
+        out["macro_trend_24h"] = np.log(btc_close / btc_close.shift(w24).clip(lower=1e-12))
 
         # 2. macro_vol_24h (Yang-Zhang)
         out["macro_vol_24h"] = _yang_zhang_vol_24(btc_open, btc_high, btc_low, btc_close, w24)
@@ -746,11 +751,12 @@ def build_systemic_hmm_features(
         vma_168 = btc_vol.rolling(w168).mean()
         out["macro_liq_24h"] = (vma_24 / (vma_168 + 1e-12)) - 1.0
 
-        # 4. macro_cost_168h (Funding)
+        # 4. macro_funding_mom_24h (Funding Momentum)
         if "funding_rate" in btc_df.columns:
-            out["macro_cost_168h"] = btc_df["funding_rate"].rolling(w168).mean()
+            fr = btc_df["funding_rate"].astype(np.float64).ffill().fillna(0.0)
+            out["macro_funding_mom_24h"] = fr.diff(w24).fillna(0.0)
         else:
-            out["macro_cost_168h"] = 0.0
+            out["macro_funding_mom_24h"] = 0.0
 
         # 5. macro_downside_vol_24h (Semi-Vol: downside only) [T1-B]
         btc_log_ret = np.log(btc_close / btc_close.shift(1).clip(lower=1e-12)).fillna(0.0)
@@ -759,7 +765,7 @@ def build_systemic_hmm_features(
             w24, min_periods=max(5, w24 // 4)
         ).std().fillna(0.0)
 
-        # 8. macro_oi_delta_24h: BTC OI 24h % change (sign-preserved momentum) [P2-C]
+        # 6. macro_oi_delta_24h: BTC OI 24h % change (sign-preserved momentum) [P2-C]
         if "sum_open_interest" in btc_df.columns:
             oi = btc_df["sum_open_interest"].astype(np.float64).replace(0, np.nan).ffill().fillna(0.0)
             oi_chg = oi.pct_change(w24).fillna(0.0)
@@ -767,21 +773,20 @@ def build_systemic_hmm_features(
         else:
             out["macro_oi_delta_24h"] = 0.0
 
-        # 9. macro_liq_proxy_24h: volume surge ratio during negative-return bars [P2-C]
+        # 7. macro_liq_proxy_24h: volume surge ratio during negative-return bars [P2-C]
         btc_log_ret_1h = np.log(btc_close / btc_close.shift(1).clip(lower=1e-12)).fillna(0.0)
         neg_vol = btc_vol.where(btc_log_ret_1h < 0, 0.0)
         neg_vol_ma = neg_vol.rolling(w24, min_periods=max(5, w24 // 4)).mean()
         total_vol_ma = btc_vol.rolling(w24, min_periods=max(5, w24 // 4)).mean()
         out["macro_liq_proxy_24h"] = (neg_vol_ma / (total_vol_ma + 1e-12)).fillna(0.5)
 
-        # 10-11. macro_lsr (Long-Short Ratio) [NEW Phase 3]
+        # 8. macro_lsr_delta_24h: Long-Short Ratio 24h % change
         if "long_short_ratio" in btc_df.columns:
-            lsr = btc_df["long_short_ratio"].astype(np.float64)
-            out["macro_lsr_168h"] = lsr.rolling(w168).mean()
-            out["macro_lsr_delta_24h"] = lsr.pct_change(w24)
+            lsr = btc_df["long_short_ratio"].astype(np.float64).ffill().fillna(1.0)
+            out["macro_lsr_delta_24h"] = lsr.pct_change(w24).fillna(0.0)
         else:
-            out["macro_lsr_168h"] = 1.0
             out["macro_lsr_delta_24h"] = 0.0
+
     else:
         # Fallback to market average if BTC not present
         m_close = panel_df["close"].groupby(level="datetime").mean()
@@ -790,12 +795,16 @@ def build_systemic_hmm_features(
         w168 = _get_window(168, tf)
 
         out["macro_trend_168h"] = np.log(m_close / m_close.shift(w168).clip(lower=1e-12))
+        out["macro_trend_24h"] = np.log(m_close / m_close.shift(w24).clip(lower=1e-12))
         out["macro_vol_24h"] = m_close.rolling(w24).std() / (m_close + 1e-12)  # Proxy
         out["macro_liq_24h"] = (m_vol.rolling(w24).mean() / (m_vol.rolling(w168).mean() + 1e-12)) - 1.0
+        
+        # 4. macro_funding_mom_24h fallback
         if "funding_rate" in panel_df.columns:
-            out["macro_cost_168h"] = panel_df["funding_rate"].groupby(level="datetime").mean().rolling(w168).mean()
+            m_fr = panel_df["funding_rate"].groupby(level="datetime").mean().ffill().fillna(0.0)
+            out["macro_funding_mom_24h"] = m_fr.diff(w24).fillna(0.0)
         else:
-            out["macro_cost_168h"] = 0.0
+            out["macro_funding_mom_24h"] = 0.0
 
         # 5. macro_downside_vol_24h fallback [T1-B]
         m_log_ret = np.log(m_close / m_close.shift(1).clip(lower=1e-12)).fillna(0.0)
@@ -804,7 +813,7 @@ def build_systemic_hmm_features(
             w24, min_periods=max(5, w24 // 4)
         ).std().fillna(0.0)
 
-        # 8. macro_oi_delta_24h: OI momentum fallback [P2-C]
+        # 6. macro_oi_delta_24h: OI momentum fallback [P2-C]
         if "sum_open_interest" in panel_df.columns:
             oi_panel = panel_df["sum_open_interest"].groupby(level="datetime").mean()
             oi_panel = oi_panel.replace(0, np.nan).ffill().fillna(0.0)
@@ -813,7 +822,7 @@ def build_systemic_hmm_features(
         else:
             out["macro_oi_delta_24h"] = 0.0
 
-        # 9. macro_liq_proxy_24h: liquidation cascade proxy fallback [P2-C]
+        # 7. macro_liq_proxy_24h: liquidation cascade proxy fallback [P2-C]
         m_log_ret2 = np.log(m_close / m_close.shift(1).clip(lower=1e-12)).fillna(0.0)
         m_neg_vol = m_vol.where(m_log_ret2 < 0, 0.0)
         m_neg_vol_ma = m_neg_vol.rolling(w24, min_periods=max(5, w24 // 4)).mean()
@@ -822,16 +831,14 @@ def build_systemic_hmm_features(
             (m_neg_vol_ma / (m_total_vol_ma + 1e-12)).fillna(0.5).reindex(idx).fillna(0.5)
         )
 
-        # 10-11. macro_lsr fallback
+        # 8. macro_lsr_delta_24h fallback
         if "long_short_ratio" in panel_df.columns:
-            m_lsr = panel_df["long_short_ratio"].groupby(level="datetime").mean()
-            out["macro_lsr_168h"] = m_lsr.rolling(w168).mean().reindex(idx).fillna(1.0)
-            out["macro_lsr_delta_24h"] = m_lsr.pct_change(w24).reindex(idx).fillna(0.0)
+            m_lsr = panel_df["long_short_ratio"].groupby(level="datetime").mean().ffill().fillna(1.0)
+            out["macro_lsr_delta_24h"] = m_lsr.pct_change(w24).fillna(0.0).reindex(idx).fillna(0.0)
         else:
-            out["macro_lsr_168h"] = 1.0
             out["macro_lsr_delta_24h"] = 0.0
 
-    # 6. macro_cs_dispersion_24h: cross-sectional 1h log-return std [T1-D]
+    # 8. macro_cs_dispersion_24h: cross-sectional 1h log-return std [T1-D]
     if not panel_df.empty and isinstance(panel_df.index, pd.MultiIndex):
         close_panel = panel_df["close"].unstack(level="symbol")
         cs_log_ret = np.log(close_panel / close_panel.shift(1).clip(lower=1e-12))
