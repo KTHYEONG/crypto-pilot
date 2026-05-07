@@ -1,0 +1,18 @@
+{
+    "project": "my-coin-traider",
+    "version": "1.0.0",
+    "last_evolution_date": "2026-05-07",
+    "current_logic": {
+        "universe_selection": "CS_RANK based filtering",
+        "regime_classification": "HMM (Hidden Markov Model) with 4 states (Bull, Bear, Chop, Crisis)",
+        "alpha_generation": "ML-based Cross-Sectional Alpha",
+        "optimization": "Optuna with NSGA-II/TPE (Growth & Stability Pareto)",
+        "risk_management": "CAWF-R (Chronological Adaptive Walk-Forward with Robustness)"
+    },
+    "key_parameters": {
+        "hmm_states": 4,
+        "optuna_total_trials": 300,
+        "is_survival_cagr_min": 15.0,
+        "is_survival_sharpe_min": 1.5
+    }
+}
