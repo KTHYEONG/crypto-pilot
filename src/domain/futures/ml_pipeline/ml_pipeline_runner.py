@@ -743,8 +743,8 @@ def _print_hmm_summary(
             if "ret" in g_df.columns:
                 mu = float(g_df["ret"].mean() * 100.0)
                 sig = float(g_df["ret"].std() * 100.0)
-                # Geometric Growth Approximation
-                g_log = mu - 0.5 * (float(g_df["ret"].var()) * 100.0)
+                # Geometric Growth Approximation in % units: mu - 0.5 * (sig^2 / 100)
+                g_log = mu - 0.5 * (sig**2 / 100.0)
             
             verdict = "CHOP"
             if g_log > 0.05: verdict = "BULL"
