@@ -20,6 +20,7 @@ from src.domain.futures.ml_pipeline.alpha_component_filter import filter_alpha_c
 from src.domain.futures.ml_pipeline.feature_engineering import (
     GP_FEATURE_SCHEMA_VERSION,
     HMM_SEMANTIC_PROB_COLUMNS,
+    add_macro_interaction_features,
 )
 
 _logger = logging.getLogger(__name__)
@@ -36,9 +37,11 @@ THEME_GROUPS = {
         "downside_vol_ratio", "cs_dispersion"
     ],
     2: [  # Group 3: Structural/Regime (Slots 10-14)
-        "funding_level", "volume_momentum_24h",
-        *list(HMM_SEMANTIC_PROB_COLUMNS),
-        "hmm_prob_bull_trend",
+        "btc_beta_x_bull_trend",
+        "realized_vol_x_crisis",
+        "funding_x_bear_trend",
+        "volume_momentum_24h",
+        "funding_level",
     ]
 }
 
@@ -56,26 +59,49 @@ class MLAlphaMiner:
     _models: dict[int, LGBMRanker] = field(default_factory=dict, init=False)
     _feature_sets: dict[int, list[str]] = field(default_factory=dict, init=False)
 
-    def _prepare_labels(self, target: pd.Series, dispersion: pd.Series | None = None) -> np.ndarray:
+    def _prepare_labels(
+        self, 
+        target: pd.Series, 
+        raw_returns: pd.Series | None = None,
+        dispersion: pd.Series | None = None,
+        friction_bps: float = 3.5
+    ) -> np.ndarray:
         """Convert continuous rank targets [-1, 1] into discrete LambdaRank labels {0, 1, 2, 3}.
         
-        Plan B: Nonlinear Magnitude Amplification.
-        - Label 3: Super Winners (Top 5%, target > 0.85)
-        - Label 2: Winners (Top 5-15%, target 0.7-0.85)
-        - Label 1: Mild Outperformers (Top 15-30%, target 0.4-0.7)
-        - Label 0: Others
+        Institutional Friction-Aware Logic:
+        - Incorporates friction hurdle to prevent learning noise from small movements.
+        - Labels are assigned based on both relative rank (target) and absolute magnitude.
         """
         labels = np.zeros(len(target), dtype=np.int32)
-        labels[target > 0.85] = 3
-        labels[(target > 0.7) & (target <= 0.85)] = 2
-        labels[(target > 0.4) & (target <= 0.7)] = 1
+        
+        # Calculate friction threshold in decimal (e.g. 3.5 bps = 0.00035)
+        friction = friction_bps / 10000.0
+        
+        # If raw_returns not provided, fallback to simple ranking (v5 legacy)
+        if raw_returns is None:
+            labels[target > 0.85] = 3
+            labels[(target > 0.7) & (target <= 0.85)] = 2
+            labels[(target > 0.4) & (target <= 0.7)] = 1
+        else:
+            # Plan B: Nonlinear Magnitude Amplification + Friction Hurdle
+            # Assuming target is rank-scaled [-1, 1] -> [0, 1] by ((target/2)+0.5)
+            # Actually mine_alphas_cs passes work_df["target"] which is [-1, 1]
+            t = (target / 2.0) + 0.5  # Scale to [0, 1]
+            
+            abs_ret = raw_returns.abs()
+            
+            # Label 3: Super Winners (Top 25% of ranks AND > 3x friction)
+            labels[(t > 0.75) & (abs_ret > 3.0 * friction)] = 3
+            # Label 2: Winners (Top 50% of ranks AND > 2x friction)
+            labels[(labels == 0) & (t > 0.50) & (abs_ret > 2.0 * friction)] = 2
+            # Label 1: Mild (Top 75% of ranks AND > 1.5x friction)
+            labels[(labels == 0) & (t > 0.25) & (abs_ret > 1.5 * friction)] = 1
         
         # C: Dynamic Target Thresholding
         # Suppress labels in quiet regimes (low dispersion) to avoid learning noise.
         if dispersion is not None:
             # Use 20th percentile as quiet threshold if not fixed
             threshold = dispersion.quantile(0.20)
-            # Re-index dispersion to match target if needed, but here they should align
             disp_mask = dispersion < threshold
             labels[disp_mask.to_numpy()] = 0
             
@@ -122,9 +148,21 @@ class MLAlphaMiner:
             # Sort by datetime for group calculation
             work_df = panel_df.sort_index(level="datetime")
             
+            # [Localization] Add macro interaction features (Theme Group 3)
+            work_df = add_macro_interaction_features(work_df)
+            
+            # [Friction-Aware] Calculate 6h forward returns for labeling hurdle
+            # Use unstacked approach to ensure no cross-symbol leakage
+            close_wide = work_df["close"].unstack(level="symbol")
+            fwd_ret_6 = np.log(close_wide.shift(-6) / close_wide).stack(future_stack=True).reindex(work_df.index).fillna(0.0)
+            
             # C: Get dispersion for dynamic thresholding
             dispersion = work_df["cs_dispersion"] if "cs_dispersion" in work_df.columns else None
-            y_labels = self._prepare_labels(work_df["target"], dispersion=dispersion)
+            y_labels = self._prepare_labels(
+                work_df["target"], 
+                raw_returns=fwd_ret_6,
+                dispersion=dispersion
+            )
             
             # In-Sample Masking
             if is_end_date:
@@ -147,8 +185,13 @@ class MLAlphaMiner:
                 theme_idx = slot_idx // 5
                 base_feats = THEME_GROUPS[theme_idx]
                 
-                # Inject HMM probabilities into ALL models as per spec
-                feat_cols = list(dict.fromkeys(base_feats + HMM_COLS))
+                # Inject HMM probabilities into models as per spec
+                # For Group 3, we use interactions only to ensure cross-sectional variance
+                if theme_idx == 2:
+                    feat_cols = list(dict.fromkeys(base_feats))
+                else:
+                    feat_cols = list(dict.fromkeys(base_feats + HMM_COLS))
+                
                 feat_cols = [c for c in feat_cols if c in work_df.columns]
                 
                 self._feature_sets[slot_idx] = feat_cols
@@ -264,13 +307,17 @@ class MLAlphaMiner:
 
         out_df = pd.DataFrame(index=panel_df.index)
         
+        # [Localization] Add macro interaction features (Theme Group 3)
+        work_df = add_macro_interaction_features(panel_df)
+        
         for slot_idx, model in self._models.items():
             feat_cols = self._feature_sets.get(slot_idx, [])
             if not feat_cols:
                 out_df[f"ml_alpha_{slot_idx:02d}"] = 0.5
                 continue
                 
-            X = panel_df[feat_cols].fillna(0.0).values
+            # Use work_df which contains interaction features
+            X = work_df[feat_cols].fillna(0.0).values
             raw_scores = model.predict(X)
             
             # Cross-sectional rank normalization
