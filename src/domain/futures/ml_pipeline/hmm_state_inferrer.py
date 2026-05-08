@@ -278,13 +278,14 @@ def _compute_nll(
     p_02 = jnp.square(jnp.maximum(0.0, locs[2, 0] - locs[0, 0] + 1.5))
     p_21 = jnp.square(jnp.maximum(0.0, locs[1, 0] - locs[2, 0] + 1.5))
     p_13 = jnp.square(jnp.maximum(0.0, locs[3, 0] - locs[1, 0] + 1.5))
-    p_crisis_val = jnp.square(jnp.maximum(0.0, locs[3, 0] + 4.0))  # CRISIS MU < -4.0 enforced (P5.B)
+    # Step 3 Improvement: Aggressive CRISIS MU penalty (< -5.0) and heavier weight
+    p_crisis_val = jnp.square(jnp.maximum(0.0, locs[3, 0] + 5.0)) * 5.0
 
     # Volatility Penalties: Crisis > Bear > Others
     p_crisis_vol = jnp.square(jnp.maximum(0.0, jnp.max(locs[:3, 2]) - locs[3, 2] + 2.0))
 
-    # Adaptive: 1000x ll_scale — directional ordering enforcement (recalibrated from 10000x)
-    semantic_penalty = 1000.0 * ll_scale * (p_02 + p_21 + p_13 + p_crisis_val + p_crisis_vol)
+    # Adaptive: 5000x ll_scale — strengthened ordering enforcement (Step 3: was 1000x)
+    semantic_penalty = 5000.0 * ll_scale * (p_02 + p_21 + p_13 + p_crisis_val + p_crisis_vol)
 
     posteriors = jax.nn.softmax(log_alphas, axis=1)
     bull_tgt = guidance_masks[:, 0]
@@ -311,8 +312,8 @@ def _compute_nll(
         + _band(crisis_f, 0.03, 0.07)
     )
 
-    l2_penalty = 0.001 * jnp.sum(params["tvtp_W"]**2)
-    return -ll + sticky_penalty + semantic_penalty + guidance_loss + freq_penalty + l2_penalty
+    l1_penalty = 0.0001 * jnp.sum(jnp.abs(params["tvtp_W"]))
+    return -ll + sticky_penalty + semantic_penalty + guidance_loss + freq_penalty + l1_penalty
 
 
 @partial(jax.jit, static_argnames=("n_iter", "optimizer"))
@@ -499,18 +500,19 @@ class HMMStateInferrer:
     def _generate_guidance_masks(self, features_df: pd.DataFrame, returns_ser: pd.Series) -> np.ndarray:
         """Stacked targets (T, 2): column 0 = BULL supervision, column 1 = CRISIS supervision."""
         # --- CRISIS: multi-modal crash + (vol spike OR OI surge), sticky ---
-        expanding_ret_thresh = returns_ser.expanding(min_periods=200).quantile(0.08).fillna(0.0)
-        ret_stress = returns_ser < expanding_ret_thresh
+        # Step 1 Improvement: Rolling window + Absolute threshold for Crisis definition
+        rolling_ret_thresh = returns_ser.rolling(window=2000, min_periods=200).quantile(0.05).fillna(0.0)
+        ret_stress = (returns_ser < rolling_ret_thresh) & (returns_ser < -0.015)
 
         vol_series = features_df.get("macro_vol_24h", pd.Series(0.0, index=features_df.index))
-        expanding_vol_thresh = vol_series.expanding(min_periods=200).quantile(0.95).fillna(
+        rolling_vol_thresh = vol_series.rolling(window=2000, min_periods=200).quantile(0.90).fillna(
             vol_series.expanding().median().fillna(0.0)
         )
-        vol_stress = vol_series > expanding_vol_thresh
+        vol_stress = vol_series > rolling_vol_thresh
 
         oi_series = features_df.get("macro_oi_delta_24h", pd.Series(0.0, index=features_df.index))
-        expanding_oi_thresh = oi_series.abs().expanding(min_periods=200).quantile(0.95).fillna(0.0)
-        oi_stress = oi_series.abs() > expanding_oi_thresh
+        rolling_oi_thresh = oi_series.abs().rolling(window=2000, min_periods=200).quantile(0.90).fillna(0.0)
+        oi_stress = oi_series.abs() > rolling_oi_thresh
 
         combined_stress = ret_stress & (vol_stress | oi_stress)
         crisis_raw = combined_stress.astype(np.float32).to_numpy()
@@ -544,14 +546,19 @@ class HMMStateInferrer:
 
     def fit_predict_systemic(self, features_df: pd.DataFrame, returns_ser: pd.Series, is_end_idx: int, symbol: str = "Market", tf: str = "1h") -> pd.DataFrame:
         """Expanding-window Guided 4-State TVTP-HMM."""
+        # Step 4: Structural Hardening - Ensure column integrity
+        feat_cols = list(SYSTEMIC_HMM_FEATURE_COLUMNS)
+        for req_col in ["macro_trend_168h", "macro_vol_24h", "macro_downside_vol_24h"]:
+            assert req_col in feat_cols, f"Required HMM feature missing: {req_col}"
+
         cm = CacheManager(FUTURES_CACHE_DIR, max_files=15, max_size_mb=1000.0)
-        deps = {"symbol": symbol, "tf": tf, "data_len": len(features_df), "ver": "v32_p4_guid_p5_logit_cal", "feat_cols": sorted(list(SYSTEMIC_HMM_FEATURE_COLUMNS))}
+        deps = {"symbol": symbol, "tf": tf, "data_len": len(features_df), "ver": "v32_p4_guid_p5_logit_cal_v2", "feat_cols": sorted(feat_cols)}
         tag = cm.generate_hash(deps, source_files=[Path(__file__).resolve()])
         cache_path = cm.get_cache_path(f"HMM_v32_p4p5_{symbol}_{tf}_len{len(features_df)}", ".parquet", tag)
         if cache_path.exists():
             try: return pd.read_parquet(cache_path)
             except Exception: pass
-        feat_cols = list(SYSTEMIC_HMM_FEATURE_COLUMNS)
+
         X_frame = features_df[feat_cols].replace([np.inf, -np.inf], np.nan).fillna(0.0)
         n = len(X_frame)
         if n < 200: return self._zeros_semantic(features_df)
@@ -561,6 +568,12 @@ class HMMStateInferrer:
         out_cols = [*_SEMANTIC_ORDER, "hmm_entropy", "hmm_expected_duration", "hmm_current_duration", "hmm_hard_state"]
         results, params, transformers, optimizer = np.full((n, len(out_cols)), 0.0, dtype=np.float64), None, None, optax.adam(learning_rate=0.02)
         viterbi_states_buf = np.zeros(n, dtype=np.int32)
+        
+        # Step 4: Dynamic Index Mapping for Initialization
+        idx_trend = feat_cols.index("macro_trend_168h")
+        idx_vol = feat_cols.index("macro_vol_24h")
+        idx_dvol = feat_cols.index("macro_downside_vol_24h")
+
         for t in range(500, n, self.predict_step):
             if t % self.fit_step == 0 or params is None:
                 win_start, win_end = max(0, t - MAX_HMM_WINDOW), max(1, t - 1)
@@ -576,24 +589,24 @@ class HMMStateInferrer:
                 else:
                     locs = np.zeros((4, num_feats), dtype=np.float32)
                     # BULL (0), BEAR (1), CHOP (2), CRISIS (3)
-                    # macro_trend_168h (0), macro_vol_24h (2), macro_downside_vol_24h (3)
-                    locs[0, 0], locs[0, 2], locs[0, 3] = 2.5, -1.0, -1.0
-                    locs[1, 0], locs[1, 2], locs[1, 3] = -1.5, 1.0, 1.0
-                    locs[2, 0], locs[2, 2], locs[2, 3] = 0.0, -1.0, -1.0
-                    # P2: CRISIS loc init more extreme (-5.0 trend, 4.0 vol) → fewer moderate high-vol periods misassigned
-                    locs[3, 0], locs[3, 2], locs[3, 3] = -5.0, 4.0, 4.0
+                    locs[0, idx_trend], locs[0, idx_vol], locs[0, idx_dvol] = 2.5, -1.0, -1.0
+                    locs[1, idx_trend], locs[1, idx_vol], locs[1, idx_dvol] = -1.5, 1.0, 1.0
+                    locs[2, idx_trend], locs[2, idx_vol], locs[2, idx_dvol] = 0.0, -1.0, -1.0
+                    
+                    # Step 4 Improvement: More extreme CRISIS initialization to force negative MU
+                    # Trend: -5.0 -> -7.0, Vol: 4.0 -> 6.0
+                    locs[3, idx_trend], locs[3, idx_vol], locs[3, idx_dvol] = -7.0, 6.0, 6.0
 
                     W_init = np.zeros((4, 4, _N_TVTP_FEATS), dtype=np.float32)
-                    # TVTP indices: cs_dispersion(0→4), oi_delta(1→5), funding_mom(2→6), liq_proxy(3→7), lsr_delta(4→8)
-                    # Crisis entry driven by oi_delta(local idx 1) and liq_proxy(local idx 3)
                     W_init[:, 3, 1], W_init[:, 3, 3] = 3.0, -2.5
-                    # P2: Stronger CRISIS entry suppression — even at n_iter=100 structural prior holds
-                    # BULL/CHOP→CRISIS: -6.0 (≈0.01%), BEAR→CRISIS: -4.0 (≈0.05%), CRISIS→CRISIS: 6.0 (sticky)
+                    
+                    # Step 4 Improvement: Stronger CRISIS priors
+                    # BULL/CHOP→CRISIS: -6.0 -> -10.0, BEAR→CRISIS: -4.0 -> -6.0, CRISIS→CRISIS: 6.0 -> 8.0
                     _tvtp_b_init = np.array([
-                        [ 3.0,  0.0,  0.0, -6.0],  # From BULL → CRISIS very hard
-                        [ 0.0,  3.0,  0.0, -4.0],  # From BEAR → CRISIS hard
-                        [ 0.0,  0.0,  3.0, -6.0],  # From CHOP → CRISIS very hard
-                        [ 0.0,  0.0,  0.0,  6.0],  # From CRISIS → very sticky
+                        [ 3.0,  0.0,  0.0, -10.0], # BULL -> CRISIS extremely hard
+                        [ 0.0,  3.0,  0.0, -6.0],  # BEAR -> CRISIS hard
+                        [ 0.0,  0.0,  3.0, -10.0], # CHOP -> CRISIS extremely hard
+                        [ 0.0,  0.0,  0.0,  8.0],  # CRISIS -> very sticky
                     ], dtype=np.float32)
                     curr_p = {
                         "initial": jnp.zeros(4),
@@ -601,7 +614,7 @@ class HMMStateInferrer:
                         "tvtp_b": jnp.array(_tvtp_b_init),
                         "locs": jnp.array(locs),
                         "log_scales": jnp.zeros((4, num_feats)),
-                        "log_dfs": jnp.array([1.5, 1.5, 1.5, 1.0]),  # df≈[6.5,6.5,6.5,4.7]: CRISIS kurtosis defined
+                        "log_dfs": jnp.array([1.5, 1.5, 1.5, 1.0]),
                     }
                     curr_o, iters = optimizer.init(curr_p), self.n_iter
                 params, self._last_opt, _, _ = _train_hmm_loop(jnp.array(X_pad), jnp.array(M_pad), jnp.array(GM_pad), curr_p, curr_o, iters, 1e-4, optimizer)
