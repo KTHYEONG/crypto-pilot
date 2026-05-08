@@ -9,7 +9,7 @@ import pandas as pd
 from numba import njit
 
 # Columns produced by build_gp_input_features (for CS-rank / imputation in pipeline).
-# Systemic HMM input (8-dim: Core Macro Features + TVTP Exogenous)
+# Systemic HMM observation: macro + risk-adjusted 1h return; index 9 excluded from TVTP.
 SYSTEMIC_HMM_FEATURE_COLUMNS: tuple[str, ...] = (
     "macro_trend_168h",
     "macro_trend_24h",
@@ -20,6 +20,7 @@ SYSTEMIC_HMM_FEATURE_COLUMNS: tuple[str, ...] = (
     "macro_funding_mom_24h",
     "macro_liq_proxy_24h",
     "macro_lsr_delta_24h",
+    "macro_ret_1h",
 )
 
 # Posterior columns aligned to stable semantic labels (order for MetaLabeler).
@@ -50,6 +51,14 @@ def _get_window(hours: int, tf: str) -> int:
     tf_h = _tf_to_hours(tf)
     res = round(hours / tf_h)
     return max(1, res)
+
+
+def _macro_risk_adj_ret_1h(close: pd.Series, w24: int) -> pd.Series:
+    """Risk-adjusted 1-bar return: pct_change(1) / rolling stdev of pct returns (Sharpe-like, causal)."""
+    r = close.astype(np.float64).pct_change(1).replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    min_p = max(2, w24 // 4)
+    vol_24h = r.rolling(w24, min_periods=min_p).std().fillna(0.0)
+    return cast(pd.Series, r / (vol_24h + 1e-8))
 
 
 ALPHA_ENGINEERED_FEATURE_NAMES: tuple[str, ...] = (
@@ -605,7 +614,9 @@ def build_gp_input_features(df: pd.DataFrame, tf: str = "1h") -> pd.DataFrame:
     # macro_trend_168h: BTC-like trend proxy (if btc_close not in df, use own close)
     ref_close = df["btc_close"] if "btc_close" in df.columns else close
     out["macro_trend_168h"] = np.log(ref_close / ref_close.shift(w168).clip(lower=1e-12))
-    
+
+    out["macro_ret_1h"] = _macro_risk_adj_ret_1h(ref_close, w24)
+
     # macro_vol_24h: Yang-Zhang Volatility
     out["macro_vol_24h"] = _yang_zhang_vol_24(open_, high, low, close, w24)
     
@@ -706,7 +717,7 @@ def build_hmm_input_features(df: pd.DataFrame) -> pd.DataFrame:
 def build_systemic_hmm_features(
     panel_df: pd.DataFrame, alpha_panel: pd.DataFrame | None = None, tf: str = "1h"
 ) -> pd.DataFrame:
-    """Build systemic macro features for HMM (Decoupling Spec v15).
+    """Build systemic macro features for HMM (Decoupling Spec v15 + causal return channels).
 
     Args:
         panel_df: Input panel dataframe.
@@ -714,7 +725,7 @@ def build_systemic_hmm_features(
         tf: Timeframe of the input dataframe.
 
     Returns:
-        Dataframe containing systemic HMM features (4-dim).
+        Dataframe indexed by datetime with SYSTEMIC_HMM_FEATURE_COLUMNS.
 
     """
     _ = alpha_panel
@@ -743,6 +754,9 @@ def build_systemic_hmm_features(
         out["macro_trend_168h"] = np.log(btc_close / btc_close.shift(w168).clip(lower=1e-12))
         out["macro_trend_24h"] = np.log(btc_close / btc_close.shift(w24).clip(lower=1e-12))
 
+        btc_log_ret_1h = np.log(btc_close / btc_close.shift(1).clip(lower=1e-12)).fillna(0.0)
+        out["macro_ret_1h"] = _macro_risk_adj_ret_1h(btc_close, w24)
+
         # 2. macro_vol_24h (Yang-Zhang)
         out["macro_vol_24h"] = _yang_zhang_vol_24(btc_open, btc_high, btc_low, btc_close, w24)
 
@@ -759,8 +773,7 @@ def build_systemic_hmm_features(
             out["macro_funding_mom_24h"] = 0.0
 
         # 5. macro_downside_vol_24h (Semi-Vol: downside only) [T1-B]
-        btc_log_ret = np.log(btc_close / btc_close.shift(1).clip(lower=1e-12)).fillna(0.0)
-        neg_ret = btc_log_ret.where(btc_log_ret < 0, 0.0)
+        neg_ret = btc_log_ret_1h.where(btc_log_ret_1h < 0, 0.0)
         out["macro_downside_vol_24h"] = neg_ret.rolling(
             w24, min_periods=max(5, w24 // 4)
         ).std().fillna(0.0)
@@ -774,7 +787,6 @@ def build_systemic_hmm_features(
             out["macro_oi_delta_24h"] = 0.0
 
         # 7. macro_liq_proxy_24h: volume surge ratio during negative-return bars [P2-C]
-        btc_log_ret_1h = np.log(btc_close / btc_close.shift(1).clip(lower=1e-12)).fillna(0.0)
         neg_vol = btc_vol.where(btc_log_ret_1h < 0, 0.0)
         neg_vol_ma = neg_vol.rolling(w24, min_periods=max(5, w24 // 4)).mean()
         total_vol_ma = btc_vol.rolling(w24, min_periods=max(5, w24 // 4)).mean()
@@ -798,7 +810,11 @@ def build_systemic_hmm_features(
         out["macro_trend_24h"] = np.log(m_close / m_close.shift(w24).clip(lower=1e-12))
         out["macro_vol_24h"] = m_close.rolling(w24).std() / (m_close + 1e-12)  # Proxy
         out["macro_liq_24h"] = (m_vol.rolling(w24).mean() / (m_vol.rolling(w168).mean() + 1e-12)) - 1.0
-        
+
+        out["macro_ret_1h"] = _macro_risk_adj_ret_1h(m_close, w24).reindex(idx).fillna(0.0)
+
+        m_log_ret = np.log(m_close / m_close.shift(1).clip(lower=1e-12)).fillna(0.0)
+
         # 4. macro_funding_mom_24h fallback
         if "funding_rate" in panel_df.columns:
             m_fr = panel_df["funding_rate"].groupby(level="datetime").mean().ffill().fillna(0.0)
@@ -807,7 +823,6 @@ def build_systemic_hmm_features(
             out["macro_funding_mom_24h"] = 0.0
 
         # 5. macro_downside_vol_24h fallback [T1-B]
-        m_log_ret = np.log(m_close / m_close.shift(1).clip(lower=1e-12)).fillna(0.0)
         neg_ret_m = m_log_ret.where(m_log_ret < 0, 0.0)
         out["macro_downside_vol_24h"] = neg_ret_m.rolling(
             w24, min_periods=max(5, w24 // 4)
@@ -823,8 +838,7 @@ def build_systemic_hmm_features(
             out["macro_oi_delta_24h"] = 0.0
 
         # 7. macro_liq_proxy_24h: liquidation cascade proxy fallback [P2-C]
-        m_log_ret2 = np.log(m_close / m_close.shift(1).clip(lower=1e-12)).fillna(0.0)
-        m_neg_vol = m_vol.where(m_log_ret2 < 0, 0.0)
+        m_neg_vol = m_vol.where(m_log_ret < 0, 0.0)
         m_neg_vol_ma = m_neg_vol.rolling(w24, min_periods=max(5, w24 // 4)).mean()
         m_total_vol_ma = m_vol.rolling(w24, min_periods=max(5, w24 // 4)).mean()
         out["macro_liq_proxy_24h"] = (
