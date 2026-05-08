@@ -28,7 +28,7 @@ except Exception as e:
 import optax
 import pandas as pd
 from numba import njit
-from sklearn.preprocessing import QuantileTransformer, RobustScaler
+from sklearn.preprocessing import RobustScaler
 
 from config.opt_config import OPT_FUTURES_CONFIG
 from config.settings import FUTURES_CACHE_DIR

@@ -36,7 +36,7 @@ HMM_SEMANTIC_PROB_COLUMNS: tuple[str, ...] = (
 
 # Bump when ALPHA feature semantics change without renaming columns so raw GP
 # caches are invalidated and Tier 2 retraining actually happens.
-GP_FEATURE_SCHEMA_VERSION: str = "v20"
+GP_FEATURE_SCHEMA_VERSION: str = "v21"
 
 def _tf_to_hours(tf: str) -> float:
     """Convert timeframe string to decimal hours."""
@@ -99,6 +99,7 @@ ALPHA_ENGINEERED_FEATURE_NAMES: tuple[str, ...] = (
     "tail_rejection_24",
     "dist_from_high_24",
     "corr_btc_24",
+    "btc_beta",
     "vpin_proxy_12",
     "funding_trap_24",
     "downside_jump_24",
@@ -484,8 +485,14 @@ def build_gp_input_features(df: pd.DataFrame, tf: str = "1h") -> pd.DataFrame:
     if "btc_close" in df.columns:
         btc_log_ret = np.log(df["btc_close"] / df["btc_close"].shift(1).clip(lower=1e-12))
         out["corr_btc_24"] = log_ret_1.rolling(w24, min_periods=max(2, w24 // 2)).corr(btc_log_ret).fillna(0.0)
+        
+        # Calculate Rolling Beta: cov(asset, btc) / var(btc)
+        cov_btc = log_ret_1.rolling(w24, min_periods=max(2, w24 // 2)).cov(btc_log_ret)
+        var_btc = btc_log_ret.rolling(w24, min_periods=max(2, w24 // 2)).var()
+        out["btc_beta"] = (cov_btc / (var_btc + 1e-12)).fillna(0.0)
     else:
         out["corr_btc_24"] = 0.0
+        out["btc_beta"] = 0.0
 
     buy_vol = tbq / (close + 1e-9)
     sell_vol = tsq / (close + 1e-9)
@@ -906,3 +913,51 @@ def build_systemic_hmm_features(
         out[other_cols] = qt.fit_transform(clean_other)
 
     return out.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+
+
+def add_macro_interaction_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Add interaction features between macro HMM probabilities and individual asset metrics.
+
+    Interactions:
+    - Trend Sensitivity: btc_beta * hmm_prob_bull_trend
+    - Volatility State: realized_vol_24h * hmm_prob_crisis
+    - Funding Pressure: funding_level * hmm_prob_bear_trend
+
+    Args:
+        df: Panel DataFrame with HMM probabilities and asset features.
+
+    Returns:
+        DataFrame with added interaction features.
+
+    """
+    out = df.copy()
+
+    # 1. Bull Trend Probability (sum calm and vol_up if they exist)
+    if "hmm_prob_bull_trend" in out.columns:
+        bull_prob = out["hmm_prob_bull_trend"]
+    elif "hmm_prob_bull_calm" in out.columns and "hmm_prob_bull_vol_up" in out.columns:
+        bull_prob = out["hmm_prob_bull_calm"] + out["hmm_prob_bull_vol_up"]
+    else:
+        bull_prob = pd.Series(0.0, index=out.index)
+
+    # 2. Asset Metrics
+    beta = out["btc_beta"] if "btc_beta" in out.columns else out["corr_btc_24"]
+    vol = out["realized_vol_yz_24"] if "realized_vol_yz_24" in out.columns else pd.Series(0.0, index=out.index)
+    
+    # Use funding_rate as funding_level proxy
+    funding = out["funding_rate"] if "funding_rate" in out.columns else pd.Series(0.0, index=out.index)
+
+    # 3. Interactions
+    out["btc_beta_x_bull_trend"] = (beta * bull_prob).fillna(0.0)
+    
+    if "hmm_prob_crisis" in out.columns:
+        out["realized_vol_x_crisis"] = (vol * out["hmm_prob_crisis"]).fillna(0.0)
+    else:
+        out["realized_vol_x_crisis"] = 0.0
+
+    if "hmm_prob_bear_trend" in out.columns:
+        out["funding_x_bear_trend"] = (funding * out["hmm_prob_bear_trend"]).fillna(0.0)
+    else:
+        out["funding_x_bear_trend"] = 0.0
+
+    return out
