@@ -43,6 +43,7 @@ class MLPipelineOutput:
     health_metrics_by_symbol: dict[str, dict[str, float]] = field(default_factory=dict)
     alpha_panel: pd.DataFrame = field(default_factory=pd.DataFrame)
     hmm_report: dict[str, float] = field(default_factory=dict)
+    market_probs: pd.DataFrame = field(default_factory=pd.DataFrame)
 
 
 def _sorted_hmm_prob_columns(df: pd.DataFrame) -> list[str]:
@@ -1057,6 +1058,7 @@ def run_hmm_fusion_for_is_end(
     out = MLPipelineOutput()
     out.hmm_report = h_rep
     out.alpha_panel = alpha_panel
+    out.market_probs = market_probs
     if not include_fusion:
         return out
 

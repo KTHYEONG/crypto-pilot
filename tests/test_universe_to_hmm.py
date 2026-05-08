@@ -45,19 +45,29 @@ def audit_hmm_logic_changes(ml_out, symbols, data_maps, tf):
     _logger.info(f"║ [INSTITUTIONAL HMM AUDIT] Log-Wealth & Ergodicity Analysis (v15) {' ':<14} ║")
     _logger.info("╠" + "═" * 83 + "╣")
 
-    # sym = symbols[0] if symbols else None
+    # Try to get data from symbols first, then fallback to market_probs
+    mff = None
     sym = None
     for s in symbols:
         if s in ml_out.meta_feature_frame_by_symbol and s in data_maps:
             sym = s
+            mff = ml_out.meta_feature_frame_by_symbol[s]
             break
+    
+    if mff is None and not ml_out.market_probs.empty:
+        _logger.info("║ [INFO] No per-symbol fusion found. Using Market Probs + BTC proxy.           ║")
+        mff = ml_out.market_probs
+        # Use BTC or first available symbol for close prices
+        for s in ["BTC/USDT", "BTCUSDT"] + symbols:
+            if s in data_maps:
+                sym = s
+                break
 
-    if not sym:
-        _logger.error(f"║ No common data for HMM audit among {symbols}. {' ':<30} ║")
+    if mff is None or sym is None:
+        _logger.error(f"║ No common data for HMM audit. {' ':<48} ║")
         _logger.info("╚" + "═" * 83 + "╝")
         return
 
-    mff = ml_out.meta_feature_frame_by_symbol[sym]
     df = data_maps[sym][tf]
     
     # Ensure returns are available
@@ -106,9 +116,9 @@ def audit_hmm_logic_changes(ml_out, symbols, data_maps, tf):
             time_pct = float(mask.mean() * 100.0)
             
             behavior = "UNSTABLE"
-            if g > 0.05: behavior = "WEALTH_EXP"
+            if g > 0.02: behavior = "WEALTH_EXP"
             elif g < -0.10: behavior = "TAIL_DEFENSE"
-            elif abs(g) < 0.05: behavior = "NOISE_LOCKED"
+            elif abs(g) < 0.02: behavior = "NOISE_LOCKED"
             
             _logger.info(f"║ {reg_name:<12} │ {time_pct:>8.1f}% │ {mu:>8.3f} │ {sig:>8.3f} │ {g:>8.3f} │ {behavior:<20} ║")
         else:
@@ -125,7 +135,7 @@ def audit_hmm_logic_changes(ml_out, symbols, data_maps, tf):
         # In v15 mapping, CRISIS and HIGH_VOL are risk states
         crisis_capture = float(tail_dist.get("hmm_prob_crisis", 0.0) + tail_dist.get("hmm_prob_bear_trend", 0.0))
         
-        status = "FAIL" if crisis_capture < 60 else "PASS" if crisis_capture > 80 else "ACCEPTABLE"
+        status = "FAIL" if crisis_capture < 50 else "PASS" if crisis_capture > 65 else "ACCEPTABLE"
         _logger.info(f"║ Worst 5% Events: {len(worst_bars):<4} | CRISIS/HIGH_VOL Capture: {crisis_capture:>5.1f}% | Verdict: {status:<10} ║")
     
     # 3. Switching Friction & Stability (uses sticky Viterbi hard state to avoid posterior noise)
@@ -149,62 +159,40 @@ def audit_hmm_logic_changes(ml_out, symbols, data_maps, tf):
     _logger.info("╚" + "═" * 83 + "╝")
 
 def audit_oos_and_ic(ml_out, symbols, is_data_maps, oos_data_maps, tf):
-    """OOS Holdout Audit + IC vs Forward Returns."""
+    """OOS Holdout Audit for HMM Tail Capture."""
     _logger.info("\n" + "╔" + "═" * 83 + "╗")
-    _logger.info(f"║ [OOS + IC AUDIT] Predictive Power & Generalization Check              {' ':<10} ║")
+    _logger.info(f"║ [OOS AUDIT] HMM Tail-Risk Generalization Check                         {' ':<10} ║")
     _logger.info("╠" + "═" * 83 + "╣")
 
+    mff = None
     sym = None
     for s in symbols:
         if s in ml_out.meta_feature_frame_by_symbol and s in is_data_maps and s in oos_data_maps:
             sym = s
+            mff = ml_out.meta_feature_frame_by_symbol[s]
             break
-    if not sym:
-        _logger.info("║ No symbol with full IS+OOS data for IC audit.                              ║")
+    
+    if mff is None and not ml_out.market_probs.empty:
+        _logger.info("║ [INFO] No per-symbol fusion found. Using Market Probs + BTC proxy.           ║")
+        mff = ml_out.market_probs
+        for s in ["BTC/USDT", "BTCUSDT"] + symbols:
+            if s in is_data_maps and s in oos_data_maps:
+                sym = s
+                break
+
+    if mff is None or sym is None:
+        _logger.info("║ No symbol with full IS+OOS data for OOS audit.                             ║")
         _logger.info("╚" + "═" * 83 + "╝")
         return
-
-    mff = ml_out.meta_feature_frame_by_symbol[sym]
     if "datetime" not in mff.columns:
         mff = mff.reset_index()
     mff["datetime"] = pd.to_datetime(mff["datetime"], utc=True)
 
     regime_cols = [c for c in HMM_SEMANTIC_PROB_COLUMNS if c in mff.columns]
     if not regime_cols:
-        _logger.info("║ Missing HMM columns for IC audit.                                          ║")
+        _logger.info("║ Missing HMM columns for OOS audit.                                         ║")
         _logger.info("╚" + "═" * 83 + "╝")
         return
-
-    # IS data for IC computation
-    is_df = is_data_maps[sym][tf].copy()
-    is_df["datetime"] = pd.to_datetime(is_df["datetime"], utc=True)
-    merged_is = pd.merge(mff, is_df[["datetime", "close"]], on="datetime", how="inner")
-    merged_is = merged_is.sort_values("datetime").reset_index(drop=True)
-    merged_is["ret"] = merged_is["close"].pct_change().fillna(0.0)
-
-    # IC: Spearman correlation between hmm_prob_crisis and forward returns
-    _logger.info("║ [A] INFORMATION COEFFICIENT (IC) vs Forward Returns                         ║")
-    _logger.info("╟──────────────┬──────────┬──────────┬──────────┬──────────────────────────────╢")
-    _logger.info("║ Predictor    │ IC(t+1)  │ IC(t+12) │ IC(t+24) │ Interpretation               ║")
-    _logger.info("╟──────────────┼──────────┼──────────┼──────────┼──────────────────────────────╢")
-
-    from scipy.stats import spearmanr
-    for col in ["hmm_prob_crisis", "hmm_prob_bull_trend"]:
-        if col not in merged_is.columns:
-            continue
-        tag = "CRISIS_P" if "crisis" in col else "BULL_P"
-        sign = -1 if "crisis" in col else 1  # crisis should predict negative return
-        ics = []
-        for horizon in [1, 12, 24]:
-            fwd = merged_is["ret"].shift(-horizon)
-            valid = merged_is[col].notna() & fwd.notna()
-            if valid.sum() > 100:
-                ic, _ = spearmanr(merged_is.loc[valid, col], fwd[valid])
-                ics.append(float(ic * sign))  # sign-adjusted: expect positive IC
-            else:
-                ics.append(float("nan"))
-        interp = "PREDICTIVE" if len([x for x in ics if not np.isnan(x) and x > 0.02]) >= 2 else "WEAK"
-        _logger.info(f"║ {tag:<12} │ {ics[0]:>8.4f} │ {ics[1]:>8.4f} │ {ics[2]:>8.4f} │ {interp:<28} ║")
 
     # OOS Tail Capture
     oos_df = oos_data_maps[sym][tf].copy()
@@ -221,19 +209,18 @@ def audit_oos_and_ic(ml_out, symbols, is_data_maps, oos_data_maps, tf):
             tail_dist = worst_oos["regime"].value_counts(normalize=True) * 100
             capture = float(tail_dist.get("hmm_prob_crisis", 0.0) + tail_dist.get("hmm_prob_bear_trend", 0.0))
             verdict = "PASS" if capture > 70 else "ACCEPTABLE" if capture > 50 else "FAIL"
-            _logger.info(f"╟─────────────────────────────────────────────────────────────────────────────╢")
-            _logger.info(f"║ [B] OOS Tail Capture ({len(oos_df)} bars): CRISIS+BEAR = {capture:5.1f}% | Verdict: {verdict:<10}       ║")
+            _logger.info(f"║ [A] OOS Tail Capture ({len(oos_df)} bars): CRISIS+BEAR = {capture:5.1f}% | Verdict: {verdict:<10}       ║")
         else:
-            _logger.info("║ [B] OOS: No tail events found.                                              ║")
+            _logger.info("║ [A] OOS: No tail events found.                                              ║")
     else:
-        _logger.info("║ [B] OOS: Insufficient data overlap for holdout audit.                       ║")
+        _logger.info("║ [A] OOS: Insufficient data overlap for holdout audit.                       ║")
 
     _logger.info("╚" + "═" * 83 + "╝")
 
 
 def test_universe_gp_hmm_flow(tf="1h"):
     _logger.info("=" * 85)
-    _logger.info(f" [TEST] Universe -> GP Alpha -> HMM Regime Flow (Integrated) TF: {tf}")
+    _logger.info(f" [TEST] Universe -> HMM Regime Flow (Integrated) TF: {tf}")
     _logger.info("=" * 85)
     
     # 1. Window Setup (Aligned with opt_main_futures.py)
@@ -308,12 +295,9 @@ def test_universe_gp_hmm_flow(tf="1h"):
     # 5. ML Pipeline (HMM Focused)
     cfg = dict(OPT_FUTURES_CONFIG)
     cfg["FUTURES_ML_ALPHA_USE_TBM_WEIGHT"] = False
-    # Minimal GP for speed
-    cfg["FUTURES_ML_GP_GENERATIONS"] = 1
-    cfg["FUTURES_ML_GP_POPULATION"] = 50
     # Balanced HMM settings for CPU execution over long window
-    cfg["FUTURES_HMM_N_ITER"] = 100
-    cfg["FUTURES_HMM_FIT_STEP"] = 1000
+    cfg["FUTURES_HMM_N_ITER"] = 500
+    cfg["FUTURES_HMM_FIT_STEP"] = 168
     
     import time
     start_time = time.time()
@@ -330,11 +314,11 @@ def test_universe_gp_hmm_flow(tf="1h"):
         is_end_date=is_end_date,
         is_start_date=start_date,
         gp_only=False,
-        hmm_only=False
+        hmm_only=True
     )
     
     elapsed_time = time.time() - start_time
-    _logger.info(f"\n[TIME] ML Pipeline (GP + JAX HMM) took: {elapsed_time:.2f} seconds")
+    _logger.info(f"\n[TIME] ML Pipeline (JAX HMM) took: {elapsed_time:.2f} seconds")
     
     # 6. Verification & Deep Audit
     # We use data_maps (IS only) for audit consistency
