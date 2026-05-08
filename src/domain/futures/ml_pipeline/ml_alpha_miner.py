@@ -36,8 +36,9 @@ THEME_GROUPS = {
         "downside_vol_ratio", "cs_dispersion"
     ],
     2: [  # Group 3: Structural/Regime (Slots 10-14)
-        "funding_level", "volume_momentum_24h", 
-        "hmm_prob_bull_trend", "hmm_prob_bear_trend", "hmm_prob_chop", "hmm_prob_crisis"
+        "funding_level", "volume_momentum_24h",
+        *list(HMM_SEMANTIC_PROB_COLUMNS),
+        "hmm_prob_bull_trend",
     ]
 }
 
