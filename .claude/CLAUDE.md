@@ -51,3 +51,7 @@ Follow this structure only for tasks involving code generation or structural cha
 - **Magic Numbers:** Always separate into constants.
 - **Unverified Refactoring:** Prohibit large-scale structural changes without test code or guaranteed behavior.
 - **Ignoring Return Values:** Prohibit neglecting return values or error handling.
+
+## 9. Rule Isolation & Priority (Conditional Exception)
+- **Override Trigger**: If the commit-specific rule file (`.agents/rules/commit.md`) is explicitly invoked or activated via labels (e.g., `commit`), the constraints and mandatory workflows defined in this document—including the Verification Loop and multi-step Workflow structure—are temporarily suspended.
+- **Precedence**: Commit task directives always take absolute precedence over these general guidelines to ensure efficiency and focus during the version control process.
