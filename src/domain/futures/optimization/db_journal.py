@@ -1,16 +1,25 @@
 """
-최적화 도구인 Optuna의 학습 결과(Study)를 원격 DB(MySQL)에서 로컬 DB(SQLite)로 복사하고 관리하는 기능을 담당함.
-최적화된 파라미터를 실제 트레이딩 시스템에서 사용할 수 있도록 데이터베이스를 실시간으로 동기화함.
+Database and Locking utilities for Optimization.
+Combines Optuna Study management (MySQL/SQLite) and Windows-specific I/O locking.
 """
 
+from __future__ import annotations
+
+import hashlib
 import logging
 import os
+import sys
 from typing import Any, Dict, Optional
 
 import optuna
 
+if sys.platform == "win32":
+    import ctypes
+    from ctypes import wintypes
+
 _logger: logging.Logger = logging.getLogger("opt_futures")
 
+# --- DB Utilities (from db_utils.py) ---
 
 def fast_reset_study(
     study_name: str,
@@ -22,23 +31,6 @@ def fast_reset_study(
 ) -> bool:
     """
     Bypass Optuna's slow ORM delete_study() by directly executing raw SQL against MySQL.
-
-    Optuna's delete_study() uses SQLAlchemy ORM cascade, which performs row-by-row
-    DELETE across 6+ child tables — extremely slow when trial count is large (100+).
-    This function directly looks up study_id and runs targeted DELETE statements,
-    reducing deletion time from ~30s to under 1s regardless of trial count.
-
-    Optuna MySQL schema (as of optuna >= 3.x):
-        studies
-        └─ study_directions        (FK: study_id)
-        └─ study_user_attributes   (FK: study_id)
-        └─ study_system_attributes (FK: study_id)
-        └─ trials
-           └─ trial_params             (FK: trial_id)
-           └─ trial_user_attributes    (FK: trial_id)
-           └─ trial_system_attributes  (FK: trial_id)
-           └─ trial_intermediate_values(FK: trial_id)
-           └─ trial_heartbeats         (FK: trial_id)
     """
     try:
         import pymysql
@@ -79,7 +71,7 @@ def fast_reset_study(
         )
         trial_ids = [r[0] for r in cursor.fetchall()]
 
-        # 3. Delete child tables in chunks to avoid huge query and handle potential locking
+        # 3. Delete child tables in chunks
         if trial_ids:
             chunk_size = 500
             child_tables = [
@@ -88,7 +80,7 @@ def fast_reset_study(
                 "trial_system_attributes",
                 "trial_user_attributes",
                 "trial_params",
-                "trial_values",  # Required for Optuna 3.x to avoid FK violation
+                "trial_values",
             ]
             for i in range(0, len(trial_ids), chunk_size):
                 chunk = trial_ids[i : i + chunk_size]
@@ -108,7 +100,7 @@ def fast_reset_study(
             (study_id,),
         )
 
-        # 5. Delete study-level attributes and the study row itself
+        # 5. Delete study-level attributes
         for table in (
             "study_system_attributes",
             "study_user_attributes",
@@ -157,8 +149,6 @@ def save_study_to_sqlite(
 ) -> bool:
     """
     Export ONLY the best trial from the current study to local SQLite for production.
-    When target_study_name is set (e.g. "futures_strategy"), the trial is stored under
-    that name so downstream (e.g. real_trader) can load it.
     """
     study_name: str = target_study_name if target_study_name is not None else study.study_name
     sqlite_path: str = os.path.join(project_root, "futures_strategy.db")
@@ -167,14 +157,11 @@ def save_study_to_sqlite(
     _logger.info("  💾 Exporting BEST trial to local SQLite as '%s'...", study_name)
 
     try:
-        # 1. Delete existing local study to ensure fresh best trial
         try:
             optuna.delete_study(study_name=study_name, storage=sqlite_storage_url)
         except (KeyError, Exception):
-            # Study may not exist yet or storage may be empty; both are safe to ignore.
             ...
 
-        # 2. Create new local study
         create_kwargs: Dict[str, Any] = {
             "study_name": study_name,
             "storage": sqlite_storage_url,
@@ -183,15 +170,12 @@ def save_study_to_sqlite(
 
         directions = getattr(study, "directions", None)
         if directions:
-            # Multi-objective (or single-objective with directions tuple)
             create_kwargs["directions"] = list(directions)
         else:
-            # Backward-compatible path for old single-objective studies
             create_kwargs["direction"] = study.direction  # type: ignore[assignment]
 
         local_study: optuna.Study = optuna.create_study(**create_kwargs)
 
-        # 3. Add trials (이미 Pareto Front로만 구성된 study가 전달됨)
         for trial in study.trials:
             local_study.add_trial(trial)
 
@@ -201,3 +185,75 @@ def save_study_to_sqlite(
     except Exception as e:
         _logger.error("❌ Failed to persist best trial to SQLite: %s", e)
         return False
+
+# --- Locking Utilities (from win_journal_lock.py) ---
+
+_INFINITE: int = 0xFFFFFFFF
+_WAIT_OBJECT_0: int = 0
+
+def _mutex_name_from_path(file_path: str) -> str:
+    """Derive a short, safe system-wide mutex name from the journal file path."""
+    normalized: str = str(file_path).replace("\\", "/").lower()
+    h: str = hashlib.sha256(normalized.encode()).hexdigest()[:24]
+    return f"Global\\optuna_journal_{h}"
+
+
+if sys.platform == "win32":
+
+    class WindowsNamedMutexJournalLock:
+        """
+        Process-spanning lock for Journal file I/O on Windows.
+        """
+
+        def __init__(self, file_path: str) -> None:
+            self._mutex_name: str = _mutex_name_from_path(file_path)
+            self._handle: wintypes.HANDLE | None = self._open_or_create_mutex()
+
+        def _open_or_create_mutex(self) -> wintypes.HANDLE | None:
+            kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+            handle: wintypes.HANDLE = kernel32.CreateMutexW(
+                None,
+                False,
+                self._mutex_name,  # type: ignore[arg-type]
+            )
+            if not handle:
+                err: int = ctypes.get_last_error()
+                _logger.error("CreateMutexW failed for %s, error=%s", self._mutex_name, err)
+                raise OSError(err, f"CreateMutexW failed: {self._mutex_name}")
+            return handle
+
+        def acquire(self) -> bool:
+            kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+            if self._handle is None:
+                self._handle = self._open_or_create_mutex()
+            ret: int = kernel32.WaitForSingleObject(
+                self._handle,
+                _INFINITE,  # type: ignore[arg-type]
+            )
+            if ret != _WAIT_OBJECT_0:
+                err = ctypes.get_last_error()
+                raise OSError(err, f"WaitForSingleObject failed: {ret}")
+            return True
+
+        def release(self) -> None:
+            kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+            if self._handle is None:
+                raise RuntimeError("Error: did not possess lock")
+            if not kernel32.ReleaseMutex(self._handle):  # type: ignore[arg-type]
+                err = ctypes.get_last_error()
+                raise OSError(err, "ReleaseMutex failed")
+
+        def __del__(self) -> None:
+            if getattr(self, "_handle", None) is not None:
+                try:
+                    ctypes.windll.kernel32.CloseHandle(self._handle)  # type: ignore[attr-defined]
+                except Exception:
+                    ...
+                self._handle = None
+
+        def __getstate__(self) -> dict[str, Any]:
+            return {"_mutex_name": self._mutex_name}
+
+        def __setstate__(self, state: dict[str, Any]) -> None:
+            self._mutex_name = state["_mutex_name"]
+            self._handle = self._open_or_create_mutex()
