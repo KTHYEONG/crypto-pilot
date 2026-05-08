@@ -1,3 +1,9 @@
+---
+name: ai-evolver
+version: 2.0.0
+description: System DNA Architect responsible for maintaining code-architecture consistency.
+---
+
 # Skill: AI Evolver (Ver 2.0)
 
 ## Role
