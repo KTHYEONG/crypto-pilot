@@ -274,7 +274,11 @@ def _compute_nll(
     avg_trans_mat = jnp.exp(jax.scipy.special.logsumexp(log_trans_mats, axis=0) - jnp.log(log_trans_mats.shape[0]))
     sticky_penalty = -50.0 * jnp.sum(jnp.log(jnp.diag(avg_trans_mat) + 1e-6))
 
-    return -ll + sticky_penalty
+    # Soft Gravity NLL Penalty (v4.0.0 Pragmatic)
+    # idx_ret = 9 (macro_ret_1h). Force CRISIS (4) negative, BULL_CALM (0) positive.
+    gravity_penalty = 200.0 * (jnp.maximum(0.0, params["locs"][4, 9]) + jnp.maximum(0.0, -params["locs"][0, 9]))
+
+    return -ll + sticky_penalty + gravity_penalty
 
 
 @partial(jax.jit, static_argnames=("n_iter", "optimizer"))
@@ -365,109 +369,40 @@ def _empirical_mu_sigma_sharpe(hard: np.ndarray, rets: np.ndarray, n_states: int
 
 
 def _assign_semantic_five_state(emp_mu: np.ndarray, emp_sig: np.ndarray, sharpe: np.ndarray) -> dict[str, int]:
-    """Map 5 latent states: CRISIS, BEAR, CHOP, CALM_BULL, VOL_UP (Phase 5).
+    """Map 5 latent states: CRISIS, BEAR, CHOP, CALM_BULL, VOL_UP (v4.0.0 Pragmatic).
 
-    CRISIS: high-vol worst Sharpe (+ negative-μ override like 4-state). BEAR: lowest μ among non-crisis.
-    CHOP: middle μ among the remaining three. VOL_UP / CALM_BULL: highest and lowest μ of those three,
-    split so higher empirical σ → VOL_UP.
-
-    Hard guards: BULL_CALM must have μ>0 (else swap to argmax-μ latent). BEAR must not have μ>0 when a
-    lower-μ non-crisis latent exists (else swap to strict worst-μ among k ≠ crisis).
+    1. Sort by emp_sig. Top 2 = High Vol Group, Bottom 3 = Low Vol Group.
+    2. High Vol Group: Lower emp_mu -> CRISIS, Higher emp_mu -> BULL_VOL_UP.
+    3. Low Vol Group: Sort by emp_mu. Lowest -> BEAR, Middle -> CHOP, Highest -> BULL_CALM.
     """
     if len(emp_mu) != 5:
         raise ValueError("five-state semantic map requires K=5")
 
-    idx_all = list(range(5))
+    idx_all = np.arange(5)
+    
+    # 1. Sort by empirical sigma (Sigma 2:3 split)
+    sig_order = np.argsort(emp_sig)
+    low_vol_group = sig_order[:3]   # Bottom 3
+    high_vol_group = sig_order[3:]  # Top 2
 
-    def _swap_latent(
-        lab: dict[str, int],
-        key_a: str,
-        new_latent: int,
-    ) -> None:
-        """Assign key_a to new_latent; the semantic that held new_latent receives key_a's old latent."""
-        old = lab[key_a]
-        if old == new_latent:
-            return
-        for nk, lv in lab.items():
-            if nk != key_a and lv == new_latent:
-                lab[nk] = old
-                break
-        lab[key_a] = new_latent
+    # 2. High Vol Group (2 states)
+    hv_mu_order = high_vol_group[np.argsort(emp_mu[high_vol_group])]
+    crisis_idx = int(hv_mu_order[0])
+    bull_vol_idx = int(hv_mu_order[1])
 
-    def _finish(
-        crisis_idx: int,
-        bear_idx: int,
-        chop_idx: int,
-        bull_calm_idx: int,
-        bull_vol_idx: int,
-    ) -> dict[str, int]:
-        if emp_mu[crisis_idx] >= 0.0:
-            crisis_idx = int(np.argmin(emp_mu))
-            others = [k for k in idx_all if k != crisis_idx]
-            bear_idx = int(min(others, key=lambda kk: emp_mu[kk]))
-            rem = [k for k in others if k != bear_idx]
-            assert len(rem) == 3
-            rem_by_mu = sorted(rem, key=lambda kk: emp_mu[kk])
-            low_m, mid_m, high_m = rem_by_mu[0], rem_by_mu[1], rem_by_mu[2]
-            chop_idx = mid_m
-            a, b = low_m, high_m
-            if emp_sig[a] >= emp_sig[b]:
-                bull_vol_idx, bull_calm_idx = a, b
-            else:
-                bull_vol_idx, bull_calm_idx = b, a
+    # 3. Low Vol Group (3 states)
+    lv_mu_order = low_vol_group[np.argsort(emp_mu[low_vol_group])]
+    bear_idx = int(lv_mu_order[0])
+    chop_idx = int(lv_mu_order[1])
+    bull_calm_idx = int(lv_mu_order[2])
 
-        lab: dict[str, int] = {
-            "crisis": int(crisis_idx),
-            "bear": int(bear_idx),
-            "chop": int(chop_idx),
-            "bull_calm": int(bull_calm_idx),
-            "bull_vol_up": int(bull_vol_idx),
-        }
-
-        # BEAR: bearish regime should not show positive mean return when a strictly lower-μ state exists.
-        if emp_mu[lab["bear"]] > 0.0:
-            for kk in sorted(idx_all, key=lambda i: emp_mu[i]):
-                if kk != lab["crisis"]:
-                    _swap_latent(lab, "bear", int(kk))
-                    break
-
-        # BULL_CALM: calm bull must have μ>0 (else swap to max-μ latent among non-crisis).
-        if emp_mu[lab["bull_calm"]] <= 0.0:
-            non_crisis = [k for k in idx_all if k != lab["crisis"]]
-            k_max = int(max(non_crisis, key=lambda kk: emp_mu[kk]))
-            _swap_latent(lab, "bull_calm", k_max)
-
-        return {
-            "bull_calm": lab["bull_calm"],
-            "bull_vol_up": lab["bull_vol_up"],
-            "bear": lab["bear"],
-            "chop": lab["chop"],
-            "crisis": lab["crisis"],
-        }
-
-    med_sig = float(np.median(emp_sig))
-
-    high_vol = [k for k in idx_all if emp_sig[k] > med_sig + 1e-12]
-    if high_vol:
-        crisis_idx = int(min(high_vol, key=lambda kk: sharpe[kk]))
-    else:
-        crisis_idx = int(np.argmin(sharpe))
-
-    pool_nb = [k for k in idx_all if k != crisis_idx]
-    bear_idx = int(min(pool_nb, key=lambda kk: emp_mu[kk]))
-
-    rem = [k for k in idx_all if k not in (crisis_idx, bear_idx)]
-    assert len(rem) == 3
-    rem_by_mu = sorted(rem, key=lambda kk: emp_mu[kk])
-    low_m, mid_m, high_m = rem_by_mu[0], rem_by_mu[1], rem_by_mu[2]
-    chop_idx = mid_m
-    a, b = low_m, high_m
-    if emp_sig[a] >= emp_sig[b]:
-        bull_vol_idx, bull_calm_idx = a, b
-    else:
-        bull_vol_idx, bull_calm_idx = b, a
-
-    return _finish(crisis_idx, bear_idx, chop_idx, bull_calm_idx, bull_vol_idx)
+    return {
+        "bull_calm": bull_calm_idx,
+        "bull_vol_up": bull_vol_idx,
+        "bear": bear_idx,
+        "chop": chop_idx,
+        "crisis": crisis_idx,
+    }
 
 
 # --- Utility Functions ---
@@ -575,19 +510,30 @@ class HMMStateInferrer:
     _last_semantic_mapping: dict[str, int] | None = field(default=None, init=False, repr=False)
 
     def _map_semantic_states_locs_fallback(self, params: dict[str, Any], idx_macro_ret: int, idx_vol: int) -> dict[str, int]:
-        """Fallback when empirical window is too short: order by macro_ret_1h loc; top two bulls split by macro_vol loc."""
+        """Fallback when empirical window is too short: v4.0.0 Pragmatic 2D logic.
+        
+        Uses locs[:, idx_vol] as sigma proxy and locs[:, idx_macro_ret] as mu proxy.
+        """
         locs = np.asarray(params["locs"])
         ret_means = locs[:, idx_macro_ret]
         vol_locs = locs[:, idx_vol]
-        order = np.argsort(ret_means)
-        crisis_idx = int(order[0])
-        bear_idx = int(order[1])
-        chop_idx = int(order[2])
-        hi_a, hi_b = int(order[3]), int(order[4])
-        if vol_locs[hi_a] >= vol_locs[hi_b]:
-            bull_vol_idx, bull_calm_idx = hi_a, hi_b
-        else:
-            bull_vol_idx, bull_calm_idx = hi_b, hi_a
+        
+        # 1. Sort by vol locs (Sigma 2:3 split)
+        sig_order = np.argsort(vol_locs)
+        low_vol_group = sig_order[:3]   # Bottom 3
+        high_vol_group = sig_order[3:]  # Top 2
+
+        # 2. High Vol Group (2 states)
+        hv_mu_order = high_vol_group[np.argsort(ret_means[high_vol_group])]
+        crisis_idx = int(hv_mu_order[0])
+        bull_vol_idx = int(hv_mu_order[1])
+
+        # 3. Low Vol Group (3 states)
+        lv_mu_order = low_vol_group[np.argsort(ret_means[low_vol_group])]
+        bear_idx = int(lv_mu_order[0])
+        chop_idx = int(lv_mu_order[1])
+        bull_calm_idx = int(lv_mu_order[2])
+
         return {
             "bull_calm": bull_calm_idx,
             "bull_vol_up": bull_vol_idx,
@@ -623,7 +569,7 @@ class HMMStateInferrer:
         if self._warmed_up:
             return
         k = self.n_states
-        _logger.info("Warming up JAX HMM JIT cache (K=%d states, TVTP, Unsupervised, FEATS=%d)...", k, n_feats)
+        _logger.info("Warming up JAX HMM JIT cache (K=%d states, TVTP, Unsupervised, FEATS=%d, v4.0.0 Pragmatic)...", k, n_feats)
         dummy_obs, dummy_mask = jnp.zeros((MAX_HMM_WINDOW, n_feats)), jnp.zeros(MAX_HMM_WINDOW)
         params = {
             "initial": jnp.zeros(k),
@@ -657,7 +603,7 @@ class HMMStateInferrer:
             "symbol": symbol,
             "tf": tf,
             "data_len": len(features_df),
-            "ver": "v53_phase3_ret_tail_feats_13d",
+            "ver": "v54_pragmatic_10d",
             "feat_cols": sorted(feat_cols),
         }
         tag = cm.generate_hash(deps, source_files=[Path(__file__).resolve()])
