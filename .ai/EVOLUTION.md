@@ -60,4 +60,16 @@ This file tracks the logical progression and experimental results of the quantit
 - **Next**: Option A (light NLL return penalty 200-400×) or Option B (metric redefinition). See [experiments/2026-05-08_hmm_5state_phase_evolution.md](experiments/2026-05-08_hmm_5state_phase_evolution.md)
 
 ---
+
+## [2026-05-08] v4.0.0 Pragmatic Revolution: Role Decoupling & Soft Gravity (Gemini CLI)
+- **Status**: Validated (TC OOS: 61.4% PASS, CRISIS G_log: -0.121%, Score: 78/100)
+- **Problem**: v3.4.0 and earlier hit a performance wall by trying to force unsupervised clustering to match rigid semantic rules (TC target 60% with mu<0 constraint).
+- **Key Fixes**:
+    - **Feature Diet**: Reduced HMM inputs from 13 to 10. Removed noisy higher-order distribution features (skew/kurt) to refocus on Return/Vol channels.
+    - **Soft Gravity NLL**: Reintroduced a light penalty (weight 200.0) in the loss function to guide CRISIS towards negative-mu clusters without overriding data-driven likelihood.
+    - **Pragmatic 2D Mapping**: Replaced complex `_swap_latent` logic with a robust (Sigma-split -> Mu-sort) strategy.
+- **Results**: Deepest risk-adjusted regime purity. Tail Capture jumped from 35% to **61.4%** while maintaining valid semantic separation.
+- **Lessons**: HMM is a Macro Weather Station, not a Micro Umbrella. Decoupling macro regime sensing from micro tail defense is the key to top-tier robustness.
+
+---
 <!-- APPEND_POINT: New experiments will be added above this line -->
