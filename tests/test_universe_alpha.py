@@ -17,8 +17,8 @@ from config.opt_config import (
     get_quarterly_window,
 )
 from config.settings import FUTURES_DATA_DIR
-from src.domain.futures.data_collector import DataCollector
-from src.domain.futures.ml_pipeline.ml_pipeline_runner import run_ml_pipeline_for_universe
+from src.domain.futures.data_loader import DataCollector
+from src.domain.futures.ml_pipeline.pipeline_runner import run_ml_pipeline_for_universe
 from src.execution.opt_main_futures import _load_futures_data_maps_for_symbols
 
 warnings.filterwarnings("ignore")
@@ -38,7 +38,7 @@ def run_universe_to_gp_test(tf="1h"):
     collector = DataCollector()
     
     # 2. Broad Screening
-    from src.domain.futures.opt_futures_utils.universe_screener_futures import (
+    from src.domain.futures.optimization.screener import (
         screen_futures_universe,
         screen_symbol_refinement_futures,
     )
