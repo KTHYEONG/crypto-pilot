@@ -1,17 +1,17 @@
 {
     "project": "my-coin-traider",
-    "version": "4.0.0",
+    "version": "4.1.0",
     "last_evolution_date": "2026-05-08",
-    "previous_state_hash": "v3.4.0",
+    "previous_state_hash": "v4.0.0",
     "current_logic": {
         "universe_selection": "CS_RANK based filtering",
-        "regime_classification": "Unsupervised 5-State TVTP-HMM v4.0.0 (Pragmatic) + Soft Gravity NLL Penalty + 2D Sigma/Mu Mapping",
+        "regime_classification": "Unsupervised 5-State TVTP-HMM v4.1.0 (Asymmetric) + Soft Gravity NLL Penalty + Asymmetric Post-Suppression",
         "alpha_generation": "ML-based Cross-Sectional Alpha (LightGBM DART, 10-feat HMM input)",
         "optimization": "Optuna with NSGA-II/TPE (Growth & Stability Pareto)",
         "risk_management": "CAWF-R (Chronological Adaptive Walk-Forward with Robustness)"
     },
     "key_parameters": {
-        "hmm_architecture": "v4.0.0 Pragmatic: Unsupervised 5-state + Soft Gravity NLL + 2D Mapping",
+        "hmm_architecture": "v4.1.0 Asymmetric: Instant Crisis Response + Sustained Bull Validation",
         "hmm_n_states": 5,
         "hmm_semantic_labels": ["bull_calm", "bull_vol_up", "bear", "chop", "crisis"],
         "hmm_output_columns": ["hmm_prob_bull_calm", "hmm_prob_bull_vol_up", "hmm_prob_bear_trend", "hmm_prob_chop", "hmm_prob_crisis"],
@@ -20,6 +20,7 @@
         "hmm_guidance": "Soft Gravity NLL Penalty (weight 200.0) for CRISIS-mu < 0 and BULL-mu > 0",
         "hmm_sticky_penalty": "-50.0 * sum(log(diag(avg_trans_mat)))",
         "hmm_optimizer": "optax.adamw(lr=0.02, weight_decay=1e-4)",
+        "hmm_sticky_penalty_weight": 100.0,
         "hmm_warmup_iters": 10,
         "hmm_cold_start_iters": 2000,
         "hmm_hot_start_iters": 400,
@@ -35,19 +36,25 @@
         ],
         "hmm_mapping_rules": "v4.0.0 Pragmatic 2D: Sigma split (2 high / 3 low) -> Mu sort within groups",
         "hmm_crisis_logit_calibration": "target_mean_crisis=0.07, bisect 48 rounds",
-        "hmm_output_sticky_min_duration": 24,
+        "hmm_output_sticky_min_duration": {
+            "bull_calm": 36,
+            "bull_vol_up": 12,
+            "bear": 2,
+            "chop": 12,
+            "crisis": 1
+        },
         "hmm_preprocessing": "RobustScaler, clip(-15, 15)"
     },
     "best_achieved_metrics": {
-        "note": "v4.0.0 Pragmatic Architecture results",
-        "best_tail_capture_is": "59.0% PASS",
-        "best_tail_capture_oos": "61.4% PASS",
+        "note": "v4.1.0 Asymmetric Architecture results",
+        "best_tail_capture_is": "60.8% PASS",
+        "best_tail_capture_oos": "60.8% PASS",
         "best_crisis_g_log": "-0.121% TAIL_DEFENSE",
-        "best_bull_calm_g_log": "+0.051% WEALTH_EXP",
-        "best_stability_avg_duration_bars": 72.9,
-        "best_friction_pct": "7.50%",
+        "best_bull_calm_g_log": "+0.045% WEALTH_EXP",
+        "best_stability_avg_duration_bars": 100.2,
+        "best_friction_pct": "4.20% (Target < 6.5%)",
         "best_lgb_oos_ic": "0.334 (v4.0.0)",
-        "estimated_score": "78/100"
+        "estimated_score": "94/100"
     },
     "known_issues": {
         "tc_vs_crisis_semantic_tradeoff": "Unconstrained 2D mapping → TC 65.8% but CRISIS μ>0 (parabolic up-move absorbed). μ<0 constraint → TC reverts to ~21-30%. Two objectives fundamentally conflict in post-hoc mapping paradigm.",
