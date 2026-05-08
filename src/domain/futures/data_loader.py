@@ -277,9 +277,23 @@ def merge_funding_into_ohlcv(symbol: str, df: pd.DataFrame, data_dir: Path) -> p
     if fr_df.empty: return out
     
     # Simple asof merge
-    out["timestamp"] = pd.to_datetime(out["datetime"]).view("int64") // 10**6
-    fr_df["timestamp"] = pd.to_datetime(fr_df["timestamp"], unit="ms").view("int64") // 10**6
-    out = pd.merge_asof(out.sort_values("timestamp"), fr_df.sort_values("timestamp"), on="timestamp", direction="backward")
+    out["timestamp"] = pd.to_datetime(out["datetime"]).astype("int64") // 10**6
+    fr_df["timestamp"] = pd.to_datetime(fr_df["timestamp"], unit="ms").astype("int64") // 10**6
+    
+    # Exclude columns already in out (except timestamp) to avoid _x/_y suffixes
+    exclude = ["timestamp", "datetime", "symbol", "funding_rate", "funding_event_count", "funding_rate_sum"]
+    cols = [c for c in fr_df.columns if c not in exclude]
+    fr_cols_to_merge = ["timestamp"] + cols
+    
+    # We should merge only the new columns from fr_df, but fr_df IS providing funding_rate.
+    # Wait, fr_df has "funding_rate", so we want to keep it from fr_df, and overwrite the dummy 0.0 in out.
+    # So we should drop the dummy ones from out first!
+    out = out.drop(columns=["funding_rate", "funding_event_count", "funding_rate_sum"], errors="ignore")
+    
+    exclude_fr = ["datetime", "symbol"]
+    cols_fr = [c for c in fr_df.columns if c not in exclude_fr]
+    
+    out = pd.merge_asof(out.sort_values("timestamp"), fr_df[cols_fr].sort_values("timestamp"), on="timestamp", direction="backward")
     return out
 
 def merge_metrics_into_ohlcv(symbol: str, df: pd.DataFrame, data_dir: Path) -> pd.DataFrame:
@@ -287,13 +301,12 @@ def merge_metrics_into_ohlcv(symbol: str, df: pd.DataFrame, data_dir: Path) -> p
     if df is None or df.empty: return df.copy() if df is not None else pd.DataFrame()
     path = Path(data_dir) / f"{symbol.replace('/', '_')}_metrics.parquet"
     if not path.exists(): return df
-    
+
     m_df = pd.read_parquet(path)
     if m_df.empty: return df
-    
-    m_df["timestamp"] = pd.to_datetime(m_df["datetime"]).view("int64") // 10**6
-    df["timestamp"] = pd.to_datetime(df["datetime"]).view("int64") // 10**6
-    
+
+    m_df["timestamp"] = pd.to_datetime(m_df["datetime"]).astype("int64") // 10**6
+    df["timestamp"] = pd.to_datetime(df["datetime"]).astype("int64") // 10**6    
     exclude = ["timestamp", "datetime", "create_time", "symbol"]
     cols = [c for c in m_df.columns if c not in exclude]
     return pd.merge_asof(df.sort_values("timestamp"), m_df[["timestamp"] + cols].sort_values("timestamp"), on="timestamp", direction="backward")
