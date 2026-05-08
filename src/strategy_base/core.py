@@ -3,7 +3,6 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Any
 
-import numpy as np
 import pandas as pd
 
 
@@ -30,63 +29,41 @@ class StrategyBase(ABC):
             return daily_bars * 6
         return daily_bars
 
+    @abstractmethod
     def _compute_warmup_bars(self) -> int:
-        """Daily-bar warmup from strategy params (used by get_required_warmup)."""
-        return calculate_required_warmup_bars(self.params)
+        """Daily-bar warmup requirement. Must be implemented by subclasses."""
+        raise NotImplementedError
 
 
 def calculate_required_warmup_bars(
     params: dict[str, Any],
     *,
-    min_bars: int = 300,  # [FIX] Hurst(200) + Regime Z-Score(100) = Minimum 300 bars guaranteed
+    min_bars: int = 300,
     safety_factor: int = 3,
 ) -> int:
-    period_keys = (
-        "ENTRY_PERIOD",
-        "MA_PERIOD",
-        "ATR_PERIOD",
-        "SUPERTREND_PERIOD",
-        "MACD_SLOW",
-        "ICHIMOKU_SENKOU_B",
-        "STRENGTH_FILTER_PERIOD",
-        "VOLUME_MA_PERIOD",
-        "CMF_PERIOD",
-        "HURST_PERIOD",
-        # Futures-specific: regime and signal periods (prevent warmup underestimate)
-        "MACRO_EMA_PERIOD",
-        "EMA_ATR_REGIME_SLOW",
-        "ADX_KC_PERIOD",
-        "VOL_PCT_WINDOW",
-    )
+    """
+    Generic helper to estimate required warmup bars based on any key ending in '_PERIOD' or '_WINDOW'.
+    This removes hardcoded dependencies on specific indicator names (ADX, HMA, etc.).
+    """
     max_period = 0
-    for key in period_keys:
-        value = params.get(key)
-        if isinstance(value, (int, float)):
+    for key, value in params.items():
+        if not isinstance(value, (int, float)):
+            continue
+        
+        # Heuristic: any parameter ending in PERIOD, WINDOW, or SLOW/FAST is likely a lookback
+        k_upper = key.upper()
+        if any(suffix in k_upper for suffix in ("_PERIOD", "_WINDOW", "_SLOW", "_FAST", "LOOKBACK")):
             max_period = max(max_period, int(value))
+            
     return max(int(max_period * safety_factor), int(min_bars))
 
 
 class MasterStrategyBase(StrategyBase):
     """
-    Legacy compatibility strategy.
-    - Builds regime line
-    - Builds ADX pass/fail filter
+    Abstract orchestration-tier strategy marker (Spot & Futures).
+
+    Subclasses define all signal/indicate logic via ``generate_signals``;
+    no default HMA/ADX or other rule presets are injected here.
     """
 
-    def generate_signals(self, df: pd.DataFrame) -> pd.DataFrame:
-        filter_type = self.params.get("REGIME_FILTER", "EMA")
-
-        if filter_type == "HMA" and "hma" in df.columns:
-            df["regime_line"] = df["hma"]
-        elif "ema_trend" in df.columns:
-            df["regime_line"] = df["ema_trend"]
-        else:
-            df["regime_line"] = df["ma50"]
-
-        if self.params.get("USE_ADX", False) and "adx" in df.columns:
-            adx_threshold = self.params.get("ADX_THRESHOLD", 20)
-            df["adx_filter"] = np.where(df["adx"] > adx_threshold, 1, 0)
-        else:
-            df["adx_filter"] = 1
-
-        return df
+    pass
