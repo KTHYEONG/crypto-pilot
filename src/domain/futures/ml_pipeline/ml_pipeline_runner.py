@@ -167,12 +167,15 @@ def _is_kelly_per_semantic_state(
     try:
         ir = IsotonicRegression(increasing=False)
 
-        idx_bull = cols.index("hmm_prob_bull_trend") if "hmm_prob_bull_trend" in cols else -1
-        idx_chop = cols.index("hmm_prob_chop") if "hmm_prob_chop" in cols else -1
-        idx_bear = cols.index("hmm_prob_bear_trend") if "hmm_prob_bear_trend" in cols else -1
-        idx_crisis = cols.index("hmm_prob_crisis") if "hmm_prob_crisis" in cols else -1
-
-        if all(i >= 0 for i in [idx_bull, idx_chop, idx_bear, idx_crisis]):
+        if (
+            len(cols) == 4
+            and "hmm_prob_bull_trend" in cols
+            and all(c in cols for c in ("hmm_prob_chop", "hmm_prob_bear_trend", "hmm_prob_crisis"))
+        ):
+            idx_bull = cols.index("hmm_prob_bull_trend")
+            idx_chop = cols.index("hmm_prob_chop")
+            idx_bear = cols.index("hmm_prob_bear_trend")
+            idx_crisis = cols.index("hmm_prob_crisis")
             x = np.array([0, 1, 2, 3], dtype=np.float64)
             y_l = np.array(
                 [
@@ -188,7 +191,6 @@ def _is_kelly_per_semantic_state(
             kelly_long[idx_chop] = (1.0 - alpha_iso) * y_l[1] + alpha_iso * y_l_adj[1]
             kelly_long[idx_bear] = (1.0 - alpha_iso) * y_l[2] + alpha_iso * y_l_adj[2]
             kelly_long[idx_crisis] = (1.0 - alpha_iso) * y_l[3] + alpha_iso * y_l_adj[3]
-            # BULL long must not suppress longs — floor at 0.0 (economic invariant)
             kelly_long[idx_bull] = float(max(0.0, kelly_long[idx_bull]))
 
             y_s = np.array(
@@ -205,6 +207,32 @@ def _is_kelly_per_semantic_state(
             kelly_short[idx_chop] = (1.0 - alpha_iso) * y_s[1] + alpha_iso * y_s_adj[1]
             kelly_short[idx_bull] = (1.0 - alpha_iso) * y_s[2] + alpha_iso * y_s_adj[2]
             kelly_short[idx_crisis] = (1.0 - alpha_iso) * y_s[3] + alpha_iso * y_s_adj[3]
+        elif len(cols) == 5 and all(c in cols for c in HMM_SEMANTIC_PROB_COLUMNS):
+            order_idx = [cols.index(c) for c in HMM_SEMANTIC_PROB_COLUMNS]
+            x = np.arange(5, dtype=np.float64)
+            y_l = np.array([kelly_long[i] for i in order_idx], dtype=np.float64)
+            y_l_adj = ir.fit_transform(x, y_l)
+            for j, i in enumerate(order_idx):
+                kelly_long[i] = (1.0 - alpha_iso) * y_l[j] + alpha_iso * y_l_adj[j]
+            for j in (0, 1):
+                kelly_long[order_idx[j]] = float(max(0.0, kelly_long[order_idx[j]]))
+
+            y_s = np.array(
+                [
+                    kelly_short[order_idx[2]],
+                    kelly_short[order_idx[3]],
+                    kelly_short[order_idx[0]],
+                    kelly_short[order_idx[1]],
+                    kelly_short[order_idx[4]],
+                ],
+                dtype=np.float64,
+            )
+            y_s_adj = ir.fit_transform(x, y_s)
+            kelly_short[order_idx[2]] = (1.0 - alpha_iso) * y_s[0] + alpha_iso * y_s_adj[0]
+            kelly_short[order_idx[3]] = (1.0 - alpha_iso) * y_s[1] + alpha_iso * y_s_adj[1]
+            kelly_short[order_idx[0]] = (1.0 - alpha_iso) * y_s[2] + alpha_iso * y_s_adj[2]
+            kelly_short[order_idx[1]] = (1.0 - alpha_iso) * y_s[3] + alpha_iso * y_s_adj[3]
+            kelly_short[order_idx[4]] = (1.0 - alpha_iso) * y_s[4] + alpha_iso * y_s_adj[4]
     except Exception as e:
         _logger.warning("Isotonic Kelly adjustment failed: %s", e)
 
@@ -972,7 +1000,7 @@ def run_hmm_fusion_for_is_end(
     else:
         market_hmm_feats.index = market_hmm_feats.index.tz_convert("UTC")
 
-    hmm_k = int(cfg.get("FUTURES_HMM_K_STATES", 4))
+    hmm_k = int(cfg.get("FUTURES_HMM_K_STATES", 5))
     hmm_n_iter = int(cfg.get("FUTURES_HMM_N_ITER", 500))
     hmm_fit_step = int(cfg.get("FUTURES_HMM_FIT_STEP", 252))
     hmm_inferrer = HMMStateInferrer(
@@ -1208,7 +1236,7 @@ def run_ml_pipeline_for_universe(
     else:
         market_hmm_feats.index = market_hmm_feats.index.tz_convert("UTC")
 
-    hmm_k = int(cfg.get("FUTURES_HMM_K_STATES", 4))
+    hmm_k = int(cfg.get("FUTURES_HMM_K_STATES", 5))
     hmm_n_iter = int(cfg.get("FUTURES_HMM_N_ITER", 500))
     hmm_fit_step = int(cfg.get("FUTURES_HMM_FIT_STEP", 252))
     hmm_inferrer = HMMStateInferrer(
