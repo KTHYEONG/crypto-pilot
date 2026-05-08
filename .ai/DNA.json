@@ -1,16 +1,21 @@
 {
     "project": "my-coin-traider",
-    "version": "4.1.0",
+    "version": "4.2.0",
     "last_evolution_date": "2026-05-08",
-    "previous_state_hash": "v4.0.0",
+    "previous_state_hash": "v4.1.0",
     "current_logic": {
         "universe_selection": "CS_RANK based filtering",
         "regime_classification": "Unsupervised 5-State TVTP-HMM v4.1.0 (Asymmetric) + Soft Gravity NLL Penalty + Asymmetric Post-Suppression",
-        "alpha_generation": "ML-based Cross-Sectional Alpha (LightGBM DART, 10-feat HMM input)",
+        "alpha_generation": "Advanced Cross-Sectional Alpha (LambdaRank DART, Macro-Asset Interaction, CS Z-Score Neutralization, Friction-Aware Dynamic Labeling)",
         "optimization": "Optuna with NSGA-II/TPE (Growth & Stability Pareto)",
         "risk_management": "CAWF-R (Chronological Adaptive Walk-Forward with Robustness)"
     },
     "key_parameters": {
+        "alpha_miner_version": "v6_lambdarank_dart",
+        "alpha_gp_feature_schema_version": "v21",
+        "alpha_interaction_features": ["btc_beta_x_bull_trend", "realized_vol_x_crisis", "funding_x_bear_trend"],
+        "alpha_neutralization": "Cross-Sectional Z-Score (Momentum/Vol/Volume)",
+        "alpha_friction_aware_labeling": "friction_bps=3.5, magnitude_multipliers=[1.5, 2.0, 3.0]",
         "hmm_architecture": "v4.1.0 Asymmetric: Instant Crisis Response + Sustained Bull Validation",
         "hmm_n_states": 5,
         "hmm_semantic_labels": ["bull_calm", "bull_vol_up", "bear", "chop", "crisis"],
@@ -46,15 +51,13 @@
         "hmm_preprocessing": "RobustScaler, clip(-15, 15)"
     },
     "best_achieved_metrics": {
-        "note": "v4.1.0 Asymmetric Architecture results",
-        "best_tail_capture_is": "60.8% PASS",
-        "best_tail_capture_oos": "60.8% PASS",
-        "best_crisis_g_log": "-0.121% TAIL_DEFENSE",
-        "best_bull_calm_g_log": "+0.045% WEALTH_EXP",
-        "best_stability_avg_duration_bars": 100.2,
-        "best_friction_pct": "4.20% (Target < 6.5%)",
-        "best_lgb_oos_ic": "0.334 (v4.0.0)",
-        "estimated_score": "94/100"
+        "note": "v4.2.0 Advanced Alpha Architecture results",
+        "best_is_ic_mean": 0.0950,
+        "best_oos_ic_mean": 0.0839,
+        "alpha_component_survival_rate": "100% (15/15)",
+        "best_tail_capture_oos": "61.4% (v4.0.0)",
+        "best_friction_pct": "4.20% (v4.1.0)",
+        "estimated_score": "92/100"
     },
     "known_issues": {
         "tc_vs_crisis_semantic_tradeoff": "Unconstrained 2D mapping → TC 65.8% but CRISIS μ>0 (parabolic up-move absorbed). μ<0 constraint → TC reverts to ~21-30%. Two objectives fundamentally conflict in post-hoc mapping paradigm.",

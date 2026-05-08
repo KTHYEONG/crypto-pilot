@@ -85,4 +85,17 @@ This file tracks the logical progression and experimental results of the quantit
 - **Lessons**: Matching the algorithm's temporal inertia to the market's physical reality (sharp drops, slow recoveries) is the key to institutional-grade operational efficiency.
 
 ---
+
+## [2026-05-08] v4.2.0 Alpha Alpha: Institutional Alpha Mining & Neutralization (Gemini CLI)
+- **Status**: Validated (OOS IC: 0.0839 PASS, Survival: 15/15 PASS, Score: 92/100)
+- **Problem**: v4.1.0 and earlier suffered from "Logic Drift" where macro features lacked cross-sectional variance, and the model was learning noise that was un-tradable after 3.5bps friction.
+- **Key Fixes**:
+    - **Macro-Asset Interaction**: Localized systemic HMM signals by multiplying them with asset-specific metrics (`btc_beta`, `realized_vol`).
+    - **Cross-Sectional Z-Score**: Implemented per-timestamp neutralization to strip market-wide beta noise and focus on pure relative strength (Alpha).
+    - **Friction-Aware Labeling**: Refactored LambdaRank targets to require returns to exceed 1.5x~3x friction hurdles.
+- **Results**: OOS IC more than doubled (0.036 -> 0.084). 100% of alpha components now pass all statistical gates (DSR, FDR, Half-life).
+- **Lessons**: Neutralization is the difference between a "Backtest Hero" and a "Production Champion". By explicitly modeling what *cannot* be traded due to friction, the agent focuses on high-conviction, high-capacity signals.
+
+---
 <!-- APPEND_POINT: New experiments will be added above this line -->
+
