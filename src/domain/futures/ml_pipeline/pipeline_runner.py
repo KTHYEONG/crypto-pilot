@@ -14,20 +14,22 @@ from sklearn.isotonic import IsotonicRegression
 
 from config.opt_config import OPT_FUTURES_CONFIG
 from config.settings import FUTURES_CACHE_DIR, FUTURES_DATA_DIR
-from src.domain.futures.data_collector import DataCollector
-from src.domain.futures.funding_utils import merge_funding_into_ohlcv
-from src.domain.futures.metrics_utils import merge_metrics_into_ohlcv
-from src.domain.futures.ml_pipeline.cross_sectional_utils import CrossSectionalPipelineUtils
-from src.domain.futures.ml_pipeline.feature_engineering import (
+from src.domain.futures.data_loader import (
+    DataCollector,
+    merge_funding_into_ohlcv,
+    merge_metrics_into_ohlcv,
+)
+from src.domain.futures.ml_pipeline.features.cross_sectional import CrossSectionalPipelineUtils
+from src.domain.futures.ml_pipeline.features.engineering import (
     ALPHA_ENGINEERED_FEATURE_NAMES,
     HMM_SEMANTIC_PROB_COLUMNS,
     build_gp_input_features,
 )
-from src.domain.futures.ml_pipeline.gp_multiobjective import is_deap_available
-from src.domain.futures.ml_pipeline.hmm_state_inferrer import HMMStateInferrer
-from src.domain.futures.ml_pipeline.meta_labeler import MetaLabeler
-from src.domain.futures.ml_pipeline.ml_alpha_miner import MLAlphaMiner
-from src.domain.futures.ml_pipeline.triple_barrier import label_triple_barrier
+from src.domain.futures.ml_pipeline.alpha.gp_availability import is_deap_available
+from src.domain.futures.ml_pipeline.regime.hmm_inferrer import HMMStateInferrer
+from src.domain.futures.ml_pipeline.labels.meta_labeler import MetaLabeler
+from src.domain.futures.ml_pipeline.alpha.miner import MLAlphaMiner
+from src.domain.futures.ml_pipeline.labels.triple_barrier import label_triple_barrier
 
 _logger = logging.getLogger(__name__)
 
@@ -983,7 +985,7 @@ def run_hmm_fusion_for_is_end(
     GP alpha_panel frozen.
     When include_fusion=False (hmm_only preview), skips per-symbol fusion.
     """
-    from src.domain.futures.ml_pipeline.feature_engineering import build_systemic_hmm_features
+    from src.domain.futures.ml_pipeline.features.engineering import build_systemic_hmm_features
 
     if panel_df is None:
         if prefetched_1h:
@@ -1240,7 +1242,7 @@ def run_ml_pipeline_for_universe(
 
     # --- Step 2a: Early Systemic HMM Inference (Regime-Aware Features) ---
     _logger.info("  --> Step 2a: Early Systemic HMM Inference for Regime-Aware Alpha")
-    from src.domain.futures.ml_pipeline.feature_engineering import build_systemic_hmm_features
+    from src.domain.futures.ml_pipeline.features.engineering import build_systemic_hmm_features
 
     market_hmm_feats = build_systemic_hmm_features(panel_df, None, tf="1h")
     if market_hmm_feats.index.tz is None:
@@ -1302,7 +1304,7 @@ def run_ml_pipeline_for_universe(
     if bool(cfg.get("FUTURES_ML_ALPHA_NSGA2_ENABLED", False)) and not is_deap_available():
         _logger.warning(
             "FUTURES_ML_ALPHA_NSGA2_ENABLED=True but `deap` is not installed; "
-            "continuing with scalarized gplearn fitness (see gp_multiobjective.py)."
+            "continuing with scalarized gplearn fitness (see alpha/gp_availability.py)."
         )
     miner = MLAlphaMiner(
         n_jobs=n_jobs,

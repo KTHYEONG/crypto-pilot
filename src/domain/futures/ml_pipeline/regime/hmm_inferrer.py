@@ -33,7 +33,7 @@ from sklearn.preprocessing import RobustScaler
 from config.opt_config import OPT_FUTURES_CONFIG
 from config.settings import FUTURES_CACHE_DIR
 from src.core.utils.cache_manager import CacheManager
-from src.domain.futures.ml_pipeline.feature_engineering import (
+from src.domain.futures.ml_pipeline.features.engineering import (
     HMM_SEMANTIC_PROB_COLUMNS,
     SYSTEMIC_HMM_FEATURE_COLUMNS,
 )
