@@ -47,6 +47,7 @@ _SEMANTIC_ORDER = list(HMM_SEMANTIC_PROB_COLUMNS)
 # Phase 4: weaker BULL MSE guidance vs CRISIS so bull share is not collapsed (bear overhang).
 _GUIDANCE_BULL_LL_WEIGHT = 550.0
 _GUIDANCE_CRISIS_LL_WEIGHT = 2000.0
+_GUIDANCE_BEAR_LL_WEIGHT = 1500.0
 
 
 def _calibrate_crisis_logit_offset(
@@ -129,10 +130,13 @@ def _student_t_log_pdf(
 
 MAX_HMM_WINDOW = 1500
 
-# Indices of features used as exogenous drivers for TVTP (subset of SYSTEMIC_HMM_FEATURE_COLUMNS)
-# Uses: cs_dispersion(4), oi_delta(5), funding_mom(6), liq_proxy(7), lsr_delta(8)
+# TVTP: cs_dispersion(4), oi_delta(5), funding_mom(6), liq_proxy(7), lsr_delta(8).
+# macro_ret_1h (obs 9) excluded from transitions.
 _TVTP_FEATURE_INDICES: tuple[int, ...] = (4, 5, 6, 7, 8)
 _N_TVTP_FEATS: int = len(_TVTP_FEATURE_INDICES)
+
+# macro_vol_24h index in SYSTEMIC_HMM_FEATURE_COLUMNS — matches locs[:, d] for σ ordering penalties.
+_HMM_LOC_IDX_VOL: int = 2
 
 @jax.jit
 def _batched_student_t_log_pdf(
@@ -250,8 +254,9 @@ def _compute_nll(
     observations: jnp.ndarray,
     mask: jnp.ndarray,
     guidance_masks: jnp.ndarray,
+    fwd_returns: jnp.ndarray,
 ) -> jnp.ndarray:
-    """Compute Negative Log-Likelihood with TVTP, Sticky Prior, dual Guidance (Phase 3 + Phase 4 weights)."""
+    """Negative log-likelihood with TVTP, sticky prior, guidance masks, and returns-space μ separation."""
     tvtp_z = observations[:, jnp.array(_TVTP_FEATURE_INDICES)]
     log_trans_mats = _compute_tvtp_matrices(tvtp_z, params["tvtp_W"], params["tvtp_b"])
     log_alphas, incremental_lls = _forward_pass(
@@ -281,18 +286,27 @@ def _compute_nll(
     # Step 3 Improvement: Aggressive CRISIS MU penalty (< -5.0) and heavier weight
     p_crisis_val = jnp.square(jnp.maximum(0.0, locs[3, 0] + 5.0)) * 5.0
 
-    # Volatility Penalties: Crisis > Bear > Others
-    p_crisis_vol = jnp.square(jnp.maximum(0.0, jnp.max(locs[:3, 2]) - locs[3, 2] + 2.0))
+    # Volatility: Crisis highest among stressed; CHOP lower-vol than BEAR (tail capture)
+    p_crisis_vol = jnp.square(
+        jnp.maximum(0.0, jnp.max(locs[:3, _HMM_LOC_IDX_VOL]) - locs[3, _HMM_LOC_IDX_VOL] + 2.0)
+    )
+    p_chop_vol = jnp.square(
+        jnp.maximum(0.0, locs[2, _HMM_LOC_IDX_VOL] - locs[1, _HMM_LOC_IDX_VOL] + 1.0)
+    )
 
-    # Adaptive: 5000x ll_scale — strengthened ordering enforcement (Step 3: was 1000x)
-    semantic_penalty = 5000.0 * ll_scale * (p_02 + p_21 + p_13 + p_crisis_val + p_crisis_vol)
+    # Adaptive: 5000x ll_scale — ordering + vol structure (trend / crisis / CHOP vs BEAR σ)
+    semantic_penalty = 5000.0 * ll_scale * (
+        p_02 + p_21 + p_13 + p_crisis_val + p_crisis_vol + p_chop_vol
+    )
 
     posteriors = jax.nn.softmax(log_alphas, axis=1)
     bull_tgt = guidance_masks[:, 0]
     crisis_tgt = guidance_masks[:, 1]
+    bear_tgt = guidance_masks[:, 2]
     guidance_loss = ll_scale * (
         _GUIDANCE_BULL_LL_WEIGHT * jnp.mean(mask * (posteriors[:, 0] - bull_tgt) ** 2)
         + _GUIDANCE_CRISIS_LL_WEIGHT * jnp.mean(mask * (posteriors[:, 3] - crisis_tgt) ** 2)
+        + _GUIDANCE_BEAR_LL_WEIGHT * jnp.mean(mask * (posteriors[:, 1] - bear_tgt) ** 2)
     )
 
     # Phase 3: frequency anchors for all four states (posterior mass share on masked timesteps)
@@ -303,17 +317,43 @@ def _compute_nll(
     crisis_f = jnp.mean(posteriors[:, 3] * mask) / denom
 
     def _band(freq: jnp.ndarray, lo: float, hi: float) -> jnp.ndarray:
-        return 2.0 * jnp.square(jnp.maximum(0.0, freq - hi)) + 0.5 * jnp.square(jnp.maximum(0.0, lo - freq))
+        return 3.0 * jnp.square(jnp.maximum(0.0, freq - hi)) + 5.0 * jnp.square(jnp.maximum(0.0, lo - freq))
 
     freq_penalty = ll_scale * T * (
-        _band(bull_f, 0.25, 0.50)
-        + _band(bear_f, 0.10, 0.25)
-        + _band(chop_f, 0.25, 0.45)
+        _band(bull_f, 0.18, 0.35)
+        + _band(bear_f, 0.30, 0.38)
+        + _band(chop_f, 0.25, 0.42)
         + _band(crisis_f, 0.03, 0.07)
     )
 
+    # Step 2: posterior-weighted forward-return means vs semantic targets (fractional returns).
+    m = mask
+    r = fwd_returns
+    eps = 1e-12
+    def _pmu(k: int) -> jnp.ndarray:
+        w = posteriors[:, k] * m
+        return jnp.sum(w * r) / (jnp.sum(w) + eps)
+
+    mu_b, mu_be, mu_ch, mu_cr = _pmu(0), _pmu(1), _pmu(2), _pmu(3)
+    # threshold 3배 강화, weight 4배 강화
+    mu_ret_pen = (
+        jnp.square(jnp.maximum(0.0, 0.0005 - mu_b))  # BULL > +0.05% 강제
+        + jnp.square(jnp.maximum(0.0, mu_be + 0.0015))  # BEAR < -0.15%
+        + jnp.square(jnp.maximum(0.0, mu_cr + 0.0025))  # CRISIS < -0.25%
+        + jnp.square(jnp.maximum(0.0, mu_be - mu_ch))  # BEAR < CHOP
+    )
+    mu_return_penalty = 800.0 * ll_scale * T * mu_ret_pen
+
     l1_penalty = 0.0001 * jnp.sum(jnp.abs(params["tvtp_W"]))
-    return -ll + sticky_penalty + semantic_penalty + guidance_loss + freq_penalty + l1_penalty
+    return (
+        -ll
+        + sticky_penalty
+        + semantic_penalty
+        + guidance_loss
+        + freq_penalty
+        + mu_return_penalty
+        + l1_penalty
+    )
 
 
 @partial(jax.jit, static_argnames=("n_iter", "optimizer"))
@@ -321,27 +361,28 @@ def _train_hmm_loop(
     X: jnp.ndarray,
     mask: jnp.ndarray,
     guidance_masks: jnp.ndarray,
+    fwd_returns: jnp.ndarray,
     params: dict[str, Any],
     opt_state: Any,
     n_iter: int,
     tol: float,
     optimizer: optax.GradientTransformation,
 ) -> tuple[dict[str, Any], Any, jnp.ndarray, bool]:
-    """Compiled HMM training loop with early stopping and dual guidance."""
+    """Compiled HMM training loop with guidance masks and aligned forward returns."""
     def cond_fn(state):
         i, _, _, loss, prev_loss, converged = state
         return (i < n_iter) & (~converged)
 
     def body_fun(state):
         i, p, opt_s, loss, _, _ = state
-        current_loss, grads = jax.value_and_grad(_compute_nll)(p, X, mask, guidance_masks)
+        current_loss, grads = jax.value_and_grad(_compute_nll)(p, X, mask, guidance_masks, fwd_returns)
         updates, new_opt_s = optimizer.update(grads, opt_s, p)
         new_p = optax.apply_updates(p, updates)
         diff = jnp.abs(current_loss - loss)
         converged = (i > 5) & (diff < tol)
         return i + 1, new_p, new_opt_s, current_loss, loss, converged
 
-    initial_loss = _compute_nll(params, X, mask, guidance_masks)
+    initial_loss = _compute_nll(params, X, mask, guidance_masks, fwd_returns)
     init_val = (0, params, opt_state, initial_loss, initial_loss + 1e6, False)
     final_val = jax.lax.while_loop(cond_fn, body_fun, init_val)
     return final_val[1], final_val[2], final_val[3], final_val[5]
@@ -498,7 +539,7 @@ class HMMStateInferrer:
     _last_opt: Any | None = None
 
     def _generate_guidance_masks(self, features_df: pd.DataFrame, returns_ser: pd.Series) -> np.ndarray:
-        """Stacked targets (T, 2): column 0 = BULL supervision, column 1 = CRISIS supervision."""
+        """Stacked targets (T, 3): col0 BULL, col1 CRISIS, col2 BEAR supervision."""
         # --- CRISIS: multi-modal crash + (vol spike OR OI surge), sticky ---
         # Step 1 Improvement: Rolling window + Absolute threshold for Crisis definition
         rolling_ret_thresh = returns_ser.rolling(window=2000, min_periods=200).quantile(0.05).fillna(0.0)
@@ -525,22 +566,39 @@ class HMMStateInferrer:
         bull_raw = (bull_ret & (trend_ser > 0)).astype(np.float32).to_numpy()
         bull_mask = _numba_sticky_labels(bull_raw.astype(np.int32), min_duration=4).astype(np.float32)
 
-        return np.stack([bull_mask, crisis_mask], axis=1).astype(np.float64)
+        # --- BEAR: deep 72-bar drawdown (vs expanding q20) + downtrend; exclude supervised CRISIS; stickier ---
+        r = returns_ser.astype(np.float64).fillna(0.0).clip(-0.999, None)
+        equity = (1.0 + r).cumprod()
+        roll_peak = equity.rolling(window=72, min_periods=72).max()
+        rolling_drawdown_72h = equity / roll_peak - 1.0
+        dd_q20 = rolling_drawdown_72h.expanding(min_periods=200).quantile(0.20).fillna(0.0)
+        crisis_excl = crisis_mask.astype(np.float64) < 0.5
+        bear_raw = (
+            (rolling_drawdown_72h < dd_q20)
+            & (trend_ser.astype(np.float64) < 0.0)
+            & crisis_excl
+        ).astype(np.float32).to_numpy()
+        bear_mask = _numba_sticky_labels(bear_raw.astype(np.int32), min_duration=8).astype(np.float32)
+
+        return np.stack([bull_mask, crisis_mask, bear_mask], axis=1).astype(np.float64)
 
     def _warmup_jit(self, n_feats: int) -> None:
         """Warm up JAX HMM JIT cache."""
         if self._warmed_up: return
         _logger.info("Warming up JAX HMM JIT cache (4-states, TVTP, Guided, FEATS=%d)...", n_feats)
         dummy_obs, dummy_mask = jnp.zeros((MAX_HMM_WINDOW, n_feats)), jnp.zeros(MAX_HMM_WINDOW)
-        dummy_gm = jnp.zeros((MAX_HMM_WINDOW, 2))
+        dummy_gm = jnp.zeros((MAX_HMM_WINDOW, 3))
+        dummy_ret = jnp.zeros(MAX_HMM_WINDOW)
         params = {"initial": jnp.zeros(4), "tvtp_W": jnp.zeros((4, 4, _N_TVTP_FEATS)), "tvtp_b": jnp.eye(4) * 1.0, "locs": jnp.zeros((4, n_feats)), "log_scales": jnp.zeros((4, n_feats)), "log_dfs": jnp.array([1.0, 1.0, 1.0, 0.5])}
         optimizer = optax.adam(learning_rate=0.01)
         opt_state = optimizer.init(params)
         dummy_tvtp_z = dummy_obs[:, jnp.array(_TVTP_FEATURE_INDICES)]
         log_trans_mats = _compute_tvtp_matrices(dummy_tvtp_z, params["tvtp_W"], params["tvtp_b"])
         _ = _forward_pass(dummy_obs, dummy_mask, jax.nn.log_softmax(params["initial"]), log_trans_mats, params["locs"], jnp.exp(params["log_scales"]), jnp.exp(params["log_dfs"]) + 2.0)
-        _ = _compute_nll(params, dummy_obs, dummy_mask, dummy_gm)
-        _, _, _, _ = _train_hmm_loop(dummy_obs, dummy_mask, dummy_gm, params, opt_state, 1, 1e-4, optimizer)
+        _ = _compute_nll(params, dummy_obs, dummy_mask, dummy_gm, dummy_ret)
+        _, _, _, _ = _train_hmm_loop(
+            dummy_obs, dummy_mask, dummy_gm, dummy_ret, params, opt_state, 1, 1e-4, optimizer
+        )
         _ = _jax_posterior_and_viterbi(dummy_obs, dummy_mask, params)
         self._warmed_up = True
 
@@ -552,9 +610,9 @@ class HMMStateInferrer:
             assert req_col in feat_cols, f"Required HMM feature missing: {req_col}"
 
         cm = CacheManager(FUTURES_CACHE_DIR, max_files=15, max_size_mb=1000.0)
-        deps = {"symbol": symbol, "tf": tf, "data_len": len(features_df), "ver": "v32_p4_guid_p5_logit_cal_v2", "feat_cols": sorted(feat_cols)}
+        deps = {"symbol": symbol, "tf": tf, "data_len": len(features_df), "ver": "v40_bear_floor_chop_cap", "feat_cols": sorted(feat_cols)}
         tag = cm.generate_hash(deps, source_files=[Path(__file__).resolve()])
-        cache_path = cm.get_cache_path(f"HMM_v32_p4p5_{symbol}_{tf}_len{len(features_df)}", ".parquet", tag)
+        cache_path = cm.get_cache_path(f"HMM_v40_bear_floor_{symbol}_{tf}_len{len(features_df)}", ".parquet", tag)
         if cache_path.exists():
             try: return pd.read_parquet(cache_path)
             except Exception: pass
@@ -565,6 +623,12 @@ class HMMStateInferrer:
         num_feats = len(feat_cols)
         self._warmup_jit(num_feats)
         X_raw, gm_raw = X_frame.to_numpy(dtype=np.float64), self._generate_guidance_masks(features_df, returns_ser)
+        ret_np = np.nan_to_num(
+            np.asarray(returns_ser.reindex(features_df.index), dtype=np.float64),
+            nan=0.0,
+            posinf=0.0,
+            neginf=0.0,
+        )
         out_cols = [*_SEMANTIC_ORDER, "hmm_entropy", "hmm_expected_duration", "hmm_current_duration", "hmm_hard_state"]
         results, params, transformers, optimizer = np.full((n, len(out_cols)), 0.0, dtype=np.float64), None, None, optax.adam(learning_rate=0.02)
         viterbi_states_buf = np.zeros(n, dtype=np.int32)
@@ -578,10 +642,12 @@ class HMMStateInferrer:
             if t % self.fit_step == 0 or params is None:
                 win_start, win_end = max(0, t - MAX_HMM_WINDOW), max(1, t - 1)
                 X_win, gm_win = X_raw[win_start:win_end], gm_raw[win_start:win_end]
+                ret_win = ret_np[win_start:win_end]
                 L = len(X_win)
                 X_train_raw, transformers = _quantile_scaling(X_win)
-                X_pad, M_pad, GM_pad = np.zeros((MAX_HMM_WINDOW, num_feats)), np.zeros(MAX_HMM_WINDOW), np.zeros((MAX_HMM_WINDOW, 2))
-                X_pad[:L], M_pad[:L], GM_pad[:L] = X_train_raw, 1.0, gm_win
+                X_pad, M_pad, GM_pad = np.zeros((MAX_HMM_WINDOW, num_feats)), np.zeros(MAX_HMM_WINDOW), np.zeros((MAX_HMM_WINDOW, 3))
+                RET_pad = np.zeros(MAX_HMM_WINDOW)
+                X_pad[:L], M_pad[:L], GM_pad[:L], RET_pad[:L] = X_train_raw, 1.0, gm_win, ret_win
                 if self._last_params:
                     curr_p = self._last_params
                     curr_o = optimizer.init(curr_p)
@@ -617,7 +683,17 @@ class HMMStateInferrer:
                         "log_dfs": jnp.array([1.5, 1.5, 1.5, 1.0]),
                     }
                     curr_o, iters = optimizer.init(curr_p), self.n_iter
-                params, self._last_opt, _, _ = _train_hmm_loop(jnp.array(X_pad), jnp.array(M_pad), jnp.array(GM_pad), curr_p, curr_o, iters, 1e-4, optimizer)
+                params, self._last_opt, _, _ = _train_hmm_loop(
+                    jnp.array(X_pad),
+                    jnp.array(M_pad),
+                    jnp.array(GM_pad),
+                    jnp.array(RET_pad),
+                    curr_p,
+                    curr_o,
+                    iters,
+                    1e-4,
+                    optimizer,
+                )
                 if self._last_params is not None:
                     params = jax.tree_util.tree_map(
                         lambda new, old: 0.9 * new + 0.1 * old, params, self._last_params  # EMA: lag minimized (was 0.7/0.3)
