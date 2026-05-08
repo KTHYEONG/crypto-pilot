@@ -16,8 +16,8 @@ from lightgbm import LGBMRanker
 
 from config.opt_config import OPT_FUTURES_CONFIG
 from src.core.utils.cache_manager import CacheManager
-from src.domain.futures.ml_pipeline.alpha_component_filter import filter_alpha_components
-from src.domain.futures.ml_pipeline.feature_engineering import (
+from src.domain.futures.ml_pipeline.alpha.component_filter import filter_alpha_components
+from src.domain.futures.ml_pipeline.features.engineering import (
     GP_FEATURE_SCHEMA_VERSION,
     HMM_SEMANTIC_PROB_COLUMNS,
     add_macro_interaction_features,
