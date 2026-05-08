@@ -9,7 +9,8 @@ import pandas as pd
 from numba import njit
 
 # Columns produced by build_gp_input_features (for CS-rank / imputation in pipeline).
-# Systemic HMM observation: macro + risk-adjusted 1h return; index 9 excluded from TVTP.
+# Systemic HMM: TVTP uses macro_trend_168h (0) + microstructure (4–8). Return-path emissions (9–12): level,
+# 5d cumulative z, 24h skew & kurt (tail shape for Student-t clustering; macro_ret_* not in TVTP logits).
 SYSTEMIC_HMM_FEATURE_COLUMNS: tuple[str, ...] = (
     "macro_trend_168h",
     "macro_trend_24h",
@@ -21,11 +22,16 @@ SYSTEMIC_HMM_FEATURE_COLUMNS: tuple[str, ...] = (
     "macro_liq_proxy_24h",
     "macro_lsr_delta_24h",
     "macro_ret_1h",
+    "macro_ret_5d_z",
+    "macro_ret_skew_24h",
+    "macro_ret_kurt_24h",
 )
 
 # Posterior columns aligned to stable semantic labels (order for MetaLabeler).
+# Phase 5: 5-state HMM — CALM_BULL vs VOL_UP (split positive-μ regimes by empirical σ).
 HMM_SEMANTIC_PROB_COLUMNS: tuple[str, ...] = (
-    "hmm_prob_bull_trend",
+    "hmm_prob_bull_calm",
+    "hmm_prob_bull_vol_up",
     "hmm_prob_bear_trend",
     "hmm_prob_chop",
     "hmm_prob_crisis",
@@ -33,7 +39,7 @@ HMM_SEMANTIC_PROB_COLUMNS: tuple[str, ...] = (
 
 # Bump when ALPHA feature semantics change without renaming columns so raw GP
 # caches are invalidated and Tier 2 retraining actually happens.
-GP_FEATURE_SCHEMA_VERSION: str = "v18"
+GP_FEATURE_SCHEMA_VERSION: str = "v20"
 
 def _tf_to_hours(tf: str) -> float:
     """Convert timeframe string to decimal hours."""
@@ -757,6 +763,21 @@ def build_systemic_hmm_features(
         btc_log_ret_1h = np.log(btc_close / btc_close.shift(1).clip(lower=1e-12)).fillna(0.0)
         out["macro_ret_1h"] = _macro_risk_adj_ret_1h(btc_close, w24)
 
+        # Phase 3 return-tail emissions: 5d cumulative return z-score (120h), rolling skew / excess kurt (24h)
+        w120 = _get_window(120, tf)
+        roll_sum_5d = btc_log_ret_1h.rolling(w120, min_periods=max(30, w120 // 4)).sum()
+        z_norm = min(500, max(len(idx), 80))
+        z_minp = max(40, z_norm // 5)
+        rs_mean = roll_sum_5d.rolling(z_norm, min_periods=z_minp).mean()
+        rs_std = roll_sum_5d.rolling(z_norm, min_periods=z_minp).std()
+        out["macro_ret_5d_z"] = ((roll_sum_5d - rs_mean) / (rs_std + 1e-12)).fillna(0.0)
+        out["macro_ret_skew_24h"] = btc_log_ret_1h.rolling(
+            w24, min_periods=max(8, w24 // 4)
+        ).skew().fillna(0.0)
+        out["macro_ret_kurt_24h"] = btc_log_ret_1h.rolling(
+            w24, min_periods=max(8, w24 // 4)
+        ).kurt().fillna(0.0)
+
         # 2. macro_vol_24h (Yang-Zhang)
         out["macro_vol_24h"] = _yang_zhang_vol_24(btc_open, btc_high, btc_low, btc_close, w24)
 
@@ -814,6 +835,20 @@ def build_systemic_hmm_features(
         out["macro_ret_1h"] = _macro_risk_adj_ret_1h(m_close, w24).reindex(idx).fillna(0.0)
 
         m_log_ret = np.log(m_close / m_close.shift(1).clip(lower=1e-12)).fillna(0.0)
+
+        w120 = _get_window(120, tf)
+        roll_sum_5d_m = m_log_ret.rolling(w120, min_periods=max(30, w120 // 4)).sum()
+        zn = min(500, max(len(idx), 80))
+        zmp = max(40, zn // 5)
+        rsm = roll_sum_5d_m.rolling(zn, min_periods=zmp).mean()
+        rss = roll_sum_5d_m.rolling(zn, min_periods=zmp).std()
+        out["macro_ret_5d_z"] = ((roll_sum_5d_m - rsm) / (rss + 1e-12)).reindex(idx).fillna(0.0)
+        out["macro_ret_skew_24h"] = (
+            m_log_ret.rolling(w24, min_periods=max(8, w24 // 4)).skew().reindex(idx).fillna(0.0)
+        )
+        out["macro_ret_kurt_24h"] = (
+            m_log_ret.rolling(w24, min_periods=max(8, w24 // 4)).kurt().reindex(idx).fillna(0.0)
+        )
 
         # 4. macro_funding_mom_24h fallback
         if "funding_rate" in panel_df.columns:
