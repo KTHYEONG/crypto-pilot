@@ -20,33 +20,77 @@ from optuna.trial import FrozenTrial
 
 from config.opt_config import OPT_FUTURES_CONFIG
 from config.settings import FUTURES_INITIAL_BALANCE, SLIPPAGE_RATE, TRADING_FEE_RATE
-from src.domain.futures.engine_multi_futures import (
+from src.domain.futures.backtest_engine import (
     _recompute_cs_dirs_numba,
     backtest_portfolio_numba,
 )
-from src.domain.futures.ml_pipeline.feature_engineering import HMM_SEMANTIC_PROB_COLUMNS
-from src.domain.futures.opt_futures_utils.cv_utils import (
+from src.domain.futures.ml_pipeline.features.engineering import HMM_SEMANTIC_PROB_COLUMNS
+from src.domain.futures.optimization.validation import (
     build_anchored_wf_legs,
     build_cpcv_test_paths_with_fallback,
     list_cpcv_block_ranges,
 )
-from src.domain.futures.opt_futures_utils.data_utils import (
+from src.domain.futures.optimization.data_aligner import (
     _build_aligned_2d_from_prebuilt,
     _dataframe_to_symbol_arrays,
 )
-from src.domain.futures.opt_futures_utils.metrics import (
+from src.domain.futures.optimization.evaluator import (
     _log_tw_from_ret_pct,
     calc_mdd_from_equity,
 )
-from src.domain.futures.opt_futures_utils.objective import (
-    EMBARGO_BARS,
-    compute_multi_alignment_info,
-)
-from src.domain.futures.opt_futures_utils.signal_cache import get_tiered_signals
-from src.domain.futures.strategies_futures import UltimateStrategy
+from src.domain.futures.strategy_ml import FuturesMLStrategy
 
 _logger = logging.getLogger(__name__)
 _PRECOMPUTE_LOCK = threading.Lock()
+
+# Cross-sectional momentum lookback periods precomputed for all trials.
+_CS_MOM_LOOKBACKS: list[int] = [12, 24, 36, 48, 60, 72]
+
+
+def inject_cs_momentum_ranks(
+    data_maps: dict[str, dict[str, Any]],
+    symbols: list[str],
+    tf: str,
+    lookbacks: list[int] | None = None,
+) -> None:
+    """Inject cross-sectional momentum rank columns into data_maps[sym][tf].
+
+    Ranking at time t uses only pct_change(periods=lb) which is backward-looking
+    — no temporal look-ahead bias.  Safe to call on IS-only or full (IS+OOS) data.
+    """
+    if lookbacks is None:
+        lookbacks = _CS_MOM_LOOKBACKS
+    if len(symbols) < 2:
+        return
+
+    rets_series: dict[str, pd.Series] = {}
+    for sym in symbols:
+        df = data_maps.get(sym, {}).get(tf)
+        if df is not None and not df.empty:
+            rets_series[sym] = df["close"]
+
+    if len(rets_series) < 2:
+        return
+
+    for lb in lookbacks:
+        all_rets = {s: r.pct_change(periods=lb) for s, r in rets_series.items()}
+        ranks_df = pd.DataFrame(all_rets).rank(axis=1, pct=True)
+        for sym in rets_series:
+            if sym in ranks_df.columns:
+                col_name = f"cs_mom_rank_{lb}"
+                data_maps[sym][tf][col_name] = ranks_df[sym].astype(np.float64)
+
+
+def compute_embargo_bars(tf: str, longest_indicator_period: int = 150) -> int:
+    fixed_min: dict[str, int] = {"1h": 24}
+    ratio_map: dict[str, float] = {"1h": 0.08}
+    ratio: float = ratio_map.get(tf, 0.05)
+    return max(fixed_min.get(tf, 12), int(longest_indicator_period * ratio))
+
+
+EMBARGO_BARS: dict[str, int] = {
+    "1h": compute_embargo_bars("1h"),
+}
 
 @dataclass
 class MLPhaseDContext:
@@ -136,6 +180,54 @@ def _inject_dyn_leverage_trimmed(trimmed_sig: pd.DataFrame, raw_full: pd.DataFra
     trimmed_sig["dyn_leverage"] = levs.astype(np.float64, copy=False)
 
 
+def compute_multi_alignment_info(
+    data_maps: dict[str, dict[str, Any]],
+    symbols: list[str],
+    tf: str,
+    embargo: int,
+) -> dict[str, Any] | None:
+    """Precompute alignment, fingerprints, and CSM ranks to avoid per-trial overhead."""
+    is_start_dts_per_sym: dict[str, Any] = {}
+
+    for sym in symbols:
+        sym_df = data_maps[sym].get(tf)
+        if sym_df is None or sym_df.empty:
+            continue
+
+        is_off = int(data_maps[sym].get(f"is_start_idx_{tf}", 0))
+        if len(sym_df) > is_off and "datetime" in sym_df.columns:
+            is_start_dts_per_sym[sym] = sym_df["datetime"].iloc[is_off]
+
+    if not is_start_dts_per_sym:
+        return None
+
+    common_is_start_dt = max(is_start_dts_per_sym.values())
+
+    alignment_offsets: dict[str, int] = {}
+    eff_ref_lens: list[int] = []
+
+    for sym in symbols:
+        sym_df = data_maps[sym].get(tf)
+        if sym_df is None or sym_df.empty or "datetime" not in sym_df.columns:
+            continue
+        start_idx = sym_df["datetime"].searchsorted(common_is_start_dt)
+        alignment_offsets[sym] = int(start_idx)
+        eff_ref_lens.append(len(sym_df) - int(start_idx))
+
+    if not eff_ref_lens:
+        return None
+
+    eff_ref_len = min(eff_ref_lens)
+    if eff_ref_len < 200:
+        return None
+
+    return {
+        "common_is_start_dt": common_is_start_dt,
+        "alignment_offsets": alignment_offsets,
+        "eff_ref_len": eff_ref_len,
+    }
+
+
 def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
     """Pre-align and pre-slice all data before Optuna starts to eliminate trial overhead."""
     with _PRECOMPUTE_LOCK:
@@ -155,7 +247,7 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
             "USE_CS_RANK_ENGINE": True,
         }
         params = _base_engine_params(pre_ml, ctx.tf)
-        strategy = UltimateStrategy(name="Precompute", params=params)
+        strategy = FuturesMLStrategy(name="Precompute", params=params)
 
         emb = int(EMBARGO_BARS.get(ctx.tf, 12))
         info = compute_multi_alignment_info(ctx.data_maps, ctx.symbols, ctx.tf, emb)
@@ -164,20 +256,30 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
         ctx.multi_alignment_info = info
 
         full_signal_dfs: dict[str, pd.DataFrame] = {}
-        for sym in ctx.symbols:
-            raw = ctx.data_maps[sym][ctx.tf]
-            full_signal_dfs[sym] = get_tiered_signals(params, sym, ctx.tf, raw, strategy)
+        # get_tiered_signals is removed as signal_cache.py is deleted. 
+        # ML pipeline should have signals pre-computed in raw_full.
+        # If it was using legacy signal registry, that is also deleted.
+        # We assume FuturesMLStrategy handles the signal generation or signals are in raw data.
+        # In the original objective_ml.py, it was calling get_tiered_signals.
+        # Since signals are now ML-based, they should be in the dataframe already.
 
         # 2. Build Global Aligned Arrays
         prebuilt_full: dict[str, dict[str, np.ndarray]] = {}
         eff_len = int(info["eff_ref_len"])
         for sym in ctx.symbols:
             start_idx = int(info["alignment_offsets"][sym])
-            trimmed_sig = full_signal_dfs[sym].iloc[start_idx:start_idx+eff_len].copy()
-
-            # [DYNAMIC FIX] Re-calculate trend_direction and strength WITHOUT threshold bias
-            # This allows Numba to apply the threshold dynamically.
             raw_full = ctx.data_maps[sym][ctx.tf].iloc[start_idx:start_idx+eff_len]
+            
+            # Create a trimmed signal dataframe from raw_full
+            trimmed_sig = pd.DataFrame(index=raw_full.index)
+            trimmed_sig["close"] = raw_full["close"].to_numpy(dtype=np.float64, copy=False)
+            trimmed_sig["high"] = raw_full["high"].to_numpy(dtype=np.float64, copy=False)
+            trimmed_sig["low"] = raw_full["low"].to_numpy(dtype=np.float64, copy=False)
+            trimmed_sig["open"] = raw_full["open"].to_numpy(dtype=np.float64, copy=False)
+            trimmed_sig["atr"] = raw_full["atr"].to_numpy(dtype=np.float64, copy=False) if "atr" in raw_full.columns else np.zeros(len(raw_full))
+            trimmed_sig["garch_kelly_f"] = raw_full["garch_kelly_f"].to_numpy(dtype=np.float64, copy=False) if "garch_kelly_f" in raw_full.columns else np.ones(len(raw_full))
+            trimmed_sig["slot_rank_score"] = raw_full["slot_rank_score"].to_numpy(dtype=np.float64, copy=False) if "slot_rank_score" in raw_full.columns else np.zeros(len(raw_full))
+
             if "funding_rate_sum" in raw_full.columns:
                 trimmed_sig["funding_rate_sum"] = raw_full["funding_rate_sum"].to_numpy(
                     dtype=np.float64, copy=False
@@ -215,9 +317,6 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
             prebuilt_full[sym] = _dataframe_to_symbol_arrays(trimmed_sig)
 
         # 3. CAWF-R: Build K chronological AWF test-leg slices.
-        # Each leg is a contiguous test window with expanding train prefix.
-        # GP/HMM features are pre-computed on full IS (known limitation: F1 GP leakage).
-        # Per-leg GP refit is deferred — cost O(K x GP_fit) per trial.
         embargo = int(EMBARGO_BARS.get(ctx.tf, 12))
         k_legs = int(OPT_FUTURES_CONFIG.get("FUTURES_AWF_K_LEGS", 5))
         min_train_frac = float(OPT_FUTURES_CONFIG.get("FUTURES_AWF_MIN_TRAIN_FRAC", 0.40))
@@ -240,7 +339,7 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
         ctx.multi_alignment_info["cpcv_all_block_ranges"] = unique_blocks
         ctx.multi_alignment_info["awf_legs"] = awf_legs
 
-    # Diagnostic on AWF leg 0 (replaces CPCV block 0 after paradigm shift).
+    # Diagnostic on AWF leg 0
     if ctx.awf_leg_slices:
         aligned0 = ctx.awf_leg_slices[0].get("data") or {}
         xl0 = aligned0.get("xs_score_long")
@@ -300,8 +399,8 @@ def _log_precompute_computed_dir_sample(
         arr_ml_l,
         arr_ml_s,
         crisis_gamma,
-        k_long, # Using k_long as k_rank (they are symmetric now)
-        1.0,    # cs_z_threshold (Default 1.0 for diagnostic)
+        k_long,
+        1.0,    # cs_z_threshold
         out,
     )
     mags = np.abs(out)
@@ -376,7 +475,6 @@ def build_phase_d_enqueue_params_from_deploy_json(
         crisis = float(deploy.get("CRISIS_GAMMA", deploy.get("CRISIS_GATE_PROB", 1.3)))
         atr_p = int(deploy["ATR_PERIOD"])
         
-        # Symmetric Mapping for Enqueue
         atr_m = float(deploy.get("ATR_MULT", deploy.get("LONG_ATR_MULT", 2.5)))
         trail_m = float(deploy.get("TRAIL_MULT", deploy.get("LONG_TRAIL_MULT", 3.0)))
         
@@ -415,8 +513,6 @@ def build_phase_d_enqueue_params_from_deploy_json(
 
 
 def _suggest_ml_phase_d(trial: optuna.Trial) -> dict[str, Any]:
-    # Session 37: v42 정합 search space (KELLY [0.45,1.20], DD [0.15,0.25]).
-    # Path A Shield: v42-anchored bands (tighter trail, capped KS) + DD early de-risk.
     shield = bool(OPT_FUTURES_CONFIG.get("FUTURES_TIER1_SHIELD_MODE", False))
     if shield:
         bayes_c = float(trial.suggest_float("BAYESIAN_C", 5.0, 14.0, log=True))
@@ -428,7 +524,6 @@ def _suggest_ml_phase_d(trial: optuna.Trial) -> dict[str, Any]:
         crisis = float(trial.suggest_float("CRISIS_GAMMA", 1.0, 1.4, step=0.05))
         atr_p = int(trial.suggest_int("ATR_PERIOD", 26, 36, step=2))
         
-        # Symmetric Parameters
         atr_m = float(trial.suggest_float("ATR_MULT", 2.0, 2.75, step=0.25))
         trail_m = float(trial.suggest_float("TRAIL_MULT", 2.5, 3.5, step=0.5))
         
@@ -447,7 +542,6 @@ def _suggest_ml_phase_d(trial: optuna.Trial) -> dict[str, Any]:
         crisis = float(trial.suggest_float("CRISIS_GAMMA", 1.0, 1.4, step=0.05))
         atr_p = int(trial.suggest_int("ATR_PERIOD", 26, 40, step=2))
         
-        # Symmetric Parameters
         atr_m = float(trial.suggest_float("ATR_MULT", 2.0, 3.0, step=0.25))
         trail_m = float(trial.suggest_float("TRAIL_MULT", 2.5, 4.0, step=0.5))
         
@@ -516,7 +610,6 @@ def _base_engine_params(ml: dict[str, Any], tf: str) -> dict[str, Any]:
     fk_frac = float(np.clip(0.35 * ks * (1.0 + 1.0 / bc), 0.05, 0.6))
     lev = float(OPT_FUTURES_CONFIG.get("FUTURES_DISCOVERY_LEVERAGE", 5))
     rpt = float(ml.get("RISK_PER_TRADE", 0.05))
-    # Cap: rpt*lev ≤ 0.40 (8% max at lev=5); v24 Goldilocks validated bound.
     if rpt * lev > 0.40:
         rpt = 0.40 / max(lev, 1e-9)
     return {
@@ -597,7 +690,6 @@ def _run_portfolio_numba_block(
     strength_g = aligned["ml_calib_prob"]
     use_cs = 1 if bool(params.get("USE_CS_RANK_ENGINE", True)) else 0
     
-    # Symmetric Mapping
     atr_m = float(params["ATR_MULT"])
     trail_m = float(params["TRAIL_MULT"])
     
@@ -658,7 +750,6 @@ def objective_ml_phase_d(trial: optuna.Trial, ctx: MLPhaseDContext) -> float | t
     params = _base_engine_params(ml, ctx.tf)
     cfg = OPT_FUTURES_CONFIG
 
-    # Early debug: xs_score dispersion on first leg
     if trial.number < 10 and awf_slices:
         ad0 = awf_slices[0].get("data") or {}
         xl = ad0.get("xs_score_long")
@@ -678,7 +769,6 @@ def objective_ml_phase_d(trial: optuna.Trial, ctx: MLPhaseDContext) -> float | t
     min_trades_target = int(cfg.get("FUTURES_MIN_TRADES_TARGET", 30))
     n_syms_ctx = max(1, len(ctx.symbols))
 
-    # --- CAWF-R: evaluate each chronological test leg ---
     leg_log_tw: list[float] = []
     leg_mdds: list[float] = []
     all_trades_chunks: list[np.ndarray] = []
@@ -713,18 +803,11 @@ def objective_ml_phase_d(trial: optuna.Trial, ctx: MLPhaseDContext) -> float | t
         if not first_leg_done:
             first_leg_done = True
             if n_tr == 0:
-                _logger.debug(
-                    "[AWF][trial=%d] Prune: first leg %s 0 trades "
-                    "diag[dust,margin,tdir0,pside0]=[%d,%d,%d,%d]",
-                    trial.number, leg_range,
-                    int(b_diag[0]), int(b_diag[1]), int(b_diag[2]), int(b_diag[3]),
-                )
                 raise optuna.TrialPruned()
 
         mdd = float(calc_mdd_from_equity(b_equity)) if b_equity.size > 0 else 100.0
         log_ret = _log_tw_from_ret_pct(float((b_bal / FUTURES_INITIAL_BALANCE - 1.0) * 100.0))
 
-        # Soft MDD penalty (continuous gradient vs hard prune)
         if mdd >= liq_mdd_thr:
             log_ret -= (mdd - liq_mdd_thr) * 3.0
 
@@ -772,23 +855,16 @@ def objective_ml_phase_d(trial: optuna.Trial, ctx: MLPhaseDContext) -> float | t
         leg_short_counts.append(n_short)
         leg_exposures.append(b_exposure)
 
-        # [NEW] Aggressive Pruning: after Leg 2 (index 1)
         if leg_idx >= 1:
             cum_log_tw = float(np.sum(leg_log_tw))
             max_leg_mdd = float(np.max(leg_mdds))
             if cum_log_tw < -0.05 or max_leg_mdd > liq_mdd_thr:
-                _logger.debug(
-                    "[AWF][trial=%d] Aggressive Pruning at Leg %d: "
-                    "cum_log_tw=%.4f, max_mdd=%.2f",
-                    trial.number, leg_idx, cum_log_tw, max_leg_mdd,
-                )
                 return -100.0
 
             trial.report(float(np.mean(leg_log_tw)), step=leg_idx)
             if trial.should_prune():
                 raise optuna.TrialPruned()
 
-    # --- Aggregate ---
     leg_arr = np.asarray(leg_log_tw, dtype=np.float64)
     all_trades = (
         np.vstack(all_trades_chunks) if all_trades_chunks
@@ -803,7 +879,6 @@ def objective_ml_phase_d(trial: optuna.Trial, ctx: MLPhaseDContext) -> float | t
     total_dir = total_long + total_short
     minority = float(min(total_long, total_short) / total_dir) if total_dir > 0 else 0.0
 
-    # --- PLGD Objective ---
     import math as _math
     k_legs_n = float(max(len(leg_arr), 1))
     mu_log = float(np.mean(leg_arr)) if leg_arr.size > 0 else -10.0
@@ -817,38 +892,26 @@ def objective_ml_phase_d(trial: optuna.Trial, ctx: MLPhaseDContext) -> float | t
     deflation = lambda_def * sr_bench * sigma_log / _math.sqrt(max(k_legs_n, 1.0))
     worst_leg = float(np.min(leg_arr)) if leg_arr.size > 0 else -10.0
 
-    # [Improvement 3] PLGD Leg Stability Weight
     leg_stability_weight = float(cfg.get("FUTURES_PLGD_AWF_LEG_STABILITY_WEIGHT", 0.0))
     if leg_stability_weight > 0 and leg_arr.size > 1:
         tw_legs = np.exp(leg_arr)
         _raw_stability = 1.0 - (float(np.std(tw_legs)) / (float(np.mean(tw_legs)) + 1e-9))
         stability = float(np.clip(_raw_stability, 0.0, 1.0))
-        # Additive penalty: instability reduces mu_log by (1-stability)*sigma_log regardless of sign
         mu_log = float(mu_log - leg_stability_weight * (1.0 - stability) * sigma_log)
 
-    # [Improvement 4] Virtual Friction Penalty
-    # Penalize high-frequency strategies to prioritize high-edge signals
     virtual_friction_bps = float(cfg.get("FUTURES_VIRTUAL_FRICTION_BPS", 0.0))
     if virtual_friction_bps > 0:
-        # Subtract bps per trade from the mean log-return
         mu_log = float(mu_log - (avg_trades_agg * virtual_friction_bps / 10000.0))
 
     tail_pen = lambda_tail * max(0.0, -worst_leg)
     plgd = mu_log - variance_drag - deflation - tail_pen
 
-    # DSR proxy: fraction of legs with positive log-TW (maps 0.0→1.0, higher=better).
-    # gate1_dsr=0.40 gate → awf_pos_frac ≥ 0.40 → ≥2/5 legs positive minimum.
     awf_pos_frac = float(np.sum(leg_arr > 0.0)) / k_legs_n
     dsr_awf = float(min(0.99, max(0.0, awf_pos_frac)))
 
-    # --- Penalties ---
     trade_shortfall = max(0.0, float(min_trades_target) - avg_trades_agg) / float(
         max(min_trades_target, 1)
     )
-    # is_penalty(5x|mu|) removed: PLGD naturally penalizes negative mu; 5x cliff creates
-    # discontinuous TPE gradient and double-counts with variance_drag + tail_pen.
-    # path_consistency_penalty(3.25*sigma) removed: PLGD deflation (Bonferroni)
-    # already covers cross-leg sigma correction; 3.25*sigma would triple-penalize sigma.
     path_consistency_penalty = 0.0
 
     ev_cost_min = float(cfg.get("FUTURES_AWF_NET_EDGE_MIN", 1.5))
@@ -856,7 +919,6 @@ def objective_ml_phase_d(trial: optuna.Trial, ctx: MLPhaseDContext) -> float | t
 
     exposure_floor_penalty = max(0.0, 0.05 - avg_exposure) / 0.05 * 1.0
 
-    # Calculate directional PF for penalty
     l_pf_agg, s_pf_agg = 1.0, 1.0
     if all_trades.size > 0:
         pnl_arr = all_trades[:, 6].astype(np.float64, copy=False)
@@ -874,14 +936,12 @@ def objective_ml_phase_d(trial: optuna.Trial, ctx: MLPhaseDContext) -> float | t
         s_loss = float(np.sum(np.abs(s_pnl[s_pnl < 0.0])))
         s_pf_agg = s_win / max(s_loss, 1e-9) if s_loss > 0 else 1.0
 
-    # Directional balance penalty (minor nudge — plgd-scale aligned)
     dir_balance_penalty = 0.0
     if l_pf_agg < 1.05:
         dir_balance_penalty += (1.05 - l_pf_agg) * 0.1
     if s_pf_agg < 1.05:
         dir_balance_penalty += (1.05 - s_pf_agg) * 0.1
 
-    # Fewer-than-k-valid-legs penalty
     n_valid_legs = int(np.sum(leg_arr > -5.0))
     pen = 0.5 * max(0, 3 - n_valid_legs) / 3.0
 
@@ -894,8 +954,6 @@ def objective_ml_phase_d(trial: optuna.Trial, ctx: MLPhaseDContext) -> float | t
             + dir_balance_penalty
         )
     else:
-        # Minimize negative PLGD + auxiliary penalties.
-        # path_consistency_penalty = 0.0 (see above). is_penalty removed.
         obj = float(
             -plgd
             + pen
@@ -906,7 +964,6 @@ def objective_ml_phase_d(trial: optuna.Trial, ctx: MLPhaseDContext) -> float | t
             + dir_balance_penalty
         )
 
-    # --- User attrs (backward-compat names preserved for downstream gate logic) ---
     trial.set_user_attr("cpcv_path_oos_log_tw", [float(x) for x in leg_log_tw])
     trial.set_user_attr("n_negative_legs", int(np.sum(leg_arr < 0.0)))
     trial.set_user_attr("leg_l_pf", [round(x, 4) for x in leg_l_pf])
@@ -919,13 +976,11 @@ def objective_ml_phase_d(trial: optuna.Trial, ctx: MLPhaseDContext) -> float | t
     trial.set_user_attr("dsr_cpcv", dsr_awf)
     trial.set_user_attr("n_valid_paths", n_valid_legs)
     trial.set_user_attr("ml_mean_log_growth_cpcv", mu_log)
-    # worst_leg replaces p10 (k=5: p10 = min)
     trial.set_user_attr("ml_p10_log_growth_cpcv", worst_leg)
     trial.set_user_attr("ml_cvar10_log_growth_cpcv", worst_leg)
     trial.set_user_attr("ml_worst_path_log_growth_cpcv", worst_leg)
     trial.set_user_attr("ml_worst_mdd_cpcv", worst_mdd_legs)
     trial.set_user_attr("ml_std_log_growth_cpcv", sigma_log)
-    # Last AWF leg = holdout-zone proxy (report only)
     trial.set_user_attr("ml_holdout_log_ret", float(leg_log_tw[-1]) if leg_log_tw else 0.0)
     trial.set_user_attr("ml_ls_minority_frac", minority)
     trial.set_user_attr("gate1_eff_ref_len", int(mai.get("eff_ref_len", 0)))
@@ -943,18 +998,13 @@ def objective_ml_phase_d(trial: optuna.Trial, ctx: MLPhaseDContext) -> float | t
 
     if OPT_FUTURES_CONFIG.get("FUTURES_ML_ALPHA_NSGA2_ENABLED", False):
         obj1 = float(-plgd + pen + 3.0 * trade_shortfall + exposure_floor_penalty)
-        obj2 = float(ev_cost_penalty)   # path_consistency removed; deflation handles sigma
+        obj2 = float(ev_cost_penalty)
         return obj1, obj2
 
     return float(obj)
 
 
 def select_best_trial_by_holdout_log_ret(trials: list[FrozenTrial]) -> FrozenTrial:
-    """Fallback when constraint-feasible set is empty.
-
-    Fallback must remain CPCV-first. Pure or overweighted hold-out ranking
-    is unstable across reruns and was selecting fallback artifacts.
-    """
     if not trials:
         raise ValueError("empty trials")
 
@@ -964,10 +1014,8 @@ def select_best_trial_by_holdout_log_ret(trials: list[FrozenTrial]) -> FrozenTri
         p10_cpcv = float(np.clip(t.user_attrs.get("ml_p10_log_growth_cpcv", -2.0), -2.0, 2.0))
         dsr = float(t.user_attrs.get("gate1_dsr", 0.0))
         worst_mdd = float(t.user_attrs.get("ml_worst_mdd_cpcv", 999.0))
-        # Prefer low-variance paths (proxy for low PBO) in fallback as well.
         path_std = float(np.clip(t.user_attrs.get("ml_std_log_growth_cpcv", 1.0), 0.0, 2.0))
 
-        # IS drag penalty: discount holdout when IS CPCV is negative.
         if is_cpcv < 0:
             holdout = holdout - abs(is_cpcv) * 2.0
 
@@ -1033,8 +1081,6 @@ def check_hard_gates_ml(
     mdd_v = float(oos_result.get("mdd_pct", oos_result.get("mdd", 100.0)))
     mdd_ok = abs(mdd_v) < float(cfg.get("FUTURES_MAX_MDD", 25.0))
     
-    # Combined PF gate: bear-regime-aware (long alpha structurally absent in crash periods).
-    # Direction-split gate replaced by overall profit_factor >= 1.05 to avoid regime bias.
     l_pf = float(oos_result.get("long_profit_factor", oos_result.get("oos_long_pf", 1.0)))
     s_pf = float(oos_result.get("short_profit_factor", oos_result.get("oos_short_pf", 1.0)))
     _default_pf = (l_pf + s_pf) / 2.0
