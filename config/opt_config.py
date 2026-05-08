@@ -71,7 +71,7 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     # Root cause: TOPSIS equal-weight dilutes DSR primacy; Pareto front drifts outside valid region.
     "FUTURES_NSGA2_POPULATION_SIZE": 30,
     # HMM stable regime (fixed hyperparameters; not in Optuna search space)
-    "FUTURES_HMM_K_STATES": 4,
+    "FUTURES_HMM_K_STATES": 5,
     # Deployment floor: ≥0.45 (align HMM systemic prior with Phase D Kelly band).
     "FUTURES_HMM_KELLY_SHRINKAGE": 0.45,
     # Session 41 sweep: 0.65-0.68 heuristically best; 0.66 compromise vs 0.70 default.
