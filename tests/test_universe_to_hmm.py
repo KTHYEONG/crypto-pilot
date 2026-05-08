@@ -24,6 +24,7 @@ from config.opt_config import (
     get_quarterly_window,
 )
 from config.settings import FUTURES_DATA_DIR
+from src.domain.futures.ml_pipeline.feature_engineering import HMM_SEMANTIC_PROB_COLUMNS
 from src.domain.futures.data_collector import DataCollector
 from src.domain.futures.ml_pipeline.ml_pipeline_runner import run_ml_pipeline_for_universe
 from src.execution.opt_main_futures import _load_futures_data_maps_for_symbols
@@ -69,19 +70,21 @@ def audit_hmm_logic_changes(ml_out, symbols, data_maps, tf):
     merged = pd.merge(mff, df[["datetime", "close"]], on="datetime", how="left")
     merged["ret"] = merged["close"].pct_change().fillna(0.0)
 
-    semantic_cols = [c for c in ["hmm_prob_bull_trend", "hmm_prob_bear_trend", "hmm_prob_chop", "hmm_prob_crisis"] if c in merged.columns]
-    if not semantic_cols:
+    regime_cols = [c for c in HMM_SEMANTIC_PROB_COLUMNS if c in merged.columns]
+    if not regime_cols:
         _logger.error("║ Missing HMM probability columns. {' ':<46} ║")
         return
 
-    merged["regime"] = merged[semantic_cols].idxmax(axis=1)
+    merged["regime"] = merged[regime_cols].idxmax(axis=1)
+    semantic_cols = [c for c in HMM_SEMANTIC_PROB_COLUMNS if c in merged.columns]
     
     # v15 Label Mapping (Hierarchical Decoupling)
     label_map = {
-        "BULL_TREND": "CALM",
+        "BULL_CALM": "CALM",
+        "BULL_VOL_UP": "VOL_RISK",
         "BEAR_TREND": "HIGH_VOL",
         "CHOP": "BLEEDING",
-        "CRISIS": "CRISIS"
+        "CRISIS": "CRISIS",
     }
 
     # 1. Log-Wealth Dispersion (g = mu - 0.5 * sigma^2)
@@ -129,10 +132,10 @@ def audit_hmm_logic_changes(ml_out, symbols, data_maps, tf):
     _logger.info("╟─────────────────────────────────────────────────────────────────────────────────╢")
     _logger.info("║ [C] REGIME STABILITY & FRICTION {' ':<46} ║")
 
-    _HARD_STATE_NAMES = ["hmm_prob_bull_trend", "hmm_prob_bear_trend", "hmm_prob_chop", "hmm_prob_crisis"]
+    _hard_labels = list(HMM_SEMANTIC_PROB_COLUMNS)
     if "hmm_hard_state" in merged.columns:
         hard_regime = merged["hmm_hard_state"].astype(int).map(
-            {i: _HARD_STATE_NAMES[i] for i in range(4)}
+            {i: _hard_labels[i] for i in range(len(_hard_labels))}
         ).fillna(merged["regime"])
     else:
         hard_regime = merged["regime"]
@@ -166,8 +169,8 @@ def audit_oos_and_ic(ml_out, symbols, is_data_maps, oos_data_maps, tf):
         mff = mff.reset_index()
     mff["datetime"] = pd.to_datetime(mff["datetime"], utc=True)
 
-    semantic_cols = [c for c in ["hmm_prob_bull_trend", "hmm_prob_bear_trend", "hmm_prob_chop", "hmm_prob_crisis"] if c in mff.columns]
-    if not semantic_cols:
+    regime_cols = [c for c in HMM_SEMANTIC_PROB_COLUMNS if c in mff.columns]
+    if not regime_cols:
         _logger.info("║ Missing HMM columns for IC audit.                                          ║")
         _logger.info("╚" + "═" * 83 + "╝")
         return
@@ -211,7 +214,7 @@ def audit_oos_and_ic(ml_out, symbols, is_data_maps, oos_data_maps, tf):
     if len(merged_oos) > 100:
         merged_oos = merged_oos.sort_values("datetime").reset_index(drop=True)
         merged_oos["ret"] = merged_oos["close"].pct_change().fillna(0.0)
-        merged_oos["regime"] = merged_oos[semantic_cols].idxmax(axis=1)
+        merged_oos["regime"] = merged_oos[regime_cols].idxmax(axis=1)
         q05 = float(merged_oos["ret"].quantile(0.05))
         worst_oos = merged_oos[merged_oos["ret"] <= q05]
         if not worst_oos.empty:

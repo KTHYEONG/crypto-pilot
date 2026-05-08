@@ -34,4 +34,30 @@ This file tracks the logical progression and experimental results of the quantit
 - **Baseline**: Initial SOTA combining HMM-regime filtering with GP-Alpha.
 
 ---
+
+## [2026-05-08] v3.4.0 5-State TVTP-HMM + Empirical Mapping + Tail Features (Claude Opus 4.7)
+- **Status**: Partial — Stability best-ever, TC ceiling confirmed at ~35% for post-hoc mapping paradigm
+- **Phases Applied**: Phase1+2 (empirical mapping + AdamW) → CRISIS μ constraint → Phase5 (5-state) → Phase3 (13 features) → BULL/BEAR μ constraints
+- **Key Wins**:
+    - **Stability**: Avg Duration 104.1 bars (+36% vs v3.0.0), Switches 210, Friction **5.25%** (first <6%)
+    - **BULL_CALM WEALTH_EXP**: Achieved for first time in Phase5 (G_log +0.051%)
+    - **LGB Alpha**: Best OOS IC 0.326 (Phase5), driven by richer HMM regime features
+    - **CRISIS TAIL_DEFENSE**: Maintained via μ<0 hard constraint
+- **Architecture Delta from v3.0.0**:
+    - 4-state → **5-state** (added `bull_vol_up` to separate parabolic up-moves from calm bull)
+    - μ-only mapping → **2D Sharpe/vol empirical mapping** (Viterbi hard labels + real returns)
+    - `returns_ser` now consumed (was silently unused)
+    - EMA blend: post-training removed → **pre-training warm-start** (0.8×old + 0.2×fresh)
+    - adam → **adamw(wd=1e-4)**; warmup iters 1 → 10
+    - 10 features → **13 features** (+`macro_ret_5d_z`, `macro_ret_skew_24h`, `macro_ret_kurt_24h`)
+    - TVTP: 5 features → **6 features** (+`macro_trend_168h` idx 0)
+    - Semantic constraints: CRISIS μ<0, BEAR μ<0, BULL_CALM μ>0 (via `_swap_latent`)
+- **Confirmed Tradeoff (architectural limit)**:
+    - Unconstrained mapping → TC 65.8% but CRISIS μ>0 (semantic failure)
+    - μ constrained → TC 20-35%, CRISIS semantically valid
+    - Root cause: BULL_CALM 57.5% mass absorbs ~54% of worst-5% events; post-hoc mapping cannot redistribute this
+- **Current Best Metrics**: TC IS/OOS 35.2%/35.2%, CRISIS G_log -0.103%, Duration 104.1 bars, Friction 5.25%, Score **53/100**
+- **Next**: Option A (light NLL return penalty 200-400×) or Option B (metric redefinition). See [experiments/2026-05-08_hmm_5state_phase_evolution.md](experiments/2026-05-08_hmm_5state_phase_evolution.md)
+
+---
 <!-- APPEND_POINT: New experiments will be added above this line -->
