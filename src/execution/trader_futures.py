@@ -81,7 +81,7 @@ from config.settings import (  # noqa: E402
 from src.core.exchange.binance_client import BinanceClient, OrderRateLimiter  # noqa: E402
 from src.core.utils.components import HealthCheckManager, TradeHistoryDB  # noqa: E402
 from src.core.utils.utils import setup_logger  # noqa: E402
-from src.domain.futures.strategies_futures import UltimateStrategy  # noqa: E402
+from src.domain.futures.strategy_ml import FuturesMLStrategy  # noqa: E402
 
 # Oracle Cloud 최적화 (선택적)
 try:
@@ -296,7 +296,7 @@ class RealTraderFutures:
 
         """
         self.client = BinanceClient(BINANCE_API_KEY, BINANCE_SECRET)
-        self.strategies: dict[str, UltimateStrategy] = {}
+        self.strategies: dict[str, FuturesMLStrategy] = {}
         self.params_map: dict[str, dict[str, Any]] = {}
         self.symbols: list[str] = []
 
@@ -442,7 +442,7 @@ class RealTraderFutures:
                 symbol_params.setdefault("INDICATOR_TIMEFRAME", tf)
                 self.params_map[symbol] = symbol_params
                 strategy_name = f"Real_{clean_sym}"
-                self.strategies[symbol] = UltimateStrategy(strategy_name, symbol_params)
+                self.strategies[symbol] = FuturesMLStrategy(strategy_name, symbol_params)
                 logger.info("Strategy initialized for: %s", symbol)
             return
         else:
@@ -1046,7 +1046,7 @@ class RealTraderFutures:
             return dict(self._exit_indicator_cache.get(symbol, {}))
 
     def _refresh_exit_indicators_if_needed(
-        self, symbol: str, strategy: UltimateStrategy, params: dict[str, Any], execution_tf: str
+        self, symbol: str, strategy: FuturesMLStrategy, params: dict[str, Any], execution_tf: str
     ) -> dict[str, Any]:
         current_slot = self._get_candle_slot_id(execution_tf)
         cached = self._get_cached_exit_indicators(symbol)
@@ -1237,8 +1237,8 @@ class RealTraderFutures:
 
         if os.getenv("SKIP_NUMBA_WARMUP", "true").lower() != "true":
             try:
-                from src.domain.futures.engine_single_futures import (
-                    backtest_loop_numba,
+                from src.domain.futures.backtest_engine import (
+                    backtest_loop_single_numba as backtest_loop_numba,
                 )
 
                 logger.info("⚙️ Pre-compiling Numba JIT functions to prevent runtime CPU spike...")

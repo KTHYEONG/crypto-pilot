@@ -1,6 +1,6 @@
 import numpy as np
 import pandas as pd
-from src.domain.futures.engine_multi_futures import backtest_portfolio_numba
+from src.domain.futures.backtest_engine import backtest_loop_multi_numba as backtest_portfolio_numba
 
 n_bars = 1000
 n_syms = 1
