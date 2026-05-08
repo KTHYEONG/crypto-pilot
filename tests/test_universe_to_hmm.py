@@ -125,14 +125,22 @@ def audit_hmm_logic_changes(ml_out, symbols, data_maps, tf):
         status = "FAIL" if crisis_capture < 60 else "PASS" if crisis_capture > 80 else "ACCEPTABLE"
         _logger.info(f"║ Worst 5% Events: {len(worst_bars):<4} | CRISIS/HIGH_VOL Capture: {crisis_capture:>5.1f}% | Verdict: {status:<10} ║")
     
-    # 3. Switching Friction & Stability
+    # 3. Switching Friction & Stability (uses sticky Viterbi hard state to avoid posterior noise)
     _logger.info("╟─────────────────────────────────────────────────────────────────────────────────╢")
     _logger.info("║ [C] REGIME STABILITY & FRICTION {' ':<46} ║")
-    
-    transitions = int((merged["regime"] != merged["regime"].shift(1)).sum())
+
+    _HARD_STATE_NAMES = ["hmm_prob_bull_trend", "hmm_prob_bear_trend", "hmm_prob_chop", "hmm_prob_crisis"]
+    if "hmm_hard_state" in merged.columns:
+        hard_regime = merged["hmm_hard_state"].astype(int).map(
+            {i: _HARD_STATE_NAMES[i] for i in range(4)}
+        ).fillna(merged["regime"])
+    else:
+        hard_regime = merged["regime"]
+
+    transitions = int((hard_regime != hard_regime.shift(1)).sum())
     avg_duration = float(len(merged) / max(1, transitions))
-    friction_est = transitions * 0.00025 * 100.0 # 2.5bps per switch estimate
-    
+    friction_est = transitions * 0.00025 * 100.0  # 2.5bps per switch estimate
+
     _logger.info(f"║ Total Switches: {transitions:<4} | Avg Duration: {avg_duration:>6.1f} bars | Friction Est: {friction_est:>5.2f}% IS ║")
     
     _logger.info("╚" + "═" * 83 + "╝")
