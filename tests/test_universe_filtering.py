@@ -9,8 +9,8 @@ project_root = str(Path(__file__).resolve().parents[1])
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-from src.domain.futures.data_collector import DataCollector
-from src.domain.futures.opt_futures_utils.universe_screener_futures import (
+from src.domain.futures.data_loader import DataCollector
+from src.domain.futures.optimization.screener import (
     screen_futures_universe,
     screen_symbol_refinement_futures,
 )

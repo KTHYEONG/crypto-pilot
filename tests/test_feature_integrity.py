@@ -1,13 +1,13 @@
 import numpy as np
 import pandas as pd
 import pytest
-from src.domain.futures.ml_pipeline.feature_engineering import (
+from src.domain.futures.ml_pipeline.features.engineering import (
     build_gp_input_features,
     build_hmm_input_features,
     build_systemic_hmm_features,
 )
 from src.core.optimization.opt_utils import compute_segment_merge_index
-from src.domain.futures.opt_futures_utils.objective import inject_cs_momentum_ranks
+from src.domain.futures.optimization.optimizer import inject_cs_momentum_ranks
 
 @pytest.fixture
 def sample_ohlcv() -> pd.DataFrame:
@@ -203,7 +203,7 @@ def test_cross_sectional_rank_leak(sample_ohlcv: pd.DataFrame) -> None:
 
 def test_backtest_alignment_and_signals(sample_ohlcv: pd.DataFrame) -> None:
     """Verify that signals generated in the strategy reach the backtester aligned correctly."""
-    from src.domain.futures.opt_futures_utils.data_utils import align_data_for_2d_engine
+    from src.domain.futures.optimization.data_aligner import align_data_for_2d_engine
     
     df = sample_ohlcv.copy().reset_index()
     # Mock some signal columns
@@ -234,7 +234,7 @@ def test_gp_alpha_mining_lookahead_mock():
     Speculative: Check if MLAlphaMiner's target creation has a shift bug.
     Alphas should predict FUTURE returns, not current ones.
     """
-    from src.domain.futures.ml_pipeline.cross_sectional_utils import CrossSectionalPipelineUtils
+    from src.domain.futures.ml_pipeline.features.cross_sectional import CrossSectionalPipelineUtils
     utils = CrossSectionalPipelineUtils()
     
     # Create panel with returns
