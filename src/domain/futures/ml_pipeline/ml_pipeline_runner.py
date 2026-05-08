@@ -824,6 +824,16 @@ def _build_panel_with_targets(
         return panel_df
 
     panel_df = utils.add_cross_sectional_features(panel_df)
+    
+    # [Neutralization] Apply Cross-Sectional Z-Score (Mean/Std) to relevant features
+    # to remove market beta and ensure relative strength evaluation.
+    cs_neutral_cols = [
+        "ret_1", "ret_3", "ret_6", "ret_12", "ret_24", 
+        "realized_vol_yz_24", "vol_ratio_24", "vol_ratio_168",
+        "mom_proxy_12", "acceleration_24", "beta_neutral_momentum"
+    ]
+    panel_df = utils.apply_cs_zscore(panel_df, cs_neutral_cols)
+    
     panel_df = utils.add_systemic_features(panel_df)
     impute_cols = [c for c in ALPHA_ENGINEERED_FEATURE_NAMES if c in panel_df.columns]
     if impute_cols:

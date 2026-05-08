@@ -188,6 +188,24 @@ class CrossSectionalPipelineUtils:
         return z.stack(future_stack=True).reindex(s.index).fillna(0.0)
 
     @staticmethod
+    def apply_cs_zscore(df: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
+        """Apply cross-sectional Z-Score (Mean/Std) to specified columns.
+        
+        Logic: For each timestamp, Z = (value - cs_mean) / (cs_std + 1e-9)
+        """
+        out = df.copy()
+        for col in columns:
+            if col not in out.columns:
+                continue
+            wide = out[col].unstack(level="symbol")
+            mean_cs = wide.mean(axis=1)
+            std_cs = wide.std(axis=1)
+            
+            z_wide = wide.sub(mean_cs, axis=0).div(std_cs + 1e-9, axis=0)
+            out[col] = z_wide.stack(future_stack=True).reindex(out.index).fillna(0.0)
+        return out
+
+    @staticmethod
     def add_cross_sectional_features(panel_df: pd.DataFrame) -> pd.DataFrame:
         """Add features relative to the universe and apply Robust Z-Scoring."""
         df = panel_df.copy()
@@ -199,7 +217,9 @@ class CrossSectionalPipelineUtils:
         
         # 2. [NEW] Universal Robust Z-Scoring for Alpha Features
         # This implements 개편안 A-1 (전면적 횡단면 정규화)
-        from src.domain.futures.ml_pipeline.feature_engineering import ALPHA_ENGINEERED_FEATURE_NAMES
+        from src.domain.futures.ml_pipeline.feature_engineering import (
+            ALPHA_ENGINEERED_FEATURE_NAMES,
+        )
         
         target_cols = [c for c in ALPHA_ENGINEERED_FEATURE_NAMES if c in df.columns]
         for col in target_cols:
