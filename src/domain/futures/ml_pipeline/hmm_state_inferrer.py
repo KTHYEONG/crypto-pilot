@@ -272,7 +272,8 @@ def _compute_nll(
     
     # sticky_penalty: Encourage states to persist (diagonal of transition matrix)
     avg_trans_mat = jnp.exp(jax.scipy.special.logsumexp(log_trans_mats, axis=0) - jnp.log(log_trans_mats.shape[0]))
-    sticky_penalty = -50.0 * jnp.sum(jnp.log(jnp.diag(avg_trans_mat) + 1e-6))
+    sticky_weight = float(OPT_FUTURES_CONFIG.get("FUTURES_HMM_STICKY_PENALTY_WEIGHT", 100.0))
+    sticky_penalty = -sticky_weight * jnp.sum(jnp.log(jnp.diag(avg_trans_mat) + 1e-6))
 
     # Soft Gravity NLL Penalty (v4.0.0 Pragmatic)
     # idx_ret = 9 (macro_ret_1h). Force CRISIS (4) negative, BULL_CALM (0) positive.
@@ -439,10 +440,10 @@ def _numba_sliding_mean_2d(data: np.ndarray, window: int) -> np.ndarray:
 
 
 @njit(cache=True, fastmath=True)
-def _numba_sticky_labels(labels: np.ndarray, min_duration: int) -> np.ndarray:
-    """Min-duration constraint to reduce regime flip noise."""
+def _numba_sticky_labels(labels: np.ndarray, min_durations: np.ndarray) -> np.ndarray:
+    """Asymmetric min-duration constraint to reduce regime flip noise (Phase 6)."""
     n = len(labels)
-    if n < 2 or min_duration <= 1:
+    if n < 2:
         return labels
     result = labels.copy()
     i = 0
@@ -452,7 +453,11 @@ def _numba_sticky_labels(labels: np.ndarray, min_duration: int) -> np.ndarray:
         while j < n and result[j] == curr:
             j += 1
         run_len = j - i
-        if run_len < min_duration and i > 0:
+        
+        # Asymmetric lookup: different persistence required per state semantic
+        m_dur = min_durations[int(curr)]
+        
+        if run_len < m_dur and i > 0:
             prev = result[i - 1]
             for k in range(i, j):
                 result[k] = prev
@@ -617,6 +622,11 @@ class HMMStateInferrer:
         if n < 200: return self._zeros_semantic(features_df)
         num_feats = len(feat_cols)
         self._warmup_jit(num_feats)
+        
+        sticky_weight = float(OPT_FUTURES_CONFIG.get("FUTURES_HMM_STICKY_PENALTY_WEIGHT", 100.0))
+        dur_cfg = OPT_FUTURES_CONFIG.get("FUTURES_HMM_OUTPUT_STICKY_MIN_DURATION", [36, 12, 2, 12, 1])
+        _logger.info("HMM Friction Reduction: weight=%.1f, durations=%s", sticky_weight, dur_cfg)
+
         X_raw = X_frame.to_numpy(dtype=np.float64)
         rs = np.nan_to_num(
             np.asarray(returns_ser.reindex(features_df.index), dtype=np.float64),
@@ -760,7 +770,9 @@ class HMMStateInferrer:
             probs_df["hmm_prob_bull_calm"] + probs_df["hmm_prob_bull_vol_up"]
         )
 
-        sticky_hard_states = _numba_sticky_labels(viterbi_states_buf.astype(np.int32), min_duration=24)
+        dur_cfg = OPT_FUTURES_CONFIG.get("FUTURES_HMM_OUTPUT_STICKY_MIN_DURATION", [36, 12, 2, 12, 1])
+        dur_arr = np.array(dur_cfg, dtype=np.int32)
+        sticky_hard_states = _numba_sticky_labels(viterbi_states_buf.astype(np.int32), dur_arr)
         probs_df["hmm_hard_state"] = sticky_hard_states.astype(np.float64)
         probs_df["hmm_current_duration"] = _numba_current_duration(sticky_hard_states)
 

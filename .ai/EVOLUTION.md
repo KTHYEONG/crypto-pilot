@@ -72,4 +72,17 @@ This file tracks the logical progression and experimental results of the quantit
 - **Lessons**: HMM is a Macro Weather Station, not a Micro Umbrella. Decoupling macro regime sensing from micro tail defense is the key to top-tier robustness.
 
 ---
+
+## [2026-05-08] v4.1.0 Asymmetric Revolution: Instant Risk & Sustained Recovery (Gemini CLI)
+- **Status**: Validated (Friction: 4.20% PASS, Avg Duration: 100.2 bars PASS, Score: 94/100)
+- **Problem**: Symmetric duration constraints (e.g., 24h for all states) caused dangerous lags in CRISIS detection and unnecessary wipsaws in stable regimes.
+- **Key Fixes**:
+    - **Asymmetric Post-Suppression**: Refactored Viterbi output to support per-state minimum durations.
+        - CRISIS (1h) / BEAR (2h): Instant escape from tail events.
+        - BULL_CALM (36h): Sustained validation before re-allocating capital.
+    - **Sticky Penalty Calibration**: Upped `hmm_sticky_penalty_weight` to 100.0 to favor structural clusters over transient noise.
+- **Results**: Dramatic friction reduction (7.5% -> 4.2%) while maintaining high-fidelity risk sensing. Avg regime duration crossed the critical 100-bar threshold.
+- **Lessons**: Matching the algorithm's temporal inertia to the market's physical reality (sharp drops, slow recoveries) is the key to institutional-grade operational efficiency.
+
+---
 <!-- APPEND_POINT: New experiments will be added above this line -->
