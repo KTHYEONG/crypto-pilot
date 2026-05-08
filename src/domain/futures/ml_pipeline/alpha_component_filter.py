@@ -433,11 +433,9 @@ def filter_alpha_components(
 
         # [OOS Blend] weighted average instead of strict ratio
         blend = 0.7 * mu_oos + 0.3 * mu
-        if is_fast_track:
-            oos_gate = True
-        elif mu > 1e-6:
-            # proposed: blend > 0.015
-            oos_gate = bool(blend > 0.015)
+        if mu > 1e-6:
+            # proposed: blend > 0.015 for standard, 0.010 for fast-track
+            oos_gate = bool(blend > (0.010 if is_fast_track else 0.015))
         else:
             oos_gate = True
         oos_ok.append(oos_gate)
