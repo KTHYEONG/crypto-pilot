@@ -76,6 +76,10 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     "FUTURES_HMM_KELLY_SHRINKAGE": 0.45,
     # Session 41 sweep: 0.65-0.68 heuristically best; 0.66 compromise vs 0.70 default.
     "FUTURES_HMM_CRISIS_THRESHOLD": 0.66,
+    # Asymmetric Friction Reduction (Phase 6): stronger sticky penalty for training stability.
+    "FUTURES_HMM_STICKY_PENALTY_WEIGHT": 100.0,
+    # Min-duration (hours) per state: [BULL_CALM, BULL_VOL_UP, BEAR, CHOP, CRISIS]
+    "FUTURES_HMM_OUTPUT_STICKY_MIN_DURATION": [36, 12, 2, 12, 1],
     # Slightly stronger sticky transitions → stabler systemic HMM under leg refit (Path C).
     "FUTURES_HMM_TRANSITION_PRIOR_ALPHA": 0.50,
     # HMM Posterior Smoothing (EMA, DEMA, TEMA, HMA, KAMA, ALMA, JMA)
