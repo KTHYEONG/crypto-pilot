@@ -39,39 +39,41 @@ from config.settings import (  # noqa: E402
     FUTURES_INITIAL_BALANCE,
 )
 from src.core.optimization.opt_utils import compute_segment_merge_index  # noqa: E402
-from src.domain.futures.data_collector import DataCollector  # noqa: E402
-from src.domain.futures.funding_utils import merge_funding_into_ohlcv  # noqa: E402
-from src.domain.futures.metrics_utils import merge_metrics_into_ohlcv  # noqa: E402
-from src.domain.futures.ml_pipeline import (  # noqa: E402
+from src.domain.futures.data_loader import (  # noqa: E402
+    DataCollector,
+    merge_funding_into_ohlcv,
+    merge_metrics_into_ohlcv,
+)
+from src.domain.futures.ml_pipeline import run_ml_pipeline_for_universe  # noqa: E402
+from src.domain.futures.ml_pipeline.pipeline_runner import (  # noqa: E402
     copy_data_maps_tf_clone,
     merge_ml_output_into_data_maps,
     merge_ml_output_into_is_and_oos,
     run_hmm_fusion_for_is_end,
-    run_ml_pipeline_for_universe,
 )
-from src.domain.futures.opt_futures_utils.mc_gate_adjust import (  # noqa: E402
+from src.domain.futures.optimization.validation import (  # noqa: E402
     awf_pos_frac_to_pseudo_pbo,
     resolve_adjusted_gates,
     wf_path_ergodicity_deviation_pct,
 )
-from src.domain.futures.opt_futures_utils.metrics import (  # noqa: E402
+from src.domain.futures.optimization.evaluator import (  # noqa: E402
     calc_net_alpha_with_friction,
     calc_time_to_target_wealth,
+    run_oos_margin_shared_portfolio,
     stationary_bootstrap_spa,
 )
-from src.domain.futures.opt_futures_utils.objective import (  # noqa: E402
-    inject_cs_momentum_ranks,
-)
-from src.domain.futures.opt_futures_utils.objective_ml import (  # noqa: E402
+from src.domain.futures.optimization.optimizer import (  # noqa: E402
     MLPhaseDContext,
     build_ml_phase_d_params,
     build_phase_d_enqueue_params_from_deploy_json,
     check_hard_gates_ml,
+    inject_cs_momentum_ranks,
     objective_ml_phase_d,
     precompute_ml_optimization_context,
 )
-from src.domain.futures.opt_futures_utils.oos_evaluator import (  # noqa: E402
-    run_oos_margin_shared_portfolio,
+from src.domain.futures.optimization.screener import (  # noqa: E402
+    screen_futures_universe,
+    screen_symbol_refinement_futures,
 )
 
 warnings.filterwarnings("ignore")
@@ -759,11 +761,6 @@ def main() -> None:
         _logger.info("\n" + "═" * 85)
         _logger.info(" [STEP 1/5] UNIVERSE DISCOVERY & DATA LOADING")
         _logger.info("═" * 85)
-
-        from src.domain.futures.opt_futures_utils.universe_screener_futures import (
-            screen_futures_universe,
-            screen_symbol_refinement_futures,
-        )
 
         res = get_quarterly_window(pre_args.reference_date)
         fetch_start_date, start_date, is_end_date, end_date = res
@@ -1810,7 +1807,7 @@ def main() -> None:
             champion_data = {
                 "id": f"cawf-r-{args.tf}-{pd.Timestamp.now().strftime('%Y%m%d-%H%M')}",
                 "promoted_at": pd.Timestamp.now().strftime("%Y-%m-%d"),
-                "note": f"Promoted via opt_main_futures.py with {args.trials} trials.",
+                "note": f"Promoted via opt_futures.py with {args.trials} trials.",
                 "architecture": "CAWF-R (K=5 chronological AWF + PLGD objective)",
                 "parameters": params,
                 "metrics": {

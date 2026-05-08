@@ -1,8 +1,8 @@
 import pandas as pd
 from pathlib import Path
 from config.settings import FUTURES_DATA_DIR
-from src.domain.futures.opt_futures_utils.data_utils import _dataframe_to_symbol_arrays
-from src.domain.futures.engine_logic_futures import calculate_position_size
+from src.domain.futures.optimization.data_aligner import _dataframe_to_symbol_arrays
+from src.domain.futures.backtest_engine import calculate_position_size
 
 sym = 'BTC_USDT'
 tf = '1h'
