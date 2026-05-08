@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from abc import abstractmethod
 from types import SimpleNamespace
 
 import pandas as pd
@@ -26,11 +27,7 @@ class PipelineStrategyBase(StrategyBase):
     def _shift_if_needed(self, series: pd.Series) -> pd.Series:
         return series.shift(1) if self.ENTRY_SHIFT else series
 
+    @abstractmethod
     def generate_signals(self, df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Plugin-based signal generation pipeline.
-        Must be implemented by subclasses using REGISTRY objects.
-        """
-        raise NotImplementedError(
-            "Subclasses must implement generate_signals using their respective registries."
-        )
+        """Implement signal columns for the concrete pipeline (Spot/Futures domain)."""
+        ...

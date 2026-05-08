@@ -10,7 +10,7 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     # Reduced from 2000: CAWF-R has K=5 independent legs; more trials = more selection bias.
     # Bonferroni SR_bench = sqrt(2*ln(400))≈3.46 vs sqrt(2*ln(2000))≈5.30 — honest deflation.
     "total_trials": 1000,
-    # Phase-D TPESampler: random trials before TPE; must be < n_ml_trials (see opt_main_futures).
+    # Phase-D TPESampler: random trials before TPE; must be < n_ml_trials (see opt_futures.py).
     "tpe_n_startup_trials": 200,
     # Caps startup at this fraction of Phase-D n_trials (prevents 384/500 ~77% random when
     # total_trials-oriented tpe_n_startup is reused for FUTURES_ML_PHASE_D_TRIALS=500).
@@ -208,10 +208,26 @@ FUTURES_SCREENER_CONFIG: dict[str, Any] = {
 }
 
 # ==============================================================================
-# SPOT CONFIGURATION (Unchanged)
+# SPOT CONFIGURATION (Standardized)
 # ==============================================================================
 SPOT_ANCHOR_SYMBOLS: list[str] = ["KRW-ETH", "KRW-SOL", "KRW-XRP"]
 SPOT_SYMBOLS: list[str] = ["KRW-ETH", "KRW-SOL", "KRW-XRP", "KRW-HBAR"]
+
+SPOT_SHARED_PARAM_SPACE: dict[str, dict[str, Any]] = {
+    "TIMEFRAME": {"type": "categorical", "choices": ["4h"]},
+    "RISK_PER_TRADE": {"type": "float", "low": 0.01, "high": 0.05, "step": 0.01},
+}
+
+SPOT_EXCLUDED_SIZING_METHODS: list[str] = ["inv_vol_parity", "liquidity_adjusted"]
+
+SLIPPAGE_GAMMA_BASE: float = 0.6
+SLIPPAGE_REFERENCE_ADV_KRW: float = 1_000_000_000.0
+
+ENGINE_PARAM_SPACE: dict[str, dict[str, Any]] = {
+    "MAX_CONCURRENT_POSITIONS": {"type": "int", "low": 3, "high": 10},
+    "MIN_PF": {"type": "float", "low": 1.2, "high": 2.0},
+    "MAX_MDD": {"type": "float", "low": 10.0, "high": 25.0},
+}
 
 OPT_SPOT_CONFIG: dict[str, Any] = {
     "total_trials": 1500,
@@ -225,8 +241,14 @@ OPT_SPOT_CONFIG: dict[str, Any] = {
 
 def get_search_space_futures(tf: str, stage: int = 0) -> dict[str, dict[str, Any]]:
     _ = tf
-    from src.domain.futures.opt_futures_utils.opt_params import build_full_discovery_space_futures
     return build_full_discovery_space_futures()
+
+def build_full_discovery_space_futures() -> dict[str, Any]:
+    return dict(ENGINE_PARAM_SPACE_FUTURES)
+
+def get_spot_effective_independent_trials(n_done: int, n_startup: int) -> int:
+    """Heuristic for independent trials (deflating multiple testing bias)."""
+    return max(1, n_done - n_startup)
 
 def get_search_space_spot(tf: str) -> dict[str, dict[str, Any]]:
     _ = tf
