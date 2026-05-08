@@ -217,7 +217,7 @@ class CrossSectionalPipelineUtils:
         
         # 2. [NEW] Universal Robust Z-Scoring for Alpha Features
         # This implements 개편안 A-1 (전면적 횡단면 정규화)
-        from src.domain.futures.ml_pipeline.feature_engineering import (
+        from src.domain.futures.ml_pipeline.features.engineering import (
             ALPHA_ENGINEERED_FEATURE_NAMES,
         )
         
