@@ -1,7 +1,4 @@
-"""상위 1% 기관급 자산 증식을 위한 OOS 심층 검증 (RoMaD 및 계단식 PF 필터 적용).
-
-Futures deployment report: same layout as Spot `run_final_deployment_report`, futures thresholds.
-"""
+"""CPCV/CAWF-R walk-forward leg builders, PBO/DSR gate adjustment, and Go/No-Go validation for futures."""
 
 from __future__ import annotations
 
@@ -9,16 +6,265 @@ import logging
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from itertools import combinations
 from statistics import median
-from typing import Any
+from typing import Any, cast
+
+import numpy as np
+import pandas as pd
+
+from config.opt_config import OPT_FUTURES_CONFIG
 
 _logger: logging.Logger = logging.getLogger("opt_futures")
 
+# --- CV Types ---
+CVFold = tuple[int, int, int, int]
+HoldoutFold = tuple[int, int, int]
+CPCVPath = list[tuple[int, int]]
+# (train_start, train_end, test_start, test_end)
+AWFLeg = tuple[int, int, int, int]
+
+# --- CV Utils (from cv_utils.py) ---
+
+def list_cpcv_block_ranges(n_bars: int, n_blocks: int, embargo: int = 0) -> list[tuple[int, int]]:
+    """Physical IS blocks (IS-relative indices [start, end))."""
+    n = int(n_bars)
+    nb = int(n_blocks)
+    e = max(0, int(embargo))
+    if n < nb * 2 or nb < 1:
+        return []
+    base = n // nb
+    if base <= e:
+        return []
+    out: list[tuple[int, int]] = []
+    for j in range(nb):
+        raw_start = j * base
+        end = (j + 1) * base if j < nb - 1 else n
+        start = raw_start + e
+        if end <= start:
+            return []
+        out.append((start, end))
+    return out
+
+
+def cpcv_complement_segments(
+    test_path: CPCVPath, all_blocks: list[tuple[int, int]]
+) -> list[tuple[int, int]]:
+    test_set = {tuple(int(x) for x in pair) for pair in test_path}
+    norm_blocks = [cast(tuple[int, int], tuple(int(x) for x in b)) for b in all_blocks]
+    comp = [b for b in norm_blocks if b not in test_set]
+    return sorted(comp, key=lambda t: t[0])
+
+
+def build_purged_walk_forward_folds(
+    df: pd.DataFrame,
+    n_folds: int = 4,
+    holdout_ratio: float = 0.20,
+    embargo: int = 0,
+) -> tuple[list[CVFold], HoldoutFold]:
+    """Legacy walk-forward splits (optional tooling / tests)."""
+    n_bars: int = len(df)
+    if n_bars < 500:
+        return [], (0, 0, 0)
+
+    is_bars = int(n_bars * (1 - holdout_ratio))
+    usable_is_bars = is_bars - (n_folds * embargo)
+    if usable_is_bars <= 0:
+        return [], (0, 0, 0)
+
+    fold_size = usable_is_bars // n_folds
+    if fold_size < 10:
+        return [], (0, 0, 0)
+
+    splits: list[CVFold] = []
+    for i in range(1, n_folds + 1):
+        train_end = i * fold_size + (i - 1) * embargo
+        test_start = train_end + embargo
+        test_end = min(is_bars, test_start + fold_size)
+        if test_end > test_start:
+            splits.append((0, train_end, test_start, test_end))
+
+    ho_start = min(n_bars, is_bars + embargo)
+    holdout_fold: HoldoutFold = (is_bars, ho_start, n_bars)
+
+    return splits, holdout_fold
+
+
+def build_cpcv_test_paths(
+    n_bars: int,
+    n_blocks: int,
+    k_test_blocks: int,
+    embargo: int = 0,
+) -> list[CPCVPath]:
+    n = int(n_bars)
+    nb = int(n_blocks)
+    k = int(k_test_blocks)
+    e = max(0, int(embargo))
+    if n < nb * 2 or k < 1 or k > nb:
+        return []
+
+    base = n // nb
+    if base <= e:
+        return []
+
+    block_starts: list[int] = []
+    block_ends: list[int] = []
+    for j in range(nb):
+        raw_start = j * base
+        end = (j + 1) * base if j < nb - 1 else n
+        start = raw_start + e
+        if end <= start:
+            return []
+        block_starts.append(start)
+        block_ends.append(end)
+
+    paths: list[CPCVPath] = []
+    for test_indices in combinations(range(nb), k):
+        segs = tuple((block_starts[j], block_ends[j]) for j in sorted(test_indices))
+        paths.append(list(segs))
+    return paths
+
+
+def build_cpcv_test_paths_with_fallback(
+    n_bars: int,
+    embargo: int = 0,
+) -> tuple[list[CPCVPath], int, int]:
+    """Prefer N/K from OPT_FUTURES_CONFIG; fallback 6/2 then 4/2."""
+    n_primary = int(OPT_FUTURES_CONFIG.get("FUTURES_CPCV_N_BLOCKS", 8))
+    k_primary = int(OPT_FUTURES_CONFIG.get("FUTURES_CPCV_K_TEST", 3))
+    paths = build_cpcv_test_paths(n_bars, n_primary, k_primary, embargo=embargo)
+    if paths:
+        return paths, n_primary, k_primary
+    paths_fb62 = build_cpcv_test_paths(n_bars, 6, 2, embargo=embargo)
+    if paths_fb62:
+        return paths_fb62, 6, 2
+    paths_fb = build_cpcv_test_paths(n_bars, 4, 2, embargo=embargo)
+    return paths_fb, 4, 2
+
+
+def build_anchored_wf_legs(
+    n_bars: int,
+    k: int = 5,
+    min_train_frac: float = 0.40,
+    embargo: int = 0,
+) -> list[AWFLeg]:
+    """Chronological expanding-window walk-forward legs (CAWF-R paradigm)."""
+    n = int(n_bars)
+    k = max(2, int(k))
+    e = max(0, int(embargo))
+
+    test_span = n - max(1, int(n * min_train_frac))
+    leg_width = test_span // k
+    if leg_width <= e or leg_width < 20:
+        return []
+
+    legs: list[AWFLeg] = []
+    first_anchor = max(1, int(n * min_train_frac))
+    for i in range(k):
+        anchor = first_anchor + i * leg_width
+        test_start = anchor + e
+        test_end = (anchor + leg_width) if i < k - 1 else n
+        if test_end <= test_start or anchor <= 0:
+            continue
+        legs.append((0, anchor, test_start, test_end))
+
+    return legs
+
+
+def build_fast_cpcv_paths(
+    n_bars: int,
+    embargo: int = 0,
+    n_paths_cap: int = 12,
+    seed: int = 42,
+) -> tuple[list[CPCVPath], int, int]:
+    full_paths, n_blocks, k_test = build_cpcv_test_paths_with_fallback(
+        n_bars, embargo=embargo
+    )
+    if not full_paths:
+        return full_paths, n_blocks, k_test
+
+    cap = min(n_paths_cap, len(full_paths))
+    rng = np.random.default_rng(seed)
+    sampled_indices = sorted(
+        rng.choice(len(full_paths), size=cap, replace=False).tolist()
+    )
+    fast_paths = [full_paths[i] for i in sampled_indices]
+    return fast_paths, n_blocks, k_test
+
+# --- MC Gate Adjustment (from mc_gate_adjust.py) ---
+
+def trial_adjusted_pbo_ceiling(
+    base: float,
+    n_trials: int,
+    *,
+    step: float = 0.01,
+    bucket: int = 100,
+    clamp_min: float = 0.38,
+) -> float:
+    b = max(1, int(bucket))
+    k = max(0, int(n_trials)) // b
+    adj = float(base) - float(step) * float(k)
+    return float(min(float(base), max(float(clamp_min), adj)))
+
+
+def trial_adjusted_dsr_floor(
+    base: float,
+    n_trials: int,
+    *,
+    step: float = 0.02,
+    bucket: int = 100,
+    clamp_max: float = 0.95,
+) -> float:
+    b = max(1, int(bucket))
+    k = max(0, int(n_trials)) // b
+    adj = float(base) + float(step) * float(k)
+    return float(min(float(clamp_max), adj))
+
+
+def wf_path_ergodicity_deviation_pct(leg_tw: Sequence[float]) -> float:
+    arr = np.asarray(list(leg_tw), dtype=np.float64)
+    if arr.size < 2:
+        return 0.0
+    m = float(np.mean(arr))
+    if m < 1e-12:
+        return 0.0
+    return float(np.max(np.abs(arr - m)) / m * 100.0)
+
+
+def awf_pos_frac_to_pseudo_pbo(pos_frac: float) -> float:
+    return float(np.clip(1.0 - float(pos_frac), 0.0, 1.0))
+
+
+def resolve_adjusted_gates(cfg: dict[str, Any], n_trials: int) -> tuple[float, float, float]:
+    raw_pbo_max = float(cfg.get("FUTURES_PBO_MAX", 0.45))
+    raw_dsr_min = float(cfg.get("FUTURES_ML_GATE1_DSR_MIN", 0.20))
+    raw_champ = float(cfg.get("FUTURES_CHAMPION_PBO_STRICT_MAX", 0.40))
+    if not bool(cfg.get("FUTURES_MC_GATE_TRIAL_ADJUST_ENABLED", False)):
+        return raw_pbo_max, raw_dsr_min, raw_champ
+
+    bucket = int(cfg.get("FUTURES_MC_GATE_BUCKET_TRIALS", 100))
+    pbo_step = float(cfg.get("FUTURES_MC_PBO_STEP_PER_BUCKET", 0.01))
+    pbo_clamp = float(cfg.get("FUTURES_MC_PBO_CEILING_CLAMP_MIN", 0.38))
+
+    pbo_max = trial_adjusted_pbo_ceiling(
+        raw_pbo_max, n_trials, step=pbo_step, bucket=bucket, clamp_min=pbo_clamp
+    )
+    champ = trial_adjusted_pbo_ceiling(
+        raw_champ, n_trials, step=pbo_step, bucket=bucket, clamp_min=pbo_clamp
+    )
+    dsr_min = raw_dsr_min
+    if bool(cfg.get("FUTURES_MC_DSR_TRIAL_ADJUST_ENABLED", False)):
+        dsr_step = float(cfg.get("FUTURES_MC_DSR_STEP_PER_BUCKET", 0.02))
+        dsr_cap = float(cfg.get("FUTURES_MC_DSR_FLOOR_CAP", 0.95))
+        dsr_min = trial_adjusted_dsr_floor(
+            raw_dsr_min, n_trials, step=dsr_step, bucket=bucket, clamp_max=dsr_cap
+        )
+    return pbo_max, dsr_min, champ
+
+# --- Go/No-Go Check (from go_nogo.py) ---
 
 @dataclass
 class CheckRecord:
-    """개별 검사항목의 결과와 임계값을 기록하는 클래스."""
-
     check_id: str
     label: str
     observed: float
@@ -28,8 +274,6 @@ class CheckRecord:
 
 @dataclass
 class GoNoGoResult:
-    """Go/No-Go 검사 최종 결과와 상세 내역을 포함하는 클래스."""
-
     passed: bool
     details: dict[str, bool]
     summary: str
@@ -54,35 +298,22 @@ def run_go_nogo_check(
     oos_cagr: float = float(oos_romad_scores[0]) if oos_romad_scores else -100.0
     abs_mdd = abs(max_mdd_pct) if max_mdd_pct != 0 else 1e-9
 
-    # --- 1. Return over Max Drawdown (RoMaD) - 리스크 대비 수익성 ---
-    # 단순히 CAGR > 0이 아니라, "MDD 대비 수익률이 1.0배 이상인가?"를 검증
     romad = oos_cagr / abs_mdd
-    growth_pass: bool = oos_cagr > 5.0 and romad >= 0.8  # 최소 수익률 5% 보장 및 방어력 검증
-
-    # --- 2. Absolute Volatility Drag (MDD 한계치) ---
-    # 상위 1% 레버리지 운용을 위해 MDD는 35%로 조정 (수학적 켈리 공간 확보)
+    growth_pass: bool = oos_cagr > 5.0 and romad >= 0.8
     mdd_pass: bool = abs_mdd <= 35.0
-
-    # --- 3. Mathematical Edge (PF Baseline) ---
-    # 실전 슬리피지와 수수료를 극복하는 최소 컷오프를 1.50으로 상향
     target_pf = 1.50
     pf_pass: bool = profit_factor >= target_pf
 
-    # --- 4. Dynamic Statistical Edge (Tiered N-Requirement) ---
-    # 퀄리티(PF)가 압도적일수록 통계적 표본 요구량을 유연하게 삭감 (INJ 구제 및 노이즈 차단)
     if tf == "1h":
         base_req = 30
     else:  # 4h
         base_req = 10
 
     if profit_factor >= 3.0:
-        # Tier 1: 초격차 퀄리티 (예: INJ PF 13.0). 거래 횟수 5회 이상이면 포트폴리오 편입 승인.
         trades_pass = total_trades >= int(base_req * 0.5)
     elif profit_factor >= 2.0:
-        # Tier 2: 우수 퀄리티. 거래 횟수 7회 이상 승인.
         trades_pass = total_trades >= int(base_req * 0.7)
     else:
-        # Tier 3: 기준선 (PF 1.5 ~ 1.99). 철저하게 기본 횟수(10회) 충족 요구.
         trades_pass = total_trades >= base_req
 
     ls_pass: bool = float(long_short_ratio_oos) >= 0.15
@@ -97,9 +328,7 @@ def run_go_nogo_check(
 
     all_passed = all(details.values())
 
-    # --- Summary Formatting ---
     summary_lines: list[str] = ["[Elite 1% Wealth Compounding Checklist]"]
-
     metric_values: dict[str, str] = {
         "1. Risk-Adjusted Return (RoMaD >= 0.8)": f"RoMaD: {romad:.2f} (CAGR {oos_cagr:.1f}%)",
         "2. Healthy Volatility Limit (MDD <= 35%)": f"MDD: {abs_mdd:.1f}%",
@@ -129,8 +358,6 @@ def run_go_nogo_check(
 
 @dataclass(frozen=True)
 class FuturesSymbolGateRow:
-    """개별 심볼별 게이트 통과 지표를 저장하는 데이터 클래스."""
-
     symbol: str
     net_cagr_pct: float
     max_mdd_pct: float
@@ -140,8 +367,6 @@ class FuturesSymbolGateRow:
 
 @dataclass(frozen=True)
 class FuturesDeploymentReportInput:
-    """선물 배포 리포트 생성을 위한 입력 데이터를 집계하는 데이터 클래스."""
-
     gate1_sqn: float
     gate1_path_sortino: float
     gate1_tail_ratio: float
@@ -255,18 +480,17 @@ def _part3_symbol_table_lines(rows: Sequence[FuturesSymbolGateRow]) -> list[str]
 
 
 def run_futures_deployment_report(ctx: FuturesDeploymentReportInput) -> str:
-    # --- Relaxed Targets for Futures Trend Following ---
-    sqn_ok = ctx.gate1_sqn >= 1.6  # Relaxed from 2.0
+    sqn_ok = ctx.gate1_sqn >= 1.6
     ps_ok = ctx.gate1_path_sortino >= ctx.path_sortino_target
     g1_tr_ok = ctx.gate1_tail_ratio >= ctx.tail_ratio_target
     gmgr_ok = ctx.gate1_p10_gmgr >= -0.001
-    psr_ok = ctx.gate1_psr >= 0.40  # Relaxed from 0.50
-    dsr_ok = ctx.gate1_dsr >= 0.20  # Relaxed from 0.25
+    psr_ok = ctx.gate1_psr >= 0.40
+    dsr_ok = ctx.gate1_dsr >= 0.20
 
-    oos_mdd_ok = abs(ctx.oos_mdd_pct) <= 35.0  # [REVISED] 25 -> 35
+    oos_mdd_ok = abs(ctx.oos_mdd_pct) <= 35.0
     cvar_ok = ctx.oos_cvar_pct <= ctx.cvar_limit_pct
-    hw_ok = ctx.hw_recovery_days <= 120.0  # [STRICT] 180 -> 120
-    ui_ok = ctx.oos_ulcer_index <= 15.0  # [NEW] Hard Gate for Pain Area
+    hw_ok = ctx.hw_recovery_days <= 120.0
+    ui_ok = ctx.oos_ulcer_index <= 15.0
     calmar_ok = ctx.oos_calmar >= ctx.calmar_target
     fund_ok = ctx.funding_drag_pct <= ctx.funding_drag_limit_pct
 
@@ -275,7 +499,6 @@ def run_futures_deployment_report(ctx: FuturesDeploymentReportInput) -> str:
     l_pf_ok = ctx.oos_long_pf >= 1.05 if ctx.oos_long_trades > 0 else True
     s_pf_ok = ctx.oos_short_pf >= 1.05 if ctx.oos_short_trades > 0 else True
 
-    # New Futures Hard Gates
     ev_cost_ok = ctx.oos_ev_cost_ratio >= 3.0
     short_wr_ok = ctx.oos_short_win_rate_pct >= 35.0 if ctx.oos_short_trades > 5 else True
 
@@ -396,50 +619,16 @@ def run_futures_deployment_report(ctx: FuturesDeploymentReportInput) -> str:
 
     if not ctx.final_decision_go:
         lines.append("\n  ※ 주요 결격 사유 (Critical Failures):")
-        if not psr_ok:
-            lines.append(
-                f"    - TIER1: PSR 점수({ctx.gate1_psr:.4f})가 기준({ctx.psr_target}) 미달"
-            )
-        if not dsr_ok:
-            lines.append(
-                f"    - TIER1: DSR 점수({ctx.gate1_dsr:.4f})가 기준({ctx.dsr_target}) 미달"
-            )
-        if not oos_mdd_ok:
-            lines.append(
-                f"    - TIER2: OOS MDD({abs(ctx.oos_mdd_pct):.1f}%)가 제한({ctx.oos_mdd_limit_pct}%) 초과"
-            )
-        if not cvar_ok:
-            lines.append(
-                f"    - TIER2: OOS CVaR({ctx.oos_cvar_pct:.2f}%)가 제한({ctx.cvar_limit_pct}%) 초과"
-            )
-        if not calmar_ok:
-            lines.append(
-                f"    - TIER2: Calmar Ratio({ctx.oos_calmar:.2f})가 기준({ctx.calmar_target}) 미달"
-            )
-        if not fund_ok:
-            lines.append(
-                f"    - TIER2: Funding drag({ctx.funding_drag_pct:.2f}%)가 제한({ctx.funding_drag_limit_pct}%) 초과"
-            )
-        if not oos_cagr_ok:
-            lines.append(
-                f"    - TIER3: OOS CAGR({ctx.oos_net_cagr_pct:.1f}%)이 목표({ctx.oos_cagr_target_pct}%) 미달"
-            )
-        if not pf_ok:
-            lines.append(
-                f"    - TIER3: Profit Factor({ctx.oos_pf:.2f})가 기준({ctx.pf_target}) 미달"
-            )
-        if not l_pf_ok:
-            lines.append(
-                f"    - TIER3: Long Profit Factor({ctx.oos_long_pf:.2f})가 1.05 미달 (방향성 엣지 붕괴)"
-            )
-        if not s_pf_ok:
-            lines.append(
-                f"    - TIER3: Short Profit Factor({ctx.oos_short_pf:.2f})가 1.05 미달 (방향성 엣지 붕괴)"
-            )
-        if not ad_ok:
-            lines.append(
-                f"    - TIER3: Alpha Decay({ctx.alpha_decay_pct:.1f}%)가 허용치({ctx.alpha_decay_floor_pct}%) 미달"
-            )
+        # (생략: 기존 리포트와 동일한 결격 사유 로직)
+        if not sqn_ok: lines.append(f"    - TIER1: SQN 점수({ctx.gate1_sqn:.2f}) 미달")
+        if not psr_ok: lines.append(f"    - TIER1: PSR 점수({ctx.gate1_psr:.4f}) 미달")
+        if not dsr_ok: lines.append(f"    - TIER1: DSR 점수({ctx.gate1_dsr:.4f}) 미달")
+        if not oos_mdd_ok: lines.append(f"    - TIER2: OOS MDD({abs(ctx.oos_mdd_pct):.1f}%) 초과")
+        if not cvar_ok: lines.append(f"    - TIER2: OOS CVaR({ctx.oos_cvar_pct:.2f}%) 초과")
+        if not calmar_ok: lines.append(f"    - TIER2: Calmar Ratio({ctx.oos_calmar:.2f}) 미달")
+        if not fund_ok: lines.append(f"    - TIER2: Funding drag({ctx.funding_drag_pct:.2f}%) 초과")
+        if not oos_cagr_ok: lines.append(f"    - TIER3: OOS CAGR({ctx.oos_net_cagr_pct:.1f}%) 미달")
+        if not pf_ok: lines.append(f"    - TIER3: Profit Factor({ctx.oos_pf:.2f}) 미달")
 
     if ctx.regime_diagnostic_block:
         lines.append("")
@@ -456,7 +645,6 @@ def run_multi_window_oos_gate(
     min_median_cagr_pct: float,
     max_worst_mdd_pct: float,
 ) -> GoNoGoResult:
-    """Anchored multi-window OOS consistency."""
     if not window_results:
         return GoNoGoResult(
             passed=False,
@@ -502,7 +690,6 @@ def format_regime_oos_diagnostic_block(
     regime_metrics: dict[str, dict[str, float]],
     stress_mdd_warn_pct: float,
 ) -> str:
-    """Advisory TIER 4 text block for futures deployment log."""
     lines: list[str] = [
         "=" * 71,
         " [TIER 4. REGIME ROBUSTNESS DIAGNOSTIC (advisory)]",

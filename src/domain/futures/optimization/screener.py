@@ -15,7 +15,7 @@ import numpy as np
 import pandas as pd
 
 from config.opt_config import FUTURES_ANCHOR_SYMBOLS, FUTURES_SCREENER_CONFIG
-from src.domain.futures.data_collector import DataCollector
+from src.domain.futures.data_loader import DataCollector
 
 _logger = logging.getLogger(__name__)
 
