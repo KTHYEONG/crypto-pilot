@@ -24,11 +24,11 @@ from config.opt_config import (
     get_quarterly_window,
 )
 from config.settings import FUTURES_DATA_DIR
-from src.domain.futures.ml_pipeline.feature_engineering import HMM_SEMANTIC_PROB_COLUMNS
-from src.domain.futures.data_collector import DataCollector
-from src.domain.futures.ml_pipeline.ml_pipeline_runner import run_ml_pipeline_for_universe
+from src.domain.futures.ml_pipeline.features.engineering import HMM_SEMANTIC_PROB_COLUMNS
+from src.domain.futures.data_loader import DataCollector
+from src.domain.futures.ml_pipeline.pipeline_runner import run_ml_pipeline_for_universe
 from src.execution.opt_main_futures import _load_futures_data_maps_for_symbols
-from src.domain.futures.opt_futures_utils.universe_screener_futures import (
+from src.domain.futures.optimization.screener import (
     screen_futures_universe,
     screen_symbol_refinement_futures,
 )
@@ -223,13 +223,13 @@ def test_universe_gp_hmm_flow(tf="1h"):
     _logger.info(f" [TEST] Universe -> HMM Regime Flow (Integrated) TF: {tf}")
     _logger.info("=" * 85)
     
-    # 1. Window Setup (Aligned with opt_main_futures.py)
+    # 1. Window Setup (Aligned with opt_futures.py)
     fetch_start_date, start_date, is_end_date, end_date = get_quarterly_window(None)
     collector = DataCollector()
     
     _logger.info(f"Window: {fetch_start_date} ~ {end_date} (IS End: {is_end_date})")
 
-    # 2. Universe Discovery & Filtering (Aligned with opt_main_futures.py)
+    # 2. Universe Discovery & Filtering (Aligned with opt_futures.py)
     _logger.info("\n[STEP] Universe Discovery & Filtering...")
     broad_candidates, _ = screen_futures_universe(
         collector,

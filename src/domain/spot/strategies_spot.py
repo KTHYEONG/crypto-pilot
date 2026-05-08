@@ -147,3 +147,7 @@ class SpotPipelineStrategy(PipelineStrategyBase):
         sizer = SIZING_REGISTRY.get(sm) or SIZING_REGISTRY["vol_target"]
         df["garch_kelly_f"] = sizer.compute(df, params)
         return df
+
+
+# --- Standardized Aliases for Phase 2 Migration ---
+UltimateSpotStrategy = SpotPipelineStrategy
