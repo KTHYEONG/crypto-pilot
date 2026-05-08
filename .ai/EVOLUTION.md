@@ -4,6 +4,50 @@ This file tracks the logical progression and experimental results of the quantit
 
 ---
 
+## [2026-05-08] v2.1.0 μ Separation Campaign: Returns Observation + Multi-Guidance + CHOP Vol Constraint (Claude Sonnet 4.6)
+- **Status**: Partial — μ 분리 달성, Tail Capture FAIL (55.3% IS / 58.9% OOS). 구조적 trade-off 확인
+- **Baseline Score**: 37/100 (v32_p4p5 기준)
+- **Problem**: 기존 HMM(FEATS=9)에서 4개 레짐 모두 NOISE_LOCKED, CRISIS μ≈0%, IC 전부 음수. 4-state HMM이 vol-clustering만 수행하고 방향성 레짐 식별 불가.
+- **Root Causes Identified**:
+    1. **μ 분리 실패** — observation에 returns 없음. semantic_penalty가 feature 공간 trend 차원만 강제, 실제 forward returns 분리 강제 안 함
+    2. **BEAR overhang** — guidance가 BULL·CRISIS만 supervise. BEAR/CHOP unsupervised → BEAR 40.7% 과팽창
+    3. **TVTP 입력에 trend 누락** — TVTP 드라이버가 sentiment(funding/oi/lsr)만 포함, 가격 추세 신호 없음
+    4. **IC 음수** — μ 분리 실패의 직접 결과
+- **Experiments (10회)**:
+    - **[E01] BEAR Guidance Mask (T,2→T,3)**: BEAR mask = drawdown_72h < q20 AND trend<0 AND ~crisis. FAIL — Tail Capture 76.4%, CRISIS μ +0.016%로 오히려 악화. guidance가 frequency 강제 불가
+    - **[E02] freq_penalty hi=5.0 강화 + BEAR weight 1500**: FAIL — Tail Capture 64.4%로 급락. BEAR→CHOP 이동으로 worst events 흡수 구조 붕괴
+    - **[E03] Returns-space μ Penalty v1 (weight=200)**: fwd_returns를 _compute_nll에 추가, posterior-weighted μ 분리 강제. FAIL — CRISIS μ 처음 음수(-0.013%) 전환, IC(t+24) 양수 전환. 그러나 weight 200이 NLL 대비 너무 약함
+    - **[E04] μ Penalty v2 (weight=800, threshold 3배 강화)**: FAIL — v1 대비 일부 후퇴. NLL gradient가 mu_ret_pen 압도. returns observation 없이는 penalty 강화 한계 확인
+    - **[E05] returns observation 추가 macro_ret_1h + macro_ema_ret_24h (FEATS=11)**: FAIL — μ 분리 최초 성공(BULL WEALTH_EXP, BEAR UNSTABLE), IC(t+1) 양수 전환. 그러나 Tail Capture 46.8%로 붕괴. HMM이 극단 returns에만 CRISIS/BEAR 집중
+    - **[E06] macro_risk_adj_ret_1h (ret/vol) + freq BEAR 하한조정 (FEATS=10)**: FAIL — BEAR μ -0.082%(목표 달성), BULL WEALTH_EXP/BEAR UNSTABLE. Tail Capture 53.8% FAIL. **종합 균형 최선 후보**
+    - **[E07] CHOP vol constraint 추가**: semantic_penalty에 p_chop_vol = sq(max(0, locs[2,vol] - locs[1,vol]+1.0)). **현재까지 종합 최선** — Tail Capture IS 55.3%, CRISIS BEHAVIOR 최초 UNSTABLE, CRISIS μ -0.075%(역대 최저), avg duration 86.8bars
+    - **[E08] Step3: TVTP trend 추가 (indices 0,4,5,6,7,8)**: FAIL — CHOP 56.5% 폭발, Tail Capture 38.9%(역대 최저). W_init CHOP→BEAR 강화가 CHOP local optimum으로 수렴. ROLLBACK
+    - **[E09] CHOP Guidance Mask (T,3→T,4)**: FAIL — 안정성 역대 최고(120.8bars) 但 CHOP guidance가 CHOP 영역 명확화 → CHOP 43.6% 증가, Tail Capture 45.9%로 악화. ROLLBACK
+    - **[E10] BEAR 하한 0.30 복원**: FAIL — BEAR 31.6% 증가했지만 CRISIS/BEAR μ 후퇴, BEHAVIOR 전부 NOISE_LOCKED 복귀. E07보다 악화
+- **Best State (E07 — CHOP vol constraint)**:
+    - Tail Capture IS: 55.3% (FAIL), OOS: 58.9% (ACCEPTABLE)
+    - BEAR μ: -0.054% ✅, CRISIS μ: -0.075% (목표 -0.10% 근접)
+    - BULL WEALTH_EXP ✅, BEAR UNSTABLE ✅, CRISIS UNSTABLE ✅
+    - BULL_P IC(t+1): +0.007, IC(t+12): +0.015 ✅ (양수 전환)
+    - avg Duration: 86.8bars, Friction: 6.3%
+    - HMMS FEATS: 10 (macro_risk_adj_ret_1h 추가)
+- **Fundamental Trade-off Discovered**:
+    - returns를 observation 추가 시: μ 분리 ✅ / Tail Capture ceiling ~55%로 고착
+    - BEAR 40%+ 유지 시: Tail Capture ~80% ✅ / μ 분리 없음
+    - 현재 4-state Diagonal Student-t HMM 아키텍처에서 두 목표 동시 달성 불가
+- **Next Options**:
+    - **A. E07 상태 수용**: μ 분리 + IC 양수 우선, Tail Capture 55% 타협
+    - **B. returns 제거 + mu_ret_pen만 유지**: 균형 타협, 예상 Tail Capture 65-68%
+    - **C. 완전 롤백**: Tail Capture 79%, μ 분리 포기
+    - **D. 아키텍처 변경**: 3-state HMM(CRISIS→BEAR 통합) 또는 Gaussian Mixture per regime
+- **Lessons**:
+    - guidance mask는 특정 타임스텝의 방향성 제시 가능하지만 frequency 강제 불가 → freq_penalty와 반드시 병행
+    - returns observation 추가는 μ 분리의 근본 해법이지만 HMM의 state-assignment 구조를 바꿔 Tail Capture와 필연적 trade-off
+    - TVTP 드라이버 확장(trend 추가)은 초기화 방향에 매우 민감 → W_init 방향이 잘못되면 CHOP local optimum 수렴
+    - CHOP guidance 추가는 CHOP을 억제하지 않고 오히려 명확화하는 역효과
+
+---
+
 ## [2026-05-07] v2.0.0 Phase 6 TVTP Asymmetric Bias: Structural CRISIS Entry Penalty (Claude Sonnet 4.6)
 - **Status**: Validated (OOS Tail Capture PASS, IS Left-Tail Capture PASS)
 - **Problem**: v1.9.0(v25_p5b_crisis) 3가지 구조적 원인: (1) CRISIS freq 17.5% — `tvtp_b=eye(4)*3.0` 대칭으로 CRISIS 진입 확률이 다른 상태와 동일. freq_penalty가 posteriors를 간접 제약하는 것만으로 TVTP transition 자체를 바꾸지 못함. (2) CRISIS MU 양수 — guidance threshold 15%가 너무 많은 이벤트를 CRISIS label로 부여 → 방향성 없는 이벤트 혼입. (3) Switches 553 — CRISIS 진입 장벽이 낮은 것이 근본 원인.
