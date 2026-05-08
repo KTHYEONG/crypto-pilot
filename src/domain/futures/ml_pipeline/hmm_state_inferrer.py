@@ -44,6 +44,69 @@ _logger = logging.getLogger(__name__)
 
 _SEMANTIC_ORDER = list(HMM_SEMANTIC_PROB_COLUMNS)
 
+# Phase 4: weaker BULL MSE guidance vs CRISIS so bull share is not collapsed (bear overhang).
+_GUIDANCE_BULL_LL_WEIGHT = 550.0
+_GUIDANCE_CRISIS_LL_WEIGHT = 2000.0
+
+
+def _calibrate_crisis_logit_offset(
+    sem_probs: np.ndarray,
+    target_mean_crisis: float = 0.07,
+    delta_hi_max: float = 80.0,
+    bisect_rounds: int = 48,
+) -> np.ndarray:
+    """Cap series-mean P(CRISIS) without global column scaling: CRISIS gets exp(-delta) vs others (logit shift).
+
+    Keeps relative weights among BULL/BEAR/CHOP unchanged per row; avoids mean-scaling overcorrection that
+    flips idxmax vs BEAR on strong-crisis bars.
+    """
+    p = np.asarray(sem_probs, dtype=np.float64)
+    p = np.clip(p, 1e-15, 1.0)
+    p = p / p.sum(axis=1, keepdims=True)
+
+    mean_c = float(np.mean(p[:, 3]))
+    if mean_c <= target_mean_crisis + 1e-14:
+        return p.copy()
+
+    def apply_delta(delta: float) -> np.ndarray:
+        w = np.ones_like(p)
+        w[:, 3] = np.exp(-delta)
+        q = p * w
+        q /= q.sum(axis=1, keepdims=True)
+        return q
+
+    def crisis_mean(delta: float) -> float:
+        q = apply_delta(delta)
+        return float(np.mean(q[:, 3]))
+
+    hi = 1.0
+    while crisis_mean(hi) > target_mean_crisis and hi < delta_hi_max:
+        hi = min(hi * 2.0, delta_hi_max)
+
+    if crisis_mean(hi) > target_mean_crisis:
+        _logger.warning(
+            "Crisis logit-offset: delta capped at %s, mean(P_crisis)=%.4f > target %.4f",
+            hi,
+            crisis_mean(hi),
+            target_mean_crisis,
+        )
+        return apply_delta(hi)
+
+    lo = 0.0
+    for _ in range(bisect_rounds):
+        mid = 0.5 * (lo + hi)
+        if crisis_mean(mid) > target_mean_crisis:
+            lo = mid
+        else:
+            hi = mid
+    return apply_delta(hi)
+
+
+def _normalized_entropy_k4(probs_4: np.ndarray) -> np.ndarray:
+    p = np.clip(np.asarray(probs_4, dtype=np.float64), 1e-12, 1.0)
+    return (-np.sum(p * np.log(p), axis=1) / np.log(4.0)).astype(np.float64)
+
+
 # --- JAX Student-t Distribution Implementation ---
 
 @jax.jit
@@ -186,9 +249,9 @@ def _compute_nll(
     params: dict[str, Any],
     observations: jnp.ndarray,
     mask: jnp.ndarray,
-    guidance_mask: jnp.ndarray,
+    guidance_masks: jnp.ndarray,
 ) -> jnp.ndarray:
-    """Compute Negative Log-Likelihood with TVTP, Sticky Prior, and Guidance."""
+    """Compute Negative Log-Likelihood with TVTP, Sticky Prior, dual Guidance (Phase 3 + Phase 4 weights)."""
     tvtp_z = observations[:, jnp.array(_TVTP_FEATURE_INDICES)]
     log_trans_mats = _compute_tvtp_matrices(tvtp_z, params["tvtp_W"], params["tvtp_b"])
     log_alphas, incremental_lls = _forward_pass(
@@ -224,15 +287,28 @@ def _compute_nll(
     semantic_penalty = 1000.0 * ll_scale * (p_02 + p_21 + p_13 + p_crisis_val + p_crisis_vol)
 
     posteriors = jax.nn.softmax(log_alphas, axis=1)
-    # Adaptive: 2000x ll_scale for guidance (recalibrated from 10000x)
-    guidance_loss = 2000.0 * ll_scale * jnp.mean(mask * (posteriors[:, 3] - guidance_mask)**2)
+    bull_tgt = guidance_masks[:, 0]
+    crisis_tgt = guidance_masks[:, 1]
+    guidance_loss = ll_scale * (
+        _GUIDANCE_BULL_LL_WEIGHT * jnp.mean(mask * (posteriors[:, 0] - bull_tgt) ** 2)
+        + _GUIDANCE_CRISIS_LL_WEIGHT * jnp.mean(mask * (posteriors[:, 3] - crisis_tgt) ** 2)
+    )
 
-    # State Frequency Penalty: CRISIS (state 3) target 3~7% (bidirectional)
-    crisis_freq = jnp.mean(posteriors[:, 3] * mask) / (jnp.mean(mask) + 1e-9)
-    # Adaptive: 30x ll_scale — bidirectional cap+floor (P5.B: 10→30 for real freq enforcement)
-    freq_penalty = 30.0 * ll_scale * (
-        jnp.maximum(0.0, crisis_freq - 0.07) +   # cap at 7%
-        jnp.maximum(0.0, 0.03 - crisis_freq)       # floor at 3%
+    # Phase 3: frequency anchors for all four states (posterior mass share on masked timesteps)
+    denom = jnp.mean(mask) + 1e-9
+    bull_f = jnp.mean(posteriors[:, 0] * mask) / denom
+    bear_f = jnp.mean(posteriors[:, 1] * mask) / denom
+    chop_f = jnp.mean(posteriors[:, 2] * mask) / denom
+    crisis_f = jnp.mean(posteriors[:, 3] * mask) / denom
+
+    def _band(freq: jnp.ndarray, lo: float, hi: float) -> jnp.ndarray:
+        return 2.0 * jnp.square(jnp.maximum(0.0, freq - hi)) + 0.5 * jnp.square(jnp.maximum(0.0, lo - freq))
+
+    freq_penalty = ll_scale * T * (
+        _band(bull_f, 0.25, 0.50)
+        + _band(bear_f, 0.10, 0.25)
+        + _band(chop_f, 0.25, 0.45)
+        + _band(crisis_f, 0.03, 0.07)
     )
 
     l2_penalty = 0.001 * jnp.sum(params["tvtp_W"]**2)
@@ -243,51 +319,54 @@ def _compute_nll(
 def _train_hmm_loop(
     X: jnp.ndarray,
     mask: jnp.ndarray,
-    guidance_mask: jnp.ndarray,
+    guidance_masks: jnp.ndarray,
     params: dict[str, Any],
     opt_state: Any,
     n_iter: int,
     tol: float,
     optimizer: optax.GradientTransformation,
 ) -> tuple[dict[str, Any], Any, jnp.ndarray, bool]:
-    """Compiled HMM training loop with early stopping and guidance."""
+    """Compiled HMM training loop with early stopping and dual guidance."""
     def cond_fn(state):
         i, _, _, loss, prev_loss, converged = state
         return (i < n_iter) & (~converged)
 
     def body_fun(state):
         i, p, opt_s, loss, _, _ = state
-        current_loss, grads = jax.value_and_grad(_compute_nll)(p, X, mask, guidance_mask)
+        current_loss, grads = jax.value_and_grad(_compute_nll)(p, X, mask, guidance_masks)
         updates, new_opt_s = optimizer.update(grads, opt_s, p)
         new_p = optax.apply_updates(p, updates)
         diff = jnp.abs(current_loss - loss)
         converged = (i > 5) & (diff < tol)
         return i + 1, new_p, new_opt_s, current_loss, loss, converged
 
-    initial_loss = _compute_nll(params, X, mask, guidance_mask)
+    initial_loss = _compute_nll(params, X, mask, guidance_masks)
     init_val = (0, params, opt_state, initial_loss, initial_loss + 1e6, False)
     final_val = jax.lax.while_loop(cond_fn, body_fun, init_val)
     return final_val[1], final_val[2], final_val[3], final_val[5]
 
 
 @jax.jit
-def _jax_inference(
+def _jax_posterior_and_viterbi(
     observations: jnp.ndarray,
     mask: jnp.ndarray,
     params: dict[str, Any],
-) -> jnp.ndarray:
-    """Consolidated JAX inference call with TVTP using Viterbi decoding."""
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Forward-filter posterior (softmax(log_alpha)) + Viterbi one-hot for sticky/duration only."""
     tvtp_z = observations[:, jnp.array(_TVTP_FEATURE_INDICES)]
     log_trans_mats = _compute_tvtp_matrices(tvtp_z, params["tvtp_W"], params["tvtp_b"])
-    return _viterbi_decode(
-        observations,
-        mask,
-        jax.nn.log_softmax(params["initial"]),
-        log_trans_mats,
-        params["locs"],
-        jnp.exp(params["log_scales"]),
-        jnp.exp(params["log_dfs"]) + 2.0,
+    log_init = jax.nn.log_softmax(params["initial"])
+    locs = params["locs"]
+    scales = jnp.exp(params["log_scales"])
+    dfs = jnp.exp(params["log_dfs"]) + 2.0
+    log_alphas, _ = _forward_pass(
+        observations, mask, log_init, log_trans_mats, locs, scales, dfs
     )
+    posterior = jax.nn.softmax(log_alphas, axis=1)
+    viterbi_onehot = _viterbi_decode(
+        observations, mask, log_init, log_trans_mats, locs, scales, dfs
+    )
+    return posterior, viterbi_onehot
 
 
 # --- Utility Functions ---
@@ -406,7 +485,7 @@ def _quantile_transform(X: np.ndarray, transformers: dict) -> np.ndarray:
 
 @dataclass
 class HMMStateInferrer:
-    """Infers market regimes using Guided 4-State TVTP-HMM (Phase 1)."""
+    """Guided 4-State TVTP-HMM; Phase 4 bull-guidance rebalance; Phase 5 logit-offset crisis cap + sticky durations."""
 
     n_states: int = 4
     max_states: int = 4
@@ -417,33 +496,41 @@ class HMMStateInferrer:
     _last_params: dict[str, Any] | None = None
     _last_opt: Any | None = None
 
-    def _generate_stress_mask(self, features_df: pd.DataFrame, returns_ser: pd.Series) -> np.ndarray:
-        """Generate guidance_mask: multi-modal AND condition — directional crash + macro stress."""
+    def _generate_guidance_masks(self, features_df: pd.DataFrame, returns_ser: pd.Series) -> np.ndarray:
+        """Stacked targets (T, 2): column 0 = BULL supervision, column 1 = CRISIS supervision."""
+        # --- CRISIS: multi-modal crash + (vol spike OR OI surge), sticky ---
         expanding_ret_thresh = returns_ser.expanding(min_periods=200).quantile(0.08).fillna(0.0)
-        ret_stress = (returns_ser < expanding_ret_thresh)
+        ret_stress = returns_ser < expanding_ret_thresh
 
-        # Vol spike: macro_vol_24h > expanding 95th percentile (P5.B: 85→95 for extreme-only CRISIS guidance)
         vol_series = features_df.get("macro_vol_24h", pd.Series(0.0, index=features_df.index))
         expanding_vol_thresh = vol_series.expanding(min_periods=200).quantile(0.95).fillna(
             vol_series.expanding().median().fillna(0.0)
         )
-        vol_stress = (vol_series > expanding_vol_thresh)
+        vol_stress = vol_series > expanding_vol_thresh
 
-        # OI surge: macro_oi_delta_24h > expanding 95th percentile (P5.B: 85→95 to reduce false positives)
         oi_series = features_df.get("macro_oi_delta_24h", pd.Series(0.0, index=features_df.index))
         expanding_oi_thresh = oi_series.abs().expanding(min_periods=200).quantile(0.95).fillna(0.0)
-        oi_stress = (oi_series.abs() > expanding_oi_thresh)
+        oi_stress = oi_series.abs() > expanding_oi_thresh
 
-        # Multi-modal: directional crash AND (vol spike OR OI surge)
         combined_stress = ret_stress & (vol_stress | oi_stress)
-        stress_mask_raw = combined_stress.astype(np.float32).to_numpy()
-        return _numba_sticky_labels(stress_mask_raw.astype(np.int32), min_duration=4).astype(np.float32)
+        crisis_raw = combined_stress.astype(np.float32).to_numpy()
+        crisis_mask = _numba_sticky_labels(crisis_raw.astype(np.int32), min_duration=4).astype(np.float32)
+
+        # --- BULL: Phase 4 — relaxed quantile (0.92→0.88) so bull_mask is less sparse ---
+        bull_q = returns_ser.expanding(min_periods=200).quantile(0.88).fillna(0.0)
+        bull_ret = returns_ser > bull_q
+        trend_ser = features_df.get("macro_trend_168h", pd.Series(0.0, index=features_df.index))
+        bull_raw = (bull_ret & (trend_ser > 0)).astype(np.float32).to_numpy()
+        bull_mask = _numba_sticky_labels(bull_raw.astype(np.int32), min_duration=4).astype(np.float32)
+
+        return np.stack([bull_mask, crisis_mask], axis=1).astype(np.float64)
 
     def _warmup_jit(self, n_feats: int) -> None:
         """Warm up JAX HMM JIT cache."""
         if self._warmed_up: return
         _logger.info("Warming up JAX HMM JIT cache (4-states, TVTP, Guided, FEATS=%d)...", n_feats)
-        dummy_obs, dummy_mask, dummy_gm = jnp.zeros((MAX_HMM_WINDOW, n_feats)), jnp.zeros(MAX_HMM_WINDOW), jnp.zeros(MAX_HMM_WINDOW)
+        dummy_obs, dummy_mask = jnp.zeros((MAX_HMM_WINDOW, n_feats)), jnp.zeros(MAX_HMM_WINDOW)
+        dummy_gm = jnp.zeros((MAX_HMM_WINDOW, 2))
         params = {"initial": jnp.zeros(4), "tvtp_W": jnp.zeros((4, 4, _N_TVTP_FEATS)), "tvtp_b": jnp.eye(4) * 1.0, "locs": jnp.zeros((4, n_feats)), "log_scales": jnp.zeros((4, n_feats)), "log_dfs": jnp.array([1.0, 1.0, 1.0, 0.5])}
         optimizer = optax.adam(learning_rate=0.01)
         opt_state = optimizer.init(params)
@@ -452,15 +539,15 @@ class HMMStateInferrer:
         _ = _forward_pass(dummy_obs, dummy_mask, jax.nn.log_softmax(params["initial"]), log_trans_mats, params["locs"], jnp.exp(params["log_scales"]), jnp.exp(params["log_dfs"]) + 2.0)
         _ = _compute_nll(params, dummy_obs, dummy_mask, dummy_gm)
         _, _, _, _ = _train_hmm_loop(dummy_obs, dummy_mask, dummy_gm, params, opt_state, 1, 1e-4, optimizer)
-        _ = _jax_inference(dummy_obs, dummy_mask, params)
+        _ = _jax_posterior_and_viterbi(dummy_obs, dummy_mask, params)
         self._warmed_up = True
 
     def fit_predict_systemic(self, features_df: pd.DataFrame, returns_ser: pd.Series, is_end_idx: int, symbol: str = "Market", tf: str = "1h") -> pd.DataFrame:
         """Expanding-window Guided 4-State TVTP-HMM."""
         cm = CacheManager(FUTURES_CACHE_DIR, max_files=15, max_size_mb=1000.0)
-        deps = {"symbol": symbol, "tf": tf, "data_len": len(features_df), "ver": "v26_p6_tvtp", "feat_cols": sorted(list(SYSTEMIC_HMM_FEATURE_COLUMNS))}
+        deps = {"symbol": symbol, "tf": tf, "data_len": len(features_df), "ver": "v32_p4_guid_p5_logit_cal", "feat_cols": sorted(list(SYSTEMIC_HMM_FEATURE_COLUMNS))}
         tag = cm.generate_hash(deps, source_files=[Path(__file__).resolve()])
-        cache_path = cm.get_cache_path(f"HMM_v26_p6_{symbol}_{tf}_len{len(features_df)}", ".parquet", tag)
+        cache_path = cm.get_cache_path(f"HMM_v32_p4p5_{symbol}_{tf}_len{len(features_df)}", ".parquet", tag)
         if cache_path.exists():
             try: return pd.read_parquet(cache_path)
             except Exception: pass
@@ -470,16 +557,17 @@ class HMMStateInferrer:
         if n < 200: return self._zeros_semantic(features_df)
         num_feats = len(feat_cols)
         self._warmup_jit(num_feats)
-        X_raw, gm_raw = X_frame.to_numpy(dtype=np.float64), self._generate_stress_mask(features_df, returns_ser)
-        out_cols = [*_SEMANTIC_ORDER, "hmm_entropy", "hmm_expected_duration", "hmm_current_duration"]
+        X_raw, gm_raw = X_frame.to_numpy(dtype=np.float64), self._generate_guidance_masks(features_df, returns_ser)
+        out_cols = [*_SEMANTIC_ORDER, "hmm_entropy", "hmm_expected_duration", "hmm_current_duration", "hmm_hard_state"]
         results, params, transformers, optimizer = np.full((n, len(out_cols)), 0.0, dtype=np.float64), None, None, optax.adam(learning_rate=0.02)
+        viterbi_states_buf = np.zeros(n, dtype=np.int32)
         for t in range(500, n, self.predict_step):
             if t % self.fit_step == 0 or params is None:
                 win_start, win_end = max(0, t - MAX_HMM_WINDOW), max(1, t - 1)
                 X_win, gm_win = X_raw[win_start:win_end], gm_raw[win_start:win_end]
                 L = len(X_win)
                 X_train_raw, transformers = _quantile_scaling(X_win)
-                X_pad, M_pad, GM_pad = np.zeros((MAX_HMM_WINDOW, num_feats)), np.zeros(MAX_HMM_WINDOW), np.zeros(MAX_HMM_WINDOW)
+                X_pad, M_pad, GM_pad = np.zeros((MAX_HMM_WINDOW, num_feats)), np.zeros(MAX_HMM_WINDOW), np.zeros((MAX_HMM_WINDOW, 2))
                 X_pad[:L], M_pad[:L], GM_pad[:L] = X_train_raw, 1.0, gm_win
                 if self._last_params:
                     curr_p = self._last_params
@@ -492,20 +580,20 @@ class HMMStateInferrer:
                     locs[0, 0], locs[0, 2], locs[0, 3] = 2.5, -1.0, -1.0
                     locs[1, 0], locs[1, 2], locs[1, 3] = -1.5, 1.0, 1.0
                     locs[2, 0], locs[2, 2], locs[2, 3] = 0.0, -1.0, -1.0
-                    locs[3, 0], locs[3, 2], locs[3, 3] = -3.5, 3.5, 3.5
+                    # P2: CRISIS loc init more extreme (-5.0 trend, 4.0 vol) → fewer moderate high-vol periods misassigned
+                    locs[3, 0], locs[3, 2], locs[3, 3] = -5.0, 4.0, 4.0
 
                     W_init = np.zeros((4, 4, _N_TVTP_FEATS), dtype=np.float32)
                     # TVTP indices: cs_dispersion(0→4), oi_delta(1→5), funding_mom(2→6), liq_proxy(3→7), lsr_delta(4→8)
                     # Crisis entry driven by oi_delta(local idx 1) and liq_proxy(local idx 3)
                     W_init[:, 3, 1], W_init[:, 3, 3] = 3.0, -2.5
-                    # Asymmetric TVTP bias: CRISIS entry is structurally penalized
-                    # BULL/CHOP→CRISIS: -4.0 bias (log_softmax ≈ 0.5%),
-                    # BEAR→CRISIS: -2.0 (≈ 7%), CRISIS→CRISIS: 5.0 (≈ 99.9% sticky)
+                    # P2: Stronger CRISIS entry suppression — even at n_iter=100 structural prior holds
+                    # BULL/CHOP→CRISIS: -6.0 (≈0.01%), BEAR→CRISIS: -4.0 (≈0.05%), CRISIS→CRISIS: 6.0 (sticky)
                     _tvtp_b_init = np.array([
-                        [ 3.0,  0.0,  0.0, -4.0],  # From BULL → CRISIS hard
-                        [ 0.0,  3.0,  0.0, -2.0],  # From BEAR → CRISIS moderate
-                        [ 0.0,  0.0,  3.0, -4.0],  # From CHOP → CRISIS hard
-                        [ 0.0,  0.0,  0.0,  5.0],  # From CRISIS → very sticky
+                        [ 3.0,  0.0,  0.0, -6.0],  # From BULL → CRISIS very hard
+                        [ 0.0,  3.0,  0.0, -4.0],  # From BEAR → CRISIS hard
+                        [ 0.0,  0.0,  3.0, -6.0],  # From CHOP → CRISIS very hard
+                        [ 0.0,  0.0,  0.0,  6.0],  # From CRISIS → very sticky
                     ], dtype=np.float32)
                     curr_p = {
                         "initial": jnp.zeros(4),
@@ -529,29 +617,44 @@ class HMMStateInferrer:
                 L_inf = len(X_inf_raw)
                 X_inf_pad, M_inf_pad = np.zeros((MAX_HMM_WINDOW, num_feats)), np.zeros(MAX_HMM_WINDOW)
                 X_inf_pad[:L_inf], M_inf_pad[:L_inf] = X_inf_raw, 1.0
-                all_probs = np.asarray(_jax_inference(jnp.array(X_inf_pad), jnp.array(M_inf_pad), params))[:L_inf]
+                post_pad, vit_pad = _jax_posterior_and_viterbi(
+                    jnp.array(X_inf_pad), jnp.array(M_inf_pad), params
+                )
+                post_np = np.asarray(post_pad)[:L_inf]
+                vit_np = np.asarray(vit_pad)[:L_inf]
+                viterbi_hard = np.argmax(vit_np, axis=1).astype(np.int32)
                 write_offset = write_start - inf_start
-                combined_probs = all_probs[write_offset:]
+                combined_probs = post_np[write_offset:]
+                viterbi_write = viterbi_hard[write_offset:]
+                viterbi_states_buf[write_start:t] = viterbi_write
                 p_clip = np.clip(combined_probs, 1e-12, 1.0)
                 entropy = -np.sum(p_clip * np.log(p_clip), axis=1) / np.log(4)
-                trans_mats = np.asarray(jnp.exp(_compute_tvtp_matrices(jnp.array(X_inf_raw[write_offset:, :][:, list(_TVTP_FEATURE_INDICES)]), params["tvtp_W"], params["tvtp_b"])))
-                L_write = len(combined_probs)
-                expected_dur = np.array([1.0 / (1.0 - np.diag(trans_mats[i]).clip(0.0, 0.95))[np.argmax(combined_probs[i])] for i in range(L_write)])
-                results[write_start:t, :4], results[write_start:t, 4], results[write_start:t, 5] = combined_probs, entropy, expected_dur
+                results[write_start:t, :4], results[write_start:t, 4] = combined_probs, entropy
             except Exception as e: _logger.error("HMM Inference failed: %s", e)
         probs_df = pd.DataFrame(results, index=features_df.index, columns=out_cols).ffill().bfill().fillna(0.0)
-        
-        # Viterbi decoding already returns one-hot; apply min-duration (sticky) constraint
-        sem_probs_np = probs_df[_SEMANTIC_ORDER].to_numpy()
-        hard_states = np.argmax(sem_probs_np, axis=1).astype(np.int32)
-        sticky_hard_states = _numba_sticky_labels(hard_states, min_duration=12)
-        
-        # Convert back to one-hot for output consistency
-        viterbi_onehot = np.zeros_like(sem_probs_np)
-        viterbi_onehot[np.arange(len(sticky_hard_states)), sticky_hard_states] = 1.0
-        probs_df[_SEMANTIC_ORDER] = viterbi_onehot
-        
+
+        sem_cal = _calibrate_crisis_logit_offset(
+            probs_df[list(_SEMANTIC_ORDER)].to_numpy(dtype=np.float64), target_mean_crisis=0.07
+        )
+        probs_df[list(_SEMANTIC_ORDER)] = sem_cal
+        probs_df["hmm_entropy"] = _normalized_entropy_k4(sem_cal)
+
+        sticky_hard_states = _numba_sticky_labels(viterbi_states_buf.astype(np.int32), min_duration=24)
+        probs_df["hmm_hard_state"] = sticky_hard_states.astype(np.float64)
         probs_df["hmm_current_duration"] = _numba_current_duration(sticky_hard_states)
+
+        if params is not None and transformers is not None:
+            X_scaled_full = _quantile_transform(X_raw, transformers)
+            Z_full = jnp.asarray(X_scaled_full[:, list(_TVTP_FEATURE_INDICES)])
+            log_tm_full = _compute_tvtp_matrices(Z_full, params["tvtp_W"], params["tvtp_b"])
+            P_full = np.asarray(jnp.exp(log_tm_full))
+            n_row = len(features_df)
+            sh = sticky_hard_states.astype(np.int64)
+            diag_clipped = np.clip(np.diagonal(P_full, axis1=1, axis2=2), 0.0, 0.95)
+            probs_df["hmm_expected_duration"] = (1.0 / (1.0 - diag_clipped[np.arange(n_row), sh])).astype(np.float64)
+        else:
+            probs_df["hmm_expected_duration"] = 0.0
+
         out = probs_df.reset_index().rename(columns={probs_df.index.name or "index": "datetime"})
         try: out.to_parquet(cache_path)
         except Exception: pass
@@ -559,7 +662,7 @@ class HMMStateInferrer:
 
     def _zeros_semantic(self, df: pd.DataFrame) -> pd.DataFrame:
         u = 1.0 / float(len(_SEMANTIC_ORDER))
-        cols = [*_SEMANTIC_ORDER, "hmm_entropy", "hmm_expected_duration", "hmm_current_duration"]
+        cols = [*_SEMANTIC_ORDER, "hmm_entropy", "hmm_expected_duration", "hmm_current_duration", "hmm_hard_state"]
         out = pd.DataFrame(np.zeros((len(df), len(cols))), index=df.index, columns=cols)
         for c in _SEMANTIC_ORDER: out[c] = u
         return out.reset_index().rename(columns={out.index.name or "index": "datetime"})
