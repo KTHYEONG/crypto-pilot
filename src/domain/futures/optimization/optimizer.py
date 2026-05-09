@@ -16,6 +16,7 @@ import numpy as np
 import optuna
 import pandas as pd
 from optuna.trial import FrozenTrial
+from sklearn.linear_model import LogisticRegression
 
 from config.opt_config import OPT_FUTURES_CONFIG
 from config.settings import FUTURES_INITIAL_BALANCE, SLIPPAGE_RATE, TRADING_FEE_RATE
@@ -95,6 +96,75 @@ EMBARGO_BARS: dict[str, int] = {
     "1h": compute_embargo_bars("1h"),
 }
 
+
+class SignalCalibrator:
+    """Platt Scaling: Map Alpha scores (0-1) to true Win Probabilities using IS data."""
+
+    def __init__(self) -> None:
+        self.model = LogisticRegression(penalty=None, solver="lbfgs")
+        self.is_fitted = False
+        self.mean_b = 1.05  # Estimated win/loss ratio (Profit Factor)
+
+    def fit(self, alphas: np.ndarray, returns: np.ndarray) -> None:
+        """Fit calibration model and estimate average win/loss ratio."""
+        # y=1 if forward return is positive
+        y = (returns > 0.0001).astype(int)
+        X = alphas.reshape(-1, 1)
+
+        if len(np.unique(y)) > 1:
+            try:
+                self.model.fit(X, y)
+                self.is_fitted = True
+                _logger.info(
+                    "[SignalCalibrator] Fitted Platt Scaling: coef=%.4f intercept=%.4f",
+                    self.model.coef_[0][0],
+                    self.model.intercept_[0],
+                )
+            except Exception as e:
+                _logger.warning("[SignalCalibrator] Logistic fit failed: %s", e)
+
+        # Estimate average win/loss ratio (b) for Kelly
+        pos_rets = returns[returns > 0]
+        neg_rets = np.abs(returns[returns < 0])
+        if pos_rets.size > 0 and neg_rets.size > 0:
+            self.mean_b = float(np.mean(pos_rets) / np.mean(neg_rets))
+            _logger.info("[SignalCalibrator] Estimated b (Avg Win/Loss)=%.4f", self.mean_b)
+
+    def predict_prob(self, alphas: np.ndarray) -> np.ndarray:
+        """Predict win probability p."""
+        if not self.is_fitted:
+            # Fallback: sigmoid-like mapping centered at 0.5
+            z = (alphas - 0.5) * 8.0
+            return 1.0 / (1.0 + np.exp(-z))
+        X = alphas.reshape(-1, 1)
+        return self.model.predict_proba(X)[:, 1]
+
+
+class DynamicKellySizer:
+    """Fractional Kelly sizing with HMM and Crisis modulation."""
+
+    @staticmethod
+    def calculate(
+        p: np.ndarray,
+        b: float,
+        hmm_crisis: np.ndarray,
+        hmm_mod: np.ndarray,
+        lam: float = 0.5,
+        crisis_gamma: float = 1.0,
+    ) -> np.ndarray:
+        """Compute optimal fractional Kelly size."""
+        # f* = p - (1-p)/b
+        b = max(b, 0.5)
+        f_star = p - (1.0 - p) / b
+        f_star = np.clip(f_star, 0.0, 1.0)
+
+        # HMM Crisis Scale
+        crisis_scale = (1.0 - hmm_crisis) ** crisis_gamma
+
+        # Final Size = Kelly * Scale (lam) * Modulator * Crisis
+        return f_star * lam * hmm_mod * crisis_scale
+
+
 @dataclass
 class MLPhaseDContext:
     """Shared precomputed context passed to each Optuna trial in Phase D."""
@@ -109,6 +179,9 @@ class MLPhaseDContext:
     cpcv_block_slices: list[dict[str, Any]] | None = None
     holdout_slice: dict[str, np.ndarray] | None = None
     multi_alignment_info: dict[str, Any] | None = None
+    # SOTA: Mathematical Policy Components
+    calibrator: SignalCalibrator | None = None
+    estimated_b: float = 1.05
 
 
 def _hmm_columns_for_dyn_leverage(df: pd.DataFrame) -> list[str]:
@@ -258,12 +331,29 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
             return
         ctx.multi_alignment_info = info
 
-        # get_tiered_signals is removed as signal_cache.py is deleted. 
-        # ML pipeline should have signals pre-computed in raw_full.
-        # If it was using legacy signal registry, that is also deleted.
-        # We assume FuturesMLStrategy handles the signal generation or signals are in raw data.
-        # In the original objective_ml.py, it was calling get_tiered_signals.
-        # Since signals are now ML-based, they should be in the dataframe already.
+        # 1.5 SOTA: Signal Calibration (Platt Scaling)
+        all_alphas = []
+        all_returns = []
+        eff_len = int(info["eff_ref_len"])
+        for sym in ctx.symbols:
+            start_idx = int(info["alignment_offsets"][sym])
+            sym_df = ctx.data_maps[sym][ctx.tf]
+            # Calibration must happen on the aligned IS zone (eff_len)
+            raw_is = sym_df.iloc[start_idx : start_idx + eff_len]
+            if "ml_alpha_00" in raw_is.columns:
+                alpha_arr = raw_is["ml_alpha_00"].to_numpy(dtype=np.float64)
+                # Forward return (12-bar) for probability calibration to capture longer edge
+                fwd_ret = raw_is["close"].pct_change(12).shift(-12).to_numpy(dtype=np.float64)
+                mask = ~np.isnan(alpha_arr) & ~np.isnan(fwd_ret)
+                if mask.any():
+                    all_alphas.append(alpha_arr[mask])
+                    all_returns.append(fwd_ret[mask])
+
+        if all_alphas:
+            calib = SignalCalibrator()
+            calib.fit(np.concatenate(all_alphas), np.concatenate(all_returns))
+            ctx.calibrator = calib
+            ctx.estimated_b = calib.mean_b
 
         # 2. Build Global Aligned Arrays
         prebuilt_full: dict[str, dict[str, np.ndarray]] = {}
@@ -298,16 +388,43 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
                 trimmed_sig["funding_rate_sum"] = raw_full["funding_rate_sum"].to_numpy(
                     dtype=np.float64, copy=False
                 )
-            # Keep true probabilities if they exist from MetaLabeler, else default to 1.0
-            trimmed_sig["ml_calib_prob"] = raw_full.get("ml_calib_prob", 1.0)
-            trimmed_sig["ml_calib_prob_long"] = raw_full.get("ml_calib_prob_long", 1.0)
-            trimmed_sig["ml_calib_prob_short"] = raw_full.get("ml_calib_prob_short", 1.0)
-            gp_pre = (
+
+            # SOTA: Predict win probabilities p using calibrated model and compute Kelly f*
+            gp_base = (
                 raw_full["ml_alpha_00"].to_numpy(dtype=np.float64, copy=False)
                 if "ml_alpha_00" in raw_full.columns
-                else np.zeros(len(trimmed_sig), dtype=np.float64)
+                else np.zeros(len(raw_full), dtype=np.float64)
             )
-            gp_centered = gp_pre - 0.5
+            if ctx.calibrator:
+                p_base = ctx.calibrator.predict_prob(gp_base)
+                b = ctx.estimated_b
+                # f* = p - (1-p)/b
+                f_base = p_base - (1.0 - p_base) / b
+                trimmed_sig["ml_calib_prob"] = np.clip(f_base, 0.0, 1.0)
+
+                if "ml_alpha_long" in raw_full.columns:
+                    p_l = ctx.calibrator.predict_prob(
+                        raw_full["ml_alpha_long"].to_numpy(dtype=np.float64, copy=False)
+                    )
+                    f_l = p_l - (1.0 - p_l) / b
+                    trimmed_sig["ml_calib_prob_long"] = np.clip(f_l, 0.0, 1.0)
+                else:
+                    trimmed_sig["ml_calib_prob_long"] = trimmed_sig["ml_calib_prob"]
+
+                if "ml_alpha_short" in raw_full.columns:
+                    p_s = ctx.calibrator.predict_prob(
+                        raw_full["ml_alpha_short"].to_numpy(dtype=np.float64, copy=False)
+                    )
+                    f_s = p_s - (1.0 - p_s) / b
+                    trimmed_sig["ml_calib_prob_short"] = np.clip(f_s, 0.0, 1.0)
+                else:
+                    trimmed_sig["ml_calib_prob_short"] = trimmed_sig["ml_calib_prob"]
+            else:
+                trimmed_sig["ml_calib_prob"] = raw_full.get("ml_calib_prob", 1.0)
+                trimmed_sig["ml_calib_prob_long"] = raw_full.get("ml_calib_prob_long", 1.0)
+                trimmed_sig["ml_calib_prob_short"] = raw_full.get("ml_calib_prob_short", 1.0)
+
+            gp_centered = gp_base - 0.5
             trimmed_sig["trend_direction"] = np.where(
                 np.abs(gp_centered) > 0.01, np.sign(gp_centered), 0.0
             ).astype(np.float64)
@@ -557,68 +674,41 @@ def build_phase_d_enqueue_params_from_deploy_json(
 
 
 def _suggest_ml_phase_d(trial: optuna.Trial) -> dict[str, Any]:
-    """Optuna knobs: narrow ATR/trail/vol; emphasize portfolio policy (caps, top-k, edge)."""
+    """SOTA: Narrow Optuna to Tail-Risk/Defense parameters only.
+    
+    1. vol_target_annual (TARGET_ANN_VOL)
+    2. hmm_crisis_penalty (CRISIS_GAMMA)
+    3. atr_stop_loss_mult (ATR_MULT)
+    """
     policy = load_portfolio_policy_config(OPT_FUTURES_CONFIG)
-    shield = bool(OPT_FUTURES_CONFIG.get("FUTURES_TIER1_SHIELD_MODE", False))
 
-    atr_p = int(trial.suggest_categorical("ATR_PERIOD", [28, 30, 32]))
-    atr_m = float(trial.suggest_categorical("ATR_MULT", [2.25, 2.5, 2.75]))
-    trail_m = float(trial.suggest_categorical("TRAIL_MULT", [2.5, 3.0]))
-    s_tp = float(trial.suggest_categorical("SHORT_TP_MULT", [1.0, 1.5]))
-    l_scale = float(trial.suggest_categorical("LONG_SCALE_ATR_MULT", [2.0, 2.5]))
-    stress_vol = float(trial.suggest_categorical("STRESS_VOL_Z", [2.5, 3.0]))
-    pfk_win = int(trial.suggest_categorical("PFK_WINDOW", [40, 48, 60]))
+    # 1. Target Volatility (Annualized) - This scales the Kelly lam
+    ann_vol = float(trial.suggest_float("TARGET_ANN_VOL", 0.15, 0.40, step=0.05))
 
-    if shield:
-        bayes_c = float(trial.suggest_float("BAYESIAN_C", 5.0, 14.0, log=True))
-        kelly_s = float(trial.suggest_float("KELLY_SHRINKAGE", 0.52, 1.02))
-    else:
-        bayes_c = float(trial.suggest_float("BAYESIAN_C", 5.0, 15.0, log=True))
-        kelly_s = float(trial.suggest_float("KELLY_SHRINKAGE", 0.45, 1.20))
+    # 2. HMM Crisis Penalty (Gamma) - Power scaling of (1 - P(Crisis))
+    crisis_gamma = float(trial.suggest_float("CRISIS_GAMMA", 1.0, 3.0, step=0.5))
 
-    k_cap = min(4, max(policy.top_k_long, policy.top_k_short))
-    k_rank = int(trial.suggest_int("K_RANK", 1, max(1, k_cap)))
-    k_long = k_rank
-    k_short = k_rank
-    reb = int(trial.suggest_categorical("REBALANCE_BARS", [1, 3, 6, 12]))
-    crisis = float(trial.suggest_float("CRISIS_GAMMA", 1.0, 1.35, step=0.05))
-    max_exp_sym = float(
-        trial.suggest_float(
-            "MAX_EXPOSURE_PER_COIN",
-            max(0.05, policy.per_symbol_cap * 0.5),
-            policy.per_symbol_cap,
-            step=0.02,
-        )
-    )
-    max_exp_gross = float(
-        trial.suggest_float(
-            "MAX_EXPOSURE",
-            max(0.3, policy.gross_exposure_cap * 0.55),
-            policy.gross_exposure_cap,
-            step=0.05,
-        )
-    )
-    min_score_pct = float(trial.suggest_float("MIN_SCORE_PERCENTILE", 0.50, 0.70, step=0.05))
-    dd_thr = float(trial.suggest_float("DD_SCALING_THRESHOLD", 0.16, 0.24, step=0.01))
-    cs_z_thr = float(trial.suggest_float("CS_Z_SCORE_THRESHOLD", 0.75, 1.75, step=0.25))
+    # 3. ATR Stop Multiplier (Tail defense)
+    atr_m = float(trial.suggest_float("ATR_MULT", 3.0, 6.0, step=0.5))
 
-    fixed = _fixed_ml_phase_d_params()
-    sizing_m = "profit_factor_kelly"
+    # Fixed Policy parameters (no longer optimized)
+    # Entry/Exit logic is now mathematical
+    atr_p = 30
+    trail_m = atr_m # Trailing stop linked to ATR mult
+    s_tp = 2.0
+    l_scale = 3.0
+    
+    # Portfolio Constraints from Policy
+    max_exp_sym = policy.per_symbol_cap
+    max_exp_gross = policy.gross_exposure_cap
+    
+    # Sizing settings
+    sizing_m = "profit_factor_kelly" # Fixed to Kelly
 
     out = {
         "SIZING_METHOD": sizing_m,
-        "PFK_WINDOW": pfk_win,
-        "STRESS_VOL_Z": stress_vol,
-        "BAYESIAN_C": bayes_c,
-        "KELLY_SHRINKAGE": kelly_s,
-        "K_LONG": k_long,
-        "K_SHORT": k_short,
-        "REBALANCE_BARS": reb,
-        "MIN_SCORE_PERCENTILE": min_score_pct,
-        "RISK_PER_TRADE": float(
-            trial.suggest_categorical("RISK_PER_TRADE", [fixed["RISK_PER_TRADE"]])
-        ),
-        "CRISIS_GAMMA": crisis,
+        "TARGET_ANN_VOL": ann_vol,
+        "CRISIS_GAMMA": crisis_gamma,
         "ATR_PERIOD": atr_p,
         "ATR_MULT": atr_m,
         "TRAIL_MULT": trail_m,
@@ -626,8 +716,13 @@ def _suggest_ml_phase_d(trial: optuna.Trial) -> dict[str, Any]:
         "LONG_SCALE_ATR_MULT": l_scale,
         "MAX_EXPOSURE_PER_COIN": max_exp_sym,
         "MAX_EXPOSURE": max_exp_gross,
-        "DD_SCALING_THRESHOLD": dd_thr,
-        "CS_Z_SCORE_THRESHOLD": cs_z_thr,
+        "RISK_PER_TRADE": ann_vol, # Overloaded for Kelly lam scaling in sizer
+        "REBALANCE_BARS": 1, # Fast reaction
+        "K_LONG": policy.top_k_long,
+        "K_SHORT": policy.top_k_short,
+        "DD_SCALING_THRESHOLD": 0.20,
+        "CS_Z_SCORE_THRESHOLD": 1.0,
+        "MIN_SCORE_PERCENTILE": 0.50,
         "USE_CS_RANK_ENGINE": True,
     }
     return apply_policy_constraints(out, policy)
@@ -657,51 +752,34 @@ def _pf_and_ev_cost_from_trades(all_trades: np.ndarray) -> tuple[float, float]:
 
 
 def _base_engine_params(ml: dict[str, Any], tf: str) -> dict[str, Any]:
-    ks, bc = float(ml["KELLY_SHRINKAGE"]), float(ml["BAYESIAN_C"])
-    fk_frac = float(np.clip(0.35 * ks * (1.0 + 1.0 / bc), 0.05, 0.6))
+    # In SOTA mode, RISK_PER_TRADE is used as the Kelly Lambda (lam)
+    # Target Annual Vol is used to scale position sizes.
+    ann_vol = float(ml.get("TARGET_ANN_VOL", 0.20))
     lev = float(OPT_FUTURES_CONFIG.get("FUTURES_DISCOVERY_LEVERAGE", 5))
-    rpt = float(ml.get("RISK_PER_TRADE", 0.05))
-    if rpt * lev > 0.40:
-        rpt = 0.40 / max(lev, 1e-9)
+
     return {
         "TIMEFRAME": tf,
         "SIGNAL_TYPE": "ML_CALIB_PROB",
         "REGIME_TYPE": "EMA_ATR",
-        "SIZING_METHOD": str(ml.get("SIZING_METHOD", "profit_factor_kelly")),
-        "USE_CS_RANK_ENGINE": bool(ml.get("USE_CS_RANK_ENGINE", True)),
-        "K_LONG": int(ml.get("K_LONG", ml.get("K_RANK", 2))),
-        "K_SHORT": int(ml.get("K_SHORT", ml.get("K_RANK", 2))),
-        "REBALANCE_BARS": max(1, int(ml.get("REBALANCE_BARS", 6))),
-        "MIN_SCORE_PERCENTILE": float(ml.get("MIN_SCORE_PERCENTILE", 0.55)),
-        "CRISIS_GAMMA": float(ml.get("CRISIS_GAMMA", ml.get("CRISIS_GATE_PROB", 1.0))),
-        "CRISIS_GATE_PROB": float(ml.get("CRISIS_GAMMA", ml.get("CRISIS_GATE_PROB", 1.0))),
+        "SIZING_METHOD": "profit_factor_kelly",
+        "USE_CS_RANK_ENGINE": True,
+        "K_LONG": int(ml.get("K_LONG", 2)),
+        "K_SHORT": int(ml.get("K_SHORT", 2)),
+        "REBALANCE_BARS": int(ml.get("REBALANCE_BARS", 1)),
+        "MIN_SCORE_PERCENTILE": float(ml.get("MIN_SCORE_PERCENTILE", 0.50)),
+        "CRISIS_GAMMA": float(ml.get("CRISIS_GAMMA", 1.0)),
         "TRAIL_MULT": float(ml.get("TRAIL_MULT", 3.0)),
-        "PFK_WINDOW": int(ml.get("PFK_WINDOW", 60)),
-        "PFK_MIN_F": 0.1,
-        "KELLY_FRACTION": fk_frac,
-        "STRESS_VOL_Z": float(ml.get("STRESS_VOL_Z", 2.5)),
-        "STRESS_FR_Z": float(ml.get("STRESS_VOL_Z", 2.5)),
-        "FK_FRACTION": fk_frac,
-        "FK_EWMA_LAMBDA": 0.94,
-        "FK_TARGET_VOL": 0.02,
-        "FK_MAX_SIZE": 1.0,
-        "FK_WINDOW": 60,
-        "ATR_PERIOD": int(ml.get("ATR_PERIOD", 14)),
-        "ATR_MULT": float(ml.get("ATR_MULT", 2.5)),
-        "LONG_SCALE_ATR_MULT": float(ml.get("LONG_SCALE_ATR_MULT", 2.5)),
+        "ATR_MULT": float(ml.get("ATR_MULT", 3.0)),
+        "ATR_PERIOD": int(ml.get("ATR_PERIOD", 30)),
         "SHORT_TP_MULT": float(ml.get("SHORT_TP_MULT", 2.0)),
-        "RISK_PER_TRADE": float(rpt),
+        "LONG_SCALE_ATR_MULT": float(ml.get("LONG_SCALE_ATR_MULT", 3.0)),
+        "RISK_PER_TRADE": ann_vol,  # lambda
         "MAX_EXPOSURE_PER_COIN": float(ml.get("MAX_EXPOSURE_PER_COIN", 1.0)),
-        "DD_SCALING_THRESHOLD": float(ml.get("DD_SCALING_THRESHOLD", 0.15)),
-        "TARGET_ANN_VOL": float(ml.get("TARGET_ANN_VOL", 0.75)),
-        "VOL_LOOKBACK": int(ml.get("VOL_LOOKBACK", 30)),
+        "MAX_EXPOSURE": float(ml.get("MAX_EXPOSURE", 1.0)),
+        "DD_SCALING_THRESHOLD": float(ml.get("DD_SCALING_THRESHOLD", 0.20)),
+        "TARGET_ANN_VOL": ann_vol,
         "USE_COMPOUNDING": True,
         "LEVERAGE": int(lev),
-        "ENTRY_QUANTILE_WINDOW": int(OPT_FUTURES_CONFIG.get("ENTRY_QUANTILE_WINDOW", 240)),
-        "MAX_CONCURRENT_POSITIONS": int(
-            ml.get("MAX_CONCURRENT_POSITIONS", int(ml.get("K_RANK", 2)) * 2)
-        ),
-        "MAX_EXPOSURE": float(ml.get("MAX_EXPOSURE", 1.0)),
     }
 
 
