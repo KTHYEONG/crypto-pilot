@@ -9,7 +9,7 @@ from typing import Any
 OPT_FUTURES_CONFIG: dict[str, Any] = {
     # Reduced from 2000: CAWF-R has K=5 independent legs; more trials = more selection bias.
     # Bonferroni SR_bench = sqrt(2*ln(400))≈3.46 vs sqrt(2*ln(2000))≈5.30 — honest deflation.
-    "total_trials": 1000,
+    "total_trials": 2000,
     # Phase-D TPESampler: random trials before TPE; must be < n_ml_trials (see opt_futures.py).
     "tpe_n_startup_trials": 200,
     # Caps startup at this fraction of Phase-D n_trials (prevents 384/500 ~77% random when
@@ -187,7 +187,7 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
 SIGNAL_PARAM_SPACE_FUTURES: dict[str, dict[str, Any]] = {
     # Multi-session stability: lower bound ≥26 (matches ML Phase D discovery band).
     "ATR_PERIOD": {"type": "int", "low": 26, "high": 40, "step": 2},
-    "ATR_MULT": {"type": "float", "low": 1.0, "high": 5.0, "step": 0.25},
+    "ATR_MULT": {"type": "float", "low": 1.0, "high": 5.0, "step": 0.1},
     "TRAIL_MULT": {"type": "float", "low": 1.5, "high": 6.5, "step": 0.5},
     "TP_MULT": {"type": "float", "low": 1.0, "high": 4.0, "step": 0.5},
 }
@@ -204,7 +204,7 @@ ENGINE_PARAM_SPACE_FUTURES: dict[str, dict[str, Any]] = {
     "K_RANK": {"type": "int", "low": 1, "high": 4, "step": 1},
     "REBALANCE_BARS": {"type": "categorical", "choices": (1, 3, 6, 12)},
     "MIN_SCORE_PERCENTILE": {"type": "float", "low": 0.50, "high": 0.90, "step": 0.10},
-    "CS_Z_SCORE_THRESHOLD": {"type": "float", "low": 0.5, "high": 2.0, "step": 0.25},
+    "CS_Z_SCORE_THRESHOLD": {"type": "float", "low": 0.5, "high": 2.0, "step": 0.1},
     "CRISIS_GAMMA": {"type": "float", "low": 1.0, "high": 5.0, "step": 1.0},
     "CRISIS_GATE_PROB": {"type": "float", "low": 0.50, "high": 0.90, "step": 0.10},
 }
