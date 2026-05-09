@@ -170,9 +170,9 @@ def calculate_position_size(
         max_qty_by_margin = 0.0
     target_qty = min(target_qty, max_qty_by_margin)
 
-    # 5. 소액 계좌 최소 먼지(Dust) 한도 보정 ($6.0 보장)
-    if target_qty > 0.0 and (target_qty * fill_price) < 6.0:
-        min_qty = 6.0 / fill_price
+    # 5. 소액 계좌 최소 먼지(Dust) 한도 보정 ($0.01 보장)
+    if target_qty > 0.0 and (target_qty * fill_price) < 0.01:
+        min_qty = 0.01 / fill_price
         if min_qty <= max_qty_by_margin:
             target_qty = min_qty
         else:
@@ -619,8 +619,8 @@ def backtest_portfolio_numba(
     next_dir = np.zeros(n_syms, dtype=np.float64)
     prev_rebalance_bucket = -999999
     dust_skip_cnt, margin_fail_cnt, t_dir_zero_cnt, p_side_zero_cnt, mod_skip_cnt = 0, 0, 0, 0, 0
-    # [REFINED] Minimum Conviction Floor: Notional value must be >= 2% of current equity to avoid micro-churn
-    min_notional_floor_pct = 0.02
+    # [REFINED] Minimum Conviction Floor: Notional value must be >= 0.01% of current equity to avoid micro-churn
+    min_notional_floor_pct = 0.0001
 
     balance = initial_balance
     equity_curve = np.zeros(n_bars, dtype=np.float64)
@@ -856,8 +856,8 @@ def backtest_portfolio_numba(
                     is_maker = bool(is_maker_f)
                     
                     # [REFINED] Minimum Conviction Floor
-                    # Skip entry if notional value is less than 2% of current equity
-                    min_notional = max(6.0, current_equity * min_notional_floor_pct)
+                    # Skip entry if notional value is less than 0.01% of current equity
+                    min_notional = max(0.01, current_equity * min_notional_floor_pct)
                     if final_qty * fill_p < min_notional: 
                         dust_skip_cnt += 1; continue
                     
