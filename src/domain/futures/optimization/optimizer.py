@@ -20,7 +20,14 @@ from optuna.trial import FrozenTrial
 from sklearn.linear_model import LogisticRegression
 
 from config.opt_config import OPT_FUTURES_CONFIG
-from config.settings import FUTURES_INITIAL_BALANCE, SLIPPAGE_RATE, TRADING_FEE_RATE
+from config.settings import (
+    FUTURES_INITIAL_BALANCE,
+    MAKER_FEE_RATE,
+    SLIPPAGE_RATE,
+    SMART_ORDER_OFFSET,
+    TAKER_FEE_RATE,
+    TRADING_FEE_RATE,
+)
 from src.domain.futures.backtest_engine import (
     _recompute_cs_dirs_numba,
     backtest_portfolio_numba,
@@ -861,8 +868,10 @@ def _run_portfolio_numba_block(
         aligned["hmm_modulator_short"],
         float(FUTURES_INITIAL_BALANCE),
         lev_blk,
-        TRADING_FEE_RATE,
+        MAKER_FEE_RATE,
+        TAKER_FEE_RATE,
         SLIPPAGE_RATE,
+        SMART_ORDER_OFFSET,
         float(params["RISK_PER_TRADE"]),
         atr_m,
         trail_m,
