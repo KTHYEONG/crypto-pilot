@@ -699,6 +699,7 @@ def _suggest_ml_phase_d(trial: optuna.Trial) -> dict[str, Any]:
     # 4. Rebalance Bars (Crucial for fee control)
     # Allowing smaller bars but Optuna must balance with higher thresholds
     reb = int(trial.suggest_categorical("REBALANCE_BARS", [1, 3, 6, 12, 24]))
+    reb_turnover = float(trial.suggest_float("REBALANCE_TURNOVER_THRESHOLD", 0.05, 0.30, step=0.05))
 
     # 5. Entry Thresholds (Selective Entry)
     # Higher Z-score means fewer but higher quality trades, reducing churn
@@ -733,6 +734,7 @@ def _suggest_ml_phase_d(trial: optuna.Trial) -> dict[str, Any]:
         "MAX_EXPOSURE": max_exp_gross,
         "RISK_PER_TRADE": rpt,
         "REBALANCE_BARS": reb,
+        "REBALANCE_TURNOVER_THRESHOLD": reb_turnover,
         "K_LONG": policy.top_k_long,
         "K_SHORT": policy.top_k_short,
         "DD_SCALING_THRESHOLD": 0.20,
@@ -781,6 +783,7 @@ def _base_engine_params(ml: dict[str, Any], tf: str) -> dict[str, Any]:
         "K_LONG": int(ml.get("K_LONG", 2)),
         "K_SHORT": int(ml.get("K_SHORT", 2)),
         "REBALANCE_BARS": int(ml.get("REBALANCE_BARS", 1)),
+        "REBALANCE_TURNOVER_THRESHOLD": float(ml.get("REBALANCE_TURNOVER_THRESHOLD", 0.15)),
         "MIN_SCORE_PERCENTILE": float(ml.get("MIN_SCORE_PERCENTILE", 0.50)),
         "CRISIS_GAMMA": float(ml.get("CRISIS_GAMMA", 1.0)),
         "TRAIL_MULT": float(ml.get("TRAIL_MULT", 3.0)),
@@ -875,6 +878,7 @@ def _run_portfolio_numba_block(
         int(params["K_SHORT"]),
         float(params.get("CS_Z_SCORE_THRESHOLD", 1.0)),
         max(1, int(params["REBALANCE_BARS"])),
+        float(params.get("REBALANCE_TURNOVER_THRESHOLD", 0.15)),
         float(params.get("CRISIS_GAMMA", params.get("CRISIS_GATE_PROB", 1.0))),
         use_cs,
     )
