@@ -50,9 +50,10 @@ UPBIT_SECRET_KEY = os.getenv("UPBIT_SECRET_KEY", "")
 # Binance Futures Fee Structure (VIP 0 기준):
 # - Maker (지정가): 0.02%
 # - Taker (시장가): 0.05%
-# 백테스트는 보수적으로 Taker 수수료 기준 적용
-TRADING_FEE_RATE = 0.0003  # 0.05% (Taker 기준, 진입/청산 각각)
-SLIPPAGE_RATE = 0.0002  # 0.05% (시장가 주문 시 예상 슬리피지)
+MAKER_FEE_RATE = 0.0002
+TAKER_FEE_RATE = 0.0005
+TRADING_FEE_RATE = TAKER_FEE_RATE  # 하위 호환성을 위해 유지 (기본값 Taker)
+SLIPPAGE_RATE = 0.0002  # 0.02% (시장가 주문 시 예상 슬리피지)
 
 # 스마트 주문 설정
 SMART_ORDER_OFFSET = 0.0003  # 0.03% (공격적 지정가 오프셋 - Maker 수수료 절감 목적)
