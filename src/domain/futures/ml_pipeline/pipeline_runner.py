@@ -674,8 +674,8 @@ def _step4_fusion_one_symbol(
             wide_1h["hmm_modulator_short"] = wide_1h["hmm_modulator_short"].fillna(0.8)
 
             # Use mean of long/short modulator for ranking score
-            m_avg = (wide_1h["hmm_modulator_long"] + wide_1h["hmm_modulator_short"]) / 2.0
-            wide_1h["slot_rank_score"] = wide_1h["ml_alpha_00"] * m_avg
+            # m_avg = (wide_1h["hmm_modulator_long"] + wide_1h["hmm_modulator_short"]) / 2.0
+            wide_1h["slot_rank_score"] = wide_1h["ml_alpha_00"]
 
             # [NEW] Merge all HMM related columns
             hmm_cols_all = [c for c in market_probs.columns if str(c).startswith("hmm_")]

@@ -842,7 +842,7 @@ def main() -> None:
     pre_parser = argparse.ArgumentParser(add_help=False)
     pre_parser.add_argument("--skip-universe", action="store_true")
     pre_parser.add_argument("--reference-date", type=str, default=None)
-    pre_parser.add_argument("--tf", type=str, default="1h")
+    pre_parser.add_argument("--tf", type=str, default="4h")
     pre_args, remaining_args = pre_parser.parse_known_args()
 
     if not pre_args.skip_universe:

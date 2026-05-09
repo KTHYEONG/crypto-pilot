@@ -27,11 +27,29 @@ def load_portfolio_policy_config(cfg: dict[str, Any]) -> PortfolioPolicyConfig:
         top_k_long=int(block.get("top_k_long", 3)),
         top_k_short=int(block.get("top_k_short", 3)),
         entry_edge_threshold=float(block.get("entry_edge_threshold", 0.15)),
-        rebalance_bars=int(block.get("rebalance_bars", 6)),
+        rebalance_bars=int(block.get("rebalance_bars", 3)),
         min_long_pf=float(block.get("min_long_pf", 1.05)),
         min_short_pf=float(block.get("min_short_pf", 1.05)),
         min_is_net_alpha_pct=float(block.get("min_is_net_alpha_pct", 0.0)),
     )
+
+
+def apply_hmm_regime_exposure(base_exposure: float, hmm_state: int, crisis_prob: float) -> float:
+    """Scale base exposure based on HMM regime and crisis probability.
+    
+    Returns:
+        0.0 if crisis_prob > 0.5 or hmm_state == 4 (CRISIS)
+        0.5 * base_exposure if hmm_state == 2 (BEAR)
+        0.7 * base_exposure if hmm_state == 3 (CHOP)
+        base_exposure otherwise (BULL_CALM=0, BULL_VOL_UP=1)
+    """
+    if crisis_prob > 0.5 or int(hmm_state) == 4:
+        return 0.0
+    if int(hmm_state) == 2:
+        return 0.5 * base_exposure
+    if int(hmm_state) == 3:
+        return 0.7 * base_exposure
+    return base_exposure
 
 
 def apply_policy_constraints(params: dict[str, Any], policy: PortfolioPolicyConfig) -> dict[str, Any]:
