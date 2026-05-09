@@ -1,38 +1,38 @@
 {
   "project": "my-coin-traider",
-  "version": "6.4.1",
+  "version": "6.4.2",
   "last_evolution_date": "2026-05-09",
-  "previous_state_hash": "v6.4.0",
+  "previous_state_hash": "v6.4.1",
   "current_logic": {
     "universe_selection": "CS_RANK based filtering (16-32 symbols)",
     "regime_classification": "Macro-Inertia 5-State HMM v4.2.0 + Posterior Smoothing (EMA) + Asymmetric Min-Duration (168h)",
     "alpha_generation": "Symmetric Hybrid Labeling (Label 3/0 for Profitable Long/Short vs Friction) + IC Breakthrough (0.14+)",
     "position_sizing": "Fractional Kelly ($f^*$) with Expanded Search Space (0.1 - 1.2) + Regime-Aware Dynamic Scaling",
-    "execution_model": "Event-Driven Z-Score Hysteresis + Directional Friction Hurdle (3.5bps)",
-    "optimization": "PLGD Objective + Softened Survivability Gates (p10 > -0.10) + Pruning-Resistant Gradients",
+    "execution_model": "Event-Driven Z-Score Hysteresis + Lowered Conviction Hurdles (CS_Z_Floor: 0.2)",
+    "optimization": "PLGD Objective + Search Space Liberation (CS_Z [0.2, 1.5], MIN_P [0.4, 0.9]) + EV_Hurdle (0.0)",
     "risk_management": "Orthogonal Ensemble with EG Online Allocation + Macro-Regime Inertia (>150 bars)"
   },
   "key_parameters": {
     "base_timeframe": "4h",
     "alpha_miner_version": "v6_lambdarank_dart_symmetric_hybrid",
-    "hmm_smoothing_span": 64,
-    "labeling_friction_hurdle": "2.0x (7.0bps)",
-    "target_oos_ic": "0.1466 (Achieved)",
-    "kelly_lambda_max": 1.2
+    "cs_z_score_threshold_floor": 0.2,
+    "min_score_percentile_floor": 0.4,
+    "ev_hurdle_ratio": 0.0,
+    "target_oos_ic": "0.1466 (Achieved)"
   },
   "best_achieved_metrics": {
-    "note": "v6.4.1 Signal Quality Breakthrough (2000 Trials Audit)",
+    "note": "v6.4.2 Execution Unlock Audit (2000 Trials)",
     "is_ic": "0.1560 (Historical High)",
     "oos_ic": "0.1466 (Robust Prediction)",
-    "hmm_avg_duration": "157.3 bars (Season Sensing)",
-    "trade_starvation": "CRITICAL (0 trades in Phase D due to strict CS_Z hurdles)"
+    "trade_starvation": "CRITICAL (0 trades due to HMM Semantic Misalignment)",
+    "diagnostics": "4,144 bars skipped due to t_dir == 0.0; HMM labels estructural BULL/BEAR as CHOP."
   },
   "known_issues": {
-    "execution_dissonance": "Superior Alpha (0.14 IC) is blocked by restrictive Optuna CS_Z search space ([0.5, 2.0]) and EV hurdles."
+    "semantic_dissonance": "Structural trends (G_LOG > 0) are incorrectly mapped to CHOP verdicts, causing over-defensive shrinkage."
   },
   "next_recommended_actions": [
-    "Search Space Liberation: Lower CS_Z_SCORE_THRESHOLD floor to 0.2 to unlock the 0.14 IC alpha.",
-    "Hurdle Synchronization: Align backtest engine entry logic with the 2.0x friction labeling hurdle.",
-    "Final Production Run: Scale to 5,000 trials to find the global optimum within the new signal regime."
+    "Semantic Re-mapping: Refine pipeline_runner.py to map all G_LOG > 0 states as BULL to enable execution.",
+    "Conviction Expansion: Increase K_RANK (Top-K) from 3 to 5-8 to widen market participation.",
+    "Final Production Sync: Synchronize HMM 'verdicts' with actual expectancy to unlock the 0.14 IC alpha."
   ]
 }

@@ -711,10 +711,10 @@ def _suggest_ml_phase_d(trial: optuna.Trial) -> dict[str, Any]:
 
     # 5. Entry Thresholds (Selective Entry)
     # Higher Z-score means fewer but higher quality trades, reducing churn
-    # Realistic Optuna Bounds: Limit CS_Z search range to [0.5, 1.5]
-    cs_z = float(trial.suggest_float("CS_Z_SCORE_THRESHOLD", 0.5, 1.5, step=0.25))
+    # Realistic Optuna Bounds: Limit CS_Z search range to [0.2, 1.5]
+    cs_z = float(trial.suggest_float("CS_Z_SCORE_THRESHOLD", 0.2, 1.5, step=0.1))
     hyst_gap = float(trial.suggest_float("HYSTERESIS_GAP", 0.1, 0.5, step=0.1))
-    min_p = float(trial.suggest_float("MIN_SCORE_PERCENTILE", 0.50, 0.90, step=0.10))
+    min_p = float(trial.suggest_float("MIN_SCORE_PERCENTILE", 0.40, 0.90, step=0.10))
 
     # Risk per trade - adjust heuristic to be more robust
     # Using 1/N scaling with annual target vol
@@ -979,6 +979,7 @@ def objective_ml_phase_d(trial: optuna.Trial, ctx: MLPhaseDContext) -> float | t
         if not first_leg_done:
             first_leg_done = True
             if n_tr == 0:
+                _logger.info("[ML_OPT] Trial %d: Zero trades on first leg. Params: %s. Diag: %s", trial.number, params, _b_diag)
                 raise optuna.TrialPruned()
 
         mdd = float(calc_mdd_from_equity(b_equity)) if b_equity.size > 0 else 100.0
