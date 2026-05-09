@@ -716,6 +716,7 @@ def backtest_portfolio_numba(
                     req_m = (final_qty * fill_p) / le_ent; e_fee = final_qty * fill_p * fee_rate
                     if free_margin >= (req_m + e_fee):
                         balance -= (req_m + e_fee); in_pos[s], pos_side[s], entry_p[s], entry_idx[s] = True, p_side, fill_p, i
+                        entry_lev[s] = le_ent
                         amount[s], entry_fee_stored[s], fund_fee_stored[s], highest[s], lowest[s], has_scaled[s], stop_p[s] = final_qty, e_fee, 0.0, fill_p, fill_p, False, fill_p - (stop_dist * p_side)
                         free_margin -= (req_m + e_fee)
                     else: margin_fail_cnt += 1
@@ -894,7 +895,7 @@ class MultiSymbolEngine:
         
         lev_2d = d.get("dyn_leverage", np.full(c2d.shape, self.leverage))
         
-        trades_arr, final_bal, equity, diag = backtest_loop_multi_numba(
+        trades_arr, final_bal, equity, diag = backtest_portfolio_numba(
             c2d, d["high"], d["low"], d["open"], d["entry_upper"], d["entry_lower"], d["trend_direction"],
             sf_raw, d["atr"], d["garch_kelly_f"], d.get("kill_signal", np.zeros_like(c2d)),
             d.get("funding_rate_sum", np.zeros_like(c2d)), d["slot_rank_score"],
