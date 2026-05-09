@@ -4,6 +4,24 @@ This file tracks the logical progression and experimental results of the quantit
 
 ---
 
+## [2026-05-09] v6.3.1: Statistical Restoration — Fixing the Kelly Starvation (Gemini CLI)
+
+### 1. Architectural Shift: Correcting Input Dissonance
+*   **Problem**: Trade count collapsed from 227 to 3 (Trade Starvation) in v6.3.0. Metrics were statistically insignificant.
+*   **Diagnosis**: The Fractional Kelly sizing formula was receiving the cross-sectional Z-score magnitude ($sf \approx 0.2$) instead of the actual win probability ($p \approx 0.55$). This caused the Kelly formula ($f^* = p - (1-p)/b$) to return zero or negative values for nearly all signals.
+*   **Implementation**:
+    1.  **Corrected $p$-win Input**: Re-routed `strength_filter_raw` (Platt Scaling probability) to the Kelly input in the Numba loop.
+    2.  **Conviction Scaling**: Applied $sf$ as a final multiplier to the Kelly-calculated quantity to maintain ranking-based sizing.
+    3.  **Hard Gate Liquidation**: Removed redundant absolute alpha checks (`sl >= 0.55`) that were overlapping with HMM shrinkage and suppressing flow.
+
+### 2. Performance Impact (2,000 Trials Validation)
+*   **Trade Frequency**: Restored to **111 trades**, reviving the system's statistical validity.
+*   **Robustness**: Maintained low MDD (**2.94%**) while allowing the strategy to express its alpha.
+*   **Verdict**: The "Trinity" architecture (PLGD + Hysteresis + Kelly) is now operationally sound. The barrier is no longer trade starvation, but absolute edge vs. friction.
+*   **Next Step**: Growth acceleration via expanded `KELLY_LAMBDA` and symbol expansion.
+
+---
+
 ## [2026-05-09] v6.3.0: Compound Wealth Maximization — The Robustness Trinity (Gemini CLI)
 
 ### 1. Architectural Shift: Robustness-First Redesign
