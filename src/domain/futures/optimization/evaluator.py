@@ -17,7 +17,10 @@ from scipy.stats import spearmanr
 from config.opt_config import OPT_FUTURES_CONFIG
 from config.settings import (
     FUTURES_INITIAL_BALANCE,
+    MAKER_FEE_RATE,
     SLIPPAGE_RATE,
+    SMART_ORDER_OFFSET,
+    TAKER_FEE_RATE,
     TRADING_FEE_RATE,
 )
 from src.domain.futures.backtest_engine import (
@@ -398,8 +401,10 @@ def run_oos_margin_shared_portfolio(
         symbol_names=symbols,
         strategy_params=params,
         initial_balance=float(FUTURES_INITIAL_BALANCE),
-        fee_rate=TRADING_FEE_RATE,
+        maker_fee=MAKER_FEE_RATE,
+        taker_fee=TAKER_FEE_RATE,
         slippage_rate=SLIPPAGE_RATE,
+        smart_offset=SMART_ORDER_OFFSET,
     )
     trades_df, equity_curve, final_balance, bt_diag = engine.run()
 
@@ -438,7 +443,8 @@ def run_oos_margin_shared_portfolio(
         minority_pct = float(min(lt, st) / max(lt + st, 1) * 100.0)
         avg_net_pnl = float(trades_df["pnl"].mean())
         avg_abs_pnl = float(trades_df["pnl"].abs().mean())
-        rt_cost = TRADING_FEE_RATE * 2.0 + SLIPPAGE_RATE * 2.0
+        # Realistic: One entry (Maker 0.02%), one exit (Taker 0.05% + Slippage 0.02%)
+        rt_cost = MAKER_FEE_RATE + TAKER_FEE_RATE + SLIPPAGE_RATE
         ev_ratio = avg_net_pnl / max(avg_abs_pnl * rt_cost, 1e-9)
 
         long_df = trades_df[trades_df["side"] == "LONG"]
