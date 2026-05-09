@@ -110,6 +110,9 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     "FUTURES_CPCV_K_TEST": 3,
     # Increased from 3: 5 WF OOS legs provide regime-diverse robustness verification.
     "FUTURES_WF_OOS_LEGS": 5,
+    "FUTURES_ENSEMBLE_MAX_SIZE": 3,
+    "FUTURES_META_ALLOC_WINDOW": 24,
+    "FUTURES_META_ALLOC_ETA": 0.1,
     # R-6: per WF OOS leg, retrain systemic HMM on data strictly before leg start (GP frozen).
     "FUTURES_WF_HMM_LEG_REFIT": True,
     "FUTURES_WF_PHASE2_DRIFT_LOG": True,
