@@ -94,6 +94,13 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     # PLGD objective weights (see objective_ml.py).
     "FUTURES_PLGD_LAMBDA_DEF": 0.5,   # Bonferroni trial-deflation strength
     "FUTURES_PLGD_LAMBDA_TAIL": 0.7,  # worst-leg tail penalty multiplier (k=5: 1 bad leg allowed)
+    # Phase-D composite objective (WF validation contract; minimizes -reward + soft PLGD reg).
+    "FUTURES_PHASE_D_W_POS_LEGS": 2.5,
+    "FUTURES_PHASE_D_W_WORST_LEG_LOGTW": 2.0,
+    "FUTURES_PHASE_D_W_DIR_PF": 1.0,
+    "FUTURES_PHASE_D_W_IS_ALPHA_LOG": 1.2,
+    "FUTURES_PHASE_D_PLGD_REG_WEIGHT": 0.12,
+    "FUTURES_PHASE_D_PRUNE_MIN_POS_RATIO": 0.25,
     "FUTURES_AWF_NET_EDGE_MIN": 1.5,   # min EV/cost ratio (avg PnL / round-trip cost)
     # SPA bootstrap for post-run diagnostics (not used per-trial).
     "FUTURES_SPA_N_BOOTSTRAP": 2000,
@@ -105,6 +112,7 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     "FUTURES_WF_OOS_LEGS": 5,
     # R-6: per WF OOS leg, retrain systemic HMM on data strictly before leg start (GP frozen).
     "FUTURES_WF_HMM_LEG_REFIT": True,
+    "FUTURES_WF_PHASE2_DRIFT_LOG": True,
     "FUTURES_WF_LEG_TW_MIN_ALL": 0.90,
     "FUTURES_WF_LEG_TW_MEAN_MIN": 1.00,
     # futures-opt P4: log reference + optional soft warn (not a hard gate).
@@ -120,6 +128,8 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     "FUTURES_USE_META_LABELER": True,
     "FUTURES_CRISIS_GATE_PROB_DEFAULT": 0.7,
     "FUTURES_MIN_TRADES_TARGET": 30,
+    "FUTURES_IS_SURVIVAL_MIN_CAGR_PCT": 15.0,
+    "FUTURES_IS_SURVIVAL_MIN_SHARPE": 1.5,
     # Phase 3: WF refit HMM-only when Meta disabled; optional PBO/DSR hard gate after Optuna
     "FUTURES_ML_WF_REFIT_ENABLED": True,
     "FUTURES_ML_WF_REFIT_LEGS": 3,
@@ -141,6 +151,32 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     "FUTURES_PLGD_AWF_LEG_STABILITY_WEIGHT": 0.8,
     # Improvement 4: Friction-Aware Virtual Cost (bps per trade)
     "FUTURES_VIRTUAL_FRICTION_BPS": 3.5,
+    # Phase-1 architecture refactor blocks (non-breaking defaults).
+    "FUTURES_VALIDATION_CONFIG": {
+        "wf_n_legs": 10,
+        "wf_purge_bars": 24,
+        "wf_min_positive_leg_ratio": 0.70,
+        "wf_worst_leg_tw_floor": 0.95,
+        "wf_mean_leg_tw_floor": 1.00,
+        "wf_ergodicity_guideline_pct": 15.0,
+        "wf_ergodicity_hard_gate_enabled": True,
+    },
+    "FUTURES_PORTFOLIO_POLICY": {
+        "target_ann_vol": 0.45,
+        "gross_exposure_cap": 1.20,
+        "per_symbol_cap": 0.25,
+        "top_k_long": 3,
+        "top_k_short": 3,
+        "entry_edge_threshold": 0.15,
+        "rebalance_bars": 6,
+        "min_long_pf": 1.05,
+        "min_short_pf": 1.05,
+        "min_is_net_alpha_pct": 0.0,
+    },
+    "FUTURES_CANDIDATE_SELECTOR": {
+        "elite_top_n": 30,
+        "basin_iqr_mult": 1.0,
+    },
 }
 
 # Cross-Sectional Strategy Parameter Space
