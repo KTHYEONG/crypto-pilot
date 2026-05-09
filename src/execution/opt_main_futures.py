@@ -1061,9 +1061,7 @@ def main() -> None:
             _prof.get("description", ""),
         )
     else:
-        n_ml_trials = (
-            int(args.trials) if args.trials != OPT_FUTURES_CONFIG["total_trials"] else 300
-        )
+        n_ml_trials = int(args.trials)
         target_seeds = (
             [42, 7, 13, 21, 55, 101, 777, 8, 99, 1234] if args.seed is None else [int(args.seed)]
         )

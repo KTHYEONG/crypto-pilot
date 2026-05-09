@@ -72,6 +72,7 @@ def _dataframe_to_symbol_arrays(sig_df: pd.DataFrame) -> Dict[str, np.ndarray]:
         "xs_score_long": 0.0,
         "xs_score_short": 0.0,
         "hmm_prob_crisis": 0.0,
+        "hmm_hard_state": 0.0,
         "hmm_modulator_long": 1.0,
         "hmm_modulator_short": 1.0,
         "hmm_modulator_base_long": 1.0,
