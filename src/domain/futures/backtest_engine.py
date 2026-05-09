@@ -123,30 +123,36 @@ def calculate_position_size(
     asset_atr_pct: float,        # 코인의 내재 변동성 (ATR / Price)
     current_equity_for_risk: float,
     available_margin: float,
-    risk_per_trade: float,       # 포트폴리오 타겟 변동성 (기존 risk_per_trade 활용)
+    risk_per_trade: float,       # Fractional Kelly Lambda (Shrinkage)
     leverage: float,
-    sf: float,                   # Confidence multiplier (Z-Score driven Alpha multiplier)
+    p_win: float,                # Calibrated Win Probability p
+    b_ratio: float,              # Estimated Win/Loss Ratio (Profit Factor)
     gk: float,
     max_exposure_per_coin: float = 1.5,
 ) -> float:
-    """[RE-ENGINEERED] Alpha-Driven Kelly & Dynamic Portfolio Scaling.
+    """[RE-ENGINEERED] Fractional Kelly Sizing.
 
-    Fuses ML Z-Score Alpha (sf) with Target Volatility Sizing.
+    f* = lambda * (p - (1-p)/b)
     """
     # 0. NaN Protection
     if np.isnan(asset_atr_pct) or np.isnan(current_equity_for_risk) or np.isnan(fill_price):
         return 0.0
     
-    # 1. Target Volatility 기반 명목 자본 할당 (Notional Allocation)
-    vol_scalar = risk_per_trade / max(asset_atr_pct, 0.001)
+    # 1. Fractional Kelly Calculation
+    # f* = p - (1-p)/b
+    p = max(min(p_win, 1.0), 0.0)
+    b = max(b_ratio, 0.01) # Avoid division by zero
     
-    # Alpha-Driven Confidence mapping
-    conf_mult = max(min(sf, 1.0), 0.0)
+    f_star = p - (1.0 - p) / b
+    f_star = max(f_star, 0.0) # No negative bets (shorts are handled by side, not negative f)
     
-    # Garch-Kelly inhibitor (optional but kept for robustness)
+    # Garch-Kelly inhibitor
     gk_use = max(min(gk, 1.0), 0.0)
     
-    target_notional = current_equity_for_risk * vol_scalar * conf_mult * gk_use
+    # Final Kelly Fraction f = lambda * f*
+    kelly_f = risk_per_trade * f_star * gk_use
+    
+    target_notional = current_equity_for_risk * kelly_f
     
     # 2. [ROBUST MARGIN PROTECTION]
     max_safe_by_equity = max(current_equity_for_risk, 0.0) * leverage * 0.70
@@ -368,6 +374,7 @@ def backtest_loop_single_numba(
     dd_scaling_threshold: float,
     hmm_crisis: np.ndarray,
     hmm_mod_long: np.ndarray,
+    estimated_b: float = 1.05,
 ) -> tuple[np.ndarray, float, np.ndarray, float]:
     funding_paid_total = 0.0
     n = len(close)
@@ -576,10 +583,11 @@ def backtest_portfolio_numba(
     slot_rank_score: np.ndarray,
     xs_long: np.ndarray,
     xs_short: np.ndarray,
-    hmm_crisis: np.ndarray,
+    hmm_prob_crisis: np.ndarray,
     hmm_hard_state: np.ndarray,
     hmm_mod_long: np.ndarray,
     hmm_mod_short: np.ndarray,
+    hmm_prob_bear: np.ndarray,
     initial_balance: float,
     lev_2d: np.ndarray,
     maker_fee: float,
@@ -599,11 +607,13 @@ def backtest_portfolio_numba(
     dd_scaling_threshold: float,
     k_rank_long: int,
     k_rank_short: int,
-    cs_z_threshold: float,
+    cs_z_entry_threshold: float,
+    cs_z_exit_threshold: float,
     rebalance_bars: int,
     rebalance_turnover_threshold: float,
     crisis_gamma: float,
     use_cs_rank: int,
+    estimated_b: float = 1.05,
 ) -> tuple[np.ndarray, float, np.ndarray, np.ndarray]:
     n_bars, n_syms = close_2d.shape
     computed_dir = np.zeros(n_syms, dtype=np.float64)
@@ -656,8 +666,13 @@ def backtest_portfolio_numba(
 
         dd = (hwm - current_equity) / hwm if hwm > 1e-9 else 0.0
         dd_scale = max(0.0, 1.0 - (dd / dd_scaling_threshold)) if dd_scaling_threshold > 1e-9 else 1.0
-        c_prob = float(hmm_crisis[i, 0])
+        
+        c_prob = float(hmm_prob_crisis[i, 0])
+        b_prob = float(hmm_prob_bear[i, 0])
         h_state = int(hmm_hard_state[i, 0])
+        
+        # [NEW] HMM Regime Modulation multiplier ft = (1 - Pcrisis) * (1 - 0.5 * Pbear)
+        f_t = (1.0 - c_prob) * (1.0 - 0.5 * b_prob)
         
         # [NEW] HMM-based Exposure Scaling (Go/No-Go)
         regime_exp_mult = 1.0
@@ -669,15 +684,15 @@ def backtest_portfolio_numba(
             regime_exp_mult = 0.7
             
         max_exp_scaled = max_exposure * regime_exp_mult
-        crisis_scale = (1.0 - c_prob) ** crisis_gamma
-        effective_risk_per_trade = risk_per_trade * dd_scale * crisis_scale
+        
+        # Apply HMM-based shrinkage f_t to the base lambda (risk_per_trade)
+        effective_risk_per_trade = risk_per_trade * dd_scale * f_t
 
         prev_i = i - 1
         n_cands = 0
         if use_cs_rank != 0 and prev_i >= 0:
-            # 1. Potential next_dir check (with hysteresis: maintenance=0.7x entry)
-            cs_z_maint = cs_z_threshold * 0.7
-            _recompute_cs_dirs_numba(prev_i, n_syms, xs_long, xs_short, hmm_crisis, hmm_mod_long, hmm_mod_short, crisis_gamma, k_rank_long, cs_z_threshold, cs_z_maint, next_dir, computed_dir)
+            # 1. Potential next_dir check (with hysteresis: Schmitt Trigger)
+            _recompute_cs_dirs_numba(prev_i, n_syms, xs_long, xs_short, hmm_prob_crisis, hmm_mod_long, hmm_mod_short, crisis_gamma, k_rank_long, cs_z_entry_threshold, cs_z_exit_threshold, next_dir, computed_dir)
 
             # 2. Rebalance Trigger: Fixed Bars OR Event-Driven (Turnover > 15%)
             bucket = prev_i // rebalance_bars if rebalance_bars > 0 else prev_i
@@ -758,6 +773,7 @@ def backtest_portfolio_numba(
                     sf_raw = strength_filter_raw[prev_i, s]
                     if sf_raw < 0.5: continue
                     t_dir = trend_dir[prev_i, s]
+                    sf = sf_raw
                 if t_dir == 0.0:
                     if use_cs_rank != 0: t_dir_zero_cnt += 1
                     continue
@@ -797,10 +813,10 @@ def backtest_portfolio_numba(
                 if not np.isfinite(gk_use) or gk_use < 0.0: gk_use = 0.0
                 stop_mult = atr_mult
                 if p_side == 1:
-                    if hmm_crisis[prev_i, s] > 0.2: stop_mult *= 0.6
+                    if hmm_prob_crisis[prev_i, s] > 0.2: stop_mult *= 0.6
                     elif hmm_mod_long[prev_i, s] < 0.7: stop_mult *= 0.8
 
-                target_qty = calculate_position_size(fill_p, atr_p, current_equity, free_margin, effective_risk_per_trade, le_ent, sf, gk_use, max_exp_per_coin)
+                target_qty = calculate_position_size(fill_p, atr_p, current_equity, free_margin, effective_risk_per_trade, le_ent, sf, estimated_b, gk_use, max_exp_per_coin)
                 if target_qty > 0:
                     sort_key = abs(float(t_dir)) if use_cs_rank != 0 else abs(float(slot_rank_score[prev_i, s]))
                     candidate_pool[n_cands] = [sort_key, float(s), float(p_side), fill_p, target_qty, atr_2d[prev_i, s] * stop_mult, is_maker_entry]
@@ -1037,24 +1053,29 @@ class MultiSymbolEngine:
         
         lev_2d = d.get("dyn_leverage", np.full(c2d.shape, self.leverage))
         
+        cs_z_entry = float(self.params.get("CS_Z_SCORE_THRESHOLD", 1.0))
+        hyst_gap = float(self.params.get("HYSTERESIS_GAP", 0.3))
+        cs_z_exit = cs_z_entry - hyst_gap
+
         trades_arr, final_bal, equity, diag = backtest_portfolio_numba(
             c2d, d["high"], d["low"], d["open"], d["entry_upper"], d["entry_lower"], d["trend_direction"],
             sf_raw, d["atr"], d["garch_kelly_f"], d.get("kill_signal", np.zeros_like(c2d)),
             d.get("funding_rate_sum", np.zeros_like(c2d)), d["slot_rank_score"],
             d.get("xs_score_long", np.zeros_like(c2d)), d.get("xs_score_short", np.zeros_like(c2d)),
-            d.get("hmm_prob_crisis", np.zeros_like(c2d)), 
+            d.get("hmm_prob_crisis", np.zeros_like(c2d)),
             d.get("hmm_hard_state", np.zeros_like(c2d)),
             hmm_mod_l, d.get("hmm_modulator_short", np.ones_like(c2d)),
+            d.get("hmm_prob_bear_trend", np.zeros_like(c2d)),
             self.initial_balance, lev_2d, self.maker_fee, self.taker_fee, self.slippage_rate, self.smart_offset, self.risk_per_trade,
             float(self.params.get("ATR_MULT", 3.0)), float(self.params.get("TRAIL_MULT", 3.0)), float(self.params.get("ATR_MULT", 3.0)),
             float(self.params.get("SHORT_TP_MULT", 3.0)), float(self.params.get("LONG_SCALE_ATR_MULT", 3.0)), float(self.params.get("TRAIL_MULT", 3.0)),
             self.max_concurrent_positions, self.max_exposure, float(self.params.get("MAX_EXPOSURE_PER_COIN", 1.5)),
             float(self.params.get("DD_SCALING_THRESHOLD", 0.15)), int(self.params.get("K_RANK", 2)), int(self.params.get("K_RANK", 2)),
-            float(self.params.get("CS_Z_SCORE_THRESHOLD", 0.0)), max(1, int(self.params.get("REBALANCE_BARS", 6))),
+            cs_z_entry, cs_z_exit, max(1, int(self.params.get("REBALANCE_BARS", 6))),
             float(self.params.get("REBALANCE_TURNOVER_THRESHOLD", 0.15)),
-            float(self.params.get("CRISIS_GAMMA", 1.0)), 1 if bool(self.params.get("USE_CS_RANK_ENGINE", True)) else 0
+            float(self.params.get("CRISIS_GAMMA", 1.0)), 1 if bool(self.params.get("USE_CS_RANK_ENGINE", True)) else 0,
+            float(self.params.get("ESTIMATED_B", 1.05))
         )
-
         if trades_arr.size == 0: return pd.DataFrame(), equity, final_bal, diag
         df = pd.DataFrame(trades_arr, columns=["sym_idx", "entry_idx", "exit_idx", "side_val", "entry_price", "exit_price", "pnl", "amount", "entry_fee", "funding_fee"])
         df["symbol"] = [self.symbols[int(i)] for i in df["sym_idx"]]
