@@ -308,11 +308,10 @@ def _recompute_cs_dirs_numba(
         eff_z_l_thr = cs_z_exit_threshold if prev_side == 1.0 else cs_z_threshold
         eff_z_s_thr = cs_z_exit_threshold if prev_side == -1.0 else cs_z_threshold
 
-        # Absolute Alpha Check: sl >= 0.55 for long, ss <= 0.45 for short (assuming 0.5 neutral)
         # Note: In some pipelines xs_long/xs_short are already normalized or directional.
-        # We add a safety check for conviction.
-        binary_l = 1.0 if (float(rank_l) <= fk and mod_l >= 0.1 and z_l >= eff_z_l_thr and sl >= 0.55) else 0.0
-        binary_s = 1.0 if (float(rank_s) <= fk and mod_s >= 0.1 and z_s >= eff_z_s_thr and ss <= 0.45) else 0.0
+        # Modulators shrink the raw score, so we rely on cross-sectional Z-score conviction.
+        binary_l = 1.0 if (float(rank_l) <= fk and mod_l >= 0.1 and z_l >= eff_z_l_thr) else 0.0
+        binary_s = 1.0 if (float(rank_s) <= fk and mod_s >= 0.1 and z_s >= eff_z_s_thr) else 0.0
 
         exposure_discount = (1.0 - c_prob) ** gam_val
 
@@ -816,7 +815,9 @@ def backtest_portfolio_numba(
                     if hmm_prob_crisis[prev_i, s] > 0.2: stop_mult *= 0.6
                     elif hmm_mod_long[prev_i, s] < 0.7: stop_mult *= 0.8
 
-                target_qty = calculate_position_size(fill_p, atr_p, current_equity, free_margin, effective_risk_per_trade, le_ent, sf, estimated_b, gk_use, max_exp_per_coin)
+                p_win_val = strength_filter_raw[prev_i, s]
+                target_qty = calculate_position_size(fill_p, atr_p, current_equity, free_margin, effective_risk_per_trade, le_ent, p_win_val, estimated_b, gk_use, max_exp_per_coin)
+                target_qty *= sf
                 if target_qty > 0:
                     sort_key = abs(float(t_dir)) if use_cs_rank != 0 else abs(float(slot_rank_score[prev_i, s]))
                     candidate_pool[n_cands] = [sort_key, float(s), float(p_side), fill_p, target_qty, atr_2d[prev_i, s] * stop_mult, is_maker_entry]
