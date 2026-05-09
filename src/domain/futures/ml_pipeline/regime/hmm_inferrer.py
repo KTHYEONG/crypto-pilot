@@ -392,10 +392,36 @@ def _assign_semantic_five_state(emp_mu: np.ndarray, emp_sig: np.ndarray, sharpe:
     bull_vol_idx = int(hv_mu_order[1])
 
     # 3. Low Vol Group (3 states)
-    lv_mu_order = low_vol_group[np.argsort(emp_mu[low_vol_group])]
-    bear_idx = int(lv_mu_order[0])
-    chop_idx = int(lv_mu_order[1])
-    bull_calm_idx = int(lv_mu_order[2])
+    lv_mu = emp_mu[low_vol_group]
+    lv_mu_order = low_vol_group[np.argsort(lv_mu)]
+    
+    mu_min = float(np.min(lv_mu))
+    mu_max = float(np.max(lv_mu))
+
+    # [FIX] Relative Labeling Bias: Implement bijection-preserving dynamic mapping.
+    if mu_min > 1e-6:
+        # Case: Bullish Drift [CHOP, BULL, BULL_CALM]
+        # Shift: LV states take BULL/CHOP names, HV states take BEAR/CRISIS names.
+        crisis_idx = int(hv_mu_order[0])
+        bear_idx = int(hv_mu_order[1])
+        chop_idx = int(lv_mu_order[0])
+        bull_calm_idx = int(lv_mu_order[1])
+        bull_vol_idx = int(lv_mu_order[2])
+    elif mu_max < -1e-6:
+        # Case: Bearish Drift [BEAR_STEEP, BEAR, CHOP]
+        # Shift: LV states take BEAR/CHOP names, HV states take BULL names.
+        crisis_idx = int(lv_mu_order[0])
+        bear_idx = int(lv_mu_order[1])
+        chop_idx = int(lv_mu_order[2])
+        bull_calm_idx = int(hv_mu_order[0])
+        bull_vol_idx = int(hv_mu_order[1])
+    else:
+        # Case: Normal / Mixed [BEAR, CHOP, BULL_CALM]
+        crisis_idx = int(hv_mu_order[0])
+        bull_vol_idx = int(hv_mu_order[1])
+        bear_idx = int(lv_mu_order[0])
+        chop_idx = int(lv_mu_order[1])
+        bull_calm_idx = int(lv_mu_order[2])
 
     return {
         "bull_calm": bull_calm_idx,

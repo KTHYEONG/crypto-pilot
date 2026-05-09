@@ -374,8 +374,8 @@ def run_oos_margin_shared_portfolio(
             oos_start = int(oos_start_idx)
         
         # In the refactored ML-focused structure, we might not use tiered signals anymore
-        # or it might be renamed. For now, we assume strategy.generate_all_signals or similar.
-        full_sig = strategy.generate_all_signals(full_df)
+        # or it might be renamed. For now, we assume strategy.generate_signals or similar.
+        full_sig = strategy.generate_signals(full_df)
         
         end_cap = int(oos_end_idx) if oos_end_idx is not None else len(full_df)
         seg, _ = _segment_with_context(full_sig, oos_start, end_cap)
@@ -406,7 +406,22 @@ def run_oos_margin_shared_portfolio(
     # Metrics calculation
     hours_per_bar = int(tf.replace("h", "")) if tf.endswith("h") else 4
     n_days = (len(equity_curve) * hours_per_bar) / 24.0
-    cagr = ((final_balance / FUTURES_INITIAL_BALANCE) ** (365.0 / max(n_days, 1.0)) - 1.0) * 100.0
+    moic = final_balance / max(FUTURES_INITIAL_BALANCE, 1e-9)
+    
+    # Safe CAGR calculation using log space to prevent OverflowError
+    try:
+        exponent = 365.0 / max(n_days, 1e-3)
+        log_moic = math.log(max(moic, 1e-9))
+        log_cagr_plus_1 = exponent * log_moic
+        if log_cagr_plus_1 > 15.0: # Cap at extremely high value (exp(15) ~ 3.2M)
+            cagr = 1e8
+        elif log_cagr_plus_1 < -15.0:
+            cagr = -100.0
+        else:
+            cagr = (math.exp(log_cagr_plus_1) - 1.0) * 100.0
+    except (OverflowError, ValueError):
+        cagr = 1e8 if moic > 1.0 else -100.0
+
     mdd = calc_mdd_from_equity(equity_curve)
     moic = final_balance / FUTURES_INITIAL_BALANCE
     cvar = calc_cvar5_loss_pct_from_equity(equity_curve)

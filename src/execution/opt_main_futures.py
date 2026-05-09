@@ -29,6 +29,7 @@ import warnings  # noqa: E402
 import config.opt_config  # noqa: E402
 from config.opt_config import (  # noqa: E402
     FUTURES_ANCHOR_SYMBOLS,
+    FUTURES_MACRO_INDEX_SYMBOLS,
     FUTURES_SCREENER_CONFIG,
     OPT_FUTURES_CONFIG,
     get_quarterly_window,
@@ -843,8 +844,11 @@ def main() -> None:
         _logger.info(" [STEP 1/5] DATA LOADING & INTEGRITY CHECK")
         _logger.info("═" * 85)
 
+    # [3-Tier Universe] Ensure Anchors and Macro Index symbols are always loaded for systemic HMM
+    load_symbols = list(set(symbols + FUTURES_ANCHOR_SYMBOLS + FUTURES_MACRO_INDEX_SYMBOLS))
+
     data_maps, oos_data_maps, valid_symbols = _load_futures_data_maps_for_symbols(
-        symbols, args.tf, fetch_start_date, start_date, is_end_date, end_date
+        load_symbols, args.tf, fetch_start_date, start_date, is_end_date, end_date
     )
 
     if not valid_symbols:

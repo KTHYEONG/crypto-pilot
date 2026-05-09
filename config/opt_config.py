@@ -175,6 +175,20 @@ FUTURES_ANCHOR_SYMBOLS: list[str] = [
     "ETH/USDT",
 ]
 
+# Tier 2: Institutional Macro Index (Stable Universe for HMM)
+FUTURES_MACRO_INDEX_SYMBOLS: list[str] = [
+    "BTC/USDT",
+    "ETH/USDT",
+    "SOL/USDT",
+    "BNB/USDT",
+    "XRP/USDT",
+    "ADA/USDT",
+    "LINK/USDT",
+    "LTC/USDT",
+    "DOT/USDT",
+    "BCH/USDT",
+]
+
 # This list will be overwritten by the dynamic screener
 FUTURES_SYMBOLS: list[str] = [
     "BTC/USDT",
