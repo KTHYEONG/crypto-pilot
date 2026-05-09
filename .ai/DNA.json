@@ -1,46 +1,41 @@
 {
   "project": "my-coin-traider",
-  "version": "5.3.0",
+  "version": "6.0.0",
   "last_evolution_date": "2026-05-09",
-  "previous_state_hash": "v5.2.0",
+  "previous_state_hash": "v5.3.0",
   "current_logic": {
     "universe_selection": "CS_RANK based filtering",
     "regime_classification": "Unsupervised 5-State TVTP-HMM v4.1.0 (Asymmetric) + Soft Gravity NLL Penalty + Asymmetric Post-Suppression",
-    "alpha_generation": "Advanced Cross-Sectional Alpha (LambdaRank DART, Macro-Asset Interaction, CS Z-Score Neutralization, Friction-Aware Dynamic Labeling)",
-    "position_sizing": "Minimum Conviction Floor (2% Equity) with Platt Calibration & HMM Soft-Scaling",
-    "optimization": "Friction-Aware Search Space: Optimized Turnover Threshold ([0.05, 0.30]), Soft Alpha Exit (Signal Reversal Only), and Dynamic Hysteresis",
-    "risk_management": "Orthogonal Ensemble with Online Capital Allocation (EG Algorithm)"
+    "alpha_generation": "Decoupled Cross-Sectional Alpha (4h Base TF, Ranking Only, Horizons: 12h-96h, IC-Weighted Ensemble)",
+    "position_sizing": "HMM-Aware Dynamic Exposure Scaling (CRISIS: 0%, BEAR: 50%, CHOP: 70%) + Minimum Conviction Floor (2%)",
+    "optimization": "Horizon-Aware Optimization (4h), Reduced Rebalance Frequency (3 bars), Pure Alpha Ranking (No Modulation)",
+    "risk_management": "Orthogonal Ensemble with EG Online Capital Allocation & Macro Regime Go/No-Go Protection"
   },
   "key_parameters": {
+    "base_timeframe": "4h",
+    "alpha_horizons": [12, 24, 48, 96],
+    "rebalance_bars": 3,
     "alpha_miner_version": "v6_lambdarank_dart",
-    "alpha_gp_feature_schema_version": "v21",
     "calibration_method": "Platt Scaling (Logistic Regression)",
-    "sizing_method": "Conviction-Weighted Z-Score Scaling",
+    "sizing_method": "Regime-Scaled Conviction Weights",
     "min_entry_notional_ratio": 0.02,
-    "search_space_parameters": [
-      "TARGET_ANN_VOL",
-      "REBALANCE_TURNOVER_THRESHOLD",
-      "REBALANCE_BARS",
-      "CS_Z_SCORE_THRESHOLD",
-      "TRAIL_MULT"
-    ],
-    "exit_logic": "Signal Reversal (t_dir opposite sign) or Stop/Target",
+    "exit_logic": "Signal Reversal or Stop/Target",
     "meta_alloc_algorithm": "Exponentiated Gradient (EG)"
   },
   "best_achieved_metrics": {
-    "note": "v5.3.0 Structural Friction Liquidation (Full Run)",
-    "trade_churn_reduction": "PASS (557 trades vs 1015 in v5.2.0-pre)",
-    "micro_trade_defense": "PASS (Minimum 2% Notional Floor enforced)",
-    "optimization_efficiency": "PASS (Turnover Threshold optimized via Optuna)",
-    "cagr_status": "HOLD (Negative Net Alpha persists in 1h timeframe)"
+    "note": "v6.0.0 Horizon Pivot Optimization (Promotion Profile)",
+    "oos_cagr": "24.84% (Taker Friction Overcome)",
+    "oos_mdd": "13.62% (HMM Defense Effective)",
+    "profit_factor": "1.14 (v5.3.0-pre < 1.0)",
+    "turnover_stability": "PASS (Ergodicity Deviation 5.45%)",
+    "alpha_ic_oos": "0.0971 (Highly Predictive at 4h)"
   },
   "known_issues": {
-    "prediction_horizon_mismatch": "1h Alpha half-life is too short for Taker fees; structural profit-taking cannot occur before signal neutralization.",
-    "market_noise_dominance": "2026-04 regime shows persistent Alpha inversion (IS/OOS negative)."
+    "statistical_significance_gate": "Strict Phase 3 Hard Gate (PBO/DSR) failed; requires more trials or tighter ranking thresholds for official Champion promotion."
   },
   "next_recommended_actions": [
-    "Horizon Pivot: Expand Alpha prediction horizon to 4h-12h to improve Return/Friction ratio.",
-    "Maker-Only Logic: Implement Limit-order execution to bypass Taker fees entirely.",
-    "Feature Engineering: Add regime-specific momentum filters to combat noise in Bear/Chop states."
+    "Sample Expansion: Increase optimization trials to 2000+ to pass statistical hard gates.",
+    "Maker-Only Execution: Integrate SMART_ORDER_OFFSET into backtest to simulate Maker fee benefits.",
+    "Z-Threshold Refinement: Self-optimize CS_Z_SCORE_THRESHOLD to find the 'Sweet Spot' for 4h conviction."
   ]
 }
