@@ -77,14 +77,14 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     # Session 41 sweep: 0.65-0.68 heuristically best; 0.66 compromise vs 0.70 default.
     "FUTURES_HMM_CRISIS_THRESHOLD": 0.66,
     # Asymmetric Friction Reduction (Phase 6): stronger sticky penalty for training stability.
-    "FUTURES_HMM_STICKY_PENALTY_WEIGHT": 100.0,
+    "FUTURES_HMM_STICKY_PENALTY_WEIGHT": 800.0,
     # Min-duration (hours) per state: [BULL_CALM, BULL_VOL_UP, BEAR, CHOP, CRISIS]
-    "FUTURES_HMM_OUTPUT_STICKY_MIN_DURATION": [36, 12, 2, 12, 1],
+    "FUTURES_HMM_OUTPUT_STICKY_MIN_DURATION": [1000, 500, 500, 500, 168],
     # Slightly stronger sticky transitions → stabler systemic HMM under leg refit (Path C).
     "FUTURES_HMM_TRANSITION_PRIOR_ALPHA": 0.50,
     # HMM Posterior Smoothing (EMA, DEMA, TEMA, HMA, KAMA, ALMA, JMA)
-    "FUTURES_HMM_SMOOTHING_METHOD": "KAMA",
-    "FUTURES_HMM_SMOOTHING_SPAN": 12,
+    "FUTURES_HMM_SMOOTHING_METHOD": "EMA",
+    "FUTURES_HMM_SMOOTHING_SPAN": 400,
     # Session 39: recovery override abandoned (P10 -0.027, DSR collapse). Keep disabled.
     "CRISIS_RECOVERY_TREND_THR": 1e9,
     "CRISIS_RECOVERY_FLOOR": 0.30,
@@ -331,3 +331,4 @@ def get_quarterly_window(reference_date: Any = None) -> tuple[str, str, str, str
         oos_start.strftime("%Y-%m-%d"),
         oos_end.strftime("%Y-%m-%d"),
     )
+

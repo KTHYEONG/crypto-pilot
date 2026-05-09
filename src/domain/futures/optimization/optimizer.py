@@ -696,7 +696,7 @@ def _suggest_ml_phase_d(trial: optuna.Trial) -> dict[str, Any]:
     ann_vol = float(trial.suggest_float("TARGET_ANN_VOL", 0.15, 0.45, step=0.05))
     
     # 1.1 Fractional Kelly Lambda (Shrinkage)
-    kelly_lambda = float(trial.suggest_float("KELLY_LAMBDA", 0.1, 0.5, step=0.05))
+    kelly_lambda = float(trial.suggest_float("KELLY_LAMBDA", 0.1, 1.2, step=0.1))
 
     # 2. HMM Crisis Penalty (Gamma)
     crisis_gamma = float(trial.suggest_float("CRISIS_GAMMA", 1.0, 5.0, step=0.5))
