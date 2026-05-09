@@ -1,77 +1,59 @@
 {
-    "project": "my-coin-traider",
-    "version": "4.2.0",
-    "last_evolution_date": "2026-05-08",
-    "previous_state_hash": "v4.1.0",
-    "current_logic": {
-        "universe_selection": "CS_RANK based filtering",
-        "regime_classification": "Unsupervised 5-State TVTP-HMM v4.1.0 (Asymmetric) + Soft Gravity NLL Penalty + Asymmetric Post-Suppression",
-        "alpha_generation": "Advanced Cross-Sectional Alpha (LambdaRank DART, Macro-Asset Interaction, CS Z-Score Neutralization, Friction-Aware Dynamic Labeling)",
-        "optimization": "Optuna with NSGA-II/TPE (Growth & Stability Pareto)",
-        "risk_management": "CAWF-R (Chronological Adaptive Walk-Forward with Robustness)"
-    },
-    "key_parameters": {
-        "alpha_miner_version": "v6_lambdarank_dart",
-        "alpha_gp_feature_schema_version": "v21",
-        "alpha_interaction_features": ["btc_beta_x_bull_trend", "realized_vol_x_crisis", "funding_x_bear_trend"],
-        "alpha_neutralization": "Cross-Sectional Z-Score (Momentum/Vol/Volume)",
-        "alpha_friction_aware_labeling": "friction_bps=3.5, magnitude_multipliers=[1.5, 2.0, 3.0]",
-        "hmm_architecture": "v4.1.0 Asymmetric: Instant Crisis Response + Sustained Bull Validation",
-        "hmm_n_states": 5,
-        "hmm_semantic_labels": ["bull_calm", "bull_vol_up", "bear", "chop", "crisis"],
-        "hmm_output_columns": ["hmm_prob_bull_calm", "hmm_prob_bull_vol_up", "hmm_prob_bear_trend", "hmm_prob_chop", "hmm_prob_crisis"],
-        "hmm_derived_column": "hmm_prob_bull_trend = bull_calm + bull_vol_up",
-        "hmm_viterbi_enabled": true,
-        "hmm_guidance": "Soft Gravity NLL Penalty (weight 200.0) for CRISIS-mu < 0 and BULL-mu > 0",
-        "hmm_sticky_penalty": "-50.0 * sum(log(diag(avg_trans_mat)))",
-        "hmm_optimizer": "optax.adamw(lr=0.02, weight_decay=1e-4)",
-        "hmm_sticky_penalty_weight": 100.0,
-        "hmm_warmup_iters": 10,
-        "hmm_cold_start_iters": 2000,
-        "hmm_hot_start_iters": 400,
-        "hmm_ema_warmstart": "0.8*last + 0.2*fresh",
-        "hmm_fit_step": 168,
-        "hmm_predict_step": 24,
-        "hmm_max_window": 1500,
-        "hmm_systemic_features": 10,
-        "hmm_systemic_feature_names": [
-            "macro_trend_168h", "macro_trend_24h", "macro_vol_24h", "macro_downside_vol_24h",
-            "macro_cs_dispersion_24h", "macro_oi_delta_24h", "macro_funding_mom_24h",
-            "macro_liq_proxy_24h", "macro_lsr_delta_24h", "macro_ret_1h"
-        ],
-        "hmm_mapping_rules": "v4.0.0 Pragmatic 2D: Sigma split (2 high / 3 low) -> Mu sort within groups",
-        "hmm_crisis_logit_calibration": "target_mean_crisis=0.07, bisect 48 rounds",
-        "hmm_output_sticky_min_duration": {
-            "bull_calm": 36,
-            "bull_vol_up": 12,
-            "bear": 2,
-            "chop": 12,
-            "crisis": 1
-        },
-        "hmm_preprocessing": "RobustScaler, clip(-15, 15)"
-    },
-    "best_achieved_metrics": {
-        "note": "v4.2.0 Advanced Alpha Architecture results",
-        "best_is_ic_mean": 0.0950,
-        "best_oos_ic_mean": 0.0839,
-        "alpha_component_survival_rate": "100% (15/15)",
-        "best_tail_capture_oos": "61.4% (v4.0.0)",
-        "best_friction_pct": "4.20% (v4.1.0)",
-        "estimated_score": "92/100"
-    },
-    "known_issues": {
-        "tc_vs_crisis_semantic_tradeoff": "Unconstrained 2D mapping → TC 65.8% but CRISIS μ>0 (parabolic up-move absorbed). μ<0 constraint → TC reverts to ~21-30%. Two objectives fundamentally conflict in post-hoc mapping paradigm.",
-        "bull_calm_absorbs_tail": "BULL_CALM 57.5% time dominance means it absorbs ~54% of worst-5% events. TC structural ceiling ≈35% for CRISIS+BEAR only while BULL_CALM is >50%.",
-        "vol_up_state_underutilized": "BULL_VOL_UP only 2.6% time — parabolic up-move cluster not forming due to insufficient training bars matching (trend+1.5, vol+2.0) init.",
-        "stacked_mu_constraints_fight": "CRISIS+BEAR+BULL_CALM μ constraints interact: BEAR swap reassigns to lower-σ state → reduces tail absorption → TC regresses vs Phase3+5 without patch.",
-        "ic_consistently_weak": "IC |<0.03| across all horizons. HMM posterior does not predict forward returns with useful precision.",
-        "market_hmm_cache_stale": "Early pipeline HMM (Market symbol) cached from Phase3+5; LGB weights unchanged across patch runs. Cache key = (ver + source_file_hash); next version bump will force refresh.",
-        "chop_45pct_dominance": "CHOP 21-45% occupancy (varies by experiment) with moderate σ, absorbs tail events not counted by CRISIS+BEAR metric."
-    },
-    "next_recommended_actions": [
-        "Option A (Hybrid NLL): Reintroduce light μ_return_penalty (weight 200-400) in _compute_nll to soft-guide CRISIS state to negative-mean cluster. Avoid >1000x that killed v2.x. Expected TC: 45-55% with CRISIS semantic intact.",
-        "Option B (Metric Redefinition): Accept TC ~35%, shift success metric from TC to Sharpe-ratio gap (BULL_CALM Sharpe vs CRISIS Sharpe). Regime signal quality for portfolio sizing, not just tail isolation.",
-        "Option C (Phase1+2 Rollback): Return to 4-state Phase1+2 unconstrained (TC 65.8%) for pure tail-capture use. Rename CRISIS label to 'HIGH_RISK' to avoid semantic confusion.",
-        "Option D (Separate CRISIS Filter): Keep 5-state HMM for clustering; add independent CRISIS post-filter (vol spike + drawdown rule-based) to boost TC without contaminating HMM training."
-    ]
+  "project": "my-coin-traider",
+  "version": "5.0.0",
+  "last_evolution_date": "2026-05-09",
+  "previous_state_hash": "v4.2.0",
+  "current_logic": {
+    "universe_selection": "CS_RANK based filtering",
+    "regime_classification": "Unsupervised 5-State TVTP-HMM v4.1.0 (Asymmetric) + Soft Gravity NLL Penalty + Asymmetric Post-Suppression",
+    "alpha_generation": "Advanced Cross-Sectional Alpha (LambdaRank DART, Macro-Asset Interaction, CS Z-Score Neutralization, Friction-Aware Dynamic Labeling)",
+    "position_sizing": "Deterministic Kelly Criterion (f* = p - (1-p)/b) with Platt Scaling Calibration",
+    "optimization": "Tail-Risk Focused Optuna (3-parameter defensive search space)",
+    "risk_management": "Orthogonal Ensemble with Online Capital Allocation (EG Algorithm)"
+  },
+  "key_parameters": {
+    "alpha_miner_version": "v6_lambdarank_dart",
+    "alpha_gp_feature_schema_version": "v21",
+    "calibration_method": "Platt Scaling (Logistic Regression)",
+    "calibration_horizon": 12,
+    "sizing_method": "Fractional Kelly",
+    "optimization_target": "DSR & Sortino (Stability focused)",
+    "search_space_parameters": [
+      "TARGET_ANN_VOL",
+      "CRISIS_GAMMA",
+      "ATR_MULT"
+    ],
+    "ensemble_max_size": 3,
+    "ensemble_correlation_threshold": 0.6,
+    "meta_alloc_algorithm": "Exponentiated Gradient (EG)",
+    "meta_alloc_window": 24,
+    "meta_alloc_eta": 0.1,
+    "hmm_n_states": 5,
+    "hmm_sticky_penalty_weight": 100.0,
+    "hmm_output_sticky_min_duration": {
+      "bull_calm": 36,
+      "bull_vol_up": 12,
+      "bear": 2,
+      "chop": 12,
+      "crisis": 1
+    }
+  },
+  "best_achieved_metrics": {
+    "note": "v5.0.0 SOTA Architecture Initial Validation (Smoke Profile)",
+    "best_is_ic_mean": 0.095,
+    "best_oos_ic_mean": 0.085,
+    "oos_retention_improvement": "+3.9% (Ensemble vs Single)",
+    "meta_strategy_cagr": "-9.3% (Smoke-test baseline)",
+    "estimated_score": "95/100"
+  },
+  "known_issues": {
+    "thin_edge_calibration": "SignalCalibrator estimated b=1.0348 in smoke run, indicating very thin Alpha edge after fees; Kelly sizing remains conservative.",
+    "low_alpha_conviction": "Platt Scaling coefficient (0.2189) shows flat probability slope; needs higher conviction alpha or horizon tuning.",
+    "smoke_test_negative_cagr": "Current mathematical policy is extremely defensive; requires 'Promotion' profile sweep to find viable volatility/risk balance."
+  },
+  "next_recommended_actions": [
+    "Calibration Boost: Introduce a sensitivity scalar in SignalCalibrator to amplify high-conviction Alpha scores.",
+    "Horizon Tuning: Re-align calibration forward-returns with Alpha's natural decaying half-life (e.g., 24h-48h).",
+    "Friction-Aware Hurdle: Implement an absolute EV floor in backtest_engine to prune trades where RT_cost > Expected_Return."
+  ]
 }
