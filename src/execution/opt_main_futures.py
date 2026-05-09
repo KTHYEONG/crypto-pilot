@@ -1139,7 +1139,7 @@ def main() -> None:
     ensemble_results = select_orthogonal_ensemble(
         all_trials=all_trials,
         is_passing=_is_passing_trial,
-        build_params=lambda rp: build_ml_phase_d_params(rp, args.tf),
+        build_params=lambda rp: {**build_ml_phase_d_params(rp, args.tf), "ESTIMATED_B": ml_ctx.estimated_b},
         max_size=int(OPT_FUTURES_CONFIG.get("FUTURES_ENSEMBLE_MAX_SIZE", 3)),
     )
     
