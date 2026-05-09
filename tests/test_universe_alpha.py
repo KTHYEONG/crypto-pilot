@@ -1,5 +1,6 @@
 import importlib
 import logging
+import os
 import sys
 import warnings
 from pathlib import Path
@@ -12,6 +13,7 @@ if project_root not in sys.path:
 import config.opt_config
 from config.opt_config import (
     FUTURES_ANCHOR_SYMBOLS,
+    FUTURES_MACRO_INDEX_SYMBOLS,
     FUTURES_SCREENER_CONFIG,
     OPT_FUTURES_CONFIG,
     get_quarterly_window,
@@ -19,9 +21,25 @@ from config.opt_config import (
 from config.settings import FUTURES_DATA_DIR
 from src.domain.futures.data_loader import DataCollector
 from src.domain.futures.ml_pipeline.pipeline_runner import run_ml_pipeline_for_universe
-from src.execution.opt_main_futures import _load_futures_data_maps_for_symbols
+from src.execution.opt_main_futures import (
+    _load_futures_data_maps_for_symbols,
+    _resolve_futures_parallel_policy,
+)
 
 warnings.filterwarnings("ignore")
+
+# Force Linux 'fork' method for memory efficiency (CoW)
+if sys.platform != "win32":
+    try:
+        import multiprocessing
+        multiprocessing.set_start_method("fork", force=True)
+    except (RuntimeError, ImportError):
+        pass
+
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("NUMBA_NUM_THREADS", "1")
 
 # 로그 설정
 logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -80,26 +98,38 @@ def run_universe_to_gp_test(tf="1h"):
     importlib.reload(config.opt_config)
     final_symbols = config.opt_config.FUTURES_SYMBOLS
     
-    _logger.info(f"\nFinal Selected Universe ({len(final_symbols)}): {final_symbols}")
+    # [3-Tier Universe] Ensure Anchors and Macro Index symbols are always loaded for systemic HMM
+    load_symbols = list(set(final_symbols + FUTURES_ANCHOR_SYMBOLS + FUTURES_MACRO_INDEX_SYMBOLS))
     
+    _logger.info(f"\nFinal Selected Universe ({len(final_symbols)}): {final_symbols}")
+    _logger.info(f"3-Tier Load Universe ({len(load_symbols)} symbols for Pipeline)")
+
+    # [Data Integrity] Re-load data for the 3-tier universe (matching production logic)
+    _, _, valid_symbols = _load_futures_data_maps_for_symbols(
+        load_symbols, tf, fetch_start, start, is_end, end, skip_metrics=False
+    )
+    
+    if not valid_symbols:
+        _logger.error("No valid symbols loaded for 3-tier universe. Test aborted.")
+        return
+
     _logger.info("\n" + "=" * 70)
-    _logger.info(" [PHASE 2] GP Alpha Mining & IC Evaluation")
+    _logger.info(" [PHASE 2] ML Pipeline: Universal Cross-Sectional Alpha Mining")
     _logger.info("=" * 70)
     
-    # 5. ML Pipeline 실행
+    # 5. ML Pipeline 실행 (Production Settings 일치)
     cfg = dict(OPT_FUTURES_CONFIG)
-    cfg["FUTURES_ML_GP_GENERATIONS"] = 5
-    cfg["FUTURES_ML_GP_POPULATION"] = 500
+    ml_n_jobs = _resolve_futures_parallel_policy(len(valid_symbols))
     
     _logger.info("\nExecuting ML Pipeline (Institutional Alpha Audit Mode)...")
     ml_out = run_ml_pipeline_for_universe(
-        final_symbols,
+        valid_symbols,
         tf,
-        fetch_start_date=fetch_start,  # v15 Decoupling
+        fetch_start_date=fetch_start,
         end=end,
         cfg=cfg,
-        workers=4,
-        n_jobs=4,
+        workers=ml_n_jobs,
+        n_jobs=ml_n_jobs,
         is_end_date=is_end,
         is_start_date=start
     )
