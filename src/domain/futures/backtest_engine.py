@@ -546,6 +546,7 @@ def backtest_portfolio_numba(
     xs_long: np.ndarray,
     xs_short: np.ndarray,
     hmm_crisis: np.ndarray,
+    hmm_hard_state: np.ndarray,
     hmm_mod_long: np.ndarray,
     hmm_mod_short: np.ndarray,
     initial_balance: float,
@@ -622,7 +623,20 @@ def backtest_portfolio_numba(
 
         dd = (hwm - current_equity) / hwm if hwm > 1e-9 else 0.0
         dd_scale = max(0.0, 1.0 - (dd / dd_scaling_threshold)) if dd_scaling_threshold > 1e-9 else 1.0
-        c_prob = float(hmm_crisis[i, 0]); crisis_scale = (1.0 - c_prob) ** crisis_gamma
+        c_prob = float(hmm_crisis[i, 0])
+        h_state = int(hmm_hard_state[i, 0])
+        
+        # [NEW] HMM-based Exposure Scaling (Go/No-Go)
+        regime_exp_mult = 1.0
+        if c_prob > 0.5 or h_state == 4: # REGIME_CRISIS
+            regime_exp_mult = 0.0
+        elif h_state == 2: # REGIME_BEAR
+            regime_exp_mult = 0.5
+        elif h_state == 3: # REGIME_CHOP
+            regime_exp_mult = 0.7
+            
+        max_exp_scaled = max_exposure * regime_exp_mult
+        crisis_scale = (1.0 - c_prob) ** crisis_gamma
         effective_risk_per_trade = risk_per_trade * dd_scale * crisis_scale
 
         prev_i = i - 1
@@ -755,10 +769,25 @@ def backtest_portfolio_numba(
                                 tmp = candidate_pool[c1, k]; candidate_pool[c1, k] = candidate_pool[c2, k]; candidate_pool[c2, k] = tmp
                 n_sel = min(n_cands, max_concurrent - num_open_pos)
                 total_req = 0.0
+                total_new_notional = 0.0
                 for idx in range(n_sel):
                     s_i = int(candidate_pool[idx, 1]); le_i = max(1.0, float(lev_2d[i, s_i]))
-                    total_req += (candidate_pool[idx, 4] * candidate_pool[idx, 3]) / le_i
+                    notional_i = candidate_pool[idx, 4] * candidate_pool[idx, 3]
+                    total_req += notional_i / le_i
+                    total_new_notional += notional_i
+                
+                # [NEW] Cap total exposure by max_exp_scaled (HMM-aware)
+                current_notional = 0.0
+                for s_in in range(n_syms):
+                    if in_pos[s_in]:
+                        current_notional += amount[s_in] * close_2d[i, s_in]
+                
+                new_notional_cap = max(0.0, (current_equity * max_exp_scaled) - current_notional)
+                
                 scale = min(1.0, (free_margin * 0.96) / total_req) if total_req > 0 else 1.0
+                if total_new_notional > 1e-9:
+                    scale = min(scale, new_notional_cap / total_new_notional)
+
                 for idx in range(n_sel):
                     _, s_f, p_side_f, fill_p, target_qty, stop_dist = candidate_pool[idx]
                     s, p_side, final_qty = int(s_f), int(p_side_f), target_qty * scale
@@ -957,7 +986,9 @@ class MultiSymbolEngine:
             sf_raw, d["atr"], d["garch_kelly_f"], d.get("kill_signal", np.zeros_like(c2d)),
             d.get("funding_rate_sum", np.zeros_like(c2d)), d["slot_rank_score"],
             d.get("xs_score_long", np.zeros_like(c2d)), d.get("xs_score_short", np.zeros_like(c2d)),
-            d.get("hmm_prob_crisis", np.zeros_like(c2d)), hmm_mod_l, d.get("hmm_modulator_short", np.ones_like(c2d)),
+            d.get("hmm_prob_crisis", np.zeros_like(c2d)), 
+            d.get("hmm_hard_state", np.zeros_like(c2d)),
+            hmm_mod_l, d.get("hmm_modulator_short", np.ones_like(c2d)),
             self.initial_balance, lev_2d, self.fee_rate, self.slippage_rate, self.risk_per_trade,
             float(self.params.get("ATR_MULT", 3.0)), float(self.params.get("TRAIL_MULT", 3.0)), float(self.params.get("ATR_MULT", 3.0)),
             float(self.params.get("SHORT_TP_MULT", 3.0)), float(self.params.get("LONG_SCALE_ATR_MULT", 3.0)), float(self.params.get("TRAIL_MULT", 3.0)),
