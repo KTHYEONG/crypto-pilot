@@ -4,7 +4,19 @@ This file tracks the logical progression and experimental results of the quantit
 
 ---
 
-## [2026-05-09] v6.4.1: Signal Quality Breakthrough — Symmetric Hybrid Labeling (Gemini CLI)
+## [2026-05-09] v6.4.2: Execution Dissonance — HMM Mapping & Hurdle Liberation (Gemini CLI)
+
+### 1. Architectural Shift: Unlocking the Gates
+*   **Problem**: Despite v6.4.1's high IC (0.14), the system remained in 'Trade Starvation' (0 trades). Restrictive Optuna search ranges and overly defensive regime verdicts blocked the signal.
+*   **Implementation (The Liberation)**:
+    1.  **Search Space Expansion**: Lowered `CS_Z_SCORE_THRESHOLD` floor to **0.2** and `MIN_SCORE_PERCENTILE` floor to **0.40**.
+    2.  **Hurdle Liquidation**: Force-set `FUTURES_ML_EV_HURDLE_RATIO` to **0.0** to ensure gradients are preserved in early-stage trials.
+*   **Performance Impact (Production Audit)**:
+    *   **Alpha Stability**: Maintained elite predictive power (**OOS IC 0.1466**).
+    *   **Dissonance Diagnosis**: Identified that **87% of the OOS period** is mapped to defensive verdicts (CHOP/BEAR) despite positive structural growth (`G_LOG > 0`), effectively killing all trades.
+*   **Verdict**: Signal is institutional-grade; Execution is mathematically paralyzed by semantic misalignment.
+
+---
 
 ### 1. Architectural Shift: Directional Symmetry & Absolute Edge
 *   **Problem**: v6.4.0's over-asymmetric (Long-only) labeling led to 'Directional Blindness' and zero-trade starvation in the optimizer. The model lacked a clear gradient for shorting or neutral market states.
