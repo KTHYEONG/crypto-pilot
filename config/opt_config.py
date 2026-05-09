@@ -203,8 +203,8 @@ ENGINE_PARAM_SPACE_FUTURES: dict[str, dict[str, Any]] = {
     **PORTFOLIO_PARAM_SPACE_FUTURES,
     "K_RANK": {"type": "int", "low": 1, "high": 4, "step": 1},
     "REBALANCE_BARS": {"type": "categorical", "choices": (1, 3, 6, 12)},
-    "MIN_SCORE_PERCENTILE": {"type": "float", "low": 0.50, "high": 0.90, "step": 0.10},
-    "CS_Z_SCORE_THRESHOLD": {"type": "float", "low": 0.5, "high": 2.0, "step": 0.1},
+    "MIN_SCORE_PERCENTILE": {"type": "float", "low": 0.40, "high": 0.90, "step": 0.10},
+    "CS_Z_SCORE_THRESHOLD": {"type": "float", "low": 0.2, "high": 2.0, "step": 0.1},
     "CRISIS_GAMMA": {"type": "float", "low": 1.0, "high": 5.0, "step": 1.0},
     "CRISIS_GATE_PROB": {"type": "float", "low": 0.50, "high": 0.90, "step": 0.10},
 }
