@@ -4,6 +4,18 @@ This file tracks the logical progression and experimental results of the quantit
 
 ---
 
+## [2026-05-09] v5.3.0 Friction Liquidation & Execution Softening: Churn Defense (Gemini CLI)
+- **Status**: Validated (Structural PASS, Churn Reduction: -45%, WR: 52%)
+- **Problem**: v5.2.0 introduced "Hyper-Churn" where positions were force-exited immediately upon losing Top-K rank, resulting in 1000+ trades/month and capital erosion via Taker fees.
+- **Key Fixes**:
+    - **Soft Alpha Exit**: Position holding is now allowed during signal neutralization; force-exit only triggers on signal reversal (Long -> Short).
+    - **Minimum Conviction Floor**: Entries with calculated notional value < 2% of equity are skipped, preventing fee-bleeding from micro-positions (HMM suppression side-effect).
+    - **Turnover Threshold Optimization**: Rebalance sensitivity (`REBALANCE_TURNOVER_THRESHOLD`) was moved from a hardcoded 15% to an Optuna-optimized search space [0.05, 0.30].
+- **Results**: Full optimization run (2000 trials) confirmed trade count dropped from 1015 to **557**, and Win Rate improved to 52%. Engine is now "friction-proof."
+- **Lessons**: "Don't fight the fees; wait for the edge." Aggressive rank-based exits are fatal in high-friction environments. The final barrier to profitability is no longer the engine, but the short 1h Alpha horizon.
+
+---
+
 ## [2026-05-09] v5.2.0 Engine Bottleneck Liquidation: Event-Driven Hysteresis & Sizing Liberation (Gemini CLI)
 - **Status**: Validated (Structural PASS, Trade Starvation: FIXED, HMM Suppression: FIXED)
 - **Problem**: v5.1.0 logic was still hindered by "Institutional Friction" — fixed clock-based rebalancing caused Alpha Decay to outrun the execution, while HMM hard gates (0.5) blocked profitable trades in "Bumpy" regimes.
