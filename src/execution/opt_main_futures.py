@@ -13,6 +13,14 @@ import sys
 from pathlib import Path
 from typing import Any
 
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("VECLIB_MAXIMUM_THREADS", "1")
+os.environ.setdefault("NUMBA_NUM_THREADS", "1")
+os.environ["CUDA_VISIBLE_DEVICES"] = ""
+os.environ["JAX_PLATFORMS"] = "cpu"
+
 import numpy as np
 import optuna
 import pandas as pd
@@ -27,6 +35,7 @@ if project_root not in sys.path:
 import warnings  # noqa: E402
 
 import config.opt_config  # noqa: E402
+from config.ops_profiles import check_run_summary_against_profile, resolve_ops_profile  # noqa: E402
 from config.opt_config import (  # noqa: E402
     FUTURES_ANCHOR_SYMBOLS,
     FUTURES_MACRO_INDEX_SYMBOLS,
@@ -47,15 +56,7 @@ from src.domain.futures.data_loader import (  # noqa: E402
 )
 from src.domain.futures.ml_pipeline import run_ml_pipeline_for_universe  # noqa: E402
 from src.domain.futures.ml_pipeline.pipeline_runner import (  # noqa: E402
-    copy_data_maps_tf_clone,
-    merge_ml_output_into_data_maps,
     merge_ml_output_into_is_and_oos,
-    run_hmm_fusion_for_is_end,
-)
-from src.domain.futures.optimization.validation import (  # noqa: E402
-    awf_pos_frac_to_pseudo_pbo,
-    resolve_adjusted_gates,
-    wf_path_ergodicity_deviation_pct,
 )
 from src.domain.futures.optimization.evaluator import (  # noqa: E402
     calc_net_alpha_with_friction,
@@ -67,7 +68,6 @@ from src.domain.futures.optimization.optimizer import (  # noqa: E402
     MLPhaseDContext,
     build_ml_phase_d_params,
     build_phase_d_enqueue_params_from_deploy_json,
-    check_hard_gates_ml,
     inject_cs_momentum_ranks,
     objective_ml_phase_d,
     precompute_ml_optimization_context,
@@ -75,6 +75,35 @@ from src.domain.futures.optimization.optimizer import (  # noqa: E402
 from src.domain.futures.optimization.screener import (  # noqa: E402
     screen_futures_universe,
     screen_symbol_refinement_futures,
+)
+from src.domain.futures.optimization.validation import (  # noqa: E402
+    awf_pos_frac_to_pseudo_pbo,
+    resolve_adjusted_gates,
+)
+from src.domain.futures.portfolio.policy_engine import (  # noqa: E402
+    apply_policy_constraints,
+    load_portfolio_policy_config,
+)
+from src.domain.futures.validation.candidate_selector import (  # noqa: E402
+    CandidateSelectorConfig,
+    select_candidate_by_robust_basin,
+)
+from src.domain.futures.validation.champion_registry import (  # noqa: E402
+    ChampionMetrics,
+    append_champion_history,
+    load_champion_metrics_for_guard,
+    resolve_champion_record_path,
+    run_champion_promotion_guard,
+    write_champion_record,
+)
+from src.domain.futures.validation.unified_gates import (  # noqa: E402
+    GATE_CODE_DESCRIPTIONS,
+    FuturesResearchGateInput,
+    evaluate_research_gates,
+)
+from src.domain.futures.validation.walk_forward import (  # noqa: E402
+    WalkForwardConfig,
+    evaluate_walk_forward,
 )
 
 warnings.filterwarnings("ignore")
@@ -85,14 +114,6 @@ if sys.platform != "win32":
         multiprocessing.set_start_method("fork", force=True)
     except RuntimeError:
         pass
-
-os.environ.setdefault("OMP_NUM_THREADS", "1")
-os.environ.setdefault("MKL_NUM_THREADS", "1")
-os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
-os.environ.setdefault("VECLIB_MAXIMUM_THREADS", "1")
-os.environ.setdefault("NUMBA_NUM_THREADS", "1")
-os.environ["CUDA_VISIBLE_DEVICES"] = ""
-os.environ["JAX_PLATFORMS"] = "cpu"
 
 from src.core.utils.utils import setup_logger  # noqa: E402
 
@@ -109,6 +130,49 @@ SEP_WIDTH: int = 60
 PROGRESS_MIN_INTERVAL: float = 0.2
 MODE_MULTI: str = "multi"
 BEST_PARAMS_FUTURES_JSON_STEM: str = "best_futures_1h"
+
+
+def _safe_float(val: Any, default: float = 0.0, clip: float | None = None) -> float:
+    try:
+        out = float(val)
+    except (TypeError, ValueError):
+        out = default
+    if not np.isfinite(out):
+        out = default
+    if clip is not None:
+        out = float(np.clip(out, -abs(float(clip)), abs(float(clip))))
+    return out
+
+
+def _sanitize_metric_map(m: dict[str, Any]) -> dict[str, float]:
+    limits = {
+        "pbo": 1e3,
+        "p10": 100.0,
+        "dsr": 1e3,
+        "tw": 1e6,
+        "cagr": 1e5,
+        "mdd": 1e3,
+        "time_2x": 1e6,
+        "cvar": 1e3,
+        "net_alpha": 1e5,
+        "avg_pnl": 1e5,
+        "pf": 1e3,
+        "is_cagr": 1e5,
+        "ho_cagr": 1e5,
+        "awf_pos_frac": 10.0,
+        "mu_awf": 100.0,
+        "sig_awf": 100.0,
+        "plgd": 100.0,
+        "erg_dev": 1e4,
+        "oos_long_pf": 1e3,
+        "oos_short_pf": 1e3,
+        "oos_retention_pct": 1e5,
+        "is_alpha": 1e5,
+    }
+    out: dict[str, float] = {}
+    for k, v in m.items():
+        out[k] = _safe_float(v, default=0.0, clip=limits.get(k, 1e6))
+    return out
 
 def _ml_phase_d_sampler(seed: int, n_trials: int = 200) -> optuna.samplers.BaseSampler:
     # NSGA-II: 2-obj Pareto (Growth | Stability). population_size from config.
@@ -414,6 +478,7 @@ def _print_dual_audit_dashboard(
     # Total content width: borders and separators included
 
     def get_delta_str(val: float, is_pct: bool = False, lower_is_better: bool = False) -> str:
+        val = _safe_float(val, 0.0, clip=1e6)
         suffix = "%p" if is_pct else ""
         precision = ".2f" if is_pct else ".4f"
 
@@ -688,7 +753,13 @@ def _load_single_symbol_data(
             min_bars_threshold = min_bars_map.get(tf_l, 300)
 
             if is_end_idx < min_bars_threshold:
-                _logger.debug("[%s] %s history too short (%d < %d)", sym, tf_l, is_end_idx, min_bars_threshold)
+                _logger.debug(
+                    "[%s] %s history too short (%d < %d)",
+                    sym,
+                    tf_l,
+                    is_end_idx,
+                    min_bars_threshold,
+                )
                 insufficient = True
                 break
 
@@ -823,6 +894,12 @@ def main() -> None:
         action="store_true",
         help="Force promotion regardless of champion comparison.",
     )
+    parser.add_argument(
+        "--ops-profile",
+        type=str,
+        default=None,
+        help="Preset trials/seeds: smoke | candidate | promotion (see config/ops_profiles.py).",
+    )
     args = parser.parse_args(remaining_args)
 
     if args.force_retrain_alpha:
@@ -956,19 +1033,32 @@ def main() -> None:
             raise RuntimeError(f"OOS signal dead for {sym}.")
 
     # [PHASE 5] Optuna Portfolio Optimization Starting
-    n_ml_trials = (
-        int(args.trials) if args.trials != OPT_FUTURES_CONFIG["total_trials"] else 300
-    )
-    target_seeds = (
-        [42, 7, 13, 21, 55, 101, 777, 8, 99, 1234] if args.seed is None else [int(args.seed)]
-    )
+    _prof = resolve_ops_profile(args.ops_profile)
+    if _prof is not None:
+        n_ml_trials = int(_prof["trials"])
+        target_seeds = [int(s) for s in (_prof.get("seeds") or [42])]
+        _logger.info(
+            " [OPS] profile=%s trials=%d seeds=%s — %s",
+            _prof.get("id"),
+            n_ml_trials,
+            target_seeds,
+            _prof.get("description", ""),
+        )
+    else:
+        n_ml_trials = (
+            int(args.trials) if args.trials != OPT_FUTURES_CONFIG["total_trials"] else 300
+        )
+        target_seeds = (
+            [42, 7, 13, 21, 55, 101, 777, 8, 99, 1234] if args.seed is None else [int(args.seed)]
+        )
     
-    candidates_pool: list[dict[str, Any]] = []
     all_trials: list[optuna.trial.FrozenTrial] = []
 
     _logger.info("\n" + "═" * 85)
     _logger.info(
-        f" [STEP 4/5] MULTI-SEED OPTIMIZATION: {len(target_seeds)} Seeds | {n_ml_trials} Trials/Seed"
+        " [STEP 4/5] MULTI-SEED OPTIMIZATION: %d Seeds | %d Trials/Seed",
+        len(target_seeds),
+        n_ml_trials,
     )
     _logger.info("═" * 85 + "\n")
 
@@ -1001,8 +1091,8 @@ def main() -> None:
                     enq = build_phase_d_enqueue_params_from_deploy_json(deploy_data)
                     if enq is not None:
                         study_ml.enqueue_trial(enq)
-                except Exception:
-                    pass
+                except Exception as _enq_e:
+                    _logger.debug("Deploy JSON enqueue skipped: %s", _enq_e)
 
         study_ml.optimize(
             lambda tr, ctx=ml_ctx: objective_ml_phase_d(tr, ctx),
@@ -1012,106 +1102,52 @@ def main() -> None:
 
         all_trials.extend(study_ml.trials)
         completed = [t for t in study_ml.trials if t.state == TrialState.COMPLETE]
-        completed.sort(key=lambda tr: tr.value if tr.value is not None else 1e18)
-
-        # Find best trial for this seed for candidates_pool (legacy/diagnostic)
-        seed_best_trial: optuna.trial.FrozenTrial | None = None
-        for i in range(min(100, len(completed))):
-            t = completed[i]
+        pass_count = 0
+        for t in completed:
             _awf_pos = float(t.user_attrs.get("awf_pos_frac", 0.0))
             pbo_obs_s = awf_pos_frac_to_pseudo_pbo(_awf_pos)
             if _ml_trial_passes_hard_gates(
                 t, pbo_obs_s, check_pbo=True, pbo_max=pbo_max_eff, dsr_min=dsr_min_eff
             ):
-                seed_best_trial = t
-                break
-        
-        if seed_best_trial is None and completed:
-            seed_best_trial = completed[0]
+                pass_count += 1
+        _logger.info("  [SEED %s] complete=%d pass=%d", seed, len(completed), pass_count)
 
-        if seed_best_trial:
-            # Quick Eval to get metrics for selection
-            s_params = build_ml_phase_d_params(dict(seed_best_trial.params), args.tf)
-            s_oos_port = run_oos_margin_shared_portfolio(
-                valid_symbols, args.tf, s_params, oos_data_maps, cache_root=FUTURES_CACHE_DIR
-            )
-            
-            # Selection Metrics
-            _awf_pos_s = float(seed_best_trial.user_attrs.get("awf_pos_frac", 0.0))
-            cand = {
-                "seed": seed,
-                "params": s_params,
-                "trial": seed_best_trial,
-                "pbo": awf_pos_frac_to_pseudo_pbo(_awf_pos_s),
-                "plgd": float(seed_best_trial.user_attrs.get("awf_plgd", 0.0)),
-                "cagr": float(s_oos_port.get("cagr_pct", 0.0)),
-                "p10": float(seed_best_trial.user_attrs.get("ml_p10_log_growth_cpcv", -10.0)),
-                "erg_dev": float(s_oos_port.get("erg_dev", 99.0)),
-                "oos_port": s_oos_port,
-                "awf_pos_frac": _awf_pos_s
-            }
-            cand["erg_dev"] = float(seed_best_trial.user_attrs.get("wf_erg_dev", 99.0))
-            
-            candidates_pool.append(cand)
-
-    # --- Robust Basin Consensus Aggregator ---
-    _logger.info("  --> Running Consensus Aggregator across all seeds...")
+    _logger.info("  --> Running robust basin selector across all completed trials...")
     pbo_max_eff, dsr_min_eff, _ = resolve_adjusted_gates(OPT_FUTURES_CONFIG, n_ml_trials)
-    
-    passing_trials = []
-    for t in all_trials:
-        if t.state == TrialState.COMPLETE:
-            _awf_pos = float(t.user_attrs.get("awf_pos_frac", 0.0))
-            pbo_obs_t = awf_pos_frac_to_pseudo_pbo(_awf_pos)
-            if _ml_trial_passes_hard_gates(
-                t, pbo_obs_t, check_pbo=True, pbo_max=pbo_max_eff, dsr_min=dsr_min_eff
-            ):
-                passing_trials.append(t)
+    selector_cfg_block = OPT_FUTURES_CONFIG.get("FUTURES_CANDIDATE_SELECTOR", {})
+    selector_cfg = CandidateSelectorConfig(
+        elite_top_n=int(selector_cfg_block.get("elite_top_n", 30)),
+        basin_iqr_mult=float(selector_cfg_block.get("basin_iqr_mult", 1.0)),
+    )
 
-    if passing_trials:
-        _logger.info(
-            f"  [CONSENSUS] Found {len(passing_trials)} passing trials. "
-            "Calculating median parameters."
+    def _is_passing_trial(t: optuna.trial.FrozenTrial) -> bool:
+        _awf_pos = float(t.user_attrs.get("awf_pos_frac", 0.0))
+        pbo_obs_t = awf_pos_frac_to_pseudo_pbo(_awf_pos)
+        return _ml_trial_passes_hard_gates(
+            t, pbo_obs_t, check_pbo=True, pbo_max=pbo_max_eff, dsr_min=dsr_min_eff
         )
-        consensus_params_raw = {}
-        param_keys = passing_trials[0].params.keys()
-        for key in param_keys:
-            vals = [t.params[key] for t in passing_trials]
-            if isinstance(vals[0], (int, float)) and not isinstance(vals[0], bool):
-                consensus_params_raw[key] = float(np.median(vals))
-                # Restore integer type if necessary
-                if isinstance(passing_trials[0].params[key], int):
-                    consensus_params_raw[key] = round(consensus_params_raw[key])
-            else:
-                # Mode for categorical/bool
-                consensus_params_raw[key] = max(set(vals), key=vals.count)
-        
-        params = build_ml_phase_d_params(consensus_params_raw, args.tf)
-        # pick the best passing trial as the 'representative' trial.
-        passing_trials.sort(key=lambda tr: tr.value if tr.value is not None else 1e18)
-        best_trial = passing_trials[0]
-        
-        # Define 'winner' for telemetry/downstream logic (seed 0 indicates consensus)
-        winner = {"seed": 0, "params": params, "trial": best_trial}
-        
-        _logger.info(
-            f"  [CONSENSUS] Aggregated {len(passing_trials)} trials "
-            "into robust parameter set."
-        )
-    else:
-        _logger.warning(
-            "  [CONSENSUS] No trials passed gates. Falling back to best seed candidate."
-        )
-        candidates_pool.sort(key=lambda c: (
-            1 if c["erg_dev"] > 25.0 else 0,
-            -c["plgd"],
-            -c["cagr"],
-            -c["p10"],
-            c["pbo"]
-        ))
-        winner = candidates_pool[0]
-        best_trial = winner["trial"]
-        params = winner["params"]
+
+    sel = select_candidate_by_robust_basin(
+        all_trials=all_trials,
+        is_passing=_is_passing_trial,
+        build_params=lambda rp: build_ml_phase_d_params(rp, args.tf),
+        cfg=selector_cfg,
+    )
+    params = sel.params
+    best_trial = sel.representative_trial
+    _seed_w = args.seed if args.seed is not None else 0
+    winner = {"seed": _seed_w, "params": params, "trial": best_trial}
+    passing_trials = [
+        t for t in all_trials if t.state == TrialState.COMPLETE and _is_passing_trial(t)
+    ]
+
+    _logger.info(
+        "  [SELECTOR] method=%s completed=%d passing=%d basin=%d",
+        sel.method,
+        sel.n_completed,
+        sel.n_passing,
+        sel.n_basin,
+    )
 
     pbo_obs = awf_pos_frac_to_pseudo_pbo(
         float(best_trial.user_attrs.get("awf_pos_frac", 0.0))
@@ -1136,7 +1172,8 @@ def main() -> None:
     _leg_tws = best_trial.user_attrs.get("cpcv_path_oos_log_tw", [])
     _mu_awf  = float(best_trial.user_attrs.get("awf_mu_log", 0.0))
     _sig_awf = float(best_trial.user_attrs.get("awf_sigma_log", 0.0))
-    _plgd_v  = float(best_trial.user_attrs.get("awf_plgd", 0.0))
+    _plgd_v = float(best_trial.user_attrs.get("awf_plgd", 0.0))
+    _reward_v = float(best_trial.user_attrs.get("awf_contract_reward", _plgd_v))
     _n_tr_cfg = float(OPT_FUTURES_CONFIG.get("total_trials", 1000))
     _ldef = float(OPT_FUTURES_CONFIG.get("FUTURES_PLGD_LAMBDA_DEF", 0.5))
     _ltail = float(OPT_FUTURES_CONFIG.get("FUTURES_PLGD_LAMBDA_TAIL", 2.0))
@@ -1146,8 +1183,9 @@ def main() -> None:
     _wl   = min(_leg_tws) if _leg_tws else 0.0
     _tp   = _ltail * max(0.0, -_wl)
     _logger.info(
-        "  [PLGD] mu=%.4f  var_drag=%.4f  deflation=%.4f  tail=%.4f  plgd=%.4f",
-        _mu_awf, _vd, _def, _tp, _plgd_v,
+        "  [AWF OBJ] mu=%.4f  var_drag=%.4f  deflation=%.4f  tail=%.4f  plgd_legacy=%.4f  "
+        "contract_reward=%.4f",
+        _mu_awf, _vd, _def, _tp, _plgd_v, _reward_v,
     )
     if _leg_tws:
         _leg_l_pf = best_trial.user_attrs.get("leg_l_pf", [])
@@ -1182,222 +1220,121 @@ def main() -> None:
         "awf_pos_frac": float(best_trial.user_attrs.get("awf_pos_frac", 0.0)),
     })
 
-    params = build_ml_phase_d_params(dict(best_trial.params), args.tf)
     _assert_oos_gp_signal_alive(oos_data_maps, valid_symbols, args.tf)
 
     _logger.info("\n" + "═" * 85)
     _logger.info(" [STEP 5/5] FINAL OOS EVALUATION & WF ADAPTATION")
     _logger.info("═" * 85)
 
+    policy_cfg = load_portfolio_policy_config(OPT_FUTURES_CONFIG)
+    params = apply_policy_constraints(params, policy_cfg)
+
     oos_port = run_oos_margin_shared_portfolio(
         valid_symbols, args.tf, params, oos_data_maps, cache_root=FUTURES_CACHE_DIR
     )
 
+    _awf_pos_best = float(best_trial.user_attrs.get("awf_pos_frac", 0.0))
+    pbo_obs = awf_pos_frac_to_pseudo_pbo(_awf_pos_best)
+    dsr_obs = float(best_trial.user_attrs.get("gate1_dsr", 0.0))
+
     if bool(OPT_FUTURES_CONFIG.get("FUTURES_PHASE3_HARD_GATE", True)):
-        # AWF: pseudo-PBO = 1 - awf_pos_frac (stored per-trial by objective_ml_phase_d).
-        _awf_pos_best = float(best_trial.user_attrs.get("awf_pos_frac", 0.0))
-        pbo_obs = awf_pos_frac_to_pseudo_pbo(_awf_pos_best)
-        # gate1_dsr == awf_pos_frac in CAWF-R paradigm (backward-compat attr name kept).
-        dsr_obs = float(best_trial.user_attrs.get("gate1_dsr", 0.0))
-        # Optional SPA post-run diagnostic (not a hard gate — informational only).
         _awf_leg_log_tw = best_trial.user_attrs.get("cpcv_path_oos_log_tw") or []
         if len(_awf_leg_log_tw) >= 3:
             _spa_p = stationary_bootstrap_spa(np.asarray(_awf_leg_log_tw, dtype=np.float64))
             _spa_max = float(OPT_FUTURES_CONFIG.get("FUTURES_SPA_P_VALUE_MAX", 0.10))
             _logger.info(
                 " [SPA] H0(zero alpha) p-value=%.4f (threshold=%.2f) -> %s",
-                _spa_p, _spa_max, "REJECT H0" if _spa_p <= _spa_max else "FAIL-TO-REJECT",
+                _spa_p,
+                _spa_max,
+                "REJECT H0" if _spa_p <= _spa_max else "FAIL-TO-REJECT",
             )
-        gate_ok = check_hard_gates_ml(
-            oos_port,
+        _logger.info(
+            " [PHASE 3 AUDIT] awf_pos_frac=%.4f pseudo_pbo=%.4f | DSR=%.4f",
+            _awf_pos_best,
             float(pbo_obs),
             dsr_obs,
-            0.55,
-            pbo_max_override=pbo_max_eff,
-            dsr_min_override=dsr_min_eff,
         )
-        _logger.info(
-            " [PHASE 3 AUDIT] awf_pos_frac=%.4f pseudo_pbo=%.4f | DSR=%.4f | RESULT: %s",
-            _awf_pos_best, float(pbo_obs), dsr_obs,
-            "PASS" if gate_ok else "FAIL",
-        )
-        if not gate_ok:
-            gate_failures.append("PHASE3_HARD_GATE")
 
-
-    n_wf = int(OPT_FUTURES_CONFIG.get("FUTURES_WF_OOS_LEGS", 1))
-    wf_hmm_refit = bool(OPT_FUTURES_CONFIG.get("FUTURES_WF_HMM_LEG_REFIT", True))
-    wf_tw_floor = float(OPT_FUTURES_CONFIG.get("FUTURES_WF_LEG_TW_MIN_ALL", 1.0))
-    wf_tw_mean_min = float(OPT_FUTURES_CONFIG.get("FUTURES_WF_LEG_TW_MEAN_MIN", 1.05))
-    # Purging: skip first N bars of each WF leg to prevent IS/train-set leakage.
-    # Covers positions opened near IS boundary that close into the evaluation window.
-    wf_purge_bars = int(OPT_FUTURES_CONFIG.get("FUTURES_WF_PURGE_BARS", 24))
-
-    # [SMART] Prefetch 1m data once before WF loop to avoid redundant I/O in each leg
-    prefetched_1m_cache: dict[str, pd.DataFrame] = {}
-    meta_on = bool(OPT_FUTURES_CONFIG.get("FUTURES_USE_META_LABELER", False))
-    if n_wf > 1 and valid_symbols and wf_hmm_refit and meta_on and ml_out.alpha_panel is not None:
-        _logger.info("  --> [WF] Prefetching 1m OHLCV for MetaLabeler audit (once)...")
-        valid_alpha_set = set(ml_out.alpha_panel.index.get_level_values("symbol").unique())
-        need_1m = [s for s in valid_symbols if s in valid_alpha_set]
-
-        def _load_1m_job(s):
-            try:
-                coll = DataCollector()
-                return s, coll.collect_1m_ohlcv(s, start_date, end_date)
-            except Exception:
-                return s, None
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=ml_n_jobs) as ex:
-            prefetched_1m_cache = {
-                sym: df_1m for sym, df_1m in ex.map(_load_1m_job, need_1m)
-                if df_1m is not None and len(df_1m) >= 200
-            }
-
-    if n_wf > 1 and valid_symbols:
+    vcfg_block = OPT_FUTURES_CONFIG.get("FUTURES_VALIDATION_CONFIG", {})
+    wf_cfg = WalkForwardConfig(
+        n_legs=int(vcfg_block.get("wf_n_legs", 10)),
+        purge_bars=int(vcfg_block.get("wf_purge_bars", 24)),
+        min_positive_leg_ratio=float(vcfg_block.get("wf_min_positive_leg_ratio", 0.70)),
+        worst_leg_tw_floor=float(vcfg_block.get("wf_worst_leg_tw_floor", 0.95)),
+        mean_leg_tw_floor=float(vcfg_block.get("wf_mean_leg_tw_floor", 1.00)),
+        ergodicity_guideline_pct=float(vcfg_block.get("wf_ergodicity_guideline_pct", 15.0)),
+        ergodicity_hard_gate_enabled=bool(vcfg_block.get("wf_ergodicity_hard_gate_enabled", True)),
+    )
+    _erg_dev_val = 0.0
+    wf_result = None
+    if valid_symbols and wf_cfg.n_legs > 1:
         ref_sym = valid_symbols[0]
         ref_df = oos_data_maps[ref_sym][args.tf]
         o0 = int(oos_data_maps[ref_sym][f"oos_start_idx_{args.tf}"])
-        span = max(0, len(ref_df) - o0)
-        leg_w = max(1, span // n_wf)
-        wf_tw_sum = 0.0
-        tw_legs: list[float] = []
-        for leg in range(n_wf):
-            ls = o0 + leg * leg_w
-            le = o0 + (leg + 1) * leg_w if leg < n_wf - 1 else len(ref_df)
-            # Apply purging: evaluation starts wf_purge_bars after leg boundary.
-            ls_eval = min(ls + wf_purge_bars, le - 1)
-            oos_maps_leg = oos_data_maps
-            if wf_hmm_refit and ml_out.alpha_panel is not None and not ml_out.alpha_panel.empty:
-                leg_anchor = pd.to_datetime(ref_df["datetime"].iloc[ls], utc=True)
-                pref_1h = {
-                    s: oos_data_maps[s]["1h"].copy()
-                    for s in valid_symbols
-                    if s in oos_data_maps and "1h" in oos_data_maps[s]
-                }
-                coll = DataCollector()
-                ml_leg = run_hmm_fusion_for_is_end(
-                    valid_symbols,
-                    args.tf,
-                    fetch_start_date,
-                    end_date,
-                    dict(OPT_FUTURES_CONFIG),
-                    oos_data_maps,
-                    pref_1h,
-                    None,
-                    ml_out.alpha_panel,
-                    leg_anchor,
-                    coll,
-                    workers=ml_n_jobs,
-                    n_jobs=ml_n_jobs,
-                    include_fusion=True,
-                    summary_mode_label=f" (WF leg {leg + 1}/{n_wf})",
-                    prefetch_label_start=start_date,
-                    prefetched_1m=prefetched_1m_cache if prefetched_1m_cache else None,
-                )
-                # run_hmm_fusion_for_is_end already propagates alpha_panel internally.
-                oos_maps_leg = copy_data_maps_tf_clone(oos_data_maps, valid_symbols, args.tf)
-                merge_ml_output_into_data_maps(
-                    ml_leg, oos_maps_leg, valid_symbols, args.tf, log_tag=f" WF{leg + 1}"
-                )
-            leg_port = run_oos_margin_shared_portfolio(
+
+        def _run_wf_leg(ls_eval: int, le: int) -> dict[str, Any]:
+            return run_oos_margin_shared_portfolio(
                 valid_symbols,
                 args.tf,
                 params,
-                oos_maps_leg,
+                oos_data_maps,
                 cache_root=FUTURES_CACHE_DIR,
                 oos_start_idx=ls_eval,
                 oos_end_idx=le,
             )
-            tw = float(leg_port.get("terminal_wealth_ratio", 1.0))
-            wf_tw_sum += tw
-            tw_legs.append(tw)
-            _suffix = " [HMM reanchored]" if wf_hmm_refit else ""
-            _logger.info(
-                " [WF] OOS leg %d/%d idx [%d+%d(purge),%d) terminal_wealth_ratio=%.4f%s",
-                leg + 1,
-                n_wf,
-                ls,
-                wf_purge_bars,
+
+        def _wf_before_leg(leg_idx: int, ls_eval: int, le: int) -> None:
+            if not bool(OPT_FUTURES_CONFIG.get("FUTURES_WF_PHASE2_DRIFT_LOG", True)):
+                return
+            _logger.debug(
+                " [WF/LEG] idx=%d eval_from=%d to=%d (HMM_leg_refit_cfg=%s)",
+                leg_idx,
+                ls_eval,
                 le,
-                tw,
-                _suffix,
+                bool(OPT_FUTURES_CONFIG.get("FUTURES_WF_HMM_LEG_REFIT", False)),
             )
-            # CRISIS% diagnostic per WF leg — uses original OOS HMM (pre-refit) for comparison.
-            # ref_df already has hmm_prob_crisis from main pipeline merge.
-            if "hmm_prob_crisis" in ref_df.columns:
-                _crisis_thr = float(OPT_FUTURES_CONFIG.get("FUTURES_HMM_CRISIS_THRESHOLD", 0.6))
-                _leg_pc = ref_df["hmm_prob_crisis"].iloc[ls:le].to_numpy(dtype=np.float64)
-                _crisis_hard_pct = float(np.mean(_leg_pc > _crisis_thr)) * 100.0
-                _crisis_avg_pct = float(np.mean(_leg_pc)) * 100.0
-                _logger.debug(
-                    " [WF CRISIS] leg %d/%d [%d,%d): bars_above_thr(%.2f)=%.1f%% avg_prob=%.1f%%",
-                    leg + 1,
-                    n_wf,
-                    ls,
-                    le,
-                    _crisis_thr,
-                    _crisis_hard_pct,
-                    _crisis_avg_pct,
-                )
-        _logger.info(" [WF] sum terminal_wealth_ratio (all legs)=%.4f", wf_tw_sum)
-        _erg_dev_val = 0.0
-        _mean_val = (sum(tw_legs) / len(tw_legs)) if tw_legs else 1.0
-        all_ok = all(t >= wf_tw_floor for t in tw_legs) if tw_legs else True
-        mean_ok = _mean_val >= wf_tw_mean_min
 
-        if len(tw_legs) >= 2:
-            _erg = wf_path_ergodicity_deviation_pct(tw_legs)
-            _erg_dev_val = float(_erg)
-            _eguide = float(OPT_FUTURES_CONFIG.get("FUTURES_ERGODICITY_GUIDELINE_PCT", 15.0))
-            _logger.info(
-                " [ERGODICITY] wf_leg_tw max_deviation_from_mean=%.2f%% "
-                "(guideline %.1f%%)",
-                _erg,
-                _eguide,
-            )
-            # [TELEMETRY] Walk-Forward Ergodicity
-            ai_telemetry_payloads.append({
-                "stage": "wf_ergodicity",
-                "erg_dev": float(_erg),
-                "guideline": float(_eguide),
-                "tw_legs": [float(t) for t in tw_legs],
-            })
-            if bool(OPT_FUTURES_CONFIG.get("FUTURES_ERGODICITY_HARD_GATE_ENABLED", True)):
-                # [Bypass] If Mean TW > 1.15 (15% OOS net), skip ergodicity hard fail
-                _high_perf_bypass = (mean_ok and _mean_val > 1.15)
-                if _erg > _eguide and not _high_perf_bypass:
-                    _logger.warning(
-                        " [ERGODICITY HARD GATE] max_deviation %.2f%% "
-                        "exceeds guideline %.1f%%. Failing gate.",
-                        _erg,
-                        _eguide,
-                    )
-                    gate_ok = False
-                    gate_failures.append("ERGODICITY_HARD_GATE")
-                elif _high_perf_bypass and _erg > _eguide:
-                    _logger.info(
-                        " [ERGODICITY] max_deviation %.2f%% exceeds guideline, "
-                        "but bypassed due to high performance (mean TW=%.4f).",
-                        _erg, _mean_val
-                    )
-
-        if wf_hmm_refit and tw_legs:
-            _logger.info(
-                " [WF HARD GATE] all legs >= %.2f: %s | mean >= %.2f: %s -> %s",
-                wf_tw_floor,
-                all_ok,
-                wf_tw_mean_min,
-                mean_ok,
-                "PASS" if (all_ok and mean_ok) else "FAIL",
-            )
-            if not (all_ok and mean_ok):
-                gate_ok = False
-                _logger.warning(
-                    " [WF HARD GATE] Persist blocked (all legs >= %.2f and mean >= %.2f required).",
-                    wf_tw_floor,
-                    wf_tw_mean_min,
+        _wf_log_drift = bool(OPT_FUTURES_CONFIG.get("FUTURES_WF_PHASE2_DRIFT_LOG", True))
+        wf_result = evaluate_walk_forward(
+            len(ref_df),
+            o0,
+            _run_wf_leg,
+            wf_cfg,
+            drift_signal_df=ref_df if _wf_log_drift else None,
+            before_each_leg=_wf_before_leg,
+        )
+        _erg_dev_val = float(wf_result.ergodicity_dev_pct)
+        _logger.info(
+            " [WF] legs=%d pos_ratio=%.2f worst_tw=%.4f mean_tw=%.4f erg_dev=%.2f%%",
+            len(wf_result.tw_legs),
+            wf_result.positive_leg_ratio,
+            wf_result.worst_leg_tw,
+            wf_result.mean_leg_tw,
+            wf_result.ergodicity_dev_pct,
+        )
+        if wf_result.leg_adaptation_logs:
+            _logger.info(" [WF/DRIFT] per-leg feature drift (alpha/calib/crisis vs prev leg)")
+            for row in wf_result.leg_adaptation_logs[:20]:
+                _logger.info(
+                    "   leg=%s tw=%.4f d_alpha=%s",
+                    row.get("leg"),
+                    row.get("tw"),
+                    row.get("ml_alpha_00_delta_vs_prev"),
                 )
+        if not wf_result.passed:
+            _logger.warning(
+                " [WF PRECHECK] leg thresholds not met %s",
+                ",".join(wf_result.failures),
+            )
+        ai_telemetry_payloads.append({
+            "stage": "wf_ergodicity",
+            "erg_dev": float(wf_result.ergodicity_dev_pct),
+            "guideline": float(wf_cfg.ergodicity_guideline_pct),
+            "tw_legs": [float(t) for t in wf_result.tw_legs],
+            "positive_leg_ratio": float(wf_result.positive_leg_ratio),
+            "worst_leg_tw": float(wf_result.worst_leg_tw),
+            "leg_adaptation_logs": [dict(r) for r in wf_result.leg_adaptation_logs],
+        })
 
     # IS & Hold-out Evaluation
     is_data_maps: dict[str, dict[str, Any]] = {}
@@ -1434,10 +1371,6 @@ def main() -> None:
     )
 
     # [STEP 5.2/5] Final Performance Reports
-    dsr_obs = float(best_trial.user_attrs.get("gate1_dsr", 0.0))
-    # pbo_obs might have been calculated in the Hard Gate check block, let's ensure it's available
-    pbo_val = locals().get("pbo_obs", None)
-
     # BTC buy-and-hold CAGR over the OOS period as market benchmark.
     # Used for Net Alpha display only — not a gate. IS-boundary safe (no look-ahead).
     _btc_benchmark_oos: float | None = None
@@ -1473,105 +1406,109 @@ def main() -> None:
     # Pre-calculate IS Net Alpha for telemetry even if gate fails
     is_net_alpha_v = is_cagr_v - (_btc_benchmark_is if _btc_benchmark_is is not None else 0.0)
 
-    # [IS Structural Survival Gate] Multi-objective quality filter.
+    rets_is = np.diff(is_port.get("equity_curve", np.array([FUTURES_INITIAL_BALANCE])))
+    hrs_is = int(args.tf.replace("h", "")) if args.tf.endswith("h") else 4
+    ann_f = (365 * 24) / hrs_is
+    is_sharpe_v = 0.0
+    if rets_is.size > 0 and np.std(rets_is) > 1e-9:
+        is_sharpe_v = float(np.mean(rets_is) / np.std(rets_is)) * np.sqrt(ann_f)
+
+    oos_eq = oos_port.get("equity_curve", np.array([FUTURES_INITIAL_BALANCE]))
+    oos_rets = np.diff(oos_eq) / np.maximum(oos_eq[:-1], 1e-9)
+    oos_sharpe_v = 0.0
+    if oos_rets.size > 0 and np.std(oos_rets) > 1e-9:
+        oos_sharpe_v = float(np.mean(oos_rets) / np.std(oos_rets)) * np.sqrt(ann_f)
+
+    _lpf_oos = float(oos_port.get("long_pf", oos_port.get("long_profit_factor", 1.0)))
+    _spf_oos = float(oos_port.get("short_pf", oos_port.get("short_profit_factor", 1.0)))
+    worst_leg = float(best_trial.user_attrs.get("ml_p10_log_growth_cpcv", -10.0))
+    worst_tw = float(np.exp(worst_leg))
+    p10_floor = float(OPT_FUTURES_CONFIG.get("FUTURES_CPCV_P10_LOG_TW_MIN", -0.05))
+
+    wf_fail_t = tuple(wf_result.failures) if wf_result is not None else ()
+
+    _gate_inp = FuturesResearchGateInput(
+        phase3_enabled=bool(OPT_FUTURES_CONFIG.get("FUTURES_PHASE3_HARD_GATE", True)),
+        pbo_max=float(pbo_max_eff),
+        dsr_min=float(dsr_min_eff),
+        is_precision=0.55,
+        oos_port=oos_port,
+        pbo_obs=float(pbo_obs),
+        dsr_obs=float(dsr_obs),
+        wf_failures=wf_fail_t,
+        min_is_net_alpha_pct=float(policy_cfg.min_is_net_alpha_pct),
+        is_net_alpha_pct=float(is_net_alpha_v),
+        min_long_pf=float(policy_cfg.min_long_pf),
+        min_short_pf=float(policy_cfg.min_short_pf),
+        oos_long_pf=float(_lpf_oos),
+        oos_short_pf=float(_spf_oos),
+        is_cagr_pct=float(is_cagr_v),
+        is_sharpe=float(is_sharpe_v),
+        is_survival_min_cagr=float(
+            OPT_FUTURES_CONFIG.get("FUTURES_IS_SURVIVAL_MIN_CAGR_PCT", 15.0)
+        ),
+        is_survival_min_sharpe=float(
+            OPT_FUTURES_CONFIG.get("FUTURES_IS_SURVIVAL_MIN_SHARPE", 1.5)
+        ),
+        worst_leg_log_tw=float(worst_leg),
+        awf_p10_log_tw_floor=float(p10_floor),
+    )
+    gate_ok, _gf_codes = evaluate_research_gates(_gate_inp)
+    gate_failures = list(_gf_codes)
+    for _code in gate_failures:
+        _logger.warning(
+            " [GATE] %s — %s",
+            _code,
+            GATE_CODE_DESCRIPTIONS.get(_code, ""),
+        )
     if gate_ok:
-        rets_is = np.diff(is_port.get("equity_curve", np.array([FUTURES_INITIAL_BALANCE])))
-        hrs_is = int(args.tf.replace("h", "")) if args.tf.endswith("h") else 4
-        ann_f = (365 * 24) / hrs_is
-        is_sharpe_v = 0.0
-        if rets_is.size > 0 and np.std(rets_is) > 1e-9:
-            is_sharpe_v = float(np.mean(rets_is) / np.std(rets_is)) * np.sqrt(ann_f)
+        _logger.info(
+            " [GATES] unified PASS | IS Sharpe=%.2f OOS Sharpe=%.2f | "
+            "worst_leg_log_tw=%.4f (tw=%.4f floor=%.4f)",
+            is_sharpe_v,
+            oos_sharpe_v,
+            worst_leg,
+            worst_tw,
+            p10_floor,
+        )
+        _pbo_cur = float(pbo_obs)
+        _logger.info(
+            " [IS SURVIVAL] IS CAGR=%.2f%% IS Sharpe=%.2f OOS Sharpe=%.2f pseudo_pbo=%.4f",
+            is_cagr_v,
+            is_sharpe_v,
+            oos_sharpe_v,
+            _pbo_cur,
+        )
+    else:
+        _logger.warning(" [GATES] unified FAIL codes=%s", ",".join(gate_failures))
 
-        oos_eq = oos_port.get("equity_curve", np.array([FUTURES_INITIAL_BALANCE]))
-        oos_rets = np.diff(oos_eq) / np.maximum(oos_eq[:-1], 1e-9)
-        oos_sharpe_v = 0.0
-        if oos_rets.size > 0 and np.std(oos_rets) > 1e-9:
-            oos_sharpe_v = float(np.mean(oos_rets) / np.std(oos_rets)) * np.sqrt(ann_f)
-
-        # Dual Survival Gate: IS CAGR > 15.0% AND IS Sharpe Ratio > 1.5
-        is_cagr_pass = is_cagr_v > 15.0
-        is_sharpe_pass = is_sharpe_v > 1.5
-        
-        # [NEW] Smart IS Survival Gate Bypass
-        # If OOS performance is exceptional, allow bypass of strict IS targets.
-        # Calculate OOS Net Alpha early for bypass check
-        oos_eq_v = np.asarray(oos_port.get("equity_curve", []), dtype=np.float64)
-        hrs_v = int(args.tf.replace("h", "")) if args.tf.endswith("h") else 4
-        bpy_v = (24.0 / hrs_v) * 365.0
-        nalpha_v_val = calc_net_alpha_with_friction(oos_eq_v, 0.0, bpy_v) if oos_eq_v.size > 1 else 0.0
-        oos_net_alpha_v = nalpha_v_val * 100.0
-        
-        oos_bypass = (oos_sharpe_v > 2.0) and (oos_net_alpha_v > 0)
-
-        _pbo_cur = float(pbo_val) if pbo_val is not None else 0.5
-
-        if not (is_cagr_pass and is_sharpe_pass):
-            if oos_bypass:
-                _logger.info(
-                    " [IS SURVIVAL GATE] IS CAGR=%.2f%% IS Sharpe=%.2f FAIL, "
-                    "but BYPASSED due to exceptional OOS performance (OOS Sharpe=%.2f, Net Alpha=%.2f%%).",
-                    is_cagr_v, is_sharpe_v, oos_sharpe_v, oos_net_alpha_v
-                )
-            else:
-                gate_ok = False
-                _logger.warning(
-                    " [IS SURVIVAL GATE] IS CAGR=%.2f%% (pass=%s) IS Sharpe=%.2f (pass=%s) "
-                    "OOS Sharpe=%.2f pseudo_pbo=%.4f FAIL.",
-                    is_cagr_v, is_cagr_pass, is_sharpe_v, is_sharpe_pass, oos_sharpe_v, _pbo_cur,
-                )
-        else:
-            _logger.info(
-                " [IS SURVIVAL GATE] PASS. IS CAGR=%.2f%% IS Sharpe=%.2f "
-                "OOS Sharpe=%.2f pseudo_pbo=%.4f",
-                is_cagr_v, is_sharpe_v, oos_sharpe_v, _pbo_cur,
-            )
-
-        # ml_p10_log_growth_cpcv now stores worst AWF leg log-TW (backward-compat name).
-        worst_leg = float(best_trial.user_attrs.get("ml_p10_log_growth_cpcv", -10.0))
-        worst_tw = float(np.exp(worst_leg))
-        p10_floor = float(OPT_FUTURES_CONFIG.get("FUTURES_CPCV_P10_LOG_TW_MIN", -0.05))
-        dist_ok = worst_leg > p10_floor
-        if not dist_ok:
-            gate_ok = False
-            gate_failures.append("AWF_HARDENING_GATE")
-            _logger.warning(
-                " [AWF HARDENING] Persist blocked. Worst AWF leg must satisfy "
-                "log(TW) > %.4f (TW > %.4f).",
-                p10_floor,
-                worst_tw,
-            )
-        else:
-            _logger.info(
-                " [AWF HARDENING] worst_leg_log_tw=%.4f tw=%.4f PASS.",
-                worst_leg, worst_tw
-            )
-
-    # ... [ Champion Logic Follows ] ...
+    pbo_val = float(pbo_obs)
 
 
     # [Dual-Audit Dashboard] Integrated Performance & Reliability side-by-side
-    champion_json_path = Path(project_root) / "logs" / "champion.json"
+    logs_dir = Path(project_root) / "logs"
+    champ_path = resolve_champion_record_path(logs_dir)
     champ_m: dict[str, Any] = {
         "pbo": 0.5, "p10": 0.0, "dsr": 0.0, "tw": 1.0, "cagr": 0.0, "mdd": 0.0,
         "time_2x": 999.0, "cvar": 0.0, "net_alpha": 0.0, "avg_pnl": 0.0, "pf": 1.0
     }
-    if champion_json_path.exists():
+    if champ_path and champ_path.exists():
         try:
-            with open(champion_json_path) as _cf:
+            with open(champ_path, encoding="utf-8") as _cf:
                 _c = json.load(_cf)
             _met = _c.get("metrics", {})
             champ_m = {
-                "pbo": float(_met.get("pbo_paired", _met.get("pbo", 0.5))),
-                "p10": float(_met.get("cpcv_p10_log_tw", 0.0)),
-                "dsr": float(_met.get("dsr", 0.0)),
-                "tw": float(_met.get("oos_terminal_wealth", 1.0)),
-                "cagr": float(_met.get("oos_cagr_pct", 0.0)),
-                "mdd": float(_met.get("oos_mdd_pct", 0.0)),
-                "time_2x": float(_met.get("oos_time_to_2x", 999.0)),
-                "cvar": float(_met.get("oos_cvar_pct", 0.0)),
-                "net_alpha": float(_met.get("oos_net_alpha_pct", 0.0)),
-                "avg_pnl": float(_met.get("oos_avg_trade_pnl_pct", 0.0)),
-                "pf": float(_met.get("oos_profit_factor", 1.0)),
+                "pbo": _safe_float(_met.get("pbo_paired", _met.get("pbo", 0.5)), 0.5, 1e3),
+                "p10": _safe_float(_met.get("cpcv_p10_log_tw", 0.0), 0.0, 100.0),
+                "dsr": _safe_float(_met.get("dsr", 0.0), 0.0, 1e3),
+                "tw": _safe_float(_met.get("oos_terminal_wealth", 1.0), 1.0, 1e6),
+                "cagr": _safe_float(_met.get("oos_cagr_pct", 0.0), 0.0, 1e5),
+                "mdd": _safe_float(_met.get("oos_mdd_pct", 0.0), 0.0, 1e3),
+                "time_2x": _safe_float(_met.get("oos_time_to_2x", 999.0), 999.0, 1e6),
+                "cvar": _safe_float(_met.get("oos_cvar_pct", 0.0), 0.0, 1e3),
+                "net_alpha": _safe_float(_met.get("oos_net_alpha_pct", 0.0), 0.0, 1e5),
+                "avg_pnl": _safe_float(_met.get("oos_avg_trade_pnl_pct", 0.0), 0.0, 1e5),
+                "pf": _safe_float(_met.get("oos_profit_factor", 1.0), 1.0, 1e3),
             }
         except Exception as _ce:
             _logger.debug("Champion metrics parse failed: %s", _ce)
@@ -1587,7 +1524,7 @@ def main() -> None:
     else:
         t2x_n, nalpha_n = 999.0, 0.0
 
-    new_m = {
+    new_m = _sanitize_metric_map({
         "pbo": float(pbo_obs) if 'pbo_obs' in locals() else 0.5,
         "p10": float(best_trial.user_attrs.get("ml_p10_log_growth_cpcv", 0.0)),
         "dsr": float(best_trial.user_attrs.get("gate1_dsr", 0.0)),
@@ -1604,121 +1541,53 @@ def main() -> None:
         "awf_pos_frac": float(best_trial.user_attrs.get("awf_pos_frac", 0.0)),
         "mu_awf": float(best_trial.user_attrs.get("awf_mu_log", 0.0)),
         "sig_awf": float(best_trial.user_attrs.get("awf_sigma_log", 0.0)),
-        "plgd": float(best_trial.user_attrs.get("awf_plgd", 0.0)),
+        "plgd": float(
+            best_trial.user_attrs.get(
+                "awf_contract_reward", best_trial.user_attrs.get("awf_plgd", 0.0)
+            )
+        ),
         "erg_dev": float(locals().get("_erg_dev_val", 0.0)),
         "oos_long_pf": float(oos_port.get("long_pf", 1.0)),
         "oos_short_pf": float(oos_port.get("short_pf", 1.0)),
         "oos_retention_pct": float(oos_retention),
         "is_alpha": float(is_net_alpha_v) if 'is_net_alpha_v' in locals() else 0.0,
-    }
+    })
 
-    # [Champion Comparison Guard] Only overwrite if new run improves Net Alpha, RoMaD, or PBO.
-    # Prevents regression from gate-passing runs that are still worse than the current champion.
     gate_ok_before_champ = gate_ok
     if gate_ok:
-        champion_json_path = Path(project_root) / "logs" / "champion.json"
-        if champion_json_path.exists():
-            try:
-                with open(champion_json_path) as _cf:
-                    _champ = json.load(_cf)
-
-                _met_g = _champ.get("metrics", {})
-                _champ_oos_cagr = float(_met_g.get("oos_cagr_pct", -999.0))
-                _champ_oos_alpha = float(_met_g.get("oos_net_alpha_pct", -999.0))
-                _champ_oos_mdd = abs(float(_met_g.get("oos_mdd_pct", 100.0)))
-                _champ_romad = _champ_oos_cagr / _champ_oos_mdd if _champ_oos_mdd > 1e-6 else 0.0
-                _champ_pbo = float(_met_g.get("pbo_paired", _met_g.get("pbo", 1.0)))
-                _champ_ho = float(_met_g.get("holdout_cagr_pct", -999.0))
-
-                _new_oos_cagr = float(oos_port.get("cagr_pct", 0.0))
-                _new_oos_alpha = new_m["net_alpha"]
-                _new_oos_mdd = abs(float(oos_port.get("mdd_pct", 100.0)))
-                _new_romad = _new_oos_cagr / _new_oos_mdd if _new_oos_mdd > 1e-6 else 0.0
-                _new_ho = float(ho_port.get("cagr_pct", 0.0))
-                _new_pbo = float(pbo_obs) if 'pbo_obs' in locals() else 0.5
-                
-                # [Institutional] New Risk-Adjusted Metrics for Champion Guard
-                _new_sharpe = oos_sharpe_v
-                _champ_sharpe = float(_met_g.get("oos_sharpe_ratio", 0.0))
-
-                # Improvement logic: prioritize Risk-Adjusted Return (RoMaD/Sharpe)
-                _alpha_improved = _new_oos_alpha > (_champ_oos_alpha + 0.5) # >0.5% improvement
-                _romad_improved = _new_romad > (_champ_romad * 1.02) # >2% improvement
-                _sharpe_improved = _new_sharpe > (_champ_sharpe + 0.05) # >0.05 improvement
-                _pbo_improved = _new_pbo < (_champ_pbo - 0.01) # >0.01 improvement
-                _cagr_improved = _new_oos_cagr > (_champ_oos_cagr + 2.0)  # >2%p CAGR improvement
-
-                # Robustness Upgrade: HO recovery or significant PBO drop
-                _pbo_champ_max = float(pbo_champ_eff)
-                _robustness_upgrade = (
-                    (_champ_ho < 0) and (_new_ho > 0) and (_new_pbo < (_pbo_champ_max - 0.05))
-                )
-
-                # Survival conditions
-                _alpha_acceptable = _new_oos_alpha > (_champ_oos_alpha - 2.0)
-                _romad_acceptable = _new_romad > (_champ_romad * 0.95)
-                _sharpe_acceptable = _new_sharpe > (_champ_sharpe * 0.95)
-                _pbo_strict = _new_pbo <= _pbo_champ_max
-
-                # REJECT if hold-out regresses severely
-                _holdout_fail = (_champ_ho > 0.0) and (_new_ho < max(0.5 * _champ_ho, 2.0))
-
-                # Final decision: Favor RoMaD/Sharpe improvement while maintaining Alpha
-                _is_better = (
-                    (_sharpe_improved and _alpha_acceptable) or
-                    (_romad_improved and _alpha_acceptable) or
-                    (_alpha_improved and _sharpe_acceptable and _romad_acceptable) or
-                    _robustness_upgrade or
-                    (_pbo_improved and _alpha_acceptable and _romad_acceptable) or
-                    (_cagr_improved and _romad_acceptable and _alpha_acceptable)
-                )
-
-                if _holdout_fail and not (_cagr_improved and _new_oos_cagr > (_champ_oos_cagr + 5.0)):
-                    _is_better = False
-
-                if args.bypass_champion_guard:
-                    _logger.info(
-                        " [CHAMPION GUARD] Bypassing comparison due to --bypass-champion-guard."
-                    )
-                    _is_better = True
-                    _pbo_strict = True
-                    _reason = "Manual Bypass"
-                elif not (_is_better and _pbo_strict):
-                    gate_ok = False
-                    _logger.warning(
-                        " [CHAMPION GUARD] No meaningful improvement (Sharpe %.2f vs %.2f | "
-                        "RoMaD %.2f vs %.2f | Alpha %.2f%% vs %.2f%%). Champion preserved.",
-                        _new_sharpe, _champ_sharpe, _new_romad, _champ_romad,
-                        _new_oos_alpha, _champ_oos_alpha
-                    )
-                else:
-                    if _sharpe_improved:
-                        _reason = "Sharpe Improved"
-                    elif _romad_improved:
-                        _reason = "RoMaD Improved"
-                    elif _alpha_improved:
-                        _reason = "Alpha Improved"
-                    elif _robustness_upgrade:
-                        _reason = "Robustness Upgrade"
-                    else:
-                        _reason = "PBO Improved"
-
-                    _logger.info(
-                        " [CHAMPION GUARD] %s: Sharpe %.2f->%.2f | RoMaD %.2f->%.2f | "
-                        "Alpha %.2f%%->%.2f%% | PBO %.4f->%.4f.",
-                        _reason, _champ_sharpe, _new_sharpe, _champ_romad, _new_romad,
-                        _champ_oos_alpha, _new_oos_alpha, _champ_pbo, _new_pbo
-                    )
-            except Exception as _ce:
-                _logger.warning(" [CHAMPION GUARD] champion.json read failed (%s). Guard skipped.", _ce)  # noqa: E501
-
-        # T4: Multi-seed mean verification note (display-only, non-blocking)
-        _logger.info(
-            " [CHAMPION GUARD] Note: Single-seed OOS comparison only. "
-            "For stable promotion, recommend 3-seed mean verification.\n"
-            "  Champion 3-seed mean: +23.3%% ± 25.2pp (S49) | "
-            "Candidate: run with seeds=[42,7,13] and compare means."
+        cand_metrics = ChampionMetrics(
+            cagr=float(new_m.get("cagr", 0.0)),
+            mdd=abs(float(new_m.get("mdd", 100.0))),
+            net_alpha=float(new_m.get("net_alpha", 0.0)),
+            sharpe=float(oos_sharpe_v),
+            pbo=float(new_m.get("pbo", 1.0)),
         )
+        allow, reason = run_champion_promotion_guard(
+            Path(project_root) / "logs",
+            Path(project_root),
+            cand_metrics,
+            float(pbo_champ_eff),
+            bool(args.bypass_champion_guard),
+        )
+        champ_metrics = load_champion_metrics_for_guard(
+            Path(project_root) / "logs",
+            Path(project_root),
+        )
+        if not allow:
+            gate_ok = False
+            _logger.warning(" [CHAMPION GUARD] HOLD reason=%s", reason)
+        else:
+            _logger.info(
+                " [CHAMPION GUARD] PASS reason=%s | sharpe %.2f->%.2f | "
+                "cagr %.2f->%.2f | pbo %.4f->%.4f",
+                reason,
+                champ_metrics.sharpe,
+                cand_metrics.sharpe,
+                champ_metrics.cagr,
+                cand_metrics.cagr,
+                champ_metrics.pbo,
+                cand_metrics.pbo,
+            )
 
     # [SMART VERDICT] Distinguish between strategy quality and champion competition
     if not gate_ok:
@@ -1735,7 +1604,22 @@ def main() -> None:
         "gate_ok": bool(gate_ok),
         "gate_failures": gate_failures,
         "total_trades": int(oos_port.get("total_trades", 0)),
+        "ops_profile": args.ops_profile,
+        "n_seeds": len(target_seeds),
+        "trials_per_seed": int(n_ml_trials),
     }
+    if args.ops_profile:
+        _prof_ok, _prof_issues = check_run_summary_against_profile(
+            args.ops_profile,
+            {
+                "gate_ok": bool(gate_ok),
+                "n_seeds": len(target_seeds),
+                "trials_per_seed": int(n_ml_trials),
+                "revalidation_ok": True,
+            },
+        )
+        if not _prof_ok:
+            _logger.warning(" [OPS PROFILE] %s issues=%s", args.ops_profile, _prof_issues)
     # Merge all numerical metrics from new_m (which tracks Candidate stats)
     eval_payload.update(new_m)
     # Ensure is_alpha uses the value calculated regardless of gate status
@@ -1807,20 +1691,26 @@ def main() -> None:
                 
             _logger.info(f" [PRODUCTION] New Champion deployed to {prod_json} and {prod_enc}")
 
-            # [Champion Update] Persist to logs/champion.json for AI-driven improvement
+            # Persist canonical champion record (see config/champion.schema.json).
             champion_data = {
+                "schema_version": 1,
                 "id": f"cawf-r-{args.tf}-{pd.Timestamp.now().strftime('%Y%m%d-%H%M')}",
                 "promoted_at": pd.Timestamp.now().strftime("%Y-%m-%d"),
                 "note": f"Promoted via opt_futures.py with {args.trials} trials.",
-                "architecture": "CAWF-R (K=5 chronological AWF + PLGD objective)",
+                "architecture": (
+                    "CAWF-R (K=5 AWF legs + contract objective; PLGD legacy diagnostics)"
+                ),
                 "parameters": params,
-                "metrics": {
+                "metrics": _sanitize_metric_map({
                     "pbo_paired": new_m["pbo"],
                     "dsr": new_m["dsr"],
                     "awf_pos_frac": new_m["awf_pos_frac"],
                     "awf_mu_log": new_m["mu_awf"],
                     "awf_sig_log": new_m["sig_awf"],
-                    "awf_plgd": new_m["plgd"],
+                    "awf_contract_reward": float(
+                        best_trial.user_attrs.get("awf_contract_reward", 0.0)
+                    ),
+                    "awf_plgd_legacy": float(best_trial.user_attrs.get("awf_plgd", 0.0)),
                     "awf_worst_leg_log_tw": new_m["p10"],
                     "wf_mean_tw": new_m["tw"],
                     "wf_erg_dev": new_m["erg_dev"],
@@ -1828,24 +1718,32 @@ def main() -> None:
                     "oos_cagr_pct": new_m["cagr"],
                     "oos_mdd_pct": new_m["mdd"],
                     "oos_net_alpha_pct": new_m["net_alpha"],
-                    "oos_sharpe_ratio": float(oos_sharpe_v),
+                    "oos_sharpe_ratio": _safe_float(oos_sharpe_v, 0.0, 1e3),
                     "oos_avg_trade_pnl_pct": new_m["avg_pnl"],
                     "oos_profit_factor": new_m["pf"],
                     "oos_time_to_2x": new_m["time_2x"],
                     "oos_cvar_pct": new_m["cvar"],
-                    "is_cagr_pct": new_m["is_cagr"]
-                },
+                    "is_cagr_pct": new_m["is_cagr"],
+                }),
                 "gates": {
                     "pbo_strict_guard": "PASS",
                     "awf_pos_frac_gate": "PASS",
                     "awf_worst_leg_hardening": "PASS",
-                    "wf_stability_gate": "PASS"
-                }
+                    "wf_stability_gate": "PASS",
+                },
             }
-            champion_json_path = Path(project_root) / "logs" / "champion.json"
-            with open(champion_json_path, "w") as f:
-                json.dump(champion_data, f, indent=4)
-            _logger.info(f"Champion successfully updated at {champion_json_path}")
+            out_champ = write_champion_record(Path(project_root), champion_data)
+            append_champion_history(
+                Path(project_root),
+                {
+                    "id": champion_data.get("id"),
+                    "promoted_at": champion_data.get("promoted_at"),
+                    "metrics": champion_data.get("metrics", {}),
+                    "gate_ok": True,
+                    "path": str(out_champ),
+                },
+            )
+            _logger.info(" [CHAMPION] registry updated at %s", out_champ)
         except Exception as _pe:
             _logger.error(" [PRODUCTION] Save failed: %s", _pe)
     else:

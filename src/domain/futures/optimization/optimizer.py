@@ -1,9 +1,8 @@
-"""Phase D: single-objective CAWF-R PLGD (TPE) for ML cross-sectional rank portfolio.
+"""Phase D: CAWF-R ML cross-sectional rank portfolio optimization (Optuna TPE).
 
-Paradigm: Combinatorial Anchored Walk-Forward with PLGD objective (2026-04-26).
-Replaces reshuffled CPCV with K=5 chronological AWF legs to fix:
-  F1 (GP leakage — partial), F2 (non-chronological), F3 (block < regime),
-  F4 (holdout double-dip), F5 (2000-trial cherry-pick).
+Walk-forward legs use a composite objective (positive-leg ratio, worst-leg log-TW,
+directional PF, IS log-alpha) with light PLGD variance regularization; legacy PLGD
+components remain in user_attrs for diagnostics.
 """
 
 from __future__ import annotations
@@ -25,11 +24,6 @@ from src.domain.futures.backtest_engine import (
     backtest_portfolio_numba,
 )
 from src.domain.futures.ml_pipeline.features.engineering import HMM_SEMANTIC_PROB_COLUMNS
-from src.domain.futures.optimization.validation import (
-    build_anchored_wf_legs,
-    build_cpcv_test_paths_with_fallback,
-    list_cpcv_block_ranges,
-)
 from src.domain.futures.optimization.data_aligner import (
     _build_aligned_2d_from_prebuilt,
     _dataframe_to_symbol_arrays,
@@ -37,6 +31,15 @@ from src.domain.futures.optimization.data_aligner import (
 from src.domain.futures.optimization.evaluator import (
     _log_tw_from_ret_pct,
     calc_mdd_from_equity,
+)
+from src.domain.futures.optimization.validation import (
+    build_anchored_wf_legs,
+    build_cpcv_test_paths_with_fallback,
+    list_cpcv_block_ranges,
+)
+from src.domain.futures.portfolio.policy_engine import (
+    apply_policy_constraints,
+    load_portfolio_policy_config,
 )
 from src.domain.futures.strategy_ml import FuturesMLStrategy
 
@@ -247,7 +250,7 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
             "USE_CS_RANK_ENGINE": True,
         }
         params = _base_engine_params(pre_ml, ctx.tf)
-        strategy = FuturesMLStrategy(name="Precompute", params=params)
+        FuturesMLStrategy(name="Precompute", params=params)
 
         emb = int(EMBARGO_BARS.get(ctx.tf, 12))
         info = compute_multi_alignment_info(ctx.data_maps, ctx.symbols, ctx.tf, emb)
@@ -255,7 +258,6 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
             return
         ctx.multi_alignment_info = info
 
-        full_signal_dfs: dict[str, pd.DataFrame] = {}
         # get_tiered_signals is removed as signal_cache.py is deleted. 
         # ML pipeline should have signals pre-computed in raw_full.
         # If it was using legacy signal registry, that is also deleted.
@@ -276,9 +278,21 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
             trimmed_sig["high"] = raw_full["high"].to_numpy(dtype=np.float64, copy=False)
             trimmed_sig["low"] = raw_full["low"].to_numpy(dtype=np.float64, copy=False)
             trimmed_sig["open"] = raw_full["open"].to_numpy(dtype=np.float64, copy=False)
-            trimmed_sig["atr"] = raw_full["atr"].to_numpy(dtype=np.float64, copy=False) if "atr" in raw_full.columns else np.zeros(len(raw_full))
-            trimmed_sig["garch_kelly_f"] = raw_full["garch_kelly_f"].to_numpy(dtype=np.float64, copy=False) if "garch_kelly_f" in raw_full.columns else np.ones(len(raw_full))
-            trimmed_sig["slot_rank_score"] = raw_full["slot_rank_score"].to_numpy(dtype=np.float64, copy=False) if "slot_rank_score" in raw_full.columns else np.zeros(len(raw_full))
+            trimmed_sig["atr"] = (
+                raw_full["atr"].to_numpy(dtype=np.float64, copy=False)
+                if "atr" in raw_full.columns
+                else np.zeros(len(raw_full))
+            )
+            trimmed_sig["garch_kelly_f"] = (
+                raw_full["garch_kelly_f"].to_numpy(dtype=np.float64, copy=False)
+                if "garch_kelly_f" in raw_full.columns
+                else np.ones(len(raw_full))
+            )
+            trimmed_sig["slot_rank_score"] = (
+                raw_full["slot_rank_score"].to_numpy(dtype=np.float64, copy=False)
+                if "slot_rank_score" in raw_full.columns
+                else np.zeros(len(raw_full))
+            )
 
             if "funding_rate_sum" in raw_full.columns:
                 trimmed_sig["funding_rate_sum"] = raw_full["funding_rate_sum"].to_numpy(
@@ -459,104 +473,139 @@ def infer_kelly_shrinkage_bayesian_c_for_enqueue(
     return best_bc, best_ks
 
 
+def _snap_int_list(val: int, choices: list[int]) -> int:
+    return int(min(choices, key=lambda c: abs(c - val)))
+
+
+def _snap_float_list(val: float, choices: list[float]) -> float:
+    return float(min(choices, key=lambda c: abs(c - val)))
+
+
 def build_phase_d_enqueue_params_from_deploy_json(
     deploy: dict[str, Any],
 ) -> dict[str, Any] | None:
     """Map deploy JSON to Optuna enqueue_trial param dict (single-objective Phase-D)."""
     shield = bool(OPT_FUTURES_CONFIG.get("FUTURES_TIER1_SHIELD_MODE", False))
+    policy = load_portfolio_policy_config(OPT_FUTURES_CONFIG)
     fk_raw = deploy.get("KELLY_FRACTION", deploy.get("FK_FRACTION"))
     if fk_raw is None:
         return None
     fixed = _fixed_ml_phase_d_params()
+    atr_choices_i = [28, 30, 32]
+    atr_m_choices = [2.25, 2.5, 2.75]
+    trail_choices = [2.5, 3.0]
+    stp_choices = [1.0, 1.5]
+    lsc_choices = [2.0, 2.5]
+    stress_choices = [2.5, 3.0]
+    pfk_choices = [40, 48, 60]
     try:
         bc, ks = infer_kelly_shrinkage_bayesian_c_for_enqueue(float(fk_raw), shield=shield)
         reb = int(deploy["REBALANCE_BARS"])
         k_long = int(deploy["K_LONG"])
         crisis = float(deploy.get("CRISIS_GAMMA", deploy.get("CRISIS_GATE_PROB", 1.3)))
-        atr_p = int(deploy["ATR_PERIOD"])
-        
-        atr_m = float(deploy.get("ATR_MULT", deploy.get("LONG_ATR_MULT", 2.5)))
-        trail_m = float(deploy.get("TRAIL_MULT", deploy.get("LONG_TRAIL_MULT", 3.0)))
-        
-        s_tp = float(deploy["SHORT_TP_MULT"])
-        l_scale = float(deploy["LONG_SCALE_ATR_MULT"])
+        atr_p = _snap_int_list(int(deploy["ATR_PERIOD"]), atr_choices_i)
+
+        atr_m = _snap_float_list(
+            float(deploy.get("ATR_MULT", deploy.get("LONG_ATR_MULT", 2.5))), atr_m_choices
+        )
+        trail_m = _snap_float_list(
+            float(deploy.get("TRAIL_MULT", deploy.get("LONG_TRAIL_MULT", 3.0))), trail_choices
+        )
+
+        s_tp = _snap_float_list(float(deploy["SHORT_TP_MULT"]), stp_choices)
+        l_scale = _snap_float_list(float(deploy["LONG_SCALE_ATR_MULT"]), lsc_choices)
         max_exp = float(deploy.get("MAX_EXPOSURE_PER_COIN", 1.0))
+        max_gross = float(deploy.get("MAX_EXPOSURE", 1.0))
         dd_thr = float(deploy["DD_SCALING_THRESHOLD"])
         cs_z_thr = float(deploy.get("CS_Z_SCORE_THRESHOLD", 1.0))
-        pfk_win = int(deploy.get("PFK_WINDOW", 40))
-        stress = float(deploy.get("STRESS_VOL_Z", 2.5))
+        pfk_win = _snap_int_list(int(deploy.get("PFK_WINDOW", 40)), pfk_choices)
+        stress = _snap_float_list(float(deploy.get("STRESS_VOL_Z", 2.5)), stress_choices)
         rpt = float(deploy.get("RISK_PER_TRADE", fixed["RISK_PER_TRADE"]))
+        min_score = float(deploy.get("MIN_SCORE_PERCENTILE", 0.55))
     except (KeyError, TypeError, ValueError):
         return None
     if rpt != float(fixed["RISK_PER_TRADE"]):
         return None
-    if pfk_win not in (40, 60):
-        return None
-    return {
-        "BAYESIAN_C": bc,
-        "KELLY_SHRINKAGE": ks,
-        "K_RANK": k_long,
-        "REBALANCE_BARS": reb,
-        "CRISIS_GAMMA": crisis,
-        "ATR_PERIOD": atr_p,
-        "ATR_MULT": atr_m,
-        "TRAIL_MULT": trail_m,
-        "SHORT_TP_MULT": s_tp,
-        "LONG_SCALE_ATR_MULT": l_scale,
-        "MAX_EXP_PER_COIN": max_exp,
-        "DD_SCALING_THRESHOLD": dd_thr,
-        "CS_Z_SCORE_THRESHOLD": cs_z_thr,
-        "PFK_WINDOW": pfk_win,
-        "STRESS_VOL_Z": stress,
-        "RISK_PER_TRADE": rpt,
-    }
+    out = apply_policy_constraints(
+        {
+            "SIZING_METHOD": "profit_factor_kelly",
+            "BAYESIAN_C": bc,
+            "KELLY_SHRINKAGE": ks,
+            "K_RANK": k_long,
+            "K_LONG": k_long,
+            "K_SHORT": k_long,
+            "REBALANCE_BARS": reb,
+            "CRISIS_GAMMA": crisis,
+            "ATR_PERIOD": atr_p,
+            "ATR_MULT": atr_m,
+            "TRAIL_MULT": trail_m,
+            "SHORT_TP_MULT": s_tp,
+            "LONG_SCALE_ATR_MULT": l_scale,
+            "MAX_EXPOSURE_PER_COIN": max_exp,
+            "MAX_EXPOSURE": max_gross,
+            "DD_SCALING_THRESHOLD": dd_thr,
+            "CS_Z_SCORE_THRESHOLD": cs_z_thr,
+            "PFK_WINDOW": pfk_win,
+            "STRESS_VOL_Z": stress,
+            "RISK_PER_TRADE": rpt,
+            "MIN_SCORE_PERCENTILE": min_score,
+            "USE_CS_RANK_ENGINE": True,
+        },
+        policy,
+    )
+    return out
 
 
 def _suggest_ml_phase_d(trial: optuna.Trial) -> dict[str, Any]:
+    """Optuna knobs: narrow ATR/trail/vol; emphasize portfolio policy (caps, top-k, edge)."""
+    policy = load_portfolio_policy_config(OPT_FUTURES_CONFIG)
     shield = bool(OPT_FUTURES_CONFIG.get("FUTURES_TIER1_SHIELD_MODE", False))
+
+    atr_p = int(trial.suggest_categorical("ATR_PERIOD", [28, 30, 32]))
+    atr_m = float(trial.suggest_categorical("ATR_MULT", [2.25, 2.5, 2.75]))
+    trail_m = float(trial.suggest_categorical("TRAIL_MULT", [2.5, 3.0]))
+    s_tp = float(trial.suggest_categorical("SHORT_TP_MULT", [1.0, 1.5]))
+    l_scale = float(trial.suggest_categorical("LONG_SCALE_ATR_MULT", [2.0, 2.5]))
+    stress_vol = float(trial.suggest_categorical("STRESS_VOL_Z", [2.5, 3.0]))
+    pfk_win = int(trial.suggest_categorical("PFK_WINDOW", [40, 48, 60]))
+
     if shield:
         bayes_c = float(trial.suggest_float("BAYESIAN_C", 5.0, 14.0, log=True))
         kelly_s = float(trial.suggest_float("KELLY_SHRINKAGE", 0.52, 1.02))
-        k_rank = int(trial.suggest_int("K_RANK", 1, 3))
-        k_long = k_rank
-        k_short = k_rank
-        reb = int(trial.suggest_categorical("REBALANCE_BARS", [1, 3, 6, 12]))
-        crisis = float(trial.suggest_float("CRISIS_GAMMA", 1.0, 1.4, step=0.05))
-        atr_p = int(trial.suggest_int("ATR_PERIOD", 26, 36, step=2))
-        
-        atr_m = float(trial.suggest_float("ATR_MULT", 2.0, 2.75, step=0.25))
-        trail_m = float(trial.suggest_float("TRAIL_MULT", 2.5, 3.5, step=0.5))
-        
-        s_tp = float(trial.suggest_float("SHORT_TP_MULT", 1.0, 1.5, step=0.5))
-        l_scale = float(trial.suggest_float("LONG_SCALE_ATR_MULT", 2.0, 2.5, step=0.5))
-        max_exp = float(trial.suggest_float("MAX_EXP_PER_COIN", 0.8, 1.0, step=0.1))
-        dd_thr = float(trial.suggest_float("DD_SCALING_THRESHOLD", 0.16, 0.24, step=0.01))
-        cs_z_thr = float(trial.suggest_float("CS_Z_SCORE_THRESHOLD", 0.5, 2.0, step=0.25))
     else:
         bayes_c = float(trial.suggest_float("BAYESIAN_C", 5.0, 15.0, log=True))
         kelly_s = float(trial.suggest_float("KELLY_SHRINKAGE", 0.45, 1.20))
-        k_rank = int(trial.suggest_int("K_RANK", 1, 3))
-        k_long = k_rank
-        k_short = k_rank
-        reb = int(trial.suggest_categorical("REBALANCE_BARS", [1, 3, 6, 12]))
-        crisis = float(trial.suggest_float("CRISIS_GAMMA", 1.0, 1.4, step=0.05))
-        atr_p = int(trial.suggest_int("ATR_PERIOD", 26, 40, step=2))
-        
-        atr_m = float(trial.suggest_float("ATR_MULT", 2.0, 3.0, step=0.25))
-        trail_m = float(trial.suggest_float("TRAIL_MULT", 2.5, 4.0, step=0.5))
-        
-        s_tp = float(trial.suggest_float("SHORT_TP_MULT", 1.0, 2.0, step=0.5))
-        l_scale = float(trial.suggest_float("LONG_SCALE_ATR_MULT", 2.0, 3.0, step=0.5))
-        max_exp = float(trial.suggest_float("MAX_EXP_PER_COIN", 0.8, 1.0, step=0.1))
-        dd_thr = float(trial.suggest_float("DD_SCALING_THRESHOLD", 0.15, 0.25, step=0.01))
-        cs_z_thr = float(trial.suggest_float("CS_Z_SCORE_THRESHOLD", 0.5, 2.0, step=0.25))
+
+    k_cap = min(4, max(policy.top_k_long, policy.top_k_short))
+    k_rank = int(trial.suggest_int("K_RANK", 1, max(1, k_cap)))
+    k_long = k_rank
+    k_short = k_rank
+    reb = int(trial.suggest_categorical("REBALANCE_BARS", [1, 3, 6, 12]))
+    crisis = float(trial.suggest_float("CRISIS_GAMMA", 1.0, 1.35, step=0.05))
+    max_exp_sym = float(
+        trial.suggest_float(
+            "MAX_EXPOSURE_PER_COIN",
+            max(0.05, policy.per_symbol_cap * 0.5),
+            policy.per_symbol_cap,
+            step=0.02,
+        )
+    )
+    max_exp_gross = float(
+        trial.suggest_float(
+            "MAX_EXPOSURE",
+            max(0.3, policy.gross_exposure_cap * 0.55),
+            policy.gross_exposure_cap,
+            step=0.05,
+        )
+    )
+    min_score_pct = float(trial.suggest_float("MIN_SCORE_PERCENTILE", 0.50, 0.70, step=0.05))
+    dd_thr = float(trial.suggest_float("DD_SCALING_THRESHOLD", 0.16, 0.24, step=0.01))
+    cs_z_thr = float(trial.suggest_float("CS_Z_SCORE_THRESHOLD", 0.75, 1.75, step=0.25))
 
     fixed = _fixed_ml_phase_d_params()
     sizing_m = "profit_factor_kelly"
-    pfk_win = int(trial.suggest_categorical("PFK_WINDOW", [40, 60]))
-    stress_vol = float(trial.suggest_float("STRESS_VOL_Z", 2.5, 3.5, step=0.5))
 
-    return {
+    out = {
         "SIZING_METHOD": sizing_m,
         "PFK_WINDOW": pfk_win,
         "STRESS_VOL_Z": stress_vol,
@@ -565,7 +614,7 @@ def _suggest_ml_phase_d(trial: optuna.Trial) -> dict[str, Any]:
         "K_LONG": k_long,
         "K_SHORT": k_short,
         "REBALANCE_BARS": reb,
-        "MIN_SCORE_PERCENTILE": 0.55,
+        "MIN_SCORE_PERCENTILE": min_score_pct,
         "RISK_PER_TRADE": float(
             trial.suggest_categorical("RISK_PER_TRADE", [fixed["RISK_PER_TRADE"]])
         ),
@@ -575,11 +624,13 @@ def _suggest_ml_phase_d(trial: optuna.Trial) -> dict[str, Any]:
         "TRAIL_MULT": trail_m,
         "SHORT_TP_MULT": s_tp,
         "LONG_SCALE_ATR_MULT": l_scale,
-        "MAX_EXPOSURE_PER_COIN": max_exp,
+        "MAX_EXPOSURE_PER_COIN": max_exp_sym,
+        "MAX_EXPOSURE": max_exp_gross,
         "DD_SCALING_THRESHOLD": dd_thr,
         "CS_Z_SCORE_THRESHOLD": cs_z_thr,
         "USE_CS_RANK_ENGINE": True,
     }
+    return apply_policy_constraints(out, policy)
 
 
 def build_ml_phase_d_params(trial_params: dict[str, Any], tf: str) -> dict[str, Any]:
@@ -650,7 +701,7 @@ def _base_engine_params(ml: dict[str, Any], tf: str) -> dict[str, Any]:
         "MAX_CONCURRENT_POSITIONS": int(
             ml.get("MAX_CONCURRENT_POSITIONS", int(ml.get("K_RANK", 2)) * 2)
         ),
-        "MAX_EXPOSURE": 1.0,
+        "MAX_EXPOSURE": float(ml.get("MAX_EXPOSURE", 1.0)),
     }
 
 
@@ -738,13 +789,14 @@ def _run_portfolio_numba_block(
 
 
 def objective_ml_phase_d(trial: optuna.Trial, ctx: MLPhaseDContext) -> float | tuple[float, float]:
-    """CAWF-R PLGD objective: K=5 chronological AWF legs → Penalized Log-Geometric Drift."""
+    """CAWF-R Phase-D: K AWF legs → validation-contract composite (minimize -reward + penalties)."""
     if ctx.awf_leg_slices is None:
         precompute_ml_optimization_context(ctx)
     awf_slices = ctx.awf_leg_slices
     mai = ctx.multi_alignment_info
     if not awf_slices or mai is None:
-        return (1e9, 1e9) if OPT_FUTURES_CONFIG.get("FUTURES_ML_ALPHA_NSGA2_ENABLED", False) else 1e9
+        nsga2 = bool(OPT_FUTURES_CONFIG.get("FUTURES_ML_ALPHA_NSGA2_ENABLED", False))
+        return (1e9, 1e9) if nsga2 else 1e9
 
     ml = _suggest_ml_phase_d(trial)
     params = _base_engine_params(ml, ctx.tf)
@@ -793,7 +845,7 @@ def objective_ml_phase_d(trial: optuna.Trial, ctx: MLPhaseDContext) -> float | t
             continue
 
         zkill, zfund, lev_leg = _cached_kill_fund_lev(aligned, params)
-        b_trades_raw, b_bal, b_equity, b_diag = _run_portfolio_numba_block(
+        b_trades_raw, b_bal, b_equity, _b_diag = _run_portfolio_numba_block(
             params, aligned, zkill, zfund, lev_leg
         )
 
@@ -858,8 +910,18 @@ def objective_ml_phase_d(trial: optuna.Trial, ctx: MLPhaseDContext) -> float | t
         if leg_idx >= 1:
             cum_log_tw = float(np.sum(leg_log_tw))
             max_leg_mdd = float(np.max(leg_mdds))
+            if (not np.isfinite(cum_log_tw)) or (not np.isfinite(max_leg_mdd)):
+                return 1e9
+            if abs(cum_log_tw) > 100.0:
+                return 1e9
             if cum_log_tw < -0.05 or max_leg_mdd > liq_mdd_thr:
-                return -100.0
+                return 1e9
+            if leg_idx >= 2:
+                prune_min_pos = float(cfg.get("FUTURES_PHASE_D_PRUNE_MIN_POS_RATIO", 0.25))
+                part = np.asarray(leg_log_tw, dtype=np.float64)
+                pos_r = float(np.sum(part > 0.0)) / float(max(part.size, 1))
+                if pos_r < prune_min_pos:
+                    raise optuna.TrialPruned()
 
             trial.report(float(np.mean(leg_log_tw)), step=leg_idx)
             if trial.should_prune():
@@ -880,6 +942,7 @@ def objective_ml_phase_d(trial: optuna.Trial, ctx: MLPhaseDContext) -> float | t
     minority = float(min(total_long, total_short) / total_dir) if total_dir > 0 else 0.0
 
     import math as _math
+
     k_legs_n = float(max(len(leg_arr), 1))
     mu_log = float(np.mean(leg_arr)) if leg_arr.size > 0 else -10.0
     sigma_log = float(np.std(leg_arr, ddof=1)) if leg_arr.size > 1 else 0.0
@@ -887,7 +950,7 @@ def objective_ml_phase_d(trial: optuna.Trial, ctx: MLPhaseDContext) -> float | t
     lambda_def = float(cfg.get("FUTURES_PLGD_LAMBDA_DEF", 0.5))
     lambda_tail = float(cfg.get("FUTURES_PLGD_LAMBDA_TAIL", 2.0))
 
-    variance_drag = 0.5 * sigma_log ** 2
+    variance_drag = 0.5 * sigma_log**2
     sr_bench = _math.sqrt(2.0 * _math.log(max(n_trials_cfg, 2.0)))
     deflation = lambda_def * sr_bench * sigma_log / _math.sqrt(max(k_legs_n, 1.0))
     worst_leg = float(np.min(leg_arr)) if leg_arr.size > 0 else -10.0
@@ -908,6 +971,8 @@ def objective_ml_phase_d(trial: optuna.Trial, ctx: MLPhaseDContext) -> float | t
 
     awf_pos_frac = float(np.sum(leg_arr > 0.0)) / k_legs_n
     dsr_awf = float(min(0.99, max(0.0, awf_pos_frac)))
+    is_cum_log = float(np.sum(leg_arr)) if leg_arr.size > 0 else -10.0
+    is_alpha_per_leg = float(is_cum_log / max(k_legs_n, 1.0))
 
     trade_shortfall = max(0.0, float(min_trades_target) - avg_trades_agg) / float(
         max(min_trades_target, 1)
@@ -925,16 +990,33 @@ def objective_ml_phase_d(trial: optuna.Trial, ctx: MLPhaseDContext) -> float | t
         dir_arr = all_trades[:, 3]
         l_mask = dir_arr == 1.0
         s_mask = dir_arr == -1.0
-        
+
         l_pnl = pnl_arr[l_mask]
         l_win = float(np.sum(l_pnl[l_pnl > 0.0]))
         l_loss = float(np.sum(np.abs(l_pnl[l_pnl < 0.0])))
         l_pf_agg = l_win / max(l_loss, 1e-9) if l_loss > 0 else 1.0
-        
+
         s_pnl = pnl_arr[s_mask]
         s_win = float(np.sum(s_pnl[s_pnl > 0.0]))
         s_loss = float(np.sum(np.abs(s_pnl[s_pnl < 0.0])))
         s_pf_agg = s_win / max(s_loss, 1e-9) if s_loss > 0 else 1.0
+
+    weak_side_pf = float(min(l_pf_agg, s_pf_agg))
+    dir_pf_score = float(np.log(max(weak_side_pf, 1.001)))
+
+    w_pos = float(cfg.get("FUTURES_PHASE_D_W_POS_LEGS", 2.5))
+    w_worst = float(cfg.get("FUTURES_PHASE_D_W_WORST_LEG_LOGTW", 2.0))
+    w_pf = float(cfg.get("FUTURES_PHASE_D_W_DIR_PF", 1.0))
+    w_is = float(cfg.get("FUTURES_PHASE_D_W_IS_ALPHA_LOG", 1.2))
+    plgd_reg_w = float(cfg.get("FUTURES_PHASE_D_PLGD_REG_WEIGHT", 0.12))
+
+    reward = (
+        w_pos * awf_pos_frac
+        + w_worst * worst_leg
+        + w_pf * dir_pf_score
+        + w_is * is_alpha_per_leg
+    )
+    plgd_reg = plgd_reg_w * (variance_drag + deflation)
 
     dir_balance_penalty = 0.0
     if l_pf_agg < 1.05:
@@ -955,7 +1037,8 @@ def objective_ml_phase_d(trial: optuna.Trial, ctx: MLPhaseDContext) -> float | t
         )
     else:
         obj = float(
-            -plgd
+            -reward
+            + plgd_reg
             + pen
             + 3.0 * trade_shortfall
             + path_consistency_penalty
@@ -992,12 +1075,22 @@ def objective_ml_phase_d(trial: optuna.Trial, ctx: MLPhaseDContext) -> float | t
     trial.set_user_attr("avg_exposure", avg_exposure)
     trial.set_user_attr("awf_pos_frac", awf_pos_frac)
     trial.set_user_attr("awf_plgd", plgd)
+    trial.set_user_attr("awf_contract_reward", reward)
+    trial.set_user_attr("awf_is_alpha_per_leg", is_alpha_per_leg)
+    trial.set_user_attr("awf_dir_pf_weak_side", weak_side_pf)
     trial.set_user_attr("awf_mu_log", mu_log)
     trial.set_user_attr("awf_sigma_log", sigma_log)
     trial.set_user_attr("dir_balance_penalty", dir_balance_penalty)
 
     if OPT_FUTURES_CONFIG.get("FUTURES_ML_ALPHA_NSGA2_ENABLED", False):
-        obj1 = float(-plgd + pen + 3.0 * trade_shortfall + exposure_floor_penalty)
+        obj1 = float(
+            -reward
+            + plgd_reg
+            + pen
+            + 3.0 * trade_shortfall
+            + exposure_floor_penalty
+            + dir_balance_penalty
+        )
         obj2 = float(ev_cost_penalty)
         return obj1, obj2
 
