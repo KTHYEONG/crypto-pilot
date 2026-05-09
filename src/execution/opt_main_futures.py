@@ -59,8 +59,12 @@ from src.domain.futures.ml_pipeline.pipeline_runner import (  # noqa: E402
     merge_ml_output_into_is_and_oos,
 )
 from src.domain.futures.optimization.evaluator import (  # noqa: E402
+    calc_cvar5_loss_pct_from_equity,
+    calc_mdd_from_equity,
     calc_net_alpha_with_friction,
     calc_time_to_target_wealth,
+    calc_ulcer_index_from_equity,
+    perform_online_capital_allocation,
     run_oos_margin_shared_portfolio,
     stationary_bootstrap_spa,
 )
@@ -85,8 +89,7 @@ from src.domain.futures.portfolio.policy_engine import (  # noqa: E402
     load_portfolio_policy_config,
 )
 from src.domain.futures.validation.candidate_selector import (  # noqa: E402
-    CandidateSelectorConfig,
-    select_candidate_by_robust_basin,
+    select_orthogonal_ensemble,
 )
 from src.domain.futures.validation.champion_registry import (  # noqa: E402
     ChampionMetrics,
@@ -243,6 +246,7 @@ def _print_performance_report(
     pbo: float | None = None,
     tf: str = "1h",
     benchmark_cagr: float | None = None,
+    meta_port: dict[str, Any] | None = None,
 ) -> None:
     eq = port.get("equity_curve", np.array([FUTURES_INITIAL_BALANCE]))
     trades = port.get("trades_df", pd.DataFrame())
@@ -261,8 +265,6 @@ def _print_performance_report(
     sortino = (np.mean(rets) / np.std(downside)) * np.sqrt(ann_factor) if downside.size > 0 else 0.0
 
     # 2. PSR (Probabilistic Sharpe Ratio) — López de Prado 2012
-    # Adjusts for skewness and excess kurtosis of per-bar returns.
-    # Answers: P(true SR > 0) after non-normality correction.
     psr = 0.5
     if rets.size >= 4:
         _sr_hat = float(np.mean(rets)) / (float(np.std(rets, ddof=1)) + 1e-12)
@@ -295,13 +297,24 @@ def _print_performance_report(
 
     # Section A: COMPOUNDING
     _logger.info(_fmt_row("[A] COMPOUNDING (Wealth Expansion)", w))
+    cagr_str = f"{port['cagr_pct']:>8.2f}%"
+    mdd_str = f"{port['mdd_pct']:>8.2f}%"
+    if meta_port:
+        cagr_str = f"{port['cagr_pct']:>6.1f} -> {meta_port['cagr_pct']:>6.1f}%"
+        mdd_str = f"{port['mdd_pct']:>6.1f} -> {meta_port['mdd_pct']:>6.1f}%"
+
     row1 = (
-        f"  CAGR:        {port['cagr_pct']:>8.2f}% | MDD:         {port['mdd_pct']:>8.2f}% | "
+        f"  CAGR:        {cagr_str} | MDD:         {mdd_str} | "
         f"Win Rate:     {port['win_rate_pct']:>8.2f}%"
     )
     _logger.info(_fmt_row(row1, w))
+
+    tw_str = f"{port.get('terminal_wealth_ratio', 1.0):>8.2f}x"
+    if meta_port:
+        tw_str = f"{port.get('terminal_wealth_ratio', 1.0):>6.1f} -> {meta_port.get('terminal_wealth_ratio', 1.0):>6.1f}x"
+
     row2 = (
-        f"  Terminal TW: {port.get('terminal_wealth_ratio', 1.0):>8.2f}x | "
+        f"  Terminal TW: {tw_str} | "
         f"Profit Factor:{port['profit_factor']:>8.2f}  | "
         f"Avg PnL %:    {port.get('avg_trade_pnl_pct', 0.0):>8.2f}%"
     )
@@ -310,32 +323,45 @@ def _print_performance_report(
 
     # Section B: ROBUSTNESS
     _logger.info(_fmt_row("[B] ROBUSTNESS (Risk & Stability)", w))
+
+    sharpe_str = f"{sharpe:>8.2f}"
+    if meta_port:
+        m_rets = np.diff(meta_port["equity_curve"]) / np.maximum(meta_port["equity_curve"][:-1], 1e-9)
+        m_sharpe = (np.mean(m_rets) / np.std(m_rets)) * np.sqrt(ann_factor) if np.std(m_rets) > 1e-9 else 0.0
+        sharpe_str = f"{sharpe:>6.2f} -> {m_sharpe:>6.2f}"
+
     row3 = (
-        f"  Sharpe:      {sharpe:>8.2f}  | "
+        f"  Sharpe:      {sharpe_str}  | "
         f"Sortino:     {sortino:>8.2f}  | "
         f"Ann. Vol:    {ann_vol:>8.2f}%"
     )
     _logger.info(_fmt_row(row3, w))
+
+    calmar_str = f"{port['calmar_ratio']:>8.2f}"
+    if meta_port:
+        calmar_str = f"{port['calmar_ratio']:>6.2f} -> {meta_port['calmar_ratio']:>6.2f}"
+
     row4 = (
-        f"  Calmar:      {port['calmar_ratio']:>8.2f}  | "
+        f"  Calmar:      {calmar_str}  | "
         f"Ulcer Index: {port['ulcer_index']:>8.2f}  | "
         f"t-stat (Tr): {t_stat:>8.2f}"
     )
     _logger.info(_fmt_row(row4, w))
     _logger.info(_fmt_row(f"  Exposure:    {exposure * 100.0:>8.2f}%", w))
-
-    if dsr is not None or pbo is not None:
-        dsr_str = f"{dsr:>8.4f}" if dsr is not None else "   N/A  "
-        pbo_str = f"{pbo:>8.4f}" if pbo is not None else "   N/A  "
-        _logger.info(_fmt_row(f"  DSR (IS Ref): {dsr_str} | PBO (IS Ref): {pbo_str}", w))
-
     # Section C: MARKET-RELATIVE ALPHA
     if benchmark_cagr is not None:
         _net_alpha = float(port.get("cagr_pct", 0.0)) - benchmark_cagr
+        alpha_val = _net_alpha
+        if meta_port:
+            meta_alpha = float(meta_port.get("cagr_pct", 0.0)) - benchmark_cagr
+            alpha_str = f"{_net_alpha:>+6.1f} -> {meta_alpha:>+6.1f}%"
+        else:
+            alpha_str = f"{_net_alpha:>+8.2f}%"
+
         na_txt = (
             f"  PSR (BLP):   {psr:>8.4f}  | "
             f"Benchmark:  {benchmark_cagr:>7.1f}%  | "
-            f"Net Alpha:  {_net_alpha:>+7.1f}%"
+            f"Net Alpha:  {alpha_str}"
         )
         _logger.info(_fmt_row(na_txt, w))
     else:
@@ -352,8 +378,6 @@ def _print_performance_report(
     _logger.info("╚" + "═" * (w + 2) + "╝\n")
 
 
-
-
 def _print_human_dashboard(
     is_port: dict[str, Any],
     ho_port: dict[str, Any],
@@ -361,6 +385,7 @@ def _print_human_dashboard(
     gate_status: str,
     benchmark_is: float = 0.0,
     benchmark_oos: float = 0.0,
+    meta_port: dict[str, Any] | None = None,
 ) -> None:
     """Unified Human Dashboard for strategy performance summary."""
     c_grn = "\033[92m"
@@ -385,24 +410,27 @@ def _print_human_dashboard(
     oos_cagr = get_val(oos_port, "cagr_pct")
     is_alpha = is_cagr - benchmark_is
     oos_alpha = oos_cagr - benchmark_oos
-    l_pf = get_val(oos_port, "long_pf", 1.0)
-    s_pf = get_val(oos_port, "short_pf", 1.0)
-    dir_balance_ok = (l_pf >= 1.05) and (s_pf >= 1.05)
+
+    if meta_port:
+        meta_cagr = get_val(meta_port, "cagr_pct")
+        meta_alpha = meta_cagr - benchmark_oos
 
     metrics = [
         ("CAGR (%)", "cagr_pct", True),
         ("Net Alpha (%)", "net_alpha_pct", True),
         ("Max Drawdown (%)", "mdd_pct", True),
         ("Profit Factor", "profit_factor", False),
-        ("Win Rate (%)", "win_rate_pct", True),
     ]
 
     for label, key, is_pct in metrics:
         suffix = "%" if is_pct else ""
         if key == "net_alpha_pct":
+            oos_val_str = f"{oos_alpha:>10.2f}{suffix}"
+            if meta_port:
+                oos_val_str = f"{oos_alpha:>5.1f}->{meta_alpha:>4.1f}{suffix}"
             row = (
                 f"  {label:<18} : {is_alpha:>10.2f}{suffix} "
-                f"{'N/A':>17} {oos_alpha:>23.2f}{suffix}"
+                f"{'N/A':>17} {oos_val_str:>23}"
             )
             _logger.info(_fmt_row(row, w))
             continue
@@ -410,54 +438,42 @@ def _print_human_dashboard(
         is_val = get_val(is_port, key)
         ho_val = get_val(ho_port, key)
         oos_val = get_val(oos_port, key)
+
+        oos_val_str = f"{oos_val:>10.2f}{suffix}"
+        if meta_port:
+            m_val = get_val(meta_port, key)
+            oos_val_str = f"{oos_val:>5.1f}->{m_val:>4.1f}{suffix}"
+
         row = (
             f"  {label:<18} : {is_val:>10.2f}{suffix} "
-            f"{ho_val:>17.2f}{suffix} {oos_val:>23.2f}{suffix}"
+            f"{ho_val:>17.2f}{suffix} {oos_val_str:>23}"
         )
         _logger.info(_fmt_row(row, w))
 
     _logger.info("╟" + "─" * (w + 2) + "╢")
-    bal_row = f"{'[DIRECTIONAL BALANCE]':<20} {'Long PF':>14} {'Short PF':>17} {'Verdict':>24}"
-    _logger.info(_fmt_row(bal_row, w))
-
-    def _fmt_pf_color(val: float) -> str:
-        color = c_grn if val >= 1.05 else c_red
-        return f"{color}{val:>10.2f}{c_rst}"
-
-    dir_status = "STABLE" if dir_balance_ok else "BIASED"
-    dir_color = c_grn if dir_balance_ok else c_red
-    row_dir = (
-        f"  OOS L/S Balance    : {_fmt_pf_color(l_pf)} {' ':<3} "
-        f"{_fmt_pf_color(s_pf)} {' ':<10} {dir_color}{dir_status:<10}{c_rst}"
-    )
-    _logger.info(_fmt_row(row_dir, w))
-
-    _logger.info("╟" + "─" * (w + 2) + "╢")
     _logger.info(_fmt_row("[SANITY CHECK & VERDICT]", w))
 
-    is_survival = "PASS" if is_alpha > 0.0 else "FAIL"
-    is_color = c_grn if is_survival == "PASS" else c_red
-    is_text = f"{is_color}{is_survival:<4}{c_rst} (IS Net Alpha > 0%)"
-    _logger.info(_fmt_row(f"  IS Survival        : {is_text}", w))
-
-    ho_survival = "DIAG"
-    ho_color = c_ylw if ho_val > 0 else c_rst
-    ho_text = f"{ho_color}{ho_survival:<4}{c_rst} (Recent Regime Check)"
-    _logger.info(_fmt_row(f"  Recent Regime      : {ho_text}", w))
-
     retention = (oos_cagr / is_cagr * 100.0) if is_cagr > 1e-6 else 0.0
-    if is_cagr <= 1e-6 and oos_cagr > 1e-6:
-        retention = 999.0 # Recovery
-    ret_color = c_grn if retention > 60.0 else c_ylw if retention > 40.0 else c_red
-    ret_text = f"{ret_color}{retention:>5.1f}%{c_rst} of IS Performance"
+    if meta_port:
+        meta_retention = (meta_cagr / is_cagr * 100.0) if is_cagr > 1e-6 else 0.0
+        ret_val = meta_retention
+    else:
+        ret_val = retention
+
+    ret_color = c_grn if ret_val > 60.0 else c_ylw if ret_val > 40.0 else c_red
+    ret_text = f"{ret_color}{ret_val:>5.1f}%{c_rst} of IS Performance"
+    if meta_port:
+        ret_text += f" (Ensemble Improvement: {meta_retention - retention:>+4.1f}%)"
+
     _logger.info(_fmt_row(f"  OOS Retention      : {ret_text}", w))
     _logger.info(_fmt_row("", w))
 
     v_color = c_grn if "PROMOTE" in gate_status else c_red
     v_msg = f"FINAL VERDICT        : {v_color}{c_bld}{gate_status}{c_rst}"
-    persisted = " (Parameters saved)" if "PROMOTE" in gate_status else " (Parameters NOT persisted)"
+    persisted = " (Ensemble saved)" if "PROMOTE" in gate_status else " (Parameters NOT persisted)"
     _logger.info(_fmt_row(f"  {v_msg}{persisted}", w))
     _logger.info("╚" + "═" * (w + 2) + "╝\n")
+
 
 
 def _print_dual_audit_dashboard(
@@ -1112,13 +1128,8 @@ def main() -> None:
                 pass_count += 1
         _logger.info("  [SEED %s] complete=%d pass=%d", seed, len(completed), pass_count)
 
-    _logger.info("  --> Running robust basin selector across all completed trials...")
+    _logger.info("  --> Running orthogonal ensemble selector across all completed trials...")
     pbo_max_eff, dsr_min_eff, _ = resolve_adjusted_gates(OPT_FUTURES_CONFIG, n_ml_trials)
-    selector_cfg_block = OPT_FUTURES_CONFIG.get("FUTURES_CANDIDATE_SELECTOR", {})
-    selector_cfg = CandidateSelectorConfig(
-        elite_top_n=int(selector_cfg_block.get("elite_top_n", 30)),
-        basin_iqr_mult=float(selector_cfg_block.get("basin_iqr_mult", 1.0)),
-    )
 
     def _is_passing_trial(t: optuna.trial.FrozenTrial) -> bool:
         _awf_pos = float(t.user_attrs.get("awf_pos_frac", 0.0))
@@ -1127,38 +1138,41 @@ def main() -> None:
             t, pbo_obs_t, check_pbo=True, pbo_max=pbo_max_eff, dsr_min=dsr_min_eff
         )
 
-    sel = select_candidate_by_robust_basin(
+    ensemble_results = select_orthogonal_ensemble(
         all_trials=all_trials,
         is_passing=_is_passing_trial,
         build_params=lambda rp: build_ml_phase_d_params(rp, args.tf),
-        cfg=selector_cfg,
+        max_size=int(OPT_FUTURES_CONFIG.get("FUTURES_ENSEMBLE_MAX_SIZE", 3)),
     )
-    params = sel.params
-    best_trial = sel.representative_trial
+    
+    if not ensemble_results:
+        _logger.error(" [FAIL] No candidates selected for ensemble. Check gate parameters.")
+        return
+
+    _logger.info(
+        "  [SELECTOR] method=orthogonal_ensemble members=%d completed=%d passing=%d",
+        len(ensemble_results),
+        len([t for t in all_trials if t.state == TrialState.COMPLETE]),
+        len([t for t in all_trials if t.state == TrialState.COMPLETE and _is_passing_trial(t)]),
+    )
+
+    _logger.info("\n" + "═" * 85)
+    _logger.info(
+        f" [ORTHOGONAL-ENSEMBLE] {len(ensemble_results)} CANDIDATES READY"
+    )
+    _logger.info("═" * 85)
+
+    # Proceed to Final Evaluation and Persistence for each member
+    # For now, we evaluate each member individually as requested.
+    # The 'winner' will be the best member (first in the list).
+    winner_res = ensemble_results[0]
+    params = winner_res.params
+    best_trial = winner_res.representative_trial
     _seed_w = args.seed if args.seed is not None else 0
     winner = {"seed": _seed_w, "params": params, "trial": best_trial}
     passing_trials = [
         t for t in all_trials if t.state == TrialState.COMPLETE and _is_passing_trial(t)
     ]
-
-    _logger.info(
-        "  [SELECTOR] method=%s completed=%d passing=%d basin=%d",
-        sel.method,
-        sel.n_completed,
-        sel.n_passing,
-        sel.n_basin,
-    )
-
-    pbo_obs = awf_pos_frac_to_pseudo_pbo(
-        float(best_trial.user_attrs.get("awf_pos_frac", 0.0))
-    )
-    
-    _logger.info("\n" + "═" * 85)
-    _logger.info(
-        f" [ROBUST-BASIN] FINAL PARAMETERS READY | PBO_ref={pbo_obs:.4f} | "
-        f"n_consensus={len(passing_trials)}"
-    )
-    _logger.info("═" * 85)
 
     # Proceed to Final Evaluation and Persistence
     gate_ok = True
@@ -1227,11 +1241,82 @@ def main() -> None:
     _logger.info("═" * 85)
 
     policy_cfg = load_portfolio_policy_config(OPT_FUTURES_CONFIG)
-    params = apply_policy_constraints(params, policy_cfg)
 
-    oos_port = run_oos_margin_shared_portfolio(
-        valid_symbols, args.tf, params, oos_data_maps, cache_root=FUTURES_CACHE_DIR
+    _logger.info("  [ENSEMBLE EVALUATION]")
+    ensemble_curves = []
+    ensemble_ports = []
+    for i, res in enumerate(ensemble_results):
+        m_params = apply_policy_constraints(res.params, policy_cfg)
+        m_port = run_oos_margin_shared_portfolio(
+            valid_symbols, args.tf, m_params, oos_data_maps, cache_root=FUTURES_CACHE_DIR
+        )
+        ensemble_ports.append(m_port)
+        ensemble_curves.append(m_port["equity_curve"])
+        m_cagr = m_port.get("cagr_pct", 0.0)
+        m_mdd = m_port.get("mdd_pct", 0.0)
+        _logger.info(
+            f"    Member {i+1}/{len(ensemble_results)}: CAGR={m_cagr:7.2f}% | "
+            f"MDD={m_mdd:6.2f}% | Trial={res.representative_trial.number}"
+        )
+
+    # Online Capital Allocation (Meta-Strategy)
+    meta_window = int(OPT_FUTURES_CONFIG.get("FUTURES_META_ALLOC_WINDOW", 24))
+    meta_eta = float(OPT_FUTURES_CONFIG.get("FUTURES_META_ALLOC_ETA", 0.1))
+    meta_equity, weight_history = perform_online_capital_allocation(
+        ensemble_curves, float(FUTURES_INITIAL_BALANCE), window_size=meta_window, eta=meta_eta
     )
+    
+    # Log final weights
+    final_weights = weight_history[-1]
+    _logger.info("  [META-ALLOCATION] EG Update Complete.")
+    for i, w_val in enumerate(final_weights):
+        _logger.info(f"    Member {i+1} Final Weight: {w_val:.4f}")
+
+    # Calculate Meta-Strategy Metrics
+    meta_final_bal = meta_equity[-1]
+    meta_moic = meta_final_bal / float(FUTURES_INITIAL_BALANCE)
+    meta_mdd = calc_mdd_from_equity(meta_equity)
+    
+    hours_per_bar = int(args.tf.replace("h", "")) if args.tf.endswith("h") else 4
+    n_days = (len(meta_equity) * hours_per_bar) / 24.0
+    
+    try:
+        exponent = 365.0 / max(n_days, 1e-3)
+        log_meta_moic = math.log(max(meta_moic, 1e-9))
+        meta_cagr = (math.exp(exponent * log_meta_moic) - 1.0) * 100.0
+    except (OverflowError, ValueError):
+        meta_cagr = 1e8 if meta_moic > 1.0 else -100.0
+
+    meta_port = {
+        "cagr_pct": meta_cagr,
+        "mdd_pct": meta_mdd,
+        "equity_curve": meta_equity,
+        "moic": meta_moic,
+        "terminal_wealth_ratio": meta_moic,
+        "profit_factor": ensemble_ports[0]["profit_factor"], # Best member as proxy
+        "total_trades": ensemble_ports[0]["total_trades"],
+        "win_rate_pct": ensemble_ports[0]["win_rate_pct"],
+        "oos_long_short_minority_pct": ensemble_ports[0]["oos_long_short_minority_pct"],
+        "calmar_ratio": meta_cagr / abs(meta_mdd) if abs(meta_mdd) > 1e-6 else 0.0,
+        "ulcer_index": calc_ulcer_index_from_equity(meta_equity),
+        "cvar_pct": calc_cvar5_loss_pct_from_equity(meta_equity),
+        "long_pf": ensemble_ports[0]["long_pf"],
+        "short_pf": ensemble_ports[0]["short_pf"],
+    }
+
+    # [STEP 5.1/5] Detailed Ensemble Audit
+    _print_performance_report(
+        "ENSEMBLE (META-STRATEGY) OOS PERFORMANCE",
+        ensemble_ports[0],
+        dsr=float(best_trial.user_attrs.get("gate1_dsr", 0.0)),
+        pbo=awf_pos_frac_to_pseudo_pbo(float(best_trial.user_attrs.get("awf_pos_frac", 0.0))),
+        tf=args.tf,
+        meta_port=meta_port
+    )
+
+    # Continue with the 'winner' (best member) for standard evaluation
+    params = apply_policy_constraints(params, policy_cfg)
+    oos_port = ensemble_ports[0]
 
     _awf_pos_best = float(best_trial.user_attrs.get("awf_pos_frac", 0.0))
     pbo_obs = awf_pos_frac_to_pseudo_pbo(_awf_pos_best)
@@ -1514,7 +1599,7 @@ def main() -> None:
             _logger.debug("Champion metrics parse failed: %s", _ce)
 
     # SOTA WEALTH (futures-opt) calculation for Candidate
-    eq_arr = np.asarray(oos_port.get("equity_curve", []), dtype=np.float64)
+    eq_arr = np.asarray(meta_port.get("equity_curve", []), dtype=np.float64)
     hrs = int(args.tf.replace("h", "")) if args.tf.endswith("h") else 4
     bpy = (24.0 / hrs) * 365.0
     if eq_arr.size > 1:
@@ -1528,14 +1613,14 @@ def main() -> None:
         "pbo": float(pbo_obs) if 'pbo_obs' in locals() else 0.5,
         "p10": float(best_trial.user_attrs.get("ml_p10_log_growth_cpcv", 0.0)),
         "dsr": float(best_trial.user_attrs.get("gate1_dsr", 0.0)),
-        "tw": float(oos_port.get("terminal_wealth_ratio", 1.0)),
-        "cagr": float(oos_port.get("cagr_pct", 0.0)),
-        "mdd": float(oos_port.get("mdd_pct", 0.0)),
+        "tw": float(meta_port.get("terminal_wealth_ratio", 1.0)),
+        "cagr": float(meta_port.get("cagr_pct", 0.0)),
+        "mdd": float(meta_port.get("mdd_pct", 0.0)),
         "time_2x": float(t2x_n),
-        "cvar": float(oos_port.get("cvar_pct", 0.0)),
+        "cvar": float(meta_port.get("cvar_pct", 0.0)),
         "net_alpha": float(nalpha_n * 100.0),
         "avg_pnl": float(oos_port.get("avg_trade_pnl_pct", 0.0)),
-        "pf": float(oos_port.get("profit_factor", 1.0)),
+        "pf": float(meta_port.get("profit_factor", 1.0)),
         "is_cagr": float(is_port.get("cagr_pct", 0.0)),
         "ho_cagr": float(ho_port.get("cagr_pct", 0.0)),
         "awf_pos_frac": float(best_trial.user_attrs.get("awf_pos_frac", 0.0)),
@@ -1547,11 +1632,20 @@ def main() -> None:
             )
         ),
         "erg_dev": float(locals().get("_erg_dev_val", 0.0)),
-        "oos_long_pf": float(oos_port.get("long_pf", 1.0)),
-        "oos_short_pf": float(oos_port.get("short_pf", 1.0)),
+        "oos_long_pf": float(meta_port.get("long_pf", 1.0)),
+        "oos_short_pf": float(meta_port.get("short_pf", 1.0)),
         "oos_retention_pct": float(oos_retention),
         "is_alpha": float(is_net_alpha_v) if 'is_net_alpha_v' in locals() else 0.0,
     })
+
+    # Update params to include ensemble info for persistence
+    params["ensemble_members"] = [res.params for res in ensemble_results]
+    params["meta_allocation"] = {
+        "window_size": meta_window,
+        "eta": meta_eta,
+        "final_weights": final_weights.tolist()
+    }
+    params["is_ensemble"] = True
 
     gate_ok_before_champ = gate_ok
     if gate_ok:
@@ -1636,7 +1730,8 @@ def main() -> None:
     _print_human_dashboard(
         is_port, ho_port, oos_port, _verdict,
         benchmark_is=(_btc_benchmark_is if _btc_benchmark_is is not None else 0.0),
-        benchmark_oos=(_btc_benchmark_oos if _btc_benchmark_oos is not None else 0.0)
+        benchmark_oos=(_btc_benchmark_oos if _btc_benchmark_oos is not None else 0.0),
+        meta_port=meta_port
     )
 
     # [CHAMPION AUDIT] Side-by-side with current champion
