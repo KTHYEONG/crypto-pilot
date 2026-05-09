@@ -27,6 +27,7 @@ except Exception as e:
 
 import optax
 import pandas as pd
+import talib
 from numba import njit
 from sklearn.preprocessing import RobustScaler
 
@@ -634,8 +635,12 @@ class HMMStateInferrer:
             "symbol": symbol,
             "tf": tf,
             "data_len": len(features_df),
-            "ver": "v54_pragmatic_10d",
+            "ver": "v55_smoothing_connected",
             "feat_cols": sorted(feat_cols),
+            "smooth_method": OPT_FUTURES_CONFIG.get("FUTURES_HMM_SMOOTHING_METHOD", "EMA"),
+            "smooth_span": int(OPT_FUTURES_CONFIG.get("FUTURES_HMM_SMOOTHING_SPAN", 12)),
+            "sticky_durations": str(OPT_FUTURES_CONFIG.get("FUTURES_HMM_OUTPUT_STICKY_MIN_DURATION", [])),
+            "sticky_weight": float(OPT_FUTURES_CONFIG.get("FUTURES_HMM_STICKY_PENALTY_WEIGHT", 100.0)),
         }
         tag = cm.generate_hash(deps, source_files=[Path(__file__).resolve()])
         cache_path = cm.get_cache_path(f"HMM_v53_unsupervised_{symbol}_{tf}_len{len(features_df)}", ".parquet", tag)
@@ -791,7 +796,34 @@ class HMMStateInferrer:
             crisis_col=len(_SEMANTIC_ORDER) - 1,
         )
         probs_df[list(_SEMANTIC_ORDER)] = sem_cal
-        probs_df["hmm_entropy"] = _normalized_entropy_k(sem_cal, len(_SEMANTIC_ORDER))
+
+        # Posterior Smoothing (Phase 7: Macro Stability)
+        smooth_method = OPT_FUTURES_CONFIG.get("FUTURES_HMM_SMOOTHING_METHOD", "EMA")
+        smooth_span = int(OPT_FUTURES_CONFIG.get("FUTURES_HMM_SMOOTHING_SPAN", 12))
+        if smooth_span > 1:
+            sem_cols = list(_SEMANTIC_ORDER)
+            if smooth_method == "EMA":
+                probs_df[sem_cols] = probs_df[sem_cols].ewm(span=smooth_span).mean()
+            elif smooth_method == "KAMA":
+                for c in sem_cols:
+                    probs_df[c] = talib.KAMA(probs_df[c].values, timeperiod=smooth_span)
+            elif smooth_method == "DEMA":
+                for c in sem_cols:
+                    probs_df[c] = talib.DEMA(probs_df[c].values, timeperiod=smooth_span)
+            elif smooth_method == "HMA":
+                for c in sem_cols:
+                    probs_df[c] = talib.WMA(2 * talib.WMA(probs_df[c].values, smooth_span // 2) - talib.WMA(probs_df[c].values, smooth_span), int(np.sqrt(smooth_span)))
+            
+            probs_df[sem_cols] = probs_df[sem_cols].ffill().fillna(1.0 / len(sem_cols))
+            
+            # Re-normalize to ensure sum to 1.0
+            p_sum = probs_df[sem_cols].sum(axis=1)
+            probs_df[sem_cols] = probs_df[sem_cols].div(p_sum, axis=0).fillna(1.0 / len(sem_cols))
+            
+            # Re-derive viterbi_states_buf from smoothed probabilities to enforce stability in hard states
+            viterbi_states_buf = np.argmax(probs_df[sem_cols].to_numpy(), axis=1).astype(np.int32)
+
+        probs_df["hmm_entropy"] = _normalized_entropy_k(probs_df[list(_SEMANTIC_ORDER)].values, len(_SEMANTIC_ORDER))
         probs_df["hmm_prob_bull_trend"] = (
             probs_df["hmm_prob_bull_calm"] + probs_df["hmm_prob_bull_vol_up"]
         )
