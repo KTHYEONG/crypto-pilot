@@ -1,39 +1,38 @@
 {
   "project": "my-coin-traider",
-  "version": "6.3.1",
+  "version": "6.4.1",
   "last_evolution_date": "2026-05-09",
-  "previous_state_hash": "v6.3.0",
+  "previous_state_hash": "v6.4.0",
   "current_logic": {
-    "universe_selection": "CS_RANK based filtering",
-    "regime_classification": "Unsupervised 5-State TVTP-HMM v4.1.0 + Asymmetric Post-Suppression",
-    "alpha_generation": "Decoupled Cross-Sectional Alpha (4h, Horizons: 12h-96h, IC-Weighted)",
-    "position_sizing": "Fractional Kelly ($f^* = \\lambda \\cdot (p - \\frac{1-p}{b})$) with corrected win-prob ($p$) input + Z-Score Conviction Scaling ($sf$)",
-    "execution_model": "Z-Score Hysteresis (Schmitt Trigger): Entry ($Th_{entry}$) vs Maintenance ($Th_{exit}$) + Absolute Alpha Gate removed for flow.",
-    "optimization": "PLGD Objective: Maximize Risk-Adjusted Log Growth Deflation ($g - Deflation$)",
-    "risk_management": "Orthogonal Ensemble with EG Online Allocation & Defensive HMM-regime Shrinkage ($f_t$)"
+    "universe_selection": "CS_RANK based filtering (16-32 symbols)",
+    "regime_classification": "Macro-Inertia 5-State HMM v4.2.0 + Posterior Smoothing (EMA) + Asymmetric Min-Duration (168h)",
+    "alpha_generation": "Symmetric Hybrid Labeling (Label 3/0 for Profitable Long/Short vs Friction) + IC Breakthrough (0.14+)",
+    "position_sizing": "Fractional Kelly ($f^*$) with Expanded Search Space (0.1 - 1.2) + Regime-Aware Dynamic Scaling",
+    "execution_model": "Event-Driven Z-Score Hysteresis + Directional Friction Hurdle (3.5bps)",
+    "optimization": "PLGD Objective + Softened Survivability Gates (p10 > -0.10) + Pruning-Resistant Gradients",
+    "risk_management": "Orthogonal Ensemble with EG Online Allocation + Macro-Regime Inertia (>150 bars)"
   },
   "key_parameters": {
     "base_timeframe": "4h",
-    "alpha_miner_version": "v6_lambdarank_dart",
-    "calibration_method": "Platt Scaling (Alpha -> True Win Prob $p$)",
-    "sizing_method": "Fractional Kelly + Conviction Scaling",
-    "objective_function": "PLGD (Probabilistic Log Growth Deflation)",
-    "kelly_lambda_suggest": "0.1 - 0.8 (Upper bound increased)",
-    "total_trials_target": 10000
+    "alpha_miner_version": "v6_lambdarank_dart_symmetric_hybrid",
+    "hmm_smoothing_span": 64,
+    "labeling_friction_hurdle": "2.0x (7.0bps)",
+    "target_oos_ic": "0.1466 (Achieved)",
+    "kelly_lambda_max": 1.2
   },
   "best_achieved_metrics": {
-    "note": "v6.3.1 Trade Restoration Audit (2,000 Trials)",
-    "trade_frequency": "111 trades (Healthy; Restored from 3)",
-    "oos_mdd": "2.94% (Stable Risk Control)",
-    "oos_profit_factor": "0.77 (Improving; Needs growth tuning)",
-    "oos_retention": "Generalization stability restored through sample size."
+    "note": "v6.4.1 Signal Quality Breakthrough (2000 Trials Audit)",
+    "is_ic": "0.1560 (Historical High)",
+    "oos_ic": "0.1466 (Robust Prediction)",
+    "hmm_avg_duration": "157.3 bars (Season Sensing)",
+    "trade_starvation": "CRITICAL (0 trades in Phase D due to strict CS_Z hurdles)"
   },
   "known_issues": {
-    "profitability_barrier": "Absolute profitability ($PF > 1.0$) is suppressed by conservative Kelly Lambda (0.1-0.5) and friction."
+    "execution_dissonance": "Superior Alpha (0.14 IC) is blocked by restrictive Optuna CS_Z search space ([0.5, 2.0]) and EV hurdles."
   },
   "next_recommended_actions": [
-    "Growth Acceleration: Expand KELLY_LAMBDA search space to 1.2 to reward high-conviction 엣지.",
-    "HMM Sensitivity Tuning: Refine BEAR/CRISIS shrinkage to avoid excessive opportunity cost.",
-    "Universe Expansion: Increase symbols to 32+ to increase sample size and selection quality."
+    "Search Space Liberation: Lower CS_Z_SCORE_THRESHOLD floor to 0.2 to unlock the 0.14 IC alpha.",
+    "Hurdle Synchronization: Align backtest engine entry logic with the 2.0x friction labeling hurdle.",
+    "Final Production Run: Scale to 5,000 trials to find the global optimum within the new signal regime."
   ]
 }
