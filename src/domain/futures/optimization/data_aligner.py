@@ -27,6 +27,7 @@ _FUTURES_2D_REQUIRED_COLS: Tuple[str, ...] = (
     "xs_score_long",
     "xs_score_short",
     "hmm_prob_crisis",
+    "hmm_hard_state",
     "hmm_modulator_long",
     "hmm_modulator_short",
     "hmm_modulator_base_long",
@@ -157,6 +158,7 @@ def align_data_for_2d_engine(
         "xs_score_long",
         "xs_score_short",
         "hmm_prob_crisis",
+        "hmm_hard_state",
         "hmm_modulator_long",
         "hmm_modulator_short",
     ]
@@ -182,6 +184,7 @@ def align_data_for_2d_engine(
             "xs_score_long",
             "xs_score_short",
             "hmm_prob_crisis",
+            "hmm_hard_state",
             "hmm_modulator_long",
             "hmm_modulator_short",
         ]:

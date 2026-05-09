@@ -47,8 +47,8 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     "FUTURES_ALPHA_REGIME_SPECIFIC_LEARNING": True,
     # Tier 2: +2 generations for marginal symbolic-regression diversity (cheap vs full schema lift).
     "FUTURES_ML_ALPHA_GENERATIONS": 22,
-    "FUTURES_ML_ALPHA_TARGET_HORIZON": 6,
-    "FUTURES_ML_ALPHA_HORIZONS": (6, 12, 24, 48),
+    "FUTURES_ML_ALPHA_TARGET_HORIZON": 12,
+    "FUTURES_ML_ALPHA_HORIZONS": (12, 24, 48, 96),
     # Cache-control refit: when True, bypass Alpha raw cache and force alpha retraining.
     "FUTURES_ML_FORCE_RETRAIN_ALPHA": True,
     "FUTURES_ML_ALPHA_PARSIMONY": 0.02,

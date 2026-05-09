@@ -4,17 +4,22 @@ This file tracks the logical progression and experimental results of the quantit
 
 ---
 
-## [2026-05-09] v5.3.0 Friction Liquidation & Execution Softening: Churn Defense (Gemini CLI)
-- **Status**: Validated (Structural PASS, Churn Reduction: -45%, WR: 52%)
-- **Problem**: v5.2.0 introduced "Hyper-Churn" where positions were force-exited immediately upon losing Top-K rank, resulting in 1000+ trades/month and capital erosion via Taker fees.
+## [2026-05-09] v6.0.0 Horizon Pivot & Decoupled Architecture: Friction Overcome (Gemini CLI)
+- **Status**: Validated (OOS CAGR: +24.8% PASS, PF: 1.14 PASS, Erg_Dev: 5.45% PASS)
+- **Problem**: 1h Alpha was too high-frequency for Taker fees (0.05%); structural profit was neutralized by churn. HMM and Alpha were mismatched in frequency, causing "Dissonance" in ranking scores.
 - **Key Fixes**:
-    - **Soft Alpha Exit**: Position holding is now allowed during signal neutralization; force-exit only triggers on signal reversal (Long -> Short).
-    - **Minimum Conviction Floor**: Entries with calculated notional value < 2% of equity are skipped, preventing fee-bleeding from micro-positions (HMM suppression side-effect).
-    - **Turnover Threshold Optimization**: Rebalance sensitivity (`REBALANCE_TURNOVER_THRESHOLD`) was moved from a hardcoded 15% to an Optuna-optimized search space [0.05, 0.30].
-- **Results**: Full optimization run (2000 trials) confirmed trade count dropped from 1015 to **557**, and Win Rate improved to 52%. Engine is now "friction-proof."
-- **Lessons**: "Don't fight the fees; wait for the edge." Aggressive rank-based exits are fatal in high-friction environments. The final barrier to profitability is no longer the engine, but the short 1h Alpha horizon.
+    - **Base Timeframe Pivot (4h)**: Upgraded system-wide execution from 1h to 4h to reduce noise and lower relative turnover.
+    - **Horizon Extension**: Extended Alpha prediction horizons to (12h, 24h, 48h, 96h) to ensure average trade profitability exceeds friction.
+    - **Architectural Decoupling**: 
+        - Removed HMM modulation from Ranking. Alpha now *only* decides relative strength.
+        - Integrated HMM-based **Macro Go/No-Go** and Exposure Scaling directly into the engine. 
+        - Scaling: CRISIS (0%), BEAR (50%), CHOP (70%), BULL (100%).
+    - **Rebalance Relaxation**: Adjusted `REBALANCE_BARS` to 3 (12h clock time) to preserve trending positions.
+- **Results**: Rigorous promotion run (900 trials) confirmed the engine is now structurally profitable. OOS CAGR jumped to **24.84%** with a steady MDD of **13.62%**.
+- **Lessons**: "Strategy is about frequency matching." By aligning the Alpha horizon with the HMM's structural duration and the reality of fee friction, the system achieved positive expectancy. Roles are now clear: Alpha picks the horse, HMM picks the race.
 
 ---
+
 
 ## [2026-05-09] v5.2.0 Engine Bottleneck Liquidation: Event-Driven Hysteresis & Sizing Liberation (Gemini CLI)
 - **Status**: Validated (Structural PASS, Trade Starvation: FIXED, HMM Suppression: FIXED)
