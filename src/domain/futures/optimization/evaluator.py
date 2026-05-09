@@ -277,6 +277,46 @@ def calc_gate1_dsr_from_path_log_tw(
     dsr_val = float(0.5 * (1.0 + math.erf(z_dsr / math.sqrt(2.0))))
     return float(min(0.99, max(0.0, dsr_val)))
 
+
+def compute_plgd_score(
+    leg_log_tw: np.ndarray,
+    total_trials: int,
+    lambda_def: float = 0.5,
+    lambda_tail: float = 2.0,
+) -> float:
+    """Compute Probabilistic Log Growth Deflation (PLGD) score for AWF legs.
+    
+    Formula: PLGD = g - Deflation - Worst_Leg_Penalty
+    g = mu - 0.5 * sigma^2 (Log-Wealth growth rate)
+    Deflation = lambda * sigma * sqrt(2 * ln(N) / T)
+    Worst_Leg_Penalty = lambda_tail * sum(abs(min(0, leg_i)))
+    """
+    arr = np.asarray(leg_log_tw, dtype=np.float64)
+    t_legs = float(max(arr.size, 1))
+    if arr.size < 2:
+        return float(np.mean(arr)) if arr.size == 1 else -10.0
+
+    mu = float(np.mean(arr))
+    sigma = float(np.std(arr, ddof=1))
+    
+    # 1. Log-Wealth Growth Rate (g)
+    g = mu - 0.5 * (sigma**2)
+    
+    # 2. Deflation Factor (Multiple Testing Bias)
+    # sr_bench corresponds to sqrt(2 * ln(N))
+    sr_bench = math.sqrt(2.0 * math.log(max(float(total_trials), 2.0)))
+    deflation = lambda_def * sigma * sr_bench / math.sqrt(t_legs)
+    
+    # 3. Worst Leg Penalty (Survivability)
+    # Penalize legs with negative log-growth (terminal wealth < 1.0)
+    neg_legs = arr[arr < 0.0]
+    worst_leg_penalty = lambda_tail * float(np.sum(np.abs(neg_legs)))
+    
+    # 4. Final PLGD Score
+    plgd = g - deflation - worst_leg_penalty
+    
+    return float(plgd)
+
 def calc_time_to_target_wealth(
     path_log_returns: np.ndarray,
     target_multiplier: float,
