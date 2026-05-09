@@ -440,8 +440,18 @@ def run_oos_margin_shared_portfolio(
         avg_abs_pnl = float(trades_df["pnl"].abs().mean())
         rt_cost = TRADING_FEE_RATE * 2.0 + SLIPPAGE_RATE * 2.0
         ev_ratio = avg_net_pnl / max(avg_abs_pnl * rt_cost, 1e-9)
+
+        long_df = trades_df[trades_df["side"] == "LONG"]
+        short_df = trades_df[trades_df["side"] == "SHORT"]
+        long_gains = float(long_df[long_df["pnl"] > 0]["pnl"].sum())
+        long_losses = float(abs(long_df[long_df["pnl"] < 0]["pnl"].sum()))
+        short_gains = float(short_df[short_df["pnl"] > 0]["pnl"].sum())
+        short_losses = float(abs(short_df[short_df["pnl"] < 0]["pnl"].sum()))
+        long_pf = long_gains / max(long_losses, 1e-9) if long_losses > 0 else (1.5 if long_gains > 0 else 1.0)
+        short_pf = short_gains / max(short_losses, 1e-9) if short_losses > 0 else (1.5 if short_gains > 0 else 1.0)
     else:
         pf_val, wr, lt, st, minority_pct, ev_ratio = 1.0, 0.0, 0, 0, 0.0, 0.0
+        long_pf, short_pf = 1.0, 1.0
 
     out = {
         "cagr_pct": cagr, "mdd_pct": mdd, "profit_factor": pf_val, "total_trades": len(trades_df),
@@ -451,6 +461,10 @@ def run_oos_margin_shared_portfolio(
         "calmar_ratio": cagr / abs(mdd) if abs(mdd) > 1e-6 else 0.0,
         "ulcer_index": ulcer, "ev_cost_ratio": ev_ratio,
         "avg_trade_pnl_pct": float(trades_df["pnl"].mean() / max(FUTURES_INITIAL_BALANCE, 1.0) * 100.0) if not trades_df.empty else 0.0,
+        "long_pf": float(long_pf),
+        "short_pf": float(short_pf),
+        "long_profit_factor": float(long_pf),
+        "short_profit_factor": float(short_pf),
         "trades_df": trades_df,
     }
     if return_signal_dfs:
