@@ -68,42 +68,41 @@ class MLAlphaMiner:
     ) -> np.ndarray:
         """Convert continuous rank targets [-1, 1] into discrete LambdaRank labels {0, 1, 2, 3}.
         
-        Institutional Friction-Aware Logic:
-        - Incorporates friction hurdle to prevent learning noise from small movements.
-        - Labels are assigned based on both relative rank (target) and absolute magnitude.
+        v6.4.0 Symmetric Hybrid Labeling:
+        - Labels both Long and Short opportunities to provide a clear gradient.
+        - Uses friction hurdle to filter out churn.
         """
-        labels = np.zeros(len(target), dtype=np.int32)
+        # Default to Label 1 (Chop)
+        labels = np.ones(len(target), dtype=np.int32)
         
         # Calculate friction threshold in decimal (e.g. 3.5 bps = 0.00035)
         friction = friction_bps / 10000.0
         
-        # If raw_returns not provided, fallback to simple ranking (v5 legacy)
-        if raw_returns is None:
-            labels[target > 0.85] = 3
-            labels[(target > 0.7) & (target <= 0.85)] = 2
-            labels[(target > 0.4) & (target <= 0.7)] = 1
-        else:
-            # Plan B: Nonlinear Magnitude Amplification + Friction Hurdle
-            # Assuming target is rank-scaled [-1, 1] -> [0, 1] by ((target/2)+0.5)
-            # Actually mine_alphas_cs passes work_df["target"] which is [-1, 1]
-            t = (target / 2.0) + 0.5  # Scale to [0, 1]
-            
-            abs_ret = raw_returns.abs()
-            
-            # Label 3: Super Winners (Top 25% of ranks AND > 3x friction)
-            labels[(t > 0.75) & (abs_ret > 3.0 * friction)] = 3
-            # Label 2: Winners (Top 50% of ranks AND > 2x friction)
-            labels[(labels == 0) & (t > 0.50) & (abs_ret > 2.0 * friction)] = 2
-            # Label 1: Mild (Top 75% of ranks AND > 1.5x friction)
-            labels[(labels == 0) & (t > 0.25) & (abs_ret > 1.5 * friction)] = 1
+        # Scale rank-target [-1, 1] to [0, 1]
+        t = (target / 2.0) + 0.5
         
-        # C: Dynamic Target Thresholding
-        # Suppress labels in quiet regimes (low dispersion) to avoid learning noise.
+        if raw_returns is None:
+            # Fallback symmetric ranking logic
+            labels[t > 0.85] = 3
+            labels[t < 0.15] = 0
+            labels[(t > 0.60) & (labels != 3)] = 2
+        else:
+            # Label 3: Strong Long (Top ranks AND > 2x friction)
+            labels[(t > 0.85) & (raw_returns > 2.0 * friction)] = 3
+            
+            # Label 0: Strong Short (Bottom ranks AND < -2x friction)
+            labels[(t < 0.15) & (raw_returns < -2.0 * friction)] = 0
+            
+            # Label 2: Mild Long (Above median ranks AND > 1x friction)
+            labels[(labels == 1) & (t > 0.60) & (raw_returns > 1.0 * friction)] = 2
+            
+            # Label 1: Default/Chop (All others)
+        
+        # Suppress labels in quiet regimes (low dispersion) to avoid learning noise
         if dispersion is not None:
-            # Use 20th percentile as quiet threshold if not fixed
             threshold = dispersion.quantile(0.20)
             disp_mask = dispersion < threshold
-            labels[disp_mask.to_numpy()] = 0
+            labels[disp_mask.to_numpy()] = 1  # Reset to Chop
             
         return labels
 
