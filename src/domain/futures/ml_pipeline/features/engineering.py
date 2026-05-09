@@ -10,7 +10,7 @@ from numba import njit
 
 # Columns produced by build_gp_input_features (for CS-rank / imputation in pipeline).
 # Systemic HMM: TVTP uses macro_trend_168h (0) + microstructure (4–8). Return-path emissions (9): level.
-# Reduced to 10 features for v4.0.0 Pragmatic Architecture.
+# Reduced to 11 features for Tiered Universe Architecture.
 SYSTEMIC_HMM_FEATURE_COLUMNS: tuple[str, ...] = (
     "macro_trend_168h",
     "macro_trend_24h",
@@ -22,6 +22,7 @@ SYSTEMIC_HMM_FEATURE_COLUMNS: tuple[str, ...] = (
     "macro_liq_proxy_24h",
     "macro_lsr_delta_24h",
     "macro_ret_1h",
+    "macro_breadth_168h",
 )
 
 # Posterior columns aligned to stable semantic labels (order for MetaLabeler).
@@ -727,7 +728,11 @@ def build_hmm_input_features(df: pd.DataFrame) -> pd.DataFrame:
 def build_systemic_hmm_features(
     panel_df: pd.DataFrame, alpha_panel: pd.DataFrame | None = None, tf: str = "1h"
 ) -> pd.DataFrame:
-    """Build systemic macro features for HMM (Decoupling Spec v15 + causal return channels).
+    """Build systemic macro features for HMM (Tiered Universe Architecture).
+
+    Tier 1: Macro Trend/Vol/Funding (Anchor Symbols: BTC, ETH)
+    Tier 2: Cross-Sectional Dynamics (Index Symbols: Top 10)
+    Tier 3: Dynamic Universe (Filtered out to avoid noise)
 
     Args:
         panel_df: Input panel dataframe.
@@ -738,6 +743,8 @@ def build_systemic_hmm_features(
         Dataframe indexed by datetime with SYSTEMIC_HMM_FEATURE_COLUMNS.
 
     """
+    from config.opt_config import FUTURES_ANCHOR_SYMBOLS, FUTURES_MACRO_INDEX_SYMBOLS
+
     _ = alpha_panel
 
     if panel_df.empty:
@@ -745,145 +752,96 @@ def build_systemic_hmm_features(
 
     idx = panel_df.index.get_level_values("datetime").unique().sort_values()
     syms = panel_df.index.get_level_values("symbol").unique()
-    btc_sym = next((s for s in syms if "BTC" in s), None)
+    
+    # Tier 1 Selection (Anchors)
+    available_anchors = [s for s in FUTURES_ANCHOR_SYMBOLS if s in syms]
+    tier1_sym = available_anchors[0] if available_anchors else next((s for s in syms if "BTC" in s), None)
+
+    # Tier 2 Selection (Macro Index)
+    available_indices = [s for s in FUTURES_MACRO_INDEX_SYMBOLS if s in syms]
+    tier2_syms = available_indices if available_indices else list(syms)
 
     out = pd.DataFrame(index=idx)
+    w24 = _get_window(24, tf)
+    w168 = _get_window(168, tf)
     
-    if btc_sym:
-        btc_df = panel_df.xs(btc_sym, level="symbol")
-        btc_close = btc_df["close"].astype(np.float64)
-        btc_high = btc_df["high"].astype(np.float64)
-        btc_low = btc_df["low"].astype(np.float64)
-        btc_open = btc_df["open"].astype(np.float64) if "open" in btc_df.columns else btc_close.shift(1).fillna(btc_close)
-        btc_vol = btc_df["volume"].astype(np.float64)
-
-        w24 = _get_window(24, tf)
-        w168 = _get_window(168, tf)
+    if tier1_sym:
+        t1_df = panel_df.xs(tier1_sym, level="symbol")
+        t1_close = t1_df["close"].astype(np.float64)
+        t1_high = t1_df["high"].astype(np.float64)
+        t1_low = t1_df["low"].astype(np.float64)
+        t1_open = t1_df["open"].astype(np.float64) if "open" in t1_df.columns else t1_close.shift(1).fillna(t1_close)
+        t1_vol = t1_df["volume"].astype(np.float64)
 
         # 1. macro_trend_168h & macro_trend_24h
-        out["macro_trend_168h"] = np.log(btc_close / btc_close.shift(w168).clip(lower=1e-12))
-        out["macro_trend_24h"] = np.log(btc_close / btc_close.shift(w24).clip(lower=1e-12))
+        out["macro_trend_168h"] = np.log(t1_close / t1_close.shift(w168).clip(lower=1e-12))
+        out["macro_trend_24h"] = np.log(t1_close / t1_close.shift(w24).clip(lower=1e-12))
 
-        btc_log_ret_1h = np.log(btc_close / btc_close.shift(1).clip(lower=1e-12)).fillna(0.0)
-        out["macro_ret_1h"] = _macro_risk_adj_ret_1h(btc_close, w24)
+        t1_log_ret_1h = np.log(t1_close / t1_close.shift(1).clip(lower=1e-12)).fillna(0.0)
+        out["macro_ret_1h"] = _macro_risk_adj_ret_1h(t1_close, w24)
 
         # 2. macro_vol_24h (Yang-Zhang)
-        out["macro_vol_24h"] = _yang_zhang_vol_24(btc_open, btc_high, btc_low, btc_close, w24)
+        out["macro_vol_24h"] = _yang_zhang_vol_24(t1_open, t1_high, t1_low, t1_close, w24)
 
-        # 3. macro_liq_24h (Volume Momentum)
-        vma_24 = btc_vol.rolling(w24).mean()
-        vma_168 = btc_vol.rolling(w168).mean()
-        out["macro_liq_24h"] = (vma_24 / (vma_168 + 1e-12)) - 1.0
-
-        # 4. macro_funding_mom_24h (Funding Momentum)
-        if "funding_rate" in btc_df.columns:
-            fr = btc_df["funding_rate"].astype(np.float64).ffill().fillna(0.0)
+        # 4. macro_funding_mom_24h
+        if "funding_rate" in t1_df.columns:
+            fr = t1_df["funding_rate"].astype(np.float64).ffill().fillna(0.0)
             out["macro_funding_mom_24h"] = fr.diff(w24).fillna(0.0)
         else:
             out["macro_funding_mom_24h"] = 0.0
 
-        # 5. macro_downside_vol_24h (Semi-Vol: downside only) [T1-B]
-        neg_ret = btc_log_ret_1h.where(btc_log_ret_1h < 0, 0.0)
+        # 5. macro_downside_vol_24h
+        neg_ret = t1_log_ret_1h.where(t1_log_ret_1h < 0, 0.0)
         out["macro_downside_vol_24h"] = neg_ret.rolling(
             w24, min_periods=max(5, w24 // 4)
         ).std().fillna(0.0)
 
-        # 6. macro_oi_delta_24h: BTC OI 24h % change (sign-preserved momentum) [P2-C]
-        if "sum_open_interest" in btc_df.columns:
-            oi = btc_df["sum_open_interest"].astype(np.float64).replace(0, np.nan).ffill().fillna(0.0)
+        # 6. macro_oi_delta_24h
+        if "sum_open_interest" in t1_df.columns:
+            oi = t1_df["sum_open_interest"].astype(np.float64).replace(0, np.nan).ffill().fillna(0.0)
             oi_chg = oi.pct_change(w24).fillna(0.0)
             out["macro_oi_delta_24h"] = oi_chg.clip(-1.0, 1.0)
         else:
             out["macro_oi_delta_24h"] = 0.0
 
-        # 7. macro_liq_proxy_24h: volume surge ratio during negative-return bars [P2-C]
-        neg_vol = btc_vol.where(btc_log_ret_1h < 0, 0.0)
+        # 7. macro_liq_proxy_24h
+        neg_vol = t1_vol.where(t1_log_ret_1h < 0, 0.0)
         neg_vol_ma = neg_vol.rolling(w24, min_periods=max(5, w24 // 4)).mean()
-        total_vol_ma = btc_vol.rolling(w24, min_periods=max(5, w24 // 4)).mean()
+        total_vol_ma = t1_vol.rolling(w24, min_periods=max(5, w24 // 4)).mean()
         out["macro_liq_proxy_24h"] = (neg_vol_ma / (total_vol_ma + 1e-12)).fillna(0.5)
 
-        # 8. macro_lsr_delta_24h: Long-Short Ratio 24h % change
-        if "long_short_ratio" in btc_df.columns:
-            lsr = btc_df["long_short_ratio"].astype(np.float64).ffill().fillna(1.0)
+        # 8. macro_lsr_delta_24h
+        if "long_short_ratio" in t1_df.columns:
+            lsr = t1_df["long_short_ratio"].astype(np.float64).ffill().fillna(1.0)
             out["macro_lsr_delta_24h"] = lsr.pct_change(w24).fillna(0.0)
         else:
             out["macro_lsr_delta_24h"] = 0.0
-
     else:
-        # Fallback to market average if BTC not present
-        m_close = panel_df["close"].groupby(level="datetime").mean()
-        m_vol = panel_df["volume"].groupby(level="datetime").mean()
-        w24 = _get_window(24, tf)
-        w168 = _get_window(168, tf)
+        # Extreme fallback
+        for col in ["macro_trend_168h", "macro_trend_24h", "macro_ret_1h", "macro_vol_24h", "macro_funding_mom_24h", "macro_downside_vol_24h", "macro_oi_delta_24h", "macro_liq_proxy_24h", "macro_lsr_delta_24h"]:
+            out[col] = 0.0
 
-        out["macro_trend_168h"] = np.log(m_close / m_close.shift(w168).clip(lower=1e-12))
-        out["macro_trend_24h"] = np.log(m_close / m_close.shift(w24).clip(lower=1e-12))
-        out["macro_vol_24h"] = m_close.rolling(w24).std() / (m_close + 1e-12)  # Proxy
-        out["macro_liq_24h"] = (m_vol.rolling(w24).mean() / (m_vol.rolling(w168).mean() + 1e-12)) - 1.0
-
-        out["macro_ret_1h"] = _macro_risk_adj_ret_1h(m_close, w24).reindex(idx).fillna(0.0)
-
-        m_log_ret = np.log(m_close / m_close.shift(1).clip(lower=1e-12)).fillna(0.0)
-
-        # 4. macro_funding_mom_24h fallback
-        if "funding_rate" in panel_df.columns:
-            m_fr = panel_df["funding_rate"].groupby(level="datetime").mean().ffill().fillna(0.0)
-            out["macro_funding_mom_24h"] = m_fr.diff(w24).fillna(0.0)
-        else:
-            out["macro_funding_mom_24h"] = 0.0
-
-        # 5. macro_downside_vol_24h fallback [T1-B]
-        neg_ret_m = m_log_ret.where(m_log_ret < 0, 0.0)
-        out["macro_downside_vol_24h"] = neg_ret_m.rolling(
-            w24, min_periods=max(5, w24 // 4)
-        ).std().fillna(0.0)
-
-        # 6. macro_oi_delta_24h: OI momentum fallback [P2-C]
-        if "sum_open_interest" in panel_df.columns:
-            oi_panel = panel_df["sum_open_interest"].groupby(level="datetime").mean()
-            oi_panel = oi_panel.replace(0, np.nan).ffill().fillna(0.0)
-            oi_chg = oi_panel.pct_change(w24).fillna(0.0)
-            out["macro_oi_delta_24h"] = oi_chg.clip(-1.0, 1.0).reindex(idx).fillna(0.0)
-        else:
-            out["macro_oi_delta_24h"] = 0.0
-
-        # 7. macro_liq_proxy_24h: liquidation cascade proxy fallback [P2-C]
-        m_neg_vol = m_vol.where(m_log_ret < 0, 0.0)
-        m_neg_vol_ma = m_neg_vol.rolling(w24, min_periods=max(5, w24 // 4)).mean()
-        m_total_vol_ma = m_vol.rolling(w24, min_periods=max(5, w24 // 4)).mean()
-        out["macro_liq_proxy_24h"] = (
-            (m_neg_vol_ma / (m_total_vol_ma + 1e-12)).fillna(0.5).reindex(idx).fillna(0.5)
-        )
-
-        # 8. macro_lsr_delta_24h fallback
-        if "long_short_ratio" in panel_df.columns:
-            m_lsr = panel_df["long_short_ratio"].groupby(level="datetime").mean().ffill().fillna(1.0)
-            out["macro_lsr_delta_24h"] = m_lsr.pct_change(w24).fillna(0.0).reindex(idx).fillna(0.0)
-        else:
-            out["macro_lsr_delta_24h"] = 0.0
-
-    # 8. macro_cs_dispersion_24h: cross-sectional 1h log-return std [T1-D]
-    if not panel_df.empty and isinstance(panel_df.index, pd.MultiIndex):
-        close_panel = panel_df["close"].unstack(level="symbol")
-        cs_log_ret = np.log(close_panel / close_panel.shift(1).clip(lower=1e-12))
-        w24_bars = _get_window(24, tf)
+    # Tier 2 Features: Cross-Sectional Dynamics
+    panel_t2 = panel_df[panel_df.index.get_level_values("symbol").isin(tier2_syms)]
+    
+    if not panel_t2.empty:
+        close_panel_t2 = panel_t2["close"].unstack(level="symbol")
+        
+        # 9. macro_cs_dispersion_24h
+        cs_log_ret = np.log(close_panel_t2 / close_panel_t2.shift(1).clip(lower=1e-12))
         cs_disp = (
-            cs_log_ret.rolling(w24_bars, min_periods=max(2, w24_bars // 4))
+            cs_log_ret.rolling(w24, min_periods=max(2, w24 // 4))
             .std(ddof=0)
             .mean(axis=1)
         )
         out["macro_cs_dispersion_24h"] = cs_disp.reindex(idx).fillna(0.0)
-    else:
-        out["macro_cs_dispersion_24h"] = 0.0
 
-    # 7. macro_breadth_168h: fraction of symbols above their 168h MA [T1-D]
-    if not panel_df.empty and isinstance(panel_df.index, pd.MultiIndex):
-        close_panel_b = panel_df["close"].unstack(level="symbol")
-        w168_bars = _get_window(168, tf)
-        ma_168 = close_panel_b.rolling(w168_bars, min_periods=max(20, w168_bars // 4)).mean()
-        breadth = (close_panel_b > ma_168).mean(axis=1)
+        # 10. macro_breadth_168h
+        ma_168_t2 = close_panel_t2.rolling(w168, min_periods=max(20, w168 // 4)).mean()
+        breadth = (close_panel_t2 > ma_168_t2).mean(axis=1)
         out["macro_breadth_168h"] = breadth.reindex(idx).fillna(0.5)
     else:
+        out["macro_cs_dispersion_24h"] = 0.0
         out["macro_breadth_168h"] = 0.5
 
     # Mixed normalization [T1-A]:
@@ -901,9 +859,8 @@ def build_systemic_hmm_features(
         rs = RobustScaler()
         out[vol_feat_cols] = rs.fit_transform(vol_data_log)
 
-    other_cols = [c for c in SYSTEMIC_HMM_FEATURE_COLUMNS if c not in vol_feat_cols]
+    other_cols = [c for c in SYSTEMIC_HMM_FEATURE_COLUMNS if c not in vol_feat_cols and c in out.columns]
     if other_cols:
-        # Robustly handle NaNs and Infs before QuantileTransformer
         clean_other = out[other_cols].replace([np.inf, -np.inf], np.nan).fillna(0.0)
         qt = QuantileTransformer(
             output_distribution="normal",

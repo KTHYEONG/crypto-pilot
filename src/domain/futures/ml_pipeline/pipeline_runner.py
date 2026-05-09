@@ -624,7 +624,7 @@ def _step4_fusion_one_symbol(
 
         if sym not in valid_alpha_set:
             wide_1h = df_1h.copy()
-            wide_1h["ml_alpha_00"] = 0.0
+            wide_1h["ml_alpha_00"] = 0.5
             # [REFACTORED] Merge asymmetric modulators
             wide_1h = pd.merge(wide_1h, hmm_modulator, on="datetime", how="left")
             if "hmm_modulator_long" not in wide_1h.columns:
@@ -658,9 +658,9 @@ def _step4_fusion_one_symbol(
                     "[%s] ml_alpha_00 missing in sym_alpha. cols=%s",
                     sym, list(sym_alpha.columns)
                 )
-                sym_alpha["ml_alpha_00"] = 0.0
+                sym_alpha["ml_alpha_00"] = 0.5
 
-            wide_1h = pd.merge(df_1h, sym_alpha, on="datetime", how="left").fillna(0.0)
+            wide_1h = pd.merge(df_1h, sym_alpha, on="datetime", how="left").fillna(0.5)
 
             # [REFACTORED] Merge asymmetric modulators
             wide_1h = pd.merge(wide_1h, hmm_modulator, on="datetime", how="left")
@@ -693,6 +693,20 @@ def _step4_fusion_one_symbol(
 
         df_tf_full = data_maps[sym][tf].copy()
         df_tf_full["datetime"] = pd.to_datetime(df_tf_full["datetime"], utc=True)
+
+        # [FIX] Clear existing columns to prevent merge collision (_x, _y)
+        ml_reserved = [
+            "ml_alpha_00", "hmm_modulator_long", "hmm_modulator_short",
+            "slot_rank_score", "xs_score_long", "xs_score_short",
+            "ml_calib_prob", "ml_calib_prob_long", "ml_calib_prob_short",
+            "hmm_prob_bull_trend", "hmm_prob_bear_trend", "hmm_prob_chop", "hmm_prob_crisis"
+        ]
+        hmm_to_drop = [c for c in df_tf_full.columns if str(c).startswith("hmm_")]
+        drop_exist = list(set(ml_reserved + hmm_to_drop))
+        drop_exist = [c for c in drop_exist if c in df_tf_full.columns]
+        if drop_exist:
+            df_tf_full = df_tf_full.drop(columns=drop_exist)
+
         aligned_tf = pd.merge(df_tf_full, wide_1h, on="datetime", how="left").fillna(0.0)
 
         _apply_ml_calib_probs(
@@ -778,8 +792,13 @@ def _print_hmm_summary(
                 g_log = mu - 0.5 * (sig**2 / 100.0)
             
             verdict = "CHOP"
-            if g_log > 0.05: verdict = "BULL"
-            if g_log < -0.10: verdict = "CRISIS"
+            if g_log > 0.015:
+                verdict = "BULL"
+            elif g_log < -0.04:
+                verdict = "CRISIS"
+            elif g_log < -0.01:
+                verdict = "BEAR"
+            
             if st_name == "CRISIS": report["hmm_crisis_g_log"] = g_log
             if st_name == "BULL_TREND": report["hmm_bull_g_log"] = g_log
 
@@ -921,6 +940,11 @@ def merge_ml_output_into_data_maps(
             original_df = original_df.drop(columns=is_cols_to_drop)
         merged = pd.merge(original_df, ml_features, on="datetime", how="left")
         merged = merged.sort_values("datetime")
+        
+        # Ensure ml_alpha_00 exists to prevent errors later
+        if "ml_alpha_00" not in merged.columns:
+            merged["ml_alpha_00"] = 0.5
+            
         if "ml_alpha_00" in merged.columns:
             nan_pct = float(merged["ml_alpha_00"].isna().mean() * 100.0)
             _logger.debug(
@@ -930,6 +954,9 @@ def merge_ml_output_into_data_maps(
                 tf,
                 nan_pct,
             )
+            # Impute neutral alpha where missing
+            merged["ml_alpha_00"] = merged["ml_alpha_00"].fillna(0.5)
+            
         maps[sym][tf] = merged.fillna(0.0)
 
 
