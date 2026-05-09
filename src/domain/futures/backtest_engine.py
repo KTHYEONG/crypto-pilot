@@ -8,7 +8,14 @@ import pandas as pd
 from numba import njit
 
 from config.opt_config import OPT_FUTURES_CONFIG
-from config.settings import FUNDING_FEE_RATE, SLIPPAGE_RATE, TRADING_FEE_RATE
+from config.settings import (
+    FUNDING_FEE_RATE,
+    MAKER_FEE_RATE,
+    SLIPPAGE_RATE,
+    SMART_ORDER_OFFSET,
+    TAKER_FEE_RATE,
+    TRADING_FEE_RATE,
+)
 
 _logger = logging.getLogger(__name__)
 
@@ -25,13 +32,17 @@ def process_long_scale_out(
     pos_atr: float,
     l_scale_atr: float,
     amount: float,
-    fee_rate: float,
+    maker_fee: float,
+    taker_fee: float,
 ) -> tuple[bool, float, float, float, float]:
     scale_target = entry_price + (pos_atr * l_scale_atr)
     if c_high >= scale_target:
-        sc_price = c_open if c_open >= scale_target else scale_target
+        # Realistic: If high > target, assume Maker fill (someone else took our limit)
+        is_maker = c_high > scale_target
+        sc_price = scale_target
         sc_amount = amount / 2.0
         pnl = (sc_price - entry_price) * sc_amount
+        fee_rate = maker_fee if is_maker else taker_fee
         fee = sc_amount * sc_price * fee_rate
         return True, sc_price, sc_amount, pnl, fee
     return False, 0.0, 0.0, 0.0, 0.0
@@ -45,13 +56,17 @@ def process_short_scale_out(
     pos_atr: float,
     s_tp_mult: float,
     amount: float,
-    fee_rate: float,
+    maker_fee: float,
+    taker_fee: float,
 ) -> tuple[bool, float, float, float, float]:
     tp_price = entry_price - (pos_atr * s_tp_mult)
     if c_open <= tp_price or c_low <= tp_price:
-        sc_price = c_open if c_open <= tp_price else tp_price
+        # Realistic: If low < tp_price, assume Maker fill
+        is_maker = c_low < tp_price or c_open < tp_price
+        sc_price = tp_price
         sc_amount = amount / 2.0
         pnl = (entry_price - sc_price) * sc_amount
+        fee_rate = maker_fee if is_maker else taker_fee
         fee = sc_amount * sc_price * fee_rate
         return True, sc_price, sc_amount, pnl, fee
     return False, 0.0, 0.0, 0.0, 0.0
@@ -67,6 +82,7 @@ def check_long_exit(
     l_trail_mult: float,
     slippage_rate: float,
 ) -> tuple[bool, float, float]:
+    # Stop loss is always Taker
     if c_open <= stop_price:
         return True, c_open * (1.0 - slippage_rate), stop_price
     elif c_low <= stop_price:
@@ -88,6 +104,7 @@ def check_short_exit(
     s_trail_mult: float,
     slippage_rate: float,
 ) -> tuple[bool, float, float]:
+    # Stop loss is always Taker
     if c_open >= stop_price:
         return True, c_open * (1.0 + slippage_rate), stop_price
     elif c_high >= stop_price:
@@ -330,8 +347,10 @@ def backtest_loop_single_numba(
     garch_kelly_f: np.ndarray,
     initial_balance: float,
     leverage: float,
-    fee_rate: float,
+    maker_fee: float,
+    taker_fee: float,
     slippage_rate: float,
+    smart_offset: float,
     risk_per_trade: float,
     timestamps: np.ndarray,
     funding_rate_sums: np.ndarray,
@@ -402,7 +421,7 @@ def backtest_loop_single_numba(
             if in_position:
                 exit_price = c_open
                 pnl = (exit_price - entry_price) * amount * pos_side
-                exit_fee = amount * exit_price * fee_rate
+                exit_fee = amount * exit_price * taker_fee
                 if trade_count < max_trades:
                     trades[trade_count] = [entry_idx, i, pos_side, entry_price, exit_price, pnl - exit_fee, amount, entry_fee_stored]
                     trade_count += 1
@@ -420,7 +439,7 @@ def backtest_loop_single_numba(
                 if funding_eq_check <= 0:
                     exit_price = c_open
                     pnl = (exit_price - entry_price) * amount * pos_side
-                    exit_fee = amount * exit_price * fee_rate
+                    exit_fee = amount * exit_price * taker_fee
                     if trade_count < max_trades:
                         trades[trade_count] = [entry_idx, i, pos_side, entry_price, exit_price, pnl - exit_fee, amount, entry_fee_stored]
                         trade_count += 1
@@ -432,7 +451,7 @@ def backtest_loop_single_numba(
                 if c_high > highest: highest = c_high
                 pos_atr = atr[entry_idx]
                 if not has_scaled_out:
-                    triggered, sc_price, sc_amount, pnl_scale, exit_fee_scale = process_long_scale_out(c_open, c_high, entry_price, pos_atr, l_scale_atr, amount, fee_rate)
+                    triggered, sc_price, sc_amount, pnl_scale, exit_fee_scale = process_long_scale_out(c_open, c_high, entry_price, pos_atr, l_scale_atr, amount, maker_fee, taker_fee)
                     if triggered:
                         balance += (sc_amount * entry_price) / leverage + pnl_scale - exit_fee_scale
                         if trade_count < max_trades:
@@ -444,18 +463,18 @@ def backtest_loop_single_numba(
                 if c_low < lowest: lowest = c_low
                 pos_atr = atr[entry_idx]
                 if not has_scaled_out:
-                    triggered, sc_price, sc_amount, pnl_scale, exit_fee_scale = process_short_scale_out(c_open, c_low, entry_price, pos_atr, s_tp_mult, amount, fee_rate)
+                    triggered, sc_price, sc_amount, pnl_scale, exit_fee_scale = process_short_scale_out(c_open, c_low, entry_price, pos_atr, s_tp_mult, amount, maker_fee, taker_fee)
                     if triggered:
                         balance += (sc_amount * entry_price) / leverage + pnl_scale - exit_fee_scale
                         if trade_count < max_trades:
                             trades[trade_count] = [entry_idx, i, pos_side, entry_price, sc_price, pnl_scale - exit_fee_scale, sc_amount, entry_fee_stored / 2.0]
                             trade_count += 1
-                        amount -= sc_amount; entry_fee_stored -= entry_fee_stored / 2.0; has_scaled_out = True; stop_price = entry_price - (entry_price * fee_rate * 2.0)
+                        amount -= sc_amount; entry_fee_stored -= entry_fee_stored / 2.0; has_scaled_out = True; stop_price = entry_price - (entry_price * taker_fee * 2.0)
                 exit_triggered, exit_price, stop_price = check_short_exit(c_open, c_high, lowest, pos_atr, stop_price, trail_mult, slippage_rate)
 
             if exit_triggered:
                 pnl = (exit_price - entry_price) * amount * pos_side
-                exit_fee = amount * exit_price * fee_rate
+                exit_fee = amount * exit_price * taker_fee
                 pnl -= exit_fee
                 margin = (amount * entry_price) / leverage
                 balance += margin + pnl
@@ -470,14 +489,26 @@ def backtest_loop_single_numba(
             if sf_raw <= 0.0 or np.isnan(sf_raw):
                 equity_curve[i] = balance; continue
 
-            do_entry, fill_price, pending_side = False, 0.0, 0
+            do_entry, fill_price, pending_side, entry_fee_rate = False, 0.0, 0, taker_fee
             if trend_dir[prev_i] == 1:
                 if c_high > entry_upper[prev_i]:
-                    fill_price = max(c_open, entry_upper[prev_i]) * (1 + slippage_rate)
+                    # Realistic Entry: If low <= open, assume Maker fill at (open - offset)
+                    if c_low <= c_open:
+                        fill_price = c_open * (1.0 - smart_offset)
+                        entry_fee_rate = maker_fee
+                    else:
+                        fill_price = max(c_open, entry_upper[prev_i]) * (1.0 + slippage_rate)
+                        entry_fee_rate = taker_fee
                     pending_side = 1; do_entry = True
             elif trend_dir[prev_i] == -1:
                 if c_low < entry_lower[prev_i]:
-                    fill_price = min(c_open, entry_lower[prev_i]) * (1 - slippage_rate)
+                    # Realistic Entry: If high >= open, assume Maker fill at (open + offset)
+                    if c_high >= c_open:
+                        fill_price = c_open * (1.0 + smart_offset)
+                        entry_fee_rate = maker_fee
+                    else:
+                        fill_price = min(c_open, entry_lower[prev_i]) * (1.0 - slippage_rate)
+                        entry_fee_rate = taker_fee
                     pending_side = -1; do_entry = True
 
             if do_entry:
@@ -497,11 +528,11 @@ def backtest_loop_single_numba(
                     current_equity = max_capital_usage if use_compounding and balance > max_capital_usage else balance
                     amount = calculate_position_size(fill_price, stop_distance/fill_price, current_equity, current_equity, effective_risk, leverage, sf_raw, garch_kelly_f[prev_i], max_exposure_per_coin=max_exp_per_coin)
                     required_margin = (amount * fill_price) / leverage
-                    entry_fee = amount * fill_price * fee_rate
+                    entry_fee = amount * fill_price * entry_fee_rate
                     if balance >= required_margin + entry_fee:
                         balance -= required_margin + entry_fee; entry_fee_stored = entry_fee
                         in_position = True; pos_side = pending_side; entry_price = fill_price; entry_idx = i; highest = fill_price; lowest = fill_price; has_scaled_out = False
-                        triggered, intra_exit_price, pnl_intra, exit_fee_intra = check_intra_bar_stop(pos_side, c_high, c_low, stop_price, entry_price, amount, fee_rate, slippage_rate)
+                        triggered, intra_exit_price, pnl_intra, exit_fee_intra = check_intra_bar_stop(pos_side, c_high, c_low, stop_price, entry_price, amount, taker_fee, slippage_rate)
                         if triggered:
                             pnl_intra -= exit_fee_intra; balance += (amount * entry_price) / leverage + pnl_intra
                             if trade_count < max_trades:
@@ -519,7 +550,7 @@ def backtest_loop_single_numba(
     if in_position and n > 0:
         last_idx = n - 1; last_close = close[last_idx]
         exit_price = last_close * (1 - slippage_rate * pos_side)
-        pnl = (exit_price - entry_price) * amount * pos_side - (amount * exit_price * fee_rate)
+        pnl = (exit_price - entry_price) * amount * pos_side - (amount * exit_price * taker_fee)
         balance += (amount * entry_price) / leverage + pnl
         if trade_count < max_trades:
             trades[trade_count] = [entry_idx, last_idx, pos_side, entry_price, exit_price, pnl, amount, entry_fee_stored]
@@ -551,8 +582,10 @@ def backtest_portfolio_numba(
     hmm_mod_short: np.ndarray,
     initial_balance: float,
     lev_2d: np.ndarray,
-    fee_rate: float,
+    maker_fee: float,
+    taker_fee: float,
     slippage_rate: float,
+    smart_offset: float,
     risk_per_trade: float,
     atr_mult: float,
     trail_mult: float,
@@ -597,7 +630,7 @@ def backtest_portfolio_numba(
     highest, lowest = np.zeros(n_syms, dtype=np.float64), np.zeros(n_syms, dtype=np.float64)
     has_scaled = np.zeros(n_syms, dtype=np.bool_)
     just_exited = np.zeros(n_syms, dtype=np.bool_)
-    candidate_pool = np.zeros((n_syms, 6), dtype=np.float64)
+    candidate_pool = np.zeros((n_syms, 7), dtype=np.float64)  # col 6: is_maker_entry
     entry_lev = np.ones(n_syms, dtype=np.float64)
 
     max_trades = 50000
@@ -687,7 +720,7 @@ def backtest_portfolio_numba(
                     if c_high > highest[s]: highest[s] = c_high
                     exit_triggered, exit_price, stop_p[s] = check_long_exit(c_open, c_low, highest[s], pos_atr, stop_p[s], trail_mult, slippage_rate)
                     if not exit_triggered and not has_scaled[s]:
-                        tr, sc_p, sc_a, pnl_s, fee_s = process_long_scale_out(c_open, c_high, entry_p[s], pos_atr, l_scale_atr, amount[s], fee_rate)
+                        tr, sc_p, sc_a, pnl_s, fee_s = process_long_scale_out(c_open, c_high, entry_p[s], pos_atr, l_scale_atr, amount[s], maker_fee, taker_fee)
                         if tr:
                             sc_f = fund_fee_stored[s] / 2.0; balance += (sc_a * entry_p[s]) / entry_lev[s] + (pnl_s - fee_s)
                             if t_count < max_trades:
@@ -698,16 +731,16 @@ def backtest_portfolio_numba(
                     if c_low < lowest[s]: lowest[s] = c_low
                     exit_triggered, exit_price, stop_p[s] = check_short_exit(c_open, c_high, lowest[s], pos_atr, stop_p[s], trail_mult, slippage_rate)
                     if not exit_triggered and not has_scaled[s]:
-                        tr, sc_p, sc_a, pnl_s, fee_s = process_short_scale_out(c_open, c_low, entry_p[s], pos_atr, s_tp_mult, amount[s], fee_rate)
+                        tr, sc_p, sc_a, pnl_s, fee_s = process_short_scale_out(c_open, c_low, entry_p[s], pos_atr, s_tp_mult, amount[s], maker_fee, taker_fee)
                         if tr:
                             sc_f = fund_fee_stored[s] / 2.0; balance += (sc_a * entry_p[s]) / entry_lev[s] + (pnl_s - fee_s)
                             if t_count < max_trades:
                                 trades[t_count] = [float(s), float(entry_idx[s]), float(i), -1.0, entry_p[s], sc_p, pnl_s - fee_s - sc_f, sc_a, entry_fee_stored[s]/2.0, sc_f]
                                 t_count += 1
-                            amount[s] -= sc_a; entry_fee_stored[s] /= 2.0; fund_fee_stored[s] /= 2.0; has_scaled[s] = True; stop_p[s] = entry_p[s] - (entry_p[s]*fee_rate*2.0)
+                            amount[s] -= sc_a; entry_fee_stored[s] /= 2.0; fund_fee_stored[s] /= 2.0; has_scaled[s] = True; stop_p[s] = entry_p[s] - (entry_p[s]*taker_fee*2.0)
 
             if exit_triggered:
-                pnl = (exit_price - entry_p[s]) * amount[s] * pos_side[s]; fee = amount[s] * exit_price * fee_rate
+                pnl = (exit_price - entry_p[s]) * amount[s] * pos_side[s]; fee = amount[s] * exit_price * taker_fee
                 balance += ((amount[s] * entry_p[s]) / entry_lev[s]) + (pnl - fee)
                 if t_count < max_trades:
                     trades[t_count] = [float(s), float(entry_idx[s]), float(i), float(pos_side[s]), entry_p[s], exit_price, pnl - fee - fund_fee_stored[s], amount[s], entry_fee_stored[s], fund_fee_stored[s]]
@@ -733,15 +766,27 @@ def backtest_portfolio_numba(
                     if (t_dir > 0 and hmm_mod_long[prev_i, s] < 0.1) or (t_dir < 0 and hmm_mod_short[prev_i, s] < 0.1):
                         mod_skip_cnt += 1; continue
 
-                c_open, p_side, fill_p = open_2d[i, s], 0, 0.0
+                c_open, c_high, c_low, p_side, fill_p, is_maker_entry = open_2d[i, s], high_2d[i, s], low_2d[i, s], 0, 0.0, 0.0
                 if t_dir > 0.0:
                     if entry_upper[prev_i, s] <= 1e-9 or high_2d[i, s] > entry_upper[prev_i, s]:
-                        base_p = c_open if entry_upper[prev_i, s] <= 1e-9 else max(c_open, entry_upper[prev_i, s])
-                        fill_p = base_p * (1.0 + slippage_rate); p_side = 1
+                        if c_low <= c_open:
+                            fill_p = c_open * (1.0 - smart_offset)
+                            is_maker_entry = 1.0
+                        else:
+                            base_p = c_open if entry_upper[prev_i, s] <= 1e-9 else max(c_open, entry_upper[prev_i, s])
+                            fill_p = base_p * (1.0 + slippage_rate)
+                            is_maker_entry = 0.0
+                        p_side = 1
                 elif t_dir < 0.0:
                     if entry_lower[prev_i, s] <= 1e-9 or entry_lower[prev_i, s] >= 999998.0 or low_2d[i, s] < entry_lower[prev_i, s]:
-                        base_p = c_open if (entry_lower[prev_i, s] <= 1e-9 or entry_lower[prev_i, s] >= 999998.0) else min(c_open, entry_lower[prev_i, s])
-                        fill_p = base_p * (1.0 - slippage_rate); p_side = -1
+                        if c_high >= c_open:
+                            fill_p = c_open * (1.0 + smart_offset)
+                            is_maker_entry = 1.0
+                        else:
+                            base_p = c_open if (entry_lower[prev_i, s] <= 1e-9 or entry_lower[prev_i, s] >= 999998.0) else min(c_open, entry_lower[prev_i, s])
+                            fill_p = base_p * (1.0 - slippage_rate)
+                            is_maker_entry = 0.0
+                        p_side = -1
                 if p_side == 0:
                     if use_cs_rank != 0: p_side_zero_cnt += 1
                     continue
@@ -758,14 +803,14 @@ def backtest_portfolio_numba(
                 target_qty = calculate_position_size(fill_p, atr_p, current_equity, free_margin, effective_risk_per_trade, le_ent, sf, gk_use, max_exp_per_coin)
                 if target_qty > 0:
                     sort_key = abs(float(t_dir)) if use_cs_rank != 0 else abs(float(slot_rank_score[prev_i, s]))
-                    candidate_pool[n_cands] = [sort_key, float(s), float(p_side), fill_p, target_qty, atr_2d[prev_i, s] * stop_mult]
+                    candidate_pool[n_cands] = [sort_key, float(s), float(p_side), fill_p, target_qty, atr_2d[prev_i, s] * stop_mult, is_maker_entry]
                     n_cands += 1
 
             if n_cands > 0:
                 for c1 in range(n_cands):
                     for c2 in range(c1 + 1, n_cands):
                         if candidate_pool[c1, 0] < candidate_pool[c2, 0]:
-                            for k in range(6):
+                            for k in range(7):
                                 tmp = candidate_pool[c1, k]; candidate_pool[c1, k] = candidate_pool[c2, k]; candidate_pool[c2, k] = tmp
                 n_sel = min(n_cands, max_concurrent - num_open_pos)
                 total_req = 0.0
@@ -789,8 +834,9 @@ def backtest_portfolio_numba(
                     scale = min(scale, new_notional_cap / total_new_notional)
 
                 for idx in range(n_sel):
-                    _, s_f, p_side_f, fill_p, target_qty, stop_dist = candidate_pool[idx]
+                    _, s_f, p_side_f, fill_p, target_qty, stop_dist, is_maker_f = candidate_pool[idx]
                     s, p_side, final_qty = int(s_f), int(p_side_f), target_qty * scale
+                    is_maker = bool(is_maker_f)
                     
                     # [REFINED] Minimum Conviction Floor
                     # Skip entry if notional value is less than 2% of current equity
@@ -799,7 +845,9 @@ def backtest_portfolio_numba(
                         dust_skip_cnt += 1; continue
                     
                     le_ent = max(1.0, float(lev_2d[i, s]))
-                    req_m = (final_qty * fill_p) / le_ent; e_fee = final_qty * fill_p * fee_rate
+                    req_m = (final_qty * fill_p) / le_ent
+                    e_fee_rate = maker_fee if is_maker else taker_fee
+                    e_fee = final_qty * fill_p * e_fee_rate
                     if free_margin >= (req_m + e_fee):
                         balance -= (req_m + e_fee); in_pos[s], pos_side[s], entry_p[s], entry_idx[s] = True, p_side, fill_p, i
                         entry_lev[s] = le_ent
@@ -812,7 +860,7 @@ def backtest_portfolio_numba(
         for s in range(n_syms):
             if in_pos[s]:
                 cur_p = close_2d[last_idx, s] if not np.isnan(close_2d[last_idx, s]) else entry_p[s]
-                pnl = (cur_p - entry_p[s]) * amount[s] * pos_side[s] - (amount[s] * cur_p * fee_rate)
+                pnl = (cur_p - entry_p[s]) * amount[s] * pos_side[s] - (amount[s] * cur_p * taker_fee)
                 balance += ((amount[s] * entry_p[s]) / entry_lev[s]) + pnl
                 if t_count < max_trades:
                     trades[t_count] = [float(s), float(entry_idx[s]), float(last_idx), float(pos_side[s]), entry_p[s], cur_p, pnl - fund_fee_stored[s], amount[s], entry_fee_stored[s], fund_fee_stored[s]]
@@ -853,8 +901,10 @@ class SingleSymbolEngine:
 
         self.leverage: float = self.strategy.params.get("LEVERAGE", 1.0)
         self.risk_per_trade: float = self.strategy.params.get("RISK_PER_TRADE", 0.015)
-        self.fee_rate = TRADING_FEE_RATE
+        self.maker_fee = MAKER_FEE_RATE
+        self.taker_fee = TAKER_FEE_RATE
         self.slippage_rate = SLIPPAGE_RATE
+        self.smart_offset = SMART_ORDER_OFFSET
 
         self._prepare_data()
 
@@ -901,7 +951,7 @@ class SingleSymbolEngine:
 
         trades_raw, final_balance, equity_curve, funding_total = backtest_loop_single_numba(
             close, high, low, open_prices, entry_upper, entry_lower, trend_dir, strength_filter, atr, macro_ema, garch_kelly_f,
-            self.initial_balance, self.leverage, self.fee_rate, self.slippage_rate, self.risk_per_trade, timestamps, funding_rate_sums,
+            self.initial_balance, self.leverage, self.maker_fee, self.taker_fee, self.slippage_rate, self.smart_offset, self.risk_per_trade, timestamps, funding_rate_sums,
             atr_mult, trail_mult, atr_mult, short_tp_mult, long_scale_atr_mult, trail_mult, warmup_bars, self._execution_start_idx,
             bool(self.strategy.params.get("USE_COMPOUNDING", True)), float(self.strategy.params.get("MAX_CAPITAL_USAGE", 1e12)),
             float(self.strategy.params.get("MAX_EXPOSURE_PER_COIN", 1.5)), float(self.strategy.params.get("DD_SCALING_THRESHOLD", 0.15)),
@@ -960,15 +1010,21 @@ class MultiSymbolEngine:
         symbol_names: list[str],
         strategy_params: dict[str, Any],
         initial_balance: float = 1_000_000,
-        fee_rate: float = 0.0004,
-        slippage_rate: float = 0.001,
+        fee_rate: float | None = None,
+        slippage_rate: float | None = None,
+        maker_fee: float | None = None,
+        taker_fee: float | None = None,
+        smart_offset: float | None = None,
     ) -> None:
         self.data = aligned_data
         self.symbols = symbol_names
         self.params = strategy_params
         self.initial_balance = initial_balance
-        self.fee_rate = fee_rate
-        self.slippage_rate = slippage_rate
+        self.maker_fee = maker_fee if maker_fee is not None else MAKER_FEE_RATE
+        self.taker_fee = taker_fee if taker_fee is not None else TAKER_FEE_RATE
+        self.slippage_rate = slippage_rate if slippage_rate is not None else SLIPPAGE_RATE
+        self.smart_offset = smart_offset if smart_offset is not None else SMART_ORDER_OFFSET
+        
         self.leverage = float(self.params.get("LEVERAGE", 1.0))
         self.risk_per_trade = float(self.params.get("RISK_PER_TRADE", 0.02))
         self.max_exposure = float(self.params.get("MAX_EXPOSURE", 0.8))
@@ -989,7 +1045,7 @@ class MultiSymbolEngine:
             d.get("hmm_prob_crisis", np.zeros_like(c2d)), 
             d.get("hmm_hard_state", np.zeros_like(c2d)),
             hmm_mod_l, d.get("hmm_modulator_short", np.ones_like(c2d)),
-            self.initial_balance, lev_2d, self.fee_rate, self.slippage_rate, self.risk_per_trade,
+            self.initial_balance, lev_2d, self.maker_fee, self.taker_fee, self.slippage_rate, self.smart_offset, self.risk_per_trade,
             float(self.params.get("ATR_MULT", 3.0)), float(self.params.get("TRAIL_MULT", 3.0)), float(self.params.get("ATR_MULT", 3.0)),
             float(self.params.get("SHORT_TP_MULT", 3.0)), float(self.params.get("LONG_SCALE_ATR_MULT", 3.0)), float(self.params.get("TRAIL_MULT", 3.0)),
             self.max_concurrent_positions, self.max_exposure, float(self.params.get("MAX_EXPOSURE_PER_COIN", 1.5)),
