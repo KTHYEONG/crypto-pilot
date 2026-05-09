@@ -1063,7 +1063,7 @@ def main() -> None:
     else:
         n_ml_trials = int(args.trials)
         target_seeds = (
-            [42, 7, 13, 21, 55, 101, 777, 8, 99, 1234] if args.seed is None else [int(args.seed)]
+            [42, 7, 13, 21, 55] if args.seed is None else [int(args.seed)]
         )
     
     all_trials: list[optuna.trial.FrozenTrial] = []
