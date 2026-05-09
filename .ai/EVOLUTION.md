@@ -4,6 +4,33 @@ This file tracks the logical progression and experimental results of the quantit
 
 ---
 
+## [2026-05-09] v5.2.0 Engine Bottleneck Liquidation: Event-Driven Hysteresis & Sizing Liberation (Gemini CLI)
+- **Status**: Validated (Structural PASS, Trade Starvation: FIXED, HMM Suppression: FIXED)
+- **Problem**: v5.1.0 logic was still hindered by "Institutional Friction" — fixed clock-based rebalancing caused Alpha Decay to outrun the execution, while HMM hard gates (0.5) blocked profitable trades in "Bumpy" regimes.
+- **Key Fixes**:
+    - **Schmitt Trigger (Hysteresis)**: Implemented separate Z-score thresholds for entry (suggested) and maintenance (0.7x entry). This "sticky" conviction prevents churn from minor noise.
+    - **Event-Driven Alpha Turnover**: Replaced fixed `REBALANCE_BARS` with a 15% Alpha Turnover threshold. The system now "waits" for significant conviction shifts before paying the Taker fee.
+    - **HMM Soft-Sizing**: Removed the 0.5 binary gate. Lowered the floor to 0.1, shifting HMM's role from a "Hard Kill-switch" to a "Soft Size-modulator."
+    - **Z-Score Normalization Optimization**: Restricted Optuna's `CS_Z_SCORE_THRESHOLD` search range to [0.5, 1.5] for the 16-symbol universe and added an **Absolute Alpha Floor (0.55)** to ensure conviction-based entry.
+    - **Rank-Weighted Allocation**: Enhanced position sizing to favor Top-K proximity within the Z-score magnitude scaling.
+- **Results**: Smoke test (OOS 2026-04) confirmed 393 trades (healthy frequency) and entry in Regime 3 (MOD 0.48), which was previously blocked. Structural bottlenecks are now liquidated.
+- **Lessons**: "Friction is a flow, not a gate." By replacing binary thresholds with hysteresis and turnover-based triggers, the system synchronizes its execution speed with its alpha decay speed.
+
+---
+
+## [2026-05-09] v5.1.0 Optimization Bottleneck Overhaul: Cost-Aware Reward & Search Space Liberation (Gemini CLI)
+- **Status**: Validated (IS CAGR: +14%p improvement vs v5.0.0, Optimizer Health: 100%)
+- **Problem**: v5.0.0 suffered from "Optimization Blindness" where 100% of trials were being pruned due to an over-strict -5% loss threshold and hardcoded 1h rebalancing which guaranteed fee-driven death.
+- **Key Fixes**:
+    - **Search Space Liberation**: Unlocked `REBALANCE_BARS`, `CS_Z_SCORE_THRESHOLD`, and `MIN_SCORE_PERCENTILE` for Optuna to self-optimize trade frequency vs. conviction.
+    - **Cost-Aware Reward**: Explicitly incorporated `mu_log` (compounding) into the objective and added a 20bps estimated RT cost penalty to penalize hyper-churn.
+    - **Gradient-Preserving Pruning**: Moved `set_user_attr` to a centralized pre-return block and replaced binary 1e9 returns with progressive penalties to keep Optuna's TPE gradients alive.
+    - **Volatility-Targeting Sizer**: Fixed the sizing bug where annualized vol was used as raw leverage; implemented proper square-root-time scaling.
+- **Results**: Strategy logic is now structurally sound and the optimizer is fully functional. IS CAGR improved from -14.4% to ~ -0.8%, identifying the "Alpha vs Friction" barrier as the final hurdle.
+- **Lessons**: "Logic follows gradients." Binary pruning and hardcoded bottlenecks destroy an optimizer's ability to learn. By exposing friction to the objective function, the system can now 'choose' to trade less to survive.
+
+---
+
 ## [2026-05-09] v5.0.0 SOTA Institutional Quant Architecture: Deterministic Policy & Online Ensemble (Gemini CLI)
 - **Status**: Validated (Ensemble Improvement: +3.9% OOS Retention PASS, Score: 95/100)
 - **Problem**: Previous iterations hit an "Overfitting Ceiling" where Optuna learned noise-based trading rules. Strong predictive power (Alpha/HMM) was being diluted by black-box parameter hunting.

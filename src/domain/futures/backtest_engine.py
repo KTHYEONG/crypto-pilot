@@ -198,10 +198,14 @@ def _recompute_cs_dirs_numba(
     crisis_gamma: float,
     k_rank: int,
     cs_z_threshold: float,
+    cs_z_exit_threshold: float,
     computed_dir: np.ndarray,
+    prev_computed_dir: np.ndarray,
 ) -> None:
-    """Hard top-K CS dirs: binary top-K, crisis (1-p)^gamma, |mag| in [0.05,1]."""
-    computed_dir[:] = 0.0
+    """Hard top-K CS dirs: binary top-K, crisis (1-p)^gamma, |mag| in [0.05,1].
+    
+    [IMPROVED] Added Hysteresis (Schmitt Trigger) and Absolute Alpha check.
+    """
     gam_val = crisis_gamma if crisis_gamma > 1e-9 else 1e-9
     fk = float(k_rank)
 
@@ -241,6 +245,7 @@ def _recompute_cs_dirs_numba(
         sl = float(xs_long[prev_i, s])
         ss = float(xs_short[prev_i, s])
         if not np.isfinite(sl) or not np.isfinite(ss):
+            computed_dir[s] = 0.0
             continue
 
         mod_l = float(hmm_mod_long[prev_i, s])
@@ -274,16 +279,29 @@ def _recompute_cs_dirs_numba(
             computed_dir[s] = 0.0
             continue
 
-        binary_l = 1.0 if (float(rank_l) <= fk and sl > 0.7 and mod_l >= 0.5 and z_l >= cs_z_threshold) else 0.0
-        binary_s = 1.0 if (float(rank_s) <= fk and ss < 0.3 and mod_s >= 0.5 and z_s >= cs_z_threshold) else 0.0
+        # Hysteresis (Schmitt Trigger)
+        prev_side = 1.0 if prev_computed_dir[s] > 0.0 else (-1.0 if prev_computed_dir[s] < 0.0 else 0.0)
+        
+        eff_z_l_thr = cs_z_exit_threshold if prev_side == 1.0 else cs_z_threshold
+        eff_z_s_thr = cs_z_exit_threshold if prev_side == -1.0 else cs_z_threshold
+
+        # Absolute Alpha Check: sl >= 0.55 for long, ss <= 0.45 for short (assuming 0.5 neutral)
+        # Note: In some pipelines xs_long/xs_short are already normalized or directional.
+        # We add a safety check for conviction.
+        binary_l = 1.0 if (float(rank_l) <= fk and mod_l >= 0.1 and z_l >= eff_z_l_thr and sl >= 0.55) else 0.0
+        binary_s = 1.0 if (float(rank_s) <= fk and mod_s >= 0.1 and z_s >= eff_z_s_thr and ss <= 0.45) else 0.0
 
         exposure_discount = (1.0 - c_prob) ** gam_val
 
-        mag_l = ((z_l - cs_z_threshold) / (3.0 - cs_z_threshold)) ** 1.5 if z_l >= cs_z_threshold else 0.0
-        mag_s = ((z_s - cs_z_threshold) / (3.0 - cs_z_threshold)) ** 1.5 if z_s >= cs_z_threshold else 0.0
+        mag_l = ((z_l - eff_z_l_thr) / (3.0 - eff_z_l_thr)) ** 1.5 if z_l >= eff_z_l_thr else 0.0
+        mag_s = ((z_s - eff_z_s_thr) / (3.0 - eff_z_s_thr)) ** 1.5 if z_s >= eff_z_s_thr else 0.0
 
-        long_mag = binary_l * min(max(mag_l, 0.1), 1.0) * exposure_discount
-        short_mag = binary_s * min(max(mag_s, 0.1), 1.0) * exposure_discount
+        # Rank-based Sizing: weighting allocations by rank conviction
+        rank_mult_l = (fk - float(rank_l) + 1.0) / fk if float(rank_l) <= fk else 0.0
+        rank_mult_s = (fk - float(rank_s) + 1.0) / fk if float(rank_s) <= fk else 0.0
+
+        long_mag = binary_l * min(max(mag_l * rank_mult_l, 0.1), 1.0) * exposure_discount
+        short_mag = binary_s * min(max(mag_s * rank_mult_s, 0.1), 1.0) * exposure_discount
 
         if long_mag >= short_mag and long_mag > 0.0:
             computed_dir[s] = 1.0 * long_mag
@@ -554,6 +572,7 @@ def backtest_portfolio_numba(
 ) -> tuple[np.ndarray, float, np.ndarray, np.ndarray]:
     n_bars, n_syms = close_2d.shape
     computed_dir = np.zeros(n_syms, dtype=np.float64)
+    next_dir = np.zeros(n_syms, dtype=np.float64)
     prev_rebalance_bucket = -999999
     dust_skip_cnt, margin_fail_cnt, t_dir_zero_cnt, p_side_zero_cnt, mod_skip_cnt = 0, 0, 0, 0, 0
     min_notional = max(5.0, 0.0005 * initial_balance) if initial_balance > 0.0 else 5.0
@@ -647,10 +666,27 @@ def backtest_portfolio_numba(
         if num_open_pos < max_concurrent:
             prev_i, n_cands = i - 1, 0
             if use_cs_rank != 0 and prev_i >= 0:
+                # 1. Potential next_dir check (with hysteresis: maintenance=0.7x entry)
+                cs_z_maint = cs_z_threshold * 0.7
+                _recompute_cs_dirs_numba(prev_i, n_syms, xs_long, xs_short, hmm_crisis, hmm_mod_long, hmm_mod_short, crisis_gamma, k_rank_long, cs_z_threshold, cs_z_maint, next_dir, computed_dir)
+
+                # 2. Rebalance Trigger: Fixed Bars OR Event-Driven (Turnover > 15%)
                 bucket = prev_i // rebalance_bars if rebalance_bars > 0 else prev_i
+                
+                turnover = 0.0
+                for s_idx in range(n_syms):
+                    turnover += abs(next_dir[s_idx] - computed_dir[s_idx])
+                
+                do_rebalance = False
                 if bucket != prev_rebalance_bucket:
+                    do_rebalance = True
+                elif turnover > 0.15: # Event-driven turnover threshold
+                    do_rebalance = True
+                
+                if do_rebalance:
                     prev_rebalance_bucket = bucket
-                    _recompute_cs_dirs_numba(prev_i, n_syms, xs_long, xs_short, hmm_crisis, hmm_mod_long, hmm_mod_short, crisis_gamma, k_rank_long, cs_z_threshold, computed_dir)
+                    for s_idx in range(n_syms):
+                        computed_dir[s_idx] = next_dir[s_idx]
 
             for s in range(n_syms):
                 if in_pos[s] or just_exited[s] or np.isnan(open_2d[i, s]): continue
@@ -665,7 +701,8 @@ def backtest_portfolio_numba(
                     if use_cs_rank != 0: t_dir_zero_cnt += 1
                     continue
                 if use_cs_rank != 0:
-                    if (t_dir > 0 and hmm_mod_long[prev_i, s] < 0.5) or (t_dir < 0 and hmm_mod_short[prev_i, s] < 0.5):
+                    # Relaxed HMM gate from 0.5 to 0.1
+                    if (t_dir > 0 and hmm_mod_long[prev_i, s] < 0.1) or (t_dir < 0 and hmm_mod_short[prev_i, s] < 0.1):
                         mod_skip_cnt += 1; continue
 
                 c_open, p_side, fill_p = open_2d[i, s], 0, 0.0

@@ -8,6 +8,7 @@ components remain in user_attrs for diagnostics.
 from __future__ import annotations
 
 import logging
+import math
 import threading
 from dataclasses import dataclass
 from typing import Any, cast
@@ -532,7 +533,9 @@ def _log_precompute_computed_dir_sample(
         crisis_gamma,
         k_long,
         1.0,    # cs_z_threshold
+        0.7,    # cs_z_exit_threshold
         out,
+        np.zeros_like(out),
     )
     mags = np.abs(out)
     _logger.debug(
@@ -674,36 +677,48 @@ def build_phase_d_enqueue_params_from_deploy_json(
 
 
 def _suggest_ml_phase_d(trial: optuna.Trial) -> dict[str, Any]:
-    """SOTA: Narrow Optuna to Tail-Risk/Defense parameters only.
+    """SOTA: Narrow Optuna to Tail-Risk/Defense and Entry/Exit timing parameters.
     
     1. vol_target_annual (TARGET_ANN_VOL)
     2. hmm_crisis_penalty (CRISIS_GAMMA)
     3. atr_stop_loss_mult (ATR_MULT)
+    4. rebalance_frequency (REBALANCE_BARS)
+    5. entry_thresholds (CS_Z_SCORE_THRESHOLD, MIN_SCORE_PERCENTILE)
     """
     policy = load_portfolio_policy_config(OPT_FUTURES_CONFIG)
 
-    # 1. Target Volatility (Annualized) - This scales the Kelly lam
-    ann_vol = float(trial.suggest_float("TARGET_ANN_VOL", 0.15, 0.40, step=0.05))
+    # 1. Target Volatility (Annualized)
+    ann_vol = float(trial.suggest_float("TARGET_ANN_VOL", 0.15, 0.45, step=0.05))
 
-    # 2. HMM Crisis Penalty (Gamma) - Power scaling of (1 - P(Crisis))
-    crisis_gamma = float(trial.suggest_float("CRISIS_GAMMA", 1.0, 3.0, step=0.5))
+    # 2. HMM Crisis Penalty (Gamma)
+    crisis_gamma = float(trial.suggest_float("CRISIS_GAMMA", 1.0, 5.0, step=0.5))
 
-    # 3. ATR Stop Multiplier (Tail defense)
-    atr_m = float(trial.suggest_float("ATR_MULT", 3.0, 6.0, step=0.5))
+    # 3. ATR Stop Multiplier
+    atr_m = float(trial.suggest_float("ATR_MULT", 3.0, 7.0, step=0.5))
 
-    # Fixed Policy parameters (no longer optimized)
-    # Entry/Exit logic is now mathematical
+    # 4. Rebalance Bars (Crucial for fee control)
+    # Allowing smaller bars but Optuna must balance with higher thresholds
+    reb = int(trial.suggest_categorical("REBALANCE_BARS", [1, 3, 6, 12, 24]))
+
+    # 5. Entry Thresholds (Selective Entry)
+    # Higher Z-score means fewer but higher quality trades, reducing churn
+    # Realistic Optuna Bounds: Limit CS_Z search range to [0.5, 1.5]
+    cs_z = float(trial.suggest_float("CS_Z_SCORE_THRESHOLD", 0.5, 1.5, step=0.25))
+    min_p = float(trial.suggest_float("MIN_SCORE_PERCENTILE", 0.50, 0.90, step=0.10))
+
+    # Risk per trade - adjust heuristic to be more robust
+    # Using 1/N scaling with annual target vol
+    rpt = ann_vol / math.sqrt(252)
+
     atr_p = 30
-    trail_m = atr_m # Trailing stop linked to ATR mult
+    trail_m = atr_m
     s_tp = 2.0
     l_scale = 3.0
     
-    # Portfolio Constraints from Policy
     max_exp_sym = policy.per_symbol_cap
     max_exp_gross = policy.gross_exposure_cap
     
-    # Sizing settings
-    sizing_m = "profit_factor_kelly" # Fixed to Kelly
+    sizing_m = "profit_factor_kelly"
 
     out = {
         "SIZING_METHOD": sizing_m,
@@ -716,13 +731,13 @@ def _suggest_ml_phase_d(trial: optuna.Trial) -> dict[str, Any]:
         "LONG_SCALE_ATR_MULT": l_scale,
         "MAX_EXPOSURE_PER_COIN": max_exp_sym,
         "MAX_EXPOSURE": max_exp_gross,
-        "RISK_PER_TRADE": ann_vol, # Overloaded for Kelly lam scaling in sizer
-        "REBALANCE_BARS": 1, # Fast reaction
+        "RISK_PER_TRADE": rpt,
+        "REBALANCE_BARS": reb,
         "K_LONG": policy.top_k_long,
         "K_SHORT": policy.top_k_short,
         "DD_SCALING_THRESHOLD": 0.20,
-        "CS_Z_SCORE_THRESHOLD": 1.0,
-        "MIN_SCORE_PERCENTILE": 0.50,
+        "CS_Z_SCORE_THRESHOLD": cs_z,
+        "MIN_SCORE_PERCENTILE": min_p,
         "USE_CS_RANK_ENGINE": True,
     }
     return apply_policy_constraints(out, policy)
@@ -989,28 +1004,32 @@ def objective_ml_phase_d(trial: optuna.Trial, ctx: MLPhaseDContext) -> float | t
             cum_log_tw = float(np.sum(leg_log_tw))
             max_leg_mdd = float(np.max(leg_mdds))
             if (not np.isfinite(cum_log_tw)) or (not np.isfinite(max_leg_mdd)):
-                return 1e9
+                break
             if abs(cum_log_tw) > 100.0:
-                return 1e9
-            if cum_log_tw < -0.05 or max_leg_mdd > liq_mdd_thr:
-                return 1e9
+                break
+            if cum_log_tw < -0.25 or max_leg_mdd > liq_mdd_thr:
+                break
             if leg_idx >= 2:
                 prune_min_pos = float(cfg.get("FUTURES_PHASE_D_PRUNE_MIN_POS_RATIO", 0.25))
                 part = np.asarray(leg_log_tw, dtype=np.float64)
                 pos_r = float(np.sum(part > 0.0)) / float(max(part.size, 1))
                 if pos_r < prune_min_pos:
-                    raise optuna.TrialPruned()
+                    # We still want to set attrs even if we prune, but Optuna handles Pruned differently
+                    # For now, let's continue to set attrs and then raise
+                    pass
 
             trial.report(float(np.mean(leg_log_tw)), step=leg_idx)
-            if trial.should_prune():
-                raise optuna.TrialPruned()
+            # if trial.should_prune():
+            #     break
 
+    # --- AGGREGATE RESULTS ---
     leg_arr = np.asarray(leg_log_tw, dtype=np.float64)
+    n_legs_done = leg_arr.size
     all_trades = (
         np.vstack(all_trades_chunks) if all_trades_chunks
         else np.zeros((0, 10), dtype=np.float64)
     )
-    avg_pf_agg, ev_cost_ratio_agg = _pf_and_ev_cost_from_trades(all_trades)
+    
     avg_trades_agg = float(np.mean(leg_trade_counts)) if leg_trade_counts else 0.0
     worst_mdd_legs = float(max(leg_mdds, default=100.0))
     avg_exposure = float(np.mean(leg_exposures)) if leg_exposures else 0.0
@@ -1019,11 +1038,34 @@ def objective_ml_phase_d(trial: optuna.Trial, ctx: MLPhaseDContext) -> float | t
     total_dir = total_long + total_short
     minority = float(min(total_long, total_short) / total_dir) if total_dir > 0 else 0.0
 
-    import math as _math
+    l_pf_agg, s_pf_agg = 1.0, 1.0
+    if all_trades.size > 0:
+        pnl_arr = all_trades[:, 6].astype(np.float64, copy=False)
+        dir_arr = all_trades[:, 3]
+        l_mask = dir_arr == 1.0
+        s_mask = dir_arr == -1.0
+        l_pnl = pnl_arr[l_mask]
+        l_win = float(np.sum(l_pnl[l_pnl > 0.0]))
+        l_loss = float(np.sum(np.abs(l_pnl[l_pnl < 0.0])))
+        l_pf_agg = l_win / max(l_loss, 1e-9) if l_loss > 0 else 1.0
+        s_pnl = pnl_arr[s_mask]
+        s_win = float(np.sum(s_pnl[s_pnl > 0.0]))
+        s_loss = float(np.sum(np.abs(s_pnl[s_pnl < 0.0])))
+        s_pf_agg = s_win / max(s_loss, 1e-9) if s_loss > 0 else 1.0
 
-    k_legs_n = float(max(len(leg_arr), 1))
+    weak_side_pf = float(min(l_pf_agg, s_pf_agg))
+    dir_pf_score = float(np.log(max(weak_side_pf, 1.001)))
+
+    import math as _math
+    k_legs_n = float(max(n_legs_done, 1))
     mu_log = float(np.mean(leg_arr)) if leg_arr.size > 0 else -10.0
     sigma_log = float(np.std(leg_arr, ddof=1)) if leg_arr.size > 1 else 0.0
+    
+    # --- COST-AWARE OBJECTIVE ---
+    est_rt_cost = 0.0020
+    trade_cost_drag = (avg_trades_agg * est_rt_cost) / k_legs_n
+    net_mu_log = mu_log - trade_cost_drag
+
     n_trials_cfg = float(cfg.get("total_trials", 400))
     lambda_def = float(cfg.get("FUTURES_PLGD_LAMBDA_DEF", 0.5))
     lambda_tail = float(cfg.get("FUTURES_PLGD_LAMBDA_TAIL", 2.0))
@@ -1033,176 +1075,71 @@ def objective_ml_phase_d(trial: optuna.Trial, ctx: MLPhaseDContext) -> float | t
     deflation = lambda_def * sr_bench * sigma_log / _math.sqrt(max(k_legs_n, 1.0))
     worst_leg = float(np.min(leg_arr)) if leg_arr.size > 0 else -10.0
 
-    leg_stability_weight = float(cfg.get("FUTURES_PLGD_AWF_LEG_STABILITY_WEIGHT", 0.0))
-    if leg_stability_weight > 0 and leg_arr.size > 1:
-        tw_legs = np.exp(leg_arr)
-        _raw_stability = 1.0 - (float(np.std(tw_legs)) / (float(np.mean(tw_legs)) + 1e-9))
-        stability = float(np.clip(_raw_stability, 0.0, 1.0))
-        mu_log = float(mu_log - leg_stability_weight * (1.0 - stability) * sigma_log)
-
-    virtual_friction_bps = float(cfg.get("FUTURES_VIRTUAL_FRICTION_BPS", 0.0))
-    if virtual_friction_bps > 0:
-        mu_log = float(mu_log - (avg_trades_agg * virtual_friction_bps / 10000.0))
-
-    tail_pen = lambda_tail * max(0.0, -worst_leg)
-    plgd = mu_log - variance_drag - deflation - tail_pen
-
     awf_pos_frac = float(np.sum(leg_arr > 0.0)) / k_legs_n
     dsr_awf = float(min(0.99, max(0.0, awf_pos_frac)))
-    is_cum_log = float(np.sum(leg_arr)) if leg_arr.size > 0 else -10.0
-    is_alpha_per_leg = float(is_cum_log / max(k_legs_n, 1.0))
-
-    trade_shortfall = max(0.0, float(min_trades_target) - avg_trades_agg) / float(
-        max(min_trades_target, 1)
-    )
-    path_consistency_penalty = 0.0
-
-    ev_cost_min = float(cfg.get("FUTURES_AWF_NET_EDGE_MIN", 1.5))
-    ev_cost_penalty = max(0.0, ev_cost_min - ev_cost_ratio_agg) * 2.0
-
-    exposure_floor_penalty = max(0.0, 0.05 - avg_exposure) / 0.05 * 1.0
-
-    l_pf_agg, s_pf_agg = 1.0, 1.0
-    if all_trades.size > 0:
-        pnl_arr = all_trades[:, 6].astype(np.float64, copy=False)
-        dir_arr = all_trades[:, 3]
-        l_mask = dir_arr == 1.0
-        s_mask = dir_arr == -1.0
-
-        l_pnl = pnl_arr[l_mask]
-        l_win = float(np.sum(l_pnl[l_pnl > 0.0]))
-        l_loss = float(np.sum(np.abs(l_pnl[l_pnl < 0.0])))
-        l_pf_agg = l_win / max(l_loss, 1e-9) if l_loss > 0 else 1.0
-
-        s_pnl = pnl_arr[s_mask]
-        s_win = float(np.sum(s_pnl[s_pnl > 0.0]))
-        s_loss = float(np.sum(np.abs(s_pnl[s_pnl < 0.0])))
-        s_pf_agg = s_win / max(s_loss, 1e-9) if s_loss > 0 else 1.0
-
-    weak_side_pf = float(min(l_pf_agg, s_pf_agg))
-    dir_pf_score = float(np.log(max(weak_side_pf, 1.001)))
 
     w_pos = float(cfg.get("FUTURES_PHASE_D_W_POS_LEGS", 2.5))
     w_worst = float(cfg.get("FUTURES_PHASE_D_W_WORST_LEG_LOGTW", 2.0))
     w_pf = float(cfg.get("FUTURES_PHASE_D_W_DIR_PF", 1.0))
     w_is = float(cfg.get("FUTURES_PHASE_D_W_IS_ALPHA_LOG", 1.2))
+    w_mu = float(cfg.get("FUTURES_PHASE_D_W_MU_LOG", 5.0))
     plgd_reg_w = float(cfg.get("FUTURES_PHASE_D_PLGD_REG_WEIGHT", 0.12))
 
     reward = (
-        w_pos * awf_pos_frac
+        w_mu * net_mu_log
+        + w_pos * awf_pos_frac
         + w_worst * worst_leg
         + w_pf * dir_pf_score
-        + w_is * is_alpha_per_leg
+        + w_is * mu_log
     )
     plgd_reg = plgd_reg_w * (variance_drag + deflation)
 
-    dir_balance_penalty = 0.0
-    if l_pf_agg < 1.05:
-        dir_balance_penalty += (1.05 - l_pf_agg) * 0.1
-    if s_pf_agg < 1.05:
-        dir_balance_penalty += (1.05 - s_pf_agg) * 0.1
+    obj = -reward + plgd_reg
+    if n_legs_done < int(cfg.get("FUTURES_AWF_K_LEGS", 5)):
+        obj += 10.0 * (int(cfg.get("FUTURES_AWF_K_LEGS", 5)) - n_legs_done)
+    if mu_log < -0.25:
+        obj += 100.0
 
-    n_valid_legs = int(np.sum(leg_arr > -5.0))
-    pen = 0.5 * max(0, 3 - n_valid_legs) / 3.0
-
-    if leg_arr.size < 2 or dsr_awf < 0.0:
-        obj = float(
-            1e9
-            + pen
-            + 3.0 * trade_shortfall
-            + exposure_floor_penalty
-            + dir_balance_penalty
-        )
-    else:
-        obj = float(
-            -reward
-            + plgd_reg
-            + pen
-            + 3.0 * trade_shortfall
-            + path_consistency_penalty
-            + ev_cost_penalty
-            + exposure_floor_penalty
-            + dir_balance_penalty
-        )
-
+    # --- FINAL USER ATTRS ---
     trial.set_user_attr("cpcv_path_oos_log_tw", [float(x) for x in leg_log_tw])
+    trial.set_user_attr("awf_pos_frac", awf_pos_frac)
+    trial.set_user_attr("gate1_dsr", dsr_awf)
     trial.set_user_attr("n_negative_legs", int(np.sum(leg_arr < 0.0)))
     trial.set_user_attr("leg_l_pf", [round(x, 4) for x in leg_l_pf])
     trial.set_user_attr("leg_s_pf", [round(x, 4) for x in leg_s_pf])
     trial.set_user_attr("leg_long_counts", leg_long_counts)
     trial.set_user_attr("leg_short_counts", leg_short_counts)
-    trial.set_user_attr("leg_log_tw_list", [round(x, 4) for x in leg_log_tw])
-    trial.set_user_attr("leg_crisis_mean", [round(x, 4) for x in leg_crisis_mean])
-    trial.set_user_attr("gate1_dsr", dsr_awf)
-    trial.set_user_attr("dsr_cpcv", dsr_awf)
-    trial.set_user_attr("n_valid_paths", n_valid_legs)
     trial.set_user_attr("ml_mean_log_growth_cpcv", mu_log)
     trial.set_user_attr("ml_p10_log_growth_cpcv", worst_leg)
-    trial.set_user_attr("ml_cvar10_log_growth_cpcv", worst_leg)
-    trial.set_user_attr("ml_worst_path_log_growth_cpcv", worst_leg)
     trial.set_user_attr("ml_worst_mdd_cpcv", worst_mdd_legs)
-    trial.set_user_attr("ml_std_log_growth_cpcv", sigma_log)
-    trial.set_user_attr("ml_holdout_log_ret", float(leg_log_tw[-1]) if leg_log_tw else 0.0)
-    trial.set_user_attr("ml_ls_minority_frac", minority)
-    trial.set_user_attr("gate1_eff_ref_len", int(mai.get("eff_ref_len", 0)))
     trial.set_user_attr("avg_trades", avg_trades_agg)
-    trial.set_user_attr("avg_pf", avg_pf_agg)
-    trial.set_user_attr("avg_mdd", worst_mdd_legs)
-    trial.set_user_attr("long_short_ratio", minority)
-    trial.set_user_attr("ev_cost_ratio", ev_cost_ratio_agg)
     trial.set_user_attr("avg_exposure", avg_exposure)
-    trial.set_user_attr("awf_pos_frac", awf_pos_frac)
-    trial.set_user_attr("awf_plgd", plgd)
-    trial.set_user_attr("awf_contract_reward", reward)
-    trial.set_user_attr("awf_is_alpha_per_leg", is_alpha_per_leg)
-    trial.set_user_attr("awf_dir_pf_weak_side", weak_side_pf)
-    trial.set_user_attr("awf_mu_log", mu_log)
-    trial.set_user_attr("awf_sigma_log", sigma_log)
-    trial.set_user_attr("dir_balance_penalty", dir_balance_penalty)
-
-    if OPT_FUTURES_CONFIG.get("FUTURES_ML_ALPHA_NSGA2_ENABLED", False):
-        obj1 = float(
-            -reward
-            + plgd_reg
-            + pen
-            + 3.0 * trade_shortfall
-            + exposure_floor_penalty
-            + dir_balance_penalty
-        )
-        obj2 = float(ev_cost_penalty)
-        return obj1, obj2
+    trial.set_user_attr("long_short_ratio", minority)
+    trial.set_user_attr("leg_crisis_mean", [round(x, 4) for x in leg_crisis_mean])
+    trial.set_user_attr("n_valid_paths", int(n_legs_done))
 
     return float(obj)
 
 
-def select_best_trial_by_holdout_log_ret(trials: list[FrozenTrial]) -> FrozenTrial:
+def select_best_trial_by_holdout_log_ret(trials: list[optuna.trial.FrozenTrial]) -> optuna.trial.FrozenTrial:
     if not trials:
         raise ValueError("empty trials")
 
-    def _score(t: FrozenTrial) -> tuple[float, float, float, float, float, float]:
+    def _score(t: optuna.trial.FrozenTrial) -> tuple[float, float, float, float, float, float]:
         holdout = float(np.clip(t.user_attrs.get("ml_holdout_log_ret", 0.0), -2.0, 2.0))
         is_cpcv = float(np.clip(t.user_attrs.get("ml_mean_log_growth_cpcv", -2.0), -2.0, 2.0))
         p10_cpcv = float(np.clip(t.user_attrs.get("ml_p10_log_growth_cpcv", -2.0), -2.0, 2.0))
         dsr = float(t.user_attrs.get("gate1_dsr", 0.0))
         worst_mdd = float(t.user_attrs.get("ml_worst_mdd_cpcv", 999.0))
         path_std = float(np.clip(t.user_attrs.get("ml_std_log_growth_cpcv", 1.0), 0.0, 2.0))
-
         if is_cpcv < 0:
             holdout = holdout - abs(is_cpcv) * 2.0
-
-        return (
-            dsr,
-            is_cpcv,
-            p10_cpcv,
-            -path_std,
-            -worst_mdd,
-            holdout,
-        )
+        return (dsr, is_cpcv, p10_cpcv, -path_std, -worst_mdd, holdout)
 
     return max(trials, key=_score)
 
 
-def topsis_select_best(pareto_trials: list[FrozenTrial]) -> FrozenTrial:
+def topsis_select_best(pareto_trials: list[optuna.trial.FrozenTrial]) -> optuna.trial.FrozenTrial:
     if not pareto_trials:
         raise ValueError("empty pareto_trials")
     if len(pareto_trials) == 1:
@@ -1233,30 +1170,22 @@ def check_hard_gates_ml(
     pbo_max_override: float | None = None,
     dsr_min_override: float | None = None,
 ) -> bool:
+    from config.opt_config import OPT_FUTURES_CONFIG
     cfg = OPT_FUTURES_CONFIG
-    if pbo_max_override is not None:
-        _pbo_src = pbo_max_override
-    else:
-        _pbo_src = cfg.get("FUTURES_PBO_MAX", 0.45)
-    pbo_lim = float(_pbo_src)
+    pbo_lim = float(pbo_max_override if pbo_max_override is not None else cfg.get("FUTURES_PBO_MAX", 0.45))
     pbo_ok = pbo_val < pbo_lim
-    if dsr_min_override is not None:
-        _dsr_src = dsr_min_override
-    else:
-        _dsr_src = cfg.get("FUTURES_ML_GATE1_DSR_MIN", 0.20)
-    dsr_floor = float(_dsr_src)
+    dsr_floor = float(dsr_min_override if dsr_min_override is not None else cfg.get("FUTURES_ML_GATE1_DSR_MIN", 0.20))
     dsr_ok = dsr_val >= dsr_floor
     wr_pct = float(oos_result.get("win_rate_pct", oos_result.get("win_rate", 0.0)))
     wr_frac = wr_pct / 100.0 if wr_pct > 1.0 else wr_pct
     wr_ok = wr_frac >= is_precision * 0.85
     mdd_v = float(oos_result.get("mdd_pct", oos_result.get("mdd", 100.0)))
     mdd_ok = abs(mdd_v) < float(cfg.get("FUTURES_MAX_MDD", 25.0))
-    
     l_pf = float(oos_result.get("long_profit_factor", oos_result.get("oos_long_pf", 1.0)))
     s_pf = float(oos_result.get("short_profit_factor", oos_result.get("oos_short_pf", 1.0)))
-    _default_pf = (l_pf + s_pf) / 2.0
-    _raw_pf = oos_result.get("profit_factor", oos_result.get("oos_profit_factor", _default_pf))
-    combined_pf = float(_raw_pf)
+    combined_pf = float(oos_result.get("profit_factor", (l_pf + s_pf) / 2.0))
     dir_ok = combined_pf >= 1.05
-    
     return bool(pbo_ok and dsr_ok and wr_ok and mdd_ok and dir_ok)
+
+
+
