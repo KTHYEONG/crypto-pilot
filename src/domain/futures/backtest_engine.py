@@ -567,6 +567,7 @@ def backtest_portfolio_numba(
     k_rank_short: int,
     cs_z_threshold: float,
     rebalance_bars: int,
+    rebalance_turnover_threshold: float,
     crisis_gamma: float,
     use_cs_rank: int,
 ) -> tuple[np.ndarray, float, np.ndarray, np.ndarray]:
@@ -575,7 +576,8 @@ def backtest_portfolio_numba(
     next_dir = np.zeros(n_syms, dtype=np.float64)
     prev_rebalance_bucket = -999999
     dust_skip_cnt, margin_fail_cnt, t_dir_zero_cnt, p_side_zero_cnt, mod_skip_cnt = 0, 0, 0, 0, 0
-    min_notional = max(5.0, 0.0005 * initial_balance) if initial_balance > 0.0 else 5.0
+    # [REFINED] Minimum Conviction Floor: Notional value must be >= 2% of current equity to avoid micro-churn
+    min_notional_floor_pct = 0.02
 
     balance = initial_balance
     equity_curve = np.zeros(n_bars, dtype=np.float64)
@@ -623,12 +625,48 @@ def backtest_portfolio_numba(
         c_prob = float(hmm_crisis[i, 0]); crisis_scale = (1.0 - c_prob) ** crisis_gamma
         effective_risk_per_trade = risk_per_trade * dd_scale * crisis_scale
 
+        prev_i = i - 1
+        n_cands = 0
+        if use_cs_rank != 0 and prev_i >= 0:
+            # 1. Potential next_dir check (with hysteresis: maintenance=0.7x entry)
+            cs_z_maint = cs_z_threshold * 0.7
+            _recompute_cs_dirs_numba(prev_i, n_syms, xs_long, xs_short, hmm_crisis, hmm_mod_long, hmm_mod_short, crisis_gamma, k_rank_long, cs_z_threshold, cs_z_maint, next_dir, computed_dir)
+
+            # 2. Rebalance Trigger: Fixed Bars OR Event-Driven (Turnover > 15%)
+            bucket = prev_i // rebalance_bars if rebalance_bars > 0 else prev_i
+            
+            turnover = 0.0
+            for s_idx in range(n_syms):
+                turnover += abs(next_dir[s_idx] - computed_dir[s_idx])
+            
+            do_rebalance = False
+            if bucket != prev_rebalance_bucket:
+                do_rebalance = True
+            elif turnover > rebalance_turnover_threshold: # Event-driven turnover threshold
+                do_rebalance = True
+            
+            if do_rebalance:
+                prev_rebalance_bucket = bucket
+                for s_idx in range(n_syms):
+                    computed_dir[s_idx] = next_dir[s_idx]
+
         for s in range(n_syms):
             if not in_pos[s]: continue
             c_open, c_high, c_low = open_2d[i, s], high_2d[i, s], low_2d[i, s]
             pos_atr = atr_2d[entry_idx[s], s]
             exit_triggered, exit_price = False, 0.0
-            if kill_signal[i-1, s] > 0.5: exit_triggered, exit_price = True, c_open * (1.0 - slippage_rate * pos_side[s])
+            
+            # 3. Alpha Conviction Exit & Hard Kill
+            if kill_signal[i-1, s] > 0.5: 
+                exit_triggered, exit_price = True, c_open * (1.0 - slippage_rate * pos_side[s])
+            elif use_cs_rank != 0 and prev_i >= 0:
+                t_dir = computed_dir[s]
+                # [FIX] Soft Alpha Exit: Only force-exit if the signal REVERSES.
+                # If signal is neutral (0.0), hold and let Trailing Stop manage.
+                if pos_side[s] == 1 and t_dir < 0.0:
+                    exit_triggered, exit_price = True, c_open * (1.0 - slippage_rate * pos_side[s])
+                elif pos_side[s] == -1 and t_dir > 0.0:
+                    exit_triggered, exit_price = True, c_open * (1.0 - slippage_rate * pos_side[s])
 
             if not exit_triggered:
                 if pos_side[s] == 1:
@@ -664,30 +702,6 @@ def backtest_portfolio_numba(
 
         free_margin = current_equity - used_margin_total
         if num_open_pos < max_concurrent:
-            prev_i, n_cands = i - 1, 0
-            if use_cs_rank != 0 and prev_i >= 0:
-                # 1. Potential next_dir check (with hysteresis: maintenance=0.7x entry)
-                cs_z_maint = cs_z_threshold * 0.7
-                _recompute_cs_dirs_numba(prev_i, n_syms, xs_long, xs_short, hmm_crisis, hmm_mod_long, hmm_mod_short, crisis_gamma, k_rank_long, cs_z_threshold, cs_z_maint, next_dir, computed_dir)
-
-                # 2. Rebalance Trigger: Fixed Bars OR Event-Driven (Turnover > 15%)
-                bucket = prev_i // rebalance_bars if rebalance_bars > 0 else prev_i
-                
-                turnover = 0.0
-                for s_idx in range(n_syms):
-                    turnover += abs(next_dir[s_idx] - computed_dir[s_idx])
-                
-                do_rebalance = False
-                if bucket != prev_rebalance_bucket:
-                    do_rebalance = True
-                elif turnover > 0.15: # Event-driven turnover threshold
-                    do_rebalance = True
-                
-                if do_rebalance:
-                    prev_rebalance_bucket = bucket
-                    for s_idx in range(n_syms):
-                        computed_dir[s_idx] = next_dir[s_idx]
-
             for s in range(n_syms):
                 if in_pos[s] or just_exited[s] or np.isnan(open_2d[i, s]): continue
                 sf = 1.0
@@ -748,7 +762,13 @@ def backtest_portfolio_numba(
                 for idx in range(n_sel):
                     _, s_f, p_side_f, fill_p, target_qty, stop_dist = candidate_pool[idx]
                     s, p_side, final_qty = int(s_f), int(p_side_f), target_qty * scale
-                    if final_qty * fill_p < min_notional: dust_skip_cnt += 1; continue
+                    
+                    # [REFINED] Minimum Conviction Floor
+                    # Skip entry if notional value is less than 2% of current equity
+                    min_notional = max(6.0, current_equity * min_notional_floor_pct)
+                    if final_qty * fill_p < min_notional: 
+                        dust_skip_cnt += 1; continue
+                    
                     le_ent = max(1.0, float(lev_2d[i, s]))
                     req_m = (final_qty * fill_p) / le_ent; e_fee = final_qty * fill_p * fee_rate
                     if free_margin >= (req_m + e_fee):
@@ -944,6 +964,7 @@ class MultiSymbolEngine:
             self.max_concurrent_positions, self.max_exposure, float(self.params.get("MAX_EXPOSURE_PER_COIN", 1.5)),
             float(self.params.get("DD_SCALING_THRESHOLD", 0.15)), int(self.params.get("K_RANK", 2)), int(self.params.get("K_RANK", 2)),
             float(self.params.get("CS_Z_SCORE_THRESHOLD", 0.0)), max(1, int(self.params.get("REBALANCE_BARS", 6))),
+            float(self.params.get("REBALANCE_TURNOVER_THRESHOLD", 0.15)),
             float(self.params.get("CRISIS_GAMMA", 1.0)), 1 if bool(self.params.get("USE_CS_RANK_ENGINE", True)) else 0
         )
 
