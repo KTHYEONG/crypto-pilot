@@ -40,6 +40,7 @@ from src.domain.futures.optimization.data_aligner import (
 from src.domain.futures.optimization.evaluator import (
     _log_tw_from_ret_pct,
     calc_mdd_from_equity,
+    compute_plgd_score,
 )
 from src.domain.futures.optimization.validation import (
     build_anchored_wf_legs,
@@ -397,7 +398,7 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
                     dtype=np.float64, copy=False
                 )
 
-            # SOTA: Predict win probabilities p using calibrated model and compute Kelly f*
+            # SOTA: Predict win probabilities p using calibrated model
             gp_base = (
                 raw_full["ml_alpha_00"].to_numpy(dtype=np.float64, copy=False)
                 if "ml_alpha_00" in raw_full.columns
@@ -405,17 +406,13 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
             )
             if ctx.calibrator:
                 p_base = ctx.calibrator.predict_prob(gp_base)
-                b = ctx.estimated_b
-                # f* = p - (1-p)/b
-                f_base = p_base - (1.0 - p_base) / b
-                trimmed_sig["ml_calib_prob"] = np.clip(f_base, 0.0, 1.0)
+                trimmed_sig["ml_calib_prob"] = p_base
 
                 if "ml_alpha_long" in raw_full.columns:
                     p_l = ctx.calibrator.predict_prob(
                         raw_full["ml_alpha_long"].to_numpy(dtype=np.float64, copy=False)
                     )
-                    f_l = p_l - (1.0 - p_l) / b
-                    trimmed_sig["ml_calib_prob_long"] = np.clip(f_l, 0.0, 1.0)
+                    trimmed_sig["ml_calib_prob_long"] = p_l
                 else:
                     trimmed_sig["ml_calib_prob_long"] = trimmed_sig["ml_calib_prob"]
 
@@ -423,14 +420,13 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
                     p_s = ctx.calibrator.predict_prob(
                         raw_full["ml_alpha_short"].to_numpy(dtype=np.float64, copy=False)
                     )
-                    f_s = p_s - (1.0 - p_s) / b
-                    trimmed_sig["ml_calib_prob_short"] = np.clip(f_s, 0.0, 1.0)
+                    trimmed_sig["ml_calib_prob_short"] = p_s
                 else:
                     trimmed_sig["ml_calib_prob_short"] = trimmed_sig["ml_calib_prob"]
             else:
-                trimmed_sig["ml_calib_prob"] = raw_full.get("ml_calib_prob", 1.0)
-                trimmed_sig["ml_calib_prob_long"] = raw_full.get("ml_calib_prob_long", 1.0)
-                trimmed_sig["ml_calib_prob_short"] = raw_full.get("ml_calib_prob_short", 1.0)
+                trimmed_sig["ml_calib_prob"] = raw_full.get("ml_calib_prob", 0.5)
+                trimmed_sig["ml_calib_prob_long"] = raw_full.get("ml_calib_prob_long", 0.5)
+                trimmed_sig["ml_calib_prob_short"] = raw_full.get("ml_calib_prob_short", 0.5)
 
             gp_centered = gp_base - 0.5
             trimmed_sig["trend_direction"] = np.where(
@@ -442,6 +438,7 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
                 "xs_score_long",
                 "xs_score_short",
                 "hmm_prob_crisis",
+                "hmm_prob_bear_trend",
                 "hmm_hard_state",
                 "hmm_modulator_long",
                 "hmm_modulator_short",
@@ -697,6 +694,9 @@ def _suggest_ml_phase_d(trial: optuna.Trial) -> dict[str, Any]:
 
     # 1. Target Volatility (Annualized)
     ann_vol = float(trial.suggest_float("TARGET_ANN_VOL", 0.15, 0.45, step=0.05))
+    
+    # 1.1 Fractional Kelly Lambda (Shrinkage)
+    kelly_lambda = float(trial.suggest_float("KELLY_LAMBDA", 0.1, 0.5, step=0.05))
 
     # 2. HMM Crisis Penalty (Gamma)
     crisis_gamma = float(trial.suggest_float("CRISIS_GAMMA", 1.0, 5.0, step=0.5))
@@ -713,6 +713,7 @@ def _suggest_ml_phase_d(trial: optuna.Trial) -> dict[str, Any]:
     # Higher Z-score means fewer but higher quality trades, reducing churn
     # Realistic Optuna Bounds: Limit CS_Z search range to [0.5, 1.5]
     cs_z = float(trial.suggest_float("CS_Z_SCORE_THRESHOLD", 0.5, 1.5, step=0.25))
+    hyst_gap = float(trial.suggest_float("HYSTERESIS_GAP", 0.1, 0.5, step=0.1))
     min_p = float(trial.suggest_float("MIN_SCORE_PERCENTILE", 0.50, 0.90, step=0.10))
 
     # Risk per trade - adjust heuristic to be more robust
@@ -732,6 +733,7 @@ def _suggest_ml_phase_d(trial: optuna.Trial) -> dict[str, Any]:
     out = {
         "SIZING_METHOD": sizing_m,
         "TARGET_ANN_VOL": ann_vol,
+        "KELLY_LAMBDA": kelly_lambda,
         "CRISIS_GAMMA": crisis_gamma,
         "ATR_PERIOD": atr_p,
         "ATR_MULT": atr_m,
@@ -747,6 +749,7 @@ def _suggest_ml_phase_d(trial: optuna.Trial) -> dict[str, Any]:
         "K_SHORT": policy.top_k_short,
         "DD_SCALING_THRESHOLD": 0.20,
         "CS_Z_SCORE_THRESHOLD": cs_z,
+        "HYSTERESIS_GAP": hyst_gap,
         "MIN_SCORE_PERCENTILE": min_p,
         "USE_CS_RANK_ENGINE": True,
     }
@@ -777,9 +780,10 @@ def _pf_and_ev_cost_from_trades(all_trades: np.ndarray) -> tuple[float, float]:
 
 
 def _base_engine_params(ml: dict[str, Any], tf: str) -> dict[str, Any]:
-    # In SOTA mode, RISK_PER_TRADE is used as the Kelly Lambda (lam)
-    # Target Annual Vol is used to scale position sizes.
+    # In SOTA mode, KELLY_LAMBDA is used as the Shrinkage (lam)
+    # RISK_PER_TRADE in engine is used as Kelly Lambda.
     ann_vol = float(ml.get("TARGET_ANN_VOL", 0.20))
+    kelly_lambda = float(ml.get("KELLY_LAMBDA", 0.20))
     lev = float(OPT_FUTURES_CONFIG.get("FUTURES_DISCOVERY_LEVERAGE", 5))
 
     return {
@@ -799,11 +803,14 @@ def _base_engine_params(ml: dict[str, Any], tf: str) -> dict[str, Any]:
         "ATR_PERIOD": int(ml.get("ATR_PERIOD", 30)),
         "SHORT_TP_MULT": float(ml.get("SHORT_TP_MULT", 2.0)),
         "LONG_SCALE_ATR_MULT": float(ml.get("LONG_SCALE_ATR_MULT", 3.0)),
-        "RISK_PER_TRADE": ann_vol,  # lambda
+        "RISK_PER_TRADE": kelly_lambda,  # Used as Kelly Lambda in calculate_position_size
         "MAX_EXPOSURE_PER_COIN": float(ml.get("MAX_EXPOSURE_PER_COIN", 1.0)),
         "MAX_EXPOSURE": float(ml.get("MAX_EXPOSURE", 1.0)),
         "DD_SCALING_THRESHOLD": float(ml.get("DD_SCALING_THRESHOLD", 0.20)),
+        "CS_Z_SCORE_THRESHOLD": float(ml.get("CS_Z_SCORE_THRESHOLD", 1.0)),
+        "HYSTERESIS_GAP": float(ml.get("HYSTERESIS_GAP", 0.3)),
         "TARGET_ANN_VOL": ann_vol,
+        "KELLY_LAMBDA": kelly_lambda,
         "USE_COMPOUNDING": True,
         "LEVERAGE": int(lev),
     }
@@ -841,6 +848,7 @@ def _run_portfolio_numba_block(
     zkill: Any,
     zfund: Any,
     lev_blk: Any,
+    estimated_b: float = 1.05,
 ) -> tuple[np.ndarray, float, np.ndarray, np.ndarray]:
     strength_g = aligned["ml_calib_prob"]
     use_cs = 1 if bool(params.get("USE_CS_RANK_ENGINE", True)) else 0
@@ -848,6 +856,10 @@ def _run_portfolio_numba_block(
     atr_m = float(params["ATR_MULT"])
     trail_m = float(params["TRAIL_MULT"])
     
+    cs_z_entry = float(params.get("CS_Z_SCORE_THRESHOLD", 1.0))
+    hyst_gap = float(params.get("HYSTERESIS_GAP", 0.3))
+    cs_z_exit = cs_z_entry - hyst_gap
+
     out_bt = backtest_portfolio_numba(
         aligned["close"],
         aligned["high"],
@@ -868,6 +880,7 @@ def _run_portfolio_numba_block(
         aligned["hmm_hard_state"],
         aligned["hmm_modulator_long"],
         aligned["hmm_modulator_short"],
+        aligned.get("hmm_prob_bear_trend", np.zeros_like(aligned["close"])),
         float(FUTURES_INITIAL_BALANCE),
         lev_blk,
         MAKER_FEE_RATE,
@@ -887,11 +900,13 @@ def _run_portfolio_numba_block(
         float(params["DD_SCALING_THRESHOLD"]),
         int(params["K_LONG"]),
         int(params["K_SHORT"]),
-        float(params.get("CS_Z_SCORE_THRESHOLD", 1.0)),
+        cs_z_entry,
+        cs_z_exit,
         max(1, int(params["REBALANCE_BARS"])),
         float(params.get("REBALANCE_TURNOVER_THRESHOLD", 0.15)),
         float(params.get("CRISIS_GAMMA", params.get("CRISIS_GATE_PROB", 1.0))),
         use_cs,
+        estimated_b,
     )
     return cast(tuple[np.ndarray, float, np.ndarray, np.ndarray], out_bt)
 
@@ -908,6 +923,7 @@ def objective_ml_phase_d(trial: optuna.Trial, ctx: MLPhaseDContext) -> float | t
 
     ml = _suggest_ml_phase_d(trial)
     params = _base_engine_params(ml, ctx.tf)
+    params["ESTIMATED_B"] = ctx.estimated_b
     cfg = OPT_FUTURES_CONFIG
 
     if trial.number < 10 and awf_slices:
@@ -954,7 +970,7 @@ def objective_ml_phase_d(trial: optuna.Trial, ctx: MLPhaseDContext) -> float | t
 
         zkill, zfund, lev_leg = _cached_kill_fund_lev(aligned, params)
         b_trades_raw, b_bal, b_equity, _b_diag = _run_portfolio_numba_block(
-            params, aligned, zkill, zfund, lev_leg
+            params, aligned, zkill, zfund, lev_leg, ctx.estimated_b
         )
 
         n_tr = int(b_trades_raw.shape[0])
@@ -1069,51 +1085,32 @@ def objective_ml_phase_d(trial: optuna.Trial, ctx: MLPhaseDContext) -> float | t
         s_pf_agg = s_win / max(s_loss, 1e-9) if s_loss > 0 else 1.0
 
     weak_side_pf = float(min(l_pf_agg, s_pf_agg))
-    dir_pf_score = float(np.log(max(weak_side_pf, 1.001)))
 
-    import math as _math
-    k_legs_n = float(max(n_legs_done, 1))
-    mu_log = float(np.mean(leg_arr)) if leg_arr.size > 0 else -10.0
-    sigma_log = float(np.std(leg_arr, ddof=1)) if leg_arr.size > 1 else 0.0
-    
-    # --- COST-AWARE OBJECTIVE ---
-    est_rt_cost = 0.0020
-    trade_cost_drag = (avg_trades_agg * est_rt_cost) / k_legs_n
-    net_mu_log = mu_log - trade_cost_drag
-
-    n_trials_cfg = float(cfg.get("total_trials", 400))
+    # --- PLGD OBJECTIVE (Probabilistic Log Growth Deflation) ---
+    n_trials_cfg = int(cfg.get("total_trials", 400))
     lambda_def = float(cfg.get("FUTURES_PLGD_LAMBDA_DEF", 0.5))
     lambda_tail = float(cfg.get("FUTURES_PLGD_LAMBDA_TAIL", 2.0))
 
-    variance_drag = 0.5 * sigma_log**2
-    sr_bench = _math.sqrt(2.0 * _math.log(max(n_trials_cfg, 2.0)))
-    deflation = lambda_def * sr_bench * sigma_log / _math.sqrt(max(k_legs_n, 1.0))
-    worst_leg = float(np.min(leg_arr)) if leg_arr.size > 0 else -10.0
+    plgd_val = compute_plgd_score(
+        leg_arr,
+        total_trials=n_trials_cfg,
+        lambda_def=lambda_def,
+        lambda_tail=lambda_tail
+    )
 
+    # Optuna minimizes, so we return -PLGD
+    obj = -plgd_val
+
+    # Survivability Penalty: Ensure all legs were at least attempted
+    if n_legs_done < int(cfg.get("FUTURES_AWF_K_LEGS", 5)):
+        obj += 20.0 * (int(cfg.get("FUTURES_AWF_K_LEGS", 5)) - n_legs_done)
+
+    # Metadata for diagnostics
+    k_legs_n = float(max(n_legs_done, 1))
+    mu_log = float(np.mean(leg_arr)) if leg_arr.size > 0 else -10.0
+    worst_leg = float(np.min(leg_arr)) if leg_arr.size > 0 else -10.0
     awf_pos_frac = float(np.sum(leg_arr > 0.0)) / k_legs_n
     dsr_awf = float(min(0.99, max(0.0, awf_pos_frac)))
-
-    w_pos = float(cfg.get("FUTURES_PHASE_D_W_POS_LEGS", 2.5))
-    w_worst = float(cfg.get("FUTURES_PHASE_D_W_WORST_LEG_LOGTW", 2.0))
-    w_pf = float(cfg.get("FUTURES_PHASE_D_W_DIR_PF", 1.0))
-    w_is = float(cfg.get("FUTURES_PHASE_D_W_IS_ALPHA_LOG", 1.2))
-    w_mu = float(cfg.get("FUTURES_PHASE_D_W_MU_LOG", 5.0))
-    plgd_reg_w = float(cfg.get("FUTURES_PHASE_D_PLGD_REG_WEIGHT", 0.12))
-
-    reward = (
-        w_mu * net_mu_log
-        + w_pos * awf_pos_frac
-        + w_worst * worst_leg
-        + w_pf * dir_pf_score
-        + w_is * mu_log
-    )
-    plgd_reg = plgd_reg_w * (variance_drag + deflation)
-
-    obj = -reward + plgd_reg
-    if n_legs_done < int(cfg.get("FUTURES_AWF_K_LEGS", 5)):
-        obj += 10.0 * (int(cfg.get("FUTURES_AWF_K_LEGS", 5)) - n_legs_done)
-    if mu_log < -0.25:
-        obj += 100.0
 
     # --- FINAL USER ATTRS ---
     trial.set_user_attr("cpcv_path_oos_log_tw", [float(x) for x in leg_log_tw])
