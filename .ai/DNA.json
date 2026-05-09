@@ -1,57 +1,46 @@
 {
   "project": "my-coin-traider",
-  "version": "5.2.0",
+  "version": "5.3.0",
   "last_evolution_date": "2026-05-09",
-  "previous_state_hash": "v5.1.0",
+  "previous_state_hash": "v5.2.0",
   "current_logic": {
     "universe_selection": "CS_RANK based filtering",
     "regime_classification": "Unsupervised 5-State TVTP-HMM v4.1.0 (Asymmetric) + Soft Gravity NLL Penalty + Asymmetric Post-Suppression",
     "alpha_generation": "Advanced Cross-Sectional Alpha (LambdaRank DART, Macro-Asset Interaction, CS Z-Score Neutralization, Friction-Aware Dynamic Labeling)",
-    "position_sizing": "Conviction-Weighted Rank Allocation with Platt Calibration & HMM Soft-Scaling",
-    "optimization": "Event-Driven & Hysteresis-Aware Overhaul: Schmitt Trigger (Entry/Exit Z-score), Alpha Turnover Rebalancing (15%), and Relaxed HMM Hard Gates",
+    "position_sizing": "Minimum Conviction Floor (2% Equity) with Platt Calibration & HMM Soft-Scaling",
+    "optimization": "Friction-Aware Search Space: Optimized Turnover Threshold ([0.05, 0.30]), Soft Alpha Exit (Signal Reversal Only), and Dynamic Hysteresis",
     "risk_management": "Orthogonal Ensemble with Online Capital Allocation (EG Algorithm)"
   },
   "key_parameters": {
     "alpha_miner_version": "v6_lambdarank_dart",
     "alpha_gp_feature_schema_version": "v21",
     "calibration_method": "Platt Scaling (Logistic Regression)",
-    "calibration_horizon": 12,
     "sizing_method": "Conviction-Weighted Z-Score Scaling",
-    "optimization_target": "Compounding Growth (mu_log) with Hysteresis-Aware Friction Control",
+    "min_entry_notional_ratio": 0.02,
     "search_space_parameters": [
       "TARGET_ANN_VOL",
-      "CRISIS_GAMMA",
-      "ATR_MULT",
+      "REBALANCE_TURNOVER_THRESHOLD",
       "REBALANCE_BARS",
-      "CS_Z_SCORE_THRESHOLD (Range: 0.5-1.5)",
-      "MIN_SCORE_PERCENTILE"
+      "CS_Z_SCORE_THRESHOLD",
+      "TRAIL_MULT"
     ],
-    "hysteresis": {
-      "cs_z_exit_threshold_ratio": 0.7,
-      "alpha_turnover_rebalance_threshold": 0.15,
-      "absolute_alpha_floor": 0.55
-    },
-    "hmm_mod_soft_floor": 0.1,
-    "ensemble_max_size": 3,
-    "meta_alloc_algorithm": "Exponentiated Gradient (EG)",
-    "meta_alloc_window": 24,
-    "meta_alloc_eta": 0.1
+    "exit_logic": "Signal Reversal (t_dir opposite sign) or Stop/Target",
+    "meta_alloc_algorithm": "Exponentiated Gradient (EG)"
   },
   "best_achieved_metrics": {
-    "note": "v5.2.0 Engine Bottleneck Liquidation (Smoke Test)",
-    "best_is_ic_mean": 0.095,
-    "best_oos_ic_mean": 0.085,
-    "trade_starvation_fix": "PASS (393 trades in smoke OOS vs potential zero in v5.1.0)",
-    "hmm_suppression_fix": "PASS (Regime 3 MOD 0.48 allowed entry via 0.1 soft-floor)",
-    "structural_integrity": "SOTA (Event-driven turnover logic functioning as intended)"
+    "note": "v5.3.0 Structural Friction Liquidation (Full Run)",
+    "trade_churn_reduction": "PASS (557 trades vs 1015 in v5.2.0-pre)",
+    "micro_trade_defense": "PASS (Minimum 2% Notional Floor enforced)",
+    "optimization_efficiency": "PASS (Turnover Threshold optimized via Optuna)",
+    "cagr_status": "HOLD (Negative Net Alpha persists in 1h timeframe)"
   },
   "known_issues": {
-    "net_alpha_barrier": "Current market regime (2026-04) shows persistent negative Alpha despite high IC; logic is sound, but predictive value is temporarily inverted.",
-    "execution_latency": "High-frequency rebalancing (1h) still poses threat if slippage exceeds 0.05%."
+    "prediction_horizon_mismatch": "1h Alpha half-life is too short for Taker fees; structural profit-taking cannot occur before signal neutralization.",
+    "market_noise_dominance": "2026-04 regime shows persistent Alpha inversion (IS/OOS negative)."
   },
   "next_recommended_actions": [
-    "Full Optimization Run: Execute multi-seed 1000-trial search to find the new optimal Hysteresis/Turnover equilibrium.",
-    "Maker-Only Execution: Implement Limit-order logic to harvest spread and offset negative net alpha.",
-    "Symbol Expansion: Push to 24+ symbols to leverage the improved Z-score dispersion logic."
+    "Horizon Pivot: Expand Alpha prediction horizon to 4h-12h to improve Return/Friction ratio.",
+    "Maker-Only Logic: Implement Limit-order execution to bypass Taker fees entirely.",
+    "Feature Engineering: Add regime-specific momentum filters to combat noise in Bear/Chop states."
   ]
 }
