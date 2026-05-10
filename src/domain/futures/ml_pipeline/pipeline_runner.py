@@ -94,7 +94,7 @@ def _attach_tbm_gp_weights(
     collector: DataCollector,
     df_1m: pd.DataFrame | None,
 ) -> pd.DataFrame:
-    """Per tmp.md 2-B: up-weight rows with clear triple-barrier (+1 / -1) hits for GP fitness."""
+    """Up-weight rows with clear triple-barrier (+1 / -1) hits for GP fitness."""
     out = df_1h.copy()
     lab = _try_tbm_labels_per_1h_row(sym, out, label_start, end, df_1m=df_1m, collector=collector)
     if lab is None or len(lab) != len(out):
