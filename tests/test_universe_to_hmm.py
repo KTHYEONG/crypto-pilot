@@ -270,8 +270,10 @@ def test_universe_gp_hmm_flow(tf="1h"):
         return
     
     importlib.reload(config.opt_config)
-    final_symbols = config.opt_config.FUTURES_SYMBOLS[:3] # Limit to top 3 for speed
-    _logger.info(f"Final Symbols (Top 3 for Audit): {final_symbols}")
+    # [3-Tier Universe] Aligned with opt_main_futures.py logic
+    from config.opt_config import FUTURES_MACRO_INDEX_SYMBOLS
+    final_symbols = list(set(config.opt_config.FUTURES_SYMBOLS + FUTURES_ANCHOR_SYMBOLS + FUTURES_MACRO_INDEX_SYMBOLS))
+    _logger.info(f"ML Ready Universe (Total {len(final_symbols)} symbols): {final_symbols}")
 
     # 3. Clear HMM Cache to force fresh training
     from config.settings import FUTURES_CACHE_DIR
@@ -285,19 +287,17 @@ def test_universe_gp_hmm_flow(tf="1h"):
                 except Exception:
                     pass
 
-    # 4. Data Loading for ML (Only for selected symbols)
+    # 4. Data Loading for ML
     data_maps, oos_data_maps, valid_ml_symbols = _load_futures_data_maps_for_symbols(
         final_symbols, tf, fetch_start_date, start_date, is_end_date, end_date
     )
     
-    _logger.info(f"ML Ready Universe: {valid_ml_symbols}")
+    _logger.info(f"Verified ML Universe: {len(valid_ml_symbols)} symbols")
 
     # 5. ML Pipeline (HMM Focused)
     cfg = dict(OPT_FUTURES_CONFIG)
-    cfg["FUTURES_ML_ALPHA_USE_TBM_WEIGHT"] = False
-    # Balanced HMM settings for CPU execution over long window
-    cfg["FUTURES_HMM_N_ITER"] = 500
-    cfg["FUTURES_HMM_FIT_STEP"] = 168
+    # Ensure consistency with opt_main_futures.py defaults
+    # cfg["FUTURES_ML_ALPHA_USE_TBM_WEIGHT"] = True (from opt_config)
     
     import time
     start_time = time.time()
