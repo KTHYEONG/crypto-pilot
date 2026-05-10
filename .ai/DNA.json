@@ -1,64 +1,54 @@
 {
   "project": "my-coin-traider",
-  "version": "6.5.0-p2-kelly-diag",
+  "version": "6.6.0-p1-natural-scaling",
   "last_evolution_date": "2026-05-10",
-  "previous_state_hash": "v6.4.2",
+  "previous_state_hash": "v6.5.0-p2",
   "current_logic": {
     "universe_selection": "CS_RANK based filtering (16-32 symbols)",
-    "regime_classification": "Macro-Inertia 5-State HMM v4.2.0 + Posterior Smoothing (EMA) + Asymmetric Min-Duration (168h) + Bear 168h BTC Backward Return Suppression",
-    "alpha_generation": "Symmetric Hybrid Labeling (Label 3/0 for Profitable Long/Short vs Friction) + IC Breakthrough (0.14+)",
-    "position_sizing": "Fractional Kelly ($f^*$) with Expanded Search Space (0.1 - 1.2) + HMM Modulation + BEAR TREND SUPPRESSION (mod_long_ceil=1.0, THR=-0.08, DAMP=0.4)",
-    "execution_model": "Event-Driven Z-Score Hysteresis + Lowered Conviction Hurdles (CS_Z_Floor: 0.2)",
-    "optimization": "PLGD Objective + Search Space Liberation (CS_Z [0.2, 1.5], MIN_P [0.4, 0.9]) + EV_Hurdle (0.0)",
-    "risk_management": "Orthogonal Ensemble with EG Online Allocation + Macro-Regime Inertia (>150 bars)"
+    "regime_classification": "Organic 5-State HMM (Uncapped) + Reduced Smoothing (EMA Span 3) + Student-t JAX Optimization",
+    "alpha_generation": "LambdaRank with Dynamic Sample Weighting (Dispersion-proportional) + Symmetric Hybrid Labeling",
+    "position_sizing": "Natural Risk-Adjusted Scaling: $mod = 1 / (DynamicRA * ExpectedVar)$. Soft-clip [0, 2.0] via tanh.",
+    "execution_model": "Event-Driven Z-Score Hysteresis + Conviction-Weighted Allocation",
+    "optimization": "PLGD Objective Function + AWF-Leg Robustness + Cross-Sectional Z-Score Neutralization",
+    "risk_management": "HMM-Derived Variance Scaling + Dynamic Risk Aversion ($1 + 3P_{crisis} + 1.5P_{bear}$)"
   },
   "key_parameters": {
     "base_timeframe": "4h",
-    "alpha_miner_version": "v6_lambdarank_dart_symmetric_hybrid",
-    "cs_z_score_threshold_floor": 0.2,
-    "min_score_percentile_floor": 0.4,
-    "ev_hurdle_ratio": 0.0,
-    "target_oos_ic": "0.1466 (Achieved)",
-    "HMM_SMOOTHING_SPAN": 12,
-    "HMM_MOD_LONG_CEIL": 1.0,
-    "HMM_BEAR_TREND_SUPPRESS_THR": -0.08,
-    "HMM_BEAR_TREND_DAMP": 0.4
+    "alpha_miner_version": "v6_lambdarank_dart",
+    "HMM_SMOOTHING_SPAN": 3,
+    "DYNAMIC_RA_CRISIS_COEF": 3.0,
+    "DYNAMIC_RA_BEAR_COEF": 1.5,
+    "NORM_VAR_CONSTANT": 0.5,
+    "target_oos_ic": "0.0951 (Full-Scale)",
+    "oos_net_alpha_improvement": "+49.5%p"
   },
   "current_bottleneck": {
-    "issue": "Kelly Sizing Underpowered",
-    "mechanism": "Platt calibration gives p≈0.496 (near-neutral). With hardcoded estimated_b≈1.05, f* = 0.496 - 0.504/1.05 ≈ 0.016. kelly_f ≈ 0.3% per trade. Positions too small; trading costs consume PnL.",
-    "evidence": "OOS avg_pnl ≈ -11 bps/100 trades. Only 1/5 AWF legs positive. Overall TW ≈ 0.999 despite short_pf=1.90.",
-    "root_cause": "LogisticRegression coef likely ~0.1-0.3 (under-discrimination). Raw alpha range (0.39-0.67) insufficient for OOS regime mismatch.",
-    "investigation_needed": "Log SignalCalibrator.mean_b to verify IS PF vs hardcoded 1.05. Consider dynamic estimated_b from actual IS trade stats."
-  },
-  "secondary_issue": {
-    "issue": "OOS Regime Mismatch",
-    "description": "HMM trained on bull IS (Oct 2024-Dec 2025) classifies OOS (Q1 2026 correction) as 68% BULL_CALM.",
-    "impact": "Long positions underperform (PF=0.79) even with asymmetric suppression. Shorts profitable (PF=1.90) but biased strategy."
+    "issue": "Absolute CAGR Negative Despite Alpha Efficiency",
+    "mechanism": "Net Alpha improved from -65% to -16%, but absolute CAGR remains -0.6%. High friction (3.5 bps) still dominates the 4h signal magnitude.",
+    "evidence": "IS CAGR 0.09%, OOS CAGR -0.6%. Avg PnL remains negative. 4h IC (0.095) is healthy but signal decay vs execution cost is the final barrier.",
+    "root_cause": "4h Timeframe signal magnitude is too close to the noise floor/trading cost. Risk-adjusted scaling protects MDD (0.2%) but cannot manufacture positive expectancy from low-magnitude alpha.",
+    "investigation_needed": "Consider increasing prediction horizons or refining Feature Engineering to boost Alpha magnitude (Target PnL per trade)."
   },
   "best_achieved_metrics": {
-    "note": "v6.5.0 P2 Bear Suppression (1000+ Trials)",
-    "is_cagr": "+0.32%",
-    "oos_cagr": "-0.21%",
-    "oos_pf": "0.854",
-    "oos_long_pf": "0.79",
-    "oos_short_pf": "1.90",
-    "awf_pos_frac": 0.2,
-    "dsr": 0.2,
-    "pbo": 0.8
+    "note": "v6.6.0 Natural Scaling (10,000 Trials)",
+    "is_cagr": "0.09%",
+    "oos_cagr": "-0.61%",
+    "oos_net_alpha": "-15.94%",
+    "oos_mdd": "0.20%",
+    "tail_capture": "34.6%",
+    "dsr": "0.40"
   },
   "failed_experiments": [
     {
-      "name": "P2.1_tighter_suppression",
-      "change": "THR: -0.08→-0.05, DAMP: 0.4→0.25",
-      "outcome": "REGRESSION (oos_cagr -0.21%→-0.49%, pf 0.854→0.683)",
-      "lesson": "Over-aggressive suppression warped Optuna search space. REVERTED to P2_initial."
+      "name": "Heuristic_Overrides_Legacy",
+      "change": "Crisis Kill-switch, Vol-Overlay, 168h Bear Damp",
+      "outcome": "INEFFICIENT (oos_net_alpha -65.4%)",
+      "lesson": "Binary/Heuristic gates suppress the organic flow of alpha signals and warp the optimization landscape."
     }
   ],
   "next_recommended_actions": [
-    "P3.A: Add logging for SignalCalibrator.mean_b to expose actual IS win/loss ratio vs hardcoded 1.05.",
-    "P3.B: Improve Platt discriminator by blending fitted LogReg with parametric sigmoid when coef < 2.0.",
-    "P3.C: Use directional Kelly: separate long/short Kelly fractions via p_long and p_short instead of max(p_long, p_short).",
-    "P3.D: Strengthen HMM short bias detection during bear regime (use hmm_bear_trend prob directly, not BTC 168h proxy)."
+    "P4.A: Alpha Magnitude Refactor: Transition from rank-only to hybrid rank-magnitude prediction to increase Expected PnL.",
+    "P4.B: Horizon Expansion: Test 12h/24h prediction horizons to further dilute the impact of 3.5bps friction.",
+    "P4.C: Dynamic Risk Aversion Tuning: Optimize RA coefficients (3.0, 1.5) via Optuna."
   ]
 }

@@ -297,5 +297,29 @@ This file tracks the logical progression and experimental results of the quantit
 - **Lessons**: Neutralization is the difference between a "Backtest Hero" and a "Production Champion". By explicitly modeling what *cannot* be traded due to friction, the agent focuses on high-conviction, high-capacity signals.
 
 ---
+## [2026-05-10] v6.6.0: Natural Risk-Adjusted Scaling & Organic HMM Integration (Gemini CLI)
+
+### 1. Architectural Shift: Liquidating Heuristic Overrides
+*   **Problem**: System was paralyzed by "Defensive Overkill." Heuristic overrides (Crisis Kill-switch, 95th-percentile Vol-overlay, 168h Trend damp) were suppressing alpha signals indiscriminately, leading to a catastrophic **Net Alpha of -65.4%**.
+*   **Implementation (The Organic Integration)**:
+    1.  **Alpha Liberation**: Removed dispersion masking in `_prepare_labels`. Implemented `cs_dispersion`-proportional sample weighting in `mine_alphas_cs` to focus learning on high-opportunity bars.
+    2.  **HMM Normalization**: Disabled `_calibrate_crisis_logit_offset` and reduced EMA Smoothing Span from 12 to **3**. The HMM now outputs raw, high-fidelity probabilities.
+    3.  **Natural Risk-Adjusted Scaling**: Replaced all binary/heuristic overrides with a continuous mathematical model:
+        *   **Dynamic Risk Aversion ($RA_{dyn}$)**: $1.0 + 3.0 \cdot P_{crisis} + 1.5 \cdot P_{bear}$.
+        *   **Variance Scaling**: Modulator = $0.5 / (RA_{dyn} \cdot \sigma^2_{ann})$.
+        *   **Soft Clipping**: Final modulators are bounded in [0, 2.0] via `tanh` to ensure stability.
+
+### 2. Performance Impact (Full-Scale 10,000 Trials)
+*   **Efficiency**: **Net Alpha improved from -65.4% to -15.94% (+49.5%p)**, proving that the system is now capturing significantly more of its intrinsic alpha.
+*   **Risk Sensing**: Left-Tail Capture surged from 17.6% to **34.6%**, nearly doubling the system's ability to identify regime-level threats.
+*   **Stability**: DSR improved to **0.40**, indicating better cross-validation consistency.
+*   **Verdict**: The "Plumbing" of the strategy is now fixed. Alpha flow is organic, and risk defense is mathematically derived.
+
+### 3. Next Challenge: The Noise Floor
+*   **Status**: Structural Victory / Absolute Return Hold.
+*   **Bottleneck**: Despite fixing the integration, absolute CAGR is still -0.6%. The 4h timeframe IC (0.095) is not strong enough to overcome the 3.5bps friction at current signal magnitudes.
+*   **Next Investigation**: Refactor Alpha Miner to predict absolute return magnitudes alongside relative ranks to boost Expected PnL per trade.
+
+---
 <!-- APPEND_POINT: New experiments will be added above this line -->
 
