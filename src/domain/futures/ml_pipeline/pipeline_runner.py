@@ -19,17 +19,18 @@ from src.domain.futures.data_loader import (
     merge_funding_into_ohlcv,
     merge_metrics_into_ohlcv,
 )
+from src.domain.futures.ml_pipeline.alpha.gp_availability import is_deap_available
+from src.domain.futures.ml_pipeline.alpha.miner import MLAlphaMiner
 from src.domain.futures.ml_pipeline.features.cross_sectional import CrossSectionalPipelineUtils
 from src.domain.futures.ml_pipeline.features.engineering import (
     ALPHA_ENGINEERED_FEATURE_NAMES,
     HMM_SEMANTIC_PROB_COLUMNS,
     build_gp_input_features,
 )
-from src.domain.futures.ml_pipeline.alpha.gp_availability import is_deap_available
-from src.domain.futures.ml_pipeline.regime.hmm_inferrer import HMMStateInferrer
 from src.domain.futures.ml_pipeline.labels.meta_labeler import MetaLabeler
-from src.domain.futures.ml_pipeline.alpha.miner import MLAlphaMiner
 from src.domain.futures.ml_pipeline.labels.triple_barrier import label_triple_barrier
+from src.domain.futures.ml_pipeline.regime.hmm_inferrer import HMMStateInferrer
+from src.domain.futures.optimization.optimizer import SignalCalibrator
 
 _logger = logging.getLogger(__name__)
 
@@ -246,20 +247,15 @@ def _hmm_modulator_kelly_values(
     market_probs: pd.DataFrame,
     alpha_panel: pd.DataFrame,
     is_end_utc: pd.Timestamp,
-    btc_df: pd.DataFrame | None,
+    price_df_1h: pd.DataFrame | None,
     shrink: float,
     crisis_thr: float,
     market_hmm_feats: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
-    """[REFACTORED] Posterior-weighted asymmetric modulators (Long/Short).
-
-    Returns DataFrame with columns ['hmm_modulator_long', 'hmm_modulator_short',
-    'hmm_modulator_base_long', 'btc_trend_vol_adj_24h'].
-    hmm_modulator_base_long = pre-crisis-kill modulator (for probe replay).
-    """
+    """Posterior-weighted asymmetric modulators from IS Kelly; fwd returns from ``price_df_1h``."""
     cols = _sorted_hmm_prob_columns(market_probs)
     n = len(market_probs)
-    if not cols or btc_df is None or len(btc_df) < 80:
+    if not cols or price_df_1h is None or len(price_df_1h) < 80:
         return pd.DataFrame({
             "hmm_modulator_long": np.full(n, 1.0, dtype=np.float64),
             "hmm_modulator_short": np.full(n, 1.0, dtype=np.float64),
@@ -268,7 +264,7 @@ def _hmm_modulator_kelly_values(
         })
 
     k_states = len(cols)
-    b = btc_df.sort_values("datetime").copy()
+    b = price_df_1h.sort_values("datetime").copy()
     b["datetime"] = pd.to_datetime(b["datetime"], utc=True)
     c = b["close"].astype(np.float64)
     fwd_1h = np.log(c.shift(-1) / c.clip(lower=1e-12)).fillna(0.0)
@@ -297,8 +293,10 @@ def _hmm_modulator_kelly_values(
         mod_long = np.clip(1.0 + float(shrink) * conf_multiplier * (p_mat @ k_long), 0.1, 2.5).astype(np.float64)
         mod_short = np.clip(1.0 + float(shrink) * conf_multiplier * (p_mat @ k_short), 0.1, 2.5).astype(np.float64)
     else:
-        # Apply shrink to deviations from 1.0
-        mod_long = np.clip(1.0 + float(shrink) * (p_mat @ k_long), 0.3, 2.0).astype(np.float64)
+        # Asymmetric ceiling: longs capped at 1.0 (only suppress, never amplify from IS-bull bias);
+        # shorts can go up to 2.0 (crisis tail compression amplifies short exposure correctly).
+        _mod_long_ceil = float(OPT_FUTURES_CONFIG.get("FUTURES_HMM_MOD_LONG_CEIL", 1.0))
+        mod_long = np.clip(1.0 + float(shrink) * (p_mat @ k_long), 0.3, _mod_long_ceil).astype(np.float64)
         mod_short = np.clip(1.0 + float(shrink) * (p_mat @ k_short), 0.3, 2.0).astype(np.float64)
 
     # Crisis prob for kill-switch (regime override removed — IS-Kelly drives modulators)
@@ -354,12 +352,70 @@ def _hmm_modulator_kelly_values(
     mod_long = np.where(is_extreme_vol, mod_long * 0.5, mod_long)
     mod_short = np.where(is_extreme_vol, mod_short * 0.5, mod_short)
 
+    # Backward-looking BTC 168h (7-day) trend overlay — no look-ahead bias.
+    # Suppresses long modulator during sustained downtrends to counter HMM's IS-bull bias.
+    _bear_thr = float(OPT_FUTURES_CONFIG.get("FUTURES_HMM_BEAR_TREND_SUPPRESS_THR", -0.08))
+    _bear_damp = float(OPT_FUTURES_CONFIG.get("FUTURES_HMM_BEAR_TREND_DAMP", 0.4))
+    if _bear_thr < 0.0:
+        ret_168h = (c / c.shift(168).clip(lower=1e-12) - 1.0).fillna(0.0)
+        b_trend = b[["datetime"]].copy()
+        b_trend["ret_168h"] = ret_168h
+        merged_trend = merged[["datetime"]].merge(b_trend, on="datetime", how="left")
+        is_bear_trend = (merged_trend["ret_168h"].fillna(0.0).to_numpy() < _bear_thr)
+        mod_long = np.where(is_bear_trend, mod_long * _bear_damp, mod_long)
+
     return pd.DataFrame({
         "hmm_modulator_long": mod_long,
         "hmm_modulator_short": mod_short,
         "hmm_modulator_base_long": mod_long_base,
         "btc_trend_vol_adj_24h": trend_24h,
     })
+
+
+def _hmm_modulator_kelly_per_symbol(
+    market_probs: pd.DataFrame,
+    alpha_panel: pd.DataFrame,
+    is_end_utc: pd.Timestamp,
+    prefetched_1h: dict[str, pd.DataFrame],
+    universe_syms: list[str],
+    shrink: float,
+    crisis_thr: float,
+    market_hmm_feats: pd.DataFrame | None,
+    anchor_symbol: str | None,
+) -> dict[str, pd.DataFrame]:
+    """One Kelly modulator per symbol using that symbol's 1h OHLC fwd returns; fallback = anchor (e.g. BTC)."""
+    anchor_df = prefetched_1h.get(anchor_symbol) if anchor_symbol else None
+    fallback = _hmm_modulator_kelly_values(
+        market_probs,
+        alpha_panel,
+        is_end_utc,
+        anchor_df,
+        shrink,
+        crisis_thr,
+        market_hmm_feats,
+    )
+    out: dict[str, pd.DataFrame] = {}
+    for sym in universe_syms:
+        df = prefetched_1h.get(sym)
+        if (
+            df is not None
+            and len(df) >= 80
+            and "close" in df.columns
+            and "high" in df.columns
+            and "low" in df.columns
+        ):
+            out[sym] = _hmm_modulator_kelly_values(
+                market_probs,
+                alpha_panel,
+                is_end_utc,
+                df,
+                shrink,
+                crisis_thr,
+                market_hmm_feats,
+            )
+        else:
+            out[sym] = fallback
+    return out
 
 
 def _try_tbm_labels_per_1h_row(
@@ -472,6 +528,38 @@ def _meta_probs_wf_refit(
     return pl_out, ps_out
 
 
+def _platt_calib_probs_wf(
+    aligned_tf: pd.DataFrame,
+    gp_base: np.ndarray,
+    gp_long: np.ndarray,
+    gp_short: np.ndarray,
+    is_end_utc: pd.Timestamp,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Platt on IS (alpha vs forward return), then predict p(win) for long/short scores.
+
+    Matches ``precompute_ml_optimization_context`` / ``SignalCalibrator`` usage so WF OOS
+    backtests agree with Phase-D precompute when MetaLabeler is off or fails.
+    """
+    horizon = int(OPT_FUTURES_CONFIG.get("FUTURES_ML_ALPHA_TARGET_HORIZON", 12))
+    min_is = 80
+    _close_col = "close" if "close" in aligned_tf.columns else "close_x"
+    close = aligned_tf[_close_col].astype(np.float64)
+    fwd_ret = close.pct_change(horizon).shift(-horizon).to_numpy(dtype=np.float64)
+    dt = pd.to_datetime(aligned_tf["datetime"], utc=True)
+    is_mask = (dt < is_end_utc).to_numpy()
+    valid = is_mask & np.isfinite(gp_base) & np.isfinite(fwd_ret)
+
+    calib = SignalCalibrator()
+    if int(valid.sum()) >= min_is:
+        y_bin = (fwd_ret[valid] > 0.0001).astype(int)
+        if len(np.unique(y_bin)) > 1:
+            calib.fit(gp_base[valid], fwd_ret[valid])
+
+    p_long = np.clip(calib.predict_prob(gp_long.astype(np.float64, copy=False)), 0.0, 1.0)
+    p_short = np.clip(calib.predict_prob(gp_short.astype(np.float64, copy=False)), 0.0, 1.0)
+    return p_long.astype(np.float64), p_short.astype(np.float64)
+
+
 def _apply_ml_calib_probs(
     aligned_tf: pd.DataFrame,
     wide_1h: pd.DataFrame,
@@ -483,7 +571,7 @@ def _apply_ml_calib_probs(
     use_meta: bool,
     df_1m_prefetch: pd.DataFrame | None = None,
 ) -> None:
-    """Cross-sectional scores (gp x HMM); ml_calib_* = 1.0; optional MetaLabeler refit."""
+    """Cross-sectional scores (gp x HMM); ml_calib_* via MetaLabeler or Platt (IS WF)."""
     hmm_m_long = (
         aligned_tf["hmm_modulator_long"].to_numpy(dtype=np.float64)
         if "hmm_modulator_long" in aligned_tf.columns
@@ -549,6 +637,7 @@ def _apply_ml_calib_probs(
     n = len(aligned_tf)
     pl = np.ones(n, dtype=np.float64)
     ps = np.ones(n, dtype=np.float64)
+    used_meta = False
 
     if can_meta:
         X_w = wide_1h[list(meta_feats)].replace([np.inf, -np.inf], np.nan).fillna(0.0)
@@ -566,8 +655,12 @@ def _apply_ml_calib_probs(
                     hmm_m_short,
                     is_end_idx,
                 )
+                used_meta = True
             except Exception as exc:
                 _logger.debug("MetaLabeler WF refit skipped: %s", exc)
+
+    if not used_meta:
+        pl, ps = _platt_calib_probs_wf(aligned_tf, gp_base, gp_long, gp_short, is_end_utc)
 
     aligned_tf["ml_calib_prob_long"] = pl
     aligned_tf["ml_calib_prob_short"] = ps
@@ -707,7 +800,14 @@ def _step4_fusion_one_symbol(
         if drop_exist:
             df_tf_full = df_tf_full.drop(columns=drop_exist)
 
-        aligned_tf = pd.merge(df_tf_full, wide_1h, on="datetime", how="left").fillna(0.0)
+        # Drop OHLCV columns from wide_1h to prevent _x/_y suffix collision when TF != 1h.
+        # We keep the trading-TF OHLCV from df_tf_full; 1h OHLCV is not needed post-merge.
+        _ohlcv_base = {"open", "high", "low", "close", "volume"}
+        wide_1h_for_merge = wide_1h.drop(
+            columns=[c for c in _ohlcv_base if c in wide_1h.columns and c in df_tf_full.columns],
+        )
+
+        aligned_tf = pd.merge(df_tf_full, wide_1h_for_merge, on="datetime", how="left").fillna(0.0)
 
         _apply_ml_calib_probs(
             aligned_tf,
@@ -1075,21 +1175,31 @@ def run_hmm_fusion_for_is_end(
     btc_anchor = next((s for s in symbols if "BTC" in s), None)
     btc_1h = prefetched_1h.get(btc_anchor) if btc_anchor else None
 
-    hmm_modulator = _hmm_modulator_kelly_values(
+    hmm_modulator_by_sym = _hmm_modulator_kelly_per_symbol(
         market_probs,
         alpha_panel,
         is_end_utc,
-        btc_1h,
+        prefetched_1h,
+        symbols,
         float(cfg.get("FUTURES_HMM_KELLY_SHRINKAGE", 0.4)),
         float(cfg.get("FUTURES_HMM_CRISIS_THRESHOLD", 0.7)),
         market_hmm_feats,
+        btc_anchor,
     )
-    hmm_modulator["datetime"] = market_probs["datetime"]
+    dt_series = market_probs["datetime"]
+    for _mod_df in hmm_modulator_by_sym.values():
+        _mod_df["datetime"] = dt_series
+
+    hmm_modulator_audit = (
+        hmm_modulator_by_sym[btc_anchor]
+        if btc_anchor and btc_anchor in hmm_modulator_by_sym
+        else (next(iter(hmm_modulator_by_sym.values())) if hmm_modulator_by_sym else pd.DataFrame())
+    )
 
     h_rep = _print_hmm_summary(
         market_probs,
         market_hmm_feats,
-        hmm_modulator,
+        hmm_modulator_audit,
         btc_1h,
         mode_label=summary_mode_label,
     )
@@ -1125,6 +1235,7 @@ def run_hmm_fusion_for_is_end(
             one_m_cache = {s: dm for s, dm in ex.map(_prefetch_1m, need_1m)}
 
     def _fusion_job(s: str) -> _Step4FusionOutcome:
+        mod_df = hmm_modulator_by_sym.get(s, hmm_modulator_audit)
         return _step4_fusion_one_symbol(
             s,
             tf,
@@ -1133,7 +1244,7 @@ def run_hmm_fusion_for_is_end(
             alpha_by_sym,
             valid_alpha_set,
             market_probs,
-            hmm_modulator,
+            mod_df,
             fetch_start,
             end,
             is_end_utc,

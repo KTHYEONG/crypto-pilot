@@ -371,58 +371,34 @@ def _empirical_mu_sigma_sharpe(hard: np.ndarray, rets: np.ndarray, n_states: int
 
 
 def _assign_semantic_five_state(emp_mu: np.ndarray, emp_sig: np.ndarray, sharpe: np.ndarray) -> dict[str, int]:
-    """Map 5 latent states: CRISIS, BEAR, CHOP, CALM_BULL, VOL_UP (v4.0.0 Pragmatic).
+    """Map 5 latent states (v5 Sharpe-priority + μ crisis rule).
 
-    1. Sort by emp_sig. Top 2 = High Vol Group, Bottom 3 = Low Vol Group.
-    2. High Vol Group: Lower emp_mu -> CRISIS, Higher emp_mu -> BULL_VOL_UP.
-    3. Low Vol Group: Sort by emp_mu. Lowest -> BEAR, Middle -> CHOP, Highest -> BULL_CALM.
+    - CRISIS: among states with μ<0 pick most negative μ; if none, global argmin(μ).
+    - BULL_CALM: highest Sharpe among non-crisis states.
+    - Remaining three: highest σ → BULL_VOL_UP; of the two low-σ, lower μ → BEAR, other → CHOP.
     """
     if len(emp_mu) != 5:
         raise ValueError("five-state semantic map requires K=5")
 
-    idx_all = np.arange(5)
-    
-    # 1. Sort by empirical sigma (Sigma 2:3 split)
-    sig_order = np.argsort(emp_sig)
-    low_vol_group = sig_order[:3]   # Bottom 3
-    high_vol_group = sig_order[3:]  # Top 2
+    sharpe_arr = np.asarray(sharpe, dtype=np.float64)
+    emp_mu_arr = np.asarray(emp_mu, dtype=np.float64)
 
-    # 2. High Vol Group (2 states)
-    hv_mu_order = high_vol_group[np.argsort(emp_mu[high_vol_group])]
-    crisis_idx = int(hv_mu_order[0])
-    bull_vol_idx = int(hv_mu_order[1])
-
-    # 3. Low Vol Group (3 states)
-    lv_mu = emp_mu[low_vol_group]
-    lv_mu_order = low_vol_group[np.argsort(lv_mu)]
-    
-    mu_min = float(np.min(lv_mu))
-    mu_max = float(np.max(lv_mu))
-
-    # [FIX] Relative Labeling Bias: Implement bijection-preserving dynamic mapping.
-    if mu_min > 1e-6:
-        # Case: Bullish Drift [CHOP, BULL, BULL_CALM]
-        # Shift: LV states take BULL/CHOP names, HV states take BEAR/CRISIS names.
-        crisis_idx = int(hv_mu_order[0])
-        bear_idx = int(hv_mu_order[1])
-        chop_idx = int(lv_mu_order[0])
-        bull_calm_idx = int(lv_mu_order[1])
-        bull_vol_idx = int(lv_mu_order[2])
-    elif mu_max < -1e-6:
-        # Case: Bearish Drift [BEAR_STEEP, BEAR, CHOP]
-        # Shift: LV states take BEAR/CHOP names, HV states take BULL names.
-        crisis_idx = int(lv_mu_order[0])
-        bear_idx = int(lv_mu_order[1])
-        chop_idx = int(lv_mu_order[2])
-        bull_calm_idx = int(hv_mu_order[0])
-        bull_vol_idx = int(hv_mu_order[1])
+    neg_mask = emp_mu_arr < 0
+    if np.any(neg_mask):
+        crisis_idx = int(np.argmin(np.where(neg_mask, emp_mu_arr, np.inf)))
     else:
-        # Case: Normal / Mixed [BEAR, CHOP, BULL_CALM]
-        crisis_idx = int(hv_mu_order[0])
-        bull_vol_idx = int(hv_mu_order[1])
-        bear_idx = int(lv_mu_order[0])
-        chop_idx = int(lv_mu_order[1])
-        bull_calm_idx = int(lv_mu_order[2])
+        crisis_idx = int(np.argmin(emp_mu_arr))
+
+    other_idx = np.delete(np.arange(5), crisis_idx)
+    bull_calm_idx = int(other_idx[np.argmax(sharpe_arr[other_idx])])
+
+    remaining = np.delete(other_idx, np.where(other_idx == bull_calm_idx)[0])
+    sig_order = remaining[np.argsort(emp_sig[remaining])]
+    bull_vol_idx = int(sig_order[-1])
+    low_vol = sig_order[:-1]
+    mu_order = low_vol[np.argsort(emp_mu_arr[low_vol])]
+    bear_idx = int(mu_order[0])
+    chop_idx = int(mu_order[1])
 
     return {
         "bull_calm": bull_calm_idx,
