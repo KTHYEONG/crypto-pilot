@@ -100,12 +100,6 @@ class MLAlphaMiner:
             
             # Label 1: Default/Chop (All others)
         
-        # Suppress labels in quiet regimes (low dispersion) to avoid learning noise
-        if dispersion is not None:
-            threshold = dispersion.quantile(0.20)
-            disp_mask = dispersion < threshold
-            labels[disp_mask.to_numpy()] = 1  # Reset to Chop
-            
         return labels
 
     def mine_alphas_cs(
@@ -172,10 +166,14 @@ class MLAlphaMiner:
             else:
                 is_mask = np.ones(len(work_df), dtype=bool)
 
-            # [Plan B-1] Sample Weighting (Magnitude-Aware)
-            # Higher weight on bars with large cross-sectional dispersion or high absolute returns.
-            # Here we use absolute target value as a proxy for profit opportunity.
-            raw_weights = work_df["target"].abs().to_numpy()
+            # [Plan B-1] Sample Weighting (Dispersion-Aware)
+            # Higher weight on bars with high cross-sectional dispersion to allow the model
+            # to learn more from high-opportunity/high-dispersion bars while naturally de-weighting low-opportunity ones.
+            if "cs_dispersion" in work_df.columns:
+                raw_weights = work_df["cs_dispersion"].to_numpy()
+            else:
+                raw_weights = work_df["target"].abs().to_numpy()
+            
             # Normalize weights to mean 1.0 to maintain learning rate stability
             sample_weights_all = raw_weights / (raw_weights.mean() + 1e-12)
 

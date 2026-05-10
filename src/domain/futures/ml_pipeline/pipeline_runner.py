@@ -285,38 +285,38 @@ def _hmm_modulator_kelly_values(
 
     k_long, k_short = _is_kelly_per_semantic_state(p_mat, fwd_ret, is_mask, k_states, cols)
 
-    # [Improvement 2] Dynamic Kelly Scaling
-    if bool(OPT_FUTURES_CONFIG.get("FUTURES_HMM_DYNAMIC_KELLY_ENABLED", False)):
-        p_max = np.max(p_mat, axis=1)
-        # multiplier: certainty relative to uniform distribution (1/k_states)
-        conf_multiplier = np.clip(p_max * float(k_states), 0.5, 1.5)
-        mod_long = np.clip(1.0 + float(shrink) * conf_multiplier * (p_mat @ k_long), 0.1, 2.5).astype(np.float64)
-        mod_short = np.clip(1.0 + float(shrink) * conf_multiplier * (p_mat @ k_short), 0.1, 2.5).astype(np.float64)
-    else:
-        # Asymmetric ceiling: longs capped at 1.0 (only suppress, never amplify from IS-bull bias);
-        # shorts can go up to 2.0 (crisis tail compression amplifies short exposure correctly).
-        _mod_long_ceil = float(OPT_FUTURES_CONFIG.get("FUTURES_HMM_MOD_LONG_CEIL", 1.0))
-        mod_long = np.clip(1.0 + float(shrink) * (p_mat @ k_long), 0.3, _mod_long_ceil).astype(np.float64)
-        mod_short = np.clip(1.0 + float(shrink) * (p_mat @ k_short), 0.3, 2.0).astype(np.float64)
+    # [REFACTORED] Natural Risk-Adjusted Scaling (Phase 8)
+    # 1. Base directional modulators from IS Kelly
+    mod_long_base = 1.0 + float(shrink) * (p_mat @ k_long)
+    mod_short_base = 1.0 + float(shrink) * (p_mat @ k_short)
 
-    # Crisis prob for kill-switch (regime override removed — IS-Kelly drives modulators)
+    # 2. Risk-Aversion (dynamic_ra) increases with p_crisis and p_bear_trend
     p_crisis = merged["hmm_prob_crisis"].to_numpy(dtype=np.float64)
+    p_bear = merged["hmm_prob_bear_trend"].to_numpy(dtype=np.float64) if "hmm_prob_bear_trend" in merged.columns else np.zeros(n)
+    dynamic_ra = 1.0 + 3.0 * p_crisis + 1.5 * p_bear
 
-    # Capture pre-kill state for probe replay (before crisis suppression)
-    mod_long_base: np.ndarray = mod_long.copy()
+    # 3. HMM-derived market variance (Annualized)
+    # macro_vol_24h is Yang-Zhang hourly volatility from build_systemic_hmm_features
+    if market_hmm_feats is not None and "macro_vol_24h" in market_hmm_feats.columns:
+        # Align to merged dataframe via datetime
+        vol_ser = market_hmm_feats["macro_vol_24h"].reindex(merged["datetime"]).ffill().bfill().fillna(0.01)
+        vol_1h = vol_ser.to_numpy(dtype=np.float64)
+        # Annualize: vol_1h * sqrt(24 * 365)
+        expected_variance = (vol_1h * np.sqrt(8760))**2
+    else:
+        # Fallback to neutral variance (approx 50% annual vol)
+        expected_variance = np.full(n, 0.25, dtype=np.float64)
 
-    # Apply Crisis Kill-Switch (Safety First)
-    if "hmm_prob_crisis" in market_probs.columns:
-        pc = p_crisis
-        gamma = float(OPT_FUTURES_CONFIG.get("CRISIS_GAMMA", 2.0))
-        # Soft-decay: factor = (1 - pc)^gamma
-        soft_factor = np.power(1.0 - pc, gamma)
-        mod_long = mod_long * soft_factor
-        # Shorts are less suppressed: (1 - pc)^(gamma/2)
-        mod_short = mod_short * np.power(1.0 - pc, gamma / 2.0)
+    # 4. Natural Risk-Adjusted Scaling: modulator = 1.0 / (dynamic_ra * expected_variance)
+    # Apply soft-clip via tanh to keep in [0.0, 2.0]. 
+    # Use 0.5 as normalization constant so that var=0.25 (50% vol) and RA=1 -> scale ~1.0
+    scale_raw = 0.5 / (dynamic_ra * expected_variance + 1e-6)
+    risk_scale = 2.0 * np.tanh(scale_raw)
 
-    # RECOVERY Override: crisis label + positive 24h trend → partial lift
-    # Activated only when CRISIS_RECOVERY_TREND_THR < 1e8 in OPT_FUTURES_CONFIG.
+    mod_long = np.clip(mod_long_base * risk_scale, 0.0, 2.0).astype(np.float64)
+    mod_short = np.clip(mod_short_base * risk_scale, 0.0, 2.0).astype(np.float64)
+
+    # BTC trend for diagnostic report only
     trend_24h: np.ndarray = np.zeros(n, dtype=np.float64)
     if market_hmm_feats is not None and "btc_trend_vol_adj_24h" in market_hmm_feats.columns:
         feat_tmp = market_hmm_feats[["btc_trend_vol_adj_24h"]].copy()
@@ -328,41 +328,6 @@ def _hmm_modulator_kelly_values(
         feat_tmp["datetime"] = pd.to_datetime(feat_tmp["datetime"], utc=True)
         merged_rec = merged[["datetime"]].merge(feat_tmp, on="datetime", how="left")
         trend_24h = merged_rec["btc_trend_vol_adj_24h"].fillna(0.0).to_numpy(dtype=np.float64)
-
-    rec_thr = float(OPT_FUTURES_CONFIG.get("CRISIS_RECOVERY_TREND_THR", 1e9))
-    rec_floor = float(OPT_FUTURES_CONFIG.get("CRISIS_RECOVERY_FLOOR", 0.30))
-    if rec_thr < 1e8 and "hmm_prob_crisis" in market_probs.columns:
-        is_recovery = (p_crisis > float(crisis_thr)) & (trend_24h > rec_thr)
-        mod_long = np.where(is_recovery, np.maximum(mod_long, rec_floor), mod_long)
-
-    # [NEW] Pragmatic Alternative 4: Post-HMM Volatility Overlay
-    # Suppress position sizes by 50% if raw BTC volatility is in the extreme top 5% (Fat-tail).
-    # This prevents the Gaussian HMM from being blinded by outlier magnitudes.
-    atr_24 = (b["high"] - b["low"]).rolling(24).mean()
-    atr_pct = (atr_24 / b["close"].shift(1).clip(lower=1e-12))
-    # Aligned to merged dataframe via datetime
-    b_vol = b[["datetime"]].copy()
-    b_vol["atr_pct"] = atr_pct.fillna(0.0)
-    # 500h causal window for quantile to adapt to market regime shifts
-    b_vol["vol_q95"] = b_vol["atr_pct"].rolling(500, min_periods=100).quantile(0.95).fillna(1e9)
-
-    merged_vol = merged[["datetime"]].merge(b_vol, on="datetime", how="left")
-    is_extreme_vol = (merged_vol["atr_pct"] > merged_vol["vol_q95"]).to_numpy()
-    
-    mod_long = np.where(is_extreme_vol, mod_long * 0.5, mod_long)
-    mod_short = np.where(is_extreme_vol, mod_short * 0.5, mod_short)
-
-    # Backward-looking BTC 168h (7-day) trend overlay — no look-ahead bias.
-    # Suppresses long modulator during sustained downtrends to counter HMM's IS-bull bias.
-    _bear_thr = float(OPT_FUTURES_CONFIG.get("FUTURES_HMM_BEAR_TREND_SUPPRESS_THR", -0.08))
-    _bear_damp = float(OPT_FUTURES_CONFIG.get("FUTURES_HMM_BEAR_TREND_DAMP", 0.4))
-    if _bear_thr < 0.0:
-        ret_168h = (c / c.shift(168).clip(lower=1e-12) - 1.0).fillna(0.0)
-        b_trend = b[["datetime"]].copy()
-        b_trend["ret_168h"] = ret_168h
-        merged_trend = merged[["datetime"]].merge(b_trend, on="datetime", how="left")
-        is_bear_trend = (merged_trend["ret_168h"].fillna(0.0).to_numpy() < _bear_thr)
-        mod_long = np.where(is_bear_trend, mod_long * _bear_damp, mod_long)
 
     return pd.DataFrame({
         "hmm_modulator_long": mod_long,
