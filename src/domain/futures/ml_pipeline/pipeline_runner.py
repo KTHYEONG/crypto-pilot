@@ -285,45 +285,39 @@ def _hmm_modulator_kelly_values(
 
     k_long, k_short = _is_kelly_per_semantic_state(p_mat, fwd_ret, is_mask, k_states, cols)
 
-    # [REFACTORED] Natural Risk-Adjusted Scaling (Phase 8)
+    # [REFACTORED] Natural Risk-Adjusted Scaling (Phase 8) - Components for Tunable Optimizer
     # 1. Base directional modulators from IS Kelly
     mod_long_base = 1.0 + float(shrink) * (p_mat @ k_long)
     mod_short_base = 1.0 + float(shrink) * (p_mat @ k_short)
 
-    # 2. Risk-Aversion (dynamic_ra) increases with p_crisis and p_bear_trend
+    # 2. Risk-Aversion components
     p_crisis = merged["hmm_prob_crisis"].to_numpy(dtype=np.float64)
-    p_bear = merged["hmm_prob_bear_trend"].to_numpy(dtype=np.float64) if "hmm_prob_bear_trend" in merged.columns else np.zeros(n)
-    dynamic_ra = 1.0 + 3.0 * p_crisis + 1.5 * p_bear
-
-    # 3. HMM-derived market variance (Annualized)
-    # macro_vol_24h is Yang-Zhang hourly volatility from build_systemic_hmm_features
-    if market_hmm_feats is not None and "macro_vol_24h" in market_hmm_feats.columns:
-        # Align to merged dataframe via datetime
-        vol_ser = market_hmm_feats["macro_vol_24h"].reindex(merged["datetime"]).ffill().bfill().fillna(0.01)
-        vol_1h = vol_ser.to_numpy(dtype=np.float64)
-        # Annualize: vol_1h * sqrt(24 * 365)
-        expected_variance = (vol_1h * np.sqrt(8760))**2
-    else:
-        # Fallback to neutral variance (approx 50% annual vol)
-        expected_variance = np.full(n, 0.25, dtype=np.float64)
-
-    # 4. Risk scale: relative to median variance (avoids tanh saturation at ~1.93 in normal vol)
-    pos_var = expected_variance[expected_variance > 0]
-    if pos_var.size > 0:
-        target_var = float(np.median(pos_var))
-    else:
-        target_var = float(np.median(expected_variance)) if expected_variance.size else 0.25
-    scale_ratio = target_var / (dynamic_ra * expected_variance + 1e-6)
-    risk_scale = np.clip(scale_ratio, 0.25, 1.75)
-    _logger.info(
-        "Modulator risk_scale: min=%.3f, max=%.3f, median=%.3f",
-        float(np.min(risk_scale)),
-        float(np.max(risk_scale)),
-        float(np.median(risk_scale)),
+    p_bear = (
+        merged["hmm_prob_bear_trend"].to_numpy(dtype=np.float64)
+        if "hmm_prob_bear_trend" in merged.columns
+        else np.zeros(n)
     )
 
-    mod_long = np.clip(mod_long_base * risk_scale, 0.0, 2.0).astype(np.float64)
-    mod_short = np.clip(mod_short_base * risk_scale, 0.0, 2.0).astype(np.float64)
+    # 3. HMM-derived market variance (Annualized)
+    if market_hmm_feats is not None and "macro_vol_24h" in market_hmm_feats.columns:
+        vol_ser = market_hmm_feats["macro_vol_24h"].reindex(merged["datetime"]).ffill().bfill().fillna(0.01)
+        vol_1h = vol_ser.to_numpy(dtype=np.float64)
+        expected_variance = (vol_1h * np.sqrt(8760))**2
+    else:
+        expected_variance = np.full(n, 0.25, dtype=np.float64)
+
+    # Target variance for normalization
+    pos_var = expected_variance[expected_variance > 0]
+    target_var = float(np.median(pos_var)) if pos_var.size > 0 else 0.25
+
+    # 4. Preliminary modulators (using legacy defaults: 3.0, 1.5, 0.5)
+    # These will be overwritten by the optimizer if tuning is enabled.
+    dynamic_ra_legacy = 1.0 + 3.0 * p_crisis + 1.5 * p_bear
+    scale_ratio_legacy = 0.5 / (dynamic_ra_legacy * expected_variance + 1e-6)
+    risk_scale_legacy = np.clip(scale_ratio_legacy, 0.25, 1.75)
+
+    mod_long = np.clip(mod_long_base * risk_scale_legacy, 0.0, 2.0).astype(np.float64)
+    mod_short = np.clip(mod_short_base * risk_scale_legacy, 0.0, 2.0).astype(np.float64)
 
     # BTC trend for diagnostic report only
     trend_24h: np.ndarray = np.zeros(n, dtype=np.float64)
@@ -342,6 +336,9 @@ def _hmm_modulator_kelly_values(
         "hmm_modulator_long": mod_long,
         "hmm_modulator_short": mod_short,
         "hmm_modulator_base_long": mod_long_base,
+        "hmm_modulator_base_short": mod_short_base,
+        "expected_variance": expected_variance,
+        "target_variance": np.full(n, target_var),
         "btc_trend_vol_adj_24h": trend_24h,
     })
 

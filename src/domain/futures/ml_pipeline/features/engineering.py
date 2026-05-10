@@ -132,6 +132,12 @@ ALPHA_ENGINEERED_FEATURE_NAMES: tuple[str, ...] = (
     "orderflow_price_divergence",
     "beta_neutral_momentum",
     "vol_structural_squeeze",
+    # [NEW] Alpha Miner Refactor
+    "dist_from_weekly_vwap",
+    "macro_vol_regime_shift",
+    "taker_absorption_score",
+    "liq_intensity_proxy",
+    "capitulation_proxy",
 )
 
 
@@ -619,6 +625,24 @@ def build_gp_input_features(df: pd.DataFrame, tf: str = "1h") -> pd.DataFrame:
     # 2. Beta-Neutral Momentum (Initial raw return, will be cross-sectionally neutralized in Step 2)
     # Using 24h as base
     out["beta_neutral_momentum"] = out["ret_24"]
+
+    # [NEW] Alpha Miner Refactor Features
+    # 1. Macro Structural Features
+    # dist_from_weekly_vwap: 168h rolling average price distance
+    vwap_168 = pv.rolling(w168, min_periods=max(1, w168 // 4)).sum() / (vol.rolling(w168, min_periods=max(1, w168 // 4)).sum() + 1e-12)
+    out["dist_from_weekly_vwap"] = (close / (vwap_168 + 1e-12)) - 1.0
+    
+    # macro_vol_regime_shift: realized_vol_yz_24 / realized_vol_yz_168
+    out["macro_vol_regime_shift"] = (out["realized_vol_yz_24"] / (vol_yz_168 + 1e-12)).fillna(1.0)
+
+    # 2. Taker Aggression Refinement
+    # taker_absorption_score: _rolling_robust_z(taker_buy_quote_volume - taker_sell_quote_volume, 24) - _rolling_robust_z(log_ret_1, 24)
+    taker_net_qv = tbq - tsq
+    out["taker_absorption_score"] = _rolling_robust_z(taker_net_qv, w24) - _rolling_robust_z(log_ret_1, w24)
+
+    # 3. Liquidation Proxy (Simulation)
+    out["liq_intensity_proxy"] = (high - np.maximum(open_, close)) / (high - low + 1e-9)
+    out["capitulation_proxy"] = (np.minimum(open_, close) - low) / (high - low + 1e-9)
 
     # [NEW] Macro Decoupling Features (Spec v15)
     w168 = _get_window(168, tf)
