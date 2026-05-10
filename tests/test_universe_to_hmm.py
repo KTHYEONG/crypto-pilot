@@ -42,7 +42,7 @@ _logger = logging.getLogger("test_universe_to_hmm")
 def audit_hmm_logic_changes(ml_out, symbols, data_maps, tf):
     """Deep audit of HMM regime classification with Log-Wealth & Tail Capture metrics."""
     _logger.info("\n" + "╔" + "═" * 83 + "╗")
-    _logger.info(f"║ [INSTITUTIONAL HMM AUDIT] Log-Wealth & Ergodicity Analysis (v15) {' ':<14} ║")
+    _logger.info(f"║ [INSTITUTIONAL HMM AUDIT] Log-Wealth & Ergodicity (v16) TF: {tf:<8} {' ':<4} ║")
     _logger.info("╠" + "═" * 83 + "╣")
 
     # Try to get data from symbols first, then fallback to market_probs
@@ -68,17 +68,25 @@ def audit_hmm_logic_changes(ml_out, symbols, data_maps, tf):
         _logger.info("╚" + "═" * 83 + "╝")
         return
 
-    df = data_maps[sym][tf]
+    df = data_maps[sym][tf].copy()
+    df["datetime"] = pd.to_datetime(df["datetime"], utc=True)
+    df = df.sort_values("datetime")
+    # Calculate returns on the source 4h/1h data directly
+    df["ret"] = df["close"].pct_change().fillna(0.0)
     
     # Ensure returns are available
     if "datetime" not in mff.columns:
         mff = mff.reset_index()
     
     mff["datetime"] = pd.to_datetime(mff["datetime"], utc=True)
-    df["datetime"] = pd.to_datetime(df["datetime"], utc=True)
     
-    merged = pd.merge(mff, df[["datetime", "close"]], on="datetime", how="left")
-    merged["ret"] = merged["close"].pct_change().fillna(0.0)
+    # Merge HMM probs with the enriched OHLCV (which already has 'ret')
+    merged = pd.merge(mff, df[["datetime", "close", "ret"]], on="datetime", how="inner")
+    
+    if merged.empty:
+        _logger.error(f"║ Merge produced empty frame. Check datetime alignment. {' ':<25} ║")
+        _logger.info("╚" + "═" * 83 + "╝")
+        return
 
     regime_cols = [c for c in HMM_SEMANTIC_PROB_COLUMNS if c in merged.columns]
     if not regime_cols:
@@ -98,7 +106,7 @@ def audit_hmm_logic_changes(ml_out, symbols, data_maps, tf):
     }
 
     # 1. Log-Wealth Dispersion (g = mu - 0.5 * sigma^2)
-    _logger.info("║ [A] LOG-WEALTH DISPERSION (Regime Purity) {' ':<42} ║")
+    _logger.info(f"║ [A] LOG-WEALTH DISPERSION (Regime Purity) | Base: {tf:<23} ║")
     _logger.info("╟──────────────┬──────────┬──────────┬──────────┬──────────┬──────────────────────╢")
     _logger.info("║ REGIME       │ TIME %   │ MU (%)   │ SIG (%)  │ G_log(%) │ BEHAVIOR             ║")
     _logger.info("╟──────────────┼──────────┼──────────┼──────────┼──────────┼──────────────────────╢")
@@ -154,14 +162,14 @@ def audit_hmm_logic_changes(ml_out, symbols, data_maps, tf):
     avg_duration = float(len(merged) / max(1, transitions))
     friction_est = transitions * 0.00025 * 100.0  # 2.5bps per switch estimate
 
-    _logger.info(f"║ Total Switches: {transitions:<4} | Avg Duration: {avg_duration:>6.1f} bars | Friction Est: {friction_est:>5.2f}% IS ║")
+    _logger.info(f"║ Total Switches: {transitions:<4} | Avg Duration: {avg_duration:>6.1f} {tf:<4} bars | Friction Est: {friction_est:>5.2f}% IS ║")
     
     _logger.info("╚" + "═" * 83 + "╝")
 
 def audit_oos_and_ic(ml_out, symbols, is_data_maps, oos_data_maps, tf):
     """OOS Holdout Audit for HMM Tail Capture."""
     _logger.info("\n" + "╔" + "═" * 83 + "╗")
-    _logger.info(f"║ [OOS AUDIT] HMM Tail-Risk Generalization Check                         {' ':<10} ║")
+    _logger.info(f"║ [OOS AUDIT] HMM Tail-Risk Generalization Check | TF: {tf:<10} {' ':<14} ║")
     _logger.info("╠" + "═" * 83 + "╣")
 
     mff = None
@@ -209,7 +217,7 @@ def audit_oos_and_ic(ml_out, symbols, is_data_maps, oos_data_maps, tf):
             tail_dist = worst_oos["regime"].value_counts(normalize=True) * 100
             capture = float(tail_dist.get("hmm_prob_crisis", 0.0) + tail_dist.get("hmm_prob_bear_trend", 0.0))
             verdict = "PASS" if capture > 70 else "ACCEPTABLE" if capture > 50 else "FAIL"
-            _logger.info(f"║ [A] OOS Tail Capture ({len(oos_df)} bars): CRISIS+BEAR = {capture:5.1f}% | Verdict: {verdict:<10}       ║")
+            _logger.info(f"║ [A] OOS Tail Capture ({len(oos_df)} {tf:<4} bars): CRISIS+BEAR = {capture:5.1f}% | Verdict: {verdict:<8} ║")
         else:
             _logger.info("║ [A] OOS: No tail events found.                                              ║")
     else:
@@ -218,7 +226,7 @@ def audit_oos_and_ic(ml_out, symbols, is_data_maps, oos_data_maps, tf):
     _logger.info("╚" + "═" * 83 + "╝")
 
 
-def test_universe_gp_hmm_flow(tf="1h"):
+def test_universe_gp_hmm_flow(tf="4h"):
     _logger.info("=" * 85)
     _logger.info(f" [TEST] Universe -> HMM Regime Flow (Integrated) TF: {tf}")
     _logger.info("=" * 85)
@@ -269,15 +277,14 @@ def test_universe_gp_hmm_flow(tf="1h"):
         _logger.error("Universe refinement failed.")
         return
     
+    # Reload config to get the updated FUTURES_SYMBOLS
     importlib.reload(config.opt_config)
-    # [3-Tier Universe] Aligned with opt_main_futures.py logic
-    from config.opt_config import FUTURES_MACRO_INDEX_SYMBOLS
-    final_symbols = list(set(config.opt_config.FUTURES_SYMBOLS + FUTURES_ANCHOR_SYMBOLS + FUTURES_MACRO_INDEX_SYMBOLS))
-    _logger.info(f"ML Ready Universe (Total {len(final_symbols)} symbols): {final_symbols}")
+    from config.opt_config import FUTURES_MACRO_INDEX_SYMBOLS, FUTURES_SYMBOLS
+    final_symbols = list(set(FUTURES_SYMBOLS + FUTURES_ANCHOR_SYMBOLS + FUTURES_MACRO_INDEX_SYMBOLS))
+    _logger.info(f"Verified ML Universe: {len(final_symbols)} symbols (Anchors + Macro Index included)")
 
     # 3. Clear HMM Cache to force fresh training
     from config.settings import FUTURES_CACHE_DIR
-    _logger.info(f"Clearing HMM cache in {FUTURES_CACHE_DIR}...")
     import os
     if FUTURES_CACHE_DIR.exists():
         for f in os.listdir(FUTURES_CACHE_DIR):
@@ -287,12 +294,10 @@ def test_universe_gp_hmm_flow(tf="1h"):
                 except Exception:
                     pass
 
-    # 4. Data Loading for ML
+    # 4. Data Loading for ML (Ensuring all symbols including anchors are loaded)
     data_maps, oos_data_maps, valid_ml_symbols = _load_futures_data_maps_for_symbols(
         final_symbols, tf, fetch_start_date, start_date, is_end_date, end_date
     )
-    
-    _logger.info(f"Verified ML Universe: {len(valid_ml_symbols)} symbols")
 
     # 5. ML Pipeline (HMM Focused)
     cfg = dict(OPT_FUTURES_CONFIG)
@@ -332,4 +337,9 @@ def test_universe_gp_hmm_flow(tf="1h"):
     _logger.info("=" * 85)
 
 if __name__ == "__main__":
-    test_universe_gp_hmm_flow("1h")
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--tf", type=str, default="4h", choices=["1h", "4h"])
+    args = parser.parse_known_args()[0]
+    test_universe_gp_hmm_flow(args.tf)
+
