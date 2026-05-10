@@ -4,6 +4,62 @@ This file tracks the logical progression and experimental results of the quantit
 
 ---
 
+## [2026-05-10] v6.7.0: P1+P2 Full Integration — Magnitude Model, Linear Modulator, Slot Expansion (Opus 4.7)
+
+### 1. Architectural Changes Applied
+
+#### P1: Immediate Fixes (4 changes)
+| ID | File | Change |
+|----|------|--------|
+| P1.A | `config/opt_config.py` | `FUTURES_HMM_SMOOTHING_SPAN`: 12 → **8** (span=3 attempted, caused CRISIS 25.1% over-detection → reverted to 8) |
+| P1.B | `optimization/optimizer.py` | SignalCalibrator input: `ml_alpha_00` → `ml_alpha_long` (IS/OOS distribution alignment) |
+| P1.C | `pipeline_runner.py` | Modulator: `2·tanh(0.5/RA·var)` → `clip(target_var/(RA·var), 0.25, 1.75)` — tanh saturation eliminated, median now 0.583 |
+| P1.D | `backtest_engine.py` | `f_t = (1 - 0.5·b_prob)` bear throttle removed from engine — RA already encodes bear penalty in modulator |
+
+HMM sticky penalty also raised: `FUTURES_HMM_STICKY_PENALTY_WEIGHT` 800 → **1100**.
+
+#### P2: Alpha Magnitude + HMM Structural Fixes
+| ID | File | Change |
+|----|------|--------|
+| P2.E | `alpha/miner.py` | Added `LGBMRegressor(L1, 100 trees)` per slot for 24h magnitude prediction; hybrid score = `rank × (1 + 0.3·mag_norm)` |
+| P2.F | `alpha/miner.py` | HMM_COLS removed from Groups 0+2; **retained in Group 1** (Vol/MR) only — full removal collapsed Long PF 1.04→0.54 |
+| P2.G | `optimization/optimizer.py` | `mean_b` clipped [0.7, 2.0], fit logging enabled |
+| Slots | `config/opt_config.py` | `FUTURES_ML_ALPHA_SLOTS_PER_THEME`: 5 → **6** (total 15 → 18 slots) |
+
+### 2. Experimental Results
+
+| Run | Condition | OOS CAGR | HO CAGR | OOS Retention | MDD | HMM Switches |
+|-----|-----------|----------|---------|--------------|-----|-------------|
+| Baseline (v6.6.0) | span=12, tanh, bear_throttle | -0.61% | — | — | 0.20% | 858 |
+| Smoke P1 (span=3) | span=3 attempted | ~-0.5% | — | — | — | — |
+| Smoke P1 (span=8) | P1.A–D, span=8, sticky=1100 | -0.35% | — | +~50% | — | 713 |
+| 1000T P2 Full | +magnitude, HMM removed all | — | — | — | — | — (IC collapsed) |
+| **1000T P2 Final** | +magnitude, Group-1 HMM retained, 18 slots | **-0.26%** | **+0.28%** | **+86.4%** | **0.15%** | 713 |
+
+### 3. Confirmed Working
+- Modulator: `risk_scale min=0.250, max=1.750, median=0.583` — dynamic range restored
+- HMM switches reduced 858 → 713 (sticky=1100 effective)
+- IS-OOS retention gap: improved from -331% → **+86.4%** (structural)
+- HO CAGR +0.28% (out-of-holdout positive for first time)
+
+### 4. Current Bottleneck: Kelly Starvation
+- `ml_calib_prob ≈ 0.502` across all AWF legs → `f* ≈ 0.002` per trade
+- Platt LogReg coef ~0.05–0.21; insufficient alpha spread (range 0.39–0.67)
+- AWF pos_frac = **0/5** → PHASE3_HARD_GATE failing
+- CRISIS regime: 25.2% of bars (target ~7%) — HMM calibration still off
+
+### 5. Failed Sub-experiments
+- **span=3**: CRISIS 25.1%, semantic mapping inverted, avg duration 25.5 bars → reverted to span=8
+- **P2.F full HMM removal**: Long PF 1.04→0.54, IC 0.083→0.044 → partial rollback (Group 1 retained)
+
+### 6. Next Actions
+1. `P4.A`: Per-regime Kelly b (bull/bear/crisis separate b estimation)
+2. `P4.B`: 8h/12h horizon test (friction/magnitude ratio halved)
+3. `P4.C`: Platt discriminator blending (LogReg + parametric sigmoid when coef < 2.0)
+4. `P4.D`: Net Alpha weighting in PLGD composite objective
+
+---
+
 ## [2026-05-10] v6.5.0-p2-kelly-diag: Kelly Sizing Root Cause + P2.1 Regression (Haiku)
 
 ### 1. P2.1 Experiment: Tighter Suppression FAILED

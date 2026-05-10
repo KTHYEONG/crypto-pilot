@@ -12,7 +12,7 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-from lightgbm import LGBMRanker
+from lightgbm import LGBMRegressor, LGBMRanker
 
 from config.opt_config import OPT_FUTURES_CONFIG
 from src.core.utils.cache_manager import CacheManager
@@ -22,6 +22,9 @@ from src.domain.futures.ml_pipeline.features.engineering import (
     HMM_SEMANTIC_PROB_COLUMNS,
     add_macro_interaction_features,
 )
+
+# Semantic HMM posteriors — Vol/MR group only (near-zero CS spread but useful with vol features).
+HMM_COLS = list(HMM_SEMANTIC_PROB_COLUMNS)
 
 _logger = logging.getLogger(__name__)
 
@@ -45,18 +48,24 @@ THEME_GROUPS = {
     ]
 }
 
-HMM_COLS = list(HMM_SEMANTIC_PROB_COLUMNS)
+
+# Bars ahead for magnitude targets / hybrid scaling (stacked OHLC timeline; matches tmp.md sketch).
+_MAG_HORIZON_BARS = 24
+
 
 @dataclass
 class MLAlphaMiner:
     """Miner for evolving cross-sectional alpha components using LightGBM LambdaRank."""
 
+    # Total rank heads = slots_per_theme × 3 thematic buckets (see THEME_GROUPS).
     n_features_to_select: int = 15
+    slots_per_theme: int = 5
     target_horizons: tuple[int, ...] = (3, 6, 12, 24)
     n_jobs: int = 4
 
     # Internal state
     _models: dict[int, LGBMRanker] = field(default_factory=dict, init=False)
+    _mag_models: dict[int, LGBMRegressor] = field(default_factory=dict, init=False)
     _feature_sets: dict[int, list[str]] = field(default_factory=dict, init=False)
     # IS Spearman IC^2 weights per slot (matches mine_alphas_cs ensemble → transform_cs)
     _ic_weights: dict[int, float] = field(default_factory=dict, init=False, repr=False)
@@ -109,9 +118,15 @@ class MLAlphaMiner:
         is_end_date: str | None = None,
         filter_options: dict[str, Any] | None = None,
     ) -> pd.DataFrame:
-        """Train 15 deterministic LambdaRank models using thematic subspacing."""
+        """Train 3×slots_per_theme LambdaRank heads (Trend / Vol+MR+HMMraw / Interaction)."""
         if panel_df.empty:
             return pd.DataFrame()
+
+        if self.n_features_to_select != self.slots_per_theme * 3:
+            raise ValueError(
+                "n_features_to_select must equal 3 × slots_per_theme "
+                f"({self.n_features_to_select} vs slots_per_theme={self.slots_per_theme})"
+            )
 
         force_retrain = bool(OPT_FUTURES_CONFIG.get("FUTURES_ML_FORCE_RETRAIN_ALPHA", False))
         versioned_cache: Path | None = None
@@ -125,7 +140,8 @@ class MLAlphaMiner:
                 "symbols": symbols,
                 "is_end_date": is_end_date,
                 "feature_schema_version": GP_FEATURE_SCHEMA_VERSION,
-                "miner_version": "v6_lambdarank_dart"
+                "miner_version": "v6_lambdarank_dart_mag_g1hmm",
+                "slots_per_theme": int(self.slots_per_theme),
             }
             tag = cm.generate_hash(deps, source_files=[Path(__file__).resolve()])
             versioned_cache = cm.get_cache_path("raw_lgbm_v6", ".parquet", tag)
@@ -133,6 +149,7 @@ class MLAlphaMiner:
             if not force_retrain and versioned_cache.exists():
                 try:
                     raw_alpha_df = pd.read_parquet(versioned_cache)
+                    self._mag_models.clear()
                     _logger.info("MLAlphaMiner v6 Cache Hit: %s", versioned_cache.name)
                 except Exception as e:
                     _logger.warning("Cache load failed: %s", e)
@@ -150,6 +167,13 @@ class MLAlphaMiner:
             # Use unstacked approach to ensure no cross-symbol leakage
             close_wide = work_df["close"].unstack(level="symbol")
             fwd_ret_6 = np.log(close_wide.shift(-6) / close_wide).stack(future_stack=True).reindex(work_df.index).fillna(0.0)
+            fwd_log_mag_horizon = np.log(close_wide.shift(-_MAG_HORIZON_BARS) / close_wide.clip(lower=1e-12))
+            y_mag_h = (
+                fwd_log_mag_horizon.abs()
+                .stack(future_stack=True)
+                .reindex(work_df.index)
+                .replace([np.inf, -np.inf], np.nan)
+            )
             
             # C: Get dispersion for dynamic thresholding
             dispersion = work_df["cs_dispersion"] if "cs_dispersion" in work_df.columns else None
@@ -177,25 +201,22 @@ class MLAlphaMiner:
             # Normalize weights to mean 1.0 to maintain learning rate stability
             sample_weights_all = raw_weights / (raw_weights.mean() + 1e-12)
 
-            # Features are combined from theme + HMM probabilities
+            # P2.F rollback: systemic HMM raw probs only with Vol/MR theme (helps long IC vs all-slots injection).
             slots_df = pd.DataFrame(index=work_df.index)
             
             for slot_idx in range(self.n_features_to_select):
-                theme_idx = slot_idx // 5
+                theme_idx = min(2, slot_idx // self.slots_per_theme)
                 base_feats = THEME_GROUPS[theme_idx]
-                
-                # Inject HMM probabilities into models as per spec
-                # For Group 3, we use interactions only to ensure cross-sectional variance
-                if theme_idx == 2:
-                    feat_cols = list(dict.fromkeys(base_feats))
-                else:
+                if theme_idx == 1:
                     feat_cols = list(dict.fromkeys(base_feats + HMM_COLS))
+                else:
+                    feat_cols = list(dict.fromkeys(base_feats))
                 
                 feat_cols = [c for c in feat_cols if c in work_df.columns]
                 
                 self._feature_sets[slot_idx] = feat_cols
                 
-                X = work_df[feat_cols].values
+                X = work_df[feat_cols].replace([np.inf, -np.inf], np.nan).fillna(0.0).values
                 y = y_labels
 
                 # Filter to In-Sample for training
@@ -243,6 +264,39 @@ class MLAlphaMiner:
                 ranked = unstacked.rank(axis=1, pct=True)
                 slots_df[f"ml_alpha_{slot_idx:02d}"] = ranked.stack(future_stack=True).reindex(work_df.index).fillna(0.5)
 
+            # P2.E: per-slot magnitude (LGBM L1 regression) × cross-period Z-score × hybrid long alpha
+            y_mag_vals = y_mag_h.to_numpy(dtype=np.float64)
+            mag_finite = np.isfinite(y_mag_vals) & (y_mag_vals >= 0)
+            self._mag_models.clear()
+            for slot_idx in range(self.n_features_to_select):
+                mag_col = f"ml_mag_{slot_idx:02d}"
+                feat_cols = self._feature_sets[slot_idx]
+                if not feat_cols:
+                    slots_df[mag_col] = 0.0
+                    continue
+                X = work_df[feat_cols].replace([np.inf, -np.inf], np.nan).fillna(0.0).values
+                train_mag = is_mask & mag_finite
+                min_mag_rows = 200
+                if int(train_mag.sum()) < min_mag_rows:
+                    slots_df[mag_col] = 0.0
+                    continue
+                X_mag = X[train_mag]
+                y_mag = y_mag_vals[train_mag]
+                w_mag = sample_weights_all[train_mag]
+                reg = LGBMRegressor(
+                    objective="regression_l1",
+                    n_estimators=100,
+                    learning_rate=0.05,
+                    random_state=42 + slot_idx,
+                    n_jobs=self.n_jobs,
+                    verbosity=-1,
+                )
+                reg.fit(X_mag, y_mag, sample_weight=w_mag)
+                self._mag_models[slot_idx] = reg
+                mag_raw = reg.predict(X)
+                mu_m, sig_m = float(np.mean(mag_raw)), float(np.std(mag_raw) + 1e-9)
+                slots_df[mag_col] = np.clip((mag_raw - mu_m) / sig_m, -3.0, 3.0)
+
             raw_alpha_df = slots_df
             
             if versioned_cache:
@@ -282,12 +336,25 @@ class MLAlphaMiner:
             if w_arr.sum() > 1e-9:
                 w_norm = w_arr / w_arr.sum()
                 _logger.info("Ensembling %d components with IC weights: %s", len(surviving), w_norm)
-                alpha_df_all["ml_alpha_long"] = (alpha_df_all[surviving] * w_norm).sum(axis=1)
+                long_rank = (alpha_df_all[surviving] * w_norm).sum(axis=1)
                 self._ic_weights = {int(c.split("_")[2]): float(w) for c, w in zip(surviving, w_norm)}
             else:
-                alpha_df_all["ml_alpha_long"] = alpha_df_all[surviving].mean(axis=1)
+                long_rank = alpha_df_all[surviving].mean(axis=1)
                 eq = 1.0 / float(len(surviving))
                 self._ic_weights = {int(c.split("_")[2]): eq for c in surviving}
+
+            mag_surv_cols: list[str] = []
+            for c in surviving:
+                suf = c.rsplit("_", 1)[-1]
+                mc = f"ml_mag_{suf}"
+                if mc in alpha_df_all.columns:
+                    mag_surv_cols.append(mc)
+
+            if mag_surv_cols:
+                mag_blend = alpha_df_all[mag_surv_cols].mean(axis=1)
+                alpha_df_all["ml_alpha_long"] = np.clip(long_rank * (1.0 + 0.3 * mag_blend), 0.02, 0.98)
+            else:
+                alpha_df_all["ml_alpha_long"] = long_rank
 
             alpha_df_all["ml_alpha_short"] = 1.0 - alpha_df_all["ml_alpha_long"]
         else:
@@ -317,18 +384,27 @@ class MLAlphaMiner:
             feat_cols = self._feature_sets.get(slot_idx, [])
             if not feat_cols:
                 out_df[f"ml_alpha_{slot_idx:02d}"] = 0.5
+                out_df[f"ml_mag_{slot_idx:02d}"] = 0.0
                 continue
-                
-            # Use work_df which contains interaction features
-            X = work_df[feat_cols].fillna(0.0).values
+
+            X = work_df[feat_cols].replace([np.inf, -np.inf], np.nan).fillna(0.0).values
             raw_scores = model.predict(X)
-            
-            # Cross-sectional rank normalization
+
             scores_ser = pd.Series(raw_scores, index=panel_df.index)
             unstacked = scores_ser.unstack(level="symbol")
             ranked = unstacked.rank(axis=1, pct=True)
             t_vals = ranked.stack(future_stack=True)
             out_df[f"ml_alpha_{slot_idx:02d}"] = t_vals.reindex(panel_df.index).fillna(0.5)
+
+            mag_model = self._mag_models.get(slot_idx)
+            if mag_model is not None:
+                mag_raw = mag_model.predict(X)
+                mu_m, sig_m = float(np.mean(mag_raw)), float(np.std(mag_raw) + 1e-9)
+                out_df[f"ml_mag_{slot_idx:02d}"] = np.clip(
+                    (mag_raw - mu_m) / sig_m, -3.0, 3.0
+                )
+            else:
+                out_df[f"ml_mag_{slot_idx:02d}"] = 0.0
 
         surviving = [c for c in out_df.columns if c.startswith("ml_alpha_") and out_df[c].std() > 1e-6]
         if surviving:
@@ -337,11 +413,25 @@ class MLAlphaMiner:
                 s = float(w.sum())
                 if s > 1e-9:
                     w = w / s
-                    out_df["ml_alpha_long"] = (out_df[surviving] * w).sum(axis=1)
+                    long_rank = (out_df[surviving] * w).sum(axis=1)
                 else:
-                    out_df["ml_alpha_long"] = out_df[surviving].mean(axis=1)
+                    long_rank = out_df[surviving].mean(axis=1)
             else:
-                out_df["ml_alpha_long"] = out_df[surviving].mean(axis=1)
+                long_rank = out_df[surviving].mean(axis=1)
+
+            mag_surv_cols_ts: list[str] = []
+            for c in surviving:
+                suf = c.rsplit("_", 1)[-1]
+                mc = f"ml_mag_{suf}"
+                if mc in out_df.columns:
+                    mag_surv_cols_ts.append(mc)
+
+            if mag_surv_cols_ts:
+                mag_blend_ts = out_df[mag_surv_cols_ts].mean(axis=1)
+                out_df["ml_alpha_long"] = np.clip(long_rank * (1.0 + 0.3 * mag_blend_ts), 0.02, 0.98)
+            else:
+                out_df["ml_alpha_long"] = long_rank
+
             out_df["ml_alpha_short"] = 1.0 - out_df["ml_alpha_long"]
         else:
             out_df["ml_alpha_long"] = 0.5
