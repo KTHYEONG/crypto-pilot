@@ -124,11 +124,6 @@ class SignalCalibrator:
             try:
                 self.model.fit(X, y)
                 self.is_fitted = True
-                _logger.info(
-                    "[SignalCalibrator] Fitted Platt Scaling: coef=%.4f intercept=%.4f",
-                    self.model.coef_[0][0],
-                    self.model.intercept_[0],
-                )
             except Exception as e:
                 _logger.warning("[SignalCalibrator] Logistic fit failed: %s", e)
 
@@ -136,8 +131,34 @@ class SignalCalibrator:
         pos_rets = returns[returns > 0]
         neg_rets = np.abs(returns[returns < 0])
         if pos_rets.size > 0 and neg_rets.size > 0:
-            self.mean_b = float(np.mean(pos_rets) / np.mean(neg_rets))
-            _logger.info("[SignalCalibrator] Estimated b (Avg Win/Loss)=%.4f", self.mean_b)
+            raw_b = float(np.mean(pos_rets) / np.mean(neg_rets))
+            self.mean_b = float(np.clip(raw_b, 0.7, 2.0))
+            if self.is_fitted:
+                _logger.info(
+                    "[SignalCalibrator] Fitted: coef=%.4f, intercept=%.4f, "
+                    "n_pos=%d, n_neg=%d, mean_b=%.4f (clipped from %.4f)",
+                    self.model.coef_[0][0],
+                    self.model.intercept_[0],
+                    int(pos_rets.size),
+                    int(neg_rets.size),
+                    self.mean_b,
+                    raw_b,
+                )
+            else:
+                _logger.info(
+                    "[SignalCalibrator] n_pos=%d, n_neg=%d, mean_b=%.4f (clipped from %.4f); "
+                    "Platt not fitted",
+                    int(pos_rets.size),
+                    int(neg_rets.size),
+                    self.mean_b,
+                    raw_b,
+                )
+        else:
+            self.mean_b = 1.05
+            _logger.info(
+                "[SignalCalibrator] insufficient pos/neg returns; keeping mean_b=%.4f default",
+                self.mean_b,
+            )
 
     def predict_prob(self, alphas: np.ndarray) -> np.ndarray:
         """Predict win probability p."""
@@ -190,6 +211,7 @@ class MLPhaseDContext:
     multi_alignment_info: dict[str, Any] | None = None
     # SOTA: Mathematical Policy Components
     calibrator: SignalCalibrator | None = None
+    calibrator_short: SignalCalibrator | None = None
     estimated_b: float = 1.05
 
 
@@ -340,29 +362,44 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
             return
         ctx.multi_alignment_info = info
 
-        # 1.5 SOTA: Signal Calibration (Platt Scaling)
-        all_alphas = []
-        all_returns = []
+        # 1.5 SOTA: Signal Calibration (Platt Scaling) — fit on ensemble alphas (long/short)
+        all_alphas: list[np.ndarray] = []
+        all_returns: list[np.ndarray] = []
+        all_alphas_short: list[np.ndarray] = []
+        all_returns_short: list[np.ndarray] = []
         eff_len = int(info["eff_ref_len"])
         for sym in ctx.symbols:
             start_idx = int(info["alignment_offsets"][sym])
             sym_df = ctx.data_maps[sym][ctx.tf]
             # Calibration must happen on the aligned IS zone (eff_len)
             raw_is = sym_df.iloc[start_idx : start_idx + eff_len]
-            if "ml_alpha_00" in raw_is.columns:
-                alpha_arr = raw_is["ml_alpha_00"].to_numpy(dtype=np.float64)
-                # Forward return (12-bar) for probability calibration to capture longer edge
-                fwd_ret = raw_is["close"].pct_change(12).shift(-12).to_numpy(dtype=np.float64)
-                mask = ~np.isnan(alpha_arr) & ~np.isnan(fwd_ret)
+            # Forward return (12-bar) for probability calibration to capture longer edge
+            fwd_ret = raw_is["close"].pct_change(12).shift(-12).to_numpy(dtype=np.float64)
+            if "ml_alpha_long" in raw_is.columns:
+                alpha_long = raw_is["ml_alpha_long"].to_numpy(dtype=np.float64)
+                mask = ~np.isnan(alpha_long) & ~np.isnan(fwd_ret)
                 if mask.any():
-                    all_alphas.append(alpha_arr[mask])
+                    all_alphas.append(alpha_long[mask])
                     all_returns.append(fwd_ret[mask])
+            if "ml_alpha_short" in raw_is.columns:
+                alpha_short = raw_is["ml_alpha_short"].to_numpy(dtype=np.float64)
+                mask_s = ~np.isnan(alpha_short) & ~np.isnan(fwd_ret)
+                if mask_s.any():
+                    all_alphas_short.append(alpha_short[mask_s])
+                    all_returns_short.append(fwd_ret[mask_s])
 
         if all_alphas:
             calib = SignalCalibrator()
             calib.fit(np.concatenate(all_alphas), np.concatenate(all_returns))
             ctx.calibrator = calib
             ctx.estimated_b = calib.mean_b
+
+        if all_alphas_short:
+            calib_s = SignalCalibrator()
+            calib_s.fit(
+                np.concatenate(all_alphas_short), np.concatenate(all_returns_short)
+            )
+            ctx.calibrator_short = calib_s
 
         # 2. Build Global Aligned Arrays
         prebuilt_full: dict[str, dict[str, np.ndarray]] = {}
@@ -417,7 +454,8 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
                     trimmed_sig["ml_calib_prob_long"] = trimmed_sig["ml_calib_prob"]
 
                 if "ml_alpha_short" in raw_full.columns:
-                    p_s = ctx.calibrator.predict_prob(
+                    calib_s = ctx.calibrator_short or ctx.calibrator
+                    p_s = calib_s.predict_prob(
                         raw_full["ml_alpha_short"].to_numpy(dtype=np.float64, copy=False)
                     )
                     trimmed_sig["ml_calib_prob_short"] = p_s
