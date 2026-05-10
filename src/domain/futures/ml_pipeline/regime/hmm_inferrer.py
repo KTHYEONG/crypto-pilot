@@ -7,7 +7,6 @@ import os
 import warnings
 from dataclasses import dataclass, field
 from functools import partial
-from pathlib import Path
 from typing import Any, cast
 
 import jax
@@ -32,8 +31,6 @@ from numba import njit
 from sklearn.preprocessing import RobustScaler
 
 from config.opt_config import OPT_FUTURES_CONFIG
-from config.settings import FUTURES_CACHE_DIR
-from src.core.utils.cache_manager import CacheManager
 from src.domain.futures.ml_pipeline.features.engineering import (
     HMM_SEMANTIC_PROB_COLUMNS,
     SYSTEMIC_HMM_FEATURE_COLUMNS,
@@ -278,7 +275,7 @@ def _compute_nll(
 
     # Soft Gravity NLL Penalty (v4.0.0 Pragmatic)
     # idx_ret = 9 (macro_ret_1h). Force CRISIS (4) negative, BULL_CALM (0) positive.
-    gravity_penalty = 200.0 * (jnp.maximum(0.0, params["locs"][4, 9]) + jnp.maximum(0.0, -params["locs"][0, 9]))
+    gravity_penalty = 700.0 * (jnp.maximum(0.0, params["locs"][4, 9]) + jnp.maximum(0.0, -params["locs"][0, 9]))
 
     return -ll + sticky_penalty + gravity_penalty
 
@@ -606,24 +603,6 @@ class HMMStateInferrer:
         for req_col in ["macro_trend_168h", "macro_vol_24h", "macro_downside_vol_24h"]:
             assert req_col in feat_cols, f"Required HMM feature missing: {req_col}"
 
-        cm = CacheManager(FUTURES_CACHE_DIR, max_files=15, max_size_mb=1000.0)
-        deps = {
-            "symbol": symbol,
-            "tf": tf,
-            "data_len": len(features_df),
-            "ver": "v55_smoothing_connected",
-            "feat_cols": sorted(feat_cols),
-            "smooth_method": OPT_FUTURES_CONFIG.get("FUTURES_HMM_SMOOTHING_METHOD", "EMA"),
-            "smooth_span": int(OPT_FUTURES_CONFIG.get("FUTURES_HMM_SMOOTHING_SPAN", 8)),
-            "sticky_durations": str(OPT_FUTURES_CONFIG.get("FUTURES_HMM_OUTPUT_STICKY_MIN_DURATION", [])),
-            "sticky_weight": float(OPT_FUTURES_CONFIG.get("FUTURES_HMM_STICKY_PENALTY_WEIGHT", 100.0)),
-        }
-        tag = cm.generate_hash(deps, source_files=[Path(__file__).resolve()])
-        cache_path = cm.get_cache_path(f"HMM_v53_unsupervised_{symbol}_{tf}_len{len(features_df)}", ".parquet", tag)
-        if cache_path.exists():
-            try: return pd.read_parquet(cache_path)
-            except Exception: pass
-
         X_frame = features_df[feat_cols].replace([np.inf, -np.inf], np.nan).fillna(0.0)
         n = len(X_frame)
         if n < 200: return self._zeros_semantic(features_df)
@@ -766,13 +745,13 @@ class HMMStateInferrer:
 
         probs_df = pd.DataFrame(results, index=features_df.index, columns=out_cols).ffill().bfill().fillna(0.0)
 
-        # [REFACTORED] Let HMM output its natural probability estimates
-        # sem_cal = _calibrate_crisis_logit_offset(
-        #     probs_df[list(_SEMANTIC_ORDER)].to_numpy(dtype=np.float64),
-        #     target_mean_crisis=0.07,
-        #     crisis_col=len(_SEMANTIC_ORDER) - 1,
-        # )
-        # probs_df[list(_SEMANTIC_ORDER)] = sem_cal
+        # Crisis logit-offset calibration: cap series-mean P(CRISIS) at 7%
+        sem_cal = _calibrate_crisis_logit_offset(
+            probs_df[list(_SEMANTIC_ORDER)].to_numpy(dtype=np.float64),
+            target_mean_crisis=0.07,
+            crisis_col=len(_SEMANTIC_ORDER) - 1,
+        )
+        probs_df[list(_SEMANTIC_ORDER)] = sem_cal
 
         # Posterior Smoothing (Phase 7: Macro Stability)
         smooth_method = OPT_FUTURES_CONFIG.get("FUTURES_HMM_SMOOTHING_METHOD", "EMA")
@@ -824,8 +803,6 @@ class HMMStateInferrer:
             probs_df["hmm_expected_duration"] = 0.0
 
         out = probs_df.reset_index().rename(columns={probs_df.index.name or "index": "datetime"})
-        try: out.to_parquet(cache_path)
-        except Exception: pass
         return out
 
     def _zeros_semantic(self, df: pd.DataFrame) -> pd.DataFrame:

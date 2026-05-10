@@ -20,7 +20,7 @@ _SOFT_FULL_SPLIT: float = 0.85
 
 def merge_exit_family_params(params: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Biases sampled engine params toward exit-family intent (tmp.md EXIT_FAMILY).
+    Biases sampled engine params toward exit-family intent (EXIT_FAMILY).
     Does not replace Optuna samples; tightens ranges per family.
     """
     p = dict(params)

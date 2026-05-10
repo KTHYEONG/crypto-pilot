@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import dataclasses
 import importlib
 import json
 import logging
@@ -69,12 +70,15 @@ from src.domain.futures.optimization.evaluator import (  # noqa: E402
     stationary_bootstrap_spa,
 )
 from src.domain.futures.optimization.optimizer import (  # noqa: E402
+    EMBARGO_BARS,
     MLPhaseDContext,
     build_ml_phase_d_params,
     build_phase_d_enqueue_params_from_deploy_json,
     inject_cs_momentum_ranks,
     objective_ml_phase_d,
     precompute_ml_optimization_context,
+    replay_robust_awf_for_trial_params,
+    rerun_precompute_for_ctx,
 )
 from src.domain.futures.optimization.screener import (  # noqa: E402
     screen_futures_universe,
@@ -84,12 +88,12 @@ from src.domain.futures.optimization.validation import (  # noqa: E402
     awf_pos_frac_to_pseudo_pbo,
     resolve_adjusted_gates,
 )
-from src.domain.futures.portfolio.policy_engine import (  # noqa: E402
-    apply_policy_constraints,
+from src.domain.futures.portfolio.portfolio_optimizer import (  # noqa: E402
+    finalize_strategy_portfolio_params,
     load_portfolio_policy_config,
 )
 from src.domain.futures.validation.candidate_selector import (  # noqa: E402
-    select_orthogonal_ensemble,
+    CandidateSelectionResult,
 )
 from src.domain.futures.validation.champion_registry import (  # noqa: E402
     ChampionMetrics,
@@ -104,9 +108,13 @@ from src.domain.futures.validation.unified_gates import (  # noqa: E402
     FuturesResearchGateInput,
     evaluate_research_gates,
 )
+from src.domain.futures.validation.tmp_md_champion import (  # noqa: E402
+    collect_tmp_md_champion_gate_failures,
+    tmp_md_layer1_failures_from_awf_diag,
+)
 from src.domain.futures.validation.walk_forward import (  # noqa: E402
     WalkForwardConfig,
-    evaluate_walk_forward,
+    mirror_walk_forward_result_from_awf_user_attrs,
 )
 
 warnings.filterwarnings("ignore")
@@ -200,6 +208,34 @@ def _ml_phase_d_sampler(seed: int, n_trials: int = 200) -> optuna.samplers.BaseS
         n_startup_trials=n_startup,
         multivariate=True,
         group=True,
+        constant_liar=True,
+        n_ei_candidates=48,
+    )
+
+
+def _ml_phase_d_sampler_coordinate(
+    seed: int, n_trials: int, phase: str
+) -> optuna.samplers.BaseSampler:
+    """Phase B: more startup trials + multivariate TPE; phases A/C use 20 startup."""
+    if OPT_FUTURES_CONFIG.get("FUTURES_ML_ALPHA_NSGA2_ENABLED", False):
+        return _ml_phase_d_sampler(seed, n_trials)
+    nt = max(2, int(n_trials))
+    if phase == "B":
+        n_startup = min(40, max(1, nt - 1))
+        return TPESampler(
+            seed=seed,
+            n_startup_trials=n_startup,
+            multivariate=True,
+            group=True,
+            constant_liar=True,
+            n_ei_candidates=48,
+        )
+    n_startup = min(20, max(1, nt - 1))
+    return TPESampler(
+        seed=seed,
+        n_startup_trials=n_startup,
+        multivariate=False,
+        group=False,
         constant_liar=True,
         n_ei_candidates=24,
     )
@@ -683,12 +719,18 @@ def _ml_trial_passes_hard_gates(
     dsr_floor = float(dsr_min if dsr_min is not None else cfg.get("FUTURES_ML_GATE1_DSR_MIN", 0.80))
     if dsr < dsr_floor:
         return False
-    p10_floor = float(cfg.get("FUTURES_CPCV_P10_LOG_TW_MIN", 0.05))
-    p10_cpcv = float(trial.user_attrs.get("ml_p10_log_growth_cpcv", -999.0))
+    p10_floor = float(cfg.get("FUTURES_AWF_P10_LOG_TW_MIN", -0.10))
+    p10_cpcv = float(
+        trial.user_attrs.get(
+            "awf_worst_leg_log_tw", trial.user_attrs.get("ml_p10_log_growth_cpcv", -999.0)
+        )
+    )
     if p10_cpcv <= p10_floor:
         return False
     mdd_limit = float(cfg.get("FUTURES_MAX_MDD", 22.0))
-    if float(trial.user_attrs.get("ml_worst_mdd_cpcv", 999.0)) >= mdd_limit:
+    if float(
+        trial.user_attrs.get("awf_worst_mdd_pct", trial.user_attrs.get("ml_worst_mdd_cpcv", 999.0))
+    ) >= mdd_limit:
         return False
     # Dynamic trade density: scale minimum trades with IS span to avoid regime-size bias.
     # FUTURES_BARS_PER_TRADE_EST = expected bars between trades (default 200).
@@ -1062,41 +1104,75 @@ def main() -> None:
         )
     else:
         n_ml_trials = int(args.trials)
-        target_seeds = (
-            [42, 7, 13, 21, 55] if args.seed is None else [int(args.seed)]
-        )
+        learning = OPT_FUTURES_CONFIG.get("FUTURES_LEARNING_SEEDS", [42])
+        target_seeds = [int(s) for s in learning] if args.seed is None else [int(args.seed)]
     
     all_trials: list[optuna.trial.FrozenTrial] = []
 
-    _logger.info("\n" + "═" * 85)
-    _logger.info(
-        " [STEP 4/5] MULTI-SEED OPTIMIZATION: %d Seeds | %d Trials/Seed",
-        len(target_seeds),
-        n_ml_trials,
+    phase_trials = OPT_FUTURES_CONFIG.get(
+        "FUTURES_COORD_PHASE_TRIALS", {"A": 80, "B": 120, "C": 60}
     )
+
+    _logger.info("\n" + "═" * 85)
+    _logger.info(" [STEP 4/5] OPTIMIZATION (3-phase coordinate ascent)")
     _logger.info("═" * 85 + "\n")
 
-    for run_idx, seed in enumerate(target_seeds):
-        _logger.info(f" >>> RUNNING SEED {seed} ({run_idx + 1}/{len(target_seeds)})...")
-        
-        pbo_max_eff, dsr_min_eff, pbo_champ_eff = resolve_adjusted_gates(
-            OPT_FUTURES_CONFIG, n_ml_trials
-        )
-        
-        ml_ctx = MLPhaseDContext(data_maps=data_maps, symbols=valid_symbols, tf=args.tf, seed=seed)
-        precompute_ml_optimization_context(ml_ctx)
+    ml_ctx: MLPhaseDContext | None = None
+    frozen_accum: dict[str, Any] = {}
+    champion_raw_params: dict[str, Any] = {}
 
+    seed_learn = int(OPT_FUTURES_CONFIG.get("FUTURES_LEARNING_SEEDS", [42])[0])
+    _logger.info(
+        " [ARCH] portfolio_constructor (Ledoit–Wolf + vol-target Kelly) | "
+        "coordinate ascent | learning_seed=%s (stability seeds run post-optimization)",
+        seed_learn,
+    )
+    base_ctx = MLPhaseDContext(
+        data_maps=data_maps,
+        symbols=valid_symbols,
+        tf=args.tf,
+        seed=seed_learn,
+        effective_total_trials=max(
+            1, sum(int(phase_trials.get(p, 80)) for p in ("A", "B", "C"))
+        ),
+        ml_pipeline_fetch_start=fetch_start_date,
+        ml_pipeline_end=end_date,
+        ml_pipeline_is_start=start_date,
+        ml_pipeline_workers=ml_n_jobs,
+    )
+    precompute_ml_optimization_context(base_ctx)
+    ml_ctx = base_ctx
+    last_study = None
+    frozen_after_ab: dict[str, Any] = {}
+    for pname in ("A", "B", "C"):
+        nt = int(phase_trials.get(pname, 80))
+        ph_ctx = dataclasses.replace(
+            base_ctx,
+            coordinate_phase=pname,
+            coordinate_frozen_params=dict(frozen_accum) if frozen_accum else None,
+            effective_total_trials=max(1, nt),
+        )
+        pbo_max_eff, dsr_min_eff, _ = resolve_adjusted_gates(OPT_FUTURES_CONFIG, nt)
         study_ml = optuna.create_study(
             directions=["minimize"],
-            sampler=_ml_phase_d_sampler(seed, n_ml_trials),
-            pruner=optuna.pruners.MedianPruner(n_startup_trials=20, n_warmup_steps=2),
+            sampler=_ml_phase_d_sampler_coordinate(
+                seed_learn + ord(pname[0]), nt, pname
+            ),
+            pruner=(
+                optuna.pruners.MedianPruner(n_startup_trials=20, n_warmup_steps=2)
+                if pname == "B"
+                else optuna.pruners.NopPruner()
+            ),
         )
-
-        # Enqueue baseline if enabled
-        if bool(OPT_FUTURES_CONFIG.get("FUTURES_ML_PHASE_D_ENQUEUE_DEPLOY_JSON", False)):
-            rel = str(OPT_FUTURES_CONFIG.get(
-                "FUTURES_ML_PHASE_D_DEPLOY_JSON_REL", "results/best_futures_1h.json"
-            ))
+        if (
+            pname == "A"
+            and bool(OPT_FUTURES_CONFIG.get("FUTURES_ML_PHASE_D_ENQUEUE_DEPLOY_JSON", False))
+        ):
+            rel = str(
+                OPT_FUTURES_CONFIG.get(
+                    "FUTURES_ML_PHASE_D_DEPLOY_JSON_REL", "results/best_futures_1h.json"
+                )
+            )
             deploy_path = Path(project_root) / rel
             if deploy_path.is_file():
                 try:
@@ -1109,13 +1185,15 @@ def main() -> None:
                     _logger.debug("Deploy JSON enqueue skipped: %s", _enq_e)
 
         study_ml.optimize(
-            lambda tr, ctx=ml_ctx: objective_ml_phase_d(tr, ctx),
-            n_trials=n_ml_trials,
+            lambda tr, ctx=ph_ctx: objective_ml_phase_d(tr, ctx),
+            n_trials=nt,
             n_jobs=min(4, _resolve_futures_parallel_policy(len(valid_symbols))),
         )
-
         all_trials.extend(study_ml.trials)
+        last_study = study_ml
         completed = [t for t in study_ml.trials if t.state == TrialState.COMPLETE]
+        bt = study_ml.best_trial
+        frozen_accum.update(dict(bt.params))
         pass_count = 0
         for t in completed:
             _awf_pos = float(t.user_attrs.get("awf_pos_frac", 0.0))
@@ -1124,45 +1202,150 @@ def main() -> None:
                 t, pbo_obs_s, check_pbo=True, pbo_max=pbo_max_eff, dsr_min=dsr_min_eff
             ):
                 pass_count += 1
-        _logger.info("  [SEED %s] complete=%d pass=%d", seed, len(completed), pass_count)
+        _logger.info(
+            "  [COORD %s] complete=%d pass=%d", pname, len(completed), pass_count
+        )
+        if pname == "B":
+            frozen_after_ab = dict(frozen_accum)
 
-    _logger.info("  --> Running orthogonal ensemble selector across all completed trials...")
-    pbo_max_eff, dsr_min_eff, _ = resolve_adjusted_gates(OPT_FUTURES_CONFIG, n_ml_trials)
+    assert last_study is not None
+    c_complete_ranked = sorted(
+        [
+            t
+            for t in last_study.trials
+            if t.state == TrialState.COMPLETE
+        ],
+        key=lambda t: float(t.user_attrs.get("awf_robust_score", -1e18)),
+        reverse=True,
+    )
+    runner_up_merged: dict[str, Any] | None = None
+    if (
+        len(c_complete_ranked) >= 2
+        and frozen_after_ab
+        and bool(OPT_FUTURES_CONFIG.get("FUTURES_STABILITY_RUNNER_UP_RETRY", True))
+    ):
+        runner_up_merged = {**frozen_after_ab, **dict(c_complete_ranked[1].params)}
+
+    best_trial_coord = last_study.best_trial
+    champion_raw_params = dict(frozen_accum)
+
+    champ_stab_cv: float | None = None
+    stab_tmp_layer3_awf_fail = False
+    stab_seeds = [
+        int(x) for x in (OPT_FUTURES_CONFIG.get("FUTURES_STABILITY_SEEDS") or [])
+    ]
+    cv_max = float(OPT_FUTURES_CONFIG.get("FUTURES_CHAMP_STABILITY_CV_MAX", 0.30))
+    stab_hard = bool(OPT_FUTURES_CONFIG.get("FUTURES_CHAMP_STABILITY_HARD_GATE", False))
+    l3_hard = bool(OPT_FUTURES_CONFIG.get("FUTURES_TMP_LAYER3_HARD_GATE", False))
+
+    def _run_champ_stability(raw_prms: dict[str, Any]) -> tuple[float | None, bool]:
+        if len(stab_seeds) < 2 or ml_ctx is None or not raw_prms:
+            return None, False
+        _l3_fail = False
+        _objs: list[float] = []
+        for _sx in stab_seeds:
+            _sctx = dataclasses.replace(ml_ctx, seed=int(_sx))
+            rerun_precompute_for_ctx(_sctx)
+            val, diag_r = replay_robust_awf_for_trial_params(_sctx, raw_prms)
+            if isinstance(val, tuple):
+                _objs.append(float(val[0]))
+            else:
+                _objs.append(float(val))
+            if bool(OPT_FUTURES_CONFIG.get("FUTURES_TMP_LAYER3_ALL_SEEDS_LAYER1", True)):
+                lf = tmp_md_layer1_failures_from_awf_diag(diag_r, OPT_FUTURES_CONFIG)
+                if lf:
+                    _l3_fail = True
+                    _logger.warning(
+                        " [TMP LAYER3] AWF replay seed=%s Layer-1 fail codes=%s",
+                        _sx,
+                        lf,
+                    )
+        _mu = float(np.mean(_objs))
+        _sig = float(np.std(_objs, ddof=1)) if len(_objs) > 1 else 0.0
+        _cv = float(_sig / max(abs(_mu), 1e-12))
+        _logger.info(
+            " [CHAMP STABILITY] seeds=%s obj_mean=%.6f std=%.6f cv=%.4f (max=%.4f)",
+            stab_seeds,
+            _mu,
+            _sig,
+            _cv,
+            cv_max,
+        )
+        if _cv > cv_max:
+            _logger.warning(
+                " [CHAMP STABILITY] cv %.4f exceeds max %.4f", _cv, cv_max
+            )
+        if _l3_fail:
+            _logger.warning(
+                " [TMP LAYER3] One or more stability seeds failed Layer-1 on AWF replay.",
+            )
+        return _cv, _l3_fail
+
+    champ_stab_cv, stab_tmp_layer3_awf_fail = _run_champ_stability(champion_raw_params)
+
+    primary_failed = (
+        (champ_stab_cv is not None and champ_stab_cv > cv_max and stab_hard)
+        or (stab_tmp_layer3_awf_fail and l3_hard)
+    )
+    if primary_failed and runner_up_merged is not None:
+        _logger.warning(
+            " [STABILITY] primary candidate failed hard gates — trying runner-up (phase C)",
+        )
+        cv_ru, l3_ru = _run_champ_stability(runner_up_merged)
+        ru_ok = (cv_ru is None or cv_ru <= cv_max or not stab_hard) and (
+            not l3_ru or not l3_hard
+        )
+        if ru_ok:
+            champion_raw_params = runner_up_merged
+            champ_stab_cv = cv_ru
+            stab_tmp_layer3_awf_fail = l3_ru
+            best_trial_coord = c_complete_ranked[1]
+            _logger.info(" [STABILITY] runner-up accepted for deploy path.")
+
+    champ_params = build_ml_phase_d_params(champion_raw_params, args.tf)
+    champ_params["ESTIMATED_B"] = float(base_ctx.estimated_b)
+    ensemble_results = [
+        CandidateSelectionResult(
+            params=champ_params,
+            representative_trial=best_trial_coord,
+            n_completed=len(
+                [t for t in last_study.trials if t.state == TrialState.COMPLETE]
+            ),
+            n_passing=0,
+            n_basin=1,
+            method="coordinate_ascent",
+        )
+    ]
+    _logger.info(
+        "  [SELECTOR] method=coordinate_ascent members=1 trials_total=%d",
+        len(all_trials),
+    )
+
+    n_trials_for_gates = sum(int(phase_trials.get(p, 80)) for p in ("A", "B", "C"))
+    pbo_gate, dsr_gate, pbo_champ_eff = resolve_adjusted_gates(
+        OPT_FUTURES_CONFIG, int(n_trials_for_gates)
+    )
 
     def _is_passing_trial(t: optuna.trial.FrozenTrial) -> bool:
         _awf_pos = float(t.user_attrs.get("awf_pos_frac", 0.0))
         pbo_obs_t = awf_pos_frac_to_pseudo_pbo(_awf_pos)
         return _ml_trial_passes_hard_gates(
-            t, pbo_obs_t, check_pbo=True, pbo_max=pbo_max_eff, dsr_min=dsr_min_eff
+            t,
+            pbo_obs_t,
+            check_pbo=True,
+            pbo_max=pbo_gate,
+            dsr_min=dsr_gate,
         )
 
-    ensemble_results = select_orthogonal_ensemble(
-        all_trials=all_trials,
-        is_passing=_is_passing_trial,
-        build_params=lambda rp: {**build_ml_phase_d_params(rp, args.tf), "ESTIMATED_B": ml_ctx.estimated_b},
-        max_size=int(OPT_FUTURES_CONFIG.get("FUTURES_ENSEMBLE_MAX_SIZE", 3)),
-    )
-    
     if not ensemble_results:
-        _logger.error(" [FAIL] No candidates selected for ensemble. Check gate parameters.")
+        _logger.error(" [FAIL] No champion candidate after optimization.")
         return
-
-    _logger.info(
-        "  [SELECTOR] method=orthogonal_ensemble members=%d completed=%d passing=%d",
-        len(ensemble_results),
-        len([t for t in all_trials if t.state == TrialState.COMPLETE]),
-        len([t for t in all_trials if t.state == TrialState.COMPLETE and _is_passing_trial(t)]),
-    )
 
     _logger.info("\n" + "═" * 85)
     _logger.info(
-        f" [ORTHOGONAL-ENSEMBLE] {len(ensemble_results)} CANDIDATES READY"
+        " [CHAMPION] %s candidate(s) ready",
+        len(ensemble_results),
     )
-    _logger.info("═" * 85)
-
-    # Proceed to Final Evaluation and Persistence for each member
-    # For now, we evaluate each member individually as requested.
-    # The 'winner' will be the best member (first in the list).
     winner_res = ensemble_results[0]
     params = winner_res.params
     best_trial = winner_res.representative_trial
@@ -1176,19 +1359,23 @@ def main() -> None:
     gate_ok = True
     gate_failures: list[str] = []
 
-    
-    # ... (Rest of Step 5 logic follows using 'params', 'oos_port', 'best_trial')
-
-
     # [PLGD Breakdown + AWF Leg Matrix] — AI diagnostic + user sanity check
-    _leg_tws = best_trial.user_attrs.get("cpcv_path_oos_log_tw", [])
+    _leg_tws = (
+        best_trial.user_attrs.get("awf_path_leg_log_tw")
+        or best_trial.user_attrs.get("awf_leg_log_tw")
+        or best_trial.user_attrs.get("cpcv_path_oos_log_tw")
+        or []
+    )
     _mu_awf  = float(best_trial.user_attrs.get("awf_mu_log", 0.0))
     _sig_awf = float(best_trial.user_attrs.get("awf_sigma_log", 0.0))
     _plgd_v = float(best_trial.user_attrs.get("awf_plgd", 0.0))
     _reward_v = float(best_trial.user_attrs.get("awf_contract_reward", _plgd_v))
-    _n_tr_cfg = float(OPT_FUTURES_CONFIG.get("total_trials", 1000))
-    _ldef = float(OPT_FUTURES_CONFIG.get("FUTURES_PLGD_LAMBDA_DEF", 0.5))
-    _ltail = float(OPT_FUTURES_CONFIG.get("FUTURES_PLGD_LAMBDA_TAIL", 2.0))
+    _n_tr_cfg = float(
+        best_trial.user_attrs.get("awf_plgd_n_trials", OPT_FUTURES_CONFIG.get("total_trials", 1000))
+    )
+    # Legacy PLGD diagnostic breakdown (post-opt log only; not configurable).
+    _ldef = 0.5
+    _ltail = 2.0
     _sr_b = math.sqrt(2.0 * math.log(max(_n_tr_cfg, 2.0)))
     _vd   = 0.5 * _sig_awf ** 2
     _def  = _ldef * _sr_b * _sig_awf / math.sqrt(max(float(len(_leg_tws)), 1.0))
@@ -1244,7 +1431,7 @@ def main() -> None:
     ensemble_curves = []
     ensemble_ports = []
     for i, res in enumerate(ensemble_results):
-        m_params = apply_policy_constraints(res.params, policy_cfg)
+        m_params = finalize_strategy_portfolio_params(res.params, policy_cfg)
         m_port = run_oos_margin_shared_portfolio(
             valid_symbols, args.tf, m_params, oos_data_maps, cache_root=FUTURES_CACHE_DIR
         )
@@ -1313,7 +1500,7 @@ def main() -> None:
     )
 
     # Continue with the 'winner' (best member) for standard evaluation
-    params = apply_policy_constraints(params, policy_cfg)
+    params = finalize_strategy_portfolio_params(params, policy_cfg)
     oos_port = ensemble_ports[0]
 
     _awf_pos_best = float(best_trial.user_attrs.get("awf_pos_frac", 0.0))
@@ -1321,7 +1508,11 @@ def main() -> None:
     dsr_obs = float(best_trial.user_attrs.get("gate1_dsr", 0.0))
 
     if bool(OPT_FUTURES_CONFIG.get("FUTURES_PHASE3_HARD_GATE", True)):
-        _awf_leg_log_tw = best_trial.user_attrs.get("cpcv_path_oos_log_tw") or []
+        _awf_leg_log_tw = (
+            best_trial.user_attrs.get("awf_leg_log_tw")
+            or best_trial.user_attrs.get("cpcv_path_oos_log_tw")
+            or []
+        )
         if len(_awf_leg_log_tw) >= 3:
             _spa_p = stationary_bootstrap_spa(np.asarray(_awf_leg_log_tw, dtype=np.float64))
             _spa_max = float(OPT_FUTURES_CONFIG.get("FUTURES_SPA_P_VALUE_MAX", 0.10))
@@ -1339,6 +1530,8 @@ def main() -> None:
         )
 
     vcfg_block = OPT_FUTURES_CONFIG.get("FUTURES_VALIDATION_CONFIG", {})
+    _emb_cfg = int(vcfg_block.get("wf_anchored_embargo_bars", -1))
+    _emb = _emb_cfg if _emb_cfg >= 0 else int(EMBARGO_BARS.get(args.tf, 12))
     wf_cfg = WalkForwardConfig(
         n_legs=int(vcfg_block.get("wf_n_legs", 10)),
         purge_bars=int(vcfg_block.get("wf_purge_bars", 24)),
@@ -1347,44 +1540,24 @@ def main() -> None:
         mean_leg_tw_floor=float(vcfg_block.get("wf_mean_leg_tw_floor", 1.00)),
         ergodicity_guideline_pct=float(vcfg_block.get("wf_ergodicity_guideline_pct", 15.0)),
         ergodicity_hard_gate_enabled=bool(vcfg_block.get("wf_ergodicity_hard_gate_enabled", True)),
+        use_anchored_awf_geometry=bool(
+            vcfg_block.get("use_anchored_awf_geometry", False)
+        ),
+        anchored_is_pool_frac=float(vcfg_block.get("wf_anchored_is_pool_frac", 0.70)),
+        anchored_embargo_bars=_emb,
     )
     _erg_dev_val = 0.0
     wf_result = None
     if valid_symbols and wf_cfg.n_legs > 1:
-        ref_sym = valid_symbols[0]
-        ref_df = oos_data_maps[ref_sym][args.tf]
-        o0 = int(oos_data_maps[ref_sym][f"oos_start_idx_{args.tf}"])
-
-        def _run_wf_leg(ls_eval: int, le: int) -> dict[str, Any]:
-            return run_oos_margin_shared_portfolio(
-                valid_symbols,
-                args.tf,
-                params,
-                oos_data_maps,
-                cache_root=FUTURES_CACHE_DIR,
-                oos_start_idx=ls_eval,
-                oos_end_idx=le,
-            )
-
-        def _wf_before_leg(leg_idx: int, ls_eval: int, le: int) -> None:
-            if not bool(OPT_FUTURES_CONFIG.get("FUTURES_WF_PHASE2_DRIFT_LOG", True)):
-                return
-            _logger.debug(
-                " [WF/LEG] idx=%d eval_from=%d to=%d (HMM_leg_refit_cfg=%s)",
-                leg_idx,
-                ls_eval,
-                le,
-                bool(OPT_FUTURES_CONFIG.get("FUTURES_WF_HMM_LEG_REFIT", False)),
-            )
-
-        _wf_log_drift = bool(OPT_FUTURES_CONFIG.get("FUTURES_WF_PHASE2_DRIFT_LOG", True))
-        wf_result = evaluate_walk_forward(
-            len(ref_df),
-            o0,
-            _run_wf_leg,
+        wf_result = mirror_walk_forward_result_from_awf_user_attrs(
+            dict(best_trial.user_attrs),
             wf_cfg,
-            drift_signal_df=ref_df if _wf_log_drift else None,
-            before_each_leg=_wf_before_leg,
+        )
+        _logger.info(
+            " [WF] mode=awf_mirror legs=%d erg_dev=%.2f%% "
+            "(single AWF geometry; mirrored from trial AWF attrs)",
+            len(wf_result.tw_legs),
+            wf_result.ergodicity_dev_pct,
         )
         _erg_dev_val = float(wf_result.ergodicity_dev_pct)
         _logger.info(
@@ -1427,7 +1600,7 @@ def main() -> None:
     alignment_offsets = mai.get("alignment_offsets", {})
     eff_len = mai.get("eff_ref_len", 0)
     ho_ratio = 0.20
-    cpcv_zone_len = max(200, int(eff_len * (1.0 - ho_ratio)))
+    aligned_main_is_bars = max(200, int(eff_len * (1.0 - ho_ratio)))
 
     for sym in valid_symbols:
         # Get perfectly aligned IS start used during model training
@@ -1442,7 +1615,7 @@ def main() -> None:
         # Hold-out: Final 20% of the aligned IS period (consistent datetime across symbols)
         ho_dm = data_maps[sym].copy()
         # Safety: Ensure hold-out start doesn't exceed data length
-        ho_start = min(aligned_is_start + cpcv_zone_len, len(ho_dm[args.tf]) - 2)
+        ho_start = min(aligned_is_start + aligned_main_is_bars, len(ho_dm[args.tf]) - 2)
         ho_dm[f"oos_start_idx_{args.tf}"] = max(aligned_is_start, ho_start)
         ho_data_maps[sym] = ho_dm
 
@@ -1504,16 +1677,20 @@ def main() -> None:
 
     _lpf_oos = float(oos_port.get("long_pf", oos_port.get("long_profit_factor", 1.0)))
     _spf_oos = float(oos_port.get("short_pf", oos_port.get("short_profit_factor", 1.0)))
-    worst_leg = float(best_trial.user_attrs.get("ml_p10_log_growth_cpcv", -10.0))
+    worst_leg = float(
+        best_trial.user_attrs.get(
+            "awf_worst_leg_log_tw", best_trial.user_attrs.get("ml_p10_log_growth_cpcv", -10.0)
+        )
+    )
     worst_tw = float(np.exp(worst_leg))
-    p10_floor = float(OPT_FUTURES_CONFIG.get("FUTURES_CPCV_P10_LOG_TW_MIN", -0.05))
+    p10_floor = float(OPT_FUTURES_CONFIG.get("FUTURES_AWF_P10_LOG_TW_MIN", -0.10))
 
     wf_fail_t = tuple(wf_result.failures) if wf_result is not None else ()
 
     _gate_inp = FuturesResearchGateInput(
         phase3_enabled=bool(OPT_FUTURES_CONFIG.get("FUTURES_PHASE3_HARD_GATE", True)),
-        pbo_max=float(pbo_max_eff),
-        dsr_min=float(dsr_min_eff),
+        pbo_max=float(pbo_gate),
+        dsr_min=float(dsr_gate),
         is_precision=0.55,
         oos_port=oos_port,
         pbo_obs=float(pbo_obs),
@@ -1538,6 +1715,31 @@ def main() -> None:
     )
     gate_ok, _gf_codes = evaluate_research_gates(_gate_inp)
     gate_failures = list(_gf_codes)
+    if bool(
+        OPT_FUTURES_CONFIG.get("FUTURES_TMP_MD_CHAMPION_GATES_ENABLED", True)
+    ):
+        tmp_gf = collect_tmp_md_champion_gate_failures(
+            dict(best_trial.user_attrs),
+            oos_bar_rets=oos_rets,
+            ann_factor=float(ann_f),
+            cfg=OPT_FUTURES_CONFIG,
+        )
+        if tmp_gf:
+            gate_failures.extend(tmp_gf)
+            gate_ok = False
+    if (
+        bool(OPT_FUTURES_CONFIG.get("FUTURES_TMP_LAYER3_HARD_GATE", False))
+        and stab_tmp_layer3_awf_fail
+    ):
+        gate_failures.append("TMP_LAYER3_STABILITY_LAYER1")
+        gate_ok = False
+    if (
+        champ_stab_cv is not None
+        and champ_stab_cv > cv_max
+        and bool(OPT_FUTURES_CONFIG.get("FUTURES_CHAMP_STABILITY_HARD_GATE", False))
+    ):
+        gate_failures.append("CHAMP_STAB_CV")
+        gate_ok = False
     for _code in gate_failures:
         _logger.warning(
             " [GATE] %s — %s",
@@ -1582,7 +1784,14 @@ def main() -> None:
             _met = _c.get("metrics", {})
             champ_m = {
                 "pbo": _safe_float(_met.get("pbo_paired", _met.get("pbo", 0.5)), 0.5, 1e3),
-                "p10": _safe_float(_met.get("cpcv_p10_log_tw", 0.0), 0.0, 100.0),
+                "p10": _safe_float(
+                    _met.get(
+                        "awf_worst_leg_log_tw",
+                        _met.get("cpcv_p10_log_tw", 0.0),
+                    ),
+                    0.0,
+                    100.0,
+                ),
                 "dsr": _safe_float(_met.get("dsr", 0.0), 0.0, 1e3),
                 "tw": _safe_float(_met.get("oos_terminal_wealth", 1.0), 1.0, 1e6),
                 "cagr": _safe_float(_met.get("oos_cagr_pct", 0.0), 0.0, 1e5),
@@ -1609,7 +1818,11 @@ def main() -> None:
 
     new_m = _sanitize_metric_map({
         "pbo": float(pbo_obs) if 'pbo_obs' in locals() else 0.5,
-        "p10": float(best_trial.user_attrs.get("ml_p10_log_growth_cpcv", 0.0)),
+        "p10": float(
+            best_trial.user_attrs.get(
+                "awf_worst_leg_log_tw", best_trial.user_attrs.get("ml_p10_log_growth_cpcv", 0.0)
+            )
+        ),
         "dsr": float(best_trial.user_attrs.get("gate1_dsr", 0.0)),
         "tw": float(meta_port.get("terminal_wealth_ratio", 1.0)),
         "cagr": float(meta_port.get("cagr_pct", 0.0)),

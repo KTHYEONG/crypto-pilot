@@ -1,4 +1,4 @@
-"""Optional diagnostics: shared-cash rank_score vs entry_signal alignment (tmp.md)."""
+"""Optional diagnostics: shared-cash rank_score vs entry_signal alignment."""
 
 from __future__ import annotations
 
