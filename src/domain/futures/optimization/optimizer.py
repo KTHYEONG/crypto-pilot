@@ -492,27 +492,21 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
         _log_precompute_computed_dir_sample(
             aligned0,
             int(pre_ml["K_LONG"]),
-            int(pre_ml["K_SHORT"]),
-            float(pre_ml["CRISIS_GAMMA"]),
         )
 
 
 def _log_precompute_computed_dir_sample(
     aligned0: dict[str, Any],
     k_long: int,
-    k_short: int,
-    crisis_gamma: float,
 ) -> None:
     """Single-bar sample of |computed_dir| dispersion (block 0, mid time index)."""
     xl = aligned0.get("xs_score_long")
     xs = aligned0.get("xs_score_short")
-    hy = aligned0.get("hmm_prob_crisis")
     ml_l = aligned0.get("hmm_modulator_long")
     ml_s = aligned0.get("hmm_modulator_short")
     if (
         xl is None
         or xs is None
-        or hy is None
         or ml_l is None
         or ml_s is None
         or getattr(xl, "size", 0) == 0
@@ -520,7 +514,6 @@ def _log_precompute_computed_dir_sample(
         return
     arr_l = np.ascontiguousarray(xl, dtype=np.float64)
     arr_s = np.ascontiguousarray(xs, dtype=np.float64)
-    arr_h = np.ascontiguousarray(hy, dtype=np.float64)
     arr_ml_l = np.ascontiguousarray(ml_l, dtype=np.float64)
     arr_ml_s = np.ascontiguousarray(ml_s, dtype=np.float64)
 
@@ -532,10 +525,8 @@ def _log_precompute_computed_dir_sample(
         n_sy,
         arr_l,
         arr_s,
-        arr_h,
         arr_ml_l,
         arr_ml_s,
-        crisis_gamma,
         k_long,
         1.0,    # cs_z_threshold
         0.7,    # cs_z_exit_threshold
@@ -877,7 +868,6 @@ def _run_portfolio_numba_block(
         aligned["xs_score_long"],
         aligned["xs_score_short"],
         aligned["hmm_prob_crisis"],
-        aligned["hmm_hard_state"],
         aligned["hmm_modulator_long"],
         aligned["hmm_modulator_short"],
         aligned.get("hmm_prob_bear_trend", np.zeros_like(aligned["close"])),
@@ -904,7 +894,6 @@ def _run_portfolio_numba_block(
         cs_z_exit,
         max(1, int(params["REBALANCE_BARS"])),
         float(params.get("REBALANCE_TURNOVER_THRESHOLD", 0.15)),
-        float(params.get("CRISIS_GAMMA", params.get("CRISIS_GATE_PROB", 1.0))),
         use_cs,
         estimated_b,
     )

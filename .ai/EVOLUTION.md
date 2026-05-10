@@ -4,6 +4,48 @@ This file tracks the logical progression and experimental results of the quantit
 
 ---
 
+## [2026-05-10] v6.5.0-p2-kelly-diag: Kelly Sizing Root Cause + P2.1 Regression (Haiku)
+
+### 1. P2.1 Experiment: Tighter Suppression FAILED
+*   **Hypothesis**: Tighten bear suppression threshold (-0.08 → -0.05) and damping (0.4 → 0.25) to reduce false-long entries in OOS bear regime.
+*   **Result**: Full regression across all metrics.
+
+| Metric | P2 Initial | P2.1 Tighter | Δ |
+|--------|-----------|------------|---|
+| OOS CAGR | -0.21% | -0.49% | -0.28%p ↓ |
+| OOS PF | 0.854 | 0.683 | -0.171 ↓ |
+| Long PF | 0.79 | 0.66 | -0.13 ↓ |
+| Short PF | 1.90 | 1.423 | -0.477 ↓ |
+
+*   **Lesson**: Over-aggressive suppression warped the Optuna optimization landscape, forcing suboptimal hyperparameter discovery. Even the profitable short side (PF=1.90→1.423) degraded. **Decision: REVERT to P2_initial**.
+
+### 2. Root Cause Discovery: Kelly Sizing Fundamentally Underpowered
+*   **The Chain**:
+    1. Platt Scaling outputs: `ml_calib_prob ≈ 0.496` (near-neutral, all legs clustered)
+    2. Hardcoded win/loss ratio: `estimated_b = 1.05` (assumed from IS backtest, but never validated)
+    3. Kelly formula: `f* = p - (1-p)/b = 0.496 - 0.504/1.05 ≈ 0.016`
+    4. Position sizing: `kelly_f = KELLY_LAMBDA × f* × gk_use = 0.2 × 0.016 × 1.0 ≈ 0.3%` per trade
+    5. Target notional: ~$3-$50 on $1,000 account. Trading costs (3.5 bps) >> PnL.
+
+*   **Evidence**:
+    - Leg magnitudes: log(TW) ∈ [-0.0009, +0.0002], i.e., all near break-even.
+    - Cumulative OOS: Only 1/5 AWF legs positive (0.2 pos_frac), total TW ≈ 0.999 (0.1% loss).
+    - Avg PnL per trade: -11 bps (including costs), suggesting gross PnL ≈ 0 after deducting 3.5 bps virtual friction.
+
+*   **Root Cause Investigation**:
+    - `SignalCalibrator.mean_b` is computed from IS fwd returns but **never logged**. Likely computed but not exposed.
+    - LogisticRegression coef likely ~0.1–0.3 (per historical Platt audit), causing severe under-discrimination.
+    - Raw alpha scores (0.39–0.67) have poor separation for OOS regime mismatch (bull-trained model in bear OOS).
+
+### 3. Impact Assessment
+*   **Status**: Structural blockade. Even with correct HMM suppression (P2 initial improving CAGR from -4.4% to -0.21%), the Kelly-sized positions are too small to overcome costs.
+*   **Next Investigation**: 
+    1. Log `calib.mean_b` value to verify if it's actually >1.05 (should be 2.0+ in bull IS).
+    2. Improve Platt discriminator: blend fitted LogReg with parametric sigmoid when coef < 2.0.
+    3. Use directional Kelly: separate long/short Kelly fractions via p_long and p_short.
+
+---
+
 ## [2026-05-09] v6.4.2: Execution Dissonance — HMM Mapping & Hurdle Liberation (Gemini CLI)
 
 ### 1. Architectural Shift: Unlocking the Gates
