@@ -40,9 +40,31 @@ class BinanceVisionDownloader:
                 with z.open(csv_name) as f:
                     df = pd.read_csv(f)
 
-            # 컬럼명 정규화 (시스템 표준인 timestamp 기반으로 변환)
+            # 컬럼명 정규화
+            # Binance Vision metrics columns:
+            # create_time, symbol, sum_open_interest, sum_open_interest_value, 
+            # count_toptrader_long_short_ratio, sum_toptrader_long_short_ratio, 
+            # count_long_short_ratio, sum_taker_long_short_vol_ratio
+            
             if "create_time" in df.columns:
-                df["timestamp"] = df["create_time"]
+                df["datetime"] = pd.to_datetime(df["create_time"], utc=True)
+                df["timestamp"] = df["datetime"].astype("int64") // 10**6
+            
+            rename_map = {
+                "sum_toptrader_long_short_ratio": "top_trader_long_short_ratio",
+                "count_long_short_ratio": "long_short_ratio",
+            }
+            df.rename(columns=rename_map, inplace=True)
+            
+            # Numeric conversion for key columns
+            numeric_cols = [
+                "sum_open_interest", "top_trader_long_short_ratio", "long_short_ratio",
+                "sum_open_interest_value", "sum_taker_long_short_vol_ratio"
+            ]
+            for col in numeric_cols:
+                if col in df.columns:
+                    df[col] = pd.to_numeric(df[col], errors="coerce")
+
             return df
         except urllib.error.HTTPError as e:
             if e.code == 404:

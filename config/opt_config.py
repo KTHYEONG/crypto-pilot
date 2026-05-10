@@ -47,8 +47,8 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     "FUTURES_ALPHA_REGIME_SPECIFIC_LEARNING": True,
     # Tier 2: +2 generations for marginal symbolic-regression diversity (cheap vs full schema lift).
     "FUTURES_ML_ALPHA_GENERATIONS": 22,
-    "FUTURES_ML_ALPHA_TARGET_HORIZON": 12,
-    "FUTURES_ML_ALPHA_HORIZONS": (12, 24, 48, 96),
+    "FUTURES_ML_ALPHA_TARGET_HORIZON": 24,
+    "FUTURES_ML_ALPHA_HORIZONS": (24, 48, 72, 96),
     # Cache-control refit: when True, bypass Alpha raw cache and force alpha retraining.
     "FUTURES_ML_FORCE_RETRAIN_ALPHA": True,
     # Thematic breadth: LambdaRank buckets (Trend / Vol+MR / Interaction) × slots each. Total = 3 × value.
@@ -218,6 +218,9 @@ ENGINE_PARAM_SPACE_FUTURES: dict[str, dict[str, Any]] = {
     "CS_Z_SCORE_THRESHOLD": {"type": "float", "low": 0.2, "high": 2.0, "step": 0.1},
     "CRISIS_GAMMA": {"type": "float", "low": 1.0, "high": 5.0, "step": 1.0},
     "CRISIS_GATE_PROB": {"type": "float", "low": 0.50, "high": 0.90, "step": 0.10},
+    "DYNAMIC_RA_CRISIS_COEF": {"type": "float", "low": 1.0, "high": 5.0, "step": 0.5},
+    "DYNAMIC_RA_BEAR_COEF": {"type": "float", "low": 0.0, "high": 3.0, "step": 0.5},
+    "NORM_VAR_CONSTANT": {"type": "float", "low": 0.1, "high": 1.0, "step": 0.1},
 }
 
 # Dynamic Universe Anchor Symbols

@@ -1,90 +1,62 @@
 {
   "project": "my-coin-traider",
-  "version": "6.7.0-magnitude-slots",
+  "version": "6.8.0-magnitude-oi-restored",
   "last_evolution_date": "2026-05-10",
-  "previous_state_hash": "v6.6.0-p1-natural-scaling",
+  "previous_state_hash": "v6.7.0",
   "current_logic": {
     "universe_selection": "CS_RANK based filtering (16-32 symbols)",
-    "regime_classification": "Organic 5-State HMM (Uncapped) + Posterior smoothing (EMA span 8) + Sticky penalty weight 1100 + Student-t JAX Optimization",
-    "alpha_generation": "LambdaRank (18-slot, 6 per theme) + Hybrid Rank×Magnitude (LGBMRegressor L1 24h horizon) + IC²-weighted ensemble + Symmetric Hybrid Labeling. HMM_COLS injected into Group 1 (Vol/MR) only.",
-    "position_sizing": "Natural Risk-Adjusted Scaling: $mod = target\\_var / (RA \\cdot variance)$. Linear clip [0.25, 1.75]. No bear_throttle in engine.",
+    "regime_classification": "Organic 5-State HMM (Uncapped) + Reduced Smoothing (EMA Span 3) + Student-t JAX Optimization",
+    "alpha_generation": "LambdaRank (18 slots) + Dynamic Friction Hurdle + Liquidation/Capitulation Proxies + Macro Structural Features (Weekly VWAP).",
+    "position_sizing": "Natural Risk-Adjusted Scaling: $mod = 0.5 / (DynamicRA * ExpectedVar)$. Soft-clip [0, 2.0] via tanh. Tunable RA coefficients via Optuna.",
     "execution_model": "Event-Driven Z-Score Hysteresis + Conviction-Weighted Allocation",
-    "optimization": "PLGD Objective Function + AWF-Leg Robustness + Cross-Sectional Z-Score Neutralization",
-    "risk_management": "HMM-Derived Linear Modulator (no tanh) + Dynamic Risk Aversion ($1 + 3P_{crisis} + 1.5P_{bear}$)"
+    "optimization": "PLGD Objective Function + AWF-Leg Robustness + Cross-Sectional Z-Score Neutralization + Tunable RA Optimization",
+    "risk_management": "HMM-Derived Variance Scaling + Dynamic Risk Aversion ($1 + RA_{crisis}P_{crisis} + RA_{bear}P_{bear}$)"
   },
   "key_parameters": {
     "base_timeframe": "4h",
-    "alpha_miner_version": "v6_lambdarank_dart_magnitude",
-    "ALPHA_SLOTS_TOTAL": 18,
-    "ALPHA_SLOTS_PER_THEME": 6,
-    "MAG_HORIZON_BARS": 24,
-    "MAG_BLEND_COEF": 0.3,
-    "HMM_SMOOTHING_SPAN": 8,
-    "HMM_STICKY_PENALTY_WEIGHT": 1100,
-    "DYNAMIC_RA_CRISIS_COEF": 3.0,
-    "DYNAMIC_RA_BEAR_COEF": 1.5,
-    "MODULATOR_CLIP_LOW": 0.25,
-    "MODULATOR_CLIP_HIGH": 1.75,
-    "CALIBRATOR_INPUT": "ml_alpha_long",
-    "MEAN_B_CLIP": [0.7, 2.0],
-    "target_oos_ic": "0.044 (post-P2, Group-1 HMM partial rollback)",
-    "oos_retention": "+86.4%"
+    "alpha_miner_version": "v6_lambdarank_dart_mag_v21",
+    "TARGET_HORIZON": 24,
+    "DYNAMIC_FRICTION_HURDLE": "max(1.5*friction, 0.4*ATR_24h_pct)",
+    "HMM_SMOOTHING_SPAN": 3,
+    "restored_data": "Binance Vision Open Interest (OI) & LSR",
+    "new_features": [
+      "liq_intensity_proxy",
+      "capitulation_proxy",
+      "dist_from_weekly_vwap",
+      "macro_vol_regime_shift",
+      "taker_absorption_score"
+    ],
+    "target_oos_ic": "0.0743 (Full-Scale)",
+    "profit_factor_improvement": "0.49 -> 0.75 (+53%)"
   },
   "current_bottleneck": {
-    "issue": "Kelly Starvation: ml_calib_prob ≈ 0.502 → f* ≈ 0.002",
-    "mechanism": "Platt Scaling LogReg coef ~0.05–0.21 insufficient for discrimination. All ml_calib_prob values cluster near 0.50, yielding Kelly fraction ≈ 0.002 per trade. At 3.5bps friction, notional ~$2–$5 on $1,000 cannot overcome costs.",
-    "evidence": "AWF pos_frac=0/5 (PHASE3 gate failing). OOS CAGR -0.26%, HO CAGR +0.28%. Mean_b computed but near 1.0. OOS IC 0.044.",
-    "root_cause": "Platt Scaling under-discrimination: raw alpha scores (range 0.39–0.67) provide insufficient spread for logistic regression separation. Combined with mean_b ≈ 1.0, Kelly f* collapses.",
-    "investigation_needed": "P4: Separate long/short Kelly b estimation; per-regime b (bull/bear/crisis); magnitude model improving p_win separation; or horizon expansion to 8h/12h to dilute friction impact."
+    "issue": "Trade Frequency & Long-side Bias",
+    "mechanism": "Strict Z-Score entry (Threshold ~1.0) and high friction hurdle (7bps) combined with Short-side dominance (Short PF 3.82 vs Long PF 0.65).",
+    "evidence": "Total trades 111 (p4). Win Rate 57.26%. MDD 0.16% (Extremely defensive). Long-side participation is insufficient to reach positive CAGR.",
+    "root_cause": "Symmetric entry thresholds block profitable Long opportunities in trending markets. Over-protection (MDD 0.16%) stifles capital growth.",
+    "investigation_needed": "P5.A: Asymmetric Entry Thresholds (Lower hurdle for Long). P5.B: Leverage/Exposure 상향 (Target MDD ~5-10% to capture CAGR)."
   },
   "best_achieved_metrics": {
-    "note": "v6.7.0 P1+P2 1000T run (18 slots, mag blend, linear modulator, span=8, sticky=1100)",
-    "is_cagr": "~0.1% (estimated)",
-    "oos_cagr": "-0.26%",
-    "ho_cagr": "+0.28%",
-    "oos_retention": "+86.4%",
-    "oos_mdd": "0.15%",
-    "hmm_switches": "713 (vs 858 baseline)",
-    "crisis_pct": "25.2%",
-    "awf_pos_frac": "0/5"
+    "note": "v6.8.0 Magnitude + OI Restored (10,000 Trials)",
+    "is_cagr": "-0.01%",
+    "oos_cagr": "-0.51%",
+    "oos_net_alpha": "-15.84%",
+    "oos_mdd": "0.16%",
+    "profit_factor": "0.75",
+    "win_rate": "57.26%",
+    "tail_capture": "34.1%"
   },
   "failed_experiments": [
     {
       "name": "Heuristic_Overrides_Legacy",
       "change": "Crisis Kill-switch, Vol-Overlay, 168h Bear Damp",
       "outcome": "INEFFICIENT (oos_net_alpha -65.4%)",
-      "lesson": "Binary/Heuristic gates suppress the organic flow of alpha signals and warp the optimization landscape."
-    },
-    {
-      "name": "P1.A_span3",
-      "change": "HMM_SMOOTHING_SPAN=3 (DNA intent misread as 3)",
-      "outcome": "CRISIS over-detection 25.1%, semantic mapping reversed, avg duration 25.5 bars",
-      "lesson": "Span=3 over-sensitizes HMM to noise; span=8 provides stable regime detection."
-    },
-    {
-      "name": "P2.F_full_HMM_removal",
-      "change": "Remove HMM_COLS from all theme groups (0, 1, 2)",
-      "outcome": "Long PF collapsed 1.04→0.54, IC halved 0.083→0.044. AWF further degraded.",
-      "lesson": "Vol/MR theme (Group 1) requires HMM regime context for meaningful cross-sectional differentiation. Only raw systemic injection (Groups 0,2) should be avoided."
+      "lesson": "Binary/Heuristic gates suppress the organic flow of alpha signals."
     }
   ],
-  "p1_changes": {
-    "P1.A": "FUTURES_HMM_SMOOTHING_SPAN: 12 → 8 (span=3 failed, settled at 8)",
-    "P1.B": "SignalCalibrator input: ml_alpha_00 → ml_alpha_long (distribution alignment)",
-    "P1.C": "Modulator: tanh saturation → linear clip [0.25, 1.75] with target_var normalization",
-    "P1.D": "engine bear_throttle (1-0.5*b_prob) removed; modulator RA already encodes bear penalty"
-  },
-  "p2_changes": {
-    "P2.E": "Magnitude model: LGBMRegressor(L1, 100 trees) per slot, 24h horizon, blend coef=0.3",
-    "P2.F_partial": "HMM_COLS: removed from Groups 0+2, RETAINED in Group 1 (Vol/MR) only",
-    "P2.G": "Calibrator: mean_b clipped [0.7,2.0], fit logging enabled",
-    "P2_slots": "FUTURES_ML_ALPHA_SLOTS_PER_THEME: 5 → 6 (total 15→18 slots)"
-  },
   "next_recommended_actions": [
-    "P4.A: Kelly b per-regime: separate b estimation for bull/bear/crisis states from HMM posterior × IS returns",
-    "P4.B: Horizon Expansion: test 8h/12h prediction to dilute 3.5bps friction (friction/magnitude ratio halved at 8h)",
-    "P4.C: Platt discriminator improvement: blend LogReg with parametric sigmoid when coef < 2.0; target ml_calib_prob spread [0.40, 0.60]",
-    "P4.D: Net Alpha weighting in PLGD objective (J.suggested) to bias Optuna toward friction-robust trials",
-    "P3.H: HMM Gravity Penalty dynamic indexing or removal (empirical mapping already sufficient)"
+    "P5.A: Asymmetric Entry Thresholds: Decouple CS_Z_SCORE_THRESHOLD into Long/Short to allow more Long participation.",
+    "P5.B: Aggressive Exposure: Increase MAX_EXPOSURE (0.8 -> 1.5) and RISK_PER_TRADE to move from 'Safe' to 'Growth'.",
+    "P5.C: Target Volatility Scaling: Train Alpha on Sharpe-like targets (Ret/Vol) to prioritize risk-efficient entries."
   ]
 }
