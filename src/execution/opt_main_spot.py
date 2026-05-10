@@ -748,7 +748,7 @@ def _run_stage1_structure_discovery(
 def _select_best_trial_from_shortlist(
     ranked: list[optuna.trial.FrozenTrial],
 ) -> optuna.trial.FrozenTrial:
-    """Within ~2% of top objective value, prefer higher CPCV robustness (tmp.md tie-break)."""
+    """Within ~2% of top objective value, prefer higher CPCV robustness (tie-break)."""
     if not ranked:
         raise ValueError("ranked trials empty")
     top_val = float(ranked[0].value if ranked[0].value is not None else -1e9)

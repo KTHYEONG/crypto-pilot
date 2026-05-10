@@ -1,4 +1,4 @@
-"""Weak prior penalty for mismatched SIGNAL_TYPE x EXIT_FAMILY (tmp.md)."""
+"""Weak prior penalty for mismatched SIGNAL_TYPE x EXIT_FAMILY."""
 
 from __future__ import annotations
 

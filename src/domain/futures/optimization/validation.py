@@ -1,4 +1,7 @@
-"""CPCV/CAWF-R walk-forward leg builders, PBO/DSR gate adjustment, and Go/No-Go validation for futures."""
+"""Anchored walk-forward leg builders and futures validation helpers.
+
+Includes PBO/DSR gate adjustment and Go/No-Go checks.
+"""
 
 from __future__ import annotations
 
@@ -6,190 +9,48 @@ import logging
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from itertools import combinations
 from statistics import median
-from typing import Any, cast
+from typing import Any
 
 import numpy as np
-import pandas as pd
-
-from config.opt_config import OPT_FUTURES_CONFIG
 
 _logger: logging.Logger = logging.getLogger("opt_futures")
 
-# --- CV Types ---
-CVFold = tuple[int, int, int, int]
-HoldoutFold = tuple[int, int, int]
-CPCVPath = list[tuple[int, int]]
-# (train_start, train_end, test_start, test_end)
+# Anchored WF leg geometry: (train_start, train_end, test_start, test_end)
 AWFLeg = tuple[int, int, int, int]
-
-# --- CV Utils (from cv_utils.py) ---
-
-def list_cpcv_block_ranges(n_bars: int, n_blocks: int, embargo: int = 0) -> list[tuple[int, int]]:
-    """Physical IS blocks (IS-relative indices [start, end))."""
-    n = int(n_bars)
-    nb = int(n_blocks)
-    e = max(0, int(embargo))
-    if n < nb * 2 or nb < 1:
-        return []
-    base = n // nb
-    if base <= e:
-        return []
-    out: list[tuple[int, int]] = []
-    for j in range(nb):
-        raw_start = j * base
-        end = (j + 1) * base if j < nb - 1 else n
-        start = raw_start + e
-        if end <= start:
-            return []
-        out.append((start, end))
-    return out
-
-
-def cpcv_complement_segments(
-    test_path: CPCVPath, all_blocks: list[tuple[int, int]]
-) -> list[tuple[int, int]]:
-    test_set = {tuple(int(x) for x in pair) for pair in test_path}
-    norm_blocks = [cast(tuple[int, int], tuple(int(x) for x in b)) for b in all_blocks]
-    comp = [b for b in norm_blocks if b not in test_set]
-    return sorted(comp, key=lambda t: t[0])
-
-
-def build_purged_walk_forward_folds(
-    df: pd.DataFrame,
-    n_folds: int = 4,
-    holdout_ratio: float = 0.20,
-    embargo: int = 0,
-) -> tuple[list[CVFold], HoldoutFold]:
-    """Legacy walk-forward splits (optional tooling / tests)."""
-    n_bars: int = len(df)
-    if n_bars < 500:
-        return [], (0, 0, 0)
-
-    is_bars = int(n_bars * (1 - holdout_ratio))
-    usable_is_bars = is_bars - (n_folds * embargo)
-    if usable_is_bars <= 0:
-        return [], (0, 0, 0)
-
-    fold_size = usable_is_bars // n_folds
-    if fold_size < 10:
-        return [], (0, 0, 0)
-
-    splits: list[CVFold] = []
-    for i in range(1, n_folds + 1):
-        train_end = i * fold_size + (i - 1) * embargo
-        test_start = train_end + embargo
-        test_end = min(is_bars, test_start + fold_size)
-        if test_end > test_start:
-            splits.append((0, train_end, test_start, test_end))
-
-    ho_start = min(n_bars, is_bars + embargo)
-    holdout_fold: HoldoutFold = (is_bars, ho_start, n_bars)
-
-    return splits, holdout_fold
-
-
-def build_cpcv_test_paths(
-    n_bars: int,
-    n_blocks: int,
-    k_test_blocks: int,
-    embargo: int = 0,
-) -> list[CPCVPath]:
-    n = int(n_bars)
-    nb = int(n_blocks)
-    k = int(k_test_blocks)
-    e = max(0, int(embargo))
-    if n < nb * 2 or k < 1 or k > nb:
-        return []
-
-    base = n // nb
-    if base <= e:
-        return []
-
-    block_starts: list[int] = []
-    block_ends: list[int] = []
-    for j in range(nb):
-        raw_start = j * base
-        end = (j + 1) * base if j < nb - 1 else n
-        start = raw_start + e
-        if end <= start:
-            return []
-        block_starts.append(start)
-        block_ends.append(end)
-
-    paths: list[CPCVPath] = []
-    for test_indices in combinations(range(nb), k):
-        segs = tuple((block_starts[j], block_ends[j]) for j in sorted(test_indices))
-        paths.append(list(segs))
-    return paths
-
-
-def build_cpcv_test_paths_with_fallback(
-    n_bars: int,
-    embargo: int = 0,
-) -> tuple[list[CPCVPath], int, int]:
-    """Prefer N/K from OPT_FUTURES_CONFIG; fallback 6/2 then 4/2."""
-    n_primary = int(OPT_FUTURES_CONFIG.get("FUTURES_CPCV_N_BLOCKS", 8))
-    k_primary = int(OPT_FUTURES_CONFIG.get("FUTURES_CPCV_K_TEST", 3))
-    paths = build_cpcv_test_paths(n_bars, n_primary, k_primary, embargo=embargo)
-    if paths:
-        return paths, n_primary, k_primary
-    paths_fb62 = build_cpcv_test_paths(n_bars, 6, 2, embargo=embargo)
-    if paths_fb62:
-        return paths_fb62, 6, 2
-    paths_fb = build_cpcv_test_paths(n_bars, 4, 2, embargo=embargo)
-    return paths_fb, 4, 2
 
 
 def build_anchored_wf_legs(
     n_bars: int,
-    k: int = 5,
-    min_train_frac: float = 0.40,
+    k: int = 6,
     embargo: int = 0,
+    *,
+    is_pool_frac: float = 0.70,
+    min_train_frac: float | None = None,
 ) -> list[AWFLeg]:
-    """Chronological expanding-window walk-forward legs (CAWF-R paradigm)."""
+    """Anchored WF: cumulative train [:anchor_i); test only inside the trailing OOS-pool."""
     n = int(n_bars)
     k = max(2, int(k))
     e = max(0, int(embargo))
-
-    test_span = n - max(1, int(n * min_train_frac))
-    leg_width = test_span // k
-    if leg_width <= e or leg_width < 20:
+    frac = float(min_train_frac) if min_train_frac is not None else float(is_pool_frac)
+    frac = float(np.clip(frac, 0.05, 0.95))
+    anchor0 = max(1, int(n * frac))
+    # Remaining timeline after earliest train cutoff still needs room for embargo + legs.
+    remaining = n - anchor0 - e
+    leg_width = remaining // k if k > 0 else 0
+    if leg_width < 20 or remaining <= 0:
         return []
 
     legs: list[AWFLeg] = []
-    first_anchor = max(1, int(n * min_train_frac))
     for i in range(k):
-        anchor = first_anchor + i * leg_width
+        anchor = anchor0 + i * leg_width
         test_start = anchor + e
-        test_end = (anchor + leg_width) if i < k - 1 else n
+        test_end = test_start + leg_width if i < k - 1 else n
         if test_end <= test_start or anchor <= 0:
             continue
         legs.append((0, anchor, test_start, test_end))
 
     return legs
-
-
-def build_fast_cpcv_paths(
-    n_bars: int,
-    embargo: int = 0,
-    n_paths_cap: int = 12,
-    seed: int = 42,
-) -> tuple[list[CPCVPath], int, int]:
-    full_paths, n_blocks, k_test = build_cpcv_test_paths_with_fallback(
-        n_bars, embargo=embargo
-    )
-    if not full_paths:
-        return full_paths, n_blocks, k_test
-
-    cap = min(n_paths_cap, len(full_paths))
-    rng = np.random.default_rng(seed)
-    sampled_indices = sorted(
-        rng.choice(len(full_paths), size=cap, replace=False).tolist()
-    )
-    fast_paths = [full_paths[i] for i in sampled_indices]
-    return fast_paths, n_blocks, k_test
 
 # --- MC Gate Adjustment (from mc_gate_adjust.py) ---
 
@@ -232,6 +93,11 @@ def wf_path_ergodicity_deviation_pct(leg_tw: Sequence[float]) -> float:
 
 
 def awf_pos_frac_to_pseudo_pbo(pos_frac: float) -> float:
+    """Heuristic selection-pressure proxy in [0, 1], **not** López–Prado PBO.
+
+    Kept for backwards-compatible gate wiring; interpret as "failure pressure from
+    low positive-leg fraction", not a calibrated probability of backtest overfitting.
+    """
     return float(np.clip(1.0 - float(pos_frac), 0.0, 1.0))
 
 
@@ -513,7 +379,7 @@ def run_futures_deployment_report(ctx: FuturesDeploymentReportInput) -> str:
 
     lines: list[str] = [
         "=" * 71,
-        " [TIER 1. CPCV STATISTICAL EDGE RIGOR]",
+        " [TIER 1. AWF STATISTICAL EDGE RIGOR]",
         "=" * 71,
         f"  - System Quality Number (SQN) : {ctx.gate1_sqn:.2f}   "
         f"{_fmt_pass_info(sqn_ok)} (Min: 1.6)",
@@ -527,8 +393,8 @@ def run_futures_deployment_report(ctx: FuturesDeploymentReportInput) -> str:
         f"{_fmt_pass_info(dsr_ok)} (Min: 0.20)",
         f"  - P10 GMGR (Worst Path Grow)  : {ctx.gate1_p10_gmgr:.6f}   "
         f"{_fmt_pass_info(gmgr_ok)} (Target: >= -0.001)",
-        f"  - CPCV Mean Path Return       : {ctx.cpcv_mean_path_return_pct:.1f}%",
-        f"  - CPCV Worst Segment MDD      : {ctx.cpcv_worst_segment_mdd_pct:.1f}%",
+        f"  - AWF mean path return          : {ctx.cpcv_mean_path_return_pct:.1f}%",
+        f"  - AWF worst segment MDD         : {ctx.cpcv_worst_segment_mdd_pct:.1f}%",
         "",
         f"  - PBO (IS vs OOS path ranks, n_paths={ctx.pbo_n_paths})  : {pbo_disp}   "
         f"{_fmt_pass_info(ctx.pbo_gate_passed)} "
