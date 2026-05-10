@@ -100,8 +100,20 @@ class FuturesMLStrategy(PipelineStrategyBase):
             df["hmm_prob_crisis"] = 0.0
 
         # 4. Signal Outputs for Backtest Engine
-        # For ML-centric, we typically use the ML prob as strength_filter
-        df["ml_calib_prob"] = 1.0  # Placeholder if used elsewhere
+        # ml_calib_prob is set by the ML pipeline (Platt/MetaLabeler); preserve it if present.
+        # Only compute here as fallback when the merge did not populate it.
+        if "ml_calib_prob" not in df.columns:
+            pl_arr = (
+                df["ml_calib_prob_long"].to_numpy(dtype=np.float64)
+                if "ml_calib_prob_long" in df.columns
+                else np.full(n, 0.5, dtype=np.float64)
+            )
+            ps_arr = (
+                df["ml_calib_prob_short"].to_numpy(dtype=np.float64)
+                if "ml_calib_prob_short" in df.columns
+                else np.full(n, 0.5, dtype=np.float64)
+            )
+            df["ml_calib_prob"] = np.maximum(pl_arr, ps_arr)
         df["strength_filter"] = gp  # Using raw GP as strength indicator
         
         # Rank score used for symbol selection in multi-symbol engine
