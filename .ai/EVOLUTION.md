@@ -4,9 +4,24 @@ This file tracks the logical progression and experimental results of the quantit
 
 ---
 
-## [2026-05-10] v7.0.0: 전면 아키텍처 재설계 + HMM 캐시 제거 (Claude Opus 4.7)
+## [2026-05-10] v8.0.0: HMM v8.0 — Hybrid NLL & Alpha Conviction Liberation (Gemini CLI)
 
-### 1. 핵심 진단: 통합 백테스트가 최악인 근본 원인
+### 1. Architectural Shift: From Suppressor to Accelerator
+*   **Problem**: HMM v7.0.0 was a "conviction killer." Modulators were stuck at 0.17–0.36, and BULL_CALM starvation (2.3%) prevented the system from leveraging its elite Alpha (IC 0.0743).
+*   **Implementation (The v8.0 Spec)**:
+    1.  **Hybrid NLL**: Multi-state drift penalties. BULL/VOL_UP (+), BEAR/CRISIS (-), CHOP (~0).
+    2.  **Semantic Anchoring**: Percentile-based `locs` initialization (p10/p50/p90) to force logical clustering.
+    3.  **Stability Penalty**: Added NLL switching penalty (weight 200) to suppress TVTP noise.
+    4.  **Modulator Redesign**: Scaling centered at 1.0. Range expanded to [0.1, 2.5], allowing up to 150% leverage on high-conviction regimes.
+
+### 2. Performance Impact (Verification Run)
+*   **Regime Restoration**: BULL_CALM recovered to **6.4%**. BULL_VOL_UP (54.3%) now correctly defines the majority trend.
+*   **Conviction**: BULL_CALM Modulator surged to **1.35 (Long)**, finally allowing the system to bet on its edge.
+*   **Risk Precision**: BEAR_TREND reduced from 46.1% to **5.2%** (surgical detection). CRISIS G_LOG deepened to **-0.024%**, doubling tail-risk sensitivity.
+*   **Stability**: Avg Duration slightly improved to **26.5 bars**.
+
+---
+
 
 - **Signal Path 다중 곱셈/게이팅**: HMM modulator가 gate(<0.1 차단)와 sizing multiplier(Kelly×modulator) 두 번 작동. alpha z-score + rank-mult 이중가중. crisis에 long만 threshold+magnitude 양쪽 패널티.
 - **IS 누설**: SignalCalibrator가 IS 12-bar returns로 Platt fit → IS에서 win probability 과적합.
