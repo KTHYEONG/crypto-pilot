@@ -26,7 +26,7 @@ _logger = logging.getLogger("combination_screener")
 
 
 def _p25_path_consistency_score(metrics: Dict[str, float]) -> float:
-    """Stage-1 growth rank: p25 log-TWR scaled by inverse path CV (tmp.md: p25 / (1 + path_cv))."""
+    """Stage-1 growth rank: p25 log-TWR scaled by inverse path CV (p25 / (1 + path_cv))."""
     p25 = float(metrics.get("cpcv_p25_log_tw", -1e9))
     if p25 <= -1e8:
         return p25

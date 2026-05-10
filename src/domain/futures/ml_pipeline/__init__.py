@@ -6,10 +6,7 @@ Public surface: pipeline entrypoint and core model classes only. Import subpacka
 
 from __future__ import annotations
 
-from src.domain.futures.ml_pipeline.alpha.miner import MLAlphaMiner
-from src.domain.futures.ml_pipeline.labels.meta_labeler import MetaLabeler
-from src.domain.futures.ml_pipeline.pipeline_runner import run_ml_pipeline_for_universe
-from src.domain.futures.ml_pipeline.regime.hmm_inferrer import HMMStateInferrer
+from typing import Any
 
 __all__ = [
     "HMMStateInferrer",
@@ -17,3 +14,14 @@ __all__ = [
     "MetaLabeler",
     "run_ml_pipeline_for_universe",
 ]
+
+
+def __getattr__(name: str) -> Any:
+    """Lazy import of ``run_ml_pipeline_for_universe`` to avoid circular imports with optimizer."""
+    if name == "run_ml_pipeline_for_universe":
+        from src.domain.futures.ml_pipeline.pipeline_runner import (
+            run_ml_pipeline_for_universe as _run,
+        )
+
+        return _run
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
