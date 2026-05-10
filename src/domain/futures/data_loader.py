@@ -227,17 +227,22 @@ class DataCollector:
             v_end = min(req_end, api_cutoff, cache_df["datetime"].min() if not cache_df.empty else req_end)
             if v_start < v_end:
                 v_df = BinanceVisionDownloader().fetch_range_metrics(symbol.replace("/", ""), v_start, v_end)
-                if not v_df.empty: new_parts.append(v_df)
+                if not v_df.empty:
+                    v_df = self._normalize_df(v_df)
+                    new_parts.append(v_df)
         
         if req_end >= api_cutoff:
             a_start = max(req_start, api_cutoff, cache_df["datetime"].max() if not cache_df.empty else api_cutoff)
             if a_start < req_end:
                 since = int(a_start.timestamp() * 1000)
                 oi = self.client.fetch_open_interest_history(symbol, "1h", since)
-                if not oi.empty: new_parts.append(oi)
+                if not oi.empty:
+                    oi = self._normalize_df(oi)
+                    new_parts.append(oi)
 
         if new_parts:
             combined = pd.concat([cache_df, *new_parts]).drop_duplicates(subset=["timestamp"]).sort_values("timestamp")
+            combined = self._normalize_df(combined)
             combined.to_parquet(path, index=False)
             cache_df = combined
         

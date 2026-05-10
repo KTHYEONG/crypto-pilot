@@ -481,6 +481,9 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
                 "hmm_modulator_long",
                 "hmm_modulator_short",
                 "hmm_modulator_base_long",
+                "hmm_modulator_base_short",
+                "expected_variance",
+                "target_variance",
                 "btc_trend_vol_adj_24h",
             )
             for col in _xs_cols:
@@ -745,6 +748,11 @@ def _suggest_ml_phase_d(trial: optuna.Trial) -> dict[str, Any]:
     hyst_gap = float(trial.suggest_float("HYSTERESIS_GAP", 0.1, 0.5, step=0.1))
     min_p = float(trial.suggest_float("MIN_SCORE_PERCENTILE", 0.40, 0.90, step=0.10))
 
+    # 6. Dynamic Risk Aversion Tuning
+    ra_crisis = float(trial.suggest_float("DYNAMIC_RA_CRISIS_COEF", 1.0, 5.0, step=0.5))
+    ra_bear = float(trial.suggest_float("DYNAMIC_RA_BEAR_COEF", 0.0, 3.0, step=0.5))
+    norm_var = float(trial.suggest_float("NORM_VAR_CONSTANT", 0.1, 1.0, step=0.1))
+
     # Risk per trade - adjust heuristic to be more robust
     # Using 1/N scaling with annual target vol
     rpt = ann_vol / math.sqrt(252)
@@ -780,6 +788,9 @@ def _suggest_ml_phase_d(trial: optuna.Trial) -> dict[str, Any]:
         "CS_Z_SCORE_THRESHOLD": cs_z,
         "HYSTERESIS_GAP": hyst_gap,
         "MIN_SCORE_PERCENTILE": min_p,
+        "DYNAMIC_RA_CRISIS_COEF": ra_crisis,
+        "DYNAMIC_RA_BEAR_COEF": ra_bear,
+        "NORM_VAR_CONSTANT": norm_var,
         "USE_CS_RANK_ENGINE": True,
     }
     return apply_policy_constraints(out, policy)
@@ -838,6 +849,9 @@ def _base_engine_params(ml: dict[str, Any], tf: str) -> dict[str, Any]:
         "DD_SCALING_THRESHOLD": float(ml.get("DD_SCALING_THRESHOLD", 0.20)),
         "CS_Z_SCORE_THRESHOLD": float(ml.get("CS_Z_SCORE_THRESHOLD", 1.0)),
         "HYSTERESIS_GAP": float(ml.get("HYSTERESIS_GAP", 0.3)),
+        "DYNAMIC_RA_CRISIS_COEF": float(ml.get("DYNAMIC_RA_CRISIS_COEF", 3.0)),
+        "DYNAMIC_RA_BEAR_COEF": float(ml.get("DYNAMIC_RA_BEAR_COEF", 1.5)),
+        "NORM_VAR_CONSTANT": float(ml.get("NORM_VAR_CONSTANT", 0.5)),
         "TARGET_ANN_VOL": ann_vol,
         "KELLY_LAMBDA": kelly_lambda,
         "USE_COMPOUNDING": True,
@@ -889,6 +903,26 @@ def _run_portfolio_numba_block(
     hyst_gap = float(params.get("HYSTERESIS_GAP", 0.3))
     cs_z_exit = cs_z_entry - hyst_gap
 
+    # [RE-CALCULATE MODULATORS] Tunable Risk-Aversion Scaling
+    ra_crisis = float(params.get("DYNAMIC_RA_CRISIS_COEF", 3.0))
+    ra_bear = float(params.get("DYNAMIC_RA_BEAR_COEF", 1.5))
+    norm_v = float(params.get("NORM_VAR_CONSTANT", 0.5))
+
+    p_crisis = aligned["hmm_prob_crisis"]
+    p_bear = aligned.get("hmm_prob_bear_trend", np.zeros_like(p_crisis))
+    exp_var = aligned.get("expected_variance", np.full_like(p_crisis, 0.25))
+
+    dyn_ra = 1.0 + ra_crisis * p_crisis + ra_bear * p_bear
+    scale_ratio = norm_v / (dyn_ra * exp_var + 1e-6)
+    risk_scale = np.clip(scale_ratio, 0.25, 1.75)
+
+    mod_l = np.clip(aligned["hmm_modulator_base_long"] * risk_scale, 0.0, 2.0)
+    mod_s = np.clip(
+        aligned.get("hmm_modulator_base_short", aligned["hmm_modulator_base_long"]) * risk_scale,
+        0.0,
+        2.0,
+    )
+
     out_bt = backtest_portfolio_numba(
         aligned["close"],
         aligned["high"],
@@ -906,8 +940,8 @@ def _run_portfolio_numba_block(
         aligned["xs_score_long"],
         aligned["xs_score_short"],
         aligned["hmm_prob_crisis"],
-        aligned["hmm_modulator_long"],
-        aligned["hmm_modulator_short"],
+        mod_l,
+        mod_s,
         aligned.get("hmm_prob_bear_trend", np.zeros_like(aligned["close"])),
         float(FUTURES_INITIAL_BALANCE),
         lev_blk,
