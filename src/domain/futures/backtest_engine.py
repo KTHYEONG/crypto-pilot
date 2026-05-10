@@ -215,21 +215,18 @@ def _recompute_cs_dirs_numba(
     n_syms: int,
     xs_long: np.ndarray,
     xs_short: np.ndarray,
-    hmm_crisis: np.ndarray,
     hmm_mod_long: np.ndarray,
     hmm_mod_short: np.ndarray,
-    crisis_gamma: float,
     k_rank: int,
     cs_z_threshold: float,
     cs_z_exit_threshold: float,
     computed_dir: np.ndarray,
     prev_computed_dir: np.ndarray,
 ) -> None:
-    """Hard top-K CS dirs: binary top-K, crisis (1-p)^gamma, |mag| in [0.05,1].
-    
-    [IMPROVED] Added Hysteresis (Schmitt Trigger) and Absolute Alpha check.
+    """Hard top-K CS dirs: binary top-K, HMM modulators, |mag| in [0.05,1].
+
+    Crisis scaling is applied only in pipeline modulator (1-Pc)^gamma — no duplicate here.
     """
-    gam_val = crisis_gamma if crisis_gamma > 1e-9 else 1e-9
     fk = float(k_rank)
 
     # 1. Compute cross-sectional mean and std for Z-scoring
@@ -274,11 +271,6 @@ def _recompute_cs_dirs_numba(
         mod_l = float(hmm_mod_long[prev_i, s])
         mod_s = float(hmm_mod_short[prev_i, s])
 
-        c_raw = float(hmm_crisis[prev_i, s])
-        if not np.isfinite(c_raw):
-            c_raw = 0.0
-        c_raw = max(0.0, min(1.0, c_raw))
-
         rank_l = 1
         for t in range(n_syms):
             if t == s:
@@ -297,11 +289,6 @@ def _recompute_cs_dirs_numba(
         z_l = (sl - mean_l) / std_l
         z_s = (mean_s - ss) / std_s
 
-        c_prob = float(hmm_crisis[prev_i, s])
-        if c_prob > 0.5:
-            computed_dir[s] = 0.0
-            continue
-
         # Hysteresis (Schmitt Trigger)
         prev_side = 1.0 if prev_computed_dir[s] > 0.0 else (-1.0 if prev_computed_dir[s] < 0.0 else 0.0)
         
@@ -313,8 +300,6 @@ def _recompute_cs_dirs_numba(
         binary_l = 1.0 if (float(rank_l) <= fk and mod_l >= 0.1 and z_l >= eff_z_l_thr) else 0.0
         binary_s = 1.0 if (float(rank_s) <= fk and mod_s >= 0.1 and z_s >= eff_z_s_thr) else 0.0
 
-        exposure_discount = (1.0 - c_prob) ** gam_val
-
         mag_l = ((z_l - eff_z_l_thr) / (3.0 - eff_z_l_thr)) ** 1.5 if z_l >= eff_z_l_thr else 0.0
         mag_s = ((z_s - eff_z_s_thr) / (3.0 - eff_z_s_thr)) ** 1.5 if z_s >= eff_z_s_thr else 0.0
 
@@ -322,8 +307,8 @@ def _recompute_cs_dirs_numba(
         rank_mult_l = (fk - float(rank_l) + 1.0) / fk if float(rank_l) <= fk else 0.0
         rank_mult_s = (fk - float(rank_s) + 1.0) / fk if float(rank_s) <= fk else 0.0
 
-        long_mag = binary_l * min(max(mag_l * rank_mult_l, 0.1), 1.0) * exposure_discount
-        short_mag = binary_s * min(max(mag_s * rank_mult_s, 0.1), 1.0) * exposure_discount
+        long_mag = binary_l * min(max(mag_l * rank_mult_l, 0.1), 1.0)
+        short_mag = binary_s * min(max(mag_s * rank_mult_s, 0.1), 1.0)
 
         if long_mag >= short_mag and long_mag > 0.0:
             computed_dir[s] = 1.0 * long_mag
@@ -583,7 +568,6 @@ def backtest_portfolio_numba(
     xs_long: np.ndarray,
     xs_short: np.ndarray,
     hmm_prob_crisis: np.ndarray,
-    hmm_hard_state: np.ndarray,
     hmm_mod_long: np.ndarray,
     hmm_mod_short: np.ndarray,
     hmm_prob_bear: np.ndarray,
@@ -610,7 +594,6 @@ def backtest_portfolio_numba(
     cs_z_exit_threshold: float,
     rebalance_bars: int,
     rebalance_turnover_threshold: float,
-    crisis_gamma: float,
     use_cs_rank: int,
     estimated_b: float = 1.05,
 ) -> tuple[np.ndarray, float, np.ndarray, np.ndarray]:
@@ -664,34 +647,23 @@ def backtest_portfolio_numba(
         if current_equity > hwm: hwm = current_equity
 
         dd = (hwm - current_equity) / hwm if hwm > 1e-9 else 0.0
-        dd_scale = max(0.0, 1.0 - (dd / dd_scaling_threshold)) if dd_scaling_threshold > 1e-9 else 1.0
+        if dd_scaling_threshold > 1e-9:
+            dd_raw = 1.0 - (dd / dd_scaling_threshold)
+            dd_scale = min(1.0, max(0.3, dd_raw))
+        else:
+            dd_scale = 1.0
         
-        c_prob = float(hmm_prob_crisis[i, 0])
         b_prob = float(hmm_prob_bear[i, 0])
-        h_state = int(hmm_hard_state[i, 0])
-        
-        # [NEW] HMM Regime Modulation multiplier ft = (1 - Pcrisis) * (1 - 0.5 * Pbear)
-        f_t = (1.0 - c_prob) * (1.0 - 0.5 * b_prob)
-        
-        # [NEW] HMM-based Exposure Scaling (Go/No-Go)
-        regime_exp_mult = 1.0
-        if c_prob > 0.5 or h_state == 4: # REGIME_CRISIS
-            regime_exp_mult = 0.0
-        elif h_state == 2: # REGIME_BEAR
-            regime_exp_mult = 0.5
-        elif h_state == 3: # REGIME_CHOP
-            regime_exp_mult = 0.7
-            
-        max_exp_scaled = max_exposure * regime_exp_mult
-        
-        # Apply HMM-based shrinkage f_t to the base lambda (risk_per_trade)
+        # P0: crisis gating only in modulator (1-Pc)^gamma — bear-only soft throttle here
+        f_t = (1.0 - 0.5 * b_prob)
+        max_exp_scaled = max_exposure
         effective_risk_per_trade = risk_per_trade * dd_scale * f_t
 
         prev_i = i - 1
         n_cands = 0
         if use_cs_rank != 0 and prev_i >= 0:
             # 1. Potential next_dir check (with hysteresis: Schmitt Trigger)
-            _recompute_cs_dirs_numba(prev_i, n_syms, xs_long, xs_short, hmm_prob_crisis, hmm_mod_long, hmm_mod_short, crisis_gamma, k_rank_long, cs_z_entry_threshold, cs_z_exit_threshold, next_dir, computed_dir)
+            _recompute_cs_dirs_numba(prev_i, n_syms, xs_long, xs_short, hmm_mod_long, hmm_mod_short, k_rank_long, cs_z_entry_threshold, cs_z_exit_threshold, next_dir, computed_dir)
 
             # 2. Rebalance Trigger: Fixed Bars OR Event-Driven (Turnover > 15%)
             bucket = prev_i // rebalance_bars if rebalance_bars > 0 else prev_i
@@ -1064,7 +1036,6 @@ class MultiSymbolEngine:
             d.get("funding_rate_sum", np.zeros_like(c2d)), d["slot_rank_score"],
             d.get("xs_score_long", np.zeros_like(c2d)), d.get("xs_score_short", np.zeros_like(c2d)),
             d.get("hmm_prob_crisis", np.zeros_like(c2d)),
-            d.get("hmm_hard_state", np.zeros_like(c2d)),
             hmm_mod_l, d.get("hmm_modulator_short", np.ones_like(c2d)),
             d.get("hmm_prob_bear_trend", np.zeros_like(c2d)),
             self.initial_balance, lev_2d, self.maker_fee, self.taker_fee, self.slippage_rate, self.smart_offset, self.risk_per_trade,
@@ -1074,7 +1045,7 @@ class MultiSymbolEngine:
             float(self.params.get("DD_SCALING_THRESHOLD", 0.15)), int(self.params.get("K_RANK", 2)), int(self.params.get("K_RANK", 2)),
             cs_z_entry, cs_z_exit, max(1, int(self.params.get("REBALANCE_BARS", 6))),
             float(self.params.get("REBALANCE_TURNOVER_THRESHOLD", 0.15)),
-            float(self.params.get("CRISIS_GAMMA", 1.0)), 1 if bool(self.params.get("USE_CS_RANK_ENGINE", True)) else 0,
+            1 if bool(self.params.get("USE_CS_RANK_ENGINE", True)) else 0,
             float(self.params.get("ESTIMATED_B", 1.05))
         )
         if trades_arr.size == 0: return pd.DataFrame(), equity, final_bal, diag
