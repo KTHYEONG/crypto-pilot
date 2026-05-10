@@ -290,11 +290,16 @@ def _hmm_modulator_kelly_values(
     mod_long_base = 1.0 + float(shrink) * (p_mat @ k_long)
     mod_short_base = 1.0 + float(shrink) * (p_mat @ k_short)
 
-    # 2. Risk-Aversion components
+    # 2. Risk-Aversion components (Phase 9: Centered Risk Multiplier)
     p_crisis = merged["hmm_prob_crisis"].to_numpy(dtype=np.float64)
     p_bear = (
         merged["hmm_prob_bear_trend"].to_numpy(dtype=np.float64)
         if "hmm_prob_bear_trend" in merged.columns
+        else np.zeros(n)
+    )
+    p_bull = (
+        merged["hmm_prob_bull_calm"].to_numpy(dtype=np.float64)
+        if "hmm_prob_bull_calm" in merged.columns
         else np.zeros(n)
     )
 
@@ -310,14 +315,16 @@ def _hmm_modulator_kelly_values(
     pos_var = expected_variance[expected_variance > 0]
     target_var = float(np.median(pos_var)) if pos_var.size > 0 else 0.25
 
-    # 4. Preliminary modulators (using legacy defaults: 3.0, 1.5, 0.5)
-    # These will be overwritten by the optimizer if tuning is enabled.
-    dynamic_ra_legacy = 1.0 + 3.0 * p_crisis + 1.5 * p_bear
-    scale_ratio_legacy = 0.5 / (dynamic_ra_legacy * expected_variance + 1e-6)
-    risk_scale_legacy = np.clip(scale_ratio_legacy, 0.25, 1.75)
+    # 4. Redesigned Modulator Logic (Centered on 1.0)
+    # risk_multiplier: 1.0 (neutral), >1.0 (risk-on), <1.0 (risk-off)
+    risk_multiplier = 1.0 - (0.75 * p_crisis) - (0.4 * p_bear) + (0.2 * p_bull)
+    
+    # vol_scalar: Ratio of target variance to current expected variance
+    vol_scalar = target_var / (expected_variance + 1e-6)
+    vol_scalar_clipped = np.clip(vol_scalar, 0.5, 1.5)
 
-    mod_long = np.clip(mod_long_base * risk_scale_legacy, 0.0, 2.0).astype(np.float64)
-    mod_short = np.clip(mod_short_base * risk_scale_legacy, 0.0, 2.0).astype(np.float64)
+    mod_long = np.clip(mod_long_base * risk_multiplier * vol_scalar_clipped, 0.1, 2.5).astype(np.float64)
+    mod_short = np.clip(mod_short_base * risk_multiplier * vol_scalar_clipped, 0.1, 2.5).astype(np.float64)
 
     # BTC trend for diagnostic report only
     trend_24h: np.ndarray = np.zeros(n, dtype=np.float64)
@@ -366,7 +373,8 @@ def _hmm_modulator_kelly_per_symbol(
         market_hmm_feats,
     )
     out: dict[str, pd.DataFrame] = {}
-    for sym in universe_syms:
+
+    def _calc_one(sym: str) -> tuple[str, pd.DataFrame]:
         df = prefetched_1h.get(sym)
         if (
             df is not None
@@ -375,7 +383,7 @@ def _hmm_modulator_kelly_per_symbol(
             and "high" in df.columns
             and "low" in df.columns
         ):
-            out[sym] = _hmm_modulator_kelly_values(
+            val = _hmm_modulator_kelly_values(
                 market_probs,
                 alpha_panel,
                 is_end_utc,
@@ -384,8 +392,16 @@ def _hmm_modulator_kelly_per_symbol(
                 crisis_thr,
                 market_hmm_feats,
             )
-        else:
-            out[sym] = fallback
+            return sym, val
+        return sym, fallback
+
+    # [Institutional Quant] Parallel execution for symbol-specific modulators
+    with ThreadPoolExecutor(max_workers=min(len(universe_syms), 8)) as executor:
+        results = list(executor.map(_calc_one, universe_syms))
+
+    for s, v in results:
+        out[s] = v
+
     return out
 
 

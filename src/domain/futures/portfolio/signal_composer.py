@@ -120,8 +120,12 @@ def apply_linear_signal_composer_scores(
         + b_crisis * p_crisis
         + b_rec * precov
     )
+    
+    # mu is simple return per bar. 
+    # alpha_long/short are assumed to be return-scaled or z-scores.
     mu_l = beta_a * np.asarray(alpha_long, dtype=np.float64) + regime - friction
     mu_s = beta_a * np.asarray(alpha_short, dtype=np.float64) + regime - friction
+    
     hurdle_frac = ev_h / 10000.0
     xs_l = np.where(mu_l >= hurdle_frac, mu_l, 0.0)
     xs_s = np.where(mu_s >= hurdle_frac, mu_s, 0.0)
