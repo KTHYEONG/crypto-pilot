@@ -78,13 +78,19 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     "FUTURES_HMM_CRISIS_THRESHOLD": 0.66,
     # Asymmetric Friction Reduction (Phase 6): stronger sticky penalty for training stability.
     "FUTURES_HMM_STICKY_PENALTY_WEIGHT": 800.0,
-    # Min-duration (hours) per state: [BULL_CALM, BULL_VOL_UP, BEAR, CHOP, CRISIS]
-    "FUTURES_HMM_OUTPUT_STICKY_MIN_DURATION": [1000, 500, 500, 500, 168],
+    # Min-duration (bars @ base TF) per state: [BULL_CALM, BULL_VOL_UP, BEAR, CHOP, CRISIS]
+    # P0: was [1000,500,...] (~6w calm lock); shortened so regime errors recover in ~1w.
+    "FUTURES_HMM_OUTPUT_STICKY_MIN_DURATION": [168, 84, 24, 24, 6],
     # Slightly stronger sticky transitions → stabler systemic HMM under leg refit (Path C).
     "FUTURES_HMM_TRANSITION_PRIOR_ALPHA": 0.50,
     # HMM Posterior Smoothing (EMA, DEMA, TEMA, HMA, KAMA, ALMA, JMA)
     "FUTURES_HMM_SMOOTHING_METHOD": "EMA",
-    "FUTURES_HMM_SMOOTHING_SPAN": 400,
+    "FUTURES_HMM_SMOOTHING_SPAN": 12,  # P1: was 400 (over-smoothed crisis to 0.0%)
+    # P2: asymmetric modulator ceiling (no bull amplification in OOS bear regime)
+    "FUTURES_HMM_MOD_LONG_CEIL": 1.0,  # was 2.0
+    # P2: backward-looking 168h BTC return suppression (no look-ahead bias)
+    "FUTURES_HMM_BEAR_TREND_SUPPRESS_THR": -0.08,  # P2.1 revert: -0.05 over-suppressed
+    "FUTURES_HMM_BEAR_TREND_DAMP": 0.40,           # P2.1 revert: 0.25 over-suppressed
     # Session 39: recovery override abandoned (P10 -0.027, DSR collapse). Keep disabled.
     "CRISIS_RECOVERY_TREND_THR": 1e9,
     "CRISIS_RECOVERY_FLOOR": 0.30,
