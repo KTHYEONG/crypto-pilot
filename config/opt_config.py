@@ -51,6 +51,9 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     "FUTURES_ML_ALPHA_HORIZONS": (12, 24, 48, 96),
     # Cache-control refit: when True, bypass Alpha raw cache and force alpha retraining.
     "FUTURES_ML_FORCE_RETRAIN_ALPHA": True,
+    # Thematic breadth: LambdaRank buckets (Trend / Vol+MR / Interaction) × slots each. Total = 3 × value.
+    # Raising adds interaction-style capacity without injecting systemic HMM into Trend slots (helps long IC vs AWF pos_frac).
+    "FUTURES_ML_ALPHA_SLOTS_PER_THEME": 6,
     "FUTURES_ML_ALPHA_PARSIMONY": 0.02,
     "FUTURES_ML_ALPHA_USE_TBM_WEIGHT": True,
     "FUTURES_ML_PRE_ALPHA_REGIME": False,
@@ -77,7 +80,8 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     # Session 41 sweep: 0.65-0.68 heuristically best; 0.66 compromise vs 0.70 default.
     "FUTURES_HMM_CRISIS_THRESHOLD": 0.66,
     # Asymmetric Friction Reduction (Phase 6): stronger sticky penalty for training stability.
-    "FUTURES_HMM_STICKY_PENALTY_WEIGHT": 800.0,
+    # Raised with smoother posteriors (SPAN 8): compensates wigglier regimes vs span≈12 legacy.
+    "FUTURES_HMM_STICKY_PENALTY_WEIGHT": 1100.0,
     # Min-duration (bars @ base TF) per state: [BULL_CALM, BULL_VOL_UP, BEAR, CHOP, CRISIS]
     # P0: was [1000,500,...] (~6w calm lock); shortened so regime errors recover in ~1w.
     "FUTURES_HMM_OUTPUT_STICKY_MIN_DURATION": [168, 84, 24, 24, 6],
@@ -85,7 +89,8 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     "FUTURES_HMM_TRANSITION_PRIOR_ALPHA": 0.50,
     # HMM Posterior Smoothing (EMA, DEMA, TEMA, HMA, KAMA, ALMA, JMA)
     "FUTURES_HMM_SMOOTHING_METHOD": "EMA",
-    "FUTURES_HMM_SMOOTHING_SPAN": 12,  # P1: was 400 (over-smoothed crisis to 0.0%)
+    # Posterior smoothing: span=3 harmed HMM stability; 6–9 + higher STICKY_PENALTY (1100).
+    "FUTURES_HMM_SMOOTHING_SPAN": 8,
     # P2: asymmetric modulator ceiling (no bull amplification in OOS bear regime)
     "FUTURES_HMM_MOD_LONG_CEIL": 1.0,  # was 2.0
     # P2: backward-looking 168h BTC return suppression (no look-ahead bias)

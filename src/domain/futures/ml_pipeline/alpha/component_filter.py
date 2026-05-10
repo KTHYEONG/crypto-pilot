@@ -479,7 +479,14 @@ def filter_alpha_components(
             sym_bal_ok.append(bool(bal_ratio <= symbol_balance_max))
 
     reject = _benjamini_hochberg_reject(pvals, fdr_q)
-    output_cols = list(dict.fromkeys(cols + [c for c in ("ml_alpha_long_raw", "ml_alpha_short_raw") if c in alpha_wide.columns]))
+    mag_cols = sorted(c for c in alpha_wide.columns if c.startswith("ml_mag_"))
+    output_cols = list(
+        dict.fromkeys(
+            cols
+            + mag_cols
+            + [c for c in ("ml_alpha_long_raw", "ml_alpha_short_raw") if c in alpha_wide.columns]
+        )
+    )
     out = alpha_wide[output_cols].copy()
     n_surv = 0
 

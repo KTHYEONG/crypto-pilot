@@ -653,11 +653,9 @@ def backtest_portfolio_numba(
         else:
             dd_scale = 1.0
         
-        b_prob = float(hmm_prob_bear[i, 0])
-        # P0: crisis gating only in modulator (1-Pc)^gamma — bear-only soft throttle here
-        f_t = (1.0 - 0.5 * b_prob)
+        # P1.D: bear soft throttle removed — modulator already encodes RA + P_bear
         max_exp_scaled = max_exposure
-        effective_risk_per_trade = risk_per_trade * dd_scale * f_t
+        effective_risk_per_trade = risk_per_trade * dd_scale
 
         prev_i = i - 1
         n_cands = 0
