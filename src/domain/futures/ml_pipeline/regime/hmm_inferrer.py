@@ -46,60 +46,7 @@ _GUIDANCE_CRISIS_LL_WEIGHT = 2000.0
 _GUIDANCE_BEAR_LL_WEIGHT = 1500.0
 
 
-def _calibrate_crisis_logit_offset(
-    sem_probs: np.ndarray,
-    target_mean_crisis: float = 0.07,
-    delta_hi_max: float = 80.0,
-    bisect_rounds: int = 48,
-    crisis_col: int | None = None,
-) -> np.ndarray:
-    """Cap series-mean P(CRISIS) without global column scaling: CRISIS gets exp(-delta) vs others (logit shift).
-
-    Keeps relative weights among non-crisis columns unchanged per row; avoids mean-scaling overcorrection that
-    flips idxmax vs BEAR on strong-crisis bars.
-    """
-    p = np.asarray(sem_probs, dtype=np.float64)
-    p = np.clip(p, 1e-15, 1.0)
-    p = p / p.sum(axis=1, keepdims=True)
-
-    cci = int(crisis_col) if crisis_col is not None else (p.shape[1] - 1)
-    mean_c = float(np.mean(p[:, cci]))
-    if mean_c <= target_mean_crisis + 1e-14:
-        return p.copy()
-
-    def apply_delta(delta: float) -> np.ndarray:
-        w = np.ones_like(p)
-        w[:, cci] = np.exp(-delta)
-        q = p * w
-        q /= q.sum(axis=1, keepdims=True)
-        return q
-
-    def crisis_mean(delta: float) -> float:
-        q = apply_delta(delta)
-        return float(np.mean(q[:, cci]))
-
-    hi = 1.0
-    while crisis_mean(hi) > target_mean_crisis and hi < delta_hi_max:
-        hi = min(hi * 2.0, delta_hi_max)
-
-    if crisis_mean(hi) > target_mean_crisis:
-        _logger.warning(
-            "Crisis logit-offset: delta capped at %s, mean(P_crisis)=%.4f > target %.4f",
-            hi,
-            crisis_mean(hi),
-            target_mean_crisis,
-        )
-        return apply_delta(hi)
-
-    lo = 0.0
-    for _ in range(bisect_rounds):
-        mid = 0.5 * (lo + hi)
-        if crisis_mean(mid) > target_mean_crisis:
-            lo = mid
-        else:
-            hi = mid
-    return apply_delta(hi)
-
+# [v8.8.0] Removed _calibrate_crisis_logit_offset to restore mathematical integrity.
 
 def _normalized_entropy_k(probs: np.ndarray, k: int) -> np.ndarray:
     p = np.clip(np.asarray(probs, dtype=np.float64), 1e-12, 1.0)
@@ -154,14 +101,7 @@ def _batched_student_t_log_pdf(
         - (dfs_expanded + 1.0) / 2.0 * jnp.log1p(y**2 / dfs_expanded)
     )
     
-    # [v8.6.0] Tiered Outcome Weighting: 
-    # Index 9 (Returns) is 5x weighted for all, but 15x for CRISIS (state 4)
-    # to force it to catch tail outliers.
-    weights = jnp.ones((log_pdf_dims.shape[0], log_pdf_dims.shape[1]))
-    weights = weights.at[:, 9].set(5.0)
-    weights = weights.at[4, 9].set(15.0)
-    
-    return jnp.sum(log_pdf_dims * weights, axis=1)
+    return jnp.sum(log_pdf_dims, axis=1)
 
 
 @jax.jit
@@ -319,43 +259,41 @@ def _compute_nll(
     )
     sticky_penalty = -sticky_weight * jnp.sum(jnp.log(jnp.diag(avg_trans_mat) + 1e-6))
 
-    # Hybrid Hard-Constraint Gravity NLL Penalty (v8.6.0: Extreme Separation)
+    # [v8.8.0] Soft Bayesian Priors (L2) to enforce state identity
     # idx_ret = 9 (macro_ret_1h).
     mu = params["locs"][:, 9]
     n_obs = float(observations.shape[0])
     
-    # Relaxed CRISIS margin (0.001) for better visibility, but higher weight for BEAR separation.
-    gravity_penalty = n_obs * (
-        100000.0 * jnp.maximum(0.0, mu[4] + 0.001) +   # CRISIS mu <= -0.001
-        50000.0 * jnp.maximum(0.0, mu[2] + 0.0005) +   # BEAR mu <= -0.0005
-        50000.0 * jnp.maximum(0.0, 0.0005 - mu[0]) +   # BULL_CALM mu >= 0.0005
-        50000.0 * jnp.maximum(0.0, 0.0015 - mu[1]) +   # BULL_VOL_UP mu >= 0.0015
-        30000.0 * jnp.abs(mu[3])                       # CHOP forces mu exactly 0
+    # MU Priors: Penalize deviations using L2 (square) when thresholds are crossed.
+    mu_penalty = n_obs * (
+        1000.0 * jnp.square(jnp.maximum(0.0, mu[4] + 0.002)) +    # CRISIS mu anchor: -0.002
+        1000.0 * jnp.square(jnp.maximum(0.0, mu[2] + 0.0005)) +   # BEAR mu anchor: -0.0005
+        1000.0 * jnp.square(jnp.maximum(0.0, 0.0005 - mu[0])) +   # BULL mu anchor: 0.0005
+        500.0 * jnp.square(mu[3])                                 # CHOP centered at 0
     )
 
-    # Volatility Ordering Penalty (v8.6.0: Massive Weights)
+    # VOL Priors: Keep BULL (0) and CHOP (3) smaller than CRISIS (4)
     sig = jnp.exp(params["log_scales"][:, 9])
-    vol_ordering_penalty = n_obs * (
-        50000.0 * jnp.maximum(0.0, sig[0] - sig[1]) +  # BULL_CALM < BULL_VOL_UP
-        50000.0 * jnp.maximum(0.0, sig[3] - sig[4]) +  # CHOP < CRISIS
-        50000.0 * jnp.maximum(0.0, sig[0] - sig[4])    # BULL_CALM < CRISIS
+    vol_penalty = n_obs * (
+        500.0 * jnp.square(jnp.maximum(0.0, sig[0] - sig[4])) +
+        500.0 * jnp.square(jnp.maximum(0.0, sig[3] - sig[4]))
     )
 
     # State Separation Penalty: Prevent states from collapsing into the same location
-    sep_penalty = n_obs * 20000.0 * (
-        jnp.exp(-jnp.abs(mu[0] - mu[1]) * 2000.0) +
-        jnp.exp(-jnp.abs(mu[2] - mu[4]) * 2000.0) +
-        jnp.exp(-jnp.abs(mu[0] - mu[3]) * 2000.0)
+    sep_penalty = n_obs * 5000.0 * (
+        jnp.exp(-jnp.abs(mu[0] - mu[1]) * 1000.0) +
+        jnp.exp(-jnp.abs(mu[2] - mu[4]) * 1000.0) +
+        jnp.exp(-jnp.abs(mu[0] - mu[3]) * 1000.0)
     )
 
     # Transition Regularization: Penalty for excessive switching
-    switching_penalty = 1000.0 * (jnp.sum(avg_trans_mat) - jnp.sum(jnp.diag(avg_trans_mat)))
+    switching_penalty = 100.0 * (jnp.sum(avg_trans_mat) - jnp.sum(jnp.diag(avg_trans_mat)))
 
     return (
         -ll
         + sticky_penalty
-        + gravity_penalty
-        + vol_ordering_penalty
+        + mu_penalty
+        + vol_penalty
         + sep_penalty
         + switching_penalty
     )
@@ -512,39 +450,15 @@ def _empirical_mu_sigma_sharpe(
 def _assign_semantic_five_state(
     emp_mu: np.ndarray, emp_sig: np.ndarray, sharpe: np.ndarray
 ) -> dict[str, int]:
-    """v8.7.0: Strict Drift-Based Semantic Sorting.
-    
-    1. CRISIS: Lowest MU.
-    2. BEAR_TREND: 2nd lowest MU.
-    3. CHOP: Middle MU.
-    4. BULL_CALM: Highest Sharpe among top 2.
-    5. BULL_VOL_UP: The other one.
+    """v8.8.0: Static Semantic Mapping.
+    Priors in _compute_nll now enforce state identity.
     """
-    n = len(emp_mu)
-    indices = np.arange(n)
-    
-    # Sort by MU ascending
-    mu_sort = indices[np.argsort(emp_mu)]
-    
-    crisis_idx = int(mu_sort[0])
-    bear_idx = int(mu_sort[1])
-    chop_idx = int(mu_sort[2])
-    
-    top_two = mu_sort[3:]
-    # Between the top two drift states, the one with higher Sharpe is BULL_CALM
-    if sharpe[top_two[0]] > sharpe[top_two[1]]:
-        bull_calm_idx = int(top_two[0])
-        bull_vol_idx = int(top_two[1])
-    else:
-        bull_calm_idx = int(top_two[1])
-        bull_vol_idx = int(top_two[0])
-    
     return {
-        "bull_calm": bull_calm_idx,
-        "bull_vol_up": bull_vol_idx,
-        "bear": bear_idx,
-        "chop": chop_idx,
-        "crisis": crisis_idx,
+        "bull_calm": 0,
+        "bull_vol_up": 1,
+        "bear": 2,
+        "chop": 3,
+        "crisis": 4,
     }
 
 
@@ -756,6 +670,16 @@ class HMMStateInferrer:
         tf: str = "1h",
     ) -> pd.DataFrame:
         """Expanding-window unsupervised 5-state TVTP-HMM with empirical post-mapping."""
+        # [v8.8.0] Dual-TF HMM: Resample 1h or faster to 4h for training stability
+        is_dual_tf = tf in ["1h", "15m", "5m", "1m"]
+        orig_features_df = features_df
+        
+        if is_dual_tf:
+            _logger.info("HMM Dual-TF Mode: Resampling %s to 4h for training.", tf)
+            features_df = features_df.resample("4h").last().ffill()
+            # Pct returns resampled as cumulative
+            returns_ser = returns_ser.resample("4h").apply(lambda x: (1 + x).prod() - 1)
+
         feat_cols = list(SYSTEMIC_HMM_FEATURE_COLUMNS)
         for req_col in ["macro_trend_168h", "macro_vol_24h", "macro_downside_vol_24h"]:
             assert req_col in feat_cols, f"Required HMM feature missing: {req_col}"
@@ -1002,14 +926,6 @@ class HMMStateInferrer:
             results, index=features_df.index, columns=out_cols
         ).ffill().bfill().fillna(0.0)
 
-        # Crisis logit-offset calibration: cap series-mean P(CRISIS) at 7%
-        sem_cal = _calibrate_crisis_logit_offset(
-            probs_df[list(_SEMANTIC_ORDER)].to_numpy(dtype=np.float64),
-            target_mean_crisis=0.07,
-            crisis_col=len(_SEMANTIC_ORDER) - 1,
-        )
-        probs_df[list(_SEMANTIC_ORDER)] = sem_cal
-
         # Posterior Smoothing (Phase 7: Macro Stability)
         smooth_method = OPT_FUTURES_CONFIG.get("FUTURES_HMM_SMOOTHING_METHOD", "EMA")
         smooth_span = int(OPT_FUTURES_CONFIG.get("FUTURES_HMM_SMOOTHING_SPAN", 8))
@@ -1066,6 +982,10 @@ class HMMStateInferrer:
             ).astype(np.float64)
         else:
             probs_df["hmm_expected_duration"] = 0.0
+
+        if is_dual_tf:
+            # [v8.8.0] Reindex 4h results back to original index and forward-fill
+            probs_df = probs_df.reindex(orig_features_df.index).ffill().bfill()
 
         out = probs_df.reset_index().rename(columns={probs_df.index.name or "index": "datetime"})
         return out
