@@ -1,62 +1,58 @@
 {
   "project": "my-coin-traider",
-  "version": "6.8.0-magnitude-oi-restored",
+  "version": "6.9.0-alpha-v22-advanced",
   "last_evolution_date": "2026-05-10",
-  "previous_state_hash": "v6.7.0",
+  "previous_state_hash": "v6.8.0",
   "current_logic": {
     "universe_selection": "CS_RANK based filtering (16-32 symbols)",
-    "regime_classification": "Organic 5-State HMM (Uncapped) + Reduced Smoothing (EMA Span 3) + Student-t JAX Optimization",
-    "alpha_generation": "LambdaRank (18 slots) + Dynamic Friction Hurdle + Liquidation/Capitulation Proxies + Macro Structural Features (Weekly VWAP).",
-    "position_sizing": "Natural Risk-Adjusted Scaling: $mod = 0.5 / (DynamicRA * ExpectedVar)$. Soft-clip [0, 2.0] via tanh. Tunable RA coefficients via Optuna.",
-    "execution_model": "Event-Driven Z-Score Hysteresis + Conviction-Weighted Allocation",
-    "optimization": "PLGD Objective Function + AWF-Leg Robustness + Cross-Sectional Z-Score Neutralization + Tunable RA Optimization",
+    "regime_classification": "Organic 5-State HMM + Posterior EMA (Span 3) + Sticky 1100 + Student-t JAX.",
+    "alpha_generation": "LambdaRank (v22) + Symmetric Hybrid Labeling + Idiosyncratic Residuals + Exhaustion Cascade + Liquidity Vacuum + Session Seasonal Embeddings.",
+    "position_sizing": "Natural Risk-Adjusted Scaling ($mod = 0.5 / (RA * Var)$) + Dynamic Kelly Shrinkage. MDD-penalized log-returns.",
+    "execution_model": "Event-Driven Z-Score Hysteresis + Conviction-Weighted Allocation. [Pending] Asymmetric L/S Entry Thresholds.",
+    "optimization": "PLGD Objective Function (Compounding Maximization) + Chronological AWF legs (K=5).",
     "risk_management": "HMM-Derived Variance Scaling + Dynamic Risk Aversion ($1 + RA_{crisis}P_{crisis} + RA_{bear}P_{bear}$)"
   },
   "key_parameters": {
     "base_timeframe": "4h",
-    "alpha_miner_version": "v6_lambdarank_dart_mag_v21",
-    "TARGET_HORIZON": 24,
-    "DYNAMIC_FRICTION_HURDLE": "max(1.5*friction, 0.4*ATR_24h_pct)",
-    "HMM_SMOOTHING_SPAN": 3,
-    "restored_data": "Binance Vision Open Interest (OI) & LSR",
-    "new_features": [
-      "liq_intensity_proxy",
-      "capitulation_proxy",
-      "dist_from_weekly_vwap",
-      "macro_vol_regime_shift",
-      "taker_absorption_score"
+    "alpha_miner_version": "v6_lambdarank_v22_advanced",
+    "GP_FEATURE_SCHEMA_VERSION": "v22",
+    "ALPHA_IC_OOS": "0.0743 (Elite)",
+    "ALPHA_T_STAT": "33.27",
+    "new_alpha_features": [
+      "idiosyncratic_return_24h",
+      "exhaustion_cascade_score",
+      "price_impact_asymmetry",
+      "session_seasonality_sin/cos"
     ],
-    "target_oos_ic": "0.0743 (Full-Scale)",
-    "profit_factor_improvement": "0.49 -> 0.75 (+53%)"
+    "RA_CRISIS_RANGE": "[1.0, 5.0]",
+    "RA_BEAR_RANGE": "[0.0, 3.0]"
   },
   "current_bottleneck": {
-    "issue": "Trade Frequency & Long-side Bias",
-    "mechanism": "Strict Z-Score entry (Threshold ~1.0) and high friction hurdle (7bps) combined with Short-side dominance (Short PF 3.82 vs Long PF 0.65).",
-    "evidence": "Total trades 111 (p4). Win Rate 57.26%. MDD 0.16% (Extremely defensive). Long-side participation is insufficient to reach positive CAGR.",
-    "root_cause": "Symmetric entry thresholds block profitable Long opportunities in trending markets. Over-protection (MDD 0.16%) stifles capital growth.",
-    "investigation_needed": "P5.A: Asymmetric Entry Thresholds (Lower hurdle for Long). P5.B: Leverage/Exposure 상향 (Target MDD ~5-10% to capture CAGR)."
+    "issue": "Symmetric Execution Blocking",
+    "mechanism": "Optuna optimizes for 0.15% MDD (Extreme Defense) due to symmetric entry thresholds. Short PF (3.82) is high, but Long PF (0.65) is choked by the same strict CS_Z hurdle.",
+    "evidence": "OOS IC 0.074 (High) vs CAGR -0.6% (Negative). PF 0.56 (v6.8.0-p5). MDD 0.15% is 'too safe'.",
+    "root_cause": "Unified CS_Z_SCORE_THRESHOLD suppresses Long alpha flow. PLGD objective over-penalizes marginal drawdown risk.",
+    "investigation_needed": "Refactor Optuna to suggest LONG_ENTRY_Z and SHORT_ENTRY_Z independently. Expand MAX_EXPOSURE to 2.0 to allow compounding to override friction."
   },
   "best_achieved_metrics": {
-    "note": "v6.8.0 Magnitude + OI Restored (10,000 Trials)",
-    "is_cagr": "-0.01%",
-    "oos_cagr": "-0.51%",
-    "oos_net_alpha": "-15.84%",
-    "oos_mdd": "0.16%",
-    "profit_factor": "0.75",
-    "win_rate": "57.26%",
-    "tail_capture": "34.1%"
+    "note": "v6.9.0 Alpha-v22 Initial Run",
+    "alpha_oos_ic": "0.0743",
+    "win_rate": "55.05%",
+    "oos_mdd": "0.15%",
+    "profit_factor": "0.56",
+    "total_trades": "111"
   },
   "failed_experiments": [
     {
-      "name": "Heuristic_Overrides_Legacy",
-      "change": "Crisis Kill-switch, Vol-Overlay, 168h Bear Damp",
-      "outcome": "INEFFICIENT (oos_net_alpha -65.4%)",
-      "lesson": "Binary/Heuristic gates suppress the organic flow of alpha signals."
+      "name": "Symmetric_High_Barrier",
+      "change": "Unified CS_Z_SCORE_THRESHOLD > 1.0",
+      "outcome": "CHOKED (Long PF 0.65, CAGR -0.6%)",
+      "lesson": "Long alpha has lower signal-to-noise ratio than Short; requires more breathing room (lower hurdle) to reach positive CAGR."
     }
   ],
   "next_recommended_actions": [
-    "P5.A: Asymmetric Entry Thresholds: Decouple CS_Z_SCORE_THRESHOLD into Long/Short to allow more Long participation.",
-    "P5.B: Aggressive Exposure: Increase MAX_EXPOSURE (0.8 -> 1.5) and RISK_PER_TRADE to move from 'Safe' to 'Growth'.",
-    "P5.C: Target Volatility Scaling: Train Alpha on Sharpe-like targets (Ret/Vol) to prioritize risk-efficient entries."
+    "P5.A: Asymmetric Entry: Suggest separate LONG_THRESHOLD and SHORT_THRESHOLD in _suggest_ml_phase_d.",
+    "P5.B: Exposure Expansion: suggesting MAX_EXPOSURE [1.0, 2.0] to utilize the high 55% win rate.",
+    "P5.C: Objective Re-weighting: Increase weight of mu_log (compounding) in PLGD to favor growth over absolute safety."
   ]
 }
