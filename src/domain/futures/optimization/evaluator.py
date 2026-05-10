@@ -8,13 +8,13 @@ from __future__ import annotations
 import logging
 import math
 from pathlib import Path
+from statistics import median
 from typing import Any, Dict, List, Optional, Sequence, Tuple, cast
 
 import numpy as np
 import pandas as pd
 from scipy.stats import spearmanr
 
-from config.opt_config import OPT_FUTURES_CONFIG
 from config.settings import (
     FUTURES_INITIAL_BALANCE,
     MAKER_FEE_RATE,
@@ -173,27 +173,6 @@ def calc_sortino_from_equity(equity_curve: np.ndarray, span_days: float) -> floa
         return 999.0 if cagr_decimal > 0 else 0.0
     return float(cagr_decimal / annual_downside_dev)
 
-def compute_pbo_from_cpcv_paths(
-    is_path_scores: Sequence[float],
-    oos_path_scores: Sequence[float],
-    *,
-    min_paths: int = 6,
-) -> tuple[float, float]:
-    """Return PBO proxy from CPCV path IS vs OOS score ranks."""
-    is_arr = np.asarray(list(is_path_scores), dtype=np.float64)
-    oos_arr = np.asarray(list(oos_path_scores), dtype=np.float64)
-    if is_arr.size != oos_arr.size or is_arr.size < int(min_paths):
-        return (1.0, 0.0)
-    ri = pd.Series(is_arr).rank(method="average").to_numpy(dtype=np.float64)
-    ro = pd.Series(oos_arr).rank(method="average").to_numpy(dtype=np.float64)
-    if np.std(ri) < 1e-12 or np.std(ro) < 1e-12:
-        return (0.5, 0.0)
-    rho = float(np.corrcoef(ri, ro)[0, 1])
-    if not np.isfinite(rho):
-        rho = 0.0
-    pbo = float(np.clip(0.5 * (1.0 - rho), 0.0, 1.0))
-    return (pbo, rho)
-
 def calc_cvar5_loss_pct_from_equity(equity_curve: np.ndarray) -> float:
     """Portfolio CVaR(5%) as positive loss %."""
     if equity_curve.size < 2:
@@ -256,7 +235,7 @@ def calc_gate1_dsr_from_path_log_tw(
     stat_ref_len: float,
     n_trials_opt: float,
 ) -> float:
-    """Compute Deflated Sharpe on CPCV path log-TWR samples."""
+    """Compute Deflated Sharpe on AWF leg log-TW samples."""
     if path_arr.size < 2:
         return 0.0
     m_pt = float(np.mean(path_arr))
@@ -278,44 +257,32 @@ def calc_gate1_dsr_from_path_log_tw(
     return float(min(0.99, max(0.0, dsr_val)))
 
 
-def compute_plgd_score(
-    leg_log_tw: np.ndarray,
-    total_trials: int,
-    lambda_def: float = 0.5,
-    lambda_tail: float = 2.0,
-) -> float:
-    """Compute Probabilistic Log Growth Deflation (PLGD) score for AWF legs.
-    
-    Formula: PLGD = g - Deflation - Worst_Leg_Penalty
-    g = mu - 0.5 * sigma^2 (Log-Wealth growth rate)
-    Deflation = lambda * sigma * sqrt(2 * ln(N) / T)
-    Worst_Leg_Penalty = lambda_tail * sum(abs(min(0, leg_i)))
-    """
-    arr = np.asarray(leg_log_tw, dtype=np.float64)
-    t_legs = float(max(arr.size, 1))
+def median_absolute_deviation_1d(samples: Sequence[float]) -> float:
+    """MAD around the median (1.4826-scaled std equivalent for normals not applied)."""
+    arr = np.asarray(list(samples), dtype=np.float64)
     if arr.size < 2:
-        return float(np.mean(arr)) if arr.size == 1 else -10.0
+        return 0.0
+    med = float(median(arr.tolist()))
+    dev = np.abs(arr - med)
+    return float(median(dev.tolist()))
 
-    mu = float(np.mean(arr))
-    sigma = float(np.std(arr, ddof=1))
-    
-    # 1. Log-Wealth Growth Rate (g)
-    g = mu - 0.5 * (sigma**2)
-    
-    # 2. Deflation Factor (Multiple Testing Bias)
-    # sr_bench corresponds to sqrt(2 * ln(N))
-    sr_bench = math.sqrt(2.0 * math.log(max(float(total_trials), 2.0)))
-    deflation = lambda_def * sigma * sr_bench / math.sqrt(t_legs)
-    
-    # 3. Worst Leg Penalty (Survivability)
-    # Penalize legs with negative log-growth (terminal wealth < 1.0)
-    neg_legs = arr[arr < 0.0]
-    worst_leg_penalty = lambda_tail * float(np.sum(np.abs(neg_legs)))
-    
-    # 4. Final PLGD Score
-    plgd = g - deflation - worst_leg_penalty
-    
-    return float(plgd)
+
+def compute_awf_robust_objective_score(
+    leg_log_tw: np.ndarray,
+    max_mdd_pct: float,
+    *,
+    lambda_mad: float = 1.0,
+    psi_dd: float = 0.5,
+) -> float:
+    """Robust scalar: median(log TW) − λ·MAD − ψ·DD_max with DD_max in percent."""
+    arr = np.asarray(leg_log_tw, dtype=np.float64)
+    if arr.size == 0:
+        return float(-10.0 - psi_dd * max(float(max_mdd_pct), 0.0) / 100.0)
+    mad = median_absolute_deviation_1d(arr.tolist())
+    med = float(median(arr.tolist()))
+    dd_term = psi_dd * max(float(max_mdd_pct), 0.0) / 100.0
+    return float(med - lambda_mad * mad - dd_term)
+
 
 def calc_time_to_target_wealth(
     path_log_returns: np.ndarray,
