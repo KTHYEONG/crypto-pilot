@@ -37,7 +37,7 @@ HMM_SEMANTIC_PROB_COLUMNS: tuple[str, ...] = (
 
 # Bump when ALPHA feature semantics change without renaming columns so raw GP
 # caches are invalidated and Tier 2 retraining actually happens.
-GP_FEATURE_SCHEMA_VERSION: str = "v21"
+GP_FEATURE_SCHEMA_VERSION: str = "v22"
 
 def _tf_to_hours(tf: str) -> float:
     """Convert timeframe string to decimal hours."""
@@ -138,6 +138,11 @@ ALPHA_ENGINEERED_FEATURE_NAMES: tuple[str, ...] = (
     "taker_absorption_score",
     "liq_intensity_proxy",
     "capitulation_proxy",
+    "idiosyncratic_return_24h",
+    "exhaustion_cascade_score",
+    "price_impact_asymmetry",
+    "session_seasonality_sin",
+    "session_seasonality_cos",
 )
 
 
@@ -643,6 +648,44 @@ def build_gp_input_features(df: pd.DataFrame, tf: str = "1h") -> pd.DataFrame:
     # 3. Liquidation Proxy (Simulation)
     out["liq_intensity_proxy"] = (high - np.maximum(open_, close)) / (high - low + 1e-9)
     out["capitulation_proxy"] = (np.minimum(open_, close) - low) / (high - low + 1e-9)
+
+    # 4. Advanced Alpha Features (v22)
+    # idio_ret: R_asset - (beta * R_btc)
+    if "btc_close" in df.columns:
+        btc_log_ret_24 = np.log(df["btc_close"] / df["btc_close"].shift(w24).clip(lower=1e-12))
+        raw_ret_24 = np.log(close / close.shift(w24).clip(lower=1e-12))
+        out["idiosyncratic_return_24h"] = raw_ret_24 - (out["btc_beta"] * btc_log_ret_24)
+    else:
+        out["idiosyncratic_return_24h"] = 0.0
+
+    # exhaustion_cascade_score: 3-bar sum of capitulation + ret drop + oi drop
+    if "sum_open_interest" in df.columns:
+        oi_tmp = df["sum_open_interest"].astype(np.float64)
+        oi_log_diff = np.log(oi_tmp / oi_tmp.shift(1).clip(lower=1e-12))
+    else:
+        oi_log_diff = pd.Series(0.0, index=out.index)
+    
+    exhaustion_signal = (
+        (out["capitulation_proxy"] > 0.5) & 
+        (log_ret_1 < 0) & 
+        (oi_log_diff < 0)
+    ).astype(np.float64)
+    out["exhaustion_cascade_score"] = exhaustion_signal.rolling(3).sum().fillna(0.0)
+
+    # price_impact_asymmetry: (AbsRet/BuyVol) / (AbsRet/SellVol)
+    abs_ret_1 = log_ret_1.abs()
+    impact_buy = (abs_ret_1 / (tbq + 1e-9)).rolling(w24).mean()
+    impact_sell = (abs_ret_1 / (tsq + 1e-9)).rolling(w24).mean()
+    out["price_impact_asymmetry"] = (impact_buy / (impact_sell + 1e-9)).fillna(1.0)
+
+    # session_seasonality: Sine/Cosine of hour
+    if isinstance(df.index, pd.DatetimeIndex):
+        hours = df.index.hour
+        out["session_seasonality_sin"] = np.sin(2 * np.pi * hours / 24)
+        out["session_seasonality_cos"] = np.cos(2 * np.pi * hours / 24)
+    else:
+        out["session_seasonality_sin"] = 0.0
+        out["session_seasonality_cos"] = 0.0
 
     # [NEW] Macro Decoupling Features (Spec v15)
     w168 = _get_window(168, tf)
