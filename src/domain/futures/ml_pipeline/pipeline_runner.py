@@ -307,11 +307,20 @@ def _hmm_modulator_kelly_values(
         # Fallback to neutral variance (approx 50% annual vol)
         expected_variance = np.full(n, 0.25, dtype=np.float64)
 
-    # 4. Natural Risk-Adjusted Scaling: modulator = 1.0 / (dynamic_ra * expected_variance)
-    # Apply soft-clip via tanh to keep in [0.0, 2.0]. 
-    # Use 0.5 as normalization constant so that var=0.25 (50% vol) and RA=1 -> scale ~1.0
-    scale_raw = 0.5 / (dynamic_ra * expected_variance + 1e-6)
-    risk_scale = 2.0 * np.tanh(scale_raw)
+    # 4. Risk scale: relative to median variance (avoids tanh saturation at ~1.93 in normal vol)
+    pos_var = expected_variance[expected_variance > 0]
+    if pos_var.size > 0:
+        target_var = float(np.median(pos_var))
+    else:
+        target_var = float(np.median(expected_variance)) if expected_variance.size else 0.25
+    scale_ratio = target_var / (dynamic_ra * expected_variance + 1e-6)
+    risk_scale = np.clip(scale_ratio, 0.25, 1.75)
+    _logger.info(
+        "Modulator risk_scale: min=%.3f, max=%.3f, median=%.3f",
+        float(np.min(risk_scale)),
+        float(np.max(risk_scale)),
+        float(np.median(risk_scale)),
+    )
 
     mod_long = np.clip(mod_long_base * risk_scale, 0.0, 2.0).astype(np.float64)
     mod_short = np.clip(mod_short_base * risk_scale, 0.0, 2.0).astype(np.float64)
@@ -1409,9 +1418,12 @@ def run_ml_pipeline_for_universe(
             "FUTURES_ML_ALPHA_NSGA2_ENABLED=True but `deap` is not installed; "
             "continuing with scalarized gplearn fitness (see alpha/gp_availability.py)."
         )
+    sp = max(5, min(12, int(cfg.get("FUTURES_ML_ALPHA_SLOTS_PER_THEME", 6))))
     miner = MLAlphaMiner(
         n_jobs=n_jobs,
         target_horizons=horizons,
+        slots_per_theme=sp,
+        n_features_to_select=sp * 3,
     )
 
     alpha_cache = Path(FUTURES_CACHE_DIR) / "universal_cs_gp_v8.parquet"
