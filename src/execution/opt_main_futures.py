@@ -998,7 +998,7 @@ def main() -> None:
         h_rep = ml_out.hmm_report
         ai_telemetry_payloads.append({
             "stage": "hmm_audit",
-            "bull_prob": float(h_rep.get("hmm_prob_bull_trend", 0)),
+            "bull_prob": float(h_rep.get("hmm_prob_bull_calm", 0)) + float(h_rep.get("hmm_prob_bull_vol_up", 0)),
             "bear_prob": float(h_rep.get("hmm_prob_bear_trend", 0)),
             "chop_prob": float(h_rep.get("hmm_prob_chop", 0)),
             "crisis_prob": float(h_rep.get("hmm_prob_crisis", 0)),
