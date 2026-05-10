@@ -58,6 +58,8 @@ class MLAlphaMiner:
     # Internal state
     _models: dict[int, LGBMRanker] = field(default_factory=dict, init=False)
     _feature_sets: dict[int, list[str]] = field(default_factory=dict, init=False)
+    # IS Spearman IC^2 weights per slot (matches mine_alphas_cs ensemble → transform_cs)
+    _ic_weights: dict[int, float] = field(default_factory=dict, init=False, repr=False)
 
     def _prepare_labels(
         self, 
@@ -283,11 +285,15 @@ class MLAlphaMiner:
                 w_norm = w_arr / w_arr.sum()
                 _logger.info("Ensembling %d components with IC weights: %s", len(surviving), w_norm)
                 alpha_df_all["ml_alpha_long"] = (alpha_df_all[surviving] * w_norm).sum(axis=1)
+                self._ic_weights = {int(c.split("_")[2]): float(w) for c, w in zip(surviving, w_norm)}
             else:
                 alpha_df_all["ml_alpha_long"] = alpha_df_all[surviving].mean(axis=1)
+                eq = 1.0 / float(len(surviving))
+                self._ic_weights = {int(c.split("_")[2]): eq for c in surviving}
 
             alpha_df_all["ml_alpha_short"] = 1.0 - alpha_df_all["ml_alpha_long"]
         else:
+            self._ic_weights = {}
             alpha_df_all["ml_alpha_long"] = 0.5
             alpha_df_all["ml_alpha_short"] = 0.5
 
@@ -328,10 +334,19 @@ class MLAlphaMiner:
 
         surviving = [c for c in out_df.columns if c.startswith("ml_alpha_") and out_df[c].std() > 1e-6]
         if surviving:
-            out_df["ml_alpha_long"] = out_df[surviving].mean(axis=1)
+            if self._ic_weights:
+                w = np.array([self._ic_weights.get(int(c.split("_")[2]), 0.0) for c in surviving])
+                s = float(w.sum())
+                if s > 1e-9:
+                    w = w / s
+                    out_df["ml_alpha_long"] = (out_df[surviving] * w).sum(axis=1)
+                else:
+                    out_df["ml_alpha_long"] = out_df[surviving].mean(axis=1)
+            else:
+                out_df["ml_alpha_long"] = out_df[surviving].mean(axis=1)
             out_df["ml_alpha_short"] = 1.0 - out_df["ml_alpha_long"]
         else:
             out_df["ml_alpha_long"] = 0.5
             out_df["ml_alpha_short"] = 0.5
-            
+
         return out_df
