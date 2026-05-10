@@ -33,11 +33,14 @@ THEME_GROUPS = {
     0: [  # Group 1: Trend/Momentum (Slots 00-04) + Vol-Adjusted
         "ret_1", "ret_3", "ret_6", "ret_12", "ret_24", 
         "ma_dist_24", "ma_dist_168", "btc_trend_vol_adj_24h",
-        "realized_vol_yz_24", "orderflow_price_divergence"
+        "realized_vol_yz_24", "orderflow_price_divergence",
+        "taker_absorption_score"
     ],
     1: [  # Group 2: Volatility/Mean-Reversion (Slots 05-09)
         "vol_ratio_24", "vol_ratio_168", "realized_vol_regime", 
-        "downside_vol_ratio", "cs_dispersion"
+        "downside_vol_ratio", "cs_dispersion",
+        "dist_from_weekly_vwap", "macro_vol_regime_shift",
+        "liq_intensity_proxy", "capitulation_proxy"
     ],
     2: [  # Group 3: Structural/Regime (Slots 10-14)
         "btc_beta_x_bull_trend",
@@ -75,13 +78,14 @@ class MLAlphaMiner:
         target: pd.Series, 
         raw_returns: pd.Series | None = None,
         dispersion: pd.Series | None = None,
-        friction_bps: float = 3.5
+        atr_24h_pct: pd.Series | None = None,
+        friction_bps: float = 7.0
     ) -> np.ndarray:
         """Convert continuous rank targets [-1, 1] into discrete LambdaRank labels {0, 1, 2, 3}.
         
-        v6.4.0 Symmetric Hybrid Labeling:
-        - Labels both Long and Short opportunities to provide a clear gradient.
-        - Uses friction hurdle to filter out churn.
+        v6.5.0 Dynamic Friction Hurdle:
+        - Replaces fixed friction with max(1.5*friction, 0.4*ATR_24h_pct).
+        - Boosts signal magnitude by ensuring volatility-relative targets.
         """
         # Default to Label 1 (Chop)
         labels = np.ones(len(target), dtype=np.int32)
@@ -98,13 +102,21 @@ class MLAlphaMiner:
             labels[t < 0.15] = 0
             labels[(t > 0.60) & (labels != 3)] = 2
         else:
-            # Label 3: Strong Long (Top ranks AND > 2x friction)
-            labels[(t > 0.85) & (raw_returns > 2.0 * friction)] = 3
+            # Calculate dynamic hurdles
+            if atr_24h_pct is not None:
+                hurdle_long = np.maximum(1.5 * friction, 0.4 * atr_24h_pct.to_numpy())
+                hurdle_short = np.maximum(1.5 * friction, 0.4 * atr_24h_pct.to_numpy())
+            else:
+                hurdle_long = 1.5 * friction
+                hurdle_short = 1.5 * friction
+
+            # Label 3: Strong Long (Top ranks AND > hurdle_long)
+            labels[(t > 0.85) & (raw_returns > hurdle_long)] = 3
             
-            # Label 0: Strong Short (Bottom ranks AND < -2x friction)
-            labels[(t < 0.15) & (raw_returns < -2.0 * friction)] = 0
+            # Label 0: Strong Short (Bottom ranks AND < -hurdle_short)
+            labels[(t < 0.15) & (raw_returns < -hurdle_short)] = 0
             
-            # Label 2: Mild Long (Above median ranks AND > 1x friction)
+            # Label 2: Mild Long (Above median ranks AND > 1.0 * friction)
             labels[(labels == 1) & (t > 0.60) & (raw_returns > 1.0 * friction)] = 2
             
             # Label 1: Default/Chop (All others)
@@ -168,6 +180,17 @@ class MLAlphaMiner:
             close_wide = work_df["close"].unstack(level="symbol")
             fwd_ret_6 = np.log(close_wide.shift(-6) / close_wide).stack(future_stack=True).reindex(work_df.index).fillna(0.0)
             fwd_log_mag_horizon = np.log(close_wide.shift(-_MAG_HORIZON_BARS) / close_wide.clip(lower=1e-12))
+            
+            # [NEW] Dynamic Hurdle components: ATR(24) / Price
+            high_wide = work_df["high"].unstack(level="symbol")
+            low_wide = work_df["low"].unstack(level="symbol")
+            tr_wide = np.maximum(high_wide - low_wide, 
+                                np.maximum((high_wide - close_wide.shift(1)).abs(), 
+                                           (low_wide - close_wide.shift(1)).abs()))
+            atr_24_wide = tr_wide.rolling(24).mean()
+            atr_24_pct_wide = atr_24_wide / close_wide.clip(lower=1e-12)
+            atr_24_pct = atr_24_pct_wide.stack(future_stack=True).reindex(work_df.index).fillna(0.0)
+
             y_mag_h = (
                 fwd_log_mag_horizon.abs()
                 .stack(future_stack=True)
@@ -180,7 +203,8 @@ class MLAlphaMiner:
             y_labels = self._prepare_labels(
                 work_df["target"], 
                 raw_returns=fwd_ret_6,
-                dispersion=dispersion
+                dispersion=dispersion,
+                atr_24h_pct=atr_24_pct
             )
             
             # In-Sample Masking
