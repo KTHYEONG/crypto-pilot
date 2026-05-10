@@ -839,7 +839,12 @@ def _print_hmm_summary(
 
     mod_cols = ["datetime", "hmm_modulator_long", "hmm_modulator_short"]
     mod_tmp = hmm_modulator[[c for c in mod_cols if c in hmm_modulator.columns]]
-    df_eval = pd.merge(df_eval, mod_tmp, on="datetime", how="left")
+    if not mod_tmp.empty and "datetime" in mod_tmp.columns:
+        df_eval = pd.merge(df_eval, mod_tmp, on="datetime", how="left")
+    else:
+        # Add placeholder columns if modulators are missing
+        df_eval["hmm_modulator_long"] = 1.0
+        df_eval["hmm_modulator_short"] = 1.0
 
     feat_tmp = market_hmm_feats.copy().reset_index()
     # [v15 Alignment] Use new macro features for diagnostic merge
@@ -1093,6 +1098,8 @@ def run_hmm_fusion_for_is_end(
     summary_mode_label: str = "",
     prefetch_label_start: str | None = None,
     prefetched_1m: dict[str, pd.DataFrame] | None = None,
+    prefetched_market_probs: pd.DataFrame | None = None,
+    prefetched_market_hmm_feats: pd.DataFrame | None = None,
 ) -> MLPipelineOutput:
     """Walk-forward leg anchor: retrain systemic HMM with is_end_date cutoff.
 
@@ -1101,64 +1108,45 @@ def run_hmm_fusion_for_is_end(
     """
     from src.domain.futures.ml_pipeline.features.engineering import build_systemic_hmm_features
 
-    if panel_df is None:
-        if prefetched_1h:
-            _logger.debug(
-                "  --> USING prefetched_1h to build panel_df. Keys: %s",
-                list(prefetched_1h.keys())
-            )
-            tmp_maps = {sym: {"1h": df} for sym, df in prefetched_1h.items()}
-            panel_df = _build_panel_with_targets(tmp_maps, cfg, skip_targets=True)
-        else:
-            _logger.debug("  --> prefetched_1h is EMPTY. USING data_maps.")
-            panel_df = _build_panel_with_targets(data_maps, cfg, skip_targets=True)
-        
-        _logger.debug(
-            "  --> panel_df len after build: %d",
-            len(panel_df) if panel_df is not None else 0
-        )
-
-
-    _logger.info("  --> Systemic HMM Inference (is_end=%s)%s...", is_end_date, summary_mode_label)
-
-    market_hmm_feats = build_systemic_hmm_features(panel_df, None, tf="1h")
-    if market_hmm_feats.index.tz is None:
-        market_hmm_feats.index = market_hmm_feats.index.tz_localize("UTC")
-    else:
-        market_hmm_feats.index = market_hmm_feats.index.tz_convert("UTC")
-
-    hmm_k = int(cfg.get("FUTURES_HMM_K_STATES", 5))
-    hmm_n_iter = int(cfg.get("FUTURES_HMM_N_ITER", 500))
-    hmm_fit_step = int(cfg.get("FUTURES_HMM_FIT_STEP", 252))
-    hmm_inferrer = HMMStateInferrer(
-        n_states=hmm_k,
-        n_iter=hmm_n_iter,
-        fit_step=hmm_fit_step
-    )
-
     is_end_dt = pd.to_datetime(is_end_date)
-    is_end_utc = (
-        is_end_dt.tz_localize("UTC")
-        if is_end_dt.tzinfo is None
-        else is_end_dt.tz_convert("UTC")
-    )
-    is_end_idx_market = int((market_hmm_feats.index < is_end_utc).sum())
+    is_end_utc = is_end_dt.tz_localize("UTC") if is_end_dt.tzinfo is None else is_end_dt.tz_convert("UTC")
 
-    _btc_for_returns = next((s for s in symbols if "BTC" in s), None)
-    _btc_df = prefetched_1h.get(_btc_for_returns) if _btc_for_returns else None
-    if _btc_df is not None and "close" in _btc_df.columns:
-        _btc_returns = _btc_df.set_index("datetime")["close"].pct_change().reindex(market_hmm_feats.index).fillna(0.0)
+    if prefetched_market_probs is not None and prefetched_market_hmm_feats is not None:
+        _logger.info("  --> Reusing precomputed HMM results for fusion.")
+        market_probs = prefetched_market_probs
+        market_hmm_feats = prefetched_market_hmm_feats
     else:
-        _btc_returns = market_hmm_feats["macro_trend_168h"]
-    market_probs = hmm_inferrer.fit_predict_systemic(
-        market_hmm_feats,
-        _btc_returns,
-        is_end_idx=is_end_idx_market,
-        symbol="Market",
-        tf=tf,
-    )
-    market_probs = _ensure_datetime_column(market_probs)
-    market_probs["datetime"] = pd.to_datetime(market_probs["datetime"], utc=True)
+        if panel_df is None:
+            if prefetched_1h:
+                tmp_maps = {sym: {"1h": df} for sym, df in prefetched_1h.items()}
+                panel_df = _build_panel_with_targets(tmp_maps, cfg, skip_targets=True)
+            else:
+                panel_df = _build_panel_with_targets(data_maps, cfg, skip_targets=True)
+        
+        _logger.info("  --> Systemic HMM Inference (is_end=%s)%s...", is_end_date, summary_mode_label)
+        market_hmm_feats = build_systemic_hmm_features(panel_df, None, tf="1h")
+        if market_hmm_feats.index.tz is None:
+            market_hmm_feats.index = market_hmm_feats.index.tz_localize("UTC")
+        else:
+            market_hmm_feats.index = market_hmm_feats.index.tz_convert("UTC")
+
+        hmm_k = int(cfg.get("FUTURES_HMM_K_STATES", 5))
+        hmm_inferrer = HMMStateInferrer(n_states=hmm_k, n_iter=int(cfg.get("FUTURES_HMM_N_ITER", 500)))
+        
+        is_end_idx_market = int((market_hmm_feats.index < is_end_utc).sum())
+        _btc_anchor = next((s for s in symbols if "BTC" in s), None)
+        _btc_df = prefetched_1h.get(_btc_anchor) if _btc_anchor else None
+        if _btc_df is not None and "close" in _btc_df.columns:
+            _btc_rets = _btc_df.set_index("datetime")["close"].pct_change().reindex(market_hmm_feats.index).fillna(0.0)
+        else:
+            _btc_rets = market_hmm_feats["macro_trend_168h"]
+
+        market_probs = hmm_inferrer.fit_predict_systemic(
+            market_hmm_feats, _btc_rets, is_end_idx=is_end_idx_market, symbol="Market", tf=tf
+        )
+        market_probs = _ensure_datetime_column(market_probs)
+        market_probs["datetime"] = pd.to_datetime(market_probs["datetime"], utc=True)
+
     btc_anchor = next((s for s in symbols if "BTC" in s), None)
     btc_1h = prefetched_1h.get(btc_anchor) if btc_anchor else None
 
@@ -1277,47 +1265,58 @@ def run_ml_pipeline_for_universe(
     gp_only: bool = False,
     hmm_only: bool = False,
 ) -> MLPipelineOutput:
-    """[Phase 2] Universal Cross-Sectional ML Pipeline."""
-    _logger.info("  --> Initiating Universal Cross-Sectional ML Pipeline")
-
+    """[Phase 2] Universal Cross-Sectional ML Pipeline.
+    
+    Logical Flow:
+    1. Data Collection & Panel Construction (TF-aware)
+    2. Systemic HMM Inference (Regime Discovery)
+    3. Alpha Mining (Regime-Aware LightGBM/GP)
+    4. Signal Fusion & Meta-Labeling (Unified Meta-Feature Frame)
+    """
+    _logger.info("  --> Initiating Universal Cross-Sectional ML Pipeline (TF: %s)", tf)
 
     collector = DataCollector()
     data_maps: dict[str, dict[str, Any]] = {}
     prefetched_1h: dict[str, pd.DataFrame] = {}
 
-    # --- Step 1: Market-Wide Data Collection & Panel Building ---
+    # --- Step 1: Market-Wide Data Collection ---
     _logger.info("  --> Step 1: Panel Construction & Asset Screening (%d symbols)", len(symbols))
-
 
     for sym in symbols:
         try:
             df_tf = collector.collect_and_save(sym, tf, fetch_start_date, end)
+            # We still fetch 1h as a master reference for features if tf != 1h
             df_1h = collector.collect_and_save(sym, "1h", fetch_start_date, end)
+            
             if df_tf is not None and df_1h is not None:
-                # IMPORTANT: Merge funding and metrics before ML feature engineering
+                # Merge funding and metrics before feature engineering
                 df_tf = merge_funding_into_ohlcv(sym, df_tf, Path(FUTURES_DATA_DIR))
                 df_tf = merge_metrics_into_ohlcv(sym, df_tf, Path(FUTURES_DATA_DIR))
+                
+                # Step 1: Enrich with ALPHA features only if not in hmm_only mode
+                if not hmm_only:
+                    try:
+                        df_tf_enriched = _enrich_with_gp_features(df_tf, tf=tf)
+                    except Exception as e:
+                        _logger.warning("[%s] ALPHA feature enrichment failed: %s", sym, e)
+                        df_tf_enriched = df_tf
+                else:
+                    # Skip heavy computations for HMM audits
+                    df_tf_enriched = df_tf
+
+                data_maps[sym] = {tf: df_tf_enriched}
+                
+                # If master ref is different, enrich it too (used for HMM/Systemic)
                 if tf != "1h":
                     df_1h = merge_funding_into_ohlcv(sym, df_1h, Path(FUTURES_DATA_DIR))
                     df_1h = merge_metrics_into_ohlcv(sym, df_1h, Path(FUTURES_DATA_DIR))
+                    if not hmm_only:
+                        prefetched_1h[sym] = _enrich_with_gp_features(df_1h, tf="1h")
+                    else:
+                        prefetched_1h[sym] = df_1h
                 else:
-                    # Target is 1h, but we keep df_tf unenriched to avoid merge collisions later
-                    df_1h = df_tf.copy()
-
-                try:
-                    # Enrich 1h with ALPHA features (primary source for panel/HMM)
-                    df_1h_enriched = _enrich_with_gp_features(df_1h, tf="1h")
-                except Exception as e:
-                    _logger.warning("[%s] ALPHA feature enrichment failed: %s", sym, e)
-                    df_1h_enriched = df_1h
-                # Store target TF and 1h-enriched frames separately.
-                # If tf=='1h', data_maps[sym][tf] MUST remain unenriched to avoid merge collisions.
-                if tf != "1h":
-                    data_maps[sym] = {tf: df_tf, "1h": df_1h_enriched}
-                else:
-                    data_maps[sym] = {tf: df_tf}
-                
-                prefetched_1h[sym] = df_1h_enriched
+                    prefetched_1h[sym] = df_tf_enriched
+                    
         except Exception as e:
             _logger.warning("[%s] Data fetch failed: %s", sym, e)
 
@@ -1325,200 +1324,93 @@ def run_ml_pipeline_for_universe(
         _logger.error("No data collected. Pipeline aborted.")
         return MLPipelineOutput()
 
-    label_start = is_start_date or fetch_start_date
-    if bool(cfg.get("FUTURES_ML_ALPHA_USE_TBM_WEIGHT", True)):
-        _logger.info("  --> Step 1b: Triple-Barrier Micro-Weighting (1m prefetch)")
-
-        one_m_gp: dict[str, pd.DataFrame | None] = {}
-        for sym in list(data_maps.keys()):
-            try:
-                one_m_gp[sym] = collector.collect_1m_ohlcv(sym, label_start, end)
-            except Exception:
-                one_m_gp[sym] = None
-
-        # Apply TBM weights to BOTH prefetched_1h (enriched) and data_maps entries
-        for sym in list(data_maps.keys()):
-            try:
-                # 1. Update data_maps target TF (if 1h) or data_maps['1h']
-                for k in [tf, "1h"]:
-                    if k in data_maps[sym]:
-                        data_maps[sym][k] = _attach_tbm_gp_weights(
-                            sym, data_maps[sym][k], label_start, end, collector, one_m_gp.get(sym)
-                        )
-                # 2. Update prefetched_1h (enriched master)
-                if sym in prefetched_1h:
-                    prefetched_1h[sym] = _attach_tbm_gp_weights(
-                        sym, prefetched_1h[sym], label_start, end, collector, one_m_gp.get(sym)
-                    )
-            except Exception as e:
-                _logger.warning("[%s] TBM weight attach failed: %s", sym, e)
-
-    # Use prefetched_1h (enriched master) to build panel_df if available
-    if prefetched_1h:
-        tmp_enriched_maps = {sym: {"1h": df} for sym, df in prefetched_1h.items()}
-        panel_df = _build_panel_with_targets(tmp_enriched_maps, cfg)
-    else:
-        panel_df = _build_panel_with_targets(data_maps, cfg)
-
-    raw_h = cfg.get("FUTURES_ML_ALPHA_HORIZONS", (3, 6, 12, 24))
-    default_h = (3, 6, 12, 24)
-    h_src = raw_h if isinstance(raw_h, (list, tuple)) else default_h
-    horizons = tuple(int(x) for x in h_src)
-
-    # --- Step 2a: Early Systemic HMM Inference (Regime-Aware Features) ---
-    _logger.info("  --> Step 2a: Early Systemic HMM Inference for Regime-Aware Alpha")
+    # --- Step 2: Systemic HMM Inference (Regime Discovery) ---
+    _logger.info("  --> Step 2: Systemic HMM Inference (Macro Regime Discovery)")
     from src.domain.futures.ml_pipeline.features.engineering import build_systemic_hmm_features
 
-    market_hmm_feats = build_systemic_hmm_features(panel_df, None, tf="1h")
+    # Build a temporary panel just for systemic HMM features (uses 1h reference if available)
+    h_maps = {s: {"1h": prefetched_1h[s]} for s in prefetched_1h}
+    h_utils = CrossSectionalPipelineUtils()
+    h_panel = h_utils.build_panel_df(h_maps, tf="1h")
+    h_panel = h_utils.add_systemic_features(h_panel)
+    
+    market_hmm_feats = build_systemic_hmm_features(h_panel, None, tf="1h")
     if market_hmm_feats.index.tz is None:
         market_hmm_feats.index = market_hmm_feats.index.tz_localize("UTC")
     else:
         market_hmm_feats.index = market_hmm_feats.index.tz_convert("UTC")
 
     hmm_k = int(cfg.get("FUTURES_HMM_K_STATES", 5))
-    hmm_n_iter = int(cfg.get("FUTURES_HMM_N_ITER", 500))
-    hmm_fit_step = int(cfg.get("FUTURES_HMM_FIT_STEP", 252))
-    hmm_inferrer = HMMStateInferrer(
-        n_states=hmm_k,
-        n_iter=hmm_n_iter,
-        fit_step=hmm_fit_step
-    )
+    hmm_inferrer = HMMStateInferrer(n_states=hmm_k, n_iter=int(cfg.get("FUTURES_HMM_N_ITER", 500)))
+    
     is_end_dt = pd.to_datetime(is_end_date or end)
-    if is_end_dt.tzinfo is None:
-        is_end_utc = is_end_dt.tz_localize("UTC")
-    else:
-        is_end_utc = is_end_dt.tz_convert("UTC")
+    is_end_utc = is_end_dt.tz_localize("UTC") if is_end_dt.tzinfo is None else is_end_dt.tz_convert("UTC")
     is_end_idx_market = int((market_hmm_feats.index < is_end_utc).sum())
 
-    _btc_for_returns2 = next((s for s in symbols if "BTC" in s), None)
-    _btc_df2 = prefetched_1h.get(_btc_for_returns2) if _btc_for_returns2 else None
-    if _btc_df2 is not None and "close" in _btc_df2.columns:
-        _btc_returns2 = _btc_df2.set_index("datetime")["close"].pct_change().reindex(market_hmm_feats.index).fillna(0.0)
+    _btc_anchor = next((s for s in symbols if "BTC" in s), None)
+    _btc_df = prefetched_1h.get(_btc_anchor) if _btc_anchor else None
+    if _btc_df is not None and "close" in _btc_df.columns:
+        _btc_rets = _btc_df.set_index("datetime")["close"].pct_change().reindex(market_hmm_feats.index).fillna(0.0)
     else:
-        _btc_returns2 = market_hmm_feats["macro_trend_168h"]
+        _btc_rets = market_hmm_feats["macro_trend_168h"]
+
     market_probs = hmm_inferrer.fit_predict_systemic(
-        market_hmm_feats,
-        _btc_returns2,
-        is_end_idx=is_end_idx_market,
-        symbol="Market",
-        tf=tf,
+        market_hmm_feats, _btc_rets, is_end_idx=is_end_idx_market, symbol="Market", tf=tf
     )
     market_probs = _ensure_datetime_column(market_probs)
     market_probs["datetime"] = pd.to_datetime(market_probs["datetime"], utc=True)
 
-    # Inject HMM and Systemic features into panel_df
-    _logger.info("  --> Injecting HMM and Systemic features into panel_df for LightGBM...")
+    if hmm_only:
+        _logger.info("  [SUCCESS] HMM Inference complete (HMM-only mode).")
+        out = MLPipelineOutput(market_probs=market_probs)
+        out.hmm_report = _print_hmm_summary(market_probs, market_hmm_feats, pd.DataFrame(), _btc_df, "(HMM-ONLY)")
+        return out
+
+    # --- Step 3: Regime-Aware Alpha Mining ---
+    _logger.info("  --> Step 3: Regime-Aware Alpha Model Training (LightGBM)")
+    
+    # Build final panel on target TF
+    panel_df = h_utils.build_panel_df(data_maps, tf=tf)
+    panel_df = h_utils.add_cross_sectional_features(panel_df)
+    panel_df = h_utils.add_systemic_features(panel_df)
+    
+    # Inject HMM features into training panel
+    _logger.info("  --> Injecting HMM regimes into Alpha features...")
     hmm_cols_all = [c for c in market_probs.columns if str(c).startswith("hmm_")]
     mp_feats = market_probs.set_index("datetime")[hmm_cols_all]
-    
-    # Merge on datetime level of MultiIndex
     panel_df = panel_df.join(mp_feats, on="datetime", how="left")
-    # Fill probabilities with uniform, others with 0
-    prob_cols = [c for c in hmm_cols_all if "prob_" in c]
-    other_hmm_cols = [c for c in hmm_cols_all if "prob_" not in c]
-    panel_df[prob_cols] = panel_df[prob_cols].fillna(1.0 / float(hmm_k))
-    panel_df[other_hmm_cols] = panel_df[other_hmm_cols].fillna(0.0)
-    
-    # Inject raw systemic features (macro_trend_168h, macro_vol_24h, etc.)
-    panel_df = panel_df.join(market_hmm_feats, on="datetime", how="left", rsuffix="_sys").fillna(0.0)
+    panel_df[hmm_cols_all] = panel_df[hmm_cols_all].ffill().fillna(1.0 / float(hmm_k))
 
-    # --- Step 2b: Universal ALPHA Model Training (Cross-Sectional IC) ---
-    _logger.info("  --> Step 2b: Training Cross-Sectional LightGBM Alpha Model")
+    # Add targets
+    raw_h = cfg.get("FUTURES_ML_ALPHA_HORIZONS", (3, 6, 12, 24))
+    horizons = tuple(int(x) for x in (raw_h if isinstance(raw_h, (list, tuple)) else (3, 6, 12, 24)))
+    _ic_hl = float(OPT_FUTURES_CONFIG.get("FUTURES_ML_IC_HALF_LIFE", 2.3))
+    _h_weights = tuple(float(np.exp(-h / _ic_hl)) for h in horizons)
+    panel_df["target"] = h_utils.create_multi_horizon_rank_targets(panel_df, horizons=horizons, weights=_h_weights)
 
-
-    if bool(cfg.get("FUTURES_ML_ALPHA_NSGA2_ENABLED", False)) and not is_deap_available():
-        _logger.warning(
-            "FUTURES_ML_ALPHA_NSGA2_ENABLED=True but `deap` is not installed; "
-            "continuing with scalarized gplearn fitness (see alpha/gp_availability.py)."
-        )
-    sp = max(5, min(12, int(cfg.get("FUTURES_ML_ALPHA_SLOTS_PER_THEME", 6))))
     miner = MLAlphaMiner(
-        n_jobs=n_jobs,
-        target_horizons=horizons,
-        slots_per_theme=sp,
-        n_features_to_select=sp * 3,
+        n_jobs=n_jobs, 
+        target_horizons=horizons, 
+        slots_per_theme=max(5, min(12, int(cfg.get("FUTURES_ML_ALPHA_SLOTS_PER_THEME", 6))))
     )
-
-    alpha_cache = Path(FUTURES_CACHE_DIR) / "universal_cs_gp_v8.parquet"
-    filter_opts = {
-        "use_newey_west": bool(cfg.get("FUTURES_ML_IC_FILTER_USE_HAC", False)),
-        "use_ewma_ic_stat": bool(cfg.get("FUTURES_ML_IC_FILTER_USE_EWMA", False)),
-        "ewma_half_life": float(cfg.get("FUTURES_ML_IC_EWMA_HALF_LIFE", 540.0)),
-        "symbol_balance_max": float(cfg.get("FUTURES_ML_IC_SYMBOL_BALANCE_MAX", 3.0)),
-        "require_regime_gate": bool(cfg.get("FUTURES_ML_IC_REGIME_GATE", True)),
-        "fdr_q": float(cfg.get("FUTURES_ML_IC_FDR_Q", 0.10)),
-    }
     alpha_panel = miner.mine_alphas_cs(
-        panel_df,
-        cache_path=alpha_cache,
-        is_end_date=is_end_date,
-        filter_options=filter_opts,
+        panel_df, 
+        cache_path=Path(FUTURES_CACHE_DIR) / "universal_cs_gp_v8.parquet",
+        is_end_date=is_end_date
     )
 
-    # --- Print ALPHA IC Validation Results immediately after Step 2 ---
-    best_fitness = alpha_panel.attrs.get("best_fitness", 0.0)
-    filter_meta = alpha_panel.attrs.get("alpha_component_filter", {})
-    neu_p = bool(filter_meta.get("neutralize_primary", 0))
-
-    _logger.info(" ┌───────────────────────────────────────────────────────────────────────────────────┐")
-    _logger.info(" │ [ALPHA AUDIT] LightGBM IC Validation (Cross-Sectional Alpha)                     │")
-    _logger.info(" ├───────────────────────────────────────────────────────────────────────────────────┤")
-    _logger.info(f" │ [OVERVIEW] Fitness: {best_fitness:.4f} | Survived: {filter_meta.get('n_surviving', 0):.0f}/{filter_meta.get('n_components', 0):.0f} | Neutralized: {neu_p} │")
-    _logger.info(" ├───────────────────────────────────────────────────────────────────────────────────┤")
-    _logger.info(" │ [BEST ALPHA] IS IC: {:>6.4f} | OOS IC: {:>6.4f} | Half-Life: {:>4.1f} | T-Stat: {:>5.2f} │".format(
-        filter_meta.get('primary_is_mu', 0.0), filter_meta.get('primary_oos_mu', 0.0),
-        filter_meta.get('primary_half_life', 0.0), filter_meta.get('primary_t_stat', 0.0)
-    ))
-    _logger.info(" ├───────────────────────────────────────────────────────────────────────────────────┤")
-    _logger.info(" │ [FAILURES] FDR:{fail_fdr:<2.0f} DSR:{fail_dsr:<2.0f} OOS:{fail_oos:<2.0f} HL:{fail_half_life:<2.0f} SYM:{fail_sym_bal:<2.0f} REG:{fail_regime:<2.0f} ORT:{fail_ortho:<2.0f} │".format(
-        fail_fdr=filter_meta.get('fail_fdr', 0), fail_dsr=filter_meta.get('fail_dsr', 0),
-        fail_oos=filter_meta.get('fail_oos', 0), fail_half_life=filter_meta.get('fail_half_life', 0),
-        fail_sym_bal=filter_meta.get('fail_sym_bal', 0), fail_regime=filter_meta.get('fail_regime', 0),
-        fail_ortho=filter_meta.get('fail_ortho', 0)
-    ))
-    _logger.info(" └───────────────────────────────────────────────────────────────────────────────────┘")
-
-    if best_fitness > 0.01:
-        _logger.info("  [SUCCESS] Reasonable IC/Fitness detected. Track A is healthy.")
-    else:
-        _logger.warning("  [WARNING] Low Fitness detected. Check market volatility or features.")
-
-    if gp_only:
-        # Step 2 이후 즉시 종료
-        _logger.info("  [SUCCESS] GP-Only analysis complete.")
-
-        out = MLPipelineOutput()
-        out.alpha_panel = alpha_panel
-        return out
-
-    _logger.info("  --> Step 3: HMM Regime Fusion & Meta-Labeling")
-
-
+    # --- Step 4: Signal Fusion & Meta-Labeling ---
+    _logger.info("  --> Step 4: Signal Fusion & Meta-Labeling (Reusing HMM results)")
+    
+    # Use existing HMM results for fusion to avoid redundant training
     out = run_hmm_fusion_for_is_end(
-        list(data_maps.keys()),
-        tf,
-        fetch_start_date,
-        end,
-        cfg,
-        data_maps,
-        prefetched_1h,
-        panel_df,
-        alpha_panel,
-        is_end_date or end,
-        collector,
-        workers,
-        n_jobs,
-        include_fusion=not hmm_only,
-        summary_mode_label="(HMM-ONLY MODE)" if hmm_only else "",
-        prefetch_label_start=is_start_date or fetch_start_date,
+        list(data_maps.keys()), tf, fetch_start_date, end, cfg, data_maps, 
+        prefetched_1h, panel_df, alpha_panel, is_end_date or end, collector,
+        workers, n_jobs, include_fusion=not gp_only,
+        prefetched_market_probs=market_probs,
+        prefetched_market_hmm_feats=market_hmm_feats
     )
-    out.alpha_panel = alpha_panel
-    if hmm_only:
-        _logger.info("  [SUCCESS] Pipeline complete (HMM-only).")
-        return out
-
-
+    
     _logger.info("  [SUCCESS] Universal ML Pipeline processing complete.")
-
-    out.alpha_panel = alpha_panel
     return out
+
