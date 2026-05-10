@@ -766,16 +766,17 @@ class HMMStateInferrer:
 
         probs_df = pd.DataFrame(results, index=features_df.index, columns=out_cols).ffill().bfill().fillna(0.0)
 
-        sem_cal = _calibrate_crisis_logit_offset(
-            probs_df[list(_SEMANTIC_ORDER)].to_numpy(dtype=np.float64),
-            target_mean_crisis=0.07,
-            crisis_col=len(_SEMANTIC_ORDER) - 1,
-        )
-        probs_df[list(_SEMANTIC_ORDER)] = sem_cal
+        # [REFACTORED] Let HMM output its natural probability estimates
+        # sem_cal = _calibrate_crisis_logit_offset(
+        #     probs_df[list(_SEMANTIC_ORDER)].to_numpy(dtype=np.float64),
+        #     target_mean_crisis=0.07,
+        #     crisis_col=len(_SEMANTIC_ORDER) - 1,
+        # )
+        # probs_df[list(_SEMANTIC_ORDER)] = sem_cal
 
         # Posterior Smoothing (Phase 7: Macro Stability)
         smooth_method = OPT_FUTURES_CONFIG.get("FUTURES_HMM_SMOOTHING_METHOD", "EMA")
-        smooth_span = int(OPT_FUTURES_CONFIG.get("FUTURES_HMM_SMOOTHING_SPAN", 12))
+        smooth_span = int(OPT_FUTURES_CONFIG.get("FUTURES_HMM_SMOOTHING_SPAN", 3))
         if smooth_span > 1:
             sem_cols = list(_SEMANTIC_ORDER)
             if smooth_method == "EMA":
