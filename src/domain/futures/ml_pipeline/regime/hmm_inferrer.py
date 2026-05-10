@@ -614,7 +614,7 @@ class HMMStateInferrer:
             "ver": "v55_smoothing_connected",
             "feat_cols": sorted(feat_cols),
             "smooth_method": OPT_FUTURES_CONFIG.get("FUTURES_HMM_SMOOTHING_METHOD", "EMA"),
-            "smooth_span": int(OPT_FUTURES_CONFIG.get("FUTURES_HMM_SMOOTHING_SPAN", 12)),
+            "smooth_span": int(OPT_FUTURES_CONFIG.get("FUTURES_HMM_SMOOTHING_SPAN", 8)),
             "sticky_durations": str(OPT_FUTURES_CONFIG.get("FUTURES_HMM_OUTPUT_STICKY_MIN_DURATION", [])),
             "sticky_weight": float(OPT_FUTURES_CONFIG.get("FUTURES_HMM_STICKY_PENALTY_WEIGHT", 100.0)),
         }
@@ -776,7 +776,7 @@ class HMMStateInferrer:
 
         # Posterior Smoothing (Phase 7: Macro Stability)
         smooth_method = OPT_FUTURES_CONFIG.get("FUTURES_HMM_SMOOTHING_METHOD", "EMA")
-        smooth_span = int(OPT_FUTURES_CONFIG.get("FUTURES_HMM_SMOOTHING_SPAN", 3))
+        smooth_span = int(OPT_FUTURES_CONFIG.get("FUTURES_HMM_SMOOTHING_SPAN", 8))
         if smooth_span > 1:
             sem_cols = list(_SEMANTIC_ORDER)
             if smooth_method == "EMA":
