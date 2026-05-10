@@ -5,6 +5,14 @@ import logging
 import numpy as np
 import pandas as pd
 
+from config.opt_config import OPT_FUTURES_CONFIG
+
+from src.domain.futures.portfolio.signal_composer import (
+    apply_linear_signal_composer_scores,
+    composer_sigma_lookback_bars,
+    rolling_per_bar_return_std,
+)
+
 from src.core.indicators.indicators import get_indicator_engine
 from src.strategy_base import PipelineStrategyBase
 
@@ -33,7 +41,11 @@ class FuturesMLStrategy(PipelineStrategyBase):
             if col in df.columns:
                 df[col] = df[col].astype(np.float64)
         
-        atr_period = int(self.params.get("ATR_PERIOD", 20))
+        atr_period = int(
+            OPT_FUTURES_CONFIG.get(
+                "FUTURES_ATR_PERIOD_FIXED", self.params.get("ATR_PERIOD", 30)
+            )
+        )
         macro_period = int(self.params.get("MACRO_EMA_PERIOD", 200))
         ind = self._ind()
         
@@ -90,12 +102,20 @@ class FuturesMLStrategy(PipelineStrategyBase):
             if "hmm_modulator_short" in df.columns else np.ones(n)
         )
         
-        # 3. Cross-sectional Scoring
-        # xs_score_long: higher is better for LONG
-        # xs_score_short: lower is better for SHORT (inverted in backtest engine)
-        df["xs_score_long"] = gp_long * hml
-        df["xs_score_short"] = gp_short / np.maximum(hms, 0.1)
-        
+        xl, xs_ = apply_linear_signal_composer_scores(
+            df, gp_long, gp_short, self.params, opt_config=OPT_FUTURES_CONFIG
+        )
+        df["xs_score_long"] = xl
+        df["xs_score_short"] = xs_
+
+        _tf = str(self.params.get("TIMEFRAME", "4h"))
+        _win = composer_sigma_lookback_bars(_tf, OPT_FUTURES_CONFIG)
+        df["composer_sigma_bar"] = rolling_per_bar_return_std(
+            df["close"].to_numpy(dtype=np.float64), _win
+        )
+        df["_hmm_mod_long_raw"] = hml
+        df["_hmm_mod_short_raw"] = hms
+
         if "hmm_prob_crisis" not in df.columns:
             df["hmm_prob_crisis"] = 0.0
 
@@ -115,10 +135,9 @@ class FuturesMLStrategy(PipelineStrategyBase):
             )
             df["ml_calib_prob"] = np.maximum(pl_arr, ps_arr)
         df["strength_filter"] = gp  # Using raw GP as strength indicator
-        
+
         # Rank score used for symbol selection in multi-symbol engine
         df["slot_rank_score"] = df["xs_score_long"]
-        
         # Trend Direction: 1.0 for LONG, -1.0 for SHORT, 0.0 for Neutral
         # We use a threshold around 0.5
         gp_centered = gp - 0.5

@@ -52,7 +52,7 @@ THEME_GROUPS = {
 }
 
 
-# Bars ahead for magnitude targets / hybrid scaling (stacked OHLC timeline; matches tmp.md sketch).
+# Bars ahead for magnitude targets / hybrid scaling (stacked OHLC timeline).
 _MAG_HORIZON_BARS = 24
 
 

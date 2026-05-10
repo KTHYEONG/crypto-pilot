@@ -3,15 +3,14 @@ from __future__ import annotations
 from typing import Any
 
 # ==============================================================================
-# OPTIMIZATION FUTURES SEARCH SPACE & CONFIGURATION (Cross-Sectional Ranking Edition)
+# OPTIMIZATION FUTURES SEARCH SPACE & CONFIGURATION
 # ==============================================================================
 
 OPT_FUTURES_CONFIG: dict[str, Any] = {
-    # Reduced from 2000: CAWF-R has K=5 independent legs; more trials = more selection bias.
-    # Bonferroni SR_bench = sqrt(2*ln(400))≈3.46 vs sqrt(2*ln(2000))≈5.30 — honest deflation.
-    "total_trials": 2000,
-    # Phase-D TPESampler: random trials before TPE; must be < n_ml_trials (see opt_futures.py).
-    "tpe_n_startup_trials": 200,
+    # 3-phase coordinate ascent total ≈ 260 (Bonferroni / reporting baseline).
+    "total_trials": 260,
+    # Phase-D TPESampler startup; per-phase samplers in opt_main_futures override as needed.
+    "tpe_n_startup_trials": 20,
     # Caps startup at this fraction of Phase-D n_trials (prevents 384/500 ~77% random when
     # total_trials-oriented tpe_n_startup is reused for FUTURES_ML_PHASE_D_TRIALS=500).
     "FUTURES_ML_PHASE_D_TPE_STARTUP_FRAC": 0.20,
@@ -84,7 +83,7 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     "FUTURES_HMM_STICKY_PENALTY_WEIGHT": 1100.0,
     # Min-duration (bars @ base TF) per state: [BULL_CALM, BULL_VOL_UP, BEAR, CHOP, CRISIS]
     # P0: was [1000,500,...] (~6w calm lock); shortened so regime errors recover in ~1w.
-    "FUTURES_HMM_OUTPUT_STICKY_MIN_DURATION": [168, 84, 24, 24, 6],
+    "FUTURES_HMM_OUTPUT_STICKY_MIN_DURATION": [120, 48, 24, 12, 24],
     # Slightly stronger sticky transitions → stabler systemic HMM under leg refit (Path C).
     "FUTURES_HMM_TRANSITION_PRIOR_ALPHA": 0.50,
     # HMM Posterior Smoothing (EMA, DEMA, TEMA, HMA, KAMA, ALMA, JMA)
@@ -99,33 +98,86 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     # Session 39: recovery override abandoned (P10 -0.027, DSR collapse). Keep disabled.
     "CRISIS_RECOVERY_TREND_THR": 1e9,
     "CRISIS_RECOVERY_FLOOR": 0.30,
-    # CAWF-R: K=5 chronological AWF legs replace reshuffled CPCV paths.
-    "FUTURES_AWF_K_LEGS": 5,
-    "FUTURES_AWF_MIN_TRAIN_FRAC": 0.40,  # first leg trains on 40% of IS bars
-    # PLGD objective weights (see objective_ml.py).
-    "FUTURES_PLGD_LAMBDA_DEF": 0.5,   # Bonferroni trial-deflation strength
-    "FUTURES_PLGD_LAMBDA_TAIL": 0.7,  # worst-leg tail penalty multiplier (k=5: 1 bad leg allowed)
-    # Phase-D composite objective (WF validation contract; minimizes -reward + soft PLGD reg).
-    "FUTURES_PHASE_D_W_POS_LEGS": 2.5,
-    "FUTURES_PHASE_D_W_WORST_LEG_LOGTW": 2.0,
-    "FUTURES_PHASE_D_W_DIR_PF": 1.0,
-    "FUTURES_PHASE_D_W_IS_ALPHA_LOG": 1.2,
-    "FUTURES_PHASE_D_W_MU_LOG": 5.0,
-    "FUTURES_PHASE_D_PLGD_REG_WEIGHT": 0.12,
+    # CAWF-R: K anchored legs in the OOS-pool slice (train [0, anchor_i), embargo, test window).
+    "FUTURES_AWF_K_LEGS": 6,
+    # IS-pool fraction (leading bars); trailing (1 − frac) builds tiled OOS test legs only.
+    "FUTURES_AWF_IS_POOL_FRAC": 0.70,
+    # Platt: prefer OOS-only windows in optimizer ``_fit_oos_platt_calibrators_from_maps``;
+    # legacy tail fraction kept for deprecated tail-window path only.
+    "FUTURES_CALIB_PLATT_TAIL_FRAC": 0.30,
+    "FUTURES_CALIB_PLATT_MIN_OOS_BARS": 80,
+    # If True and the primary OOS window has too few samples, widen to AWF OOS-pool start (still no IS-pool).
+    "FUTURES_CALIB_PLATT_OOS_WIDEN_TO_POOL": True,
+    # Covariance lookback for portfolio_constructor (~30 calendar days in bars per TF).
+    "FUTURES_PORTFOLIO_COV_LOOKBACK": 180,
+    "FUTURES_PORTFOLIO_COV_LOOKBACK_BY_TF": {"1h": 720, "4h": 180, "1d": 30},
+    "FUTURES_PORTFOLIO_KAPPA": 0.35,
+    "FUTURES_PORTFOLIO_F_KELLY_MAX": 2.0,
+    # ATR stop multiplier (ATR_PERIOD lives in engine / Optuna params).
+    "FUTURES_ATR_STOP_MULT": 2.5,
+    "FUTURES_SIMPLE_ATR_STOP": True,
+    # ATR period fixed (not an Optuna dimension).
+    "FUTURES_ATR_PERIOD_FIXED": 30,
+    # Rolling σ lookback ≈ 8 calendar days (bars per TF optional override).
+    "FUTURES_COMPOSER_SIGMA_CALENDAR_DAYS": 8.0,
+    "FUTURES_COMPOSER_SIGMA_LOOKBACK_BY_TF": {"1h": 192, "4h": 48, "1d": 8},
+    # 1.0 = disabled (no crisis long-only magnitude scaling in execution stack).
+    "FUTURES_CRISIS_LONG_MAG_SUPPRESS": 1.0,
+    "FUTURES_EVENT_TURNOVER_REBALANCE": False,
+    # Short borrow ~0.06%/day (fraction of notional per day).
+    "FUTURES_SHORT_BORROW_DAILY": 0.0006,
+    "SLIPPAGE_BPS_BUFFER_MULT": 1.0,
+    "FUTURES_DEFAULT_BETA_ALPHA": 1.0,
+    "FUTURES_DEFAULT_BETA_REGIME_BULL": 1.0,
+    "FUTURES_DEFAULT_BETA_REGIME_BEAR": 0.25,
+    # Stability fail → try runner-up phase-C trial once.
+    "FUTURES_STABILITY_RUNNER_UP_RETRY": True,
+    "FUTURES_DEFAULT_BETA_REGIME_CRISIS": 0.5,
+    "FUTURES_DEFAULT_BETA_REGIME_RECOVERY": 0.0,
+    "FUTURES_DEFAULT_BETA_REGIME_CHOP": 0.25,
+    "FUTURES_DEFAULT_EV_HURDLE_BPS": 5.0,
+    "FUTURES_DEFAULT_TIME_BARRIER_H": 24.0,
+    "FUTURES_TMP_MD_CHAMPION_GATES_ENABLED": True,
+    "FUTURES_TMP_LAYER1_MEDIAN_LOG_TW_MIN": 0.0,
+    "FUTURES_TMP_LAYER1_POS_LEG_RATIO_MIN": 4.0 / 6.0,
+    "FUTURES_TMP_LAYER1_MAX_DD_PCT": 12.0,
+    "FUTURES_TMP_LAYER2_PSR_MIN": 0.95,
+    "FUTURES_TMP_LAYER2_MIN_TRADES_PER_LEG": 30,
+    # Layer 2 optional: median(leg_log_tw − stress·round_trip) > 0 (see tmp_md_champion).
+    "FUTURES_TMP_LAYER2_FRICTION_STRESS_ENABLED": True,
+    "FUTURES_TMP_LAYER2_FRICTION_STRESS_MULT": 1.5,
+    # Layer 3: every stability-seed AWF replay must pass Layer-1 checks when hard gate on.
+    "FUTURES_TMP_LAYER3_ALL_SEEDS_LAYER1": True,
+    "FUTURES_TMP_LAYER3_HARD_GATE": True,
+    "FUTURES_LEARNING_SEEDS": [42],
+    "FUTURES_STABILITY_SEEDS": [42, 7, 13, 21, 55],
+    "FUTURES_COORD_PHASE_TRIALS": {"A": 80, "B": 120, "C": 60},
+    "FUTURES_CHAMP_STABILITY_CV_MAX": 0.30,
+    # When True, unified gates fail if multi-seed AWF replay CV exceeds max (see key above).
+    "FUTURES_CHAMP_STABILITY_HARD_GATE": True,
+    "EMBARGO_BARS_BY_TF": {"1h": 168, "4h": 42, "1d": 7},
+    # Robust AWF scalar objective weights (see objective_ml.py).
+    # median(log_TW) - lambda*MAD - psi*DD_max (fixed lambda, psi).
+    "FUTURES_AWF_OBJ_LAMBDA_MAD": 1.0,
+    "FUTURES_AWF_OBJ_PSI_DD": 0.5,
+    # Phase-D pruning / auxiliary weights (robust AWF objective uses keys above).
+    "FUTURES_PHASE_D_W_PF_LONG": 1.5,
+    "FUTURES_PHASE_D_W_PF_SHORT": 1.5,
     "FUTURES_PHASE_D_PRUNE_MIN_POS_RATIO": 0.25,
     "FUTURES_AWF_NET_EDGE_MIN": 1.5,   # min EV/cost ratio (avg PnL / round-trip cost)
     # SPA bootstrap for post-run diagnostics (not used per-trial).
     "FUTURES_SPA_N_BOOTSTRAP": 2000,
     "FUTURES_SPA_P_VALUE_MAX": 0.10,   # SPA p-value ≤ 0.10 → reject H0: zero alpha
-    # CPCV legacy params (kept for cv_utils compat; not used in AWF objective).
-    "FUTURES_CPCV_N_BLOCKS": 8,
-    "FUTURES_CPCV_K_TEST": 3,
+    # Worst AWF leg log-TW floor (10th percentile / min-leg semantics in objective).
+    "FUTURES_AWF_P10_LOG_TW_MIN": -0.10,
     # Increased from 3: 5 WF OOS legs provide regime-diverse robustness verification.
     "FUTURES_WF_OOS_LEGS": 5,
     "FUTURES_ENSEMBLE_MAX_SIZE": 3,
     "FUTURES_META_ALLOC_WINDOW": 24,
     "FUTURES_META_ALLOC_ETA": 0.1,
     # R-6: per WF OOS leg, retrain systemic HMM on data strictly before leg start (GP frozen).
+    # Per AWF leg, rerun full universe ML (alpha + systemic HMM + fusion) at the leg train
+    # cutoff before slicing that leg's test window. Disable for faster iteration (single merge).
     "FUTURES_WF_HMM_LEG_REFIT": True,
     "FUTURES_WF_PHASE2_DRIFT_LOG": True,
     "FUTURES_WF_LEG_TW_MIN_ALL": 0.90,
@@ -149,37 +201,36 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     "FUTURES_ML_WF_REFIT_ENABLED": True,
     "FUTURES_ML_WF_REFIT_LEGS": 3,
     "FUTURES_PHASE3_HARD_GATE": True,
-    # gate1_dsr ∈ [0,1] from CPCV paths (Bailey & López de Prado style)
-    # AWF gate1_dsr = awf_pos_frac (fraction of legs with positive log-TW).
+    # gate1_dsr ∈ [0,1]: AWF positive-leg fraction proxy under MC-adjusted floor.
     # 0.40 → at least 2/5 legs positive (floor). MC adjustment raises to 0.48 at 400 trials.
     "FUTURES_ML_GATE1_DSR_MIN": 0.40,
-    # Distributional hardening: 10th percentile CPCV path must still survive.
-    # log(TW) > 0.0 ↔ TW > 1.0, so this is a direct worst-decile survival test.
-    # AWF worst-leg floor: ≥-0.05 means at most 5% log loss on worst single leg.
-    # Changed from -0.03 to -0.10 to accommodate v11 alpha volatility.
-    "FUTURES_CPCV_P10_LOG_TW_MIN": -0.10,
+    # Worst AWF leg log-TW floor already enforced via FUTURES_AWF_P10_LOG_TW_MIN.
     # Improvement 1: Friction-Aware EV Hurdle
     "FUTURES_ML_EV_HURDLE_RATIO": 0.0,
     # Improvement 2: Regime-Aware Dynamic Kelly Scaling
-    "FUTURES_HMM_DYNAMIC_KELLY_ENABLED": True,
+    "FUTURES_HMM_DYNAMIC_KELLY_ENABLED": False,
     # Improvement 3: PLGD Leg Stability Weight
     "FUTURES_PLGD_AWF_LEG_STABILITY_WEIGHT": 0.8,
     # Improvement 4: Friction-Aware Virtual Cost (bps per trade)
     "FUTURES_VIRTUAL_FRICTION_BPS": 3.5,
     # Phase-1 architecture refactor blocks (non-breaking defaults).
     "FUTURES_VALIDATION_CONFIG": {
-        "wf_n_legs": 10,
+        "wf_n_legs": 6,
         "wf_purge_bars": 24,
         "wf_min_positive_leg_ratio": 0.70,
         "wf_worst_leg_tw_floor": 0.95,
         "wf_mean_leg_tw_floor": 1.00,
         "wf_ergodicity_guideline_pct": 15.0,
         "wf_ergodicity_hard_gate_enabled": True,
+        "use_anchored_awf_geometry": True,
+        "wf_anchored_is_pool_frac": 0.70,
     },
+    # Phase-A: temporary gross cap (raise after PnL/cost tuning).
+    "FUTURES_PHASE_A_MAX_GROSS_EXPOSURE": 1.5,
     "FUTURES_PORTFOLIO_POLICY": {
         "target_ann_vol": 0.45,
-        "gross_exposure_cap": 1.20,
-        "per_symbol_cap": 0.25,
+        "gross_exposure_cap": 1.50,
+        "per_symbol_cap": 0.40,
         "top_k_long": 3,
         "top_k_short": 3,
         "entry_edge_threshold": 0.15,
@@ -194,12 +245,8 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     },
 }
 
-# Cross-Sectional Strategy Parameter Space
+# Single-pass execution: ATR period & stop mult are config/defaults (not this search grid).
 SIGNAL_PARAM_SPACE_FUTURES: dict[str, dict[str, Any]] = {
-    # Multi-session stability: lower bound ≥26 (matches ML Phase D discovery band).
-    "ATR_PERIOD": {"type": "int", "low": 26, "high": 40, "step": 2},
-    "ATR_MULT": {"type": "float", "low": 1.0, "high": 5.0, "step": 0.1},
-    "TRAIL_MULT": {"type": "float", "low": 1.5, "high": 6.5, "step": 0.5},
     "TP_MULT": {"type": "float", "low": 1.0, "high": 4.0, "step": 0.5},
 }
 
