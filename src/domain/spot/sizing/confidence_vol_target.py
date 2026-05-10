@@ -1,4 +1,4 @@
-"""Vol-target sizing scaled by normalized slot_rank_score (tmp.md confidence_vol_target)."""
+"""Vol-target sizing scaled by normalized slot_rank_score (confidence_vol_target)."""
 
 from __future__ import annotations
 

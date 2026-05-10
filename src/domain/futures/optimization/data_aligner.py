@@ -1,5 +1,6 @@
 """
-Futures Optuna objective: CPCV paths, Kelly-CVaR scalar, disk+memory signal cache.
+Futures Optuna objective: anchored walk-forward (AWF) legs, Kelly-CVaR scalar,
+disk+memory signal cache.
 """
 
 from __future__ import annotations
@@ -26,6 +27,7 @@ _FUTURES_2D_REQUIRED_COLS: Tuple[str, ...] = (
     "dyn_leverage",
     "xs_score_long",
     "xs_score_short",
+    "composer_sigma_bar",
     "hmm_prob_crisis",
     "hmm_hard_state",
     "hmm_modulator_long",
@@ -71,6 +73,7 @@ def _dataframe_to_symbol_arrays(sig_df: pd.DataFrame) -> Dict[str, np.ndarray]:
         "dyn_leverage": 5.0,
         "xs_score_long": 0.0,
         "xs_score_short": 0.0,
+        "composer_sigma_bar": 0.01,
         "hmm_prob_crisis": 0.0,
         "hmm_hard_state": 0.0,
         "hmm_modulator_long": 1.0,

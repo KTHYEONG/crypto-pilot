@@ -1,58 +1,99 @@
 {
   "project": "my-coin-traider",
-  "version": "6.9.0-alpha-v22-advanced",
+  "version": "7.0.0",
   "last_evolution_date": "2026-05-10",
-  "previous_state_hash": "v6.8.0",
+  "previous_state_hash": "v6.9.0-alpha-v22-advanced",
   "current_logic": {
-    "universe_selection": "CS_RANK based filtering (16-32 symbols)",
-    "regime_classification": "Organic 5-State HMM + Posterior EMA (Span 3) + Sticky 1100 + Student-t JAX.",
-    "alpha_generation": "LambdaRank (v22) + Symmetric Hybrid Labeling + Idiosyncratic Residuals + Exhaustion Cascade + Liquidity Vacuum + Session Seasonal Embeddings.",
-    "position_sizing": "Natural Risk-Adjusted Scaling ($mod = 0.5 / (RA * Var)$) + Dynamic Kelly Shrinkage. MDD-penalized log-returns.",
-    "execution_model": "Event-Driven Z-Score Hysteresis + Conviction-Weighted Allocation. [Pending] Asymmetric L/S Entry Thresholds.",
-    "optimization": "PLGD Objective Function (Compounding Maximization) + Chronological AWF legs (K=5).",
-    "risk_management": "HMM-Derived Variance Scaling + Dynamic Risk Aversion ($1 + RA_{crisis}P_{crisis} + RA_{bear}P_{bear}$)"
+    "universe_selection": "CS_RANK 필터링 (16-32 symbols). Anchor/Macro/Screener 3-tier 구조 유지.",
+    "regime_classification": "5-State Unsupervised TVTP-HMM (Student-t, JAX). Crisis calibration 활성화 (target 7% cap). Gravity penalty=700. CRISIS min-dur=24bars, BULL_CALM min-dur=120bars. 캐시 완전 제거(no-cache), 매 실행 재학습 (~2분).",
+    "alpha_generation": "LightGBM v6 (DART + Dynamic Labeling). OOS IC=0.0743, T-Stat=33.27. 18/18 components survived FDR+DSR gates.",
+    "signal_combination": "[NEW] signal_composer.py: 단일 선형 결합 μ = β_alpha·α + Σ_k p_k·β_regime,k − friction_buffer. HMM gate/multiply 직렬 적용 폐기. EV hurdle로 weak signal drop.",
+    "portfolio_construction": "[NEW] portfolio_constructor.py + portfolio_optimizer.py: Ledoit-Wolf cov (30d lookback) + fractional Kelly + vol-target 정규화 + QP constraint projection. DD-conditional scaling 1회만 적용.",
+    "execution_model": "[NEW] execution_sim.py: Single-pass execution. taker fee 단일 적용, scale-out fee 이중계상 제거. short borrow=0.06%/day 반영. stop=2.5×ATR(period=30 고정).",
+    "optimization": "[REDESIGNED] 3-Phase Coordinate Ascent: Phase A(portfolio,80) → B(signal,120) → C(execution,60) = 260 trials. 학습 seed=42(단일), 평가 seed=[42,7,13,21,55]. 목적함수: median(log_TW) − 1.0·MAD − 0.5·DD_max (PLGD 7-항 폐기).",
+    "validation": "[REDESIGNED] AWF 단일 표준: K=6 legs, IS-pool=70%, embargo timeframe-aware (1h:168bars, 4h:42bars). CPCV 완전 제거. OOS-only Platt calibration (IS 누설 차단).",
+    "champion_selection": "[NEW] 3-Layer Gate: L1(median>0, pos_leg≥4/6, DD≤12%) → L2(PSR≥0.95, friction stress×1.5, trades/leg≥30) → L3(5-seed stability CV≤0.30).",
+    "risk_management": "Signal Composer 내 friction_buffer=1.5×(fee+slip+funding). Crisis 비대칭 억제(FUTURES_CRISIS_LONG_MAG_SUPPRESS=1.0). HMM Dynamic Kelly 비활성화."
   },
   "key_parameters": {
     "base_timeframe": "4h",
-    "alpha_miner_version": "v6_lambdarank_v22_advanced",
-    "GP_FEATURE_SCHEMA_VERSION": "v22",
+    "alpha_miner_version": "v6_lightgbm_dart",
     "ALPHA_IC_OOS": "0.0743 (Elite)",
     "ALPHA_T_STAT": "33.27",
-    "new_alpha_features": [
-      "idiosyncratic_return_24h",
-      "exhaustion_cascade_score",
-      "price_impact_asymmetry",
-      "session_seasonality_sin/cos"
-    ],
-    "RA_CRISIS_RANGE": "[1.0, 5.0]",
-    "RA_BEAR_RANGE": "[0.0, 3.0]"
+    "hmm_states": 5,
+    "hmm_gravity_penalty": 700.0,
+    "hmm_sticky_weight": 1100.0,
+    "hmm_min_duration": "[120(BULL_CALM), 48(BULL_VOL), 24(BEAR), 12(CHOP), 24(CRISIS)]",
+    "hmm_crisis_calibration_target": 0.07,
+    "hmm_cache": "disabled",
+    "awf_k_legs": 6,
+    "awf_is_pool_frac": 0.70,
+    "awf_embargo_bars": {"1h": 168, "4h": 42, "1d": 7},
+    "optuna_total_trials": 260,
+    "optuna_phase_trials": {"A": 80, "B": 120, "C": 60},
+    "learning_seed": 42,
+    "stability_seeds": [42, 7, 13, 21, 55],
+    "stability_cv_max": 0.30,
+    "objective_lambda_mad": 1.0,
+    "objective_psi_dd": 0.5,
+    "portfolio_kappa_kelly": 0.35,
+    "portfolio_sigma_target": 0.45,
+    "atr_stop_mult": 2.5,
+    "atr_period_fixed": 30,
+    "short_borrow_daily": 0.0006
   },
   "current_bottleneck": {
-    "issue": "Symmetric Execution Blocking",
-    "mechanism": "Optuna optimizes for 0.15% MDD (Extreme Defense) due to symmetric entry thresholds. Short PF (3.82) is high, but Long PF (0.65) is choked by the same strict CS_Z hurdle.",
-    "evidence": "OOS IC 0.074 (High) vs CAGR -0.6% (Negative). PF 0.56 (v6.8.0-p5). MDD 0.15% is 'too safe'.",
-    "root_cause": "Unified CS_Z_SCORE_THRESHOLD suppresses Long alpha flow. PLGD objective over-penalizes marginal drawdown risk.",
-    "investigation_needed": "Refactor Optuna to suggest LONG_ENTRY_Z and SHORT_ENTRY_Z independently. Expand MAX_EXPOSURE to 2.0 to allow compounding to override friction."
+    "issue": "BEAR_TREND 과대분류 (46.1%)",
+    "mechanism": "HMM 재학습 후 BULL_CALM(43%→2.3%)이 BEAR_TREND(12.8%→46.1%)로 재배분됨. Crisis calibration(7% cap)은 수학적으로 올바르나, 적용 전 이미 HMM 수렴 자체가 BEAR-dominant solution으로 변경된 상태.",
+    "evidence": "Calibration 활성화/비활성화 무관하게 BULL_CALM=2.3% 유지. 초기화는 결정론적이나 optimizer 수렴 경로가 이전 캐시 결과와 상이.",
+    "root_cause": "HMM 재학습 시 BEAR state가 global min에 더 가까운 위치에 수렴. optax adamw 최적화 경로의 landscape 민감성.",
+    "investigation_needed": "JAX PRNGKey(42) 고정 추가 및 warm-start checkpoint 도입으로 수렴 안정화. 또는 BEAR_TREND 비율 기준 calibration 추가."
   },
   "best_achieved_metrics": {
-    "note": "v6.9.0 Alpha-v22 Initial Run",
+    "note": "v7.0.0 Architecture Redesign — HMM 개선 진행 중",
     "alpha_oos_ic": "0.0743",
-    "win_rate": "55.05%",
-    "oos_mdd": "0.15%",
-    "profit_factor": "0.56",
-    "total_trades": "111"
+    "hmm_crisis_pct": "6.4% (목표 7% 달성)",
+    "hmm_left_tail_capture": "60.8% (vs 이전 34.1%)",
+    "hmm_bear_trend_pct": "46.1% (비정상적으로 높음, 조사 필요)",
+    "hmm_training_time_no_cache": "~120s (2분)"
   },
   "failed_experiments": [
     {
       "name": "Symmetric_High_Barrier",
       "change": "Unified CS_Z_SCORE_THRESHOLD > 1.0",
       "outcome": "CHOKED (Long PF 0.65, CAGR -0.6%)",
-      "lesson": "Long alpha has lower signal-to-noise ratio than Short; requires more breathing room (lower hurdle) to reach positive CAGR."
+      "lesson": "Long alpha has lower signal-to-noise ratio than Short; requires more breathing room."
+    },
+    {
+      "name": "CRISIS_min_duration_6bars",
+      "change": "CRISIS min-duration=6bars (spiky crisis detection)",
+      "outcome": "CRISIS 25.2% (과대분류), 스파이크 노이즈 다수",
+      "lesson": "CRISIS 최소 지속시간은 최소 24bars(=4일) 이상이어야 안정적."
+    },
+    {
+      "name": "HMM_SourceFileHash_in_CacheKey",
+      "change": "CacheManager에 source_files 인자로 hmm_inferrer.py 포함",
+      "outcome": "주석 1줄 수정에도 캐시 무효화→비결정론적 재학습→완전히 다른 regime 분포",
+      "lesson": "소스파일 해시는 캐시 키에서 제거해야 함. 결정론적 시드 + version string이 올바른 접근."
+    },
+    {
+      "name": "HMM_CacheRemoval_BEAR_Surge",
+      "change": "캐시 제거 후 crisis calibration 활성화",
+      "outcome": "CRISIS 6.4%(달성)이나 BEAR_TREND 46.1%로 폭증, BULL_CALM 2.3%로 붕괴",
+      "lesson": "HMM 재학습 시 수렴 경로가 달라져 state 분포가 완전히 변동. JAX seed 고정이 필수."
+    },
+    {
+      "name": "BULL_CALM_MinDuration_84",
+      "change": "BULL_CALM min-duration 168→84",
+      "outcome": "BULL_CALM 43%→2.3% 붕괴, 효과 없음",
+      "lesson": "min-duration은 post-hoc lock-in이므로 Viterbi 경로 자체가 BULL_CALM 할당이 적으면 무의미."
     }
   ],
   "next_recommended_actions": [
-    "P5.A: Asymmetric Entry: Suggest separate LONG_THRESHOLD and SHORT_THRESHOLD in _suggest_ml_phase_d.",
-    "P5.B: Exposure Expansion: suggesting MAX_EXPOSURE [1.0, 2.0] to utilize the high 55% win rate.",
-    "P5.C: Objective Re-weighting: Increase weight of mu_log (compounding) in PLGD to favor growth over absolute safety."
+    "P7.A: JAX PRNGKey(42) 고정으로 HMM 결정론적 수렴 보장 (hmm_inferrer.py)",
+    "P7.B: BEAR_TREND 46.1% 원인 분석 — BEAR state logit offset calibration 도입 검토",
+    "P7.C: 5-7순위 HMM 개선 적용 — Risk scale 공식 교체(regime_factor), MOD_LONG_CEIL 1.5",
+    "P7.D: 전체 백테스팅 파이프라인(Signal Composer + Portfolio Constructor + AWF K=6) 통합 실행 검증",
+    "P7.E: LightGBM 학습 시간 최적화 (실제 병목 — triple-barrier micro-weighting 포함)"
   ]
 }

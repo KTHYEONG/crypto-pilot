@@ -232,7 +232,7 @@ def _symbol_ic_balance_ok(
 ) -> bool:
     """Penalize alpha driven by a single symbol.
 
-    Follows tmp.md 4-E guidelines for IC dispersion.
+    Follows institutional IC dispersion guidelines.
 
     Args:
         is_sub: In-sample panel data.
