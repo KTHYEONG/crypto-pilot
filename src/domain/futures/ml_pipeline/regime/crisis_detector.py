@@ -100,8 +100,8 @@ def detect_crisis(
     score = pd.Series(np.where(ret_z > 2.0, score * 0.2, np.where(ret > 0, score * 0.7, score)), index=idx)
 
     result = score.clip(0.0, 1.0)
-    _logger.info(
-        "Crisis detector (v9.2.0): %d bars with score>=0.35 (%.2f%% of total).",
+    _logger.debug(
+        "🚨 Crisis detector | score>=0.35: %d bars (%.1f%%)",
         int((result >= 0.35).sum()),
         100.0 * float((result >= 0.35).mean()),
     )

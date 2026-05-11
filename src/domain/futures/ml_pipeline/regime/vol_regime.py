@@ -278,7 +278,7 @@ class VolRegimeModel:
         """Pre-compile JAX functions with dummy tensors."""
         if self._warmed:
             return
-        _logger.info("VolRegimeModel: warming up JAX JIT cache …")
+        _logger.debug("⚙️  JAX JIT warmup (Vol)")
         dummy_r = jnp.zeros(MAX_LEN)
         dummy_m = jnp.zeros(MAX_LEN)
         dummy_z = jnp.zeros((MAX_LEN, _N_TVTP))
@@ -288,7 +288,7 @@ class VolRegimeModel:
         _ms_garch_forward(dummy_r, dummy_m, dummy_z, p)
         _train_vol_regime(dummy_r, dummy_m, dummy_z, p, os_init, 3, 1e-4, opt)
         self._warmed = True
-        _logger.info("VolRegimeModel: JIT warmup complete.")
+        _logger.debug("✅ JAX JIT ready (Vol)")
 
     def fit_predict(
         self,
