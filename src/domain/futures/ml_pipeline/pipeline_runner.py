@@ -261,43 +261,6 @@ def _is_kelly_per_semantic_state(
     return kelly_long, kelly_short
 
 
-def _precompute_hmm_risk_components(
-    market_probs: pd.DataFrame,
-    market_hmm_feats: pd.DataFrame | None,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Calculate market-wide risk components (multiplier & vol scalar) once."""
-    n = len(market_probs)
-    p_crisis = market_probs["hmm_prob_crisis"].to_numpy(dtype=np.float64)
-    p_bear = (
-        market_probs["hmm_prob_bear_trend"].to_numpy(dtype=np.float64)
-        if "hmm_prob_bear_trend" in market_probs.columns
-        else np.zeros(n)
-    )
-    p_bull = (
-        market_probs["hmm_prob_bull_calm"].to_numpy(dtype=np.float64)
-        if "hmm_prob_bull_calm" in market_probs.columns
-        else np.zeros(n)
-    )
-
-    if market_hmm_feats is not None and "macro_vol_24h" in market_hmm_feats.columns:
-        vol_ser = market_hmm_feats["macro_vol_24h"].reindex(market_probs["datetime"]).ffill().bfill().fillna(0.01)
-        vol_1h = vol_ser.to_numpy(dtype=np.float64)
-        expected_variance = (vol_1h * np.sqrt(8760))**2
-    else:
-        expected_variance = np.full(n, 0.25, dtype=np.float64)
-
-    pos_var = expected_variance[expected_variance > 0]
-    target_var = float(np.median(pos_var)) if pos_var.size > 0 else 0.25
-    # risk_multiplier: 1.0 (neutral), >1.0 (risk-on), <1.0 (risk-off)
-    risk_multiplier = 1.0 - (0.75 * p_crisis) - (0.4 * p_bear) + (0.2 * p_bull)
-    
-    # vol_scalar: Ratio of target variance to current expected variance
-    vol_scalar = target_var / (expected_variance + 1e-6)
-    vol_scalar_clipped = np.clip(vol_scalar, 0.5, 1.5)
-
-    return risk_multiplier, vol_scalar_clipped
-
-
 def _hmm_modulator_kelly_values(
     market_probs: pd.DataFrame,
     alpha_panel: pd.DataFrame,
@@ -755,7 +718,6 @@ def _step4_fusion_one_symbol(
         # [Optimization #11] Unify column drop logic
         df_1h = _drop_ml_columns(df_1h)
         
-        hmm_cols_ref = _sorted_hmm_prob_columns(market_probs)
         hmm_cols_ref = _sorted_hmm_prob_columns(market_probs)
         k_fb = len(hmm_cols_ref) if hmm_cols_ref else len(HMM_SEMANTIC_PROB_COLUMNS)
 
