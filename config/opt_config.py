@@ -73,7 +73,8 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     # Root cause: TOPSIS equal-weight dilutes DSR primacy; Pareto front drifts outside valid region.
     "FUTURES_NSGA2_POPULATION_SIZE": 30,
     # HMM stable regime (fixed hyperparameters; not in Optuna search space)
-    "FUTURES_HMM_K_STATES": 5,
+    # v9.0.0: 6 internal states (RECOVERY added); external output remapped to 5 states.
+    "FUTURES_HMM_K_STATES": 6,
     # Deployment floor: ≥0.45 (align HMM systemic prior with Phase D Kelly band).
     "FUTURES_HMM_KELLY_SHRINKAGE": 0.45,
     # Session 41 sweep: 0.65-0.68 heuristically best; 0.66 compromise vs 0.70 default.
@@ -83,6 +84,7 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     "FUTURES_HMM_STICKY_PENALTY_WEIGHT": 1100.0,
     # Min-duration (bars @ base TF) per state: [BULL_CALM, BULL_VOL_UP, BEAR, CHOP, CRISIS]
     # P0: was [1000,500,...] (~6w calm lock); shortened so regime errors recover in ~1w.
+    # Note: sticky labels applied on 5-state output (RECOVERY merged into BULL_VOL_UP).
     "FUTURES_HMM_OUTPUT_STICKY_MIN_DURATION": [120, 48, 24, 12, 24],
     # Slightly stronger sticky transitions → stabler systemic HMM under leg refit (Path C).
     "FUTURES_HMM_TRANSITION_PRIOR_ALPHA": 0.50,
