@@ -151,31 +151,23 @@ class SignalCalibrator:
             raw_b = float(np.mean(pos_rets) / np.mean(neg_rets))
             self.mean_b = float(np.clip(raw_b, 0.7, 2.0))
             if self.is_fitted:
-                _logger.info(
-                    "[SignalCalibrator] Fitted: coef=%.4f, intercept=%.4f, "
-                    "n_pos=%d, n_neg=%d, mean_b=%.4f (clipped from %.4f)",
+                _logger.debug(
+                    "📐 Platt coef=%.4f b=%.4f n=%d/%d",
                     self.model.coef_[0][0],
-                    self.model.intercept_[0],
+                    self.mean_b,
                     int(pos_rets.size),
                     int(neg_rets.size),
-                    self.mean_b,
-                    raw_b,
                 )
             else:
-                _logger.info(
-                    "[SignalCalibrator] n_pos=%d, n_neg=%d, mean_b=%.4f (clipped from %.4f); "
-                    "Platt not fitted",
+                _logger.debug(
+                    "📐 Platt skip (no fit) b=%.4f n=%d/%d",
+                    self.mean_b,
                     int(pos_rets.size),
                     int(neg_rets.size),
-                    self.mean_b,
-                    raw_b,
                 )
         else:
             self.mean_b = 1.05
-            _logger.info(
-                "[SignalCalibrator] insufficient pos/neg returns; keeping mean_b=%.4f default",
-                self.mean_b,
-            )
+            _logger.debug("📐 Platt skip (insufficient samples) b=%.4f default", self.mean_b)
 
     def predict_prob(self, alphas: np.ndarray) -> np.ndarray:
         """Predict win probability p."""
@@ -693,8 +685,8 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
                     cutoff_dt = pd.to_datetime(sym_df_ref["datetime"].iloc[idx_row], utc=True)
                     is_end_str = cutoff_dt.isoformat()
 
-                    _logger.info(
-                        "[ML_OPT] AWF leg %d/%d: ML is_end=%s | train [0,%d) bars | test [%d,%d)",
+                    _logger.debug(
+                        "[ML_OPT] AWF leg %d/%d: is_end=%s train=[0,%d) test=[%d,%d)",
                         leg_i + 1,
                         len(awf_legs),
                         is_end_str,
@@ -1419,10 +1411,9 @@ def _evaluate_awf_phase_d_aggregate(
         if not first_leg_done:
             first_leg_done = True
             if n_tr == 0:
-                _logger.info(
-                    "[ML_OPT%s] Zero trades on first leg. Params: %s. Diag: %s",
-                    f" Trial {trial.number}" if trial is not None else " replay",
-                    params,
+                _logger.debug(
+                    "⚠️  Zero trades | trial=%s diag=%s",
+                    trial.number if trial is not None else "replay",
                     _b_diag,
                 )
                 # [SMOKE FIX] If trials are few (smoke profile), return a bad score instead of pruning
