@@ -5,12 +5,12 @@ Architecture:
     Soft-scoring via additive rule triggers, clipped to [0, 1].
 
 Rules:
-    1. return < rolling_mean - 4*rolling_std (4-sigma event)            → +0.5
+    1. return < rolling_mean - 4*rolling_std (4-sigma event)            → +0.35
     2. macro_liq_proxy_24h > p99.5 (lifetime)                           → +0.25
-    3. macro_funding_mom_24h < p0.5 AND Layer1 HIGH_VOL > 0.7           → +0.3
+    3. macro_funding_mom_24h > p95 AND Layer1 HIGH_VOL > 0.6 AND ret<0  → +0.3
     4. vol_high > 0.8 AND return < rolling_mean - 2*rolling_std         → +0.15
-    5. vol_high > 0.6 AND dir_bear > 0.5  (NEW: early bear+vol signal)  → +0.25
-    6. return < rolling_mean - 3*rolling_std (3-sigma, broader net)     → +0.35
+    5. vol_high > 0.6 AND dir_bear > 0.5  (NEW: early bear+vol signal)  → +0.5
+    6. return < rolling_mean - 3*rolling_std (3-sigma, broader net)     → +0.25
 
 Threshold for hard activation: >= 0.25 (relaxed from 0.6).
 """
@@ -59,7 +59,7 @@ def detect_crisis(
 
     # ── Rule 1: 4-sigma return event ─────────────────────────────────────────
     rule1 = (ret < roll_mu - 4.0 * roll_std).astype(np.float64)
-    score += 0.5 * rule1
+    score += 0.35 * rule1
     _logger.debug("Crisis Rule-1 (4-sigma): %d bars triggered.", int(rule1.sum()))
 
     # ── Rule 2: extreme liquidation proxy ────────────────────────────────────
@@ -73,9 +73,9 @@ def detect_crisis(
     # ── Rule 3: funding extreme + HIGH_VOL posterior ──────────────────────────
     if "macro_funding_mom_24h" in features_df.columns and "vol_high" in vol_probs.columns:
         fund = features_df["macro_funding_mom_24h"].fillna(0.0)
-        p005 = float(fund.quantile(0.005))
-        vol_high_flag = vol_probs["vol_high"].reindex(idx).fillna(0.0) > 0.7
-        rule3 = ((fund < p005) & vol_high_flag).astype(np.float64)
+        p95 = float(fund.quantile(0.95))
+        vol_high_flag = vol_probs["vol_high"].reindex(idx).fillna(0.0) > 0.6
+        rule3 = ((fund > p95) & vol_high_flag & (ret < 0)).astype(np.float64)
         score += 0.3 * rule3
         _logger.debug("Crisis Rule-3 (fund+volhigh): %d bars triggered.", int(rule3.sum()))
 
@@ -98,13 +98,26 @@ def detect_crisis(
         vol_high_ser = vol_probs["vol_high"].reindex(idx).fillna(0.0)
         p_bear_ser = dir_probs["dir_bear"].reindex(idx).fillna(0.0)
         rule5 = ((vol_high_ser > 0.6) & (p_bear_ser > 0.5)).astype(np.float64)
-        score += 0.25 * rule5
+        score += 0.5 * rule5
         _logger.debug("Crisis Rule-5 (vol>0.6+bear>0.5): %d bars triggered.", int(rule5.sum()))
 
     # ── Rule 6 (NEW): 3-sigma return event (broader net than Rule 1) ─────────
     rule6 = (ret < roll_mu - 3.0 * roll_std).astype(np.float64)
-    score += 0.35 * rule6
+    score += 0.25 * rule6
     _logger.debug("Crisis Rule-6 (3-sigma): %d bars triggered.", int(rule6.sum()))
+
+    # ── Liquidity Decay (NEW for Step 2) ─────────────────────────────────────
+    if "macro_liq_proxy_24h" in features_df.columns:
+        liq = features_df["macro_liq_proxy_24h"].fillna(0.0)
+        p995 = float(liq.quantile(0.995))
+        # If massive liquidations happened, decay the crisis score by 50%
+        # because the 'washout' has likely occurred.
+        score = pd.Series(np.where(liq > p995, score * 0.5, score), index=idx)
+
+    # ── Rule 7: Positive Return Penalty (NEW for Step 3) ──────────────────────
+    # If the current bar is positive, we aggressively suppress the crisis score
+    # to avoid catching high-volatility pumps or V-recoveries.
+    score = pd.Series(np.where(ret > 0, score - 0.1, score), index=idx)
 
     result = score.clip(0.0, 1.0)
     _logger.info(

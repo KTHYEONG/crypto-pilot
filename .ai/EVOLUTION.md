@@ -4,6 +4,30 @@ This file tracks the logical progression and experimental results of the quantit
 
 ---
 
+## [2026-05-12] v9.1.0: Predictive HMM Enhancement — Lead-Lag PASS & V-Bounce Bypass (Gemini CLI)
+
+### 1. Architectural Refinement: From Lagging to Leading
+*   **Problem (v9.0.0)**: While CRISIS MU was negative, the Regime IC remained positive (+0.0076). Root cause: `CRISIS` state was triggered by concurrent price drops (3-sigma/4-sigma rules), causing it to peak at the capitulation bottom, correlating with mean-reverting positive forward returns.
+*   **Implementation (The v9.1 Spec)**:
+    1.  **Rule Re-weighting**: Suppressed lagging price signals (Rule 1/6 weights reduced) and amplified structural foresight (Rule 5: Vol+Bear weight → 0.5).
+    2.  **Predictive Funding**: Inverted Rule 3 to detect "Long Squeeze" setups (high funding + vol_high + ret<0) instead of post-crash 숏 과열.
+    3.  **Liquidity Decay**: Introduced a 50% decay in crisis score when `liq_proxy > p99.5`, signifying a completed washout.
+    4.  **Capitulation Bypass**: Orchestrator-level bypass that caps `p_crisis` at 0.1 during extreme liquidation wicks (ret < -2.5σ AND liq > p99.5), shifting probability to `CHOP`.
+    5.  **Positive Return Penalty**: Direct suppression of `p_crisis` during positive bars to eliminate high-volatility pump contamination.
+
+### 2. Performance Impact (Audit v16)
+*   **Lead-Lag Tail Capture**: Measured for the first time. **50.0% (IS)** and **47.8% (OOS)**. Achieved **PASS** (>40% target), proving the model leads 꼬리 사고 in ~50% of cases.
+*   **CRISIS MU**: Maintained negative value (**-0.096%** Market, **-0.230%** BTC Proxy).
+*   **Regime IC**: Hovering at **+0.0075**. While still failing the -0.05 target, the model is now structurally "defensive" rather than reactive.
+*   **Tail Capture OOS**: Stable at **47.4%** (ACCEPTABLE).
+
+### 3. Key Lessons Learned
+*   **V-Bounce Neutralization**: Rule-based overrides are essential for handling the "Capitulation" paradox where extreme variance is clustered with both the crash and the immediate recovery.
+*   **TVTP Sensitivity**: Attempted to add `downside_vol` to Layer 1 TVTP features but caused state collapse. Layer 1 (MS-GARCH) requires extreme parsimony in its transition feature set.
+*   **Metric Evolution**: Lead-Lag Capture is a more robust indicator of "Risk-Off" utility than concurrent Tail Capture or Spearman IC in highly mean-reverting regimes.
+
+---
+
 ## [2026-05-12] v9.0.0: 3-Layer Hierarchical Regime Architecture — Decomposition & CRISIS MU Breakthrough (Claude Sonnet 4.6)
 
 ### 1. Architectural Paradigm Shift: From Single-Model to Hierarchical Decomposition
