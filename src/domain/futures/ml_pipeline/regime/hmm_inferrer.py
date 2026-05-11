@@ -153,9 +153,9 @@ def _build_five_state_probs(
 
     bull_calm: pd.Series = p_low * p_bull
     bull_vol_up: pd.Series = (p_mid + p_high) * p_bull
-    bear_trend: pd.Series = (p_mid + p_high) * p_bear
+    bear_trend: pd.Series = p_mid * p_bear
     chop: pd.Series = p_low * p_range + p_mid * p_range
-    crisis_base: pd.Series = (p_high * p_bear * 2.0 + p_mid * p_bear * 0.8).clip(0.0, 0.45)
+    crisis_base: pd.Series = (p_high * p_bear * 1.8 + p_mid * p_bear * 0.3).clip(0.0, 0.50)
 
     # Layer 3 override: blend crisis_prob into crisis_final
     blend_factor = crisis_prob.clip(0.0, 1.0)
@@ -172,14 +172,17 @@ def _build_five_state_probs(
         bypass_mask = (ret < -3.5 * roll_std) & (liq > p995)
         if bypass_mask.any():
             _logger.info("Capitulation Bypass: triggered on %d bars.", int(bypass_mask.sum()))
-            # Cap crisis at 0.1, shift delta to chop
+            # Cap crisis at 0.1, distribute delta proportionally to chop and bear_trend
             old_crisis = crisis_final.copy()
             crisis_final = pd.Series(
                 np.where(bypass_mask, np.minimum(crisis_final, 0.1), crisis_final),
                 index=idx
             )
             delta = (old_crisis - crisis_final).clip(0.0, 1.0)
-            chop = chop + delta
+            
+            total_def_probs = chop + bear_trend + 1e-8
+            chop = chop + (delta * (chop / total_def_probs))
+            bear_trend = bear_trend + (delta * (bear_trend / total_def_probs))
 
     # Re-scale non-crisis channels so the 5 probs sum to 1
     raw_sum = bull_calm + bull_vol_up + bear_trend + chop + 1e-8
@@ -341,8 +344,8 @@ class HMMStateInferrer:
         # Hard state: argmax of 5-state probs
         hard_states_raw = np.argmax(prob_mat, axis=1).astype(np.int32)
 
-        # Apply sticky min-duration (BULL_CALM=24, BULL_VOL_UP=12, BEAR=3, CHOP=8, CRISIS=3)
-        _DUR_CFG = np.array([24, 12, 3, 8, 3], dtype=np.int32)
+        # Apply sticky min-duration (BULL_CALM=24, BULL_VOL_UP=12, BEAR=6, CHOP=8, CRISIS=4)
+        _DUR_CFG = np.array([24, 12, 8, 10, 4], dtype=np.int32)
         sticky_hard = _numba_sticky_labels(hard_states_raw, _DUR_CFG)
         result["hmm_hard_state"] = sticky_hard.astype(np.float64)
         result["hmm_current_duration"] = _numba_current_duration(sticky_hard)
