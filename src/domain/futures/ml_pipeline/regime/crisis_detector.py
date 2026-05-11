@@ -65,7 +65,11 @@ def detect_crisis(
         funding_z = (fund - fund_mu) / fund_std
         
         v_low = vol_probs["vol_low"].reindex(idx).fillna(0.0)
-        score += 0.35 * (v_low * expit(funding_z - 1.5))
+        v_mid = vol_probs["vol_mid"].reindex(idx).fillna(0.0)
+        # v_low: Higher threshold for extreme overheating
+        score += 0.30 * (v_low * expit(funding_z - 2.0))
+        # v_mid: Capture transitional overheating
+        score += 0.20 * (v_mid * expit(funding_z - 1.5))
 
     # ── Rule 2: Structural Bearish Transition (Weight 0.45) ───────────────────
     # Combination of high volatility and bearish direction.
