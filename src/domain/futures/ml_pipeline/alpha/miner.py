@@ -6,9 +6,10 @@ Replaces regression with 'Learning to Rank' for cross-sectional alpha mining.
 from __future__ import annotations
 
 import logging
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -32,24 +33,111 @@ _logger = logging.getLogger(__name__)
 THEME_GROUPS = {
     0: [  # Group 1: Trend/Momentum (Slots 00-04) + Vol-Adjusted
         "ret_1", "ret_3", "ret_6", "ret_12", "ret_24", 
-        "ma_dist_24", "ma_dist_168", "btc_trend_vol_adj_24h",
+        "ma_dist_24", "ma_dist_168", "ret_vol_adj_24",
         "realized_vol_yz_24", "orderflow_price_divergence",
         "taker_absorption_score"
     ],
     1: [  # Group 2: Volatility/Mean-Reversion (Slots 05-09)
-        "vol_ratio_24", "vol_ratio_168", "realized_vol_regime", 
-        "downside_vol_ratio", "cs_dispersion",
-        "dist_from_weekly_vwap", "macro_vol_regime_shift",
-        "liq_intensity_proxy", "capitulation_proxy"
+        "vol_ratio_24", "vol_ratio_168", "macro_vol_regime_shift", 
+        "cs_dispersion", "dist_from_weekly_vwap",
+        "liq_intensity_proxy", "capitulation_proxy", "tail_risk_24"
     ],
     2: [  # Group 3: Structural/Regime (Slots 10-14)
         "btc_beta_x_bull_trend",
         "realized_vol_x_crisis",
         "funding_x_bear_trend",
-        "volume_momentum_24h",
-        "funding_level",
+        "macro_trend_24h",
+        "funding_rate",
     ]
 }
+
+
+def _train_ranker_slot(
+    slot_idx: int,
+    slots_per_theme: int,
+    work_df: pd.DataFrame,
+    y_labels: np.ndarray,
+    is_mask: np.ndarray,
+    sample_weights_all: np.ndarray,
+    is_group_sizes: np.ndarray,
+    n_jobs: int = 1,
+) -> Tuple[int, Optional[LGBMRanker], list[str], np.ndarray]:
+    """Helper for parallel Ranker training."""
+    theme_idx = min(2, slot_idx // slots_per_theme)
+    base_feats = THEME_GROUPS[theme_idx]
+    if theme_idx == 1:
+        feat_cols = list(dict.fromkeys(base_feats + HMM_COLS))
+    else:
+        feat_cols = list(dict.fromkeys(base_feats))
+
+    feat_cols = [c for c in feat_cols if c in work_df.columns]
+    
+    if not feat_cols:
+        return slot_idx, None, [], np.full(len(work_df), 0.5)
+
+    X = work_df[feat_cols].replace([np.inf, -np.inf], np.nan).fillna(0.0).values
+
+    X_is = X[is_mask]
+    y_is = y_labels[is_mask]
+    w_is = sample_weights_all[is_mask]
+
+    model = LGBMRanker(
+        boosting_type="dart",
+        objective="lambdarank",
+        metric="ndcg",
+        eval_at=[1, 3],
+        n_estimators=100,
+        learning_rate=0.05,
+        num_leaves=31,
+        max_depth=-1,
+        random_state=42 + slot_idx,
+        deterministic=True,
+        n_jobs=n_jobs,
+        importance_type="gain",
+        verbosity=-1,
+        drop_rate=0.1,
+        skip_drop=0.5,
+    )
+
+    model.fit(X_is, y_is, group=is_group_sizes, sample_weight=w_is)
+    raw_scores = model.predict(X)
+    return slot_idx, model, feat_cols, raw_scores
+
+
+def _train_regressor_slot(
+    slot_idx: int,
+    feat_cols: list[str],
+    work_df: pd.DataFrame,
+    y_mag_vals: np.ndarray,
+    is_mask: np.ndarray,
+    mag_finite: np.ndarray,
+    sample_weights_all: np.ndarray,
+    n_jobs: int = 1,
+) -> Tuple[int, Optional[LGBMRegressor], np.ndarray]:
+    """Helper for parallel Regressor training."""
+    if not feat_cols:
+        return slot_idx, None, np.zeros(len(work_df))
+
+    X = work_df[feat_cols].replace([np.inf, -np.inf], np.nan).fillna(0.0).values
+    train_mag = is_mask & mag_finite
+    if int(train_mag.sum()) < 200:
+        return slot_idx, None, np.zeros(len(work_df))
+
+    X_mag = X[train_mag]
+    y_mag = y_mag_vals[train_mag]
+    w_mag = sample_weights_all[train_mag]
+
+    reg = LGBMRegressor(
+        objective="regression_l1",
+        n_estimators=100,
+        learning_rate=0.05,
+        random_state=42 + slot_idx,
+        n_jobs=n_jobs,
+        verbosity=-1,
+    )
+    reg.fit(X_mag, y_mag, sample_weight=w_mag)
+    mag_raw = reg.predict(X)
+    return slot_idx, reg, mag_raw
 
 
 # Bars ahead for magnitude targets / hybrid scaling (stacked OHLC timeline).
@@ -61,10 +149,14 @@ class MLAlphaMiner:
     """Miner for evolving cross-sectional alpha components using LightGBM LambdaRank."""
 
     # Total rank heads = slots_per_theme × 3 thematic buckets (see THEME_GROUPS).
-    n_features_to_select: int = 15
     slots_per_theme: int = 5
+    n_features_to_select: int = 15
     target_horizons: tuple[int, ...] = (3, 6, 12, 24)
     n_jobs: int = 4
+
+    def __post_init__(self):
+        # Ensure n_features_to_select is perfectly aligned with thematic themes
+        self.n_features_to_select = self.slots_per_theme * 3
 
     # Internal state
     _models: dict[int, LGBMRanker] = field(default_factory=dict, init=False)
@@ -72,6 +164,7 @@ class MLAlphaMiner:
     _feature_sets: dict[int, list[str]] = field(default_factory=dict, init=False)
     # IS Spearman IC^2 weights per slot (matches mine_alphas_cs ensemble → transform_cs)
     _ic_weights: dict[int, float] = field(default_factory=dict, init=False, repr=False)
+    ic_by_slot: dict[str, float] = field(default_factory=dict, init=False)
 
     def _prepare_labels(
         self, 
@@ -93,33 +186,29 @@ class MLAlphaMiner:
         # Calculate friction threshold in decimal (e.g. 3.5 bps = 0.00035)
         friction = friction_bps / 10000.0
         
-        # Scale rank-target [-1, 1] to [0, 1]
-        t = (target / 2.0) + 0.5
+        # Convert to numpy for faster vectorized operations
+        t = (target.to_numpy() / 2.0) + 0.5
+        ret = raw_returns.to_numpy() if hasattr(raw_returns, "to_numpy") else raw_returns
+        atr = atr_24h_pct.to_numpy() if hasattr(atr_24h_pct, "to_numpy") else atr_24h_pct
         
-        if raw_returns is None:
-            # Fallback symmetric ranking logic
+        friction = friction_bps / 10000.0
+        labels = np.ones(len(t), dtype=np.int32)
+
+        if ret is None:
             labels[t > 0.85] = 3
             labels[t < 0.15] = 0
-            labels[(t > 0.60) & (labels != 3)] = 2
+            labels[(t > 0.60) & (labels == 1)] = 2
         else:
-            # Calculate dynamic hurdles
-            if atr_24h_pct is not None:
-                hurdle_long = np.maximum(1.5 * friction, 0.4 * atr_24h_pct.to_numpy())
-                hurdle_short = np.maximum(1.5 * friction, 0.4 * atr_24h_pct.to_numpy())
-            else:
-                hurdle_long = 1.5 * friction
-                hurdle_short = 1.5 * friction
-
-            # Label 3: Strong Long (Top ranks AND > hurdle_long)
-            labels[(t > 0.85) & (raw_returns > hurdle_long)] = 3
+            hurdle = np.maximum(1.5 * friction, 0.4 * atr) if atr is not None else 1.5 * friction
             
-            # Label 0: Strong Short (Bottom ranks AND < -hurdle_short)
-            labels[(t < 0.15) & (raw_returns < -hurdle_short)] = 0
+            # [Optimization #9] Vectorized Conditional Assignment
+            is_strong_long = (t > 0.85) & (ret > hurdle)
+            is_strong_short = (t < 0.15) & (ret < -hurdle)
+            is_mild_long = (~is_strong_long) & (~is_strong_short) & (t > 0.60) & (ret > friction)
             
-            # Label 2: Mild Long (Above median ranks AND > 1.0 * friction)
-            labels[(labels == 1) & (t > 0.60) & (raw_returns > 1.0 * friction)] = 2
-            
-            # Label 1: Default/Chop (All others)
+            labels[is_strong_long] = 3
+            labels[is_strong_short] = 0
+            labels[is_mild_long] = 2
         
         return labels
 
@@ -176,19 +265,23 @@ class MLAlphaMiner:
             work_df = add_macro_interaction_features(work_df)
             
             # [Friction-Aware] Calculate 6h forward returns for labeling hurdle
-            # Use unstacked approach to ensure no cross-symbol leakage
+            # [Optimization #8] Cache unstacked DataFrames to avoid redundant shift/clip operations
             close_wide = work_df["close"].unstack(level="symbol")
-            fwd_ret_6 = np.log(close_wide.shift(-6) / close_wide).stack(future_stack=True).reindex(work_df.index).fillna(0.0)
-            fwd_log_mag_horizon = np.log(close_wide.shift(-_MAG_HORIZON_BARS) / close_wide.clip(lower=1e-12))
+            close_clipped = close_wide.clip(lower=1e-12)
+            
+            fwd_ret_6 = np.log(close_wide.shift(-6) / close_clipped).stack(future_stack=True).reindex(work_df.index).fillna(0.0)
+            fwd_log_mag_horizon = np.log(close_wide.shift(-_MAG_HORIZON_BARS) / close_clipped)
             
             # [NEW] Dynamic Hurdle components: ATR(24) / Price
             high_wide = work_df["high"].unstack(level="symbol")
             low_wide = work_df["low"].unstack(level="symbol")
+            
+            close_shifted_1 = close_wide.shift(1)
             tr_wide = np.maximum(high_wide - low_wide, 
-                                np.maximum((high_wide - close_wide.shift(1)).abs(), 
-                                           (low_wide - close_wide.shift(1)).abs()))
+                                np.maximum((high_wide - close_shifted_1).abs(), 
+                                           (low_wide - close_shifted_1).abs()))
             atr_24_wide = tr_wide.rolling(24).mean()
-            atr_24_pct_wide = atr_24_wide / close_wide.clip(lower=1e-12)
+            atr_24_pct_wide = atr_24_wide / close_clipped
             atr_24_pct = atr_24_pct_wide.stack(future_stack=True).reindex(work_df.index).fillna(0.0)
 
             y_mag_h = (
@@ -225,101 +318,76 @@ class MLAlphaMiner:
             # Normalize weights to mean 1.0 to maintain learning rate stability
             sample_weights_all = raw_weights / (raw_weights.mean() + 1e-12)
 
-            # P2.F rollback: systemic HMM raw probs only with Vol/MR theme (helps long IC vs all-slots injection).
             slots_df = pd.DataFrame(index=work_df.index)
             
-            for slot_idx in range(self.n_features_to_select):
-                theme_idx = min(2, slot_idx // self.slots_per_theme)
-                base_feats = THEME_GROUPS[theme_idx]
-                if theme_idx == 1:
-                    feat_cols = list(dict.fromkeys(base_feats + HMM_COLS))
-                else:
-                    feat_cols = list(dict.fromkeys(base_feats))
+            # [NEW] Parallelized Slot Training (Ranker)
+            is_group_sizes = work_df[is_mask].groupby("datetime").size().to_numpy()
+            
+            # Using ThreadPoolExecutor as LGBM releases GIL and to avoid fork/spawn overhead
+            # Limit workers to avoid memory exhaustion; each LGBM process uses multiple threads
+            max_workers = min(self.n_features_to_select, 6)
+            
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = [
+                    executor.submit(
+                        _train_ranker_slot,
+                        i,
+                        self.slots_per_theme,
+                        work_df,
+                        y_labels,
+                        is_mask,
+                        sample_weights_all,
+                        is_group_sizes,
+                        n_jobs=max(1, self.n_jobs // 2)
+                    )
+                    for i in range(self.n_features_to_select)
+                ]
                 
-                feat_cols = [c for c in feat_cols if c in work_df.columns]
-                
-                self._feature_sets[slot_idx] = feat_cols
-                
-                X = work_df[feat_cols].replace([np.inf, -np.inf], np.nan).fillna(0.0).values
-                y = y_labels
+                for future in futures:
+                    slot_idx, model, feat_cols, raw_scores = future.result()
+                    if model is not None:
+                        self._models[slot_idx] = model
+                        self._feature_sets[slot_idx] = feat_cols
+                        
+                        scores_ser = pd.Series(raw_scores, index=work_df.index)
+                        unstacked = scores_ser.unstack(level="symbol")
+                        ranked = unstacked.rank(axis=1, pct=True)
+                        slots_df[f"ml_alpha_{slot_idx:02d}"] = ranked.stack(future_stack=True).reindex(work_df.index).fillna(0.5)
+                    else:
+                        slots_df[f"ml_alpha_{slot_idx:02d}"] = 0.5
 
-                # Filter to In-Sample for training
-                X_is = X[is_mask]
-                y_is = y[is_mask]
-                w_is = sample_weights_all[is_mask]
-                
-                # For LambdaRank, we need to recalculate group sizes for IS data
-                is_df = work_df[is_mask]
-                is_group_sizes = is_df.groupby("datetime").size().to_numpy()
-
-                # B-1: DART Booster for better generalization
-                model = LGBMRanker(
-                    boosting_type="dart",
-                    objective="lambdarank",
-                    metric="ndcg",
-                    eval_at=[1, 3],
-                    n_estimators=100,
-                    learning_rate=0.05,
-                    num_leaves=31,
-                    max_depth=-1,
-                    random_state=42 + slot_idx,
-                    deterministic=True,
-                    n_jobs=self.n_jobs,
-                    importance_type="gain",
-                    verbosity=-1,
-                    drop_rate=0.1,
-                    skip_drop=0.5
-                )
-                
-                model.fit(
-                    X_is, y_is,
-                    group=is_group_sizes,
-                    sample_weight=w_is
-                )
-                
-                self._models[slot_idx] = model
-                
-                # Generate full-period predictions (In-Sample + Out-of-Sample)
-                raw_scores = model.predict(X)
-                
-                # Rank-transform raw scores cross-sectionally to [0, 1]
-                scores_ser = pd.Series(raw_scores, index=work_df.index)
-                unstacked = scores_ser.unstack(level="symbol")
-                ranked = unstacked.rank(axis=1, pct=True)
-                slots_df[f"ml_alpha_{slot_idx:02d}"] = ranked.stack(future_stack=True).reindex(work_df.index).fillna(0.5)
-
-            # P2.E: per-slot magnitude (LGBM L1 regression) × cross-period Z-score × hybrid long alpha
+            # [NEW] Parallelized Magnitude Training (Regressor)
             y_mag_vals = y_mag_h.to_numpy(dtype=np.float64)
             mag_finite = np.isfinite(y_mag_vals) & (y_mag_vals >= 0)
             self._mag_models.clear()
-            for slot_idx in range(self.n_features_to_select):
-                mag_col = f"ml_mag_{slot_idx:02d}"
-                feat_cols = self._feature_sets[slot_idx]
-                if not feat_cols:
-                    slots_df[mag_col] = 0.0
-                    continue
-                X = work_df[feat_cols].replace([np.inf, -np.inf], np.nan).fillna(0.0).values
-                train_mag = is_mask & mag_finite
-                min_mag_rows = 200
-                if int(train_mag.sum()) < min_mag_rows:
-                    slots_df[mag_col] = 0.0
-                    continue
-                X_mag = X[train_mag]
-                y_mag = y_mag_vals[train_mag]
-                w_mag = sample_weights_all[train_mag]
-                reg = LGBMRegressor(
-                    objective="regression_l1",
-                    n_estimators=100,
-                    learning_rate=0.05,
-                    random_state=42 + slot_idx,
-                    n_jobs=self.n_jobs,
-                    verbosity=-1,
-                )
-                reg.fit(X_mag, y_mag, sample_weight=w_mag)
-                self._mag_models[slot_idx] = reg
-                mag_raw = reg.predict(X)
-                mu_m, sig_m = float(np.mean(mag_raw)), float(np.std(mag_raw) + 1e-9)
-                slots_df[mag_col] = np.clip((mag_raw - mu_m) / sig_m, -3.0, 3.0)
+            
+            # Using ThreadPoolExecutor for parallel Magnitude training
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = [
+                    executor.submit(
+                        _train_regressor_slot,
+                        i,
+                        self._feature_sets.get(i, []),
+                        work_df,
+                        y_mag_vals,
+                        is_mask,
+                        mag_finite,
+                        sample_weights_all,
+                        n_jobs=max(1, self.n_jobs // 2)
+                    )
+                    for i in range(self.n_features_to_select)
+                ]
+                
+                for future in futures:
+                    slot_idx, reg, mag_raw = future.result()
+                    mag_col = f"ml_mag_{slot_idx:02d}"
+                    if reg is not None:
+                        self._mag_models[slot_idx] = reg
+                        mu_m, sig_m = float(np.mean(mag_raw)), float(np.std(mag_raw) + 1e-9)
+                        slots_df[mag_col] = np.clip((mag_raw - mu_m) / sig_m, -3.0, 3.0)
+                    else:
+                        slots_df[mag_col] = 0.0
 
             raw_alpha_df = slots_df
             
@@ -339,41 +407,33 @@ class MLAlphaMiner:
             require_regime_gate=bool(filter_opts.get("require_regime_gate", True)),
         )
 
-        # B-2: IC-Weighted Ensemble (instead of simple mean)
+        # [Optimization #10] Reuse IC-Weighted Ensemble calculated inside filter_alpha_components
+        # FDR/DSR filter already calculates Spearman IC for FDR control; we reuse it for ensembling.
         surviving = [c for c in alpha_df_all.columns if c.startswith("ml_alpha_") and alpha_df_all[c].std() > 1e-6]
+        
         if surviving:
-            weights = []
-            is_sub = panel_df.loc[alpha_df_all.index]
-            if is_end_date:
-                cut = pd.to_datetime(is_end_date, utc=True)
-                is_mask_ens = is_sub.index.get_level_values("datetime") < cut
-                is_sub = is_sub[is_mask_ens]
-                alpha_is = alpha_df_all[is_mask_ens]
-            else:
-                alpha_is = alpha_df_all
+            ic_map = filt_meta.get("ic_by_slot", {})
+            if not ic_map:
+                # Fallback if filt_meta doesn't have it (should not happen with new component_filter)
+                is_sub = panel_df.loc[alpha_df_all.index]
+                if is_end_date:
+                    cut = pd.to_datetime(is_end_date, utc=True)
+                    is_sub = is_sub[is_sub.index.get_level_values("datetime") < cut]
+                ic_map = {c: is_sub["target"].corr(alpha_df_all.loc[is_sub.index, c], method="spearman") for c in surviving}
 
-            for c in surviving:
-                ic = is_sub["target"].corr(alpha_is[c], method="spearman")
-                weights.append(max(0.0, ic) ** 2)
-
+            weights = [max(0.0, ic_map.get(c, 0.0)) ** 2 for c in surviving]
             w_arr = np.array(weights)
+            
             if w_arr.sum() > 1e-9:
                 w_norm = w_arr / w_arr.sum()
-                _logger.info("Ensembling %d components with IC weights: %s", len(surviving), w_norm)
+                _logger.info("Ensembling %d components with reused IC weights: %s", len(surviving), w_norm)
                 long_rank = (alpha_df_all[surviving] * w_norm).sum(axis=1)
                 self._ic_weights = {int(c.split("_")[2]): float(w) for c, w in zip(surviving, w_norm)}
             else:
                 long_rank = alpha_df_all[surviving].mean(axis=1)
-                eq = 1.0 / float(len(surviving))
-                self._ic_weights = {int(c.split("_")[2]): eq for c in surviving}
+                self._ic_weights = {int(c.split("_")[2]): 1.0 / len(surviving) for c in surviving}
 
-            mag_surv_cols: list[str] = []
-            for c in surviving:
-                suf = c.rsplit("_", 1)[-1]
-                mc = f"ml_mag_{suf}"
-                if mc in alpha_df_all.columns:
-                    mag_surv_cols.append(mc)
-
+            mag_surv_cols = [f"ml_mag_{c.split('_')[2]}" for c in surviving if f"ml_mag_{c.split('_')[2]}" in alpha_df_all.columns]
             if mag_surv_cols:
                 mag_blend = alpha_df_all[mag_surv_cols].mean(axis=1)
                 alpha_df_all["ml_alpha_long"] = np.clip(long_rank * (1.0 + 0.3 * mag_blend), 0.02, 0.98)

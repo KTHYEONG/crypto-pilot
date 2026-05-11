@@ -19,7 +19,6 @@ from src.domain.futures.data_loader import (
     merge_funding_into_ohlcv,
     merge_metrics_into_ohlcv,
 )
-from src.domain.futures.ml_pipeline.alpha.gp_availability import is_deap_available
 from src.domain.futures.ml_pipeline.alpha.miner import MLAlphaMiner
 from src.domain.futures.ml_pipeline.features.cross_sectional import CrossSectionalPipelineUtils
 from src.domain.futures.ml_pipeline.features.engineering import (
@@ -59,6 +58,25 @@ def _sorted_hmm_prob_columns(df: pd.DataFrame) -> list[str]:
         if str(c).startswith("hmm_prob_") and str(c).split("_")[-1].isdigit()
     ]
     return sorted(legacy, key=lambda x: int(str(x).split("_")[-1]))
+
+
+def _drop_ml_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Unify removal of existing ML/HMM columns to prevent merge collisions."""
+    ml_reserved = [
+        "ml_alpha_00", "ml_alpha_long", "ml_alpha_short",
+        "hmm_modulator_long", "hmm_modulator_short",
+        "slot_rank_score", "xs_score_long", "xs_score_short",
+        "ml_calib_prob", "ml_calib_prob_long", "ml_calib_prob_short",
+        "hmm_prob_bull_trend", "hmm_prob_bear_trend", "hmm_prob_chop", "hmm_prob_crisis"
+    ]
+    # Drop reserved patterns and any column starting with hmm_
+    to_drop = [
+        c for c in df.columns 
+        if any(p in str(c) for p in ml_reserved) or str(c).startswith("hmm_")
+    ]
+    if to_drop:
+        return df.drop(columns=to_drop)
+    return df
 
 
 _META_EXTRA_FEATS: tuple[str, ...] = (
@@ -243,6 +261,43 @@ def _is_kelly_per_semantic_state(
     return kelly_long, kelly_short
 
 
+def _precompute_hmm_risk_components(
+    market_probs: pd.DataFrame,
+    market_hmm_feats: pd.DataFrame | None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Calculate market-wide risk components (multiplier & vol scalar) once."""
+    n = len(market_probs)
+    p_crisis = market_probs["hmm_prob_crisis"].to_numpy(dtype=np.float64)
+    p_bear = (
+        market_probs["hmm_prob_bear_trend"].to_numpy(dtype=np.float64)
+        if "hmm_prob_bear_trend" in market_probs.columns
+        else np.zeros(n)
+    )
+    p_bull = (
+        market_probs["hmm_prob_bull_calm"].to_numpy(dtype=np.float64)
+        if "hmm_prob_bull_calm" in market_probs.columns
+        else np.zeros(n)
+    )
+
+    if market_hmm_feats is not None and "macro_vol_24h" in market_hmm_feats.columns:
+        vol_ser = market_hmm_feats["macro_vol_24h"].reindex(market_probs["datetime"]).ffill().bfill().fillna(0.01)
+        vol_1h = vol_ser.to_numpy(dtype=np.float64)
+        expected_variance = (vol_1h * np.sqrt(8760))**2
+    else:
+        expected_variance = np.full(n, 0.25, dtype=np.float64)
+
+    pos_var = expected_variance[expected_variance > 0]
+    target_var = float(np.median(pos_var)) if pos_var.size > 0 else 0.25
+    # risk_multiplier: 1.0 (neutral), >1.0 (risk-on), <1.0 (risk-off)
+    risk_multiplier = 1.0 - (0.75 * p_crisis) - (0.4 * p_bear) + (0.2 * p_bull)
+    
+    # vol_scalar: Ratio of target variance to current expected variance
+    vol_scalar = target_var / (expected_variance + 1e-6)
+    vol_scalar_clipped = np.clip(vol_scalar, 0.5, 1.5)
+
+    return risk_multiplier, vol_scalar_clipped
+
+
 def _hmm_modulator_kelly_values(
     market_probs: pd.DataFrame,
     alpha_panel: pd.DataFrame,
@@ -251,6 +306,7 @@ def _hmm_modulator_kelly_values(
     shrink: float,
     crisis_thr: float,
     market_hmm_feats: pd.DataFrame | None = None,
+    precomputed_risk: tuple[np.ndarray, np.ndarray] | None = None,
 ) -> pd.DataFrame:
     """Posterior-weighted asymmetric modulators from IS Kelly; fwd returns from ``price_df_1h``."""
     cols = _sorted_hmm_prob_columns(market_probs)
@@ -286,42 +342,16 @@ def _hmm_modulator_kelly_values(
     k_long, k_short = _is_kelly_per_semantic_state(p_mat, fwd_ret, is_mask, k_states, cols)
 
     # [REFACTORED] Natural Risk-Adjusted Scaling (Phase 8) - Components for Tunable Optimizer
-    # 1. Base directional modulators from IS Kelly
     mod_long_base = 1.0 + float(shrink) * (p_mat @ k_long)
     mod_short_base = 1.0 + float(shrink) * (p_mat @ k_short)
 
-    # 2. Risk-Aversion components (Phase 9: Centered Risk Multiplier)
-    p_crisis = merged["hmm_prob_crisis"].to_numpy(dtype=np.float64)
-    p_bear = (
-        merged["hmm_prob_bear_trend"].to_numpy(dtype=np.float64)
-        if "hmm_prob_bear_trend" in merged.columns
-        else np.zeros(n)
-    )
-    p_bull = (
-        merged["hmm_prob_bull_calm"].to_numpy(dtype=np.float64)
-        if "hmm_prob_bull_calm" in merged.columns
-        else np.zeros(n)
-    )
-
-    # 3. HMM-derived market variance (Annualized)
-    if market_hmm_feats is not None and "macro_vol_24h" in market_hmm_feats.columns:
-        vol_ser = market_hmm_feats["macro_vol_24h"].reindex(merged["datetime"]).ffill().bfill().fillna(0.01)
-        vol_1h = vol_ser.to_numpy(dtype=np.float64)
-        expected_variance = (vol_1h * np.sqrt(8760))**2
+    if precomputed_risk is not None:
+        risk_multiplier, vol_scalar_clipped = precomputed_risk
     else:
-        expected_variance = np.full(n, 0.25, dtype=np.float64)
-
-    # Target variance for normalization
-    pos_var = expected_variance[expected_variance > 0]
-    target_var = float(np.median(pos_var)) if pos_var.size > 0 else 0.25
-
-    # 4. Redesigned Modulator Logic (Centered on 1.0)
-    # risk_multiplier: 1.0 (neutral), >1.0 (risk-on), <1.0 (risk-off)
-    risk_multiplier = 1.0 - (0.75 * p_crisis) - (0.4 * p_bear) + (0.2 * p_bull)
-    
-    # vol_scalar: Ratio of target variance to current expected variance
-    vol_scalar = target_var / (expected_variance + 1e-6)
-    vol_scalar_clipped = np.clip(vol_scalar, 0.5, 1.5)
+        # Fallback to local calculation if not provided
+        risk_multiplier, vol_scalar_clipped = _precompute_hmm_risk_components(
+            market_probs, market_hmm_feats
+        )
 
     mod_long = np.clip(mod_long_base * risk_multiplier * vol_scalar_clipped, 0.1, 2.5).astype(np.float64)
     mod_short = np.clip(mod_short_base * risk_multiplier * vol_scalar_clipped, 0.1, 2.5).astype(np.float64)
@@ -344,11 +374,45 @@ def _hmm_modulator_kelly_values(
         "hmm_modulator_short": mod_short,
         "hmm_modulator_base_long": mod_long_base,
         "hmm_modulator_base_short": mod_short_base,
-        "expected_variance": expected_variance,
-        "target_variance": np.full(n, target_var),
         "btc_trend_vol_adj_24h": trend_24h,
     })
 
+
+def _precompute_hmm_risk_components(
+    market_probs: pd.DataFrame,
+    market_hmm_feats: pd.DataFrame | None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Calculate market-wide risk components (multiplier & vol scalar) once."""
+    n = len(market_probs)
+    p_crisis = market_probs["hmm_prob_crisis"].to_numpy(dtype=np.float64)
+    p_bear = (
+        market_probs["hmm_prob_bear_trend"].to_numpy(dtype=np.float64)
+        if "hmm_prob_bear_trend" in market_probs.columns
+        else np.zeros(n)
+    )
+    p_bull = (
+        market_probs["hmm_prob_bull_calm"].to_numpy(dtype=np.float64)
+        if "hmm_prob_bull_calm" in market_probs.columns
+        else np.zeros(n)
+    )
+
+    if market_hmm_feats is not None and "macro_vol_24h" in market_hmm_feats.columns:
+        vol_ser = market_hmm_feats["macro_vol_24h"].reindex(market_probs["datetime"]).ffill().bfill().fillna(0.01)
+        vol_1h = vol_ser.to_numpy(dtype=np.float64)
+        expected_variance = (vol_1h * np.sqrt(8760))**2
+    else:
+        expected_variance = np.full(n, 0.25, dtype=np.float64)
+
+    pos_var = expected_variance[expected_variance > 0]
+    target_var = float(np.median(pos_var)) if pos_var.size > 0 else 0.25
+    # risk_multiplier: 1.0 (neutral), >1.0 (risk-on), <1.0 (risk-off)
+    risk_multiplier = 1.0 - (0.75 * p_crisis) - (0.4 * p_bear) + (0.2 * p_bull)
+    
+    # vol_scalar: Ratio of target variance to current expected variance
+    vol_scalar = target_var / (expected_variance + 1e-6)
+    vol_scalar_clipped = np.clip(vol_scalar, 0.5, 1.5)
+
+    return risk_multiplier, vol_scalar_clipped
 
 def _hmm_modulator_kelly_per_symbol(
     market_probs: pd.DataFrame,
@@ -362,6 +426,9 @@ def _hmm_modulator_kelly_per_symbol(
     anchor_symbol: str | None,
 ) -> dict[str, pd.DataFrame]:
     """One Kelly modulator per symbol using that symbol's 1h OHLC fwd returns; fallback = anchor (e.g. BTC)."""
+    # [Precomputation] Calculate shared risk components once
+    shared_risk = _precompute_hmm_risk_components(market_probs, market_hmm_feats)
+    
     anchor_df = prefetched_1h.get(anchor_symbol) if anchor_symbol else None
     fallback = _hmm_modulator_kelly_values(
         market_probs,
@@ -371,6 +438,7 @@ def _hmm_modulator_kelly_per_symbol(
         shrink,
         crisis_thr,
         market_hmm_feats,
+        precomputed_risk=shared_risk,
     )
     out: dict[str, pd.DataFrame] = {}
 
@@ -391,6 +459,7 @@ def _hmm_modulator_kelly_per_symbol(
                 shrink,
                 crisis_thr,
                 market_hmm_feats,
+                precomputed_risk=shared_risk,
             )
             return sym, val
         return sym, fallback
@@ -679,26 +748,14 @@ def _step4_fusion_one_symbol(
 ) -> _Step4FusionOutcome:
     """Per-symbol merge + asof alignment + MetaLabeler (Phase 3: raw x modulator, WF refit)."""
     try:
+        _logger.debug("[%s] Step 4 Fusion started.", sym)
         df_1h = prefetched_1h[sym].copy()
         df_1h["datetime"] = pd.to_datetime(df_1h["datetime"], utc=True)
 
-        # Clear any existing ML/HMM columns to prevent merge collisions (_x, _y)
-        ml_reserved = [
-            "ml_alpha_00", "hmm_modulator_long", "hmm_modulator_short",
-            "slot_rank_score", "xs_score_long", "xs_score_short",
-            "ml_calib_prob", "ml_calib_prob_long", "ml_calib_prob_short",
-            "hmm_prob_bull_trend", "hmm_prob_bear_trend", "hmm_prob_chop", "hmm_prob_crisis"
-        ]
-        # Also drop any legacy or dynamic HMM probability columns
-        hmm_to_drop = [c for c in df_1h.columns if str(c).startswith("hmm_")]
-
-        # [FIX] Do NOT drop ALPHA_ENGINEERED_FEATURE_NAMES or _META_EXTRA_FEATS here.
-        # We want to preserve these microstructure features for the MetaLabeler/Audit.
-        drop_exist = list(set(ml_reserved + hmm_to_drop))
-        drop_exist = [c for c in drop_exist if c in df_1h.columns]
-
-        if drop_exist:
-            df_1h = df_1h.drop(columns=drop_exist)
+        # [Optimization #11] Unify column drop logic
+        df_1h = _drop_ml_columns(df_1h)
+        
+        hmm_cols_ref = _sorted_hmm_prob_columns(market_probs)
         hmm_cols_ref = _sorted_hmm_prob_columns(market_probs)
         k_fb = len(hmm_cols_ref) if hmm_cols_ref else len(HMM_SEMANTIC_PROB_COLUMNS)
 
@@ -707,14 +764,10 @@ def _step4_fusion_one_symbol(
             wide_1h["ml_alpha_00"] = 0.5
             # [REFACTORED] Merge asymmetric modulators
             wide_1h = pd.merge(wide_1h, hmm_modulator, on="datetime", how="left")
-            if "hmm_modulator_long" not in wide_1h.columns:
-                 _logger.error(
-                     "[%s] Merge failed to add hmm_modulator_long. "
-                     "wide_1h.cols=%s, hmm_modulator.cols=%s",
-                     sym, list(wide_1h.columns), list(hmm_modulator.columns)
-                 )
-            wide_1h["hmm_modulator_long"] = wide_1h["hmm_modulator_long"].fillna(0.8)
-            wide_1h["hmm_modulator_short"] = wide_1h["hmm_modulator_short"].fillna(0.8)
+            # [Institutional Quant] Dual-TF Persistence: ffill 4h modulators into 1h bars
+            mod_cols = [c for c in hmm_modulator.columns if c != "datetime"]
+            wide_1h[mod_cols] = wide_1h[mod_cols].ffill().fillna(1.0)
+            
             wide_1h["slot_rank_score"] = 0.0
 
             # [NEW] Merge all HMM related columns
@@ -722,6 +775,9 @@ def _step4_fusion_one_symbol(
             if hmm_cols_all:
                 mp_h = market_probs[["datetime", *hmm_cols_all]]
                 wide_1h = wide_1h.merge(mp_h, on="datetime", how="left")
+                # [Institutional Quant] Dual-TF Persistence: ffill 4h HMM states into 1h bars
+                wide_1h[hmm_cols_all] = wide_1h[hmm_cols_all].ffill()
+                
                 # Fill probabilities with uniform, others with 0
                 prob_cols = [c for c in hmm_cols_all if "prob_" in c]
                 other_hmm_cols = [c for c in hmm_cols_all if "prob_" not in c]
@@ -740,18 +796,16 @@ def _step4_fusion_one_symbol(
                 )
                 sym_alpha["ml_alpha_00"] = 0.5
 
-            wide_1h = pd.merge(df_1h, sym_alpha, on="datetime", how="left").fillna(0.5)
+            wide_1h = pd.merge(df_1h, sym_alpha, on="datetime", how="left")
+            # [Institutional Quant] Dual-TF Alpha persistence: 
+            # If sym_alpha is 4h and df_1h is 1h, ffill to maintain the thesis across bars.
+            wide_1h["ml_alpha_00"] = wide_1h["ml_alpha_00"].ffill().fillna(0.5)
 
             # [REFACTORED] Merge asymmetric modulators
             wide_1h = pd.merge(wide_1h, hmm_modulator, on="datetime", how="left")
-            if "hmm_modulator_long" not in wide_1h.columns:
-                 _logger.error(
-                     "[%s] Merge failed to add hmm_modulator_long. "
-                     "wide_1h.cols=%s, hmm_modulator.cols=%s",
-                     sym, list(wide_1h.columns), list(hmm_modulator.columns)
-                 )
-            wide_1h["hmm_modulator_long"] = wide_1h["hmm_modulator_long"].fillna(0.8)
-            wide_1h["hmm_modulator_short"] = wide_1h["hmm_modulator_short"].fillna(0.8)
+            # [Institutional Quant] Dual-TF Persistence: ffill 4h modulators into 1h bars
+            mod_cols = [c for c in hmm_modulator.columns if c != "datetime"]
+            wide_1h[mod_cols] = wide_1h[mod_cols].ffill().fillna(1.0)
 
             # Use mean of long/short modulator for ranking score
             # m_avg = (wide_1h["hmm_modulator_long"] + wide_1h["hmm_modulator_short"]) / 2.0
@@ -762,6 +816,9 @@ def _step4_fusion_one_symbol(
             if hmm_cols_all:
                 mp_h = market_probs[["datetime", *hmm_cols_all]]
                 wide_1h = wide_1h.merge(mp_h, on="datetime", how="left")
+                # [Institutional Quant] Dual-TF Persistence: ffill 4h HMM states into 1h bars
+                wide_1h[hmm_cols_all] = wide_1h[hmm_cols_all].ffill()
+
                 # Fill probabilities with uniform, others with 0
                 prob_cols = [c for c in hmm_cols_all if "prob_" in c]
                 other_hmm_cols = [c for c in hmm_cols_all if "prob_" not in c]
@@ -774,18 +831,8 @@ def _step4_fusion_one_symbol(
         df_tf_full = data_maps[sym][tf].copy()
         df_tf_full["datetime"] = pd.to_datetime(df_tf_full["datetime"], utc=True)
 
-        # [FIX] Clear existing columns to prevent merge collision (_x, _y)
-        ml_reserved = [
-            "ml_alpha_00", "hmm_modulator_long", "hmm_modulator_short",
-            "slot_rank_score", "xs_score_long", "xs_score_short",
-            "ml_calib_prob", "ml_calib_prob_long", "ml_calib_prob_short",
-            "hmm_prob_bull_trend", "hmm_prob_bear_trend", "hmm_prob_chop", "hmm_prob_crisis"
-        ]
-        hmm_to_drop = [c for c in df_tf_full.columns if str(c).startswith("hmm_")]
-        drop_exist = list(set(ml_reserved + hmm_to_drop))
-        drop_exist = [c for c in drop_exist if c in df_tf_full.columns]
-        if drop_exist:
-            df_tf_full = df_tf_full.drop(columns=drop_exist)
+        # [Optimization #11] Unify column drop logic
+        df_tf_full = _drop_ml_columns(df_tf_full)
 
         # Drop OHLCV columns from wide_1h to prevent _x/_y suffix collision when TF != 1h.
         # We keep the trading-TF OHLCV from df_tf_full; 1h OHLCV is not needed post-merge.
@@ -971,85 +1018,66 @@ def merge_ml_output_into_data_maps(
     log_tag: str = "",
 ) -> None:
     """Merge ML fusion columns from ml_out into each symbol's tf DataFrame in maps (in-place)."""
-    for sym in symbols:
+    # [Optimization #12] Parallelize per-symbol merge
+    def _merge_one(sym: str) -> None:
         if sym not in ml_out.meta_feature_frame_by_symbol:
-            continue
+            return
         mff = ml_out.meta_feature_frame_by_symbol[sym].copy()
         mff["datetime"] = pd.to_datetime(mff["datetime"], utc=True)
         
-        # [NEW] Dynamically capture all HMM related columns (probabilities, entropy, durations, etc.)
         hmm_cols_in_mff = [c for c in mff.columns if str(c).startswith("hmm_")]
-        
         ml_cols = [
-            "datetime",
-            "ml_alpha_00",
-            "ml_alpha_long",
-            "ml_alpha_short",
-            "btc_trend_vol_adj_24h",
-            "hmm_modulator_long",
-            "hmm_modulator_short",
-            "slot_rank_score",
-            "ml_calib_prob",
-            "ml_calib_prob_long",
-            "ml_calib_prob_short",
-            "xs_score_long",
-            "xs_score_short",
-            *hmm_cols_in_mff,
+            "datetime", "ml_alpha_00", "ml_alpha_long", "ml_alpha_short",
+            "btc_trend_vol_adj_24h", "hmm_modulator_long", "hmm_modulator_short",
+            "slot_rank_score", "ml_calib_prob", "ml_calib_prob_long", "ml_calib_prob_short",
+            "xs_score_long", "xs_score_short", *hmm_cols_in_mff,
         ]
-        # Include extra features for auditing/MetaLabeler (Pragmatic Alternative 2)
         for c in _META_EXTRA_FEATS:
-            if c not in ml_cols:
-                ml_cols.append(c)
+            if c not in ml_cols: ml_cols.append(c)
 
-        # Ensure uniqueness of columns while preserving order
         unique_ml_cols = []
         seen = set()
         for x in ml_cols:
             if x in mff.columns and x not in seen:
                 unique_ml_cols.append(x)
                 seen.add(x)
-        ml_cols = unique_ml_cols
         
-        ml_features = mff[ml_cols].copy()
-        drop_cols = [c for c in ml_cols if c != "datetime"]
         if sym not in maps or tf not in maps[sym]:
-            continue
+            return
+            
+        ml_features = mff[unique_ml_cols].copy()
         original_df = maps[sym][tf].copy()
         original_df["datetime"] = pd.to_datetime(original_df["datetime"], utc=True)
 
-        # Aggressively drop any existing ML/HMM columns to prevent _x, _y suffixes
-        reserved_patterns = [
-            "ml_alpha_", "hmm_modulator", "ml_calib_prob", "xs_score_", "slot_rank_"
-        ]
-        exist_ml_cols = [
-            c for c in original_df.columns
-            if any(p in str(c) for p in reserved_patterns) or str(c).startswith("hmm_")
-        ]
-        to_drop = list(set(drop_cols + exist_ml_cols))
-        is_cols_to_drop = [c for c in to_drop if c in original_df.columns]
-
-        if is_cols_to_drop:
-            original_df = original_df.drop(columns=is_cols_to_drop)
-        merged = pd.merge(original_df, ml_features, on="datetime", how="left")
-        merged = merged.sort_values("datetime")
+        # Optimization #11
+        original_df = _drop_ml_columns(original_df)
         
-        # Ensure ml_alpha_00 exists to prevent errors later
+        # Optimization #12: Use sort=True inside merge instead of separate sort_values
+        merged = pd.merge(original_df, ml_features, on="datetime", how="left", sort=True)
+
+        # Forward fill for Dual-TF
+        ml_non_dt_cols = [c for c in unique_ml_cols if c != "datetime" and c in merged.columns]
+        if ml_non_dt_cols:
+            merged[ml_non_dt_cols] = merged[ml_non_dt_cols].ffill()
+
         if "ml_alpha_00" not in merged.columns:
             merged["ml_alpha_00"] = 0.5
-            
-        if "ml_alpha_00" in merged.columns:
-            nan_pct = float(merged["ml_alpha_00"].isna().mean() * 100.0)
-            _logger.debug(
-                " [MERGE%s] %s %s ml_alpha_00 NaN ratio: %.4f%%",
-                log_tag,
-                sym,
-                tf,
-                nan_pct,
-            )
-            # Impute neutral alpha where missing
+        else:
             merged["ml_alpha_00"] = merged["ml_alpha_00"].fillna(0.5)
             
+        # [Institutional Quant] Prevent total flattening of signal by fillna(0.0)
+        # We fill probabilities with uniform, modulators with 1.0, others with 0
+        p_cols = [c for c in merged.columns if "prob_" in c]
+        mod_cols = [c for c in merged.columns if "modulator" in c]
+        k_fb_local = len(p_cols) if p_cols else 5
+        merged[p_cols] = merged[p_cols].fillna(1.0 / float(k_fb_local))
+        merged[mod_cols] = merged[mod_cols].fillna(1.0)
+        
         maps[sym][tf] = merged.fillna(0.0)
+
+    workers = min(len(symbols), 12)
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        list(executor.map(_merge_one, symbols))
 
 
 def merge_ml_output_into_is_and_oos(
@@ -1131,7 +1159,9 @@ def run_hmm_fusion_for_is_end(
             market_hmm_feats.index = market_hmm_feats.index.tz_convert("UTC")
 
         hmm_k = int(cfg.get("FUTURES_HMM_K_STATES", 5))
-        hmm_inferrer = HMMStateInferrer(n_states=hmm_k, n_iter=int(cfg.get("FUTURES_HMM_N_ITER", 500)))
+        # [Optimization #6] Reduce n_iter and add convergence tolerance
+        hmm_n_iter = int(cfg.get("FUTURES_HMM_N_ITER", 200))
+        hmm_inferrer = HMMStateInferrer(n_states=hmm_k, n_iter=hmm_n_iter, tol=1e-4)
         
         is_end_idx_market = int((market_hmm_feats.index < is_end_utc).sum())
         _btc_anchor = next((s for s in symbols if "BTC" in s), None)
@@ -1188,6 +1218,7 @@ def run_hmm_fusion_for_is_end(
 
     label_start = prefetch_label_start or fetch_start
     syms_step4 = [s for s in symbols if s in data_maps]
+    _logger.info("    --> [STEP 4] Fusing %d symbols...", len(syms_step4))
     valid_alpha_symbols = alpha_panel.index.get_level_values("symbol").unique()
     valid_alpha_set = set(valid_alpha_symbols.tolist())
     need_1m = [s for s in syms_step4 if s in valid_alpha_set]
@@ -1202,10 +1233,13 @@ def run_hmm_fusion_for_is_end(
     prefetch_workers = max(1, min(len(need_1m) or 1, 4))
     one_m_cache: dict[str, pd.DataFrame | None] = {}
     
+    # [Fix] Use passed cfg instead of global OPT_FUTURES_CONFIG
+    meta_on_any = bool(cfg.get("FUTURES_USE_META_LABELER", False))
+
     if prefetched_1m is not None:
         # Use existing memory cache if provided (Smart bypass)
         one_m_cache = prefetched_1m
-    elif need_1m:
+    elif need_1m and meta_on_any:
         with ThreadPoolExecutor(max_workers=prefetch_workers) as ex:
             one_m_cache = {s: dm for s, dm in ex.map(_prefetch_1m, need_1m)}
 
@@ -1233,9 +1267,12 @@ def run_hmm_fusion_for_is_end(
         if s in valid_alpha_set
     }
 
-    fusion_workers = max(1, min(len(syms_step4) or 1, max(workers, n_jobs, 2), 12))
-    with ThreadPoolExecutor(max_workers=fusion_workers) as ex:
-        fusion_results = list(ex.map(_fusion_job, syms_step4))
+    fusion_workers = max(1, min(len(syms_step4) or 1, max(workers, n_jobs), 12))
+    if fusion_workers > 1:
+        with ThreadPoolExecutor(max_workers=fusion_workers) as ex:
+            fusion_results = list(ex.map(_fusion_job, syms_step4))
+    else:
+        fusion_results = [_fusion_job(s) for s in syms_step4]
 
     for res in fusion_results:
         if res.error is not None:
@@ -1264,6 +1301,8 @@ def run_ml_pipeline_for_universe(
     is_start_date: str | None = None,
     gp_only: bool = False,
     hmm_only: bool = False,
+    preloaded_data_maps: dict[str, dict[str, Any]] | None = None,
+    preloaded_1h_maps: dict[str, pd.DataFrame] | None = None,
 ) -> MLPipelineOutput:
     """[Phase 2] Universal Cross-Sectional ML Pipeline.
     
@@ -1276,49 +1315,65 @@ def run_ml_pipeline_for_universe(
     _logger.info("  --> Initiating Universal Cross-Sectional ML Pipeline (TF: %s)", tf)
 
     collector = DataCollector()
-    data_maps: dict[str, dict[str, Any]] = {}
-    prefetched_1h: dict[str, pd.DataFrame] = {}
+    data_maps: dict[str, dict[str, Any]] = preloaded_data_maps or {}
+    prefetched_1h: dict[str, pd.DataFrame] = preloaded_1h_maps or {}
 
-    # --- Step 1: Market-Wide Data Collection ---
+    # --- Step 1: Market-Wide Data Collection & Enrichment ---
     _logger.info("  --> Step 1: Panel Construction & Asset Screening (%d symbols)", len(symbols))
-
+    
+    missing_any = False
     for sym in symbols:
-        try:
-            df_tf = collector.collect_and_save(sym, tf, fetch_start_date, end)
-            # We still fetch 1h as a master reference for features if tf != 1h
-            df_1h = collector.collect_and_save(sym, "1h", fetch_start_date, end)
-            
-            if df_tf is not None and df_1h is not None:
-                # Merge funding and metrics before feature engineering
-                df_tf = merge_funding_into_ohlcv(sym, df_tf, Path(FUTURES_DATA_DIR))
-                df_tf = merge_metrics_into_ohlcv(sym, df_tf, Path(FUTURES_DATA_DIR))
-                
-                # Step 1: Enrich with ALPHA features only if not in hmm_only mode
-                if not hmm_only:
-                    try:
-                        df_tf_enriched = _enrich_with_gp_features(df_tf, tf=tf)
-                    except Exception as e:
-                        _logger.warning("[%s] ALPHA feature enrichment failed: %s", sym, e)
-                        df_tf_enriched = df_tf
-                else:
-                    # Skip heavy computations for HMM audits
-                    df_tf_enriched = df_tf
+        # Check if enrichment is needed for target TF
+        needs_enrich = False
+        if sym in data_maps and tf in data_maps[sym]:
+            df_check = data_maps[sym][tf]
+            if "ret_1" not in df_check.columns:
+                needs_enrich = True
+        else:
+            needs_enrich = True
 
-                data_maps[sym] = {tf: df_tf_enriched}
+        # Check if enrichment is needed for 1h reference
+        if tf != "1h" and sym not in prefetched_1h:
+            needs_enrich = True
+        elif tf != "1h" and sym in prefetched_1h:
+            if "ret_1" not in prefetched_1h[sym].columns:
+                needs_enrich = True
+
+        if needs_enrich:
+            try:
+                # Fetch if missing from maps
+                if sym not in data_maps or tf not in data_maps[sym]:
+                    df_tf = collector.collect_and_save(sym, tf, fetch_start_date, end)
+                    if df_tf is not None:
+                        df_tf = merge_funding_into_ohlcv(sym, df_tf, Path(FUTURES_DATA_DIR))
+                        df_tf = merge_metrics_into_ohlcv(sym, df_tf, Path(FUTURES_DATA_DIR))
+                        data_maps.setdefault(sym, {})[tf] = df_tf
                 
-                # If master ref is different, enrich it too (used for HMM/Systemic)
-                if tf != "1h":
-                    df_1h = merge_funding_into_ohlcv(sym, df_1h, Path(FUTURES_DATA_DIR))
-                    df_1h = merge_metrics_into_ohlcv(sym, df_1h, Path(FUTURES_DATA_DIR))
-                    if not hmm_only:
-                        prefetched_1h[sym] = _enrich_with_gp_features(df_1h, tf="1h")
-                    else:
+                if tf != "1h" and sym not in prefetched_1h:
+                    df_1h = collector.collect_and_save(sym, "1h", fetch_start_date, end)
+                    if df_1h is not None:
+                        df_1h = merge_funding_into_ohlcv(sym, df_1h, Path(FUTURES_DATA_DIR))
+                        df_1h = merge_metrics_into_ohlcv(sym, df_1h, Path(FUTURES_DATA_DIR))
                         prefetched_1h[sym] = df_1h
-                else:
-                    prefetched_1h[sym] = df_tf_enriched
+
+                # Enrich if not in hmm_only mode
+                if not hmm_only:
+                    if sym in data_maps and tf in data_maps[sym]:
+                        if "ret_1" not in data_maps[sym][tf].columns:
+                            data_maps[sym][tf] = _enrich_with_gp_features(data_maps[sym][tf], tf=tf)
                     
-        except Exception as e:
-            _logger.warning("[%s] Data fetch failed: %s", sym, e)
+                    if tf != "1h" and sym in prefetched_1h:
+                        if "ret_1" not in prefetched_1h[sym].columns:
+                            prefetched_1h[sym] = _enrich_with_gp_features(prefetched_1h[sym], tf="1h")
+                    elif tf == "1h" and sym in data_maps and "1h" in data_maps[sym]:
+                        prefetched_1h[sym] = data_maps[sym]["1h"]
+
+            except Exception as e:
+                _logger.warning("[%s] Data fetch/enrich failed: %s", sym, e)
+        else:
+            # Already enriched, just ensure prefetched_1h is synced for 1h mode
+            if tf == "1h" and sym not in prefetched_1h:
+                prefetched_1h[sym] = data_maps[sym]["1h"]
 
     if not data_maps:
         _logger.error("No data collected. Pipeline aborted.")
@@ -1328,11 +1383,15 @@ def run_ml_pipeline_for_universe(
     _logger.info("  --> Step 2: Systemic HMM Inference (Macro Regime Discovery)")
     from src.domain.futures.ml_pipeline.features.engineering import build_systemic_hmm_features
 
-    # Build a temporary panel just for systemic HMM features (uses 1h reference if available)
+    # [Optimization #5] Build panel once and reuse for systemic features
     h_maps = {s: {"1h": prefetched_1h[s]} for s in prefetched_1h}
     h_utils = CrossSectionalPipelineUtils()
     h_panel = h_utils.build_panel_df(h_maps, tf="1h")
-    h_panel = h_utils.add_systemic_features(h_panel)
+    
+    # Check if systemic features already exist (from GP enrichment)
+    systemic_cols = ["macro_trend_24h", "macro_vol_24h", "cs_dispersion"]
+    if not all(c in h_panel.columns for c in systemic_cols):
+        h_panel = h_utils.add_systemic_features(h_panel)
     
     market_hmm_feats = build_systemic_hmm_features(h_panel, None, tf="1h")
     if market_hmm_feats.index.tz is None:
@@ -1341,7 +1400,9 @@ def run_ml_pipeline_for_universe(
         market_hmm_feats.index = market_hmm_feats.index.tz_convert("UTC")
 
     hmm_k = int(cfg.get("FUTURES_HMM_K_STATES", 5))
-    hmm_inferrer = HMMStateInferrer(n_states=hmm_k, n_iter=int(cfg.get("FUTURES_HMM_N_ITER", 500)))
+    # [Optimization #6] Reduce n_iter and add convergence tolerance
+    hmm_n_iter = int(cfg.get("FUTURES_HMM_N_ITER", 200))
+    hmm_inferrer = HMMStateInferrer(n_states=hmm_k, n_iter=hmm_n_iter, tol=1e-4)
     
     is_end_dt = pd.to_datetime(is_end_date or end)
     is_end_utc = is_end_dt.tz_localize("UTC") if is_end_dt.tzinfo is None else is_end_dt.tz_convert("UTC")
@@ -1372,11 +1433,20 @@ def run_ml_pipeline_for_universe(
     # Build final panel on target TF
     panel_df = h_utils.build_panel_df(data_maps, tf=tf)
     panel_df = h_utils.add_cross_sectional_features(panel_df)
-    panel_df = h_utils.add_systemic_features(panel_df)
+    
+    # [Optimization #5] Avoid redundant systemic feature recalculation
+    if not all(c in panel_df.columns for c in systemic_cols):
+        panel_df = h_utils.add_systemic_features(panel_df)
     
     # Inject HMM features into training panel
     _logger.info("  --> Injecting HMM regimes into Alpha features...")
     hmm_cols_all = [c for c in market_probs.columns if str(c).startswith("hmm_")]
+    
+    # [Fix] Drop overlapping columns before join
+    drop_overlap = [c for c in hmm_cols_all if c in panel_df.columns]
+    if drop_overlap:
+        panel_df = panel_df.drop(columns=drop_overlap)
+
     mp_feats = market_probs.set_index("datetime")[hmm_cols_all]
     panel_df = panel_df.join(mp_feats, on="datetime", how="left")
     panel_df[hmm_cols_all] = panel_df[hmm_cols_all].ffill().fillna(1.0 / float(hmm_k))
