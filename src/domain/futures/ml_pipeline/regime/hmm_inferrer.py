@@ -573,6 +573,7 @@ class HMMStateInferrer:
     n_states: int = 5
     max_states: int = 5
     n_iter: int = 2000
+    tol: float = 1e-4
     predict_step: int = 24
     fit_step: int = 168
     _warmed_up: bool = False
@@ -813,7 +814,7 @@ class HMMStateInferrer:
                     curr_p,
                     curr_o,
                     iters,
-                    1e-4,
+                    self.tol,
                     optimizer,
                     sticky_weight,
                 )
