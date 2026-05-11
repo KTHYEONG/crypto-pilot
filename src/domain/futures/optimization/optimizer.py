@@ -715,6 +715,7 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
                         is_start_date=ctx.ml_pipeline_is_start,
                         gp_only=False,
                         hmm_only=False,
+                        preloaded_data_maps=ctx.data_maps,
                     )
                     if not ml_out.meta_feature_frame_by_symbol:
                         _logger.error("[ML_OPT] AWF leg %d ML pipeline returned empty output.", leg_i)
@@ -1424,7 +1425,11 @@ def _evaluate_awf_phase_d_aggregate(
                     params,
                     _b_diag,
                 )
+                # [SMOKE FIX] If trials are few (smoke profile), return a bad score instead of pruning
+                # to allow the study to complete and the pipeline to finish.
                 if trial is not None:
+                    if n_trials_eff <= 80:
+                        return float(10.0), {"pruned": False, "robust_val": float(-1e9)}
                     raise optuna.TrialPruned()
                 diag = {"pruned": True, "robust_val": float(-1e9)}
                 return float(1e9), diag

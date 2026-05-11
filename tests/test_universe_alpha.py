@@ -45,9 +45,9 @@ os.environ.setdefault("NUMBA_NUM_THREADS", "1")
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 _logger = logging.getLogger("test_full_universe_gp")
 
-def run_universe_to_gp_test(tf="1h"):
+def run_universe_to_gp_test(tf="4h"):
     _logger.info("=" * 70)
-    _logger.info(f" [PHASE 1] Universe Filtering (Broad + Refinement) TF: {tf}")
+    _logger.info(f" [PHASE 1] Universe Filtering (Broad + Refinement) EXEC TF: {tf}")
     _logger.info("=" * 70)
     
     # 1. 분기 윈도우 설정
@@ -55,7 +55,12 @@ def run_universe_to_gp_test(tf="1h"):
     fetch_start, start, is_end, end = res
     collector = DataCollector()
     
-    # 2. Broad Screening
+    # [Institutional Quant] Alpha Dual-TF Logic Alignment
+    # Always screen universe and train models on 4h to avoid noise/fees, even if execution is 1h.
+    ml_train_tf = "4h" if tf == "1h" else tf
+    _logger.info(f" [ARCH] Alpha Dual-TF Mode: Exec={tf} | Training={ml_train_tf}")
+
+    # 2. Broad Screening (Always use 4h for quality anchoring if target is 1h/4h)
     from src.domain.futures.optimization.screener import (
         screen_futures_universe,
         screen_symbol_refinement_futures,
@@ -64,7 +69,7 @@ def run_universe_to_gp_test(tf="1h"):
     _logger.info(f"Window: {fetch_start} ~ {is_end}")
     
     broad_candidates, _ = screen_futures_universe(
-        collector, [], tf, FUTURES_SCREENER_CONFIG, fetch_start, is_end, data_dir=FUTURES_DATA_DIR
+        collector, [], ml_train_tf, FUTURES_SCREENER_CONFIG, fetch_start, is_end, data_dir=FUTURES_DATA_DIR
     )
     
     if not broad_candidates:
@@ -75,7 +80,7 @@ def run_universe_to_gp_test(tf="1h"):
 
     # 3. Data Loading for Refinement
     data_maps_broad, _, valid_broad = _load_futures_data_maps_for_symbols(
-        list(broad_candidates), tf, fetch_start, start, is_end, end, skip_metrics=True
+        list(broad_candidates), ml_train_tf, fetch_start, start, is_end, end, skip_metrics=True
     )
     
     # 4. Refinement (Winning Signal Type: CS_RANK)
@@ -83,8 +88,8 @@ def run_universe_to_gp_test(tf="1h"):
         broad_candidates=list(broad_candidates),
         winning_signal_type="CS_RANK",
         is_end_date=is_end,
-        tf=tf,
-        symbol_dfs_4h={s: data_maps_broad[s][tf] for s in valid_broad},
+        tf=ml_train_tf,
+        symbol_dfs_4h={s: data_maps_broad[s][ml_train_tf] for s in valid_broad},
         daily_dfs={s: data_maps_broad[s]["1d"] for s in valid_broad},
         phase_b_params=None,
         anchor_symbols=FUTURES_ANCHOR_SYMBOLS,
@@ -105,7 +110,7 @@ def run_universe_to_gp_test(tf="1h"):
     _logger.info(f"3-Tier Load Universe ({len(load_symbols)} symbols for Pipeline)")
 
     # [Data Integrity] Re-load data for the 3-tier universe (matching production logic)
-    _, _, valid_symbols = _load_futures_data_maps_for_symbols(
+    data_maps, _, valid_symbols = _load_futures_data_maps_for_symbols(
         load_symbols, tf, fetch_start, start, is_end, end, skip_metrics=False
     )
     
@@ -114,24 +119,26 @@ def run_universe_to_gp_test(tf="1h"):
         return
 
     _logger.info("\n" + "=" * 70)
-    _logger.info(" [PHASE 2] ML Pipeline: Universal Cross-Sectional Alpha Mining")
+    _logger.info(f" [PHASE 2] ML Pipeline: Alpha Mining on {ml_train_tf}")
     _logger.info("=" * 70)
     
     # 5. ML Pipeline 실행 (Production Settings 일치)
     cfg = dict(OPT_FUTURES_CONFIG)
+    cfg["FUTURES_USE_META_LABELER"] = False  # Speed up test by skipping Meta-Labeler
     ml_n_jobs = _resolve_futures_parallel_policy(len(valid_symbols))
     
-    _logger.info("\nExecuting ML Pipeline (Institutional Alpha Audit Mode)...")
+    _logger.info(f"\nExecuting ML Pipeline (Dual-TF Mode: {ml_train_tf} training)...")
     ml_out = run_ml_pipeline_for_universe(
         valid_symbols,
-        tf,
+        ml_train_tf,
         fetch_start_date=fetch_start,
         end=end,
         cfg=cfg,
         workers=ml_n_jobs,
         n_jobs=ml_n_jobs,
         is_end_date=is_end,
-        is_start_date=start
+        is_start_date=start,
+        preloaded_data_maps=data_maps
     )
     
     # 6. 결과 보고
@@ -158,5 +165,4 @@ def run_universe_to_gp_test(tf="1h"):
     _logger.info("=" * 70)
 
 if __name__ == "__main__":
-    run_universe_to_gp_test("1h")
     run_universe_to_gp_test("4h")

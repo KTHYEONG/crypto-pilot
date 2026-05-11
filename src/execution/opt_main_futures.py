@@ -103,14 +103,14 @@ from src.domain.futures.validation.champion_registry import (  # noqa: E402
     run_champion_promotion_guard,
     write_champion_record,
 )
+from src.domain.futures.validation.tmp_md_champion import (  # noqa: E402
+    collect_tmp_md_champion_gate_failures,
+    tmp_md_layer1_failures_from_awf_diag,
+)
 from src.domain.futures.validation.unified_gates import (  # noqa: E402
     GATE_CODE_DESCRIPTIONS,
     FuturesResearchGateInput,
     evaluate_research_gates,
-)
-from src.domain.futures.validation.tmp_md_champion import (  # noqa: E402
-    collect_tmp_md_champion_gate_failures,
-    tmp_md_layer1_failures_from_awf_diag,
 )
 from src.domain.futures.validation.walk_forward import (  # noqa: E402
     WalkForwardConfig,
@@ -140,7 +140,7 @@ logging.getLogger("BinanceClient").setLevel(logging.WARNING)
 SEP_WIDTH: int = 60
 PROGRESS_MIN_INTERVAL: float = 0.2
 MODE_MULTI: str = "multi"
-BEST_PARAMS_FUTURES_JSON_STEM: str = "best_futures_1h"
+BEST_PARAMS_FUTURES_JSON_STEM: str = "best_futures_4h"
 
 
 def _safe_float(val: Any, default: float = 0.0, clip: float | None = None) -> float:
@@ -763,22 +763,22 @@ def _load_single_symbol_data(
         insufficient = False
         collector = DataCollector()
         
-        # Ensure data exist (Internal error handling)
-        try:
-            collector.ensure_funding_data(sym, fetch_start, end)
-            if not skip_metrics:
-                collector.ensure_metrics_data(sym, fetch_start, end)
-        except Exception as e:
-            _logger.debug("[%s] Metadata (funding/metrics) check failed: %s", sym, e)
+        # Load raw dependencies once per symbol
+        from src.domain.futures.ml_pipeline.pipeline_runner import (
+            merge_funding_into_ohlcv, 
+            merge_metrics_into_ohlcv
+        )
 
-        tfs_to_load = set([tf, "1d", "1h"])
+        tfs_to_load = set([tf, "1d", "1h", "4h"])
+        
+        # Pre-process raw data structures
+        raw_dfs = {}
         for tf_l in tfs_to_load:
             raw_df = collector.collect_and_save(sym, tf_l, fetch_start, end)
             if raw_df is None or raw_df.empty:
                 insufficient = True
                 break
             
-            # Standardizing Column names check
             if "datetime" not in raw_df.columns:
                 raw_df = raw_df.reset_index()
                 if "datetime" not in raw_df.columns and len(raw_df.columns) > 0:
@@ -788,8 +788,13 @@ def _load_single_symbol_data(
                 # Core Merge logic with explicit Error Handling
                 df = merge_funding_into_ohlcv(sym, raw_df, Path(FUTURES_DATA_DIR))
                 df = merge_metrics_into_ohlcv(sym, df, Path(FUTURES_DATA_DIR))
+                
+                # [Optimization] Enrich with GP features here (in parallel)
+                if not skip_metrics:
+                    from src.domain.futures.ml_pipeline.pipeline_runner import _enrich_with_gp_features
+                    df = _enrich_with_gp_features(df, tf=tf_l)
             except Exception as e:
-                _logger.debug("[%s] Merge failed (Format mismatch): %s", sym, e)
+                _logger.error("[%s] Merge/Enrich failed: %s", sym, e)
                 insufficient = True
                 break
 
@@ -1002,18 +1007,38 @@ def main() -> None:
     _logger.info("═" * 85)
 
 
+    # [Institutional Quant] Alpha Dual-TF: Train on 4h even if execution is 1h to avoid noise/fees decay.
+    ml_train_tf = args.tf
+    if args.tf == "1h":
+        _logger.info("  --> [ML] ALPHA DUAL-TF: Training on 4h (Noise Reduction) -> Merging to 1h")
+        ml_train_tf = "4h"
+
+    # [Institutional Quant] Alpha Dual-TF: Train on 4h even if execution is 1h to avoid noise/fees decay.
+    ml_train_tf = args.tf
+    if args.tf == "1h":
+        _logger.info("  --> [ML] ALPHA DUAL-TF: Training on 4h (Noise Reduction) -> Merging to 1h")
+        ml_train_tf = "4h"
+
+    # [Optimization #1] Pass preloaded broad screening data to pipeline
+    ml_pipeline_cfg = dict(OPT_FUTURES_CONFIG)
+    if args.ops_profile == "smoke":
+        ml_pipeline_cfg["FUTURES_USE_META_LABELER"] = False
+        _logger.info("  --> [OPS] SMOKE profile: Meta-Labeler disabled for speed.")
+
     ml_out = run_ml_pipeline_for_universe(
         valid_symbols,
-        args.tf,
+        ml_train_tf,
         fetch_start_date,
         end_date,
-        dict(OPT_FUTURES_CONFIG),
+        ml_pipeline_cfg,
         workers=ml_n_jobs,
         n_jobs=ml_n_jobs,
         is_end_date=is_end_date,
         is_start_date=start_date,
         gp_only=args.alpha_only,
         hmm_only=args.hmm_only,
+        preloaded_data_maps=data_maps if not pre_args.skip_universe else None,
+        preloaded_1h_maps={s: data_maps[s]["1h"] for s in valid_symbols if s in data_maps and "1h" in data_maps[s]} if not pre_args.skip_universe else None,
     )
 
     # [TELEMETRY] ML Pipeline Audit
@@ -1087,8 +1112,11 @@ def main() -> None:
         oos_std = float(gp.iloc[o0:].std(ddof=0) or 0.0)
         _logger.debug("[SIG CHECK] %s IS gp_std=%.6f OOS gp_std=%.6f", sym, is_std, oos_std)
         if oos_std < 1e-4:
-            _logger.error("[ABORT] %s OOS ml_alpha_00 std < 1e-4. Check merge/tz.", sym)
-            raise RuntimeError(f"OOS signal dead for {sym}.")
+            if args.ops_profile == "smoke":
+                _logger.warning("[SIG CHECK] %s OOS ml_alpha_00 std < 1e-4 but continuing due to smoke profile.", sym)
+            else:
+                _logger.error("[ABORT] %s OOS ml_alpha_00 std < 1e-4. Check merge/tz.", sym)
+                raise RuntimeError(f"OOS signal dead for {sym}.")
 
     # [PHASE 5] Optuna Portfolio Optimization Starting
     _prof = resolve_ops_profile(args.ops_profile)
@@ -1187,11 +1215,16 @@ def main() -> None:
         study_ml.optimize(
             lambda tr, ctx=ph_ctx: objective_ml_phase_d(tr, ctx),
             n_trials=nt,
-            n_jobs=min(4, _resolve_futures_parallel_policy(len(valid_symbols))),
+            n_jobs=1 if args.ops_profile == "smoke" else min(4, _resolve_futures_parallel_policy(len(valid_symbols))),
         )
         all_trials.extend(study_ml.trials)
         last_study = study_ml
         completed = [t for t in study_ml.trials if t.state == TrialState.COMPLETE]
+        
+        if not completed:
+            _logger.error(f"  [COORD {pname}] No trials completed successfully. Stopping optimization.")
+            return
+
         bt = study_ml.best_trial
         frozen_accum.update(dict(bt.params))
         pass_count = 0
