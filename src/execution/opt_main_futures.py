@@ -1037,8 +1037,8 @@ def main() -> None:
         is_start_date=start_date,
         gp_only=args.alpha_only,
         hmm_only=args.hmm_only,
-        preloaded_data_maps=data_maps if not pre_args.skip_universe else None,
-        preloaded_1h_maps={s: data_maps[s]["1h"] for s in valid_symbols if s in data_maps and "1h" in data_maps[s]} if not pre_args.skip_universe else None,
+        preloaded_data_maps=oos_data_maps if not pre_args.skip_universe else None,
+        preloaded_1h_maps={s: oos_data_maps[s]["1h"] for s in valid_symbols if s in oos_data_maps and "1h" in oos_data_maps[s]} if not pre_args.skip_universe else None,
     )
 
     # [TELEMETRY] ML Pipeline Audit
@@ -1101,22 +1101,35 @@ def main() -> None:
     _logger.info("  [SUCCESS] Signal integration and quality audit complete.")
 
 
-    for sym in valid_symbols[:3]:
+    for sym in valid_symbols:
         df = oos_data_maps[sym][args.tf]
         if "ml_alpha_00" not in df.columns:
             _logger.error("[SIG CHECK] %s: no ml_alpha_00 column.", sym)
             raise RuntimeError(f"OOS merge missing ml_alpha_00 for {sym}.")
+            
         o0 = int(oos_data_maps[sym][f"oos_start_idx_{args.tf}"])
         gp = pd.to_numeric(df["ml_alpha_00"], errors="coerce")
         is_std = float(gp.iloc[:o0].std(ddof=0) or 0.0)
         oos_std = float(gp.iloc[o0:].std(ddof=0) or 0.0)
-        _logger.debug("[SIG CHECK] %s IS gp_std=%.6f OOS gp_std=%.6f", sym, is_std, oos_std)
-        if oos_std < 1e-4:
-            if args.ops_profile == "smoke":
-                _logger.warning("[SIG CHECK] %s OOS ml_alpha_00 std < 1e-4 but continuing due to smoke profile.", sym)
-            else:
-                _logger.error("[ABORT] %s OOS ml_alpha_00 std < 1e-4. Check merge/tz.", sym)
-                raise RuntimeError(f"OOS signal dead for {sym}.")
+        
+        # [v15.2 Diagnostic] Specific logging for problematic symbol or dead signal
+        if sym == "1000SHIB/USDT" or oos_std < 1e-4:
+            oos_slice = gp.iloc[o0:]
+            nz_count = int((oos_slice != 0).sum())
+            nz_count_neutral = int((oos_slice != 0.5).sum())
+            _logger.info(
+                "[SIG CHECK] %s OOS ml_alpha_00 status: STD=%.6f, NonZero=%d, NonNeutral=%d, Mean=%.4f",
+                sym, oos_std, nz_count, nz_count_neutral, float(oos_slice.mean())
+            )
+            
+            if oos_std < 1e-4:
+                if args.ops_profile == "smoke":
+                    _logger.warning("[SIG CHECK] %s OOS ml_alpha_00 std < 1e-4 but continuing due to smoke profile.", sym)
+                else:
+                    _logger.error("[ABORT] %s OOS ml_alpha_00 std < 1e-4. Check merge/tz or symbol discovery.", sym)
+                    raise RuntimeError(f"OOS signal dead for {sym}.")
+        else:
+            _logger.debug("[SIG CHECK] %s IS gp_std=%.6f OOS gp_std=%.6f", sym, is_std, oos_std)
 
     # [PHASE 5] Optuna Portfolio Optimization Starting
     _prof = resolve_ops_profile(args.ops_profile)
