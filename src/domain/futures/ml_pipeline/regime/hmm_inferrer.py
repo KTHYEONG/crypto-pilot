@@ -171,7 +171,7 @@ def _build_five_state_probs(
 
         bypass_mask = (ret < -3.5 * roll_std) & (liq > p995)
         if bypass_mask.any():
-            _logger.info("Capitulation Bypass: triggered on %d bars.", int(bypass_mask.sum()))
+            _logger.debug("⚡ Capitulation bypass | %d bars", int(bypass_mask.sum()))
             # Cap crisis at 0.1, distribute delta proportionally to chop and bear_trend
             old_crisis = crisis_final.copy()
             crisis_final = pd.Series(
@@ -271,12 +271,7 @@ class HMMStateInferrer:
         Time complexity: O(n_windows_vol * n_iter * T/12 * 9) + O(n_windows_dir * n_iter * T/6 * 9).
 
         """
-        _logger.info(
-            "HMMStateInferrer v9.0 (3-Layer): symbol=%s tf=%s n=%d",
-            symbol,
-            tf,
-            len(features_df),
-        )
+        _logger.info("🧠 HMM | %s %s | %d bars", symbol, tf, len(features_df))
 
         n_orig = len(features_df)
         if n_orig < 200:
@@ -288,7 +283,7 @@ class HMMStateInferrer:
         # ── Normalise TF: resample sub-4h inputs to 4h for stability ────────
         is_fast_tf = tf in ("1h", "15m", "5m", "1m")
         if is_fast_tf:
-            _logger.info("Fast TF detected (%s): pre-resampling to 4h.", tf)
+            _logger.debug("⏩ TF %s → 4h resample", tf)
             features_df = features_df.resample("4h").last().ffill()
             returns_ser = returns_ser.resample("4h").apply(
                 lambda x: (1.0 + x).prod() - 1.0
@@ -299,7 +294,7 @@ class HMMStateInferrer:
         returns_12h = returns_ser.resample("12h").apply(
             lambda x: (1.0 + x).prod() - 1.0
         )
-        _logger.info("Layer 1 MS-GARCH: fitting on %d 12h bars …", len(features_12h))
+        _logger.debug("  L1 MS-GARCH | %d 12h bars", len(features_12h))
         vol_probs_12h = self._vol_model.fit_predict(features_12h, returns_12h, is_end_idx)
 
         # Reindex vol probs back to original (4h or input) TF
@@ -314,13 +309,13 @@ class HMMStateInferrer:
         vol_probs_6h = vol_probs_12h.reindex(features_6h.index).ffill().bfill()
         norm_ret_6h = self._compute_norm_returns(returns_6h, vol_probs_6h)
 
-        _logger.info("Layer 2 Direction HMM: fitting on %d 6h bars …", len(features_6h))
+        _logger.debug("  L2 Dir HMM | %d 6h bars", len(features_6h))
         dir_probs_6h = self._dir_model.fit_predict(norm_ret_6h, vol_probs_6h)
 
         dir_probs_orig = dir_probs_6h.reindex(features_df.index).ffill().bfill()
 
         # ── Layer 3: Crisis Detector ─────────────────────────────────────────
-        _logger.info("Layer 3 Crisis Detector: scoring %d bars …", len(features_df))
+        _logger.debug("  L3 Crisis | %d bars", len(features_df))
         crisis_orig = detect_crisis(features_df, returns_ser, vol_probs_orig, dir_probs_orig)
 
         # ── 5-State Mapping ──────────────────────────────────────────────────
@@ -366,8 +361,7 @@ class HMMStateInferrer:
         )
 
         _logger.info(
-            "HMMStateInferrer v9.0 complete: output shape %s, crisis_share=%.2f%%.",
-            result.shape,
+            "✅ HMM done | crisis=%.1f%%",
             100.0 * float(result["hmm_prob_crisis"].mean()),
         )
         return result

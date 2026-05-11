@@ -1046,20 +1046,42 @@ def main() -> None:
         best_fitness = ml_out.alpha_panel.attrs.get("best_fitness", 0.0)
         rep = ml_out.alpha_panel.attrs.get("alpha_component_filter", {})
         if rep:
+            n_tried = int(rep.get("n_components", 0))
+            n_survived = int(rep.get("n_surviving", 0))
+            is_ic = float(rep.get("primary_is_mu", 0.0))
+            oos_ic = float(rep.get("primary_oos_mu", 0.0))
+            hl = float(rep.get("primary_half_life", 0.0))
+            fail_fdr = int(rep.get("fail_fdr", 0))
+            fail_dsr = int(rep.get("fail_dsr", 0))
+            fail_oos = int(rep.get("fail_oos", 0))
+            fail_hl = int(rep.get("fail_half_life", 0))
+            fail_sym = int(rep.get("fail_sym_bal", 0))
+            fail_reg = int(rep.get("fail_regime", 0))
+            ic_ok = "✅" if oos_ic > 0.02 else ("⚠️" if oos_ic > 0.0 else "❌")
+            _logger.info(
+                "┌─ 🤖 Alpha Performance Report ────────────────────────────────\n"
+                "│  Components : %d tried → %d survived  (fitness=%.4f)\n"
+                "│  IC         : IS=%.4f  OOS=%.4f %s  half-life=%.1f bars\n"
+                "│  Filter     : fdr=%d dsr=%d oos=%d hl=%d sym=%d regime=%d\n"
+                "└──────────────────────────────────────────────────────────────",
+                n_tried, n_survived, float(best_fitness),
+                is_ic, oos_ic, ic_ok, hl,
+                fail_fdr, fail_dsr, fail_oos, fail_hl, fail_sym, fail_reg,
+            )
             ai_telemetry_payloads.append({
                 "stage": "alpha_audit_ml",
                 "is_best_fitness": float(best_fitness),
-                "n_tried": int(rep.get("n_components", 0)),
-                "n_survived": int(rep.get("n_surviving", 0)),
-                "is_mean_ic": float(rep.get("primary_is_mu", 0.0)),
-                "oos_mean_ic": float(rep.get("primary_oos_mu", 0.0)),
-                "ic_half_life": float(rep.get("primary_half_life", 0.0)),
-                "fail_fdr": int(rep.get("fail_fdr", 0)),
-                "fail_dsr": int(rep.get("fail_dsr", 0)),
-                "fail_oos": int(rep.get("fail_oos", 0)),
-                "fail_half_life": int(rep.get("fail_half_life", 0)),
-                "fail_sym_bal": int(rep.get("fail_sym_bal", 0)),
-                "fail_regime": int(rep.get("fail_regime", 0)),
+                "n_tried": n_tried,
+                "n_survived": n_survived,
+                "is_mean_ic": is_ic,
+                "oos_mean_ic": oos_ic,
+                "ic_half_life": hl,
+                "fail_fdr": fail_fdr,
+                "fail_dsr": fail_dsr,
+                "fail_oos": fail_oos,
+                "fail_half_life": fail_hl,
+                "fail_sym_bal": fail_sym,
+                "fail_regime": fail_reg,
             })
     if hasattr(ml_out, "hmm_report") and ml_out.hmm_report:
         h_rep = ml_out.hmm_report
@@ -1185,6 +1207,21 @@ def main() -> None:
     ml_ctx = base_ctx
     last_study = None
     frozen_after_ab: dict[str, Any] = {}
+
+    def _trial_progress_callback(study: optuna.Study, trial: optuna.trial.FrozenTrial) -> None:
+        n_complete = len([t for t in study.trials if t.state == TrialState.COMPLETE])
+        n_total = study.user_attrs.get("_n_trials", 1)
+        pname_cb = study.user_attrs.get("_pname", "?")
+        filled = int(20 * n_complete / max(n_total, 1))
+        bar = "█" * filled + "░" * (20 - filled)
+        best_val = study.best_value if n_complete > 0 else float("nan")
+        sys.stderr.write(
+            f"\r  🔧 Phase {pname_cb} [{bar}] {n_complete:>3}/{n_total}  best={best_val:.4f}   "
+        )
+        sys.stderr.flush()
+        if n_complete >= n_total:
+            sys.stderr.write("\n")
+
     for pname in ("A", "B", "C"):
         nt = int(phase_trials.get(pname, 80))
         ph_ctx = dataclasses.replace(
@@ -1205,6 +1242,9 @@ def main() -> None:
                 else optuna.pruners.NopPruner()
             ),
         )
+        study_ml.set_user_attr("_n_trials", nt)
+        study_ml.set_user_attr("_pname", pname)
+        _logger.info("🔧 Optuna Phase %s | %d trials", pname, nt)
         if (
             pname == "A"
             and bool(OPT_FUTURES_CONFIG.get("FUTURES_ML_PHASE_D_ENQUEUE_DEPLOY_JSON", False))
@@ -1229,6 +1269,7 @@ def main() -> None:
             lambda tr, ctx=ph_ctx: objective_ml_phase_d(tr, ctx),
             n_trials=nt,
             n_jobs=1 if args.ops_profile == "smoke" else min(4, _resolve_futures_parallel_policy(len(valid_symbols))),
+            callbacks=[_trial_progress_callback],
         )
         all_trials.extend(study_ml.trials)
         last_study = study_ml

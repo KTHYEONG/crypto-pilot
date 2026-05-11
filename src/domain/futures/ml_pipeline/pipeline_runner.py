@@ -1148,7 +1148,7 @@ def run_hmm_fusion_for_is_end(
     is_end_utc = is_end_dt.tz_localize("UTC") if is_end_dt.tzinfo is None else is_end_dt.tz_convert("UTC")
 
     if prefetched_market_probs is not None and prefetched_market_hmm_feats is not None:
-        _logger.info("  --> Reusing precomputed HMM results for fusion.")
+        _logger.debug("♻️  HMM cache hit")
         market_probs = prefetched_market_probs
         market_hmm_feats = prefetched_market_hmm_feats
     else:
@@ -1159,7 +1159,7 @@ def run_hmm_fusion_for_is_end(
             else:
                 panel_df = _build_panel_with_targets(data_maps, cfg, skip_targets=True)
         
-        _logger.info("  --> Systemic HMM Inference (is_end=%s)%s...", is_end_date, summary_mode_label)
+        _logger.info("🧠 HMM Inference | is_end=%s%s", is_end_date, summary_mode_label)
         market_hmm_feats = build_systemic_hmm_features(panel_df, None, tf="1h")
         if market_hmm_feats.index.tz is None:
             market_hmm_feats.index = market_hmm_feats.index.tz_localize("UTC")
@@ -1226,7 +1226,7 @@ def run_hmm_fusion_for_is_end(
 
     label_start = prefetch_label_start or fetch_start
     syms_step4 = [s for s in symbols if s in data_maps]
-    _logger.info("    --> [STEP 4] Fusing %d symbols...", len(syms_step4))
+    _logger.debug("🔀 Fusing %d symbols", len(syms_step4))
     valid_alpha_symbols = alpha_panel.index.get_level_values("symbol").unique()
     valid_alpha_set = set(valid_alpha_symbols.tolist())
     need_1m = [s for s in syms_step4 if s in valid_alpha_set]
@@ -1320,14 +1320,14 @@ def run_ml_pipeline_for_universe(
     3. Alpha Mining (Regime-Aware LightGBM/GP)
     4. Signal Fusion & Meta-Labeling (Unified Meta-Feature Frame)
     """
-    _logger.info("  --> Initiating Universal Cross-Sectional ML Pipeline (TF: %s)", tf)
+    _logger.info("🔄 ML Pipeline | TF=%s | symbols=%d", tf, len(symbols))
 
     collector = DataCollector()
     data_maps: dict[str, dict[str, Any]] = preloaded_data_maps or {}
     prefetched_1h: dict[str, pd.DataFrame] = preloaded_1h_maps or {}
 
     # --- Step 1: Market-Wide Data Collection & Enrichment ---
-    _logger.info("  --> Step 1: Panel Construction & Asset Screening (%d symbols)", len(symbols))
+    _logger.info("📊 Step 1/4 | Panel & Screening | %d symbols", len(symbols))
     
     missing_any = False
     for sym in symbols:
@@ -1388,7 +1388,7 @@ def run_ml_pipeline_for_universe(
         return MLPipelineOutput()
 
     # --- Step 2: Systemic HMM Inference (Regime Discovery) ---
-    _logger.info("  --> Step 2: Systemic HMM Inference (Macro Regime Discovery)")
+    _logger.info("🧠 Step 2/4 | HMM Regime Inference")
     from src.domain.futures.ml_pipeline.features.engineering import build_systemic_hmm_features
 
     # [Optimization #5] Build panel once and reuse for systemic features
@@ -1430,13 +1430,13 @@ def run_ml_pipeline_for_universe(
     market_probs["datetime"] = pd.to_datetime(market_probs["datetime"], utc=True)
 
     if hmm_only:
-        _logger.info("  [SUCCESS] HMM Inference complete (HMM-only mode).")
+        _logger.info("✅ HMM Inference complete (HMM-only mode)")
         out = MLPipelineOutput(market_probs=market_probs)
         out.hmm_report = _print_hmm_summary(market_probs, market_hmm_feats, pd.DataFrame(), _btc_df, "(HMM-ONLY)")
         return out
 
     # --- Step 3: Regime-Aware Alpha Mining ---
-    _logger.info("  --> Step 3: Regime-Aware Alpha Model Training (LightGBM)")
+    _logger.info("🤖 Step 3/4 | Alpha Training (LightGBM)")
     
     # Build final panel on target TF
     panel_df = h_utils.build_panel_df(data_maps, tf=tf)
@@ -1447,7 +1447,7 @@ def run_ml_pipeline_for_universe(
         panel_df = h_utils.add_systemic_features(panel_df)
     
     # Inject HMM features into training panel
-    _logger.info("  --> Injecting HMM regimes into Alpha features...")
+    _logger.debug("🔗 HMM → Alpha feature injection")
     hmm_cols_all = [c for c in market_probs.columns if str(c).startswith("hmm_")]
     
     # [Fix] Drop overlapping columns before join
@@ -1478,7 +1478,7 @@ def run_ml_pipeline_for_universe(
     )
 
     # --- Step 4: Signal Fusion & Meta-Labeling ---
-    _logger.info("  --> Step 4: Signal Fusion & Meta-Labeling (Reusing HMM results)")
+    _logger.info("🔀 Step 4/4 | Signal Fusion & Meta-Labeling")
     
     # Use existing HMM results for fusion to avoid redundant training
     out = run_hmm_fusion_for_is_end(
@@ -1489,6 +1489,6 @@ def run_ml_pipeline_for_universe(
         prefetched_market_hmm_feats=market_hmm_feats
     )
     
-    _logger.info("  [SUCCESS] Universal ML Pipeline processing complete.")
+    _logger.info("✅ ML Pipeline complete")
     return out
 
