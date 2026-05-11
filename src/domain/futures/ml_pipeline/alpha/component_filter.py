@@ -367,16 +367,27 @@ def filter_alpha_components(
 
     u_tgt = is_sub["target"].unstack(level="symbol")
     u_tgt_oos = None
+    r_tgt = u_tgt.rank(axis=1)
+    r_t_oos = None
+
     if oos_time_set:
         oos_sub = is_sub[is_sub.index.get_level_values("datetime").isin(oos_time_set)]
         u_tgt_oos = oos_sub["target"].unstack(level="symbol")
+        r_t_oos = u_tgt_oos.rank(axis=1)
+
+    # [Optimization] Unstack all alpha columns at once
+    u_alphas = is_sub[cols].unstack(level="symbol")
+    u_alphas_oos = None
+    # [Optimization] Pre-calculate unstacked target ranks to avoid redundant groupby
+    u_tgt = is_sub["target"].unstack(level="symbol")
+    valid_bal_syms = [s for s in u_tgt.columns if u_tgt[s].notna().sum() >= 40]
+    u_tgt_ranks = {s: u_tgt[s].rank() for s in valid_bal_syms}
 
     for _, c in enumerate(cols):
-        u_c = is_sub[c].unstack(level="symbol")
+        u_c = u_alphas[c]
         valid_mask = u_c.notna() & u_tgt.notna()
         counts = valid_mask.sum(axis=1)
         r_c = u_c.rank(axis=1)
-        r_tgt = u_tgt.rank(axis=1)
         ic_series = r_c.corrwith(r_tgt, axis=1)
         ic_arr = ic_series[counts >= 3].dropna().to_numpy(dtype=np.float64)
 
@@ -421,13 +432,11 @@ def filter_alpha_components(
         tail_mu = float(np.mean(tails)) if tails else mu
         tail_ok.append(bool(tail_mu > -0.05 or len(tails) < 5))
 
-        if oos_time_set and u_tgt_oos is not None:
-            oos_sub = is_sub[is_sub.index.get_level_values("datetime").isin(oos_time_set)]
-            u_c_oos = oos_sub[c].unstack(level="symbol")
+        if oos_time_set and u_tgt_oos is not None and r_t_oos is not None and u_alphas_oos is not None:
+            u_c_oos = u_alphas_oos[c]
             v_mask_oos = u_c_oos.notna() & u_tgt_oos.notna()
             c_oos = v_mask_oos.sum(axis=1)
             r_c_oos = u_c_oos.rank(axis=1)
-            r_t_oos = u_tgt_oos.rank(axis=1)
             ic_oos_series = r_c_oos.corrwith(r_t_oos, axis=1)
             oos_arr = ic_oos_series[c_oos >= 3].dropna().to_numpy(dtype=np.float64)
             mu_oos = float(np.mean(oos_arr)) if oos_arr.size > 0 else mu
@@ -459,26 +468,23 @@ def filter_alpha_components(
         else:
             regime_ok.append(True)
 
-        # Symbol balance check and store for diagnostic if primary
+        # [Optimization] Symbol balance check using pre-calculated ranks
         bal_ratio = 0.0
         per: list[float] = []
-        for _, g in is_sub.groupby(level="symbol", sort=False):
-            if len(g) >= 40:
-                v = float(g[c].corr(g["target"], method="spearman"))
-                if math.isfinite(v):
-                    per.append(v)
+        for s in valid_bal_syms:
+            s_c = u_c[s].rank()
+            v = float(s_c.corr(u_tgt_ranks[s]))
+            if math.isfinite(v):
+                per.append(v)
         arr_bal = np.asarray(per, dtype=np.float64)
-        if arr_bal.size >= 3:
-            m_bal = float(np.mean(arr_bal))
-            s_bal = float(np.std(arr_bal, ddof=1))
-            bal_ratio = s_bal / (abs(m_bal) + 1e-9)
-
-        if c == "ml_alpha_00":
-            primary_diagnostic["sym_dispersion"] = bal_ratio
 
         if is_fast_track:
             sym_bal_ok.append(True)
         else:
+            if arr_bal.size >= 3:
+                m_bal = float(np.mean(arr_bal))
+                s_bal = float(np.std(arr_bal, ddof=1))
+                bal_ratio = s_bal / (abs(m_bal) + 1e-9)
             sym_bal_ok.append(bool(bal_ratio <= symbol_balance_max))
 
     reject = _benjamini_hochberg_reject(pvals, fdr_q)

@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import os
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +19,8 @@ class CacheManager:
         self.max_files = max_files
         self.max_size_mb = max_size_mb
         self.cache_dir.mkdir(parents=True, exist_ok=True)
+        # Auto-cleanup on init to enforce storage limits immediately
+        self.cleanup_lru(pattern="*.parquet")
 
     @staticmethod
     def generate_hash(dependencies: dict[str, Any], source_files: list[Path] | None = None) -> str:
