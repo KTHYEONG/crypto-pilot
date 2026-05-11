@@ -170,7 +170,7 @@ def _train_dir(
 
 def _warmup_dir() -> None:
     """Pre-compile Direction HMM JIT functions."""
-    _logger.info("DirRegimeModel: warming up JAX JIT cache …")
+    _logger.debug("⚙️  JAX JIT warmup (Dir)")
     dummy_obs = jnp.zeros(_DIR_MAX_LEN)
     dummy_mask = jnp.zeros(_DIR_MAX_LEN)
     p = {
@@ -183,7 +183,7 @@ def _warmup_dir() -> None:
     os_ = opt.init(p)
     _dir_forward(dummy_obs, dummy_mask, p)
     _train_dir(dummy_obs, dummy_mask, p, os_, 3, 1e-4, opt)
-    _logger.info("DirRegimeModel: JIT warmup complete.")
+    _logger.debug("✅ JAX JIT ready (Dir)")
 
 
 class DirRegimeModel:
