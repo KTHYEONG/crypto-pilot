@@ -115,6 +115,8 @@ def _build_five_state_probs(
     vol_probs: pd.DataFrame,
     dir_probs: pd.DataFrame,
     crisis_prob: pd.Series,
+    returns_ser: pd.Series | None = None,
+    liq_proxy: pd.Series | None = None,
 ) -> pd.DataFrame:
     """Combine Layer 1+2+3 into 5 semantic probability columns.
 
@@ -133,6 +135,8 @@ def _build_five_state_probs(
         vol_probs:   (T, 3) — vol_low, vol_mid, vol_high (Layer 1).
         dir_probs:   (T, 3) — dir_bull, dir_range, dir_bear (Layer 2).
         crisis_prob: (T,)   — [0, 1] soft crisis score (Layer 3).
+        returns_ser: Raw returns (for Capitulation Bypass).
+        liq_proxy:   Liquidity proxy (for Capitulation Bypass).
 
     Returns:
         DataFrame with columns = HMM_SEMANTIC_PROB_COLUMNS.
@@ -156,6 +160,26 @@ def _build_five_state_probs(
     # Layer 3 override: blend crisis_prob into crisis_final
     blend_factor = crisis_prob.clip(0.0, 1.0)
     crisis_final: pd.Series = crisis_base * (1.0 - blend_factor) + blend_factor
+
+    # ── Capitulation Bypass (NEW for Step 2) ─────────────────────────────────
+    if returns_ser is not None and liq_proxy is not None:
+        idx = vol_probs.index
+        ret = returns_ser.reindex(idx).fillna(0.0)
+        liq = liq_proxy.reindex(idx).fillna(0.0)
+        roll_std = ret.rolling(168, min_periods=24).std().fillna(float(ret.std()))
+        p995 = float(liq.quantile(0.995))
+
+        bypass_mask = (ret < -2.5 * roll_std) & (liq > p995)
+        if bypass_mask.any():
+            _logger.info("Capitulation Bypass: triggered on %d bars.", int(bypass_mask.sum()))
+            # Cap crisis at 0.1, shift delta to chop
+            old_crisis = crisis_final.copy()
+            crisis_final = pd.Series(
+                np.where(bypass_mask, np.minimum(crisis_final, 0.1), crisis_final),
+                index=idx
+            )
+            delta = (old_crisis - crisis_final).clip(0.0, 1.0)
+            chop = chop + delta
 
     # Re-scale non-crisis channels so the 5 probs sum to 1
     raw_sum = bull_calm + bull_vol_up + bear_trend + chop + 1e-8
@@ -297,7 +321,14 @@ class HMMStateInferrer:
         crisis_orig = detect_crisis(features_df, returns_ser, vol_probs_orig, dir_probs_orig)
 
         # ── 5-State Mapping ──────────────────────────────────────────────────
-        result = _build_five_state_probs(vol_probs_orig, dir_probs_orig, crisis_orig)
+        liq_proxy = features_df["macro_liq_proxy_24h"] if "macro_liq_proxy_24h" in features_df.columns else None
+        result = _build_five_state_probs(
+            vol_probs_orig,
+            dir_probs_orig,
+            crisis_orig,
+            returns_ser=returns_ser,
+            liq_proxy=liq_proxy,
+        )
 
         # ── Auxiliary columns ────────────────────────────────────────────────
         result["hmm_prob_bull_trend"] = (
