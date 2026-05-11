@@ -348,7 +348,8 @@ def filter_alpha_components(
 
     # ml_alpha_00 diagnostic metrics
     primary_diagnostic: dict[str, float] = {}
-
+    ic_by_slot: dict[str, float] = {}
+    
     is_sub = base[base["__is"]]
     uniq_times = sorted(is_sub.index.get_level_values("datetime").unique())
     oos_time_set: set[pd.Timestamp] = set()
@@ -396,6 +397,8 @@ def filter_alpha_components(
         else:
             t_stat = mu_for_t / (sd / math.sqrt(n_ic) + 1e-12) if sd > 1e-12 else 0.0
         pvals.append(float(2.0 * min(_norm_sf(abs(t_stat)), 1.0 - 1e-15)))
+        # [Optimization #10] Store IC for ensemble reuse
+        ic_by_slot[c] = mu
         sharpe = mu / (sd + 1e-12) * math.sqrt(float(max(n_ic, 1)))
         sk = float(pd.Series(ic_arr).skew()) if n_ic > 2 else 0.0
         ku = float(pd.Series(ic_arr).kurt()) - 3.0 if n_ic > 3 else 0.0
@@ -544,6 +547,7 @@ def filter_alpha_components(
         "fail_oos": float(f_oos),
         "fail_regime": float(f_reg),
         "fail_sym_bal": float(f_bal),
+        "ic_by_slot": ic_by_slot,
     }
 
     # ml_alpha_00(Primary)의 상세 지표를 meta에 병합
