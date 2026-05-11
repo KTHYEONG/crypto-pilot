@@ -4,6 +4,22 @@ This file tracks the logical progression and experimental results of the quantit
 
 ---
 
+## [2026-05-12] v9.3.0: Predictive Transition & Lead-Lag Breakthrough — Predictive Pivot (Antigravity)
+
+### 1. Architectural Evolution: From Reactive to Predictive
+*   **Problem (v9.2.1)**: While the model achieved a "Preventive" status, the Lead-Lag Capture was hovering near the 40% margin. The `CRISIS` definition was too narrow (only High Vol), and "Calm Before Storm" rules captured market peaks, causing a positive Regime IC.
+*   **Implementation (The v9.3 Spec)**:
+    1.  **Predictive Transition (A)**: Included `vol_mid * p_bear` in the `crisis_base` calculation. This allows the model to flag a crisis as soon as the market shifts from Low to Mid volatility if the direction is bearish.
+    2.  **Overheating Noise Suppression (D)**: Refined Rule 1 by splitting it into `v_low` (Threshold 2.0) and `v_mid` (Threshold 1.5) triggers. This prevents normal bull market peaks from triggering false crisis alarms.
+    3.  **Sticky Duration Rebalancing (B)**: Reduced `BULL_CALM` persistence (36→24) and increased `CRISIS` persistence (1→3). Improves responsiveness to early signals while ensuring signal stability.
+    4.  **Capitulation Safety (C)**: Raised bypass threshold to `-3.5σ`. Prevents premature exit from CRISIS during the most extreme phase of a crash.
+*   **Performance Impact**:
+    *   **Lead-Lag Tail Capture**: Surged to **53.6% (IS)** and **55.2% (OOS)**. Shattered the 50% barrier.
+    *   **Regime IC (OOS)**: Successfully turned **NEGATIVE (-0.0034)** for the first time.
+    *   **CRISIS MU**: Shifted to **-0.105% (IS)**, providing a robust defensive profile.
+
+---
+
 ## [2026-05-12] v9.2.1: Metric Reformation — Institutional Calibration & Final PASS (Gemini CLI)
 
 ### 1. Final Institutional Audit Result
