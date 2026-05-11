@@ -155,7 +155,7 @@ def _build_five_state_probs(
     bull_vol_up: pd.Series = (p_mid + p_high) * p_bull
     bear_trend: pd.Series = (p_mid + p_high) * p_bear
     chop: pd.Series = p_low * p_range + p_mid * p_range
-    crisis_base: pd.Series = (p_high * p_bear * 2.5).clip(0.0, 0.6)
+    crisis_base: pd.Series = (p_high * p_bear * 2.0 + p_mid * p_bear * 0.8).clip(0.0, 0.45)
 
     # Layer 3 override: blend crisis_prob into crisis_final
     blend_factor = crisis_prob.clip(0.0, 1.0)
@@ -169,7 +169,7 @@ def _build_five_state_probs(
         roll_std = ret.rolling(168, min_periods=24).std().fillna(float(ret.std()))
         p995 = float(liq.quantile(0.995))
 
-        bypass_mask = (ret < -2.5 * roll_std) & (liq > p995)
+        bypass_mask = (ret < -3.5 * roll_std) & (liq > p995)
         if bypass_mask.any():
             _logger.info("Capitulation Bypass: triggered on %d bars.", int(bypass_mask.sum()))
             # Cap crisis at 0.1, shift delta to chop
@@ -341,8 +341,8 @@ class HMMStateInferrer:
         # Hard state: argmax of 5-state probs
         hard_states_raw = np.argmax(prob_mat, axis=1).astype(np.int32)
 
-        # Apply sticky min-duration (BULL_CALM=36, BULL_VOL_UP=12, BEAR=2, CHOP=12, CRISIS=1)
-        _DUR_CFG = np.array([36, 12, 2, 12, 1], dtype=np.int32)
+        # Apply sticky min-duration (BULL_CALM=24, BULL_VOL_UP=12, BEAR=3, CHOP=8, CRISIS=3)
+        _DUR_CFG = np.array([24, 12, 3, 8, 3], dtype=np.int32)
         sticky_hard = _numba_sticky_labels(hard_states_raw, _DUR_CFG)
         result["hmm_hard_state"] = sticky_hard.astype(np.float64)
         result["hmm_current_duration"] = _numba_current_duration(sticky_hard)
