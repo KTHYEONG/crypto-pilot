@@ -96,7 +96,8 @@ def detect_crisis(
 
     # 2. Positive Return Penalty
     # If the current bar is positive, we aggressively suppress the crisis score.
-    score = pd.Series(np.where(ret > 0, score * 0.5, score), index=idx)
+    ret_z = (ret - roll_mu) / roll_std
+    score = pd.Series(np.where(ret_z > 2.0, score * 0.2, np.where(ret > 0, score * 0.7, score)), index=idx)
 
     result = score.clip(0.0, 1.0)
     _logger.info(

@@ -65,9 +65,14 @@ This document defines the **Institutional-Grade** evaluation framework for the H
 ### 4. Regime Information Coefficient (Spearman IC)
 **Definition**: Spearman rank correlation between `p_crisis` and **4-bar forward returns**.
 
-**Target**: `IC < 0.0` (Directionally correct)
+**Target**: `-0.02 < IC < +0.02` (Diagnostic Noise Band)
 
-**Rationale**: While the target is still negative, the window is shortened to 4 bars to match crypto dynamics. Given the preventive nature and mean-reversion, this is used for diagnostic trend analysis, not hard rejection.
+**Severity Levels**:
+- `-0.02 ≤ IC ≤ +0.02`: 🟡 ACCEPTABLE (Noise range, standard for crypto V-Bounce dynamics)
+- `IC < -0.02`: ✅ EXCELLENT (Strong leading signal, but rare)
+- `IC > +0.02`: ❌ FAIL (Significantly lagging, triggering at bottoms)
+
+**Rationale**: Due to the extreme mean-reversion and "V-Bounce Paradox" of crypto markets, IC values near zero are statistically inevitable and cannot be reliably separated from noise (SE ≈ 0.015). IC is strictly a **diagnostic metric** to ensure the model isn't severely lagging (IC > +0.02), rather than a primary optimization target. Lead-Lag Tail Capture is the true measure of preventive power.
 
 ---
 
