@@ -713,7 +713,11 @@ def _step4_fusion_one_symbol(
     try:
         _logger.debug("[%s] Step 4 Fusion started.", sym)
         df_1h = prefetched_1h[sym].copy()
-        df_1h["datetime"] = pd.to_datetime(df_1h["datetime"], utc=True)
+        if "datetime" not in df_1h.columns and df_1h.index.name == "datetime":
+            df_1h = df_1h.reset_index()
+        if "datetime" not in df_1h.columns:
+            return _Step4FusionOutcome(sym, None, None, None, f"Missing datetime in df_1h for {sym}")
+        df_1h["datetime"] = pd.to_datetime(df_1h["datetime"], utc=True).dt.floor("1s")
 
         # [Optimization #11] Unify column drop logic
         df_1h = _drop_ml_columns(df_1h)
@@ -748,9 +752,13 @@ def _step4_fusion_one_symbol(
             else:
                 for c in HMM_SEMANTIC_PROB_COLUMNS:
                     wide_1h[c] = 1.0 / float(len(HMM_SEMANTIC_PROB_COLUMNS))
-        else:
+        else:  # sym in valid_alpha_set: use trained alpha
             sym_alpha = alpha_by_sym[sym].copy()
-            sym_alpha["datetime"] = pd.to_datetime(sym_alpha["datetime"], utc=True)
+            if "datetime" not in sym_alpha.columns and sym_alpha.index.name == "datetime":
+                sym_alpha = sym_alpha.reset_index()
+            if "datetime" in sym_alpha.columns:
+                sym_alpha["datetime"] = pd.to_datetime(sym_alpha["datetime"], utc=True).dt.floor("1s")
+
             if "ml_alpha_00" not in sym_alpha.columns:
                 _logger.warning(
                     "[%s] ml_alpha_00 missing in sym_alpha. cols=%s",
@@ -791,7 +799,11 @@ def _step4_fusion_one_symbol(
                     wide_1h[c] = 1.0 / float(len(HMM_SEMANTIC_PROB_COLUMNS))
 
         df_tf_full = data_maps[sym][tf].copy()
-        df_tf_full["datetime"] = pd.to_datetime(df_tf_full["datetime"], utc=True)
+        if "datetime" not in df_tf_full.columns and df_tf_full.index.name == "datetime":
+            df_tf_full = df_tf_full.reset_index()
+        if "datetime" not in df_tf_full.columns:
+            return _Step4FusionOutcome(sym, None, None, None, f"Missing datetime in df_tf_full for {sym}")
+        df_tf_full["datetime"] = pd.to_datetime(df_tf_full["datetime"], utc=True).dt.floor("1s")
 
         # [Optimization #11] Unify column drop logic
         df_tf_full = _drop_ml_columns(df_tf_full)
@@ -803,6 +815,8 @@ def _step4_fusion_one_symbol(
             columns=[c for c in _ohlcv_base if c in wide_1h.columns and c in df_tf_full.columns],
         )
 
+        # [v15.2 Fix] Final asof alignment to trading TF with floor normalization
+        wide_1h_for_merge["datetime"] = pd.to_datetime(wide_1h_for_merge["datetime"], utc=True).dt.floor("1s")
         aligned_tf = pd.merge(df_tf_full, wide_1h_for_merge, on="datetime", how="left").fillna(0.0)
 
         _apply_ml_calib_probs(
@@ -968,6 +982,12 @@ def _build_panel_with_targets(
     _ic_hl = float(OPT_FUTURES_CONFIG.get("FUTURES_ML_IC_HALF_LIFE", 2.3))
     _h_weights = tuple(float(np.exp(-h / _ic_hl)) for h in horizons)
     panel_df["target"] = utils.create_multi_horizon_rank_targets(panel_df, horizons=horizons, weights=_h_weights)
+    
+    # [v15.2 Fix] Critical: Floor datetime index to 1s to ensure perfect join with original_df
+    if "datetime" in panel_df.index.names:
+        new_dt = pd.to_datetime(panel_df.index.get_level_values("datetime"), utc=True).floor("1s")
+        panel_df.index = panel_df.index.set_levels(new_dt, level="datetime")
+        
     return panel_df
 
 
@@ -982,8 +1002,18 @@ def merge_ml_output_into_data_maps(
     """Merge ML fusion columns from ml_out into each symbol's tf DataFrame in maps (in-place)."""
     # [Optimization #12] Parallelize per-symbol merge
     def _merge_one(sym: str) -> None:
-        if sym not in ml_out.meta_feature_frame_by_symbol:
+        if sym not in maps or tf not in maps[sym]:
             return
+            
+        original_df = maps[sym][tf].copy()
+        original_df = _drop_ml_columns(original_df)
+        
+        if sym not in ml_out.meta_feature_frame_by_symbol:
+            _logger.debug("[%s] ML output missing. Filling with neutral 0.5.", sym)
+            original_df["ml_alpha_00"] = 0.5
+            maps[sym][tf] = original_df
+            return
+            
         mff = ml_out.meta_feature_frame_by_symbol[sym].copy()
         mff["datetime"] = pd.to_datetime(mff["datetime"], utc=True)
         
@@ -1008,14 +1038,26 @@ def merge_ml_output_into_data_maps(
             return
             
         ml_features = mff[unique_ml_cols].copy()
+        if "datetime" not in ml_features.columns and ml_features.index.name == "datetime":
+            ml_features = ml_features.reset_index()
+        if "datetime" in ml_features.columns:
+            ml_features["datetime"] = pd.to_datetime(ml_features["datetime"], utc=True).dt.floor("1s")
+
         original_df = maps[sym][tf].copy()
-        original_df["datetime"] = pd.to_datetime(original_df["datetime"], utc=True)
+        if "datetime" not in original_df.columns and original_df.index.name == "datetime":
+            original_df = original_df.reset_index()
+        if "datetime" in original_df.columns:
+            original_df["datetime"] = pd.to_datetime(original_df["datetime"], utc=True).dt.floor("1s")
 
         # Optimization #11
         original_df = _drop_ml_columns(original_df)
         
         # Optimization #12: Use sort=True inside merge instead of separate sort_values
-        merged = pd.merge(original_df, ml_features, on="datetime", how="left", sort=True)
+        if "datetime" in original_df.columns and "datetime" in ml_features.columns:
+            merged = pd.merge(original_df, ml_features, on="datetime", how="left", sort=True)
+        else:
+            _logger.warning("[%s] Merge skipped due to missing datetime column.", sym)
+            merged = original_df
 
         # Forward fill for Dual-TF
         ml_non_dt_cols = [c for c in unique_ml_cols if c != "datetime" and c in merged.columns]
@@ -1035,6 +1077,10 @@ def merge_ml_output_into_data_maps(
         merged[p_cols] = merged[p_cols].fillna(1.0 / float(k_fb_local))
         merged[mod_cols] = merged[mod_cols].fillna(1.0)
         
+        # [Diagnostic] Final check if alpha is alive
+        if "ml_alpha_00" in merged.columns and merged["ml_alpha_00"].std() < 1e-9:
+            _logger.debug("[%s] Signal still dead after merge. Rows=%d", sym, len(merged))
+
         maps[sym][tf] = merged.fillna(0.0)
 
     workers = min(len(symbols), 12)
