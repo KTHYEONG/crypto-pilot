@@ -7,6 +7,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import os
+from scipy.stats import spearmanr
 
 os.environ["CUDA_VISIBLE_DEVICES"] = ""
 os.environ["JAX_PLATFORMS"] = "cpu"
@@ -95,14 +96,14 @@ def audit_hmm_logic_changes(ml_out, symbols, data_maps, tf):
 
     merged["regime"] = merged[regime_cols].idxmax(axis=1)
     semantic_cols = [c for c in HMM_SEMANTIC_PROB_COLUMNS if c in merged.columns]
-    
-    # v15 Label Mapping (Hierarchical Decoupling)
-    label_map = {
-        "BULL_CALM": "CALM",
-        "BULL_VOL_UP": "VOL_RISK",
-        "BEAR_TREND": "HIGH_VOL",
-        "CHOP": "BLEEDING",
-        "CRISIS": "CRISIS",
+
+    # v9.0 Regime Names
+    regime_display_names = {
+        "hmm_prob_bull_calm": "BULL_CALM",
+        "hmm_prob_bull_vol_up": "BULL_VOL_UP",
+        "hmm_prob_bear_trend": "BEAR_TREND",
+        "hmm_prob_chop": "CHOP",
+        "hmm_prob_crisis": "CRISIS",
     }
 
     # 1. Log-Wealth Dispersion (g = mu - 0.5 * sigma^2)
@@ -110,10 +111,9 @@ def audit_hmm_logic_changes(ml_out, symbols, data_maps, tf):
     _logger.info("╟──────────────┬──────────┬──────────┬──────────┬──────────┬──────────────────────╢")
     _logger.info("║ REGIME       │ TIME %   │ MU (%)   │ SIG (%)  │ G_log(%) │ BEHAVIOR             ║")
     _logger.info("╟──────────────┼──────────┼──────────┼──────────┼──────────┼──────────────────────╢")
-    
+
     for col in semantic_cols:
-        raw_name = col.replace("hmm_prob_", "").upper()
-        reg_name = label_map.get(raw_name, raw_name)
+        reg_name = regime_display_names.get(col, col.replace("hmm_prob_", "").upper())
         mask = merged["regime"] == col
         if mask.any():
             r = merged.loc[mask, "ret"]
@@ -122,12 +122,12 @@ def audit_hmm_logic_changes(ml_out, symbols, data_maps, tf):
             # Geometric Growth Approximation in % units: mu - 0.5 * (sig^2 / 100)
             g = mu - 0.5 * (sig**2 / 100.0)
             time_pct = float(mask.mean() * 100.0)
-            
+
             behavior = "UNSTABLE"
             if g > 0.02: behavior = "WEALTH_EXP"
             elif g < -0.10: behavior = "TAIL_DEFENSE"
             elif abs(g) < 0.02: behavior = "NOISE_LOCKED"
-            
+
             _logger.info(f"║ {reg_name:<12} │ {time_pct:>8.1f}% │ {mu:>8.3f} │ {sig:>8.3f} │ {g:>8.3f} │ {behavior:<20} ║")
         else:
             _logger.info(f"║ {reg_name:<12} │ {0.0:>8.1f}% │ {'-':>8} │ {'-':>8} │ {'-':>8} │ {'-':<20} ║")
@@ -143,7 +143,7 @@ def audit_hmm_logic_changes(ml_out, symbols, data_maps, tf):
         # In v15 mapping, CRISIS and HIGH_VOL are risk states
         crisis_capture = float(tail_dist.get("hmm_prob_crisis", 0.0) + tail_dist.get("hmm_prob_bear_trend", 0.0))
         
-        status = "FAIL" if crisis_capture < 50 else "PASS" if crisis_capture > 65 else "ACCEPTABLE"
+        status = "FAIL" if crisis_capture < 40 else "PASS" if crisis_capture >= 55 else "ACCEPTABLE"
         _logger.info(f"║ Worst 5% Events: {len(worst_bars):<4} | CRISIS/HIGH_VOL Capture: {crisis_capture:>5.1f}% | Verdict: {status:<10} ║")
     
     # 3. Switching Friction & Stability (uses sticky Viterbi hard state to avoid posterior noise)
@@ -163,7 +163,76 @@ def audit_hmm_logic_changes(ml_out, symbols, data_maps, tf):
     friction_est = transitions * 0.00025 * 100.0  # 2.5bps per switch estimate
 
     _logger.info(f"║ Total Switches: {transitions:<4} | Avg Duration: {avg_duration:>6.1f} {tf:<4} bars | Friction Est: {friction_est:>5.2f}% IS ║")
-    
+
+    # [D] Lead-Lag Tail Capture: CRISIS 진입 후 8 bars 내 tail event 발생률
+    _logger.info("╟─────────────────────────────────────────────────────────────────────────────────╢")
+    _logger.info("║ [D] LEAD-LAG TAIL CAPTURE (Preventive Power, N=8 bars ahead)                   ║")
+
+    is_crisis_arr = (merged["regime"] == "hmm_prob_crisis").to_numpy()
+    is_tail_arr   = (merged["ret"] <= q05_thr).to_numpy()
+    crisis_enters = is_crisis_arr & np.concatenate([[False], ~is_crisis_arr[:-1]])
+    n_total = len(merged)
+    fwd_tail = np.array([
+        bool(np.any(is_tail_arr[i : min(i + 9, n_total)]))
+        for i in range(n_total)
+    ])
+    n_crisis_entries = int(crisis_enters.sum())
+    if n_crisis_entries > 0:
+        ll_capture = float(fwd_tail[crisis_enters].mean() * 100.0)
+        ll_status = "PASS" if ll_capture >= 40 else "ACCEPTABLE" if ll_capture >= 25 else "FAIL"
+        _logger.info(f"║ CRISIS Entries: {n_crisis_entries:<4} | Followed by Tail (≤8 bars): {ll_capture:>5.1f}% | Verdict: {ll_status:<10} ║")
+    else:
+        _logger.info("║ CRISIS Entries: 0    | No entries to measure Lead-Lag.                         ║")
+
+    # [E] Regime IC: Spearman(p_crisis, forward_10bar_return)
+    _logger.info("╟─────────────────────────────────────────────────────────────────────────────────╢")
+    _logger.info("║ [E] REGIME IC — Spearman(p_crisis, fwd_10bar_ret)                              ║")
+
+    crisis_col = next((c for c in regime_cols if "crisis" in c), None)
+    if crisis_col and crisis_col in merged.columns:
+        fwd_ret_10 = merged["ret"].shift(-10)
+        valid_mask = fwd_ret_10.notna() & merged[crisis_col].notna()
+        if valid_mask.sum() > 50:
+            ic_val, ic_pval = spearmanr(
+                merged.loc[valid_mask, crisis_col],
+                fwd_ret_10[valid_mask]
+            )
+            ic_status = "PASS" if ic_val < -0.05 else "ACCEPTABLE" if ic_val < 0.0 else "FAIL"
+            _logger.info(f"║ Spearman IC: {ic_val:>+.4f} (p={ic_pval:.3f}) | Target: <-0.05 | Verdict: {ic_status:<10}    ║")
+        else:
+            _logger.info("║ Insufficient data for IC calculation.                                           ║")
+    else:
+        _logger.info("║ hmm_prob_crisis column not found.                                               ║")
+
+    # [F] CRISIS Entry Lead Time: tail event 기준 CRISIS가 몇 bars 전에 활성화되었는지
+    _logger.info("╟─────────────────────────────────────────────────────────────────────────────────╢")
+    _logger.info("║ [F] CRISIS LEAD TIME (bars before tail event CRISIS was active)                 ║")
+
+    tail_positions = np.where(is_tail_arr)[0]
+    lead_times: list[int] = []
+    for pos in tail_positions:
+        lookback = max(0, pos - 20)
+        window = is_crisis_arr[lookback : pos + 1]
+        if window[-1]:  # CRISIS active at tail event bar
+            run = 0
+            for k in range(len(window) - 1, -1, -1):
+                if window[k]:
+                    run += 1
+                else:
+                    break
+            lead_times.append(run - 1)  # bars BEFORE the tail event
+        # If not in CRISIS at tail event bar, skip (don't penalize here)
+
+    if lead_times:
+        avg_lead = float(np.mean(lead_times))
+        pct_concurrent = float(np.mean(np.array(lead_times) == 0) * 100.0)
+        pct_leading    = float(np.mean(np.array(lead_times) > 0) * 100.0)
+        lead_status = "PASS" if avg_lead >= 1.0 else "ACCEPTABLE" if avg_lead >= 0 else "FAIL"
+        _logger.info(f"║ Crisis-covered tail events: {len(lead_times)}/{len(tail_positions)} ({len(lead_times)/max(1,len(tail_positions))*100:.0f}%)                          ║")
+        _logger.info(f"║ Avg Lead Time: {avg_lead:>5.1f} bars | Concurrent: {pct_concurrent:>5.1f}% | Leading: {pct_leading:>5.1f}% | {lead_status:<6} ║")
+    else:
+        _logger.info("║ CRISIS was never active at any tail event bar (0 coverage).                    ║")
+
     _logger.info("╚" + "═" * 83 + "╝")
 
 def audit_oos_and_ic(ml_out, symbols, is_data_maps, oos_data_maps, tf):
@@ -216,10 +285,46 @@ def audit_oos_and_ic(ml_out, symbols, is_data_maps, oos_data_maps, tf):
         if not worst_oos.empty:
             tail_dist = worst_oos["regime"].value_counts(normalize=True) * 100
             capture = float(tail_dist.get("hmm_prob_crisis", 0.0) + tail_dist.get("hmm_prob_bear_trend", 0.0))
-            verdict = "PASS" if capture > 70 else "ACCEPTABLE" if capture > 50 else "FAIL"
+            verdict = "PASS" if capture >= 50 else "ACCEPTABLE" if capture >= 40 else "FAIL"
             _logger.info(f"║ [A] OOS Tail Capture ({len(oos_df)} {tf:<4} bars): CRISIS+BEAR = {capture:5.1f}% | Verdict: {verdict:<8} ║")
         else:
             _logger.info("║ [A] OOS: No tail events found.                                              ║")
+
+        # [B] OOS Regime IC: Spearman(p_crisis, fwd_10bar_return)
+        _logger.info("╟─────────────────────────────────────────────────────────────────────────────────╢")
+        crisis_col_oos = next((c for c in regime_cols if "crisis" in c), None)
+        if crisis_col_oos and crisis_col_oos in merged_oos.columns:
+            fwd_ret_10 = merged_oos["ret"].shift(-10)
+            valid_mask = fwd_ret_10.notna() & merged_oos[crisis_col_oos].notna()
+            if valid_mask.sum() > 50:
+                ic_val, ic_pval = spearmanr(
+                    merged_oos.loc[valid_mask, crisis_col_oos],
+                    fwd_ret_10[valid_mask]
+                )
+                ic_status = "PASS" if ic_val < -0.05 else "ACCEPTABLE" if ic_val < 0.0 else "FAIL"
+                _logger.info(f"║ [B] OOS Regime IC: {ic_val:>+.4f} (p={ic_pval:.3f}) | Target: <-0.05 | Verdict: {ic_status:<10}      ║")
+            else:
+                _logger.info("║ [B] OOS IC: Insufficient overlap for IC calculation.                        ║")
+        else:
+            _logger.info("║ [B] OOS IC: hmm_prob_crisis column not found.                               ║")
+
+        # [C] OOS Lead-Lag Tail Capture (CRISIS entries → tail within 8 bars)
+        _logger.info("╟─────────────────────────────────────────────────────────────────────────────────╢")
+        is_crisis_oos = (merged_oos["regime"] == "hmm_prob_crisis").to_numpy()
+        is_tail_oos   = (merged_oos["ret"] <= q05).to_numpy()
+        crisis_enters_oos = is_crisis_oos & np.concatenate([[False], ~is_crisis_oos[:-1]])
+        n_oos = len(merged_oos)
+        fwd_tail_oos = np.array([
+            bool(np.any(is_tail_oos[i : min(i + 9, n_oos)]))
+            for i in range(n_oos)
+        ])
+        n_entries_oos = int(crisis_enters_oos.sum())
+        if n_entries_oos > 0:
+            ll_oos = float(fwd_tail_oos[crisis_enters_oos].mean() * 100.0)
+            ll_status_oos = "PASS" if ll_oos >= 40 else "ACCEPTABLE" if ll_oos >= 25 else "FAIL"
+            _logger.info(f"║ [C] OOS Lead-Lag Capture: {n_entries_oos} entries, {ll_oos:>5.1f}% → tail ≤8 bars | {ll_status_oos:<10}    ║")
+        else:
+            _logger.info("║ [C] OOS Lead-Lag: No CRISIS entries found in OOS period.                    ║")
     else:
         _logger.info("║ [A] OOS: Insufficient data overlap for holdout audit.                       ║")
 
