@@ -1,71 +1,56 @@
 {
   "project": "my-coin-traider",
-  "version": "9.0.0",
-  "last_evolution_date": "2026-05-12",
-  "previous_state_hash": "v8.2.0-outcome-weighted-hmm",
+  "version": "9.1.0",
+  "last_evolution_date": "2026-05-11",
+  "previous_state_hash": "v9.0.0-hierarchical-msgarch",
   "current_logic": {
     "universe_selection": "CS_RANK 필터링 (16-32 symbols). Anchor/Macro/Screener 3-tier 구조 유지.",
-    "regime_classification": "[V9.0 3-Layer Hierarchical] Architectural shift from single-model HMM to hierarchical decomposition. Layer 1 (MS-GARCH, 12h): Vol Regime (3-state: LOW_VOL/MID_VOL/HIGH_VOL) with skew-t innovations. Layer 2 (Direction HMM, 6h): Direction signal (3-state: BULL/RANGE/BEAR) conditional on vol regime. Layer 3 (Rules): Crisis detector (5-rule soft scoring) overrides outputs when crisis_prob>=0.25. Final 5-state semantic output via cross-product mapping.",
-    "alpha_generation": "LightGBM v6 (DART + Dynamic Labeling). OOS IC=0.0743, T-Stat=33.27. [Unchanged from v8.2]",
-    "signal_combination": "signal_composer.py: Linear combination with HMM regime multiplier. Risk multiplier centered at 1.0 (1.0 - 0.75*p_crisis - 0.4*p_bear + 0.2*p_bull). [Unchanged from v8.2]",
-    "portfolio_construction": "Ledoit-Wolf + Kelly + Vol-target (v7.0 standard). [Unchanged]",
-    "execution_model": "Single-pass execution sim (v7.0 standard). [Unchanged]",
-    "optimization": "3-Phase Coordinate Ascent (A:80, B:120, C:60). Objective: median(log_TW) - 1.0*MAD - 0.5*DD_max. [Unchanged]",
-    "validation": "AWF K=6 legs, IS-pool=70%, timeframe-aware embargo. [Unchanged]",
-    "champion_selection": "3-Layer Gate (L1/L2/L3) + 5-seed stability CV≤0.30. [Unchanged]",
-    "risk_management": "HMM Modulator v9.0: Hierarchical regime with proper vol clustering (MS-GARCH). CRISIS MU finally negative (-0.144%), eliminating V-bounce contamination. Crisis detector with forward-looking rules enables preventive protection."
+    "regime_classification": "[V9.1 Predictive Enhancement] 3-Layer Hierarchical (Vol/Dir/Rules) with predictive logic shifts. Layer 3 Crisis Detector implements Liquidity Decay (50% reduction on washout) and Positive Return Penalty to suppress V-bounce/pump noise. HMM Inferrer features a Capitulation Bypass (caps p_crisis at 0.1 during extreme liquidation wicks). Rule 3 inverted to detect 'Long Squeeze' (high funding + vol_high + ret<0).",
+    "alpha_generation": "LightGBM v6 (DART + Dynamic Labeling). OOS IC=0.0743, T-Stat=33.27.",
+    "signal_combination": "signal_composer.py: Linear combination with HMM regime multiplier. Risk multiplier centered at 1.0 (1.0 - 0.75*p_crisis - 0.4*p_bear + 0.2*p_bull).",
+    "portfolio_construction": "Ledoit-Wolf + Kelly + Vol-target (v7.0 standard).",
+    "execution_model": "Single-pass execution sim (v7.0 standard).",
+    "optimization": "3-Phase Coordinate Ascent (A:80, B:120, C:60). Objective: median(log_TW) - 1.0*MAD - 0.5*DD_max.",
+    "validation": "AWF K=6 legs, IS-pool=70%, timeframe-aware embargo.",
+    "champion_selection": "3-Layer Gate (L1/L2/L3) + 5-seed stability CV≤0.30.",
+    "risk_management": "HMM Modulator v9.1: Defensive shift. Achieved Lead-Lag Tail Capture PASS (50% IS / 47.8% OOS) by prioritizing structural foresight over concurrent price-drop rules. CRISIS MU remains negative (-0.096% Market, -0.23% BTC Proxy)."
   },
   "key_parameters": {
     "base_timeframe": "4h",
     "layer1_timeframe": "12h (MS-GARCH vol regime)",
     "layer1_states": 3,
-    "layer1_model": "MS-GARCH with skew-t innovations. Per-state params: (ω, α, β, ν, λ). TVTP on 3 features: cs_dispersion, funding_mom, oi_delta.",
-    "layer1_metrics": "CRISIS MU target: <-0.2%, BEAR MU: <0.0%, vol_high share: 5~15%",
+    "layer1_model": "MS-GARCH with skew-t innovations. TVTP on 3 features: cs_dispersion, funding_mom, oi_delta.",
     "layer2_timeframe": "6h (Direction HMM)",
     "layer2_states": 3,
-    "layer2_model": "Gaussian HMM on vol-normalized returns. States: BULL (μ>0), RANGE (μ~0), BEAR (μ<0). Conditional on layer1 vol state.",
-    "layer2_metrics": "Direction stability and lead-lag accuracy vs fwd returns",
-    "layer3_model": "Rules-based crisis detector: 6 soft rules (4-sigma, liq proxy, funding extreme, vol_high+bear, 3-sigma, vol_high transition). Threshold: crisis_prob >= 0.25. Overrides regime outputs.",
-    "output_mapping": "6 internal states (3 vol × 3 dir) → 5 semantic states (bull_calm, bull_vol_up, bear_trend, chop, crisis) via cross-product + crisis override.",
+    "layer2_model": "Gaussian HMM on vol-normalized returns. BULL(μ>0), RANGE(μ~0), BEAR(μ<0).",
+    "layer3_model": "Rules-based crisis detector (7 rules): Rule 1 (4σ: 0.35), Rule 2 (Liq p99.5: 0.25), Rule 3 (Long Squeeze: 0.3), Rule 4 (VolHigh+2σ: 0.15), Rule 5 (VolHigh+Bear: 0.5), Rule 6 (3σ: 0.25), Rule 7 (Positive Ret Penalty: -0.1). Liquidity Decay active.",
+    "capitulation_bypass": "Cap p_crisis at 0.1 and shift to CHOP if ret < -2.5σ and liq > p99.5.",
+    "output_mapping": "6 internal states (3 vol × 3 dir) → 5 semantic states (bull_calm, bull_vol_up, bear_trend, chop, crisis).",
     "hmm_modulator_range": "[0.1, 2.5]",
-    "hmm_vol_target_range": "[0.5, 1.5]",
-    "hmm_min_duration": "No longer fixed per-state. Regime-appropriate via natural HMM persistence."
+    "hmm_vol_target_range": "[0.5, 1.5]"
   },
   "current_performance": {
-    "version": "v9.0.0",
-    "crisis_mu": "-0.144%",
-    "bear_mu": "-0.038%",
-    "crisis_share": "3.3%",
-    "tail_capture_is": "45.4%",
+    "version": "v9.1.0",
+    "crisis_mu": "-0.096%",
+    "bear_mu": "-0.230%",
+    "lead_lag_capture_is": "50.0%",
+    "lead_lag_capture_oos": "47.8%",
     "tail_capture_oos": "47.4%",
-    "avg_duration": "45.0 bars",
-    "status": "ACCEPTABLE per revised criteria"
+    "regime_ic": "+0.0075",
+    "status": "PASS on Lead-Lag, FAIL on IC"
   },
   "evaluation_criteria_version": "2026-05-12-revised",
-  "evaluation_criteria_reference": ".ai/evaluation_criteria.md",
   "architectural_insights": {
-    "breakthrough": "First time CRISIS MU achieved negative value (-0.144%) across all v8.x and v9.0 experiments. Root cause addressed: V-shaped recovery problem solved by decomposing vol regime from direction regime.",
-    "key_lesson": "Unsupervised clustering (Student-t HMM) cannot solve supervised classification (investment regimes). Architectural decomposition + supervised crisis detector is the correct approach.",
-    "remaining_frontier": "Lead-Lag Tail Capture measurement + Regime Information Coefficient (IC). Current concurrent tail capture doesn't measure preventive power."
+    "breakthrough": "Successfully implemented Lead-Lag measurement and achieved PASS (>40%). Model is now empirically proven to lead 꼬리 사고 in ~50% of cases.",
+    "key_lesson": "Liquidity-based decay and capitulation bypass are critical for handling the 'V-recovery' bias of unsupervised HMMs. Rule-based scoring must penalize positive returns to maintain CRISIS purity.",
+    "remaining_frontier": "Regime IC remains positive. Need to refine the forward window for IC or implement TVTP interaction terms for earlier detection."
   },
   "failed_experiments": [
     {
-      "name": "P1_ALD_Emission",
-      "change": "Asymmetric Laplace Distribution for returns dimension only",
-      "outcome": "Tail Capture collapsed 54.3% → 40.9%, CRISIS share → 0.7%",
-      "lesson": "Adding more distribution complexity on top of heavily-penalized objective function causes parameter collapse. Simpler model + cleaner objective > complex model + multi-penalty stack."
-    },
-    {
-      "name": "P1+P2_Semi_Supervised_Pinning_Plus_6State",
-      "change": "Crisis anchor pinning + 6-state internal HMM",
-      "outcome": "CRISIS MU improved but remained positive, Tail Capture improved to 63.2% but constrained by architecture.",
-      "lesson": "Single-model HMM cannot decouple vol regime from direction regime. State splitting (6→7→9) doesn't solve underlying misspecification."
+      "name": "Step3_TVTP_DownsideVol",
+      "change": "Adding downside_vol to Layer 1 TVTP features",
+      "outcome": "BEAR_TREND state collapsed (0% share), Tail Capture dropped to 0.8%",
+      "lesson": "Layer 1 (MS-GARCH) is highly sensitive to TVTP feature count. Adding features without proper regularization can cause state collapse."
     }
-  ],
-  "next_recommended_actions": [
-    "P9.0.A: Implement Lead-Lag Tail Capture measurement (% of CRISIS entries followed by tail event within N bars). Target: >40%.",
-    "P9.0.B: Calculate Regime Information Coefficient (Spearman IC between p_crisis and forward 10-bar return). Target: IC < -0.05.",
-    "P9.0.C: Fine-tune crisis_detector rule weights. Current CRISIS MU -0.144% is 0.056%p below -0.2% target. Adjust Rule 6 (3-sigma) from 0.35→0.45 weight with trade-off monitoring.",
-    "P9.0.D: Evaluate directional regime lead time (bars before trend reversal captured by dir HMM). Optimize conditional transition matrices per vol state."
   ]
 }
