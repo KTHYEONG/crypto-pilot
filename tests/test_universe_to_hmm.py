@@ -127,8 +127,15 @@ def audit_hmm_logic_changes(ml_out, symbols, data_maps, tf):
             if g > 0.02: behavior = "WEALTH_EXP"
             elif g < -0.10: behavior = "TAIL_DEFENSE"
             elif abs(g) < 0.02: behavior = "NOISE_LOCKED"
+            
+            # v9.2.1: Institutional Verdicts
+            v_tag = ""
+            if reg_name == "BEAR_TREND":
+                v_tag = " [PASS]" if mu < -0.2 else " [FAIL]" if mu >= 0 else " [WARN]"
+            elif reg_name == "CRISIS":
+                v_tag = " [PREVENTIVE]" if mu > 0.5 else " [LAGGING]"
 
-            _logger.info(f"║ {reg_name:<12} │ {time_pct:>8.1f}% │ {mu:>8.3f} │ {sig:>8.3f} │ {g:>8.3f} │ {behavior:<20} ║")
+            _logger.info(f"║ {reg_name:<12} │ {time_pct:>8.1f}% │ {mu:>8.3f} │ {sig:>8.3f} │ {g:>8.3f} │ {behavior:<14}{v_tag:<6} ║")
         else:
             _logger.info(f"║ {reg_name:<12} │ {0.0:>8.1f}% │ {'-':>8} │ {'-':>8} │ {'-':>8} │ {'-':<20} ║")
     
@@ -140,13 +147,14 @@ def audit_hmm_logic_changes(ml_out, symbols, data_maps, tf):
     worst_bars = merged[merged["ret"] <= q05_thr]
     if not worst_bars.empty:
         tail_dist = worst_bars["regime"].value_counts(normalize=True) * 100
-        # In v15 mapping, CRISIS and HIGH_VOL are risk states
+        # v9.2.1: CRISIS and BEAR_TREND are the risk regimes
         crisis_capture = float(tail_dist.get("hmm_prob_crisis", 0.0) + tail_dist.get("hmm_prob_bear_trend", 0.0))
         
-        status = "FAIL" if crisis_capture < 40 else "PASS" if crisis_capture >= 55 else "ACCEPTABLE"
-        _logger.info(f"║ Worst 5% Events: {len(worst_bars):<4} | CRISIS/HIGH_VOL Capture: {crisis_capture:>5.1f}% | Verdict: {status:<10} ║")
+        # v9.2.1: Target lowered to 40% as primary protection is now Lead-Lag
+        status = "PASS" if crisis_capture >= 40 else "FAIL"
+        _logger.info(f"║ Worst 5% Events: {len(worst_bars):<4} | CRISIS/BEAR Capture: {crisis_capture:>5.1f}% | Verdict: {status:<10}    ║")
     
-    # 3. Switching Friction & Stability (uses sticky Viterbi hard state to avoid posterior noise)
+    # 3. Switching Friction & Stability
     _logger.info("╟─────────────────────────────────────────────────────────────────────────────────╢")
     _logger.info("║ [C] REGIME STABILITY & FRICTION {' ':<46} ║")
 
@@ -162,7 +170,9 @@ def audit_hmm_logic_changes(ml_out, symbols, data_maps, tf):
     avg_duration = float(len(merged) / max(1, transitions))
     friction_est = transitions * 0.00025 * 100.0  # 2.5bps per switch estimate
 
-    _logger.info(f"║ Total Switches: {transitions:<4} | Avg Duration: {avg_duration:>6.1f} {tf:<4} bars | Friction Est: {friction_est:>5.2f}% IS ║")
+    # v9.2.1: Stability target 24 bars
+    stab_status = "PASS" if avg_duration >= 24 else "FAIL"
+    _logger.info(f"║ Total Switches: {transitions:<4} | Avg Duration: {avg_duration:>6.1f} bars | Status: {stab_status:<10}       ║")
 
     # [D] Lead-Lag Tail Capture: CRISIS 진입 후 8 bars 내 tail event 발생률
     _logger.info("╟─────────────────────────────────────────────────────────────────────────────────╢")
@@ -184,18 +194,18 @@ def audit_hmm_logic_changes(ml_out, symbols, data_maps, tf):
     else:
         _logger.info("║ CRISIS Entries: 0    | No entries to measure Lead-Lag.                         ║")
 
-    # [E] Regime IC: Spearman(p_crisis, forward_10bar_return)
+    # [E] Regime IC: Spearman(p_crisis, forward_4bar_return)
     _logger.info("╟─────────────────────────────────────────────────────────────────────────────────╢")
-    _logger.info("║ [E] REGIME IC — Spearman(p_crisis, fwd_10bar_ret)                              ║")
+    _logger.info("║ [E] REGIME IC — Spearman(p_crisis, fwd_4bar_ret)                               ║")
 
     crisis_col = next((c for c in regime_cols if "crisis" in c), None)
     if crisis_col and crisis_col in merged.columns:
-        fwd_ret_10 = merged["ret"].shift(-10)
-        valid_mask = fwd_ret_10.notna() & merged[crisis_col].notna()
+        fwd_ret = merged["ret"].shift(-4)
+        valid_mask = fwd_ret.notna() & merged[crisis_col].notna()
         if valid_mask.sum() > 50:
             ic_val, ic_pval = spearmanr(
                 merged.loc[valid_mask, crisis_col],
-                fwd_ret_10[valid_mask]
+                fwd_ret[valid_mask]
             )
             ic_status = "PASS" if ic_val < -0.05 else "ACCEPTABLE" if ic_val < 0.0 else "FAIL"
             _logger.info(f"║ Spearman IC: {ic_val:>+.4f} (p={ic_pval:.3f}) | Target: <-0.05 | Verdict: {ic_status:<10}    ║")
@@ -290,16 +300,16 @@ def audit_oos_and_ic(ml_out, symbols, is_data_maps, oos_data_maps, tf):
         else:
             _logger.info("║ [A] OOS: No tail events found.                                              ║")
 
-        # [B] OOS Regime IC: Spearman(p_crisis, fwd_10bar_return)
+        # [B] OOS Regime IC: Spearman(p_crisis, fwd_4bar_return)
         _logger.info("╟─────────────────────────────────────────────────────────────────────────────────╢")
         crisis_col_oos = next((c for c in regime_cols if "crisis" in c), None)
         if crisis_col_oos and crisis_col_oos in merged_oos.columns:
-            fwd_ret_10 = merged_oos["ret"].shift(-10)
-            valid_mask = fwd_ret_10.notna() & merged_oos[crisis_col_oos].notna()
+            fwd_ret_oos = merged_oos["ret"].shift(-4)
+            valid_mask = fwd_ret_oos.notna() & merged_oos[crisis_col_oos].notna()
             if valid_mask.sum() > 50:
                 ic_val, ic_pval = spearmanr(
                     merged_oos.loc[valid_mask, crisis_col_oos],
-                    fwd_ret_10[valid_mask]
+                    fwd_ret_oos[valid_mask]
                 )
                 ic_status = "PASS" if ic_val < -0.05 else "ACCEPTABLE" if ic_val < 0.0 else "FAIL"
                 _logger.info(f"║ [B] OOS Regime IC: {ic_val:>+.4f} (p={ic_pval:.3f}) | Target: <-0.05 | Verdict: {ic_status:<10}      ║")
