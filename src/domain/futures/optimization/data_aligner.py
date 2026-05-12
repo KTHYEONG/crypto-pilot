@@ -1,16 +1,13 @@
-"""
-Futures Optuna objective: anchored walk-forward (AWF) legs, Kelly-CVaR scalar,
+"""Futures Optuna objective: anchored walk-forward (AWF) legs, Kelly-CVaR scalar,
 disk+memory signal cache.
 """
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Tuple
-
 import numpy as np
 import pandas as pd
 
-_FUTURES_2D_REQUIRED_COLS: Tuple[str, ...] = (
+_FUTURES_2D_REQUIRED_COLS: tuple[str, ...] = (
     "open",
     "high",
     "low",
@@ -37,12 +34,11 @@ _FUTURES_2D_REQUIRED_COLS: Tuple[str, ...] = (
 )
 
 
-def _dataframe_to_symbol_arrays(sig_df: pd.DataFrame) -> Dict[str, np.ndarray]:
-    """
-    Converts a signal DataFrame to a dictionary of numpy arrays.
+def _dataframe_to_symbol_arrays(sig_df: pd.DataFrame) -> dict[str, np.ndarray]:
+    """Converts a signal DataFrame to a dictionary of numpy arrays.
     Optimized to minimize allocations and redundant filling.
     """
-    out: Dict[str, np.ndarray] = {}
+    out: dict[str, np.ndarray] = {}
     
     # 1. Base OHLCV (Direct to numpy, no filling needed for these usually)
     for col in ["open", "high", "low", "close"]:
@@ -95,16 +91,24 @@ def _dataframe_to_symbol_arrays(sig_df: pd.DataFrame) -> Dict[str, np.ndarray]:
 
 
 def _build_aligned_2d_from_prebuilt(
-    prebuilt_arrays: Dict[str, Dict[str, np.ndarray]],
-    symbols: List[str],
+    prebuilt_arrays: dict[str, dict[str, np.ndarray]],
+    symbols: list[str],
     slice_start: int,
     slice_end: int,
-) -> Optional[Dict[str, np.ndarray]]:
+    sigma_3d_full: np.ndarray | None = None,
+) -> dict[str, np.ndarray] | None:
     if slice_end - slice_start < 2:
         return None
-    aligned_data: Dict[str, np.ndarray] = {}
+    aligned_data: dict[str, np.ndarray] = {}
+    
+    # Slice the precomputed 3D covariance if provided
+    if sigma_3d_full is not None:
+        if slice_end > sigma_3d_full.shape[0]:
+            return None
+        aligned_data["sigma_3d"] = sigma_3d_full[slice_start:slice_end]
+        
     for col in _FUTURES_2D_REQUIRED_COLS:
-        col_views: List[np.ndarray] = []
+        col_views: list[np.ndarray] = []
         for sym in symbols:
             sym_arrs = prebuilt_arrays.get(sym)
             if sym_arrs is None:
@@ -122,16 +126,16 @@ def _build_aligned_2d_from_prebuilt(
 
 
 def align_data_for_2d_engine(
-    signal_dfs: Dict[str, pd.DataFrame],
-    symbols: List[str],
-) -> Tuple[Dict[str, np.ndarray], pd.Series]:
-    all_dates: List[pd.Series] = []
+    signal_dfs: dict[str, pd.DataFrame],
+    symbols: list[str],
+) -> tuple[dict[str, np.ndarray], pd.Series]:
+    all_dates: list[pd.Series] = []
     for sym in symbols:
         df = signal_dfs.get(sym)
         if df is not None and "datetime" in df.columns:
             all_dates.append(df["datetime"])
     if not all_dates:
-        empty: Dict[str, np.ndarray] = {}
+        empty: dict[str, np.ndarray] = {}
         return empty, pd.Series(dtype="datetime64[ns]")
 
     master_index = (
@@ -166,7 +170,7 @@ def align_data_for_2d_engine(
         "hmm_modulator_long",
         "hmm_modulator_short",
     ]
-    aligned_data: Dict[str, np.ndarray] = {
+    aligned_data: dict[str, np.ndarray] = {
         col: np.full((n_bars, n_syms), np.nan, dtype=np.float64) for col in target_cols
     }
 
@@ -215,7 +219,7 @@ def _segment_with_context(
     full_signal_df: pd.DataFrame,
     exec_start_idx: int,
     exec_end_idx: int,
-) -> Tuple[pd.DataFrame, int]:
+) -> tuple[pd.DataFrame, int]:
     slice_start = max(0, int(exec_start_idx) - 1)
     slice_end = max(slice_start, int(exec_end_idx))
     segment = full_signal_df.iloc[slice_start:slice_end].copy(deep=False)

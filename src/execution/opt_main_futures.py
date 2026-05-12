@@ -1321,7 +1321,7 @@ def main() -> None:
         study_ml.optimize(
             lambda tr, ctx=ph_ctx: objective_ml_phase_d(tr, ctx),
             n_trials=nt,
-            n_jobs=1 if args.ops_profile == "smoke" else min(4, _resolve_futures_parallel_policy(len(valid_symbols))),
+            n_jobs=min(4, _resolve_futures_parallel_policy(len(valid_symbols))),
             callbacks=[_trial_progress_callback],
             catch=(ValueError,),
         )
