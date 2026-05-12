@@ -7,12 +7,17 @@ import importlib
 import json
 import logging
 import math
+import gc
 import multiprocessing
 import os
 import re
 import sys
 from pathlib import Path
 from typing import Any
+
+from sqlalchemy import create_engine, text
+from sqlalchemy.pool import QueuePool
+from joblib import Parallel, delayed
 
 os.environ.setdefault("OMP_NUM_THREADS", "1")
 os.environ.setdefault("MKL_NUM_THREADS", "1")
@@ -73,6 +78,9 @@ from src.domain.futures.optimization.evaluator import (  # noqa: E402
 from src.domain.futures.optimization.optimizer import (  # noqa: E402
     EMBARGO_BARS,
     MLPhaseDContext,
+    _base_engine_params,
+    _cached_kill_fund_lev,
+    _run_portfolio_numba_block,
     build_ml_phase_d_params,
     build_phase_d_enqueue_params_from_deploy_json,
     inject_cs_momentum_ranks,
@@ -124,6 +132,8 @@ warnings.filterwarnings("ignore")
 # Force Linux 'fork' method for memory efficiency (CoW)
 if sys.platform != "win32":
     try:
+        # We use 'fork' for maximum startup speed.
+        # CoW preservation is handled via gc.freeze() later.
         multiprocessing.set_start_method("fork", force=True)
     except RuntimeError:
         pass
@@ -886,6 +896,19 @@ def _load_futures_data_maps_for_symbols(
 
 
 
+def optimize_worker(s_name: str, s_url: str, trials: int, ctx: MLPhaseDContext):
+    # Each process loads the study and runs its portion of trials
+    # This completely bypasses the GIL.
+    # Note: Use a local storage object to avoid sharing it across processes
+    inner_storage = optuna.storages.RDBStorage(s_url, engine_kwargs={"connect_args": {"timeout": 60, "check_same_thread": False}})
+    study = optuna.load_study(study_name=s_name, storage=inner_storage)
+    study.optimize(
+        lambda tr: objective_ml_phase_d(tr, ctx),
+        n_trials=trials,
+        n_jobs=1,  # 1 job per process
+        catch=(ValueError, RuntimeError),
+    )
+
 def main() -> None:
     ai_telemetry_payloads: list[dict[str, Any]] = []
     pre_parser = argparse.ArgumentParser(add_help=False)
@@ -1204,191 +1227,111 @@ def main() -> None:
         n_ml_trials = int(args.trials)
         learning = OPT_FUTURES_CONFIG.get("FUTURES_LEARNING_SEEDS", [42])
         target_seeds = [int(s) for s in learning] if args.seed is None else [int(args.seed)]
-    
-    all_trials: list[optuna.trial.FrozenTrial] = []
-
-    phase_trials = OPT_FUTURES_CONFIG.get(
-        "FUTURES_COORD_PHASE_TRIALS", {"A": 80, "B": 120, "C": 60}
-    )
 
     _logger.info("\n" + "═" * 85)
-    _logger.info(" [STEP 4/5] OPTIMIZATION (3-phase coordinate ascent)")
+    _logger.info(" [STEP 4/5] OPTIMIZATION (Joint NSGA-II)")
     _logger.info("═" * 85 + "\n")
 
-    ml_ctx: MLPhaseDContext | None = None
-    frozen_accum: dict[str, Any] = {}
-    champion_raw_params: dict[str, Any] = {}
-
     seed_learn = int(OPT_FUTURES_CONFIG.get("FUTURES_LEARNING_SEEDS", [42])[0])
-    _logger.info(
-        " [ARCH] portfolio_constructor (Ledoit–Wolf + vol-target Kelly) | "
-        "coordinate ascent | learning_seed=%s (stability seeds run post-optimization)",
-        seed_learn,
-    )
     base_ctx = MLPhaseDContext(
         data_maps=data_maps,
         symbols=valid_symbols,
         tf=args.tf,
         seed=seed_learn,
-        effective_total_trials=max(
-            1, sum(int(phase_trials.get(p, 80)) for p in ("A", "B", "C"))
-        ),
+        effective_total_trials=n_ml_trials,
         ml_pipeline_fetch_start=fetch_start_date,
         ml_pipeline_end=end_date,
         ml_pipeline_is_start=start_date,
         ml_pipeline_workers=ml_n_jobs,
     )
-    precompute_ml_optimization_context(base_ctx)
     ml_ctx = base_ctx
-    last_study = None
-    frozen_after_ab: dict[str, Any] = {}
 
-    def _trial_progress_callback(study: optuna.Study, trial: optuna.trial.FrozenTrial) -> None:
-        n_complete = len([t for t in study.trials if t.state == TrialState.COMPLETE])
-        n_total = study.user_attrs.get("_n_trials", 1)
-        pname_cb = study.user_attrs.get("_pname", "?")
-        filled = int(20 * n_complete / max(n_total, 1))
-        bar = "█" * filled + "░" * (20 - filled)
-        if n_complete > 0:
-            try:
-                _bv = study.best_value
-                best_val = float(_bv) if not isinstance(_bv, (list, tuple)) else float(_bv[0])
-            except Exception:
-                best_val = float("nan")
-        else:
-            best_val = float("nan")
-        sys.stderr.write(
-            f"\r  🔧 Phase {pname_cb} [{bar}] {n_complete:>3}/{n_total}  best={best_val:.4f}   "
-        )
-        sys.stderr.flush()
-        if n_complete >= n_total:
-            sys.stderr.write("\n")
 
-    _ns2_enabled = bool(OPT_FUTURES_CONFIG.get("FUTURES_ML_ALPHA_NSGA2_ENABLED", False))
-    for pname in ("A", "B", "C"):
-        nt = int(phase_trials.get(pname, 80))
-        ph_ctx = dataclasses.replace(
-            base_ctx,
-            coordinate_phase=pname,
-            coordinate_frozen_params=dict(frozen_accum) if frozen_accum else None,
-            effective_total_trials=max(1, nt),
-        )
-        pbo_max_eff, dsr_min_eff, _ = resolve_adjusted_gates(OPT_FUTURES_CONFIG, nt)
-        if _ns2_enabled:
-            study_ml = optuna.create_study(
-                directions=["minimize", "minimize"],  # Obj1: growth, Obj2: worst_leg
-                sampler=optuna.samplers.NSGAIISampler(
-                    population_size=min(50, max(10, nt // 4)),
-                    seed=seed_learn + ord(pname[0]),
-                ),
-                pruner=optuna.pruners.NopPruner(),  # NSGA-II는 population 유지 필요
-            )
-        else:
-            study_ml = optuna.create_study(
-                directions=["minimize"],
-                sampler=_ml_phase_d_sampler_coordinate(
-                    seed_learn + ord(pname[0]), nt, pname
-                ),
-                pruner=(
-                    optuna.pruners.MedianPruner(n_startup_trials=20, n_warmup_steps=2)
-                    if pname == "B"
-                    else optuna.pruners.NopPruner()
-                ),
-            )
-        study_ml.set_user_attr("_n_trials", nt)
-        study_ml.set_user_attr("_pname", pname)
-        _logger.info("🔧 Optuna Phase %s | %d trials", pname, nt)
-        if (
-            pname == "A"
-            and bool(OPT_FUTURES_CONFIG.get("FUTURES_ML_PHASE_D_ENQUEUE_DEPLOY_JSON", False))
-        ):
-            rel = str(
-                OPT_FUTURES_CONFIG.get(
-                    "FUTURES_ML_PHASE_D_DEPLOY_JSON_REL", "results/best_futures_1h.json"
-                )
-            )
-            deploy_path = Path(project_root) / rel
-            if deploy_path.is_file():
-                try:
-                    with open(deploy_path, encoding="utf-8") as bf:
-                        deploy_data = json.load(bf)
-                    enq = build_phase_d_enqueue_params_from_deploy_json(deploy_data)
-                    if enq is not None:
-                        study_ml.enqueue_trial(enq)
-                except Exception as _enq_e:
-                    _logger.debug("Deploy JSON enqueue skipped: %s", _enq_e)
+    # [Speed Optimization] Numba Warm-up
+    _logger.info("  --> [WARM-UP] JIT-compiling Numba kernels...")
+    # Force enable NSGA2 for Joint optimization
+    OPT_FUTURES_CONFIG["FUTURES_ML_ALPHA_NSGA2_ENABLED"] = True
+    precompute_ml_optimization_context(base_ctx)
+    if base_ctx.awf_leg_slices:
+        test_leg = base_ctx.awf_leg_slices[0]["data"]
+        zkill, zfund, lev_leg = _cached_kill_fund_lev(test_leg, _base_engine_params({}, args.tf))
+        _run_portfolio_numba_block(_base_engine_params({}, args.tf), test_leg, zkill, zfund, lev_leg)
 
-        study_ml.optimize(
-            lambda tr, ctx=ph_ctx: objective_ml_phase_d(tr, ctx),
-            n_trials=nt,
-            n_jobs=min(4, _resolve_futures_parallel_policy(len(valid_symbols))),
-            callbacks=[_trial_progress_callback],
-            catch=(ValueError,),
-        )
-        all_trials.extend(study_ml.trials)
-        last_study = study_ml
-        completed = [t for t in study_ml.trials if t.state == TrialState.COMPLETE]
-        
-        if not completed:
-            _logger.error(f"  [COORD {pname}] No trials completed successfully. Stopping optimization.")
-            return
-
-        if _ns2_enabled and study_ml.best_trials:
-            bt = topsis_select_best(study_ml.best_trials)
-        else:
-            bt = study_ml.best_trial
-        frozen_accum.update(dict(bt.params))
-        pass_count = 0
-        for t in completed:
-            _awf_pos = float(t.user_attrs.get("awf_pos_frac", 0.0))
-            pbo_obs_s = awf_pos_frac_to_pseudo_pbo(_awf_pos)
-            if _ml_trial_passes_hard_gates(
-                t, pbo_obs_s, check_pbo=True, pbo_max=pbo_max_eff, dsr_min=dsr_min_eff
-            ):
-                pass_count += 1
-        _logger.info(
-            "  [COORD %s] complete=%d pass=%d", pname, len(completed), pass_count
-        )
-        if pname == "A" and completed:
-            _sample = completed[:3]
-            for _t in _sample:
-                _logger.info(
-                    "  [DIAG trial=%d] awf_pos_frac=%.2f avg_trades=%.1f "
-                    "worst_leg=%.4f worst_mdd=%.2f dsr=%.4f leg_log_tw=%s",
-                    _t.number,
-                    float(_t.user_attrs.get("awf_pos_frac", -9)),
-                    float(_t.user_attrs.get("avg_trades", -9)),
-                    float(_t.user_attrs.get("awf_worst_leg_log_tw", -9)),
-                    float(_t.user_attrs.get("awf_worst_mdd_pct", -9)),
-                    float(_t.user_attrs.get("gate1_dsr", -9)),
-                    _t.user_attrs.get("awf_leg_log_tw", []),
-                )
-        if pname == "B":
-            frozen_after_ab = dict(frozen_accum)
-
-    assert last_study is not None
-    c_complete_ranked = sorted(
-        [
-            t
-            for t in last_study.trials
-            if t.state == TrialState.COMPLETE
-        ],
-        key=lambda t: float(t.user_attrs.get("awf_robust_score", -1e18)),
-        reverse=True,
+    # [Speed Optimization] High-Performance Optuna Storage (SQLite WAL)
+    storage_path = Path(project_root) / "logs" / "optuna_futures.db"
+    if storage_path.exists():
+        storage_path.unlink()
+    
+    storage_url = f"sqlite:///{storage_path}"
+    
+    # 1. SQLAlchemy Engine with WAL mode & Connection Pooling
+    # check_same_thread=False is required for multi-threaded access.
+    engine = create_engine(
+        storage_url,
+        connect_args={"check_same_thread": False, "timeout": 60},
+        poolclass=QueuePool,
+        pool_size=10,
+        max_overflow=20
     )
-    runner_up_merged: dict[str, Any] | None = None
-    if (
-        len(c_complete_ranked) >= 2
-        and frozen_after_ab
-        and bool(OPT_FUTURES_CONFIG.get("FUTURES_STABILITY_RUNNER_UP_RETRY", True))
-    ):
-        runner_up_merged = {**frozen_after_ab, **dict(c_complete_ranked[1].params)}
+    
+    with engine.begin() as conn:
+        conn.execute(text("PRAGMA journal_mode=WAL;"))
+        conn.execute(text("PRAGMA synchronous=NORMAL;"))
+        conn.execute(text("PRAGMA cache_size=-64000;"))  # 64MB Cache
 
-    if _ns2_enabled and last_study.best_trials:
-        best_trial_coord = topsis_select_best(last_study.best_trials)
-    else:
-        best_trial_coord = last_study.best_trial
-    champion_raw_params = dict(frozen_accum)
+    storage = optuna.storages.RDBStorage(storage_url, engine_kwargs={"connect_args": {"timeout": 60, "check_same_thread": False}})
+    study_name = "futures_joint_nsga2"
+
+    # [Memory Optimization] gc.freeze() to preserve CoW before parallel branching
+    # This prevents memory explosion in WSL by stopping refcount updates on data_maps.
+    _logger.info("  --> [MEMORY] Freezing GC to preserve CoW...")
+    gc.collect()
+    gc.freeze()
+
+    study_ml = optuna.create_study(
+        study_name=study_name,
+        storage=storage,
+        directions=["minimize", "minimize"],  # Obj1: -Mean Log TW, Obj2: -Min Log TW
+        sampler=optuna.samplers.NSGAIISampler(
+            population_size=int(OPT_FUTURES_CONFIG.get("FUTURES_NSGA2_POPULATION_SIZE", 30)),
+            seed=seed_learn,
+        ),
+        load_if_exists=True,
+    )
+
+    _logger.info("  --> [EXEC] Running Joint NSGA-II optimization (8 Parallel Processes)...")
+    
+    # Distribute trials across 8 processes
+    n_workers = 8
+    trials_per_worker = n_ml_trials // n_workers
+    remainder = n_ml_trials % n_workers
+    
+    worker_tasks = []
+    for i in range(n_workers):
+        t_count = trials_per_worker + (1 if i < remainder else 0)
+        if t_count > 0:
+            worker_tasks.append(delayed(optimize_worker)(study_name, storage_url, t_count, base_ctx))
+
+    Parallel(n_jobs=n_workers, backend="multiprocessing")(worker_tasks)
+
+    all_trials = study_ml.get_trials()
+    best_trials = study_ml.best_trials
+
+    if not best_trials:
+        _logger.error("  [FAIL] No trials completed successfully. Stopping optimization.")
+        return
+
+    # [TOPSIS] Selection from Pareto front
+    best_trial_coord = topsis_select_best(best_trials)
+    champion_raw_params = dict(best_trial_coord.params)
+    _logger.info("  [SUCCESS] Optimization complete. Best Trial: %d", best_trial_coord.number)
+
+    # [STABILITY] Runner-up logic for Joint optimization
+    runner_up_merged = None
+    if len(best_trials) >= 2:
+        # Simple runner-up: next closest to ideal point (this is a placeholder for more complex logic)
+        runner_up_merged = dict(best_trials[1].params)
+
 
     champ_stab_cv: float | None = None
     stab_tmp_layer3_awf_fail = False
@@ -1470,21 +1413,21 @@ def main() -> None:
             params=champ_params,
             representative_trial=best_trial_coord,
             n_completed=len(
-                [t for t in last_study.trials if t.state == TrialState.COMPLETE]
+                [t for t in study_ml.trials if t.state == TrialState.COMPLETE]
             ),
             n_passing=0,
             n_basin=1,
-            method="coordinate_ascent",
+            method="joint_nsga2",
         )
     ]
     _logger.info(
-        "  [SELECTOR] method=coordinate_ascent members=1 trials_total=%d",
+        "  [SELECTOR] method=joint_nsga2 members=1 trials_total=%d",
         len(all_trials),
     )
 
-    n_trials_for_gates = sum(int(phase_trials.get(p, 80)) for p in ("A", "B", "C"))
+    n_trials_for_gates = int(n_ml_trials)
     pbo_gate, dsr_gate, pbo_champ_eff = resolve_adjusted_gates(
-        OPT_FUTURES_CONFIG, int(n_trials_for_gates)
+        OPT_FUTURES_CONFIG, n_trials_for_gates
     )
 
     def _is_passing_trial(t: optuna.trial.FrozenTrial) -> bool:

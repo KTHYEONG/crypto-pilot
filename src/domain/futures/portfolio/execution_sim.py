@@ -479,6 +479,7 @@ def backtest_target_weights_numba(
     max_exposure: float,
     max_exp_per_coin: float,
     dd_scaling_threshold: float,
+    volume_2d: np.ndarray | None = None,
 ) -> tuple[np.ndarray, float, np.ndarray, np.ndarray]:
     """Execute toward signed equity fractions `target_weights` (rebalance at open); no CS ranking path.
 
@@ -585,7 +586,18 @@ def backtest_target_weights_numba(
                     need_exit = True
 
                 if need_exit:
-                    exit_price = op * (1.0 - slippage_rate * pos_side[s])
+                    # [Non-linear Friction] Slippage = Constant * (ATR/Close) * sqrt(OrderSize / Volume)
+                    eff_slip = slippage_rate
+                    if volume_2d is not None:
+                        vol = volume_2d[i, s]
+                        if vol > 0:
+                            order_val = amount[s] * op
+                            atr_v = atr_2d[i, s]
+                            # Heuristic constant 0.1 for market impact
+                            impact = 0.1 * (atr_v / op) * np.sqrt(order_val / vol)
+                            eff_slip += impact
+
+                    exit_price = op * (1.0 - eff_slip * pos_side[s])
                     pnl = (exit_price - entry_p[s]) * amount[s] * pos_side[s]
                     fee_x = amount[s] * exit_price * taker_fee
                     balance += ((amount[s] * entry_p[s]) / entry_lev[s]) + (pnl - fee_x)
@@ -633,7 +645,17 @@ def backtest_target_weights_numba(
                 if ts == 0:
                     continue
 
-                fill_p = op * (1.0 + slippage_rate * float(ts))
+                # [Non-linear Friction]
+                eff_slip = slippage_rate
+                if volume_2d is not None:
+                    vol = volume_2d[i, s]
+                    if vol > 0:
+                        order_val = abs(tgt_notional)
+                        atr_v = atr_2d[i, s]
+                        impact = 0.1 * (atr_v / op) * np.sqrt(order_val / vol)
+                        eff_slip += impact
+
+                fill_p = op * (1.0 + eff_slip * float(ts))
                 atr_prev = atr_2d[prev_i, s]
                 if np.isnan(atr_prev) or atr_prev <= 0.0:
                     continue

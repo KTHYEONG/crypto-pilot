@@ -382,6 +382,7 @@ def _build_prebuilt_full_arrays(
         trimmed_sig["high"] = raw_full["high"].to_numpy(dtype=np.float64, copy=False)
         trimmed_sig["low"] = raw_full["low"].to_numpy(dtype=np.float64, copy=False)
         trimmed_sig["open"] = raw_full["open"].to_numpy(dtype=np.float64, copy=False)
+        trimmed_sig["volume"] = raw_full["volume"].to_numpy(dtype=np.float64, copy=False) if "volume" in raw_full.columns else np.ones(len(raw_full))
         _atr_col = raw_full["atr"].to_numpy(dtype=np.float64, copy=False) if "atr" in raw_full.columns else None
         if _atr_col is None or not np.any(_atr_col > 0):
             _atr_period_fb = int(OPT_FUTURES_CONFIG.get("FUTURES_ATR_PERIOD_FIXED", 30))
@@ -448,8 +449,11 @@ def _build_prebuilt_full_arrays(
         _xs_cols = (
             "xs_score_long",
             "xs_score_short",
-            "hmm_prob_crisis",
+            "hmm_prob_bull_calm",
+            "hmm_prob_bull_vol_up",
             "hmm_prob_bear_trend",
+            "hmm_prob_chop",
+            "hmm_prob_crisis",
             "hmm_hard_state",
             "hmm_modulator_long",
             "hmm_modulator_short",
@@ -1063,73 +1067,55 @@ def _baseline_ml_out_dict_for_coordinate(policy: Any) -> dict[str, Any]:
     }
 
 
-def _suggest_ml_coordinate_phase(trial: optuna.Trial, ctx: MLPhaseDContext) -> dict[str, Any]:
-    """3-phase coordinate ascent: portfolio caps → signal betas → execution."""
+def _suggest_ml_joint_nsga2(trial: optuna.Trial, ctx: MLPhaseDContext) -> dict[str, Any]:
+    """Joint NSGA-II parameter space (15-20 parameters)."""
     policy = load_portfolio_policy_config(OPT_FUTURES_CONFIG)
-    base = _baseline_ml_out_dict_for_coordinate(policy)
-    base.update(dict(ctx.coordinate_frozen_params or {}))
-    ph = ctx.coordinate_phase or "A"
 
-    if ph == "A":
-        ann = float(trial.suggest_float("TARGET_ANN_VOL", 0.15, 0.45, step=0.05))
-        gh = min(
-            float(policy.gross_exposure_cap),
-            float(OPT_FUTURES_CONFIG.get("FUTURES_PHASE_A_MAX_GROSS_EXPOSURE", 1.5)),
-        )
-        mx = float(trial.suggest_float("MAX_EXPOSURE", 1.0, gh, step=0.1))
-        pc = float(
-            trial.suggest_float(
-                "MAX_EXPOSURE_PER_COIN",
-                0.2,
-                min(0.5, mx),
-                step=0.05,
-            )
-        )
-        kappa = float(trial.suggest_float("PORTFOLIO_KAPPA", 0.25, 0.50, step=0.05))
-        base.update(
-            {
-                "TARGET_ANN_VOL": ann,
-                "PORTFOLIO_KAPPA": kappa,
-                "KELLY_LAMBDA": kappa,
-                "MAX_EXPOSURE": mx,
-                "MAX_EXPOSURE_PER_COIN": pc,
-                "RISK_PER_TRADE": kappa,
-            }
-        )
-    elif ph == "B":
-        beta_a = float(trial.suggest_float("BETA_ALPHA", 0.0, 2.0, step=0.1))
-        b_bull = float(trial.suggest_float("BETA_REGIME_BULL", 0.0, 2.0, step=0.1))
-        b_bear = float(trial.suggest_float("BETA_REGIME_BEAR", 0.0, 2.0, step=0.1))
-        b_chop = float(trial.suggest_float("BETA_REGIME_CHOP", 0.0, 2.0, step=0.1))
-        b_crisis = float(trial.suggest_float("BETA_REGIME_CRISIS", 0.0, 2.0, step=0.1))
-        ev_h = float(trial.suggest_float("EV_HURDLE_BPS", 0.0, 25.0, step=1.0))
-        base.update(
-            {
-                "BETA_ALPHA": beta_a,
-                "BETA_REGIME_BULL": b_bull,
-                "BETA_REGIME_BEAR": b_bear,
-                "BETA_REGIME_CHOP": b_chop,
-                "BETA_REGIME_CRISIS": b_crisis,
-                "EV_HURDLE_BPS": ev_h,
-            }
-        )
-    else:
-        reb = int(trial.suggest_categorical("REBALANCE_BARS", [1, 3, 6, 12, 24]))
-        slip_buf = float(
-            trial.suggest_float("SLIPPAGE_BPS_BUFFER_MULT", 0.85, 1.60, step=0.05)
-        )
-        tb_h = float(
-            trial.suggest_categorical(
-                "TIME_BARRIER_H", [0.0, 24.0, 48.0, 96.0, 168.0, 336.0]
-            )
-        )
-        base.update(
-            {
-                "REBALANCE_BARS": reb,
-                "SLIPPAGE_BPS_BUFFER_MULT": slip_buf,
-                "TIME_BARRIER_H": tb_h,
-            }
-        )
+    # 1. Capacity & Risk
+    ann = float(trial.suggest_float("TARGET_ANN_VOL", 0.15, 0.45, step=0.05))
+    gh = min(float(policy.gross_exposure_cap), 1.5)
+    mx = float(trial.suggest_float("MAX_EXPOSURE", 0.8, gh, step=0.1))
+    pc = float(trial.suggest_float("MAX_EXPOSURE_PER_COIN", 0.15, min(0.5, mx), step=0.05))
+    kappa = float(trial.suggest_float("PORTFOLIO_KAPPA", 0.2, 0.5, step=0.05))
+
+    # 2. Alpha & Regime Betas
+    beta_a = float(trial.suggest_float("BETA_ALPHA", 0.5, 1.5, step=0.1))
+    b_bull = float(trial.suggest_float("BETA_REGIME_BULL", 0.5, 2.0, step=0.1))
+    b_bear = float(trial.suggest_float("BETA_REGIME_BEAR", 0.0, 1.0, step=0.1))
+    b_chop = float(trial.suggest_float("BETA_REGIME_CHOP", 0.0, 1.0, step=0.1))
+    b_crisis = float(trial.suggest_float("BETA_REGIME_CRISIS", -0.5, 0.5, step=0.1))
+    ev_h = float(trial.suggest_float("EV_HURDLE_BPS", 0.0, 20.0, step=1.0))
+
+    # 3. Execution & Friction
+    reb = int(trial.suggest_categorical("REBALANCE_BARS", [1, 3, 6, 12]))
+    slip_buf = float(trial.suggest_float("SLIPPAGE_BPS_BUFFER_MULT", 0.8, 1.5, step=0.1))
+    tb_h = float(trial.suggest_categorical("TIME_BARRIER_H", [0.0, 24.0, 48.0, 168.0]))
+
+    # 4. HMM-conditioned Dynamic Kelly
+    crisis_thr = float(trial.suggest_float("CRISIS_OVERRIDE_THRESHOLD", 0.3, 0.7, step=0.1))
+    gamma = float(trial.suggest_float("CRISIS_GAMMA", 0.5, 3.0, step=0.5))
+
+    base = {
+        "TARGET_ANN_VOL": ann,
+        "MAX_EXPOSURE": mx,
+        "MAX_EXPOSURE_PER_COIN": pc,
+        "PORTFOLIO_KAPPA": kappa,
+        "KELLY_LAMBDA": kappa,
+        "RISK_PER_TRADE": kappa,
+        "BETA_ALPHA": beta_a,
+        "BETA_REGIME_BULL": b_bull,
+        "BETA_REGIME_BEAR": b_bear,
+        "BETA_REGIME_CHOP": b_chop,
+        "BETA_REGIME_CRISIS": b_crisis,
+        "EV_HURDLE_BPS": ev_h,
+        "REBALANCE_BARS": reb,
+        "SLIPPAGE_BPS_BUFFER_MULT": slip_buf,
+        "TIME_BARRIER_H": tb_h,
+        "CRISIS_OVERRIDE_THRESHOLD": crisis_thr,
+        "CRISIS_GAMMA": gamma,
+        "SIZING_METHOD": "profit_factor_kelly",
+        "MIN_SCORE_PERCENTILE": 0.55,
+    }
 
     return finalize_strategy_portfolio_params(base, policy)
 
@@ -1138,6 +1124,7 @@ def build_ml_phase_d_params(trial_params: dict[str, Any], tf: str) -> dict[str, 
     merged = dict(_fixed_ml_phase_d_params())
     merged.update(trial_params)
     return _base_engine_params(merged, tf)
+
 
 
 def _pf_and_ev_cost_from_trades(all_trades: np.ndarray) -> tuple[float, float]:
@@ -1345,6 +1332,7 @@ def _run_portfolio_numba_block(
         float(params.get("MAX_EXPOSURE", 0.8)),
         float(params["MAX_EXPOSURE_PER_COIN"]),
         float(params["DD_SCALING_THRESHOLD"]),
+        volume_2d=aligned.get("volume"),
     )
     return cast(tuple[np.ndarray, float, np.ndarray, np.ndarray], out_tw)
 
@@ -1465,9 +1453,15 @@ def _evaluate_awf_phase_d_aggregate(
                     raise optuna.TrialPruned()
                 diag = {"pruned": True, "robust_val": (-1e9)}
                 return 1e9, diag
-
+            
         mdd = float(calc_mdd_from_equity(b_equity)) if b_equity.size > 0 else 100.0
         log_ret = _log_tw_from_ret_pct(float((b_bal / FUTURES_INITIAL_BALANCE - 1.0) * 100.0))
+
+        # [Speed Optimization] Early Pruning after first AWF leg
+        if leg_idx == 0 and trial is not None:
+            if log_ret < -0.1:
+                raise optuna.TrialPruned()
+
 
         if mdd >= liq_mdd_thr:
             log_ret -= (mdd - liq_mdd_thr) * 3.0
@@ -1667,12 +1661,10 @@ def _evaluate_awf_phase_d_aggregate(
 
 
 def objective_ml_phase_d(trial: optuna.Trial, ctx: MLPhaseDContext) -> float | tuple[float, float]:
-    """CAWF-R Phase-D: K AWF legs minimize negative robust anchored-WF scalar."""
+    """Joint NSGA-II Portfolio Optimization."""
     if ctx.awf_leg_slices is None:
         precompute_ml_optimization_context(ctx)
-    if getattr(ctx, "coordinate_phase", None) is None:
-        raise ValueError("MLPhaseDContext.coordinate_phase is required (A/B/C).")
-    merged = _suggest_ml_coordinate_phase(trial, ctx)
+    merged = _suggest_ml_joint_nsga2(trial, ctx)
     return _evaluate_awf_phase_d_aggregate(ctx, merged, trial=trial)[0]
 
 
