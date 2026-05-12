@@ -66,7 +66,7 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     "FUTURES_ML_IC_REGIME_GATE": False,
     # Tier 2 discovery: FDR relaxation to expand candidate pool.
     "FUTURES_ML_IC_FDR_Q": 0.40,
-    "FUTURES_ML_ALPHA_NSGA2_ENABLED": False,
+    "FUTURES_ML_ALPHA_NSGA2_ENABLED": True,
     # NSGA-II population size. Generations = trials / population_size.
     # Target ≥ 10 generations → min trials = population_size * 10.
     # Sessions 27/35/38: NSGA-II 3-strike empirical failure. DSR collapses to ~0.45.
@@ -101,7 +101,7 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     "CRISIS_RECOVERY_TREND_THR": 1e9,
     "CRISIS_RECOVERY_FLOOR": 0.30,
     # CAWF-R: K anchored legs in the OOS-pool slice (train [0, anchor_i), embargo, test window).
-    "FUTURES_AWF_K_LEGS": 6,
+    "FUTURES_AWF_K_LEGS": 4,
     # IS-pool fraction (leading bars); trailing (1 − frac) builds tiled OOS test legs only.
     "FUTURES_AWF_IS_POOL_FRAC": 0.70,
     # Platt: prefer OOS-only windows in optimizer ``_fit_oos_platt_calibrators_from_maps``;

@@ -81,10 +81,8 @@ def _apply_ls_balance(w: np.ndarray, *, lo: float = 0.5, hi: float = 2.0) -> np.
         short_m = float(np.sum(np.abs(out[out < 0])))
         if short_m < 1e-12 and long_m < 1e-12:
             return out
-        if short_m < 1e-12:
-            return out * 0.0
-        if long_m < 1e-12:
-            return out * 0.0
+        if short_m < 1e-12 or long_m < 1e-12:
+            return out  # 단방향 포트폴리오는 그대로 통과 (regime-driven direction 허용)
         r = long_m / short_m
         if r < lo:
             scale_l = min(hi / max(r, 1e-12), 10.0)
@@ -167,7 +165,7 @@ def solve_constrained_weights(
         w_pre = w_raw * 0.0
 
     w_c = _project_l1_linf(w_pre, gross_cap=gross_cap, per_symbol_cap=per_symbol_cap)
-    w_c = _apply_ls_balance(w_c, lo=0.5, hi=2.0)
+    # L/S balance 강제 제거: regime 신호(HMM)가 방향성을 결정하므로 단방향 포트폴리오 허용
 
     dd = float(max(0.0, current_dd))
     dd_scale = float(np.clip(1.0 - max(0.0, dd - 0.05) / 0.10, 0.3, 1.0))
