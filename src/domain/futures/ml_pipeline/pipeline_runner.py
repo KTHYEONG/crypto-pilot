@@ -271,53 +271,54 @@ def _hmm_modulator_kelly_values(
     market_hmm_feats: pd.DataFrame | None = None,
     precomputed_risk: tuple[np.ndarray, np.ndarray] | None = None,
 ) -> pd.DataFrame:
-    """Posterior-weighted asymmetric modulators from IS Kelly; fwd returns from ``price_df_1h``."""
+    """[Advanced HMM Control] Asymmetric Kelly Modulation and Entropy-Based Confidence Shrinkage."""
     cols = _sorted_hmm_prob_columns(market_probs)
     n = len(market_probs)
-    if not cols or price_df_1h is None or len(price_df_1h) < 80:
+    
+    # Check for 5-state HMM structure
+    expected_cols = [
+        "hmm_prob_bull_calm",
+        "hmm_prob_bull_vol_up",
+        "hmm_prob_bear_trend",
+        "hmm_prob_chop",
+        "hmm_prob_crisis"
+    ]
+    has_all_cols = all(c in market_probs.columns for c in expected_cols)
+    
+    if not has_all_cols or not cols:
+        _logger.warning("Missing required HMM probability columns for advanced modulation.")
         return pd.DataFrame({
-            "hmm_modulator_long": np.full(n, 1.0, dtype=np.float64),
-            "hmm_modulator_short": np.full(n, 1.0, dtype=np.float64),
-            "hmm_modulator_base_long": np.full(n, 1.0, dtype=np.float64),
+            "hmm_modulator_long": np.ones(n, dtype=np.float64),
+            "hmm_modulator_short": np.ones(n, dtype=np.float64),
+            "hmm_modulator_base_long": np.ones(n, dtype=np.float64),
+            "hmm_modulator_base_short": np.ones(n, dtype=np.float64),
             "btc_trend_vol_adj_24h": np.zeros(n, dtype=np.float64),
         })
 
-    k_states = len(cols)
-    b = price_df_1h.sort_values("datetime").copy()
-    b["datetime"] = pd.to_datetime(b["datetime"], utc=True)
-    c = b["close"].astype(np.float64)
-    fwd_1h = np.log(c.shift(-1) / c.clip(lower=1e-12)).fillna(0.0)
-    fwd_24h = np.log(c.shift(-24) / c.clip(lower=1e-12)).fillna(0.0) / np.sqrt(24.0)
-    b["fwd_ret"] = 0.3 * fwd_1h + 0.7 * fwd_24h
-
-    mp = market_probs[["datetime", *cols]].copy()
-    mp["datetime"] = pd.to_datetime(mp["datetime"], utc=True)
-    merged = mp.merge(b[["datetime", "fwd_ret"]], on="datetime", how="left")
-    merged["fwd_ret"] = merged["fwd_ret"].fillna(0.0)
-
-    fwd_ret = merged["fwd_ret"].to_numpy(dtype=np.float64)
-    p_mat = (
-        merged[cols].replace([np.inf, -np.inf], np.nan).fillna(1.0 / float(k_states)).to_numpy()
-    )
-    dt_mp = pd.to_datetime(merged["datetime"], utc=True)
-    is_mask = (dt_mp < is_end_utc).to_numpy()
-
-    k_long, k_short = _is_kelly_per_semantic_state(p_mat, fwd_ret, is_mask, k_states, cols)
-
-    # [REFACTORED] Natural Risk-Adjusted Scaling (Phase 8) - Components for Tunable Optimizer
-    mod_long_base = 1.0 + float(shrink) * (p_mat @ k_long)
-    mod_short_base = 1.0 + float(shrink) * (p_mat @ k_short)
-
-    if precomputed_risk is not None:
-        risk_multiplier, vol_scalar_clipped = precomputed_risk
-    else:
-        # Fallback to local calculation if not provided
-        risk_multiplier, vol_scalar_clipped = _precompute_hmm_risk_components(
-            market_probs, market_hmm_feats
-        )
-
-    mod_long = np.clip(mod_long_base * risk_multiplier * vol_scalar_clipped, 0.1, 2.5).astype(np.float64)
-    mod_short = np.clip(mod_short_base * risk_multiplier * vol_scalar_clipped, 0.1, 2.5).astype(np.float64)
+    # Posterior probability matrix (N, 5)
+    p_mat = market_probs[expected_cols].to_numpy(dtype=np.float64)
+    
+    # Component 1: Asymmetric Kelly Modulation
+    # M_long = 1.0*Bull_Calm + 1.0*Bull_Vol_Up + 0.5*Chop + 0.1*Bear + 0.0*Crisis
+    # M_short = 0.0*Bull_Calm + 0.1*Bull_Vol_Up + 0.5*Chop + 1.2*Bear + 0.0*Crisis
+    w_long = np.array([1.0, 1.0, 0.1, 0.5, 0.0], dtype=np.float64)
+    w_short = np.array([0.0, 0.1, 1.2, 0.5, 0.0], dtype=np.float64)
+    
+    m_long = p_mat @ w_long
+    m_short = p_mat @ w_short
+    
+    # Component 2: Entropy-Based Confidence Shrinkage
+    # E = -sum(Pi * log2(Pi + eps))
+    # E_norm = E / log2(5)
+    # Penalty = 1.0 - (E_norm)^2
+    eps = 1e-12
+    entropy = -np.sum(p_mat * np.log2(p_mat + eps), axis=1)
+    e_norm = entropy / np.log2(5.0)
+    penalty = 1.0 - np.square(e_norm)
+    
+    # Final Modulation
+    mod_long = np.clip(m_long * penalty, 0.0, 2.5).astype(np.float64)
+    mod_short = np.clip(m_short * penalty, 0.0, 2.5).astype(np.float64)
 
     # BTC trend for diagnostic report only
     trend_24h: np.ndarray = np.zeros(n, dtype=np.float64)
@@ -329,14 +330,16 @@ def _hmm_modulator_kelly_values(
         if idx_col != "datetime":
             feat_tmp = feat_tmp.rename(columns={idx_col: "datetime"})
         feat_tmp["datetime"] = pd.to_datetime(feat_tmp["datetime"], utc=True)
-        merged_rec = merged[["datetime"]].merge(feat_tmp, on="datetime", how="left")
+        dt_df = market_probs[["datetime"]].copy()
+        dt_df["datetime"] = pd.to_datetime(dt_df["datetime"], utc=True)
+        merged_rec = dt_df.merge(feat_tmp, on="datetime", how="left")
         trend_24h = merged_rec["btc_trend_vol_adj_24h"].fillna(0.0).to_numpy(dtype=np.float64)
 
     return pd.DataFrame({
         "hmm_modulator_long": mod_long,
         "hmm_modulator_short": mod_short,
-        "hmm_modulator_base_long": mod_long_base,
-        "hmm_modulator_base_short": mod_short_base,
+        "hmm_modulator_base_long": m_long,
+        "hmm_modulator_base_short": m_short,
         "btc_trend_vol_adj_24h": trend_24h,
     })
 
@@ -614,7 +617,7 @@ def _apply_ml_calib_probs(
     gp_short = (
         aligned_tf["ml_alpha_short"].to_numpy(dtype=np.float64)
         if "ml_alpha_short" in aligned_tf.columns
-        else gp_base
+        else (1.0 - gp_base)
     )
     # [Improvement 1] Friction-Aware EV Hurdle
     hurdle_ratio = float(OPT_FUTURES_CONFIG.get("FUTURES_ML_EV_HURDLE_RATIO", 0.0))
@@ -625,15 +628,21 @@ def _apply_ml_calib_probs(
         # Heuristic: 0.1% expected return corresponds to ~0.02 deviation from 0.5 in rank space.
         score_hurdle = hurdle_ratio * rt_cost * 10.0
         
+        # [NEW] Component 3: Regime-Aware Dynamic EV Hurdle
+        # Hurdle_Dyn = BaseHurdle * (1.0 + 2.0 * P(Chop) + 5.0 * P(Crisis))
+        p_chop = aligned_tf["hmm_prob_chop"].to_numpy(dtype=np.float64) if "hmm_prob_chop" in aligned_tf.columns else 0.0
+        p_crisis = aligned_tf["hmm_prob_crisis"].to_numpy(dtype=np.float64) if "hmm_prob_crisis" in aligned_tf.columns else 0.0
+        hurdle_dyn = score_hurdle * (1.0 + 2.0 * p_chop + 5.0 * p_crisis)
+        
         # Zero out signals that don't clear the hurdle
-        gp_long_mask = (gp_long > (0.5 + score_hurdle)).astype(np.float64)
-        gp_short_mask = (gp_short < (0.5 - score_hurdle)).astype(np.float64)
+        gp_long_mask = (gp_long > (0.5 + hurdle_dyn)).astype(np.float64)
+        gp_short_mask = (gp_short > (0.5 + hurdle_dyn)).astype(np.float64)
         
         aligned_tf["xs_score_long"] = gp_long * hmm_m_long * gp_long_mask
-        aligned_tf["xs_score_short"] = (gp_short / np.maximum(hmm_m_short, 0.1)) * gp_short_mask + (1.0 * (1.0 - gp_short_mask))
+        aligned_tf["xs_score_short"] = gp_short * hmm_m_short * gp_short_mask
     else:
         aligned_tf["xs_score_long"] = gp_long * hmm_m_long
-        aligned_tf["xs_score_short"] = gp_short / np.maximum(hmm_m_short, 0.1)
+        aligned_tf["xs_score_short"] = gp_short * hmm_m_short
 
     meta_on = bool(use_meta) and bool(OPT_FUTURES_CONFIG.get("FUTURES_USE_META_LABELER", False))
 
