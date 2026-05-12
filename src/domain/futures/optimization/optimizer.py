@@ -10,7 +10,6 @@ Trial user_attrs set both AWF-native keys (``awf_*`` / ``awf_path_*``) and legac
 from __future__ import annotations
 
 import logging
-import math
 import threading
 from dataclasses import dataclass
 from typing import Any, cast
@@ -18,17 +17,15 @@ from typing import Any, cast
 import numpy as np
 import optuna
 import pandas as pd
-from optuna.trial import FrozenTrial
 from sklearn.linear_model import LogisticRegression
 
 from config.opt_config import OPT_FUTURES_CONFIG
+from src.core.indicators.numpy_ops_futures import compute_atr_numpy
 from config.settings import (
     FUTURES_INITIAL_BALANCE,
     MAKER_FEE_RATE,
     SLIPPAGE_RATE,
-    SMART_ORDER_OFFSET,
     TAKER_FEE_RATE,
-    TRADING_FEE_RATE,
 )
 from src.domain.futures.backtest_engine import (
     backtest_target_weights_numba,
@@ -383,11 +380,17 @@ def _build_prebuilt_full_arrays(
         trimmed_sig["high"] = raw_full["high"].to_numpy(dtype=np.float64, copy=False)
         trimmed_sig["low"] = raw_full["low"].to_numpy(dtype=np.float64, copy=False)
         trimmed_sig["open"] = raw_full["open"].to_numpy(dtype=np.float64, copy=False)
-        trimmed_sig["atr"] = (
-            raw_full["atr"].to_numpy(dtype=np.float64, copy=False)
-            if "atr" in raw_full.columns
-            else np.zeros(len(raw_full))
-        )
+        _atr_col = raw_full["atr"].to_numpy(dtype=np.float64, copy=False) if "atr" in raw_full.columns else None
+        if _atr_col is None or not np.any(_atr_col > 0):
+            _atr_period_fb = int(OPT_FUTURES_CONFIG.get("FUTURES_ATR_PERIOD_FIXED", 30))
+            _atr_col = compute_atr_numpy(
+                raw_full["high"].to_numpy(dtype=np.float64),
+                raw_full["low"].to_numpy(dtype=np.float64),
+                raw_full["close"].to_numpy(dtype=np.float64),
+                _atr_period_fb,
+            )
+        trimmed_sig["atr"] = np.where(np.isfinite(_atr_col) & (_atr_col > 0), _atr_col,
+                                       raw_full["close"].to_numpy(dtype=np.float64) * 0.01)
         trimmed_sig["garch_kelly_f"] = (
             raw_full["garch_kelly_f"].to_numpy(dtype=np.float64, copy=False)
             if "garch_kelly_f" in raw_full.columns
@@ -763,15 +766,38 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
             ctx.calibrator_short = last_calib_short
             ctx.estimated_b = last_est_b
         else:
-            c0, c0s, eb0 = _fit_oos_platt_calibrators_from_maps(
-                ctx.data_maps,
-                ctx.symbols,
-                ctx.tf,
-                info,
-                window_lo=first_awf_anchor,
-                window_hi_excl=eff_len,
-                oos_pool_start=first_awf_anchor,
-            )
+            # [LEAKAGE FIX] Calibrator must be trained on IS bars only.
+            # Range: [0, first_awf_anchor - embargo) — no leakage into OOS test legs.
+            calib_min_bars = int(OPT_FUTURES_CONFIG.get("FUTURES_CALIB_PLATT_MIN_OOS_BARS", 80))
+            calib_hi = max(0, first_awf_anchor - embargo)
+            if calib_hi < calib_min_bars:
+                _logger.warning(
+                    "[CALIB] IS-only calibration window too small (%d bars < min %d); "
+                    "falling back to OOS-pool window [%d, %d) to avoid data starvation.",
+                    calib_hi,
+                    calib_min_bars,
+                    first_awf_anchor,
+                    eff_len,
+                )
+                c0, c0s, eb0 = _fit_oos_platt_calibrators_from_maps(
+                    ctx.data_maps,
+                    ctx.symbols,
+                    ctx.tf,
+                    info,
+                    window_lo=first_awf_anchor,
+                    window_hi_excl=eff_len,
+                    oos_pool_start=first_awf_anchor,
+                )
+            else:
+                c0, c0s, eb0 = _fit_oos_platt_calibrators_from_maps(
+                    ctx.data_maps,
+                    ctx.symbols,
+                    ctx.tf,
+                    info,
+                    window_lo=0,
+                    window_hi_excl=calib_hi,
+                    oos_pool_start=None,  # IS 구간이므로 pool_start 불필요
+                )
             ctx.calibrator = c0
             ctx.calibrator_short = c0s
             ctx.estimated_b = eb0
@@ -1337,7 +1363,7 @@ def _evaluate_awf_phase_d_aggregate(
     ctx: MLPhaseDContext,
     ml_bundle: dict[str, Any],
     trial: optuna.Trial | None,
-) -> tuple[float, dict[str, Any]]:
+) -> tuple[float | tuple[float, float], dict[str, Any]]:
     """Core AWF leg loop + robust objective."""
     cfg = OPT_FUTURES_CONFIG
     awf_slices = ctx.awf_leg_slices or []
@@ -1416,11 +1442,7 @@ def _evaluate_awf_phase_d_aggregate(
                     trial.number if trial is not None else "replay",
                     _b_diag,
                 )
-                # [SMOKE FIX] If trials are few (smoke profile), return a bad score instead of pruning
-                # to allow the study to complete and the pipeline to finish.
                 if trial is not None:
-                    if n_trials_eff <= 80:
-                        return float(10.0), {"pruned": False, "robust_val": float(-1e9)}
                     raise optuna.TrialPruned()
                 diag = {"pruned": True, "robust_val": float(-1e9)}
                 return float(1e9), diag
@@ -1491,9 +1513,10 @@ def _evaluate_awf_phase_d_aggregate(
                 if pos_r < prune_min_pos:
                     pass
 
-            trial.report(float(np.mean(leg_log_tw)), step=leg_idx)
-            if trial.should_prune():
-                raise optuna.TrialPruned()
+            if trial is not None and len(trial.study.directions) == 1:
+                trial.report(float(np.mean(leg_log_tw)), step=leg_idx)
+                if trial.should_prune():
+                    raise optuna.TrialPruned()
 
     leg_arr = np.asarray(leg_log_tw, dtype=np.float64)
     n_legs_done = leg_arr.size
@@ -1616,7 +1639,11 @@ def _evaluate_awf_phase_d_aggregate(
 
     ns2 = bool(cfg.get("FUTURES_ML_ALPHA_NSGA2_ENABLED", False))
     if ns2:
-        return (float(obj), float(-robust_val)), diag
+        # Obj1: compound growth 최대화 (Kelly criterion)
+        obj1 = -float(np.mean(leg_arr)) if leg_arr.size > 0 else float(1e9)
+        # Obj2: worst leg 최대화 (tail risk 방어)
+        obj2 = -float(np.min(leg_arr)) if leg_arr.size > 0 else float(1e9)
+        return (obj1, obj2), diag
     return float(obj), diag
 
 
