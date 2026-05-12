@@ -274,14 +274,20 @@ def compute_awf_robust_objective_score(
     lambda_mad: float = 1.0,
     psi_dd: float = 0.5,
 ) -> float:
-    """Robust scalar: median(log TW) − λ·MAD − ψ·DD_max with DD_max in percent."""
+    """Kelly compound growth: mean(log_TW) - semi_deviation_penalty - DD_term.
+
+    mean(leg_log_tw) is the unbiased estimator of compound growth rate (Kelly criterion).
+    Semi-deviation penalizes only downside variability, preserving upside asymmetry.
+    """
     arr = np.asarray(leg_log_tw, dtype=np.float64)
     if arr.size == 0:
         return float(-10.0 - psi_dd * max(float(max_mdd_pct), 0.0) / 100.0)
-    mad = median_absolute_deviation_1d(arr.tolist())
-    med = float(median(arr.tolist()))
+    mu = float(np.mean(arr))
+    # 하방 semi-deviation: 평균 이하 구간만 패널티 (MAD는 상방도 패널티 → 복리에 불리)
+    downside = arr[arr < mu]
+    semi_dev = float(np.sqrt(np.mean((downside - mu) ** 2))) if downside.size > 0 else 0.0
     dd_term = psi_dd * max(float(max_mdd_pct), 0.0) / 100.0
-    return float(med - lambda_mad * mad - dd_term)
+    return float(mu - lambda_mad * semi_dev - dd_term)
 
 
 def calc_time_to_target_wealth(
