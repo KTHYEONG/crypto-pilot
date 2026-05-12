@@ -12,6 +12,7 @@ _FUTURES_2D_REQUIRED_COLS: tuple[str, ...] = (
     "high",
     "low",
     "close",
+    "volume",
     "entry_upper",
     "entry_lower",
     "trend_direction",
@@ -25,6 +26,10 @@ _FUTURES_2D_REQUIRED_COLS: tuple[str, ...] = (
     "xs_score_long",
     "xs_score_short",
     "composer_sigma_bar",
+    "hmm_prob_bull_calm",
+    "hmm_prob_bull_vol_up",
+    "hmm_prob_bear_trend",
+    "hmm_prob_chop",
     "hmm_prob_crisis",
     "hmm_hard_state",
     "hmm_modulator_long",
@@ -41,8 +46,11 @@ def _dataframe_to_symbol_arrays(sig_df: pd.DataFrame) -> dict[str, np.ndarray]:
     out: dict[str, np.ndarray] = {}
     
     # 1. Base OHLCV (Direct to numpy, no filling needed for these usually)
-    for col in ["open", "high", "low", "close"]:
-        out[col] = sig_df[col].to_numpy(dtype=np.float64, copy=False)
+    for col in ["open", "high", "low", "close", "volume"]:
+        if col in sig_df.columns:
+            out[col] = sig_df[col].to_numpy(dtype=np.float64, copy=False)
+        else:
+            out[col] = np.ones(len(sig_df), dtype=np.float64)
     
     # 2. ATR (Fast ffill then fallback)
     atr = sig_df["atr"].to_numpy(dtype=np.float64, copy=True)
@@ -70,6 +78,10 @@ def _dataframe_to_symbol_arrays(sig_df: pd.DataFrame) -> dict[str, np.ndarray]:
         "xs_score_long": 0.0,
         "xs_score_short": 0.0,
         "composer_sigma_bar": 0.01,
+        "hmm_prob_bull_calm": 0.0,
+        "hmm_prob_bull_vol_up": 0.0,
+        "hmm_prob_bear_trend": 0.0,
+        "hmm_prob_chop": 0.0,
         "hmm_prob_crisis": 0.0,
         "hmm_hard_state": 0.0,
         "hmm_modulator_long": 1.0,
