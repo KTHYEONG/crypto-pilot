@@ -2,6 +2,47 @@
 
 This file tracks the logical progression and experimental results of the quantitative trading system. It serves as the primary context for AI agents to understand "why" certain changes were made and "what" was learned.
 
+---
+
+## [2026-05-12] Optimizer Pipeline Debug — Phase A/B Zero-Trade Root Cause Hunt (IN PROGRESS)
+
+### 현황 요약
+`opt_main_futures.py` 실행 시 `Phase A complete=0 pass=0 best=10.0` 문제를 계기로
+백테스팅 파이프라인 전반의 구조적 결함을 진단하고 순차적으로 수정 중.
+
+### 완료된 수정 (5개 파일)
+
+| 파일 | 수정 내용 | 효과 |
+|------|----------|------|
+| `optimizer.py` | Zero-trade hack 제거 (n_trials≤80 → 10.0 반환) | complete 0→80 |
+| `optimizer.py` | Calibrator IS-only 학습 구간 적용 | look-ahead leakage 해소 |
+| `optimizer.py` | ATR=0 fallback → compute_atr_numpy on-the-fly | 거래 skip 해소 |
+| `optimizer.py` | trial.report() NSGA-II guard | NotImplementedError 해소 |
+| `portfolio_constructor.py` | `_apply_ls_balance` 단방향 포지션 허용 | HMM 방향성 신호 존중 |
+| `evaluator.py` | objective: median+MAD → mean+semi_dev | Kelly 복리 정합 |
+| `config/opt_config.py` | AWF k=6 → k=4 | leg 학습 window 확대 |
+| `opt_main_futures.py` | ATR injection (ML merge 직후) | data_maps ATR 보장 |
+| `opt_main_futures.py` | NSGA-II dual-objective 독립화 | Pareto front 실질화 |
+| `opt_main_futures.py` | `catch=(ValueError,)` 추가 | Phase C crash 방지 |
+
+### 현재 상태 (2026-05-12)
+- `Phase A complete=80` ✅ (이전 0)
+- `Phase A pass=0` ❌ **미해결** → DIAG 로그로 원인 추적 중
+- `Phase C ValueError` ⚠️ catch로 임시 처리 (근본 수정 필요)
+
+### pass=0 가설
+`awf_pos_frac_to_pseudo_pbo`가 `1 - pos_frac`으로 계산되어
+4개 leg 중 3개 이상 양수여야 PBO gate 통과 (pbo_max=0.45).
+실제 trial user_attrs 확인 후 → gate 임계값 완화 또는 신호 품질 개선 결정 필요.
+
+### 다음 실행 커맨드
+```bash
+uv run python src/execution/opt_main_futures.py --ops-profile smoke --tf 4h 2>&1 | grep -E "DIAG|COORD"
+```
+상세 실험 기록: `.ai/experiments/2026-05-12_optimizer_pipeline_debug.md`
+
+---
+
 ## [2026-05-11] v9.6.0: Efficiency Optimization & IC Realism — The Surgical Pivot (Antigravity)
 ### 1. Architectural Evolution: Trading Redundancy for Efficiency
 *   **Problem (v9.5.1)**: While predictive power was high (58%), a 13.5% `CRISIS` share imposed excessive opportunity costs. Additionally, the Regime IC target was mathematically unrealistic given crypto's V-bounce dynamics.
