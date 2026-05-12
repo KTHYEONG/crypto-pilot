@@ -49,6 +49,7 @@ from config.settings import (  # noqa: E402
     FUTURES_DATA_DIR,
     FUTURES_INITIAL_BALANCE,
 )
+from src.core.indicators.numpy_ops_futures import compute_atr_numpy  # noqa: E402
 from src.core.optimization.opt_utils import compute_segment_merge_index  # noqa: E402
 from src.domain.futures.data_loader import (  # noqa: E402
     DataCollector,
@@ -79,6 +80,7 @@ from src.domain.futures.optimization.optimizer import (  # noqa: E402
     precompute_ml_optimization_context,
     replay_robust_awf_for_trial_params,
     rerun_precompute_for_ctx,
+    topsis_select_best,
 )
 from src.domain.futures.optimization.screener import (  # noqa: E402
     screen_futures_universe,
@@ -1122,6 +1124,39 @@ def main() -> None:
 
     _logger.info("  [SUCCESS] Signal integration and quality audit complete.")
 
+    # [ATR Injection] Ensure ATR column is populated in all data maps.
+    # backtest_target_weights_numba skips every entry when atr_prev <= 0 → zero trades.
+    _atr_period = int(OPT_FUTURES_CONFIG.get("FUTURES_ATR_PERIOD_FIXED", 30))
+    _tfs_to_patch = list({args.tf, "1h"})
+    for _maps in (data_maps, oos_data_maps):
+        for _sym in valid_symbols:
+            if _sym not in _maps:
+                continue
+            for _tf in _tfs_to_patch:
+                if _tf not in _maps[_sym]:
+                    continue
+                _df = _maps[_sym][_tf]
+                _needs_atr = (
+                    "atr" not in _df.columns
+                    or _df["atr"].isna().all()
+                    or (_df["atr"].fillna(0) == 0).all()
+                )
+                if _needs_atr:
+                    _atr_arr = compute_atr_numpy(
+                        _df["high"].to_numpy(dtype=np.float64),
+                        _df["low"].to_numpy(dtype=np.float64),
+                        _df["close"].to_numpy(dtype=np.float64),
+                        _atr_period,
+                    )
+                    _df = _df.copy()
+                    _df["atr"] = pd.Series(_atr_arr, index=_df.index).ffill().fillna(
+                        _df["close"] * 0.01
+                    )
+                    _maps[_sym][_tf] = _df
+                    _logger.info(
+                        "[ATR] %s/%s: computed ATR(period=%d) — was missing/zero",
+                        _sym, _tf, _atr_period,
+                    )
 
     for sym in valid_symbols:
         df = oos_data_maps[sym][args.tf]
@@ -1214,7 +1249,14 @@ def main() -> None:
         pname_cb = study.user_attrs.get("_pname", "?")
         filled = int(20 * n_complete / max(n_total, 1))
         bar = "█" * filled + "░" * (20 - filled)
-        best_val = study.best_value if n_complete > 0 else float("nan")
+        if n_complete > 0:
+            try:
+                _bv = study.best_value
+                best_val = float(_bv) if not isinstance(_bv, (list, tuple)) else float(_bv[0])
+            except Exception:
+                best_val = float("nan")
+        else:
+            best_val = float("nan")
         sys.stderr.write(
             f"\r  🔧 Phase {pname_cb} [{bar}] {n_complete:>3}/{n_total}  best={best_val:.4f}   "
         )
@@ -1222,6 +1264,7 @@ def main() -> None:
         if n_complete >= n_total:
             sys.stderr.write("\n")
 
+    _ns2_enabled = bool(OPT_FUTURES_CONFIG.get("FUTURES_ML_ALPHA_NSGA2_ENABLED", False))
     for pname in ("A", "B", "C"):
         nt = int(phase_trials.get(pname, 80))
         ph_ctx = dataclasses.replace(
@@ -1231,17 +1274,27 @@ def main() -> None:
             effective_total_trials=max(1, nt),
         )
         pbo_max_eff, dsr_min_eff, _ = resolve_adjusted_gates(OPT_FUTURES_CONFIG, nt)
-        study_ml = optuna.create_study(
-            directions=["minimize"],
-            sampler=_ml_phase_d_sampler_coordinate(
-                seed_learn + ord(pname[0]), nt, pname
-            ),
-            pruner=(
-                optuna.pruners.MedianPruner(n_startup_trials=20, n_warmup_steps=2)
-                if pname == "B"
-                else optuna.pruners.NopPruner()
-            ),
-        )
+        if _ns2_enabled:
+            study_ml = optuna.create_study(
+                directions=["minimize", "minimize"],  # Obj1: growth, Obj2: worst_leg
+                sampler=optuna.samplers.NSGAIISampler(
+                    population_size=min(50, max(10, nt // 4)),
+                    seed=seed_learn + ord(pname[0]),
+                ),
+                pruner=optuna.pruners.NopPruner(),  # NSGA-II는 population 유지 필요
+            )
+        else:
+            study_ml = optuna.create_study(
+                directions=["minimize"],
+                sampler=_ml_phase_d_sampler_coordinate(
+                    seed_learn + ord(pname[0]), nt, pname
+                ),
+                pruner=(
+                    optuna.pruners.MedianPruner(n_startup_trials=20, n_warmup_steps=2)
+                    if pname == "B"
+                    else optuna.pruners.NopPruner()
+                ),
+            )
         study_ml.set_user_attr("_n_trials", nt)
         study_ml.set_user_attr("_pname", pname)
         _logger.info("🔧 Optuna Phase %s | %d trials", pname, nt)
@@ -1270,6 +1323,7 @@ def main() -> None:
             n_trials=nt,
             n_jobs=1 if args.ops_profile == "smoke" else min(4, _resolve_futures_parallel_policy(len(valid_symbols))),
             callbacks=[_trial_progress_callback],
+            catch=(ValueError,),
         )
         all_trials.extend(study_ml.trials)
         last_study = study_ml
@@ -1279,7 +1333,10 @@ def main() -> None:
             _logger.error(f"  [COORD {pname}] No trials completed successfully. Stopping optimization.")
             return
 
-        bt = study_ml.best_trial
+        if _ns2_enabled and study_ml.best_trials:
+            bt = topsis_select_best(study_ml.best_trials)
+        else:
+            bt = study_ml.best_trial
         frozen_accum.update(dict(bt.params))
         pass_count = 0
         for t in completed:
@@ -1292,6 +1349,20 @@ def main() -> None:
         _logger.info(
             "  [COORD %s] complete=%d pass=%d", pname, len(completed), pass_count
         )
+        if pname == "A" and completed:
+            _sample = completed[:3]
+            for _t in _sample:
+                _logger.info(
+                    "  [DIAG trial=%d] awf_pos_frac=%.2f avg_trades=%.1f "
+                    "worst_leg=%.4f worst_mdd=%.2f dsr=%.4f leg_log_tw=%s",
+                    _t.number,
+                    float(_t.user_attrs.get("awf_pos_frac", -9)),
+                    float(_t.user_attrs.get("avg_trades", -9)),
+                    float(_t.user_attrs.get("awf_worst_leg_log_tw", -9)),
+                    float(_t.user_attrs.get("awf_worst_mdd_pct", -9)),
+                    float(_t.user_attrs.get("gate1_dsr", -9)),
+                    _t.user_attrs.get("awf_leg_log_tw", []),
+                )
         if pname == "B":
             frozen_after_ab = dict(frozen_accum)
 
@@ -1313,7 +1384,10 @@ def main() -> None:
     ):
         runner_up_merged = {**frozen_after_ab, **dict(c_complete_ranked[1].params)}
 
-    best_trial_coord = last_study.best_trial
+    if _ns2_enabled and last_study.best_trials:
+        best_trial_coord = topsis_select_best(last_study.best_trials)
+    else:
+        best_trial_coord = last_study.best_trial
     champion_raw_params = dict(frozen_accum)
 
     champ_stab_cv: float | None = None
