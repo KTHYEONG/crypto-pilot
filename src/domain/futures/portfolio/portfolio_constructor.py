@@ -225,8 +225,30 @@ def _solve_constrained_weights_numba(
     per_symbol_cap: float,
     current_dd: float,
     kelly_sigma_diag: np.ndarray | None = None,
+    hmm_probs: np.ndarray | None = None,
+    regime_betas: np.ndarray | None = None,
+    crisis_override_thr: float = 0.4,
 ) -> np.ndarray:
     n = mu.size
+    
+    # [HMM Dynamic Modulation]
+    # regime_betas: [BULL, BEAR, CHOP, CRISIS]
+    mu_mod = mu.copy()
+    if hmm_probs is not None and regime_betas is not None:
+        p_crisis = hmm_probs[3]
+        if p_crisis > crisis_override_thr:
+            return np.zeros(n, dtype=np.float64)
+            
+        # Composite regime multiplier
+        mult = (
+            hmm_probs[0] * regime_betas[0] +  # BULL
+            hmm_probs[1] * regime_betas[1] +  # BEAR
+            hmm_probs[2] * regime_betas[2] +  # CHOP
+            hmm_probs[3] * regime_betas[3]    # CRISIS
+        )
+        for i in range(n):
+            mu_mod[i] *= mult
+
     if kelly_sigma_diag is not None:
         sig = kelly_sigma_diag
     else:
@@ -239,7 +261,7 @@ def _solve_constrained_weights_numba(
     f_max = abs(f_kelly_max)
     for i in range(n):
         var = max(sig[i] ** 2, 1e-12)
-        f = mu[i] / var
+        f = mu_mod[i] / var
         if f > f_max:
             f = f_max
         elif f < -f_max:
@@ -289,6 +311,9 @@ def _precompute_loop_numba(
     per_symbol_cap: float,
     current_dd: float,
     ks_diag_2d: np.ndarray | None = None,
+    hmm_probs_2d: np.ndarray | None = None,
+    regime_betas: np.ndarray | None = None,
+    crisis_override_thr: float = 0.4,
 ) -> np.ndarray:
     out = np.zeros((n_bars, n_syms), dtype=np.float64)
     for i in range(1, n_bars):
@@ -298,6 +323,7 @@ def _precompute_loop_numba(
         mu = mu_2d[i - 1]
         sigma = sigma_3d[i]
         ks_diag = ks_diag_2d[i - 1] if ks_diag_2d is not None else None
+        hmm_probs = hmm_probs_2d[i - 1] if hmm_probs_2d is not None else None
 
         out[i, :] = _solve_constrained_weights_numba(
             mu,
@@ -310,6 +336,9 @@ def _precompute_loop_numba(
             per_symbol_cap,
             current_dd,
             kelly_sigma_diag=ks_diag,
+            hmm_probs=hmm_probs,
+            regime_betas=regime_betas,
+            crisis_override_thr=crisis_override_thr,
         )
     return out
 
@@ -331,6 +360,9 @@ def precompute_rebalance_weights(
     min_obs: int = 20,
     composer_sigma_2d: np.ndarray | None = None,
     sigma_3d: np.ndarray | None = None,
+    hmm_probs_2d: np.ndarray | None = None,
+    regime_betas: np.ndarray | None = None,
+    crisis_override_thr: float = 0.4,
 ) -> np.ndarray:
     """Sparse target weights: precomputed or rolling LW covariance."""
     c = np.asarray(close_2d, dtype=np.float64)
@@ -364,6 +396,9 @@ def precompute_rebalance_weights(
             float(per_symbol_cap),
             float(current_dd),
             ks_diag_2d=ks_diag_2d,
+            hmm_probs_2d=hmm_probs_2d,
+            regime_betas=regime_betas,
+            crisis_override_thr=float(crisis_override_thr),
         )
 
     # Fallback to slower Python loop with rolling LW
