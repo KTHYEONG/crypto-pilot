@@ -20,25 +20,17 @@ import pandas as pd
 from sklearn.linear_model import LogisticRegression
 
 from config.opt_config import OPT_FUTURES_CONFIG
-from src.core.indicators.numpy_ops_futures import compute_atr_numpy
 from config.settings import (
     FUTURES_INITIAL_BALANCE,
     MAKER_FEE_RATE,
     SLIPPAGE_RATE,
     TAKER_FEE_RATE,
 )
+from src.core.indicators.numpy_ops_futures import compute_atr_numpy
 from src.domain.futures.backtest_engine import (
     backtest_target_weights_numba,
     hours_per_bar_from_timeframe,
     max_hold_bars_from_time_barrier,
-)
-from src.domain.futures.portfolio.portfolio_constructor import (
-    portfolio_weight_params_from_optuna,
-    precompute_rebalance_weights,
-)
-from src.domain.futures.portfolio.signal_composer import (
-    composer_sigma_lookback_bars,
-    rolling_per_bar_return_std,
 )
 from src.domain.futures.ml_pipeline.features.engineering import HMM_SEMANTIC_PROB_COLUMNS
 from src.domain.futures.optimization.data_aligner import (
@@ -52,9 +44,19 @@ from src.domain.futures.optimization.evaluator import (
     compute_awf_robust_objective_score,
 )
 from src.domain.futures.optimization.validation import build_anchored_wf_legs
+from src.domain.futures.portfolio.portfolio_constructor import (
+    cov_lookback_bars,
+    portfolio_weight_params_from_optuna,
+    precompute_rebalance_weights,
+    precompute_rolling_covariances,
+)
 from src.domain.futures.portfolio.portfolio_optimizer import (
     finalize_strategy_portfolio_params,
     load_portfolio_policy_config,
+)
+from src.domain.futures.portfolio.signal_composer import (
+    composer_sigma_lookback_bars,
+    rolling_per_bar_return_std,
 )
 from src.domain.futures.strategy_ml import FuturesMLStrategy
 
@@ -633,6 +635,19 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
         awf_legs = build_anchored_wf_legs(
             eff_len, k=k_legs, embargo=embargo, is_pool_frac=is_pool
         )
+        
+        # SOTA: Precompute Global Rolling Covariance (once per optimization run)
+        # Eliminates O(T * N^3) sklearn LW calls from the inner Trial loops.
+        lookback = cov_lookback_bars(ctx.tf, OPT_FUTURES_CONFIG)
+        close_2d_full = np.zeros((eff_len, len(ctx.symbols)), dtype=np.float64)
+        for s_idx, sym in enumerate(ctx.symbols):
+            if sym in ctx.data_maps and ctx.tf in ctx.data_maps[sym]:
+                start_idx = info["alignment_offsets"][sym]
+                close_2d_full[:, s_idx] = ctx.data_maps[sym][ctx.tf]["close"].iloc[
+                    start_idx : start_idx + eff_len
+                ].to_numpy(dtype=np.float64)
+        sigma_3d_full = precompute_rolling_covariances(close_2d_full, lookback)
+        
         first_awf_anchor = int(awf_legs[0][1]) if awf_legs else max(1, int(eff_len * is_pool))
 
         dates_ok = bool(ctx.ml_pipeline_fetch_start and ctx.ml_pipeline_end)
@@ -746,7 +761,8 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
                         calibrator_short=calib_s_leg,
                     )
                     aligned_leg = _build_aligned_2d_from_prebuilt(
-                        prebuilt_leg, ctx.symbols, test_s, test_e
+                        prebuilt_leg, ctx.symbols, test_s, test_e,
+                        sigma_3d_full=sigma_3d_full
                     )
                     tmp_slices.append({"leg_range": (test_s, test_e), "data": aligned_leg})
 
@@ -814,7 +830,8 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
             ctx.awf_leg_slices = []
             for _train_s, _train_e, test_s, test_e in awf_legs:
                 aligned = _build_aligned_2d_from_prebuilt(
-                    prebuilt_full, ctx.symbols, test_s, test_e
+                    prebuilt_full, ctx.symbols, test_s, test_e,
+                    sigma_3d_full=sigma_3d_full
                 )
                 ctx.awf_leg_slices.append({"leg_range": (test_s, test_e), "data": aligned})
 
@@ -1264,6 +1281,7 @@ def _run_portfolio_numba_block(
     xs = np.asarray(
         aligned.get("xs_score_short", np.zeros_like(close_np)), dtype=np.float64
     )
+    sigma_3d = aligned.get("sigma_3d")
     tw_blk = np.asarray(
         precompute_rebalance_weights(
             close_np,
@@ -1283,6 +1301,7 @@ def _run_portfolio_numba_block(
                 if aligned.get("composer_sigma_bar") is not None
                 else None
             ),
+            sigma_3d=sigma_3d,
         ),
         dtype=np.float64,
     )
@@ -1369,8 +1388,8 @@ def _evaluate_awf_phase_d_aggregate(
     awf_slices = ctx.awf_leg_slices or []
     mai = ctx.multi_alignment_info
     if not awf_slices or mai is None:
-        diag = {"empty": True, "robust_val": float(-1e9)}
-        fail = float(1e9)
+        diag = {"empty": True, "robust_val": (-1e9)}
+        fail = 1e9
         ns = bool(cfg.get("FUTURES_ML_ALPHA_NSGA2_ENABLED", False))
         return ((fail, fail) if ns else fail), diag
 
@@ -1444,8 +1463,8 @@ def _evaluate_awf_phase_d_aggregate(
                 )
                 if trial is not None:
                     raise optuna.TrialPruned()
-                diag = {"pruned": True, "robust_val": float(-1e9)}
-                return float(1e9), diag
+                diag = {"pruned": True, "robust_val": (-1e9)}
+                return 1e9, diag
 
         mdd = float(calc_mdd_from_equity(b_equity)) if b_equity.size > 0 else 100.0
         log_ret = _log_tw_from_ret_pct(float((b_bal / FUTURES_INITIAL_BALANCE - 1.0) * 100.0))
@@ -1640,9 +1659,9 @@ def _evaluate_awf_phase_d_aggregate(
     ns2 = bool(cfg.get("FUTURES_ML_ALPHA_NSGA2_ENABLED", False))
     if ns2:
         # Obj1: compound growth 최대화 (Kelly criterion)
-        obj1 = -float(np.mean(leg_arr)) if leg_arr.size > 0 else float(1e9)
+        obj1 = -float(np.mean(leg_arr)) if leg_arr.size > 0 else 1e9
         # Obj2: worst leg 최대화 (tail risk 방어)
-        obj2 = -float(np.min(leg_arr)) if leg_arr.size > 0 else float(1e9)
+        obj2 = -float(np.min(leg_arr)) if leg_arr.size > 0 else 1e9
         return (obj1, obj2), diag
     return float(obj), diag
 
