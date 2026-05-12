@@ -1,14 +1,21 @@
 {
   "project": "my-coin-traider",
-  "version": "9.6.0",
-  "last_evolution_date": "2026-05-11",
-  "previous_state_hash": "v9.5.1-production-ready",
+  "version": "9.6.1-optimizer-debug",
+  "last_evolution_date": "2026-05-12",
+  "previous_state_hash": "v9.6.0-production-ready",
+  "optimizer_debug_status": {
+    "phase_a_complete": "80 (fixed from 0)",
+    "phase_a_pass": "0 (UNRESOLVED — investigating gate failure)",
+    "phase_c_crash": "catch=(ValueError,) workaround applied",
+    "pending_fix": "DIAG log analysis → identify which gate fails all trials"
+  },
   "current_logic": {
     "universe_selection": "CS_RANK 필터링 (16-32 symbols). [Unchanged]",
-    "regime_classification": "[V9.6.0 Efficiency Optimization] Reduced CRISIS Share from 13.5% to 1.5% using surgical base weights. Redefined Regime IC as Diagnostic Noise Band to acknowledge crypto V-Bounce limits.",
+    "regime_classification": "[V9.6.0 Efficiency Optimization] Reduced CRISIS Share from 13.5% to 1.5% using surgical base weights.",
     "alpha_generation": "LightGBM v6. [Unchanged]",
     "signal_combination": "signal_composer.py: Integrated with v9.6.0 surgical risk-off.",
-    "risk_management": "HMM Modulator v9.6.0: Minimized opportunity cost (shutdown drag) while maintaining >40% tail foresight."
+    "risk_management": "HMM Modulator v9.6.0: Minimized opportunity cost (shutdown drag) while maintaining >40% tail foresight.",
+    "portfolio_optimization": "[PATCHED] ATR injection, NSGA-II dual-obj, ls_balance unidirectional fix, Kelly objective alignment"
   },
   "key_parameters": {
     "evaluation_criteria_version": "2026-05-12-efficiency-optimized",
