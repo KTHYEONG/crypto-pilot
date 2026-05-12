@@ -8,8 +8,8 @@ from __future__ import annotations
 import math
 from typing import Any
 
+import numba
 import numpy as np
-from scipy.optimize import minimize
 from sklearn.covariance import LedoitWolf
 
 
@@ -95,41 +95,52 @@ def _apply_ls_balance(w: np.ndarray, *, lo: float = 0.5, hi: float = 2.0) -> np.
     return out
 
 
+@numba.njit(cache=True)
+def _project_l1_linf_numba(
+    w_pre: np.ndarray, gross_cap: float, per_symbol_cap: float
+) -> np.ndarray:
+    """Fast L1 gross + per-symbol caps via iterative scaling and clipping (Numba)."""
+    out = w_pre.copy()
+    n = out.size
+    if n == 0:
+        return out
+
+    cap = float(per_symbol_cap) * float(gross_cap)
+
+    # 1. Immediate per-symbol clipping
+    for i in range(n):
+        if out[i] > cap:
+            out[i] = cap
+        elif out[i] < -cap:
+            out[i] = -cap
+
+    # 2. Iterative Gross Cap adjustment (max 10 iterations)
+    for _ in range(10):
+        g1 = 0.0
+        for i in range(n):
+            g1 += abs(out[i])
+
+        if g1 <= gross_cap + 1e-9:
+            break
+
+        # Scale down to meet gross cap
+        scale = gross_cap / max(g1, 1e-12)
+        for i in range(n):
+            out[i] *= scale
+
+    return out
+
+
 def _project_l1_linf(
     w_pre: np.ndarray, *, gross_cap: float, per_symbol_cap: float
 ) -> np.ndarray:
-    """L1 gross + per-symbol caps via SLSQP (small n)."""
-    n = int(w_pre.size)
-    w0 = np.asarray(w_pre, dtype=np.float64).ravel()
-    cap = float(per_symbol_cap) * float(gross_cap)
-
-    def objective(x: np.ndarray) -> float:
-        return float(np.sum((x - w0) ** 2))
-
-    cons = (
-        {"type": "ineq", "fun": lambda x: float(gross_cap) - float(np.sum(np.abs(x)))},
-    )
-    bounds = [(-cap, cap) for _ in range(n)]
-    res = minimize(
-        objective,
-        w0,
-        method="SLSQP",
-        bounds=bounds,
-        constraints=cons,
-        options={"maxiter": 400, "ftol": 1e-12},
-    )
-    x = np.asarray(res.x, dtype=np.float64)
-    if not res.success:
-        x = np.clip(w0, -cap, cap)
-        g1 = float(np.sum(np.abs(x)))
-        if g1 > gross_cap + 1e-9 and g1 > 0:
-            x *= gross_cap / g1
-    return x
+    """Fast L1 gross + per-symbol caps via iterative scaling and clipping."""
+    return _project_l1_linf_numba(w_pre, float(gross_cap), float(per_symbol_cap))
 
 
 def solve_constrained_weights(
     mu: np.ndarray,
-    Sigma: np.ndarray,
+    sigma: np.ndarray,
     *,
     kappa: float,
     f_kelly_max: float,
@@ -149,14 +160,14 @@ def solve_constrained_weights(
             raise ValueError("kelly_sigma_diag size must match mu")
         sig = np.maximum(sig, 1e-12)
     else:
-        sig = np.sqrt(np.clip(np.diag(np.asarray(Sigma, dtype=np.float64)), 1e-12, None))
+        sig = np.sqrt(np.clip(np.diag(np.asarray(sigma, dtype=np.float64)), 1e-12, None))
     w_raw = kappa * _kelly_raw(mu_v, sig, f_kelly_max=f_kelly_max)
 
-    Sigma = np.asarray(Sigma, dtype=np.float64)
-    if Sigma.shape != (n, n):
-        Sigma = np.diag(np.diag(Sigma))
+    sigma = np.asarray(sigma, dtype=np.float64)
+    if sigma.shape != (n, n):
+        sigma = np.diag(np.diag(sigma))
 
-    port_var_bar = float(w_raw @ Sigma @ w_raw)
+    port_var_bar = float(w_raw @ sigma @ w_raw)
     sigma_pb = math.sqrt(max(port_var_bar, 1e-18))
     ann = _vol_ann_from_per_bar_sigma(sigma_pb, bars_per_year)
     if ann > 1e-12:
@@ -170,6 +181,137 @@ def solve_constrained_weights(
     dd = float(max(0.0, current_dd))
     dd_scale = float(np.clip(1.0 - max(0.0, dd - 0.05) / 0.10, 0.3, 1.0))
     return w_c * dd_scale
+
+
+def precompute_rolling_covariances(
+    close_2d: np.ndarray, lookback: int, min_obs: int = 20
+) -> np.ndarray:
+    """Precompute rolling Ledoit-Wolf covariance matrices for all bars.
+    
+    Called once during optimization precompute phase to eliminate 1M+ redundant 
+    calls during trials.
+    """
+    c = np.asarray(close_2d, dtype=np.float64)
+    n_bars, n_syms = c.shape
+    out = np.zeros((n_bars, n_syms, n_syms), dtype=np.float64)
+    lb = max(5, int(lookback))
+    
+    # LW fit is relatively heavy, but we only do this once per bar for the entire optimization.
+    for i in range(1, n_bars):
+        start_i = max(0, i - lb)
+        hist = c[start_i:i, :]
+        if hist.shape[0] < 3:
+            # Identity matrix fallback for insufficient history
+            for j in range(n_syms):
+                out[i, j, j] = 1e-6
+            continue
+            
+        rr = np.diff(hist, axis=0) / np.maximum(hist[:-1, :], 1e-12)
+        rr = np.nan_to_num(rr, nan=0.0, posinf=0.0, neginf=0.0)
+        out[i] = rolling_ledoit_wolf_cov(rr, min_obs=min_obs)
+        
+    return out
+
+
+@numba.njit(cache=True)
+def _solve_constrained_weights_numba(
+    mu: np.ndarray,
+    sigma: np.ndarray,
+    kappa: float,
+    f_kelly_max: float,
+    sigma_target_ann: float,
+    bars_per_year: float,
+    gross_cap: float,
+    per_symbol_cap: float,
+    current_dd: float,
+    kelly_sigma_diag: np.ndarray | None = None,
+) -> np.ndarray:
+    n = mu.size
+    if kelly_sigma_diag is not None:
+        sig = kelly_sigma_diag
+    else:
+        sig = np.zeros(n, dtype=np.float64)
+        for i in range(n):
+            sig[i] = math.sqrt(max(sigma[i, i], 1e-12))
+
+    # _kelly_raw logic
+    w_raw = np.zeros(n, dtype=np.float64)
+    f_max = abs(f_kelly_max)
+    for i in range(n):
+        var = max(sig[i] ** 2, 1e-12)
+        f = mu[i] / var
+        if f > f_max:
+            f = f_max
+        elif f < -f_max:
+            f = -f_max
+        w_raw[i] = kappa * f
+
+    # Sigma interaction
+    port_var_bar = 0.0
+    for i in range(n):
+        for j in range(n):
+            port_var_bar += w_raw[i] * sigma[i, j] * w_raw[j]
+
+    sigma_pb = math.sqrt(max(port_var_bar, 1e-18))
+    ann = sigma_pb * math.sqrt(max(bars_per_year, 1e-9))
+
+    if ann > 1e-12:
+        w_pre = w_raw * (sigma_target_ann / ann)
+    else:
+        w_pre = w_raw * 0.0
+
+    w_c = _project_l1_linf_numba(w_pre, gross_cap, per_symbol_cap)
+
+    dd_scale = 1.0 - max(0.0, current_dd - 0.05) / 0.10
+    if dd_scale < 0.3:
+        dd_scale = 0.3
+    elif dd_scale > 1.0:
+        dd_scale = 1.0
+
+    for i in range(n):
+        w_c[i] *= dd_scale
+
+    return w_c
+
+
+@numba.njit(cache=True)
+def _precompute_loop_numba(
+    n_bars: int,
+    n_syms: int,
+    rb: int,
+    mu_2d: np.ndarray,
+    sigma_3d: np.ndarray,
+    kappa: float,
+    f_kelly_max: float,
+    sigma_target_ann: float,
+    bars_per_year: float,
+    gross_cap: float,
+    per_symbol_cap: float,
+    current_dd: float,
+    ks_diag_2d: np.ndarray | None = None,
+) -> np.ndarray:
+    out = np.zeros((n_bars, n_syms), dtype=np.float64)
+    for i in range(1, n_bars):
+        if (i % rb) != 0:
+            continue
+
+        mu = mu_2d[i - 1]
+        sigma = sigma_3d[i]
+        ks_diag = ks_diag_2d[i - 1] if ks_diag_2d is not None else None
+
+        out[i, :] = _solve_constrained_weights_numba(
+            mu,
+            sigma,
+            kappa,
+            f_kelly_max,
+            sigma_target_ann,
+            bars_per_year,
+            gross_cap,
+            per_symbol_cap,
+            current_dd,
+            kelly_sigma_diag=ks_diag,
+        )
+    return out
 
 
 def precompute_rebalance_weights(
@@ -188,19 +330,46 @@ def precompute_rebalance_weights(
     current_dd: float = 0.0,
     min_obs: int = 20,
     composer_sigma_2d: np.ndarray | None = None,
+    sigma_3d: np.ndarray | None = None,
 ) -> np.ndarray:
-    """Sparse target weights: nonzero when ``i > 0`` and ``i % rebalance_bars == 0``."""
+    """Sparse target weights: precomputed or rolling LW covariance."""
     c = np.asarray(close_2d, dtype=np.float64)
     xl = np.asarray(xs_long, dtype=np.float64)
     xs_ = np.asarray(xs_short, dtype=np.float64)
     n_bars, n_syms = c.shape
-    out = np.zeros((n_bars, n_syms), dtype=np.float64)
     rb = max(1, int(rebalance_bars))
-    lb = max(5, int(lookback))
 
-    for i in range(n_bars):
-        if i == 0:
-            continue
+    # Prepare inputs for Numba loop
+    mu_2d = xl - xs_
+    mu_2d = np.nan_to_num(mu_2d, nan=0.0, posinf=0.0, neginf=0.0)
+
+    # If sigma_3d is provided, we can use the high-speed Numba loop
+    if sigma_3d is not None:
+        ks_diag_2d = None
+        if composer_sigma_2d is not None:
+            ks_diag_2d = np.asarray(composer_sigma_2d, dtype=np.float64)
+            ks_diag_2d = np.maximum(ks_diag_2d, 1e-12)
+
+        return _precompute_loop_numba(
+            n_bars,
+            n_syms,
+            rb,
+            mu_2d,
+            sigma_3d,
+            float(kappa),
+            float(f_kelly_max),
+            float(sigma_target_ann),
+            float(bars_per_year),
+            float(gross_cap),
+            float(per_symbol_cap),
+            float(current_dd),
+            ks_diag_2d=ks_diag_2d,
+        )
+
+    # Fallback to slower Python loop with rolling LW
+    out = np.zeros((n_bars, n_syms), dtype=np.float64)
+    lb = max(5, int(lookback))
+    for i in range(1, n_bars):
         if (i % rb) != 0:
             continue
         start_i = max(0, i - lb)
@@ -210,23 +379,22 @@ def precompute_rebalance_weights(
         rr = np.diff(hist, axis=0) / np.maximum(hist[:-1, :], 1e-12)
         rr = np.nan_to_num(rr, nan=0.0, posinf=0.0, neginf=0.0)
         sigma = rolling_ledoit_wolf_cov(rr, min_obs=min_obs)
-        sl = np.nan_to_num(xl[i - 1, :], nan=0.0, posinf=0.0, neginf=0.0)
-        ss = np.nan_to_num(xs_[i - 1, :], nan=0.0, posinf=0.0, neginf=0.0)
-        mu = mu_net_from_composer_channels(sl, ss)
+
         ks_diag = None
         if composer_sigma_2d is not None:
-            ks_row = np.asarray(composer_sigma_2d[i - 1, :], dtype=np.float64).ravel()
-            ks_diag = np.maximum(ks_row, 1e-12)
-        out[i, :] = solve_constrained_weights(
-            mu,
+            ks_diag = np.asarray(composer_sigma_2d[i - 1, :], dtype=np.float64).ravel()
+            ks_diag = np.maximum(ks_diag, 1e-12)
+
+        out[i, :] = _solve_constrained_weights_numba(
+            mu_2d[i - 1],
             sigma,
-            kappa=float(kappa),
-            f_kelly_max=float(f_kelly_max),
-            sigma_target_ann=float(sigma_target_ann),
-            bars_per_year=float(bars_per_year),
-            gross_cap=float(gross_cap),
-            per_symbol_cap=float(per_symbol_cap),
-            current_dd=float(current_dd),
+            float(kappa),
+            float(f_kelly_max),
+            float(sigma_target_ann),
+            float(bars_per_year),
+            float(gross_cap),
+            float(per_symbol_cap),
+            float(current_dd),
             kelly_sigma_diag=ks_diag,
         )
 

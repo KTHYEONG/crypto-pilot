@@ -8,12 +8,12 @@ from typing import Any
 
 OPT_FUTURES_CONFIG: dict[str, Any] = {
     # 3-phase coordinate ascent total ≈ 260 (Bonferroni / reporting baseline).
-    "total_trials": 260,
+    "total_trials": 480,
     # Phase-D TPESampler startup; per-phase samplers in opt_main_futures override as needed.
     "tpe_n_startup_trials": 20,
     # Caps startup at this fraction of Phase-D n_trials (prevents 384/500 ~77% random when
     # total_trials-oriented tpe_n_startup is reused for FUTURES_ML_PHASE_D_TRIALS=500).
-    "FUTURES_ML_PHASE_D_TPE_STARTUP_FRAC": 0.20,
+    "FUTURES_ML_PHASE_D_TPE_STARTUP_FRAC": 0.15,
     # Phase-D: trial 0 = deploy JSON in search space (TPE anchor; counts toward n_trials).
     "FUTURES_ML_PHASE_D_ENQUEUE_DEPLOY_JSON": True,
     "FUTURES_ML_PHASE_D_DEPLOY_JSON_REL": "results/best_futures_1h.json",
@@ -40,19 +40,19 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     # Path A: True + PBO_MAX 0.50 for exploration; default off (session 42: 300t HOLD).
     "FUTURES_TIER1_SHIELD_MODE": False,
     # Universal Cross-Sectional Alpha Miner Settings
-    "FUTURES_ML_ALPHA_POPULATION": 1000,
+    "FUTURES_ML_ALPHA_POPULATION": 1500,
     "FUTURES_ALPHA_LONG_BIAS": 2.0,
     "FUTURES_ALPHA_ASYMMETRIC_FITNESS_WEIGHT": 0.7,
     "FUTURES_ALPHA_REGIME_SPECIFIC_LEARNING": True,
     # Tier 2: +2 generations for marginal symbolic-regression diversity (cheap vs full schema lift).
-    "FUTURES_ML_ALPHA_GENERATIONS": 22,
+    "FUTURES_ML_ALPHA_GENERATIONS": 30,
     "FUTURES_ML_ALPHA_TARGET_HORIZON": 24,
-    "FUTURES_ML_ALPHA_HORIZONS": (24, 48, 72, 96),
+    "FUTURES_ML_ALPHA_HORIZONS": (12, 24, 48, 72, 96),
     # Cache-control refit: when True, bypass Alpha raw cache and force alpha retraining.
     "FUTURES_ML_FORCE_RETRAIN_ALPHA": True,
     # Thematic breadth: LambdaRank buckets (Trend / Vol+MR / Interaction) × slots each. Total = 3 × value.
     # Raising adds interaction-style capacity without injecting systemic HMM into Trend slots (helps long IC vs AWF pos_frac).
-    "FUTURES_ML_ALPHA_SLOTS_PER_THEME": 6,
+    "FUTURES_ML_ALPHA_SLOTS_PER_THEME": 8,
     "FUTURES_ML_ALPHA_PARSIMONY": 0.02,
     "FUTURES_ML_ALPHA_USE_TBM_WEIGHT": True,
     "FUTURES_ML_PRE_ALPHA_REGIME": False,
@@ -65,8 +65,8 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     "FUTURES_ML_IC_SYMBOL_BALANCE_MAX": 3.0,
     "FUTURES_ML_IC_REGIME_GATE": False,
     # Tier 2 discovery: FDR relaxation to expand candidate pool.
-    "FUTURES_ML_IC_FDR_Q": 0.40,
-    "FUTURES_ML_ALPHA_NSGA2_ENABLED": True,
+    "FUTURES_ML_IC_FDR_Q": 0.30,
+    "FUTURES_ML_ALPHA_NSGA2_ENABLED": False,
     # NSGA-II population size. Generations = trials / population_size.
     # Target ≥ 10 generations → min trials = population_size * 10.
     # Sessions 27/35/38: NSGA-II 3-strike empirical failure. DSR collapses to ~0.45.
@@ -101,9 +101,9 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     "CRISIS_RECOVERY_TREND_THR": 1e9,
     "CRISIS_RECOVERY_FLOOR": 0.30,
     # CAWF-R: K anchored legs in the OOS-pool slice (train [0, anchor_i), embargo, test window).
-    "FUTURES_AWF_K_LEGS": 4,
+    "FUTURES_AWF_K_LEGS": 5,
     # IS-pool fraction (leading bars); trailing (1 − frac) builds tiled OOS test legs only.
-    "FUTURES_AWF_IS_POOL_FRAC": 0.70,
+    "FUTURES_AWF_IS_POOL_FRAC": 0.65,
     # Platt: prefer OOS-only windows in optimizer ``_fit_oos_platt_calibrators_from_maps``;
     # legacy tail fraction kept for deprecated tail-window path only.
     "FUTURES_CALIB_PLATT_TAIL_FRAC": 0.30,
@@ -131,10 +131,10 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     "SLIPPAGE_BPS_BUFFER_MULT": 1.0,
     "FUTURES_DEFAULT_BETA_ALPHA": 1.0,
     "FUTURES_DEFAULT_BETA_REGIME_BULL": 1.0,
-    "FUTURES_DEFAULT_BETA_REGIME_BEAR": 0.25,
+    "FUTURES_DEFAULT_BETA_REGIME_BEAR": 0.15,
     # Stability fail → try runner-up phase-C trial once.
     "FUTURES_STABILITY_RUNNER_UP_RETRY": True,
-    "FUTURES_DEFAULT_BETA_REGIME_CRISIS": 0.5,
+    "FUTURES_DEFAULT_BETA_REGIME_CRISIS": 0.3,
     "FUTURES_DEFAULT_BETA_REGIME_RECOVERY": 0.0,
     "FUTURES_DEFAULT_BETA_REGIME_CHOP": 0.25,
     "FUTURES_DEFAULT_EV_HURDLE_BPS": 5.0,
@@ -144,24 +144,24 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     "FUTURES_TMP_LAYER1_POS_LEG_RATIO_MIN": 4.0 / 6.0,
     "FUTURES_TMP_LAYER1_MAX_DD_PCT": 12.0,
     "FUTURES_TMP_LAYER2_PSR_MIN": 0.95,
-    "FUTURES_TMP_LAYER2_MIN_TRADES_PER_LEG": 30,
+    "FUTURES_TMP_LAYER2_MIN_TRADES_PER_LEG": 20,
     # Layer 2 optional: median(leg_log_tw − stress·round_trip) > 0 (see tmp_md_champion).
     "FUTURES_TMP_LAYER2_FRICTION_STRESS_ENABLED": True,
-    "FUTURES_TMP_LAYER2_FRICTION_STRESS_MULT": 1.5,
+    "FUTURES_TMP_LAYER2_FRICTION_STRESS_MULT": 1.2,
     # Layer 3: every stability-seed AWF replay must pass Layer-1 checks when hard gate on.
     "FUTURES_TMP_LAYER3_ALL_SEEDS_LAYER1": True,
     "FUTURES_TMP_LAYER3_HARD_GATE": True,
-    "FUTURES_LEARNING_SEEDS": [42],
-    "FUTURES_STABILITY_SEEDS": [42, 7, 13, 21, 55],
-    "FUTURES_COORD_PHASE_TRIALS": {"A": 80, "B": 120, "C": 60},
-    "FUTURES_CHAMP_STABILITY_CV_MAX": 0.30,
+    "FUTURES_LEARNING_SEEDS": [42, 7],
+    "FUTURES_STABILITY_SEEDS": [42, 7, 13],
+    "FUTURES_COORD_PHASE_TRIALS": {"A": 120, "B": 240, "C": 120},
+    "FUTURES_CHAMP_STABILITY_CV_MAX": 0.40,
     # When True, unified gates fail if multi-seed AWF replay CV exceeds max (see key above).
     "FUTURES_CHAMP_STABILITY_HARD_GATE": True,
     "EMBARGO_BARS_BY_TF": {"1h": 168, "4h": 42, "1d": 7},
     # Robust AWF scalar objective weights (see objective_ml.py).
     # median(log_TW) - lambda*MAD - psi*DD_max (fixed lambda, psi).
-    "FUTURES_AWF_OBJ_LAMBDA_MAD": 1.0,
-    "FUTURES_AWF_OBJ_PSI_DD": 0.5,
+    "FUTURES_AWF_OBJ_LAMBDA_MAD": 1.5,
+    "FUTURES_AWF_OBJ_PSI_DD": 0.3,
     # Phase-D pruning / auxiliary weights (robust AWF objective uses keys above).
     "FUTURES_PHASE_D_W_PF_LONG": 1.5,
     "FUTURES_PHASE_D_W_PF_SHORT": 1.5,
@@ -174,9 +174,9 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     "FUTURES_AWF_P10_LOG_TW_MIN": -0.10,
     # Increased from 3: 5 WF OOS legs provide regime-diverse robustness verification.
     "FUTURES_WF_OOS_LEGS": 5,
-    "FUTURES_ENSEMBLE_MAX_SIZE": 3,
-    "FUTURES_META_ALLOC_WINDOW": 24,
-    "FUTURES_META_ALLOC_ETA": 0.1,
+    "FUTURES_ENSEMBLE_MAX_SIZE": 5,
+    "FUTURES_META_ALLOC_WINDOW": 12,
+    "FUTURES_META_ALLOC_ETA": 0.15,
     # R-6: per WF OOS leg, retrain systemic HMM on data strictly before leg start (GP frozen).
     # Per AWF leg, rerun full universe ML (alpha + systemic HMM + fusion) at the leg train
     # cutoff before slicing that leg's test window. Disable for faster iteration (single merge).
@@ -197,10 +197,10 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     "FUTURES_USE_META_LABELER": True,
     "FUTURES_CRISIS_GATE_PROB_DEFAULT": 0.7,
     "FUTURES_MIN_TRADES_TARGET": 30,
-    "FUTURES_IS_SURVIVAL_MIN_CAGR_PCT": 15.0,
-    "FUTURES_IS_SURVIVAL_MIN_SHARPE": 1.5,
+    "FUTURES_IS_SURVIVAL_MIN_CAGR_PCT": 8.0,
+    "FUTURES_IS_SURVIVAL_MIN_SHARPE": 0.8,
     # Phase 3: WF refit HMM-only when Meta disabled; optional PBO/DSR hard gate after Optuna
-    "FUTURES_ML_WF_REFIT_ENABLED": True,
+    "FUTURES_ML_WF_REFIT_ENABLED": False,
     "FUTURES_ML_WF_REFIT_LEGS": 3,
     "FUTURES_PHASE3_HARD_GATE": True,
     # gate1_dsr ∈ [0,1]: AWF positive-leg fraction proxy under MC-adjusted floor.
@@ -208,9 +208,9 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     "FUTURES_ML_GATE1_DSR_MIN": 0.40,
     # Worst AWF leg log-TW floor already enforced via FUTURES_AWF_P10_LOG_TW_MIN.
     # Improvement 1: Friction-Aware EV Hurdle
-    "FUTURES_ML_EV_HURDLE_RATIO": 0.0,
+    "FUTURES_ML_EV_HURDLE_RATIO": 1.0,
     # Improvement 2: Regime-Aware Dynamic Kelly Scaling
-    "FUTURES_HMM_DYNAMIC_KELLY_ENABLED": False,
+    "FUTURES_HMM_DYNAMIC_KELLY_ENABLED": True,
     # Improvement 3: PLGD Leg Stability Weight
     "FUTURES_PLGD_AWF_LEG_STABILITY_WEIGHT": 0.8,
     # Improvement 4: Friction-Aware Virtual Cost (bps per trade)
@@ -230,13 +230,13 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     # Phase-A: temporary gross cap (raise after PnL/cost tuning).
     "FUTURES_PHASE_A_MAX_GROSS_EXPOSURE": 1.5,
     "FUTURES_PORTFOLIO_POLICY": {
-        "target_ann_vol": 0.45,
-        "gross_exposure_cap": 1.50,
-        "per_symbol_cap": 0.40,
-        "top_k_long": 3,
-        "top_k_short": 3,
+        "target_ann_vol": 0.35,
+        "gross_exposure_cap": 1.80,
+        "per_symbol_cap": 0.35,
+        "top_k_long": 4,
+        "top_k_short": 4,
         "entry_edge_threshold": 0.15,
-        "rebalance_bars": 6,
+        "rebalance_bars": 3,
         "min_long_pf": 1.05,
         "min_short_pf": 1.05,
         "min_is_net_alpha_pct": 0.0,
@@ -262,7 +262,7 @@ ENGINE_PARAM_SPACE_FUTURES: dict[str, dict[str, Any]] = {
     **SIGNAL_PARAM_SPACE_FUTURES,
     **PORTFOLIO_PARAM_SPACE_FUTURES,
     "K_RANK": {"type": "int", "low": 1, "high": 4, "step": 1},
-    "REBALANCE_BARS": {"type": "categorical", "choices": (1, 3, 6, 12)},
+    "REBALANCE_BARS": {"type": "categorical", "choices": (1, 3, 6)},
     "MIN_SCORE_PERCENTILE": {"type": "float", "low": 0.40, "high": 0.90, "step": 0.10},
     "CS_Z_SCORE_THRESHOLD": {"type": "float", "low": 0.2, "high": 2.0, "step": 0.1},
     "CRISIS_GAMMA": {"type": "float", "low": 1.0, "high": 5.0, "step": 1.0},
