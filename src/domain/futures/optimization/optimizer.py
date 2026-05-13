@@ -730,6 +730,7 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
                         gp_only=False,
                         hmm_only=False,
                         preloaded_data_maps=ctx.data_maps,
+                        seed=ctx.seed,
                     )
                     if not ml_out.meta_feature_frame_by_symbol:
                         _logger.error("[ML_OPT] AWF leg %d ML pipeline returned empty output.", leg_i)
