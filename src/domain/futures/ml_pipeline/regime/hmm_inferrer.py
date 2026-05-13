@@ -153,7 +153,7 @@ def _build_five_state_probs(
 
     bull_calm: pd.Series = p_low * p_bull
     bull_vol_up: pd.Series = (p_mid + p_high) * p_bull
-    bear_trend: pd.Series = p_mid * p_bear
+    bear_trend: pd.Series = (p_mid + p_high) * p_bear
     chop: pd.Series = p_low * p_range + p_mid * p_range
     crisis_base: pd.Series = (p_high * p_bear * 1.8 + p_mid * p_bear * 0.3).clip(0.0, 0.50)
 

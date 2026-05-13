@@ -89,7 +89,22 @@ def tmp_md_layer1_gate_failures(
     )
     logs = [float(x) for x in raw]
     if not logs:
-        failures.append("TMP_LAYER1_NO_AWF_LEGS")
+        # scalar-only 저장 정책으로 list가 없을 때: 저장된 scalar로 동일 체크 수행
+        awf_pos = float(user_attrs.get("awf_pos_frac", -1.0))
+        if awf_pos < 0.0:
+            failures.append("TMP_LAYER1_NO_AWF_LEGS")
+            return failures
+        thr = float(cfg.get("FUTURES_TMP_LAYER1_POS_LEG_RATIO_MIN", 4.0 / 6.0))
+        if awf_pos + 1e-12 < thr:
+            failures.append("TMP_LAYER1_POS_LEG_RATIO")
+        awf_mu = float(user_attrs.get("awf_mu_log", -999.0))
+        if awf_mu <= float(cfg.get("FUTURES_TMP_LAYER1_MEDIAN_LOG_TW_MIN", 0.0)):
+            failures.append("TMP_LAYER1_MEDIAN_LOG_TW")
+        mdd_pct = float(
+            user_attrs.get("awf_worst_mdd_pct", user_attrs.get("ml_worst_mdd_cpcv", 0.0))
+        )
+        if mdd_pct > float(cfg.get("FUTURES_TMP_LAYER1_MAX_DD_PCT", 12.0)):
+            failures.append("TMP_LAYER1_MAX_DD")
         return failures
     arr = np.asarray(logs, dtype=np.float64)
     med = float(np.median(arr))
