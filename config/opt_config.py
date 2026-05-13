@@ -66,7 +66,7 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     "FUTURES_ML_IC_REGIME_GATE": False,
     # Tier 2 discovery: FDR relaxation to expand candidate pool.
     "FUTURES_ML_IC_FDR_Q": 0.30,
-    "FUTURES_ML_ALPHA_NSGA2_ENABLED": False,
+    "FUTURES_ML_ALPHA_NSGA2_ENABLED": True,  # T2: AWF ns2 분기 활성 (objectives=(mean,min))
     # NSGA-II population size. Generations = trials / population_size.
     # Target ≥ 10 generations → min trials = population_size * 10.
     # Sessions 27/35/38: NSGA-II 3-strike empirical failure. DSR collapses to ~0.45.
@@ -206,6 +206,8 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     # gate1_dsr ∈ [0,1]: AWF positive-leg fraction proxy under MC-adjusted floor.
     # 0.40 → at least 2/5 legs positive (floor). MC adjustment raises to 0.48 at 400 trials.
     "FUTURES_ML_GATE1_DSR_MIN": 0.40,
+    "FUTURES_AWF_POS_FRAC_MIN": 0.60,   # AWF 게이트: 최소 60% leg 수익 (≥3/5)
+    "FUTURES_AWF_MU_LOG_MIN": 0.0,       # AWF 게이트: 평균 leg log-TW > 0
     # Worst AWF leg log-TW floor already enforced via FUTURES_AWF_P10_LOG_TW_MIN.
     # Improvement 1: Friction-Aware EV Hurdle
     "FUTURES_ML_EV_HURDLE_RATIO": 1.0,
