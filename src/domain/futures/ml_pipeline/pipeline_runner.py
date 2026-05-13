@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import hashlib
+import json
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -11,9 +13,15 @@ from typing import Any, NamedTuple, cast
 import numpy as np
 import pandas as pd
 from sklearn.isotonic import IsotonicRegression
+from joblib import Memory
 
 from config.opt_config import OPT_FUTURES_CONFIG
 from config.settings import FUTURES_CACHE_DIR, FUTURES_DATA_DIR
+
+_logger = logging.getLogger(__name__)
+
+# Initialize joblib Memory for disk caching
+_memory = Memory(FUTURES_CACHE_DIR, verbose=0)
 from src.domain.futures.data_loader import (
     DataCollector,
     merge_funding_into_ohlcv,
@@ -1306,6 +1314,46 @@ def run_hmm_fusion_for_is_end(
     return out
 
 
+def _get_cfg_hash(cfg: dict[str, Any]) -> str:
+    """Create a stable hash of the configuration dictionary."""
+    relevant_cfg = {
+        k: v for k, v in cfg.items() 
+        if k.startswith("FUTURES_") or k in ("total_trials", "tpe_n_startup_trials")
+    }
+    cfg_str = json.dumps(relevant_cfg, sort_keys=True, default=str)
+    return hashlib.md5(cfg_str.encode()).hexdigest()
+
+
+@_memory.cache(ignore=["fetch_start_date", "end", "cfg", "workers", "n_jobs", "gp_only", "hmm_only", "preloaded_data_maps", "preloaded_1h_maps"])
+def _run_ml_pipeline_cached_core(
+    tf: str,
+    is_end_date: str | None,
+    is_start_date: str | None,
+    symbols_tuple: tuple[str, ...],
+    seed: int,
+    cfg_hash: str,
+    fetch_start_date: str,
+    end: str,
+    cfg: dict[str, Any],
+    workers: int,
+    n_jobs: int,
+    gp_only: bool,
+    hmm_only: bool,
+    preloaded_data_maps: dict[str, dict[str, Any]] | None,
+    preloaded_1h_maps: dict[str, pd.DataFrame] | None,
+) -> MLPipelineOutput:
+    """Core ML pipeline logic that is cached on disk.
+    
+    The hashing is based only on the first 6 arguments.
+    """
+    _logger.info("🚀 [ML CACHE] Cache MISS - Running core pipeline for %s symbols", len(symbols_tuple))
+    return _run_ml_pipeline_implementation(
+        list(symbols_tuple), tf, fetch_start_date, end, cfg, workers, n_jobs,
+        is_end_date, is_start_date, gp_only, hmm_only,
+        preloaded_data_maps, preloaded_1h_maps
+    )
+
+
 def run_ml_pipeline_for_universe(
     symbols: list[str],
     tf: str,
@@ -1320,16 +1368,47 @@ def run_ml_pipeline_for_universe(
     hmm_only: bool = False,
     preloaded_data_maps: dict[str, dict[str, Any]] | None = None,
     preloaded_1h_maps: dict[str, pd.DataFrame] | None = None,
+    seed: int | None = None,
 ) -> MLPipelineOutput:
-    """[Phase 2] Universal Cross-Sectional ML Pipeline.
+    """[Phase 2] Universal Cross-Sectional ML Pipeline with Disk Caching."""
+    symbols_tuple = tuple(sorted(symbols))
+    # Use provided seed or fallback to first seed in config
+    actual_seed = seed if seed is not None else int(cfg.get("FUTURES_LEARNING_SEEDS", [42])[0])
+    cfg_hash = _get_cfg_hash(cfg)
     
-    Logical Flow:
-    1. Data Collection & Panel Construction (TF-aware)
-    2. Systemic HMM Inference (Regime Discovery)
-    3. Alpha Mining (Regime-Aware LightGBM/GP)
-    4. Signal Fusion & Meta-Labeling (Unified Meta-Feature Frame)
-    """
-    _logger.info("🔄 ML Pipeline | TF=%s | symbols=%d", tf, len(symbols))
+    try:
+        return _run_ml_pipeline_cached_core(
+            tf, is_end_date, is_start_date, symbols_tuple, actual_seed, cfg_hash,
+            fetch_start_date, end, cfg, workers, n_jobs, gp_only, hmm_only,
+            preloaded_data_maps, preloaded_1h_maps
+        )
+    except Exception as e:
+        _logger.warning("ML Pipeline Caching failed or bypassed: %s", e)
+        return _run_ml_pipeline_implementation(
+            symbols, tf, fetch_start_date, end, cfg, workers, n_jobs, 
+            is_end_date, is_start_date, gp_only, hmm_only,
+            preloaded_data_maps, preloaded_1h_maps, seed=actual_seed
+        )
+
+
+def _run_ml_pipeline_implementation(
+    symbols: list[str],
+    tf: str,
+    fetch_start_date: str,
+    end: str,
+    cfg: dict[str, Any],
+    workers: int = 4,
+    n_jobs: int = 4,
+    is_end_date: str | None = None,
+    is_start_date: str | None = None,
+    gp_only: bool = False,
+    hmm_only: bool = False,
+    preloaded_data_maps: dict[str, dict[str, Any]] | None = None,
+    preloaded_1h_maps: dict[str, pd.DataFrame] | None = None,
+    seed: int | None = None,
+) -> MLPipelineOutput:
+    """[Phase 2] Universal Cross-Sectional ML Pipeline implementation."""
+    _logger.info("🔄 ML Pipeline | TF=%s | symbols=%d | seed=%s", tf, len(symbols), seed)
 
     collector = DataCollector()
     data_maps: dict[str, dict[str, Any]] = preloaded_data_maps or {}
