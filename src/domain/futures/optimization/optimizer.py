@@ -212,6 +212,7 @@ class MLPhaseDContext:
     tf: str
     seed: int = 42
     awf_leg_slices: list[dict[str, Any]] | None = None
+    is_slice: dict[str, Any] | None = None
     holdout_slice: dict[str, np.ndarray] | None = None
     multi_alignment_info: dict[str, Any] | None = None
     # SOTA: Mathematical Policy Components
@@ -677,7 +678,7 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
                 run_ml_pipeline_for_universe,
             )
 
-            _logger.warning(
+            _logger.debug(
                 "[ML_OPT] AWF full ML leg refit — %d× universe pipeline "
                 "(cross-sectional alpha + systemic HMM + fusion). Expect long precompute.",
                 len(awf_legs),
@@ -772,7 +773,7 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
                     tmp_slices.append({"leg_range": (test_s, test_e), "data": aligned_leg})
 
                 if failed or len(tmp_slices) != len(awf_legs):
-                    _logger.warning(
+                    _logger.debug(
                         "[ML_OPT] Per-leg ML refit incomplete (%d/%d legs); "
                         "falling back to single global ML merge for AWF.",
                         len(tmp_slices),
@@ -786,6 +787,20 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
             ctx.calibrator = last_calib
             ctx.calibrator_short = last_calib_short
             ctx.estimated_b = last_est_b
+            
+            # [Optimization] Populate is_slice for decoupled IS optimization
+            prebuilt_full_is = _build_prebuilt_full_arrays(
+                ctx.data_maps,
+                ctx.symbols,
+                ctx.tf,
+                info,
+                calibrator=ctx.calibrator,
+                calibrator_short=ctx.calibrator_short,
+            )
+            ctx.is_slice = _build_aligned_2d_from_prebuilt(
+                prebuilt_full_is, ctx.symbols, 0, eff_len,
+                sigma_3d_full=sigma_3d_full
+            )
         else:
             # [LEAKAGE FIX] Calibrator must be trained on IS bars only.
             # Range: [0, first_awf_anchor - embargo) — no leakage into OOS test legs.
@@ -832,6 +847,12 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
                 calibrator_short=ctx.calibrator_short,
             )
 
+            # [Optimization] Populate is_slice for decoupled IS optimization
+            ctx.is_slice = _build_aligned_2d_from_prebuilt(
+                prebuilt_full, ctx.symbols, 0, eff_len,
+                sigma_3d_full=sigma_3d_full
+            )
+
             ctx.awf_leg_slices = []
             for _train_s, _train_e, test_s, test_e in awf_legs:
                 aligned = _build_aligned_2d_from_prebuilt(
@@ -851,7 +872,7 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
             xs_std = float(np.nanstd(np.asarray(xl0, dtype=np.float64)))
             ctx.multi_alignment_info["xs_score_aligned_std"] = xs_std
             if xs_std < 0.05:
-                _logger.warning(
+                _logger.debug(
                     "[ML_OPT] xs_score dispersion low (std=%.6f); check GP/CS merge path.",
                     xs_std,
                 )
@@ -1593,63 +1614,54 @@ def _evaluate_awf_phase_d_aggregate(
     diag: dict[str, Any] = {
         "objective": float(obj),
         "robust_val": float(robust_val),
-        "leg_log_tw": leg_log_tw,
-        "leg_mdds": leg_mdds,
-        "leg_arr": leg_arr,
-        "mu_log": mu_log,
-        "worst_leg": worst_leg,
+        "awf_robust_score": float(robust_val),
+        "awf_contract_reward": float(robust_val),
+        "awf_plgd": float(robust_val),
+        "awf_plgd_n_trials": int(n_trials_eff),
+        "gate1_eff_ref_len": int(gate_stat_ref),
+        "awf_path_leg_log_tw": [float(x) for x in leg_log_tw],
+        "cpcv_path_oos_log_tw": [float(x) for x in leg_log_tw],
+        "awf_leg_log_tw": [float(x) for x in leg_log_tw],
+        "awf_leg_trade_counts": [float(x) for x in leg_trade_counts],
         "awf_pos_frac": awf_pos_frac,
+        "gate1_dsr": dsr_awf,
         "dsr_awf": dsr_awf,
-        "sig_awf_diag": sig_awf_diag,
-        "gate_stat_ref": gate_stat_ref,
-        "n_trials_eff": n_trials_eff,
-        "avg_trades_agg": avg_trades_agg,
-        "worst_mdd_legs": worst_mdd_legs,
-        "avg_exposure": avg_exposure,
-        "minority": minority,
-        "leg_l_pf": leg_l_pf,
-        "leg_s_pf": leg_s_pf,
+        "n_negative_legs": int(np.sum(leg_arr < 0.0)),
+        "leg_l_pf": [round(x, 4) for x in leg_l_pf],
+        "leg_s_pf": [round(x, 4) for x in leg_s_pf],
         "leg_long_counts": leg_long_counts,
         "leg_short_counts": leg_short_counts,
-        "leg_crisis_mean": leg_crisis_mean,
-        "n_legs_done": int(n_legs_done),
+        "awf_mu_log": mu_log,
+        "mu_log": mu_log,
+        "awf_sigma_log": sig_awf_diag,
+        "sig_awf_diag": sig_awf_diag,
+        "awf_mean_log_tw": float(mu_log),
+        "ml_mean_log_growth_cpcv": mu_log,
+        "awf_worst_leg_log_tw": float(worst_leg),
+        "worst_leg": worst_leg,
+        "ml_p10_log_growth_cpcv": worst_leg,
+        "awf_worst_mdd_pct": float(worst_mdd_legs),
+        "worst_mdd_legs": worst_mdd_legs,
+        "ml_worst_mdd_cpcv": worst_mdd_legs,
+        "avg_trades": avg_trades_agg,
+        "avg_exposure": avg_exposure,
+        "long_short_ratio": minority,
+        "leg_crisis_mean": [round(x, 4) for x in leg_crisis_mean],
+        "n_valid_paths": int(n_legs_done),
         "l_pf_agg": l_pf_agg,
         "s_pf_agg": s_pf_agg,
     }
 
     if trial is not None:
+        # Scalar-only storage to prevent DB bottleneck
         trial.set_user_attr("awf_mu_log", mu_log)
         trial.set_user_attr("awf_sigma_log", sig_awf_diag)
         trial.set_user_attr("awf_robust_score", float(robust_val))
-        trial.set_user_attr("awf_contract_reward", float(robust_val))
-        trial.set_user_attr("awf_plgd", float(robust_val))
-        trial.set_user_attr("awf_plgd_n_trials", int(n_trials_eff))
-        trial.set_user_attr("gate1_eff_ref_len", int(gate_stat_ref))
-        trial.set_user_attr("awf_path_leg_log_tw", [float(x) for x in leg_log_tw])
-        trial.set_user_attr("cpcv_path_oos_log_tw", [float(x) for x in leg_log_tw])
-        trial.set_user_attr("awf_leg_log_tw", [float(x) for x in leg_log_tw])
-        trial.set_user_attr(
-            "awf_leg_trade_counts",
-            [float(x) for x in leg_trade_counts],
-        )
         trial.set_user_attr("awf_pos_frac", awf_pos_frac)
         trial.set_user_attr("gate1_dsr", dsr_awf)
-        trial.set_user_attr("n_negative_legs", int(np.sum(leg_arr < 0.0)))
-        trial.set_user_attr("leg_l_pf", [round(x, 4) for x in leg_l_pf])
-        trial.set_user_attr("leg_s_pf", [round(x, 4) for x in leg_s_pf])
-        trial.set_user_attr("leg_long_counts", leg_long_counts)
-        trial.set_user_attr("leg_short_counts", leg_short_counts)
-        trial.set_user_attr("awf_mean_log_tw", float(mu_log))
-        trial.set_user_attr("ml_mean_log_growth_cpcv", mu_log)
         trial.set_user_attr("awf_worst_leg_log_tw", float(worst_leg))
-        trial.set_user_attr("ml_p10_log_growth_cpcv", worst_leg)
         trial.set_user_attr("awf_worst_mdd_pct", float(worst_mdd_legs))
-        trial.set_user_attr("ml_worst_mdd_cpcv", worst_mdd_legs)
         trial.set_user_attr("avg_trades", avg_trades_agg)
-        trial.set_user_attr("avg_exposure", avg_exposure)
-        trial.set_user_attr("long_short_ratio", minority)
-        trial.set_user_attr("leg_crisis_mean", [round(x, 4) for x in leg_crisis_mean])
-        trial.set_user_attr("n_valid_paths", int(n_legs_done))
 
     ns2 = bool(cfg.get("FUTURES_ML_ALPHA_NSGA2_ENABLED", False))
     if ns2:
@@ -1661,12 +1673,100 @@ def _evaluate_awf_phase_d_aggregate(
     return float(obj), diag
 
 
+def _evaluate_is_phase_d(
+    ctx: MLPhaseDContext,
+    ml_bundle: dict[str, Any],
+    trial: optuna.Trial | None,
+) -> tuple[tuple[float, float], dict[str, Any]]:
+    """Single-IS backtest for decoupled optimization."""
+    cfg = OPT_FUTURES_CONFIG
+    aligned = ctx.is_slice
+    mai = ctx.multi_alignment_info
+
+    if aligned is None or mai is None:
+        fail = 1e9
+        return (fail, fail), {"empty": True}
+
+    params = ml_bundle if ml_bundle.get("TIMEFRAME") else _base_engine_params(ml_bundle, ctx.tf)
+    params["ESTIMATED_B"] = ctx.estimated_b
+
+    # Run IS backtest
+    zkill, zfund, lev_blk = _cached_kill_fund_lev(aligned, params)
+    b_trades_raw, b_bal, b_equity, _b_diag = _run_portfolio_numba_block(
+        params, aligned, zkill, zfund, lev_blk, ctx.estimated_b
+    )
+
+    n_tr = int(b_trades_raw.shape[0])
+    # Early Pruning: zero trades
+    if n_tr == 0:
+        if trial is not None:
+            raise optuna.TrialPruned()
+        return (1e9, 1e9), {"pruned": True}
+
+    # Early Pruning: excessive loss (> 20%)
+    is_ret_pct = (b_bal / FUTURES_INITIAL_BALANCE - 1.0) * 100.0
+    if trial is not None and is_ret_pct < -20.0:
+        raise optuna.TrialPruned()
+
+    is_mdd = float(calc_mdd_from_equity(b_equity))
+
+    # Split equity into 10 chunks to calculate robust score and DSR
+    k_chunks = 10
+    n_bars = b_equity.size
+    chunk_size = max(1, n_bars // k_chunks)
+    leg_log_tw = []
+    for i in range(k_chunks):
+        s = i * chunk_size
+        e = (i + 1) * chunk_size if i < k_chunks - 1 else n_bars
+        if e > s + 1:
+            chunk_ret = (b_equity[e-1] / b_equity[s] - 1.0) * 100.0
+            leg_log_tw.append(_log_tw_from_ret_pct(chunk_ret))
+
+    leg_arr = np.asarray(leg_log_tw, dtype=np.float64)
+    robust_val = compute_awf_robust_objective_score(
+        leg_arr, is_mdd,
+        lambda_mad=float(cfg.get("FUTURES_AWF_OBJ_LAMBDA_MAD", 1.0)),
+        psi_dd=float(cfg.get("FUTURES_AWF_OBJ_PSI_DD", 0.5))
+    )
+
+    # DSR calculation for constraints
+    n_trials_eff = int(cfg.get("total_trials", 1500))
+    if ctx.effective_total_trials is not None:
+        n_trials_eff = max(int(ctx.effective_total_trials), 1)
+
+    is_dsr = calc_gate1_dsr_from_path_log_tw(
+        leg_arr, ctx.tf, float(n_bars), float(n_trials_eff)
+    )
+
+    obj1 = -float(robust_val)
+    obj2 = -float(np.min(leg_arr)) if leg_arr.size > 0 else 1e9
+
+    if trial is not None:
+        # Scalar-only storage
+        trial.set_user_attr("IS_MDD", is_mdd)
+        trial.set_user_attr("IS_DSR", is_dsr)
+        trial.set_user_attr("IS_RET_PCT", float(is_ret_pct))
+        trial.set_user_attr("IS_ROBUST_SCORE", float(robust_val))
+        trial.set_user_attr("avg_trades", float(n_tr))
+
+    diag = {
+        "is_ret_pct": is_ret_pct,
+        "is_mdd": is_mdd,
+        "is_dsr": is_dsr,
+        "robust_val": robust_val,
+        "obj1": obj1,
+        "obj2": obj2,
+    }
+    return (obj1, obj2), diag
+
+
 def objective_ml_phase_d(trial: optuna.Trial, ctx: MLPhaseDContext) -> float | tuple[float, float]:
     """Joint NSGA-II Portfolio Optimization."""
-    if ctx.awf_leg_slices is None:
+    if ctx.is_slice is None:
         precompute_ml_optimization_context(ctx)
     merged = _suggest_ml_joint_nsga2(trial, ctx)
-    return _evaluate_awf_phase_d_aggregate(ctx, merged, trial=trial)[0]
+    # Using decoupled IS optimization
+    return _evaluate_is_phase_d(ctx, merged, trial=trial)[0]
 
 
 def select_best_trial_by_holdout_log_ret(trials: list[optuna.trial.FrozenTrial]) -> optuna.trial.FrozenTrial:
@@ -1719,10 +1819,17 @@ def topsis_select_best(pareto_trials: list[optuna.trial.FrozenTrial]) -> optuna.
     vals = np.asarray(vals_list, dtype=np.float64)
     vmin, vmax = vals.min(axis=0), vals.max(axis=0)
     norm = (vals - vmin) / np.where(vmax - vmin < 1e-12, 1.0, vmax - vmin)
+    
+    # Asymmetric Weights: [0.7 (Growth/Obj1), 0.3 (Tail Risk/Obj2)]
+    weights = np.array([0.7, 0.3]) if n_dim == 2 else np.ones(n_dim) / n_dim
+    
     ideal: np.ndarray = np.zeros(n_dim, dtype=np.float64)
     nadir: np.ndarray = np.ones(n_dim, dtype=np.float64)
-    d_pos = np.linalg.norm(norm - ideal, axis=1)
-    d_neg = np.linalg.norm(norm - nadir, axis=1)
+    
+    # Weighted Euclidean distance
+    d_pos = np.sqrt(np.sum(weights * (norm - ideal)**2, axis=1))
+    d_neg = np.sqrt(np.sum(weights * (norm - nadir)**2, axis=1))
+    
     return pareto_trials[int(np.argmax(d_neg / (d_pos + d_neg + 1e-12)))]
 
 
@@ -1751,6 +1858,3 @@ def check_hard_gates_ml(
     combined_pf = float(oos_result.get("profit_factor", (l_pf + s_pf) / 2.0))
     dir_ok = combined_pf >= 1.05
     return bool(pbo_ok and dsr_ok and wr_ok and mdd_ok and dir_ok)
-
-
-
