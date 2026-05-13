@@ -768,6 +768,7 @@ def _load_single_symbol_data(
     is_end: str,
     end: str,
     skip_metrics: bool = False,
+    target_tfs: list[str] | None = None,
 ) -> tuple[str, dict[str, Any] | None, dict[str, Any] | None, bool]:
     try:
         temp_is: dict[str, Any] = {}
@@ -781,10 +782,24 @@ def _load_single_symbol_data(
             merge_metrics_into_ohlcv
         )
 
-        tfs_to_load = set([tf, "1d", "1h", "4h"])
+        tfs_to_load = set(target_tfs) if target_tfs else {tf, "1d", "1h", "4h"}
         
-        # Pre-process raw data structures
-        raw_dfs = {}
+        # [Optimization] Pre-load funding and metrics data once to avoid redundant I/O per TF
+        funding_df = None
+        metrics_df = None
+        if not skip_metrics:
+            f_path = Path(FUTURES_DATA_DIR) / f"{sym.replace('/', '_')}_funding.parquet"
+            if f_path.exists():
+                try:
+                    funding_df = pd.read_parquet(f_path)
+                except Exception: pass
+            
+            m_path = Path(FUTURES_DATA_DIR) / f"{sym.replace('/', '_')}_metrics.parquet"
+            if m_path.exists():
+                try:
+                    metrics_df = pd.read_parquet(m_path)
+                except Exception: pass
+
         for tf_l in tfs_to_load:
             raw_df = collector.collect_and_save(sym, tf_l, fetch_start, end)
             if raw_df is None or raw_df.empty:
@@ -797,11 +812,26 @@ def _load_single_symbol_data(
                     raw_df = raw_df.rename(columns={str(raw_df.columns[0]): "datetime"})
 
             try:
-                # Core Merge logic with explicit Error Handling
-                df = merge_funding_into_ohlcv(sym, raw_df, Path(FUTURES_DATA_DIR))
-                df = merge_metrics_into_ohlcv(sym, df, Path(FUTURES_DATA_DIR))
+                # [Optimization] Use localized merge logic to benefit from pre-loaded data
+                df = raw_df.copy()
+                if funding_df is not None and not funding_df.empty:
+                    df["timestamp"] = pd.to_datetime(df["datetime"]).astype("int64") // 10**6
+                    f_tmp = funding_df.copy()
+                    f_tmp["timestamp"] = pd.to_datetime(f_tmp["timestamp"], unit="ms").astype("int64") // 10**6
+                    exclude_fr = ["datetime", "symbol"]
+                    cols_fr = [c for c in f_tmp.columns if c not in exclude_fr]
+                    df = pd.merge_asof(df.sort_values("timestamp"), f_tmp[cols_fr].sort_values("timestamp"), on="timestamp", direction="backward")
                 
-                # [Optimization] Enrich with GP features here (in parallel)
+                if metrics_df is not None and not metrics_df.empty:
+                    if "timestamp" not in df.columns:
+                        df["timestamp"] = pd.to_datetime(df["datetime"]).astype("int64") // 10**6
+                    m_tmp = metrics_df.copy()
+                    m_tmp["timestamp"] = pd.to_datetime(m_tmp["datetime"]).astype("int64") // 10**6
+                    exclude_m = ["timestamp", "datetime", "create_time", "symbol"]
+                    cols_m = [c for c in m_tmp.columns if c not in exclude_m]
+                    df = pd.merge_asof(df.sort_values("timestamp"), m_tmp[["timestamp"] + cols_m].sort_values("timestamp"), on="timestamp", direction="backward")
+
+                # Enrich with GP features
                 if not skip_metrics:
                     from src.domain.futures.ml_pipeline.pipeline_runner import _enrich_with_gp_features
                     df = _enrich_with_gp_features(df, tf=tf_l)
@@ -865,6 +895,7 @@ def _load_futures_data_maps_for_symbols(
     is_end: str,
     end: str,
     skip_metrics: bool = False,
+    target_tfs: list[str] | None = None,
 ) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]], list[str]]:
     data_maps: dict[str, dict[str, Any]] = {}
     oos_data_maps: dict[str, dict[str, Any]] = {}
@@ -876,7 +907,7 @@ def _load_futures_data_maps_for_symbols(
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
         futures = [
             executor.submit(
-                _load_single_symbol_data, sym, tf, fetch_start, start, is_end, end, skip_metrics
+                _load_single_symbol_data, sym, tf, fetch_start, start, is_end, end, skip_metrics, target_tfs
             )
             for sym in symbols
         ]
@@ -948,6 +979,7 @@ def main() -> None:
             is_end_date,
             end_date,
             skip_metrics=True,
+            target_tfs=[pre_args.tf, "1d"],
         )
 
         success = screen_symbol_refinement_futures(
@@ -1299,10 +1331,10 @@ def main() -> None:
         load_if_exists=True,
     )
 
-    _logger.info("  --> [EXEC] Running Joint NSGA-II optimization (8 Parallel Processes)...")
+    _logger.info("  --> [EXEC] Running Joint NSGA-II optimization (6 Parallel Processes)...")
     
-    # Distribute trials across 8 processes
-    n_workers = 8
+    # Distribute trials across 6 processes
+    n_workers = 6
     trials_per_worker = n_ml_trials // n_workers
     remainder = n_ml_trials % n_workers
     
@@ -1343,13 +1375,17 @@ def main() -> None:
     l3_hard = bool(OPT_FUTURES_CONFIG.get("FUTURES_TMP_LAYER3_HARD_GATE", False))
 
     def _run_champ_stability(raw_prms: dict[str, Any]) -> tuple[float | None, bool]:
-        if len(stab_seeds) < 2 or ml_ctx is None or not raw_prms:
+        if len(stab_seeds) < 1 or ml_ctx is None or not raw_prms:
             return None, False
         _l3_fail = False
         _objs: list[float] = []
         for _sx in stab_seeds:
+            _logger.info("  --> [STABILITY] Replaying seed=%s", _sx)
             _sctx = dataclasses.replace(ml_ctx, seed=int(_sx))
+            # [Performance] Force fresh precompute and clear memory for each seed
             rerun_precompute_for_ctx(_sctx)
+            gc.collect()
+            
             val, diag_r = replay_robust_awf_for_trial_params(_sctx, raw_prms)
             if isinstance(val, tuple):
                 _objs.append(float(val[0]))
@@ -1364,6 +1400,10 @@ def main() -> None:
                         _sx,
                         lf,
                     )
+            # Clear leg caches to prevent OOM during stability run
+            _sctx.awf_leg_slices = None
+            gc.collect()
+
         _mu = float(np.mean(_objs))
         _sig = float(np.std(_objs, ddof=1)) if len(_objs) > 1 else 0.0
         _cv = float(_sig / max(abs(_mu), 1e-12))
