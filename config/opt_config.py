@@ -8,12 +8,12 @@ from typing import Any
 
 OPT_FUTURES_CONFIG: dict[str, Any] = {
     # 3-phase coordinate ascent total ≈ 260 (Bonferroni / reporting baseline).
-    "total_trials": 480,
+    "total_trials": 1500,
     # Phase-D TPESampler startup; per-phase samplers in opt_main_futures override as needed.
-    "tpe_n_startup_trials": 20,
+    "tpe_n_startup_trials": 256,
     # Caps startup at this fraction of Phase-D n_trials (prevents 384/500 ~77% random when
     # total_trials-oriented tpe_n_startup is reused for FUTURES_ML_PHASE_D_TRIALS=500).
-    "FUTURES_ML_PHASE_D_TPE_STARTUP_FRAC": 0.15,
+    "FUTURES_ML_PHASE_D_TPE_STARTUP_FRAC": 0.20,
     # Phase-D: trial 0 = deploy JSON in search space (TPE anchor; counts toward n_trials).
     "FUTURES_ML_PHASE_D_ENQUEUE_DEPLOY_JSON": True,
     "FUTURES_ML_PHASE_D_DEPLOY_JSON_REL": "results/best_futures_1h.json",
