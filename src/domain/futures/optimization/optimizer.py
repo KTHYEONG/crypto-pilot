@@ -219,6 +219,7 @@ class MLPhaseDContext:
     calibrator: SignalCalibrator | None = None
     calibrator_short: SignalCalibrator | None = None
     estimated_b: float = 1.05
+    kelly_ic_upper: float = 0.5  # T3-B: IC EWMA-based Kelly upper bound
     # Effective Bonferroni count = n_seeds × trials_per_seed (multi-seed studies).
     effective_total_trials: int | None = None
     # Coordinate ascent: "A"/"B"/"C"; frozen holds completed phases' Optuna-param dict slices.
@@ -862,6 +863,33 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
                 ctx.awf_leg_slices.append({"leg_range": (test_s, test_e), "data": aligned})
 
         ctx.holdout_slice = None  # last AWF leg covers holdout zone
+
+        # T3-B: IS xs_score_long vs forward return의 Spearman IC → Kelly upper bound
+        if ctx.is_slice is not None:
+            xl_is = ctx.is_slice.get("xs_score_long")
+            cl_is = ctx.is_slice.get("close")
+            if xl_is is not None and cl_is is not None:
+                xl_arr = np.asarray(xl_is, dtype=np.float64)
+                cl_arr = np.asarray(cl_is, dtype=np.float64)
+                if xl_arr.ndim == 2:
+                    xl_arr = np.nanmean(xl_arr, axis=1)
+                if cl_arr.ndim == 2:
+                    cl_arr = np.nanmean(cl_arr, axis=1)
+                fwd = np.log(
+                    np.clip(cl_arr[1:], 1e-12, None) / np.clip(cl_arr[:-1], 1e-12, None)
+                )
+                sig = xl_arr[:-1]
+                mask = np.isfinite(sig) & np.isfinite(fwd)
+                if int(np.sum(mask)) > 30:
+                    from scipy.stats import spearmanr as _spearmanr
+                    _ic_raw, _ = _spearmanr(sig[mask], fwd[mask])
+                    ctx.kelly_ic_upper = float(np.clip(abs(_ic_raw) * 10.0, 0.05, 0.5))
+                    _logger.debug(
+                        "[T3-B] IC→Kelly upper: %.4f (Spearman IC=%.4f)",
+                        ctx.kelly_ic_upper,
+                        _ic_raw,
+                    )
+
         ctx.multi_alignment_info["awf_legs"] = awf_legs
 
     # Diagnostic on AWF leg 0
@@ -1094,28 +1122,28 @@ def _suggest_ml_joint_nsga2(trial: optuna.Trial, ctx: MLPhaseDContext) -> dict[s
     policy = load_portfolio_policy_config(OPT_FUTURES_CONFIG)
 
     # 1. Capacity & Risk
-    ann = float(trial.suggest_float("TARGET_ANN_VOL", 0.15, 0.45, step=0.05))
+    ann = float(trial.suggest_float("TARGET_ANN_VOL", 0.15, 0.45))
     gh = min(float(policy.gross_exposure_cap), 1.5)
-    mx = float(trial.suggest_float("MAX_EXPOSURE", 0.8, gh, step=0.1))
-    pc = float(trial.suggest_float("MAX_EXPOSURE_PER_COIN", 0.15, min(0.5, mx), step=0.05))
-    kappa = float(trial.suggest_float("PORTFOLIO_KAPPA", 0.2, 0.5, step=0.05))
+    mx = float(trial.suggest_float("MAX_EXPOSURE", 0.8, gh))
+    pc = float(trial.suggest_float("MAX_EXPOSURE_PER_COIN", 0.15, min(0.5, mx)))
+    kappa = float(trial.suggest_float("PORTFOLIO_KAPPA", 0.2, 0.5))
 
     # 2. Alpha & Regime Betas
-    beta_a = float(trial.suggest_float("BETA_ALPHA", 0.5, 1.5, step=0.1))
-    b_bull = float(trial.suggest_float("BETA_REGIME_BULL", 0.5, 2.0, step=0.1))
-    b_bear = float(trial.suggest_float("BETA_REGIME_BEAR", 0.0, 1.0, step=0.1))
-    b_chop = float(trial.suggest_float("BETA_REGIME_CHOP", 0.0, 1.0, step=0.1))
-    b_crisis = float(trial.suggest_float("BETA_REGIME_CRISIS", -0.5, 0.5, step=0.1))
-    ev_h = float(trial.suggest_float("EV_HURDLE_BPS", 0.0, 20.0, step=1.0))
+    beta_a = float(trial.suggest_float("BETA_ALPHA", 0.5, 1.5))
+    b_bull = float(trial.suggest_float("BETA_REGIME_BULL", 0.5, 2.0))
+    b_bear = float(trial.suggest_float("BETA_REGIME_BEAR", 0.0, 1.0))
+    b_chop = float(trial.suggest_float("BETA_REGIME_CHOP", 0.0, 1.0))
+    b_crisis = float(trial.suggest_float("BETA_REGIME_CRISIS", -0.5, 0.5))
+    ev_h = float(trial.suggest_float("EV_HURDLE_BPS", 0.0, 20.0))
 
     # 3. Execution & Friction
     reb = int(trial.suggest_categorical("REBALANCE_BARS", [1, 3, 6, 12]))
-    slip_buf = float(trial.suggest_float("SLIPPAGE_BPS_BUFFER_MULT", 0.8, 1.5, step=0.1))
+    slip_buf = float(trial.suggest_float("SLIPPAGE_BPS_BUFFER_MULT", 0.8, 1.5))
     tb_h = float(trial.suggest_categorical("TIME_BARRIER_H", [0.0, 24.0, 48.0, 168.0]))
 
     # 4. HMM-conditioned Dynamic Kelly
-    crisis_thr = float(trial.suggest_float("CRISIS_OVERRIDE_THRESHOLD", 0.3, 0.7, step=0.1))
-    gamma = float(trial.suggest_float("CRISIS_GAMMA", 0.5, 3.0, step=0.5))
+    crisis_thr = float(trial.suggest_float("CRISIS_OVERRIDE_THRESHOLD", 0.3, 0.7))
+    gamma = float(trial.suggest_float("CRISIS_GAMMA", 0.5, 3.0))
 
     base = {
         "TARGET_ANN_VOL": ann,
@@ -1281,6 +1309,27 @@ def _run_portfolio_numba_block(
     cfg_block = OPT_FUTURES_CONFIG
     reb_b = max(1, int(params["REBALANCE_BARS"]))
     pwp = portfolio_weight_params_from_optuna(params, cfg_block)
+
+    # T3-A: Kelly × HMM Entropy 동적 스케일링
+    _hmm_cols_t3 = [
+        "hmm_prob_bull_calm", "hmm_prob_bull_vol_up", "hmm_prob_bear_trend",
+        "hmm_prob_chop", "hmm_prob_crisis",
+    ]
+    _hmm_t3 = [aligned.get(c) for c in _hmm_cols_t3]
+    if all(a is not None for a in _hmm_t3):
+        def _to_1d(a: Any) -> np.ndarray:
+            arr = np.asarray(a, dtype=np.float64)
+            return arr[:, 0] if arr.ndim == 2 else arr
+        _p5 = np.stack([_to_1d(a) for a in _hmm_t3], axis=1)  # (n_bars, 5)
+        _log5 = np.log(5.0)
+        _ent = -np.sum(_p5 * np.log(np.clip(_p5, 1e-12, 1.0)), axis=1)
+        _h_norm = float(np.mean(_ent) / _log5)
+        _mean_crisis = float(np.mean(np.clip(_p5[:, 4], 0.0, 1.0)))
+        _kelly_disc = max(0.1, (1.0 - _h_norm) * (1.0 - _mean_crisis))
+        pwp["f_kelly_max"] = float(pwp["f_kelly_max"]) * _kelly_disc
+    # T3-B: IC EWMA → Kelly upper bound
+    pwp["f_kelly_max"] = min(float(pwp["f_kelly_max"]), float(params.get("KELLY_IC_UPPER", 0.5)))
+
     hpb = hours_per_bar_from_timeframe(str(params.get("TIMEFRAME", "4h")))
     bars_py = (365.0 * 24.0) / max(hpb, 1e-9)
     close_np = np.asarray(aligned["close"], dtype=np.float64)
@@ -1408,6 +1457,7 @@ def _evaluate_awf_phase_d_aggregate(
     else:
         params = _base_engine_params(ml_bundle, ctx.tf)
     params["ESTIMATED_B"] = ctx.estimated_b
+    params["KELLY_IC_UPPER"] = ctx.kelly_ic_upper  # T3-B
 
     n_trials_eff = int(cfg.get("total_trials", 400))
     if ctx.effective_total_trials is not None:
@@ -1760,13 +1810,22 @@ def _evaluate_is_phase_d(
     return (obj1, obj2), diag
 
 
-def objective_ml_phase_d(trial: optuna.Trial, ctx: MLPhaseDContext) -> float | tuple[float, float]:
-    """Joint NSGA-II Portfolio Optimization."""
-    if ctx.is_slice is None:
+def objective_ml_phase_d(trial: optuna.Trial, ctx: MLPhaseDContext) -> tuple[float, float]:
+    """Joint NSGA-II Portfolio Optimization — AWF-based objectives (T2).
+
+    T2: AWF leg log-TW를 직접 목적함수로 사용 (IS-only 탈피).
+    Obj1 = -mean(leg_log_tw),  Obj2 = -min(leg_log_tw)  [both minimized].
+    """
+    if ctx.awf_leg_slices is None:
         precompute_ml_optimization_context(ctx)
     merged = _suggest_ml_joint_nsga2(trial, ctx)
-    # Using decoupled IS optimization
-    return _evaluate_is_phase_d(ctx, merged, trial=trial)[0]
+    # T2: AWF leg log-TW 직접 목적함수 (NSGA-II 분기 강제 활성)
+    result, _ = _evaluate_awf_phase_d_aggregate(ctx, merged, trial=trial)
+    if isinstance(result, tuple):
+        return result
+    # FUTURES_ML_ALPHA_NSGA2_ENABLED=False 환경에서의 fallback — tuple로 통일
+    scalar = float(result)
+    return (scalar, scalar)
 
 
 def select_best_trial_by_holdout_log_ret(trials: list[optuna.trial.FrozenTrial]) -> optuna.trial.FrozenTrial:

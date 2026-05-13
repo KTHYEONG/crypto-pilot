@@ -500,7 +500,13 @@ class MLAlphaMiner:
 
         out_df = alpha_df_all.reindex(panel_df.index).fillna(0.5)
         out_df.attrs["alpha_component_filter"] = filt_meta
-        out_df.attrs["best_fitness"] = 1.0 if len(surviving) > 5 else 0.1
+        if surviving:
+            ic_by_slot = filt_meta.get("ic_by_slot", {})
+            ic_vals = [float(ic_by_slot.get(c, 0.0)) for c in surviving if c in ic_by_slot]
+            survival_rate = len(surviving) / max(len(alpha_df_all.columns), 1)
+            out_df.attrs["best_fitness"] = float(np.mean(ic_vals)) if ic_vals else survival_rate
+        else:
+            out_df.attrs["best_fitness"] = 0.0
         return out_df
 
     def transform_cs(self, panel_df: pd.DataFrame, cache_path: Path | None = None) -> pd.DataFrame:

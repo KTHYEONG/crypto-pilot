@@ -240,15 +240,18 @@ def calc_gate1_dsr_from_path_log_tw(
     if not math.isfinite(s_pt) or s_pt < 1e-6:
         return -1.0
     sharpe = m_pt / (s_pt + 1e-12)
-    hrs = int(tf.replace("h", "")) if tf.endswith("h") else 4
-    t_samples = float(stat_ref_len) / (24.0 / float(hrs))
+    # t_samples: Sharpe의 표준오차는 path_arr 관측치 수(k_chunks)로 계산해야 함.
+    # stat_ref_len(IS bars→days)을 쓰면 t≈333이 되어 sqrt(t)≈18 배율로 z를 폭발시킴.
+    t_samples = float(max(path_arr.size, 2))
     sk = float(np.mean(((path_arr - m_pt) / (s_pt + 1e-12)) ** 3))
     ex_kurt = float(np.mean(((path_arr - m_pt) / (s_pt + 1e-12)) ** 4)) - 3.0
     sr_var_denom = max(
         1.0 - sk * sharpe + ((ex_kurt + 2.0) / 4.0) * sharpe**2,
         1e-12,
     )
-    sr_bench = math.sqrt(2.0 * math.log(max(n_trials_opt, 2.0)))
+    # 과도한 sr_bench 방지: 최대 50개 유효 독립 검정으로 한정
+    effective_trials = min(float(n_trials_opt), 50.0)
+    sr_bench = math.sqrt(2.0 * math.log(max(effective_trials, 2.0)))
     z_dsr = (sharpe - sr_bench) * math.sqrt(max(t_samples - 1.0, 1.0)) / math.sqrt(sr_var_denom)
     dsr_val = float(0.5 * (1.0 + math.erf(z_dsr / math.sqrt(2.0))))
     return float(min(0.99, max(0.0, dsr_val)))
