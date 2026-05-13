@@ -377,7 +377,9 @@ def filter_alpha_components(
 
     # [Optimization] Unstack all alpha columns at once
     u_alphas = is_sub[cols].unstack(level="symbol")
-    u_alphas_oos = None
+    u_alphas_oos = (
+        oos_sub[cols].unstack(level="symbol") if oos_time_set and not oos_sub.empty else None
+    )
     # [Optimization] Pre-calculate unstacked target ranks to avoid redundant groupby
     u_tgt = is_sub["target"].unstack(level="symbol")
     valid_bal_syms = [s for s in u_tgt.columns if u_tgt[s].notna().sum() >= 40]
