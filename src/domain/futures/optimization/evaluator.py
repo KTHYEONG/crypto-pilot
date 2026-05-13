@@ -1,5 +1,4 @@
-"""
-Performance Evaluation and Metrics for Optimization.
+"""Performance Evaluation and Metrics for Optimization.
 Combines Alpha IC evaluation, OOS Portfolio Backtesting, and statistical metrics.
 """
 
@@ -7,9 +6,10 @@ from __future__ import annotations
 
 import logging
 import math
+from collections.abc import Sequence
 from pathlib import Path
 from statistics import median
-from typing import Any, Dict, List, Optional, Sequence, Tuple, cast
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -21,11 +21,9 @@ from config.settings import (
     SLIPPAGE_RATE,
     SMART_ORDER_OFFSET,
     TAKER_FEE_RATE,
-    TRADING_FEE_RATE,
 )
 from src.domain.futures.backtest_engine import (
     MultiSymbolEngine as PortfolioBacktestEngineFast,
-    SingleSymbolEngine as BacktestEngineFast,
 )
 
 _logger: logging.Logger = logging.getLogger("opt_futures")
@@ -34,11 +32,10 @@ _logger: logging.Logger = logging.getLogger("opt_futures")
 
 def compute_vol_adj_forward_returns(
     df: pd.DataFrame, 
-    horizons: List[int] = [2, 6, 12],
-    market_returns: Optional[Dict[int, np.ndarray]] = None
-) -> Dict[int, np.ndarray]:
-    """
-    여러 호흡(Horizons)에 대해 변동성으로 정규화된 미래 수익률을 계산함.
+    horizons: list[int] = [2, 6, 12],
+    market_returns: dict[int, np.ndarray] | None = None
+) -> dict[int, np.ndarray]:
+    """여러 호흡(Horizons)에 대해 변동성으로 정규화된 미래 수익률을 계산함.
     """
     close = df["close"].to_numpy(dtype=np.float64)
     high = df["high"].to_numpy(dtype=np.float64)
@@ -106,7 +103,7 @@ def calculate_conditional_ic(
     signal_scores: np.ndarray, 
     target_returns: np.ndarray, 
     regime_mask: np.ndarray
-) -> Tuple[float, float]:
+) -> tuple[float, float]:
     """특정 Regime 구간에서의 조건부 IC 및 커버리지 계산."""
     if len(signal_scores) != len(regime_mask):
         return 0.0, 0.0
@@ -366,22 +363,23 @@ def stationary_bootstrap_spa(
 # --- OOS Evaluation (from oos_evaluator.py) ---
 
 def run_oos_margin_shared_portfolio(
-    symbols: List[str],
+    symbols: list[str],
     tf: str,
-    params: Dict[str, Any],
-    oos_data_maps: Dict[str, Dict[str, Any]],
-    cache_root: Optional[Path] = None,
+    params: dict[str, Any],
+    oos_data_maps: dict[str, dict[str, Any]],
+    cache_root: Path | None = None,
     return_signal_dfs: bool = False,
-    oos_end_idx: Optional[int] = None,
-    oos_start_idx: Optional[int] = None,
-) -> Dict[str, Any]:
+    oos_end_idx: int | None = None,
+    oos_start_idx: int | None = None,
+) -> dict[str, Any]:
     # Import locally to avoid circular dependencies if any
     from src.domain.futures.strategy_ml import FuturesMLStrategy
-    from .data_aligner import align_data_for_2d_engine, _segment_with_context
+
+    from .data_aligner import _segment_with_context, align_data_for_2d_engine
 
     strategy = FuturesMLStrategy(name="OOS_Portfolio", params=params)
-    full_signal_dfs: Dict[str, pd.DataFrame] = {}
-    seg_dfs: Dict[str, pd.DataFrame] = {}
+    full_signal_dfs: dict[str, pd.DataFrame] = {}
+    seg_dfs: dict[str, pd.DataFrame] = {}
 
     for sym in symbols:
         full_df = oos_data_maps[sym][tf]
@@ -496,8 +494,7 @@ def perform_online_capital_allocation(
     window_size: int = 24,
     eta: float = 0.1
 ) -> tuple[np.ndarray, np.ndarray]:
-    """
-    Simulate an online weighting process using Exponentiated Gradient (EG).
+    """Simulate an online weighting process using Exponentiated Gradient (EG).
     
     Args:
         ensemble_curves: List of equity curves (numpy arrays).
@@ -508,6 +505,7 @@ def perform_online_capital_allocation(
     Returns:
         meta_equity: The resulting meta-equity curve.
         weight_history: History of weights over time.
+
     """
     if not ensemble_curves:
         return np.array([initial_balance]), np.array([])
