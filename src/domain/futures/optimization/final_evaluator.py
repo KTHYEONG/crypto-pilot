@@ -32,6 +32,7 @@ from src.domain.futures.optimization.evaluator import (
 )
 from src.domain.futures.optimization.opt_data_utils import (
     compute_oos_regime_attribution,
+    compute_regime_drift,
 )
 from src.domain.futures.optimization.optimizer import (
     EMBARGO_BARS,
@@ -263,9 +264,26 @@ def run_final_oos_evaluation(
     run_summary_extras["oos_regime_attribution"] = regime_attr
     log_oos_regime_attribution(regime_attr)
 
+    # S3: Regime distribution drift detection (IS vs OOS KL divergence)
+    regime_drift_info = compute_regime_drift(
+        data_maps=data_maps, oos_data_maps=oos_data_maps,
+        symbols=valid_symbols, tf=args.tf,
+    )
+    run_summary_extras["regime_drift"] = regime_drift_info
+
     is_cagr_v = float(is_port.get("cagr_pct", is_port.get("cagr", 0.0)))
     oos_cagr_v = float(oos_port.get("cagr_pct", oos_port.get("cagr", 0.0)))
     oos_retention = (oos_cagr_v / is_cagr_v * 100.0) if abs(is_cagr_v) > 1e-6 else 0.0
+    # S1: Cap IS BTC benchmark to prevent unfair hurdle during bull-market IS periods.
+    # 2023-2025 IS = crypto bull run (BTC CAGR ≈ 150%); a market-neutral strategy cannot
+    # beat raw BTC buy-and-hold. Cap anchors benchmark to long-run sustainable BTC return.
+    _btc_is_cap = float(OPT_FUTURES_CONFIG.get("FUTURES_IS_ALPHA_BTC_CAP_PCT", 999.0))
+    if _btc_benchmark_is is not None and _btc_benchmark_is > _btc_is_cap:
+        _logger.info(
+            " [S1] IS BTC benchmark capped: %.1f%% → %.1f%% (FUTURES_IS_ALPHA_BTC_CAP_PCT)",
+            _btc_benchmark_is, _btc_is_cap,
+        )
+        _btc_benchmark_is = _btc_is_cap
     is_net_alpha_v = is_cagr_v - (_btc_benchmark_is if _btc_benchmark_is is not None else 0.0)
 
     rets_is = np.diff(is_port.get("equity_curve", np.array([FUTURES_INITIAL_BALANCE])))
