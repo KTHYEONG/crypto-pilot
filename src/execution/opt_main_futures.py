@@ -40,6 +40,7 @@ from src.domain.futures.optimization.candidate_selector import (  # noqa: E402
     select_and_rank_candidates,
 )
 from src.domain.futures.optimization.dashboard import (  # noqa: E402
+    log_alpha_component_summary,
     log_hmm_report_summary,
     log_ml_merge_feature_stats,
 )
@@ -112,7 +113,7 @@ def main() -> None:
     pre_parser.add_argument("--tf", type=str, default="4h")
     pre_args, remaining_args = pre_parser.parse_known_args()
 
-    # [STEP 1/5] UNIVERSE DISCOVERY & DATA LOADING
+    # [STEP 1/4] UNIVERSE DISCOVERY & DATA LOADING
     if not pre_args.skip_universe:
         collector = DataCollector()
         success = orchestrate_universe_discovery(
@@ -162,9 +163,9 @@ def main() -> None:
         _logger.error("No valid symbols loaded. Aborting.")
         return
 
-    # [STEP 2/5] ML PIPELINE
+    # [STEP 2/4] ML PIPELINE
     _logger.info("\n" + "═" * 85)
-    _logger.info(" [STEP 2/5] ML PIPELINE: Universal Cross-Sectional Alpha")
+    _logger.info(" [STEP 2/4] ML PIPELINE: Universal Cross-Sectional Alpha")
     _logger.info("═" * 85)
 
     ml_n_jobs = resolve_futures_parallel_policy(len(valid_symbols))
@@ -178,20 +179,19 @@ def main() -> None:
     if hasattr(ml_out, "hmm_report") and ml_out.hmm_report:
         log_hmm_report_summary(ml_out.hmm_report)
 
+    if hasattr(ml_out, "alpha_panel") and not ml_out.alpha_panel.empty:
+        log_alpha_component_summary(ml_out.alpha_panel)
+
     if args.alpha_only or args.hmm_only:
         return
 
-    # [STEP 3/5] FEATURE INTEGRATION
-    _logger.info("\n" + "═" * 85)
-    _logger.info(" [STEP 3/5] FEATURE INTEGRATION & SIGNAL QUALITY AUDIT")
-    _logger.info("═" * 85)
-
+    # FEATURE INTEGRATION
     merge_ml_output_into_is_and_oos(ml_out, data_maps, oos_data_maps, valid_symbols, args.tf)
     log_ml_merge_feature_stats(oos_data_maps, valid_symbols, args.tf)
 
-    # [STEP 4/5] OPTIMIZATION
+    # [STEP 3/4] OPTIMIZATION
     _logger.info("\n" + "═" * 85)
-    _logger.info(" [STEP 4/5] Optimization: Joint Multi-Objective TPE")
+    _logger.info(" [STEP 3/4] Optimization: Joint Multi-Objective TPE")
     _logger.info("═" * 85)
 
     n_ml_trials = (
@@ -282,7 +282,7 @@ def main() -> None:
     pbo_obs = awf_pos_frac_to_pseudo_pbo(float(champion_awf_diag.get("awf_pos_frac", 0.0)))
     dsr_obs = float(champion_awf_diag.get("dsr_awf", 0.0))
 
-    # [STEP 5/5] FINAL EVALUATION
+    # [STEP 4/4] FINAL EVALUATION
     run_final_oos_evaluation(
         ensemble_results=[best_cand], oos_data_maps=oos_data_maps, data_maps=data_maps,
         valid_symbols=valid_symbols, champion_awf_diag=champion_awf_diag, args=args,
