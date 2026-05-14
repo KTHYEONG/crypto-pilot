@@ -270,15 +270,17 @@ def replay_stability_candidate(
     base_ctx: MLPhaseDContext,
     seed: int,
 ) -> tuple[float, bool]:
-    """Replay a candidate with a specific seed to check stability (Layer 3)."""
+    import dataclasses
+
     from src.domain.futures.optimization.optimizer import rerun_precompute_for_ctx
     from src.domain.futures.validation.tmp_md_champion import tmp_md_layer1_failures_from_awf_diag
     
-    sctx = rerun_precompute_for_ctx(base_ctx, seed)
+    sctx = dataclasses.replace(base_ctx, seed=seed)
+    rerun_precompute_for_ctx(sctx)
     try:
         clear_stability_runtime_cache(sctx)
         obj, diag = replay_robust_awf_for_trial_params(sctx, params)
-        l1_fail = bool(tmp_md_layer1_failures_from_awf_diag(diag))
+        l1_fail = bool(tmp_md_layer1_failures_from_awf_diag(diag, dict(OPT_FUTURES_CONFIG)))
         return float(obj), l1_fail
     finally:
         release_stability_ctx(sctx)
@@ -357,7 +359,7 @@ def select_and_rank_candidates(
             return {}, {}
 
     deploy_candidates = []
-    reject_reason_count = {}
+    reject_reason_count: dict[str, int] = {}
     for cand in validated_candidates:
         reasons = deploy_reject_reasons(cand)
         if reasons:
@@ -415,12 +417,13 @@ def check_stability_layer3(
     seed_ctxs = []
     try:
         for sx in stab_seeds:
-            sctx = rerun_precompute_for_ctx(dataclasses.replace(base_ctx, seed=int(sx)), sx)
+            sctx = dataclasses.replace(base_ctx, seed=int(sx))
+            rerun_precompute_for_ctx(sctx)
             seed_ctxs.append(sctx)
             clear_stability_runtime_cache(sctx)
             obj, diag = replay_robust_awf_for_trial_params(sctx, champion_raw_params)
             champ_objs.append(obj)
-            champ_l3_fail = champ_l3_fail or bool(tmp_md_layer1_failures_from_awf_diag(diag))
+            champ_l3_fail = champ_l3_fail or bool(tmp_md_layer1_failures_from_awf_diag(diag, cfg))
     finally:
         for sctx in seed_ctxs:
             release_stability_ctx(sctx)
