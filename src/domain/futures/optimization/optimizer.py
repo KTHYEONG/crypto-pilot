@@ -567,8 +567,133 @@ def _inject_dyn_leverage_trimmed(trimmed_sig: pd.DataFrame, raw_full: pd.DataFra
     lev_max = max(base_lev, lev_min)
     levs = lev_min + (lev_max - lev_min) * exp_q * ent_disc
     levs = np.clip(levs, lev_min, lev_max)
+    # Step6: split execution policy for pre-crisis (soft damp) vs realized-crisis/tail-risk
+    # (hard flat or strong cut). Falls back to legacy hmm_prob_crisis behavior when new
+    # columns are absent.
+    split_enabled = bool(cfg.get("FUTURES_HMM_SPLIT_KILLSWITCH_ENABLED", True))
     crisis_flat_lev = float(cfg.get("FUTURES_HMM_CRISIS_FLAT_LEV", 0.0))
-    if "hmm_prob_crisis" in raw_full.columns:
+    if split_enabled:
+        p_pre = (
+            raw_full["hmm_prob_pre_crisis"].fillna(0.0).to_numpy(dtype=np.float64)
+            if "hmm_prob_pre_crisis" in raw_full.columns
+            else (
+                raw_full["hmm_prob_crisis"].fillna(0.0).to_numpy(dtype=np.float64)
+                if "hmm_prob_crisis" in raw_full.columns
+                else np.zeros(len(raw_full), dtype=np.float64)
+            )
+        )
+        p_real = (
+            raw_full["hmm_prob_realized_crisis"].fillna(0.0).to_numpy(dtype=np.float64)
+            if "hmm_prob_realized_crisis" in raw_full.columns
+            else (
+                raw_full["hmm_prob_crisis"].fillna(0.0).to_numpy(dtype=np.float64)
+                if "hmm_prob_crisis" in raw_full.columns
+                else np.zeros(len(raw_full), dtype=np.float64)
+            )
+        )
+        p_tail = (
+            raw_full["hmm_tail_risk_8bar"].fillna(0.0).to_numpy(dtype=np.float64)
+            if "hmm_tail_risk_8bar" in raw_full.columns
+            else np.zeros(len(raw_full), dtype=np.float64)
+        )
+
+        pre_thr = float(cfg.get("FUTURES_HMM_PRE_CRISIS_DAMP_THRESHOLD", 0.55))
+        pre_min_mult = float(cfg.get("FUTURES_HMM_PRE_CRISIS_DAMP_MIN_MULT", 0.50))
+        real_thr = float(cfg.get("FUTURES_HMM_REALIZED_CRISIS_FLAT_THRESHOLD", crisis_thr))
+        tail_thr = float(cfg.get("FUTURES_HMM_TAIL_RISK_HIGH_THRESHOLD", 0.75))
+        tail_high_mult = float(cfg.get("FUTURES_HMM_TAIL_RISK_HIGH_LEV_MULT", 0.25))
+        tail_flat_enabled = bool(cfg.get("FUTURES_HMM_TAIL_RISK_FORCE_FLAT", False))
+
+        thr_mode = str(cfg.get("FUTURES_HMM_THRESHOLD_MODE", "fixed")).strip().lower()
+        is_frac = float(cfg.get("FUTURES_HMM_THRESHOLD_IS_FRAC", 0.70))
+        is_frac = float(np.clip(is_frac, 0.05, 0.95))
+        roll_win = int(cfg.get("FUTURES_HMM_THRESHOLD_ROLLING_WINDOW", 336))
+        roll_minp = int(cfg.get("FUTURES_HMM_THRESHOLD_ROLLING_MIN_PERIODS", 96))
+        pre_q = float(np.clip(float(cfg.get("FUTURES_HMM_PRE_CRISIS_Q", 0.85)), 0.50, 0.999))
+        real_q = float(np.clip(float(cfg.get("FUTURES_HMM_REALIZED_CRISIS_Q", 0.95)), 0.50, 0.999))
+        tail_q = float(np.clip(float(cfg.get("FUTURES_HMM_TAIL_RISK_Q", 0.93)), 0.50, 0.999))
+
+        def _is_quantile_threshold(v: np.ndarray, q: float, fallback: float) -> float:
+            if v.size == 0:
+                return float(fallback)
+            n_is = int(max(32, min(v.size, round(v.size * is_frac))))
+            base = v[:n_is]
+            base = base[np.isfinite(base)]
+            if base.size < 16:
+                return float(fallback)
+            return float(np.quantile(base, q))
+
+        def _rolling_quantile_threshold(v: np.ndarray, q: float, fallback: float) -> np.ndarray:
+            if v.size == 0:
+                return np.array([], dtype=np.float64)
+            s = pd.Series(v, dtype=np.float64)
+            th = s.rolling(window=max(16, roll_win), min_periods=max(16, roll_minp)).quantile(q)
+            fb = _is_quantile_threshold(v, q, fallback)
+            return th.fillna(fb).to_numpy(dtype=np.float64)
+
+        if thr_mode == "is_quantile":
+            pre_thr = _is_quantile_threshold(p_pre, pre_q, pre_thr)
+            real_thr = _is_quantile_threshold(p_real, real_q, real_thr)
+            tail_thr = _is_quantile_threshold(p_tail, tail_q, tail_thr)
+            _logger.info(
+                "[HMM][Step6] threshold_mode=is_quantile pre=%.4f(q=%.3f) real=%.4f(q=%.3f) tail=%.4f(q=%.3f) is_frac=%.2f",
+                pre_thr,
+                pre_q,
+                real_thr,
+                real_q,
+                tail_thr,
+                tail_q,
+                is_frac,
+            )
+        elif thr_mode == "rolling_quantile":
+            pre_thr_vec = _rolling_quantile_threshold(p_pre, pre_q, pre_thr)
+            real_thr_vec = _rolling_quantile_threshold(p_real, real_q, real_thr)
+            tail_thr_vec = _rolling_quantile_threshold(p_tail, tail_q, tail_thr)
+            _logger.info(
+                "[HMM][Step6] threshold_mode=rolling_quantile pre_last=%.4f pre_med=%.4f real_last=%.4f real_med=%.4f tail_last=%.4f tail_med=%.4f q=(%.3f,%.3f,%.3f)",
+                float(pre_thr_vec[-1]) if pre_thr_vec.size else float(pre_thr),
+                float(np.median(pre_thr_vec)) if pre_thr_vec.size else float(pre_thr),
+                float(real_thr_vec[-1]) if real_thr_vec.size else float(real_thr),
+                float(np.median(real_thr_vec)) if real_thr_vec.size else float(real_thr),
+                float(tail_thr_vec[-1]) if tail_thr_vec.size else float(tail_thr),
+                float(np.median(tail_thr_vec)) if tail_thr_vec.size else float(tail_thr),
+                pre_q,
+                real_q,
+                tail_q,
+            )
+        else:
+            pre_thr_vec = None
+            real_thr_vec = None
+            tail_thr_vec = None
+            _logger.info(
+                "[HMM][Step6] threshold_mode=fixed pre=%.4f real=%.4f tail=%.4f",
+                pre_thr,
+                real_thr,
+                tail_thr,
+            )
+
+        if thr_mode == "rolling_quantile":
+            pre_base = np.clip(pre_thr_vec, 0.0, 0.999999)
+            pre_excess = np.clip((p_pre - pre_base) / np.maximum(1.0 - pre_base, 1e-12), 0.0, 1.0)
+            realized_mask = p_real > real_thr_vec
+        else:
+            pre_excess = np.clip((p_pre - pre_thr) / max(1.0 - pre_thr, 1e-12), 0.0, 1.0)
+            realized_mask = p_real > real_thr
+        pre_mult = 1.0 - (1.0 - pre_min_mult) * pre_excess
+        levs = levs * np.clip(pre_mult, pre_min_mult, 1.0)
+        levs = np.where(realized_mask, crisis_flat_lev, levs)
+
+        if tail_flat_enabled:
+            if thr_mode == "rolling_quantile":
+                levs = np.where(p_tail > tail_thr_vec, crisis_flat_lev, levs)
+            else:
+                levs = np.where(p_tail > tail_thr, crisis_flat_lev, levs)
+        else:
+            if thr_mode == "rolling_quantile":
+                levs = np.where(p_tail > tail_thr_vec, levs * tail_high_mult, levs)
+            else:
+                levs = np.where(p_tail > tail_thr, levs * tail_high_mult, levs)
+    elif "hmm_prob_crisis" in raw_full.columns:
         pc = raw_full["hmm_prob_crisis"].fillna(0.0).to_numpy(dtype=np.float64)
         levs = np.where(pc > crisis_thr, crisis_flat_lev, levs)
 

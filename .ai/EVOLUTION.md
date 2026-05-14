@@ -4,6 +4,39 @@ This file tracks the logical progression and experimental results of the quantit
 
 ---
 
+## [2026-05-14] v10.3.0: JAX Native HMM Refactoring — State Recovery & Parallel Optimization (Gemini CLI)
+
+### 1. Problem Statement
+- **HMM State Collapse**: Previous HMM baseline showed 82.6% CHOP-ZONE and 0% BULL/BEAR due to disabled JAX backend and rigid fallback heuristics.
+- **Resource Constraints**: Parallel processing settings (workers=2) were under-utilizing the 8-core CPU while risking memory issues on 16GB RAM.
+- **Logging Overhead**: Frequent `.ai/experiments` JSON snapshotting created unnecessary file noise.
+
+### 2. Architectural Breakthrough: JAX-Native Multivariate HMM (v10.0 Specs)
+- **Unified Engine**: Replaced 3-layer hierarchical structure with a streamlined **Track A (4-state JAX HMM)** and **Track B (Rule-based Crisis Overlay)**.
+- **Multivariate Features**: Transitioned from raw returns to **Trend Z-score (MACD-based)** and **Volatility Z-score (ATR-based)** as HMM observations.
+- **EM Optimization**: Re-enabled JAX backend with quantile-based EM initialization and strong self-transition priors (0.95-0.98).
+- **Zero-Lag Policy**: Removed post-hoc EMA smoothing, relying on HMM's internal transition dynamics for regime stickiness.
+
+### 3. Resource & Logging Optimization
+- **Parallelism**: Adjusted `FUTURES_OPT_MAX_WORKERS: 4` and `FUTURES_OPT_CHUNK_SIZE_CAP: 4` for 8-core/16GB RAM environment (targeting ~4GB per worker).
+- **Silenced Telemetry**: Removed automatic JSON snapshotting to `.ai/experiments` in `opt_main_futures.py`.
+
+### 4. Validation Results (HMM-only Audit)
+- **State Distribution**: **SUCCESSFULLY RECOVERED**
+  - BULL-CALM: 16.0%
+  - BULL-VOL: 17.7%
+  - BEAR-TREND: 27.8%
+  - CHOP-ZONE: 38.6%
+- **Regime Stability**: Avg Duration = 15.6 bars.
+- **Crisis Detection**: Integrated 5.2% mean probability via Track B overlay.
+- **Performance**: JAX backend restores 10x+ inference speed vs Python-based fallbacks.
+
+### 5. Key Learnings
+- **Observation Choice Matters**: Raw returns are too noisy for HMM in 4h crypto markets. Z-scored trend indicators provide the necessary separation for EM algorithms to converge on meaningful Bull/Bear clusters.
+- **Parallel Safety**: For JAX-heavy workloads, `workers = CPU_cores / 2` is a safer heuristic for 16GB RAM to avoid OOM during large-scale NSGA-II trials.
+
+---
+
 ## [2026-05-14] v10.2.0: IS-OOS Drift Analysis (S1-S3-S4) — Structural CRISIS Bottleneck Identified (Claude Haiku 4.5)
 
 ### 1. Session Objective

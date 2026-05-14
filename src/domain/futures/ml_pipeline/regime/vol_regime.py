@@ -25,6 +25,8 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 import pandas as pd
+from config.opt_config import OPT_FUTURES_CONFIG
+from src.domain.futures.ml_pipeline.regime.causal_transformers import causal_robust_zscore
 
 os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 jax.config.update("jax_platform_name", "cpu")
@@ -253,6 +255,9 @@ class VolRegimeModel:
         self.tol = tol
         self._params: dict[str, Any] | None = None
         self._warmed: bool = False
+        self._jax_enabled: bool = bool(
+            OPT_FUTURES_CONFIG.get("FUTURES_HMM_JAX_BACKEND_ENABLED", False)
+        )
 
     def _init_params(self, ret_data: np.ndarray) -> dict[str, Any]:
         """Percentile-anchored parameter initialisation."""
@@ -310,6 +315,9 @@ class VolRegimeModel:
         Time complexity: O(n_windows * n_iter * T * K²).
 
         """
+        if not self._jax_enabled:
+            return self._fit_predict_fallback(features_df, returns_ser)
+
         from src.domain.futures.ml_pipeline.features.engineering import (
             SYSTEMIC_HMM_FEATURE_COLUMNS,
         )
@@ -326,13 +334,18 @@ class VolRegimeModel:
             .to_numpy(dtype=np.float64)
         )
 
-        # IQR robust scaling of TVTP features
-        med = np.nanmedian(tvtp_arr, axis=0)
-        iqr = np.nanpercentile(tvtp_arr, 75, axis=0) - np.nanpercentile(
-            tvtp_arr, 25, axis=0
+        # Causal robust scaling of TVTP features (rolling median/IQR).
+        tvtp_df = pd.DataFrame(
+            tvtp_arr,
+            index=features_df.index,
+            columns=tvtp_cols,
         )
-        iqr = np.where(np.abs(iqr) < 1e-9, 1.0, iqr)
-        tvtp_scaled = np.clip((tvtp_arr - med) / iqr, -5.0, 5.0)
+        tvtp_scaled = causal_robust_zscore(
+            tvtp_df,
+            window=MAX_LEN,
+            min_periods=max(64, MAX_LEN // 8),
+            clip=5.0,
+        ).to_numpy(dtype=np.float64)
 
         n = len(ret_arr)
         self._warmup()
@@ -398,5 +411,55 @@ class VolRegimeModel:
         return pd.DataFrame(
             probs_all,
             index=features_df.index,
+            columns=["vol_low", "vol_mid", "vol_high"],
+        )
+
+    @staticmethod
+    def _fit_predict_fallback(
+        features_df: pd.DataFrame,
+        returns_ser: pd.Series,
+    ) -> pd.DataFrame:
+        """Stable NumPy fallback volatility-state estimator."""
+        idx = features_df.index
+        ret = returns_ser.reindex(idx).fillna(0.0).to_numpy(dtype=np.float64)
+        ret_abs = np.abs(ret)
+
+        vol_feat = (
+            pd.to_numeric(features_df.get("macro_vol_24h"), errors="coerce")
+            .reindex(idx)
+            .ffill()
+            .bfill()
+            .fillna(float(np.nanmedian(ret_abs) if ret_abs.size else 0.0))
+            .to_numpy(dtype=np.float64)
+        )
+        down_vol = (
+            pd.to_numeric(features_df.get("macro_downside_vol_24h"), errors="coerce")
+            .reindex(idx)
+            .ffill()
+            .bfill()
+            .fillna(pd.Series(vol_feat, index=idx))
+            .to_numpy(dtype=np.float64)
+        )
+
+        # Causal scale
+        combo = 0.65 * ret_abs + 0.25 * np.abs(vol_feat) + 0.10 * np.abs(down_vol)
+        combo_s = pd.Series(combo, index=idx).ewm(span=12, adjust=False).mean()
+        q1 = combo_s.expanding(min_periods=32).quantile(0.33).ffill().bfill().to_numpy(dtype=np.float64)
+        q2 = combo_s.expanding(min_periods=32).quantile(0.66).ffill().bfill().to_numpy(dtype=np.float64)
+        sig = np.maximum(float(np.nanstd(combo_s.to_numpy(dtype=np.float64))), 1e-6)
+
+        x = combo_s.to_numpy(dtype=np.float64)
+        logit_low = -((x - q1) / sig) ** 2
+        logit_mid = -((x - 0.5 * (q1 + q2)) / sig) ** 2 + 0.15
+        logit_high = -((x - q2) / sig) ** 2 + 0.10
+
+        logits = np.column_stack([logit_low, logit_mid, logit_high])
+        logits -= np.max(logits, axis=1, keepdims=True)
+        probs = np.exp(logits)
+        probs /= np.maximum(np.sum(probs, axis=1, keepdims=True), 1e-12)
+
+        return pd.DataFrame(
+            probs,
+            index=idx,
             columns=["vol_low", "vol_mid", "vol_high"],
         )

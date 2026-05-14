@@ -14,6 +14,16 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     # Caps startup at this fraction of Phase-D n_trials (prevents 384/500 ~77% random when
     # total_trials-oriented tpe_n_startup is reused for FUTURES_ML_PHASE_D_TRIALS=500).
     "FUTURES_ML_PHASE_D_TPE_STARTUP_FRAC": 0.20,
+    # Optimizer tail-stall guardrails (does not change JAX kernels).
+    # Per-trial timeout in worker process; timed-out trials are marked FAIL and loop proceeds.
+    "FUTURES_OPT_TRIAL_TIMEOUT_SEC": 180,
+    # Per-chunk future timeout; prevents indefinite wait on a wedged worker batch.
+    "FUTURES_OPT_CHUNK_TIMEOUT_SEC": 1200,
+    # Optimized for 8-core CPU / 16GB RAM environment.
+    # We use 4 workers to ensure each worker has enough RAM for JAX/Optimized kernels (approx 3-4GB per worker).
+    "FUTURES_OPT_MAX_WORKERS": 4,
+    "FUTURES_OPT_CHUNK_SIZE_CAP": 4,
+    "FUTURES_OPT_ENABLE_PROGRESS_POLLER": False,
     # Phase-D: trial 0 = deploy JSON in search space (TPE anchor; counts toward n_trials).
     "FUTURES_ML_PHASE_D_ENQUEUE_DEPLOY_JSON": True,
     "FUTURES_ML_PHASE_D_DEPLOY_JSON_REL": "results/best_futures_1h.json",
@@ -82,8 +92,11 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     # Root cause: TOPSIS equal-weight dilutes DSR primacy; Pareto front drifts outside valid region.
     "FUTURES_NSGA2_POPULATION_SIZE": 30,
     # HMM stable regime (fixed hyperparameters; not in Optuna search space)
-    # v9.0.0: 6 internal states (RECOVERY added); external output remapped to 5 states.
-    "FUTURES_HMM_K_STATES": 6,
+    # v10.0.0: 4 internal states (BULL_TREND, BEAR_TREND, CHOP_HIGH, CHOP_LOW).
+    "FUTURES_HMM_K_STATES": 4,
+    # Stability guard: JAX HMM backend intermittently segfaulted (exit 139) on long-trial runs.
+    # v10.0.0: RESTORED for multivariate EM.
+    "FUTURES_HMM_JAX_BACKEND_ENABLED": True,
     # Deployment floor: ≥0.45 (align HMM systemic prior with Phase D Kelly band).
     "FUTURES_HMM_KELLY_SHRINKAGE": 0.45,
     # Immovable at 0.66: ANY reduction (even 0.62) collapses IS AWF because IS period has
@@ -93,6 +106,29 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     # CRISIS regime: hard zero-leverage kill-switch during crisis (0.0 = no position).
     # OOS data shows CRISIS PF=0.34 — any nonzero position destroys OOS compounding.
     "FUTURES_HMM_CRISIS_FLAT_LEV": 0.0,
+    # Step6: split kill-switch policy. If new columns are absent, code falls back to
+    # legacy hmm_prob_crisis behavior automatically.
+    "FUTURES_HMM_SPLIT_KILLSWITCH_ENABLED": True,
+    # pre_crisis: soft leverage damp (gross/leverage reduction only).
+    "FUTURES_HMM_PRE_CRISIS_DAMP_THRESHOLD": 0.55,
+    "FUTURES_HMM_PRE_CRISIS_DAMP_MIN_MULT": 0.50,
+    # realized_crisis: hard flat (or configured flat leverage).
+    "FUTURES_HMM_REALIZED_CRISIS_FLAT_THRESHOLD": 0.66,
+    # tail risk overlay: high risk bars -> strong leverage cut (or optional hard flat).
+    "FUTURES_HMM_TAIL_RISK_HIGH_THRESHOLD": 0.75,
+    "FUTURES_HMM_TAIL_RISK_HIGH_LEV_MULT": 0.25,
+    "FUTURES_HMM_TAIL_RISK_FORCE_FLAT": False,
+    # Threshold calibration mode for Step6 split kill-switch.
+    # fixed: use static thresholds below (backward compatible default)
+    # is_quantile: use quantiles estimated on leading IS slice
+    # rolling_quantile: use per-bar rolling quantile thresholds
+    "FUTURES_HMM_THRESHOLD_MODE": "is_quantile",
+    "FUTURES_HMM_THRESHOLD_IS_FRAC": 0.70,
+    "FUTURES_HMM_THRESHOLD_ROLLING_WINDOW": 336,
+    "FUTURES_HMM_THRESHOLD_ROLLING_MIN_PERIODS": 96,
+    "FUTURES_HMM_PRE_CRISIS_Q": 0.75,
+    "FUTURES_HMM_REALIZED_CRISIS_Q": 0.90,
+    "FUTURES_HMM_TAIL_RISK_Q": 0.85,
     # S2: Auxiliary volatility-based CRISIS gate.
     # DISABLED: vol gate fires during profitable high-vol IS periods (CRISIS G=+0.193% in IS),
     # collapsing IS CAGR from ~30% to 2.6%. IS-OOS mismatch requires a smarter approach
@@ -112,7 +148,18 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     # HMM Posterior Smoothing (EMA, DEMA, TEMA, HMA, KAMA, ALMA, JMA)
     "FUTURES_HMM_SMOOTHING_METHOD": "EMA",
     # Posterior smoothing: span=3 harmed HMM stability; 6–9 + higher STICKY_PENALTY (1100).
-    "FUTURES_HMM_SMOOTHING_SPAN": 8,
+    "FUTURES_HMM_SMOOTHING_SPAN": 5,
+    # Optional asymmetric EMA for crisis posterior (faster attack, slower decay).
+    "FUTURES_HMM_CRISIS_ATTACK_SPAN": 2,
+    "FUTURES_HMM_CRISIS_DECAY_SPAN": 8,
+    # Step5: Tail-event supervised overlay (1~8 bar forward tail risk).
+    "FUTURES_HMM_TAIL_OVERLAY_ENABLED": True,
+    "FUTURES_HMM_TAIL_OVERLAY_HORIZON": 8,
+    "FUTURES_HMM_TAIL_OVERLAY_LABEL_Q": 0.10,
+    "FUTURES_HMM_TAIL_OVERLAY_MIN_TRAIN": 240,
+    "FUTURES_HMM_TAIL_OVERLAY_MIN_POS": 20,
+    "FUTURES_HMM_TAIL_OVERLAY_USE_ISOTONIC": True,
+    "FUTURES_HMM_TAIL_OVERLAY_LR_C": 0.8,
     # P2: asymmetric modulator ceiling (no bull amplification in OOS bear regime)
     "FUTURES_HMM_MOD_LONG_CEIL": 1.0,  # was 2.0
     # P2: backward-looking 168h BTC return suppression (no look-ahead bias)
