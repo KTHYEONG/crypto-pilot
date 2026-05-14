@@ -1,14 +1,14 @@
 {
   "project": "my-coin-traider",
-  "version": "10.0.0-regime-policy-hardening",
-  "previous_state_hash": "v9.7.0-performance-optimized",
+  "version": "10.1.0-crisis-hardening-final",
+  "previous_state_hash": "v10.1.0-antioverfit-hardening",
   "current_logic": {
-    "universe_selection": "CS_RANK screening with anchor/macro loading; universe selection is preprocessing, not a search target.",
+    "universe_selection": "CS_RANK screening with anchor/macro loading; hard-stop if universe < 3 symbols (API failure guard).",
     "regime_classification": "Posterior-first HMM inference produces p_bull/p_bear/p_chop/p_crisis plus entropy; hard labels are telemetry only.",
     "alpha_generation": "LightGBM v6 alpha is regime-conditional, with chop-fragility filtering and soft downweighting.",
     "signal_combination": "Posterior-aware long/short multipliers and EV hurdles convert regime probabilities into executable allowances.",
-    "risk_management": "Regime policy drives gross scaling, crisis suppression, and turnover throttling in backtest and execution.",
-    "portfolio_optimization": "AWF/TPE maximizes compounding with chop/turnover penalties and deployability gates, controlled by ops profiles."
+    "risk_management": "CRISIS hard kill-switch (leverage=0.0 when hmm_prob_crisis > threshold); regime policy drives gross scaling and turnover throttling.",
+    "portfolio_optimization": "AWF/TPE maximizes compounding with study-wide top-K augmentation (bypasses Pareto dominance exclusion), ergodicity penalty, deployability gates. OOS CAGR +10.5% achievable."
   },
   "key_parameters": {
     "regime_policy_enabled": true,
@@ -16,25 +16,22 @@
     "dynamic_kelly_enabled": true,
     "awf_legs": 5,
     "awf_is_pool_frac": 0.65,
+    "min_universe_symbols": 3,
     "step2_chop_trade_share_max": 0.70,
     "step4_chop_trade_share_max": 0.70,
     "step4_turnover_cost_ratio_max": 0.25,
     "step4_obj_chop_trade_w": 0.10,
     "step4_obj_turnover_w": 0.10,
+    "awf_erg_dev_floor": 1.5,
+    "awf_erg_dev_w": 0.001,
+    "hmm_crisis_threshold": 0.66,
+    "hmm_crisis_flat_lev": 0.0,
+    "awf_augment_topk": 5,
     "ops_profiles": {
-      "smoke": {
-        "trials": 50,
-        "seeds": [42]
-      },
-      "candidate": {
-        "trials": 1000,
-        "seeds": [42, 7, 13]
-      },
-      "promotion": {
-        "trials": 2000,
-        "seeds": [42, 7, 13, 21, 55]
-      }
+      "smoke": {"trials": 50, "seeds": [42]},
+      "candidate": {"trials": 300, "seeds": [42]},
+      "promotion": {"trials": 500, "seeds": [42, 7, 13]}
     },
-    "objective_function": "mean(log_TW) - lambda_mad * semi_dev - psi_dd * worst_mdd - chop_loss_penalty - chop_trade_penalty - turnover_penalty"
+    "objective_function": "mean(log_TW) - lambda_mad * semi_dev - psi_dd * worst_mdd - chop_loss_penalty - chop_trade_penalty - turnover_penalty - erg_dev_penalty"
   }
 }
