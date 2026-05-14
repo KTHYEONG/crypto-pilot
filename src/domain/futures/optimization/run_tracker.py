@@ -198,25 +198,32 @@ def ml_trial_passes_hard_gates(
     return True
 
 
+# Global context for worker processes to leverage Linux Copy-on-Write (CoW)
+# This prevents expensive IPC pickling of large context objects.
+_GLOBAL_BASE_CTX: MLPhaseDContext | None = None
+
+
 def resolve_futures_parallel_policy(symbol_count: int) -> int:
     """Determine the optimal number of workers for parallel optimization."""
     logical_cpus = max(1, os.cpu_count() or 1)
     return max(1, min(8, logical_cpus))
 
 
-def optimize_worker(s_name: str, s_url: str, trials: int, ctx: MLPhaseDContext):
-    """Worker function for parallel Optuna optimization."""
+def optimize_worker(s_name: str, s_url: str, chunk_size: int):
+    """Worker function for parallel Optuna optimization using global context."""
+    global _GLOBAL_BASE_CTX
+    if _GLOBAL_BASE_CTX is None:
+        raise RuntimeError("Worker started without _GLOBAL_BASE_CTX")
+
     # Each process loads the study and runs its portion of trials
-    # This completely bypasses the GIL.
-    # Note: Use a local storage object to avoid sharing it across processes
     inner_storage = optuna.storages.RDBStorage(
         s_url, engine_kwargs={"connect_args": {"timeout": 60, "check_same_thread": False}}
     )
     study = optuna.load_study(study_name=s_name, storage=inner_storage)
     study.optimize(
-        lambda tr: objective_ml_phase_d(tr, ctx),
-        n_trials=trials,
-        n_jobs=1,  # 1 job per process
+        lambda tr: objective_ml_phase_d(tr, _GLOBAL_BASE_CTX),
+        n_trials=chunk_size,
+        n_jobs=1,
         catch=(ValueError, RuntimeError),
     )
 
@@ -390,22 +397,25 @@ def run_optimization_loop(
     resume: bool = False,
     n_workers: int = 6,
 ) -> optuna.Study:
-    """Orchestrate Step 4: Parallel Optuna optimization loop with dynamic load balancing.
+    """Orchestrate Step 4: Parallel Optuna optimization loop with Micro-Batching.
 
-    Uses ProcessPoolExecutor (fork) to dispatch 1-trial tasks dynamically to avoid
-    straggler effects from static partitioning. Constrains Numba/NumPy threads
-    to prevent CPU thrashing.
+    Uses ProcessPoolExecutor (fork) with Global State to eliminate IPC pickling overhead.
+    Dispatches tasks in small chunks to balance between DB lock contention and
+    dynamic load distribution.
     """
     import gc
     import multiprocessing
     import os
-    from concurrent.futures import ProcessPoolExecutor, as_completed
+    import threading
+    import time
+    from concurrent.futures import ProcessPoolExecutor
 
     import optuna
     from tqdm import tqdm
 
+    global _GLOBAL_BASE_CTX
+
     # 1. Prevent CPU Thrashing: Disable nested multi-threading in sub-processes
-    # This ensures each worker process uses exactly one core efficiently.
     for env_var in [
         "NUMBA_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS",
         "OPENBLAS_NUM_THREADS", "VECLIB_MAXIMUM_THREADS", "NUMEXPR_NUM_THREADS"
@@ -431,32 +441,80 @@ def run_optimization_loop(
     )
     study_ml.set_user_attr("latest_run_id", base_ctx.run_id)
 
-    # 2. Memory Efficiency: Freeze existing objects before fork to leverage CoW
+    # 2. Zero-IPC Setup: Assign global context and freeze memory for fork()
+    _GLOBAL_BASE_CTX = base_ctx
     gc.collect()
     try:
         gc.freeze()
     except (AttributeError, RuntimeError):
         pass
 
-    # 3. Dynamic Dispatch: Submit each trial as an individual task
-    # This allows workers to grab next task immediately after finishing current one,
-    # solving the 'straggler effect' from static partitioning.
+    # 3. Micro-Batching: Calculate chunk size to balance throughput and latency
+    # Typically 2-4 trials per chunk is a good balance for SQLite WAL.
+    chunk_size = max(1, min(4, n_trials // (n_workers * 2)))
+    n_chunks = n_trials // chunk_size
+    remainder = n_trials % chunk_size
+    chunks = [chunk_size] * n_chunks
+    if remainder > 0:
+        chunks.append(remainder)
+
+    # 4. Progress Tracking: Background poller for smooth tqdm updates
+    stop_event = threading.Event()
+
+    def progress_poller(s_name: str, s_url: str, target: int, r_id: str | None) -> None:
+        poller_storage = optuna.storages.RDBStorage(
+            s_url, engine_kwargs={"connect_args": {"timeout": 60, "check_same_thread": False}}
+        )
+        try:
+            study = optuna.load_study(study_name=s_name, storage=poller_storage)
+            with tqdm(total=target, desc=" [OPT] Progress", unit="trial", leave=True) as pbar:
+                while not stop_event.is_set():
+                    try:
+                        trials = study.get_trials(
+                            deepcopy=False, 
+                            states=[TrialState.COMPLETE, TrialState.PRUNED, TrialState.FAIL]
+                        )
+                        if r_id:
+                            count = sum(1 for t in trials if t.user_attrs.get("run_id") == r_id)
+                        else:
+                            count = len(trials)
+                        
+                        pbar.n = min(count, target)
+                        pbar.refresh()
+                        if count >= target:
+                            break
+                    except Exception:
+                        pass
+                    time.sleep(3)  # Relaxed polling interval to reduce DB load
+                pbar.n = target
+                pbar.refresh()
+        except Exception:
+            pass
+
+    poller_thread = threading.Thread(
+        target=progress_poller,
+        args=(study_name, storage_url, n_trials, base_ctx.run_id),
+        daemon=True
+    )
+    poller_thread.start()
+
+    # 5. Parallel Execution: Dynamic dispatch of chunked tasks
     mp_ctx = multiprocessing.get_context("fork")
-    
-    with tqdm(total=n_trials, desc=" [OPT] Progress", unit="trial", leave=True) as pbar:
+    try:
         with ProcessPoolExecutor(max_workers=n_workers, mp_context=mp_ctx) as executor:
-            # Create a list of single-trial tasks
             futures = [
-                executor.submit(optimize_worker, study_name, storage_url, 1, base_ctx)
-                for _ in range(n_trials)
+                executor.submit(optimize_worker, study_name, storage_url, c_size)
+                for c_size in chunks
             ]
-            
-            # Update progress bar in real-time as tasks complete
-            for future in as_completed(futures):
+            # Just wait for completion, tqdm is handled by the poller thread
+            for future in futures:
                 try:
-                    future.result()  # Catch potential worker errors
+                    future.result()
                 except Exception as e:
-                    _logger.error("Worker task failed: %s", e)
-                pbar.update(1)
+                    _logger.error("Worker batch failed: %s", e)
+    finally:
+        stop_event.set()
+        poller_thread.join(timeout=5)
+        _GLOBAL_BASE_CTX = None  # Clear global reference
 
     return study_ml
