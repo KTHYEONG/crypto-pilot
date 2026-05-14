@@ -709,28 +709,38 @@ def build_gp_input_features(df: pd.DataFrame, tf: str = "1h") -> pd.DataFrame:
     else:
         out["macro_cost_168h"] = 0.0
 
-    # [Mixed Normalization] Vol features: Log+RobustScaler; others: Rank-Gauss [T1-A]
-    from sklearn.preprocessing import QuantileTransformer
-    from sklearn.preprocessing import RobustScaler as _RobustScaler
+    # [Mixed Normalization - Causal]
+    # Vol-like features: log1p + rolling robust z-score
+    # Other features: rolling robust z-score
 
     _vol_macro_cols = [
         c for c in ["macro_vol_24h", "macro_downside_vol_24h", "macro_cs_dispersion_24h"]
         if c in out.columns
     ]
     if _vol_macro_cols:
-        _vol_data = out[_vol_macro_cols].fillna(0.0).to_numpy()
-        _vol_data_log = np.log1p(np.maximum(_vol_data, 0.0))
-        _rs = _RobustScaler()
-        out[_vol_macro_cols] = _rs.fit_transform(_vol_data_log)
+        from src.domain.futures.ml_pipeline.regime.causal_transformers import (
+            causal_log_robust_zscore,
+        )
+        _scaled_vol = causal_log_robust_zscore(
+            out[_vol_macro_cols].fillna(0.0),
+            window=w168,
+            min_periods=max(8, w24 // 2),
+            clip=5.0,
+        )
+        out[_vol_macro_cols] = _scaled_vol
 
     _other_macro_cols = [c for c in SYSTEMIC_HMM_FEATURE_COLUMNS if c not in _vol_macro_cols and c in out.columns]
     if _other_macro_cols:
-        _qt = QuantileTransformer(
-            output_distribution="normal",
-            n_quantiles=min(len(out), 1000),
-            random_state=42,
+        from src.domain.futures.ml_pipeline.regime.causal_transformers import (
+            causal_robust_zscore,
         )
-        out[_other_macro_cols] = _qt.fit_transform(out[_other_macro_cols].fillna(0.0))
+        _scaled_other = causal_robust_zscore(
+            out[_other_macro_cols].fillna(0.0),
+            window=w168,
+            min_periods=max(8, w24 // 2),
+            clip=5.0,
+        )
+        out[_other_macro_cols] = _scaled_other
 
     out = out.replace([np.inf, -np.inf], np.nan)
     return out
@@ -911,30 +921,37 @@ def build_systemic_hmm_features(
         out["macro_cs_dispersion_24h"] = 0.0
         out["macro_breadth_168h"] = 0.5
 
-    # Mixed normalization [T1-A]:
-    #   Vol-like features (always positive): Log + RobustScaler (magnitude 보존)
-    #   Other features: Rank-Gauss (QuantileTransformer)
-    from sklearn.preprocessing import QuantileTransformer, RobustScaler
+    # Mixed normalization [T1-A] (causal):
+    #   Vol-like features: log1p + rolling robust z-score
+    #   Other features: rolling robust z-score
 
     vol_feat_cols = [
         c for c in ["macro_vol_24h", "macro_downside_vol_24h", "macro_cs_dispersion_24h"]
         if c in out.columns
     ]
     if vol_feat_cols:
-        vol_data = out[vol_feat_cols].fillna(0.0).to_numpy()
-        vol_data_log = np.log1p(np.maximum(vol_data, 0.0))
-        rs = RobustScaler()
-        out[vol_feat_cols] = rs.fit_transform(vol_data_log)
+        from src.domain.futures.ml_pipeline.regime.causal_transformers import (
+            causal_log_robust_zscore,
+        )
+        out[vol_feat_cols] = causal_log_robust_zscore(
+            out[vol_feat_cols].fillna(0.0),
+            window=w168,
+            min_periods=max(8, w24 // 2),
+            clip=5.0,
+        )
 
     other_cols = [c for c in SYSTEMIC_HMM_FEATURE_COLUMNS if c not in vol_feat_cols and c in out.columns]
     if other_cols:
-        clean_other = out[other_cols].replace([np.inf, -np.inf], np.nan).fillna(0.0)
-        qt = QuantileTransformer(
-            output_distribution="normal",
-            n_quantiles=min(len(out), 1000),
-            random_state=42,
+        from src.domain.futures.ml_pipeline.regime.causal_transformers import (
+            causal_robust_zscore,
         )
-        out[other_cols] = qt.fit_transform(clean_other)
+        clean_other = out[other_cols].replace([np.inf, -np.inf], np.nan).fillna(0.0)
+        out[other_cols] = causal_robust_zscore(
+            clean_other,
+            window=w168,
+            min_periods=max(8, w24 // 2),
+            clip=5.0,
+        )
 
     return out.replace([np.inf, -np.inf], np.nan).fillna(0.0)
 
