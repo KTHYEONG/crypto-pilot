@@ -231,6 +231,8 @@ class MLPhaseDContext:
     ml_pipeline_end: str | None = None
     ml_pipeline_is_start: str | None = None
     ml_pipeline_workers: int | None = None
+    # Per-execution identifier for run-level trial filtering in shared Optuna DB.
+    run_id: str | None = None
 
 
 def _fit_oos_platt_calibrators_from_maps(
@@ -1340,6 +1342,21 @@ def _run_portfolio_numba_block(
         aligned.get("xs_score_short", np.zeros_like(close_np)), dtype=np.float64
     )
     sigma_3d = aligned.get("sigma_3d")
+    hmm_probs_2d = None
+    _hmm_cols_pw = [
+        "hmm_prob_bull_calm",
+        "hmm_prob_bull_vol_up",
+        "hmm_prob_bear_trend",
+        "hmm_prob_chop",
+        "hmm_prob_crisis",
+    ]
+    _hmm_blocks_pw = [aligned.get(c) for c in _hmm_cols_pw]
+    if all(b is not None for b in _hmm_blocks_pw):
+        _cols_pw = []
+        for b in _hmm_blocks_pw:
+            arr = np.asarray(b, dtype=np.float64)
+            _cols_pw.append(arr[:, 0] if arr.ndim == 2 else arr)
+        hmm_probs_2d = np.stack(_cols_pw, axis=1)
     tw_blk = np.asarray(
         precompute_rebalance_weights(
             close_np,
@@ -1360,6 +1377,15 @@ def _run_portfolio_numba_block(
                 else None
             ),
             sigma_3d=sigma_3d,
+            hmm_probs_2d=hmm_probs_2d,
+            regime_policy_enabled=bool(pwp.get("regime_policy_enabled", False)),
+            chop_gross_damp=float(pwp.get("chop_gross_damp", 0.50)),
+            crisis_gross_damp=float(pwp.get("crisis_gross_damp", 0.80)),
+            entropy_gross_damp=float(pwp.get("entropy_gross_damp", 0.35)),
+            bear_gross_damp=float(pwp.get("bear_gross_damp", 0.10)),
+            gross_floor_mult=float(pwp.get("gross_floor_mult", 0.15)),
+            crisis_long_suppress_thr=float(pwp.get("crisis_long_suppress_thr", 0.60)),
+            crisis_long_suppress_mult=float(pwp.get("crisis_long_suppress_mult", 0.10)),
         ),
         dtype=np.float64,
     )
@@ -1492,6 +1518,10 @@ def _evaluate_awf_phase_d_aggregate(
     leg_s_pf: list[float] = []
     leg_exposures: list[float] = []
     leg_crisis_mean: list[float] = []
+    chop_trade_counts: list[int] = []
+    chop_loss_notional: list[float] = []
+    total_loss_notional: list[float] = []
+    leg_flip_proxy: list[float] = []
     first_leg_done = False
 
     for leg_idx, leg in enumerate(awf_slices):
@@ -1562,6 +1592,40 @@ def _evaluate_awf_phase_d_aggregate(
             _lpf, _spf = 1.0, 1.0
         leg_l_pf.append(_lpf)
         leg_s_pf.append(_spf)
+
+        # Step2 regime-aware diagnostics: chop drag + turnover/flip proxy from available trade path.
+        chop_tr = 0
+        chop_loss = 0.0
+        tot_loss = 0.0
+        flip_proxy = 0.0
+        if n_tr > 0 and b_trades_raw.size > 0:
+            try:
+                _sym_idx = np.asarray(b_trades_raw[:, 0], dtype=np.int64)
+                _entry_idx = np.asarray(b_trades_raw[:, 1], dtype=np.int64)
+                _pnl = np.asarray(b_trades_raw[:, 6], dtype=np.float64)
+                _side = np.asarray(b_trades_raw[:, 3], dtype=np.float64)
+                _chop_2d = aligned.get("hmm_prob_chop")
+                if _chop_2d is not None:
+                    _chop_np = np.asarray(_chop_2d, dtype=np.float64)
+                    if _chop_np.ndim == 2 and _chop_np.size > 0:
+                        rb, cb = _chop_np.shape
+                        _r = np.clip(_entry_idx, 0, max(rb - 1, 0))
+                        _c = np.clip(_sym_idx, 0, max(cb - 1, 0))
+                        _p_chop = _chop_np[_r, _c]
+                        _is_chop = _p_chop >= 0.50
+                        chop_tr = int(np.sum(_is_chop))
+                        if np.any(_is_chop):
+                            _chop_pnl = _pnl[_is_chop]
+                            chop_loss = float(np.sum(np.clip(-_chop_pnl, 0.0, None)))
+                tot_loss = float(np.sum(np.clip(-_pnl, 0.0, None)))
+                if _side.size >= 2:
+                    flip_proxy = float(np.mean(np.abs(np.diff(_side)) > 0.0))
+            except Exception:
+                chop_tr, chop_loss, tot_loss, flip_proxy = 0, 0.0, 0.0, 0.0
+        chop_trade_counts.append(int(chop_tr))
+        chop_loss_notional.append(float(chop_loss))
+        total_loss_notional.append(float(tot_loss))
+        leg_flip_proxy.append(float(flip_proxy))
 
         _hy_arr = aligned.get("hmm_prob_crisis") if aligned else None
         if _hy_arr is not None:
@@ -1642,15 +1706,10 @@ def _evaluate_awf_phase_d_aggregate(
         psi_dd=psi_d,
     )
 
-    obj = -robust_val
-
-    k_cfg = int(cfg.get("FUTURES_AWF_K_LEGS", 6))
-    if n_legs_done < k_cfg:
-        obj += 20.0 * (k_cfg - n_legs_done)
-
     k_legs_n = float(max(n_legs_done, 1))
     mu_log = float(np.mean(leg_arr)) if leg_arr.size > 0 else -10.0
     worst_leg = float(np.min(leg_arr)) if leg_arr.size > 0 else -10.0
+    med_leg = float(np.median(leg_arr)) if leg_arr.size > 0 else -10.0
     awf_pos_frac = float(np.sum(leg_arr > 0.0)) / k_legs_n
     dsr_awf = calc_gate1_dsr_from_path_log_tw(
         leg_arr,
@@ -1660,6 +1719,67 @@ def _evaluate_awf_phase_d_aggregate(
     )
 
     sig_awf_diag = float(np.std(leg_arr, ddof=1)) if leg_arr.size >= 2 else 0.0
+    leg_l_pf_mean = float(np.mean(leg_l_pf)) if leg_l_pf else l_pf_agg
+    leg_s_pf_mean = float(np.mean(leg_s_pf)) if leg_s_pf else s_pf_agg
+    _awf_pf_agg, ev_cost_ratio = _pf_and_ev_cost_from_trades(all_trades)
+    turnover_cost_ratio = float(np.clip(1.0 / max(ev_cost_ratio, 1e-9), 0.0, 1e6))
+    total_trades_agg = float(np.sum(leg_trade_counts)) if leg_trade_counts else 0.0
+    total_chop_trades = float(np.sum(chop_trade_counts)) if chop_trade_counts else 0.0
+    chop_trade_share = float(total_chop_trades / max(total_trades_agg, 1.0))
+    loss_total = float(np.sum(total_loss_notional)) if total_loss_notional else 0.0
+    loss_chop = float(np.sum(chop_loss_notional)) if chop_loss_notional else 0.0
+    chop_loss_share = float(loss_chop / max(loss_total, 1e-9)) if loss_total > 0.0 else 0.0
+    flip_rate_proxy = float(np.mean(leg_flip_proxy)) if leg_flip_proxy else 0.0
+
+    step2_enabled = bool(cfg.get("FUTURES_STEP2_REGIME_DEPLOY_ENABLED", False))
+    if step2_enabled:
+        chop_loss_w = float(cfg.get("FUTURES_STEP2_OBJ_CHOP_LOSS_W", 0.25))
+        chop_trade_w = float(cfg.get("FUTURES_STEP2_OBJ_CHOP_TRADE_W", 0.15))
+        flip_w = float(cfg.get("FUTURES_STEP2_OBJ_FLIP_W", 0.10))
+        # Penalize only excess over practical thresholds to preserve backward-compatible baseline.
+        loss_thr = float(cfg.get("FUTURES_STEP2_CHOP_LOSS_SHARE_MAX", 0.60))
+        trade_thr = float(cfg.get("FUTURES_STEP2_CHOP_TRADE_SHARE_MAX", 0.65))
+        flip_thr = float(cfg.get("FUTURES_STEP2_FLIP_RATE_PROXY_MAX", 0.75))
+        excess_loss = max(0.0, chop_loss_share - loss_thr)
+        excess_trade = max(0.0, chop_trade_share - trade_thr)
+        excess_flip = max(0.0, flip_rate_proxy - flip_thr)
+        robust_val -= chop_loss_w * excess_loss + chop_trade_w * excess_trade + flip_w * excess_flip
+
+    step4_enabled = bool(cfg.get("FUTURES_STEP4_DEPLOYABILITY_ENABLED", False))
+    if step4_enabled:
+        chop_trade_w4 = float(cfg.get("FUTURES_STEP4_OBJ_CHOP_TRADE_W", 0.10))
+        turnover_w4 = float(cfg.get("FUTURES_STEP4_OBJ_TURNOVER_W", 0.05))
+        chop_trade_ref = float(
+            cfg.get(
+                "FUTURES_STEP2_CHOP_TRADE_SHARE_MAX",
+                cfg.get("FUTURES_STEP4_CHOP_TRADE_SHARE_MAX", 0.65),
+            )
+        )
+        turnover_ref = float(cfg.get("FUTURES_STEP4_TURNOVER_COST_RATIO_MAX", 0.35))
+        edge_ref = cfg.get("FUTURES_AWF_NET_EDGE_MIN")
+        if edge_ref is not None:
+            try:
+                edge_ref_f = float(edge_ref)
+                if np.isfinite(edge_ref_f) and edge_ref_f > 0.0:
+                    turnover_ref = max(turnover_ref, 1.0 / edge_ref_f)
+            except (TypeError, ValueError):
+                pass
+        ev_ref = cfg.get("FUTURES_ML_EV_HURDLE_RATIO")
+        if ev_ref is not None:
+            try:
+                ev_ref_f = float(ev_ref)
+                if np.isfinite(ev_ref_f) and ev_ref_f > 0.0:
+                    turnover_ref = max(turnover_ref, 1.0 / ev_ref_f)
+            except (TypeError, ValueError):
+                pass
+        excess_trade4 = max(0.0, chop_trade_share - chop_trade_ref)
+        excess_turnover4 = max(0.0, turnover_cost_ratio - turnover_ref)
+        robust_val -= chop_trade_w4 * excess_trade4 + turnover_w4 * excess_turnover4
+
+    obj = -robust_val
+    k_cfg = int(cfg.get("FUTURES_AWF_K_LEGS", 6))
+    if n_legs_done < k_cfg:
+        obj += 20.0 * (k_cfg - n_legs_done)
 
     diag: dict[str, Any] = {
         "objective": float(obj),
@@ -1688,18 +1808,31 @@ def _evaluate_awf_phase_d_aggregate(
         "awf_mean_log_tw": float(mu_log),
         "ml_mean_log_growth_cpcv": mu_log,
         "awf_worst_leg_log_tw": float(worst_leg),
+        "awf_leg_worst_log_tw": float(worst_leg),
+        "awf_leg_median_log_tw": float(med_leg),
+        "awf_leg_pos_ratio": float(awf_pos_frac),
+        "awf_leg_dispersion": float(sig_awf_diag),
         "worst_leg": worst_leg,
         "ml_p10_log_growth_cpcv": worst_leg,
         "awf_worst_mdd_pct": float(worst_mdd_legs),
         "worst_mdd_legs": worst_mdd_legs,
         "ml_worst_mdd_cpcv": worst_mdd_legs,
         "avg_trades": avg_trades_agg,
+        "awf_trade_count_mean": float(avg_trades_agg),
         "avg_exposure": avg_exposure,
         "long_short_ratio": minority,
         "leg_crisis_mean": [round(x, 4) for x in leg_crisis_mean],
         "n_valid_paths": int(n_legs_done),
         "l_pf_agg": l_pf_agg,
+        "awf_pf_agg": float(_awf_pf_agg),
+        "awf_ev_cost_ratio": float(ev_cost_ratio),
+        "awf_turnover_cost_ratio": float(turnover_cost_ratio),
         "s_pf_agg": s_pf_agg,
+        "awf_long_pf_mean": float(leg_l_pf_mean),
+        "awf_short_pf_mean": float(leg_s_pf_mean),
+        "awf_chop_trade_share": float(chop_trade_share),
+        "awf_chop_loss_share": float(chop_loss_share),
+        "awf_flip_rate_proxy": float(flip_rate_proxy),
     }
 
     if trial is not None:
@@ -1710,15 +1843,28 @@ def _evaluate_awf_phase_d_aggregate(
         trial.set_user_attr("awf_pos_frac", awf_pos_frac)
         trial.set_user_attr("gate1_dsr", dsr_awf)
         trial.set_user_attr("awf_worst_leg_log_tw", float(worst_leg))
+        trial.set_user_attr("awf_leg_worst_log_tw", float(worst_leg))
+        trial.set_user_attr("awf_leg_median_log_tw", float(med_leg))
+        trial.set_user_attr("awf_leg_pos_ratio", float(awf_pos_frac))
+        trial.set_user_attr("awf_leg_dispersion", float(sig_awf_diag))
         trial.set_user_attr("awf_worst_mdd_pct", float(worst_mdd_legs))
         trial.set_user_attr("avg_trades", avg_trades_agg)
+        trial.set_user_attr("awf_trade_count_mean", float(avg_trades_agg))
+        trial.set_user_attr("awf_long_pf_mean", float(leg_l_pf_mean))
+        trial.set_user_attr("awf_short_pf_mean", float(leg_s_pf_mean))
+        trial.set_user_attr("awf_chop_trade_share", float(chop_trade_share))
+        trial.set_user_attr("awf_chop_loss_share", float(chop_loss_share))
+        trial.set_user_attr("awf_flip_rate_proxy", float(flip_rate_proxy))
+        trial.set_user_attr("awf_turnover_cost_ratio", float(turnover_cost_ratio))
 
     ns2 = bool(cfg.get("FUTURES_ML_ALPHA_NSGA2_ENABLED", False))
     if ns2:
-        # Obj1: compound growth 최대화 (Kelly criterion)
-        obj1 = -float(np.mean(leg_arr)) if leg_arr.size > 0 else 1e9
-        # Obj2: worst leg 최대화 (tail risk 방어)
-        obj2 = -float(np.min(leg_arr)) if leg_arr.size > 0 else 1e9
+        # Obj1: robust compounding (AWF robust objective) maximize -> minimize negative
+        obj1 = -float(robust_val)
+        # Obj2: tail-risk minimization; prefers higher worst-leg and lower worst-MDD
+        # while keeping existing diagnostics/user_attrs compatibility intact.
+        tail_mdd_w = float(cfg.get("FUTURES_AWF_OBJ_PSI_DD", 0.5))
+        obj2 = -float(worst_leg) + tail_mdd_w * float(worst_mdd_legs)
         return (obj1, obj2), diag
     return float(obj), diag
 
@@ -1818,6 +1964,8 @@ def objective_ml_phase_d(trial: optuna.Trial, ctx: MLPhaseDContext) -> tuple[flo
     """
     if ctx.awf_leg_slices is None:
         precompute_ml_optimization_context(ctx)
+    if ctx.run_id:
+        trial.set_user_attr("run_id", str(ctx.run_id))
     merged = _suggest_ml_joint_nsga2(trial, ctx)
     # T2: AWF leg log-TW 직접 목적함수 (NSGA-II 분기 강제 활성)
     result, _ = _evaluate_awf_phase_d_aggregate(ctx, merged, trial=trial)
@@ -1868,28 +2016,64 @@ def topsis_select_best(pareto_trials: list[optuna.trial.FrozenTrial]) -> optuna.
         raise ValueError("empty pareto_trials")
     if len(pareto_trials) == 1:
         return pareto_trials[0]
-    n_dim = int(max(len(t.values) for t in pareto_trials))
-    vals_list: list[list[float]] = []
+    def _safe_float(v: Any, default: float) -> float:
+        try:
+            x = float(v)
+            return x if np.isfinite(x) else default
+        except Exception:
+            return default
+
+    # Build robust candidate metrics (all transformed so "higher is better").
+    # [robust, mu_log, worst_leg, pos_frac, -mdd]
+    feats: list[list[float]] = []
     for t in pareto_trials:
-        row = [float(x) for x in t.values]
-        while len(row) < n_dim:
-            row.append(0.0)
-        vals_list.append(row[:n_dim])
-    vals = np.asarray(vals_list, dtype=np.float64)
-    vmin, vmax = vals.min(axis=0), vals.max(axis=0)
-    norm = (vals - vmin) / np.where(vmax - vmin < 1e-12, 1.0, vmax - vmin)
-    
-    # Asymmetric Weights: [0.7 (Growth/Obj1), 0.3 (Tail Risk/Obj2)]
-    weights = np.array([0.7, 0.3]) if n_dim == 2 else np.ones(n_dim) / n_dim
-    
-    ideal: np.ndarray = np.zeros(n_dim, dtype=np.float64)
-    nadir: np.ndarray = np.ones(n_dim, dtype=np.float64)
-    
-    # Weighted Euclidean distance
-    d_pos = np.sqrt(np.sum(weights * (norm - ideal)**2, axis=1))
-    d_neg = np.sqrt(np.sum(weights * (norm - nadir)**2, axis=1))
-    
-    return pareto_trials[int(np.argmax(d_neg / (d_pos + d_neg + 1e-12)))]
+        ua = t.user_attrs
+        robust = _safe_float(ua.get("awf_robust_score", ua.get("awf_contract_reward", np.nan)), np.nan)
+        if not np.isfinite(robust):
+            v0 = float(t.values[0]) if t.values else np.nan
+            robust = -v0 if np.isfinite(v0) else -1e9
+
+        mu_log = _safe_float(
+            ua.get("awf_mu_log", ua.get("awf_mean_log_tw", ua.get("ml_mean_log_growth_cpcv", np.nan))),
+            -2.0,
+        )
+        worst_leg = _safe_float(
+            ua.get("awf_worst_leg_log_tw", ua.get("ml_p10_log_growth_cpcv", np.nan)),
+            -2.0,
+        )
+        pos_frac = _safe_float(ua.get("awf_pos_frac", np.nan), 0.0)
+        pos_frac = float(np.clip(pos_frac, 0.0, 1.0))
+        mdd = _safe_float(
+            ua.get("awf_worst_mdd_pct", ua.get("ml_worst_mdd_cpcv", np.nan)),
+            999.0,
+        )
+        feats.append([robust, mu_log, worst_leg, pos_frac, -mdd])
+
+    x = np.asarray(feats, dtype=np.float64)
+    xmin = np.min(x, axis=0)
+    xmax = np.max(x, axis=0)
+    span = xmax - xmin
+    # Deterministic min-max normalization; constant columns become neutral (0.5).
+    norm = np.where(span > 1e-12, (x - xmin) / span, 0.5)
+
+    # Robustness-first deterministic weighting.
+    weights = np.asarray([0.40, 0.20, 0.20, 0.10, 0.10], dtype=np.float64)
+    score = np.sum(norm * weights, axis=1)
+
+    # Stable tie-breakers favor stronger robustness/tail metrics, then older trial number.
+    best_idx = max(
+        range(len(pareto_trials)),
+        key=lambda i: (
+            float(score[i]),
+            float(x[i, 0]),  # robust
+            float(x[i, 2]),  # worst_leg
+            float(x[i, 1]),  # mu_log
+            float(x[i, 3]),  # pos_frac
+            float(x[i, 4]),  # -mdd
+            -int(pareto_trials[i].number),
+        ),
+    )
+    return pareto_trials[int(best_idx)]
 
 
 def check_hard_gates_ml(

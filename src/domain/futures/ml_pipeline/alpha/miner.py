@@ -471,12 +471,17 @@ class MLAlphaMiner:
             fdr_q=float(filter_opts.get("fdr_q", 0.10)),
             symbol_balance_max=float(filter_opts.get("symbol_balance_max", 3.0)),
             require_regime_gate=bool(filter_opts.get("require_regime_gate", True)),
+            step3_regime_alpha_enabled=bool(filter_opts.get("step3_regime_alpha_enabled", False)),
+            step3_chop_support_min=float(filter_opts.get("step3_chop_support_min", 0.25)),
+            step3_chop_ic_min=float(filter_opts.get("step3_chop_ic_min", -0.01)),
+            step3_chop_weight_mult=float(filter_opts.get("step3_chop_weight_mult", 0.50)),
+            step3_weight_mult_floor=float(filter_opts.get("step3_weight_mult_floor", 0.20)),
         )
 
         surviving = [c for c in alpha_df_all.columns if c.startswith("ml_alpha_") and alpha_df_all[c].std() > 1e-6]
         if surviving:
-            ic_map = filt_meta.get("ic_by_slot", {})
-            weights = [max(0.0, ic_map.get(c, 0.0)) ** 2 for c in surviving]
+            ic_map = filt_meta.get("ic_weight_by_slot", {}) or filt_meta.get("ic_by_slot", {})
+            weights = [max(0.0, float(ic_map.get(c, 0.0))) ** 2 for c in surviving]
             w_arr = np.array(weights)
             if w_arr.sum() > 1e-9:
                 w_norm = w_arr / w_arr.sum()
@@ -500,6 +505,19 @@ class MLAlphaMiner:
 
         out_df = alpha_df_all.reindex(panel_df.index).fillna(0.5)
         out_df.attrs["alpha_component_filter"] = filt_meta
+        # Minimal Step3 audit rollups for telemetry/logging without refactor.
+        ic_chop = filt_meta.get("ic_chop_by_slot", {}) if isinstance(filt_meta, dict) else {}
+        ic_bear = filt_meta.get("ic_bear_by_slot", {}) if isinstance(filt_meta, dict) else {}
+        chop_support = filt_meta.get("chop_support_by_slot", {}) if isinstance(filt_meta, dict) else {}
+        tail_ic = filt_meta.get("tail_ic_by_slot", {}) if isinstance(filt_meta, dict) else {}
+        if isinstance(ic_chop, dict) and ic_chop:
+            out_df.attrs["step3_ic_chop_mean"] = float(np.mean(list(ic_chop.values())))
+        if isinstance(ic_bear, dict) and ic_bear:
+            out_df.attrs["step3_ic_bear_mean"] = float(np.mean(list(ic_bear.values())))
+        if isinstance(chop_support, dict) and chop_support:
+            out_df.attrs["step3_chop_support_mean"] = float(np.mean(list(chop_support.values())))
+        if isinstance(tail_ic, dict) and tail_ic:
+            out_df.attrs["step3_tail_ic_mean"] = float(np.mean(list(tail_ic.values())))
         if surviving:
             ic_by_slot = filt_meta.get("ic_by_slot", {})
             ic_vals = [float(ic_by_slot.get(c, 0.0)) for c in surviving if c in ic_by_slot]
