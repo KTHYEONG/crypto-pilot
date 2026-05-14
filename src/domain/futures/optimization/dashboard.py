@@ -463,3 +463,73 @@ def log_ml_merge_feature_stats(
                 oos_nan,
                 oos_z,
             )
+
+
+def log_alpha_component_summary(alpha_panel: pd.DataFrame) -> None:
+    """Log a summary of ML alpha component extraction and filtering results.
+
+    Args:
+        alpha_panel: Dataframe containing alpha components with 'attrs' metadata.
+
+    """
+    meta = alpha_panel.attrs.get("alpha_component_filter", {})
+    if not meta:
+        _logger.warning(" [WARN] No alpha component metadata found for summary.")
+        return
+
+    n_surv = int(meta.get("n_surviving", 0))
+    n_total = int(meta.get("n_components", 0))
+    surv_rate = (n_surv / n_total * 100.0) if n_total > 0 else 0.0
+
+    ic_map = meta.get("ic_by_slot", {})
+    primary_ic = float(ic_map.get("ml_alpha_00", 0.0))
+    
+    # Calculate pool avg IC for surviving components
+    surviving_cols = [
+        c for c in alpha_panel.columns if c.startswith("ml_alpha_") and c[-2:].isdigit()
+    ]
+    surviving_ics = [
+        float(ic_map.get(c, 0.0)) for c in surviving_cols if alpha_panel[c].std() > 1e-9
+    ]
+    pool_avg_ic = float(np.mean(surviving_ics)) if surviving_ics else 0.0
+    pos_ic_ratio = (
+        (sum(1 for ic in surviving_ics if ic > 0) / len(surviving_ics) * 100.0)
+        if surviving_ics
+        else 0.0
+    )
+
+    _logger.info("\n [ALPHA COMPONENT SUMMARY]")
+    _logger.info(" ────────────────────────────────────────────────────────────────────────────")
+    _logger.info(
+        "  🧬 Survival   : %d / %d (%.1f%%)",
+        n_surv,
+        n_total,
+        surv_rate,
+    )
+    _logger.info(
+        "  📊 Primary IC : %.4f",
+        primary_ic,
+    )
+    _logger.info(
+        "  📈 Pool Avg IC: %.4f (IC > 0: %.1f%%)",
+        pool_avg_ic,
+        pos_ic_ratio,
+    )
+    
+    # Filter failure breakdown
+    fail_parts = []
+    for k, label in [
+        ("fail_fdr", "FDR"),
+        ("fail_dsr", "DSR"),
+        ("fail_sym_bal", "Bal"),
+        ("fail_regime", "Regime"),
+        ("fail_tail", "Tail"),
+    ]:
+        val = int(meta.get(k, 0))
+        if val > 0:
+            fail_parts.append(f"{label}: {val}")
+    
+    if fail_parts:
+        _logger.info("  🛡️ Filter Fail: %s", " | ".join(fail_parts))
+    
+    _logger.info(" ────────────────────────────────────────────────────────────────────────────")
