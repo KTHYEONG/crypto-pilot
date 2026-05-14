@@ -567,10 +567,28 @@ def _inject_dyn_leverage_trimmed(trimmed_sig: pd.DataFrame, raw_full: pd.DataFra
     lev_max = max(base_lev, lev_min)
     levs = lev_min + (lev_max - lev_min) * exp_q * ent_disc
     levs = np.clip(levs, lev_min, lev_max)
+    crisis_flat_lev = float(cfg.get("FUTURES_HMM_CRISIS_FLAT_LEV", 0.0))
     if "hmm_prob_crisis" in raw_full.columns:
         pc = raw_full["hmm_prob_crisis"].fillna(0.0).to_numpy(dtype=np.float64)
-        crisis_flat_lev = float(cfg.get("FUTURES_HMM_CRISIS_FLAT_LEV", 0.0))
         levs = np.where(pc > crisis_thr, crisis_flat_lev, levs)
+
+    # S2: Auxiliary volatility-based CRISIS gate.
+    # IS-OOS mismatch: HMM detects only 2.9% CRISIS in IS but 15.9% occurs in OOS.
+    # HMM trained on IS under-fires prob_crisis < 0.66 for many OOS crisis bars.
+    # Solution: if rolling realized vol > IS_95th * multiplier → force kill-switch.
+    if bool(cfg.get("FUTURES_VOL_CRISIS_GATE_ENABLED", True)):
+        vol_window = int(cfg.get("FUTURES_VOL_CRISIS_WINDOW", 20))
+        vol_mult = float(cfg.get("FUTURES_VOL_CRISIS_MULT", 3.0))
+        n = len(r)
+        roll_vol = np.zeros(n, dtype=np.float64)
+        for i in range(vol_window, n):
+            roll_vol[i] = float(np.std(r[i - vol_window : i], ddof=1))
+        # Dataset-level 95th pct as baseline: self-calibrating, no IS/OOS split needed.
+        pos_vol = roll_vol[roll_vol > 0]
+        baseline_vol = float(np.percentile(pos_vol, 95)) if pos_vol.size > 0 else 1e-9
+        vol_crisis_mask = roll_vol > baseline_vol * vol_mult
+        levs = np.where(vol_crisis_mask, crisis_flat_lev, levs)
+
     trimmed_sig["dyn_leverage"] = levs.astype(np.float64, copy=False)
 
 
@@ -1898,10 +1916,16 @@ def _evaluate_awf_phase_d_aggregate(
     if ns2:
         # Obj1: robust compounding (AWF robust objective) maximize -> minimize negative
         obj1 = -float(robust_val)
-        # Obj2: tail-risk minimization; prefers higher worst-leg and lower worst-MDD
-        # while keeping existing diagnostics/user_attrs compatibility intact.
+        # P0-1: regime-aware obj2 (CHOP drag + worst_leg tail risk)
+        # Minimizing obj2 penalizes both worst-leg tail risk and CHOP loss concentration,
+        # so CHOP-heavy trials are naturally dominated in Pareto front.
         tail_mdd_w = float(cfg.get("FUTURES_AWF_OBJ_PSI_DD", 0.5))
-        obj2 = -float(worst_leg) + tail_mdd_w * float(worst_mdd_legs)
+        chop_trade_w = float(cfg.get("FUTURES_STEP2_OBJ_CHOP_LOSS_W", 0.25))
+        obj2 = (
+            -float(worst_leg)
+            + tail_mdd_w * float(worst_mdd_legs)
+            + chop_trade_w * chop_loss_share
+        )
         return (obj1, obj2), diag
     return float(obj), diag
 

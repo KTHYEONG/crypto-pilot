@@ -405,3 +405,86 @@ def load_futures_data_maps_for_symbols(
         inject_cs_momentum_ranks(oos_data_maps, valid_symbols, tf)
 
     return data_maps, oos_data_maps, valid_symbols
+
+
+def compute_regime_drift(
+    data_maps: dict[str, dict[str, Any]],
+    oos_data_maps: dict[str, dict[str, Any]],
+    symbols: list[str],
+    tf: str,
+) -> dict[str, Any]:
+    """S3: Compute IS vs OOS regime distribution drift (KL divergence).
+
+    Detects when OOS regime distribution diverges from IS training distribution.
+    KL > 0.5 nats → significant drift warning; KL > 1.0 → severe drift.
+    """
+    def _regime_dist(maps: dict[str, dict[str, Any]], oos_split: bool) -> np.ndarray:
+        counts = np.zeros(len(REGIME_NAMES), dtype=np.int64)
+        for sym in symbols:
+            smap = maps.get(sym, {})
+            df = smap.get(tf)
+            if not isinstance(df, pd.DataFrame) or df.empty:
+                continue
+            if oos_split:
+                o0 = int(smap.get(f"oos_start_idx_{tf}", 0))
+                slice_df = df.iloc[o0:]
+            else:
+                o0 = int(smap.get(f"is_start_idx_{tf}", 0))
+                slice_df = df.iloc[o0:]
+            if slice_df.empty:
+                continue
+            rc = infer_regime_codes(slice_df)
+            counts += np.bincount(rc, minlength=len(REGIME_NAMES))
+        total = float(counts.sum())
+        if total < 1:
+            return np.ones(len(REGIME_NAMES), dtype=np.float64) / len(REGIME_NAMES)
+        return counts.astype(np.float64) / total
+
+    is_dist = _regime_dist(data_maps, oos_split=False)
+    oos_dist = _regime_dist(oos_data_maps, oos_split=True)
+
+    eps = 1e-9
+    kl_is_to_oos = float(np.sum(is_dist * np.log((is_dist + eps) / (oos_dist + eps))))
+    kl_oos_to_is = float(np.sum(oos_dist * np.log((oos_dist + eps) / (is_dist + eps))))
+    kl_sym = (kl_is_to_oos + kl_oos_to_is) / 2.0
+
+    drift_label = "OK"
+    if kl_sym > 1.0:
+        drift_label = "SEVERE"
+    elif kl_sym > 0.5:
+        drift_label = "MODERATE"
+    elif kl_sym > 0.2:
+        drift_label = "MILD"
+
+    regime_shift = {}
+    for ridx, rname in enumerate(REGIME_NAMES):
+        regime_shift[rname] = {
+            "is_pct": float(is_dist[ridx] * 100.0),
+            "oos_pct": float(oos_dist[ridx] * 100.0),
+            "ratio": float((oos_dist[ridx] + eps) / (is_dist[ridx] + eps)),
+        }
+
+    _logger.info(
+        " [S3] Regime Drift: KL(IS||OOS)=%.3f  KL(OOS||IS)=%.3f  KL_sym=%.3f  [%s]",
+        kl_is_to_oos, kl_oos_to_is, kl_sym, drift_label,
+    )
+    for rname, v in regime_shift.items():
+        _logger.info(
+            "      %-8s  IS=%.1f%%  OOS=%.1f%%  ratio=%.2fx",
+            rname, v["is_pct"], v["oos_pct"], v["ratio"],
+        )
+    if drift_label in ("MODERATE", "SEVERE"):
+        _logger.warning(
+            " [S3] ⚠ DRIFT=%s  KL_sym=%.3f — OOS regime distribution significantly "
+            "differs from IS training. Vol gate (FUTURES_VOL_CRISIS_GATE_ENABLED) "
+            "partially compensates; consider walk-forward refit.",
+            drift_label, kl_sym,
+        )
+
+    return {
+        "kl_is_to_oos": kl_is_to_oos,
+        "kl_oos_to_is": kl_oos_to_is,
+        "kl_sym": kl_sym,
+        "drift_label": drift_label,
+        "regime_shift": regime_shift,
+    }
