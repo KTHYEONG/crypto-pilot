@@ -399,7 +399,7 @@ def run_oos_margin_shared_portfolio(
         full_signal_dfs[sym] = full_sig
         seg_dfs[sym] = seg
 
-    aligned_data, _ = align_data_for_2d_engine(seg_dfs, symbols)
+    aligned_data, master_index = align_data_for_2d_engine(seg_dfs, symbols)
     if not aligned_data:
         return {
             "cagr_pct": -100.0, "mdd_pct": 100.0, "profit_factor": 0.0,
@@ -489,6 +489,7 @@ def run_oos_margin_shared_portfolio(
     }
     if return_signal_dfs:
         out["full_signal_dfs"] = full_signal_dfs
+        out["aligned_master_index"] = master_index
     return out
 
 def perform_online_capital_allocation(

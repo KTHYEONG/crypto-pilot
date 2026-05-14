@@ -66,6 +66,15 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     "FUTURES_ML_IC_REGIME_GATE": False,
     # Tier 2 discovery: FDR relaxation to expand candidate pool.
     "FUTURES_ML_IC_FDR_Q": 0.30,
+    # Step3: regime-conditional alpha utility pressure (disabled by default).
+    "FUTURES_STEP3_REGIME_ALPHA_ENABLED": False,
+    # CHOP-fragile rejection gate: active when chop support is sufficiently high.
+    "FUTURES_STEP3_CHOP_SUPPORT_MIN": 0.25,
+    "FUTURES_STEP3_CHOP_IC_MIN": -0.01,
+    # Soft downweight for CHOP-fragile survivors (used in ensemble weighting).
+    "FUTURES_STEP3_CHOP_WEIGHT_MULT": 0.50,
+    # floor for soft downweighted component weights.
+    "FUTURES_STEP3_WEIGHT_MULT_FLOOR": 0.20,
     "FUTURES_ML_ALPHA_NSGA2_ENABLED": True,  # T2: AWF ns2 분기 활성 (objectives=(mean,min))
     # NSGA-II population size. Generations = trials / population_size.
     # Target ≥ 10 generations → min trials = population_size * 10.
@@ -138,6 +147,30 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     "FUTURES_DEFAULT_BETA_REGIME_RECOVERY": 0.0,
     "FUTURES_DEFAULT_BETA_REGIME_CHOP": 0.25,
     "FUTURES_DEFAULT_EV_HURDLE_BPS": 5.0,
+    # Step1: posterior-aware regime policy (disabled by default for backward compatibility).
+    "FUTURES_REGIME_POLICY_ENABLED": False,
+    "FUTURES_REGIME_CONFIDENCE_ENTROPY_MULT": 0.50,
+    "FUTURES_REGIME_MULT_MIN": 0.10,
+    "FUTURES_REGIME_MULT_MAX": 1.50,
+    "FUTURES_REGIME_LONG_BULL_W": 0.35,
+    "FUTURES_REGIME_LONG_BEAR_PENALTY": 0.35,
+    "FUTURES_REGIME_LONG_CHOP_PENALTY": 0.55,
+    "FUTURES_REGIME_LONG_CRISIS_PENALTY": 0.90,
+    "FUTURES_REGIME_SHORT_BEAR_W": 0.45,
+    "FUTURES_REGIME_SHORT_BULL_PENALTY": 0.25,
+    "FUTURES_REGIME_SHORT_CHOP_PENALTY": 0.45,
+    "FUTURES_REGIME_SHORT_CRISIS_W": 0.15,
+    "FUTURES_REGIME_EV_CHOP_ADD_BPS": 8.0,
+    "FUTURES_REGIME_EV_CRISIS_ADD_BPS": 12.0,
+    "FUTURES_REGIME_EV_ENTROPY_ADD_BPS": 6.0,
+    "FUTURES_PORTFOLIO_REGIME_DAMP_ENABLED": False,
+    "FUTURES_PORTFOLIO_CHOP_GROSS_DAMP": 0.50,
+    "FUTURES_PORTFOLIO_CRISIS_GROSS_DAMP": 0.80,
+    "FUTURES_PORTFOLIO_ENTROPY_GROSS_DAMP": 0.35,
+    "FUTURES_PORTFOLIO_BEAR_GROSS_DAMP": 0.10,
+    "FUTURES_PORTFOLIO_GROSS_FLOOR_MULT": 0.15,
+    "FUTURES_PORTFOLIO_CRISIS_LONG_SUPPRESS_THR": 0.60,
+    "FUTURES_PORTFOLIO_CRISIS_LONG_SUPPRESS_MULT": 0.10,
     "FUTURES_DEFAULT_TIME_BARRIER_H": 24.0,
     "FUTURES_TMP_MD_CHAMPION_GATES_ENABLED": True,
     "FUTURES_TMP_LAYER1_MEDIAN_LOG_TW_MIN": 0.0,
@@ -208,6 +241,21 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     "FUTURES_ML_GATE1_DSR_MIN": 0.40,
     "FUTURES_AWF_POS_FRAC_MIN": 0.60,   # AWF 게이트: 최소 60% leg 수익 (≥3/5)
     "FUTURES_AWF_MU_LOG_MIN": 0.0,       # AWF 게이트: 평균 leg log-TW > 0
+    # Step2: regime-aware deployability pressure (disabled by default for backward compatibility).
+    "FUTURES_STEP2_REGIME_DEPLOY_ENABLED": False,
+    "FUTURES_STEP2_CHOP_LOSS_SHARE_MAX": 0.60,
+    "FUTURES_STEP2_CHOP_TRADE_SHARE_MAX": 0.65,
+    "FUTURES_STEP2_FLIP_RATE_PROXY_MAX": 0.75,
+    "FUTURES_STEP2_OBJ_CHOP_LOSS_W": 0.25,
+    "FUTURES_STEP2_OBJ_CHOP_TRADE_W": 0.15,
+    "FUTURES_STEP2_OBJ_FLIP_W": 0.10,
+    # Step4: Optuna regime-aware deployability hardening (disabled by default).
+    "FUTURES_STEP4_DEPLOYABILITY_ENABLED": False,
+    "FUTURES_STEP4_OBJ_CHOP_TRADE_W": 0.10,
+    "FUTURES_STEP4_OBJ_TURNOVER_W": 0.05,
+    "FUTURES_STEP4_CHOP_TRADE_SHARE_MAX": 0.65,
+    "FUTURES_STEP4_TURNOVER_COST_RATIO_MAX": 0.35,
+    "FUTURES_STEP4_CHOP_PF_FLOOR": 0.95,
     # Worst AWF leg log-TW floor already enforced via FUTURES_AWF_P10_LOG_TW_MIN.
     # Improvement 1: Friction-Aware EV Hurdle
     "FUTURES_ML_EV_HURDLE_RATIO": 1.0,
@@ -396,4 +444,3 @@ def get_quarterly_window(reference_date: Any = None) -> tuple[str, str, str, str
         oos_start.strftime("%Y-%m-%d"),
         oos_end.strftime("%Y-%m-%d"),
     )
-

@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import math
 from collections.abc import Sequence
-from typing import cast
+from typing import Any, cast
 
 import numpy as np
 import pandas as pd
@@ -273,7 +273,12 @@ def filter_alpha_components(
     ewma_half_life: float = 540.0,
     symbol_balance_max: float = 3.0,
     require_regime_gate: bool = True,
-) -> tuple[pd.DataFrame, dict[str, float]]:
+    step3_regime_alpha_enabled: bool = False,
+    step3_chop_support_min: float = 0.25,
+    step3_chop_ic_min: float = -0.01,
+    step3_chop_weight_mult: float = 0.50,
+    step3_weight_mult_floor: float = 0.20,
+) -> tuple[pd.DataFrame, dict[str, Any]]:
     """Zero-out GP alpha columns that fail various statistical and practical gates.
 
     Expects alpha_wide indexed like panel_df (MultiIndex datetime, symbol).
@@ -330,6 +335,9 @@ def filter_alpha_components(
 
     base = panel_df.loc[common, ["target"]].copy()
     base["__is"] = is_ix[panel_df.index.get_indexer(common)]
+    for pcol in ("hmm_prob_bear_trend", "hmm_prob_chop", "hmm_prob_crisis"):
+        if pcol in panel_df.columns:
+            base[pcol] = panel_df.loc[common, pcol].to_numpy(dtype=np.float64)
     if "regime_pre_hmm" in panel_df.columns:
         base["__regime"] = panel_df.loc[common, "regime_pre_hmm"].to_numpy()
     else:
@@ -343,12 +351,19 @@ def filter_alpha_components(
     tail_ok: list[bool] = []
     oos_ok: list[bool] = []
     regime_ok: list[bool] = []
+    step3_chop_ok: list[bool] = []
+    step3_weight_mults: list[float] = []
     sym_bal_ok: list[bool] = []
     neutralize_primary = False
 
     # ml_alpha_00 diagnostic metrics
     primary_diagnostic: dict[str, float] = {}
     ic_by_slot: dict[str, float] = {}
+    ic_bear_by_slot: dict[str, float] = {}
+    ic_chop_by_slot: dict[str, float] = {}
+    ic_pos_ratio_by_slot: dict[str, float] = {}
+    tail_ic_by_slot: dict[str, float] = {}
+    chop_support_by_slot: dict[str, float] = {}
     
     is_sub = base[base["__is"]]
     uniq_times = sorted(is_sub.index.get_level_values("datetime").unique())
@@ -363,6 +378,8 @@ def filter_alpha_components(
         tail_ok.append(False)
         oos_ok.append(False)
         regime_ok.append(False)
+        step3_chop_ok.append(False)
+        step3_weight_mults.append(1.0)
         sym_bal_ok.append(False)
 
     u_tgt = is_sub["target"].unstack(level="symbol")
@@ -384,6 +401,13 @@ def filter_alpha_components(
     u_tgt = is_sub["target"].unstack(level="symbol")
     valid_bal_syms = [s for s in u_tgt.columns if u_tgt[s].notna().sum() >= 40]
     u_tgt_ranks = {s: u_tgt[s].rank() for s in valid_bal_syms}
+    dt_probs: pd.DataFrame | None = None
+    hmm_prob_cols = ["hmm_prob_bear_trend", "hmm_prob_chop", "hmm_prob_crisis"]
+    if all(c in is_sub.columns for c in hmm_prob_cols):
+        try:
+            dt_probs = is_sub.groupby("datetime")[hmm_prob_cols].mean()
+        except Exception:
+            dt_probs = None
 
     for _, c in enumerate(cols):
         u_c = u_alphas[c]
@@ -432,7 +456,36 @@ def filter_alpha_components(
 
         tails = _tail_decile_ic_series_fast(u_c, u_tgt, min_symbols=8)
         tail_mu = float(np.mean(tails)) if tails else mu
+        tail_ic_by_slot[c] = tail_mu
+        ic_pos_ratio_by_slot[c] = float(np.mean(ic_arr > 0.0)) if n_ic > 0 else 0.0
         tail_ok.append(bool(tail_mu > -0.05 or len(tails) < 5))
+
+        # Step3 regime-conditional utility diagnostics:
+        # use datetime-level IC + market posterior context to measure CHOP/BEAR fragility.
+        ic_bear = mu
+        ic_chop = mu
+        chop_support = 0.0
+        if dt_probs is not None:
+            ic_df = pd.DataFrame({"ic": ic_series}).join(dt_probs, how="left").dropna()
+            if not ic_df.empty:
+                bear_mask = (
+                    (ic_df["hmm_prob_bear_trend"] >= ic_df["hmm_prob_chop"])
+                    & (ic_df["hmm_prob_bear_trend"] >= ic_df["hmm_prob_crisis"])
+                    & (ic_df["hmm_prob_bear_trend"] >= 0.40)
+                )
+                chop_mask = (
+                    (ic_df["hmm_prob_chop"] >= ic_df["hmm_prob_bear_trend"])
+                    & (ic_df["hmm_prob_chop"] >= ic_df["hmm_prob_crisis"])
+                    & (ic_df["hmm_prob_chop"] >= 0.40)
+                )
+                if bool(bear_mask.any()):
+                    ic_bear = float(ic_df.loc[bear_mask, "ic"].mean())
+                if bool(chop_mask.any()):
+                    ic_chop = float(ic_df.loc[chop_mask, "ic"].mean())
+                chop_support = float(chop_mask.mean())
+        ic_bear_by_slot[c] = float(ic_bear)
+        ic_chop_by_slot[c] = float(ic_chop)
+        chop_support_by_slot[c] = float(chop_support)
 
         if oos_time_set and u_tgt_oos is not None and r_t_oos is not None and u_alphas_oos is not None:
             u_c_oos = u_alphas_oos[c]
@@ -470,6 +523,18 @@ def filter_alpha_components(
         else:
             regime_ok.append(True)
 
+        if step3_regime_alpha_enabled:
+            chop_fragile = bool(chop_support >= step3_chop_support_min and ic_chop < step3_chop_ic_min)
+            step3_chop_ok.append(not chop_fragile)
+            if chop_fragile:
+                mult = max(step3_weight_mult_floor, min(1.0, step3_chop_weight_mult))
+                step3_weight_mults.append(float(mult))
+            else:
+                step3_weight_mults.append(1.0)
+        else:
+            step3_chop_ok.append(True)
+            step3_weight_mults.append(1.0)
+
         # [Optimization] Symbol balance check using pre-calculated ranks
         bal_ratio = 0.0
         per: list[float] = []
@@ -502,7 +567,8 @@ def filter_alpha_components(
     n_surv = 0
 
     # 상세 진단을 위한 카운터
-    f_fdr, f_dsr, f_hl, f_tail, f_oos, f_reg, f_bal = 0, 0, 0, 0, 0, 0, 0
+    f_fdr, f_dsr, f_hl, f_tail, f_oos, f_reg, f_bal, f_step3_chop = 0, 0, 0, 0, 0, 0, 0, 0
+    ic_weight_by_slot: dict[str, float] = {}
 
     for i, c in enumerate(cols):
         # 개별 필터 결과 기록
@@ -512,6 +578,7 @@ def filter_alpha_components(
         is_tail_ok = tail_ok[i]
         is_oos_ok = oos_ok[i]
         is_reg_ok = regime_ok[i]
+        is_step3_chop_ok = step3_chop_ok[i]
         is_bal_ok = sym_bal_ok[i]
 
         ok = (
@@ -521,8 +588,10 @@ def filter_alpha_components(
             and is_tail_ok
             and is_oos_ok
             and is_reg_ok
+            and is_step3_chop_ok
             and is_bal_ok
         )
+        ic_weight_by_slot[c] = float(max(0.0, ic_by_slot.get(c, 0.0)) * step3_weight_mults[i])
 
         if ok:
             n_surv += 1
@@ -541,10 +610,12 @@ def filter_alpha_components(
                 f_oos += 1
             if not is_reg_ok:
                 f_reg += 1
+            if not is_step3_chop_ok:
+                f_step3_chop += 1
             if not is_bal_ok:
                 f_bal += 1
 
-    meta: dict[str, float] = {
+    meta: dict[str, Any] = {
         "n_surviving": float(n_surv),
         "n_components": float(len(cols)),
         "neutralize_primary": 1.0 if neutralize_primary else 0.0,
@@ -554,8 +625,19 @@ def filter_alpha_components(
         "fail_tail": float(f_tail),
         "fail_oos": float(f_oos),
         "fail_regime": float(f_reg),
+        "fail_step3_chop": float(f_step3_chop),
         "fail_sym_bal": float(f_bal),
+        "step3_regime_alpha_enabled": 1.0 if step3_regime_alpha_enabled else 0.0,
+        "step3_chop_support_min": float(step3_chop_support_min),
+        "step3_chop_ic_min": float(step3_chop_ic_min),
+        "step3_chop_weight_mult": float(step3_chop_weight_mult),
         "ic_by_slot": ic_by_slot,
+        "ic_weight_by_slot": ic_weight_by_slot,
+        "ic_bear_by_slot": ic_bear_by_slot,
+        "ic_chop_by_slot": ic_chop_by_slot,
+        "ic_pos_ratio_by_slot": ic_pos_ratio_by_slot,
+        "tail_ic_by_slot": tail_ic_by_slot,
+        "chop_support_by_slot": chop_support_by_slot,
     }
 
     # ml_alpha_00(Primary)의 상세 지표를 meta에 병합

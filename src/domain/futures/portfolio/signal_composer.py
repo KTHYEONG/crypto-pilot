@@ -57,12 +57,7 @@ def apply_linear_signal_composer_scores(
     *,
     opt_config: dict[str, Any] | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Linear μ: β·α + Σ_k p_k β_k − friction; EV hurdle → drop (zero μ).
-
-    Regime terms are symmetric for long/short (no crisis long-only penalty). ``side(α)``
-    is applied only as separate α channels (ml_alpha_long / ml_alpha_short), not as an
-    extra asymmetric gate.
-    """
+    """Compose long/short expected edge with optional posterior-aware regime gates."""
     cfg = opt_config or OPT_FUTURES_CONFIG
 
     if not isinstance(df, pd.DataFrame):
@@ -120,13 +115,57 @@ def apply_linear_signal_composer_scores(
         + b_crisis * p_crisis
         + b_rec * precov
     )
-    
-    # mu is simple return per bar. 
-    # alpha_long/short are assumed to be return-scaled or z-scores.
     mu_l = beta_a * np.asarray(alpha_long, dtype=np.float64) + regime - friction
     mu_s = beta_a * np.asarray(alpha_short, dtype=np.float64) + regime - friction
-    
-    hurdle_frac = ev_h / 10000.0
+
+    regime_policy_enabled = bool(
+        params.get(
+            "REGIME_POLICY_ENABLED",
+            cfg.get("FUTURES_REGIME_POLICY_ENABLED", False),
+        )
+    )
+    if regime_policy_enabled:
+        probs = np.column_stack([pbull, p_bear, p_chop, p_crisis, precov])
+        psum = np.maximum(probs.sum(axis=1), 1e-12)
+        probs = probs / psum[:, None]
+        logk = np.log(float(probs.shape[1]))
+        ent = -np.sum(probs * np.log(np.clip(probs, 1e-12, 1.0)), axis=1) / max(logk, 1e-12)
+        ent = np.clip(ent, 0.0, 1.0)
+        conf = 1.0 - ent
+
+        ent_mult = float(
+            params.get(
+                "REGIME_CONFIDENCE_ENTROPY_MULT",
+                cfg.get("FUTURES_REGIME_CONFIDENCE_ENTROPY_MULT", 0.50),
+            )
+        )
+        min_mult = float(params.get("REGIME_MULT_MIN", cfg.get("FUTURES_REGIME_MULT_MIN", 0.10)))
+        max_mult = float(params.get("REGIME_MULT_MAX", cfg.get("FUTURES_REGIME_MULT_MAX", 1.50)))
+        conf_scale = np.clip(1.0 - ent_mult * (1.0 - conf), min_mult, max_mult)
+
+        l_bull_w = float(params.get("REGIME_LONG_BULL_W", cfg.get("FUTURES_REGIME_LONG_BULL_W", 0.35)))
+        l_bear_p = float(params.get("REGIME_LONG_BEAR_PENALTY", cfg.get("FUTURES_REGIME_LONG_BEAR_PENALTY", 0.35)))
+        l_chop_p = float(params.get("REGIME_LONG_CHOP_PENALTY", cfg.get("FUTURES_REGIME_LONG_CHOP_PENALTY", 0.55)))
+        l_crisis_p = float(params.get("REGIME_LONG_CRISIS_PENALTY", cfg.get("FUTURES_REGIME_LONG_CRISIS_PENALTY", 0.90)))
+        s_bear_w = float(params.get("REGIME_SHORT_BEAR_W", cfg.get("FUTURES_REGIME_SHORT_BEAR_W", 0.45)))
+        s_bull_p = float(params.get("REGIME_SHORT_BULL_PENALTY", cfg.get("FUTURES_REGIME_SHORT_BULL_PENALTY", 0.25)))
+        s_chop_p = float(params.get("REGIME_SHORT_CHOP_PENALTY", cfg.get("FUTURES_REGIME_SHORT_CHOP_PENALTY", 0.45)))
+        s_crisis_w = float(params.get("REGIME_SHORT_CRISIS_W", cfg.get("FUTURES_REGIME_SHORT_CRISIS_W", 0.15)))
+
+        long_mult = 1.0 + (l_bull_w * pbull) - (l_bear_p * p_bear) - (l_chop_p * p_chop) - (l_crisis_p * p_crisis)
+        short_mult = 1.0 + (s_bear_w * p_bear) - (s_bull_p * pbull) - (s_chop_p * p_chop) + (s_crisis_w * p_crisis)
+        long_mult = np.clip(long_mult * conf_scale, min_mult, max_mult)
+        short_mult = np.clip(short_mult * conf_scale, min_mult, max_mult)
+
+        mu_l = mu_l * long_mult
+        mu_s = mu_s * short_mult
+
+        ev_chop = float(params.get("REGIME_EV_CHOP_ADD_BPS", cfg.get("FUTURES_REGIME_EV_CHOP_ADD_BPS", 8.0)))
+        ev_crisis = float(params.get("REGIME_EV_CRISIS_ADD_BPS", cfg.get("FUTURES_REGIME_EV_CRISIS_ADD_BPS", 12.0)))
+        ev_entropy = float(params.get("REGIME_EV_ENTROPY_ADD_BPS", cfg.get("FUTURES_REGIME_EV_ENTROPY_ADD_BPS", 6.0)))
+        ev_h = ev_h + (ev_chop * p_chop) + (ev_crisis * p_crisis) + (ev_entropy * ent)
+
+    hurdle_frac = np.asarray(ev_h, dtype=np.float64) / 10000.0
     xs_l = np.where(mu_l >= hurdle_frac, mu_l, 0.0)
     xs_s = np.where(mu_s >= hurdle_frac, mu_s, 0.0)
     return xs_l, xs_s
