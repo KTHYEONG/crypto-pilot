@@ -394,7 +394,7 @@ def log_hmm_report_summary(h_rep: dict[str, Any]) -> None:
     switches = round(float(h_rep.get("hmm_switches", 0.0)))
 
     _logger.info(
-        " [HMM SUMMARY] 🐂%.1f%% 🚀%.1f%% 🐻%.1f%% 🎢%.1f%% 💀%.1f%%",
+        " [HMM SUMMARY] 🐂Bull:%.1f%% 🚀Rally:%.1f%% 🐻Bear:%.1f%% 🎢Chop:%.1f%% 💀Crisis:%.1f%%",
         bull_calm,
         bull_vol_up,
         bear,
