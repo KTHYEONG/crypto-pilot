@@ -862,16 +862,15 @@ def _print_hmm_summary(
     btc_1h: pd.DataFrame | None,
     mode_label: str = "",
 ) -> dict[str, float]:
-    """Print institutional-grade audit of HMM states and return report metrics."""
-    _logger.info(" ┌───────────────────────────────────────────────────────────────────────────────────┐")
-    _logger.info(f" │ [HMM INSTITUTIONAL AUDIT] Log-Wealth & Tail-Risk Analysis {mode_label:<24} │")
-    _logger.info(" ├───────────────────────────────────────────────────────────────────────────────────┤")
+    """Print institutional-grade audit of HMM states and return report metrics (Compact V2)."""
+    _logger.info("\n [HMM REGIME SUMMARY] %s", mode_label)
+    _logger.info(" ────────────────────────────────────────────────────────────────────────────")
 
     report: dict[str, float] = {}
     cols = [c for c in HMM_SEMANTIC_PROB_COLUMNS if c in market_probs.columns]
     if not (cols and len(market_probs) == len(market_hmm_feats)):
-        _logger.warning(" │ [WARN] HMM data alignment failed for audit.                                    │")
-        _logger.info(" └───────────────────────────────────────────────────────────────────────────────────┘")
+        _logger.warning(" [WARN] HMM data alignment failed for audit.")
+        _logger.info(" ────────────────────────────────────────────────────────────────────────────")
         return report
 
     df_eval = market_probs[["datetime", *cols]].copy()
@@ -882,12 +881,10 @@ def _print_hmm_summary(
     if not mod_tmp.empty and "datetime" in mod_tmp.columns:
         df_eval = pd.merge(df_eval, mod_tmp, on="datetime", how="left")
     else:
-        # Add placeholder columns if modulators are missing
         df_eval["hmm_modulator_long"] = 1.0
         df_eval["hmm_modulator_short"] = 1.0
 
     feat_tmp = market_hmm_feats.copy().reset_index()
-    # [v15 Alignment] Use new macro features for diagnostic merge
     target_feats = ["macro_vol_24h", "macro_cost_168h"]
     feat_cols_to_merge = ["datetime"] + [f for f in target_feats if f in feat_tmp.columns]
     df_eval = pd.merge(df_eval, feat_tmp[feat_cols_to_merge], on="datetime", how="left")
@@ -898,87 +895,65 @@ def _print_hmm_summary(
         btc_tmp["ret"] = btc_tmp["close"].pct_change().fillna(0.0)
         df_eval = pd.merge(df_eval, btc_tmp[["datetime", "ret"]], on="datetime", how="left")
 
-    regime_label_by_state: dict[str, str] = {
-        "hmm_prob_bull_calm": "BULL_CALM",
-        "hmm_prob_bull_vol_up": "BULL_VOL_UP",
-        "hmm_prob_bear_trend": "BEAR_TREND",
-        "hmm_prob_chop": "CHOP",
-        "hmm_prob_crisis": "CRISIS",
+    # [Compact V2] Emoji & Label Mapping
+    regime_display: dict[str, str] = {
+        "hmm_prob_bull_calm": "🐂 BULL-CALM ",
+        "hmm_prob_bull_vol_up": "🚀 BULL-VOL  ",
+        "hmm_prob_bear_trend": "🐻 BEAR-TREND",
+        "hmm_prob_chop": "🎢 CHOP-ZONE ",
+        "hmm_prob_crisis": "💀 CRISIS    ",
     }
 
-    # Diagnostic verdict categories are intentionally decoupled from semantic regime labels.
-    # Allowed values: favorable / neutral / adverse / tail_risk
     def _diag_verdict_for_regime(regime_label: str, g_log: float, m_l: float, m_s: float) -> str:
-        crisis_ctx = regime_label == "CRISIS"
-
-        # Primary signal from geometric-growth proxy; modulators provide deterministic tie-break/context.
-        if (g_log <= -0.04) or crisis_ctx or (m_l <= 0.15 and m_s <= 0.15):
-            verdict = "tail_risk"
-        elif (g_log <= -0.01) or (m_l < 0.45 and m_s > 0.85):
-            verdict = "adverse"
-        elif (g_log >= 0.015) and (m_l >= 0.85) and (m_s <= 0.55):
-            verdict = "favorable"
-        else:
-            verdict = "neutral"
-
-        # Safety guard: CRISIS semantic regime cannot be classified as favorable.
-        if crisis_ctx and verdict == "favorable":
-            return "tail_risk"
-        return verdict
-
-    # 1. Log-Wealth Dispersion
-    _logger.info(" │ [A] LOG-WEALTH DISPERSION (g = mu - 0.5*sigma^2)                                 │")
-    _logger.info(" ├────────────┬────────────┬────────┬─────────────┬───────────┬───────────┬───────────┬────────────┤")
-    _logger.info(" │ REGIME     │ DIAG_LABEL │ TIME % │ MOD (L / S) │ MU (%)    │ SIG (%)   │ G_LOG (%) │ DIAG_VERD  │")
-    _logger.info(" ├────────────┼────────────┼────────┼─────────────┼───────────┼───────────┼───────────┼────────────┤")
+        if (g_log <= -0.04) or (regime_label == "CRISIS") or (m_l <= 0.15 and m_s <= 0.15):
+            return "⚠️ Tail-Risk"
+        if (g_log <= -0.01) or (m_l < 0.45 and m_s > 0.85):
+            return "Adverse"
+        if (g_log >= 0.015) and (m_l >= 0.85) and (m_s <= 0.55):
+            return "Favorable"
+        return "Neutral"
 
     for state in cols:
         g_df = df_eval[df_eval["dominant_state"] == state]
         pct = len(g_df) / len(df_eval) * 100
-        st_name = state.replace("hmm_prob_", "").upper()
-        regime_label = regime_label_by_state.get(state, st_name)
         report[state] = pct
+        label = regime_display.get(state, state.replace("hmm_prob_", "").upper()[:12])
 
         if len(g_df) > 0:
             m_l = float(g_df["hmm_modulator_long"].mean())
             m_s = float(g_df["hmm_modulator_short"].mean())
-            
-            mu = 0.0
-            sig = 0.0
-            g_log = 0.0
+            mu, sig, g_log = 0.0, 0.0, 0.0
             if "ret" in g_df.columns:
                 mu = float(g_df["ret"].mean() * 100.0)
                 sig = float(g_df["ret"].std() * 100.0)
-                # Geometric Growth Approximation in % units: mu - 0.5 * (sig^2 / 100)
                 g_log = mu - 0.5 * (sig**2 / 100.0)
             
-            diag_verdict = _diag_verdict_for_regime(regime_label, g_log, m_l, m_s)
-            
-            if st_name == "CRISIS": report["hmm_crisis_g_log"] = g_log
-            if st_name == "BULL_TREND": report["hmm_bull_g_log"] = g_log
+            verd = _diag_verdict_for_regime(state.replace("hmm_prob_", "").upper(), g_log, m_l, m_s)
+            if "CRISIS" in label: report["hmm_crisis_g_log"] = g_log
+            if "BULL" in label and "CALM" in label: report["hmm_bull_g_log"] = g_log
 
-            _logger.info(f" │ {st_name:<10} │ {regime_label:<10} │ {pct:>5.1f}% │ {m_l:.2f} / {m_s:.2f} │ {mu:>9.3f} │ {sig:>9.3f} │ {g_log:>9.3f} │ {diag_verdict:<10} │")
+            _logger.info(f"  {label} : {pct:>5.1f}% | Bias: {m_l:.2f}/{m_s:.2f} | G: {g_log:+.3f}% | [{verd}]")
         else:
-            _logger.info(f" │ {st_name:<10} │ {regime_label:<10} │   0.0% │ ---- / ---- │      ---- │      ---- │      ---- │ ---------- │")
+            _logger.info(f"  {label} :   0.0% | Bias: ----/---- | G:  ----   | [None]")
 
-    # 2. Tail Capture
+    _logger.info(" ────────────────────────────────────────────────────────────────────────────")
+
+    # Footer metrics
+    tail_capture = 0.0
     if "ret" in df_eval.columns:
-        _logger.info(" ├────────────┴────────────┴────────┴─────────────┴───────────┴───────────┴───────────┴────────────┤")
         q05 = float(df_eval["ret"].quantile(0.05))
-        worst_mask = df_eval["ret"] <= q05
-        worst_df = df_eval[worst_mask]
+        worst_df = df_eval[df_eval["ret"] <= q05]
         if not worst_df.empty:
-            capture = float((worst_df["dominant_state"].isin(["hmm_prob_crisis", "hmm_prob_bear_trend"])).mean() * 100.0)
-            report["hmm_tail_capture"] = capture
-            _logger.info(f" │ [B] LEFT-TAIL CAPTURE (Worst 5%): {capture:>5.1f}% Caught in CRISIS/BEAR {' '*20} │")
-
-    # 3. Friction & Stability
+            tail_capture = float((worst_df["dominant_state"].isin(["hmm_prob_crisis", "hmm_prob_bear_trend"])).mean() * 100.0)
+    
+    report["hmm_tail_capture"] = tail_capture
     switches = int((df_eval["dominant_state"] != df_eval["dominant_state"].shift(1)).sum())
     avg_dur = float(len(df_eval) / max(1, switches))
     report["hmm_switches"] = float(switches)
     report["hmm_avg_duration"] = avg_dur
-    _logger.info(f" │ [C] STABILITY: {switches} Switches | Avg Duration: {avg_dur:>6.1f} bars {' '*31} │")
-    _logger.info(" └───────────────────────────────────────────────────────────────────────────────────┘\n")
+
+    _logger.info(f"  > Tail-Capture: {tail_capture:>5.1f}%  |  Switches: {switches} (Avg {avg_dur:.1f} bars)")
+    _logger.info(" ────────────────────────────────────────────────────────────────────────────\n")
 
     return report
 
