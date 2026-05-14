@@ -23,6 +23,7 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 import pandas as pd
+from config.opt_config import OPT_FUTURES_CONFIG
 
 os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 jax.config.update("jax_platform_name", "cpu")
@@ -199,6 +200,9 @@ class DirRegimeModel:
         self.tol = tol
         self._params: dict[str, Any] | None = None
         self._warmed: bool = False
+        self._jax_enabled: bool = bool(
+            OPT_FUTURES_CONFIG.get("FUTURES_HMM_JAX_BACKEND_ENABLED", False)
+        )
 
     def _init_params(self, obs_data: np.ndarray) -> dict[str, Any]:
         """Percentile-anchored Direction HMM parameter initialisation."""
@@ -238,6 +242,9 @@ class DirRegimeModel:
         Time complexity: O(n_windows * n_iter * T * K²).
 
         """
+        if not self._jax_enabled:
+            return self._fit_predict_fallback(norm_returns, vol_probs)
+
         if not self._warmed:
             _warmup_dir()
             self._warmed = True
@@ -301,5 +308,46 @@ class DirRegimeModel:
         return pd.DataFrame(
             probs_all,
             index=norm_returns.index,
+            columns=["dir_bull", "dir_range", "dir_bear"],
+        )
+
+    @staticmethod
+    def _fit_predict_fallback(
+        norm_returns: pd.Series,
+        vol_probs: pd.DataFrame,
+    ) -> pd.DataFrame:
+        """Stable NumPy fallback to avoid JAX segfaults on long runs."""
+        idx = norm_returns.index
+        x = norm_returns.reindex(idx).fillna(0.0).to_numpy(dtype=np.float64)
+        x = np.clip(x, -10.0, 10.0)
+
+        vol_hi = (
+            vol_probs["vol_high"].reindex(idx).ffill().bfill().fillna(0.0).to_numpy(dtype=np.float64)
+            if "vol_high" in vol_probs.columns
+            else np.zeros_like(x)
+        )
+        vol_mid = (
+            vol_probs["vol_mid"].reindex(idx).ffill().bfill().fillna(0.0).to_numpy(dtype=np.float64)
+            if "vol_mid" in vol_probs.columns
+            else np.zeros_like(x)
+        )
+
+        # Smoothened directional signal + volatility-aware range boost
+        x_s = pd.Series(x, index=idx).ewm(span=8, adjust=False).mean().to_numpy(dtype=np.float64)
+        range_penalty = np.abs(x_s)
+        range_boost = 0.6 * vol_mid + 0.35 * vol_hi
+
+        logit_bull = 1.15 * x_s - 0.45 * vol_hi
+        logit_bear = -1.15 * x_s + 0.15 * vol_hi
+        logit_range = 0.90 - 1.25 * range_penalty + range_boost
+
+        logits = np.column_stack([logit_bull, logit_range, logit_bear])
+        logits -= np.max(logits, axis=1, keepdims=True)
+        probs = np.exp(logits)
+        probs /= np.maximum(np.sum(probs, axis=1, keepdims=True), 1e-12)
+
+        return pd.DataFrame(
+            probs,
+            index=idx,
             columns=["dir_bull", "dir_range", "dir_bear"],
         )
