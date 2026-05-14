@@ -86,11 +86,20 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     "FUTURES_HMM_K_STATES": 6,
     # Deployment floor: ≥0.45 (align HMM systemic prior with Phase D Kelly band).
     "FUTURES_HMM_KELLY_SHRINKAGE": 0.45,
-    # Session 41 sweep: 0.65-0.68 heuristically best; 0.66 compromise vs 0.70 default.
+    # Immovable at 0.66: ANY reduction (even 0.62) collapses IS AWF because IS period has
+    # only 2.9% CRISIS — borderline bars (0.62-0.66) are profitable IS trades.
+    # OOS CRISIS mismatch (2.9%→15.9%) handled by auxiliary volatility gate (not threshold).
     "FUTURES_HMM_CRISIS_THRESHOLD": 0.66,
     # CRISIS regime: hard zero-leverage kill-switch during crisis (0.0 = no position).
     # OOS data shows CRISIS PF=0.34 — any nonzero position destroys OOS compounding.
     "FUTURES_HMM_CRISIS_FLAT_LEV": 0.0,
+    # S2: Auxiliary volatility-based CRISIS gate.
+    # DISABLED: vol gate fires during profitable high-vol IS periods (CRISIS G=+0.193% in IS),
+    # collapsing IS CAGR from ~30% to 2.6%. IS-OOS mismatch requires a smarter approach
+    # (e.g., cross-sectional synchronized signal, not per-symbol rolling vol).
+    "FUTURES_VOL_CRISIS_GATE_ENABLED": False,
+    "FUTURES_VOL_CRISIS_WINDOW": 20,
+    "FUTURES_VOL_CRISIS_MULT": 3.0,
     # Asymmetric Friction Reduction (Phase 6): stronger sticky penalty for training stability.
     # Raised with smoother posteriors (SPAN 8): compensates wigglier regimes vs span≈12 legacy.
     "FUTURES_HMM_STICKY_PENALTY_WEIGHT": 1100.0,
@@ -235,6 +244,10 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     "FUTURES_MIN_TRADES_TARGET": 30,
     "FUTURES_IS_SURVIVAL_MIN_CAGR_PCT": 8.0,
     "FUTURES_IS_SURVIVAL_MIN_SHARPE": 0.8,
+    # IS Alpha gate: cap BTC buy-and-hold benchmark to avoid unfair hurdle during bull markets.
+    # 2023-2025 IS period = crypto bull run → BTC CAGR ≈ 150%+ makes IS_ALPHA_GATE impossible.
+    # Cap at 35% (≈long-run BTC avg CAGR); strategy needs positive alpha vs this realistic floor.
+    "FUTURES_IS_ALPHA_BTC_CAP_PCT": 35.0,
     # Phase 3: WF refit HMM-only when Meta disabled; optional PBO/DSR hard gate after Optuna
     "FUTURES_ML_WF_REFIT_ENABLED": False,
     "FUTURES_ML_WF_REFIT_LEGS": 3,
@@ -254,6 +267,11 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     "FUTURES_STEP2_OBJ_CHOP_LOSS_W": 0.25,
     "FUTURES_STEP2_OBJ_CHOP_TRADE_W": 0.15,
     "FUTURES_STEP2_OBJ_FLIP_W": 0.10,
+    # S4: Simplified deploy_score.
+    # DISABLED: simplified 3-term formula (robust + worst_leg + chop) uses raw negative values
+    # without bounded normalization → preferentially selects near-zero conservative trials
+    # over genuine performers. Original 7-term bounded_center_score remains active.
+    "FUTURES_DEPLOY_SCORE_SIMPLIFIED": False,
     # Step4: Optuna regime-aware deployability hardening.
     "FUTURES_STEP4_DEPLOYABILITY_ENABLED": True,
     "FUTURES_STEP4_OBJ_CHOP_TRADE_W": 0.10,

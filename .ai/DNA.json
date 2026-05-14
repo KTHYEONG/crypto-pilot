@@ -1,14 +1,17 @@
 {
   "project": "my-coin-traider",
-  "version": "10.1.0-crisis-hardening-final",
-  "previous_state_hash": "v10.1.0-antioverfit-hardening",
+  "version": "10.2.0-s1-s3-drift-analysis",
+  "timestamp": "2026-05-14T21:00:00Z",
+  "previous_state_hash": "v10.1.0-crisis-hardening-final_caa7d76eb",
   "current_logic": {
     "universe_selection": "CS_RANK screening with anchor/macro loading; hard-stop if universe < 3 symbols (API failure guard).",
     "regime_classification": "Posterior-first HMM inference produces p_bull/p_bear/p_chop/p_crisis plus entropy; hard labels are telemetry only.",
     "alpha_generation": "LightGBM v6 alpha is regime-conditional, with chop-fragility filtering and soft downweighting.",
     "signal_combination": "Posterior-aware long/short multipliers and EV hurdles convert regime probabilities into executable allowances.",
-    "risk_management": "CRISIS hard kill-switch (leverage=0.0 when hmm_prob_crisis > threshold); regime policy drives gross scaling and turnover throttling.",
-    "portfolio_optimization": "AWF/TPE maximizes compounding with study-wide top-K augmentation (bypasses Pareto dominance exclusion), ergodicity penalty, deployability gates. OOS CAGR +10.5% achievable."
+    "risk_management": "CRISIS hard kill-switch (leverage=0.0 when hmm_prob_crisis > 0.66); regime policy drives gross scaling and turnover throttling.",
+    "portfolio_optimization": "AWF/TPE maximizes compounding with NSGA-II multi-objective (robust_score + worst_leg penalty + chop_drag), study-wide top-K augmentation, ergodicity penalty, deployability gates.",
+    "gate_framework": "PHASE3_HARD_GATE (PBO/DSR) → IS_SURVIVAL_GATE (CAGR≥8%, Sharpe≥0.8) → IS_ALPHA_GATE (net_alpha vs capped BTC) → DIRECTIONAL_PF_GATE → AWF_HARDENING_GATE",
+    "is_oos_calibration": "IS-OOS regime distribution drift compensated by (1) S1: BTC benchmark cap @ 35% (2) S3: KL divergence monitoring. Structural mismatch CRISIS ratio=8.07× (IS:2% → OOS:16%) remains unresolved; requires deploy-time threshold calibration."
   },
   "key_parameters": {
     "regime_policy_enabled": true,
@@ -22,16 +25,36 @@
     "step4_turnover_cost_ratio_max": 0.25,
     "step4_obj_chop_trade_w": 0.10,
     "step4_obj_turnover_w": 0.10,
+    "step2_obj_chop_loss_w": 0.25,
     "awf_erg_dev_floor": 1.5,
     "awf_erg_dev_w": 0.001,
     "hmm_crisis_threshold": 0.66,
     "hmm_crisis_flat_lev": 0.0,
     "awf_augment_topk": 5,
+    "is_alpha_btc_cap_pct": 35.0,
+    "vol_crisis_gate_enabled": false,
+    "deploy_score_simplified": false,
     "ops_profiles": {
       "smoke": {"trials": 50, "seeds": [42]},
       "candidate": {"trials": 300, "seeds": [42]},
-      "promotion": {"trials": 500, "seeds": [42, 7, 13]}
+      "promotion": {"trials": 500, "seeds": [42, 7, 13]},
+      "full_study": {"trials": 1500, "seeds": [42]}
     },
-    "objective_function": "mean(log_TW) - lambda_mad * semi_dev - psi_dd * worst_mdd - chop_loss_penalty - chop_trade_penalty - turnover_penalty - erg_dev_penalty"
+    "objective_function": "Pareto(obj1=-robust_score, obj2=-worst_leg_log_tw + tail_mdd_w * worst_mdd + chop_loss_w * chop_loss_share)"
+  },
+  "s1_s3_session_findings": {
+    "testing_date": "2026-05-14",
+    "changes_tested": ["Fix#0: CRISIS_THRESHOLD 0.62→0.66", "S1: IS Alpha BTC cap", "S2: Vol-based CRISIS gate", "S3: Regime drift detector", "S4: Simplified deploy_score"],
+    "changes_enabled": ["Fix#0: ACTIVE", "S1: ACTIVE", "S3: ACTIVE"],
+    "changes_disabled": ["S2: Failed (collapsed IS CAGR 30%→2.6%)", "S4: Failed (selected near-zero conservative trial)"],
+    "baseline_comparison": {
+      "v10.1": {"is_cagr": "30%+", "oos_cagr": "-28%→+10.5%", "bear_pf": 0.60, "chop_pf": 0.94},
+      "p0_1_p0_2_best": {"is_cagr": "~30%+", "oos_cagr": -2.3, "bear_pf": 1.11, "chop_pf": 1.11},
+      "s1_s2_s3_s4": {"is_cagr": 2.62, "oos_cagr": -18.3, "bear_pf": 1.53, "chop_pf": 0.48},
+      "s1_s3_only": {"is_cagr": -0.07, "oos_cagr": -24.0, "bear_pf": 0.76, "chop_pf": 0.72}
+    },
+    "critical_finding": "18 OOS CRISIS trades (PF=0.36-0.40, avg_pnl=-8.5) structurally block positive OOS CAGR. Root cause: IS CRISIS 2.0% vs OOS CRISIS 15.9% (ratio 8.07×). HMM trained on IS cannot detect these OOS bars; they have hmm_prob_crisis < 0.66 → no kill-switch.",
+    "kl_divergence": 0.326,
+    "drift_severity": "MILD (due to BULL collapse: 9.3%→0.2%, ratio 0.02×)"
   }
 }
