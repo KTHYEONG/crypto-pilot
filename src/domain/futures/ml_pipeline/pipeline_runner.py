@@ -36,7 +36,10 @@ from src.domain.futures.ml_pipeline.features.engineering import (
 )
 from src.domain.futures.ml_pipeline.labels.meta_labeler import MetaLabeler
 from src.domain.futures.ml_pipeline.labels.triple_barrier import label_triple_barrier
-from src.domain.futures.ml_pipeline.regime.hmm_inferrer import HMMStateInferrer
+from src.domain.futures.ml_pipeline.regime.hmm_inferrer import (
+    build_hmm_inferrer_from_config,
+)
+from src.domain.futures.ml_pipeline.regime.tail_overlay import fit_predict_tail_overlay
 from src.domain.futures.optimization.optimizer import SignalCalibrator
 
 _logger = logging.getLogger(__name__)
@@ -873,8 +876,23 @@ def _print_hmm_summary(
         _logger.info(" ────────────────────────────────────────────────────────────────────────────")
         return report
 
-    df_eval = market_probs[["datetime", *cols]].copy()
+    base_cols = ["datetime", *cols]
+    if "hmm_tail_risk_8bar" in market_probs.columns:
+        base_cols.append("hmm_tail_risk_8bar")
+    df_eval = market_probs[base_cols].copy()
     df_eval["dominant_state"] = df_eval[cols].idxmax(axis=1)
+    pre_crisis_mean = (
+        float(market_probs["hmm_prob_pre_crisis"].mean() * 100.0)
+        if "hmm_prob_pre_crisis" in market_probs.columns
+        else 0.0
+    )
+    realized_crisis_mean = (
+        float(market_probs["hmm_prob_realized_crisis"].mean() * 100.0)
+        if "hmm_prob_realized_crisis" in market_probs.columns
+        else 0.0
+    )
+    report["hmm_pre_crisis_mean"] = pre_crisis_mean
+    report["hmm_realized_crisis_mean"] = realized_crisis_mean
 
     mod_cols = ["datetime", "hmm_modulator_long", "hmm_modulator_short"]
     mod_tmp = hmm_modulator[[c for c in mod_cols if c in hmm_modulator.columns]]
@@ -945,17 +963,120 @@ def _print_hmm_summary(
         worst_df = df_eval[df_eval["ret"] <= q05]
         if not worst_df.empty:
             tail_capture = float((worst_df["dominant_state"].isin(["hmm_prob_crisis", "hmm_prob_bear_trend"])).mean() * 100.0)
+
+    lead_lag_tail_capture_8bar = 0.0
+    realized_crisis_capture = 0.0
+    false_flat_cost = 0.0
+    crisis_precision = 0.0
+    if "ret" in df_eval.columns and not df_eval.empty:
+        # 8-bar forward realized tail proxy: worst forward return from t+1..t+8
+        fwd_worst_8 = pd.Series(np.inf, index=df_eval.index, dtype=np.float64)
+        for k in range(1, 9):
+            fwd_worst_8 = np.minimum(fwd_worst_8, df_eval["ret"].shift(-k).to_numpy(dtype=np.float64))
+        fwd_worst_8 = pd.Series(fwd_worst_8, index=df_eval.index).replace([np.inf, -np.inf], np.nan)
+        q10_fwd = float(fwd_worst_8.quantile(0.10)) if fwd_worst_8.notna().any() else np.nan
+        realized_tail_mask = fwd_worst_8 <= q10_fwd if np.isfinite(q10_fwd) else pd.Series(False, index=df_eval.index)
+        pred_tail_mask = df_eval["dominant_state"].isin(["hmm_prob_crisis", "hmm_prob_bear_trend"])
+        if realized_tail_mask.any():
+            lead_lag_tail_capture_8bar = float((pred_tail_mask & realized_tail_mask).sum() / max(1, int(realized_tail_mask.sum())) * 100.0)
+
+        q05_now = float(df_eval["ret"].quantile(0.05))
+        realized_crisis_now = df_eval["ret"] <= q05_now
+        if realized_crisis_now.any():
+            realized_crisis_capture = float(
+                (df_eval.loc[realized_crisis_now, "dominant_state"] == "hmm_prob_crisis").mean() * 100.0
+            )
+
+        crisis_mask = df_eval["dominant_state"] == "hmm_prob_crisis"
+        if crisis_mask.any():
+            pos_ret = df_eval.loc[crisis_mask, "ret"]
+            # Opportunity cost proxy: positive returns lost while flat in CRISIS state
+            false_flat_cost = float(pos_ret[pos_ret > 0.0].sum() * 100.0)
+            crisis_precision = float((df_eval.loc[crisis_mask, "ret"] <= q05_now).mean() * 100.0)
     
+    if "hmm_tail_risk_8bar" in df_eval.columns:
+        tail_score = pd.to_numeric(df_eval["hmm_tail_risk_8bar"], errors="coerce").fillna(0.0).clip(0.0, 1.0)
+        report["hmm_tail_overlay_mean"] = float(tail_score.mean() * 100.0)
+        report["hmm_tail_overlay_p95"] = float(tail_score.quantile(0.95) * 100.0)
+        if "ret" in df_eval.columns and len(df_eval) > 10:
+            fwd_worst = pd.Series(np.inf, index=df_eval.index, dtype=np.float64)
+            for k in range(1, 9):
+                fwd_worst = np.minimum(fwd_worst, df_eval["ret"].shift(-k).to_numpy(dtype=np.float64))
+            fwd_worst = pd.Series(fwd_worst, index=df_eval.index).replace([np.inf, -np.inf], np.nan)
+            q10 = float(fwd_worst.quantile(0.10)) if fwd_worst.notna().any() else np.nan
+            if np.isfinite(q10):
+                top_mask = tail_score >= float(tail_score.quantile(0.90))
+                realized = fwd_worst <= q10
+                if bool(np.any(top_mask)):
+                    report["hmm_tail_overlay_top_decile_hit_rate"] = float((realized[top_mask]).mean() * 100.0)
+
     report["hmm_tail_capture"] = tail_capture
+    report["hmm_lead_lag_tail_capture_8bar"] = lead_lag_tail_capture_8bar
+    report["hmm_realized_crisis_capture"] = realized_crisis_capture
+    report["hmm_false_flat_cost"] = false_flat_cost
+    report["hmm_crisis_precision"] = crisis_precision
     switches = int((df_eval["dominant_state"] != df_eval["dominant_state"].shift(1)).sum())
     avg_dur = float(len(df_eval) / max(1, switches))
     report["hmm_switches"] = float(switches)
     report["hmm_avg_duration"] = avg_dur
 
-    _logger.info(f"  > Tail-Capture: {tail_capture:>5.1f}%  |  Switches: {switches} (Avg {avg_dur:.1f} bars)")
+    _logger.info(
+        "  > Tail-Capture: %5.1f%% | Lead-Lag(8): %5.1f%% | CrisisCap: %5.1f%% | CrisisPrec: %5.1f%%",
+        tail_capture,
+        lead_lag_tail_capture_8bar,
+        realized_crisis_capture,
+        crisis_precision,
+    )
+    _logger.info(
+        "  > FalseFlatCost: %+6.3f%% | Switches: %d (Avg %.1f bars)",
+        false_flat_cost,
+        switches,
+        avg_dur,
+    )
+    if ("hmm_prob_pre_crisis" in market_probs.columns) or ("hmm_prob_realized_crisis" in market_probs.columns):
+        _logger.info(
+            "  > AuxCrisis: pre=%5.1f%% | realized=%5.1f%%",
+            pre_crisis_mean,
+            realized_crisis_mean,
+        )
     _logger.info(" ────────────────────────────────────────────────────────────────────────────\n")
 
     return report
+
+
+def _attach_tail_overlay_if_enabled(
+    market_probs: pd.DataFrame,
+    market_hmm_feats: pd.DataFrame,
+    market_returns: pd.Series,
+    is_end_idx_market: int,
+    cfg: dict[str, Any],
+) -> tuple[pd.DataFrame, dict[str, float]]:
+    if not bool(cfg.get("FUTURES_HMM_TAIL_OVERLAY_ENABLED", True)):
+        return market_probs, {}
+    if "hmm_tail_risk_8bar" in market_probs.columns:
+        return market_probs, {}
+
+    out_probs = market_probs.copy()
+    try:
+        ov = fit_predict_tail_overlay(
+            market_probs=out_probs,
+            market_hmm_feats=market_hmm_feats,
+            market_returns=market_returns,
+            is_end_idx=is_end_idx_market,
+            cfg=cfg,
+        )
+        out_probs["hmm_tail_risk_8bar"] = ov.risk.reindex(out_probs["datetime"]).fillna(0.0).to_numpy(dtype=np.float64)
+        rep = dict(ov.report)
+        rep["hmm_tail_overlay_method"] = 1.0 if ov.method == "logistic+isotonic" else (0.5 if ov.method == "logistic" else 0.0)
+        return out_probs, rep
+    except Exception as e:
+        _logger.warning("Tail overlay failed; fallback neutral: %s", e)
+        out_probs["hmm_tail_risk_8bar"] = np.clip(
+            pd.to_numeric(out_probs.get("hmm_prob_crisis", 0.0), errors="coerce").fillna(0.0).to_numpy(dtype=np.float64),
+            0.0,
+            1.0,
+        )
+        return out_probs, {"hmm_tail_overlay_method": -1.0}
 
 
 
@@ -1161,6 +1282,7 @@ def run_hmm_fusion_for_is_end(
 
     is_end_dt = pd.to_datetime(is_end_date)
     is_end_utc = is_end_dt.tz_localize("UTC") if is_end_dt.tzinfo is None else is_end_dt.tz_convert("UTC")
+    tail_rep: dict[str, float] = {}
 
     if prefetched_market_probs is not None and prefetched_market_hmm_feats is not None:
         _logger.debug("♻️  HMM cache hit")
@@ -1184,7 +1306,12 @@ def run_hmm_fusion_for_is_end(
         hmm_k = int(cfg.get("FUTURES_HMM_K_STATES", 5))
         # [Optimization #6] Reduce n_iter and add convergence tolerance
         hmm_n_iter = int(cfg.get("FUTURES_HMM_N_ITER", 200))
-        hmm_inferrer = HMMStateInferrer(n_states=hmm_k, n_iter=hmm_n_iter, tol=1e-4)
+        hmm_inferrer = build_hmm_inferrer_from_config(
+            cfg,
+            n_states=hmm_k,
+            n_iter=hmm_n_iter,
+            tol=1e-4,
+        )
         
         is_end_idx_market = int((market_hmm_feats.index < is_end_utc).sum())
         _btc_anchor = next((s for s in symbols if "BTC" in s), None)
@@ -1199,6 +1326,28 @@ def run_hmm_fusion_for_is_end(
         )
         market_probs = _ensure_datetime_column(market_probs)
         market_probs["datetime"] = pd.to_datetime(market_probs["datetime"], utc=True)
+        market_probs, tail_rep = _attach_tail_overlay_if_enabled(
+            market_probs=market_probs,
+            market_hmm_feats=market_hmm_feats,
+            market_returns=_btc_rets,
+            is_end_idx_market=is_end_idx_market,
+            cfg=cfg,
+        )
+    if "hmm_tail_risk_8bar" not in market_probs.columns:
+        is_end_idx_market = int((pd.to_datetime(market_hmm_feats.index, utc=True) < is_end_utc).sum())
+        _btc_anchor = next((s for s in symbols if "BTC" in s), None)
+        _btc_df = prefetched_1h.get(_btc_anchor) if _btc_anchor else None
+        if _btc_df is not None and "close" in _btc_df.columns:
+            _btc_rets = _btc_df.set_index("datetime")["close"].pct_change().reindex(market_hmm_feats.index).fillna(0.0)
+        else:
+            _btc_rets = market_hmm_feats["macro_trend_168h"]
+        market_probs, tail_rep = _attach_tail_overlay_if_enabled(
+            market_probs=market_probs,
+            market_hmm_feats=market_hmm_feats,
+            market_returns=_btc_rets,
+            is_end_idx_market=is_end_idx_market,
+            cfg=cfg,
+        )
 
     btc_anchor = next((s for s in symbols if "BTC" in s), None)
     btc_1h = prefetched_1h.get(btc_anchor) if btc_anchor else None
@@ -1231,6 +1380,8 @@ def run_hmm_fusion_for_is_end(
         btc_1h,
         mode_label=summary_mode_label,
     )
+    if tail_rep:
+        h_rep.update({k: float(v) for k, v in tail_rep.items()})
 
     out = MLPipelineOutput()
     out.hmm_report = h_rep
@@ -1500,7 +1651,12 @@ def _run_ml_pipeline_implementation(
     hmm_k = int(cfg.get("FUTURES_HMM_K_STATES", 5))
     # [Optimization #6] Reduce n_iter and add convergence tolerance
     hmm_n_iter = int(cfg.get("FUTURES_HMM_N_ITER", 200))
-    hmm_inferrer = HMMStateInferrer(n_states=hmm_k, n_iter=hmm_n_iter, tol=1e-4)
+    hmm_inferrer = build_hmm_inferrer_from_config(
+        cfg,
+        n_states=hmm_k,
+        n_iter=hmm_n_iter,
+        tol=1e-4,
+    )
     
     is_end_dt = pd.to_datetime(is_end_date or end)
     is_end_utc = is_end_dt.tz_localize("UTC") if is_end_dt.tzinfo is None else is_end_dt.tz_convert("UTC")
@@ -1518,11 +1674,19 @@ def _run_ml_pipeline_implementation(
     )
     market_probs = _ensure_datetime_column(market_probs)
     market_probs["datetime"] = pd.to_datetime(market_probs["datetime"], utc=True)
+    market_probs, tail_rep = _attach_tail_overlay_if_enabled(
+        market_probs=market_probs,
+        market_hmm_feats=market_hmm_feats,
+        market_returns=_btc_rets,
+        is_end_idx_market=is_end_idx_market,
+        cfg=cfg,
+    )
 
     if hmm_only:
         _logger.info("✅ HMM Inference complete (HMM-only mode)")
         out = MLPipelineOutput(market_probs=market_probs)
         out.hmm_report = _print_hmm_summary(market_probs, market_hmm_feats, pd.DataFrame(), _btc_df, "(HMM-ONLY)")
+        out.hmm_report.update({k: float(v) for k, v in tail_rep.items()})
         return out
 
     # --- Step 3: Regime-Aware Alpha Mining ---
