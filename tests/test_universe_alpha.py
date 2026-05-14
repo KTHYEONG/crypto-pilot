@@ -21,8 +21,10 @@ from config.opt_config import (
 from config.settings import FUTURES_DATA_DIR
 from src.domain.futures.data_loader import DataCollector
 from src.domain.futures.ml_pipeline.pipeline_runner import run_ml_pipeline_for_universe
+from src.domain.futures.optimization.opt_data_utils import (
+    load_futures_data_maps_for_symbols,
+)
 from src.execution.opt_main_futures import (
-    _load_futures_data_maps_for_symbols,
     _resolve_futures_parallel_policy,
 )
 
@@ -79,7 +81,7 @@ def run_universe_to_gp_test(tf="4h"):
     _logger.info(f"Broad Candidates: {len(broad_candidates)} symbols.")
 
     # 3. Data Loading for Refinement
-    data_maps_broad, _, valid_broad = _load_futures_data_maps_for_symbols(
+    data_maps_broad, _, valid_broad = load_futures_data_maps_for_symbols(
         list(broad_candidates), ml_train_tf, fetch_start, start, is_end, end, skip_metrics=True
     )
     
@@ -110,7 +112,7 @@ def run_universe_to_gp_test(tf="4h"):
     _logger.info(f"3-Tier Load Universe ({len(load_symbols)} symbols for Pipeline)")
 
     # [Data Integrity] Re-load data for the 3-tier universe (matching production logic)
-    data_maps, _, valid_symbols = _load_futures_data_maps_for_symbols(
+    data_maps, _, valid_symbols = load_futures_data_maps_for_symbols(
         load_symbols, tf, fetch_start, start, is_end, end, skip_metrics=False
     )
     
