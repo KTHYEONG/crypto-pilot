@@ -88,6 +88,9 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     "FUTURES_HMM_KELLY_SHRINKAGE": 0.45,
     # Session 41 sweep: 0.65-0.68 heuristically best; 0.66 compromise vs 0.70 default.
     "FUTURES_HMM_CRISIS_THRESHOLD": 0.66,
+    # CRISIS regime: hard zero-leverage kill-switch during crisis (0.0 = no position).
+    # OOS data shows CRISIS PF=0.34 — any nonzero position destroys OOS compounding.
+    "FUTURES_HMM_CRISIS_FLAT_LEV": 0.0,
     # Asymmetric Friction Reduction (Phase 6): stronger sticky penalty for training stability.
     # Raised with smoother posteriors (SPAN 8): compensates wigglier regimes vs span≈12 legacy.
     "FUTURES_HMM_STICKY_PENALTY_WEIGHT": 1100.0,
@@ -241,21 +244,26 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     "FUTURES_ML_GATE1_DSR_MIN": 0.40,
     "FUTURES_AWF_POS_FRAC_MIN": 0.60,   # AWF 게이트: 최소 60% leg 수익 (≥3/5)
     "FUTURES_AWF_MU_LOG_MIN": 0.0,       # AWF 게이트: 평균 leg log-TW > 0
-    # Step2: regime-aware deployability pressure (disabled by default for backward compatibility).
-    "FUTURES_STEP2_REGIME_DEPLOY_ENABLED": False,
+    # Step2: regime-aware deployability pressure.
+    # Note: CHOP trade share is structurally ~0.68; threshold must exceed this to avoid
+    # penalizing all trials. Set 0.70 (tuned_v1 best-validated setting).
+    "FUTURES_STEP2_REGIME_DEPLOY_ENABLED": True,
     "FUTURES_STEP2_CHOP_LOSS_SHARE_MAX": 0.60,
-    "FUTURES_STEP2_CHOP_TRADE_SHARE_MAX": 0.65,
+    "FUTURES_STEP2_CHOP_TRADE_SHARE_MAX": 0.70,
     "FUTURES_STEP2_FLIP_RATE_PROXY_MAX": 0.75,
     "FUTURES_STEP2_OBJ_CHOP_LOSS_W": 0.25,
     "FUTURES_STEP2_OBJ_CHOP_TRADE_W": 0.15,
     "FUTURES_STEP2_OBJ_FLIP_W": 0.10,
-    # Step4: Optuna regime-aware deployability hardening (disabled by default).
-    "FUTURES_STEP4_DEPLOYABILITY_ENABLED": False,
+    # Step4: Optuna regime-aware deployability hardening.
+    "FUTURES_STEP4_DEPLOYABILITY_ENABLED": True,
     "FUTURES_STEP4_OBJ_CHOP_TRADE_W": 0.10,
-    "FUTURES_STEP4_OBJ_TURNOVER_W": 0.05,
-    "FUTURES_STEP4_CHOP_TRADE_SHARE_MAX": 0.65,
-    "FUTURES_STEP4_TURNOVER_COST_RATIO_MAX": 0.35,
+    "FUTURES_STEP4_OBJ_TURNOVER_W": 0.10,
+    "FUTURES_STEP4_CHOP_TRADE_SHARE_MAX": 0.70,
+    "FUTURES_STEP4_TURNOVER_COST_RATIO_MAX": 0.25,
     "FUTURES_STEP4_CHOP_PF_FLOOR": 0.95,
+    # Ergodicity deviation penalty params (optimizer.py _evaluate_awf_phase_d_aggregate).
+    "FUTURES_AWF_ERG_DEV_FLOOR": 1.5,
+    "FUTURES_AWF_ERG_DEV_W": 0.001,
     # Worst AWF leg log-TW floor already enforced via FUTURES_AWF_P10_LOG_TW_MIN.
     # Improvement 1: Friction-Aware EV Hurdle
     "FUTURES_ML_EV_HURDLE_RATIO": 1.0,
