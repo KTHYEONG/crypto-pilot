@@ -1,37 +1,40 @@
 {
   "project": "my-coin-traider",
-  "version": "9.7.0-performance-optimized",
-  "last_evolution_date": "2026-05-12",
-  "previous_state_hash": "v9.6.1-optimizer-debug",
-  "status": "STABLE & OPTIMIZED",
+  "version": "10.0.0-regime-policy-hardening",
+  "previous_state_hash": "v9.7.0-performance-optimized",
   "current_logic": {
-    "universe_selection": "CS_RANK 필터링 (16-32 symbols). [Unchanged]",
-    "regime_classification": "[V9.7.0 Adaptivity] Per-Leg ML Refit enabled for AWF. Models adapt to each walk-forward test leg's local market context.",
-    "alpha_generation": "LightGBM v6. [Unchanged]",
-    "signal_combination": "signal_composer.py: Integrated with v9.6.0 surgical risk-off.",
-    "risk_management": "HMM Modulator v9.7.0: Dynamic Kelly Scaling enabled. Bear/Crisis regime exposures reduced by 40-70%.",
-    "portfolio_optimization": "[PERFORMANCE SOTA] Global Ledoit-Wolf precomputation (O(T*N^3) once), Numba-compiled iterative scaling projection loop, and AWF leg model-injection."
+    "universe_selection": "CS_RANK screening with anchor/macro loading; universe selection is preprocessing, not a search target.",
+    "regime_classification": "Posterior-first HMM inference produces p_bull/p_bear/p_chop/p_crisis plus entropy; hard labels are telemetry only.",
+    "alpha_generation": "LightGBM v6 alpha is regime-conditional, with chop-fragility filtering and soft downweighting.",
+    "signal_combination": "Posterior-aware long/short multipliers and EV hurdles convert regime probabilities into executable allowances.",
+    "risk_management": "Regime policy drives gross scaling, crisis suppression, and turnover throttling in backtest and execution.",
+    "portfolio_optimization": "AWF/TPE maximizes compounding with chop/turnover penalties and deployability gates, controlled by ops profiles."
   },
   "key_parameters": {
-    "total_trials": 480,
+    "regime_policy_enabled": true,
+    "portfolio_regime_damp_enabled": true,
+    "dynamic_kelly_enabled": true,
     "awf_legs": 5,
     "awf_is_pool_frac": 0.65,
-    "tpe_sampler_enabled": true,
-    "dynamic_kelly_enabled": true,
-    "objective_function": "mean(log_TW) - 1.5*semi_dev - 0.3*max_mdd",
-    "portfolio_vol_target": 0.35,
-    "gross_exposure_cap": 1.8
-  },
-  "current_performance": {
-    "status": "PASS (STABILITY)",
-    "awf_positive_leg_frac": "60.0% (3/5 legs)",
-    "oos_cagr": "-7.65% (Full Refit)",
-    "pbo": "0.40 (Full Refit)",
-    "execution_time_per_trial": "< 0.1s (Portfolio Loop)",
-    "total_optimization_time": "~14m (Full 5-leg ML Refit x 480 Trials)"
-  },
-  "architectural_insights": {
-    "bottleneck_resolution": "Separating covariance computation from the trial loop and using Numba for the projection inner-loop reduced execution time by 100x+.",
-    "stability_breakthrough": "Per-Leg ML Refit (re-training HMM/Alpha for each walk-forward window) is essential to overcome regime drift and achieve >50% positive leg ratios."
+    "step2_chop_trade_share_max": 0.70,
+    "step4_chop_trade_share_max": 0.70,
+    "step4_turnover_cost_ratio_max": 0.25,
+    "step4_obj_chop_trade_w": 0.10,
+    "step4_obj_turnover_w": 0.10,
+    "ops_profiles": {
+      "smoke": {
+        "trials": 50,
+        "seeds": [42]
+      },
+      "candidate": {
+        "trials": 1000,
+        "seeds": [42, 7, 13]
+      },
+      "promotion": {
+        "trials": 2000,
+        "seeds": [42, 7, 13, 21, 55]
+      }
+    },
+    "objective_function": "mean(log_TW) - lambda_mad * semi_dev - psi_dd * worst_mdd - chop_loss_penalty - chop_trade_penalty - turnover_penalty"
   }
 }

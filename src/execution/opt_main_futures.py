@@ -4,6 +4,7 @@ import argparse
 import concurrent.futures
 import dataclasses
 import gc
+import hashlib
 import importlib
 import json
 import logging
@@ -11,7 +12,9 @@ import math
 import multiprocessing
 import os
 import re
+import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -188,11 +191,385 @@ def _sanitize_metric_map(m: dict[str, Any]) -> dict[str, float]:
         "oos_short_pf": 1e3,
         "oos_retention_pct": 1e5,
         "is_alpha": 1e5,
+        "awf_chop_loss_share": 10.0,
+        "awf_chop_trade_share": 10.0,
+        "awf_flip_rate_proxy": 10.0,
+        "awf_turnover_cost_ratio": 1e3,
     }
     out: dict[str, float] = {}
     for k, v in m.items():
         out[k] = _safe_float(v, default=0.0, clip=limits.get(k, 1e6))
     return out
+
+
+_REGIME_NAMES: tuple[str, ...] = ("bull", "bear", "chop", "crisis")
+
+
+def _infer_regime_codes(df: pd.DataFrame) -> np.ndarray:
+    n = len(df)
+
+    def _float_col(name: str) -> np.ndarray:
+        if name not in df.columns:
+            return np.zeros(n, dtype=np.float64)
+        # Force a writable array; some pandas-backed arrays can be read-only views.
+        return pd.to_numeric(df[name], errors="coerce").to_numpy(dtype=np.float64, copy=True)
+
+    bull = _float_col("hmm_prob_bull_calm")
+    bull += _float_col("hmm_prob_bull_vol_up")
+    bear = _float_col("hmm_prob_bear_trend")
+    chop = _float_col("hmm_prob_chop")
+    crisis = _float_col("hmm_prob_crisis")
+    probs = np.column_stack(
+        [
+            np.nan_to_num(bull, nan=0.0, posinf=0.0, neginf=0.0),
+            np.nan_to_num(bear, nan=0.0, posinf=0.0, neginf=0.0),
+            np.nan_to_num(chop, nan=0.0, posinf=0.0, neginf=0.0),
+            np.nan_to_num(crisis, nan=0.0, posinf=0.0, neginf=0.0),
+        ]
+    )
+    return np.argmax(probs, axis=1).astype(np.int64, copy=False)
+
+
+def _compute_oos_regime_attribution(
+    oos_port: dict[str, Any],
+    oos_data_maps: dict[str, dict[str, Any]],
+    symbols: list[str],
+    tf: str,
+) -> dict[str, Any]:
+    time_counts = np.zeros(len(_REGIME_NAMES), dtype=np.int64)
+    total_symbol_bars = 0
+    for sym in symbols:
+        smap = oos_data_maps.get(sym, {})
+        df = smap.get(tf)
+        if not isinstance(df, pd.DataFrame) or df.empty:
+            continue
+        o0 = int(smap.get(f"oos_start_idx_{tf}", 0))
+        o0 = max(0, min(o0, len(df)))
+        oos_df = df.iloc[o0:]
+        if oos_df.empty:
+            continue
+        rc = _infer_regime_codes(oos_df)
+        time_counts += np.bincount(rc, minlength=len(_REGIME_NAMES))
+        total_symbol_bars += int(rc.size)
+
+    trades_df = oos_port.get("trades_df", pd.DataFrame())
+    if not isinstance(trades_df, pd.DataFrame):
+        trades_df = pd.DataFrame()
+    n_trades = int(len(trades_df))
+    trade_codes = np.full(n_trades, -1, dtype=np.int64)
+
+    aligned_master = oos_port.get("aligned_master_index")
+    full_signal_dfs = oos_port.get("full_signal_dfs", {})
+    if n_trades > 0 and isinstance(full_signal_dfs, dict):
+        aligned_ns = np.array([], dtype=np.int64)
+        if isinstance(aligned_master, pd.Series):
+            aligned_ns = pd.to_datetime(aligned_master, errors="coerce").to_numpy(dtype="datetime64[ns]").astype(np.int64, copy=False)
+        elif aligned_master is not None:
+            aligned_idx = pd.Index(np.asarray(aligned_master).ravel())
+            aligned_ns = pd.to_datetime(aligned_idx, errors="coerce").to_numpy(dtype="datetime64[ns]").astype(np.int64, copy=False)
+        if aligned_ns.size > 0:
+            nat_i64 = np.iinfo(np.int64).min
+            sym_map: dict[str, pd.Series] = {}
+            for sym in np.unique(trades_df["symbol"].astype(str).to_numpy()):
+                sdf = full_signal_dfs.get(sym)
+                if not isinstance(sdf, pd.DataFrame) or sdf.empty or "datetime" not in sdf.columns:
+                    continue
+                dt_ns = pd.to_datetime(sdf["datetime"], errors="coerce").to_numpy(dtype="datetime64[ns]").astype(np.int64, copy=False)
+                valid_dt = dt_ns != nat_i64
+                if not valid_dt.any():
+                    continue
+                rc = _infer_regime_codes(sdf)
+                sr = pd.Series(rc[valid_dt], index=dt_ns[valid_dt], dtype=np.int64)
+                sym_map[sym] = sr.groupby(level=0).last()
+
+            entry_idx = pd.to_numeric(trades_df["entry_idx"], errors="coerce").to_numpy(dtype=np.float64)
+            sym_arr = trades_df["symbol"].astype(str).to_numpy()
+            for sym, sr in sym_map.items():
+                pos = np.where(sym_arr == sym)[0]
+                if pos.size == 0:
+                    continue
+                e = entry_idx[pos]
+                finite = np.isfinite(e)
+                if not finite.any():
+                    continue
+                loc = e[finite].astype(np.int64)
+                inb = (loc >= 0) & (loc < aligned_ns.size)
+                if not inb.any():
+                    continue
+                valid_rows = pos[finite][inb]
+                keys = aligned_ns[loc[inb]]
+                mapped = sr.reindex(keys).to_numpy()
+                ok = ~pd.isna(mapped)
+                if ok.any():
+                    trade_codes[valid_rows[ok]] = mapped[ok].astype(np.int64, copy=False)
+
+    pnl = (
+        pd.to_numeric(trades_df["pnl"], errors="coerce").fillna(0.0).to_numpy(dtype=np.float64)
+        if n_trades > 0
+        else np.array([], dtype=np.float64)
+    )
+    side_arr = trades_df["side"].astype(str).to_numpy() if n_trades > 0 else np.array([], dtype=object)
+    entry_idx = (
+        pd.to_numeric(trades_df["entry_idx"], errors="coerce").fillna(-1).to_numpy(dtype=np.int64)
+        if n_trades > 0
+        else np.array([], dtype=np.int64)
+    )
+    sym_arr = trades_df["symbol"].astype(str).to_numpy() if n_trades > 0 else np.array([], dtype=object)
+
+    regime_metrics: dict[str, dict[str, float | int]] = {}
+    for ridx, rname in enumerate(_REGIME_NAMES):
+        r_mask = trade_codes == ridx
+        r_count = int(r_mask.sum())
+        if r_count > 0:
+            r_pnl = pnl[r_mask]
+            gains = float(r_pnl[r_pnl > 0.0].sum())
+            losses = abs(float(r_pnl[r_pnl < 0.0].sum()))
+            if losses == 0.0:
+                pf = 5.0 if gains > 0.0 else 1.0
+            else:
+                pf = gains / losses
+            win_rate = float(np.mean(r_pnl > 0.0) * 100.0)
+            avg_pnl = float(np.mean(r_pnl))
+        else:
+            win_rate = 0.0
+            pf = 1.0
+            avg_pnl = 0.0
+        time_pct = float(100.0 * time_counts[ridx] / max(total_symbol_bars, 1))
+        regime_metrics[rname] = {
+            "time_pct": time_pct,
+            "trade_count": r_count,
+            "win_rate": win_rate,
+            "profit_factor": float(pf),
+            "avg_pnl": avg_pnl,
+        }
+
+    chop_idx = _REGIME_NAMES.index("chop")
+    chop_mask = trade_codes == chop_idx
+    chop_trade_count = int(chop_mask.sum())
+    chop_losses = abs(float(pnl[chop_mask & (pnl < 0.0)].sum())) if n_trades > 0 else 0.0
+    total_losses = abs(float(pnl[pnl < 0.0].sum())) if n_trades > 0 else 0.0
+    chop_loss_share = float(chop_losses / max(total_losses, 1e-12))
+    chop_trade_share = float(chop_trade_count / max(n_trades, 1))
+
+    flip_count = 0
+    flip_pairs = 0
+    if n_trades > 1 and chop_trade_count > 1:
+        for sym in np.unique(sym_arr[chop_mask]):
+            s_mask = (sym_arr == sym) & chop_mask
+            if int(s_mask.sum()) < 2:
+                continue
+            ord_idx = np.argsort(entry_idx[s_mask], kind="mergesort")
+            s_side = side_arr[s_mask][ord_idx]
+            flip_count += int(np.sum(s_side[1:] != s_side[:-1]))
+            flip_pairs += int(max(s_side.size - 1, 0))
+    chop_flip_proxy = float(flip_count / max(flip_pairs, 1))
+
+    return {
+        "regime_metrics": regime_metrics,
+        "chop_loss_share": chop_loss_share,
+        "chop_trade_share": chop_trade_share,
+        "chop_flip_proxy": chop_flip_proxy,
+        "chop_flip_proxy_label": "side_switch_rate_within_chop_trades_by_symbol (proxy)",
+        "trade_regime_coverage_pct": float(100.0 * np.mean(trade_codes >= 0) if n_trades > 0 else 0.0),
+    }
+
+
+def _log_oos_regime_attribution(attr: dict[str, Any]) -> None:
+    _logger.info(" [OOS REGIME ATTRIBUTION]")
+    regime_metrics = attr.get("regime_metrics", {})
+    for rn in _REGIME_NAMES:
+        m = regime_metrics.get(rn, {})
+        _logger.info(
+            "   %-6s time=%6.2f%% trades=%4d win=%6.2f%% pf=%5.2f avg_pnl=% .6f",
+            rn.upper(),
+            float(m.get("time_pct", 0.0)),
+            int(m.get("trade_count", 0)),
+            float(m.get("win_rate", 0.0)),
+            float(m.get("profit_factor", 1.0)),
+            float(m.get("avg_pnl", 0.0)),
+        )
+    _logger.info(
+        "   CHOP diagnostics: loss_share=%.2f%% trade_share=%.2f%% flip_proxy=%.3f (%s) coverage=%.2f%%",
+        float(attr.get("chop_loss_share", 0.0)) * 100.0,
+        float(attr.get("chop_trade_share", 0.0)) * 100.0,
+        float(attr.get("chop_flip_proxy", 0.0)),
+        str(attr.get("chop_flip_proxy_label", "proxy")),
+        float(attr.get("trade_regime_coverage_pct", 0.0)),
+    )
+
+
+def _log_hmm_report_summary(h_rep: dict[str, Any]) -> None:
+    bull_calm = float(h_rep.get("hmm_prob_bull_calm", 0.0))
+    bull_vol_up = float(h_rep.get("hmm_prob_bull_vol_up", 0.0))
+    bear = float(h_rep.get("hmm_prob_bear_trend", 0.0))
+    chop = float(h_rep.get("hmm_prob_chop", 0.0))
+    crisis = float(h_rep.get("hmm_prob_crisis", 0.0))
+    bull = bull_calm + bull_vol_up
+    tail_capture = float(h_rep.get("hmm_tail_capture", 0.0))
+    avg_duration = float(h_rep.get("hmm_avg_duration", 0.0))
+    switches = int(round(float(h_rep.get("hmm_switches", 0.0))))
+    _logger.info(
+        " [HMM] bull=%.1f%% (calm=%.1f vol_up=%.1f) bear=%.1f%% chop=%.1f%% crisis=%.1f%%",
+        bull,
+        bull_calm,
+        bull_vol_up,
+        bear,
+        chop,
+        crisis,
+    )
+    _logger.info(
+        " [HMM] tail_capture=%.1f%% avg_duration=%.1f bars switches=%d",
+        tail_capture,
+        avg_duration,
+        switches,
+    )
+
+
+def _cfg_hash_for_run(cfg: dict[str, Any]) -> str:
+    """Stable hash for run-isolating study names."""
+    relevant = {k: v for k, v in cfg.items() if str(k).startswith("FUTURES_")}
+    raw = json.dumps(relevant, sort_keys=True, ensure_ascii=True, default=str)
+    return hashlib.md5(raw.encode()).hexdigest()[:10]
+
+
+def _build_joint_study_name(
+    tf: str,
+    fetch_start_date: str,
+    end_date: str,
+    symbols: list[str],
+    cfg: dict[str, Any],
+) -> str:
+    symbols_sorted = sorted(str(s) for s in symbols)
+    sym_raw = json.dumps(symbols_sorted, ensure_ascii=True, separators=(",", ":"))
+    sym_fp = hashlib.md5(sym_raw.encode()).hexdigest()[:10]
+    cfg_fp = _cfg_hash_for_run(cfg)
+    return f"futures_joint_tpe_tf{tf}_win{fetch_start_date}_{end_date}_n{len(symbols_sorted)}_s{sym_fp}_c{cfg_fp}"
+
+
+def _short_git_rev() -> str:
+    """Best-effort short git rev; 'nogit' when unavailable."""
+    try:
+        out = subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=project_root,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+        return out or "nogit"
+    except Exception:
+        return "nogit"
+
+
+def _build_run_id(
+    tf: str,
+    fetch_start_date: str,
+    end_date: str,
+    symbols: list[str],
+    cfg: dict[str, Any],
+) -> str:
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    sym_raw = json.dumps(sorted(str(s) for s in symbols), ensure_ascii=True, separators=(",", ":"))
+    sym_fp = hashlib.md5(sym_raw.encode()).hexdigest()[:8]
+    cfg_fp = _cfg_hash_for_run(cfg)[:8]
+    return f"{ts}_tf{tf}_s{sym_fp}_c{cfg_fp}_{_short_git_rev()}"
+
+
+def _apply_ops_profile_overrides(
+    cfg: dict[str, Any],
+    profile: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Apply profile config overrides to runtime config and return flattened applied map."""
+    applied: dict[str, Any] = {}
+    if not profile:
+        return applied
+    overrides = profile.get("config_overrides")
+    if not isinstance(overrides, dict):
+        return applied
+    for key, value in overrides.items():
+        if isinstance(value, dict):
+            base_val = cfg.get(key)
+            if isinstance(base_val, dict):
+                merged = dict(base_val)
+                for sub_key, sub_value in value.items():
+                    merged[sub_key] = sub_value
+                    applied[f"{key}.{sub_key}"] = sub_value
+                cfg[key] = merged
+            else:
+                cfg[key] = dict(value)
+                for sub_key, sub_value in value.items():
+                    applied[f"{key}.{sub_key}"] = sub_value
+        else:
+            cfg[key] = value
+            applied[key] = value
+    return applied
+
+
+def _collect_run_summary_from_study(
+    study_ml: optuna.Study,
+    run_id: str,
+    *,
+    study_name: str,
+    requested_trials: int,
+) -> dict[str, Any]:
+    trials = study_ml.get_trials(deepcopy=False)
+    scoped = [t for t in trials if str(t.user_attrs.get("run_id", "")) == str(run_id)]
+    complete = [t for t in scoped if t.state == TrialState.COMPLETE]
+    pareto = list(study_ml.best_trials or [])
+    pareto_scoped = [t for t in pareto if str(t.user_attrs.get("run_id", "")) == str(run_id)]
+
+    def _tmetric(t: optuna.trial.FrozenTrial, key: str, default: float) -> float:
+        return _safe_float(t.user_attrs.get(key, default), default=default)
+
+    best_robust = None
+    best_mu = None
+    if complete:
+        best_robust = max(complete, key=lambda t: _tmetric(t, "awf_robust_score", -1e9))
+        best_mu = max(complete, key=lambda t: _tmetric(t, "awf_mu_log", -1e9))
+
+    pass_raw = 0
+    for t in complete:
+        mu = _tmetric(t, "awf_mu_log", -9.0)
+        pos = _tmetric(t, "awf_pos_frac", 0.0)
+        if (1.0 - pos) < 0.45 and mu >= 0.0:
+            pass_raw += 1
+
+    return {
+        "run_id": run_id,
+        "study_name": study_name,
+        "requested_trials": int(requested_trials),
+        "scoped_trials": int(len(scoped)),
+        "scoped_complete": int(len(complete)),
+        "scoped_pareto": int(len(pareto_scoped)),
+        "awf_pass_raw_count": int(pass_raw),
+        "best_robust": {
+            "trial_number": int(best_robust.number),
+            "awf_robust_score": _tmetric(best_robust, "awf_robust_score", -1e9),
+            "awf_mu_log": _tmetric(best_robust, "awf_mu_log", -9.0),
+            "awf_worst_leg_log_tw": _tmetric(best_robust, "awf_worst_leg_log_tw", -9.0),
+            "awf_worst_mdd_pct": _tmetric(best_robust, "awf_worst_mdd_pct", 999.0),
+            "awf_pos_frac": _tmetric(best_robust, "awf_pos_frac", 0.0),
+        } if best_robust is not None else None,
+        "best_mu": {
+            "trial_number": int(best_mu.number),
+            "awf_robust_score": _tmetric(best_mu, "awf_robust_score", -1e9),
+            "awf_mu_log": _tmetric(best_mu, "awf_mu_log", -9.0),
+            "awf_worst_leg_log_tw": _tmetric(best_mu, "awf_worst_leg_log_tw", -9.0),
+            "awf_worst_mdd_pct": _tmetric(best_mu, "awf_worst_mdd_pct", 999.0),
+            "awf_pos_frac": _tmetric(best_mu, "awf_pos_frac", 0.0),
+        } if best_mu is not None else None,
+    }
+
+
+def _write_run_summary_snapshot(summary: dict[str, Any]) -> Path:
+    out_dir = Path(project_root) / "logs" / "runs"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    run_id = str(summary.get("run_id", "unknown"))
+    out_path = out_dir / f"{run_id}.summary.json"
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(summary, f, indent=2, ensure_ascii=False)
+    with open(out_dir / "index.jsonl", "a", encoding="utf-8") as f:
+        f.write(json.dumps(summary, ensure_ascii=False) + "\n")
+    return out_path
 
 def _ml_phase_d_sampler(seed: int, n_trials: int = 200) -> optuna.samplers.BaseSampler:
     # NSGA-II: 2-obj Pareto (Growth | Stability). population_size from config.
@@ -951,6 +1328,16 @@ def optimize_worker(s_name: str, s_url: str, trials: int, ctx: MLPhaseDContext):
 
 def main() -> None:
     ai_telemetry_payloads: list[dict[str, Any]] = []
+    run_id: str | None = None
+    run_summary_written = False
+    run_summary_path: Path | None = None
+    selection_summary: dict[str, Any] = {
+        "selected_by": None,
+        "selected_trial_number": None,
+        "deploy_score": None,
+        "selection_reject_reason_count": {},
+    }
+    run_summary_extras: dict[str, Any] = {}
     pre_parser = argparse.ArgumentParser(add_help=False)
     pre_parser.add_argument("--skip-universe", action="store_true")
     pre_parser.add_argument("--reference-date", type=str, default=None)
@@ -1031,10 +1418,50 @@ def main() -> None:
     )
     args = parser.parse_args(remaining_args)
 
+    raw_ops_profile = str(args.ops_profile).strip().lower() if args.ops_profile else None
+    if raw_ops_profile in ("", "none"):
+        raw_ops_profile = None
+    resolved_ops_profile = resolve_ops_profile(raw_ops_profile)
+    selected_ops_profile = (
+        resolved_ops_profile.get("id")
+        if resolved_ops_profile is not None
+        else (raw_ops_profile or "custom")
+    )
+    ops_profile_applied_overrides = _apply_ops_profile_overrides(
+        OPT_FUTURES_CONFIG,
+        resolved_ops_profile,
+    )
+    if resolved_ops_profile is not None:
+        _logger.info(
+            " [OPS] profile=%s trials=%s seeds=%s overrides=%d — %s",
+            resolved_ops_profile.get("id"),
+            resolved_ops_profile.get("trials"),
+            resolved_ops_profile.get("seeds"),
+            len(ops_profile_applied_overrides),
+            resolved_ops_profile.get("description", ""),
+        )
+    elif raw_ops_profile and raw_ops_profile != "custom":
+        _logger.warning(" [OPS] Unknown profile '%s'; proceeding with custom runtime config.", raw_ops_profile)
+
+    run_summary_extras["ops_profile"] = selected_ops_profile
+    run_summary_extras["ops_profile_applied_overrides_count"] = int(
+        len(ops_profile_applied_overrides)
+    )
+    run_summary_extras["ops_profile_check_ok"] = True
+    run_summary_extras["ops_profile_check_issues"] = []
+
     if args.force_retrain_alpha:
         OPT_FUTURES_CONFIG["FUTURES_ML_FORCE_RETRAIN_ALPHA"] = True
         _logger.info("[ML] FORCE_RETRAIN_ALPHA enabled via CLI; raw Alpha cache will be bypassed.")
 
+    ai_telemetry_payloads.append({
+        "stage": "ops_profile",
+        "requested_profile": raw_ops_profile or "custom",
+        "selected_profile": selected_ops_profile,
+        "resolved": bool(resolved_ops_profile is not None),
+        "applied_overrides_count": int(len(ops_profile_applied_overrides)),
+        "applied_overrides": dict(ops_profile_applied_overrides),
+    })
     ai_telemetry_payloads.append({
         "stage": "execution_context",
         "tf": args.tf,
@@ -1087,9 +1514,6 @@ def main() -> None:
 
     # [Optimization #1] Pass preloaded broad screening data to pipeline
     ml_pipeline_cfg = dict(OPT_FUTURES_CONFIG)
-    if args.ops_profile == "smoke":
-        ml_pipeline_cfg["FUTURES_USE_META_LABELER"] = False
-        _logger.info("  --> [OPS] SMOKE profile: Meta-Labeler disabled for speed.")
 
     ml_out = run_ml_pipeline_for_universe(
         valid_symbols,
@@ -1151,6 +1575,7 @@ def main() -> None:
             })
     if hasattr(ml_out, "hmm_report") and ml_out.hmm_report:
         h_rep = ml_out.hmm_report
+        _log_hmm_report_summary(h_rep)
         ai_telemetry_payloads.append({
             "stage": "hmm_audit",
             "bull_prob": float(h_rep.get("hmm_prob_bull_calm", 0)) + float(h_rep.get("hmm_prob_bull_vol_up", 0)),
@@ -1244,7 +1669,7 @@ def main() -> None:
             )
             
             if oos_std < 1e-4:
-                if args.ops_profile == "smoke":
+                if selected_ops_profile == "smoke":
                     _logger.warning("[SIG CHECK] %s OOS ml_alpha_00 std < 1e-4 but continuing due to smoke profile.", sym)
                 else:
                     _logger.error("[ABORT] %s OOS ml_alpha_00 std < 1e-4. Check merge/tz or symbol discovery.", sym)
@@ -1253,25 +1678,19 @@ def main() -> None:
             _logger.debug("[SIG CHECK] %s IS gp_std=%.6f OOS gp_std=%.6f", sym, is_std, oos_std)
 
     # [PHASE 5] Optuna Portfolio Optimization Starting
-    _prof = resolve_ops_profile(args.ops_profile)
-    if _prof is not None:
-        n_ml_trials = int(_prof["trials"])
-        target_seeds = [int(s) for s in (_prof.get("seeds") or [42])]
-        _logger.info(
-            " [OPS] profile=%s trials=%d seeds=%s — %s",
-            _prof.get("id"),
-            n_ml_trials,
-            target_seeds,
-            _prof.get("description", ""),
-        )
+    if resolved_ops_profile is not None:
+        n_ml_trials = int(resolved_ops_profile["trials"])
+        target_seeds = [int(s) for s in (resolved_ops_profile.get("seeds") or [42])]
     else:
         n_ml_trials = int(args.trials)
         learning = OPT_FUTURES_CONFIG.get("FUTURES_LEARNING_SEEDS", [42])
         target_seeds = [int(s) for s in learning] if args.seed is None else [int(args.seed)]
 
-    _logger.info("\n" + "═" * 85)
-    _logger.info(" [STEP 4/5] OPTIMIZATION (Joint NSGA-II)")
-    _logger.info("═" * 85 + "\n")
+    _logger.info(" [STEP 4/5] Optimization: Joint Multi-Objective TPE")
+
+    run_id = _build_run_id(args.tf, fetch_start_date, end_date, valid_symbols, OPT_FUTURES_CONFIG)
+    _logger.info(" [RUN] run_id=%s", run_id)
+    ai_telemetry_payloads.append({"stage": "run_context", "run_id": run_id})
 
     seed_learn = int(OPT_FUTURES_CONFIG.get("FUTURES_LEARNING_SEEDS", [42])[0])
     base_ctx = MLPhaseDContext(
@@ -1284,12 +1703,13 @@ def main() -> None:
         ml_pipeline_end=end_date,
         ml_pipeline_is_start=start_date,
         ml_pipeline_workers=ml_n_jobs,
+        run_id=run_id,
     )
     ml_ctx = base_ctx
 
 
     # [Speed Optimization] Numba Warm-up
-    _logger.info("  --> [WARM-UP] JIT-compiling Numba kernels...")
+    _logger.info(" [OPT] Warm-up: compile Numba kernels")
     # Force enable NSGA2 for Joint optimization
     OPT_FUTURES_CONFIG["FUTURES_ML_ALPHA_NSGA2_ENABLED"] = True
     precompute_ml_optimization_context(base_ctx)
@@ -1300,7 +1720,7 @@ def main() -> None:
 
     # [Speed Optimization] High-Performance Optuna Storage (SQLite WAL)
     storage_path = Path(project_root) / "logs" / "optuna_futures.db"
-    # DB 유지하여 이전 탐색 결과 재활용 (study_name이 같으면 resume)
+    # Deterministic study name isolates runs by TF/window/symbol set/config.
     storage_url = f"sqlite:///{storage_path}"
     
     # 1. SQLAlchemy Engine with WAL mode & Connection Pooling
@@ -1319,11 +1739,13 @@ def main() -> None:
         conn.execute(text("PRAGMA cache_size=-64000;"))  # 64MB Cache
 
     storage = optuna.storages.RDBStorage(storage_url, engine_kwargs={"connect_args": {"timeout": 60, "check_same_thread": False}})
-    study_name = "futures_joint_nsga2_v3"
+    study_name = _build_joint_study_name(
+        args.tf, fetch_start_date, end_date, valid_symbols, OPT_FUTURES_CONFIG
+    )
 
     # [Memory Optimization] gc.freeze() to preserve CoW before parallel branching
     # This prevents memory explosion in WSL by stopping refcount updates on data_maps.
-    _logger.info("  --> [MEMORY] Freezing GC to preserve CoW...")
+    _logger.info(" [OPT] Memory: freeze GC (CoW)")
     gc.collect()
     gc.freeze()
 
@@ -1346,8 +1768,60 @@ def main() -> None:
         ),
         load_if_exists=True,
     )
+    study_ml.set_user_attr("latest_run_id", run_id)
 
-    _logger.info("  --> [EXEC] Running Joint NSGA-II optimization (6 Parallel Processes)...")
+    def _persist_run_summary(status: str, force: bool = False) -> None:
+        nonlocal run_summary_written, run_summary_path
+        if (run_summary_written and not force) or run_id is None:
+            return
+        summary = _collect_run_summary_from_study(
+            study_ml,
+            run_id,
+            study_name=study_name,
+            requested_trials=n_ml_trials,
+        )
+        summary["status"] = status
+        summary["selected_by"] = selection_summary.get("selected_by")
+        summary["selected_trial_number"] = selection_summary.get("selected_trial_number")
+        summary["deploy_score"] = selection_summary.get("deploy_score")
+        summary["selection_reject_reason_count"] = dict(
+            selection_summary.get("selection_reject_reason_count") or {}
+        )
+        summary["step2_regime_enabled"] = bool(selection_summary.get("step2_regime_enabled", False))
+        summary["step2_chop_loss_share"] = _safe_float(
+            selection_summary.get("step2_chop_loss_share", 0.0), 0.0
+        )
+        summary["step2_chop_trade_share"] = _safe_float(
+            selection_summary.get("step2_chop_trade_share", 0.0), 0.0
+        )
+        summary["step2_flip_rate_proxy"] = _safe_float(
+            selection_summary.get("step2_flip_rate_proxy", 0.0), 0.0
+        )
+        summary["step4_deployability_enabled"] = bool(
+            selection_summary.get("step4_deployability_enabled", False)
+        )
+        summary["step4_chop_trade_share"] = _safe_float(
+            selection_summary.get("step4_chop_trade_share", 0.0), 0.0
+        )
+        summary["step4_turnover_cost_ratio"] = _safe_float(
+            selection_summary.get("step4_turnover_cost_ratio", 0.0), 0.0
+        )
+        _step4_chop_pf = selection_summary.get("step4_chop_pf")
+        summary["step4_chop_pf"] = (
+            _safe_float(_step4_chop_pf, 0.0) if _step4_chop_pf is not None else None
+        )
+        for k, v in run_summary_extras.items():
+            if k not in summary:
+                summary[k] = v
+            elif isinstance(summary.get(k), dict) and isinstance(v, dict):
+                merged = dict(summary[k])
+                merged.update(v)
+                summary[k] = merged
+        run_summary_path = _write_run_summary_snapshot(summary)
+        run_summary_written = True
+        _logger.info(" [RUN SUMMARY] %s", run_summary_path)
+
+    _logger.info(" [OPT] Run TPE optimization (workers=6)")
     
     # Distribute trials across 6 processes
     n_workers = 6
@@ -1364,9 +1838,13 @@ def main() -> None:
 
     all_trials = study_ml.get_trials()
     pareto_trials = study_ml.best_trials
+    # Persist immediately after optimization so even later-stage exceptions/timeouts
+    # keep a run-scoped snapshot for comparison.
+    _persist_run_summary("optimized")
 
     if not pareto_trials:
         _logger.error("  [FAIL] No trials completed successfully. Stopping optimization.")
+        _persist_run_summary("fail:no_pareto")
         return
 
     from tqdm import tqdm as _tqdm
@@ -1411,7 +1889,12 @@ def main() -> None:
     )
 
     if not validated_candidates:
-        _logger.warning("  [WARN] AWF PASS 0건 — 게이트 완화 후 전체 Pareto 재사용")
+        awf_fail_open_enabled = bool(OPT_FUTURES_CONFIG.get("FUTURES_AWF_FAIL_OPEN_ENABLED", False))
+        if not awf_fail_open_enabled:
+            _logger.error("  [FAIL] AWF PASS 0건 — fail-open disabled (FUTURES_AWF_FAIL_OPEN_ENABLED=False).")
+            _persist_run_summary("fail:awf_pass_zero")
+            return
+        _logger.warning("  [WARN] AWF PASS 0건 — explicit fail-open enabled, reusing all Pareto candidates.")
         for t in pareto_trials:
             val_obj, val_diag = replay_robust_awf_for_trial_params(base_ctx, t.params)
             validated_candidates.append({
@@ -1421,25 +1904,343 @@ def main() -> None:
                 "values": t.values,
             })
 
-    # [TOPSIS] Selection from validated candidates
-    # We use a custom score or just TOPSIS on the original trial values (IS)
-    best_cand = validated_candidates[0]
-    if len(validated_candidates) > 1:
-        # Simple TOPSIS on original trials of validated candidates
-        cand_trials = [c["trial"] for c in validated_candidates]
-        best_trial_coord = topsis_select_best(cand_trials)
-        best_cand = next(c for c in validated_candidates if c["trial"].number == best_trial_coord.number)
+    deploy_min_pos_ratio = float(
+        OPT_FUTURES_CONFIG.get("FUTURES_DEPLOY_MIN_POS_RATIO", pos_frac_min)
+    )
+    deploy_min_worst_leg = float(
+        OPT_FUTURES_CONFIG.get(
+            "FUTURES_DEPLOY_MIN_WORST_LEG_LOG_TW",
+            OPT_FUTURES_CONFIG.get("FUTURES_AWF_P10_LOG_TW_MIN", -0.10),
+        )
+    )
+    deploy_min_trades = float(
+        OPT_FUTURES_CONFIG.get(
+            "FUTURES_DEPLOY_MIN_TRADE_COUNT_MEAN",
+            max(12.0, float(OPT_FUTURES_CONFIG.get("FUTURES_MIN_TRADES_TARGET", 30)) * 0.5),
+        )
+    )
+    deploy_min_side_pf = float(
+        OPT_FUTURES_CONFIG.get(
+            "FUTURES_DEPLOY_MIN_SIDE_PF",
+            OPT_FUTURES_CONFIG.get("FUTURES_MIN_PF", 1.35),
+        )
+    )
+    deploy_leg_disp_ref = float(
+        OPT_FUTURES_CONFIG.get("FUTURES_DEPLOY_LEG_DISPERSION_REF", 0.10)
+    )
+    step2_enabled = bool(OPT_FUTURES_CONFIG.get("FUTURES_STEP2_REGIME_DEPLOY_ENABLED", False))
+    step2_chop_loss_max = float(OPT_FUTURES_CONFIG.get("FUTURES_STEP2_CHOP_LOSS_SHARE_MAX", 0.60))
+    step2_chop_trade_max = float(OPT_FUTURES_CONFIG.get("FUTURES_STEP2_CHOP_TRADE_SHARE_MAX", 0.65))
+    step2_flip_proxy_max = float(OPT_FUTURES_CONFIG.get("FUTURES_STEP2_FLIP_RATE_PROXY_MAX", 0.75))
+    step4_enabled = bool(OPT_FUTURES_CONFIG.get("FUTURES_STEP4_DEPLOYABILITY_ENABLED", False))
+    step4_chop_trade_max = float(OPT_FUTURES_CONFIG.get("FUTURES_STEP4_CHOP_TRADE_SHARE_MAX", 0.65))
+    step4_turnover_cost_max = float(
+        OPT_FUTURES_CONFIG.get("FUTURES_STEP4_TURNOVER_COST_RATIO_MAX", 0.35)
+    )
+    step4_chop_pf_floor = float(OPT_FUTURES_CONFIG.get("FUTURES_STEP4_CHOP_PF_FLOOR", 0.95))
+
+    def _safe_awf_float(val: Any, default: float = 0.0) -> float:
+        try:
+            out = float(val)
+            if not np.isfinite(out):
+                return default
+            return out
+        except (TypeError, ValueError):
+            return default
+
+    def _list_mean(vals: Any, default: float) -> float:
+        if isinstance(vals, (list, tuple)) and vals:
+            arr = np.asarray(vals, dtype=np.float64)
+            if arr.size > 0 and np.isfinite(arr).any():
+                return float(np.nanmean(arr))
+        return default
+
+    def _cand_metric(cand: dict[str, Any], key: str, default: float = 0.0) -> float:
+        tr = cand["trial"]
+        ua = tr.user_attrs
+        diag = cand.get("awf_diag", {}) or {}
+
+        if key == "awf_robust_score":
+            return _safe_awf_float(
+                ua.get(
+                    "awf_robust_score",
+                    diag.get("awf_robust_score", diag.get("robust_val", default)),
+                ),
+                default,
+            )
+        if key == "awf_leg_median_log_tw":
+            med_src = ua.get("awf_leg_median_log_tw", diag.get("awf_leg_median_log_tw"))
+            if med_src is not None:
+                return _safe_awf_float(med_src, default)
+            leg_path = diag.get("awf_leg_log_tw", diag.get("leg_log_tw", []))
+            if isinstance(leg_path, (list, tuple)) and leg_path:
+                arr = np.asarray(leg_path, dtype=np.float64)
+                return float(np.nanmedian(arr))
+            return _safe_awf_float(ua.get("awf_mu_log", diag.get("awf_mu_log", default)), default)
+        if key == "awf_leg_worst_log_tw":
+            return _safe_awf_float(
+                ua.get(
+                    "awf_leg_worst_log_tw",
+                    ua.get(
+                        "awf_worst_leg_log_tw",
+                        diag.get(
+                            "awf_leg_worst_log_tw",
+                            diag.get("awf_worst_leg_log_tw", diag.get("worst_leg", default)),
+                        ),
+                    ),
+                ),
+                default,
+            )
+        if key == "awf_leg_pos_ratio":
+            return float(
+                np.clip(
+                    _safe_awf_float(
+                        ua.get(
+                            "awf_leg_pos_ratio",
+                            ua.get(
+                                "awf_pos_frac",
+                                diag.get("awf_leg_pos_ratio", diag.get("awf_pos_frac", default)),
+                            ),
+                        ),
+                        default,
+                    ),
+                    0.0,
+                    1.0,
+                )
+            )
+        if key == "awf_leg_dispersion":
+            return max(
+                0.0,
+                _safe_awf_float(
+                    ua.get(
+                        "awf_leg_dispersion",
+                        ua.get(
+                            "awf_sigma_log",
+                            diag.get("awf_leg_dispersion", diag.get("sig_awf_diag", default)),
+                        ),
+                    ),
+                    default,
+                ),
+            )
+        if key == "awf_trade_count_mean":
+            return max(
+                0.0,
+                _safe_awf_float(
+                    ua.get(
+                        "awf_trade_count_mean",
+                        ua.get("avg_trades", diag.get("awf_trade_count_mean", diag.get("avg_trades", default))),
+                    ),
+                    default,
+                ),
+            )
+        if key == "awf_long_pf_mean":
+            long_pf = ua.get("awf_long_pf_mean", diag.get("awf_long_pf_mean"))
+            if long_pf is not None:
+                return max(0.0, _safe_awf_float(long_pf, default))
+            return max(0.0, _safe_awf_float(diag.get("l_pf_agg", _list_mean(diag.get("leg_l_pf", []), default)), default))
+        if key == "awf_short_pf_mean":
+            short_pf = ua.get("awf_short_pf_mean", diag.get("awf_short_pf_mean"))
+            if short_pf is not None:
+                return max(0.0, _safe_awf_float(short_pf, default))
+            return max(0.0, _safe_awf_float(diag.get("s_pf_agg", _list_mean(diag.get("leg_s_pf", []), default)), default))
+        return _safe_awf_float(ua.get(key, diag.get(key, default)), default)
+
+    def _objective_key(cand: dict[str, Any]) -> tuple[float, float, float, float, int]:
+        tr = cand["trial"]
+        vals = list(tr.values or [])
+        v0 = _safe_awf_float(vals[0], 1e9) if len(vals) >= 1 else -_cand_metric(cand, "awf_robust_score", -1e9)
+        v1 = _safe_awf_float(vals[1], 1e9) if len(vals) >= 2 else -_cand_metric(cand, "awf_leg_worst_log_tw", -1e9)
+        robust = _cand_metric(cand, "awf_robust_score", -1e9)
+        worst = _cand_metric(cand, "awf_leg_worst_log_tw", -1e9)
+        return (v0, v1, -robust, -worst, int(tr.number))
+
+    def _bounded_center_score(x: float, center: float, scale: float) -> float:
+        return float(np.tanh((x - center) / max(scale, 1e-9)))
+
+    def _deploy_score(cand: dict[str, Any]) -> float:
+        robust = _cand_metric(cand, "awf_robust_score", -1e9)
+        med_leg = _cand_metric(cand, "awf_leg_median_log_tw", -9.0)
+        worst_leg_sc = _cand_metric(cand, "awf_leg_worst_log_tw", -9.0)
+        pos_ratio = _cand_metric(cand, "awf_leg_pos_ratio", 0.0)
+        disp = _cand_metric(cand, "awf_leg_dispersion", 0.0)
+        trades = _cand_metric(cand, "awf_trade_count_mean", 0.0)
+        long_pf = _cand_metric(cand, "awf_long_pf_mean", 1.0)
+        short_pf = _cand_metric(cand, "awf_short_pf_mean", 1.0)
+        score = float(
+            0.28 * _bounded_center_score(robust, 0.0, 0.12)
+            + 0.18 * _bounded_center_score(med_leg, 0.0, 0.08)
+            + 0.16 * _bounded_center_score(worst_leg_sc, deploy_min_worst_leg, 0.08)
+            + 0.14 * _bounded_center_score(pos_ratio, deploy_min_pos_ratio, 0.08)
+            + 0.10 * _bounded_center_score(trades, deploy_min_trades, max(deploy_min_trades * 0.4, 5.0))
+            + 0.07 * _bounded_center_score(long_pf, deploy_min_side_pf, 0.20)
+            + 0.07 * _bounded_center_score(short_pf, deploy_min_side_pf, 0.20)
+            + 0.06 * _bounded_center_score(-disp, -deploy_leg_disp_ref, max(deploy_leg_disp_ref, 0.05))
+        )
+        if step2_enabled:
+            chop_loss_share = float(np.clip(_cand_metric(cand, "awf_chop_loss_share", 0.0), 0.0, 1.0))
+            chop_trade_share = float(np.clip(_cand_metric(cand, "awf_chop_trade_share", 0.0), 0.0, 1.0))
+            flip_proxy = float(np.clip(_cand_metric(cand, "awf_flip_rate_proxy", 0.0), 0.0, 1.0))
+            score += (
+                -0.08 * _bounded_center_score(chop_loss_share, step2_chop_loss_max, 0.10)
+                -0.06 * _bounded_center_score(chop_trade_share, step2_chop_trade_max, 0.10)
+                -0.04 * _bounded_center_score(flip_proxy, step2_flip_proxy_max, 0.10)
+            )
+        return score
+
+    def _deploy_reject_reasons(cand: dict[str, Any]) -> list[str]:
+        reasons: list[str] = []
+        pos_ratio = _cand_metric(cand, "awf_leg_pos_ratio", 0.0)
+        worst_leg_sc = _cand_metric(cand, "awf_leg_worst_log_tw", -9.0)
+        trades = _cand_metric(cand, "awf_trade_count_mean", 0.0)
+        long_pf = _cand_metric(cand, "awf_long_pf_mean", 1.0)
+        short_pf = _cand_metric(cand, "awf_short_pf_mean", 1.0)
+        if pos_ratio < deploy_min_pos_ratio:
+            reasons.append("LOW_POS_RATIO")
+        if worst_leg_sc < deploy_min_worst_leg:
+            reasons.append("LOW_WORST_LEG_LOG_TW")
+        if trades < deploy_min_trades:
+            reasons.append("LOW_TRADE_COUNT")
+        if long_pf < deploy_min_side_pf and short_pf < deploy_min_side_pf:
+            reasons.append("WEAK_BOTH_SIDE_PF")
+        if step2_enabled:
+            chop_loss_share = float(np.clip(_cand_metric(cand, "awf_chop_loss_share", 0.0), 0.0, 1.0))
+            chop_trade_share = float(np.clip(_cand_metric(cand, "awf_chop_trade_share", 0.0), 0.0, 1.0))
+            flip_proxy = float(np.clip(_cand_metric(cand, "awf_flip_rate_proxy", 0.0), 0.0, 1.0))
+            if chop_loss_share > step2_chop_loss_max:
+                reasons.append("CHOP_HEAVY_LOSS_SHARE")
+            if chop_trade_share > step2_chop_trade_max:
+                reasons.append("CHOP_HEAVY_TRADE_SHARE")
+            if flip_proxy > step2_flip_proxy_max:
+                reasons.append("HIGH_FLIP_PROXY")
+        if step4_enabled:
+            ua = cand["trial"].user_attrs
+            diag = cand.get("awf_diag", {}) or {}
+            chop_trade_share = float(np.clip(_cand_metric(cand, "awf_chop_trade_share", 0.0), 0.0, 1.0))
+            turnover_cost_ratio = max(0.0, _cand_metric(cand, "awf_turnover_cost_ratio", 0.0))
+            chop_pf_raw = ua.get("awf_chop_pf", diag.get("awf_chop_pf"))
+            if chop_trade_share > step4_chop_trade_max:
+                reasons.append("STEP4_CHOP_HEAVY_TRADE")
+            if turnover_cost_ratio > step4_turnover_cost_max:
+                reasons.append("STEP4_HIGH_TURNOVER_COST")
+            if chop_trade_share > step4_chop_trade_max and chop_pf_raw is not None:
+                chop_pf = _safe_awf_float(chop_pf_raw, default=np.nan)
+                if np.isfinite(chop_pf) and chop_pf < step4_chop_pf_floor:
+                    reasons.append("STEP4_CHOP_PF_TOO_LOW")
+        return reasons
+
+    best_obj_cand = min(validated_candidates, key=_objective_key)
+    best_obj_trial = best_obj_cand["trial"]
+    deploy_candidates: list[dict[str, Any]] = []
+    reject_reason_count: dict[str, int] = {}
+    for cand in validated_candidates:
+        reasons = _deploy_reject_reasons(cand)
+        if reasons:
+            cand["deploy_reject_reasons"] = reasons
+            for reason in reasons:
+                reject_reason_count[reason] = int(reject_reason_count.get(reason, 0)) + 1
+            continue
+        cand["deploy_score"] = _deploy_score(cand)
+        deploy_candidates.append(cand)
+
+    best_deploy_cand = None
+    best_deploy_trial = None
+    ranked_candidates: list[dict[str, Any]]
+    selected_by = "deploy_score"
+    if deploy_candidates:
+        ranked_candidates = sorted(
+            deploy_candidates,
+            key=lambda c: (
+                _safe_awf_float(c.get("deploy_score"), -1e9),
+                _cand_metric(c, "awf_robust_score", -1e9),
+                _cand_metric(c, "awf_leg_worst_log_tw", -9.0),
+                _cand_metric(c, "awf_leg_median_log_tw", -9.0),
+                _cand_metric(c, "awf_leg_pos_ratio", 0.0),
+                _cand_metric(c, "awf_trade_count_mean", 0.0),
+                _cand_metric(c, "awf_long_pf_mean", 1.0) + _cand_metric(c, "awf_short_pf_mean", 1.0),
+                -int(c["trial"].number),
+            ),
+            reverse=True,
+        )
+        best_deploy_cand = ranked_candidates[0]
+        best_deploy_trial = best_deploy_cand["trial"]
+        best_cand = best_deploy_cand
+        best_trial_coord = best_deploy_trial
     else:
+        selected_by = "objective"
+        ranked_candidates = sorted(validated_candidates, key=_objective_key)
+        best_cand = ranked_candidates[0]
         best_trial_coord = best_cand["trial"]
+        _logger.warning(
+            " [SELECTION] Deploy hard rejects removed all candidates; fallback to objective ranking."
+        )
+
+    _logger.debug(
+        " [SELECTION] best_by_objective=%d | best_by_deploy_score=%s",
+        int(best_obj_trial.number),
+        str(best_deploy_trial.number) if best_deploy_trial is not None else "none",
+    )
+    if best_deploy_cand is not None and int(best_obj_trial.number) != int(best_deploy_trial.number):
+        _logger.debug(
+            " [SELECTION] deploy vs objective delta: robust=%+.4f worst_leg=%+.4f pos_ratio=%+.4f "
+            "trades=%+.2f long_pf=%+.3f short_pf=%+.3f",
+            _cand_metric(best_deploy_cand, "awf_robust_score", 0.0) - _cand_metric(best_obj_cand, "awf_robust_score", 0.0),
+            _cand_metric(best_deploy_cand, "awf_leg_worst_log_tw", 0.0) - _cand_metric(best_obj_cand, "awf_leg_worst_log_tw", 0.0),
+            _cand_metric(best_deploy_cand, "awf_leg_pos_ratio", 0.0) - _cand_metric(best_obj_cand, "awf_leg_pos_ratio", 0.0),
+            _cand_metric(best_deploy_cand, "awf_trade_count_mean", 0.0) - _cand_metric(best_obj_cand, "awf_trade_count_mean", 0.0),
+            _cand_metric(best_deploy_cand, "awf_long_pf_mean", 0.0) - _cand_metric(best_obj_cand, "awf_long_pf_mean", 0.0),
+            _cand_metric(best_deploy_cand, "awf_short_pf_mean", 0.0) - _cand_metric(best_obj_cand, "awf_short_pf_mean", 0.0),
+        )
+    if reject_reason_count:
+        _logger.debug(" [SELECTION] reject_reason_count=%s", reject_reason_count)
+
+    selection_summary["selected_by"] = selected_by
+    selection_summary["selected_trial_number"] = int(best_trial_coord.number)
+    if best_deploy_cand is not None:
+        selection_summary["deploy_score"] = float(_safe_awf_float(best_deploy_cand.get("deploy_score"), 0.0))
+    else:
+        selection_summary["deploy_score"] = float(_deploy_score(best_cand))
+    selection_summary["selection_reject_reason_count"] = dict(reject_reason_count)
+    selection_summary["step2_regime_enabled"] = bool(step2_enabled)
+    selection_summary["step2_chop_loss_share"] = float(
+        _cand_metric(best_cand, "awf_chop_loss_share", 0.0)
+    )
+    selection_summary["step2_chop_trade_share"] = float(
+        _cand_metric(best_cand, "awf_chop_trade_share", 0.0)
+    )
+    selection_summary["step2_flip_rate_proxy"] = float(
+        _cand_metric(best_cand, "awf_flip_rate_proxy", 0.0)
+    )
+    selection_summary["step4_deployability_enabled"] = bool(step4_enabled)
+    selection_summary["step4_chop_trade_share"] = float(
+        _cand_metric(best_cand, "awf_chop_trade_share", 0.0)
+    )
+    selection_summary["step4_turnover_cost_ratio"] = float(
+        _cand_metric(best_cand, "awf_turnover_cost_ratio", 0.0)
+    )
+    _best_chop_pf_raw = best_trial_coord.user_attrs.get(
+        "awf_chop_pf",
+        (best_cand.get("awf_diag", {}) or {}).get("awf_chop_pf"),
+    )
+    selection_summary["step4_chop_pf"] = (
+        float(_safe_awf_float(_best_chop_pf_raw, 0.0))
+        if _best_chop_pf_raw is not None
+        else None
+    )
 
     champion_raw_params = dict(best_cand["params"])
     champion_awf_diag = best_cand["awf_diag"]
-    _logger.info("  [SUCCESS] Selection complete. Best Trial: %d", best_trial_coord.number)
+    _logger.info(
+        "  [SUCCESS] Selection complete. selected_by=%s Best Trial: %d",
+        selected_by,
+        best_trial_coord.number,
+    )
 
     # [STABILITY] Runner-up logic
     runner_up_merged = None
-    if len(validated_candidates) >= 2:
-        runner_up_merged = dict(validated_candidates[1]["params"])
+    runner_up_trial = None
+    if len(ranked_candidates) >= 2:
+        runner_up_merged = dict(ranked_candidates[1]["params"])
+        runner_up_trial = ranked_candidates[1]["trial"]
 
 
     champ_stab_cv: float | None = None
@@ -1451,41 +2252,51 @@ def main() -> None:
     stab_hard = bool(OPT_FUTURES_CONFIG.get("FUTURES_CHAMP_STABILITY_HARD_GATE", False))
     l3_hard = bool(OPT_FUTURES_CONFIG.get("FUTURES_TMP_LAYER3_HARD_GATE", False))
 
-    def _run_champ_stability(raw_prms: dict[str, Any]) -> tuple[float | None, bool]:
-        if len(stab_seeds) < 1 or ml_ctx is None or not raw_prms:
-            return None, False
-        _l3_fail = False
-        _objs: list[float] = []
-        for _sx in stab_seeds:
-            _logger.debug("  --> [STABILITY] Replaying seed=%s", _sx)
-            _sctx = dataclasses.replace(ml_ctx, seed=int(_sx))
-            # [Performance] Force fresh precompute and clear memory for each seed
-            rerun_precompute_for_ctx(_sctx)
-            gc.collect()
-            
-            val, diag_r = replay_robust_awf_for_trial_params(_sctx, raw_prms)
-            if isinstance(val, tuple):
-                _objs.append(float(val[0]))
-            else:
-                _objs.append(float(val))
-            if bool(OPT_FUTURES_CONFIG.get("FUTURES_TMP_LAYER3_ALL_SEEDS_LAYER1", True)):
-                lf = tmp_md_layer1_failures_from_awf_diag(diag_r, OPT_FUTURES_CONFIG)
-                if lf:
-                    _l3_fail = True
-                    _logger.debug(
-                        " [TMP LAYER3] AWF replay seed=%s Layer-1 fail codes=%s",
-                        _sx,
-                        lf,
-                    )
-            # Clear leg caches to prevent OOM during stability run
-            _sctx.awf_leg_slices = None
-            gc.collect()
+    def _clear_stability_runtime_cache(sctx: MLPhaseDContext) -> None:
+        awf = sctx.awf_leg_slices or []
+        for _leg in awf:
+            _aligned = _leg.get("data")
+            if isinstance(_aligned, dict):
+                _aligned.pop("kill_signal_cached", None)
+                _aligned.pop("funding_rate_sum_cached", None)
+                _aligned.pop("dyn_leverage_cached", None)
 
-        _mu = float(np.mean(_objs))
-        _sig = float(np.std(_objs, ddof=1)) if len(_objs) > 1 else 0.0
+    def _release_stability_ctx(sctx: MLPhaseDContext) -> None:
+        _clear_stability_runtime_cache(sctx)
+        sctx.awf_leg_slices = None
+        sctx.multi_alignment_info = None
+        sctx.calibrator = None
+        sctx.calibrator_short = None
+        sctx.is_slice = None
+        sctx.holdout_slice = None
+
+    def _replay_stability_candidate(
+        sctx: MLPhaseDContext, raw_prms: dict[str, Any], seed: int
+    ) -> tuple[float, bool]:
+        _clear_stability_runtime_cache(sctx)
+        val, diag_r = replay_robust_awf_for_trial_params(sctx, raw_prms)
+        obj = float(val[0]) if isinstance(val, tuple) else float(val)
+        l3_fail = False
+        if bool(OPT_FUTURES_CONFIG.get("FUTURES_TMP_LAYER3_ALL_SEEDS_LAYER1", True)):
+            lf = tmp_md_layer1_failures_from_awf_diag(diag_r, OPT_FUTURES_CONFIG)
+            if lf:
+                l3_fail = True
+                _logger.debug(
+                    " [TMP LAYER3] AWF replay seed=%s Layer-1 fail codes=%s",
+                    seed,
+                    lf,
+                )
+        return obj, l3_fail
+
+    def _stability_cv(label: str, objs: list[float], l3_fail: bool) -> float | None:
+        if not objs:
+            return None
+        _mu = float(np.mean(objs))
+        _sig = float(np.std(objs, ddof=1)) if len(objs) > 1 else 0.0
         _cv = float(_sig / max(abs(_mu), 1e-12))
         _logger.debug(
-            " [CHAMP STABILITY] seeds=%s obj_mean=%.6f std=%.6f cv=%.4f (max=%.4f)",
+            " [CHAMP STABILITY][%s] seeds=%s obj_mean=%.6f std=%.6f cv=%.4f (max=%.4f)",
+            label,
             stab_seeds,
             _mu,
             _sig,
@@ -1493,26 +2304,58 @@ def main() -> None:
             cv_max,
         )
         if _cv > cv_max:
+            _logger.debug(" [CHAMP STABILITY][%s] cv %.4f exceeds max %.4f", label, _cv, cv_max)
+        if l3_fail:
             _logger.debug(
-                " [CHAMP STABILITY] cv %.4f exceeds max %.4f", _cv, cv_max
+                " [TMP LAYER3] One or more stability seeds failed Layer-1 on AWF replay (%s).",
+                label,
             )
-        if _l3_fail:
-            _logger.debug(
-                " [TMP LAYER3] One or more stability seeds failed Layer-1 on AWF replay.",
-            )
-        return _cv, _l3_fail
+        return _cv
 
-    champ_stab_cv, stab_tmp_layer3_awf_fail = _run_champ_stability(champion_raw_params)
+    seed_ctxs: list[tuple[int, MLPhaseDContext]] = []
+    champ_objs: list[float] = []
+    champ_l3_fail = False
+    cv_ru: float | None = None
+    l3_ru = False
 
-    primary_failed = (
-        (champ_stab_cv is not None and champ_stab_cv > cv_max and stab_hard)
-        or (stab_tmp_layer3_awf_fail and l3_hard)
-    )
-    if primary_failed and runner_up_merged is not None:
-        _logger.warning(
-            " [STABILITY] primary candidate failed hard gates — trying runner-up (phase C)",
+    try:
+        if len(stab_seeds) >= 1 and ml_ctx is not None and champion_raw_params:
+            for _sx in stab_seeds:
+                _logger.debug("  --> [STABILITY] Seed precompute seed=%s", _sx)
+                _sctx = dataclasses.replace(ml_ctx, seed=int(_sx))
+                # Precompute once per seed; reuse for champion/runner-up replay.
+                rerun_precompute_for_ctx(_sctx)
+                gc.collect()
+                seed_ctxs.append((int(_sx), _sctx))
+
+                _logger.debug("  --> [STABILITY] Replaying champion seed=%s", _sx)
+                _obj_c, _l3_c = _replay_stability_candidate(_sctx, champion_raw_params, int(_sx))
+                champ_objs.append(_obj_c)
+                champ_l3_fail = bool(champ_l3_fail or _l3_c)
+
+        champ_stab_cv = _stability_cv("champion", champ_objs, champ_l3_fail)
+        stab_tmp_layer3_awf_fail = champ_l3_fail
+
+        primary_failed = (
+            (champ_stab_cv is not None and champ_stab_cv > cv_max and stab_hard)
+            or (stab_tmp_layer3_awf_fail and l3_hard)
         )
-        cv_ru, l3_ru = _run_champ_stability(runner_up_merged)
+        if primary_failed and runner_up_merged is not None and seed_ctxs:
+            _logger.info(" [STABILITY] Champion failed gate, evaluating runner-up.")
+            ru_objs: list[float] = []
+            for _sx, _sctx in seed_ctxs:
+                _logger.debug("  --> [STABILITY] Replaying runner-up seed=%s", _sx)
+                _obj_ru, _l3_seed = _replay_stability_candidate(_sctx, runner_up_merged, int(_sx))
+                ru_objs.append(_obj_ru)
+                l3_ru = bool(l3_ru or _l3_seed)
+            cv_ru = _stability_cv("runner_up", ru_objs, l3_ru)
+    finally:
+        for _, _sctx in seed_ctxs:
+            _release_stability_ctx(_sctx)
+        if seed_ctxs:
+            gc.collect()
+
+    if primary_failed and runner_up_merged is not None:
         ru_ok = (cv_ru is None or cv_ru <= cv_max or not stab_hard) and (
             not l3_ru or not l3_hard
         )
@@ -1520,7 +2363,16 @@ def main() -> None:
             champion_raw_params = runner_up_merged
             champ_stab_cv = cv_ru
             stab_tmp_layer3_awf_fail = l3_ru
-            best_trial_coord = validated_candidates[1]["trial"] if len(validated_candidates) > 1 else validated_candidates[0]["trial"]
+            if runner_up_trial is not None:
+                champion_awf_diag = ranked_candidates[1]["awf_diag"]
+                best_trial_coord = runner_up_trial
+                selection_summary["selected_trial_number"] = int(best_trial_coord.number)
+                selection_summary["deploy_score"] = float(
+                    _safe_awf_float(
+                        ranked_candidates[1].get("deploy_score"),
+                        _deploy_score(ranked_candidates[1]),
+                    )
+                )
             _logger.info(" [STABILITY] runner-up accepted for deploy path.")
 
     champ_params = build_ml_phase_d_params(champion_raw_params, args.tf)
@@ -1560,6 +2412,7 @@ def main() -> None:
 
     if not ensemble_results:
         _logger.error(" [FAIL] No champion candidate after optimization.")
+        _persist_run_summary("fail:no_ensemble_results")
         return
 
     _logger.info("\n" + "═" * 85)
@@ -1631,6 +2484,10 @@ def main() -> None:
         "sig_awf": float(_sig_awf),
         "leg_tws": [float(t) for t in _leg_tws],
         "awf_pos_frac": float(champion_awf_diag.get("awf_pos_frac", 0.0)),
+        "awf_chop_loss_share": float(champion_awf_diag.get("awf_chop_loss_share", 0.0)),
+        "awf_chop_trade_share": float(champion_awf_diag.get("awf_chop_trade_share", 0.0)),
+        "awf_flip_rate_proxy": float(champion_awf_diag.get("awf_flip_rate_proxy", 0.0)),
+        "awf_turnover_cost_ratio": float(champion_awf_diag.get("awf_turnover_cost_ratio", 0.0)),
     })
 
     _assert_oos_gp_signal_alive(oos_data_maps, valid_symbols, args.tf)
@@ -1647,7 +2504,12 @@ def main() -> None:
     for i, res in enumerate(ensemble_results):
         m_params = finalize_strategy_portfolio_params(res.params, policy_cfg)
         m_port = run_oos_margin_shared_portfolio(
-            valid_symbols, args.tf, m_params, oos_data_maps, cache_root=FUTURES_CACHE_DIR
+            valid_symbols,
+            args.tf,
+            m_params,
+            oos_data_maps,
+            cache_root=FUTURES_CACHE_DIR,
+            return_signal_dfs=(i == 0),
         )
         ensemble_ports.append(m_port)
         ensemble_curves.append(m_port["equity_curve"])
@@ -1864,6 +2726,15 @@ def main() -> None:
     is_port["symbol_names"] = valid_symbols
     ho_port["symbol_names"] = valid_symbols
     oos_port["symbol_names"] = valid_symbols
+    regime_attr = _compute_oos_regime_attribution(
+        oos_port=oos_port,
+        oos_data_maps=oos_data_maps,
+        symbols=valid_symbols,
+        tf=args.tf,
+    )
+    oos_port["regime_attribution"] = regime_attr
+    run_summary_extras["oos_regime_attribution"] = regime_attr
+    _log_oos_regime_attribution(regime_attr)
 
     # OOS performance vs IS performance
     is_cagr_v = float(is_port.get("cagr_pct", is_port.get("cagr", 0.0)))
@@ -1926,6 +2797,41 @@ def main() -> None:
     )
     gate_ok, _gf_codes = evaluate_research_gates(_gate_inp)
     gate_failures = list(_gf_codes)
+    if bool(OPT_FUTURES_CONFIG.get("FUTURES_STEP2_REGIME_DEPLOY_ENABLED", False)):
+        _chop_loss = float(champion_awf_diag.get("awf_chop_loss_share", 0.0))
+        _chop_trade = float(champion_awf_diag.get("awf_chop_trade_share", 0.0))
+        _flip_proxy = float(champion_awf_diag.get("awf_flip_rate_proxy", 0.0))
+        if _chop_loss > float(OPT_FUTURES_CONFIG.get("FUTURES_STEP2_CHOP_LOSS_SHARE_MAX", 0.60)):
+            gate_failures.append("STEP2_CHOP_HEAVY_LOSS")
+            gate_ok = False
+        if _chop_trade > float(OPT_FUTURES_CONFIG.get("FUTURES_STEP2_CHOP_TRADE_SHARE_MAX", 0.65)):
+            gate_failures.append("STEP2_CHOP_HEAVY_TRADE")
+            gate_ok = False
+        if _flip_proxy > float(OPT_FUTURES_CONFIG.get("FUTURES_STEP2_FLIP_RATE_PROXY_MAX", 0.75)):
+            gate_failures.append("STEP2_HIGH_FLIP_PROXY")
+            gate_ok = False
+    if bool(OPT_FUTURES_CONFIG.get("FUTURES_STEP4_DEPLOYABILITY_ENABLED", False)):
+        _step4_chop_trade_max = float(
+            OPT_FUTURES_CONFIG.get("FUTURES_STEP4_CHOP_TRADE_SHARE_MAX", 0.65)
+        )
+        _step4_turnover_max = float(
+            OPT_FUTURES_CONFIG.get("FUTURES_STEP4_TURNOVER_COST_RATIO_MAX", 0.35)
+        )
+        _step4_chop_pf_floor = float(OPT_FUTURES_CONFIG.get("FUTURES_STEP4_CHOP_PF_FLOOR", 0.95))
+        _chop_trade = float(champion_awf_diag.get("awf_chop_trade_share", 0.0))
+        _turnover_cost_ratio = float(champion_awf_diag.get("awf_turnover_cost_ratio", 0.0))
+        if _chop_trade > _step4_chop_trade_max:
+            gate_failures.append("STEP4_CHOP_HEAVY_TRADE")
+            gate_ok = False
+        if _turnover_cost_ratio > _step4_turnover_max:
+            gate_failures.append("STEP4_HIGH_TURNOVER_COST")
+            gate_ok = False
+        _chop_pf_raw = champion_awf_diag.get("awf_chop_pf")
+        if _chop_trade > _step4_chop_trade_max and _chop_pf_raw is not None:
+            _chop_pf = _safe_float(_chop_pf_raw, 0.0)
+            if _chop_pf < _step4_chop_pf_floor:
+                gate_failures.append("STEP4_CHOP_PF_TOO_LOW")
+                gate_ok = False
     if bool(
         OPT_FUTURES_CONFIG.get("FUTURES_TMP_MD_CHAMPION_GATES_ENABLED", True)
     ):
@@ -2050,6 +2956,10 @@ def main() -> None:
         "oos_short_pf": float(meta_port.get("short_pf", 1.0)),
         "oos_retention_pct": float(oos_retention),
         "is_alpha": float(is_net_alpha_v) if 'is_net_alpha_v' in locals() else 0.0,
+        "awf_chop_loss_share": float(champion_awf_diag.get("awf_chop_loss_share", 0.0)),
+        "awf_chop_trade_share": float(champion_awf_diag.get("awf_chop_trade_share", 0.0)),
+        "awf_flip_rate_proxy": float(champion_awf_diag.get("awf_flip_rate_proxy", 0.0)),
+        "awf_turnover_cost_ratio": float(champion_awf_diag.get("awf_turnover_cost_ratio", 0.0)),
     })
 
     # Update params to include ensemble info for persistence
@@ -2112,22 +3022,25 @@ def main() -> None:
         "gate_ok": bool(gate_ok),
         "gate_failures": gate_failures,
         "total_trades": int(oos_port.get("total_trades", 0)),
-        "ops_profile": args.ops_profile,
+        "ops_profile": selected_ops_profile,
         "n_seeds": len(target_seeds),
         "trials_per_seed": int(n_ml_trials),
     }
-    if args.ops_profile:
-        _prof_ok, _prof_issues = check_run_summary_against_profile(
-            args.ops_profile,
-            {
-                "gate_ok": bool(gate_ok),
-                "n_seeds": len(target_seeds),
-                "trials_per_seed": int(n_ml_trials),
-                "revalidation_ok": True,
-            },
-        )
-        if not _prof_ok:
-            _logger.warning(" [OPS PROFILE] %s issues=%s", args.ops_profile, _prof_issues)
+    _ops_profile_check_ok, _ops_profile_check_issues = check_run_summary_against_profile(
+        selected_ops_profile,
+        {
+            "gate_ok": bool(gate_ok),
+            "n_seeds": len(target_seeds),
+            "trials_per_seed": int(n_ml_trials),
+            "revalidation_ok": bool(wf_result.passed) if wf_result is not None else False,
+        },
+    )
+    run_summary_extras["ops_profile_check_ok"] = bool(_ops_profile_check_ok)
+    run_summary_extras["ops_profile_check_issues"] = list(_ops_profile_check_issues)
+    if not _ops_profile_check_ok:
+        _logger.warning(" [OPS PROFILE] %s issues=%s", selected_ops_profile, _ops_profile_check_issues)
+    eval_payload["ops_profile_check_ok"] = bool(_ops_profile_check_ok)
+    eval_payload["ops_profile_check_issues"] = list(_ops_profile_check_issues)
     # Merge all numerical metrics from new_m (which tracks Candidate stats)
     eval_payload.update(new_m)
     # Ensure is_alpha uses the value calculated regardless of gate status
@@ -2258,6 +3171,8 @@ def main() -> None:
             " [PRODUCTION] Absolute champion preserved. "
             "New candidate did not exceed performance benchmarks."
         )
+
+    _persist_run_summary("done", force=True)
 
 
 if __name__ == "__main__":

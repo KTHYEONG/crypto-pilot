@@ -898,16 +898,45 @@ def _print_hmm_summary(
         btc_tmp["ret"] = btc_tmp["close"].pct_change().fillna(0.0)
         df_eval = pd.merge(df_eval, btc_tmp[["datetime", "ret"]], on="datetime", how="left")
 
+    regime_label_by_state: dict[str, str] = {
+        "hmm_prob_bull_calm": "BULL_CALM",
+        "hmm_prob_bull_vol_up": "BULL_VOL_UP",
+        "hmm_prob_bear_trend": "BEAR_TREND",
+        "hmm_prob_chop": "CHOP",
+        "hmm_prob_crisis": "CRISIS",
+    }
+
+    # Diagnostic verdict categories are intentionally decoupled from semantic regime labels.
+    # Allowed values: favorable / neutral / adverse / tail_risk
+    def _diag_verdict_for_regime(regime_label: str, g_log: float, m_l: float, m_s: float) -> str:
+        crisis_ctx = regime_label == "CRISIS"
+
+        # Primary signal from geometric-growth proxy; modulators provide deterministic tie-break/context.
+        if (g_log <= -0.04) or crisis_ctx or (m_l <= 0.15 and m_s <= 0.15):
+            verdict = "tail_risk"
+        elif (g_log <= -0.01) or (m_l < 0.45 and m_s > 0.85):
+            verdict = "adverse"
+        elif (g_log >= 0.015) and (m_l >= 0.85) and (m_s <= 0.55):
+            verdict = "favorable"
+        else:
+            verdict = "neutral"
+
+        # Safety guard: CRISIS semantic regime cannot be classified as favorable.
+        if crisis_ctx and verdict == "favorable":
+            return "tail_risk"
+        return verdict
+
     # 1. Log-Wealth Dispersion
     _logger.info(" │ [A] LOG-WEALTH DISPERSION (g = mu - 0.5*sigma^2)                                 │")
-    _logger.info(" ├────────────┬────────┬─────────────┬───────────┬───────────┬───────────┬──────────┤")
-    _logger.info(" │ REGIME     │ TIME % │ MOD (L / S) │ MU (%)    │ SIG (%)   │ G_LOG (%) │ VERDICT  │")
-    _logger.info(" ├────────────┼────────┼─────────────┼───────────┼───────────┼───────────┼──────────┤")
+    _logger.info(" ├────────────┬────────────┬────────┬─────────────┬───────────┬───────────┬───────────┬────────────┤")
+    _logger.info(" │ REGIME     │ DIAG_LABEL │ TIME % │ MOD (L / S) │ MU (%)    │ SIG (%)   │ G_LOG (%) │ DIAG_VERD  │")
+    _logger.info(" ├────────────┼────────────┼────────┼─────────────┼───────────┼───────────┼───────────┼────────────┤")
 
     for state in cols:
         g_df = df_eval[df_eval["dominant_state"] == state]
         pct = len(g_df) / len(df_eval) * 100
         st_name = state.replace("hmm_prob_", "").upper()
+        regime_label = regime_label_by_state.get(state, st_name)
         report[state] = pct
 
         if len(g_df) > 0:
@@ -923,24 +952,18 @@ def _print_hmm_summary(
                 # Geometric Growth Approximation in % units: mu - 0.5 * (sig^2 / 100)
                 g_log = mu - 0.5 * (sig**2 / 100.0)
             
-            verdict = "CHOP"
-            if g_log > 0.015:
-                verdict = "BULL"
-            elif g_log < -0.04:
-                verdict = "CRISIS"
-            elif g_log < -0.01:
-                verdict = "BEAR"
+            diag_verdict = _diag_verdict_for_regime(regime_label, g_log, m_l, m_s)
             
             if st_name == "CRISIS": report["hmm_crisis_g_log"] = g_log
             if st_name == "BULL_TREND": report["hmm_bull_g_log"] = g_log
 
-            _logger.info(f" │ {st_name:<10} │ {pct:>5.1f}% │ {m_l:.2f} / {m_s:.2f} │ {mu:>9.3f} │ {sig:>9.3f} │ {g_log:>9.3f} │ {verdict:<8} │")
+            _logger.info(f" │ {st_name:<10} │ {regime_label:<10} │ {pct:>5.1f}% │ {m_l:.2f} / {m_s:.2f} │ {mu:>9.3f} │ {sig:>9.3f} │ {g_log:>9.3f} │ {diag_verdict:<10} │")
         else:
-            _logger.info(f" │ {st_name:<10} │   0.0% │ ---- / ---- │      ---- │      ---- │      ---- │ -------- │")
+            _logger.info(f" │ {st_name:<10} │ {regime_label:<10} │   0.0% │ ---- / ---- │      ---- │      ---- │      ---- │ ---------- │")
 
     # 2. Tail Capture
     if "ret" in df_eval.columns:
-        _logger.info(" ├────────────┴────────┴─────────────┴───────────┴───────────┴───────────┴──────────┤")
+        _logger.info(" ├────────────┴────────────┴────────┴─────────────┴───────────┴───────────┴───────────┴────────────┤")
         q05 = float(df_eval["ret"].quantile(0.05))
         worst_mask = df_eval["ret"] <= q05
         worst_df = df_eval[worst_mask]
@@ -1346,11 +1369,15 @@ def _run_ml_pipeline_cached_core(
     
     The hashing is based only on the first 6 arguments.
     """
-    _logger.info("🚀 [ML CACHE] Cache MISS - Running core pipeline for %s symbols", len(symbols_tuple))
+    _logger.info(
+        "🚀 [ML CACHE] Cache MISS - Running core pipeline for %s symbols (seed=%s)",
+        len(symbols_tuple),
+        seed,
+    )
     return _run_ml_pipeline_implementation(
         list(symbols_tuple), tf, fetch_start_date, end, cfg, workers, n_jobs,
         is_end_date, is_start_date, gp_only, hmm_only,
-        preloaded_data_maps, preloaded_1h_maps
+        preloaded_data_maps, preloaded_1h_maps, seed=seed
     )
 
 
@@ -1375,7 +1402,7 @@ def run_ml_pipeline_for_universe(
     # Use provided seed or fallback to first seed in config
     actual_seed = seed if seed is not None else int(cfg.get("FUTURES_LEARNING_SEEDS", [42])[0])
     cfg_hash = _get_cfg_hash(cfg)
-    
+    _logger.debug("ML pipeline request | tf=%s symbols=%d seed=%s", tf, len(symbols), actual_seed)
     try:
         return _run_ml_pipeline_cached_core(
             tf, is_end_date, is_start_date, symbols_tuple, actual_seed, cfg_hash,
@@ -1383,7 +1410,7 @@ def run_ml_pipeline_for_universe(
             preloaded_data_maps, preloaded_1h_maps
         )
     except Exception as e:
-        _logger.warning("ML Pipeline Caching failed or bypassed: %s", e)
+        _logger.warning("ML Pipeline Caching failed or bypassed (seed=%s): %s", actual_seed, e)
         return _run_ml_pipeline_implementation(
             symbols, tf, fetch_start_date, end, cfg, workers, n_jobs, 
             is_end_date, is_start_date, gp_only, hmm_only,
@@ -1408,7 +1435,7 @@ def _run_ml_pipeline_implementation(
     seed: int | None = None,
 ) -> MLPipelineOutput:
     """[Phase 2] Universal Cross-Sectional ML Pipeline implementation."""
-    _logger.info("🔄 ML Pipeline | TF=%s | symbols=%d | seed=%s", tf, len(symbols), seed)
+    _logger.debug("ML pipeline start | tf=%s symbols=%d seed=%s", tf, len(symbols), seed)
 
     collector = DataCollector()
     data_maps: dict[str, dict[str, Any]] = preloaded_data_maps or {}
@@ -1559,10 +1586,22 @@ def _run_ml_pipeline_implementation(
         target_horizons=horizons, 
         slots_per_theme=max(5, min(12, int(cfg.get("FUTURES_ML_ALPHA_SLOTS_PER_THEME", 6))))
     )
+    filter_options = {
+        # Keep legacy defaults intact unless Step3 is explicitly enabled.
+        "fdr_q": 0.10,
+        "symbol_balance_max": 3.0,
+        "require_regime_gate": True,
+        "step3_regime_alpha_enabled": bool(cfg.get("FUTURES_STEP3_REGIME_ALPHA_ENABLED", False)),
+        "step3_chop_support_min": float(cfg.get("FUTURES_STEP3_CHOP_SUPPORT_MIN", 0.25)),
+        "step3_chop_ic_min": float(cfg.get("FUTURES_STEP3_CHOP_IC_MIN", -0.01)),
+        "step3_chop_weight_mult": float(cfg.get("FUTURES_STEP3_CHOP_WEIGHT_MULT", 0.50)),
+        "step3_weight_mult_floor": float(cfg.get("FUTURES_STEP3_WEIGHT_MULT_FLOOR", 0.20)),
+    }
     alpha_panel = miner.mine_alphas_cs(
         panel_df, 
         cache_path=Path(FUTURES_CACHE_DIR) / "universal_cs_gp_v8.parquet",
-        is_end_date=is_end_date
+        is_end_date=is_end_date,
+        filter_options=filter_options,
     )
 
     # --- Step 4: Signal Fusion & Meta-Labeling ---
@@ -1579,4 +1618,3 @@ def _run_ml_pipeline_implementation(
     
     _logger.info("✅ ML Pipeline complete")
     return out
-
