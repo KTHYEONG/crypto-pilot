@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 import os
+import signal
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
@@ -245,8 +246,26 @@ def optimize_worker(s_name: str, s_url: str, chunk_size: int):
         s_url, engine_kwargs={"connect_args": {"timeout": 60, "check_same_thread": False}}
     )
     study = optuna.load_study(study_name=s_name, storage=inner_storage)
+    trial_timeout_sec = int(OPT_FUTURES_CONFIG.get("FUTURES_OPT_TRIAL_TIMEOUT_SEC", 180))
+
+    def _objective_with_timeout(tr: optuna.Trial):
+        if trial_timeout_sec <= 0:
+            return objective_ml_phase_d(tr, _GLOBAL_BASE_CTX)
+
+        def _timeout_handler(_signum, _frame):
+            raise RuntimeError(f"trial_timeout>{trial_timeout_sec}s")
+
+        prev = signal.getsignal(signal.SIGALRM)
+        signal.signal(signal.SIGALRM, _timeout_handler)
+        signal.alarm(trial_timeout_sec)
+        try:
+            return objective_ml_phase_d(tr, _GLOBAL_BASE_CTX)
+        finally:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, prev)
+
     study.optimize(
-        lambda tr: objective_ml_phase_d(tr, _GLOBAL_BASE_CTX),
+        _objective_with_timeout,
         n_trials=chunk_size,
         n_jobs=1,
         catch=(ValueError, RuntimeError),
@@ -460,7 +479,7 @@ def run_optimization_loop(
     import os
     import threading
     import time
-    from concurrent.futures import ProcessPoolExecutor
+    from concurrent.futures import ProcessPoolExecutor, TimeoutError
 
     import optuna
     from tqdm import tqdm
@@ -513,7 +532,9 @@ def run_optimization_loop(
 
     # 3. Micro-Batching: Calculate chunk size to balance throughput and latency
     # Typically 2-4 trials per chunk is a good balance for SQLite WAL.
-    chunk_size = max(1, min(4, n_trials // (n_workers * 2)))
+    chunk_cap = int(OPT_FUTURES_CONFIG.get("FUTURES_OPT_CHUNK_SIZE_CAP", 4))
+    chunk_cap = max(1, chunk_cap)
+    chunk_size = max(1, min(chunk_cap, n_trials // max(1, (n_workers * 2))))
     n_chunks = n_trials // chunk_size
     remainder = n_trials % chunk_size
     chunks = [chunk_size] * n_chunks
@@ -553,12 +574,16 @@ def run_optimization_loop(
         except Exception:
             pass
 
-    poller_thread = threading.Thread(
-        target=progress_poller,
-        args=(study_name, storage_url, n_trials, base_ctx.run_id),
-        daemon=True
-    )
-    poller_thread.start()
+    poller_enabled = bool(OPT_FUTURES_CONFIG.get("FUTURES_OPT_ENABLE_PROGRESS_POLLER", True))
+    poller_thread = None
+    if poller_enabled:
+        poller_thread = threading.Thread(
+            target=progress_poller,
+            args=(study_name, storage_url, n_trials, base_ctx.run_id),
+            daemon=True
+        )
+        poller_thread.start()
+    chunk_timeout_sec = int(OPT_FUTURES_CONFIG.get("FUTURES_OPT_CHUNK_TIMEOUT_SEC", 1200))
 
     # 5. Parallel Execution: Dynamic dispatch of chunked tasks
     mp_ctx = multiprocessing.get_context("fork")
@@ -568,15 +593,25 @@ def run_optimization_loop(
                 executor.submit(optimize_worker, study_name, storage_url, c_size)
                 for c_size in chunks
             ]
-            # Just wait for completion, tqdm is handled by the poller thread
-            for future in futures:
+            # Wait chunk-by-chunk with timeout to avoid indefinite tail stalls.
+            for i, future in enumerate(futures, start=1):
                 try:
-                    future.result()
+                    future.result(timeout=None if chunk_timeout_sec <= 0 else chunk_timeout_sec)
+                except TimeoutError:
+                    _logger.error(
+                        "Worker batch timeout (chunk %d/%d, timeout=%ss).",
+                        i, len(futures), chunk_timeout_sec
+                    )
+                    # Cancel queued work and break out; completed trials remain in DB.
+                    for f in futures[i:]:
+                        f.cancel()
+                    break
                 except Exception as e:
                     _logger.error("Worker batch failed: %s", e)
     finally:
         stop_event.set()
-        poller_thread.join(timeout=5)
+        if poller_thread is not None:
+            poller_thread.join(timeout=5)
         _GLOBAL_BASE_CTX = None  # Clear global reference
 
     return study_ml

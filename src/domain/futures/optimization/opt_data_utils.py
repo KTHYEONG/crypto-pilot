@@ -463,6 +463,7 @@ def compute_regime_drift(
             "oos_pct": float(oos_dist[ridx] * 100.0),
             "ratio": float((oos_dist[ridx] + eps) / (is_dist[ridx] + eps)),
         }
+    is_oos_crisis_ratio = float(regime_shift.get("CRISIS", {}).get("ratio", 1.0))
 
     _logger.info(
         " [S3] Regime Drift: KL(IS||OOS)=%.3f  KL(OOS||IS)=%.3f  KL_sym=%.3f  [%s]",
@@ -486,5 +487,6 @@ def compute_regime_drift(
         "kl_oos_to_is": kl_oos_to_is,
         "kl_sym": kl_sym,
         "drift_label": drift_label,
+        "is_oos_crisis_ratio": is_oos_crisis_ratio,
         "regime_shift": regime_shift,
     }
