@@ -101,7 +101,7 @@ def run_final_oos_evaluation(
     ensemble_curves = []
     ensemble_ports = []
     for i, res in enumerate(ensemble_results):
-        m_params = finalize_strategy_portfolio_params(res.params, policy_cfg)
+        m_params = finalize_strategy_portfolio_params(res["params"], policy_cfg)
         m_port = run_oos_margin_shared_portfolio(
             valid_symbols,
             args.tf,
@@ -116,7 +116,7 @@ def run_final_oos_evaluation(
         m_mdd = m_port.get("mdd_pct", 0.0)
         _logger.debug(
             f"    Member {i+1}/{len(ensemble_results)}: CAGR={m_cagr:7.2f}% | "
-            f"MDD={m_mdd:6.2f}% | Trial={res.representative_trial.number}"
+            f"MDD={m_mdd:6.2f}% | Trial={res['trial'].number}"
         )
 
     # Online Capital Allocation (Meta-Strategy)
@@ -451,7 +451,7 @@ def run_final_oos_evaluation(
         "awf_turnover_cost_ratio": float(champion_awf_diag.get("awf_turnover_cost_ratio", 0.0)),
     })
 
-    params["ensemble_members"] = [res.params for res in ensemble_results]
+    params["ensemble_members"] = [res["params"] for res in ensemble_results]
     params["meta_allocation"] = {
         "window_size": meta_window, 
         "eta": meta_eta, 
