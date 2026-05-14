@@ -390,10 +390,27 @@ def run_optimization_loop(
     resume: bool = False,
     n_workers: int = 6,
 ) -> optuna.Study:
-    """Orchestrate Step 4: Parallel Optuna optimization loop."""
-    import gc
+    """Orchestrate Step 4: Parallel Optuna optimization loop with dynamic load balancing.
 
-    from joblib import Parallel, delayed
+    Uses ProcessPoolExecutor (fork) to dispatch 1-trial tasks dynamically to avoid
+    straggler effects from static partitioning. Constrains Numba/NumPy threads
+    to prevent CPU thrashing.
+    """
+    import gc
+    import multiprocessing
+    import os
+    from concurrent.futures import ProcessPoolExecutor, as_completed
+
+    import optuna
+    from tqdm import tqdm
+
+    # 1. Prevent CPU Thrashing: Disable nested multi-threading in sub-processes
+    # This ensures each worker process uses exactly one core efficiently.
+    for env_var in [
+        "NUMBA_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS",
+        "OPENBLAS_NUM_THREADS", "VECLIB_MAXIMUM_THREADS", "NUMEXPR_NUM_THREADS"
+    ]:
+        os.environ[env_var] = "1"
 
     def constraints_func(trial: optuna.trial.FrozenTrial) -> list[float]:
         if "IS_MDD" in trial.user_attrs:
@@ -414,17 +431,32 @@ def run_optimization_loop(
     )
     study_ml.set_user_attr("latest_run_id", base_ctx.run_id)
 
+    # 2. Memory Efficiency: Freeze existing objects before fork to leverage CoW
     gc.collect()
-    gc.freeze()
+    try:
+        gc.freeze()
+    except (AttributeError, RuntimeError):
+        pass
 
-    trials_per_worker = n_trials // n_workers
-    remainder = n_trials % n_workers
-    worker_tasks = [
-        delayed(optimize_worker)(
-            study_name, storage_url, trials_per_worker + (1 if i < remainder else 0), base_ctx
-        )
-        for i in range(n_workers)
-        if (trials_per_worker + (1 if i < remainder else 0)) > 0
-    ]
-    Parallel(n_jobs=n_workers, backend="multiprocessing")(worker_tasks)
+    # 3. Dynamic Dispatch: Submit each trial as an individual task
+    # This allows workers to grab next task immediately after finishing current one,
+    # solving the 'straggler effect' from static partitioning.
+    mp_ctx = multiprocessing.get_context("fork")
+    
+    with tqdm(total=n_trials, desc=" [OPT] Progress", unit="trial", leave=True) as pbar:
+        with ProcessPoolExecutor(max_workers=n_workers, mp_context=mp_ctx) as executor:
+            # Create a list of single-trial tasks
+            futures = [
+                executor.submit(optimize_worker, study_name, storage_url, 1, base_ctx)
+                for _ in range(n_trials)
+            ]
+            
+            # Update progress bar in real-time as tasks complete
+            for future in as_completed(futures):
+                try:
+                    future.result()  # Catch potential worker errors
+                except Exception as e:
+                    _logger.error("Worker task failed: %s", e)
+                pbar.update(1)
+
     return study_ml
