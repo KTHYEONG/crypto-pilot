@@ -93,7 +93,7 @@ def wf_path_ergodicity_deviation_pct(leg_tw: Sequence[float]) -> float:
 
 
 def awf_pos_frac_to_pseudo_pbo(pos_frac: float) -> float:
-    """Heuristic selection-pressure proxy in [0, 1], **not** López–Prado PBO.
+    """Heuristic selection-pressure proxy in [0, 1], **not** Lopez-Prado PBO.
 
     Kept for backwards-compatible gate wiring; interpret as "failure pressure from
     low positive-leg fraction", not a calibrated probability of backtest overfitting.
@@ -131,6 +131,8 @@ def resolve_adjusted_gates(cfg: dict[str, Any], n_trials: int) -> tuple[float, f
 
 @dataclass
 class CheckRecord:
+    """Record of a single gate check."""
+
     check_id: str
     label: str
     observed: float
@@ -140,6 +142,8 @@ class CheckRecord:
 
 @dataclass
 class GoNoGoResult:
+    """Result of a Go/No-Go check with details and summary."""
+
     passed: bool
     details: dict[str, bool]
     summary: str
@@ -224,6 +228,8 @@ def run_go_nogo_check(
 
 @dataclass(frozen=True)
 class FuturesSymbolGateRow:
+    """Row for a single symbol in the futures deployment report."""
+
     symbol: str
     net_cagr_pct: float
     max_mdd_pct: float
@@ -233,6 +239,8 @@ class FuturesSymbolGateRow:
 
 @dataclass(frozen=True)
 class FuturesDeploymentReportInput:
+    """Input parameters for the futures deployment report."""
+
     gate1_sqn: float
     gate1_path_sortino: float
     gate1_tail_ratio: float
@@ -435,7 +443,8 @@ def run_futures_deployment_report(ctx: FuturesDeploymentReportInput) -> str:
         f"  - Terminal Wealth Ratio       : {ctx.terminal_wealth_ratio:.3f}   "
         f"{_fmt_pass_info(tw_ok)} (Min: {ctx.tw_target})",
         f"  - OOS Win Rate (INFO)         : {ctx.oos_win_rate_pct:.1f}%",
-        f"  - Long/Short Ratio (INFO)     : {ctx.oos_long_short_minority_pct:.1f}% minority direction",
+        f"  - Long/Short Ratio (INFO)     : {ctx.oos_long_short_minority_pct:.1f}% "
+        "minority direction",
         "",
     ]
     if ctx.multi_window_summary:
@@ -447,7 +456,8 @@ def run_futures_deployment_report(ctx: FuturesDeploymentReportInput) -> str:
             " [PART 3. SYMBOL MICROSTRUCTURE & FINAL VERDICT]",
             "=" * 71,
             "▶ Portfolio Composition (Margin-Shared)",
-            f"  - Capital: ${ctx.initial_capital_usdt:,.0f} -> ${final_capital:,.0f} ({profit_pct:+.1f}%)",
+            f"  - Capital: ${ctx.initial_capital_usdt:,.0f} -> ${final_capital:,.0f} "
+            f"({profit_pct:+.1f}%)",
             f"  - Total Trades: {ctx.oos_total_trades} | Concentration: {ctx.loso_warning}",
             "",
         ]
@@ -456,9 +466,11 @@ def run_futures_deployment_report(ctx: FuturesDeploymentReportInput) -> str:
 
     lines.extend(
         [
-            "  ※ Symbol PnL contrib ann%: margin-shared trade PnL vs initial, annualized (not standalone engine CAGR).",
+            "  ※ Symbol PnL contrib ann%: margin-shared trade PnL vs initial, "
+            "annualized (not standalone engine CAGR).",
             "",
-            f"▶ Final Verdict : {'[GO - DEPLOYABLE]' if ctx.final_decision_go else '[NO-GO - REFINEMENT NEEDED]'}",
+            "▶ Final Verdict : "
+            f"{'[GO - DEPLOYABLE]' if ctx.final_decision_go else '[NO-GO - REFINEMENT NEEDED]'}",
             f"  Compliance Score: {ctx.hard_passed}/{ctx.hard_total} Critical Gates Passed",
         ]
     )
@@ -477,8 +489,10 @@ def run_futures_deployment_report(ctx: FuturesDeploymentReportInput) -> str:
             " [PART 4. LONG/SHORT BALANCE (FUTURES)]",
             "=" * 71,
             "▶ Long/Short Balance Diagnostic",
-            f"  - Long Trades: {ctx.oos_long_trades} | Short Trades: {ctx.oos_short_trades} | Ratio: {ratio_txt}",
-            f"  - Funding Cost Total: ${ctx.funding_cost_total_usdt:,.2f} | Drag: {drag_pct:.1f}% of gross PnL",
+            f"  - Long Trades: {ctx.oos_long_trades} | Short Trades: {ctx.oos_short_trades} | "
+            f"Ratio: {ratio_txt}",
+            f"  - Funding Cost Total: ${ctx.funding_cost_total_usdt:,.2f} | "
+            f"Drag: {drag_pct:.1f}% of gross PnL",
             "=" * 71,
         ]
     )
@@ -486,15 +500,24 @@ def run_futures_deployment_report(ctx: FuturesDeploymentReportInput) -> str:
     if not ctx.final_decision_go:
         lines.append("\n  ※ 주요 결격 사유 (Critical Failures):")
         # (생략: 기존 리포트와 동일한 결격 사유 로직)
-        if not sqn_ok: lines.append(f"    - TIER1: SQN 점수({ctx.gate1_sqn:.2f}) 미달")
-        if not psr_ok: lines.append(f"    - TIER1: PSR 점수({ctx.gate1_psr:.4f}) 미달")
-        if not dsr_ok: lines.append(f"    - TIER1: DSR 점수({ctx.gate1_dsr:.4f}) 미달")
-        if not oos_mdd_ok: lines.append(f"    - TIER2: OOS MDD({abs(ctx.oos_mdd_pct):.1f}%) 초과")
-        if not cvar_ok: lines.append(f"    - TIER2: OOS CVaR({ctx.oos_cvar_pct:.2f}%) 초과")
-        if not calmar_ok: lines.append(f"    - TIER2: Calmar Ratio({ctx.oos_calmar:.2f}) 미달")
-        if not fund_ok: lines.append(f"    - TIER2: Funding drag({ctx.funding_drag_pct:.2f}%) 초과")
-        if not oos_cagr_ok: lines.append(f"    - TIER3: OOS CAGR({ctx.oos_net_cagr_pct:.1f}%) 미달")
-        if not pf_ok: lines.append(f"    - TIER3: Profit Factor({ctx.oos_pf:.2f}) 미달")
+        if not sqn_ok:
+            lines.append(f"    - TIER1: SQN 점수({ctx.gate1_sqn:.2f}) 미달")
+        if not psr_ok:
+            lines.append(f"    - TIER1: PSR 점수({ctx.gate1_psr:.4f}) 미달")
+        if not dsr_ok:
+            lines.append(f"    - TIER1: DSR 점수({ctx.gate1_dsr:.4f}) 미달")
+        if not oos_mdd_ok:
+            lines.append(f"    - TIER2: OOS MDD({abs(ctx.oos_mdd_pct):.1f}%) 초과")
+        if not cvar_ok:
+            lines.append(f"    - TIER2: OOS CVaR({ctx.oos_cvar_pct:.2f}%) 초과")
+        if not calmar_ok:
+            lines.append(f"    - TIER2: Calmar Ratio({ctx.oos_calmar:.2f}) 미달")
+        if not fund_ok:
+            lines.append(f"    - TIER2: Funding drag({ctx.funding_drag_pct:.2f}%) 초과")
+        if not oos_cagr_ok:
+            lines.append(f"    - TIER3: OOS CAGR({ctx.oos_net_cagr_pct:.1f}%) 미달")
+        if not pf_ok:
+            lines.append(f"    - TIER3: Profit Factor({ctx.oos_pf:.2f}) 미달")
 
     if ctx.regime_diagnostic_block:
         lines.append("")
@@ -539,9 +562,12 @@ def run_multi_window_oos_gate(
             )
             for w in window_results
         ],
-        f"  - Positive windows >= {min_positive_windows} | {'PASS' if ok_pos else 'FAIL'} | obs={pos}/{len(window_results)}",
-        f"  - Median window CAGR >= {min_median_cagr_pct}% | {'PASS' if ok_med else 'FAIL'} | obs={med_c:.2f}%",
-        f"  - Worst-window |MDD| <= {max_worst_mdd_pct}% | {'PASS' if ok_mdd else 'FAIL'} | obs={worst_mdd:.2f}%",
+        f"  - Positive windows >= {min_positive_windows} | "
+        f"{'PASS' if ok_pos else 'FAIL'} | obs={pos}/{len(window_results)}",
+        f"  - Median window CAGR >= {min_median_cagr_pct}% | "
+        f"{'PASS' if ok_med else 'FAIL'} | obs={med_c:.2f}%",
+        f"  - Worst-window |MDD| <= {max_worst_mdd_pct}% | "
+        f"{'PASS' if ok_mdd else 'FAIL'} | obs={worst_mdd:.2f}%",
         "-" * 55,
         f"  FINAL: {'GO' if passed else 'NO-GO'}",
     ]
@@ -577,7 +603,8 @@ def format_regime_oos_diagnostic_block(
     if stress_mdd > float(stress_mdd_warn_pct):
         lines.append("")
         lines.append(
-            f"  ⚠ WARNING: Stress-regime MDD ({stress_mdd:.2f}%) exceeds threshold ({stress_mdd_warn_pct}%)"
+            f"  ⚠ WARNING: Stress-regime MDD ({stress_mdd:.2f}%) "
+            f"exceeds threshold ({stress_mdd_warn_pct}%)"
         )
     lines.append("=" * 71)
     return "\n".join(lines)
