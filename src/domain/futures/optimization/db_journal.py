@@ -1,5 +1,5 @@
-"""
-Database and Locking utilities for Optimization.
+"""Database and Locking utilities for Optimization.
+
 Combines Optuna Study management (MySQL/SQLite) and Windows-specific I/O locking.
 """
 
@@ -9,7 +9,7 @@ import hashlib
 import logging
 import os
 import sys
-from typing import Any, Dict, Optional
+from typing import Any
 
 import optuna
 
@@ -29,16 +29,14 @@ def fast_reset_study(
     db_port: str,
     db_name: str,
 ) -> bool:
-    """
-    Bypass Optuna's slow ORM delete_study() by directly executing raw SQL against MySQL.
-    """
+    """Bypass Optuna's slow ORM delete_study() by directly executing raw SQL against MySQL."""
     try:
         import pymysql
     except ImportError:
         _logger.warning("pymysql not installed; falling back to optuna.delete_study()")
         return False
 
-    conn: Optional[pymysql.connections.Connection] = None
+    conn: pymysql.connections.Connection | None = None
     try:
         conn = pymysql.connect(
             host=db_host,
@@ -88,7 +86,7 @@ def fast_reset_study(
                 for table in child_tables:
                     try:
                         cursor.execute(
-                            f"DELETE FROM {table} WHERE trial_id IN ({fmt})",  # nosec: S608
+                            f"DELETE FROM {table} WHERE trial_id IN ({fmt})",  # noqa: S608
                             chunk,
                         )
                     except Exception as e:
@@ -108,7 +106,7 @@ def fast_reset_study(
         ):
             try:
                 cursor.execute(
-                    f"DELETE FROM {table} WHERE study_id = %s",
+                    f"DELETE FROM {table} WHERE study_id = %s",  # noqa: S608
                     (study_id,),
                 )
             except Exception as e:
@@ -145,11 +143,9 @@ def fast_reset_study(
 
 
 def save_study_to_sqlite(
-    study: optuna.Study, project_root: str, target_study_name: Optional[str] = None
+    study: optuna.Study, project_root: str, target_study_name: str | None = None
 ) -> bool:
-    """
-    Export ONLY the best trial from the current study to local SQLite for production.
-    """
+    """Export ONLY the best trial from the current study to local SQLite for production."""
     study_name: str = target_study_name if target_study_name is not None else study.study_name
     sqlite_path: str = os.path.join(project_root, "futures_strategy.db")
     sqlite_storage_url: str = f"sqlite:///{sqlite_path}"
@@ -162,7 +158,7 @@ def save_study_to_sqlite(
         except (KeyError, Exception):
             ...
 
-        create_kwargs: Dict[str, Any] = {
+        create_kwargs: dict[str, Any] = {
             "study_name": study_name,
             "storage": sqlite_storage_url,
             "load_if_exists": False,
@@ -201,11 +197,10 @@ def _mutex_name_from_path(file_path: str) -> str:
 if sys.platform == "win32":
 
     class WindowsNamedMutexJournalLock:
-        """
-        Process-spanning lock for Journal file I/O on Windows.
-        """
+        """Process-spanning lock for Journal file I/O on Windows."""
 
         def __init__(self, file_path: str) -> None:
+            """Initialize the mutex for the given file path."""
             self._mutex_name: str = _mutex_name_from_path(file_path)
             self._handle: wintypes.HANDLE | None = self._open_or_create_mutex()
 
@@ -223,6 +218,7 @@ if sys.platform == "win32":
             return handle
 
         def acquire(self) -> bool:
+            """Acquire the Windows mutex."""
             kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
             if self._handle is None:
                 self._handle = self._open_or_create_mutex()
@@ -236,6 +232,7 @@ if sys.platform == "win32":
             return True
 
         def release(self) -> None:
+            """Release the Windows mutex."""
             kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
             if self._handle is None:
                 raise RuntimeError("Error: did not possess lock")
@@ -244,6 +241,7 @@ if sys.platform == "win32":
                 raise OSError(err, "ReleaseMutex failed")
 
         def __del__(self) -> None:
+            """Ensure handle is closed on deletion."""
             if getattr(self, "_handle", None) is not None:
                 try:
                     ctypes.windll.kernel32.CloseHandle(self._handle)  # type: ignore[attr-defined]
@@ -252,8 +250,10 @@ if sys.platform == "win32":
                 self._handle = None
 
         def __getstate__(self) -> dict[str, Any]:
+            """Return state for pickling (mutex name only)."""
             return {"_mutex_name": self._mutex_name}
 
         def __setstate__(self, state: dict[str, Any]) -> None:
+            """Restore state after pickling and re-open mutex."""
             self._mutex_name = state["_mutex_name"]
             self._handle = self._open_or_create_mutex()

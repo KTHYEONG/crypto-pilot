@@ -28,7 +28,7 @@ from config.settings import FUTURES_DATA_DIR
 from src.domain.futures.ml_pipeline.features.engineering import HMM_SEMANTIC_PROB_COLUMNS
 from src.domain.futures.data_loader import DataCollector
 from src.domain.futures.ml_pipeline.pipeline_runner import run_ml_pipeline_for_universe
-from src.execution.opt_main_futures import _load_futures_data_maps_for_symbols
+from src.domain.futures.optimization.opt_data_utils import load_futures_data_maps_for_symbols
 from src.domain.futures.optimization.screener import (
     screen_futures_universe,
     screen_symbol_refinement_futures,
@@ -243,7 +243,7 @@ def test_universe_gp_hmm_flow(tf="4h"):
         _logger.error("No broad candidates found. Aborting.")
         return
 
-    data_maps_broad, _, valid_broad = _load_futures_data_maps_for_symbols(
+    data_maps_broad, _, valid_broad = load_futures_data_maps_for_symbols(
         broad_candidates,
         tf,
         fetch_start_date,
@@ -285,7 +285,7 @@ def test_universe_gp_hmm_flow(tf="4h"):
                     pass
 
     # 4. Data Loading for ML (Ensuring all symbols including anchors are loaded)
-    data_maps, oos_data_maps, valid_ml_symbols = _load_futures_data_maps_for_symbols(
+    data_maps, oos_data_maps, valid_ml_symbols = load_futures_data_maps_for_symbols(
         final_symbols, tf, fetch_start_date, start_date, is_end_date, end_date
     )
 
