@@ -20,7 +20,7 @@ from config.opt_config import (
     get_quarterly_window
 )
 from config.settings import FUTURES_DATA_DIR
-from src.execution.opt_main_futures import _load_futures_data_maps_for_symbols
+from src.domain.futures.optimization.opt_data_utils import load_futures_data_maps_for_symbols
 
 def test_futures_universe_filtering():
     """
@@ -54,7 +54,7 @@ def test_futures_universe_filtering():
     test_symbols = list(broad_candidates)[:10]
     print(f"[Data Load] Loading data for refinement check (Sample size: {len(test_symbols)})...")
     
-    data_maps_broad, _, valid_broad = _load_futures_data_maps_for_symbols(
+    data_maps_broad, _, valid_broad = load_futures_data_maps_for_symbols(
         test_symbols, tf, fetch_start, start, is_end, end
     )
     

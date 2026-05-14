@@ -1,4 +1,5 @@
 """Performance Evaluation and Metrics for Optimization.
+
 Combines Alpha IC evaluation, OOS Portfolio Backtesting, and statistical metrics.
 """
 
@@ -32,11 +33,12 @@ _logger: logging.Logger = logging.getLogger("opt_futures")
 
 def compute_vol_adj_forward_returns(
     df: pd.DataFrame, 
-    horizons: list[int] = [2, 6, 12],
+    horizons: list[int] | None = None,
     market_returns: dict[int, np.ndarray] | None = None
 ) -> dict[int, np.ndarray]:
-    """여러 호흡(Horizons)에 대해 변동성으로 정규화된 미래 수익률을 계산함.
-    """
+    """여러 호흡(Horizons)에 대해 변동성으로 정규화된 미래 수익률을 계산함."""
+    if horizons is None:
+        horizons = [2, 6, 12]
     close = df["close"].to_numpy(dtype=np.float64)
     high = df["high"].to_numpy(dtype=np.float64)
     low = df["low"].to_numpy(dtype=np.float64)
@@ -420,7 +422,7 @@ def run_oos_margin_shared_portfolio(
         slippage_rate=SLIPPAGE_RATE,
         smart_offset=SMART_ORDER_OFFSET,
     )
-    trades_df, equity_curve, final_balance, bt_diag = engine.run()
+    trades_df, equity_curve, final_balance, _bt_diag = engine.run()
 
     # Metrics calculation
     hours_per_bar = int(tf.replace("h", "")) if tf.endswith("h") else 4
@@ -467,8 +469,14 @@ def run_oos_margin_shared_portfolio(
         long_losses = float(abs(long_df[long_df["pnl"] < 0]["pnl"].sum()))
         short_gains = float(short_df[short_df["pnl"] > 0]["pnl"].sum())
         short_losses = float(abs(short_df[short_df["pnl"] < 0]["pnl"].sum()))
-        long_pf = long_gains / max(long_losses, 1e-9) if long_losses > 0 else (1.5 if long_gains > 0 else 1.0)
-        short_pf = short_gains / max(short_losses, 1e-9) if short_losses > 0 else (1.5 if short_gains > 0 else 1.0)
+        long_pf = (
+            long_gains / max(long_losses, 1e-9) 
+            if long_losses > 0 else (1.5 if long_gains > 0 else 1.0)
+        )
+        short_pf = (
+            short_gains / max(short_losses, 1e-9) 
+            if short_losses > 0 else (1.5 if short_gains > 0 else 1.0)
+        )
     else:
         pf_val, wr, lt, st, minority_pct, ev_ratio = 1.0, 0.0, 0, 0, 0.0, 0.0
         long_pf, short_pf = 1.0, 1.0
@@ -480,7 +488,10 @@ def run_oos_margin_shared_portfolio(
         "hw_recovery_days": hw_days, "oos_long_short_minority_pct": minority_pct,
         "calmar_ratio": cagr / abs(mdd) if abs(mdd) > 1e-6 else 0.0,
         "ulcer_index": ulcer, "ev_cost_ratio": ev_ratio,
-        "avg_trade_pnl_pct": float(trades_df["pnl"].mean() / max(FUTURES_INITIAL_BALANCE, 1.0) * 100.0) if not trades_df.empty else 0.0,
+        "avg_trade_pnl_pct": (
+            float(trades_df["pnl"].mean() / max(FUTURES_INITIAL_BALANCE, 1.0) * 100.0)
+            if not trades_df.empty else 0.0
+        ),
         "long_pf": float(long_pf),
         "short_pf": float(short_pf),
         "long_profit_factor": float(long_pf),
