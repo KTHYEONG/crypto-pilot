@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import multiprocessing
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -93,6 +95,40 @@ setup_logger("DataCollector")
 setup_logger("BinanceClient")
 logging.getLogger("DataCollector").setLevel(logging.WARNING)
 logging.getLogger("BinanceClient").setLevel(logging.WARNING)
+
+
+def _write_hmm_baseline_snapshot(
+    *,
+    project_root_path: str,
+    tf: str,
+    ops_profile: str,
+    hmm_only: bool,
+    alpha_only: bool,
+    is_end_date: str,
+    end_date: str,
+    hmm_report: dict[str, Any],
+) -> Path | None:
+    if not hmm_report:
+        return None
+    out_dir = Path(project_root_path) / ".ai" / "experiments"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    mode = "hmm-only" if hmm_only else ("alpha-only" if alpha_only else "full")
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    out_path = out_dir / f"{stamp}_hmm_baseline_snapshot_{ops_profile}_{mode}_{tf}.json"
+    payload = {
+        "snapshot_type": "hmm_baseline",
+        "created_at_utc": datetime.now(timezone.utc).isoformat(),
+        "tf": tf,
+        "ops_profile": ops_profile,
+        "mode": mode,
+        "is_end_date": is_end_date,
+        "end_date": end_date,
+        "hmm_report": hmm_report,
+    }
+    with out_path.open("w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+    _logger.info(" [HMM SNAPSHOT] %s", out_path)
+    return out_path
 
 
 def main() -> None:
@@ -256,9 +292,11 @@ def main() -> None:
         write_run_summary_snapshot(summary, project_root)
         run_summary_written = True
 
+    opt_workers = int(OPT_FUTURES_CONFIG.get("FUTURES_OPT_MAX_WORKERS", ml_n_jobs))
+    opt_workers = max(1, min(opt_workers, ml_n_jobs))
     study_ml = run_optimization_loop(
         base_ctx, study_name, storage_url, storage, n_ml_trials, seed_learn,
-        resume=args.resume, n_workers=6
+        resume=args.resume, n_workers=opt_workers
     )
 
     _persist_run_summary("optimized")
