@@ -347,7 +347,7 @@ def print_dual_audit_dashboard(
 
 
 def log_oos_regime_attribution(attr: dict[str, Any]) -> None:
-    """Log out-of-sample regime performance attribution.
+    """Log out-of-sample regime performance attribution with a clean, visual format.
 
     Args:
         attr: Dictionary containing regime metrics and chop diagnostics.
@@ -355,25 +355,36 @@ def log_oos_regime_attribution(attr: dict[str, Any]) -> None:
     """
     _logger.info(" [OOS REGIME ATTRIBUTION]")
     regime_metrics = attr.get("regime_metrics", {})
+    emoji_map = {
+        "bull": "🐂Bull  ",
+        "bear": "🐻Bear  ",
+        "chop": "🎢Chop  ",
+        "crisis": "💀Crisis",
+    }
+
     for rn in REGIME_NAMES:
         m = regime_metrics.get(rn, {})
+        label = emoji_map.get(rn, rn.capitalize())
         _logger.info(
-            "   %-6s time=%6.2f%% trades=%4d win=%6.2f%% pf=%5.2f avg_pnl=% .6f",
-            rn.upper(),
+            "   %s : %5.1f%% time | %3d trades | PF %4.2f | PnL % .2f",
+            label,
             float(m.get("time_pct", 0.0)),
             int(m.get("trade_count", 0)),
-            float(m.get("win_rate", 0.0)),
             float(m.get("profit_factor", 1.0)),
             float(m.get("avg_pnl", 0.0)),
         )
+
+    loss_s = float(attr.get("chop_loss_share", 0.0)) * 100.0
+    trd_s = float(attr.get("chop_trade_share", 0.0)) * 100.0
+    flip = float(attr.get("chop_flip_proxy", 0.0))
+    cov = float(attr.get("trade_regime_coverage_pct", 0.0))
+
     _logger.info(
-        "   CHOP diagnostics: loss_share=%.2f%% trade_share=%.2f%% flip_proxy=%.3f (%s) "
-        "coverage=%.2f%%",
-        float(attr.get("chop_loss_share", 0.0)) * 100.0,
-        float(attr.get("chop_trade_share", 0.0)) * 100.0,
-        float(attr.get("chop_flip_proxy", 0.0)),
-        str(attr.get("chop_flip_proxy_label", "proxy")),
-        float(attr.get("trade_regime_coverage_pct", 0.0)),
+        "   > CHOP Diagnostics: Loss %.1f%% | Trade %.1f%% | Flip %.3f | Coverage %.1f%%",
+        loss_s,
+        trd_s,
+        flip,
+        cov,
     )
 
 
