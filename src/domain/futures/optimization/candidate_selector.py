@@ -146,12 +146,26 @@ def bounded_center_score(x: float, center: float, scale: float) -> float:
 
 
 def deploy_score(cand: dict[str, Any]) -> float:
-    """Unified score for deployment suitability across multiple metrics."""
+    """Unified score for deployment suitability across multiple metrics.
+
+    S4: When FUTURES_DEPLOY_SCORE_SIMPLIFIED=True, use 2-term Pareto-front ranking
+    (robust_score + worst_leg) instead of 7-term arbitrary weighting. Within the
+    Pareto front all constraint gates already passed → secondary metrics are redundant
+    and introduce noise into final candidate selection.
+    """
     cfg = dict(OPT_FUTURES_CONFIG)
-    step2_enabled = bool(cfg.get("FUTURES_CHOP_REGIME_GATE_ENABLED", False))
-    
+
     robust = cand_metric(cand, "awf_robust_score", -1.0)
     worst_leg_sc = cand_metric(cand, "awf_leg_worst_log_tw", -0.5)
+
+    if bool(cfg.get("FUTURES_DEPLOY_SCORE_SIMPLIFIED", True)):
+        # S4 simplified: dominant AWF quality signal, no arbitrary 7-term blend.
+        # awf_robust_score = min(leg_log_tw) across AWF legs (conservative compounding proxy).
+        # worst_leg adds distributional tail protection on top.
+        chop_loss = float(np.clip(cand_metric(cand, "awf_chop_loss_share", 0.0), 0.0, 1.0))
+        return 0.65 * robust + 0.25 * worst_leg_sc + 0.10 * (1.0 - chop_loss)
+
+    step2_enabled = bool(cfg.get("FUTURES_CHOP_REGIME_GATE_ENABLED", False))
     pos_ratio = cand_metric(cand, "awf_leg_pos_ratio", 0.0)
     trades = cand_metric(cand, "awf_trade_count_mean", 0.0)
     long_pf = cand_metric(cand, "awf_long_pf_mean", 1.0)
