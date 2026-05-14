@@ -1,5 +1,5 @@
-"""
-Cross-Sectional Universe Screener for Binance Futures.
+"""Cross-Sectional Universe Screener for Binance Futures.
+
 Focus: Liquidity, BTC Alignment (Beta/Corr), and Amihud Illiquidity.
 """
 
@@ -9,7 +9,7 @@ import json
 import logging
 import re
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -117,15 +117,15 @@ def _has_regime_diversity(df: pd.DataFrame, tf: str = "4h", min_vol_cv: float = 
 
 def screen_futures_universe(
     collector: DataCollector,
-    candidate_pool: List[str],
+    candidate_pool: list[str],
     tf: str,
-    cfg: Dict[str, Any],
+    cfg: dict[str, Any],
     fetch_start: str,
     end_date: str,
     *,
     data_dir: Path | None = None,
     universe_history_path: Path | None = None,
-) -> Tuple[List[str], int]:
+) -> tuple[list[str], int]:
     """Phase A: Market-Wide Liquidity Scan + PIT history + cached delisted symbols."""
     _ = candidate_pool
     _ = fetch_start
@@ -177,15 +177,15 @@ def screen_futures_universe(
 
 
 def screen_symbol_refinement_futures(
-    broad_candidates: List[str],
+    broad_candidates: list[str],
     winning_signal_type: str,
     is_end_date: str,
     tf: str = "1h",
     *,
-    symbol_dfs_4h: Dict[str, pd.DataFrame],
-    daily_dfs: Dict[str, pd.DataFrame],
-    phase_b_params: Optional[Dict[str, Any]] = None,
-    anchor_symbols: Optional[List[str]] = None,
+    symbol_dfs_4h: dict[str, pd.DataFrame],
+    daily_dfs: dict[str, pd.DataFrame],
+    phase_b_params: dict[str, Any] | None = None,
+    anchor_symbols: list[str] | None = None,
 ) -> bool:
     """Phase B: Institutional Risk Filtering (Beta, Corr, Funding, Diversity)."""
     anchors = list(anchor_symbols) if anchor_symbols else FUTURES_ANCHOR_SYMBOLS
@@ -274,7 +274,7 @@ def screen_symbol_refinement_futures(
     return True
 
 
-def update_futures_config_file(symbols: List[str]) -> None:
+def update_futures_config_file(symbols: list[str]) -> None:
     path = Path("config/opt_config.py")
     if not path.exists():
         return
@@ -283,3 +283,55 @@ def update_futures_config_file(symbols: List[str]) -> None:
     lines = [f'    "{s}",\n' for s in symbols]
     new_block = "FUTURES_SYMBOLS: List[str] = [\n" + "".join(lines) + "]"
     path.write_text(re.sub(pattern, new_block, content, count=1, flags=re.DOTALL), encoding="utf-8")
+
+
+def orchestrate_universe_discovery(
+    collector: DataCollector,
+    tf: str,
+    reference_date: str | None,
+    data_dir: Path,
+    anchor_symbols: list[str],
+) -> bool:
+    """Orchestrate Step 1: Universe Discovery & Data Loading.
+
+    Returns:
+        bool: True if refinement succeeded and config was updated.
+
+    """
+    _logger.info("\n" + "═" * 85)
+    _logger.info(" [STEP 1/5] UNIVERSE DISCOVERY & DATA LOADING")
+    _logger.info("═" * 85)
+
+    import importlib
+
+    import config.opt_config
+    from config.opt_config import FUTURES_SCREENER_CONFIG, get_quarterly_window
+    from src.domain.futures.optimization.opt_data_utils import load_futures_data_maps_for_symbols
+
+    res = get_quarterly_window(reference_date)
+    fetch_start_date, start_date, is_end_date, end_date = res
+
+    broad_candidates, _ = screen_futures_universe(
+        collector, [], tf, FUTURES_SCREENER_CONFIG,
+        fetch_start_date, is_end_date, data_dir=data_dir
+    )
+
+    if not broad_candidates:
+        _logger.error("No broad candidates. Aborting.")
+        return False
+
+    data_maps_broad, _, valid_broad = load_futures_data_maps_for_symbols(
+        broad_candidates, tf, fetch_start_date, start_date, is_end_date, end_date,
+        skip_metrics=True, target_tfs=[tf, "1d"]
+    )
+
+    success = screen_symbol_refinement_futures(
+        broad_candidates=list(broad_candidates), winning_signal_type="CS_RANK",
+        is_end_date=is_end_date, tf=tf,
+        symbol_dfs_4h={s: data_maps_broad[s][tf] for s in valid_broad},
+        daily_dfs={s: data_maps_broad[s]["1d"] for s in valid_broad},
+        phase_b_params=None, anchor_symbols=anchor_symbols
+    )
+    if success:
+        importlib.reload(config.opt_config)
+    return success
