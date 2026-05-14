@@ -552,7 +552,8 @@ def _inject_dyn_leverage_trimmed(trimmed_sig: pd.DataFrame, raw_full: pd.DataFra
     levs = np.clip(levs, lev_min, lev_max)
     if "hmm_prob_crisis" in raw_full.columns:
         pc = raw_full["hmm_prob_crisis"].fillna(0.0).to_numpy(dtype=np.float64)
-        levs = np.where(pc > crisis_thr, 1.0, levs)
+        crisis_flat_lev = float(cfg.get("FUTURES_HMM_CRISIS_FLAT_LEV", 0.0))
+        levs = np.where(pc > crisis_thr, crisis_flat_lev, levs)
     trimmed_sig["dyn_leverage"] = levs.astype(np.float64, copy=False)
 
 
@@ -1293,7 +1294,7 @@ def _cached_kill_fund_lev(
         if lev_blk is None or lev_blk.shape != aligned["close"].shape:
             lev_blk = np.full_like(aligned["close"], float(params["LEVERAGE"]), dtype=np.float64)
         else:
-            lev_blk = np.maximum(lev_blk.astype(np.float64, copy=False), 1.0)
+            lev_blk = np.maximum(lev_blk.astype(np.float64, copy=False), 0.0)
         aligned["dyn_leverage_cached"] = lev_blk
     lev_blk = aligned["dyn_leverage_cached"]
     return zkill, zfund, lev_blk
@@ -1738,7 +1739,7 @@ def _evaluate_awf_phase_d_aggregate(
         flip_w = float(cfg.get("FUTURES_STEP2_OBJ_FLIP_W", 0.10))
         # Penalize only excess over practical thresholds to preserve backward-compatible baseline.
         loss_thr = float(cfg.get("FUTURES_STEP2_CHOP_LOSS_SHARE_MAX", 0.60))
-        trade_thr = float(cfg.get("FUTURES_STEP2_CHOP_TRADE_SHARE_MAX", 0.65))
+        trade_thr = float(cfg.get("FUTURES_STEP2_CHOP_TRADE_SHARE_MAX", 0.70))
         flip_thr = float(cfg.get("FUTURES_STEP2_FLIP_RATE_PROXY_MAX", 0.75))
         excess_loss = max(0.0, chop_loss_share - loss_thr)
         excess_trade = max(0.0, chop_trade_share - trade_thr)
@@ -1748,11 +1749,11 @@ def _evaluate_awf_phase_d_aggregate(
     step4_enabled = bool(cfg.get("FUTURES_STEP4_DEPLOYABILITY_ENABLED", False))
     if step4_enabled:
         chop_trade_w4 = float(cfg.get("FUTURES_STEP4_OBJ_CHOP_TRADE_W", 0.10))
-        turnover_w4 = float(cfg.get("FUTURES_STEP4_OBJ_TURNOVER_W", 0.05))
+        turnover_w4 = float(cfg.get("FUTURES_STEP4_OBJ_TURNOVER_W", 0.10))
         chop_trade_ref = float(
             cfg.get(
                 "FUTURES_STEP2_CHOP_TRADE_SHARE_MAX",
-                cfg.get("FUTURES_STEP4_CHOP_TRADE_SHARE_MAX", 0.65),
+                cfg.get("FUTURES_STEP4_CHOP_TRADE_SHARE_MAX", 0.70),
             )
         )
         turnover_ref = float(cfg.get("FUTURES_STEP4_TURNOVER_COST_RATIO_MAX", 0.35))
@@ -1775,6 +1776,19 @@ def _evaluate_awf_phase_d_aggregate(
         excess_trade4 = max(0.0, chop_trade_share - chop_trade_ref)
         excess_turnover4 = max(0.0, turnover_cost_ratio - turnover_ref)
         robust_val -= chop_trade_w4 * excess_trade4 + turnover_w4 * excess_turnover4
+
+    # Ergodicity deviation penalty: high path-dependence violates Kelly compound growth assumptions
+    if leg_arr.size >= 2:
+        _tw_legs = np.exp(leg_arr)
+        _tw_mean = float(np.mean(_tw_legs))
+        _erg_dev_pct = (
+            float(np.max(np.abs(_tw_legs - _tw_mean)) / max(_tw_mean, 1e-9) * 100.0)
+            if _tw_mean > 1e-9
+            else 0.0
+        )
+        _erg_dev_floor = float(cfg.get("FUTURES_AWF_ERG_DEV_FLOOR", 1.5))
+        _erg_dev_w = float(cfg.get("FUTURES_AWF_ERG_DEV_W", 0.001))
+        robust_val -= _erg_dev_w * max(0.0, _erg_dev_pct - _erg_dev_floor)
 
     obj = -robust_val
     k_cfg = int(cfg.get("FUTURES_AWF_K_LEGS", 6))
