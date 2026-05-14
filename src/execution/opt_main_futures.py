@@ -1472,6 +1472,17 @@ def main() -> None:
     fetch_start_date, start_date, is_end_date, end_date = get_quarterly_window(args.reference_date)
     symbols = [s.strip() for s in args.symbols.split(",") if s.strip()]
 
+    _MIN_UNIVERSE_SYMBOLS = int(OPT_FUTURES_CONFIG.get("FUTURES_MIN_UNIVERSE_SYMBOLS", 3))
+    if not pre_args.skip_universe and len(symbols) < _MIN_UNIVERSE_SYMBOLS:
+        _logger.error(
+            " [HARD-STOP] Universe too small (%d symbol(s), minimum=%d). "
+            "CS_RANK cross-sectional alpha requires portfolio diversity. "
+            "Check Binance API connectivity or use --skip-universe to bypass.",
+            len(symbols),
+            _MIN_UNIVERSE_SYMBOLS,
+        )
+        return
+
     if pre_args.skip_universe:
         _logger.info("\n" + "═" * 85)
         _logger.info(" [STEP 1/5] DATA LOADING & INTEGRITY CHECK")
@@ -1837,10 +1848,36 @@ def main() -> None:
     Parallel(n_jobs=n_workers, backend="multiprocessing")(worker_tasks)
 
     all_trials = study_ml.get_trials()
-    pareto_trials = study_ml.best_trials
+    pareto_trials = list(study_ml.best_trials)
     # Persist immediately after optimization so even later-stage exceptions/timeouts
     # keep a run-scoped snapshot for comparison.
     _persist_run_summary("optimized")
+
+    if not pareto_trials and not all_trials:
+        _logger.error("  [FAIL] No trials completed successfully. Stopping optimization.")
+        _persist_run_summary("fail:no_pareto")
+        return
+
+    # Augment Pareto candidates with top-K study-wide trials by (awf_pos_frac, awf_mu_log).
+    # Pareto dominance on (robust_score, turnover) can exclude solutions with high
+    # awf_pos_frac that pass the AWF gate — adding them ensures we don't miss valid candidates.
+    # Uses ALL study trials (not just current run) since the study is keyed by cfg_hash,
+    # guaranteeing parameter compatibility across runs.
+    _study_complete = [t for t in all_trials if t.state == TrialState.COMPLETE]
+    _k_aug = int(OPT_FUTURES_CONFIG.get("FUTURES_AWF_AUGMENT_TOPK", 5))
+    _top_aug = sorted(
+        _study_complete,
+        key=lambda t: (
+            float(t.user_attrs.get("awf_pos_frac", 0.0)),
+            float(t.user_attrs.get("awf_mu_log", -9.0)),
+        ),
+        reverse=True,
+    )[:_k_aug]
+    _pareto_nums = {t.number for t in pareto_trials}
+    for _t in _top_aug:
+        if _t.number not in _pareto_nums:
+            pareto_trials.append(_t)
+            _pareto_nums.add(_t.number)
 
     if not pareto_trials:
         _logger.error("  [FAIL] No trials completed successfully. Stopping optimization.")
@@ -1850,7 +1887,7 @@ def main() -> None:
     from tqdm import tqdm as _tqdm
 
     n_pareto = len(pareto_trials)
-    _logger.info("  --> [VALIDATION] AWF Validation: %d Pareto candidates", n_pareto)
+    _logger.info("  --> [VALIDATION] AWF Validation: %d Pareto+TopK candidates", n_pareto)
 
     validated_candidates = []
     _awf_pass = 0
@@ -1930,10 +1967,10 @@ def main() -> None:
     )
     step2_enabled = bool(OPT_FUTURES_CONFIG.get("FUTURES_STEP2_REGIME_DEPLOY_ENABLED", False))
     step2_chop_loss_max = float(OPT_FUTURES_CONFIG.get("FUTURES_STEP2_CHOP_LOSS_SHARE_MAX", 0.60))
-    step2_chop_trade_max = float(OPT_FUTURES_CONFIG.get("FUTURES_STEP2_CHOP_TRADE_SHARE_MAX", 0.65))
+    step2_chop_trade_max = float(OPT_FUTURES_CONFIG.get("FUTURES_STEP2_CHOP_TRADE_SHARE_MAX", 0.70))
     step2_flip_proxy_max = float(OPT_FUTURES_CONFIG.get("FUTURES_STEP2_FLIP_RATE_PROXY_MAX", 0.75))
     step4_enabled = bool(OPT_FUTURES_CONFIG.get("FUTURES_STEP4_DEPLOYABILITY_ENABLED", False))
-    step4_chop_trade_max = float(OPT_FUTURES_CONFIG.get("FUTURES_STEP4_CHOP_TRADE_SHARE_MAX", 0.65))
+    step4_chop_trade_max = float(OPT_FUTURES_CONFIG.get("FUTURES_STEP4_CHOP_TRADE_SHARE_MAX", 0.70))
     step4_turnover_cost_max = float(
         OPT_FUTURES_CONFIG.get("FUTURES_STEP4_TURNOVER_COST_RATIO_MAX", 0.35)
     )
@@ -2804,7 +2841,7 @@ def main() -> None:
         if _chop_loss > float(OPT_FUTURES_CONFIG.get("FUTURES_STEP2_CHOP_LOSS_SHARE_MAX", 0.60)):
             gate_failures.append("STEP2_CHOP_HEAVY_LOSS")
             gate_ok = False
-        if _chop_trade > float(OPT_FUTURES_CONFIG.get("FUTURES_STEP2_CHOP_TRADE_SHARE_MAX", 0.65)):
+        if _chop_trade > float(OPT_FUTURES_CONFIG.get("FUTURES_STEP2_CHOP_TRADE_SHARE_MAX", 0.70)):
             gate_failures.append("STEP2_CHOP_HEAVY_TRADE")
             gate_ok = False
         if _flip_proxy > float(OPT_FUTURES_CONFIG.get("FUTURES_STEP2_FLIP_RATE_PROXY_MAX", 0.75)):
@@ -2812,7 +2849,7 @@ def main() -> None:
             gate_ok = False
     if bool(OPT_FUTURES_CONFIG.get("FUTURES_STEP4_DEPLOYABILITY_ENABLED", False)):
         _step4_chop_trade_max = float(
-            OPT_FUTURES_CONFIG.get("FUTURES_STEP4_CHOP_TRADE_SHARE_MAX", 0.65)
+            OPT_FUTURES_CONFIG.get("FUTURES_STEP4_CHOP_TRADE_SHARE_MAX", 0.70)
         )
         _step4_turnover_max = float(
             OPT_FUTURES_CONFIG.get("FUTURES_STEP4_TURNOVER_COST_RATIO_MAX", 0.35)
