@@ -396,9 +396,13 @@ def run_optimization_loop(
     from joblib import Parallel, delayed
 
     def constraints_func(trial: optuna.trial.FrozenTrial) -> list[float]:
-        is_mdd = trial.user_attrs.get("IS_MDD", 100.0)
-        is_dsr = trial.user_attrs.get("IS_DSR", 0.0)
-        return [is_mdd - 30.0, 0.10 - is_dsr]
+        if "IS_MDD" in trial.user_attrs:
+            mdd = trial.user_attrs.get("IS_MDD", 100.0)
+            dsr = trial.user_attrs.get("IS_DSR", 0.0)
+        else:
+            mdd = trial.user_attrs.get("awf_worst_mdd_pct", 100.0)
+            dsr = trial.user_attrs.get("gate1_dsr", 0.0)
+        return [mdd - 30.0, 0.10 - dsr]
 
     study_ml = get_or_create_study(
         study_name=study_name,
