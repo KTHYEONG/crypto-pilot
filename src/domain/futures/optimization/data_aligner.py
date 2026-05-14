@@ -1,5 +1,6 @@
-"""Futures Optuna objective: anchored walk-forward (AWF) legs, Kelly-CVaR scalar,
-disk+memory signal cache.
+"""Futures Optuna objective.
+
+Anchored walk-forward (AWF) legs, Kelly-CVaR scalar, disk+memory signal cache.
 """
 
 from __future__ import annotations
@@ -40,7 +41,8 @@ _FUTURES_2D_REQUIRED_COLS: tuple[str, ...] = (
 
 
 def _dataframe_to_symbol_arrays(sig_df: pd.DataFrame) -> dict[str, np.ndarray]:
-    """Converts a signal DataFrame to a dictionary of numpy arrays.
+    """Convert a signal DataFrame to a dictionary of numpy arrays.
+
     Optimized to minimize allocations and redundant filling.
     """
     out: dict[str, np.ndarray] = {}

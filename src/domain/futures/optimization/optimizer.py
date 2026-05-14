@@ -1,7 +1,7 @@
 """Phase D: CAWF-R ML cross-sectional rank portfolio optimization (Optuna TPE).
 
 Trial objective minimizes the negative robust anchored-WF scalar
-(median(log leg-TW) − λ·MAD − ψ·max leg-DD) with λ, ψ fixed in OPT_FUTURES_CONFIG.
+(median(log leg-TW) - lambda * MAD - psi * max leg-DD) with lambda, psi fixed in OPT_FUTURES_CONFIG.
 Phase D futures: anchored walk-forward legs, robust AWF scalar objective.
 Trial user_attrs set both AWF-native keys (``awf_*`` / ``awf_path_*``) and legacy
 ``cpcv_*`` / ``ml_*_cpcv`` aliases for older JSON readers.
@@ -101,7 +101,9 @@ def inject_cs_momentum_ranks(
                 data_maps[sym][tf][col_name] = ranks_df[sym].astype(np.float64)
 
 
-def resolve_embargo_bars_for_tf(cfg: dict[str, Any], tf: str, longest_indicator_period: int = 150) -> int:
+def resolve_embargo_bars_for_tf(
+    cfg: dict[str, Any], tf: str, longest_indicator_period: int = 150
+) -> int:
     """Prefer EMBARGO_BARS_BY_TF; fallback to horizon ratio heuristic."""
     by_tf = cfg.get("EMBARGO_BARS_BY_TF")
     if isinstance(by_tf, dict) and tf in by_tf:
@@ -126,6 +128,7 @@ class SignalCalibrator:
     """
 
     def __init__(self) -> None:
+        """Initialize the signal calibrator with a logistic regression model."""
         self.model = LogisticRegression(penalty=None, solver="lbfgs")
         self.is_fitted = False
         self.mean_b = 1.05  # Estimated win/loss ratio (Profit Factor)
@@ -134,11 +137,11 @@ class SignalCalibrator:
         """Fit calibration model and estimate average win/loss ratio."""
         # y=1 if forward return is positive
         y = (returns > 0.0001).astype(int)
-        X = alphas.reshape(-1, 1)
+        x_input = alphas.reshape(-1, 1)
 
         if len(np.unique(y)) > 1:
             try:
-                self.model.fit(X, y)
+                self.model.fit(x_input, y)
                 self.is_fitted = True
             except Exception as e:
                 _logger.warning("[SignalCalibrator] Logistic fit failed: %s", e)
@@ -174,8 +177,8 @@ class SignalCalibrator:
             # Fallback: sigmoid-like mapping centered at 0.5
             z = (alphas - 0.5) * 8.0
             return 1.0 / (1.0 + np.exp(-z))
-        X = alphas.reshape(-1, 1)
-        return self.model.predict_proba(X)[:, 1]
+        x_input = alphas.reshape(-1, 1)
+        return self.model.predict_proba(x_input)[:, 1]
 
 
 class DynamicKellySizer:
@@ -220,7 +223,8 @@ class MLPhaseDContext:
     calibrator_short: SignalCalibrator | None = None
     estimated_b: float = 1.05
     kelly_ic_upper: float = 0.5  # T3-B: IC EWMA-based Kelly upper bound
-    # Effective Bonferroni count = n_seeds × trials_per_seed (multi-seed studies).
+    # Effective Bonferroni count = n_seeds x trials_per_seed (multi-seed studies).
+
     effective_total_trials: int | None = None
     # Coordinate ascent: "A"/"B"/"C"; frozen holds completed phases' Optuna-param dict slices.
     coordinate_phase: str | None = None
@@ -265,7 +269,9 @@ def _fit_oos_platt_calibrators_from_maps(
     widen = bool(OPT_FUTURES_CONFIG.get("FUTURES_CALIB_PLATT_OOS_WIDEN_TO_POOL", True))
     pool = int(oos_pool_start) if oos_pool_start is not None else lo
 
-    def _collect(a0: int, a1: int) -> tuple[list[np.ndarray], list[np.ndarray], list[np.ndarray], list[np.ndarray]]:
+    def _collect(
+        a0: int, a1: int
+    ) -> tuple[list[np.ndarray], list[np.ndarray], list[np.ndarray], list[np.ndarray]]:
         al, rl, ash, rsh = [], [], [], []
         for sym in symbols:
             if sym not in data_maps or tf not in data_maps[sym]:
@@ -345,13 +351,15 @@ def _fit_tail_platt_calibrators_from_maps(
     *,
     tail_frac: float | None = None,
 ) -> tuple[SignalCalibrator | None, SignalCalibrator | None, float]:
-    """**Deprecated path:** tail of full aligned window (IS+OOS). Prefer
+    """Fit Platt calibrators from tail of data maps.
+
+    **Deprecated path:** tail of full aligned window (IS+OOS). Prefer
     :func:`_fit_oos_platt_calibrators_from_maps` with an explicit OOS index range.
     """
     eff_len = int(info["eff_ref_len"])
     if tail_frac is None:
         tail_frac = float(OPT_FUTURES_CONFIG.get("FUTURES_CALIB_PLATT_TAIL_FRAC", 0.30))
-    calib_start = max(0, int(round(eff_len * (1.0 - float(tail_frac)))))
+    calib_start = max(0, round(eff_len * (1.0 - float(tail_frac))))
     return _fit_oos_platt_calibrators_from_maps(
         data_maps,
         symbols,
@@ -372,7 +380,10 @@ def _build_prebuilt_full_arrays(
     calibrator: SignalCalibrator | None,
     calibrator_short: SignalCalibrator | None,
 ) -> dict[str, dict[str, np.ndarray]]:
-    """Vector bundle builders for ``_build_aligned_2d_from_prebuilt`` (one row = eff_ref_len bar)."""
+    """Build vector bundles for ``_build_aligned_2d_from_prebuilt``.
+
+    One row = eff_ref_len bar.
+    """
     prebuilt_full: dict[str, dict[str, np.ndarray]] = {}
     eff_len = int(info["eff_ref_len"])
     for sym in symbols:
@@ -386,8 +397,14 @@ def _build_prebuilt_full_arrays(
         trimmed_sig["high"] = raw_full["high"].to_numpy(dtype=np.float64, copy=False)
         trimmed_sig["low"] = raw_full["low"].to_numpy(dtype=np.float64, copy=False)
         trimmed_sig["open"] = raw_full["open"].to_numpy(dtype=np.float64, copy=False)
-        trimmed_sig["volume"] = raw_full["volume"].to_numpy(dtype=np.float64, copy=False) if "volume" in raw_full.columns else np.ones(len(raw_full))
-        _atr_col = raw_full["atr"].to_numpy(dtype=np.float64, copy=False) if "atr" in raw_full.columns else None
+        trimmed_sig["volume"] = (
+            raw_full["volume"].to_numpy(dtype=np.float64, copy=False)
+            if "volume" in raw_full.columns else np.ones(len(raw_full))
+        )
+        _atr_col = (
+            raw_full["atr"].to_numpy(dtype=np.float64, copy=False)
+            if "atr" in raw_full.columns else None
+        )
         if _atr_col is None or not np.any(_atr_col > 0):
             _atr_period_fb = int(OPT_FUTURES_CONFIG.get("FUTURES_ATR_PERIOD_FIXED", 30))
             _atr_col = compute_atr_numpy(
@@ -664,7 +681,8 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
         use_full_leg_ml = want_leg_refit and dates_ok and bool(awf_legs)
         if want_leg_refit and not dates_ok:
             _logger.warning(
-                "[ML_OPT] FUTURES_WF_HMM_LEG_REFIT=True but ml_pipeline_fetch_start/ml_pipeline_end "
+                "[ML_OPT] FUTURES_WF_HMM_LEG_REFIT=True but "
+                "ml_pipeline_fetch_start/ml_pipeline_end "
                 "not set on MLPhaseDContext; using one merged ML snapshot for every AWF leg."
             )
 
@@ -683,7 +701,7 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
             )
 
             _logger.debug(
-                "[ML_OPT] AWF full ML leg refit — %d× universe pipeline "
+                "[ML_OPT] AWF full ML leg refit - %dx universe pipeline "
                 "(cross-sectional alpha + systemic HMM + fusion). Expect long precompute.",
                 len(awf_legs),
             )
@@ -738,7 +756,9 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
                         seed=ctx.seed,
                     )
                     if not ml_out.meta_feature_frame_by_symbol:
-                        _logger.error("[ML_OPT] AWF leg %d ML pipeline returned empty output.", leg_i)
+                        _logger.error(
+                            "[ML_OPT] AWF leg %d ML pipeline returned empty output.", leg_i
+                        )
                         failed = True
                         break
 
@@ -1313,7 +1333,7 @@ def _run_portfolio_numba_block(
     reb_b = max(1, int(params["REBALANCE_BARS"]))
     pwp = portfolio_weight_params_from_optuna(params, cfg_block)
 
-    # T3-A: Kelly × HMM Entropy 동적 스케일링
+    # T3-A: Kelly x HMM Entropy 동적 스케일링
     _hmm_cols_t3 = [
         "hmm_prob_bull_calm", "hmm_prob_bull_vol_up", "hmm_prob_bear_trend",
         "hmm_prob_chop", "hmm_prob_crisis",
@@ -1457,7 +1477,10 @@ def rerun_precompute_for_ctx(ctx: MLPhaseDContext) -> None:
 def replay_robust_awf_for_trial_params(
     ctx: MLPhaseDContext, raw_optuna_params: dict[str, Any]
 ) -> tuple[float, dict[str, Any]]:
-    """Replay AWF legs with fixed tuned Optuna param dict (no Optuna Trial); for multi-seed checks."""
+    """Replay AWF legs with fixed tuned Optuna param dict.
+
+    No Optuna Trial; for multi-seed checks.
+    """
     if ctx.awf_leg_slices is None:
         rerun_precompute_for_ctx(ctx)
     merged_full = build_ml_phase_d_params(raw_optuna_params, ctx.tf)
@@ -1990,16 +2013,39 @@ def objective_ml_phase_d(trial: optuna.Trial, ctx: MLPhaseDContext) -> tuple[flo
     return (scalar, scalar)
 
 
-def select_best_trial_by_holdout_log_ret(trials: list[optuna.trial.FrozenTrial]) -> optuna.trial.FrozenTrial:
+def select_best_trial_by_holdout_log_ret(
+    trials: list[optuna.trial.FrozenTrial]
+) -> optuna.trial.FrozenTrial:
+    """Select the best trial from a list based on a multi-metric scoring system.
+
+    Prioritizes robust score, DSR, mean log growth, and uses holdout log return
+    as a final tie-breaker.
+
+    Args:
+        trials: A list of completed Optuna trials to evaluate.
+
+    Returns:
+        The best trial according to the multi-metric heuristic.
+
+    Raises:
+        ValueError: If the trials list is empty.
+
+    """
     if not trials:
         raise ValueError("empty trials")
 
-    def _score(t: optuna.trial.FrozenTrial) -> tuple[float, float, float, float, float, float, float]:
+    def _score(
+        t: optuna.trial.FrozenTrial
+    ) -> tuple[float, float, float, float, float, float, float]:
         holdout = float(np.clip(t.user_attrs.get("ml_holdout_log_ret", 0.0), -2.0, 2.0))
-        robust = float(t.user_attrs.get("awf_robust_score", t.user_attrs.get("awf_contract_reward", -1e9)))
+        robust = float(
+            t.user_attrs.get("awf_robust_score", t.user_attrs.get("awf_contract_reward", -1e9))
+        )
         is_cpcv = float(
             np.clip(
-                t.user_attrs.get("awf_mean_log_tw", t.user_attrs.get("ml_mean_log_growth_cpcv", -2.0)),
+                t.user_attrs.get(
+                    "awf_mean_log_tw", t.user_attrs.get("ml_mean_log_growth_cpcv", -2.0)
+                ),
                 -2.0,
                 2.0,
             )
@@ -2026,6 +2072,21 @@ def select_best_trial_by_holdout_log_ret(trials: list[optuna.trial.FrozenTrial])
 
 
 def topsis_select_best(pareto_trials: list[optuna.trial.FrozenTrial]) -> optuna.trial.FrozenTrial:
+    """Select the best trial from a Pareto front using the TOPSIS method.
+
+    Normalizes multiple metrics (robustness, mean log-TW, worst leg, etc.) and
+    applies a weighted sum to determine the ideal candidate.
+
+    Args:
+        pareto_trials: A list of trials belonging to the Pareto front.
+
+    Returns:
+        The selected best trial based on normalized multi-objective scoring.
+
+    Raises:
+        ValueError: If pareto_trials is empty.
+
+    """
     if not pareto_trials:
         raise ValueError("empty pareto_trials")
     if len(pareto_trials) == 1:
@@ -2042,13 +2103,18 @@ def topsis_select_best(pareto_trials: list[optuna.trial.FrozenTrial]) -> optuna.
     feats: list[list[float]] = []
     for t in pareto_trials:
         ua = t.user_attrs
-        robust = _safe_float(ua.get("awf_robust_score", ua.get("awf_contract_reward", np.nan)), np.nan)
+        robust = _safe_float(
+            ua.get("awf_robust_score", ua.get("awf_contract_reward", np.nan)), np.nan
+        )
         if not np.isfinite(robust):
             v0 = float(t.values[0]) if t.values else np.nan
             robust = -v0 if np.isfinite(v0) else -1e9
 
         mu_log = _safe_float(
-            ua.get("awf_mu_log", ua.get("awf_mean_log_tw", ua.get("ml_mean_log_growth_cpcv", np.nan))),
+            ua.get(
+                "awf_mu_log",
+                ua.get("awf_mean_log_tw", ua.get("ml_mean_log_growth_cpcv", np.nan))
+            ),
             -2.0,
         )
         worst_leg = _safe_float(
@@ -2099,11 +2165,34 @@ def check_hard_gates_ml(
     pbo_max_override: float | None = None,
     dsr_min_override: float | None = None,
 ) -> bool:
+    """Check if the OOS results pass all mandatory research and stability gates.
+
+    Evaluates PBO, DSR, win rate, MDD, and profit factor against configurable
+    thresholds.
+
+    Args:
+        oos_result: Dictionary containing out-of-sample performance metrics.
+        pbo_val: Observed Probability of Backtest Overfitting.
+        dsr_val: Observed Deflated Sharpe Ratio.
+        is_precision: In-sample precision (win rate) for comparison.
+        pbo_max_override: Optional override for the PBO threshold.
+        dsr_min_override: Optional override for the DSR threshold.
+
+    Returns:
+        True if all gates are passed, False otherwise.
+
+    """
     from config.opt_config import OPT_FUTURES_CONFIG
     cfg = OPT_FUTURES_CONFIG
-    pbo_lim = float(pbo_max_override if pbo_max_override is not None else cfg.get("FUTURES_PBO_MAX", 0.45))
+    pbo_lim = float(
+        pbo_max_override if pbo_max_override is not None else cfg.get("FUTURES_PBO_MAX", 0.45)
+    )
     pbo_ok = pbo_val < pbo_lim
-    dsr_floor = float(dsr_min_override if dsr_min_override is not None else cfg.get("FUTURES_ML_GATE1_DSR_MIN", 0.20))
+    dsr_floor = float(
+        dsr_min_override if dsr_min_override is not None else (
+            cfg.get("FUTURES_ML_GATE1_DSR_MIN", 0.20)
+        )
+    )
     dsr_ok = dsr_val >= dsr_floor
     wr_pct = float(oos_result.get("win_rate_pct", oos_result.get("win_rate", 0.0)))
     wr_frac = wr_pct / 100.0 if wr_pct > 1.0 else wr_pct
