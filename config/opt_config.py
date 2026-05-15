@@ -94,6 +94,10 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     # HMM stable regime (fixed hyperparameters; not in Optuna search space)
     # v10.0.0: 4 internal states (BULL_TREND, BEAR_TREND, CHOP_HIGH, CHOP_LOW).
     "FUTURES_HMM_K_STATES": 4,
+    # HMM backend selector:
+    # - "jax_gaussian" (default): existing JAX Gaussian backend
+    # - "student_t": Student-t backend (if available in runtime)
+    "FUTURES_HMM_BACKEND": "jax_gaussian",
     # Stability guard: JAX HMM backend intermittently segfaulted (exit 139) on long-trial runs.
     # v10.0.0: RESTORED for multivariate EM.
     "FUTURES_HMM_JAX_BACKEND_ENABLED": True,

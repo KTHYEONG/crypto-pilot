@@ -1,23 +1,36 @@
 {
   "project": "my-coin-traider",
-  "version": "10.3.0-jax-native-hmm",
-  "timestamp": "2026-05-14T23:30:00Z",
-  "previous_state_hash": "v10.2.0-s1-s3-drift-analysis",
+  "version": "10.4.0-spec-hmm-4state-hazard-policy",
+  "timestamp": "2026-05-15T00:00:00Z",
+  "previous_state_hash": "v10.3.0-jax-native-hmm",
   "current_logic": {
     "universe_selection": "CS_RANK screening with anchor/macro loading; hard-stop if universe < 3 symbols.",
-    "regime_classification": "Unified Track A (4-state JAX Multivariate HMM) + Track B (Rule-based Crisis Overlay). JAX EM-optimized with Trend/Vol Z-score features. No post-hoc EMA smoothing.",
+    "regime_classification": "Canonical 4-state regime contract with Student-t or Gaussian causal filtering, plus legacy hmm_prob_* compatibility columns derived from the canonical posterior.",
+    "hazard_overlay": "Separate tail/crisis hazard layer estimates pre_crisis_hazard, realized_crisis_hazard, and 4h/8h/24h tail hazards from 1h features and regime posterior.",
+    "policy_mapping": "Policy mapper converts regime posterior and hazard outputs into gross, Kelly, long, short, flat, and rebalance controls.",
     "alpha_generation": "LightGBM v6 alpha is regime-conditional, with chop-fragility filtering.",
-    "signal_combination": "Posterior-aware multipliers convert regime probabilities into executable allowances.",
-    "risk_management": "CRISIS hard kill-switch (leverage=0.0 when hmm_prob_crisis > 0.66).",
+    "risk_management": "Realized-crisis hazard and policy flat-gate replace primary dependence on hmm_prob_crisis as the execution control signal.",
+    "runtime_bootstrap": "JAX is pinned to CPU-only initialization in this environment to avoid CUDA plugin probing during imports.",
     "parallel_processing": "Optimized for 8-core/16GB RAM: 4 workers, 4 chunk size cap to ensure ~4GB RAM per worker."
   },
   "key_parameters": {
-    "FUTURES_HMM_JAX_BACKEND_ENABLED": true,
-    "FUTURES_HMM_K_STATES": 4,
+    "FUTURES_HMM_BACKEND": "jax_gaussian",
+    "FUTURES_HMM_N_STATES": 4,
+    "FUTURES_HMM_N_ITER": 1500,
+    "FUTURES_HMM_TOL": 0.0001,
+    "FUTURES_HMM_NU_INIT": 8.0,
+    "FUTURES_HMM_NU_MIN": 3.0,
+    "FUTURES_HMM_NU_MAX": 30.0,
+    "FUTURES_HAZARD_ENABLE": true,
+    "FUTURES_HAZARD_HORIZONS": [4, 8, 24],
+    "FUTURES_POLICY_ENABLE": true,
+    "FUTURES_POLICY_FLAT_REALIZED_CRISIS_THR": 0.8,
+    "FUTURES_POLICY_DAMP_PRE_CRISIS_THR": 0.65,
     "FUTURES_HMM_STICKY_PENALTY_WEIGHT": 1100.0,
     "FUTURES_OPT_MAX_WORKERS": 4,
     "FUTURES_OPT_CHUNK_SIZE_CAP": 4,
     "hmm_features": ["Trend_Z_Score", "Vol_Z_Score"],
-    "hmm_init_strategy": "Quantile-based EM initialization"
+    "hmm_init_strategy": "Quantile-based EM initialization",
+    "jax_runtime": "cpu-only bootstrap"
   }
 }

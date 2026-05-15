@@ -395,17 +395,17 @@ def log_hmm_report_summary(h_rep: dict[str, Any]) -> None:
         h_rep: Dictionary with HMM report data.
 
     """
-    bull_calm = float(h_rep.get("hmm_prob_bull_calm", 0.0))
-    bull_vol_up = float(h_rep.get("hmm_prob_bull_vol_up", 0.0))
-    bear = float(h_rep.get("hmm_prob_bear_trend", 0.0))
-    chop = float(h_rep.get("hmm_prob_chop", 0.0))
-    crisis = float(h_rep.get("hmm_prob_crisis", 0.0))
+    bull_calm = float(h_rep.get("regime_prob_risk_on_calm", h_rep.get("hmm_prob_bull_calm", 0.0)))
+    bull_vol_up = float(h_rep.get("regime_prob_risk_on_volatile", h_rep.get("hmm_prob_bull_vol_up", 0.0)))
+    bear = float(h_rep.get("regime_prob_risk_off_trend", h_rep.get("hmm_prob_bear_trend", 0.0)))
+    chop = float(h_rep.get("regime_prob_chop_liquidity_thin", h_rep.get("hmm_prob_chop", 0.0)))
+    crisis = float(h_rep.get("hmm_realized_crisis_mean", h_rep.get("hmm_prob_crisis", 0.0)))
     tail_capture = float(h_rep.get("hmm_tail_capture", 0.0))
     avg_duration = float(h_rep.get("hmm_avg_duration", 0.0))
     switches = round(float(h_rep.get("hmm_switches", 0.0)))
 
     _logger.info(
-        " [HMM SUMMARY] 🐂Bull:%.1f%% 🚀Rally:%.1f%% 🐻Bear:%.1f%% 🎢Chop:%.1f%% 💀Crisis:%.1f%%",
+        " [HMM SUMMARY] 🐂Bull-Calm:%.1f%% 🚀Bull-Vol:%.1f%% 🐻Bear-Trend:%.1f%% 🎢Chop-Thin:%.1f%% 💀Rlz:%.1f%%",
         bull_calm,
         bull_vol_up,
         bear,
