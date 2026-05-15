@@ -666,16 +666,24 @@ def filter_alpha_components(
             return
 
         def _calc_mu(mask: np.ndarray) -> float:
-            if int(mask.sum()) < 20:
+            n_samples = int(mask.sum())
+            if n_samples < 20:
                 return 0.0
             sub = base.loc[mask]
             u_pred = sub[col_name].unstack(level="symbol")
             u_tgt = pd.Series(target_arr[mask], index=sub.index).unstack(level="symbol")
-            valid = u_pred.notna() & u_tgt.notna()
+            
+            # [Fix] Mask to focus on the 'head' (top half) of the signal for the given direction.
+            # In a [0, 1] rank space, > 0.5 represents the active half.
+            u_pred_head = u_pred.where(u_pred > 0.5)
+            
+            valid = u_pred_head.notna() & u_tgt.notna()
             cnt = valid.sum(axis=1)
-            ic_s = u_pred.rank(axis=1).corrwith(u_tgt.rank(axis=1), axis=1)
+            ic_s = u_pred_head.rank(axis=1).corrwith(u_tgt.rank(axis=1), axis=1)
             arr = ic_s[cnt >= 3].dropna().to_numpy(dtype=np.float64)
-            return float(np.mean(arr)) if arr.size > 0 else 0.0
+            mu = float(np.mean(arr)) if arr.size > 0 else 0.0
+            _logger.debug(" [_calc_mu] %s | samples=%d | valid_bars=%d | mu=%.4f", prefix, n_samples, int(arr.size), mu)
+            return mu
 
         mu_is = _calc_mu(is_mask)
         mu_oos = 0.0
@@ -694,8 +702,22 @@ def filter_alpha_components(
 
     target_long = base["target"].to_numpy(dtype=np.float64)
     target_short = 1.0 - target_long
-    _direction_head_stats("ml_alpha_long_raw", target_long, "long_head")
-    _direction_head_stats("ml_alpha_short_raw", target_short, "short_head")
+    
+    # [Fix] Fallback to ml_alpha_00 if directional raw heads are missing.
+    primary_col = "ml_alpha_00" if "ml_alpha_00" in base.columns else (cols[0] if cols else None)
+    
+    if "ml_alpha_long_raw" in base.columns:
+        _direction_head_stats("ml_alpha_long_raw", target_long, "long_head")
+    elif primary_col:
+        _direction_head_stats(primary_col, target_long, "long_head")
+        
+    if "ml_alpha_short_raw" in base.columns:
+        _direction_head_stats("ml_alpha_short_raw", target_short, "short_head")
+    elif primary_col:
+        # Create temporary flipped column for short-side IC calculation (1 - alpha vs 1 - target)
+        base["__short_proxy"] = 1.0 - base[primary_col]
+        _direction_head_stats("__short_proxy", target_short, "short_head")
+        base.drop(columns=["__short_proxy"], inplace=True)
 
     _logger.info("ML alpha FDR+DSR+IC gates: %d / %d columns survive.", n_surv, len(cols))
     return out, meta

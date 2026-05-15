@@ -132,8 +132,6 @@ def _write_hmm_baseline_snapshot(
 
 
 def main() -> None:
-    import jax
-    print(f"!!! JAX Devices at main start: {jax.devices()} !!!")
     ai_telemetry_payloads: list[dict[str, Any]] = []
     run_id: str | None = None
     run_summary_written = False
