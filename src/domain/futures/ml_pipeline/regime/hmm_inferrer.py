@@ -128,12 +128,15 @@ class HMMStateInferrer:
     def __post_init__(self) -> None:
         self.sticky_min_duration = tuple(max(1, int(v)) for v in self.sticky_min_duration)
         backend_req = str(self.backend or "jax_gaussian").strip().lower()
+        
+        # Default fallback
         self._model = JAXMultivariateHMM(
             n_iter=self.n_iter,
             tol=self.tol,
             tvtp_config=self.tvtp_config,
         )
         self._backend_name = "jax_gaussian"
+        
         if backend_req == "student_t":
             student_model = self._build_student_t_model()
             if student_model is not None:
@@ -141,6 +144,13 @@ class HMMStateInferrer:
                 self._backend_name = "student_t"
             else:
                 _logger.warning("HMM backend=student_t requested but unavailable; fallback=jax_gaussian")
+        elif backend_req == "skewed_t":
+            skewed_model = self._build_skewed_t_model()
+            if skewed_model is not None:
+                self._model = skewed_model
+                self._backend_name = "skewed_t"
+            else:
+                _logger.warning("HMM backend=skewed_t requested but unavailable; fallback=jax_gaussian")
 
     def _build_student_t_model(self) -> Any | None:
         candidates: tuple[tuple[str, str], ...] = (
@@ -156,6 +166,14 @@ class HMMStateInferrer:
             except Exception:
                 continue
         return None
+
+    def _build_skewed_t_model(self) -> Any | None:
+        try:
+            from src.domain.futures.ml_pipeline.regime.skewed_t_hmm import SkewedTMultivariateHMM  # noqa: PLC0415
+            return SkewedTMultivariateHMM(n_iter=self.n_iter, tol=self.tol)
+        except Exception as exc:
+            _logger.error("Failed to load SkewedTMultivariateHMM: %s", exc)
+            return None
 
     def _fit_filter_probs(self, obs_df: pd.DataFrame, is_end_idx: int) -> pd.DataFrame:
         if hasattr(self._model, "fit_filter_train_oos"):
@@ -590,7 +608,7 @@ def build_hmm_inferrer_from_config(cfg: dict[str, object] | None = None, **kwarg
     else:
         sticky_tuple = sticky_tuple[:4]
     backend = str(conf.get("FUTURES_HMM_BACKEND", "jax_gaussian") or "jax_gaussian").strip().lower()
-    if backend not in {"jax_gaussian", "student_t"}:
+    if backend not in {"jax_gaussian", "student_t", "skewed_t"}:
         backend = "jax_gaussian"
     tvtp_config = {
         "enabled": float(bool(conf.get("FUTURES_HMM_TVTP_ENABLED", True))),
