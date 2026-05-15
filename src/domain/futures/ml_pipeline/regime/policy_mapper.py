@@ -72,7 +72,7 @@ def map_policy_controls(
     flat_tail_thr = float(cfg.get("FUTURES_POLICY_FLAT_TAIL8_THR", 0.96))
     flat_mix_tail_w = float(np.clip(cfg.get("FUTURES_POLICY_FLAT_MIX_TAIL8_W", 0.15), 0.0, 1.0))
     flat_extreme_thr = float(
-        np.clip(cfg.get("FUTURES_POLICY_FLAT_REALIZED_EXTREME_THR", max(flat_thr + 0.08, 0.90)), 0.0, 1.0)
+        np.clip(cfg.get("FUTURES_POLICY_FLAT_REALIZED_EXTREME_THR", max(flat_thr + 0.08, 0.94)), 0.0, 1.0)
     )
     damp_thr = float(cfg.get("FUTURES_POLICY_DAMP_PRE_CRISIS_THR", 0.65))
     pre_damp = float(cfg.get("FUTURES_POLICY_PRE_DAMP_FACTOR", 0.85))
@@ -94,12 +94,12 @@ def map_policy_controls(
     hard_realized_thr = float(np.clip(cfg.get("FUTURES_POLICY_DEFENSE_HARD_REALIZED_THR", 0.55), 0.0, 1.0))
     near_flat_realized_thr = float(np.clip(cfg.get("FUTURES_POLICY_DEFENSE_NEAR_FLAT_REALIZED_THR", 0.72), 0.0, 1.0))
     hard_tail_rank_thr = float(np.clip(cfg.get("FUTURES_POLICY_DEFENSE_HARD_TAIL_RANK_THR", 0.90), 0.0, 1.0))
-    near_flat_tail_rank_thr = float(np.clip(cfg.get("FUTURES_POLICY_DEFENSE_NEAR_FLAT_TAIL_RANK_THR", 0.95), 0.0, 1.0))
+    near_flat_tail_rank_thr = float(np.clip(cfg.get("FUTURES_POLICY_DEFENSE_NEAR_FLAT_TAIL_RANK_THR", 0.90), 0.0, 1.0))
     soft_realized_floor = float(np.clip(cfg.get("FUTURES_POLICY_DEFENSE_SOFT_REALIZED_FLOOR", 0.40), 0.0, 1.0))
     soft_tail_thr = float(np.clip(cfg.get("FUTURES_POLICY_DEFENSE_SOFT_TAIL_THR", 0.82), 0.0, 1.0))
     soft_sup_thr = float(np.clip(cfg.get("FUTURES_POLICY_DEFENSE_SOFT_SUP_THR", 0.80), 0.0, 1.0))
     hard_sup_thr = float(np.clip(cfg.get("FUTURES_POLICY_DEFENSE_HARD_SUP_THR", 0.86), 0.0, 1.0))
-    near_flat_sup_thr = float(np.clip(cfg.get("FUTURES_POLICY_DEFENSE_NEAR_FLAT_SUP_THR", 0.92), 0.0, 1.0))
+    near_flat_sup_thr = float(np.clip(cfg.get("FUTURES_POLICY_DEFENSE_NEAR_FLAT_SUP_THR", 0.85), 0.0, 1.0))
 
     flat_signal = np.maximum(realized, (1.0 - flat_mix_tail_w) * realized + flat_mix_tail_w * tail8)
     hard_realized_mask = realized > flat_extreme_thr
