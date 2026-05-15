@@ -4,6 +4,41 @@ This file tracks the logical progression and experimental results of the quantit
 
 ---
 
+## [2026-05-15] v10.6.0: Multi-Label Supervised Tail Separation & Tiered Defense (GPT-5)
+
+### 1. Architectural Shift: Supervised Tail Separation
+- The supervised tail layer moved from a single q10 target to a **multi-label, multi-horizon score bundle** centered on q10/q05/q03 risk tiers.
+- Forward-worst labels now span **4h, 8h, and 16h** horizons so soft-damp, hard-damp, and near-flat tiers can separate broad tail drift from crash-sensitive events.
+- The supervised feature set was expanded conservatively beyond the original 7-feature base to include momentum, volatility ratio, drawdown, and regime-spread signals while preserving causal IS-only training boundaries.
+- Calibration now combines **logistic + isotonic** with **rank blending**, which is more stable for rare-tail tiers than probability-only gating.
+
+### 2. Architectural Shift: Tiered Execution Defense
+- Execution protection now uses a **tiered soft_damp / hard_damp / near_flat** structure instead of a single flat or damp gate.
+- The policy mapper applies hazard/tail thresholds through exposure multipliers, so protection strength increases gradually before the system reaches the extreme flat gate.
+- This makes the execution layer easier to audit: coverage and precision can be measured separately for soft, hard, and near-flat defense tiers.
+
+### 3. Diagnostics Reformation
+- `hmm-only` reporting now separates:
+  - regime quality,
+  - execution quality,
+  - tiered damp coverage,
+  - supervised score separation.
+- New diagnostics expose top-decile hit rates for q10/q05/q03 scores, which are the best early signal of whether the supervised score itself is learning sharper tail structure.
+
+### 4. Validation Results (Latest Smoke Audit)
+- `SupHit q10/q05/q03`: **19.6% / 12.2% / 8.0%**.
+- `HardDamp Precision`: **10.9%**.
+- `NearFlat Precision`: **14.1%**.
+- `Execution Tail-Capture`: **3.9%**.
+- `Execution Crisis-Cap`: **16.2%**.
+- `Avg-Duration`: **18.3 bars**.
+- `Switches`: **1193**.
+
+### 5. What We Learned
+- The supervised stack is now more expressive and better instrumented, but the system still loses more in execution coverage than it gains in precision.
+- The main bottleneck has moved from "can we detect tails at all" to "can the score bundle concentrate the right tails tightly enough to justify stronger gates".
+- The next durable improvement path is supervised score separation first, gate tuning second.
+
 ## [2026-05-15] v10.5.0: HMM Step 3.5/5/6 & Action 2 Convergence — Regime Stability & Tail Defense (Gemini CLI)
 
 ### 1. Architectural Shift: Regime Stability & Feature Diet

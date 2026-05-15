@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import hashlib
 import json
+import os
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -83,6 +84,90 @@ def _resolve_hmm_backend_name(hmm_inferrer: Any, cfg: dict[str, Any] | None = No
         if "student" in name and "hmm" in name:
             return "student_t"
     return "jax"
+
+
+def _resolve_trace_run_id(
+    *,
+    explicit_run_id: str | None = None,
+    tf: str | None = None,
+    is_end_date: str | pd.Timestamp | None = None,
+    symbol_count: int | None = None,
+    seed: int | None = None,
+) -> str:
+    """Resolve run trace key; fallback to stable execution id when run_id is unavailable."""
+    if explicit_run_id and str(explicit_run_id).strip():
+        return str(explicit_run_id).strip()
+    env_run_id = os.getenv("FUTURES_RUN_ID", "").strip()
+    if env_run_id:
+        return env_run_id
+    stable_payload = {
+        "tf": str(tf or "n/a"),
+        "is_end_date": str(is_end_date or "n/a"),
+        "symbol_count": int(symbol_count or 0),
+        "seed": int(seed or 0),
+    }
+    stable_str = json.dumps(stable_payload, sort_keys=True)
+    return f"exec-{hashlib.md5(stable_str.encode()).hexdigest()[:12]}"
+
+
+def _resolve_cfg_fingerprint(cfg: dict[str, Any] | None) -> str:
+    if not isinstance(cfg, dict):
+        return "stable_unavailable"
+    try:
+        return _get_cfg_hash(cfg)
+    except Exception:
+        return "stable_unavailable"
+
+
+def _compact_tvtp_snapshot(cfg: dict[str, Any] | None) -> str:
+    if not isinstance(cfg, dict):
+        return "n/a"
+
+    def _fmt_num(key: str) -> str:
+        val = cfg.get(key)
+        try:
+            return f"{float(val):.3f}"
+        except Exception:
+            return "n/a"
+
+    enabled_raw = cfg.get("FUTURES_HMM_TVTP_ENABLED")
+    if enabled_raw is None:
+        enabled = "n/a"
+    else:
+        enabled = "1" if bool(enabled_raw) else "0"
+    return (
+        f"enabled={enabled}"
+        f",diag_slope={_fmt_num('FUTURES_HMM_TVTP_DIAG_SLOPE')}"
+        f",diag_clip={_fmt_num('FUTURES_HMM_TVTP_DIAG_CLIP')}"
+        f",sticky_min_mult={_fmt_num('FUTURES_HMM_TVTP_STICKY_PRIOR_MIN_MULT')}"
+        f",sticky_max_mult={_fmt_num('FUTURES_HMM_TVTP_STICKY_PRIOR_MAX_MULT')}"
+    )
+
+
+def _build_hmm_traceability(
+    *,
+    cfg: dict[str, Any] | None,
+    tf: str,
+    is_end_date: str | pd.Timestamp | None,
+    symbol_count: int,
+    seed: int | None,
+    explicit_run_id: str | None,
+    backend: str | None,
+    cache_state: str | None,
+) -> dict[str, str]:
+    return {
+        "run_id": _resolve_trace_run_id(
+            explicit_run_id=explicit_run_id,
+            tf=tf,
+            is_end_date=is_end_date,
+            symbol_count=symbol_count,
+            seed=seed,
+        ),
+        "config_fingerprint": _resolve_cfg_fingerprint(cfg),
+        "hmm_backend": str(backend or "n/a"),
+        "tvtp_snapshot": _compact_tvtp_snapshot(cfg),
+        "hmm_cache_state": str(cache_state or "n/a"),
+    }
 
 
 def _drop_ml_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -944,9 +1029,20 @@ def _print_hmm_summary(
     hmm_modulator: pd.DataFrame,
     btc_1h: pd.DataFrame | None,
     mode_label: str = "",
+    traceability: dict[str, str] | None = None,
 ) -> dict[str, float]:
     """Print institutional-grade audit of HMM states and return report metrics (Compact V2)."""
     _logger.info("\n [HMM REGIME SUMMARY] %s", mode_label)
+    _logger.info(" ────────────────────────────────────────────────────────────────────────────")
+    trace = traceability or {}
+    _logger.info(
+        " [TRACE] run_id=%s | cfg_fp=%s | backend=%s | tvtp=%s | hmm_cache=%s",
+        trace.get("run_id", "n/a"),
+        trace.get("config_fingerprint", "n/a"),
+        trace.get("hmm_backend", "n/a"),
+        trace.get("tvtp_snapshot", "n/a"),
+        trace.get("hmm_cache_state", "n/a"),
+    )
     _logger.info(" ────────────────────────────────────────────────────────────────────────────")
 
     report: dict[str, float] = {}
@@ -966,6 +1062,14 @@ def _print_hmm_summary(
         _logger.info(" ────────────────────────────────────────────────────────────────────────────")
         return report
 
+    def _series_from_col(frame: pd.DataFrame, col: str, default: float = 0.0) -> pd.Series:
+        if col not in frame.columns:
+            return pd.Series(default, index=frame.index, dtype=np.float64)
+        obj = frame[col]
+        if isinstance(obj, pd.DataFrame):
+            obj = obj.iloc[:, -1]
+        return pd.to_numeric(obj, errors="coerce")
+
     base_cols = ["datetime", *cols]
     if "hmm_tail_risk_8bar" in market_probs.columns:
         base_cols.append("hmm_tail_risk_8bar")
@@ -973,6 +1077,27 @@ def _print_hmm_summary(
         base_cols.append("tail_hazard_8h")
     if "flat_gate" in market_probs.columns:
         base_cols.append("flat_gate")
+    if "soft_damp_gate" in market_probs.columns:
+        base_cols.append("soft_damp_gate")
+    if "hard_damp_gate" in market_probs.columns:
+        base_cols.append("hard_damp_gate")
+    if "near_flat_gate" in market_probs.columns:
+        base_cols.append("near_flat_gate")
+    if "gross_cap_mult" in market_probs.columns:
+        base_cols.append("gross_cap_mult")
+    if "kelly_mult" in market_probs.columns:
+        base_cols.append("kelly_mult")
+    if "long_mult" in market_probs.columns:
+        base_cols.append("long_mult")
+    for _sup_col in ("sup_score_q10_h8", "sup_score_q05_h8", "sup_score_q03_h16", "sup_score_soft", "sup_score_hard", "sup_score_near_flat"):
+        if _sup_col in market_probs.columns:
+            base_cols.append(_sup_col)
+    if "gross_cap_mult" in market_probs.columns:
+        base_cols.append("gross_cap_mult")
+    if "kelly_mult" in market_probs.columns:
+        base_cols.append("kelly_mult")
+    if "long_mult" in market_probs.columns:
+        base_cols.append("long_mult")
     df_eval = market_probs[base_cols].copy()
     df_eval["dominant_state"] = df_eval[cols].idxmax(axis=1)
     pre_crisis_mean = float(
@@ -1093,8 +1218,26 @@ def _print_hmm_summary(
 
     lead_lag_tail_capture_8bar = 0.0
     realized_crisis_capture = 0.0
+    execution_tail_capture = 0.0
+    execution_crisis_cap = 0.0
+    step2_tail8_tail_lift = 0.0
+    step2_tail8_crisis_lift = 0.0
+    execution_damp_tail_capture = 0.0
+    execution_damp_crisis_cap = 0.0
+    execution_damp_precision = 0.0
+    execution_protected_exposure_share = 0.0
+    execution_soft_damp_tail_capture = 0.0
+    execution_soft_damp_crisis_cap = 0.0
+    execution_soft_damp_precision = 0.0
+    execution_hard_damp_tail_capture = 0.0
+    execution_hard_damp_crisis_cap = 0.0
+    execution_hard_damp_precision = 0.0
+    execution_near_flat_tail_capture = 0.0
+    execution_near_flat_crisis_cap = 0.0
+    execution_near_flat_precision = 0.0
     false_flat_cost = 0.0
     crisis_precision = 0.0
+    flat_gate_precision = 0.0
     if "ret" in df_eval.columns and not df_eval.empty:
         # 8-bar forward realized tail proxy: worst forward return from t+1..t+8
         fwd_worst_8 = pd.Series(np.inf, index=df_eval.index, dtype=np.float64)
@@ -1108,18 +1251,22 @@ def _print_hmm_summary(
         )
         if realized_tail_mask.any():
             lead_lag_tail_capture_8bar = float((pred_tail_mask & realized_tail_mask).sum() / max(1, int(realized_tail_mask.sum())) * 100.0)
+        if pred_tail_mask.any() and np.isfinite(q10_fwd):
+            crisis_precision = float((fwd_worst_8.loc[pred_tail_mask] <= q10_fwd).mean() * 100.0)
 
         q05_now = float(df_eval["ret"].quantile(0.05))
+        # Regime-side crisis coverage should track realized market stress (not execution hazard gates).
+        regime_crisis_now = df_eval["ret"] <= q05_now
         if "realized_crisis_hazard" in market_probs.columns:
             hz = pd.to_numeric(market_probs["realized_crisis_hazard"], errors="coerce").fillna(0.0).to_numpy(dtype=np.float64)
             thr = float(np.quantile(hz, 0.90))
-            realized_crisis_now = pd.Series(hz >= thr, index=df_eval.index)
+            execution_crisis_now = pd.Series(hz >= thr, index=df_eval.index)
         else:
-            realized_crisis_now = df_eval["ret"] <= q05_now
-        if realized_crisis_now.any():
+            execution_crisis_now = regime_crisis_now
+        if regime_crisis_now.any():
             realized_crisis_capture = float(
                 (
-                    df_eval.loc[realized_crisis_now, "dominant_state"].isin(
+                    df_eval.loc[regime_crisis_now, "dominant_state"].isin(
                         ["regime_prob_risk_off_trend", "hmm_prob_crisis"]
                     )
                 ).mean()
@@ -1130,13 +1277,127 @@ def _print_hmm_summary(
             flat_mask = pd.to_numeric(df_eval["flat_gate"], errors="coerce").fillna(0.0) > 0.5
         else:
             flat_mask = df_eval["dominant_state"].isin(["regime_prob_risk_off_trend", "hmm_prob_crisis"])
+        if ("tail_hazard_8h" in df_eval.columns) or ("hmm_tail_risk_8bar" in df_eval.columns):
+            tcol_exec = "tail_hazard_8h" if "tail_hazard_8h" in df_eval.columns else "hmm_tail_risk_8bar"
+            tail_score_exec = _series_from_col(df_eval, tcol_exec, default=0.0).fillna(0.0).clip(0.0, 1.0)
+            strong_tail_q = float(np.clip(OPT_FUTURES_CONFIG.get("FUTURES_POLICY_EXEC_STRONG_TAIL_Q", 0.88), 0.80, 0.995))
+            strong_tail_abs_thr = float(np.clip(OPT_FUTURES_CONFIG.get("FUTURES_POLICY_EXEC_STRONG_TAIL_ABS_THR", 0.72), 0.0, 1.0))
+            strong_tail_thr = max(float(tail_score_exec.quantile(strong_tail_q)), strong_tail_abs_thr)
+            strong_tail_mask = tail_score_exec >= strong_tail_thr
+            report["hmm_execution_strong_tail_thr"] = strong_tail_thr
+            report["hmm_execution_strong_tail_rate"] = float(strong_tail_mask.mean() * 100.0)
+        else:
+            strong_tail_mask = pd.Series(False, index=df_eval.index)
+        exec_gate_mask = flat_mask | strong_tail_mask
+        damp_thr = float(np.clip(OPT_FUTURES_CONFIG.get("FUTURES_POLICY_EXEC_DAMP_ACTIVE_THR", 0.82), 0.0, 1.0))
+        damp_valid = (
+            ("gross_cap_mult" in df_eval.columns)
+            and ("kelly_mult" in df_eval.columns)
+            and ("long_mult" in df_eval.columns)
+        )
+        if damp_valid:
+            gross_m = _series_from_col(df_eval, "gross_cap_mult", default=1.0).fillna(1.0).clip(0.0, 2.0)
+            kelly_m = _series_from_col(df_eval, "kelly_mult", default=1.0).fillna(1.0).clip(0.0, 2.0)
+            long_m = _series_from_col(df_eval, "long_mult", default=1.0).fillna(1.0).clip(0.0, 2.0)
+            exposure_mult = np.minimum(np.minimum(gross_m.to_numpy(dtype=np.float64), kelly_m.to_numpy(dtype=np.float64)), long_m.to_numpy(dtype=np.float64))
+            protected_share = np.clip(1.0 - exposure_mult, 0.0, 1.0)
+            damp_mask = pd.Series(exposure_mult <= damp_thr, index=df_eval.index)
+            soft_thr = float(np.clip(OPT_FUTURES_CONFIG.get("FUTURES_EXEC_TIER_SOFT_MAX_EXP", 0.80), 0.0, 1.0))
+            hard_thr = float(np.clip(OPT_FUTURES_CONFIG.get("FUTURES_EXEC_TIER_HARD_MAX_EXP", 0.50), 0.0, 1.0))
+            near_flat_thr = float(np.clip(OPT_FUTURES_CONFIG.get("FUTURES_EXEC_TIER_NEAR_FLAT_MAX_EXP", 0.25), 0.0, 1.0))
+            near_flat_thr = min(near_flat_thr, hard_thr)
+            hard_thr = min(max(hard_thr, near_flat_thr), soft_thr)
+            soft_thr = max(soft_thr, hard_thr)
+            near_flat_mask = pd.Series(exposure_mult <= near_flat_thr, index=df_eval.index)
+            hard_damp_mask = pd.Series((exposure_mult <= hard_thr) & (~near_flat_mask.to_numpy(dtype=bool)), index=df_eval.index)
+            soft_damp_mask = pd.Series(
+                (exposure_mult <= soft_thr)
+                & (~hard_damp_mask.to_numpy(dtype=bool))
+                & (~near_flat_mask.to_numpy(dtype=bool)),
+                index=df_eval.index,
+            )
+            execution_protected_exposure_share = float(np.mean(protected_share) * 100.0)
+            report["hmm_execution_damp_active_rate"] = float(damp_mask.mean() * 100.0)
+            report["hmm_execution_damp_active_thr"] = damp_thr
+            report["hmm_execution_soft_damp_rate"] = float(soft_damp_mask.mean() * 100.0)
+            report["hmm_execution_hard_damp_rate"] = float(hard_damp_mask.mean() * 100.0)
+            report["hmm_execution_near_flat_rate"] = float(near_flat_mask.mean() * 100.0)
+            report["hmm_execution_tier_soft_thr"] = soft_thr
+            report["hmm_execution_tier_hard_thr"] = hard_thr
+            report["hmm_execution_tier_near_flat_thr"] = near_flat_thr
+            if "soft_damp_gate" in df_eval.columns:
+                soft_gate_mask = _series_from_col(df_eval, "soft_damp_gate", default=0.0).fillna(0.0) > 0.5
+                if soft_gate_mask.any():
+                    report["hmm_execution_soft_gate_avg_exposure"] = float(np.mean(exposure_mult[soft_gate_mask.to_numpy(dtype=bool)]))
+            if "hard_damp_gate" in df_eval.columns:
+                hard_gate_mask = _series_from_col(df_eval, "hard_damp_gate", default=0.0).fillna(0.0) > 0.5
+                if hard_gate_mask.any():
+                    report["hmm_execution_hard_gate_avg_exposure"] = float(np.mean(exposure_mult[hard_gate_mask.to_numpy(dtype=bool)]))
+            if "near_flat_gate" in df_eval.columns:
+                near_flat_gate_mask = _series_from_col(df_eval, "near_flat_gate", default=0.0).fillna(0.0) > 0.5
+                if near_flat_gate_mask.any():
+                    report["hmm_execution_near_flat_gate_avg_exposure"] = float(np.mean(exposure_mult[near_flat_gate_mask.to_numpy(dtype=bool)]))
+            if realized_tail_mask.any():
+                execution_damp_tail_capture = float(
+                    (damp_mask & realized_tail_mask).sum() / max(1, int(realized_tail_mask.sum())) * 100.0
+                )
+                execution_soft_damp_tail_capture = float(
+                    (soft_damp_mask & realized_tail_mask).sum() / max(1, int(realized_tail_mask.sum())) * 100.0
+                )
+                execution_hard_damp_tail_capture = float(
+                    (hard_damp_mask & realized_tail_mask).sum() / max(1, int(realized_tail_mask.sum())) * 100.0
+                )
+                execution_near_flat_tail_capture = float(
+                    (near_flat_mask & realized_tail_mask).sum() / max(1, int(realized_tail_mask.sum())) * 100.0
+                )
+            if execution_crisis_now.any():
+                execution_damp_crisis_cap = float(
+                    (damp_mask & execution_crisis_now).sum() / max(1, int(execution_crisis_now.sum())) * 100.0
+                )
+                execution_soft_damp_crisis_cap = float(
+                    (soft_damp_mask & execution_crisis_now).sum() / max(1, int(execution_crisis_now.sum())) * 100.0
+                )
+                execution_hard_damp_crisis_cap = float(
+                    (hard_damp_mask & execution_crisis_now).sum() / max(1, int(execution_crisis_now.sum())) * 100.0
+                )
+                execution_near_flat_crisis_cap = float(
+                    (near_flat_mask & execution_crisis_now).sum() / max(1, int(execution_crisis_now.sum())) * 100.0
+                )
+            if damp_mask.any() and np.isfinite(q10_fwd):
+                execution_damp_precision = float((fwd_worst_8.loc[damp_mask] <= q10_fwd).mean() * 100.0)
+            if soft_damp_mask.any() and np.isfinite(q10_fwd):
+                execution_soft_damp_precision = float((fwd_worst_8.loc[soft_damp_mask] <= q10_fwd).mean() * 100.0)
+            if hard_damp_mask.any() and np.isfinite(q10_fwd):
+                execution_hard_damp_precision = float((fwd_worst_8.loc[hard_damp_mask] <= q10_fwd).mean() * 100.0)
+            if near_flat_mask.any() and np.isfinite(q10_fwd):
+                execution_near_flat_precision = float((fwd_worst_8.loc[near_flat_mask] <= q10_fwd).mean() * 100.0)
+        else:
+            damp_mask = pd.Series(False, index=df_eval.index)
         if flat_mask.any():
             pos_ret = df_eval.loc[flat_mask, "ret"]
             # Opportunity cost proxy: positive returns lost while flat in CRISIS state vs total market upside
             total_upside = df_eval.loc[df_eval["ret"] > 0, "ret"].sum()
             false_flat_cost = float(pos_ret[pos_ret > 0.0].sum() / max(float(total_upside), 1e-9) * 100.0)
             if np.isfinite(q10_fwd):
-                crisis_precision = float((fwd_worst_8.loc[flat_mask] <= q10_fwd).mean() * 100.0)
+                flat_gate_precision = float((fwd_worst_8.loc[flat_mask] <= q10_fwd).mean() * 100.0)
+        if realized_tail_mask.any():
+            execution_tail_capture = float(
+                (exec_gate_mask & realized_tail_mask).sum() / max(1, int(realized_tail_mask.sum())) * 100.0
+            )
+            if flat_mask.any():
+                flat_tail_capture = float(
+                    (flat_mask & realized_tail_mask).sum() / max(1, int(realized_tail_mask.sum())) * 100.0
+                )
+                step2_tail8_tail_lift = max(0.0, execution_tail_capture - flat_tail_capture)
+        if execution_crisis_now.any():
+            execution_crisis_cap = float(
+                (exec_gate_mask & execution_crisis_now).sum() / max(1, int(execution_crisis_now.sum())) * 100.0
+            )
+            if flat_mask.any():
+                flat_crisis_cap = float(
+                    (flat_mask & execution_crisis_now).sum() / max(1, int(execution_crisis_now.sum())) * 100.0
+                )
+                step2_tail8_crisis_lift = max(0.0, execution_crisis_cap - flat_crisis_cap)
             
         try:
             from scipy.stats import spearmanr
@@ -1162,28 +1423,113 @@ def _print_hmm_summary(
                 realized = fwd_worst <= q10
                 if bool(np.any(top_mask)):
                     report["hmm_tail_overlay_top_decile_hit_rate"] = float((realized[top_mask]).mean() * 100.0)
+        score_diag_specs = (
+            ("sup_score_q10_h8", 8, 0.10, "hmm_sup_q10_h8_top_decile_hit"),
+            ("sup_score_q05_h8", 8, 0.05, "hmm_sup_q05_h8_top_decile_hit"),
+            ("sup_score_q03_h16", 16, 0.03, "hmm_sup_q03_h16_top_decile_hit"),
+        )
+        for s_col, horizon, qv, out_key in score_diag_specs:
+            if s_col not in df_eval.columns:
+                continue
+            s_val = _series_from_col(df_eval, s_col, default=0.0).fillna(0.0).clip(0.0, 1.0)
+            fwd_w = pd.Series(np.inf, index=df_eval.index, dtype=np.float64)
+            for k in range(1, int(max(2, horizon)) + 1):
+                fwd_w = np.minimum(fwd_w, df_eval["ret"].shift(-k).to_numpy(dtype=np.float64))
+            fwd_w = pd.Series(fwd_w, index=df_eval.index).replace([np.inf, -np.inf], np.nan)
+            q_thr = float(fwd_w.quantile(qv)) if fwd_w.notna().any() else np.nan
+            if not np.isfinite(q_thr):
+                continue
+            top_dec = s_val >= float(s_val.quantile(0.90))
+            if bool(np.any(top_dec)):
+                report[out_key] = float((fwd_w[top_dec] <= q_thr).mean() * 100.0)
 
+    report["hmm_regime_tail_capture"] = tail_capture
+    report["hmm_regime_crisis_cap"] = realized_crisis_capture
+    report["hmm_execution_tail_capture"] = execution_tail_capture
+    report["hmm_execution_crisis_cap"] = execution_crisis_cap
+    report["hmm_execution_damp_tail_capture"] = execution_damp_tail_capture
+    report["hmm_execution_damp_crisis_cap"] = execution_damp_crisis_cap
+    report["hmm_execution_damp_precision"] = execution_damp_precision
+    report["hmm_execution_protected_exposure_share"] = execution_protected_exposure_share
+    report["hmm_execution_soft_damp_tail_capture"] = execution_soft_damp_tail_capture
+    report["hmm_execution_soft_damp_crisis_cap"] = execution_soft_damp_crisis_cap
+    report["hmm_execution_soft_damp_precision"] = execution_soft_damp_precision
+    report["hmm_execution_hard_damp_tail_capture"] = execution_hard_damp_tail_capture
+    report["hmm_execution_hard_damp_crisis_cap"] = execution_hard_damp_crisis_cap
+    report["hmm_execution_hard_damp_precision"] = execution_hard_damp_precision
+    report["hmm_execution_near_flat_tail_capture"] = execution_near_flat_tail_capture
+    report["hmm_execution_near_flat_crisis_cap"] = execution_near_flat_crisis_cap
+    report["hmm_execution_near_flat_precision"] = execution_near_flat_precision
     report["hmm_tail_capture"] = tail_capture
     report["hmm_lead_lag_tail_capture_8bar"] = lead_lag_tail_capture_8bar
     report["hmm_realized_crisis_capture"] = realized_crisis_capture
+    report["hmm_execution_tail8_tail_lift"] = step2_tail8_tail_lift
+    report["hmm_execution_tail8_crisis_lift"] = step2_tail8_crisis_lift
     report["hmm_false_flat_cost"] = false_flat_cost
     report["hmm_crisis_precision"] = crisis_precision
+    report["hmm_flat_gate_precision"] = flat_gate_precision
     switches = int((df_eval["dominant_state"] != df_eval["dominant_state"].shift(1)).sum())
     avg_dur = float(len(df_eval) / max(1, switches))
     report["hmm_switches"] = float(switches)
     report["hmm_avg_duration"] = avg_dur
 
-    tc_pass = "PASS" if tail_capture > 60.0 else "FAIL"
-    cc_pass = "PASS" if realized_crisis_capture > 60.0 else "FAIL"
+    rtc_pass = "PASS" if tail_capture > 60.0 else "FAIL"
+    rcc_pass = "PASS" if realized_crisis_capture > 60.0 else "FAIL"
+    etc_pass = "PASS" if execution_tail_capture > 60.0 else "FAIL"
+    ecc_pass = "PASS" if execution_crisis_cap > 60.0 else "FAIL"
+    edtc_pass = "PASS" if execution_damp_tail_capture > 60.0 else "FAIL"
+    edcc_pass = "PASS" if execution_damp_crisis_cap > 60.0 else "FAIL"
+    edp_pass = "OK" if execution_damp_precision > 40.0 else "LOW"
     cp_pass = "OK" if crisis_precision > 40.0 else "LOW"
+    fg_pass = "OK" if flat_gate_precision > 40.0 else "LOW"
     ff_pass = "GOOD" if false_flat_cost < 15.0 else "WARN"
     dur_pass = "PASS" if avg_dur > 35 else "SHORT"
 
-    _logger.info(" [PROTECTION & ACCURACY] - Target: >60%%")
-    _logger.info(f"  > Tail-Capture  : {tail_capture:>5.1f}%% [{tc_pass}]")
-    _logger.info(f"  > Crisis-Cap    : {realized_crisis_capture:>5.1f}%% [{cc_pass}]")
+    _logger.info(" [REGIME QUALITY] - Target: Tail/Crisis >60%%, Precision >40%%")
+    _logger.info(f"  > Regime Tail-Capture : {tail_capture:>5.1f}%% [{rtc_pass}]")
+    _logger.info(f"  > Regime Crisis-Cap   : {realized_crisis_capture:>5.1f}%% [{rcc_pass}]")
     _logger.info(f"  > Crisis-Prec   : {crisis_precision:>5.1f}%% [{cp_pass}]")
     _logger.info(f"  > Regime IC     : {report.get('hmm_regime_ic', 0.0):>+6.3f}")
+    _logger.info(" ────────────────────────────────────────────────────────────────────────────")
+    _logger.info(" [EXECUTION QUALITY] - Target: Tail/Crisis >60%%, FlatGate-Prec >40%%")
+    _logger.info(f"  > Execution Tail-Capture : {execution_tail_capture:>5.1f}%% [{etc_pass}]")
+    _logger.info(f"  > Execution Crisis-Cap   : {execution_crisis_cap:>5.1f}%% [{ecc_pass}]")
+    _logger.info(f"  > Damp Tail-Capture      : {execution_damp_tail_capture:>5.1f}%% [{edtc_pass}]")
+    _logger.info(f"  > Damp Crisis-Cap        : {execution_damp_crisis_cap:>5.1f}%% [{edcc_pass}]")
+    _logger.info(f"  > Damp Precision         : {execution_damp_precision:>5.1f}%% [{edp_pass}]")
+    _logger.info(
+        "  > SoftDamp T/C/P         : %5.1f%% / %5.1f%% / %5.1f%%",
+        execution_soft_damp_tail_capture,
+        execution_soft_damp_crisis_cap,
+        execution_soft_damp_precision,
+    )
+    _logger.info(
+        "  > HardDamp T/C/P         : %5.1f%% / %5.1f%% / %5.1f%%",
+        execution_hard_damp_tail_capture,
+        execution_hard_damp_crisis_cap,
+        execution_hard_damp_precision,
+    )
+    _logger.info(
+        "  > NearFlat T/C/P         : %5.1f%% / %5.1f%% / %5.1f%%",
+        execution_near_flat_tail_capture,
+        execution_near_flat_crisis_cap,
+        execution_near_flat_precision,
+    )
+    _logger.info(
+        "  > GateExp Soft/Hard/NFlat: %5.3f / %5.3f / %5.3f",
+        float(report.get("hmm_execution_soft_gate_avg_exposure", np.nan)),
+        float(report.get("hmm_execution_hard_gate_avg_exposure", np.nan)),
+        float(report.get("hmm_execution_near_flat_gate_avg_exposure", np.nan)),
+    )
+    _logger.info(f"  > Protected Exposure     : {execution_protected_exposure_share:>5.1f}%%")
+    _logger.info(f"  > FlatGate-Prec : {flat_gate_precision:>5.1f}%% [{fg_pass}]")
+    _logger.info(f"  > Step2 Tail8 Lift (Tail/Crisis): {step2_tail8_tail_lift:>5.1f}%% / {step2_tail8_crisis_lift:>5.1f}%%")
+    _logger.info(
+        "  > SupHit q10/q05/q03    : %5.1f%% / %5.1f%% / %5.1f%%",
+        float(report.get("hmm_sup_q10_h8_top_decile_hit", np.nan)),
+        float(report.get("hmm_sup_q05_h8_top_decile_hit", np.nan)),
+        float(report.get("hmm_sup_q03_h16_top_decile_hit", np.nan)),
+    )
     _logger.info(f"  > False-Flat    : {false_flat_cost:>+6.3f}%% [{ff_pass}]")
     _logger.info(" ────────────────────────────────────────────────────────────────────────────")
     _logger.info(" [OPERATIONAL STABILITY] - Target: >35 bars")
@@ -1445,11 +1791,14 @@ def run_hmm_fusion_for_is_end(
     is_end_dt = pd.to_datetime(is_end_date)
     is_end_utc = is_end_dt.tz_localize("UTC") if is_end_dt.tzinfo is None else is_end_dt.tz_convert("UTC")
     tail_rep: dict[str, float] = {}
+    hmm_inferrer: Any | None = None
+    hmm_cache_state = "miss"
 
     if prefetched_market_probs is not None and prefetched_market_hmm_feats is not None:
         _logger.debug("♻️  HMM cache hit")
         market_probs = prefetched_market_probs
         market_hmm_feats = prefetched_market_hmm_feats
+        hmm_cache_state = "hit"
     else:
         if panel_df is None:
             if prefetched_1h:
@@ -1544,6 +1893,16 @@ def run_hmm_fusion_for_is_end(
         hmm_modulator_audit,
         btc_1h,
         mode_label=summary_mode_label,
+        traceability=_build_hmm_traceability(
+            cfg=cfg,
+            tf=tf,
+            is_end_date=is_end_date,
+            symbol_count=len(symbols),
+            seed=None,
+            explicit_run_id=None,
+            backend=_resolve_hmm_backend_name(hmm_inferrer, cfg),
+            cache_state=hmm_cache_state,
+        ),
     )
     if tail_rep:
         h_rep.update({k: float(v) for k, v in tail_rep.items()})
@@ -1854,7 +2213,23 @@ def _run_ml_pipeline_implementation(
     if hmm_only:
         _logger.info("✅ HMM Inference complete (HMM-only mode)")
         out = MLPipelineOutput(market_probs=market_probs)
-        out.hmm_report = _print_hmm_summary(market_probs, market_hmm_feats, pd.DataFrame(), _btc_df, "(HMM-ONLY)")
+        out.hmm_report = _print_hmm_summary(
+            market_probs,
+            market_hmm_feats,
+            pd.DataFrame(),
+            _btc_df,
+            "(HMM-ONLY)",
+            traceability=_build_hmm_traceability(
+                cfg=cfg,
+                tf=tf,
+                is_end_date=is_end_date or end,
+                symbol_count=len(symbols),
+                seed=seed,
+                explicit_run_id=None,
+                backend=_resolve_hmm_backend_name(hmm_inferrer, cfg),
+                cache_state="miss",
+            ),
+        )
         out.hmm_report.update({k: float(v) for k, v in tail_rep.items()})
         out.hmm_report["hmm_backend"] = _resolve_hmm_backend_name(hmm_inferrer, cfg)
         return out
