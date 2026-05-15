@@ -39,6 +39,51 @@ _N_STATES = 4
 _N_FEATURES = 4
 _MAX_LEN = 3000
 
+
+def _prepare_tvtp_config(tvtp_config: dict[str, Any] | None) -> dict[str, float]:
+    cfg = tvtp_config or {}
+    return {
+        "enabled": float(bool(cfg.get("enabled", True))),
+        "vol_center": float(cfg.get("vol_center", 0.0)),
+        "vol_scale": float(cfg.get("vol_scale", 1.0)),
+        "diag_slope": float(cfg.get("diag_slope", -0.24)),
+        "diag_bias": float(cfg.get("diag_bias", 0.0)),
+        "diag_clip": float(max(1e-3, cfg.get("diag_clip", 0.34))),
+        "sticky_prior_base": float(cfg.get("sticky_prior_base", 1100.0)),
+        "sticky_prior_vol_slope": float(cfg.get("sticky_prior_vol_slope", -0.30)),
+        "sticky_prior_min_mult": float(cfg.get("sticky_prior_min_mult", 0.90)),
+        "sticky_prior_max_mult": float(cfg.get("sticky_prior_max_mult", 1.28)),
+    }
+
+
+def _to_jax_tvtp_config(cfg: dict[str, float]) -> dict[str, jnp.ndarray]:
+    return {k: jnp.array(v, dtype=jnp.float32) for k, v in cfg.items()}
+
+
+@jax.jit
+def _tvtp_log_trans(
+    log_trans: jnp.ndarray,
+    vol_z: jnp.ndarray,
+    tvtp_cfg: dict[str, jnp.ndarray],
+) -> jnp.ndarray:
+    base = jax.nn.log_softmax(log_trans, axis=1)
+
+    def _enabled(_: None) -> jnp.ndarray:
+        vol_scaled = (vol_z - tvtp_cfg["vol_center"]) * tvtp_cfg["vol_scale"]
+        stress = jnp.tanh(vol_scaled)
+        diag_shift = jnp.clip(
+            tvtp_cfg["diag_bias"] + tvtp_cfg["diag_slope"] * stress,
+            -tvtp_cfg["diag_clip"],
+            tvtp_cfg["diag_clip"],
+        )
+        eye = jnp.eye(_N_STATES, dtype=log_trans.dtype)
+        off = (1.0 - eye) / float(max(_N_STATES - 1, 1))
+        adjusted = log_trans + diag_shift * eye - diag_shift * off
+        return jax.nn.log_softmax(adjusted, axis=1)
+
+    return jax.lax.cond(tvtp_cfg["enabled"] > 0.5, _enabled, lambda _: base, operand=None)
+
+
 @jax.jit
 def _gauss_log_pdf(x: jnp.ndarray, mu: jnp.ndarray, log_sig: jnp.ndarray) -> jnp.ndarray:
     """Multivariate Gaussian log-pdf with diagonal covariance.
@@ -62,10 +107,9 @@ def _hmm_forward(
     obs: jnp.ndarray,
     mask: jnp.ndarray,
     params: dict[str, Any],
+    tvtp_cfg: dict[str, jnp.ndarray],
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Log-space HMM forward pass."""
-    K = _N_STATES
-    log_trans = jax.nn.log_softmax(params["log_trans"], axis=1)
     mu = params["mu"]
     log_sig = params["log_sig"]
     log_init = jax.nn.log_softmax(params["log_init"])
@@ -73,8 +117,9 @@ def _hmm_forward(
     def step_fn(log_alpha_prev, inputs):
         x_t, m_t = inputs
         log_emit = _gauss_log_pdf(x_t, mu, log_sig)
+        log_trans_t = _tvtp_log_trans(params["log_trans"], x_t[1], tvtp_cfg)
         log_alpha_pred = jax.scipy.special.logsumexp(
-            log_alpha_prev[:, None] + log_trans, axis=0
+            log_alpha_prev[:, None] + log_trans_t, axis=0
         )
         log_alpha_unnorm = log_alpha_pred + log_emit
         ll_t = jax.scipy.special.logsumexp(log_alpha_unnorm)
@@ -104,24 +149,26 @@ def _hmm_nll(
     params: dict[str, Any],
     obs: jnp.ndarray,
     mask: jnp.ndarray,
+    tvtp_cfg: dict[str, jnp.ndarray],
 ) -> jnp.ndarray:
     """NLL with priors for JAX HMM."""
-    _, lls = _hmm_forward(obs, mask, params)
+    _, lls = _hmm_forward(obs, mask, params, tvtp_cfg)
     nll = -jnp.sum(lls)
 
-    # 1. Transition Matrix Priors (Stickiness ~0.95-0.98)
-    # Step 6: TVTP (Time-Varying Transition Probabilities)
-    # 평시(Low f2_vol_z)에는 sticky_weight 강화, 고변동성 시기에는 완화
+    # 1) Transition prior: base stickiness with vol-conditioned multiplier from config.
     trans_probs = jax.nn.softmax(params["log_trans"], axis=1)
     diag = jnp.diag(trans_probs)
-    
     vol_z = obs[:, 1]
     avg_vol = jnp.sum(vol_z * mask) / jnp.maximum(jnp.sum(mask), 1.0)
-    sticky_base = 1500.0
-    sticky_weight = jnp.where(avg_vol < 0.0, sticky_base * 1.5, sticky_base * 0.7)
+    sticky_mult = jnp.clip(
+        1.0 + tvtp_cfg["sticky_prior_vol_slope"] * avg_vol,
+        tvtp_cfg["sticky_prior_min_mult"],
+        tvtp_cfg["sticky_prior_max_mult"],
+    )
+    sticky_weight = tvtp_cfg["sticky_prior_base"] * sticky_mult
     sticky_prior = -sticky_weight * jnp.sum(jnp.log(jnp.maximum(diag, 1e-6)))
 
-    # 2. Semantic State Separation Priors
+    # 2) Semantic state separation priors.
     # BULL (0): f1 >> 0
     # BEAR (1): f1 << 0
     # CHOP_HIGH (2): f2 >> 0
@@ -143,6 +190,7 @@ def _train_hmm(
     obs: jnp.ndarray,
     mask: jnp.ndarray,
     params: dict[str, Any],
+    tvtp_cfg: dict[str, jnp.ndarray],
     opt_state: Any,
     n_iter: int,
     tol: float,
@@ -154,20 +202,27 @@ def _train_hmm(
 
     def body(state):
         i, p, opt_s, loss, _prev, _c = state
-        new_loss, grads = jax.value_and_grad(_hmm_nll)(p, obs, mask)
+        new_loss, grads = jax.value_and_grad(_hmm_nll)(p, obs, mask, tvtp_cfg)
         updates, new_opt_s = optimizer.update(grads, opt_s, p)
         new_p = optax.apply_updates(p, updates)
         return i + 1, new_p, new_opt_s, new_loss, loss, False
 
-    init_loss = _hmm_nll(params, obs, mask)
+    init_loss = _hmm_nll(params, obs, mask, tvtp_cfg)
     state = (0, params, opt_state, init_loss, init_loss + 1e6, False)
     final = jax.lax.while_loop(cond, body, state)
     return final[1], final[2]
 
 class JAXMultivariateHMM:
-    def __init__(self, n_iter: int = 1000, tol: float = 1e-4):
+    def __init__(
+        self,
+        n_iter: int = 1000,
+        tol: float = 1e-4,
+        tvtp_config: dict[str, Any] | None = None,
+    ):
         self.n_iter = n_iter
         self.tol = tol
+        self._tvtp_cfg = _prepare_tvtp_config(tvtp_config)
+        self._tvtp_cfg_jax = _to_jax_tvtp_config(self._tvtp_cfg)
         self._params = None
         self._warmed = False
 
@@ -203,8 +258,8 @@ class JAXMultivariateHMM:
         p = self._init_params(np.random.normal(size=(_MAX_LEN, _N_FEATURES)))
         opt = optax.adamw(0.01)
         os = opt.init(p)
-        _hmm_forward(dummy_obs, dummy_mask, p)
-        _train_hmm(dummy_obs, dummy_mask, p, os, 3, 1e-4, opt)
+        _hmm_forward(dummy_obs, dummy_mask, p, self._tvtp_cfg_jax)
+        _train_hmm(dummy_obs, dummy_mask, p, self._tvtp_cfg_jax, os, 3, 1e-4, opt)
         self._warmed = True
 
     def _prep_obs(self, obs_df: pd.DataFrame) -> np.ndarray:
@@ -251,7 +306,14 @@ class JAXMultivariateHMM:
 
             os = opt.init(p)
             self._params, _ = _train_hmm(
-                jnp.array(obs_pad), jnp.array(m_pad), p, os, self.n_iter, self.tol, opt
+                jnp.array(obs_pad),
+                jnp.array(m_pad),
+                p,
+                self._tvtp_cfg_jax,
+                os,
+                self.n_iter,
+                self.tol,
+                opt,
             )
         return self
 
@@ -285,7 +347,12 @@ class JAXMultivariateHMM:
             m_p = np.zeros(_MAX_LEN, dtype=np.float32)
             obs_p[:L] = obs_win
             m_p[:L] = 1.0
-            log_alphas, _ = _hmm_forward(jnp.array(obs_p), jnp.array(m_p), self._params)
+            log_alphas, _ = _hmm_forward(
+                jnp.array(obs_p),
+                jnp.array(m_p),
+                self._params,
+                self._tvtp_cfg_jax,
+            )
             post = np.asarray(jax.nn.softmax(log_alphas[:L], axis=1))
             probs_all[win_start:end] = post
 

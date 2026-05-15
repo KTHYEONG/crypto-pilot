@@ -121,13 +121,18 @@ class HMMStateInferrer:
     tol: float = 1e-4
     sticky_min_duration: tuple[int, int, int, int] = (32, 16, 14, 12)
     backend: str = "jax_gaussian"
+    tvtp_config: dict[str, float] = field(default_factory=dict)
     _model: Any = field(init=False, repr=False)
     _backend_name: str = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         self.sticky_min_duration = tuple(max(1, int(v)) for v in self.sticky_min_duration)
         backend_req = str(self.backend or "jax_gaussian").strip().lower()
-        self._model = JAXMultivariateHMM(n_iter=self.n_iter, tol=self.tol)
+        self._model = JAXMultivariateHMM(
+            n_iter=self.n_iter,
+            tol=self.tol,
+            tvtp_config=self.tvtp_config,
+        )
         self._backend_name = "jax_gaussian"
         if backend_req == "student_t":
             student_model = self._build_student_t_model()
@@ -259,7 +264,7 @@ class HMMStateInferrer:
 
         # ── Step 3: supervised score 계산 (IS causal, regime_df 부스트에 사용) ──
         try:
-            supervised_score = self._compute_supervised_tail_score(
+            supervised_scores = self._compute_supervised_tail_score(
                 legacy_df=legacy_df,
                 returns_ser=returns_ser,
                 features_df=features_df,
@@ -268,15 +273,25 @@ class HMMStateInferrer:
             )
         except Exception as _sup_exc:
             _logger.warning("Supervised tail score computation raised: %s", _sup_exc)
-            supervised_score = None
+            supervised_scores = None
 
-        # ── Step 3.5: supervised score → regime_df p_off 직접 부스트 ─────────
-        # dominant_state = idxmax(regime4_cols) 이므로 legacy_df가 아닌 regime_df를 수정.
-        # supervised score는 t 시점에서 t+1..t+8 충격을 예측하는 leading indicator이므로
-        # forward_window만큼 전방 전파(causal: 과거 signal → 현재 state)하여
-        # 충격 당일 bar가 BEAR dominant_state가 되도록 보장.
-        if supervised_score is not None:
-            sup = np.clip(supervised_score, 0.0, 1.0)
+        # ── Step 3.5: supervised score를 hazard/policy overlay 경로로 반영 ─────
+        # NOTE:
+        # - regime posterior(regime_prob_*)는 직접 수정하지 않는다.
+        # - supervised 신호는 causal forward propagation 후 hazard overlay 입력으로만 사용한다.
+        overlay_supervised_score: np.ndarray | dict[str, np.ndarray] | None = supervised_scores
+        if supervised_scores is not None:
+            sup = np.clip(
+                np.nan_to_num(
+                    supervised_scores.get(
+                        "sup_score_q10_h8",
+                        supervised_scores.get("sup_score_soft", np.zeros(len(idx), dtype=np.float64)),
+                    ),
+                    nan=0.0,
+                ),
+                0.0,
+                1.0,
+            )
             # Rank-based top-8%: IsotonicRegression 이산값 때문에 quantile 기반이 부정확함
             n_sup = len(sup)
             target_n = max(10, int(n_sup * 0.08))
@@ -297,36 +312,17 @@ class HMMStateInferrer:
                 rolled[:k] = False
                 boost_series = np.maximum(boost_series, np.where(rolled, boost_at_k, 0.0))
 
-            p_off_cur = regime_df["regime_prob_risk_off_trend"].to_numpy(dtype=np.float64)
-            p_off_boosted = np.maximum(p_off_cur, boost_series)
-            regime_df = regime_df.copy()
-            regime_df["regime_prob_risk_off_trend"] = p_off_boosted
-            
-            # [Step 3.5 Extension] Force p_off dominance by dampening other states where boosted
-            for col in REGIME_STATE_COLUMNS:
-                if col == "regime_prob_risk_off_trend":
-                    continue
-                regime_df[col] = np.where(boost_series > 0.3, regime_df[col] * 0.1, regime_df[col])
-
-            regime_df = normalize_regime_state_frame(regime_df).join(
-                regime_df[["regime_entropy"]]
-            )
-            
-            # Recalculate hard state and duration after boost to improve Avg-Duration
-            prob4_boosted = regime_df[list(REGIME_STATE_COLUMNS)].to_numpy(dtype=np.float64)
-            hard_boosted = np.argmax(prob4_boosted, axis=1).astype(np.int32)
-            sticky_boosted = _numba_sticky_labels(hard_boosted, np.array(self.sticky_min_duration, dtype=np.int32))
-            regime_df["regime_hard_state"] = sticky_boosted.astype(np.float64)
-            regime_df["regime_current_duration"] = _numba_current_duration(sticky_boosted)
-
-            legacy_df = derive_legacy_hmm_prob_frame(regime_df)
-            _logger.warning(
-                "Step3.5 p_off boost | %s %s | raw_pct=%.3f | extended_pct=%.3f | p_off_mean=%.3f",
+            boosted_sup = np.clip(np.maximum(sup, boost_series), 0.0, 1.0)
+            overlay_supervised_score = dict(supervised_scores)
+            overlay_supervised_score["sup_score_q10_h8"] = boosted_sup
+            overlay_supervised_score["sup_score_soft"] = boosted_sup
+            _logger.info(
+                "Step3.5 hazard-overlay boost | %s %s | raw_pct=%.3f | extended_pct=%.3f | sup_mean=%.3f",
                 symbol,
                 tf,
                 float(crisis_mask.mean()),
                 float((boost_series > 0.0).mean()),
-                float(regime_df["regime_prob_risk_off_trend"].mean()),
+                float(np.mean(boosted_sup)),
             )
 
         # ── Crisis Detector overlay ────────────────────────────────────────────
@@ -376,7 +372,7 @@ class HMMStateInferrer:
             regime_df=regime_df,
             returns_ser=returns_ser,
             cfg=OPT_FUTURES_CONFIG,
-            supervised_score=supervised_score,
+            supervised_score=overlay_supervised_score,
         )
         hazard_df = hazard_res.hazards
         policy_df = map_policy_controls(regime_df=regime_df, hazard_df=hazard_df, cfg=OPT_FUTURES_CONFIG)
@@ -393,7 +389,7 @@ class HMMStateInferrer:
         features_df: pd.DataFrame,
         idx: pd.Index,
         is_end_idx: int,
-    ) -> np.ndarray | None:
+    ) -> dict[str, np.ndarray] | None:
         """IS supervised logistic+isotonic score for tail events.
 
         Causal: trains on [:is_end_idx] only, applies to full timeline.
@@ -406,7 +402,7 @@ class HMMStateInferrer:
             is_end_idx: Exclusive end of in-sample window.
 
         Returns:
-            Calibrated score array (n,) or None on failure.
+            Calibrated multi-score dict or None on failure.
         """
         try:
             from sklearn.isotonic import IsotonicRegression  # noqa: PLC0415
@@ -417,9 +413,14 @@ class HMMStateInferrer:
 
         try:
             n = len(idx)
+            cfg = OPT_FUTURES_CONFIG
             if is_end_idx < 50:
                 return None
 
+            p_calm = pd.to_numeric(
+                legacy_df.get("hmm_prob_bull_calm", pd.Series(0.25, index=idx)),
+                errors="coerce",
+            ).fillna(0.25).to_numpy(dtype=np.float64)
             p_off = pd.to_numeric(
                 legacy_df.get("hmm_prob_bear_trend", pd.Series(0.25, index=idx)),
                 errors="coerce",
@@ -438,6 +439,16 @@ class HMMStateInferrer:
 
             rv24_z = _tail_zscore(pd.Series(np.abs(r_np), index=idx).rolling(24, min_periods=4).std().fillna(0.0))
             down24_z = _tail_zscore(pd.Series(np.clip(-r_np, 0.0, None), index=idx).rolling(24, min_periods=4).std().fillna(0.0))
+            mom6_z = _tail_zscore(pd.Series(r_np, index=idx).rolling(6, min_periods=2).mean().fillna(0.0))
+            mom24_z = _tail_zscore(pd.Series(r_np, index=idx).rolling(24, min_periods=4).mean().fillna(0.0))
+            vol24 = pd.Series(r_np, index=idx).rolling(24, min_periods=4).std().fillna(0.0)
+            vol96 = pd.Series(r_np, index=idx).rolling(96, min_periods=12).std().replace(0.0, np.nan).fillna(vol24 + 1e-9)
+            vol_ratio_z = _tail_zscore((vol24 / vol96).replace([np.inf, -np.inf], np.nan).fillna(0.0))
+            px = (1.0 + pd.Series(r_np, index=idx)).cumprod()
+            dd96 = (px / px.rolling(96, min_periods=8).max() - 1.0).fillna(0.0)
+            dd96_z = _tail_zscore(dd96)
+            spread_off_calm = _tail_zscore(pd.Series(p_off - p_calm, index=idx))
+            spread_off_chop = _tail_zscore(pd.Series(p_off - p_chop, index=idx))
 
             f = features_df.reindex(idx)
             if "macro_liq_proxy_24h" in f.columns:
@@ -446,47 +457,85 @@ class HMMStateInferrer:
                 liq24_z = np.zeros(n, dtype=np.float64)
             jump_z = _tail_zscore(pd.Series(np.clip(-r_np, 0.0, None), index=idx))
 
-            X = np.column_stack([p_off, p_chop, ent, rv24_z, down24_z, liq24_z, jump_z]).astype(np.float64)
+            X = np.column_stack([
+                p_off, p_chop, ent, rv24_z, down24_z, liq24_z, jump_z,
+                mom6_z, mom24_z, vol_ratio_z, dd96_z, spread_off_calm, spread_off_chop,
+            ]).astype(np.float64)
 
-            # 8-bar forward worst return (IS 라벨; causal)
-            fwd_worst = np.full(n, np.inf, dtype=np.float64)
-            for k in range(1, 9):
-                shifted = r_ser.shift(-k).to_numpy(dtype=np.float64)
-                fwd_worst = np.minimum(fwd_worst, shifted)
-            fwd_ser = pd.Series(fwd_worst, index=idx).replace([np.inf, -np.inf], np.nan)
+            horizons_raw = cfg.get("FUTURES_HMM_SUP_HORIZONS", [4, 8, 16])
+            try:
+                horizons = tuple(int(h) for h in horizons_raw)
+            except Exception:
+                horizons = (4, 8, 16)
+            horizons = tuple(sorted({h for h in horizons if h > 1})) or (4, 8, 16)
+            quantiles = {
+                "q10": float(np.clip(cfg.get("FUTURES_HMM_SUP_LABEL_Q10", 0.10), 0.001, 0.40)),
+                "q05": float(np.clip(cfg.get("FUTURES_HMM_SUP_LABEL_Q05", 0.05), 0.001, 0.30)),
+                "q03": float(np.clip(cfg.get("FUTURES_HMM_SUP_LABEL_Q03", 0.03), 0.001, 0.20)),
+            }
+            min_pos = int(max(5, cfg.get("FUTURES_HMM_SUP_MIN_POS", 12)))
+            rank_blend_w = float(np.clip(cfg.get("FUTURES_HMM_SUP_RANK_BLEND_W", 0.30), 0.0, 0.95))
+            rank_blend_pow = float(np.clip(cfg.get("FUTURES_HMM_SUP_RANK_BLEND_POW", 1.20), 0.5, 3.0))
 
-            fwd_is = fwd_ser.iloc[:is_end_idx]
-            valid_is = fwd_is.dropna()
-            if len(valid_is) < 20:
-                _logger.warning("Supervised tail: too few valid IS returns (%d)", len(valid_is))
+            fwd_map: dict[int, pd.Series] = {}
+            for h in horizons:
+                fwd_worst = np.full(n, np.inf, dtype=np.float64)
+                for k in range(1, int(h) + 1):
+                    shifted = r_ser.shift(-k).to_numpy(dtype=np.float64)
+                    fwd_worst = np.minimum(fwd_worst, shifted)
+                fwd_map[h] = pd.Series(fwd_worst, index=idx).replace([np.inf, -np.inf], np.nan)
+
+            X_is = X[:is_end_idx]
+            scores: dict[str, np.ndarray] = {}
+            for h in horizons:
+                fwd_ser = fwd_map[h]
+                valid_is = fwd_ser.iloc[:is_end_idx].dropna()
+                if len(valid_is) < 20:
+                    continue
+                for q_name, q_v in quantiles.items():
+                    q_thr = float(valid_is.quantile(q_v))
+                    if not np.isfinite(q_thr):
+                        continue
+                    y_is = (fwd_ser.iloc[:is_end_idx].fillna(0.0).to_numpy() <= q_thr).astype(int)
+                    if int(y_is.sum()) < min_pos:
+                        continue
+                    clf = LogisticRegression(C=0.5, class_weight="balanced", max_iter=500, random_state=42)
+                    clf.fit(X_is, y_is)
+                    prob_is = clf.predict_proba(X_is)[:, 1]
+                    iso = IsotonicRegression(out_of_bounds="clip")
+                    iso.fit(prob_is, y_is.astype(np.float64))
+                    prob_all = clf.predict_proba(X)[:, 1]
+                    score_iso = np.clip(iso.transform(prob_all).astype(np.float64), 0.0, 1.0)
+                    score_rank = pd.Series(score_iso).rank(method="average", pct=True).fillna(0.0).to_numpy(dtype=np.float64)
+                    score_rank = np.clip(score_rank**rank_blend_pow, 0.0, 1.0)
+                    score = np.clip((1.0 - rank_blend_w) * score_iso + rank_blend_w * score_rank, 0.0, 1.0)
+                    scores[f"sup_score_{q_name}_h{h}"] = score
+
+            if "sup_score_q10_h4" in scores:
+                scores["sup_score_soft"] = scores["sup_score_q10_h4"]
+            elif "sup_score_q10_h8" in scores:
+                scores["sup_score_soft"] = scores["sup_score_q10_h8"]
+            if "sup_score_q05_h8" in scores:
+                scores["sup_score_hard"] = scores["sup_score_q05_h8"]
+            elif "sup_score_q05_h16" in scores:
+                scores["sup_score_hard"] = scores["sup_score_q05_h16"]
+            if "sup_score_q03_h16" in scores:
+                scores["sup_score_near_flat"] = scores["sup_score_q03_h16"]
+            elif "sup_score_q03_h8" in scores:
+                scores["sup_score_near_flat"] = scores["sup_score_q03_h8"]
+            if "sup_score_q10_h8" not in scores and "sup_score_soft" in scores:
+                scores["sup_score_q10_h8"] = scores["sup_score_soft"]
+            if not scores:
+                _logger.warning("Supervised tail: no valid multi-label model")
                 return None
-            q10_is = float(valid_is.quantile(0.10))
-            if not np.isfinite(q10_is):
-                _logger.warning("Supervised tail: q10 not finite")
-                return None
-
-            y_is = (fwd_ser.iloc[:is_end_idx].fillna(0.0).to_numpy() <= q10_is).astype(int)
-            if y_is.sum() < 10:
-                _logger.warning("Supervised tail: too few positive labels (%d)", y_is.sum())
-                return None
-
-            clf = LogisticRegression(C=0.5, class_weight="balanced", max_iter=500, random_state=42)
-            clf.fit(X[:is_end_idx], y_is)
-
-            prob_is = clf.predict_proba(X[:is_end_idx])[:, 1]
-            iso = IsotonicRegression(out_of_bounds="clip")
-            iso.fit(prob_is, y_is.astype(np.float64))
-
-            prob_all = clf.predict_proba(X)[:, 1]
-            score: np.ndarray = iso.transform(prob_all).astype(np.float64)
             _logger.info(
-                "Step3 supervised tail score | is_end=%d | n=%d | score_mean=%.3f | pos_rate=%.3f",
+                "Step3 supervised tail score | is_end=%d | n=%d | multi_scores=%d | soft_mean=%.3f",
                 is_end_idx,
                 n,
-                float(score.mean()),
-                float(y_is.mean()),
+                len(scores),
+                float(np.mean(scores.get("sup_score_soft", scores.get("sup_score_q10_h8", np.zeros(n, dtype=np.float64))))),
             )
-            return score
+            return scores
         except Exception as exc:
             _logger.warning("_compute_supervised_tail_score failed: %s; no supervised score", exc)
             return None
@@ -517,21 +566,34 @@ class HMMStateInferrer:
 
 def build_hmm_inferrer_from_config(cfg: dict[str, object] | None = None, **kwargs) -> HMMStateInferrer:
     conf = OPT_FUTURES_CONFIG if cfg is None else cfg
-    sticky_raw = conf.get("FUTURES_HMM_OUTPUT_STICKY_MIN_DURATION", [24, 12, 10, 8])
+    sticky_raw = conf.get("FUTURES_HMM_OUTPUT_STICKY_MIN_DURATION", [132, 56, 28, 16])
     try:
         sticky_tuple = tuple(int(v) for v in sticky_raw)
     except Exception:
-        sticky_tuple = (24, 12, 10, 8)
+        sticky_tuple = (132, 56, 28, 16)
     if len(sticky_tuple) < 4:
-        sticky_tuple = (24, 12, 10, 8)
+        sticky_tuple = (132, 56, 28, 16)
     else:
         sticky_tuple = sticky_tuple[:4]
     backend = str(conf.get("FUTURES_HMM_BACKEND", "jax_gaussian") or "jax_gaussian").strip().lower()
     if backend not in {"jax_gaussian", "student_t"}:
         backend = "jax_gaussian"
+    tvtp_config = {
+        "enabled": float(bool(conf.get("FUTURES_HMM_TVTP_ENABLED", True))),
+        "vol_center": float(conf.get("FUTURES_HMM_TVTP_VOL_CENTER", 0.0)),
+        "vol_scale": float(conf.get("FUTURES_HMM_TVTP_VOL_SCALE", 1.0)),
+        "diag_slope": float(conf.get("FUTURES_HMM_TVTP_DIAG_SLOPE", -0.24)),
+        "diag_bias": float(conf.get("FUTURES_HMM_TVTP_DIAG_BIAS", 0.0)),
+        "diag_clip": float(conf.get("FUTURES_HMM_TVTP_DIAG_CLIP", 0.34)),
+        "sticky_prior_base": float(conf.get("FUTURES_HMM_STICKY_PENALTY_WEIGHT", 1100.0)),
+        "sticky_prior_vol_slope": float(conf.get("FUTURES_HMM_TVTP_STICKY_PRIOR_VOL_SLOPE", -0.30)),
+        "sticky_prior_min_mult": float(conf.get("FUTURES_HMM_TVTP_STICKY_PRIOR_MIN_MULT", 0.90)),
+        "sticky_prior_max_mult": float(conf.get("FUTURES_HMM_TVTP_STICKY_PRIOR_MAX_MULT", 1.28)),
+    }
     return HMMStateInferrer(
         n_iter=int(conf.get("FUTURES_HMM_N_ITER", 1500)),
         tol=float(conf.get("FUTURES_HMM_TOL", 1e-4)),
         sticky_min_duration=sticky_tuple,
         backend=backend,
+        tvtp_config=tvtp_config,
     )
