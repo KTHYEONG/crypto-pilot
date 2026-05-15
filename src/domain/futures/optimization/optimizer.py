@@ -574,27 +574,39 @@ def _inject_dyn_leverage_trimmed(trimmed_sig: pd.DataFrame, raw_full: pd.DataFra
     crisis_flat_lev = float(cfg.get("FUTURES_HMM_CRISIS_FLAT_LEV", 0.0))
     if split_enabled:
         p_pre = (
-            raw_full["hmm_prob_pre_crisis"].fillna(0.0).to_numpy(dtype=np.float64)
-            if "hmm_prob_pre_crisis" in raw_full.columns
+            raw_full["pre_crisis_hazard"].fillna(0.0).to_numpy(dtype=np.float64)
+            if "pre_crisis_hazard" in raw_full.columns
             else (
-                raw_full["hmm_prob_crisis"].fillna(0.0).to_numpy(dtype=np.float64)
-                if "hmm_prob_crisis" in raw_full.columns
-                else np.zeros(len(raw_full), dtype=np.float64)
+                raw_full["hmm_prob_pre_crisis"].fillna(0.0).to_numpy(dtype=np.float64)
+                if "hmm_prob_pre_crisis" in raw_full.columns
+                else (
+                    raw_full["hmm_prob_crisis"].fillna(0.0).to_numpy(dtype=np.float64)
+                    if "hmm_prob_crisis" in raw_full.columns
+                    else np.zeros(len(raw_full), dtype=np.float64)
+                )
             )
         )
         p_real = (
-            raw_full["hmm_prob_realized_crisis"].fillna(0.0).to_numpy(dtype=np.float64)
-            if "hmm_prob_realized_crisis" in raw_full.columns
+            raw_full["realized_crisis_hazard"].fillna(0.0).to_numpy(dtype=np.float64)
+            if "realized_crisis_hazard" in raw_full.columns
             else (
-                raw_full["hmm_prob_crisis"].fillna(0.0).to_numpy(dtype=np.float64)
-                if "hmm_prob_crisis" in raw_full.columns
-                else np.zeros(len(raw_full), dtype=np.float64)
+                raw_full["hmm_prob_realized_crisis"].fillna(0.0).to_numpy(dtype=np.float64)
+                if "hmm_prob_realized_crisis" in raw_full.columns
+                else (
+                    raw_full["hmm_prob_crisis"].fillna(0.0).to_numpy(dtype=np.float64)
+                    if "hmm_prob_crisis" in raw_full.columns
+                    else np.zeros(len(raw_full), dtype=np.float64)
+                )
             )
         )
         p_tail = (
-            raw_full["hmm_tail_risk_8bar"].fillna(0.0).to_numpy(dtype=np.float64)
-            if "hmm_tail_risk_8bar" in raw_full.columns
-            else np.zeros(len(raw_full), dtype=np.float64)
+            raw_full["tail_hazard_8h"].fillna(0.0).to_numpy(dtype=np.float64)
+            if "tail_hazard_8h" in raw_full.columns
+            else (
+                raw_full["hmm_tail_risk_8bar"].fillna(0.0).to_numpy(dtype=np.float64)
+                if "hmm_tail_risk_8bar" in raw_full.columns
+                else np.zeros(len(raw_full), dtype=np.float64)
+            )
         )
 
         pre_thr = float(cfg.get("FUTURES_HMM_PRE_CRISIS_DAMP_THRESHOLD", 0.55))
