@@ -1,34 +1,29 @@
 {
   "project": "my-coin-traider",
-  "version": "10.7.0-spec-hmm-student-t-tuning",
-  "timestamp": "2026-05-15T07:31:30Z",
-  "previous_state_hash": "v10.6.0-spec-hmm-supervised-separation",
+  "version": "10.8.0-spec-hmm-skewed-t-parallel",
+  "timestamp": "2026-05-15T08:15:00Z",
+  "previous_state_hash": "v10.7.0-spec-hmm-student-t-tuning",
   "current_logic": {
     "universe_selection": "CS_RANK screening with anchor/macro loading; hard-stop if universe < 3 symbols.",
-    "regime_classification": "JAX-native Student-t HMM with 6 features (Trend, Vol, Downside Vol, CS Dispersion, OI Delta, Funding Momentum). Uses asymmetric nu-priors (nu=3.5 for BEAR) and sigmoid TVTP for state-specific stickiness.",
-    "supervised_tail_separation": "Causal IS-trained supervised tail scores split into q10/q05/q03 tiers across 4h/8h/16h horizons. logistic+isotonic calibration with rank blending.",
-    "regime_boosting": "Supervised score bundles forwarded through hazard overlay. Phase 3.7 introduced intersection logic (p_off * down24) for sharpened crisis identification.",
-    "hazard_overlay": "Separate tail/crisis hazard layer estimates pre_crisis_hazard, realized_crisis_hazard, and 4h/8h/24h tail hazards. Realized logit uses bias=-2.8 and intersection features.",
-    "policy_mapping": "Policy mapper converts regime posterior and hazard outputs into tiered soft_damp, hard_damp, near_flat, flat, and rebalance controls.",
-    "diagnostics": "Separates regime quality, execution quality, and tiered damp coverage. Avg-Duration target > 18 bars (currently 22.3 bars).",
+    "regime_classification": "JAX-native Skewed-t HMM with Parallel Associative Scan. Uses asymmetric nu-priors and lambda-skewness parameters. Accelerated by RTX 4070 Ti (O(log N) complexity).",
+    "supervised_tail_separation": "Causal IS-trained supervised tail scores split into q10/q05/q03 tiers. Triple-Barrier Meta-Labeling (Phase 3.9) pending optimization.",
+    "regime_boosting": "Supervised score bundles forwarded through hazard overlay with Exponential Decay Boost (24-bar window).",
+    "hazard_overlay": "Separate tail/crisis hazard layer estimating pre_crisis_hazard and realized_crisis_hazard with logit bias -2.8.",
+    "policy_mapping": "Policy mapper converts regime posterior and hazard outputs into tiered soft_damp, hard_damp, near_flat, flat controls.",
+    "diagnostics": "Separates regime quality and execution quality. Avg-Duration target > 18 bars (currently 20.0 bars).",
     "alpha_generation": "LightGBM v6 alpha is regime-conditional, with chop-fragility filtering.",
-    "risk_management": "Tiered execution protection with Student-t backend. BEAR-OFF state has increased min-duration (42 bars) to prevent premature defense exit.",
-    "runtime_bootstrap": "JAX is pinned to CPU-only initialization to avoid CUDA conflicts.",
-    "parallel_processing": "Optimized for 8-core/16GB RAM: 4 workers, 4 chunk size cap."
+    "risk_management": "Tiered execution protection with Skewed-t backend. Damp Crisis-Cap achieved 100% in verification.",
+    "runtime_bootstrap": "JAX enabled for GPU (CudaDevice) with XLA_PYTHON_CLIENT_PREALLOCATE=false.",
+    "parallel_processing": "Optimized for 8-core CPU / RTX 4070 Ti GPU: Associative Scan eliminates sequential bottlenecks."
   },
   "key_parameters": {
-    "FUTURES_HMM_BACKEND": "student_t",
+    "FUTURES_HMM_BACKEND": "skewed_t",
     "FUTURES_HMM_N_STATES": 4,
     "FUTURES_HMM_N_ITER": 1500,
     "FUTURES_HMM_TOL": 0.0001,
     "FUTURES_HMM_TVTP_ENABLED": true,
     "FUTURES_HMM_STICKY_BASE": 2000.0,
     "FUTURES_HMM_OUTPUT_STICKY_MIN_DURATION": [132, 56, 42, 16, 24],
-    "FUTURES_HMM_SUP_HORIZONS": [4, 8, 16],
-    "FUTURES_HMM_STEP2_TAIL8_RANK_BLEND_W": 0.55,
-    "FUTURES_POLICY_DEFENSE_SOFT_THR": 0.48,
-    "FUTURES_POLICY_DEFENSE_HARD_THR": 0.66,
-    "FUTURES_POLICY_DEFENSE_NEAR_FLAT_THR": 0.84,
     "hmm_features": [
       "Trend_Z",
       "Vol_Z",
@@ -37,6 +32,6 @@
       "OI_Delta_Z",
       "Funding_Mom_Z"
     ],
-    "hmm_init_strategy": "6-feature Quantile-based EM initialization"
+    "hmm_init_strategy": "6-feature Quantile-based EM initialization with Skewness Priors"
   }
 }

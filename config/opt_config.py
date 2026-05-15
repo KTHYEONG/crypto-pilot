@@ -96,8 +96,9 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     "FUTURES_HMM_K_STATES": 4,
     # HMM backend selector:
     # - "jax_gaussian" (default): existing JAX Gaussian backend
-    # - "student_t": Student-t backend (if available in runtime)
-    "FUTURES_HMM_BACKEND": "student_t",
+    # - "student_t": Student-t backend
+    # - "skewed_t": Skewed-t backend with Parallel Associative Scan
+    "FUTURES_HMM_BACKEND": "skewed_t",
     # Stability guard: JAX HMM backend intermittently segfaulted (exit 139) on long-trial runs.
     # v10.0.0: RESTORED for multivariate EM.
     "FUTURES_HMM_JAX_BACKEND_ENABLED": True,
