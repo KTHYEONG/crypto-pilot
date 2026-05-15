@@ -158,7 +158,12 @@ def _hmm_nll(
     mask: jnp.ndarray,
 ) -> jnp.ndarray:
     _, lls = _hmm_forward(obs, mask, params)
-    nll = -jnp.sum(lls)
+    # Outcome-Weighted NLL: 하방 꼬리 구간에 2.5배 가중 (BEAR λ 학습 강화)
+    # f0=trend_z (<-1.5 → downtrend), f2=downside_vol_z (>1.5 → high downside risk)
+    n_feats = obs.shape[1]
+    tail_flag = (obs[:, 0] < -1.5) | (obs[:, 2] > 1.5 if n_feats > 2 else obs[:, 0] < -1.5)
+    outcome_w = jnp.where(tail_flag, 2.5, 1.0)
+    nll = -jnp.sum(lls * outcome_w)
 
     # Transition priors (Stickiness)
     trans_probs = jax.nn.softmax(params["log_trans"], axis=1)
@@ -168,7 +173,7 @@ def _hmm_nll(
     avg_vol = jnp.sum(vol_z * mask) / jnp.maximum(jnp.sum(mask), 1.0)
     
     sigmoid_vol = jax.nn.sigmoid(2.0 * (avg_vol - 1.0))
-    sticky_base = 2200.0  # Slightly stronger for Skewed-t
+    sticky_base = 3200.0  # Slightly stronger for Skewed-t
     sticky_weight = sticky_base * (1.0 - 0.5 * sigmoid_vol)
     sticky_prior = -sticky_weight * jnp.sum(jnp.log(jnp.maximum(diag, _EPS)))
 
@@ -192,8 +197,10 @@ def _hmm_nll(
     lambdas = params["lambda_raw"] # (K, F)
     # Target: BULL trend skew > 0, BEAR trend skew < -1.5 (Crash risk)
     skew_prior = n_obs * (
-        0.5 * jnp.square(jnp.maximum(0.0, 0.5 - lambdas[0, 0]))   # BULL f1 skew
-        + 1.5 * jnp.square(jnp.maximum(0.0, lambdas[1, 0] + 1.5)) # BEAR f1 skew << 0
+        # BULL f1 skew (강화: 0.5→0.8)
+        0.8 * jnp.square(jnp.maximum(0.0, 0.5 - lambdas[0, 0]))
+        # BEAR f1 skew << 0 (강화: 1.5→2.5)
+        + 2.5 * jnp.square(jnp.maximum(0.0, lambdas[1, 0] + 1.5))
     )
     # L2 regularization on other skewness params
     skew_l2 = 0.1 * jnp.sum(jnp.square(lambdas))

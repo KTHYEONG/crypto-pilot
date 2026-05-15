@@ -147,7 +147,7 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     # Min-duration (bars @ base TF) per state: [BULL_CALM, BULL_VOL_UP, BEAR, CHOP, CRISIS]
     # P0: was [1000,500,...] (~6w calm lock); shortened so regime errors recover in ~1w.
     # Note: sticky labels applied on 5-state output (RECOVERY merged into BULL_VOL_UP).
-    "FUTURES_HMM_OUTPUT_STICKY_MIN_DURATION": [132, 56, 42, 16, 24],
+    "FUTURES_HMM_OUTPUT_STICKY_MIN_DURATION": [48, 32, 28, 16, 20],
     # Slightly stronger sticky transitions → stabler systemic HMM under leg refit (Path C).
     "FUTURES_HMM_TRANSITION_PRIOR_ALPHA": 0.50,
     # True per-bar TVTP controls (f2/vol_z driven).
@@ -155,17 +155,17 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     "FUTURES_HMM_TVTP_VOL_CENTER": 0.0,
     "FUTURES_HMM_TVTP_VOL_SCALE": 1.0,
     # diag_slope < 0: high vol lowers self-transition stickiness, increasing regime mobility.
-    "FUTURES_HMM_TVTP_DIAG_SLOPE": -0.16,
+    "FUTURES_HMM_TVTP_DIAG_SLOPE": -0.12,
     "FUTURES_HMM_TVTP_DIAG_BIAS": 0.0,
     "FUTURES_HMM_TVTP_DIAG_CLIP": 0.22,
     # Sticky prior multiplier = clip(1 + slope * avg_vol, min_mult, max_mult).
-    "FUTURES_HMM_TVTP_STICKY_PRIOR_VOL_SLOPE": -0.45,
+    "FUTURES_HMM_TVTP_STICKY_PRIOR_VOL_SLOPE": -0.30,
     "FUTURES_HMM_TVTP_STICKY_PRIOR_MIN_MULT": 1.01,
     "FUTURES_HMM_TVTP_STICKY_PRIOR_MAX_MULT": 1.35,
     # HMM Posterior Smoothing (EMA, DEMA, TEMA, HMA, KAMA, ALMA, JMA)
     "FUTURES_HMM_SMOOTHING_METHOD": "EMA",
     # Posterior smoothing: span=3 harmed HMM stability; 6–9 + higher STICKY_PENALTY (1100).
-    "FUTURES_HMM_SMOOTHING_SPAN": 9,
+    "FUTURES_HMM_SMOOTHING_SPAN": 12,
     # Optional asymmetric EMA for crisis posterior (faster attack, slower decay).
     "FUTURES_HMM_CRISIS_ATTACK_SPAN": 2,
     "FUTURES_HMM_CRISIS_DECAY_SPAN": 9,
@@ -214,7 +214,7 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     "FUTURES_POLICY_DAMP_MIX_REALIZED_W": 0.65,
     "FUTURES_POLICY_DAMP_MIX_PRE_W": 0.20,
     "FUTURES_POLICY_DAMP_MIX_TAIL8_W": 0.15,
-    "FUTURES_POLICY_DEFENSE_SOFT_THR": 0.48,
+    "FUTURES_POLICY_DEFENSE_SOFT_THR": 0.38,
     "FUTURES_POLICY_DEFENSE_HARD_THR": 0.66,
     "FUTURES_POLICY_DEFENSE_NEAR_FLAT_THR": 0.84,
     "FUTURES_POLICY_DEFENSE_SOFT_MULT": 0.82,
@@ -225,9 +225,9 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     "FUTURES_POLICY_DEFENSE_NEAR_FLAT_REALIZED_THR": 0.72,
     "FUTURES_POLICY_DEFENSE_HARD_TAIL_RANK_THR": 0.90,
     "FUTURES_POLICY_DEFENSE_NEAR_FLAT_TAIL_RANK_THR": 0.95,
-    "FUTURES_POLICY_DEFENSE_SOFT_REALIZED_FLOOR": 0.40,
-    "FUTURES_POLICY_DEFENSE_SOFT_TAIL_THR": 0.82,
-    "FUTURES_POLICY_DEFENSE_SOFT_SUP_THR": 0.80,
+    "FUTURES_POLICY_DEFENSE_SOFT_REALIZED_FLOOR": 0.30,
+    "FUTURES_POLICY_DEFENSE_SOFT_TAIL_THR": 0.70,
+    "FUTURES_POLICY_DEFENSE_SOFT_SUP_THR": 0.68,
     "FUTURES_POLICY_DEFENSE_HARD_SUP_THR": 0.86,
     "FUTURES_POLICY_DEFENSE_NEAR_FLAT_SUP_THR": 0.92,
     # Execution-oriented evaluation gate for Step2 contribution measurement.
