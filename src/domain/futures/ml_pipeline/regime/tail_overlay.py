@@ -68,13 +68,19 @@ def _as_score_bundle(supervised_score: np.ndarray | dict[str, np.ndarray] | None
 
 
 def _zscore_robust(s: pd.Series, win: int = 168) -> np.ndarray:
-    x = pd.to_numeric(s, errors="coerce").astype(np.float64)
-    med = x.rolling(win, min_periods=max(12, win // 8)).median()
-    q75 = x.rolling(win, min_periods=max(12, win // 8)).quantile(0.75)
-    q25 = x.rolling(win, min_periods=max(12, win // 8)).quantile(0.25)
-    iqr = (q75 - q25).replace(0.0, np.nan)
-    z = ((x - med) / iqr).replace([np.inf, -np.inf], np.nan).fillna(0.0)
-    return z.to_numpy(dtype=np.float64)
+    """Standard rolling z-score for performance (optimized)."""
+    x = s.to_numpy(dtype=np.float64) if isinstance(s, pd.Series) else np.asarray(s, dtype=np.float64)
+    x = np.nan_to_num(x, nan=0.0)
+
+    ser = pd.Series(x)
+    min_p = max(12, win // 8)
+    roll = ser.rolling(win, min_periods=min_p)
+    mu = roll.mean()
+    sigma = roll.std(ddof=0).replace(0.0, np.nan)
+
+    z = (ser - mu) / sigma
+    return z.fillna(0.0).clip(-4.0, 4.0).to_numpy(dtype=np.float64)
+
 
 
 def compute_tail_hazard_overlay(
@@ -291,11 +297,9 @@ def _fit_supervised_tail_score(
         scores: dict[str, np.ndarray] = {}
         fwd_map: dict[int, pd.Series] = {}
         for h in horizons:
-            fwd_worst = np.full(n, np.inf, dtype=np.float64)
-            for k in range(1, int(h) + 1):
-                shifted = r_ser.shift(-k).to_numpy(dtype=np.float64)
-                fwd_worst = np.minimum(fwd_worst, shifted)
-            fwd_map[h] = pd.Series(fwd_worst, index=idx).replace([np.inf, -np.inf], np.nan)
+            # Optimized vectorized look-forward minimum (worst) return
+            fwd_worst = r_ser.shift(-h).rolling(window=h, min_periods=1).min()
+            fwd_map[h] = fwd_worst.replace([np.inf, -np.inf], np.nan)
 
         for h in horizons:
             fwd_ser = fwd_map[h]
