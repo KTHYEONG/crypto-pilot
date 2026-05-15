@@ -7,7 +7,6 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-
 POLICY_COLUMNS: tuple[str, ...] = (
     "gross_cap_mult",
     "kelly_mult",
