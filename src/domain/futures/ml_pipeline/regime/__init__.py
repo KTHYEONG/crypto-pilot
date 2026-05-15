@@ -1,13 +1,25 @@
-"""Market regime inference — 3-Layer Hierarchical Classifier (v9.0)."""
+"""Market regime inference public surface."""
 
-from src.domain.futures.ml_pipeline.regime.crisis_detector import detect_crisis
-from src.domain.futures.ml_pipeline.regime.dir_regime import DirRegimeModel
 from src.domain.futures.ml_pipeline.regime.hmm_inferrer import HMMStateInferrer
-from src.domain.futures.ml_pipeline.regime.vol_regime import VolRegimeModel
+from src.domain.futures.ml_pipeline.regime.regime_contracts import (
+    REGIME_INDEX,
+    REGIME_PROB_COLUMNS,
+    canonical_regime_prob_columns,
+    normalize_regime_prob_frame,
+    regime_prob_matrix,
+    semantic_probs_frame,
+    semantic_probs_from_vector,
+)
+from src.domain.futures.ml_pipeline.regime.student_t_hmm import StudentTMultivariateHMM
 
 __all__ = [
-    "DirRegimeModel",
     "HMMStateInferrer",
-    "VolRegimeModel",
-    "detect_crisis",
+    "REGIME_INDEX",
+    "REGIME_PROB_COLUMNS",
+    "canonical_regime_prob_columns",
+    "normalize_regime_prob_frame",
+    "regime_prob_matrix",
+    "semantic_probs_frame",
+    "semantic_probs_from_vector",
+    "StudentTMultivariateHMM",
 ]

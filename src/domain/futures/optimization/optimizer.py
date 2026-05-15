@@ -1507,6 +1507,8 @@ def _run_portfolio_numba_block(
     )
     sigma_3d = aligned.get("sigma_3d")
     hmm_probs_2d = None
+    # Semantic 5-col order consumed by portfolio constructor:
+    # [bull_calm, bull_vol_up, bear_trend, chop, crisis]
     _hmm_cols_pw = [
         "hmm_prob_bull_calm",
         "hmm_prob_bull_vol_up",

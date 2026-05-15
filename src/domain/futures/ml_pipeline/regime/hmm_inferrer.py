@@ -1,24 +1,11 @@
-"""3-Layer Hierarchical Regime Classifier (v9.0) — Orchestrator / Facade.
-
-Architecture:
-    Layer 1: MS-GARCH Vol Regime  (3 states, 12h — vol_regime.py)
-    Layer 2: Direction HMM        (3 states, 6h  — dir_regime.py)
-    Layer 3: Crisis Detector      (rules-based   — crisis_detector.py)
-
-External output: 5 semantic probability columns (HMM_SEMANTIC_PROB_COLUMNS)
-    + auxiliary columns (hmm_entropy, hmm_expected_duration, hmm_current_duration,
-                         hmm_hard_state, hmm_prob_bull_trend, datetime).
-
-Public interface (backward-compatible):
-    HMMStateInferrer.fit_predict_systemic(features_df, returns_ser, is_end_idx,
-                                          symbol, tf) -> pd.DataFrame
-"""
+"""Regime inference orchestrator with canonical 4-state contract + overlays."""
 
 from __future__ import annotations
 
 import logging
 import os
 from dataclasses import dataclass, field
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -26,9 +13,15 @@ from numba import njit
 from scipy.special import expit
 
 from config.opt_config import OPT_FUTURES_CONFIG
-from src.domain.futures.ml_pipeline.regime.crisis_detector import detect_crisis_components
-from src.domain.futures.ml_pipeline.regime.jax_hmm import JAXMultivariateHMM
 from src.core.indicators.indicators import global_ind
+from src.domain.futures.ml_pipeline.regime.jax_hmm import JAXMultivariateHMM
+from src.domain.futures.ml_pipeline.regime.policy_mapper import map_policy_controls
+from src.domain.futures.ml_pipeline.regime.regime_contracts import (
+    REGIME_STATE_COLUMNS,
+    derive_legacy_hmm_prob_frame,
+    normalize_regime_state_frame,
+)
+from src.domain.futures.ml_pipeline.regime.tail_overlay import compute_tail_hazard_overlay
 
 os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 
@@ -41,27 +34,10 @@ HMM_SEMANTIC_PROB_COLUMNS: tuple[str, ...] = (
     "hmm_prob_chop",
     "hmm_prob_crisis",
 )
-_SEMANTIC_ORDER: list[str] = list(HMM_SEMANTIC_PROB_COLUMNS)
-HMM_AUX_CRISIS_PROB_COLUMNS: tuple[str, str] = (
-    "hmm_prob_pre_crisis",
-    "hmm_prob_realized_crisis",
-)
-
-# ---------------------------------------------------------------------------
-# Utility functions
-# ---------------------------------------------------------------------------
-
-
-def _normalized_entropy_k(probs: np.ndarray, k: int) -> np.ndarray:
-    """Normalised Shannon entropy for a probability matrix."""
-    p = np.clip(np.asarray(probs, dtype=np.float64), 1e-12, 1.0)
-    result: np.ndarray = (-np.sum(p * np.log(p), axis=1) / np.log(float(k))).astype(np.float64)
-    return result
 
 
 @njit(cache=True, fastmath=True)
 def _numba_sticky_labels(labels: np.ndarray, min_durations: np.ndarray) -> np.ndarray:
-    """Asymmetric min-duration constraint to reduce regime flip noise."""
     n = len(labels)
     if n < 2:
         return labels
@@ -84,7 +60,6 @@ def _numba_sticky_labels(labels: np.ndarray, min_durations: np.ndarray) -> np.nd
 
 @njit(cache=True, fastmath=True)
 def _numba_current_duration(hard_states: np.ndarray) -> np.ndarray:
-    """Compute run-length (current duration) for each bar."""
     n = len(hard_states)
     dur_arr = np.zeros(n, dtype=np.float64)
     if n == 0:
@@ -100,78 +75,117 @@ def _numba_current_duration(hard_states: np.ndarray) -> np.ndarray:
     return dur_arr
 
 
-# ---------------------------------------------------------------------------
-# Track A + B Mapping
-# ---------------------------------------------------------------------------
-
-def _map_jax_to_five_state(
-    jax_probs: pd.DataFrame,
-    crisis_comps: pd.DataFrame,
-    f2_vol_z: pd.Series,
-) -> pd.DataFrame:
-    """Map 4-state JAX HMM + Crisis Detector into 5 semantic columns.
-
-    Track A states: bull_trend, bear_trend, chop_high, chop_low
-    Track B: crisis_score
-    """
-    idx = jax_probs.index
-    p_bull = jax_probs["bull_trend"]
-    p_bear = jax_probs["bear_trend"]
-    p_chop = jax_probs["chop_high"] + jax_probs["chop_low"]
-    
-    # Track B: Crisis Score
-    p_crisis = crisis_comps["crisis_score"].reindex(idx).fillna(0.0)
-    
-    # Split BULL_TREND using Volatility Z-score (f2)
-    # Sigmoid(f2) gives weight to bull_vol_up, Sigmoid(-f2) to bull_calm
-    vol_weight = pd.Series(expit(f2_vol_z.values), index=idx)
-    p_bull_vol_up = p_bull * vol_weight
-    p_bull_calm = p_bull * (1.0 - vol_weight)
-    
-    # Blend Track B (Crisis)
-    # We follow the same logic as before: Track B is an overlay.
-    # Sigma (bull_calm, bull_vol_up, bear_trend, chop) = 1 - p_crisis
-    target_noncr = (1.0 - p_crisis).clip(0.0, 1.0)
-    current_sum = p_bull_calm + p_bull_vol_up + p_bear + p_chop + 1e-12
-    scale = target_noncr / current_sum
-    
-    return pd.DataFrame({
-        "hmm_prob_bull_calm": (p_bull_calm * scale).clip(0.0, 1.0),
-        "hmm_prob_bull_vol_up": (p_bull_vol_up * scale).clip(0.0, 1.0),
-        "hmm_prob_bear_trend": (p_bear * scale).clip(0.0, 1.0),
-        "hmm_prob_chop": (p_chop * scale).clip(0.0, 1.0),
-        "hmm_prob_crisis": p_crisis.clip(0.0, 1.0),
-    }, index=idx)
+def _safe_probs(mat: np.ndarray) -> np.ndarray:
+    arr = np.asarray(mat, dtype=np.float64)
+    arr = np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
+    arr = np.clip(arr, 0.0, 1.0)
+    row_sum = arr.sum(axis=1, keepdims=True)
+    bad = row_sum[:, 0] <= 1e-12
+    if np.any(bad):
+        arr[bad] = 1.0 / float(arr.shape[1])
+        row_sum = arr.sum(axis=1, keepdims=True)
+    return arr / np.maximum(row_sum, 1e-12)
 
 
-# ---------------------------------------------------------------------------
-# Orchestrator
-# ---------------------------------------------------------------------------
+def _entropy4(prob4: np.ndarray) -> np.ndarray:
+    p = np.clip(prob4, 1e-12, 1.0)
+    return (-np.sum(p * np.log(p), axis=1) / np.log(4.0)).astype(np.float64)
 
 
 @dataclass
 class HMMStateInferrer:
-    """Next-Gen Regime Model Refactoring (v10.0 - JAX Native).
-
-    Track A: 4-State JAX Multivariate HMM
-    Track B: Rule-based Crisis Detector Overlay
-    """
-
-    n_states: int = 5
+    n_states: int = 4
     n_iter: int = 1500
     tol: float = 1e-4
-    smoothing_method: str = "EMA"
-    smoothing_span: int = 8
-    sticky_min_duration: tuple[int, int, int, int, int] = (24, 12, 8, 10, 4)
-    crisis_attack_span: int | None = None
-    crisis_decay_span: int | None = None
-    _jax_model: JAXMultivariateHMM = field(init=False, repr=False)
+    sticky_min_duration: tuple[int, int, int, int] = (24, 12, 10, 8)
+    backend: str = "jax_gaussian"
+    _model: Any = field(init=False, repr=False)
+    _backend_name: str = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
-        self.smoothing_method = str(self.smoothing_method or "EMA").upper()
-        self.smoothing_span = int(max(1, self.smoothing_span))
         self.sticky_min_duration = tuple(max(1, int(v)) for v in self.sticky_min_duration)
-        self._jax_model = JAXMultivariateHMM(n_iter=self.n_iter, tol=self.tol)
+        backend_req = str(self.backend or "jax_gaussian").strip().lower()
+        self._model = JAXMultivariateHMM(n_iter=self.n_iter, tol=self.tol)
+        self._backend_name = "jax_gaussian"
+        if backend_req == "student_t":
+            student_model = self._build_student_t_model()
+            if student_model is not None:
+                self._model = student_model
+                self._backend_name = "student_t"
+            else:
+                _logger.warning("HMM backend=student_t requested but unavailable; fallback=jax_gaussian")
+
+    def _build_student_t_model(self) -> Any | None:
+        candidates: tuple[tuple[str, str], ...] = (
+            ("src.domain.futures.ml_pipeline.regime.student_t_hmm", "StudentTRegimeHMM"),
+            ("src.domain.futures.ml_pipeline.regime.student_t_hmm", "StudentTMultivariateHMM"),
+            ("src.domain.futures.ml_pipeline.regime.student_t_hmm", "StudentTHMM"),
+        )
+        for module_name, cls_name in candidates:
+            try:
+                mod = __import__(module_name, fromlist=[cls_name])
+                cls = getattr(mod, cls_name)
+                return cls(n_iter=self.n_iter, tol=self.tol)
+            except Exception:
+                continue
+        return None
+
+    def _fit_filter_probs(self, obs_df: pd.DataFrame, is_end_idx: int) -> pd.DataFrame:
+        if hasattr(self._model, "fit_filter_train_oos"):
+            return self._model.fit_filter_train_oos(obs_df, is_end_idx=is_end_idx)
+        if hasattr(self._model, "fit_predict"):
+            _logger.warning("Selected backend lacks fit_filter_train_oos; using fit_predict fallback")
+            return self._model.fit_predict(obs_df)
+        raise AttributeError(f"HMM backend '{self._backend_name}' does not provide inference API")
+
+    def _build_obs_df(self, features_df: pd.DataFrame, returns_ser: pd.Series) -> tuple[pd.DataFrame, pd.Series]:
+        idx = features_df.index
+        close = (
+            pd.to_numeric(features_df["close"], errors="coerce").astype(np.float64)
+            if "close" in features_df.columns
+            else returns_ser.cumsum().astype(np.float64)
+        )
+        ema12 = global_ind.calculate_ema(close, 12)
+        ema144 = global_ind.calculate_ema(close, 144).replace(0.0, np.nan)
+        f1_raw = (ema12 / ema144) - 1.0
+        f1_z = (f1_raw - f1_raw.rolling(168, min_periods=24).mean()) / f1_raw.rolling(168, min_periods=24).std().replace(0.0, np.nan)
+
+        if "high" in features_df.columns and "low" in features_df.columns:
+            atr14 = global_ind.calculate_atr(features_df, 14)
+        else:
+            atr14 = returns_ser.abs().rolling(14, min_periods=4).mean() * close
+
+        f2_raw = np.log((atr14 / close.replace(0.0, np.nan)).replace([np.inf, -np.inf], np.nan))
+        f2_z = (f2_raw - f2_raw.rolling(168, min_periods=24).mean()) / f2_raw.rolling(168, min_periods=24).std().replace(0.0, np.nan)
+
+        obs_df = pd.DataFrame({"f1": f1_z, "f2": f2_z}, index=idx)
+        obs_df = obs_df.replace([np.inf, -np.inf], np.nan).ffill().bfill().fillna(0.0)
+        return obs_df, f2_z.reindex(idx).fillna(0.0)
+
+    def _map_to_canonical_states(self, jax_probs: pd.DataFrame, vol_z: pd.Series) -> pd.DataFrame:
+        idx = jax_probs.index
+        p_bull = pd.to_numeric(jax_probs.get("bull_trend", 0.25), errors="coerce").fillna(0.25).to_numpy(dtype=np.float64)
+        p_bear = pd.to_numeric(jax_probs.get("bear_trend", 0.25), errors="coerce").fillna(0.25).to_numpy(dtype=np.float64)
+        p_chop_h = pd.to_numeric(jax_probs.get("chop_high", 0.25), errors="coerce").fillna(0.25).to_numpy(dtype=np.float64)
+        p_chop_l = pd.to_numeric(jax_probs.get("chop_low", 0.25), errors="coerce").fillna(0.25).to_numpy(dtype=np.float64)
+
+        split = expit(np.clip(vol_z.to_numpy(dtype=np.float64), -8.0, 8.0))
+        p_volatile = p_bull * split
+        p_calm = p_bull * (1.0 - split)
+        p_off = p_bear
+        p_chop = p_chop_h + p_chop_l
+
+        prob4 = np.column_stack([p_calm, p_volatile, p_off, p_chop])
+        prob4 = _safe_probs(prob4)
+
+        out = pd.DataFrame(prob4, index=idx, columns=REGIME_STATE_COLUMNS)
+        out["regime_entropy"] = _entropy4(prob4)
+
+        hard = np.argmax(prob4, axis=1).astype(np.int32)
+        sticky = _numba_sticky_labels(hard, np.array(self.sticky_min_duration, dtype=np.int32))
+        out["regime_hard_state"] = sticky.astype(np.float64)
+        out["regime_current_duration"] = _numba_current_duration(sticky)
+        return out
 
     def fit_predict_systemic(
         self,
@@ -181,111 +195,74 @@ class HMMStateInferrer:
         symbol: str = "Market",
         tf: str = "4h",
     ) -> pd.DataFrame:
-        """v10.0 implementation of regime inference."""
-        _logger.info("🧠 HMM v10.0 | %s %s | %d bars", symbol, tf, len(features_df))
-
-        n_orig = len(features_df)
-        if n_orig < 200:
+        _logger.info("HMM regime inference | %s %s | n=%d | backend=%s", symbol, tf, len(features_df), self._backend_name)
+        if len(features_df) < 50:
             return self._zeros_semantic(features_df)
 
-        orig_idx = features_df.index
-        # ── 1. Feature Engineering (f1, f2) ──────────────────────────────────
-        # f1: Trend (Rolling Z-score of EMA(12)/EMA(144)-1)
-        close = features_df["close"] if "close" in features_df.columns else returns_ser.cumsum() # Fallback
-        ema12 = global_ind.calculate_ema(close, 12)
-        ema144 = global_ind.calculate_ema(close, 144)
-        f1_raw = (ema12 / ema144) - 1.0
-        f1_z = (f1_raw - f1_raw.rolling(168).mean()) / f1_raw.rolling(168).std().replace(0, 0.001)
-        
-        # f2: Volatility (Rolling Z-score of Log(ATR(14)/Close))
-        if "high" in features_df.columns and "low" in features_df.columns:
-            atr14 = global_ind.calculate_atr(features_df, 14)
-        else:
-            # Fallback for OHLC lack
-            atr14 = returns_ser.abs().rolling(14).mean() * close
-            
-        f2_raw = np.log(atr14 / close.replace(0, 0.001)).replace([np.inf, -np.inf], np.nan).fillna(0.0)
-        f2_z = (f2_raw - f2_raw.rolling(168).mean()) / f2_raw.rolling(168).std().replace(0, 0.001)
-        
-        obs_df = pd.DataFrame({"f1": f1_z, "f2": f2_z}, index=orig_idx).fillna(0.0)
+        idx = features_df.index
+        obs_df, vol_z = self._build_obs_df(features_df, returns_ser.reindex(idx).fillna(0.0))
+        jax_probs = self._fit_filter_probs(obs_df, is_end_idx=int(max(1, min(is_end_idx, len(obs_df)))))
 
-        # ── 2. Track A: JAX Multivariate HMM ─────────────────────────────────
-        jax_probs = self._jax_model.fit_predict(obs_df)
+        regime_df = self._map_to_canonical_states(jax_probs.reindex(idx).ffill().bfill().fillna(0.0), vol_z)
+        regime_df = normalize_regime_state_frame(regime_df).join(regime_df[["regime_entropy", "regime_hard_state", "regime_current_duration"]])
 
-        # ── 3. Track B: Crisis Detector Overlay ──────────────────────────────
-        # We need vol_probs and dir_probs for legacy crisis detector, 
-        # so we map JAX states to temporary vol/dir proxies.
-        vol_proxies = pd.DataFrame({
-            "vol_low": jax_probs["bull_trend"] + jax_probs["bear_trend"] + jax_probs["chop_low"],
-            "vol_mid": jax_probs["chop_high"] * 0.5,
-            "vol_high": jax_probs["chop_high"] * 0.5,
-        }, index=orig_idx).fillna(0.33)
-        dir_proxies = pd.DataFrame({
-            "dir_bull": jax_probs["bull_trend"],
-            "dir_range": jax_probs["chop_high"] + jax_probs["chop_low"],
-            "dir_bear": jax_probs["bear_trend"],
-        }, index=orig_idx).fillna(0.33)
+        legacy_df = derive_legacy_hmm_prob_frame(regime_df)
 
-        crisis_comps = detect_crisis_components(
-            features_df, returns_ser, vol_proxies, dir_proxies
+        hazard_res = compute_tail_hazard_overlay(
+            features_df=features_df,
+            regime_df=regime_df,
+            returns_ser=returns_ser,
+            cfg=OPT_FUTURES_CONFIG,
         )
+        hazard_df = hazard_res.hazards
+        policy_df = map_policy_controls(regime_df=regime_df, hazard_df=hazard_df, cfg=OPT_FUTURES_CONFIG)
 
-        # ── 4. Final Mapping ─────────────────────────────────────────────────
-        result = _map_jax_to_five_state(jax_probs, crisis_comps, f2_z)
-        
-        # Skip post-hoc smoothing if configured (Specification: "Remove post-hoc EMA probability smoothing")
-        # But we keep it if smoothing_span > 1 for backward compatibility unless explicitly disabled.
-        # Given the spec, I'll set a flag or just respect the config.
-        # Actually, let's just use what's in the result.
-        
-        # ── Auxiliary columns ────────────────────────────────────────────────
-        result["hmm_prob_pre_crisis"] = crisis_comps["pre_crisis_score"].reindex(result.index).fillna(0.0)
-        result["hmm_prob_realized_crisis"] = crisis_comps["realized_crisis_score"].reindex(result.index).fillna(0.0)
-        result["hmm_prob_bull_trend"] = jax_probs["bull_trend"]
-        
-        prob_mat = result[_SEMANTIC_ORDER].to_numpy(dtype=np.float64)
-        result["hmm_entropy"] = _normalized_entropy_k(prob_mat, len(_SEMANTIC_ORDER))
-
-        hard_states_raw = np.argmax(prob_mat, axis=1).astype(np.int32)
-        _DUR_CFG = np.array(self.sticky_min_duration, dtype=np.int32)
-        sticky_hard = _numba_sticky_labels(hard_states_raw, _DUR_CFG)
-        result["hmm_hard_state"] = sticky_hard.astype(np.float64)
-        result["hmm_current_duration"] = _numba_current_duration(sticky_hard)
-        result["hmm_expected_duration"] = 1.0 / (1.0 - 0.96) # Default sticky prior
-
-        result = result.ffill().bfill().fillna(0.0)
-        result = result.reset_index().rename(columns={result.index.name or "index": "datetime"})
-
-        _logger.info("✅ HMM v10.0 done | crisis=%.1f%%", 100.0 * float(result["hmm_prob_crisis"].mean()))
-        return result
+        out = pd.concat([regime_df, legacy_df, hazard_df, policy_df], axis=1)
+        out = out.replace([np.inf, -np.inf], np.nan).ffill().bfill().fillna(0.0)
+        out = out.reset_index().rename(columns={out.index.name or "index": "datetime"})
+        return out
 
     def _zeros_semantic(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Return uniform-prior output when there is insufficient data."""
-        u = 1.0 / float(len(_SEMANTIC_ORDER))
-        cols: list[str] = [
-            *_SEMANTIC_ORDER,
-            *HMM_AUX_CRISIS_PROB_COLUMNS,
-            "hmm_entropy",
-            "hmm_expected_duration",
-            "hmm_current_duration",
-            "hmm_hard_state",
-            "hmm_prob_bull_trend",
-        ]
-        out = pd.DataFrame(np.zeros((len(df), len(cols))), index=df.index, columns=cols)
-        for c in _SEMANTIC_ORDER: out[c] = u
-        out["hmm_prob_bull_trend"] = 2*u
-        out["hmm_entropy"] = 1.0
-        return out.reset_index().rename(columns={out.index.name or "index": "datetime"})
+        idx = df.index
+        n = len(df)
+        prob4 = np.full((n, 4), 0.25, dtype=np.float64)
+        out = pd.DataFrame(prob4, index=idx, columns=REGIME_STATE_COLUMNS)
+        out["regime_entropy"] = 1.0
+        out["regime_hard_state"] = 0.0
+        out["regime_current_duration"] = 1.0
+        legacy = derive_legacy_hmm_prob_frame(out)
+        hazard = pd.DataFrame(
+            {
+                "pre_crisis_hazard": np.zeros(n, dtype=np.float64),
+                "realized_crisis_hazard": np.zeros(n, dtype=np.float64),
+                "tail_hazard_4h": np.zeros(n, dtype=np.float64),
+                "tail_hazard_8h": np.zeros(n, dtype=np.float64),
+                "tail_hazard_24h": np.zeros(n, dtype=np.float64),
+            },
+            index=idx,
+        )
+        policy = map_policy_controls(out, hazard, cfg=OPT_FUTURES_CONFIG)
+        merged = pd.concat([out, legacy, hazard, policy], axis=1)
+        return merged.reset_index().rename(columns={merged.index.name or "index": "datetime"})
+
 
 def build_hmm_inferrer_from_config(cfg: dict[str, object] | None = None, **kwargs) -> HMMStateInferrer:
     conf = OPT_FUTURES_CONFIG if cfg is None else cfg
-    sticky_raw = conf.get("FUTURES_HMM_OUTPUT_STICKY_MIN_DURATION", [24, 12, 8, 10, 4])
+    sticky_raw = conf.get("FUTURES_HMM_OUTPUT_STICKY_MIN_DURATION", [24, 12, 10, 8])
     try:
-        sticky = tuple(int(v) for v in sticky_raw)
+        sticky_tuple = tuple(int(v) for v in sticky_raw)
     except Exception:
-        sticky = (24, 12, 8, 10, 4)
+        sticky_tuple = (24, 12, 10, 8)
+    if len(sticky_tuple) < 4:
+        sticky_tuple = (24, 12, 10, 8)
+    else:
+        sticky_tuple = sticky_tuple[:4]
+    backend = str(conf.get("FUTURES_HMM_BACKEND", "jax_gaussian") or "jax_gaussian").strip().lower()
+    if backend not in {"jax_gaussian", "student_t"}:
+        backend = "jax_gaussian"
     return HMMStateInferrer(
         n_iter=int(conf.get("FUTURES_HMM_N_ITER", 1500)),
-        sticky_min_duration=sticky,
+        tol=float(conf.get("FUTURES_HMM_TOL", 1e-4)),
+        sticky_min_duration=sticky_tuple,
+        backend=backend,
     )
-

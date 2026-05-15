@@ -214,6 +214,30 @@ def precompute_rolling_covariances(
 
 
 @numba.njit(cache=True)
+def _decode_regime_probs(hmm_probs: np.ndarray) -> tuple[float, float, float, float]:
+    """
+    Decode HMM probabilities into semantic 4-bucket regime probs.
+    5-col format: [bull_calm, bull_vol_up, bear_trend, chop, crisis]
+    4-col legacy format: [bull, bear, chop, crisis]
+    """
+    p_bull = 0.0
+    p_bear = 0.0
+    p_chop = 0.0
+    p_crisis = 0.0
+    if hmm_probs.size >= 5:
+        p_bull = hmm_probs[0] + hmm_probs[1]
+        p_bear = hmm_probs[2]
+        p_chop = hmm_probs[3]
+        p_crisis = hmm_probs[4]
+    elif hmm_probs.size >= 4:
+        p_bull = hmm_probs[0]
+        p_bear = hmm_probs[1]
+        p_chop = hmm_probs[2]
+        p_crisis = hmm_probs[3]
+    return p_bull, p_bear, p_chop, p_crisis
+
+
+@numba.njit(cache=True)
 def _solve_constrained_weights_numba(
     mu: np.ndarray,
     sigma: np.ndarray,
@@ -243,26 +267,27 @@ def _solve_constrained_weights_numba(
     # regime_betas: [BULL, BEAR, CHOP, CRISIS]
     mu_mod = mu.copy()
     if hmm_probs is not None and regime_betas is not None:
-        p_crisis = hmm_probs[3]
+        p_bull, p_bear, p_chop, p_crisis = _decode_regime_probs(hmm_probs)
         if p_crisis > crisis_override_thr:
             return np.zeros(n, dtype=np.float64)
             
         # Composite regime multiplier
         mult = (
-            hmm_probs[0] * regime_betas[0] +  # BULL
-            hmm_probs[1] * regime_betas[1] +  # BEAR
-            hmm_probs[2] * regime_betas[2] +  # CHOP
-            hmm_probs[3] * regime_betas[3]    # CRISIS
+            p_bull * regime_betas[0] +   # BULL
+            p_bear * regime_betas[1] +   # BEAR
+            p_chop * regime_betas[2] +   # CHOP
+            p_crisis * regime_betas[3]   # CRISIS
         )
         for i in range(n):
             mu_mod[i] *= mult
 
     dyn_gross_cap = gross_cap
     if regime_policy_enabled == 1 and hmm_probs is not None and hmm_probs.size >= 4:
-        p_bull = min(max(hmm_probs[0], 0.0), 1.0)
-        p_bear = min(max(hmm_probs[1], 0.0), 1.0)
-        p_chop = min(max(hmm_probs[2], 0.0), 1.0)
-        p_crisis = min(max(hmm_probs[3], 0.0), 1.0)
+        p_bull, p_bear, p_chop, p_crisis = _decode_regime_probs(hmm_probs)
+        p_bull = min(max(p_bull, 0.0), 1.0)
+        p_bear = min(max(p_bear, 0.0), 1.0)
+        p_chop = min(max(p_chop, 0.0), 1.0)
+        p_crisis = min(max(p_crisis, 0.0), 1.0)
         s = p_bull + p_bear + p_chop + p_crisis
         if s > 1e-12:
             p_bull /= s
