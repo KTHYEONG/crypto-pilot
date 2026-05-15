@@ -320,88 +320,97 @@ def select_and_rank_candidates(
     base_ctx: MLPhaseDContext,
     cfg: dict[str, Any],
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Step 4 Refinement: Augment Pareto trials, filter, and rank candidates.
+    """J-score 기반 단일목적 후보 선정. 3개 hard-safety gate만 적용.
 
     Returns:
         tuple[dict, dict]: (best_cand, selection_summary)
 
     """
-    all_trials = study_ml.get_trials()
-    pareto_trials = list(study_ml.best_trials)
-    if not pareto_trials:
-        return {}, {}
-
     from optuna.trial import TrialState
 
-    from src.domain.futures.optimization.validation import awf_pos_frac_to_pseudo_pbo
+    completed = [
+        t for t in study_ml.get_trials()
+        if t.state == TrialState.COMPLETE and t.value is not None
+    ]
+    if not completed:
+        _logger.warning(" [SELECT] No completed trials found.")
+        return {}, {}
 
-    _study_complete = [t for t in all_trials if t.state == TrialState.COMPLETE]
-    _k_aug = int(cfg.get("FUTURES_AWF_AUGMENT_TOPK", 5))
-    _top_aug = sorted(
-        _study_complete,
-        key=lambda t: (float(t.user_attrs.get("awf_pos_frac", 0.0)),
-                       float(t.user_attrs.get("awf_mu_log", -9.0))),
-        reverse=True
-    )[:_k_aug]
-    _pareto_nums = {t.number for t in pareto_trials}
-    for _t in _top_aug:
-        if _t.number not in _pareto_nums:
-            pareto_trials.append(_t)
-            _pareto_nums.add(_t.number)
+    _j_hard_fail = float(cfg.get("FUTURES_J_HARD_FAIL_VALUE", -10.0))
+    _deploy_j_floor = float(cfg.get("FUTURES_DEPLOY_J_FLOOR", 0.0))
+    _mdd_hard_max = 0.40
+    _min_trades_per_leg = int(cfg.get("FUTURES_J_MIN_TRADES_PER_LEG", 8))
+    _k_legs = int(cfg.get("FUTURES_AWF_K_LEGS", 6))
+    _min_trades_total = _min_trades_per_leg * _k_legs
 
-    validated_candidates = []
-    pbo_limit = float(cfg.get("FUTURES_PBO_MAX", 0.45))
-    mu_log_min = float(cfg.get("FUTURES_AWF_MU_LOG_MIN", 0.0))
+    # activity floor 통과한 trial만 (hard_fail보다 높은 값)
+    viable = [t for t in completed if t.value > _j_hard_fail + 1e-6]
+    if not viable:
+        viable = completed  # fallback: best of bad
 
-    for t in pareto_trials:
-        _, val_diag = replay_robust_awf_for_trial_params(base_ctx, t.params)
-        awf_pos = float(t.user_attrs.get("awf_pos_frac", val_diag.get("awf_pos_frac", 0.0)))
-        awf_mu = float(t.user_attrs.get("awf_mu_log", val_diag.get("awf_mu_log", -9.0)))
-        if awf_pos_frac_to_pseudo_pbo(awf_pos) < pbo_limit and awf_mu >= mu_log_min:
-            validated_candidates.append({
-                "trial": t, "awf_diag": val_diag, "params": t.params, "values": t.values
-            })
+    # J 내림차순 정렬
+    viable.sort(key=lambda t: t.value, reverse=True)  # type: ignore[arg-type]
 
-    if not validated_candidates:
-        if bool(cfg.get("FUTURES_AWF_FAIL_OPEN_ENABLED", False)):
-            for t in pareto_trials:
-                _, val_diag = replay_robust_awf_for_trial_params(base_ctx, t.params)
-                validated_candidates.append({
-                    "trial": t, "awf_diag": val_diag, "params": t.params, "values": t.values
-                })
-        else:
-            return {}, {}
-
-    deploy_candidates = []
     reject_reason_count: dict[str, int] = {}
-    for cand in validated_candidates:
-        reasons = deploy_reject_reasons(cand)
-        if reasons:
-            for r in reasons:
-                reject_reason_count[r] = reject_reason_count.get(r, 0) + 1
+    best_cand: dict[str, Any] = {}
+
+    for trial in viable:
+        ua = trial.user_attrs
+        j_val = float(trial.value)  # type: ignore[arg-type]
+
+        # Gate 1: J ≥ DEPLOY_J_FLOOR
+        if j_val < _deploy_j_floor:
+            reject_reason_count["j_below_floor"] = reject_reason_count.get("j_below_floor", 0) + 1
             continue
-        cand["deploy_score"] = deploy_score(cand)
-        deploy_candidates.append(cand)
 
-    if deploy_candidates:
-        ranked = sorted(
-            deploy_candidates,
-            key=lambda c: (safe_float(c.get("deploy_score"), -1e9),
-                           cand_metric(c, "awf_robust_score", -1e9),
-                           -int(c["trial"].number)),
-            reverse=True
+        # Gate 2: worst MDD ≤ 40%
+        mdd_pct = float(ua.get("awf_worst_mdd_pct", ua.get("worst_mdd_legs", 100.0)))
+        if mdd_pct / 100.0 > _mdd_hard_max:
+            reject_reason_count["mdd_hard"] = reject_reason_count.get("mdd_hard", 0) + 1
+            continue
+
+        # Gate 3: 최소 거래 수 확인
+        n_trades = float(ua.get("awf_trade_count_mean", ua.get("avg_trades", 0.0))) * _k_legs
+        if n_trades < _min_trades_total:
+            reject_reason_count["insufficient_trades"] = (
+                reject_reason_count.get("insufficient_trades", 0) + 1
+            )
+            continue
+
+        # replay for full diag
+        _, val_diag = replay_robust_awf_for_trial_params(base_ctx, trial.params)
+        best_cand = {
+            "trial": trial,
+            "params": dict(trial.params),
+            "awf_diag": val_diag,
+            "j_score": j_val,
+            "deploy_score": j_val,
+        }
+        break
+
+    if not best_cand:
+        # FAIL-OPEN: gate 전부 실패해도 J 최고값 반환
+        _logger.warning(
+            " [SELECT] All gates failed (%s). FAIL-OPEN with best J=%.4f.",
+            reject_reason_count, viable[0].value,
         )
-        best_cand = ranked[0]
-        selected_by = "deploy_score"
-    else:
-        best_cand = sorted(validated_candidates, key=objective_key)[0]
-        selected_by = "objective"
+        trial = viable[0]
+        _, val_diag = replay_robust_awf_for_trial_params(base_ctx, trial.params)
+        best_cand = {
+            "trial": trial,
+            "params": dict(trial.params),
+            "awf_diag": val_diag,
+            "j_score": float(trial.value),  # type: ignore[arg-type]
+            "deploy_score": float(trial.value),  # type: ignore[arg-type]
+            "fail_open": True,
+        }
+        reject_reason_count["fail_open"] = 1
 
-    selection_summary = {
-        "selected_by": selected_by,
+    selection_summary: dict[str, Any] = {
+        "selected_by": "j_score_tpe",
         "selected_trial_number": int(best_cand["trial"].number),
-        "deploy_score": float(safe_float(best_cand.get("deploy_score"), deploy_score(best_cand))),
-        "selection_reject_reason_count": reject_reason_count
+        "deploy_score": float(best_cand["deploy_score"]),
+        "selection_reject_reason_count": reject_reason_count,
     }
     return best_cand, selection_summary
 

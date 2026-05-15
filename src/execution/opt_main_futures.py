@@ -251,7 +251,6 @@ def main() -> None:
         ml_pipeline_workers=ml_n_jobs, run_id=run_id,
     )
 
-    OPT_FUTURES_CONFIG["FUTURES_ML_ALPHA_NSGA2_ENABLED"] = True
     precompute_ml_optimization_context(base_ctx)
     if base_ctx.awf_leg_slices:
         test_leg = base_ctx.awf_leg_slices[0]["data"]
