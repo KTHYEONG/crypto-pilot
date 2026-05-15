@@ -4,6 +4,31 @@ This file tracks the logical progression and experimental results of the quantit
 
 ---
 
+## [2026-05-15] v10.4.0: Canonical 4-State HMM, Hazard Overlay, Policy Mapper, and CPU-Only JAX Bootstrap (GPT-5)
+
+### 1. Architectural Shift
+- The regime layer moved from legacy 5-state semantics to a canonical 4-state posterior contract: `risk_on_calm`, `risk_on_volatile`, `risk_off_trend`, and `chop_liquidity_thin`.
+- Legacy `hmm_prob_*` columns remain available as derived compatibility outputs, but they are no longer the primary contract.
+- Tail risk handling was split into a dedicated hazard layer instead of embedding crisis logic inside the HMM posterior itself.
+- Execution controls were extracted into a policy mapper so gross, Kelly, directional multipliers, and flat/rebalance gates are computed from posterior + hazard inputs.
+
+### 2. Runtime Hardening
+- JAX initialization is now forced to CPU-only in this environment so imports do not probe CUDA plugins and trigger runtime segfaults.
+- This change is operationally important for local execution and test stability, not just a debugging convenience.
+
+### 3. Validation Notes
+- `tests/test_hmm_backend_switch.py` passes.
+- `tests/test_hmm_causal_split.py` passes when the process is protected from GPU probing.
+- `--hmm-only` pipeline output now logs the current 4-state names while preserving the existing summary structure.
+
+### 4. Why This Is a DNA Update
+- The change is architectural, not temporary:
+  - canonical regime contract changed,
+  - hazard became a separate layer,
+  - policy mapping became a separate layer,
+  - runtime bootstrap now enforces CPU-only JAX initialization.
+- This is the new source of truth for how the HMM stack is intended to operate.
+
 ## [2026-05-14] v10.3.0: JAX Native HMM Refactoring — State Recovery & Parallel Optimization (Gemini CLI)
 
 ### 1. Problem Statement

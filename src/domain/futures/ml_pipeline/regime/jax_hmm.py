@@ -14,8 +14,14 @@ Features:
 from __future__ import annotations
 
 import logging
+import os
 from functools import partial
 from typing import Any
+
+# Force CPU backend to avoid CUDA plugin probing/segfault in this runtime.
+os.environ.setdefault("JAX_PLATFORMS", "cpu")
+os.environ.setdefault("JAX_PLATFORM_NAME", "cpu")
+os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
 
 import jax
 import jax.numpy as jnp
@@ -187,68 +193,111 @@ class JAXMultivariateHMM:
         _train_hmm(dummy_obs, dummy_mask, p, os, 3, 1e-4, opt)
         self._warmed = True
 
-    def fit_predict(self, obs_df: pd.DataFrame) -> pd.DataFrame:
+    def _prep_obs(self, obs_df: pd.DataFrame) -> np.ndarray:
         obs_arr = obs_df.fillna(0.0).to_numpy(dtype=np.float64)
         obs_arr = np.clip(obs_arr, -5.0, 5.0).astype(np.float32)
+        return obs_arr
+
+    def _to_prob_df(self, probs: np.ndarray, obs_df: pd.DataFrame) -> pd.DataFrame:
+        return pd.DataFrame(
+            probs,
+            index=obs_df.index,
+            columns=["bull_trend", "bear_trend", "chop_high", "chop_low"],
+        )
+
+    def fit(self, obs_df: pd.DataFrame) -> "JAXMultivariateHMM":
+        """Train HMM parameters on the provided observations only."""
+        obs_arr = self._prep_obs(obs_df)
         n = len(obs_arr)
-        
+        if n <= 0:
+            return self
+
         self._warmup()
-        
-        probs_all = np.full((n, _N_STATES), 1.0 / _N_STATES, dtype=np.float64)
         opt = optax.adamw(learning_rate=0.03, weight_decay=1e-4)
 
-        # Expanding window training
+        # Expanding window training (causal by construction).
         step = 168
         for t in range(min(n, 500), n + step, step):
             t_end = min(t, n)
-            inf_end = min(t_end + step, n)
-            # Ensure window including inference doesn't exceed _MAX_LEN
-            win_start = max(0, inf_end - _MAX_LEN)
+            win_start = max(0, t_end - _MAX_LEN)
             L = t_end - win_start
-            
-            if L <= 0: continue
+            if L <= 0:
+                continue
 
             obs_win = obs_arr[win_start:t_end]
             obs_pad = np.zeros((_MAX_LEN, _N_FEATURES), dtype=np.float32)
             m_pad = np.zeros(_MAX_LEN, dtype=np.float32)
             obs_pad[:L] = obs_win
             m_pad[:L] = 1.0
-            
+
             if self._params is None:
                 p = self._init_params(obs_win)
             else:
                 p = self._params
-                
+
             os = opt.init(p)
             self._params, _ = _train_hmm(
                 jnp.array(obs_pad), jnp.array(m_pad), p, os, self.n_iter, self.tol, opt
             )
-            
-            if inf_end > t_end:
-                obs_inf = obs_arr[win_start:inf_end]
-                L_inf = len(obs_inf)
-                obs_p = np.zeros((_MAX_LEN, _N_FEATURES), dtype=np.float32)
-                m_p = np.zeros(_MAX_LEN, dtype=np.float32)
-                obs_p[:L_inf] = obs_inf
-                m_p[:L_inf] = 1.0
-                
-                log_alphas, _ = _hmm_forward(jnp.array(obs_p), jnp.array(m_p), self._params)
-                post = np.asarray(jax.nn.softmax(log_alphas[:L_inf], axis=1))
-                probs_all[win_start:inf_end] = post
-            elif t_end == n and n > 0:
-                # Last window case if not covered
-                obs_inf = obs_arr[win_start:n]
-                L_inf = len(obs_inf)
-                obs_p = np.zeros((_MAX_LEN, _N_FEATURES), dtype=np.float32)
-                m_p = np.zeros(_MAX_LEN, dtype=np.float32)
-                obs_p[:L_inf] = obs_inf
-                m_p[:L_inf] = 1.0
-                log_alphas, _ = _hmm_forward(jnp.array(obs_p), jnp.array(m_p), self._params)
-                post = np.asarray(jax.nn.softmax(log_alphas[:L_inf], axis=1))
-                probs_all[win_start:n] = post
+        return self
 
-        return pd.DataFrame(
-            probs_all,
-            index=obs_df.index,
-            columns=["bull_trend", "bear_trend", "chop_high", "chop_low"]
-        )
+    def filter(self, obs_df: pd.DataFrame) -> pd.DataFrame:
+        """Run forward filtering with fixed params.
+
+        Causal guarantee: posterior at t depends only on observations up to t.
+        """
+        obs_arr = self._prep_obs(obs_df)
+        n = len(obs_arr)
+        if n <= 0:
+            return self._to_prob_df(np.empty((0, _N_STATES), dtype=np.float64), obs_df)
+
+        self._warmup()
+        if self._params is None:
+            # Backward-compatible behavior: if unfitted, train on provided sample first.
+            self.fit(obs_df)
+
+        probs_all = np.full((n, _N_STATES), 1.0 / _N_STATES, dtype=np.float64)
+        # Causal rolling filtering: each t uses a trailing window ending at t.
+        # This avoids any future-to-past overwrite.
+        step = 168
+        for t_end in range(step, n + step, step):
+            end = min(t_end, n)
+            win_start = max(0, end - _MAX_LEN)
+            obs_win = obs_arr[win_start:end]
+            L = len(obs_win)
+            if L <= 0:
+                continue
+            obs_p = np.zeros((_MAX_LEN, _N_FEATURES), dtype=np.float32)
+            m_p = np.zeros(_MAX_LEN, dtype=np.float32)
+            obs_p[:L] = obs_win
+            m_p[:L] = 1.0
+            log_alphas, _ = _hmm_forward(jnp.array(obs_p), jnp.array(m_p), self._params)
+            post = np.asarray(jax.nn.softmax(log_alphas[:L], axis=1))
+            probs_all[win_start:end] = post
+
+        return self._to_prob_df(probs_all, obs_df)
+
+    def fit_filter_train_oos(self, obs_df: pd.DataFrame, is_end_idx: int) -> pd.DataFrame:
+        """Fit on train slice and filter full slice with frozen params.
+
+        Train slice: [0, is_end_idx] inclusive.
+        Causal guarantee: no future bar is used to re-estimate posteriors on earlier bars.
+        """
+        n = len(obs_df)
+        if n <= 0:
+            return self._to_prob_df(np.empty((0, _N_STATES), dtype=np.float64), obs_df)
+
+        cut = int(np.clip(is_end_idx, 0, n - 1))
+        self._params = None
+        self.fit(obs_df.iloc[: cut + 1])
+        return self.filter(obs_df)
+
+    def fit_predict(self, obs_df: pd.DataFrame) -> pd.DataFrame:
+        """Backward-compatible wrapper.
+
+        Semantics: fit on full sample, then causal filtering on full sample.
+        """
+        n = len(obs_df)
+        if n <= 0:
+            return self._to_prob_df(np.empty((0, _N_STATES), dtype=np.float64), obs_df)
+        return self.fit_filter_train_oos(obs_df, n - 1)
