@@ -1,8 +1,8 @@
 {
   "project": "my-coin-traider",
-  "version": "10.8.0-spec-hmm-skewed-t-parallel",
-  "timestamp": "2026-05-15T08:15:00Z",
-  "previous_state_hash": "v10.7.0-spec-hmm-student-t-tuning",
+  "version": "10.8.1-spec-hmm-tuning-ceiling-analysis",
+  "timestamp": "2026-05-15T17:30:00Z",
+  "previous_state_hash": "v10.8.0-spec-hmm-skewed-t-parallel",
   "current_logic": {
     "universe_selection": "CS_RANK screening with anchor/macro loading; hard-stop if universe < 3 symbols.",
     "regime_classification": "JAX-native Skewed-t HMM with Parallel Associative Scan. Uses asymmetric nu-priors and lambda-skewness parameters. Accelerated by RTX 4070 Ti (O(log N) complexity).",
@@ -14,7 +14,14 @@
     "alpha_generation": "LightGBM v6 alpha is regime-conditional, with chop-fragility filtering.",
     "risk_management": "Tiered execution protection with Skewed-t backend. Damp Crisis-Cap achieved 100% in verification.",
     "runtime_bootstrap": "JAX enabled for GPU (CudaDevice) with XLA_PYTHON_CLIENT_PREALLOCATE=false.",
-    "parallel_processing": "Optimized for 8-core CPU / RTX 4070 Ti GPU: Associative Scan eliminates sequential bottlenecks."
+    "parallel_processing": "Optimized for 8-core CPU / RTX 4070 Ti GPU: Associative Scan eliminates sequential bottlenecks.",
+    "v10.8.1_tuning_findings": {
+      "damp_tail_capture_ceiling": "71.5% (target >85%) — limited by upstream Regime Tail-Capture (22.3%) + policy gate threshold saturation. Further gate opening breaches Protected Exposure bounds (30~50%).",
+      "avg_duration_ceiling": "20.0 bars (target >24) — limited by frequent HMM posterior oscillations in CHOP region (2.7 bars raw duration). Sticky labels mitigate but cannot overcome.",
+      "regime_init_instability": "HMM collapse to CHOP-100% on certain runs due to zero semantic_prior penalty on CHOP state. Multi-start init or CHOP constraint recommended.",
+      "supervised_score_quality": "SupHit q10 = 19.4% is lagging-indicator ceiling. LightGBM replacement of LogisticRegression yielded no improvement (LR: 19.6% → LGB: 19.4%). Requires micro-signals (OI accel, funding rate spike).",
+      "policy_configuration_status": "DEFENSE_SOFT_THR, SOFT_TAIL_THR, SOFT_SUP_THR, SOFT_REALIZED_FLOOR already at optimal values in current config. 레버 B (threshold reduction) already active."
+    }
   },
   "key_parameters": {
     "FUTURES_HMM_BACKEND": "skewed_t",

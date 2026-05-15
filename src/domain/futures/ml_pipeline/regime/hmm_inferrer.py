@@ -255,7 +255,10 @@ class HMMStateInferrer:
         p_chop_h = pd.to_numeric(jax_probs.get("chop_high", 0.25), errors="coerce").fillna(0.25).to_numpy(dtype=np.float64)
         p_chop_l = pd.to_numeric(jax_probs.get("chop_low", 0.25), errors="coerce").fillna(0.25).to_numpy(dtype=np.float64)
 
-        split = expit(np.clip(vol_z.to_numpy(dtype=np.float64), -8.0, 8.0))
+        vol_z_np = vol_z.to_numpy(dtype=np.float64)
+        # EMA span=24: vol_z 고빈도 진동 제거 → calm/volatile 전환 감소
+        vol_z_smooth = pd.Series(vol_z_np).ewm(span=24, adjust=False).mean().to_numpy(dtype=np.float64)
+        split = expit(np.clip(vol_z_smooth, -8.0, 8.0))
         p_volatile = p_bull * split
         p_calm = p_bull * (1.0 - split)
         p_off = p_bear
@@ -326,7 +329,7 @@ class HMMStateInferrer:
             )
             # Rank-based top-8%: IsotonicRegression 이산값 때문에 quantile 기반이 부정확함
             n_sup = len(sup)
-            target_n = max(10, int(n_sup * 0.08))
+            target_n = max(10, int(n_sup * 0.13))
             sorted_desc = np.sort(sup)[::-1]
             rank_threshold = float(sorted_desc[min(target_n - 1, n_sup - 1)])
             crisis_mask = (sup >= rank_threshold).astype(bool)
@@ -334,8 +337,8 @@ class HMMStateInferrer:
             # Causal forward propagation: bar t 신호 → bar t+1..t+24도 BEAR (Exponential Decay)
             # supervised는 충격 발생 수 bar 전에 fire하며, 위기 신호 이후에도 일정 기간 리스크 오프 유지.
             forward_window = 24
-            initial_boost = 0.90
-            decay_factor = 0.97
+            initial_boost = 0.95
+            decay_factor = 0.985
 
             boost_series = np.zeros(n_sup, dtype=np.float64)
             for k in range(0, forward_window + 1):
@@ -531,13 +534,40 @@ class HMMStateInferrer:
                     y_is = (fwd_ser.iloc[:is_end_idx].fillna(0.0).to_numpy() <= q_thr).astype(int)
                     if int(y_is.sum()) < min_pos:
                         continue
-                    clf = LogisticRegression(C=0.5, class_weight="balanced", max_iter=500, random_state=42)
-                    clf.fit(X_is, y_is)
-                    prob_is = clf.predict_proba(X_is)[:, 1]
-                    iso = IsotonicRegression(out_of_bounds="clip")
-                    iso.fit(prob_is, y_is.astype(np.float64))
-                    prob_all = clf.predict_proba(X)[:, 1]
-                    score_iso = np.clip(iso.transform(prob_all).astype(np.float64), 0.0, 1.0)
+                    try:
+                        import lightgbm as lgb  # noqa: PLC0415
+                        lgb_params = {
+                            "objective": "binary",
+                            "metric": "auc",
+                            "n_estimators": 200,
+                            "learning_rate": 0.05,
+                            "num_leaves": 15,
+                            "min_child_samples": max(5, int(y_is.sum() * 0.1)),
+                            "scale_pos_weight": max(1.0, (len(y_is) - int(y_is.sum())) / max(1, int(y_is.sum()))),
+                            "subsample": 0.8,
+                            "colsample_bytree": 0.8,
+                            "reg_alpha": 0.1,
+                            "reg_lambda": 1.0,
+                            "random_state": 42,
+                            "verbose": -1,
+                            "n_jobs": 1,
+                        }
+                        clf = lgb.LGBMClassifier(**lgb_params)
+                        clf.fit(X_is, y_is)
+                        prob_is = clf.predict_proba(X_is)[:, 1]
+                        iso = IsotonicRegression(out_of_bounds="clip")
+                        iso.fit(prob_is, y_is.astype(np.float64))
+                        prob_all = clf.predict_proba(X)[:, 1]
+                        score_iso = np.clip(iso.transform(prob_all).astype(np.float64), 0.0, 1.0)
+                    except Exception as _lgb_exc:
+                        _logger.warning("LightGBM supervised tail failed (%s); fallback to LogisticRegression", _lgb_exc)
+                        clf = LogisticRegression(C=0.5, class_weight="balanced", max_iter=500, random_state=42)
+                        clf.fit(X_is, y_is)
+                        prob_is = clf.predict_proba(X_is)[:, 1]
+                        iso = IsotonicRegression(out_of_bounds="clip")
+                        iso.fit(prob_is, y_is.astype(np.float64))
+                        prob_all = clf.predict_proba(X)[:, 1]
+                        score_iso = np.clip(iso.transform(prob_all).astype(np.float64), 0.0, 1.0)
                     score_rank = pd.Series(score_iso).rank(method="average", pct=True).fillna(0.0).to_numpy(dtype=np.float64)
                     score_rank = np.clip(score_rank**rank_blend_pow, 0.0, 1.0)
                     score = np.clip((1.0 - rank_blend_w) * score_iso + rank_blend_w * score_rank, 0.0, 1.0)
