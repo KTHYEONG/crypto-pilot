@@ -1,14 +1,18 @@
-"""Track A: 4-State JAX Multivariate HMM (v10.0).
+"""Track A: 4-State JAX Multivariate HMM (v10.1).
 
 States:
     0: BULL_TREND    (High f1, Low f2)
-    1: BEAR_TREND    (Low f1, Low f2)
+    1: BEAR_TREND    (Low f1, Low f2, High f3, Low f4)
     2: CHOP_HIGH_VOL (Mid f1, High f2)
     3: CHOP_LOW_VOL  (Mid f1, Low f2)
 
 Features:
-    f1: Trend (Rolling Z-score of EMA(12)/EMA(144)-1)
-    f2: Volatility (Rolling Z-score of Log(ATR(14)/Close))
+    f1: Trend           (Rolling Z-score of EMA(12)/EMA(144)-1)
+    f2: Volatility      (Rolling Z-score of Log(ATR(14)/Close))
+    f3: Downside Vol    (Robust Z-score of macro_downside_vol_24h)
+    f4: Funding Mom     (Robust Z-score of macro_funding_mom_24h)
+    f5: OI Delta        (Robust Z-score of macro_oi_delta_24h)
+    f6: CS Dispersion   (Robust Z-score of macro_cs_dispersion_24h)
 """
 
 from __future__ import annotations
@@ -32,7 +36,7 @@ import pandas as pd
 _logger = logging.getLogger(__name__)
 
 _N_STATES = 4
-_N_FEATURES = 2
+_N_FEATURES = 4
 _MAX_LEN = 3000
 
 @jax.jit
@@ -46,6 +50,7 @@ def _gauss_log_pdf(x: jnp.ndarray, mu: jnp.ndarray, log_sig: jnp.ndarray) -> jnp
 
     Returns:
         (K,) log-probabilities.
+
     """
     sig = jnp.exp(log_sig)
     # (K, F)
@@ -105,10 +110,16 @@ def _hmm_nll(
     nll = -jnp.sum(lls)
 
     # 1. Transition Matrix Priors (Stickiness ~0.95-0.98)
-    # Encourage high diagonal values in the transition matrix.
+    # Step 6: TVTP (Time-Varying Transition Probabilities)
+    # 평시(Low f2_vol_z)에는 sticky_weight 강화, 고변동성 시기에는 완화
     trans_probs = jax.nn.softmax(params["log_trans"], axis=1)
     diag = jnp.diag(trans_probs)
-    sticky_prior = -1500.0 * jnp.sum(jnp.log(jnp.maximum(diag, 1e-6)))
+    
+    vol_z = obs[:, 1]
+    avg_vol = jnp.sum(vol_z * mask) / jnp.maximum(jnp.sum(mask), 1.0)
+    sticky_base = 1500.0
+    sticky_weight = jnp.where(avg_vol < 0.0, sticky_base * 1.5, sticky_base * 0.7)
+    sticky_prior = -sticky_weight * jnp.sum(jnp.log(jnp.maximum(diag, 1e-6)))
 
     # 2. Semantic State Separation Priors
     # BULL (0): f1 >> 0
@@ -117,12 +128,12 @@ def _hmm_nll(
     # CHOP_LOW (3): f2 << 0
     mu = params["mu"]
     n_obs = jnp.maximum(jnp.sum(mask), 1.0)
-    
+
     semantic_prior = n_obs * (
-        1000.0 * jnp.square(jnp.maximum(0.0, 0.5 - mu[0, 0]))   # BULL f1 > 0.5
-        + 1000.0 * jnp.square(jnp.maximum(0.0, mu[1, 0] + 0.5)) # BEAR f1 < -0.5
-        + 500.0 * jnp.square(jnp.maximum(0.0, 0.8 - mu[2, 1]))  # CHOP_HIGH f2 > 0.8
-        + 500.0 * jnp.square(jnp.maximum(0.0, mu[3, 1] + 0.5)) # CHOP_LOW f2 < -0.5
+        1000.0 * jnp.square(jnp.maximum(0.0, 0.5 - mu[0, 0]))    # BULL f1 > 0.5
+        + 1000.0 * jnp.square(jnp.maximum(0.0, mu[1, 0] + 0.5))  # BEAR f1 < -0.5
+        + 500.0  * jnp.square(jnp.maximum(0.0, 0.8 - mu[2, 1]))  # CHOP_HIGH f2 > 0.8
+        + 500.0  * jnp.square(jnp.maximum(0.0, mu[3, 1] + 0.5))  # CHOP_LOW f2 < -0.5
     )
 
     return nll + sticky_prior + semantic_prior
@@ -161,22 +172,25 @@ class JAXMultivariateHMM:
         self._warmed = False
 
     def _init_params(self, obs: np.ndarray) -> dict[str, Any]:
-        """Quantile-based initialization for state separation."""
-        f1 = obs[:, 0]
-        f2 = obs[:, 1]
-        
-        # State 0: BULL (Top 25% of f1)
-        mu0 = [np.percentile(f1, 75), np.percentile(f2, 25)]
-        # State 1: BEAR (Bottom 25% of f1)
-        mu1 = [np.percentile(f1, 25), np.percentile(f2, 25)]
-        # State 2: CHOP_HIGH (Top 25% of f2)
-        mu2 = [np.percentile(f1, 50), np.percentile(f2, 75)]
-        # State 3: CHOP_LOW (Bottom 25% of f2)
-        mu3 = [np.percentile(f1, 50), np.percentile(f2, 10)]
+        """Quantile-based initialization for 4-feature state separation.
+
+        4-feature layout:
+            f1: trend_z, f2: vol_z, f3: downside_vol_z, f4: cs_dispersion_z
+        """
+        f1, f2, f3, f4 = obs[:, 0], obs[:, 1], obs[:, 2], obs[:, 3]
+
+        # State 0: BULL (High f1, Low f2, Low f3)
+        mu0 = [np.percentile(f1, 75), np.percentile(f2, 25), np.percentile(f3, 20), np.percentile(f4, 50)]
+        # State 1: BEAR (Low f1, Mid f2, High f3)
+        mu1 = [np.percentile(f1, 25), np.percentile(f2, 50), np.percentile(f3, 80), np.percentile(f4, 50)]
+        # State 2: CHOP_HIGH (Mid f1, High f2, High f4)
+        mu2 = [np.percentile(f1, 50), np.percentile(f2, 75), np.percentile(f3, 50), np.percentile(f4, 80)]
+        # State 3: CHOP_LOW (Mid f1, Low f2, Low f4)
+        mu3 = [np.percentile(f1, 50), np.percentile(f2, 10), np.percentile(f3, 25), np.percentile(f4, 20)]
 
         return {
             "log_init": jnp.zeros(_N_STATES),
-            "log_trans": jnp.eye(_N_STATES) * 4.0, # Strong self-transition
+            "log_trans": jnp.eye(_N_STATES) * 4.0,  # Strong self-transition
             "mu": jnp.array([mu0, mu1, mu2, mu3], dtype=jnp.float32),
             "log_sig": jnp.zeros((_N_STATES, _N_FEATURES), dtype=jnp.float32) - 0.5,
         }
@@ -205,7 +219,7 @@ class JAXMultivariateHMM:
             columns=["bull_trend", "bear_trend", "chop_high", "chop_low"],
         )
 
-    def fit(self, obs_df: pd.DataFrame) -> "JAXMultivariateHMM":
+    def fit(self, obs_df: pd.DataFrame) -> JAXMultivariateHMM:
         """Train HMM parameters on the provided observations only."""
         obs_arr = self._prep_obs(obs_df)
         n = len(obs_arr)
