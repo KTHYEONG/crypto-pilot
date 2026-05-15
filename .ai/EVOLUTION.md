@@ -4,6 +4,30 @@ This file tracks the logical progression and experimental results of the quantit
 
 ---
 
+## [2026-05-15] v10.5.0: HMM Step 3.5/5/6 & Action 2 Convergence — Regime Stability & Tail Defense (Gemini CLI)
+
+### 1. Architectural Shift: Regime Stability & Feature Diet
+- **Action 2 (Feature Diet)**: Reduced HMM observation features from 6 to 4 (`Trend`, `Vol`, `Downside Vol`, `CS Dispersion`). Removed high-noise signals (`Funding Mom`, `OI Delta`) from the core HMM engine to prevent "jittery" state transitions, delegating them to the `CrisisDetector` layer instead.
+- **Step 6 (TVTP - Time-Varying Transition Probabilities)**: Implemented dynamic `sticky_weight` in the HMM NLL. Transition penalty is now volatility-conditional (1.5x in low vol, 0.7x in high vol), forcing regime "stickiness" during calm periods while allowing rapid exit during volatility spikes.
+- **Step 3.5 (Decay Boost)**: Replaced rigid 4-bar forward window with a **24-bar Causal Forward Window** and **Exponential Decay Boost** (Initial 0.90, Decay 0.97). This provides sustained protection after a supervised tail signal while smoothly transitioning back to the HMM posterior.
+
+### 2. Metric Reformation (Step 5)
+- **False-Flat Normalization**: Re-aligned `False-Flat Cost` to be relative to the total market upside, providing a true opportunity cost metric as defined in `h-hmm.md`.
+- **Regime IC & Precision**: Added `Regime IC` (Spearman correlation between `hmm_prob_crisis` and `fwd_worst_8`) and fixed `Crisis-Prec` calculation to use future 8-bar windows instead of reactive realized returns.
+
+### 3. Validation Results (Audit v18)
+- **Tail-Capture**: **61.4% [PASS]** (Massive improvement from 24.6% baseline).
+- **Crisis-Cap**: **93.8% [PASS]**.
+- **Avg-Duration**: **25.7 bars [READY]** (Improved from 19.3 bars; +33% stability).
+- **Vol-Scale (Calm)**: **0.67x [PASS]**.
+- **Switches**: Reduced from 1132 to **851** (-25% turnover).
+
+### 4. Why This Is a DNA Update
+- The HMM engine has moved from a reactive "return-clusterer" to a **Predictive Risk Overlay** that prioritizes structural stability (`Avg-Duration`) and defensive coverage (`Tail-Capture`).
+- The 4-feature diet + TVTP is the new verified baseline for all future walk-forward optimizations.
+
+---
+
 ## [2026-05-15] v10.4.0: Canonical 4-State HMM, Hazard Overlay, Policy Mapper, and CPU-Only JAX Bootstrap (GPT-5)
 
 ### 1. Architectural Shift

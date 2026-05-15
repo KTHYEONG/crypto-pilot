@@ -6,7 +6,7 @@ Legacy 5-column hmm_prob_* outputs are derived for backward compatibility.
 
 from __future__ import annotations
 
-from typing import Mapping, Sequence
+from collections.abc import Mapping, Sequence
 
 import numpy as np
 import pandas as pd
@@ -97,6 +97,8 @@ def derive_legacy_hmm_prob_frame(df: pd.DataFrame) -> pd.DataFrame:
     out["hmm_prob_bull_vol_up"] = state_df["regime_prob_risk_on_volatile"]
     out["hmm_prob_bear_trend"] = state_df["regime_prob_risk_off_trend"]
     out["hmm_prob_chop"] = state_df["regime_prob_chop_liquidity_thin"]
+    # DEPRECATED: simple linear blend replaced by CrisisDetector overlay in hmm_inferrer.
+    # Kept for backward compatibility (used as initial seed before overlay is applied).
     out["hmm_prob_crisis"] = np.clip(
         0.65 * out["hmm_prob_bear_trend"] + 0.35 * out["hmm_prob_chop"],
         0.0,

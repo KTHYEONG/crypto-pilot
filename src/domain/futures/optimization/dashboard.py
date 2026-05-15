@@ -389,35 +389,70 @@ def log_oos_regime_attribution(attr: dict[str, Any]) -> None:
 
 
 def log_hmm_report_summary(h_rep: dict[str, Any]) -> None:
-    """Log a summary of HMM regime probabilities and stats.
+    """Log a summary of HMM regime probabilities and stats with professional risk focus.
 
     Args:
         h_rep: Dictionary with HMM report data.
 
     """
-    bull_calm = float(h_rep.get("regime_prob_risk_on_calm", h_rep.get("hmm_prob_bull_calm", 0.0)))
-    bull_vol_up = float(h_rep.get("regime_prob_risk_on_volatile", h_rep.get("hmm_prob_bull_vol_up", 0.0)))
-    bear = float(h_rep.get("regime_prob_risk_off_trend", h_rep.get("hmm_prob_bear_trend", 0.0)))
-    chop = float(h_rep.get("regime_prob_chop_liquidity_thin", h_rep.get("hmm_prob_chop", 0.0)))
-    crisis = float(h_rep.get("hmm_realized_crisis_mean", h_rep.get("hmm_prob_crisis", 0.0)))
-    tail_capture = float(h_rep.get("hmm_tail_capture", 0.0))
-    avg_duration = float(h_rep.get("hmm_avg_duration", 0.0))
-    switches = round(float(h_rep.get("hmm_switches", 0.0)))
+    _logger.info("\n════════════════════════ [HMM RISK OVERLAY DIAGNOSTICS] ════════════════════════")
+    _logger.info(" [REGIME SEPARATION] - Volatility & Risk Isolation")
+    _logger.info(" ──────────────────────────────────────────────────────────────────────────────")
 
-    _logger.info(
-        " [HMM SUMMARY] 🐂Bull-Calm:%.1f%% 🚀Bull-Vol:%.1f%% 🐻Bear-Trend:%.1f%% 🎢Chop-Thin:%.1f%% 💀Rlz:%.1f%%",
-        bull_calm,
-        bull_vol_up,
-        bear,
-        chop,
-        crisis,
-    )
-    _logger.info(
-        " [HMM SUMMARY] Tail-Capture: %.1f%% | Avg-Duration: %.1f bars | Switches: %d",
-        tail_capture,
-        avg_duration,
-        switches,
-    )
+    states = [
+        ("risk_on_calm", "🐂 CALM-ON   "),
+        ("risk_on_volatile", "🚀 VOL-UP    "),
+        ("risk_off_trend", "🐻 BEAR-OFF  "),
+        ("chop_liquidity_thin", "🎢 CHOP-THIN "),
+    ]
+
+    for suffix, label in states:
+        col = f"regime_prob_{suffix}"
+        if col not in h_rep:
+            # Fallback to legacy hmm_prob_* names
+            legacy_map = {
+                "risk_on_calm": "hmm_prob_bull_calm",
+                "risk_on_volatile": "hmm_prob_bull_vol_up",
+                "risk_off_trend": "hmm_prob_bear_trend",
+                "chop_liquidity_thin": "hmm_prob_chop",
+            }
+            col = legacy_map.get(suffix, col)
+
+        pct = float(h_rep.get(col, 0.0))
+        vol_scale = float(h_rep.get(f"{col}_vol_scale", 1.0))
+        vol_icon = "🔴" if vol_scale > 1.2 else ("🟡" if vol_scale > 1.0 else ("🟢" if vol_scale < 0.8 else "⚪"))
+        verdict = "Safe-to-Leverage" if vol_scale < 0.8 else ("Hedge/Flat-Signal" if "BEAR" in label else "Neutral")
+        
+        _logger.info(f"  {label} : {pct:>5.1f}% | Vol-Scale: {vol_scale:>4.2f}x {vol_icon} | [{verdict}]")
+
+    _logger.info(" ──────────────────────────────────────────────────────────────────────────────")
+
+    tail_capture = float(h_rep.get("hmm_tail_capture", 0.0))
+    crisis_cap = float(h_rep.get("hmm_realized_crisis_capture", 0.0))
+    crisis_prec = float(h_rep.get("hmm_crisis_precision", 0.0))
+    false_flat = float(h_rep.get("hmm_false_flat_cost", 0.0))
+    avg_dur = float(h_rep.get("hmm_avg_duration", 0.0))
+    switches = int(float(h_rep.get("hmm_switches", 0.0)))
+
+    tc_pass = "PASS" if tail_capture > 60.0 else "FAIL"
+    cc_pass = "PASS" if crisis_cap > 60.0 else "FAIL"
+    cp_pass = "OK" if crisis_prec > 40.0 else "LOW"
+    ff_pass = "GOOD" if false_flat < 15.0 else "WARN"
+    dur_pass = "PASS" if avg_dur > 35 else "SHORT"
+
+    _logger.info(" [PROTECTION & ACCURACY] - Target: >60%%")
+    _logger.info(f"  > Tail-Capture  : {tail_capture:>5.1f}%% [{tc_pass}]")
+    _logger.info(f"  > Crisis-Cap    : {crisis_cap:>5.1f}%% [{cc_pass}]")
+    _logger.info(f"  > Crisis-Prec   : {crisis_prec:>5.1f}%% [{cp_pass}]")
+    _logger.info(f"  > False-Flat    : {false_flat:>+6.3f}%% [{ff_pass}]")
+    _logger.info(" ──────────────────────────────────────────────────────────────────────────────")
+    _logger.info(" [OPERATIONAL STABILITY] - Target: >35 bars")
+    _logger.info(f"  > Avg-Duration  : {avg_dur:>5.1f} bars [{dur_pass}]")
+    _logger.info(f"  > Switches      : {switches}")
+    
+    overall = "🟢 CONDITION_READY" if (tail_capture > 60.0 and avg_dur > 35) else "🔴 NEEDS_IMPROVEMENT"
+    _logger.info(f" [OVERALL VERDICT] -> {overall}")
+    _logger.info("════════════════════════════════════════════════════════════════════════════════\n")
 
 
 def feature_slice_stats(series: pd.Series) -> tuple[float, float, float]:
