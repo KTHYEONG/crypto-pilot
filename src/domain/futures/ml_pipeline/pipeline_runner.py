@@ -1033,6 +1033,16 @@ def _print_hmm_summary(
             return "Favorable"
         return "Neutral"
 
+    # Calculate total market vol for Vol-Scale baseline (BTC ret as proxy)
+    total_m_sig = 1.0
+    if "ret" in df_eval.columns:
+        valid_ret = df_eval["ret"].dropna()
+        if not valid_ret.empty:
+            total_m_sig = float(valid_ret.std() * 100.0)
+    
+    if total_m_sig == 0:
+        total_m_sig = 1.0
+
     for state in cols:
         g_df = df_eval[df_eval["dominant_state"] == state]
         pct = len(g_df) / len(df_eval) * 100
@@ -1043,10 +1053,15 @@ def _print_hmm_summary(
             m_l = float(g_df["hmm_modulator_long"].mean())
             m_s = float(g_df["hmm_modulator_short"].mean())
             mu, sig, g_log = 0.0, 0.0, 0.0
+            vol_scale = 1.0
             if "ret" in g_df.columns:
                 mu = float(g_df["ret"].mean() * 100.0)
                 sig = float(g_df["ret"].std() * 100.0)
                 g_log = mu - 0.5 * (sig**2 / 100.0)
+                vol_scale = sig / total_m_sig
+            
+            report[f"{state}_vol_scale"] = vol_scale
+            vol_icon = "🔴" if vol_scale > 1.2 else ("🟡" if vol_scale > 1.0 else ("🟢" if vol_scale < 0.8 else "⚪"))
             
             label_key = state.replace("hmm_prob_", "").replace("regime_prob_", "").upper()
             verd = _diag_verdict_for_regime(label_key, g_log, m_l, m_s)
@@ -1055,9 +1070,9 @@ def _print_hmm_summary(
             if ("RISK-ON-C" in label) or ("BULL-CALM" in label):
                 report["hmm_bull_g_log"] = g_log
 
-            _logger.info(f"  {label} : {pct:>5.1f}% | Bias: {m_l:.2f}/{m_s:.2f} | G: {g_log:+.3f}% | [{verd}]")
+            _logger.info(f"  {label:<13} : {pct:>5.1f}% | Vol-Scale: {vol_scale:>4.2f}x {vol_icon} | G: {g_log:+.3f}% | [{verd}]")
         else:
-            _logger.info(f"  {label} :   0.0% | Bias: ----/---- | G:  ----   | [None]")
+            _logger.info(f"  {label:<13} :   0.0% | Vol-Scale: ----  - | G:  ----   | [None]")
 
     _logger.info(" ────────────────────────────────────────────────────────────────────────────")
 
@@ -1117,9 +1132,19 @@ def _print_hmm_summary(
             flat_mask = df_eval["dominant_state"].isin(["regime_prob_risk_off_trend", "hmm_prob_crisis"])
         if flat_mask.any():
             pos_ret = df_eval.loc[flat_mask, "ret"]
-            # Opportunity cost proxy: positive returns lost while flat in CRISIS state
-            false_flat_cost = float(pos_ret[pos_ret > 0.0].sum() * 100.0)
-            crisis_precision = float((df_eval.loc[flat_mask, "ret"] <= q05_now).mean() * 100.0)
+            # Opportunity cost proxy: positive returns lost while flat in CRISIS state vs total market upside
+            total_upside = df_eval.loc[df_eval["ret"] > 0, "ret"].sum()
+            false_flat_cost = float(pos_ret[pos_ret > 0.0].sum() / max(float(total_upside), 1e-9) * 100.0)
+            if np.isfinite(q10_fwd):
+                crisis_precision = float((fwd_worst_8.loc[flat_mask] <= q10_fwd).mean() * 100.0)
+            
+        try:
+            from scipy.stats import spearmanr
+            p_crisis = pd.to_numeric(market_probs.get("hmm_prob_crisis", market_probs.get("regime_prob_risk_off_trend", pd.Series(0, index=df_eval.index))), errors="coerce").fillna(0.0).reindex(df_eval.index)
+            regime_ic, _ = spearmanr(p_crisis.to_numpy(), fwd_worst_8.fillna(0.0).to_numpy())
+            report["hmm_regime_ic"] = float(regime_ic) if np.isfinite(regime_ic) else 0.0
+        except Exception:
+            pass
     
     if ("hmm_tail_risk_8bar" in df_eval.columns) or ("tail_hazard_8h" in df_eval.columns):
         tcol = "tail_hazard_8h" if "tail_hazard_8h" in df_eval.columns else "hmm_tail_risk_8bar"
@@ -1148,19 +1173,23 @@ def _print_hmm_summary(
     report["hmm_switches"] = float(switches)
     report["hmm_avg_duration"] = avg_dur
 
-    _logger.info(
-        "  > Tail-Capture: %5.1f%% | Lead-Lag(8): %5.1f%% | CrisisCap: %5.1f%% | CrisisPrec: %5.1f%%",
-        tail_capture,
-        lead_lag_tail_capture_8bar,
-        realized_crisis_capture,
-        crisis_precision,
-    )
-    _logger.info(
-        "  > FalseFlatCost: %+6.3f%% | Switches: %d (Avg %.1f bars)",
-        false_flat_cost,
-        switches,
-        avg_dur,
-    )
+    tc_pass = "PASS" if tail_capture > 60.0 else "FAIL"
+    cc_pass = "PASS" if realized_crisis_capture > 60.0 else "FAIL"
+    cp_pass = "OK" if crisis_precision > 40.0 else "LOW"
+    ff_pass = "GOOD" if false_flat_cost < 15.0 else "WARN"
+    dur_pass = "PASS" if avg_dur > 35 else "SHORT"
+
+    _logger.info(" [PROTECTION & ACCURACY] - Target: >60%%")
+    _logger.info(f"  > Tail-Capture  : {tail_capture:>5.1f}%% [{tc_pass}]")
+    _logger.info(f"  > Crisis-Cap    : {realized_crisis_capture:>5.1f}%% [{cc_pass}]")
+    _logger.info(f"  > Crisis-Prec   : {crisis_precision:>5.1f}%% [{cp_pass}]")
+    _logger.info(f"  > Regime IC     : {report.get('hmm_regime_ic', 0.0):>+6.3f}")
+    _logger.info(f"  > False-Flat    : {false_flat_cost:>+6.3f}%% [{ff_pass}]")
+    _logger.info(" ────────────────────────────────────────────────────────────────────────────")
+    _logger.info(" [OPERATIONAL STABILITY] - Target: >35 bars")
+    _logger.info(f"  > Avg-Duration  : {avg_dur:>5.1f} bars [{dur_pass}]")
+    _logger.info(f"  > Switches      : {switches}")
+
     if (
         ("pre_crisis_hazard" in market_probs.columns)
         or ("realized_crisis_hazard" in market_probs.columns)
