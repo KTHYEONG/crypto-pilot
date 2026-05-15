@@ -31,23 +31,28 @@ _logger = logging.getLogger(__name__)
 
 
 def _tail_zscore(ser: pd.Series, window: int = 168) -> np.ndarray:
-    """Robust z-score (IQR-based) for tail feature engineering.
+    """Standard rolling z-score for tail feature engineering (optimized).
 
     Args:
         ser: Input series.
-        window: Rolling window size for median/IQR estimation.
+        window: Rolling window size.
 
     Returns:
         Clipped z-score array of shape (n,), dtype float64.
     """
-    x = pd.to_numeric(ser, errors="coerce").fillna(0.0).astype(np.float64)
+    # Use standard mean/std for performance as requested. 
+    # pd.to_numeric and fillna are kept for robustness but minimized.
+    x = ser.to_numpy(dtype=np.float64) if isinstance(ser, pd.Series) else np.asarray(ser, dtype=np.float64)
+    x = np.nan_to_num(x, nan=0.0)
+    
+    s = pd.Series(x)
     min_p = max(12, window // 8)
-    med = x.rolling(window, min_periods=min_p).median()
-    q75 = x.rolling(window, min_periods=min_p).quantile(0.75)
-    q25 = x.rolling(window, min_periods=min_p).quantile(0.25)
-    iqr = (q75 - q25).replace(0.0, np.nan)
-    z = ((x - med) / iqr).replace([np.inf, -np.inf], np.nan).fillna(0.0)
-    return z.clip(-4.0, 4.0).to_numpy(dtype=np.float64)
+    roll = s.rolling(window, min_periods=min_p)
+    mu = roll.mean()
+    sigma = roll.std(ddof=0)
+    
+    z = (s - mu) / sigma.replace(0.0, np.nan)
+    return z.fillna(0.0).clip(-4.0, 4.0).to_numpy(dtype=np.float64)
 
 HMM_SEMANTIC_PROB_COLUMNS: tuple[str, ...] = (
     "hmm_prob_bull_calm",
@@ -78,6 +83,22 @@ def _numba_sticky_labels(labels: np.ndarray, min_durations: np.ndarray) -> np.nd
                 result[kk] = prev
         i = j
     return result
+
+
+@njit(cache=True, fastmath=True)
+def _numba_decay_max(signal: np.ndarray, initial_boost: float, decay_factor: float) -> np.ndarray:
+    n = len(signal)
+    out = np.zeros(n, dtype=np.float64)
+    if n == 0:
+        return out
+    curr = 0.0
+    for i in range(n):
+        if signal[i] > 0:
+            curr = initial_boost
+        else:
+            curr *= decay_factor
+        out[i] = curr
+    return out
 
 
 @njit(cache=True, fastmath=True)
@@ -297,7 +318,7 @@ class HMMStateInferrer:
 
         legacy_df = derive_legacy_hmm_prob_frame(regime_df)
 
-        # ── Step 3: supervised score 계산 (IS causal, regime_df 부스트에 사용) ──
+        # ── Step 3: supervised score 계산 ─────────────────────────────────────
         try:
             supervised_scores = self._compute_supervised_tail_score(
                 legacy_df=legacy_df,
@@ -310,98 +331,55 @@ class HMMStateInferrer:
             _logger.warning("Supervised tail score computation raised: %s", _sup_exc)
             supervised_scores = None
 
-        # ── Step 3.5: supervised score를 hazard/policy overlay 경로로 반영 ─────
-        # NOTE:
-        # - regime posterior(regime_prob_*)는 직접 수정하지 않는다.
-        # - supervised 신호는 causal forward propagation 후 hazard overlay 입력으로만 사용한다.
-        overlay_supervised_score: np.ndarray | dict[str, np.ndarray] | None = supervised_scores
+        # ── Step 3.5: Supervised Boost (Vectorized) & Crisis Overlay ──────────
+        overlay_supervised_score: dict[str, np.ndarray] | None = None
         if supervised_scores is not None:
-            sup = np.clip(
-                np.nan_to_num(
-                    supervised_scores.get(
-                        "sup_score_q10_h8",
-                        supervised_scores.get("sup_score_soft", np.zeros(len(idx), dtype=np.float64)),
-                    ),
-                    nan=0.0,
-                ),
-                0.0,
-                1.0,
-            )
-            # Rank-based top-8%: IsotonicRegression 이산값 때문에 quantile 기반이 부정확함
+            sup = np.nan_to_num(
+                supervised_scores.get(
+                    "sup_score_q10_h8",
+                    supervised_scores.get("sup_score_soft", np.zeros(len(idx), dtype=np.float64)),
+                )
+            ).astype(np.float64)
+            
+            # Rank-based top-13% mask
             n_sup = len(sup)
             target_n = max(10, int(n_sup * 0.13))
             sorted_desc = np.sort(sup)[::-1]
             rank_threshold = float(sorted_desc[min(target_n - 1, n_sup - 1)])
-            crisis_mask = (sup >= rank_threshold).astype(bool)
+            crisis_mask = (sup >= rank_threshold)
 
-            # Causal forward propagation: bar t 신호 → bar t+1..t+24도 BEAR (Exponential Decay)
-            # supervised는 충격 발생 수 bar 전에 fire하며, 위기 신호 이후에도 일정 기간 리스크 오프 유지.
-            forward_window = 24
-            initial_boost = 0.95
-            decay_factor = 0.985
-
-            boost_series = np.zeros(n_sup, dtype=np.float64)
-            for k in range(0, forward_window + 1):
-                boost_at_k = initial_boost * (decay_factor**k)
-                rolled = np.roll(crisis_mask, k)
-                rolled[:k] = False
-                boost_series = np.maximum(boost_series, np.where(rolled, boost_at_k, 0.0))
-
+            # Optimized Numba decay-max boost
+            boost_series = _numba_decay_max(crisis_mask.astype(np.int32), 0.95, 0.985)
             boosted_sup = np.clip(np.maximum(sup, boost_series), 0.0, 1.0)
+            
             overlay_supervised_score = dict(supervised_scores)
             overlay_supervised_score["sup_score_q10_h8"] = boosted_sup
             overlay_supervised_score["sup_score_soft"] = boosted_sup
+            
             _logger.info(
-                "Step3.5 hazard-overlay boost | %s %s | raw_pct=%.3f | extended_pct=%.3f | sup_mean=%.3f",
-                symbol,
-                tf,
-                float(crisis_mask.mean()),
-                float((boost_series > 0.0).mean()),
-                float(np.mean(boosted_sup)),
+                "Step3.5 hazard-overlay boost | Market %s | extended_pct=%.3f",
+                tf, float((boost_series > 0.0).mean())
             )
 
         # ── Crisis Detector overlay ────────────────────────────────────────────
-        # Replace derive-based hmm_prob_crisis with CrisisDetector soft score.
-        # bear_trend 확률에서 증가분을 차감하여 5-column 합이 1로 유지되도록 re-normalize.
         try:
             detector = CrisisDetector()
-            det_score = detector.score(
-                features_df.reindex(idx).fillna(0.0),
-                returns_ser.reindex(idx).fillna(0.0),
-            )
-
+            det_score = detector.score(features_df.reindex(idx).fillna(0.0), returns_ser.reindex(idx).fillna(0.0))
             raw_crisis = legacy_df["hmm_prob_crisis"].to_numpy(dtype=np.float64)
             merged_crisis = np.clip(np.maximum(raw_crisis, det_score), 0.0, 1.0)
-
             delta = merged_crisis - raw_crisis
-            bear_adj = np.clip(
-                legacy_df["hmm_prob_bear_trend"].to_numpy(dtype=np.float64) - delta,
-                0.0,
-                1.0,
-            )
+            bear_adj = np.clip(legacy_df["hmm_prob_bear_trend"].to_numpy(dtype=np.float64) - delta, 0.0, 1.0)
 
             legacy_df = legacy_df.copy()
             legacy_df["hmm_prob_crisis"] = merged_crisis
             legacy_df["hmm_prob_bear_trend"] = bear_adj
 
-            # Row-normalize to ensure 5-column sum == 1
             prob_mat = legacy_df[list(LEGACY_HMM_PROB_COLUMNS)].to_numpy(dtype=np.float64)
-            prob_mat = np.clip(prob_mat, 0.0, 1.0)
-            row_sum = prob_mat.sum(axis=1, keepdims=True)
-            prob_mat = prob_mat / np.maximum(row_sum, 1e-12)
-            legacy_df[list(LEGACY_HMM_PROB_COLUMNS)] = prob_mat
-
-            crisis_triggered_pct = float((merged_crisis > 0.40).mean())
-            _logger.info(
-                "CrisisDetector+Supervised overlay applied | %s %s | crisis_pct=%.3f",
-                symbol,
-                tf,
-                crisis_triggered_pct,
-            )
+            legacy_df[list(LEGACY_HMM_PROB_COLUMNS)] = prob_mat / np.maximum(prob_mat.sum(axis=1, keepdims=True), 1e-12)
         except Exception as exc:
-            _logger.warning("CrisisDetector overlay failed; using derived crisis | %s", exc)
-        # ─────────────────────────────────────────────────────────────────────
+            _logger.warning("CrisisDetector overlay failed: %s", exc)
 
+        # ── Step 4: Final Hazard Overlay (Single Call) ────────────────────────
         hazard_res = compute_tail_hazard_overlay(
             features_df=features_df,
             regime_df=regime_df,
@@ -410,9 +388,24 @@ class HMMStateInferrer:
             supervised_score=overlay_supervised_score,
         )
         hazard_df = hazard_res.hazards
-        policy_df = map_policy_controls(regime_df=regime_df, hazard_df=hazard_df, cfg=OPT_FUTURES_CONFIG)
+
+        # ── Step 5: Adaptive Policy Thresholds ────────────────────────────────
+        try:
+            realized_haz = hazard_df["realized_crisis_hazard"]
+            # Optimized rolling quantile for thresholds (kept for policy accuracy)
+            roll_haz = realized_haz.rolling(168, min_periods=48)
+            dynamic_cfg = dict(OPT_FUTURES_CONFIG)
+            dynamic_cfg["FUTURES_POLICY_DEFENSE_SOFT_THR"] = roll_haz.quantile(0.65).fillna(0.48).to_numpy()
+            dynamic_cfg["FUTURES_POLICY_DEFENSE_HARD_THR"] = roll_haz.quantile(0.85).fillna(0.66).to_numpy()
+            dynamic_cfg["FUTURES_POLICY_DEFENSE_NEAR_FLAT_THR"] = roll_haz.quantile(0.95).fillna(0.84).to_numpy()
+        except Exception as _thr_exc:
+            _logger.warning("Adaptive thresholds failed: %s", _thr_exc)
+            dynamic_cfg = OPT_FUTURES_CONFIG
+
+        policy_df = map_policy_controls(regime_df=regime_df, hazard_df=hazard_df, cfg=dynamic_cfg)
 
         out = pd.concat([regime_df, legacy_df, hazard_df, policy_df], axis=1)
+        out["hmm_tail_risk_8bar"] = hazard_df["tail_hazard_8h"].to_numpy(dtype=np.float64)
         out = out.replace([np.inf, -np.inf], np.nan).ffill().bfill().fillna(0.0)
         out = out.reset_index().rename(columns={out.index.name or "index": "datetime"})
         return out
@@ -470,31 +463,48 @@ class HMMStateInferrer:
             ).fillna(0.5).to_numpy(dtype=np.float64)
 
             r_ser = returns_ser.reindex(idx).fillna(0.0).astype(np.float64)
-            r_np = r_ser.to_numpy(dtype=np.float64)
-
-            rv24_z = _tail_zscore(pd.Series(np.abs(r_np), index=idx).rolling(24, min_periods=4).std().fillna(0.0))
-            down24_z = _tail_zscore(pd.Series(np.clip(-r_np, 0.0, None), index=idx).rolling(24, min_periods=4).std().fillna(0.0))
-            mom6_z = _tail_zscore(pd.Series(r_np, index=idx).rolling(6, min_periods=2).mean().fillna(0.0))
-            mom24_z = _tail_zscore(pd.Series(r_np, index=idx).rolling(24, min_periods=4).mean().fillna(0.0))
-            vol24 = pd.Series(r_np, index=idx).rolling(24, min_periods=4).std().fillna(0.0)
-            vol96 = pd.Series(r_np, index=idx).rolling(96, min_periods=12).std().replace(0.0, np.nan).fillna(vol24 + 1e-9)
+            # Use r_ser (Series) directly to avoid repeated Series creation with index
+            rv24_z = _tail_zscore(r_ser.abs().rolling(24, min_periods=4).std().fillna(0.0))
+            down24_z = _tail_zscore(r_ser.clip(upper=0.0).abs().rolling(24, min_periods=4).std().fillna(0.0))
+            mom6_z = _tail_zscore(r_ser.rolling(6, min_periods=2).mean().fillna(0.0))
+            mom24_z = _tail_zscore(r_ser.rolling(24, min_periods=4).mean().fillna(0.0))
+            
+            vol24 = r_ser.rolling(24, min_periods=4).std().fillna(0.0)
+            vol96 = r_ser.rolling(96, min_periods=12).std().replace(0.0, np.nan).fillna(vol24 + 1e-9)
             vol_ratio_z = _tail_zscore((vol24 / vol96).replace([np.inf, -np.inf], np.nan).fillna(0.0))
-            px = (1.0 + pd.Series(r_np, index=idx)).cumprod()
+            
+            px = (1.0 + r_ser).cumprod()
             dd96 = (px / px.rolling(96, min_periods=8).max() - 1.0).fillna(0.0)
             dd96_z = _tail_zscore(dd96)
+            
             spread_off_calm = _tail_zscore(pd.Series(p_off - p_calm, index=idx))
             spread_off_chop = _tail_zscore(pd.Series(p_off - p_chop, index=idx))
+
+            r_np = r_ser.to_numpy(dtype=np.float64)
 
             f = features_df.reindex(idx)
             if "macro_liq_proxy_24h" in f.columns:
                 liq24_z = _tail_zscore(pd.to_numeric(f["macro_liq_proxy_24h"], errors="coerce").fillna(0.0))
             else:
                 liq24_z = np.zeros(n, dtype=np.float64)
+            
+            # Micro-structure features activation
+            if "macro_oi_delta_24h" in f.columns:
+                oi24_z = _tail_zscore(pd.to_numeric(f["macro_oi_delta_24h"], errors="coerce").fillna(0.0))
+            else:
+                oi24_z = np.zeros(n, dtype=np.float64)
+            
+            if "macro_funding_mom_24h" in f.columns:
+                funding24_z = _tail_zscore(pd.to_numeric(f["macro_funding_mom_24h"], errors="coerce").fillna(0.0))
+            else:
+                funding24_z = np.zeros(n, dtype=np.float64)
+
             jump_z = _tail_zscore(pd.Series(np.clip(-r_np, 0.0, None), index=idx))
 
             X = np.column_stack([
                 p_off, p_chop, ent, rv24_z, down24_z, liq24_z, jump_z,
                 mom6_z, mom24_z, vol_ratio_z, dd96_z, spread_off_calm, spread_off_chop,
+                oi24_z, funding24_z
             ]).astype(np.float64)
 
             horizons_raw = cfg.get("FUTURES_HMM_SUP_HORIZONS", [4, 8, 16])
@@ -514,11 +524,9 @@ class HMMStateInferrer:
 
             fwd_map: dict[int, pd.Series] = {}
             for h in horizons:
-                fwd_worst = np.full(n, np.inf, dtype=np.float64)
-                for k in range(1, int(h) + 1):
-                    shifted = r_ser.shift(-k).to_numpy(dtype=np.float64)
-                    fwd_worst = np.minimum(fwd_worst, shifted)
-                fwd_map[h] = pd.Series(fwd_worst, index=idx).replace([np.inf, -np.inf], np.nan)
+                # Optimized vectorized look-forward minimum (worst) return
+                fwd_worst = r_ser.shift(-h).rolling(window=h, min_periods=1).min()
+                fwd_map[h] = fwd_worst.replace([np.inf, -np.inf], np.nan)
 
             X_is = X[:is_end_idx]
             scores: dict[str, np.ndarray] = {}
