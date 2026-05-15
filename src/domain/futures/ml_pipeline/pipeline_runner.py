@@ -71,6 +71,20 @@ def _sorted_hmm_prob_columns(df: pd.DataFrame) -> list[str]:
     return sorted(legacy, key=lambda x: int(str(x).split("_")[-1]))
 
 
+def _resolve_hmm_backend_name(hmm_inferrer: Any, cfg: dict[str, Any] | None = None) -> str:
+    """Resolve HMM backend name for lightweight reporting."""
+    if cfg is not None:
+        cfg_backend = cfg.get("FUTURES_HMM_BACKEND")
+        if isinstance(cfg_backend, str) and cfg_backend.strip():
+            return cfg_backend.strip().lower()
+    model = getattr(hmm_inferrer, "_jax_model", None)
+    if model is not None:
+        name = type(model).__name__.lower()
+        if "student" in name and "hmm" in name:
+            return "student_t"
+    return "jax"
+
+
 def _drop_ml_columns(df: pd.DataFrame) -> pd.DataFrame:
     """Unify removal of existing ML/HMM columns to prevent merge collisions."""
     ml_reserved = [
@@ -157,6 +171,72 @@ def _ensure_datetime_column(df: pd.DataFrame) -> pd.DataFrame:
         if c0 != "datetime":
             out = out.rename(columns={c0: "datetime"})
     return out
+
+
+def _run_systemic_hmm_with_causal_split(
+    hmm_inferrer: Any,
+    market_hmm_feats: pd.DataFrame,
+    market_returns: pd.Series,
+    is_end_idx_market: int,
+    tf: str,
+    *,
+    symbol: str = "Market",
+) -> pd.DataFrame:
+    """Run systemic HMM with causal IS/OOS boundary handling in pipeline layer.
+
+    Current inferrer API does not expose frozen-parameter OOS filter, so OOS posterior
+    is emitted via last-IS posterior carry-forward to avoid OOS refit leakage.
+    """
+    n_total = int(len(market_hmm_feats))
+    split = int(np.clip(is_end_idx_market, 0, n_total))
+    _logger.info(
+        "🧭 HMM causal boundary | total=%d | is_end_idx=%d | is=%d | oos=%d",
+        n_total,
+        split,
+        split,
+        max(0, n_total - split),
+    )
+
+    if n_total <= 0:
+        return pd.DataFrame({"datetime": pd.to_datetime([], utc=True)})
+
+    if split <= 0 or split >= n_total:
+        probs = hmm_inferrer.fit_predict_systemic(
+            market_hmm_feats,
+            market_returns,
+            is_end_idx=split,
+            symbol=symbol,
+            tf=tf,
+        )
+        probs = _ensure_datetime_column(probs)
+        probs["datetime"] = pd.to_datetime(probs["datetime"], utc=True)
+        return probs
+
+    is_feats = market_hmm_feats.iloc[:split]
+    is_rets = market_returns.iloc[:split]
+    is_probs = hmm_inferrer.fit_predict_systemic(
+        is_feats,
+        is_rets,
+        is_end_idx=len(is_feats),
+        symbol=symbol,
+        tf=tf,
+    )
+    is_probs = _ensure_datetime_column(is_probs)
+    is_probs["datetime"] = pd.to_datetime(is_probs["datetime"], utc=True)
+
+    oos_dt = pd.to_datetime(market_hmm_feats.index[split:], utc=True)
+    oos_n = len(oos_dt)
+    if oos_n <= 0:
+        return is_probs
+
+    tail_row = is_probs.iloc[[-1]].drop(columns=["datetime"], errors="ignore").copy()
+    oos_probs = pd.concat([tail_row] * oos_n, ignore_index=True)
+    oos_probs.insert(0, "datetime", oos_dt.to_numpy())
+
+    all_cols = list(is_probs.columns)
+    combined = pd.concat([is_probs, oos_probs], ignore_index=True)
+    combined = combined.reindex(columns=all_cols)
+    return combined
 
 
 def _is_kelly_per_semantic_state(
@@ -870,7 +950,17 @@ def _print_hmm_summary(
     _logger.info(" ────────────────────────────────────────────────────────────────────────────")
 
     report: dict[str, float] = {}
-    cols = [c for c in HMM_SEMANTIC_PROB_COLUMNS if c in market_probs.columns]
+    regime4_cols = [
+        "regime_prob_risk_on_calm",
+        "regime_prob_risk_on_volatile",
+        "regime_prob_risk_off_trend",
+        "regime_prob_chop_liquidity_thin",
+    ]
+    cols = (
+        regime4_cols
+        if all(c in market_probs.columns for c in regime4_cols)
+        else [c for c in HMM_SEMANTIC_PROB_COLUMNS if c in market_probs.columns]
+    )
     if not (cols and len(market_probs) == len(market_hmm_feats)):
         _logger.warning(" [WARN] HMM data alignment failed for audit.")
         _logger.info(" ────────────────────────────────────────────────────────────────────────────")
@@ -879,17 +969,25 @@ def _print_hmm_summary(
     base_cols = ["datetime", *cols]
     if "hmm_tail_risk_8bar" in market_probs.columns:
         base_cols.append("hmm_tail_risk_8bar")
+    if "tail_hazard_8h" in market_probs.columns:
+        base_cols.append("tail_hazard_8h")
+    if "flat_gate" in market_probs.columns:
+        base_cols.append("flat_gate")
     df_eval = market_probs[base_cols].copy()
     df_eval["dominant_state"] = df_eval[cols].idxmax(axis=1)
-    pre_crisis_mean = (
-        float(market_probs["hmm_prob_pre_crisis"].mean() * 100.0)
-        if "hmm_prob_pre_crisis" in market_probs.columns
-        else 0.0
+    pre_crisis_mean = float(
+        pd.to_numeric(
+            market_probs.get("pre_crisis_hazard", market_probs.get("hmm_prob_pre_crisis", 0.0)),
+            errors="coerce",
+        ).fillna(0.0).mean()
+        * 100.0
     )
-    realized_crisis_mean = (
-        float(market_probs["hmm_prob_realized_crisis"].mean() * 100.0)
-        if "hmm_prob_realized_crisis" in market_probs.columns
-        else 0.0
+    realized_crisis_mean = float(
+        pd.to_numeric(
+            market_probs.get("realized_crisis_hazard", market_probs.get("hmm_prob_realized_crisis", 0.0)),
+            errors="coerce",
+        ).fillna(0.0).mean()
+        * 100.0
     )
     report["hmm_pre_crisis_mean"] = pre_crisis_mean
     report["hmm_realized_crisis_mean"] = realized_crisis_mean
@@ -915,6 +1013,10 @@ def _print_hmm_summary(
 
     # [Compact V2] Emoji & Label Mapping
     regime_display: dict[str, str] = {
+        "regime_prob_risk_on_calm": "🐂 BULL-CALM ",
+        "regime_prob_risk_on_volatile": "🚀 BULL-VOL  ",
+        "regime_prob_risk_off_trend": "🐻 BEAR-TREND",
+        "regime_prob_chop_liquidity_thin": "🎢 CHOP-THIN ",
         "hmm_prob_bull_calm": "🐂 BULL-CALM ",
         "hmm_prob_bull_vol_up": "🚀 BULL-VOL  ",
         "hmm_prob_bear_trend": "🐻 BEAR-TREND",
@@ -923,7 +1025,7 @@ def _print_hmm_summary(
     }
 
     def _diag_verdict_for_regime(regime_label: str, g_log: float, m_l: float, m_s: float) -> str:
-        if (g_log <= -0.04) or (regime_label == "CRISIS") or (m_l <= 0.15 and m_s <= 0.15):
+        if (g_log <= -0.04) or ("RISK_OFF" in regime_label) or (m_l <= 0.15 and m_s <= 0.15):
             return "⚠️ Tail-Risk"
         if (g_log <= -0.01) or (m_l < 0.45 and m_s > 0.85):
             return "Adverse"
@@ -946,9 +1048,12 @@ def _print_hmm_summary(
                 sig = float(g_df["ret"].std() * 100.0)
                 g_log = mu - 0.5 * (sig**2 / 100.0)
             
-            verd = _diag_verdict_for_regime(state.replace("hmm_prob_", "").upper(), g_log, m_l, m_s)
-            if "CRISIS" in label: report["hmm_crisis_g_log"] = g_log
-            if "BULL" in label and "CALM" in label: report["hmm_bull_g_log"] = g_log
+            label_key = state.replace("hmm_prob_", "").replace("regime_prob_", "").upper()
+            verd = _diag_verdict_for_regime(label_key, g_log, m_l, m_s)
+            if ("RISK-OFF" in label) or ("CRISIS" in label):
+                report["hmm_crisis_g_log"] = g_log
+            if ("RISK-ON-C" in label) or ("BULL-CALM" in label):
+                report["hmm_bull_g_log"] = g_log
 
             _logger.info(f"  {label} : {pct:>5.1f}% | Bias: {m_l:.2f}/{m_s:.2f} | G: {g_log:+.3f}% | [{verd}]")
         else:
@@ -962,7 +1067,14 @@ def _print_hmm_summary(
         q05 = float(df_eval["ret"].quantile(0.05))
         worst_df = df_eval[df_eval["ret"] <= q05]
         if not worst_df.empty:
-            tail_capture = float((worst_df["dominant_state"].isin(["hmm_prob_crisis", "hmm_prob_bear_trend"])).mean() * 100.0)
+            tail_capture = float(
+                (
+                    worst_df["dominant_state"].isin(
+                        ["regime_prob_risk_off_trend", "hmm_prob_bear_trend", "hmm_prob_crisis"]
+                    )
+                ).mean()
+                * 100.0
+            )
 
     lead_lag_tail_capture_8bar = 0.0
     realized_crisis_capture = 0.0
@@ -976,26 +1088,42 @@ def _print_hmm_summary(
         fwd_worst_8 = pd.Series(fwd_worst_8, index=df_eval.index).replace([np.inf, -np.inf], np.nan)
         q10_fwd = float(fwd_worst_8.quantile(0.10)) if fwd_worst_8.notna().any() else np.nan
         realized_tail_mask = fwd_worst_8 <= q10_fwd if np.isfinite(q10_fwd) else pd.Series(False, index=df_eval.index)
-        pred_tail_mask = df_eval["dominant_state"].isin(["hmm_prob_crisis", "hmm_prob_bear_trend"])
+        pred_tail_mask = df_eval["dominant_state"].isin(
+            ["regime_prob_risk_off_trend", "hmm_prob_bear_trend", "hmm_prob_crisis"]
+        )
         if realized_tail_mask.any():
             lead_lag_tail_capture_8bar = float((pred_tail_mask & realized_tail_mask).sum() / max(1, int(realized_tail_mask.sum())) * 100.0)
 
         q05_now = float(df_eval["ret"].quantile(0.05))
-        realized_crisis_now = df_eval["ret"] <= q05_now
+        if "realized_crisis_hazard" in market_probs.columns:
+            hz = pd.to_numeric(market_probs["realized_crisis_hazard"], errors="coerce").fillna(0.0).to_numpy(dtype=np.float64)
+            thr = float(np.quantile(hz, 0.90))
+            realized_crisis_now = pd.Series(hz >= thr, index=df_eval.index)
+        else:
+            realized_crisis_now = df_eval["ret"] <= q05_now
         if realized_crisis_now.any():
             realized_crisis_capture = float(
-                (df_eval.loc[realized_crisis_now, "dominant_state"] == "hmm_prob_crisis").mean() * 100.0
+                (
+                    df_eval.loc[realized_crisis_now, "dominant_state"].isin(
+                        ["regime_prob_risk_off_trend", "hmm_prob_crisis"]
+                    )
+                ).mean()
+                * 100.0
             )
 
-        crisis_mask = df_eval["dominant_state"] == "hmm_prob_crisis"
-        if crisis_mask.any():
-            pos_ret = df_eval.loc[crisis_mask, "ret"]
+        if "flat_gate" in df_eval.columns:
+            flat_mask = pd.to_numeric(df_eval["flat_gate"], errors="coerce").fillna(0.0) > 0.5
+        else:
+            flat_mask = df_eval["dominant_state"].isin(["regime_prob_risk_off_trend", "hmm_prob_crisis"])
+        if flat_mask.any():
+            pos_ret = df_eval.loc[flat_mask, "ret"]
             # Opportunity cost proxy: positive returns lost while flat in CRISIS state
             false_flat_cost = float(pos_ret[pos_ret > 0.0].sum() * 100.0)
-            crisis_precision = float((df_eval.loc[crisis_mask, "ret"] <= q05_now).mean() * 100.0)
+            crisis_precision = float((df_eval.loc[flat_mask, "ret"] <= q05_now).mean() * 100.0)
     
-    if "hmm_tail_risk_8bar" in df_eval.columns:
-        tail_score = pd.to_numeric(df_eval["hmm_tail_risk_8bar"], errors="coerce").fillna(0.0).clip(0.0, 1.0)
+    if ("hmm_tail_risk_8bar" in df_eval.columns) or ("tail_hazard_8h" in df_eval.columns):
+        tcol = "tail_hazard_8h" if "tail_hazard_8h" in df_eval.columns else "hmm_tail_risk_8bar"
+        tail_score = pd.to_numeric(df_eval[tcol], errors="coerce").fillna(0.0).clip(0.0, 1.0)
         report["hmm_tail_overlay_mean"] = float(tail_score.mean() * 100.0)
         report["hmm_tail_overlay_p95"] = float(tail_score.quantile(0.95) * 100.0)
         if "ret" in df_eval.columns and len(df_eval) > 10:
@@ -1033,7 +1161,12 @@ def _print_hmm_summary(
         switches,
         avg_dur,
     )
-    if ("hmm_prob_pre_crisis" in market_probs.columns) or ("hmm_prob_realized_crisis" in market_probs.columns):
+    if (
+        ("pre_crisis_hazard" in market_probs.columns)
+        or ("realized_crisis_hazard" in market_probs.columns)
+        or ("hmm_prob_pre_crisis" in market_probs.columns)
+        or ("hmm_prob_realized_crisis" in market_probs.columns)
+    ):
         _logger.info(
             "  > AuxCrisis: pre=%5.1f%% | realized=%5.1f%%",
             pre_crisis_mean,
@@ -1321,11 +1454,14 @@ def run_hmm_fusion_for_is_end(
         else:
             _btc_rets = market_hmm_feats["macro_trend_168h"]
 
-        market_probs = hmm_inferrer.fit_predict_systemic(
-            market_hmm_feats, _btc_rets, is_end_idx=is_end_idx_market, symbol="Market", tf=tf
+        market_probs = _run_systemic_hmm_with_causal_split(
+            hmm_inferrer=hmm_inferrer,
+            market_hmm_feats=market_hmm_feats,
+            market_returns=_btc_rets,
+            is_end_idx_market=is_end_idx_market,
+            tf=tf,
+            symbol="Market",
         )
-        market_probs = _ensure_datetime_column(market_probs)
-        market_probs["datetime"] = pd.to_datetime(market_probs["datetime"], utc=True)
         market_probs, tail_rep = _attach_tail_overlay_if_enabled(
             market_probs=market_probs,
             market_hmm_feats=market_hmm_feats,
@@ -1382,6 +1518,7 @@ def run_hmm_fusion_for_is_end(
     )
     if tail_rep:
         h_rep.update({k: float(v) for k, v in tail_rep.items()})
+    h_rep["hmm_backend"] = _resolve_hmm_backend_name(hmm_inferrer, cfg)
 
     out = MLPipelineOutput()
     out.hmm_report = h_rep
@@ -1669,11 +1806,14 @@ def _run_ml_pipeline_implementation(
     else:
         _btc_rets = market_hmm_feats["macro_trend_168h"]
 
-    market_probs = hmm_inferrer.fit_predict_systemic(
-        market_hmm_feats, _btc_rets, is_end_idx=is_end_idx_market, symbol="Market", tf=tf
+    market_probs = _run_systemic_hmm_with_causal_split(
+        hmm_inferrer=hmm_inferrer,
+        market_hmm_feats=market_hmm_feats,
+        market_returns=_btc_rets,
+        is_end_idx_market=is_end_idx_market,
+        tf=tf,
+        symbol="Market",
     )
-    market_probs = _ensure_datetime_column(market_probs)
-    market_probs["datetime"] = pd.to_datetime(market_probs["datetime"], utc=True)
     market_probs, tail_rep = _attach_tail_overlay_if_enabled(
         market_probs=market_probs,
         market_hmm_feats=market_hmm_feats,
@@ -1687,6 +1827,7 @@ def _run_ml_pipeline_implementation(
         out = MLPipelineOutput(market_probs=market_probs)
         out.hmm_report = _print_hmm_summary(market_probs, market_hmm_feats, pd.DataFrame(), _btc_df, "(HMM-ONLY)")
         out.hmm_report.update({k: float(v) for k, v in tail_rep.items()})
+        out.hmm_report["hmm_backend"] = _resolve_hmm_backend_name(hmm_inferrer, cfg)
         return out
 
     # --- Step 3: Regime-Aware Alpha Mining ---
