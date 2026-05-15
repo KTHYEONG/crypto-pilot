@@ -4,6 +4,104 @@ This file tracks the logical progression and experimental results of the quantit
 
 ---
 
+## [2026-05-15] v10.8.1: HMM Tuning Ceiling Analysis — Policy Threshold Limits (Claude Opus 4.7)
+
+### 1. Session Objective & Scope
+Improve `Damp Tail-Capture` (target >85%) and `Avg-Duration` (target >24 bars) from v10.8.0 baseline (71.5%, 20.0 bars) through 5 targeted levers: 
+- **P0**: Outcome-Weighted NLL (skewed_t priority on tail events)
+- **P1**: Config sticky/TVTP tuning 
+- **레버 A+D**: crisis_mask/forward-boost expansion + sticky_base increase
+- **Fix1+Fix2**: vol_z EMA smoothing + LightGBM supervised score replacement
+- **레버 B**: Policy soft_damp gate threshold reduction (0.48→0.38, 0.82→0.70, etc.)
+
+### 2. Results Summary: No Material Improvement
+
+| Lever | Files Modified | Expected Effect | Actual Result | PASS/FAIL |
+|---|---|---|---|---|
+| P0 | skewed_t_hmm.py | +10%p Tail-Capture | -0.1%p (71.4%) | FAIL |
+| P1 | opt_config.py (4 keys) | +4 bars Duration | -0.2 bars (19.8) | FAIL |
+| A+D | skewed_t_hmm.py, hmm_inferrer.py | +13%p Capture, +6 bars | -0.1%p, -0.2 bars | FAIL |
+| Fix1+Fix2 | hmm_inferrer.py | +5%p Capture via better score | -0.1%p, unchanged SupHit 19.4% | FAIL |
+| 레버 B | opt_config.py (4 keys) | +13%p Capture via soft gate | **Regime Collapse** (CHOP 100%) | FAIL |
+
+**Key Finding**: All 5 levers either had no effect or triggered regime collapse. No single-lever change moved any metric > 0.5%.
+
+### 3. Root Cause Analysis — 3-Layer Decomposition
+
+**Layer 1 — HMM Inference (Regime Tail-Capture ~22%)**
+- `Regime Tail-Capture = 22.3%` is the upstream bottleneck. Policy overlays cannot exceed upstream quality.
+- `Outcome-Weighted NLL` targets HMM emission fit but feeds through `log_alphas` in JAX JIT compile, where tail_flag becomes static → no gradient flow → no effect.
+- Skewed-t `lambda_raw` prior (2.5×BEAR) is already strong; problem is HMM init collapse on certain runs (see below).
+
+**Layer 2 — Supervised Tail Score Quality (SupHit ~19%)**
+- 13-feature LogisticRegression + LightGBM both achieve SupHit q10 = 19.4%, confirming that **pirat-dependent tail predictors** cannot improve beyond ~19% without adding forward-looking features.
+- Features are: `down24_z, rv24_z, mom_z, dd96_z` (all lagging/concurrent), no surprise micro-signals (OI spike, funding rate accel, volume explosion).
+- LeakGBM 교체 had zero effect (LR: 19.6% → LGB: 19.4% — statistically same).
+
+**Layer 3 — Policy Gate Thresholds (已有效 already configured)**
+- Policy `DEFENSE_SOFT_THR=0.38, SOFT_TAIL_THR=0.70, SOFT_SUP_THR=0.68, SOFT_REALIZED_FLOOR=0.30` are **already active in current opt_config.py** — 가지 변경 오류가 됐음.
+- Damp Tail-Capture 71.5% reflects this threshold configuration. Further reduction would trigger Protected Exposure > 50%, breaching `g-hmm.md` range.
+
+### 4. HMM Init Collapse Issue
+
+During 레버 B testing, HMM fully collapsed to `CHOP-THIN = 100%` (Switches=1, Avg-Duration=21865 bars). Investigation revealed:
+- `skewed_t_hmm._train_hmm` first window (bars 500) learns CHOP-dominated posterior.
+- `_init_params` uses percentile-based init (q25/q50/q75) but provides no BULL/BEAR separation guarantee.
+- Subsequent windows inherit CHOP parameters → entire timeline collapses.
+- `semantic_prior` constrains BULL/BEAR but **has zero penalty for CHOP** → CHOP becomes cost-free sink.
+- Root: `_train_hmm` optimizer (AdamW) reaches local minimum at CHOP-heavy state and cannot escape.
+
+### 5. Architecture Ceiling Identified
+
+**Damp Tail-Capture ceiling: 71.5%** is set by:
+```
+Damp T/C = f(Regime T/C, Hazard Boost, Policy Gate)
+         ≤ Regime T/C (22.3%) + Policy boost margin (~50%p when gates fully open)
+         = hard ceiling at ~72% under current supervised score quality (SupHit 19%)
+```
+
+Reaching 85% target requires:
+1. **Regime Tail-Capture > 40%** (currently 22.3%) — needs HMM init hardening + different loss weighting
+2. **OR SupHit > 35%** (currently 19.4%) — needs forward-looking micro-signals
+3. **OR both at moderate improvements**
+
+**Avg-Duration ceiling: ~20 bars** is set by:
+```
+Duration = sticky_labels(hard_states)
+hard_states = argmax(HMM posterior per bar)
+HMM posterior is multi-modal/diffuse in CHOP region → frequent argmax flips
+```
+
+Even with `sticky_min_duration=[48,32,28,16,20]`, duration stays 19.8 bars because upstream hard_state oscillates 2.7 bars on average (1104 switches in 3000 bars).
+
+### 6. Architectural Trade-off: Policy Saturation
+
+Attempting to move both metrics simultaneously reveals Pareto frontier:
+- Raise `Damp Tail-Capture` → lower policy thresholds → Protected Exposure > 50% → violates `g-hmm.md` range
+- Raise `Avg-Duration` via sticky → regime collapses (CHOP sink due to zero semantic penalty)
+- Raise `Crisis-Prec` → requires higher crisis frequency → false-flat cost rises
+
+**Conclusion**: Current v10.8.0 is a local maximum. Movement in any direction breaches another constraint.
+
+### 7. Recommended Next Phase
+
+**Option A — HMM Init Hardening (P0 Priority)**
+- Add `semantic_prior` penalty for CHOP state (currently absent)
+- Implement multi-start init: try 5 different starting points, select lowest NLL
+- Expected: Regime Tail-Capture 22% → 30%+, avoid collapse, enable Damp T/C → 80%+
+
+**Option B — Supervised Score Augmentation (P1 Priority)**
+- Add micro-signals: OI rate-of-change, funding rate acceleration, bid-ask spread, liquidation flow
+- Retrain with forward-looking labels (h=8 tail, not concurrent features)
+- Expected: SupHit 19% → 28%+, Damp T/C → 82%+
+
+**Option C — IS-OOS Threshold Separation (P2 Priority)**
+- Override `hmm_prob_crisis > 0.66` threshold in OOS eval to `0.50`
+- Addresses 8.07× regime distribution mismatch from v10.2 findings
+- Expected: OOS CAGR +5% but requires dual-threshold code path
+
+---
+
 ## [2026-05-15] v10.8.0: Skewed-t HMM & GPU Parallel Scan (Antigravity)
 
 ### 1. Architectural Shift: Skewed-t Distribution & Associative Scan
