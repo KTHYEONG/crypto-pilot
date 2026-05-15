@@ -4,6 +4,31 @@ This file tracks the logical progression and experimental results of the quantit
 
 ---
 
+## [2026-05-15] v10.7.0: Student-T HMM Transition & 6-Feature Expansion (Antigravity)
+
+### 1. Architectural Shift: Student-T Backend & Heavy-Tail Priors
+- **Student-T HMM**: Transitioned from Gaussian to Student-T backend to better model the fat-tailed nature of crypto returns. Implemented asymmetric `nu` priors (nu=3.5 for BEAR) to sharpen state separation during tail events.
+- **6-Feature Expansion**: Observation space expanded from 4 to 6 features by re-introducing `OI Delta` and `Funding Momentum` in robust Z-score format. This provides the HMM with institutional flow context.
+- **Sticky Tuning (Phase 3.5/3.6)**: Implemented `sticky_base` logic and increased `Avg-Duration` target. Currently stabilized at **22.3 bars** (Ready).
+
+### 2. Architectural Shift: Structural Hazard Refinement (Phase 3.7)
+- **Intersection Signal**: Replaced linear `p_off` logit with an intersection signal `(p_off * downside_vol)`. This aims to reduce false-positive crisis triggers by requiring both a bearish regime probability and realized negative volatility.
+- **Bias Calibration**: Adjusted `realized_logit` bias to -2.8 (balancing precision and recall).
+
+### 3. Validation Results (Audit v19 - Student-T Backend)
+- **Avg-Duration**: **22.3 bars [PASS]** (target >18).
+- **Crisis-Prec**: **9.7% [LOW]** (target >20%).
+- **Damp Tail-Capture**: **75.4% [FAIL]** (target >85%).
+- **False-Flat**: **0.000% [EXCELLENT]**.
+- **Regime Distribution**: BEAR-OFF (26.6%) - Significantly more conservative than Gaussian baseline (41%).
+
+### 4. What We Learned
+- The **Student-T backend is structurally more optimistic** (less BEAR share) than the Gaussian version, even with heavy-tail priors. This caused a drop in `Tail-Capture` (recall).
+- Simply tuning post-hoc `logit` biases is insufficient for recall recovery. The next durable improvement must involve **strengthening BEAR state priors** at the HMM training level.
+- The `nan` reporting bug in `NearFlat` gate exposure was successfully resolved.
+
+---
+
 ## [2026-05-15] v10.6.0: Multi-Label Supervised Tail Separation & Tiered Defense (GPT-5)
 
 ### 1. Architectural Shift: Supervised Tail Separation

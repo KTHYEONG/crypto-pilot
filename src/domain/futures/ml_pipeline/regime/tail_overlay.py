@@ -112,13 +112,11 @@ def compute_tail_hazard_overlay(
         + 0.30 * liq24
     )
     realized_logit = (
-        -2.3
-        + 1.60 * p_off
-        + 0.70 * p_chop
-        + 0.55 * down24
-        + 0.50 * jump
-        + 0.35 * liq24
-        + 0.25 * ent
+        -2.8
+        + 2.20 * (p_off * down24)
+        + 0.60 * p_chop
+        + 0.40 * jump
+        + 0.30 * liq24
     )
 
     pre = _safe01(_sigmoid(pre_logit))

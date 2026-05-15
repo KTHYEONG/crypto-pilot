@@ -1335,8 +1335,8 @@ def _print_hmm_summary(
                     report["hmm_execution_hard_gate_avg_exposure"] = float(np.mean(exposure_mult[hard_gate_mask.to_numpy(dtype=bool)]))
             if "near_flat_gate" in df_eval.columns:
                 near_flat_gate_mask = _series_from_col(df_eval, "near_flat_gate", default=0.0).fillna(0.0) > 0.5
-                if near_flat_gate_mask.any():
-                    report["hmm_execution_near_flat_gate_avg_exposure"] = float(np.mean(exposure_mult[near_flat_gate_mask.to_numpy(dtype=bool)]))
+                _nf_arr = exposure_mult[near_flat_gate_mask.to_numpy(dtype=bool)]
+                report["hmm_execution_near_flat_gate_avg_exposure"] = float(np.mean(_nf_arr)) if len(_nf_arr) > 0 else 0.0
             if realized_tail_mask.any():
                 execution_damp_tail_capture = float(
                     (damp_mask & realized_tail_mask).sum() / max(1, int(realized_tail_mask.sum())) * 100.0

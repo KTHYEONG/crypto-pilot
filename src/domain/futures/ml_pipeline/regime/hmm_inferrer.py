@@ -173,14 +173,16 @@ class HMMStateInferrer:
             f2: Volatility      (macro_vol_24h)
             f3: Downside Vol    (macro_downside_vol_24h)
             f4: CS Dispersion   (macro_cs_dispersion_24h)
+            f5: OI Delta        (macro_oi_delta_24h)
+            f6: Funding Mom     (macro_funding_mom_24h)
         """
         idx = features_df.index
         
         # Check if systemic features are already in features_df (standard pipeline path)
-        needed = ["macro_trend_168h", "macro_vol_24h", "macro_downside_vol_24h", "macro_cs_dispersion_24h"]
+        needed = ["macro_trend_168h", "macro_vol_24h", "macro_downside_vol_24h", "macro_cs_dispersion_24h", "macro_oi_delta_24h", "macro_funding_mom_24h"]
         if all(c in features_df.columns for c in needed):
             obs_df = features_df[needed].copy()
-            obs_df.columns = ["f1", "f2", "f3", "f4"]
+            obs_df.columns = ["f1", "f2", "f3", "f4", "f5", "f6"]
             vol_z = obs_df["f2"]
         else:
             # Fallback for direct usage without full systemic feature builder
@@ -207,10 +209,22 @@ class HMMStateInferrer:
             down_vol = ret_1h.clip(upper=0.0).rolling(24).std().fillna(0.0)
             f3_z = (down_vol - down_vol.rolling(168, min_periods=24).mean()) / down_vol.rolling(168, min_periods=24).std().replace(0.0, np.nan)
             
-            # f4: constant 0 as placeholder for CS dispersion
-            f4_z = pd.Series(0.0, index=idx)
+            # f4: Sell-off Pressure or Negative Acceleration
+            if "volume" in features_df.columns:
+                # Sell-off Pressure: abs(ret) * volume when ret < 0
+                vol_ser = pd.to_numeric(features_df["volume"], errors="coerce").fillna(0.0)
+                sell_off = (ret_1h.clip(upper=0.0).abs() * vol_ser).rolling(24).sum().fillna(0.0)
+                f4_z = pd.Series(_tail_zscore(sell_off), index=idx)
+            else:
+                # Negative Acceleration: (ret_t - ret_t-1) when accelerating downwards
+                accel = ret_1h.diff().clip(upper=0.0).abs().rolling(24).mean().fillna(0.0)
+                f4_z = pd.Series(_tail_zscore(accel), index=idx)
 
-            obs_df = pd.DataFrame({"f1": f1_z, "f2": f2_z, "f3": f3_z, "f4": f4_z}, index=idx)
+            # f5, f6 fallback: use zeros if not provided in direct usage
+            f5_z = pd.Series(0.0, index=idx)
+            f6_z = pd.Series(0.0, index=idx)
+
+            obs_df = pd.DataFrame({"f1": f1_z, "f2": f2_z, "f3": f3_z, "f4": f4_z, "f5": f5_z, "f6": f6_z}, index=idx)
             vol_z = f2_z
 
         obs_df = obs_df.replace([np.inf, -np.inf], np.nan).ffill().bfill().fillna(0.0)
