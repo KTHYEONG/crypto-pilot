@@ -57,6 +57,7 @@ def get_or_create_study(
     storage: optuna.storages.RDBStorage,
     sampler: optuna.samplers.BaseSampler,
     resume: bool = False,
+    pruner: optuna.pruners.BasePruner | None = None,
 ) -> optuna.Study:
     """Get existing or create new Optuna study, optionally deleting existing one."""
     if not resume:
@@ -69,8 +70,9 @@ def get_or_create_study(
     study = optuna.create_study(
         study_name=study_name,
         storage=storage,
-        directions=["minimize", "minimize"],
+        direction="maximize",
         sampler=sampler,
+        pruner=pruner,
         load_if_exists=True,
     )
     return study
@@ -98,15 +100,10 @@ def _nsga2_constraints(trial: optuna.trial.FrozenTrial) -> list[float]:
 def ml_phase_d_sampler(
     seed: int, n_trials: int = 200, constraints_func: Any | None = None
 ) -> optuna.samplers.BaseSampler:
-    """Set standard Phase D sampler: NSGA-II if enabled, else multivariate TPE.
-
-    P0-2: _nsga2_constraints is injected by default when constraints_func is None,
-    ensuring CHOP/worst-leg hard gates participate in Pareto selection rather than
-    being applied post-hoc.
-    """
-    effective_constraints = constraints_func if constraints_func is not None else _nsga2_constraints
+    """Multivariate TPE sampler for single-objective J-score maximization."""
     if OPT_FUTURES_CONFIG.get("FUTURES_ML_ALPHA_NSGA2_ENABLED", False):
         pop = int(OPT_FUTURES_CONFIG.get("FUTURES_NSGA2_POPULATION_SIZE", 30))
+        effective_constraints = constraints_func if constraints_func is not None else _nsga2_constraints
         return optuna.samplers.NSGAIISampler(
             seed=seed,
             population_size=pop,
@@ -126,7 +123,6 @@ def ml_phase_d_sampler(
         group=True,
         constant_liar=True,
         n_ei_candidates=48,
-        constraints_func=effective_constraints,
     )
 
 
@@ -493,32 +489,18 @@ def run_optimization_loop(
     ]:
         os.environ[env_var] = "1"
 
-    def constraints_func(trial: optuna.trial.FrozenTrial) -> list[float]:
-        ua = trial.user_attrs
-        mdd = float(ua.get("awf_worst_mdd_pct", 100.0))
-        # P0-2: regime-aware hard gates as NSGA-II feasibility constraints.
-        # Infeasible trials are dominated in Pareto selection.
-        # C1(DSR) removed: gate1_dsr ≈ 0 in AWF mode (numerical artifact); covered by C4.
-        # C2 threshold calibrated to actual distribution min (0.61); 0.72 leaves headroom.
-        chop_loss = float(ua.get("awf_chop_loss_share", 0.0))
-        chop_trade = float(ua.get("awf_chop_trade_share", 0.0))
-        worst_leg = float(ua.get("awf_worst_leg_log_tw", -999.0))
-        pos_frac = float(ua.get("awf_pos_frac", 0.0))
-        return [
-            mdd - 30.0,           # C0: MDD ≤ 30%
-            chop_loss - 0.72,     # C2: chop_loss_share ≤ 0.72 (calibrated to actual dist)
-            chop_trade - 0.70,    # C3: chop_trade_share ≤ 0.70
-            -0.10 - worst_leg,    # C4: worst_leg_log_tw ≥ -0.10
-            0.40 - pos_frac,      # C5: pos_frac ≥ 0.40
-        ]
+    from optuna.pruners import MedianPruner
+    _pruner = MedianPruner(
+        n_startup_trials=int(OPT_FUTURES_CONFIG.get("FUTURES_PRUNER_STARTUP_TRIALS", 40)),
+        n_warmup_steps=int(OPT_FUTURES_CONFIG.get("FUTURES_PRUNER_WARMUP_STEPS", 2)),
+    )
 
     study_ml = get_or_create_study(
         study_name=study_name,
         storage=storage,
-        sampler=ml_phase_d_sampler(
-            seed=seed, n_trials=n_trials, constraints_func=constraints_func
-        ),
+        sampler=ml_phase_d_sampler(seed=seed, n_trials=n_trials),
         resume=resume,
+        pruner=_pruner,
     )
     study_ml.set_user_attr("latest_run_id", base_ctx.run_id)
 

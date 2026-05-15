@@ -85,12 +85,23 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     "FUTURES_STEP3_CHOP_WEIGHT_MULT": 0.50,
     # floor for soft downweighted component weights.
     "FUTURES_STEP3_WEIGHT_MULT_FLOOR": 0.20,
-    "FUTURES_ML_ALPHA_NSGA2_ENABLED": True,  # T2: AWF ns2 분기 활성 (objectives=(mean,min))
+    "FUTURES_ML_ALPHA_NSGA2_ENABLED": False,  # Sessions 27/35/38: NSGA-II 3-strike failure → TPE
     # NSGA-II population size. Generations = trials / population_size.
     # Target ≥ 10 generations → min trials = population_size * 10.
     # Sessions 27/35/38: NSGA-II 3-strike empirical failure. DSR collapses to ~0.45.
     # Root cause: TOPSIS equal-weight dilutes DSR primacy; Pareto front drifts outside valid region.
     "FUTURES_NSGA2_POPULATION_SIZE": 30,
+    # J-Score single-objective TPE params (Phase redesign: maximize compound growth)
+    "FUTURES_J_LAMBDA_DOWNSIDE": 0.6,
+    "FUTURES_J_PSI_DD": 0.3,
+    "FUTURES_J_GAMMA_OVERFIT": 0.5,
+    "FUTURES_J_GAMMA_REGIME": 0.4,
+    "FUTURES_J_CONSISTENCY_FLOOR": 0.20,
+    "FUTURES_J_MIN_TRADES_PER_LEG": 8,
+    "FUTURES_J_HARD_FAIL_VALUE": -10.0,
+    "FUTURES_DEPLOY_J_FLOOR": 0.0,
+    "FUTURES_PRUNER_STARTUP_TRIALS": 40,
+    "FUTURES_PRUNER_WARMUP_STEPS": 2,
     # HMM stable regime (fixed hyperparameters; not in Optuna search space)
     # v10.0.0: 4 internal states (BULL_TREND, BEAR_TREND, CHOP_HIGH, CHOP_LOW).
     "FUTURES_HMM_K_STATES": 4,

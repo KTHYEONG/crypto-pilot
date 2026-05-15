@@ -279,10 +279,9 @@ def run_final_oos_evaluation(
     # beat raw BTC buy-and-hold. Cap anchors benchmark to long-run sustainable BTC return.
     _btc_is_cap = float(OPT_FUTURES_CONFIG.get("FUTURES_IS_ALPHA_BTC_CAP_PCT", 999.0))
     if _btc_benchmark_is is not None and _btc_benchmark_is > _btc_is_cap:
-        _logger.info(
-            " [S1] IS BTC benchmark capped: %.1f%% → %.1f%% (FUTURES_IS_ALPHA_BTC_CAP_PCT)",
-            _btc_benchmark_is, _btc_is_cap,
-        )
+        _logger.info("\n ⚖️ [BENCHMARK ADJUSTMENT]")
+        _logger.info("   > BTC Hurdle Capped: %.1f%% ➔ %.1f%% (FUTURES_IS_ALPHA_BTC_CAP_PCT 적용)",
+                     _btc_benchmark_is, _btc_is_cap)
         _btc_benchmark_is = _btc_is_cap
     is_net_alpha_v = is_cagr_v - (_btc_benchmark_is if _btc_benchmark_is is not None else 0.0)
 
