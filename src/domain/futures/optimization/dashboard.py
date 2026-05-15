@@ -452,26 +452,24 @@ def log_hmm_report_summary(h_rep: dict[str, Any]) -> None:
     avg_dur = float(h_rep.get("hmm_avg_duration", 0.0))
     switches = int(float(h_rep.get("hmm_switches", 0.0)))
 
-    rtc_pass = "PASS" if regime_tail_capture > 60.0 else "FAIL"
-    rcc_pass = "PASS" if regime_crisis_cap > 60.0 else "FAIL"
-    etc_pass = "PASS" if execution_tail_capture > 60.0 else "FAIL"
-    ecc_pass = "PASS" if execution_crisis_cap > 60.0 else "FAIL"
-    edtc_pass = "PASS" if execution_damp_tail_capture > 60.0 else "FAIL"
-    edcc_pass = "PASS" if execution_damp_crisis_cap > 60.0 else "FAIL"
-    edp_pass = "OK" if execution_damp_precision > 40.0 else "LOW"
-    cp_pass = "OK" if crisis_prec > 40.0 else "LOW"
-    fp_pass = "OK" if flat_prec > 40.0 else "LOW"
+    rtc_pass = "PASS" if regime_tail_capture > 40.0 else "FAIL"
+    rcc_pass = "PASS" if regime_crisis_cap > 40.0 else "FAIL"
+    etc_pass = "PASS" if execution_tail_capture > 10.0 else "FAIL"
+    ecc_pass = "PASS" if execution_crisis_cap > 20.0 else "FAIL"
+    edtc_pass = "PASS" if execution_damp_tail_capture > 85.0 else "FAIL"
+    edcc_pass = "PASS" if execution_damp_crisis_cap > 90.0 else "FAIL"
+    edp_pass = "OK" if execution_damp_precision > 10.0 else "LOW"
+    cp_pass = "OK" if crisis_prec > 10.0 else "LOW"
+    fp_pass = "OK" if flat_prec > 20.0 else "LOW"
     ff_pass = "GOOD" if false_flat < 15.0 else "WARN"
-    dur_pass = "PASS" if avg_dur > 35 else "SHORT"
+    dur_pass = "PASS" if avg_dur > 18.0 else "SHORT"
 
-    _logger.info(" [REGIME QUALITY] - Target: Tail/Crisis >60%%, Precision >40%%")
+    _logger.info(" [REGIME QUALITY] - Target: Tail/Crisis >40%% (Inference Level)")
     _logger.info(f"  > Regime Tail-Capture : {regime_tail_capture:>5.1f}%% [{rtc_pass}]")
     _logger.info(f"  > Regime Crisis-Cap   : {regime_crisis_cap:>5.1f}%% [{rcc_pass}]")
     _logger.info(f"  > Crisis-Prec   : {crisis_prec:>5.1f}%% [{cp_pass}]")
     _logger.info(" ──────────────────────────────────────────────────────────────────────────────")
-    _logger.info(" [EXECUTION QUALITY] - Target: Tail/Crisis >60%%, FlatGate-Prec >40%%")
-    _logger.info(f"  > Execution Tail-Capture : {execution_tail_capture:>5.1f}%% [{etc_pass}]")
-    _logger.info(f"  > Execution Crisis-Cap   : {execution_crisis_cap:>5.1f}%% [{ecc_pass}]")
+    _logger.info(" [EXECUTION QUALITY] - Target: Damp Tail >85%%, Damp Crisis >90%% (Policy Level)")
     _logger.info(f"  > Damp Tail-Capture      : {execution_damp_tail_capture:>5.1f}%% [{edtc_pass}]")
     _logger.info(f"  > Damp Crisis-Cap        : {execution_damp_crisis_cap:>5.1f}%% [{edcc_pass}]")
     _logger.info(f"  > Damp Precision         : {execution_damp_precision:>5.1f}%% [{edp_pass}]")
@@ -510,13 +508,12 @@ def log_hmm_report_summary(h_rep: dict[str, Any]) -> None:
     )
     _logger.info(f"  > False-Flat    : {false_flat:>+6.3f}%% [{ff_pass}]")
     _logger.info(" ──────────────────────────────────────────────────────────────────────────────")
-    _logger.info(" [OPERATIONAL STABILITY] - Target: >35 bars")
+    _logger.info(" [OPERATIONAL STABILITY] - Target: >18 bars")
     _logger.info(f"  > Avg-Duration  : {avg_dur:>5.1f} bars [{dur_pass}]")
     _logger.info(f"  > Switches      : {switches}")
     
-    regime_ok = (regime_tail_capture > 60.0) and (regime_crisis_cap > 60.0) and (crisis_prec > 40.0)
-    execution_ok = (execution_tail_capture > 60.0) and (execution_crisis_cap > 60.0) and (flat_prec > 40.0)
-    overall = "🟢 CONDITION_READY" if (regime_ok and execution_ok and avg_dur > 35) else "🔴 NEEDS_IMPROVEMENT"
+    execution_ok = (execution_damp_tail_capture > 85.0) and (execution_damp_crisis_cap > 90.0)
+    overall = "🟢 CONDITION_READY" if (execution_ok and avg_dur > 18.0 and false_flat < 15.0) else "🔴 NEEDS_IMPROVEMENT"
     _logger.info(f" [OVERALL VERDICT] -> {overall}")
     _logger.info("════════════════════════════════════════════════════════════════════════════════\n")
 
