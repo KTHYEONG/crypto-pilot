@@ -33,7 +33,7 @@ import pandas as pd
 _logger = logging.getLogger(__name__)
 
 _N_STATES = 4
-_N_FEATURES = 4
+_N_FEATURES = 6
 _MAX_LEN = 3000
 _EPS = 1e-6
 
@@ -122,15 +122,17 @@ def _hmm_nll(
     _, lls = _hmm_forward(obs, mask, params)
     nll = -jnp.sum(lls)
 
-    # Step 6: TVTP (Time-Varying Transition Probabilities)
-    # 평시(Low f2_vol_z)에는 sticky_weight 강화, 고변동성 시기에는 완화
+    # Phase 3: TVTP (Time-Varying Transition Probabilities) Sigmoid Smoothing
     trans_probs = jax.nn.softmax(params["log_trans"], axis=1)
     diag = jnp.diag(trans_probs)
     
     vol_z = obs[:, 1]
     avg_vol = jnp.sum(vol_z * mask) / jnp.maximum(jnp.sum(mask), 1.0)
-    sticky_base = 1200.0
-    sticky_weight = jnp.where(avg_vol < 0.0, sticky_base * 1.5, sticky_base * 0.7)
+    
+    # Nonlinear sigmoid weighting: smoother transition than jnp.where
+    sigmoid_vol = jax.nn.sigmoid(2.0 * (avg_vol - 1.0))
+    sticky_base = 2000.0
+    sticky_weight = sticky_base * (1.0 - 0.5 * sigmoid_vol)
     sticky_prior = -sticky_weight * jnp.sum(jnp.log(jnp.maximum(diag, _EPS)))
 
     mu = params["mu"]
@@ -142,8 +144,11 @@ def _hmm_nll(
         + 450.0 * jnp.square(jnp.maximum(0.0, mu[3, 1] + 0.5))   # CHOP_LOW f2 < -0.5
     )
 
+    # Phase 1: Asymmetric nu Prior
     nu = jax.nn.softplus(params["nu_raw"]) + 2.1
-    nu_prior = 10.0 * jnp.sum(jnp.square(jnp.log(jnp.maximum(nu, _EPS)) - jnp.log(8.0)))
+    # BULL: 30.0 (Normal), BEAR: 3.5 (Heavy Tail), CHOP: 8.0~12.0
+    nu_targets = jnp.array([30.0, 3.5, 8.0, 12.0])
+    nu_prior = 10.0 * jnp.sum(jnp.square(jnp.log(jnp.maximum(nu, _EPS)) - jnp.log(nu_targets)))
     loss = nll + sticky_prior + semantic_prior + nu_prior
     return jnp.nan_to_num(loss, nan=1e9, posinf=1e9, neginf=1e9)
 
@@ -192,20 +197,26 @@ class StudentTMultivariateHMM:
         self._warmed = False
 
     def _init_params(self, obs: np.ndarray) -> dict[str, Any]:
-        """Quantile-based initialization for 4-feature state separation.
+        """Quantile-based initialization for 6-feature state separation.
 
-        4-feature layout:
-            f1: trend_z, f2: vol_z, f3: downside_vol_z, f4: cs_dispersion_z
+        6-feature layout:
+            f1: trend_z, f2: vol_z, f3: downside_vol_z, f4: cs_dispersion_z,
+            f5: oi_delta_z, f6: funding_mom_z
         """
-        f1, f2, f3, f4 = obs[:, 0], obs[:, 1], obs[:, 2], obs[:, 3]
-        # State 0: BULL (High f1, Low f2, Low f3)
-        mu0 = [np.percentile(f1, 75), np.percentile(f2, 25), np.percentile(f3, 20), np.percentile(f4, 50)]
-        # State 1: BEAR (Low f1, Mid f2, High f3)
-        mu1 = [np.percentile(f1, 25), np.percentile(f2, 50), np.percentile(f3, 80), np.percentile(f4, 50)]
+        f = [obs[:, i] for i in range(obs.shape[1])]
+        
+        # Helper to get percentiles for 6 features
+        def get_mu(p_list):
+            return [np.percentile(f[i], p_list[i]) for i in range(len(f))]
+
+        # State 0: BULL (High f1, Low f2, Low f3, High f5, High f6)
+        mu0 = get_mu([75, 25, 20, 50, 70, 70])
+        # State 1: BEAR (Low f1, Mid f2, High f3, Low f5, Low f6)
+        mu1 = get_mu([25, 50, 80, 50, 30, 30])
         # State 2: CHOP_HIGH (Mid f1, High f2, High f4)
-        mu2 = [np.percentile(f1, 50), np.percentile(f2, 75), np.percentile(f3, 50), np.percentile(f4, 80)]
+        mu2 = get_mu([50, 75, 50, 80, 50, 50])
         # State 3: CHOP_LOW (Mid f1, Low f2, Low f4)
-        mu3 = [np.percentile(f1, 50), np.percentile(f2, 10), np.percentile(f3, 25), np.percentile(f4, 20)]
+        mu3 = get_mu([50, 10, 25, 20, 50, 50])
         return {
             "log_init": jnp.zeros(_N_STATES),
             "log_trans": jnp.eye(_N_STATES) * 4.0,

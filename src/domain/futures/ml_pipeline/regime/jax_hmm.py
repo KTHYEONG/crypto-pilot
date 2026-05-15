@@ -36,7 +36,7 @@ import pandas as pd
 _logger = logging.getLogger(__name__)
 
 _N_STATES = 4
-_N_FEATURES = 4
+_N_FEATURES = 6
 _MAX_LEN = 3000
 
 
@@ -71,14 +71,26 @@ def _tvtp_log_trans(
     def _enabled(_: None) -> jnp.ndarray:
         vol_scaled = (vol_z - tvtp_cfg["vol_center"]) * tvtp_cfg["vol_scale"]
         stress = jnp.tanh(vol_scaled)
+        
+        # Asymmetric TVTP slopes: States 0,3 use negative (exit easily), 1,2 use positive (stickier)
+        # We use a strength multiplier of 1.35x for the sticky states as requested.
+        slopes = jnp.array([
+            tvtp_cfg["diag_slope"],            # BULL(0)
+            -tvtp_cfg["diag_slope"] * 1.35,    # BEAR(1)
+            -tvtp_cfg["diag_slope"] * 1.35,    # CHOP_HIGH(2)
+            tvtp_cfg["diag_slope"]             # CHOP_LOW(3)
+        ], dtype=log_trans.dtype)
+
         diag_shift = jnp.clip(
-            tvtp_cfg["diag_bias"] + tvtp_cfg["diag_slope"] * stress,
+            tvtp_cfg["diag_bias"] + slopes * stress,
             -tvtp_cfg["diag_clip"],
             tvtp_cfg["diag_clip"],
         )
         eye = jnp.eye(_N_STATES, dtype=log_trans.dtype)
         off = (1.0 - eye) / float(max(_N_STATES - 1, 1))
-        adjusted = log_trans + diag_shift * eye - diag_shift * off
+
+        # Broadcast diag_shift (4,) to matrix form (4,4) for consistent adjustment
+        adjusted = log_trans + diag_shift[:, None] * eye - diag_shift[:, None] * off
         return jax.nn.log_softmax(adjusted, axis=1)
 
     return jax.lax.cond(tvtp_cfg["enabled"] > 0.5, _enabled, lambda _: base, operand=None)
@@ -227,21 +239,26 @@ class JAXMultivariateHMM:
         self._warmed = False
 
     def _init_params(self, obs: np.ndarray) -> dict[str, Any]:
-        """Quantile-based initialization for 4-feature state separation.
+        """Quantile-based initialization for 6-feature state separation.
 
-        4-feature layout:
-            f1: trend_z, f2: vol_z, f3: downside_vol_z, f4: cs_dispersion_z
+        6-feature layout:
+            f1: trend_z, f2: vol_z, f3: downside_vol_z, f4: cs_dispersion_z,
+            f5: oi_delta_z, f6: funding_mom_z
         """
-        f1, f2, f3, f4 = obs[:, 0], obs[:, 1], obs[:, 2], obs[:, 3]
+        f = [obs[:, i] for i in range(obs.shape[1])]
+        
+        # Helper to get percentiles for 6 features
+        def get_mu(p_list):
+            return [np.percentile(f[i], p_list[i]) for i in range(len(f))]
 
-        # State 0: BULL (High f1, Low f2, Low f3)
-        mu0 = [np.percentile(f1, 75), np.percentile(f2, 25), np.percentile(f3, 20), np.percentile(f4, 50)]
-        # State 1: BEAR (Low f1, Mid f2, High f3)
-        mu1 = [np.percentile(f1, 25), np.percentile(f2, 50), np.percentile(f3, 80), np.percentile(f4, 50)]
+        # State 0: BULL (High f1, Low f2, Low f3, High f5, High f6)
+        mu0 = get_mu([75, 25, 20, 50, 70, 70])
+        # State 1: BEAR (Low f1, Mid f2, High f3, Low f5, Low f6)
+        mu1 = get_mu([25, 50, 80, 50, 30, 30])
         # State 2: CHOP_HIGH (Mid f1, High f2, High f4)
-        mu2 = [np.percentile(f1, 50), np.percentile(f2, 75), np.percentile(f3, 50), np.percentile(f4, 80)]
+        mu2 = get_mu([50, 75, 50, 80, 50, 50])
         # State 3: CHOP_LOW (Mid f1, Low f2, Low f4)
-        mu3 = [np.percentile(f1, 50), np.percentile(f2, 10), np.percentile(f3, 25), np.percentile(f4, 20)]
+        mu3 = get_mu([50, 10, 25, 20, 50, 50])
 
         return {
             "log_init": jnp.zeros(_N_STATES),
