@@ -465,21 +465,25 @@ def compute_regime_drift(
         }
     is_oos_crisis_ratio = float(regime_shift.get("CRISIS", {}).get("ratio", 1.0))
 
-    _logger.info(
-        " [S3] Regime Drift: KL(IS||OOS)=%.3f  KL(OOS||IS)=%.3f  KL_sym=%.3f  [%s]",
-        kl_is_to_oos, kl_oos_to_is, kl_sym, drift_label,
-    )
+    status_map = {
+        "SEVERE": "🔴 SEVERE",
+        "MODERATE": "🟡 MODERATE",
+        "MILD": "🔵 MILD",
+        "OK": "🟢 OK"
+    }
+    status_text = status_map.get(drift_label, "🟢 OK")
+
+    _logger.info("\n 🔍 [STRATEGY DRIFT AUDIT]")
+    _logger.info("   Status   : %s (Drift Score: %.3f)", status_text, kl_sym)
+    _logger.info("   Regime Shift (IS ➔ OOS):")
     for rname, v in regime_shift.items():
         _logger.info(
-            "      %-8s  IS=%.1f%%  OOS=%.1f%%  ratio=%.2fx",
-            rname, v["is_pct"], v["oos_pct"], v["ratio"],
+            "     %-8s  : %5.1f%% ➔ %5.1f%%  [x%.2fx]",
+            rname.capitalize(), v["is_pct"], v["oos_pct"], v["ratio"],
         )
     if drift_label in ("MODERATE", "SEVERE"):
         _logger.warning(
-            " [S3] ⚠ DRIFT=%s  KL_sym=%.3f — OOS regime distribution significantly "
-            "differs from IS training. Vol gate (FUTURES_VOL_CRISIS_GATE_ENABLED) "
-            "partially compensates; consider walk-forward refit.",
-            drift_label, kl_sym,
+            "   ⚠ OOS 시장 환경이 학습 데이터와 크게 다릅니다. Walk-forward refit 검토 권장."
         )
 
     return {
