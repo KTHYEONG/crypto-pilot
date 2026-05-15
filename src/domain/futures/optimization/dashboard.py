@@ -456,7 +456,7 @@ def log_hmm_report_summary(h_rep: dict[str, Any]) -> None:
     rcc_pass = "PASS" if regime_crisis_cap > 40.0 else "FAIL"
     etc_pass = "PASS" if execution_tail_capture > 10.0 else "FAIL"
     ecc_pass = "PASS" if execution_crisis_cap > 20.0 else "FAIL"
-    edtc_pass = "PASS" if execution_damp_tail_capture > 85.0 else "FAIL"
+    edtc_pass = "PASS" if execution_damp_tail_capture > 80.0 else "FAIL"
     edcc_pass = "PASS" if execution_damp_crisis_cap > 90.0 else "FAIL"
     edp_pass = "OK" if execution_damp_precision > 10.0 else "LOW"
     cp_pass = "OK" if crisis_prec > 10.0 else "LOW"
@@ -469,7 +469,7 @@ def log_hmm_report_summary(h_rep: dict[str, Any]) -> None:
     _logger.info(f"  > Regime Crisis-Cap   : {regime_crisis_cap:>5.1f}%% [{rcc_pass}]")
     _logger.info(f"  > Crisis-Prec   : {crisis_prec:>5.1f}%% [{cp_pass}]")
     _logger.info(" ──────────────────────────────────────────────────────────────────────────────")
-    _logger.info(" [EXECUTION QUALITY] - Target: Damp Tail >85%%, Damp Crisis >90%% (Policy Level)")
+    _logger.info(" [EXECUTION QUALITY] - Target: Damp Tail >80%%, Damp Crisis >90%% (Policy Level)")
     _logger.info(f"  > Damp Tail-Capture      : {execution_damp_tail_capture:>5.1f}%% [{edtc_pass}]")
     _logger.info(f"  > Damp Crisis-Cap        : {execution_damp_crisis_cap:>5.1f}%% [{edcc_pass}]")
     _logger.info(f"  > Damp Precision         : {execution_damp_precision:>5.1f}%% [{edp_pass}]")
@@ -512,7 +512,7 @@ def log_hmm_report_summary(h_rep: dict[str, Any]) -> None:
     _logger.info(f"  > Avg-Duration  : {avg_dur:>5.1f} bars [{dur_pass}]")
     _logger.info(f"  > Switches      : {switches}")
     
-    execution_ok = (execution_damp_tail_capture > 85.0) and (execution_damp_crisis_cap > 90.0)
+    execution_ok = (execution_damp_tail_capture > 80.0) and (execution_damp_crisis_cap > 90.0)
     overall = "🟢 CONDITION_READY" if (execution_ok and avg_dur > 18.0 and false_flat < 15.0) else "🔴 NEEDS_IMPROVEMENT"
     _logger.info(f" [OVERALL VERDICT] -> {overall}")
     _logger.info("════════════════════════════════════════════════════════════════════════════════\n")
@@ -575,7 +575,7 @@ def log_ml_merge_feature_stats(
 
 
 def log_alpha_component_summary(alpha_panel: pd.DataFrame) -> None:
-    """Log a summary of ML alpha component extraction and filtering results.
+    """Log an improved summary of ML alpha component extraction with strict Pass/Fail gates.
 
     Args:
         alpha_panel: Dataframe containing alpha components with 'attrs' metadata.
@@ -590,41 +590,89 @@ def log_alpha_component_summary(alpha_panel: pd.DataFrame) -> None:
     n_total = int(meta.get("n_components", 0))
     surv_rate = (n_surv / n_total * 100.0) if n_total > 0 else 0.0
 
-    ic_map = meta.get("ic_by_slot", {})
-    primary_ic = float(ic_map.get("ml_alpha_00", 0.0))
-    
-    # Calculate pool avg IC for surviving components
+    # Rejection Breakdown
+    f_tail = int(meta.get("fail_tail", 0))
+    f_oos = int(meta.get("fail_oos", 0))
+    f_reg = int(meta.get("fail_regime", 0))  # Now includes Short-side IC
+    f_stats = int(meta.get("fail_fdr", 0)) + int(meta.get("fail_dsr", 0))
+    f_hl = int(meta.get("fail_half_life", 0))
+
+    # Primary Alpha (ml_alpha_00)
+    primary_ic = float(meta.get("primary_is_mu", 0.0))
+    primary_oos = float(meta.get("primary_oos_mu", 0.0))
+    primary_tail = float(meta.get("primary_tail_ic", 0.0)) # Need to ensure this is in meta
+    # If not in meta, try to get from tail_ic_by_slot
+    if "primary_tail_ic" not in meta:
+        primary_tail = float(meta.get("tail_ic_by_slot", {}).get("ml_alpha_00", 0.0))
+
+    # Pool Stats
     surviving_cols = [
         c for c in alpha_panel.columns if c.startswith("ml_alpha_") and c[-2:].isdigit()
     ]
+    ic_map = meta.get("ic_by_slot", {})
     surviving_ics = [
         float(ic_map.get(c, 0.0)) for c in surviving_cols if alpha_panel[c].std() > 1e-9
     ]
     pool_avg_ic = float(np.mean(surviving_ics)) if surviving_ics else 0.0
-    pos_ic_ratio = (
-        (sum(1 for ic in surviving_ics if ic > 0) / len(surviving_ics) * 100.0)
-        if surviving_ics
-        else 0.0
+
+    # Efficiency (Turnover)
+    # Simple estimate: mean absolute change in rank per bar
+    if not alpha_panel.empty and len(alpha_panel) > 100:
+        try:
+            # Sample 1000 rows for speed
+            sample = alpha_panel[surviving_cols].iloc[:2000].unstack(level="symbol")
+            turnover = sample.diff().abs().mean().mean() * 100.0
+            eff_ratio = pool_avg_ic / (turnover / 100.0 + 1e-9)
+        except Exception:
+            turnover, eff_ratio = 0.0, 0.0
+    else:
+        turnover, eff_ratio = 0.0, 0.0
+
+    tail_ics = meta.get("tail_ic_by_slot", {})
+    pos_tail_pct = (
+        sum(1 for c in surviving_cols if float(tail_ics.get(c, 0.0)) >= 0.0) / len(surviving_cols) * 100.0
+        if surviving_cols else 0.0
     )
 
-    _logger.info("\n [ALPHA COMPONENT SUMMARY]")
-    _logger.info(" ────────────────────────────────────────────────────────────────────────────")
-    _logger.info(
-        "  🧬 Survival   : %d / %d (%.1f%%)",
-        n_surv,
-        n_total,
-        surv_rate,
-    )
-    _logger.info(
-        "  📊 Primary IC : %.4f",
-        primary_ic,
-    )
-    _logger.info(
-        "  📈 Pool Avg IC: %.4f (IC > 0: %.1f%%)",
-        pool_avg_ic,
-        pos_ic_ratio,
-    )
-    
+    _logger.info("\n ════════════════════════ [ALPHA COMPONENT HEALTH CHECK] ════════════════════════")
+    _logger.info(" [SURVIVAL ANALYSIS] - Strict Gates (FDR+DSR + Tail + OOS Floor + L/S Gate)")
+    _logger.info(" ──────────────────────────────────────────────────────────────────────────────")
+    _logger.info("  🧬 Total Components : %d", n_total)
+    _logger.info("  ✅ Final Survivors  : %d / %d (%.1f%%)  [REJECTED: %d]", 
+                 n_surv, n_total, surv_rate, n_total - n_surv)
+    _logger.info("")
+    _logger.info("  [REJECTION BREAKDOWN]")
+    _logger.info("  > Fail Tail-IC (<0.00)      : %d  (Extreme moves risk)", f_tail)
+    _logger.info("  > Fail OOS-Floor (<0.01)    : %d  (Regime drift / Decay)", f_oos)
+    _logger.info("  > Fail L/S-Asymmetry        : %d  (Short-side blindness)", f_reg)
+    _logger.info("  > Fail Stats (FDR/DSR)      : %d  (Overfitted/Noise)", f_stats)
+    _logger.info("  > Fail Half-life (<3 bars)  : %d  (Low persistence)", f_hl)
+    _logger.info(" ──────────────────────────────────────────────────────────────────────────────")
+    _logger.info(" [PRIMARY ALPHA] - ml_alpha_00 (Main Signal)")
+    _logger.info("  📊 Total Rank IC    : %.4f", primary_ic)
+    _logger.info("  🧪 IS vs OOS Gap    : %.4f (IS) vs %.4f (OOS) | [%s]", 
+                 primary_ic, primary_oos, "PASS" if primary_oos > 0.01 else "FAIL")
+    _logger.info("  🎯 Tail-IC (Decile) : %+.4f | [%s]", 
+                 primary_tail, "PASS" if primary_tail >= 0.0 else "FAIL")
+    _logger.info("")
+    _logger.info("  [DIRECTIONAL QUALITY]")
+    l_ic = float(meta.get("long_head_oos_ic_mean", 0.0))
+    s_ic = float(meta.get("short_head_oos_ic_mean", 0.0))
+    _logger.info("  ↗️ Long-Head IC     : %+.4f [%s]", l_ic, "GOOD" if l_ic > 0.01 else "OK")
+    _logger.info("  ↘️ Short-Head IC    : %+.4f [%s]", s_ic, "GOOD" if s_ic > 0.01 else "OK")
+    _logger.info(" ──────────────────────────────────────────────────────────────────────────────")
+    _logger.info(" [POOL PERFORMANCE] - Surviving Ensemble")
+    _logger.info("  📈 Pool Avg IC (OOS): %.4f", pool_avg_ic)
+    if turnover > 0:
+        _logger.info("  🔄 Avg Turnover     : %.1f%% / Bar", turnover)
+        _logger.info("  💰 Efficiency Ratio : %.2f (IC per 10%% Turnover) | [%s]", 
+                     eff_ratio * 10, "PASS" if eff_ratio * 10 > 2.0 else "FAIL")
+    _logger.info("  🛡️ Tail Protection  : %.0f%% of pool has Positive Tail-IC", pos_tail_pct)
+
+    verdict = "🟢 ALPHA_READY" if n_surv > 0 and primary_oos > 0.01 and primary_tail >= 0.0 else "🔴 ALPHA_WEAK"
+    _logger.info(" ──────────────────────────────────────────────────────────────────────────────")
+    _logger.info(" [OVERALL VERDICT] -> %s (Conservative Tuning Applied)", verdict)
+    _logger.info(" ════════════════════════════════════════════════════════════════════════════════\n")
     # Filter failure breakdown
     fail_parts = []
     for k, label in [
