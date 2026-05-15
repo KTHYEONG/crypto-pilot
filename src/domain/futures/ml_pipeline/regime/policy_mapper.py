@@ -84,9 +84,9 @@ def map_policy_controls(
     mix_pre_w /= mix_sum
     mix_tail_w /= mix_sum
 
-    soft_thr = float(np.clip(cfg.get("FUTURES_POLICY_DEFENSE_SOFT_THR", 0.48), 0.0, 1.0))
-    hard_thr = float(np.clip(cfg.get("FUTURES_POLICY_DEFENSE_HARD_THR", 0.66), 0.0, 1.0))
-    near_flat_thr = float(np.clip(cfg.get("FUTURES_POLICY_DEFENSE_NEAR_FLAT_THR", 0.84), 0.0, 1.0))
+    soft_thr = np.clip(cfg.get("FUTURES_POLICY_DEFENSE_SOFT_THR", 0.48), 0.0, 1.0)
+    hard_thr = np.clip(cfg.get("FUTURES_POLICY_DEFENSE_HARD_THR", 0.66), 0.0, 1.0)
+    near_flat_thr = np.clip(cfg.get("FUTURES_POLICY_DEFENSE_NEAR_FLAT_THR", 0.84), 0.0, 1.0)
     soft_mult = float(np.clip(cfg.get("FUTURES_POLICY_DEFENSE_SOFT_MULT", 0.82), 0.0, 1.0))
     hard_mult = float(np.clip(cfg.get("FUTURES_POLICY_DEFENSE_HARD_MULT", 0.52), 0.0, 1.0))
     near_flat_mult = float(np.clip(cfg.get("FUTURES_POLICY_DEFENSE_NEAR_FLAT_MULT", 0.24), 0.0, 1.0))
