@@ -8,6 +8,8 @@ import numpy as np
 import pandas as pd
 from numba import njit
 
+from src.domain.futures.ml_pipeline.regime.regime_contracts import REGIME_PROB_COLUMNS
+
 # Columns produced by build_gp_input_features (for CS-rank / imputation in pipeline).
 # Systemic HMM: TVTP uses macro_trend_168h (0) + microstructure (4–8). Return-path emissions (9): level.
 # Reduced to 11 features for Tiered Universe Architecture.
@@ -26,14 +28,8 @@ SYSTEMIC_HMM_FEATURE_COLUMNS: tuple[str, ...] = (
 )
 
 # Posterior columns aligned to stable semantic labels (order for MetaLabeler).
-# Phase 5: 5-state HMM — CALM_BULL vs VOL_UP (split positive-μ regimes by empirical σ).
-HMM_SEMANTIC_PROB_COLUMNS: tuple[str, ...] = (
-    "hmm_prob_bull_calm",
-    "hmm_prob_bull_vol_up",
-    "hmm_prob_bear_trend",
-    "hmm_prob_chop",
-    "hmm_prob_crisis",
-)
+# Keep a local alias for backward compatibility with existing imports.
+HMM_SEMANTIC_PROB_COLUMNS: tuple[str, ...] = REGIME_PROB_COLUMNS
 
 # Bump when ALPHA feature semantics change without renaming columns so raw GP
 # caches are invalidated and Tier 2 retraining actually happens.
