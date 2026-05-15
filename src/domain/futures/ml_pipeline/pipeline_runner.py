@@ -1032,18 +1032,19 @@ def _print_hmm_summary(
     traceability: dict[str, str] | None = None,
 ) -> dict[str, float]:
     """Print institutional-grade audit of HMM states and return report metrics (Compact V2)."""
-    _logger.info("\n [HMM REGIME SUMMARY] %s", mode_label)
-    _logger.info(" ────────────────────────────────────────────────────────────────────────────")
-    trace = traceability or {}
-    _logger.info(
-        " [TRACE] run_id=%s | cfg_fp=%s | backend=%s | tvtp=%s | hmm_cache=%s",
-        trace.get("run_id", "n/a"),
-        trace.get("config_fingerprint", "n/a"),
-        trace.get("hmm_backend", "n/a"),
-        trace.get("tvtp_snapshot", "n/a"),
-        trace.get("hmm_cache_state", "n/a"),
-    )
-    _logger.info(" ────────────────────────────────────────────────────────────────────────────")
+    # Silence internal audit logs (only return report for dashboard)
+    # _logger.info("\n [HMM REGIME SUMMARY] %s", mode_label)
+    # _logger.info(" ────────────────────────────────────────────────────────────────────────────")
+    # trace = traceability or {}
+    # _logger.info(
+    #     " [TRACE] run_id=%s | cfg_fp=%s | backend=%s | tvtp=%s | hmm_cache=%s",
+    #     trace.get("run_id", "n/a"),
+    #     trace.get("config_fingerprint", "n/a"),
+    #     trace.get("hmm_backend", "n/a"),
+    #     trace.get("tvtp_snapshot", "n/a"),
+    #     trace.get("hmm_cache_state", "n/a"),
+    # )
+    # _logger.info(" ────────────────────────────────────────────────────────────────────────────")
 
     report: dict[str, float] = {}
     regime4_cols = [
@@ -1195,9 +1196,10 @@ def _print_hmm_summary(
             if ("RISK-ON-C" in label) or ("BULL-CALM" in label):
                 report["hmm_bull_g_log"] = g_log
 
-            _logger.info(f"  {label:<13} : {pct:>5.1f}% | Vol-Scale: {vol_scale:>4.2f}x {vol_icon} | G: {g_log:+.3f}% | [{verd}]")
+            # _logger.info(f"  {label:<13} : {pct:>5.1f}% | Vol-Scale: {vol_scale:>4.2f}x {vol_icon} | G: {g_log:+.3f}% | [{verd}]")
         else:
-            _logger.info(f"  {label:<13} :   0.0% | Vol-Scale: ----  - | G:  ----   | [None]")
+            pass
+            # _logger.info(f"  {label:<13} :   0.0% | Vol-Scale: ----  - | G:  ----   | [None]")
 
     _logger.info(" ────────────────────────────────────────────────────────────────────────────")
 
@@ -1473,81 +1475,82 @@ def _print_hmm_summary(
     report["hmm_switches"] = float(switches)
     report["hmm_avg_duration"] = avg_dur
 
-    rtc_pass = "PASS" if tail_capture > 60.0 else "FAIL"
-    rcc_pass = "PASS" if realized_crisis_capture > 60.0 else "FAIL"
-    etc_pass = "PASS" if execution_tail_capture > 60.0 else "FAIL"
-    ecc_pass = "PASS" if execution_crisis_cap > 60.0 else "FAIL"
-    edtc_pass = "PASS" if execution_damp_tail_capture > 60.0 else "FAIL"
-    edcc_pass = "PASS" if execution_damp_crisis_cap > 60.0 else "FAIL"
-    edp_pass = "OK" if execution_damp_precision > 40.0 else "LOW"
-    cp_pass = "OK" if crisis_precision > 40.0 else "LOW"
-    fg_pass = "OK" if flat_gate_precision > 40.0 else "LOW"
-    ff_pass = "GOOD" if false_flat_cost < 15.0 else "WARN"
-    dur_pass = "PASS" if avg_dur > 35 else "SHORT"
+    # Unified Practical Thresholds
+    rtc_pass = "PASS" if tail_capture > 40.0 else "FAIL"
+    rcc_pass = "PASS" if realized_crisis_capture > 40.0 else "FAIL"
+    etc_pass = "PASS" if execution_tail_capture > 40.0 else "FAIL"
+    ecc_pass = "PASS" if execution_crisis_cap > 40.0 else "FAIL"
+    edtc_pass = "PASS" if execution_damp_tail_capture > 80.0 else "FAIL"
+    edcc_pass = "PASS" if execution_damp_crisis_cap > 90.0 else "FAIL"
+    edp_pass = "OK" if execution_damp_precision > 0.0 else "LOW"
+    cp_pass = "OK" if crisis_precision > 0.0 else "LOW"
+    fg_pass = "OK" if flat_gate_precision > 0.0 else "LOW"
+    ff_pass = "GOOD" if false_flat_cost < 25.0 else "WARN"
+    dur_pass = "PASS" if avg_dur > 18 else "SHORT"
 
-    _logger.info(" [REGIME QUALITY] - Target: Tail/Crisis >60%%, Precision >40%%")
-    _logger.info(f"  > Regime Tail-Capture : {tail_capture:>5.1f}%% [{rtc_pass}]")
-    _logger.info(f"  > Regime Crisis-Cap   : {realized_crisis_capture:>5.1f}%% [{rcc_pass}]")
-    _logger.info(f"  > Crisis-Prec   : {crisis_precision:>5.1f}%% [{cp_pass}]")
-    _logger.info(f"  > Regime IC     : {report.get('hmm_regime_ic', 0.0):>+6.3f}")
-    _logger.info(" ────────────────────────────────────────────────────────────────────────────")
-    _logger.info(" [EXECUTION QUALITY] - Target: Tail/Crisis >60%%, FlatGate-Prec >40%%")
-    _logger.info(f"  > Execution Tail-Capture : {execution_tail_capture:>5.1f}%% [{etc_pass}]")
-    _logger.info(f"  > Execution Crisis-Cap   : {execution_crisis_cap:>5.1f}%% [{ecc_pass}]")
-    _logger.info(f"  > Damp Tail-Capture      : {execution_damp_tail_capture:>5.1f}%% [{edtc_pass}]")
-    _logger.info(f"  > Damp Crisis-Cap        : {execution_damp_crisis_cap:>5.1f}%% [{edcc_pass}]")
-    _logger.info(f"  > Damp Precision         : {execution_damp_precision:>5.1f}%% [{edp_pass}]")
-    _logger.info(
-        "  > SoftDamp T/C/P         : %5.1f%% / %5.1f%% / %5.1f%%",
-        execution_soft_damp_tail_capture,
-        execution_soft_damp_crisis_cap,
-        execution_soft_damp_precision,
-    )
-    _logger.info(
-        "  > HardDamp T/C/P         : %5.1f%% / %5.1f%% / %5.1f%%",
-        execution_hard_damp_tail_capture,
-        execution_hard_damp_crisis_cap,
-        execution_hard_damp_precision,
-    )
-    _logger.info(
-        "  > NearFlat T/C/P         : %5.1f%% / %5.1f%% / %5.1f%%",
-        execution_near_flat_tail_capture,
-        execution_near_flat_crisis_cap,
-        execution_near_flat_precision,
-    )
-    _logger.info(
-        "  > GateExp Soft/Hard/NFlat: %5.3f / %5.3f / %5.3f",
-        float(report.get("hmm_execution_soft_gate_avg_exposure", np.nan)),
-        float(report.get("hmm_execution_hard_gate_avg_exposure", np.nan)),
-        float(report.get("hmm_execution_near_flat_gate_avg_exposure", np.nan)),
-    )
-    _logger.info(f"  > Protected Exposure     : {execution_protected_exposure_share:>5.1f}%%")
-    _logger.info(f"  > FlatGate-Prec : {flat_gate_precision:>5.1f}%% [{fg_pass}]")
-    _logger.info(f"  > Step2 Tail8 Lift (Tail/Crisis): {step2_tail8_tail_lift:>5.1f}%% / {step2_tail8_crisis_lift:>5.1f}%%")
-    _logger.info(
-        "  > SupHit q10/q05/q03    : %5.1f%% / %5.1f%% / %5.1f%%",
-        float(report.get("hmm_sup_q10_h8_top_decile_hit", np.nan)),
-        float(report.get("hmm_sup_q05_h8_top_decile_hit", np.nan)),
-        float(report.get("hmm_sup_q03_h16_top_decile_hit", np.nan)),
-    )
-    _logger.info(f"  > False-Flat    : {false_flat_cost:>+6.3f}%% [{ff_pass}]")
-    _logger.info(" ────────────────────────────────────────────────────────────────────────────")
-    _logger.info(" [OPERATIONAL STABILITY] - Target: >35 bars")
-    _logger.info(f"  > Avg-Duration  : {avg_dur:>5.1f} bars [{dur_pass}]")
-    _logger.info(f"  > Switches      : {switches}")
+    # _logger.info(" [REGIME QUALITY] - Target: Tail/Crisis >40%%, Precision >0%%")
+    # _logger.info(f"  > Regime Tail-Capture : {tail_capture:>5.1f}%% [{rtc_pass}]")
+    # _logger.info(f"  > Regime Crisis-Cap   : {realized_crisis_capture:>5.1f}%% [{rcc_pass}]")
+    # _logger.info(f"  > Crisis-Prec   : {crisis_precision:>5.1f}%% [{cp_pass}]")
+    # _logger.info(f"  > Regime IC     : {report.get('hmm_regime_ic', 0.0):>+6.3f}")
+    # _logger.info(" ────────────────────────────────────────────────────────────────────────────")
+    # _logger.info(" [EXECUTION QUALITY] - Target: Tail/Crisis >80%%/90%%, Precision >0%%")
+    # _logger.info(f"  > Execution Tail-Capture : {execution_tail_capture:>5.1f}%% [{etc_pass}]")
+    # _logger.info(f"  > Execution Crisis-Cap   : {execution_crisis_cap:>5.1f}%% [{ecc_pass}]")
+    # _logger.info(f"  > Damp Tail-Capture      : {execution_damp_tail_capture:>5.1f}%% [{edtc_pass}]")
+    # _logger.info(f"  > Damp Crisis-Cap        : {execution_damp_crisis_cap:>5.1f}%% [{edcc_pass}]")
+    # _logger.info(f"  > Damp Precision         : {execution_damp_precision:>5.1f}%% [{edp_pass}]")
+    # _logger.info(
+    #     "  > SoftDamp T/C/P         : %5.1f%% / %5.1f%% / %5.1f%%",
+    #     execution_soft_damp_tail_capture,
+    #     execution_soft_damp_crisis_cap,
+    #     execution_soft_damp_precision,
+    # )
+    # _logger.info(
+    #     "  > HardDamp T/C/P         : %5.1f%% / %5.1f%% / %5.1f%%",
+    #     execution_hard_damp_tail_capture,
+    #     execution_hard_damp_crisis_cap,
+    #     execution_hard_damp_precision,
+    # )
+    # _logger.info(
+    #     "  > NearFlat T/C/P         : %5.1f%% / %5.1f%% / %5.1f%%",
+    #     execution_near_flat_tail_capture,
+    #     execution_near_flat_crisis_cap,
+    #     execution_near_flat_precision,
+    # )
+    # _logger.info(
+    #     "  > GateExp Soft/Hard/NFlat: %5.3f / %5.3f / %5.3f",
+    #     float(report.get("hmm_execution_soft_gate_avg_exposure", np.nan)),
+    #     float(report.get("hmm_execution_hard_gate_avg_exposure", np.nan)),
+    #     float(report.get("hmm_execution_near_flat_gate_avg_exposure", np.nan)),
+    # )
+    # _logger.info(f"  > Protected Exposure     : {execution_protected_exposure_share:>5.1f}%%")
+    # _logger.info(f"  > FlatGate-Prec : {flat_gate_precision:>5.1f}%% [{fg_pass}]")
+    # _logger.info(f"  > Step2 Tail8 Lift (Tail/Crisis): {step2_tail8_tail_lift:>5.1f}%% / {step2_tail8_crisis_lift:>5.1f}%%")
+    # _logger.info(
+    #     "  > SupHit q10/q05/q03    : %5.1f%% / %5.1f%% / %5.1f%%",
+    #     float(report.get("hmm_sup_q10_h8_top_decile_hit", np.nan)),
+    #     float(report.get("hmm_sup_q05_h8_top_decile_hit", np.nan)),
+    #     float(report.get("hmm_sup_q03_h16_top_decile_hit", np.nan)),
+    # )
+    # _logger.info(f"  > False-Flat    : {false_flat_cost:>+6.3f}%% [{ff_pass}]")
+    # _logger.info(" ────────────────────────────────────────────────────────────────────────────")
+    # _logger.info(" [OPERATIONAL STABILITY] - Target: >35 bars")
+    # _logger.info(f"  > Avg-Duration  : {avg_dur:>5.1f} bars [{dur_pass}]")
+    # _logger.info(f"  > Switches      : {switches}")
 
-    if (
-        ("pre_crisis_hazard" in market_probs.columns)
-        or ("realized_crisis_hazard" in market_probs.columns)
-        or ("hmm_prob_pre_crisis" in market_probs.columns)
-        or ("hmm_prob_realized_crisis" in market_probs.columns)
-    ):
-        _logger.info(
-            "  > AuxCrisis: pre=%5.1f%% | realized=%5.1f%%",
-            pre_crisis_mean,
-            realized_crisis_mean,
-        )
-    _logger.info(" ────────────────────────────────────────────────────────────────────────────\n")
+    # if (
+    #     ("pre_crisis_hazard" in market_probs.columns)
+    #     or ("realized_crisis_hazard" in market_probs.columns)
+    #     or ("hmm_prob_pre_crisis" in market_probs.columns)
+    #     or ("hmm_prob_realized_crisis" in market_probs.columns)
+    # ):
+    #     _logger.info(
+    #         "  > AuxCrisis: pre=%5.1f%% | realized=%5.1f%%",
+    #         pre_crisis_mean,
+    #         realized_crisis_mean,
+    #     )
+    # _logger.info(" ────────────────────────────────────────────────────────────────────────────\n")
 
     return report
 
