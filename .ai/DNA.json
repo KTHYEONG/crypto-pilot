@@ -1,44 +1,29 @@
 {
+  "version": "11.6.0",
   "project": "my-coin-traider",
-  "version": "10.8.1-spec-hmm-tuning-ceiling-analysis",
-  "timestamp": "2026-05-15T17:30:00Z",
-  "previous_state_hash": "v10.8.0-spec-hmm-skewed-t-parallel",
+  "last_updated": "2026-05-15T20:10:00Z",
   "current_logic": {
-    "universe_selection": "CS_RANK screening with anchor/macro loading; hard-stop if universe < 3 symbols.",
-    "regime_classification": "JAX-native Skewed-t HMM with Parallel Associative Scan. Uses asymmetric nu-priors and lambda-skewness parameters. Accelerated by RTX 4070 Ti (O(log N) complexity).",
-    "supervised_tail_separation": "Causal IS-trained supervised tail scores split into q10/q05/q03 tiers. Triple-Barrier Meta-Labeling (Phase 3.9) pending optimization.",
-    "regime_boosting": "Supervised score bundles forwarded through hazard overlay with Exponential Decay Boost (24-bar window).",
-    "hazard_overlay": "Separate tail/crisis hazard layer estimating pre_crisis_hazard and realized_crisis_hazard with logit bias -2.8.",
-    "policy_mapping": "Policy mapper converts regime posterior and hazard outputs into tiered soft_damp, hard_damp, near_flat, flat controls.",
-    "diagnostics": "Separates regime quality and execution quality. Avg-Duration target > 18 bars (currently 20.0 bars).",
-    "alpha_generation": "LightGBM v6 alpha is regime-conditional, with chop-fragility filtering.",
-    "risk_management": "Tiered execution protection with Skewed-t backend. Damp Crisis-Cap achieved 100% in verification.",
-    "runtime_bootstrap": "JAX enabled for GPU (CudaDevice) with XLA_PYTHON_CLIENT_PREALLOCATE=false.",
-    "parallel_processing": "Optimized for 8-core CPU / RTX 4070 Ti GPU: Associative Scan eliminates sequential bottlenecks.",
-    "v10.8.1_tuning_findings": {
-      "damp_tail_capture_ceiling": "71.5% (target >85%) — limited by upstream Regime Tail-Capture (22.3%) + policy gate threshold saturation. Further gate opening breaches Protected Exposure bounds (30~50%).",
-      "avg_duration_ceiling": "20.0 bars (target >24) — limited by frequent HMM posterior oscillations in CHOP region (2.7 bars raw duration). Sticky labels mitigate but cannot overcome.",
-      "regime_init_instability": "HMM collapse to CHOP-100% on certain runs due to zero semantic_prior penalty on CHOP state. Multi-start init or CHOP constraint recommended.",
-      "supervised_score_quality": "SupHit q10 = 19.4% is lagging-indicator ceiling. LightGBM replacement of LogisticRegression yielded no improvement (LR: 19.6% → LGB: 19.4%). Requires micro-signals (OI accel, funding rate spike).",
-      "policy_configuration_status": "DEFENSE_SOFT_THR, SOFT_TAIL_THR, SOFT_SUP_THR, SOFT_REALIZED_FLOOR already at optimal values in current config. 레버 B (threshold reduction) already active."
-    }
+    "regime_inference": "Skewed-t Multivariate HMM with Parallel Associative Scan & GPU Native Loop (v11.6)",
+    "risk_overlay": "CrisisDetector + Supervised Tail Score (LGBM/Isotonic) with Adaptive Rolling Quantile Thresholding",
+    "gpu_optimization": "Fixed-Shape Padding, GPU-Native lax.scan, Loop-Invariant Hoisting, and TensorFloat32 (TF32) Acceleration"
   },
   "key_parameters": {
     "FUTURES_HMM_BACKEND": "skewed_t",
-    "FUTURES_HMM_N_STATES": 4,
-    "FUTURES_HMM_N_ITER": 1500,
-    "FUTURES_HMM_TOL": 0.0001,
-    "FUTURES_HMM_TVTP_ENABLED": true,
-    "FUTURES_HMM_STICKY_BASE": 2000.0,
-    "FUTURES_HMM_OUTPUT_STICKY_MIN_DURATION": [132, 56, 42, 16, 24],
-    "hmm_features": [
-      "Trend_Z",
-      "Vol_Z",
-      "Downside_Vol_Z",
-      "CS_Dispersion_Z",
-      "OI_Delta_Z",
-      "Funding_Mom_Z"
-    ],
-    "hmm_init_strategy": "6-feature Quantile-based EM initialization with Skewness Priors"
-  }
+    "FUTURES_HMM_K_STATES": 4,
+    "FUTURES_HMM_N_ITER": 200,
+    "FUTURES_HMM_TOL": 1e-4,
+    "FUTURES_HMM_MAX_LEN": 3000,
+    "FUTURES_HMM_OCCUPANCY_PRIOR_WEIGHT": 5000.0,
+    "FUTURES_HMM_MIN_OCCUPANCY": 0.05,
+    "FUTURES_HMM_TF32_ENABLED": true,
+    "FUTURES_HMM_EARLY_STOPPING": "Relative Tolerance (jnp.abs(loss - prev) > tol * jnp.maximum(jnp.abs(prev), 1.0))"
+  },
+  "performance_baseline": {
+    "regime_tail_capture": 0.521,
+    "regime_crisis_cap": 0.521,
+    "avg_duration": 35.9,
+    "execution_time_gpu": "35s (v11.6) vs 189s (v11.1)",
+    "status": "CONDITION_READY"
+  },
+  "previous_state_hash": "v11.0.0-baseline-collapse"
 }
