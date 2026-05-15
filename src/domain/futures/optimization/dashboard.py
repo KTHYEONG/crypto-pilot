@@ -218,40 +218,55 @@ def print_human_dashboard(
 
     _logger.info("\n 🧑💻 [HUMAN DASHBOARD: PERFORMANCE SUMMARY]")
     _logger.info(" ────────────────────────────────────────────────────────────────────────────")
-    _logger.info("  METRIC          │      IS      │   Hold-Out   │    OOS (Single ➔ Meta)")
-    _logger.info(" ─────────────────┼──────────────┼──────────────┼────────────────────────────")
+    _logger.info("  METRIC           │      IS      │   Hold-Out   │    OOS (Single ➔ Meta)")
+    _logger.info(" ──────────────────┼──────────────┼──────────────┼───────────────────────────")
 
     def get_v(p: dict[str, Any], k: str) -> float:
         return float(p.get(k, 0.0))
 
     metrics = [
-        ("CAGR (%)", "cagr_pct", True),
-        ("Net Alpha (%)", "net_alpha_pct", True),
-        ("Max Drawdown (%)", "mdd_pct", True),
+        ("CAGR", "cagr_pct", True),
+        ("Net Alpha", "net_alpha_pct", True),
+        ("Max Drawdown", "mdd_pct", True),
         ("Profit Factor", "profit_factor", False),
     ]
 
     for label, key, is_pct in metrics:
-        suffix = "%" if is_pct else ""
         is_v, ho_v = get_v(is_port, key), get_v(ho_port, key)
         oos_v = get_v(oos_port, key)
 
         if key == "net_alpha_pct":
             is_v = get_v(is_port, "cagr_pct") - benchmark_is
             oos_v = get_v(oos_port, "cagr_pct") - benchmark_oos
+        
+        # Format IS and HO values with consistent spacing and signs
+        if is_pct:
+            is_str = f"{is_v:>+8.2f}%"
+            ho_str = f"{ho_v:>+8.2f}%"
+        else:
+            is_str = f"{is_v:>9.2f} "
+            ho_str = f"{ho_v:>9.2f} "
 
-        val_str = f"{oos_v:>8.1f}{suffix}"
+        # Format OOS values (Single and Meta)
         if meta_port:
             m_v = (
                 get_v(meta_port, "cagr_pct") - benchmark_oos
                 if key == "net_alpha_pct"
                 else get_v(meta_port, key)
             )
-            val_str = f"{oos_v:>6.1f}{suffix}  ➔  {m_v:>5.1f}{suffix}"
+            if is_pct:
+                oos_val_str = f"{oos_v:>+6.1f}%  ➔  {m_v:>+5.1f}%"
+            else:
+                oos_val_str = f"{oos_v:>6.2f}   ➔   {m_v:>5.2f}"
+        else:
+            if is_pct:
+                oos_val_str = f"{oos_v:>+8.1f}%"
+            else:
+                oos_val_str = f"{oos_v:>9.2f}"
 
-        _logger.info(f"  {label:<15} │ {is_v:>10.2f}{suffix} │ {ho_v:>10.2f}{suffix} │ {val_str}")
+        _logger.info(f"  {label:<16} │  {is_str}  │  {ho_str}  │  {oos_val_str}")
 
-    _logger.info(" ────────────────────────────────────────────────────────────────────────────")
+    _logger.info(" ──────────────────┼──────────────┼──────────────┼───────────────────────────")
 
     is_cagr = get_v(is_port, "cagr_pct")
     oos_cagr = get_v(oos_port, "cagr_pct")
@@ -265,12 +280,14 @@ def print_human_dashboard(
             f"{meta_ret:.1f}% of IS Performance (Meta-Gain: {meta_ret - retention:>+0.1f}%)"
         )
 
+    v_icon = "⚠️ " if "HOLD" in gate_status else "✅ "
     v_color = c_grn if "PROMOTE" in gate_status else c_red
     persisted = "" if "PROMOTE" in gate_status else " - Parameters NOT persisted"
 
-    _logger.info(f"  > OOS Retention : {ret_info}")
-    _logger.info(f"  > FINAL VERDICT : {v_color}{c_bld}{gate_status}{c_rst}{persisted}")
+    _logger.info(f"  > OOS Retention  : {ret_info}")
+    _logger.info(f"  > FINAL VERDICT  : {v_icon} {v_color}{c_bld}{gate_status}{c_rst}{persisted}")
     _logger.info(" ────────────────────────────────────────────────────────────────────────────\n")
+
 
 
 def print_dual_audit_dashboard(
@@ -283,52 +300,53 @@ def print_dual_audit_dashboard(
 
     _logger.info("\n 🛡️ [STRATEGY AUDIT: CANDIDATE vs CHAMPION]")
     _logger.info(" ────────────────────────────────────────────────────────────────────────────")
-    _logger.info("  CATEGORY (OOS)  │  CHAMPION    │  CANDIDATE   │  DELTA (Δ)")
-    _logger.info(" ─────────────────┼──────────────┼──────────────┼────────────────────────────")
+    _logger.info("  CATEGORY (OOS)   │  CHAMPION    │  CANDIDATE   │      DELTA (Δ)")
+    _logger.info(" ──────────────────┼──────────────┼──────────────┼───────────────────────────")
 
-    def log_row(cat, met, c_val, n_val, is_pct=False, low_better=False):
+    def log_row(met, c_val, n_val, is_pct=False, low_better=False):
         c_v = safe_float(c_val)
         n_v = safe_float(n_val)
         diff = n_v - c_v
-        suffix = "%" if is_pct else ""
 
         good = (diff < 0) if low_better else (diff > 0)
         mark = f"{c_grn}▲{c_rst}" if good else f"{c_red}▼{c_rst}"
         if abs(diff) < 1e-7:
             mark = "─"
 
-        c_str = f"{c_v:.2f}{suffix}" if is_pct else f"{c_v:.4f}"
-        n_str = f"{n_v:.2f}{suffix}" if is_pct else f"{n_v:.4f}"
-        d_str = f"{diff:+.2f}{suffix}" if is_pct else f"{diff:+.4f}"
+        if is_pct:
+            c_str = f"{c_v:>8.2f}%"
+            n_str = f"{n_v:>8.2f}%"
+            d_str = f"{diff:>+8.2f}%"
+        else:
+            c_str = f"{c_v:>9.4f} "
+            n_str = f"{n_v:>9.4f} "
+            d_str = f"{diff:>+9.4f} "
 
-        _logger.info(f"  {met:<15} │ {c_str:>10}   │ {n_str:>10}   │ {d_str:>8} ({mark})")
+        _logger.info(f"  {met:<16} │  {c_str}  │  {n_str}  │  {d_str} ({mark})")
 
     log_row(
-        "REL",
-        "PBO (Reliability)",
+        "PBO Reliability",
         champ_m.get("pbo", 0.5),
         new_m.get("pbo", 0.5),
         low_better=True,
     )
-    log_row("COM", "CAGR (%)", champ_m.get("cagr", 0.0), new_m.get("cagr", 0.0), is_pct=True)
+    log_row("CAGR", champ_m.get("cagr", 0.0), new_m.get("cagr", 0.0), is_pct=True)
     log_row(
-        "COM",
-        "Max Drawdown (%)",
+        "Max Drawdown",
         champ_m.get("mdd", 0.0),
         new_m.get("mdd", 0.0),
         is_pct=True,
         low_better=True,
     )
-    log_row("COM", "Profit Factor", champ_m.get("pf", 1.0), new_m.get("pf", 1.0))
+    log_row("Profit Factor", champ_m.get("pf", 1.0), new_m.get("pf", 1.0))
     log_row(
-        "COM",
-        "Net Alpha (%)",
+        "Net Alpha",
         champ_m.get("net_alpha", 0.0),
         new_m.get("net_alpha", 0.0),
         is_pct=True,
     )
 
-    _logger.info(" ────────────────────────────────────────────────────────────────────────────")
+    _logger.info(" ──────────────────┼──────────────┼──────────────┼───────────────────────────")
 
     is_alpha = new_m.get("is_alpha", 0.0)
     ho_cagr = new_m.get("ho_cagr", 0.0)
@@ -336,14 +354,16 @@ def print_dual_audit_dashboard(
     retention = (new_m.get("cagr", 0.0) / is_cagr * 100.0) if abs(is_cagr) > 1e-6 else 0.0
 
     s_tag = f"{c_grn}PASS{c_rst}" if is_alpha >= 0 else f"{c_red}FAIL{c_rst}"
+    v_icon = "⚠️ " if "HOLD" in gate_status else "✅ "
+    v_color = c_grn if "PROMOTE" in gate_status else c_red
+
     _logger.info(
-        f"  > Sanity Check  : IS Alpha {is_alpha:.1f}% ({s_tag}) | "
+        f"  > Sanity Check   : IS Alpha {is_alpha:.1f}% ({s_tag}) | "
         f"HO CAGR {ho_cagr:.1f}% | OOS Ret {retention:.1f}%"
     )
-
-    v_color = c_grn if "PROMOTE" in gate_status else c_red
-    _logger.info(f"  > FINAL VERDICT : {v_color}{c_bld}{gate_status}{c_rst}")
+    _logger.info(f"  > FINAL VERDICT  : {v_icon} {v_color}{c_bld}{gate_status}{c_rst}")
     _logger.info(" ────────────────────────────────────────────────────────────────────────────\n")
+
 
 
 def log_oos_regime_attribution(attr: dict[str, Any]) -> None:
