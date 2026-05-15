@@ -427,30 +427,96 @@ def log_hmm_report_summary(h_rep: dict[str, Any]) -> None:
 
     _logger.info(" ──────────────────────────────────────────────────────────────────────────────")
 
-    tail_capture = float(h_rep.get("hmm_tail_capture", 0.0))
-    crisis_cap = float(h_rep.get("hmm_realized_crisis_capture", 0.0))
+    regime_tail_capture = float(h_rep.get("hmm_regime_tail_capture", h_rep.get("hmm_tail_capture", 0.0)))
+    regime_crisis_cap = float(h_rep.get("hmm_regime_crisis_cap", h_rep.get("hmm_realized_crisis_capture", 0.0)))
+    execution_tail_capture = float(h_rep.get("hmm_execution_tail_capture", 0.0))
+    execution_crisis_cap = float(h_rep.get("hmm_execution_crisis_cap", 0.0))
+    execution_damp_tail_capture = float(h_rep.get("hmm_execution_damp_tail_capture", 0.0))
+    execution_damp_crisis_cap = float(h_rep.get("hmm_execution_damp_crisis_cap", 0.0))
+    execution_damp_precision = float(h_rep.get("hmm_execution_damp_precision", 0.0))
+    execution_protected_exposure_share = float(h_rep.get("hmm_execution_protected_exposure_share", 0.0))
+    execution_soft_damp_tail_capture = float(h_rep.get("hmm_execution_soft_damp_tail_capture", 0.0))
+    execution_soft_damp_crisis_cap = float(h_rep.get("hmm_execution_soft_damp_crisis_cap", 0.0))
+    execution_soft_damp_precision = float(h_rep.get("hmm_execution_soft_damp_precision", 0.0))
+    execution_hard_damp_tail_capture = float(h_rep.get("hmm_execution_hard_damp_tail_capture", 0.0))
+    execution_hard_damp_crisis_cap = float(h_rep.get("hmm_execution_hard_damp_crisis_cap", 0.0))
+    execution_hard_damp_precision = float(h_rep.get("hmm_execution_hard_damp_precision", 0.0))
+    execution_near_flat_tail_capture = float(h_rep.get("hmm_execution_near_flat_tail_capture", 0.0))
+    execution_near_flat_crisis_cap = float(h_rep.get("hmm_execution_near_flat_crisis_cap", 0.0))
+    execution_near_flat_precision = float(h_rep.get("hmm_execution_near_flat_precision", 0.0))
     crisis_prec = float(h_rep.get("hmm_crisis_precision", 0.0))
+    flat_prec = float(h_rep.get("hmm_flat_gate_precision", 0.0))
     false_flat = float(h_rep.get("hmm_false_flat_cost", 0.0))
+    step2_tail_lift = float(h_rep.get("hmm_execution_tail8_tail_lift", 0.0))
+    step2_crisis_lift = float(h_rep.get("hmm_execution_tail8_crisis_lift", 0.0))
     avg_dur = float(h_rep.get("hmm_avg_duration", 0.0))
     switches = int(float(h_rep.get("hmm_switches", 0.0)))
 
-    tc_pass = "PASS" if tail_capture > 60.0 else "FAIL"
-    cc_pass = "PASS" if crisis_cap > 60.0 else "FAIL"
+    rtc_pass = "PASS" if regime_tail_capture > 60.0 else "FAIL"
+    rcc_pass = "PASS" if regime_crisis_cap > 60.0 else "FAIL"
+    etc_pass = "PASS" if execution_tail_capture > 60.0 else "FAIL"
+    ecc_pass = "PASS" if execution_crisis_cap > 60.0 else "FAIL"
+    edtc_pass = "PASS" if execution_damp_tail_capture > 60.0 else "FAIL"
+    edcc_pass = "PASS" if execution_damp_crisis_cap > 60.0 else "FAIL"
+    edp_pass = "OK" if execution_damp_precision > 40.0 else "LOW"
     cp_pass = "OK" if crisis_prec > 40.0 else "LOW"
+    fp_pass = "OK" if flat_prec > 40.0 else "LOW"
     ff_pass = "GOOD" if false_flat < 15.0 else "WARN"
     dur_pass = "PASS" if avg_dur > 35 else "SHORT"
 
-    _logger.info(" [PROTECTION & ACCURACY] - Target: >60%%")
-    _logger.info(f"  > Tail-Capture  : {tail_capture:>5.1f}%% [{tc_pass}]")
-    _logger.info(f"  > Crisis-Cap    : {crisis_cap:>5.1f}%% [{cc_pass}]")
+    _logger.info(" [REGIME QUALITY] - Target: Tail/Crisis >60%%, Precision >40%%")
+    _logger.info(f"  > Regime Tail-Capture : {regime_tail_capture:>5.1f}%% [{rtc_pass}]")
+    _logger.info(f"  > Regime Crisis-Cap   : {regime_crisis_cap:>5.1f}%% [{rcc_pass}]")
     _logger.info(f"  > Crisis-Prec   : {crisis_prec:>5.1f}%% [{cp_pass}]")
+    _logger.info(" ──────────────────────────────────────────────────────────────────────────────")
+    _logger.info(" [EXECUTION QUALITY] - Target: Tail/Crisis >60%%, FlatGate-Prec >40%%")
+    _logger.info(f"  > Execution Tail-Capture : {execution_tail_capture:>5.1f}%% [{etc_pass}]")
+    _logger.info(f"  > Execution Crisis-Cap   : {execution_crisis_cap:>5.1f}%% [{ecc_pass}]")
+    _logger.info(f"  > Damp Tail-Capture      : {execution_damp_tail_capture:>5.1f}%% [{edtc_pass}]")
+    _logger.info(f"  > Damp Crisis-Cap        : {execution_damp_crisis_cap:>5.1f}%% [{edcc_pass}]")
+    _logger.info(f"  > Damp Precision         : {execution_damp_precision:>5.1f}%% [{edp_pass}]")
+    _logger.info(
+        "  > SoftDamp T/C/P         : %5.1f%% / %5.1f%% / %5.1f%%",
+        execution_soft_damp_tail_capture,
+        execution_soft_damp_crisis_cap,
+        execution_soft_damp_precision,
+    )
+    _logger.info(
+        "  > HardDamp T/C/P         : %5.1f%% / %5.1f%% / %5.1f%%",
+        execution_hard_damp_tail_capture,
+        execution_hard_damp_crisis_cap,
+        execution_hard_damp_precision,
+    )
+    _logger.info(
+        "  > NearFlat T/C/P         : %5.1f%% / %5.1f%% / %5.1f%%",
+        execution_near_flat_tail_capture,
+        execution_near_flat_crisis_cap,
+        execution_near_flat_precision,
+    )
+    _logger.info(
+        "  > GateExp Soft/Hard/NFlat: %5.3f / %5.3f / %5.3f",
+        float(h_rep.get("hmm_execution_soft_gate_avg_exposure", float("nan"))),
+        float(h_rep.get("hmm_execution_hard_gate_avg_exposure", float("nan"))),
+        float(h_rep.get("hmm_execution_near_flat_gate_avg_exposure", float("nan"))),
+    )
+    _logger.info(f"  > Protected Exposure     : {execution_protected_exposure_share:>5.1f}%%")
+    _logger.info(f"  > FlatGate-Prec : {flat_prec:>5.1f}%% [{fp_pass}]")
+    _logger.info(f"  > Step2 Tail8 Lift (Tail/Crisis): {step2_tail_lift:>5.1f}%% / {step2_crisis_lift:>5.1f}%%")
+    _logger.info(
+        "  > SupHit q10/q05/q03    : %5.1f%% / %5.1f%% / %5.1f%%",
+        float(h_rep.get("hmm_sup_q10_h8_top_decile_hit", float("nan"))),
+        float(h_rep.get("hmm_sup_q05_h8_top_decile_hit", float("nan"))),
+        float(h_rep.get("hmm_sup_q03_h16_top_decile_hit", float("nan"))),
+    )
     _logger.info(f"  > False-Flat    : {false_flat:>+6.3f}%% [{ff_pass}]")
     _logger.info(" ──────────────────────────────────────────────────────────────────────────────")
     _logger.info(" [OPERATIONAL STABILITY] - Target: >35 bars")
     _logger.info(f"  > Avg-Duration  : {avg_dur:>5.1f} bars [{dur_pass}]")
     _logger.info(f"  > Switches      : {switches}")
     
-    overall = "🟢 CONDITION_READY" if (tail_capture > 60.0 and avg_dur > 35) else "🔴 NEEDS_IMPROVEMENT"
+    regime_ok = (regime_tail_capture > 60.0) and (regime_crisis_cap > 60.0) and (crisis_prec > 40.0)
+    execution_ok = (execution_tail_capture > 60.0) and (execution_crisis_cap > 60.0) and (flat_prec > 40.0)
+    overall = "🟢 CONDITION_READY" if (regime_ok and execution_ok and avg_dur > 35) else "🔴 NEEDS_IMPROVEMENT"
     _logger.info(f" [OVERALL VERDICT] -> {overall}")
     _logger.info("════════════════════════════════════════════════════════════════════════════════\n")
 
