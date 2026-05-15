@@ -647,42 +647,14 @@ def _inject_dyn_leverage_trimmed(trimmed_sig: pd.DataFrame, raw_full: pd.DataFra
             pre_thr = _is_quantile_threshold(p_pre, pre_q, pre_thr)
             real_thr = _is_quantile_threshold(p_real, real_q, real_thr)
             tail_thr = _is_quantile_threshold(p_tail, tail_q, tail_thr)
-            _logger.info(
-                "[HMM][Step6] threshold_mode=is_quantile pre=%.4f(q=%.3f) real=%.4f(q=%.3f) tail=%.4f(q=%.3f) is_frac=%.2f",
-                pre_thr,
-                pre_q,
-                real_thr,
-                real_q,
-                tail_thr,
-                tail_q,
-                is_frac,
-            )
         elif thr_mode == "rolling_quantile":
             pre_thr_vec = _rolling_quantile_threshold(p_pre, pre_q, pre_thr)
             real_thr_vec = _rolling_quantile_threshold(p_real, real_q, real_thr)
             tail_thr_vec = _rolling_quantile_threshold(p_tail, tail_q, tail_thr)
-            _logger.info(
-                "[HMM][Step6] threshold_mode=rolling_quantile pre_last=%.4f pre_med=%.4f real_last=%.4f real_med=%.4f tail_last=%.4f tail_med=%.4f q=(%.3f,%.3f,%.3f)",
-                float(pre_thr_vec[-1]) if pre_thr_vec.size else float(pre_thr),
-                float(np.median(pre_thr_vec)) if pre_thr_vec.size else float(pre_thr),
-                float(real_thr_vec[-1]) if real_thr_vec.size else float(real_thr),
-                float(np.median(real_thr_vec)) if real_thr_vec.size else float(real_thr),
-                float(tail_thr_vec[-1]) if tail_thr_vec.size else float(tail_thr),
-                float(np.median(tail_thr_vec)) if tail_thr_vec.size else float(tail_thr),
-                pre_q,
-                real_q,
-                tail_q,
-            )
         else:
             pre_thr_vec = None
             real_thr_vec = None
             tail_thr_vec = None
-            _logger.info(
-                "[HMM][Step6] threshold_mode=fixed pre=%.4f real=%.4f tail=%.4f",
-                pre_thr,
-                real_thr,
-                tail_thr,
-            )
 
         if thr_mode == "rolling_quantile":
             pre_base = np.clip(pre_thr_vec, 0.0, 0.999999)
