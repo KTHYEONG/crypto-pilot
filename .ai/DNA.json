@@ -1,29 +1,39 @@
 {
-  "version": "11.6.0",
+  "version": "12.0.0",
   "project": "my-coin-traider",
-  "last_updated": "2026-05-15T20:10:00Z",
+  "last_updated": "2026-05-15T21:40:00Z",
   "current_logic": {
-    "regime_inference": "Skewed-t Multivariate HMM with Parallel Associative Scan & GPU Native Loop (v11.6)",
-    "risk_overlay": "CrisisDetector + Supervised Tail Score (LGBM/Isotonic) with Adaptive Rolling Quantile Thresholding",
-    "gpu_optimization": "Fixed-Shape Padding, GPU-Native lax.scan, Loop-Invariant Hoisting, and TensorFloat32 (TF32) Acceleration"
+    "phase_b_c": "Skewed-t Multivariate HMM + LightGBM Alpha Miner (v11.6)",
+    "phase_d_objective": "Single-Objective TPE with J-Score Maximization (v12.0)",
+    "phase_d_pruner": "MedianPruner (startup_trials=40, warmup_steps=2)",
+    "phase_d_objective_formula": "j_score = j_mean - γ_overfit * j_std, where j_leg = leg_log_tw * shrink_j - ψ * mdd_frac"
   },
   "key_parameters": {
-    "FUTURES_HMM_BACKEND": "skewed_t",
-    "FUTURES_HMM_K_STATES": 4,
-    "FUTURES_HMM_N_ITER": 200,
-    "FUTURES_HMM_TOL": 1e-4,
-    "FUTURES_HMM_MAX_LEN": 3000,
-    "FUTURES_HMM_OCCUPANCY_PRIOR_WEIGHT": 5000.0,
-    "FUTURES_HMM_MIN_OCCUPANCY": 0.05,
-    "FUTURES_HMM_TF32_ENABLED": true,
-    "FUTURES_HMM_EARLY_STOPPING": "Relative Tolerance (jnp.abs(loss - prev) > tol * jnp.maximum(jnp.abs(prev), 1.0))"
+    "FUTURES_ML_ALPHA_NSGA2_ENABLED": false,
+    "FUTURES_J_LAMBDA_DOWNSIDE": 0.6,
+    "FUTURES_J_PSI_DD": 0.3,
+    "FUTURES_J_GAMMA_OVERFIT": 0.5,
+    "FUTURES_J_GAMMA_REGIME": 0.4,
+    "FUTURES_J_CONSISTENCY_FLOOR": 0.20,
+    "FUTURES_J_MIN_TRADES_PER_LEG": 8,
+    "FUTURES_J_HARD_FAIL_VALUE": -10.0,
+    "FUTURES_DEPLOY_J_FLOOR": 0.0,
+    "FUTURES_PRUNER_STARTUP_TRIALS": 40,
+    "FUTURES_PRUNER_WARMUP_STEPS": 2,
+    "FUTURES_AWF_K_LEGS": 6
+  },
+  "fixed_bugs": {
+    "nsga2_leg0_prune": "Removed zero-trade & log_ret<-0.1 early prune (leg-0) causing survival bias",
+    "constraints_func": "Removed constraints_func from TPESampler (was never used, Pareto front was empty)",
+    "study_direction": "Changed from multi-objective minimize[2] to single-objective maximize",
+    "candidate_selection": "Replaced Pareto + strict gates with J-ranking + FAIL-OPEN (3 hard gates only)"
   },
   "performance_baseline": {
-    "regime_tail_capture": 0.521,
-    "regime_crisis_cap": 0.521,
-    "avg_duration": 35.9,
-    "execution_time_gpu": "35s (v11.6) vs 189s (v11.1)",
-    "status": "CONDITION_READY"
+    "phase_d_trial_completion": "52.5% (42/80 COMPLETE, 38 PRUNED)",
+    "best_j_score": -0.0129,
+    "j_floor_pass_rate": "0% (FAIL-OPEN activated)",
+    "no_valid_candidates_error": "RESOLVED",
+    "regime_drift_risk": "HIGH (OOS 100% bull vs IS 26% bull, requires date window selection)"
   },
-  "previous_state_hash": "v11.0.0-baseline-collapse"
+  "previous_state_hash": "v11.6.0-hmm-optimized"
 }
