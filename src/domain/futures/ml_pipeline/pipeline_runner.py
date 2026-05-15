@@ -1998,7 +1998,7 @@ def _get_cfg_hash(cfg: dict[str, Any]) -> str:
     return hashlib.md5(cfg_str.encode()).hexdigest()
 
 
-@_memory.cache(ignore=["fetch_start_date", "end", "cfg", "workers", "n_jobs", "gp_only", "hmm_only", "preloaded_data_maps", "preloaded_1h_maps"])
+@_memory.cache(ignore=["fetch_start_date", "end", "cfg", "workers", "n_jobs", "preloaded_data_maps", "preloaded_1h_maps"])
 def _run_ml_pipeline_cached_core(
     tf: str,
     is_end_date: str | None,

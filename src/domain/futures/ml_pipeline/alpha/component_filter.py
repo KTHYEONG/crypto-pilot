@@ -450,15 +450,16 @@ def filter_alpha_components(
         if is_fast_track:
             half_life_ok.append(True)
         else:
-            # More lenient: 2.0 (for 1h) instead of 4.0; 50% relax if robust
-            hl_thresh = 1.0 if is_robust else 2.0
-            half_life_ok.append(bool(hl > hl_thresh or n_ic < 50))
+            # More strict for 4h as requested: > 3.0 bars
+            hl_thresh = 2.0 if is_robust else 3.0
+            half_life_ok.append(bool(hl >= hl_thresh or n_ic < 50))
 
         tails = _tail_decile_ic_series_fast(u_c, u_tgt, min_symbols=8)
         tail_mu = float(np.mean(tails)) if tails else mu
         tail_ic_by_slot[c] = tail_mu
         ic_pos_ratio_by_slot[c] = float(np.mean(ic_arr > 0.0)) if n_ic > 0 else 0.0
-        tail_ok.append(bool(tail_mu > -0.05 or len(tails) < 5))
+        # Strict Tail Gate: Must be non-negative
+        tail_ok.append(bool(tail_mu >= 0.0 or len(tails) < 5))
 
         # Step3 regime-conditional utility diagnostics:
         # use datetime-level IC + market posterior context to measure CHOP/BEAR fragility.
@@ -501,11 +502,17 @@ def filter_alpha_components(
         # [OOS Blend] weighted average instead of strict ratio
         blend = 0.7 * mu_oos + 0.3 * mu
         if mu > 1e-6:
-            # proposed: blend > 0.015 for standard, 0.010 for fast-track
-            oos_gate = bool(blend > (0.010 if is_fast_track else 0.015))
+            # Proposed: blend > 0.015 for standard, OOS Floor must be > 0.010
+            oos_gate = bool(blend > (0.010 if is_fast_track else 0.015) and mu_oos > 0.010)
         else:
             oos_gate = True
         oos_ok.append(oos_gate)
+
+        # [Short-side IC Gate]
+        short_side_ic = ic_bear  # Simplified proxy using BEAR regime IC
+        # If BEAR regime IC is available and negative, it's a fail
+        ic_short_ok = bool(short_side_ic >= 0.0)
+        regime_ok.append(ic_short_ok) # reusing regime_ok list for brevity or add new
 
         if c == "ml_alpha_00":
             if not is_fast_track and mu > 1e-6 and mu_oos < 0.45 * mu:
