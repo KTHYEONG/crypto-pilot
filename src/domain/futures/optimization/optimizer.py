@@ -293,15 +293,15 @@ def _fit_oos_platt_calibrators_from_maps(
             i0, i1 = int(np.clip(a0, 0, eff_len)), int(np.clip(a1, 0, eff_len))
             if i1 <= i0:
                 continue
-            if "ml_alpha_long" in raw.columns:
-                alpha_long = raw["ml_alpha_long"].to_numpy(dtype=np.float64)[i0:i1]
+            if "alpha_long" in raw.columns:
+                alpha_long = raw["alpha_long"].to_numpy(dtype=np.float64)[i0:i1]
                 r_t = fwd_ret[i0:i1]
                 mask = ~np.isnan(alpha_long) & ~np.isnan(r_t)
                 if mask.any():
                     al.append(alpha_long[mask])
                     rl.append(r_t[mask])
-            if "ml_alpha_short" in raw.columns:
-                alpha_short = raw["ml_alpha_short"].to_numpy(dtype=np.float64)[i0:i1]
+            if "alpha_short" in raw.columns:
+                alpha_short = raw["alpha_short"].to_numpy(dtype=np.float64)[i0:i1]
                 r_ts = fwd_ret[i0:i1]
                 mask_s = ~np.isnan(alpha_short) & ~np.isnan(r_ts)
                 if mask_s.any():
@@ -442,26 +442,26 @@ def _build_prebuilt_full_arrays(
             )
 
         gp_base = (
-            raw_full["ml_alpha_00"].to_numpy(dtype=np.float64, copy=False)
-            if "ml_alpha_00" in raw_full.columns
+            raw_full["alpha_long_00"].to_numpy(dtype=np.float64, copy=False)
+            if "alpha_long_00" in raw_full.columns
             else np.zeros(len(raw_full), dtype=np.float64)
         )
         if calibrator:
             p_base = calibrator.predict_prob(gp_base)
             trimmed_sig["ml_calib_prob"] = p_base
 
-            if "ml_alpha_long" in raw_full.columns:
+            if "alpha_long" in raw_full.columns:
                 p_l = calibrator.predict_prob(
-                    raw_full["ml_alpha_long"].to_numpy(dtype=np.float64, copy=False)
+                    raw_full["alpha_long"].to_numpy(dtype=np.float64, copy=False)
                 )
                 trimmed_sig["ml_calib_prob_long"] = p_l
             else:
                 trimmed_sig["ml_calib_prob_long"] = trimmed_sig["ml_calib_prob"]
 
-            if "ml_alpha_short" in raw_full.columns:
+            if "alpha_short" in raw_full.columns:
                 calib_s = calibrator_short or calibrator
                 p_s = calib_s.predict_prob(
-                    raw_full["ml_alpha_short"].to_numpy(dtype=np.float64, copy=False)
+                    raw_full["alpha_short"].to_numpy(dtype=np.float64, copy=False)
                 )
                 trimmed_sig["ml_calib_prob_short"] = p_s
             else:
@@ -555,8 +555,8 @@ def _inject_dyn_leverage_trimmed(trimmed_sig: pd.DataFrame, raw_full: pd.DataFra
     close = raw_full["close"].astype(np.float64)
     r = np.log(close / close.shift(1).clip(lower=1e-12)).fillna(0.0).to_numpy(dtype=np.float64)
     g = (
-        raw_full["ml_alpha_00"].fillna(0.0).to_numpy(dtype=np.float64)
-        if "ml_alpha_00" in raw_full.columns
+        raw_full["alpha_long_00"].fillna(0.0).to_numpy(dtype=np.float64)
+        if "alpha_long_00" in raw_full.columns
         else np.zeros(len(raw_full), dtype=np.float64)
     )
     factor_ret = g * r

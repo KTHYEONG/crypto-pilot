@@ -53,9 +53,13 @@ def map_policy_controls(
     sup_hard = _clip01(hazard_df.get("sup_score_hard", hazard_df.get("sup_score_q05_h8", tail8)))
     sup_near = _clip01(hazard_df.get("sup_score_near_flat", hazard_df.get("sup_score_q03_h16", sup_hard)))
 
-    gross = 1.0 - 0.30 * p_chop - 0.45 * p_off - 0.55 * realized - 0.15 * ent
-    kelly = 1.0 - 0.20 * p_off - 0.35 * tail8 - 0.20 * realized - 0.15 * ent
-    long_m = 1.0 - 0.50 * p_off - 0.50 * realized - 0.20 * pre
+    # B-3: entropy drag는 위험 국면(ent>0.80 & p_off>0.30)에서만 강하게 적용,
+    # 양호 국면에서는 0.03 잔류(수치 안정성 유지)
+    # Protected Exp. 목표 30-50%: ent_drag 조건부화로 양호 국면 과잉 보호 해소
+    ent_drag = np.where((ent > 0.80) & (p_off > 0.30), 0.15 * ent, 0.03 * ent)
+    gross = 1.0 - 0.30 * p_chop - 0.45 * p_off - 0.55 * realized - ent_drag
+    kelly = 1.0 - 0.20 * p_off - 0.35 * tail8 - 0.20 * realized - ent_drag
+    long_m = 1.0 - 0.40 * p_off - 0.40 * realized - 0.15 * pre
     short_m = 1.0 + 0.20 * p_off - 0.20 * p_calm
 
     gross = _clip_mult(gross, float(cfg.get("FUTURES_POLICY_GROSS_CAP_MIN", 0.0)), float(cfg.get("FUTURES_POLICY_GROSS_CAP_MAX", 1.5)))

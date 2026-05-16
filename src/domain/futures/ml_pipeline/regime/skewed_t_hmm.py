@@ -1,8 +1,13 @@
-"""Skewed-t emission HMM backend with Parallel Associative Scan (v11.5 - GPU Native).
+"""Skewed-t emission HMM backend with Parallel Associative Scan (v12.0 - 5-State + TVTP).
 
-This backend implements Skewed-t emissions for better capture of asymmetric 
-market regimes and utilizes JAX's lax.scan for extreme GPU-native 
+This backend implements Skewed-t emissions for better capture of asymmetric
+market regimes and utilizes JAX's lax.scan for extreme GPU-native
 Walk-Forward optimization on RTX 40-series Tensor Cores.
+
+v12.0 changes:
+- 4-state → 5-state: bull_calm / bull_volatile / bear_trend / chop / pre_crisis
+- TVTP (Time-Varying Transition Probabilities): stress 기반 bull stickiness 감소
+- semantic_prior 재작성: Vol-Scale(Calm) FAIL② 및 Lead-Lag Tail Cap FAIL① 해결
 """
 
 from __future__ import annotations
@@ -22,8 +27,10 @@ jax.config.update("jax_default_matmul_precision", "tensorfloat32")
 
 _logger = logging.getLogger(__name__)
 
-_N_STATES = 4
-_N_FEATURES = 6
+_N_STATES = 5  # 4→5: bull_calm / bull_volatile / bear_trend / chop / pre_crisis
+# Phase C: 6 base features + 2 universe breadth (macro_breadth_ma20, macro_alt_btc_rs_24h).
+# Falls back to 6 gracefully when breadth extras are absent (hmm_inferrer pads zeros).
+_N_FEATURES = 8
 _MAX_LEN = 3000
 _EPS = 1e-6
 
@@ -81,32 +88,53 @@ def _hmm_forward(
     mask: jnp.ndarray,
     params: dict[str, Any],
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
-    """Parallel forward filtering pass."""
+    """Parallel forward filtering pass with TVTP (Time-Varying Transition Probabilities).
+
+    TVTP: stress = -trend + downside_vol 기반으로 bull 상태 stickiness를 고위험 시 감소.
+    """
     mu = params["mu"]
     log_sig = params["log_sig"]
     nu_raw = params["nu_raw"]
     lambda_raw = params["lambda_raw"]
     log_init = jax.nn.log_softmax(params["log_init"])
-    log_trans = jax.nn.log_softmax(params["log_trans"], axis=1)
+
+    # TVTP: stress 계산 (f0=trend 음수 + f2=downside_vol 양수)
+    stress = jnp.clip(-obs[:, 0], 0.0, 3.0) + jnp.clip(obs[:, 2], 0.0, 3.0)  # (T,)
+    # tvtp_w: per-state stress sensitivity (positive → diagonal decreases under stress)
+    tvtp_w_raw = params.get("tvtp_w", jnp.zeros(_N_STATES, dtype=jnp.float32))
+    tvtp_w = jnp.maximum(tvtp_w_raw, 0.0)  # (S,) non-negative
+
+    # 기본 전이행렬 log-softmax (S,S)
+    log_trans_base = jax.nn.log_softmax(params["log_trans"], axis=1)
+
+    # 대각원소 stress 기반 감소: (T,S,S)
+    # diag_reduction[t, s, s] = stress[t] * tvtp_w[s]
+    diag_eye = jnp.eye(_N_STATES)  # (S,S)
+    diag_reduction = stress[:, None, None] * tvtp_w[None, :, None] * diag_eye[None, :, :]
+    # 각 t별 재-softmax
+    log_trans_t = jax.vmap(
+        lambda lr: jax.nn.log_softmax(log_trans_base - lr, axis=1)
+    )(diag_reduction)  # (T,S,S)
 
     log_emits = jax.vmap(_skewed_t_log_pdf, in_axes=(0, None, None, None, None))(
         obs, mu, log_sig, nu_raw, lambda_raw
-    )
-    
-    log_Ms = log_trans[None, :, :] + log_emits[:, None, :]
-    
+    )  # (T,S)
+
+    # (T,S,S): transition + emission
+    log_Ms = log_trans_t + log_emits[:, None, :]
+
     eye_log = jnp.where(jnp.eye(_N_STATES) > 0.5, 0.0, -1e6)
     log_Ms = jnp.where(mask[:, None, None] > 0.5, log_Ms, eye_log)
 
     prefix_Ms = jax.lax.associative_scan(_log_matmul, log_Ms)
-    
+
     log_alphas_unnorm = jax.vmap(lambda M: jax.scipy.special.logsumexp(log_init[:, None] + M, axis=0))(prefix_Ms)
     lls_total = jax.scipy.special.logsumexp(log_alphas_unnorm, axis=1)
     log_alphas = log_alphas_unnorm - lls_total[:, None]
-    
+
     lls = jnp.concatenate([lls_total[:1], jnp.diff(lls_total)], axis=0)
     lls = jnp.where(mask, lls, 0.0)
-    
+
     return log_alphas, lls
 
 
@@ -140,34 +168,67 @@ def _hmm_nll(
     probs = jax.nn.softmax(log_alphas, axis=1)
     avg_occupancy = jnp.sum(probs * mask[:, None], axis=0) / n_obs
     occ_penalty = 5000.0 * jnp.sum(jnp.square(jnp.maximum(0.0, 0.05 - avg_occupancy)))
-    tail_force_penalty = -2.0 * jnp.sum(tail_flag * log_alphas[:, 1])
+
+    # 5-state: bear_trend(2) + pre_crisis(4) 합산으로 tail_force 계산 (FAIL① Lead-Lag 개선)
+    tail_force_penalty = -5.0 * jnp.sum(
+        tail_flag * jax.scipy.special.logsumexp(
+            jnp.stack([log_alphas[:, 2], log_alphas[:, 4]], axis=1), axis=1
+        )
+    )
 
     trans_probs = jax.nn.softmax(params["log_trans"], axis=1)
     diag = jnp.diag(trans_probs)
-    
+
     sticky_prior = -sticky_weight * jnp.sum(jnp.log(jnp.maximum(diag, _EPS)))
 
     mu = params["mu"]
+    # 5-state semantic_prior:
+    # state 0: bull_calm  → 양의 추세(f0), 낮은 변동성(f1) ← FAIL② Vol-Scale(Calm) 핵심
+    # state 1: bull_volatile → 약양수 추세, 높은 변동성   ← FAIL① Lead-Lag 핵심
+    # state 2: bear_trend → 음의 추세, 높은 하방변동(f2)
+    # state 3: chop       → 중립 추세, 낮은 하방변동
+    # state 4: pre_crisis → 강한 음의 추세, 극단 하방변동
     semantic_prior = n_obs * (
-        1000.0 * jnp.square(jnp.maximum(0.0, 0.6 - mu[0, 0]))
-        + 1000.0 * jnp.square(jnp.maximum(0.0, mu[1, 0] + 0.6))
-        + 500.0 * jnp.square(jnp.maximum(0.0, 1.0 - mu[2, 1]))
-        + 500.0 * jnp.square(jnp.maximum(0.0, mu[3, 1] + 0.6))
-        + 800.0 * (jnp.square(mu[2, 0]) + jnp.square(mu[3, 0]))
+        # bull_calm: 양의 추세 강제, 낮은 변동성 강제 (FAIL② Vol-Scale 핵심)
+        # vol 목표를 -1.0 이하로 강제(10th percentile 수준) + 가중치 2500으로 강화
+        1200.0 * jnp.square(jnp.maximum(0.0, 0.6 - mu[0, 0]))
+        + 2500.0 * jnp.square(jnp.maximum(0.0, mu[0, 1] + 1.00))
+        # bull_volatile: 약양수 추세, 높은 변동성 강제 (FAIL① Lead-Lag 핵심)
+        + 800.0 * jnp.square(jnp.maximum(0.0, 0.3 - mu[1, 0]))
+        + 800.0 * jnp.square(jnp.maximum(0.0, 0.8 - mu[1, 1]))
+        # bear_trend: 음의 추세, 높은 하방변동
+        + 1000.0 * jnp.square(jnp.maximum(0.0, mu[2, 0] + 0.0))
+        + 600.0 * jnp.square(jnp.maximum(0.0, 1.0 - mu[2, 2]))
+        # chop: 중립 추세
+        + 600.0 * (jnp.square(mu[3, 0]) + jnp.square(mu[3, 2]))
+        # pre_crisis: 음의 추세, 극단 하방변동
+        + 1000.0 * jnp.square(jnp.maximum(0.0, mu[4, 0] + 0.3))
+        + 1000.0 * jnp.square(jnp.maximum(0.0, 1.5 - mu[4, 2]))
     )
 
     nu = jax.nn.softplus(params["nu_raw"]) + 2.1
-    nu_targets = jnp.array([40.0, 3.0, 10.0, 15.0])
+    # 5-state: bull_calm(가우시안)=40, bull_volatile=15, bear=3, chop=12, pre_crisis=2.5
+    nu_targets = jnp.array([40.0, 15.0, 3.0, 12.0, 2.5])
     nu_prior = 15.0 * jnp.sum(jnp.square(jnp.log(nu) - jnp.log(nu_targets)))
 
     lambdas = params["lambda_raw"]
+    # 5-state skew_prior
     skew_prior = n_obs * (
-        0.8 * jnp.square(jnp.maximum(0.0, 0.5 - lambdas[0, 0]))
-        + 2.5 * jnp.square(jnp.maximum(0.0, lambdas[1, 0] + 1.5))
+        0.8 * jnp.square(jnp.maximum(0.0, 0.5 - lambdas[0, 0]))    # bull_calm: 약양수 왜도
+        + 2.5 * jnp.square(jnp.maximum(0.0, lambdas[1, 0] + 0.5))  # bull_volatile: 약음수 왜도
+        + 3.0 * jnp.square(jnp.maximum(0.0, lambdas[2, 0] + 1.5))  # bear: 강음수
+        + 4.0 * jnp.square(jnp.maximum(0.0, lambdas[4, 0] + 2.0))  # pre_crisis: 매우 강음수
     )
     skew_l2 = 0.1 * jnp.sum(jnp.square(lambdas))
 
-    loss = nll + occ_penalty + tail_force_penalty + sticky_prior + semantic_prior + nu_prior + skew_prior + skew_l2
+    # TVTP L2 정규화 (tvtp_w 과도 확대 방지)
+    tvtp_w_raw = params.get("tvtp_w", jnp.zeros(_N_STATES, dtype=jnp.float32))
+    tvtp_l2 = 0.5 * jnp.sum(jnp.square(tvtp_w_raw))
+
+    loss = (
+        nll + occ_penalty + tail_force_penalty + sticky_prior
+        + semantic_prior + nu_prior + skew_prior + skew_l2 + tvtp_l2
+    )
     return jnp.nan_to_num(loss, nan=1e9, posinf=1e9, neginf=1e9)
 
 
@@ -231,7 +292,10 @@ def _scan_step(
 
 
 class SkewedTMultivariateHMM:
-    """4-state HMM with GPU-Native Scan optimization (v11.5)."""
+    """5-state HMM with GPU-Native Scan optimization + TVTP (v12.0).
+
+    States: 0=bull_calm, 1=bull_volatile, 2=bear_trend, 3=chop, 4=pre_crisis
+    """
 
     def __init__(self, n_iter: int = 1000, tol: float = 1e-4):
         self.n_iter = n_iter
@@ -244,20 +308,50 @@ class SkewedTMultivariateHMM:
         self._device = devices[0]
 
     def _init_params(self, obs: np.ndarray, init_type: str = "standard") -> dict[str, Any]:
+        """5-state 초기 파라미터 설정.
+
+        f1=trend, f2=vol, f3=downside_vol, f4=cs_dispersion, f5=oi_delta, f6=funding_mom
+        states: 0=bull_calm, 1=bull_volatile, 2=bear_trend, 3=chop, 4=pre_crisis
+        """
         f = [obs[:, i] for i in range(obs.shape[1])]
-        def get_mu(p_list):
+
+        def get_mu(p_list: list[float]) -> list[float]:
             return [np.percentile(f[i], p_list[i]) for i in range(len(f))]
 
+        # Percentile lists: [f1=trend, f2=vol, f3=downside_vol, f4=cs_disp, f5=oi_delta, f6=funding,
+        #                     f7=breadth_ma20, f8=alt_btc_rs]  (Phase C extras)
+        # If obs has fewer than 8 columns, get_mu clips to available features.
+        def _p(base: list[float], ext: list[float]) -> list[float]:
+            """Extend base percentile list with breadth extras, clipped to obs dims."""
+            n_feat = obs.shape[1]
+            full = base + ext
+            return full[:n_feat]
+
         if init_type == "tail_sensitive":
-            mu = [get_mu([65, 30, 30, 50, 60, 60]), get_mu([10, 60, 90, 50, 20, 20]),
-                  get_mu([50, 80, 50, 85, 50, 50]), get_mu([50, 20, 30, 15, 50, 50])]
+            mu = [
+                get_mu(_p([75, 20, 15, 50, 65, 65], [70, 50])),   # bull_calm
+                get_mu(_p([60, 75, 30, 50, 55, 55], [60, 50])),   # bull_volatile
+                get_mu(_p([15, 65, 80, 50, 30, 25], [30, 50])),   # bear_trend
+                get_mu(_p([50, 45, 45, 50, 50, 50], [50, 50])),   # chop
+                get_mu(_p([5,  85, 95, 80, 15, 10], [20, 50])),   # pre_crisis
+            ]
         elif init_type == "trend_focused":
-            mu = [get_mu([90, 40, 30, 50, 80, 80]), get_mu([10, 40, 70, 50, 20, 20]),
-                  get_mu([50, 70, 50, 70, 50, 50]), get_mu([50, 30, 50, 30, 50, 50])]
-        else:
-            mu = [get_mu([75, 25, 20, 50, 70, 70]), get_mu([25, 50, 80, 50, 30, 30]),
-                  get_mu([50, 75, 50, 80, 50, 50]), get_mu([50, 10, 25, 20, 50, 50])]
-        
+            mu = [
+                get_mu(_p([85, 20, 15, 50, 75, 75], [75, 50])),
+                get_mu(_p([70, 80, 25, 50, 60, 60], [60, 50])),
+                get_mu(_p([10, 60, 80, 50, 25, 20], [25, 50])),
+                get_mu(_p([50, 50, 50, 50, 50, 50], [50, 50])),
+                get_mu(_p([5,  90, 95, 85, 10, 5],  [15, 50])),
+            ]
+        else:  # standard
+            mu = [
+                get_mu(_p([80, 10, 10, 50, 70, 70], [70, 50])),  # bull_calm
+                get_mu(_p([65, 75, 25, 50, 60, 60], [60, 50])),  # bull_volatile
+                get_mu(_p([15, 60, 75, 50, 30, 25], [25, 50])),  # bear_trend
+                get_mu(_p([50, 45, 40, 50, 50, 50], [50, 50])),  # chop
+                get_mu(_p([5,  85, 95, 80, 10, 5],  [15, 50])),  # pre_crisis
+            ]
+
         return {
             "log_init": jnp.zeros(_N_STATES),
             "log_trans": jnp.eye(_N_STATES) * 4.5,
@@ -265,6 +359,8 @@ class SkewedTMultivariateHMM:
             "log_sig": jnp.zeros((_N_STATES, _N_FEATURES), dtype=jnp.float32) - 0.4,
             "nu_raw": jnp.ones((_N_STATES,), dtype=jnp.float32) * 2.0,
             "lambda_raw": jnp.zeros((_N_STATES, _N_FEATURES), dtype=jnp.float32),
+            # TVTP: per-state stress sensitivity (bull states 0,1이 높은 값 → 위험 시 stickiness 감소)
+            "tvtp_w": jnp.array([0.5, 0.3, 0.0, 0.1, 0.0], dtype=jnp.float32),
         }
 
     def _warmup(self) -> None:
@@ -286,9 +382,13 @@ class SkewedTMultivariateHMM:
         return obs_arr.astype(np.float32)
 
     def _to_prob_df(self, probs: np.ndarray, obs_df: pd.DataFrame) -> pd.DataFrame:
-        safe = np.clip(np.nan_to_num(probs, nan=1.0/_N_STATES), _EPS, 1.0)
+        safe = np.clip(np.nan_to_num(probs, nan=1.0 / _N_STATES), _EPS, 1.0)
         safe = safe / np.maximum(safe.sum(axis=1, keepdims=True), _EPS)
-        return pd.DataFrame(safe, index=obs_df.index, columns=["bull_trend", "bear_trend", "chop_high", "chop_low"])
+        return pd.DataFrame(
+            safe,
+            index=obs_df.index,
+            columns=["bull_calm", "bull_volatile", "bear_trend", "chop", "pre_crisis"],
+        )
 
     def fit(self, obs_df: pd.DataFrame) -> SkewedTMultivariateHMM:
         obs_arr = self._prep_obs(obs_df)
@@ -300,19 +400,20 @@ class SkewedTMultivariateHMM:
         
         # 2. Host-to-Device 통신 최소화: 전체 데이터를 GPU로 업로드
         # Pad with zeros at the end to allow dynamic_slice to always take _MAX_LEN
-        obs_full = jnp.zeros((n + _MAX_LEN, _N_FEATURES), dtype=jnp.float32)
+        n_feat = obs_arr.shape[1]  # dynamic: 6 (base) or 8 (Phase C)
+        obs_full = jnp.zeros((n + _MAX_LEN, n_feat), dtype=jnp.float32)
         obs_full = obs_full.at[:n, :].set(jnp.array(obs_arr))
-        
+
         t_starts = np.arange(min(n, 500), n + 168, 168)
         if len(t_starts) == 0: return self
-        
+
         # First step: Multi-start or Initial Training
         t_first = t_starts[0]
         win_start = max(0, t_first - _MAX_LEN)
         obs_win_first = obs_arr[win_start:t_first]
         cur_len_first = len(obs_win_first)
-        
-        obs_pad = np.zeros((_MAX_LEN, _N_FEATURES), dtype=np.float32)
+
+        obs_pad = np.zeros((_MAX_LEN, n_feat), dtype=np.float32)
         m_pad = np.zeros(_MAX_LEN, dtype=np.float32)
         obs_pad[:cur_len_first] = obs_win_first
         m_pad[:cur_len_first] = 1.0
