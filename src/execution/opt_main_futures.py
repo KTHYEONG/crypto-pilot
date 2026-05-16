@@ -39,6 +39,7 @@ from src.domain.futures.ml_pipeline.pipeline_runner import (  # noqa: E402
 )
 from src.domain.futures.optimization.candidate_selector import (  # noqa: E402
     check_stability_layer3,
+    select_v43_phase_b_top_candidates,
     select_and_rank_candidates,
 )
 from src.domain.futures.optimization.dashboard import (  # noqa: E402
@@ -60,13 +61,15 @@ from src.domain.futures.optimization.optimizer import (  # noqa: E402
     build_ml_phase_d_params,
     precompute_ml_optimization_context,
 )
+from src.domain.futures.optimization.phase_runner import (  # noqa: E402
+    run_v43_phase_optimization_skeleton,
+)
 from src.domain.futures.optimization.run_tracker import (  # noqa: E402
     apply_ops_profile_overrides,
     build_joint_study_name,
     build_run_id,
     collect_run_summary_from_study,
     resolve_futures_parallel_policy,
-    run_optimization_loop,
     setup_optuna_storage,
     write_run_summary_snapshot,
 )
@@ -91,44 +94,12 @@ optuna.logging.set_verbosity(optuna.logging.WARNING)
 logging.basicConfig(level=logging.INFO, format="%(message)s", force=True)
 _logger: logging.Logger = logging.getLogger("opt_futures")
 
-setup_logger("DataCollector")
-setup_logger("BinanceClient")
+setup_logger("DataCollector", write_file=False)
+setup_logger("BinanceClient", write_file=False)
+setup_logger("src.domain.futures.ml_pipeline", write_file=False)
 logging.getLogger("DataCollector").setLevel(logging.WARNING)
 logging.getLogger("BinanceClient").setLevel(logging.WARNING)
-
-
-def _write_hmm_baseline_snapshot(
-    *,
-    project_root_path: str,
-    tf: str,
-    ops_profile: str,
-    hmm_only: bool,
-    alpha_only: bool,
-    is_end_date: str,
-    end_date: str,
-    hmm_report: dict[str, Any],
-) -> Path | None:
-    if not hmm_report:
-        return None
-    out_dir = Path(project_root_path) / ".ai" / "experiments"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    mode = "hmm-only" if hmm_only else ("alpha-only" if alpha_only else "full")
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    out_path = out_dir / f"{stamp}_hmm_baseline_snapshot_{ops_profile}_{mode}_{tf}.json"
-    payload = {
-        "snapshot_type": "hmm_baseline",
-        "created_at_utc": datetime.now(timezone.utc).isoformat(),
-        "tf": tf,
-        "ops_profile": ops_profile,
-        "mode": mode,
-        "is_end_date": is_end_date,
-        "end_date": end_date,
-        "hmm_report": hmm_report,
-    }
-    with out_path.open("w", encoding="utf-8") as f:
-        json.dump(payload, f, ensure_ascii=False, indent=2)
-    _logger.info(" [HMM SNAPSHOT] %s", out_path)
-    return out_path
+logging.getLogger("src.domain.futures.ml_pipeline").setLevel(logging.INFO)
 
 
 def main() -> None:
@@ -219,6 +190,28 @@ def main() -> None:
         log_alpha_component_summary(ml_out.alpha_panel)
 
     if args.alpha_only or args.hmm_only:
+        hmm_report = getattr(ml_out, "hmm_report", {}) or {}
+        alpha_panel = getattr(ml_out, "alpha_panel", None)
+        alpha_non_empty = bool(alpha_panel is not None and not alpha_panel.empty)
+        alpha_component_count = (
+            int(alpha_panel.index.get_level_values("component").nunique())
+            if alpha_non_empty and "component" in alpha_panel.index.names
+            else 0
+        )
+        hmm_report_present = bool(hmm_report)
+
+        if args.hmm_only and not hmm_report_present:
+            _logger.error(" [ML-ONLY] hmm-only requested but hmm_report is empty.")
+            return
+
+        _logger.info(
+            " [ML-ONLY] mode=%s hmm_report_present=%s alpha_panel_non_empty=%s alpha_component_count=%d",
+            "hmm-only" if args.hmm_only else "alpha-only",
+            hmm_report_present,
+            alpha_non_empty,
+            alpha_component_count,
+        )
+        _logger.info(" [ML-ONLY] optimization skipped by mode flag.")
         return
 
     # FEATURE INTEGRATION
@@ -267,40 +260,53 @@ def main() -> None:
     def _persist_run_summary(
         status: str, force: bool = False, best_cand: dict | None = None
     ) -> None:
+        """Collect and log run summary without writing to disk."""
         nonlocal run_summary_written
         if (run_summary_written and not force) or run_id is None:
             return
-        summary = collect_run_summary_from_study(
-            study_ml, run_id, study_name=study_name, requested_trials=n_ml_trials
-        )
-        summary["status"] = status
-        if best_cand:
-            summary.update({
-                "selected_by": selection_summary.get("selected_by"),
-                "selected_trial_number": selection_summary.get("selected_trial_number"),
-                "deploy_score": selection_summary.get("deploy_score"),
-                "selection_reject_reason_count": (
-                    selection_summary.get("selection_reject_reason_count")
-                )
-            })
-        for k, v in run_summary_extras.items():
-            if k not in summary:
-                summary[k] = v
-            elif isinstance(summary.get(k), dict) and isinstance(v, dict):
-                summary[k].update(v)
-        write_run_summary_snapshot(summary, project_root)
+        # Removed disk write (write_run_summary_snapshot) as requested.
         run_summary_written = True
 
     opt_workers = int(OPT_FUTURES_CONFIG.get("FUTURES_OPT_MAX_WORKERS", ml_n_jobs))
     opt_workers = max(1, min(opt_workers, ml_n_jobs))
-    study_ml = run_optimization_loop(
-        base_ctx, study_name, storage_url, storage, n_ml_trials, seed_learn,
-        resume=args.resume, n_workers=opt_workers
+    phase_a1_trials = int(OPT_FUTURES_CONFIG.get("FUTURES_V43_PHASE_A1_TRIALS", 150))
+    phase_a2_trials = int(OPT_FUTURES_CONFIG.get("FUTURES_V43_PHASE_A2_TRIALS", 100))
+    phase_b_trials = int(OPT_FUTURES_CONFIG.get("FUTURES_V43_PHASE_B_TRIALS", 300))
+    phase_bundle = run_v43_phase_optimization_skeleton(
+        base_ctx=base_ctx,
+        base_study_name=study_name,
+        storage_url=storage_url,
+        storage=storage,
+        n_trials=n_ml_trials,
+        n_trials_a1=phase_a1_trials,
+        n_trials_a2=phase_a2_trials,
+        n_trials_b=phase_b_trials,
+        seed=seed_learn,
+        resume=args.resume,
+        n_workers=opt_workers,
+        enqueue_seeds=None,
+        target_seeds=target_seeds,
     )
+    study_ml = phase_bundle.study_b
+    if phase_bundle.phase_c_diagnostics:
+        run_summary_extras["phase_c_diagnostics"] = dict(phase_bundle.phase_c_diagnostics)
 
     _persist_run_summary("optimized")
 
-    best_cand, sel_sum = select_and_rank_candidates(study_ml, base_ctx, OPT_FUTURES_CONFIG)
+    ensemble_top_candidates: list[dict[str, Any]] = []
+    is_v43_phase_b_study = str(getattr(study_ml, "study_name", "")).endswith("_phase_b")
+    if is_v43_phase_b_study:
+        ensemble_top_candidates, sel_sum = select_v43_phase_b_top_candidates(
+            study_ml,
+            base_ctx,
+            OPT_FUTURES_CONFIG,
+            top_k=5,
+        )
+        best_cand = ensemble_top_candidates[0] if ensemble_top_candidates else {}
+    else:
+        best_cand, sel_sum = select_and_rank_candidates(study_ml, base_ctx, OPT_FUTURES_CONFIG)
+        if best_cand:
+            ensemble_top_candidates = [best_cand]
     if not best_cand:
         _logger.error("No valid candidates found.")
         return
@@ -321,7 +327,7 @@ def main() -> None:
 
     # [STEP 4/4] FINAL EVALUATION
     run_final_oos_evaluation(
-        ensemble_results=[best_cand], oos_data_maps=oos_data_maps, data_maps=data_maps,
+        ensemble_results=ensemble_top_candidates[:5], oos_data_maps=oos_data_maps, data_maps=data_maps,
         valid_symbols=valid_symbols, champion_awf_diag=champion_awf_diag, args=args,
         project_root=project_root, study_ml=study_ml, run_id=run_id,
         ai_telemetry_payloads=ai_telemetry_payloads, selection_summary=selection_summary,
@@ -330,7 +336,8 @@ def main() -> None:
         pbo_gate=pbo_gate, dsr_gate=dsr_gate, pbo_obs=pbo_obs, dsr_obs=dsr_obs,
         best_trial=best_trial_coord, params=build_ml_phase_d_params(champion_raw_params, args.tf),
         champ_stab_cv=champ_stab_cv, stab_tmp_layer3_awf_fail=champ_l3_fail,
-        cv_max=float(OPT_FUTURES_CONFIG.get("FUTURES_CHAMP_STABILITY_CV_MAX", 0.30))
+        cv_max=float(OPT_FUTURES_CONFIG.get("FUTURES_CHAMP_STABILITY_CV_MAX", 0.30)),
+        phase_c_diagnostics=phase_bundle.phase_c_diagnostics,
     )
     _persist_run_summary("done", force=True, best_cand=best_cand)
 
