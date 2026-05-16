@@ -9,6 +9,8 @@ import numpy as np
 
 _logger: logging.Logger = logging.getLogger("opt_futures")
 
+REGIME_NAMES = ["bull", "bear", "chop", "crisis"]
+
 
 def safe_float(v: Any, default: float = 0.0, limit: float = 1e9) -> float:
     """Safe conversion to float with optional clamping."""
@@ -127,7 +129,7 @@ def print_dual_audit_dashboard(
     gate_status: str,
 ) -> None:
     """SOTA Dashboard for Strategy Promotion Audit (V3)."""
-    c_grn, c_red, c_rst, c_bld = "\033[92m", "\033[91m", "\033[0m", "\033[1m"
+    c_grn, c_red, c_rst, c_bld, c_yel = "\033[92m", "\033[91m", "\033[0m", "\033[1m", "\033[93m"
 
     _logger.info("\n 🛡️ [STRATEGY AUDIT: CANDIDATE vs CHAMPION]")
     _logger.info(" ────────────────────────────────────────────────────────────────────────────")

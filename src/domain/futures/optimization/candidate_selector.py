@@ -61,7 +61,7 @@ def sanitize_metric_map(m: dict[str, Any]) -> dict[str, float]:
     }
     out: dict[str, float] = {}
     for k, v in m.items():
-        out[k] = safe_float(v, default=0.0, clip=limits.get(k, 1e6))
+        out[k] = safe_float(v, default=0.0, limit=limits.get(k, 1e6))
     return out
 
 
