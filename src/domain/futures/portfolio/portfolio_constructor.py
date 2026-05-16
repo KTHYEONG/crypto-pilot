@@ -27,8 +27,10 @@ def rolling_ledoit_wolf_cov(
 ) -> np.ndarray:
     """returns_hist shape (T, N). PSD covariance of last row's distribution estimate."""
     r = np.asarray(returns_hist, dtype=np.float64)
-    if r.ndim != 2 or r.shape[0] < 2:
-        raise ValueError("returns_hist must be 2-D with T>=2")
+    if r.ndim != 2:
+        raise ValueError("returns_hist must be 2-D")
+    if r.shape[0] < 2:
+        return np.eye(r.shape[1]) * 1e-8
     if r.shape[0] < min_obs:
         v = np.var(r, axis=0, ddof=1)
         v = np.where(np.isfinite(v) & (v > 1e-18), v, 1e-8)
