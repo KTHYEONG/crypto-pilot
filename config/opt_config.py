@@ -31,18 +31,18 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     "TARGET_TIMEFRAMES": ["4h"],
     # Risk & Portfolio (Phase D)
     "FUTURES_MAX_CONCURRENT_POSITIONS": 3,
-    "FUTURES_MIN_PF": 1.35,
-    "FUTURES_MAX_MDD": 30.0,
-    "FUTURES_MIN_CAGR_PCT": 5.0,
+    "FUTURES_MIN_PF": 1.50,
+    "FUTURES_MAX_MDD": 20.0,
+    "FUTURES_MIN_CAGR_PCT": 30.0,
     "FUTURES_DISCOVERY_LEVERAGE": 5,
-    "FUTURES_PBO_MAX": 0.45,
+    "FUTURES_PBO_MAX": 0.10,
     # Hardening: candidate PBO must be ≤ this to beat champion.json (skill P4 strict guard).
-    "FUTURES_CHAMPION_PBO_STRICT_MAX": 0.50,
+    "FUTURES_CHAMPION_PBO_STRICT_MAX": 0.15,
     # futures-opt Phase 3: trial-count PBO ceiling (-step per bucket); clamp avoids overkill.
     "FUTURES_MC_GATE_TRIAL_ADJUST_ENABLED": True,
     "FUTURES_MC_GATE_BUCKET_TRIALS": 100,
     "FUTURES_MC_PBO_STEP_PER_BUCKET": 0.01,
-    "FUTURES_MC_PBO_CEILING_CLAMP_MIN": 0.38,
+    "FUTURES_MC_PBO_CEILING_CLAMP_MIN": 0.12,
     # DSR base: +0.02 per 100-trial bucket (MC-DSR); at 500t→0.55, 2000t→0.85 (cap 0.95).
     "FUTURES_MC_DSR_TRIAL_ADJUST_ENABLED": True,
     "FUTURES_MC_DSR_STEP_PER_BUCKET": 0.02,
@@ -293,7 +293,7 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     "FUTURES_DEFAULT_BETA_REGIME_CRISIS": 0.3,
     "FUTURES_DEFAULT_BETA_REGIME_RECOVERY": 0.0,
     "FUTURES_DEFAULT_BETA_REGIME_CHOP": 0.25,
-    "FUTURES_DEFAULT_EV_HURDLE_BPS": 5.0,
+    "FUTURES_DEFAULT_EV_HURDLE_BPS": 40.0,
     # Step1: posterior-aware regime policy (disabled by default for backward compatibility).
     "FUTURES_REGIME_POLICY_ENABLED": False,
     "FUTURES_REGIME_CONFIDENCE_ENTROPY_MULT": 0.50,
@@ -377,8 +377,8 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     "FUTURES_USE_META_LABELER": True,
     "FUTURES_CRISIS_GATE_PROB_DEFAULT": 0.7,
     "FUTURES_MIN_TRADES_TARGET": 30,
-    "FUTURES_IS_SURVIVAL_MIN_CAGR_PCT": 8.0,
-    "FUTURES_IS_SURVIVAL_MIN_SHARPE": 0.8,
+    "FUTURES_IS_SURVIVAL_MIN_CAGR_PCT": 15.0,
+    "FUTURES_IS_SURVIVAL_MIN_SHARPE": 1.0,
     # IS Alpha gate: cap BTC buy-and-hold benchmark to avoid unfair hurdle during bull markets.
     # 2023-2025 IS period = crypto bull run → BTC CAGR ≈ 150%+ makes IS_ALPHA_GATE impossible.
     # Cap at 35% (≈long-run BTC avg CAGR); strategy needs positive alpha vs this realistic floor.
