@@ -148,6 +148,54 @@ def calc_mdd_from_equity(equity_curve: np.ndarray) -> float:
     if len(equity_curve) == 0:
         return 0.0
     running_max = np.maximum.accumulate(equity_curve)
+    drawdowns = (equity_curve - running_max) / np.maximum(running_max, 1e-9)
+    return float(abs(np.min(drawdowns)) * 100.0)
+
+
+def calc_mdd_duration(equity_curve: np.ndarray) -> int:
+    """Calculate Maximum Drawdown Duration in bars from an equity curve."""
+    if len(equity_curve) < 2:
+        return 0
+    running_max = np.maximum.accumulate(equity_curve)
+    is_underwater = equity_curve < running_max
+    
+    max_duration = 0
+    current_duration = 0
+    for underwater in is_underwater:
+        if underwater:
+            current_duration += 1
+            if current_duration > max_duration:
+                max_duration = current_duration
+        else:
+            current_duration = 0
+    return max_duration
+
+
+def calc_sortino_ratio(
+    equity_curve: np.ndarray, 
+    ann_factor: float, 
+    risk_free_rate: float = 0.0
+) -> float:
+    """Calculate Sortino Ratio (Downside-only risk) from equity curve."""
+    if len(equity_curve) < 2:
+        return 0.0
+    
+    returns = np.diff(equity_curve) / np.maximum(equity_curve[:-1], 1e-9)
+    if returns.size == 0:
+        return 0.0
+    
+    excess_returns = returns - (risk_free_rate / ann_factor)
+    downside_returns = excess_returns[excess_returns < 0]
+    
+    if downside_returns.size < 2:
+        # If no downside, Sortino is technically infinite; cap at 10.0 for stability
+        return 10.0 if np.mean(excess_returns) > 0 else 0.0
+        
+    downside_std = np.std(downside_returns) * np.sqrt(ann_factor)
+    if downside_std < 1e-9:
+        return 10.0 if np.mean(excess_returns) > 0 else 0.0
+        
+    return float(np.mean(excess_returns) * ann_factor) / downside_std
     running_max[running_max == 0] = 1e-9
     drawdown = (equity_curve - running_max) / running_max * 100.0
     return float(abs(np.min(np.nan_to_num(drawdown, nan=0.0))))
