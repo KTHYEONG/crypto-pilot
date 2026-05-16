@@ -35,6 +35,11 @@ class FuturesResearchGateInput:
     is_survival_min_sharpe: float
     worst_leg_log_tw: float
     awf_p10_log_tw_floor: float
+    # V3.1 Mechanical Additions
+    oos_mdd_duration: float = 0.0
+    max_mdd_duration: float = 180.0
+    oos_expectancy: float = 0.0
+    min_expectancy: float = 0.40
 
 
 def evaluate_research_gates(inp: FuturesResearchGateInput) -> tuple[bool, list[str]]:
@@ -58,6 +63,16 @@ def evaluate_research_gates(inp: FuturesResearchGateInput) -> tuple[bool, list[s
 
     if inp.wf_failures:
         failures.extend(inp.wf_failures)
+        return False, failures
+
+    # V3.1 Mechanical: Expectancy Gate
+    if inp.oos_expectancy < float(inp.min_expectancy):
+        failures.append("EXPECTANCY_GATE")
+        return False, failures
+
+    # V3.1 Mechanical: MDD Duration Gate
+    if inp.oos_mdd_duration > float(inp.max_mdd_duration):
+        failures.append("MDD_DURATION_GATE")
         return False, failures
 
     if inp.is_net_alpha_pct <= float(inp.min_is_net_alpha_pct):
@@ -95,4 +110,6 @@ GATE_CODE_DESCRIPTIONS: dict[str, str] = {
     "DIRECTIONAL_PF_GATE": "OOS long/short profit factor below policy minima",
     "IS_SURVIVAL_GATE": "IS CAGR or IS Sharpe below survival cut",
     "AWF_HARDENING_GATE": "Worst AWF leg log-TW below distributional floor",
+    "EXPECTANCY_GATE": "OOS Mean Return per Trade below 0.40% mechanical hurdle",
+    "MDD_DURATION_GATE": "OOS Max Drawdown Duration exceeds 180 days",
 }
