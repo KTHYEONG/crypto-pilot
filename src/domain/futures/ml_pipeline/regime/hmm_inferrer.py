@@ -218,10 +218,20 @@ class HMMStateInferrer:
         idx = features_df.index
         
         # Check if systemic features are already in features_df (standard pipeline path)
-        needed = ["macro_trend_168h", "macro_vol_24h", "macro_downside_vol_24h", "macro_cs_dispersion_24h", "macro_oi_delta_24h", "macro_funding_mom_24h"]
-        if all(c in features_df.columns for c in needed):
-            obs_df = features_df[needed].copy()
-            obs_df.columns = ["f1", "f2", "f3", "f4", "f5", "f6"]
+        needed_base = [
+            "macro_trend_168h", "macro_vol_24h", "macro_downside_vol_24h",
+            "macro_cs_dispersion_24h", "macro_oi_delta_24h", "macro_funding_mom_24h",
+        ]
+        # Phase C: universe breadth features — always attempt to include; pad 0 if absent.
+        breadth_extras = ["macro_breadth_ma20", "macro_alt_btc_rs_24h"]
+        if all(c in features_df.columns for c in needed_base):
+            obs_data: dict[str, pd.Series] = {
+                f"f{i+1}": features_df[c] for i, c in enumerate(needed_base)
+            }
+            # f7, f8: Phase C breadth extras (0.0 if not yet computed)
+            obs_data["f7"] = features_df[breadth_extras[0]] if breadth_extras[0] in features_df.columns else pd.Series(0.0, index=idx)
+            obs_data["f8"] = features_df[breadth_extras[1]] if breadth_extras[1] in features_df.columns else pd.Series(0.0, index=idx)
+            obs_df = pd.DataFrame(obs_data, index=idx)
             vol_z = obs_df["f2"]
         else:
             # Fallback for direct usage without full systemic feature builder
@@ -242,12 +252,12 @@ class HMMStateInferrer:
 
             f2_raw = np.log((atr14 / close.replace(0.0, np.nan)).replace([np.inf, -np.inf], np.nan))
             f2_z = (f2_raw - f2_raw.rolling(168, min_periods=24).mean()) / f2_raw.rolling(168, min_periods=24).std().replace(0.0, np.nan)
-            
+
             # f3: Downside vol proxy
             ret_1h = close.pct_change().fillna(0.0)
             down_vol = ret_1h.clip(upper=0.0).rolling(24).std().fillna(0.0)
             f3_z = (down_vol - down_vol.rolling(168, min_periods=24).mean()) / down_vol.rolling(168, min_periods=24).std().replace(0.0, np.nan)
-            
+
             # f4: Sell-off Pressure or Negative Acceleration
             if "volume" in features_df.columns:
                 # Sell-off Pressure: abs(ret) * volume when ret < 0
@@ -259,11 +269,13 @@ class HMMStateInferrer:
                 accel = ret_1h.diff().clip(upper=0.0).abs().rolling(24).mean().fillna(0.0)
                 f4_z = pd.Series(_tail_zscore(accel), index=idx)
 
-            # f5, f6 fallback: use zeros if not provided in direct usage
-            f5_z = pd.Series(0.0, index=idx)
-            f6_z = pd.Series(0.0, index=idx)
-
-            obs_df = pd.DataFrame({"f1": f1_z, "f2": f2_z, "f3": f3_z, "f4": f4_z, "f5": f5_z, "f6": f6_z}, index=idx)
+            # f5~f8 fallback: use zeros if not provided in direct usage
+            zeros = pd.Series(0.0, index=idx)
+            obs_df = pd.DataFrame(
+                {"f1": f1_z, "f2": f2_z, "f3": f3_z, "f4": f4_z,
+                 "f5": zeros, "f6": zeros, "f7": zeros, "f8": zeros},
+                index=idx,
+            )
             vol_z = f2_z
 
         obs_df = obs_df.replace([np.inf, -np.inf], np.nan).ffill().bfill().fillna(0.0)
@@ -271,21 +283,45 @@ class HMMStateInferrer:
 
     def _map_to_canonical_states(self, jax_probs: pd.DataFrame, vol_z: pd.Series) -> pd.DataFrame:
         idx = jax_probs.index
-        p_bull = pd.to_numeric(jax_probs.get("bull_trend", 0.25), errors="coerce").fillna(0.25).to_numpy(dtype=np.float64)
-        p_bear = pd.to_numeric(jax_probs.get("bear_trend", 0.25), errors="coerce").fillna(0.25).to_numpy(dtype=np.float64)
-        p_chop_h = pd.to_numeric(jax_probs.get("chop_high", 0.25), errors="coerce").fillna(0.25).to_numpy(dtype=np.float64)
-        p_chop_l = pd.to_numeric(jax_probs.get("chop_low", 0.25), errors="coerce").fillna(0.25).to_numpy(dtype=np.float64)
 
-        vol_z_np = vol_z.to_numpy(dtype=np.float64)
-        # EMA span=24: vol_z 고빈도 진동 제거 → calm/volatile 전환 감소
-        vol_z_smooth = pd.Series(vol_z_np).ewm(span=24, adjust=False).mean().to_numpy(dtype=np.float64)
-        split = expit(np.clip(vol_z_smooth, -8.0, 8.0))
-        p_volatile = p_bull * split
-        p_calm = p_bull * (1.0 - split)
-        p_off = p_bear
-        p_chop = p_chop_h + p_chop_l
+        if "bull_calm" in jax_probs.columns:
+            # 5-state 직접 매핑 (HMM이 이미 bull_calm / bull_volatile 분리)
+            p_calm = pd.to_numeric(jax_probs.get("bull_calm", 0.25), errors="coerce").fillna(0.25).to_numpy(dtype=np.float64)
+            p_vol = pd.to_numeric(jax_probs.get("bull_volatile", 0.25), errors="coerce").fillna(0.25).to_numpy(dtype=np.float64)
+            p_off = pd.to_numeric(jax_probs.get("bear_trend", 0.25), errors="coerce").fillna(0.25).to_numpy(dtype=np.float64)
+            p_chop = pd.to_numeric(jax_probs.get("chop", 0.25), errors="coerce").fillna(0.25).to_numpy(dtype=np.float64)
+            p_pre = pd.to_numeric(jax_probs.get("pre_crisis", 0.0), errors="coerce").fillna(0.0).to_numpy(dtype=np.float64)
+            # pre_crisis를 bear_trend에 합산 → canonical 4-state 유지
+            p_off = p_off + p_pre
+            # Vol-Scale(Calm) FAIL② 보정:
+            # p_calm에 vol_z 역가중치(inverse vol weight)를 직접 곱해서
+            # 고변동성 구간에서 p_calm이 dominant가 되지 않도록 억제
+            vol_z_np = vol_z.to_numpy(dtype=np.float64)
+            vol_z_smooth = pd.Series(vol_z_np).ewm(span=24, adjust=False).mean().to_numpy(dtype=np.float64)
+            # inv_vol_weight: vol_z=-2→~1.0, vol_z=0→~0.5, vol_z=1→~0.27, vol_z=2→~0.12
+            # 이를 통해 고변동성 시 p_calm이 자연스럽게 작아져 dominant 되지 않음
+            inv_vol_weight = expit(-vol_z_smooth * 2.5)  # soft: vol_z=0 → 0.5 weight
+            p_calm_weighted = p_calm * inv_vol_weight
+            # 줄어든 calm의 절반을 volatile로, 절반을 chop으로 분산
+            leaked = p_calm - p_calm_weighted
+            p_calm = p_calm_weighted
+            p_vol = p_vol + leaked * 0.7
+            p_chop = p_chop + leaked * 0.3
+        else:
+            # 기존 4-state fallback (하위 호환: bull_trend / bear_trend / chop_high / chop_low)
+            p_bull = pd.to_numeric(jax_probs.get("bull_trend", 0.25), errors="coerce").fillna(0.25).to_numpy(dtype=np.float64)
+            p_bear = pd.to_numeric(jax_probs.get("bear_trend", 0.25), errors="coerce").fillna(0.25).to_numpy(dtype=np.float64)
+            p_chop_h = pd.to_numeric(jax_probs.get("chop_high", 0.25), errors="coerce").fillna(0.25).to_numpy(dtype=np.float64)
+            p_chop_l = pd.to_numeric(jax_probs.get("chop_low", 0.25), errors="coerce").fillna(0.25).to_numpy(dtype=np.float64)
+            vol_z_np = vol_z.to_numpy(dtype=np.float64)
+            vol_z_smooth = pd.Series(vol_z_np).ewm(span=24, adjust=False).mean().to_numpy(dtype=np.float64)
+            split = expit(np.clip(vol_z_smooth, -8.0, 8.0))
+            p_calm = p_bull * (1.0 - split)
+            p_vol = p_bull * split
+            p_off = p_bear
+            p_chop = p_chop_h + p_chop_l
 
-        prob4 = np.column_stack([p_calm, p_volatile, p_off, p_chop])
+        prob4 = np.column_stack([p_calm, p_vol, p_off, p_chop])
         prob4 = _safe_probs(prob4)
 
         out = pd.DataFrame(prob4, index=idx, columns=REGIME_STATE_COLUMNS)
