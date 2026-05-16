@@ -525,6 +525,10 @@ class MLAlphaMiner:
             out_df.attrs["best_fitness"] = float(np.mean(ic_vals)) if ic_vals else survival_rate
         else:
             out_df.attrs["best_fitness"] = 0.0
+
+        if "target" in panel_df.columns:
+            out_df["target"] = panel_df["target"]
+
         return out_df
 
     def transform_cs(self, panel_df: pd.DataFrame, cache_path: Path | None = None) -> pd.DataFrame:
@@ -596,5 +600,8 @@ class MLAlphaMiner:
         else:
             out_df["ml_alpha_long"] = 0.5
             out_df["ml_alpha_short"] = 0.5
+
+        if "target" in panel_df.columns:
+            out_df["target"] = panel_df["target"]
 
         return out_df.reindex(panel_df.index).fillna(0.5)
