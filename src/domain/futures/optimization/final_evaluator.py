@@ -24,8 +24,10 @@ from src.domain.futures.optimization.dashboard import (
     safe_float,
 )
 from src.domain.futures.optimization.evaluator import (
+    calc_mdd_duration,
     calc_mdd_from_equity,
     calc_net_alpha_with_friction,
+    calc_sortino_ratio,
     calc_time_to_target_wealth,
     perform_online_capital_allocation,
     run_oos_margin_shared_portfolio,
@@ -224,6 +226,28 @@ def run_final_oos_evaluation(
         valid_symbols, args.tf, params, ho_data_maps, cache_root=FUTURES_CACHE_DIR
     )
 
+    def _augment_port_metrics(p: dict[str, Any], hrs_tf: int):
+        eq = p.get("equity_curve", np.array([float(FUTURES_INITIAL_BALANCE)]))
+        ann_f = (365 * 24) / hrs_tf
+        
+        p["mdd_pct"] = calc_mdd_from_equity(eq)
+        p["mdd_duration_days"] = (calc_mdd_duration(eq) * hrs_tf) / 24.0
+        p["sortino"] = calc_sortino_ratio(eq, ann_f)
+        
+        cagr = float(p.get("cagr_pct", 0.0))
+        mdd = abs(p["mdd_pct"])
+        p["calmar"] = (cagr / mdd) if mdd > 1e-6 else (cagr / 0.1)
+
+    hrs_tf = int(args.tf.replace("h", "")) if args.tf.endswith("h") else 4
+    _augment_port_metrics(is_port, hrs_tf)
+    _augment_port_metrics(ho_port, hrs_tf)
+    _augment_port_metrics(oos_port, hrs_tf)
+    if meta_port:
+        _augment_port_metrics(meta_port, hrs_tf)
+
+    # Add OOS specific robustness
+    oos_port["pbo_reliability"] = float(pbo_obs) * 100.0
+
     # [STEP 5.2/5] Final Performance Reports
     _btc_benchmark_oos: float | None = None
     _btc_benchmark_is: float | None = None
@@ -329,6 +353,10 @@ def run_final_oos_evaluation(
         ),
         worst_leg_log_tw=float(worst_leg),
         awf_p10_log_tw_floor=float(p10_floor),
+        oos_mdd_duration=float(oos_port.get("mdd_duration_days", 0.0)),
+        max_mdd_duration=180.0,
+        oos_expectancy=float(oos_port.get("avg_trade_pnl_pct", 0.0)),
+        min_expectancy=float(OPT_FUTURES_CONFIG.get("FUTURES_DEFAULT_EV_HURDLE_BPS", 40.0)) / 100.0,
     )
     gate_ok, _gf_codes = evaluate_research_gates(_gate_inp)
     gate_failures = list(_gf_codes)
@@ -404,7 +432,8 @@ def run_final_oos_evaluation(
     logs_dir = Path(project_root) / "logs"
     champ_path = resolve_champion_record_path(logs_dir)
     champ_m = {
-        "pbo": 0.5, "p10": 0.0, "dsr": 0.0, "tw": 1.0, "cagr": 0.0, "mdd": 0.0,
+        "pbo": 50.0, "p10": 0.0, "dsr": 0.0, "tw": 1.0, "cagr": 0.0, "mdd": 0.0,
+        "calmar": 0.0, "sortino": 0.0, "mdd_duration": 0.0,
         "time_2x": 999.0, "cvar": 0.0, "net_alpha": 0.0, "avg_pnl": 0.0, "pf": 1.0
     }
     if champ_path and champ_path.exists():
@@ -413,7 +442,7 @@ def run_final_oos_evaluation(
                 _c = json.load(_cf)
             _met = _c.get("metrics", {})
             champ_m = {
-                "pbo": safe_float(_met.get("pbo_paired", _met.get("pbo", 0.5)), 0.5, 1e3),
+                "pbo": safe_float(_met.get("pbo_paired", _met.get("pbo", 0.5)), 0.5, 1.0) * 100.0,
                 "p10": safe_float(
                     _met.get("awf_worst_leg_log_tw", _met.get("cpcv_p10_log_tw", 0.0)), 0.0, 100.0
                 ),
@@ -421,6 +450,9 @@ def run_final_oos_evaluation(
                 "tw": safe_float(_met.get("oos_terminal_wealth", 1.0), 1.0, 1e6),
                 "cagr": safe_float(_met.get("oos_cagr_pct", 0.0), 0.0, 1e5),
                 "mdd": safe_float(_met.get("oos_mdd_pct", 0.0), 0.0, 1e3),
+                "calmar": safe_float(_met.get("oos_calmar", 0.0), 0.0, 1e3),
+                "sortino": safe_float(_met.get("oos_sortino", 0.0), 0.0, 1e3),
+                "mdd_duration": safe_float(_met.get("oos_mdd_duration_days", 0.0), 0.0, 1e5),
                 "time_2x": safe_float(_met.get("oos_time_to_2x", 999.0), 999.0, 1e6),
                 "cvar": safe_float(_met.get("oos_cvar_pct", 0.0), 0.0, 1e3),
                 "net_alpha": safe_float(_met.get("oos_net_alpha_pct", 0.0), 0.0, 1e5),
@@ -440,12 +472,15 @@ def run_final_oos_evaluation(
         t2x_n, nalpha_n = 999.0, 0.0
 
     new_m = sanitize_metric_map({
-        "pbo": float(pbo_obs),
+        "pbo": float(pbo_obs) * 100.0,
         "p10": float(champion_awf_diag.get("worst_leg", 0.0)),
         "dsr": float(champion_awf_diag.get("dsr_awf", 0.0)),
         "tw": float(meta_port.get("terminal_wealth_ratio", 1.0)),
         "cagr": float(meta_port.get("cagr_pct", 0.0)),
         "mdd": float(meta_port.get("mdd_pct", 0.0)),
+        "calmar": float(meta_port.get("calmar", 0.0)),
+        "sortino": float(meta_port.get("sortino", 0.0)),
+        "mdd_duration": float(meta_port.get("mdd_duration_days", 0.0)),
         "time_2x": float(t2x_n),
         "cvar": float(meta_port.get("cvar_pct", 0.0)),
         "net_alpha": float(nalpha_n * 100.0),
