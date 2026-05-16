@@ -313,7 +313,7 @@ def filter_alpha_components(
     cols = (
         list(alpha_cols)
         if alpha_cols is not None
-        else [c for c in alpha_wide.columns if c.startswith("ml_alpha_") and c[-2:].isdigit()]
+        else [c for c in alpha_wide.columns if (c.startswith("alpha_long_") and c[-2:].isdigit()) or c == "alpha_long"]
     )
     if not cols:
         return alpha_wide, {"n_surviving": 0.0, "neutralize_primary": 0.0}
@@ -350,13 +350,14 @@ def filter_alpha_components(
     half_life_ok: list[bool] = []
     tail_ok: list[bool] = []
     oos_ok: list[bool] = []
-    regime_ok: list[bool] = []
+    short_ok: list[bool] = []
+    regime_consistency_ok: list[bool] = []
     step3_chop_ok: list[bool] = []
     step3_weight_mults: list[float] = []
     sym_bal_ok: list[bool] = []
     neutralize_primary = False
 
-    # ml_alpha_00 diagnostic metrics
+    # alpha_long_00 diagnostic metrics
     primary_diagnostic: dict[str, float] = {}
     ic_by_slot: dict[str, float] = {}
     ic_bear_by_slot: dict[str, float] = {}
@@ -377,7 +378,8 @@ def filter_alpha_components(
         half_life_ok.append(False)
         tail_ok.append(False)
         oos_ok.append(False)
-        regime_ok.append(False)
+        short_ok.append(False)
+        regime_consistency_ok.append(False)
         step3_chop_ok.append(False)
         step3_weight_mults.append(1.0)
         sym_bal_ok.append(False)
@@ -512,13 +514,14 @@ def filter_alpha_components(
         short_side_ic = ic_bear  # Simplified proxy using BEAR regime IC
         # If BEAR regime IC is available and negative, it's a fail
         ic_short_ok = bool(short_side_ic >= 0.0)
-        regime_ok.append(ic_short_ok) # reusing regime_ok list for brevity or add new
+        short_ok.append(ic_short_ok)
 
-        if c == "ml_alpha_00":
+        primary_col_name = "alpha_long_00" if "alpha_long_00" in cols else ("alpha_long" if "alpha_long" in cols else (cols[0] if cols else None))
+        if c == primary_col_name:
             if not is_fast_track and mu > 1e-6 and mu_oos < 0.45 * mu:
                 neutralize_primary = True
 
-            # Diagnostic for ml_alpha_00
+            # Diagnostic for alpha_long_00
             primary_diagnostic["is_mu"] = mu
             primary_diagnostic["oos_mu"] = mu_oos
             primary_diagnostic["half_life"] = hl
@@ -526,9 +529,9 @@ def filter_alpha_components(
             primary_diagnostic["t_stat"] = t_stat
 
         if require_regime_gate:
-            regime_ok.append(_regime_consistency_ok_fast(is_sub, c, ic_series))
+            regime_consistency_ok.append(_regime_consistency_ok_fast(is_sub, c, ic_series))
         else:
-            regime_ok.append(True)
+            regime_consistency_ok.append(True)
 
         if step3_regime_alpha_enabled:
             chop_fragile = bool(chop_support >= step3_chop_support_min and ic_chop < step3_chop_ic_min)
@@ -562,19 +565,19 @@ def filter_alpha_components(
             sym_bal_ok.append(bool(bal_ratio <= symbol_balance_max))
 
     reject = _benjamini_hochberg_reject(pvals, fdr_q)
-    mag_cols = sorted(c for c in alpha_wide.columns if c.startswith("ml_mag_"))
+    mag_cols = sorted(c for c in alpha_wide.columns if c.startswith("mag_long_"))
     output_cols = list(
         dict.fromkeys(
             cols
             + mag_cols
-            + [c for c in ("ml_alpha_long_raw", "ml_alpha_short_raw") if c in alpha_wide.columns]
+            + [c for c in ("alpha_long_raw", "alpha_short_raw") if c in alpha_wide.columns]
         )
     )
     out = alpha_wide[output_cols].copy()
     n_surv = 0
 
     # 상세 진단을 위한 카운터
-    f_fdr, f_dsr, f_hl, f_tail, f_oos, f_reg, f_bal, f_step3_chop = 0, 0, 0, 0, 0, 0, 0, 0
+    f_fdr, f_dsr, f_hl, f_tail, f_oos, f_short, f_reg_consistency, f_bal, f_step3_chop = 0, 0, 0, 0, 0, 0, 0, 0, 0
     ic_weight_by_slot: dict[str, float] = {}
 
     for i, c in enumerate(cols):
@@ -584,7 +587,8 @@ def filter_alpha_components(
         is_hl_ok = half_life_ok[i]
         is_tail_ok = tail_ok[i]
         is_oos_ok = oos_ok[i]
-        is_reg_ok = regime_ok[i]
+        is_short_ok = short_ok[i]
+        is_reg_ok = regime_consistency_ok[i]
         is_step3_chop_ok = step3_chop_ok[i]
         is_bal_ok = sym_bal_ok[i]
 
@@ -594,6 +598,7 @@ def filter_alpha_components(
             and is_hl_ok
             and is_tail_ok
             and is_oos_ok
+            and is_short_ok
             and is_reg_ok
             and is_step3_chop_ok
             and is_bal_ok
@@ -615,8 +620,10 @@ def filter_alpha_components(
                 f_tail += 1
             if not is_oos_ok:
                 f_oos += 1
+            if not is_short_ok:
+                f_short += 1
             if not is_reg_ok:
-                f_reg += 1
+                f_reg_consistency += 1
             if not is_step3_chop_ok:
                 f_step3_chop += 1
             if not is_bal_ok:
@@ -631,7 +638,10 @@ def filter_alpha_components(
         "fail_half_life": float(f_hl),
         "fail_tail": float(f_tail),
         "fail_oos": float(f_oos),
-        "fail_regime": float(f_reg),
+        "fail_short": float(f_short),
+        "fail_regime_consistency": float(f_reg_consistency),
+        # Backward-compat alias for existing dashboards expecting `fail_regime`.
+        "fail_regime": float(f_reg_consistency),
         "fail_step3_chop": float(f_step3_chop),
         "fail_sym_bal": float(f_bal),
         "step3_regime_alpha_enabled": 1.0 if step3_regime_alpha_enabled else 0.0,
@@ -647,7 +657,7 @@ def filter_alpha_components(
         "chop_support_by_slot": chop_support_by_slot,
     }
 
-    # ml_alpha_00(Primary)의 상세 지표를 meta에 병합
+    # alpha_long_00(Primary)의 상세 지표를 meta에 병합
     for k_diag, v_diag in primary_diagnostic.items():
         meta[f"primary_{k_diag}"] = float(v_diag)
 
@@ -703,16 +713,16 @@ def filter_alpha_components(
     target_long = base["target"].to_numpy(dtype=np.float64)
     target_short = 1.0 - target_long
     
-    # [Fix] Fallback to ml_alpha_00 if directional raw heads are missing.
-    primary_col = "ml_alpha_00" if "ml_alpha_00" in base.columns else (cols[0] if cols else None)
+    # [Fix] Fallback to alpha_long_00 or alpha_long if directional raw heads are missing.
+    primary_col = "alpha_long_00" if "alpha_long_00" in base.columns else ("alpha_long" if "alpha_long" in base.columns else (cols[0] if cols else None))
     
-    if "ml_alpha_long_raw" in base.columns:
-        _direction_head_stats("ml_alpha_long_raw", target_long, "long_head")
+    if "alpha_long_raw" in base.columns:
+        _direction_head_stats("alpha_long_raw", target_long, "long_head")
     elif primary_col:
         _direction_head_stats(primary_col, target_long, "long_head")
         
-    if "ml_alpha_short_raw" in base.columns:
-        _direction_head_stats("ml_alpha_short_raw", target_short, "short_head")
+    if "alpha_short_raw" in base.columns:
+        _direction_head_stats("alpha_short_raw", target_short, "short_head")
     elif primary_col:
         # Create temporary flipped column for short-side IC calculation (1 - alpha vs 1 - target)
         base["__short_proxy"] = 1.0 - base[primary_col]

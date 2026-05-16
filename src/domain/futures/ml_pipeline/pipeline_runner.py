@@ -173,7 +173,7 @@ def _build_hmm_traceability(
 def _drop_ml_columns(df: pd.DataFrame) -> pd.DataFrame:
     """Unify removal of existing ML/HMM columns to prevent merge collisions."""
     ml_reserved = [
-        "ml_alpha_00", "ml_alpha_long", "ml_alpha_short",
+        "alpha_long_00", "alpha_long", "alpha_short",
         "hmm_modulator_long", "hmm_modulator_short",
         "slot_rank_score", "xs_score_long", "xs_score_short",
         "ml_calib_prob", "ml_calib_prob_long", "ml_calib_prob_short",
@@ -204,8 +204,8 @@ def _meta_feature_column_names(wide_1h: pd.DataFrame) -> tuple[str, ...]:
     """Resolve which columns to use as features for the meta-labeler."""
     hmm_cols = _sorted_hmm_prob_columns(wide_1h)
     base: list[str] = []
-    if "ml_alpha_00" in wide_1h.columns:
-        base.append("ml_alpha_00")
+    if "alpha_long_00" in wide_1h.columns:
+        base.append("alpha_long_00")
     base.extend(hmm_cols)
     # 추가 피처: wide_1h에 실제 존재하는 것만 포함
     for c in _META_EXTRA_FEATS:
@@ -439,13 +439,7 @@ def _is_kelly_per_semantic_state(
 
 def _hmm_modulator_kelly_values(
     market_probs: pd.DataFrame,
-    alpha_panel: pd.DataFrame,
-    is_end_utc: pd.Timestamp,
-    price_df_1h: pd.DataFrame | None,
-    shrink: float,
-    crisis_thr: float,
     market_hmm_feats: pd.DataFrame | None = None,
-    precomputed_risk: tuple[np.ndarray, np.ndarray] | None = None,
 ) -> pd.DataFrame:
     """[Advanced HMM Control] Asymmetric Kelly Modulation and Entropy-Based Confidence Shrinkage."""
     cols = _sorted_hmm_prob_columns(market_probs)
@@ -475,9 +469,9 @@ def _hmm_modulator_kelly_values(
     p_mat = market_probs[expected_cols].to_numpy(dtype=np.float64)
     
     # Component 1: Asymmetric Kelly Modulation
-    # M_long = 1.0*Bull_Calm + 1.0*Bull_Vol_Up + 0.5*Chop + 0.1*Bear + 0.0*Crisis
+    # M_long = 1.0*Bull_Calm + 1.0*Bull_Vol_Up + 0.9*Chop + 0.5*Bear + 0.0*Crisis
     # M_short = 0.0*Bull_Calm + 0.1*Bull_Vol_Up + 0.5*Chop + 1.2*Bear + 0.0*Crisis
-    w_long = np.array([1.0, 1.0, 0.1, 0.5, 0.0], dtype=np.float64)
+    w_long = np.array([1.0, 1.0, 0.5, 0.9, 0.0], dtype=np.float64)
     w_short = np.array([0.0, 0.1, 1.2, 0.5, 0.0], dtype=np.float64)
     
     m_long = p_mat @ w_long
@@ -486,11 +480,11 @@ def _hmm_modulator_kelly_values(
     # Component 2: Entropy-Based Confidence Shrinkage
     # E = -sum(Pi * log2(Pi + eps))
     # E_norm = E / log2(5)
-    # Penalty = 1.0 - (E_norm)^2
+    # Penalty = 1.0 - 0.1 * (E_norm)^2  # Minimized to prevent over-protection
     eps = 1e-12
     entropy = -np.sum(p_mat * np.log2(p_mat + eps), axis=1)
     e_norm = entropy / np.log2(5.0)
-    penalty = 1.0 - np.square(e_norm)
+    penalty = 1.0 - 0.1 * np.square(e_norm)
     
     # Final Modulation
     mod_long = np.clip(m_long * penalty, 0.0, 2.5).astype(np.float64)
@@ -520,42 +514,6 @@ def _hmm_modulator_kelly_values(
     })
 
 
-def _precompute_hmm_risk_components(
-    market_probs: pd.DataFrame,
-    market_hmm_feats: pd.DataFrame | None,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Calculate market-wide risk components (multiplier & vol scalar) once."""
-    n = len(market_probs)
-    p_crisis = market_probs["hmm_prob_crisis"].to_numpy(dtype=np.float64)
-    p_bear = (
-        market_probs["hmm_prob_bear_trend"].to_numpy(dtype=np.float64)
-        if "hmm_prob_bear_trend" in market_probs.columns
-        else np.zeros(n)
-    )
-    p_bull = (
-        market_probs["hmm_prob_bull_calm"].to_numpy(dtype=np.float64)
-        if "hmm_prob_bull_calm" in market_probs.columns
-        else np.zeros(n)
-    )
-
-    if market_hmm_feats is not None and "macro_vol_24h" in market_hmm_feats.columns:
-        vol_ser = market_hmm_feats["macro_vol_24h"].reindex(market_probs["datetime"]).ffill().bfill().fillna(0.01)
-        vol_1h = vol_ser.to_numpy(dtype=np.float64)
-        expected_variance = (vol_1h * np.sqrt(8760))**2
-    else:
-        expected_variance = np.full(n, 0.25, dtype=np.float64)
-
-    pos_var = expected_variance[expected_variance > 0]
-    target_var = float(np.median(pos_var)) if pos_var.size > 0 else 0.25
-    # risk_multiplier: 1.0 (neutral), >1.0 (risk-on), <1.0 (risk-off)
-    risk_multiplier = 1.0 - (0.75 * p_crisis) - (0.4 * p_bear) + (0.2 * p_bull)
-    
-    # vol_scalar: Ratio of target variance to current expected variance
-    vol_scalar = target_var / (expected_variance + 1e-6)
-    vol_scalar_clipped = np.clip(vol_scalar, 0.5, 1.5)
-
-    return risk_multiplier, vol_scalar_clipped
-
 def _hmm_modulator_kelly_per_symbol(
     market_probs: pd.DataFrame,
     alpha_panel: pd.DataFrame,
@@ -566,45 +524,50 @@ def _hmm_modulator_kelly_per_symbol(
     crisis_thr: float,
     market_hmm_feats: pd.DataFrame | None,
     anchor_symbol: str | None,
+    cfg: dict[str, Any] | None = None,
 ) -> dict[str, pd.DataFrame]:
     """One Kelly modulator per symbol using that symbol's 1h OHLC fwd returns; fallback = anchor (e.g. BTC)."""
-    # [Precomputation] Calculate shared risk components once
-    shared_risk = _precompute_hmm_risk_components(market_probs, market_hmm_feats)
-    
+    from src.domain.futures.ml_pipeline.regime.per_symbol_overlay import (
+        apply_symbol_overlay,
+        compute_symbol_overlay,
+    )
+
+    cfg_dict: dict[str, Any] = cfg if cfg is not None else dict(OPT_FUTURES_CONFIG)
+    overlay_enabled: bool = bool(cfg_dict.get("FUTURES_PER_SYMBOL_OVERLAY_ENABLED", True))
+
     anchor_df = prefetched_1h.get(anchor_symbol) if anchor_symbol else None
     fallback = _hmm_modulator_kelly_values(
         market_probs,
-        alpha_panel,
-        is_end_utc,
-        anchor_df,
-        shrink,
-        crisis_thr,
         market_hmm_feats,
-        precomputed_risk=shared_risk,
     )
     out: dict[str, pd.DataFrame] = {}
 
+    dt_grid: pd.Series = market_probs["datetime"]
+
     def _calc_one(sym: str) -> tuple[str, pd.DataFrame]:
         df = prefetched_1h.get(sym)
-        if (
-            df is not None
-            and len(df) >= 80
-            and "close" in df.columns
-            and "high" in df.columns
-            and "low" in df.columns
-        ):
-            val = _hmm_modulator_kelly_values(
-                market_probs,
-                alpha_panel,
-                is_end_utc,
-                df,
-                shrink,
-                crisis_thr,
-                market_hmm_feats,
-                precomputed_risk=shared_risk,
-            )
-            return sym, val
-        return sym, fallback
+        # Base modulator is identical for all symbols (market_probs-level signal).
+        # Per-symbol differentiation comes from the beta/idio overlay below.
+        val = fallback
+
+        # Per-symbol beta scaling + idiosyncratic overlay
+        if overlay_enabled and df is not None and len(df) >= 4 and "close" in df.columns:
+            try:
+                is_anc = sym == anchor_symbol
+                ov = compute_symbol_overlay(
+                    sym_1h=df,
+                    anchor_1h=anchor_df if anchor_df is not None else df,
+                    dt_grid=dt_grid,
+                    cfg=cfg_dict,
+                    is_anchor=is_anc,
+                )
+                val = apply_symbol_overlay(val, ov, cfg_dict)
+            except Exception as exc:
+                _logger.warning(
+                    "per_symbol_overlay failed for %s (fallback to base mod): %s", sym, exc
+                )
+
+        return sym, val
 
     # [Institutional Quant] Parallel execution for symbol-specific modulators
     with ThreadPoolExecutor(max_workers=min(len(universe_syms), 8)) as executor:
@@ -781,18 +744,18 @@ def _apply_ml_calib_probs(
         else np.ones(len(aligned_tf), dtype=np.float64)
     )
     gp_base = (
-        aligned_tf["ml_alpha_00"].to_numpy(dtype=np.float64)
-        if "ml_alpha_00" in aligned_tf.columns
+        aligned_tf["alpha_long_00"].to_numpy(dtype=np.float64)
+        if "alpha_long_00" in aligned_tf.columns
         else np.zeros(len(aligned_tf), dtype=np.float64)
     )
     gp_long = (
-        aligned_tf["ml_alpha_long"].to_numpy(dtype=np.float64)
-        if "ml_alpha_long" in aligned_tf.columns
+        aligned_tf["alpha_long"].to_numpy(dtype=np.float64)
+        if "alpha_long" in aligned_tf.columns
         else gp_base
     )
     gp_short = (
-        aligned_tf["ml_alpha_short"].to_numpy(dtype=np.float64)
-        if "ml_alpha_short" in aligned_tf.columns
+        aligned_tf["alpha_short"].to_numpy(dtype=np.float64)
+        if "alpha_short" in aligned_tf.columns
         else (1.0 - gp_base)
     )
     # [Improvement 1] Friction-Aware EV Hurdle
@@ -912,7 +875,7 @@ def _step4_fusion_one_symbol(
 
         if sym not in valid_alpha_set:
             wide_1h = df_1h.copy()
-            wide_1h["ml_alpha_00"] = 0.5
+            wide_1h["alpha_long_00"] = 0.5
             # [REFACTORED] Merge asymmetric modulators
             wide_1h = pd.merge(wide_1h, hmm_modulator, on="datetime", how="left")
             # [Institutional Quant] Dual-TF Persistence: ffill 4h modulators into 1h bars
@@ -944,17 +907,17 @@ def _step4_fusion_one_symbol(
             if "datetime" in sym_alpha.columns:
                 sym_alpha["datetime"] = pd.to_datetime(sym_alpha["datetime"], utc=True).dt.floor("1s")
 
-            if "ml_alpha_00" not in sym_alpha.columns:
+            if "alpha_long_00" not in sym_alpha.columns:
                 _logger.warning(
-                    "[%s] ml_alpha_00 missing in sym_alpha. cols=%s",
+                    "[%s] alpha_long_00 missing in sym_alpha. cols=%s",
                     sym, list(sym_alpha.columns)
                 )
-                sym_alpha["ml_alpha_00"] = 0.5
+                sym_alpha["alpha_long_00"] = 0.5
 
             wide_1h = pd.merge(df_1h, sym_alpha, on="datetime", how="left")
             # [Institutional Quant] Dual-TF Alpha persistence: 
             # If sym_alpha is 4h and df_1h is 1h, ffill to maintain the thesis across bars.
-            wide_1h["ml_alpha_00"] = wide_1h["ml_alpha_00"].ffill().fillna(0.5)
+            wide_1h["alpha_long_00"] = wide_1h["alpha_long_00"].ffill().fillna(0.5)
 
             # [REFACTORED] Merge asymmetric modulators
             wide_1h = pd.merge(wide_1h, hmm_modulator, on="datetime", how="left")
@@ -964,7 +927,7 @@ def _step4_fusion_one_symbol(
 
             # Use mean of long/short modulator for ranking score
             # m_avg = (wide_1h["hmm_modulator_long"] + wide_1h["hmm_modulator_short"]) / 2.0
-            wide_1h["slot_rank_score"] = wide_1h["ml_alpha_00"]
+            wide_1h["slot_rank_score"] = wide_1h["alpha_long_00"]
 
             # [NEW] Merge all HMM related columns
             hmm_cols_all = [c for c in market_probs.columns if str(c).startswith("hmm_")]
@@ -1021,6 +984,124 @@ def _step4_fusion_one_symbol(
         return _Step4FusionOutcome(sym, aligned_tf, cp_long, cp_short, None)
     except Exception as e:
         return _Step4FusionOutcome(sym, None, None, None, str(e))
+
+
+def _compute_per_symbol_metrics(
+    hmm_modulator_by_sym: dict[str, pd.DataFrame],
+    market_probs: pd.DataFrame,
+) -> dict[str, float | None]:
+    """Compute per-symbol beta/idio overlay metrics for HMM audit report.
+
+    Metrics:
+        1. β-adj Protected Exposure (β-adj Prot. Exp.):
+               universe mean of (1 - mean_mod_long_i)
+               target: 30% ~ 50%
+        2. β-Protection Monotonicity:
+               Spearman corr(mean_beta_i, 1 - mean_mod_long_i) in risk-off bars.
+               target: > 0  (high-β symbols protected more in risk-off)
+        3. Idio Crash Capture: N/A at HMM-only stage (no forward returns).
+
+    Args:
+        hmm_modulator_by_sym: dict mapping symbol → mod_df (output of
+            _hmm_modulator_kelly_per_symbol, with 'hmm_modulator_long' and
+            optionally 'beta' columns after apply_symbol_overlay).
+        market_probs: market-level HMM posterior DataFrame with 'datetime'
+            and hmm_prob_* columns.
+
+    Returns:
+        Dict with keys:
+            per_sym_beta_adj_protected_exp  (float, %)
+            per_sym_beta_monotonicity_corr  (float)
+            per_sym_idio_crash_capture      (None — N/A at HMM-only stage)
+
+    Note:
+        Time complexity: O(S * N) where S = universe size, N = time bars.
+    """
+    result: dict[str, float | None] = {
+        "per_sym_beta_adj_protected_exp": 0.0,
+        "per_sym_beta_monotonicity_corr": 0.0,
+        "per_sym_idio_crash_capture": None,
+    }
+
+    if not hmm_modulator_by_sym:
+        return result
+
+    # --- Metric 1: β-adj Protected Exposure ----------------------------------
+    # For each symbol i: protection_i = 1 - mean(mod_long_i)
+    # Universe mean of protection_i expressed as %.
+    prot_list: list[float] = []
+    for mod_df in hmm_modulator_by_sym.values():
+        if "hmm_modulator_long" not in mod_df.columns:
+            continue
+        mean_mod: float = float(
+            np.nan_to_num(mod_df["hmm_modulator_long"].to_numpy(dtype=np.float64), nan=1.0).mean()
+        )
+        prot_list.append(1.0 - mean_mod)
+
+    if prot_list:
+        result["per_sym_beta_adj_protected_exp"] = float(np.mean(prot_list) * 100.0)
+
+    # --- Metric 2: β-Protection Monotonicity ---------------------------------
+    # Use risk-off bars: dominant regime ∈ {hmm_prob_bear_trend, hmm_prob_crisis}.
+    risk_off_cols = {"hmm_prob_bear_trend", "hmm_prob_crisis"}
+    prob_cols = [c for c in market_probs.columns if c in risk_off_cols]
+
+    # Build risk-off mask (row-wise max of risk-off regime probs)
+    if prob_cols and len(market_probs) > 0:
+        risk_off_mask: np.ndarray = (
+            market_probs[prob_cols].max(axis=1).to_numpy(dtype=np.float64) > 0.4
+        )
+    else:
+        risk_off_mask = np.ones(len(market_probs), dtype=bool)
+
+    mean_beta_per_sym: list[float] = []
+    mean_prot_per_sym: list[float] = []
+
+    for mod_df in hmm_modulator_by_sym.values():
+        if "hmm_modulator_long" not in mod_df.columns:
+            continue
+        mask = risk_off_mask[: len(mod_df)]
+        if mask.sum() < 5:
+            # Insufficient risk-off bars → skip this metric
+            mean_beta_per_sym = []
+            break
+
+        mod_long_arr = np.nan_to_num(
+            mod_df["hmm_modulator_long"].to_numpy(dtype=np.float64)[: len(mask)], nan=1.0
+        )
+        prot_ro = float((1.0 - mod_long_arr[mask]).mean())
+        mean_prot_per_sym.append(prot_ro)
+
+        if "beta" in mod_df.columns:
+            beta_arr = np.nan_to_num(
+                mod_df["beta"].to_numpy(dtype=np.float64)[: len(mask)], nan=1.0
+            )
+            mean_beta_per_sym.append(float(beta_arr[mask].mean()))
+        else:
+            mean_beta_per_sym.append(1.0)
+
+    if len(mean_beta_per_sym) >= 3:
+        # Spearman rank correlation (vectorised via scipy-free rank trick)
+        b_arr = np.array(mean_beta_per_sym, dtype=np.float64)
+        p_arr = np.array(mean_prot_per_sym, dtype=np.float64)
+        # Rank transform
+        def _rank(x: np.ndarray) -> np.ndarray:
+            order = x.argsort()
+            ranks = np.empty_like(order, dtype=np.float64)
+            ranks[order] = np.arange(len(x), dtype=np.float64)
+            return ranks
+
+        b_rank = _rank(b_arr)
+        p_rank = _rank(p_arr)
+        b_c = b_rank - b_rank.mean()
+        p_c = p_rank - p_rank.mean()
+        denom = float(np.sqrt((b_c**2).sum() * (p_c**2).sum()) + 1e-12)
+        spearman_corr = float(np.dot(b_c, p_c) / denom)
+        result["per_sym_beta_monotonicity_corr"] = spearman_corr
+
+    # Metric 3: N/A at HMM-only stage
+    result["per_sym_idio_crash_capture"] = None
+    return result
 
 
 def _print_hmm_summary(
@@ -1657,7 +1738,7 @@ def merge_ml_output_into_data_maps(
         
         if sym not in ml_out.meta_feature_frame_by_symbol:
             _logger.debug("[%s] ML output missing. Filling with neutral 0.5.", sym)
-            original_df["ml_alpha_00"] = 0.5
+            original_df["alpha_long_00"] = 0.5
             maps[sym][tf] = original_df
             return
             
@@ -1666,7 +1747,7 @@ def merge_ml_output_into_data_maps(
         
         hmm_cols_in_mff = [c for c in mff.columns if str(c).startswith("hmm_")]
         ml_cols = [
-            "datetime", "ml_alpha_00", "ml_alpha_long", "ml_alpha_short",
+            "datetime", "alpha_long_00", "alpha_long", "alpha_short",
             "btc_trend_vol_adj_24h", "hmm_modulator_long", "hmm_modulator_short",
             "slot_rank_score", "ml_calib_prob", "ml_calib_prob_long", "ml_calib_prob_short",
             "xs_score_long", "xs_score_short", *hmm_cols_in_mff,
@@ -1711,10 +1792,10 @@ def merge_ml_output_into_data_maps(
         if ml_non_dt_cols:
             merged[ml_non_dt_cols] = merged[ml_non_dt_cols].ffill()
 
-        if "ml_alpha_00" not in merged.columns:
-            merged["ml_alpha_00"] = 0.5
+        if "alpha_long_00" not in merged.columns:
+            merged["alpha_long_00"] = 0.5
         else:
-            merged["ml_alpha_00"] = merged["ml_alpha_00"].fillna(0.5)
+            merged["alpha_long_00"] = merged["alpha_long_00"].fillna(0.5)
             
         # [Institutional Quant] Prevent total flattening of signal by fillna(0.0)
         # We fill probabilities with uniform, modulators with 1.0, others with 0
@@ -1725,7 +1806,7 @@ def merge_ml_output_into_data_maps(
         merged[mod_cols] = merged[mod_cols].fillna(1.0)
         
         # [Diagnostic] Final check if alpha is alive
-        if "ml_alpha_00" in merged.columns and merged["ml_alpha_00"].std() < 1e-9:
+        if "alpha_long_00" in merged.columns and merged["alpha_long_00"].std() < 1e-9:
             _logger.debug("[%s] Signal still dead after merge. Rows=%d", sym, len(merged))
 
         maps[sym][tf] = merged.fillna(0.0)
@@ -1879,6 +1960,7 @@ def run_hmm_fusion_for_is_end(
         float(cfg.get("FUTURES_HMM_CRISIS_THRESHOLD", 0.7)),
         market_hmm_feats,
         btc_anchor,
+        cfg=dict(cfg),
     )
     dt_series = market_probs["datetime"]
     for _mod_df in hmm_modulator_by_sym.values():
@@ -1910,6 +1992,16 @@ def run_hmm_fusion_for_is_end(
     if tail_rep:
         h_rep.update({k: float(v) for k, v in tail_rep.items()})
     h_rep["hmm_backend"] = _resolve_hmm_backend_name(hmm_inferrer, cfg)
+
+    # Step 5: Per-symbol beta/idio overlay metrics
+    per_sym_metrics = _compute_per_symbol_metrics(hmm_modulator_by_sym, market_probs)
+    h_rep["per_sym_beta_adj_protected_exp"] = float(
+        per_sym_metrics.get("per_sym_beta_adj_protected_exp") or 0.0
+    )
+    h_rep["per_sym_beta_monotonicity_corr"] = float(
+        per_sym_metrics.get("per_sym_beta_monotonicity_corr") or 0.0
+    )
+    h_rep["per_sym_idio_crash_capture"] = None  # type: ignore[assignment]  # N/A at HMM-only stage
 
     out = MLPipelineOutput()
     out.hmm_report = h_rep
@@ -2215,11 +2307,33 @@ def _run_ml_pipeline_implementation(
 
     if hmm_only:
         _logger.info("✅ HMM Inference complete (HMM-only mode)")
+        # Compute per-symbol overlay to populate beta/idio metrics in audit report.
+        btc_anchor_hmm = next((s for s in symbols if "BTC" in s), None)
+        hmm_mod_by_sym = _hmm_modulator_kelly_per_symbol(
+            market_probs,
+            pd.DataFrame(),  # alpha_panel not needed for HMM-only
+            is_end_utc,
+            prefetched_1h,
+            symbols,
+            float(cfg.get("FUTURES_HMM_KELLY_SHRINKAGE", 0.4)),
+            float(cfg.get("FUTURES_HMM_CRISIS_THRESHOLD", 0.7)),
+            market_hmm_feats,
+            btc_anchor_hmm,
+            cfg=dict(cfg),
+        )
+        dt_series_hmm = market_probs["datetime"]
+        for _m in hmm_mod_by_sym.values():
+            _m["datetime"] = dt_series_hmm
+        hmm_mod_audit = (
+            hmm_mod_by_sym[btc_anchor_hmm]
+            if btc_anchor_hmm and btc_anchor_hmm in hmm_mod_by_sym
+            else (next(iter(hmm_mod_by_sym.values())) if hmm_mod_by_sym else pd.DataFrame())
+        )
         out = MLPipelineOutput(market_probs=market_probs)
         out.hmm_report = _print_hmm_summary(
             market_probs,
             market_hmm_feats,
-            pd.DataFrame(),
+            hmm_mod_audit,
             _btc_df,
             "(HMM-ONLY)",
             traceability=_build_hmm_traceability(
@@ -2235,6 +2349,15 @@ def _run_ml_pipeline_implementation(
         )
         out.hmm_report.update({k: float(v) for k, v in tail_rep.items()})
         out.hmm_report["hmm_backend"] = _resolve_hmm_backend_name(hmm_inferrer, cfg)
+        # Step 5: per-symbol overlay metrics
+        _per_sym = _compute_per_symbol_metrics(hmm_mod_by_sym, market_probs)
+        out.hmm_report["per_sym_beta_adj_protected_exp"] = float(
+            _per_sym.get("per_sym_beta_adj_protected_exp") or 0.0
+        )
+        out.hmm_report["per_sym_beta_monotonicity_corr"] = float(
+            _per_sym.get("per_sym_beta_monotonicity_corr") or 0.0
+        )
+        out.hmm_report["per_sym_idio_crash_capture"] = None  # type: ignore[assignment]
         return out
 
     # --- Step 3: Regime-Aware Alpha Mining ---
@@ -2274,10 +2397,27 @@ def _run_ml_pipeline_implementation(
         slots_per_theme=max(5, min(12, int(cfg.get("FUTURES_ML_ALPHA_SLOTS_PER_THEME", 6))))
     )
     filter_options = {
-        # Keep legacy defaults intact unless Step3 is explicitly enabled.
-        "fdr_q": 0.10,
-        "symbol_balance_max": 3.0,
-        "require_regime_gate": True,
+        # IC filter options are config-driven to avoid drift between config and runtime behavior.
+        "fdr_q": float(cfg.get("FUTURES_ML_IC_FDR_Q", OPT_FUTURES_CONFIG.get("FUTURES_ML_IC_FDR_Q", 0.10))),
+        "symbol_balance_max": float(
+            cfg.get(
+                "FUTURES_ML_IC_SYMBOL_BALANCE_MAX",
+                OPT_FUTURES_CONFIG.get("FUTURES_ML_IC_SYMBOL_BALANCE_MAX", 3.0),
+            )
+        ),
+        "require_regime_gate": bool(
+            cfg.get("FUTURES_ML_IC_REGIME_GATE", OPT_FUTURES_CONFIG.get("FUTURES_ML_IC_REGIME_GATE", True))
+        ),
+        "use_newey_west": bool(
+            cfg.get("FUTURES_ML_IC_FILTER_USE_HAC", OPT_FUTURES_CONFIG.get("FUTURES_ML_IC_FILTER_USE_HAC", True))
+        ),
+        "use_ewma_ic_stat": bool(
+            cfg.get("FUTURES_ML_IC_FILTER_USE_EWMA", OPT_FUTURES_CONFIG.get("FUTURES_ML_IC_FILTER_USE_EWMA", False))
+        ),
+        "ewma_half_life": float(
+            cfg.get("FUTURES_ML_IC_EWMA_HALF_LIFE", OPT_FUTURES_CONFIG.get("FUTURES_ML_IC_EWMA_HALF_LIFE", 540.0))
+        ),
+        # Keep Step3 regime alpha options intact.
         "step3_regime_alpha_enabled": bool(cfg.get("FUTURES_STEP3_REGIME_ALPHA_ENABLED", False)),
         "step3_chop_support_min": float(cfg.get("FUTURES_STEP3_CHOP_SUPPORT_MIN", 0.25)),
         "step3_chop_ic_min": float(cfg.get("FUTURES_STEP3_CHOP_IC_MIN", -0.01)),

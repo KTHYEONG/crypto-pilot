@@ -23,7 +23,7 @@ _FUTURES_INDICATORS = get_indicator_engine(domain="futures")
 class FuturesMLStrategy(PipelineStrategyBase):
     """Pure ML-focused Futures Strategy.
     
-    Uses ML alpha signals (ml_alpha_*) and HMM probabilities/modulators 
+    Uses ML alpha signals (alpha_long_*) and HMM probabilities/modulators 
     for signal generation, regime filtering, and ranking.
     """
 
@@ -69,28 +69,28 @@ class FuturesMLStrategy(PipelineStrategyBase):
         n = len(df)
         
         # 1. Identify ML Alpha features
-        # We prefer a mean of all ml_alpha_XX columns if multiple exist, otherwise ml_alpha_00
+        # We prefer a mean of all alpha_long_XX columns if multiple exist, otherwise alpha_long_00
         surviving_gp_cols = [
             c for c in df.columns
-            if c.startswith("ml_alpha_") and c[-2:].isdigit() and float(df[c].std()) > 1e-6
+            if c.startswith("alpha_long_") and c[-2:].isdigit() and float(df[c].std()) > 1e-6
         ]
         
         if surviving_gp_cols:
             gp = df[surviving_gp_cols].mean(axis=1).to_numpy(dtype=np.float64)
-        elif "ml_alpha_00" in df.columns:
-            gp = df["ml_alpha_00"].to_numpy(dtype=np.float64, copy=False)
+        elif "alpha_long_00" in df.columns:
+            gp = df["alpha_long_00"].to_numpy(dtype=np.float64, copy=False)
         else:
-            _logger.warning("No ml_alpha_00 found, using neutral 0.5")
+            _logger.warning("No alpha_long_00 found, using neutral 0.5")
             gp = np.full(n, 0.5, dtype=np.float64)
 
         # 2. Extract HMM Modulators & Crisis Prob
         gp_long = (
-            df["ml_alpha_long"].to_numpy(dtype=np.float64)
-            if "ml_alpha_long" in df.columns else gp
+            df["alpha_long"].to_numpy(dtype=np.float64)
+            if "alpha_long" in df.columns else gp
         )
         gp_short = (
-            df["ml_alpha_short"].to_numpy(dtype=np.float64)
-            if "ml_alpha_short" in df.columns else gp
+            df["alpha_short"].to_numpy(dtype=np.float64)
+            if "alpha_short" in df.columns else gp
         )
         
         hml = (
