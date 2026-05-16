@@ -25,6 +25,9 @@ SYSTEMIC_HMM_FEATURE_COLUMNS: tuple[str, ...] = (
     "macro_lsr_delta_24h",
     "macro_ret_1h",
     "macro_breadth_168h",
+    # Tier 3: Universe Breadth (Phase C)
+    "macro_breadth_ma20",
+    "macro_alt_btc_rs_24h",
 )
 
 # Posterior columns aligned to stable semantic labels (order for MetaLabeler).
@@ -916,6 +919,41 @@ def build_systemic_hmm_features(
     else:
         out["macro_cs_dispersion_24h"] = 0.0
         out["macro_breadth_168h"] = 0.5
+
+    # Tier 3: Universe Breadth (Phase C)
+    # 11. macro_breadth_ma20: fraction of universe symbols with close > MA(20).
+    #     shift(1) applied to prevent look-ahead bias.
+    #     Formula: breadth_i,t = mean_j(close_{j,t-1} > MA20_{j,t-1})
+    # 12. macro_alt_btc_rs_24h: median(alt 24h return) - btc 24h return.
+    #     Positive = alt-season, Negative = BTC dominance.
+    #     shift(1) applied to both numerator and denominator.
+    eps = 1e-12
+    panel_t3_syms = [s for s in syms if s in (tier2_syms or list(syms))]
+    panel_t3 = panel_df[panel_df.index.get_level_values("symbol").isin(panel_t3_syms)]
+    if not panel_t3.empty:
+        close_t3 = panel_t3["close"].unstack(level="symbol")
+        # MA(20) breadth -- shift(1) for causality
+        w20 = max(2, _get_window(20, tf))
+        ma20 = close_t3.rolling(w20, min_periods=min(w20, 2)).mean()
+        above_ma20_lagged = (close_t3.shift(1) > ma20.shift(1)).astype(np.float64)
+        out["macro_breadth_ma20"] = above_ma20_lagged.mean(axis=1).reindex(idx).fillna(0.5)
+
+        # Alt-coin vs BTC relative strength (24h return spread)
+        ret_24h = np.log(
+            close_t3.shift(1).clip(lower=eps)
+            / close_t3.shift(1 + w24).clip(lower=eps)
+        )
+        btc_col = next((c for c in ret_24h.columns if "BTC" in str(c)), None)
+        if btc_col is not None and ret_24h.shape[1] > 1:
+            alt_cols = [c for c in ret_24h.columns if c != btc_col]
+            alt_median_ret = ret_24h[alt_cols].median(axis=1)
+            btc_ret = ret_24h[btc_col]
+            out["macro_alt_btc_rs_24h"] = (alt_median_ret - btc_ret).reindex(idx).fillna(0.0)
+        else:
+            out["macro_alt_btc_rs_24h"] = 0.0
+    else:
+        out["macro_breadth_ma20"] = 0.5
+        out["macro_alt_btc_rs_24h"] = 0.0
 
     # Mixed normalization [T1-A] (causal):
     #   Vol-like features: log1p + rolling robust z-score

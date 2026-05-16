@@ -6,6 +6,7 @@ import logging
 from typing import Any
 
 import numpy as np
+import pandas as pd
 
 _logger: logging.Logger = logging.getLogger("opt_futures")
 
@@ -21,6 +22,37 @@ def safe_float(v: Any, default: float = 0.0, limit: float = 1e9) -> float:
         return max(-limit, min(f, limit))
     except (TypeError, ValueError):
         return default
+
+
+def _per_bar_cs_ic_series(
+    df: pd.DataFrame,
+    signal_col: str,
+    target_col: str,
+    *,
+    by_level: str = "datetime",
+    min_obs: int = 5,
+) -> np.ndarray:
+    """Return per-bar cross-sectional Spearman IC series."""
+    if df is None or df.empty or signal_col not in df.columns or target_col not in df.columns:
+        return np.array([], dtype=float)
+
+    def _ic_on_group(g: pd.DataFrame) -> float:
+        gg = g[[signal_col, target_col]].dropna()
+        if len(gg) < min_obs:
+            return np.nan
+        return gg[signal_col].corr(gg[target_col], method="spearman")
+
+    if isinstance(df.index, pd.MultiIndex) and by_level in df.index.names:
+        grouped = df.groupby(level=by_level, sort=False)
+        vals = grouped.apply(_ic_on_group).to_numpy(dtype=float)
+    elif by_level in df.columns:
+        grouped = df.groupby(by_level, sort=False)
+        vals = grouped.apply(_ic_on_group).to_numpy(dtype=float)
+    else:
+        vals = np.array([_ic_on_group(df)], dtype=float)
+
+    vals = vals[np.isfinite(vals)]
+    return vals if vals.size else np.array([], dtype=float)
 
 
 def print_human_dashboard(
@@ -192,9 +224,9 @@ def log_alpha_component_summary(alpha_panel: pd.DataFrame) -> None:
     c_grn, c_red, c_rst, c_bld, c_yel = "\033[92m", "\033[91m", "\033[0m", "\033[1m", "\033[93m"
 
     _logger.info("\n 🤖 [ALPHA MINER AUDIT: V7.0.0 (CRYPTO NATIVE)]")
-    _logger.info(" ───────────────────────────────────────────────────────────────────────────────────")
-    _logger.info("  COMPONENT        │  IC (OOS) │ Short IC  │  Tail IC  │  ICIR   │  STATUS")
-    _logger.info(" ──────────────────┼───────────┼───────────┼───────────┼─────────┼───────────")
+    _logger.info(" ─────────────────────────────────────────────────────────────────────────────────────")
+    _logger.info("  COMPONENT         │     IC    │  Short IC │  Tail IC  │   ICIR  │  STATUS")
+    _logger.info(" ───────────────────┼───────────┼───────────┼───────────┼─────────┼───────────────────")
 
     components = alpha_panel.index.get_level_values("component").unique() if "component" in alpha_panel.index.names else []
     
@@ -205,25 +237,38 @@ def log_alpha_component_summary(alpha_panel: pd.DataFrame) -> None:
     HURDLE_ICIR = 0.50
 
     if not components:
-        cols = [c for c in alpha_panel.columns if c.startswith("ml_alpha_") and c[-2:].isdigit()]
+        cols = [c for c in alpha_panel.columns if (c.startswith("alpha_long_") and c[-2:].isdigit()) or c == "alpha_long"]
         if not cols:
             _logger.info("  No alpha components found in panel.")
             return
         
         if "target" not in alpha_panel.columns:
             for col in sorted(cols):
-                _logger.info(f"  {col:<16} │    --     │    --     │    --     │   --    │   [READY]")
-            _logger.info(" ───────────────────────────────────────────────────────────────────────────────────\n")
+                _logger.info(f"  {col:<17} │    --     │    --     │    --     │   --    │   [READY]")
+            _logger.info(" ─────────────────────────────────────────────────────────────────────────────────────\n")
             return
 
         # Calculate metrics for each wide-form column
         for col in sorted(cols):
-            # 1. Overall IC
+            # 1. Overall IC (full sample)
             ic = alpha_panel[col].corr(alpha_panel["target"], method="spearman")
-            
-            # 2. Short-side IC
-            short_mask = alpha_panel["target"] < 0
-            short_ic = alpha_panel.loc[short_mask, col].corr(alpha_panel.loc[short_mask, "target"], method="spearman") if short_mask.sum() > 20 else 0.0
+
+            # 2. Short-side IC (directional short signal vs short target proxy)
+            short_signal = "alpha_short" if "alpha_short" in alpha_panel.columns else None
+            short_proxy = None
+            primary_col = "alpha_long_00" if "alpha_long_00" in alpha_panel.columns else ("alpha_long" if "alpha_long" in alpha_panel.columns else None)
+            if short_signal is None and col == primary_col:
+                short_proxy = 1.0 - alpha_panel[col]
+            elif short_signal is None:
+                short_proxy = 1.0 - alpha_panel[col]
+            short_sig_values = alpha_panel[short_signal] if short_signal else short_proxy
+            short_target = -alpha_panel["target"]
+            short_mask = short_sig_values.notna() & short_target.notna()
+            short_ic = (
+                short_sig_values.loc[short_mask].corr(short_target.loc[short_mask], method="spearman")
+                if short_mask.sum() > 20
+                else 0.0
+            )
             
             # 3. Tail IC
             q10_low = alpha_panel["target"].quantile(0.10)
@@ -231,9 +276,11 @@ def log_alpha_component_summary(alpha_panel: pd.DataFrame) -> None:
             tail_mask = (alpha_panel["target"] <= q10_low) | (alpha_panel["target"] >= q10_high)
             tail_ic = alpha_panel.loc[tail_mask, col].corr(alpha_panel.loc[tail_mask, "target"], method="spearman") if tail_mask.sum() > 20 else 0.0
             
-            # 4. ICIR
-            std = alpha_panel[col].std()
-            icir = (ic / std) if std > 1e-6 else 0.0
+            # 4. True ICIR = mean/std of per-bar cross-sectional IC series
+            ic_series = _per_bar_cs_ic_series(alpha_panel, col, "target")
+            ic_mean = float(np.nanmean(ic_series)) if ic_series.size else 0.0
+            ic_std = float(np.nanstd(ic_series, ddof=1)) if ic_series.size > 1 else 0.0
+            icir = (ic_mean / ic_std) if ic_std > 1e-12 else 0.0
 
             ok_ic = ic >= HURDLE_IC
             ok_short = short_ic >= HURDLE_SHORT
@@ -249,33 +296,41 @@ def log_alpha_component_summary(alpha_panel: pd.DataFrame) -> None:
                 res_str = f"{c_yel}[FAIL]{c_rst}"
 
             _logger.info(
-                f"  {col:<16} │  {ic:>8.3f} │ {short_ic:>8.3f}  │ {tail_ic:>8.3f}  │ {icir:>7.2f} │  {res_str}"
+                f"  {col:<17} │ {ic:>8.3f}  │ {short_ic:>8.3f}  │ {tail_ic:>8.3f}  │ {icir:>7.2f} │  {res_str}"
             )
-        _logger.info(" ───────────────────────────────────────────────────────────────────────────────────\n")
+        _logger.info(" ─────────────────────────────────────────────────────────────────────────────────────\n")
         return
 
     for comp in sorted(components):
         sub = alpha_panel.xs(comp, level="component")
-        if "target" not in sub.columns or "ml_alpha_00" not in sub.columns:
+        # Identify primary alpha column for this component
+        primary_col = "alpha_long_00" if "alpha_long_00" in sub.columns else ("alpha_long" if "alpha_long" in sub.columns else None)
+        if "target" not in sub.columns or primary_col is None:
             continue
             
-        # 1. Overall IC
-        ic = sub["ml_alpha_00"].corr(sub["target"], method="spearman")
-        
-        # 2. Short-side IC (Target < 0)
-        short_mask = sub["target"] < 0
-        short_ic = sub.loc[short_mask, "ml_alpha_00"].corr(sub.loc[short_mask, "target"], method="spearman") if short_mask.sum() > 20 else 0.0
+        # 1. Overall IC (full sample)
+        ic = sub[primary_col].corr(sub["target"], method="spearman")
+
+        # 2. Short-side IC (directional short signal vs short target proxy)
+        if "alpha_short" in sub.columns:
+            short_signal = sub["alpha_short"]
+        else:
+            short_signal = 1.0 - sub[primary_col]
+        short_target = -sub["target"]
+        short_mask = short_signal.notna() & short_target.notna()
+        short_ic = short_signal.loc[short_mask].corr(short_target.loc[short_mask], method="spearman") if short_mask.sum() > 20 else 0.0
         
         # 3. Tail IC (Decile 1 & 10)
         q10_low = sub["target"].quantile(0.10)
         q10_high = sub["target"].quantile(0.90)
         tail_mask = (sub["target"] <= q10_low) | (sub["target"] >= q10_high)
-        tail_ic = sub.loc[tail_mask, "ml_alpha_00"].corr(sub.loc[tail_mask, "target"], method="spearman") if tail_mask.sum() > 20 else 0.0
+        tail_ic = sub.loc[tail_mask, primary_col].corr(sub.loc[tail_mask, "target"], method="spearman") if tail_mask.sum() > 20 else 0.0
         
-        # 4. ICIR (Hurdle 0.5 for Crypto)
-        # Using daily-equivalent IR if possible, or per-bar IR
-        std = sub["ml_alpha_00"].std()
-        icir = (ic / std) if std > 1e-6 else 0.0
+        # 4. True ICIR = mean/std of per-bar cross-sectional IC series
+        ic_series = _per_bar_cs_ic_series(sub, primary_col, "target")
+        ic_mean = float(np.nanmean(ic_series)) if ic_series.size else 0.0
+        ic_std = float(np.nanstd(ic_series, ddof=1)) if ic_series.size > 1 else 0.0
+        icir = (ic_mean / ic_std) if ic_std > 1e-12 else 0.0
 
         # Pass/Fail Logic (G-ALPHA strictly enforced)
         ok_ic = ic >= HURDLE_IC
@@ -293,12 +348,12 @@ def log_alpha_component_summary(alpha_panel: pd.DataFrame) -> None:
             res_str = f"{c_yel}[FAIL]{c_rst}"
             
         _logger.info(
-            f"  {comp:<16} │  {ic:>8.3f} │ {short_ic:>8.3f}  │ {tail_ic:>8.3f}  │ {icir:>7.2f} │  {res_str}"
+            f"  {comp:<17} │ {ic:>8.3f}  │ {short_ic:>8.3f}  │ {tail_ic:>8.3f}  │ {icir:>7.2f} │  {res_str}"
         )
 
-    _logger.info(" ───────────────────────────────────────────────────────────────────────────────────")
+    _logger.info(" ─────────────────────────────────────────────────────────────────────────────────────")
     _logger.info(f"  [HURDLES] IC > {HURDLE_IC} | Short > {HURDLE_SHORT} | Tail > {HURDLE_TAIL} | ICIR > {HURDLE_ICIR}")
-    _logger.info(" ───────────────────────────────────────────────────────────────────────────────────\n")
+    _logger.info(" ─────────────────────────────────────────────────────────────────────────────────────\n")
 
 
 def log_hmm_report_summary(hmm_report: dict[str, Any]) -> None:
@@ -309,9 +364,9 @@ def log_hmm_report_summary(hmm_report: dict[str, Any]) -> None:
     c_grn, c_red, c_rst, c_bld, c_yel = "\033[92m", "\033[91m", "\033[0m", "\033[1m", "\033[93m"
 
     _logger.info("\n 🧠 [HMM RISK OVERLAY AUDIT: V11.0.0]")
-    _logger.info(" ───────────────────────────────────────────────────────────────────────────────────")
-    _logger.info("  METRIC           │      VALUE     │  TARGET (Hurdle)  │  RESULT")
-    _logger.info(" ──────────────────┼────────────────┼───────────────────┼───────────")
+    _logger.info(" ─────────────────────────────────────────────────────────────────────────────────────")
+    _logger.info("  METRIC            │      VALUE      │   TARGET (Hurdle)   │  RESULT")
+    _logger.info(" ───────────────────┼─────────────────┼─────────────────────┼─────────────────────────")
 
     def get_v(k: str) -> float:
         return safe_float(hmm_report.get(k, 0.0))
@@ -348,23 +403,51 @@ def log_hmm_report_summary(hmm_report: dict[str, Any]) -> None:
             res_color = c_grn if passed else c_red
             res_str = f"{res_color}{'[PASS]' if passed else '[FAIL]'}{c_rst}"
             
-            val_fmt = f"{val:>13.2f}%" if is_pct else f"{val:>13.2f} "
+            val_fmt = f"{val:>14.2f}%" if is_pct else f"{val:>14.2f} "
             if not is_pct and "Duration" in label:
-                val_fmt = f"{val:>13.1f} b"
+                val_fmt = f"{val:>14.1f} b"
             elif not is_pct and "Scale" in label:
-                val_fmt = f"{val:>13.2f} x"
+                val_fmt = f"{val:>14.2f} x"
 
             if op == "range":
                 tgt_fmt = f"{target[0]:.0f}% ~ {target[1]:.0f}%"
             else:
                 tgt_fmt = f"{op} {target:.1f}" + ("%" if is_pct else "")
             
-            _logger.info(f"  {label:<16} │ {val_fmt}  │  {tgt_fmt:<17} │   {res_str}")
+            _logger.info(f"  {label:<17} │ {val_fmt}  │  {tgt_fmt:<18} │   {res_str}")
 
     print_rows(inference_metrics, "Inference Level")
     print_rows(policy_metrics, "Policy Level")
 
-    _logger.info(" ───────────────────────────────────────────────────────────────────────────────────")
+    # Per-symbol beta/idio overlay metrics (Step 5)
+    _logger.info(" [Per-Symbol Overlay]")
+    _ps_beta_exp = safe_float(hmm_report.get("per_sym_beta_adj_protected_exp", 0.0))
+    _ps_mono = safe_float(hmm_report.get("per_sym_beta_monotonicity_corr", 0.0))
+    _ps_exp_passed = 30.0 <= _ps_beta_exp <= 50.0
+    _ps_mono_passed = _ps_mono > 0.0
+    _logger.info(
+        "  %-17s │ %14.2f%%  │  %-18s │   %s",
+        "β-adj Prot. Exp.",
+        _ps_beta_exp,
+        "30.0% ~ 50.0%",
+        f"{c_grn}[PASS]{c_rst}" if _ps_exp_passed else f"{c_red}[FAIL]{c_rst}",
+    )
+    _logger.info(
+        "  %-17s │ %14.4f   │  %-18s │   %s",
+        "β-Protect Monot.",
+        _ps_mono,
+        "> 0",
+        f"{c_grn}[PASS]{c_rst}" if _ps_mono_passed else f"{c_red}[FAIL]{c_rst}",
+    )
+    _logger.info(
+        "  %-17s │ %14s   │  %-18s │   %s",
+        "Idio Crash Cap.",
+        "N/A",
+        "> 50.0%",
+        "[N/A]",
+    )
+
+    _logger.info(" ─────────────────────────────────────────────────────────────────────────────────────")
     backend = hmm_report.get("hmm_backend", "unknown")
     _logger.info(f"  > HMM Backend    : {backend}")
     
@@ -381,7 +464,7 @@ def log_hmm_report_summary(hmm_report: dict[str, Any]) -> None:
             
     verdict = f"{c_grn}[READY]{c_rst}" if all_passed else f"{c_yel}[WARN]{c_rst}"
     _logger.info(f"  > Final Verdict  : {verdict} - Validated for Optuna Search Space")
-    _logger.info(" ───────────────────────────────────────────────────────────────────────────────────\n")
+    _logger.info(" ─────────────────────────────────────────────────────────────────────────────────────\n")
 
 
 def log_ml_merge_feature_stats(oos_data_maps: Any, valid_symbols: Any, tf: Any) -> None:
