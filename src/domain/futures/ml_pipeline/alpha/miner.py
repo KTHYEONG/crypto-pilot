@@ -15,6 +15,7 @@ from typing import Any, Optional, Tuple
 import numpy as np
 import pandas as pd
 import numba
+import time
 from catboost import CatBoostRanker, CatBoostRegressor, Pool
 
 from config.opt_config import OPT_FUTURES_CONFIG
@@ -31,7 +32,7 @@ HMM_COLS = list(HMM_SEMANTIC_PROB_COLUMNS)
 
 _logger = logging.getLogger(__name__)
 
-@numba.njit(parallel=False, cache=True)
+@numba.njit(parallel=True, cache=True)
 def _fast_rank_2d_numba(array: np.ndarray) -> np.ndarray:
     """Vectorized percentile ranking across rows (axis=1) with tie-breaking 'average'.
     
@@ -39,7 +40,7 @@ def _fast_rank_2d_numba(array: np.ndarray) -> np.ndarray:
     """
     n, m = array.shape
     out = np.empty((n, m), dtype=np.float64)
-    for i in range(n):
+    for i in numba.prange(n):
         row = array[i]
         mask = ~np.isnan(row)
         n_valid = np.sum(mask)
@@ -293,7 +294,7 @@ class MLAlphaMiner:
                 "symbols": symbols,
                 "is_end_date": is_end_date,
                 "feature_schema_version": GP_FEATURE_SCHEMA_VERSION,
-                "miner_version": "v6_catboost_yeti_gpu_v2",
+                "miner_version": "v7_gpu_final",
                 "slots_per_theme": int(self.slots_per_theme),
                 "n_rows": len(panel_df),
                 "last_ts": _last_ts,
@@ -398,42 +399,19 @@ class MLAlphaMiner:
             y_is_float = y_labels[is_mask].astype(np.float32)
             y_short_is_float = y_labels_short[is_mask].astype(np.float32)
             w_is_float = sample_weights_all[is_mask].astype(np.float32)
-            
+            _logger.info("🚀 Starting Advanced GPU Optimized Mining Loop (v7.5)...")
+            total_loop_start = time.time()
+            mag_finite = np.isfinite(y_mag_vals_raw)
             train_mag = is_mask & mag_finite
             y_mag_float = y_mag_vals_raw[train_mag].astype(np.float32)
             w_mag_float = sample_weights_all[train_mag].astype(np.float32)
-
-            long_feat_cols_by_theme = {}
-            long_X_by_theme = {}
-            long_X_is_by_theme = {}
-            long_X_mag_by_theme = {}
             
-            for theme_idx, base_feats in THEME_GROUPS.items():
+            # --- Advanced GPU Optimization Pipeline (v7.5) ---
+            # Group training by theme to maximize Pool object reuse and minimize GPU context overhead.
+            border_file = ".quantization_borders.dat"
+            for theme_idx in range(3):
+                # 1. Resolve Theme Features
                 if theme_idx == 1:
-                    fc = list(dict.fromkeys(base_feats + HMM_COLS))
-                else:
-                    fc = list(dict.fromkeys(base_feats))
-                fc = [c for c in fc if c in work_df.columns]
-                long_feat_cols_by_theme[theme_idx] = fc
-                if fc:
-                    X_full = work_df[fc].values.astype(np.float32)
-                    long_X_by_theme[theme_idx] = X_full
-                    long_X_is_by_theme[theme_idx] = X_full[is_mask]
-                    long_X_mag_by_theme[theme_idx] = X_full[train_mag]
-                else:
-                    long_X_by_theme[theme_idx] = np.empty((len(work_df), 0), dtype=np.float32)
-                    long_X_is_by_theme[theme_idx] = np.empty((is_mask.sum(), 0), dtype=np.float32)
-                    long_X_mag_by_theme[theme_idx] = np.empty((train_mag.sum(), 0), dtype=np.float32)
-
-            short_feat_cols_by_theme = {}
-            short_X_by_theme = {}
-            short_X_is_by_theme = {}
-            
-            for theme_idx, base_feats in SHORT_THEME_GROUPS.items():
-                fc = list(dict.fromkeys(base_feats))
-                fc = [c for c in fc if c in work_df.columns]
-                short_feat_cols_by_theme[theme_idx] = fc
-                if fc:
                     fc = list(dict.fromkeys(THEME_GROUPS[theme_idx] + HMM_COLS))
                 else:
                     fc = list(dict.fromkeys(THEME_GROUPS[theme_idx]))
@@ -445,90 +423,122 @@ class MLAlphaMiner:
                 if not fc and not short_fc:
                     continue
 
-                # 2. Build Pre-quantized Pools (Crucial for GPU performance)
-                # Full Prediction Pool
                 X_full = work_df[fc].values.astype(np.float32) if fc else None
                 X_short_full = work_df[short_fc].values.astype(np.float32) if short_fc else None
                 
-                pred_pool = Pool(data=X_full) if X_full is not None else None
-                short_pred_pool = Pool(data=X_short_full) if X_short_full is not None else None
-
-                # Training Pools
+                full_group_ids = work_df["datetime"].factorize()[0]
+                
+                master_pool = None
                 train_pool = None
-                if fc is not None:
-                    train_pool = Pool(
-                        data=X_full[is_mask], 
-                        label=y_is_float, 
-                        group_id=is_group_ids, 
-                        weight=w_is_float
+                pred_pool = None
+                
+                if X_full is not None:
+                    master_pool = Pool(
+                        data=X_full, 
+                        label=y_labels, 
+                        weight=sample_weights_all, 
+                        group_id=full_group_ids, 
+                        feature_names=fc
                     )
-
-                mag_train_pool = None
-                if fc is not None:
-                    train_mag_mask = is_mask & mag_finite
-                    if train_mag_mask.any():
-                        mag_train_pool = Pool(
-                            data=X_full[train_mag_mask], 
-                            label=y_mag_float, 
-                            weight=w_mag_float
-                        )
-
+                    master_pool.quantize(border_count=128)
+                    train_idx = is_mask.nonzero()[0]
+                    train_pool = master_pool.slice(train_idx)
+                    pred_pool = master_pool
+                    
+                    master_mag_pool = Pool(
+                        data=X_full,
+                        label=y_mag_vals_raw,
+                        weight=sample_weights_all,
+                        feature_names=fc
+                    )
+                    master_mag_pool.quantize(border_count=128)
+                    train_mag_idx = (is_mask & mag_finite).nonzero()[0]
+                    mag_train_pool = master_mag_pool.slice(train_mag_idx)
+                    
+                master_short_pool = None
                 short_train_pool = None
-                if short_fc:
-                    X_short_is = X_short_full[is_mask]
-                    short_train_pool = Pool(
-                        data=X_short_is, 
-                        label=y_short_is_float, 
-                        group_id=is_group_ids, 
-                        weight=w_is_float
+                short_pred_pool = None
+                
+                if X_short_full is not None:
+                    master_short_pool = Pool(
+                        data=X_short_full,
+                        label=y_labels_short,
+                        weight=sample_weights_all,
+                        group_id=full_group_ids,
+                        feature_names=short_fc
                     )
+                    master_short_pool.quantize(border_count=128)
+                    short_train_pool = master_short_pool.slice(train_idx)
+                    short_pred_pool = master_short_pool
 
-                # 3. Fit & Predict Batch for this Theme
+                # 3. Execution Phase (2-Phase Batching to saturate GPU)
                 theme_start = theme_idx * self.slots_per_theme
                 theme_end = min(self.n_features_to_select, (theme_idx + 1) * self.slots_per_theme)
                 
+                # Phase 1: Collective Training & Inference (GPU focus)
+                theme_batch_results = []
                 for i in range(theme_start, theme_end):
-                    # Long Slot (Ranker + Regressor)
-                    slot_idx, model, _, raw_scores = _train_ranker_slot(
-                        i, self.slots_per_theme, pred_pool, train_pool, fc, seed_offset=0
-                    )
-                    if model is not None:
-                        self._models[slot_idx] = model
-                        self._feature_sets[slot_idx] = fc
-                        scores_matrix = np.full(idx_shape, np.nan)
-                        scores_matrix[valid_mask] = raw_scores
-                        ranked_matrix = _fast_rank_2d_numba(scores_matrix)
-                        slots_df[f"alpha_long_{slot_idx:02d}"] = ranked_matrix[valid_mask]
-                    else:
-                        slots_df[f"alpha_long_{slot_idx:02d}"] = 0.5
+                    res = {"idx": i}
+                    # Long fit/pred
+                    if train_pool:
+                        params = self._get_lgbm_params(seed_offset=theme_idx * 100 + i)
+                        model = CatBoostRanker(**params)
+                        model.fit(train_pool)
+                        raw_scores = model.predict(pred_pool)
+                        res["model"] = model
+                        res["raw_scores"] = raw_scores
+                        
+                        _, reg, mag_raw = _train_regressor_slot(i, self.slots_per_theme, pred_pool, mag_train_pool, fc)
+                        res["reg"] = reg
+                        res["mag_raw"] = mag_raw
 
-                    _, reg, mag_raw = _train_regressor_slot(
-                        i, self.slots_per_theme, pred_pool, mag_train_pool, fc
-                    )
-                    if reg is not None:
-                        self._mag_models[slot_idx] = reg
-                        mu_m, sig_m = float(np.mean(mag_raw)), float(np.std(mag_raw) + 1e-9)
-                        slots_df[f"mag_long_{slot_idx:02d}"] = np.clip((mag_raw - mu_m) / sig_m, -3.0, 3.0)
-                    else:
-                        slots_df[f"mag_long_{slot_idx:02d}"] = 0.0
+                    # Short fit/pred
+                    if short_train_pool:
+                        params = self._get_lgbm_params(seed_offset=theme_idx * 100 + i + 1000)
+                        short_model = CatBoostRanker(**params)
+                        short_model.fit(short_train_pool)
+                        short_raw_scores = short_model.predict(short_pred_pool)
+                        res["short_model"] = short_model
+                        res["short_raw_scores"] = short_raw_scores
+                    
+                    theme_batch_results.append(res)
 
-                    # Short Slot
-                    _, short_model, _, short_raw_scores = _train_ranker_slot(
-                        i, self.slots_per_theme, short_pred_pool, short_train_pool, short_fc, seed_offset=1000
-                    )
-                    if short_model is not None:
-                        self._short_models[slot_idx] = short_model
-                        self._short_feature_sets[slot_idx] = short_fc
-                        short_scores_matrix = np.full(idx_shape, np.nan)
-                        short_scores_matrix[valid_mask] = short_raw_scores
-                        short_ranked_matrix = _fast_rank_2d_numba(short_scores_matrix)
-                        slots_df[f"alpha_short_{slot_idx:02d}"] = short_ranked_matrix[valid_mask]
+                # Phase 2: Batch Ranking Process (CPU focus - Parallelized via Numba)
+                for res in theme_batch_results:
+                    s_idx = res["idx"]
+                    if "model" in res and res["model"]:
+                        self._models[s_idx] = res["model"]
+                        self._feature_sets[s_idx] = fc
+                        m_scores = np.full(idx_shape, np.nan)
+                        m_scores[valid_mask] = res["raw_scores"]
+                        slots_df[f"alpha_long_{s_idx:02d}"] = _fast_rank_2d_numba(m_scores)[valid_mask]
+                        
+                        if res["reg"]:
+                            self._mag_models[s_idx] = res["reg"]
+                            mu_m, sig_m = float(np.mean(res["mag_raw"])), float(np.std(res["mag_raw"]) + 1e-9)
+                            slots_df[f"mag_long_{s_idx:02d}"] = np.clip((res["mag_raw"] - mu_m) / sig_m, -3.0, 3.0)
+                        else:
+                            slots_df[f"mag_long_{s_idx:02d}"] = 0.0
                     else:
-                        slots_df[f"alpha_short_{slot_idx:02d}"] = 0.5
+                        slots_df[f"alpha_long_{s_idx:02d}"] = 0.5
+                        slots_df[f"mag_long_{s_idx:02d}"] = 0.0
 
-                # 4. Cleanup Theme Pools to free VRAM/RAM
+                    if "short_model" in res and res["short_model"]:
+                        self._short_models[s_idx] = res["short_model"]
+                        self._short_feature_sets[s_idx] = short_fc
+                        s_scores = np.full(idx_shape, np.nan)
+                        s_scores[valid_mask] = res["short_raw_scores"]
+                        slots_df[f"alpha_short_{s_idx:02d}"] = _fast_rank_2d_numba(s_scores)[valid_mask]
+                    else:
+                        slots_df[f"alpha_short_{s_idx:02d}"] = 0.5
+
+                # 4. Cleanup Theme Pools and Files to free VRAM/RAM
                 del pred_pool, short_pred_pool, train_pool, mag_train_pool, short_train_pool
+                del master_pool, master_mag_pool, master_short_pool
                 gc.collect()
+            
+            loop_elapsed = time.time() - total_loop_start
+            _logger.info("✅ GPU Mining Loop completed in %.4f seconds.", loop_elapsed)
 
             raw_alpha_df = slots_df
             
