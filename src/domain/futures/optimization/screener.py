@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
-import re
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +22,10 @@ _logger = logging.getLogger(__name__)
 
 def _default_universe_history_path() -> Path:
     return Path(__file__).resolve().parents[4] / "config" / "universe_history.json"
+
+
+def _default_universe_artifact_dir() -> Path:
+    return Path(__file__).resolve().parents[4] / "results" / "universe"
 
 
 def _quarter_key_end_utc(key: str) -> pd.Timestamp:
@@ -186,12 +190,12 @@ def screen_symbol_refinement_futures(
     daily_dfs: dict[str, pd.DataFrame],
     phase_b_params: dict[str, Any] | None = None,
     anchor_symbols: list[str] | None = None,
-) -> bool:
+) -> list[str]:
     """Phase B: Institutional Risk Filtering (Beta, Corr, Funding, Diversity)."""
     anchors = list(anchor_symbols) if anchor_symbols else FUTURES_ANCHOR_SYMBOLS
     if "BTC/USDT" not in symbol_dfs_4h:
         _logger.error("BTC/USDT missing from symbol_dfs. Cannot refine universe.")
-        return False
+        return []
     
     cfg = FUTURES_SCREENER_CONFIG
     
@@ -266,23 +270,35 @@ def screen_symbol_refinement_futures(
         final_symbols.insert(0, "BTC/USDT")
     _logger.info(f"  [SUCCESS] Universe Refinement Complete: {len(final_symbols)} symbols selected.")  # noqa: E501
     _logger.info(f"  Selected: {final_symbols}")
+    return final_symbols
 
 
-
-
-    update_futures_config_file(final_symbols)
-    return True
-
-
-def update_futures_config_file(symbols: list[str]) -> None:
-    path = Path("config/opt_config.py")
-    if not path.exists():
-        return
-    content = path.read_text(encoding="utf-8")
-    pattern = r"FUTURES_SYMBOLS(?::\s*List\[str\])?\s*=\s*\[.*?\]"
-    lines = [f'    "{s}",\n' for s in symbols]
-    new_block = "FUTURES_SYMBOLS: List[str] = [\n" + "".join(lines) + "]"
-    path.write_text(re.sub(pattern, new_block, content, count=1, flags=re.DOTALL), encoding="utf-8")
+def write_universe_artifact(
+    *,
+    is_end_date: str,
+    tf: str,
+    anchors: list[str],
+    selected_symbols: list[str],
+    thresholds_snapshot: dict[str, Any],
+    artifact_dir: Path | None = None,
+) -> Path:
+    out_dir = artifact_dir or _default_universe_artifact_dir()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    ts_utc = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    as_of_tag = str(is_end_date).replace(":", "").replace(" ", "_")
+    artifact_path = out_dir / f"universe_{tf}_{as_of_tag}_{ts_utc}.json"
+    payload = {
+        "as_of": is_end_date,
+        "is_end_date": is_end_date,
+        "tf": tf,
+        "anchors": list(anchors),
+        "selected_symbols": list(selected_symbols),
+        "screening_thresholds_snapshot": dict(thresholds_snapshot),
+        "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+    }
+    artifact_path.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
+    _logger.info("  [UNIVERSE] artifact=%s", artifact_path)
+    return artifact_path
 
 
 def orchestrate_universe_discovery(
@@ -291,11 +307,11 @@ def orchestrate_universe_discovery(
     reference_date: str | None,
     data_dir: Path,
     anchor_symbols: list[str],
-) -> bool:
+) -> dict[str, Any]:
     """Orchestrate Step 1: Universe Discovery & Data Loading.
 
     Returns:
-        bool: True if refinement succeeded and config was updated.
+        dict[str, Any]: discovery result with selected symbols and artifact path.
 
     """
     _logger.info("\n" + "═" * 85)
@@ -318,20 +334,46 @@ def orchestrate_universe_discovery(
 
     if not broad_candidates:
         _logger.error("No broad candidates. Aborting.")
-        return False
+        return {"success": False, "selected_symbols": [], "artifact_path": None}
 
     data_maps_broad, _, valid_broad = load_futures_data_maps_for_symbols(
         broad_candidates, tf, fetch_start_date, start_date, is_end_date, end_date,
         skip_metrics=True, target_tfs=[tf, "1d"]
     )
 
-    success = screen_symbol_refinement_futures(
+    selected_symbols = screen_symbol_refinement_futures(
         broad_candidates=list(broad_candidates), winning_signal_type="CS_RANK",
         is_end_date=is_end_date, tf=tf,
         symbol_dfs_4h={s: data_maps_broad[s][tf] for s in valid_broad},
         daily_dfs={s: data_maps_broad[s]["1d"] for s in valid_broad},
         phase_b_params=None, anchor_symbols=anchor_symbols
     )
-    if success:
-        importlib.reload(config.opt_config)
-    return success
+    if not selected_symbols:
+        return {"success": False, "selected_symbols": [], "artifact_path": None}
+
+    threshold_snapshot = {
+        "MIN_ADV_USDT": float(FUTURES_SCREENER_CONFIG.get("MIN_ADV_USDT", 25_000_000)),
+        "BROAD_POOL_K": int(FUTURES_SCREENER_CONFIG.get("BROAD_POOL_K", 80)),
+        "MIN_VOL_CV": float(FUTURES_SCREENER_CONFIG.get("MIN_VOL_CV", 0.3)),
+        "FUNDING_RATE_MAX_ABS": float(FUTURES_SCREENER_CONFIG.get("FUNDING_RATE_MAX_ABS", 0.0008)),
+        "AMIHUD_PRUNE_RATIO": float(FUTURES_SCREENER_CONFIG.get("AMIHUD_PRUNE_RATIO", 0.75)),
+        "MIN_CORR_BTC": float(FUTURES_SCREENER_CONFIG.get("MIN_CORR_BTC", 0.50)),
+        "MAX_BETA_BTC": float(FUTURES_SCREENER_CONFIG.get("MAX_BETA_BTC", 1.40)),
+        "MIN_BETA_BTC": float(FUTURES_SCREENER_CONFIG.get("MIN_BETA_BTC", 0.60)),
+        "FINAL_POOL_K": int(FUTURES_SCREENER_CONFIG.get("FINAL_POOL_K", 40)),
+    }
+    artifact_path = write_universe_artifact(
+        is_end_date=is_end_date,
+        tf=tf,
+        anchors=list(anchor_symbols),
+        selected_symbols=selected_symbols,
+        thresholds_snapshot=threshold_snapshot,
+    )
+    importlib.reload(config.opt_config)
+    return {
+        "success": True,
+        "selected_symbols": list(selected_symbols),
+        "artifact_path": str(artifact_path),
+        "is_end_date": is_end_date,
+        "tf": tf,
+    }
