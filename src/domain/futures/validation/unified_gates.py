@@ -40,6 +40,11 @@ class FuturesResearchGateInput:
     max_mdd_duration: float = 180.0
     oos_expectancy: float = 0.0
     min_expectancy: float = 0.40
+    is_expectancy: float = 0.0
+    min_oos_retention_expectancy_pct: float = 50.0
+    # Auxiliary diagnostics only (non-blocking): legacy CAGR retention.
+    oos_cagr_pct: float = 0.0
+    is_cagr_ref_pct: float = 0.0
 
 
 def evaluate_research_gates(inp: FuturesResearchGateInput) -> tuple[bool, list[str]]:
@@ -68,6 +73,15 @@ def evaluate_research_gates(inp: FuturesResearchGateInput) -> tuple[bool, list[s
     # V3.1 Mechanical: Expectancy Gate
     if inp.oos_expectancy < float(inp.min_expectancy):
         failures.append("EXPECTANCY_GATE")
+        return False, failures
+
+    # V4.3: OOS retention gate based on expectancy (not CAGR)
+    if abs(float(inp.is_expectancy)) > 1e-9:
+        _exp_ret = float(inp.oos_expectancy) / float(inp.is_expectancy) * 100.0
+    else:
+        _exp_ret = 0.0
+    if _exp_ret < float(inp.min_oos_retention_expectancy_pct):
+        failures.append("OOS_RETENTION_EXPECTANCY_GATE")
         return False, failures
 
     # V3.1 Mechanical: MDD Duration Gate
@@ -111,5 +125,6 @@ GATE_CODE_DESCRIPTIONS: dict[str, str] = {
     "IS_SURVIVAL_GATE": "IS CAGR or IS Sharpe below survival cut",
     "AWF_HARDENING_GATE": "Worst AWF leg log-TW below distributional floor",
     "EXPECTANCY_GATE": "OOS Mean Return per Trade below 0.40% mechanical hurdle",
+    "OOS_RETENTION_EXPECTANCY_GATE": "OOS/IS expectancy retention below policy floor",
     "MDD_DURATION_GATE": "OOS Max Drawdown Duration exceeds 180 days",
 }
