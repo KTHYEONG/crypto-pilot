@@ -2290,6 +2290,8 @@ def _run_ml_pipeline_implementation(
         is_end_date=is_end_date,
         filter_options=filter_options,
     )
+    if "target" in panel_df.columns:
+        alpha_panel["target"] = panel_df["target"]
 
     # --- Step 4: Signal Fusion & Meta-Labeling ---
     _logger.info("🔀 Step 4/4 | Signal Fusion & Meta-Labeling")
@@ -2302,6 +2304,19 @@ def _run_ml_pipeline_implementation(
         prefetched_market_probs=market_probs,
         prefetched_market_hmm_feats=market_hmm_feats
     )
+    if gp_only:
+        alpha_non_empty = not out.alpha_panel.empty
+        alpha_component_count = (
+            int(out.alpha_panel.index.get_level_values("component").nunique())
+            if alpha_non_empty and "component" in out.alpha_panel.index.names
+            else 0
+        )
+        _logger.info(
+            "✅ Alpha Mining complete (ALPHA-only mode) | hmm_report_present=%s alpha_panel_non_empty=%s alpha_component_count=%d",
+            bool(out.hmm_report),
+            alpha_non_empty,
+            alpha_component_count,
+        )
     
     _logger.info("✅ ML Pipeline complete")
     return out
