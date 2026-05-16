@@ -39,9 +39,17 @@ from src.domain.futures.optimization.data_aligner import (
 )
 from src.domain.futures.optimization.evaluator import (
     _log_tw_from_ret_pct,
+    calc_cvar5_loss_pct_from_equity,
     calc_gate1_dsr_from_path_log_tw,
+    calc_max_underwater_days_from_equity,
     calc_mdd_from_equity,
     compute_awf_robust_objective_score,
+)
+from src.domain.futures.optimization.phase_param_space import (
+    V43_FIXED_DEFAULTS,
+    suggest_risk_params,
+    suggest_signal_params,
+    suggest_joint_params,
 )
 from src.domain.futures.optimization.validation import build_anchored_wf_legs
 from src.domain.futures.portfolio.portfolio_constructor import (
@@ -229,6 +237,8 @@ class MLPhaseDContext:
     # Coordinate ascent: "A"/"B"/"C"; frozen holds completed phases' Optuna-param dict slices.
     coordinate_phase: str | None = None
     coordinate_frozen_params: dict[str, Any] | None = None
+    coordinate_shrunk_ranges: dict[str, tuple[Any, Any]] | None = None
+    phase_ranges: dict[str, tuple[Any, Any]] | None = None
     # When ``FUTURES_WF_HMM_LEG_REFIT`` is True, anchored-WF precompute reruns the full
     # universe ML pipeline (cross-sectional alpha + systemic HMM + fusion) per leg anchor.
     ml_pipeline_fetch_start: str | None = None
@@ -1268,54 +1278,48 @@ def _baseline_ml_out_dict_for_coordinate(policy: Any) -> dict[str, Any]:
 
 
 def _suggest_ml_joint_nsga2(trial: optuna.Trial, ctx: MLPhaseDContext) -> dict[str, Any]:
-    """Joint NSGA-II parameter space (15-20 parameters)."""
+    """Joint parameter space for main objective path (V4.3 core + fixed defaults)."""
     policy = load_portfolio_policy_config(OPT_FUTURES_CONFIG)
+    default_ranges = {"MAX_EXPOSURE": (0.50, min(float(policy.gross_exposure_cap), 3.00))}
+    phase = str(getattr(ctx, "coordinate_phase", "") or "").lower()
+    frozen = dict(getattr(ctx, "coordinate_frozen_params", None) or {})
+    phase_ranges = dict(default_ranges)
+    shrunk_ranges = dict(getattr(ctx, "coordinate_shrunk_ranges", None) or {})
+    phase_ranges.update(shrunk_ranges)
+    phase_ranges.update(dict(getattr(ctx, "phase_ranges", None) or {}))
 
-    # 1. Capacity & Risk
-    ann = float(trial.suggest_float("TARGET_ANN_VOL", 0.15, 0.45))
-    gh = min(float(policy.gross_exposure_cap), 1.5)
-    mx = float(trial.suggest_float("MAX_EXPOSURE", 0.8, gh))
-    pc = float(trial.suggest_float("MAX_EXPOSURE_PER_COIN", 0.15, min(0.5, mx)))
-    kappa = float(trial.suggest_float("PORTFOLIO_KAPPA", 0.2, 0.5))
-
-    # 2. Alpha & Regime Betas
-    beta_a = float(trial.suggest_float("BETA_ALPHA", 0.5, 1.5))
-    b_bull = float(trial.suggest_float("BETA_REGIME_BULL", 0.5, 2.0))
-    b_bear = float(trial.suggest_float("BETA_REGIME_BEAR", 0.0, 1.0))
-    b_chop = float(trial.suggest_float("BETA_REGIME_CHOP", 0.0, 1.0))
-    b_crisis = float(trial.suggest_float("BETA_REGIME_CRISIS", -0.5, 0.5))
-    ev_h = float(trial.suggest_float("EV_HURDLE_BPS", 0.0, 20.0))
-
-    # 3. Execution & Friction
-    reb = int(trial.suggest_categorical("REBALANCE_BARS", [1, 3, 6, 12]))
-    slip_buf = float(trial.suggest_float("SLIPPAGE_BPS_BUFFER_MULT", 0.8, 1.5))
-    tb_h = float(trial.suggest_categorical("TIME_BARRIER_H", [0.0, 24.0, 48.0, 168.0]))
-
-    # 4. HMM-conditioned Dynamic Kelly
-    crisis_thr = float(trial.suggest_float("CRISIS_OVERRIDE_THRESHOLD", 0.3, 0.7))
-    gamma = float(trial.suggest_float("CRISIS_GAMMA", 0.5, 3.0))
-
-    base = {
-        "TARGET_ANN_VOL": ann,
-        "MAX_EXPOSURE": mx,
-        "MAX_EXPOSURE_PER_COIN": pc,
-        "PORTFOLIO_KAPPA": kappa,
-        "KELLY_LAMBDA": kappa,
-        "RISK_PER_TRADE": kappa,
-        "BETA_ALPHA": beta_a,
-        "BETA_REGIME_BULL": b_bull,
-        "BETA_REGIME_BEAR": b_bear,
-        "BETA_REGIME_CHOP": b_chop,
-        "BETA_REGIME_CRISIS": b_crisis,
-        "EV_HURDLE_BPS": ev_h,
-        "REBALANCE_BARS": reb,
-        "SLIPPAGE_BPS_BUFFER_MULT": slip_buf,
-        "TIME_BARRIER_H": tb_h,
-        "CRISIS_OVERRIDE_THRESHOLD": crisis_thr,
-        "CRISIS_GAMMA": gamma,
-        "SIZING_METHOD": "profit_factor_kelly",
-        "MIN_SCORE_PERCENTILE": 0.55,
+    baseline = _baseline_ml_out_dict_for_coordinate(policy)
+    baseline_core = {
+        "BETA_REGIME_BEAR": float(baseline.get("BETA_REGIME_BEAR", 0.25)),
+        "BETA_REGIME_CHOP": float(baseline.get("BETA_REGIME_CHOP", 0.25)),
+        "K_LONG": int(baseline.get("K_LONG", 2)),
+        "K_SHORT": int(baseline.get("K_SHORT", 2)),
+        "REBALANCE_BARS": int(baseline.get("REBALANCE_BARS", 6)),
+        "EV_HURDLE_BPS": float(baseline.get("EV_HURDLE_BPS", 5.0)),
+        "PORTFOLIO_KAPPA": float(baseline.get("PORTFOLIO_KAPPA", 0.35)),
+        "TARGET_ANN_VOL": float(baseline.get("TARGET_ANN_VOL", 0.25)),
+        "MAX_EXPOSURE": float(baseline.get("MAX_EXPOSURE", 1.2)),
+        "MAX_EXPOSURE_PER_COIN": float(baseline.get("MAX_EXPOSURE_PER_COIN", 0.25)),
     }
+
+    if phase in {"phase_a1", "a1"}:
+        phase_suggested = suggest_signal_params(trial, ranges=phase_ranges, fixed=frozen)
+        base = dict(baseline_core)
+        base.update(frozen)
+        base.update(phase_suggested)
+    elif phase in {"phase_a2", "a2"}:
+        phase_suggested = suggest_risk_params(trial, ranges=phase_ranges, fixed=frozen)
+        base = dict(baseline_core)
+        base.update(frozen)
+        base.update(phase_suggested)
+    else:
+        base = suggest_joint_params(trial, ranges=phase_ranges, fixed=frozen)
+
+    base.update(V43_FIXED_DEFAULTS)
+    kappa = float(base["PORTFOLIO_KAPPA"])
+    base["KELLY_LAMBDA"] = kappa
+    base["RISK_PER_TRADE"] = kappa
+    base["SIZING_METHOD"] = "profit_factor_kelly"
 
     return finalize_strategy_portfolio_params(base, policy)
 
@@ -1342,6 +1346,22 @@ def _pf_and_ev_cost_from_trades(all_trades: np.ndarray) -> tuple[float, float]:
     total_fee = float(np.sum(fees))
     ev_cost_ratio = abs(net_pnl) / max(total_fee, 1e-9)
     return avg_pf, ev_cost_ratio
+
+
+def _funding_drag_ratio_from_trades(all_trades: np.ndarray) -> tuple[float, str]:
+    """Funding drag ratio using a conservative gross-PnL basis.
+
+    Formula:
+      funding_drag_ratio = sum(abs(funding_fee)) / max(sum(abs(pnl)), 1e-9)
+    """
+    if all_trades.size == 0:
+        return 0.0, "funding_fee_abs_over_gross_pnl_abs"
+    pnl = all_trades[:, 6].astype(np.float64, copy=False)
+    funding_fee = all_trades[:, 9].astype(np.float64, copy=False)
+    gross_pnl_abs = float(np.sum(np.abs(pnl)))
+    funding_abs = float(np.sum(np.abs(funding_fee)))
+    ratio = float(funding_abs / max(gross_pnl_abs, 1e-9))
+    return ratio, "funding_fee_abs_over_gross_pnl_abs"
 
 
 def _base_engine_params(ml: dict[str, Any], tf: str) -> dict[str, Any]:
@@ -1675,6 +1695,8 @@ def _evaluate_awf_phase_d_aggregate(
     chop_loss_notional: list[float] = []
     total_loss_notional: list[float] = []
     leg_flip_proxy: list[float] = []
+    leg_mdd_duration_days: list[float] = []
+    leg_cvar_pct: list[float] = []
     first_leg_done = False
 
     for leg_idx, leg in enumerate(awf_slices):
@@ -1710,6 +1732,16 @@ def _evaluate_awf_phase_d_aggregate(
                 return 1e9, diag
             
         mdd = float(calc_mdd_from_equity(b_equity)) if b_equity.size > 0 else 100.0
+        mdd_duration_days = (
+            float(calc_max_underwater_days_from_equity(b_equity, hours_per_bar_from_timeframe(ctx.tf)))
+            if b_equity.size > 1
+            else 0.0
+        )
+        cvar_pct = (
+            float(calc_cvar5_loss_pct_from_equity(b_equity))
+            if b_equity.size > 1
+            else 0.0
+        )
         log_ret = _log_tw_from_ret_pct(float((b_bal / FUTURES_INITIAL_BALANCE - 1.0) * 100.0))
 
         # [Speed Optimization] Early Pruning after first AWF leg
@@ -1794,6 +1826,8 @@ def _evaluate_awf_phase_d_aggregate(
 
         leg_log_tw.append(log_ret)
         leg_mdds.append(mdd)
+        leg_mdd_duration_days.append(mdd_duration_days)
+        leg_cvar_pct.append(cvar_pct)
         leg_trade_counts.append(float(n_tr))
         leg_long_counts.append(n_long)
         leg_short_counts.append(n_short)
@@ -1875,6 +1909,9 @@ def _evaluate_awf_phase_d_aggregate(
     leg_l_pf_mean = float(np.mean(leg_l_pf)) if leg_l_pf else l_pf_agg
     leg_s_pf_mean = float(np.mean(leg_s_pf)) if leg_s_pf else s_pf_agg
     _awf_pf_agg, ev_cost_ratio = _pf_and_ev_cost_from_trades(all_trades)
+    funding_drag_ratio, funding_drag_basis = _funding_drag_ratio_from_trades(all_trades)
+    mdd_duration_days = float(max(leg_mdd_duration_days, default=0.0))
+    cvar_pct = float(max(leg_cvar_pct, default=0.0))
     turnover_cost_ratio = float(np.clip(1.0 / max(ev_cost_ratio, 1e-9), 0.0, 1e6))
     total_trades_agg = float(np.sum(leg_trade_counts)) if leg_trade_counts else 0.0
     total_chop_trades = float(np.sum(chop_trade_counts)) if chop_trade_counts else 0.0
@@ -1993,12 +2030,25 @@ def _evaluate_awf_phase_d_aggregate(
         "awf_pf_agg": float(_awf_pf_agg),
         "awf_ev_cost_ratio": float(ev_cost_ratio),
         "awf_turnover_cost_ratio": float(turnover_cost_ratio),
+        "awf_funding_drag_ratio": float(funding_drag_ratio),
+        "funding_drag_ratio": float(funding_drag_ratio),
+        "funding_drag_basis": funding_drag_basis,
+        "ev_cost_ratio": float(ev_cost_ratio),
+        "turnover_cost_ratio": float(turnover_cost_ratio),
+        "mdd_duration": float(mdd_duration_days),
+        "awf_mdd_duration": float(mdd_duration_days),
+        "awf_mdd_duration_days": float(mdd_duration_days),
+        "cvar": float(cvar_pct),
+        "awf_cvar": float(cvar_pct),
+        "awf_cvar_pct": float(cvar_pct),
         "s_pf_agg": s_pf_agg,
         "awf_long_pf_mean": float(leg_l_pf_mean),
         "awf_short_pf_mean": float(leg_s_pf_mean),
         "awf_chop_trade_share": float(chop_trade_share),
         "awf_chop_loss_share": float(chop_loss_share),
         "awf_flip_rate_proxy": float(flip_rate_proxy),
+        "minority_side_ratio": float(minority),
+        "n_trades": float(avg_trades_agg),
     }
 
     if trial is not None:
@@ -2022,6 +2072,19 @@ def _evaluate_awf_phase_d_aggregate(
         trial.set_user_attr("awf_chop_loss_share", float(chop_loss_share))
         trial.set_user_attr("awf_flip_rate_proxy", float(flip_rate_proxy))
         trial.set_user_attr("awf_turnover_cost_ratio", float(turnover_cost_ratio))
+        trial.set_user_attr("awf_funding_drag_ratio", float(funding_drag_ratio))
+        trial.set_user_attr("funding_drag_ratio", float(funding_drag_ratio))
+        trial.set_user_attr("funding_drag_basis", funding_drag_basis)
+        trial.set_user_attr("ev_cost_ratio", float(ev_cost_ratio))
+        trial.set_user_attr("turnover_cost_ratio", float(turnover_cost_ratio))
+        trial.set_user_attr("mdd_duration", float(mdd_duration_days))
+        trial.set_user_attr("awf_mdd_duration", float(mdd_duration_days))
+        trial.set_user_attr("awf_mdd_duration_days", float(mdd_duration_days))
+        trial.set_user_attr("cvar", float(cvar_pct))
+        trial.set_user_attr("awf_cvar", float(cvar_pct))
+        trial.set_user_attr("awf_cvar_pct", float(cvar_pct))
+        trial.set_user_attr("minority_side_ratio", float(minority))
+        trial.set_user_attr("n_trades", float(avg_trades_agg))
 
     ns2 = bool(cfg.get("FUTURES_ML_ALPHA_NSGA2_ENABLED", False))
     if ns2:

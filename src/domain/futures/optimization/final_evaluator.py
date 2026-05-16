@@ -66,6 +66,90 @@ from src.domain.futures.validation.walk_forward import (
 _logger: logging.Logger = logging.getLogger("final_evaluator")
 
 
+def _compute_expectancy_retention_pct(oos_expectancy: float, is_expectancy: float) -> float:
+    if abs(float(is_expectancy)) <= 1e-9:
+        return 0.0
+    return float(oos_expectancy) / float(is_expectancy) * 100.0
+
+
+def _build_top5_ensemble_results(ensemble_results: list[Any]) -> list[Any]:
+    if not ensemble_results:
+        return []
+    # Explicit v4.3 path: evaluate top-5 candidates as ensemble members.
+    ranked = sorted(
+        ensemble_results,
+        key=lambda r: float(getattr(r.get("trial"), "value", -1e18) or -1e18),
+        reverse=True,
+    )
+    return ranked[:5]
+
+
+def _build_ensemble_evaluation_summary(
+    selected_ensemble_results: list[Any],
+    ensemble_ports: list[dict[str, Any]],
+    meta_port: dict[str, Any],
+) -> dict[str, Any]:
+    members: list[dict[str, Any]] = []
+    for idx, (res, port) in enumerate(zip(selected_ensemble_results, ensemble_ports), start=1):
+        members.append(
+            {
+                "rank": int(idx),
+                "trial_number": int(getattr(res.get("trial"), "number", -1)),
+                "cagr_pct": float(port.get("cagr_pct", 0.0)),
+                "mdd_pct": float(port.get("mdd_pct", 0.0)),
+                "terminal_wealth_ratio": float(port.get("terminal_wealth_ratio", 1.0)),
+                "avg_trade_pnl_pct": float(port.get("avg_trade_pnl_pct", 0.0)),
+            }
+        )
+    return {
+        "selected_count": int(len(selected_ensemble_results)),
+        "members": members,
+        "ensemble_meta": {
+            "cagr_pct": float(meta_port.get("cagr_pct", 0.0)),
+            "mdd_pct": float(meta_port.get("mdd_pct", 0.0)),
+            "terminal_wealth_ratio": float(meta_port.get("terminal_wealth_ratio", 1.0)),
+            "avg_trade_pnl_pct": float(meta_port.get("avg_trade_pnl_pct", 0.0)),
+        },
+    }
+
+
+def _passes_champion_swap_4conditions(
+    gate_ok: bool,
+    new_m: dict[str, float],
+    champ_m: dict[str, float],
+    cand_ev_cost_ratio: float,
+    champ_ev_cost_ratio: float,
+) -> tuple[bool, list[str]]:
+    failures: list[str] = []
+    if not gate_ok:
+        failures.append("CHAMP_SWAP_GATE_NOT_PASSED")
+
+    # Core-metric parity: higher-is-better for CAGR/Calmar/Sortino/TW; lower-is-better for MDD.
+    core_parity_ok = (
+        float(new_m.get("cagr", 0.0)) >= float(champ_m.get("cagr", 0.0))
+        and float(new_m.get("calmar", 0.0)) >= float(champ_m.get("calmar", 0.0))
+        and float(new_m.get("sortino", 0.0)) >= float(champ_m.get("sortino", 0.0))
+        and float(new_m.get("tw", 0.0)) >= float(champ_m.get("tw", 0.0))
+        and float(new_m.get("oos_retention_expectancy_pct", 0.0))
+        >= float(champ_m.get("oos_retention_expectancy_pct", 0.0))
+        and abs(float(new_m.get("mdd", 1e9))) <= abs(float(champ_m.get("mdd", 1e9)))
+    )
+    if not core_parity_ok:
+        failures.append("CHAMP_SWAP_CORE_METRIC_PARITY_FAIL")
+
+    # PBO superiority: lower overfitting probability is better.
+    if float(new_m.get("pbo", 100.0)) >= float(champ_m.get("pbo", 100.0)):
+        failures.append("CHAMP_SWAP_PBO_NOT_SUPERIOR")
+
+    # EV/Cost superiority: higher expectancy with no worse EV-cost burden.
+    cand_avg_pnl = float(new_m.get("avg_pnl", 0.0))
+    champ_avg_pnl = float(champ_m.get("avg_pnl", 0.0))
+    if cand_avg_pnl < champ_avg_pnl or float(cand_ev_cost_ratio) > float(champ_ev_cost_ratio):
+        failures.append("CHAMP_SWAP_EV_COST_NOT_SUPERIOR")
+
+    return len(failures) == 0, failures
+
+
 def run_final_oos_evaluation(
     ensemble_results: list[Any],
     oos_data_maps: dict[str, dict[str, Any]],
@@ -92,6 +176,7 @@ def run_final_oos_evaluation(
     champ_stab_cv: float | None,
     stab_tmp_layer3_awf_fail: bool,
     cv_max: float,
+    phase_c_diagnostics: dict[str, Any] | None = None,
 ) -> None:
     """Execute Step 5: Final OOS evaluation, research gates, and persistence."""
     _logger.info("\n" + "═" * 85)
@@ -101,9 +186,20 @@ def run_final_oos_evaluation(
     policy_cfg = load_portfolio_policy_config(OPT_FUTURES_CONFIG)
 
     _logger.debug("  [ENSEMBLE EVALUATION]")
+    selected_ensemble_results = _build_top5_ensemble_results(ensemble_results)
+    if not selected_ensemble_results:
+        _logger.warning(" [ENSEMBLE] No members provided; skipping final OOS evaluation.")
+        return
+    if len(selected_ensemble_results) != len(ensemble_results):
+        _logger.info(
+            " [ENSEMBLE] Top-5 path enabled: selected %d/%d members",
+            len(selected_ensemble_results),
+            len(ensemble_results),
+        )
+
     ensemble_curves = []
     ensemble_ports = []
-    for i, res in enumerate(ensemble_results):
+    for i, res in enumerate(selected_ensemble_results):
         m_params = finalize_strategy_portfolio_params(res["params"], policy_cfg)
         m_port = run_oos_margin_shared_portfolio(
             valid_symbols,
@@ -118,7 +214,7 @@ def run_final_oos_evaluation(
         m_cagr = m_port.get("cagr_pct", 0.0)
         m_mdd = m_port.get("mdd_pct", 0.0)
         _logger.debug(
-            f"    Member {i+1}/{len(ensemble_results)}: CAGR={m_cagr:7.2f}% | "
+            f"    Member {i+1}/{len(selected_ensemble_results)}: CAGR={m_cagr:7.2f}% | "
             f"MDD={m_mdd:6.2f}% | Trial={res['trial'].number}"
         )
 
@@ -244,6 +340,11 @@ def run_final_oos_evaluation(
     _augment_port_metrics(oos_port, hrs_tf)
     if meta_port:
         _augment_port_metrics(meta_port, hrs_tf)
+    run_summary_extras["ensemble_evaluation"] = _build_ensemble_evaluation_summary(
+        selected_ensemble_results=selected_ensemble_results,
+        ensemble_ports=ensemble_ports,
+        meta_port=meta_port,
+    )
 
     # Add OOS specific robustness
     oos_port["pbo_reliability"] = float(pbo_obs) * 100.0
@@ -294,10 +395,17 @@ def run_final_oos_evaluation(
         symbols=valid_symbols, tf=args.tf,
     )
     run_summary_extras["regime_drift"] = regime_drift_info
+    if phase_c_diagnostics is not None:
+        run_summary_extras["phase_c_diagnostics"] = dict(phase_c_diagnostics)
 
     is_cagr_v = float(is_port.get("cagr_pct", is_port.get("cagr", 0.0)))
     oos_cagr_v = float(oos_port.get("cagr_pct", oos_port.get("cagr", 0.0)))
-    oos_retention = (oos_cagr_v / is_cagr_v * 100.0) if abs(is_cagr_v) > 1e-6 else 0.0
+    oos_retention_cagr_aux = (oos_cagr_v / is_cagr_v * 100.0) if abs(is_cagr_v) > 1e-6 else 0.0
+    is_expectancy_v = float(is_port.get("avg_trade_pnl_pct", 0.0))
+    oos_expectancy_v = float(oos_port.get("avg_trade_pnl_pct", 0.0))
+    oos_retention_expectancy = _compute_expectancy_retention_pct(
+        oos_expectancy=oos_expectancy_v, is_expectancy=is_expectancy_v
+    )
     # S1: Cap IS BTC benchmark to prevent unfair hurdle during bull-market IS periods.
     # 2023-2025 IS = crypto bull run (BTC CAGR ≈ 150%); a market-neutral strategy cannot
     # beat raw BTC buy-and-hold. Cap anchors benchmark to long-run sustainable BTC return.
@@ -355,8 +463,14 @@ def run_final_oos_evaluation(
         awf_p10_log_tw_floor=float(p10_floor),
         oos_mdd_duration=float(oos_port.get("mdd_duration_days", 0.0)),
         max_mdd_duration=180.0,
-        oos_expectancy=float(oos_port.get("avg_trade_pnl_pct", 0.0)),
+        oos_expectancy=float(oos_expectancy_v),
         min_expectancy=float(OPT_FUTURES_CONFIG.get("FUTURES_DEFAULT_EV_HURDLE_BPS", 40.0)) / 100.0,
+        is_expectancy=float(is_expectancy_v),
+        min_oos_retention_expectancy_pct=float(
+            OPT_FUTURES_CONFIG.get("FUTURES_OOS_RETENTION_EXPECTANCY_MIN_PCT", 50.0)
+        ),
+        oos_cagr_pct=float(oos_cagr_v),
+        is_cagr_ref_pct=float(is_cagr_v),
     )
     gate_ok, _gf_codes = evaluate_research_gates(_gate_inp)
     gate_failures = list(_gf_codes)
@@ -425,6 +539,18 @@ def run_final_oos_evaluation(
         gate_failures.append("CHAMP_STAB_CV")
         gate_ok = False
 
+    if phase_c_diagnostics:
+        phase_c_cv = safe_float(phase_c_diagnostics.get("stability_cv"), 1.0)
+        phase_c_rob = safe_float(phase_c_diagnostics.get("robustness_score"), 0.0)
+        _phase_c_cv_max = float(OPT_FUTURES_CONFIG.get("FUTURES_PHASE_C_STABILITY_CV_MAX", 0.35))
+        _phase_c_rob_min = float(OPT_FUTURES_CONFIG.get("FUTURES_PHASE_C_ROBUSTNESS_MIN", 0.45))
+        if phase_c_cv > _phase_c_cv_max:
+            gate_failures.append("PHASE_C_STABILITY_CV")
+            gate_ok = False
+        if phase_c_rob < _phase_c_rob_min:
+            gate_failures.append("PHASE_C_LOW_ROBUSTNESS")
+            gate_ok = False
+
     for _code in gate_failures:
         _logger.debug(" [GATE] %s — %s", _code, GATE_CODE_DESCRIPTIONS.get(_code, ""))
 
@@ -434,7 +560,8 @@ def run_final_oos_evaluation(
     champ_m = {
         "pbo": 50.0, "p10": 0.0, "dsr": 0.0, "tw": 1.0, "cagr": 0.0, "mdd": 0.0,
         "calmar": 0.0, "sortino": 0.0, "mdd_duration": 0.0,
-        "time_2x": 999.0, "cvar": 0.0, "net_alpha": 0.0, "avg_pnl": 0.0, "pf": 1.0
+        "time_2x": 999.0, "cvar": 0.0, "net_alpha": 0.0, "avg_pnl": 0.0, "pf": 1.0,
+        "oos_retention_expectancy_pct": 0.0,
     }
     if champ_path and champ_path.exists():
         try:
@@ -458,6 +585,10 @@ def run_final_oos_evaluation(
                 "net_alpha": safe_float(_met.get("oos_net_alpha_pct", 0.0), 0.0, 1e5),
                 "avg_pnl": safe_float(_met.get("oos_avg_trade_pnl_pct", 0.0), 0.0, 1e5),
                 "pf": safe_float(_met.get("oos_profit_factor", 1.0), 1.0, 1e3),
+                "ev_cost_ratio": safe_float(_met.get("ev_cost_ratio", 1e3), 1e3, 1e6),
+                "oos_retention_expectancy_pct": safe_float(
+                    _met.get("oos_retention_expectancy_pct", 0.0), 0.0, 1e6
+                ),
             }
         except Exception as _ce:
             _logger.debug("Champion metrics parse failed: %s", _ce)
@@ -495,7 +626,10 @@ def run_final_oos_evaluation(
         "erg_dev": float(_erg_dev_val),
         "oos_long_pf": float(meta_port.get("long_pf", 1.0)),
         "oos_short_pf": float(meta_port.get("short_pf", 1.0)),
-        "oos_retention_pct": float(oos_retention),
+        # v4.3 primary retention is expectancy-based; CAGR retention kept as auxiliary.
+        "oos_retention_pct": float(oos_retention_expectancy),
+        "oos_retention_expectancy_pct": float(oos_retention_expectancy),
+        "oos_retention_cagr_pct_aux": float(oos_retention_cagr_aux),
         "is_alpha": float(is_net_alpha_v),
         "awf_chop_loss_share": float(champion_awf_diag.get("awf_chop_loss_share", 0.0)),
         "awf_chop_trade_share": float(champion_awf_diag.get("awf_chop_trade_share", 0.0)),
@@ -503,7 +637,7 @@ def run_final_oos_evaluation(
         "awf_turnover_cost_ratio": float(champion_awf_diag.get("awf_turnover_cost_ratio", 0.0)),
     })
 
-    params["ensemble_members"] = [res["params"] for res in ensemble_results]
+    params["ensemble_members"] = [res["params"] for res in selected_ensemble_results]
     params["meta_allocation"] = {
         "window_size": meta_window, 
         "eta": meta_eta, 
@@ -514,6 +648,19 @@ def run_final_oos_evaluation(
     gate_ok_before_champ = gate_ok
     pbo_champ_eff = float(resolve_adjusted_gates(OPT_FUTURES_CONFIG, n_ml_trials)[2])
     
+    cand_ev_cost_ratio = safe_float(best_trial.user_attrs.get("ev_cost_ratio"), 1e3, 1e6)
+    champ_ev_cost_ratio = safe_float(champ_m.get("ev_cost_ratio", 1e3), 1e3, 1e6)
+    swap_ok, swap_failures = _passes_champion_swap_4conditions(
+        gate_ok=gate_ok,
+        new_m=new_m,
+        champ_m=champ_m,
+        cand_ev_cost_ratio=cand_ev_cost_ratio,
+        champ_ev_cost_ratio=champ_ev_cost_ratio,
+    )
+    if not swap_ok:
+        gate_ok = False
+        gate_failures.extend(swap_failures)
+
     if gate_ok:
         cand_metrics = ChampionMetrics(
             cagr=float(new_m.get("cagr", 0.0)), 

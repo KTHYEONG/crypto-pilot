@@ -13,6 +13,7 @@ from src.domain.futures.optimization.optimizer import (
     MLPhaseDContext,
     replay_robust_awf_for_trial_params,
 )
+from src.domain.futures.optimization.phase_samplers import phase_b_constraints
 
 _logger: logging.Logger = logging.getLogger("candidate_selector")
 
@@ -332,6 +333,14 @@ def select_and_rank_candidates(
         t for t in study_ml.get_trials()
         if t.state == TrialState.COMPLETE and t.value is not None
     ]
+    is_v43_phase_b_study = str(getattr(study_ml, "study_name", "")).endswith("_phase_b")
+    if is_v43_phase_b_study:
+        phase_b_only = [
+            t for t in completed
+            if str(t.user_attrs.get("phase", "phase_b")).strip().lower() in {"phase_b", "b"}
+        ]
+        if phase_b_only:
+            completed = phase_b_only
     if not completed:
         _logger.warning(" [SELECT] No completed trials found.")
         return {}, {}
@@ -413,6 +422,71 @@ def select_and_rank_candidates(
         "selection_reject_reason_count": reject_reason_count,
     }
     return best_cand, selection_summary
+
+
+def _phase_b_calmar_sort_key(trial: optuna.trial.FrozenTrial) -> tuple[float, float, int]:
+    calmar_lcb = safe_float(trial.user_attrs.get("calmar_lcb", -1e18), -1e18)
+    trial_value = safe_float(getattr(trial, "value", -1e18), -1e18)
+    return (calmar_lcb, trial_value, -int(trial.number))
+
+
+def _is_phase_b_feasible(trial: optuna.trial.FrozenTrial) -> bool:
+    try:
+        return all(float(v) <= 0.0 for v in phase_b_constraints(trial))
+    except Exception:
+        return False
+
+
+def select_v43_phase_b_top_candidates(
+    study_ml: optuna.Study,
+    base_ctx: MLPhaseDContext,
+    cfg: dict[str, Any],
+    *,
+    top_k: int = 5,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Return v4.3 phase-b top candidates sorted by calmar_lcb with constraints awareness."""
+    from optuna.trial import TrialState
+
+    k = max(1, int(top_k))
+    completed = [
+        t for t in study_ml.get_trials()
+        if t.state == TrialState.COMPLETE and t.value is not None
+    ]
+    phase_b_completed = [
+        t for t in completed
+        if str(t.user_attrs.get("phase", "phase_b")).strip().lower() in {"phase_b", "b"}
+    ]
+    if phase_b_completed:
+        completed = phase_b_completed
+    if not completed:
+        return [], {"selected_by": "v43_phase_b_calmar_lcb", "candidate_count": 0}
+
+    feasible = [t for t in completed if _is_phase_b_feasible(t)]
+    pool = feasible if feasible else completed
+    ranked = sorted(pool, key=_phase_b_calmar_sort_key, reverse=True)
+    selected_trials = ranked[:k]
+
+    top_candidates: list[dict[str, Any]] = []
+    for trial in selected_trials:
+        _, val_diag = replay_robust_awf_for_trial_params(base_ctx, trial.params)
+        top_candidates.append({
+            "trial": trial,
+            "params": dict(trial.params),
+            "awf_diag": val_diag,
+            "j_score": float(safe_float(getattr(trial, "value", 0.0), 0.0)),
+            "deploy_score": float(safe_float(trial.user_attrs.get("calmar_lcb", trial.value), 0.0)),
+        })
+
+    summary = {
+        "selected_by": "v43_phase_b_calmar_lcb",
+        "candidate_count": int(len(completed)),
+        "feasible_count": int(len(feasible)),
+        "selected_count": int(len(top_candidates)),
+        "selected_trial_numbers": [int(c["trial"].number) for c in top_candidates],
+    }
+    if not feasible:
+        summary["fail_open"] = True
+    return top_candidates, summary
 
 
 def check_stability_layer3(
