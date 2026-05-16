@@ -2128,7 +2128,7 @@ def _evaluate_is_phase_d(
     return (obj1, obj2), diag
 
 
-def objective_ml_phase_d(trial: optuna.Trial, ctx: MLPhaseDContext) -> tuple[float, float]:
+def objective_ml_phase_d(trial: optuna.Trial, ctx: MLPhaseDContext) -> tuple[float, float] | float:
     """Joint NSGA-II Portfolio Optimization — AWF-based objectives (T2).
 
     T2: AWF leg log-TW를 직접 목적함수로 사용 (IS-only 탈피).
@@ -2143,9 +2143,8 @@ def objective_ml_phase_d(trial: optuna.Trial, ctx: MLPhaseDContext) -> tuple[flo
     result, _ = _evaluate_awf_phase_d_aggregate(ctx, merged, trial=trial)
     if isinstance(result, tuple):
         return result
-    # FUTURES_ML_ALPHA_NSGA2_ENABLED=False 환경에서의 fallback — tuple로 통일
-    scalar = float(result)
-    return (scalar, scalar)
+    # FUTURES_ML_ALPHA_NSGA2_ENABLED=False 환경에서의 fallback
+    return float(result)
 
 
 def select_best_trial_by_holdout_log_ret(
