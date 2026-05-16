@@ -456,6 +456,16 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
         "elite_top_n": 30,
         "basin_iqr_mult": 1.0,
     },
+    # Per-symbol beta scaling + idiosyncratic overlay (per_symbol_overlay.py)
+    "FUTURES_BETA_WINDOW": 240,
+    "FUTURES_BETA_MIN": 0.3,
+    "FUTURES_BETA_MAX": 4.0,
+    "FUTURES_BETA_PRIOR": 1.0,
+    "FUTURES_IDIO_VOL_WINDOW": 72,
+    "FUTURES_IDIO_ZHIST_WINDOW": 480,
+    "FUTURES_IDIO_DD_WINDOW": 168,
+    "FUTURES_IDIO_MAX_CUT": 0.5,
+    "FUTURES_PER_SYMBOL_OVERLAY_ENABLED": True,
 }
 
 # Single-pass execution: ATR period & stop mult are config/defaults (not this search grid).

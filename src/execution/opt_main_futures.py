@@ -106,6 +106,7 @@ def main() -> None:
     ai_telemetry_payloads: list[dict[str, Any]] = []
     run_id: str | None = None
     run_summary_written = False
+    discovered_symbols: list[str] = []
     selection_summary: dict[str, Any] = {
         "selected_by": None,
         "selected_trial_number": None,
@@ -123,15 +124,18 @@ def main() -> None:
     # [STEP 1/4] UNIVERSE DISCOVERY & DATA LOADING
     if not pre_args.skip_universe:
         collector = DataCollector()
-        success = orchestrate_universe_discovery(
+        discovery = orchestrate_universe_discovery(
             collector, pre_args.tf, pre_args.reference_date,
             FUTURES_DATA_DIR, FUTURES_ANCHOR_SYMBOLS
         )
-        if not success:
+        if not bool(discovery.get("success")):
             return
+        discovered_symbols = [str(s).strip() for s in discovery.get("selected_symbols", []) if str(s).strip()]
+
+    parser_default_symbols = discovered_symbols or list(config.opt_config.FUTURES_SYMBOLS)
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--symbols", type=str, default=",".join(config.opt_config.FUTURES_SYMBOLS))
+    parser.add_argument("--symbols", type=str, default=",".join(parser_default_symbols))
     parser.add_argument("--trials", type=int, default=OPT_FUTURES_CONFIG["total_trials"])
     parser.add_argument("--tf", type=str, choices=["1h", "4h"], default=pre_args.tf)
     parser.add_argument("--reference-date", type=str, default=pre_args.reference_date)

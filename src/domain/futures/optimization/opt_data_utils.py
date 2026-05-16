@@ -215,15 +215,15 @@ def assert_oos_gp_signal_alive(
     """Verify that ML signals are not dead in the OOS period."""
     for sym in valid_symbols[: min(5, len(valid_symbols))]:
         df = oos_data_maps[sym][tf]
-        if "ml_alpha_00" not in df.columns:
-            raise RuntimeError(f"Pre-OOS: {sym} missing ml_alpha_00.")
-        gp = df["ml_alpha_00"]
+        if "alpha_long_00" not in df.columns:
+            raise RuntimeError(f"Pre-OOS: {sym} missing alpha_long_00.")
+        gp = df["alpha_long_00"]
         if not pd.api.types.is_numeric_dtype(gp):
-            raise RuntimeError(f"Pre-OOS: {sym} ml_alpha_00 non-numeric dtype={gp.dtype}")
+            raise RuntimeError(f"Pre-OOS: {sym} alpha_long_00 non-numeric dtype={gp.dtype}")
         o0 = int(oos_data_maps[sym][f"oos_start_idx_{tf}"])
         oos_std = float(pd.to_numeric(gp.iloc[o0:], errors="coerce").std(ddof=0) or 0.0)
         if oos_std < 1e-6:
-            raise RuntimeError(f"Pre-OOS: {sym} OOS ml_alpha_00 std={oos_std:.2e} (dead signal).")
+            raise RuntimeError(f"Pre-OOS: {sym} OOS alpha_long_00 std={oos_std:.2e} (dead signal).")
 
 
 def load_single_symbol_data(
