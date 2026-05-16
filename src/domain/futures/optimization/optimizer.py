@@ -2338,4 +2338,9 @@ def check_hard_gates_ml(
     s_pf = float(oos_result.get("short_profit_factor", oos_result.get("oos_short_pf", 1.0)))
     combined_pf = float(oos_result.get("profit_factor", (l_pf + s_pf) / 2.0))
     dir_ok = combined_pf >= 1.05
-    return bool(pbo_ok and dsr_ok and wr_ok and mdd_ok and dir_ok)
+
+    # V3.1 Mechanical Hurdle: Mean Return per Trade (Expectancy) >= 0.40%
+    ev_pct = float(oos_result.get("mean_ret_pct", oos_result.get("expectancy", 0.0)))
+    ev_ok = ev_pct >= float(cfg.get("FUTURES_DEFAULT_EV_HURDLE_BPS", 40.0)) / 100.0
+
+    return bool(pbo_ok and dsr_ok and wr_ok and mdd_ok and dir_ok and ev_ok)
