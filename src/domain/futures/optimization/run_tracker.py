@@ -8,7 +8,7 @@ import signal
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import optuna
 from optuna.samplers import TPESampler
@@ -58,6 +58,7 @@ def get_or_create_study(
     sampler: optuna.samplers.BaseSampler,
     resume: bool = False,
     pruner: optuna.pruners.BasePruner | None = None,
+    directions: list[str] | tuple[str, ...] | None = None,
 ) -> optuna.Study:
     """Get existing or create new Optuna study, optionally deleting existing one."""
     if not resume:
@@ -67,14 +68,20 @@ def get_or_create_study(
         except KeyError:
             pass  # Study doesn't exist yet
 
-    study = optuna.create_study(
-        study_name=study_name,
-        storage=storage,
-        direction="maximize",
-        sampler=sampler,
-        pruner=pruner,
-        load_if_exists=True,
-    )
+    create_kwargs: dict[str, Any] = {
+        "study_name": study_name,
+        "storage": storage,
+        "sampler": sampler,
+        "pruner": pruner,
+        "load_if_exists": True,
+    }
+    if directions is not None and len(directions) > 1:
+        create_kwargs["directions"] = list(directions)
+    else:
+        direction = str(directions[0]) if directions else "maximize"
+        create_kwargs["direction"] = direction
+
+    study = optuna.create_study(**create_kwargs)
     return study
 
 
@@ -223,6 +230,7 @@ def ml_trial_passes_hard_gates(
 # Global context for worker processes to leverage Linux Copy-on-Write (CoW)
 # This prevents expensive IPC pickling of large context objects.
 _GLOBAL_BASE_CTX: MLPhaseDContext | None = None
+_GLOBAL_OBJECTIVE_FN: Callable[[optuna.Trial, MLPhaseDContext], Any] = objective_ml_phase_d
 
 
 def resolve_futures_parallel_policy(symbol_count: int) -> int:
@@ -236,6 +244,7 @@ def optimize_worker(s_name: str, s_url: str, chunk_size: int):
     global _GLOBAL_BASE_CTX
     if _GLOBAL_BASE_CTX is None:
         raise RuntimeError("Worker started without _GLOBAL_BASE_CTX")
+    objective_fn = _GLOBAL_OBJECTIVE_FN
 
     # Each process loads the study and runs its portion of trials
     inner_storage = optuna.storages.RDBStorage(
@@ -246,7 +255,7 @@ def optimize_worker(s_name: str, s_url: str, chunk_size: int):
 
     def _objective_with_timeout(tr: optuna.Trial):
         if trial_timeout_sec <= 0:
-            return objective_ml_phase_d(tr, _GLOBAL_BASE_CTX)
+            return objective_fn(tr, _GLOBAL_BASE_CTX)
 
         def _timeout_handler(_signum, _frame):
             raise RuntimeError(f"trial_timeout>{trial_timeout_sec}s")
@@ -255,7 +264,7 @@ def optimize_worker(s_name: str, s_url: str, chunk_size: int):
         signal.signal(signal.SIGALRM, _timeout_handler)
         signal.alarm(trial_timeout_sec)
         try:
-            return objective_ml_phase_d(tr, _GLOBAL_BASE_CTX)
+            return objective_fn(tr, _GLOBAL_BASE_CTX)
         finally:
             signal.alarm(0)
             signal.signal(signal.SIGALRM, prev)
@@ -463,6 +472,11 @@ def run_optimization_loop(
     seed: int,
     resume: bool = False,
     n_workers: int = 6,
+    sampler: optuna.samplers.BaseSampler | None = None,
+    pruner: optuna.pruners.BasePruner | None = None,
+    enqueue_params: list[dict[str, Any]] | None = None,
+    objective_fn: Callable[[optuna.Trial, MLPhaseDContext], Any] | None = None,
+    directions: list[str] | tuple[str, ...] | None = None,
 ) -> optuna.Study:
     """Orchestrate Step 4: Parallel Optuna optimization loop with Micro-Batching.
 
@@ -480,7 +494,7 @@ def run_optimization_loop(
     import optuna
     from tqdm import tqdm
 
-    global _GLOBAL_BASE_CTX
+    global _GLOBAL_BASE_CTX, _GLOBAL_OBJECTIVE_FN
 
     # 1. Prevent CPU Thrashing: Disable nested multi-threading in sub-processes
     for env_var in [
@@ -490,7 +504,7 @@ def run_optimization_loop(
         os.environ[env_var] = "1"
 
     from optuna.pruners import MedianPruner
-    _pruner = MedianPruner(
+    _pruner = pruner if pruner is not None else MedianPruner(
         n_startup_trials=int(OPT_FUTURES_CONFIG.get("FUTURES_PRUNER_STARTUP_TRIALS", 40)),
         n_warmup_steps=int(OPT_FUTURES_CONFIG.get("FUTURES_PRUNER_WARMUP_STEPS", 2)),
     )
@@ -498,14 +512,22 @@ def run_optimization_loop(
     study_ml = get_or_create_study(
         study_name=study_name,
         storage=storage,
-        sampler=ml_phase_d_sampler(seed=seed, n_trials=n_trials),
+        sampler=sampler if sampler is not None else ml_phase_d_sampler(seed=seed, n_trials=n_trials),
         resume=resume,
         pruner=_pruner,
+        directions=directions,
     )
     study_ml.set_user_attr("latest_run_id", base_ctx.run_id)
+    if enqueue_params:
+        for params in enqueue_params:
+            try:
+                study_ml.enqueue_trial(dict(params))
+            except Exception as e:
+                _logger.warning("Failed to enqueue seed params: %s", e)
 
     # 2. Zero-IPC Setup: Assign global context and freeze memory for fork()
     _GLOBAL_BASE_CTX = base_ctx
+    _GLOBAL_OBJECTIVE_FN = objective_fn if objective_fn is not None else objective_ml_phase_d
     gc.collect()
     try:
         gc.freeze()
@@ -595,5 +617,6 @@ def run_optimization_loop(
         if poller_thread is not None:
             poller_thread.join(timeout=5)
         _GLOBAL_BASE_CTX = None  # Clear global reference
+        _GLOBAL_OBJECTIVE_FN = objective_ml_phase_d
 
     return study_ml

@@ -184,12 +184,204 @@ def print_dual_audit_dashboard(
     _logger.info(" ──────────────────┼──────────────┼──────────────┼───────────────────────────")
 
 
-def log_alpha_component_summary(alpha_panel: Any) -> None:
-    pass
+def log_alpha_component_summary(alpha_panel: pd.DataFrame) -> None:
+    """Standardized Alpha Component Audit (V7.0.0 - Crypto Native)."""
+    if alpha_panel is None or alpha_panel.empty:
+        return
+
+    c_grn, c_red, c_rst, c_bld, c_yel = "\033[92m", "\033[91m", "\033[0m", "\033[1m", "\033[93m"
+
+    _logger.info("\n 🤖 [ALPHA MINER AUDIT: V7.0.0 (CRYPTO NATIVE)]")
+    _logger.info(" ───────────────────────────────────────────────────────────────────────────────────")
+    _logger.info("  COMPONENT        │  IC (OOS) │ Short IC  │  Tail IC  │  ICIR   │  STATUS")
+    _logger.info(" ──────────────────┼───────────┼───────────┼───────────┼─────────┼───────────")
+
+    components = alpha_panel.index.get_level_values("component").unique() if "component" in alpha_panel.index.names else []
+    
+    # Hurdles from g-alpha.md
+    HURDLE_IC = 0.015
+    HURDLE_SHORT = 0.010
+    HURDLE_TAIL = 0.000
+    HURDLE_ICIR = 0.50
+
+    if not components:
+        cols = [c for c in alpha_panel.columns if c.startswith("ml_alpha_") and c[-2:].isdigit()]
+        if not cols:
+            _logger.info("  No alpha components found in panel.")
+            return
+        
+        if "target" not in alpha_panel.columns:
+            for col in sorted(cols):
+                _logger.info(f"  {col:<16} │    --     │    --     │    --     │   --    │   [READY]")
+            _logger.info(" ───────────────────────────────────────────────────────────────────────────────────\n")
+            return
+
+        # Calculate metrics for each wide-form column
+        for col in sorted(cols):
+            # 1. Overall IC
+            ic = alpha_panel[col].corr(alpha_panel["target"], method="spearman")
+            
+            # 2. Short-side IC
+            short_mask = alpha_panel["target"] < 0
+            short_ic = alpha_panel.loc[short_mask, col].corr(alpha_panel.loc[short_mask, "target"], method="spearman") if short_mask.sum() > 20 else 0.0
+            
+            # 3. Tail IC
+            q10_low = alpha_panel["target"].quantile(0.10)
+            q10_high = alpha_panel["target"].quantile(0.90)
+            tail_mask = (alpha_panel["target"] <= q10_low) | (alpha_panel["target"] >= q10_high)
+            tail_ic = alpha_panel.loc[tail_mask, col].corr(alpha_panel.loc[tail_mask, "target"], method="spearman") if tail_mask.sum() > 20 else 0.0
+            
+            # 4. ICIR
+            std = alpha_panel[col].std()
+            icir = (ic / std) if std > 1e-6 else 0.0
+
+            ok_ic = ic >= HURDLE_IC
+            ok_short = short_ic >= HURDLE_SHORT
+            ok_tail = tail_ic >= HURDLE_TAIL
+            ok_icir = icir >= HURDLE_ICIR
+            all_pass = ok_ic and ok_short and ok_tail and ok_icir
+            
+            if not ok_short or not ok_tail:
+                res_str = f"{c_red}[REJECTED]{c_rst}"
+            elif all_pass:
+                res_str = f"{c_grn}[PASS]{c_rst}"
+            else:
+                res_str = f"{c_yel}[FAIL]{c_rst}"
+
+            _logger.info(
+                f"  {col:<16} │  {ic:>8.3f} │ {short_ic:>8.3f}  │ {tail_ic:>8.3f}  │ {icir:>7.2f} │  {res_str}"
+            )
+        _logger.info(" ───────────────────────────────────────────────────────────────────────────────────\n")
+        return
+
+    for comp in sorted(components):
+        sub = alpha_panel.xs(comp, level="component")
+        if "target" not in sub.columns or "ml_alpha_00" not in sub.columns:
+            continue
+            
+        # 1. Overall IC
+        ic = sub["ml_alpha_00"].corr(sub["target"], method="spearman")
+        
+        # 2. Short-side IC (Target < 0)
+        short_mask = sub["target"] < 0
+        short_ic = sub.loc[short_mask, "ml_alpha_00"].corr(sub.loc[short_mask, "target"], method="spearman") if short_mask.sum() > 20 else 0.0
+        
+        # 3. Tail IC (Decile 1 & 10)
+        q10_low = sub["target"].quantile(0.10)
+        q10_high = sub["target"].quantile(0.90)
+        tail_mask = (sub["target"] <= q10_low) | (sub["target"] >= q10_high)
+        tail_ic = sub.loc[tail_mask, "ml_alpha_00"].corr(sub.loc[tail_mask, "target"], method="spearman") if tail_mask.sum() > 20 else 0.0
+        
+        # 4. ICIR (Hurdle 0.5 for Crypto)
+        # Using daily-equivalent IR if possible, or per-bar IR
+        std = sub["ml_alpha_00"].std()
+        icir = (ic / std) if std > 1e-6 else 0.0
+
+        # Pass/Fail Logic (G-ALPHA strictly enforced)
+        ok_ic = ic >= HURDLE_IC
+        ok_short = short_ic >= HURDLE_SHORT
+        ok_tail = tail_ic >= HURDLE_TAIL
+        ok_icir = icir >= HURDLE_ICIR
+        
+        all_pass = ok_ic and ok_short and ok_tail and ok_icir
+        
+        if not ok_short or not ok_tail:
+            res_str = f"{c_red}[REJECTED]{c_rst}"
+        elif all_pass:
+            res_str = f"{c_grn}[PASS]{c_rst}"
+        else:
+            res_str = f"{c_yel}[FAIL]{c_rst}"
+            
+        _logger.info(
+            f"  {comp:<16} │  {ic:>8.3f} │ {short_ic:>8.3f}  │ {tail_ic:>8.3f}  │ {icir:>7.2f} │  {res_str}"
+        )
+
+    _logger.info(" ───────────────────────────────────────────────────────────────────────────────────")
+    _logger.info(f"  [HURDLES] IC > {HURDLE_IC} | Short > {HURDLE_SHORT} | Tail > {HURDLE_TAIL} | ICIR > {HURDLE_ICIR}")
+    _logger.info(" ───────────────────────────────────────────────────────────────────────────────────\n")
 
 
 def log_hmm_report_summary(hmm_report: dict[str, Any]) -> None:
-    pass
+    """Standardized HMM Audit Report (V11.0.0)."""
+    if not hmm_report:
+        return
+
+    c_grn, c_red, c_rst, c_bld, c_yel = "\033[92m", "\033[91m", "\033[0m", "\033[1m", "\033[93m"
+
+    _logger.info("\n 🧠 [HMM RISK OVERLAY AUDIT: V11.0.0]")
+    _logger.info(" ───────────────────────────────────────────────────────────────────────────────────")
+    _logger.info("  METRIC           │      VALUE     │  TARGET (Hurdle)  │  RESULT")
+    _logger.info(" ──────────────────┼────────────────┼───────────────────┼───────────")
+
+    def get_v(k: str) -> float:
+        return safe_float(hmm_report.get(k, 0.0))
+
+    # [Hurdle Definitions]
+    # (Label, Key, Target, Operator, Is_Pct)
+    inference_metrics = [
+        ("Lead-Lag Tail Cap", "hmm_lead_lag_tail_capture_8bar", 40.0, ">", True),
+        ("Avg-Duration", "hmm_avg_duration", 18.0, ">", False),
+        ("Crisis-Prec", "hmm_crisis_precision", 10.0, ">", True),
+        ("Vol-Scale (Calm)", "regime_prob_risk_on_calm_vol_scale", 0.85, "<", False),
+    ]
+
+    policy_metrics = [
+        ("Damp Tail-Capture", "hmm_execution_damp_tail_capture", 80.0, ">", True),
+        ("Damp Crisis-Cap", "hmm_execution_damp_crisis_cap", 90.0, ">", True),
+        ("Protected Exp.", "hmm_execution_protected_exposure_share", (30.0, 50.0), "range", True),
+        ("False-Flat", "hmm_false_flat_cost", 15.0, "<", True),
+    ]
+
+    def print_rows(metrics, header):
+        _logger.info(f" [{header}]")
+        for label, key, target, op, is_pct in metrics:
+            val = get_v(key)
+            
+            passed = False
+            if op == ">":
+                passed = val >= target
+            elif op == "<":
+                passed = val <= target
+            elif op == "range":
+                passed = target[0] <= val <= target[1]
+            
+            res_color = c_grn if passed else c_red
+            res_str = f"{res_color}{'[PASS]' if passed else '[FAIL]'}{c_rst}"
+            
+            val_fmt = f"{val:>13.2f}%" if is_pct else f"{val:>13.2f} "
+            if not is_pct and "Duration" in label:
+                val_fmt = f"{val:>13.1f} b"
+            elif not is_pct and "Scale" in label:
+                val_fmt = f"{val:>13.2f} x"
+
+            if op == "range":
+                tgt_fmt = f"{target[0]:.0f}% ~ {target[1]:.0f}%"
+            else:
+                tgt_fmt = f"{op} {target:.1f}" + ("%" if is_pct else "")
+            
+            _logger.info(f"  {label:<16} │ {val_fmt}  │  {tgt_fmt:<17} │   {res_str}")
+
+    print_rows(inference_metrics, "Inference Level")
+    print_rows(policy_metrics, "Policy Level")
+
+    _logger.info(" ───────────────────────────────────────────────────────────────────────────────────")
+    backend = hmm_report.get("hmm_backend", "unknown")
+    _logger.info(f"  > HMM Backend    : {backend}")
+    
+    all_passed = True
+    for _, k, t, o, _ in inference_metrics + policy_metrics:
+        v = get_v(k)
+        p = False
+        if o == ">": p = v >= t
+        elif o == "<": p = v <= t
+        elif o == "range": p = t[0] <= v <= t[1]
+        if not p:
+            all_passed = False
+            break
+            
+    verdict = f"{c_grn}[READY]{c_rst}" if all_passed else f"{c_yel}[WARN]{c_rst}"
+    _logger.info(f"  > Final Verdict  : {verdict} - Validated for Optuna Search Space")
+    _logger.info(" ───────────────────────────────────────────────────────────────────────────────────\n")
 
 
 def log_ml_merge_feature_stats(oos_data_maps: Any, valid_symbols: Any, tf: Any) -> None:
