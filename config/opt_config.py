@@ -70,12 +70,12 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     "FUTURES_ML_IC_FILTER_USE_HAC": True,
     "FUTURES_ML_IC_FILTER_USE_EWMA": False,
     "FUTURES_ML_IC_EWMA_HALF_LIFE": 540.0,
-    "FUTURES_ML_IC_HALF_LIFE": 2.3,
+    "FUTURES_ML_IC_HALF_LIFE": 40,
     # Tier 2 discovery: significantly relax cross-section balance cap for growth.
     "FUTURES_ML_IC_SYMBOL_BALANCE_MAX": 3.0,
-    "FUTURES_ML_IC_REGIME_GATE": False,
-    # Tier 2 discovery: FDR relaxation to expand candidate pool.
-    "FUTURES_ML_IC_FDR_Q": 0.30,
+    "FUTURES_ML_IC_REGIME_GATE": True,
+    # FDR: 0.10 기준으로 강화 (HORIZONS=(12,24,48,72,96) multi-horizon 유효성 확보)
+    "FUTURES_ML_IC_FDR_Q": 0.10,
     # Step3: regime-conditional alpha utility pressure (disabled by default).
     "FUTURES_STEP3_REGIME_ALPHA_ENABLED": False,
     # CHOP-fragile rejection gate: active when chop support is sufficiently high.
