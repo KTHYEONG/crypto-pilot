@@ -1,11 +1,9 @@
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import multiprocessing
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -39,8 +37,8 @@ from src.domain.futures.ml_pipeline.pipeline_runner import (  # noqa: E402
 )
 from src.domain.futures.optimization.candidate_selector import (  # noqa: E402
     check_stability_layer3,
-    select_v43_phase_b_top_candidates,
     select_and_rank_candidates,
+    select_v43_phase_b_top_candidates,
 )
 from src.domain.futures.optimization.dashboard import (  # noqa: E402
     log_alpha_component_summary,
@@ -67,14 +65,16 @@ from src.domain.futures.optimization.phase_runner import (  # noqa: E402
 from src.domain.futures.optimization.run_tracker import (  # noqa: E402
     apply_ops_profile_overrides,
     build_joint_study_name,
+    build_p7_ops_summary,
     build_run_id,
-    collect_run_summary_from_study,
     resolve_futures_parallel_policy,
     setup_optuna_storage,
-    write_run_summary_snapshot,
 )
 from src.domain.futures.optimization.screener import (  # noqa: E402
     orchestrate_universe_discovery,
+)
+from src.domain.futures.optimization.trial_observability import (  # noqa: E402
+    classify_no_valid_candidates,
 )
 from src.domain.futures.optimization.validation import (  # noqa: E402
     awf_pos_frac_to_pseudo_pbo,
@@ -101,6 +101,52 @@ setup_logger("src.domain.futures.ml_pipeline", write_file=False)
 logging.getLogger("DataCollector").setLevel(logging.WARNING)
 logging.getLogger("BinanceClient").setLevel(logging.WARNING)
 logging.getLogger("src.domain.futures.ml_pipeline").setLevel(logging.INFO)
+
+
+def _collect_p7_ops_summary(
+    *,
+    mode: str,
+    ml_out: Any,
+    study_ml: optuna.Study | None,
+    selection_summary: dict[str, Any],
+) -> dict[str, Any]:
+    alpha_panel = getattr(ml_out, "alpha_panel", None)
+    alpha_attrs = getattr(alpha_panel, "attrs", {}) if alpha_panel is not None else {}
+    hmm_report = getattr(ml_out, "hmm_report", {}) or {}
+    study_attrs = dict(getattr(study_ml, "user_attrs", {}) or {}) if study_ml is not None else {}
+    return build_p7_ops_summary(
+        mode=mode,
+        ml_integrity_report=getattr(ml_out, "integrity_report", {}) or {},
+        alpha_filter_meta=dict(alpha_attrs.get("alpha_component_filter", {}) or {}),
+        alpha_goal_meta=dict(alpha_attrs.get("alpha_goal_eval_meta", {}) or {}),
+        hmm_goal_meta=dict(hmm_report.get("hmm_goal_eval_meta", {}) or {}),
+        alpha_cache_meta=dict(alpha_attrs.get("alpha_cache", {}) or {}),
+        study_user_attrs=study_attrs,
+        selection_summary=selection_summary,
+    )
+
+
+def _log_p7_ops_summary(summary: dict[str, Any]) -> None:
+    integrity = summary.get("integrity", {}) if isinstance(summary.get("integrity"), dict) else {}
+    alpha = summary.get("alpha", {}) if isinstance(summary.get("alpha"), dict) else {}
+    obs = (
+        summary.get("optuna_observability", {})
+        if isinstance(summary.get("optuna_observability"), dict)
+        else {}
+    )
+    _logger.info(
+        " [P7] health=%s mode=%s panel_nan=%.4f prefill_nan=%.4f alpha_survive=%d/%d "
+        "elite_zero=%s no_candidate=%s reasons=%s",
+        str(summary.get("health_status", "unknown")),
+        str(summary.get("mode", "unknown")),
+        float(integrity.get("panel_nan_pct", 0.0) or 0.0),
+        float(integrity.get("panel_prefill_nan_pct", 0.0) or 0.0),
+        int(alpha.get("n_surviving", 0) or 0),
+        int(alpha.get("n_components", 0) or 0),
+        str(bool(alpha.get("elite_zero_after_survival", False))).lower(),
+        str(obs.get("no_candidate_reason", "") or "-"),
+        ",".join(str(x) for x in (summary.get("reason_codes", []) or [])) or "-",
+    )
 
 
 def main() -> None:
@@ -199,10 +245,12 @@ def main() -> None:
     alpha_panel = getattr(ml_out, "alpha_panel", None)
     filt_meta = getattr(alpha_panel, "attrs", {}).get("alpha_component_filter", {}) if alpha_panel is not None else {}
     n_surv = int(filt_meta.get("n_surviving", 0))
+    # Final aggregated count check (strictly what will be used in optimization)
+    n_post = int(filt_meta.get("post_agg_selected_long_count", 0))
     
     if not args.hmm_only:  # HMM-only 모드가 아닐 때만 알파 생존 여부 체크
-        if n_surv <= 0:
-            _logger.error("\n [!] G-ALPHA v8.0 CRITICAL: No alpha components survived the strict gates.")
+        if n_surv <= 0 or n_post <= 0:
+            _logger.error("\n [!] G-ALPHA v8.0 CRITICAL: No alpha components survived the strict gates (survive=%d, post=%d).", n_surv, n_post)
             _logger.error(" [!] Optimization (Step 3/4) aborted to prevent noise overfitting.")
             return
 
@@ -210,11 +258,16 @@ def main() -> None:
         hmm_report = getattr(ml_out, "hmm_report", {}) or {}
         alpha_panel = getattr(ml_out, "alpha_panel", None)
         alpha_non_empty = bool(alpha_panel is not None and not alpha_panel.empty)
-        alpha_component_count = (
-            int(alpha_panel.index.get_level_values("component").nunique())
-            if alpha_non_empty and "component" in alpha_panel.index.names
-            else 0
-        )
+        
+        # Improved component count discovery
+        if alpha_non_empty and alpha_panel is not None:
+            if "component" in alpha_panel.index.names:
+                alpha_component_count = int(alpha_panel.index.get_level_values("component").nunique())
+            else:
+                alpha_component_count = len([c for c in alpha_panel.columns if c.startswith("alpha_long_") or c == "alpha_long"])
+        else:
+            alpha_component_count = 0
+            
         hmm_report_present = bool(hmm_report)
 
         if args.hmm_only and not hmm_report_present:
@@ -245,6 +298,14 @@ def main() -> None:
                 int(filt_meta.get("fail_oos", 0)), int(filt_meta.get("fail_half_life", 0)),
             )
 
+        p7_ml_only_summary = _collect_p7_ops_summary(
+            mode="hmm-only" if args.hmm_only else "alpha-only",
+            ml_out=ml_out,
+            study_ml=None,
+            selection_summary=selection_summary,
+        )
+        run_summary_extras["p7_ops_summary"] = p7_ml_only_summary
+        _log_p7_ops_summary(p7_ml_only_summary)
         _logger.info(" [ML-ONLY] optimization skipped by mode flag.")
         return
 
@@ -342,7 +403,27 @@ def main() -> None:
         if best_cand:
             ensemble_top_candidates = [best_cand]
     if not best_cand:
-        _logger.error("No valid candidates found.")
+        completed_trials = [
+            t for t in study_ml.get_trials(deepcopy=False)
+            if t.state == optuna.trial.TrialState.COMPLETE
+        ]
+        no_candidate_reason = classify_no_valid_candidates(
+            selection_summary=sel_sum,
+            completed_trials=completed_trials,
+        )
+        try:
+            study_ml.set_user_attr("obs_no_valid_candidates_reason", no_candidate_reason)
+        except Exception:
+            pass
+        p7_no_candidate_summary = _collect_p7_ops_summary(
+            mode="optimization",
+            ml_out=ml_out,
+            study_ml=study_ml,
+            selection_summary=sel_sum,
+        )
+        run_summary_extras["p7_ops_summary"] = p7_no_candidate_summary
+        _log_p7_ops_summary(p7_no_candidate_summary)
+        _logger.error("No valid candidates found. reason=%s", no_candidate_reason)
         return
     selection_summary.update(sel_sum)
 
@@ -366,13 +447,21 @@ def main() -> None:
         project_root=project_root, study_ml=study_ml, run_id=run_id,
         ai_telemetry_payloads=ai_telemetry_payloads, selection_summary=selection_summary,
         run_summary_extras=run_summary_extras, ml_ctx=base_ctx, n_ml_trials=n_ml_trials,
-        target_seeds=target_seeds, selected_ops_profile=selected_ops_profile,
+        target_seeds=target_seeds, selected_ops_profile=str(selected_ops_profile or "custom"),
         pbo_gate=pbo_gate, dsr_gate=dsr_gate, pbo_obs=pbo_obs, dsr_obs=dsr_obs,
         best_trial=best_trial_coord, params=build_ml_phase_d_params(champion_raw_params, args.tf),
         champ_stab_cv=champ_stab_cv, stab_tmp_layer3_awf_fail=champ_l3_fail,
         cv_max=float(OPT_FUTURES_CONFIG.get("FUTURES_CHAMP_STABILITY_CV_MAX", 0.30)),
         phase_c_diagnostics=phase_bundle.phase_c_diagnostics,
     )
+    p7_done_summary = _collect_p7_ops_summary(
+        mode="optimization",
+        ml_out=ml_out,
+        study_ml=study_ml,
+        selection_summary=selection_summary,
+    )
+    run_summary_extras["p7_ops_summary"] = p7_done_summary
+    _log_p7_ops_summary(p7_done_summary)
     _persist_run_summary("done", force=True, best_cand=best_cand)
 
 

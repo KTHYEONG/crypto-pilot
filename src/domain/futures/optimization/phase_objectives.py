@@ -8,6 +8,7 @@ import optuna
 
 from src.domain.futures.optimization.optimizer import MLPhaseDContext, objective_ml_phase_d
 from src.domain.futures.optimization.phase_metrics import lcb, summarize, ucb
+from src.domain.futures.optimization.trial_observability import set_trial_event_attrs
 
 
 def _metric(trial: optuna.Trial, *keys: str, default: float = 0.0) -> float:
@@ -69,6 +70,14 @@ def _report_fold_steps_for_pruning(
         score_lcb = lcb(fold_scores[:idx], k=k)
         trial.report(float(score_lcb), step=idx - 1)
         if hasattr(trial, "should_prune") and trial.should_prune():
+            set_trial_event_attrs(
+                trial,
+                status="pruned",
+                reason="prune_report_should_prune",
+                stage="phase_fold_pruning",
+                step=idx - 1,
+                metrics={"score_lcb": score_lcb},
+            )
             raise optuna.TrialPruned()
 
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import os
 import signal
 import subprocess
@@ -21,6 +22,12 @@ from src.domain.futures.optimization.dashboard import safe_float
 from src.domain.futures.optimization.optimizer import (
     MLPhaseDContext,
     objective_ml_phase_d,
+)
+from src.domain.futures.optimization.trial_observability import (
+    build_compact_trial_summary,
+    increment_failure_reason_count,
+    init_failure_reason_counts,
+    trial_elapsed_seconds,
 )
 
 _logger: logging.Logger = logging.getLogger("run_tracker")
@@ -269,11 +276,19 @@ def optimize_worker(s_name: str, s_url: str, chunk_size: int):
             signal.alarm(0)
             signal.signal(signal.SIGALRM, prev)
 
+    def _trial_finish_callback(_study: optuna.Study, tr: optuna.trial.FrozenTrial) -> None:
+        elapsed = trial_elapsed_seconds(tr)
+        # Suppress verbose logging for pruned trials to reduce noise. 
+        # Only log COMPLETE trials or significant events if needed.
+        if tr.state == optuna.trial.TrialState.COMPLETE:
+             _logger.info("%s", build_compact_trial_summary(tr, elapsed_sec=elapsed))
+
     study.optimize(
         _objective_with_timeout,
         n_trials=chunk_size,
         n_jobs=1,
         catch=(ValueError, RuntimeError),
+        callbacks=[_trial_finish_callback],
     )
 
 
@@ -423,6 +438,114 @@ def collect_run_summary_from_study(
     }
 
 
+def build_p7_ops_summary(
+    *,
+    mode: str,
+    ml_integrity_report: dict[str, Any] | None,
+    alpha_filter_meta: dict[str, Any] | None,
+    alpha_goal_meta: dict[str, Any] | None,
+    hmm_goal_meta: dict[str, Any] | None,
+    alpha_cache_meta: dict[str, Any] | None,
+    study_user_attrs: dict[str, Any] | None,
+    selection_summary: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Build a structured P7 operations summary for post-run diagnosis."""
+    integrity = dict(ml_integrity_report or {})
+    alpha_filter = dict(alpha_filter_meta or {})
+    alpha_goal = dict(alpha_goal_meta or {})
+    hmm_goal = dict(hmm_goal_meta or {})
+    alpha_cache = dict(alpha_cache_meta or {})
+    study_attrs = dict(study_user_attrs or {})
+    selection = dict(selection_summary or {})
+
+    panel = integrity.get("panel", {}) if isinstance(integrity.get("panel"), dict) else {}
+    panel_nan_pct = float(panel.get("nan_pct", 0.0) or 0.0)
+    panel_prefill_nan_pct = float(integrity.get("panel_pre_fillna_nan_pct", 0.0) or 0.0)
+    n_stage_rows = len(integrity.get("stages", []) or [])
+    n_feature_group_rows = len(integrity.get("feature_group_coverage", []) or [])
+
+    n_surviving = int(alpha_filter.get("n_surviving", 0) or 0)
+    n_components = int(alpha_filter.get("n_components", 0) or 0)
+    elite_zero_after_survival = bool(alpha_filter.get("elite_zero_after_survival", False))
+
+    no_candidate_reason = str(study_attrs.get("obs_no_valid_candidates_reason", "") or "")
+    failure_reason_counts = (
+        dict(study_attrs.get("obs_failure_reason_counts", {}))
+        if isinstance(study_attrs.get("obs_failure_reason_counts", {}), dict)
+        else {}
+    )
+    reject_reason_count = (
+        dict(selection.get("selection_reject_reason_count", {}))
+        if isinstance(selection.get("selection_reject_reason_count", {}), dict)
+        else {}
+    )
+
+    reason_codes: list[str] = []
+    for section in (alpha_goal, hmm_goal):
+        codes = section.get("reason_codes", [])
+        if isinstance(codes, list):
+            for code in codes:
+                txt = str(code).strip()
+                if txt:
+                    reason_codes.append(txt)
+    if no_candidate_reason:
+        reason_codes.append(f"no_candidate:{no_candidate_reason}")
+    if elite_zero_after_survival:
+        reason_codes.append("elite_zero_after_survival")
+    dedup_reason_codes = list(dict.fromkeys(reason_codes))
+
+    cache_state = str(alpha_cache.get("cache_state", "n/a") or "n/a")
+    cache_enabled = cache_state not in {"disabled", "n/a"}
+
+    health_status = "pass"
+    if (
+        no_candidate_reason
+        or n_surviving <= 0
+        or elite_zero_after_survival
+        or "no_elite_components" in dedup_reason_codes
+    ):
+        health_status = "fail"
+    elif panel_nan_pct > 0.05 or panel_prefill_nan_pct > 0.15 or dedup_reason_codes:
+        health_status = "warn"
+
+    if not math.isfinite(panel_nan_pct):
+        panel_nan_pct = 1.0
+    if not math.isfinite(panel_prefill_nan_pct):
+        panel_prefill_nan_pct = 1.0
+
+    return {
+        "framework": "p7-ops-summary-v1",
+        "mode": str(mode),
+        "health_status": health_status,
+        "integrity": {
+            "panel_nan_pct": float(panel_nan_pct),
+            "panel_prefill_nan_pct": float(panel_prefill_nan_pct),
+            "stage_rows": int(n_stage_rows),
+            "feature_group_rows": int(n_feature_group_rows),
+        },
+        "alpha": {
+            "n_surviving": int(n_surviving),
+            "n_components": int(n_components),
+            "elite_zero_after_survival": bool(elite_zero_after_survival),
+            "goal_verdict": str(alpha_goal.get("verdict", "unknown")),
+        },
+        "hmm": {
+            "goal_verdict": str(hmm_goal.get("verdict", "unknown")),
+        },
+        "optuna_observability": {
+            "no_candidate_reason": no_candidate_reason,
+            "failure_reason_counts": failure_reason_counts,
+            "selection_reject_reason_count": reject_reason_count,
+        },
+        "alpha_cache": {
+            "enabled": bool(cache_enabled),
+            "state": cache_state,
+            "schema": str(alpha_cache.get("cache_schema", "")),
+        },
+        "reason_codes": dedup_reason_codes,
+    }
+
+
 def _cleanup_old_runs(out_dir: Path, max_files: int = 50) -> None:
     """Keep only the most recent N summary files to prevent directory bloating."""
     try:
@@ -519,6 +642,7 @@ def run_optimization_loop(
         directions=directions,
     )
     study_ml.set_user_attr("latest_run_id", base_ctx.run_id)
+    failure_reason_counts = init_failure_reason_counts()
     if enqueue_params:
         for params in enqueue_params:
             try:
@@ -555,7 +679,7 @@ def run_optimization_loop(
         )
         try:
             study = optuna.load_study(study_name=s_name, storage=poller_storage)
-            with tqdm(total=target, desc=f"  {phase_label}", unit="trial", leave=True) as pbar:
+            with tqdm(total=target, desc=f"  {phase_label:<32}", unit="trial", leave=True) as pbar:
                 while not stop_event.is_set():
                     try:
                         trials = study.get_trials(
@@ -563,17 +687,20 @@ def run_optimization_loop(
                             states=[TrialState.COMPLETE, TrialState.PRUNED, TrialState.FAIL]
                         )
                         if r_id:
-                            count = sum(1 for t in trials if t.user_attrs.get("run_id") == r_id)
-                        else:
-                            count = len(trials)
+                            trials = [t for t in trials if t.user_attrs.get("run_id") == r_id]
                         
+                        count = len(trials)
+                        ok_count = sum(1 for t in trials if t.state == TrialState.COMPLETE)
+                        pruned_count = sum(1 for t in trials if t.state == TrialState.PRUNED)
+                        
+                        pbar.set_postfix_str(f"OK:{ok_count} | PRUNED:{pruned_count}")
                         pbar.n = min(count, target)
                         pbar.refresh()
                         if count >= target:
                             break
                     except Exception:
                         pass
-                    time.sleep(3)  # Relaxed polling interval to reduce DB load
+                    time.sleep(1)  # Faster polling for better responsiveness
                 pbar.n = target
                 pbar.refresh()
         except Exception:
@@ -614,6 +741,14 @@ def run_optimization_loop(
                 except Exception as e:
                     _logger.error("Worker batch failed: %s", e)
     finally:
+        try:
+            trials = study_ml.get_trials(deepcopy=False, states=[TrialState.FAIL, TrialState.PRUNED])
+            for tr in trials:
+                reason = str((tr.user_attrs or {}).get("obs_reason", "unknown"))
+                increment_failure_reason_count(failure_reason_counts, reason)
+        except Exception:
+            pass
+        study_ml.set_user_attr("obs_failure_reason_counts", dict(failure_reason_counts))
         stop_event.set()
         if poller_thread is not None:
             poller_thread.join(timeout=5)

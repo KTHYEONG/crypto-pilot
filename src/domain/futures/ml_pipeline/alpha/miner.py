@@ -56,10 +56,10 @@ except Exception:
     )
     _GPU_AVAILABLE = (_res.returncode == 0)
 except Exception as _e:
-    _logger.warning("Failed to check GPU availability: %s. Defaulting to CPU.", _e)
+    _logger.debug("Failed to check GPU availability: %s. Defaulting to CPU.", _e)
     _GPU_AVAILABLE = False
 
-_logger.info("CatBoost GPU availability verified: %s", _GPU_AVAILABLE)
+_logger.debug("CatBoost GPU availability verified: %s", _GPU_AVAILABLE)
 _DEFAULT_TASK_TYPE = "GPU" if _GPU_AVAILABLE else "CPU"
 
 
@@ -335,7 +335,7 @@ class MLAlphaMiner:
                 f"({self.n_features_to_select} vs slots_per_theme={self.slots_per_theme})"
             )
 
-        _logger.info("Training MLAlphaMiner v6 (CatBoost GPU + Dynamic Labeling)...")
+        _logger.debug("Training MLAlphaMiner v6 (CatBoost %s + Dynamic Labeling)...", _DEFAULT_TASK_TYPE)
         
         # [Fix] Standardize indices to UTC aware to prevent alignment mismatches.
         def _standardize_idx(idx: pd.Index) -> pd.Index:
@@ -562,11 +562,12 @@ class MLAlphaMiner:
 
             if train_pool is not None:
                 ranker_params = self._get_lgbm_params(seed_offset=theme_idx * 100, iterations=long_iters)
+                ranker_params["logging_level"] = "Silent" # Suppress CatBoost overfitting detector warnings
                 long_ranker = CatBoostRanker(**ranker_params)
                 try:
                     long_ranker.fit(train_pool, eval_set=eval_pool)
                 except CatBoostError as exc:
-                    _logger.warning("CatBoost Long Ranker fit failed: %s. Falling back to CPU.", exc)
+                    _logger.debug("CatBoost Long Ranker fit failed: %s. Falling back to CPU.", exc)
                     ranker_params["task_type"] = "CPU"
                     ranker_params.pop("devices", None)
                     ranker_params.pop("gpu_ram_part", None)
@@ -575,11 +576,12 @@ class MLAlphaMiner:
 
             if short_train_pool is not None:
                 short_params = self._get_lgbm_params(seed_offset=theme_idx * 100 + 1000, iterations=short_iters)
+                short_params["logging_level"] = "Silent"
                 short_ranker = CatBoostRanker(**short_params)
                 try:
                     short_ranker.fit(short_train_pool, eval_set=short_eval_pool)
                 except CatBoostError as exc:
-                    _logger.warning("CatBoost Short Ranker fit failed: %s. Falling back to CPU.", exc)
+                    _logger.debug("CatBoost Short Ranker fit failed: %s. Falling back to CPU.", exc)
                     short_params["task_type"] = "CPU"
                     short_params.pop("devices", None)
                     short_params.pop("gpu_ram_part", None)
@@ -674,18 +676,19 @@ class MLAlphaMiner:
         # valid_mask.sum() == len(work_df) (close가 항상 유효한 경우)이므로 직접 구성 가능
         raw_alpha_df = pd.DataFrame(slot_arrays, index=work_df.index)
 
-        # Apply filtering (long heads only). Short heads are preserved and
-        # aggregated separately because they are trained with short-oriented labels.
+        # Apply filtering on both long/short slots. Filter metadata will expose
+        # direction-separated survivors while preserving backward-compatible aliases.
         long_slot_cols = [c for c in raw_alpha_df.columns if _LONG_SLOT_COL_RE.match(c)]
         short_slot_cols = [c for c in raw_alpha_df.columns if _SHORT_SLOT_COL_RE.match(c)]
+        alpha_slot_cols = list(dict.fromkeys(long_slot_cols + short_slot_cols))
         filter_opts = filter_options or {}
         alpha_df_all, filt_meta = filter_alpha_components(
             raw_alpha_df.copy(),
             panel_df_std, # [Fix] Use standardized panel
             is_end_date=is_end_date,
-            n_trials=max(1, len(long_slot_cols)),
+            n_trials=max(1, len(alpha_slot_cols)),
             fdr_q=float(filter_opts.get("fdr_q", 0.10)),
-            alpha_cols=long_slot_cols,
+            alpha_cols=alpha_slot_cols,
             symbol_balance_max=float(filter_opts.get("symbol_balance_max", 3.0)),
             use_newey_west=bool(filter_opts.get("use_newey_west", False)),
             use_ewma_ic_stat=bool(filter_opts.get("use_ewma_ic_stat", False)),
@@ -697,17 +700,21 @@ class MLAlphaMiner:
             step3_chop_weight_mult=float(filter_opts.get("step3_chop_weight_mult", 0.50)),
             step3_weight_mult_floor=float(filter_opts.get("step3_weight_mult_floor", 0.20)),
         )
-        for c in short_slot_cols:
-            alpha_df_all[c] = raw_alpha_df[c]
-
-        # [Audit Fix] Use survived_cols from metadata instead of std check.
-        # This allows us to show raw ICs in the audit report while still 
-        # only including valid components in the final alpha_long ensemble.
-        surviving_all = filt_meta.get("survived_cols", [])
-        surviving_short = [c for c in surviving_all if _SHORT_SLOT_COL_RE.match(c)]
-        surviving = [c for c in surviving_all if _LONG_SLOT_COL_RE.match(c)]
+        # [Audit Fix] Use direction-separated survivors from metadata.
+        # Keep backward compatibility by falling back to survived_cols parsing.
+        surviving = list(filt_meta.get("survived_long_cols", []))
+        surviving_short = list(filt_meta.get("survived_short_cols", []))
+        if not surviving and not surviving_short:
+            surviving_all = list(filt_meta.get("survived_cols", []))
+            surviving_short = [c for c in surviving_all if _SHORT_SLOT_COL_RE.match(c)]
+            surviving = [c for c in surviving_all if _LONG_SLOT_COL_RE.match(c)]
+        pre_agg_long_count = int(float(filt_meta.get("n_surviving_long", len(surviving))))
+        pre_agg_short_count = int(float(filt_meta.get("n_surviving_short", len(surviving_short))))
+        filt_meta["pre_agg_surviving_long_count"] = float(pre_agg_long_count)
+        filt_meta["pre_agg_surviving_short_count"] = float(pre_agg_short_count)
         
         mag_surv_cols = [c.replace("alpha_", "mag_") for c in surviving if c.replace("alpha_", "mag_") in alpha_df_all.columns]
+        final_selected_long_cols: list[str] = []
         if surviving:
             ic_map = filt_meta.get("ic_weight_by_slot", {}) or filt_meta.get("ic_by_slot", {})
             weights = [max(0.0, float(ic_map.get(c, 0.0))) ** 2 for c in surviving]
@@ -715,9 +722,11 @@ class MLAlphaMiner:
             if w_arr.sum() > 1e-9:
                 w_norm = w_arr / w_arr.sum()
                 long_rank = (alpha_df_all[surviving] * w_norm).sum(axis=1)
+                final_selected_long_cols = [c for c, w in zip(surviving, w_norm) if float(w) > 0.0]
                 self._ic_weights = {int(_LONG_SLOT_COL_RE.match(c).group(1)): float(w) for c, w in zip(surviving, w_norm)}
             else:
                 long_rank = alpha_df_all[surviving].mean(axis=1)
+                final_selected_long_cols = list(surviving)
                 self._ic_weights = {int(_LONG_SLOT_COL_RE.match(c).group(1)): 1.0 / len(surviving) for c in surviving}
 
             if mag_surv_cols:
@@ -733,6 +742,7 @@ class MLAlphaMiner:
             self._ic_weights = {}
             alpha_df_all["alpha_long"] = 0.5
 
+        final_selected_short_cols: list[str] = []
         if surviving_short:
             ic_map_short = filt_meta.get("ic_weight_by_slot", {}) or filt_meta.get("ic_by_slot", {})
             short_weights = [max(0.0, float(ic_map_short.get(c, 0.0))) ** 2 for c in surviving_short]
@@ -740,27 +750,66 @@ class MLAlphaMiner:
             if sw_arr.sum() > 1e-9:
                 sw_norm = sw_arr / sw_arr.sum()
                 short_rank = (alpha_df_all[surviving_short] * sw_norm).sum(axis=1)
+                final_selected_short_cols = [c for c, w in zip(surviving_short, sw_norm) if float(w) > 0.0]
                 self._short_ic_weights = {int(_SHORT_SLOT_COL_RE.match(c).group(1)): float(w) for c, w in zip(surviving_short, sw_norm)}
             else:
                 short_rank = alpha_df_all[surviving_short].mean(axis=1)
+                final_selected_short_cols = list(surviving_short)
                 self._short_ic_weights = {int(_SHORT_SLOT_COL_RE.match(c).group(1)): 1.0 / len(surviving_short) for c in surviving_short}
             
             # G-ALPHA v8.0: Signal Masking for Short
             short_mask = (short_rank > 0.3) & (short_rank < 0.7)
             short_rank[short_mask] = 0.5
             alpha_df_all["alpha_short"] = short_rank
+            filt_meta["alpha_short_degraded_mode"] = 0.0
+            filt_meta["alpha_short_degraded_reason"] = ""
         elif "alpha_long" in alpha_df_all.columns:
             self._short_ic_weights = {}
             alpha_df_all["alpha_short"] = 1.0 - alpha_df_all["alpha_long"]
+            filt_meta["alpha_short_degraded_mode"] = 1.0
+            filt_meta["alpha_short_degraded_reason"] = "no_survived_short_slots_fallback_to_1_minus_alpha_long"
+            _logger.warning(
+                "alpha_short fallback engaged: no survived short slots, using 1 - alpha_long."
+            )
         else:
             self._short_ic_weights = {}
             alpha_df_all["alpha_short"] = 0.5
+            filt_meta["alpha_short_degraded_mode"] = 1.0
+            filt_meta["alpha_short_degraded_reason"] = "no_alpha_long_and_no_survived_short_slots_fallback_to_flat"
+            _logger.warning(
+                "alpha_short fallback engaged: no alpha_long and no survived short slots, using flat 0.5."
+            )
+
+        post_agg_long_count = len(final_selected_long_cols)
+        post_agg_short_count = len(final_selected_short_cols)
+        filt_meta["post_agg_selected_long_count"] = float(post_agg_long_count)
+        filt_meta["post_agg_selected_short_count"] = float(post_agg_short_count)
+        filt_meta["post_agg_selected_long_cols"] = final_selected_long_cols
+        filt_meta["post_agg_selected_short_cols"] = final_selected_short_cols
+        filt_meta["final_selection_fail_long"] = float(max(0, pre_agg_long_count - post_agg_long_count))
+        filt_meta["final_selection_fail_short"] = float(max(0, pre_agg_short_count - post_agg_short_count))
+        filt_meta["elite_zero_after_survival"] = 1.0 if (pre_agg_long_count > 0 and post_agg_long_count == 0) else 0.0
+        if pre_agg_long_count != post_agg_long_count or pre_agg_short_count != post_agg_short_count:
+            _logger.warning(
+                "Alpha final aggregation mismatch | long %d->%d | short %d->%d",
+                pre_agg_long_count,
+                post_agg_long_count,
+                pre_agg_short_count,
+                post_agg_short_count,
+            )
 
         # [Fix] Final reindex using standardized panel index, then restore original index
         out_df = alpha_df_all.reindex(panel_df_std.index).fillna(0.5)
         out_df.index = panel_df.index
         
         out_df.attrs["alpha_component_filter"] = filt_meta
+        out_df.attrs["alpha_final_aggregation_counts"] = {
+            "pre_agg_surviving_long_count": float(pre_agg_long_count),
+            "post_agg_selected_long_count": float(post_agg_long_count),
+            "pre_agg_surviving_short_count": float(pre_agg_short_count),
+            "post_agg_selected_short_count": float(post_agg_short_count),
+            "elite_zero_after_survival": float(filt_meta.get("elite_zero_after_survival", 0.0)),
+        }
         # Minimal Step3 audit rollups for telemetry/logging without refactor.
         ic_chop = filt_meta.get("ic_chop_by_slot", {}) if isinstance(filt_meta, dict) else {}
         ic_bear = filt_meta.get("ic_bear_by_slot", {}) if isinstance(filt_meta, dict) else {}
