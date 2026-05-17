@@ -1384,30 +1384,35 @@ def _print_hmm_summary(
             long_m = _series_from_col(df_eval, "long_mult", default=1.0).fillna(1.0).clip(0.0, 2.0)
             exposure_mult = np.minimum(np.minimum(gross_m.to_numpy(dtype=np.float64), kelly_m.to_numpy(dtype=np.float64)), long_m.to_numpy(dtype=np.float64))
             protected_share = np.clip(1.0 - exposure_mult, 0.0, 1.0)
-            damp_mask = pd.Series(exposure_mult <= damp_thr, index=df_eval.index)
-            soft_thr = float(np.clip(OPT_FUTURES_CONFIG.get("FUTURES_EXEC_TIER_SOFT_MAX_EXP", 0.80), 0.0, 1.0))
-            hard_thr = float(np.clip(OPT_FUTURES_CONFIG.get("FUTURES_EXEC_TIER_HARD_MAX_EXP", 0.50), 0.0, 1.0))
-            near_flat_thr = float(np.clip(OPT_FUTURES_CONFIG.get("FUTURES_EXEC_TIER_NEAR_FLAT_MAX_EXP", 0.25), 0.0, 1.0))
-            near_flat_thr = min(near_flat_thr, hard_thr)
-            hard_thr = min(max(hard_thr, near_flat_thr), soft_thr)
-            soft_thr = max(soft_thr, hard_thr)
-            near_flat_mask = pd.Series(exposure_mult <= near_flat_thr, index=df_eval.index)
-            hard_damp_mask = pd.Series((exposure_mult <= hard_thr) & (~near_flat_mask.to_numpy(dtype=bool)), index=df_eval.index)
-            soft_damp_mask = pd.Series(
-                (exposure_mult <= soft_thr)
-                & (~hard_damp_mask.to_numpy(dtype=bool))
-                & (~near_flat_mask.to_numpy(dtype=bool)),
-                index=df_eval.index,
-            )
+
+            # Use actual gate signals from policy_mapper if available
+            if "soft_damp_gate" in df_eval.columns:
+                soft_damp_mask = _series_from_col(df_eval, "soft_damp_gate", default=0.0).fillna(0.0) > 0.5
+            else:
+                soft_damp_mask = pd.Series(exposure_mult <= damp_thr, index=df_eval.index)
+
+            if "hard_damp_gate" in df_eval.columns:
+                hard_damp_mask = _series_from_col(df_eval, "hard_damp_gate", default=0.0).fillna(0.0) > 0.5
+            else:
+                hard_damp_mask = pd.Series(exposure_mult <= 0.50, index=df_eval.index)
+
+            if "near_flat_gate" in df_eval.columns:
+                near_flat_mask = _series_from_col(df_eval, "near_flat_gate", default=0.0).fillna(0.0) > 0.5
+            else:
+                near_flat_mask = pd.Series(exposure_mult <= 0.25, index=df_eval.index)
+
+            damp_mask = soft_damp_mask | hard_damp_mask | near_flat_mask
+
             execution_protected_exposure_share = float(np.mean(protected_share) * 100.0)
             report["hmm_execution_damp_active_rate"] = float(damp_mask.mean() * 100.0)
-            report["hmm_execution_damp_active_thr"] = damp_thr
             report["hmm_execution_soft_damp_rate"] = float(soft_damp_mask.mean() * 100.0)
             report["hmm_execution_hard_damp_rate"] = float(hard_damp_mask.mean() * 100.0)
             report["hmm_execution_near_flat_rate"] = float(near_flat_mask.mean() * 100.0)
-            report["hmm_execution_tier_soft_thr"] = soft_thr
-            report["hmm_execution_tier_hard_thr"] = hard_thr
-            report["hmm_execution_tier_near_flat_thr"] = near_flat_thr
+            
+            # Diagnostic: capture the mean tiers if they exist in the panel
+            for k in ["hmm_execution_tier_soft_thr", "hmm_execution_tier_hard_thr", "hmm_execution_tier_near_flat_thr"]:
+                if k in df_eval.columns:
+                    report[k] = float(df_eval[k].mean())
             if "soft_damp_gate" in df_eval.columns:
                 soft_gate_mask = _series_from_col(df_eval, "soft_damp_gate", default=0.0).fillna(0.0) > 0.5
                 if soft_gate_mask.any():
@@ -2434,17 +2439,33 @@ def _run_ml_pipeline_implementation(
         alpha_panel["target"] = panel_df["target"]
 
     # --- Step 4: Signal Fusion & Meta-Labeling ---
-    _logger.info("🔀 Step 4/4 | Signal Fusion & Meta-Labeling")
-    
-    # Use existing HMM results for fusion to avoid redundant training
-    out = run_hmm_fusion_for_is_end(
-        list(data_maps.keys()), tf, fetch_start_date, end, cfg, data_maps, 
-        prefetched_1h, panel_df, alpha_panel, is_end_date or end, collector,
-        workers, n_jobs, include_fusion=not gp_only,
-        prefetched_market_probs=market_probs,
-        prefetched_market_hmm_feats=market_hmm_feats
-    )
     if gp_only:
+        _logger.info("⏭️ Step 4/4 | Fusion bypass (ALPHA-only fast path)")
+        hmm_mod_audit = _hmm_modulator_kelly_values(market_probs, market_hmm_feats)
+        hmm_mod_audit["datetime"] = market_probs["datetime"]
+        out = MLPipelineOutput(
+            alpha_panel=alpha_panel,
+            market_probs=market_probs,
+        )
+        out.hmm_report = _print_hmm_summary(
+            market_probs,
+            market_hmm_feats,
+            hmm_mod_audit,
+            _btc_df,
+            "(ALPHA-ONLY)",
+            traceability=_build_hmm_traceability(
+                cfg=cfg,
+                tf=tf,
+                is_end_date=is_end_date or end,
+                symbol_count=len(symbols),
+                seed=seed,
+                explicit_run_id=None,
+                backend=_resolve_hmm_backend_name(hmm_inferrer, cfg),
+                cache_state="miss",
+            ),
+        )
+        out.hmm_report.update({k: float(v) for k, v in tail_rep.items()})
+        out.hmm_report["hmm_backend"] = _resolve_hmm_backend_name(hmm_inferrer, cfg)
         alpha_non_empty = not out.alpha_panel.empty
         alpha_component_count = (
             int(out.alpha_panel.index.get_level_values("component").nunique())
@@ -2457,6 +2478,18 @@ def _run_ml_pipeline_implementation(
             alpha_non_empty,
             alpha_component_count,
         )
+        _logger.info("✅ ML Pipeline complete")
+        return out
+
+    _logger.info("🔀 Step 4/4 | Signal Fusion & Meta-Labeling")
+    # Use existing HMM results for fusion to avoid redundant training
+    out = run_hmm_fusion_for_is_end(
+        list(data_maps.keys()), tf, fetch_start_date, end, cfg, data_maps,
+        prefetched_1h, panel_df, alpha_panel, is_end_date or end, collector,
+        workers, n_jobs, include_fusion=True,
+        prefetched_market_probs=market_probs,
+        prefetched_market_hmm_feats=market_hmm_feats
+    )
     
     _logger.info("✅ ML Pipeline complete")
     return out
