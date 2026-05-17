@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import math
+import re
 from collections.abc import Sequence
 from typing import Any, cast
 
@@ -12,6 +13,8 @@ import pandas as pd
 from scipy.stats import skew as _scipy_skew, kurtosis as _scipy_kurtosis
 
 _logger = logging.getLogger(__name__)
+_LONG_SLOT_COL_RE = re.compile(r"^alpha_long_(\d{2})$")
+_SHORT_SLOT_COL_RE = re.compile(r"^alpha_short_(\d{2})$")
 
 
 def _norm_sf(x: float) -> float:
@@ -127,6 +130,34 @@ def _ic_half_life_bars(ic_arr: np.ndarray) -> float:
     if not math.isfinite(rho) or rho <= 0.0 or rho >= 1.0:
         return 0.0
     return float(-math.log(2.0) / math.log(rho))
+
+
+def _ic_half_life_bars_with_diag(ic_arr: np.ndarray) -> tuple[float, str]:
+    """Calculate AR(1) half-life in bars with explicit diagnostic code.
+
+    Args:
+        ic_arr: Array of IC values.
+
+    Returns:
+        Tuple of (half-life in bars, diagnostic code).
+
+    """
+    n = int(ic_arr.size)
+    if n < 5:
+        return 0.0, "insufficient_samples"
+    a = ic_arr[:-1]
+    b = ic_arr[1:]
+    if float(np.std(a)) < 1e-12 or float(np.std(b)) < 1e-12:
+        return 0.0, "zero_variance"
+    rho = float(np.corrcoef(a, b)[0, 1])
+    if not math.isfinite(rho):
+        return 0.0, "rho_non_finite"
+    if rho <= 0.0 or rho >= 1.0:
+        return 0.0, "rho_out_of_bounds"
+    hl = float(-math.log(2.0) / math.log(rho))
+    if not math.isfinite(hl):
+        return 0.0, "half_life_non_finite"
+    return hl, "ok"
 
 
 def _deflated_sharpe_threshold(
@@ -366,7 +397,14 @@ def filter_alpha_components(
     cols = (
         list(alpha_cols)
         if alpha_cols is not None
-        else [c for c in alpha_wide.columns if (c.startswith("alpha_long_") and c[-2:].isdigit()) or c == "alpha_long"]
+        else [
+            c
+            for c in alpha_wide.columns
+            if (c.startswith("alpha_long_") and c[-2:].isdigit())
+            or (c.startswith("alpha_short_") and c[-2:].isdigit())
+            or c == "alpha_long"
+            or c == "alpha_short"
+        ]
     )
     if not cols:
         return alpha_wide, {"n_surviving": 0.0, "neutralize_primary": 0.0}
@@ -380,7 +418,7 @@ def filter_alpha_components(
         is_ix = np.ones(len(panel_df), dtype=bool)
 
     common = alpha_wide.index.intersection(panel_df.index)
-    _logger.info("filter_alpha_components | Intersection size: %d / %d (alpha) / %d (panel)", 
+    _logger.debug("filter_alpha_components | Intersection size: %d / %d (alpha) / %d (panel)", 
                  len(common), len(alpha_wide), len(panel_df))
     if len(common) < 50:
         _logger.warning("Index intersection too small: %d rows (alpha=%d, panel=%d)", 
@@ -389,7 +427,7 @@ def filter_alpha_components(
 
     base = panel_df.loc[common, ["target"]].copy()
     base["__is"] = is_ix[panel_df.index.get_indexer(common)]
-    _logger.info("filter_alpha_components | IS rows: %d, OOS rows: %d", 
+    _logger.debug("filter_alpha_components | IS rows: %d, OOS rows: %d", 
                  base["__is"].sum(), len(base) - base["__is"].sum())
     for pcol in ("hmm_prob_bear_trend", "hmm_prob_chop", "hmm_prob_crisis"):
         if pcol in panel_df.columns:
@@ -411,6 +449,7 @@ def filter_alpha_components(
     step3_chop_ok: list[bool] = []
     step3_weight_mults: list[float] = []
     sym_bal_ok: list[bool] = []
+    half_life_diag_codes: list[str] = []
     neutralize_primary = False
 
     # alpha_long_00 diagnostic metrics
@@ -447,17 +486,24 @@ def filter_alpha_components(
         step3_chop_ok.append(False)
         step3_weight_mults.append(1.0)
         sym_bal_ok.append(False)
+        half_life_diag_codes.append("insufficient_ic_samples")
 
     u_tgt = is_sub["target"].unstack(level="symbol")
+    u_tgt_short = 1.0 - u_tgt
     u_tgt_oos = None
+    u_tgt_short_oos = None
     r_tgt = u_tgt.rank(axis=1)
+    r_tgt_short = u_tgt_short.rank(axis=1)
     r_t_oos = None
+    r_t_short_oos = None
 
     if oos_time_set:
         # [Fix] oos_sub from full base (includes true OOS rows), not is_sub
         oos_sub = base[base.index.get_level_values("datetime").isin(oos_time_set)]
         u_tgt_oos = oos_sub["target"].unstack(level="symbol")
+        u_tgt_short_oos = 1.0 - u_tgt_oos
         r_t_oos = u_tgt_oos.rank(axis=1)
+        r_t_short_oos = u_tgt_short_oos.rank(axis=1)
 
     # [Optimization] Unstack all alpha columns at once
     u_alphas = is_sub[cols].unstack(level="symbol")
@@ -480,6 +526,9 @@ def filter_alpha_components(
     r_tgt_arr = r_tgt.values.astype(np.float64)
     rt_m = np.nanmean(r_tgt_arr, axis=1, keepdims=True)
     rt_c_centered = r_tgt_arr - rt_m
+    r_tgt_short_arr = r_tgt_short.values.astype(np.float64)
+    rt_short_m = np.nanmean(r_tgt_short_arr, axis=1, keepdims=True)
+    rt_short_c_centered = r_tgt_short_arr - rt_short_m
 
     def _vec_ic_series(u_col: pd.DataFrame, r_tgt_centered: np.ndarray) -> np.ndarray:
         """행별 Spearman IC를 numpy로 벡터화 계산 (pandas corrwith 대체).
@@ -503,23 +552,36 @@ def filter_alpha_components(
 
     # OOS 분리 계산
     rt_oos_centered: np.ndarray | None = None
+    rt_short_oos_centered: np.ndarray | None = None
     if oos_time_set and r_t_oos is not None:
         rt_oos_arr = r_t_oos.values.astype(np.float64)
         rt_oos_m = np.nanmean(rt_oos_arr, axis=1, keepdims=True)
         rt_oos_centered = rt_oos_arr - rt_oos_m
+    if oos_time_set and r_t_short_oos is not None:
+        rt_short_oos_arr = r_t_short_oos.values.astype(np.float64)
+        rt_short_oos_m = np.nanmean(rt_short_oos_arr, axis=1, keepdims=True)
+        rt_short_oos_centered = rt_short_oos_arr - rt_short_oos_m
 
     # 슬롯별 IC 사전 계산
     _precomp_ic: dict[str, np.ndarray] = {}
     _precomp_ic_oos: dict[str, np.ndarray] = {}
     for c in cols:
-        _precomp_ic[c] = _vec_ic_series(u_alphas[c], rt_c_centered)
-        if rt_oos_centered is not None and u_alphas_oos is not None and c in u_alphas_oos.columns:
-            _precomp_ic_oos[c] = _vec_ic_series(u_alphas_oos[c], rt_oos_centered)
+        is_short_slot = bool(_SHORT_SLOT_COL_RE.match(c))
+        tgt_centered = rt_short_c_centered if is_short_slot else rt_c_centered
+        _precomp_ic[c] = _vec_ic_series(u_alphas[c], tgt_centered)
+        if u_alphas_oos is not None and c in u_alphas_oos.columns:
+            oos_tgt_centered = rt_short_oos_centered if is_short_slot else rt_oos_centered
+            if oos_tgt_centered is not None:
+                _precomp_ic_oos[c] = _vec_ic_series(u_alphas_oos[c], oos_tgt_centered)
     # ------------------------------------------------------------------
 
     for i, c in enumerate(cols):
+        is_short_slot = bool(_SHORT_SLOT_COL_RE.match(c))
+        tgt_is = u_tgt_short if is_short_slot else u_tgt
+        tgt_oos = u_tgt_short_oos if is_short_slot else u_tgt_oos
+        rank_tgt_oos = r_t_short_oos if is_short_slot else r_t_oos
         u_c = u_alphas[c]
-        valid_mask = u_c.notna() & u_tgt.notna()
+        valid_mask = u_c.notna() & tgt_is.notna()
         counts = valid_mask.sum(axis=1)
         # [Optimization ①] 사전 계산된 numpy IC 배열 재사용
         ic_series = pd.Series(_precomp_ic[c], index=u_c.index)
@@ -556,11 +618,12 @@ def filter_alpha_components(
         is_fast_track = bool(t_stat > 15.0)
         is_robust = bool(t_stat > 8.0)
 
-        hl = _ic_half_life_bars(ic_arr)
+        hl, hl_diag = _ic_half_life_bars_with_diag(ic_arr)
+        half_life_diag_codes.append(hl_diag)
         # G-ALPHA v8.0: Strict 3.0 bars minimum, no exceptions for fast-track/robust.
         half_life_ok.append(bool(hl >= 3.0 or n_ic < 50))
 
-        tails = _tail_decile_ic_series_fast(u_c, u_tgt, min_symbols=8)
+        tails = _tail_decile_ic_series_fast(u_c, tgt_is, min_symbols=8)
         tail_mu = float(np.mean(tails)) if tails else mu
         tail_ic_by_slot[c] = tail_mu
         ic_pos_ratio_by_slot[c] = float(np.mean(ic_arr > 0.0)) if n_ic > 0 else 0.0
@@ -594,23 +657,23 @@ def filter_alpha_components(
         ic_chop_by_slot[c] = float(ic_chop)
         chop_support_by_slot[c] = float(chop_support)
 
-        if oos_time_set and u_tgt_oos is not None and r_t_oos is not None and u_alphas_oos is not None:
+        if oos_time_set and tgt_oos is not None and rank_tgt_oos is not None and u_alphas_oos is not None:
             u_c_oos = u_alphas_oos[c]
-            v_mask_oos = u_c_oos.notna() & u_tgt_oos.notna()
+            v_mask_oos = u_c_oos.notna() & tgt_oos.notna()
             c_oos = v_mask_oos.sum(axis=1)
             # [Optimization ①-OOS] 사전 계산된 OOS IC 배열 재사용
             if c in _precomp_ic_oos:
                 ic_oos_series = pd.Series(_precomp_ic_oos[c], index=u_c_oos.index)
             else:
                 r_c_oos = u_c_oos.rank(axis=1)
-                ic_oos_series = r_c_oos.corrwith(r_t_oos, axis=1)
+                ic_oos_series = r_c_oos.corrwith(rank_tgt_oos, axis=1)
             oos_arr = ic_oos_series[c_oos >= 3].dropna().to_numpy(dtype=np.float64)
             mu_oos = float(np.mean(oos_arr)) if oos_arr.size > 0 else mu
         else:
             mu_oos = mu
 
         if i < 3:
-            _logger.info("  [COL %s] mu_oos=%.4f, ic_bear=%.4f, ic_chop=%.4f", c, mu_oos, ic_bear, ic_chop)
+            _logger.debug("  [COL %s] mu_oos=%.4f, ic_bear=%.4f, ic_chop=%.4f", c, mu_oos, ic_bear, ic_chop)
 
         # G-ALPHA v8.0: Hard OOS Floor >= 0.015. No blending with IS.
         if mu > 1e-6:
@@ -619,10 +682,9 @@ def filter_alpha_components(
             oos_gate = True
         oos_ok.append(oos_gate)
 
-        # [Short-side IC Gate]
-        # G-ALPHA v8.0: Bear regime IC must be >= 0.015
-        short_side_ic = ic_bear
-        ic_short_ok = bool(short_side_ic >= 0.015)
+        # Short-side gate must use actual short prediction vs short target IC.
+        short_side_ic = mu_oos if is_short_slot else mu_oos
+        ic_short_ok = bool(short_side_ic >= 0.015) if is_short_slot else True
         short_ok.append(ic_short_ok)
 
         primary_col_name = "alpha_long_00" if "alpha_long_00" in cols else ("alpha_long" if "alpha_long" in cols else (cols[0] if cols else None))
@@ -660,7 +722,8 @@ def filter_alpha_components(
         per: list[float] = []
         for s in valid_bal_syms:
             s_c = u_c[s].rank()
-            v = float(s_c.corr(u_tgt_ranks[s]))
+            tgt_rank = u_tgt_ranks[s] if not is_short_slot else (1.0 - u_tgt[s]).rank()
+            v = float(s_c.corr(tgt_rank))
             if math.isfinite(v):
                 per.append(v)
         arr_bal = np.asarray(per, dtype=np.float64)
@@ -687,7 +750,12 @@ def filter_alpha_components(
     # 상세 진단을 위한 카운터
     f_fdr, f_dsr, f_hl, f_tail, f_oos, f_short, f_reg_consistency, f_bal, f_step3_chop = 0, 0, 0, 0, 0, 0, 0, 0, 0
     ic_weight_by_slot: dict[str, float] = {}
-    survived_cols = []
+    survived_cols: list[str] = []
+    survived_long_cols: list[str] = []
+    survived_short_cols: list[str] = []
+    gate_fail_reasons_by_col: dict[str, list[str]] = {}
+    gate_status_by_col: dict[str, dict[str, bool | str]] = {}
+    half_life_diag_code_by_col: dict[str, str] = {}
 
     for i, c in enumerate(cols):
         # 개별 필터 결과 기록
@@ -700,6 +768,8 @@ def filter_alpha_components(
         is_reg_ok = regime_consistency_ok[i]
         is_step3_chop_ok = step3_chop_ok[i]
         is_bal_ok = sym_bal_ok[i]
+        hl_diag_code = half_life_diag_codes[i] if i < len(half_life_diag_codes) else "unknown"
+        half_life_diag_code_by_col[c] = hl_diag_code
 
         ok = (
             is_fdr_ok
@@ -717,6 +787,11 @@ def filter_alpha_components(
         if ok:
             n_surv += 1
             survived_cols.append(c)
+            if _LONG_SLOT_COL_RE.match(c):
+                survived_long_cols.append(c)
+            elif _SHORT_SLOT_COL_RE.match(c):
+                survived_short_cols.append(c)
+            gate_fail_reasons_by_col[c] = []
         else:
             # [Audit Fix] Do not neutralize here so audit report can show raw ICs.
             # Miner.py will handle filtering using survived_cols.
@@ -732,10 +807,49 @@ def filter_alpha_components(
             if not is_reg_ok: f_reg_consistency += 1
             if not is_step3_chop_ok: f_step3_chop += 1
             if not is_bal_ok: f_bal += 1
+            reasons: list[str] = []
+            if not is_fdr_ok:
+                reasons.append("fdr_fail")
+            if not is_dsr_ok:
+                reasons.append("dsr_fail")
+            if not is_hl_ok:
+                reasons.append("half_life_fail")
+            if not is_tail_ok:
+                reasons.append("tail_fail")
+            if not is_oos_ok:
+                reasons.append("oos_fail")
+            if not is_short_ok:
+                reasons.append("short_gate_fail")
+            if not is_reg_ok:
+                reasons.append("regime_consistency_fail")
+            if not is_step3_chop_ok:
+                reasons.append("step3_chop_fail")
+            if not is_bal_ok:
+                reasons.append("symbol_balance_fail")
+            gate_fail_reasons_by_col[c] = reasons
+
+        gate_status_by_col[c] = {
+            "fdr_ok": is_fdr_ok,
+            "dsr_ok": is_dsr_ok,
+            "half_life_ok": is_hl_ok,
+            "half_life_bars": float(hl),
+            "tail_ok": is_tail_ok,
+            "oos_ok": is_oos_ok,
+            "short_ok": is_short_ok,
+            "regime_consistency_ok": is_reg_ok,
+            "step3_chop_ok": is_step3_chop_ok,
+            "symbol_balance_ok": is_bal_ok,
+            "final_selection_ok": ok,
+            "half_life_diag_code": hl_diag_code,
+        }
 
     meta: dict[str, Any] = {
         "n_surviving": float(n_surv),
         "survived_cols": survived_cols,
+        "survived_long_cols": survived_long_cols,
+        "survived_short_cols": survived_short_cols,
+        "n_surviving_long": float(len(survived_long_cols)),
+        "n_surviving_short": float(len(survived_short_cols)),
         "n_components": float(len(cols)),
         "neutralize_primary": 1.0 if neutralize_primary else 0.0,
         "fail_fdr": float(f_fdr),
@@ -760,6 +874,11 @@ def filter_alpha_components(
         "ic_pos_ratio_by_slot": ic_pos_ratio_by_slot,
         "tail_ic_by_slot": tail_ic_by_slot,
         "chop_support_by_slot": chop_support_by_slot,
+        "gate_fail_reasons_by_col": gate_fail_reasons_by_col,
+        "gate_status_by_col": gate_status_by_col,
+        "half_life_diag_code_by_col": half_life_diag_code_by_col,
+        "n_final_selected": float(len(survived_cols)),
+        "final_selection_fail": float(max(0, len(cols) - len(survived_cols))),
     }
 
     # alpha_long_00(Primary)의 상세 지표를 meta에 병합

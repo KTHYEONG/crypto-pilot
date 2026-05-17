@@ -10,12 +10,71 @@ import pandas as pd
 
 from config.settings import FUTURES_DATA_DIR
 from src.core.optimization.opt_utils import compute_segment_merge_index
-from src.domain.futures.data_loader import DataCollector
+from src.domain.futures.data_loader import DataCollector, summarize_dataframe_integrity
 from src.domain.futures.ml_pipeline.pipeline_runner import _enrich_with_gp_features
 from src.domain.futures.optimization.dashboard import REGIME_NAMES
 from src.domain.futures.optimization.optimizer import inject_cs_momentum_ranks
 
 _logger: logging.Logger = logging.getLogger("opt_data_utils")
+
+
+def _to_unix_ms(dt: pd.Series | pd.DatetimeIndex) -> pd.Series:
+    """datetime series → Unix milliseconds int64, safe across datetime64[ms/us/ns] dtypes.
+
+    Pandas 2.x preserves storage resolution (ms/us/ns), so astype('int64') returns
+    values in the native unit. Upcasting to ns first normalizes all variants.
+    """
+    return pd.to_datetime(dt, utc=True).astype("datetime64[ns, UTC]").astype("int64") // 10**6
+
+
+_FEATURE_GROUP_PATTERNS: dict[str, tuple[str, ...]] = {
+    "price": ("open", "high", "low", "close", "ret_", "vol_", "realized_vol", "atr", "mom", "beta"),
+    "funding": ("funding",),
+    "oi": ("open_interest", "oi", "sum_open_interest"),
+    "lsr": ("lsr", "long_short", "top_trader", "global_lsr"),
+    "taker_orderflow": ("taker", "buy_sell", "imbalance", "orderflow"),
+    "macro": ("macro_", "btc_", "market_", "cs_dispersion"),
+    "hmm_derived": ("hmm_", "regime_", "tail_risk"),
+}
+
+
+def _feature_group_coverage(df: pd.DataFrame) -> dict[str, dict[str, float]]:
+    out: dict[str, dict[str, float]] = {}
+    if df is None or df.empty:
+        for g in _FEATURE_GROUP_PATTERNS:
+            out[g] = {"col_count": 0.0, "non_null_coverage": 0.0, "non_zero_coverage": 0.0}
+        return out
+    n_rows = max(len(df), 1)
+    for group, pats in _FEATURE_GROUP_PATTERNS.items():
+        cols = [c for c in df.columns if any(p in str(c).lower() for p in pats)]
+        if not cols:
+            out[group] = {"col_count": 0.0, "non_null_coverage": 0.0, "non_zero_coverage": 0.0}
+            continue
+        sub = df[cols].apply(pd.to_numeric, errors="coerce")
+        out[group] = {
+            "col_count": float(len(cols)),
+            "non_null_coverage": float(1.0 - (sub.isna().sum().sum() / max(sub.size, 1))),
+            "non_zero_coverage": float((sub.fillna(0.0) != 0.0).sum().sum() / max(sub.size, 1)),
+        }
+    return out
+
+
+def _append_stage_integrity(
+    audit: list[dict[str, Any]],
+    *,
+    symbol: str,
+    timeframe: str,
+    stage: str,
+    df: pd.DataFrame,
+    fillna_cols: list[str] | None = None,
+) -> None:
+    rec: dict[str, Any] = {"symbol": symbol, "timeframe": timeframe, "stage": stage}
+    rec.update(summarize_dataframe_integrity(df, timeframe=timeframe))
+    if fillna_cols:
+        pre_na = df[fillna_cols].isna().sum().sum() if fillna_cols else 0
+        denom = max(int(len(df) * len(fillna_cols)), 1)
+        rec["pre_fillna_nan_pct"] = float(pre_na / denom)
+    audit.append(rec)
 
 
 def infer_regime_codes(df: pd.DataFrame) -> np.ndarray:
@@ -240,6 +299,7 @@ def load_single_symbol_data(
     try:
         temp_is: dict[str, Any] = {}
         temp_oos: dict[str, Any] = {}
+        integrity_audit: list[dict[str, Any]] = []
         insufficient = False
         collector = DataCollector()
 
@@ -268,6 +328,13 @@ def load_single_symbol_data(
             if raw_df is None or raw_df.empty:
                 insufficient = True
                 break
+            _append_stage_integrity(
+                integrity_audit,
+                symbol=sym,
+                timeframe=tf_l,
+                stage="raw",
+                df=raw_df,
+            )
 
             if "datetime" not in raw_df.columns:
                 raw_df = raw_df.reset_index()
@@ -278,10 +345,10 @@ def load_single_symbol_data(
                 # [Optimization] Use localized merge logic to benefit from pre-loaded data
                 df = raw_df.copy()
                 if funding_df is not None and not funding_df.empty:
-                    df["timestamp"] = pd.to_datetime(df["datetime"]).astype("int64") // 10**6
+                    df["timestamp"] = _to_unix_ms(df["datetime"])
                     f_tmp = funding_df.copy()
-                    f_tmp["timestamp"] = (
-                        pd.to_datetime(f_tmp["timestamp"], unit="ms").astype("int64") // 10**6
+                    f_tmp["timestamp"] = _to_unix_ms(
+                        pd.to_datetime(f_tmp["timestamp"], unit="ms", utc=True)
                     )
                     exclude_fr = ["datetime", "symbol"]
                     cols_fr = [c for c in f_tmp.columns if c not in exclude_fr]
@@ -294,9 +361,9 @@ def load_single_symbol_data(
 
                 if metrics_df is not None and not metrics_df.empty:
                     if "timestamp" not in df.columns:
-                        df["timestamp"] = pd.to_datetime(df["datetime"]).astype("int64") // 10**6
+                        df["timestamp"] = _to_unix_ms(df["datetime"])
                     m_tmp = metrics_df.copy()
-                    m_tmp["timestamp"] = pd.to_datetime(m_tmp["datetime"]).astype("int64") // 10**6
+                    m_tmp["timestamp"] = _to_unix_ms(m_tmp["datetime"])
                     exclude_m = ["timestamp", "datetime", "create_time", "symbol"]
                     cols_m = [c for c in m_tmp.columns if c not in exclude_m]
                     df = pd.merge_asof(
@@ -305,10 +372,24 @@ def load_single_symbol_data(
                         on="timestamp",
                         direction="backward",
                     )
+                _append_stage_integrity(
+                    integrity_audit,
+                    symbol=sym,
+                    timeframe=tf_l,
+                    stage="merged",
+                    df=df,
+                )
 
                 # Enrich with GP features
                 if not skip_metrics:
                     df = _enrich_with_gp_features(df, tf=tf_l)
+                    _append_stage_integrity(
+                        integrity_audit,
+                        symbol=sym,
+                        timeframe=tf_l,
+                        stage="engineered",
+                        df=df,
+                    )
             except Exception as e:
                 _logger.error("[%s] Merge/Enrich failed: %s", sym, e)
                 insufficient = True
@@ -355,6 +436,11 @@ def load_single_symbol_data(
 
         temp_is[f"merge_idx_{tf}"] = compute_segment_merge_index(temp_is[tf], temp_is["1d"])
         temp_oos[f"merge_idx_{tf}"] = compute_segment_merge_index(temp_oos[tf], temp_oos["1d"])
+        temp_is["integrity_audit"] = integrity_audit
+        temp_oos["integrity_audit"] = integrity_audit
+        tf_df = temp_oos.get(tf)
+        if isinstance(tf_df, pd.DataFrame) and not tf_df.empty:
+            temp_oos["feature_group_coverage"] = _feature_group_coverage(tf_df)
         return sym, temp_is, temp_oos, False
     except Exception as e:
         _logger.debug("[%s] Critical load failure: %s", sym, e)
@@ -403,6 +489,61 @@ def load_futures_data_maps_for_symbols(
     if len(valid_symbols) > 1:
         inject_cs_momentum_ranks(data_maps, valid_symbols, tf)
         inject_cs_momentum_ranks(oos_data_maps, valid_symbols, tf)
+
+    audit_rows: list[dict[str, Any]] = []
+    for sym in valid_symbols:
+        recs = data_maps.get(sym, {}).get("integrity_audit", [])
+        if isinstance(recs, list):
+            audit_rows.extend([r for r in recs if isinstance(r, dict)])
+    if audit_rows:
+        audit_df = pd.DataFrame(audit_rows)
+        grp = (
+            audit_df.groupby(["stage", "timeframe"], dropna=False)[
+                ["nan_pct", "inf_count", "zero_ratio", "duplicate_dt", "gap_count", "nonpositive_price_count"]
+            ]
+            .mean(numeric_only=True)
+            .reset_index()
+        )
+        _logger.info(" 📊 [DATA INTEGRITY AUDIT] symbols=%d rows=%d", len(valid_symbols), len(audit_rows))
+        _logger.info(" ──────────────────────────────────────────────────────────────")
+        _logger.info("  STAGE    TF      NAN-PCT    ZERO-RAT    GAPS/DUP   VERDICT")
+        _logger.info(" ──────────────────────────────────────────────────────────────")
+
+        # Smart consolidation: If all metrics are same across timeframes for a stage, collapse them.
+        for stage_name in sorted(grp["stage"].unique()):
+            stage_df = grp[grp["stage"] == stage_name]
+            
+            # Check if metrics are identical across all TFs in this stage
+            # We check nan_pct, zero_ratio, gap_count, duplicate_dt
+            unique_metrics = stage_df[["nan_pct", "zero_ratio", "gap_count", "duplicate_dt"]].round(6).drop_duplicates()
+            
+            rows_to_print = []
+            if len(unique_metrics) == 1 and len(stage_df) > 1:
+                # All TFs are identical, collapse to 'All'
+                row = stage_df.iloc[0].to_dict()
+                row["timeframe"] = "All"
+                rows_to_print.append(row)
+            else:
+                # Different metrics or only one TF, print all
+                rows_to_print = stage_df.to_dict(orient="records")
+
+            for row in rows_to_print:
+                stg = str(row.get("stage", "??")).upper()[:7]
+                tf = str(row.get("timeframe", "??"))
+                nan = float(row.get("nan_pct", 0.0)) * 100
+                zero = float(row.get("zero_ratio", 0.0)) * 100
+                gaps = float(row.get("gap_count", 0.0))
+                dups = float(row.get("duplicate_dt", 0.0))
+                
+                verdict = "[PASS]"
+                if nan > 25.0: verdict = "[FAIL: NaN]"
+                elif nan > 10.0: verdict = "[WARN: NaN]"
+                elif gaps > 0 or dups > 0: verdict = "[FAIL: Gaps]"
+                
+                # Robust whitespace alignment (No vertical bars)
+                _logger.info(f"  {stg:<8} {tf:<5} {nan:>8.2f}% {zero:>10.2f}% {gaps:>5.0f}/{dups:<3.0f}   {verdict}")
+
+        _logger.info(" ──────────────────────────────────────────────────────────────")
 
     return data_maps, oos_data_maps, valid_symbols
 
@@ -474,17 +615,25 @@ def compute_regime_drift(
     status_text = status_map.get(drift_label, "🟢 OK")
 
     _logger.info("\n 🔍 [STRATEGY DRIFT AUDIT]")
-    _logger.info("   Status   : %s (Drift Score: %.3f)", status_text, kl_sym)
-    _logger.info("   Regime Shift (IS ➔ OOS):")
+    _logger.info(" ──────────────────────────────────────────────────────────────")
+    _logger.info(f"  Overall Status : {status_text} (Score: {kl_sym:.3f})")
+    _logger.info(" ──────────────────────────────────────────────────────────────")
+    _logger.info("  REGIME        IS-DIST      OOS-DIST     SHIFT-RATIO")
+    _logger.info(" ──────────────────────────────────────────────────────────────")
+    
     for rname, v in regime_shift.items():
+        ratio_str = f"x{v['ratio']:.2f}x" if v['ratio'] < 100 else ">x100x"
         _logger.info(
-            "     %-8s  : %5.1f%% ➔ %5.1f%%  [x%.2fx]",
-            rname.capitalize(), v["is_pct"], v["oos_pct"], v["ratio"],
+            f"  {rname:<10}   {v['is_pct']:>6.1f}%  ➔  {v['oos_pct']:>6.1f}%    {ratio_str:>9}"
         )
+        
+    _logger.info(" ──────────────────────────────────────────────────────────────")
     if drift_label in ("MODERATE", "SEVERE"):
-        _logger.warning(
-            "   ⚠ OOS 시장 환경이 학습 데이터와 크게 다릅니다. Walk-forward refit 검토 권장."
-        )
+        _logger.warning("  ⚠️  CRITICAL DRIFT: OOS environment differs significantly from IS.")
+        _logger.warning("  建议: Walk-forward refit or parameter re-tuning recommended.")
+    else:
+        _logger.info("  ✅ STABLE: OOS regime distribution matches IS training.")
+    _logger.info(" ──────────────────────────────────────────────────────────────")
 
     return {
         "kl_is_to_oos": kl_is_to_oos,

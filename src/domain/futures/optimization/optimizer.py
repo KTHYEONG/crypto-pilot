@@ -51,6 +51,7 @@ from src.domain.futures.optimization.phase_param_space import (
     suggest_signal_params,
     suggest_joint_params,
 )
+from src.domain.futures.optimization.trial_observability import set_trial_event_attrs
 from src.domain.futures.optimization.validation import build_anchored_wf_legs
 from src.domain.futures.portfolio.portfolio_constructor import (
     cov_lookback_bars,
@@ -1727,6 +1728,14 @@ def _evaluate_awf_phase_d_aggregate(
                     _b_diag,
                 )
                 if trial is not None:
+                    set_trial_event_attrs(
+                        trial,
+                        status="pruned",
+                        reason="zero_trades_first_leg",
+                        stage="awf_leg_eval",
+                        step=int(leg_idx),
+                        metrics={"n_trades": n_tr},
+                    )
                     raise optuna.TrialPruned()
                 diag = {"pruned": True, "robust_val": (-1e9)}
                 return 1e9, diag
@@ -1747,6 +1756,14 @@ def _evaluate_awf_phase_d_aggregate(
         # [Speed Optimization] Early Pruning after first AWF leg
         if leg_idx == 0 and trial is not None:
             if log_ret < -0.1:
+                set_trial_event_attrs(
+                    trial,
+                    status="pruned",
+                    reason="first_leg_log_ret_too_low",
+                    stage="awf_leg_eval",
+                    step=int(leg_idx),
+                    metrics={"log_ret": log_ret},
+                )
                 raise optuna.TrialPruned()
 
 
@@ -1852,6 +1869,14 @@ def _evaluate_awf_phase_d_aggregate(
             if trial is not None and len(trial.study.directions) == 1:
                 trial.report(float(np.mean(leg_log_tw)), step=leg_idx)
                 if trial.should_prune():
+                    set_trial_event_attrs(
+                        trial,
+                        status="pruned",
+                        reason="trial_should_prune",
+                        stage="awf_intermediate_report",
+                        step=int(leg_idx),
+                        metrics={"mean_leg_log_tw": float(np.mean(leg_log_tw))},
+                    )
                     raise optuna.TrialPruned()
 
     leg_arr = np.asarray(leg_log_tw, dtype=np.float64)
@@ -2201,13 +2226,31 @@ def objective_ml_phase_d(trial: optuna.Trial, ctx: MLPhaseDContext) -> tuple[flo
         precompute_ml_optimization_context(ctx)
     if ctx.run_id:
         trial.set_user_attr("run_id", str(ctx.run_id))
-    merged = _suggest_ml_joint_nsga2(trial, ctx)
-    # T2: AWF leg log-TW 직접 목적함수 (NSGA-II 분기 강제 활성)
-    result, _ = _evaluate_awf_phase_d_aggregate(ctx, merged, trial=trial)
-    if isinstance(result, tuple):
-        return result
-    # FUTURES_ML_ALPHA_NSGA2_ENABLED=False 환경에서의 fallback
-    return float(result)
+    try:
+        merged = _suggest_ml_joint_nsga2(trial, ctx)
+        # T2: AWF leg log-TW 직접 목적함수 (NSGA-II 분기 강제 활성)
+        result, _ = _evaluate_awf_phase_d_aggregate(ctx, merged, trial=trial)
+        if isinstance(result, tuple):
+            return result
+        # FUTURES_ML_ALPHA_NSGA2_ENABLED=False 환경에서의 fallback
+        return float(result)
+    except optuna.TrialPruned:
+        if "obs_reason" not in trial.user_attrs:
+            set_trial_event_attrs(
+                trial,
+                status="pruned",
+                reason="trial_pruned_unspecified",
+                stage="objective_ml_phase_d",
+            )
+        raise
+    except Exception:
+        set_trial_event_attrs(
+            trial,
+            status="failed",
+            reason="objective_exception",
+            stage="objective_ml_phase_d",
+        )
+        raise
 
 
 def select_best_trial_by_holdout_log_ret(
