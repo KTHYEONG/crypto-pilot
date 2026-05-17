@@ -368,10 +368,18 @@ def filter_alpha_components(
     chop_support_by_slot: dict[str, float] = {}
     
     is_sub = base[base["__is"]]
-    uniq_times = sorted(is_sub.index.get_level_values("datetime").unique())
+    # [Fix] Use true OOS (dates >= is_end_date) instead of IS tail 20%
     oos_time_set: set[pd.Timestamp] = set()
-    if len(uniq_times) >= 10:
-        oos_time_set = set(uniq_times[int(len(uniq_times) * 0.8) :])
+    oos_rows_times = sorted(
+        base[~base["__is"].astype(bool)].index.get_level_values("datetime").unique()
+    )
+    if len(oos_rows_times) >= 10:
+        oos_time_set = set(oos_rows_times)
+    else:
+        # Fallback: last 20% of IS as pseudo-OOS
+        uniq_times = sorted(is_sub.index.get_level_values("datetime").unique())
+        if len(uniq_times) >= 10:
+            oos_time_set = set(uniq_times[int(len(uniq_times) * 0.8):])
 
     def _append_failed() -> None:
         pvals.append(1.0)
@@ -391,7 +399,8 @@ def filter_alpha_components(
     r_t_oos = None
 
     if oos_time_set:
-        oos_sub = is_sub[is_sub.index.get_level_values("datetime").isin(oos_time_set)]
+        # [Fix] oos_sub from full base (includes true OOS rows), not is_sub
+        oos_sub = base[base.index.get_level_values("datetime").isin(oos_time_set)]
         u_tgt_oos = oos_sub["target"].unstack(level="symbol")
         r_t_oos = u_tgt_oos.rank(axis=1)
 
@@ -492,19 +501,15 @@ def filter_alpha_components(
         is_robust = bool(t_stat > 8.0)
 
         hl = _ic_half_life_bars(ic_arr)
-        if is_fast_track:
-            half_life_ok.append(True)
-        else:
-            # More strict for 4h as requested: > 3.0 bars
-            hl_thresh = 2.0 if is_robust else 3.0
-            half_life_ok.append(bool(hl >= hl_thresh or n_ic < 50))
+        # G-ALPHA v8.0: Strict 3.0 bars minimum, no exceptions for fast-track/robust.
+        half_life_ok.append(bool(hl >= 3.0 or n_ic < 50))
 
         tails = _tail_decile_ic_series_fast(u_c, u_tgt, min_symbols=8)
         tail_mu = float(np.mean(tails)) if tails else mu
         tail_ic_by_slot[c] = tail_mu
         ic_pos_ratio_by_slot[c] = float(np.mean(ic_arr > 0.0)) if n_ic > 0 else 0.0
-        # Strict Tail Gate: Must be non-negative
-        tail_ok.append(bool(tail_mu >= 0.0 or len(tails) < 5))
+        # G-ALPHA v8.0: Tail IC must be >= 0.005
+        tail_ok.append(bool(tail_mu >= 0.005 or len(tails) < 5))
 
         # Step3 regime-conditional utility diagnostics:
         # use datetime-level IC + market posterior context to measure CHOP/BEAR fragility.
@@ -548,24 +553,23 @@ def filter_alpha_components(
         else:
             mu_oos = mu
 
-        # [OOS Blend] weighted average instead of strict ratio
-        blend = 0.7 * mu_oos + 0.3 * mu
+        # G-ALPHA v8.0: Hard OOS Floor >= 0.015. No blending with IS.
         if mu > 1e-6:
-            # Proposed: blend > 0.015 for standard, OOS Floor must be > 0.010
-            oos_gate = bool(blend > (0.010 if is_fast_track else 0.015) and mu_oos > 0.010)
+            oos_gate = bool(mu_oos >= 0.015)
         else:
             oos_gate = True
         oos_ok.append(oos_gate)
 
         # [Short-side IC Gate]
-        short_side_ic = ic_bear  # Simplified proxy using BEAR regime IC
-        # If BEAR regime IC is available and negative, it's a fail
-        ic_short_ok = bool(short_side_ic >= 0.0)
+        # G-ALPHA v8.0: Bear regime IC must be >= 0.015
+        short_side_ic = ic_bear
+        ic_short_ok = bool(short_side_ic >= 0.015)
         short_ok.append(ic_short_ok)
 
         primary_col_name = "alpha_long_00" if "alpha_long_00" in cols else ("alpha_long" if "alpha_long" in cols else (cols[0] if cols else None))
         if c == primary_col_name:
-            if not is_fast_track and mu > 1e-6 and mu_oos < 0.45 * mu:
+            # G-ALPHA v8.0: Retention >= 50% (Decay < 50%)
+            if mu > 1e-6 and mu_oos < 0.50 * mu:
                 neutralize_primary = True
 
             # Diagnostic for alpha_long_00
@@ -602,14 +606,12 @@ def filter_alpha_components(
                 per.append(v)
         arr_bal = np.asarray(per, dtype=np.float64)
 
-        if is_fast_track:
-            sym_bal_ok.append(True)
-        else:
-            if arr_bal.size >= 3:
-                m_bal = float(np.mean(arr_bal))
-                s_bal = float(np.std(arr_bal, ddof=1))
-                bal_ratio = s_bal / (abs(m_bal) + 1e-9)
-            sym_bal_ok.append(bool(bal_ratio <= symbol_balance_max))
+        # G-ALPHA v8.0: No fast-track bypass for symbol balance.
+        if arr_bal.size >= 3:
+            m_bal = float(np.mean(arr_bal))
+            s_bal = float(np.std(arr_bal, ddof=1))
+            bal_ratio = s_bal / (abs(m_bal) + 1e-9)
+        sym_bal_ok.append(bool(bal_ratio <= symbol_balance_max))
 
     reject = _benjamini_hochberg_reject(pvals, fdr_q)
     mag_cols = sorted(c for c in alpha_wide.columns if c.startswith("mag_long_"))
