@@ -82,6 +82,7 @@ from src.domain.futures.optimization.validation import (  # noqa: E402
 )
 
 warnings.filterwarnings("ignore")
+warnings.filterwarnings("ignore", message=".*Overfitting detector is active.*")
 
 # Force Linux 'fork' method for memory efficiency (CoW)
 if sys.platform != "win32":
@@ -122,6 +123,8 @@ def main() -> None:
     pre_args, remaining_args = pre_parser.parse_known_args()
 
     # [STEP 1/4] UNIVERSE DISCOVERY & DATA LOADING
+    _logger.info("\n [STEP 1/4] UNIVERSE DISCOVERY & DATA LOADING")
+    _logger.info(" ─────────────────────────────────────────────────────────────────────────────────────")
     if not pre_args.skip_universe:
         collector = DataCollector()
         discovery = orchestrate_universe_discovery(
@@ -131,6 +134,8 @@ def main() -> None:
         if not bool(discovery.get("success")):
             return
         discovered_symbols = [str(s).strip() for s in discovery.get("selected_symbols", []) if str(s).strip()]
+        _logger.info(" ✅ Universe discovery complete. %d symbols selected:", len(discovered_symbols))
+        _logger.info("    > %s", ", ".join(discovered_symbols))
 
     parser_default_symbols = discovered_symbols or list(config.opt_config.FUTURES_SYMBOLS)
 
@@ -142,7 +147,6 @@ def main() -> None:
     parser.add_argument("--alpha-only", action="store_true")
     parser.add_argument("--hmm-only", action="store_true")
     parser.add_argument("--seed", type=int, default=None)
-    parser.add_argument("--force-retrain-alpha", action="store_true")
     parser.add_argument("--bypass-champion-guard", action="store_true")
     parser.add_argument("--ops-profile", type=str, default=None)
     parser.add_argument("--resume", action="store_true")
@@ -159,9 +163,6 @@ def main() -> None:
                      selected_ops_profile, resolved_ops_profile.get("trials"),
                      resolved_ops_profile.get("seeds"), resolved_ops_profile.get("description", ""))
 
-    if args.force_retrain_alpha:
-        OPT_FUTURES_CONFIG["FUTURES_ML_FORCE_RETRAIN_ALPHA"] = True
-
     fetch_start_date, start_date, is_end_date, end_date = get_quarterly_window(args.reference_date)
     symbols = [s.strip() for s in args.symbols.split(",") if s.strip()]
     load_symbols = list(set(symbols + FUTURES_ANCHOR_SYMBOLS + FUTURES_MACRO_INDEX_SYMBOLS))
@@ -176,7 +177,7 @@ def main() -> None:
 
     # [STEP 2/4] ML PIPELINE
     _logger.info("\n" + "═" * 85)
-    _logger.info(" [STEP 2/4] ML PIPELINE: Universal Cross-Sectional Alpha")
+    _logger.info(" [STEP 2/4] ML PIPELINE: Alpha & HMM Goal Audit")
     _logger.info("═" * 85)
 
     ml_n_jobs = resolve_futures_parallel_policy(len(valid_symbols))
@@ -253,7 +254,7 @@ def main() -> None:
 
     # [STEP 3/4] OPTIMIZATION
     _logger.info("\n" + "═" * 85)
-    _logger.info(" [STEP 3/4] Optimization: Joint Multi-Objective TPE")
+    _logger.info(" [STEP 3/4] Optimization: Multi-Phase Strategy Tuning")
     _logger.info("═" * 85)
 
     n_ml_trials = (

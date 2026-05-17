@@ -2,8 +2,8 @@
 
 이 문서는 크립토 선물 시장에서 살아남을 수 있는 정예 알파를 선별하기 위한 정량적 목표와 평가 기준을 정의한다. 모든 알파 생성 및 개선 작업은 본 지표를 통과하는 것을 목표로 한다.
 
-## 1. 핵심 철학 (v8.0.0 기준: YetiRank Optimization & Survival)
-- **순위 최적화 대응**: CatBoost YetiRank 도입으로 인한 IS IC 인플레이션을 경계하고, 순수 OOS 성능만으로 실력을 증명한다.
+## 1. 핵심 철학 (v8.0.0 기준: PairLogit Optimization & Survival)
+- **순위 최적화 대응**: CatBoost PairLogit 도입으로 인한 IS IC 인플레이션을 경계하고, 순수 OOS 성능만으로 실력을 증명한다.
 - **예외 없는 엄격함**: 통계적 유의성(T-stat)이 높더라도 리스크 관리 지표(Tail, Short, Half-life)에서 타협하지 않는다.
 - **비용 극복**: 높은 Taker 수수료와 슬리피지를 이길 수 있는 고마진 IC(Rank IC ≥ 0.015)를 지향한다.
 - **방향 균형**: 롱(Long) 편향을 지양하고, 하락장에서도 작동하는 숏(Short) 예측력을 확보한다.
@@ -16,7 +16,7 @@
 | **FDR q-value** | **< 0.10** | 다중 검정 보정을 통해 노이즈에 의한 우연한 성과 배제. |
 | **DSR (Deflated Sharpe)** | **> 50.0%** | 데이터 마이닝 편향을 제거한 실질적 샤프 지수 신뢰도. |
 | **OOS IC Floor** | **≥ 0.015** | **(Hard Floor)** 혼합(Blend) 점수를 배제하고 순수 OOS 구간 Rank IC 확인. |
-| **IS-OOS Retention** | **≥ 50.0%** | (Decay < 50%) YetiRank의 과적합을 방지하기 위한 최소 보존율. |
+| **IS-OOS Retention** | **≥ 50.0%** | (Decay < 50%) PairLogit의 과적합을 방지하기 위한 최소 보존율. |
 | **ICIR (OOS)** | **≥ 0.5** | OOS 구간 내에서 예측력의 꾸준함(Consistency) 확인. |
 
 ### B. 리스크 및 실무 (Risk & Operational)
