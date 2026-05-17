@@ -99,6 +99,140 @@ def _fast_rank_2d_numba(array: np.ndarray) -> np.ndarray:
         out[i] = out_row
     return out
 
+
+def _compute_triple_barrier_labels_wide(
+    close_wide: pd.DataFrame,
+    atr_wide: pd.DataFrame,
+    horizon: int = 6,
+    pt_multiplier: float = 1.5,
+    market_neutral: bool = True,
+) -> np.ndarray:
+    """Triple-barrier per-symbol 레이블 (wide format 완전 벡터화).
+
+    horizon-length 루프만 사용 (per-bar Python 루프 없음, Zero-Loop Policy 준수).
+    market_neutral=True: 각 수평선에서 cross-sectional 평균 return 차감 (B2 통합).
+
+    Args:
+        close_wide: wide format close DataFrame (rows=datetime, cols=symbols).
+        atr_wide: wide format ATR DataFrame, price units (rows=datetime, cols=symbols).
+        horizon: 최대 대기 bar 수.
+        pt_multiplier: ATR 배수 (TP/SL barrier 크기).
+        market_neutral: True면 CS 평균 return 차감 (BTC-beta 노출 중립화).
+
+    Returns:
+        numpy array shape (n_bars, n_syms), dtype float32, values in {0.0, 0.5, 1.0}.
+    """
+    close_arr = close_wide.to_numpy(dtype=np.float64, copy=True)
+    atr_arr = (
+        atr_wide.reindex(close_wide.index, fill_value=np.nan).to_numpy(dtype=np.float64, copy=True)
+    )
+    np.nan_to_num(atr_arr, nan=0.0, copy=False)
+
+    n_bars, n_syms = close_arr.shape
+    close_safe = np.where(close_arr > 1e-12, close_arr, 1.0)
+
+    # Barrier as return fraction: pt_multiplier * ATR / close
+    barrier_frac = pt_multiplier * np.abs(atr_arr) / close_safe
+    barrier_frac = np.clip(barrier_frac, 0.002, 0.20)  # 0.2%~20%
+
+    # Track first hit bar for TP and SL (horizon = sentinel for "no hit")
+    tp_bar = np.full((n_bars, n_syms), horizon, dtype=np.int32)
+    sl_bar = np.full((n_bars, n_syms), horizon, dtype=np.int32)
+
+    for h in range(1, horizon + 1):  # horizon=6 iterations — NOT a per-bar loop
+        # Future close at h bars ahead
+        future_close = np.empty_like(close_arr)
+        future_close[:-h] = close_arr[h:]
+        future_close[-h:] = np.nan
+
+        ret = future_close / close_safe - 1.0  # (n_bars, n_syms)
+
+        if market_neutral:
+            # [B2] CS 평균 차감 → 시장 요인(BTC-beta) 중립화
+            cs_mean = np.nanmean(ret, axis=1, keepdims=True)
+            ret = ret - cs_mean
+
+        # First hit only: 이미 hit된 위치는 갱신 안 함
+        tp_hit_h = np.isfinite(ret) & (ret >= barrier_frac) & (tp_bar == horizon)
+        sl_hit_h = np.isfinite(ret) & (ret <= -barrier_frac) & (sl_bar == horizon)
+        tp_bar[tp_hit_h] = h
+        sl_bar[sl_hit_h] = h
+
+    # Label: TP 먼저 = 1.0, SL 먼저 = 0.0, 동시/없음 = 0.5
+    labels = np.where(tp_bar < sl_bar, 1.0,
+             np.where(sl_bar < tp_bar, 0.0, 0.5)).astype(np.float32)
+    labels[-horizon:, :] = 0.5  # 미래 데이터 없는 마지막 bars
+    return labels
+
+
+def _compute_ic_linear_slot(
+    wide_target: pd.DataFrame,
+    feat_wide_list: list[pd.DataFrame],
+    feat_names: list[str],
+    is_mask_dt: pd.DatetimeIndex,
+) -> np.ndarray:
+    """IS IC-가중 선형 alpha 슬롯 계산 (G-ALPHA v9.0 A2 baseline).
+
+    IS 구간에서 각 feature의 Spearman IC를 구하고,
+    IC-가중 CS rank 합산 → 전체 기간 CS rank → [0,1] 알파 신호.
+
+    Args:
+        wide_target: target wide DataFrame (datetime × symbol).
+        feat_wide_list: list of feature wide DataFrames (each datetime × symbol).
+        feat_names: feature 이름 (로깅 용).
+        is_mask_dt: datetime index values that belong to IS set.
+
+    Returns:
+        1D numpy array of linear alpha scores (float64), valid_mask 기준 길이.
+    """
+    if not feat_wide_list:
+        n_valid = int(wide_target.notna().any(axis=1).sum())
+        return np.full(n_valid, 0.5, dtype=np.float64)
+
+    # IS 구간만 사용해 IC 계산
+    is_idx = wide_target.index.isin(is_mask_dt)
+    tgt_is = wide_target.loc[is_idx]
+    r_tgt_is = tgt_is.rank(axis=1)
+
+    feature_ics: list[float] = []
+    for fw in feat_wide_list:
+        fw_is = fw.reindex(wide_target.index).loc[is_idx]
+        r_fw = fw_is.rank(axis=1)
+        # per-bar Spearman IC (min 3 symbols), then IS mean
+        valid_counts = (r_fw.notna() & r_tgt_is.notna()).sum(axis=1)
+        valid_rows = valid_counts >= 3
+        if not valid_rows.any():
+            feature_ics.append(0.0)
+            continue
+        ic_series = r_fw.loc[valid_rows].corrwith(r_tgt_is.loc[valid_rows], axis=1).dropna()
+        feature_ics.append(float(ic_series.mean()) if len(ic_series) > 0 else 0.0)
+
+    ic_arr = np.array(feature_ics, dtype=np.float64)
+
+    # IC-가중 CS rank 합산 (음수 IC → 해당 feature 반전하여 활용)
+    score_wide = pd.DataFrame(0.0, index=wide_target.index, columns=wide_target.columns)
+    for fw, w in zip(feat_wide_list, ic_arr):
+        if abs(w) < 1e-6:
+            continue
+        fw_all = fw.reindex(wide_target.index)
+        r_fw_all = fw_all.rank(axis=1)
+        score_wide = score_wide.add(r_fw_all.multiply(w), fill_value=0.0)
+
+    # CS rank per bar → percentile [0, 1]
+    score_ranked = score_wide.rank(axis=1, pct=True).fillna(0.5)
+
+    # valid_mask (target notna) 기준으로 flatten
+    valid_mask_2d = wide_target.notna().values
+    scores = score_ranked.values[valid_mask_2d].astype(np.float64)
+    _logger.debug(
+        "[IC-Linear] features=%d, mean_IC=%.4f, score_shape=%d",
+        len(feat_names),
+        float(np.mean(np.abs(ic_arr))),
+        len(scores),
+    )
+    return scores
+
+
 # v5 Theme Subspacing Definitions
 THEME_GROUPS = {
     0: [  # Group 1: Trend/Momentum (Slots 00-04) + Vol-Adjusted
@@ -108,8 +242,11 @@ THEME_GROUPS = {
         "taker_absorption_score"
     ],
     1: [  # Group 2: Volatility/Mean-Reversion (Slots 05-09)
-        "vol_ratio_24", "vol_ratio_168", "macro_vol_regime_shift", 
-        "cs_dispersion", "dist_from_weekly_vwap",
+        # [G-ALPHA v9.0] CS-constant features 제거:
+        # macro_vol_regime_shift — market-wide regime signal, 모든 symbol 동일값 (CS rank 무의미)
+        # cs_dispersion — cross-sectional dispersion by definition, 모든 symbol 동일값
+        "vol_ratio_24", "vol_ratio_168",
+        "dist_from_weekly_vwap",
         "liq_intensity_proxy", "capitulation_proxy", "tail_risk_24"
     ],
     2: [  # Group 3: Structural/Regime (Slots 10-14)
@@ -246,8 +383,10 @@ class MLAlphaMiner:
     """Miner for evolving cross-sectional alpha components using LightGBM LambdaRank."""
 
     # Total rank heads = slots_per_theme × 3 thematic buckets (see THEME_GROUPS).
-    slots_per_theme: int = 5
-    n_features_to_select: int = 15
+    # [G-ALPHA v9.0] slots_per_theme: 5→3 축소. staged prediction "fake breadth" 완화.
+    # 총 slots = 3 themes × 3 = 9 (long), 9 (short). n_features_to_select은 __post_init__에서 자동 연동.
+    slots_per_theme: int = 3
+    n_features_to_select: int = 9
     target_horizons: tuple[int, ...] = (3, 6, 12, 24)
     n_jobs: int = 4
 
@@ -388,13 +527,8 @@ class MLAlphaMiner:
         # This replaces the unstack() -> shift() -> mask approach which is fragile for mismatched indices.
         work_grouped = work_df.groupby("symbol", group_keys=False)
         
-        # 1. Forward Return (6 bars)
-        # Use transform to ensure the result is aligned with work_df order (datetime, symbol)
-        fwd_close_6 = work_grouped["close"].transform(lambda x: x.shift(-6))
-        fwd_ret_6_series = (fwd_close_6 / work_df["close"].clip(lower=1e-12)) - 1.0
-        fwd_ret_6 = np.nan_to_num(fwd_ret_6_series.to_numpy())
-        
-        # 2. Magnitude Horizon Log Returns (for auxiliary regression)
+        # 1. Magnitude Horizon Log Returns (for auxiliary regression)
+        # [B1] Forward 6-bar return은 triple-barrier 내부에서 처리.
         fwd_close_h = work_grouped["close"].transform(lambda x: x.shift(-_MAG_HORIZON_BARS))
         fwd_log_mag_h = np.log(fwd_close_h / work_df["close"].clip(lower=1e-12))
         y_mag_h_vals = np.abs(fwd_log_mag_h.fillna(0.0).to_numpy())
@@ -411,28 +545,30 @@ class MLAlphaMiner:
         )
         # Use transform with lambda for reliable per-symbol rolling mean alignment
         atr_24 = tr.groupby(level="symbol", group_keys=False).transform(lambda x: x.rolling(24).mean())
-        atr_24_pct = np.nan_to_num((atr_24 / work_df["close"].clip(lower=1e-12)).to_numpy())
+        # [B1] atr_24_pct (pct-normalized) 불필요 — triple-barrier에서 ATR price units 직접 사용
 
-        # [Target Distribution & Alignment] Generate Labels
-        y_labels = self._prepare_labels(
-            work_df["target"],
-            raw_returns=fwd_ret_6,
-            dispersion=work_df.get("cs_dispersion"),
-            atr_24h_pct=atr_24_pct
-        )
-        # [Short Label Simplification] Perfectly symmetric labels (Fix #3)
-        y_labels_short = 1.0 - y_labels
-
-        # Metadata for alignment in mining loop (needed for _fast_rank_2d_numba)
+        # Metadata + Wide format (B1 triple-barrier에 필요하므로 먼저 생성, 나중에 삭제)
         _close_wide = work_df["close"].unstack(level="symbol")
         valid_mask = _close_wide.notna().values
         idx_shape = _close_wide.shape
-        del _close_wide
+
+        # [G-ALPHA v9.0 B1+B2] Triple-barrier 레이블 (CS 평균 차감 포함)
+        # _compute_triple_barrier_labels_wide: horizon 루프만 사용, per-bar 루프 없음
+        _atr_wide = atr_24.unstack(level="symbol")  # ATR price units (per-symbol rolling mean of TR)
+        _tb_labels_wide = _compute_triple_barrier_labels_wide(
+            _close_wide, _atr_wide, horizon=6, pt_multiplier=1.5, market_neutral=True
+        )
+        # valid_mask 기준으로 flatten (valid_mask와 동일한 순서)
+        y_labels = _tb_labels_wide[valid_mask].astype(np.float32)
+        del _close_wide, _atr_wide, _tb_labels_wide
 
         _logger.info(
-            "Label Stats - Long: mean=%.4f, std=%.4f, nans=%d | Short: mean=%.4f, std=%.4f, nans=%d",
+            "Label Stats - Triple-barrier: mean=%.4f, std=%.4f, nans=%d | "
+            "TP=%.1f%%, SL=%.1f%%, neutral=%.1f%%",
             float(np.mean(y_labels)), float(np.std(y_labels)), int(np.isnan(y_labels).sum()),
-            float(np.mean(y_labels_short)), float(np.std(y_labels_short)), int(np.isnan(y_labels_short).sum())
+            float(np.mean(y_labels == 1.0)) * 100,
+            float(np.mean(y_labels == 0.0)) * 100,
+            float(np.mean(y_labels == 0.5)) * 100,
         )
         
         # In-Sample Masking & Time-Series Split
@@ -487,13 +623,12 @@ class MLAlphaMiner:
         self._short_ntree_ends.clear()
 
         # GPU-Native Mining Loop v8.0
-        _logger.info("GPU-Native Mining Loop v8.0 (9 fit + staged predictions + Early Stopping)...")
+        _logger.info("GPU-Native Mining Loop v9.0 (A1: 독립모델 3개/theme, A3: short=1-long)...")
         total_loop_start = time.time()
         mag_finite = np.isfinite(y_mag_vals_raw)
 
         # iterations per theme
         _LONG_ITERS = {0: 1000, 1: 800, 2: 600}
-        _SHORT_ITERS = {0: 800, 1: 600, 2: 500}
 
         for theme_idx in range(3):
             if theme_idx == 1:
@@ -501,16 +636,13 @@ class MLAlphaMiner:
             else:
                 fc = list(dict.fromkeys(THEME_GROUPS[theme_idx]))
             fc = [c for c in fc if c in work_df.columns]
-            short_fc = list(dict.fromkeys(SHORT_THEME_GROUPS[theme_idx]))
-            short_fc = [c for c in short_fc if c in work_df.columns]
 
-            if not fc and not short_fc:
+            if not fc:
                 continue
 
             # --- Build pools: quantize ONCE, reuse across all staged predictions ---
             master_pool = train_pool = eval_pool = pred_pool = None
             master_mag_pool = mag_train_pool = mag_eval_pool = None
-            master_short_pool = short_train_pool = short_eval_pool = short_pred_pool = None
 
             if fc:
                 X_long = work_df[fc].values.astype(np.float32)
@@ -537,58 +669,15 @@ class MLAlphaMiner:
                 mag_train_pool = master_mag_pool.slice(train_idx[mag_train_mask])
                 mag_eval_pool = master_mag_pool.slice(eval_idx[mag_eval_mask])
 
-            if short_fc:
-                master_short_pool = Pool(
-                    data=work_df[short_fc].values.astype(np.float32),
-                    label=y_labels_short,
-                    group_id=full_group_ids,
-                    feature_names=short_fc,
-                )
-                master_short_pool.quantize(border_count=254)
-                short_train_pool = master_short_pool.slice(train_idx)
-                short_eval_pool = master_short_pool.slice(eval_idx)
-                short_pred_pool = master_short_pool
-
             theme_start = theme_idx * self.slots_per_theme
             theme_end = min(self.n_features_to_select, (theme_idx + 1) * self.slots_per_theme)
             n_virtual = theme_end - theme_start
 
-            # --- Phase 1: ONE GPU fit per direction ---
-            long_ranker: CatBoostRanker | None = None
-            short_ranker: CatBoostRanker | None = None
-
             long_iters = _LONG_ITERS[theme_idx]
-            short_iters = _SHORT_ITERS[theme_idx]
 
-            if train_pool is not None:
-                ranker_params = self._get_lgbm_params(seed_offset=theme_idx * 100, iterations=long_iters)
-                ranker_params["logging_level"] = "Silent" # Suppress CatBoost overfitting detector warnings
-                long_ranker = CatBoostRanker(**ranker_params)
-                try:
-                    long_ranker.fit(train_pool, eval_set=eval_pool)
-                except CatBoostError as exc:
-                    _logger.debug("CatBoost Long Ranker fit failed: %s. Falling back to CPU.", exc)
-                    ranker_params["task_type"] = "CPU"
-                    ranker_params.pop("devices", None)
-                    ranker_params.pop("gpu_ram_part", None)
-                    long_ranker = CatBoostRanker(**ranker_params)
-                    long_ranker.fit(train_pool, eval_set=eval_pool)
-
-            if short_train_pool is not None:
-                short_params = self._get_lgbm_params(seed_offset=theme_idx * 100 + 1000, iterations=short_iters)
-                short_params["logging_level"] = "Silent"
-                short_ranker = CatBoostRanker(**short_params)
-                try:
-                    short_ranker.fit(short_train_pool, eval_set=short_eval_pool)
-                except CatBoostError as exc:
-                    _logger.debug("CatBoost Short Ranker fit failed: %s. Falling back to CPU.", exc)
-                    short_params["task_type"] = "CPU"
-                    short_params.pop("devices", None)
-                    short_params.pop("gpu_ram_part", None)
-                    short_ranker = CatBoostRanker(**short_params)
-                    short_ranker.fit(short_train_pool, eval_set=short_eval_pool)
-
-            # Magnitude regressor with Early Stopping
+            # --- Phase 1: Magnitude Regressor only (theme당 1개, long/short ranker는 Phase 2에서 slot별 독립 학습) ---
+            # [G-ALPHA v9.0 A1] long_ranker/short_ranker 단일 fit 제거.
+            # staged checkpoint fake breadth 완전 폐기 → 독립 subsample 모델 3개/theme 로 대체.
             mag_params = {
                 "loss_function": "MAE",
                 "task_type": _DEFAULT_TASK_TYPE,
@@ -622,24 +711,46 @@ class MLAlphaMiner:
                 sig_m = float(np.std(mag_raw_all) + 1e-9)
                 mag_z = np.clip((mag_raw_all - mu_m) / sig_m, -3.0, 3.0)
 
-            # --- Phase 2: Staged predictions ---
-            actual_long_iters = long_ranker.get_best_iteration() if long_ranker else long_iters
-            actual_short_iters = short_ranker.get_best_iteration() if short_ranker else short_iters
-            
-            step_l = max(1, actual_long_iters // n_virtual)
-            step_s = max(1, actual_short_iters // n_virtual)
-            long_checkpoints = [min(actual_long_iters, step_l * (k + 1)) for k in range(n_virtual)]
-            short_checkpoints = [min(actual_short_iters, step_s * (k + 1)) for k in range(n_virtual)]
+            # --- [G-ALPHA v9.0 A1] Phase 2: Independent models per slot (genuine breadth) ---
+            # Staged checkpoint fake breadth 제거. slot당 subsample 다양화 독립 모델 = 진짜 diversity.
+            # 각 슬롯은 (subsample, rsm, seed) 조합이 달라 상관관계 0.85~0.95 문제 해소.
+            _SLOT_DIVERSITY = [
+                {"subsample": 0.85, "rsm": 1.00, "seed_extra": 0},    # slot 0: full features
+                {"subsample": 0.75, "rsm": 0.85, "seed_extra": 100},  # slot 1: feature subsample
+                {"subsample": 0.65, "rsm": 0.70, "seed_extra": 200},  # slot 2: aggressive subsample
+            ]
+            n_independent = min(n_virtual, len(_SLOT_DIVERSITY))
 
-            for v_idx in range(n_virtual):
+            for v_idx in range(n_independent):
                 s_idx = theme_start + v_idx
+                div_cfg = _SLOT_DIVERSITY[v_idx]
 
-                if long_ranker is not None and pred_pool is not None:
-                    ntree_l = long_checkpoints[v_idx]
-                    raw_scores = long_ranker.predict(pred_pool, ntree_end=ntree_l)
-                    self._models[s_idx] = long_ranker
+                # --- Long independent model ---
+                slot_long_ranker: CatBoostRanker | None = None
+                if train_pool is not None:
+                    slot_params = self._get_lgbm_params(
+                        seed_offset=theme_idx * 100 + div_cfg["seed_extra"],
+                        iterations=long_iters,
+                    )
+                    slot_params["logging_level"] = "Silent"
+                    slot_params["subsample"] = div_cfg["subsample"]
+                    slot_params["rsm"] = div_cfg["rsm"]
+                    slot_long_ranker = CatBoostRanker(**slot_params)
+                    try:
+                        slot_long_ranker.fit(train_pool, eval_set=eval_pool)
+                    except CatBoostError as exc:
+                        _logger.debug("CatBoost Long slot%d fit failed: %s. CPU fallback.", v_idx, exc)
+                        slot_params["task_type"] = "CPU"
+                        slot_params.pop("devices", None)
+                        slot_params.pop("gpu_ram_part", None)
+                        slot_long_ranker = CatBoostRanker(**slot_params)
+                        slot_long_ranker.fit(train_pool, eval_set=eval_pool)
+
+                if slot_long_ranker is not None and pred_pool is not None:
+                    raw_scores = slot_long_ranker.predict(pred_pool)
+                    self._models[s_idx] = slot_long_ranker
                     self._feature_sets[s_idx] = fc
-                    self._ntree_ends[s_idx] = ntree_l
+                    self._ntree_ends[s_idx] = 0  # 0 = full model, staged prediction 없음
                     _m_buf.fill(np.nan)
                     _m_buf[valid_mask] = raw_scores
                     slot_arrays[f"alpha_long_{s_idx:02d}"] = _fast_rank_2d_numba(_m_buf)[valid_mask]
@@ -652,25 +763,69 @@ class MLAlphaMiner:
                     slot_arrays[f"alpha_long_{s_idx:02d}"] = np.full(int(valid_mask.sum()), 0.5)
                     slot_arrays[f"mag_long_{s_idx:02d}"] = np.zeros(int(valid_mask.sum()), dtype=np.float64)
 
-                if short_ranker is not None and short_pred_pool is not None:
-                    ntree_s = short_checkpoints[v_idx]
-                    short_raw = short_ranker.predict(short_pred_pool, ntree_end=ntree_s)
-                    self._short_models[s_idx] = short_ranker
-                    self._short_feature_sets[s_idx] = short_fc
-                    self._short_ntree_ends[s_idx] = ntree_s
-                    _m_buf.fill(np.nan)
-                    _m_buf[valid_mask] = short_raw
-                    slot_arrays[f"alpha_short_{s_idx:02d}"] = _fast_rank_2d_numba(_m_buf)[valid_mask]
+                # [G-ALPHA v9.0 A3] Short 독립 모델 폐기: alpha_short = 1 - alpha_long
+                # 별도 short ranker 반복 실패 검증됨. 단일 CS ranker 역순 활용.
+                long_slot_arr = slot_arrays.get(f"alpha_long_{s_idx:02d}")
+                if long_slot_arr is not None:
+                    slot_arrays[f"alpha_short_{s_idx:02d}"] = 1.0 - long_slot_arr
                 else:
                     slot_arrays[f"alpha_short_{s_idx:02d}"] = np.full(int(valid_mask.sum()), 0.5)
 
             # Free VRAM/RAM before next theme
-            del pred_pool, short_pred_pool, train_pool, mag_train_pool, short_train_pool
-            del master_pool, master_mag_pool, master_short_pool
+            del pred_pool, train_pool, mag_train_pool
+            del master_pool, master_mag_pool
             gc.collect()
 
         loop_elapsed = time.time() - total_loop_start
         _logger.info("GPU-Native Mining Loop completed in %.4f seconds.", loop_elapsed)
+
+        # --- [G-ALPHA v9.0 A2] IC-가중 선형 Baseline 슬롯 (CatBoost vs 선형 결합 비교용) ---
+        # CatBoost가 단순 IC-가중 선형 결합 대비 OOS에서 나은지 실증 데이터 확보.
+        # Long baseline만 생성 (SHORT는 우선순위 낮음). 슬롯 인덱스: n_features_to_select + theme_idx.
+        _logger.info("[G-ALPHA v9.0 A2] Computing IC-linear baseline slots...")
+        try:
+            if "target" in panel_df_std.columns:
+                _u_tgt_wide = panel_df_std["target"].unstack(level="symbol")
+                _is_dt_idx = pd.DatetimeIndex(
+                    work_df.index.get_level_values("datetime")[is_mask].unique()
+                )
+                n_valid_total = int(valid_mask.sum())
+
+                for _lin_theme_idx in range(3):
+                    _lin_fc = list(dict.fromkeys(THEME_GROUPS[_lin_theme_idx]))
+                    _lin_fc = [c for c in _lin_fc if c in work_df.columns]
+                    if not _lin_fc:
+                        _logger.debug("[A2] theme%d: no valid features, skip.", _lin_theme_idx)
+                        continue
+
+                    _feat_wide_list = [
+                        work_df[f].unstack(level="symbol").reindex(_u_tgt_wide.index)
+                        for f in _lin_fc
+                    ]
+                    _lin_slot_idx = self.n_features_to_select + _lin_theme_idx
+
+                    _lin_scores = _compute_ic_linear_slot(
+                        wide_target=_u_tgt_wide,
+                        feat_wide_list=_feat_wide_list,
+                        feat_names=_lin_fc,
+                        is_mask_dt=_is_dt_idx,
+                    )
+                    if len(_lin_scores) == n_valid_total:
+                        slot_arrays[f"alpha_long_{_lin_slot_idx:02d}"] = _lin_scores
+                        slot_arrays[f"mag_long_{_lin_slot_idx:02d}"] = np.zeros(n_valid_total, dtype=np.float64)
+                        _logger.info(
+                            "  [A2] Linear baseline long theme%d → slot alpha_long_%02d (%d features)",
+                            _lin_theme_idx, _lin_slot_idx, len(_lin_fc),
+                        )
+                    else:
+                        _logger.warning(
+                            "  [A2] Linear baseline theme%d length mismatch: %d vs %d, skip.",
+                            _lin_theme_idx, len(_lin_scores), n_valid_total,
+                        )
+            else:
+                _logger.warning("[A2] 'target' column missing from panel_df_std; skipping linear baseline.")
+        except Exception as _a2_exc:
+            _logger.warning("[A2] Linear baseline computation failed (non-fatal): %s", _a2_exc)
 
         # [Optimization ⑤] slot_arrays → DataFrame 일괄 구성 (컬럼별 시리즈 할당 제거)
         # valid_mask.sum() == len(work_df) (close가 항상 유효한 경우)이므로 직접 구성 가능
@@ -686,11 +841,11 @@ class MLAlphaMiner:
             raw_alpha_df.copy(),
             panel_df_std, # [Fix] Use standardized panel
             is_end_date=is_end_date,
-            n_trials=max(1, len(alpha_slot_cols)),
+            n_trials=max(1, 2 * 3 * 3),  # 3 themes × 2 directions × 3 independent models (A1: genuine breadth)
             fdr_q=float(filter_opts.get("fdr_q", 0.10)),
             alpha_cols=alpha_slot_cols,
             symbol_balance_max=float(filter_opts.get("symbol_balance_max", 3.0)),
-            use_newey_west=bool(filter_opts.get("use_newey_west", False)),
+            use_newey_west=bool(filter_opts.get("use_newey_west", True)),  # [B1] overlapping label t-stat 보정
             use_ewma_ic_stat=bool(filter_opts.get("use_ewma_ic_stat", False)),
             ewma_half_life=float(filter_opts.get("ewma_half_life", 540.0)),
             require_regime_gate=bool(filter_opts.get("require_regime_gate", True)),
@@ -904,13 +1059,8 @@ class MLAlphaMiner:
                 fc = list(dict.fromkeys(THEME_GROUPS[theme_idx]))
             fc = [c for c in fc if c in work_df.columns]
             
-            # Resolve Short Features
-            short_fc = list(dict.fromkeys(SHORT_THEME_GROUPS[theme_idx]))
-            short_fc = [c for c in short_fc if c in work_df.columns]
-
-            # Build Prediction Pools for this theme
+            # Build Prediction Pool for this theme (long only; A3: short=1-long)
             pred_pool = Pool(data=work_df[fc].values.astype(np.float32)) if fc else None
-            short_pred_pool = Pool(data=work_df[short_fc].values.astype(np.float32)) if short_fc else None
 
             theme_start = theme_idx * self.slots_per_theme
             theme_end = min(self.n_features_to_select, (theme_idx + 1) * self.slots_per_theme)
@@ -943,18 +1093,14 @@ class MLAlphaMiner:
                     out_df[f"alpha_long_{slot_idx:02d}"] = 0.5
                     out_df[f"mag_long_{slot_idx:02d}"] = 0.0
 
-                # Short Predictions — use stored ntree_end
-                short_model = self._short_models.get(slot_idx)
-                ntree_s = self._short_ntree_ends.get(slot_idx, 0)
-                if short_model is not None and short_pred_pool is not None:
-                    short_raw_scores = short_model.predict(short_pred_pool, ntree_end=ntree_s)
-                    short_scores_matrix = np.full(idx_shape, np.nan)
-                    short_scores_matrix[valid_mask] = short_raw_scores
-                    out_df[f"alpha_short_{slot_idx:02d}"] = _fast_rank_2d_numba(short_scores_matrix)[valid_mask]
+                # [G-ALPHA v9.0 A3] Short 독립 모델 폐기: alpha_short = 1 - alpha_long
+                long_col = f"alpha_long_{slot_idx:02d}"
+                if long_col in out_df.columns:
+                    out_df[f"alpha_short_{slot_idx:02d}"] = 1.0 - out_df[long_col]
                 else:
                     out_df[f"alpha_short_{slot_idx:02d}"] = 0.5
 
-            del pred_pool, short_pred_pool
+            del pred_pool
             gc.collect()
 
         surviving = [c for c in out_df.columns if _LONG_SLOT_COL_RE.match(c) and out_df[c].std() > 1e-6]
