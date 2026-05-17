@@ -445,6 +445,7 @@ def filter_alpha_components(
     tail_ok: list[bool] = []
     oos_ok: list[bool] = []
     short_ok: list[bool] = []
+    lso_ok: list[bool] = []  # [G-ALPHA v9.0] Leave-Symbols-Out validation gate
     regime_consistency_ok: list[bool] = []
     step3_chop_ok: list[bool] = []
     step3_weight_mults: list[float] = []
@@ -460,6 +461,42 @@ def filter_alpha_components(
     ic_pos_ratio_by_slot: dict[str, float] = {}
     tail_ic_by_slot: dict[str, float] = {}
     chop_support_by_slot: dict[str, float] = {}
+    lso_ic_by_slot: dict[str, float] = {}  # [G-ALPHA v9.0] LSO IC per slot
+
+    def _lso_ic_check(
+        u_c: pd.DataFrame,
+        u_tgt: pd.DataFrame,
+        holdout_frac: float = 0.20,
+        seed: int = 42,
+    ) -> float:
+        """Leave-Symbols-Out IC: symbol의 20%를 holdout하고 held-out set에서 IC 계산.
+
+        Args:
+            u_c: wide format alpha DataFrame (rows=datetime, cols=symbols).
+            u_tgt: wide format target DataFrame (rows=datetime, cols=symbols).
+            holdout_frac: holdout symbol 비율 (default 0.20).
+            seed: random seed.
+
+        Returns:
+            held-out symbol 집합에서 계산된 mean IC.
+        """
+        symbols = list(u_c.columns)
+        if len(symbols) < 5:
+            return 0.0
+        n_hold = max(1, int(len(symbols) * holdout_frac))
+        rng = np.random.default_rng(seed)
+        hold_syms = list(rng.choice(symbols, size=n_hold, replace=False))
+        u_hold = u_c[hold_syms]
+        t_hold = u_tgt[hold_syms]
+        valid = u_hold.notna() & t_hold.notna()
+        counts = valid.sum(axis=1)
+        rows = counts >= 2
+        if not rows.any():
+            return 0.0
+        r_c = u_hold[rows].rank(axis=1)
+        r_t = t_hold[rows].rank(axis=1)
+        ics = r_c.corrwith(r_t, axis=1).dropna()
+        return float(ics.mean()) if len(ics) > 0 else 0.0
     
     is_sub = base[base["__is"]]
     # [Fix] Use true OOS (dates >= is_end_date) instead of IS tail 20%
@@ -482,6 +519,7 @@ def filter_alpha_components(
         tail_ok.append(False)
         oos_ok.append(False)
         short_ok.append(False)
+        lso_ok.append(False)  # [G-ALPHA v9.0]
         regime_consistency_ok.append(False)
         step3_chop_ok.append(False)
         step3_weight_mults.append(1.0)
@@ -575,6 +613,9 @@ def filter_alpha_components(
                 _precomp_ic_oos[c] = _vec_ic_series(u_alphas_oos[c], oos_tgt_centered)
     # ------------------------------------------------------------------
 
+    hl_by_col: dict[str, float] = {}  # Fix 1: per-column half-life tracking
+    ic_oos_by_slot: dict[str, float] = {}  # Fix 2: per-column OOS CS-IC tracking
+
     for i, c in enumerate(cols):
         is_short_slot = bool(_SHORT_SLOT_COL_RE.match(c))
         tgt_is = u_tgt_short if is_short_slot else u_tgt
@@ -589,6 +630,8 @@ def filter_alpha_components(
 
         n_ic = int(ic_arr.size)
         if n_ic < 10:
+            hl_by_col[c] = 0.0  # Fix 1: record zero for failed components
+            ic_oos_by_slot[c] = 0.0  # Fix 2: record zero for failed components
             _append_failed()
             continue
 
@@ -619,9 +662,25 @@ def filter_alpha_components(
         is_robust = bool(t_stat > 8.0)
 
         hl, hl_diag = _ic_half_life_bars_with_diag(ic_arr)
+        hl_by_col[c] = hl  # Fix 1: store per-column half-life
         half_life_diag_codes.append(hl_diag)
-        # G-ALPHA v8.0: Strict 3.0 bars minimum, no exceptions for fast-track/robust.
-        half_life_ok.append(bool(hl >= 3.0 or n_ic < 50))
+
+        # [G-ALPHA v9.0] Replace AR(1) half-life gate with robust 3-gate majority vote
+        # Gate A: ICIR (annualized Information Ratio) >= 1.3
+        _icir = mu / (sd + 1e-12) * math.sqrt(float(n_ic))
+        _icir_ok = bool(_icir >= 1.3 or n_ic < 50)
+
+        # Gate B: Positive-bar ratio >= 45% (IC > 0 비율)
+        _pos_ratio = float(np.mean(ic_arr > 0.0)) if n_ic > 0 else 0.0
+        _pos_ratio_ok = bool(_pos_ratio >= 0.45 or n_ic < 30)
+
+        # Gate C: Sub-period sign consistency — 3등분 각 구간 mean > -0.005 중 2개 이상
+        _third = max(1, n_ic // 3)
+        _sub_means = [float(np.mean(ic_arr[k * _third:(k + 1) * _third])) for k in range(3)]
+        _subperiod_ok = bool(sum(m > -0.005 for m in _sub_means) >= 2 or n_ic < 30)
+
+        # Majority vote: 3개 중 2개 이상 통과
+        half_life_ok.append(bool(sum([_icir_ok, _pos_ratio_ok, _subperiod_ok]) >= 2))
 
         tails = _tail_decile_ic_series_fast(u_c, tgt_is, min_symbols=8)
         tail_mu = float(np.mean(tails)) if tails else mu
@@ -629,6 +688,12 @@ def filter_alpha_components(
         ic_pos_ratio_by_slot[c] = float(np.mean(ic_arr > 0.0)) if n_ic > 0 else 0.0
         # G-ALPHA v8.0: Tail IC must be >= 0.005
         tail_ok.append(bool(tail_mu >= 0.005 or len(tails) < 5))
+
+        # [G-ALPHA v9.0] Leave-Symbols-Out IC gate: full IC 대비 70% 이상 보존 확인
+        lso_ic = _lso_ic_check(u_c, tgt_is)
+        lso_ic_by_slot[c] = lso_ic
+        # n_ic < 50이면 gate 면제 (샘플 부족 시 LSO 신뢰도 낮음)
+        lso_ok.append(bool(lso_ic >= 0.70 * abs(mu) or n_ic < 50))
 
         # Step3 regime-conditional utility diagnostics:
         # use datetime-level IC + market posterior context to measure CHOP/BEAR fragility.
@@ -671,6 +736,7 @@ def filter_alpha_components(
             mu_oos = float(np.mean(oos_arr)) if oos_arr.size > 0 else mu
         else:
             mu_oos = mu
+        ic_oos_by_slot[c] = mu_oos  # Fix 2: store per-column OOS CS-IC
 
         if i < 3:
             _logger.debug("  [COL %s] mu_oos=%.4f, ic_bear=%.4f, ic_chop=%.4f", c, mu_oos, ic_bear, ic_chop)
@@ -748,13 +814,13 @@ def filter_alpha_components(
     n_surv = 0
 
     # 상세 진단을 위한 카운터
-    f_fdr, f_dsr, f_hl, f_tail, f_oos, f_short, f_reg_consistency, f_bal, f_step3_chop = 0, 0, 0, 0, 0, 0, 0, 0, 0
+    f_fdr, f_dsr, f_hl, f_tail, f_oos, f_short, f_lso, f_reg_consistency, f_bal, f_step3_chop = 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
     ic_weight_by_slot: dict[str, float] = {}
     survived_cols: list[str] = []
     survived_long_cols: list[str] = []
     survived_short_cols: list[str] = []
     gate_fail_reasons_by_col: dict[str, list[str]] = {}
-    gate_status_by_col: dict[str, dict[str, bool | str]] = {}
+    gate_status_by_col: dict[str, dict[str, bool | str | float]] = {}
     half_life_diag_code_by_col: dict[str, str] = {}
 
     for i, c in enumerate(cols):
@@ -765,6 +831,7 @@ def filter_alpha_components(
         is_tail_ok = tail_ok[i]
         is_oos_ok = oos_ok[i]
         is_short_ok = short_ok[i]
+        is_lso_ok = lso_ok[i]  # [G-ALPHA v9.0]
         is_reg_ok = regime_consistency_ok[i]
         is_step3_chop_ok = step3_chop_ok[i]
         is_bal_ok = sym_bal_ok[i]
@@ -778,6 +845,7 @@ def filter_alpha_components(
             and is_tail_ok
             and is_oos_ok
             and is_short_ok
+            and is_lso_ok  # [G-ALPHA v9.0] LSO IC gate
             and is_reg_ok
             and is_step3_chop_ok
             and is_bal_ok
@@ -804,6 +872,7 @@ def filter_alpha_components(
             if not is_tail_ok: f_tail += 1
             if not is_oos_ok: f_oos += 1
             if not is_short_ok: f_short += 1
+            if not is_lso_ok: f_lso += 1  # [G-ALPHA v9.0]
             if not is_reg_ok: f_reg_consistency += 1
             if not is_step3_chop_ok: f_step3_chop += 1
             if not is_bal_ok: f_bal += 1
@@ -820,6 +889,8 @@ def filter_alpha_components(
                 reasons.append("oos_fail")
             if not is_short_ok:
                 reasons.append("short_gate_fail")
+            if not is_lso_ok:
+                reasons.append("lso_fail")  # [G-ALPHA v9.0]
             if not is_reg_ok:
                 reasons.append("regime_consistency_fail")
             if not is_step3_chop_ok:
@@ -832,10 +903,12 @@ def filter_alpha_components(
             "fdr_ok": is_fdr_ok,
             "dsr_ok": is_dsr_ok,
             "half_life_ok": is_hl_ok,
-            "half_life_bars": float(hl),
+            "half_life_bars": float(hl_by_col.get(c, 0.0)),  # Fix 1: per-column half-life
             "tail_ok": is_tail_ok,
             "oos_ok": is_oos_ok,
             "short_ok": is_short_ok,
+            "lso_ok": is_lso_ok,  # [G-ALPHA v9.0]
+            "lso_ic": float(lso_ic_by_slot.get(c, 0.0)),  # [G-ALPHA v9.0]
             "regime_consistency_ok": is_reg_ok,
             "step3_chop_ok": is_step3_chop_ok,
             "symbol_balance_ok": is_bal_ok,
@@ -858,6 +931,7 @@ def filter_alpha_components(
         "fail_tail": float(f_tail),
         "fail_oos": float(f_oos),
         "fail_short": float(f_short),
+        "fail_lso": float(f_lso),  # [G-ALPHA v9.0] LSO gate 탈락 수
         "fail_regime_consistency": float(f_reg_consistency),
         # Backward-compat alias for existing dashboards expecting `fail_regime`.
         "fail_regime": float(f_reg_consistency),
@@ -868,6 +942,8 @@ def filter_alpha_components(
         "step3_chop_ic_min": float(step3_chop_ic_min),
         "step3_chop_weight_mult": float(step3_chop_weight_mult),
         "ic_by_slot": ic_by_slot,
+        "ic_oos_by_slot": ic_oos_by_slot,  # Fix 2: OOS CS-IC per slot for dashboard
+        "lso_ic_by_slot": lso_ic_by_slot,  # [G-ALPHA v9.0] LSO IC per slot
         "ic_weight_by_slot": ic_weight_by_slot,
         "ic_bear_by_slot": ic_bear_by_slot,
         "ic_chop_by_slot": ic_chop_by_slot,
