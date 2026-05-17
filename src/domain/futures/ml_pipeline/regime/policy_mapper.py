@@ -29,6 +29,12 @@ def _clip_mult(v: np.ndarray, lo: float, hi: float) -> np.ndarray:
     return np.clip(np.nan_to_num(v, nan=0.0, posinf=hi, neginf=lo), lo, hi)
 
 
+def _sigmoid(x: np.ndarray | pd.Series) -> np.ndarray:
+    arr = np.asarray(x, dtype=np.float64)
+    z = np.clip(np.nan_to_num(arr, nan=0.0, posinf=20.0, neginf=-20.0), -20.0, 20.0)
+    return 1.0 / (1.0 + np.exp(-z))
+
+
 def _rank_pct01(v: np.ndarray) -> np.ndarray:
     return pd.Series(np.asarray(v, dtype=np.float64)).rank(method="average", pct=True).fillna(0.0).to_numpy(dtype=np.float64)
 
@@ -53,10 +59,11 @@ def map_policy_controls(
     sup_hard = _clip01(hazard_df.get("sup_score_hard", hazard_df.get("sup_score_q05_h8", tail8)))
     sup_near = _clip01(hazard_df.get("sup_score_near_flat", hazard_df.get("sup_score_q03_h16", sup_hard)))
 
-    # B-3: entropy drag는 위험 국면(ent>0.80 & p_off>0.30)에서만 강하게 적용,
-    # 양호 국면에서는 0.03 잔류(수치 안정성 유지)
-    # Protected Exp. 목표 30-50%: ent_drag 조건부화로 양호 국면 과잉 보호 해소
-    ent_drag = np.where((ent > 0.80) & (p_off > 0.30), 0.15 * ent, 0.03 * ent)
+    # B-3: entropy drag 동적 스무딩 (sigmoid 도입)
+    # ent_drag = 0.15 * ent * _sigmoid(10.0 * (ent - ent_thr))
+    ent_thr = float(cfg.get("FUTURES_POLICY_ENT_DRAG_THR", 0.80))
+    ent_drag = 0.15 * ent * _sigmoid(10.0 * (ent - ent_thr))
+
     gross = 1.0 - 0.30 * p_chop - 0.45 * p_off - 0.55 * realized - ent_drag
     kelly = 1.0 - 0.20 * p_off - 0.35 * tail8 - 0.20 * realized - ent_drag
     long_m = 1.0 - 0.40 * p_off - 0.40 * realized - 0.15 * pre
@@ -88,9 +95,6 @@ def map_policy_controls(
     mix_pre_w /= mix_sum
     mix_tail_w /= mix_sum
 
-    soft_thr = np.clip(cfg.get("FUTURES_POLICY_DEFENSE_SOFT_THR", 0.48), 0.0, 1.0)
-    hard_thr = np.clip(cfg.get("FUTURES_POLICY_DEFENSE_HARD_THR", 0.66), 0.0, 1.0)
-    near_flat_thr = np.clip(cfg.get("FUTURES_POLICY_DEFENSE_NEAR_FLAT_THR", 0.84), 0.0, 1.0)
     soft_mult = float(np.clip(cfg.get("FUTURES_POLICY_DEFENSE_SOFT_MULT", 0.82), 0.0, 1.0))
     hard_mult = float(np.clip(cfg.get("FUTURES_POLICY_DEFENSE_HARD_MULT", 0.52), 0.0, 1.0))
     near_flat_mult = float(np.clip(cfg.get("FUTURES_POLICY_DEFENSE_NEAR_FLAT_MULT", 0.24), 0.0, 1.0))
@@ -99,9 +103,9 @@ def map_policy_controls(
     near_flat_realized_thr = float(np.clip(cfg.get("FUTURES_POLICY_DEFENSE_NEAR_FLAT_REALIZED_THR", 0.72), 0.0, 1.0))
     hard_tail_rank_thr = float(np.clip(cfg.get("FUTURES_POLICY_DEFENSE_HARD_TAIL_RANK_THR", 0.90), 0.0, 1.0))
     near_flat_tail_rank_thr = float(np.clip(cfg.get("FUTURES_POLICY_DEFENSE_NEAR_FLAT_TAIL_RANK_THR", 0.90), 0.0, 1.0))
-    soft_realized_floor = float(np.clip(cfg.get("FUTURES_POLICY_DEFENSE_SOFT_REALIZED_FLOOR", 0.40), 0.0, 1.0))
-    soft_tail_thr = float(np.clip(cfg.get("FUTURES_POLICY_DEFENSE_SOFT_TAIL_THR", 0.82), 0.0, 1.0))
-    soft_sup_thr = float(np.clip(cfg.get("FUTURES_POLICY_DEFENSE_SOFT_SUP_THR", 0.80), 0.0, 1.0))
+    soft_realized_floor = float(np.clip(cfg.get("FUTURES_POLICY_DEFENSE_SOFT_REALIZED_FLOOR", 0.55), 0.0, 1.0))
+    soft_tail_thr = float(np.clip(cfg.get("FUTURES_POLICY_DEFENSE_SOFT_TAIL_THR", 0.85), 0.0, 1.0))
+    soft_sup_thr = float(np.clip(cfg.get("FUTURES_POLICY_DEFENSE_SOFT_SUP_THR", 0.85), 0.0, 1.0))
     hard_sup_thr = float(np.clip(cfg.get("FUTURES_POLICY_DEFENSE_HARD_SUP_THR", 0.86), 0.0, 1.0))
     near_flat_sup_thr = float(np.clip(cfg.get("FUTURES_POLICY_DEFENSE_NEAR_FLAT_SUP_THR", 0.85), 0.0, 1.0))
 
@@ -111,6 +115,20 @@ def map_policy_controls(
     flat_gate = (hard_realized_mask | combo_tail_mask).astype(np.float64)
 
     defense_signal = _clip01(mix_realized_w * realized + mix_pre_w * pre + mix_tail_w * tail8)
+
+    # 롤링 랭크(Rolling Quantile) 기반 게이트 도입
+    q_soft = float(cfg.get("FUTURES_POLICY_Q_SOFT", 0.65))
+    q_hard = float(cfg.get("FUTURES_POLICY_Q_HARD", 0.85))
+    q_near_flat = float(cfg.get("FUTURES_POLICY_Q_NEAR_FLAT", 0.95))
+    roll_win = int(cfg.get("FUTURES_POLICY_ROLLING_WIN", 336))
+
+    def_ser = pd.Series(defense_signal, index=idx)
+    roll_def = def_ser.rolling(window=roll_win, min_periods=max(24, roll_win // 4))
+
+    soft_thr = roll_def.quantile(q_soft).bfill().fillna(0.48).to_numpy()
+    hard_thr = roll_def.quantile(q_hard).bfill().fillna(0.66).to_numpy()
+    near_flat_thr = roll_def.quantile(q_near_flat).bfill().fillna(0.84).to_numpy()
+
     tail_rank = _clip01(_rank_pct01(tail8))
     near_flat_gate = (
         (defense_signal >= near_flat_thr)
