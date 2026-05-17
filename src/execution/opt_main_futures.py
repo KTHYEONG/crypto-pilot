@@ -191,7 +191,19 @@ def main() -> None:
         log_hmm_report_summary(ml_out.hmm_report)
 
     if hasattr(ml_out, "alpha_panel") and not ml_out.alpha_panel.empty:
-        log_alpha_component_summary(ml_out.alpha_panel)
+        log_alpha_component_summary(ml_out.alpha_panel, is_end_date=is_end_date)
+
+    # G-ALPHA v8.0: Hard-Kill Switch
+    # 최적화 진입 전 최소 1개 이상의 정예 알파가 생존해야 함을 보장.
+    alpha_panel = getattr(ml_out, "alpha_panel", None)
+    filt_meta = getattr(alpha_panel, "attrs", {}).get("alpha_component_filter", {}) if alpha_panel is not None else {}
+    n_surv = int(filt_meta.get("n_surviving", 0))
+    
+    if not args.hmm_only:  # HMM-only 모드가 아닐 때만 알파 생존 여부 체크
+        if n_surv <= 0:
+            _logger.error("\n [!] G-ALPHA v8.0 CRITICAL: No alpha components survived the strict gates.")
+            _logger.error(" [!] Optimization (Step 3/4) aborted to prevent noise overfitting.")
+            return
 
     if args.alpha_only or args.hmm_only:
         hmm_report = getattr(ml_out, "hmm_report", {}) or {}
@@ -215,6 +227,23 @@ def main() -> None:
             alpha_non_empty,
             alpha_component_count,
         )
+
+        # alpha_panel.attrs에 저장된 filter 통계 출력
+        filt_meta = getattr(alpha_panel, "attrs", {}).get("alpha_component_filter", {}) if alpha_panel is not None else {}
+        if filt_meta:
+            n_surv = int(filt_meta.get("n_surviving", 0))
+            n_comp = int(filt_meta.get("n_components", 0))
+            is_mu = float(filt_meta.get("primary_is_mu", 0.0))
+            oos_mu = float(filt_meta.get("primary_oos_mu", 0.0))
+            _logger.info(
+                " [FILTER] FDR/DSR/OOS gate: %d / %d slots survive | primary IS-IC=%.4f OOS-IC=%.4f | "
+                "fail_fdr=%d fail_dsr=%d fail_oos=%d fail_hl=%d",
+                n_surv, n_comp,
+                is_mu, oos_mu,
+                int(filt_meta.get("fail_fdr", 0)), int(filt_meta.get("fail_dsr", 0)),
+                int(filt_meta.get("fail_oos", 0)), int(filt_meta.get("fail_half_life", 0)),
+            )
+
         _logger.info(" [ML-ONLY] optimization skipped by mode flag.")
         return
 
