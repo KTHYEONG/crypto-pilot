@@ -362,18 +362,18 @@ def orchestrate_universe_discovery(
         "MIN_BETA_BTC": float(FUTURES_SCREENER_CONFIG.get("MIN_BETA_BTC", 0.60)),
         "FINAL_POOL_K": int(FUTURES_SCREENER_CONFIG.get("FINAL_POOL_K", 40)),
     }
-    artifact_path = write_universe_artifact(
-        is_end_date=is_end_date,
-        tf=tf,
-        anchors=list(anchor_symbols),
-        selected_symbols=selected_symbols,
-        thresholds_snapshot=threshold_snapshot,
-    )
+    # artifact_path = write_universe_artifact(
+    #     is_end_date=is_end_date,
+    #     tf=tf,
+    #     anchors=list(anchor_symbols),
+    #     selected_symbols=selected_symbols,
+    #     thresholds_snapshot=threshold_snapshot,
+    # )
     importlib.reload(config.opt_config)
     return {
         "success": True,
         "selected_symbols": list(selected_symbols),
-        "artifact_path": str(artifact_path),
+        "artifact_path": None,
         "is_end_date": is_end_date,
         "tf": tf,
     }
