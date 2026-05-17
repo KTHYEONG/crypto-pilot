@@ -25,6 +25,71 @@ from src.core.utils.utils import setup_logger
 
 _logger = logging.getLogger("DataCollector")
 
+
+def summarize_dataframe_integrity(
+    df: pd.DataFrame,
+    *,
+    timeframe: str | None = None,
+    datetime_col: str = "datetime",
+) -> dict[str, float]:
+    """Compute lightweight integrity metrics for a dataframe snapshot."""
+    if df is None or df.empty:
+        return {
+            "nan_pct": 0.0,
+            "inf_count": 0.0,
+            "zero_ratio": 0.0,
+            "duplicate_dt": 0.0,
+            "gap_count": 0.0,
+            "nonpositive_price_count": 0.0,
+            "rows": 0.0,
+            "cols": 0.0,
+        }
+
+    rows = int(len(df))
+    cols = int(len(df.columns))
+    total_cells = max(rows * cols, 1)
+    nan_pct = float(df.isna().sum().sum() / total_cells)
+    num_df = df.select_dtypes(include=[np.number])
+    inf_count = float(np.isinf(num_df.to_numpy(dtype=np.float64, copy=False)).sum()) if not num_df.empty else 0.0
+    zero_ratio = (
+        float((num_df.to_numpy(dtype=np.float64, copy=False) == 0.0).sum() / max(num_df.size, 1))
+        if not num_df.empty
+        else 0.0
+    )
+
+    duplicate_dt = 0.0
+    gap_count = 0.0
+    if datetime_col in df.columns:
+        dt = pd.to_datetime(df[datetime_col], utc=True, errors="coerce")
+        duplicate_dt = float(dt.duplicated().sum())
+        tf_to_delta = {
+            "1m": pd.Timedelta(minutes=1),
+            "1h": pd.Timedelta(hours=1),
+            "4h": pd.Timedelta(hours=4),
+            "1d": pd.Timedelta(days=1),
+        }
+        expected = tf_to_delta.get(str(timeframe or "").lower())
+        if expected is not None:
+            ddt = dt.sort_values().diff().dropna()
+            gap_count = float((ddt != expected).sum())
+
+    nonpositive_price_count = 0.0
+    for pcol in ("open", "high", "low", "close"):
+        if pcol in df.columns:
+            v = pd.to_numeric(df[pcol], errors="coerce")
+            nonpositive_price_count += float((v <= 0.0).sum())
+
+    return {
+        "nan_pct": nan_pct,
+        "inf_count": inf_count,
+        "zero_ratio": zero_ratio,
+        "duplicate_dt": duplicate_dt,
+        "gap_count": gap_count,
+        "nonpositive_price_count": nonpositive_price_count,
+        "rows": float(rows),
+        "cols": float(cols),
+    }
+
 # --- Data Validator (from data_collector.py) ---
 
 class DataValidator:
