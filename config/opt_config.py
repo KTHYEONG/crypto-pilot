@@ -62,7 +62,7 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     "FUTURES_ML_FORCE_RETRAIN_ALPHA": True,
     # Thematic breadth: LambdaRank buckets (Trend / Vol+MR / Interaction) × slots each. Total = 3 × value.
     # Raising adds interaction-style capacity without injecting systemic HMM into Trend slots (helps long IC vs AWF pos_frac).
-    "FUTURES_ML_ALPHA_SLOTS_PER_THEME": 8,
+    "FUTURES_ML_ALPHA_SLOTS_PER_THEME": 3,
     "FUTURES_ML_ALPHA_PARSIMONY": 0.02,
     "FUTURES_ML_ALPHA_USE_TBM_WEIGHT": True,
     "FUTURES_ML_PRE_ALPHA_REGIME": False,

@@ -35,7 +35,7 @@ def log_alpha_component_summary(alpha_panel: pd.DataFrame, is_end_date: str | No
 
     _logger.info("\n 🤖 [G-ALPHA v8.0: ELITE COMPONENT SURVIVAL AUDIT]")
     _logger.info(SEP_85)
-    _logger.info("  COMPONENT      │ IS-IC  │ OOS-IC │ SHORT-IC │ HALF-LIFE │ STATUS")
+    _logger.info("  COMPONENT      │ IS-IC  │ OOS-IC │ CSIC-OOS │ HALF-LIFE │ STATUS")
     _logger.info(" ────────────────┼────────┼────────┼──────────┼───────────┼───────────────────")
 
     # IS/OOS split
@@ -113,7 +113,8 @@ def log_alpha_component_summary(alpha_panel: pd.DataFrame, is_end_date: str | No
         oos_ic = float(sub_full.loc[oos_idx, primary_col].corr(sub_full.loc[oos_idx, "target"], method="spearman")) if not oos_idx.empty else 0.0
         
         slot_stat = gate_status_by_col.get(comp, {})
-        short_ic = safe_float(ic_by_slot.get(comp, oos_ic), default=oos_ic)
+        ic_oos_slot_map = filt_meta.get("ic_oos_by_slot", {})  # Fix 3B: OOS CS-IC per slot
+        short_ic = safe_float(ic_oos_slot_map.get(comp, oos_ic), default=oos_ic)
         half_life = safe_float(slot_stat.get("half_life_bars", np.nan), default=np.nan)
         if not np.isfinite(half_life):
             half_life = safe_float(filt_meta.get("primary_half_life", np.nan), default=np.nan)
@@ -149,17 +150,23 @@ def log_alpha_component_summary(alpha_panel: pd.DataFrame, is_end_date: str | No
     alpha_goal_eval_meta = _build_alpha_goal_eval_meta(alpha_panel=alpha_panel, is_end_date=is_end_date)
     alpha_panel.attrs["alpha_goal_eval_meta"] = alpha_goal_eval_meta
     
-    # Calculate retention honestly: Universe mean of (OOS-IC / IS-IC) for surviving components
+    # Fix 3A: IC Retention — IS CS-IC (ic_by_slot) vs OOS CS-IC (ic_oos_by_slot)
     surviving_ic_pairs = []
+    ic_oos_by_slot = filt_meta.get("ic_oos_by_slot", {})
     for c in [k for k, v in gate_status_by_col.items() if v.get("final_selection_ok")]:
-        p_is = float(filt_meta.get("ic_by_slot_is", {}).get(c, 0.0))
-        p_oos = float(ic_by_slot.get(c, 0.0))
+        p_is = float(ic_by_slot.get(c, 0.0))
+        p_oos = float(ic_oos_by_slot.get(c, 0.0))
         if abs(p_is) > 1e-6:
             surviving_ic_pairs.append(p_oos / p_is)
-    
+
     retention = float(np.mean(surviving_ic_pairs) * 100.0) if surviving_ic_pairs else 0.0
-    verdict_str = f"{C_GRN}[READY]{C_RST}" if n_surv > 0 else f"{C_RED}[FAIL]{C_RST}"
-    _logger.info(f"  🚀 G-ALPHA Verdict: {verdict_str} - {n_surv} elite slots surviving. (IC Retention: {retention:.1f}%)")
+
+    # Fix 3C: Verdict with OOS CS-IC quality gate
+    surviving_cs = [k for k, v in gate_status_by_col.items() if v.get("final_selection_ok")]
+    mean_survivor_oos_cs = float(np.mean([safe_float(ic_oos_by_slot.get(c, 0.0)) for c in surviving_cs])) if surviving_cs else 0.0
+    is_ready = n_surv > 0 and mean_survivor_oos_cs >= 0.02 and (retention >= 50.0 or len(surviving_ic_pairs) == 0)
+    verdict_str = f"{C_GRN}[READY]{C_RST}" if is_ready else (f"{C_YEL}[MARGINAL]{C_RST}" if n_surv > 0 else f"{C_RED}[FAIL]{C_RST}")
+    _logger.info(f"  🚀 G-ALPHA Verdict: {verdict_str} - {n_surv} elite slots surviving. (IC Retention: {retention:.1f}% | OOS-CS-IC: {mean_survivor_oos_cs:.4f})")
     _logger.info(SEP_85 + "\n")
 
 

@@ -1,39 +1,36 @@
 {
-  "version": "12.0.0",
-  "project": "my-coin-traider",
-  "last_updated": "2026-05-15T21:40:00Z",
-  "current_logic": {
-    "phase_b_c": "Skewed-t Multivariate HMM + LightGBM Alpha Miner (v11.6)",
-    "phase_d_objective": "Single-Objective TPE with J-Score Maximization (v12.0)",
-    "phase_d_pruner": "MedianPruner (startup_trials=40, warmup_steps=2)",
-    "phase_d_objective_formula": "j_score = j_mean - γ_overfit * j_std, where j_leg = leg_log_tw * shrink_j - ψ * mdd_frac"
+  "version": "9.0.3",
+  "project": "G-ALPHA Futures Alpha Mining v9.0",
+  "timestamp": "2026-05-17T22:39:00Z",
+  "current_logic": "Cross-sectional CatBoost+Linear hybrid ranker with triple-barrier labels, independent model diversity, IC-weighted ensemble with LSO validation. Short signals via 1-alpha_long fallback. Linear baseline (IC-weighted) emerging as more robust than CatBoost for low-SNR crypto CS alpha.",
+  "architecture": {
+    "core_model": "CatBoost YetiRank (9 slots/direction) + IC-weighted Linear baseline (3 slots/direction)",
+    "diversity_mechanism": "3 independent CatBoost models per theme (subsample/rsm/seed variation), eliminating staged-checkpoint fake breadth (A1)",
+    "label_generation": "Triple-barrier method: TP=1.0 / SL=0.0 / time-elapsed=0.5, with cross-sectional market-neutral demeaning (B1+B2)",
+    "ensemble": "IC²-weighted blend of surviving slots (current: 2 linear baselines, 0 CatBoost)",
+    "short_strategy": "1.0 - alpha_long (single CS ranker inverted), automatic fallback when no separate short slots survive",
+    "validation_gates": ["FDR (BH correction)", "DSR (Bailey-Lopez de Prado)", "ICIR + pos_ratio + sub_period (A1 majority vote)", "Tail IC >= 0.005", "OOS IC >= 0.015", "LSO IC >= 0.70*IS", "Regime consistency (HMM)", "Symbol balance (std/mean ratio)"]
   },
   "key_parameters": {
-    "FUTURES_ML_ALPHA_NSGA2_ENABLED": false,
-    "FUTURES_J_LAMBDA_DOWNSIDE": 0.6,
-    "FUTURES_J_PSI_DD": 0.3,
-    "FUTURES_J_GAMMA_OVERFIT": 0.5,
-    "FUTURES_J_GAMMA_REGIME": 0.4,
-    "FUTURES_J_CONSISTENCY_FLOOR": 0.20,
-    "FUTURES_J_MIN_TRADES_PER_LEG": 8,
-    "FUTURES_J_HARD_FAIL_VALUE": -10.0,
-    "FUTURES_DEPLOY_J_FLOOR": 0.0,
-    "FUTURES_PRUNER_STARTUP_TRIALS": 40,
-    "FUTURES_PRUNER_WARMUP_STEPS": 2,
-    "FUTURES_AWF_K_LEGS": 6
+    "slots_per_theme": 3,
+    "n_themes": 3,
+    "total_slots": "9 long + 9 short",
+    "triple_barrier_horizon_bars": 6,
+    "barrier_multiplier_pt_sl": 1.5,
+    "market_neutral_demeaning": true,
+    "lso_holdout_frac": 0.20,
+    "lso_ic_threshold": 0.70,
+    "oos_ic_floor": 0.015,
+    "dsr_n_trials": 18,
+    "newey_west_se": true,
+    "fdr_q": 0.10
   },
-  "fixed_bugs": {
-    "nsga2_leg0_prune": "Removed zero-trade & log_ret<-0.1 early prune (leg-0) causing survival bias",
-    "constraints_func": "Removed constraints_func from TPESampler (was never used, Pareto front was empty)",
-    "study_direction": "Changed from multi-objective minimize[2] to single-objective maximize",
-    "candidate_selection": "Replaced Pareto + strict gates with J-ranking + FAIL-OPEN (3 hard gates only)"
+  "critical_findings": {
+    "catboost_vs_linear": "With triple-barrier labels + Newey-West SE, linear IC-weighted baselines (A2) survive DSR gate (OOS-IC 0.026-0.050) while all 9 CatBoost slots fail DSR. Root cause: discrete 3-value labels {0, 0.5, 1} poorly suited to YetiRank pairwise optimization; neutral label 0.5 creates uninformative pairs. Implication: nonlinear GB trees may be overfit instrument for overlapping low-SNR alpha signals. Recommendation: (1) tune barrier to reduce neutral%, (2) switch to RMSE loss, or (3) commit to linear factor blending as primary engine.",
+    "short_model_failure": "Separate short CatBoostRanker consistently produced CSIC-OOS sign-flip: IS IC positive but OOS CSIC negative. A3 replacement (1-alpha_long) eliminates redundancy, saves 80% training time. Fallback works correctly.",
+    "independent_diversity_success": "A1 change (staged checkpoints → 3 independent models/theme with subsample/rsm variation) improved IC Retention 67%→72%, confirming staged predictions were mathematically correlated ~0.85-0.95. Effective breadth now honest (~6-9) vs claimed 24.",
+    "newey_west_effect": "Enabling Newey-West for overlapping 6-bar labels increased SE, reduced t-stats. Converted false DSR passes to failures. Indicates label inflation was real. IC Retention increased 72%→83.8% (fewer false survivors), but eliminated CatBoost slots entirely."
   },
-  "performance_baseline": {
-    "phase_d_trial_completion": "52.5% (42/80 COMPLETE, 38 PRUNED)",
-    "best_j_score": -0.0129,
-    "j_floor_pass_rate": "0% (FAIL-OPEN activated)",
-    "no_valid_candidates_error": "RESOLVED",
-    "regime_drift_risk": "HIGH (OOS 100% bull vs IS 26% bull, requires date window selection)"
-  },
-  "previous_state_hash": "v11.6.0-hmm-optimized"
+  "previous_stable_state": "98db559 (v8.0 with 5 bug fixes: hl_by_col dict, ic_oos_by_slot, CSIC-OOS column, IC Retention formula, Verdict quality gate)",
+  "deployment_readiness": "MARGINAL (OOS-IC=0.038 mean across 2 survivors). Next priorities: (1) tune pt_multiplier 1.5→2.0-2.5 to reduce neutral label%, (2) walk-forward CV for temporal stability, (3) BTC-beta neutralization in features, (4) triple-barrier with different random_state per symbol."
 }

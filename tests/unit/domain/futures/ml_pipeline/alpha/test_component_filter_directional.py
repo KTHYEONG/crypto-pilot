@@ -132,7 +132,10 @@ def test_component_filter_records_gate_reasons_and_half_life_diag(monkeypatch) -
     fail_reasons = meta.get("gate_fail_reasons_by_col", {})
     gate_status = meta.get("gate_status_by_col", {})
     hl_diag = meta.get("half_life_diag_code_by_col", {})
-    assert "alpha_long_00" in fail_reasons
-    assert "half_life_fail" in fail_reasons["alpha_long_00"]
+    # [G-ALPHA v9.0] half_life gate가 ICIR/positive_bar/subperiod majority vote로 교체됨.
+    # hl_diag_code는 diagnostic 목적으로 여전히 기록되지만, 탈락 이유는 majority vote 결과에 따름.
+    assert "alpha_long_00" in fail_reasons or "alpha_long_00" in gate_status
     assert hl_diag.get("alpha_long_00") == "zero_variance"
     assert gate_status.get("alpha_long_00", {}).get("half_life_diag_code") == "zero_variance"
+    # half_life_ok 상태도 gate_status에 기록되어야 함
+    assert "half_life_ok" in gate_status.get("alpha_long_00", {})
