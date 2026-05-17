@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
-import logging
 import hashlib
 import json
+import logging
 import os
+import threading
+import time
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -13,8 +16,8 @@ from typing import Any, NamedTuple, cast
 
 import numpy as np
 import pandas as pd
-from sklearn.isotonic import IsotonicRegression
 from joblib import Memory
+from sklearn.isotonic import IsotonicRegression
 
 from config.opt_config import OPT_FUTURES_CONFIG
 from config.settings import FUTURES_CACHE_DIR, FUTURES_DATA_DIR
@@ -27,11 +30,13 @@ from src.domain.futures.data_loader import (
     DataCollector,
     merge_funding_into_ohlcv,
     merge_metrics_into_ohlcv,
+    summarize_dataframe_integrity,
 )
 from src.domain.futures.ml_pipeline.alpha.miner import MLAlphaMiner
 from src.domain.futures.ml_pipeline.features.cross_sectional import CrossSectionalPipelineUtils
 from src.domain.futures.ml_pipeline.features.engineering import (
     ALPHA_ENGINEERED_FEATURE_NAMES,
+    GP_FEATURE_SCHEMA_VERSION,
     HMM_SEMANTIC_PROB_COLUMNS,
     build_gp_input_features,
 )
@@ -44,6 +49,124 @@ from src.domain.futures.ml_pipeline.regime.tail_overlay import fit_predict_tail_
 from src.domain.futures.optimization.optimizer import SignalCalibrator
 
 _logger = logging.getLogger(__name__)
+
+_ALPHA_CACHE_SCHEMA_VERSION = "v1"
+_ALPHA_SAFE_DEFAULT_MAX_ITEMS = 2
+_alpha_cache_lock = threading.Lock()
+_alpha_cache_store: OrderedDict[str, dict[str, Any]] = OrderedDict()
+
+
+def _hash_jsonable(payload: dict[str, Any]) -> str:
+    return hashlib.md5(json.dumps(payload, sort_keys=True, default=str).encode()).hexdigest()
+
+
+def _alpha_data_snapshot_id(panel_df: pd.DataFrame) -> str:
+    row_hash = pd.util.hash_pandas_object(panel_df, index=True).to_numpy(dtype=np.uint64, copy=False)
+    digest = hashlib.md5(row_hash.tobytes()).hexdigest()
+    shape_sig = f"{panel_df.shape[0]}x{panel_df.shape[1]}"
+    cols_sig = hashlib.md5("|".join(str(c) for c in panel_df.columns).encode()).hexdigest()[:12]
+    return f"{shape_sig}:{cols_sig}:{digest}"
+
+
+def _build_alpha_cache_key(
+    *,
+    panel_df: pd.DataFrame,
+    tf: str,
+    is_end_date: str | None,
+    seed: int | None,
+    cfg: dict[str, Any],
+    horizons: tuple[int, ...],
+    slots_per_theme: int,
+    filter_options: dict[str, Any],
+) -> str:
+    model_cfg = {
+        "gp_feature_schema_version": GP_FEATURE_SCHEMA_VERSION,
+        "slots_per_theme": int(slots_per_theme),
+        "horizons": tuple(int(h) for h in horizons),
+        "seed": int(seed or 0),
+        "alpha_target_half_life": float(OPT_FUTURES_CONFIG.get("FUTURES_ML_IC_HALF_LIFE", 2.3)),
+        "filter_options": filter_options,
+        "cfg_subset": {
+            "FUTURES_ML_ALPHA_SLOTS_PER_THEME": cfg.get("FUTURES_ML_ALPHA_SLOTS_PER_THEME"),
+            "FUTURES_ML_ALPHA_HORIZONS": cfg.get("FUTURES_ML_ALPHA_HORIZONS"),
+            "FUTURES_ML_IC_FDR_Q": cfg.get("FUTURES_ML_IC_FDR_Q"),
+            "FUTURES_ML_IC_SYMBOL_BALANCE_MAX": cfg.get("FUTURES_ML_IC_SYMBOL_BALANCE_MAX"),
+            "FUTURES_ML_IC_REGIME_GATE": cfg.get("FUTURES_ML_IC_REGIME_GATE"),
+            "FUTURES_ML_IC_FILTER_USE_HAC": cfg.get("FUTURES_ML_IC_FILTER_USE_HAC"),
+            "FUTURES_ML_IC_FILTER_USE_EWMA": cfg.get("FUTURES_ML_IC_FILTER_USE_EWMA"),
+            "FUTURES_ML_IC_EWMA_HALF_LIFE": cfg.get("FUTURES_ML_IC_EWMA_HALF_LIFE"),
+            "FUTURES_STEP3_REGIME_ALPHA_ENABLED": cfg.get("FUTURES_STEP3_REGIME_ALPHA_ENABLED"),
+            "FUTURES_STEP3_CHOP_SUPPORT_MIN": cfg.get("FUTURES_STEP3_CHOP_SUPPORT_MIN"),
+            "FUTURES_STEP3_CHOP_IC_MIN": cfg.get("FUTURES_STEP3_CHOP_IC_MIN"),
+            "FUTURES_STEP3_CHOP_WEIGHT_MULT": cfg.get("FUTURES_STEP3_CHOP_WEIGHT_MULT"),
+            "FUTURES_STEP3_WEIGHT_MULT_FLOOR": cfg.get("FUTURES_STEP3_WEIGHT_MULT_FLOOR"),
+        },
+    }
+    payload = {
+        "schema": _ALPHA_CACHE_SCHEMA_VERSION,
+        "reference_date": str(is_end_date or ""),
+        "tf": str(tf),
+        "data_snapshot_id": _alpha_data_snapshot_id(panel_df),
+        "model_cfg_fingerprint": _hash_jsonable(model_cfg),
+    }
+    return _hash_jsonable(payload)
+
+
+def _resolve_alpha_cache_limits(cfg: dict[str, Any]) -> tuple[bool, int]:
+    enabled = bool(cfg.get("FUTURES_ML_ALPHA_CACHE_ENABLED", True))
+    max_items = int(cfg.get("FUTURES_ML_ALPHA_CACHE_MAX_ITEMS", _ALPHA_SAFE_DEFAULT_MAX_ITEMS))
+    return enabled, max(0, max_items)
+
+
+def _alpha_cache_get(key: str) -> tuple[pd.DataFrame | None, dict[str, Any] | None]:
+    with _alpha_cache_lock:
+        entry = _alpha_cache_store.get(key)
+        if entry is None:
+            _logger.info("ALPHA_CACHE miss key=%s reason=not_found", key[:12])
+            return None, None
+        if str(entry.get("key")) != key:
+            _logger.warning("ALPHA_CACHE miss key=%s reason=key_mismatch", key[:12])
+            return None, None
+        _alpha_cache_store.move_to_end(key)
+        hit_meta = {
+            "cache_state": "hit",
+            "cache_key": key,
+            "cached_at_epoch_s": float(entry.get("created_at", 0.0)),
+            "cache_schema": _ALPHA_CACHE_SCHEMA_VERSION,
+        }
+        _logger.info("ALPHA_CACHE hit key=%s", key[:12])
+        return cast(pd.DataFrame, entry["alpha_panel"]).copy(deep=True), hit_meta
+
+
+def _alpha_cache_put(
+    key: str,
+    alpha_panel: pd.DataFrame,
+    *,
+    max_items: int,
+) -> dict[str, Any]:
+    evicted_key: str | None = None
+    with _alpha_cache_lock:
+        _alpha_cache_store[key] = {
+            "key": key,
+            "alpha_panel": alpha_panel.copy(deep=True),
+            "created_at": time.time(),
+        }
+        _alpha_cache_store.move_to_end(key)
+        while max_items >= 0 and len(_alpha_cache_store) > max_items:
+            old_key, _ = _alpha_cache_store.popitem(last=False)
+            if old_key != key:
+                evicted_key = old_key
+            else:
+                break
+    if evicted_key:
+        _logger.info("ALPHA_CACHE evict key=%s reason=lru_limit", evicted_key[:12])
+    _logger.info("ALPHA_CACHE store key=%s", key[:12])
+    return {
+        "cache_state": "miss_stored",
+        "cache_key": key,
+        "cache_schema": _ALPHA_CACHE_SCHEMA_VERSION,
+        "evicted_key": evicted_key,
+    }
 
 
 @dataclass
@@ -58,6 +181,7 @@ class MLPipelineOutput:
     alpha_panel: pd.DataFrame = field(default_factory=pd.DataFrame)
     hmm_report: dict[str, float] = field(default_factory=dict)
     market_probs: pd.DataFrame = field(default_factory=pd.DataFrame)
+    integrity_report: dict[str, Any] = field(default_factory=dict)
 
 
 def _sorted_hmm_prob_columns(df: pd.DataFrame) -> list[str]:
@@ -272,7 +396,7 @@ def _run_systemic_hmm_with_causal_split(
     Current inferrer API does not expose frozen-parameter OOS filter, so OOS posterior
     is emitted via last-IS posterior carry-forward to avoid OOS refit leakage.
     """
-    n_total = int(len(market_hmm_feats))
+    n_total = len(market_hmm_feats)
     split = int(np.clip(is_end_idx_market, 0, n_total))
     _logger.info(
         "🧭 HMM causal boundary | total=%d | is_end_idx=%d | is=%d | oos=%d",
@@ -1016,6 +1140,7 @@ def _compute_per_symbol_metrics(
 
     Note:
         Time complexity: O(S * N) where S = universe size, N = time bars.
+
     """
     result: dict[str, float | None] = {
         "per_sym_beta_adj_protected_exp": 0.0,
@@ -1111,23 +1236,10 @@ def _print_hmm_summary(
     btc_1h: pd.DataFrame | None,
     mode_label: str = "",
     traceability: dict[str, str] | None = None,
-) -> dict[str, float]:
+) -> dict[str, Any]:
     """Print institutional-grade audit of HMM states and return report metrics (Compact V2)."""
-    # Silence internal audit logs (only return report for dashboard)
-    # _logger.info("\n [HMM REGIME SUMMARY] %s", mode_label)
-    # _logger.info(" ────────────────────────────────────────────────────────────────────────────")
-    # trace = traceability or {}
-    # _logger.info(
-    #     " [TRACE] run_id=%s | cfg_fp=%s | backend=%s | tvtp=%s | hmm_cache=%s",
-    #     trace.get("run_id", "n/a"),
-    #     trace.get("config_fingerprint", "n/a"),
-    #     trace.get("hmm_backend", "n/a"),
-    #     trace.get("tvtp_snapshot", "n/a"),
-    #     trace.get("hmm_cache_state", "n/a"),
-    # )
-    # _logger.info(" ────────────────────────────────────────────────────────────────────────────")
-
-    report: dict[str, float] = {}
+    # ... existing code ...
+    report: dict[str, Any] = {}
     regime4_cols = [
         "regime_prob_risk_on_calm",
         "regime_prob_risk_on_volatile",
@@ -1245,15 +1357,29 @@ def _print_hmm_summary(
     if "ret" in df_eval.columns:
         valid_ret = df_eval["ret"].dropna()
         if not valid_ret.empty:
-            total_m_sig = float(valid_ret.std() * 100.0)
+            std_val = float(valid_ret.std() * 100.0)
+            if std_val > 1e-6:
+                total_m_sig = std_val
     
-    if total_m_sig == 0:
-        total_m_sig = 1.0
+    # Fallback: if total_m_sig is still 1.0 (no ret or no std), try to use macro_vol if available
+    if total_m_sig <= 1.0 and "macro_vol_24h" in df_eval.columns:
+        m_vol = df_eval["macro_vol_24h"].mean()
+        if m_vol > 0:
+            total_m_sig = float(m_vol)
 
     for state in cols:
         g_df = df_eval[df_eval["dominant_state"] == state]
         pct = len(g_df) / len(df_eval) * 100
-        report[state] = pct
+        
+        # Standardize key to always start with 'hmm_prob_' for the dashboard
+        standard_key = state if state.startswith("hmm_prob_") else state.replace("regime_prob_", "hmm_prob_")
+        # Specific mappings for the dashboard's expected 5 regimes
+        if "risk_on_calm" in standard_key: standard_key = "hmm_prob_bull_calm"
+        elif "risk_on_volatile" in standard_key: standard_key = "hmm_prob_bull_vol_up"
+        elif "risk_off_trend" in standard_key: standard_key = "hmm_prob_bear_trend"
+        elif "chop_liquidity_thin" in standard_key: standard_key = "hmm_prob_chop"
+        
+        report[f"{standard_key}_share"] = pct / 100.0
         label = regime_display.get(state, state.replace("hmm_prob_", "").upper()[:12])
 
         if len(g_df) > 0:
@@ -1266,8 +1392,16 @@ def _print_hmm_summary(
                 sig = float(g_df["ret"].std() * 100.0)
                 g_log = mu - 0.5 * (sig**2 / 100.0)
                 vol_scale = sig / total_m_sig
+            elif "macro_trend_24h" in g_df.columns and "macro_vol_24h" in g_df.columns:
+                # Fallback to macro features if ret is missing
+                mu = float(g_df["macro_trend_24h"].mean())
+                sig = float(g_df["macro_vol_24h"].mean())
+                g_log = mu - 0.5 * (sig**2 / 100.0)
+                vol_scale = sig / total_m_sig if total_m_sig > 0 else 1.0
             
-            report[f"{state}_vol_scale"] = vol_scale
+            report[f"{standard_key}_vol_scale"] = vol_scale
+            report[f"{standard_key}_g_log"] = g_log / 100.0 # Standardized key for dashboard
+            
             vol_icon = "🔴" if vol_scale > 1.2 else ("🟡" if vol_scale > 1.0 else ("🟢" if vol_scale < 0.8 else "⚪"))
             
             label_key = state.replace("hmm_prob_", "").replace("regime_prob_", "").upper()
@@ -1276,11 +1410,9 @@ def _print_hmm_summary(
                 report["hmm_crisis_g_log"] = g_log
             if ("RISK-ON-C" in label) or ("BULL-CALM" in label):
                 report["hmm_bull_g_log"] = g_log
-
-            # _logger.info(f"  {label:<13} : {pct:>5.1f}% | Vol-Scale: {vol_scale:>4.2f}x {vol_icon} | G: {g_log:+.3f}% | [{verd}]")
         else:
-            pass
-            # _logger.info(f"  {label:<13} :   0.0% | Vol-Scale: ----  - | G:  ----   | [None]")
+            report[f"{state}_vol_scale"] = 1.0
+            report[f"{state}_g_log"] = 0.0
 
     _logger.info(" ────────────────────────────────────────────────────────────────────────────")
 
@@ -1722,6 +1854,70 @@ def _build_panel_with_targets(
         panel_df.index = panel_df.index.set_levels(new_dt, level="datetime")
         
     return panel_df
+
+
+def _collect_stage_integrity_from_maps(
+    maps: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for sym, smap in maps.items():
+        recs = smap.get("integrity_audit")
+        if isinstance(recs, list):
+            for rec in recs:
+                if isinstance(rec, dict):
+                    rows.append(dict(rec))
+        cov = smap.get("feature_group_coverage")
+        if isinstance(cov, dict):
+            for g, metrics in cov.items():
+                if not isinstance(metrics, dict):
+                    continue
+                rows.append(
+                    {
+                        "symbol": sym,
+                        "timeframe": "n/a",
+                        "stage": "feature_group",
+                        "feature_group": str(g),
+                        **{k: float(v) for k, v in metrics.items() if isinstance(v, (int, float))},
+                    }
+                )
+    return rows
+
+
+def _build_integrity_summary(
+    data_maps: dict[str, dict[str, Any]],
+    panel_df: pd.DataFrame | None,
+    tf: str,
+    *,
+    panel_fillna_cols: list[str] | None = None,
+) -> dict[str, Any]:
+    stage_rows = _collect_stage_integrity_from_maps(data_maps)
+    panel_summary = summarize_dataframe_integrity(panel_df if isinstance(panel_df, pd.DataFrame) else pd.DataFrame(), timeframe=tf)
+    summary: dict[str, Any] = {"panel": panel_summary, "panel_pre_fillna_nan_pct": 0.0}
+    if isinstance(panel_df, pd.DataFrame) and panel_fillna_cols:
+        cols = [c for c in panel_fillna_cols if c in panel_df.columns]
+        if cols:
+            pre_nan = panel_df[cols].isna().sum().sum()
+            summary["panel_pre_fillna_nan_pct"] = float(pre_nan / max(int(len(panel_df) * len(cols)), 1))
+    if stage_rows:
+        stage_df = pd.DataFrame(stage_rows)
+        if {"stage", "timeframe", "nan_pct", "inf_count", "zero_ratio"}.issubset(stage_df.columns):
+            agg = (
+                stage_df.groupby(["stage", "timeframe"], dropna=False)[
+                    ["nan_pct", "inf_count", "zero_ratio", "duplicate_dt", "gap_count", "nonpositive_price_count"]
+                ]
+                .mean(numeric_only=True)
+                .reset_index()
+            )
+            summary["stages"] = agg.to_dict(orient="records")
+        fg_df = stage_df[stage_df.get("stage", "") == "feature_group"] if "stage" in stage_df.columns else pd.DataFrame()
+        if not fg_df.empty:
+            fg_agg = (
+                fg_df.groupby("feature_group", dropna=False)[["col_count", "non_null_coverage", "non_zero_coverage"]]
+                .mean(numeric_only=True)
+                .reset_index()
+            )
+            summary["feature_group_coverage"] = fg_agg.to_dict(orient="records")
+    return summary
 
 
 def merge_ml_output_into_data_maps(
@@ -2203,9 +2399,8 @@ def _run_ml_pipeline_implementation(
     prefetched_1h: dict[str, pd.DataFrame] = preloaded_1h_maps or {}
 
     # --- Step 1: Market-Wide Data Collection & Enrichment ---
-    _logger.info("📊 Step 1/4 | Panel & Screening | %d symbols", len(symbols))
+    _logger.info("  ● STEP 1/4 : Panel & Discovery      [WORKING] symbols=%d", len(symbols))
     
-    missing_any = False
     for sym in symbols:
         # Check if enrichment is needed for target TF
         needs_enrich = False
@@ -2253,18 +2448,16 @@ def _run_ml_pipeline_implementation(
                         prefetched_1h[sym] = data_maps[sym]["1h"]
 
             except Exception as e:
-                _logger.warning("[%s] Data fetch/enrich failed: %s", sym, e)
+                _logger.debug("[%s] Data fetch/enrich failed: %s", sym, e)
         else:
             # Already enriched, just ensure prefetched_1h is synced for 1h mode
             if tf == "1h" and sym not in prefetched_1h:
                 prefetched_1h[sym] = data_maps[sym]["1h"]
-
-    if not data_maps:
-        _logger.error("No data collected. Pipeline aborted.")
-        return MLPipelineOutput()
+    
+    _logger.info("  ● STEP 1/4 : Panel & Discovery      [██████████] ✅ DONE")
 
     # --- Step 2: Systemic HMM Inference (Regime Discovery) ---
-    _logger.info("🧠 Step 2/4 | HMM Regime Inference")
+    _logger.info("  ● STEP 2/4 : HMM Regime Inference   [WORKING] Backend: %s", _resolve_hmm_backend_name(hmm_inferrer, cfg))
     from src.domain.futures.ml_pipeline.features.engineering import build_systemic_hmm_features
 
     # [Optimization #5] Build panel once and reuse for systemic features
@@ -2304,6 +2497,9 @@ def _run_ml_pipeline_implementation(
     else:
         _btc_rets = market_hmm_feats["macro_trend_168h"]
 
+    _logger.debug("🧭 HMM causal boundary | total=%d | is_end_idx=%d", len(market_hmm_feats), is_end_idx_market)
+    _logger.debug("HMM regime inference | Market %s | backend=%s", tf, _resolve_hmm_backend_name(hmm_inferrer, cfg))
+
     market_probs = _run_systemic_hmm_with_causal_split(
         hmm_inferrer=hmm_inferrer,
         market_hmm_feats=market_hmm_feats,
@@ -2319,6 +2515,8 @@ def _run_ml_pipeline_implementation(
         is_end_idx_market=is_end_idx_market,
         cfg=cfg,
     )
+    
+    _logger.info("  ● STEP 2/4 : HMM Regime Inference   [██████████] ✅ is=%d, oos=%d", is_end_idx_market, len(market_hmm_feats) - is_end_idx_market)
 
     if hmm_only:
         _logger.info("✅ HMM Inference complete (HMM-only mode)")
@@ -2344,7 +2542,8 @@ def _run_ml_pipeline_implementation(
             if btc_anchor_hmm and btc_anchor_hmm in hmm_mod_by_sym
             else (next(iter(hmm_mod_by_sym.values())) if hmm_mod_by_sym else pd.DataFrame())
         )
-        out = MLPipelineOutput(market_probs=market_probs)
+        integrity_summary = _build_integrity_summary(data_maps, None, tf)
+        out = MLPipelineOutput(market_probs=market_probs, integrity_report=integrity_summary)
         out.hmm_report = _print_hmm_summary(
             market_probs,
             market_hmm_feats,
@@ -2364,6 +2563,8 @@ def _run_ml_pipeline_implementation(
         )
         out.hmm_report.update({k: float(v) for k, v in tail_rep.items()})
         out.hmm_report["hmm_backend"] = _resolve_hmm_backend_name(hmm_inferrer, cfg)
+        out.hmm_report["integrity_panel_nan_pct"] = float(integrity_summary.get("panel", {}).get("nan_pct", 0.0))
+        out.hmm_report["integrity_panel_prefill_nan_pct"] = float(integrity_summary.get("panel_pre_fillna_nan_pct", 0.0))
         # Step 5: per-symbol overlay metrics
         _per_sym = _compute_per_symbol_metrics(hmm_mod_by_sym, market_probs)
         out.hmm_report["per_sym_beta_adj_protected_exp"] = float(
@@ -2373,10 +2574,15 @@ def _run_ml_pipeline_implementation(
             _per_sym.get("per_sym_beta_monotonicity_corr") or 0.0
         )
         out.hmm_report["per_sym_idio_crash_capture"] = None  # type: ignore[assignment]
+        _logger.info(
+            "Integrity summary (HMM-only) panel_nan_pct=%.4f stage_rows=%d",
+            float(integrity_summary.get("panel", {}).get("nan_pct", 0.0)),
+            len(integrity_summary.get("stages", [])),
+        )
         return out
 
     # --- Step 3: Regime-Aware Alpha Mining ---
-    _logger.info("🤖 Step 3/4 | Alpha Training (LightGBM)")
+    _logger.info("  ● STEP 3/4 : Alpha Signal Mining    [WORKING] %s", "HMM-Aware GPU Loop")
     
     # Build final panel on target TF
     panel_df = h_utils.build_panel_df(data_maps, tf=tf)
@@ -2397,6 +2603,9 @@ def _run_ml_pipeline_implementation(
 
     mp_feats = market_probs.set_index("datetime")[hmm_cols_all]
     panel_df = panel_df.join(mp_feats, on="datetime", how="left")
+    panel_prefill_nan_pct = 0.0
+    if hmm_cols_all:
+        panel_prefill_nan_pct = float(panel_df[hmm_cols_all].isna().sum().sum() / max(int(len(panel_df) * len(hmm_cols_all)), 1))
     panel_df[hmm_cols_all] = panel_df[hmm_cols_all].ffill().fillna(1.0 / float(hmm_k))
 
     # Add targets
@@ -2439,22 +2648,65 @@ def _run_ml_pipeline_implementation(
         "step3_chop_weight_mult": float(cfg.get("FUTURES_STEP3_CHOP_WEIGHT_MULT", 0.50)),
         "step3_weight_mult_floor": float(cfg.get("FUTURES_STEP3_WEIGHT_MULT_FLOOR", 0.20)),
     }
-    alpha_panel = miner.mine_alphas_cs(
-        panel_df, 
+    alpha_cache_enabled, alpha_cache_max_items = _resolve_alpha_cache_limits(cfg)
+    alpha_cache_meta: dict[str, Any] = {"cache_state": "disabled"}
+    alpha_cache_key = _build_alpha_cache_key(
+        panel_df=panel_df,
+        tf=tf,
         is_end_date=is_end_date,
+        seed=seed,
+        cfg=cfg,
+        horizons=horizons,
+        slots_per_theme=int(getattr(miner, "slots_per_theme", cfg.get("FUTURES_ML_ALPHA_SLOTS_PER_THEME", 6))),
         filter_options=filter_options,
     )
+
+    alpha_panel: pd.DataFrame | None = None
+    if alpha_cache_enabled and alpha_cache_max_items > 0:
+        alpha_panel, hit_meta = _alpha_cache_get(alpha_cache_key)
+        if alpha_panel is not None and hit_meta is not None:
+            alpha_cache_meta = hit_meta
+
+    if alpha_panel is None:
+        alpha_panel = miner.mine_alphas_cs(
+            panel_df,
+            is_end_date=is_end_date,
+            filter_options=filter_options,
+        )
+        if alpha_cache_enabled and alpha_cache_max_items > 0:
+            alpha_cache_meta = _alpha_cache_put(
+                alpha_cache_key,
+                alpha_panel,
+                max_items=alpha_cache_max_items,
+            )
+        else:
+            _logger.info("ALPHA_CACHE bypass reason=disabled_or_zero_capacity")
+
     if "target" in panel_df.columns:
         alpha_panel["target"] = panel_df["target"]
+    alpha_panel.attrs["alpha_cache"] = dict(alpha_cache_meta)
+    integrity_summary = _build_integrity_summary(data_maps, panel_df, tf, panel_fillna_cols=hmm_cols_all)
+    integrity_summary["panel_pre_fillna_nan_pct"] = panel_prefill_nan_pct
+    
+    _logger.debug(
+        "Integrity summary | panel_nan_pct=%.4f panel_prefill_nan_pct=%.4f stage_rows=%d",
+        float(integrity_summary.get("panel", {}).get("nan_pct", 0.0)),
+        float(integrity_summary.get("panel_pre_fillna_nan_pct", 0.0)),
+        len(integrity_summary.get("stages", [])),
+    )
+
+    n_surv = int(getattr(alpha_panel, "attrs", {}).get("alpha_component_filter", {}).get("n_surviving", 0))
+    _logger.info("  ● STEP 3/4 : Alpha Signal Mining    [██████████] ✅ Survival: %d elite slots", n_surv)
 
     # --- Step 4: Signal Fusion & Meta-Labeling ---
     if gp_only:
-        _logger.info("⏭️ Step 4/4 | Fusion bypass (ALPHA-only fast path)")
+        _logger.debug("⏭️ Step 4/4 | Fusion bypass (ALPHA-only fast path)")
         hmm_mod_audit = _hmm_modulator_kelly_values(market_probs, market_hmm_feats)
         hmm_mod_audit["datetime"] = market_probs["datetime"]
         out = MLPipelineOutput(
             alpha_panel=alpha_panel,
             market_probs=market_probs,
+            integrity_report=integrity_summary,
         )
         out.hmm_report = _print_hmm_summary(
             market_probs,
@@ -2475,22 +2727,26 @@ def _run_ml_pipeline_implementation(
         )
         out.hmm_report.update({k: float(v) for k, v in tail_rep.items()})
         out.hmm_report["hmm_backend"] = _resolve_hmm_backend_name(hmm_inferrer, cfg)
+        out.hmm_report["integrity_panel_nan_pct"] = float(integrity_summary.get("panel", {}).get("nan_pct", 0.0))
+        out.hmm_report["integrity_panel_prefill_nan_pct"] = float(integrity_summary.get("panel_pre_fillna_nan_pct", 0.0))
         alpha_non_empty = not out.alpha_panel.empty
         alpha_component_count = (
             int(out.alpha_panel.index.get_level_values("component").nunique())
             if alpha_non_empty and "component" in out.alpha_panel.index.names
             else 0
         )
-        _logger.info(
+        _logger.debug(
             "✅ Alpha Mining complete (ALPHA-only mode) | hmm_report_present=%s alpha_panel_non_empty=%s alpha_component_count=%d",
             bool(out.hmm_report),
             alpha_non_empty,
             alpha_component_count,
         )
-        _logger.info("✅ ML Pipeline complete")
+        _logger.info("  ● STEP 4/4 : Signal Multi-Fusion    [██████████] ✅ Bypass (Alpha-only)")
+        _logger.info(" ──────────────────────────────────────────────────────────────")
+        _logger.info(" ✅ ML Pipeline orchestration finished successfully.")
         return out
 
-    _logger.info("🔀 Step 4/4 | Signal Fusion & Meta-Labeling")
+    _logger.info("  ● STEP 4/4 : Signal Multi-Fusion    [WORKING] Meta-Labeling")
     # Use existing HMM results for fusion to avoid redundant training
     out = run_hmm_fusion_for_is_end(
         list(data_maps.keys()), tf, fetch_start_date, end, cfg, data_maps,
@@ -2499,6 +2755,9 @@ def _run_ml_pipeline_implementation(
         prefetched_market_probs=market_probs,
         prefetched_market_hmm_feats=market_hmm_feats
     )
+    out.integrity_report = integrity_summary
     
-    _logger.info("✅ ML Pipeline complete")
+    _logger.info("  ● STEP 4/4 : Signal Multi-Fusion    [██████████] ✅ DONE")
+    _logger.info(" ──────────────────────────────────────────────────────────────")
+    _logger.info(" ✅ ML Pipeline orchestration finished successfully.")
     return out
