@@ -19,7 +19,6 @@ import time
 from catboost import CatBoostError, CatBoostRanker, CatBoostRegressor, Pool
 
 from config.opt_config import OPT_FUTURES_CONFIG
-from src.core.utils.cache_manager import CacheManager
 from src.domain.futures.ml_pipeline.alpha.component_filter import filter_alpha_components
 from src.domain.futures.ml_pipeline.features.engineering import (
     GP_FEATURE_SCHEMA_VERSION,
@@ -279,28 +278,43 @@ class MLAlphaMiner:
         friction_bps: float = 7.0,
         short_oriented: bool = False,
     ) -> np.ndarray:
-        """Convert continuous rank targets into Risk-Adjusted Soft Labels (G-ALPHA v8.0).
+        """Convert continuous rank targets into Risk-Adjusted Soft Labels (G-ALPHA v8.1).
         
-        Uses tanh transformation of returns normalized by ATR to produce continuous
-        labels that prioritize high-conviction, low-volatility moves.
+        Uses tanh transformation of returns normalized by ATR to scale the 
+        cross-sectional rank targets, prioritizing high-conviction moves.
         """
         if raw_returns is None or atr_24h_pct is None:
             # Fallback to rank-based continuous labels if metadata is missing
             t = (target.to_numpy() / 2.0) + 0.5
-            return t if not short_oriented else 1.0 - t
+            return (t if not short_oriented else 1.0 - t).astype(np.float32)
 
         # Convert to numpy for vectorized operations
         ret = raw_returns.to_numpy() if hasattr(raw_returns, "to_numpy") else raw_returns
         atr = atr_24h_pct.to_numpy() if hasattr(atr_24h_pct, "to_numpy") else atr_24h_pct
         
-        # G-ALPHA v8.0 Soft Labeling: np.tanh(raw_returns / (atr_24h_pct + 1e-8))
-        # This maps (-inf, inf) to (-1, 1), then we shift to (0, 1) for CatBoost
-        soft_labels = np.tanh(ret / (atr + 1e-8))
+        if hasattr(target, "to_numpy"):
+            target_vals = target.fillna(0.5).to_numpy()
+        else:
+            target_vals = np.nan_to_num(target, nan=0.5)
         
-        # Shift from [-1, 1] to [0, 1] for general ranking/regression compatibility
+        # G-ALPHA v8.1: Combine Rank Direction with Return-based Magnitude.
+        # 1. Center target [0, 1] to [-1, 1] to preserve cross-sectional ordering.
+        target_centered = (target_vals - 0.5) * 2.0
+        
+        # G-ALPHA v8.2: Enhanced Conviction Scaling (tanh multiplier 2.0x)
+        # Uses 2.0x multiplier to increase label variance and prevent CatBoost GPU pruning.
+        mag = np.tanh(2.0 * np.abs(ret) / (atr + 1e-8))
+        
+        # 3. Combine rank direction with return-based magnitude.
+        # Multiplicative combination scales the rank signal by absolute return conviction.
+        soft_labels = target_centered * mag
+        
+        # 4. Shift back to [0, 1] for CatBoost PairLogit/RMSE compatibility.
         labels = (soft_labels / 2.0) + 0.5
 
         if short_oriented:
+            # Note: y_labels_short is now calculated as 1.0 - y_labels externally
+            # but we keep this for internal consistency/fallback.
             labels = 1.0 - labels
         
         return labels.astype(np.float32)
@@ -308,7 +322,6 @@ class MLAlphaMiner:
     def mine_alphas_cs(
         self,
         panel_df: pd.DataFrame,
-        cache_path: Path | None = None,
         is_end_date: str | None = None,
         filter_options: dict[str, Any] | None = None,
     ) -> pd.DataFrame:
@@ -322,331 +335,344 @@ class MLAlphaMiner:
                 f"({self.n_features_to_select} vs slots_per_theme={self.slots_per_theme})"
             )
 
-        force_retrain = bool(OPT_FUTURES_CONFIG.get("FUTURES_ML_FORCE_RETRAIN_ALPHA", False))
-        versioned_cache: Path | None = None
-        raw_alpha_df: pd.DataFrame | None = None
-
-        if cache_path is not None:
-            cm = CacheManager(cache_path.parent, max_files=5)
-            symbols = sorted(list(panel_df.index.get_level_values("symbol").unique()))
-            # [Optimization] Use data fingerprint instead of source-file hash.
-            # Source-file hash invalidates cache on every code edit, even unrelated ones.
-            # miner_version must be bumped manually when model logic changes intentionally.
-            _times = panel_df.index.get_level_values("datetime")
-            _last_ts = str(_times.max()) if len(_times) > 0 else "none"
-            deps = {
-                "horizons": self.target_horizons,
-                "symbols": symbols,
-                "is_end_date": is_end_date,
-                "feature_schema_version": GP_FEATURE_SCHEMA_VERSION,
-                "miner_version": "v8_staged_pred_cpu_opt",
-                "slots_per_theme": int(self.slots_per_theme),
-                "n_rows": len(panel_df),
-                "last_ts": _last_ts,
-            }
-            tag = cm.generate_hash(deps)
-            versioned_cache = cm.get_cache_path("raw_lgbm_v6", ".parquet", tag)
-
-            if not force_retrain and versioned_cache.exists():
-                try:
-                    raw_alpha_df = pd.read_parquet(versioned_cache)
-                    self._mag_models.clear()
-                    _logger.info("MLAlphaMiner v6 Cache Hit: %s", versioned_cache.name)
-                except Exception as e:
-                    _logger.warning("Cache load failed: %s", e)
-
-        if raw_alpha_df is None:
-            _logger.info("Training MLAlphaMiner v6 (CatBoost GPU + Dynamic Labeling)...")
+        _logger.info("Training MLAlphaMiner v6 (CatBoost GPU + Dynamic Labeling)...")
+        
+        # [Fix] Standardize indices to UTC aware to prevent alignment mismatches.
+        def _standardize_idx(idx: pd.Index) -> pd.Index:
+            if not isinstance(idx, pd.MultiIndex):
+                return idx
+            d_idx = -1
+            s_idx = -1
+            for i, name in enumerate(idx.names):
+                if name and name.lower() in ("datetime", "time", "timestamp"): d_idx = i
+                elif name and name.lower() in ("symbol", "ticker", "asset"): s_idx = i
+            if d_idx == -1 or s_idx == -1: return idx
             
-            # Sort by datetime and symbol for alignment and group calculation
-            work_df = panel_df.sort_index(level=["datetime", "symbol"])
-            
-            # [Localization] Add macro interaction features (Theme Group 3)
-            work_df = add_macro_interaction_features(work_df)
-            
-            # [Optimization] Pre-clean feature columns once
-            all_feat_cols = set()
-            for group_feats in THEME_GROUPS.values():
-                all_feat_cols.update(group_feats)
-            for group_feats in SHORT_THEME_GROUPS.values():
-                all_feat_cols.update(group_feats)
-            all_feat_cols.update(HMM_COLS)
-            
-            existing_feats = [c for c in all_feat_cols if c in work_df.columns]
-            if existing_feats:
-                # [Optimization ⑨] replace/fillna 체인 → numpy in-place (pandas 중간 DataFrame 생성 제거)
-                _feat_arr = work_df[existing_feats].to_numpy(dtype=np.float64, copy=True)
-                np.nan_to_num(_feat_arr, nan=0.0, posinf=0.0, neginf=0.0, copy=False)
-                work_df[existing_feats] = _feat_arr
-
-            # [Optimization ⑧] 3회 unstack → 1회 통합 (pandas groupby 오버헤드 2회 절감)
-            _ohlc_wide = work_df[["close", "high", "low"]].unstack(level="symbol")
-            close_wide = _ohlc_wide["close"]
-            high_wide = _ohlc_wide["high"]
-            low_wide = _ohlc_wide["low"]
-            del _ohlc_wide
-
-            # [Optimization] Efficient wide-flat mapping
-            close_clipped = close_wide.clip(lower=1e-12)
-            valid_mask = close_wide.notna().values  # Since work_df is sorted by (datetime, symbol), this matches perfectly
-            idx_shape = close_wide.shape
-
-            # Efficient vectorized calculation of forward returns and ATR
-            fwd_ret_6_wide = np.log(close_wide.shift(-6) / close_clipped)
-            fwd_log_mag_horizon_wide = np.log(close_wide.shift(-_MAG_HORIZON_BARS) / close_clipped)
-            close_shifted_1 = close_wide.shift(1)
-            tr_wide = np.maximum(high_wide - low_wide, 
-                                np.maximum((high_wide - close_shifted_1).abs(), 
-                                           (low_wide - close_shifted_1).abs()))
-            atr_24_wide = tr_wide.rolling(24).mean()
-            atr_24_pct_wide = atr_24_wide / close_clipped
-
-            # Map wide calculations back to flat work_df alignment (row-major)
-            fwd_ret_6 = np.nan_to_num(fwd_ret_6_wide.values[valid_mask])
-            atr_24_pct = np.nan_to_num(atr_24_pct_wide.values[valid_mask])
-            y_mag_h_vals = np.abs(fwd_log_mag_horizon_wide.values[valid_mask])
-            
-            y_mag_h = pd.Series(y_mag_h_vals, index=work_df.index).replace([np.inf, -np.inf], np.nan)
-            
-            y_labels = self._prepare_labels(
-                work_df["target"],
-                raw_returns=fwd_ret_6,
-                dispersion=work_df.get("cs_dispersion"),
-                atr_24h_pct=atr_24_pct
+            d_vals = idx.get_level_values(d_idx)
+            if getattr(d_vals, "tz", None) is None:
+                d_vals = pd.to_datetime(d_vals, utc=True)
+            else:
+                d_vals = d_vals.tz_convert("UTC")
+            return pd.MultiIndex.from_arrays(
+                [d_vals, idx.get_level_values(s_idx)],
+                names=["datetime", "symbol"]
             )
-            # [Optimization ⑥] short 라벨: _prepare_labels 재호출 대신 flip (3 - labels)
-            # short_oriented=True 경로는 마지막에 `labels = 3 - labels`만 수행하므로 동일
-            y_labels_short = (3 - y_labels).astype(np.int32)
-            
-            # In-Sample Masking & Time-Series Split
-            if is_end_date:
-                cutoff = pd.to_datetime(is_end_date, utc=True)
-                is_mask = work_df.index.get_level_values("datetime") < cutoff
-            else:
-                is_mask = np.ones(len(work_df), dtype=bool)
 
-            # Time-Series Split for Validation (Last 20% of IS)
-            is_indices = is_mask.nonzero()[0]
-            if len(is_indices) > 0:
+        # Work with sorted and standardized copy
+        work_df = panel_df.sort_index(level=["datetime", "symbol"]).copy()
+        work_df.index = _standardize_idx(work_df.index)
+        
+        # Standardized panel for filtering
+        panel_df_std = panel_df.copy()
+        panel_df_std.index = _standardize_idx(panel_df_std.index)
+
+        # [Localization] Add macro interaction features (Theme Group 3)
+        work_df = add_macro_interaction_features(work_df)
+        
+        # [Optimization] Pre-clean feature columns once
+        all_feat_cols = set()
+        for group_feats in THEME_GROUPS.values():
+            all_feat_cols.update(group_feats)
+        for group_feats in SHORT_THEME_GROUPS.values():
+            all_feat_cols.update(group_feats)
+        all_feat_cols.update(HMM_COLS)
+        
+        existing_feats = [c for c in all_feat_cols if c in work_df.columns]
+        if existing_feats:
+            # [Optimization ⑨] replace/fillna 체인 → numpy in-place (pandas 중간 DataFrame 생성 제거)
+            _feat_arr = work_df[existing_feats].to_numpy(dtype=np.float64, copy=True)
+            np.nan_to_num(_feat_arr, nan=0.0, posinf=0.0, neginf=0.0, copy=False)
+            work_df[existing_feats] = _feat_arr
+
+        # [Fix] Strict Data Alignment: Use groupby('symbol') for shifts to ensure row integrity.
+        # This replaces the unstack() -> shift() -> mask approach which is fragile for mismatched indices.
+        work_grouped = work_df.groupby("symbol", group_keys=False)
+        
+        # 1. Forward Return (6 bars)
+        # Use transform to ensure the result is aligned with work_df order (datetime, symbol)
+        fwd_close_6 = work_grouped["close"].transform(lambda x: x.shift(-6))
+        fwd_ret_6_series = (fwd_close_6 / work_df["close"].clip(lower=1e-12)) - 1.0
+        fwd_ret_6 = np.nan_to_num(fwd_ret_6_series.to_numpy())
+        
+        # 2. Magnitude Horizon Log Returns (for auxiliary regression)
+        fwd_close_h = work_grouped["close"].transform(lambda x: x.shift(-_MAG_HORIZON_BARS))
+        fwd_log_mag_h = np.log(fwd_close_h / work_df["close"].clip(lower=1e-12))
+        y_mag_h_vals = np.abs(fwd_log_mag_h.fillna(0.0).to_numpy())
+        y_mag_h = pd.Series(y_mag_h_vals, index=work_df.index)
+        
+        # 3. ATR (24 bars) for risk-normalization
+        close_shift_1 = work_grouped["close"].shift(1)
+        tr = np.maximum(
+            work_df["high"] - work_df["low"],
+            np.maximum(
+                (work_df["high"] - close_shift_1).abs(),
+                (work_df["low"] - close_shift_1).abs()
+            )
+        )
+        # Use transform with lambda for reliable per-symbol rolling mean alignment
+        atr_24 = tr.groupby(level="symbol", group_keys=False).transform(lambda x: x.rolling(24).mean())
+        atr_24_pct = np.nan_to_num((atr_24 / work_df["close"].clip(lower=1e-12)).to_numpy())
+
+        # [Target Distribution & Alignment] Generate Labels
+        y_labels = self._prepare_labels(
+            work_df["target"],
+            raw_returns=fwd_ret_6,
+            dispersion=work_df.get("cs_dispersion"),
+            atr_24h_pct=atr_24_pct
+        )
+        # [Short Label Simplification] Perfectly symmetric labels (Fix #3)
+        y_labels_short = 1.0 - y_labels
+
+        # Metadata for alignment in mining loop (needed for _fast_rank_2d_numba)
+        _close_wide = work_df["close"].unstack(level="symbol")
+        valid_mask = _close_wide.notna().values
+        idx_shape = _close_wide.shape
+        del _close_wide
+
+        _logger.info(
+            "Label Stats - Long: mean=%.4f, std=%.4f, nans=%d | Short: mean=%.4f, std=%.4f, nans=%d",
+            float(np.mean(y_labels)), float(np.std(y_labels)), int(np.isnan(y_labels).sum()),
+            float(np.mean(y_labels_short)), float(np.std(y_labels_short)), int(np.isnan(y_labels_short).sum())
+        )
+        
+        # In-Sample Masking & Time-Series Split
+        if is_end_date:
+            cutoff = pd.to_datetime(is_end_date, utc=True)
+            is_mask = work_df.index.get_level_values("datetime") < cutoff
+        else:
+            is_mask = np.ones(len(work_df), dtype=bool)
+
+        # [Fix] Pre-calculate group IDs to ensure split happens at a group boundary
+        full_group_ids = work_df.index.get_level_values("datetime").factorize()[0]
+
+        # Time-Series Split for Validation (Last 20% of IS)
+        is_indices = is_mask.nonzero()[0]
+        if len(is_indices) > 1:
+            split_idx = int(len(is_indices) * 0.8)
+            
+            # Ensure split_idx is at a group boundary to avoid CatBoostError:
+            # "Subset's last group size is less than corresponding source group size"
+            while split_idx < len(is_indices) and \
+                  full_group_ids[is_indices[split_idx]] == full_group_ids[is_indices[split_idx-1]]:
+                split_idx += 1
+            
+            if split_idx >= len(is_indices):
+                # Fallback: move backward if we hit the end
                 split_idx = int(len(is_indices) * 0.8)
-                train_idx = is_indices[:split_idx]
-                eval_idx = is_indices[split_idx:]
-            else:
-                train_idx = eval_idx = is_indices
-
-            # [Plan B-1] Sample Weighting (Dispersion-Aware)
-            if "cs_dispersion" in work_df.columns:
-                raw_weights = work_df["cs_dispersion"].to_numpy()
-            else:
-                raw_weights = work_df["target"].abs().to_numpy()
+                while split_idx > 0 and \
+                      full_group_ids[is_indices[split_idx]] == full_group_ids[is_indices[split_idx-1]]:
+                    split_idx -= 1
             
-            sample_weights_all = raw_weights / (raw_weights.mean() + 1e-12)
+            train_idx = is_indices[:split_idx]
+            eval_idx = is_indices[split_idx:]
+        else:
+            train_idx = eval_idx = is_indices
 
-            y_mag_vals_raw = y_mag_h.to_numpy(dtype=np.float64)
-            # [Optimization ⑤] 재사용 버퍼 사전 할당 + dict-of-arrays 일괄 구성 (컬럼별 할당 제거)
-            _m_buf = np.empty(idx_shape, dtype=np.float64)
-            slot_arrays: dict[str, np.ndarray] = {}
-            self._mag_models.clear()
-            self._short_models.clear()
-            self._short_feature_sets.clear()
-            self._ntree_ends.clear()
-            self._short_ntree_ends.clear()
+        # [Plan B-1] Sample Weighting (Dispersion-Aware)
+        if "cs_dispersion" in work_df.columns:
+            raw_weights = work_df["cs_dispersion"].to_numpy()
+        else:
+            raw_weights = work_df["target"].abs().to_numpy()
+        
+        sample_weights_all = raw_weights / (raw_weights.mean() + 1e-12)
 
-            # GPU-Native Mining Loop v8.0
-            _logger.info("GPU-Native Mining Loop v8.0 (9 fit + staged predictions + Early Stopping)...")
-            total_loop_start = time.time()
-            mag_finite = np.isfinite(y_mag_vals_raw)
+        y_mag_vals_raw = y_mag_h.to_numpy(dtype=np.float64)
+        # [Optimization ⑤] 재사용 버퍼 사전 할당 + dict-of-arrays 일괄 구성 (컬럼별 할당 제거)
+        _m_buf = np.empty(idx_shape, dtype=np.float64)
+        slot_arrays: dict[str, np.ndarray] = {}
+        self._mag_models.clear()
+        self._short_models.clear()
+        self._short_feature_sets.clear()
+        self._ntree_ends.clear()
+        self._short_ntree_ends.clear()
 
-            full_group_ids = work_df.index.get_level_values("datetime").factorize()[0]
+        # GPU-Native Mining Loop v8.0
+        _logger.info("GPU-Native Mining Loop v8.0 (9 fit + staged predictions + Early Stopping)...")
+        total_loop_start = time.time()
+        mag_finite = np.isfinite(y_mag_vals_raw)
 
-            # iterations per theme
-            _LONG_ITERS = {0: 1000, 1: 800, 2: 600}
-            _SHORT_ITERS = {0: 800, 1: 600, 2: 500}
+        # iterations per theme
+        _LONG_ITERS = {0: 1000, 1: 800, 2: 600}
+        _SHORT_ITERS = {0: 800, 1: 600, 2: 500}
 
-            for theme_idx in range(3):
-                if theme_idx == 1:
-                    fc = list(dict.fromkeys(THEME_GROUPS[theme_idx] + HMM_COLS))
-                else:
-                    fc = list(dict.fromkeys(THEME_GROUPS[theme_idx]))
-                fc = [c for c in fc if c in work_df.columns]
-                short_fc = list(dict.fromkeys(SHORT_THEME_GROUPS[theme_idx]))
-                short_fc = [c for c in short_fc if c in work_df.columns]
+        for theme_idx in range(3):
+            if theme_idx == 1:
+                fc = list(dict.fromkeys(THEME_GROUPS[theme_idx] + HMM_COLS))
+            else:
+                fc = list(dict.fromkeys(THEME_GROUPS[theme_idx]))
+            fc = [c for c in fc if c in work_df.columns]
+            short_fc = list(dict.fromkeys(SHORT_THEME_GROUPS[theme_idx]))
+            short_fc = [c for c in short_fc if c in work_df.columns]
 
-                if not fc and not short_fc:
-                    continue
+            if not fc and not short_fc:
+                continue
 
-                # --- Build pools: quantize ONCE, reuse across all staged predictions ---
-                master_pool = train_pool = eval_pool = pred_pool = None
-                master_mag_pool = mag_train_pool = mag_eval_pool = None
-                master_short_pool = short_train_pool = short_eval_pool = short_pred_pool = None
+            # --- Build pools: quantize ONCE, reuse across all staged predictions ---
+            master_pool = train_pool = eval_pool = pred_pool = None
+            master_mag_pool = mag_train_pool = mag_eval_pool = None
+            master_short_pool = short_train_pool = short_eval_pool = short_pred_pool = None
 
-                if fc:
-                    X_long = work_df[fc].values.astype(np.float32)
-                    master_pool = Pool(
-                        data=X_long,
-                        label=y_labels,
-                        group_id=full_group_ids,
-                        feature_names=fc,
-                    )
-                    master_pool.quantize(border_count=254)
-                    train_pool = master_pool.slice(train_idx)
-                    eval_pool = master_pool.slice(eval_idx)
-                    pred_pool = master_pool
+            if fc:
+                X_long = work_df[fc].values.astype(np.float32)
+                master_pool = Pool(
+                    data=X_long,
+                    label=y_labels,
+                    group_id=full_group_ids,
+                    feature_names=fc,
+                )
+                master_pool.quantize(border_count=254)
+                train_pool = master_pool.slice(train_idx)
+                eval_pool = master_pool.slice(eval_idx)
+                pred_pool = master_pool
 
-                    master_mag_pool = Pool(
-                        data=X_long,
-                        label=y_mag_vals_raw,
-                        weight=sample_weights_all,
-                        feature_names=fc,
-                    )
-                    master_mag_pool.quantize(border_count=254)
-                    mag_train_mask = mag_finite[train_idx]
-                    mag_eval_mask = mag_finite[eval_idx]
-                    mag_train_pool = master_mag_pool.slice(train_idx[mag_train_mask])
-                    mag_eval_pool = master_mag_pool.slice(eval_idx[mag_eval_mask])
+                master_mag_pool = Pool(
+                    data=X_long,
+                    label=y_mag_vals_raw,
+                    weight=sample_weights_all,
+                    feature_names=fc,
+                )
+                master_mag_pool.quantize(border_count=254)
+                mag_train_mask = mag_finite[train_idx]
+                mag_eval_mask = mag_finite[eval_idx]
+                mag_train_pool = master_mag_pool.slice(train_idx[mag_train_mask])
+                mag_eval_pool = master_mag_pool.slice(eval_idx[mag_eval_mask])
 
-                if short_fc:
-                    master_short_pool = Pool(
-                        data=work_df[short_fc].values.astype(np.float32),
-                        label=y_labels_short,
-                        group_id=full_group_ids,
-                        feature_names=short_fc,
-                    )
-                    master_short_pool.quantize(border_count=254)
-                    short_train_pool = master_short_pool.slice(train_idx)
-                    short_eval_pool = master_short_pool.slice(eval_idx)
-                    short_pred_pool = master_short_pool
+            if short_fc:
+                master_short_pool = Pool(
+                    data=work_df[short_fc].values.astype(np.float32),
+                    label=y_labels_short,
+                    group_id=full_group_ids,
+                    feature_names=short_fc,
+                )
+                master_short_pool.quantize(border_count=254)
+                short_train_pool = master_short_pool.slice(train_idx)
+                short_eval_pool = master_short_pool.slice(eval_idx)
+                short_pred_pool = master_short_pool
 
-                theme_start = theme_idx * self.slots_per_theme
-                theme_end = min(self.n_features_to_select, (theme_idx + 1) * self.slots_per_theme)
-                n_virtual = theme_end - theme_start
+            theme_start = theme_idx * self.slots_per_theme
+            theme_end = min(self.n_features_to_select, (theme_idx + 1) * self.slots_per_theme)
+            n_virtual = theme_end - theme_start
 
-                # --- Phase 1: ONE GPU fit per direction ---
-                long_ranker: CatBoostRanker | None = None
-                short_ranker: CatBoostRanker | None = None
+            # --- Phase 1: ONE GPU fit per direction ---
+            long_ranker: CatBoostRanker | None = None
+            short_ranker: CatBoostRanker | None = None
 
-                long_iters = _LONG_ITERS[theme_idx]
-                short_iters = _SHORT_ITERS[theme_idx]
+            long_iters = _LONG_ITERS[theme_idx]
+            short_iters = _SHORT_ITERS[theme_idx]
 
-                if train_pool is not None:
-                    ranker_params = self._get_lgbm_params(seed_offset=theme_idx * 100, iterations=long_iters)
+            if train_pool is not None:
+                ranker_params = self._get_lgbm_params(seed_offset=theme_idx * 100, iterations=long_iters)
+                long_ranker = CatBoostRanker(**ranker_params)
+                try:
+                    long_ranker.fit(train_pool, eval_set=eval_pool)
+                except CatBoostError as exc:
+                    _logger.warning("CatBoost Long Ranker fit failed: %s. Falling back to CPU.", exc)
+                    ranker_params["task_type"] = "CPU"
+                    ranker_params.pop("devices", None)
+                    ranker_params.pop("gpu_ram_part", None)
                     long_ranker = CatBoostRanker(**ranker_params)
-                    try:
-                        _logger.info("  [THEME %d] Fitting LONG ranker with Early Stopping...", theme_idx)
-                        long_ranker.fit(train_pool, eval_set=eval_pool)
-                    except CatBoostError as exc:
-                        _logger.warning("CatBoost Long Ranker fit failed: %s. Falling back to CPU.", exc)
-                        ranker_params["task_type"] = "CPU"
-                        ranker_params.pop("devices", None)
-                        ranker_params.pop("gpu_ram_part", None)
-                        long_ranker = CatBoostRanker(**ranker_params)
-                        long_ranker.fit(train_pool, eval_set=eval_pool)
+                    long_ranker.fit(train_pool, eval_set=eval_pool)
 
-                if short_train_pool is not None:
-                    short_params = self._get_lgbm_params(seed_offset=theme_idx * 100 + 1000, iterations=short_iters)
+            if short_train_pool is not None:
+                short_params = self._get_lgbm_params(seed_offset=theme_idx * 100 + 1000, iterations=short_iters)
+                short_ranker = CatBoostRanker(**short_params)
+                try:
+                    short_ranker.fit(short_train_pool, eval_set=short_eval_pool)
+                except CatBoostError as exc:
+                    _logger.warning("CatBoost Short Ranker fit failed: %s. Falling back to CPU.", exc)
+                    short_params["task_type"] = "CPU"
+                    short_params.pop("devices", None)
+                    short_params.pop("gpu_ram_part", None)
                     short_ranker = CatBoostRanker(**short_params)
-                    try:
-                        _logger.info("  [THEME %d] Fitting SHORT ranker with Early Stopping...", theme_idx)
-                        short_ranker.fit(short_train_pool, eval_set=short_eval_pool)
-                    except CatBoostError as exc:
-                        _logger.warning("CatBoost Short Ranker fit failed: %s. Falling back to CPU.", exc)
-                        short_params["task_type"] = "CPU"
-                        short_params.pop("devices", None)
-                        short_params.pop("gpu_ram_part", None)
-                        short_ranker = CatBoostRanker(**short_params)
-                        short_ranker.fit(short_train_pool, eval_set=short_eval_pool)
+                    short_ranker.fit(short_train_pool, eval_set=short_eval_pool)
 
-                # Magnitude regressor with Early Stopping
-                mag_params = {
-                    "loss_function": "MAE",
-                    "task_type": _DEFAULT_TASK_TYPE,
-                    "iterations": 500,
-                    "depth": 4,
-                    "learning_rate": 0.03,
-                    "verbose": 0,
-                    "random_seed": 42 + theme_idx,
-                    "early_stopping_rounds": 50,
-                    "use_best_model": True,
-                }
-                if _DEFAULT_TASK_TYPE == "GPU":
-                    mag_params["devices"] = "0"
-                    mag_params["gpu_ram_part"] = 0.4
+            # Magnitude regressor with Early Stopping
+            mag_params = {
+                "loss_function": "MAE",
+                "task_type": _DEFAULT_TASK_TYPE,
+                "iterations": 500,
+                "depth": 4,
+                "learning_rate": 0.03,
+                "logging_level": "Silent",
+                "random_seed": 42 + theme_idx,
+                "early_stopping_rounds": 50,
+                "use_best_model": True,
+            }
+            if _DEFAULT_TASK_TYPE == "GPU":
+                mag_params["devices"] = "0"
+                mag_params["gpu_ram_part"] = 0.4
 
-                mag_reg = CatBoostRegressor(**mag_params)
-                if mag_train_pool is not None:
-                    try:
-                        mag_reg.fit(mag_train_pool, eval_set=mag_eval_pool)
-                    except CatBoostError as exc:
-                        _logger.warning("CatBoost Mag fit failed: %s. CPU fallback.", exc)
-                        mag_params["task_type"] = "CPU"
-                        mag_params.pop("devices", None)
-                        mag_reg = CatBoostRegressor(**mag_params)
-                        mag_reg.fit(mag_train_pool, eval_set=mag_eval_pool)
+            mag_reg = CatBoostRegressor(**mag_params)
+            if mag_train_pool is not None:
+                try:
+                    mag_reg.fit(mag_train_pool, eval_set=mag_eval_pool)
+                except CatBoostError as exc:
+                    _logger.warning("CatBoost Mag fit failed: %s. CPU fallback.", exc)
+                    mag_params["task_type"] = "CPU"
+                    mag_params.pop("devices", None)
+                    mag_reg = CatBoostRegressor(**mag_params)
+                    mag_reg.fit(mag_train_pool, eval_set=mag_eval_pool)
 
-                mag_z: np.ndarray | None = None
-                if mag_reg is not None and pred_pool is not None:
-                    mag_raw_all = mag_reg.predict(pred_pool)
-                    mu_m = float(np.mean(mag_raw_all))
-                    sig_m = float(np.std(mag_raw_all) + 1e-9)
-                    mag_z = np.clip((mag_raw_all - mu_m) / sig_m, -3.0, 3.0)
+            mag_z: np.ndarray | None = None
+            if mag_reg is not None and pred_pool is not None:
+                mag_raw_all = mag_reg.predict(pred_pool)
+                mu_m = float(np.mean(mag_raw_all))
+                sig_m = float(np.std(mag_raw_all) + 1e-9)
+                mag_z = np.clip((mag_raw_all - mu_m) / sig_m, -3.0, 3.0)
 
-                # --- Phase 2: Staged predictions ---
-                actual_long_iters = long_ranker.get_best_iteration() if long_ranker else long_iters
-                actual_short_iters = short_ranker.get_best_iteration() if short_ranker else short_iters
-                
-                step_l = max(1, actual_long_iters // n_virtual)
-                step_s = max(1, actual_short_iters // n_virtual)
-                long_checkpoints = [min(actual_long_iters, step_l * (k + 1)) for k in range(n_virtual)]
-                short_checkpoints = [min(actual_short_iters, step_s * (k + 1)) for k in range(n_virtual)]
-
-                for v_idx in range(n_virtual):
-                    s_idx = theme_start + v_idx
-
-                    if long_ranker is not None and pred_pool is not None:
-                        ntree_l = long_checkpoints[v_idx]
-                        raw_scores = long_ranker.predict(pred_pool, ntree_end=ntree_l)
-                        self._models[s_idx] = long_ranker
-                        self._feature_sets[s_idx] = fc
-                        self._ntree_ends[s_idx] = ntree_l
-                        _m_buf.fill(np.nan)
-                        _m_buf[valid_mask] = raw_scores
-                        slot_arrays[f"alpha_long_{s_idx:02d}"] = _fast_rank_2d_numba(_m_buf)[valid_mask]
-                        if mag_z is not None:
-                            self._mag_models[s_idx] = mag_reg
-                            slot_arrays[f"mag_long_{s_idx:02d}"] = mag_z
-                        else:
-                            slot_arrays[f"mag_long_{s_idx:02d}"] = np.zeros(int(valid_mask.sum()), dtype=np.float64)
-                    else:
-                        slot_arrays[f"alpha_long_{s_idx:02d}"] = np.full(int(valid_mask.sum()), 0.5)
-                        slot_arrays[f"mag_long_{s_idx:02d}"] = np.zeros(int(valid_mask.sum()), dtype=np.float64)
-
-                    if short_ranker is not None and short_pred_pool is not None:
-                        ntree_s = short_checkpoints[v_idx]
-                        short_raw = short_ranker.predict(short_pred_pool, ntree_end=ntree_s)
-                        self._short_models[s_idx] = short_ranker
-                        self._short_feature_sets[s_idx] = short_fc
-                        self._short_ntree_ends[s_idx] = ntree_s
-                        _m_buf.fill(np.nan)
-                        _m_buf[valid_mask] = short_raw
-                        slot_arrays[f"alpha_short_{s_idx:02d}"] = _fast_rank_2d_numba(_m_buf)[valid_mask]
-                    else:
-                        slot_arrays[f"alpha_short_{s_idx:02d}"] = np.full(int(valid_mask.sum()), 0.5)
-
-                # Free VRAM/RAM before next theme
-                del pred_pool, short_pred_pool, train_pool, mag_train_pool, short_train_pool
-                del master_pool, master_mag_pool, master_short_pool
-                gc.collect()
-
-            loop_elapsed = time.time() - total_loop_start
-            _logger.info("GPU-Native Mining Loop completed in %.4f seconds.", loop_elapsed)
-
-            # [Optimization ⑤] slot_arrays → DataFrame 일괄 구성 (컬럼별 시리즈 할당 제거)
-            # valid_mask.sum() == len(work_df) (close가 항상 유효한 경우)이므로 직접 구성 가능
-            raw_alpha_df = pd.DataFrame(slot_arrays, index=work_df.index)
+            # --- Phase 2: Staged predictions ---
+            actual_long_iters = long_ranker.get_best_iteration() if long_ranker else long_iters
+            actual_short_iters = short_ranker.get_best_iteration() if short_ranker else short_iters
             
-            if versioned_cache:
-                versioned_cache.parent.mkdir(parents=True, exist_ok=True)
-                raw_alpha_df.to_parquet(versioned_cache)
+            step_l = max(1, actual_long_iters // n_virtual)
+            step_s = max(1, actual_short_iters // n_virtual)
+            long_checkpoints = [min(actual_long_iters, step_l * (k + 1)) for k in range(n_virtual)]
+            short_checkpoints = [min(actual_short_iters, step_s * (k + 1)) for k in range(n_virtual)]
+
+            for v_idx in range(n_virtual):
+                s_idx = theme_start + v_idx
+
+                if long_ranker is not None and pred_pool is not None:
+                    ntree_l = long_checkpoints[v_idx]
+                    raw_scores = long_ranker.predict(pred_pool, ntree_end=ntree_l)
+                    self._models[s_idx] = long_ranker
+                    self._feature_sets[s_idx] = fc
+                    self._ntree_ends[s_idx] = ntree_l
+                    _m_buf.fill(np.nan)
+                    _m_buf[valid_mask] = raw_scores
+                    slot_arrays[f"alpha_long_{s_idx:02d}"] = _fast_rank_2d_numba(_m_buf)[valid_mask]
+                    if mag_z is not None:
+                        self._mag_models[s_idx] = mag_reg
+                        slot_arrays[f"mag_long_{s_idx:02d}"] = mag_z
+                    else:
+                        slot_arrays[f"mag_long_{s_idx:02d}"] = np.zeros(int(valid_mask.sum()), dtype=np.float64)
+                else:
+                    slot_arrays[f"alpha_long_{s_idx:02d}"] = np.full(int(valid_mask.sum()), 0.5)
+                    slot_arrays[f"mag_long_{s_idx:02d}"] = np.zeros(int(valid_mask.sum()), dtype=np.float64)
+
+                if short_ranker is not None and short_pred_pool is not None:
+                    ntree_s = short_checkpoints[v_idx]
+                    short_raw = short_ranker.predict(short_pred_pool, ntree_end=ntree_s)
+                    self._short_models[s_idx] = short_ranker
+                    self._short_feature_sets[s_idx] = short_fc
+                    self._short_ntree_ends[s_idx] = ntree_s
+                    _m_buf.fill(np.nan)
+                    _m_buf[valid_mask] = short_raw
+                    slot_arrays[f"alpha_short_{s_idx:02d}"] = _fast_rank_2d_numba(_m_buf)[valid_mask]
+                else:
+                    slot_arrays[f"alpha_short_{s_idx:02d}"] = np.full(int(valid_mask.sum()), 0.5)
+
+            # Free VRAM/RAM before next theme
+            del pred_pool, short_pred_pool, train_pool, mag_train_pool, short_train_pool
+            del master_pool, master_mag_pool, master_short_pool
+            gc.collect()
+
+        loop_elapsed = time.time() - total_loop_start
+        _logger.info("GPU-Native Mining Loop completed in %.4f seconds.", loop_elapsed)
+
+        # [Optimization ⑤] slot_arrays → DataFrame 일괄 구성 (컬럼별 시리즈 할당 제거)
+        # valid_mask.sum() == len(work_df) (close가 항상 유효한 경우)이므로 직접 구성 가능
+        raw_alpha_df = pd.DataFrame(slot_arrays, index=work_df.index)
 
         # Apply filtering (long heads only). Short heads are preserved and
         # aggregated separately because they are trained with short-oriented labels.
@@ -655,7 +681,7 @@ class MLAlphaMiner:
         filter_opts = filter_options or {}
         alpha_df_all, filt_meta = filter_alpha_components(
             raw_alpha_df.copy(),
-            panel_df,
+            panel_df_std, # [Fix] Use standardized panel
             is_end_date=is_end_date,
             n_trials=max(1, len(long_slot_cols)),
             fdr_q=float(filter_opts.get("fdr_q", 0.10)),
@@ -674,8 +700,14 @@ class MLAlphaMiner:
         for c in short_slot_cols:
             alpha_df_all[c] = raw_alpha_df[c]
 
-        surviving = [c for c in alpha_df_all.columns if _LONG_SLOT_COL_RE.match(c) and alpha_df_all[c].std() > 1e-6]
-        surviving_short = [c for c in alpha_df_all.columns if _SHORT_SLOT_COL_RE.match(c) and alpha_df_all[c].std() > 1e-6]
+        # [Audit Fix] Use survived_cols from metadata instead of std check.
+        # This allows us to show raw ICs in the audit report while still 
+        # only including valid components in the final alpha_long ensemble.
+        surviving_all = filt_meta.get("survived_cols", [])
+        surviving_short = [c for c in surviving_all if _SHORT_SLOT_COL_RE.match(c)]
+        surviving = [c for c in surviving_all if _LONG_SLOT_COL_RE.match(c)]
+        
+        mag_surv_cols = [c.replace("alpha_", "mag_") for c in surviving if c.replace("alpha_", "mag_") in alpha_df_all.columns]
         if surviving:
             ic_map = filt_meta.get("ic_weight_by_slot", {}) or filt_meta.get("ic_by_slot", {})
             weights = [max(0.0, float(ic_map.get(c, 0.0))) ** 2 for c in surviving]
@@ -724,7 +756,10 @@ class MLAlphaMiner:
             self._short_ic_weights = {}
             alpha_df_all["alpha_short"] = 0.5
 
-        out_df = alpha_df_all.reindex(panel_df.index).fillna(0.5)
+        # [Fix] Final reindex using standardized panel index, then restore original index
+        out_df = alpha_df_all.reindex(panel_df_std.index).fillna(0.5)
+        out_df.index = panel_df.index
+        
         out_df.attrs["alpha_component_filter"] = filt_meta
         # Minimal Step3 audit rollups for telemetry/logging without refactor.
         ic_chop = filt_meta.get("ic_chop_by_slot", {}) if isinstance(filt_meta, dict) else {}
@@ -773,7 +808,7 @@ class MLAlphaMiner:
             "l2_leaf_reg": 30.0,    # Strong regularization
             "random_strength": 1.5,
             "metric_period": 100,
-            "verbose": 0,
+            "logging_level": "Silent",
             "random_seed": 42 + seed_offset,
             "allow_writing_files": False,
             "bootstrap_type": "Bernoulli",
@@ -786,7 +821,7 @@ class MLAlphaMiner:
             params["gpu_ram_part"] = 0.4
         return params
 
-    def transform_cs(self, panel_df: pd.DataFrame, cache_path: Path | None = None) -> pd.DataFrame:
+    def transform_cs(self, panel_df: pd.DataFrame) -> pd.DataFrame:
         """Apply trained v5 models to new panel data."""
         if panel_df.empty or not self._models:
             _logger.warning("transform_cs: No models trained or empty panel.")
@@ -875,6 +910,7 @@ class MLAlphaMiner:
 
         surviving = [c for c in out_df.columns if _LONG_SLOT_COL_RE.match(c) and out_df[c].std() > 1e-6]
         surviving_short = [c for c in out_df.columns if _SHORT_SLOT_COL_RE.match(c) and out_df[c].std() > 1e-6]
+        mag_surv_cols = [c.replace("alpha_", "mag_") for c in surviving if c.replace("alpha_", "mag_") in out_df.columns]
         if surviving:
             if self._ic_weights:
                 w = np.array([self._ic_weights.get(int(_LONG_SLOT_COL_RE.match(c).group(1)), 0.0) for c in surviving])

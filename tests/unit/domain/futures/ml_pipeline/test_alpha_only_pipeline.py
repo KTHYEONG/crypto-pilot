@@ -1,4 +1,12 @@
+from __future__ import annotations
+
+import sys
+from pathlib import Path
 import pandas as pd
+
+project_root = str(Path(__file__).resolve().parents[5])
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
 
 from src.domain.futures.ml_pipeline import pipeline_runner
 

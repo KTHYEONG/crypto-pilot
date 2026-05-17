@@ -2120,7 +2120,7 @@ def _run_ml_pipeline_cached_core(
     
     The hashing is based only on the first 6 arguments.
     """
-    _logger.info(
+    _logger.debug(
         "🚀 [ML CACHE] Cache MISS - Running core pipeline for %s symbols (seed=%s)",
         len(symbols_tuple),
         seed,
@@ -2154,6 +2154,16 @@ def run_ml_pipeline_for_universe(
     actual_seed = seed if seed is not None else int(cfg.get("FUTURES_LEARNING_SEEDS", [42])[0])
     cfg_hash = _get_cfg_hash(cfg)
     _logger.debug("ML pipeline request | tf=%s symbols=%d seed=%s", tf, len(symbols), actual_seed)
+    
+    force_retrain = bool(cfg.get("FUTURES_ML_FORCE_RETRAIN_ALPHA", False))
+    if force_retrain:
+        _logger.debug("🔥 [ML CACHE] Force retrain enabled - bypassing cache.")
+        return _run_ml_pipeline_implementation(
+            symbols, tf, fetch_start_date, end, cfg, workers, n_jobs,
+            is_end_date, is_start_date, gp_only, hmm_only,
+            preloaded_data_maps, preloaded_1h_maps, seed=actual_seed
+        )
+
     try:
         return _run_ml_pipeline_cached_core(
             tf, is_end_date, is_start_date, symbols_tuple, actual_seed, cfg_hash,
@@ -2431,7 +2441,6 @@ def _run_ml_pipeline_implementation(
     }
     alpha_panel = miner.mine_alphas_cs(
         panel_df, 
-        cache_path=Path(FUTURES_CACHE_DIR) / "universal_cs_gp_v8.parquet",
         is_end_date=is_end_date,
         filter_options=filter_options,
     )

@@ -126,6 +126,7 @@ def run_phase_a1(
         pruner=build_phase_a1_pruner(),
         objective_fn=spec.objective,
         directions=spec.directions,
+        phase_label="Phase 1/3: Signal Quality (A1)",
     )
     _tag_phase_trials(study, phase="phase_a1", run_id=getattr(base_ctx, "run_id", None))
     return study
@@ -162,6 +163,7 @@ def run_phase_a2(
         pruner=build_phase_a1_pruner(),
         objective_fn=spec.objective,
         directions=spec.directions,
+        phase_label="Phase 2/3: Risk Management (A2)",
     )
     _tag_phase_trials(study, phase="phase_a2", run_id=getattr(base_ctx, "run_id", None))
     return study
@@ -202,6 +204,7 @@ def run_phase_b(
         enqueue_params=enqueue_seeds,
         objective_fn=spec.objective,
         directions=spec.directions,
+        phase_label="Phase 3/3: Portfolio Robustness (B)",
     )
     _tag_phase_trials(study, phase="phase_b", run_id=getattr(base_ctx, "run_id", None))
     return study

@@ -20,7 +20,7 @@ from src.domain.futures.optimization.candidate_selector import (
 from src.domain.futures.optimization.dashboard import (
     log_oos_regime_attribution,
     print_dual_audit_dashboard,
-    print_human_dashboard,
+    print_mechanical_dashboard,
     safe_float,
 )
 from src.domain.futures.optimization.evaluator import (
@@ -686,11 +686,12 @@ def run_final_oos_evaluation(
     )
 
     # Final result logging & saving logic...
-    print_human_dashboard(
-        is_port, ho_port, oos_port, _verdict, 
-        benchmark_is=_btc_benchmark_is, 
-        benchmark_oos=_btc_benchmark_oos, 
-        meta_port=meta_port
+    print_mechanical_dashboard(
+        oos_port=meta_port if meta_port is not None else oos_port,
+        gate_status=_verdict,
+        pbo_obs=pbo_obs,
+        dsr_obs=dsr_obs,
+        hmm_damp_tail=safe_float(best_trial.user_attrs.get("hmm_execution_damp_tail_capture"))
     )
     print_dual_audit_dashboard(new_m, champ_m, _verdict)
 

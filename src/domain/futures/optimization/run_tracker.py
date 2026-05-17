@@ -477,6 +477,7 @@ def run_optimization_loop(
     enqueue_params: list[dict[str, Any]] | None = None,
     objective_fn: Callable[[optuna.Trial, MLPhaseDContext], Any] | None = None,
     directions: list[str] | tuple[str, ...] | None = None,
+    phase_label: str = "Optimization",
 ) -> optuna.Study:
     """Orchestrate Step 4: Parallel Optuna optimization loop with Micro-Batching.
 
@@ -554,7 +555,7 @@ def run_optimization_loop(
         )
         try:
             study = optuna.load_study(study_name=s_name, storage=poller_storage)
-            with tqdm(total=target, desc=" [OPT] Progress", unit="trial", leave=True) as pbar:
+            with tqdm(total=target, desc=f"  {phase_label}", unit="trial", leave=True) as pbar:
                 while not stop_event.is_set():
                     try:
                         trials = study.get_trials(
