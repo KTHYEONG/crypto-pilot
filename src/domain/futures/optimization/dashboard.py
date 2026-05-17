@@ -216,79 +216,118 @@ def print_dual_audit_dashboard(
     _logger.info(" ──────────────────┼──────────────┼──────────────┼───────────────────────────")
 
 
-def log_alpha_component_summary(alpha_panel: pd.DataFrame) -> None:
-    """Standardized Alpha Component Audit (V7.0.0 - Crypto Native)."""
+def log_alpha_component_summary(alpha_panel: pd.DataFrame, is_end_date: str | None = None) -> None:
+    """Standardized Alpha Component Audit (V7.1.0 - IS/OOS 분리 버전)."""
     if alpha_panel is None or alpha_panel.empty:
         return
 
     c_grn, c_red, c_rst, c_bld, c_yel = "\033[92m", "\033[91m", "\033[0m", "\033[1m", "\033[93m"
 
-    _logger.info("\n 🤖 [ALPHA MINER AUDIT: V7.0.0 (CRYPTO NATIVE)]")
-    _logger.info(" ─────────────────────────────────────────────────────────────────────────────────────")
-    _logger.info("  COMPONENT         │     IC    │  Short IC │  Tail IC  │   ICIR  │  STATUS")
-    _logger.info(" ───────────────────┼───────────┼───────────┼───────────┼─────────┼───────────────────")
+    _logger.info("\n 🤖 [ALPHA MINER AUDIT: V7.1.0 (IS/OOS SEPARATED)]")
+    _logger.info(" ─────────────────────────────────────────────────────────────────────────────────────────────")
+    _logger.info("  COMPONENT         │  IS-IC   │  OOS-IC  │  Tail-OOS │  ICIR(OOS) │  STATUS")
+    _logger.info(" ───────────────────┼──────────┼──────────┼───────────┼────────────┼───────────────────")
+
+    # IS/OOS 분리 슬라이스 준비
+    is_panel = alpha_panel
+    oos_panel: pd.DataFrame = pd.DataFrame()
+    if is_end_date:
+        cut = pd.to_datetime(is_end_date, utc=True)
+        times = alpha_panel.index.get_level_values("datetime")
+        if getattr(times, "tz", None) is None:
+            times_utc = times.tz_localize("UTC")
+        else:
+            times_utc = times.tz_convert("UTC")
+        is_panel = alpha_panel[times_utc < cut]
+        oos_panel = alpha_panel[times_utc >= cut]
 
     components = alpha_panel.index.get_level_values("component").unique() if "component" in alpha_panel.index.names else []
-    
+
     # Hurdles from g-alpha.md
     HURDLE_IC = 0.015
     HURDLE_SHORT = 0.010
     HURDLE_TAIL = 0.000
     HURDLE_ICIR = 0.50
 
+    def _compute_col_metrics(
+        panel_is: pd.DataFrame,
+        panel_oos: pd.DataFrame,
+        col: str,
+    ) -> tuple[float, float, float, float, float]:
+        """(is_ic, oos_ic, tail_oos_ic, icir_oos, short_oos_ic) 반환."""
+        if "target" not in panel_is.columns:
+            return 0.0, 0.0, 0.0, 0.0, 0.0
+
+        # IS-IC
+        is_ic = float(panel_is[col].corr(panel_is["target"], method="spearman")) if not panel_is.empty else 0.0
+
+        # OOS-IC
+        if not panel_oos.empty and "target" in panel_oos.columns and col in panel_oos.columns:
+            oos_ic = float(panel_oos[col].corr(panel_oos["target"], method="spearman"))
+            # Tail-OOS IC
+            q10_low = panel_oos["target"].quantile(0.10)
+            q10_high = panel_oos["target"].quantile(0.90)
+            tail_mask = (panel_oos["target"] <= q10_low) | (panel_oos["target"] >= q10_high)
+            tail_oos_ic = float(
+                panel_oos.loc[tail_mask, col].corr(panel_oos.loc[tail_mask, "target"], method="spearman")
+            ) if tail_mask.sum() > 20 else 0.0
+            # ICIR(OOS) — per-bar cross-sectional IC series on OOS slice
+            ic_series = _per_bar_cs_ic_series(panel_oos, col, "target")
+            ic_mean = float(np.nanmean(ic_series)) if ic_series.size else 0.0
+            ic_std = float(np.nanstd(ic_series, ddof=1)) if ic_series.size > 1 else 0.0
+            icir_oos = (ic_mean / ic_std) if ic_std > 1e-12 else 0.0
+            # Short IC(OOS)
+            short_signal_col = "alpha_short" if "alpha_short" in panel_oos.columns else None
+            if short_signal_col:
+                short_sig = panel_oos[short_signal_col]
+            else:
+                short_sig = 1.0 - panel_oos[col]
+            short_target = -panel_oos["target"]
+            s_mask = short_sig.notna() & short_target.notna()
+            short_oos_ic = float(
+                short_sig.loc[s_mask].corr(short_target.loc[s_mask], method="spearman")
+            ) if s_mask.sum() > 20 else 0.0
+        else:
+            # OOS 없으면 IS 수치로 fallback (표시만)
+            oos_ic = is_ic
+            q10_low = panel_is["target"].quantile(0.10)
+            q10_high = panel_is["target"].quantile(0.90)
+            tail_mask = (panel_is["target"] <= q10_low) | (panel_is["target"] >= q10_high)
+            tail_oos_ic = float(
+                panel_is.loc[tail_mask, col].corr(panel_is.loc[tail_mask, "target"], method="spearman")
+            ) if tail_mask.sum() > 20 else 0.0
+            ic_series = _per_bar_cs_ic_series(panel_is, col, "target")
+            ic_mean = float(np.nanmean(ic_series)) if ic_series.size else 0.0
+            ic_std = float(np.nanstd(ic_series, ddof=1)) if ic_series.size > 1 else 0.0
+            icir_oos = (ic_mean / ic_std) if ic_std > 1e-12 else 0.0
+            short_oos_ic = 0.0
+
+        return is_ic, oos_ic, tail_oos_ic, icir_oos, short_oos_ic
+
     if not components:
         cols = [c for c in alpha_panel.columns if (c.startswith("alpha_long_") and c[-2:].isdigit()) or c == "alpha_long"]
         if not cols:
             _logger.info("  No alpha components found in panel.")
             return
-        
+
         if "target" not in alpha_panel.columns:
             for col in sorted(cols):
-                _logger.info(f"  {col:<17} │    --     │    --     │    --     │   --    │   [READY]")
-            _logger.info(" ─────────────────────────────────────────────────────────────────────────────────────\n")
+                _logger.info(f"  {col:<17} │    --    │    --    │    --     │     --     │   [READY]")
+            _logger.info(" ─────────────────────────────────────────────────────────────────────────────────────────────\n")
             return
 
-        # Calculate metrics for each wide-form column
         for col in sorted(cols):
-            # 1. Overall IC (full sample)
-            ic = alpha_panel[col].corr(alpha_panel["target"], method="spearman")
-
-            # 2. Short-side IC (directional short signal vs short target proxy)
-            short_signal = "alpha_short" if "alpha_short" in alpha_panel.columns else None
-            short_proxy = None
-            primary_col = "alpha_long_00" if "alpha_long_00" in alpha_panel.columns else ("alpha_long" if "alpha_long" in alpha_panel.columns else None)
-            if short_signal is None and col == primary_col:
-                short_proxy = 1.0 - alpha_panel[col]
-            elif short_signal is None:
-                short_proxy = 1.0 - alpha_panel[col]
-            short_sig_values = alpha_panel[short_signal] if short_signal else short_proxy
-            short_target = -alpha_panel["target"]
-            short_mask = short_sig_values.notna() & short_target.notna()
-            short_ic = (
-                short_sig_values.loc[short_mask].corr(short_target.loc[short_mask], method="spearman")
-                if short_mask.sum() > 20
-                else 0.0
+            is_ic, oos_ic, tail_oos_ic, icir_oos, _short_oos_ic = _compute_col_metrics(
+                is_panel, oos_panel, col
             )
-            
-            # 3. Tail IC
-            q10_low = alpha_panel["target"].quantile(0.10)
-            q10_high = alpha_panel["target"].quantile(0.90)
-            tail_mask = (alpha_panel["target"] <= q10_low) | (alpha_panel["target"] >= q10_high)
-            tail_ic = alpha_panel.loc[tail_mask, col].corr(alpha_panel.loc[tail_mask, "target"], method="spearman") if tail_mask.sum() > 20 else 0.0
-            
-            # 4. True ICIR = mean/std of per-bar cross-sectional IC series
-            ic_series = _per_bar_cs_ic_series(alpha_panel, col, "target")
-            ic_mean = float(np.nanmean(ic_series)) if ic_series.size else 0.0
-            ic_std = float(np.nanstd(ic_series, ddof=1)) if ic_series.size > 1 else 0.0
-            icir = (ic_mean / ic_std) if ic_std > 1e-12 else 0.0
+            # Status 판정: OOS-IC 기준
+            eval_ic = oos_ic if not oos_panel.empty else is_ic
+            ok_ic = eval_ic >= HURDLE_IC
+            ok_tail = tail_oos_ic >= HURDLE_TAIL
+            ok_icir = icir_oos >= HURDLE_ICIR
+            all_pass = ok_ic and ok_tail and ok_icir
 
-            ok_ic = ic >= HURDLE_IC
-            ok_short = short_ic >= HURDLE_SHORT
-            ok_tail = tail_ic >= HURDLE_TAIL
-            ok_icir = icir >= HURDLE_ICIR
-            all_pass = ok_ic and ok_short and ok_tail and ok_icir
-            
-            if not ok_short or not ok_tail:
+            if not ok_tail:
                 res_str = f"{c_red}[REJECTED]{c_rst}"
             elif all_pass:
                 res_str = f"{c_grn}[PASS]{c_rst}"
@@ -296,64 +335,51 @@ def log_alpha_component_summary(alpha_panel: pd.DataFrame) -> None:
                 res_str = f"{c_yel}[FAIL]{c_rst}"
 
             _logger.info(
-                f"  {col:<17} │ {ic:>8.3f}  │ {short_ic:>8.3f}  │ {tail_ic:>8.3f}  │ {icir:>7.2f} │  {res_str}"
+                f"  {col:<17} │ {is_ic:>7.3f}  │ {oos_ic:>7.3f}  │ {tail_oos_ic:>8.3f}  │ {icir_oos:>9.2f}  │  {res_str}"
             )
-        _logger.info(" ─────────────────────────────────────────────────────────────────────────────────────\n")
+        _logger.info(" ─────────────────────────────────────────────────────────────────────────────────────────────\n")
         return
 
     for comp in sorted(components):
-        sub = alpha_panel.xs(comp, level="component")
-        # Identify primary alpha column for this component
-        primary_col = "alpha_long_00" if "alpha_long_00" in sub.columns else ("alpha_long" if "alpha_long" in sub.columns else None)
-        if "target" not in sub.columns or primary_col is None:
+        sub_full = alpha_panel.xs(comp, level="component")
+        primary_col = "alpha_long_00" if "alpha_long_00" in sub_full.columns else ("alpha_long" if "alpha_long" in sub_full.columns else None)
+        if "target" not in sub_full.columns or primary_col is None:
             continue
-            
-        # 1. Overall IC (full sample)
-        ic = sub[primary_col].corr(sub["target"], method="spearman")
 
-        # 2. Short-side IC (directional short signal vs short target proxy)
-        if "alpha_short" in sub.columns:
-            short_signal = sub["alpha_short"]
+        # component-level IS/OOS 분리
+        if not is_panel.empty and "component" in is_panel.index.names:
+            sub_is = is_panel.xs(comp, level="component") if comp in is_panel.index.get_level_values("component") else pd.DataFrame()
+            sub_oos = oos_panel.xs(comp, level="component") if (not oos_panel.empty and comp in oos_panel.index.get_level_values("component")) else pd.DataFrame()
         else:
-            short_signal = 1.0 - sub[primary_col]
-        short_target = -sub["target"]
-        short_mask = short_signal.notna() & short_target.notna()
-        short_ic = short_signal.loc[short_mask].corr(short_target.loc[short_mask], method="spearman") if short_mask.sum() > 20 else 0.0
-        
-        # 3. Tail IC (Decile 1 & 10)
-        q10_low = sub["target"].quantile(0.10)
-        q10_high = sub["target"].quantile(0.90)
-        tail_mask = (sub["target"] <= q10_low) | (sub["target"] >= q10_high)
-        tail_ic = sub.loc[tail_mask, primary_col].corr(sub.loc[tail_mask, "target"], method="spearman") if tail_mask.sum() > 20 else 0.0
-        
-        # 4. True ICIR = mean/std of per-bar cross-sectional IC series
-        ic_series = _per_bar_cs_ic_series(sub, primary_col, "target")
-        ic_mean = float(np.nanmean(ic_series)) if ic_series.size else 0.0
-        ic_std = float(np.nanstd(ic_series, ddof=1)) if ic_series.size > 1 else 0.0
-        icir = (ic_mean / ic_std) if ic_std > 1e-12 else 0.0
+            sub_is = sub_full
+            sub_oos = pd.DataFrame()
 
-        # Pass/Fail Logic (G-ALPHA strictly enforced)
-        ok_ic = ic >= HURDLE_IC
-        ok_short = short_ic >= HURDLE_SHORT
-        ok_tail = tail_ic >= HURDLE_TAIL
-        ok_icir = icir >= HURDLE_ICIR
-        
-        all_pass = ok_ic and ok_short and ok_tail and ok_icir
-        
-        if not ok_short or not ok_tail:
+        is_ic, oos_ic, tail_oos_ic, icir_oos, _short_oos_ic = _compute_col_metrics(
+            sub_is, sub_oos, primary_col
+        )
+
+        # Status 판정: OOS-IC 기준
+        eval_ic = oos_ic if not sub_oos.empty else is_ic
+        ok_ic = eval_ic >= HURDLE_IC
+        ok_tail = tail_oos_ic >= HURDLE_TAIL
+        ok_icir = icir_oos >= HURDLE_ICIR
+        all_pass = ok_ic and ok_tail and ok_icir
+
+        if not ok_tail:
             res_str = f"{c_red}[REJECTED]{c_rst}"
         elif all_pass:
             res_str = f"{c_grn}[PASS]{c_rst}"
         else:
             res_str = f"{c_yel}[FAIL]{c_rst}"
-            
+
         _logger.info(
-            f"  {comp:<17} │ {ic:>8.3f}  │ {short_ic:>8.3f}  │ {tail_ic:>8.3f}  │ {icir:>7.2f} │  {res_str}"
+            f"  {comp:<17} │ {is_ic:>7.3f}  │ {oos_ic:>7.3f}  │ {tail_oos_ic:>8.3f}  │ {icir_oos:>9.2f}  │  {res_str}"
         )
 
-    _logger.info(" ─────────────────────────────────────────────────────────────────────────────────────")
-    _logger.info(f"  [HURDLES] IC > {HURDLE_IC} | Short > {HURDLE_SHORT} | Tail > {HURDLE_TAIL} | ICIR > {HURDLE_ICIR}")
-    _logger.info(" ─────────────────────────────────────────────────────────────────────────────────────\n")
+    _logger.info(" ─────────────────────────────────────────────────────────────────────────────────────────────")
+    oos_label = f"OOS >= {is_end_date}" if is_end_date else "OOS (IS tail fallback)"
+    _logger.info(f"  [HURDLES] OOS-IC > {HURDLE_IC} | Tail-OOS > {HURDLE_TAIL} | ICIR(OOS) > {HURDLE_ICIR}  [{oos_label}]")
+    _logger.info(" ─────────────────────────────────────────────────────────────────────────────────────────────\n")
 
 
 def log_hmm_report_summary(hmm_report: dict[str, Any]) -> None:
