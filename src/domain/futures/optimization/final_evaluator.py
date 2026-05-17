@@ -178,11 +178,9 @@ def run_final_oos_evaluation(
     cv_max: float,
     phase_c_diagnostics: dict[str, Any] | None = None,
 ) -> None:
-    """Execute Step 5: Final OOS evaluation, research gates, and persistence."""
-    _logger.info("\n" + "═" * 85)
-    _logger.info(" [STEP 5/5] FINAL OOS EVALUATION & WF ADAPTATION")
-    _logger.info("═" * 85)
-
+    """Execute Step 4: Final OOS evaluation, research gates, and persistence."""
+    # REDUNDANT HEADER REMOVED (Step header is handled by the overall orchestration or the dashboard summary)
+    
     policy_cfg = load_portfolio_policy_config(OPT_FUTURES_CONFIG)
 
     _logger.debug("  [ENSEMBLE EVALUATION]")

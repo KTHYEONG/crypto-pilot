@@ -268,8 +268,6 @@ def screen_symbol_refinement_futures(
     final_symbols = list(dict.fromkeys(final))[:int(cfg.get("FINAL_POOL_K", 40))]
     if "BTC/USDT" not in final_symbols:
         final_symbols.insert(0, "BTC/USDT")
-    _logger.info(f"  [SUCCESS] Universe Refinement Complete: {len(final_symbols)} symbols selected.")  # noqa: E501
-    _logger.info(f"  Selected: {final_symbols}")
     return final_symbols
 
 
@@ -314,10 +312,6 @@ def orchestrate_universe_discovery(
         dict[str, Any]: discovery result with selected symbols and artifact path.
 
     """
-    _logger.info("\n" + "═" * 85)
-    _logger.info(" [STEP 1/5] UNIVERSE DISCOVERY & DATA LOADING")
-    _logger.info("═" * 85)
-
     import importlib
 
     import config.opt_config
