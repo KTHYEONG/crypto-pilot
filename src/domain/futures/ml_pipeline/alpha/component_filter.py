@@ -306,6 +306,58 @@ def filter_alpha_components(
     if alpha_wide.empty or panel_df.empty or "target" not in panel_df.columns:
         return alpha_wide, {"n_surviving": 0.0, "neutralize_primary": 0.0}
 
+    # --- [Fix] Unified Index Alignment (Standardize names and timezone) ---
+    def _standardize_idx(df: pd.DataFrame) -> pd.DataFrame:
+        if not isinstance(df.index, pd.MultiIndex):
+            return df
+        idx = df.index
+        # Identify datetime and symbol levels by name (case-insensitive)
+        d_idx = -1
+        s_idx = -1
+        for i, name in enumerate(idx.names):
+            if name and name.lower() in ("datetime", "time", "timestamp"):
+                d_idx = i
+            elif name and name.lower() in ("symbol", "ticker", "asset"):
+                s_idx = i
+        
+        if d_idx == -1 or s_idx == -1:
+            return df
+            
+        # Standardize datetime to UTC aware
+        d_vals = idx.get_level_values(d_idx)
+        if getattr(d_vals, "tz", None) is None:
+            d_vals = pd.to_datetime(d_vals, utc=True)
+        else:
+            d_vals = d_vals.tz_convert("UTC")
+            
+        # Reconstruct MultiIndex with standardized names ['datetime', 'symbol']
+        # We only keep these two levels to ensure intersection success
+        standard_idx = pd.MultiIndex.from_arrays(
+            [d_vals, idx.get_level_values(s_idx)],
+            names=["datetime", "symbol"]
+        )
+        # Handle potential duplicates after standardization (unlikely but safe)
+        if standard_idx.duplicated().any():
+            _logger.warning("Standardized index contains duplicates; dropping.")
+            temp_df = df.copy()
+            temp_df.index = standard_idx
+            return temp_df[~temp_df.index.duplicated(keep='first')]
+        
+        new_df = df.copy()
+        new_df.index = standard_idx
+        return new_df
+
+    # Standardize both inputs before any logic
+    alpha_wide = _standardize_idx(alpha_wide)
+    panel_df = _standardize_idx(panel_df)
+    # -----------------------------------------------------------------------
+
+    _logger.debug("filter_alpha_components | alpha_wide index: %s, panel_df index: %s", 
+                  alpha_wide.index.names, panel_df.index.names)
+    _logger.debug("filter_alpha_components | alpha_wide TZ: %s, panel_df TZ: %s",
+                  getattr(alpha_wide.index.get_level_values(0), "tz", "None"),
+                  getattr(panel_df.index.get_level_values(0), "tz", "None"))
+
     # Ensure unique columns in input
     if alpha_wide.columns.duplicated().any():
         _logger.warning("Duplicate columns detected in alpha_wide; dropping duplicates.")
@@ -322,20 +374,23 @@ def filter_alpha_components(
     times = panel_df.index.get_level_values("datetime")
     if is_end_date:
         cut = pd.to_datetime(is_end_date, utc=True)
-        if getattr(times, "tz", None) is None:
-            times_utc = pd.to_datetime(times, utc=True)
-        else:
-            times_utc = times.tz_convert("UTC")
-        is_ix = np.asarray(times_utc < cut, dtype=bool)
+        # [Fix] Since we standardized to UTC aware above, we can compare directly
+        is_ix = np.asarray(times < cut, dtype=bool)
     else:
         is_ix = np.ones(len(panel_df), dtype=bool)
 
     common = alpha_wide.index.intersection(panel_df.index)
+    _logger.info("filter_alpha_components | Intersection size: %d / %d (alpha) / %d (panel)", 
+                 len(common), len(alpha_wide), len(panel_df))
     if len(common) < 50:
+        _logger.warning("Index intersection too small: %d rows (alpha=%d, panel=%d)", 
+                        len(common), len(alpha_wide), len(panel_df))
         return alpha_wide, {"n_surviving": float(len(cols)), "neutralize_primary": 0.0}
 
     base = panel_df.loc[common, ["target"]].copy()
     base["__is"] = is_ix[panel_df.index.get_indexer(common)]
+    _logger.info("filter_alpha_components | IS rows: %d, OOS rows: %d", 
+                 base["__is"].sum(), len(base) - base["__is"].sum())
     for pcol in ("hmm_prob_bear_trend", "hmm_prob_chop", "hmm_prob_crisis"):
         if pcol in panel_df.columns:
             base[pcol] = panel_df.loc[common, pcol].to_numpy(dtype=np.float64)
@@ -462,7 +517,7 @@ def filter_alpha_components(
             _precomp_ic_oos[c] = _vec_ic_series(u_alphas_oos[c], rt_oos_centered)
     # ------------------------------------------------------------------
 
-    for _, c in enumerate(cols):
+    for i, c in enumerate(cols):
         u_c = u_alphas[c]
         valid_mask = u_c.notna() & u_tgt.notna()
         counts = valid_mask.sum(axis=1)
@@ -477,6 +532,7 @@ def filter_alpha_components(
 
         mu = float(np.mean(ic_arr))
         sd = float(np.std(ic_arr, ddof=1))
+
         mu_for_t = mu
         if use_ewma_ic_stat:
             mu_for_t, _sd_ew = _ewma_ic_stats(ic_arr, half_life=ewma_half_life)
@@ -553,6 +609,9 @@ def filter_alpha_components(
         else:
             mu_oos = mu
 
+        if i < 3:
+            _logger.info("  [COL %s] mu_oos=%.4f, ic_bear=%.4f, ic_chop=%.4f", c, mu_oos, ic_bear, ic_chop)
+
         # G-ALPHA v8.0: Hard OOS Floor >= 0.015. No blending with IS.
         if mu > 1e-6:
             oos_gate = bool(mu_oos >= 0.015)
@@ -628,6 +687,7 @@ def filter_alpha_components(
     # 상세 진단을 위한 카운터
     f_fdr, f_dsr, f_hl, f_tail, f_oos, f_short, f_reg_consistency, f_bal, f_step3_chop = 0, 0, 0, 0, 0, 0, 0, 0, 0
     ic_weight_by_slot: dict[str, float] = {}
+    survived_cols = []
 
     for i, c in enumerate(cols):
         # 개별 필터 결과 기록
@@ -656,30 +716,26 @@ def filter_alpha_components(
 
         if ok:
             n_surv += 1
+            survived_cols.append(c)
         else:
-            out[c] = 0.5
-            # 탈락 원인 집계 (중복 집계 가능)
-            if not is_fdr_ok:
-                f_fdr += 1
-            if not is_dsr_ok:
-                f_dsr += 1
-            if not is_hl_ok:
-                f_hl += 1
-            if not is_tail_ok:
-                f_tail += 1
-            if not is_oos_ok:
-                f_oos += 1
-            if not is_short_ok:
-                f_short += 1
-            if not is_reg_ok:
-                f_reg_consistency += 1
-            if not is_step3_chop_ok:
-                f_step3_chop += 1
-            if not is_bal_ok:
-                f_bal += 1
+            # [Audit Fix] Do not neutralize here so audit report can show raw ICs.
+            # Miner.py will handle filtering using survived_cols.
+            # out[c] = 0.5
+            
+            # 탈락 원인 집계
+            if not is_fdr_ok: f_fdr += 1
+            if not is_dsr_ok: f_dsr += 1
+            if not is_hl_ok: f_hl += 1
+            if not is_tail_ok: f_tail += 1
+            if not is_oos_ok: f_oos += 1
+            if not is_short_ok: f_short += 1
+            if not is_reg_ok: f_reg_consistency += 1
+            if not is_step3_chop_ok: f_step3_chop += 1
+            if not is_bal_ok: f_bal += 1
 
     meta: dict[str, Any] = {
         "n_surviving": float(n_surv),
+        "survived_cols": survived_cols,
         "n_components": float(len(cols)),
         "neutralize_primary": 1.0 if neutralize_primary else 0.0,
         "fail_fdr": float(f_fdr),

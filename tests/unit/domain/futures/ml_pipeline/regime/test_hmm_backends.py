@@ -8,10 +8,40 @@ import numpy as np
 import pandas as pd
 import pytest
 
-project_root = str(Path(__file__).resolve().parents[1])
+project_root = str(Path(__file__).resolve().parents[6])
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
+from src.domain.futures.ml_pipeline.pipeline_runner import _resolve_hmm_backend_name
+
+# --- From test_hmm_backend_switch.py ---
+
+class _DummyJaxModel:
+    pass
+
+
+class StudentTMultivariateHMM:
+    pass
+
+
+class _InferrerWithJax:
+    _jax_model = _DummyJaxModel()
+
+
+class _InferrerWithStudentT:
+    _jax_model = StudentTMultivariateHMM()
+
+
+def test_backend_name_uses_config_override() -> None:
+    cfg = {"FUTURES_HMM_BACKEND": "student_t"}
+    assert _resolve_hmm_backend_name(_InferrerWithJax(), cfg) == "student_t"
+
+
+def test_backend_name_falls_back_to_inferrer_model_type() -> None:
+    assert _resolve_hmm_backend_name(_InferrerWithStudentT(), None) == "student_t"
+    assert _resolve_hmm_backend_name(_InferrerWithJax(), None) == "jax"
+
+# --- From test_student_t_hmm_backend.py ---
 
 def _load_student_t_backend_class() -> type | None:
     try:
@@ -77,4 +107,3 @@ def test_student_t_backend_fit_filter_train_oos_api() -> None:
     split = 120
     split_probs = model.fit_filter_train_oos(obs, is_end_idx=split)
     _assert_prob_frame(split_probs, len(obs))
-

@@ -8,8 +8,9 @@ import pandas as pd
 import jax
 import jax.numpy as jnp
 import optax
+import pytest
 
-project_root = str(Path(__file__).resolve().parents[1])
+project_root = str(Path(__file__).resolve().parents[6])
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
@@ -18,7 +19,6 @@ from src.domain.futures.ml_pipeline.regime.jax_hmm import (
     _hmm_forward,
     _train_hmm,
 )
-
 
 def _synthetic_obs(n: int, seed: int = 7) -> pd.DataFrame:
     rng = np.random.default_rng(seed)
@@ -33,6 +33,7 @@ def _to_obs_arr(df: pd.DataFrame) -> np.ndarray:
     arr = df.fillna(0.0).to_numpy(dtype=np.float64)
     return np.clip(arr, -5.0, 5.0).astype(np.float32)
 
+# --- From test_hmm_causal_split.py ---
 
 class _CausalSplitHarness:
     """Minimal fit(train)/filter(oos) harness using frozen HMM params."""
@@ -96,3 +97,57 @@ def test_hmm_fit_train_filter_oos_causal_split() -> None:
         rtol=1e-6,
         atol=1e-6,
     )
+
+# --- From test_hmm_truncation_invariance.py ---
+
+def _fit_params(train_df: pd.DataFrame, n_iter: int = 25, tol: float = 1e-6):
+    model = JAXMultivariateHMM(n_iter=n_iter, tol=tol)
+    obs = _to_obs_arr(train_df)
+    params = model._init_params(obs)
+    optimizer = optax.adamw(learning_rate=0.03, weight_decay=1e-4)
+    opt_state = optimizer.init(params)
+    mask = jnp.ones(len(obs), dtype=jnp.float32)
+    params, _ = _train_hmm(
+        jnp.array(obs),
+        mask,
+        params,
+        opt_state,
+        model.n_iter,
+        model.tol,
+        optimizer,
+    )
+    return params
+
+
+def test_hmm_filter_truncation_invariance() -> None:
+    """Tests that filtering on [A, B] gives same result for B as filtering on [A, B, C]."""
+    full_df = _synthetic_obs(300, seed=42)
+    split_1 = 150
+    split_2 = 220
+    
+    train_df = full_df.iloc[:split_1]
+    params = _fit_params(train_df)
+    
+    # Filter on [train + OOS_part1]
+    df_short = full_df.iloc[:split_2]
+    obs_short = _to_obs_arr(df_short)
+    mask_short = jnp.ones(len(obs_short), dtype=jnp.float32)
+    log_alphas_short, _ = _hmm_forward(jnp.array(obs_short), mask_short, params)
+    probs_short = np.asarray(jax.nn.softmax(log_alphas_short, axis=1))
+    
+    # Filter on [train + OOS_part1 + OOS_part2]
+    obs_long = _to_obs_arr(full_df)
+    mask_long = jnp.ones(len(obs_long), dtype=jnp.float32)
+    log_alphas_long, _ = _hmm_forward(jnp.array(obs_long), mask_long, params)
+    probs_long = np.asarray(jax.nn.softmax(log_alphas_long, axis=1))
+    
+    # Results for df_short should be identical
+    np.testing.assert_allclose(
+        probs_short,
+        probs_long[:split_2],
+        rtol=1e-6,
+        atol=1e-6
+    )
+    
+    # The sum should always be 1.0
+    np.testing.assert_allclose(probs_long.sum(axis=1), 1.0, rtol=1e-6)
