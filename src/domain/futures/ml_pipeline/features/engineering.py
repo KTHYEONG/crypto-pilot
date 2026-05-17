@@ -1005,30 +1005,28 @@ def add_macro_interaction_features(df: pd.DataFrame) -> pd.DataFrame:
         DataFrame with added interaction features.
 
     """
-    out = df.copy()
-
+    # [Optimization ④] df.copy() 제거 → df.assign() 사용 (CoW-friendly, 신규 컬럼만 shallow-copy)
     # 1. Bull Trend Probability (sum calm and vol_up if they exist)
-    if "hmm_prob_bull_trend" in out.columns:
-        bull_prob = out["hmm_prob_bull_trend"]
-    elif "hmm_prob_bull_calm" in out.columns and "hmm_prob_bull_vol_up" in out.columns:
-        bull_prob = out["hmm_prob_bull_calm"] + out["hmm_prob_bull_vol_up"]
+    if "hmm_prob_bull_trend" in df.columns:
+        bull_prob = df["hmm_prob_bull_trend"]
+    elif "hmm_prob_bull_calm" in df.columns and "hmm_prob_bull_vol_up" in df.columns:
+        bull_prob = df["hmm_prob_bull_calm"] + df["hmm_prob_bull_vol_up"]
     else:
-        bull_prob = pd.Series(0.0, index=out.index)
+        bull_prob = pd.Series(0.0, index=df.index)
 
     # 2. Asset Metrics
-    beta = out.get("btc_beta", out.get("corr_btc_24", pd.Series(0.0, index=out.index)))
-    vol = out.get("realized_vol_yz_24", pd.Series(0.0, index=out.index))
-    
+    beta = df.get("btc_beta", df.get("corr_btc_24", pd.Series(0.0, index=df.index)))
+    vol = df.get("realized_vol_yz_24", pd.Series(0.0, index=df.index))
+
     # Use funding_rate as funding_level proxy
-    funding = out.get("funding_rate", pd.Series(0.0, index=out.index))
+    funding = df.get("funding_rate", pd.Series(0.0, index=df.index))
 
-    # 3. Interactions
-    out["btc_beta_x_bull_trend"] = (beta * bull_prob).fillna(0.0)
-    
-    crisis_prob = out.get("hmm_prob_crisis", pd.Series(0.0, index=out.index))
-    out["realized_vol_x_crisis"] = (vol * crisis_prob).fillna(0.0)
+    crisis_prob = df.get("hmm_prob_crisis", pd.Series(0.0, index=df.index))
+    bear_prob = df.get("hmm_prob_bear_trend", pd.Series(0.0, index=df.index))
 
-    bear_prob = out.get("hmm_prob_bear_trend", pd.Series(0.0, index=out.index))
-    out["funding_x_bear_trend"] = (funding * bear_prob).fillna(0.0)
-
-    return out
+    # 3. Interactions — assign() returns new DataFrame without full copy of existing columns
+    return df.assign(
+        btc_beta_x_bull_trend=(beta * bull_prob).fillna(0.0),
+        realized_vol_x_crisis=(vol * crisis_prob).fillna(0.0),
+        funding_x_bear_trend=(funding * bear_prob).fillna(0.0),
+    )

@@ -128,15 +128,33 @@ def compute_tail_hazard_overlay(
     pre = _safe01(_sigmoid(pre_logit))
     sup_bundle = _as_score_bundle(supervised_score, len(idx))
     sup_main = sup_bundle.get("sup_score_q10_h8", np.zeros(len(idx), dtype=np.float64))
-    # supervised_score 주입: 0.5 * sigmoid(realized_logit) + 0.5 * supervised main score
+
+    # supervised_score 주입 가중치 캡슐화
+    w_sup_realized = float(cfg.get("FUTURES_HMM_SUP_REALIZED_W", 0.50))
     if sup_bundle:
-        realized = _safe01(0.5 * _sigmoid(realized_logit) + 0.5 * sup_main)
+        realized = _safe01((1.0 - w_sup_realized) * _sigmoid(realized_logit) + w_sup_realized * sup_main)
     else:
         realized = _safe01(_sigmoid(realized_logit))
-    tail4 = _safe01(0.55 * realized + 0.35 * pre + 0.10 * _safe01(_sigmoid(-1.0 + 1.0 * down24 + 0.5 * p_off)))
-    tail8_struct = _safe01(0.45 * realized + 0.40 * pre + 0.15 * _safe01(_sigmoid(-0.9 + 0.8 * down24 + 0.6 * p_off + 0.3 * ent)))
+
+    # Tail hazard 기본 블렌딩 가중치 캡슐화
+    w_t4_real = float(cfg.get("FUTURES_HMM_TAIL4_W_REALIZED", 0.55))
+    w_t4_pre = float(cfg.get("FUTURES_HMM_TAIL4_W_PRE", 0.35))
+    w_t4_extra = float(cfg.get("FUTURES_HMM_TAIL4_W_EXTRA", 0.10))
+    sum_t4 = max(1e-6, w_t4_real + w_t4_pre + w_t4_extra)
+    tail4 = _safe01((w_t4_real * realized + w_t4_pre * pre + w_t4_extra * _safe01(_sigmoid(-1.0 + 1.0 * down24 + 0.5 * p_off))) / sum_t4)
+
+    w_t8_real = float(cfg.get("FUTURES_HMM_TAIL8_W_REALIZED", 0.45))
+    w_t8_pre = float(cfg.get("FUTURES_HMM_TAIL8_W_PRE", 0.40))
+    w_t8_extra = float(cfg.get("FUTURES_HMM_TAIL8_W_EXTRA", 0.15))
+    sum_t8 = max(1e-6, w_t8_real + w_t8_pre + w_t8_extra)
+    tail8_struct = _safe01((w_t8_real * realized + w_t8_pre * pre + w_t8_extra * _safe01(_sigmoid(-0.9 + 0.8 * down24 + 0.6 * p_off + 0.3 * ent))) / sum_t8)
     tail8 = tail8_struct.copy()
-    tail24 = _safe01(0.30 * realized + 0.45 * pre + 0.25 * _safe01(_sigmoid(-0.6 + 0.7 * p_off + 0.4 * p_chop + 0.3 * liq24 + 0.3 * ent)))
+
+    w_t24_real = float(cfg.get("FUTURES_HMM_TAIL24_W_REALIZED", 0.30))
+    w_t24_pre = float(cfg.get("FUTURES_HMM_TAIL24_W_PRE", 0.45))
+    w_t24_extra = float(cfg.get("FUTURES_HMM_TAIL24_W_EXTRA", 0.25))
+    sum_t24 = max(1e-6, w_t24_real + w_t24_pre + w_t24_extra)
+    tail24 = _safe01((w_t24_real * realized + w_t24_pre * pre + w_t24_extra * _safe01(_sigmoid(-0.6 + 0.7 * p_off + 0.4 * p_chop + 0.3 * liq24 + 0.3 * ent))) / sum_t24)
 
     # Step2: strengthen hazard path for top supervised-score zones (posterior purity preserved).
     if sup_bundle:

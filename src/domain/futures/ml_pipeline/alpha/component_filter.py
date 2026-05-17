@@ -9,6 +9,7 @@ from typing import Any, cast
 
 import numpy as np
 import pandas as pd
+from scipy.stats import skew as _scipy_skew, kurtosis as _scipy_kurtosis
 
 _logger = logging.getLogger(__name__)
 
@@ -399,8 +400,7 @@ def filter_alpha_components(
     u_alphas_oos = (
         oos_sub[cols].unstack(level="symbol") if oos_time_set and not oos_sub.empty else None
     )
-    # [Optimization] Pre-calculate unstacked target ranks to avoid redundant groupby
-    u_tgt = is_sub["target"].unstack(level="symbol")
+    # [Optimization] u_tgt already computed above (line ~387); reuse to avoid double unstack
     valid_bal_syms = [s for s in u_tgt.columns if u_tgt[s].notna().sum() >= 40]
     u_tgt_ranks = {s: u_tgt[s].rank() for s in valid_bal_syms}
     dt_probs: pd.DataFrame | None = None
@@ -411,12 +411,54 @@ def filter_alpha_components(
         except Exception:
             dt_probs = None
 
+    # --- [Optimization ①] 벡터화 IC 사전 계산: pandas corrwith 루프 제거 ---
+    # r_tgt numpy 변환 (IS 전체)
+    r_tgt_arr = r_tgt.values.astype(np.float64)
+    rt_m = np.nanmean(r_tgt_arr, axis=1, keepdims=True)
+    rt_c_centered = r_tgt_arr - rt_m
+
+    def _vec_ic_series(u_col: pd.DataFrame, r_tgt_centered: np.ndarray) -> np.ndarray:
+        """행별 Spearman IC를 numpy로 벡터화 계산 (pandas corrwith 대체).
+
+        Args:
+            u_col: unstack된 alpha 컬럼 DataFrame (T, n_syms).
+            r_tgt_centered: 이미 center된 target rank array (T, n_syms).
+
+        Returns:
+            IC array shape (T,).
+
+        """
+        rc_arr = u_col.rank(axis=1).values.astype(np.float64)
+        rc_m = np.nanmean(rc_arr, axis=1, keepdims=True)
+        rc_c = rc_arr - rc_m
+        num = np.nansum(rc_c * r_tgt_centered, axis=1)
+        denom = np.sqrt(
+            np.nansum(rc_c**2, axis=1) * np.nansum(r_tgt_centered**2, axis=1)
+        ) + 1e-12
+        return num / denom  # shape (T,)
+
+    # OOS 분리 계산
+    rt_oos_centered: np.ndarray | None = None
+    if oos_time_set and r_t_oos is not None:
+        rt_oos_arr = r_t_oos.values.astype(np.float64)
+        rt_oos_m = np.nanmean(rt_oos_arr, axis=1, keepdims=True)
+        rt_oos_centered = rt_oos_arr - rt_oos_m
+
+    # 슬롯별 IC 사전 계산
+    _precomp_ic: dict[str, np.ndarray] = {}
+    _precomp_ic_oos: dict[str, np.ndarray] = {}
+    for c in cols:
+        _precomp_ic[c] = _vec_ic_series(u_alphas[c], rt_c_centered)
+        if rt_oos_centered is not None and u_alphas_oos is not None and c in u_alphas_oos.columns:
+            _precomp_ic_oos[c] = _vec_ic_series(u_alphas_oos[c], rt_oos_centered)
+    # ------------------------------------------------------------------
+
     for _, c in enumerate(cols):
         u_c = u_alphas[c]
         valid_mask = u_c.notna() & u_tgt.notna()
         counts = valid_mask.sum(axis=1)
-        r_c = u_c.rank(axis=1)
-        ic_series = r_c.corrwith(r_tgt, axis=1)
+        # [Optimization ①] 사전 계산된 numpy IC 배열 재사용
+        ic_series = pd.Series(_precomp_ic[c], index=u_c.index)
         ic_arr = ic_series[counts >= 3].dropna().to_numpy(dtype=np.float64)
 
         n_ic = int(ic_arr.size)
@@ -439,8 +481,9 @@ def filter_alpha_components(
         # [Optimization #10] Store IC for ensemble reuse
         ic_by_slot[c] = mu
         sharpe = mu / (sd + 1e-12) * math.sqrt(float(max(n_ic, 1)))
-        sk = float(pd.Series(ic_arr).skew()) if n_ic > 2 else 0.0
-        ku = float(pd.Series(ic_arr).kurt()) - 3.0 if n_ic > 3 else 0.0
+        # [Optimization ②] scipy skew/kurtosis: pandas Series 생성 오버헤드 제거
+        sk = float(_scipy_skew(ic_arr)) if n_ic > 2 else 0.0
+        ku = float(_scipy_kurtosis(ic_arr, fisher=True)) if n_ic > 3 else 0.0
         dsr_gate = _deflated_sharpe_threshold(sharpe, n_ic, sk, ku, n_trials)
         dsr_ok.append(dsr_gate)
 
@@ -494,8 +537,12 @@ def filter_alpha_components(
             u_c_oos = u_alphas_oos[c]
             v_mask_oos = u_c_oos.notna() & u_tgt_oos.notna()
             c_oos = v_mask_oos.sum(axis=1)
-            r_c_oos = u_c_oos.rank(axis=1)
-            ic_oos_series = r_c_oos.corrwith(r_t_oos, axis=1)
+            # [Optimization ①-OOS] 사전 계산된 OOS IC 배열 재사용
+            if c in _precomp_ic_oos:
+                ic_oos_series = pd.Series(_precomp_ic_oos[c], index=u_c_oos.index)
+            else:
+                r_c_oos = u_c_oos.rank(axis=1)
+                ic_oos_series = r_c_oos.corrwith(r_t_oos, axis=1)
             oos_arr = ic_oos_series[c_oos >= 3].dropna().to_numpy(dtype=np.float64)
             mu_oos = float(np.mean(oos_arr)) if oos_arr.size > 0 else mu
         else:
