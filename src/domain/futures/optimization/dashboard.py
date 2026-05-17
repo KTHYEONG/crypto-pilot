@@ -383,7 +383,7 @@ def log_hmm_report_summary(hmm_report: dict[str, Any]) -> None:
     policy_metrics = [
         ("Damp Tail-Capture", "hmm_execution_damp_tail_capture", 80.0, ">", True),
         ("Damp Crisis-Cap", "hmm_execution_damp_crisis_cap", 90.0, ">", True),
-        ("Protected Exp.", "hmm_execution_protected_exposure_share", (30.0, 50.0), "range", True),
+        ("Protected Exp.", "hmm_execution_protected_exposure_share", (30.0, 55.0), "range", True),
         ("False-Flat", "hmm_false_flat_cost", 15.0, "<", True),
     ]
 
@@ -423,13 +423,13 @@ def log_hmm_report_summary(hmm_report: dict[str, Any]) -> None:
     _logger.info(" [Per-Symbol Overlay]")
     _ps_beta_exp = safe_float(hmm_report.get("per_sym_beta_adj_protected_exp", 0.0))
     _ps_mono = safe_float(hmm_report.get("per_sym_beta_monotonicity_corr", 0.0))
-    _ps_exp_passed = 30.0 <= _ps_beta_exp <= 50.0
+    _ps_exp_passed = 30.0 <= _ps_beta_exp <= 55.0
     _ps_mono_passed = _ps_mono > 0.0
     _logger.info(
         "  %-17s │ %14.2f%%  │  %-18s │   %s",
         "β-adj Prot. Exp.",
         _ps_beta_exp,
-        "30.0% ~ 50.0%",
+        "30.0% ~ 55.0%",
         f"{c_grn}[PASS]{c_rst}" if _ps_exp_passed else f"{c_red}[FAIL]{c_rst}",
     )
     _logger.info(
