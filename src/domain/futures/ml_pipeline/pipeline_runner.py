@@ -2457,19 +2457,18 @@ def _run_ml_pipeline_implementation(
     _logger.info("  ● STEP 1/4 : Panel & Discovery      [██████████] ✅ DONE")
 
     # --- Step 2: Systemic HMM Inference (Regime Discovery) ---
-    _logger.info("  ● STEP 2/4 : HMM Regime Inference   [WORKING] Backend: %s", _resolve_hmm_backend_name(hmm_inferrer, cfg))
     from src.domain.futures.ml_pipeline.features.engineering import build_systemic_hmm_features
 
     # [Optimization #5] Build panel once and reuse for systemic features
     h_maps = {s: {"1h": prefetched_1h[s]} for s in prefetched_1h}
     h_utils = CrossSectionalPipelineUtils()
     h_panel = h_utils.build_panel_df(h_maps, tf="1h")
-    
+
     # Check if systemic features already exist (from GP enrichment)
     systemic_cols = ["macro_trend_24h", "macro_vol_24h", "cs_dispersion"]
     if not all(c in h_panel.columns for c in systemic_cols):
         h_panel = h_utils.add_systemic_features(h_panel)
-    
+
     market_hmm_feats = build_systemic_hmm_features(h_panel, None, tf="1h")
     if market_hmm_feats.index.tz is None:
         market_hmm_feats.index = market_hmm_feats.index.tz_localize("UTC")
@@ -2485,7 +2484,8 @@ def _run_ml_pipeline_implementation(
         n_iter=hmm_n_iter,
         tol=1e-4,
     )
-    
+    _logger.info("  ● STEP 2/4 : HMM Regime Inference   [WORKING] Backend: %s", _resolve_hmm_backend_name(hmm_inferrer, cfg))
+
     is_end_dt = pd.to_datetime(is_end_date or end)
     is_end_utc = is_end_dt.tz_localize("UTC") if is_end_dt.tzinfo is None else is_end_dt.tz_convert("UTC")
     is_end_idx_market = int((market_hmm_feats.index < is_end_utc).sum())
@@ -2618,7 +2618,7 @@ def _run_ml_pipeline_implementation(
     miner = MLAlphaMiner(
         n_jobs=n_jobs, 
         target_horizons=horizons, 
-        slots_per_theme=max(5, min(12, int(cfg.get("FUTURES_ML_ALPHA_SLOTS_PER_THEME", 6))))
+        slots_per_theme=max(3, min(6, int(cfg.get("FUTURES_ML_ALPHA_SLOTS_PER_THEME", 3))))
     )
     filter_options = {
         # IC filter options are config-driven to avoid drift between config and runtime behavior.
