@@ -1,10 +1,17 @@
+import hashlib
 import io
 import logging
+import os
+import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
 from datetime import datetime, timedelta
+from email.utils import parsedate_to_datetime
+from typing import cast
+from xml.etree import ElementTree
 
 import pandas as pd
 
@@ -12,33 +19,197 @@ import pandas as pd
 class BinanceVisionDownloader:
     """Binance Vision(data.binance.vision)에서 과거 통계 데이터를 수집하는 유틸리티."""
 
-    BASE_URL = "https://data.binance.vision/data/futures/um/daily/metrics"
+    BASE_URL = "https://data.binance.vision/data/futures/um"
+    S3_LISTING_URL = "https://s3-ap-northeast-1.amazonaws.com/data.binance.vision"
+    DEFAULT_TIMEOUT_SECONDS = 20
+    DEFAULT_MAX_CONCURRENCY = 2
+    DEFAULT_MAX_WEIGHT_PER_MIN = 600
+    DEFAULT_BACKOFF_BASE_SECONDS = 1.0
+    DEFAULT_BACKOFF_MAX_SECONDS = 30.0
+    DEFAULT_MAX_RETRIES = 4
 
     def __init__(self) -> None:
         """Binance Vision 다운로더 초기화."""
         self.logger = logging.getLogger("BinanceVision")
+        self.max_concurrency = self._env_int(
+            "BINANCE_VISION_MAX_CONCURRENCY",
+            default=self.DEFAULT_MAX_CONCURRENCY,
+            min_value=1,
+        )
+        self.max_weight_per_min = self._env_int(
+            "BINANCE_VISION_MAX_WEIGHT_PER_MIN",
+            default=self.DEFAULT_MAX_WEIGHT_PER_MIN,
+            min_value=1,
+        )
+        self.backoff_base_seconds = self._env_float(
+            "BINANCE_VISION_BACKOFF_BASE_SECONDS",
+            default=self.DEFAULT_BACKOFF_BASE_SECONDS,
+            min_value=0.1,
+        )
+        self.backoff_max_seconds = self._env_float(
+            "BINANCE_VISION_BACKOFF_MAX_SECONDS",
+            default=self.DEFAULT_BACKOFF_MAX_SECONDS,
+            min_value=self.backoff_base_seconds,
+        )
+        self.max_retries = self._env_int(
+            "BINANCE_VISION_MAX_RETRIES",
+            default=self.DEFAULT_MAX_RETRIES,
+            min_value=0,
+        )
+        default_interval_seconds = (60.0 / float(self.max_weight_per_min)) * 1.2
+        self.min_request_interval_seconds = self._env_float(
+            "BINANCE_VISION_MIN_REQUEST_INTERVAL_SECONDS",
+            default=default_interval_seconds,
+            min_value=0.01,
+        )
+        self._request_semaphore = threading.BoundedSemaphore(self.max_concurrency)
+        self._request_lock = threading.Lock()
+        self._next_request_monotonic = 0.0
+
+    @staticmethod
+    def _env_int(name: str, default: int, min_value: int) -> int:
+        value = os.getenv(name)
+        if value is None:
+            return default
+        try:
+            return max(min_value, int(value))
+        except ValueError:
+            return default
+
+    @staticmethod
+    def _env_float(name: str, default: float, min_value: float) -> float:
+        value = os.getenv(name)
+        if value is None:
+            return default
+        try:
+            return max(min_value, float(value))
+        except ValueError:
+            return default
+
+    def _wait_for_turn(self) -> None:
+        """전역 최소 요청 간격을 보장한다."""
+        with self._request_lock:
+            now = time.monotonic()
+            wait_seconds = max(0.0, self._next_request_monotonic - now)
+            if wait_seconds > 0:
+                time.sleep(wait_seconds)
+                now = time.monotonic()
+            self._next_request_monotonic = now + self.min_request_interval_seconds
+
+    @staticmethod
+    def _is_retryable_http_error(error: urllib.error.HTTPError) -> bool:
+        return error.code == 429 or 500 <= error.code <= 599
+
+    def _parse_retry_after_seconds(self, raw: str | None) -> float | None:
+        if not raw:
+            return None
+        try:
+            return max(0.0, float(raw.strip()))
+        except ValueError:
+            pass
+        try:
+            retry_at = parsedate_to_datetime(raw.strip())
+            now = datetime.now(tz=retry_at.tzinfo)
+            return max(0.0, (retry_at - now).total_seconds())
+        except Exception:
+            return None
+
+    def _compute_backoff_seconds(
+        self,
+        attempt: int,
+        http_error: urllib.error.HTTPError | None = None,
+    ) -> float:
+        base: float = min(self.backoff_max_seconds, self.backoff_base_seconds * (2**attempt))
+        retry_after_seconds: float | None = None
+        if http_error is not None:
+            retry_after_seconds = self._parse_retry_after_seconds(
+                http_error.headers.get("Retry-After"),
+            )
+        if retry_after_seconds is not None:
+            bounded = min(self.backoff_max_seconds, max(base, retry_after_seconds))
+            return float(bounded)
+        return base
+
+    def _read_url_bytes(self, url: str, timeout: int | None = None) -> bytes:
+        timeout_seconds = timeout or self.DEFAULT_TIMEOUT_SECONDS
+        for attempt in range(self.max_retries + 1):
+            try:
+                with self._request_semaphore:
+                    self._wait_for_turn()
+                    with urllib.request.urlopen(  # noqa: S310
+                        url,
+                        timeout=timeout_seconds,
+                    ) as response:
+                        return cast(bytes, response.read())
+            except urllib.error.HTTPError as http_error:
+                if not self._is_retryable_http_error(http_error) or attempt >= self.max_retries:
+                    raise
+                backoff = self._compute_backoff_seconds(attempt, http_error=http_error)
+                self.logger.warning(
+                    "Retryable HTTP error %s for %s (attempt %s/%s), backoff %.2fs",
+                    http_error.code,
+                    url,
+                    attempt + 1,
+                    self.max_retries + 1,
+                    backoff,
+                )
+                time.sleep(backoff)
+            except (urllib.error.URLError, TimeoutError, OSError) as err:
+                if attempt >= self.max_retries:
+                    raise
+                backoff = self._compute_backoff_seconds(attempt)
+                self.logger.warning(
+                    "Network error fetching %s (attempt %s/%s): %s; backoff %.2fs",
+                    url,
+                    attempt + 1,
+                    self.max_retries + 1,
+                    err,
+                    backoff,
+                )
+                time.sleep(backoff)
+        raise RuntimeError("Unreachable retry loop for _read_url_bytes")
+
+    def _fetch_zip_csv(self, url: str) -> pd.DataFrame:
+        zip_data = self._read_url_bytes(url)
+        with zipfile.ZipFile(io.BytesIO(zip_data)) as zf:
+            csv_names = [name for name in zf.namelist() if name.endswith(".csv")]
+            if not csv_names:
+                return pd.DataFrame()
+            with zf.open(csv_names[0]) as handle:
+                return pd.read_csv(handle)
+
+    def _vision_path_url(self, *parts: str) -> str:
+        encoded = "/".join(urllib.parse.quote(p.strip("/")) for p in parts if p)
+        return f"{self.BASE_URL}/{encoded}"
+
+    def _fetch_zip_by_path(self, *parts: str) -> pd.DataFrame:
+        url = self._vision_path_url(*parts)
+        try:
+            return self._fetch_zip_csv(url)
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                self.logger.debug("Vision data not found (404): %s", url)
+                return pd.DataFrame()
+            self.logger.warning("HTTP error fetching Vision zip (%s): %s", url, e)
+            return pd.DataFrame()
+        except Exception as e:
+            self.logger.warning("Unexpected error fetching Vision zip (%s): %s", url, e)
+            return pd.DataFrame()
 
     def fetch_daily_metrics(self, symbol: str, date: datetime) -> pd.DataFrame:
         """특정 날짜의 metrics ZIP 파일을 다운로드하여 DataFrame으로 반환합니다."""
         date_str = date.strftime("%Y-%m-%d")
-        
-        # [Fix] URL 인코딩 처리 (비 ASCII 문자 포함 시 오류 방지)
         safe_symbol = urllib.parse.quote(symbol)
-        url = f"{self.BASE_URL}/{safe_symbol}/{safe_symbol}-metrics-{date_str}.zip"
+        url = self._vision_path_url(
+            "daily",
+            "metrics",
+            safe_symbol,
+            f"{safe_symbol}-metrics-{date_str}.zip",
+        )
 
         try:
-            self.logger.info(f"Downloading Vision metrics: {symbol} @ {date_str}")
-            with urllib.request.urlopen(url, timeout=10) as response:  # noqa: S310
-                zip_data = response.read()
-
-            with zipfile.ZipFile(io.BytesIO(zip_data)) as z:
-                # ZIP 내부의 첫 번째 CSV 파일 로드
-                csv_names = z.namelist()
-                if not csv_names:
-                    return pd.DataFrame()
-                csv_name = csv_names[0]
-                with z.open(csv_name) as f:
-                    df = pd.read_csv(f)
+            self.logger.info("Downloading Vision metrics: %s @ %s", symbol, date_str)
+            df = self._fetch_zip_csv(url)
 
             # 컬럼명 정규화
             # Binance Vision metrics columns:
@@ -100,3 +271,104 @@ class BinanceVisionDownloader:
             return pd.DataFrame()
 
         return pd.concat(all_dfs, ignore_index=True).drop_duplicates(subset=["timestamp"])
+
+    def fetch_klines_archive_monthly(
+        self,
+        symbol: str,
+        interval: str,
+        year: int,
+        month: int,
+    ) -> pd.DataFrame:
+        """월간 klines archive ZIP을 내려받아 DataFrame으로 반환합니다."""
+        month_str = f"{month:02d}"
+        filename = f"{symbol}-{interval}-{year}-{month_str}.zip"
+        return self._fetch_zip_by_path("monthly", "klines", symbol, interval, filename)
+
+    def fetch_klines_archive(
+        self,
+        symbol: str,
+        interval: str,
+        year: int,
+        month: int,
+    ) -> pd.DataFrame:
+        """Alias for docs name: fetch monthly klines archive."""
+        return self.fetch_klines_archive_monthly(
+            symbol=symbol,
+            interval=interval,
+            year=year,
+            month=month,
+        )
+
+    def fetch_funding_rate_monthly(self, symbol: str, year: int, month: int) -> pd.DataFrame:
+        """월간 fundingRate archive ZIP을 내려받아 DataFrame으로 반환합니다."""
+        month_str = f"{month:02d}"
+        filename = f"{symbol}-fundingRate-{year}-{month_str}.zip"
+        return self._fetch_zip_by_path("monthly", "fundingRate", symbol, filename)
+
+    def fetch_funding_monthly(self, symbol: str, year: int, month: int) -> pd.DataFrame:
+        """Alias for docs name: fetch monthly funding archive."""
+        return self.fetch_funding_rate_monthly(symbol=symbol, year=year, month=month)
+
+    def fetch_bookdepth_daily(self, symbol: str, date: datetime, level: str = "5") -> pd.DataFrame:
+        """일간 bookDepth archive ZIP을 내려받아 DataFrame으로 반환합니다."""
+        date_str = date.strftime("%Y-%m-%d")
+        filename = f"{symbol}-bookDepth-{level}-{date_str}.zip"
+        return self._fetch_zip_by_path("daily", "bookDepth", symbol, filename)
+
+    def fetch_premiumindex_daily(self, symbol: str, date: datetime) -> pd.DataFrame:
+        """일간 premiumIndexKlines archive ZIP을 내려받아 DataFrame으로 반환합니다."""
+        date_str = date.strftime("%Y-%m-%d")
+        filename = f"{symbol}-premiumIndexKlines-5m-{date_str}.zip"
+        return self._fetch_zip_by_path("daily", "premiumIndexKlines", symbol, filename)
+
+    def list_symbols_from_s3_xml_listing(
+        self,
+        *,
+        dataset_prefix: str = "data/futures/um/daily/klines/",
+        timeout: int | None = None,
+    ) -> list[str]:
+        """S3 XML listing을 파싱하여 데이터셋 디렉토리 내 심볼 목록을 반환합니다."""
+        query = urllib.parse.urlencode({"prefix": dataset_prefix, "delimiter": "/"})
+        url = f"{self.S3_LISTING_URL}?{query}"
+        try:
+            body = self._read_url_bytes(url, timeout=timeout)
+            root = ElementTree.fromstring(body)  # noqa: S314
+            symbols: list[str] = []
+            ns = "{http://s3.amazonaws.com/doc/2006-03-01/}"
+            for node in root.findall(f".//{ns}CommonPrefixes/{ns}Prefix"):
+                prefix = (node.text or "").strip()
+                if not prefix.startswith(dataset_prefix):
+                    continue
+                remain = prefix[len(dataset_prefix):].strip("/")
+                if remain:
+                    symbols.append(remain.split("/")[0])
+            return sorted(set(symbols))
+        except Exception as e:
+            self.logger.warning("Failed to list symbols from Vision S3 XML listing: %s", e)
+            return []
+
+    def list_all_symbols(
+        self,
+        *,
+        dataset_prefix: str = "data/futures/um/daily/klines/",
+        timeout: int | None = None,
+    ) -> list[str]:
+        """Alias for docs name: list all symbols from Vision listing."""
+        return self.list_symbols_from_s3_xml_listing(
+            dataset_prefix=dataset_prefix,
+            timeout=timeout,
+        )
+
+    def verify_checksum(
+        self,
+        payload: bytes,
+        expected_hex_digest: str,
+        algorithm: str = "sha256",
+    ) -> bool:
+        """다운로드 payload의 checksum(hex)이 예상값과 일치하는지 검증합니다."""
+        algo = algorithm.lower()
+        if algo not in {"sha256", "md5"}:
+            raise ValueError(f"Unsupported checksum algorithm: {algorithm}")
+        digest = hashlib.new(algo, payload).hexdigest()
+        expected = expected_hex_digest.strip().lower().split()[0]
+        return digest == expected

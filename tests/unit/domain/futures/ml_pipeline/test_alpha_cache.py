@@ -41,9 +41,15 @@ def test_alpha_cache_hit_with_identical_key() -> None:
         horizons=(3, 6, 12),
         slots_per_theme=5,
         filter_options=filter_options,
+        alpha_backend="jax",
     )
     alpha_panel = pd.DataFrame(index=panel_df.index, data={"alpha_long": 0.5, "alpha_short": 0.5})
-    store_meta = pipeline_runner._alpha_cache_put(key, alpha_panel, max_items=2)
+    store_meta = pipeline_runner._alpha_cache_put(
+        key,
+        alpha_panel,
+        max_items=2,
+        alpha_backend="jax",
+    )
     hit_panel, hit_meta = pipeline_runner._alpha_cache_get(key)
 
     assert store_meta["cache_state"] == "miss_stored"
@@ -67,6 +73,7 @@ def test_alpha_cache_miss_when_hyperparameter_changes() -> None:
         horizons=(3, 6, 12),
         slots_per_theme=5,
         filter_options={"fdr_q": 0.1},
+        alpha_backend="jax",
     )
     key_changed = pipeline_runner._build_alpha_cache_key(
         panel_df=panel_df,
@@ -77,11 +84,13 @@ def test_alpha_cache_miss_when_hyperparameter_changes() -> None:
         horizons=(3, 6, 12),
         slots_per_theme=6,
         filter_options={"fdr_q": 0.1},
+        alpha_backend="jax",
     )
     pipeline_runner._alpha_cache_put(
         key_base,
         pd.DataFrame(index=panel_df.index, data={"alpha_long": 0.5}),
         max_items=2,
+        alpha_backend="jax",
     )
     miss_panel, miss_meta = pipeline_runner._alpha_cache_get(key_changed)
     assert key_base != key_changed
@@ -104,6 +113,7 @@ def test_alpha_cache_miss_when_data_snapshot_changes() -> None:
         horizons=(3, 6, 12),
         slots_per_theme=5,
         filter_options={"fdr_q": 0.1},
+        alpha_backend="jax",
     )
     key_changed = pipeline_runner._build_alpha_cache_key(
         panel_df=panel_df_changed,
@@ -114,11 +124,13 @@ def test_alpha_cache_miss_when_data_snapshot_changes() -> None:
         horizons=(3, 6, 12),
         slots_per_theme=5,
         filter_options={"fdr_q": 0.1},
+        alpha_backend="jax",
     )
     pipeline_runner._alpha_cache_put(
         key_base,
         pd.DataFrame(index=panel_df.index, data={"alpha_long": 0.5}),
         max_items=2,
+        alpha_backend="jax",
     )
     miss_panel, miss_meta = pipeline_runner._alpha_cache_get(key_changed)
     assert key_base != key_changed

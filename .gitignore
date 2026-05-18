@@ -161,9 +161,6 @@ logs/
 # Explain
 Explain/
 
-# docs
-docs/
-
 # Environments
 .env
 .envrc
