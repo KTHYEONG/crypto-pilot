@@ -115,10 +115,24 @@ def _ensure_alpha_panel_attrs(
         panel["alpha_long_00"] = pd.to_numeric(panel["alpha_long"], errors="coerce")
     if "alpha_short_00" not in panel.columns and "alpha_short" in panel.columns:
         panel["alpha_short_00"] = pd.to_numeric(panel["alpha_short"], errors="coerce")
+    if "alpha_long_signal" not in panel.columns:
+        if "alpha_long_00" in panel.columns:
+            panel["alpha_long_signal"] = pd.to_numeric(panel["alpha_long_00"], errors="coerce")
+        elif "alpha_long" in panel.columns:
+            panel["alpha_long_signal"] = pd.to_numeric(panel["alpha_long"], errors="coerce")
+    if "alpha_short_signal" not in panel.columns:
+        if "alpha_short_00" in panel.columns:
+            panel["alpha_short_signal"] = pd.to_numeric(panel["alpha_short_00"], errors="coerce")
+        elif "alpha_short" in panel.columns:
+            panel["alpha_short_signal"] = pd.to_numeric(panel["alpha_short"], errors="coerce")
     if "alpha_long" not in panel.columns and "alpha_long_00" in panel.columns:
         panel["alpha_long"] = pd.to_numeric(panel["alpha_long_00"], errors="coerce")
     if "alpha_short" not in panel.columns and "alpha_short_00" in panel.columns:
         panel["alpha_short"] = pd.to_numeric(panel["alpha_short_00"], errors="coerce")
+    if "alpha_long_00" not in panel.columns and "alpha_long_signal" in panel.columns:
+        panel["alpha_long_00"] = pd.to_numeric(panel["alpha_long_signal"], errors="coerce")
+    if "alpha_short_00" not in panel.columns and "alpha_short_signal" in panel.columns:
+        panel["alpha_short_00"] = pd.to_numeric(panel["alpha_short_signal"], errors="coerce")
     if "alpha_net" not in panel.columns and {"alpha_long", "alpha_short"}.issubset(panel.columns):
         panel["alpha_net"] = (
             pd.to_numeric(panel["alpha_long"], errors="coerce")
