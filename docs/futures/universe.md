@@ -1,743 +1,226 @@
-# Binance Futures 유니버스 아키텍처 (v1.3)
+# Binance Futures 유니버스 아키텍처 (v1.3 - AI Optimized)
 
-**작성일**: 2026-05-18 | **최종 검증**: 2026-05-18  
-**상태**: 아키텍처 확정 — 데이터 가용성 검증 완료, Phase 1 구현 준비됨  
-**목표**: Point-in-time PIT 준수, 생존편향/상폐편향 제거, 거래가능 자산만 선별
-
----
-
-## 목차
-
-1. [핵심 설계 원칙](#핵심-설계-원칙)
-2. [2개 프로세스 분리](#2개-프로세스-분리)
-3. [디렉토리 구조](#디렉토리-구조)
-4. [Ledger - 생존편향 해소](#ledger---생존편향-해소)
-5. [데이터 수집 레이어 (Binance Data)](binance_data.md)
-6. [7단계 Funnel](#7단계-funnel)
-7. [Stage 6 - 분산 전략](#stage-6---분산-전략)
-8. [데이터 계약](#데이터-계약)
-9. [요구사항 충족 매핑](#요구사항-충족-매핑)
-10. [미확정 사항](#미확정-사항)
+**최종 검증/확정**: 2026-05-18  
+**핵심 설계 목적**: Point-in-time(PIT) 준수, 생존/상폐 편향 제거, 결정론적 재현성 보장 및 거래 불가능 자산 원천 차단.
 
 ---
 
-## 핵심 설계 원칙
+## 1. 핵심 아키텍처 및 데이터 흐름
 
-기존 코드의 치명적 결함: **스크리닝 시점에 라이브 API(`fetch_tickers`)를 호출** → PIT 원천적 불가능.
-
-**재설계의 1원칙:**
+유니버스 빌드는 외부 거래소 API와 완전히 격리된 **순수 함수(Pure Function)**로 동작한다.
 
 ```
-유니버스 빌드는 외부 세계와 단절된 순수 함수다.
-build_universe(as_of, tf, cfg) -> UniverseSnapshot
-  - as_of 이후 데이터를 절대 읽지 않음
-  - 동일 입력 → 동일 출력 (결정론적)
+build_universe(as_of: date, tf: str, cfg: UniverseConfig) -> UniverseSnapshot
 ```
+* **결정론적 재현성**: 동일 `as_of` 일자 + 동일 `UniverseConfig` + 동일 `universe_ledger.parquet` ➡️ 항상 동일한 유니버스 스냅샷 반환.
+* **룩어헤드 차단**: `as_of` 시점 이후에 알려진 정보(`knowledge_date > as_of`)는 데이터 쿼리 및 연산에서 원천 배제.
 
-이를 통해:
-- **PIT 순수성**: 백테스트(과거 `as_of`)와 라이브(`as_of=now`)가 동일 코드 경로 → train/live skew 제로
-- **생존편향 해소**: Ledger에 상폐 코인의 과거 행 보존
-- **재현성**: 동일 ledger + 동일 config → 동일 결과
-
----
-
-## 2개 프로세스 분리
-
-유일하게 거래소 API를 접하는 곳과 순수 스크리닝 로직을 물리적으로 분리:
+### 2개 프로세스 분리 구조
 
 ```
 ┌─────────────────────────────────────────────────────┐
-│ [프로세스 A: Ledger 적재]                            │
-│ • 온라인 · append-only · 스케줄러로 주기 실행        │
-│ • exchangeInfo + klines + funding + OI              │
-│ • "날짜 태그" (knowledge_date)하여 ledger에 기록     │
-│ • 유일 API 접점 ⚠️                                  │
+│ [프로세스 A: Ledger 적재 및 갱신]                     │
+│ - 온라인 · append-only · 주기적 크론 실행            │
+│ - 데이터 소스: exchangeInfo + klines + funding + OI │
+│ - 데이터 가용 시점 기준 "knowledge_date" 태깅 기록   │
 └──────────────────┬──────────────────────────────────┘
                    │
-                   ▼
-        [universe_ledger.parquet]
-        (상폐 코인 포함 전체 역사)
+                   ▼ [data/futures/universe_ledger.parquet] (상폐 자산 포함 역사 패널)
                    │
-                   ▼
-┌──────────────────────────────────────────────────────┐
+┌──────────────────┴──────────────────────────────────┐
 │ [프로세스 B: Universe 빌드]                          │
-│ • 오프라인 · 순수함수 · 거래소 API 미접근            │
-│ • ledger 읽기만 가능 (as_of 이전만)                │
-│ • build_universe(as_of) → 7단계 funnel             │
-│ • 백테스트/라이브 동일 호출                          │
-└──────────────────────────────────────────────────────┘
+│ - 오프라인 · 순수 함수 · 거래소 API 비접촉           │
+│ - as_of 이전 데이터만 쿼리 (`knowledge_date <= as_of`) │
+│ - pipeline.py 실행 ➡️ 7단계 Funnel 통과            │
+└──────────────────┬──────────────────────────────────┘
                    │
-                   ▼
-        [UniverseSnapshot]
-        (dated, reproducible)
-```
-
-**핵심 이점**:
-- CRITICAL-1(룩어헤드) 구조적 해결
-- 스냅샷 영속화 → 백테스트 재현성
-- 레이턴시 감소 → 라이브는 오프라인 계산만 수행
-
----
-
-## 디렉토리 구조
-
-`src/domain/futures/universe/` — 각 파일 단일 책임, ≤500 줄 (CLAUDE.md §7):
-
-```
-src/domain/futures/universe/
-├── __init__.py              # 공개 API
-│                           # build_universe(as_of, tf, cfg) -> UniverseSnapshot
-│                           # load_universe_snapshot(as_of, tf)
-│                           # update_ledger() [프로세스 A]
-│
-├── config.py               # UniverseConfig (frozen dataclass)
-│                          # 모든 임계값 중앙화, config_hash로 재현성
-│
-├── contracts.py            # 스키마 (dataclass)
-│                          # SymbolMeta, LedgerRow, FilterReport,
-│                          # UniverseSnapshot, RejectCode(Enum)
-│
-├── ledger.py               # Ledger 빌드/갱신/질의
-│                          # - as_of 시점 수익 심볼 쿼리
-│                          # - append-only 로직
-│                          # - 상장/상폐일 복원
-│
-├── exchange_meta.py        # Binance exchangeInfo 수집
-│                          # - 계약 메타 (tick_size, step_size, etc)
-│                          # - 상장/상폐일 파싱
-│                          # - 거래소 status 추적
-│
-├── data_quality.py         # Stage 2: 데이터 품질 검증
-│                          # - bar 커버리지 / gap 검사
-│                          # - NaN / Inf / frozen bar 감지
-│                          # - 최근 60d 연속성 (last_60d_coverage ≥ 95%)
-│                          # - 0 volume bar 수 (n_zero_volume_bars_60d ≤ 1)
-│                          # - 타임스탬프 정합성
-│
-├── structure.py            # Stage 1: 자산 구조 필터
-│                          # - PERP swap 확인
-│                          # - USDT margin/quote 확인
-│                          # - 레버리지토큰 배제 (UP/DOWN/BULL/BEAR)
-│                          # - contract multiplier 검증
-│
-├── liquidity.py            # Stage 3: 유동성 & 체결성
-│                          # - ADV (30d 중앙값, robust to spikes)
-│                          # - Amihud illiquidity score
-│                          # - 호가 깊이 (if available)
-│                          # - 목표 클립 체결성 추정
-│
-├── cost_model.py           # Stage 4: 거래 비용 모델
-│                          # - Maker/Taker 수수료 × 2 (round-trip)
-│                          # - Half-spread × 2
-│                          # - √ impact slippage: k·σ·√(Q/ADV)
-│                          # - 펀딩 캐리 (부호 포함)
-│                          # - Cost-to-edge 비율
-│
-├── risk_events.py          # Stage 5: 리스크·조작·이벤트
-│                          # - 상장 연령 (≥90d)
-│                          # - 상폐/정산 스케줄 임박 여부
-│                          # - 펌프/wash-trading 휴리스틱
-│                          # - 정지 이력 / 상태 이상
-│                          # - 펀딩 이상치 (z-blowout)
-│                          # - 변동성 밴드 게이트 (vol_30d_band)
-│                          # - mark-index basis 이상치 (premiumIndexKlines)
-│                          # - manual_event_ledger: risk_event_override 인터페이스
-│
-├── selection.py            # Stage 6: 선택 & 분산
-│                          # - 생존자 상관 클러스터링
-│                          # - ENB (effective # of bets) 극대화
-│                          # - 히스테리시스 (entry/exit rank band)
-│                          # - 앵커 강제 포함 (BTC/ETH)
-│                          # - 시장 바스켓 기준축
-│
-├── pipeline.py             # 오케스트레이션
-│                          # - Stage 0~6 순차 실행
-│                          # - FilterReport 감사 추적
-│                          # - UniverseSnapshot 생성
-│
-└── persistence.py          # 스냅샷 & ledger I/O
-                           # - Parquet / JSON 저장
-                           # - 스키마 버저닝
-                           # - 타임스탬프 태깅
+                   ▼ [logs/futures/universe/snapshots/...] (Reproducible Snapshot)
 ```
 
 ---
 
-## Ledger - 생존편향 해소
+## 2. 디렉토리 구조 및 모듈 매핑
 
-### 구조
+`src/domain/futures/universe/` 디렉토리 내 각 파일의 단일 책임과 역할 정의:
 
-`universe_ledger.parquet` — 일별 append-only 패널:
-
-```python
-@dataclass
-class LedgerRow:
-    symbol: str              # e.g., "BTC/USDT"
-    date: str                # YYYY-MM-DD
-    knowledge_date: str      # 해당 데이터가 실제로 "알려진" 날짜
-                            # (일반적으로 date + 1-2일, same-day 룩어헤드 방지)
-    
-    # 상장/상폐 상태
-    is_listed: bool
-    is_trading: bool
-    status: str              # "TRADING", "HALT", "DELISTED", "PRE_TRADING"
-    first_kline_date: str    # de-facto 상장일 (복원됨)
-    delist_date: str | None  # de-facto 상폐일 (복원됨)
-    delist_announcement: str | None
-    
-    # 유동성 & 활동성
-    adv_usdt_median: float   # 추세 30d quote-volume 중앙값 (robust)
-    adv_usdt_mean: float     # (참고용)
-    has_kline: bool          # 4h/1h kline 보유
-    has_funding: bool        # 펀딩비 데이터 보유
-    n_bar_gaps: int          # 장시간 gap 개수
-    max_gap_bars: int        # 최대 gap 크기
-    frozen_bars: int         # 연속 동일 종가 봉 수
-    
-    # 데이터 품질 (Stage 2에서 쓰임)
-    last_60d_coverage: float      # 최근 60d bar 커버리지 비율 (0~1)
-    n_zero_volume_bars_60d: int   # 최근 60d 0-volume bar 수
-    
-    # 리스크 신호 (Stage 5에서 쓰임)
-    funding_rate_8h: float        # 최근 8h 펀딩비 (원천 주기, 연환산 금지)
-    open_interest_usdt: float
-    oi_usdt_median: float         # 30d OI 중앙값 (깊이 proxy)
-    oi_change_30d: float          # OI 변화율 — crowding/squeeze 신호
-    listing_age_days: int         # 첫 kline으로부터 경과 일수
-    vol_30d: float                # 30d 수익률 변동성 (Stage 5 vol_band 게이트)
-    basis_z_score: float | None   # mark-index basis z-score (premiumIndexKlines, 게이트)
-    basis_annualized_mean: float | None  # 구조적 carry 수준 (descriptive 피처)
-    basis_vol: float | None       # peg 불안정성 (descriptive 피처)
-    risk_event_override: str | None  # 수동 이벤트 태그 (ManualEventRow 참조)
-    
-    # 메타
-    updated_at_utc: str      # ledger 행 생성 시각
-```
-
-### 상장/상폐일 복원 전략 (검증 확정)
-
-**상장일 복원**:
-1. `exchangeInfo.onboardDate` 필드 → **731개 중 645개 커버** (현재 거래 심볼 대부분)
-2. onboardDate 없는 심볼 → Vision S3 klines 디렉토리의 첫 파일 날짜로 대체
-
-**상폐일 복원**:
-1. `exchangeInfo.status == "SETTLING"` → **즉시 is_trading=False 처리**
-2. `deliveryDate` 필드는 **신뢰 금지** — 실제 거래 종료보다 수개월 앞선 결정일 기록 (검증됨: SXPUSDT deliveryDate=2025-12-05, Vision klines 2026-05-16까지 존재)
-3. **실제 상폐일 = Vision klines 마지막 파일 날짜** (유일한 신뢰 소스)
-4. Vision S3 klines 디렉토리에서 **857개 심볼** 발견 → 상폐 심볼(LUNA, DEFI, YFII) 포함 확인
-
-**미래 (forward)**:
-- 프로세스 A가 매일 `exchangeInfo` 스냅샷 적재 → SETTLING 전환 시점 정확히 포착
-- `ledger_confidence`: `"official"` (onboardDate 있음) vs `"reconstructed"` (Vision 최초파일 기반)
-
-### Availability Lag
-
-핵심: `date` ≠ `knowledge_date`
-
-```
-실제 거래 발생: T일 (예: 5월 18일)
-  ↓
-데이터 수집: T+1 (5월 19일, daily settlement 후)
-  ↓
-knowledge_date = T+1 으로 태그
-  ↓
-Stage 스크리닝: knowledge_date ≤ as_of 인 행만 사용
-  → same-day 룩어헤드 원천 차단
-```
-
-이는 "T일 데이터가 T일에 실제로 사용 가능했는가?"라는 현실적 질문에 답합니다.
-
----
-
-## 데이터 수집 레이어
-
-> [!NOTE]
-> Binance Futures의 가용 데이터 소스, 수집 범위, 하이브리드 수집 전략 및 영속화 스키마(Data Manifest) 등 데이터 수집과 관련된 세부 스펙은 별도 문서인 [binance_data.md](binance_data.md)에서 자세히 확인할 수 있습니다.
-
-해당 파트는 유니버스 구축 시 사용되는 CCXT API, Binance Vision 아카이브 하이브리드 전략, Half-spread 실측 계산 및 데이터 재현성 잠금(Manifest) 등을 다룹니다.
-
----
-
-## 7단계 Funnel
-
-`pipeline.py`가 다음 순서로 실행. 각 stage는 통과/탈락 + 메트릭을 `FilterReport`에 기록 → 완전한 감사 추적:
-
-### Stage 0: 적격 모집단 (Eligibility Universe)
-
-```
-입력: as_of 날짜
-출력: is_listed & is_trading @ as_of 인 전 심볼 (상폐예정도 포함, 미래상장은 제외)
-```
-
-ledger에서 `knowledge_date ≤ as_of and is_trading == True` 필터링.
-
----
-
-### Stage 1: 자산 구조 (structure.py)
-
-```
-검사 항목                      설명
-─────────────────────────────────────────────────────────────────
-PERP swap 확인                 Quarterly/monthly 선물 제외
-USDT margin/quote             USDT-margined 또는 USDT-quoted만
-status == TRADING 만 허용      HALT / DELISTED / SETTLING 모두 즉시 배제
-                               ※ SETTLING: 검증됨 — deliveryDate 이후에도
-                                  수개월간 잔존, 거래불가 상태이므로 즉시 제외
-레버리지 토큰 배제             UP·DOWN·BULL·BEAR 패턴 매칭
-Contract multiplier           정상 범위 내 (1 또는 사전정의값)
-Normalized symbol             1000XXX 같은 호환성 정규화
-```
-
-**목적**: 데이터 이상한 자산, 거래 불가능한 자산 즉시 제거.  
-**주의**: `deliveryDate` 필드로 상폐 예측 금지 — SETTLING 상태 확인이 유일한 신뢰 방법.
-
----
-
-### Stage 2: 데이터 품질 (data_quality.py)
-
-```
-검사 항목                      기준                비고
-─────────────────────────────────────────────────────────────────
-커버리지                       IS window 80% 이상   IS = 21개월 → @4h ≥ 3,834봉 중 3,067봉
-단일 gap                       ≤ G봉 (예: 200)    장기 중단 배제
-연속 동일 종가                  ≤ S봉 (예: 10)     frozen bar 감지
-최근 60d 연속성                 last_60d_coverage  IS 평균 커버와 독립 — 최신 데이터 공백
-                               ≥ 95%              탐지 (구간 평균을 통과해도 최근 공백 발생 가능)
-0 volume bar                   ≤ 1봉 / 60일       체결 없는 봉 검출 (frozen bar는 가격만 보므로
-                                                   거래량 0을 독립 신호로 추가 검사)
-NaN / Inf                      없음                수치 정합성
-funding 컬럼                   보유                FAPI로 2019-09~현재 전량 수집 가능
-OI 컬럼 (2020-09 이후)         보유                Vision metrics에서 수집 (BinanceVisionDownloader)
-OI 컬럼 (2020-09 이전)         결측 허용           FAPI 딥히스토리 미지원, NaN 처리 필요
-타임스탐프                      단조증가, UTC       시간 역순 방지
-```
-
-**핵심**: 15개월 IS 윈도우에서 **커버리지 ≥ 80%** 의무화 → 신규상장 저데이터 심볼 배제.
-
-기존 코드 `min_is_bars=500`(≈83일)은 약함. **v1.3 확정 기준**: `@4h ≥ 3,067봉` (IS 3,834봉 × 80%).
-
-**Walk-Forward 평가 방식 (v1.3 확정)**:
-```
-mode            = rolling           # anchored 아님 — 크립토 concept drift 대응
-is_months       = 21
-oos_months      = 3
-step_months     = 3
-purge           = label_horizon     # IS/OOS 경계 누수 차단 (≥ triple-barrier vertical)
-embargo_days    = 7
-```
-데이터 2020-01~현재 ≈ 77개월 기준 OOS fold **약 16~17개** (≈ 4년 연속 OOS equity curve).  
-단일 IS/OOS split 금지 — OOS 1개는 통계적 신뢰성 불가(Deflated Sharpe Ratio 계산 불가).
-
-`last_60d_coverage`와 `n_zero_volume_bars_60d`는 IS 평균과 독립 검사. IS 80% 통과 후에도 최근 60d 공백이 있으면 배제.
-
----
-
-### Stage 3: 유동성 & 체결성 (liquidity.py)
-
-```
-검사 항목                      기준                    계산
-─────────────────────────────────────────────────────────────────
-ADV (Average Daily Volume)    ≥ 25M USDT            추세 30d 중앙값
-                                                     (mean이 아님, spike robust)
-
-Amihud illiquidity            상한 설정              |ret| / (volume·price)
-                                                     tail 180봉
-
-호가 깊이 (if available)       depth@Kbps ≥ X%       호가창 데이터 있을 시
-                              of ADV
-
-체결성 추정                    screening_clip / ADV  screening_clip_usdt로 impact 추정
-                               ≤ 0.5% ADV            (자본 티어별 설정값 아래 참조)
-```
-
-**중앙값 사용 이유**: 한 번의 폭증(listing pump, 공지)이 ADV 기준값을 왜곡하지 않음.
-
-**자본 티어별 Clip 설계 (v1.3 확정)**:
-```python
-# 스크리닝용 — universe gate에서 impact 계산 기준 (외생 고정, equity 비의존)
-# 보수적 방향으로 설정 (impact 과대추정이 안전)
-SCREENING_CLIP_BY_TIER = {
-    "seed":   1_000,   # 초기 실전 시작 / 연구용 기본
-    "small":  5_000,   # 소규모 실전
-    "mid":   10_000,   # 자본 성장 후 1단계
-    "large": 25_000,   # 자본 성장 후 2단계
-    "xlarge":50_000,   # 개인 규모 상한
-}
-
-# capacity 평가 — 유니버스가 지탱 가능한 AUM ceiling 분석용
-CAPACITY_CLIP_LIST = [50_000, 100_000]  # 성장 가능성 상한 시뮬레이션
-
-# 라이브 실거래 — equity 비례, 유니버스 gate와 분리
-live_clip_usdt = equity * position_size_pct  # (작게 시작, 유니버스 gate와 무관)
-```
-**원칙**: `screening_clip_usdt`는 equity 순환 방지를 위해 **반드시 외생 고정**, tier는 분기 재배포 시 수동 업그레이드.  
-`capacity_clip_list`로 스냅샷마다 capacity ceiling 보고 → 자본이 ceiling에 접근 시 경고.
-
----
-
-### Stage 4: 거래 비용 (cost_model.py)
-
-**Round-trip Execution Cost 산식 (v1.3: funding 분리)**:
-
-```
-# ── 순수 실행 마찰 (라운드트립당 1회, turnover에 비례) ──
-execution_cost_bps = 2·fee_bps
-                   + 2·half_spread_bps
-                   + k·σ·√(screening_clip_usdt / adv_usdt)·1e4
-                   + tick_cost_bps        (반올림 마찰: tick_size/price × 0.5 × 1e4)
-
-# ── Funding carry: 절대 합산 금지, 별도 피처로 분리 ──
-funding_carry_8h   = per-8h 원천 주기로 저장 (Binance 정산 주기 일치)
-                     부호 포함 — 숏 + funding > 0 → 수익
-```
-
-**각 항목 (execution_cost_bps)**:
-- `2·fee`: Maker + Taker round-trip (Binance Futures 기본 ~0.04%×2)
-- `2·half_spread`: **소스 분기 (검증 확정)**
-  - `as_of ≥ 2020-01-01` → **Vision bookDepth 집계** (0.5 MB/일, ~2,600 스냅샷)
-    - `half_spread = median(best_ask - mid) over 4h window`
-  - `as_of < 2020-01-01` → **Corwin-Schultz 변형 fallback**
-    - `half_spread ≈ (High - Low) / (2 × Close)` (Roll 모델 사용 금지)
-    - Roll(1984) 검증 결과: NaN 46.8%, 실측 대비 5.8배 과대추정 → 폐기
-- **√ impact model**: σ = 4h 수익률 변동성, k ≈ 0.1~0.2, clip = `screening_clip_usdt`
-- `tick_cost_bps`: `(tick_size / price) × 0.5 × 1e4` — bookDepth half_spread가 이미 tick granularity 반영(2020+)이므로 **반올림 마찰만** 포착, 이중 가산 금지.
-
-**Funding carry 분리 근거**: funding은 (a) holding time 비례 연속 수익/비용, (b) signed alpha 성분. execution_cost는 (a) 라운드트립당 1회, (b) 순수 마찰. 차원이 달라 합산 시 cost gate가 carry 우호 자산을 오배제하고, 복리 carry 효과가 비용으로 소거됨.
-
-**게이트**: `execution_cost_bps ≤ max_cost_bps` (예: 50bps) — funding 미포함  
-**스냅샷 피처**: `execution_cost_bps`, `funding_carry_8h` — 둘 다 운반, 절대 합산 경로 없음  
-**알파/optimizer 레이어**: `funding_carry_8h`는 carry-harvesting sleeve 평가 입력으로만 사용
-
----
-
-### Stage 5: 리스크·조작·이벤트 (risk_events.py)
-
-```
-검사 항목                      기준 / 휴리스틱          목적
-─────────────────────────────────────────────────────────────────
-상장 연령                       ≥ 90일                가격발견·언락·유동성 불안정 구간 배제
-                                                     (v1.2: 30d→90d 상향 — 상장빔/락업 이슈)
-상폐/정산 스케줄                snapshot 유효기간+    예정된 퇴출 방지
-                               holding horizon 내
-                               비예정 확인
-
-펌프-덤프 검출                  return z-score > 3    극단값 + 반전 추적
-                              (높음 → 낮음 within
-                              수일)
-
-비정상 거래 활동              volume/trade-count    abnormal activity heuristic
-(Abnormal activity)           ratio inconsistent    (Amihud illiquidity가 부분 커버하나
-                              with price-move       명시적 패턴 감지 보완)
-
-거래 정지 이력                  status != TRADING     이력 상태 확인
-                              어느 시점이든
-
-펀딩비 이상치                   |funding_rate|       *단순 고펀딩은 통과*
-(조작/스퀴즈)                  z-score > 2.5 OR      - 이상치(급등/급락)만 배제
-                              부호 급반전 (< 1일)     - 구조적 고펀딩 → 피처로
-
-OI/ADV 농도 비율               OI_usdt_median /      OI 집중도(crowding proxy) — 청산 리스크
-                              adv_usdt              (과도한 레버리지 신호 아님, 개별 포지션 크기와 무관)
-
-변동성 밴드                     vol_30d ∈              하한: ADV 통과 후에도 거래 소멸 코인
-                               [min_vol, max_vol]     상한: 구조적 펌프앤덤프 배제
-                               (config 파라미터화)     (min_vol / max_vol 예: 0.3%~25% / day)
-
-mark-index basis 이상치        |basis_z| ≤ 2.5       마킹 조작·청산 연쇄 신호 (게이트)
-(premiumIndexKlines)           AND 30분 내 부호        (펀딩 이상치와 독립 — basis는
-                               급반전 없음             price-discovery 왜곡을 포착)
-                               ── 아래는 게이트 아님, descriptive 피처로 스냅샷 운반 ──
-                               basis_annualized_mean  구조적 carry 수준
-                               basis_vol              peg 불안정성 → 체결 리스크
-                               (예측 피처 금지 — alpha_factory 전담)
-
-수동 리스크 이벤트              risk_event_override    token unlock·해킹·규제 이슈 등
-(manual_event_ledger)          ≠ None → 즉시 배제     자동 수집 불가 데이터를 수동 태깅
-                                                     인터페이스만 제공 (자동화 미포함)
-```
-
-**핵심 (피드백 반영)**:
-- 펀딩비는 "**배제**가 아니라 **이상치만 배제**"
-- 구조적 고펀딩(일관된 carry) 통과 → Stage 6에서 `funding_carry` 신호로 활용
-- 이를 통해 선물 carry 알파(특히 숏북)를 놓치지 않음
-
-**추가 (v1.2)**:
-- 상장 연령 30d → **90d** 상향 (상장빔·락업 해소 최소 구간)
-- `vol_30d_band`: 변동성 하한(죽은 코인)·상한(펌프앤덤프) 양방향 게이트
-- `basis_anomaly`: `premiumIndexKlines` 기반 mark-index basis 이상치 — 펀딩 이상치와 독립 신호
-- `risk_event_override`: 수동 이벤트 태그 인터페이스 (token unlock 등, 자동 수집 미포함)
-
-**Manual event PIT 안전 규칙 (v1.3)**:
-```python
-@dataclass(frozen=True)
-class ManualEventRow:
-    symbol: str
-    event_type: EventType     # SCHEDULED_UNLOCK | EXCHANGE_HALT |
-                              # REGULATORY | SECURITY_INCIDENT
-    event_date: str           # 실제 이벤트 발생일
-    knowledge_date: str       # 필수 non-null — 정보가 공개적으로 알 수 있게 된 날
-                              # SCHEDULED_UNLOCK: 스케줄 공시일 (PIT-safe ✓)
-                              # SECURITY_INCIDENT: 거래소 disclosure 날짜
-    severity: str
-    action: str               # "exclude" | "flag"
-    source_url: str
-    recorded_at_utc: str      # 감사용 only (PIT 판정 미사용)
-```
-- **fail-closed**: `knowledge_date` null → build_universe가 해당 행 **무시** (추정 날짜 적용 금지)
-- `knowledge_date ≤ as_of` 필터를 ledger와 **동일하게 적용** (룩어헤드 원천 차단)
-- `SCHEDULED_UNLOCK`은 스케줄이 상장 시 공개되므로 PIT-safe — 적극 활용
-- **Hindsight-selection 편향 정량화**: backtest를 `scheduled-only` vs `scheduled+discretionary` 두 버전으로 실행해 delta 보고 의무화
-
----
-
-### Stage 6: 선택 (selection.py) — 멤버십 결정 전담
-
-**v1.3 재설계**: Universe selection과 Portfolio selection 물리적 분리.
-
-| | Universe (Stage 6) | Portfolio (optimizer) |
+| 파일명 | 주된 역할 및 책임 | 주요 외부 라이브러리 |
 |---|---|---|
-| **역할** | 어떤 자산이 *플레이어블 셋*인가 | 각 자산에 *얼마 배분*하는가 |
-| **전략 의존성** | strategy-agnostic | 전략 목적함수에 의존 |
-| **ENB** | 피처로 운반만 | 실제 ENB 타게팅 |
-| **상관 클러스터링** | cluster_id 피처 운반 | 분산/HRP 결정 |
-
-Stage 5 생존자 대상 실행:
-
-#### 6.1 베타 reference 계산 (descriptive only)
-
-```python
-# reference index — 베타 계산용, 멤버 선발 기준 아님
-market_basket = [
-    ("BTC/USDT", 0.45), ("ETH/USDT", 0.25), ("SOL/USDT", 0.08), # ... cap-weighted
-]
-market_returns = weighted_sum(symbol_returns, weights)
-# → beta_vs_market 피처로 스냅샷에 운반, 선발 제외 기준으로 사용 금지
-```
-
-#### 6.2 상관 클러스터링 (피처 운반 전용, 멤버 제거 금지)
-
-```
-Step 1: pairwise correlation 산출 (trailing 250 trading days, PIT-safe)
-Step 2: distance = 1 - |corr| 변환
-Step 3: hierarchical clustering (ward linkage)
-Step 4: cluster_id 할당 → SymbolMeta 피처로 운반
-  ※ 클러스터 기반 멤버 제거 금지 — optimizer가 cluster_id로 분산 결정
-  ※ 예외: 동일 underlying 중복 instrument (1000X vs X 등) de-dup은 universe 권한
-```
-
-ENB / HRP / risk-parity → **optimizer 레이어 전담** (universe layer 밖).
-
-#### 6.3 Tradeability Composite Rank (선발 기준)
-
-```python
-# strategy-agnostic tradeability 점수
-tradeable_score = (
-    w_liq   * normalize(adv_usdt_median)       # 유동성
-  + w_cost  * normalize(1 / execution_cost_bps) # 비용 역수
-  + w_qual  * normalize(last_60d_coverage)      # 데이터 품질
-  + w_age   * normalize(listing_age_days)       # 안정성
-)
-# 상위 K_in 선발 (예: 15~25), hysteresis band로 churn 제어
-```
-
-#### 6.4 히스테리시스 (churn 제어)
-
-```
-진입 조건: tradeable_score rank ≤ K_in  (엄격, 예: top 20)
-이탈 조건: rank > K_out                  (느슨, 예: top 35)
-최소 dwell: 1분기
-하드 게이트: Stage 1~5 fail → 즉시 퇴출 (hysteresis 무시)
-```
-
-#### 6.5 앵커 강제 포함
-
-```python
-if "BTC/USDT" not in final_list:
-    final_list.insert(0, "BTC/USDT")  # role="anchor"
-if "ETH/USDT" not in final_list:
-    final_list.insert(1, "ETH/USDT")  # role="anchor"
-# anchor role → HMM reference / 벤치마크 / 가중치 0 허용 (거래 멤버와 구분)
-```
-
-#### Stage 6 출력 (스냅샷 피처)
-
-```python
-# SymbolMeta 운반 피처 — optimizer 입력
-adv_usdt, execution_cost_bps, funding_carry_8h,
-beta_vs_market, cluster_id, tradeable_rank,
-basis_annualized_mean, basis_vol,
-oi_usdt_median,             # OI 절대값 (깊이)
-oi_to_adv,                  # OI/ADV 비율 (crowding proxy)
-oi_change_30d,              # OI 변화율 (포지션 유입/유출, squeeze 선행)
-capacity_clip_usdt_list,    # capacity ceiling 분석용
-data_manifest_hash          # 데이터 재현성 지문
-```
+| `__init__.py` | 유니버스 패키지 공개 API (`build_universe`, `load_universe_snapshot` 등) | `pandas` |
+| `config.py` | 각 Stage 임계값 중앙화 및 결정론적 `config_hash` 생성 | `dataclasses`, `hashlib`, `json` |
+| `contracts.py` | `LedgerRow`, `SymbolMeta`, `FilterReport`, `UniverseSnapshot` 데이터 스키마 정의 | `dataclasses`, `enum` |
+| `ledger.py` | `universe_ledger.parquet` 데이터 쿼리, 슬라이싱 및 상장/상폐일 복원 | `pandas`, `pyarrow` |
+| `exchange_meta.py` | 계약 메타(tick_size, step_size 등) 수집 및 상폐 상태 모니터링 | `ccxt`, `pandas` |
+| `structure.py` | **Stage 1**: 계약 형태, 마진 자산 및 거래소 활성화 상태 필터링 | `pandas`, `numpy` |
+| `data_quality.py` | **Stage 2**: 데이터 누락률, gap 크기, frozen bar 검사 및 연속성 평가 | `pandas`, `numpy` |
+| `liquidity.py` | **Stage 3**: ADV 중앙값, Amihud 지수 및 자본 규모별 체결 타당성 검사 | `pandas`, `numpy` |
+| `cost_model.py` | **Stage 4**: 슬리피지(Square-root impact), 수수료, Spread 비용 모델링 | `pandas`, `numpy` |
+| `risk_events.py` | **Stage 5**: 상장일령, 변동성 밴드, 고펀딩/Basis 이상치 및 수동 리스크 이벤트 제외 | `pandas`, `numpy` |
+| `selection.py` | **Stage 6**: 종합 점수화(Rank), 히스테리시스, 상관성 클러스터링 및 앵커 결합 | `pandas`, `numpy` |
+| `pipeline.py` | Stage 0~6 순차 실행, `FilterReport` 생성 및 스냅샷 오케스트레이션 | `pandas`, `datetime` |
+| `persistence.py` | Parquet/JSON 포맷 스냅샷 영속화 및 `data_manifest` 지문 저장 | `pandas`, `pyarrow` |
 
 ---
 
-## 데이터 계약
+## 3. 데이터 계약 및 영속화 스키마 (`contracts.py`)
 
-### UniverseSnapshot
+### 3.1 LedgerRow (원시 데이터 패널 행)
+`universe_ledger.parquet`에 일단위 append-only 형식으로 기록되는 구조.
+* `date`: 실제 데이터 발생 일자 (YYYY-MM-DD)
+* `knowledge_date`: 해당 행의 정보가 시스템에 실제로 가용해진 날짜 (T+1 적용으로 same-day 룩어헤드 방지)
+* `is_listed` / `is_trading` / `status`: 상장 여부 및 활성 거래 상태 ("TRADING", "SETTLING", "DELISTED" 등)
+* `first_kline_date` / `delist_date`: 복원된 상장일 및 실제 최종 kline 관측일 기준 상폐일
+* `adv_usdt_median`: 30일 거래대금 중앙값
+* `last_60d_coverage`: 최근 60일 데이터 존재율 (0.0 ~ 1.0)
+* `n_zero_volume_bars_60d`: 최근 60일 내 거래량 0인 봉 개수
+* `basis_z_score`: Premium Index 기반의 mark-index basis z-score
+* `risk_event_override`: 수동 리스크 배제 사유 태그
 
-```python
-@dataclass(frozen=True, slots=True)
-class UniverseSnapshot:
-    # PIT & 재현성
-    as_of: str                      # YYYY-MM-DD, 기준 시점
-    tf: str                         # "4h", "1h"
-    schema_version: int             # 스키마 버저닝
-    config_hash: str                # UniverseConfig.hash → 재현성 지문
-    data_manifest_hash: str         # 투입 데이터 (symbol, period, sha256) 집합의 해시
-    
-    # 시장 참고
-    basket_ref: tuple[str, ...]     # 베타/마켓 reference 심볼
-    basket_weights: tuple[float, ...] # 가중치
-    
-    # 선택된 자산
-    selected: tuple[SymbolMeta, ...]  # 최종 선택, 메타 포함
-    # SymbolMeta: symbol, role (regular/anchor),
-    #   adv_usdt, execution_cost_bps, funding_carry_8h,  ← 절대 합산 금지
-    #   beta_vs_market, cluster_id, tradeable_rank,
-    #   basis_annualized_mean, basis_vol,
-    #   oi_usdt_median, oi_to_adv, oi_change_30d,
-    #   capacity_clip_usdt_list
-    
-    # 감사 추적
-    rejected: dict[str, FilterReport]  # {symbol: FilterReport}
-    # FilterReport: stage별 통과/탈락 + 메트릭 + RejectCode
-    
-    # 메타
-    generated_at_utc: str           # 생성 시각
-    ledger_confidence: str          # "reconstructed" or "official"
-    n_stage0: int                   # Stage 0 진입 수
-    n_stage1_pass: int              # ... (감시용)
-    # ...
-```
-
-### FilterReport
-
-```python
-@dataclass(frozen=True)
-class FilterReport:
-    symbol: str
-    stage0_pass: bool
-    stage1_reason: RejectCode | None
-    stage1_metrics: dict[str, float]
-    # ... (stage 2~6)
-    
-    final_rank: int | None
-    final_cluster_id: int | None
-    audit_trail: list[str]          # 사람이 읽을 메시지
-```
-
-### 영속화 포맷
-
-```
-results/universe/
-├── snapshot_4h_2026-05-18.parquet
-│   (UniverseSnapshot 직렬화)
-├── snapshot_4h_2026-05-18.json    (가독성)
-├── snapshot_1h_2026-05-18.parquet
-└── ...
-
-data/futures/
-├── universe_ledger.parquet        (LedgerRow 일별 append-only)
-└── data_manifest.parquet          (ManifestRow — sha256·source·is_final 잠금)
-```
-
-백테스트는 과거 `as_of` 스냅샷을 재생, 라이브는 최신 스냅샷 사용.
+### 3.2 SymbolMeta (스냅샷 탑재 개별 자산 정보)
+유니버스 빌드 통과 후 `UniverseSnapshot` 내 `selected` 튜플에 담겨 포트폴리오 최적화(Optimizer) 레이어로 전달되는 피처 데이터셋.
+* `symbol`: 심볼명 (예: `"BTC/USDT"`)
+* `role`: 역할군 (`"anchor"` 또는 `"regular"`)
+* `adv_usdt` / `execution_cost_bps`: 30일 median ADV 및 예상 총 라운드트립 마찰 비용 (※ 절대 상호 합산 금지)
+* `funding_carry_8h`: 최근 8시간 원천 펀딩비 (signed alpha 성분으로 별도 보존)
+* `beta_vs_market`: market basket 대비 historical beta
+* `cluster_id`: 상관성 거리 기준 클러스터링 군집 번호
+* `tradeable_rank`: Stage 6 종합 스코어 랭킹
+* `basis_annualized_mean` / `basis_vol`: Mark-index basis 기초 통계 피처 (예측용 alpha 피처와 구분)
+* `oi_usdt_median` / `oi_to_adv` / `oi_change_30d`: Open Interest 기반 crowding/squeeze 대리 지표
 
 ---
 
-## 요구사항 충족 매핑
+## 4. 7단계 유니버스 필터링 Funnel 상세
 
-| # | 요구사항 | 충족 메커니즘 | 모듈 |
-|---|---|---|---|
-| 1 | **PIT 거래가능성** | 프로세스 A/B 분리 + `knowledge_date` lag | ledger, pipeline |
-| 2 | **생존/상폐편향 제거** | append-only ledger + 상장/상폐일 복원 + 상폐 심볼 히스토리 | ledger, exchange_meta |
-| 3 | **유동성 & 체결성** | ADV 중앙값, Amihud, 호가깊이, 클립체결성 | liquidity |
-| 4 | **거래비용 / 슬리피지 / 영향** | √-impact 모델, round-trip 수수료, 펀딩캐리 | cost_model |
-| 5 | **데이터 품질** | 커버리지 80%, gap/NaN/frozen/타임스탬프 | data_quality |
-| 6 | **자산 구조** | PERP/USDT/상태/레버리지토큰/multiplier | structure |
-| 7 | **리스크·조작·이벤트** | 상장연령, 상폐임박, 펌프, 정지, 펀딩이상 | risk_events |
-| **피드백** | **분산/breadth** | 상관 클러스터링, ENB 극대화 | selection |
-| **피드백** | **펀딩 캐리** | 이상치만 배제, 구조적 고펀딩→피처 | risk_events, selection |
-| **피드백** | **Churn 제어** | 히스테리시스 (entry/exit band) | selection |
-| **검증 확정** | **실측 spread** | Vision bookDepth (2020+), Corwin-Schultz fallback (2019) | cost_model |
-| **검증 확정** | **OI 딥히스토리** | Vision metrics 2020-09-01부터, BinanceVisionDownloader 확장 | data_quality |
-| **검증 확정** | **상폐 심볼 복원** | Vision S3 857개 목록 + 마지막 kline 날짜 = 실제 상폐일 | ledger |
-| **v1.2** | **상장 연령 90d** | Stage 5 ≥90d 게이트 (30d→90d 상향) + Stage 2 최근 60d 연속성 | risk_events, data_quality |
-| **v1.2** | **변동성 밴드** | vol_30d_band 하한/상한 게이트 | risk_events |
-| **v1.2** | **Tick 마찰 비용** | tick_cost_bps = tick_size/price × 0.5 × 1e4 → cost_bps 항목 추가 | cost_model |
-| **v1.2** | **Mark-index basis** | premiumIndexKlines basis z-score 이상치 → Stage 5 추가 | risk_events |
-| **v1.2** | **최근 60d 연속성** | last_60d_coverage ≥ 95% + n_zero_volume_bars_60d ≤ 1 | data_quality |
-| **v1.2** | **Token unlock 인터페이스** | risk_event_override 수동 태깅 (자동화 미포함, Accepted Limitation) | risk_events |
-| **v1.3** | **자본 티어 clip** | seed~xlarge 5단계 외생 고정 + capacity_clip_list + live_clip 분리 | config, liquidity |
-| **v1.3** | **Walk-Forward 평가** | rolling 21/3 ~16 fold, purge=label_horizon, embargo=7d, DSR 적용 가능 | pipeline |
-| **v1.3** | **Funding/cost 분리** | execution_cost_bps(게이트) + funding_carry_8h(피처) 완전 분리 | cost_model |
-| **v1.3** | **Data manifest** | SHA256 lockfile, data_manifest_hash → config_hash와 결합한 완전 재현성 | persistence |
-| **v1.3** | **Manual event PIT** | knowledge_date 필수·fail-closed·카테고리 분리·hindsight delta 보고 | risk_events |
-| **v1.3** | **Basis/OI 피처 분리** | basis_z(게이트) / basis_mean·vol·oi_change(descriptive 피처, 예측 금지) | risk_events |
-| **v1.3** | **Stage 6 관심사 분리** | 멤버십(tradeable_rank·hysteresis·anchor) vs 분산(optimizer). ENB/HRP 이전 | selection |
+`pipeline.py` 오케스트레이터를 통해 실행되며, 각 Stage는 통과 데이터프레임과 감사용 `FilterReport`를 반환한다.
+
+### Stage 0: 적격 모집단 (Eligibility)
+* **목적**: `as_of` 기준 상장 및 거래가 활성화되어 있는 모집단 추출.
+* **로직**: `knowledge_date <= as_of` 이고 `is_listed == True` 및 `is_trading == True`인 전 심볼 쿼리. (미래 상장 예정 자산 자동 제외)
+* **구현 모듈**: `ledger.py` ➡️ `load_ledger_slice()`
 
 ---
 
-## 미확정 사항
-
-검증으로 해소된 항목은 제거, 아직 결정이 필요한 항목만 남김.
-
-### ✅ 해소됨
-
-| 항목 | 결정 내용 |
-|---|---|
-| 호가창 데이터 소스 | Vision `bookDepth` 사용 (0.5 MB/일 실용적). Roll spread 폐기. |
-| 과거 exchangeInfo | 보유 없음 확인. Vision S3 목록 + `onboardDate` + SETTLING 상태로 충분히 대체 가능. |
-| OI/LSR 딥히스토리 | Vision `metrics/` 2020-09-01부터 가용 확인. BinanceVisionDownloader 확장으로 처리. |
-| 펀딩비 Vision 경로 | `daily/` 없음, `monthly/` 확인. FAPI가 완전한 역사 보유로 primary 소스. |
-| **클립 크기 (v1.3)** | 자본 티어 고정값 (seed 1k→small 5k→mid 10k→large 25k→xlarge 50k). 외생 고정 — equity 순환 차단. capacity_clip_list=[50k, 100k]. live_clip은 별도 equity 비례. [→ Stage 3](#stage-3-유동성--체결성-liquiditypy) |
-| **IS 윈도우 (v1.3)** | IS=21개월, OOS=3개월, step=3개월, rolling walk-forward, ~16 fold. Stage 2 기준: 3,067봉(IS 3,834봉×80%). [→ Stage 2](#stage-2-데이터-품질-data_qualitypy) |
-
-### 🚫 수용된 한계 (Accepted Limitations)
-
-설계 결정에 의해 의도적으로 포함하지 않는 항목. "미확정"이 아니라 **명시적 포기**:
-
-| 항목 | 미포함 이유 | 부분 대체 |
-|---|---|---|
-| **거래소간 가격 괴리** | Binance 단일 거래소 설계 원칙. 외부 API 접점 추가 불가. | 내부 funding/basis 이상치로 간접 감지 |
-| **해킹·규제 뉴스** | 비정형 외부 뉴스 데이터. 자동 수집 파이프라인 범위 외. | risk_event_override 수동 태깅으로 대응 |
-| **Token Unlock 자동화** | 베스팅 스케줄 API 외부 소스 의존. v1.1 범위 외. | risk_event_override 수동 태깅으로 대응 |
-| **자유유통/FDV/공급구조** | Binance/Vision 소스에 미포함. CoinGecko 등 외부 의존 없음. | OI/ADV 비율로 간접 감지 |
-| **청산(Liquidation)/ADL/Leverage bracket** | 거래소 내부 기제. 백테스트는 체결 기록만 관측 가능, 청산 이전 상태 불가시. 개별 포지션 크기 알 수 없음. | OI_to_ADV, basis_anomaly로 위험 신호만 감지 |
+### Stage 1: 자산 구조 필터 (Structure)
+* **목적**: 거래 불가 상태, 레버리지 상품 및 규격 외 계약 자산 원천 차단.
+* **구현 모듈**: `structure.py` ➡️ `apply_structure_stage()`
+* **검증 규칙**:
+  1. `contract_type == "PERPETUAL"` (기한부 선물 배제)
+  2. `quote_asset == "USDT"` 또는 `margin_asset == "USDT"` (USDT 마진 계약만 허용)
+  3. `status == "TRADING"` (HALT, SETTLING 등 비정상 거래 상태 즉각 제외)
+     * *주의*: `deliveryDate` 정보로 임의의 상폐 시점 예측 금지. 오직 `status == "SETTLING"` 인가 여부로만 판별.
+  4. 레버리지 토큰 배제: 심볼 문자열 내 `UP`, `DOWN`, `BULL`, `BEAR` 키워드 정규식 패턴 매칭 차단.
+  5. `contract_multiplier` 유효성 검사: 수치가 유한하고 `> 0.0` 인지 확인.
+* **기술 스택**: `pandas` DataFrame 벡터화 마스킹 연산 (`is_perp & is_usdt_quote & is_trading & ...`)
 
 ---
 
-## 구현 로드맵 (추후)
-
-설정된 후 다음 순서로 구현 예정:
-
-1. **Phase 1**: `contracts.py` + `config.py` (데이터 계약 고정)
-2. **Phase 2**: `ledger.py` + `exchange_meta.py` (데이터 기초층)
-3. **Phase 3**: `data_quality.py` + `structure.py` + `liquidity.py` (Stage 1~3)
-4. **Phase 4**: `cost_model.py` + `risk_events.py` (Stage 4~5)
-5. **Phase 5**: `selection.py` (Stage 6, 클러스터링 핵심)
-6. **Phase 6**: `pipeline.py` + `persistence.py` (오케스트레이션 & I/O)
-7. **Phase 7**: `opt_main_futures.py` Step 1 통합 + 테스트
-
-각 phase 후 단위 테스트 + 주요 모듈 정합성 검증.
-
----
-
-## 참고: 기존 코드와의 단절
-
-현재 `src/domain/futures/optimization/screener.py` 는 **완전히 제거**됩니다 (신 universe 모듈로 대체).
-
-**마이그레이션 경로**:
-- `orchestrate_universe_discovery()` → `build_universe(as_of=now)` 호출로 축소
-- 백테스트는 과거 스냅샷 재생(`load_universe_snapshot(as_of)`) → 재현성 보장
-- 라이브는 최신 스냅샷 사용
+### Stage 2: 데이터 품질 필터 (Data Quality)
+* **목적**: 백테스트 및 라이브 시그널 연산 시 결측치/이상값으로 인한 연산 오류 예방.
+* **구현 모듈**: `data_quality.py` ➡️ `apply_data_quality_stage()`
+* **설정 파라미터 (`Stage2Config`)**:
+  * `min_is_coverage = 0.80` (최소 데이터 충족률 80%)
+  * `min_is_bars_4h = 3_067` (21개월 IS 윈도우 기준 4시간 봉 기준값: $3,834 \times 80\%$)
+  * `min_coverage_60d = 0.95` (최근 60일 연속성 점검: 단기 결측 감지)
+  * `max_zero_volume_bars_60d = 1` (체결이 없는 동결 자산 차단)
+  * `max_gap_bars = 200` (최대 허용 단일 데이터 Gap 크기)
+  * `max_frozen_bars_60d = 4` (연속 동일 종가 5회 이상 발생 시 시세 이상 자산으로 간주)
+* **체크리스트**:
+  * NaN / Inf 값 부존재 확인 (`~has_nan & ~has_inf`)
+  * 타임스탬프 단조 증가 및 UTC 정합성 확인
+  * 필수 데이터 컬럼 존재 여부 (`has_kline`, `has_funding`)
+* **Walk-Forward 검증 메타 (rolling)**:
+  * `is_months = 21`, `oos_months = 3`, `step_months = 3`, `purge = label_horizon`, `embargo_days = 7`
+* **기술 스택**: `numpy.where`, `pandas.to_numeric` 벡터화 예외 판별.
 
 ---
 
-**문서 버전**: v1.3 (2026-05-18)  
-**상태**: 아키텍처 확정 — 자본 티어·Walk-Forward·관심사 분리 완전 반영  
-**다음**: Phase 1 (`contracts.py` + `config.py`) 구현 시작
+### Stage 3: 유동성 & 체결성 필터 (Liquidity & Capacity)
+* **목적**: 슬리피지 통제 불가능 및 AUM 수용 한계 자산 배제.
+* **구현 모듈**: `liquidity.py` ➡️ `apply_liquidity_stage()`
+* **설정 파라미터 (`Stage3Config`)**:
+  * `min_adv_usdt_median = 25_000_000.0` (30일 Median ADV 하한선 25M USDT. Spike 왜곡 방지용 Median 필수 사용)
+  * `max_amihud_30d = 5e-6` (일별 $|ret| / (volume \times price)$ 기준 30일 Amihud Illiquidity 상한선)
+  * `max_clip_to_adv = 0.005` (ADV 대비 1회 집행 Clip 비율 상한 0.5%)
+* **자본 티어별 Clip 설계 (외생 고정 적용으로 순환 루프 제거)**:
+  $$\text{screening\_clip\_usdt} = \begin{cases} 
+  1,000 & \text{Tier: seed} \\
+  5,000 & \text{Tier: small} \\
+  10,000 & \text{Tier: mid (Default)} \\
+  25,000 & \text{Tier: large} \\
+  50,000 & \text{Tier: xlarge} 
+  \end{cases}$$
+  * AUM Ceiling 수용력 평가용 고정 Clip 리스트: `[50_000, 100_000]`
+* **기술 스택**: `pandas` 연산 시 분모 0 치환 방지 `replace(0, np.nan)` 처리 및 벡터화 연산.
+
+---
+
+### Stage 4: 거래 비용 모델 필터 (Execution Cost)
+* **목적**: 마찰 비용이 기대 에지(Alpha)를 갉아먹는 자산 사전 제외. (펀딩 캐리는 에지 성분이므로 본 단계 비용에서 완전 격리 보존)
+* **구현 모듈**: `cost_model.py` ➡️ `apply_cost_model_stage()`
+* **비용 함수 및 수식**:
+  $$\text{execution\_cost\_bps} = 2 \cdot \text{taker\_fee\_bps} + 2 \cdot \text{half\_spread\_bps} + \text{impact\_bps} + \text{tick\_cost\_bps}$$
+  * `taker_fee_bps`: Binance 기본 요율 적용.
+  * `half_spread_bps` (실측 기반 분기 처리):
+    * **2020-01-01 이후**: `bookDepth` 데이터 실측 중앙값 사용 (`median(best_ask - mid) over 4h window`).
+    * **2020-01-01 이전 (Fallback)**: `Corwin-Schultz` OHLC 변형 모델 적용 (Roll 스프레드식 사용 금지).
+      $$\text{spread} = \frac{2(e^\alpha - 1)}{1+e^\alpha}, \quad \text{half\_spread\_bps} = \text{spread} \times 5,000$$
+      $$\alpha = \frac{\sqrt{2\beta} - \sqrt{\beta}}{3 - 2\sqrt{2}} - \sqrt{\frac{\gamma}{3 - 2\sqrt{2}}}$$
+      $$\beta = \ln(H_t/L_t)^2, \quad \gamma = \ln\left(\frac{\max(H_t, H_{t-1})}{\min(L_t, L_{t-1})}\right)^2$$
+  * `impact_bps` (Square-root Impact): $k \cdot \sigma \cdot \sqrt{\frac{\text{screening\_clip\_usdt}}{\text{adv\_usdt\_median}}} \cdot 10,000$ (여기서 $k \approx 18.0$, $\sigma$는 30일 변동성)
+  * `tick_cost_bps`: $\frac{\text{tick\_size}}{\text{mark\_price}} \times 0.5 \times 10,000$ (이중 계산을 막기 위한 반올림 마찰 보정)
+* **필터 게이트**: `execution_cost_bps <= max_execution_cost_bps` (기본 임계값: 50.0 bps)
+
+---
+
+### Stage 5: 리스크 & 이상치 필터 (Risk Events)
+* **목적**: 펌프앤덤프, 극단적 유동성 고갈 및 인위적 시세 조작 자산 배제.
+* **구현 모듈**: `risk_events.py` ➡️ `apply_risk_events_stage()`
+* **검증 규칙**:
+  1. **상장 연령 (Listing Age)**: 최소 90일 이상 경과 자산만 허용 (`listing_age_days >= 90`). (상장 빔 및 초기 락업 해제 충격 방지)
+  2. **변동성 밴드 (Vol Band)**: 일별 변동성 기준 `vol_30d`가 `[0.003, 0.25]` 범위 내 존재할 것. (활동성 없는 고사 코인 및 투기적 급등락 코인 동시 배제)
+  3. **펀딩비 이상치**: 8시간 원천 펀딩비의 절대값 z-score 가 2.5를 초과하거나 1일 이내 급격한 부호 반전(`enable_funding_sign_flip`)이 일어나는 조작/스퀴즈성 자산 차단. (※ 단순 고펀딩 일관 유지 자산은 carry harvest 전략 활용을 위해 **정상 통과** 시킴)
+  4. **Basis 이상치**: `premiumIndexKlines` 기준 Mark-Index basis z-score 절대값 2.5 이하 검사 (`basis_z_score <= 2.5`).
+  5. **OI 집중도 (Crowding Proxy)**: `oi_usdt_median / adv_usdt_median <= 12.0` (과도한 레버리지로 인한 연쇄 청산 위험 방지)
+  6. **수동 리스크 오버라이드 (Manual Override)**:
+     * `ManualEventRow` 수동 입력 이벤트 발생 시 배제.
+     * **Fail-Closed 원칙**: `knowledge_date`가 누락된 수동 배제 요청은 PIT 정합성을 해치므로 해당 레코드 자체를 무시(배제하지 않음)하여 휴리스틱 오염 차단.
+* **기술 스택**: `numpy.where` 조건 결합 마스킹.
+
+---
+
+### Stage 6: 멤버십 선택 & 랭킹 (Selection)
+* **목적**: 전략 독립적(Strategy-Agnostic) 관점에서 거래 가치가 가장 높은 최정예 유니버스 멤버 선발. (※ 분산 최적화 - ENB, HRP 등은 본 유니버스 레이어가 아닌 **Optimizer 단에서 처리**하므로 멤버 선별만 수행)
+* **구현 모듈**: `selection.py` ➡️ `apply_selection_stage()`
+* **핵심 알고리즘**:
+  1. **Tradeability Composite Score 산출**:
+     $$\text{tradeable\_score} = 0.40 \cdot \text{liq\_norm} + 0.30 \cdot \text{cost\_inv\_norm} + 0.20 \cdot \text{quality\_norm} + 0.10 \cdot \text{stability\_norm}$$
+     * `liq_norm`: $normalize(adv\_usdt\_median)$
+     * `cost_inv_norm`: $normalize(1 / execution\_cost\_bps)$
+     * `quality_norm`: $normalize(last\_60d\_coverage)$
+     * `stability_norm`: $normalize(listing\_age\_days)$
+     * (여기서 $normalize$는 $[0.0, 1.0]$ 범위 내 선형 Min-Max Scaling)
+  2. **상관성 클러스터링 피처 생성 (WARD Linkage)**:
+     * 피처 운반용 correlation 산출 (250 거래일 윈도우) ➡️ Distance $D = 1 - |corr|$ 변환 ➡️ 계층적 클러스터링 ➡️ 자산 메타정보 `cluster_id` 피처로 snapshot에 운반. (본 단계에서는 제거 없이 메타 전달만 담당)
+  3. **히스테리시스 필터 (Hysteresis Churn Control)**:
+     * 유니버스 잦은 교체로 인한 거래비용 폭증(Churn) 제어.
+     * 신규 진입 장벽: $\text{Rank} \le K_{in}$ (기본값: 20)
+     * 이탈 장벽: $\text{Rank} > K_{out}$ (기본값: 35)
+     * 최소 Dwell 일수: `90일` (Dwell 미달 시 Rank가 이탈 범위 내에 있어도 퇴출 유예)
+     * 단, Stage 1~5에서 결격 사유 발생 시 히스테리시스 및 Dwell 조건을 무시하고 **즉시 퇴출**.
+  4. **앵커 자산 강제 편입**:
+     * `"BTC/USDT"`, `"ETH/USDT"`는 스코어 및 랭킹에 관계없이 강제 유니버스 최상단 고정 편입 (`role = "anchor"`).
+     * 앵커 자산은 포트폴리오 최적화 시 가중치 0% 배분을 허용하여 가상 reference로 기능하게 함.
+
+---
+
+## 5. 데이터 재현성 잠금 및 검증 감사 계약
+
+### 5.1 Data Manifest
+외부 환경 변화에 흔들리지 않는 재현성을 달성하기 위해 입력 파일들의 무결성을 SHA256 체크섬으로 기록하는 `data_manifest.parquet`을 유지한다.
+* `data_manifest_hash`는 파이프라인 시동 시 투입되는 모든 Klines 파일의 SHA256 지문을 정렬한 문자열의 마스터 해시다.
+* `UniverseSnapshot.config_hash` 와 결합하여 오프라인 백테스트 시 동일 입력 데이터를 사용했는지 물리적으로 완벽히 검증한다.
+
+### 5.2 UniverseSnapshot & FilterReport 직렬화 포맷
+매 빌드 시 결과물은 `logs/futures/universe/snapshots/` 디렉토리에 버전 명세 스키마에 따라 Parquet 와 JSON 파일로 동시 저장된다.
+* **Parquet 스냅샷**: 판다스 로딩용 납작한(flat) 테이블 구조.
+* **JSON 스냅샷**: 감사용 중첩 객체. 각 탈락 자산에 대한 `RejectCode` 및 Stage별 상세 메트릭(`stage4_metrics`, `stage5_metrics`)이 누락 없이 기록된다.
