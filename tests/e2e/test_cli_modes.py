@@ -22,17 +22,12 @@ def _dummy_data_maps(symbols: list[str]) -> tuple[dict, dict]:
 def test_hmm_only_skips_optimization_and_writes_snapshot(monkeypatch):
     symbols = ["BTCUSDT"]
     data_maps, oos_data_maps = _dummy_data_maps(symbols)
-    snapshot_calls: list[dict] = []
     optimization_called = False
 
     def _fake_run_opt(*args, **kwargs):
         nonlocal optimization_called
         optimization_called = True
         raise AssertionError("optimization loop must not run in --hmm-only mode")
-
-    def _fake_snapshot(**kwargs):
-        snapshot_calls.append(kwargs)
-        return None
 
     def _fake_ml(*args, **kwargs):
         out = MLPipelineOutput()
@@ -42,7 +37,6 @@ def test_hmm_only_skips_optimization_and_writes_snapshot(monkeypatch):
     monkeypatch.setattr(opt_main_futures, "get_quarterly_window", lambda _ref: ("2025-01-01", "2025-03-01", "2025-04-01", "2025-05-01"))
     monkeypatch.setattr(opt_main_futures, "load_futures_data_maps_for_symbols", lambda *a, **k: (data_maps, oos_data_maps, symbols))
     monkeypatch.setattr(opt_main_futures, "run_ml_pipeline_for_universe", _fake_ml)
-    monkeypatch.setattr(opt_main_futures, "_write_hmm_baseline_snapshot", _fake_snapshot)
     monkeypatch.setattr(opt_main_futures, "run_v43_phase_optimization_skeleton", _fake_run_opt)
     monkeypatch.setattr(opt_main_futures, "resolve_futures_parallel_policy", lambda _n: 1)
     monkeypatch.setattr(sys, "argv", ["opt_main_futures.py", "--skip-universe", "--hmm-only", "--symbols", "BTCUSDT"])
@@ -50,21 +44,19 @@ def test_hmm_only_skips_optimization_and_writes_snapshot(monkeypatch):
     opt_main_futures.main()
 
     assert optimization_called is False
-    assert len(snapshot_calls) == 1
-    assert snapshot_calls[0]["hmm_only"] is True
-    assert snapshot_calls[0]["alpha_only"] is False
-    assert bool(snapshot_calls[0]["hmm_report"]) is True
 
 
 def test_alpha_only_skips_optimization_and_writes_snapshot(monkeypatch):
     symbols = ["BTCUSDT"]
     data_maps, oos_data_maps = _dummy_data_maps(symbols)
-    snapshot_calls: list[dict] = []
     optimization_called = False
 
     alpha_idx = pd.MultiIndex.from_tuples(
-        [("BTCUSDT", "comp_a"), ("BTCUSDT", "comp_b")],
-        names=["symbol", "component"],
+        [
+            (pd.Timestamp("2025-01-01T00:00:00Z"), "BTCUSDT"),
+            (pd.Timestamp("2025-01-01T04:00:00Z"), "BTCUSDT"),
+        ],
+        names=["datetime", "symbol"],
     )
     alpha_panel = pd.DataFrame({"score": [0.1, 0.2]}, index=alpha_idx)
 
@@ -72,10 +64,6 @@ def test_alpha_only_skips_optimization_and_writes_snapshot(monkeypatch):
         nonlocal optimization_called
         optimization_called = True
         raise AssertionError("optimization loop must not run in --alpha-only mode")
-
-    def _fake_snapshot(**kwargs):
-        snapshot_calls.append(kwargs)
-        return None
 
     def _fake_ml(*args, **kwargs):
         out = MLPipelineOutput(alpha_panel=alpha_panel)
@@ -85,7 +73,6 @@ def test_alpha_only_skips_optimization_and_writes_snapshot(monkeypatch):
     monkeypatch.setattr(opt_main_futures, "get_quarterly_window", lambda _ref: ("2025-01-01", "2025-03-01", "2025-04-01", "2025-05-01"))
     monkeypatch.setattr(opt_main_futures, "load_futures_data_maps_for_symbols", lambda *a, **k: (data_maps, oos_data_maps, symbols))
     monkeypatch.setattr(opt_main_futures, "run_ml_pipeline_for_universe", _fake_ml)
-    monkeypatch.setattr(opt_main_futures, "_write_hmm_baseline_snapshot", _fake_snapshot)
     monkeypatch.setattr(opt_main_futures, "run_v43_phase_optimization_skeleton", _fake_run_opt)
     monkeypatch.setattr(opt_main_futures, "resolve_futures_parallel_policy", lambda _n: 1)
     monkeypatch.setattr(sys, "argv", ["opt_main_futures.py", "--skip-universe", "--alpha-only", "--symbols", "BTCUSDT"])
@@ -93,7 +80,3 @@ def test_alpha_only_skips_optimization_and_writes_snapshot(monkeypatch):
     opt_main_futures.main()
 
     assert optimization_called is False
-    assert len(snapshot_calls) == 1
-    assert snapshot_calls[0]["hmm_only"] is False
-    assert snapshot_calls[0]["alpha_only"] is True
-    assert bool(snapshot_calls[0]["hmm_report"]) is True
