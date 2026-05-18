@@ -33,6 +33,7 @@ from .pipeline import (
     load_or_build_universe_snapshot,
     load_universe_snapshot,
 )
+from .sync_utils import run_historical_sync
 
 __all__ = [
     "DEFAULT_LEDGER_PATH",
@@ -61,4 +62,5 @@ __all__ = [
     "snapshot_from_payload",
     "snapshot_to_payload",
     "update_ledger",
+    "run_historical_sync",
 ]
