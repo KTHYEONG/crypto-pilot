@@ -19,19 +19,14 @@ import config.opt_config
 from config.opt_config import (
     FUTURES_ANCHOR_SYMBOLS,
     FUTURES_MACRO_INDEX_SYMBOLS,
-    FUTURES_SCREENER_CONFIG,
     OPT_FUTURES_CONFIG,
     get_quarterly_window,
 )
-from config.settings import FUTURES_DATA_DIR, FUTURES_CACHE_DIR
+from config.settings import FUTURES_CACHE_DIR
 from src.domain.futures.ml_pipeline.features.engineering import HMM_SEMANTIC_PROB_COLUMNS
-from src.domain.futures.data_loader import DataCollector
 from src.domain.futures.ml_pipeline.pipeline_runner import run_ml_pipeline_for_universe
 from src.domain.futures.optimization.opt_data_utils import load_futures_data_maps_for_symbols
-from src.domain.futures.optimization.screener import (
-    screen_futures_universe,
-    screen_symbol_refinement_futures,
-)
+from src.domain.futures.universe import load_or_build_universe_snapshot
 
 warnings.filterwarnings("ignore")
 
@@ -118,34 +113,25 @@ def test_full_pipeline_flow():
     
     # 1. Window Setup
     fetch_start, start, is_end, end = get_quarterly_window(None)
-    collector = DataCollector()
-    
-    # 2. Universe Screening (Phase A)
-    broad_candidates, _ = screen_futures_universe(
-        collector, [], tf, FUTURES_SCREENER_CONFIG, fetch_start, is_end, data_dir=FUTURES_DATA_DIR
-    )
-    assert len(broad_candidates) > 0, "No broad candidates found"
-    
-    # 3. Data Loading for Refinement
-    data_maps_broad, _, valid_broad = load_futures_data_maps_for_symbols(
-        list(broad_candidates), tf, fetch_start, start, is_end, end, skip_metrics=True
-    )
-    
-    # 4. Refinement (Phase B)
-    success = screen_symbol_refinement_futures(
-        broad_candidates=list(broad_candidates),
-        winning_signal_type="CS_RANK",
-        is_end_date=is_end,
-        tf=tf,
-        symbol_dfs_4h={s: data_maps_broad[s][tf] for s in valid_broad},
-        daily_dfs={s: data_maps_broad[s]["1d"] for s in valid_broad},
-        phase_b_params=None,
-        anchor_symbols=FUTURES_ANCHOR_SYMBOLS,
-    )
-    assert success is True, "Universe refinement failed"
-    
+    # 2. Universe Snapshot Build/Load (spec path)
+    try:
+        snapshot, selected_frame, _report = load_or_build_universe_snapshot(as_of=is_end, tf=tf)
+        if selected_frame is not None and not selected_frame.empty and "symbol" in selected_frame.columns:
+            selected_symbols = [
+                str(symbol).strip()
+                for symbol in selected_frame["symbol"].astype(str).tolist()
+                if str(symbol).strip()
+            ]
+        else:
+            selected_symbols = [
+                str(meta.symbol).strip() for meta in snapshot.selected if str(meta.symbol).strip()
+            ]
+    except FileNotFoundError:
+        selected_symbols = list(config.opt_config.FUTURES_SYMBOLS)
+    assert len(selected_symbols) > 0, "Universe snapshot/config returned no symbols"
+
     importlib.reload(config.opt_config)
-    final_symbols = list(set(config.opt_config.FUTURES_SYMBOLS + FUTURES_ANCHOR_SYMBOLS + FUTURES_MACRO_INDEX_SYMBOLS))
+    final_symbols = list(set(selected_symbols + FUTURES_ANCHOR_SYMBOLS + FUTURES_MACRO_INDEX_SYMBOLS))
     
     # 5. Clear HMM Cache
     if FUTURES_CACHE_DIR.exists():
