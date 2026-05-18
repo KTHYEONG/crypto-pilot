@@ -122,10 +122,11 @@ build_universe(as_of: date, tf: str, cfg: UniverseConfig) -> UniverseSnapshot
 * **구현 모듈**: `data_quality.py` ➡️ `apply_data_quality_stage()`
 * **설정 파라미터 (`Stage2Config`)**:
   * `min_is_coverage = 0.80` (최소 데이터 충족률 80%)
-  * `min_is_bars_4h = 3_067` (21개월 IS 윈도우 기준 4시간 봉 기준값: $3,834 \times 80\%$)
+  * `min_is_bars_4h = 1_296` (9개월 기준 4시간 봉 기준값: $9 \times 30 \times 6 \times 80\% = 1{,}296$. Stage 5의 `listing_age_days >= 90`이 단기 상장 종목을 별도로 걸러주므로, Stage 2는 롤링 지표 계산에 충분한 기간만 요구함. 백테스트 IS 윈도우 충분성은 optimizer fold에서 별도 검증.)
   * `min_coverage_60d = 0.95` (최근 60일 연속성 점검: 단기 결측 감지)
   * `max_zero_volume_bars_60d = 1` (체결이 없는 동결 자산 차단)
-  * `max_gap_bars = 200` (최대 허용 단일 데이터 Gap 크기)
+  * `max_gap_bars = 200` (최대 허용 단일 데이터 Gap 크기; `max_gap_bars` 컬럼이 레저에 공급될 때 활성화)
+  * `max_gap_count = 1` (최대 허용 gap 발생 횟수)
   * `max_frozen_bars_60d = 4` (연속 동일 종가 5회 이상 발생 시 시세 이상 자산으로 간주)
 * **체크리스트**:
   * NaN / Inf 값 부존재 확인 (`~has_nan & ~has_inf`)
@@ -230,10 +231,16 @@ build_universe(as_of: date, tf: str, cfg: UniverseConfig) -> UniverseSnapshot
 ### 6.1 비용 및 수용력 지표 (Cost & Capacity)
 전략의 실행력을 결정하는 물리적 한계치를 측정한다.
 
+> **임계값 구분**: Stage 3/4의 per-symbol 게이트(개별 자산 최소 요건)와 Quality Gate의 hard-stop(포트폴리오 레벨 집계 게이트)은 역할이 다르므로 수치가 다를 수 있다.
+> - Stage 3 per-symbol: `adv_usdt_median >= 25M` (개별 종목 최소 유동성)
+> - Stage 4 per-symbol: `execution_cost_bps <= 50 bps` (개별 종목 최대 비용)
+> - Quality Gate: 선발된 유니버스 전체의 중앙값 기준 집계 게이트
+> - **Cost 비고**: `bookDepth` 미적재 시 impact 계산이 ~12 bps 수준으로 고정되어 Stage 4 게이트가 사실상 비활성 상태임. `bookDepth` 공급 이후 Stage 4 재기능 예정.
+
 | 평가지표 | Excellent | Good (Pass) | Fail (Hard-Stop) |
 | :--- | :---: | :---: | :---: |
-| **중앙값 집행 비용 (Median Cost)** | < 18.0 bps | 18.0 ~ 25.0 bps | **> 25.0 bps** |
-| **중앙값 유동성 (Median ADV)** | > 100M USDT | 40M ~ 100M USDT | **< 40M USDT** |
+| **중앙값 집행 비용 (Median Cost)** | < 18.0 bps | 18.0 ~ 50.0 bps | **> 50.0 bps** |
+| **중앙값 유동성 (Median ADV)** | > 100M USDT | 25M ~ 100M USDT | **< 25M USDT** |
 
 *   **Median Cost**: 슬리피지(Impact)와 수수료를 포함한 왕복 마찰 비용의 중앙값.
 *   **Median ADV**: 유니버스 내 자산들의 30일 일평균 거래대금 중앙값.

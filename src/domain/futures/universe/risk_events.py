@@ -33,8 +33,15 @@ def _resolve_funding_sign_flip(
     prev_column = config.funding_prev_rate_column
     if prev_column in frame.columns:
         prev_rate = pd.to_numeric(frame[prev_column], errors="coerce")
-        sign_flip = (funding_rate_8h * prev_rate) < 0.0
-        flip_signal = flip_signal | sign_flip.fillna(False)
+        # 양쪽 모두 |funding| > flip_threshold 인 경우의 부호 반전만 유의미한 이상치로 처리.
+        # +0.001% → -0.001% 수준의 중립 진동(노이즈)을 이상치 제외에서 제거.
+        flip_threshold = float(config.funding_sign_flip_min_abs)
+        significant_flip = (
+            (funding_rate_8h.abs() > flip_threshold)
+            & (prev_rate.abs() > flip_threshold)
+            & ((funding_rate_8h * prev_rate) < 0.0)
+        )
+        flip_signal = flip_signal | significant_flip.fillna(False)
     return flip_signal
 
 
