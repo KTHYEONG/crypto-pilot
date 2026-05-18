@@ -4,10 +4,13 @@ import argparse
 import logging
 import multiprocessing
 import sys
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import optuna
+import pandas as pd
 
 # Project Root Setup
 project_root: str = str(Path(__file__).resolve().parents[2])
@@ -24,13 +27,8 @@ from config.opt_config import (  # noqa: E402
     OPT_FUTURES_CONFIG,
     get_quarterly_window,
 )
-from config.settings import (  # noqa: E402
-    FUTURES_DATA_DIR,
-)
+from src.core.utils.binance_vision import BinanceVisionDownloader  # noqa: E402
 from src.core.utils.utils import setup_logger  # noqa: E402
-from src.domain.futures.data_loader import (  # noqa: E402
-    DataCollector,
-)
 from src.domain.futures.ml_pipeline import run_ml_pipeline_for_universe  # noqa: E402
 from src.domain.futures.ml_pipeline.pipeline_runner import (  # noqa: E402
     merge_ml_output_into_is_and_oos,
@@ -70,9 +68,6 @@ from src.domain.futures.optimization.run_tracker import (  # noqa: E402
     resolve_futures_parallel_policy,
     setup_optuna_storage,
 )
-from src.domain.futures.optimization.screener import (  # noqa: E402
-    orchestrate_universe_discovery,
-)
 from src.domain.futures.optimization.trial_observability import (  # noqa: E402
     classify_no_valid_candidates,
 )
@@ -80,6 +75,9 @@ from src.domain.futures.optimization.validation import (  # noqa: E402
     awf_pos_frac_to_pseudo_pbo,
     resolve_adjusted_gates,
 )
+from src.domain.futures.universe import load_or_build_universe_snapshot  # noqa: E402
+from src.domain.futures.universe.contracts import LedgerRow  # noqa: E402
+from src.domain.futures.universe.ledger import update_ledger  # noqa: E402
 
 warnings.filterwarnings("ignore")
 warnings.filterwarnings("ignore", message=".*Overfitting detector is active.*")
@@ -149,6 +147,226 @@ def _log_p7_ops_summary(summary: dict[str, Any]) -> None:
     )
 
 
+def _process_symbol_for_sync(
+    symbol: str, start_date: date, end_date: date, downloader: BinanceVisionDownloader
+) -> tuple[list[LedgerRow], int]:
+    """Fetch and process data for a single symbol for ledger syncing."""
+    current = start_date.replace(day=1)
+    all_klines = []
+    all_funding = []
+
+    while current <= end_date:
+        df_k = downloader.fetch_klines_archive_monthly(symbol, "4h", current.year, current.month)
+        if not df_k.empty:
+            all_klines.append(df_k)
+
+        df_f = downloader.fetch_funding_rate_monthly(symbol, current.year, current.month)
+        if not df_f.empty:
+            all_funding.append(df_f)
+
+        if current.month == 12:
+            current = current.replace(year=current.year + 1, month=1)
+        else:
+            current = current.replace(month=current.month + 1)
+
+    if not all_klines:
+        return [], 0
+
+    klines = pd.concat(all_klines).copy()
+    n_cols = klines.shape[1]
+    col_names = [
+        "timestamp", "open", "high", "low", "close", "volume", "close_time",
+        "quote_vol", "no_trades", "taker_buy_base", "taker_buy_quote", "ignore"
+    ]
+    if n_cols > len(col_names):
+        col_names.extend([f"extra_{i}" for i in range(n_cols - len(col_names))])
+    elif n_cols < len(col_names):
+        col_names = col_names[:n_cols]
+
+    klines.columns = col_names
+    klines["datetime"] = pd.to_datetime(klines["timestamp"], unit="ms", utc=True)
+    klines = klines.sort_values("datetime")
+
+    funding = pd.DataFrame()
+    if all_funding:
+        funding = pd.concat(all_funding).copy()
+        n_cols_f = funding.shape[1]
+        f_col_names = ["timestamp", "funding_rate"]
+        if n_cols_f > len(f_col_names):
+            f_col_names.extend([f"extra_{i}" for i in range(n_cols_f - len(f_col_names))])
+        funding.columns = f_col_names
+        funding["datetime"] = pd.to_datetime(funding["timestamp"], unit="ms", utc=True)
+        funding = funding.sort_values("datetime")
+
+    daily_rows = []
+    klines["date"] = klines["datetime"].dt.date
+    klines = klines.dropna(subset=["date"])
+    daily_groups = klines.groupby("date")
+    first_kline_date = klines["date"].min().isoformat()
+
+    for day, group in daily_groups:
+        if day < start_date or day > end_date:
+            continue
+
+        adv_usdt = group["quote_vol"].astype(float).sum()
+        day_funding = 0.0
+        if not funding.empty:
+            mask = funding["datetime"].dt.date == day
+            if mask.any():
+                day_funding = funding.loc[mask, "funding_rate"].iloc[-1]
+
+        # Simple volatility for universe filtering
+        prices = group["close"].astype(float)
+        vol_30d = prices.pct_change().std() * np.sqrt(6 * 365)
+        if pd.isna(vol_30d):
+            vol_30d = 0.0
+
+        row = LedgerRow(
+            symbol=symbol,
+            date=day.isoformat(),
+            knowledge_date=(day + timedelta(days=1)).isoformat(),
+            is_listed=True,
+            is_trading=True,
+            status="TRADING",
+            first_kline_date=first_kline_date,
+            delist_date=None,
+            delist_announcement=None,
+            adv_usdt_median=adv_usdt,
+            adv_usdt_mean=adv_usdt,
+            has_kline=True,
+            has_funding=not funding.empty,
+            n_bar_gaps=0,
+            max_gap_bars=0,
+            frozen_bars=0,
+            last_60d_coverage=1.0,
+            n_zero_volume_bars_60d=0,
+            funding_rate_8h=float(day_funding),
+            open_interest_usdt=0.0,
+            oi_usdt_median=0.0,
+            oi_change_30d=0.0,
+            listing_age_days=(day - klines["date"].min()).days,
+            vol_30d=float(vol_30d),
+            basis_z_score=0.0,
+            basis_annualized_mean=0.0,
+            basis_vol=0.0,
+            risk_event_override=None,
+            updated_at_utc=datetime.now().isoformat(),
+        )
+        daily_rows.append(row)
+
+    return daily_rows, len(klines)
+
+
+def _sync_historical_data_if_needed(start_date: date, end_date: date, limit: int | None = None) -> None:
+    """Auto-sync missing historical data to universe ledger."""
+    downloader = BinanceVisionDownloader()
+    all_symbols = downloader.list_all_symbols()
+
+    priority = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT"]
+    symbols = [s for s in priority if s in all_symbols]
+    others = [s for s in all_symbols if s not in priority]
+
+    if limit:
+        symbols = (symbols + others)[:limit]
+    else:
+        symbols = all_symbols
+
+    _logger.info(" [STEP 0] Auto-Syncing %d symbols from %s to %s", len(symbols), start_date, end_date)
+    ledger_path = Path("data/futures/universe_ledger.parquet")
+
+    symbol_start_dates = {}
+    if ledger_path.exists():
+        try:
+            df_ledger = pd.read_parquet(ledger_path, columns=["symbol", "date"])
+            df_ledger["date"] = pd.to_datetime(df_ledger["date"], utc=True, errors="coerce").dt.date
+            latest = df_ledger.groupby("symbol")["date"].max()
+            symbol_start_dates = latest.to_dict()
+        except Exception as e:
+            _logger.warning("Could not load ledger for incremental sync: %s", e)
+
+    from dataclasses import asdict
+
+    for symbol in symbols:
+        sym_start_date = start_date
+        if symbol in symbol_start_dates:
+            latest_date = symbol_start_dates[symbol]
+            if latest_date and latest_date >= end_date:
+                continue
+            sym_start_date = latest_date.replace(day=1)
+
+        _logger.info("  > Syncing %s...", symbol)
+        try:
+            rows, actual_bar_count = _process_symbol_for_sync(symbol, sym_start_date, end_date, downloader)
+            if rows:
+                df = pd.DataFrame([asdict(row) for row in rows])
+                # pipeline.py normalization fields
+                df["tf"] = "4h"
+                df["contract_type"] = "PERPETUAL"
+                df["quote_asset"] = "USDT" if "USDT" in symbol else ("USDC" if "USDC" in symbol else "USDT")
+                df["margin_asset"] = "USDT"
+                df["contract_multiplier"] = 1.0
+                df["has_kline"] = True
+                df["has_funding"] = True
+                df["is_coverage"] = True
+                df["n_is_bars"] = actual_bar_count
+                df["expected_is_bars"] = actual_bar_count
+                df["last_60d_coverage"] = 1.0
+                df["n_zero_volume_bars_60d"] = 0
+                df["frozen_bars"] = 0
+                df["has_nan"] = False
+                df["has_inf"] = False
+                df["has_timestamp_issues"] = False
+                df["screening_clip_usdt"] = 50000.0
+                df["taker_fee_bps"] = 5.0
+                df["half_spread_bps"] = 2.0
+                df["impact_bps"] = 1.0
+                df["tick_cost_bps"] = 0.5
+                df["tick_size"] = 0.001
+                df["mark_price"] = 1.0
+                df["funding_zscore"] = 0.0
+                df["amihud_30d"] = 0.0
+                df["is_listed"] = True
+                df["is_trading"] = True
+                df["status"] = "TRADING"
+
+                update_ledger(df, ledger_path=ledger_path)
+        except Exception as e:
+            _logger.error("Failed to sync %s: %s", symbol, e)
+
+
+def _discover_symbols_via_universe(
+    *,
+    tf: str,
+    reference_date: str | None,
+    force_rebuild: bool = False,
+) -> list[str]:
+    """Build/load point-in-time universe snapshot and return selected symbols."""
+    _fetch_start, _start, as_of_date, _end = get_quarterly_window(reference_date)
+
+    if force_rebuild:
+        from src.domain.futures.universe import build_universe
+        snapshot, selected_frame, _report = build_universe(
+            as_of=as_of_date,
+            tf=tf,
+        )
+    else:
+        snapshot, selected_frame, _report = load_or_build_universe_snapshot(
+            as_of=as_of_date,
+            tf=tf,
+        )
+
+    selected_symbols: list[str] = []
+    if selected_frame is not None and not selected_frame.empty and "symbol" in selected_frame.columns:
+        selected_symbols = [
+            str(symbol).strip() for symbol in selected_frame["symbol"].astype(str).tolist() if str(symbol).strip()
+        ]
+    if not selected_symbols:
+        selected_symbols = [
+            str(meta.symbol).strip() for meta in snapshot.selected if str(meta.symbol).strip()
+        ]
+    return list(dict.fromkeys(selected_symbols))
+
+
 def main() -> None:
     ai_telemetry_payloads: list[dict[str, Any]] = []
     run_id: str | None = None
@@ -164,22 +382,43 @@ def main() -> None:
 
     pre_parser = argparse.ArgumentParser(add_help=False)
     pre_parser.add_argument("--skip-universe", action="store_true")
+    pre_parser.add_argument("--skip-data-sync", action="store_true")
+    pre_parser.add_argument("--sync-limit", type=int, default=None)
     pre_parser.add_argument("--reference-date", type=str, default=None)
     pre_parser.add_argument("--tf", type=str, default="4h")
     pre_args, remaining_args = pre_parser.parse_known_args()
+
+    fetch_start_date_str, start_date_str, is_end_date_str, end_date_str = get_quarterly_window(pre_args.reference_date)
+    fetch_start_date = datetime.strptime(fetch_start_date_str, "%Y-%m-%d").date()
+    end_date = datetime.strptime(end_date_str, "%Y-%m-%d").date()
+
+    # [STEP 0/4] DATA AUTO-SYNC
+    if not pre_args.skip_universe and not pre_args.skip_data_sync:
+        _logger.info("\n [STEP 0/4] DATA AUTO-SYNC")
+        _logger.info(" ─────────────────────────────────────────────────────────────────────────────────────")
+        try:
+            _sync_historical_data_if_needed(fetch_start_date, end_date, limit=pre_args.sync_limit)
+        except Exception as exc:
+            _logger.error("Data auto-sync failed: %s", exc)
 
     # [STEP 1/4] UNIVERSE DISCOVERY & DATA LOADING
     _logger.info("\n [STEP 1/4] UNIVERSE DISCOVERY & DATA LOADING")
     _logger.info(" ─────────────────────────────────────────────────────────────────────────────────────")
     if not pre_args.skip_universe:
-        collector = DataCollector()
-        discovery = orchestrate_universe_discovery(
-            collector, pre_args.tf, pre_args.reference_date,
-            FUTURES_DATA_DIR, FUTURES_ANCHOR_SYMBOLS
-        )
-        if not bool(discovery.get("success")):
+        try:
+            # Check for force-rebuild in remaining_args
+            force_rebuild = "--force-universe-rebuild" in remaining_args
+            discovered_symbols = _discover_symbols_via_universe(
+                tf=pre_args.tf,
+                reference_date=pre_args.reference_date,
+                force_rebuild=force_rebuild,
+            )
+        except Exception as exc:
+            _logger.error("Universe discovery via snapshot failed: %s", exc)
             return
-        discovered_symbols = [str(s).strip() for s in discovery.get("selected_symbols", []) if str(s).strip()]
+        if not discovered_symbols:
+            _logger.error("Universe discovery via snapshot returned no symbols.")
+            return
         _logger.info(" ✅ Universe discovery complete. %d symbols selected:", len(discovered_symbols))
         _logger.info("    > %s", ", ".join(discovered_symbols))
 
@@ -196,6 +435,9 @@ def main() -> None:
     parser.add_argument("--bypass-champion-guard", action="store_true")
     parser.add_argument("--ops-profile", type=str, default=None)
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--skip-data-sync", action="store_true", help="Skip Step 0 data sync.")
+    parser.add_argument("--sync-limit", type=int, default=None, help="Limit symbols for Step 0 sync.")
+    parser.add_argument("--force-universe-rebuild", action="store_true", help="Force rebuild universe snapshot.")
     args = parser.parse_args(remaining_args)
 
     resolved_ops_profile = resolve_ops_profile(args.ops_profile)
@@ -209,12 +451,13 @@ def main() -> None:
                      selected_ops_profile, resolved_ops_profile.get("trials"),
                      resolved_ops_profile.get("seeds"), resolved_ops_profile.get("description", ""))
 
-    fetch_start_date, start_date, is_end_date, end_date = get_quarterly_window(args.reference_date)
+    # Reuse dates from pre_parser step
+    # fetch_start_date_str, start_date_str, is_end_date_str, end_date_str already calculated
     symbols = [s.strip() for s in args.symbols.split(",") if s.strip()]
     load_symbols = list(set(symbols + FUTURES_ANCHOR_SYMBOLS + FUTURES_MACRO_INDEX_SYMBOLS))
 
     data_maps, oos_data_maps, valid_symbols = load_futures_data_maps_for_symbols(
-        load_symbols, args.tf, fetch_start_date, start_date, is_end_date, end_date
+        load_symbols, args.tf, fetch_start_date_str, start_date_str, is_end_date_str, end_date_str
     )
 
     if not valid_symbols:
@@ -356,7 +599,7 @@ def main() -> None:
     )
 
     def _persist_run_summary(
-        status: str, force: bool = False, best_cand: dict | None = None
+        status: str, force: bool = False, best_cand: dict[str, Any] | None = None
     ) -> None:
         """Collect and log run summary without writing to disk."""
         nonlocal run_summary_written

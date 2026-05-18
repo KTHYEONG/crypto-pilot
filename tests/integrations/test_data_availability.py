@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import io
 import json
+import socket
 import sys
 import time
 import urllib.error
@@ -22,6 +23,7 @@ import urllib.request
 import xml.etree.ElementTree as ET
 import zipfile
 from datetime import datetime, timedelta, timezone
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -44,10 +46,15 @@ PROBE_SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]   # 충분한 역사를 가진
 DELISTED_SYMBOLS = ["LUNAUSDT", "DEFIUSDT", "YFIIUSDT"]  # 상폐 확인용
 
 HTTP_TIMEOUT = 15
+REQUEST_THROTTLE_SECONDS = 0.12
 FINDINGS: dict[str, Any] = {}  # 모든 탐색 결과 수집
 
 
 # ── 유틸 ─────────────────────────────────────────────────────────────────────
+def _throttle_requests(multiplier: float = 1.0) -> None:
+    time.sleep(max(0.0, REQUEST_THROTTLE_SECONDS * multiplier))
+
+
 def _get_json(url: str) -> Any:
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
     with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as r:  # noqa: S310
@@ -60,6 +67,7 @@ def _get_text(url: str) -> str:
         return r.read().decode()
 
 
+@lru_cache(maxsize=8192)
 def _head_ok(url: str) -> bool:
     try:
         req = urllib.request.Request(url, method="HEAD", headers={"User-Agent": "Mozilla/5.0"})
@@ -67,6 +75,32 @@ def _head_ok(url: str) -> bool:
             return r.status == 200
     except Exception:
         return False
+
+
+def _ensure_network_available_or_skip() -> None:
+    hosts = ("fapi.binance.com", "data.binance.vision", "archive.org")
+    for host in hosts:
+        try:
+            socket.gethostbyname(host)
+        except socket.gaierror as err:
+            pytest.skip(f"Network unavailable (DNS): {host} -> {err}")
+    probe_req = urllib.request.Request(
+        f"{FAPI_BASE}/fapi/v1/time",
+        headers={"User-Agent": "Mozilla/5.0"},
+    )
+    try:
+        with urllib.request.urlopen(probe_req, timeout=HTTP_TIMEOUT):  # noqa: S310
+            return
+    except urllib.error.HTTPError:
+        # HTTP status 응답이 왔다는 뜻이므로 네트워크 자체는 유효하다.
+        return
+    except (urllib.error.URLError, TimeoutError, OSError) as err:
+        pytest.skip(f"Network unavailable (connectivity): {err}")
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _skip_if_no_network() -> None:
+    _ensure_network_available_or_skip()
 
 
 def _vision_kline_url(symbol: str, tf: str, date: str) -> str:
@@ -220,7 +254,7 @@ def test_a3_ohlcv_depth() -> None:
                 results[sym] = {"earliest_4h": first_dt, "bars_returned": len(ohlcv)}
             else:
                 results[sym] = {"earliest_4h": None, "error": "empty"}
-            time.sleep(0.3)
+            _throttle_requests(2.5)
         except Exception as e:
             results[sym] = {"error": str(e)}
 
@@ -255,7 +289,7 @@ def test_a4_funding_rate_depth() -> None:
                 results[sym] = {"earliest_funding": first_dt, "count": len(data)}
             else:
                 results[sym] = {"earliest_funding": None, "count": 0}
-            time.sleep(0.2)
+            _throttle_requests(1.7)
         except Exception as e:
             results[sym] = {"error": str(e)}
 
@@ -298,7 +332,7 @@ def test_a5_oi_and_lsr_depth() -> None:
                 oi_results[sym_raw] = {"earliest_oi": None}
         except Exception as e:
             oi_results[sym_raw] = {"error": str(e)[:100]}
-        time.sleep(0.3)
+        _throttle_requests(2.5)
 
         # LSR — 동일하게 최대 limit 조회
         try:
@@ -316,7 +350,7 @@ def test_a5_oi_and_lsr_depth() -> None:
                 lsr_results[sym_raw] = {"earliest_lsr": None}
         except Exception as e:
             lsr_results[sym_raw] = {"error": str(e)[:100]}
-        time.sleep(0.3)
+        _throttle_requests(2.5)
 
     FINDINGS["A5_oi_lsr_depth"] = {"oi": oi_results, "lsr": lsr_results}
 
@@ -427,7 +461,7 @@ def test_b2_vision_kline_archive_depth() -> None:
                         ds = month_probe.strftime("%Y-%m-%d")
                 earliest = ds
                 break
-            time.sleep(0.05)
+            _throttle_requests()
 
         results[sym] = earliest
 
@@ -475,7 +509,7 @@ def test_b3_vision_funding_archive() -> None:
             btc_earliest = ds
             break
         probe += timedelta(days=45)
-        time.sleep(0.05)
+        _throttle_requests()
 
     finding = {
         "funding_symbols_count": len(funding_symbols),
@@ -523,7 +557,7 @@ def test_b4_vision_additional_datasets() -> None:
             avail[name] = {"available": count > 0, "symbol_count": count, "sample": sample}
         except Exception as e:
             avail[name] = {"available": False, "error": str(e)[:80]}
-        time.sleep(0.1)
+        _throttle_requests()
 
     FINDINGS["B4_vision_datasets"] = avail
 
@@ -569,7 +603,7 @@ def test_c1_delisted_symbol_vision_probe() -> None:
                     sym_result["earliest_kline"] = ds
                 if sym_result["latest_kline"] is None or ds > sym_result["latest_kline"]:
                     sym_result["latest_kline"] = ds
-            time.sleep(0.05)
+            _throttle_requests()
 
         if sym_result["kline_found"]:
             # funding 확인 (상폐 직전)
@@ -612,7 +646,7 @@ def test_c2_delisted_via_ccxt() -> None:
             results[sym_raw] = {"accessible": len(ohlcv) > 0, "bars": len(ohlcv)}
         except Exception as e:
             results[sym_raw] = {"accessible": False, "error": str(e)[:100]}
-        time.sleep(0.2)
+        _throttle_requests(1.7)
 
     FINDINGS["C2_delisted_ccxt"] = results
 
