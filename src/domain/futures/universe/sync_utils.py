@@ -1,22 +1,22 @@
 import logging
-import pandas as pd
-import numpy as np
+import multiprocessing
+from dataclasses import asdict
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from dataclasses import asdict
-import multiprocessing
 
-from src.core.utils.binance_vision import BinanceVisionDownloader
+import numpy as np
+import pandas as pd
+
+from config.settings import BINANCE_API_KEY, BINANCE_SECRET, FUTURES_DATA_DIR
 from src.core.exchange.binance_client import BinanceClient
-from src.domain.futures.universe.ledger import update_ledger
+from src.core.utils.binance_vision import BinanceVisionDownloader
 from src.domain.futures.universe.contracts import LedgerRow
-from config.settings import FUTURES_DATA_DIR, BINANCE_API_KEY, BINANCE_SECRET
+from src.domain.futures.universe.ledger import update_ledger
 
 logger = logging.getLogger("SyncUtils")
 
 def smart_filter_symbols(limit: int = None) -> list[str]:
-    """
-    거래량 기반 상위 40% 엘리트 심볼 필터링.
+    """거래량 기반 상위 40% 엘리트 심볼 필터링.
     """
     logger.info("Starting Smart Early-Exit Filtering...")
     client = BinanceClient(BINANCE_API_KEY, BINANCE_SECRET)
@@ -41,8 +41,7 @@ def smart_filter_symbols(limit: int = None) -> list[str]:
         return ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT"] # 최소한의 Fallback
 
 def sync_single_symbol_data(symbol: str, start_date: date, end_date: date, downloader: BinanceVisionDownloader):
-    """
-    개별 심볼 동기화: 1h 수집 -> 4h 리샘플링 -> 로컬 저장 -> Ledger 데이터 생성.
+    """개별 심볼 동기화: 1h 수집 -> 4h 리샘플링 -> 로컬 저장 -> Ledger 데이터 생성.
     """
     current = start_date.replace(day=1)
     all_klines_1h = []
@@ -107,39 +106,83 @@ def sync_single_symbol_data(symbol: str, start_date: date, end_date: date, downl
         funding.to_parquet(Path(FUTURES_DATA_DIR) / f"{safe_symbol}_funding.parquet", index=False)
         
     # LedgerRow 생성
-    daily_rows = []
+    # vol_30d: 30일(4h*6*30=180바) 롤링 수익률 표준편차 연율화 (annualized)
+    # funding_zscore: 30일 롤링 평균/std 기반 시계열 z-score
+    bars_per_day = 6        # 4h 바 기준
+    vol_window = 30 * bars_per_day      # 180바 = 30일
+    funding_rolling_window = 30         # 펀딩비 일별 집계 후 30일 롤링
+
     klines_4h['date'] = klines_4h['datetime'].dt.date
-    daily_groups = klines_4h.groupby('date')
+    klines_4h = klines_4h.sort_values('datetime').reset_index(drop=True)
     first_date = klines_4h['date'].min()
-    
+
+    # 전체 시계열로 롤링 vol_30d 미리 계산 (벡터화)
+    close_series = klines_4h['close'].astype(float)
+    ret_series = close_series.pct_change()
+    # min_periods=bars_per_day: 최소 하루치 데이터 있으면 추정값 제공
+    rolling_vol = (
+        ret_series.rolling(window=vol_window, min_periods=bars_per_day)
+        .std()
+        .mul(np.sqrt(bars_per_day * 365))
+    )
+    klines_4h['_vol_30d'] = rolling_vol.values
+
+    # ADV: 일별 quote_vol 합산 (나중에 pandas groupby로 계산)
+    klines_4h['_adv'] = klines_4h['quote_vol'].astype(float)
+    klines_4h['_ret_abs'] = ret_series.abs()
+
+    # 펀딩비 일별 마지막 값 집계 + 30일 롤링 z-score
+    funding_daily: pd.DataFrame = pd.DataFrame()
+    if not funding.empty:
+        funding['_date'] = funding['datetime'].dt.date
+        funding_daily = (
+            funding.groupby('_date')['funding_rate']
+            .last()
+            .reset_index()
+            .rename(columns={'_date': 'date', 'funding_rate': 'fr'})
+            .sort_values('date')
+        )
+        # 30일 롤링 z-score: (fr - rolling_mean) / rolling_std
+        fr_rolling_mean = funding_daily['fr'].rolling(window=funding_rolling_window, min_periods=3).mean()
+        fr_rolling_std = funding_daily['fr'].rolling(window=funding_rolling_window, min_periods=3).std(ddof=0)
+        # std=0 방어: 0인 경우 z-score=0
+        fr_rolling_std = fr_rolling_std.replace(0.0, np.nan)
+        funding_daily['fz'] = ((funding_daily['fr'] - fr_rolling_mean) / fr_rolling_std).fillna(0.0)
+        funding_daily = funding_daily.set_index('date')
+
+    daily_groups = klines_4h.groupby('date')
+    daily_rows = []
+
     for day, group in daily_groups:
         if day < start_date or day > end_date:
             continue
-        adv = group['quote_vol'].sum()
+
+        adv = float(group['_adv'].sum())
+        ret_abs_mean = float(group['_ret_abs'].mean()) if group['_ret_abs'].notna().any() else 0.0
+        amihud = float(ret_abs_mean / adv) if adv > 0 else 0.0
+        last_price = float(group['close'].iloc[-1])
+
+        # vol_30d: 해당 일의 마지막 바 롤링값 사용
+        vol_30d_val = float(group['_vol_30d'].iloc[-1])
+        if not np.isfinite(vol_30d_val):
+            vol_30d_val = 0.0
+
         fr = 0.0
-        if not funding.empty:
-            mask = funding['datetime'].dt.date == day
-            if mask.any():
-                fr = funding.loc[mask, 'funding_rate'].iloc[-1]
-        
-        prices = group['close']
-        vol_30d = prices.pct_change().std() * np.sqrt(6 * 365)
-        last_price = float(prices.iloc[-1])
-        ret_abs = prices.pct_change().abs().mean()
-        amihud = float(ret_abs / adv) if adv > 0 else 0.0
-        
+        fz = 0.0
+        if not funding_daily.empty and day in funding_daily.index:
+            fr = float(funding_daily.loc[day, 'fr'])
+            fz = float(funding_daily.loc[day, 'fz'])
+
         daily_rows.append(LedgerRow(
             symbol=symbol, date=day.isoformat(), knowledge_date=(day + timedelta(days=1)).isoformat(),
             is_listed=True, is_trading=True, status="TRADING",
             first_kline_date=first_date.isoformat(), adv_usdt_median=adv, adv_usdt_mean=adv,
             has_kline=True, has_funding=not funding.empty, n_bar_gaps=0, max_gap_bars=0,
             frozen_bars=0, last_60d_coverage=1.0, n_zero_volume_bars_60d=0,
-            funding_rate_8h=float(fr), open_interest_usdt=0.0, oi_usdt_median=0.0,
-            oi_change_30d=0.0, listing_age_days=(day - first_date).days,
-            vol_30d=float(vol_30d or 0), basis_z_score=0.0, basis_annualized_mean=0.0,
-            basis_vol=0.0, risk_event_override=None, updated_at_utc=datetime.now().isoformat(),
+            funding_rate_8h=float(fr), listing_age_days=(day - first_date).days,
+            vol_30d=vol_30d_val, risk_event_override=None, updated_at_utc=datetime.now().isoformat(),
             is_coverage=True, n_is_bars=len(klines_4h), expected_is_bars=len(klines_4h), tf="4h",
-            amihud_30d=amihud, mark_price=last_price
+            amihud_30d=amihud, mark_price=last_price, funding_zscore=fz,
         ))
     return daily_rows, len(klines_4h)
 
@@ -148,8 +191,7 @@ def _worker(args):
     return sync_single_symbol_data(symbol, start, end, BinanceVisionDownloader())
 
 def run_historical_sync(start_date: date, end_date: date, limit: int = None, force: bool = False):
-    """
-    메인 동기화 오케스트레이터.
+    """메인 동기화 오케스트레이터.
     """
     ledger_path = Path("data/futures/universe_ledger.parquet")
     symbol_start_dates = {}
