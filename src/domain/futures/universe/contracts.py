@@ -57,14 +57,8 @@ class LedgerRow:
     last_60d_coverage: float = 0.0
     n_zero_volume_bars_60d: int = 0
     funding_rate_8h: float = 0.0
-    open_interest_usdt: float = 0.0
-    oi_usdt_median: float = 0.0
-    oi_change_30d: float = 0.0
     listing_age_days: int = 0
     vol_30d: float = 0.0
-    basis_z_score: float | None = None
-    basis_annualized_mean: float | None = None
-    basis_vol: float | None = None
     risk_event_override: str | None = None
     updated_at_utc: str = ""
     # New fields for pipeline compatibility
@@ -134,9 +128,6 @@ class SymbolMeta:
     tradeable_rank: int
     basis_annualized_mean: float | None
     basis_vol: float | None
-    oi_usdt_median: float
-    oi_to_adv: float
-    oi_change_30d: float
     capacity_clip_usdt_list: tuple[float, ...]
 
 

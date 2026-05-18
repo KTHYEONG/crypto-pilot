@@ -7,8 +7,6 @@ import pandas as pd
 
 from .config import Stage5Config
 
-MAX_OI_TO_ADV = 12.0
-
 
 def _resolve_funding_sign_flip(
     frame: pd.DataFrame,
@@ -72,13 +70,7 @@ def apply_risk_events_stage(
     )
     funding_sign_flip = _resolve_funding_sign_flip(frame, config=cfg, funding_rate_8h=funding)
     funding_anomaly = (funding_z > cfg.max_abs_funding_z) | funding_sign_flip
-    basis_z = pd.to_numeric(
-        frame.get("basis_z_score", pd.Series(0.0, index=frame.index)),
-        errors="coerce",
-    ).fillna(0.0).abs()
-    oi = frame.get("oi_usdt_median", pd.Series(0.0, index=frame.index)).fillna(0.0)
     vol_30d = frame.get("vol_30d", pd.Series(0.0, index=frame.index)).fillna(0.0).abs()
-    adv = frame.get("adv_usdt_median", pd.Series(np.nan, index=frame.index)).replace(0, np.nan)
     risk_override = frame.get(
         "risk_event_override", pd.Series("", index=frame.index)
     ).fillna("").astype("string")
@@ -89,13 +81,10 @@ def apply_risk_events_stage(
     override_missing_knowledge = override_active & pd.to_datetime(
         override_knowledge_date, utc=True, errors="coerce"
     ).isna()
-    oi_to_adv = (oi / adv).replace([np.inf, -np.inf], np.nan).fillna(np.inf)
 
     pass_mask = (
         (age >= cfg.min_listing_age_days)
         & (~funding_anomaly)
-        & (basis_z <= cfg.max_abs_basis_z)
-        & (oi_to_adv <= MAX_OI_TO_ADV)
         & (vol_30d >= cfg.min_vol_30d)
         & (vol_30d <= cfg.max_vol_30d)
         & (~override_active)
@@ -108,8 +97,6 @@ def apply_risk_events_stage(
         "funding_anomaly",
         reasons,
     )
-    reasons = np.where((reasons == "") & (basis_z > cfg.max_abs_basis_z), "basis_anomaly", reasons)
-    reasons = np.where((reasons == "") & (oi_to_adv > MAX_OI_TO_ADV), "oi_to_adv_too_high", reasons)
     reasons = np.where((reasons == "") & (vol_30d < cfg.min_vol_30d), "vol_too_low", reasons)
     reasons = np.where((reasons == "") & (vol_30d > cfg.max_vol_30d), "vol_too_high", reasons)
     reasons = np.where(
@@ -121,17 +108,14 @@ def apply_risk_events_stage(
     reasons = pd.Series(np.where(reasons == "", "pass", reasons), index=frame.index, dtype="string")
 
     out = frame.copy()
-    out["oi_to_adv"] = oi_to_adv.astype(float)
     report = pd.DataFrame(
         {
             "symbol": out["symbol"].astype("string"),
             "stage": "stage5_risk_events",
             "passed": pass_mask.astype(bool),
             "reason": reasons,
-            "oi_to_adv": oi_to_adv.astype(float),
             "funding_z_abs": funding_z.astype(float),
             "funding_sign_flip": funding_sign_flip.astype(bool),
-            "basis_z_abs": basis_z.astype(float),
         }
     )
     return out.loc[pass_mask].copy(), report
