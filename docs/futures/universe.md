@@ -20,9 +20,11 @@ build_universe(as_of: date, tf: str, cfg: UniverseConfig) -> UniverseSnapshot
 ```
 ┌─────────────────────────────────────────────────────┐
 │ [프로세스 A: Ledger 적재 및 갱신]                     │
-│ - 온라인 · append-only · 주기적 크론 실행            │
-│ - 데이터 소스: exchangeInfo + klines + funding + OI │
-│ - 데이터 가용 시점 기준 "knowledge_date" 태깅 기록   │
+│ - 온라인 · append-only · Smart Sync 적용            │
+│ - Smart Filter: 거래량 상위 40% 엘리트 심볼 선별      │
+│ - 1h Base Grain: 1h 데이터 수집 후 4h 리샘플링 적재   │
+│ - Parallel Worker: 멀티프로세싱 기반 고속 병렬 수집   │
+│ - 데이터 소스: Binance Vision (Monthly Archive)      │
 └──────────────────┬──────────────────────────────────┘
                    │
                    ▼ [data/futures/universe_ledger.parquet] (상폐 자산 포함 역사 패널)
@@ -58,6 +60,7 @@ build_universe(as_of: date, tf: str, cfg: UniverseConfig) -> UniverseSnapshot
 | `selection.py` | **Stage 6**: 종합 점수화(Rank), 히스테리시스, 상관성 클러스터링 및 앵커 결합 | `pandas`, `numpy` |
 | `pipeline.py` | Stage 0~6 순차 실행, `FilterReport` 생성 및 스냅샷 오케스트레이션 | `pandas`, `datetime` |
 | `persistence.py` | Parquet/JSON 포맷 스냅샷 영속화 및 `data_manifest` 지문 저장 | `pandas`, `pyarrow` |
+| `sync_utils.py` | **Smart Sync**: 1h 데이터 병렬 수집, 상위 40% 필터링 및 Ledger 갱신 오케스트레이션 | `multiprocessing`, `pandas` |
 
 ---
 
@@ -70,6 +73,8 @@ build_universe(as_of: date, tf: str, cfg: UniverseConfig) -> UniverseSnapshot
 * `is_listed` / `is_trading` / `status`: 상장 여부 및 활성 거래 상태 ("TRADING", "SETTLING", "DELISTED" 등)
 * `first_kline_date` / `delist_date`: 복원된 상장일 및 실제 최종 kline 관측일 기준 상폐일
 * `adv_usdt_median`: 30일 거래대금 중앙값
+* `amihud_30d`: 가격 영향 지수 (PIT 준수 리샘플링 기반)
+* `mark_price`: 해당 시점의 기준 가격
 * `last_60d_coverage`: 최근 60일 데이터 존재율 (0.0 ~ 1.0)
 * `n_zero_volume_bars_60d`: 최근 60일 내 거래량 0인 봉 개수
 * `basis_z_score`: Premium Index 기반의 mark-index basis z-score
@@ -220,7 +225,34 @@ build_universe(as_of: date, tf: str, cfg: UniverseConfig) -> UniverseSnapshot
 * `data_manifest_hash`는 파이프라인 시동 시 투입되는 모든 Klines 파일의 SHA256 지문을 정렬한 문자열의 마스터 해시다.
 * `UniverseSnapshot.config_hash` 와 결합하여 오프라인 백테스트 시 동일 입력 데이터를 사용했는지 물리적으로 완벽히 검증한다.
 
-### 5.2 UniverseSnapshot & FilterReport 직렬화 포맷
-매 빌드 시 결과물은 `logs/futures/universe/snapshots/` 디렉토리에 버전 명세 스키마에 따라 Parquet 와 JSON 파일로 동시 저장된다.
-* **Parquet 스냅샷**: 판다스 로딩용 납작한(flat) 테이블 구조.
-* **JSON 스냅샷**: 감사용 중첩 객체. 각 탈락 자산에 대한 `RejectCode` 및 Stage별 상세 메트릭(`stage4_metrics`, `stage5_metrics`)이 누락 없이 기록된다.
+---
+
+## 6. 유니버스 품질 검증 가드레일 (Quality Gates)
+
+`opt_main_futures.py` 실행 시, 유니버스 빌드 직후 다음의 객관적 지표를 검증하여 통과하지 못할 경우 최적화 단계를 즉시 중단(Hard-Stop)한다. 이는 전략(Alpha)과 무관하게 유니버스 자체가 복리 자산 극대화에 적합한 '건전한 토대'를 제공하는지 측정하기 위함이다.
+
+### 6.1 비용 및 수용력 지표 (Cost & Capacity)
+전략의 실행력을 결정하는 물리적 한계치를 측정한다.
+
+| 평가지표 | Excellent | Good (Pass) | Fail (Hard-Stop) |
+| :--- | :---: | :---: | :---: |
+| **중앙값 집행 비용 (Median Cost)** | < 18.0 bps | 18.0 ~ 25.0 bps | **> 25.0 bps** |
+| **중앙값 유동성 (Median ADV)** | > 100M USDT | 40M ~ 100M USDT | **< 40M USDT** |
+
+*   **Median Cost**: 슬리피지(Impact)와 수수료를 포함한 왕복 마찰 비용의 중앙값.
+*   **Median ADV**: 유니버스 내 자산들의 30일 일평균 거래대금 중앙값.
+
+### 6.2 예기치 않은 강제 퇴출률 (Forced Dropout Rate)
+유니버스 로직이 리스크 자산을 사전에 얼마나 잘 식별하는지 측정한다.
+
+*   **정의**: 90일 최소 유지 기간(Dwell Time)을 채우기 전, 비정상적 사유(상폐, 펀딩비 조작, 유동성 고갈 등 Stage 1~5 결격)로 긴급 퇴출된 자산의 비율.
+*   **공식**: $\frac{\text{Count of dropouts where RejectCode} \neq \text{RANKED\_OUT}}{\text{Total Previous Universe Size}}$
+*   **평가 구간**:
+    *   **Excellent (0% ~ 3%)**: 리스크 사전 차단 완벽.
+    *   **Good (3% ~ 10%)**: 일반적인 시장 변동성 내 수용 가능.
+    *   **Fail (> 10%)**: 유니버스 필터링 엔진 결함으로 간주. (강제 청산 슬리피지 위험 과다)
+
+### 6.3 종합 품질 스코어 (Snapshot Score)
+파이프라인 모니터링을 위한 전략 독립적 지표.
+$$Score_{universe} = \frac{Capacity \times Stability}{mAEC}$$
+이 지표는 백테스팅 진입 전 유니버스 빌드 결과의 '순수 품질'을 역사적으로 비교 및 로깅하는 용도로 활용된다.
