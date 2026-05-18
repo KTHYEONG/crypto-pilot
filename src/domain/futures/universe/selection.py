@@ -133,7 +133,11 @@ def _compute_beta_vs_market(
     return beta_series
 
 
-def _compute_cluster_ids(out: pd.DataFrame) -> pd.Series:
+def _compute_cluster_ids(
+    out: pd.DataFrame,
+    *,
+    corr_threshold: float = CORR_CLUSTER_THRESHOLD,
+) -> pd.Series:
     fallback = pd.Series(-1, index=out.index, dtype=int)
     source_col = _first_available_column(out, CLUSTER_ID_SOURCE_COLUMNS)
     if source_col is not None:
@@ -152,7 +156,7 @@ def _compute_cluster_ids(out: pd.DataFrame) -> pd.Series:
     corr = np.corrcoef(matrix)
     if corr.ndim != 2:
         return fallback
-    adjacency = np.isfinite(corr) & (corr >= CORR_CLUSTER_THRESHOLD)
+    adjacency = np.isfinite(corr) & (corr >= corr_threshold)
     np.fill_diagonal(adjacency, True)
     assigned = np.full(len(valid_idx), -1, dtype=int)
     cluster_id = 0
@@ -199,7 +203,7 @@ def apply_selection_stage(
     out = frame.copy()
     out["symbol"] = out.get("symbol", pd.Series("", index=out.index)).astype("string")
     out["_symbol_key"] = out["symbol"].astype(str).map(_symbol_key)
-    out["cluster_id"] = _compute_cluster_ids(out)
+    out["cluster_id"] = _compute_cluster_ids(out, corr_threshold=float(cfg.corr_cluster_threshold))
     out["beta_vs_market"] = _compute_beta_vs_market(
         out,
         basket_ref=tuple(cfg.basket_ref),
