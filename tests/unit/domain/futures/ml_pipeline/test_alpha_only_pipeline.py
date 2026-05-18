@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+
 import pandas as pd
 
 project_root = str(Path(__file__).resolve().parents[5])
@@ -55,6 +56,21 @@ class _FakeMiner:
         out["alpha_short_00"] = 0.5
         out["alpha_long"] = 0.5
         out["alpha_short"] = 0.5
+        out["alpha_net"] = 0.0
+        out["alpha_confidence"] = 0.75
+        out.attrs["alpha_component_filter"] = {
+            "n_components": 1.0,
+            "n_surviving": 1.0,
+            "n_surviving_long": 1.0,
+            "n_surviving_short": 1.0,
+            "post_agg_selected_long_count": 1.0,
+            "post_agg_selected_short_count": 1.0,
+            "survived_long_cols": ["alpha_long_00"],
+            "survived_short_cols": ["alpha_short_00"],
+            "post_agg_selected_long_cols": ["alpha_long_00"],
+            "post_agg_selected_short_cols": ["alpha_short_00"],
+            "elite_zero_after_survival": 0.0,
+        }
         return out
 
 
@@ -133,13 +149,18 @@ def test_alpha_only_skips_fusion_and_injects_hmm_columns(monkeypatch):
     # local import inside function must resolve to patched callable
     import src.domain.futures.ml_pipeline.features.engineering as engineering
 
-    monkeypatch.setattr(engineering, "build_systemic_hmm_features", lambda *args, **kwargs: market_hmm_feats)
+    monkeypatch.setattr(
+        engineering,
+        "build_systemic_hmm_features",
+        lambda *args, **kwargs: market_hmm_feats,
+    )
 
     cfg = {
         "FUTURES_HMM_K_STATES": 5,
         "FUTURES_HMM_N_ITER": 1,
         "FUTURES_ML_ALPHA_HORIZONS": (3, 6),
         "FUTURES_ML_ALPHA_SLOTS_PER_THEME": 5,
+        "FUTURES_ML_ALPHA_BACKEND": "factory_v1",
     }
 
     out = pipeline_runner._run_ml_pipeline_implementation(
@@ -154,10 +175,29 @@ def test_alpha_only_skips_fusion_and_injects_hmm_columns(monkeypatch):
         preloaded_1h_maps={sym: df_1h.copy()},
     )
 
-    injected = _FakeMiner.captured_panel_df
-    assert injected is not None
-    hmm_cols = [c for c in injected.columns if str(c).startswith("hmm_")]
-    assert "hmm_prob_crisis" in hmm_cols
-    assert "hmm_tail_risk_8bar" in hmm_cols
-
     assert isinstance(out.hmm_report, dict)
+    assert "target" in out.alpha_panel.columns
+    assert out.alpha_panel.attrs.get("alpha_backend") == "factory_v1"
+    assert "alpha_long" in out.alpha_panel.columns
+    assert "alpha_short" in out.alpha_panel.columns
+    assert "alpha_confidence" in out.alpha_panel.columns
+    assert "alpha_net" in out.alpha_panel.columns
+    assert out.alpha_panel["alpha_long"].between(0.0, 1.0).all()
+    assert out.alpha_panel["alpha_short"].between(0.0, 1.0).all()
+    assert out.alpha_panel["alpha_confidence"].between(0.0, 1.0).all()
+    assert out.alpha_panel["alpha_net"].between(-1.0, 1.0).all()
+    alpha_filter = out.alpha_panel.attrs.get("alpha_component_filter", {})
+    assert "n_surviving" in alpha_filter
+    assert "n_components" in alpha_filter
+    assert "n_surviving_long" in alpha_filter
+    assert "n_surviving_short" in alpha_filter
+    assert "post_agg_selected_long_count" in alpha_filter
+    assert "post_agg_selected_short_count" in alpha_filter
+    assert "survived_long_cols" in alpha_filter
+    assert "survived_short_cols" in alpha_filter
+    assert "post_agg_selected_long_cols" in alpha_filter
+    assert "post_agg_selected_short_cols" in alpha_filter
+    assert "elite_zero_after_survival" in alpha_filter
+    assert 0.0 <= float(alpha_filter["n_surviving"]) <= float(alpha_filter["n_components"])
+    assert 0.0 <= float(alpha_filter["n_surviving_long"]) <= float(alpha_filter["n_components"])
+    assert 0.0 <= float(alpha_filter["n_surviving_short"]) <= float(alpha_filter["n_components"])
