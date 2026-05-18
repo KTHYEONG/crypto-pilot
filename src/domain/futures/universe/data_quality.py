@@ -33,10 +33,15 @@ def apply_data_quality_stage(
         frame.get("n_bar_gaps", pd.Series(0, index=frame.index)),
         errors="coerce",
     ).fillna(0)
-    gap_size = pd.to_numeric(
-        frame.get("max_gap_bars", pd.Series(0, index=frame.index)),
-        errors="coerce",
-    ).fillna(0)
+    # NOTE: max_gap_bars 컬럼은 레저에 미적재 → 항상 0 fallback → dead condition.
+    # gap 크기 제한은 max_gap_bars config에 유지하되, 컬럼이 실제 공급될 때만 적용.
+    gap_size_raw = frame.get("max_gap_bars", None)
+    if gap_size_raw is not None:
+        gap_size = pd.to_numeric(gap_size_raw, errors="coerce").fillna(0)
+        gap_size_available = True
+    else:
+        gap_size = pd.Series(0, index=frame.index)
+        gap_size_available = False
     has_nan = frame.get("has_nan", pd.Series(False, index=frame.index)).fillna(False).astype(bool)
     has_inf = frame.get("has_inf", pd.Series(False, index=frame.index)).fillna(False).astype(bool)
     has_timestamp_issues = frame.get(
@@ -50,6 +55,11 @@ def apply_data_quality_stage(
     ).fillna(0.0)
     min_is_bars_mask = n_is_bars.fillna(0.0) >= float(cfg.min_is_bars_4h)
 
+    gap_size_mask = (
+        (gap_size <= cfg.max_gap_bars)
+        if gap_size_available
+        else pd.Series(True, index=frame.index)
+    )
     pass_mask = (
         has_kline.astype(bool)
         & has_funding.astype(bool)
@@ -58,8 +68,8 @@ def apply_data_quality_stage(
         & (coverage >= cfg.min_coverage_60d)
         & (zero_bars <= cfg.max_zero_volume_bars_60d)
         & (frozen <= cfg.max_frozen_bars_60d)
-        & (gap_count <= 1)
-        & (gap_size <= cfg.max_gap_bars)
+        & (gap_count <= cfg.max_gap_count)
+        & gap_size_mask
         & (~has_nan)
         & (~has_inf)
         & (~has_timestamp_issues)
@@ -91,8 +101,9 @@ def apply_data_quality_stage(
         "too_many_frozen_bars",
         reasons,
     )
-    reasons = np.where((reasons == "") & (gap_count > 1), "too_many_gaps", reasons)
-    reasons = np.where((reasons == "") & (gap_size > cfg.max_gap_bars), "gap_too_wide", reasons)
+    reasons = np.where((reasons == "") & (gap_count > cfg.max_gap_count), "too_many_gaps", reasons)
+    if gap_size_available:
+        reasons = np.where((reasons == "") & (gap_size > cfg.max_gap_bars), "gap_too_wide", reasons)
     reasons = np.where((reasons == "") & has_nan, "nan_detected", reasons)
     reasons = np.where((reasons == "") & has_inf, "inf_detected", reasons)
     reasons = np.where(

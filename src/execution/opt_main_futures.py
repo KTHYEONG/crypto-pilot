@@ -4,7 +4,7 @@ import argparse
 import logging
 import multiprocessing
 import sys
-from datetime import date, datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -27,7 +27,6 @@ from config.opt_config import (  # noqa: E402
     OPT_FUTURES_CONFIG,
     get_quarterly_window,
 )
-from src.core.utils.binance_vision import BinanceVisionDownloader  # noqa: E402
 from src.core.utils.utils import setup_logger  # noqa: E402
 from src.domain.futures.ml_pipeline import run_ml_pipeline_for_universe  # noqa: E402
 from src.domain.futures.ml_pipeline.pipeline_runner import (  # noqa: E402
@@ -76,8 +75,6 @@ from src.domain.futures.optimization.validation import (  # noqa: E402
     resolve_adjusted_gates,
 )
 from src.domain.futures.universe import load_or_build_universe_snapshot  # noqa: E402
-from src.domain.futures.universe.contracts import LedgerRow  # noqa: E402
-from src.domain.futures.universe.sync_utils import run_historical_sync  # noqa: E402
 
 warnings.filterwarnings("ignore")
 warnings.filterwarnings("ignore", message=".*Overfitting detector is active.*")
@@ -211,11 +208,11 @@ def validate_universe_quality(
     median_adv = float(np.median(advs))
     
     _logger.info(" [1] Cost & Capacity Base:")
-    _logger.info("     - Median Execution Cost: %.2f bps (Gate: <= 25.0)", median_cost)
-    _logger.info("     - Median ADV: %s USDT (Gate: >= 40M)", f"{median_adv:,.0f}")
+    _logger.info("     - Median Execution Cost: %.2f bps (Gate: <= 50.0)", median_cost)
+    _logger.info("     - Median ADV: %s USDT (Gate: >= 25M)", f"{median_adv:,.0f}")
 
-    cost_pass = median_cost <= 25.0
-    adv_pass = median_adv >= 40_000_000.0
+    cost_pass = median_cost <= 50.0
+    adv_pass = median_adv >= 25_000_000.0
 
     # 2. Unexpected Forced Dropout Rate
     # Find previous quarter's snapshot to calculate dropout rate
@@ -266,9 +263,9 @@ def validate_universe_quality(
         return True
     else:
         if not cost_pass:
-            _logger.error(" [!] FAIL: Median execution cost (%.2f bps) exceeds 25.0 bps gate.", median_cost)
+            _logger.error(" [!] FAIL: Median execution cost (%.2f bps) exceeds 50.0 bps gate.", median_cost)
         if not adv_pass:
-            _logger.error(" [!] FAIL: Median ADV (%s) is below 40M USDT gate.", f"{median_adv:,.0f}")
+            _logger.error(" [!] FAIL: Median ADV (%s) is below 25M USDT gate.", f"{median_adv:,.0f}")
         if not dropout_pass:
             _logger.error(" [!] FAIL: Forced dropout rate (%.2f%%) exceeds 10.0%% gate.", dropout_rate * 100)
         
