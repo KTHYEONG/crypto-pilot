@@ -77,7 +77,7 @@ from src.domain.futures.optimization.validation import (  # noqa: E402
 )
 from src.domain.futures.universe import load_or_build_universe_snapshot  # noqa: E402
 from src.domain.futures.universe.contracts import LedgerRow  # noqa: E402
-from src.domain.futures.universe.ledger import update_ledger  # noqa: E402
+from src.domain.futures.universe.sync_utils import run_historical_sync  # noqa: E402
 
 warnings.filterwarnings("ignore")
 warnings.filterwarnings("ignore", message=".*Overfitting detector is active.*")
@@ -147,191 +147,10 @@ def _log_p7_ops_summary(summary: dict[str, Any]) -> None:
     )
 
 
-def _process_symbol_for_sync(
-    symbol: str, start_date: date, end_date: date, downloader: BinanceVisionDownloader
-) -> tuple[list[LedgerRow], int]:
-    """Fetch and process data for a single symbol for ledger syncing."""
-    current = start_date.replace(day=1)
-    all_klines = []
-    all_funding = []
-
-    while current <= end_date:
-        df_k = downloader.fetch_klines_archive_monthly(symbol, "4h", current.year, current.month)
-        if not df_k.empty:
-            all_klines.append(df_k)
-
-        df_f = downloader.fetch_funding_rate_monthly(symbol, current.year, current.month)
-        if not df_f.empty:
-            all_funding.append(df_f)
-
-        if current.month == 12:
-            current = current.replace(year=current.year + 1, month=1)
-        else:
-            current = current.replace(month=current.month + 1)
-
-    if not all_klines:
-        return [], 0
-
-    klines = pd.concat(all_klines).copy()
-    n_cols = klines.shape[1]
-    col_names = [
-        "timestamp", "open", "high", "low", "close", "volume", "close_time",
-        "quote_vol", "no_trades", "taker_buy_base", "taker_buy_quote", "ignore"
-    ]
-    if n_cols > len(col_names):
-        col_names.extend([f"extra_{i}" for i in range(n_cols - len(col_names))])
-    elif n_cols < len(col_names):
-        col_names = col_names[:n_cols]
-
-    klines.columns = col_names
-    klines["datetime"] = pd.to_datetime(klines["timestamp"], unit="ms", utc=True)
-    klines = klines.sort_values("datetime")
-
-    funding = pd.DataFrame()
-    if all_funding:
-        funding = pd.concat(all_funding).copy()
-        n_cols_f = funding.shape[1]
-        f_col_names = ["timestamp", "funding_rate"]
-        if n_cols_f > len(f_col_names):
-            f_col_names.extend([f"extra_{i}" for i in range(n_cols_f - len(f_col_names))])
-        funding.columns = f_col_names
-        funding["datetime"] = pd.to_datetime(funding["timestamp"], unit="ms", utc=True)
-        funding = funding.sort_values("datetime")
-
-    daily_rows = []
-    klines["date"] = klines["datetime"].dt.date
-    klines = klines.dropna(subset=["date"])
-    daily_groups = klines.groupby("date")
-    first_kline_date = klines["date"].min().isoformat()
-
-    for day, group in daily_groups:
-        if day < start_date or day > end_date:
-            continue
-
-        adv_usdt = group["quote_vol"].astype(float).sum()
-        day_funding = 0.0
-        if not funding.empty:
-            mask = funding["datetime"].dt.date == day
-            if mask.any():
-                day_funding = funding.loc[mask, "funding_rate"].iloc[-1]
-
-        # Simple volatility for universe filtering
-        prices = group["close"].astype(float)
-        vol_30d = prices.pct_change().std() * np.sqrt(6 * 365)
-        if pd.isna(vol_30d):
-            vol_30d = 0.0
-
-        row = LedgerRow(
-            symbol=symbol,
-            date=day.isoformat(),
-            knowledge_date=(day + timedelta(days=1)).isoformat(),
-            is_listed=True,
-            is_trading=True,
-            status="TRADING",
-            first_kline_date=first_kline_date,
-            delist_date=None,
-            delist_announcement=None,
-            adv_usdt_median=adv_usdt,
-            adv_usdt_mean=adv_usdt,
-            has_kline=True,
-            has_funding=not funding.empty,
-            n_bar_gaps=0,
-            max_gap_bars=0,
-            frozen_bars=0,
-            last_60d_coverage=1.0,
-            n_zero_volume_bars_60d=0,
-            funding_rate_8h=float(day_funding),
-            open_interest_usdt=0.0,
-            oi_usdt_median=0.0,
-            oi_change_30d=0.0,
-            listing_age_days=(day - klines["date"].min()).days,
-            vol_30d=float(vol_30d),
-            basis_z_score=0.0,
-            basis_annualized_mean=0.0,
-            basis_vol=0.0,
-            risk_event_override=None,
-            updated_at_utc=datetime.now().isoformat(),
-        )
-        daily_rows.append(row)
-
-    return daily_rows, len(klines)
 
 
-def _sync_historical_data_if_needed(start_date: date, end_date: date, limit: int | None = None) -> None:
-    """Auto-sync missing historical data to universe ledger."""
-    downloader = BinanceVisionDownloader()
-    all_symbols = downloader.list_all_symbols()
 
-    priority = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT"]
-    symbols = [s for s in priority if s in all_symbols]
-    others = [s for s in all_symbols if s not in priority]
 
-    if limit:
-        symbols = (symbols + others)[:limit]
-    else:
-        symbols = all_symbols
-
-    _logger.info(" [STEP 0] Auto-Syncing %d symbols from %s to %s", len(symbols), start_date, end_date)
-    ledger_path = Path("data/futures/universe_ledger.parquet")
-
-    symbol_start_dates = {}
-    if ledger_path.exists():
-        try:
-            df_ledger = pd.read_parquet(ledger_path, columns=["symbol", "date"])
-            df_ledger["date"] = pd.to_datetime(df_ledger["date"], utc=True, errors="coerce").dt.date
-            latest = df_ledger.groupby("symbol")["date"].max()
-            symbol_start_dates = latest.to_dict()
-        except Exception as e:
-            _logger.warning("Could not load ledger for incremental sync: %s", e)
-
-    from dataclasses import asdict
-
-    for symbol in symbols:
-        sym_start_date = start_date
-        if symbol in symbol_start_dates:
-            latest_date = symbol_start_dates[symbol]
-            if latest_date and latest_date >= end_date:
-                continue
-            sym_start_date = latest_date.replace(day=1)
-
-        _logger.info("  > Syncing %s...", symbol)
-        try:
-            rows, actual_bar_count = _process_symbol_for_sync(symbol, sym_start_date, end_date, downloader)
-            if rows:
-                df = pd.DataFrame([asdict(row) for row in rows])
-                # pipeline.py normalization fields
-                df["tf"] = "4h"
-                df["contract_type"] = "PERPETUAL"
-                df["quote_asset"] = "USDT" if "USDT" in symbol else ("USDC" if "USDC" in symbol else "USDT")
-                df["margin_asset"] = "USDT"
-                df["contract_multiplier"] = 1.0
-                df["has_kline"] = True
-                df["has_funding"] = True
-                df["is_coverage"] = True
-                df["n_is_bars"] = actual_bar_count
-                df["expected_is_bars"] = actual_bar_count
-                df["last_60d_coverage"] = 1.0
-                df["n_zero_volume_bars_60d"] = 0
-                df["frozen_bars"] = 0
-                df["has_nan"] = False
-                df["has_inf"] = False
-                df["has_timestamp_issues"] = False
-                df["screening_clip_usdt"] = 50000.0
-                df["taker_fee_bps"] = 5.0
-                df["half_spread_bps"] = 2.0
-                df["impact_bps"] = 1.0
-                df["tick_cost_bps"] = 0.5
-                df["tick_size"] = 0.001
-                df["mark_price"] = 1.0
-                df["funding_zscore"] = 0.0
-                df["amihud_30d"] = 0.0
-                df["is_listed"] = True
-                df["is_trading"] = True
-                df["status"] = "TRADING"
-
-                update_ledger(df, ledger_path=ledger_path)
-        except Exception as e:
-            _logger.error("Failed to sync %s: %s", symbol, e)
 
 
 def _discover_symbols_via_universe(
@@ -339,18 +158,18 @@ def _discover_symbols_via_universe(
     tf: str,
     reference_date: str | None,
     force_rebuild: bool = False,
-) -> list[str]:
+) -> tuple[list[str], Any, pd.DataFrame]:
     """Build/load point-in-time universe snapshot and return selected symbols."""
     _fetch_start, _start, as_of_date, _end = get_quarterly_window(reference_date)
 
     if force_rebuild:
         from src.domain.futures.universe import build_universe
-        snapshot, selected_frame, _report = build_universe(
+        snapshot, selected_frame, report = build_universe(
             as_of=as_of_date,
             tf=tf,
         )
     else:
-        snapshot, selected_frame, _report = load_or_build_universe_snapshot(
+        snapshot, selected_frame, report = load_or_build_universe_snapshot(
             as_of=as_of_date,
             tf=tf,
         )
@@ -364,7 +183,97 @@ def _discover_symbols_via_universe(
         selected_symbols = [
             str(meta.symbol).strip() for meta in snapshot.selected if str(meta.symbol).strip()
         ]
-    return list(dict.fromkeys(selected_symbols))
+    return list(dict.fromkeys(selected_symbols)), snapshot, report
+
+
+def validate_universe_quality(
+    snapshot: Any,
+    report: pd.DataFrame,
+    reference_date: str | None,
+    tf: str,
+) -> bool:
+    """Evaluate universe quality against objective metrics and enforce hard-stop."""
+    from src.domain.futures.universe import load_universe_snapshot
+    from src.domain.futures.universe.contracts import RejectCode
+
+    _logger.info("\n [QUALITY] UNIVERSE QUALITY GATE CHECK")
+    _logger.info(" ─────────────────────────────────────────────────────────────────────────────────────")
+
+    if not snapshot.selected:
+        _logger.error(" [!] FAIL: No symbols selected in universe snapshot.")
+        return False
+
+    # 1. Cost & Capacity Base
+    costs = [m.execution_cost_bps for m in snapshot.selected]
+    advs = [m.adv_usdt for m in snapshot.selected]
+    
+    median_cost = float(np.median(costs))
+    median_adv = float(np.median(advs))
+    
+    _logger.info(" [1] Cost & Capacity Base:")
+    _logger.info("     - Median Execution Cost: %.2f bps (Gate: <= 25.0)", median_cost)
+    _logger.info("     - Median ADV: %s USDT (Gate: >= 40M)", f"{median_adv:,.0f}")
+
+    cost_pass = median_cost <= 25.0
+    adv_pass = median_adv >= 40_000_000.0
+
+    # 2. Unexpected Forced Dropout Rate
+    # Find previous quarter's snapshot to calculate dropout rate
+    ref_dt = datetime.now().date()
+    if reference_date:
+        ref_dt = datetime.strptime(reference_date, "%Y-%m-%d").date()
+    
+    from dateutil.relativedelta import relativedelta
+    prev_quarter_dt = ref_dt - relativedelta(months=3)
+    _, _, prev_as_of, _ = get_quarterly_window(prev_quarter_dt.isoformat())
+    
+    previous_snapshot_frame = load_universe_snapshot(as_of=prev_as_of, tf=tf)
+    dropout_pass = True
+    dropout_rate = 0.0
+
+    if previous_snapshot_frame is not None and not previous_snapshot_frame.empty:
+        prev_symbols = set(previous_snapshot_frame["symbol"].tolist())
+        curr_symbols = set(m.symbol for m in snapshot.selected)
+        
+        dropped_symbols = prev_symbols - curr_symbols
+        forced_dropouts = 0
+        
+        for sym in dropped_symbols:
+            filt_report = snapshot.rejected.get(sym)
+            if filt_report:
+                # Forced if rejected in Stage 1-5, or Stage 6 reason is not RANKED_OUT
+                is_forced = any([
+                    filt_report.stage1_reason, filt_report.stage2_reason,
+                    filt_report.stage3_reason, filt_report.stage4_reason,
+                    filt_report.stage5_reason
+                ])
+                if not is_forced and filt_report.stage6_reason and filt_report.stage6_reason != RejectCode.RANKED_OUT:
+                    is_forced = True
+                
+                if is_forced:
+                    forced_dropouts += 1
+        
+        dropout_rate = (forced_dropouts / len(prev_symbols)) if prev_symbols else 0.0
+        _logger.info(" [2] Unexpected Forced Dropout Rate:")
+        _logger.info("     - Rate: %.2f%% (%d/%d) (Gate: <= 10.0%%)", dropout_rate * 100, forced_dropouts, len(prev_symbols))
+        dropout_pass = dropout_rate <= 0.10
+    else:
+        _logger.info(" [2] Unexpected Forced Dropout Rate: SKIPPED (No previous snapshot found for %s)", prev_as_of)
+
+    # Final Verdict
+    if cost_pass and adv_pass and dropout_pass:
+        _logger.info(" ✅ UNIVERSE QUALITY PASS")
+        return True
+    else:
+        if not cost_pass:
+            _logger.error(" [!] FAIL: Median execution cost (%.2f bps) exceeds 25.0 bps gate.", median_cost)
+        if not adv_pass:
+            _logger.error(" [!] FAIL: Median ADV (%s) is below 40M USDT gate.", f"{median_adv:,.0f}")
+        if not dropout_pass:
+            _logger.error(" [!] FAIL: Forced dropout rate (%.2f%%) exceeds 10.0%% gate.", dropout_rate * 100)
+        
+        _logger.error(" [!] Universe quality gates failed. Aborting optimization to prevent suboptimal execution.")
+        return False
 
 
 def main() -> None:
@@ -372,6 +281,8 @@ def main() -> None:
     run_id: str | None = None
     run_summary_written = False
     discovered_symbols: list[str] = []
+    snapshot: Any = None
+    report: pd.DataFrame = pd.DataFrame()
     selection_summary: dict[str, Any] = {
         "selected_by": None,
         "selected_trial_number": None,
@@ -397,7 +308,8 @@ def main() -> None:
         _logger.info("\n [STEP 0/4] DATA AUTO-SYNC")
         _logger.info(" ─────────────────────────────────────────────────────────────────────────────────────")
         try:
-            _sync_historical_data_if_needed(fetch_start_date, end_date, limit=pre_args.sync_limit)
+            from src.domain.futures.universe.sync_utils import run_historical_sync
+            run_historical_sync(fetch_start_date, end_date, limit=pre_args.sync_limit)
         except Exception as exc:
             _logger.error("Data auto-sync failed: %s", exc)
 
@@ -408,7 +320,7 @@ def main() -> None:
         try:
             # Check for force-rebuild in remaining_args
             force_rebuild = "--force-universe-rebuild" in remaining_args
-            discovered_symbols = _discover_symbols_via_universe(
+            discovered_symbols, snapshot, report = _discover_symbols_via_universe(
                 tf=pre_args.tf,
                 reference_date=pre_args.reference_date,
                 force_rebuild=force_rebuild,
@@ -419,6 +331,11 @@ def main() -> None:
         if not discovered_symbols:
             _logger.error("Universe discovery via snapshot returned no symbols.")
             return
+        
+        # Universe Quality Gate Check
+        if not validate_universe_quality(snapshot, report, pre_args.reference_date, pre_args.tf):
+            sys.exit(1)
+
         _logger.info(" ✅ Universe discovery complete. %d symbols selected:", len(discovered_symbols))
         _logger.info("    > %s", ", ".join(discovered_symbols))
 
@@ -475,7 +392,7 @@ def main() -> None:
     ml_cfg["FUTURES_ML_ALPHA_BACKEND"] = "factory_v1"
     ml_out = run_ml_pipeline_for_universe(
         valid_symbols, args.tf, fetch_start_date, end_date, ml_cfg,
-        workers=ml_n_jobs, n_jobs=ml_n_jobs, is_end_date=is_end_date, is_start_date=start_date,
+        workers=ml_n_jobs, n_jobs=ml_n_jobs, is_end_date=is_end_date_str, is_start_date=start_date_str,
         gp_only=args.alpha_only, hmm_only=args.hmm_only,
         preloaded_data_maps=oos_data_maps if not pre_args.skip_universe else None,
     )
@@ -484,7 +401,7 @@ def main() -> None:
         log_hmm_report_summary(ml_out.hmm_report)
 
     if hasattr(ml_out, "alpha_panel") and not ml_out.alpha_panel.empty:
-        log_alpha_component_summary(ml_out.alpha_panel, is_end_date=is_end_date)
+        log_alpha_component_summary(ml_out.alpha_panel, is_end_date=is_end_date_str)
 
     # G-ALPHA v8.0: Hard-Kill Switch
     # 최적화 진입 전 최소 1개 이상의 정예 알파가 생존해야 함을 보장.
