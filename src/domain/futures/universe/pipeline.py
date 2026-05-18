@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import replace
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -24,6 +25,7 @@ DEFAULT_SNAPSHOT_ROOT = Path("logs/futures/universe/snapshots")
 SCHEMA_VERSION = 1
 DEFAULT_MANIFEST_PATH = Path("data/futures/data_manifest.parquet")
 _BASE_REPORT_COLUMNS = {"symbol", "stage", "passed", "reason"}
+_log = logging.getLogger(__name__)
 
 
 def _to_date(as_of: str | date) -> date:
@@ -481,6 +483,22 @@ def build_universe(
         [dwell_col for dwell_col in ("membership_days", "dwell_days") if dwell_col in s6.columns]
     )
     selected = s6[[column for column in selected_columns if column in s6.columns]].copy()
+
+    # [P1-3] 유니버스 충원율(fill-rate) 경보 게이트
+    _n_selected = snapshot.n_stage6_selected
+    _k_in = int(config.stage6.k_in)
+    _fill_rate = _n_selected / max(1, _k_in)
+    if _fill_rate < 0.25:
+        _log.error(
+            "Universe fill-rate critical: %d/%d (%.0f%%) — stage filter over-rejection suspected",
+            _n_selected, _k_in, _fill_rate * 100,
+        )
+    elif _fill_rate < 0.50:
+        _log.warning(
+            "Universe fill-rate low: %d/%d (%.0f%%) — check stage filters",
+            _n_selected, _k_in, _fill_rate * 100,
+        )
+
     _save_snapshot(snapshot, selected, report, root=snapshot_root)
     return snapshot, selected, report
 
