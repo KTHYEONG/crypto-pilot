@@ -33,6 +33,48 @@ class EnsembleOutput:
     weights: np.ndarray
 
 
+@dataclass(frozen=True, slots=True)
+class SleeveICStats:
+    """Per-sleeve IC summary."""
+
+    mu: float
+    sigma: float
+    n_folds: int
+
+
+def compute_sleeve_shrinkage_weights(
+    ic_by_sleeve: dict[str, list[float]],
+    *,
+    prior_mean: float,
+    prior_strength: float,
+    min_folds: int,
+    eps: float = _EPS,
+) -> tuple[dict[str, float], dict[str, SleeveICStats]]:
+    """Compute non-negative normalized shrinkage weights from OOS fold ICs."""
+    sleeves = ("trend", "reversal", "carry", "flow", "idio")
+    raw_edges: dict[str, float] = {}
+    stats: dict[str, SleeveICStats] = {}
+    for sleeve in sleeves:
+        vals = np.asarray(ic_by_sleeve.get(sleeve, []), dtype=np.float64)
+        vals = vals[np.isfinite(vals)]
+        n_folds = int(vals.size)
+        mu = float(np.mean(vals)) if n_folds > 0 else 0.0
+        sigma = float(np.std(vals)) if n_folds > 0 else 0.0
+        signal = mu / max(sigma, float(eps)) if n_folds > 0 else 0.0
+        post = ((n_folds * signal) + (prior_strength * prior_mean)) / (
+            n_folds + prior_strength + float(eps)
+        )
+        raw_edges[sleeve] = max(float(post), 0.0) if n_folds >= min_folds else 0.0
+        stats[sleeve] = SleeveICStats(mu=mu, sigma=sigma, n_folds=n_folds)
+
+    edge_sum = float(sum(raw_edges.values()))
+    if edge_sum <= float(eps):
+        return {}, stats
+
+    weights = {k: (v / edge_sum) for k, v in raw_edges.items()}
+    return weights, stats
+
+
 def _safe_clip_01(values: np.ndarray) -> np.ndarray:
     clipped = np.clip(np.nan_to_num(values, nan=0.5, posinf=1.0, neginf=0.0), 0.0, 1.0)
     return cast(np.ndarray, clipped)
