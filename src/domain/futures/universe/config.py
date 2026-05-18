@@ -56,7 +56,7 @@ class Stage3Config:
     """Liquidity and execution feasibility gates."""
 
     min_adv_usdt_median: float = 25_000_000.0
-    max_amihud_30d: float = 5e-6
+    max_amihud_30d: float = 6e-8  # 실측 분포 기반: p95 ≈ 4.15e-8, 임계값 = p95 × 1.5 ≈ 6.2e-8 → 6e-8
     max_clip_to_adv: float = 0.005
     screening_tier: str = "mid"
     screening_clip_usdt_by_tier: dict[str, float] = field(
@@ -121,8 +121,8 @@ class Stage6Config:
     k_in: int = 20
     k_out: int = 35
     min_dwell_days: int = 90
-    anchor_symbols: tuple[str, ...] = ("BTC/USDT", "ETH/USDT")
-    basket_ref: tuple[str, ...] = ("BTC/USDT", "ETH/USDT", "SOL/USDT")
+    anchor_symbols: tuple[str, ...] = ("BTCUSDT", "ETHUSDT")
+    basket_ref: tuple[str, ...] = ("BTCUSDT", "ETHUSDT", "SOLUSDT")
     basket_weights: tuple[float, ...] = (0.45, 0.25, 0.08)
     corr_cluster_threshold: float = 0.70  # 상관계수 >= threshold → 동일 클러스터로 연결
 
