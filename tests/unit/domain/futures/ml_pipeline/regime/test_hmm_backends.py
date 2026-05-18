@@ -68,8 +68,15 @@ def _synthetic_obs(n: int = 180, seed: int = 17) -> pd.DataFrame:
     t = np.arange(n, dtype=np.float64)
     f1 = 0.9 * np.sin(t / 19.0) + 0.15 * rng.normal(size=n)
     f2 = 0.7 * np.cos(t / 27.0) + 0.12 * rng.normal(size=n)
+    f3 = 0.4 * np.sin(t / 13.0) + 0.10 * rng.normal(size=n)
+    f4 = 0.35 * np.cos(t / 29.0) + 0.10 * rng.normal(size=n)
+    f5 = 0.3 * np.sin(t / 11.0) + 0.10 * rng.normal(size=n)
+    f6 = 0.3 * np.cos(t / 31.0) + 0.10 * rng.normal(size=n)
     idx = pd.date_range("2025-01-01", periods=n, freq="1h", tz="UTC")
-    return pd.DataFrame({"f1": f1, "f2": f2}, index=idx)
+    return pd.DataFrame(
+        {"f1": f1, "f2": f2, "f3": f3, "f4": f4, "f5": f5, "f6": f6},
+        index=idx,
+    )
 
 
 def _prob_cols(df: pd.DataFrame) -> list[str]:
