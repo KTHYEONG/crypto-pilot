@@ -228,32 +228,44 @@ def validate_universe_quality(
     dropout_pass = True
     dropout_rate = 0.0
 
+    MIN_SAMPLE_FOR_DROPOUT_RATE = 10
+
     if previous_snapshot_frame is not None and not previous_snapshot_frame.empty:
         prev_symbols = set(previous_snapshot_frame["symbol"].tolist())
-        curr_symbols = set(m.symbol for m in snapshot.selected)
-        
-        dropped_symbols = prev_symbols - curr_symbols
-        forced_dropouts = 0
-        
-        for sym in dropped_symbols:
-            filt_report = snapshot.rejected.get(sym)
-            if filt_report:
-                # Forced if rejected in Stage 1-5, or Stage 6 reason is not RANKED_OUT
-                is_forced = any([
-                    filt_report.stage1_reason, filt_report.stage2_reason,
-                    filt_report.stage3_reason, filt_report.stage4_reason,
-                    filt_report.stage5_reason
-                ])
-                if not is_forced and filt_report.stage6_reason and filt_report.stage6_reason != RejectCode.RANKED_OUT:
-                    is_forced = True
-                
-                if is_forced:
-                    forced_dropouts += 1
-        
-        dropout_rate = (forced_dropouts / len(prev_symbols)) if prev_symbols else 0.0
-        _logger.info(" [2] Unexpected Forced Dropout Rate:")
-        _logger.info("     - Rate: %.2f%% (%d/%d) (Gate: <= 10.0%%)", dropout_rate * 100, forced_dropouts, len(prev_symbols))
-        dropout_pass = dropout_rate <= 0.10
+        prev_universe_size = len(prev_symbols)
+
+        if prev_universe_size < MIN_SAMPLE_FOR_DROPOUT_RATE:
+            # 소표본: 통계적으로 무의미 → 지표 산출 보류
+            _logger.warning(
+                " [2] Unexpected Forced Dropout Rate: SKIPPED (prev_universe_size=%d < %d, small-sample guard)",
+                prev_universe_size,
+                MIN_SAMPLE_FOR_DROPOUT_RATE,
+            )
+        else:
+            curr_symbols = set(m.symbol for m in snapshot.selected)
+
+            dropped_symbols = prev_symbols - curr_symbols
+            forced_dropouts = 0
+
+            for sym in dropped_symbols:
+                filt_report = snapshot.rejected.get(sym)
+                if filt_report:
+                    # Forced if rejected in Stage 1-5, or Stage 6 reason is not RANKED_OUT
+                    is_forced = any([
+                        filt_report.stage1_reason, filt_report.stage2_reason,
+                        filt_report.stage3_reason, filt_report.stage4_reason,
+                        filt_report.stage5_reason
+                    ])
+                    if not is_forced and filt_report.stage6_reason and filt_report.stage6_reason != RejectCode.RANKED_OUT:
+                        is_forced = True
+
+                    if is_forced:
+                        forced_dropouts += 1
+
+            dropout_rate = (forced_dropouts / prev_universe_size) if prev_universe_size else 0.0
+            _logger.info(" [2] Unexpected Forced Dropout Rate:")
+            _logger.info("     - Rate: %.2f%% (%d/%d) (Gate: <= 10.0%%)", dropout_rate * 100, forced_dropouts, prev_universe_size)
+            dropout_pass = dropout_rate <= 0.10
     else:
         _logger.info(" [2] Unexpected Forced Dropout Rate: SKIPPED (No previous snapshot found for %s)", prev_as_of)
 

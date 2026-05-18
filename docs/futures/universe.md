@@ -143,7 +143,7 @@ build_universe(as_of: date, tf: str, cfg: UniverseConfig) -> UniverseSnapshot
 * **구현 모듈**: `liquidity.py` ➡️ `apply_liquidity_stage()`
 * **설정 파라미터 (`Stage3Config`)**:
   * `min_adv_usdt_median = 25_000_000.0` (30일 Median ADV 하한선 25M USDT. Spike 왜곡 방지용 Median 필수 사용)
-  * `max_amihud_30d = 5e-6` (일별 $|ret| / (volume \times price)$ 기준 30일 Amihud Illiquidity 상한선)
+  * `max_amihud_30d = 6e-8` (일별 $|ret| / (volume \times price)$ 기준 30일 Amihud Illiquidity 상한선. 실측 분포: p50≈2.2e-9, p95≈4.2e-8, max≈1.7e-7. 임계값 = p95 × 1.5 ≈ 6.2e-8 → 6e-8로 반올림. ADV 게이트 통과 종목 중 명백 비유동 상위 5%만 탈락.)
   * `max_clip_to_adv = 0.005` (ADV 대비 1회 집행 Clip 비율 상한 0.5%)
 * **자본 티어별 Clip 설계 (외생 고정 적용으로 순환 루프 제거)**:
   $$\text{screening\_clip\_usdt} = \begin{cases} 
@@ -210,8 +210,9 @@ build_universe(as_of: date, tf: str, cfg: UniverseConfig) -> UniverseSnapshot
      * 최소 Dwell 일수: `90일` (Dwell 미달 시 Rank가 이탈 범위 내에 있어도 퇴출 유예)
      * 단, Stage 1~5에서 결격 사유 발생 시 히스테리시스 및 Dwell 조건을 무시하고 **즉시 퇴출**.
   4. **앵커 자산 강제 편입**:
-     * `"BTC/USDT"`, `"ETH/USDT"`는 스코어 및 랭킹에 관계없이 강제 유니버스 최상단 고정 편입 (`role = "anchor"`).
+     * `"BTCUSDT"`, `"ETHUSDT"`는 스코어 및 랭킹에 관계없이 강제 유니버스 최상단 고정 편입 (`role = "anchor"`).
      * 앵커 자산은 포트폴리오 최적화 시 가중치 0% 배분을 허용하여 가상 reference로 기능하게 함.
+     * **주의**: 앵커 심볼 표기는 슬래시 없는 Binance 원형 심볼(`BTCUSDT`)을 사용한다. 슬래시 포함(`BTC/USDT`) 사용 시 Stage 1~5 자연 통과 심볼(`BTCUSDT`)과 phantom churn artifact가 발생한다.
 
 ---
 
@@ -250,12 +251,26 @@ build_universe(as_of: date, tf: str, cfg: UniverseConfig) -> UniverseSnapshot
 
 *   **정의**: 90일 최소 유지 기간(Dwell Time)을 채우기 전, 비정상적 사유(상폐, 펀딩비 조작, 유동성 고갈 등 Stage 1~5 결격)로 긴급 퇴출된 자산의 비율.
 *   **공식**: $\frac{\text{Count of dropouts where RejectCode} \neq \text{RANKED\_OUT}}{\text{Total Previous Universe Size}}$
-*   **평가 구간**:
+*   **소표본 가드**: 이전 유니버스 크기 `prev_universe_size < 10`인 경우, 통계적으로 무의미한 비율 산출을 방지하기 위해 해당 지표 산출을 보류하고 `WARNING` 로그를 남긴다. (예: 유니버스 크기 3에서 1개 탈락 = 33%는 오탐)
+*   **평가 구간** (`prev_universe_size >= 10` 조건 충족 시):
     *   **Excellent (0% ~ 3%)**: 리스크 사전 차단 완벽.
     *   **Good (3% ~ 10%)**: 일반적인 시장 변동성 내 수용 가능.
     *   **Fail (> 10%)**: 유니버스 필터링 엔진 결함으로 간주. (강제 청산 슬리피지 위험 과다)
 
 ### 6.3 종합 품질 스코어 (Snapshot Score)
-파이프라인 모니터링을 위한 전략 독립적 지표.
-$$Score_{universe} = \frac{Capacity \times Stability}{mAEC}$$
+파이프라인 모니터링을 위한 전략 독립적 **무차원** 지표.
+
+$$Score_{universe} = fill\_rate \times \log_{10}\!\left(\frac{\text{median\_adv\_usdt}}{10^6}\right) \times \frac{1}{\text{mAEC\_bps}}$$
+
+| 항목 | 정의 | 단위 |
+|---|---|---|
+| $fill\_rate$ | $n_{selected} / K_{in}$ — 목표 인원 대비 실제 충원율 | [0, 1] |
+| $\log_{10}(\text{median\_adv} / 10^6)$ | ADV outlier 완화: 1M→0, 10M→1, 100M→2, 1B→3 | 무차원 |
+| $1 / \text{mAEC\_bps}$ | 유니버스 중앙값 집행 비용 역수 (낮을수록 고점수) | $\text{bps}^{-1}$ |
+
+**예시 수치**: 완전 충원(fill=1.0), Median ADV = 100M USDT, mAEC = 15 bps  
+$$Score = 1.0 \times \log_{10}(100) \times \frac{1}{15} \approx 0.133$$
+
+**설계 근거**: 구 공식 $\frac{Capacity \times Stability}{mAEC}$ 는 Capacity(USD) × Stability(무단위) / Cost(bps) 구조로 차원이 불일치하고 BTC ADV 같은 outlier가 지수를 지배하는 문제가 있었다. 신 공식은 ADV에 log 스케일을 적용하여 outlier를 완화하고, fill_rate 가중을 통해 충원 실패 패널티를 직접 반영하며, 완전 무차원이므로 시계열 비교가 가능하다.
+
 이 지표는 백테스팅 진입 전 유니버스 빌드 결과의 '순수 품질'을 역사적으로 비교 및 로깅하는 용도로 활용된다.
