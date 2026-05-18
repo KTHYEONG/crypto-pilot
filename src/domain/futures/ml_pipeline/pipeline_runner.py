@@ -33,6 +33,10 @@ from src.domain.futures.data_loader import (
     summarize_dataframe_integrity,
 )
 from src.domain.futures.ml_pipeline.alpha.miner import MLAlphaMiner
+try:
+    from src.domain.futures.alpha_factory import AlphaFactoryV1
+except Exception:  # pragma: no cover - optional dependency path for staged rollout
+    AlphaFactoryV1 = None  # type: ignore[assignment]
 from src.domain.futures.ml_pipeline.features.cross_sectional import CrossSectionalPipelineUtils
 from src.domain.futures.ml_pipeline.features.engineering import (
     ALPHA_ENGINEERED_FEATURE_NAMES,
@@ -54,6 +58,276 @@ _ALPHA_CACHE_SCHEMA_VERSION = "v1"
 _ALPHA_SAFE_DEFAULT_MAX_ITEMS = 2
 _alpha_cache_lock = threading.Lock()
 _alpha_cache_store: OrderedDict[str, dict[str, Any]] = OrderedDict()
+_ALPHA_FACTORY_V1_CACHE_SCHEMA_VERSION = "factory_v1_contract_v1"
+
+
+def _resolve_alpha_backend(cfg: dict[str, Any]) -> str:
+    raw = str(cfg.get("FUTURES_ML_ALPHA_BACKEND", "legacy")).strip().lower()
+    return raw if raw in {"legacy", "factory_v1"} else "legacy"
+
+
+def _normalize_alpha_panel_contract(alpha_result: Any) -> pd.DataFrame:
+    """Normalize alpha miner/factory output to the legacy alpha_panel DataFrame contract."""
+    if isinstance(alpha_result, pd.DataFrame):
+        return _ensure_alpha_panel_attrs(alpha_result, source_meta=None)
+    if isinstance(alpha_result, dict):
+        panel = alpha_result.get("alpha_panel")
+        if isinstance(panel, pd.DataFrame):
+            return _ensure_alpha_panel_attrs(panel, source_meta=alpha_result)
+    raise TypeError(f"Unsupported alpha result contract: {type(alpha_result).__name__}")
+
+
+def _ensure_alpha_panel_attrs(
+    panel: pd.DataFrame,
+    *,
+    source_meta: dict[str, Any] | None,
+) -> pd.DataFrame:
+    """Backfill alpha_panel attrs so downstream hard-kill/summary logic never breaks."""
+    attrs = dict(getattr(panel, "attrs", {}) or {})
+    if source_meta:
+        for meta_key in (
+            "alpha_component_filter",
+            "alpha_filter_meta",
+            "alpha_summary",
+            "component_filter",
+            "filter_meta",
+            "summary",
+        ):
+            meta_val = source_meta.get(meta_key)
+            if isinstance(meta_val, dict):
+                attrs[meta_key] = dict(meta_val)
+        nested_meta = source_meta.get("meta")
+        if isinstance(nested_meta, dict):
+            for meta_key in (
+                "alpha_component_filter",
+                "alpha_filter_meta",
+                "alpha_summary",
+                "component_filter",
+                "filter_meta",
+                "summary",
+            ):
+                meta_val = nested_meta.get(meta_key)
+                if isinstance(meta_val, dict):
+                    attrs[meta_key] = dict(meta_val)
+
+    # Preserve both slot and aggregate aliases so cache hit/cold paths stay contract-identical.
+    if "alpha_long_00" not in panel.columns and "alpha_long" in panel.columns:
+        panel["alpha_long_00"] = pd.to_numeric(panel["alpha_long"], errors="coerce")
+    if "alpha_short_00" not in panel.columns and "alpha_short" in panel.columns:
+        panel["alpha_short_00"] = pd.to_numeric(panel["alpha_short"], errors="coerce")
+    if "alpha_long" not in panel.columns and "alpha_long_00" in panel.columns:
+        panel["alpha_long"] = pd.to_numeric(panel["alpha_long_00"], errors="coerce")
+    if "alpha_short" not in panel.columns and "alpha_short_00" in panel.columns:
+        panel["alpha_short"] = pd.to_numeric(panel["alpha_short_00"], errors="coerce")
+    if "alpha_net" not in panel.columns and {"alpha_long", "alpha_short"}.issubset(panel.columns):
+        panel["alpha_net"] = (
+            pd.to_numeric(panel["alpha_long"], errors="coerce")
+            - pd.to_numeric(panel["alpha_short"], errors="coerce")
+        )
+    if "alpha_confidence" not in panel.columns:
+        if "alpha_confidence_00" in panel.columns:
+            panel["alpha_confidence"] = pd.to_numeric(panel["alpha_confidence_00"], errors="coerce")
+        else:
+            panel["alpha_confidence"] = 1.0
+    if "alpha_confidence_00" not in panel.columns and "alpha_confidence" in panel.columns:
+        panel["alpha_confidence_00"] = pd.to_numeric(panel["alpha_confidence"], errors="coerce")
+
+    filt_meta: dict[str, Any] = {}
+    for meta_key in (
+        "alpha_component_filter",
+        "alpha_filter_meta",
+        "component_filter",
+        "filter_meta",
+    ):
+        meta_val = attrs.get(meta_key)
+        if isinstance(meta_val, dict):
+            filt_meta = dict(meta_val)
+            break
+
+    if not filt_meta:
+        summary_meta = attrs.get("alpha_summary")
+        if isinstance(summary_meta, dict):
+            filt_meta = dict(summary_meta)
+
+    # Canonical aliases used by production hard-kill/reporting paths.
+    if "n_surviving" not in filt_meta:
+        for alias_key in (
+            "n_survive",
+            "surviving_count",
+            "n_survivors",
+            "survivor_count",
+            "selected_count",
+        ):
+            if alias_key in filt_meta:
+                filt_meta["n_surviving"] = filt_meta.get(alias_key)
+                break
+    if "n_components" not in filt_meta:
+        long_slot_cols = [c for c in panel.columns if str(c).startswith("alpha_long_")]
+        short_slot_cols = [c for c in panel.columns if str(c).startswith("alpha_short_")]
+        inferred_components = max(len(long_slot_cols), len(short_slot_cols))
+        filt_meta["n_components"] = float(inferred_components)
+    if "n_surviving_long" not in filt_meta:
+        surviving_long_cols = filt_meta.get("survived_long_cols")
+        if isinstance(surviving_long_cols, list):
+            filt_meta["n_surviving_long"] = float(len(surviving_long_cols))
+    if "n_surviving_short" not in filt_meta:
+        surviving_short_cols = filt_meta.get("survived_short_cols")
+        if isinstance(surviving_short_cols, list):
+            filt_meta["n_surviving_short"] = float(len(surviving_short_cols))
+    if "n_surviving" not in filt_meta:
+        filt_meta["n_surviving"] = float(
+            max(
+                float(filt_meta.get("n_surviving_long", 0.0) or 0.0),
+                float(filt_meta.get("n_surviving_short", 0.0) or 0.0),
+                float(filt_meta.get("n_components", 0.0) or 0.0),
+            )
+        )
+    filt_meta.setdefault("n_surviving_long", float(filt_meta.get("n_surviving", 0.0) or 0.0))
+    filt_meta.setdefault("n_surviving_short", float(filt_meta.get("n_surviving", 0.0) or 0.0))
+    filt_meta.setdefault("elite_zero_after_survival", 0.0)
+
+    attrs["alpha_component_filter"] = filt_meta
+    attrs["alpha_filter_meta"] = dict(filt_meta)
+    attrs["component_filter"] = dict(filt_meta)
+    attrs["filter_meta"] = dict(filt_meta)
+    summary_meta = attrs.get("alpha_summary")
+    if not isinstance(summary_meta, dict):
+        attrs["alpha_summary"] = {
+            "n_components": float(filt_meta.get("n_components", 0.0) or 0.0),
+            "n_surviving": float(filt_meta.get("n_surviving", 0.0) or 0.0),
+        }
+    panel.attrs = attrs
+    return panel
+
+
+def _extract_factory_frame(factory_out: Any) -> pd.DataFrame:
+    """Try to adapt AlphaFactoryV1 outputs into legacy alpha_panel format."""
+    if isinstance(factory_out, pd.DataFrame):
+        return _ensure_alpha_panel_attrs(factory_out, source_meta=None)
+    if isinstance(factory_out, dict):
+        panel = factory_out.get("alpha_panel")
+        if isinstance(panel, pd.DataFrame):
+            return _ensure_alpha_panel_attrs(panel, source_meta=factory_out)
+    # Current AlphaFactoryV1 returns dataclass with ndarray fields.
+    if hasattr(factory_out, "alpha_long") and hasattr(factory_out, "alpha_short"):
+        alpha_long = np.asarray(getattr(factory_out, "alpha_long"), dtype=np.float64)
+        alpha_short = np.asarray(getattr(factory_out, "alpha_short"), dtype=np.float64)
+        alpha_net = (
+            np.asarray(getattr(factory_out, "alpha_net"), dtype=np.float64)
+            if hasattr(factory_out, "alpha_net")
+            else (alpha_long - alpha_short)
+        )
+        confidence = (
+            np.asarray(getattr(factory_out, "confidence"), dtype=np.float64)
+            if hasattr(factory_out, "confidence")
+            else np.ones_like(alpha_long, dtype=np.float64)
+        )
+        n = len(alpha_long)
+        if len(alpha_short) != n or len(alpha_net) != n or len(confidence) != n:
+            raise ValueError("AlphaFactoryV1 output length mismatch")
+        panel = pd.DataFrame(
+            {
+                "alpha_long": alpha_long,
+                "alpha_short": alpha_short,
+                "alpha_net": alpha_net,
+                "alpha_confidence": confidence,
+            }
+        )
+        return _ensure_alpha_panel_attrs(panel, source_meta=None)
+    raise TypeError(f"Unsupported AlphaFactoryV1 output type: {type(factory_out).__name__}")
+
+
+def _mine_alpha_panel_with_backend(
+    *,
+    backend: str,
+    panel_df: pd.DataFrame,
+    is_end_date: str | None,
+    filter_options: dict[str, Any],
+    n_jobs: int,
+    horizons: tuple[int, ...],
+    slots_per_theme: int,
+) -> tuple[pd.DataFrame, str]:
+    if backend == "factory_v1" and AlphaFactoryV1 is not None:
+        try:
+            factory = AlphaFactoryV1(timeframe="4h")
+        except Exception as exc:
+            _logger.warning(
+                "AlphaFactoryV1 initialization failed (%s: %s); "
+                "forcing legacy fallback for this run.",
+                type(exc).__name__,
+                exc,
+                exc_info=True,
+            )
+        else:
+            if hasattr(factory, "mine_alphas_cs"):
+                try:
+                    return _normalize_alpha_panel_contract(
+                        factory.mine_alphas_cs(
+                            panel_df,
+                            is_end_date=is_end_date,
+                            filter_options=filter_options,
+                        )
+                    ), "factory_v1"
+                except Exception as exc:
+                    _logger.warning(
+                        "AlphaFactoryV1 mine_alphas_cs failed (%s: %s); "
+                        "forcing legacy fallback for this run.",
+                        type(exc).__name__,
+                        exc,
+                        exc_info=True,
+                    )
+            elif hasattr(factory, "run"):
+                try:
+                    return _normalize_alpha_panel_contract(
+                        factory.run(
+                            panel_df=panel_df,
+                            is_end_date=is_end_date,
+                            filter_options=filter_options,
+                        )
+                    ), "factory_v1"
+                except Exception as exc:
+                    _logger.warning(
+                        "AlphaFactoryV1 run failed (%s: %s); "
+                        "forcing legacy fallback for this run.",
+                        type(exc).__name__,
+                        exc,
+                        exc_info=True,
+                    )
+            elif hasattr(factory, "build"):
+                # build() signature is not yet integrated with pipeline inputs.
+                _logger.warning(
+                    "AlphaFactoryV1 build() path is not wired to pipeline inputs yet; "
+                    "falling back to legacy miner."
+                )
+            else:
+                _logger.warning(
+                    "AlphaFactoryV1 backend requested but no compatible entrypoint "
+                    "(mine_alphas_cs/run/build). Falling back to legacy miner."
+                )
+    if backend == "factory_v1" and AlphaFactoryV1 is None:
+        _logger.warning(
+            "AlphaFactoryV1 backend requested but unavailable; "
+            "falling back to legacy miner"
+        )
+
+    miner = MLAlphaMiner(
+        n_jobs=n_jobs,
+        target_horizons=horizons,
+        slots_per_theme=slots_per_theme,
+    )
+    return _normalize_alpha_panel_contract(
+        miner.mine_alphas_cs(
+            panel_df,
+            is_end_date=is_end_date,
+            filter_options=filter_options,
+        )
+    ), "legacy"
+
+
+def _resolve_alpha_backend_schema(alpha_backend: str) -> str:
+    if str(alpha_backend) == "factory_v1":
+        return _ALPHA_FACTORY_V1_CACHE_SCHEMA_VERSION
+    return ""
 
 
 def _hash_jsonable(payload: dict[str, Any]) -> str:
@@ -78,6 +352,8 @@ def _build_alpha_cache_key(
     horizons: tuple[int, ...],
     slots_per_theme: int,
     filter_options: dict[str, Any],
+    alpha_backend: str,
+    include_backend_schema: bool = True,
 ) -> str:
     model_cfg = {
         "gp_feature_schema_version": GP_FEATURE_SCHEMA_VERSION,
@@ -108,7 +384,12 @@ def _build_alpha_cache_key(
         "tf": str(tf),
         "data_snapshot_id": _alpha_data_snapshot_id(panel_df),
         "model_cfg_fingerprint": _hash_jsonable(model_cfg),
+        "alpha_backend": str(alpha_backend),
     }
+    if include_backend_schema:
+        backend_schema = _resolve_alpha_backend_schema(alpha_backend)
+        if backend_schema:
+            payload["alpha_backend_schema"] = backend_schema
     return _hash_jsonable(payload)
 
 
@@ -133,6 +414,8 @@ def _alpha_cache_get(key: str) -> tuple[pd.DataFrame | None, dict[str, Any] | No
             "cache_key": key,
             "cached_at_epoch_s": float(entry.get("created_at", 0.0)),
             "cache_schema": _ALPHA_CACHE_SCHEMA_VERSION,
+            "alpha_backend": str(entry.get("alpha_backend", "") or ""),
+            "alpha_backend_schema": str(entry.get("alpha_backend_schema", "") or ""),
         }
         _logger.info("ALPHA_CACHE hit key=%s", key[:12])
         return cast(pd.DataFrame, entry["alpha_panel"]).copy(deep=True), hit_meta
@@ -143,13 +426,17 @@ def _alpha_cache_put(
     alpha_panel: pd.DataFrame,
     *,
     max_items: int,
+    alpha_backend: str,
 ) -> dict[str, Any]:
     evicted_key: str | None = None
+    backend_schema = _resolve_alpha_backend_schema(alpha_backend)
     with _alpha_cache_lock:
         _alpha_cache_store[key] = {
             "key": key,
             "alpha_panel": alpha_panel.copy(deep=True),
             "created_at": time.time(),
+            "alpha_backend": str(alpha_backend),
+            "alpha_backend_schema": backend_schema,
         }
         _alpha_cache_store.move_to_end(key)
         while max_items >= 0 and len(_alpha_cache_store) > max_items:
@@ -165,6 +452,8 @@ def _alpha_cache_put(
         "cache_state": "miss_stored",
         "cache_key": key,
         "cache_schema": _ALPHA_CACHE_SCHEMA_VERSION,
+        "alpha_backend": str(alpha_backend),
+        "alpha_backend_schema": backend_schema,
         "evicted_key": evicted_key,
     }
 
@@ -2615,11 +2904,8 @@ def _run_ml_pipeline_implementation(
     _h_weights = tuple(float(np.exp(-h / _ic_hl)) for h in horizons)
     panel_df["target"] = h_utils.create_multi_horizon_rank_targets(panel_df, horizons=horizons, weights=_h_weights)
 
-    miner = MLAlphaMiner(
-        n_jobs=n_jobs, 
-        target_horizons=horizons, 
-        slots_per_theme=max(3, min(6, int(cfg.get("FUTURES_ML_ALPHA_SLOTS_PER_THEME", 3))))
-    )
+    alpha_backend = _resolve_alpha_backend(cfg)
+    slots_per_theme = max(3, min(6, int(cfg.get("FUTURES_ML_ALPHA_SLOTS_PER_THEME", 3))))
     filter_options = {
         # IC filter options are config-driven to avoid drift between config and runtime behavior.
         "fdr_q": float(cfg.get("FUTURES_ML_IC_FDR_Q", OPT_FUTURES_CONFIG.get("FUTURES_ML_IC_FDR_Q", 0.10))),
@@ -2657,33 +2943,80 @@ def _run_ml_pipeline_implementation(
         seed=seed,
         cfg=cfg,
         horizons=horizons,
-        slots_per_theme=int(getattr(miner, "slots_per_theme", cfg.get("FUTURES_ML_ALPHA_SLOTS_PER_THEME", 6))),
+        slots_per_theme=slots_per_theme,
         filter_options=filter_options,
+        alpha_backend=alpha_backend,
     )
+    alpha_cache_legacy_compat_key: str | None = None
+    if alpha_backend == "factory_v1":
+        alpha_cache_legacy_compat_key = _build_alpha_cache_key(
+            panel_df=panel_df,
+            tf=tf,
+            is_end_date=is_end_date,
+            seed=seed,
+            cfg=cfg,
+            horizons=horizons,
+            slots_per_theme=slots_per_theme,
+            filter_options=filter_options,
+            alpha_backend=alpha_backend,
+            include_backend_schema=False,
+        )
 
     alpha_panel: pd.DataFrame | None = None
     if alpha_cache_enabled and alpha_cache_max_items > 0:
         alpha_panel, hit_meta = _alpha_cache_get(alpha_cache_key)
+        if (
+            alpha_panel is None
+            and alpha_cache_legacy_compat_key
+            and alpha_cache_legacy_compat_key != alpha_cache_key
+        ):
+            alpha_panel, hit_meta = _alpha_cache_get(alpha_cache_legacy_compat_key)
+            if alpha_panel is not None:
+                _logger.info(
+                    "ALPHA_CACHE compat-hit backend=%s key=%s",
+                    alpha_backend,
+                    alpha_cache_legacy_compat_key[:12],
+                )
         if alpha_panel is not None and hit_meta is not None:
+            alpha_panel = _ensure_alpha_panel_attrs(alpha_panel, source_meta=None)
+            if alpha_backend == "factory_v1":
+                hit_meta.setdefault("alpha_backend", "factory_v1")
+                hit_meta.setdefault(
+                    "alpha_backend_schema",
+                    _resolve_alpha_backend_schema("factory_v1"),
+                )
             alpha_cache_meta = hit_meta
 
+    effective_alpha_backend = alpha_backend
+    if alpha_panel is not None:
+        cached_backend = str(alpha_cache_meta.get("alpha_backend", "") or "").strip().lower()
+        if cached_backend:
+            effective_alpha_backend = cached_backend
     if alpha_panel is None:
-        alpha_panel = miner.mine_alphas_cs(
-            panel_df,
+        alpha_panel, effective_alpha_backend = _mine_alpha_panel_with_backend(
+            backend=alpha_backend,
+            panel_df=panel_df,
             is_end_date=is_end_date,
             filter_options=filter_options,
+            n_jobs=n_jobs,
+            horizons=horizons,
+            slots_per_theme=slots_per_theme,
         )
         if alpha_cache_enabled and alpha_cache_max_items > 0:
             alpha_cache_meta = _alpha_cache_put(
                 alpha_cache_key,
                 alpha_panel,
                 max_items=alpha_cache_max_items,
+                alpha_backend=effective_alpha_backend,
             )
         else:
             _logger.info("ALPHA_CACHE bypass reason=disabled_or_zero_capacity")
+    else:
+        alpha_panel = _ensure_alpha_panel_attrs(alpha_panel, source_meta=None)
 
     if "target" in panel_df.columns:
         alpha_panel["target"] = panel_df["target"]
+    alpha_panel.attrs["alpha_backend"] = effective_alpha_backend
     alpha_panel.attrs["alpha_cache"] = dict(alpha_cache_meta)
     integrity_summary = _build_integrity_summary(data_maps, panel_df, tf, panel_fillna_cols=hmm_cols_all)
     integrity_summary["panel_pre_fillna_nan_pct"] = panel_prefill_nan_pct
@@ -2733,7 +3066,13 @@ def _run_ml_pipeline_implementation(
         alpha_component_count = (
             int(out.alpha_panel.index.get_level_values("component").nunique())
             if alpha_non_empty and "component" in out.alpha_panel.index.names
-            else 0
+            else int(
+                float(
+                    getattr(out.alpha_panel, "attrs", {})
+                    .get("alpha_component_filter", {})
+                    .get("n_surviving", 0.0) or 0.0
+                )
+            )
         )
         _logger.debug(
             "✅ Alpha Mining complete (ALPHA-only mode) | hmm_report_present=%s alpha_panel_non_empty=%s alpha_component_count=%d",
