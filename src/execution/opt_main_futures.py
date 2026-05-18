@@ -227,8 +227,11 @@ def main() -> None:
     _logger.info("═" * 85)
 
     ml_n_jobs = resolve_futures_parallel_policy(len(valid_symbols))
+    ml_cfg = dict(OPT_FUTURES_CONFIG)
+    # Force AlphaFactory backend for futures execution so runs are not tied to legacy miner path.
+    ml_cfg["FUTURES_ML_ALPHA_BACKEND"] = "factory_v1"
     ml_out = run_ml_pipeline_for_universe(
-        valid_symbols, args.tf, fetch_start_date, end_date, dict(OPT_FUTURES_CONFIG),
+        valid_symbols, args.tf, fetch_start_date, end_date, ml_cfg,
         workers=ml_n_jobs, n_jobs=ml_n_jobs, is_end_date=is_end_date, is_start_date=start_date,
         gp_only=args.alpha_only, hmm_only=args.hmm_only,
         preloaded_data_maps=oos_data_maps if not pre_args.skip_universe else None,
