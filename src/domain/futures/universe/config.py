@@ -77,13 +77,20 @@ class Stage4Config:
 
 @dataclass(frozen=True, slots=True)
 class Stage5Config:
-    """Risk-event and anomaly gates."""
+    """Risk-event and anomaly gates.
+
+    Notes:
+        vol_30d는 4h 바 기준 연율화 변동성 (std * sqrt(6*365)).
+        median ~0.75, p90 ~1.81 수준의 스케일.
+        min=0.05(5% 연율, 사실상 거래 없는 코인 제거),
+        max=4.0(400% 연율, 극단적 meme 제거).
+
+    """
 
     min_listing_age_days: int = 90
-    min_vol_30d: float = 0.003
-    max_vol_30d: float = 0.25
+    min_vol_30d: float = 0.05   # 5% annualized — 거래 없는 죽은 코인 제거
+    max_vol_30d: float = 4.0    # 400% annualized — 극단적 meme/junk 제거
     max_abs_funding_z: float = 2.5
-    max_abs_basis_z: float = 2.5
     enable_funding_sign_flip: bool = True
     funding_sign_flip_columns: tuple[str, ...] = (
         "funding_sign_flip_1d",

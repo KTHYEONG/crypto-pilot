@@ -83,9 +83,6 @@ def _to_symbol_meta(frame: pd.DataFrame) -> tuple[SymbolMeta, ...]:
                     else None
                 ),
                 basis_vol=float(row["basis_vol"]) if row.get("basis_vol") is not None else None,
-                oi_usdt_median=float(row.get("oi_usdt_median", 0.0)),
-                oi_to_adv=float(row.get("oi_to_adv", 0.0)),
-                oi_change_30d=float(row.get("oi_change_30d", 0.0)),
                 capacity_clip_usdt_list=tuple(
                     float(x) for x in row.get("capacity_clip_usdt_list", ())
                 ),
@@ -406,8 +403,6 @@ def build_universe(
         "listing_age_days",
         "funding_rate_8h",
         "funding_zscore",
-        "basis_z_score",
-        "oi_usdt_median",
         "risk_event_override",
     )
     stage0 = load_ledger_slice(as_of=as_of_date, tf=tf, columns=columns, ledger_path=ledger_path)
