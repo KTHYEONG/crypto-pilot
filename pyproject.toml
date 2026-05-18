@@ -96,6 +96,9 @@ exclude = [
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 addopts = "-ra -q"
+markers = [
+    "integration: Binance API / 외부 네트워크가 필요한 통합 테스트",
+]
 
 [dependency-groups]
 dev = [
