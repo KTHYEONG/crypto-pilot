@@ -56,7 +56,7 @@ build_universe(as_of: date, tf: str, cfg: UniverseConfig) -> UniverseSnapshot
 | `data_quality.py` | **Stage 2**: 데이터 누락률, gap 크기, frozen bar 검사 및 연속성 평가 | `pandas`, `numpy` |
 | `liquidity.py` | **Stage 3**: ADV 중앙값, Amihud 지수 및 자본 규모별 체결 타당성 검사 | `pandas`, `numpy` |
 | `cost_model.py` | **Stage 4**: 슬리피지(Square-root impact), 수수료, Spread 비용 모델링 | `pandas`, `numpy` |
-| `risk_events.py` | **Stage 5**: 상장일령, 변동성 밴드, 고펀딩/Basis 이상치 및 수동 리스크 이벤트 제외 | `pandas`, `numpy` |
+| `risk_events.py` | **Stage 5**: 상장일령, 변동성 밴드, 펀딩비 이상치 및 수동 리스크 이벤트 제외 | `pandas`, `numpy` |
 | `selection.py` | **Stage 6**: 종합 점수화(Rank), 히스테리시스, 상관성 클러스터링 및 앵커 결합 | `pandas`, `numpy` |
 | `pipeline.py` | Stage 0~6 순차 실행, `FilterReport` 생성 및 스냅샷 오케스트레이션 | `pandas`, `datetime` |
 | `persistence.py` | Parquet/JSON 포맷 스냅샷 영속화 및 `data_manifest` 지문 저장 | `pandas`, `pyarrow` |
@@ -77,7 +77,6 @@ build_universe(as_of: date, tf: str, cfg: UniverseConfig) -> UniverseSnapshot
 * `mark_price`: 해당 시점의 기준 가격
 * `last_60d_coverage`: 최근 60일 데이터 존재율 (0.0 ~ 1.0)
 * `n_zero_volume_bars_60d`: 최근 60일 내 거래량 0인 봉 개수
-* `basis_z_score`: Premium Index 기반의 mark-index basis z-score
 * `risk_event_override`: 수동 리스크 배제 사유 태그
 
 ### 3.2 SymbolMeta (스냅샷 탑재 개별 자산 정보)
@@ -89,8 +88,7 @@ build_universe(as_of: date, tf: str, cfg: UniverseConfig) -> UniverseSnapshot
 * `beta_vs_market`: market basket 대비 historical beta
 * `cluster_id`: 상관성 거리 기준 클러스터링 군집 번호
 * `tradeable_rank`: Stage 6 종합 스코어 랭킹
-* `basis_annualized_mean` / `basis_vol`: Mark-index basis 기초 통계 피처 (예측용 alpha 피처와 구분)
-* `oi_usdt_median` / `oi_to_adv` / `oi_change_30d`: Open Interest 기반 crowding/squeeze 대리 지표
+* `basis_annualized_mean` / `basis_vol`: Mark-index basis 기초 통계 피처 (alpha 신호용; `premiumIndexKlines` downloader 구현 후 실측값 공급 예정)
 
 ---
 
@@ -182,11 +180,9 @@ build_universe(as_of: date, tf: str, cfg: UniverseConfig) -> UniverseSnapshot
 * **구현 모듈**: `risk_events.py` ➡️ `apply_risk_events_stage()`
 * **검증 규칙**:
   1. **상장 연령 (Listing Age)**: 최소 90일 이상 경과 자산만 허용 (`listing_age_days >= 90`). (상장 빔 및 초기 락업 해제 충격 방지)
-  2. **변동성 밴드 (Vol Band)**: 일별 변동성 기준 `vol_30d`가 `[0.003, 0.25]` 범위 내 존재할 것. (활동성 없는 고사 코인 및 투기적 급등락 코인 동시 배제)
+  2. **변동성 밴드 (Vol Band)**: 4h 바 기준 연율화 변동성 `vol_30d`가 `[0.05, 4.0]` 범위 내 존재할 것 (5%~400% 연율). 활동성 없는 고사 코인 및 극단적 meme/junk 코인 동시 배제.
   3. **펀딩비 이상치**: 8시간 원천 펀딩비의 절대값 z-score 가 2.5를 초과하거나 1일 이내 급격한 부호 반전(`enable_funding_sign_flip`)이 일어나는 조작/스퀴즈성 자산 차단. (※ 단순 고펀딩 일관 유지 자산은 carry harvest 전략 활용을 위해 **정상 통과** 시킴)
-  4. **Basis 이상치**: `premiumIndexKlines` 기준 Mark-Index basis z-score 절대값 2.5 이하 검사 (`basis_z_score <= 2.5`).
-  5. **OI 집중도 (Crowding Proxy)**: `oi_usdt_median / adv_usdt_median <= 12.0` (과도한 레버리지로 인한 연쇄 청산 위험 방지)
-  6. **수동 리스크 오버라이드 (Manual Override)**:
+  4. **수동 리스크 오버라이드 (Manual Override)**:
      * `ManualEventRow` 수동 입력 이벤트 발생 시 배제.
      * **Fail-Closed 원칙**: `knowledge_date`가 누락된 수동 배제 요청은 PIT 정합성을 해치므로 해당 레코드 자체를 무시(배제하지 않음)하여 휴리스틱 오염 차단.
 * **기술 스택**: `numpy.where` 조건 결합 마스킹.
