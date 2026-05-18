@@ -66,14 +66,24 @@ date < 2020-01-01  →  Roll spread fallback
 
 기존 구현(`src/core/utils/binance_vision.py`)은 `daily/metrics`만 지원. Ledger 적재를 위해 추가 필요:
 
-| 추가 메서드 | Vision 경로 | 용도 |
-|---|---|---|
-| `fetch_klines_archive` | `daily/klines/{sym}/{tf}/` | OHLCV 수집 (상폐 심볼 포함) |
-| `fetch_funding_monthly` | `monthly/fundingRate/{sym}/` | 펀딩비 아카이브 |
-| `fetch_bookdepth_daily` | `daily/bookDepth/{sym}/` | spread/depth 집계용 |
-| `fetch_premiumindex_daily` | `daily/premiumIndexKlines/{sym}/` | basis 계산용 |
-| `list_all_symbols` | S3 XML 목록 (`?list-type=2`) | 전체 심볼 발견 (상폐 포함) |
-| `verify_checksum` | `{path}.CHECKSUM` (SHA256 동봉) | **다운로드마다 SHA256 검증 필수** |
+| 추가 메서드 | Vision 경로 | 용도 | 파이프라인 상태 |
+|---|---|---|---|
+| `fetch_klines_archive` | `daily/klines/{sym}/{tf}/` | OHLCV 수집 (상폐 심볼 포함) | 활성 |
+| `fetch_funding_monthly` | `monthly/fundingRate/{sym}/` | 펀딩비 아카이브 | 활성 |
+| `fetch_bookdepth_daily` | `daily/bookDepth/{sym}/` | spread/depth 집계용 | 활성 |
+| `fetch_premiumindex_daily` | `daily/premiumIndexKlines/{sym}/` | basis 계산용 | **미구현 — 파이프라인 비활성화** |
+| `fetch_metrics_daily` | `daily/metrics/{sym}/` | OI / LSR 수집 | **미구현 — 파이프라인 비활성화** |
+| `list_all_symbols` | S3 XML 목록 (`?list-type=2`) | 전체 심볼 발견 (상폐 포함) | 활성 |
+| `verify_checksum` | `{path}.CHECKSUM` (SHA256 동봉) | **다운로드마다 SHA256 검증 필수** | 활성 |
+
+#### 비활성화된 유니버스 필터 (데이터 미구현)
+
+`fetch_premiumindex_daily`와 `fetch_metrics_daily`가 미구현된 결과, 아래 두 Stage 5 필터가 파이프라인에서 제거된 상태다. 해당 메서드 구현 후 Ledger에 실측값을 공급하면 필터를 복구해야 한다.
+
+| 제거된 필터 | 감지 대상 리스크 | 현재 대안 방어막 | 공백 수준 |
+|---|---|---|---|
+| `basis_z_score <= 2.5` | Mark-Index basis 이상치 (선물 프리미엄 폭발, 시세 조작 의심) | `vol_30d` 상한(400%)으로 간접 커버; `funding_zscore` 이상치가 basis spike와 동반하는 경우 부분 커버; `listing_age_days >= 90`으로 신규 상장 초기 basis 이상 방어 | 중간 — `premiumIndexKlines` downloader 구현 시 복구 |
+| `oi_usdt_median / adv <= 12.0` | OI/ADV 비율 과레버리지·crowding 감지 | `vol_30d` 상한으로 고레버리지 청산 vol spike 간접 감지; `adv_usdt_median >= 25M`으로 대량 청산 충격 완화; `funding_zscore`로 롱/숏 편중 간접 감지 | 낮음 — `daily/metrics` downloader 구현 시 복구 |
 
 ---
 
