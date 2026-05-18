@@ -7,7 +7,7 @@ import pandas as pd
 
 from .config import Stage6Config
 
-ANCHORS = ("BTC/USDT", "ETH/USDT")
+ANCHORS = ("BTCUSDT", "ETHUSDT")
 DEFAULT_MAX_SYMBOLS = 24
 DEFAULT_K_IN = 18
 DEFAULT_K_OUT = 30
