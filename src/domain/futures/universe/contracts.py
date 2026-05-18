@@ -45,28 +45,49 @@ class LedgerRow:
     is_trading: bool
     status: str
     first_kline_date: str
-    delist_date: str | None
-    delist_announcement: str | None
-    adv_usdt_median: float
-    adv_usdt_mean: float
-    has_kline: bool
-    has_funding: bool
-    n_bar_gaps: int
-    max_gap_bars: int
-    frozen_bars: int
-    last_60d_coverage: float
-    n_zero_volume_bars_60d: int
-    funding_rate_8h: float
-    open_interest_usdt: float
-    oi_usdt_median: float
-    oi_change_30d: float
-    listing_age_days: int
-    vol_30d: float
-    basis_z_score: float | None
-    basis_annualized_mean: float | None
-    basis_vol: float | None
-    risk_event_override: str | None
-    updated_at_utc: str
+    delist_date: str | None = None
+    delist_announcement: str | None = None
+    adv_usdt_median: float = 0.0
+    adv_usdt_mean: float = 0.0
+    has_kline: bool = False
+    has_funding: bool = False
+    n_bar_gaps: int = 0
+    max_gap_bars: int = 0
+    frozen_bars: int = 0
+    last_60d_coverage: float = 0.0
+    n_zero_volume_bars_60d: int = 0
+    funding_rate_8h: float = 0.0
+    open_interest_usdt: float = 0.0
+    oi_usdt_median: float = 0.0
+    oi_change_30d: float = 0.0
+    listing_age_days: int = 0
+    vol_30d: float = 0.0
+    basis_z_score: float | None = None
+    basis_annualized_mean: float | None = None
+    basis_vol: float | None = None
+    risk_event_override: str | None = None
+    updated_at_utc: str = ""
+    # New fields for pipeline compatibility
+    tf: str = "4h"
+    contract_type: str = "PERPETUAL"
+    quote_asset: str = "USDT"
+    margin_asset: str = "USDT"
+    is_coverage: bool = True
+    n_is_bars: int = 0
+    expected_is_bars: int = 0
+    amihud_30d: float = 0.0
+    screening_clip_usdt: float = 10000.0
+    taker_fee_bps: float = 5.0
+    half_spread_bps: float = 1.0
+    impact_bps: float = 0.0
+    tick_cost_bps: float = 0.0
+    tick_size: float = 0.0
+    mark_price: float = 0.0
+    funding_zscore: float = 0.0
+    contract_multiplier: float = 1.0
+    has_nan: bool = False
+    has_inf: bool = False
+    has_timestamp_issues: bool = False
 
 
 @dataclass(frozen=True, slots=True)

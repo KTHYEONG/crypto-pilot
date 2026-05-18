@@ -176,7 +176,14 @@ class BinanceVisionDownloader:
             if not csv_names:
                 return pd.DataFrame()
             with zf.open(csv_names[0]) as handle:
-                return pd.read_csv(handle)
+                df = pd.read_csv(handle, header=None)
+                if not df.empty:
+                    # 일부 파일(metrics, fundingRate 등)에는 첫 줄에 헤더가 포함된 경우가 있음.
+                    # 첫 줄의 첫 번째 컬럼이 문자열(예: 'calc_time', 'create_time', 'timestamp')인 경우 헤더로 간주하고 제거.
+                    first_val = str(df.iloc[0, 0]).lower()
+                    if first_val in ("calc_time", "create_time", "timestamp", "open_time"):
+                        df = df.iloc[1:].reset_index(drop=True)
+                return df
 
     def _vision_path_url(self, *parts: str) -> str:
         encoded = "/".join(urllib.parse.quote(p.strip("/")) for p in parts if p)
