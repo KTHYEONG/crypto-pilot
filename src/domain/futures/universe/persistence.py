@@ -57,9 +57,6 @@ def _symbol_meta_from_dict(payload: dict[str, Any]) -> SymbolMeta:
             else None
         ),
         basis_vol=float(payload["basis_vol"]) if payload["basis_vol"] is not None else None,
-        oi_usdt_median=float(payload["oi_usdt_median"]),
-        oi_to_adv=float(payload["oi_to_adv"]),
-        oi_change_30d=float(payload["oi_change_30d"]),
         capacity_clip_usdt_list=tuple(float(item) for item in payload["capacity_clip_usdt_list"]),
     )
 
