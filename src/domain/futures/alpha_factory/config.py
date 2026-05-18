@@ -50,6 +50,17 @@ class CostAdjusterConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class Step2BlendConfig:
+    """Step2 IC-shrinkage blend configuration."""
+
+    enabled: bool = False
+    prior_mean: float = 0.0
+    prior_strength: float = 3.0
+    min_folds: int = 3
+    fallback_to_static: bool = True
+
+
+@dataclass(frozen=True, slots=True)
 class AlphaFactoryConfig:
     """Top-level config for 4h non-ML AlphaFactoryV1."""
 
@@ -58,3 +69,4 @@ class AlphaFactoryConfig:
     sleeves: SleeveConfig = field(default_factory=SleeveConfig)
     regime: RegimeRouterConfig = field(default_factory=RegimeRouterConfig)
     cost: CostAdjusterConfig = field(default_factory=CostAdjusterConfig)
+    step2: Step2BlendConfig = field(default_factory=Step2BlendConfig)
