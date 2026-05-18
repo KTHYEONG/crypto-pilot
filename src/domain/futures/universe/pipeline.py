@@ -1,0 +1,555 @@
+"""Offline-first PIT universe build pipeline."""
+
+from __future__ import annotations
+
+from dataclasses import replace
+from datetime import UTC, date, datetime
+from pathlib import Path
+from typing import Any
+
+import pandas as pd
+
+from .config import UniverseConfig, hash_config
+from .contracts import FilterReport, ManifestRow, RejectCode, SymbolMeta, UniverseSnapshot
+from .cost_model import apply_cost_model_stage
+from .data_quality import apply_data_quality_stage
+from .ledger import DEFAULT_LEDGER_PATH, load_ledger_slice
+from .liquidity import apply_liquidity_stage
+from .persistence import hash_manifest_rows, save_snapshot_json, save_snapshot_parquet
+from .risk_events import apply_risk_events_stage
+from .selection import apply_selection_stage
+from .structure import apply_structure_stage
+
+DEFAULT_SNAPSHOT_ROOT = Path("logs/futures/universe/snapshots")
+SCHEMA_VERSION = 1
+DEFAULT_MANIFEST_PATH = Path("data/futures/data_manifest.parquet")
+_BASE_REPORT_COLUMNS = {"symbol", "stage", "passed", "reason"}
+
+
+def _to_date(as_of: str | date) -> date:
+    return as_of if isinstance(as_of, date) else date.fromisoformat(as_of)
+
+
+def _normalize_cfg(cfg: dict[str, Any] | UniverseConfig | None) -> UniverseConfig:
+    if cfg is None:
+        return UniverseConfig()
+    if isinstance(cfg, UniverseConfig):
+        return cfg
+    return UniverseConfig(**cfg)
+
+
+def _snapshot_dir(*, tf: str, as_of: date, root: Path) -> Path:
+    return root / f"tf={tf}" / f"as_of={as_of.isoformat()}"
+
+
+def _snapshot_file_stem(*, tf: str, as_of: date) -> str:
+    return f"snapshot_{tf}_{as_of.isoformat()}"
+
+
+def _snapshot_paths(*, tf: str, as_of: date, root: Path) -> tuple[Path, Path]:
+    stem = _snapshot_file_stem(tf=tf, as_of=as_of)
+    return root / f"{stem}.parquet", root / f"{stem}.json"
+
+
+def _filter_report_path(*, tf: str, as_of: date, root: Path) -> Path:
+    return root / f"filter_report_{tf}_{as_of.isoformat()}.parquet"
+
+
+def _to_symbol_meta(frame: pd.DataFrame) -> tuple[SymbolMeta, ...]:
+    metas: list[SymbolMeta] = []
+    if frame.empty:
+        return tuple()
+    ranked = frame.copy()
+    if "rank" not in ranked.columns:
+        ranked["rank"] = pd.Series(range(1, len(ranked) + 1), dtype="int64")
+    for _, row in ranked.iterrows():
+        role_raw = row.get("role", "regular")
+        role = "regular" if pd.isna(role_raw) else str(role_raw)
+        if role not in {"anchor", "regular"}:
+            role = "regular"
+        metas.append(
+            SymbolMeta(
+                symbol=str(row.get("symbol", "")),
+                role=role,
+                adv_usdt=float(row.get("adv_usdt_median", 0.0)),
+                execution_cost_bps=float(row.get("execution_cost_bps", 0.0)),
+                funding_carry_8h=float(row.get("funding_rate_8h", 0.0)),
+                beta_vs_market=float(row.get("beta_vs_market", 0.0)),
+                cluster_id=int(row.get("cluster_id", -1)),
+                tradeable_rank=int(row.get("rank", 0)),
+                basis_annualized_mean=(
+                    float(row["basis_annualized_mean"])
+                    if row.get("basis_annualized_mean") is not None
+                    else None
+                ),
+                basis_vol=float(row["basis_vol"]) if row.get("basis_vol") is not None else None,
+                oi_usdt_median=float(row.get("oi_usdt_median", 0.0)),
+                oi_to_adv=float(row.get("oi_to_adv", 0.0)),
+                oi_change_30d=float(row.get("oi_change_30d", 0.0)),
+                capacity_clip_usdt_list=tuple(
+                    float(x) for x in row.get("capacity_clip_usdt_list", ())
+                ),
+            )
+        )
+    return tuple(metas)
+
+
+def _empty_filter_report(symbol: str) -> FilterReport:
+    return FilterReport(
+        symbol=symbol,
+        stage0_pass=True,
+        stage1_reason=None,
+        stage1_metrics={},
+        stage2_reason=None,
+        stage2_metrics={},
+        stage3_reason=None,
+        stage3_metrics={},
+        stage4_reason=None,
+        stage4_metrics={},
+        stage5_reason=None,
+        stage5_metrics={},
+        stage6_reason=None,
+        stage6_metrics={},
+        final_rank=None,
+        final_cluster_id=None,
+        audit_trail=tuple(),
+    )
+
+
+def _reason_to_reject_code(*, stage: str, reason: str) -> RejectCode | None:
+    normalized = reason.strip().lower()
+    if normalized in {"", "pass", "selected", "anchor_selected"}:
+        return None
+    if normalized == "not_trading":
+        return RejectCode.NOT_TRADING
+    if normalized in {"not_listed"}:
+        return RejectCode.NOT_LISTED
+    if stage.startswith("stage1"):
+        return RejectCode.INVALID_STRUCTURE
+    if normalized in {"insufficient_coverage_60d", "insufficient_is_coverage", "missing_kline"}:
+        return RejectCode.LOW_COVERAGE
+    if normalized in {"too_many_zero_volume_bars"}:
+        return RejectCode.TOO_MANY_ZERO_VOLUME_BARS
+    if normalized in {"too_many_gaps", "gap_too_wide"}:
+        return RejectCode.EXCESSIVE_GAPS
+    if stage.startswith("stage3"):
+        return RejectCode.LOW_LIQUIDITY
+    if stage.startswith("stage4"):
+        return RejectCode.HIGH_EXECUTION_COST
+    if normalized in {"funding_anomaly"}:
+        return RejectCode.FUNDING_ANOMALY
+    if normalized in {"basis_anomaly"}:
+        return RejectCode.BASIS_ANOMALY
+    if normalized in {"manual_risk_override", "manual_override_fail_closed_missing_knowledge_date"}:
+        return RejectCode.RISK_EVENT_OVERRIDE
+    if normalized in {"listing_age_too_young"}:
+        return RejectCode.LISTING_TOO_YOUNG
+    if normalized in {"vol_too_low", "vol_too_high"}:
+        return RejectCode.VOL_BAND_VIOLATION
+    return RejectCode.RANKED_OUT
+
+
+def _stage_metrics_from_row(row: pd.Series) -> dict[str, float]:
+    metrics: dict[str, float] = {}
+    for column, value in row.items():
+        if column in _BASE_REPORT_COLUMNS or pd.isna(value):
+            continue
+        if isinstance(value, bool):
+            metrics[str(column)] = 1.0 if value else 0.0
+            continue
+        if isinstance(value, int | float):
+            metrics[str(column)] = float(value)
+            continue
+        numeric = pd.to_numeric(pd.Series([value]), errors="coerce").iloc[0]
+        if pd.notna(numeric):
+            metrics[str(column)] = float(numeric)
+    return metrics
+
+
+def _to_rejected(frame: pd.DataFrame) -> dict[str, FilterReport]:
+    if frame.empty or "symbol" not in frame.columns:
+        return {}
+    reports: dict[str, FilterReport] = {}
+    grouped = frame.groupby(frame["symbol"].astype("string"), sort=False)
+    for symbol_key, symbol_rows in grouped:
+        symbol = str(symbol_key)
+        if not symbol:
+            continue
+        base = _empty_filter_report(symbol)
+        ordered = symbol_rows.reset_index(drop=True)
+        audit_steps: list[str] = []
+        for _, row in ordered.iterrows():
+            stage = str(row.get("stage", ""))
+            if not stage.startswith("stage"):
+                continue
+            passed = bool(row.get("passed", False))
+            reason = str(row.get("reason", "pass"))
+            reject = None if passed else _reason_to_reject_code(stage=stage, reason=reason)
+            metrics = _stage_metrics_from_row(row)
+            metric_fragment = ",".join(f"{k}={v:.6g}" for k, v in sorted(metrics.items()))
+            audit_steps.append(
+                f"{stage}:{'PASS' if passed else 'FAIL'}:{reason}"
+                + (f":{metric_fragment}" if metric_fragment else "")
+            )
+            if stage.startswith("stage1"):
+                base = replace(base, stage1_reason=reject, stage1_metrics=metrics)
+            elif stage.startswith("stage2"):
+                base = replace(base, stage2_reason=reject, stage2_metrics=metrics)
+            elif stage.startswith("stage3"):
+                base = replace(base, stage3_reason=reject, stage3_metrics=metrics)
+            elif stage.startswith("stage4"):
+                base = replace(base, stage4_reason=reject, stage4_metrics=metrics)
+            elif stage.startswith("stage5"):
+                base = replace(base, stage5_reason=reject, stage5_metrics=metrics)
+            elif stage.startswith("stage6"):
+                final_rank_raw = row.get("rank")
+                final_rank = (
+                    int(final_rank_raw)
+                    if final_rank_raw is not None and pd.notna(final_rank_raw)
+                    else base.final_rank
+                )
+                cluster_raw = row.get("cluster_id")
+                final_cluster_id = (
+                    int(cluster_raw)
+                    if cluster_raw is not None and pd.notna(cluster_raw)
+                    else base.final_cluster_id
+                )
+                base = replace(
+                    base,
+                    stage6_reason=reject,
+                    stage6_metrics=metrics,
+                    final_rank=final_rank,
+                    final_cluster_id=final_cluster_id,
+                )
+        base = replace(base, audit_trail=tuple(audit_steps))
+        if any(not bool(item.get("passed", False)) for _, item in ordered.iterrows()):
+            reports[symbol] = base
+    return reports
+
+
+def _compute_manifest_hash(*, as_of: date, tf: str, manifest_path: Path) -> str:
+    if not manifest_path.exists():
+        return str(hash_manifest_rows(tuple()))
+    manifest = pd.read_parquet(manifest_path)
+    if manifest.empty:
+        return str(hash_manifest_rows(tuple()))
+
+    scoped = manifest.copy()
+    if "tf" in scoped.columns:
+        scoped = scoped.loc[scoped["tf"].astype("string") == tf]
+    if scoped.empty:
+        return str(hash_manifest_rows(tuple()))
+
+    if "knowledge_date" in scoped.columns:
+        cutoff_raw = pd.to_datetime(scoped["knowledge_date"], errors="coerce")
+    else:
+        cutoff_raw = pd.to_datetime(scoped.get("period"), errors="coerce")
+    scoped = scoped.loc[cutoff_raw.dt.date <= as_of]
+    if scoped.empty:
+        return str(hash_manifest_rows(tuple()))
+
+    rows: list[ManifestRow] = []
+    for _, row in scoped.iterrows():
+        rows.append(
+            ManifestRow(
+                symbol=str(row.get("symbol", "")),
+                period=str(row.get("period", "")),
+                source=str(row.get("source", "")),
+                sha256=str(row.get("sha256", "")),
+                is_final=bool(row.get("is_final", True)),
+                updated_at_utc=str(row.get("updated_at_utc", "")),
+                tf=str(row.get("tf", "")),
+                url=str(row.get("url", "")),
+                bytes=int(row.get("bytes", 0) or 0),
+                fetched_at_utc=str(row.get("fetched_at_utc", "")),
+            )
+        )
+    return str(hash_manifest_rows(rows))
+
+
+def _stage_counts_from_report(
+    report: pd.DataFrame,
+    *,
+    selected: pd.DataFrame | None = None,
+) -> tuple[int, int, int, int, int, int, int]:
+    if report.empty or "stage" not in report.columns or "symbol" not in report.columns:
+        n_selected = (
+            int(selected["symbol"].nunique())
+            if selected is not None and "symbol" in selected.columns
+            else 0
+        )
+        return (0, 0, 0, 0, 0, 0, n_selected)
+
+    stage_col = report["stage"].astype("string")
+    symbol_col = report["symbol"].astype("string")
+    pass_col = report.get("passed", pd.Series(False, index=report.index)).astype(bool)
+
+    def _count(stage_prefix: str, *, passed_only: bool) -> int:
+        mask = stage_col.str.startswith(stage_prefix)
+        if passed_only:
+            mask = mask & pass_col
+        return int(symbol_col.loc[mask].nunique())
+
+    n_stage0 = _count("stage1", passed_only=False)
+    n_stage1_pass = _count("stage1", passed_only=True)
+    n_stage2_pass = _count("stage2", passed_only=True)
+    n_stage3_pass = _count("stage3", passed_only=True)
+    n_stage4_pass = _count("stage4", passed_only=True)
+    n_stage5_pass = _count("stage5", passed_only=True)
+    n_stage6_selected = _count("stage6", passed_only=True)
+    if n_stage6_selected == 0 and selected is not None and "symbol" in selected.columns:
+        n_stage6_selected = int(selected["symbol"].nunique())
+    return (
+        n_stage0,
+        n_stage1_pass,
+        n_stage2_pass,
+        n_stage3_pass,
+        n_stage4_pass,
+        n_stage5_pass,
+        n_stage6_selected,
+    )
+
+
+def _save_snapshot(
+    snapshot: UniverseSnapshot,
+    selected: pd.DataFrame,
+    report: pd.DataFrame,
+    *,
+    root: Path,
+) -> None:
+    as_of_date = date.fromisoformat(snapshot.as_of)
+    out_dir = _snapshot_dir(tf=snapshot.tf, as_of=as_of_date, root=root)
+    flat_parquet, flat_json = _snapshot_paths(tf=snapshot.tf, as_of=as_of_date, root=root)
+    flat_report = _filter_report_path(tf=snapshot.tf, as_of=as_of_date, root=root)
+    root.mkdir(parents=True, exist_ok=True)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    selected.to_parquet(flat_parquet, index=False)
+    report.to_parquet(flat_report, index=False)
+    save_snapshot_json(snapshot, flat_json)
+    save_snapshot_parquet(snapshot, out_dir / "snapshot_meta.parquet")
+    # Legacy compatibility artifacts.
+    selected.to_parquet(out_dir / "snapshot.parquet", index=False)
+    report.to_parquet(out_dir / "filter_report.parquet", index=False)
+    save_snapshot_json(snapshot, out_dir / "snapshot.json")
+
+
+def load_universe_snapshot(
+    *,
+    as_of: str | date,
+    tf: str,
+    snapshot_root: Path = DEFAULT_SNAPSHOT_ROOT,
+) -> pd.DataFrame | None:
+    """Load selected universe symbols from snapshot, if already materialized."""
+    as_of_date = _to_date(as_of)
+    flat_parquet, _ = _snapshot_paths(tf=tf, as_of=as_of_date, root=snapshot_root)
+    legacy_parquet = _snapshot_dir(tf=tf, as_of=as_of_date, root=snapshot_root) / "snapshot.parquet"
+    target = flat_parquet if flat_parquet.exists() else legacy_parquet
+    if not target.exists():
+        return None
+    return pd.read_parquet(target)
+
+
+def build_universe(
+    *,
+    as_of: str | date,
+    tf: str,
+    cfg: dict[str, Any] | UniverseConfig | None = None,
+    ledger_path: Path = DEFAULT_LEDGER_PATH,
+    snapshot_root: Path = DEFAULT_SNAPSHOT_ROOT,
+    previous_selection: tuple[str, ...] | None = None,
+) -> tuple[UniverseSnapshot, pd.DataFrame, pd.DataFrame]:
+    """Build universe with offline-first PIT stage pipeline.
+
+    Returns:
+        Tuple of (snapshot metadata, selected symbols frame, filter report frame).
+
+    """
+    as_of_date = _to_date(as_of)
+    config = _normalize_cfg(cfg)
+    manifest_hash = _compute_manifest_hash(
+        as_of=as_of_date,
+        tf=tf,
+        manifest_path=DEFAULT_MANIFEST_PATH,
+    )
+    columns = (
+        "symbol",
+        "tf",
+        "date",
+        "knowledge_date",
+        "contract_type",
+        "quote_asset",
+        "margin_asset",
+        "status",
+        "contract_multiplier",
+        "has_kline",
+        "has_funding",
+        "is_coverage",
+        "n_is_bars",
+        "expected_is_bars",
+        "n_bar_gaps",
+        "last_60d_coverage",
+        "n_zero_volume_bars_60d",
+        "frozen_bars",
+        "has_nan",
+        "has_inf",
+        "has_timestamp_issues",
+        "adv_usdt_median",
+        "amihud_30d",
+        "vol_30d",
+        "screening_clip_usdt",
+        "taker_fee_bps",
+        "half_spread_bps",
+        "impact_bps",
+        "tick_cost_bps",
+        "tick_size",
+        "mark_price",
+        "listing_age_days",
+        "funding_rate_8h",
+        "funding_zscore",
+        "basis_z_score",
+        "oi_usdt_median",
+        "risk_event_override",
+    )
+    stage0 = load_ledger_slice(as_of=as_of_date, tf=tf, columns=columns, ledger_path=ledger_path)
+    if stage0.empty:
+        empty = pd.DataFrame(columns=["symbol"])
+        report = pd.DataFrame(columns=["symbol", "stage", "passed", "reason"])
+        snapshot = UniverseSnapshot(
+            as_of=as_of_date.isoformat(),
+            tf=tf,
+            schema_version=SCHEMA_VERSION,
+            config_hash=hash_config(config),
+            data_manifest_hash=manifest_hash,
+            basket_ref=config.stage6.basket_ref,
+            basket_weights=config.stage6.basket_weights,
+            selected=tuple(),
+            rejected={},
+            generated_at_utc=datetime.now(tz=UTC).isoformat(),
+            ledger_confidence=config.ledger_confidence,
+            n_stage0=0,
+            n_stage1_pass=0,
+            n_stage2_pass=0,
+            n_stage3_pass=0,
+            n_stage4_pass=0,
+            n_stage5_pass=0,
+            n_stage6_selected=0,
+        )
+        _save_snapshot(snapshot, empty, report, root=snapshot_root)
+        return snapshot, empty, report
+
+    latest = (
+        stage0.sort_values(["symbol", "date", "knowledge_date"])
+        .groupby("symbol", as_index=False)
+        .tail(1)
+    )
+    s1, r1 = apply_structure_stage(latest)
+    s2, r2 = apply_data_quality_stage(s1, config=config.stage2)
+    s3, r3 = apply_liquidity_stage(s2, config=config.stage3)
+    s4, r4 = apply_cost_model_stage(
+        s3,
+        config=config.stage4,
+        as_of=as_of_date,
+    )
+    s5, r5 = apply_risk_events_stage(s4, config=config.stage5)
+    s6, r6 = apply_selection_stage(
+        s5,
+        config=config.stage6,
+        max_symbols=int(config.stage6.k_in),
+        previous_selection=previous_selection,
+        k_in=int(config.stage6.k_in),
+        k_out=int(config.stage6.k_out),
+    )
+    report = pd.concat([r1, r2, r3, r4, r5, r6], ignore_index=True)
+
+    snapshot = UniverseSnapshot(
+        as_of=as_of_date.isoformat(),
+        tf=tf,
+        schema_version=SCHEMA_VERSION,
+        config_hash=hash_config(config),
+        data_manifest_hash=manifest_hash,
+        basket_ref=config.stage6.basket_ref,
+        basket_weights=config.stage6.basket_weights,
+        selected=_to_symbol_meta(s6),
+        rejected=_to_rejected(report),
+        n_stage0=int(latest["symbol"].nunique()),
+        n_stage1_pass=int(s1["symbol"].nunique()),
+        n_stage2_pass=int(s2["symbol"].nunique()),
+        n_stage3_pass=int(s3["symbol"].nunique()),
+        n_stage4_pass=int(s4["symbol"].nunique()),
+        n_stage5_pass=int(s5["symbol"].nunique()),
+        n_stage6_selected=int(s6["symbol"].nunique()),
+        generated_at_utc=datetime.now(tz=UTC).isoformat(),
+        ledger_confidence=config.ledger_confidence,
+    )
+    selected_columns = ["symbol", "tradeable_score", "rank", "role", "hysteresis_state"]
+    selected_columns.extend(
+        [dwell_col for dwell_col in ("membership_days", "dwell_days") if dwell_col in s6.columns]
+    )
+    selected = s6[[column for column in selected_columns if column in s6.columns]].copy()
+    _save_snapshot(snapshot, selected, report, root=snapshot_root)
+    return snapshot, selected, report
+
+
+def load_or_build_universe_snapshot(
+    *,
+    as_of: str | date,
+    tf: str,
+    cfg: dict[str, Any] | UniverseConfig | None = None,
+    ledger_path: Path = DEFAULT_LEDGER_PATH,
+    snapshot_root: Path = DEFAULT_SNAPSHOT_ROOT,
+    previous_selection: tuple[str, ...] | None = None,
+) -> tuple[UniverseSnapshot, pd.DataFrame, pd.DataFrame]:
+    """Load cached snapshot, otherwise build and persist it."""
+    loaded = load_universe_snapshot(as_of=as_of, tf=tf, snapshot_root=snapshot_root)
+    if loaded is not None:
+        as_of_date = _to_date(as_of)
+        config = _normalize_cfg(cfg)
+        manifest_hash = _compute_manifest_hash(
+            as_of=as_of_date,
+            tf=tf,
+            manifest_path=DEFAULT_MANIFEST_PATH,
+        )
+        report_path = _filter_report_path(tf=tf, as_of=as_of_date, root=snapshot_root)
+        if not report_path.exists():
+            report_path = (
+                _snapshot_dir(tf=tf, as_of=as_of_date, root=snapshot_root) / "filter_report.parquet"
+            )
+        report = pd.read_parquet(report_path) if report_path.exists() else pd.DataFrame()
+        (
+            n_stage0,
+            n_stage1_pass,
+            n_stage2_pass,
+            n_stage3_pass,
+            n_stage4_pass,
+            n_stage5_pass,
+            n_stage6_selected,
+        ) = _stage_counts_from_report(report, selected=loaded)
+        snapshot = UniverseSnapshot(
+            as_of=as_of_date.isoformat(),
+            tf=tf,
+            schema_version=SCHEMA_VERSION,
+            config_hash=hash_config(config),
+            data_manifest_hash=manifest_hash,
+            basket_ref=config.stage6.basket_ref,
+            basket_weights=config.stage6.basket_weights,
+            selected=_to_symbol_meta(loaded),
+            rejected=_to_rejected(report),
+            ledger_confidence=config.ledger_confidence,
+            n_stage0=n_stage0,
+            n_stage1_pass=n_stage1_pass,
+            n_stage2_pass=n_stage2_pass,
+            n_stage3_pass=n_stage3_pass,
+            n_stage4_pass=n_stage4_pass,
+            n_stage5_pass=n_stage5_pass,
+            n_stage6_selected=n_stage6_selected,
+            generated_at_utc=datetime.now(tz=UTC).isoformat(),
+        )
+        return snapshot, loaded, report
+    return build_universe(
+        as_of=as_of,
+        tf=tf,
+        cfg=cfg,
+        ledger_path=ledger_path,
+        snapshot_root=snapshot_root,
+        previous_selection=previous_selection,
+    )
