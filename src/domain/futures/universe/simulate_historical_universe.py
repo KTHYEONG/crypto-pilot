@@ -155,10 +155,14 @@ def process_symbol(symbol: str, start_date: date, end_date: date, downloader: Bi
         
     return daily_rows, len(klines)
 
-def collect_historical_data(start_date: date, end_date: date, limit=None):
+def collect_historical_data(start_date: date, end_date: date, limit: int | None = None) -> None:
     """Phase A: Build the universe ledger with real data."""
+    import re
     downloader = BinanceVisionDownloader()
-    all_symbols = downloader.list_all_symbols()
+    all_symbols: list[str] = downloader.list_all_symbols()
+    
+    # 만기일이 포함된 분기 선물 심볼(예: ETHUSDT_210326) 필터링하여 제외
+    all_symbols = [s for s in all_symbols if not re.search(r'_\d{6}$', s)]
     
     priority = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT"]
     symbols = [s for s in priority if s in all_symbols]
