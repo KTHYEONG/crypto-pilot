@@ -1,11 +1,12 @@
-import logging
 import argparse
+import logging
 from datetime import date, datetime
 from pathlib import Path
 
 # Project Root Setup
 project_root = Path(__file__).resolve().parents[4]
 import sys
+
 if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
