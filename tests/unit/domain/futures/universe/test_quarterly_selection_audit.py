@@ -44,7 +44,7 @@ _COMMON_ROW = {
     "oi_usdt_median": 15_000_000.0,
     "risk_event_override": "",
     "vol_30d": 0.05,
-    "amihud_30d": 1e-6,
+    "amihud_30d": 5e-10,
     "screening_clip_usdt": 10_000.0,
     "impact_bps": 1.0,
     "half_spread_bps": 1.0,
@@ -75,7 +75,7 @@ def _quarter_row(
             "is_listed": True,
             "is_trading": True,
             "adv_usdt_median": adv_usdt_median,
-            "amihud_30d": 1e-6,
+            "amihud_30d": 5e-10,
             # Keep the execution-cost ordering stable by varying spread/impact inputs.
             "half_spread_bps": execution_bias_bps,
             "impact_bps": execution_bias_bps,
@@ -163,17 +163,17 @@ def test_quarterly_universe_selection_audit(tmp_path: Path) -> None:
     )
 
     quarterly_expectations: dict[str, QuarterlyExpectation] = {
-        "2025-04-01": {
+        "2025-07-01": {
             "as_of": "2025-01-01",
             "selected": ("BTC/USDT", "ETH/USDT"),
             "ranked_out": "XRP/USDT",
         },
-        "2025-07-01": {
+        "2025-10-01": {
             "as_of": "2025-04-01",
             "selected": ("BTC/USDT", "XRP/USDT"),
             "ranked_out": "ETH/USDT",
         },
-        "2025-10-01": {
+        "2026-01-01": {
             "as_of": "2025-07-01",
             "selected": ("BTC/USDT", "ETH/USDT"),
             "ranked_out": "XRP/USDT",
@@ -213,4 +213,4 @@ def test_quarterly_universe_selection_audit(tmp_path: Path) -> None:
         "2025-01-01": ("BTC/USDT", "ETH/USDT"),
         "2025-04-01": ("BTC/USDT", "XRP/USDT"),
         "2025-07-01": ("BTC/USDT", "ETH/USDT"),
-    }
+    }  # is_end keys: oos_start from OOS=6M window
