@@ -1235,51 +1235,6 @@ class RealTraderFutures:
             pass
             logger.error(f"⚠️ Failed to set Single-Asset Mode: {e}")
 
-        if os.getenv("SKIP_NUMBA_WARMUP", "true").lower() != "true":
-            try:
-                from src.domain.futures.backtest_engine import (
-                    backtest_loop_single_numba as backtest_loop_numba,
-                )
-
-                logger.info("⚙️ Pre-compiling Numba JIT functions to prevent runtime CPU spike...")
-                dummy_arr = np.array([1.0], dtype=np.float64)
-                dummy_int_arr = np.array([1], dtype=np.int64)
-                _ = backtest_loop_numba(
-                    dummy_arr,
-                    dummy_arr,
-                    dummy_arr,
-                    dummy_arr,
-                    dummy_arr,
-                    dummy_arr,
-                    dummy_int_arr,
-                    dummy_arr,
-                    dummy_arr,
-                    dummy_arr,
-                    dummy_arr,
-                    100.0,
-                    1.0,
-                    0.0005,
-                    0.0005,
-                    0.01,
-                    dummy_int_arr,
-                    dummy_arr,
-                    2.0,
-                    2.0,
-                    2.0,
-                    2.0,
-                    2.0,
-                    2.0,
-                    0,
-                    0,
-                    False,
-                    1000.0,
-                )
-                logger.info("✅ Numba JIT warm-up complete.")
-            except ImportError:
-                pass
-        else:
-            logger.info("??Skipping Numba warm-up (SKIP_NUMBA_WARMUP=true)")
-
         self.health_manager.update_heartbeat(status="initialized")
         logger.info("🚀 Initialization Complete. Bot is Running in 2D Mode...")
 
