@@ -134,7 +134,7 @@ build_universe(as_of: date, tf: str, cfg: UniverseConfig) -> UniverseSnapshot
   * 타임스탬프 단조 증가 및 UTC 정합성 확인
   * 필수 데이터 컬럼 존재 여부 (`has_kline`, `has_funding`)
 * **Walk-Forward 검증 메타 (rolling)**:
-  * `is_months = 21`, `oos_months = 3`, `step_months = 3`, `purge = label_horizon`, `embargo_days = 7`
+  * `is_months = 24`, `oos_months = 6`, `step_months = 3`, `purge = 1 decision bar`, `embargo_days = 0`
 * **기술 스택**: `numpy.where`, `pandas.to_numeric` 벡터화 예외 판별.
 
 ---
