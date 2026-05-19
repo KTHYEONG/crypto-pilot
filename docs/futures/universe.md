@@ -71,7 +71,7 @@ build_universe(as_of: date, tf: str, cfg: UniverseConfig) -> UniverseSnapshot
 * `date`: 실제 데이터 발생 일자 (YYYY-MM-DD)
 * `knowledge_date`: 해당 행의 정보가 시스템에 실제로 가용해진 날짜 (T+1 적용으로 same-day 룩어헤드 방지)
 * `is_listed` / `is_trading` / `status`: 상장 여부 및 활성 거래 상태 ("TRADING", "SETTLING", "DELISTED" 등)
-* `first_kline_date` / `delist_date`: 복원된 상장일 및 실제 최종 kline 관측일 기준 상폐일
+* `first_kline_date` / `delist_date`: FAPI `exchangeInfo.onboardDate` 기준 실제 상장일(누락 시 첫 kline 관측일 fallback) 및 실제 최종 kline 관측일 기준 상폐일. `listing_age_days`는 본 값 기준으로 산출되어 sync 윈도우 시작점에 고정되지 않음.
 * `adv_usdt_median`: 30일 거래대금 중앙값
 * `amihud_30d`: 가격 영향 지수 (PIT 준수 리샘플링 기반)
 * `mark_price`: 해당 시점의 기준 가격
@@ -123,6 +123,7 @@ build_universe(as_of: date, tf: str, cfg: UniverseConfig) -> UniverseSnapshot
 * **설정 파라미터 (`Stage2Config`)**:
   * `min_is_coverage = 0.80` (최소 데이터 충족률 80%)
   * `min_is_bars_4h = 1_296` (9개월 기준 4시간 봉 기준값: $9 \times 30 \times 6 \times 80\% = 1{,}296$. Stage 5의 `listing_age_days >= 90`이 단기 상장 종목을 별도로 걸러주므로, Stage 2는 롤링 지표 계산에 충분한 기간만 요구함. 백테스트 IS 윈도우 충분성은 optimizer fold에서 별도 검증.)
+    * **PIT 보장**: `n_is_bars` / `expected_is_bars`는 `sync_utils.py`에서 각 레저 행의 `date`까지 **누적된 4h 봉 수**로 산출된다. 전체 수집 길이를 모든 행에 상수로 기록하던 look-ahead 결함은 제거되었으며, 이로써 Stage 2 게이트가 `as_of` 시점별로 정상 동작한다.
   * `min_coverage_60d = 0.95` (최근 60일 연속성 점검: 단기 결측 감지)
   * `max_zero_volume_bars_60d = 1` (체결이 없는 동결 자산 차단)
   * `max_gap_bars = 200` (최대 허용 단일 데이터 Gap 크기; `max_gap_bars` 컬럼이 레저에 공급될 때 활성화)
@@ -143,7 +144,7 @@ build_universe(as_of: date, tf: str, cfg: UniverseConfig) -> UniverseSnapshot
 * **구현 모듈**: `liquidity.py` ➡️ `apply_liquidity_stage()`
 * **설정 파라미터 (`Stage3Config`)**:
   * `min_adv_usdt_median = 25_000_000.0` (30일 Median ADV 하한선 25M USDT. Spike 왜곡 방지용 Median 필수 사용)
-  * `max_amihud_30d = 6e-8` (일별 $|ret| / (volume \times price)$ 기준 30일 Amihud Illiquidity 상한선. 실측 분포: p50≈2.2e-9, p95≈4.2e-8, max≈1.7e-7. 임계값 = p95 × 1.5 ≈ 6.2e-8 → 6e-8로 반올림. ADV 게이트 통과 종목 중 명백 비유동 상위 5%만 탈락.)
+  * `max_amihud_30d = 1.63e-9` (일별 $|ret| / (volume \times price)$ 기준 30일 Amihud Illiquidity 상한선. ADV ≥ 25M 통과 종목 실측 분포: p90≈4.6e-10, p95≈6.3e-10, p99≈1.1e-9, max≈5.2e-8. 임계값 = p99 × 1.5 ≈ 1.63e-9 → ADV 게이트 통과 종목 중 명백 비유동 상위 ~1%만 탈락. 구 임계값 6e-8은 실측 max(5.2e-8)보다도 높아 영구 inert였으므로 실측 분포 기반으로 재산정함.)
   * `max_clip_to_adv = 0.005` (ADV 대비 1회 집행 Clip 비율 상한 0.5%)
 * **자본 티어별 Clip 설계 (외생 고정 적용으로 순환 루프 제거)**:
   $$\text{screening\_clip\_usdt} = \begin{cases} 
@@ -182,7 +183,8 @@ build_universe(as_of: date, tf: str, cfg: UniverseConfig) -> UniverseSnapshot
 * **검증 규칙**:
   1. **상장 연령 (Listing Age)**: 최소 90일 이상 경과 자산만 허용 (`listing_age_days >= 90`). (상장 빔 및 초기 락업 해제 충격 방지)
   2. **변동성 밴드 (Vol Band)**: 4h 바 기준 연율화 변동성 `vol_30d`가 `[0.05, 4.0]` 범위 내 존재할 것 (5%~400% 연율). 활동성 없는 고사 코인 및 극단적 meme/junk 코인 동시 배제.
-  3. **펀딩비 이상치**: 8시간 원천 펀딩비의 절대값 z-score 가 2.5를 초과하거나 1일 이내 급격한 부호 반전(`enable_funding_sign_flip`)이 일어나는 조작/스퀴즈성 자산 차단. (※ 단순 고펀딩 일관 유지 자산은 carry harvest 전략 활용을 위해 **정상 통과** 시킴)
+  3. **펀딩비 이상치**: 8시간 원천 펀딩비의 **MAD 기반 robust z-score**(`funding_zscore`) 절대값이 2.5를 초과하거나, 1일 이내 급격한 부호 반전(`enable_funding_sign_flip`; 양쪽 펀딩비 모두 `|funding| > funding_sign_flip_min_abs`(0.001) 조건 충족 시에만 이상치 인정)이 일어나는 조작/스퀴즈성 자산 차단. (※ 단순 고펀딩 일관 유지 자산은 carry harvest 전략 활용을 위해 **정상 통과** 시킴)
+     * **MAD robust z 산출**: `funding_zscore`는 `sync_utils.py`에서 종목별 30일 롤링 윈도우로 PIT 산출된다. 표준편차 대신 MAD(중앙값 절대편차, breakdown point 50%, `scale='normal'`)를 사용해 fat-tail 극단치의 masking 효과를 차단하며, 펀딩비가 장기 안정 구간일 때 MAD 분모가 0에 수렴해 z가 발산하는 수치 불안정을 막기 위해 출력값을 `[-50, 50]`으로 클리핑한다.
   4. **수동 리스크 오버라이드 (Manual Override)**:
      * `ManualEventRow` 수동 입력 이벤트 발생 시 배제.
      * **Fail-Closed 원칙**: `knowledge_date`가 누락된 수동 배제 요청은 PIT 정합성을 해치므로 해당 레코드 자체를 무시(배제하지 않음)하여 휴리스틱 오염 차단.
