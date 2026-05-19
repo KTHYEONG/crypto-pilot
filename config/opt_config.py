@@ -607,8 +607,8 @@ def get_quarterly_window(reference_date: Any = None) -> tuple[str, str, str, str
         reference_date.year, current_quarter_start_month, 1
     )
     oos_end: datetime.date = current_quarter_start - datetime.timedelta(days=1)
-    oos_start: datetime.date = current_quarter_start - relativedelta(months=3)
-    is_start: datetime.date = oos_start - relativedelta(months=15)
+    oos_start: datetime.date = current_quarter_start - relativedelta(months=6)
+    is_start: datetime.date = oos_start - relativedelta(months=24)
     fetch_start: datetime.date = is_start - relativedelta(days=365)
     return (
         fetch_start.strftime("%Y-%m-%d"),
