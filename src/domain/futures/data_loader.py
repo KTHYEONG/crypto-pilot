@@ -212,6 +212,9 @@ class DataCollector:
     def _normalize_df(self, df: pd.DataFrame) -> pd.DataFrame:
         if df.empty: return df
         if "timestamp" in df.columns:
+            # Ensure timestamp is numeric to prevent pandas from parsing it as a date string
+            # and to avoid TypeError during sort_values if there's a mix of int and str
+            df["timestamp"] = pd.to_numeric(df["timestamp"], errors="coerce")
             df["datetime"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
         elif "datetime" in df.columns:
             df["datetime"] = pd.to_datetime(df["datetime"], utc=True)
@@ -275,6 +278,60 @@ class DataCollector:
 
         mask = (cache_df["datetime"] >= req_start) & (cache_df["datetime"] <= req_end)
         return cache_df.loc[mask].copy()
+
+    def ensure_1m_data(self, symbol: str, start_date: str, end_date: str) -> None:
+        """Optimized 1m data collection: Vision for bulk, API for recent."""
+        timeframe = "1m"
+        req_start, req_end = pd.to_datetime(start_date, utc=True), pd.to_datetime(end_date, utc=True)
+        
+        cache_df = self._load_cache(symbol, timeframe)
+        if not cache_df.empty and cache_df["datetime"].min() <= req_start and cache_df["datetime"].max() >= req_end:
+            return
+
+        # API cutoff: data from the last 35 days might not be in Vision monthly archives
+        api_cutoff = pd.Timestamp.now(tz="UTC").replace(day=1, hour=0, minute=0, second=0, microsecond=0) - pd.Timedelta(days=32)
+        
+        new_parts = []
+        
+        # 1. Vision monthly archives for full months in the past
+        vision_symbol = symbol.replace("/", "")
+        current_month_start = req_start.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        
+        while current_month_start < min(req_end, api_cutoff):
+            # Check if this month is already in cache_df
+            month_end = (current_month_start + pd.offsets.MonthEnd(1)).replace(hour=23, minute=59, second=59)
+            if cache_df.empty or cache_df["datetime"].min() > current_month_start or cache_df["datetime"].max() < month_end:
+                from src.core.utils.binance_vision import BinanceVisionDownloader
+                vision = BinanceVisionDownloader()
+                v_df = vision.fetch_klines_archive_monthly(vision_symbol, "1m", current_month_start.year, current_month_start.month)
+                if not v_df.empty:
+                    # Klines columns: timestamp, open, high, low, close, volume, close_time, quote_asset_volume, trades, taker_buy_base, taker_buy_quote, ignore
+                    v_df.columns = [
+                        "timestamp", "open", "high", "low", "close", "volume",
+                        "close_time", "quote_asset_volume", "number_of_trades",
+                        "taker_buy_base_volume", "taker_buy_quote_volume", "ignore"
+                    ]
+                    # Convert to numeric
+                    for col in ["open", "high", "low", "close", "volume", "taker_buy_base_volume", "taker_buy_quote_volume"]:
+                        v_df[col] = pd.to_numeric(v_df[col], errors="coerce")
+                    
+                    v_df = v_df[["timestamp", "open", "high", "low", "close", "volume", "taker_buy_base_volume", "taker_buy_quote_volume"]]
+                    new_parts.append(self._normalize_df(v_df))
+            
+            current_month_start += pd.offsets.MonthBegin(1)
+
+        # 2. API for recent data or gaps
+        remaining_start = max(req_start, cache_df["datetime"].max() if not cache_df.empty else req_start)
+        if remaining_start < req_end:
+            chunk = self.client.fetch_ohlcv_with_taker(symbol, timeframe, str(remaining_start), str(req_end))
+            if not chunk.empty:
+                new_parts.append(self._normalize_df(chunk))
+
+        if new_parts:
+            if not cache_df.empty and "timestamp" in cache_df.columns:
+                cache_df["timestamp"] = pd.to_numeric(cache_df["timestamp"], errors="coerce")
+            combined = pd.concat([cache_df, *new_parts]).drop_duplicates(subset=["timestamp"]).sort_values("timestamp")
+            self._save_cache(symbol, timeframe, combined)
 
     def ensure_metrics_data(self, symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
         safe_symbol = self._safe_symbol(symbol)
