@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from typing import cast
 
 import numpy as np
 import pytest
@@ -15,7 +16,10 @@ project_root = str(Path(__file__).resolve().parents[3])
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-from src.domain.futures.portfolio.execution_sim import backtest_target_weights_numba
+from src.domain.futures.portfolio.execution_sim import (
+    backtest_target_weights_intrabar_numba,
+    backtest_target_weights_numba,
+)
 
 # ---------------------------------------------------------------------------
 # 공통 헬퍼
@@ -64,30 +68,33 @@ def _run(
     dd_thr: float = 0.0,
 ) -> tuple[np.ndarray, float, np.ndarray, np.ndarray]:
     """backtest_target_weights_numba 호출 래퍼."""
-    return backtest_target_weights_numba(
-        d["close"],
-        d["high"],
-        d["low"],
-        d["open"],
-        d["funding"],
-        d["kill"],
-        weights,
-        init_bal,
-        d["lev"],
-        0.0002,  # maker_fee (unused)
-        taker_fee,
-        slip,
-        rb,
-        max_hold,
-        0.0,
-        d["atr"],
-        atr_mult,
-        trail_mult,
-        use_simple_atr,
-        max_conc,
-        max_exp,
-        max_exp_coin,
-        dd_thr,
+    return cast(
+        tuple[np.ndarray, float, np.ndarray, np.ndarray],
+        backtest_target_weights_numba(
+            d["close"],
+            d["high"],
+            d["low"],
+            d["open"],
+            d["funding"],
+            d["kill"],
+            weights,
+            init_bal,
+            d["lev"],
+            0.0002,  # maker_fee (unused)
+            taker_fee,
+            slip,
+            rb,
+            max_hold,
+            0.0,
+            d["atr"],
+            atr_mult,
+            trail_mult,
+            use_simple_atr,
+            max_conc,
+            max_exp,
+            max_exp_coin,
+            dd_thr,
+        ),
     )
 
 
@@ -1048,3 +1055,297 @@ class TestKillSignalMaxHold:
         t = trades[0]
         assert int(t[1]) == 1  # entry_idx == 1
         assert int(t[2]) == 4  # exit_idx == 4 (4-1=3 >= max_hold=3)
+
+
+# ---------------------------------------------------------------------------
+# Intrabar 1m semantics
+# ---------------------------------------------------------------------------
+
+
+class TestIntrabarStopPathContract:
+    """intrabar_1m stop path 보수적 계약 검증."""
+
+    def test_long_gap_down_through_stop_uses_adverse_open_fill(self) -> None:
+        """Long stop gap-down은 stop price가 아닌 불리한 open 기준으로 체결되어야 한다."""
+        n_decisions, n_syms = 6, 1
+        n_path = 12
+        slip = 0.0002
+        decision_price = np.full((n_decisions, n_syms), 100.0, dtype=np.float64)
+        target_weights = np.zeros((n_decisions, n_syms), dtype=np.float64)
+        target_weights[2:, 0] = 0.50
+        lev = np.ones((n_decisions, n_syms), dtype=np.float64)
+        atr = np.full((n_decisions, n_syms), 5.0, dtype=np.float64)
+        kill = np.zeros((n_decisions, n_syms), dtype=np.float64)
+        path_open = np.full((n_path, n_syms), 100.0, dtype=np.float64)
+        path_high = np.full((n_path, n_syms), 100.0, dtype=np.float64)
+        path_low = np.full((n_path, n_syms), 100.0, dtype=np.float64)
+        path_close = np.full((n_path, n_syms), 100.0, dtype=np.float64)
+        path_open[6, 0] = 80.0
+        path_high[6, 0] = 80.0
+        path_low[6, 0] = 79.0
+        path_close[6, 0] = 80.0
+        start_idx = np.array([0, 2, 4, 6, 8, 10], dtype=np.int64)
+        end_idx = np.array([2, 4, 6, 8, 10, 12], dtype=np.int64)
+
+        trades, _bal, _eq, _diag = backtest_target_weights_intrabar_numba(
+            decision_price,
+            decision_price,
+            decision_price,
+            decision_price,
+            target_weights,
+            lev,
+            atr,
+            kill,
+            path_open,
+            path_high,
+            path_low,
+            path_close,
+            start_idx,
+            end_idx,
+            10_000.0,
+            0.0,
+            0.0,
+            slip,
+            2,
+            0,
+            0.0,
+            1.0,
+            999.0,
+            1,
+            10,
+            10.0,
+            10.0,
+            0.0,
+            None,
+            None,
+            None,
+        )
+
+        assert len(trades) >= 1
+        trade = trades[0]
+        assert int(trade[1]) == 2
+        assert int(trade[2]) == 3
+        assert trade[5] == pytest.approx(80.0 * (1.0 - slip), abs=1e-4)
+
+    def test_short_gap_up_through_stop_uses_adverse_open_fill(self) -> None:
+        """Short stop gap-up은 stop price가 아닌 불리한 open 기준으로 체결되어야 한다."""
+        n_decisions, n_syms = 6, 1
+        n_path = 12
+        slip = 0.0002
+        decision_price = np.full((n_decisions, n_syms), 100.0, dtype=np.float64)
+        target_weights = np.zeros((n_decisions, n_syms), dtype=np.float64)
+        target_weights[2:, 0] = -0.50
+        lev = np.ones((n_decisions, n_syms), dtype=np.float64)
+        atr = np.full((n_decisions, n_syms), 5.0, dtype=np.float64)
+        kill = np.zeros((n_decisions, n_syms), dtype=np.float64)
+        path_open = np.full((n_path, n_syms), 100.0, dtype=np.float64)
+        path_high = np.full((n_path, n_syms), 100.0, dtype=np.float64)
+        path_low = np.full((n_path, n_syms), 100.0, dtype=np.float64)
+        path_close = np.full((n_path, n_syms), 100.0, dtype=np.float64)
+        path_open[6, 0] = 120.0
+        path_high[6, 0] = 121.0
+        path_low[6, 0] = 120.0
+        path_close[6, 0] = 120.0
+        start_idx = np.array([0, 2, 4, 6, 8, 10], dtype=np.int64)
+        end_idx = np.array([2, 4, 6, 8, 10, 12], dtype=np.int64)
+
+        trades, _bal, _eq, _diag = backtest_target_weights_intrabar_numba(
+            decision_price,
+            decision_price,
+            decision_price,
+            decision_price,
+            target_weights,
+            lev,
+            atr,
+            kill,
+            path_open,
+            path_high,
+            path_low,
+            path_close,
+            start_idx,
+            end_idx,
+            10_000.0,
+            0.0,
+            0.0,
+            slip,
+            2,
+            0,
+            0.0,
+            1.0,
+            999.0,
+            1,
+            10,
+            10.0,
+            10.0,
+            0.0,
+            None,
+            None,
+            None,
+        )
+
+        assert len(trades) >= 1
+        trade = trades[0]
+        assert int(trade[1]) == 2
+        assert int(trade[2]) == 3
+        assert trade[5] == pytest.approx(120.0 * (1.0 + slip), abs=1e-4)
+
+    def test_open_priority_exit_precedes_intrabar_stop_scan(self) -> None:
+        """관측 가능한 open-event(max_hold)는 같은 1m bar의 stop hit보다 먼저 처리되어야 한다."""
+        n_decisions, n_syms = 6, 1
+        n_path = 12
+        slip = 0.0002
+        decision_price = np.full((n_decisions, n_syms), 100.0, dtype=np.float64)
+        target_weights = np.zeros((n_decisions, n_syms), dtype=np.float64)
+        target_weights[2:, 0] = 0.50
+        lev = np.ones((n_decisions, n_syms), dtype=np.float64)
+        atr = np.full((n_decisions, n_syms), 5.0, dtype=np.float64)
+        kill = np.zeros((n_decisions, n_syms), dtype=np.float64)
+        path_open = np.full((n_path, n_syms), 100.0, dtype=np.float64)
+        path_high = np.full((n_path, n_syms), 100.0, dtype=np.float64)
+        path_low = np.full((n_path, n_syms), 100.0, dtype=np.float64)
+        path_close = np.full((n_path, n_syms), 100.0, dtype=np.float64)
+        path_low[6, 0] = 90.0
+        start_idx = np.array([0, 2, 4, 6, 8, 10], dtype=np.int64)
+        end_idx = np.array([2, 4, 6, 8, 10, 12], dtype=np.int64)
+
+        trades, _bal, _eq, _diag = backtest_target_weights_intrabar_numba(
+            decision_price,
+            decision_price,
+            decision_price,
+            decision_price,
+            target_weights,
+            lev,
+            atr,
+            kill,
+            path_open,
+            path_high,
+            path_low,
+            path_close,
+            start_idx,
+            end_idx,
+            10_000.0,
+            0.0,
+            0.0,
+            slip,
+            2,
+            1,
+            0.0,
+            1.0,
+            999.0,
+            1,
+            10,
+            10.0,
+            10.0,
+            0.0,
+            None,
+            None,
+            None,
+        )
+
+        assert len(trades) >= 1
+        trade = trades[0]
+        assert int(trade[1]) == 2
+        assert int(trade[2]) == 3
+        assert trade[5] == pytest.approx(100.0 * (1.0 - slip), abs=1e-4)
+
+
+class TestIntrabarFundingEventContract:
+    """intrabar funding event-only 반영 계약 검증."""
+
+    def test_funding_event_applies_only_on_marked_1m_bars(self) -> None:
+        """funding_event_mask_1m=1.0 인 1m bar에서만 funding 누적."""
+        n_decisions, n_syms = 4, 1
+        n_path = 8
+        decision_price = np.full((n_decisions, n_syms), 100.0, dtype=np.float64)
+        target_weights = np.zeros((n_decisions, n_syms), dtype=np.float64)
+        target_weights[1:, 0] = 0.50
+        lev = np.ones((n_decisions, n_syms), dtype=np.float64)
+        atr = np.full((n_decisions, n_syms), 5.0, dtype=np.float64)
+        kill = np.zeros((n_decisions, n_syms), dtype=np.float64)
+        path_open = np.full((n_path, n_syms), 100.0, dtype=np.float64)
+        path_high = np.full((n_path, n_syms), 100.0, dtype=np.float64)
+        path_low = np.full((n_path, n_syms), 100.0, dtype=np.float64)
+        path_close = np.full((n_path, n_syms), 100.0, dtype=np.float64)
+        start_idx = np.array([0, 2, 4, 6], dtype=np.int64)
+        end_idx = np.array([2, 4, 6, 8], dtype=np.int64)
+
+        mask_none = np.zeros((n_path, n_syms), dtype=np.float64)
+        rate = np.full((n_path, n_syms), 0.001, dtype=np.float64)
+        trades_none, bal_none, _eq_none, _diag_none = backtest_target_weights_intrabar_numba(
+            decision_price,
+            decision_price,
+            decision_price,
+            decision_price,
+            target_weights,
+            lev,
+            atr,
+            kill,
+            path_open,
+            path_high,
+            path_low,
+            path_close,
+            start_idx,
+            end_idx,
+            10_000.0,
+            0.0,
+            0.0,
+            0.0,
+            1,
+            0,
+            0.0,
+            999.0,
+            999.0,
+            1,
+            10,
+            10.0,
+            10.0,
+            0.0,
+            mask_none,
+            rate,
+            None,
+        )
+
+        mask_evt = np.zeros((n_path, n_syms), dtype=np.float64)
+        mask_evt[4, 0] = 1.0
+        trades_evt, bal_evt, _eq_evt, _diag_evt = backtest_target_weights_intrabar_numba(
+            decision_price,
+            decision_price,
+            decision_price,
+            decision_price,
+            target_weights,
+            lev,
+            atr,
+            kill,
+            path_open,
+            path_high,
+            path_low,
+            path_close,
+            start_idx,
+            end_idx,
+            10_000.0,
+            0.0,
+            0.0,
+            0.0,
+            1,
+            0,
+            0.0,
+            999.0,
+            999.0,
+            1,
+            10,
+            10.0,
+            10.0,
+            0.0,
+            mask_evt,
+            rate,
+            None,
+        )
+
+        assert len(trades_none) >= 1
+        assert len(trades_evt) >= 1
+        # long 포지션에서 +funding은 비용으로 누적되어 final balance를 감소시켜야 함.
+        assert bal_evt < bal_none
+        # 한 번의 event만 추가한 케이스이므로 총 funding_fee도 더 커야 함.
+        total_funding_none = float(np.nansum(trades_none[:, 9]))
+        total_funding_evt = float(np.nansum(trades_evt[:, 9]))
+        assert total_funding_evt > total_funding_none

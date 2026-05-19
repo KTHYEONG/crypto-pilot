@@ -28,10 +28,12 @@ from config.settings import (
 )
 from src.core.indicators.numpy_ops_futures import compute_atr_numpy
 from src.domain.futures.backtest_engine import (
+    backtest_target_weights_intrabar_numba,
     backtest_target_weights_numba,
     hours_per_bar_from_timeframe,
     max_hold_bars_from_time_barrier,
 )
+from src.domain.futures.backtest_preparation import prepare_backtest_inputs
 from src.domain.futures.ml_pipeline.features.engineering import HMM_SEMANTIC_PROB_COLUMNS
 from src.domain.futures.optimization.data_aligner import (
     _build_aligned_2d_from_prebuilt,
@@ -47,9 +49,9 @@ from src.domain.futures.optimization.evaluator import (
 )
 from src.domain.futures.optimization.phase_param_space import (
     V43_FIXED_DEFAULTS,
+    suggest_joint_params,
     suggest_risk_params,
     suggest_signal_params,
-    suggest_joint_params,
 )
 from src.domain.futures.optimization.trial_observability import set_trial_event_attrs
 from src.domain.futures.optimization.validation import build_anchored_wf_legs
@@ -1439,6 +1441,7 @@ def _base_engine_params(ml: dict[str, Any], tf: str) -> dict[str, Any]:
         "PORTFOLIO_KAPPA": float(
             ml.get("PORTFOLIO_KAPPA", cfg.get("FUTURES_PORTFOLIO_KAPPA", 0.35))
         ),
+        "FUTURES_EXECUTION_MODE": str(ml.get("FUTURES_EXECUTION_MODE", "coarse")),
     }
 
 
@@ -1471,12 +1474,12 @@ def _cached_kill_fund_lev(
 def _run_portfolio_numba_block(
     params: dict[str, Any],
     aligned: dict[str, Any],
-    zkill: Any,
-    zfund: Any,
-    lev_blk: Any,
     estimated_b: float = 1.05,
 ) -> tuple[np.ndarray, float, np.ndarray, np.ndarray]:
     _ = estimated_b
+    prepared = prepare_backtest_inputs(aligned, params)
+    aligned = prepared.aligned_data
+    zkill, zfund, lev_blk = _cached_kill_fund_lev(aligned, params)
     cfg_block = OPT_FUTURES_CONFIG
     reb_b = max(1, int(params["REBALANCE_BARS"]))
     pwp = portfolio_weight_params_from_optuna(params, cfg_block)
@@ -1576,32 +1579,76 @@ def _run_portfolio_numba_block(
     atr_m = float(params["ATR_MULT"])
     trail_m = float(params["TRAIL_MULT"])
 
-    out_tw = backtest_target_weights_numba(
-        aligned["close"],
-        aligned["high"],
-        aligned["low"],
-        aligned["open"],
-        zfund,
-        zkill,
-        tw_blk,
-        float(FUTURES_INITIAL_BALANCE),
-        lev_blk,
-        MAKER_FEE_RATE,
-        TAKER_FEE_RATE,
-        slip_eff,
-        reb_b,
-        mx_hold,
-        sborr,
-        aligned["atr"],
-        atr_m,
-        trail_m,
-        use_simple_atr_i,
-        int(params.get("MAX_CONCURRENT_POSITIONS", 2)),
-        float(params.get("MAX_EXPOSURE", 0.8)),
-        float(params["MAX_EXPOSURE_PER_COIN"]),
-        float(params["DD_SCALING_THRESHOLD"]),
-        volume_2d=aligned.get("volume"),
+    use_intrabar = (
+        prepared.execution_mode == "intrabar_1m"
+        and prepared.exec_bar_start_1m_idx is not None
+        and prepared.exec_bar_end_1m_idx is not None
+        and aligned.get("exec_open_1m") is not None
+        and aligned.get("exec_high_1m") is not None
+        and aligned.get("exec_low_1m") is not None
+        and aligned.get("exec_close_1m") is not None
     )
+    if use_intrabar:
+        out_tw = backtest_target_weights_intrabar_numba(
+            aligned["close"],
+            aligned["high"],
+            aligned["low"],
+            aligned["open"],
+            tw_blk,
+            lev_blk,
+            aligned["atr"],
+            zkill,
+            np.asarray(aligned["exec_open_1m"], dtype=np.float64),
+            np.asarray(aligned["exec_high_1m"], dtype=np.float64),
+            np.asarray(aligned["exec_low_1m"], dtype=np.float64),
+            np.asarray(aligned["exec_close_1m"], dtype=np.float64),
+            prepared.exec_bar_start_1m_idx,
+            prepared.exec_bar_end_1m_idx,
+            float(FUTURES_INITIAL_BALANCE),
+            MAKER_FEE_RATE,
+            TAKER_FEE_RATE,
+            slip_eff,
+            reb_b,
+            mx_hold,
+            sborr,
+            atr_m,
+            trail_m,
+            use_simple_atr_i,
+            int(params.get("MAX_CONCURRENT_POSITIONS", 2)),
+            float(params.get("MAX_EXPOSURE", 0.8)),
+            float(params["MAX_EXPOSURE_PER_COIN"]),
+            float(params["DD_SCALING_THRESHOLD"]),
+            funding_event_mask_1m=aligned.get("funding_event_mask_1m"),
+            funding_rate_1m=aligned.get("funding_rate_event_1m"),
+            volume_1m_2d=aligned.get("exec_volume_1m"),
+        )
+    else:
+        out_tw = backtest_target_weights_numba(
+            aligned["close"],
+            aligned["high"],
+            aligned["low"],
+            aligned["open"],
+            zfund,
+            zkill,
+            tw_blk,
+            float(FUTURES_INITIAL_BALANCE),
+            lev_blk,
+            MAKER_FEE_RATE,
+            TAKER_FEE_RATE,
+            slip_eff,
+            reb_b,
+            mx_hold,
+            sborr,
+            aligned["atr"],
+            atr_m,
+            trail_m,
+            use_simple_atr_i,
+            int(params.get("MAX_CONCURRENT_POSITIONS", 2)),
+            float(params.get("MAX_EXPOSURE", 0.8)),
+            float(params["MAX_EXPOSURE_PER_COIN"]),
+            float(params["DD_SCALING_THRESHOLD"]),
+            volume_2d=aligned.get("volume"),
+        )
     return cast(tuple[np.ndarray, float, np.ndarray, np.ndarray], out_tw)
 
 
@@ -1711,9 +1758,8 @@ def _evaluate_awf_phase_d_aggregate(
             leg_crisis_mean.append(0.0)
             continue
 
-        zkill, zfund, lev_leg = _cached_kill_fund_lev(aligned, params)
         b_trades_raw, b_bal, b_equity, _b_diag = _run_portfolio_numba_block(
-            params, aligned, zkill, zfund, lev_leg, ctx.estimated_b
+            params, aligned, ctx.estimated_b
         )
 
         n_tr = int(b_trades_raw.shape[0])
@@ -1742,7 +1788,11 @@ def _evaluate_awf_phase_d_aggregate(
             
         mdd = float(calc_mdd_from_equity(b_equity)) if b_equity.size > 0 else 100.0
         mdd_duration_days = (
-            float(calc_max_underwater_days_from_equity(b_equity, hours_per_bar_from_timeframe(ctx.tf)))
+            float(
+                calc_max_underwater_days_from_equity(
+                    b_equity, hours_per_bar_from_timeframe(ctx.tf)
+                )
+            )
             if b_equity.size > 1
             else 0.0
         )
@@ -2147,9 +2197,8 @@ def _evaluate_is_phase_d(
     params["ESTIMATED_B"] = ctx.estimated_b
 
     # Run IS backtest
-    zkill, zfund, lev_blk = _cached_kill_fund_lev(aligned, params)
     b_trades_raw, b_bal, b_equity, _b_diag = _run_portfolio_numba_block(
-        params, aligned, zkill, zfund, lev_blk, ctx.estimated_b
+        params, aligned, ctx.estimated_b
     )
 
     n_tr = int(b_trades_raw.shape[0])

@@ -183,6 +183,46 @@ def _discover_symbols_via_universe(
     return list(dict.fromkeys(selected_symbols)), snapshot, report
 
 
+def _discover_evolution_symbols(
+    *,
+    tf: str,
+    is_start: datetime.date,
+    oos_start: datetime.date,
+    force_rebuild: bool = False,
+) -> tuple[list[str], Any, pd.DataFrame]:
+    """Find the union of all symbols in the universe from is_start to oos_start."""
+    from dateutil.relativedelta import relativedelta
+    current_dt = is_start
+    all_symbols = set()
+    latest_snapshot = None
+    latest_report = pd.DataFrame()
+    
+    _logger.info(" [EVOLUTION] Discovering symbols across the optimization period...")
+    
+    # Iterate through each quarter from is_start to oos_start
+    while current_dt <= oos_start:
+        # reference_date should be the quarter START to get that quarter's oos_start in get_quarterly_window
+        # Actually, if current_dt is 2024-10-01, we want the snapshot for 2024-10-01.
+        # get_quarterly_window(2025-01-01) -> oos_start=2024-10-01.
+        # So we use current_dt + 3 months as the reference_date.
+        ref_dt = current_dt + relativedelta(months=3)
+        symbols, snapshot, report = _discover_symbols_via_universe(
+            tf=tf,
+            reference_date=ref_dt.isoformat(),
+            force_rebuild=force_rebuild
+        )
+        all_symbols.update(symbols)
+        if current_dt == oos_start:
+            latest_snapshot = snapshot
+            latest_report = report
+        
+        _logger.info(f"  > Quarter {current_dt}: {len(symbols)} symbols")
+        current_dt += relativedelta(months=3)
+        
+    union_symbols = sorted(list(all_symbols))
+    return union_symbols, latest_snapshot, latest_report
+
+
 def validate_universe_quality(
     snapshot: Any,
     report: pd.DataFrame,
@@ -193,8 +233,10 @@ def validate_universe_quality(
     from src.domain.futures.universe import load_universe_snapshot
     from src.domain.futures.universe.contracts import RejectCode
 
-    _logger.info("\n [QUALITY] UNIVERSE QUALITY GATE CHECK")
-    _logger.info(" ─────────────────────────────────────────────────────────────────────────────────────")
+    _logger.info("\n[QUALITY GATE] Evaluation Report")
+    _logger.info("-" * 75)
+    _logger.info(f"{'METRIC':<20} | {'ACTUAL':<12} | {'GATE':<12} | {'STATUS'}")
+    _logger.info("-" * 75)
 
     if not snapshot.selected:
         _logger.error(" [!] FAIL: No symbols selected in universe snapshot.")
@@ -207,15 +249,13 @@ def validate_universe_quality(
     median_cost = float(np.median(costs))
     median_adv = float(np.median(advs))
     
-    _logger.info(" [1] Cost & Capacity Base:")
-    _logger.info("     - Median Execution Cost: %.2f bps (Gate: <= 50.0)", median_cost)
-    _logger.info("     - Median ADV: %s USDT (Gate: >= 25M)", f"{median_adv:,.0f}")
+    cost_status = "✅ PASS" if median_cost <= 50.0 else "❌ FAIL"
+    adv_status = "✅ PASS" if median_adv >= 25_000_000.0 else "❌ FAIL"
 
-    cost_pass = median_cost <= 50.0
-    adv_pass = median_adv >= 25_000_000.0
+    _logger.info(f"{'Median Cost':<20} | {f'{median_cost:.2f} bps':<12} | {'≤ 50.0 bps':<12} | {cost_status}")
+    _logger.info(f"{'Median ADV':<20} | {f'{median_adv/1e6:.1f}M':<12} | {'≥ 25.0M':<12} | {adv_status}")
 
     # 2. Unexpected Forced Dropout Rate
-    # Find previous quarter's snapshot to calculate dropout rate
     ref_dt = datetime.now().date()
     if reference_date:
         ref_dt = datetime.strptime(reference_date, "%Y-%m-%d").date()
@@ -227,61 +267,56 @@ def validate_universe_quality(
     previous_snapshot_frame = load_universe_snapshot(as_of=prev_as_of, tf=tf)
     dropout_pass = True
     dropout_rate = 0.0
-
-    MIN_SAMPLE_FOR_DROPOUT_RATE = 10
+    dropout_status = "✅ PASS"
 
     if previous_snapshot_frame is not None and not previous_snapshot_frame.empty:
         prev_symbols = set(previous_snapshot_frame["symbol"].tolist())
         prev_universe_size = len(prev_symbols)
 
-        if prev_universe_size < MIN_SAMPLE_FOR_DROPOUT_RATE:
-            # 소표본: 통계적으로 무의미 → 지표 산출 보류
-            _logger.warning(
-                " [2] Unexpected Forced Dropout Rate: SKIPPED (prev_universe_size=%d < %d, small-sample guard)",
-                prev_universe_size,
-                MIN_SAMPLE_FOR_DROPOUT_RATE,
-            )
-        else:
+        if prev_universe_size >= 10: # MIN_SAMPLE_FOR_DROPOUT_RATE
             curr_symbols = set(m.symbol for m in snapshot.selected)
-
             dropped_symbols = prev_symbols - curr_symbols
             forced_dropouts = 0
 
             for sym in dropped_symbols:
                 filt_report = snapshot.rejected.get(sym)
                 if filt_report:
-                    # Forced if rejected in Stage 1-5, or Stage 6 reason is not RANKED_OUT
                     is_forced = any([
                         filt_report.stage1_reason, filt_report.stage2_reason,
                         filt_report.stage3_reason, filt_report.stage4_reason,
                         filt_report.stage5_reason
                     ])
-                    if not is_forced and filt_report.stage6_reason and filt_report.stage6_reason != RejectCode.RANKED_OUT:
+                    if not is_forced and filt_report.stage6_reason != RejectCode.RANKED_OUT:
                         is_forced = True
-
                     if is_forced:
                         forced_dropouts += 1
 
-            dropout_rate = (forced_dropouts / prev_universe_size) if prev_universe_size else 0.0
-            _logger.info(" [2] Unexpected Forced Dropout Rate:")
-            _logger.info("     - Rate: %.2f%% (%d/%d) (Gate: <= 10.0%%)", dropout_rate * 100, forced_dropouts, prev_universe_size)
+            dropout_rate = (forced_dropouts / prev_universe_size)
             dropout_pass = dropout_rate <= 0.10
+            dropout_status = "✅ PASS" if dropout_pass else "❌ FAIL"
+            _logger.info(f"{'Dropout Rate':<20} | {f'{dropout_rate*100:.1f}%':<12} | {'≤ 10.0%':<12} | {dropout_status}")
+        else:
+            _logger.info(f"{'Dropout Rate':<20} | {'SKIPPED':<12} | {'n/a':<12} | ⚠️ SMALL SAMPLE")
     else:
-        _logger.info(" [2] Unexpected Forced Dropout Rate: SKIPPED (No previous snapshot found for %s)", prev_as_of)
+        _logger.info(f"{'Dropout Rate':<20} | {'NO PREV':<12} | {'n/a':<12} | ⚠️ NO DATA")
+
+    _logger.info("-" * 75)
 
     # Final Verdict
-    if cost_pass and adv_pass and dropout_pass:
-        _logger.info(" ✅ UNIVERSE QUALITY PASS")
+    if median_cost <= 50.0 and median_adv >= 25_000_000.0 and dropout_pass:
+        _logger.info(" [VERDICT] ✅ UNIVERSE QUALITY PASS")
         return True
     else:
-        if not cost_pass:
-            _logger.error(" [!] FAIL: Median execution cost (%.2f bps) exceeds 50.0 bps gate.", median_cost)
-        if not adv_pass:
-            _logger.error(" [!] FAIL: Median ADV (%s) is below 25M USDT gate.", f"{median_adv:,.0f}")
+        _logger.error(" [VERDICT] ❌ UNIVERSE QUALITY REJECTED")
+        if median_cost > 50.0:
+            _logger.error(f" > Reason: Median execution cost ({median_cost:.2f} bps) exceeds 50.0 bps gate.")
+        if median_adv < 25_000_000.0:
+            _logger.error(f" > Reason: Median ADV ({median_adv/1e6:.1f}M) is below 25M USDT gate.")
         if not dropout_pass:
-            _logger.error(" [!] FAIL: Forced dropout rate (%.2f%%) exceeds 10.0%% gate.", dropout_rate * 100)
+            _logger.error(f" > Reason: Forced dropout rate ({dropout_rate*100:.1f}%) exceeds 10.0% gate.")
         
-        _logger.error(" [!] Universe quality gates failed. Aborting optimization to prevent suboptimal execution.")
+        _logger.error(" > Action: Aborting optimization to prevent suboptimal execution.")
+        _logger.info("-" * 75)
         return False
 
 
@@ -303,6 +338,7 @@ def main() -> None:
     pre_parser = argparse.ArgumentParser(add_help=False)
     pre_parser.add_argument("--skip-universe", action="store_true")
     pre_parser.add_argument("--skip-data-sync", action="store_true")
+    pre_parser.add_argument("--uni", action="store_true", help="Stop after universe discovery and 1m sync.")
     pre_parser.add_argument("--sync-limit", type=int, default=None)
     pre_parser.add_argument("--reference-date", type=str, default=None)
     pre_parser.add_argument("--tf", type=str, default="4h")
@@ -310,28 +346,46 @@ def main() -> None:
 
     fetch_start_date_str, start_date_str, is_end_date_str, end_date_str = get_quarterly_window(pre_args.reference_date)
     fetch_start_date = datetime.strptime(fetch_start_date_str, "%Y-%m-%d").date()
+    start_date = datetime.strptime(start_date_str, "%Y-%m-%d").date()
+    oos_start_date = datetime.strptime(is_end_date_str, "%Y-%m-%d").date()
     end_date = datetime.strptime(end_date_str, "%Y-%m-%d").date()
 
     # [STEP 0/4] DATA AUTO-SYNC
     if not pre_args.skip_universe and not pre_args.skip_data_sync:
-        _logger.info("\n [STEP 0/4] DATA AUTO-SYNC")
-        _logger.info(" ─────────────────────────────────────────────────────────────────────────────────────")
-        try:
-            from src.domain.futures.universe.sync_utils import run_historical_sync
-            run_historical_sync(fetch_start_date, end_date, limit=pre_args.sync_limit)
-        except Exception as exc:
-            _logger.error("Data auto-sync failed: %s", exc)
+        # [SMART SKIP] Check if snapshot already exists to avoid heavy sync
+        from src.domain.futures.universe import load_universe_snapshot
+        force_rebuild = "--force-universe-rebuild" in remaining_args
+        existing_snapshot = None
+        if not force_rebuild:
+            # oos_start_date가 실제 유니버스가 생성되는 기준점입니다.
+            existing_snapshot = load_universe_snapshot(as_of=oos_start_date, tf=pre_args.tf)
+
+        if existing_snapshot is not None and not existing_snapshot.empty:
+            _logger.info("\n[STEP 0] DATA AUTO-SYNC: SKIPPED")
+            _logger.info("-" * 75)
+            _logger.info(f" ✅ Valid universe snapshot found for {oos_start_date}. Skipping heavy sync.")
+        else:
+            _logger.info("\n[STEP 0] DATA AUTO-SYNC")
+            _logger.info("-" * 75)
+            try:
+                from src.domain.futures.universe.sync_utils import run_historical_sync
+                run_historical_sync(fetch_start_date, end_date, limit=pre_args.sync_limit)
+            except Exception as exc:
+                _logger.error("Data auto-sync failed: %s", exc)
 
     # [STEP 1/4] UNIVERSE DISCOVERY & DATA LOADING
-    _logger.info("\n [STEP 1/4] UNIVERSE DISCOVERY & DATA LOADING")
-    _logger.info(" ─────────────────────────────────────────────────────────────────────────────────────")
+    _logger.info("\n[STEP 1] UNIVERSE DISCOVERY & DATA LOADING")
+    _logger.info("-" * 75)
     if not pre_args.skip_universe:
         try:
             # Check for force-rebuild in remaining_args
             force_rebuild = "--force-universe-rebuild" in remaining_args
-            discovered_symbols, snapshot, report = _discover_symbols_via_universe(
+            
+            # Evolution-aware symbol discovery: Get union of all symbols in IS+OOS period
+            discovered_symbols, snapshot, report = _discover_evolution_symbols(
                 tf=pre_args.tf,
-                reference_date=pre_args.reference_date,
+                is_start=start_date,
+                oos_start=oos_start_date,
                 force_rebuild=force_rebuild,
             )
         except Exception as exc:
@@ -341,12 +395,28 @@ def main() -> None:
             _logger.error("Universe discovery via snapshot returned no symbols.")
             return
         
+        _logger.info(" ✅ Evolution discovery complete. %d symbols in union:", len(discovered_symbols))
+        _logger.info("    > %s", ", ".join(discovered_symbols))
+
+        # [DATA] Intrabar-1m Sync for Selected Universe
+        # 품질 검사 전에 수행하여, 데이터 부족으로 인한 품질 저하 문제를 해결할 기회를 제공합니다.
+        if OPT_FUTURES_CONFIG.get("FUTURES_EXECUTION_MODE") == "intrabar_1m":
+            _logger.info(" [DATA] Syncing 1m data for %d universe symbols...", len(discovered_symbols))
+            from src.domain.futures.data_loader import DataCollector
+            collector = DataCollector()
+            for sym in discovered_symbols:
+                collector.ensure_1m_data(sym, fetch_start_date_str, end_date_str)
+
         # Universe Quality Gate Check
         if not validate_universe_quality(snapshot, report, pre_args.reference_date, pre_args.tf):
-            sys.exit(1)
-
-        _logger.info(" ✅ Universe discovery complete. %d symbols selected:", len(discovered_symbols))
-        _logger.info("    > %s", ", ".join(discovered_symbols))
+            if pre_args.uni:
+                _logger.warning(" [!] Universe quality gate failed, but continuing due to --uni flag.")
+            else:
+                sys.exit(1)
+        
+        if pre_args.uni:
+            _logger.info(" ✅ Universe discovery and 1m data sync complete. --uni flag set, exiting.")
+            return
 
     parser_default_symbols = discovered_symbols or list(config.opt_config.FUTURES_SYMBOLS)
 
