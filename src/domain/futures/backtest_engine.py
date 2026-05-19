@@ -1,4 +1,4 @@
-"""Futures backtest orchestration: delegates Numba loops to ``portfolio.execution_sim``."""
+"""Futures portfolio backtest engine: multi-symbol, target-weight driven, Numba-accelerated."""
 
 from __future__ import annotations
 
@@ -10,26 +10,107 @@ import pandas as pd
 
 from config.opt_config import OPT_FUTURES_CONFIG
 from config.settings import (
-    FUNDING_FEE_RATE,
     MAKER_FEE_RATE,
     SLIPPAGE_RATE,
     SMART_ORDER_OFFSET,
     TAKER_FEE_RATE,
 )
 from src.domain.futures.portfolio.execution_sim import (
-    backtest_loop_single_numba,
     backtest_target_weights_numba,
-    calculate_position_size,
-    check_intra_bar_stop,
     check_long_exit,
     check_short_exit,
-    process_long_scale_out,
-    process_short_scale_out,
 )
 from src.domain.futures.portfolio.portfolio_constructor import (
     portfolio_weight_params_from_optuna,
     precompute_rebalance_weights,
 )
+
+_AGG_FACTOR_BY_TIMEFRAME: dict[str, int] = {
+    "4h": 4,
+}
+
+
+def _aggregate_1h_to_4h_block(arr: np.ndarray, mode: str) -> np.ndarray:
+    """Aggregate 2D [bars, symbols] 1h arrays to 4h blocks with no look-ahead."""
+    if arr.ndim != 2:
+        raise ValueError(f"expected 2D array, got ndim={arr.ndim}")
+    n_bars, n_syms = arr.shape
+    factor = 4
+    if n_bars < factor:
+        raise ValueError("insufficient 1h bars for 4h aggregation")
+    usable = (n_bars // factor) * factor
+    trimmed = arr[n_bars - usable :, :]
+    block = trimmed.reshape(usable // factor, factor, n_syms)
+    if mode == "open":
+        return np.asarray(block[:, 0, :], dtype=np.float64)
+    if mode == "high":
+        return np.asarray(np.nanmax(block, axis=1), dtype=np.float64)
+    if mode == "low":
+        return np.asarray(np.nanmin(block, axis=1), dtype=np.float64)
+    if mode == "close":
+        return np.asarray(block[:, -1, :], dtype=np.float64)
+    if mode == "sum":
+        return np.asarray(np.nansum(block, axis=1), dtype=np.float64)
+    if mode == "max":
+        return np.asarray(np.nanmax(block, axis=1), dtype=np.float64)
+    if mode == "last":
+        return np.asarray(block[:, -1, :], dtype=np.float64)
+    if mode == "finite_last":
+        finite_mask = np.isfinite(block)
+        rev_mask = finite_mask[:, ::-1, :]
+        has_any = np.any(rev_mask, axis=1)
+        idx_from_end = np.argmax(rev_mask, axis=1)
+        take_idx = (factor - 1) - idx_from_end
+        gathered = np.take_along_axis(block, take_idx[:, None, :], axis=1)[:, 0, :]
+        return np.where(has_any, gathered, np.nan)
+    raise ValueError(f"unsupported aggregation mode: {mode}")
+
+
+def _should_aggregate_from_1h(params: dict[str, Any]) -> bool:
+    target_tf = str(params.get("TIMEFRAME", "4h")).lower()
+    data_tf = str(params.get("DATA_TIMEFRAME", target_tf)).lower()
+    return target_tf == "4h" and data_tf == "1h"
+
+
+def _aggregate_aligned_data_1h_to_4h(
+    aligned_data: dict[str, np.ndarray],
+) -> dict[str, np.ndarray]:
+    """Return a shallow-copied aligned_data aggregated from 1h bars to 4h bars."""
+    out: dict[str, np.ndarray] = dict(aligned_data)
+    mode_map = {
+        "open": "open",
+        "high": "high",
+        "low": "low",
+        "close": "close",
+        "volume": "sum",
+        "funding_rate_sum": "sum",
+        "kill_signal": "max",
+        "atr": "finite_last",
+        "dyn_leverage": "last",
+        "xs_score_long": "last",
+        "xs_score_short": "last",
+        "target_weights": "last",
+    }
+    hmm_cols = (
+        "hmm_prob_bull_calm",
+        "hmm_prob_bull_vol_up",
+        "hmm_prob_bear_trend",
+        "hmm_prob_chop",
+        "hmm_prob_crisis",
+        "composer_sigma_bar",
+    )
+    for col in hmm_cols:
+        mode_map[col] = "last"
+
+    for key, mode in mode_map.items():
+        raw = out.get(key)
+        if raw is None:
+            continue
+        arr = np.asarray(raw, dtype=np.float64)
+        if arr.ndim != 2:
+            continue
+        out[key] = _aggregate_1h_to_4h_block(arr, mode)
+    return out
 
 
 def hours_per_bar_from_timeframe(tf: str) -> float:
@@ -54,23 +135,17 @@ def max_hold_bars_from_time_barrier(strategy_params: dict[str, Any]) -> int:
     if tb <= 0.0:
         return 0
     hpb = hours_per_bar_from_timeframe(str(strategy_params.get("TIMEFRAME", "4h")))
-    return max(1, int(math.ceil(tb / hpb)))
+    return max(1, math.ceil(tb / hpb))
 
 
 __all__ = [
     "FuturesBacktestEngine",
-    "MultiSymbolEngine",
-    "SingleSymbolEngine",
-    "hours_per_bar_from_timeframe",
-    "max_hold_bars_from_time_barrier",
-    "backtest_loop_single_numba",
+    "PortfolioBacktestEngine",
     "backtest_target_weights_numba",
-    "calculate_position_size",
-    "check_intra_bar_stop",
     "check_long_exit",
     "check_short_exit",
-    "process_long_scale_out",
-    "process_short_scale_out",
+    "hours_per_bar_from_timeframe",
+    "max_hold_bars_from_time_barrier",
 ]
 
 
@@ -79,133 +154,7 @@ __all__ = [
 # =============================================================================
 
 
-class SingleSymbolEngine:
-    """Consolidated Single-symbol Futures Backtest Engine."""
-
-    _REQUIRED_INDICATOR_COLS = frozenset({"entry_upper", "entry_lower", "trend_direction", "strength_filter", "atr", "macro_ema"})
-    _OPTIONAL_MERGE_COLS = frozenset({"garch_kelly_f"})
-
-    def __init__(
-        self,
-        hourly_df: pd.DataFrame,
-        daily_df: pd.DataFrame,
-        strategy: Any,
-        initial_balance: float = 1_000_000,
-        precomputed_daily_df: pd.DataFrame | None = None,
-        warmup_bars: int | None = None,
-        execution_start_idx: int = 0,
-    ) -> None:
-        self.hourly_df = hourly_df.copy(deep=False)
-        self.daily_df = daily_df.copy(deep=False)
-        self.strategy = strategy
-        self.initial_balance = initial_balance
-        self._precomputed_daily_df = precomputed_daily_df
-        self._warmup_bars_override = warmup_bars
-        self._execution_start_idx = max(0, int(execution_start_idx))
-
-        self.leverage: float = self.strategy.params.get("LEVERAGE", 1.0)
-        self.risk_per_trade: float = self.strategy.params.get("RISK_PER_TRADE", 0.015)
-        self.maker_fee = MAKER_FEE_RATE
-        self.taker_fee = TAKER_FEE_RATE
-        self.slippage_rate = SLIPPAGE_RATE
-        self.smart_offset = SMART_ORDER_OFFSET
-
-        self._prepare_data()
-
-    def _prepare_data(self) -> None:
-        exclude_cols = {"date_key", "datetime", "date", "open", "high", "low", "close", "volume", "timestamp"}
-        if all(c in self.hourly_df.columns for c in self._REQUIRED_INDICATOR_COLS):
-            signal_df = self.hourly_df
-        else:
-            signal_df = self.strategy.generate_signals(self.hourly_df.copy(deep=True))
-
-        merge_keys = self._REQUIRED_INDICATOR_COLS | self._OPTIONAL_MERGE_COLS
-        indicator_cols = [c for c in signal_df.columns if c not in exclude_cols and c in merge_keys]
-        self.merged_df = self.hourly_df.copy(deep=False)
-        for col in indicator_cols:
-            self.merged_df[f"daily_{col}"] = signal_df[col].values
-
-    def run(self) -> dict[str, Any]:
-        df = self.merged_df
-        n = len(df)
-        open_prices, close, high, low = df["open"].values, df["close"].values, df["high"].values, df["low"].values
-        entry_upper, entry_lower = df["daily_entry_upper"].values, df["daily_entry_lower"].values
-        trend_dir, strength_filter = df["daily_trend_direction"].values, df["daily_strength_filter"].values
-        atr, macro_ema = df["daily_atr"].values, df["daily_macro_ema"].values
-
-        garch_kelly_f = df["daily_garch_kelly_f"].values if "daily_garch_kelly_f" in df.columns else np.ones(n)
-        garch_kelly_f = np.nan_to_num(garch_kelly_f, nan=1.0)
-
-        atr_mult = float(self.strategy.params.get("ATR_MULT", 3.0))
-        trail_mult = float(self.strategy.params.get("TRAIL_MULT", 3.0))
-        short_tp_mult = float(self.strategy.params.get("SHORT_TP_MULT", 3.0))
-        long_scale_atr_mult = float(self.strategy.params.get("LONG_SCALE_ATR_MULT", 3.0))
-
-        timestamps = df["timestamp"].values
-        funding_rate_sums = df["funding_rate_sum"].values if "funding_rate_sum" in df.columns else np.full(n, FUNDING_FEE_RATE / 3.0)
-
-        warmup_bars = self._warmup_bars_override if self._warmup_bars_override is not None else int(getattr(df, "attrs", {}).get("warmup_bars", self.strategy.get_required_warmup(freq=self.strategy.params.get("TIMEFRAME", "1h"))))
-        self._warmup_bars = warmup_bars
-        self._effective_start_idx = max(warmup_bars, self._execution_start_idx)
-
-        hmm_crisis = df["hmm_prob_crisis"].values if "hmm_prob_crisis" in df.columns else np.zeros(n)
-        hmm_mod_long = df["hmm_modulator_long"].values if "hmm_modulator_long" in df.columns else np.ones(n)
-        long_mod_floor = float(self.strategy.params.get("LONG_MOD_FLOOR", 0.70))
-        hmm_mod_long = np.maximum(hmm_mod_long, long_mod_floor)
-
-        trades_raw, final_balance, equity_curve, funding_total = backtest_loop_single_numba(
-            close, high, low, open_prices, entry_upper, entry_lower, trend_dir, strength_filter, atr, macro_ema, garch_kelly_f,
-            self.initial_balance, self.leverage, self.maker_fee, self.taker_fee, self.slippage_rate, self.smart_offset, self.risk_per_trade, timestamps, funding_rate_sums,
-            atr_mult, trail_mult, atr_mult, short_tp_mult, long_scale_atr_mult, trail_mult, warmup_bars, self._execution_start_idx,
-            bool(self.strategy.params.get("USE_COMPOUNDING", True)), float(self.strategy.params.get("MAX_CAPITAL_USAGE", 1e12)),
-            float(self.strategy.params.get("MAX_EXPOSURE_PER_COIN", 1.5)), float(self.strategy.params.get("DD_SCALING_THRESHOLD", 0.15)),
-            hmm_crisis, hmm_mod_long
-        )
-
-        self.balance = final_balance
-        self._equity_curve = equity_curve
-        self._total_funding_paid = funding_total
-
-        datetime_vals = df["datetime"].values
-        self.trades = []
-        for i in range(len(trades_raw)):
-            e_idx, x_idx = int(trades_raw[i][0]), int(trades_raw[i][1])
-            self.trades.append({
-                "entry_time": datetime_vals[e_idx], "exit_time": datetime_vals[x_idx],
-                "side": "LONG" if trades_raw[i][2] == 1 else "SHORT",
-                "entry_price": trades_raw[i][3], "exit_price": trades_raw[i][4],
-                "pnl": trades_raw[i][5], "amount": trades_raw[i][6], "entry_fee": trades_raw[i][7]
-            })
-        return self.get_results()
-
-    def get_results(self) -> dict[str, Any]:
-        if not np.isfinite(self.balance) or not self.trades:
-            return self._empty_result()
-
-        total_return_pct = ((self.balance - self.initial_balance) / self.initial_balance) * 100
-        pnl_arr = np.array([t["pnl"] for t in self.trades])
-        win_trades = int(np.sum(pnl_arr > 0))
-
-        equity = self._equity_curve[self._effective_start_idx:] if len(self._equity_curve) > self._effective_start_idx else self._equity_curve
-        if len(equity) > 0:
-            running_max = np.maximum.accumulate(equity)
-            drawdown = (equity - running_max) / np.where(running_max == 0, 1e-9, running_max) * 100
-            mdd = float(drawdown.min())
-        else: mdd = 0.0
-
-        return {
-            "total_trades": len(self.trades), "win_trades": win_trades, "loss_trades": len(self.trades) - win_trades,
-            "win_rate": (win_trades / len(self.trades)) * 100, "total_return_pct": total_return_pct,
-            "final_balance": self.balance, "mdd_pct": mdd, "trades_df": pd.DataFrame(self.trades),
-            "equity_curve": equity, "total_funding_paid": float(self._total_funding_paid),
-            "gross_pnl_abs": float(np.sum(np.abs(pnl_arr)))
-        }
-
-    def _empty_result(self) -> dict[str, Any]:
-        return {"total_trades": 0, "win_trades": 0, "loss_trades": 0, "win_rate": 0, "total_return_pct": 0, "final_balance": self.initial_balance, "mdd_pct": 0, "trades_df": pd.DataFrame(), "equity_curve": np.array([]), "total_funding_paid": 0.0, "gross_pnl_abs": 0.0}
-
-
-class MultiSymbolEngine:
+class PortfolioBacktestEngine:
     """Multi-symbol portfolio: QP-style target weights + ``backtest_target_weights_numba``."""
 
     def __init__(
@@ -220,6 +169,7 @@ class MultiSymbolEngine:
         taker_fee: float | None = None,
         smart_offset: float | None = None,
     ) -> None:
+        """Initialize engine state and execution parameters."""
         self.data = aligned_data
         self.symbols = symbol_names
         self.params = strategy_params
@@ -235,7 +185,10 @@ class MultiSymbolEngine:
         self.max_concurrent_positions = int(OPT_FUTURES_CONFIG.get("FUTURES_MAX_CONCURRENT_POSITIONS", 2))
 
     def run(self) -> tuple[pd.DataFrame, np.ndarray, float, np.ndarray]:
+        """Execute multi-symbol futures backtest."""
         d = self.data
+        if _should_aggregate_from_1h(self.params):
+            d = _aggregate_aligned_data_1h_to_4h(d)
         c2d = d["close"]
         lev_2d = d.get("dyn_leverage", np.full(c2d.shape, self.leverage))
 
@@ -335,6 +288,7 @@ class MultiSymbolEngine:
             self.max_exposure,
             float(self.params.get("MAX_EXPOSURE_PER_COIN", 1.5)),
             float(self.params.get("DD_SCALING_THRESHOLD", 0.0)),
+            d.get("volume"),
         )
         if trades_arr.size == 0:
             return pd.DataFrame(), equity, final_bal, diag
@@ -348,11 +302,12 @@ class FuturesBacktestEngine:
     """Unified entry point for Futures Backtesting."""
 
     @staticmethod
-    def run_single(hourly_df: pd.DataFrame, daily_df: pd.DataFrame, strategy: Any, **kwargs) -> dict[str, Any]:
-        engine = SingleSymbolEngine(hourly_df, daily_df, strategy, **kwargs)
-        return engine.run()
-
-    @staticmethod
-    def run_multi(aligned_data: dict[str, np.ndarray], symbol_names: list[str], strategy_params: dict[str, Any], **kwargs) -> tuple[pd.DataFrame, np.ndarray, float, np.ndarray]:
-        engine = MultiSymbolEngine(aligned_data, symbol_names, strategy_params, **kwargs)
+    def run_multi(
+        aligned_data: dict[str, np.ndarray],
+        symbol_names: list[str],
+        strategy_params: dict[str, Any],
+        **kwargs: Any,
+    ) -> tuple[pd.DataFrame, np.ndarray, float, np.ndarray]:
+        """Run the portfolio backtest from aligned arrays."""
+        engine = PortfolioBacktestEngine(aligned_data, symbol_names, strategy_params, **kwargs)
         return engine.run()
