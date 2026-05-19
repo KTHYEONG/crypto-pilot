@@ -404,7 +404,8 @@ def main() -> None:
             _logger.info(" [DATA] Syncing 1m data for %d universe symbols...", len(discovered_symbols))
             from src.domain.futures.data_loader import DataCollector
             collector = DataCollector()
-            for sym in discovered_symbols:
+            for i, sym in enumerate(discovered_symbols, 1):
+                _logger.info(f" [DATA]  > Syncing {sym} ({i}/{len(discovered_symbols)})...")
                 collector.ensure_1m_data(sym, fetch_start_date_str, end_date_str)
 
         # Universe Quality Gate Check
