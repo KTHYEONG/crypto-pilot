@@ -121,7 +121,10 @@ def backtest_target_weights_numba(
     spare_a, spare_b = 0, 0
     min_notional_floor_pct = 0.0001
 
-    max_trades = 50000
+    liq_p = np.zeros(n_syms, dtype=np.float64)
+    MAINT_MARGIN_RATE = 0.005  # Binance USDT-M 기본 유지증거금율 0.5%
+
+    max_trades = max(50_000, n_bars * n_syms * 3)
     trades: np.ndarray = np.zeros((max_trades, 10), dtype=np.float64)
     t_count = 0
 
@@ -325,6 +328,11 @@ def backtest_target_weights_numba(
                 highest[s] = fill_p
                 lowest[s] = fill_p
                 stop_p[s] = fill_p - (stop_dist * float(ts))
+                # Isolated margin liquidation price
+                # Long: entry*(1 - 1/lev + MMR), Short: entry*(1 + 1/lev - MMR)
+                liq_p[s] = fill_p * (
+                    1.0 - (1.0 / le_ent) * float(ts) + MAINT_MARGIN_RATE * float(ts)
+                )
 
         unrealized_total = 0.0
         used_margin_total = 0.0
@@ -393,6 +401,15 @@ def backtest_target_weights_numba(
                 exit_triggered = True
                 exit_price = c_open * (1.0 - slippage_rate * pos_side[s])
 
+            # Liquidation check (isolated margin model): priority over stop-loss
+            if not exit_triggered and liq_p[s] > 0.0:
+                if pos_side[s] == 1 and c_low <= liq_p[s]:
+                    exit_triggered = True
+                    exit_price = liq_p[s] * (1.0 - slippage_rate)
+                elif pos_side[s] == -1 and c_high >= liq_p[s]:
+                    exit_triggered = True
+                    exit_price = liq_p[s] * (1.0 + slippage_rate)
+
             if not exit_triggered:
                 if use_simple_atr_stop != 0:
                     if pos_side[s] == 1:
@@ -444,6 +461,7 @@ def backtest_target_weights_numba(
                     ]
                     t_count += 1
                 in_pos[s] = False
+                liq_p[s] = 0.0
 
     if n_bars > 0:
         last_idx = n_bars - 1
@@ -531,12 +549,14 @@ def backtest_target_weights_intrabar_numba(
     highest = np.zeros(n_syms, dtype=np.float64)
     lowest = np.zeros(n_syms, dtype=np.float64)
     entry_lev = np.ones(n_syms, dtype=np.float64)
+    liq_p = np.zeros(n_syms, dtype=np.float64)
+    MAINT_MARGIN_RATE = 0.005  # Binance USDT-M 기본 유지증거금율 0.5%
 
     dust_skip_cnt, margin_fail_cnt = 0, 0
     spare_a, spare_b = 0, 0
     min_notional_floor_pct = 0.0001
 
-    max_trades = 50000
+    max_trades = max(50_000, n_decisions * n_syms * 3)
     trades = np.zeros((max_trades, 10), dtype=np.float64)
     t_count = 0
 
@@ -739,6 +759,10 @@ def backtest_target_weights_intrabar_numba(
                 highest[s] = fill_p
                 lowest[s] = fill_p
                 stop_p[s] = fill_p - (stop_dist * float(ts))
+                # Isolated margin liquidation price
+                liq_p[s] = fill_p * (
+                    1.0 - (1.0 / le_ent) * float(ts) + MAINT_MARGIN_RATE * float(ts)
+                )
 
         window_liq = False
         liq_m = start_m
@@ -795,6 +819,15 @@ def backtest_target_weights_intrabar_numba(
                     exit_triggered = True
                     exit_price = c_open * (1.0 - slippage_rate * pos_side[s])
 
+                # Liquidation check (isolated margin model): priority over stop-loss
+                if not exit_triggered and liq_p[s] > 0.0:
+                    if pos_side[s] == 1 and c_low <= liq_p[s]:
+                        exit_triggered = True
+                        exit_price = liq_p[s] * (1.0 - slippage_rate)
+                    elif pos_side[s] == -1 and c_high >= liq_p[s]:
+                        exit_triggered = True
+                        exit_price = liq_p[s] * (1.0 + slippage_rate)
+
                 if not exit_triggered:
                     if use_simple_atr_stop != 0:
                         if pos_side[s] == 1:
@@ -844,6 +877,7 @@ def backtest_target_weights_intrabar_numba(
                         ]
                         t_count += 1
                     in_pos[s] = False
+                    liq_p[s] = 0.0
 
         if window_liq:
             for s in range(n_syms):
