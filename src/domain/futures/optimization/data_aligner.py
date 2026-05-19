@@ -39,6 +39,16 @@ _FUTURES_2D_REQUIRED_COLS: tuple[str, ...] = (
     "btc_trend_vol_adj_24h",
 )
 
+_EXEC_1M_VALUE_COLS: tuple[str, ...] = (
+    "exec_open_1m",
+    "exec_high_1m",
+    "exec_low_1m",
+    "exec_close_1m",
+    "exec_volume_1m",
+)
+_EXEC_1M_DT_COL = "exec_dt_index_1m"
+_DECISION_DT_COL = "dt_index"
+
 
 def _dataframe_to_symbol_arrays(sig_df: pd.DataFrame) -> dict[str, np.ndarray]:
     """Convert a signal DataFrame to a dictionary of numpy arrays.
@@ -136,7 +146,108 @@ def _build_aligned_2d_from_prebuilt(
         except ValueError:
             return None
         aligned_data[col] = np.ascontiguousarray(merged)
+
+    decision_dt = _extract_decision_dt_index(
+        prebuilt_arrays=prebuilt_arrays,
+        symbols=symbols,
+        slice_start=slice_start,
+        slice_end=slice_end,
+    )
+    if decision_dt is not None:
+        aligned_data[_DECISION_DT_COL] = np.ascontiguousarray(decision_dt)
+
+    exec_payload = _build_optional_exec_1m_payload(
+        prebuilt_arrays=prebuilt_arrays,
+        symbols=symbols,
+    )
+    if exec_payload is not None:
+        aligned_data.update(exec_payload)
     return aligned_data
+
+
+def _extract_decision_dt_index(
+    prebuilt_arrays: dict[str, dict[str, np.ndarray]],
+    symbols: list[str],
+    slice_start: int,
+    slice_end: int,
+) -> np.ndarray | None:
+    """Extract decision timeframe datetime index for current slice."""
+    for sym in symbols:
+        sym_arrs = prebuilt_arrays.get(sym)
+        if sym_arrs is None:
+            continue
+        raw_dt = sym_arrs.get(_DECISION_DT_COL)
+        if raw_dt is None:
+            continue
+        dt_arr = np.asarray(raw_dt, dtype=np.float64)
+        if dt_arr.ndim != 1 or slice_end > int(dt_arr.shape[0]):
+            continue
+        return dt_arr[slice_start:slice_end]
+    return None
+
+
+def _build_optional_exec_1m_payload(
+    prebuilt_arrays: dict[str, dict[str, np.ndarray]],
+    symbols: list[str],
+) -> dict[str, np.ndarray] | None:
+    """Build optional 1m execution payload aligned on deterministic master index.
+
+    Alignment rule: master union sorted index from all available symbol-level
+    ``exec_dt_index_1m`` arrays. Missing timestamps for a symbol remain NaN.
+    """
+    exec_dt_candidates: list[np.ndarray] = []
+    symbol_exec_dt: dict[str, np.ndarray] = {}
+    for sym in symbols:
+        sym_arrs = prebuilt_arrays.get(sym)
+        if sym_arrs is None:
+            continue
+        raw_dt = sym_arrs.get(_EXEC_1M_DT_COL)
+        if raw_dt is None:
+            continue
+        dt_arr = np.asarray(raw_dt, dtype=np.float64)
+        if dt_arr.ndim != 1 or dt_arr.size == 0:
+            continue
+        exec_dt_candidates.append(dt_arr)
+        symbol_exec_dt[sym] = dt_arr
+    if not exec_dt_candidates:
+        return None
+
+    master_exec_dt = np.unique(np.concatenate(exec_dt_candidates).astype(np.float64, copy=False))
+    if master_exec_dt.size == 0:
+        return None
+
+    n_exec = int(master_exec_dt.size)
+    n_syms = len(symbols)
+    payload: dict[str, np.ndarray] = {
+        _EXEC_1M_DT_COL: np.ascontiguousarray(master_exec_dt),
+    }
+    for col in _EXEC_1M_VALUE_COLS:
+        payload[col] = np.full((n_exec, n_syms), np.nan, dtype=np.float64)
+
+    for s_idx, sym in enumerate(symbols):
+        sym_arrs = prebuilt_arrays.get(sym)
+        sym_dt = symbol_exec_dt.get(sym)
+        if sym_arrs is None or sym_dt is None:
+            continue
+        idx = np.searchsorted(master_exec_dt, sym_dt, side="left")
+        in_range = idx < n_exec
+        if not np.any(in_range):
+            continue
+        idx = idx[in_range]
+        src_mask = master_exec_dt[idx] == sym_dt[in_range]
+        if not np.any(src_mask):
+            continue
+        row_idx = idx[src_mask]
+
+        for col in _EXEC_1M_VALUE_COLS:
+            raw_val = sym_arrs.get(col)
+            if raw_val is None:
+                continue
+            val_arr = np.asarray(raw_val, dtype=np.float64)
+            if val_arr.ndim != 1 or val_arr.shape[0] != sym_dt.shape[0]:
+                continue
+            payload[col][row_idx, s_idx] = val_arr[in_range][src_mask]
+    return payload
 
 
 def align_data_for_2d_engine(

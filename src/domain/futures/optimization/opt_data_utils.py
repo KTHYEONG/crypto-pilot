@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import logging
+import os
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +26,68 @@ def _to_unix_ms(dt: pd.Series | pd.DatetimeIndex) -> pd.Series:
     values in the native unit. Upcasting to ns first normalizes all variants.
     """
     return pd.to_datetime(dt, utc=True).astype("datetime64[ns, UTC]").astype("int64") // 10**6
+
+
+def _should_load_exec_1m(load_exec_1m: bool | None) -> bool:
+    """Resolve whether execution 1m data should be loaded."""
+    if load_exec_1m is not None:
+        return bool(load_exec_1m)
+    mode = os.getenv("FUTURES_EXECUTION_MODE", "coarse").strip().lower()
+    return mode == "intrabar_1m"
+
+
+def _safe_read_funding_parquet(symbol: str) -> pd.DataFrame | None:
+    """Read funding parquet for symbol with defensive fallback."""
+    f_path = Path(FUTURES_DATA_DIR) / f"{symbol.replace('/', '_')}_funding.parquet"
+    if not f_path.exists():
+        return None
+    try:
+        df = pd.read_parquet(f_path)
+        return df if not df.empty else None
+    except Exception:
+        _logger.warning("Failed to load funding parquet for %s", symbol)
+        return None
+
+
+def _build_funding_event_arrays_1m(
+    exec_df_1m: pd.DataFrame,
+    funding_df: pd.DataFrame | None,
+) -> tuple[np.ndarray | None, np.ndarray | None]:
+    """Build 1m funding event mask/rate arrays aligned to exec 1m rows.
+
+    Events are stamped only on exact funding timestamps (typically 8h cadence).
+    Non-event bars are zero.
+    """
+    if exec_df_1m is None or exec_df_1m.empty or funding_df is None or funding_df.empty:
+        return None, None
+    if "datetime" not in exec_df_1m.columns:
+        return None, None
+    if "timestamp" not in funding_df.columns or "funding_rate" not in funding_df.columns:
+        return None, None
+
+    exec_ms = _to_unix_ms(exec_df_1m["datetime"]).to_numpy(dtype=np.int64, copy=False)
+    event_ms = _to_unix_ms(pd.to_datetime(funding_df["timestamp"], unit="ms", utc=True)).to_numpy(
+        dtype=np.int64, copy=False
+    )
+    event_rate = pd.to_numeric(funding_df["funding_rate"], errors="coerce").to_numpy(
+        dtype=np.float64, copy=False
+    )
+
+    n = exec_ms.size
+    if n == 0 or event_ms.size == 0:
+        return None, None
+    mask = np.zeros(n, dtype=np.float64)
+    rate = np.zeros(n, dtype=np.float64)
+    pos = np.searchsorted(exec_ms, event_ms, side="left")
+    valid = (pos >= 0) & (pos < n) & (exec_ms[pos] == event_ms) & np.isfinite(event_rate)
+    if not np.any(valid):
+        return None, None
+    pos_v = pos[valid]
+    rate_v = event_rate[valid]
+    np.add.at(mask, pos_v, 1.0)
+    np.add.at(rate, pos_v, rate_v)
+    mask = np.where(mask > 0.0, 1.0, 0.0)
+    return mask, rate
 
 
 _FEATURE_GROUP_PATTERNS: dict[str, tuple[str, ...]] = {
@@ -294,6 +357,7 @@ def load_single_symbol_data(
     end: str,
     skip_metrics: bool = False,
     target_tfs: list[str] | None = None,
+    load_exec_1m: bool | None = None,
 ) -> tuple[str, dict[str, Any] | None, dict[str, Any] | None, bool]:
     """Load and enrich data for a single symbol across multiple timeframes."""
     try:
@@ -304,17 +368,13 @@ def load_single_symbol_data(
         collector = DataCollector()
 
         tfs_to_load = set(target_tfs) if target_tfs else {tf, "1d", "1h", "4h"}
+        use_exec_1m = _should_load_exec_1m(load_exec_1m)
 
         # [Optimization] Pre-load funding and metrics data once to avoid redundant I/O per TF
         funding_df = None
         metrics_df = None
         if not skip_metrics:
-            f_path = Path(FUTURES_DATA_DIR) / f"{sym.replace('/', '_')}_funding.parquet"
-            if f_path.exists():
-                try:
-                    funding_df = pd.read_parquet(f_path)
-                except Exception:
-                    _logger.warning("Failed to load funding data for %s", sym)
+            funding_df = _safe_read_funding_parquet(sym)
 
             m_path = Path(FUTURES_DATA_DIR) / f"{sym.replace('/', '_')}_metrics.parquet"
             if m_path.exists():
@@ -431,6 +491,45 @@ def load_single_symbol_data(
             idx_oos = int(mask_oos.to_numpy().argmax()) if mask_oos.any() else len(df)
             temp_oos[f"oos_start_idx_{tf_l}"] = idx_oos
 
+        if use_exec_1m:
+            try:
+                exec_1m = collector.collect_1m_ohlcv(sym, fetch_start, end)
+            except Exception as e:
+                _logger.warning("[%s] collect_1m_ohlcv failed: %s", sym, e)
+                exec_1m = pd.DataFrame()
+            if isinstance(exec_1m, pd.DataFrame) and not exec_1m.empty:
+                if "datetime" not in exec_1m.columns:
+                    exec_1m = exec_1m.reset_index()
+                    if "datetime" not in exec_1m.columns and len(exec_1m.columns) > 0:
+                        exec_1m = exec_1m.rename(columns={str(exec_1m.columns[0]): "datetime"})
+                if "datetime" in exec_1m.columns:
+                    exec_1m = exec_1m.copy()
+                    exec_1m["datetime"] = pd.to_datetime(exec_1m["datetime"], utc=True)
+                    exec_1m.sort_values("datetime", inplace=True)
+                    exec_1m.reset_index(drop=True, inplace=True)
+                    temp_is["exec_1m"] = exec_1m[exec_1m["datetime"] < is_end_dt].copy()
+                    mask_exec_is = temp_is["exec_1m"]["datetime"] >= is_start_dt
+                    temp_is["is_start_idx_exec_1m"] = (
+                        int(mask_exec_is.to_numpy().argmax()) if mask_exec_is.any() else 0
+                    )
+                    temp_oos["exec_1m"] = exec_1m
+                    mask_exec_oos = exec_1m["datetime"] >= is_end_dt
+                    temp_oos["oos_start_idx_exec_1m"] = (
+                        int(mask_exec_oos.to_numpy().argmax())
+                        if mask_exec_oos.any()
+                        else len(exec_1m)
+                    )
+
+                    if funding_df is None and not skip_metrics:
+                        funding_df = _safe_read_funding_parquet(sym)
+                    mask_1m, rate_1m = _build_funding_event_arrays_1m(exec_1m, funding_df)
+                    if mask_1m is not None and rate_1m is not None:
+                        is_exec_len = len(temp_is["exec_1m"])
+                        temp_is["funding_event_mask_1m"] = mask_1m[:is_exec_len].copy()
+                        temp_is["funding_rate_event_1m"] = rate_1m[:is_exec_len].copy()
+                        temp_oos["funding_event_mask_1m"] = mask_1m.copy()
+                        temp_oos["funding_rate_event_1m"] = rate_1m.copy()
+
         if insufficient:
             return sym, None, None, True
 
@@ -456,6 +555,7 @@ def load_futures_data_maps_for_symbols(
     end: str,
     skip_metrics: bool = False,
     target_tfs: list[str] | None = None,
+    load_exec_1m: bool | None = None,
 ) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]], list[str]]:
     """Load data for multiple symbols in parallel and inject momentum ranks."""
     data_maps: dict[str, dict[str, Any]] = {}
@@ -477,6 +577,7 @@ def load_futures_data_maps_for_symbols(
                 end,
                 skip_metrics,
                 target_tfs,
+                load_exec_1m,
             )
             for sym in symbols
         ]
