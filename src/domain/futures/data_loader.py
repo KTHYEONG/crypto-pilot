@@ -297,13 +297,22 @@ class DataCollector:
         vision_symbol = symbol.replace("/", "")
         current_month_start = req_start.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
         
+        vision_tasks = []
         while current_month_start < min(req_end, api_cutoff):
             # Check if this month is already in cache_df
             month_end = (current_month_start + pd.offsets.MonthEnd(1)).replace(hour=23, minute=59, second=59)
             if cache_df.empty or cache_df["datetime"].min() > current_month_start or cache_df["datetime"].max() < month_end:
-                from src.core.utils.binance_vision import BinanceVisionDownloader
-                vision = BinanceVisionDownloader()
-                v_df = vision.fetch_klines_archive_monthly(vision_symbol, "1m", current_month_start.year, current_month_start.month)
+                vision_tasks.append((current_month_start.year, current_month_start.month))
+            current_month_start += pd.offsets.MonthBegin(1)
+
+        if vision_tasks:
+            from src.core.utils.binance_vision import BinanceVisionDownloader
+            import concurrent.futures
+            
+            vision = BinanceVisionDownloader()
+
+            def _fetch_month(year: int, month: int) -> pd.DataFrame:
+                v_df = vision.fetch_klines_archive_monthly(vision_symbol, "1m", year, month)
                 if not v_df.empty:
                     # Klines columns: timestamp, open, high, low, close, volume, close_time, quote_asset_volume, trades, taker_buy_base, taker_buy_quote, ignore
                     v_df.columns = [
@@ -316,9 +325,19 @@ class DataCollector:
                         v_df[col] = pd.to_numeric(v_df[col], errors="coerce")
                     
                     v_df = v_df[["timestamp", "open", "high", "low", "close", "volume", "taker_buy_base_volume", "taker_buy_quote_volume"]]
-                    new_parts.append(self._normalize_df(v_df))
-            
-            current_month_start += pd.offsets.MonthBegin(1)
+                    return self._normalize_df(v_df)
+                return pd.DataFrame()
+
+            # 무리하지 않게 4개의 스레드로 제한하여 I/O 대기와 파싱(CPU)을 교차 병렬화
+            with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+                future_to_task = {executor.submit(_fetch_month, y, m): (y, m) for y, m in vision_tasks}
+                for future in concurrent.futures.as_completed(future_to_task):
+                    try:
+                        res_df = future.result()
+                        if not res_df.empty:
+                            new_parts.append(res_df)
+                    except Exception as e:
+                        self.logger.warning(f"Error fetching vision data for {symbol}: {e}")
 
         # 2. API for recent data or gaps
         remaining_start = max(req_start, cache_df["datetime"].max() if not cache_df.empty else req_start)

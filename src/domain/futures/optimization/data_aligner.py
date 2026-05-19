@@ -45,6 +45,8 @@ _EXEC_1M_VALUE_COLS: tuple[str, ...] = (
     "exec_low_1m",
     "exec_close_1m",
     "exec_volume_1m",
+    "funding_event_mask_1m",   # intrabar 엔진 funding event 판정용
+    "funding_rate_event_1m",   # intrabar 엔진 funding rate 적용용
 )
 _EXEC_1M_DT_COL = "exec_dt_index_1m"
 _DECISION_DT_COL = "dt_index"

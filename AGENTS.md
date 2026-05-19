@@ -64,9 +64,13 @@ Follow this structure only for tasks involving code generation or structural cha
         - `src/**/sizing/**/*.py` (Position Sizing)
         - `src/**/regimes/**/*.py` (Market Regime Analysis)
         - `src/**/opt_*_utils/**/*.py` (Optimization Utilities)
+        - `src/**/alpha_factory/**/*.py` (Futures Alpha Factory)
+        - `src/**/ml_pipeline/**/*.py` (Futures ML Pipeline)
+        - `src/**/optimization/**/*.py` (Optimization Modules)
+        - `src/**/validation/**/*.py` (Walk-forward Validation)
+        - `src/**/universe/**/*.py` (Universe Selection & Cost Model)
         - `src/core/indicators/**/*.py` (Technical Indicators)
-        - `src/core/optimization/**/*.py` (Optimization Logic)
         - `src/execution/opt_main_*.py` (Optimization Execution Engines)
         - `src/execution/trader_*.py` (Live Trading & Execution Engines)
-    - **Filename Regex Pattern**: `src/.*(engine|portfolio|metrics|data_collector|backtest).*`
+    - **Filename Regex Pattern**: `src/.*(engine|portfolio|metrics|data_collector|backtest|alpha|pipeline|optimizer|universe|loader).*`
 - **Application Instruction**: When the trigger is activated, the agent prioritizes and inherits the quant-specific workflow (`<quant_plan>` -> `<quant_compute>` -> `<quant_risk>`), Zero-Loop / JIT Compilation / Walk-forward Time-Series Validation principles defined in [quant.md](file:///.agents/rules/quant.md) over the general guidelines in this document (`AGENTS.md`).
