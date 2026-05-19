@@ -15,7 +15,9 @@ from config.settings import (
     SMART_ORDER_OFFSET,
     TAKER_FEE_RATE,
 )
+from src.domain.futures.backtest_preparation import prepare_backtest_inputs
 from src.domain.futures.portfolio.execution_sim import (
+    backtest_target_weights_intrabar_numba,
     backtest_target_weights_numba,
     check_long_exit,
     check_short_exit,
@@ -24,93 +26,6 @@ from src.domain.futures.portfolio.portfolio_constructor import (
     portfolio_weight_params_from_optuna,
     precompute_rebalance_weights,
 )
-
-_AGG_FACTOR_BY_TIMEFRAME: dict[str, int] = {
-    "4h": 4,
-}
-
-
-def _aggregate_1h_to_4h_block(arr: np.ndarray, mode: str) -> np.ndarray:
-    """Aggregate 2D [bars, symbols] 1h arrays to 4h blocks with no look-ahead."""
-    if arr.ndim != 2:
-        raise ValueError(f"expected 2D array, got ndim={arr.ndim}")
-    n_bars, n_syms = arr.shape
-    factor = 4
-    if n_bars < factor:
-        raise ValueError("insufficient 1h bars for 4h aggregation")
-    usable = (n_bars // factor) * factor
-    trimmed = arr[n_bars - usable :, :]
-    block = trimmed.reshape(usable // factor, factor, n_syms)
-    if mode == "open":
-        return np.asarray(block[:, 0, :], dtype=np.float64)
-    if mode == "high":
-        return np.asarray(np.nanmax(block, axis=1), dtype=np.float64)
-    if mode == "low":
-        return np.asarray(np.nanmin(block, axis=1), dtype=np.float64)
-    if mode == "close":
-        return np.asarray(block[:, -1, :], dtype=np.float64)
-    if mode == "sum":
-        return np.asarray(np.nansum(block, axis=1), dtype=np.float64)
-    if mode == "max":
-        return np.asarray(np.nanmax(block, axis=1), dtype=np.float64)
-    if mode == "last":
-        return np.asarray(block[:, -1, :], dtype=np.float64)
-    if mode == "finite_last":
-        finite_mask = np.isfinite(block)
-        rev_mask = finite_mask[:, ::-1, :]
-        has_any = np.any(rev_mask, axis=1)
-        idx_from_end = np.argmax(rev_mask, axis=1)
-        take_idx = (factor - 1) - idx_from_end
-        gathered = np.take_along_axis(block, take_idx[:, None, :], axis=1)[:, 0, :]
-        return np.where(has_any, gathered, np.nan)
-    raise ValueError(f"unsupported aggregation mode: {mode}")
-
-
-def _should_aggregate_from_1h(params: dict[str, Any]) -> bool:
-    target_tf = str(params.get("TIMEFRAME", "4h")).lower()
-    data_tf = str(params.get("DATA_TIMEFRAME", target_tf)).lower()
-    return target_tf == "4h" and data_tf == "1h"
-
-
-def _aggregate_aligned_data_1h_to_4h(
-    aligned_data: dict[str, np.ndarray],
-) -> dict[str, np.ndarray]:
-    """Return a shallow-copied aligned_data aggregated from 1h bars to 4h bars."""
-    out: dict[str, np.ndarray] = dict(aligned_data)
-    mode_map = {
-        "open": "open",
-        "high": "high",
-        "low": "low",
-        "close": "close",
-        "volume": "sum",
-        "funding_rate_sum": "sum",
-        "kill_signal": "max",
-        "atr": "finite_last",
-        "dyn_leverage": "last",
-        "xs_score_long": "last",
-        "xs_score_short": "last",
-        "target_weights": "last",
-    }
-    hmm_cols = (
-        "hmm_prob_bull_calm",
-        "hmm_prob_bull_vol_up",
-        "hmm_prob_bear_trend",
-        "hmm_prob_chop",
-        "hmm_prob_crisis",
-        "composer_sigma_bar",
-    )
-    for col in hmm_cols:
-        mode_map[col] = "last"
-
-    for key, mode in mode_map.items():
-        raw = out.get(key)
-        if raw is None:
-            continue
-        arr = np.asarray(raw, dtype=np.float64)
-        if arr.ndim != 2:
-            continue
-        out[key] = _aggregate_1h_to_4h_block(arr, mode)
-    return out
 
 
 def hours_per_bar_from_timeframe(tf: str) -> float:
@@ -141,6 +56,7 @@ def max_hold_bars_from_time_barrier(strategy_params: dict[str, Any]) -> int:
 __all__ = [
     "FuturesBacktestEngine",
     "PortfolioBacktestEngine",
+    "backtest_target_weights_intrabar_numba",
     "backtest_target_weights_numba",
     "check_long_exit",
     "check_short_exit",
@@ -186,9 +102,8 @@ class PortfolioBacktestEngine:
 
     def run(self) -> tuple[pd.DataFrame, np.ndarray, float, np.ndarray]:
         """Execute multi-symbol futures backtest."""
-        d = self.data
-        if _should_aggregate_from_1h(self.params):
-            d = _aggregate_aligned_data_1h_to_4h(d)
+        prepared = prepare_backtest_inputs(self.data, self.params)
+        d = prepared.aligned_data
         c2d = d["close"]
         lev_2d = d.get("dyn_leverage", np.full(c2d.shape, self.leverage))
 
@@ -264,32 +179,76 @@ class PortfolioBacktestEngine:
             1 if bool(OPT_FUTURES_CONFIG.get("FUTURES_SIMPLE_ATR_STOP", True)) else 0
         )
 
-        trades_arr, final_bal, equity, diag = backtest_target_weights_numba(
-            c2d,
-            d["high"],
-            d["low"],
-            d["open"],
-            d.get("funding_rate_sum", np.zeros_like(c2d)),
-            d.get("kill_signal", np.zeros_like(c2d)),
-            tw_arr,
-            self.initial_balance,
-            lev_2d,
-            self.maker_fee,
-            self.taker_fee,
-            slip_eff,
-            max(1, int(self.params.get("REBALANCE_BARS", 6))),
-            mx_hold,
-            sborr,
-            d["atr"],
-            float(self.params.get("ATR_MULT", 3.0)),
-            float(self.params.get("TRAIL_MULT", 3.0)),
-            use_simple_atr_i,
-            self.max_concurrent_positions,
-            self.max_exposure,
-            float(self.params.get("MAX_EXPOSURE_PER_COIN", 1.5)),
-            float(self.params.get("DD_SCALING_THRESHOLD", 0.0)),
-            d.get("volume"),
+        use_intrabar = (
+            prepared.execution_mode == "intrabar_1m"
+            and prepared.exec_bar_start_1m_idx is not None
+            and prepared.exec_bar_end_1m_idx is not None
+            and d.get("exec_open_1m") is not None
+            and d.get("exec_high_1m") is not None
+            and d.get("exec_low_1m") is not None
+            and d.get("exec_close_1m") is not None
         )
+        if use_intrabar:
+            trades_arr, final_bal, equity, diag = backtest_target_weights_intrabar_numba(
+                c2d,
+                d["high"],
+                d["low"],
+                d["open"],
+                tw_arr,
+                lev_2d,
+                d["atr"],
+                d.get("kill_signal", np.zeros_like(c2d)),
+                np.asarray(d["exec_open_1m"], dtype=np.float64),
+                np.asarray(d["exec_high_1m"], dtype=np.float64),
+                np.asarray(d["exec_low_1m"], dtype=np.float64),
+                np.asarray(d["exec_close_1m"], dtype=np.float64),
+                prepared.exec_bar_start_1m_idx,
+                prepared.exec_bar_end_1m_idx,
+                self.initial_balance,
+                self.maker_fee,
+                self.taker_fee,
+                slip_eff,
+                max(1, int(self.params.get("REBALANCE_BARS", 6))),
+                mx_hold,
+                sborr,
+                float(self.params.get("ATR_MULT", 3.0)),
+                float(self.params.get("TRAIL_MULT", 3.0)),
+                use_simple_atr_i,
+                self.max_concurrent_positions,
+                self.max_exposure,
+                float(self.params.get("MAX_EXPOSURE_PER_COIN", 1.5)),
+                float(self.params.get("DD_SCALING_THRESHOLD", 0.0)),
+                funding_event_mask_1m=d.get("funding_event_mask_1m"),
+                funding_rate_1m=d.get("funding_rate_event_1m"),
+                volume_1m_2d=d.get("exec_volume_1m"),
+            )
+        else:
+            trades_arr, final_bal, equity, diag = backtest_target_weights_numba(
+                c2d,
+                d["high"],
+                d["low"],
+                d["open"],
+                d.get("funding_rate_sum", np.zeros_like(c2d)),
+                d.get("kill_signal", np.zeros_like(c2d)),
+                tw_arr,
+                self.initial_balance,
+                lev_2d,
+                self.maker_fee,
+                self.taker_fee,
+                slip_eff,
+                max(1, int(self.params.get("REBALANCE_BARS", 6))),
+                mx_hold,
+                sborr,
+                d["atr"],
+                float(self.params.get("ATR_MULT", 3.0)),
+                float(self.params.get("TRAIL_MULT", 3.0)),
+                use_simple_atr_i,
+                self.max_concurrent_positions,
+                self.max_exposure,
+                float(self.params.get("MAX_EXPOSURE_PER_COIN", 1.5)),
+                float(self.params.get("DD_SCALING_THRESHOLD", 0.0)),
+                d.get("volume"),
+            )
         if trades_arr.size == 0:
             return pd.DataFrame(), equity, final_bal, diag
         df = pd.DataFrame(trades_arr, columns=["sym_idx", "entry_idx", "exit_idx", "side_val", "entry_price", "exit_price", "pnl", "amount", "entry_fee", "funding_fee"])

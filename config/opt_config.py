@@ -30,6 +30,7 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     "seeds": [42],
     "TARGET_TIMEFRAMES": ["4h"],
     # Risk & Portfolio (Phase D)
+    "FUTURES_EXECUTION_MODE": "intrabar_1m",
     "FUTURES_MAX_CONCURRENT_POSITIONS": 3,
     "FUTURES_MIN_PF": 1.50,
     "FUTURES_MAX_MDD": 20.0,
