@@ -24,7 +24,7 @@ from config.settings import (
     TAKER_FEE_RATE,
 )
 from src.domain.futures.backtest_engine import (
-    MultiSymbolEngine as PortfolioBacktestEngineFast,
+    PortfolioBacktestEngine as PortfolioBacktestEngineFast,
 )
 
 _logger: logging.Logger = logging.getLogger("opt_futures")
