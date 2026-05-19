@@ -15,8 +15,8 @@ import src.domain.futures.backtest_engine as backtest_engine_mod
 from config.settings import FUTURES_DATA_DIR
 from src.domain.futures.backtest_engine import (
     PortfolioBacktestEngine,
-    _aggregate_aligned_data_1h_to_4h,
 )
+from src.domain.futures.backtest_preparation import prepare_backtest_inputs
 
 
 def test_backtest_engine_multi_symbol_mock() -> None:
@@ -88,7 +88,11 @@ def test_aggregate_1h_to_4h_ohlcv_contract() -> None:
         "kill_signal": np.array([[0.0], [0.0], [1.0], [0.0]], dtype=np.float64),
         "atr": np.array([[2.0], [np.nan], [2.2], [np.nan]], dtype=np.float64),
     }
-    out = _aggregate_aligned_data_1h_to_4h(aligned_data)
+    prepared = prepare_backtest_inputs(
+        aligned_data,
+        {"TIMEFRAME": "4h", "DATA_TIMEFRAME": "1h"},
+    )
+    out = prepared.aligned_data
     assert out["open"][0, 0] == pytest.approx(10.0)
     assert out["high"][0, 0] == pytest.approx(15.0)
     assert out["low"][0, 0] == pytest.approx(8.0)
@@ -178,6 +182,129 @@ def test_backtest_engine_passes_volume_2d_to_execution_sim(
     )
     engine.run()
     np.testing.assert_allclose(captured["volume_2d"], volume)
+
+
+def test_intrabar_1m_mode_smoke_runs_without_src_intrabar_path() -> None:
+    """intrabar_1m 플래그 활성 시에도 현행 coarse 경로로 안정 실행."""
+    n_bars = 12
+    aligned_data = {
+        "close": np.full((n_bars, 1), 100.0, dtype=np.float64),
+        "high": np.full((n_bars, 1), 101.0, dtype=np.float64),
+        "low": np.full((n_bars, 1), 99.0, dtype=np.float64),
+        "open": np.full((n_bars, 1), 100.0, dtype=np.float64),
+        "atr": np.full((n_bars, 1), 2.0, dtype=np.float64),
+        "funding_rate_sum": np.zeros((n_bars, 1), dtype=np.float64),
+        "kill_signal": np.zeros((n_bars, 1), dtype=np.float64),
+        "target_weights": np.full((n_bars, 1), 0.2, dtype=np.float64),
+    }
+    engine = PortfolioBacktestEngine(
+        aligned_data=aligned_data,
+        symbol_names=["BTC/USDT"],
+        strategy_params={
+            "TIMEFRAME": "1h",
+            "REBALANCE_BARS": 1,
+            "FUTURES_EXECUTION_MODE": "intrabar_1m",
+        },
+        initial_balance=1000.0,
+    )
+    trades_df, equity, final_bal, _diag = engine.run()
+    assert isinstance(trades_df, pd.DataFrame)
+    assert len(equity) == n_bars
+    assert np.isfinite(final_bal)
+
+
+def test_intrabar_1m_flag_fallback_matches_coarse_outputs() -> None:
+    """Src intrabar 경로 미구현 상태에서 intrabar 플래그 결과는 coarse와 동일."""
+    n_bars = 16
+    aligned_data = {
+        "close": np.full((n_bars, 1), 100.0, dtype=np.float64),
+        "high": np.full((n_bars, 1), 101.0, dtype=np.float64),
+        "low": np.full((n_bars, 1), 99.0, dtype=np.float64),
+        "open": np.full((n_bars, 1), 100.0, dtype=np.float64),
+        "atr": np.full((n_bars, 1), 2.0, dtype=np.float64),
+        "funding_rate_sum": np.zeros((n_bars, 1), dtype=np.float64),
+        "kill_signal": np.zeros((n_bars, 1), dtype=np.float64),
+        "target_weights": np.where(np.arange(n_bars).reshape(-1, 1) >= 1, 0.3, 0.0),
+    }
+    common_params = {"TIMEFRAME": "1h", "REBALANCE_BARS": 2}
+    engine_coarse = PortfolioBacktestEngine(
+        aligned_data=aligned_data,
+        symbol_names=["BTC/USDT"],
+        strategy_params={**common_params, "FUTURES_EXECUTION_MODE": "coarse"},
+        initial_balance=1000.0,
+    )
+    engine_intrabar = PortfolioBacktestEngine(
+        aligned_data=aligned_data,
+        symbol_names=["BTC/USDT"],
+        strategy_params={**common_params, "FUTURES_EXECUTION_MODE": "intrabar_1m"},
+        initial_balance=1000.0,
+    )
+    trades_coarse, equity_coarse, final_coarse, _ = engine_coarse.run()
+    trades_intrabar, equity_intrabar, final_intrabar, _ = engine_intrabar.run()
+    assert final_intrabar == pytest.approx(final_coarse, abs=1e-9)
+    np.testing.assert_allclose(equity_intrabar, equity_coarse, atol=1e-9, rtol=0.0)
+    assert len(trades_intrabar) == len(trades_coarse)
+
+
+def test_intrabar_1m_window_mapping_basic_contract() -> None:
+    """Decision bar -> 1m window 매핑 기본 계약 검증."""
+    aligned_data = {
+        "close": np.full((3, 1), 100.0, dtype=np.float64),
+        "high": np.full((3, 1), 101.0, dtype=np.float64),
+        "low": np.full((3, 1), 99.0, dtype=np.float64),
+        "open": np.full((3, 1), 100.0, dtype=np.float64),
+        "atr": np.full((3, 1), 2.0, dtype=np.float64),
+        "dt_index": np.array([60.0, 120.0, 180.0], dtype=np.float64),
+        "exec_dt_index_1m": np.array(
+            [60.0, 61.0, 62.0, 120.0, 121.0, 180.0, 181.0], dtype=np.float64
+        ),
+    }
+    prepared = prepare_backtest_inputs(
+        aligned_data,
+        {"TIMEFRAME": "1h", "FUTURES_EXECUTION_MODE": "intrabar_1m"},
+    )
+    assert prepared.exec_bar_start_1m_idx is not None
+    assert prepared.exec_bar_end_1m_idx is not None
+    np.testing.assert_array_equal(
+        prepared.exec_bar_start_1m_idx, np.array([0, 3, 5], dtype=np.int64)
+    )
+    np.testing.assert_array_equal(prepared.exec_bar_end_1m_idx, np.array([2, 4, 6], dtype=np.int64))
+
+
+def test_intrabar_1m_injection_keys_contract_ready_for_execution() -> None:
+    """intrabar 실행에 필요한 1m 주입 키/매핑이 준비되는지 검증."""
+    n_decisions = 3
+    n_path = 7
+    aligned_data = {
+        "close": np.full((n_decisions, 1), 100.0, dtype=np.float64),
+        "high": np.full((n_decisions, 1), 101.0, dtype=np.float64),
+        "low": np.full((n_decisions, 1), 99.0, dtype=np.float64),
+        "open": np.full((n_decisions, 1), 100.0, dtype=np.float64),
+        "atr": np.full((n_decisions, 1), 2.0, dtype=np.float64),
+        "target_weights": np.zeros((n_decisions, 1), dtype=np.float64),
+        "kill_signal": np.zeros((n_decisions, 1), dtype=np.float64),
+        "dt_index": np.array([60.0, 120.0, 180.0], dtype=np.float64),
+        "exec_dt_index_1m": np.array([60.0, 61.0, 62.0, 120.0, 121.0, 180.0, 181.0], dtype=np.float64),
+        "exec_open_1m": np.full((n_path, 1), 100.0, dtype=np.float64),
+        "exec_high_1m": np.full((n_path, 1), 101.0, dtype=np.float64),
+        "exec_low_1m": np.full((n_path, 1), 99.0, dtype=np.float64),
+        "exec_close_1m": np.full((n_path, 1), 100.0, dtype=np.float64),
+        "exec_volume_1m": np.full((n_path, 1), 50.0, dtype=np.float64),
+    }
+
+    prepared = prepare_backtest_inputs(
+        aligned_data,
+        {"TIMEFRAME": "1h", "FUTURES_EXECUTION_MODE": "intrabar_1m"},
+    )
+    assert prepared.execution_mode == "intrabar_1m"
+    assert prepared.exec_bar_start_1m_idx is not None
+    assert prepared.exec_bar_end_1m_idx is not None
+    for key in ("exec_open_1m", "exec_high_1m", "exec_low_1m", "exec_close_1m", "exec_volume_1m"):
+        assert key in prepared.aligned_data
+        assert prepared.aligned_data[key].shape == (n_path, 1)
+    assert "exec_bar_start_1m_idx" in prepared.aligned_data
+    assert "exec_bar_end_1m_idx" in prepared.aligned_data
+
 
 @pytest.mark.skipif(not FUTURES_DATA_DIR.exists(), reason="Data directory not found")
 def test_backtest_engine_real_data_structure() -> None:
