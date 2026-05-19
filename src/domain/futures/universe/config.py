@@ -56,7 +56,8 @@ class Stage3Config:
     """Liquidity and execution feasibility gates."""
 
     min_adv_usdt_median: float = 25_000_000.0
-    max_amihud_30d: float = 6e-8  # 실측 분포 기반: p95 ≈ 4.15e-8, 임계값 = p95 × 1.5 ≈ 6.2e-8 → 6e-8
+    # 실측 분포 기반: p99 ≈ 1.084e-9, 임계값 = p99 × 1.5 ≈ 1.627e-9
+    max_amihud_30d: float = 1.63e-9
     max_clip_to_adv: float = 0.005
     screening_tier: str = "mid"
     screening_clip_usdt_by_tier: dict[str, float] = field(
