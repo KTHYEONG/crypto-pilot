@@ -80,8 +80,12 @@
 2. **관측 가능 이벤트 (Kill / Max Hold)**:
    * `kill_signal` 발생 또는 `max_hold_bars` 초과 시 현재 1m Bar의 `Open` 가격으로 즉시 시장가 강제 청산합니다. (Stop-loss보다 우선 판별)
 3. **강제 청산 판정 (Liquidation)**:
-   * 포지션 유지 증거금(`maintenance_margin_rate`) 기준의 파산가(Liquidation Price)를 계산합니다.
-   * `exec_low_1m` (Long) 또는 `exec_high_1m` (Short)이 청산가를 터치하면 포지션이 즉각 소멸되며 `liquidation_fee`가 부과됩니다.
+   * 진입 시 포지션별 청산가(`liq_price`)를 산출하여 보유한다.
+     - **Long**: `liq_price = entry_price × (1 - 1/leverage + MMR)` (MMR = 0.5%)
+     - **Short**: `liq_price = entry_price × (1 + 1/leverage - MMR)`
+   * `exec_low_1m ≤ liq_price` (Long) 또는 `exec_high_1m ≥ liq_price` (Short) 조건 충족 시
+     청산가에 slippage를 적용하여 포지션 즉시 소멸. Stop-loss보다 우선 판별.
+   * 구현 위치: `portfolio/execution_sim.py` — 두 Numba 함수 모두 적용.
 4. **Stop Loss & Trailing Stop 판정**:
    * 청산가를 터치하지 않았다면, 스탑로스 도달 여부를 확인합니다.
    * **Long 포지션 스탑로스**:
@@ -118,7 +122,7 @@
 엔진은 테스트(`backtest-test.md`)를 통해 아래 9대 원칙이 훼손되지 않음을 증명합니다.
 
 1. **노출 한도 (Exposure Cap)**: Gross Exposure와 Concurrent Symbol 한도를 정확히 스케일다운하여 준수.
-2. **청산 방지 (Bankruptcy Guard)**: `current_equity ≤ 0` 발생 즉시 전체 청산 및 파산 처리.
+2. **청산 방지 (Liquidation Guard)**: 포지션별 청산가 도달 시 즉시 청산(Stop-loss 우선). 계좌 레벨 `current_equity ≤ 0` 발생 시 전체 강제 청산 및 파산 처리.
 3. **마찰 정밀도 (Cost Precision)**: Turn-over 시의 수수료/슬리피지 수학적 일치.
 4. **갭 처리 (Price Gaps)**: 캔들 간 갭 시 지정가(Stop)가 아닌 시장가(Open)로 체결하여 유리한 조작 방지.
 5. **펀딩 부호 (Funding Signs)**: Short/Long 의 정확한 보유 비용 및 수익 누적.
