@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import numpy as np
-import pytest
 
 from src.domain.futures.portfolio.execution_sim import (
     backtest_target_weights_intrabar,
