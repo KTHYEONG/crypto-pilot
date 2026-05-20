@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import numpy as np
-import pytest
 
 from src.domain.futures.portfolio.portfolio_constructor import quantize_weights
 
@@ -15,7 +14,7 @@ class TestQuantization:
     """quantize_weights 함수 검증."""
 
     def test_min_notional_below_threshold_zeroed(self) -> None:
-        """minNotional 미달 주문 → 0.
+        """MinNotional 미달 주문 → 0.
 
         equity=10000, price=50000, step_size=0.001, w=0.0001
         notional = 0.0001 * 10000 = 1 USDT < 20 → qty=0
@@ -88,7 +87,7 @@ class TestQuantization:
         result = quantize_weights(w, equity, prices, step_sizes, min_notional=20.0)
 
         # 심볼 0: notional = 0.0001 * 10000 = 1 USDT < 20 → 0
-        assert result[0] == 0.0, f"심볼 0 minNotional 미달 → 0"
+        assert result[0] == 0.0, "심볼 0 minNotional 미달 → 0"
         # 심볼 1: notional = 0.05 * 10000 = 500 USDT → 통과
         assert result[1] > 0.0, f"심볼 1 통과 ({result[1]})"
 

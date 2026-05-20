@@ -272,7 +272,7 @@ def test_intrabar_1m_window_mapping_basic_contract() -> None:
 
 
 def test_intrabar_1m_injection_keys_contract_ready_for_execution() -> None:
-    """intrabar 실행에 필요한 1m 주입 키/매핑이 준비되는지 검증."""
+    """Intrabar 실행에 필요한 1m 주입 키/매핑이 준비되는지 검증."""
     n_decisions = 3
     n_path = 7
     aligned_data = {

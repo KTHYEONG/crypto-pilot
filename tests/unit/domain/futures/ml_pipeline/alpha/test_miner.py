@@ -3,16 +3,17 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-import pandas as pd
 import numpy as np
+import pandas as pd
 import pytest
 
 project_root = str(Path(__file__).resolve().parents[6])
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-from src.domain.futures.ml_pipeline.alpha.miner import MLAlphaMiner
 import src.domain.futures.ml_pipeline.alpha.miner as miner_module
+from src.domain.futures.ml_pipeline.alpha.miner import MLAlphaMiner
+
 
 def test_miner_labels_preparation():
     """Tests the label preparation logic in MLAlphaMiner."""

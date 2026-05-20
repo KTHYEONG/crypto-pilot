@@ -6,11 +6,8 @@
 from __future__ import annotations
 
 import numpy as np
-import pytest
 
 from src.domain.futures.validation.unified_gates import (
-    GateResult,
-    V3HardGates,
     evaluate_v3_hard_gates,
 )
 
@@ -49,7 +46,7 @@ class TestV3HardGates:
         assert "WF_POSITIVE_LEG_RATIO" not in result.failures
 
     def test_gate2_worst_leg_tw_floor_fail(self) -> None:
-        """worst leg TW = exp(-0.17) ≈ 0.844 < 0.85 → FAIL."""
+        """Worst leg TW = exp(-0.17) ≈ 0.844 < 0.85 → FAIL."""
         inp = _all_pass_inputs()
         worst_log = np.log(0.844)
         inp["leg_log_tw"] = np.array([0.04, 0.06, 0.03, 0.05, worst_log, 0.04, 0.05, 0.06])
@@ -58,7 +55,7 @@ class TestV3HardGates:
         assert "WF_WORST_LEG_TW" in result.failures
 
     def test_gate2_worst_leg_tw_floor_pass(self) -> None:
-        """worst leg TW = exp(log(0.86)) ≈ 0.86 > 0.85 → PASS."""
+        """Worst leg TW = exp(log(0.86)) ≈ 0.86 > 0.85 → PASS."""
         inp = _all_pass_inputs()
         worst_log = np.log(0.86)
         inp["leg_log_tw"] = np.array([0.04, 0.06, 0.03, 0.05, worst_log, 0.04, 0.05, 0.06])
@@ -66,7 +63,7 @@ class TestV3HardGates:
         assert "WF_WORST_LEG_TW" not in result.failures
 
     def test_gate3_mean_leg_tw_floor_fail(self) -> None:
-        """mean TW = 1.014 < 1.015 → FAIL."""
+        """Mean TW = 1.014 < 1.015 → FAIL."""
         inp = _all_pass_inputs()
         # mean(exp(log_tw)) = 1.014 → mean_log = log(1.014) 근사치
         target_mean_log = np.log(1.014)
@@ -76,7 +73,7 @@ class TestV3HardGates:
         assert "WF_MEAN_LEG_TW" in result.failures
 
     def test_gate3_mean_leg_tw_floor_pass(self) -> None:
-        """mean TW = 1.016 > 1.015 → PASS."""
+        """Mean TW = 1.016 > 1.015 → PASS."""
         inp = _all_pass_inputs()
         target_mean_log = np.log(1.016)
         inp["leg_log_tw"] = np.full(8, target_mean_log, dtype=np.float64)
