@@ -218,6 +218,24 @@ class BinanceVisionDownloader:
             self.logger.info("Downloading Vision metrics: %s @ %s", symbol, date_str)
             df = self._fetch_zip_csv(url)
 
+            if not df.empty and not any(isinstance(col, str) for col in df.columns):
+                expected_cols = [
+                    "create_time",
+                    "symbol",
+                    "sum_open_interest",
+                    "sum_open_interest_value",
+                    "count_toptrader_long_short_ratio",
+                    "sum_toptrader_long_short_ratio",
+                    "count_long_short_ratio",
+                    "sum_taker_long_short_vol_ratio",
+                ]
+                if len(df.columns) >= len(expected_cols):
+                    rename_map = {
+                        src_col: expected_cols[idx]
+                        for idx, src_col in enumerate(df.columns[: len(expected_cols)])
+                    }
+                    df = df.rename(columns=rename_map)
+
             # 컬럼명 정규화
             # Binance Vision metrics columns:
             # create_time, symbol, sum_open_interest, sum_open_interest_value,
@@ -491,4 +509,3 @@ def fetch_metrics_bulk(
 
     combined = pd.concat(dfs, ignore_index=True)
     return combined
-

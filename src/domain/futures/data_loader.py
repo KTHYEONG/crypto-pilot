@@ -255,25 +255,16 @@ class DataCollector:
         timeframe = "1m"
         req_start, req_end = pd.to_datetime(start_date, utc=True), pd.to_datetime(end_date, utc=True)
         cache_df = self._load_cache(symbol, timeframe)
-        new_dfs = []
-        fetch_tasks = []
-        if cache_df.empty: fetch_tasks.append((req_start, req_end))
-        else:
-            c_s, c_e = cache_df["datetime"].min(), cache_df["datetime"].max()
-            if req_start < c_s: fetch_tasks.append((req_start, c_s))
-            if req_end > c_e: fetch_tasks.append((c_e, req_end))
+        cache_covers_range = (
+            not cache_df.empty
+            and cache_df["datetime"].min() <= req_start
+            and cache_df["datetime"].max() >= req_end
+        )
 
-        if fetch_tasks:
+        if not cache_covers_range:
             with self._collect_1m_semaphore:
-                for f_s, f_e in fetch_tasks:
-                    chunk = self.client.fetch_ohlcv_with_taker(symbol, timeframe, str(f_s), str(f_e))
-                    if not chunk.empty: new_dfs.append(self._normalize_df(chunk))
-        
-        if new_dfs:
-            combined = pd.concat([cache_df, *new_dfs]).drop_duplicates(subset=["timestamp"])
-            combined.sort_values("timestamp", inplace=True)
-            self._save_cache(symbol, timeframe, combined)
-            cache_df = combined
+                self.ensure_1m_data(symbol, start_date, end_date)
+            cache_df = self._load_cache(symbol, timeframe)
 
         mask = (cache_df["datetime"] >= req_start) & (cache_df["datetime"] <= req_end)
         return cache_df.loc[mask].copy()
@@ -340,7 +331,17 @@ class DataCollector:
                         self.logger.warning(f"Error fetching vision data for {symbol}: {e}")
 
         # 2. API for recent data or gaps
-        remaining_start = max(req_start, cache_df["datetime"].max() if not cache_df.empty else req_start)
+        latest_cached_dt = cache_df["datetime"].max() if not cache_df.empty else None
+        for part in new_parts:
+            if part.empty or "datetime" not in part.columns:
+                continue
+            part_max_dt = pd.to_datetime(part["datetime"], utc=True).max()
+            if pd.isna(part_max_dt):
+                continue
+            if latest_cached_dt is None or part_max_dt > latest_cached_dt:
+                latest_cached_dt = part_max_dt
+
+        remaining_start = max(req_start, latest_cached_dt) if latest_cached_dt is not None else req_start
         if remaining_start < req_end:
             chunk = self.client.fetch_ohlcv_with_taker(symbol, timeframe, str(remaining_start), str(req_end))
             if not chunk.empty:
