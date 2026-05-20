@@ -1,12 +1,10 @@
-"""
-Cross-validation helpers: purged walk-forward (legacy) and CPCV test paths for spot optimization.
+"""Cross-validation helpers: purged walk-forward (legacy) and CPCV test paths for spot optimization.
 """
 
 from __future__ import annotations
 
 import logging
 from itertools import combinations
-from typing import List, Tuple
 
 import pandas as pd
 
@@ -16,16 +14,15 @@ _logger: logging.Logger = logging.getLogger("opt_spot")
 
 # CV folds  : 4-tuple (train_start, train_end, test_start, test_end)
 # Holdout fold: 3-tuple (train_end, test_start, test_end)
-CVFold = Tuple[int, int, int, int]
-HoldoutFold = Tuple[int, int, int]
+CVFold = tuple[int, int, int, int]
+HoldoutFold = tuple[int, int, int]
 
 # CPCV: each path is a list of disjoint test segment index ranges [start, end)
-CPCVPath = List[Tuple[int, int]]
+CPCVPath = list[tuple[int, int]]
 
 
-def list_cpcv_block_ranges(n_bars: int, n_blocks: int, embargo: int = 0) -> List[Tuple[int, int]]:
-    """
-    Physical IS blocks used by build_cpcv_test_paths (same geometry, IS-relative indices).
+def list_cpcv_block_ranges(n_bars: int, n_blocks: int, embargo: int = 0) -> list[tuple[int, int]]:
+    """Physical IS blocks used by build_cpcv_test_paths (same geometry, IS-relative indices).
     """
     n = int(n_bars)
     nb = int(n_blocks)
@@ -35,7 +32,7 @@ def list_cpcv_block_ranges(n_bars: int, n_blocks: int, embargo: int = 0) -> List
     base = n // nb
     if base <= e:
         return []
-    out: List[Tuple[int, int]] = []
+    out: list[tuple[int, int]] = []
     for j in range(nb):
         raw_start = j * base
         end = (j + 1) * base if j < nb - 1 else n
@@ -47,8 +44,8 @@ def list_cpcv_block_ranges(n_bars: int, n_blocks: int, embargo: int = 0) -> List
 
 
 def cpcv_complement_segments(
-    test_path: CPCVPath, all_blocks: List[Tuple[int, int]]
-) -> List[Tuple[int, int]]:
+    test_path: CPCVPath, all_blocks: list[tuple[int, int]]
+) -> list[tuple[int, int]]:
     """Train/CPCV complement = all physical blocks not selected as test in this path."""
     test_set = {tuple(int(x) for x in pair) for pair in test_path}
     norm_blocks = [tuple(int(x) for x in b) for b in all_blocks]
@@ -61,7 +58,7 @@ def build_purged_walk_forward_folds(
     n_folds: int = 4,
     holdout_ratio: float = 0.20,
     embargo: int = 0,
-) -> Tuple[List[CVFold], HoldoutFold]:
+) -> tuple[list[CVFold], HoldoutFold]:
     n_bars: int = len(df)
     if n_bars < 500:
         return [], (0, 0, 0)
@@ -78,7 +75,7 @@ def build_purged_walk_forward_folds(
     if fold_size < 10:
         return [], (0, 0, 0)
 
-    splits: List[CVFold] = []
+    splits: list[CVFold] = []
     for i in range(1, n_folds + 1):
         # 정교한 Expanding Window + Embargo 처리
         train_end = i * fold_size + (i - 1) * embargo
@@ -101,9 +98,8 @@ def build_cpcv_test_paths(
     n_blocks: int,
     k_test_blocks: int,
     embargo: int = 0,
-) -> List[CPCVPath]:
-    """
-    Combinatorial purged CV: choose k_test_blocks disjoint blocks as test; each path is their union.
+) -> list[CPCVPath]:
+    """Combinatorial purged CV: choose k_test_blocks disjoint blocks as test; each path is their union.
 
     Each physical block [j*base, end_j) is trimmed to [j*base+embargo, end_j) so the first `embargo`
     bars of each candidate test block are excluded (train/test boundary mitigation).
@@ -119,8 +115,8 @@ def build_cpcv_test_paths(
     if base <= e:
         return []
 
-    block_starts: List[int] = []
-    block_ends: List[int] = []
+    block_starts: list[int] = []
+    block_ends: list[int] = []
     for j in range(nb):
         raw_start = j * base
         end = (j + 1) * base if j < nb - 1 else n
@@ -130,7 +126,7 @@ def build_cpcv_test_paths(
         block_starts.append(start)
         block_ends.append(end)
 
-    paths: List[CPCVPath] = []
+    paths: list[CPCVPath] = []
     for test_indices in combinations(range(nb), k):
         segs = tuple((block_starts[j], block_ends[j]) for j in sorted(test_indices))
         paths.append(list(segs))
@@ -140,7 +136,7 @@ def build_cpcv_test_paths(
 def build_cpcv_test_paths_with_fallback(
     n_bars: int,
     embargo: int = 0,
-) -> Tuple[List[CPCVPath], int, int]:
+) -> tuple[list[CPCVPath], int, int]:
     """Prefer N/K from OPT_SPOT_CONFIG (default 8/3); fallback 6/2 then 4/2 if empty."""
     n_primary = int(OPT_SPOT_CONFIG.get("CPCV_N_BLOCKS", 8))
     k_primary = int(OPT_SPOT_CONFIG.get("CPCV_K_TEST", 3))

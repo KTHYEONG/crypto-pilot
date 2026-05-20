@@ -1,5 +1,4 @@
-"""
-Triple-filter trend quality regime on the reference symbol (causal).
+"""Triple-filter trend quality regime on the reference symbol (causal).
 
 Active when: close > EMA_slow AND EMA_fast > EMA_slow AND ADX > threshold.
 Returns {0.0, 1.0} as float64 risk multiplier series.
@@ -7,7 +6,7 @@ Returns {0.0, 1.0} as float64 risk multiplier series.
 
 from __future__ import annotations
 
-from typing import Any, ClassVar, Dict
+from typing import Any, ClassVar
 
 import numpy as np
 import pandas as pd
@@ -19,14 +18,14 @@ from src.domain.spot.regimes.registry import register_regime
 @register_regime
 class TrendQualityRegime:
     name: ClassVar[str] = "TREND_QUALITY"
-    param_space: ClassVar[Dict[str, Any]] = {
+    param_space: ClassVar[dict[str, Any]] = {
         "TQ_EMA_FAST": {"type": "int", "low": 20, "high": 50, "step": 5},
         "TQ_EMA_SLOW": {"type": "int", "low": 100, "high": 200, "step": 20},
         "TQ_ADX_PERIOD": {"type": "int", "low": 10, "high": 20, "step": 5},
         "TQ_ADX_THRESHOLD": {"type": "float", "low": 20.0, "high": 35.0, "step": 5.0},
     }
 
-    def compute(self, data_maps: Dict[str, Dict[str, Any]], params: Dict[str, Any]) -> np.ndarray:
+    def compute(self, data_maps: dict[str, dict[str, Any]], params: dict[str, Any]) -> np.ndarray:
         tf = str(params.get("TIMEFRAME", "4h"))
         symbols = sorted(
             s for s in data_maps if tf in data_maps[s] and data_maps[s][tf] is not None

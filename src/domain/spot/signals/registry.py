@@ -1,15 +1,15 @@
 from __future__ import annotations
 
-from typing import Dict, Type, TypeVar
+from typing import TypeVar
 
 from src.domain.spot.signals.base import ISignal
 
-SIGNAL_REGISTRY: Dict[str, ISignal] = {}
+SIGNAL_REGISTRY: dict[str, ISignal] = {}
 
 T = TypeVar("T")
 
 
-def register_signal(cls: Type[T]) -> Type[T]:
+def register_signal(cls: type[T]) -> type[T]:
     inst = cls()
     name = getattr(inst, "name", None)
     if not isinstance(name, str) or not name:
@@ -19,8 +19,7 @@ def register_signal(cls: Type[T]) -> Type[T]:
 
 
 def _load_signal_plugin_modules() -> None:
-    """
-    Import all signal modules so @register_signal runs.
+    """Import all signal modules so @register_signal runs.
 
     Callers that only do ``from ...registry import SIGNAL_REGISTRY`` must still
     populate the registry; importing the package __init__ would recurse here, so

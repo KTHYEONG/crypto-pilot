@@ -1,12 +1,11 @@
-"""
-EMA × ATR volatility-trend regime (EATF): labels 0–3 from trend × vol-high axes.
+"""EMA × ATR volatility-trend regime (EATF): labels 0–3 from trend × vol-high axes.
 
 All computations are causal (no lookahead).
 """
 
 from __future__ import annotations
 
-from typing import Any, ClassVar, Dict
+from typing import Any, ClassVar
 
 import numpy as np
 import pandas as pd
@@ -70,7 +69,7 @@ def compute_ema_atr_regime_labels(
 @register_regime
 class EmaAtrRegime:
     name: ClassVar[str] = "EMA_ATR"
-    param_space: ClassVar[Dict[str, Any]] = {
+    param_space: ClassVar[dict[str, Any]] = {
         "EMA_ATR_REGIME_SLOW": {"type": "int", "low": 50, "high": 200, "step": 10},
         "ATR_REGIME_PERIOD": {"type": "int", "low": 10, "high": 30, "step": 5},
         "VOL_PCT_WINDOW": {"type": "int", "low": 40, "high": 120, "step": 10},
@@ -78,7 +77,7 @@ class EmaAtrRegime:
         "VOV_WINDOW": {"type": "int", "low": 20, "high": 60, "step": 20},
     }
 
-    def compute(self, data_maps: Dict[str, Dict[str, Any]], params: Dict[str, Any]) -> np.ndarray:
+    def compute(self, data_maps: dict[str, dict[str, Any]], params: dict[str, Any]) -> np.ndarray:
         tf = str(params.get("TIMEFRAME", "4h"))
         symbols = sorted(s for s in data_maps if tf in data_maps[s])
         if not symbols:
