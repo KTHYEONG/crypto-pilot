@@ -621,3 +621,120 @@ def perform_online_capital_allocation(
             weights = new_weights / np.sum(new_weights)
             
     return meta_equity, weight_history
+
+
+# ---------------------------------------------------------------------------
+# Phase 2: v3.0 Score 공식 및 DSR Entropy Effective Rank
+# ---------------------------------------------------------------------------
+
+_V3_LAMBDA_DOWN: float = 0.50
+_V3_LAMBDA_MDD: float = 1.00
+_V3_LAMBDA_CVAR: float = 0.30
+_V3_LAMBDA_TURNOVER: float = 0.20
+_V3_LAMBDA_FUNDING: float = 0.50
+_V3_LAMBDA_CAPACITY: float = 0.40
+
+
+def compute_v3_score(
+    leg_log_tw: np.ndarray,
+    worst_mdd: float,
+    cvar_5: float,
+    excess_turnover: float,
+    funding_drag: float,
+    aum_impact_penalty: float,
+) -> float:
+    """v3.0 고정 λ 기반 6항 score 공식.
+
+    Args:
+        leg_log_tw: shape [K], 각 leg의 log Terminal Wealth.
+        worst_mdd: 0~1 scale 최대 낙폭.
+        cvar_5: 0~1 scale CVaR 5%.
+        excess_turnover: 정규화된 초과 회전율.
+        funding_drag: 0~1 scale 펀딩 비용 비율.
+        aum_impact_penalty: 0~1 scale AUM 충격 패널티.
+
+    Returns:
+        score = mean(log_tw)
+                - λ_down * semidev
+                - λ_mdd * worst_mdd
+                - λ_cvar * cvar_5
+                - λ_turnover * excess_turnover
+                - λ_funding * funding_drag
+                - λ_capacity * aum_impact_penalty
+    """
+    arr = np.asarray(leg_log_tw, dtype=np.float64)
+    if arr.size == 0:
+        return -10.0
+
+    mu = float(np.mean(arr))
+    downside = arr[arr < 0.0]
+    semidev = float(np.std(downside, ddof=0)) if downside.size > 1 else 0.0
+
+    return float(
+        mu
+        - _V3_LAMBDA_DOWN * semidev
+        - _V3_LAMBDA_MDD * float(worst_mdd)
+        - _V3_LAMBDA_CVAR * float(cvar_5)
+        - _V3_LAMBDA_TURNOVER * float(excess_turnover)
+        - _V3_LAMBDA_FUNDING * float(funding_drag)
+        - _V3_LAMBDA_CAPACITY * float(aum_impact_penalty)
+    )
+
+
+def calc_n_trials_eff_entropy(
+    signatures: np.ndarray,
+    weights: np.ndarray,
+) -> float:
+    """DSR entropy effective rank.
+
+    Args:
+        signatures: shape [n_trials, 11] (K=8 log_tw + 3 stats).
+        weights: shape [n_trials] (completed_legs / K; pruned < 1.0).
+
+    Returns:
+        exp(-Σ p_i * log(p_i)) — eigenvalue entropy of weighted correlation matrix.
+
+    Algorithm:
+        1. 가중 상관행렬 C = weighted_corr(signatures, weights)
+        2. λ_i = eigenvalues(C)
+        3. p_i = λ_i / Σλ_i
+        4. return exp(-Σ p_i * log(p_i + ε))
+    """
+    sig = np.asarray(signatures, dtype=np.float64)
+    w = np.asarray(weights, dtype=np.float64)
+
+    n_trials, n_features = sig.shape
+    if n_trials < 2:
+        return 1.0
+
+    # weight 정규화
+    w = np.maximum(w, 0.0)
+    w_sum = float(np.sum(w))
+    if w_sum < 1e-12:
+        return 1.0
+    w_norm = w / w_sum  # shape [n_trials]
+
+    # 가중 평균 및 가중 공분산 계산
+    mu_w = (w_norm[:, None] * sig).sum(axis=0)  # shape [n_features]
+    sig_centered = sig - mu_w[None, :]  # shape [n_trials, n_features]
+
+    # 가중 공분산 행렬 (편향 추정기)
+    cov_w = (w_norm[:, None] * sig_centered).T @ sig_centered  # [n_features, n_features]
+
+    # 가중 상관행렬로 변환
+    std_w = np.sqrt(np.diag(cov_w))
+    std_w = np.where(std_w < 1e-12, 1e-12, std_w)
+    corr_w = cov_w / np.outer(std_w, std_w)
+    corr_w = np.clip(corr_w, -1.0, 1.0)
+
+    # 고유값 분해
+    eigenvalues = np.linalg.eigvalsh(corr_w)
+    eigenvalues = np.maximum(eigenvalues, 0.0)
+    eigval_sum = float(np.sum(eigenvalues))
+    if eigval_sum < 1e-12:
+        return 1.0
+
+    p = eigenvalues / eigval_sum  # 확률 분포
+    p = np.where(p < 1e-15, 1e-15, p)
+    entropy = -float(np.sum(p * np.log(p)))
+    return float(math.exp(entropy))

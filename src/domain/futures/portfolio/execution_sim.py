@@ -953,3 +953,94 @@ def backtest_target_weights_intrabar_numba(
 
     diag_out = np.array([dust_skip_cnt, margin_fail_cnt, spare_a, spare_b, 1], dtype=np.int64)
     return trades[:t_count], balance, equity_curve, diag_out
+
+
+def backtest_target_weights_intrabar(
+    decision_close_2d: np.ndarray,
+    decision_high_2d: np.ndarray,
+    decision_low_2d: np.ndarray,
+    decision_open_2d: np.ndarray,
+    target_weights: np.ndarray,
+    lev_2d: np.ndarray,
+    atr_2d: np.ndarray,
+    kill_signal_2d: np.ndarray,
+    path_open_2d: np.ndarray,
+    path_high_2d: np.ndarray,
+    path_low_2d: np.ndarray,
+    path_close_2d: np.ndarray,
+    decision_start_1m_idx: np.ndarray,
+    decision_end_1m_idx: np.ndarray,
+    initial_balance: float,
+    maker_fee: float,
+    taker_fee: float,
+    slippage_rate: float,
+    rebalance_bars: int,
+    max_hold_bars: int,
+    short_borrow_daily: float,
+    atr_mult: float,
+    trail_mult: float,
+    use_simple_atr_stop: int,
+    max_concurrent: int,
+    max_exposure: float,
+    max_exp_per_coin: float,
+    dd_scaling_threshold: float,
+    funding_event_mask_1m: np.ndarray | None = None,
+    funding_rate_1m: np.ndarray | None = None,
+    volume_1m_2d: np.ndarray | None = None,
+    mark_price_1m: np.ndarray | None = None,
+) -> tuple[np.ndarray, float, np.ndarray, np.ndarray]:
+    """Python wrapper for backtest_target_weights_intrabar_numba.
+
+    mark_price_1m 파라미터를 처리하여 Numba 함수에 전달한다.
+    mark_price_1m이 제공되면 청산 판정 기준으로 mark_price를 사용하기 위해
+    path_low_2d (Long 청산)와 path_high_2d (Short 청산)를 mark_price로 교체한다.
+
+    Args:
+        mark_price_1m: shape [B_1m, N]. None이면 기존 exec_low/high 사용.
+
+    Returns:
+        (trades, final_balance, equity_curve, diag) — Numba 함수와 동일 형식.
+    """
+    if mark_price_1m is not None:
+        mark_arr = np.asarray(mark_price_1m, dtype=np.float64)
+        # Long 청산 판정에 사용되는 path_low → mark_price로 교체
+        # Short 청산 판정에 사용되는 path_high → mark_price로 교체
+        eff_path_low = mark_arr
+        eff_path_high = mark_arr
+    else:
+        eff_path_low = path_low_2d
+        eff_path_high = path_high_2d
+
+    return backtest_target_weights_intrabar_numba(
+        decision_close_2d=decision_close_2d,
+        decision_high_2d=decision_high_2d,
+        decision_low_2d=decision_low_2d,
+        decision_open_2d=decision_open_2d,
+        target_weights=target_weights,
+        lev_2d=lev_2d,
+        atr_2d=atr_2d,
+        kill_signal_2d=kill_signal_2d,
+        path_open_2d=path_open_2d,
+        path_high_2d=eff_path_high,
+        path_low_2d=eff_path_low,
+        path_close_2d=path_close_2d,
+        decision_start_1m_idx=decision_start_1m_idx,
+        decision_end_1m_idx=decision_end_1m_idx,
+        initial_balance=float(initial_balance),
+        maker_fee=float(maker_fee),
+        taker_fee=float(taker_fee),
+        slippage_rate=float(slippage_rate),
+        rebalance_bars=int(rebalance_bars),
+        max_hold_bars=int(max_hold_bars),
+        short_borrow_daily=float(short_borrow_daily),
+        atr_mult=float(atr_mult),
+        trail_mult=float(trail_mult),
+        use_simple_atr_stop=int(use_simple_atr_stop),
+        max_concurrent=int(max_concurrent),
+        max_exposure=float(max_exposure),
+        max_exp_per_coin=float(max_exp_per_coin),
+        dd_scaling_threshold=float(dd_scaling_threshold),
+        funding_event_mask_1m=funding_event_mask_1m,
+        funding_rate_1m=funding_rate_1m,
+        volume_1m_2d=volume_1m_2d,
+    )

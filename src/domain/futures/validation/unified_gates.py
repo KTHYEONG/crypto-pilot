@@ -5,10 +5,131 @@ Champion guard stays a separate economic promotion check; use `champion_registry
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
+import numpy as np
+
 from src.domain.futures.optimization.optimizer import check_hard_gates_ml
+
+
+# ---------------------------------------------------------------------------
+# Phase 3: V3HardGates 8-gate 체계
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class V3HardGates:
+    """v3.0 확정 상수 — 8-gate 평가 기준."""
+
+    MIN_POSITIVE_LEG_RATIO: float = 0.55
+    WORST_LEG_TW_FLOOR: float = 0.85
+    MEAN_LEG_TW_FLOOR: float = 1.015
+    ERGODICITY_PCT: float = 15.0
+    EV_COST_FLOOR: float = 3.0
+    DSR_FLOOR: float = 0.60
+    FUNDING_DRAG_CEILING: float = 0.30
+    CAPACITY_REQUIRED_TIERS: tuple[int, ...] = (50_000, 100_000, 250_000)
+
+
+@dataclass
+class GateResult:
+    """Gate 평가 결과."""
+
+    passed: bool
+    failures: list[str] = field(default_factory=list)
+    metrics: dict[str, float] = field(default_factory=dict)
+
+
+def evaluate_v3_hard_gates(
+    leg_log_tw: np.ndarray,
+    worst_mdd: float,
+    dsr: float,
+    ev_cost: float,
+    funding_drag_ratio: float,
+    ergodicity_dev_pct: float,
+    capacity_results: dict[int, bool],
+    gates: V3HardGates = V3HardGates(),
+) -> GateResult:
+    """8-gate v3.0 평가.
+
+    Args:
+        leg_log_tw: shape [K] — leg별 log Terminal Wealth.
+        worst_mdd: 최대 낙폭 (0~1).
+        dsr: Deflated Sharpe Ratio (0~1).
+        ev_cost: EV/Cost 비율.
+        funding_drag_ratio: funding_drag / gross_return (0~1).
+        ergodicity_dev_pct: ergodicity deviation (%).
+        capacity_results: {aum: pass/fail} — CAPACITY_REQUIRED_TIERS 전부 필요.
+        gates: V3HardGates 상수 컨테이너.
+
+    Returns:
+        GateResult(passed, failures, metrics).
+    """
+    arr = np.asarray(leg_log_tw, dtype=np.float64)
+    tw_arr = np.exp(arr)
+
+    failures: list[str] = []
+
+    # Gate 1: min positive leg ratio
+    pos_ratio = float(np.mean(tw_arr >= 1.0))
+    if pos_ratio < gates.MIN_POSITIVE_LEG_RATIO:
+        failures.append("WF_POSITIVE_LEG_RATIO")
+
+    # Gate 2: worst leg TW floor
+    worst_tw = float(np.min(tw_arr)) if arr.size > 0 else 0.0
+    if worst_tw < gates.WORST_LEG_TW_FLOOR:
+        failures.append("WF_WORST_LEG_TW")
+
+    # Gate 3: mean leg TW floor
+    mean_tw = float(np.mean(tw_arr)) if arr.size > 0 else 0.0
+    if mean_tw < gates.MEAN_LEG_TW_FLOOR:
+        failures.append("WF_MEAN_LEG_TW")
+
+    # Gate 4: DSR floor
+    if float(dsr) < gates.DSR_FLOOR:
+        failures.append("DSR_FLOOR")
+
+    # Gate 5: funding drag ceiling
+    if float(funding_drag_ratio) > gates.FUNDING_DRAG_CEILING:
+        failures.append("FUNDING_DRAG")
+
+    # Gate 6: capacity — CAPACITY_REQUIRED_TIERS 전부 통과 필요
+    required_tiers = set(gates.CAPACITY_REQUIRED_TIERS)
+    cap_fail = any(
+        not capacity_results.get(tier, False)
+        for tier in required_tiers
+        if tier in capacity_results
+    ) or any(
+        tier not in capacity_results
+        for tier in required_tiers
+    )
+    if cap_fail:
+        failures.append("CAPACITY")
+
+    # Gate 7: ergodicity
+    if float(ergodicity_dev_pct) > gates.ERGODICITY_PCT:
+        failures.append("WF_ERGODICITY")
+
+    # Gate 8: EV/Cost
+    if float(ev_cost) < gates.EV_COST_FLOOR:
+        failures.append("EV_COST")
+
+    metrics: dict[str, float] = {
+        "pos_ratio": pos_ratio,
+        "worst_tw": worst_tw,
+        "mean_tw": mean_tw,
+        "dsr": float(dsr),
+        "funding_drag_ratio": float(funding_drag_ratio),
+        "ergodicity_dev_pct": float(ergodicity_dev_pct),
+        "ev_cost": float(ev_cost),
+    }
+
+    return GateResult(
+        passed=len(failures) == 0,
+        failures=failures,
+        metrics=metrics,
+    )
 
 
 @dataclass(frozen=True)
