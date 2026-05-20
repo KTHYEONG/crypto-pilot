@@ -36,8 +36,7 @@ def expected_calibration_error_binary(
     *,
     n_bins: int = 10,
 ) -> float:
-    """
-    Mean absolute gap between empirical positive rate and mean predicted prob per bin.
+    """Mean absolute gap between empirical positive rate and mean predicted prob per bin.
     probs, labels same length in [0,1] and {0,1}.
     """
     p = np.clip(np.asarray(probs, dtype=np.float64), 0.0, 1.0)

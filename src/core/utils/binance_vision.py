@@ -220,20 +220,20 @@ class BinanceVisionDownloader:
 
             # 컬럼명 정규화
             # Binance Vision metrics columns:
-            # create_time, symbol, sum_open_interest, sum_open_interest_value, 
-            # count_toptrader_long_short_ratio, sum_toptrader_long_short_ratio, 
+            # create_time, symbol, sum_open_interest, sum_open_interest_value,
+            # count_toptrader_long_short_ratio, sum_toptrader_long_short_ratio,
             # count_long_short_ratio, sum_taker_long_short_vol_ratio
-            
+
             if "create_time" in df.columns:
                 df["datetime"] = pd.to_datetime(df["create_time"], utc=True)
                 df["timestamp"] = df["datetime"].astype("int64") // 10**6
-            
+
             rename_map = {
                 "sum_toptrader_long_short_ratio": "top_trader_long_short_ratio",
                 "count_long_short_ratio": "long_short_ratio",
             }
             df.rename(columns=rename_map, inplace=True)
-            
+
             # Numeric conversion for key columns
             numeric_cols = [
                 "sum_open_interest", "top_trader_long_short_ratio", "long_short_ratio",
@@ -379,3 +379,116 @@ class BinanceVisionDownloader:
         digest = hashlib.new(algo, payload).hexdigest()
         expected = expected_hex_digest.strip().lower().split()[0]
         return digest == expected
+
+    def fetch_metrics_daily(self, symbol: str, date: datetime) -> pd.DataFrame:
+        """일간 metrics archive ZIP을 내려받아 DataFrame으로 반환합니다.
+
+        Args:
+            symbol: 선물 심볼 (e.g. 'BTCUSDT').
+            date: 수집 날짜 (datetime 오브젝트).
+
+        Returns:
+            columns에 sum_open_interest, count_toptrader_long_short_ratio 등을 포함한 DataFrame.
+            데이터가 없으면 빈 DataFrame.
+
+        Notes:
+            Binance Vision daily/metrics 경로: SYMBOL-metrics-YYYY-MM-DD.zip
+        """
+        date_str = date.strftime("%Y-%m-%d")
+        filename = f"{symbol}-metrics-{date_str}.zip"
+        return self._fetch_zip_by_path("daily", "metrics", symbol, filename)
+
+
+# ---------------------------------------------------------------------------
+# 모듈-레벨 helper: fetch_metrics_bulk
+# ---------------------------------------------------------------------------
+
+_OI_ADV_METRICS_START = "2020-09-01"  # Binance Vision metrics 제공 시작일
+
+
+def fetch_metrics_bulk(
+    symbol: str,
+    start_date: "str | datetime",
+    end_date: "str | datetime",
+    cache_dir: "str | None" = None,
+) -> pd.DataFrame:
+    """일간 metrics를 날짜 범위로 일괄 수집한다.
+
+    2020-09-01 이전 구간은 Binance Vision에 데이터가 없으므로 빈 DataFrame을 반환한다.
+
+    Args:
+        symbol: 선물 심볼 (e.g. 'BTCUSDT').
+        start_date: 수집 시작일 (date 또는 'YYYY-MM-DD' str).
+        end_date: 수집 종료일.
+        cache_dir: 로컬 캐시 디렉토리 (None이면 캐싱 안 함).
+
+    Returns:
+        columns=[open_time, sum_open_interest, ...] 형태의 DataFrame.
+        시작일이 2020-09-01 이전이면 빈 DataFrame.
+
+    Time Complexity: O(n_days)
+    Space Complexity: O(n_days * n_cols)
+    """
+    import pathlib
+    from datetime import date as _date, datetime as _datetime, timedelta as _timedelta
+
+    # 날짜 타입 정규화
+    def _to_date(d: object) -> _date:
+        if isinstance(d, _datetime):
+            return d.date()
+        if isinstance(d, _date):
+            return d
+        return _datetime.strptime(str(d), "%Y-%m-%d").date()
+
+    _start = _to_date(start_date)
+    _end = _to_date(end_date)
+    _metrics_start = _datetime.strptime(_OI_ADV_METRICS_START, "%Y-%m-%d").date()
+
+    # 2020-09-01 이전 구간: 데이터 없음 → 빈 DataFrame
+    if _end < _metrics_start:
+        return pd.DataFrame()
+
+    # 유효 시작일 조정
+    _eff_start = max(_start, _metrics_start)
+
+    downloader = BinanceVisionDownloader()
+    dfs: list[pd.DataFrame] = []
+    curr = _eff_start
+    safe_symbol = symbol.replace("/", "").replace("_", "")
+
+    while curr <= _end:
+        date_str = curr.strftime("%Y-%m-%d")
+        cache_file = None
+        if cache_dir is not None:
+            cache_file = pathlib.Path(cache_dir) / safe_symbol / f"metrics-{date_str}.parquet"
+
+        if cache_file is not None and cache_file.exists():
+            try:
+                df = pd.read_parquet(cache_file)
+                dfs.append(df)
+                curr += _timedelta(days=1)
+                continue
+            except Exception as _e:
+                downloader.logger.warning("Cache read failed %s: %s", cache_file, _e)
+
+        dt = _datetime.combine(curr, _datetime.min.time())
+        try:
+            df = downloader.fetch_metrics_daily(safe_symbol, dt)
+            if not df.empty:
+                if cache_dir is not None and cache_file is not None:
+                    cache_file.parent.mkdir(parents=True, exist_ok=True)
+                    df.to_parquet(cache_file, index=False)
+                dfs.append(df)
+        except Exception as _e:
+            downloader.logger.warning(
+                "fetch_metrics_daily failed symbol=%s date=%s: %s", symbol, date_str, _e
+            )
+
+        curr += _timedelta(days=1)
+
+    if not dfs:
+        return pd.DataFrame()
+
+    combined = pd.concat(dfs, ignore_index=True)
+    return combined
+

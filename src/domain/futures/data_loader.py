@@ -1,5 +1,4 @@
-"""
-Data Loading and Preparation for Futures.
+"""Data Loading and Preparation for Futures.
 Combines Data Collection (API/Vision), Metadata management, and Merging of 
 Funding/Metrics into OHLCV.
 """
@@ -10,10 +9,10 @@ import fcntl
 import json
 import logging
 import os
-import sys
 import threading
+from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -45,8 +44,8 @@ def summarize_dataframe_integrity(
             "cols": 0.0,
         }
 
-    rows = int(len(df))
-    cols = int(len(df.columns))
+    rows = len(df)
+    cols = len(df.columns)
     total_cells = max(rows * cols, 1)
     nan_pct = float(df.isna().sum().sum() / total_cells)
     num_df = df.select_dtypes(include=[np.number])
@@ -306,8 +305,9 @@ class DataCollector:
             current_month_start += pd.offsets.MonthBegin(1)
 
         if vision_tasks:
-            from src.core.utils.binance_vision import BinanceVisionDownloader
             import concurrent.futures
+
+            from src.core.utils.binance_vision import BinanceVisionDownloader
             
             vision = BinanceVisionDownloader()
 
@@ -353,12 +353,25 @@ class DataCollector:
             self._save_cache(symbol, timeframe, combined)
 
     def ensure_metrics_data(self, symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
+        """Ensure metrics data (OI, LSR) is cached and up to date.
+
+        Args:
+            symbol: Trading pair symbol.
+            start_date: Start date string.
+            end_date: End date string.
+
+        Returns:
+            DataFrame containing the requested metrics.
+
+        """
         safe_symbol = self._safe_symbol(symbol)
         path = FUTURES_DATA_DIR / f"{safe_symbol}_metrics.parquet"
-        req_start, req_end = pd.to_datetime(start_date, utc=True), pd.to_datetime(end_date, utc=True)
+        req_start = pd.to_datetime(start_date, utc=True)
+        req_end = pd.to_datetime(end_date, utc=True)
         
         cache_df = pd.DataFrame()
-        if path.exists(): cache_df = pd.read_parquet(path)
+        if path.exists():
+            cache_df = pd.read_parquet(path)
         
         # simplified logic for Vision/API collection
         api_cutoff = pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=28)
@@ -391,68 +404,222 @@ class DataCollector:
         return cache_df.loc[mask].copy()
 
     def ensure_funding_data(self, symbol: str, start_date: str, end_date: str) -> None:
+        """Ensure funding rate history is cached and up to date.
+
+        Args:
+            symbol: Trading pair symbol.
+            start_date: Start date string.
+            end_date: End date string.
+
+        """
         safe_symbol = self._safe_symbol(symbol)
         path = FUTURES_DATA_DIR / f"{safe_symbol}_funding.parquet"
-        req_start, req_end = pd.to_datetime(start_date, utc=True), pd.to_datetime(end_date, utc=True)
+        req_start = pd.to_datetime(start_date, utc=True)
+        req_end = pd.to_datetime(end_date, utc=True)
         
         cache_df = pd.DataFrame()
-        if path.exists(): cache_df = pd.read_parquet(path)
+        if path.exists():
+            cache_df = pd.read_parquet(path)
         
-        if not cache_df.empty and cache_df["datetime"].min() <= req_start and cache_df["datetime"].max() >= req_end:
+        if (
+            not cache_df.empty
+            and cache_df["datetime"].min() <= req_start
+            and cache_df["datetime"].max() >= req_end
+        ):
             return
         
         new_funding = self.client.fetch_funding_rate_history(symbol, str(req_start), str(req_end))
         if not new_funding.empty:
             new_funding["datetime"] = pd.to_datetime(new_funding["timestamp"], unit="ms", utc=True)
-            combined = pd.concat([cache_df, new_funding]).drop_duplicates(subset=["timestamp"]).sort_values("timestamp")
+            combined = (
+                pd.concat([cache_df, new_funding])
+                .drop_duplicates(subset=["timestamp"])
+                .sort_values("timestamp")
+            )
             combined.to_parquet(path, index=False)
 
 # --- Merging Utilities (from funding_utils.py and metrics_utils.py) ---
 
 def merge_funding_into_ohlcv(symbol: str, df: pd.DataFrame, data_dir: Path) -> pd.DataFrame:
     """Merge funding rate information into OHLCV."""
-    if df is None or df.empty: return df.copy() if df is not None else pd.DataFrame()
+    if df is None or df.empty:
+        return df.copy() if df is not None else pd.DataFrame()
     out = df.copy()
     for col in ["funding_rate", "funding_event_count", "funding_rate_sum"]:
-        if col not in out.columns: out[col] = 0.0
+        if col not in out.columns:
+            out[col] = 0.0
     
     path = Path(data_dir) / f"{symbol.replace('/', '_')}_funding.parquet"
-    if not path.exists(): return out
+    if not path.exists():
+        return out
     
     fr_df = pd.read_parquet(path)
-    if fr_df.empty: return out
+    if fr_df.empty:
+        return out
     
     # Simple asof merge
     out["timestamp"] = pd.to_datetime(out["datetime"]).astype("int64") // 10**6
     fr_df["timestamp"] = pd.to_datetime(fr_df["timestamp"], unit="ms").astype("int64") // 10**6
     
-    # Exclude columns already in out (except timestamp) to avoid _x/_y suffixes
-    exclude = ["timestamp", "datetime", "symbol", "funding_rate", "funding_event_count", "funding_rate_sum"]
-    cols = [c for c in fr_df.columns if c not in exclude]
-    fr_cols_to_merge = ["timestamp"] + cols
-    
     # We should merge only the new columns from fr_df, but fr_df IS providing funding_rate.
     # Wait, fr_df has "funding_rate", so we want to keep it from fr_df, and overwrite the dummy 0.0 in out.
     # So we should drop the dummy ones from out first!
-    out = out.drop(columns=["funding_rate", "funding_event_count", "funding_rate_sum"], errors="ignore")
+    out = out.drop(
+        columns=["funding_rate", "funding_event_count", "funding_rate_sum"],
+        errors="ignore",
+    )
     
     exclude_fr = ["datetime", "symbol"]
     cols_fr = [c for c in fr_df.columns if c not in exclude_fr]
     
-    out = pd.merge_asof(out.sort_values("timestamp"), fr_df[cols_fr].sort_values("timestamp"), on="timestamp", direction="backward")
+    out = pd.merge_asof(
+        out.sort_values("timestamp"),
+        fr_df[cols_fr].sort_values("timestamp"),
+        on="timestamp",
+        direction="backward",
+    )
     return out
 
 def merge_metrics_into_ohlcv(symbol: str, df: pd.DataFrame, data_dir: Path) -> pd.DataFrame:
     """Merge metrics (OI, LSR) into OHLCV."""
-    if df is None or df.empty: return df.copy() if df is not None else pd.DataFrame()
+    if df is None or df.empty:
+        return df.copy() if df is not None else pd.DataFrame()
     path = Path(data_dir) / f"{symbol.replace('/', '_')}_metrics.parquet"
-    if not path.exists(): return df
+    if not path.exists():
+        return df
 
     m_df = pd.read_parquet(path)
-    if m_df.empty: return df
+    if m_df.empty:
+        return df
 
     m_df["timestamp"] = pd.to_datetime(m_df["datetime"]).astype("int64") // 10**6
     df["timestamp"] = pd.to_datetime(df["datetime"]).astype("int64") // 10**6    
     exclude = ["timestamp", "datetime", "create_time", "symbol"]
     cols = [c for c in m_df.columns if c not in exclude]
-    return pd.merge_asof(df.sort_values("timestamp"), m_df[["timestamp"] + cols].sort_values("timestamp"), on="timestamp", direction="backward")
+    return pd.merge_asof(
+        df.sort_values("timestamp"),
+        m_df[["timestamp", *cols]].sort_values("timestamp"),
+        on="timestamp",
+        direction="backward",
+    )
+
+
+def fetch_premiumindex_bulk(
+    symbol: str,
+    start_date: date,
+    end_date: date,
+    interval: str = "1m",
+    cache_dir: Path | None = None,
+) -> pd.DataFrame:
+    """premiumIndexKlines를 날짜 범위로 일괄 수집.
+
+    이미 캐시된 날짜는 skip.
+    반환: columns=[open_time, open, high, low, close, ...], index=UTC datetime
+    """
+    downloader = BinanceVisionDownloader()
+    dfs: list[pd.DataFrame] = []
+    curr = start_date
+    safe_symbol = symbol.replace("/", "").replace("_", "")
+
+    while curr <= end_date:
+        date_str = curr.strftime("%Y-%m-%d")
+        cache_file = None
+        if cache_dir is not None:
+            cache_file = Path(cache_dir) / safe_symbol / f"{date_str}.parquet"
+
+        if cache_file is not None and cache_file.exists():
+            try:
+                df = pd.read_parquet(cache_file)
+                dfs.append(df)
+            except Exception as e:
+                _logger.warning("Failed to read cache file %s: %s", cache_file, e)
+                cache_file = None
+
+        if cache_file is None or not cache_file.exists():
+            dt = datetime.combine(curr, datetime.min.time())
+            try:
+                df = downloader.fetch_premiumindex_daily(safe_symbol, dt)
+                if not df.empty:
+                    if df.shape[1] >= 6:
+                        cols = [
+                            "open_time",
+                            "open",
+                            "high",
+                            "low",
+                            "close",
+                            "volume",
+                            "close_time",
+                            "quote_asset_volume",
+                            "number_of_trades",
+                            "taker_buy_base_asset_volume",
+                            "taker_buy_quote_asset_volume",
+                            "ignore",
+                        ][: df.shape[1]]
+                        df.columns = cols
+                    if cache_dir is not None and cache_file is not None:
+                        cache_file.parent.mkdir(parents=True, exist_ok=True)
+                        df.to_parquet(cache_file, index=False)
+                    dfs.append(df)
+            except Exception as e:
+                _logger.warning(
+                    "Failed to fetch premium index for %s on %s: %s",
+                    symbol,
+                    date_str,
+                    e,
+                )
+
+        curr += timedelta(days=1)
+
+    if not dfs:
+        return pd.DataFrame()
+
+    combined = pd.concat(dfs, ignore_index=True)
+    if "open_time" in combined.columns:
+        combined = combined.drop_duplicates(subset=["open_time"]).sort_values("open_time")
+        combined.index = pd.to_datetime(combined["open_time"], unit="ms", utc=True)
+    return combined
+
+
+def build_mark_price_1m_array(
+    symbols: list[str],
+    start_ts: int,
+    end_ts: int,
+    cache_dir: Path,
+) -> np.ndarray:
+    """각 심볼의 premiumIndex close를 로드하여 [B_1m, N] 배열 구성.
+
+    결측 구간: forward-fill (직전 값). 완전 결측 심볼: NaN column 허용.
+    B_1m = (end_ts - start_ts) / (60 * 1000) 기준 정렬.
+    """
+    start_dt = pd.to_datetime(start_ts, unit="ms", utc=True)
+    end_dt = pd.to_datetime(end_ts, unit="ms", utc=True)
+
+    expected_len = (end_ts - start_ts) // 60000
+    if expected_len <= 0:
+        return np.empty((0, len(symbols)))
+
+    target_index = pd.date_range(start=start_dt, periods=expected_len, freq="1min", tz="UTC")
+
+    out_df = pd.DataFrame(index=target_index)
+
+    for symbol in symbols:
+        try:
+            df = fetch_premiumindex_bulk(
+                symbol=symbol,
+                start_date=start_dt.date(),
+                end_date=end_dt.date(),
+                cache_dir=cache_dir,
+            )
+            if not df.empty and "close" in df.columns:
+                df["close"] = pd.to_numeric(df["close"], errors="coerce")
+                df = df[~df.index.duplicated(keep="first")]
+                s_series = df["close"].reindex(target_index, method="ffill")
+                s_series = s_series.ffill().bfill()
+                out_df[symbol] = s_series
+            else:
+                out_df[symbol] = np.nan
+        except Exception as e:
+            _logger.warning("Error building mark price for %s: %s", symbol, e)
+            out_df[symbol] = np.nan
+
+    return out_df.to_numpy(dtype=np.float64)
