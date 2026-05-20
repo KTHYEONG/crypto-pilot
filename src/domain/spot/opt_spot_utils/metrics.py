@@ -1,11 +1,10 @@
-"""
-Backtest metrics: profit factor, MDD, Sortino, portfolio CAGR, CVaR, PSR/DSR, underwater duration.
+"""Backtest metrics: profit factor, MDD, Sortino, portfolio CAGR, CVaR, PSR/DSR, underwater duration.
 """
 
 from __future__ import annotations
 
 import math
-from typing import Sequence
+from collections.abc import Sequence
 
 import numpy as np
 import pandas as pd
@@ -165,8 +164,7 @@ def probabilistic_sharpe_ratio(
 
 
 def compute_dsr_from_path_values(path_values: Sequence[float], n_independent_trials: int) -> float:
-    """
-    Deflated Sharpe on path-level scalars (e.g. log terminal wealth per CPCV path).
+    """Deflated Sharpe on path-level scalars (e.g. log terminal wealth per CPCV path).
     Uses variance of Sharpe estimator and expected max SR under multiple testing (rough).
     """
     x = np.asarray(path_values, dtype=np.float64)
@@ -194,8 +192,7 @@ def compute_pbo_from_cpcv_paths(
     is_path_scores: Sequence[float],
     oos_path_scores: Sequence[float],
 ) -> tuple[float, float]:
-    """
-    PBO proxy from CPCV path IS vs OOS score ranks.
+    """PBO proxy from CPCV path IS vs OOS score ranks.
     Returns (pbo_fraction, spearman_rho). Uses Spearman via Pearson on ranks; PBO ~ 0.5 * (1 - rho).
     """
     is_arr = np.asarray(list(is_path_scores), dtype=np.float64)

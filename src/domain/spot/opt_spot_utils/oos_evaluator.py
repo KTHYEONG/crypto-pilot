@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -53,23 +54,23 @@ _logger: logging.Logger = logging.getLogger("opt_spot")
 
 # Optuna TPE `constraints_func`: each value <= 0 means satisfied (Gardner-style soft constraints).
 
-SymbolFoldResult = Tuple[str, float, float, float, float, float, float, float, np.ndarray, float]
+SymbolFoldResult = tuple[str, float, float, float, float, float, float, float, np.ndarray, float]
 
 
 def evaluate_symbol_fold(
     strategy: UltimateSpotStrategy,
-    params: Dict[str, Any],
+    params: dict[str, Any],
     symbol: str,
     tf: str,
     target_df: pd.DataFrame,
     daily_df: pd.DataFrame,
     full_merge_idx: np.ndarray,
-    precomputed_daily_df: Optional[pd.DataFrame],
+    precomputed_daily_df: pd.DataFrame | None,
     test_start: int,
     test_end: int,
-    precomputed_signal_df: Optional[pd.DataFrame] = None,
+    precomputed_signal_df: pd.DataFrame | None = None,
     execution_start_idx: int = 0,
-) -> Tuple[float, float, float, int, float, float, int, np.ndarray, float]:
+) -> tuple[float, float, float, int, float, float, int, np.ndarray, float]:
     if precomputed_signal_df is not None:
         sig_oos: pd.DataFrame = precomputed_signal_df
     else:
@@ -95,7 +96,7 @@ def evaluate_symbol_fold(
     engine.strategy.params = params_fixed
 
     try:
-        result: Dict[str, Any] = engine.run()
+        result: dict[str, Any] = engine.run()
         trades_df: pd.DataFrame = result.get("trades_df", pd.DataFrame())
     except Exception as e:
         _logger.warning("Backtest engine error: %s", e, exc_info=True)
@@ -149,7 +150,7 @@ def evaluate_symbol_fold(
     )
 
 
-def _compute_signal_stats(sig_df: pd.DataFrame) -> Dict[str, float]:
+def _compute_signal_stats(sig_df: pd.DataFrame) -> dict[str, float]:
     """OOS holdout: quantify signal vs regime gating on the execution window."""
     n = len(sig_df)
     if n == 0:
@@ -173,27 +174,26 @@ def _compute_signal_stats(sig_df: pd.DataFrame) -> Dict[str, float]:
 
 
 def run_holdout_shared_cash_portfolio(
-    params: Dict[str, Any],
-    symbols: List[str],
+    params: dict[str, Any],
+    symbols: list[str],
     tf: str,
-    oos_data_maps: Dict[str, Dict[str, Any]],
+    oos_data_maps: dict[str, dict[str, Any]],
     *,
-    signal_disk_cache_root: Optional[Path] = None,
+    signal_disk_cache_root: Path | None = None,
     return_signal_dfs: bool = False,
     concurrency_penalty_scale: float = 1.0,
-    oos_end_idx: Optional[int] = None,
-) -> Dict[str, Any]:
-    """
-    OOS holdout: single shared-cash run from oos_start_idx to end for all symbols.
+    oos_end_idx: int | None = None,
+) -> dict[str, Any]:
+    """OOS holdout: single shared-cash run from oos_start_idx to end for all symbols.
     If oos_end_idx is set, evaluation ends at that absolute bar index (exclusive upper bound on OHLCV index).
     """
     p = dict(params)
     strategy: UltimateSpotStrategy = UltimateSpotStrategy(name="HoldoutSpot", params=p)
     strategy._portfolio_eval_ctx = {"data_maps": oos_data_maps, "symbols": list(symbols), "tf": tf}
-    full_signal_dfs: Dict[str, pd.DataFrame] = {}
+    full_signal_dfs: dict[str, pd.DataFrame] = {}
     try:
         for sym in symbols:
-            df_full: Optional[pd.DataFrame] = oos_data_maps.get(sym, {}).get(tf)
+            df_full: pd.DataFrame | None = oos_data_maps.get(sym, {}).get(tf)
             if df_full is None or df_full.empty:
                 continue
             fp = _dataset_fingerprint_from_df(df_full)
@@ -207,7 +207,7 @@ def run_holdout_shared_cash_portfolio(
     finally:
         strategy._portfolio_eval_ctx = None
     if len(full_signal_dfs) != len(symbols):
-        failed: Dict[str, Any] = {
+        failed: dict[str, Any] = {
             "portfolio_cagr_pct": -100.0,
             "mdd_pct": 100.0,
             "cvar_pct": 100.0,
@@ -243,7 +243,7 @@ def run_holdout_shared_cash_portfolio(
     )
     if slice_end - slice_start < 5:
         _logger.warning("Holdout OOS segment too short (len < 5). Returning FAIL.")
-        failed: Dict[str, Any] = {
+        failed: dict[str, Any] = {
             "portfolio_cagr_pct": -100.0,
             "mdd_pct": 100.0,
             "cvar_pct": 100.0,
@@ -260,8 +260,8 @@ def run_holdout_shared_cash_portfolio(
             failed["full_signal_dfs"] = full_signal_dfs
         return failed
 
-    symbol_arrays: Dict[str, Dict[str, np.ndarray]] = {}
-    rank_scores: Dict[str, np.ndarray] = {}
+    symbol_arrays: dict[str, dict[str, np.ndarray]] = {}
+    rank_scores: dict[str, np.ndarray] = {}
     for sym in symbols:
         seg = full_signal_dfs[sym].iloc[slice_start:slice_end]
         symbol_arrays[sym] = _dataframe_to_symbol_arrays(seg)
@@ -322,13 +322,13 @@ def run_holdout_shared_cash_portfolio(
     dd_bars = float(max_underwater_bars_from_equity(eq)) if eq.size > 1 else 0.0
     final_bal = float(res.final_balance)
     moic = final_bal / initial_balance if initial_balance > 0 else 0.0
-    oos_signal_stats_by_symbol: Dict[str, Dict[str, float]] = {}
+    oos_signal_stats_by_symbol: dict[str, dict[str, float]] = {}
     for sym in symbols:
         seg = full_signal_dfs[sym].iloc[slice_start:slice_end]
         diag = seg.iloc[execution_start_idx:]
         oos_signal_stats_by_symbol[sym] = _compute_signal_stats(diag)
 
-    out: Dict[str, Any] = {
+    out: dict[str, Any] = {
         "portfolio_cagr_pct": cagr,
         "mdd_pct": mdd,
         "cvar_pct": cvar_pct,
@@ -355,20 +355,19 @@ def run_holdout_shared_cash_portfolio(
 
 
 def run_cpcv_complement_evaluation(
-    params: Dict[str, Any],
-    symbols: List[str],
+    params: dict[str, Any],
+    symbols: list[str],
     tf: str,
-    data_maps: Dict[str, Dict[str, Any]],
-    cpcv_paths: List[CPCVPath],
-    all_block_ranges: List[Tuple[int, int]],
+    data_maps: dict[str, dict[str, Any]],
+    cpcv_paths: list[CPCVPath],
+    all_block_ranges: list[tuple[int, int]],
     *,
     oos_path_scores: Sequence[float],
-    signal_disk_cache_root: Optional[Path] = None,
-    project_root: Optional[str] = None,
+    signal_disk_cache_root: Path | None = None,
+    project_root: str | None = None,
     concurrency_penalty_scale: float = 1.0,
-) -> Tuple[float, float]:
-    """
-    Evaluate CPCV complement (train) segments for each path on fixed params; compare to stored OOS path scores.
+) -> tuple[float, float]:
+    """Evaluate CPCV complement (train) segments for each path on fixed params; compare to stored OOS path scores.
     Returns (pbo, spearman_rho).
     """
     oos_list = [float(x) for x in oos_path_scores]
@@ -386,15 +385,15 @@ def run_cpcv_complement_evaluation(
 
     p = dict(params)
     strategy: UltimateSpotStrategy = UltimateSpotStrategy(name="PBOComplement", params=p)
-    cache_root: Optional[Path] = signal_disk_cache_root
+    cache_root: Path | None = signal_disk_cache_root
     if cache_root is None and project_root is not None:
         cache_root = Path(project_root) / ".spot_signal_cache"
 
     strategy._portfolio_eval_ctx = {"data_maps": data_maps, "symbols": list(symbols), "tf": tf}
-    full_signal_dfs: Dict[str, pd.DataFrame] = {}
+    full_signal_dfs: dict[str, pd.DataFrame] = {}
     try:
         for sym in symbols:
-            target_df_full: Optional[pd.DataFrame] = data_maps.get(sym, {}).get(tf)
+            target_df_full: pd.DataFrame | None = data_maps.get(sym, {}).get(tf)
             if target_df_full is None or target_df_full.empty:
                 continue
             fp = _dataset_fingerprint_from_df(target_df_full)
@@ -410,7 +409,7 @@ def run_cpcv_complement_evaluation(
     if len(full_signal_dfs) != len(symbols):
         return (0.5, 0.0)
 
-    prebuilt_full_arrays: Dict[str, Dict[str, np.ndarray]] = {}
+    prebuilt_full_arrays: dict[str, dict[str, np.ndarray]] = {}
     for sym in symbols:
         target_df_full = data_maps.get(sym, {}).get(tf)
         if target_df_full is None or target_df_full.empty:
@@ -430,7 +429,7 @@ def run_cpcv_complement_evaluation(
         prebuilt_full_arrays[sym] = arrs
 
     max_slots = int(OPT_SPOT_CONFIG.get("SPOT_MAX_CONCURRENT_POSITIONS", 3))
-    is_scores: List[float] = []
+    is_scores: list[float] = []
     for path in cpcv_paths:
         comp = cpcv_complement_segments(path, all_block_ranges)
         raw = _cpcv_path_compound_raw_log_tw(
@@ -451,32 +450,31 @@ def run_cpcv_complement_evaluation(
 
 
 def run_multi_window_oos_holdout(
-    params: Dict[str, Any],
-    symbols: List[str],
+    params: dict[str, Any],
+    symbols: list[str],
     tf: str,
-    oos_data_maps: Dict[str, Dict[str, Any]],
+    oos_data_maps: dict[str, dict[str, Any]],
     n_sub_windows: int = 2,
     *,
-    signal_disk_cache_root: Optional[Path] = None,
+    signal_disk_cache_root: Path | None = None,
     concurrency_penalty_scale: float = 1.0,
-    full_holdout_result: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
-    """
-    Anchored expanding OOS windows (4mo, 8mo, ... + full). Reuses full-window holdout once for the last window.
+    full_holdout_result: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Anchored expanding OOS windows (4mo, 8mo, ... + full). Reuses full-window holdout once for the last window.
     Pass full_holdout_result to avoid a second full-OOS shared-cash run when already computed.
     """
     ref_sym = symbols[0]
     oos_start = int(oos_data_maps[ref_sym].get(f"oos_start_idx_{tf}", 0))
     full_end = len(oos_data_maps[ref_sym][tf])
     bars_pm = float(OPT_SPOT_CONFIG.get("SPOT_MULTI_WINDOW_BARS_PER_MONTH", 180.0))
-    ends_raw: List[int] = []
+    ends_raw: list[int] = []
     for i in range(1, n_sub_windows + 1):
         cap = oos_start + int(i * 4 * bars_pm)
         ends_raw.append(min(cap, full_end))
     ends_raw.append(full_end)
 
-    ordered: List[int] = []
-    seen: Set[int] = set()
+    ordered: list[int] = []
+    seen: set[int] = set()
     for e in ends_raw:
         if e > oos_start and e not in seen:
             seen.add(e)
@@ -507,8 +505,8 @@ def run_multi_window_oos_holdout(
             "full_window_result": full_res,
         }
 
-    windows: List[Dict[str, Any]] = []
-    cagrs: List[float] = []
+    windows: list[dict[str, Any]] = []
+    cagrs: list[float] = []
     for end in ordered:
         if end >= full_end:
             r = full_res
@@ -564,13 +562,12 @@ def _regime_stress_label(mult: float) -> str:
 
 
 def compute_regime_conditional_oos_metrics(
-    full_signal_dfs: Dict[str, pd.DataFrame],
+    full_signal_dfs: dict[str, pd.DataFrame],
     portfolio_equity_curve: np.ndarray,
     oos_start_idx: int,
-    symbols: List[str],
-) -> Dict[str, Dict[str, float]]:
-    """
-    OOS bars classified by reference symbol regime_risk_mult; per-regime return and MDD (diagnostic).
+    symbols: list[str],
+) -> dict[str, dict[str, float]]:
+    """OOS bars classified by reference symbol regime_risk_mult; per-regime return and MDD (diagnostic).
     """
     ref = symbols[0]
     if ref not in full_signal_dfs:
@@ -592,8 +589,8 @@ def compute_regime_conditional_oos_metrics(
     labels = [_regime_stress_label(float(rrm[i])) for i in range(n)]
     log_ret = np.diff(np.log(np.maximum(eq, 1e-12)))
     keys = ("risk_on", "cautious", "stress")
-    sum_log: Dict[str, float] = {k: 0.0 for k in keys}
-    bar_ct: Dict[str, float] = {k: 0.0 for k in keys}
+    sum_log: dict[str, float] = {k: 0.0 for k in keys}
+    bar_ct: dict[str, float] = {k: 0.0 for k in keys}
     for j in range(n):
         bar_ct[labels[j]] += 1.0
     for i in range(1, n):
@@ -601,7 +598,7 @@ def compute_regime_conditional_oos_metrics(
         lr = float(log_ret[i - 1])
         sum_log[lab] += lr
 
-    out: Dict[str, Dict[str, float]] = {}
+    out: dict[str, dict[str, float]] = {}
     for lab in keys:
         slr = sum_log[lab]
         bc = bar_ct[lab]

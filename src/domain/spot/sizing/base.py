@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, ClassVar, Dict, Protocol
+from typing import Any, ClassVar, Protocol
 
 import numpy as np
 import pandas as pd
@@ -8,6 +8,6 @@ import pandas as pd
 
 class ISizing(Protocol):
     name: ClassVar[str]
-    param_space: ClassVar[Dict[str, Any]]
+    param_space: ClassVar[dict[str, Any]]
 
-    def compute(self, df: pd.DataFrame, params: Dict[str, Any]) -> np.ndarray: ...
+    def compute(self, df: pd.DataFrame, params: dict[str, Any]) -> np.ndarray: ...
