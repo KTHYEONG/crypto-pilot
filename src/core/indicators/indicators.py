@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import os
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -767,8 +768,7 @@ class IndicatorEngine:
 
 
 def get_indicator_engine(domain: str = "generic") -> IndicatorEngine:
-    """
-    도메인별 환경 변수를 참조하여 IndicatorEngine 인스턴스를 생성하는 팩토리 함수.
+    """도메인별 환경 변수를 참조하여 IndicatorEngine 인스턴스를 생성하는 팩토리 함수.
     """
     env_suffix = domain.upper()
     cache_mode = os.getenv(
