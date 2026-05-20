@@ -7,9 +7,10 @@ import math
 import os
 import signal
 import subprocess
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import optuna
 from optuna.samplers import TPESampler
