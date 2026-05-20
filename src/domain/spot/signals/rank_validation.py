@@ -11,8 +11,7 @@ def rank_entry_alignment_issues(
     *,
     min_entry_bars: int = 20,
 ) -> list[str]:
-    """
-    Heuristic: on entry bars, mean rank should not be systematically below non-entry bars.
+    """Heuristic: on entry bars, mean rank should not be systematically below non-entry bars.
     Returns human-readable issue strings (empty if no obvious conflict).
     """
     issues: list[str] = []
