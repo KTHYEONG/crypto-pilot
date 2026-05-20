@@ -102,7 +102,7 @@ def _build_ensemble_evaluation_summary(
             }
         )
     return {
-        "selected_count": int(len(selected_ensemble_results)),
+        "selected_count": len(selected_ensemble_results),
         "members": members,
         "ensemble_meta": {
             "cagr_pct": float(meta_port.get("cagr_pct", 0.0)),

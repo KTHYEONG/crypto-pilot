@@ -20,7 +20,7 @@ _logger: logging.Logger = logging.getLogger("opt_data_utils")
 
 
 def _to_unix_ms(dt: pd.Series | pd.DatetimeIndex) -> pd.Series:
-    """datetime series → Unix milliseconds int64, safe across datetime64[ms/us/ns] dtypes.
+    """Datetime series → Unix milliseconds int64, safe across datetime64[ms/us/ns] dtypes.
 
     Pandas 2.x preserves storage resolution (ms/us/ns), so astype('int64') returns
     values in the native unit. Upcasting to ns first normalizes all variants.

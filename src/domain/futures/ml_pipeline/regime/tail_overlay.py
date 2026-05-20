@@ -285,10 +285,11 @@ def _fit_supervised_tail_score(
 
     Returns:
         Dict of calibrated multi-label scores or None on failure.
+
     """
     try:
-        from sklearn.isotonic import IsotonicRegression  # noqa: PLC0415
-        from sklearn.linear_model import LogisticRegression  # noqa: PLC0415
+        from sklearn.isotonic import IsotonicRegression
+        from sklearn.linear_model import LogisticRegression
     except ImportError:
         _logger.warning("scikit-learn not available; using hardcoded fallback")
         return None

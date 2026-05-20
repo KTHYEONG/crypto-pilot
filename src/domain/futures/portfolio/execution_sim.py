@@ -1000,6 +1000,7 @@ def backtest_target_weights_intrabar(
 
     Returns:
         (trades, final_balance, equity_curve, diag) — Numba 함수와 동일 형식.
+
     """
     if mark_price_1m is not None:
         mark_arr = np.asarray(mark_price_1m, dtype=np.float64)

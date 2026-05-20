@@ -12,7 +12,7 @@ from __future__ import annotations
 import logging
 import threading
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any
 
 import numpy as np
 import optuna
@@ -45,7 +45,7 @@ from src.domain.futures.optimization.evaluator import (
     calc_gate1_dsr_from_path_log_tw,
     calc_max_underwater_days_from_equity,
     calc_mdd_from_equity,
-    compute_awf_robust_objective_score,
+    compute_v3_score,
 )
 from src.domain.futures.optimization.phase_param_space import (
     V43_FIXED_DEFAULTS,
@@ -70,6 +70,7 @@ from src.domain.futures.portfolio.signal_composer import (
     rolling_per_bar_return_std,
 )
 from src.domain.futures.strategy_ml import FuturesMLStrategy
+from src.domain.futures.validation.boundary_contract import PurgeBarsRegistry
 
 _logger = logging.getLogger(__name__)
 _PRECOMPUTE_LOCK = threading.Lock()
@@ -225,6 +226,7 @@ class MLPhaseDContext:
     symbols: list[str]
     tf: str
     seed: int = 42
+    registry: PurgeBarsRegistry | None = None
     awf_leg_slices: list[dict[str, Any]] | None = None
     is_slice: dict[str, Any] | None = None
     holdout_slice: dict[str, np.ndarray] | None = None
@@ -801,7 +803,7 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
         awf_legs = build_anchored_wf_legs(
             eff_len, k=k_legs, embargo=embargo, is_pool_frac=is_pool
         )
-        
+
         # SOTA: Precompute Global Rolling Covariance (once per optimization run)
         # Eliminates O(T * N^3) sklearn LW calls from the inner Trial loops.
         lookback = cov_lookback_bars(ctx.tf, OPT_FUTURES_CONFIG)
@@ -813,7 +815,7 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
                     start_idx : start_idx + eff_len
                 ].to_numpy(dtype=np.float64)
         sigma_3d_full = precompute_rolling_covariances(close_2d_full, lookback)
-        
+
         first_awf_anchor = int(awf_legs[0][1]) if awf_legs else max(1, int(eff_len * is_pool))
 
         dates_ok = bool(ctx.ml_pipeline_fetch_start and ctx.ml_pipeline_end)
@@ -951,7 +953,7 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
             ctx.calibrator = last_calib
             ctx.calibrator_short = last_calib_short
             ctx.estimated_b = last_est_b
-            
+
             # [Optimization] Populate is_slice for decoupled IS optimization
             prebuilt_full_is = _build_prebuilt_full_arrays(
                 ctx.data_maps,
@@ -1589,6 +1591,10 @@ def _run_portfolio_numba_block(
         and aligned.get("exec_close_1m") is not None
     )
     if use_intrabar:
+        exec_start = prepared.exec_bar_start_1m_idx
+        exec_end = prepared.exec_bar_end_1m_idx
+        assert exec_start is not None
+        assert exec_end is not None
         out_tw = backtest_target_weights_intrabar_numba(
             aligned["close"],
             aligned["high"],
@@ -1602,8 +1608,8 @@ def _run_portfolio_numba_block(
             np.asarray(aligned["exec_high_1m"], dtype=np.float64),
             np.asarray(aligned["exec_low_1m"], dtype=np.float64),
             np.asarray(aligned["exec_close_1m"], dtype=np.float64),
-            prepared.exec_bar_start_1m_idx,
-            prepared.exec_bar_end_1m_idx,
+            exec_start,
+            exec_end,
             float(FUTURES_INITIAL_BALANCE),
             MAKER_FEE_RATE,
             TAKER_FEE_RATE,
@@ -1649,7 +1655,7 @@ def _run_portfolio_numba_block(
             float(params["DD_SCALING_THRESHOLD"]),
             volume_2d=aligned.get("volume"),
         )
-    return cast(tuple[np.ndarray, float, np.ndarray, np.ndarray], out_tw)
+    return out_tw
 
 
 def _awf_gate_stat_ref_bars(awf_slices: list[dict[str, Any]]) -> int:
@@ -1673,7 +1679,7 @@ def rerun_precompute_for_ctx(ctx: MLPhaseDContext) -> None:
 
 def replay_robust_awf_for_trial_params(
     ctx: MLPhaseDContext, raw_optuna_params: dict[str, Any]
-) -> tuple[float, dict[str, Any]]:
+) -> tuple[float | tuple[float, float], dict[str, Any]]:
     """Replay AWF legs with fixed tuned Optuna param dict.
 
     No Optuna Trial; for multi-seed checks.
@@ -1785,7 +1791,7 @@ def _evaluate_awf_phase_d_aggregate(
                     raise optuna.TrialPruned()
                 diag = {"pruned": True, "robust_val": (-1e9)}
                 return 1e9, diag
-            
+
         mdd = float(calc_mdd_from_equity(b_equity)) if b_equity.size > 0 else 100.0
         mdd_duration_days = (
             float(
@@ -1959,15 +1965,6 @@ def _evaluate_awf_phase_d_aggregate(
         s_loss = float(np.sum(np.abs(s_pnl[s_pnl < 0.0])))
         s_pf_agg = s_win / max(s_loss, 1e-9) if s_loss > 0 else 1.0
 
-    lam_m = float(cfg.get("FUTURES_AWF_OBJ_LAMBDA_MAD", 1.0))
-    psi_d = float(cfg.get("FUTURES_AWF_OBJ_PSI_DD", 0.5))
-    robust_val = compute_awf_robust_objective_score(
-        leg_arr,
-        worst_mdd_legs,
-        lambda_mad=lam_m,
-        psi_dd=psi_d,
-    )
-
     k_legs_n = float(max(n_legs_done, 1))
     mu_log = float(np.mean(leg_arr)) if leg_arr.size > 0 else -10.0
     worst_leg = float(np.min(leg_arr)) if leg_arr.size > 0 else -10.0
@@ -1988,6 +1985,16 @@ def _evaluate_awf_phase_d_aggregate(
     mdd_duration_days = float(max(leg_mdd_duration_days, default=0.0))
     cvar_pct = float(max(leg_cvar_pct, default=0.0))
     turnover_cost_ratio = float(np.clip(1.0 / max(ev_cost_ratio, 1e-9), 0.0, 1e6))
+
+    robust_val = compute_v3_score(
+        leg_log_tw=leg_arr,
+        worst_mdd=worst_mdd_legs / 100.0,
+        cvar_5=cvar_pct / 100.0,
+        excess_turnover=turnover_cost_ratio,
+        funding_drag=funding_drag_ratio,
+        aum_impact_penalty=0.0,
+    )
+
     total_trades_agg = float(np.sum(leg_trade_counts)) if leg_trade_counts else 0.0
     total_chop_trades = float(np.sum(chop_trade_counts)) if chop_trade_counts else 0.0
     chop_trade_share = float(total_chop_trades / max(total_trades_agg, 1.0))
@@ -2059,7 +2066,7 @@ def _evaluate_awf_phase_d_aggregate(
     if n_legs_done < k_cfg:
         obj += 20.0 * (k_cfg - n_legs_done)
 
-    diag: dict[str, Any] = {
+    diag_res: dict[str, Any] = {
         "objective": float(obj),
         "robust_val": float(robust_val),
         "awf_robust_score": float(robust_val),
@@ -2175,8 +2182,8 @@ def _evaluate_awf_phase_d_aggregate(
             + tail_mdd_w * float(worst_mdd_legs)
             + chop_trade_w * chop_loss_share
         )
-        return (obj1, obj2), diag
-    return float(obj), diag
+        return (obj1, obj2), diag_res
+    return float(obj), diag_res
 
 
 def _evaluate_is_phase_d(
@@ -2228,10 +2235,14 @@ def _evaluate_is_phase_d(
             leg_log_tw.append(_log_tw_from_ret_pct(chunk_ret))
 
     leg_arr = np.asarray(leg_log_tw, dtype=np.float64)
-    robust_val = compute_awf_robust_objective_score(
-        leg_arr, is_mdd,
-        lambda_mad=float(cfg.get("FUTURES_AWF_OBJ_LAMBDA_MAD", 1.0)),
-        psi_dd=float(cfg.get("FUTURES_AWF_OBJ_PSI_DD", 0.5))
+    is_cvar = float(calc_cvar5_loss_pct_from_equity(b_equity)) if b_equity.size > 0 else 0.0
+    robust_val = compute_v3_score(
+        leg_log_tw=leg_arr,
+        worst_mdd=is_mdd / 100.0,
+        cvar_5=is_cvar / 100.0,
+        excess_turnover=0.0,
+        funding_drag=0.0,
+        aum_impact_penalty=0.0,
     )
 
     # DSR calculation for constraints
@@ -2271,6 +2282,8 @@ def objective_ml_phase_d(trial: optuna.Trial, ctx: MLPhaseDContext) -> tuple[flo
     T2: AWF leg log-TW를 직접 목적함수로 사용 (IS-only 탈피).
     Obj1 = -mean(leg_log_tw),  Obj2 = -min(leg_log_tw)  [both minimized].
     """
+    if hasattr(ctx, "registry") and ctx.registry is not None:
+        ctx.registry.validate()
     if ctx.awf_leg_slices is None:
         precompute_ml_optimization_context(ctx)
     if ctx.run_id:

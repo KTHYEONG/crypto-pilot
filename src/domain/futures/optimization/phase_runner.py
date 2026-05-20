@@ -9,10 +9,10 @@ from optuna.trial import TrialState
 
 from config.opt_config import OPT_FUTURES_CONFIG
 from src.domain.futures.optimization.optimizer import MLPhaseDContext
-from src.domain.futures.optimization.phase_importance import PhaseBPlan, build_phase_b_plan
 from src.domain.futures.optimization.phase_c_robustness import (
     evaluate_phase_c_robustness,
 )
+from src.domain.futures.optimization.phase_importance import PhaseBPlan, build_phase_b_plan
 from src.domain.futures.optimization.phase_objectives import build_phase_objective_specs
 from src.domain.futures.optimization.phase_samplers import (
     build_phase_a1_pruner,
@@ -38,8 +38,8 @@ class PhaseBundle:
 
 def _tag_phase_trials(study: optuna.Study, *, phase: str, run_id: str | None) -> None:
     try:
-        storage = study._storage  # noqa: SLF001
-        study_id = study._study_id  # noqa: SLF001
+        storage = study._storage
+        study_id = study._study_id
     except Exception:
         return
     for tr in study.get_trials(deepcopy=False):
