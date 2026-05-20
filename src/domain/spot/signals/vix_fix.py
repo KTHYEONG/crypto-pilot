@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, ClassVar, Dict
+from typing import Any, ClassVar
 
 import numpy as np
 import pandas as pd
@@ -12,13 +12,13 @@ from src.domain.spot.signals.registry import register_signal
 @register_signal
 class VIXFixSignal:
     name: ClassVar[str] = "VIX_FIX"
-    param_space: ClassVar[Dict[str, Any]] = {
+    param_space: ClassVar[dict[str, Any]] = {
         "WVF_PERIOD": {"type": "int", "low": 16, "high": 30, "step": 2},
         "WVF_LOOKBACK": {"type": "int", "low": 80, "high": 150, "step": 10},
         "WVF_PERCENTILE": {"type": "float", "low": 0.95, "high": 0.99, "step": 0.01},
     }
 
-    def compute(self, df: pd.DataFrame, params: Dict[str, Any]) -> SignalOutput:
+    def compute(self, df: pd.DataFrame, params: dict[str, Any]) -> SignalOutput:
         p = int(params.get("WVF_PERIOD", 22))
         lb = int(params.get("WVF_LOOKBACK", 100))
         pct = float(params.get("WVF_PERCENTILE", 0.975))

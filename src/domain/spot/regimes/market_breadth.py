@@ -1,5 +1,4 @@
-"""
-Market-breadth regime with hysteresis (Schmitt-style) and BTC circuit breaker.
+"""Market-breadth regime with hysteresis (Schmitt-style) and BTC circuit breaker.
 
 Returns per-bar strength in [0, 1]: risk-off / BTC lock => 0; risk-on strength scales
 with smoothed breadth signal so regime_state can be OFF / SOFT / FULL (strategies_spot).
@@ -8,7 +7,8 @@ Causal only.
 
 from __future__ import annotations
 
-from typing import Any, ClassVar, Dict, Mapping
+from collections.abc import Mapping
+from typing import Any, ClassVar
 
 import numpy as np
 import pandas as pd
@@ -100,7 +100,7 @@ def compute_market_breadth_regime(
 @register_regime
 class MarketBreadthRegime:
     name: ClassVar[str] = "MARKET_BREADTH"
-    param_space: ClassVar[Dict[str, Any]] = {
+    param_space: ClassVar[dict[str, Any]] = {
         "W_SIGNAL": {"type": "int", "low": 5, "high": 20, "step": 5},
         "K_ACCEL": {"type": "int", "low": 1, "high": 6, "step": 1},
         "MB_FLOOR": {"type": "float", "low": 0.40, "high": 0.70, "step": 0.05},
@@ -109,7 +109,7 @@ class MarketBreadthRegime:
         "K_COOL_DOWN": {"type": "int", "low": 3, "high": 12, "step": 1},
     }
 
-    def compute(self, data_maps: Dict[str, Dict[str, Any]], params: Dict[str, Any]) -> np.ndarray:
+    def compute(self, data_maps: dict[str, dict[str, Any]], params: dict[str, Any]) -> np.ndarray:
         tf = str(params.get("TIMEFRAME", "4h"))
         symbols = sorted(
             s for s in data_maps if tf in data_maps[s] and data_maps[s][tf] is not None
@@ -118,7 +118,7 @@ class MarketBreadthRegime:
             raise ValueError("market_breadth: empty data_maps")
         ref = data_maps[symbols[0]][tf]
         n = len(ref)
-        close_map: Dict[str, np.ndarray] = {}
+        close_map: dict[str, np.ndarray] = {}
         for s in symbols:
             df = data_maps[s][tf]
             if len(df) != n:

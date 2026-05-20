@@ -8,7 +8,7 @@ import sys
 import time
 from datetime import timedelta
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -38,7 +38,8 @@ def filter_by_adv_floor(stats_df: pd.DataFrame, min_adv_krw_day: float) -> pd.Da
 
 def filter_by_p25_bar_liquidity(stats_df: pd.DataFrame, min_p25_bar_krw: float) -> pd.DataFrame:
     """Reject coins where p25 4H-bar KRW volume < min_p25_bar_krw.
-    Prevents spike-dominant volume from passing ADV filter."""
+    Prevents spike-dominant volume from passing ADV filter.
+    """
     if stats_df.empty or "p25_bar_vol" not in stats_df.columns:
         return stats_df
     return stats_df[stats_df["p25_bar_vol"] >= float(min_p25_bar_krw)].copy()
@@ -68,7 +69,7 @@ def _median_atr_percent(
 
 def screen_by_volatility_fit(
     stats_df: pd.DataFrame,
-    symbol_dfs: Dict[str, pd.DataFrame],
+    symbol_dfs: dict[str, pd.DataFrame],
     *,
     atr_period: int,
     atr_pct_min: float,
@@ -119,8 +120,7 @@ def _align_is_end_to_series_tz(is_end: pd.Timestamp, dt_series: pd.Series) -> pd
 
 
 def _indices_is_last_year(df: pd.DataFrame, is_end_date: pd.Timestamp | str) -> tuple[int, int]:
-    """
-    Last ~365 days of in-sample rows strictly before is_end_date (OOS boundary).
+    """Last ~365 days of in-sample rows strictly before is_end_date (OOS boundary).
     Avoids look-ahead: mini-BT window uses only IS bars, never OOS.
     """
     if df.empty or "datetime" not in df.columns:
@@ -157,8 +157,7 @@ def _run_mini_backtest_window(
     test_start: int,
     test_end: int,
 ) -> tuple[float, int, float, float, pd.Series]:
-    """
-    Single-symbol mini backtest on [test_start:test_end).
+    """Single-symbol mini backtest on [test_start:test_end).
     Returns pf, n_trades, cagr_pct, relevance_score, equity_simple_returns (indexed).
     """
     strategy = UltimateSpotStrategy(name=f"Screener_{sym}", params=dict(params))
@@ -217,8 +216,8 @@ def _run_mini_backtest_window(
 
 def screen_by_strategy_fit(
     vol_df: pd.DataFrame,
-    symbol_dfs: Dict[str, pd.DataFrame],
-    daily_dfs: Dict[str, pd.DataFrame],
+    symbol_dfs: dict[str, pd.DataFrame],
+    daily_dfs: dict[str, pd.DataFrame],
     fixed_params: dict[str, Any],
     *,
     is_end_date: pd.Timestamp | str,
@@ -226,13 +225,12 @@ def screen_by_strategy_fit(
     min_pf: float,
     min_cagr_pct: float,
     signal_type: str | None = None,
-) -> tuple[pd.DataFrame, Dict[str, pd.Series]]:
-    """
-    Run fixed-parameter mini backtest (last ~1y of IS, before is_end_date) per symbol.
+) -> tuple[pd.DataFrame, dict[str, pd.Series]]:
+    """Run fixed-parameter mini backtest (last ~1y of IS, before is_end_date) per symbol.
     Pass criteria: trades >= min_trades, PF >= min_pf, CAGR > min_cagr_pct.
     """
     rows: list[dict[str, float | str]] = []
-    ret_map: Dict[str, pd.Series] = {}
+    ret_map: dict[str, pd.Series] = {}
     fp_base = dict(fixed_params)
     if signal_type is not None:
         fp_base["SIGNAL_TYPE"] = str(signal_type)
@@ -301,9 +299,9 @@ def marchenko_pastur_n_factors(
 
 def select_by_mrmr(
     candidates_df: pd.DataFrame,
-    strategy_returns: Dict[str, pd.Series],
+    strategy_returns: dict[str, pd.Series],
     n_select: int,
-) -> List[str]:
+) -> list[str]:
     """Greedy mRMR on strategy equity returns: score = relevance - mean(|corr| to selected)."""
     if candidates_df.empty:
         return []
@@ -325,7 +323,7 @@ def select_by_mrmr(
     corr = rets.corr().abs()
     relevance = {s: float(work.loc[s, "relevance"]) for s in symbols if s in work.index}
 
-    selected: List[str] = []
+    selected: list[str] = []
     remaining = set(symbols)
     seed = max(remaining, key=lambda s: relevance.get(s, 0.0))
     selected.append(seed)
@@ -407,7 +405,7 @@ def _slice_df_to_is(df: pd.DataFrame, is_start: str, is_end: str) -> pd.DataFram
     return df.loc[mask].reset_index(drop=True)
 
 
-def update_broad_candidates_in_config(symbols: List[str]) -> None:
+def update_broad_candidates_in_config(symbols: list[str]) -> None:
     config_path = Path("config/opt_config.py")
     if not config_path.exists():
         _logger.error("config/opt_config.py not found.")
@@ -431,9 +429,8 @@ def screen_broad_universe(
     is_start: str,
     is_end: str,
     fetch_end: str | None = None,
-) -> List[str]:
-    """
-    Phase A: ADV + ATR% only (signal-agnostic). Uses in-sample bars only for gates; OOS excluded.
+) -> list[str]:
+    """Phase A: ADV + ATR% only (signal-agnostic). Uses in-sample bars only for gates; OOS excluded.
     """
     from config.opt_config import SPOT_SCREENER_CONFIG, get_quarterly_window
 
@@ -467,7 +464,7 @@ def screen_broad_universe(
         ).strftime("%Y-%m-%d")
 
     stats: list[dict[str, float | str]] = []
-    symbol_dfs: Dict[str, pd.DataFrame] = {}
+    symbol_dfs: dict[str, pd.DataFrame] = {}
 
     _logger.info("Fetching all KRW markets from Upbit (Phase A)...")
     all_markets = client.exchange.load_markets()
@@ -548,19 +545,18 @@ def screen_broad_universe(
 
 
 def screen_symbol_refinement(
-    broad_candidates: List[str],
+    broad_candidates: list[str],
     winning_signal_type: str,
     is_end_date: str,
     *,
-    symbol_dfs_4h: Dict[str, pd.DataFrame],
-    daily_dfs: Dict[str, pd.DataFrame],
-    adv_by_symbol: Optional[Dict[str, float]] = None,
-    phase_b_params: Optional[Dict[str, Any]] = None,
-    phase_a_broad: Optional[List[str]] = None,
-    anchor_symbols: Optional[List[str]] = None,
+    symbol_dfs_4h: dict[str, pd.DataFrame],
+    daily_dfs: dict[str, pd.DataFrame],
+    adv_by_symbol: dict[str, float] | None = None,
+    phase_b_params: dict[str, Any] | None = None,
+    phase_a_broad: list[str] | None = None,
+    anchor_symbols: list[str] | None = None,
 ) -> None:
-    """
-    Phase C+D: mini-BT on IS last year with winning SIGNAL_TYPE, then MP + mRMR → SPOT_SYMBOLS.
+    """Phase C+D: mini-BT on IS last year with winning SIGNAL_TYPE, then MP + mRMR → SPOT_SYMBOLS.
 
     phase_b_params: midpoint params derived from the Phase-B winning combo (via build_probe_params).
     When supplied, avoids loading stale best_params_4h.json and breaks the circular bias where
@@ -585,11 +581,11 @@ def screen_symbol_refinement(
     top_k = int(cfg["CANDIDATES_TOP_K"])
     adaptive_adv = bool(cfg["ADAPTIVE_SLIPPAGE_REF_ADV"])
 
-    anchor_syms: List[str] = (
+    anchor_syms: list[str] = (
         list(anchor_symbols) if anchor_symbols is not None else list(SPOT_ANCHOR_SYMBOLS)
     )
     anchor_set = set(anchor_syms)
-    phase_a_list: List[str] = (
+    phase_a_list: list[str] = (
         list(phase_a_broad) if phase_a_broad is not None else list(broad_candidates)
     )
 
@@ -795,7 +791,7 @@ def screen_symbol_refinement(
         min_tr_dyn,
     )
 
-    mp_cols: List[str] = []
+    mp_cols: list[str] = []
     for s in valid_anchors_ordered:
         if s in ret_anchor and len(ret_anchor[s]) >= 30:
             mp_cols.append(s)
@@ -854,7 +850,7 @@ def screen_symbol_refinement(
                 picked = select_by_mrmr(pool, strat_returns, n_select)
                 final_symbols = picked if picked else valid_anchors_ordered[:mp_max]
     else:
-        strat_combined: Dict[str, pd.Series] = {**ret_anchor, **ret_dyn}
+        strat_combined: dict[str, pd.Series] = {**ret_anchor, **ret_dyn}
         returns_for_mp = pd.concat({s: strat_combined[s] for s in mp_cols}, axis=1, join="inner")
         n_select = marchenko_pastur_n_factors(returns_for_mp, min_n=mp_min, max_n=mp_max)
         n_select = min(n_select, mp_max)
@@ -916,8 +912,8 @@ def screen_universe() -> None:
 
     start_date = (pd.to_datetime(end_date) - timedelta(days=365 * 3)).strftime("%Y-%m-%d")
     collector = DataCollectorSpot()
-    symbol_dfs_4h: Dict[str, pd.DataFrame] = {}
-    daily_dfs: Dict[str, pd.DataFrame] = {}
+    symbol_dfs_4h: dict[str, pd.DataFrame] = {}
+    daily_dfs: dict[str, pd.DataFrame] = {}
 
     symbols_to_load = list(
         dict.fromkeys(list(broad) + [s for s in SPOT_ANCHOR_SYMBOLS if s not in broad])
@@ -960,8 +956,8 @@ def screen_universe() -> None:
 
 
 def update_config_file(
-    symbols: List[str],
-    clusters: Dict[str, str],
+    symbols: list[str],
+    clusters: dict[str, str],
     *,
     median_adv_krw: float | None = None,
     adaptive_slippage: bool = False,

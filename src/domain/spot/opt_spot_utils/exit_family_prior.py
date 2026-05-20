@@ -10,8 +10,7 @@ _HYBRID: frozenset[str] = frozenset({"BB_SQUEEZE", "MACD_HIST_DIV"})
 
 
 def exit_family_prior_penalty(signal_type: str, exit_family: str) -> float:
-    """
-    Return a small objective subtraction (positive = penalize) for awkward pairings.
+    """Return a small objective subtraction (positive = penalize) for awkward pairings.
     Not a hard gate.
     """
     s = str(signal_type).upper()

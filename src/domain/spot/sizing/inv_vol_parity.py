@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, ClassVar, Dict
+from typing import Any, ClassVar
 
 import numpy as np
 import pandas as pd
@@ -12,9 +12,9 @@ from src.domain.spot.sizing.registry import register_sizing
 @register_sizing
 class InvVolParitySizing:
     name: ClassVar[str] = "inv_vol_parity"
-    param_space: ClassVar[Dict[str, Any]] = {}
+    param_space: ClassVar[dict[str, Any]] = {}
 
-    def compute(self, df: pd.DataFrame, params: Dict[str, Any]) -> np.ndarray:
+    def compute(self, df: pd.DataFrame, params: dict[str, Any]) -> np.ndarray:
         close = df["close"].to_numpy(dtype=np.float64)
         high = df["high"].to_numpy(dtype=np.float64)
         low = df["low"].to_numpy(dtype=np.float64)

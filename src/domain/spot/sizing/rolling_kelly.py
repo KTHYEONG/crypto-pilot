@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, ClassVar, Dict
+from typing import Any, ClassVar
 
 import numpy as np
 import pandas as pd
@@ -11,11 +11,11 @@ from src.domain.spot.sizing.registry import register_sizing
 @register_sizing
 class RollingKellySizing:
     name: ClassVar[str] = "rolling_kelly"
-    param_space: ClassVar[Dict[str, Any]] = {
+    param_space: ClassVar[dict[str, Any]] = {
         "KELLY_WINDOW": {"type": "int", "low": 30, "high": 120, "step": 10},
     }
 
-    def compute(self, df: pd.DataFrame, params: Dict[str, Any]) -> np.ndarray:
+    def compute(self, df: pd.DataFrame, params: dict[str, Any]) -> np.ndarray:
         close = df["close"].to_numpy(dtype=np.float64)
         n = len(close)
         window = int(max(10, params.get("KELLY_WINDOW", 60)))

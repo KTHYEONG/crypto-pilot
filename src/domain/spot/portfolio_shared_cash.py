@@ -1,5 +1,4 @@
-"""
-Shared-cash spot portfolio: one balance, bar-aligned symbols, optional top-N concurrent slots.
+"""Shared-cash spot portfolio: one balance, bar-aligned symbols, optional top-N concurrent slots.
 
 When max_concurrent_positions == 1, only one symbol holds a position at a time (capital rotation).
 Exit/entry rules match engine_spot.backtest_loop_numba_spot per active slot.
@@ -9,7 +8,6 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -46,20 +44,19 @@ class _SlotState:
 
 
 def run_shared_cash_multi_symbol(
-    symbol_arrays: Dict[str, Dict[str, np.ndarray]],
-    symbols_ordered: List[str],
-    params: Dict[str, object],
+    symbol_arrays: dict[str, dict[str, np.ndarray]],
+    symbols_ordered: list[str],
+    params: dict[str, object],
     *,
     initial_balance: float = SPOT_INITIAL_BALANCE,
     max_concurrent_positions: int = 3,
-    rank_scores: Optional[Dict[str, np.ndarray]] = None,
+    rank_scores: dict[str, np.ndarray] | None = None,
     warmup_bars: int = 0,
     execution_start_idx: int = 0,
     allow_python_fallback: bool = True,
     concurrency_penalty_scale: float = 1.0,
 ) -> SharedCashResult:
-    """
-    Shared balance; per bar: exit all slots first, then enter ranked candidates into free slots.
+    """Shared balance; per bar: exit all slots first, then enter ranked candidates into free slots.
     All symbol arrays must have length n.
     """
     if not symbols_ordered:
@@ -114,7 +111,7 @@ def run_shared_cash_multi_symbol(
     long_trail_lock_mult = float(params.get("LONG_TRAIL_LOCK_MULT", 1.5))
 
     max_slots = max(1, min(int(max_concurrent_positions), len(symbols_ordered)))
-    slots: List[_SlotState] = [_SlotState() for _ in range(max_slots)]
+    slots: list[_SlotState] = [_SlotState() for _ in range(max_slots)]
     balance = float(initial_balance)
     equity_curve = np.zeros(n, dtype=np.float64)
     total_trades = 0
@@ -211,7 +208,7 @@ def run_shared_cash_multi_symbol(
             equity_curve[i] = _portfolio_equity(balance, slots, symbol_arrays, symbols_ordered, i)
             continue
 
-        candidates: List[int] = []
+        candidates: list[int] = []
         for si, sym in enumerate(symbols_ordered):
             if sym_cooldown[si] > 0:
                 continue
@@ -355,9 +352,9 @@ def run_shared_cash_multi_symbol(
 
 def _portfolio_equity(
     balance: float,
-    slots: List[_SlotState],
-    symbol_arrays: Dict[str, Dict[str, np.ndarray]],
-    symbols_ordered: List[str],
+    slots: list[_SlotState],
+    symbol_arrays: dict[str, dict[str, np.ndarray]],
+    symbols_ordered: list[str],
     i: int,
 ) -> float:
     eq = balance
@@ -392,19 +389,19 @@ def _process_in_position_bar(
     long_scale_atr_mult: float,
     scale_out_pct: float,
     fractal_scale_out_ratio: float,
-    fractal_high_flag: Optional[np.ndarray],
+    fractal_high_flag: np.ndarray | None,
     time_stop_bars: int,
     warmup_bars: int,
     execution_start_idx: int,
-    kill_signal: Optional[np.ndarray] = None,
+    kill_signal: np.ndarray | None = None,
     sym_idx: int = -1,
-    sym_cooldown: Optional[np.ndarray] = None,
-    sym_cooldown_skip: Optional[np.ndarray] = None,
+    sym_cooldown: np.ndarray | None = None,
+    sym_cooldown_skip: np.ndarray | None = None,
     kill_cooldown_bars: int = 6,
-    bb_upper: Optional[np.ndarray] = None,
-    trail_tighten: Optional[np.ndarray] = None,
-    regime_risk_mult: Optional[np.ndarray] = None,
-) -> Tuple[_SlotState, float, int, float]:
+    bb_upper: np.ndarray | None = None,
+    trail_tighten: np.ndarray | None = None,
+    regime_risk_mult: np.ndarray | None = None,
+) -> tuple[_SlotState, float, int, float]:
     trades_delta = 0
     pnl_out = 0.0
     if i < warmup_bars or i < execution_start_idx:
@@ -589,12 +586,12 @@ def _try_open_long(
     long_tp_mult: float,
     warmup_bars: int,
     execution_start_idx: int,
-    regime_risk_mult: Optional[np.ndarray] = None,
-    garch_kelly_f: Optional[np.ndarray] = None,
+    regime_risk_mult: np.ndarray | None = None,
+    garch_kelly_f: np.ndarray | None = None,
     delta_gate: float = 0.08,
-    last_risk_pct_ref: Optional[List[float]] = None,
+    last_risk_pct_ref: list[float] | None = None,
     sym_idx: int = 0,
-) -> Tuple[_SlotState, float, bool, int, float]:
+) -> tuple[_SlotState, float, bool, int, float]:
     trades_delta = 0
     pnl_out = 0.0
     slot = _SlotState()

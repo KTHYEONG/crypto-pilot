@@ -9,7 +9,7 @@ import threading
 import time
 from collections import OrderedDict
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any
 
 import joblib
 import numpy as np
@@ -65,7 +65,7 @@ SIGNAL_CACHE_PARAM_KEYS: frozenset[str] = frozenset(
 
 _SIGNAL_CACHE_SCHEMA_VERSION: int = 15
 
-_STRATEGY_LOGIC_HASH: Optional[str] = None
+_STRATEGY_LOGIC_HASH: str | None = None
 _CACHE_CLEANUP_DONE: bool = False
 _CACHE_LAST_CLEANUP_TS: float = 0.0
 
@@ -167,7 +167,7 @@ def _cleanup_old_cache_impl(
     max_sec = max_days * 86400
     expired_count = 0
     expired_bytes = 0
-    kept_files: List[Tuple[float, int, Path]] = []
+    kept_files: list[tuple[float, int, Path]] = []
     total_bytes = 0
     for f in root.rglob("*.joblib"):
         try:
@@ -248,25 +248,25 @@ def _touch_cache_file(path: Path) -> None:
         pass
 
 
-_SignalCacheKey = Tuple[Tuple[Tuple[str, Any], ...], str, str, int, int, int, str]
-_SignalComponentCacheKey = Tuple[str, Tuple[Tuple[str, Any], ...], str, str, int, int, int, str]
+_SignalCacheKey = tuple[tuple[tuple[str, Any], ...], str, str, int, int, int, str]
+_SignalComponentCacheKey = tuple[str, tuple[tuple[str, Any], ...], str, str, int, int, int, str]
 _SIGNAL_CACHE_MAXSIZE: int = _signal_mem_cache_maxsize()
 _ARRAYS_CACHE_MAXSIZE: int = _arrays_mem_cache_maxsize()
 _cache_lock: threading.Lock = threading.Lock()
 _signal_cache: OrderedDict[_SignalCacheKey, pd.DataFrame] = OrderedDict()
-_arrays_cache: OrderedDict[_SignalCacheKey, Dict[str, np.ndarray]] = OrderedDict()
+_arrays_cache: OrderedDict[_SignalCacheKey, dict[str, np.ndarray]] = OrderedDict()
 
 _CACHE_PARAM_EXCLUDE: frozenset[str] = frozenset({"LEVERAGE", "USE_COMPOUNDING"})
-_CACHE_COMPONENTS: Tuple[str, ...] = ("signal", "regime", "sizing", "exit")
-_BASE_OHLCV_COLS: Tuple[str, ...] = ("open", "high", "low", "close", "volume")
-_RUNTIME_REQUIRED_SIGNAL_COLS: Tuple[str, ...] = (
+_CACHE_COMPONENTS: tuple[str, ...] = ("signal", "regime", "sizing", "exit")
+_BASE_OHLCV_COLS: tuple[str, ...] = ("open", "high", "low", "close", "volume")
+_RUNTIME_REQUIRED_SIGNAL_COLS: tuple[str, ...] = (
     "long_entry_signal",
     "entry_upper",
     "trend_direction",
     "strength_filter",
     "atr",
 )
-_COMPONENT_HINTS: Dict[str, Tuple[str, ...]] = {
+_COMPONENT_HINTS: dict[str, tuple[str, ...]] = {
     "regime": ("regime_",),
     "sizing": ("garch_", "kelly", "position_size", "size_"),
     "exit": ("bb_", "trail_", "exit_"),
@@ -302,14 +302,14 @@ def _normalize_key_value(v: Any) -> Any:
     return v
 
 
-def _cache_key_to_params(cache_key: _SignalCacheKey) -> Dict[str, Any]:
+def _cache_key_to_params(cache_key: _SignalCacheKey) -> dict[str, Any]:
     return {k: v for k, v in cache_key[0]}
 
 
-def _params_for_component(params: Dict[str, Any], component: str) -> Set[str]:
-    signal_keys: Set[str] = set()
-    regime_keys: Set[str] = set()
-    sizing_keys: Set[str] = set()
+def _params_for_component(params: dict[str, Any], component: str) -> set[str]:
+    signal_keys: set[str] = set()
+    regime_keys: set[str] = set()
+    sizing_keys: set[str] = set()
 
     try:
         from src.domain.spot.signals import SIGNAL_REGISTRY
@@ -341,7 +341,7 @@ def _params_for_component(params: Dict[str, Any], component: str) -> Set[str]:
     except Exception:
         sizing_keys.add("SIZING_METHOD")
 
-    keys: Set[str] = set()
+    keys: set[str] = set()
     if component == "signal":
         keys.update(signal_keys)
     elif component == "regime":
@@ -384,10 +384,10 @@ def _runtime_dtype_for_disk_dtype(disk_dtype: str) -> str:
 def _collect_component_specs(
     full_df: pd.DataFrame,
     target_df: pd.DataFrame,
-) -> Dict[str, List[Tuple[str, str, str]]]:
-    base_cols: Set[str] = set(target_df.columns)
+) -> dict[str, list[tuple[str, str, str]]]:
+    base_cols: set[str] = set(target_df.columns)
     dynamic_cols = [c for c in full_df.columns if c not in base_cols]
-    specs: Dict[str, List[Tuple[str, str, str]]] = {c: [] for c in _CACHE_COMPONENTS}
+    specs: dict[str, list[tuple[str, str, str]]] = {c: [] for c in _CACHE_COMPONENTS}
     for col in dynamic_cols:
         s = full_df[col]
         if s.empty:
@@ -410,11 +410,11 @@ def _collect_component_specs(
 
 
 def _build_component_cache_key(
-    cache_key: _SignalCacheKey, params: Dict[str, Any], component: str
+    cache_key: _SignalCacheKey, params: dict[str, Any], component: str
 ) -> _SignalComponentCacheKey:
     _, sym, tf, data_len, fingerprint, version, logic_hash = cache_key
     names = _params_for_component(params, component)
-    items: List[Tuple[str, Any]] = sorted(
+    items: list[tuple[str, Any]] = sorted(
         (k, _normalize_key_value(params[k])) for k in names if k in params
     )
     return (component, tuple(items), sym, tf, data_len, fingerprint, version, logic_hash)
@@ -433,9 +433,9 @@ def _signal_component_cache_path(component_key: _SignalComponentCacheKey, root: 
 def _extract_component_arrays(
     full_df: pd.DataFrame,
     component: str,
-    col_specs: List[Tuple[str, str, str]],
-) -> Dict[str, np.ndarray]:
-    out: Dict[str, np.ndarray] = {}
+    col_specs: list[tuple[str, str, str]],
+) -> dict[str, np.ndarray]:
+    out: dict[str, np.ndarray] = {}
     for col, disk_dtype, _ in col_specs:
         if col not in full_df.columns:
             raise KeyError(f"Missing required component column: {col}")
@@ -445,7 +445,7 @@ def _extract_component_arrays(
 
 def _write_component_cache(
     cache_key: _SignalCacheKey,
-    params: Dict[str, Any],
+    params: dict[str, Any],
     full_df: pd.DataFrame,
     target_df: pd.DataFrame,
     root: Path,
@@ -457,7 +457,7 @@ def _write_component_cache(
             continue
         comp_key = _build_component_cache_key(cache_key, params, component)
         cache_path = _signal_component_cache_path(comp_key, root)
-        payload: Dict[str, Any] = {
+        payload: dict[str, Any] = {
             "schema": _SIGNAL_CACHE_SCHEMA_VERSION,
             "component": component,
             "n": len(full_df),
@@ -471,10 +471,10 @@ def _write_component_cache(
 
 def _load_component_cache(
     cache_key: _SignalCacheKey,
-    params: Dict[str, Any],
+    params: dict[str, Any],
     root: Path,
-) -> Optional[Dict[str, np.ndarray]]:
-    all_cols: Dict[str, np.ndarray] = {}
+) -> dict[str, np.ndarray] | None:
+    all_cols: dict[str, np.ndarray] = {}
     expected_n = int(cache_key[3])
     for component in _CACHE_COMPONENTS:
         comp_key = _build_component_cache_key(cache_key, params, component)
@@ -510,7 +510,7 @@ def _load_component_cache(
 
 def _rebuild_full_df_from_components(
     target_df: pd.DataFrame,
-    component_cols: Dict[str, np.ndarray],
+    component_cols: dict[str, np.ndarray],
 ) -> pd.DataFrame:
     full_df = target_df.copy(deep=True)
     for col in _BASE_OHLCV_COLS:
@@ -527,13 +527,13 @@ def _rebuild_full_df_from_components(
 
 
 def _build_signal_cache_key(
-    params: Dict[str, Any],
+    params: dict[str, Any],
     sym: str,
     tf: str,
     data_len: int,
     fingerprint: int,
 ) -> _SignalCacheKey:
-    signal_items: List[Tuple[str, Any]] = sorted(
+    signal_items: list[tuple[str, Any]] = sorted(
         (k, _normalize_key_value(v)) for k, v in params.items() if k not in _CACHE_PARAM_EXCLUDE
     )
     return (
@@ -552,7 +552,7 @@ def get_or_compute_signals(
     target_df: pd.DataFrame,
     strategy: UltimateSpotStrategy,
     *,
-    disk_cache_root: Optional[Path] = None,
+    disk_cache_root: Path | None = None,
 ) -> pd.DataFrame:
     global _CACHE_CLEANUP_DONE
     params = _cache_key_to_params(cache_key)

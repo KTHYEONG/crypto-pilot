@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -18,8 +17,8 @@ class BacktestEngineFastSpot:
         strategy,
         initial_balance: float = 1_000_000,
         merge_index_map=None,
-        precomputed_daily_df: Optional[pd.DataFrame] = None,
-        warmup_bars: Optional[int] = None,
+        precomputed_daily_df: pd.DataFrame | None = None,
+        warmup_bars: int | None = None,
         execution_start_idx: int = 0,
     ):
         self.hourly_df = hourly_df.copy(deep=False)
