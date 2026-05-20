@@ -400,7 +400,8 @@ def main() -> None:
 
         # [DATA] Intrabar-1m Sync for Selected Universe
         # 품질 검사 전에 수행하여, 데이터 부족으로 인한 품질 저하 문제를 해결할 기회를 제공합니다.
-        if OPT_FUTURES_CONFIG.get("FUTURES_EXECUTION_MODE") == "intrabar_1m":
+        is_intrabar = OPT_FUTURES_CONFIG.get("FUTURES_EXECUTION_MODE") == "intrabar_1m"
+        if is_intrabar and not pre_args.skip_data_sync:
             _logger.info(" [DATA] Syncing 1m data for %d universe symbols...", len(discovered_symbols))
             from src.domain.futures.data_loader import DataCollector
             collector = DataCollector()

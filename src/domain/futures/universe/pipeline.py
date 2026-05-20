@@ -478,7 +478,21 @@ def build_universe(
         generated_at_utc=datetime.now(tz=UTC).isoformat(),
         ledger_confidence=config.ledger_confidence,
     )
-    selected_columns = ["symbol", "tradeable_score", "rank", "role", "hysteresis_state"]
+    selected_columns = [
+        "symbol",
+        "tradeable_score",
+        "rank",
+        "role",
+        "hysteresis_state",
+        "adv_usdt_median",
+        "execution_cost_bps",
+        "funding_rate_8h",
+        "beta_vs_market",
+        "cluster_id",
+        "basis_annualized_mean",
+        "basis_vol",
+        "capacity_clip_usdt_list",
+    ]
     selected_columns.extend(
         [dwell_col for dwell_col in ("membership_days", "dwell_days") if dwell_col in s6.columns]
     )
@@ -516,6 +530,73 @@ def load_or_build_universe_snapshot(
     loaded = load_universe_snapshot(as_of=as_of, tf=tf, snapshot_root=snapshot_root)
     if loaded is not None:
         as_of_date = _to_date(as_of)
+        if not loaded.empty and "adv_usdt_median" not in loaded.columns:
+            # Join from ledger to restore metrics for backwards compatibility
+            # Only query physical columns in load_ledger_slice
+            physical_cols = (
+                "adv_usdt_median",
+                "funding_rate_8h",
+                "taker_fee_bps",
+                "half_spread_bps",
+                "impact_bps",
+                "tick_cost_bps",
+            )
+            try:
+                ledger_slice = load_ledger_slice(
+                    as_of=as_of_date,
+                    tf=tf,
+                    columns=physical_cols,
+                    symbols=tuple(loaded["symbol"].tolist()),
+                    ledger_path=ledger_path,
+                )
+                if not ledger_slice.empty:
+                    latest_ledger = (
+                        ledger_slice.sort_values(["symbol", "date", "knowledge_date"])
+                        .groupby("symbol", as_index=False)
+                        .tail(1)
+                    ).copy()
+                    
+                    # Compute execution_cost_bps from physical ledger metrics
+                    latest_ledger["execution_cost_bps"] = (
+                        2.0 * latest_ledger["taker_fee_bps"].fillna(0.0)
+                        + 2.0 * latest_ledger["half_spread_bps"].fillna(0.0)
+                        + latest_ledger["impact_bps"].fillna(0.0)
+                        + latest_ledger["tick_cost_bps"].fillna(0.0)
+                    )
+                    
+                    missing_cols = [
+                        c
+                        for c in (*physical_cols, "execution_cost_bps")
+                        if c in latest_ledger.columns and c not in loaded.columns
+                    ]
+                    if missing_cols:
+                        loaded = loaded.merge(
+                            latest_ledger[["symbol", *missing_cols]],
+                            on="symbol",
+                            how="left",
+                        )
+            except Exception as e:
+                _log.warning("Backwards compatible ledger join failed: %s", e)
+            
+            # Safely backfill all virtual/derived columns to avoid KeyError or 0.0 anomalies
+            fallback_defaults = {
+                "adv_usdt_median": 0.0,
+                "execution_cost_bps": 0.0,
+                "funding_rate_8h": 0.0,
+                "beta_vs_market": 0.0,
+                "cluster_id": -1,
+                "basis_annualized_mean": None,
+                "basis_vol": None,
+            }
+            for col, default_val in fallback_defaults.items():
+                if col not in loaded.columns:
+                    if default_val is None:
+                        loaded[col] = None
+                    else:
+                        loaded[col] = default_val
+            
+            if "capacity_clip_usdt_list" not in loaded.columns:
+                loaded["capacity_clip_usdt_list"] = [() for _ in range(len(loaded))]
         config = _normalize_cfg(cfg)
         manifest_hash = _compute_manifest_hash(
             as_of=as_of_date,
