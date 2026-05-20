@@ -16,8 +16,7 @@ class StrategyBase(ABC):
         raise NotImplementedError
 
     def get_required_warmup(self, freq: str = "daily") -> int:
-        """
-        Return required warmup bar count in the requested timeframe.
+        """Return required warmup bar count in the requested timeframe.
         freq='daily': daily-bar count (for strategies that run on daily data).
         freq='1h' or 'hourly': hourly-bar count (daily_bars * 24).
         freq='4h': 4h-bar count (daily_bars * 6).
@@ -41,8 +40,7 @@ def calculate_required_warmup_bars(
     min_bars: int = 300,
     safety_factor: int = 3,
 ) -> int:
-    """
-    Generic helper to estimate required warmup bars based on any key ending in '_PERIOD' or '_WINDOW'.
+    """Generic helper to estimate required warmup bars based on any key ending in '_PERIOD' or '_WINDOW'.
     This removes hardcoded dependencies on specific indicator names (ADX, HMA, etc.).
     """
     max_period = 0
@@ -59,8 +57,7 @@ def calculate_required_warmup_bars(
 
 
 class MasterStrategyBase(StrategyBase):
-    """
-    Abstract orchestration-tier strategy marker (Spot & Futures).
+    """Abstract orchestration-tier strategy marker (Spot & Futures).
 
     Subclasses define all signal/indicate logic via ``generate_signals``;
     no default HMA/ADX or other rule presets are injected here.
