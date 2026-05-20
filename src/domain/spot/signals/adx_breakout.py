@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, ClassVar, Dict
+from typing import Any, ClassVar
 
 import numpy as np
 import pandas as pd
@@ -17,13 +17,13 @@ from src.domain.spot.signals.registry import register_signal
 @register_signal
 class ADXBreakoutSignal:
     name: ClassVar[str] = "ADX_BREAKOUT"
-    param_space: ClassVar[Dict[str, Any]] = {
+    param_space: ClassVar[dict[str, Any]] = {
         "KC_PERIOD": {"type": "int", "low": 15, "high": 40, "step": 5},
         "KC_MULT": {"type": "float", "low": 0.5, "high": 2.0, "step": 0.25},
         "ADX_THRESHOLD": {"type": "float", "low": 15.0, "high": 35.0, "step": 5.0},
     }
 
-    def compute(self, df: pd.DataFrame, params: Dict[str, Any]) -> SignalOutput:
+    def compute(self, df: pd.DataFrame, params: dict[str, Any]) -> SignalOutput:
         kc_p = int(params.get("KC_PERIOD", 20))
         kc_m = float(params.get("KC_MULT", 2.0))
         adx_threshold = float(params.get("ADX_THRESHOLD", 20.0))

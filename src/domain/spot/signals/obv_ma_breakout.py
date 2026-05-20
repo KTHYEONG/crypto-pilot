@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, ClassVar, Dict
+from typing import Any, ClassVar
 
 import numpy as np
 import pandas as pd
@@ -13,13 +13,13 @@ from src.domain.spot.signals.registry import register_signal
 @register_signal
 class ObvMaBreakoutSignal:
     name: ClassVar[str] = "OBV_MA"
-    param_space: ClassVar[Dict[str, Any]] = {
+    param_space: ClassVar[dict[str, Any]] = {
         "OBV_WINSOR_SPAN": {"type": "int", "low": 36, "high": 60, "step": 6},
         "OBV_EMA_PERIOD": {"type": "int", "low": 14, "high": 30, "step": 2},
         "OBV_RANK_WINDOW": {"type": "int", "low": 14, "high": 30, "step": 2},
     }
 
-    def compute(self, df: pd.DataFrame, params: Dict[str, Any]) -> SignalOutput:
+    def compute(self, df: pd.DataFrame, params: dict[str, Any]) -> SignalOutput:
         wspan = int(params.get("OBV_WINSOR_SPAN", 48))
         ema_p = int(params.get("OBV_EMA_PERIOD", 20))
         rw = int(params.get("OBV_RANK_WINDOW", 20))

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, ClassVar, Dict
+from typing import Any, ClassVar
 
 import numpy as np
 import pandas as pd
@@ -13,13 +13,13 @@ from src.domain.spot.signals.registry import register_signal
 @register_signal
 class StochRSICrossSignal:
     name: ClassVar[str] = "STOCHRSI_CROSS"
-    param_space: ClassVar[Dict[str, Any]] = {
+    param_space: ClassVar[dict[str, Any]] = {
         "STOCHRSI_RSI_P": {"type": "int", "low": 10, "high": 21, "step": 2},
         "STOCHRSI_LEN": {"type": "int", "low": 10, "high": 20, "step": 2},
         "STOCHRSI_OS": {"type": "float", "low": 0.1, "high": 0.35, "step": 0.05},
     }
 
-    def compute(self, df: pd.DataFrame, params: Dict[str, Any]) -> SignalOutput:
+    def compute(self, df: pd.DataFrame, params: dict[str, Any]) -> SignalOutput:
         rsi_p = int(params.get("STOCHRSI_RSI_P", 14))
         st_len = int(params.get("STOCHRSI_LEN", 14))
         os_level = float(params.get("STOCHRSI_OS", 0.2))

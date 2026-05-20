@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 
 class FeatureFamily(str, Enum):
@@ -38,25 +38,25 @@ class DeployableUniverseReport:
     """Structured output after discovery + generalization gates."""
 
     archetype: SpotArchetypeContract = field(default_factory=SpotArchetypeContract)
-    deployable_symbols: List[str] = field(default_factory=list)
-    forbidden_regime_hints: List[str] = field(default_factory=list)
-    risk_band: Dict[str, float] = field(default_factory=dict)
-    loso_scores: Dict[str, float] = field(default_factory=dict)
-    stress_symbol_metrics: Dict[str, Dict[str, Any]] = field(default_factory=dict)
-    dsr: Optional[float] = None
-    psr_paths: Optional[float] = None
-    regime_coverage_ratio: Optional[float] = None
-    stability_ok: Optional[bool] = None
+    deployable_symbols: list[str] = field(default_factory=list)
+    forbidden_regime_hints: list[str] = field(default_factory=list)
+    risk_band: dict[str, float] = field(default_factory=dict)
+    loso_scores: dict[str, float] = field(default_factory=dict)
+    stress_symbol_metrics: dict[str, dict[str, Any]] = field(default_factory=dict)
+    dsr: float | None = None
+    psr_paths: float | None = None
+    regime_coverage_ratio: float | None = None
+    stability_ok: bool | None = None
     # Portfolio / deployment contract (shared-cash optimization)
     allocation_rule: str = "shared_cash_ranked_entries"
     ranking_rule: str = "slot_rank_score_cluster_weight"
     cash_state_rule: str = "idle_when_no_slot_or_no_signal"
-    max_concurrent_positions: Optional[int] = None
-    discovery_veto_passed: Optional[bool] = None
-    mean_path_terminal_wealth_ratio: Optional[float] = None
-    min_path_terminal_wealth_ratio: Optional[float] = None
+    max_concurrent_positions: int | None = None
+    discovery_veto_passed: bool | None = None
+    mean_path_terminal_wealth_ratio: float | None = None
+    min_path_terminal_wealth_ratio: float | None = None
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "archetype": {
                 "archetype_id": self.archetype.archetype_id,

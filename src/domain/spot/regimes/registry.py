@@ -1,15 +1,15 @@
 from __future__ import annotations
 
-from typing import Dict, Type, TypeVar
+from typing import TypeVar
 
 from src.domain.spot.regimes.base import IRegime
 
-REGIME_REGISTRY: Dict[str, IRegime] = {}
+REGIME_REGISTRY: dict[str, IRegime] = {}
 
 T = TypeVar("T")
 
 
-def register_regime(cls: Type[T]) -> Type[T]:
+def register_regime(cls: type[T]) -> type[T]:
     inst = cls()
     name = getattr(inst, "name", None)
     if not isinstance(name, str) or not name:

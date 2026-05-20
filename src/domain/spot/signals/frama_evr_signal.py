@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, ClassVar, Dict
+from typing import Any, ClassVar
 
 import numpy as np
 import pandas as pd
@@ -81,14 +81,14 @@ def compute_evr_zscore(
 @register_signal
 class FramaEvrSignal:
     name: ClassVar[str] = "FRAMA_EVR"
-    param_space: ClassVar[Dict[str, Any]] = {
+    param_space: ClassVar[dict[str, Any]] = {
         "FRAMA_PERIOD": {"type": "int", "low": 8, "high": 32, "step": 4},
         "EVR_WINDOW": {"type": "int", "low": 20, "high": 80, "step": 10},
         "EVR_Z_ENTRY": {"type": "float", "low": 0.5, "high": 2.0, "step": 0.25},
         "FRAMA_KILL_LAG": {"type": "int", "low": 2, "high": 8, "step": 1},
     }
 
-    def compute(self, df: pd.DataFrame, params: Dict[str, Any]) -> SignalOutput:
+    def compute(self, df: pd.DataFrame, params: dict[str, Any]) -> SignalOutput:
         frama_p = int(params.get("FRAMA_PERIOD", 16))
         evr_w = int(params.get("EVR_WINDOW", 40))
         evr_z_entry = float(params.get("EVR_Z_ENTRY", 1.0))

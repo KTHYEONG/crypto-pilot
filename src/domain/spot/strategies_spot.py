@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -18,9 +18,8 @@ _REGIME_OFF_EPS: float = 1e-9
 _SOFT_FULL_SPLIT: float = 0.85
 
 
-def merge_exit_family_params(params: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Biases sampled engine params toward exit-family intent (EXIT_FAMILY).
+def merge_exit_family_params(params: dict[str, Any]) -> dict[str, Any]:
+    """Biases sampled engine params toward exit-family intent (EXIT_FAMILY).
     Does not replace Optuna samples; tightens ranges per family.
     """
     p = dict(params)
@@ -47,8 +46,7 @@ def merge_exit_family_params(params: Dict[str, Any]) -> Dict[str, Any]:
 
 
 class SpotPipelineStrategy(PipelineStrategyBase):
-    """
-    Thin orchestrator: Signal + Regime + Sizing plugins → engine columns.
+    """Thin orchestrator: Signal + Regime + Sizing plugins → engine columns.
     Set `_portfolio_eval_ctx` to ``{"data_maps": ..., "symbols": ..., "tf": ...}`` for
     multi-symbol regime (e.g. market breadth) during portfolio optimization.
     """
@@ -56,12 +54,12 @@ class SpotPipelineStrategy(PipelineStrategyBase):
     INDICATORS = _SPOT_INDICATORS
     ENTRY_SHIFT = False
 
-    _portfolio_eval_ctx: Optional[Dict[str, Any]] = None
+    _portfolio_eval_ctx: dict[str, Any] | None = None
 
     def _compute_warmup_bars(self) -> int:
         return 300
 
-    def _regime_data_maps(self, df: pd.DataFrame) -> Dict[str, Dict[str, Any]]:
+    def _regime_data_maps(self, df: pd.DataFrame) -> dict[str, dict[str, Any]]:
         ctx = self._portfolio_eval_ctx
         if ctx is not None and isinstance(ctx.get("data_maps"), dict):
             return ctx["data_maps"]
@@ -127,7 +125,7 @@ class SpotPipelineStrategy(PipelineStrategyBase):
         out = self.apply_sizing(df, eff_params)
         return self._attach_exit_overlay(out, eff_params)
 
-    def _attach_exit_overlay(self, df: pd.DataFrame, params: Dict[str, Any]) -> pd.DataFrame:
+    def _attach_exit_overlay(self, df: pd.DataFrame, params: dict[str, Any]) -> pd.DataFrame:
         close = df["close"].to_numpy(dtype=np.float64)
         bb_per = int(params.get("BB_EXIT_PERIOD", 20))
         bb_std_n = float(params.get("BB_EXIT_STD", 2.0))
@@ -142,7 +140,7 @@ class SpotPipelineStrategy(PipelineStrategyBase):
         df["trail_tighten_flag"] = (rsi_series > th).astype(np.float64)
         return df
 
-    def apply_sizing(self, df: pd.DataFrame, params: Dict[str, Any]) -> pd.DataFrame:
+    def apply_sizing(self, df: pd.DataFrame, params: dict[str, Any]) -> pd.DataFrame:
         sm = str(params.get("SIZING_METHOD", "vol_target")).lower()
         sizer = SIZING_REGISTRY.get(sm) or SIZING_REGISTRY["vol_target"]
         df["garch_kelly_f"] = sizer.compute(df, params)

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, ClassVar, Dict
+from typing import Any, ClassVar
 
 import numpy as np
 
@@ -58,12 +58,12 @@ def _supertrend_line_trend(
 @register_signal
 class SuperTrendSignal:
     name: ClassVar[str] = "SUPERTREND"
-    param_space: ClassVar[Dict[str, Any]] = {
+    param_space: ClassVar[dict[str, Any]] = {
         "ST_ATR_PERIOD": {"type": "int", "low": 7, "high": 21, "step": 7},
         "ST_MULT": {"type": "float", "low": 1.5, "high": 4.0, "step": 0.5},
     }
 
-    def compute(self, df: pd.DataFrame, params: Dict[str, Any]) -> SignalOutput:
+    def compute(self, df: pd.DataFrame, params: dict[str, Any]) -> SignalOutput:
         p = int(params.get("ST_ATR_PERIOD", 10))
         mult = float(params.get("ST_MULT", 3.0))
         high = df["high"].to_numpy(dtype=np.float64)

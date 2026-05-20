@@ -1,12 +1,11 @@
-"""
-Numba-accelerated shared-cash portfolio loop (packed 2D arrays).
+"""Numba-accelerated shared-cash portfolio loop (packed 2D arrays).
 Mirrors run_shared_cash_multi_symbol in portfolio_shared_cash.py.
 """
 
 from __future__ import annotations
 
 import os
-from typing import Dict, List, Optional, Tuple, cast
+from typing import cast
 
 import numpy as np
 from numba import njit
@@ -16,8 +15,8 @@ from config.settings import SPOT_SLIPPAGE_RATE, UPBIT_SPOT_TAKER_FEE_RATE
 
 
 def _max_position_pct_by_symbol(
-    symbols_ordered: List[str],
-    params: Dict[str, object],
+    symbols_ordered: list[str],
+    params: dict[str, object],
 ) -> np.ndarray:
     """Per-symbol position cap: anchor / liquid_major / trending_alt from OPT_SPOT_CONFIG."""
     max_pos = float(params.get("MAX_POSITION_PCT", 0.25))
@@ -30,8 +29,8 @@ def _max_position_pct_by_symbol(
     cap_liquid = min(max_pos, float(liq)) if liq is not None else base_cap
     trd = params.get("MAX_CAP_TRENDING_ALT")
     cap_trend = min(max_pos, float(trd)) if trd is not None else base_cap
-    cluster_map: Dict[str, str] = cast(
-        Dict[str, str], OPT_SPOT_CONFIG.get("SPOT_SYMBOL_CLUSTER", {})
+    cluster_map: dict[str, str] = cast(
+        dict[str, str], OPT_SPOT_CONFIG.get("SPOT_SYMBOL_CLUSTER", {})
     )
     n_sym = len(symbols_ordered)
     out = np.empty(n_sym, dtype=np.float64)
@@ -117,7 +116,7 @@ def _run_shared_cash_packed_numba(
     slippage_ref_adv_krw: float,
     concurrency_penalty_scale: float,
     max_position_pct_by_sym: np.ndarray,
-) -> Tuple[np.ndarray, float, int, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, float, int, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     n_sym, n = close.shape
     balance = initial_balance
     equity_curve = np.zeros(n, dtype=np.float64)
@@ -606,17 +605,17 @@ def _run_shared_cash_packed_numba(
 
 
 def run_packed_from_symbol_arrays(
-    symbol_arrays: Dict[str, Dict[str, np.ndarray]],
-    symbols_ordered: List[str],
-    params: Dict[str, object],
+    symbol_arrays: dict[str, dict[str, np.ndarray]],
+    symbols_ordered: list[str],
+    params: dict[str, object],
     *,
     initial_balance: float,
     max_concurrent_positions: int,
-    rank_scores: Optional[Dict[str, np.ndarray]],
+    rank_scores: dict[str, np.ndarray] | None,
     warmup_bars: int,
     execution_start_idx: int,
     concurrency_penalty_scale: float = 1.0,
-) -> Tuple[np.ndarray, float, int]:
+) -> tuple[np.ndarray, float, int]:
     """Build packed arrays and run numba kernel."""
     n = len(symbol_arrays[symbols_ordered[0]]["close"])
     n_sym = len(symbols_ordered)

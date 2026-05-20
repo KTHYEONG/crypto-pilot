@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import math
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 import numpy as np
 import optuna
@@ -64,13 +64,13 @@ def spot_frozen_trial_constraints(trial: optuna.trial.FrozenTrial) -> tuple[floa
 
 
 def compute_embargo_bars(tf: str, longest_indicator_period: int = 150) -> int:
-    fixed_min: Dict[str, int] = {"4h": 24}
-    ratio_map: Dict[str, float] = {"4h": 0.05}
+    fixed_min: dict[str, int] = {"4h": 24}
+    ratio_map: dict[str, float] = {"4h": 0.05}
     ratio: float = ratio_map.get(tf, 0.03)
     return max(fixed_min.get(tf, 2), int(longest_indicator_period * ratio))
 
 
-EMBARGO_BARS: Dict[str, int] = {
+EMBARGO_BARS: dict[str, int] = {
     "4h": compute_embargo_bars("4h"),
 }
 
@@ -83,8 +83,7 @@ _SPOT_OBJECTIVE_PATH_CV_PENALTY: float = 0.75  # Path CV penalty (Generalized Ke
 
 
 def _compute_path_gmgr_high_moments(equity: np.ndarray) -> float:
-    """
-    Geometric mean growth proxy with high-moment correction on log returns:
+    """Geometric mean growth proxy with high-moment correction on log returns:
     r_mean - σ²/2 + S·σ³/6 - K·σ⁴/24. Returns winsorized at [p1, p99].
     """
     eq = np.asarray(equity, dtype=np.float64).ravel()
@@ -120,11 +119,11 @@ def _compute_ulcer_index(equity: np.ndarray) -> float:
 
 
 def _cpcv_path_compound_raw_log_tw(
-    segments: List[Tuple[int, int]],
+    segments: list[tuple[int, int]],
     *,
-    prebuilt_full_arrays: Dict[str, Dict[str, np.ndarray]],
-    symbols: List[str],
-    params: Dict[str, Any],
+    prebuilt_full_arrays: dict[str, dict[str, np.ndarray]],
+    symbols: list[str],
+    params: dict[str, Any],
     is_off: int,
     ref_df: pd.DataFrame,
     max_slots: int,
@@ -132,7 +131,7 @@ def _cpcv_path_compound_raw_log_tw(
     concurrency_penalty_scale: float = 1.0,
 ) -> float:
     """Sum of raw log terminal-wealth ratios per segment (matches objective_spot CPCV path metric)."""
-    seg_raw_log_tw: List[float] = []
+    seg_raw_log_tw: list[float] = []
     running_balance = float(SPOT_INITIAL_BALANCE)
     for test_start, test_end in segments:
         abs_start = is_off + int(test_start)
@@ -141,8 +140,8 @@ def _cpcv_path_compound_raw_log_tw(
         slice_end = min(len(ref_df), abs_end)
         if slice_end - slice_start < 5:
             continue
-        symbol_arrays: Dict[str, Dict[str, np.ndarray]] = {}
-        rank_scores: Dict[str, np.ndarray] = {}
+        symbol_arrays: dict[str, dict[str, np.ndarray]] = {}
+        rank_scores: dict[str, np.ndarray] = {}
         for sym in symbols:
             symbol_arrays[sym] = _slice_symbol_arrays_view(
                 prebuilt_full_arrays[sym], slice_start, slice_end
@@ -179,17 +178,17 @@ def _cpcv_path_compound_raw_log_tw(
 
 def objective_spot(
     trial: optuna.Trial,
-    data_maps: Dict[str, Dict[str, Any]],
-    symbols: List[str],
+    data_maps: dict[str, dict[str, Any]],
+    symbols: list[str],
     tf_target: str,
     *,
-    space: Dict[str, Dict[str, Any]],
+    space: dict[str, dict[str, Any]],
     mode: str = "single",
-    project_root: Optional[str] = None,
-    prebuilt_cpcv_bundle: Optional[Tuple[List[CPCVPath], int, int]] = None,
-    signal_disk_cache_root: Optional[Path] = None,
+    project_root: str | None = None,
+    prebuilt_cpcv_bundle: tuple[list[CPCVPath], int, int] | None = None,
+    signal_disk_cache_root: Path | None = None,
 ) -> float:
-    params: Dict[str, Any] = suggest_params_spot(trial, space, tf_target)
+    params: dict[str, Any] = suggest_params_spot(trial, space, tf_target)
     tf: str = tf_target
     strategy: UltimateSpotStrategy = UltimateSpotStrategy(name="OptSpot", params=params)
 
@@ -211,15 +210,15 @@ def objective_spot(
         raise optuna.TrialPruned()
     n_independent_paths = max(2, nb_cpcv // k_cpcv)
 
-    cache_root: Optional[Path] = signal_disk_cache_root
+    cache_root: Path | None = signal_disk_cache_root
     if cache_root is None and project_root is not None:
         cache_root = Path(project_root) / ".spot_signal_cache"
 
     strategy._portfolio_eval_ctx = {"data_maps": data_maps, "symbols": list(symbols), "tf": tf}
     try:
-        full_signal_dfs: Dict[str, pd.DataFrame] = {}
+        full_signal_dfs: dict[str, pd.DataFrame] = {}
         for sym in symbols:
-            target_df_full: Optional[pd.DataFrame] = data_maps.get(sym, {}).get(tf)
+            target_df_full: pd.DataFrame | None = data_maps.get(sym, {}).get(tf)
             if target_df_full is None or target_df_full.empty:
                 continue
             fp = _dataset_fingerprint_from_df(target_df_full)
@@ -233,7 +232,7 @@ def objective_spot(
         if len(full_signal_dfs) != len(symbols):
             raise optuna.TrialPruned()
 
-        prebuilt_full_arrays: Dict[str, Dict[str, np.ndarray]] = {}
+        prebuilt_full_arrays: dict[str, dict[str, np.ndarray]] = {}
         for sym in symbols:
             target_df_full = data_maps.get(sym, {}).get(tf)
             if target_df_full is None or target_df_full.empty:
@@ -263,34 +262,34 @@ def objective_spot(
         sortino_ratio_cap = float(cfg.get("SPOT_OBJECTIVE_SORTINO_RATIO_CAP", 1.0e6))
         path_sortino_clip = float(cfg.get("SPOT_OBJECTIVE_PATH_SORTINO_CLIP", 500.0))
 
-        path_compound_log_tw: List[float] = []
-        path_compound_raw_log_tw: List[float] = []
-        path_compound_tw_ratio: List[float] = []
-        path_sortino_vals: List[float] = []
-        path_worst_mdd: List[float] = []
-        path_max_cvar: List[float] = []
-        path_trades: List[int] = []
-        path_tail_ratios: List[float] = []
-        path_pfs: List[float] = []
-        path_gmgr: List[float] = []
-        path_ui: List[float] = []
-        path_calmars: List[float] = []
-        path_cagrs: List[float] = []
-        path_regime_rates: List[float] = []
+        path_compound_log_tw: list[float] = []
+        path_compound_raw_log_tw: list[float] = []
+        path_compound_tw_ratio: list[float] = []
+        path_sortino_vals: list[float] = []
+        path_worst_mdd: list[float] = []
+        path_max_cvar: list[float] = []
+        path_trades: list[int] = []
+        path_tail_ratios: list[float] = []
+        path_pfs: list[float] = []
+        path_gmgr: list[float] = []
+        path_ui: list[float] = []
+        path_calmars: list[float] = []
+        path_cagrs: list[float] = []
+        path_regime_rates: list[float] = []
         total_sym_pnl = np.zeros(len(symbols), dtype=np.float64)
 
         for path_idx, path in enumerate(cpcv_paths):
-            seg_log_tw: List[float] = []
-            seg_raw_log_tw: List[float] = []
-            seg_tw_ratio: List[float] = []
-            seg_mdds: List[float] = []
-            seg_cvars: List[float] = []
-            seg_pfs: List[float] = []
+            seg_log_tw: list[float] = []
+            seg_raw_log_tw: list[float] = []
+            seg_tw_ratio: list[float] = []
+            seg_mdds: list[float] = []
+            seg_cvars: list[float] = []
+            seg_pfs: list[float] = []
             path_total_trades = 0
             path_regime_on = 0
             path_regime_len = 0
             running_balance = float(SPOT_INITIAL_BALANCE)
-            path_eq_chunks: List[np.ndarray] = []
+            path_eq_chunks: list[np.ndarray] = []
             span_path_days = 0.0
             for test_start, test_end in path:
                 abs_start = is_off + int(test_start)
@@ -300,8 +299,8 @@ def objective_spot(
                 if slice_end - slice_start < 5:
                     continue
                 span_path_days += _span_days_ref_slice(ref_df, abs_start, abs_end)
-                symbol_arrays: Dict[str, Dict[str, np.ndarray]] = {}
-                rank_scores: Dict[str, np.ndarray] = {}
+                symbol_arrays: dict[str, dict[str, np.ndarray]] = {}
+                rank_scores: dict[str, np.ndarray] = {}
                 for sym in symbols:
                     symbol_arrays[sym] = _slice_symbol_arrays_view(
                         prebuilt_full_arrays[sym], slice_start, slice_end
@@ -640,8 +639,8 @@ def objective_spot(
             slice_rs = max(0, recent_start - 1)
             slice_re = min(len(ref_df), recent_end)
             if slice_re - slice_rs >= 5:
-                symbol_arrays_fwd: Dict[str, Dict[str, np.ndarray]] = {}
-                rank_scores_fwd: Dict[str, np.ndarray] = {}
+                symbol_arrays_fwd: dict[str, dict[str, np.ndarray]] = {}
+                rank_scores_fwd: dict[str, np.ndarray] = {}
                 for sym_fwd in symbols:
                     symbol_arrays_fwd[sym_fwd] = _slice_symbol_arrays_view(
                         prebuilt_full_arrays[sym_fwd], slice_rs, slice_re

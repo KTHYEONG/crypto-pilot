@@ -1,15 +1,15 @@
 from __future__ import annotations
 
-from typing import Dict, Type, TypeVar
+from typing import TypeVar
 
 from src.domain.spot.sizing.base import ISizing
 
-SIZING_REGISTRY: Dict[str, ISizing] = {}
+SIZING_REGISTRY: dict[str, ISizing] = {}
 
 T = TypeVar("T")
 
 
-def register_sizing(cls: Type[T]) -> Type[T]:
+def register_sizing(cls: type[T]) -> type[T]:
     inst = cls()
     name = getattr(inst, "name", None)
     if not isinstance(name, str) or not name:

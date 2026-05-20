@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, ClassVar, Dict
+from typing import Any, ClassVar
 
 import numpy as np
 import pandas as pd
@@ -13,14 +13,14 @@ from src.domain.spot.signals.registry import register_signal
 @register_signal
 class MacdHistDivSignal:
     name: ClassVar[str] = "MACD_HIST_DIV"
-    param_space: ClassVar[Dict[str, Any]] = {
+    param_space: ClassVar[dict[str, Any]] = {
         "MACD_FAST": {"type": "int", "low": 8, "high": 14, "step": 2},
         "MACD_SLOW": {"type": "int", "low": 20, "high": 30, "step": 2},
         "MACD_SIGNAL": {"type": "int", "low": 7, "high": 11, "step": 1},
         "MACD_DIV_LAG": {"type": "int", "low": 3, "high": 8, "step": 1},
     }
 
-    def compute(self, df: pd.DataFrame, params: Dict[str, Any]) -> SignalOutput:
+    def compute(self, df: pd.DataFrame, params: dict[str, Any]) -> SignalOutput:
         fast_p = int(params.get("MACD_FAST", 12))
         slow_p = int(params.get("MACD_SLOW", 26))
         sig_p = int(params.get("MACD_SIGNAL", 9))
