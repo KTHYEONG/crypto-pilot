@@ -6,10 +6,7 @@
 
 from __future__ import annotations
 
-import math
-
 import numpy as np
-import pytest
 
 from src.domain.futures.optimization.validation import wf_path_ergodicity_deviation_pct
 
@@ -46,7 +43,7 @@ class TestErgodicityGate:
         assert dev_pct > 15.0, f"높은 변동성에서 deviation이 커야 함: {dev_pct:.2f}%"
 
     def test_deviation_formula_known_example(self) -> None:
-        """deviation 정의 수식 검증 (known example).
+        """Deviation 정의 수식 검증 (known example).
 
         TW = [1.0, 0.5]: mean = 0.75
         max|TW_i - mean| = 0.25
