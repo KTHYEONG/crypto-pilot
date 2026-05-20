@@ -10,14 +10,25 @@ from src.domain.futures.optimization.validation import wf_path_ergodicity_deviat
 
 @dataclass(frozen=True)
 class WalkForwardConfig:
-    """User thresholds for multi-leg walk-forward on OOS."""
+    """User thresholds for multi-leg walk-forward on OOS.
 
-    n_legs: int = 10
+    v3.0 상수 기준:
+        n_legs: 8 (기존 10 → 8)
+        min_positive_leg_ratio: 0.55 (기존 0.70 → 0.55)
+        worst_leg_tw_floor: 0.85 (기존 0.95 → 0.85)
+        mean_leg_tw_floor: 1.015 (기존 1.00 → 1.015)
+        dsr_floor: 0.60 (신규)
+        funding_drag_ceiling: 0.30 (신규)
+    """
+
+    n_legs: int = 8
     purge_bars: int = 24
-    min_positive_leg_ratio: float = 0.70
-    worst_leg_tw_floor: float = 0.95
-    mean_leg_tw_floor: float = 1.00
+    min_positive_leg_ratio: float = 0.55
+    worst_leg_tw_floor: float = 0.85
+    mean_leg_tw_floor: float = 1.015
     ergodicity_guideline_pct: float = 15.0
+    dsr_floor: float = 0.60
+    funding_drag_ceiling: float = 0.30
     ergodicity_hard_gate_enabled: bool = True
     # When True, tile OOS using the same anchored WF geometry as ML objective (IS-pool + embargo).
     use_anchored_awf_geometry: bool = False

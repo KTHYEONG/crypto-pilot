@@ -6,6 +6,7 @@ Expected return ``mu`` is in **simple return per bar** (same units as bar-to-bar
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 from typing import Any
 
 import numba
@@ -67,12 +68,29 @@ def _vol_ann_from_per_bar_sigma(sigma_port_bar: float, bars_per_year: float) -> 
     return float(sigma_port_bar * math.sqrt(max(bars_per_year, 1e-9)))
 
 
+KELLY_FRACTION: float = 0.25  # Fractional Kelly — 변경 금지
+
+
 def _kelly_raw(
     mu: np.ndarray, sigma_diag: np.ndarray, *, f_kelly_max: float, eps: float = 1e-12
 ) -> np.ndarray:
     var = np.maximum(sigma_diag**2, eps)
     f = mu / var
     return np.clip(f, -abs(f_kelly_max), abs(f_kelly_max))
+
+
+def _kelly_scaled(
+    mu: np.ndarray,
+    sigma_diag: np.ndarray,
+    *,
+    f_kelly_max: float,
+) -> np.ndarray:
+    """Fractional Kelly weight = _kelly_raw × KELLY_FRACTION.
+
+    KELLY_FRACTION은 모듈 상수(0.25)이며 외부 주입 불가.
+    """
+    raw = _kelly_raw(mu, sigma_diag, f_kelly_max=f_kelly_max)
+    return raw * KELLY_FRACTION
 
 
 def _apply_ls_balance(w: np.ndarray, *, lo: float = 0.5, hi: float = 2.0) -> np.ndarray:
@@ -630,3 +648,138 @@ def portfolio_weight_params_from_optuna(
             )
         ),
     }
+
+
+# ---------------------------------------------------------------------------
+# Phase 5: 5-cap 투영 및 minNotional 양자화
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class PortfolioCaps:
+    """5종 포트폴리오 cap 제약.
+
+    Attributes:
+        gross: Σ|w_i| ≤ gross.
+        per_symbol: |w_i| ≤ per_symbol (각 심볼 개별 cap).
+        net: |Σw_i| ≤ net.
+        beta: |w @ btc_beta| ≤ beta.
+        target_ann_vol: 연율화 변동성 target (vol scaling 기준).
+    """
+
+    gross: float = 3.0
+    per_symbol: float = 0.10
+    net: float = 0.30
+    beta: float = 0.50
+    target_ann_vol: float = 0.20
+
+
+def project_all_caps(
+    w: np.ndarray,
+    btc_beta: np.ndarray,
+    sigma_port: float,
+    bars_per_year: float,
+    caps: PortfolioCaps = PortfolioCaps(),
+) -> np.ndarray:
+    """5-cap 투영: gross, per_symbol, net, beta, vol_target.
+
+    각 cap을 순서대로 적용하는 iterative projection.
+
+    Args:
+        w: 초기 weight vector, shape [N].
+        btc_beta: 심볼별 BTC beta, shape [N].
+        sigma_port: 1-bar realized 포트폴리오 vol.
+        bars_per_year: 연율화 factor.
+        caps: PortfolioCaps 제약.
+
+    Returns:
+        투영된 weight vector, shape [N].
+    """
+    out = np.asarray(w, dtype=np.float64).copy()
+    n = int(out.size)
+    if n == 0:
+        return out
+
+    beta_arr = np.asarray(btc_beta, dtype=np.float64).ravel()
+    if beta_arr.size != n:
+        beta_arr = np.zeros(n, dtype=np.float64)
+
+    # Cap 1: per_symbol clipping
+    out = np.clip(out, -caps.per_symbol, caps.per_symbol)
+
+    # Cap 2: gross cap (L1 norm)
+    for _ in range(20):
+        gross = float(np.sum(np.abs(out)))
+        if gross <= caps.gross + 1e-9:
+            break
+        out = out * (caps.gross / gross)
+        # per_symbol 재적용
+        out = np.clip(out, -caps.per_symbol, caps.per_symbol)
+
+    # Cap 3: net cap (signed sum)
+    net = float(np.sum(out))
+    if abs(net) > caps.net + 1e-9:
+        # net 초과분을 비례 축소
+        excess = abs(net) - caps.net
+        if abs(net) > 1e-12:
+            correction = np.sign(net) * excess / n
+            out = out - correction
+        # per_symbol 재적용
+        out = np.clip(out, -caps.per_symbol, caps.per_symbol)
+
+    # Cap 4: beta cap
+    beta_exp = float(np.dot(out, beta_arr))
+    if abs(beta_exp) > caps.beta + 1e-9:
+        # beta 초과분을 beta 방향으로 축소
+        scale = caps.beta / abs(beta_exp)
+        out = out * scale
+
+    # Cap 5: vol target scaling
+    ann_vol = float(sigma_port) * math.sqrt(max(float(bars_per_year), 1e-9))
+    if ann_vol > 1e-12:
+        vol_scale = caps.target_ann_vol / ann_vol
+        out = out * min(vol_scale, 1.0)  # 축소만 허용 (확대 금지)
+
+    # 최종 per_symbol 재확인
+    out = np.clip(out, -caps.per_symbol, caps.per_symbol)
+
+    return out
+
+
+def quantize_weights(
+    w: np.ndarray,
+    equity: float,
+    prices: np.ndarray,
+    step_sizes: np.ndarray,
+    min_notional: float = 20.0,
+) -> np.ndarray:
+    """minNotional 및 step_size 기반 weight 양자화.
+
+    Args:
+        w: 비중 벡터, shape [N].
+        equity: 현재 계좌 자산 (USDT).
+        prices: 심볼별 현재가, shape [N].
+        step_sizes: 심볼별 step size (exchangeInfo), shape [N].
+        min_notional: 최소 notional (기본 20.0 USDT).
+
+    Returns:
+        양자화된 비중 벡터, shape [N].
+        qty = floor(w * equity / (price * step_size)) * step_size
+        notional < min_notional → qty = 0
+        return qty * price / equity
+    """
+    w_arr = np.asarray(w, dtype=np.float64)
+    p_arr = np.asarray(prices, dtype=np.float64)
+    s_arr = np.asarray(step_sizes, dtype=np.float64)
+    eq = float(equity)
+
+    # step_size 양자화
+    raw_qty = w_arr * eq / np.where(p_arr * s_arr > 1e-15, p_arr * s_arr, 1e-15)
+    qty = np.floor(np.abs(raw_qty)) * s_arr * np.sign(w_arr)
+
+    # minNotional 필터
+    notional = np.abs(qty) * p_arr
+    qty = np.where(notional < min_notional, 0.0, qty)
+
+    # 비중으로 재변환
+    return qty * p_arr / eq
