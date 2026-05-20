@@ -73,4 +73,4 @@ Follow this structure only for tasks involving code generation or structural cha
         - `src/execution/opt_main_*.py` (Optimization Execution Engines)
         - `src/execution/trader_*.py` (Live Trading & Execution Engines)
     - **Filename Regex Pattern**: `src/.*(engine|portfolio|metrics|data_collector|backtest|alpha|pipeline|optimizer|universe|loader).*`
-- **Application Instruction**: When the trigger is activated, the agent prioritizes and inherits the quant-specific workflow (`<quant_plan>` -> `<quant_compute>` -> `<quant_risk>`), Zero-Loop / JIT Compilation / Walk-forward Time-Series Validation principles defined in [quant.md](file:///.agents/rules/quant.md) over the general guidelines in this document (`AGENTS.md`).
+- **Application Instruction**: When the trigger is activated, the agent prioritizes and inherits the quant-specific workflow, constraints, and formatting defined in **6. Output Modes & Templates (Micro/Standard/Full)**, Zero-Loop / JIT Compilation / Walk-forward Time-Series Validation principles defined in [quant.md](file:///.agents/rules/quant.md) over the general guidelines in this document (`AGENTS.md`).
