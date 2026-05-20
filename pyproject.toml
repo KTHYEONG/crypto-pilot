@@ -99,6 +99,13 @@ addopts = "-ra -q"
 markers = [
     "integration: Binance API / 외부 네트워크가 필요한 통합 테스트",
 ]
+filterwarnings = [
+    "ignore::optuna.exceptions.ExperimentalWarning",
+    "ignore:.*restart_strategy.*:FutureWarning:optuna.*",
+    "ignore::FutureWarning:optuna.*",
+    "ignore::RuntimeWarning:numpy.*",
+    "ignore::RuntimeWarning:scipy.*",
+]
 
 [dependency-groups]
 dev = [
