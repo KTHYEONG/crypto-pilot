@@ -10,7 +10,8 @@ from typing import Any, cast
 
 import numpy as np
 import pandas as pd
-from scipy.stats import skew as _scipy_skew, kurtosis as _scipy_kurtosis
+from scipy.stats import kurtosis as _scipy_kurtosis
+from scipy.stats import skew as _scipy_skew
 
 _logger = logging.getLogger(__name__)
 _LONG_SLOT_COL_RE = re.compile(r"^alpha_long_(\d{2})$")
@@ -479,6 +480,7 @@ def filter_alpha_components(
 
         Returns:
             held-out symbol 집합에서 계산된 mean IC.
+
         """
         symbols = list(u_c.columns)
         if len(symbols) < 5:

@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import inspect
-from typing import Any
+import warnings
+from typing import Any, cast
 
 import optuna
 
 from config.opt_config import OPT_FUTURES_CONFIG
+
+# Optuna Experimental Warning suppression at code level
+warnings.filterwarnings("ignore", category=optuna.exceptions.ExperimentalWarning)
 
 
 def build_phase_study_name(base_study_name: str, phase: str) -> str:
@@ -236,9 +240,9 @@ def build_phase_a2_sampler(seed: int) -> optuna.samplers.BaseSampler:
             sig = inspect.signature(BoTorchSampler.__init__)
             if "constraints_func" in sig.parameters:
                 kwargs["constraints_func"] = phase_a2_constraints
-        except Exception:
+        except Exception:  # noqa: S110
             pass
-        return BoTorchSampler(**kwargs)
+        return cast(optuna.samplers.BaseSampler, BoTorchSampler(**kwargs))
     except Exception:
         return optuna.samplers.TPESampler(
             seed=seed,

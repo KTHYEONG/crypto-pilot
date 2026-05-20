@@ -5,7 +5,6 @@ import os
 import re
 from dataclasses import dataclass
 from decimal import ROUND_FLOOR, Decimal
-from typing import Optional
 
 import numpy as np
 import optuna
@@ -31,8 +30,7 @@ _OPTUNA_MYSQL_TABLES: tuple[str, ...] = (
 
 
 def calc_ulcer_index_from_equity(equity_curve: np.ndarray) -> float:
-    """
-    Calculate Ulcer Index: sqrt(mean(drawdown_pct^2)).
+    """Calculate Ulcer Index: sqrt(mean(drawdown_pct^2)).
     Input equity_curve is absolute balance values.
     """
     if equity_curve.size < 2:
@@ -138,7 +136,7 @@ def reclaim_mysql_space(storage_url: str) -> None:
         _logger.warning("reclaim_mysql_space: connection failed: %s", exc)
 
 
-def get_db_size_mb(storage_url: str, db_name: Optional[str] = None) -> float:
+def get_db_size_mb(storage_url: str, db_name: str | None = None) -> float:
     """Return current MySQL schema size in MB from ``information_schema``.
 
     Args:
@@ -147,6 +145,7 @@ def get_db_size_mb(storage_url: str, db_name: Optional[str] = None) -> float:
 
     Returns:
         Size in MB, or ``0.0`` on error.
+
     """
     if not storage_url.startswith("mysql"):
         return 0.0
@@ -334,8 +333,7 @@ OBJECTIVE_CFG = _load_objective_config()
 
 
 def suggest_params(trial, search_space):
-    """
-    Generate trial parameters from search space with conditional dependency pruning.
+    """Generate trial parameters from search space with conditional dependency pruning.
     Only suggests parameters that are actually used by the selected strategy configuration.
 
     Efficiency Gain: 60~70% reduction in search space by skipping irrelevant parameters.
@@ -386,8 +384,7 @@ def suggest_params(trial, search_space):
         raise ValueError(f"Unsupported spec type: {typ} for {key}")
 
     def _suggest_timeframe_bounded_holding(spec):
-        """
-        Conditionally bound MAX_HOLDING_BARS by timeframe.
+        """Conditionally bound MAX_HOLDING_BARS by timeframe.
         This prevents structurally-low-frequency combinations from dominating spot search.
         """
         # Suggest from a single static distribution first (warning-safe),
@@ -727,8 +724,7 @@ def suggest_params(trial, search_space):
 
 
 def soft_sigmoid(x, L, k, x0):
-    """
-    Soft-Sigmoid mapping to handle diminishing returns without hard caps.
+    """Soft-Sigmoid mapping to handle diminishing returns without hard caps.
     L: Maximum value (Asymptote)
     k: Steepness
     x0: Midpoint (Center of the S-curve)
@@ -742,8 +738,7 @@ def soft_sigmoid(x, L, k, x0):
 
 
 def _smooth_gate(value, center, scale):
-    """
-    Smooth gate in [0, 1] to avoid hard discontinuities in optimization landscape.
+    """Smooth gate in [0, 1] to avoid hard discontinuities in optimization landscape.
     """
     safe_scale = max(float(scale), 1e-9)
     z = (float(value) - float(center)) / safe_scale
@@ -752,8 +747,7 @@ def _smooth_gate(value, center, scale):
 
 
 def _asinh_score(value, scale, clip_abs):
-    """
-    Anti-saturation transform: slower saturation than tanh, better rank resolution in tails.
+    """Anti-saturation transform: slower saturation than tanh, better rank resolution in tails.
     """
     safe_scale = max(float(scale), 1e-9)
     transformed = np.arcsinh(float(value) / safe_scale)
@@ -761,8 +755,7 @@ def _asinh_score(value, scale, clip_abs):
 
 
 def _blend_gates_with_floor(gates, weights, gate_floor):
-    """
-    Conservative-bias mitigation:
+    """Conservative-bias mitigation:
     Instead of multiplicative collapse, use floor + weighted average.
     """
     g = np.array(gates, dtype=np.float64)
@@ -785,8 +778,7 @@ def calculate_score(
     timeframe=None,
     min_trades_override=None,
 ):
-    """
-    Overfitting-resistant objective (continuous-form):
+    """Overfitting-resistant objective (continuous-form):
     score = C(activity, consistency, Kelly, side-coverage) * (Growth + Quality - Risk)
 
     Design goals:
@@ -1049,8 +1041,7 @@ def calculate_score(
 
 
 def compute_segment_merge_index(hourly_df: pd.DataFrame, daily_df: pd.DataFrame) -> np.ndarray:
-    """
-    Build merge index for a sliced segment so engine can use fast index mapping.
+    """Build merge index for a sliced segment so engine can use fast index mapping.
     """
     hourly_days = (
         pd.to_datetime(hourly_df["datetime"]).dt.normalize().values.astype("datetime64[ns]")

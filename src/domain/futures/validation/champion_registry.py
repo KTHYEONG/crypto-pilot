@@ -7,6 +7,31 @@ from typing import Any
 
 
 @dataclass(frozen=True)
+class ChampionMetricsV3:
+    """v3.0 multi-dimensional benchmark metrics for Champion promotion."""
+
+    atomic_oos_pass_ratio: float
+    capacity_ceiling_usdt: float
+    median_log_growth: float
+    worst_block_mdd: float
+    absolute_decay_bps_yr: float
+    dsr: float
+    # Backward compatibility fields
+    cagr: float = 0.0
+    mdd: float = 0.0
+    sharpe: float = 0.0
+
+
+@dataclass
+class PromotionGateResult:
+    """Result of the sequential promotion gate evaluation."""
+
+    passed: bool
+    gate_failures: list[str]
+    promoted_to_champion: bool
+
+
+@dataclass(frozen=True)
 class ChampionMetrics:
     """Benchmark metrics loaded from champion JSON for guard comparison."""
 
@@ -178,3 +203,104 @@ def build_champion_record_payload(
         "metrics": metrics,
         "gates": gates,
     }
+
+
+def should_promote_candidate_v3(
+    candidate: ChampionMetricsV3,
+    champion: ChampionMetricsV3,
+) -> bool:
+    """Compare candidate against champion using multi-dimensional v3.0 logic.
+
+    Time Complexity: O(1)
+    Space Complexity: O(1)
+    """
+    # 1. atomic_oos_pass_ratio가 5%p 이상 높으면 승격
+    if candidate.atomic_oos_pass_ratio >= champion.atomic_oos_pass_ratio + 0.05:
+        return True
+    elif candidate.atomic_oos_pass_ratio <= champion.atomic_oos_pass_ratio - 0.05:
+        return False
+
+    # 2. capacity_ceiling 더 높음 (10% 이상 차이)
+    if candidate.capacity_ceiling_usdt >= champion.capacity_ceiling_usdt * 1.10:
+        return True
+    elif candidate.capacity_ceiling_usdt <= champion.capacity_ceiling_usdt * 0.90:
+        return False
+
+    # 3. median_log_growth 더 높음
+    if candidate.median_log_growth > champion.median_log_growth + 1e-9:
+        return True
+    elif candidate.median_log_growth < champion.median_log_growth - 1e-9:
+        return False
+
+    # 4. worst_block_mdd 더 낮음 (5%p 이상 차이)
+    if candidate.worst_block_mdd <= champion.worst_block_mdd - 0.05:
+        return True
+    elif candidate.worst_block_mdd >= champion.worst_block_mdd + 0.05:
+        return False
+
+    # 5. absolute_decay_bps 덜 부정적
+    if candidate.absolute_decay_bps_yr > champion.absolute_decay_bps_yr + 1e-9:
+        return True
+    elif candidate.absolute_decay_bps_yr < champion.absolute_decay_bps_yr - 1e-9:
+        return False
+
+    # 동률: dsr 더 높음
+    return candidate.dsr > champion.dsr
+
+
+def evaluate_sequential_promotion_gate(
+    candidate: ChampionMetricsV3,
+    champion: ChampionMetricsV3 | None,
+    wf_result: Any,
+    dual_decay: Any,
+    atomic_result: Any,
+    capacity_results: dict[int, bool],
+    intrabar_tw: float,
+    intrabar_mdd: float,
+    mdd_hard_limit: float = 0.50,
+) -> PromotionGateResult:
+    """Evaluate sequential promotion gates for backtest v3.0 champion.
+
+    Time Complexity: O(1)
+    Space Complexity: O(1)
+    """
+    failures: list[str] = []
+
+    # 1. Inner AWF hard gates (WalkForwardResult.passed)
+    if not getattr(wf_result, "passed", False):
+        failures.append("AWF_HARD_GATES")
+
+    # 2. Atomic 6M blocks pass_ratio >= 0.70
+    if getattr(atomic_result, "pass_ratio", 0.0) < 0.70:
+        failures.append("ATOMIC_PASS_RATIO")
+
+    # 3. Intrabar 1m: TW > 1.0 AND MDD < mdd_hard_limit
+    if intrabar_tw <= 1.0:
+        failures.append("INTRABAR_TW")
+    if intrabar_mdd >= mdd_hard_limit:
+        failures.append("INTRABAR_MDD")
+
+    # 4. Dual decay 통과
+    if not getattr(dual_decay, "passed", False):
+        failures.append("DUAL_DECAY")
+
+    # 5. AUM ladder 50k, 100k, 250k 전부 pass
+    for tier in (50000, 100000, 250000):
+        if not capacity_results.get(tier, False):
+            failures.append("CAPACITY_LADDER")
+            break
+
+    passed = len(failures) == 0
+    promoted_to_champion = False
+
+    if passed:
+        if champion is None:
+            promoted_to_champion = True
+        else:
+            promoted_to_champion = should_promote_candidate_v3(candidate, champion)
+
+    return PromotionGateResult(
+        passed=passed,
+        gate_failures=failures,
+        promoted_to_champion=promoted_to_champion,
+    )
