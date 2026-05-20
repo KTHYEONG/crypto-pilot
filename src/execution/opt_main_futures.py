@@ -30,6 +30,7 @@ from config.opt_config import (  # noqa: E402
 from src.core.utils.utils import setup_logger  # noqa: E402
 from src.domain.futures.ml_pipeline import run_ml_pipeline_for_universe  # noqa: E402
 from src.domain.futures.ml_pipeline.pipeline_runner import (  # noqa: E402
+    MLPipelineOutput,
     merge_ml_output_into_is_and_oos,
 )
 from src.domain.futures.optimization.candidate_selector import (  # noqa: E402
@@ -433,6 +434,11 @@ def main() -> None:
     parser.add_argument("--bypass-champion-guard", action="store_true")
     parser.add_argument("--ops-profile", type=str, default=None)
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument(
+        "--quick-backtest",
+        action="store_true",
+        help="Skip heavy ML alpha/HMM pipeline and inject neutral features for backtest plumbing tests.",
+    )
     parser.add_argument("--skip-data-sync", action="store_true", help="Skip Step 0 data sync.")
     parser.add_argument("--sync-limit", type=int, default=None, help="Limit symbols for Step 0 sync.")
     parser.add_argument("--force-universe-rebuild", action="store_true", help="Force rebuild universe snapshot.")
@@ -468,15 +474,26 @@ def main() -> None:
     _logger.info("═" * 85)
 
     ml_n_jobs = resolve_futures_parallel_policy(len(valid_symbols))
-    ml_cfg = dict(OPT_FUTURES_CONFIG)
-    # Force AlphaFactory backend for futures execution so runs are not tied to legacy miner path.
-    ml_cfg["FUTURES_ML_ALPHA_BACKEND"] = "factory_v1"
-    ml_out = run_ml_pipeline_for_universe(
-        valid_symbols, args.tf, fetch_start_date, end_date, ml_cfg,
-        workers=ml_n_jobs, n_jobs=ml_n_jobs, is_end_date=is_end_date_str, is_start_date=start_date_str,
-        gp_only=args.alpha_only, hmm_only=args.hmm_only,
-        preloaded_data_maps=oos_data_maps if not pre_args.skip_universe else None,
-    )
+    if args.quick_backtest:
+        if args.alpha_only or args.hmm_only:
+            _logger.error(" --quick-backtest cannot be combined with --alpha-only or --hmm-only.")
+            return
+        OPT_FUTURES_CONFIG["FUTURES_WF_HMM_LEG_REFIT"] = False
+        OPT_FUTURES_CONFIG["FUTURES_USE_META_LABELER"] = False
+        _logger.warning(
+            " [STEP 2/4] QUICK-BACKTEST mode: skip Alpha/HMM pipeline and use neutral ML features."
+        )
+        ml_out = MLPipelineOutput()
+    else:
+        ml_cfg = dict(OPT_FUTURES_CONFIG)
+        # Force AlphaFactory backend for futures execution so runs are not tied to legacy miner path.
+        ml_cfg["FUTURES_ML_ALPHA_BACKEND"] = "factory_v1"
+        ml_out = run_ml_pipeline_for_universe(
+            valid_symbols, args.tf, fetch_start_date, end_date, ml_cfg,
+            workers=ml_n_jobs, n_jobs=ml_n_jobs, is_end_date=is_end_date_str, is_start_date=start_date_str,
+            gp_only=args.alpha_only, hmm_only=args.hmm_only,
+            preloaded_data_maps=oos_data_maps if not pre_args.skip_universe else None,
+        )
 
     if hasattr(ml_out, "hmm_report") and ml_out.hmm_report:
         log_hmm_report_summary(ml_out.hmm_report)
@@ -492,7 +509,7 @@ def main() -> None:
     # Final aggregated count check (strictly what will be used in optimization)
     n_post = int(filt_meta.get("post_agg_selected_long_count", 0))
     
-    if not args.hmm_only:  # HMM-only 모드가 아닐 때만 알파 생존 여부 체크
+    if not args.hmm_only and not args.quick_backtest:  # quick 모드에서는 neutral signal 허용
         if n_surv <= 0 or n_post <= 0:
             _logger.error("\n [!] G-ALPHA v8.0 CRITICAL: No alpha components survived the strict gates (survive=%d, post=%d).", n_surv, n_post)
             _logger.error(" [!] Optimization (Step 3/4) aborted to prevent noise overfitting.")
@@ -587,9 +604,7 @@ def main() -> None:
     if base_ctx.awf_leg_slices:
         test_leg = base_ctx.awf_leg_slices[0]["data"]
         zkill, zfund, lev_leg = _cached_kill_fund_lev(test_leg, _base_engine_params({}, args.tf))
-        _run_portfolio_numba_block(
-            _base_engine_params({}, args.tf), test_leg, zkill, zfund, lev_leg
-        )
+        _run_portfolio_numba_block(_base_engine_params({}, args.tf), test_leg)
 
     storage_url, storage = setup_optuna_storage(project_root)
     study_name = build_joint_study_name(
