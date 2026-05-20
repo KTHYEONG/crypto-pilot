@@ -33,6 +33,7 @@ from src.domain.futures.data_loader import (
     summarize_dataframe_integrity,
 )
 from src.domain.futures.ml_pipeline.alpha.miner import MLAlphaMiner
+
 try:
     from src.domain.futures.alpha_factory import AlphaFactoryV1
 except Exception:  # pragma: no cover - optional dependency path for staged rollout
@@ -224,15 +225,15 @@ def _extract_factory_frame(factory_out: Any) -> pd.DataFrame:
             return _ensure_alpha_panel_attrs(panel, source_meta=factory_out)
     # Current AlphaFactoryV1 returns dataclass with ndarray fields.
     if hasattr(factory_out, "alpha_long") and hasattr(factory_out, "alpha_short"):
-        alpha_long = np.asarray(getattr(factory_out, "alpha_long"), dtype=np.float64)
-        alpha_short = np.asarray(getattr(factory_out, "alpha_short"), dtype=np.float64)
+        alpha_long = np.asarray(factory_out.alpha_long, dtype=np.float64)
+        alpha_short = np.asarray(factory_out.alpha_short, dtype=np.float64)
         alpha_net = (
-            np.asarray(getattr(factory_out, "alpha_net"), dtype=np.float64)
+            np.asarray(factory_out.alpha_net, dtype=np.float64)
             if hasattr(factory_out, "alpha_net")
             else (alpha_long - alpha_short)
         )
         confidence = (
-            np.asarray(getattr(factory_out, "confidence"), dtype=np.float64)
+            np.asarray(factory_out.confidence, dtype=np.float64)
             if hasattr(factory_out, "confidence")
             else np.ones_like(alpha_long, dtype=np.float64)
         )

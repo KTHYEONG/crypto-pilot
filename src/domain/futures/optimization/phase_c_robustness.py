@@ -34,7 +34,7 @@ def _select_top_trials(study_b: optuna.Study, top_k: int) -> list[optuna.trial.F
 
 def _deterministic_perturb_score(params: dict[str, Any], *, salt: str) -> float:
     payload = "|".join(f"{k}:{params.get(k)}" for k in sorted(params))
-    digest = hashlib.sha256(f"{salt}|{payload}".encode("utf-8")).digest()
+    digest = hashlib.sha256(f"{salt}|{payload}".encode()).digest()
     nums = [b / 255.0 for b in digest[:12]]
     mean_v = sum(nums) / max(len(nums), 1)
     centered_var = sum((x - mean_v) ** 2 for x in nums) / max(len(nums), 1)
@@ -182,7 +182,7 @@ def evaluate_phase_c_robustness(
         "method": "salib_sobol" if salib_available else "deterministic_perturbation_fallback",
         "salib_available": bool(salib_available),
         "sobol_n": 128 if salib_available else 0,
-        "candidate_count": int(len(top_trials)),
+        "candidate_count": len(top_trials),
         "seed_count": int(seed_count),
         "top_trials": [int(t.number) for t in top_trials],
         "pbo_proxy": float(matrix_stats["pbo_proxy"]),

@@ -8,20 +8,17 @@ from __future__ import annotations
 import gc
 import logging
 import re
+import time
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Any, Optional, Tuple
+from typing import Any
 
+import numba
 import numpy as np
 import pandas as pd
-import numba
-import time
 from catboost import CatBoostError, CatBoostRanker, CatBoostRegressor, Pool
 
-from config.opt_config import OPT_FUTURES_CONFIG
 from src.domain.futures.ml_pipeline.alpha.component_filter import filter_alpha_components
 from src.domain.futures.ml_pipeline.features.engineering import (
-    GP_FEATURE_SCHEMA_VERSION,
     HMM_SEMANTIC_PROB_COLUMNS,
     add_macro_interaction_features,
 )
@@ -121,6 +118,7 @@ def _compute_triple_barrier_labels_wide(
 
     Returns:
         numpy array shape (n_bars, n_syms), dtype float32, values in {0.0, 0.5, 1.0}.
+
     """
     close_arr = close_wide.to_numpy(dtype=np.float64, copy=True)
     atr_arr = (
@@ -184,6 +182,7 @@ def _compute_ic_linear_slot(
 
     Returns:
         1D numpy array of linear alpha scores (float64), valid_mask 기준 길이.
+
     """
     if not feat_wide_list:
         n_valid = int(wide_target.notna().any(axis=1).sum())
@@ -282,11 +281,11 @@ _SHORT_SLOT_COL_RE = re.compile(r"^alpha_short_(\d{2})$")
 def _train_ranker_slot(
     slot_idx: int,
     slots_per_theme: int,
-    X_pool: Optional[Pool],
-    train_pool: Optional[Pool],
+    X_pool: Pool | None,
+    train_pool: Pool | None,
     feat_cols: list[str],
     seed_offset: int = 0,
-) -> Tuple[int, Optional[CatBoostRanker], list[str], np.ndarray]:
+) -> tuple[int, CatBoostRanker | None, list[str], np.ndarray]:
     """Helper for Ranker training using CatBoost."""
     if not feat_cols or train_pool is None:
         return slot_idx, None, [], np.array([])
@@ -330,10 +329,10 @@ def _train_ranker_slot(
 def _train_regressor_slot(
     slot_idx: int,
     slots_per_theme: int,
-    X_pool: Optional[Pool],
-    train_pool: Optional[Pool],
+    X_pool: Pool | None,
+    train_pool: Pool | None,
     feat_cols: list[str],
-) -> Tuple[int, Optional[CatBoostRegressor], np.ndarray]:
+) -> tuple[int, CatBoostRegressor | None, np.ndarray]:
     """Helper for Regressor training using CatBoost."""
     if not feat_cols or train_pool is None:
         return slot_idx, None, np.array([])
@@ -1000,6 +999,7 @@ class MLAlphaMiner:
 
         Returns:
             Dictionary of CatBoost parameters.
+
         """
         params = {
             "loss_function": "PairLogit",

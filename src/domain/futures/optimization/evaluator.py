@@ -661,6 +661,7 @@ def compute_v3_score(
                 - λ_turnover * excess_turnover
                 - λ_funding * funding_drag
                 - λ_capacity * aum_impact_penalty
+
     """
     arr = np.asarray(leg_log_tw, dtype=np.float64)
     if arr.size == 0:
@@ -699,6 +700,7 @@ def calc_n_trials_eff_entropy(
         2. λ_i = eigenvalues(C)
         3. p_i = λ_i / Σλ_i
         4. return exp(-Σ p_i * log(p_i + ε))
+
     """
     sig = np.asarray(signatures, dtype=np.float64)
     w = np.asarray(weights, dtype=np.float64)

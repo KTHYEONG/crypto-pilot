@@ -12,7 +12,6 @@ import numpy as np
 
 from src.domain.futures.optimization.optimizer import check_hard_gates_ml
 
-
 # ---------------------------------------------------------------------------
 # Phase 3: V3HardGates 8-gate 체계
 # ---------------------------------------------------------------------------
@@ -65,6 +64,7 @@ def evaluate_v3_hard_gates(
 
     Returns:
         GateResult(passed, failures, metrics).
+
     """
     arr = np.asarray(leg_log_tw, dtype=np.float64)
     tw_arr = np.exp(arr)

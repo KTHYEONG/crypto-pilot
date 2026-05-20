@@ -17,6 +17,7 @@ class ModulePurgeBarsMeta:
         module_name: 모듈 식별자.
         purge_bars: IS/OOS 경계 purge 길이 (바 단위).
         reason: purge_bars 값의 근거 (label_horizon / fit_window 등).
+
     """
 
     module_name: str
@@ -39,6 +40,7 @@ class PurgeBarsRegistry:
 
         Args:
             meta: ModulePurgeBarsMeta 인스턴스.
+
         """
         self._registry[meta.module_name] = meta
 
@@ -50,6 +52,7 @@ class PurgeBarsRegistry:
 
         Raises:
             RuntimeError: 등록된 모듈이 없을 경우 Fail-fast.
+
         """
         if not self._registry:
             raise RuntimeError(
@@ -63,6 +66,7 @@ class PurgeBarsRegistry:
 
         Raises:
             RuntimeError: 등록된 모듈이 없을 경우.
+
         """
         _ = self.get_boundary_purge_bars()  # RuntimeError 전파
 

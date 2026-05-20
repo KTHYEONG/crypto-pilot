@@ -1,4 +1,4 @@
-"""Portfolio weights: Ledoit–Wolf covariance, fractional Kelly → vol target → constrained net.
+"""Portfolio weights: Ledoit-Wolf covariance, fractional Kelly -> vol target -> constrained net.
 
 Expected return ``mu`` is in **simple return per bar** (same units as bar-to-bar returns).
 """
@@ -43,7 +43,7 @@ def rolling_ledoit_wolf_cov(
 def mu_from_cross_section_signals(
     xs_long_prev: np.ndarray, xs_short_prev: np.ndarray
 ) -> np.ndarray:
-    """Legacy CS z-score of (long − short); prefer :func:`mu_net_from_composer_channels`."""
+    """Legacy CS z-score of (long - short); prefer :func:`mu_net_from_composer_channels`."""
     xl = np.asarray(xs_long_prev, dtype=np.float64).ravel()
     xs_ = np.asarray(xs_short_prev, dtype=np.float64).ravel()
     d = xl - xs_
@@ -85,7 +85,7 @@ def _kelly_scaled(
     *,
     f_kelly_max: float,
 ) -> np.ndarray:
-    """Fractional Kelly weight = _kelly_raw × KELLY_FRACTION.
+    """Fractional Kelly weight = _kelly_raw * KELLY_FRACTION.
 
     KELLY_FRACTION은 모듈 상수(0.25)이며 외부 주입 불가.
     """
@@ -235,8 +235,8 @@ def precompute_rolling_covariances(
 
 @numba.njit(cache=True)
 def _decode_regime_probs(hmm_probs: np.ndarray) -> tuple[float, float, float, float]:
-    """
-    Decode HMM probabilities into semantic 4-bucket regime probs.
+    """Decode HMM probabilities into semantic 4-bucket regime probs.
+
     5-col format: [bull_calm, bull_vol_up, bear_trend, chop, crisis]
     4-col legacy format: [bull, bear, chop, crisis]
     """
@@ -328,7 +328,13 @@ def _solve_constrained_weights_numba(
             ent_norm = 0.0
         elif ent_norm > 1.0:
             ent_norm = 1.0
-        damp = 1.0 - (chop_gross_damp * p_chop) - (crisis_gross_damp * p_crisis) - (entropy_gross_damp * ent_norm) - (bear_gross_damp * p_bear)
+        damp = (
+            1.0
+            - (chop_gross_damp * p_chop)
+            - (crisis_gross_damp * p_crisis)
+            - (entropy_gross_damp * ent_norm)
+            - (bear_gross_damp * p_bear)
+        )
         if damp < gross_floor_mult:
             damp = gross_floor_mult
         elif damp > 1.0:
@@ -498,7 +504,7 @@ def precompute_rebalance_weights(
             ks_diag_2d = np.asarray(composer_sigma_2d, dtype=np.float64)
             ks_diag_2d = np.maximum(ks_diag_2d, 1e-12)
 
-        return _precompute_loop_numba(
+        out = _precompute_loop_numba(
             n_bars,
             n_syms,
             rb,
@@ -524,49 +530,106 @@ def precompute_rebalance_weights(
             crisis_long_suppress_thr=float(crisis_long_suppress_thr),
             crisis_long_suppress_mult=float(crisis_long_suppress_mult),
         )
+    else:
+        # Fallback to slower Python loop with rolling LW
+        out = np.zeros((n_bars, n_syms), dtype=np.float64)
+        lb = max(5, int(lookback))
+        for i in range(1, n_bars):
+            if (i % rb) != 0:
+                continue
+            start_i = max(0, i - lb)
+            hist = c[start_i:i, :]
+            if hist.shape[0] < 2:
+                continue
+            rr = np.diff(hist, axis=0) / np.maximum(hist[:-1, :], 1e-12)
+            rr = np.nan_to_num(rr, nan=0.0, posinf=0.0, neginf=0.0)
+            sigma = rolling_ledoit_wolf_cov(rr, min_obs=min_obs)
 
-    # Fallback to slower Python loop with rolling LW
-    out = np.zeros((n_bars, n_syms), dtype=np.float64)
+            ks_diag = None
+            if composer_sigma_2d is not None:
+                ks_diag = np.asarray(composer_sigma_2d[i - 1, :], dtype=np.float64).ravel()
+                ks_diag = np.maximum(ks_diag, 1e-12)
+
+            out[i, :] = _solve_constrained_weights_numba(
+                mu_2d[i - 1],
+                sigma,
+                float(kappa),
+                float(f_kelly_max),
+                float(sigma_target_ann),
+                float(bars_per_year),
+                float(gross_cap),
+                float(per_symbol_cap),
+                float(current_dd),
+                kelly_sigma_diag=ks_diag,
+                hmm_probs=(hmm_probs_2d[i - 1] if hmm_probs_2d is not None else None),
+                regime_betas=regime_betas,
+                crisis_override_thr=float(crisis_override_thr),
+                regime_policy_enabled=1 if regime_policy_enabled else 0,
+                chop_gross_damp=float(chop_gross_damp),
+                crisis_gross_damp=float(crisis_gross_damp),
+                entropy_gross_damp=float(entropy_gross_damp),
+                bear_gross_damp=float(bear_gross_damp),
+                gross_floor_mult=float(gross_floor_mult),
+                crisis_long_suppress_thr=float(crisis_long_suppress_thr),
+                crisis_long_suppress_mult=float(crisis_long_suppress_mult),
+            )
+
+    # project_all_caps 및 quantize_weights 통합 후처리
+    caps = PortfolioCaps(
+        gross=float(gross_cap),
+        per_symbol=float(per_symbol_cap),
+        target_ann_vol=float(sigma_target_ann),
+    )
+
     lb = max(5, int(lookback))
     for i in range(1, n_bars):
         if (i % rb) != 0:
             continue
-        start_i = max(0, i - lb)
-        hist = c[start_i:i, :]
-        if hist.shape[0] < 2:
+        w = out[i, :]
+        if np.all(w == 0.0):
             continue
-        rr = np.diff(hist, axis=0) / np.maximum(hist[:-1, :], 1e-12)
-        rr = np.nan_to_num(rr, nan=0.0, posinf=0.0, neginf=0.0)
-        sigma = rolling_ledoit_wolf_cov(rr, min_obs=min_obs)
 
-        ks_diag = None
-        if composer_sigma_2d is not None:
-            ks_diag = np.asarray(composer_sigma_2d[i - 1, :], dtype=np.float64).ravel()
-            ks_diag = np.maximum(ks_diag, 1e-12)
+        if sigma_3d is not None:
+            sigma = sigma_3d[i]
+        else:
+            start_i = max(0, i - lb)
+            hist = c[start_i:i, :]
+            if hist.shape[0] < 2:
+                sigma = np.eye(n_syms) * 1e-4
+            else:
+                rr = np.diff(hist, axis=0) / np.maximum(hist[:-1, :], 1e-12)
+                rr = np.nan_to_num(rr, nan=0.0, posinf=0.0, neginf=0.0)
+                sigma = rolling_ledoit_wolf_cov(rr, min_obs=min_obs)
 
-        out[i, :] = _solve_constrained_weights_numba(
-            mu_2d[i - 1],
-            sigma,
-            float(kappa),
-            float(f_kelly_max),
-            float(sigma_target_ann),
-            float(bars_per_year),
-            float(gross_cap),
-            float(per_symbol_cap),
-            float(current_dd),
-            kelly_sigma_diag=ks_diag,
-            hmm_probs=(hmm_probs_2d[i - 1] if hmm_probs_2d is not None else None),
-            regime_betas=regime_betas,
-            crisis_override_thr=float(crisis_override_thr),
-            regime_policy_enabled=1 if regime_policy_enabled else 0,
-            chop_gross_damp=float(chop_gross_damp),
-            crisis_gross_damp=float(crisis_gross_damp),
-            entropy_gross_damp=float(entropy_gross_damp),
-            bear_gross_damp=float(bear_gross_damp),
-            gross_floor_mult=float(gross_floor_mult),
-            crisis_long_suppress_thr=float(crisis_long_suppress_thr),
-            crisis_long_suppress_mult=float(crisis_long_suppress_mult),
+        sigma_port = float(np.sqrt(max(0.0, w @ sigma @ w)))
+
+        if regime_betas is not None:
+            if regime_betas.ndim == 2:
+                btc_beta = regime_betas[i - 1]
+            else:
+                btc_beta = regime_betas
+        else:
+            btc_beta = np.zeros(n_syms)
+
+        w_proj = project_all_caps(
+            w=w,
+            btc_beta=btc_beta,
+            sigma_port=sigma_port,
+            bars_per_year=bars_per_year,
+            caps=caps,
         )
+
+        # 백테스트 시뮬레이션용 quantize_weights 호출
+        # min_notional = 20.0, step_size_proxy = 0.001
+        step_sizes = np.full(n_syms, 0.001)
+        w_quant = quantize_weights(
+            w=w_proj,
+            equity=10000.0,  # 백테스트 프록시 equity
+            prices=c[i],
+            step_sizes=step_sizes,
+            min_notional=20.0,
+        )
+        out[i, :] = w_quant
 
     return out
 
@@ -665,6 +728,7 @@ class PortfolioCaps:
         net: |Σw_i| ≤ net.
         beta: |w @ btc_beta| ≤ beta.
         target_ann_vol: 연율화 변동성 target (vol scaling 기준).
+
     """
 
     gross: float = 3.0
@@ -679,7 +743,7 @@ def project_all_caps(
     btc_beta: np.ndarray,
     sigma_port: float,
     bars_per_year: float,
-    caps: PortfolioCaps = PortfolioCaps(),
+    caps: PortfolioCaps | None = None,
 ) -> np.ndarray:
     """5-cap 투영: gross, per_symbol, net, beta, vol_target.
 
@@ -694,7 +758,10 @@ def project_all_caps(
 
     Returns:
         투영된 weight vector, shape [N].
+
     """
+    if caps is None:
+        caps = PortfolioCaps()
     out = np.asarray(w, dtype=np.float64).copy()
     n = int(out.size)
     if n == 0:
@@ -753,7 +820,7 @@ def quantize_weights(
     step_sizes: np.ndarray,
     min_notional: float = 20.0,
 ) -> np.ndarray:
-    """minNotional 및 step_size 기반 weight 양자화.
+    """MinNotional 및 step_size 기반 weight 양자화.
 
     Args:
         w: 비중 벡터, shape [N].
@@ -767,6 +834,7 @@ def quantize_weights(
         qty = floor(w * equity / (price * step_size)) * step_size
         notional < min_notional → qty = 0
         return qty * price / equity
+
     """
     w_arr = np.asarray(w, dtype=np.float64)
     p_arr = np.asarray(prices, dtype=np.float64)

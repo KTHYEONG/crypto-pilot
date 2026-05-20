@@ -39,6 +39,7 @@ def _tail_zscore(ser: pd.Series, window: int = 168) -> np.ndarray:
 
     Returns:
         Clipped z-score array of shape (n,), dtype float64.
+
     """
     # Use standard mean/std for performance as requested. 
     # pd.to_numeric and fillna are kept for robustness but minimized.
@@ -190,7 +191,9 @@ class HMMStateInferrer:
 
     def _build_skewed_t_model(self) -> Any | None:
         try:
-            from src.domain.futures.ml_pipeline.regime.skewed_t_hmm import SkewedTMultivariateHMM  # noqa: PLC0415
+            from src.domain.futures.ml_pipeline.regime.skewed_t_hmm import (
+                SkewedTMultivariateHMM,
+            )
             return SkewedTMultivariateHMM(n_iter=self.n_iter, tol=self.tol)
         except Exception as exc:
             _logger.error("Failed to load SkewedTMultivariateHMM: %s", exc)
@@ -467,10 +470,11 @@ class HMMStateInferrer:
 
         Returns:
             Calibrated multi-score dict or None on failure.
+
         """
         try:
-            from sklearn.isotonic import IsotonicRegression  # noqa: PLC0415
-            from sklearn.linear_model import LogisticRegression  # noqa: PLC0415
+            from sklearn.isotonic import IsotonicRegression
+            from sklearn.linear_model import LogisticRegression
         except ImportError:
             _logger.warning("scikit-learn not available; skipping supervised tail score")
             return None
@@ -579,7 +583,7 @@ class HMMStateInferrer:
                     if int(y_is.sum()) < min_pos:
                         continue
                     try:
-                        import lightgbm as lgb  # noqa: PLC0415
+                        import lightgbm as lgb
                         lgb_params = {
                             "objective": "binary",
                             "metric": "auc",
