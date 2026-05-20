@@ -16,7 +16,7 @@ from src.domain.futures.universe.ledger import update_ledger
 
 logger = logging.getLogger("SyncUtils")
 
-def smart_filter_symbols(limit: int = None) -> list[str]:
+def smart_filter_symbols(limit: int | None = None) -> list[str]:
     """거래량 기반 상위 40% 엘리트 심볼 필터링.
     """
     logger.info("Starting Smart Early-Exit Filtering...")
