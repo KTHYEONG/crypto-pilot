@@ -479,9 +479,9 @@ def select_v43_phase_b_top_candidates(
 
     summary = {
         "selected_by": "v43_phase_b_calmar_lcb",
-        "candidate_count": int(len(completed)),
-        "feasible_count": int(len(feasible)),
-        "selected_count": int(len(top_candidates)),
+        "candidate_count": len(completed),
+        "feasible_count": len(feasible),
+        "selected_count": len(top_candidates),
         "selected_trial_numbers": [int(c["trial"].number) for c in top_candidates],
     }
     if not feasible:

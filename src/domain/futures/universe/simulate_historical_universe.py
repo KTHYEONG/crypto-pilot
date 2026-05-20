@@ -1,11 +1,11 @@
 import argparse
 import logging
+
+# Project Root Setup
+import sys
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
-
-# Project Root Setup
-import sys  # noqa: E402
 
 project_root = Path(__file__).resolve().parents[4]
 if str(project_root) not in sys.path:

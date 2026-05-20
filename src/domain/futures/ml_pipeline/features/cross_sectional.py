@@ -8,9 +8,9 @@ from __future__ import annotations
 import logging
 from collections.abc import Iterable, Sequence
 
+import numba
 import numpy as np
 import pandas as pd
-import numba
 
 _logger = logging.getLogger(__name__)
 
