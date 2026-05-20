@@ -7,9 +7,10 @@ import logging
 import math
 import os
 import sys
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Sequence, Tuple
+from typing import Any
 
 import numpy as np
 import optuna
@@ -25,7 +26,7 @@ from src.domain.spot.opt_spot_utils.opt_params import build_combined_param_space
 _logger = logging.getLogger("combination_screener")
 
 
-def _p25_path_consistency_score(metrics: Dict[str, float]) -> float:
+def _p25_path_consistency_score(metrics: dict[str, float]) -> float:
     """Stage-1 growth rank: p25 log-TWR scaled by inverse path CV (p25 / (1 + path_cv))."""
     p25 = float(metrics.get("cpcv_p25_log_tw", -1e9))
     if p25 <= -1e8:
@@ -45,7 +46,7 @@ class CombinationScore:
     reason: str = ""
 
 
-def _combo_search_dim(space: Dict[str, Any]) -> int:
+def _combo_search_dim(space: dict[str, Any]) -> int:
     dim = 0
     for k, spec in space.items():
         if k in ("SIGNAL_TYPE", "REGIME_TYPE", "SIZING_METHOD"):
@@ -59,10 +60,9 @@ def _combo_search_dim(space: Dict[str, Any]) -> int:
 def _auto_combo_trials(
     viable_count: int,
     median_dim: float,
-    cfg: Dict[str, Any],
+    cfg: dict[str, Any],
 ) -> tuple[int, int]:
-    """
-    Practical auto-sizing for Stage-1 quick CPCV.
+    """Practical auto-sizing for Stage-1 quick CPCV.
     Keep current config as floors, then scale mildly by viable combo count and
     effective combo dimension so runtime stays bounded as the search space grows.
     """
@@ -86,10 +86,9 @@ def _auto_combo_trials(
 def _ambiguity_phase2_boost(
     phase1_scores: Sequence[float],
     top_k: int,
-    cfg: Dict[str, Any],
+    cfg: dict[str, Any],
 ) -> int:
-    """
-    If the prune boundary is crowded, add a small Phase-2 budget bump.
+    """If the prune boundary is crowded, add a small Phase-2 budget bump.
     This preserves fast default behavior while spending a bit more only when
     combo ranking is genuinely ambiguous.
     """
@@ -109,7 +108,7 @@ def _ambiguity_phase2_boost(
     return 0
 
 
-def _mid_value_from_spec(spec: Dict[str, Any]) -> int | float:
+def _mid_value_from_spec(spec: dict[str, Any]) -> int | float:
     t = spec["type"]
     if t == "int":
         lo = int(spec["low"])
@@ -127,7 +126,7 @@ def _mid_value_from_spec(spec: Dict[str, Any]) -> int | float:
     return choices[len(choices) // 2]
 
 
-def params_disqualified_against_space(params: Dict[str, Any], space: Dict[str, Any]) -> str:
+def params_disqualified_against_space(params: dict[str, Any], space: dict[str, Any]) -> str:
     """Return reason string if params violate declared bounds (e.g. legacy KC_MULT=3.0)."""
     if "KC_MULT" in params and "KC_MULT" in space:
         spec = space["KC_MULT"]
@@ -138,14 +137,14 @@ def params_disqualified_against_space(params: Dict[str, Any], space: Dict[str, A
     return ""
 
 
-def build_probe_params(combo: "CombinationScore", tf: str) -> Dict[str, Any]:
+def build_probe_params(combo: CombinationScore, tf: str) -> dict[str, Any]:
     """Return search-space midpoint params for a Phase-B combo (signal-agnostic for Phase C)."""
     return _build_probe_params(combo.signal, combo.regime, combo.sizing, tf)
 
 
-def _build_probe_params(sig: str, reg: str, siz: str, tf: str) -> Dict[str, Any]:
+def _build_probe_params(sig: str, reg: str, siz: str, tf: str) -> dict[str, Any]:
     combo_space = build_combined_param_space(sig, reg, siz)
-    probe_params: Dict[str, Any] = {
+    probe_params: dict[str, Any] = {
         "SIGNAL_TYPE": sig,
         "REGIME_TYPE": reg,
         "SIZING_METHOD": siz,
@@ -164,12 +163,12 @@ def _build_probe_params(sig: str, reg: str, siz: str, tf: str) -> Dict[str, Any]
 
 
 def measure_signal_rate(
-    data_maps: Dict[str, Dict[str, Any]],
+    data_maps: dict[str, dict[str, Any]],
     symbols: Sequence[str],
     tf: str,
     signal_name: str,
     *,
-    mid_params: Dict[str, Any],
+    mid_params: dict[str, Any],
 ) -> float:
     from src.domain.spot.signals import SIGNAL_REGISTRY
 
@@ -184,7 +183,7 @@ def measure_signal_rate(
     return float(np.mean(out.entry_signal.astype(np.float64)))
 
 
-def _metrics_from_best_study(study: optuna.Study) -> Dict[str, float]:
+def _metrics_from_best_study(study: optuna.Study) -> dict[str, float]:
     completed = [t for t in study.trials if t.state == TrialState.COMPLETE and t.value is not None]
     if not completed:
         return {
@@ -213,8 +212,8 @@ def _metrics_from_best_study(study: optuna.Study) -> Dict[str, float]:
 def run_quick_cpcv_for_combo(
     combo: tuple[str, str, str],
     *,
-    data_maps: Dict[str, Dict[str, Any]],
-    symbols: List[str],
+    data_maps: dict[str, dict[str, Any]],
+    symbols: list[str],
     tf: str,
     n_trials: int,
     project_root: str,
@@ -268,13 +267,13 @@ def run_quick_cpcv_for_combo(
 def run_quick_cpcv_for_combo_metrics(
     combo: tuple[str, str, str],
     *,
-    data_maps: Dict[str, Dict[str, Any]],
-    symbols: List[str],
+    data_maps: dict[str, dict[str, Any]],
+    symbols: list[str],
     tf: str,
     n_trials: int,
     project_root: str,
     signal_cache_dir: str,
-) -> Dict[str, float]:
+) -> dict[str, float]:
     sig, reg, siz = combo
     space = build_combined_param_space(sig, reg, siz)
     ref_sym = symbols[0]
@@ -314,8 +313,8 @@ def run_quick_cpcv_for_combo_metrics(
 def _phase1_worker(
     combo: tuple[str, str, str],
     *,
-    data_maps: Dict[str, Dict[str, Any]],
-    symbols: List[str],
+    data_maps: dict[str, dict[str, Any]],
+    symbols: list[str],
     tf: str,
     n_trials: int,
     project_root: str,
@@ -336,13 +335,13 @@ def _phase1_worker(
 def _phase2_worker(
     combo: tuple[str, str, str],
     *,
-    data_maps: Dict[str, Dict[str, Any]],
-    symbols: List[str],
+    data_maps: dict[str, dict[str, Any]],
+    symbols: list[str],
     tf: str,
     n_trials: int,
     project_root: str,
     signal_cache_dir: str,
-) -> Dict[str, float]:
+) -> dict[str, float]:
     """Full-trial CPCV screen for surviving combinations."""
     return run_quick_cpcv_for_combo_metrics(
         combo,
@@ -356,8 +355,8 @@ def _phase2_worker(
 
 
 def _warmup_numba(
-    data_maps: Dict[str, Dict[str, Any]],
-    symbols: List[str],
+    data_maps: dict[str, dict[str, Any]],
+    symbols: list[str],
     tf: str,
     project_root: str = "",
     signal_cache_dir: str = "",
@@ -416,12 +415,12 @@ def _process_pool_context():
 
 def run_combination_screening(
     *,
-    data_maps: Dict[str, Dict[str, Any]],
-    symbols: List[str],
+    data_maps: dict[str, dict[str, Any]],
+    symbols: list[str],
     tf: str,
     project_root: str,
     signal_cache_dir: str = "",
-) -> List[CombinationScore]:
+) -> list[CombinationScore]:
     from concurrent.futures import ProcessPoolExecutor
     from functools import partial
 
@@ -454,9 +453,9 @@ def run_combination_screening(
         )
     )
 
-    scores: List[CombinationScore] = []
-    viable: List[tuple[str, str, str]] = []
-    viable_dims: List[int] = []
+    scores: list[CombinationScore] = []
+    viable: list[tuple[str, str, str]] = []
+    viable_dims: list[int] = []
 
     for sig, reg, siz in combinations:
         combo_space = build_combined_param_space(sig, reg, siz)
@@ -549,7 +548,7 @@ def run_combination_screening(
             )
         )
 
-    surviving: List[tuple[str, str, str]] = []
+    surviving: list[tuple[str, str, str]] = []
     for combo, score in zip(viable, phase1_results, strict=True):
         sig, reg, siz = combo
         if score > prune_thr:
@@ -613,11 +612,11 @@ def run_combination_screening(
             )
         )
 
-    scored_rows: List[Tuple[tuple[str, str, str], Dict[str, float]]] = list(
+    scored_rows: list[tuple[tuple[str, str, str], dict[str, float]]] = list(
         zip(surviving, phase2_results, strict=True)
     )
 
-    def _robust_key(m: Dict[str, float]) -> float:
+    def _robust_key(m: dict[str, float]) -> float:
         return float(m["psr_paths"]) + float(max(0.0, m["dsr_paths"]))
 
     by_growth = sorted(
@@ -633,7 +632,7 @@ def run_combination_screening(
     ]
 
     seen: set[tuple[str, str, str]] = set()
-    bucket_order: List[tuple[str, str, str]] = []
+    bucket_order: list[tuple[str, str, str]] = []
     for bucket in (by_growth, by_robust, by_balance):
         for combo, _m in bucket:
             if combo not in seen:

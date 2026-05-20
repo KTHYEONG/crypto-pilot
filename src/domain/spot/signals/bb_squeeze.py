@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, ClassVar, Dict
+from typing import Any, ClassVar
 
 import numpy as np
 import pandas as pd
@@ -13,13 +13,13 @@ from src.domain.spot.signals.registry import register_signal
 @register_signal
 class BBSqueezeSignal:
     name: ClassVar[str] = "BB_SQUEEZE"
-    param_space: ClassVar[Dict[str, Any]] = {
+    param_space: ClassVar[dict[str, Any]] = {
         "BB_SQ_PERIOD": {"type": "int", "low": 14, "high": 24, "step": 2},
         "BB_SQ_STD": {"type": "float", "low": 1.5, "high": 2.5, "step": 0.25},
         "BB_SQ_KC_MULT": {"type": "float", "low": 1.0, "high": 2.0, "step": 0.25},
     }
 
-    def compute(self, df: pd.DataFrame, params: Dict[str, Any]) -> SignalOutput:
+    def compute(self, df: pd.DataFrame, params: dict[str, Any]) -> SignalOutput:
         p = int(params.get("BB_SQ_PERIOD", 20))
         n_std = float(params.get("BB_SQ_STD", 2.0))
         kc_m = float(params.get("BB_SQ_KC_MULT", 1.5))

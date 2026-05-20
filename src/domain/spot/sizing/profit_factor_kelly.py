@@ -1,5 +1,4 @@
-"""
-Profit-factor Kelly sizing: f* = (W*R - (1-W)) / R from rolling win rate W and payoff R.
+"""Profit-factor Kelly sizing: f* = (W*R - (1-W)) / R from rolling win rate W and payoff R.
 
 W = share of positive bar returns in window; R = avg_win / avg_loss on signed returns.
 Causal; uses shared KELLY_FRACTION and MAX_EXPOSURE like rolling_kelly.
@@ -7,7 +6,7 @@ Causal; uses shared KELLY_FRACTION and MAX_EXPOSURE like rolling_kelly.
 
 from __future__ import annotations
 
-from typing import Any, ClassVar, Dict
+from typing import Any, ClassVar
 
 import numpy as np
 import pandas as pd
@@ -18,12 +17,12 @@ from src.domain.spot.sizing.registry import register_sizing
 @register_sizing
 class ProfitFactorKellySizing:
     name: ClassVar[str] = "profit_factor_kelly"
-    param_space: ClassVar[Dict[str, Any]] = {
+    param_space: ClassVar[dict[str, Any]] = {
         "PFK_WINDOW": {"type": "int", "low": 30, "high": 120, "step": 10},
         "PFK_MIN_F": {"type": "float", "low": 0.05, "high": 0.30, "step": 0.05},
     }
 
-    def compute(self, df: pd.DataFrame, params: Dict[str, Any]) -> np.ndarray:
+    def compute(self, df: pd.DataFrame, params: dict[str, Any]) -> np.ndarray:
         close = df["close"].to_numpy(dtype=np.float64)
         n = len(close)
         window = int(max(5, params.get("PFK_WINDOW", 60)))

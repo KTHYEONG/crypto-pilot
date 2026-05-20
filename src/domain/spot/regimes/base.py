@@ -1,14 +1,14 @@
 from __future__ import annotations
 
-from typing import Any, ClassVar, Dict, Protocol
+from typing import Any, ClassVar, Protocol
 
 import numpy as np
 
 
 class IRegime(Protocol):
     name: ClassVar[str]
-    param_space: ClassVar[Dict[str, Any]]
+    param_space: ClassVar[dict[str, Any]]
 
     def compute(
-        self, data_maps: Dict[str, Dict[str, Any]], params: Dict[str, Any]
+        self, data_maps: dict[str, dict[str, Any]], params: dict[str, Any]
     ) -> np.ndarray: ...

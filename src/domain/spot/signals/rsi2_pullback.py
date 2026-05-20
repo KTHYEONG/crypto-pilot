@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, ClassVar, Dict
+from typing import Any, ClassVar
 
 import numpy as np
 import pandas as pd
@@ -13,12 +13,12 @@ from src.domain.spot.signals.registry import register_signal
 @register_signal
 class RSI2PullbackSignal:
     name: ClassVar[str] = "RSI2_PULLBACK"
-    param_space: ClassVar[Dict[str, Any]] = {
+    param_space: ClassVar[dict[str, Any]] = {
         "RSI2_TREND_EMA": {"type": "int", "low": 150, "high": 250, "step": 25},
         "RSI2_OVERSOLD": {"type": "float", "low": 5.0, "high": 15.0, "step": 2.5},
     }
 
-    def compute(self, df: pd.DataFrame, params: Dict[str, Any]) -> SignalOutput:
+    def compute(self, df: pd.DataFrame, params: dict[str, Any]) -> SignalOutput:
         trend_p = int(params.get("RSI2_TREND_EMA", 200))
         os_level = float(params.get("RSI2_OVERSOLD", 10.0))
         close = df["close"].to_numpy(dtype=np.float64)
