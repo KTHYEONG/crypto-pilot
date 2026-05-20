@@ -12,7 +12,6 @@
 
 from __future__ import annotations
 
-import io
 import json
 import socket
 import sys
@@ -21,8 +20,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
-import zipfile
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -34,7 +32,6 @@ project_root = str(Path(__file__).resolve().parents[3])
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-from config.settings import BINANCE_API_KEY, BINANCE_SECRET  # noqa: E402
 
 # ── 상수 ─────────────────────────────────────────────────────────────────────
 FAPI_BASE = "https://fapi.binance.com"
@@ -114,8 +111,8 @@ def _vision_funding_url(symbol: str, date: str) -> str:
 def _probe_vision_earliest(symbol: str, tf: str = "4h") -> str | None:
     """Vision 아카이브에서 특정 심볼의 가장 이른 날짜를 이진 탐색."""
     # 바이낸스 선물 PERP 최초 출시: 2019-09-08
-    lo = datetime(2019, 9, 8, tzinfo=timezone.utc)
-    hi = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    lo = datetime(2019, 9, 8, tzinfo=UTC)
+    hi = datetime(2024, 1, 1, tzinfo=UTC)
     found: str | None = None
 
     # 연 단위 앞에서 검색 (최대 5번)
@@ -202,7 +199,7 @@ def test_a2_exchange_info_onboard_dates() -> None:
     has_onboard = len(symbols)
     dates = sorted(
         [
-            (s["symbol"], datetime.fromtimestamp(s["onboardDate"] / 1000, tz=timezone.utc).strftime("%Y-%m-%d"))
+            (s["symbol"], datetime.fromtimestamp(s["onboardDate"] / 1000, tz=UTC).strftime("%Y-%m-%d"))
             for s in symbols
         ],
         key=lambda x: x[1],
@@ -242,7 +239,7 @@ def test_a3_ohlcv_depth() -> None:
 
     results: dict[str, Any] = {}
     # 2019-09-01 (PERP 출시 직전)부터 탐색
-    probe_start = int(datetime(2019, 9, 1, tzinfo=timezone.utc).timestamp() * 1000)
+    probe_start = int(datetime(2019, 9, 1, tzinfo=UTC).timestamp() * 1000)
 
     for sym in PROBE_SYMBOLS:
         try:
@@ -250,7 +247,7 @@ def test_a3_ohlcv_depth() -> None:
                                           "4h", since=probe_start, limit=3)
             if ohlcv:
                 first_ts = ohlcv[0][0]
-                first_dt = datetime.fromtimestamp(first_ts / 1000, tz=timezone.utc).strftime("%Y-%m-%d")
+                first_dt = datetime.fromtimestamp(first_ts / 1000, tz=UTC).strftime("%Y-%m-%d")
                 results[sym] = {"earliest_4h": first_dt, "bars_returned": len(ohlcv)}
             else:
                 results[sym] = {"earliest_4h": None, "error": "empty"}
@@ -273,7 +270,7 @@ def test_a4_funding_rate_depth() -> None:
     """펀딩비 히스토리 최초 가능 날짜 탐색."""
     results: dict[str, Any] = {}
     base = f"{FAPI_BASE}/fapi/v1/fundingRate"
-    probe_start_ts = int(datetime(2019, 9, 1, tzinfo=timezone.utc).timestamp() * 1000)
+    probe_start_ts = int(datetime(2019, 9, 1, tzinfo=UTC).timestamp() * 1000)
 
     for sym in PROBE_SYMBOLS:
         try:
@@ -285,7 +282,7 @@ def test_a4_funding_rate_depth() -> None:
             data = _get_json(f"{base}?{qs}")
             if data:
                 first_ts = data[0]["fundingTime"]
-                first_dt = datetime.fromtimestamp(first_ts / 1000, tz=timezone.utc).strftime("%Y-%m-%d")
+                first_dt = datetime.fromtimestamp(first_ts / 1000, tz=UTC).strftime("%Y-%m-%d")
                 results[sym] = {"earliest_funding": first_dt, "count": len(data)}
             else:
                 results[sym] = {"earliest_funding": None, "count": 0}
@@ -318,10 +315,10 @@ def test_a5_oi_and_lsr_depth() -> None:
             data = _get_json(f"{FAPI_BASE}/futures/data/openInterestHist?{qs}")
             if data:
                 first_dt = datetime.fromtimestamp(
-                    int(data[0]["timestamp"]) / 1000, tz=timezone.utc
+                    int(data[0]["timestamp"]) / 1000, tz=UTC
                 ).strftime("%Y-%m-%d")
                 last_dt = datetime.fromtimestamp(
-                    int(data[-1]["timestamp"]) / 1000, tz=timezone.utc
+                    int(data[-1]["timestamp"]) / 1000, tz=UTC
                 ).strftime("%Y-%m-%d")
                 oi_results[sym_raw] = {
                     "api_window_oldest": first_dt, "api_window_newest": last_dt,
@@ -340,7 +337,7 @@ def test_a5_oi_and_lsr_depth() -> None:
             data = _get_json(f"{FAPI_BASE}/futures/data/globalLongShortAccountRatio?{qs}")
             if data:
                 first_dt = datetime.fromtimestamp(
-                    int(data[0]["timestamp"]) / 1000, tz=timezone.utc
+                    int(data[0]["timestamp"]) / 1000, tz=UTC
                 ).strftime("%Y-%m-%d")
                 lsr_results[sym_raw] = {
                     "api_window_oldest": first_dt, "records": len(data),
@@ -441,8 +438,8 @@ def test_b2_vision_kline_archive_depth() -> None:
         earliest = None
         # 분기별로 앞에서부터 탐색
         probe_dates = []
-        cur = datetime(2019, 9, 1, tzinfo=timezone.utc)
-        end = datetime(2022, 1, 1, tzinfo=timezone.utc)
+        cur = datetime(2019, 9, 1, tzinfo=UTC)
+        end = datetime(2022, 1, 1, tzinfo=UTC)
         while cur <= end:
             probe_dates.append(cur.strftime("%Y-%m-%d"))
             cur += timedelta(days=90)
@@ -451,10 +448,10 @@ def test_b2_vision_kline_archive_depth() -> None:
             url = _vision_kline_url(sym, "4h", ds)
             if _head_ok(url):
                 # 이 날짜가 첫 번째 존재 확인 — 더 이른 날짜 있는지 월 단위로 확인
-                month_probe = datetime.strptime(ds, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+                month_probe = datetime.strptime(ds, "%Y-%m-%d").replace(tzinfo=UTC)
                 for _ in range(3):
                     month_probe -= timedelta(days=30)
-                    if month_probe < datetime(2019, 9, 1, tzinfo=timezone.utc):
+                    if month_probe < datetime(2019, 9, 1, tzinfo=UTC):
                         break
                     prev_url = _vision_kline_url(sym, "4h", month_probe.strftime("%Y-%m-%d"))
                     if _head_ok(prev_url):
@@ -502,7 +499,7 @@ def test_b3_vision_funding_archive() -> None:
 
     # BTC 펀딩 최초 날짜 탐색
     btc_earliest: str | None = None
-    probe = datetime(2019, 9, 1, tzinfo=timezone.utc)
+    probe = datetime(2019, 9, 1, tzinfo=UTC)
     for _ in range(20):
         ds = probe.strftime("%Y-%m-%d")
         if _head_ok(_vision_funding_url("BTCUSDT", ds)):
@@ -676,7 +673,7 @@ def test_d1_order_book_historical_probe() -> None:
         results["realtime_orderbook_via_ccxt"] = False
 
     # 2. Vision bookDepth 아카이브 확인
-    btc_today = datetime.now(tz=timezone.utc)
+    btc_today = datetime.now(tz=UTC)
     for days_ago in [1, 2, 5]:
         ds = (btc_today - timedelta(days=days_ago)).strftime("%Y-%m-%d")
         url = f"{VISION_BASE}/data/futures/um/daily/bookDepth/BTCUSDT/BTCUSDT-bookDepth-{ds}.zip"
@@ -763,7 +760,7 @@ def test_z_final_report() -> None:
     print("\n▶ 수집 가능 (Ledger 구성에 활용 가능)")
 
     ei = FINDINGS.get("A1_exchange_info", {})
-    print(f"\n  [FAPI exchangeInfo]")
+    print("\n  [FAPI exchangeInfo]")
     print(f"    · PERP/USDT 심볼: {ei.get('perp_usdt_count')}개")
     print(f"    · 비-TRADING 심볼: {ei.get('non_trading_count')}개  → 최근 상폐 일부 포착 가능")
     onb = FINDINGS.get("A2_onboard_dates", {})
@@ -772,19 +769,19 @@ def test_z_final_report() -> None:
     print(f"    · onboardDate 보유 심볼: {onb.get('symbols_with_onboard_date')}개")
 
     a3 = FINDINGS.get("A3_ohlcv_depth", {})
-    print(f"\n  [OHLCV via CCXT]")
+    print("\n  [OHLCV via CCXT]")
     for sym, r in a3.items():
         if "error" not in r:
             print(f"    · {sym} 4h: {r.get('earliest_4h')}~현재")
 
     a4 = FINDINGS.get("A4_funding_depth", {})
-    print(f"\n  [Funding Rate via FAPI]")
+    print("\n  [Funding Rate via FAPI]")
     for sym, r in a4.items():
         if "error" not in r:
             print(f"    · {sym}: {r.get('earliest_funding')}~현재")
 
     a5 = FINDINGS.get("A5_oi_lsr_depth", {})
-    print(f"\n  [OI / LSR via CCXT/FAPI]")
+    print("\n  [OI / LSR via CCXT/FAPI]")
     for sym, r in a5.get("oi", {}).items():
         if "error" not in r:
             print(f"    · {sym} OI: {r.get('earliest_oi')}~현재")
@@ -793,7 +790,7 @@ def test_z_final_report() -> None:
             print(f"    · {sym} LSR: {r.get('earliest_lsr')}~현재")
 
     b1 = FINDINGS.get("B1_vision_symbols", {})
-    print(f"\n  [Binance Vision S3 — 전체 심볼 목록 (상폐 포함)]")
+    print("\n  [Binance Vision S3 — 전체 심볼 목록 (상폐 포함)]")
     if "error" not in b1:
         print(f"    · 발견 심볼: {b1.get('total_discovered')}개  (상폐 심볼 포함)")
         print(f"    · 샘플: {b1.get('sample_symbols', [])[:8]}")
@@ -805,50 +802,50 @@ def test_z_final_report() -> None:
         print(f"    · 오류: {b1.get('error')}")
 
     b2 = FINDINGS.get("B2_vision_kline_depth", {})
-    print(f"\n  [Binance Vision — kline 아카이브 깊이]")
+    print("\n  [Binance Vision — kline 아카이브 깊이]")
     for sym, dt in b2.items():
         print(f"    · {sym} 4h: {dt or '확인 실패'}~현재")
 
     b3 = FINDINGS.get("B3_vision_funding", {})
-    print(f"\n  [Binance Vision — fundingRate 아카이브]")
+    print("\n  [Binance Vision — fundingRate 아카이브]")
     if "error" not in b3:
         print(f"    · 심볼: {b3.get('funding_symbols_count')}개  BTC 최초: {b3.get('btc_earliest')}")
 
     b4 = FINDINGS.get("B4_vision_datasets", {})
-    print(f"\n  [Binance Vision — 추가 데이터셋]")
+    print("\n  [Binance Vision — 추가 데이터셋]")
     for name, info in b4.items():
         status = "✅" if info.get("available") else "❌"
         print(f"    · {status} {name}: {info.get('symbol_count',0)}개 심볼")
 
     c1 = FINDINGS.get("C1_delisted_probe", {})
-    print(f"\n  [상폐 심볼 데이터 복원]")
+    print("\n  [상폐 심볼 데이터 복원]")
     for sym, r in c1.items():
         k = "✅" if r.get("kline_found") else "❌"
         f_ = "✅" if r.get("funding_found") else "❌"
         print(f"    · {sym}: kline={k} ({r.get('earliest_kline')}~{r.get('latest_kline')})  funding={f_}")
 
     # ── 수집 불가 ─────────────────────────────────────────────────────────────
-    print(f"\n▶ 수집 불가 / 제한 사항")
+    print("\n▶ 수집 불가 / 제한 사항")
 
     d1 = FINDINGS.get("D1_orderbook", {})
     book_ok = any("bookDepth" in k and v for k, v in d1.items())
-    print(f"\n  [호가창 히스토리]")
+    print("\n  [호가창 히스토리]")
     if book_ok:
-        print(f"    · ⚠️ Vision bookDepth 아카이브 존재 (파일 크기 조사 필요)")
+        print("    · ⚠️ Vision bookDepth 아카이브 존재 (파일 크기 조사 필요)")
     else:
-        print(f"    · ❌ 히스토리 호가창 수집 불가 → 비용 모델: OHLC Roll-spread 추정치 사용")
+        print("    · ❌ 히스토리 호가창 수집 불가 → 비용 모델: OHLC Roll-spread 추정치 사용")
 
     d2 = FINDINGS.get("D2_historical_exchange_info", {})
     wb = d2.get("wayback_snapshot", {})
-    print(f"\n  [과거 exchangeInfo (상폐 심볼 메타)]")
+    print("\n  [과거 exchangeInfo (상폐 심볼 메타)]")
     print(f"    · 현재 API: 비-TRADING {len(d2.get('non_trading_in_current_exchangeInfo', []))}개 포함")
     if wb.get("available"):
-        print(f"    · Wayback Machine: ✅ 아카이브 존재 → 과거 API 응답 복원 가능")
+        print("    · Wayback Machine: ✅ 아카이브 존재 → 과거 API 응답 복원 가능")
     else:
-        print(f"    · Wayback Machine: ❌ 없음 → Vision S3 + kline 기반 복원이 주 전략")
+        print("    · Wayback Machine: ❌ 없음 → Vision S3 + kline 기반 복원이 주 전략")
 
     # ── 아키텍처 권고 ─────────────────────────────────────────────────────────
-    print(f"\n▶ Ledger 구성 전략 (탐색 결과 기반)")
+    print("\n▶ Ledger 구성 전략 (탐색 결과 기반)")
     print("""
   1. 현재 심볼 상장일 → exchangeInfo.onboardDate (정확)
   2. 전체 심볼 목록   → Vision S3 klines/ 디렉토리 XML 목록 (상폐 포함)

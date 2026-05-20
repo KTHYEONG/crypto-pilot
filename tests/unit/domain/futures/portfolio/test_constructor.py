@@ -4,13 +4,13 @@ import sys
 from pathlib import Path
 
 import numpy as np
-import pytest
 
 project_root = str(Path(__file__).resolve().parents[5])
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
 from src.domain.futures.portfolio.portfolio_constructor import precompute_rebalance_weights
+
 
 def _base_inputs() -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     n_bars = 3

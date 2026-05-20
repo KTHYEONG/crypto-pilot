@@ -53,7 +53,7 @@ class TestBoundaryContract:
         reg.validate()
 
     def test_oos_start_bar_is_after_purge(self) -> None:
-        """purge 적용 후 IS 말단 ~ OOS 시작 사이 데이터 사용 불가 검증.
+        """Purge 적용 후 IS 말단 ~ OOS 시작 사이 데이터 사용 불가 검증.
 
         IS 마지막 bar = T, purge_bars = 24 → OOS 첫 사용 가능 bar = T + 24.
         """

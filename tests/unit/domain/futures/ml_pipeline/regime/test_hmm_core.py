@@ -14,6 +14,7 @@ from src.domain.futures.ml_pipeline.regime.jax_hmm import (
     JAXMultivariateHMM,
 )
 
+
 def _synthetic_obs(n: int, seed: int = 7) -> pd.DataFrame:
     rng = np.random.default_rng(seed)
     t = np.arange(n, dtype=np.float64)
