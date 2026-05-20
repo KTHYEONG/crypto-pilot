@@ -1,14 +1,11 @@
 # data
 data/
 
-# cursor
-.cursor/
+# antigravity cli
+.antigravitycli/
 
 # .vscode
 .vscode/
-
-# gemini
-.gemini/
 
 # cache
 .spot_signal_cache/
