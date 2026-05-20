@@ -10,7 +10,6 @@ from dataclasses import dataclass
 
 import numpy as np
 
-
 # 6M ≈ 182.5일 (밀리초 단위)
 _MS_PER_DAY: int = 86_400_000
 _DAYS_PER_6M: float = 182.5
@@ -25,6 +24,7 @@ class AtomicBlockConfig:
         block_months: 블록 기간 (고정 6M).
         min_pass_ratio: 통과 블록 비율 최소값.
         required_min_blocks: 판정을 위한 최소 block 수.
+
     """
 
     block_months: int = 6
@@ -44,6 +44,7 @@ class AtomicBlockResult:
         block_log_tws: 각 블록의 log Terminal Wealth.
         worst_block_mdd: 최악 블록의 최대 낙폭 (0~1 scale).
         median_log_growth: 중앙값 log TW.
+
     """
 
     n_blocks: int
@@ -71,6 +72,7 @@ def build_atomic_blocks(
 
     Returns:
         list of (start_idx, end_idx) — end_idx는 exclusive.
+
     """
     ts = np.asarray(timestamps, dtype=np.int64)
     n = int(ts.size)
@@ -142,6 +144,7 @@ def evaluate_atomic_blocks(
 
     Returns:
         AtomicBlockResult with pass/fail 판정.
+
     """
     n_blocks = len(equity_curves)
 

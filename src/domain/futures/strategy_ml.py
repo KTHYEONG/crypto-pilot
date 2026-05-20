@@ -6,14 +6,12 @@ import numpy as np
 import pandas as pd
 
 from config.opt_config import OPT_FUTURES_CONFIG
-
+from src.core.indicators.indicators import get_indicator_engine
 from src.domain.futures.portfolio.signal_composer import (
     apply_linear_signal_composer_scores,
     composer_sigma_lookback_bars,
     rolling_per_bar_return_std,
 )
-
-from src.core.indicators.indicators import get_indicator_engine
 from src.strategy_base import PipelineStrategyBase
 
 _logger = logging.getLogger(__name__)
