@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import numpy as np
-import pytest
 
 from src.domain.futures.portfolio.portfolio_constructor import (
     PortfolioCaps,
@@ -21,7 +20,7 @@ class TestCapsProjection:
         return PortfolioCaps()
 
     def test_gross_cap_enforced(self) -> None:
-        """gross = 3.6 > 3.0 → 투영 후 gross ≤ 3.0."""
+        """Gross = 3.6 > 3.0 → 투영 후 gross ≤ 3.0."""
         w = np.array([0.6] * 6, dtype=np.float64)  # gross = 3.6
         btc_beta = np.zeros(6, dtype=np.float64)
         sigma_port = 0.01
@@ -38,7 +37,7 @@ class TestCapsProjection:
         )
 
     def test_net_cap_enforced(self) -> None:
-        """net = 1.6 >> 0.30 → 투영 후 |net| ≤ 0.30."""
+        """Net = 1.6 >> 0.30 → 투영 후 |net| ≤ 0.30."""
         w = np.array([0.2] * 8, dtype=np.float64)  # net = 1.6
         btc_beta = np.zeros(8, dtype=np.float64)
         sigma_port = 0.01

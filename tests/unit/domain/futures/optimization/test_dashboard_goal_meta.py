@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-import pandas as pd
 from typing import Any, cast
+
+import pandas as pd
 
 project_root = str(Path(__file__).resolve().parents[5])
 if project_root not in sys.path:

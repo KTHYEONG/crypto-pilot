@@ -5,10 +5,10 @@ from optuna.distributions import FloatDistribution
 
 from src.domain.futures.optimization.optimizer import MLPhaseDContext, _suggest_ml_joint_nsga2
 from src.domain.futures.optimization.phase_param_space import (
-    V43_RISK_PARAM_KEYS,
-    V43_SIGNAL_PARAM_KEYS,
     V43_CORE_PARAM_KEYS,
     V43_FIXED_DEFAULTS,
+    V43_RISK_PARAM_KEYS,
+    V43_SIGNAL_PARAM_KEYS,
     suggest_joint_params,
 )
 

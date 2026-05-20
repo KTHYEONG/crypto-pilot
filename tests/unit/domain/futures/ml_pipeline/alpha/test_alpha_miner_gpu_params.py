@@ -2,13 +2,12 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-import pytest
 
 project_root = str(Path(__file__).resolve().parents[6])
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-from src.domain.futures.ml_pipeline.alpha.miner import MLAlphaMiner, _GPU_AVAILABLE
+from src.domain.futures.ml_pipeline.alpha.miner import _GPU_AVAILABLE, MLAlphaMiner
 
 
 def test_alpha_miner_has_get_lgbm_params_and_gpu_safety_flags():
@@ -16,7 +15,7 @@ def test_alpha_miner_has_get_lgbm_params_and_gpu_safety_flags():
 
     assert hasattr(miner, "_get_lgbm_params"), "MLAlphaMiner must define _get_lgbm_params"
 
-    getter = getattr(miner, "_get_lgbm_params")
+    getter = miner._get_lgbm_params
     assert callable(getter)
 
     params = getter(seed_offset=0)
