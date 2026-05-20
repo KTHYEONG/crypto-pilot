@@ -32,6 +32,7 @@ class CacheManager:
 
         Returns:
             A short 8-character hash string.
+
         """
         dna = dependencies.copy()
         

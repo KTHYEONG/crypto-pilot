@@ -18,6 +18,7 @@ class PreparedBacktestInputs:
     execution_mode: str
     exec_bar_start_1m_idx: np.ndarray | None = None
     exec_bar_end_1m_idx: np.ndarray | None = None
+    mark_price_1m: np.ndarray | None = None
 
 
 def _aggregate_1h_to_4h_block(arr: np.ndarray, mode: str) -> np.ndarray:
@@ -155,6 +156,7 @@ def _build_optional_intrabar_window_mapping(
 def prepare_backtest_inputs(
     aligned_data: dict[str, np.ndarray],
     params: dict[str, Any],
+    mark_price_1m_raw: np.ndarray | None = None,
 ) -> PreparedBacktestInputs:
     """Prepare aligned arrays for unified backtest execution paths."""
     out = dict(aligned_data)
@@ -165,10 +167,23 @@ def prepare_backtest_inputs(
     if start_idx is not None and end_idx is not None:
         out["exec_bar_start_1m_idx"] = start_idx
         out["exec_bar_end_1m_idx"] = end_idx
+
+    mark_price_1m = None
+    if mark_price_1m_raw is not None:
+        exec_open_1m = out.get("exec_open_1m")
+        if exec_open_1m is not None:
+            if mark_price_1m_raw.shape != exec_open_1m.shape:
+                raise ValueError(
+                    f"mark_price_1m_raw shape {mark_price_1m_raw.shape} "
+                    f"does not match exec_open_1m shape {exec_open_1m.shape}"
+                )
+        mark_price_1m = mark_price_1m_raw
+
     return PreparedBacktestInputs(
         aligned_data=out,
         execution_mode=execution_mode,
         exec_bar_start_1m_idx=start_idx,
         exec_bar_end_1m_idx=end_idx,
+        mark_price_1m=mark_price_1m,
     )
 
