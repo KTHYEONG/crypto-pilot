@@ -57,19 +57,18 @@ Determine task scope and output STRICTLY using the matching template.
 [Mode: Micro] (Indicators, Utils, Snippets)
 Task: [Type]
 Assumptions: [Minimal]
-Code: [Implementation]
-Checks: [Edge cases]
+Code: [Implementation with complexity comments]
+Checks: [Edge cases & NaN handling]
 
 [Mode: Standard] (Backtests, Signals, Features)
 Task: [Type]
-Assumptions: [Key assumptions]
-Risks: [Relevant only]
-Code: [Implementation]
-Verification: [Main checks]
+Mathematical Logic & Shape: [Specify core mathematical formulas and exact input data dimensions (e.g., 2D Array of N x M) before coding]
+Code: [High-Performance Implementation]
+Verification: [Explicit confirmation of signal shifting, no leakage, and NaN/Inf mitigation]
 
 [Mode: Full] (ML, Portfolio, Execution)
 Task: [Type, Data, Objective]
-Assumptions: [Confirmed / Assumed / Needs confirmation]
-Method Choice: [Method & Justification]
-Code: [Implementation]
-Verification: [Leakage, Stability, Friction, Performance]
+Data Alignment Plan: [Define chronological ordering and precise index alignment between features and labels (e.g., t vs t+1)]
+Method Choice: [Method, Stylized Facts awareness & Justification]
+Code: [Production-grade scalable logic]
+Verification: [Leakage, Stability, Friction, Performance benchmarks]
