@@ -1,13 +1,15 @@
 import numpy as np
 import pandas as pd
 import pytest
+
+from src.core.optimization.opt_utils import compute_segment_merge_index
 from src.domain.futures.ml_pipeline.features.engineering import (
     build_gp_input_features,
     build_hmm_input_features,
     build_systemic_hmm_features,
 )
-from src.core.optimization.opt_utils import compute_segment_merge_index
 from src.domain.futures.optimization.optimizer import inject_cs_momentum_ranks
+
 
 @pytest.fixture
 def sample_ohlcv() -> pd.DataFrame:
@@ -123,8 +125,7 @@ def test_systemic_hmm_features_lookahead_bias(sample_ohlcv: pd.DataFrame) -> Non
     )
 
 def test_multi_timeframe_merge_leak(sample_ohlcv: pd.DataFrame) -> None:
-    """
-    CRITICAL: Verify that merging daily data into hourly data doesn't leak 'today's' daily close.
+    """CRITICAL: Verify that merging daily data into hourly data doesn't leak 'today's' daily close.
     In crypto, 1d bar T represents data from T 00:00 to T+1 00:00.
     At time T 10:00, we should ONLY see 1d bar T-1.
     """
@@ -230,8 +231,7 @@ def test_backtest_alignment_and_signals(sample_ohlcv: pd.DataFrame) -> None:
     assert len(master_index) == len(df)
     
 def test_gp_alpha_mining_lookahead_mock():
-    """
-    Speculative: Check if MLAlphaMiner's target creation has a shift bug.
+    """Speculative: Check if MLAlphaMiner's target creation has a shift bug.
     Alphas should predict FUTURE returns, not current ones.
     """
     from src.domain.futures.ml_pipeline.features.cross_sectional import CrossSectionalPipelineUtils

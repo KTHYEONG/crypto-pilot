@@ -1,7 +1,8 @@
-import json
 import ccxt
 import pytest
+
 from config.settings import BINANCE_API_KEY, BINANCE_SECRET
+
 
 @pytest.mark.integration
 def test_binance_algo_orders_fetch():

@@ -1,7 +1,8 @@
-import pandas as pd
-import numpy as np
 import sys
 from pathlib import Path
+
+import numpy as np
+import pandas as pd
 import pytest
 
 # Add project root to sys.path
@@ -9,9 +10,14 @@ project_root = str(Path(__file__).resolve().parents[6])
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-from src.execution.opt_main_futures import load_futures_data_maps_for_symbols, get_quarterly_window
+from config.opt_config import (
+    FUTURES_ANCHOR_SYMBOLS,
+    FUTURES_MACRO_INDEX_SYMBOLS,
+    OPT_FUTURES_CONFIG,
+)
 from src.domain.futures.ml_pipeline.features.cross_sectional import CrossSectionalPipelineUtils
-from config.opt_config import OPT_FUTURES_CONFIG, FUTURES_ANCHOR_SYMBOLS, FUTURES_MACRO_INDEX_SYMBOLS
+from src.execution.opt_main_futures import get_quarterly_window, load_futures_data_maps_for_symbols
+
 
 @pytest.mark.skipif(not Path("data").exists(), reason="Data directory not found")
 def test_target_creation_logic():

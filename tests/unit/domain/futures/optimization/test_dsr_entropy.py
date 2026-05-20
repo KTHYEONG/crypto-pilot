@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import numpy as np
-import pytest
 
 from src.domain.futures.optimization.evaluator import calc_n_trials_eff_entropy
 
@@ -38,7 +37,7 @@ class TestDsrEntropy:
         )
 
     def test_pruned_weight_reduces_n_eff(self) -> None:
-        """pruned trial weight < 1 적용 시 n_eff 감소."""
+        """Pruned trial weight < 1 적용 시 n_eff 감소."""
         rng = np.random.default_rng(42)
         sigs = rng.normal(0, 1, (100, 11))
 

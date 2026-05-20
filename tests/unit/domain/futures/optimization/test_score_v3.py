@@ -6,10 +6,8 @@
 from __future__ import annotations
 
 import inspect
-import math
 
 import numpy as np
-import pytest
 
 from src.domain.futures.optimization.evaluator import compute_v3_score
 

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -34,7 +34,7 @@ class _FakeStudy:
     study_name: str
     trials: list[_FakeTrial]
 
-    def get_trials(self, deepcopy: bool = False):  # noqa: ARG002
+    def get_trials(self, deepcopy: bool = False):
         return list(self.trials)
 
 

@@ -8,7 +8,6 @@ from __future__ import annotations
 import inspect
 
 import numpy as np
-import pytest
 
 from src.domain.futures.portfolio.portfolio_constructor import (
     KELLY_FRACTION,
@@ -21,7 +20,7 @@ class TestFractionalKelly:
     """_kelly_scaled = _kelly_raw × 0.25 검증."""
 
     def test_scaled_equals_raw_times_fraction(self) -> None:
-        """full Kelly 대비 0.25x 검증."""
+        """Full Kelly 대비 0.25x 검증."""
         mu = np.array([0.001, -0.0005, 0.002, 0.0, -0.001])
         sigma_diag = np.array([0.01, 0.015, 0.008, 0.012, 0.02])
 
