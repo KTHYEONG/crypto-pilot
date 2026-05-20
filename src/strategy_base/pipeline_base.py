@@ -11,8 +11,7 @@ from .core import StrategyBase
 
 
 class PipelineStrategyBase(StrategyBase):
-    """
-    Base class for plugin-based strategy pipelines.
+    """Base class for plugin-based strategy pipelines.
     Domain-specific strategies (Spot/Futures) must override generate_signals.
     """
 
