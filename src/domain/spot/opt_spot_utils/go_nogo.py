@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from statistics import median
-from typing import Any, Dict, List, Sequence, Tuple
+from typing import Any
 
 
 @dataclass
@@ -18,10 +19,10 @@ class CheckRecord:
 @dataclass
 class GoNoGoResult:
     passed: bool
-    details: Dict[str, bool]
+    details: dict[str, bool]
     summary: str
-    checks: List[CheckRecord] = field(default_factory=list)
-    advisory: Dict[str, Any] = field(default_factory=dict)
+    checks: list[CheckRecord] = field(default_factory=list)
+    advisory: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -120,7 +121,7 @@ def run_pbo_gate(
 
 def run_multi_window_oos_gate(
     *,
-    window_results: List[Dict[str, Any]],
+    window_results: list[dict[str, Any]],
     min_positive_windows: int,
     min_median_cagr_pct: float,
     max_worst_mdd_pct: float,
@@ -158,11 +159,11 @@ def run_multi_window_oos_gate(
 
 
 def format_regime_oos_diagnostic_block(
-    regime_metrics: Dict[str, Dict[str, float]],
+    regime_metrics: dict[str, dict[str, float]],
     stress_mdd_warn_pct: float,
 ) -> str:
     """Advisory TIER 4 text block for deployment log."""
-    lines: List[str] = [
+    lines: list[str] = [
         "=" * 71,
         " [TIER 4. REGIME ROBUSTNESS DIAGNOSTIC (advisory)]",
         "=" * 71,
@@ -189,9 +190,9 @@ def format_regime_oos_diagnostic_block(
 
 
 def run_go_nogo_check(
-    cv_fold_scores: List[float],
+    cv_fold_scores: list[float],
     holdout_score: float,
-    oos_romad_scores: List[float],
+    oos_romad_scores: list[float],
     max_mdd_pct: float,
     tail_ratio: float,
     long_count: int,
@@ -209,15 +210,15 @@ def run_go_nogo_check(
     min_trades_req = 5
     trades_pass: bool = total_trades >= min_trades_req
 
-    details: Dict[str, bool] = {
+    details: dict[str, bool] = {
         "1. Out-of-Sample Growth (CAGR > 0%)": growth_pass,
         f"2. Volatility Drag (MDD <= {mdd_limit_pct}%)": mdd_pass,
         f"3. Tail Ratio (>= {tail_ratio_min})": tr_pass,
         f"4. Stat Edge (Trades >= {min_trades_req})": trades_pass,
     }
     all_passed = all(details.values())
-    summary_lines: List[str] = ["[Spot Holdout Safety]"]
-    metric_values: Dict[str, str] = {
+    summary_lines: list[str] = ["[Spot Holdout Safety]"]
+    metric_values: dict[str, str] = {
         "1. Out-of-Sample Growth (CAGR > 0%)": f"CAGR: {oos_cagr:.2f}%",
         f"2. Volatility Drag (MDD <= {mdd_limit_pct}%)": f"MDD: {abs(max_mdd_pct):.2f}%",
         f"3. Tail Ratio (>= {tail_ratio_min})": f"Tail: {tail_ratio:.2f}",
@@ -243,13 +244,12 @@ def run_portfolio_discovery_veto(
     psr_min: float = 0.5,
     dsr_min: float = -1.0,
 ) -> GoNoGoResult:
-    """
-    Discovery veto: PSR hard; DSR soft floor; P10 GMGR >= -0.001 (noise tolerance).
+    """Discovery veto: PSR hard; DSR soft floor; P10 GMGR >= -0.001 (noise tolerance).
     """
     psr_ok = psr >= psr_min
     dsr_ok = dsr >= dsr_min
     gmgr_ok = p10_gmgr >= -0.001
-    details: Dict[str, bool] = {
+    details: dict[str, bool] = {
         "psr_hard": psr_ok,
         "dsr_soft": dsr_ok,
         "p10_gmgr_positive": gmgr_ok,
@@ -324,8 +324,7 @@ def run_holdout_portfolio_shared_cash(
     pf_min: float = 1.3,
     calmar_min: float = 1.5,
 ) -> GoNoGoResult:
-    """
-    Shared-cash holdout: terminal wealth, CAGR floor, MDD, CVaR, tail ratio,
+    """Shared-cash holdout: terminal wealth, CAGR floor, MDD, CVaR, tail ratio,
     PF, Calmar, HWM recovery, alpha decay.
     """
     c_tw = min_path_terminal_wealth_ratio > tw_need
@@ -420,8 +419,7 @@ def run_go_nogo_holdout_portfolio_growth(
     pf_min: float = 1.3,
     calmar_min: float = 1.5,
 ) -> GoNoGoResult:
-    """
-    Backward-compatible: trade floor AND shared-cash screen; all must pass.
+    """Backward-compatible: trade floor AND shared-cash screen; all must pass.
     """
     tfloor = run_holdout_portfolio_trade_floor(
         portfolio_long_trades=portfolio_long_trades,
@@ -461,10 +459,10 @@ def _fmt_pass_info(ok: bool) -> str:
 
 
 # PART 3 markdown-style columns: must match separator dash counts exactly.
-_PART3_COL_WIDTHS: Tuple[int, int, int, int, int] = (11, 18, 9, 10, 8)
+_PART3_COL_WIDTHS: tuple[int, int, int, int, int] = (11, 18, 9, 10, 8)
 
 
-def _part3_symbol_table_lines(rows: Sequence[SymbolGateRow]) -> List[str]:
+def _part3_symbol_table_lines(rows: Sequence[SymbolGateRow]) -> list[str]:
     """Fixed-width symbol table: header, rule, and one row per symbol (aligned columns)."""
     w = _PART3_COL_WIDTHS
     header = (
@@ -488,7 +486,7 @@ def _part3_symbol_table_lines(rows: Sequence[SymbolGateRow]) -> List[str]:
         + "-" * w[4]
         + " |"
     )
-    out: List[str] = [header, rule]
+    out: list[str] = [header, rule]
     for row in rows:
         sym = row.symbol if len(row.symbol) <= w[0] else row.symbol[: w[0] - 2] + ".."
         pnl = f"{row.net_cagr_pct:+.1f}%"
@@ -535,7 +533,7 @@ def run_final_deployment_report(ctx: FinalDeploymentReportInput) -> str:
     pbo_disp = f"{ctx.pbo:.4f}" if math.isfinite(ctx.pbo) else "N/A"
     rho_disp = f"{ctx.spearman_rho:.4f}" if math.isfinite(ctx.spearman_rho) else "N/A"
 
-    lines: List[str] = [
+    lines: list[str] = [
         "=" * 71,
         " [TIER 1. CPCV STATISTICAL EDGE RIGOR]",
         "=" * 71,

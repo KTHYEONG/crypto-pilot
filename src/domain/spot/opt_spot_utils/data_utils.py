@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-from typing import Dict, Tuple
 
 import numpy as np
 import pandas as pd
@@ -21,7 +20,7 @@ def _segment_with_context(
     full_signal_df: pd.DataFrame,
     exec_start_idx: int,
     exec_end_idx: int,
-) -> Tuple[pd.DataFrame, int]:
+) -> tuple[pd.DataFrame, int]:
     slice_start = max(0, int(exec_start_idx) - 1)
     slice_end = max(slice_start, int(exec_end_idx))
     segment = full_signal_df.iloc[slice_start:slice_end].copy()
@@ -31,13 +30,13 @@ def _segment_with_context(
     return segment, execution_start_idx
 
 
-def _dataframe_to_symbol_arrays(sig_df: pd.DataFrame) -> Dict[str, np.ndarray]:
+def _dataframe_to_symbol_arrays(sig_df: pd.DataFrame) -> dict[str, np.ndarray]:
     # volume: required for shared-cash Numba ADV anchor (concurrency slippage scaling).
     required = ("open", "high", "low", "close", "volume", "atr", "long_entry_signal", "entry_upper")
     for c in required:
         if c not in sig_df.columns:
             raise ValueError(f"Missing column {c} for shared-cash segment.")
-    out: Dict[str, np.ndarray] = {}
+    out: dict[str, np.ndarray] = {}
     for c in required:
         out[c] = sig_df[c].to_numpy(dtype=np.float64)
     if "regime_risk_mult" in sig_df.columns:
@@ -57,7 +56,7 @@ def _dataframe_to_symbol_arrays(sig_df: pd.DataFrame) -> Dict[str, np.ndarray]:
     return out
 
 
-def _dataframe_to_symbol_arrays_extended(sig_df: pd.DataFrame) -> Dict[str, np.ndarray]:
+def _dataframe_to_symbol_arrays_extended(sig_df: pd.DataFrame) -> dict[str, np.ndarray]:
     """Full IS arrays for shared-cash + optional slot_rank_score (views used in CPCV slices)."""
     base = _dataframe_to_symbol_arrays(sig_df)
     if "slot_rank_score" in sig_df.columns:
@@ -66,10 +65,10 @@ def _dataframe_to_symbol_arrays_extended(sig_df: pd.DataFrame) -> Dict[str, np.n
 
 
 def _slice_symbol_arrays_view(
-    full: Dict[str, np.ndarray],
+    full: dict[str, np.ndarray],
     slice_start: int,
     slice_end: int,
-) -> Dict[str, np.ndarray]:
+) -> dict[str, np.ndarray]:
     return {k: v[slice_start:slice_end] for k, v in full.items()}
 
 

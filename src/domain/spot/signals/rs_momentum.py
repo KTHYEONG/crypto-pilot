@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, ClassVar, Dict
+from typing import Any, ClassVar
 
 import numpy as np
 import pandas as pd
@@ -21,7 +21,7 @@ def _vol_adj_momentum(close: np.ndarray, period: int) -> np.ndarray:
 @register_signal
 class RSMomentumSignal:
     name: ClassVar[str] = "RS_MOMENTUM"
-    param_space: ClassVar[Dict[str, Any]] = {
+    param_space: ClassVar[dict[str, Any]] = {
         "MOMENTUM_PERIOD": {"type": "int", "low": 10, "high": 50, "step": 5},
         "MOMENTUM_LOOKBACK": {"type": "int", "low": 40, "high": 120, "step": 20},
         "MOMENTUM_THRESHOLD": {"type": "float", "low": 1.0, "high": 2.5, "step": 0.25},
@@ -29,7 +29,7 @@ class RSMomentumSignal:
         "RS_PEAK_DROP": {"type": "float", "low": 0.35, "high": 0.8, "step": 0.05},
     }
 
-    def compute(self, df: pd.DataFrame, params: Dict[str, Any]) -> SignalOutput:
+    def compute(self, df: pd.DataFrame, params: dict[str, Any]) -> SignalOutput:
         p = int(params.get("MOMENTUM_PERIOD", 20))
         lookback = int(params.get("MOMENTUM_LOOKBACK", 60))
         threshold = float(params.get("MOMENTUM_THRESHOLD", 1.0))

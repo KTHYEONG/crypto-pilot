@@ -2,27 +2,24 @@
 
 from __future__ import annotations
 
-from typing import Dict, List
-
 
 def build_cluster_balanced_symbol_weights(
-    symbols: List[str],
-    cluster_map: Dict[str, str],
-    cluster_weights: Dict[str, float],
+    symbols: list[str],
+    cluster_map: dict[str, str],
+    cluster_weights: dict[str, float],
     *,
     default_cluster: str = "default",
-) -> Dict[str, float]:
-    """
-    Per-symbol weights: cluster_weight / count(symbols in cluster), renormalized to sum 1.
+) -> dict[str, float]:
+    """Per-symbol weights: cluster_weight / count(symbols in cluster), renormalized to sum 1.
     """
     if not symbols:
         return {}
-    counts: Dict[str, int] = {}
+    counts: dict[str, int] = {}
     for sym in symbols:
         cluster = cluster_map.get(sym, default_cluster)
         counts[cluster] = counts.get(cluster, 0) + 1
 
-    raw: Dict[str, float] = {}
+    raw: dict[str, float] = {}
     for sym in symbols:
         cluster = cluster_map.get(sym, default_cluster)
         cw = float(cluster_weights.get(cluster, 1.0 / max(len(cluster_weights), 1)))

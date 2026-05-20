@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import Any, Dict, Mapping, Protocol, Sequence
+from collections.abc import Mapping, Sequence
+from typing import Any, Protocol
 
 import optuna
 
@@ -11,7 +12,7 @@ from config.opt_config import (
 )
 
 
-def build_full_discovery_space() -> Dict[str, Any]:
+def build_full_discovery_space() -> dict[str, Any]:
     """Union of signal / regime / sizing plugin spaces + engine + shared keys."""
     from src.domain.spot.regimes import REGIME_REGISTRY
     from src.domain.spot.signals import SIGNAL_REGISTRY
@@ -20,7 +21,7 @@ def build_full_discovery_space() -> Dict[str, Any]:
     sizing_choices = tuple(
         sorted(k for k in SIZING_REGISTRY.keys() if k not in SPOT_EXCLUDED_SIZING_METHODS)
     )
-    out: Dict[str, Any] = {
+    out: dict[str, Any] = {
         "SIGNAL_TYPE": {
             "type": "categorical",
             "choices": tuple(sorted(SIGNAL_REGISTRY.keys())),
@@ -53,7 +54,7 @@ def build_full_discovery_space() -> Dict[str, Any]:
     return out
 
 
-def build_combined_param_space(signal: str, regime: str, sizing: str) -> Dict[str, Any]:
+def build_combined_param_space(signal: str, regime: str, sizing: str) -> dict[str, Any]:
     from src.domain.spot.regimes import REGIME_REGISTRY
     from src.domain.spot.signals import SIGNAL_REGISTRY
     from src.domain.spot.sizing import SIZING_REGISTRY
@@ -61,7 +62,7 @@ def build_combined_param_space(signal: str, regime: str, sizing: str) -> Dict[st
     if sizing in SPOT_EXCLUDED_SIZING_METHODS:
         raise ValueError(f"SIZING_METHOD {sizing!r} is excluded from spot optimization.")
 
-    space: Dict[str, Any] = {}
+    space: dict[str, Any] = {}
     space["SIGNAL_TYPE"] = {"type": "categorical", "choices": (signal,)}
     space["REGIME_TYPE"] = {"type": "categorical", "choices": (regime,)}
     space["SIZING_METHOD"] = {"type": "categorical", "choices": (sizing,)}
@@ -87,7 +88,7 @@ class _Stage1ComboLike(Protocol):
     sizing: str
 
 
-def build_multi_combo_param_space(tops: Sequence[_Stage1ComboLike]) -> Dict[str, Any]:
+def build_multi_combo_param_space(tops: Sequence[_Stage1ComboLike]) -> dict[str, Any]:
     """Union param space for multiple Stage1 combos — allows TPE to choose signal/regime/sizing."""
     from src.domain.spot.regimes import REGIME_REGISTRY
     from src.domain.spot.signals import SIGNAL_REGISTRY
@@ -100,7 +101,7 @@ def build_multi_combo_param_space(tops: Sequence[_Stage1ComboLike]) -> Dict[str,
     all_regs = list(dict.fromkeys(t.regime for t in tops))
     all_sizs = list(dict.fromkeys(t.sizing for t in tops))
 
-    space: Dict[str, Any] = {
+    space: dict[str, Any] = {
         "SIGNAL_TYPE": {"type": "categorical", "choices": tuple(all_sigs)},
         "REGIME_TYPE": {"type": "categorical", "choices": tuple(all_regs)},
         "SIZING_METHOD": {"type": "categorical", "choices": tuple(all_sizs)},
@@ -173,7 +174,7 @@ def _iter_param_names_define_by_run(space: Mapping[str, Any], signal_type: str) 
 def _suggest_one(
     trial: optuna.Trial,
     space: Mapping[str, Any],
-    params: Dict[str, Any],
+    params: dict[str, Any],
     param_name: str,
 ) -> None:
     if param_name not in space:
@@ -194,12 +195,12 @@ def _suggest_one(
 
 def suggest_params_spot(
     trial: optuna.Trial,
-    space: Dict[str, Any],
+    space: dict[str, Any],
     tf: str,
     *,
-    locked: Dict[str, Any] | None = None,
-) -> Dict[str, Any]:
-    params: Dict[str, Any] = {**dict(locked or {}), "TIMEFRAME": tf}
+    locked: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    params: dict[str, Any] = {**dict(locked or {}), "TIMEFRAME": tf}
 
     if "SIGNAL_TYPE" not in space:
         raise ValueError("space must contain SIGNAL_TYPE for spot optimization.")
