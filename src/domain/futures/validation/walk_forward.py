@@ -47,6 +47,8 @@ class WalkForwardResult:
     ergodicity_dev_pct: float
     passed: bool
     failures: list[str]
+    dsr: float = 1.0
+    funding_drag_ratio: float = 0.0
     leg_adaptation_logs: tuple[dict[str, Any], ...] = ()
 
 
@@ -75,6 +77,8 @@ def mirror_walk_forward_result_from_awf_user_attrs(
             ergodicity_dev_pct=0.0,
             passed=False,
             failures=["WF_AWFMIRROR_EMPTY"],
+            dsr=1.0,
+            funding_drag_ratio=0.0,
             leg_adaptation_logs=(),
         )
 
@@ -83,6 +87,9 @@ def mirror_walk_forward_result_from_awf_user_attrs(
     worst_tw = float(np.min(arr))
     mean_tw = float(np.mean(arr))
     erg_dev = float(wf_path_ergodicity_deviation_pct(tw_legs)) if arr.size >= 2 else 0.0
+
+    dsr = float(user_attrs.get("dsr", 1.0))
+    funding_drag = float(user_attrs.get("funding_drag_ratio", 0.0))
 
     failures: list[str] = []
     if pos_ratio < float(cfg.min_positive_leg_ratio):
@@ -93,6 +100,10 @@ def mirror_walk_forward_result_from_awf_user_attrs(
         failures.append("WF_MEAN_LEG_TW")
     if cfg.ergodicity_hard_gate_enabled and erg_dev > float(cfg.ergodicity_guideline_pct):
         failures.append("WF_ERGODICITY")
+    if dsr < float(cfg.dsr_floor):
+        failures.append("WF_DSR_FLOOR")
+    if funding_drag > float(cfg.funding_drag_ceiling):
+        failures.append("WF_FUNDING_DRAG")
 
     return WalkForwardResult(
         tw_legs=tw_legs,
@@ -102,5 +113,7 @@ def mirror_walk_forward_result_from_awf_user_attrs(
         ergodicity_dev_pct=erg_dev,
         passed=len(failures) == 0,
         failures=failures,
+        dsr=dsr,
+        funding_drag_ratio=funding_drag,
         leg_adaptation_logs=(),
     )

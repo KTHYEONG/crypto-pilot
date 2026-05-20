@@ -44,6 +44,7 @@ def apply_hmm_regime_exposure(base_exposure: float, hmm_state: int, crisis_prob:
         0.5 * base_exposure if hmm_state == 2 (BEAR)
         0.7 * base_exposure if hmm_state == 3 (CHOP)
         base_exposure otherwise (BULL_CALM=0, BULL_VOL_UP=1)
+
     """
     if crisis_prob > 0.5 or int(hmm_state) == 4:
         return 0.0
