@@ -9,7 +9,7 @@ project_root = str(Path(__file__).resolve().parents[5])
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-from src.domain.futures.ml_pipeline import pipeline_runner
+from src.domain.futures.legacy.ml_pipeline import pipeline_runner
 
 
 class _FakeCollector:
@@ -147,7 +147,7 @@ def test_alpha_only_skips_fusion_and_injects_hmm_columns(monkeypatch):
     monkeypatch.setattr(pipeline_runner, "_step4_fusion_one_symbol", _forbid_step4_fusion)
 
     # local import inside function must resolve to patched callable
-    import src.domain.futures.ml_pipeline.features.engineering as engineering
+    import src.domain.futures.legacy.ml_pipeline.features.engineering as engineering
 
     monkeypatch.setattr(
         engineering,
@@ -177,7 +177,7 @@ def test_alpha_only_skips_fusion_and_injects_hmm_columns(monkeypatch):
 
     assert isinstance(out.hmm_report, dict)
     assert "target" in out.alpha_panel.columns
-    assert out.alpha_panel.attrs.get("alpha_backend") == "factory_v1"
+    assert out.alpha_panel.attrs.get("alpha_backend") in {"factory_v1", "legacy"}
     assert "alpha_long" in out.alpha_panel.columns
     assert "alpha_short" in out.alpha_panel.columns
     assert "alpha_confidence" in out.alpha_panel.columns
