@@ -426,7 +426,7 @@ def run_oos_margin_shared_portfolio(
     oos_start_idx: int | None = None,
 ) -> dict[str, Any]:
     # Import locally to avoid circular dependencies if any
-    from src.domain.futures.strategy_ml import FuturesMLStrategy
+    from src.domain.futures.strategy_runtime.bridge import FuturesMLStrategy
 
     from .data_aligner import _segment_with_context, align_data_for_2d_engine
 

@@ -11,11 +11,11 @@ project_root = str(Path(__file__).resolve().parents[5])
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-import src.domain.futures.alpha_factory.factory as factory_module
-from src.domain.futures.alpha_factory import AlphaFactoryV1
-from src.domain.futures.alpha_factory.config import AlphaFactoryConfig
-from src.domain.futures.alpha_factory.contracts import RegimeDecision, SleeveScores, SleeveWeights
-from src.domain.futures.alpha_factory.features import extract_alpha_features
+import src.domain.futures.legacy.alpha_factory.factory as factory_module
+from src.domain.futures.legacy.alpha_factory import AlphaFactoryV1
+from src.domain.futures.legacy.alpha_factory.config import AlphaFactoryConfig
+from src.domain.futures.legacy.alpha_factory.contracts import RegimeDecision, SleeveScores, SleeveWeights
+from src.domain.futures.legacy.alpha_factory.features import extract_alpha_features
 
 
 def _build_panel_df() -> pd.DataFrame:

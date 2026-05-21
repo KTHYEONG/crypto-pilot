@@ -11,8 +11,8 @@ project_root = str(Path(__file__).resolve().parents[6])
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-import src.domain.futures.ml_pipeline.alpha.miner as miner_module
-from src.domain.futures.ml_pipeline.alpha.miner import MLAlphaMiner
+import src.domain.futures.legacy.ml_pipeline.alpha.miner as miner_module
+from src.domain.futures.legacy.ml_pipeline.alpha.miner import MLAlphaMiner
 
 
 def test_miner_labels_preparation():

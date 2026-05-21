@@ -9,7 +9,7 @@ project_root = str(Path(__file__).resolve().parents[5])
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-from src.domain.futures.ml_pipeline import pipeline_runner
+from src.domain.futures.legacy.ml_pipeline import pipeline_runner
 
 
 def _build_panel_df() -> pd.DataFrame:

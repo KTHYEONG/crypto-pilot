@@ -7,7 +7,7 @@ project_root = str(Path(__file__).resolve().parents[6])
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-from src.domain.futures.ml_pipeline.alpha.miner import _GPU_AVAILABLE, MLAlphaMiner
+from src.domain.futures.legacy.ml_pipeline.alpha.miner import _GPU_AVAILABLE, MLAlphaMiner
 
 
 def test_alpha_miner_has_get_lgbm_params_and_gpu_safety_flags():

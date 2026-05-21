@@ -81,7 +81,7 @@ from config.settings import (  # noqa: E402
 from src.core.exchange.binance_client import BinanceClient, OrderRateLimiter  # noqa: E402
 from src.core.utils.components import HealthCheckManager, TradeHistoryDB  # noqa: E402
 from src.core.utils.utils import setup_logger  # noqa: E402
-from src.domain.futures.strategy_ml import FuturesMLStrategy  # noqa: E402
+from src.domain.futures.strategy_runtime.bridge import FuturesMLStrategy  # noqa: E402
 
 # Oracle Cloud 최적화 (선택적)
 try:

@@ -28,9 +28,9 @@ from config.opt_config import (  # noqa: E402
     get_quarterly_window,
 )
 from src.core.utils.utils import setup_logger  # noqa: E402
-from src.domain.futures.ml_pipeline import run_ml_pipeline_for_universe  # noqa: E402
-from src.domain.futures.ml_pipeline.pipeline_runner import (  # noqa: E402
+from src.domain.futures.strategy_runtime.bridge import (  # noqa: E402
     MLPipelineOutput,
+    run_ml_pipeline_for_universe,
     merge_ml_output_into_is_and_oos,
 )
 from src.domain.futures.optimization.candidate_selector import (  # noqa: E402
