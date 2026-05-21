@@ -10,8 +10,8 @@ project_root = str(Path(__file__).resolve().parents[6])
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-import src.domain.futures.ml_pipeline.alpha.component_filter as component_filter
-from src.domain.futures.ml_pipeline.alpha.component_filter import filter_alpha_components
+import src.domain.futures.legacy.ml_pipeline.alpha.component_filter as component_filter
+from src.domain.futures.legacy.ml_pipeline.alpha.component_filter import filter_alpha_components
 
 
 def _build_panel_and_alpha(

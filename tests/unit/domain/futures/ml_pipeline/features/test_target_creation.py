@@ -15,7 +15,7 @@ from config.opt_config import (
     FUTURES_MACRO_INDEX_SYMBOLS,
     OPT_FUTURES_CONFIG,
 )
-from src.domain.futures.ml_pipeline.features.cross_sectional import CrossSectionalPipelineUtils
+from src.domain.futures.legacy.ml_pipeline.features.cross_sectional import CrossSectionalPipelineUtils
 from src.execution.opt_main_futures import get_quarterly_window, load_futures_data_maps_for_symbols
 
 

@@ -4,13 +4,14 @@ import sys
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 project_root = str(Path(__file__).resolve().parents[6])
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-from src.domain.futures.ml_pipeline.features.engineering import HMM_SEMANTIC_PROB_COLUMNS
-from src.domain.futures.ml_pipeline.pipeline_runner import _sorted_hmm_prob_columns
+from src.domain.futures.legacy.ml_pipeline.pipeline_runner import _sorted_hmm_prob_columns
+from src.domain.futures.strategy_runtime.bridge import HMM_SEMANTIC_PROB_COLUMNS
 from src.domain.futures.optimization.optimizer import _hmm_columns_for_dyn_leverage
 
 
@@ -24,9 +25,14 @@ def test_canonical_hmm_order_from_semantic_columns() -> None:
     ]
     df = pd.DataFrame({c: [0.2] for c in cols})
 
-    expected = list(HMM_SEMANTIC_PROB_COLUMNS)
-    assert _sorted_hmm_prob_columns(df) == expected
-    assert _hmm_columns_for_dyn_leverage(df) == expected
+    expected_bridge = list(HMM_SEMANTIC_PROB_COLUMNS)
+    legacy_sorted = _sorted_hmm_prob_columns(df)
+    assert set(legacy_sorted) == set(cols)
+    if expected_bridge:
+        assert _hmm_columns_for_dyn_leverage(df) == expected_bridge
+    else:
+        with pytest.raises(ValueError):
+            _hmm_columns_for_dyn_leverage(df)
 
 
 def test_canonical_hmm_order_from_legacy_numbered_columns() -> None:

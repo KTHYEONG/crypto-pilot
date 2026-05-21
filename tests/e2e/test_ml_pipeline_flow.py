@@ -20,8 +20,10 @@ from config.opt_config import (
     get_quarterly_window,
 )
 from config.settings import FUTURES_CACHE_DIR
-from src.domain.futures.ml_pipeline.features.engineering import HMM_SEMANTIC_PROB_COLUMNS
-from src.domain.futures.ml_pipeline.pipeline_runner import run_ml_pipeline_for_universe
+from src.domain.futures.strategy_runtime.bridge import (
+    HMM_SEMANTIC_PROB_COLUMNS,
+    run_ml_pipeline_for_universe,
+)
 from src.domain.futures.optimization.opt_data_utils import load_futures_data_maps_for_symbols
 from src.domain.futures.universe import load_or_build_universe_snapshot
 
