@@ -3,7 +3,7 @@ import pandas as pd
 import pytest
 
 from src.core.optimization.opt_utils import compute_segment_merge_index
-from src.domain.futures.ml_pipeline.features.engineering import (
+from src.domain.futures.legacy.ml_pipeline.features.engineering import (
     build_gp_input_features,
     build_hmm_input_features,
     build_systemic_hmm_features,
@@ -234,7 +234,7 @@ def test_gp_alpha_mining_lookahead_mock():
     """Speculative: Check if MLAlphaMiner's target creation has a shift bug.
     Alphas should predict FUTURE returns, not current ones.
     """
-    from src.domain.futures.ml_pipeline.features.cross_sectional import CrossSectionalPipelineUtils
+    from src.domain.futures.legacy.ml_pipeline.features.cross_sectional import CrossSectionalPipelineUtils
     utils = CrossSectionalPipelineUtils()
     
     # Create panel with returns
@@ -260,4 +260,3 @@ def test_gp_alpha_mining_lookahead_mock():
     # The important part is that the FEATURES don't look forward. 
     # (Checked in test_gp_features_lookahead_bias)
     assert not targets.isna().all()
-

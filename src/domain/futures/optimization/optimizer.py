@@ -34,7 +34,7 @@ from src.domain.futures.backtest_engine import (
     max_hold_bars_from_time_barrier,
 )
 from src.domain.futures.backtest_preparation import prepare_backtest_inputs
-from src.domain.futures.ml_pipeline.features.engineering import HMM_SEMANTIC_PROB_COLUMNS
+from src.domain.futures.strategy_runtime.bridge import HMM_SEMANTIC_PROB_COLUMNS
 from src.domain.futures.optimization.data_aligner import (
     _build_aligned_2d_from_prebuilt,
     _dataframe_to_symbol_arrays,
@@ -69,7 +69,7 @@ from src.domain.futures.portfolio.signal_composer import (
     composer_sigma_lookback_bars,
     rolling_per_bar_return_std,
 )
-from src.domain.futures.strategy_ml import FuturesMLStrategy
+from src.domain.futures.strategy_runtime.bridge import FuturesMLStrategy
 from src.domain.futures.validation.boundary_contract import PurgeBarsRegistry
 
 _logger = logging.getLogger(__name__)
@@ -836,7 +836,7 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
         last_est_b = 1.05
 
         if use_full_leg_ml:
-            from src.domain.futures.ml_pipeline.pipeline_runner import (
+            from src.domain.futures.strategy_runtime.bridge import (
                 copy_data_maps_tf_clone,
                 merge_ml_output_into_data_maps,
                 run_ml_pipeline_for_universe,
