@@ -12,7 +12,7 @@ project_root = str(Path(__file__).resolve().parents[6])
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-from src.domain.futures.ml_pipeline.pipeline_runner import _resolve_hmm_backend_name
+from src.domain.futures.legacy.ml_pipeline.pipeline_runner import _resolve_hmm_backend_name
 
 # --- From test_hmm_backend_switch.py ---
 
@@ -45,7 +45,7 @@ def test_backend_name_falls_back_to_inferrer_model_type() -> None:
 
 def _load_student_t_backend_class() -> type | None:
     try:
-        mod = importlib.import_module("src.domain.futures.ml_pipeline.regime.student_t_hmm")
+        mod = importlib.import_module("src.domain.futures.legacy.ml_pipeline.regime.student_t_hmm")
     except ModuleNotFoundError:
         return None
 

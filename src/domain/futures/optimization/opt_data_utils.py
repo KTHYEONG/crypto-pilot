@@ -12,7 +12,7 @@ import pandas as pd
 from config.settings import FUTURES_DATA_DIR
 from src.core.optimization.opt_utils import compute_segment_merge_index
 from src.domain.futures.data_loader import DataCollector, summarize_dataframe_integrity
-from src.domain.futures.ml_pipeline.pipeline_runner import _enrich_with_gp_features
+from src.domain.futures.strategy_runtime.bridge import _enrich_with_gp_features
 from src.domain.futures.optimization.dashboard import REGIME_NAMES
 from src.domain.futures.optimization.optimizer import inject_cs_momentum_ranks
 

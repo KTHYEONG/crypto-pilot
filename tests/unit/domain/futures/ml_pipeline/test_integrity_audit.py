@@ -3,7 +3,7 @@ from __future__ import annotations
 import pandas as pd
 
 from src.domain.futures.data_loader import summarize_dataframe_integrity
-from src.domain.futures.ml_pipeline import pipeline_runner
+from src.domain.futures.legacy.ml_pipeline import pipeline_runner
 from src.domain.futures.optimization import opt_data_utils
 
 
