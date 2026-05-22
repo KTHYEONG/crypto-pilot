@@ -9,6 +9,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from config.opt_config import OPT_FUTURES_CONFIG
 from config.settings import FUTURES_DATA_DIR
 from src.core.optimization.opt_utils import compute_segment_merge_index
 from src.domain.futures.data_loader import DataCollector, summarize_dataframe_integrity
@@ -17,6 +18,179 @@ from src.domain.futures.optimization.dashboard import REGIME_NAMES
 from src.domain.futures.optimization.optimizer import inject_cs_momentum_ranks
 
 _logger: logging.Logger = logging.getLogger("opt_data_utils")
+_SUFFICIENCY_LOG_DIR = Path("logs/futures/data")
+
+
+def _tf_delta(tf: str) -> pd.Timedelta:
+    tf_l = str(tf).lower()
+    if tf_l == "1h":
+        return pd.Timedelta(hours=1)
+    if tf_l == "4h":
+        return pd.Timedelta(hours=4)
+    if tf_l == "1d":
+        return pd.Timedelta(days=1)
+    if tf_l == "1m":
+        return pd.Timedelta(minutes=1)
+    return pd.Timedelta(hours=4)
+
+
+def _bars_between(start: str, end: str, tf: str) -> int:
+    s = pd.Timestamp(start, tz="UTC")
+    e = pd.Timestamp(end, tz="UTC")
+    if e <= s:
+        return 0
+    return int((e - s) / _tf_delta(tf))
+
+
+def _resolve_warmup_bars(tf: str) -> int:
+    bars_per_day = {"1h": 24, "4h": 6, "1d": 1}.get(str(tf).lower(), 6)
+    lookback = int(OPT_FUTURES_CONFIG.get("FUTURES_MOMENTUM_LOOKBACK", 252))
+    cov = int(OPT_FUTURES_CONFIG.get("FUTURES_COV_LOOKBACK", 252))
+    sigma = int(OPT_FUTURES_CONFIG.get("FUTURES_COMPOSER_SIGMA_LOOKBACK", 252))
+    atr = int(OPT_FUTURES_CONFIG.get("FUTURES_ATR_PERIOD", 14))
+    embargo = int(OPT_FUTURES_CONFIG.get("FUTURES_EMBARGO_BARS", 0))
+    platt = int(OPT_FUTURES_CONFIG.get("FUTURES_PLATT_MIN_TRAIN_BARS", 120))
+    min_membership_warm = int(OPT_FUTURES_CONFIG.get("FUTURES_MEMBERSHIP_WARM_DAYS", 42)) * bars_per_day
+    return max(lookback, cov, sigma, atr, embargo, platt, min_membership_warm)
+
+
+def evaluate_symbol_data_sufficiency(
+    *,
+    symbol: str,
+    tf: str,
+    symbol_map: dict[str, Any],
+    fetch_start: str,
+    is_start: str,
+    oos_start: str,
+    oos_end: str,
+    require_exec_1m: bool,
+    warmup_bars_required: int,
+) -> dict[str, Any]:
+    frame = symbol_map.get(tf)
+    if not isinstance(frame, pd.DataFrame) or frame.empty or "datetime" not in frame.columns:
+        return {"symbol": symbol, "tf": tf, "pass": False, "reason": "missing_tf_frame"}
+    dt = pd.to_datetime(frame["datetime"], utc=True, errors="coerce").dropna().sort_values()
+    if dt.empty:
+        return {"symbol": symbol, "tf": tf, "pass": False, "reason": "invalid_datetime"}
+
+    first_dt = dt.iloc[0]
+    last_dt = dt.iloc[-1]
+    fetch_ok = first_dt <= pd.Timestamp(fetch_start, tz="UTC") and last_dt >= pd.Timestamp(
+        oos_end, tz="UTC"
+    )
+
+    is_start_ts = pd.Timestamp(is_start, tz="UTC")
+    oos_start_ts = pd.Timestamp(oos_start, tz="UTC")
+    oos_end_ts = pd.Timestamp(oos_end, tz="UTC")
+    bars_before_is = int((dt < is_start_ts).sum())
+    actual_is_bars = int(((dt >= is_start_ts) & (dt < oos_start_ts)).sum())
+    actual_oos_bars = int(((dt >= oos_start_ts) & (dt <= oos_end_ts)).sum())
+    required_is_bars = _bars_between(is_start, oos_start, tf)
+    required_oos_bars = _bars_between(oos_start, oos_end, tf)
+    min_is_bars = int(required_is_bars * 0.95)
+    min_oos_bars = int(required_oos_bars * 0.95)
+    warmup_ok = bars_before_is >= warmup_bars_required
+
+    exec_1m_ok = True
+    exec_1m_cov = 1.0
+    if require_exec_1m:
+        exec_1m = symbol_map.get("exec_1m")
+        if not isinstance(exec_1m, pd.DataFrame) or exec_1m.empty or "datetime" not in exec_1m.columns:
+            exec_1m_ok = False
+            exec_1m_cov = 0.0
+        else:
+            exec_dt = pd.to_datetime(exec_1m["datetime"], utc=True, errors="coerce").dropna()
+            actual_1m = int(
+                ((exec_dt >= pd.Timestamp(fetch_start, tz="UTC")) & (exec_dt <= oos_end_ts)).sum()
+            )
+            required_1m = max(1, _bars_between(fetch_start, oos_end, "1m"))
+            exec_1m_cov = float(actual_1m / required_1m)
+            exec_1m_ok = exec_1m_cov >= 0.95
+
+    pass_flag = bool(fetch_ok and warmup_ok and actual_is_bars >= min_is_bars and actual_oos_bars >= min_oos_bars and exec_1m_ok)
+    reason = "ok"
+    if not fetch_ok:
+        reason = "fetch_window_short"
+    elif not warmup_ok:
+        reason = "warmup_insufficient"
+    elif actual_is_bars < min_is_bars:
+        reason = "is_coverage_short"
+    elif actual_oos_bars < min_oos_bars:
+        reason = "oos_coverage_short"
+    elif not exec_1m_ok:
+        reason = "missing_exec_1m"
+
+    return {
+        "symbol": symbol,
+        "tf": tf,
+        "pass": pass_flag,
+        "reason": reason,
+        "fetch_ok": fetch_ok,
+        "warmup_bars": warmup_bars_required,
+        "bars_before_is": bars_before_is,
+        "required_is_bars": required_is_bars,
+        "actual_is_bars": actual_is_bars,
+        "required_oos_bars": required_oos_bars,
+        "actual_oos_bars": actual_oos_bars,
+        "exec_1m_coverage": exec_1m_cov,
+        "first_dt": first_dt.isoformat(),
+        "last_dt": last_dt.isoformat(),
+    }
+
+
+def filter_symbols_by_data_sufficiency(
+    *,
+    tf: str,
+    data_maps: dict[str, dict[str, Any]],
+    oos_data_maps: dict[str, dict[str, Any]],
+    valid_symbols: list[str],
+    fetch_start: str,
+    is_start: str,
+    oos_start: str,
+    oos_end: str,
+    require_exec_1m: bool,
+) -> tuple[list[str], dict[str, dict[str, Any]], dict[str, dict[str, Any]], pd.DataFrame, int]:
+    warmup_bars = _resolve_warmup_bars(tf)
+    rows: list[dict[str, Any]] = []
+    kept: list[str] = []
+    for symbol in valid_symbols:
+        rec = evaluate_symbol_data_sufficiency(
+            symbol=symbol,
+            tf=tf,
+            symbol_map=oos_data_maps.get(symbol, {}),
+            fetch_start=fetch_start,
+            is_start=is_start,
+            oos_start=oos_start,
+            oos_end=oos_end,
+            require_exec_1m=require_exec_1m,
+            warmup_bars_required=warmup_bars,
+        )
+        rows.append(rec)
+        _logger.info(
+            "[DATA-SUFFICIENCY] symbol=%s tf=%s fetch_ok=%s warmup_bars=%d required_is_bars=%d actual_is_bars=%d required_oos_bars=%d actual_oos_bars=%d pass=%s reason=%s exec_1m_coverage=%.3f",
+            symbol,
+            tf,
+            str(bool(rec.get("fetch_ok", False))).lower(),
+            int(rec.get("warmup_bars", 0)),
+            int(rec.get("required_is_bars", 0)),
+            int(rec.get("actual_is_bars", 0)),
+            int(rec.get("required_oos_bars", 0)),
+            int(rec.get("actual_oos_bars", 0)),
+            str(bool(rec.get("pass", False))).lower(),
+            str(rec.get("reason", "unknown")),
+            float(rec.get("exec_1m_coverage", 0.0)),
+        )
+        if bool(rec.get("pass", False)):
+            kept.append(symbol)
+    report_df = pd.DataFrame(rows)
+    _SUFFICIENCY_LOG_DIR.mkdir(parents=True, exist_ok=True)
+    if not report_df.empty:
+        report_df.to_parquet(_SUFFICIENCY_LOG_DIR / "data_sufficiency_report.parquet", index=False)
+
+    kept_set = set(kept)
+    filtered_is = {s: m for s, m in data_maps.items() if s in kept_set}
+    filtered_oos = {s: m for s, m in oos_data_maps.items() if s in kept_set}
+    return kept, filtered_is, filtered_oos, report_df, warmup_bars
 
 
 def _to_unix_ms(dt: pd.Series | pd.DatetimeIndex) -> pd.Series:

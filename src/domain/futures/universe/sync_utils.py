@@ -16,30 +16,109 @@ from src.domain.futures.universe.ledger import update_ledger
 
 logger = logging.getLogger("SyncUtils")
 
+
+def _build_sync_coverage_report_rows(
+    *,
+    mode: str,
+    start_date: date,
+    end_date: date,
+    symbols_total: int,
+    sync_tasks_total: int,
+    per_symbol_synced_days: dict[str, int],
+) -> list[dict[str, object]]:
+    """Build lightweight sync coverage rows for parquet persistence."""
+    report_rows: list[dict[str, object]] = []
+    run_ts = datetime.now().isoformat()
+    synced_symbols = int(sum(1 for v in per_symbol_synced_days.values() if int(v) > 0))
+    total_synced_days = int(sum(int(v) for v in per_symbol_synced_days.values()))
+    coverage_ratio = (
+        float(synced_symbols / max(1, sync_tasks_total)) if sync_tasks_total > 0 else 0.0
+    )
+    for symbol, synced_days in sorted(per_symbol_synced_days.items()):
+        report_rows.append(
+            {
+                "run_ts_utc": run_ts,
+                "sync_mode": mode,
+                "start_date": start_date.isoformat(),
+                "end_date": end_date.isoformat(),
+                "symbols_total": int(symbols_total),
+                "sync_tasks_total": int(sync_tasks_total),
+                "synced_symbols": synced_symbols,
+                "total_synced_days": total_synced_days,
+                "task_coverage_ratio": coverage_ratio,
+                "symbol": str(symbol),
+                "synced_days": int(synced_days),
+                "is_synced": bool(int(synced_days) > 0),
+            }
+        )
+    return report_rows
+
+
+def _write_sync_coverage_report(report_rows: list[dict[str, object]]) -> None:
+    """Append sync coverage report rows to parquet log file."""
+    if not report_rows:
+        return
+    report_path = Path("logs/futures/universe/sync_coverage_report.parquet")
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    df_new = pd.DataFrame(report_rows)
+    if report_path.exists():
+        try:
+            df_old = pd.read_parquet(report_path)
+            df_out = pd.concat([df_old, df_new], ignore_index=True)
+        except Exception as exc:
+            logger.warning("sync_coverage_report read failed, overwrite: %s", exc)
+            df_out = df_new
+    else:
+        df_out = df_new
+    df_out.to_parquet(report_path, index=False)
+    logger.info(
+        "[SYNC-COVERAGE] rows=%d file=%s",
+        len(df_new),
+        str(report_path),
+    )
+
+def _list_usdt_futures_symbols() -> list[str]:
+    """Return all USDT perpetual futures symbols from exchangeInfo."""
+    client = BinanceClient(BINANCE_API_KEY, BINANCE_SECRET)
+    try:
+        info = client.exchange.fapiPublicGetExchangeInfo()
+        symbols: list[str] = []
+        for sym_info in info.get("symbols", []):
+            symbol = str(sym_info.get("symbol", "")).strip()
+            quote_asset = str(sym_info.get("quoteAsset", "")).upper()
+            contract_type = str(sym_info.get("contractType", "")).upper()
+            if not symbol.endswith("USDT"):
+                continue
+            if quote_asset != "USDT":
+                continue
+            if contract_type not in {"PERPETUAL", ""}:
+                continue
+            symbols.append(symbol)
+        return sorted(set(symbols))
+    except Exception as e:
+        logger.error("ExchangeInfo symbol discovery failed: %s", e)
+        return ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT"]
+
+
 def smart_filter_symbols(limit: int | None = None) -> list[str]:
-    """거래량 기반 상위 40% 엘리트 심볼 필터링.
-    """
-    logger.info("Starting Smart Early-Exit Filtering...")
+    """Fast-mode filter: top-volume elite symbols (optional acceleration mode)."""
+    logger.info("Starting Smart Early-Exit Filtering (elite_fast)...")
     client = BinanceClient(BINANCE_API_KEY, BINANCE_SECRET)
     try:
         tickers = client.exchange.fapiPublicGetTicker24hr()
         df = pd.DataFrame(tickers)
-        df['quoteVolume'] = pd.to_numeric(df['quoteVolume'])
-        df = df[df['symbol'].str.endswith('USDT')]
-
-        # 상위 40% 동적 추출
+        df["quoteVolume"] = pd.to_numeric(df["quoteVolume"])
+        df = df[df["symbol"].str.endswith("USDT")]
         threshold_idx = int(len(df) * 0.4)
-        df = df.sort_values('quoteVolume', ascending=False).head(threshold_idx)
-
-        selected_symbols: list[str] = df['symbol'].tolist()
-        logger.info(f"Smart Filter: Selected {len(selected_symbols)} elite candidates.")
-
+        df = df.sort_values("quoteVolume", ascending=False).head(threshold_idx)
+        selected_symbols: list[str] = df["symbol"].tolist()
         if limit:
             selected_symbols = selected_symbols[:limit]
+        logger.info("Smart Filter: Selected %d elite candidates.", len(selected_symbols))
         return selected_symbols
     except Exception as e:
-        logger.error(f"Smart Filter failed: {e}")
-        return ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT"] # 최소한의 Fallback
+        logger.error("Smart Filter failed: %s", e)
+        return _list_usdt_futures_symbols()[: limit if limit else None]
 
 def sync_single_symbol_data(
     symbol: str,
@@ -48,8 +127,7 @@ def sync_single_symbol_data(
     downloader: BinanceVisionDownloader,
     onboard_date: date | None = None,
 ) -> tuple[list[LedgerRow], int]:
-    """개별 심볼 동기화: 1h 수집 -> 4h 리샘플링 -> 로컬 저장 -> Ledger 데이터 생성.
-    """
+    """개별 심볼을 동기화하고 ledger row를 생성한다."""
     current = start_date.replace(day=1)
     all_klines_1h = []
     all_funding = []
@@ -154,7 +232,7 @@ def sync_single_symbol_data(
     # NOTE: funding_daily는 일별 집계 최대 ~2000행 소규모 배열 → Python loop 허용
     #       (CLAUDE.md Zero-Loop Policy는 OHLCV 시계열 대용량 배열에 해당)
     def _mad_zscore_series(series: pd.Series, window: int, min_periods: int = 3) -> pd.Series:
-        """Rolling MAD-based robust z-score. Breakdown point 50%."""
+        """Compute rolling MAD-based robust z-score."""
         result = np.zeros(len(series), dtype=float)
         arr = series.to_numpy(dtype=float)
         for i in range(len(arr)):
@@ -164,7 +242,7 @@ def sync_single_symbol_data(
                 result[i] = 0.0
                 continue
             med = np.median(window_data)
-            mad_val = float(_mad(window_data, scale="normal"))  # 0.6745×MAD
+            mad_val = float(_mad(window_data, scale="normal"))  # 0.6745 x MAD
             z = (arr[i] - med) / mad_val if mad_val > 1e-10 else 0.0
             result[i] = float(np.clip(z, -50.0, 50.0))  # prevent extreme z values
         return pd.Series(result, index=series.index)
@@ -240,9 +318,9 @@ def run_historical_sync(
     end_date: date,
     limit: int | None = None,
     force: bool = False,
+    sync_mode: str = "full_history_master",
 ) -> None:
-    """메인 동기화 오케스트레이터.
-    """
+    """메인 동기화 오케스트레이터."""
     ledger_path = Path("data/futures/universe_ledger.parquet")
     symbol_start_dates = {}
     if ledger_path.exists() and not force:
@@ -253,7 +331,14 @@ def run_historical_sync(
         except Exception as e:
             logger.warning(f"Ledger load failed: {e}")
 
-    symbols = smart_filter_symbols(limit=limit)
+    mode = str(sync_mode or "full_history_master").strip().lower()
+    if mode == "elite_fast":
+        symbols = smart_filter_symbols(limit=limit)
+    else:
+        symbols = _list_usdt_futures_symbols()
+        if limit:
+            symbols = symbols[:limit]
+        logger.info("Sync mode=full_history_master symbols=%d", len(symbols))
     sync_tasks = []
 
     # Fix 2 Step C: FAPI exchangeInfo에서 onboardDate 일괄 조회
@@ -267,8 +352,8 @@ def run_historical_sync(
             if ob_ms:
                 try:
                     onboard_dates[s] = date.fromtimestamp(int(ob_ms) / 1000)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("Invalid onboardDate for symbol=%s: %s", s, e)
         logger.info(f"onboardDate 조회 완료: {len(onboard_dates)}개 심볼")
     except Exception as e:
         logger.warning(f"onboardDate 조회 실패(fallback to first kline): {e}")
@@ -297,11 +382,25 @@ def run_historical_sync(
         results = pool.map(_worker, sync_tasks)
 
     all_new = []
-    for (rows, count), (symbol, _, _, _) in zip(results, sync_tasks):
+    per_symbol_synced_days: dict[str, int] = {}
+    for (rows, _count), (symbol, _, _, _) in zip(results, sync_tasks, strict=False):
+        per_symbol_synced_days[str(symbol)] = len(rows)
         if rows:
             df = pd.DataFrame([asdict(row) for row in rows])
             all_new.append(df)
             logger.info(f"  > {symbol} synced ({len(df)} days)")
+        else:
+            logger.info(f"  > {symbol} synced (0 days)")
+
+    report_rows = _build_sync_coverage_report_rows(
+        mode=mode,
+        start_date=start_date,
+        end_date=end_date,
+        symbols_total=len(symbols),
+        sync_tasks_total=len(sync_tasks),
+        per_symbol_synced_days=per_symbol_synced_days,
+    )
+    _write_sync_coverage_report(report_rows)
 
     if all_new:
         update_ledger(pd.concat(all_new, ignore_index=True), ledger_path=ledger_path)

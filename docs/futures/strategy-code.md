@@ -4,6 +4,13 @@
 **최종 업데이트**: 2026-05-22
 **목적**: legacy alpha/HMM 미사용 상태에서 `--quick-backtest` 대비 의미있는 신호를 가진 백테스트를 완주시킨다.
 
+## 0-a. 실행 모드 계약 (현재 코드 기준)
+
+- active mode: `quick-backtest | strategy | strategy-smoke`
+- `strategy`/`strategy-smoke`에서는 `--strategy` 지정이 필수다.
+- `quick-backtest`에서는 strategy bridge가 neutral `MLPipelineOutput()`를 반환한다.
+- legacy 모드/플래그(`full`, `--alpha-only`, `--hmm-only`)는 parser 단계에서 reject된다.
+
 ---
 
 ## 0. 사전 확인된 코드 사실
