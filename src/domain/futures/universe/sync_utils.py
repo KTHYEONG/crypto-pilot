@@ -8,8 +8,8 @@ import numpy as np
 import pandas as pd
 from scipy.stats import median_abs_deviation as _mad
 
-from config.settings import BINANCE_API_KEY, BINANCE_SECRET, FUTURES_DATA_DIR
 from src.core.exchange.binance_client import BinanceClient
+from src.core.settings import BINANCE_API_KEY, BINANCE_SECRET, FUTURES_DATA_DIR
 from src.core.utils.binance_vision import BinanceVisionDownloader
 from src.domain.futures.universe.contracts import LedgerRow
 from src.domain.futures.universe.ledger import update_ledger

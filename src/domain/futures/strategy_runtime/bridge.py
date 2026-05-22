@@ -61,8 +61,9 @@ def run_ml_pipeline_for_universe(
 
     market_probs = pd.DataFrame()
     if strategy_cfg.regime.enabled:
-        from src.domain.futures.optimization.optimizer import compute_multi_alignment_info
         from src.domain.futures.strategy.regime.provider import compute_regime_posterior
+
+        from src.domain.futures.optimization.optimizer import compute_multi_alignment_info
         info = compute_multi_alignment_info(preloaded_data_maps, symbols, tf, embargo=0)
         if info is not None:
             eff_len = int(info["eff_ref_len"])

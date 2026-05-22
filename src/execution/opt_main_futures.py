@@ -7,13 +7,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
-import config.opt_config
-from config.opt_config import (
-    FUTURES_ANCHOR_SYMBOLS,
-    FUTURES_MACRO_INDEX_SYMBOLS,
-    OPT_FUTURES_CONFIG,
-    get_quarterly_window,
-)
+import src.domain.futures.optimization.opt_config
 from src.application.futures.optimization.config import (
     FuturesRunConfig,
     build_run_config_from_args,
@@ -37,6 +31,12 @@ from src.application.futures.optimization.universe_service import (
     UniverseMembershipTimeline,
     discover_universe_timeline,
     validate_universe_quality,
+)
+from src.domain.futures.optimization.opt_config import (
+    FUTURES_ANCHOR_SYMBOLS,
+    FUTURES_MACRO_INDEX_SYMBOLS,
+    OPT_FUTURES_CONFIG,
+    get_quarterly_window,
 )
 from src.domain.futures.optimization.opt_data_utils import load_futures_data_maps_for_symbols
 from src.domain.futures.optimization.run_tracker import (
@@ -188,7 +188,7 @@ def _run_data_stage(
     discovered_symbols: list[str],
     timeline: dict[date, frozenset[str]],
 ) -> DataStageResult:
-    configured = tuple(discovered_symbols or config.opt_config.FUTURES_SYMBOLS)
+    configured = tuple(discovered_symbols or src.domain.futures.optimization.opt_config.FUTURES_SYMBOLS)
     target_symbols = list(run_config.symbols or configured)
     load_symbols = list(set(target_symbols + FUTURES_ANCHOR_SYMBOLS + FUTURES_MACRO_INDEX_SYMBOLS))
     require_exec_1m = OPT_FUTURES_CONFIG.get("FUTURES_EXECUTION_MODE") == "intrabar_1m"

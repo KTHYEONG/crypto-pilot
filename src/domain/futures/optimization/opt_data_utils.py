@@ -9,13 +9,13 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from config.opt_config import OPT_FUTURES_CONFIG
-from config.settings import FUTURES_DATA_DIR
 from src.core.optimization.opt_utils import compute_segment_merge_index
+from src.core.settings import FUTURES_DATA_DIR
 from src.domain.futures.data_loader import DataCollector, summarize_dataframe_integrity
-from src.domain.futures.strategy_runtime.bridge import _enrich_with_gp_features
 from src.domain.futures.optimization.dashboard import REGIME_NAMES
+from src.domain.futures.optimization.opt_config import OPT_FUTURES_CONFIG
 from src.domain.futures.optimization.optimizer import inject_cs_momentum_ranks
+from src.domain.futures.strategy_runtime.bridge import _enrich_with_gp_features
 
 _logger: logging.Logger = logging.getLogger("opt_data_utils")
 _SUFFICIENCY_LOG_DIR = Path("logs/futures/data")

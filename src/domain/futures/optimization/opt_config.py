@@ -547,36 +547,8 @@ FUTURES_SCREENER_CONFIG: dict[str, Any] = {
 }
 
 # ==============================================================================
-# SPOT CONFIGURATION (Standardized)
+# FUTURES OPT CONFIGURATION & SEARCH SPACE
 # ==============================================================================
-SPOT_ANCHOR_SYMBOLS: list[str] = ["KRW-ETH", "KRW-SOL", "KRW-XRP"]
-SPOT_SYMBOLS: list[str] = ["KRW-ETH", "KRW-SOL", "KRW-XRP", "KRW-HBAR"]
-
-SPOT_SHARED_PARAM_SPACE: dict[str, dict[str, Any]] = {
-    "TIMEFRAME": {"type": "categorical", "choices": ["4h"]},
-    "RISK_PER_TRADE": {"type": "float", "low": 0.01, "high": 0.05, "step": 0.01},
-}
-
-SPOT_EXCLUDED_SIZING_METHODS: list[str] = ["inv_vol_parity", "liquidity_adjusted"]
-
-SLIPPAGE_GAMMA_BASE: float = 0.6
-SLIPPAGE_REFERENCE_ADV_KRW: float = 1_000_000_000.0
-
-ENGINE_PARAM_SPACE: dict[str, dict[str, Any]] = {
-    "MAX_CONCURRENT_POSITIONS": {"type": "int", "low": 3, "high": 10},
-    "MIN_PF": {"type": "float", "low": 1.2, "high": 2.0},
-    "MAX_MDD": {"type": "float", "low": 10.0, "high": 25.0},
-}
-
-OPT_SPOT_CONFIG: dict[str, Any] = {
-    "total_trials": 1500,
-    "tpe_n_startup_trials": 256,
-    "seeds": [42],
-    "n_jobs": 3,
-    "TARGET_TIMEFRAMES": ["4h"],
-    "CPCV_N_BLOCKS": 8,
-    "CPCV_K_TEST": 3,
-}
 
 def get_search_space_futures(tf: str, stage: int = 0) -> dict[str, dict[str, Any]]:
     _ = tf
@@ -584,15 +556,6 @@ def get_search_space_futures(tf: str, stage: int = 0) -> dict[str, dict[str, Any
 
 def build_full_discovery_space_futures() -> dict[str, Any]:
     return dict(ENGINE_PARAM_SPACE_FUTURES)
-
-def get_spot_effective_independent_trials(n_done: int, n_startup: int) -> int:
-    """Heuristic for independent trials (deflating multiple testing bias)."""
-    return max(1, n_done - n_startup)
-
-def get_search_space_spot(tf: str) -> dict[str, dict[str, Any]]:
-    _ = tf
-    from src.domain.spot.opt_spot_utils.opt_params import build_full_discovery_space
-    return build_full_discovery_space()
 
 def get_quarterly_window(reference_date: Any = None) -> tuple[str, str, str, str]:
     import datetime

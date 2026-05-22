@@ -6,7 +6,7 @@ from typing import Any, cast
 
 import optuna
 
-from config.opt_config import OPT_FUTURES_CONFIG
+from src.domain.futures.optimization.opt_config import OPT_FUTURES_CONFIG
 
 # Optuna Experimental Warning suppression at code level
 warnings.filterwarnings("ignore", category=optuna.exceptions.ExperimentalWarning)

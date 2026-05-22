@@ -71,13 +71,13 @@ def _metrics_from_payload(payload: dict[str, Any]) -> ChampionMetrics:
 
 def default_baseline_file(project_root: Path) -> Path:
     """Canonical baseline path (may not exist on disk)."""
-    return project_root / "config" / "champion_baseline.json"
+    return Path(__file__).parent / "champion_baseline.json"
 
 
 def resolve_baseline_file(project_root: Path) -> Path | None:
     """Prefer champion_baseline.json, then champion_baseline_v2.json (compat)."""
     for name in ("champion_baseline.json", "champion_baseline_v2.json"):
-        p = project_root / "config" / name
+        p = Path(__file__).parent / name
         if p.exists():
             return p
     return None

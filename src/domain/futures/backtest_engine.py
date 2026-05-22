@@ -9,8 +9,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from config.opt_config import OPT_FUTURES_CONFIG
-from config.settings import (
+from src.core.settings import (
     MAKER_FEE_RATE,
     SLIPPAGE_RATE,
     SMART_ORDER_OFFSET,
@@ -18,6 +17,7 @@ from config.settings import (
 )
 from src.domain.futures.backtest_preparation import prepare_backtest_inputs
 from src.domain.futures.optimization.data_aligner import merge_effective_membership_constraints
+from src.domain.futures.optimization.opt_config import OPT_FUTURES_CONFIG
 from src.domain.futures.portfolio.execution_sim import (
     backtest_target_weights_intrabar_numba,
     backtest_target_weights_numba,
