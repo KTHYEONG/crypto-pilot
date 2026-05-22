@@ -67,8 +67,21 @@ def classify_no_valid_candidates(
     *,
     selection_summary: Mapping[str, Any] | None,
     completed_trials: list[optuna.trial.FrozenTrial],
+    pruned_trials: list[optuna.trial.FrozenTrial] | None = None,
 ) -> str:
     if not completed_trials:
+        if pruned_trials:
+            reason_counts: dict[str, int] = {}
+            for trial in pruned_trials:
+                obs_reason = str((trial.user_attrs or {}).get("obs_reason", "")).strip()
+                if not obs_reason:
+                    obs_reason = "unknown_pruned"
+                reason_counts[obs_reason] = int(reason_counts.get(obs_reason, 0)) + 1
+            if reason_counts:
+                top_reason, top_count = max(reason_counts.items(), key=lambda kv: kv[1])
+                if top_count == len(pruned_trials):
+                    return f"all_pruned_{top_reason}"
+                return f"mostly_pruned_{top_reason}"
         return "no_completed_trials"
     if selection_summary is None:
         return "unknown"
@@ -114,7 +127,12 @@ def build_compact_trial_summary(
     stage = ua.get("obs_stage", ua.get("phase", "-"))
     status = str(trial.state.name).lower()
     elapsed = elapsed_sec if elapsed_sec is not None else 0.0
-    key_params = ("HMM_CRISIS_THRESHOLD", "KELLY_FRACTION", "STOP_LOSS_ATR_MULT")
+    key_params = (
+        "BETA_ALPHA",
+        "EV_HURDLE_BPS",
+        "REBALANCE_BARS",
+        "MAX_EXPOSURE",
+    )
     compact_params = [f"{key}={trial.params[key]}" for key in key_params if key in trial.params]
     params_text = ",".join(compact_params) if compact_params else "-"
     return (

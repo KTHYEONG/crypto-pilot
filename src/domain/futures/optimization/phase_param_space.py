@@ -5,6 +5,7 @@ from typing import Any
 import optuna
 
 V43_SIGNAL_PARAM_KEYS: tuple[str, ...] = (
+    "BETA_ALPHA",
     "BETA_REGIME_BEAR",
     "BETA_REGIME_CHOP",
     "K_LONG",
@@ -34,6 +35,7 @@ V43_FIXED_DEFAULTS: dict[str, Any] = {
 }
 
 _SIGNAL_DEFAULT_RANGES: dict[str, tuple[Any, Any, bool]] = {
+    "BETA_ALPHA": (2.0, 6.0, False),
     "BETA_REGIME_BEAR": (0.0, 1.5, False),
     "BETA_REGIME_CHOP": (0.0, 1.0, False),
     "K_LONG": (1, 8, False),

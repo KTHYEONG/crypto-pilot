@@ -1,11 +1,17 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
+import numpy as np
 import pandas as pd
 
+if TYPE_CHECKING:
+    from src.domain.futures.strategy.config import StrategyConfig
+
 HMM_SEMANTIC_PROB_COLUMNS: list[str] = []
+_logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -30,10 +36,23 @@ def run_ml_pipeline_for_universe(
     fetch_start: str | None,
     end_date: str | None,
     opt_config: dict[str, Any],
+    *,
+    strategy_cfg: StrategyConfig | None = None,
+    preloaded_data_maps: dict[str, dict[str, Any]] | None = None,
     **kwargs: Any,
 ) -> MLPipelineOutput:
-    del symbols, tf, fetch_start, end_date, opt_config, kwargs
-    return MLPipelineOutput()
+    del fetch_start, end_date, opt_config, kwargs
+    if strategy_cfg is None or preloaded_data_maps is None:
+        return MLPipelineOutput()
+    from src.domain.futures.strategy.builder import build_strategy_alpha
+
+    alpha_panel = build_strategy_alpha(
+        data_maps=preloaded_data_maps,
+        symbols=symbols,
+        tf=tf,
+        cfg=strategy_cfg,
+    )
+    return MLPipelineOutput(alpha_panel=alpha_panel)
 
 
 def merge_ml_output_into_is_and_oos(
@@ -43,7 +62,8 @@ def merge_ml_output_into_is_and_oos(
     valid_symbols: list[str],
     tf: str,
 ) -> None:
-    del ml_out, is_maps, oos_maps, valid_symbols, tf
+    merge_ml_output_into_data_maps(ml_out, is_maps, valid_symbols, tf, log_tag="is")
+    merge_ml_output_into_data_maps(ml_out, oos_maps, valid_symbols, tf, log_tag="oos")
 
 
 def copy_data_maps_tf_clone(
@@ -67,15 +87,46 @@ def merge_ml_output_into_data_maps(
     tf: str,
     log_tag: str = "",
 ) -> None:
-    del ml_out, data_maps, symbols, tf, log_tag
+    panel = getattr(ml_out, "alpha_panel", None)
+    if panel is None or panel.empty:
+        return
+    required = {"alpha_long", "alpha_short"}
+    if not required.issubset(panel.columns):
+        _logger.warning("[%s] alpha_panel missing required columns; skip merge", log_tag)
+        return
+
+    by_sym = panel.reset_index().groupby("symbol", sort=False)
+    for sym in symbols:
+        if sym not in data_maps or tf not in data_maps[sym]:
+            continue
+        try:
+            sym_rows = by_sym.get_group(sym)
+        except KeyError:
+            continue
+        df = data_maps[sym][tf]
+        if "alpha_long" in df.columns or "alpha_short" in df.columns:
+            _logger.warning("[%s] overwrite alpha columns for symbol=%s", log_tag, sym)
+        if df["datetime"].dtype != sym_rows["datetime"].dtype:
+            raise RuntimeError(
+                f"datetime dtype mismatch: {df['datetime'].dtype} != {sym_rows['datetime'].dtype}"
+            )
+        merged = df[["datetime"]].merge(
+            sym_rows[["datetime", "alpha_long", "alpha_short"]],
+            on="datetime",
+            how="left",
+        )
+        df["alpha_long"] = merged["alpha_long"].fillna(0.0).to_numpy(dtype=np.float64)
+        df["alpha_short"] = merged["alpha_short"].fillna(0.0).to_numpy(dtype=np.float64)
 
 
 class FuturesMLStrategy:
     """Neutral strategy stub for bridge contract."""
 
     def __init__(self, name: str, params: dict[str, Any]) -> None:
+        """Store strategy identity and params."""
         self.name = name
         self.params = params
 
     def generate_signals(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Return pass-through copy of input frame."""
         return df.copy()

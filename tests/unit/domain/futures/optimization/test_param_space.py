@@ -33,7 +33,6 @@ def test_v43_joint_suggest_only_core_params_and_log_distributions() -> None:
         "SLIPPAGE_BPS_BUFFER_MULT",
         "CRISIS_OVERRIDE_THRESHOLD",
         "CRISIS_GAMMA",
-        "BETA_ALPHA",
         "TIME_BARRIER_H",
     }
     assert removed.isdisjoint(set(trial.params.keys()))
@@ -75,6 +74,7 @@ def test_optimizer_phase_a1_suggests_signal_only() -> None:
 def test_optimizer_phase_a2_suggests_risk_only_with_frozen_signal() -> None:
     study, trial = _ask_trial()
     frozen_signal = {
+        "BETA_ALPHA": 3.5,
         "BETA_REGIME_BEAR": 0.3,
         "BETA_REGIME_CHOP": 0.2,
         "K_LONG": 4,
@@ -113,3 +113,32 @@ def test_optimizer_phase_b_applies_fixed_and_shrunk_ranges() -> None:
     assert isinstance(dist, FloatDistribution)
     assert abs(float(dist.low) - 0.12) < 1e-12
     assert abs(float(dist.high) - 0.16) < 1e-12
+
+
+def test_optimizer_strategy_mode_applies_strategy_phase_ranges() -> None:
+    study, trial = _ask_trial()
+    ctx = MLPhaseDContext(
+        data_maps={},
+        symbols=[],
+        tf="4h",
+        strategy_mode=True,
+        phase_ranges={
+            "BETA_ALPHA": (4.0, 8.0),
+            "EV_HURDLE_BPS": (1.0, 3.0),
+            "REBALANCE_BARS": (4, 8),
+        },
+    )
+    _suggest_ml_joint_nsga2(trial, ctx)
+    study.tell(trial, 0.0)
+
+    beta_dist = trial.distributions["BETA_ALPHA"]
+    ev_dist = trial.distributions["EV_HURDLE_BPS"]
+    reb_dist = trial.distributions["REBALANCE_BARS"]
+    assert isinstance(beta_dist, FloatDistribution)
+    assert isinstance(ev_dist, FloatDistribution)
+    assert float(beta_dist.low) == 4.0
+    assert float(beta_dist.high) == 8.0
+    assert float(ev_dist.low) == 1.0
+    assert float(ev_dist.high) == 3.0
+    assert int(reb_dist.low) == 4
+    assert int(reb_dist.high) == 8
