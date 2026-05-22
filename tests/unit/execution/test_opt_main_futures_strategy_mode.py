@@ -96,12 +96,12 @@ def test_apply_strategy_p0_overrides_sets_defaults() -> None:
     }
     _apply_strategy_p0_overrides(cfg)
     assert cfg["FUTURES_WF_HMM_LEG_REFIT"] is False
-    assert float(cfg["FUTURES_DEFAULT_BETA_ALPHA"]) == 3.0
-    assert float(cfg["FUTURES_DEFAULT_EV_HURDLE_BPS"]) == 3.0
+    assert float(cfg["FUTURES_DEFAULT_BETA_ALPHA"]) == 1.0
+    assert float(cfg["FUTURES_DEFAULT_EV_HURDLE_BPS"]) == 1.5
 
 
 def test_strategy_smoke_engine_params_uses_strategy_defaults() -> None:
     params = _strategy_smoke_engine_params("4h")
-    assert float(params["BETA_ALPHA"]) == 3.0
-    assert float(params["EV_HURDLE_BPS"]) == 3.0
+    assert float(params["BETA_ALPHA"]) == 1.0
+    assert float(params["EV_HURDLE_BPS"]) == 1.5
     assert int(params["REBALANCE_BARS"]) == 6

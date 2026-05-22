@@ -71,7 +71,9 @@ def _build_trial_matrix_stats(study_b: optuna.Study) -> dict[str, float]:
     n = float(len(calmar_vals))
     sharpe_like = mean_v / max(std_v, 1e-9)
     # Small-sample corrected smooth confidence proxy in [0, 1].
-    dsr_proxy = 1.0 / (1.0 + math.exp(-(sharpe_like * math.sqrt(max(n - 1.0, 1.0))) / 3.0))
+    dsr_arg = -(sharpe_like * math.sqrt(max(n - 1.0, 1.0))) / 3.0
+    dsr_arg_clipped = max(-700.0, min(700.0, dsr_arg))
+    dsr_proxy = 1.0 / (1.0 + math.exp(dsr_arg_clipped))
     # Lower is better: map stronger signal to lower overfit probability proxy.
     pbo_proxy = 0.5 - 0.5 * math.tanh(sharpe_like / 3.0)
     return {
@@ -85,7 +87,7 @@ def _build_trial_matrix_stats(study_b: optuna.Study) -> dict[str, float]:
 
 def _sobol_perturb_score(params: dict[str, Any], seeds: list[int]) -> float:
     # SALib path: deterministic Sobol design over unit cube, then derive stable score.
-    from SALib.sample import sobol as sobol_sample  # type: ignore
+    from SALib.sample import sobol as sobol_sample
 
     dim = max(2, min(16, len(params) if params else 2))
     n = 128
