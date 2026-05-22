@@ -7,13 +7,11 @@ from typing import Any
 import numpy as np
 import optuna
 
-from src.domain.futures.optimization.dashboard import safe_float
+from src.domain.futures.optimization.observability.dashboard import safe_float
 from src.domain.futures.optimization.opt_config import OPT_FUTURES_CONFIG
-from src.domain.futures.optimization.optimizer import (
-    MLPhaseDContext,
-    replay_robust_awf_for_trial_params,
-)
-from src.domain.futures.optimization.phase_samplers import phase_b_constraints
+from src.domain.futures.optimization.ml_context import MLPhaseDContext
+from src.domain.futures.optimization.objectives import replay_robust_awf_for_trial_params
+from src.domain.futures.optimization.workflow import phase_b_constraints
 
 _logger: logging.Logger = logging.getLogger("candidate_selector")
 
@@ -287,7 +285,7 @@ def replay_stability_candidate(
 ) -> tuple[float, bool]:
     import dataclasses
 
-    from src.domain.futures.optimization.optimizer import rerun_precompute_for_ctx
+    from src.domain.futures.optimization.ml_context import rerun_precompute_for_ctx
     from src.domain.futures.validation.tmp_md_champion import tmp_md_layer1_failures_from_awf_diag
     
     sctx = dataclasses.replace(base_ctx, seed=seed)
@@ -333,8 +331,8 @@ def select_and_rank_candidates(
         t for t in study_ml.get_trials()
         if t.state == TrialState.COMPLETE and t.value is not None
     ]
-    is_v43_phase_b_study = str(getattr(study_ml, "study_name", "")).endswith("_phase_b")
-    if is_v43_phase_b_study:
+    is_phase_b_study = str(getattr(study_ml, "study_name", "")).endswith("_phase_b")
+    if is_phase_b_study:
         phase_b_only = [
             t for t in completed
             if str(t.user_attrs.get("phase", "phase_b")).strip().lower() in {"phase_b", "b"}
@@ -452,14 +450,14 @@ def _is_strategy_active_trial(trial: optuna.trial.FrozenTrial) -> bool:
     return robust > -1e8
 
 
-def select_v43_phase_b_top_candidates(
+def select_phase_b_top_candidates(
     study_ml: optuna.Study,
     base_ctx: MLPhaseDContext,
     cfg: dict[str, Any],
     *,
     top_k: int = 5,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """Return v4.3 phase-b top candidates sorted by calmar_lcb with constraints awareness."""
+    """Return phase-b top candidates sorted by calmar_lcb with constraints awareness."""
     from optuna.trial import TrialState
 
     k = max(1, int(top_k))
@@ -474,7 +472,7 @@ def select_v43_phase_b_top_candidates(
     if phase_b_completed:
         completed = phase_b_completed
     if not completed:
-        return [], {"selected_by": "v43_phase_b_calmar_lcb", "candidate_count": 0}
+        return [], {"selected_by": "phase_b_calmar_lcb", "candidate_count": 0}
 
     feasible = [t for t in completed if _is_phase_b_feasible(t)]
     strategy_mode = bool(getattr(base_ctx, "strategy_mode", False))
@@ -504,7 +502,7 @@ def select_v43_phase_b_top_candidates(
         })
 
     summary = {
-        "selected_by": "v43_phase_b_calmar_lcb",
+        "selected_by": "phase_b_calmar_lcb",
         "candidate_count": len(completed),
         "feasible_count": len(feasible),
         "strategy_active_count": len(strategy_active),
@@ -529,7 +527,7 @@ def check_stability_layer3(
     """
     import dataclasses
 
-    from src.domain.futures.optimization.optimizer import rerun_precompute_for_ctx
+    from src.domain.futures.optimization.ml_context import rerun_precompute_for_ctx
     from src.domain.futures.validation.tmp_md_champion import tmp_md_layer1_failures_from_awf_diag
 
     stab_seeds = [int(x) for x in (cfg.get("FUTURES_STABILITY_SEEDS") or [])]

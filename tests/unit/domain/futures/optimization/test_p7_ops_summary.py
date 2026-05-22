@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from src.domain.futures.optimization.run_tracker import build_p7_ops_summary
+from src.domain.futures.optimization.observability.run_tracker import build_p7_ops_summary
 
 
 def test_build_p7_ops_summary_fail_on_no_candidate_and_no_elite() -> None:

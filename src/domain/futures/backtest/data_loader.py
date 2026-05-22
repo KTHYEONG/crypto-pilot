@@ -19,7 +19,7 @@ import pandas as pd
 
 from src.core.exchange.binance_client import BinanceClient
 from src.core.settings import FUTURES_DATA_DIR
-from src.core.utils.binance_vision import BinanceVisionDownloader
+from src.core.exchange.binance_vision import BinanceVisionDownloader
 from src.core.utils.utils import setup_logger
 
 _logger = logging.getLogger("DataCollector")
@@ -298,7 +298,7 @@ class DataCollector:
         if vision_tasks:
             import concurrent.futures
 
-            from src.core.utils.binance_vision import BinanceVisionDownloader
+            from src.core.exchange.binance_vision import BinanceVisionDownloader
             
             vision = BinanceVisionDownloader()
 
