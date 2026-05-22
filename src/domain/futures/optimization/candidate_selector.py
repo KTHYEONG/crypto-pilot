@@ -437,6 +437,21 @@ def _is_phase_b_feasible(trial: optuna.trial.FrozenTrial) -> bool:
         return False
 
 
+def _is_strategy_active_trial(trial: optuna.trial.FrozenTrial) -> bool:
+    """Conservative activity filter to avoid flat champions in strategy mode."""
+    avg_trades = safe_float(
+        trial.user_attrs.get("awf_trade_count_mean", trial.user_attrs.get("avg_trades", 0.0)),
+        0.0,
+    )
+    pos_frac = safe_float(trial.user_attrs.get("awf_pos_frac", 0.0), 0.0)
+    robust = safe_float(trial.user_attrs.get("awf_robust_score", -1e9), -1e9)
+    if avg_trades < 2.0:
+        return False
+    if pos_frac <= 0.0:
+        return False
+    return robust > -1e8
+
+
 def select_v43_phase_b_top_candidates(
     study_ml: optuna.Study,
     base_ctx: MLPhaseDContext,
@@ -462,7 +477,18 @@ def select_v43_phase_b_top_candidates(
         return [], {"selected_by": "v43_phase_b_calmar_lcb", "candidate_count": 0}
 
     feasible = [t for t in completed if _is_phase_b_feasible(t)]
-    pool = feasible if feasible else completed
+    strategy_mode = bool(getattr(base_ctx, "strategy_mode", False))
+    strategy_active = (
+        [t for t in feasible if _is_strategy_active_trial(t)]
+        if strategy_mode
+        else []
+    )
+    if strategy_active:
+        pool = strategy_active
+    elif feasible:
+        pool = feasible
+    else:
+        pool = completed
     ranked = sorted(pool, key=_phase_b_calmar_sort_key, reverse=True)
     selected_trials = ranked[:k]
 
@@ -481,6 +507,7 @@ def select_v43_phase_b_top_candidates(
         "selected_by": "v43_phase_b_calmar_lcb",
         "candidate_count": len(completed),
         "feasible_count": len(feasible),
+        "strategy_active_count": len(strategy_active),
         "selected_count": len(top_candidates),
         "selected_trial_numbers": [int(c["trial"].number) for c in top_candidates],
     }

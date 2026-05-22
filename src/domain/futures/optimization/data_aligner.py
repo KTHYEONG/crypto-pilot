@@ -23,6 +23,8 @@ _FUTURES_2D_REQUIRED_COLS: tuple[str, ...] = (
     "funding_rate_sum",
     "slot_rank_score",
     "ml_calib_prob",
+    "alpha_long",
+    "alpha_short",
     "dyn_leverage",
     "xs_score_long",
     "xs_score_short",
@@ -88,6 +90,8 @@ def _dataframe_to_symbol_arrays(sig_df: pd.DataFrame) -> dict[str, np.ndarray]:
         "funding_rate_sum": 0.0,
         "slot_rank_score": 0.0,
         "ml_calib_prob": 1.0,
+        "alpha_long": 0.0,
+        "alpha_short": 0.0,
         "dyn_leverage": 5.0,
         "xs_score_long": 0.0,
         "xs_score_short": 0.0,
@@ -292,6 +296,8 @@ def align_data_for_2d_engine(
         "dyn_leverage",
         "xs_score_long",
         "xs_score_short",
+        "alpha_long",
+        "alpha_short",
         "hmm_prob_crisis",
         "hmm_hard_state",
         "hmm_modulator_long",
@@ -309,6 +315,12 @@ def align_data_for_2d_engine(
         for col in ["open", "high", "low", "close", "atr"]:
             if col in merged.columns:
                 aligned_data[col][:, s_idx] = merged[col].ffill().values
+        # ATR fallback: atr이 없거나 모두 0/NaN이면 close의 2%로 채움
+        atr_col = aligned_data["atr"][:, s_idx]
+        if not np.any(np.isfinite(atr_col) & (atr_col > 0)):
+            close_col = aligned_data["close"][:, s_idx]
+            close_finite = np.where(np.isfinite(close_col) & (close_col > 0), close_col, 1.0)
+            aligned_data["atr"][:, s_idx] = close_finite * 0.02
         for col in [
             "strength_filter",
             "trend_direction",
@@ -318,6 +330,8 @@ def align_data_for_2d_engine(
             "ml_calib_prob",
             "xs_score_long",
             "xs_score_short",
+            "alpha_long",
+            "alpha_short",
             "hmm_prob_crisis",
             "hmm_hard_state",
             "hmm_modulator_long",

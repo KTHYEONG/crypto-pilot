@@ -481,7 +481,12 @@ def log_ml_merge_feature_stats(oos_data_maps: Any, valid_symbols: Any, tf: Any) 
             continue
         total_rows += len(df)
         total_cols += len(df.columns)
-        if "alpha_long_00" in df.columns:
+        has_alpha_cols = (
+            "alpha_long_00" in df.columns
+            or "alpha_long" in df.columns
+            or "alpha_short" in df.columns
+        )
+        if has_alpha_cols:
             alpha_present += 1
         hmm_cols = {
             "hmm_prob_bull_calm",

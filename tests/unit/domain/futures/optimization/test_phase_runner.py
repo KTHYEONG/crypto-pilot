@@ -210,3 +210,62 @@ def test_phase_runner_propagates_frozen_and_shrunk_to_phase_b(monkeypatch) -> No
     assert ctx_b.coordinate_frozen_params["PORTFOLIO_KAPPA"] == 0.21
     assert ctx_b.coordinate_frozen_params["K_SHORT"] == 2
     assert ctx_b.phase_ranges["TARGET_ANN_VOL"] == (0.1, 0.2)
+
+
+def test_phase_runner_inherits_base_phase_ranges_for_all_phases(monkeypatch) -> None:
+    calls: list[dict[str, Any]] = []
+
+    class _DummyStudyWithTrials(_DummyStudy):
+        def __init__(self, study_name: str):
+            super().__init__(study_name=study_name)
+            self._trials: list[Any] = []
+
+        def get_trials(self, deepcopy: bool = False):
+            return self._trials
+
+        def set_user_attr(self, _k: str, _v: Any) -> None:
+            return None
+
+    def _fake_loop(**kwargs):
+        calls.append(kwargs)
+        return _DummyStudyWithTrials(kwargs["study_name"])
+
+    monkeypatch.setattr(
+        "src.domain.futures.optimization.phase_runner.run_optimization_loop", _fake_loop
+    )
+    monkeypatch.setattr(
+        "src.domain.futures.optimization.phase_runner.build_phase_b_plan",
+        lambda *_a, **_k: SimpleNamespace(
+            fixed_params={},
+            shrunk_ranges={"TARGET_ANN_VOL": (0.1, 0.2)},
+            seed_combos=[],
+            importance_report={},
+        ),
+    )
+
+    run_v43_phase_optimization_skeleton(
+        base_ctx=SimpleNamespace(
+            run_id="r5",
+            strategy_mode=True,
+            phase_ranges={
+                "BETA_ALPHA": (4.0, 8.0),
+                "EV_HURDLE_BPS": (1.0, 3.0),
+                "REBALANCE_BARS": (4, 8),
+            },
+        ),
+        base_study_name="joint",
+        storage_url="sqlite:///tmp.db",
+        storage=None,
+        n_trials=1,
+        seed=7,
+        resume=False,
+        n_workers=1,
+        enqueue_seeds=None,
+    )
+
+    for idx in range(3):
+        ctx = calls[idx]["base_ctx"]
+        assert ctx.phase_ranges["BETA_ALPHA"] == (4.0, 8.0)
+        assert ctx.phase_ranges["EV_HURDLE_BPS"] == (1.0, 3.0)
+        assert ctx.phase_ranges["REBALANCE_BARS"] == (4, 8)
+    assert calls[2]["base_ctx"].phase_ranges["TARGET_ANN_VOL"] == (0.1, 0.2)
