@@ -112,16 +112,18 @@ _STRATEGY_P0_OFF_KEYS: tuple[str, ...] = (
     "FUTURES_CHOP_REGIME_GATE_ENABLED",
 )
 _STRATEGY_DEFAULTS: dict[str, float] = {
-    "FUTURES_DEFAULT_BETA_ALPHA": 5.0,
+    # Grinold-calibrated alpha is in range ~0.001-0.003 per bar.
+    # Friction is ~0.0012. BETA_ALPHA=10 gives mu_p95 ≈ 3x friction.
+    "FUTURES_DEFAULT_BETA_ALPHA": 10.0,
     "FUTURES_DEFAULT_EV_HURDLE_BPS": 1.5,
 }
 _STRATEGY_PHASE_RANGES: dict[str, tuple[float, float]] = {
-    "BETA_ALPHA": (4.0, 8.0),
-    "EV_HURDLE_BPS": (1.0, 3.0),
+    "BETA_ALPHA": (5.0, 30.0),
+    "EV_HURDLE_BPS": (1.0, 5.0),
     "REBALANCE_BARS": (4.0, 8.0),
 }
 _STRATEGY_SMOKE_ENGINE_OVERRIDES: dict[str, float | int | bool] = {
-    "BETA_ALPHA": 5.0,
+    "BETA_ALPHA": 10.0,
     "EV_HURDLE_BPS": 1.5,
     "REBALANCE_BARS": 6,
     "STRATEGY_MODE": True,
@@ -588,11 +590,12 @@ def main() -> None:
         "--strategy",
         type=str,
         default=None,
-        choices=["momentum_v0"],
+        choices=["momentum_v0", "eh_st_v1"],
         help="Inject strategy alpha. If omitted, keep existing quick/full pipeline behavior.",
     )
     parser.add_argument("--lookback", type=int, default=6, help="Strategy momentum lookback (bars).")
     parser.add_argument("--mom-lookback", type=int, dest="lookback", help=argparse.SUPPRESS)
+    parser.add_argument("--no-regime", action="store_true", help="Disable regime policy in strategy mode (ablation test).")
     parser.add_argument("--skip-data-sync", action="store_true", help="Skip Step 0 data sync.")
     parser.add_argument("--sync-limit", type=int, default=None, help="Limit symbols for Step 0 sync.")
     parser.add_argument("--force-universe-rebuild", action="store_true", help="Force rebuild universe snapshot.")
@@ -652,6 +655,37 @@ def main() -> None:
             name=args.strategy,
             momentum=MomentumConfig(lookback_bars=args.lookback),
         )
+        strategy_data_maps = _pick_strategy_data_maps(
+            oos_data_maps=oos_data_maps,
+            is_data_maps=data_maps,
+            valid_symbols=valid_symbols,
+            tf=args.tf,
+        )
+        ml_out = run_ml_pipeline_for_universe(
+            valid_symbols,
+            args.tf,
+            fetch_start_date_str,
+            end_date_str,
+            OPT_FUTURES_CONFIG,
+            strategy_cfg=strategy_cfg,
+            preloaded_data_maps=strategy_data_maps,
+        )
+    elif args.strategy == "eh_st_v1":
+        _apply_strategy_p0_overrides(OPT_FUTURES_CONFIG)
+        regime_on = not getattr(args, "no_regime", False)
+        OPT_FUTURES_CONFIG["FUTURES_REGIME_POLICY_ENABLED"] = regime_on
+        OPT_FUTURES_CONFIG["FUTURES_DEFAULT_BETA_ALPHA"] = 1.0
+
+        # Override globally configured phase ranges and smoke parameters
+        _STRATEGY_PHASE_RANGES["BETA_ALPHA"] = (5.0, 30.0)
+        _STRATEGY_SMOKE_ENGINE_OVERRIDES["BETA_ALPHA"] = 10.0
+
+        _logger.warning(
+            " [STEP 2/4] ENHANCED STRATEGY mode=%s regime_policy=%s.",
+            args.strategy,
+            regime_on,
+        )
+        strategy_cfg = StrategyConfig(name=args.strategy)
         strategy_data_maps = _pick_strategy_data_maps(
             oos_data_maps=oos_data_maps,
             is_data_maps=data_maps,
