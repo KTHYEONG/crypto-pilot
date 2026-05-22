@@ -1,7 +1,20 @@
-# Binance Futures 백테스트 아키텍처 (v3.1 - Engine/Execution Focus)
+# Binance Futures 백테스트 아키텍처 (v3.2 - Engine/Execution Focus)
 
-**최종 업데이트**: 2026-05-20  
+**최종 업데이트**: 2026-05-22  
 **핵심 목적**: 전략 품질과 분리된 백테스트 엔진의 정확성, 재현성, 실행 현실성 보장.
+
+## 0. 2026-05-22 실행 계약 업데이트
+
+- `src/execution/opt_main_futures.py`는 thin wrapper가 아니라 stage 오케스트레이션 엔트리포인트로 동작한다.
+- 최적화 실행 계약은 `run_tracker.log_optuna_contract()`와 `collect_run_summary_from_study()`로 추적한다.
+- run summary/contract에서 관리하는 핵심 항목:
+  - `requested_trials_per_phase`
+  - `planned_total_trials`
+  - `trials_per_phase`
+  - `completed_trials_per_phase`
+  - `sampler_by_phase`
+  - `worker_by_phase`
+  - `storage_url`
 
 ---
 
