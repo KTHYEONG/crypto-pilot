@@ -8,7 +8,7 @@ from typing import Any
 import numpy as np
 
 try:
-    from config.settings import SLIPPAGE_RATE, TAKER_FEE_RATE
+    from src.core.settings import SLIPPAGE_RATE, TAKER_FEE_RATE
 except ImportError:  # pragma: no cover — tests/unit without full pkg path
     TAKER_FEE_RATE = 0.0005  # type: ignore[misc]
     SLIPPAGE_RATE = 2e-4  # type: ignore[misc]

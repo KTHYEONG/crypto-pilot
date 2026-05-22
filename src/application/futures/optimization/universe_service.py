@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 from dateutil.relativedelta import relativedelta
 
-from config.opt_config import get_quarterly_window
+from src.domain.futures.optimization.opt_config import get_quarterly_window
 from src.domain.futures.universe import (
     UniverseSnapshot,
     build_universe,
