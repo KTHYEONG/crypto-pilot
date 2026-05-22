@@ -10,7 +10,13 @@ import pandas as pd
 if TYPE_CHECKING:
     from src.domain.futures.strategy.config import StrategyConfig
 
-HMM_SEMANTIC_PROB_COLUMNS: list[str] = []
+HMM_SEMANTIC_PROB_COLUMNS: list[str] = [
+    "hmm_prob_bull_calm",
+    "hmm_prob_bull_vol_up",
+    "hmm_prob_bear_trend",
+    "hmm_prob_chop",
+    "hmm_prob_crisis",
+]
 _logger = logging.getLogger(__name__)
 
 
@@ -52,7 +58,43 @@ def run_ml_pipeline_for_universe(
         tf=tf,
         cfg=strategy_cfg,
     )
-    return MLPipelineOutput(alpha_panel=alpha_panel)
+
+    market_probs = pd.DataFrame()
+    if strategy_cfg.regime.enabled:
+        from src.domain.futures.optimization.optimizer import compute_multi_alignment_info
+        from src.domain.futures.strategy.regime.provider import compute_regime_posterior
+        info = compute_multi_alignment_info(preloaded_data_maps, symbols, tf, embargo=0)
+        if info is not None:
+            eff_len = int(info["eff_ref_len"])
+            offsets = info["alignment_offsets"]
+            valid_symbols = [
+                sym
+                for sym in symbols
+                if (
+                    sym in offsets
+                    and sym in preloaded_data_maps
+                    and tf in preloaded_data_maps[sym]
+                )
+            ]
+            if len(valid_symbols) >= strategy_cfg.blend.min_symbols:
+                close_2d = np.zeros((eff_len, len(valid_symbols)), dtype=np.float64)
+                datetimes = None
+                for col_idx, sym in enumerate(valid_symbols):
+                    df = preloaded_data_maps[sym][tf]
+                    start_idx = offsets[sym]
+                    end_idx = start_idx + eff_len
+                    close_2d[:, col_idx] = (
+                        df["close"].iloc[start_idx:end_idx].to_numpy(dtype=np.float64)
+                    )
+                    if datetimes is None:
+                        datetimes = df["datetime"].iloc[start_idx:end_idx].to_numpy()
+
+                if datetimes is not None:
+                    probs_dict = compute_regime_posterior(close_2d, strategy_cfg.regime)
+                    probs_dict["datetime"] = datetimes
+                    market_probs = pd.DataFrame(probs_dict).set_index("datetime")
+
+    return MLPipelineOutput(alpha_panel=alpha_panel, market_probs=market_probs)
 
 
 def merge_ml_output_into_is_and_oos(
@@ -117,6 +159,28 @@ def merge_ml_output_into_data_maps(
         )
         df["alpha_long"] = merged["alpha_long"].fillna(0.0).to_numpy(dtype=np.float64)
         df["alpha_short"] = merged["alpha_short"].fillna(0.0).to_numpy(dtype=np.float64)
+
+    # Broadcast market_probs (Regime) to all symbols
+    mp = getattr(ml_out, "market_probs", None)
+    if mp is not None and not mp.empty:
+        prob_cols = [
+            "hmm_prob_bull_calm",
+            "hmm_prob_bull_vol_up",
+            "hmm_prob_bear_trend",
+            "hmm_prob_chop",
+            "hmm_prob_crisis",
+        ]
+        for sym in symbols:
+            if sym not in data_maps or tf not in data_maps[sym]:
+                continue
+            df = data_maps[sym][tf]
+            # Merge probabilities
+            merged_probs = df[["datetime"]].merge(mp.reset_index(), on="datetime", how="left")
+            for c in prob_cols:
+                # Fallback: bull_calm is 1.0, other states are 0.0 if not present
+                fill_val = 1.0 if c == "hmm_prob_bull_calm" else 0.0
+                df[c] = merged_probs[c].fillna(fill_val).to_numpy(dtype=np.float64)
+
 
 
 class FuturesMLStrategy:

@@ -2498,7 +2498,8 @@ def _evaluate_awf_phase_d_aggregate(
     }
 
     if trial is not None:
-        # Scalar-only storage to prevent DB bottleneck
+        # Prevent DB bottleneck but persist leg-level log return vector for objectives LCB
+        trial.set_user_attr("awf_leg_log_tw", [float(x) for x in leg_log_tw])
         trial.set_user_attr("awf_mu_log", mu_log)
         trial.set_user_attr("awf_sigma_log", sig_awf_diag)
         trial.set_user_attr("awf_robust_score", float(robust_val))
