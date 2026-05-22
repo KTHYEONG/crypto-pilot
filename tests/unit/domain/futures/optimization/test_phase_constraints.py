@@ -13,7 +13,7 @@ if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
 from src.domain.futures.optimization.candidate_selector import select_and_rank_candidates
-from src.domain.futures.optimization.phase_samplers import (
+from src.domain.futures.optimization.workflow import (
     phase_a1_constraints,
     phase_a2_constraints,
     phase_b_constraints,
@@ -143,7 +143,7 @@ def test_phase_b_cvar_mdd_unit_alignment() -> None:
     assert vals[7] <= 0  # cvar <= 1.3 * mdd after unit alignment
 
 
-def test_v43_candidate_selector_filters_to_phase_b_only(monkeypatch) -> None:
+def test_candidate_selector_filters_to_phase_b_only(monkeypatch) -> None:
     monkeypatch.setattr(
         "src.domain.futures.optimization.candidate_selector.replay_robust_awf_for_trial_params",
         lambda _ctx, _params: (0.0, {"ok": True}),

@@ -12,7 +12,7 @@ from src.domain.futures.universe import (
     build_universe,
     load_universe_snapshot,
 )
-from src.domain.futures.universe.contracts import RejectCode
+from src.domain.futures.universe.models import RejectCode
 
 _COMMON_ROW = {
     "tf": "4h",

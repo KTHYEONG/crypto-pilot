@@ -3,7 +3,7 @@ from __future__ import annotations
 from optuna.distributions import FloatDistribution
 from optuna.trial import TrialState, create_trial
 
-from src.domain.futures.optimization.trial_observability import (
+from src.domain.futures.optimization.observability.trial_observability import (
     build_compact_trial_summary,
     classify_no_valid_candidates,
 )

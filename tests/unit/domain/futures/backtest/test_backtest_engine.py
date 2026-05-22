@@ -11,12 +11,12 @@ project_root = str(Path(__file__).resolve().parents[4])
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-import src.domain.futures.backtest_engine as backtest_engine_mod
+import src.domain.futures.backtest.engine as backtest_engine_mod
 from src.core.settings import FUTURES_DATA_DIR
-from src.domain.futures.backtest_engine import (
+from src.domain.futures.backtest.engine import (
     PortfolioBacktestEngine,
 )
-from src.domain.futures.backtest_preparation import prepare_backtest_inputs
+from src.domain.futures.backtest.preparation import prepare_backtest_inputs
 
 
 def test_backtest_engine_multi_symbol_mock() -> None:

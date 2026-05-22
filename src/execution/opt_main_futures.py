@@ -39,7 +39,7 @@ from src.domain.futures.optimization.opt_config import (
     get_quarterly_window,
 )
 from src.domain.futures.optimization.opt_data_utils import load_futures_data_maps_for_symbols
-from src.domain.futures.optimization.run_tracker import (
+from src.domain.futures.optimization.observability.run_tracker import (
     build_joint_study_name,
     build_run_id,
     log_optuna_contract,

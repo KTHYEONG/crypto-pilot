@@ -9,11 +9,12 @@ project_root = str(Path(__file__).resolve().parents[5])
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-from src.domain.futures.optimization.phase_metrics import lcb, ucb
-from src.domain.futures.optimization.phase_objectives import (
+from src.domain.futures.optimization.workflow import (
+    lcb,
     objective_phase_a1_signal_lcb,
     objective_phase_a2_sortino_mdd,
     objective_phase_b_calmar_lcb,
+    ucb,
 )
 
 
@@ -67,7 +68,7 @@ def test_phase_objectives_write_lcb_ucb_attrs(monkeypatch) -> None:
         return 0.0
 
     monkeypatch.setattr(
-        "src.domain.futures.optimization.phase_objectives.objective_ml_phase_d",
+        "src.domain.futures.optimization.workflow.objective_ml_phase_d",
         _fake_base_objective,
     )
 
@@ -132,7 +133,7 @@ def test_phase_objective_pruning_path(monkeypatch) -> None:
         return 0.0
 
     monkeypatch.setattr(
-        "src.domain.futures.optimization.phase_objectives.objective_ml_phase_d",
+        "src.domain.futures.optimization.workflow.objective_ml_phase_d",
         _fake_base_objective,
     )
 
