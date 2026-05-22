@@ -4,11 +4,11 @@ import optuna
 from optuna.distributions import FloatDistribution
 
 from src.domain.futures.optimization.optimizer import MLPhaseDContext, _suggest_ml_joint_nsga2
-from src.domain.futures.optimization.phase_param_space import (
-    V43_CORE_PARAM_KEYS,
-    V43_FIXED_DEFAULTS,
-    V43_RISK_PARAM_KEYS,
-    V43_SIGNAL_PARAM_KEYS,
+from src.domain.futures.optimization.workflow import (
+    CORE_PARAM_KEYS,
+    FIXED_DEFAULTS,
+    RISK_PARAM_KEYS,
+    SIGNAL_PARAM_KEYS,
     suggest_joint_params,
 )
 
@@ -19,13 +19,13 @@ def _ask_trial() -> tuple[optuna.study.Study, optuna.trial.Trial]:
     return study, trial
 
 
-def test_v43_joint_suggest_only_core_params_and_log_distributions() -> None:
+def test_joint_suggest_only_core_params_and_log_distributions() -> None:
     study, trial = _ask_trial()
     params = suggest_joint_params(trial)
     study.tell(trial, 0.0)
 
-    assert set(params.keys()) == set(V43_CORE_PARAM_KEYS)
-    assert set(trial.params.keys()) == set(V43_CORE_PARAM_KEYS)
+    assert set(params.keys()) == set(CORE_PARAM_KEYS)
+    assert set(trial.params.keys()) == set(CORE_PARAM_KEYS)
 
     removed = {
         "BETA_REGIME_BULL",
@@ -48,17 +48,17 @@ def test_v43_joint_suggest_only_core_params_and_log_distributions() -> None:
         assert dist.log
 
 
-def test_optimizer_main_path_uses_v43_space_and_fixed_defaults() -> None:
+def test_optimizer_main_path_uses_phased_space_and_fixed_defaults() -> None:
     study, trial = _ask_trial()
     ctx = MLPhaseDContext(data_maps={}, symbols=[], tf="4h")
     merged = _suggest_ml_joint_nsga2(trial, ctx)
     study.tell(trial, 0.0)
 
-    assert set(trial.params.keys()) == set(V43_CORE_PARAM_KEYS)
+    assert set(trial.params.keys()) == set(CORE_PARAM_KEYS)
     assert "BETA_REGIME_BULL" not in trial.params
     assert "SLIPPAGE_BPS_BUFFER_MULT" not in trial.params
 
-    for key, value in V43_FIXED_DEFAULTS.items():
+    for key, value in FIXED_DEFAULTS.items():
         assert merged.get(key) == value
 
 
@@ -67,8 +67,8 @@ def test_optimizer_phase_a1_suggests_signal_only() -> None:
     ctx = MLPhaseDContext(data_maps={}, symbols=[], tf="4h", coordinate_phase="phase_a1")
     _suggest_ml_joint_nsga2(trial, ctx)
     study.tell(trial, 0.0)
-    assert set(trial.params.keys()) == set(V43_SIGNAL_PARAM_KEYS)
-    assert set(V43_RISK_PARAM_KEYS).isdisjoint(set(trial.params.keys()))
+    assert set(trial.params.keys()) == set(SIGNAL_PARAM_KEYS)
+    assert set(RISK_PARAM_KEYS).isdisjoint(set(trial.params.keys()))
 
 
 def test_optimizer_phase_a2_suggests_risk_only_with_frozen_signal() -> None:
@@ -91,7 +91,7 @@ def test_optimizer_phase_a2_suggests_risk_only_with_frozen_signal() -> None:
     )
     merged = _suggest_ml_joint_nsga2(trial, ctx)
     study.tell(trial, 0.0)
-    assert set(trial.params.keys()) == set(V43_RISK_PARAM_KEYS)
+    assert set(trial.params.keys()) == set(RISK_PARAM_KEYS)
     for key, value in frozen_signal.items():
         assert merged[key] == value
 

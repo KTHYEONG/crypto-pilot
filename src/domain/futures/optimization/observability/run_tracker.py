@@ -18,19 +18,17 @@ from optuna.trial import TrialState
 from sqlalchemy import create_engine, text
 from sqlalchemy.pool import QueuePool
 
-from src.domain.futures.optimization.dashboard import safe_float
+from src.domain.futures.optimization.observability.dashboard import safe_float
 from src.domain.futures.optimization.opt_config import OPT_FUTURES_CONFIG
-from src.domain.futures.optimization.optimizer import (
-    MLPhaseDContext,
-    objective_ml_phase_d,
-)
-from src.domain.futures.optimization.phase_samplers import (
+from src.domain.futures.optimization.ml_context import MLPhaseDContext
+from src.domain.futures.optimization.objectives import objective_ml_phase_d
+from src.domain.futures.optimization.workflow import (
     build_phase_a1_pruner,
     build_phase_a1_sampler,
     build_phase_a2_sampler,
     build_phase_b_sampler,
 )
-from src.domain.futures.optimization.trial_observability import (
+from src.domain.futures.optimization.observability.trial_observability import (
     build_compact_trial_summary,
     increment_failure_reason_count,
     init_failure_reason_counts,

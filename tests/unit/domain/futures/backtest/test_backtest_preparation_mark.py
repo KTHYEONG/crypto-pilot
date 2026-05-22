@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from src.domain.futures.backtest_preparation import prepare_backtest_inputs
+from src.domain.futures.backtest.preparation import prepare_backtest_inputs
 
 
 def test_prepare_backtest_inputs_mark_price_success() -> None:

@@ -7,7 +7,7 @@ import optuna
 from optuna.trial import TrialState
 
 from src.application.futures.optimization import optimization_service
-from src.domain.futures.optimization.phase_runner import PhaseBundle
+from src.domain.futures.optimization.workflow import PhaseBundle
 
 
 def _build_request() -> optimization_service.OptimizationRequest:
@@ -76,7 +76,7 @@ def test_execute_phase_skeleton_wires_budget_and_workers(monkeypatch: Any) -> No
     )
     monkeypatch.setattr(
         optimization_service,
-        "run_v43_phase_optimization_skeleton",
+        "run_phased_optimization_skeleton",
         _fake_run_phase,
     )
     request = _build_request()

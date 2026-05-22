@@ -68,7 +68,7 @@ def test_oi_adv_ratio_under_threshold_passes() -> None:
 
 def test_fetch_metrics_bulk_returns_empty_before_2020_09() -> None:
     """2020-09-01 이전 구간 → 데이터 없음 → 빈 DataFrame."""
-    from src.core.utils.binance_vision import fetch_metrics_bulk
+    from src.core.exchange.binance_vision import fetch_metrics_bulk
 
     result = fetch_metrics_bulk(
         symbol="BTCUSDT",
@@ -81,7 +81,7 @@ def test_fetch_metrics_bulk_returns_empty_before_2020_09() -> None:
 
 def test_fetch_metrics_bulk_adjusts_start_to_metrics_start() -> None:
     """start_date < 2020-09-01이지만 end_date >= 2020-09-01 → 2020-09-01부터 수집 시도."""
-    from src.core.utils.binance_vision import fetch_metrics_bulk, BinanceVisionDownloader
+    from src.core.exchange.binance_vision import fetch_metrics_bulk, BinanceVisionDownloader
 
     # HTTP 요청 mock — 1행짜리 DataFrame 반환
     mock_df = pd.DataFrame(
@@ -111,7 +111,7 @@ def test_fetch_metrics_bulk_adjusts_start_to_metrics_start() -> None:
 
 def test_fetch_metrics_bulk_shape_with_mock_http() -> None:
     """HTTP mock으로 5일치 metrics 요청 → DataFrame row 수 확인."""
-    from src.core.utils.binance_vision import fetch_metrics_bulk, BinanceVisionDownloader
+    from src.core.exchange.binance_vision import fetch_metrics_bulk, BinanceVisionDownloader
 
     n_mock_days = 3
     mock_row = pd.DataFrame(

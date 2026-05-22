@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pandas as pd
 
-from src.domain.futures.data_loader import (
+from src.domain.futures.backtest.data_loader import (
     build_mark_price_1m_array,
     fetch_premiumindex_bulk,
 )
@@ -39,7 +39,7 @@ def test_fetch_premiumindex_bulk_mocked() -> None:
                 }
             )
 
-        with patch("src.domain.futures.data_loader.BinanceVisionDownloader") as mock_downloader_cls:
+        with patch("src.domain.futures.backtest.data_loader.BinanceVisionDownloader") as mock_downloader_cls:
             mock_downloader = MagicMock()
             mock_downloader.fetch_premiumindex_daily.side_effect = get_mock_df
             mock_downloader_cls.return_value = mock_downloader
@@ -107,7 +107,7 @@ def test_fetch_premiumindex_bulk_cache_hit() -> None:
         df_1.to_parquet(date_dir / "2020-09-13.parquet", index=False)
         df_2.to_parquet(date_dir / "2020-09-14.parquet", index=False)
 
-        with patch("src.domain.futures.data_loader.BinanceVisionDownloader") as mock_downloader_cls:
+        with patch("src.domain.futures.backtest.data_loader.BinanceVisionDownloader") as mock_downloader_cls:
             mock_downloader = MagicMock()
             mock_downloader_cls.return_value = mock_downloader
 
@@ -149,7 +149,7 @@ def test_build_mark_price_1m_array_shape_and_ffill() -> None:
                 return df_eth
             return pd.DataFrame()
 
-        with patch("src.domain.futures.data_loader.fetch_premiumindex_bulk", side_effect=mock_bulk):
+        with patch("src.domain.futures.backtest.data_loader.fetch_premiumindex_bulk", side_effect=mock_bulk):
             # Start: 1600000000000 (0ms)
             # End: 1600000360000 (6 minutes = 360000 ms)
             arr = build_mark_price_1m_array(

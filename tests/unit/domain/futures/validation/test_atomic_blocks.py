@@ -8,7 +8,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from src.domain.futures.validation.atomic_blocks import (
+from src.domain.futures.validation.gates import (
     AtomicBlockConfig,
     build_atomic_blocks,
     evaluate_atomic_blocks,
