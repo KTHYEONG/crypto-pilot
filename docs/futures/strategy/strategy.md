@@ -1,8 +1,8 @@
-# Binance Futures 전략 아키텍처 (v2.0 - Minimal Viable Strategy)
+# Binance Futures 전략 아키텍처 (v2.1 - Multi-Sleeve Blending System)
 
 **최종 업데이트**: 2026-05-22
-**핵심 설계 목적**: legacy alpha/HMM 없이 순수 결정론적 신호로 백테스트 엔진·로직·유니버스 종합 검증.  
-이 문서는 복잡한 알파 mining을 목적으로 하지 않는다. 기존 파이프라인이 end-to-end로 정상 동작하는지 확인하는 것이 1차 목표다.
+**핵심 설계 목적**: legacy alpha/HMM 없이 순수 결정론적 신호로 백테스트 엔진·로직·유니버스 종합 검증 및 다중 슬리브(XS Reversal, TSMomentum, Carry) 동적 블렌딩 검증.  
+이 문서는 복잡한 알파 mining을 목적으로 하지 않으며, 다중 슬리브 신호가 end-to-end로 정상 동작하고 최적화되는지 확인하는 것이 1차 목표다.
 
 ---
 
@@ -11,7 +11,7 @@
 - **legacy 의존 금지**: `src/domain/futures/legacy/*` 경로를 신규 strategy 코드에서 import하지 않는다.
 - **HMM/alpha_factory 미사용**: regime posterior, ML alpha panel 없이 순수 가격·funding 데이터만 사용.
 - **기존 파이프라인 재사용**: `signal_composer` → `portfolio_constructor` → `backtest_engine` 경로를 그대로 통과시킨다. 전략 계층은 `alpha_long/alpha_short` 배열만 생산한다.
-- **P0 범위 최소화**: 단일 sleeve(XS momentum). P1에서 carry 추가. 다른 sleeve는 검증 후 결정.
+- **Multi-Sleeve 동적 블렌딩**: XS Reversal(기본 활성), Carry(기본 활성), TSMomentum(기본 비활성) 다중 슬리브를 구성하고, 롤링 Spearman IC 및 t-stat 기반으로 동적 가중치를 산출하여 결합한다.
 
 ---
 
@@ -19,9 +19,13 @@
 
 ```text
 [신규 strategy 모듈]
-build_strategy_alpha(data_maps, symbols, tf)
+build_strategy_alpha(data_maps, symbols, tf, cfg)
+  → 1. compute_multi_alignment_info 기반 가격 패널 정렬
+  → 2. 활성 슬리브(XS Reversal, TSMomentum, Carry) raw 신호 산출
+  → 3. Cross-sectional Winsorized z-score 및 Spearman IC 산출
+  → 4. Dynamic Blending 및 t-stat Gate 평가를 통한 가중치 결합
+  → 5. Grinold expected return calibration (to_return_units)
   → alpha_panel: DataFrame[(datetime, symbol), alpha_long / alpha_short]
-                  (simple return per bar 단위, strategy mode only)
          │
          ▼
 [strategy_runtime/bridge.py]
@@ -80,53 +84,64 @@ strategy mode는 `--strategy momentum_v0`처럼 명시적으로 진입하며, `b
 
 ---
 
-## 4. P0 전략: XS Momentum Sleeve
+## 4. 다중 슬리브(Multi-Sleeve) 아키텍처 및 세부 로직
 
-### 4.1 설계 의도
+### 4.1 XS Reversal Sleeve (기본 활성화)
+가장 안정적이고 강건한 평균회귀 신호인 **Cross-Sectional Reversal**입니다.
+* **설계 의도**: 최근 N개 바(Closed Bar) 동안의 수익률이 낮았던 하위 심볼을 매수(Long), 높았던 상위 심볼을 매도(Short)합니다.
+* **신호 산출**:
+  $$\text{rev\_score}[t, i] = -\ln\left(\frac{\text{close}[t, i]}{\text{close}[t - L, i]}\right)$$
+  * `L` = lookback_bars (기본값: 6 bars = 24h)
+  * `min_symbols_for_xs` = 최소 5개 심볼 이상 존재할 때만 스코어링 활성화.
 
-가장 단순하고 검증된 신호: **cross-section 모멘텀**. 특정 period의 수익률 상위 심볼 long, 하위 심볼 short.
+### 4.2 TS Momentum Sleeve (기본 비활성화)
+각 심볼별로 개별적인 시간축 모멘텀(Time-Series Momentum)을 평가합니다.
+* **설계 의도**: 백테스트 검증 결과, 4h 해상도 및 1d 해상도 전체 구간에서 음의 IC(4h t=-6.8, 1d t=-2.3)를 기록하여 **기본값 비활성(`False`)**으로 제어합니다.
+* **신호 산출**:
+  $$\text{ts\_mom\_score}[t, i] = \ln\left(\frac{\text{close}[t - skip, i]}{\text{close}[t - L, i]}\right)$$
+  * `L` = ts_momentum_lookback (기본값: 36)
+  * `skip` = ts_momentum_skip (기본값: 1)
 
-- legacy 의존 없음
-- 파라미터 2개(lookback bars, top/bottom ratio)
-- 신호 direction이 명확하여 결과 해석이 쉬움
-- 비용 차감 후 EV가 양수인지 바로 확인 가능
+### 4.3 Carry Sleeve (기본 활성화)
+Binance Futures의 8시간 원천 funding rate를 수집하여 Carry-adjusted edge를 포착합니다.
+* **설계 의도**: 펀딩 비용 드래그를 상쇄하고 고펀딩 수혜 포지션을 취하기 위해 활성화됩니다.
+* **신호 산출**:
+  $$\text{carry\_score}[t, i] = \text{rolling\_mean}(\text{funding\_rate\_sum}, \text{smooth\_bars})$$
+  * `smooth_bars` = carry_smooth (기본값: 6 bars = 24h)
 
-### 4.2 신호 산출 수식
+### 4.4 동적 블렌딩 (Dynamic Blending) 및 Grinold expected return Calibration
+* **Dynamic Weighting**: 각 슬리브의 롤링 Spearman IC 윈도우(`ic_window_bars = 180`) 통계를 바탕으로 t-stat가 `min_t_stat = 2.0`, `min_hit_ratio = 0.45` 등의 Hard Gate를 통과한 슬리브에 대해서만 `ic_shrinkage(0.5) * mean_ic` 만큼의 가중치를 배분하여 Dynamic blend를 수행합니다. 
+* **Fallback**: 모든 슬리브가 통과하지 못하면 가장 절대값이 높은 `mean_ic`를 지닌 단일 슬리브를 강제 적용(Fallback)합니다.
+* **Grinold Calibration**: 블렌딩된 z-score와 예상 선행 변동성(`sigma_lookback = 30`), 롤링 IC 강도를 곱하여 **to_return_units**로 expected return($\alpha_{hat}$) 단위를 캘리브레이션합니다:
+  $$\alpha_{hat} = \text{score} \times \sigma_{fwd} \times \text{IC}_{lagged}$$
 
-```text
-모멘텀 score (심볼 i, 시점 t):
-  mom_score[t, i] = simple_return(close[t, i], close[t - L, i])
-
-strategy mode에서는 mom_score를 심볼별 edge로 유지하고, cross-sectional rank/threshold로
-상위 tail은 `alpha_long`, 하위 tail은 `alpha_short`로 분리한다.
-결측/NaN 심볼은 제외하며 해당 alpha는 0.0 처리한다.
-```
-
-- `L` = lookback_bars (권장 초기값: 6 bars = 24h, 18 bars = 3d 두 가지로 비교)
-- `top_ratio` = 상위 비율 (권장: 0.3), `bottom_ratio` = 하위 비율 (권장: 0.3)
-- 출력 단위: per-bar simple return edge. trial-time composer가 `BETA_ALPHA`와 `EV_HURDLE_BPS`를 적용해
-  `xs_score_long/short`를 생성한다.
-
-### 4.3 데이터 의존성
+### 4.5 데이터 의존성
 
 | 필요 데이터 | 경로 | 비고 |
 |---|---|---|
 | OHLCV 4h | `data_maps[symbol]["4h"]["close"]` | optimizer가 이미 적재 |
-| funding_rate | `data_maps[symbol]["4h"]["funding_rate_sum"]` | carry sleeve 추가 시(P1) 사용 |
-
-**신규 외부 데이터 불필요.** optimizer가 준비한 `data_maps`를 그대로 소비한다.
+| funding_rate | `data_maps[symbol]["4h"]["funding_rate_sum"]` | Carry sleeve 연산용 |
 
 ---
 
 ## 5. 모듈 구조 및 구현 범위
 
-### 5.1 신규 파일 (P0)
+### 5.1 파일 구조 (XS Reversal / TS Momentum / Carry 완비)
 
 ```text
 src/domain/futures/strategy/
 ├── __init__.py
-├── momentum.py          # XS momentum alpha_long/alpha_short 산출
-└── builder.py           # build_strategy_alpha() - data_maps → alpha_panel DataFrame
+├── builder.py           # build_strategy_alpha() - data_maps -> alpha_panel DataFrame
+├── config.py            # StrategyConfig, SleeveConfig, BlendConfig, RegimeConfig 정의
+├── combine.py           # blend_sleeves() - 가중치 기반 다중 슬리브 합성 및 Normalization
+├── normalize.py         # Winsorized CS z-score, Grinold return calibration(to_return_units)
+├── diagnostics.py       # rolling_ic, ic_summary, passes_ic_gate 검증 헬퍼
+├── momentum.py          # XS Momentum 원형 (수식 연산 유틸)
+└── sleeves/
+    ├── base.py          # BaseSleeve 추상 클래스
+    ├── xs_reversal.py   # XSReversalSleeve 구현
+    ├── ts_momentum.py   # TSMomentumSleeve 구현
+    └── carry.py         # CarrySleeve 구현
 ```
 
 수정 대상 파일:
@@ -140,9 +155,10 @@ src/domain/futures/strategy_runtime/bridge.py
 
 | 파일 | 역할 | 외부 의존 |
 |---|---|---|
-| `strategy/momentum.py` | closed bar에서 XS momentum score 산출 | numpy, pandas |
-| `strategy/builder.py` | data_maps 소비 → alpha_panel DataFrame 조립 | momentum.py |
-| `bridge.py` (수정) | strategy 주입 on/off 분기 | builder.py |
+| `sleeves/*.py` | 개별 sleeve 신호 산출 추상화 | numpy, pandas |
+| `strategy/builder.py` | data_maps 소비 → Multi-sleeve 동적 결합 및 Grinold Calibration 진행 | sleeves, combine, normalize |
+| `bridge.py` | strategy 주입 on/off 분기 | builder.py |
+| `config.py` | `StrategyConfig` 및 `RegimeConfig` 등의 하이퍼파라미터 정의 | dataclasses |
 
 ### 5.3 금지 사항
 

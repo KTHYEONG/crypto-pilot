@@ -4,13 +4,13 @@ import logging
 import threading
 from dataclasses import dataclass
 from datetime import date
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import pandas as pd
 
 from src.core.indicators.numpy_ops_futures import compute_atr_numpy
+from src.core.settings import LOG_DIR
 from src.domain.futures.optimization.data_aligner import (
     _build_aligned_2d_from_prebuilt,
     _dataframe_to_symbol_arrays,
@@ -35,7 +35,7 @@ if TYPE_CHECKING:
 
 _logger = logging.getLogger(__name__)
 _PRECOMPUTE_LOCK = threading.Lock()
-_MEMBERSHIP_STATS_PATH = Path("logs/futures/optimization/membership_mask_stats.parquet")
+_MEMBERSHIP_STATS_PATH = LOG_DIR / "futures/optimization/membership_mask_stats.parquet"
 
 @dataclass
 class MLPhaseDContext:
