@@ -5,6 +5,8 @@ Anchored walk-forward (AWF) legs, Kelly-CVaR scalar, disk+memory signal cache.
 
 from __future__ import annotations
 
+from typing import Any
+
 import numpy as np
 import pandas as pd
 
@@ -21,6 +23,9 @@ _FUTURES_2D_REQUIRED_COLS: tuple[str, ...] = (
     "atr",
     "garch_kelly_f",
     "funding_rate_sum",
+    "kill_signal",
+    "membership_kill_signal",
+    "entry_block_mask",
     "slot_rank_score",
     "ml_calib_prob",
     "alpha_long",
@@ -52,6 +57,96 @@ _EXEC_1M_VALUE_COLS: tuple[str, ...] = (
 )
 _EXEC_1M_DT_COL = "exec_dt_index_1m"
 _DECISION_DT_COL = "dt_index"
+
+
+def merge_effective_membership_constraints(
+    aligned_data: dict[str, np.ndarray],
+    *,
+    clamp_target_weights: bool = False,
+) -> dict[str, Any]:
+    """Merge membership-derived constraints into aligned arrays in-place.
+
+    Returns compact stats to support diagnostics/persistence.
+    """
+    close_2d = np.asarray(aligned_data.get("close"), dtype=np.float64)
+    if close_2d.ndim != 2:
+        return {"rows": []}
+    n_bars, n_syms = close_2d.shape
+
+    raw_kill = aligned_data.get("kill_signal")
+    kill_2d = (
+        np.asarray(raw_kill, dtype=np.float64)
+        if raw_kill is not None and np.asarray(raw_kill).shape == close_2d.shape
+        else np.zeros_like(close_2d, dtype=np.float64)
+    )
+    membership_kill = aligned_data.get("membership_kill_signal")
+    if membership_kill is not None and np.asarray(membership_kill).shape == close_2d.shape:
+        kill_2d = np.maximum(kill_2d, np.asarray(membership_kill, dtype=np.float64))
+
+    active = aligned_data.get("universe_active_mask")
+    warm = aligned_data.get("universe_entry_warm_mask")
+    entry_block = aligned_data.get("entry_block_mask")
+    if entry_block is not None and np.asarray(entry_block).shape == close_2d.shape:
+        entry_block_2d = np.asarray(entry_block, dtype=np.float64)
+    else:
+        entry_block_2d = np.zeros_like(close_2d, dtype=np.float64)
+    if active is not None and np.asarray(active).shape == close_2d.shape:
+        entry_block_2d = np.maximum(
+            entry_block_2d,
+            np.where(np.asarray(active, dtype=np.float64) > 0.0, 0.0, 1.0),
+        )
+    if warm is not None and np.asarray(warm).shape == close_2d.shape:
+        entry_block_2d = np.maximum(
+            entry_block_2d,
+            np.where(np.asarray(warm, dtype=np.float64) > 0.0, 0.0, 1.0),
+        )
+
+    aligned_data["kill_signal"] = np.ascontiguousarray(kill_2d)
+    aligned_data["effective_kill_signal"] = np.ascontiguousarray(kill_2d)
+    aligned_data["entry_block_mask"] = np.ascontiguousarray(entry_block_2d)
+
+    target_weights = aligned_data.get("target_weights")
+    if clamp_target_weights and target_weights is not None:
+        tw = np.asarray(target_weights, dtype=np.float64)
+        if tw.shape == close_2d.shape:
+            aligned_data["target_weights"] = np.where(entry_block_2d > 0.0, 0.0, tw)
+
+    symbol_names = aligned_data.get("symbol_names")
+    rows: list[dict[str, Any]] = []
+    if (
+        isinstance(symbol_names, np.ndarray)
+        and symbol_names.ndim == 1
+        and symbol_names.shape[0] == n_syms
+    ):
+        for s_idx, symbol in enumerate(symbol_names.tolist()):
+            rows.append(
+                {
+                    "symbol": str(symbol),
+                    "active_ratio": float(
+                        np.mean(
+                            (
+                                np.asarray(active, dtype=np.float64)[:, s_idx]
+                                if active is not None and np.asarray(active).shape == close_2d.shape
+                                else np.ones(n_bars, dtype=np.float64)
+                            )
+                            > 0.0
+                        )
+                    ),
+                    "warm_ratio": float(
+                        np.mean(
+                            (
+                                np.asarray(warm, dtype=np.float64)[:, s_idx]
+                                if warm is not None and np.asarray(warm).shape == close_2d.shape
+                                else np.ones(n_bars, dtype=np.float64)
+                            )
+                            > 0.0
+                        )
+                    ),
+                    "forced_exit_count": int(np.count_nonzero(kill_2d[:, s_idx] > 0.0)),
+                    "blocked_entry_count": int(np.count_nonzero(entry_block_2d[:, s_idx] > 0.0)),
+                }
+            )
+    return {"rows": rows}
 
 
 def _dataframe_to_symbol_arrays(sig_df: pd.DataFrame) -> dict[str, np.ndarray]:
@@ -88,6 +183,9 @@ def _dataframe_to_symbol_arrays(sig_df: pd.DataFrame) -> dict[str, np.ndarray]:
         "entry_lower": 0.0,
         "garch_kelly_f": 1.0,
         "funding_rate_sum": 0.0,
+        "kill_signal": 0.0,
+        "membership_kill_signal": 0.0,
+        "entry_block_mask": 0.0,
         "slot_rank_score": 0.0,
         "ml_calib_prob": 1.0,
         "alpha_long": 0.0,
@@ -130,6 +228,7 @@ def _build_aligned_2d_from_prebuilt(
     if slice_end - slice_start < 2:
         return None
     aligned_data: dict[str, np.ndarray] = {}
+    aligned_data["symbol_names"] = np.asarray(symbols, dtype=object)
     
     # Slice the precomputed 3D covariance if provided
     if sigma_3d_full is not None:
@@ -291,6 +390,9 @@ def align_data_for_2d_engine(
         "atr",
         "garch_kelly_f",
         "funding_rate_sum",
+        "kill_signal",
+        "membership_kill_signal",
+        "entry_block_mask",
         "slot_rank_score",
         "ml_calib_prob",
         "dyn_leverage",
@@ -326,6 +428,9 @@ def align_data_for_2d_engine(
             "trend_direction",
             "garch_kelly_f",
             "funding_rate_sum",
+            "kill_signal",
+            "membership_kill_signal",
+            "entry_block_mask",
             "slot_rank_score",
             "ml_calib_prob",
             "xs_score_long",

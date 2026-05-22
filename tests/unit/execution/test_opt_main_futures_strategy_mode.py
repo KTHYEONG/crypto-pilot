@@ -1,107 +1,137 @@
 from __future__ import annotations
 
-import pandas as pd
-import pytest
-
-from src.domain.futures.strategy_runtime.bridge import MLPipelineOutput
-from src.execution.opt_main_futures import (
-    _apply_strategy_p0_overrides,
-    _assert_strategy_alpha_ready,
-    _pick_strategy_data_maps,
-    _strategy_smoke_engine_params,
-)
+from src.application.futures.optimization.config import build_run_config_from_args
+from src.execution import opt_main_futures
 
 
-def _build_symbol_df(n: int = 5) -> pd.DataFrame:
-    return pd.DataFrame(
+def test_strategy_mode_pipeline_orchestration_order(monkeypatch) -> None:
+    run_config = build_run_config_from_args(
         {
-            "datetime": pd.date_range("2026-01-01", periods=n, freq="4h"),
-            "close": [100.0 + i for i in range(n)],
+            "mode": "strategy",
+            "strategy": "momentum_v0",
+            "symbols": ("BTCUSDT",),
+            "tf": "4h",
+            "trials": 1,
+            "sync_mode": "full_history_master",
         }
     )
-
-
-def test_pick_strategy_data_maps_prefers_oos_when_not_empty() -> None:
-    oos_df = _build_symbol_df()
-    is_df = _build_symbol_df()
-    oos_maps = {"BTCUSDT": {"4h": oos_df}}
-    is_maps = {"BTCUSDT": {"4h": is_df}}
-    chosen = _pick_strategy_data_maps(oos_maps, is_maps, ["BTCUSDT"], "4h")
-    assert chosen is oos_maps
-
-
-def test_pick_strategy_data_maps_falls_back_to_is_when_oos_empty() -> None:
-    oos_maps = {"BTCUSDT": {"4h": pd.DataFrame()}}
-    is_maps = {"BTCUSDT": {"4h": _build_symbol_df()}}
-    chosen = _pick_strategy_data_maps(oos_maps, is_maps, ["BTCUSDT"], "4h")
-    assert chosen is is_maps
-
-
-def test_assert_strategy_alpha_ready_raises_when_panel_empty() -> None:
-    with pytest.raises(RuntimeError, match="non-empty alpha_panel"):
-        _assert_strategy_alpha_ready(
-            ml_out=MLPipelineOutput(alpha_panel=pd.DataFrame()),
-            oos_data_maps={"BTCUSDT": {"4h": _build_symbol_df()}},
-            valid_symbols=["BTCUSDT"],
-            tf="4h",
-        )
-
-
-def test_assert_strategy_alpha_ready_raises_when_merged_values_all_zero() -> None:
-    panel = pd.DataFrame(
-        {
-            "datetime": pd.date_range("2026-01-01", periods=5, freq="4h"),
-            "symbol": ["BTCUSDT"] * 5,
-            "alpha_long": [0.0] * 5,
-            "alpha_short": [0.0] * 5,
-        }
-    ).set_index(["datetime", "symbol"])
-    oos_df = _build_symbol_df()
-    oos_df["alpha_long"] = 0.0
-    oos_df["alpha_short"] = 0.0
-    with pytest.raises(RuntimeError, match="zero-only alpha columns"):
-        _assert_strategy_alpha_ready(
-            ml_out=MLPipelineOutput(alpha_panel=panel),
-            oos_data_maps={"BTCUSDT": {"4h": oos_df}},
-            valid_symbols=["BTCUSDT"],
-            tf="4h",
-        )
-
-
-def test_assert_strategy_alpha_ready_passes_with_non_zero_alpha() -> None:
-    panel = pd.DataFrame(
-        {
-            "datetime": pd.date_range("2026-01-01", periods=5, freq="4h"),
-            "symbol": ["BTCUSDT"] * 5,
-            "alpha_long": [1.0, 0.0, 0.0, 0.0, 0.0],
-            "alpha_short": [0.0, 1.0, 0.0, 0.0, 0.0],
-        }
-    ).set_index(["datetime", "symbol"])
-    oos_df = _build_symbol_df()
-    oos_df["alpha_long"] = [1.0, 0.0, 0.0, 0.0, 0.0]
-    oos_df["alpha_short"] = [0.0, 1.0, 0.0, 0.0, 0.0]
-    _assert_strategy_alpha_ready(
-        ml_out=MLPipelineOutput(alpha_panel=panel),
-        oos_data_maps={"BTCUSDT": {"4h": oos_df}},
+    called: list[str] = []
+    window = opt_main_futures.QuarterlyWindow(
+        fetch_start="2025-01-01",
+        is_start="2025-04-01",
+        oos_start="2026-01-01",
+        end_date="2026-04-01",
+        fetch_start_date=opt_main_futures.datetime.strptime("2025-01-01", "%Y-%m-%d").date(),
+        is_start_date=opt_main_futures.datetime.strptime("2025-04-01", "%Y-%m-%d").date(),
+        oos_start_date=opt_main_futures.datetime.strptime("2026-01-01", "%Y-%m-%d").date(),
+        end_date_value=opt_main_futures.datetime.strptime("2026-04-01", "%Y-%m-%d").date(),
+    )
+    data_stage = opt_main_futures.DataStageResult(
+        data_maps={"BTCUSDT": {}},
+        oos_data_maps={"BTCUSDT": {}},
         valid_symbols=["BTCUSDT"],
-        tf="4h",
     )
 
+    def fake_window(reference_date: str | None) -> opt_main_futures.QuarterlyWindow:
+        _ = reference_date
+        called.append("window")
+        return window
 
-def test_apply_strategy_p0_overrides_sets_defaults() -> None:
-    cfg: dict[str, float | bool] = {
-        "FUTURES_WF_HMM_LEG_REFIT": True,
-        "FUTURES_DEFAULT_BETA_ALPHA": 1.0,
-        "FUTURES_DEFAULT_EV_HURDLE_BPS": 40.0,
-    }
-    _apply_strategy_p0_overrides(cfg)
-    assert cfg["FUTURES_WF_HMM_LEG_REFIT"] is False
-    assert float(cfg["FUTURES_DEFAULT_BETA_ALPHA"]) == 1.0
-    assert float(cfg["FUTURES_DEFAULT_EV_HURDLE_BPS"]) == 1.5
+    def fake_universe(
+        rc: object,
+        win: object,
+    ) -> tuple[list[str], dict[object, frozenset[str]]]:
+        _ = rc
+        _ = win
+        called.append("universe")
+        return ["BTCUSDT"], {}
+
+    def fake_data(
+        rc: object,
+        win: object,
+        discovered: list[str],
+        timeline: dict[object, frozenset[str]],
+    ) -> opt_main_futures.DataStageResult:
+        _ = rc
+        _ = win
+        _ = discovered
+        _ = timeline
+        called.append("data")
+        return data_stage
+
+    def fake_strategy(
+        rc: object,
+        win: object,
+        ds: object,
+    ) -> None:
+        _ = rc
+        _ = win
+        _ = ds
+        called.append("strategy")
+
+    def fake_optimization(
+        rc: object,
+        win: object,
+        ds: object,
+        *,
+        seed: int,
+        resume: bool,
+    ) -> opt_main_futures.RunnerResult:
+        _ = rc
+        _ = win
+        _ = ds
+        _ = seed
+        _ = resume
+        called.append("optimization")
+        return opt_main_futures.RunnerResult(exit_code=0, reason="ok")
+
+    monkeypatch.setattr(opt_main_futures, "_resolve_quarterly_window", fake_window)
+    monkeypatch.setattr(opt_main_futures, "_run_universe_stage", fake_universe)
+    monkeypatch.setattr(opt_main_futures, "_run_data_stage", fake_data)
+    monkeypatch.setattr(opt_main_futures, "_run_strategy_stage", fake_strategy)
+    monkeypatch.setattr(opt_main_futures, "_run_optimization_stage", fake_optimization)
+
+    result = opt_main_futures.run_pipeline(run_config, seed=13, resume=True)
+    assert result.exit_code == 0
+    assert called == ["window", "universe", "data", "strategy", "optimization"]
 
 
-def test_strategy_smoke_engine_params_uses_strategy_defaults() -> None:
-    params = _strategy_smoke_engine_params("4h")
-    assert float(params["BETA_ALPHA"]) == 1.0
-    assert float(params["EV_HURDLE_BPS"]) == 1.5
-    assert int(params["REBALANCE_BARS"]) == 6
+def test_strategy_smoke_skips_optimization_stage(monkeypatch) -> None:
+    run_config = build_run_config_from_args(
+        {
+            "mode": "strategy-smoke",
+            "strategy": "eh_st_v1",
+            "symbols": ("BTCUSDT",),
+            "tf": "4h",
+            "trials": 1,
+            "sync_mode": "full_history_master",
+        }
+    )
+    window = opt_main_futures.QuarterlyWindow(
+        fetch_start="2025-01-01",
+        is_start="2025-04-01",
+        oos_start="2026-01-01",
+        end_date="2026-04-01",
+        fetch_start_date=opt_main_futures.datetime.strptime("2025-01-01", "%Y-%m-%d").date(),
+        is_start_date=opt_main_futures.datetime.strptime("2025-04-01", "%Y-%m-%d").date(),
+        oos_start_date=opt_main_futures.datetime.strptime("2026-01-01", "%Y-%m-%d").date(),
+        end_date_value=opt_main_futures.datetime.strptime("2026-04-01", "%Y-%m-%d").date(),
+    )
+    data_stage = opt_main_futures.DataStageResult(
+        data_maps={"BTCUSDT": {}},
+        oos_data_maps={"BTCUSDT": {}},
+        valid_symbols=["BTCUSDT"],
+    )
+
+    monkeypatch.setattr(opt_main_futures, "_resolve_quarterly_window", lambda _: window)
+    monkeypatch.setattr(opt_main_futures, "_run_universe_stage", lambda *_: (["BTCUSDT"], {}))
+    monkeypatch.setattr(opt_main_futures, "_run_data_stage", lambda *_: data_stage)
+    monkeypatch.setattr(opt_main_futures, "_run_strategy_stage", lambda *_: None)
+
+    def fail_if_called(*args: object, **kwargs: object) -> opt_main_futures.RunnerResult:
+        raise AssertionError("optimization stage should not be called in strategy-smoke")
+
+    monkeypatch.setattr(opt_main_futures, "_run_optimization_stage", fail_if_called)
+    result = opt_main_futures.run_pipeline(run_config)
+    assert result.exit_code == 0
+    assert result.reason == "strategy_smoke_done"

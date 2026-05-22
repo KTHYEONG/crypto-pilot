@@ -1,7 +1,16 @@
-# Binance Futures 유니버스 아키텍처 (v1.3 - AI Optimized)
+# Binance Futures 유니버스 아키텍처 (v1.4 - AI Optimized)
 
-**최종 검증/확정**: 2026-05-18  
+**최종 검증/확정**: 2026-05-22  
 **핵심 설계 목적**: Point-in-time(PIT) 준수, 생존/상폐 편향 제거, 결정론적 재현성 보장 및 거래 불가능 자산 원천 차단.
+
+## 0. 2026-05-22 반영 사항 (코드 사실)
+
+- `sync_utils.run_historical_sync()`는 `sync_mode="full_history_master"`일 때 전체 USDT perpetual 모집단 기준으로 동기화를 수행한다.
+- 동기화 실행마다 coverage 리포트가 저장된다.
+  - 경로: `logs/futures/universe/sync_coverage_report.parquet`
+  - 단위: symbol row append
+  - 핵심 컬럼: `run_ts_utc`, `sync_mode`, `start_date`, `end_date`, `symbols_total`, `sync_tasks_total`, `synced_symbols`, `task_coverage_ratio`, `symbol`, `synced_days`, `is_synced`
+- 목적: full-history 수집 시점의 실행 커버리지/누락 심볼을 run 단위로 추적하기 위한 lightweight audit trail.
 
 ---
 
