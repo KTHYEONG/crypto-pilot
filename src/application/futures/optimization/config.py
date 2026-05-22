@@ -80,8 +80,9 @@ def build_run_config_from_args(args: Namespace | dict[str, Any]) -> FuturesRunCo
         if bool(raw.get(legacy_flag, False)):
             raise ValueError(f"legacy flag is not allowed in active runner: {legacy_flag}")
 
-    mode = parse_active_mode(str(raw.get("mode", "quick-backtest")))
-    strategy = _parse_strategy_name(raw.get("strategy"))
+    mode = parse_active_mode(str(raw.get("mode", "strategy")))
+    default_strategy: str | None = "momentum_v0" if mode == "strategy" else None
+    strategy = _parse_strategy_name(raw.get("strategy", default_strategy))
     sync_mode_raw = str(raw.get("sync_mode", "full_history_master"))
     if sync_mode_raw not in {"full_history_master", "elite_fast"}:
         raise ValueError(f"invalid sync_mode: {sync_mode_raw}")

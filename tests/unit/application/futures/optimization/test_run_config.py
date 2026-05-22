@@ -5,6 +5,12 @@ import pytest
 from src.application.futures.optimization.config import build_run_config_from_args
 
 
+def test_build_run_config_defaults_to_strategy_momentum_v0() -> None:
+    cfg = build_run_config_from_args({"tf": "4h", "trials": 1})
+    assert cfg.mode == "strategy"
+    assert cfg.strategy == "momentum_v0"
+
+
 def test_build_run_config_accepts_quick_backtest_mode() -> None:
     cfg = build_run_config_from_args(
         {
