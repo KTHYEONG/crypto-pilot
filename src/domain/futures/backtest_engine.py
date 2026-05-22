@@ -102,6 +102,11 @@ class PortfolioBacktestEngine:
 
     def run(self) -> tuple[pd.DataFrame, np.ndarray, float, np.ndarray]:
         """Execute multi-symbol futures backtest."""
+        if bool(self.params.get("STRATEGY_MODE", False)):
+            from src.domain.futures.optimization.optimizer import (  # noqa: PLC0415
+                _compose_strategy_scores_inplace,
+            )
+            _compose_strategy_scores_inplace(self.data, self.params)
         prepared = prepare_backtest_inputs(self.data, self.params)
         d = prepared.aligned_data
         c2d = d["close"]

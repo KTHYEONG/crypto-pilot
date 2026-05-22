@@ -61,18 +61,22 @@ def _ctx_for_phase(
     frozen_params: dict[str, Any] | None = None,
     phase_ranges: dict[str, tuple[Any, Any]] | None = None,
 ) -> MLPhaseDContext:
+    inherited_frozen = dict(getattr(base_ctx, "coordinate_frozen_params", None) or {})
+    inherited_frozen.update(dict(frozen_params or {}))
+    inherited_ranges = dict(getattr(base_ctx, "phase_ranges", None) or {})
+    inherited_ranges.update(dict(phase_ranges or {}))
     if is_dataclass(base_ctx):
         return replace(
             base_ctx,
             coordinate_phase=phase,
-            coordinate_frozen_params=dict(frozen_params or {}),
-            phase_ranges=dict(phase_ranges or {}),
+            coordinate_frozen_params=inherited_frozen,
+            phase_ranges=inherited_ranges,
         )
     payload = dict(getattr(base_ctx, "__dict__", {}))
     payload["coordinate_phase"] = phase
-    payload["coordinate_frozen_params"] = dict(frozen_params or {})
-    payload["phase_ranges"] = dict(phase_ranges or {})
-    return SimpleNamespace(**payload)  # type: ignore[return-value]
+    payload["coordinate_frozen_params"] = inherited_frozen
+    payload["phase_ranges"] = inherited_ranges
+    return SimpleNamespace(**payload)
 
 
 def _best_complete_trial(study: optuna.Study) -> optuna.trial.FrozenTrial | None:
@@ -220,12 +224,18 @@ def run_v43_phase_optimization_skeleton(
     seed: int,
     resume: bool,
     n_workers: int,
+    n_workers_a1: int | None = None,
+    n_workers_a2: int | None = None,
+    n_workers_b: int | None = None,
     enqueue_seeds: list[dict[str, Any]] | None = None,
     target_seeds: list[int] | None = None,
     n_trials_a1: int | None = None,
     n_trials_a2: int | None = None,
     n_trials_b: int | None = None,
 ) -> PhaseBundle:
+    phase_a1_workers = int(n_workers_a1) if n_workers_a1 is not None else int(n_workers)
+    phase_a2_workers = int(n_workers_a2) if n_workers_a2 is not None else int(n_workers)
+    phase_b_workers = int(n_workers_b) if n_workers_b is not None else int(n_workers)
     phase_a1_trials = int(
         n_trials_a1
         if n_trials_a1 is not None
@@ -255,12 +265,13 @@ def run_v43_phase_optimization_skeleton(
         n_trials=phase_a1_trials,
         seed=seed,
         resume=resume,
-        n_workers=n_workers,
+        n_workers=phase_a1_workers,
     )
     best_a1_trial_for_a2 = _best_complete_trial(study_a1)
     frozen_signal_for_a2 = _core_subset(
         (best_a1_trial_for_a2.params if best_a1_trial_for_a2 is not None else {}),
         (
+            "BETA_ALPHA",
             "BETA_REGIME_BEAR",
             "BETA_REGIME_CHOP",
             "K_LONG",
@@ -277,7 +288,7 @@ def run_v43_phase_optimization_skeleton(
         n_trials=phase_a2_trials,
         seed=seed,
         resume=resume,
-        n_workers=n_workers,
+        n_workers=phase_a2_workers,
         frozen_signal_params=frozen_signal_for_a2,
     )
     try:
@@ -291,6 +302,7 @@ def run_v43_phase_optimization_skeleton(
     best_signal = _core_subset(
         (best_a1_trial.params if best_a1_trial is not None else {}),
         (
+            "BETA_ALPHA",
             "BETA_REGIME_BEAR",
             "BETA_REGIME_CHOP",
             "K_LONG",
@@ -322,7 +334,7 @@ def run_v43_phase_optimization_skeleton(
         n_trials=phase_b_trials,
         seed=seed,
         resume=resume,
-        n_workers=n_workers,
+        n_workers=phase_b_workers,
         enqueue_seeds=phase_b_seeds,
         frozen_params=phase_b_frozen,
         phase_ranges=(phase_b_plan.shrunk_ranges if phase_b_plan is not None else None),

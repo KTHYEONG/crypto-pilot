@@ -196,9 +196,6 @@ def calc_sortino_ratio(
         return 10.0 if np.mean(excess_returns) > 0 else 0.0
         
     return float(np.mean(excess_returns) * ann_factor) / downside_std
-    running_max[running_max == 0] = 1e-9
-    drawdown = (equity_curve - running_max) / running_max * 100.0
-    return float(abs(np.min(np.nan_to_num(drawdown, nan=0.0))))
 
 def calc_sortino_from_equity(equity_curve: np.ndarray, span_days: float) -> float:
     """Compute annualized Sortino ratio from equity curve."""
@@ -529,8 +526,10 @@ def run_oos_margin_shared_portfolio(
         pf_val, wr, lt, st, minority_pct, ev_ratio = 1.0, 0.0, 0, 0, 0.0, 0.0
         long_pf, short_pf = 1.0, 1.0
 
+    _n_trades = len(trades_df)
     out = {
-        "cagr_pct": cagr, "mdd_pct": mdd, "profit_factor": pf_val, "total_trades": len(trades_df),
+        "cagr_pct": cagr, "mdd_pct": mdd, "profit_factor": pf_val, "total_trades": _n_trades,
+        "trade_count": _n_trades, "n_trades": _n_trades, "oos_trade_count": _n_trades,
         "moic": moic, "terminal_wealth_ratio": moic, "win_rate_pct": wr, "long_trades": lt,
         "short_trades": st, "equity_curve": equity_curve, "cvar_pct": cvar,
         "hw_recovery_days": hw_days, "oos_long_short_minority_pct": minority_pct,

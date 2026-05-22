@@ -27,12 +27,8 @@ from config.opt_config import (  # noqa: E402
     OPT_FUTURES_CONFIG,
     get_quarterly_window,
 )
+from config.settings import FUTURES_INITIAL_BALANCE  # noqa: E402
 from src.core.utils.utils import setup_logger  # noqa: E402
-from src.domain.futures.strategy_runtime.bridge import (  # noqa: E402
-    MLPipelineOutput,
-    run_ml_pipeline_for_universe,
-    merge_ml_output_into_is_and_oos,
-)
 from src.domain.futures.optimization.candidate_selector import (  # noqa: E402
     check_stability_layer3,
     select_and_rank_candidates,
@@ -75,6 +71,15 @@ from src.domain.futures.optimization.validation import (  # noqa: E402
     awf_pos_frac_to_pseudo_pbo,
     resolve_adjusted_gates,
 )
+from src.domain.futures.strategy import (  # noqa: E402
+    MomentumConfig,
+    StrategyConfig,
+)
+from src.domain.futures.strategy_runtime.bridge import (  # noqa: E402
+    MLPipelineOutput,
+    merge_ml_output_into_is_and_oos,
+    run_ml_pipeline_for_universe,
+)
 from src.domain.futures.universe import load_or_build_universe_snapshot  # noqa: E402
 
 warnings.filterwarnings("ignore")
@@ -97,6 +102,139 @@ setup_logger("src.domain.futures.ml_pipeline", write_file=False)
 logging.getLogger("DataCollector").setLevel(logging.WARNING)
 logging.getLogger("BinanceClient").setLevel(logging.WARNING)
 logging.getLogger("src.domain.futures.ml_pipeline").setLevel(logging.INFO)
+
+_STRATEGY_P0_OFF_KEYS: tuple[str, ...] = (
+    "FUTURES_WF_HMM_LEG_REFIT",
+    "FUTURES_USE_META_LABELER",
+    "FUTURES_REGIME_POLICY_ENABLED",
+    "FUTURES_PORTFOLIO_REGIME_DAMP_ENABLED",
+    "FUTURES_STEP2_REGIME_DEPLOY_ENABLED",
+    "FUTURES_CHOP_REGIME_GATE_ENABLED",
+)
+_STRATEGY_DEFAULTS: dict[str, float] = {
+    "FUTURES_DEFAULT_BETA_ALPHA": 5.0,
+    "FUTURES_DEFAULT_EV_HURDLE_BPS": 1.5,
+}
+_STRATEGY_PHASE_RANGES: dict[str, tuple[float, float]] = {
+    "BETA_ALPHA": (4.0, 8.0),
+    "EV_HURDLE_BPS": (1.0, 3.0),
+    "REBALANCE_BARS": (4.0, 8.0),
+}
+_STRATEGY_SMOKE_ENGINE_OVERRIDES: dict[str, float | int | bool] = {
+    "BETA_ALPHA": 5.0,
+    "EV_HURDLE_BPS": 1.5,
+    "REBALANCE_BARS": 6,
+    "STRATEGY_MODE": True,
+}
+
+
+def _apply_strategy_p0_overrides(cfg: dict[str, Any]) -> None:
+    for key in _STRATEGY_P0_OFF_KEYS:
+        cfg[key] = False
+    for key, value in _STRATEGY_DEFAULTS.items():
+        cfg[key] = value
+
+
+def _strategy_smoke_engine_params(tf: str) -> dict[str, Any]:
+    return _base_engine_params(dict(_STRATEGY_SMOKE_ENGINE_OVERRIDES), tf)
+
+
+def _pick_strategy_data_maps(
+    oos_data_maps: dict[str, dict[str, Any]],
+    is_data_maps: dict[str, dict[str, Any]],
+    valid_symbols: list[str],
+    tf: str,
+) -> dict[str, dict[str, Any]]:
+    for sym in valid_symbols:
+        sdf = oos_data_maps.get(sym, {}).get(tf)
+        if isinstance(sdf, pd.DataFrame) and not sdf.empty:
+            return oos_data_maps
+    return is_data_maps
+
+
+def _assert_strategy_alpha_ready(
+    *,
+    ml_out: MLPipelineOutput,
+    oos_data_maps: dict[str, dict[str, Any]],
+    valid_symbols: list[str],
+    tf: str,
+) -> None:
+    alpha_panel = getattr(ml_out, "alpha_panel", None)
+    if alpha_panel is None or alpha_panel.empty:
+        raise RuntimeError("strategy mode requires non-empty alpha_panel")
+    for required_col in ("alpha_long", "alpha_short"):
+        if required_col not in alpha_panel.columns:
+            raise RuntimeError(f"strategy alpha_panel missing required column: {required_col}")
+
+    long_non_zero = 0
+    short_non_zero = 0
+    merged_count = 0
+    for sym in valid_symbols:
+        df = oos_data_maps.get(sym, {}).get(tf)
+        if not isinstance(df, pd.DataFrame) or df.empty:
+            continue
+        if "alpha_long" not in df.columns or "alpha_short" not in df.columns:
+            raise RuntimeError(f"strategy merge missing alpha columns for symbol={sym}")
+        merged_count += 1
+        long_non_zero += int(np.count_nonzero(df["alpha_long"].to_numpy(dtype=np.float64)))
+        short_non_zero += int(np.count_nonzero(df["alpha_short"].to_numpy(dtype=np.float64)))
+    if merged_count == 0:
+        raise RuntimeError("strategy mode has no merged symbol frames for selected timeframe")
+    if long_non_zero <= 0 or short_non_zero <= 0:
+        raise RuntimeError(
+            "strategy merge produced zero-only alpha columns "
+            f"(nonzero long={long_non_zero}, short={short_non_zero})"
+        )
+
+
+def _run_strategy_smoke(
+    *,
+    data_maps: dict[str, dict[str, Any]],
+    valid_symbols: list[str],
+    tf: str,
+    ml_n_jobs: int,
+    run_id: str,
+    fetch_start_date_str: str,
+    end_date_str: str,
+    start_date_str: str,
+) -> None:
+    _logger.info("\n" + "═" * 85)
+    _logger.info(" [STEP 3/4] Strategy Smoke: Composer → Portfolio → Backtest")
+    _logger.info("═" * 85)
+    smoke_ctx = MLPhaseDContext(
+        data_maps=data_maps,
+        symbols=valid_symbols,
+        tf=tf,
+        seed=42,
+        effective_total_trials=1,
+        ml_pipeline_fetch_start=fetch_start_date_str,
+        ml_pipeline_end=end_date_str,
+        ml_pipeline_is_start=start_date_str,
+        ml_pipeline_workers=ml_n_jobs,
+        run_id=run_id,
+        strategy_mode=True,
+    )
+    precompute_ml_optimization_context(smoke_ctx)
+    if not smoke_ctx.awf_leg_slices:
+        raise RuntimeError("strategy-smoke precompute produced no AWF leg slices")
+    test_leg = smoke_ctx.awf_leg_slices[0]["data"]
+    params = _strategy_smoke_engine_params(tf)
+    _cached_kill_fund_lev(test_leg, params)
+    trades_raw, final_balance, equity_curve, diag = _run_portfolio_numba_block(params, test_leg)
+    ret_pct = (float(final_balance) / float(FUTURES_INITIAL_BALANCE) - 1.0) * 100.0
+    mdd_pct = 0.0
+    if equity_curve.size > 0:
+        run_max = np.maximum.accumulate(equity_curve)
+        drawdown = (equity_curve - run_max) / np.maximum(run_max, 1e-9) * 100.0
+        mdd_pct = float(abs(np.min(np.nan_to_num(drawdown, nan=0.0))))
+    _logger.info(
+        " [STRATEGY-SMOKE] trades=%d final_balance=%.2f return_pct=%.3f mdd_pct=%.3f ev_cost_ratio=%s",
+        int(trades_raw.shape[0]),
+        float(final_balance),
+        ret_pct,
+        mdd_pct,
+        f"{float(diag.get('ev_cost_ratio', 0.0)):.3f}" if isinstance(diag, dict) else "n/a",
+    )
 
 
 def _collect_p7_ops_summary(
@@ -435,10 +573,26 @@ def main() -> None:
     parser.add_argument("--ops-profile", type=str, default=None)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument(
+        "--mode",
+        type=str,
+        choices=["full", "strategy-smoke"],
+        default="full",
+        help="Execution mode. strategy-smoke runs single-pass architecture validation without v4.3 phase optimization.",
+    )
+    parser.add_argument(
         "--quick-backtest",
         action="store_true",
         help="Skip heavy ML alpha/HMM pipeline and inject neutral features for backtest plumbing tests.",
     )
+    parser.add_argument(
+        "--strategy",
+        type=str,
+        default=None,
+        choices=["momentum_v0"],
+        help="Inject strategy alpha. If omitted, keep existing quick/full pipeline behavior.",
+    )
+    parser.add_argument("--lookback", type=int, default=6, help="Strategy momentum lookback (bars).")
+    parser.add_argument("--mom-lookback", type=int, dest="lookback", help=argparse.SUPPRESS)
     parser.add_argument("--skip-data-sync", action="store_true", help="Skip Step 0 data sync.")
     parser.add_argument("--sync-limit", type=int, default=None, help="Limit symbols for Step 0 sync.")
     parser.add_argument("--force-universe-rebuild", action="store_true", help="Force rebuild universe snapshot.")
@@ -475,6 +629,9 @@ def main() -> None:
 
     ml_n_jobs = resolve_futures_parallel_policy(len(valid_symbols))
     if args.quick_backtest:
+        if args.mode == "strategy-smoke":
+            _logger.error(" --mode strategy-smoke cannot be combined with --quick-backtest.")
+            return
         if args.alpha_only or args.hmm_only:
             _logger.error(" --quick-backtest cannot be combined with --alpha-only or --hmm-only.")
             return
@@ -484,12 +641,38 @@ def main() -> None:
             " [STEP 2/4] QUICK-BACKTEST mode: skip Alpha/HMM pipeline and use neutral ML features."
         )
         ml_out = MLPipelineOutput()
+    elif args.strategy == "momentum_v0":
+        _apply_strategy_p0_overrides(OPT_FUTURES_CONFIG)
+        _logger.warning(
+            " [STEP 2/4] STRATEGY mode=%s (lookback=%d).",
+            args.strategy,
+            args.lookback,
+        )
+        strategy_cfg = StrategyConfig(
+            name=args.strategy,
+            momentum=MomentumConfig(lookback_bars=args.lookback),
+        )
+        strategy_data_maps = _pick_strategy_data_maps(
+            oos_data_maps=oos_data_maps,
+            is_data_maps=data_maps,
+            valid_symbols=valid_symbols,
+            tf=args.tf,
+        )
+        ml_out = run_ml_pipeline_for_universe(
+            valid_symbols,
+            args.tf,
+            fetch_start_date_str,
+            end_date_str,
+            OPT_FUTURES_CONFIG,
+            strategy_cfg=strategy_cfg,
+            preloaded_data_maps=strategy_data_maps,
+        )
     else:
         ml_cfg = dict(OPT_FUTURES_CONFIG)
         # Force AlphaFactory backend for futures execution so runs are not tied to legacy miner path.
         ml_cfg["FUTURES_ML_ALPHA_BACKEND"] = "factory_v1"
         ml_out = run_ml_pipeline_for_universe(
-            valid_symbols, args.tf, fetch_start_date, end_date, ml_cfg,
+            valid_symbols, args.tf, fetch_start_date_str, end_date_str, ml_cfg,
             workers=ml_n_jobs, n_jobs=ml_n_jobs, is_end_date=is_end_date_str, is_start_date=start_date_str,
             gp_only=args.alpha_only, hmm_only=args.hmm_only,
             preloaded_data_maps=oos_data_maps if not pre_args.skip_universe else None,
@@ -509,7 +692,7 @@ def main() -> None:
     # Final aggregated count check (strictly what will be used in optimization)
     n_post = int(filt_meta.get("post_agg_selected_long_count", 0))
     
-    if not args.hmm_only and not args.quick_backtest:  # quick 모드에서는 neutral signal 허용
+    if not args.hmm_only and not args.quick_backtest and args.strategy is None:
         if n_surv <= 0 or n_post <= 0:
             _logger.error("\n [!] G-ALPHA v8.0 CRITICAL: No alpha components survived the strict gates (survive=%d, post=%d).", n_surv, n_post)
             _logger.error(" [!] Optimization (Step 3/4) aborted to prevent noise overfitting.")
@@ -572,7 +755,33 @@ def main() -> None:
 
     # FEATURE INTEGRATION
     merge_ml_output_into_is_and_oos(ml_out, data_maps, oos_data_maps, valid_symbols, args.tf)
+    if args.strategy is not None:
+        _assert_strategy_alpha_ready(
+            ml_out=ml_out,
+            oos_data_maps=oos_data_maps,
+            valid_symbols=valid_symbols,
+            tf=args.tf,
+        )
     log_ml_merge_feature_stats(oos_data_maps, valid_symbols, args.tf)
+
+    if args.mode == "strategy-smoke":
+        if args.strategy is None:
+            _logger.error(" --mode strategy-smoke requires --strategy.")
+            return
+        run_id = build_run_id(
+            args.tf, fetch_start_date_str, end_date_str, valid_symbols, OPT_FUTURES_CONFIG, project_root
+        )
+        _run_strategy_smoke(
+            data_maps=data_maps,
+            valid_symbols=valid_symbols,
+            tf=args.tf,
+            ml_n_jobs=ml_n_jobs,
+            run_id=run_id,
+            fetch_start_date_str=fetch_start_date_str,
+            end_date_str=end_date_str,
+            start_date_str=start_date_str,
+        )
+        return
 
     # [STEP 3/4] OPTIMIZATION
     _logger.info("\n" + "═" * 85)
@@ -589,16 +798,18 @@ def main() -> None:
     seed_learn = target_seeds[0]
 
     run_id = build_run_id(
-        args.tf, fetch_start_date, end_date, valid_symbols, OPT_FUTURES_CONFIG, project_root
+        args.tf, fetch_start_date_str, end_date_str, valid_symbols, OPT_FUTURES_CONFIG, project_root
     )
     _logger.info(" [RUN] run_id=%s", run_id)
 
     base_ctx = MLPhaseDContext(
         data_maps=data_maps, symbols=valid_symbols, tf=args.tf, seed=seed_learn,
-        effective_total_trials=n_ml_trials, ml_pipeline_fetch_start=fetch_start_date,
-        ml_pipeline_end=end_date, ml_pipeline_is_start=start_date,
-        ml_pipeline_workers=ml_n_jobs, run_id=run_id,
+        effective_total_trials=n_ml_trials, ml_pipeline_fetch_start=fetch_start_date_str,
+        ml_pipeline_end=end_date_str, ml_pipeline_is_start=start_date_str,
+        ml_pipeline_workers=ml_n_jobs, run_id=run_id, strategy_mode=(args.strategy is not None),
     )
+    if args.strategy is not None:
+        base_ctx.phase_ranges = dict(_STRATEGY_PHASE_RANGES)
 
     precompute_ml_optimization_context(base_ctx)
     if base_ctx.awf_leg_slices:
@@ -608,7 +819,7 @@ def main() -> None:
 
     storage_url, storage = setup_optuna_storage(project_root)
     study_name = build_joint_study_name(
-        args.tf, fetch_start_date, end_date, valid_symbols, OPT_FUTURES_CONFIG
+        args.tf, fetch_start_date_str, end_date_str, valid_symbols, OPT_FUTURES_CONFIG
     )
 
     def _persist_run_summary(
@@ -623,9 +834,13 @@ def main() -> None:
 
     opt_workers = int(OPT_FUTURES_CONFIG.get("FUTURES_OPT_MAX_WORKERS", ml_n_jobs))
     opt_workers = max(1, min(opt_workers, ml_n_jobs))
-    phase_a1_trials = int(OPT_FUTURES_CONFIG.get("FUTURES_V43_PHASE_A1_TRIALS", 150))
-    phase_a2_trials = int(OPT_FUTURES_CONFIG.get("FUTURES_V43_PHASE_A2_TRIALS", 100))
-    phase_b_trials = int(OPT_FUTURES_CONFIG.get("FUTURES_V43_PHASE_B_TRIALS", 300))
+    # Keep CLI/profile trial budget consistent across all phases.
+    phase_a1_trials = int(n_ml_trials)
+    phase_a2_trials = int(n_ml_trials)
+    phase_b_trials = int(n_ml_trials)
+    # Phase-B SQLite distributed writes occasionally raise
+    # "Cannot tell a COMPLETE trial"; run phase-B single-worker for determinism.
+    phase_b_workers = 1
     phase_bundle = run_v43_phase_optimization_skeleton(
         base_ctx=base_ctx,
         base_study_name=study_name,
@@ -638,6 +853,7 @@ def main() -> None:
         seed=seed_learn,
         resume=args.resume,
         n_workers=opt_workers,
+        n_workers_b=phase_b_workers,
         enqueue_seeds=None,
         target_seeds=target_seeds,
     )
@@ -666,9 +882,14 @@ def main() -> None:
             t for t in study_ml.get_trials(deepcopy=False)
             if t.state == optuna.trial.TrialState.COMPLETE
         ]
+        pruned_trials = [
+            t for t in study_ml.get_trials(deepcopy=False)
+            if t.state == optuna.trial.TrialState.PRUNED
+        ]
         no_candidate_reason = classify_no_valid_candidates(
             selection_summary=sel_sum,
             completed_trials=completed_trials,
+            pruned_trials=pruned_trials,
         )
         try:
             study_ml.set_user_attr("obs_no_valid_candidates_reason", no_candidate_reason)
@@ -699,9 +920,19 @@ def main() -> None:
     pbo_obs = awf_pos_frac_to_pseudo_pbo(float(champion_awf_diag.get("awf_pos_frac", 0.0)))
     dsr_obs = float(champion_awf_diag.get("dsr_awf", 0.0))
 
+    # strategy 모드: trial.params에 STRATEGY_MODE가 포함되지 않으므로 OOS 평가 전에 주입
+    _final_ensemble_candidates = ensemble_top_candidates[:5]
+    if args.strategy is not None:
+        _final_ensemble_candidates = [
+            {**res, "params": {**res["params"], "STRATEGY_MODE": True}}
+            for res in _final_ensemble_candidates
+        ]
+        if champion_raw_params.get("STRATEGY_MODE") is None:
+            champion_raw_params["STRATEGY_MODE"] = True
+
     # [STEP 4/4] FINAL EVALUATION
     run_final_oos_evaluation(
-        ensemble_results=ensemble_top_candidates[:5], oos_data_maps=oos_data_maps, data_maps=data_maps,
+        ensemble_results=_final_ensemble_candidates, oos_data_maps=oos_data_maps, data_maps=data_maps,
         valid_symbols=valid_symbols, champion_awf_diag=champion_awf_diag, args=args,
         project_root=project_root, study_ml=study_ml, run_id=run_id,
         ai_telemetry_payloads=ai_telemetry_payloads, selection_summary=selection_summary,
