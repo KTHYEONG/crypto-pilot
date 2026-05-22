@@ -17,7 +17,7 @@ if hasattr(sys.stdout, "reconfigure"):
 load_dotenv()
 
 # 프로젝트 루트 디렉토리
-BASE_DIR = Path(__file__).resolve().parent.parent
+BASE_DIR = Path(__file__).resolve().parent.parent.parent
 
 # 데이터 저장 경로
 DATA_DIR = BASE_DIR / "data"
