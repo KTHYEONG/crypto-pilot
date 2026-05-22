@@ -246,3 +246,59 @@ def test_phase_b_top_candidates_prioritize_calmar_and_constraints(monkeypatch) -
     assert str(top[0]["trial"].user_attrs.get("phase", "")).lower() == "phase_b"
     assert str(top[1]["trial"].user_attrs.get("phase", "")).lower() == "phase_b"
     assert float(top[0]["trial"].user_attrs["calmar_lcb"]) >= float(top[1]["trial"].user_attrs["calmar_lcb"])
+
+
+def test_v43_phase_b_strategy_mode_prefers_active_trials(monkeypatch) -> None:
+    study = optuna.create_study(direction="maximize")
+
+    def _obj(trial):
+        trial.suggest_float("x", 0.0, 1.0)
+        return float(10 - trial.number)
+
+    study.optimize(_obj, n_trials=2)
+    trials = study.get_trials(deepcopy=False)
+
+    inactive = trials[0]
+    inactive.set_user_attr("phase", "phase_b")
+    inactive.set_user_attr("calmar_lcb", 2.5)
+    inactive.set_user_attr("ev_cost_ratio", 3.2)
+    inactive.set_user_attr("funding_drag_ratio", 0.10)
+    inactive.set_user_attr("cagr_lcb", 31.0)
+    inactive.set_user_attr("sortino_lcb", 2.0)
+    inactive.set_user_attr("mdd_ucb", 18.0)
+    inactive.set_user_attr("mdd_duration", 40.0)
+    inactive.set_user_attr("cvar", 20.0)
+    inactive.set_user_attr("minority_side_ratio", 0.22)
+    inactive.set_user_attr("awf_trade_count_mean", 0.0)
+    inactive.set_user_attr("awf_pos_frac", 0.0)
+    inactive.set_user_attr("awf_robust_score", 0.2)
+
+    active = trials[1]
+    active.set_user_attr("phase", "phase_b")
+    active.set_user_attr("calmar_lcb", 1.8)
+    active.set_user_attr("ev_cost_ratio", 3.2)
+    active.set_user_attr("funding_drag_ratio", 0.10)
+    active.set_user_attr("cagr_lcb", 31.0)
+    active.set_user_attr("sortino_lcb", 2.0)
+    active.set_user_attr("mdd_ucb", 18.0)
+    active.set_user_attr("mdd_duration", 40.0)
+    active.set_user_attr("cvar", 20.0)
+    active.set_user_attr("minority_side_ratio", 0.22)
+    active.set_user_attr("awf_trade_count_mean", 3.0)
+    active.set_user_attr("awf_pos_frac", 0.5)
+    active.set_user_attr("awf_robust_score", 0.2)
+
+    monkeypatch.setattr(
+        "src.domain.futures.optimization.candidate_selector.replay_robust_awf_for_trial_params",
+        lambda _ctx, _params: (0.0, {"awf_pos_frac": 0.5}),
+    )
+
+    top, summary = select_v43_phase_b_top_candidates(
+        study,
+        base_ctx=SimpleNamespace(strategy_mode=True),
+        cfg={},
+        top_k=1,
+    )
+
+    assert summary["strategy_active_count"] == 1
+    assert top[0]["trial"].number == active.number
