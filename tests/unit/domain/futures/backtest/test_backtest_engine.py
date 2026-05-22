@@ -268,7 +268,60 @@ def test_intrabar_1m_window_mapping_basic_contract() -> None:
     np.testing.assert_array_equal(
         prepared.exec_bar_start_1m_idx, np.array([0, 3, 5], dtype=np.int64)
     )
-    np.testing.assert_array_equal(prepared.exec_bar_end_1m_idx, np.array([2, 4, 6], dtype=np.int64))
+    np.testing.assert_array_equal(
+        prepared.exec_bar_end_1m_idx, np.array([2, 4, 6], dtype=np.int64)
+    )
+
+
+def test_membership_constraints_are_applied_before_execution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Membership kill/entry block이 공통 경로에서 적용되는지 검증."""
+    n_bars = 6
+    aligned_data = {
+        "close": np.full((n_bars, 1), 100.0, dtype=np.float64),
+        "high": np.full((n_bars, 1), 101.0, dtype=np.float64),
+        "low": np.full((n_bars, 1), 99.0, dtype=np.float64),
+        "open": np.full((n_bars, 1), 100.0, dtype=np.float64),
+        "atr": np.full((n_bars, 1), 2.0, dtype=np.float64),
+        "funding_rate_sum": np.zeros((n_bars, 1), dtype=np.float64),
+        "kill_signal": np.zeros((n_bars, 1), dtype=np.float64),
+        "membership_kill_signal": np.array(
+            [[0.0], [1.0], [0.0], [0.0], [0.0], [0.0]], dtype=np.float64
+        ),
+        "entry_block_mask": np.array(
+            [[1.0], [1.0], [0.0], [0.0], [0.0], [0.0]], dtype=np.float64
+        ),
+        "target_weights": np.full((n_bars, 1), 0.4, dtype=np.float64),
+        "symbol_names": np.asarray(["BTCUSDT"], dtype=object),
+    }
+    captured: dict[str, np.ndarray] = {}
+
+    def _fake_exec(*args: object) -> tuple[np.ndarray, float, np.ndarray, np.ndarray]:
+        captured["kill"] = np.asarray(args[5], dtype=np.float64)
+        captured["tw"] = np.asarray(args[6], dtype=np.float64)
+        close_2d = np.asarray(args[0], dtype=np.float64)
+        return (
+            np.zeros((0, 10), dtype=np.float64),
+            1000.0,
+            np.zeros(close_2d.shape[0], dtype=np.float64),
+            np.zeros(5, dtype=np.int64),
+        )
+
+    monkeypatch.setattr(backtest_engine_mod, "backtest_target_weights_numba", _fake_exec)
+    engine = PortfolioBacktestEngine(
+        aligned_data=aligned_data,
+        symbol_names=["BTC/USDT"],
+        strategy_params={"TIMEFRAME": "1h", "REBALANCE_BARS": 1},
+        initial_balance=1000.0,
+    )
+    _trades_df, _equity, _final_bal, diag = engine.run()
+    assert captured["kill"][1, 0] == pytest.approx(1.0)
+    assert captured["tw"][0, 0] == pytest.approx(0.0)
+    assert captured["tw"][1, 0] == pytest.approx(0.0)
+    assert captured["tw"][2, 0] == pytest.approx(0.4)
+    assert isinstance(diag, np.ndarray)
+    assert diag[2] >= 1.0
 
 
 def test_intrabar_1m_injection_keys_contract_ready_for_execution() -> None:
@@ -284,7 +337,9 @@ def test_intrabar_1m_injection_keys_contract_ready_for_execution() -> None:
         "target_weights": np.zeros((n_decisions, 1), dtype=np.float64),
         "kill_signal": np.zeros((n_decisions, 1), dtype=np.float64),
         "dt_index": np.array([60.0, 120.0, 180.0], dtype=np.float64),
-        "exec_dt_index_1m": np.array([60.0, 61.0, 62.0, 120.0, 121.0, 180.0, 181.0], dtype=np.float64),
+        "exec_dt_index_1m": np.array(
+            [60.0, 61.0, 62.0, 120.0, 121.0, 180.0, 181.0], dtype=np.float64
+        ),
         "exec_open_1m": np.full((n_path, 1), 100.0, dtype=np.float64),
         "exec_high_1m": np.full((n_path, 1), 101.0, dtype=np.float64),
         "exec_low_1m": np.full((n_path, 1), 99.0, dtype=np.float64),
