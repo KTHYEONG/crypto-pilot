@@ -9,6 +9,9 @@ import optuna
 from optuna.trial import FrozenTrial, TrialState
 
 from src.domain.futures.optimization.final_evaluator import run_final_oos_evaluation
+from src.domain.futures.optimization.observability.trial_observability import (
+    classify_no_valid_candidates,
+)
 from src.domain.futures.optimization.optimizer import (
     MLPhaseDContext,
     build_ml_phase_d_params,
@@ -156,10 +159,45 @@ def extract_best_trial(study: optuna.Study | None) -> FrozenTrial | None:
         )
 
 
+def _log_phase_run_summary(study: optuna.Study, phase: str) -> None:
+    """Log [RUN-SUMMARY] for a completed phase study."""
+    all_trials = study.get_trials(deepcopy=False)
+    completed = [t for t in all_trials if t.state == TrialState.COMPLETE]
+    pruned = [t for t in all_trials if t.state == TrialState.PRUNED]
+    failed = [t for t in all_trials if t.state == TrialState.FAIL]
+    verdict = classify_no_valid_candidates(
+        selection_summary=None,
+        completed_trials=completed,
+        pruned_trials=pruned,
+    )
+    prune_reasons: dict[str, int] = {}
+    for tr in pruned:
+        reason = str((tr.user_attrs or {}).get("obs_reason", "unknown_pruned")).strip()
+        if not reason:
+            reason = "unknown_pruned"
+        prune_reasons[reason] = int(prune_reasons.get(reason, 0)) + 1
+    top_reasons = sorted(prune_reasons.items(), key=lambda kv: kv[1], reverse=True)[:3]
+    reasons_str = ", ".join(f"{k}:{v}" for k, v in top_reasons) if top_reasons else "-"
+    _logger.info(
+        "[RUN-SUMMARY] phase=%s trials=%d complete=%d pruned=%d failed=%d"
+        " verdict=%s prune_reasons={%s}",
+        phase,
+        len(all_trials),
+        len(completed),
+        len(pruned),
+        len(failed),
+        verdict,
+        reasons_str,
+    )
+
+
 def run_optimization(request: OptimizationRequest) -> OptimizationResult:
     """Execute context preparation + phased optimization + best-trial selection."""
     base_ctx = prepare_optimization_context(request)
     phase_bundle = execute_phase_skeleton(request, base_ctx=base_ctx)
+    _log_phase_run_summary(phase_bundle.study_a1, "phase_a1")
+    _log_phase_run_summary(phase_bundle.study_a2, "phase_a2")
+    _log_phase_run_summary(phase_bundle.study_b, "phase_b")
     study_ml = phase_bundle.study_b
     best_trial = extract_best_trial(study_ml)
     return OptimizationResult(
