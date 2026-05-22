@@ -22,7 +22,7 @@ def hours_per_bar_tf(tf: str) -> float:
 
 
 def composer_sigma_lookback_bars(tf: str, opt_cfg: dict[str, Any] | None = None) -> int:
-    """~8 calendar days of bars for simple per-bar return std (σ_t,i)."""
+    """Get ~8 calendar days of bars for simple per-bar return std (sigma_t,i)."""
     cfg = opt_cfg or OPT_FUTURES_CONFIG
     by_tf = cfg.get("FUTURES_COMPOSER_SIGMA_LOOKBACK_BY_TF")
     key = str(tf).strip().lower()
@@ -34,7 +34,7 @@ def composer_sigma_lookback_bars(tf: str, opt_cfg: dict[str, Any] | None = None)
 
 
 def rolling_per_bar_return_std(close_1d: np.ndarray, window: int) -> np.ndarray:
-    """Rolling std of simple returns r_t = (c_t - c_{t-1}) / |c_{t-1}| (causal)."""
+    """Calculate rolling std of simple returns r_t = (c_t - c_{t-1}) / |c_{t-1}| (causal)."""
     c = np.asarray(close_1d, dtype=np.float64).ravel()
     n = c.size
     out = np.zeros(n, dtype=np.float64)
@@ -46,7 +46,7 @@ def rolling_per_bar_return_std(close_1d: np.ndarray, window: int) -> np.ndarray:
     s = pd.Series(r).rolling(rw, min_periods=2).std(ddof=1)
     v = s.to_numpy(dtype=np.float64)
     v = np.nan_to_num(v, nan=0.0, posinf=0.0, neginf=0.0)
-    return np.maximum(v, 1e-12)
+    return np.maximum(v, 1e-12)  # type: ignore[no-any-return]
 
 
 def apply_linear_signal_composer_scores(
@@ -65,10 +65,6 @@ def apply_linear_signal_composer_scores(
 
     n = len(df)
     beta_a = float(params.get("BETA_ALPHA", cfg.get("FUTURES_DEFAULT_BETA_ALPHA", 1.0)))
-    b_bull = float(params.get("BETA_REGIME_BULL", cfg.get("FUTURES_DEFAULT_BETA_REGIME_BULL", 1.0)))
-    b_bear = float(params.get("BETA_REGIME_BEAR", cfg.get("FUTURES_DEFAULT_BETA_REGIME_BEAR", 1.0)))
-    b_crisis = float(params.get("BETA_REGIME_CRISIS", cfg.get("FUTURES_DEFAULT_BETA_REGIME_CRISIS", 1.0)))
-    b_chop = float(params.get("BETA_REGIME_CHOP", cfg.get("FUTURES_DEFAULT_BETA_REGIME_CHOP", 0.25)))
     ev_h = float(params.get("EV_HURDLE_BPS", cfg.get("FUTURES_DEFAULT_EV_HURDLE_BPS", 5.0)))
 
     from config.settings import SLIPPAGE_RATE, TAKER_FEE_RATE
@@ -106,17 +102,10 @@ def apply_linear_signal_composer_scores(
         if "hmm_prob_recovery" in df.columns
         else np.zeros(n, dtype=np.float64)
     )
-    b_rec = float(params.get("BETA_REGIME_RECOVERY", cfg.get("FUTURES_DEFAULT_BETA_REGIME_RECOVERY", 0.0)))
 
-    regime = (
-        b_bull * pbull
-        + b_bear * p_bear
-        + b_chop * p_chop
-        + b_crisis * p_crisis
-        + b_rec * precov
-    )
-    mu_l = beta_a * np.asarray(alpha_long, dtype=np.float64) + regime - friction
-    mu_s = beta_a * np.asarray(alpha_short, dtype=np.float64) + regime - friction
+
+    mu_l = beta_a * np.asarray(alpha_long, dtype=np.float64) - friction
+    mu_s = beta_a * np.asarray(alpha_short, dtype=np.float64) - friction
 
     regime_policy_enabled = bool(
         params.get(
