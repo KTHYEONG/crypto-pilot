@@ -1,4 +1,4 @@
-# Binance Futures 전략 아키텍처 (v2.1 - Multi-Sleeve Blending System)
+# Binance Futures 전략 아키텍처 (v2.2 - Multi-Sleeve Blending System)
 
 **최종 업데이트**: 2026-05-22
 **핵심 설계 목적**: legacy alpha/HMM 없이 순수 결정론적 신호로 백테스트 엔진·로직·유니버스 종합 검증 및 다중 슬리브(XS Reversal, TSMomentum, Carry) 동적 블렌딩 검증.  
@@ -133,6 +133,7 @@ src/domain/futures/strategy/
 ├── __init__.py
 ├── builder.py           # build_strategy_alpha() - data_maps -> alpha_panel DataFrame
 ├── config.py            # StrategyConfig, SleeveConfig, BlendConfig, RegimeConfig 정의
+│                        # ⚠ RegimeConfig.enabled=False (regime 모듈 미구현, P2 이후 활성화)
 ├── combine.py           # blend_sleeves() - 가중치 기반 다중 슬리브 합성 및 Normalization
 ├── normalize.py         # Winsorized CS z-score, Grinold return calibration(to_return_units)
 ├── diagnostics.py       # rolling_ic, ic_summary, passes_ic_gate 검증 헬퍼
@@ -142,6 +143,9 @@ src/domain/futures/strategy/
     ├── xs_reversal.py   # XSReversalSleeve 구현
     ├── ts_momentum.py   # TSMomentumSleeve 구현
     └── carry.py         # CarrySleeve 구현
+
+❌ regime/ 디렉토리: 미구현 (provider.py 없음). bridge.py가 strategy_cfg.regime.enabled를
+   확인 후 분기하므로, enabled=False일 때 market_probs=pd.DataFrame()으로 안전하게 스킵됨.
 ```
 
 수정 대상 파일:
@@ -187,13 +191,17 @@ strategy mode에서는 `optimizer.py`가 trial-time으로 `alpha_long/short -> x
 
 P0에서 조정 가능한 optimizer 파라미터:
 
-| 파라미터 | 역할 | 권장 초기 범위 |
-|---|---|---|
-| `BETA_ALPHA` | alpha 신호 스케일 | 4.0 ~ 8.0 |
-| `EV_HURDLE_BPS` | 진입 최소 edge (bps) | 1.0 ~ 3.0 |
-| `REBALANCE_BARS` | 리밸런스 주기 | 4 ~ 8 |
-| `ATR_MULT` / `TRAIL_MULT` | stop loss 범위 | 1.5 ~ 4.0 |
-| `KELLY_SHRINKAGE` | Kelly 보수화 | 0.2 ~ 0.5 |
+| 파라미터 | 역할 | 권장 탐색 범위 | 검증 실측값 |
+|---|---|---|---|
+| `BETA_ALPHA` | alpha 신호 스케일 | 2.0 ~ 8.0 | 3.3 ~ 5.4 (momentum_v0) |
+| `EV_HURDLE_BPS` | 진입 최소 edge (bps) | 1.0 ~ 20.0 | 12.6~28.5bps에서 xs_nz>0 확인 |
+| `REBALANCE_BARS` | 리밸런스 주기 | 4 ~ 8 | - |
+| `ATR_MULT` / `TRAIL_MULT` | stop loss 범위 | 1.5 ~ 4.0 | - |
+| `KELLY_SHRINKAGE` | Kelly 보수화 | 0.2 ~ 0.5 | - |
+
+> **단위 정합 주의**: Grinold calibrated alpha의 `long_p95 ≈ 11bps` (momentum_v0, 5-sym 기준).
+> friction ≈ 12bps이므로 `BETA_ALPHA × alpha_p95 > friction + EV_HURDLE` 조건을 만족해야 xs_score > 0.
+> `EV_HURDLE_BPS` 상한이 과도하면 무거래(xs_nz≈0) → zero_trades prune 발생. [COMPOSE-DIAG] 로그로 확인.
 
 ---
 
@@ -227,7 +235,7 @@ momentum이 baseline보다 turnover_adjusted 성과가 개선되지 않으면 �
 | P0 | `strategy/builder.py` — data_maps → alpha_panel 조립 | `alpha_panel DataFrame` |
 | P0 | `bridge.py` 수정 — strategy 주입 분기 | `MLPipelineOutput(alpha_panel=...)` |
 | P0 | `optimizer.py` 수정 — trial-time `alpha -> xs_score` 생성 | strategy mode 전용 composer path |
-| P0 | `phase_runner.py` 수정 — strategy phase_ranges 상속 | A1/A2/B 동일 범위 보장 |
+| P0 | `workflow.py` — strategy phase A1/A2/B 오케스트레이션 | A1/A2/B phase budget 관리 |
 | P0 | `opt_main_futures.py` 수정 — phase budget/worker 고정 | `--trials` 일관성, phase B 단일 worker |
 | P0 | `--quick-backtest` baseline vs momentum 비교 실행 | 검증 결과 (CAGR/MDD/EV·Cost) |
 | P1 | funding carry sleeve 추가 (`alpha_short` 보완) | carry-adjusted alpha |
@@ -257,10 +265,12 @@ momentum이 baseline보다 turnover_adjusted 성과가 개선되지 않으면 �
 
 ### 9.3 현재 운영 규칙
 
-- strategy mode의 phase ranges는 `phase_runner`가 `base_ctx.phase_ranges`를 A1/A2/B에 상속한다.
-- `--trials`는 A1/A2/B의 공통 phase budget으로 사용한다.
+- strategy mode의 phase 오케스트레이션은 `workflow.py:run_phased_optimization_skeleton`이 담당한다 (`phase_runner.py` 파일명은 미사용 — 구 문서 drift).
+- `--trials N`은 A1/A2/B 모두 동일하게 N trials로 배분된다 (`n_trials_a1 = n_trials_a2 = n_trials_b = N`).
+  - 최솟값: A1 ≥ 20 (TPE startup), A2 ≥ 40 (BoTorch startup). `--trials 1`은 random 탐색 1회로 수렴 불가.
 - phase B는 SQLite/Optuna 병렬 충돌 방지를 위해 단일 worker로 실행한다.
 - `No elite components found`는 strategy mode에서 정상일 수 있으며, canonical signal은 `alpha_long/alpha_short`이다.
+- `BETA_REGIME_BEAR`, `BETA_REGIME_CHOP` 파라미터는 탐색공간에 존재하나 strategy mode에서 hmm_probs=0이므로 실질적 영향 없음 (legacy 잔재, P2 이후 제거 예정).
 
 ### 9.4 미래 결정 사항 (P2 이후)
 
@@ -270,7 +280,57 @@ momentum이 baseline보다 turnover_adjusted 성과가 개선되지 않으면 �
 
 ---
 
-## 10. 적용 대상 파일
+## 10. 진단 로깅 태그 체계 (v2.2 추가)
+
+`--mode strategy` 실행 시 아래 태그로 `grep`하여 각 단계의 정상 진행 여부를 확인한다.
+
+| 태그 | 단계 | 파일 | 핵심 출력 항목 |
+|---|---|---|---|
+| `[STAGE]` | 파이프라인 단계 전이 | `opt_main_futures.py` | window/universe/data/strategy/optimize |
+| `[ALPHA-BUILD]` | alpha_panel 산출 통계 | `strategy/builder.py` | sleeves, long_p95_bps, ic_lag_mean, fallback |
+| `[ALPHA-MERGE]` | data_maps 병합 결과 | `strategy_runtime/bridge.py` | merged_syms, alpha_long_nz, regime_broadcast |
+| `[ALPHA-ALIGN]` | AWF leg 정렬 후 alpha 잔존량 | `optimization/ml_context.py` | leg, bars, alpha_long_nz (첫 3 leg) |
+| `[COMPOSE-DIAG]` | alpha→xs_score 단위 정합 | `optimization/objectives.py` | friction_bps, hurdle_bps, thr_bps, xs_long_nz (trial<3) |
+| `[LEG]` | per-leg 백테스트 결과 | `optimization/objectives.py` | trades, log_ret, mdd, tw_nz (trial<5) |
+| `[PRUNE]` | prune 사유 | `observability/run_tracker.py` | reason, params (trial<5: INFO, 이후 DEBUG) |
+| `[RUN-SUMMARY]` | 종료 시 phase별 집계 | `application/.../optimization_service.py` | complete/pruned/failed, prune_reasons top-3 |
+
+### 빠른 진단 명령
+
+```bash
+# 1) 단계 도달 확인
+grep '\[STAGE\]' run.log
+
+# 2) 신호 생존 확인 ★ 핵심
+grep '\[ALPHA-BUILD\]\|\[COMPOSE-DIAG\]' run.log
+
+# 3) leg별 무거래/손실 확인
+grep '\[LEG\]' run.log | head -20
+
+# 4) 최종 prune 원인 집계
+grep '\[RUN-SUMMARY\]' run.log
+```
+
+### 의사결정 트리
+
+```
+[COMPOSE-DIAG] xs_long_nz ≈ 0 ?
+├─ YES → alpha_l_p95 vs thr 비교
+│        ├─ alpha < thr  → BETA_ALPHA↑ 또는 EV_HURDLE↓ 또는 Grinold calibration gain
+│        └─ alpha ≥ thr  → signal_composer 합성 버그 점검
+└─ NO  → [LEG] tw_nz ≈ 0 ?
+         ├─ YES → Kelly/cap/min_notional 단계 문제
+         └─ NO  → 거래 발생, log_ret<-0.1 → 신호 방향(IC 부호) 문제
+```
+
+**실측 참고값 (momentum_v0, 5-sym, 4h)**:
+- `[ALPHA-BUILD]`: long_p95=11.3bps, ic_lag_mean=0.014, ic_neg_ratio=0.35, fallback=True
+- `[COMPOSE-DIAG]`: friction=12.2bps, hurdle=12~28bps, xs_long_nz=0.03~0.19
+- `[RUN-SUMMARY]`: phase_a1 pruned 12/30 (trial_should_prune:9, zero_trades_first_leg:3)
+
+---
+
+## 11. 적용 대상 파일
 
 | 파일 | 변경 수준 |
 |---|---|
@@ -278,4 +338,4 @@ momentum이 baseline보다 turnover_adjusted 성과가 개선되지 않으면 �
 | `src/domain/futures/strategy/builder.py` | 신규 |
 | `src/domain/futures/strategy/__init__.py` | 신규 |
 | `src/domain/futures/strategy_runtime/bridge.py` | 수정 (분기 추가) |
-| `src/execution/opt_main_futures.py` | 필요시 `--strategy` 플래그 추가 |
+| `src/execution/opt_main_futures.py` | `--strategy` 플래그, `[STAGE]` 로깅 |

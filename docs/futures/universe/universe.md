@@ -11,6 +11,12 @@
   - 단위: symbol row append
   - 핵심 컬럼: `run_ts_utc`, `sync_mode`, `start_date`, `end_date`, `symbols_total`, `sync_tasks_total`, `synced_symbols`, `task_coverage_ratio`, `symbol`, `synced_days`, `is_synced`
 - 목적: full-history 수집 시점의 실행 커버리지/누락 심볼을 run 단위로 추적하기 위한 lightweight audit trail.
+- **초기 단일 파이프라인 수집(Pre-fetch) 및 오프라인 백테스트 도입**:
+  - 기존의 백테스팅 연산 중 발생하는 동적 API 호출과 이로 인한 포트 고갈 문제를 예방하기 위해, 백테스팅에 필요한 모든 시간대(`1h, 1d, 4h, 1m`) 및 `funding` 데이터를 안전한 멀티프로세스 커넥션 풀을 활용해 일괄 선 수집(Pre-fetch)하도록 데이터 단일 파이프라인 구축.
+  - `storage.py`의 `run_historical_sync` 및 `sync_single_symbol_data`에 `sync_4h=True` 파라미터를 추가하여 4h 데이터의 명시적 선 수집을 완결함.
+  - **1m 데이터의 Targeted Pre-fetch 제어**: 1m 데이터는 시계열 용량이 매우 크고 네트워크 수집 오버헤드가 극대화되므로, 유니버스 필터링 이전(1.5단계)에는 수집을 원천 생략(`sync_1m=False`)합니다. 이후 **유니버스 7단계 필터링을 완전히 통과하여 최종 백테스팅 대상으로 선정된 정예 심볼군(`load_symbols`)에 대해서만 3단계 데이터 로드 직전에 선별 수집(Targeted Pre-fetch)**하도록 최적화하여 불필요한 트래픽과 디스크 낭비를 차단합니다.
+  - 멀티프로세스 워커 `_worker` 인자 구조를 7요소 튜플(`symbol, start_date, end_date, delist_date, sync_1m, sync_funding, sync_4h`)로 확장 및 리팩토링하여 병렬 처리 성능과 타입 안정성을 확보함.
+  - CLI 인자(`--symbols`)가 주입될 경우, 명시된 대상 심볼 및 유니버스 필수 심볼(anchors, macros)로 타겟 수집 대상을 엄격하게 제한(Targeted Sync)하여 시스템 불필요 리소스를 차단함.
 
 ---
 
@@ -28,12 +34,12 @@ build_universe(as_of: date, tf: str, cfg: UniverseConfig) -> UniverseSnapshot
 
 ```
 ┌─────────────────────────────────────────────────────┐
-│ [프로세스 A: Ledger 적재 및 갱신]                     │
+│ [프로세스 A: Ledger 적재 및 갱신 (Pre-fetch 동기화)]  │
 │ - 온라인 · append-only · Smart Sync 적용            │
 │ - Smart Filter: 거래량 상위 40% 엘리트 심볼 선별      │
-│ - 1h Base Grain: 1h 데이터 수집 후 4h 리샘플링 적재   │
-│ - Parallel Worker: 멀티프로세싱 기반 고속 병렬 수집   │
-│ - 데이터 소스: Binance Vision (Monthly Archive)      │
+│ - Pre-fetch Pipeline: 1h, 1d, 4h, 1m, funding 일괄 수집│
+│ - Parallel Worker: 7요소 튜플 기반 병렬 고속 동기화     │
+│ - 데이터 소스: Binance Vision & CCXT API            │
 └──────────────────┬──────────────────────────────────┘
                    │
                    ▼ [data/futures/universe_ledger.parquet] (상폐 자산 포함 역사 패널)
@@ -63,7 +69,7 @@ build_universe(as_of: date, tf: str, cfg: UniverseConfig) -> UniverseSnapshot
 | `data_quality.py` | **Stage 2**: 데이터 누락률, gap 크기, frozen bar 검사 및 연속성 평가 | `pandas`, `numpy` |
 | `selection.py` | **Stage 6**: 종합 점수화(Rank), 히스테리시스, 상관성 클러스터링 및 앵커 결합 | `pandas`, `numpy` |
 | `membership.py` | 유니버스 스냅샷 통계, Churn Control, Dwell time 등을 처리하는 로직 | `pandas`, `numpy` |
-| `storage.py` | Parquet/JSON 영속화, S3 XML 파싱, Smart Sync(병렬 수집) 오케스트레이션 및 동기화 수행 | `pandas`, `pyarrow`, `multiprocessing` |
+| `storage.py` | Parquet/JSON 영속화, S3 XML 파싱, Smart Sync(1h, 1d, 4h, 1m, funding 병렬 수집) 오케스트레이션 및 동기화 수행 (`sync_4h` 명시적 지원) | `pandas`, `pyarrow`, `multiprocessing` |
 | `pipeline.py` | Stage 0~6 순차 실행, `FilterReport` 생성 및 스냅샷 오케스트레이션 | `pandas`, `datetime` |
 
 ---
