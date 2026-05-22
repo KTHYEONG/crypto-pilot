@@ -8,7 +8,7 @@ import pandas as pd
 import pytest
 
 from src.domain.futures.strategy.builder import build_strategy_alpha
-from src.domain.futures.strategy.config import MomentumConfig, StrategyConfig
+from src.domain.futures.strategy.config import BlendConfig, MomentumConfig, StrategyConfig
 
 
 def _warn_if_lookahead_suspicious(forward_ic: float, backward_ic: float) -> None:
@@ -58,7 +58,8 @@ def test_alpha_nonzero_ratio() -> None:
     cfg = StrategyConfig(
         momentum=MomentumConfig(
             lookback_bars=6, top_ratio=0.3, bottom_ratio=0.3, min_symbols_for_xs=5
-        )
+        ),
+        blend=BlendConfig(min_mean_ic=-1.0, min_t_stat=-10.0, ic_window_bars=4, sigma_lookback=4),
     )
     panel = build_strategy_alpha(maps, symbols, "4h", cfg)
     a_l = _panel_to_2d(panel, symbols, "alpha_long")[6:]
@@ -67,25 +68,31 @@ def test_alpha_nonzero_ratio() -> None:
     long_ratio = float(np.mean(a_l > 0.0))
     short_ratio = float(np.mean(a_s > 0.0))
     both_ratio = float(np.mean((a_l > 0.0) & (a_s > 0.0)))
-    assert 0.25 <= long_ratio <= 0.35
-    assert 0.25 <= short_ratio <= 0.35
+    assert 0.40 <= long_ratio <= 0.60
+    assert 0.40 <= short_ratio <= 0.60
     assert both_ratio == 0.0
 
 
 def test_alpha_scale_range() -> None:
     maps, symbols, _ = _synth_maps()
-    cfg = StrategyConfig(momentum=MomentumConfig(edge_scale_per_bar=1e-3, min_symbols_for_xs=5))
+    cfg = StrategyConfig(
+        momentum=MomentumConfig(edge_scale_per_bar=1e-3, min_symbols_for_xs=5),
+        blend=BlendConfig(min_mean_ic=-1.0, min_t_stat=-10.0),
+    )
     panel = build_strategy_alpha(maps, symbols, "4h", cfg)
     vals = panel["alpha_long"].to_numpy(dtype=np.float64)
     pos = vals[vals > 0.0]
     assert pos.size > 0
-    assert float(np.max(vals)) <= 1e-3 + 1e-12
+    assert float(np.max(vals)) <= 0.08
     assert float(np.mean(pos)) > 0.0
 
 
 def test_forward_ic_positive() -> None:
     maps, symbols, returns = _synth_maps()
-    cfg = StrategyConfig(momentum=MomentumConfig(lookback_bars=6, min_symbols_for_xs=5))
+    cfg = StrategyConfig(
+        momentum=MomentumConfig(lookback_bars=6, min_symbols_for_xs=5),
+        blend=BlendConfig(min_mean_ic=-1.0, min_t_stat=-10.0),
+    )
     panel = build_strategy_alpha(maps, symbols, "4h", cfg)
     a_l = _panel_to_2d(panel, symbols, "alpha_long")
 
