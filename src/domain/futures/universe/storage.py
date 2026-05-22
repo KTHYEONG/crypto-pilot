@@ -17,7 +17,8 @@ from scipy.stats import median_abs_deviation as _mad
 
 from src.core.exchange.binance_client import BinanceClient
 from src.core.exchange.binance_vision import BinanceVisionDownloader
-from src.core.settings import BINANCE_API_KEY, BINANCE_SECRET, FUTURES_DATA_DIR
+from src.core.settings import BINANCE_API_KEY, BINANCE_SECRET, FUTURES_DATA_DIR, LOG_DIR
+
 from .models import (
     FilterReport,
     LedgerRow,
@@ -300,7 +301,7 @@ def _write_sync_coverage_report(report_rows: list[dict[str, object]]) -> None:
     """Append sync coverage report rows to parquet log file."""
     if not report_rows:
         return
-    report_path = Path("logs/futures/universe/sync_coverage_report.parquet")
+    report_path = LOG_DIR / "futures/universe/sync_coverage_report.parquet"
     report_path.parent.mkdir(parents=True, exist_ok=True)
     df_new = pd.DataFrame(report_rows)
     if report_path.exists():
@@ -567,7 +568,7 @@ def run_historical_sync(
     sync_mode: str = "full_history_master",
 ) -> None:
     """메인 동기화 오케스트레이터."""
-    ledger_path = Path("data/futures/universe_ledger.parquet")
+    ledger_path = FUTURES_DATA_DIR / "universe_ledger.parquet"
     symbol_start_dates = {}
     if ledger_path.exists() and not force:
         try:

@@ -12,7 +12,9 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-DEFAULT_LEDGER_PATH = Path("data/futures/universe_ledger.parquet")
+from src.core.settings import FUTURES_DATA_DIR
+
+DEFAULT_LEDGER_PATH = FUTURES_DATA_DIR / "universe_ledger.parquet"
 LEVERAGED_TOKEN_PATTERNS = ("UP", "DOWN", "BULL", "BEAR")
 
 

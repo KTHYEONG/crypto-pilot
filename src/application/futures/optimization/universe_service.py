@@ -3,12 +3,12 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import date, datetime
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
 from dateutil.relativedelta import relativedelta
 
+from src.core.settings import LOG_DIR
 from src.domain.futures.optimization.opt_config import get_quarterly_window
 from src.domain.futures.universe import (
     UniverseSnapshot,
@@ -19,7 +19,7 @@ from src.domain.futures.universe import (
 from src.domain.futures.universe.models import RejectCode
 
 _logger = logging.getLogger("futures_universe_service")
-_UNIVERSE_AUDIT_DIR = Path("logs/futures/universe")
+_UNIVERSE_AUDIT_DIR = LOG_DIR / "futures/universe"
 
 
 @dataclass(slots=True, frozen=True)
