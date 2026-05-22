@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from src.domain.futures.validation.unified_gates import (
+from src.domain.futures.validation.gates import (
     evaluate_v3_hard_gates,
 )
 

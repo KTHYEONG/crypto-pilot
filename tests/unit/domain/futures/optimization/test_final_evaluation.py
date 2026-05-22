@@ -6,17 +6,17 @@ from types import SimpleNamespace
 import optuna
 
 from src.domain.futures.optimization.candidate_selector import (
-    select_v43_phase_b_top_candidates,
+    select_phase_b_top_candidates,
 )
 from src.domain.futures.optimization.final_evaluator import (
     _build_ensemble_evaluation_summary,
     _passes_champion_swap_4conditions,
 )
-from src.domain.futures.optimization.phase_c_robustness import (
+from src.domain.futures.optimization.workflow import (
     evaluate_phase_c_robustness,
+    run_phased_optimization_skeleton,
 )
-from src.domain.futures.optimization.phase_runner import run_v43_phase_optimization_skeleton
-from src.domain.futures.validation.unified_gates import (
+from src.domain.futures.validation.gates import (
     FuturesResearchGateInput,
     evaluate_research_gates,
 )
@@ -38,7 +38,7 @@ def test_phase_c_robustness_scaffold_schema() -> None:
     assert 0.0 <= float(diag["pbo_candidate"]) <= 1.0
     assert 0.0 <= float(diag["dsr_proxy"]) <= 1.0
     stress = diag["stress_diagnostics"]
-    assert stress["schema_version"] == "v43.phase_c.1"
+    assert stress["schema_version"] == "phased.phase_c.1"
     assert stress["method"] in {
         "salib_sobol",
         "deterministic_perturbation_fallback",
@@ -64,14 +64,14 @@ def test_phase_runner_includes_phase_c_diagnostics(monkeypatch) -> None:
         return {"phase": "phase_c", "robustness_score": 0.5, "stability_cv": 0.1}
 
     monkeypatch.setattr(
-        "src.domain.futures.optimization.phase_runner.run_optimization_loop", _fake_loop
+        "src.domain.futures.optimization.workflow.run_optimization_loop", _fake_loop
     )
     monkeypatch.setattr(
-        "src.domain.futures.optimization.phase_runner.evaluate_phase_c_robustness",
+        "src.domain.futures.optimization.workflow.evaluate_phase_c_robustness",
         _fake_phase_c,
     )
 
-    bundle = run_v43_phase_optimization_skeleton(
+    bundle = run_phased_optimization_skeleton(
         base_ctx=SimpleNamespace(run_id="r-phase-c"),
         base_study_name="base_phase",
         storage_url="sqlite:///tmp.db",
@@ -221,7 +221,7 @@ def test_phase_b_top_candidates_prioritize_calmar_and_constraints(monkeypatch) -
     trials[2].set_user_attr("cvar", 20.0)
     trials[2].set_user_attr("minority_side_ratio", 0.22)
 
-    # t3: not phase_b, should be ignored for v43 phase-b ranking
+    # t3: not phase_b, should be ignored for phase-b ranking
     trials[3].set_user_attr("phase", "phase_a2")
     trials[3].set_user_attr("calmar_lcb", 2.5)
 
@@ -233,13 +233,13 @@ def test_phase_b_top_candidates_prioritize_calmar_and_constraints(monkeypatch) -
         _fake_replay,
     )
 
-    top, summary = select_v43_phase_b_top_candidates(
+    top, summary = select_phase_b_top_candidates(
         study,
         base_ctx=SimpleNamespace(),
         cfg={},
         top_k=2,
     )
-    assert summary["selected_by"] == "v43_phase_b_calmar_lcb"
+    assert summary["selected_by"] == "phase_b_calmar_lcb"
     assert summary["feasible_count"] == 2
     assert summary["selected_count"] == 2
     assert len(top) == 2
@@ -248,7 +248,7 @@ def test_phase_b_top_candidates_prioritize_calmar_and_constraints(monkeypatch) -
     assert float(top[0]["trial"].user_attrs["calmar_lcb"]) >= float(top[1]["trial"].user_attrs["calmar_lcb"])
 
 
-def test_v43_phase_b_strategy_mode_prefers_active_trials(monkeypatch) -> None:
+def test_phase_b_strategy_mode_prefers_active_trials(monkeypatch) -> None:
     study = optuna.create_study(direction="maximize")
 
     def _obj(trial):
@@ -293,7 +293,7 @@ def test_v43_phase_b_strategy_mode_prefers_active_trials(monkeypatch) -> None:
         lambda _ctx, _params: (0.0, {"awf_pos_frac": 0.5}),
     )
 
-    top, summary = select_v43_phase_b_top_candidates(
+    top, summary = select_phase_b_top_candidates(
         study,
         base_ctx=SimpleNamespace(strategy_mode=True),
         cfg={},

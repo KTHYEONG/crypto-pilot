@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-from src.domain.futures.validation.boundary_contract import (
+from src.domain.futures.validation.gates import (
     ModulePurgeBarsMeta,
     PurgeBarsRegistry,
 )

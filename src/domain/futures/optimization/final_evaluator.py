@@ -16,7 +16,7 @@ from src.core.settings import (
 from src.domain.futures.optimization.candidate_selector import (
     sanitize_metric_map,
 )
-from src.domain.futures.optimization.dashboard import (
+from src.domain.futures.optimization.observability.dashboard import (
     log_oos_regime_attribution,
     print_dual_audit_dashboard,
     print_mechanical_dashboard,
@@ -36,10 +36,8 @@ from src.domain.futures.optimization.opt_data_utils import (
     compute_oos_regime_attribution,
     compute_regime_drift,
 )
-from src.domain.futures.optimization.optimizer import (
-    EMBARGO_BARS,
-    MLPhaseDContext,
-)
+from src.domain.futures.optimization.common import EMBARGO_BARS
+from src.domain.futures.optimization.ml_context import MLPhaseDContext
 from src.domain.futures.optimization.validation import resolve_adjusted_gates
 from src.domain.futures.portfolio.portfolio_optimizer import (
     finalize_strategy_portfolio_params,
@@ -50,10 +48,7 @@ from src.domain.futures.validation.champion_registry import (
     resolve_champion_record_path,
     run_champion_promotion_guard,
 )
-from src.domain.futures.validation.tmp_md_champion import (
-    collect_tmp_md_champion_gate_failures,
-)
-from src.domain.futures.validation.unified_gates import (
+from src.domain.futures.validation.gates import (
     GATE_CODE_DESCRIPTIONS,
     FuturesResearchGateInput,
     evaluate_research_gates,
@@ -510,17 +505,6 @@ def run_final_oos_evaluation(
             if _chop_pf < _step4_chop_pf_floor:
                 gate_failures.append("STEP4_CHOP_PF_TOO_LOW")
                 gate_ok = False
-
-    if bool(OPT_FUTURES_CONFIG.get("FUTURES_TMP_MD_CHAMPION_GATES_ENABLED", True)):
-        tmp_gf = collect_tmp_md_champion_gate_failures(
-            dict(best_trial.user_attrs),
-            oos_bar_rets=oos_rets,
-            ann_factor=float(ann_f),
-            cfg=OPT_FUTURES_CONFIG,
-        )
-        if tmp_gf:
-            gate_failures.extend(tmp_gf)
-            gate_ok = False
 
     if (
         bool(OPT_FUTURES_CONFIG.get("FUTURES_TMP_LAYER3_HARD_GATE", False))

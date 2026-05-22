@@ -15,7 +15,7 @@ from src.core.settings import (
     SMART_ORDER_OFFSET,
     TAKER_FEE_RATE,
 )
-from src.domain.futures.backtest_preparation import prepare_backtest_inputs
+from src.domain.futures.backtest.preparation import prepare_backtest_inputs
 from src.domain.futures.optimization.data_aligner import merge_effective_membership_constraints
 from src.domain.futures.optimization.opt_config import OPT_FUTURES_CONFIG
 from src.domain.futures.portfolio.execution_sim import (

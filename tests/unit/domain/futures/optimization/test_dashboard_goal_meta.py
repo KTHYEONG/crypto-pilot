@@ -10,7 +10,7 @@ project_root = str(Path(__file__).resolve().parents[5])
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-from src.domain.futures.optimization.dashboard import (
+from src.domain.futures.optimization.observability.dashboard import (
     _build_alpha_goal_eval_meta,
     _build_hmm_goal_eval_meta,
     log_hmm_report_summary,
