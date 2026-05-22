@@ -162,7 +162,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--mode",
         type=str,
         choices=["quick-backtest", "strategy", "strategy-smoke", "full"],
-        default="quick-backtest",
+        default="strategy",
     )
     parser.add_argument(
         "--quick-backtest",
@@ -172,7 +172,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--strategy",
         type=str,
-        default=None,
+        default="momentum_v0",
         choices=["momentum_v0", "eh_st_v1"],
     )
     parser.add_argument("--skip-universe", action="store_true")
