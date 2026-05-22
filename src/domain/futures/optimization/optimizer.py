@@ -12,6 +12,8 @@ from __future__ import annotations
 import logging
 import threading
 from dataclasses import dataclass
+from datetime import date
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -37,6 +39,7 @@ from src.domain.futures.backtest_preparation import prepare_backtest_inputs
 from src.domain.futures.optimization.data_aligner import (
     _build_aligned_2d_from_prebuilt,
     _dataframe_to_symbol_arrays,
+    merge_effective_membership_constraints,
 )
 from src.domain.futures.optimization.evaluator import (
     _log_tw_from_ret_pct,
@@ -70,6 +73,7 @@ from src.domain.futures.portfolio.signal_composer import (
     rolling_per_bar_return_std,
 )
 from src.domain.futures.strategy_runtime.bridge import HMM_SEMANTIC_PROB_COLUMNS, FuturesMLStrategy
+from src.domain.futures.universe.membership import build_membership_mask_bundle
 from src.domain.futures.validation.boundary_contract import PurgeBarsRegistry
 
 _logger = logging.getLogger(__name__)
@@ -77,6 +81,7 @@ _PRECOMPUTE_LOCK = threading.Lock()
 
 # Cross-sectional momentum lookback periods precomputed for all trials.
 _CS_MOM_LOOKBACKS: list[int] = [12, 24, 36, 48, 60, 72]
+_MEMBERSHIP_STATS_PATH = Path("logs/futures/optimization/membership_mask_stats.parquet")
 
 
 def _array_stats(name: str, arr: Any) -> str:
@@ -439,6 +444,65 @@ class MLPhaseDContext:
     # Per-execution identifier for run-level trial filtering in shared Optuna DB.
     run_id: str | None = None
     strategy_mode: bool = False
+    universe_timeline: dict[date, frozenset[str] | set[str]] | None = None
+    warmup_bars_required: int = 0
+    data_sufficiency_report: dict[str, Any] | None = None
+
+
+def build_universe_membership_arrays(
+    *,
+    symbol: str,
+    datetimes: pd.Series,
+    timeline: dict[date, frozenset[str] | set[str]] | None,
+    warmup_bars_required: int,
+    raw_kill_signal: np.ndarray | None = None,
+) -> dict[str, np.ndarray]:
+    """Build per-bar membership arrays for one symbol."""
+    if not timeline:
+        n = len(datetimes)
+        z = np.zeros(n, dtype=np.float64)
+        o = np.ones(n, dtype=np.float64)
+        raw = z if raw_kill_signal is None else np.asarray(raw_kill_signal, dtype=np.float64)
+        return {
+            "universe_active_mask": o,
+            "universe_entry_warm_mask": o,
+            "membership_kill_signal": z,
+            "entry_block_mask": z,
+            "kill_signal": raw,
+        }
+    bundle = build_membership_mask_bundle(
+        datetimes=datetimes,
+        symbol=symbol,
+        timeline=timeline,
+        warmup_bars_required=max(int(warmup_bars_required), 1),
+        raw_kill_signal=raw_kill_signal,
+    )
+    return {
+        "universe_active_mask": bundle.universe_active_mask,
+        "universe_entry_warm_mask": bundle.universe_entry_warm_mask,
+        "membership_kill_signal": bundle.membership_kill_signal,
+        "entry_block_mask": bundle.entry_block_mask,
+        "kill_signal": bundle.kill_signal,
+    }
+
+
+def merge_membership_constraints_into_aligned(
+    aligned_data: dict[str, Any],
+    *,
+    persist_stats: bool = False,
+) -> None:
+    """Apply effective membership kill/entry constraints into aligned 2D arrays."""
+    stats = merge_effective_membership_constraints(aligned_data, clamp_target_weights=False)
+    if not persist_stats:
+        return
+    rows = stats.get("rows", [])
+    if not rows:
+        return
+    if bool(aligned_data.get("_membership_stats_persisted", False)):
+        return
+    _MEMBERSHIP_STATS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(rows).to_parquet(_MEMBERSHIP_STATS_PATH, index=False)
+    aligned_data["_membership_stats_persisted"] = True
 
 
 def _fit_oos_platt_calibrators_from_maps(
@@ -631,6 +695,21 @@ def _build_prebuilt_full_arrays(
         if "funding_rate_sum" in raw_full.columns:
             trimmed_sig["funding_rate_sum"] = raw_full["funding_rate_sum"].to_numpy(
                 dtype=np.float64, copy=False
+            )
+        if "kill_signal" in raw_full.columns:
+            trimmed_sig["kill_signal"] = raw_full["kill_signal"].to_numpy(
+                dtype=np.float64,
+                copy=False,
+            )
+        if "membership_kill_signal" in raw_full.columns:
+            trimmed_sig["membership_kill_signal"] = raw_full["membership_kill_signal"].to_numpy(
+                dtype=np.float64,
+                copy=False,
+            )
+        if "entry_block_mask" in raw_full.columns:
+            trimmed_sig["entry_block_mask"] = raw_full["entry_block_mask"].to_numpy(
+                dtype=np.float64,
+                copy=False,
             )
 
         # Prefer current strategy alpha path. Keep legacy fallback for non-strategy runs.
@@ -1657,7 +1736,9 @@ def _cached_kill_fund_lev(
     aligned: dict[str, Any], params: dict[str, Any]
 ) -> tuple[Any, Any, Any]:
     if "kill_signal_cached" not in aligned:
-        zkill = aligned.get("kill_signal")
+        zkill = aligned.get("effective_kill_signal")
+        if zkill is None:
+            zkill = aligned.get("kill_signal")
         if zkill is None:
             zkill = np.zeros_like(aligned["close"])
         aligned["kill_signal_cached"] = zkill
@@ -1757,6 +1838,7 @@ def _run_portfolio_numba_block(
             raise RuntimeError("strategy mode failed to generate xs_score_long/xs_score_short")
     prepared = prepare_backtest_inputs(aligned, params)
     aligned = prepared.aligned_data
+    merge_membership_constraints_into_aligned(aligned, persist_stats=True)
     zkill, zfund, lev_blk = _cached_kill_fund_lev(aligned, params)
     cfg_block = OPT_FUTURES_CONFIG
     reb_b = max(1, int(params["REBALANCE_BARS"]))
@@ -1841,6 +1923,33 @@ def _run_portfolio_numba_block(
         ),
         dtype=np.float64,
     )
+    entry_block = aligned.get("entry_block_mask")
+    if entry_block is not None:
+        entry_block_2d = np.asarray(entry_block, dtype=np.float64)
+        if entry_block_2d.shape == tw_blk.shape:
+            tw_blk = np.where(entry_block_2d > 0.0, 0.0, tw_blk)
+            symbol_names = aligned.get("symbol_names")
+            if (
+                isinstance(symbol_names, np.ndarray)
+                and symbol_names.ndim == 1
+                and int(symbol_names.shape[0]) == tw_blk.shape[1]
+                and not bool(aligned.get("_membership_mask_logged", False))
+            ):
+                active_mask = np.where(np.abs(tw_blk) > 1e-12, 1.0, 0.0)
+                for s_idx, symbol in enumerate(symbol_names):
+                    sym_block = entry_block_2d[:, s_idx] > 0.0
+                    if not np.any(sym_block):
+                        continue
+                    _logger.info(
+                        "[MEMBERSHIP-MASK] symbol=%s active_ratio=%.4f warm_ratio=%.4f "
+                        "forced_exit_count=%d blocked_entry_count=%d",
+                        str(symbol),
+                        float(np.mean((entry_block_2d[:, s_idx] <= 0.0).astype(np.float64))),
+                        float(np.mean((entry_block_2d[:, s_idx] <= 0.0).astype(np.float64))),
+                        int(np.count_nonzero(np.asarray(zkill)[:, s_idx] > 0.0)),
+                        int(np.count_nonzero(sym_block & (active_mask[:, s_idx] > 0.0))),
+                    )
+                aligned["_membership_mask_logged"] = True
     aligned["target_weights"] = tw_blk
     if bool(params.get("STRATEGY_MODE", False)):
         should_log_weight = (trial_number is not None and int(trial_number) < 5) or (
