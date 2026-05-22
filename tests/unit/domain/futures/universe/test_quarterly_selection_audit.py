@@ -5,7 +5,7 @@ from typing import TypedDict
 
 import pandas as pd
 
-from config.opt_config import get_quarterly_window
+from src.domain.futures.optimization.opt_config import get_quarterly_window
 from src.domain.futures.universe import (
     Stage6Config,
     UniverseConfig,

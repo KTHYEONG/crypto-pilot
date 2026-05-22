@@ -1,7 +1,7 @@
 import ccxt
 import pytest
 
-from config.settings import BINANCE_API_KEY, BINANCE_SECRET
+from src.core.settings import BINANCE_API_KEY, BINANCE_SECRET
 
 
 @pytest.mark.integration

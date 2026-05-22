@@ -411,6 +411,7 @@ class BinanceVisionDownloader:
 
         Notes:
             Binance Vision daily/metrics 경로: SYMBOL-metrics-YYYY-MM-DD.zip
+
         """
         date_str = date.strftime("%Y-%m-%d")
         filename = f"{symbol}-metrics-{date_str}.zip"
@@ -446,9 +447,12 @@ def fetch_metrics_bulk(
 
     Time Complexity: O(n_days)
     Space Complexity: O(n_days * n_cols)
+
     """
     import pathlib
-    from datetime import date as _date, datetime as _datetime, timedelta as _timedelta
+    from datetime import date as _date
+    from datetime import datetime as _datetime
+    from datetime import timedelta as _timedelta
 
     # 날짜 타입 정규화
     def _to_date(d: object) -> _date:
