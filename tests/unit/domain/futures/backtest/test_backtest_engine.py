@@ -12,7 +12,7 @@ if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
 import src.domain.futures.backtest_engine as backtest_engine_mod
-from config.settings import FUTURES_DATA_DIR
+from src.core.settings import FUTURES_DATA_DIR
 from src.domain.futures.backtest_engine import (
     PortfolioBacktestEngine,
 )

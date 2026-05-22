@@ -22,6 +22,7 @@ def blend_sleeves(
 
     Returns:
         [T, N] blended and re-standardized score array.
+
     """
     if not z_by_sleeve:
         raise ValueError("z_by_sleeve cannot be empty")

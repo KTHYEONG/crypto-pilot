@@ -7,8 +7,8 @@ from typing import Any
 import numpy as np
 import optuna
 
-from config.opt_config import OPT_FUTURES_CONFIG
 from src.domain.futures.optimization.dashboard import safe_float
+from src.domain.futures.optimization.opt_config import OPT_FUTURES_CONFIG
 from src.domain.futures.optimization.optimizer import (
     MLPhaseDContext,
     replay_robust_awf_for_trial_params,

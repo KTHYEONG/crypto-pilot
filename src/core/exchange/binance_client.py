@@ -24,7 +24,7 @@ try:
 except IndexError:
     pass
 
-from config.settings import API_READ_TIMEOUT
+from src.core.settings import API_READ_TIMEOUT
 
 
 class OrderRateLimiter:
@@ -1024,7 +1024,7 @@ class BinanceClient:
         client_order_id: str | None = None,
     ) -> dict[str, Any] | None:
         """Production waterfall order executor."""
-        from config.settings import SMART_ORDER_OFFSET
+        from src.core.settings import SMART_ORDER_OFFSET
         tick_size = self.get_price_tick_size(symbol, fallback=(0.1 if "BTC" in symbol else 0.01))
 
         def round_to_tick(price: float, tick: float) -> float:

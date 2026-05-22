@@ -17,7 +17,7 @@ try:
 except IndexError:
     pass
 
-from config.settings import CANDLE_SYNC_OFFSET_SECONDS
+from src.core.settings import CANDLE_SYNC_OFFSET_SECONDS
 
 logger = logging.getLogger(__name__)
 

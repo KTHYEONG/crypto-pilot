@@ -19,6 +19,7 @@ def rolling_ic(
 
     Returns:
         [T] correlation values. Warmup or small sample bars are NaN.
+
     """
     if sig_2d.shape != fwd_ret_2d.shape:
         raise ValueError("sig_2d and fwd_ret_2d must have the same shape")
@@ -73,6 +74,7 @@ def ic_summary(ic_series: np.ndarray) -> dict[str, float]:
         - 't_stat': T-statistic of the mean IC (mean_ic / standard_error)
         - 'n_obs': Count of valid ICs
         - 'hit_ratio': Ratio of positive valid ICs
+
     """
     valid = ic_series[np.isfinite(ic_series)]
     n_obs = len(valid)
@@ -128,6 +130,7 @@ def passes_ic_gate(
 
     Returns:
         True if all conditions are satisfied, else False.
+
     """
     mean_ic_ok = summary["mean_ic"] >= min_mean_ic
     t_stat_ok = summary["t_stat"] >= min_t_stat

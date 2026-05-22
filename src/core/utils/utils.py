@@ -32,7 +32,7 @@ try:
 except IndexError:
     pass
 
-from config.settings import (
+from src.core.settings import (
     API_RETRY_ATTEMPTS,
     API_RETRY_WAIT_MAX,
     API_RETRY_WAIT_MIN,

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from typing import Any
 import numpy as np
 
 
@@ -31,6 +30,7 @@ class CarrySleeve:
 
         Returns:
             [T, N] signals. Warmup period has no special NaN mask except standard EWMA initialization.
+
         """
         if "funding_2d" not in aux:
             raise KeyError("aux dictionary must contain 'funding_2d' for CarrySleeve")

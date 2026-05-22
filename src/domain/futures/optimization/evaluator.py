@@ -16,7 +16,7 @@ import numpy as np
 import pandas as pd
 from scipy.stats import spearmanr
 
-from config.settings import (
+from src.core.settings import (
     FUTURES_INITIAL_BALANCE,
     MAKER_FEE_RATE,
     SLIPPAGE_RATE,
