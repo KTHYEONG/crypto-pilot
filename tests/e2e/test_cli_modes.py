@@ -1,82 +1,85 @@
 from __future__ import annotations
 
 import sys
-from pathlib import Path
 
-import pandas as pd
-
-# Project Root Setup
-project_root = str(Path(__file__).resolve().parents[2])
-if project_root not in sys.path:
-    sys.path.insert(0, project_root)
-
-from src.domain.futures.strategy_runtime.bridge import MLPipelineOutput
 from src.execution import opt_main_futures
 
 
-def _dummy_data_maps(symbols: list[str]) -> tuple[dict, dict]:
-    data_maps = {s: {"4h": pd.DataFrame({"datetime": [], "close": []})} for s in symbols}
-    return data_maps, dict(data_maps)
-
-
-def test_hmm_only_skips_optimization_and_writes_snapshot(monkeypatch):
-    symbols = ["BTCUSDT"]
-    data_maps, oos_data_maps = _dummy_data_maps(symbols)
-    optimization_called = False
-
-    def _fake_run_opt(*args, **kwargs):
-        nonlocal optimization_called
-        optimization_called = True
-        raise AssertionError("optimization loop must not run in --hmm-only mode")
-
-    def _fake_ml(*args, **kwargs):
-        out = MLPipelineOutput()
-        out.hmm_report = {"hmm_prob_crisis_mean": 0.12}
-        return out
-
-    monkeypatch.setattr(opt_main_futures, "get_quarterly_window", lambda _ref: ("2025-01-01", "2025-03-01", "2025-04-01", "2025-05-01"))
-    monkeypatch.setattr(opt_main_futures, "load_futures_data_maps_for_symbols", lambda *a, **k: (data_maps, oos_data_maps, symbols))
-    monkeypatch.setattr(opt_main_futures, "run_ml_pipeline_for_universe", _fake_ml)
-    monkeypatch.setattr(opt_main_futures, "run_v43_phase_optimization_skeleton", _fake_run_opt)
-    monkeypatch.setattr(opt_main_futures, "resolve_futures_parallel_policy", lambda _n: 1)
-    monkeypatch.setattr(sys, "argv", ["opt_main_futures.py", "--skip-universe", "--hmm-only", "--symbols", "BTCUSDT"])
-
-    opt_main_futures.main()
-
-    assert optimization_called is False
-
-
-def test_alpha_only_skips_optimization_and_writes_snapshot(monkeypatch):
-    symbols = ["BTCUSDT"]
-    data_maps, oos_data_maps = _dummy_data_maps(symbols)
-    optimization_called = False
-
-    alpha_idx = pd.MultiIndex.from_tuples(
-        [
-            (pd.Timestamp("2025-01-01T00:00:00Z"), "BTCUSDT"),
-            (pd.Timestamp("2025-01-01T04:00:00Z"), "BTCUSDT"),
-        ],
-        names=["datetime", "symbol"],
+def test_rejects_legacy_alpha_only_flag(monkeypatch) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["opt_main_futures.py", "--mode", "quick-backtest", "--symbols", "BTCUSDT", "--alpha-only"],
     )
-    alpha_panel = pd.DataFrame({"score": [0.1, 0.2]}, index=alpha_idx)
+    exit_code = opt_main_futures.main()
+    assert exit_code == 2
 
-    def _fake_run_opt(*args, **kwargs):
-        nonlocal optimization_called
-        optimization_called = True
-        raise AssertionError("optimization loop must not run in --alpha-only mode")
 
-    def _fake_ml(*args, **kwargs):
-        out = MLPipelineOutput(alpha_panel=alpha_panel)
-        out.hmm_report = {"hmm_prob_crisis_mean": 0.08}
-        return out
+def test_rejects_legacy_hmm_only_flag(monkeypatch) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["opt_main_futures.py", "--mode", "quick-backtest", "--symbols", "BTCUSDT", "--hmm-only"],
+    )
+    exit_code = opt_main_futures.main()
+    assert exit_code == 2
 
-    monkeypatch.setattr(opt_main_futures, "get_quarterly_window", lambda _ref: ("2025-01-01", "2025-03-01", "2025-04-01", "2025-05-01"))
-    monkeypatch.setattr(opt_main_futures, "load_futures_data_maps_for_symbols", lambda *a, **k: (data_maps, oos_data_maps, symbols))
-    monkeypatch.setattr(opt_main_futures, "run_ml_pipeline_for_universe", _fake_ml)
-    monkeypatch.setattr(opt_main_futures, "run_v43_phase_optimization_skeleton", _fake_run_opt)
-    monkeypatch.setattr(opt_main_futures, "resolve_futures_parallel_policy", lambda _n: 1)
-    monkeypatch.setattr(sys, "argv", ["opt_main_futures.py", "--skip-universe", "--alpha-only", "--symbols", "BTCUSDT"])
 
-    opt_main_futures.main()
+def test_strategy_mode_requires_strategy(monkeypatch) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["opt_main_futures.py", "--mode", "strategy", "--symbols", "BTCUSDT"],
+    )
+    exit_code = opt_main_futures.main()
+    assert exit_code == 2
 
-    assert optimization_called is False
+
+def test_strategy_smoke_mode_requires_strategy(monkeypatch) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["opt_main_futures.py", "--mode", "strategy-smoke", "--symbols", "BTCUSDT"],
+    )
+    exit_code = opt_main_futures.main()
+    assert exit_code == 2
+
+
+def test_rejects_legacy_full_mode(monkeypatch) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["opt_main_futures.py", "--mode", "full", "--symbols", "BTCUSDT"],
+    )
+    exit_code = opt_main_futures.main()
+    assert exit_code == 2
+
+
+def test_strategy_smoke_mode_enters_pipeline(monkeypatch) -> None:
+    captured_mode = {"value": None}
+
+    def fake_run_pipeline(run_config, *, seed: int = 42, resume: bool = False):
+        _ = seed
+        _ = resume
+        captured_mode["value"] = run_config.mode
+        return opt_main_futures.RunnerResult(exit_code=0, reason="strategy_smoke_done")
+
+    monkeypatch.setattr(opt_main_futures, "run_pipeline", fake_run_pipeline)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "opt_main_futures.py",
+            "--mode",
+            "strategy-smoke",
+            "--strategy",
+            "momentum_v0",
+            "--symbols",
+            "BTCUSDT",
+            "--trials",
+            "1",
+        ],
+    )
+    exit_code = opt_main_futures.main()
+    assert exit_code == 0
+    assert captured_mode["value"] == "strategy-smoke"

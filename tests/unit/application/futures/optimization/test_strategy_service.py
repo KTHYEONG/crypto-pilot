@@ -1,0 +1,83 @@
+from __future__ import annotations
+
+import pandas as pd
+import pytest
+
+from src.application.futures.optimization.config import FuturesRunConfig
+from src.application.futures.optimization.strategy_service import (
+    assert_strategy_alpha_ready,
+    pick_strategy_data_maps,
+    run_active_strategy_output_bridge,
+)
+from src.domain.futures.strategy_runtime.bridge import MLPipelineOutput
+
+
+def test_pick_strategy_data_maps_prefers_oos_when_available() -> None:
+    frame = pd.DataFrame({"datetime": pd.to_datetime(["2026-01-01"]), "close": [1.0]})
+    oos = {"BTCUSDT": {"4h": frame}}
+    is_maps = {"BTCUSDT": {"4h": pd.DataFrame()}}
+    picked = pick_strategy_data_maps(oos, is_maps, ["BTCUSDT"], "4h")
+    assert picked is oos
+
+
+def test_assert_strategy_alpha_ready_rejects_missing_alpha_columns() -> None:
+    ml_out = MLPipelineOutput(alpha_panel=pd.DataFrame({"alpha_long": [0.1]}))
+    oos = {"BTCUSDT": {"4h": pd.DataFrame({"datetime": pd.to_datetime(["2026-01-01"])})}}
+    with pytest.raises(RuntimeError, match="missing required column: alpha_short"):
+        assert_strategy_alpha_ready(
+            ml_out=ml_out,
+            oos_data_maps=oos,
+            valid_symbols=["BTCUSDT"],
+            tf="4h",
+        )
+
+
+def test_run_active_strategy_output_bridge_allows_quick_backtest_neutral() -> None:
+    cfg = FuturesRunConfig(
+        tf="4h",
+        reference_date=None,
+        symbols=("BTCUSDT",),
+        trials=1,
+        mode="quick-backtest",
+        strategy=None,
+        sync_mode="full_history_master",
+        skip_universe=False,
+        skip_data_sync=False,
+        force_universe_rebuild=False,
+    )
+    out = run_active_strategy_output_bridge(
+        run_config=cfg,
+        symbols=["BTCUSDT"],
+        tf="4h",
+        fetch_start=None,
+        end_date=None,
+        opt_config={},
+        preloaded_data_maps=None,
+    )
+    assert isinstance(out, MLPipelineOutput)
+    assert out.alpha_panel.empty
+
+
+def test_run_active_strategy_output_bridge_rejects_strategy_smoke() -> None:
+    cfg = FuturesRunConfig(
+        tf="4h",
+        reference_date=None,
+        symbols=("BTCUSDT",),
+        trials=1,
+        mode="strategy-smoke",
+        strategy="momentum_v0",
+        sync_mode="full_history_master",
+        skip_universe=False,
+        skip_data_sync=False,
+        force_universe_rebuild=False,
+    )
+    with pytest.raises(ValueError, match="unsupported mode"):
+        run_active_strategy_output_bridge(
+            run_config=cfg,
+            symbols=["BTCUSDT"],
+            tf="4h",
+            fetch_start=None,
+            end_date=None,
+            opt_config={},
+            preloaded_data_maps={},
+        )

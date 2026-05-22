@@ -24,6 +24,12 @@ from src.domain.futures.optimization.optimizer import (
     MLPhaseDContext,
     objective_ml_phase_d,
 )
+from src.domain.futures.optimization.phase_samplers import (
+    build_phase_a1_pruner,
+    build_phase_a1_sampler,
+    build_phase_a2_sampler,
+    build_phase_b_sampler,
+)
 from src.domain.futures.optimization.trial_observability import (
     build_compact_trial_summary,
     increment_failure_reason_count,
@@ -32,6 +38,76 @@ from src.domain.futures.optimization.trial_observability import (
 )
 
 _logger: logging.Logger = logging.getLogger("run_tracker")
+
+
+def _normalize_phase_workers(phase_workers: dict[str, int]) -> dict[str, int]:
+    """Normalize phase workers to canonical keys."""
+    return {
+        "phase_a1": int(phase_workers.get("phase_a1", 1)),
+        "phase_a2": int(phase_workers.get("phase_a2", 1)),
+        "phase_b": int(phase_workers.get("phase_b", 1)),
+    }
+
+
+def log_optuna_contract(
+    *,
+    project_root: str | Path,
+    requested_trials_per_phase: int,
+    phase_workers: dict[str, int],
+    seed: int,
+    storage_url: str,
+) -> dict[str, Any]:
+    """Persist and log Optuna phase contract."""
+    normalized_workers = _normalize_phase_workers(phase_workers)
+    phase_trials = {
+        "phase_a1": int(requested_trials_per_phase),
+        "phase_a2": int(requested_trials_per_phase),
+        "phase_b": int(requested_trials_per_phase),
+    }
+    sampler_by_phase = {
+        "phase_a1": build_phase_a1_sampler(seed).__class__.__name__,
+        "phase_a2": build_phase_a2_sampler(seed).__class__.__name__,
+        "phase_b": build_phase_b_sampler(seed).__class__.__name__,
+    }
+    pruner_name = build_phase_a1_pruner().__class__.__name__
+    planned_total = int(sum(phase_trials.values()))
+    payload: dict[str, Any] = {
+        "requested_trials_per_phase": int(requested_trials_per_phase),
+        "planned_total_trials": planned_total,
+        "trials_per_phase": phase_trials,
+        "worker_by_phase": normalized_workers,
+        "sampler_by_phase": sampler_by_phase,
+        "pruner_by_phase": {
+            "phase_a1": pruner_name,
+            "phase_a2": pruner_name,
+            "phase_b": pruner_name,
+        },
+        "storage_url": storage_url,
+    }
+    _logger.info(
+        "[OPTUNA-CONTRACT] requested_trials_per_phase=%d total_planned_trials=%d phases=A1,A2,B",
+        int(requested_trials_per_phase),
+        planned_total,
+    )
+    for phase_key in ("phase_a1", "phase_a2", "phase_b"):
+        rationale = ""
+        if phase_key == "phase_b" and int(normalized_workers.get(phase_key, 1)) == 1:
+            rationale = " rationale=sqlite_complete_trial_race_prevention"
+        _logger.info(
+            "[OPTUNA-CONTRACT] phase=%s sampler=%s pruner=%s workers=%d trials=%d%s",
+            phase_key,
+            sampler_by_phase[phase_key],
+            pruner_name,
+            int(normalized_workers.get(phase_key, 1)),
+            int(phase_trials[phase_key]),
+            rationale,
+        )
+    out_dir = Path(project_root) / "logs" / "futures" / "optimization"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / "optuna_contract.json"
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+    return payload
 
 
 def setup_optuna_storage(project_root: str | Path) -> tuple[str, optuna.storages.RDBStorage]:
@@ -118,7 +194,9 @@ def ml_phase_d_sampler(
     """Multivariate TPE sampler for single-objective J-score maximization."""
     if OPT_FUTURES_CONFIG.get("FUTURES_ML_ALPHA_NSGA2_ENABLED", False):
         pop = int(OPT_FUTURES_CONFIG.get("FUTURES_NSGA2_POPULATION_SIZE", 30))
-        effective_constraints = constraints_func if constraints_func is not None else _nsga2_constraints
+        effective_constraints = (
+            constraints_func if constraints_func is not None else _nsga2_constraints
+        )
         return optuna.samplers.NSGAIISampler(
             seed=seed,
             population_size=pop,
@@ -297,7 +375,7 @@ def cfg_hash_for_run(cfg: dict[str, Any]) -> str:
     """Generate a stable hash for the relevant futures config keys."""
     relevant = {k: v for k, v in cfg.items() if str(k).startswith("FUTURES_")}
     raw = json.dumps(relevant, sort_keys=True, ensure_ascii=True, default=str)
-    return hashlib.md5(raw.encode()).hexdigest()[:10]  # nosec: S324
+    return hashlib.sha256(raw.encode()).hexdigest()[:10]
 
 
 def build_joint_study_name(
@@ -310,7 +388,7 @@ def build_joint_study_name(
     """Build a unique study name for Optuna based on parameters."""
     symbols_sorted = sorted(str(s) for s in symbols)
     sym_raw = json.dumps(symbols_sorted, ensure_ascii=True, separators=(",", ":"))
-    sym_fp = hashlib.md5(sym_raw.encode()).hexdigest()[:10]  # nosec: S324
+    sym_fp = hashlib.sha256(sym_raw.encode()).hexdigest()[:10]
     cfg_fp = cfg_hash_for_run(cfg)
     return (
         f"futures_joint_tpe_tf{tf}_win{fetch_start_date}_{end_date}_"
@@ -347,7 +425,7 @@ def build_run_id(
         ensure_ascii=True,
         separators=(",", ":")
     )
-    sym_fp = hashlib.md5(sym_raw.encode()).hexdigest()[:8]  # nosec: S324
+    sym_fp = hashlib.sha256(sym_raw.encode()).hexdigest()[:8]
     cfg_fp = cfg_hash_for_run(cfg)[:8]
     return f"{ts}_tf{tf}_s{sym_fp}_c{cfg_fp}_{short_git_rev(project_root)}"
 
@@ -388,6 +466,7 @@ def collect_run_summary_from_study(
     *,
     study_name: str,
     requested_trials: int,
+    optuna_contract: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Collect statistics and best trials for a specific Run ID from an Optuna study."""
     trials = study_ml.get_trials(deepcopy=False)
@@ -412,10 +491,46 @@ def collect_run_summary_from_study(
         if (1.0 - pos) < 0.45 and mu >= 0.0:
             pass_raw += 1
 
+    completed_trials_per_phase = {"phase_a1": 0, "phase_a2": 0, "phase_b": 0}
+    for t in complete:
+        phase_key = str(t.user_attrs.get("phase", "")).strip().lower()
+        if phase_key in completed_trials_per_phase:
+            completed_trials_per_phase[phase_key] += 1
+    contract = dict(optuna_contract or {})
+    trials_per_phase = dict(contract.get("trials_per_phase", {}))
+    worker_by_phase = _normalize_phase_workers(dict(contract.get("worker_by_phase", {})))
+    sampler_by_phase = dict(contract.get("sampler_by_phase", {}))
+    storage_url = str(contract.get("storage_url", ""))
+    requested_trials_per_phase = int(contract.get("requested_trials_per_phase", requested_trials))
+    planned_total_trials = int(
+        contract.get(
+            "planned_total_trials",
+            sum(
+                int(trials_per_phase.get(k, requested_trials_per_phase))
+                for k in completed_trials_per_phase
+            ),
+        )
+    )
+
     return {
         "run_id": run_id,
         "study_name": study_name,
         "requested_trials": int(requested_trials),
+        "requested_trials_per_phase": requested_trials_per_phase,
+        "planned_total_trials": planned_total_trials,
+        "trials_per_phase": {
+            "phase_a1": int(trials_per_phase.get("phase_a1", requested_trials_per_phase)),
+            "phase_a2": int(trials_per_phase.get("phase_a2", requested_trials_per_phase)),
+            "phase_b": int(trials_per_phase.get("phase_b", requested_trials_per_phase)),
+        },
+        "completed_trials_per_phase": completed_trials_per_phase,
+        "sampler_by_phase": {
+            "phase_a1": str(sampler_by_phase.get("phase_a1", "")),
+            "phase_a2": str(sampler_by_phase.get("phase_a2", "")),
+            "phase_b": str(sampler_by_phase.get("phase_b", "")),
+        },
+        "worker_by_phase": worker_by_phase,
+        "storage_url": storage_url,
         "scoped_trials": len(scoped),
         "scoped_complete": len(complete),
         "scoped_pareto": len(pareto_scoped),
@@ -560,8 +675,8 @@ def _cleanup_old_runs(out_dir: Path, max_files: int = 50) -> None:
             for f in files[max_files:]:
                 try:
                     f.unlink(missing_ok=True)
-                except Exception:
-                    pass
+                except Exception as e:
+                    _logger.debug("Failed to delete old summary file %s: %s", f, e)
     except Exception as e:
         _logger.debug("Failed to cleanup old runs: %s", e)
 
@@ -637,7 +752,11 @@ def run_optimization_loop(
     study_ml = get_or_create_study(
         study_name=study_name,
         storage=storage,
-        sampler=sampler if sampler is not None else ml_phase_d_sampler(seed=seed, n_trials=n_trials),
+        sampler=(
+            sampler
+            if sampler is not None
+            else ml_phase_d_sampler(seed=seed, n_trials=n_trials)
+        ),
         resume=resume,
         pruner=_pruner,
         directions=directions,
@@ -699,13 +818,13 @@ def run_optimization_loop(
                         pbar.refresh()
                         if count >= target:
                             break
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        _logger.debug("Progress poller failed to fetch trials: %s", e)
                     time.sleep(1)  # Faster polling for better responsiveness
                 pbar.n = target
                 pbar.refresh()
-        except Exception:
-            pass
+        except Exception as e:
+            _logger.debug("Progress poller terminated: %s", e)
 
     poller_enabled = bool(OPT_FUTURES_CONFIG.get("FUTURES_OPT_ENABLE_PROGRESS_POLLER", True))
     poller_thread = None
@@ -743,12 +862,15 @@ def run_optimization_loop(
                     _logger.error("Worker batch failed: %s", e)
     finally:
         try:
-            trials = study_ml.get_trials(deepcopy=False, states=[TrialState.FAIL, TrialState.PRUNED])
+            trials = study_ml.get_trials(
+                deepcopy=False,
+                states=[TrialState.FAIL, TrialState.PRUNED],
+            )
             for tr in trials:
                 reason = str((tr.user_attrs or {}).get("obs_reason", "unknown"))
                 increment_failure_reason_count(failure_reason_counts, reason)
-        except Exception:
-            pass
+        except Exception as e:
+            _logger.debug("Failed to collect failure reason counts: %s", e)
         study_ml.set_user_attr("obs_failure_reason_counts", dict(failure_reason_counts))
         stop_event.set()
         if poller_thread is not None:
