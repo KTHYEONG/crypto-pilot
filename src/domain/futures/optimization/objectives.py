@@ -20,6 +20,11 @@ from src.domain.futures.backtest.engine import (
     max_hold_bars_from_time_barrier,
 )
 from src.domain.futures.backtest.preparation import prepare_backtest_inputs
+from src.domain.futures.optimization.common import (
+    _diag_to_dict,
+    _safe_float_or_none,
+    _weight_stage_diag,
+)
 from src.domain.futures.optimization.evaluator import (
     _log_tw_from_ret_pct,
     calc_cvar5_loss_pct_from_equity,
@@ -28,24 +33,18 @@ from src.domain.futures.optimization.evaluator import (
     calc_mdd_from_equity,
     compute_v3_score,
 )
-from src.domain.futures.optimization.opt_config import OPT_FUTURES_CONFIG
+from src.domain.futures.optimization.ml_context import (
+    merge_membership_constraints_into_aligned,
+    precompute_ml_optimization_context,
+    rerun_precompute_for_ctx,
+)
 from src.domain.futures.optimization.observability.trial_observability import set_trial_event_attrs
+from src.domain.futures.optimization.opt_config import OPT_FUTURES_CONFIG
 from src.domain.futures.portfolio.portfolio_constructor import (
     portfolio_weight_params_from_optuna,
     precompute_rebalance_weights,
 )
 from src.domain.futures.portfolio.signal_composer import apply_linear_signal_composer_scores
-from src.domain.futures.optimization.ml_context import (
-    precompute_ml_optimization_context,
-    merge_membership_constraints_into_aligned,
-    rerun_precompute_for_ctx,
-)
-
-from src.domain.futures.optimization.common import (
-    _diag_to_dict,
-    _weight_stage_diag,
-    _safe_float_or_none,
-)
 
 if TYPE_CHECKING:
     from src.domain.futures.optimization.ml_context import MLPhaseDContext
@@ -287,7 +286,12 @@ def _cached_kill_fund_lev(
     return zkill, zfund, lev_blk
 
 
-def _compose_strategy_scores_inplace(aligned: dict[str, Any], params: dict[str, Any]) -> None:
+def _compose_strategy_scores_inplace(
+    aligned: dict[str, Any],
+    params: dict[str, Any],
+    *,
+    trial_number: int | None = None,
+) -> None:
     """Build xs_score from alpha_long/alpha_short for strategy-mode trials."""
     alpha_l = aligned.get("alpha_long")
     alpha_s = aligned.get("alpha_short")
@@ -349,6 +353,25 @@ def _compose_strategy_scores_inplace(aligned: dict[str, Any], params: dict[str, 
         hmm_probs=hmm_prob_map,
         params=params,
     )
+    if trial_number is not None and trial_number < 3:
+        _diag: dict[str, float] = aligned["_strategy_compose_diag"]
+        _beta_a = float(
+            params.get("BETA_ALPHA", OPT_FUTURES_CONFIG.get("FUTURES_DEFAULT_BETA_ALPHA", 1.0))
+        )
+        _logger.info(
+            "[COMPOSE-DIAG] trial=%d beta_alpha=%.2f friction=%.1fbps hurdle=%.1fbps"
+            " thr=%.1fbps alpha_l_p95=%.1fbps alpha_s_p95=%.1fbps"
+            " xs_long_nz=%.4f xs_short_nz=%.4f",
+            trial_number,
+            _beta_a,
+            _diag.get("friction_bps", 0.0),
+            _diag.get("ev_hurdle_bps", 0.0),
+            _diag.get("effective_threshold_bps", 0.0),
+            _diag.get("alpha_long_p95", 0.0) * 10000.0,
+            _diag.get("alpha_short_p95", 0.0) * 10000.0,
+            _diag.get("xs_long_nz_ratio", 0.0),
+            _diag.get("xs_short_nz_ratio", 0.0),
+        )
 
 
 def _run_portfolio_numba_block(
@@ -360,7 +383,7 @@ def _run_portfolio_numba_block(
 ) -> tuple[np.ndarray, float, np.ndarray, np.ndarray]:
     _ = estimated_b
     if bool(params.get("STRATEGY_MODE", False)):
-        _compose_strategy_scores_inplace(aligned, params)
+        _compose_strategy_scores_inplace(aligned, params, trial_number=trial_number)
         if "xs_score_long" not in aligned or "xs_score_short" not in aligned:
             raise RuntimeError("strategy mode failed to generate xs_score_long/xs_score_short")
     prepared = prepare_backtest_inputs(aligned, params)
@@ -683,6 +706,31 @@ def _evaluate_awf_phase_d_aggregate(
         n_tr = int(b_trades_raw.shape[0])
         all_trades_chunks.append(b_trades_raw)
 
+        # [LEG] diagnostic log — gated to first 5 trials
+        _trial_num_leg = trial.number if trial is not None else None
+        if _trial_num_leg is not None and _trial_num_leg < 5:
+            _b_bars_leg = max(1, leg_range[1] - leg_range[0])
+            _xs_l_leg = aligned.get("xs_score_long")
+            _tw_nz = 0.0
+            if _xs_l_leg is not None:
+                _xs_arr = np.asarray(_xs_l_leg, dtype=np.float64)
+                _tw_nz = float(np.count_nonzero(np.abs(_xs_arr) > 1e-12) / max(_xs_arr.size, 1))
+            _n_long_leg = int(np.sum(b_trades_raw[:, 3] == 1.0)) if n_tr > 0 else 0
+            _n_short_leg = int(np.sum(b_trades_raw[:, 3] == -1.0)) if n_tr > 0 else 0
+            _logger.info(
+                "[LEG] trial=%d leg=%d range=(%d,%d) bars=%d"
+                " trades=%d long=%d short=%d tw_nz=%.4f",
+                _trial_num_leg,
+                leg_idx,
+                leg_range[0],
+                leg_range[1],
+                _b_bars_leg,
+                n_tr,
+                _n_long_leg,
+                _n_short_leg,
+                _tw_nz,
+            )
+
         if not first_leg_done:
             first_leg_done = True
             if n_tr == 0:
@@ -716,6 +764,21 @@ def _evaluate_awf_phase_d_aggregate(
             else 0.0
         )
         log_ret = _log_tw_from_ret_pct(float((b_bal / FUTURES_INITIAL_BALANCE - 1.0) * 100.0))
+
+        if _trial_num_leg is not None and _trial_num_leg < 5:
+            _prune_suffix = (
+                " -> PRUNE(first_leg_log_ret_too_low)"
+                if (leg_idx == 0 and log_ret < -0.1 and trial is not None)
+                else ""
+            )
+            _logger.info(
+                "[LEG] trial=%d leg=%d log_ret=%.3f mdd=%.1f%%%s",
+                _trial_num_leg,
+                leg_idx,
+                log_ret,
+                mdd,
+                _prune_suffix,
+            )
 
         if leg_idx == 0 and trial is not None:
             if log_ret < -0.1:

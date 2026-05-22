@@ -667,6 +667,29 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
                     )
                     last_calib, last_calib_short, last_est_b = calib_leg, calib_s_leg, est_b_leg
 
+                    # [ALPHA-ALIGN] per-leg alpha residual diagnostic (first 3 legs only)
+                    if leg_i < 3:
+                        _al_nz_list: list[float] = []
+                        _as_nz_list: list[float] = []
+                        _bars_leg = int(test_e) - int(test_s)
+                        for _sym in ctx.symbols:
+                            if _sym not in leg_maps or ctx.tf not in leg_maps[_sym]:
+                                continue
+                            _ldf = leg_maps[_sym][ctx.tf]
+                            if "alpha_long" in _ldf.columns:
+                                _al_nz_list.append(float((_ldf["alpha_long"] != 0).mean()))
+                            if "alpha_short" in _ldf.columns:
+                                _as_nz_list.append(float((_ldf["alpha_short"] != 0).mean()))
+                        _al_nz = float(np.mean(_al_nz_list)) if _al_nz_list else 0.0
+                        _as_nz = float(np.mean(_as_nz_list)) if _as_nz_list else 0.0
+                        _logger.info(
+                            "[ALPHA-ALIGN] leg=%d bars=%d alpha_long_nz=%.3f alpha_short_nz=%.3f",
+                            leg_i,
+                            _bars_leg,
+                            _al_nz,
+                            _as_nz,
+                        )
+
                     prebuilt_leg = _build_prebuilt_full_arrays(
                         leg_maps,
                         ctx.symbols,
@@ -759,7 +782,29 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
             )
 
             ctx.awf_leg_slices = []
-            for _train_s, _train_e, test_s, test_e in awf_legs:
+            for _leg_i, (_train_s, _train_e, test_s, test_e) in enumerate(awf_legs):
+                # [ALPHA-ALIGN] per-leg alpha residual diagnostic (first 3 legs only)
+                if _leg_i < 3:
+                    _al_nz2_list: list[float] = []
+                    _as_nz2_list: list[float] = []
+                    _bars_leg2 = int(test_e) - int(test_s)
+                    for _sym2 in ctx.symbols:
+                        if _sym2 not in ctx.data_maps or ctx.tf not in ctx.data_maps[_sym2]:
+                            continue
+                        _ldf2 = ctx.data_maps[_sym2][ctx.tf]
+                        if "alpha_long" in _ldf2.columns:
+                            _al_nz2_list.append(float((_ldf2["alpha_long"] != 0).mean()))
+                        if "alpha_short" in _ldf2.columns:
+                            _as_nz2_list.append(float((_ldf2["alpha_short"] != 0).mean()))
+                    _al_nz2 = float(np.mean(_al_nz2_list)) if _al_nz2_list else 0.0
+                    _as_nz2 = float(np.mean(_as_nz2_list)) if _as_nz2_list else 0.0
+                    _logger.info(
+                        "[ALPHA-ALIGN] leg=%d bars=%d alpha_long_nz=%.3f alpha_short_nz=%.3f",
+                        _leg_i,
+                        _bars_leg2,
+                        _al_nz2,
+                        _as_nz2,
+                    )
                 aligned = _build_aligned_2d_from_prebuilt(
                     prebuilt_full, ctx.symbols, test_s, test_e,
                     sigma_3d_full=sigma_3d_full

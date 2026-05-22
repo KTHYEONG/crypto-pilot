@@ -18,21 +18,21 @@ from optuna.trial import TrialState
 from sqlalchemy import create_engine, text
 from sqlalchemy.pool import QueuePool
 
-from src.domain.futures.optimization.observability.dashboard import safe_float
-from src.domain.futures.optimization.opt_config import OPT_FUTURES_CONFIG
 from src.domain.futures.optimization.ml_context import MLPhaseDContext
 from src.domain.futures.optimization.objectives import objective_ml_phase_d
-from src.domain.futures.optimization.workflow import (
-    build_phase_a1_pruner,
-    build_phase_a1_sampler,
-    build_phase_a2_sampler,
-    build_phase_b_sampler,
-)
+from src.domain.futures.optimization.observability.dashboard import safe_float
 from src.domain.futures.optimization.observability.trial_observability import (
     build_compact_trial_summary,
     increment_failure_reason_count,
     init_failure_reason_counts,
     trial_elapsed_seconds,
+)
+from src.domain.futures.optimization.opt_config import OPT_FUTURES_CONFIG
+from src.domain.futures.optimization.workflow import (
+    build_phase_a1_pruner,
+    build_phase_a1_sampler,
+    build_phase_a2_sampler,
+    build_phase_b_sampler,
 )
 
 _logger: logging.Logger = logging.getLogger("run_tracker")
@@ -355,10 +355,16 @@ def optimize_worker(s_name: str, s_url: str, chunk_size: int):
 
     def _trial_finish_callback(_study: optuna.Study, tr: optuna.trial.FrozenTrial) -> None:
         elapsed = trial_elapsed_seconds(tr)
-        # Suppress verbose logging for pruned trials to reduce noise. 
-        # Only log COMPLETE trials or significant events if needed.
         if tr.state == optuna.trial.TrialState.COMPLETE:
-             _logger.info("%s", build_compact_trial_summary(tr, elapsed_sec=elapsed))
+            _logger.info("%s", build_compact_trial_summary(tr, elapsed_sec=elapsed))
+        elif tr.state == optuna.trial.TrialState.PRUNED:
+            summary = build_compact_trial_summary(tr, elapsed_sec=elapsed)
+            # Replace [TRIAL] prefix with [PRUNE] for easier grep
+            prune_msg = summary.replace("[TRIAL]", "[PRUNE]", 1)
+            if tr.number < 5:
+                _logger.info("%s", prune_msg)
+            else:
+                _logger.debug("%s", prune_msg)
 
     study.optimize(
         _objective_with_timeout,

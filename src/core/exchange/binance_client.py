@@ -398,6 +398,7 @@ class BinanceClient:
         while since < end_timestamp:
             retry_count = 0
             used_weight = 0
+            data = None
             while retry_count < 5:
                 params = {
                     "symbol": binance_symbol, "interval": interval,
