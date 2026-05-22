@@ -9,6 +9,7 @@ import optuna
 from src.domain.futures.optimization.phase_param_space import V43_CORE_PARAM_KEYS
 
 _NON_FIXABLE_PARAMS = {
+    "BETA_ALPHA",
     "K_LONG",
     "K_SHORT",
     "EV_HURDLE_BPS",
@@ -18,6 +19,7 @@ _NON_FIXABLE_PARAMS = {
 }
 
 _V43_BOUNDS: dict[str, tuple[float, float]] = {
+    "BETA_ALPHA": (2.0, 6.0),
     "BETA_REGIME_BEAR": (0.0, 1.5),
     "BETA_REGIME_CHOP": (0.0, 1.0),
     "K_LONG": (1.0, 8.0),

@@ -34,7 +34,6 @@ from src.domain.futures.backtest_engine import (
     max_hold_bars_from_time_barrier,
 )
 from src.domain.futures.backtest_preparation import prepare_backtest_inputs
-from src.domain.futures.strategy_runtime.bridge import HMM_SEMANTIC_PROB_COLUMNS
 from src.domain.futures.optimization.data_aligner import (
     _build_aligned_2d_from_prebuilt,
     _dataframe_to_symbol_arrays,
@@ -66,10 +65,11 @@ from src.domain.futures.portfolio.portfolio_optimizer import (
     load_portfolio_policy_config,
 )
 from src.domain.futures.portfolio.signal_composer import (
+    apply_linear_signal_composer_scores,
     composer_sigma_lookback_bars,
     rolling_per_bar_return_std,
 )
-from src.domain.futures.strategy_runtime.bridge import FuturesMLStrategy
+from src.domain.futures.strategy_runtime.bridge import HMM_SEMANTIC_PROB_COLUMNS, FuturesMLStrategy
 from src.domain.futures.validation.boundary_contract import PurgeBarsRegistry
 
 _logger = logging.getLogger(__name__)
@@ -77,6 +77,192 @@ _PRECOMPUTE_LOCK = threading.Lock()
 
 # Cross-sectional momentum lookback periods precomputed for all trials.
 _CS_MOM_LOOKBACKS: list[int] = [12, 24, 36, 48, 60, 72]
+
+
+def _array_stats(name: str, arr: Any) -> str:
+    """Return compact finite/non-zero stats for debug logging."""
+    if arr is None:
+        return f"{name}=None"
+    np_arr = np.asarray(arr, dtype=np.float64)
+    if np_arr.size == 0:
+        return f"{name}=empty"
+    finite_mask = np.isfinite(np_arr)
+    finite = np_arr[finite_mask]
+    nnz = int(np.count_nonzero(np.abs(np_arr) > 1e-12))
+    if finite.size == 0:
+        return f"{name}=size:{np_arr.size} finite:0 nnz:{nnz}"
+    return (
+        f"{name}=size:{np_arr.size} finite:{finite.size} nnz:{nnz} "
+        f"mean:{float(np.mean(finite)):.6g} std:{float(np.std(finite)):.6g} "
+        f"min:{float(np.min(finite)):.6g} max:{float(np.max(finite)):.6g}"
+    )
+
+
+def _diag_to_dict(diag: Any) -> dict[str, float]:
+    """Convert Numba diag array to named dictionary when possible."""
+    arr = np.asarray(diag)
+    if arr.size < 5:
+        return {"diag_size": float(arr.size)}
+    # [dust_skip_cnt, margin_fail_cnt, spare_a, spare_b, mode_flag]
+    return {
+        "dust_skip_cnt": float(arr[0]),
+        "margin_fail_cnt": float(arr[1]),
+        "spare_a": float(arr[2]),
+        "spare_b": float(arr[3]),
+        "mode_flag": float(arr[4]),
+    }
+
+
+def _safe_pct(arr: np.ndarray, q: float) -> float:
+    finite = arr[np.isfinite(arr)]
+    if finite.size == 0:
+        return 0.0
+    return float(np.nanpercentile(finite, q))
+
+
+def _nonzero_ratio(arr: np.ndarray, eps: float = 1e-12) -> float:
+    if arr.size == 0:
+        return 0.0
+    return float(np.count_nonzero(np.abs(arr) > eps) / arr.size)
+
+
+def _trial_diag_sampled(trial: optuna.Trial | None, *, n_trades: int) -> bool:
+    if n_trades == 0:
+        return True
+    if trial is None:
+        return False
+    return int(trial.number) < 5
+
+
+def _build_strategy_compose_diag(
+    *,
+    alpha_long: np.ndarray,
+    alpha_short: np.ndarray,
+    xs_long: np.ndarray,
+    xs_short: np.ndarray,
+    hmm_probs: dict[str, np.ndarray],
+    params: dict[str, Any],
+) -> dict[str, float]:
+    n_bars = alpha_long.shape[0]
+    beta_a = float(
+        params.get("BETA_ALPHA", OPT_FUTURES_CONFIG.get("FUTURES_DEFAULT_BETA_ALPHA", 1.0))
+    )
+    b_bull = float(
+        params.get(
+            "BETA_REGIME_BULL",
+            OPT_FUTURES_CONFIG.get("FUTURES_DEFAULT_BETA_REGIME_BULL", 1.0),
+        )
+    )
+    b_bear = float(
+        params.get(
+            "BETA_REGIME_BEAR",
+            OPT_FUTURES_CONFIG.get("FUTURES_DEFAULT_BETA_REGIME_BEAR", 1.0),
+        )
+    )
+    b_crisis = float(
+        params.get(
+            "BETA_REGIME_CRISIS",
+            OPT_FUTURES_CONFIG.get("FUTURES_DEFAULT_BETA_REGIME_CRISIS", 1.0),
+        )
+    )
+    b_chop = float(
+        params.get(
+            "BETA_REGIME_CHOP",
+            OPT_FUTURES_CONFIG.get("FUTURES_DEFAULT_BETA_REGIME_CHOP", 0.25),
+        )
+    )
+    b_rec = float(
+        params.get(
+            "BETA_REGIME_RECOVERY",
+            OPT_FUTURES_CONFIG.get("FUTURES_DEFAULT_BETA_REGIME_RECOVERY", 0.0),
+        )
+    )
+    ev_h = float(
+        params.get("EV_HURDLE_BPS", OPT_FUTURES_CONFIG.get("FUTURES_DEFAULT_EV_HURDLE_BPS", 5.0))
+    )
+    slip = float(SLIPPAGE_RATE) * float(params.get("SLIPPAGE_BPS_BUFFER_MULT", 1.0))
+    fee = float(TAKER_FEE_RATE)
+    fund_bar = float(OPT_FUTURES_CONFIG.get("FUTURES_COMPOSER_FUNDING_BAR_FRAC", 1e-5))
+    buf_mult = float(OPT_FUTURES_CONFIG.get("FUTURES_FRICTION_BUFFER_MULT", 1.5))
+    friction = buf_mult * (fee + slip + fund_bar)
+    friction_bps = friction * 10000.0
+    threshold_bps = friction_bps + ev_h
+
+    pbull = hmm_probs["hmm_prob_bull_calm"] + hmm_probs["hmm_prob_bull_vol_up"]
+    regime = (
+        b_bull * pbull
+        + b_bear * hmm_probs["hmm_prob_bear_trend"]
+        + b_chop * hmm_probs["hmm_prob_chop"]
+        + b_crisis * hmm_probs["hmm_prob_crisis"]
+        + b_rec * hmm_probs["hmm_prob_recovery"]
+    )
+    regime = np.broadcast_to(regime[:, None], alpha_long.shape)
+    mu_l_pre = (beta_a * alpha_long) + regime - friction
+    mu_s_pre = (beta_a * alpha_short) + regime - friction
+
+    return {
+        "bars": float(n_bars),
+        "alpha_long_nz_ratio": _nonzero_ratio(alpha_long),
+        "alpha_short_nz_ratio": _nonzero_ratio(alpha_short),
+        "alpha_long_p50": _safe_pct(alpha_long, 50),
+        "alpha_long_p95": _safe_pct(alpha_long, 95),
+        "alpha_long_p99": _safe_pct(alpha_long, 99),
+        "alpha_short_p50": _safe_pct(alpha_short, 50),
+        "alpha_short_p95": _safe_pct(alpha_short, 95),
+        "alpha_short_p99": _safe_pct(alpha_short, 99),
+        "friction_bps": float(friction_bps),
+        "ev_hurdle_bps": float(ev_h),
+        "effective_threshold_bps": float(threshold_bps),
+        "mu_pre_hurdle_p95_long": _safe_pct(mu_l_pre, 95),
+        "mu_pre_hurdle_p95_short": _safe_pct(mu_s_pre, 95),
+        "xs_long_nz_ratio": _nonzero_ratio(xs_long),
+        "xs_short_nz_ratio": _nonzero_ratio(xs_short),
+    }
+
+
+def _weight_stage_diag(
+    target_weights: np.ndarray | None,
+    *,
+    per_symbol_cap: float | None,
+) -> dict[str, float | str]:
+    if target_weights is None:
+        return {
+            "tw_row_nz_ratio": 0.0,
+            "gross_mean": 0.0,
+            "gross_p95": 0.0,
+            "cap_hit_proxy_ratio": "not_available",
+        }
+    tw = np.asarray(target_weights, dtype=np.float64)
+    if tw.ndim != 2 or tw.size == 0:
+        return {
+            "tw_row_nz_ratio": 0.0,
+            "gross_mean": 0.0,
+            "gross_p95": 0.0,
+            "cap_hit_proxy_ratio": "not_available",
+        }
+    row_nz = np.any(np.abs(tw) > 1e-12, axis=1)
+    gross = np.sum(np.abs(tw), axis=1)
+    cap_hit_proxy: float | str = "not_available"
+    if per_symbol_cap is not None and float(per_symbol_cap) > 0.0:
+        cap = float(per_symbol_cap)
+        active = np.abs(tw) > 1e-12
+        hits = np.abs(tw) >= (0.99 * cap)
+        den = int(np.count_nonzero(active))
+        cap_hit_proxy = float(np.count_nonzero(hits & active) / max(den, 1))
+    return {
+        "tw_row_nz_ratio": float(np.mean(row_nz)) if row_nz.size > 0 else 0.0,
+        "gross_mean": float(np.mean(gross)) if gross.size > 0 else 0.0,
+        "gross_p95": _safe_pct(gross, 95) if gross.size > 0 else 0.0,
+        "cap_hit_proxy_ratio": cap_hit_proxy,
+    }
+
+
+def _safe_float_or_none(value: Any) -> float | None:
+    try:
+        out = float(value)
+    except Exception:
+        return None
+    return out if np.isfinite(out) else None
 
 
 def inject_cs_momentum_ranks(
@@ -252,6 +438,7 @@ class MLPhaseDContext:
     ml_pipeline_workers: int | None = None
     # Per-execution identifier for run-level trial filtering in shared Optuna DB.
     run_id: str | None = None
+    strategy_mode: bool = False
 
 
 def _fit_oos_platt_calibrators_from_maps(
@@ -446,11 +633,24 @@ def _build_prebuilt_full_arrays(
                 dtype=np.float64, copy=False
             )
 
+        # Prefer current strategy alpha path. Keep legacy fallback for non-strategy runs.
         gp_base = (
-            raw_full["alpha_long_00"].to_numpy(dtype=np.float64, copy=False)
-            if "alpha_long_00" in raw_full.columns
-            else np.zeros(len(raw_full), dtype=np.float64)
+            raw_full["alpha_long"].to_numpy(dtype=np.float64, copy=False)
+            if "alpha_long" in raw_full.columns
+            else (
+                raw_full["alpha_long_00"].to_numpy(dtype=np.float64, copy=False)
+                if "alpha_long_00" in raw_full.columns
+                else np.zeros(len(raw_full), dtype=np.float64)
+            )
         )
+        if "alpha_long" in raw_full.columns:
+            trimmed_sig["alpha_long"] = raw_full["alpha_long"].to_numpy(
+                dtype=np.float64, copy=False
+            )
+        if "alpha_short" in raw_full.columns:
+            trimmed_sig["alpha_short"] = raw_full["alpha_short"].to_numpy(
+                dtype=np.float64, copy=False
+            )
         if calibrator:
             p_base = calibrator.predict_prob(gp_base)
             trimmed_sig["ml_calib_prob"] = p_base
@@ -560,9 +760,13 @@ def _inject_dyn_leverage_trimmed(trimmed_sig: pd.DataFrame, raw_full: pd.DataFra
     close = raw_full["close"].astype(np.float64)
     r = np.log(close / close.shift(1).clip(lower=1e-12)).fillna(0.0).to_numpy(dtype=np.float64)
     g = (
-        raw_full["alpha_long_00"].fillna(0.0).to_numpy(dtype=np.float64)
-        if "alpha_long_00" in raw_full.columns
-        else np.zeros(len(raw_full), dtype=np.float64)
+        raw_full["alpha_long"].fillna(0.0).to_numpy(dtype=np.float64)
+        if "alpha_long" in raw_full.columns
+        else (
+            raw_full["alpha_long_00"].fillna(0.0).to_numpy(dtype=np.float64)
+            if "alpha_long_00" in raw_full.columns
+            else np.zeros(len(raw_full), dtype=np.float64)
+        )
     )
     factor_ret = g * r
     state_hard = np.argmax(p_mat, axis=1).astype(np.int64)
@@ -1295,6 +1499,7 @@ def _suggest_ml_joint_nsga2(trial: optuna.Trial, ctx: MLPhaseDContext) -> dict[s
 
     baseline = _baseline_ml_out_dict_for_coordinate(policy)
     baseline_core = {
+        "BETA_ALPHA": float(baseline.get("BETA_ALPHA", 1.0)),
         "BETA_REGIME_BEAR": float(baseline.get("BETA_REGIME_BEAR", 0.25)),
         "BETA_REGIME_CHOP": float(baseline.get("BETA_REGIME_CHOP", 0.25)),
         "K_LONG": int(baseline.get("K_LONG", 2)),
@@ -1444,6 +1649,7 @@ def _base_engine_params(ml: dict[str, Any], tf: str) -> dict[str, Any]:
             ml.get("PORTFOLIO_KAPPA", cfg.get("FUTURES_PORTFOLIO_KAPPA", 0.35))
         ),
         "FUTURES_EXECUTION_MODE": str(ml.get("FUTURES_EXECUTION_MODE", "coarse")),
+        "STRATEGY_MODE": bool(ml.get("STRATEGY_MODE", False)),
     }
 
 
@@ -1473,12 +1679,82 @@ def _cached_kill_fund_lev(
     return zkill, zfund, lev_blk
 
 
+def _compose_strategy_scores_inplace(aligned: dict[str, Any], params: dict[str, Any]) -> None:
+    """Build xs_score from alpha_long/alpha_short for strategy-mode trials."""
+    alpha_l = aligned.get("alpha_long")
+    alpha_s = aligned.get("alpha_short")
+    if alpha_l is None or alpha_s is None:
+        raise RuntimeError("strategy mode requires aligned alpha_long/alpha_short")
+    alpha_l_2d = np.asarray(alpha_l, dtype=np.float64)
+    alpha_s_2d = np.asarray(alpha_s, dtype=np.float64)
+    if alpha_l_2d.ndim != 2 or alpha_s_2d.ndim != 2 or alpha_l_2d.shape != alpha_s_2d.shape:
+        raise RuntimeError("strategy mode requires 2D alpha_long/alpha_short with matching shape")
+
+    n_bars, n_syms = alpha_l_2d.shape
+    xs_l = np.zeros((n_bars, n_syms), dtype=np.float64)
+    xs_s = np.zeros((n_bars, n_syms), dtype=np.float64)
+    hmm_cols = (
+        "hmm_prob_bull_calm",
+        "hmm_prob_bull_vol_up",
+        "hmm_prob_bear_trend",
+        "hmm_prob_chop",
+        "hmm_prob_crisis",
+    )
+    hmm_prob_map: dict[str, np.ndarray] = {}
+    for hmm_col in hmm_cols:
+        hmm_2d = aligned.get(hmm_col)
+        if hmm_2d is None:
+            hmm_prob_map[hmm_col] = np.zeros((n_bars,), dtype=np.float64)
+            continue
+        hmm_arr = np.asarray(hmm_2d, dtype=np.float64)
+        if hmm_arr.ndim != 2 or hmm_arr.shape != alpha_l_2d.shape:
+            raise RuntimeError(f"strategy mode requires aligned {hmm_col} with alpha shape")
+        hmm_prob_map[hmm_col] = np.mean(hmm_arr, axis=1)
+    hmm_prob_map["hmm_prob_recovery"] = np.zeros((n_bars,), dtype=np.float64)
+
+    for col_idx in range(n_syms):
+        composer_df = pd.DataFrame(index=np.arange(n_bars))
+        for hmm_col in hmm_cols:
+            hmm_2d = aligned.get(hmm_col)
+            if hmm_2d is None:
+                composer_df[hmm_col] = np.zeros(n_bars, dtype=np.float64)
+                continue
+            hmm_arr = np.asarray(hmm_2d, dtype=np.float64)
+            composer_df[hmm_col] = hmm_arr[:, col_idx]
+        xl, xs = apply_linear_signal_composer_scores(
+            composer_df,
+            alpha_l_2d[:, col_idx],
+            alpha_s_2d[:, col_idx],
+            params,
+            opt_config=OPT_FUTURES_CONFIG,
+        )
+        xs_l[:, col_idx] = xl
+        xs_s[:, col_idx] = xs
+
+    aligned["xs_score_long"] = np.ascontiguousarray(xs_l)
+    aligned["xs_score_short"] = np.ascontiguousarray(xs_s)
+    aligned["_strategy_compose_diag"] = _build_strategy_compose_diag(
+        alpha_long=alpha_l_2d,
+        alpha_short=alpha_s_2d,
+        xs_long=xs_l,
+        xs_short=xs_s,
+        hmm_probs=hmm_prob_map,
+        params=params,
+    )
+
+
 def _run_portfolio_numba_block(
     params: dict[str, Any],
     aligned: dict[str, Any],
     estimated_b: float = 1.05,
+    *,
+    trial_number: int | None = None,
 ) -> tuple[np.ndarray, float, np.ndarray, np.ndarray]:
     _ = estimated_b
+    if bool(params.get("STRATEGY_MODE", False)):
+        _compose_strategy_scores_inplace(aligned, params)
+        if "xs_score_long" not in aligned or "xs_score_short" not in aligned:
+            raise RuntimeError("strategy mode failed to generate xs_score_long/xs_score_short")
     prepared = prepare_backtest_inputs(aligned, params)
     aligned = prepared.aligned_data
     zkill, zfund, lev_blk = _cached_kill_fund_lev(aligned, params)
@@ -1566,6 +1842,19 @@ def _run_portfolio_numba_block(
         dtype=np.float64,
     )
     aligned["target_weights"] = tw_blk
+    if bool(params.get("STRATEGY_MODE", False)):
+        should_log_weight = (trial_number is not None and int(trial_number) < 5) or (
+            trial_number is None
+        )
+        if should_log_weight:
+            _logger.info(
+                " [WEIGHT-STAGE-DIAG] trial=%s %s",
+                trial_number if trial_number is not None else "replay",
+                _weight_stage_diag(
+                    tw_blk,
+                    per_symbol_cap=_safe_float_or_none(params.get("MAX_EXPOSURE_PER_COIN")),
+                ),
+            )
     use_simple_atr_i = (
         1 if bool(cfg_block.get("FUTURES_SIMPLE_ATR_STOP", True)) else 0
     )
@@ -1655,6 +1944,26 @@ def _run_portfolio_numba_block(
             float(params["DD_SCALING_THRESHOLD"]),
             volume_2d=aligned.get("volume"),
         )
+    if _logger.isEnabledFor(logging.DEBUG):
+        try:
+            tw_abs = np.abs(tw_blk)
+            tw_row_abs = (
+                np.sum(tw_abs, axis=1)
+                if tw_abs.ndim == 2
+                else np.array([], dtype=np.float64)
+            )
+            _logger.debug(
+                " [LEG-BT-INPUT] %s | %s | %s | %s | tw_row_abs_nnz=%d/%d kill_nonzero=%d",
+                _array_stats("xs_long", xl),
+                _array_stats("xs_short", xs),
+                _array_stats("composer_sigma", aligned.get("composer_sigma_bar")),
+                _array_stats("target_weights", tw_blk),
+                int(np.count_nonzero(tw_row_abs > 1e-12)),
+                int(tw_row_abs.size),
+                int(np.count_nonzero(np.asarray(zkill) > 0)),
+            )
+        except Exception:
+            _logger.debug(" [LEG-BT-INPUT] stats logging failed", exc_info=True)
     return out_tw
 
 
@@ -1709,6 +2018,8 @@ def _evaluate_awf_phase_d_aggregate(
         params = dict(ml_bundle)
     else:
         params = _base_engine_params(ml_bundle, ctx.tf)
+    if ctx.strategy_mode:
+        params["STRATEGY_MODE"] = True
     params["ESTIMATED_B"] = ctx.estimated_b
     params["KELLY_IC_UPPER"] = ctx.kelly_ic_upper  # T3-B
 
@@ -1765,19 +2076,72 @@ def _evaluate_awf_phase_d_aggregate(
             continue
 
         b_trades_raw, b_bal, b_equity, _b_diag = _run_portfolio_numba_block(
-            params, aligned, ctx.estimated_b
+            params,
+            aligned,
+            ctx.estimated_b,
+            trial_number=(trial.number if trial is not None else None),
         )
 
         n_tr = int(b_trades_raw.shape[0])
         all_trades_chunks.append(b_trades_raw)
+        if (
+            bool(params.get("STRATEGY_MODE", False))
+            and not first_leg_done
+            and _trial_diag_sampled(trial, n_trades=n_tr)
+        ):
+            compose_diag = aligned.get("_strategy_compose_diag", {})
+            wt_diag = _weight_stage_diag(
+                aligned.get("target_weights"),
+                per_symbol_cap=_safe_float_or_none(params.get("MAX_EXPOSURE_PER_COIN")),
+            )
+            _logger.info(
+                (
+                    " [STRATEGY-FIRST-LEG-DIAG] trial=%s leg=%d bars=%d syms=%d "
+                    "compose=%s weights=%s"
+                ),
+                trial.number if trial is not None else "replay",
+                int(leg_idx),
+                int(np.asarray(aligned.get("close")).shape[0]),
+                int(np.asarray(aligned.get("close")).shape[1]),
+                compose_diag,
+                wt_diag,
+            )
 
         if not first_leg_done:
             first_leg_done = True
             if n_tr == 0:
-                _logger.debug(
+                diag_dict = _diag_to_dict(_b_diag)
+                try:
+                    _logger.info(
+                        (
+                            " [ZERO-TRADES-FIRST-LEG] trial=%s leg=%d bars=%d syms=%d "
+                            "%s | %s | %s | %s | diag=%s"
+                        ),
+                        trial.number if trial is not None else "replay",
+                        int(leg_idx),
+                        int(np.asarray(aligned.get("close")).shape[0]),
+                        int(np.asarray(aligned.get("close")).shape[1]),
+                        _array_stats("xs_long", aligned.get("xs_score_long")),
+                        _array_stats("xs_short", aligned.get("xs_score_short")),
+                        _array_stats("target_weights", aligned.get("target_weights")),
+                        _array_stats("kill_signal", aligned.get("kill_signal")),
+                        {
+                            "exec_diag": diag_dict,
+                            "compose_diag": aligned.get("_strategy_compose_diag", {}),
+                            "weight_diag": _weight_stage_diag(
+                                aligned.get("target_weights"),
+                                per_symbol_cap=_safe_float_or_none(
+                                    params.get("MAX_EXPOSURE_PER_COIN")
+                                ),
+                            ),
+                        },
+                    )
+                except Exception:
+                    _logger.debug(" [ZERO-TRADES-FIRST-LEG] extended logging failed", exc_info=True)
+                _logger.info(
                     "⚠️  Zero trades | trial=%s diag=%s",
                     trial.number if trial is not None else "replay",
-                    _b_diag,
+                    diag_dict,
                 )
                 if trial is not None:
                     set_trial_event_attrs(
@@ -2509,5 +2873,24 @@ def check_hard_gates_ml(
     # V3.1 Mechanical Hurdle: Mean Return per Trade (Expectancy) >= 0.40%
     ev_pct = float(oos_result.get("mean_ret_pct", oos_result.get("expectancy", 0.0)))
     ev_ok = ev_pct >= float(cfg.get("FUTURES_DEFAULT_EV_HURDLE_BPS", 40.0)) / 100.0
+    trades = float(
+        oos_result.get(
+            "trade_count",
+            oos_result.get("n_trades", oos_result.get("oos_trade_count", 0.0)),
+        )
+    )
+    if trades <= 0.0:
+        _logger.info(
+            " [FINAL-FLAT-DIAG] oos_zero_trades=1 wr_ok=%s mdd_ok=%s pf_ok=%s ev_ok=%s "
+            "wr=%.4f mdd=%.4f pf=%.4f ev_pct=%.6f",
+            wr_ok,
+            mdd_ok,
+            dir_ok,
+            ev_ok,
+            wr_frac,
+            mdd_v,
+            combined_pf,
+            ev_pct,
+        )
 
     return bool(pbo_ok and dsr_ok and wr_ok and mdd_ok and dir_ok and ev_ok)
