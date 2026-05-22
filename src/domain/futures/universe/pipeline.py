@@ -10,7 +10,10 @@ from typing import Any
 
 import pandas as pd
 
+from src.core.settings import FUTURES_DATA_DIR, LOG_DIR
+
 from .config import UniverseConfig, hash_config
+from .data_quality import apply_data_quality_stage
 from .filters import (
     apply_cost_model_stage,
     apply_liquidity_stage,
@@ -26,17 +29,16 @@ from .models import (
     apply_structure_stage,
     load_ledger_slice,
 )
+from .selection import apply_selection_stage
 from .storage import (
     hash_manifest_rows,
     save_snapshot_json,
     save_snapshot_parquet,
 )
-from .selection import apply_selection_stage
-from .data_quality import apply_data_quality_stage
 
-DEFAULT_SNAPSHOT_ROOT = Path("logs/futures/universe/snapshots")
+DEFAULT_SNAPSHOT_ROOT = LOG_DIR / "futures/universe/snapshots"
 SCHEMA_VERSION = 1
-DEFAULT_MANIFEST_PATH = Path("data/futures/data_manifest.parquet")
+DEFAULT_MANIFEST_PATH = FUTURES_DATA_DIR / "data_manifest.parquet"
 _BASE_REPORT_COLUMNS = {"symbol", "stage", "passed", "reason"}
 _log = logging.getLogger(__name__)
 

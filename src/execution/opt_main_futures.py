@@ -4,7 +4,6 @@ import argparse
 import logging
 from dataclasses import dataclass
 from datetime import date, datetime
-from pathlib import Path
 from typing import Any
 
 import src.domain.futures.optimization.opt_config
@@ -32,13 +31,7 @@ from src.application.futures.optimization.universe_service import (
     discover_universe_timeline,
     validate_universe_quality,
 )
-from src.domain.futures.optimization.opt_config import (
-    FUTURES_ANCHOR_SYMBOLS,
-    FUTURES_MACRO_INDEX_SYMBOLS,
-    OPT_FUTURES_CONFIG,
-    get_quarterly_window,
-)
-from src.domain.futures.optimization.opt_data_utils import load_futures_data_maps_for_symbols
+from src.core.settings import BASE_DIR
 from src.domain.futures.optimization.observability.run_tracker import (
     build_joint_study_name,
     build_run_id,
@@ -46,6 +39,13 @@ from src.domain.futures.optimization.observability.run_tracker import (
     resolve_futures_parallel_policy,
     setup_optuna_storage,
 )
+from src.domain.futures.optimization.opt_config import (
+    FUTURES_ANCHOR_SYMBOLS,
+    FUTURES_MACRO_INDEX_SYMBOLS,
+    OPT_FUTURES_CONFIG,
+    get_quarterly_window,
+)
+from src.domain.futures.optimization.opt_data_utils import load_futures_data_maps_for_symbols
 from src.domain.futures.optimization.validation import (
     awf_pos_frac_to_pseudo_pbo,
     resolve_adjusted_gates,
@@ -278,7 +278,7 @@ def _run_optimization_stage(
     seed: int,
     resume: bool,
 ) -> RunnerResult:
-    project_root = str(Path(__file__).resolve().parents[2])
+    project_root = str(BASE_DIR)
     ml_n_jobs = resolve_futures_parallel_policy(len(data_stage.valid_symbols))
     run_id = build_run_id(
         run_config.tf,

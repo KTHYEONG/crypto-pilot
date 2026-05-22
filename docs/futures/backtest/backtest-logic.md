@@ -266,9 +266,26 @@ if qty * price < min_notional:
   * `_run_portfolio_numba_block` 호출 시그니처 불일치 수정 (`opt_main_futures.py`)
 * `--quick-backtest` 추가로 전략 모듈과 분리된 엔진 경로 검증 가능.
 
-### 8.2 Quick Backtest 통과 기준
+### 8.2 실행 아규먼트 및 Quick Backtest 통과 기준
 
-실행 명령:
+실행 명령 파라미터는 `--mode` 아규먼트를 통해 동작 모드를 지정하며, `--quick-backtest` alias 플래그를 제공합니다.
+
+*   `--mode` 지원 옵션:
+    *   `quick-backtest` (기본값): 초고속 엔진 경로/정합성 검증용.
+    *   `strategy`: 최적화 전략 탐색용.
+    *   `strategy-smoke`: 단기 전략 스모크 테스트용.
+    *   `full`: 전체 파이프라인 E2E 풀 코스 수행용.
+
+실행 명령 예시:
+
+```bash
+uv run python -m src.execution.opt_main_futures \
+  --skip-universe --skip-data-sync \
+  --symbols BTCUSDT --trials 1 --tf 4h \
+  --mode quick-backtest
+```
+
+또는 동일한 alias 플래그 사용:
 
 ```bash
 uv run python -m src.execution.opt_main_futures \
