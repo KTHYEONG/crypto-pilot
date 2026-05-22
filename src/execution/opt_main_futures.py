@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any
 
+import pandas as pd
+
 import src.domain.futures.optimization.opt_config
 from src.application.futures.optimization.config import (
     FuturesRunConfig,
@@ -31,7 +33,7 @@ from src.application.futures.optimization.universe_service import (
     discover_universe_timeline,
     validate_universe_quality,
 )
-from src.core.settings import BASE_DIR
+from src.core.settings import BASE_DIR, FUTURES_DATA_DIR
 from src.domain.futures.optimization.observability.run_tracker import (
     build_joint_study_name,
     build_run_id,
@@ -52,8 +54,69 @@ from src.domain.futures.optimization.validation import (
 )
 from src.domain.futures.strategy_runtime.bridge import merge_ml_output_into_is_and_oos
 from src.domain.futures.universe.membership import inject_membership_masks_into_maps
+from src.domain.futures.universe.storage import run_historical_sync
 
 _logger = logging.getLogger("opt_main_futures")
+
+
+def _ensure_data_sync_for_window(run_config: FuturesRunConfig, window: QuarterlyWindow) -> None:
+    """Check if ledger covers the required window and sync if needed."""
+    if run_config.skip_data_sync:
+        _logger.info("Data sync skipped by config.")
+        return
+
+    ledger_path = FUTURES_DATA_DIR / "universe_ledger.parquet"
+    needs_sync = False
+    last_ledger_date = date(2023, 1, 1)
+
+    if not ledger_path.exists():
+        _logger.info("Universe ledger missing. Initializing first-time sync...")
+        needs_sync = True
+    else:
+        try:
+            # We only need the 'date' column to check the last coverage
+            df_ledger = pd.read_parquet(ledger_path, columns=["date"])
+            if df_ledger.empty:
+                needs_sync = True
+            else:
+                last_ledger_date = pd.to_datetime(df_ledger["date"]).max().date()
+                # If the ledger doesn't cover up to the required OOS end date, we need more data
+                if last_ledger_date < window.end_date_value:
+                    _logger.info(
+                        "Outdated ledger (last=%s < req=%s). Syncing...",
+                        last_ledger_date,
+                        window.end_date_value,
+                    )
+                    needs_sync = True
+        except Exception as e:
+            _logger.warning("Failed to verify ledger readiness (%s). Forcing sync for safety.", e)
+            needs_sync = True
+
+    if needs_sync:
+        # Sync from the last known date (or default start) up to the end of the required window
+        target_symbols: list[str] | None = None
+        if run_config.symbols:
+            # Include targets, anchors, and macros for seamless readiness
+            target_symbols = list(set(
+                list(run_config.symbols)
+                + FUTURES_ANCHOR_SYMBOLS
+                + FUTURES_MACRO_INDEX_SYMBOLS
+            ))
+        
+        # 1m data is massive and sync duration is long.
+        # We explicitly set sync_1m=False here to skip 1m data fetch
+        # for the entire candidate population.
+        # 1m data for the filtered backtest symbols will be targetedly
+        # pre-fetched during _run_data_stage.
+        run_historical_sync(
+            start_date=last_ledger_date,
+            end_date=window.end_date_value,
+            sync_mode=run_config.sync_mode,
+            symbols=target_symbols,
+            sync_1d=True,
+            sync_4h=True,
+            sync_1m=False,
+        )
 
 
 @dataclass(slots=True, frozen=True)
@@ -188,10 +251,41 @@ def _run_data_stage(
     discovered_symbols: list[str],
     timeline: dict[date, frozenset[str]],
 ) -> DataStageResult:
-    configured = tuple(discovered_symbols or src.domain.futures.optimization.opt_config.FUTURES_SYMBOLS)
+    configured = tuple(
+        discovered_symbols or src.domain.futures.optimization.opt_config.FUTURES_SYMBOLS
+    )
     target_symbols = list(run_config.symbols or configured)
     load_symbols = list(set(target_symbols + FUTURES_ANCHOR_SYMBOLS + FUTURES_MACRO_INDEX_SYMBOLS))
     require_exec_1m = OPT_FUTURES_CONFIG.get("FUTURES_EXECUTION_MODE") == "intrabar_1m"
+
+    # Targeted Pre-fetch for 1m data:
+    # If 1m execution is required and data sync is not skipped,
+    # run targeted sync only for the load_symbols which have
+    # successfully passed the universe filtering stages.
+    if require_exec_1m and not run_config.skip_data_sync:
+        _logger.info(
+            "Targeted Pre-fetch: Syncing 1m data only for %d universe-filtered symbols.",
+            len(load_symbols),
+        )
+        ledger_path = FUTURES_DATA_DIR / "universe_ledger.parquet"
+        last_ledger_date = date(2023, 1, 1)
+        if ledger_path.exists():
+            try:
+                df_ledger = pd.read_parquet(ledger_path, columns=["date"])
+                if not df_ledger.empty:
+                    last_ledger_date = pd.to_datetime(df_ledger["date"]).max().date()
+            except Exception as e:
+                _logger.warning("Failed to check ledger date in data stage (%s).", e)
+        
+        run_historical_sync(
+            start_date=last_ledger_date,
+            end_date=window.end_date_value,
+            sync_mode=run_config.sync_mode,
+            symbols=load_symbols,
+            sync_1d=False,
+            sync_4h=False,
+            sync_1m=True,
+        )
 
     data_maps, oos_data_maps, valid_symbols = load_futures_data_maps_for_symbols(
         load_symbols,
@@ -383,15 +477,46 @@ def run_pipeline(
     """Run active futures pipeline in explicit orchestration order."""
     # Step 1) parse run window
     window = _resolve_quarterly_window(run_config.reference_date)
+    _logger.info(
+        "[STAGE] step=window fetch=%s is=%s oos=%s end=%s",
+        window.fetch_start,
+        window.is_start,
+        window.oos_start,
+        window.end_date,
+    )
+    # Step 1.5) Ensure data is synchronized for the required window
+    _ensure_data_sync_for_window(run_config, window)
     # Step 2) universe timeline/quality gate
     discovered_symbols, timeline = _run_universe_stage(run_config, window)
+    _logger.info(
+        "[STAGE] step=universe skip=%s discovered=%d timeline_windows=%d",
+        run_config.skip_universe,
+        len(discovered_symbols),
+        len(timeline),
+    )
     # Step 3) data loading + readiness
     data_stage = _run_data_stage(run_config, window, discovered_symbols, timeline)
+    _logger.info(
+        "[STAGE] step=data valid=%d require_exec_1m=%s",
+        len(data_stage.valid_symbols),
+        OPT_FUTURES_CONFIG.get("FUTURES_EXECUTION_MODE") == "intrabar_1m",
+    )
     # Step 4) strategy bridge + alpha contract
+    _logger.info(
+        "[STAGE] step=strategy mode=%s strategy=%s strategy_mode=%s",
+        run_config.mode,
+        run_config.strategy,
+        run_config.strategy is not None,
+    )
     _run_strategy_stage(run_config, window, data_stage)
     if run_config.mode == "strategy-smoke":
         return RunnerResult(exit_code=0, reason="strategy_smoke_done")
     # Step 5) optimization + final OOS evaluation
+    _logger.info(
+        "[STAGE] step=optimize symbols=%d trials=%d",
+        len(data_stage.valid_symbols),
+        int(run_config.trials),
+    )
     return _run_optimization_stage(
         run_config,
         window,
