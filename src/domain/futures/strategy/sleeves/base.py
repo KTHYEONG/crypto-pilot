@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Protocol
+
 import numpy as np
 
 
@@ -23,5 +24,6 @@ class Sleeve(Protocol):
         Returns:
             [T, N] directional signals. Positive is bullish, negative is bearish.
             Uninitialized / warmup periods should return NaN.
+
         """
         ...

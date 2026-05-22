@@ -7,7 +7,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from config.opt_config import OPT_FUTURES_CONFIG
+from src.domain.futures.optimization.opt_config import OPT_FUTURES_CONFIG
 
 
 def hours_per_bar_tf(tf: str) -> float:
@@ -67,7 +67,7 @@ def apply_linear_signal_composer_scores(
     beta_a = float(params.get("BETA_ALPHA", cfg.get("FUTURES_DEFAULT_BETA_ALPHA", 1.0)))
     ev_h = float(params.get("EV_HURDLE_BPS", cfg.get("FUTURES_DEFAULT_EV_HURDLE_BPS", 5.0)))
 
-    from config.settings import SLIPPAGE_RATE, TAKER_FEE_RATE
+    from src.core.settings import SLIPPAGE_RATE, TAKER_FEE_RATE
 
     slip = float(SLIPPAGE_RATE) * float(params.get("SLIPPAGE_BPS_BUFFER_MULT", 1.0))
     fee = float(TAKER_FEE_RATE)

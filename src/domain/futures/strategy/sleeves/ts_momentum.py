@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from typing import Any
 import numpy as np
 
 
@@ -34,6 +33,7 @@ class TSMomentumSleeve:
 
         Returns:
             [T, N] signals. Warmup rows are NaN.
+
         """
         del aux
         if close_2d.ndim != 2:

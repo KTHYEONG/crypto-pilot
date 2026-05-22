@@ -9,8 +9,7 @@ from typing import Any
 import numpy as np
 import optuna
 
-from config.opt_config import OPT_FUTURES_CONFIG
-from config.settings import (
+from src.core.settings import (
     FUTURES_CACHE_DIR,
     FUTURES_INITIAL_BALANCE,
 )
@@ -32,6 +31,7 @@ from src.domain.futures.optimization.evaluator import (
     perform_online_capital_allocation,
     run_oos_margin_shared_portfolio,
 )
+from src.domain.futures.optimization.opt_config import OPT_FUTURES_CONFIG
 from src.domain.futures.optimization.opt_data_utils import (
     compute_oos_regime_attribution,
     compute_regime_drift,

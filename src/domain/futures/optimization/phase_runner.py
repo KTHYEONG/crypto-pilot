@@ -7,7 +7,7 @@ from typing import Any
 import optuna
 from optuna.trial import TrialState
 
-from config.opt_config import OPT_FUTURES_CONFIG
+from src.domain.futures.optimization.opt_config import OPT_FUTURES_CONFIG
 from src.domain.futures.optimization.optimizer import MLPhaseDContext
 from src.domain.futures.optimization.phase_c_robustness import (
     evaluate_phase_c_robustness,

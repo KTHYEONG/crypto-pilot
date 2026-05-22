@@ -21,14 +21,13 @@ import optuna
 import pandas as pd
 from sklearn.linear_model import LogisticRegression
 
-from config.opt_config import OPT_FUTURES_CONFIG
-from config.settings import (
+from src.core.indicators.numpy_ops_futures import compute_atr_numpy
+from src.core.settings import (
     FUTURES_INITIAL_BALANCE,
     MAKER_FEE_RATE,
     SLIPPAGE_RATE,
     TAKER_FEE_RATE,
 )
-from src.core.indicators.numpy_ops_futures import compute_atr_numpy
 from src.domain.futures.backtest_engine import (
     backtest_target_weights_intrabar_numba,
     backtest_target_weights_numba,
@@ -49,6 +48,7 @@ from src.domain.futures.optimization.evaluator import (
     calc_mdd_from_equity,
     compute_v3_score,
 )
+from src.domain.futures.optimization.opt_config import OPT_FUTURES_CONFIG
 from src.domain.futures.optimization.phase_param_space import (
     V43_FIXED_DEFAULTS,
     suggest_joint_params,
@@ -2958,7 +2958,7 @@ def check_hard_gates_ml(
         True if all gates are passed, False otherwise.
 
     """
-    from config.opt_config import OPT_FUTURES_CONFIG
+    from src.domain.futures.optimization.opt_config import OPT_FUTURES_CONFIG
     cfg = OPT_FUTURES_CONFIG
     pbo_lim = float(
         pbo_max_override if pbo_max_override is not None else cfg.get("FUTURES_PBO_MAX", 0.45)
