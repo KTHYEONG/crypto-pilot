@@ -97,7 +97,7 @@ def test_v3_score_key_set_in_trial_attrs() -> None:
 
 def test_purge_bars_registry_validate_raises_when_empty() -> None:
     """빈 레지스트리에서 validate() → RuntimeError."""
-    from src.domain.futures.validation.boundary_contract import PurgeBarsRegistry
+    from src.domain.futures.validation.gates import PurgeBarsRegistry
 
     registry = PurgeBarsRegistry()
     with pytest.raises(RuntimeError, match="No modules registered purge_bars"):
@@ -106,7 +106,7 @@ def test_purge_bars_registry_validate_raises_when_empty() -> None:
 
 def test_purge_bars_registry_validate_passes_when_registered() -> None:
     """등록 후 validate() → 정상 통과."""
-    from src.domain.futures.validation.boundary_contract import (
+    from src.domain.futures.validation.gates import (
         ModulePurgeBarsMeta,
         PurgeBarsRegistry,
     )
@@ -124,7 +124,7 @@ def test_objective_propagates_registry_runtime_error() -> None:
         MLPhaseDContext,
         objective_ml_phase_d,
     )
-    from src.domain.futures.validation.boundary_contract import PurgeBarsRegistry
+    from src.domain.futures.validation.gates import PurgeBarsRegistry
     import optuna
 
     ctx = _make_minimal_ctx(n_bars=80)

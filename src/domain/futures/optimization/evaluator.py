@@ -23,7 +23,7 @@ from src.core.settings import (
     SMART_ORDER_OFFSET,
     TAKER_FEE_RATE,
 )
-from src.domain.futures.backtest_engine import (
+from src.domain.futures.backtest.engine import (
     PortfolioBacktestEngine as PortfolioBacktestEngineFast,
 )
 

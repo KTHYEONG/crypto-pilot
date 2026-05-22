@@ -4,11 +4,11 @@ import numpy as np
 from optuna.distributions import FloatDistribution
 from optuna.trial import TrialState, create_trial
 
-from src.domain.futures.optimization.optimizer import (
-    _build_strategy_compose_diag,
+from src.domain.futures.optimization.common import (
     _trial_diag_sampled,
     _weight_stage_diag,
 )
+from src.domain.futures.optimization.objectives import _build_strategy_compose_diag
 
 
 def test_build_strategy_compose_diag_has_expected_core_keys() -> None:

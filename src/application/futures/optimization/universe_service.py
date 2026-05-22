@@ -16,7 +16,7 @@ from src.domain.futures.universe import (
     load_or_build_universe_snapshot,
     load_universe_snapshot,
 )
-from src.domain.futures.universe.contracts import RejectCode
+from src.domain.futures.universe.models import RejectCode
 
 _logger = logging.getLogger("futures_universe_service")
 _UNIVERSE_AUDIT_DIR = Path("logs/futures/universe")

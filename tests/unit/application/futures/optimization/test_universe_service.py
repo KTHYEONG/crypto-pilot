@@ -11,7 +11,7 @@ from src.application.futures.optimization import universe_service
 from src.application.futures.optimization.universe_service import (
     UniverseMembershipTimeline,
 )
-from src.domain.futures.universe.contracts import SymbolMeta, UniverseSnapshot
+from src.domain.futures.universe.models import SymbolMeta, UniverseSnapshot
 
 
 def _empty_snapshot() -> UniverseSnapshot:

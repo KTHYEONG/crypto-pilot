@@ -5,7 +5,7 @@ from urllib.error import HTTPError
 
 import pytest
 
-from src.core.utils.binance_vision import BinanceVisionDownloader
+from src.core.exchange.binance_vision import BinanceVisionDownloader
 
 
 class _FakeResponse:
@@ -59,8 +59,8 @@ def test_read_url_bytes_retries_for_429_with_backoff(monkeypatch: pytest.MonkeyP
             raise _http_error(429, retry_after="2")
         return _FakeResponse(b"ok")
 
-    monkeypatch.setattr("src.core.utils.binance_vision.time.sleep", fake_sleep)
-    monkeypatch.setattr("src.core.utils.binance_vision.urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr("src.core.exchange.binance_vision.time.sleep", fake_sleep)
+    monkeypatch.setattr("src.core.exchange.binance_vision.urllib.request.urlopen", fake_urlopen)
 
     data = downloader._read_url_bytes("https://data.binance.vision/fake")
     assert data == b"ok"
@@ -77,7 +77,7 @@ def test_read_url_bytes_does_not_retry_for_404(monkeypatch: pytest.MonkeyPatch) 
         call_count["n"] += 1
         raise _http_error(404)
 
-    monkeypatch.setattr("src.core.utils.binance_vision.urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr("src.core.exchange.binance_vision.urllib.request.urlopen", fake_urlopen)
 
     with pytest.raises(HTTPError):
         downloader._read_url_bytes("https://data.binance.vision/fake")
