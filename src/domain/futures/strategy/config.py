@@ -81,7 +81,7 @@ class BlendConfig:
 class RegimeConfig:
     """Rule-based 5-state soft posterior regime settings."""
 
-    enabled: bool = True
+    enabled: bool = False  # regime provider module removed; keep False until re-implemented
     vol_window: int = 30
     vol_crisis_pct: float = 0.95
     vol_high_pct: float = 0.70

@@ -219,10 +219,19 @@ class DataCollector:
             df["datetime"] = pd.to_datetime(df["datetime"], utc=True)
         return df
 
-    def collect_and_save(self, symbol: str, timeframe: str, start_date: str, end_date: str) -> pd.DataFrame:
+    def collect_and_save(
+        self, symbol: str, timeframe: str, start_date: str, end_date: str, fetch_network: bool = True
+    ) -> pd.DataFrame:
         req_start = pd.to_datetime(start_date, utc=True)
         req_end = pd.to_datetime(end_date, utc=True)
         cache_df = self._load_cache(symbol, timeframe)
+        
+        if not fetch_network:
+            if cache_df.empty:
+                return pd.DataFrame()
+            mask = (cache_df["datetime"] >= req_start) & (cache_df["datetime"] <= req_end)
+            return cache_df.loc[mask].copy()
+
         meta = self._load_meta().get(self._meta_key(symbol, timeframe), {})
         ea = meta.get("earliest_available")
         if ea:
@@ -245,16 +254,126 @@ class DataCollector:
             combined = pd.concat([cache_df, *new_dfs]).drop_duplicates(subset=["timestamp"])
             combined.sort_values("timestamp", inplace=True)
             self._save_cache(symbol, timeframe, combined)
-            self._save_meta({self._meta_key(symbol, timeframe): {"earliest_available": str(combined["datetime"].min())}})
+            self._save_meta({
+                self._meta_key(symbol, timeframe): {
+                    "earliest_available": str(combined["datetime"].min()),
+                    "latest_available": str(combined["datetime"].max())
+                }
+            })
             cache_df = combined
 
         mask = (cache_df["datetime"] >= req_start) & (cache_df["datetime"] <= req_end)
         return cache_df.loc[mask].copy()
 
-    def collect_1m_ohlcv(self, symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
+    def ensure_ohlcv_data(self, symbol: str, timeframe: str, start_date: str, end_date: str) -> None:
+        """Generic OHLCV data collection: Vision for bulk, API for recent."""
+        req_start, req_end = pd.to_datetime(start_date, utc=True), pd.to_datetime(end_date, utc=True)
+        
+        # 1. 메타데이터 사전 검사 (디스크 I/O 최적화)
+        meta = self._load_meta().get(self._meta_key(symbol, timeframe), {})
+        ea = meta.get("earliest_available")
+        la = meta.get("latest_available")
+        if ea and la:
+            try:
+                ea_dt = pd.to_datetime(ea, utc=True)
+                la_dt = pd.to_datetime(la, utc=True)
+                if ea_dt <= req_start and la_dt >= req_end - pd.Timedelta(hours=8):
+                    return
+            except Exception:
+                pass
+
+        cache_df = self._load_cache(symbol, timeframe)
+        if not cache_df.empty and cache_df["datetime"].min() <= req_start and cache_df["datetime"].max() >= req_end - pd.Timedelta(hours=8):
+            return
+
+        # API cutoff: data from the last 32 days might not be in Vision monthly archives
+        api_cutoff = pd.Timestamp.now(tz="UTC").replace(day=1, hour=0, minute=0, second=0, microsecond=0) - pd.Timedelta(days=32)
+        
+        new_parts = []
+        
+        # 1. Vision monthly archives for full months in the past
+        vision_symbol = symbol.replace("/", "")
+        current_month_start = req_start.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        
+        vision_tasks = []
+        while current_month_start < min(req_end, api_cutoff):
+            # Check if this month is already in cache_df
+            month_end = (current_month_start + pd.offsets.MonthEnd(1)).replace(hour=23, minute=59, second=59)
+            if cache_df.empty or cache_df["datetime"].min() > current_month_start or cache_df["datetime"].max() < month_end:
+                vision_tasks.append((current_month_start.year, current_month_start.month))
+            current_month_start += pd.offsets.MonthBegin(1)
+
+        if vision_tasks:
+            import concurrent.futures
+            from src.core.exchange.binance_vision import BinanceVisionDownloader
+            vision = BinanceVisionDownloader()
+
+            def _fetch_month(year: int, month: int) -> pd.DataFrame:
+                v_df = vision.fetch_klines_archive_monthly(vision_symbol, timeframe, year, month)
+                if not v_df.empty:
+                    v_df.columns = [
+                        "timestamp", "open", "high", "low", "close", "volume",
+                        "close_time", "quote_vol", "no_trades",
+                        "taker_buy_base", "taker_buy_quote", "ignore"
+                    ][:v_df.shape[1]]
+                    for col in ["open", "high", "low", "close", "volume", "quote_vol", "taker_buy_base", "taker_buy_quote"]:
+                        if col in v_df.columns:
+                            v_df[col] = pd.to_numeric(v_df[col], errors="coerce")
+                    return self._normalize_df(v_df)
+                return pd.DataFrame()
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+                future_to_task = {executor.submit(_fetch_month, y, m): (y, m) for y, m in vision_tasks}
+                for future in concurrent.futures.as_completed(future_to_task):
+                    try:
+                        res_df = future.result()
+                        if not res_df.empty:
+                            new_parts.append(res_df)
+                    except Exception as e:
+                        self.logger.warning(f"Error fetching vision data for {symbol}: {e}")
+
+        # 2. API for recent data or gaps
+        latest_cached_dt = cache_df["datetime"].max() if not cache_df.empty else None
+        for part in new_parts:
+            if part.empty or "datetime" not in part.columns:
+                continue
+            part_max_dt = pd.to_datetime(part["datetime"], utc=True).max()
+            if pd.isna(part_max_dt):
+                continue
+            if latest_cached_dt is None or part_max_dt > latest_cached_dt:
+                latest_cached_dt = part_max_dt
+
+        remaining_start = max(req_start, latest_cached_dt) if latest_cached_dt is not None else req_start
+        if remaining_start < req_end:
+            chunk = self.client.fetch_ohlcv_with_taker(symbol, timeframe, str(remaining_start), str(req_end))
+            if not chunk.empty:
+                new_parts.append(self._normalize_df(chunk))
+
+        if new_parts:
+            if not cache_df.empty and "timestamp" in cache_df.columns:
+                cache_df["timestamp"] = pd.to_numeric(cache_df["timestamp"], errors="coerce")
+            combined = pd.concat([cache_df, *new_parts]).drop_duplicates(subset=["timestamp"]).sort_values("timestamp")
+            self._save_cache(symbol, timeframe, combined)
+            self._save_meta({
+                self._meta_key(symbol, timeframe): {
+                    "earliest_available": str(combined["datetime"].min()),
+                    "latest_available": str(combined["datetime"].max())
+                }
+            })
+
+    def collect_1m_ohlcv(
+        self, symbol: str, start_date: str, end_date: str, fetch_network: bool = True
+    ) -> pd.DataFrame:
         timeframe = "1m"
         req_start, req_end = pd.to_datetime(start_date, utc=True), pd.to_datetime(end_date, utc=True)
         cache_df = self._load_cache(symbol, timeframe)
+        
+        if not fetch_network:
+            if cache_df.empty:
+                return pd.DataFrame()
+            mask = (cache_df["datetime"] >= req_start) & (cache_df["datetime"] <= req_end)
+            return cache_df.loc[mask].copy()
+
         cache_covers_range = (
             not cache_df.empty
             and cache_df["datetime"].min() <= req_start
@@ -274,8 +393,21 @@ class DataCollector:
         timeframe = "1m"
         req_start, req_end = pd.to_datetime(start_date, utc=True), pd.to_datetime(end_date, utc=True)
         
+        # 1. 메타데이터 사전 검사 (디스크 I/O 최적화)
+        meta = self._load_meta().get(self._meta_key(symbol, timeframe), {})
+        ea = meta.get("earliest_available")
+        la = meta.get("latest_available")
+        if ea and la:
+            try:
+                ea_dt = pd.to_datetime(ea, utc=True)
+                la_dt = pd.to_datetime(la, utc=True)
+                if ea_dt <= req_start and la_dt >= req_end - pd.Timedelta(hours=8):
+                    return
+            except Exception:
+                pass
+
         cache_df = self._load_cache(symbol, timeframe)
-        if not cache_df.empty and cache_df["datetime"].min() <= req_start and cache_df["datetime"].max() >= req_end:
+        if not cache_df.empty and cache_df["datetime"].min() <= req_start and cache_df["datetime"].max() >= req_end - pd.Timedelta(hours=8):
             return
 
         # API cutoff: data from the last 35 days might not be in Vision monthly archives
@@ -352,6 +484,12 @@ class DataCollector:
                 cache_df["timestamp"] = pd.to_numeric(cache_df["timestamp"], errors="coerce")
             combined = pd.concat([cache_df, *new_parts]).drop_duplicates(subset=["timestamp"]).sort_values("timestamp")
             self._save_cache(symbol, timeframe, combined)
+            self._save_meta({
+                self._meta_key(symbol, timeframe): {
+                    "earliest_available": str(combined["datetime"].min()),
+                    "latest_available": str(combined["datetime"].max())
+                }
+            })
 
     def ensure_metrics_data(self, symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
         """Ensure metrics data (OI, LSR) is cached and up to date.
@@ -405,14 +543,7 @@ class DataCollector:
         return cache_df.loc[mask].copy()
 
     def ensure_funding_data(self, symbol: str, start_date: str, end_date: str) -> None:
-        """Ensure funding rate history is cached and up to date.
-
-        Args:
-            symbol: Trading pair symbol.
-            start_date: Start date string.
-            end_date: End date string.
-
-        """
+        """Ensure funding rate history is cached and up to date using Vision for bulk and API for recent."""
         safe_symbol = self._safe_symbol(symbol)
         path = FUTURES_DATA_DIR / f"{safe_symbol}_funding.parquet"
         req_start = pd.to_datetime(start_date, utc=True)
@@ -421,23 +552,83 @@ class DataCollector:
         cache_df = pd.DataFrame()
         if path.exists():
             cache_df = pd.read_parquet(path)
-        
+
         if (
             not cache_df.empty
             and cache_df["datetime"].min() <= req_start
-            and cache_df["datetime"].max() >= req_end
+            and cache_df["datetime"].max() >= req_end - pd.Timedelta(hours=12)
         ):
-            return
+            return        
+        api_cutoff = pd.Timestamp.now(tz="UTC").replace(day=1, hour=0, minute=0, second=0, microsecond=0) - pd.Timedelta(days=32)
+        new_parts = []
+        vision_symbol = symbol.replace("/", "")
+        current_month_start = req_start.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
         
-        new_funding = self.client.fetch_funding_rate_history(symbol, str(req_start), str(req_end))
-        if not new_funding.empty:
-            new_funding["datetime"] = pd.to_datetime(new_funding["timestamp"], unit="ms", utc=True)
-            combined = (
-                pd.concat([cache_df, new_funding])
-                .drop_duplicates(subset=["timestamp"])
-                .sort_values("timestamp")
-            )
+        vision_tasks = []
+        while current_month_start < min(req_end, api_cutoff):
+            month_end = (current_month_start + pd.offsets.MonthEnd(1)).replace(hour=23, minute=59, second=59)
+            if cache_df.empty or cache_df["datetime"].min() > current_month_start or cache_df["datetime"].max() < month_end:
+                vision_tasks.append((current_month_start.year, current_month_start.month))
+            current_month_start += pd.offsets.MonthBegin(1)
+
+        if vision_tasks:
+            import concurrent.futures
+            from src.core.exchange.binance_vision import BinanceVisionDownloader
+            vision = BinanceVisionDownloader()
+
+            def _fetch_month_funding(year: int, month: int) -> pd.DataFrame:
+                v_df = vision.fetch_funding_rate_monthly(vision_symbol, year, month)
+                if not v_df.empty:
+                    if "calc_time" in v_df.columns:
+                        v_df = v_df.rename(columns={"calc_time": "timestamp", "fundingRate": "funding_rate"})
+                    elif "fundingRate" in v_df.columns:
+                        v_df = v_df.rename(columns={"fundingRate": "funding_rate"})
+                    
+                    if "timestamp" not in v_df.columns and len(v_df.columns) > 0:
+                        v_df = v_df.rename(columns={v_df.columns[0]: "timestamp"})
+                    if "funding_rate" not in v_df.columns and len(v_df.columns) > 2:
+                        v_df = v_df.rename(columns={v_df.columns[2]: "funding_rate"})
+                    
+                    if "timestamp" in v_df.columns and "funding_rate" in v_df.columns:
+                        v_df["timestamp"] = pd.to_numeric(v_df["timestamp"], errors="coerce")
+                        v_df["funding_rate"] = pd.to_numeric(v_df["funding_rate"], errors="coerce")
+                        v_df["datetime"] = pd.to_datetime(v_df["timestamp"], unit="ms", utc=True)
+                        return v_df
+                return pd.DataFrame()
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+                future_to_task = {executor.submit(_fetch_month_funding, y, m): (y, m) for y, m in vision_tasks}
+                for future in concurrent.futures.as_completed(future_to_task):
+                    try:
+                        res_df = future.result()
+                        if not res_df.empty:
+                            new_parts.append(res_df)
+                    except Exception as e:
+                        self.logger.warning(f"Error fetching vision funding data for {symbol}: {e}")
+
+        latest_cached_dt = cache_df["datetime"].max() if not cache_df.empty else None
+        for part in new_parts:
+            if part.empty or "datetime" not in part.columns:
+                continue
+            part_max_dt = part["datetime"].max()
+            if pd.isna(part_max_dt):
+                continue
+            if latest_cached_dt is None or part_max_dt > latest_cached_dt:
+                latest_cached_dt = part_max_dt
+
+        remaining_start = max(req_start, latest_cached_dt) if latest_cached_dt is not None else req_start
+        if remaining_start < req_end:
+            new_funding = self.client.fetch_funding_rate_history(symbol, str(remaining_start), str(req_end))
+            if not new_funding.empty:
+                new_funding["datetime"] = pd.to_datetime(new_funding["timestamp"], unit="ms", utc=True)
+                new_parts.append(new_funding)
+
+        if new_parts:
+            if not cache_df.empty and "timestamp" in cache_df.columns:
+                cache_df["timestamp"] = pd.to_numeric(cache_df["timestamp"], errors="coerce")
+            combined = pd.concat([cache_df, *new_parts]).drop_duplicates(subset=["timestamp"]).sort_values("timestamp")
             combined.to_parquet(path, index=False)
+
 
 # --- Merging Utilities (from funding_utils.py and metrics_utils.py) ---
 

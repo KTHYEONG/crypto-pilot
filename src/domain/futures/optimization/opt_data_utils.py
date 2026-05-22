@@ -253,7 +253,8 @@ def _build_funding_event_arrays_1m(
     mask = np.zeros(n, dtype=np.float64)
     rate = np.zeros(n, dtype=np.float64)
     pos = np.searchsorted(exec_ms, event_ms, side="left")
-    valid = (pos >= 0) & (pos < n) & (exec_ms[pos] == event_ms) & np.isfinite(event_rate)
+    pos_safe = np.clip(pos, 0, n - 1)  # guard before indexing; out-of-bounds filtered by pos < n
+    valid = (pos >= 0) & (pos < n) & (exec_ms[pos_safe] == event_ms) & np.isfinite(event_rate)
     if not np.any(valid):
         return None, None
     pos_v = pos[valid]
@@ -558,7 +559,9 @@ def load_single_symbol_data(
                     _logger.warning("Failed to load metrics data for %s", sym)
 
         for tf_l in tfs_to_load:
-            raw_df = collector.collect_and_save(sym, tf_l, fetch_start, end)
+            raw_df = collector.collect_and_save(
+                sym, tf_l, fetch_start, end, fetch_network=False
+            )
             if raw_df is None or raw_df.empty:
                 insufficient = True
                 break
@@ -667,7 +670,9 @@ def load_single_symbol_data(
 
         if use_exec_1m:
             try:
-                exec_1m = collector.collect_1m_ohlcv(sym, fetch_start, end)
+                exec_1m = collector.collect_1m_ohlcv(
+                    sym, fetch_start, end, fetch_network=False
+                )
             except Exception as e:
                 _logger.warning("[%s] collect_1m_ohlcv failed: %s", sym, e)
                 exec_1m = pd.DataFrame()

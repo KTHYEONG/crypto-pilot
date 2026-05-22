@@ -1,4 +1,4 @@
-# Binance Futures 백테스트 아키텍처 (v3.2 - Engine/Execution Focus)
+# Binance Futures 백테스트 아키텍처 (v3.3 - Engine/Execution Focus)
 
 **최종 업데이트**: 2026-05-22  
 **핵심 목적**: 전략 품질과 분리된 백테스트 엔진의 정확성, 재현성, 실행 현실성 보장.
@@ -15,6 +15,9 @@
   - `sampler_by_phase`
   - `worker_by_phase`
   - `storage_url`
+- **백테스팅 데이터 로딩의 오프라인화**:
+  - 병렬 백테스팅 스레드 가동 도중 동적으로 생성되는 API 요청에 의한 네트워크 포트 고갈을 해결하기 위해 백테스트 실행 단계(`load_single_symbol_data`)는 오직 디스크 캐시(Parquet)만을 100% 사용하여 기동되도록 강제함.
+  - `DataCollector.collect_and_save(fetch_network=False)` 및 `collect_1m_ohlcv(fetch_network=False)` 호출을 강제하여, 캐시 누락 시 실시간 API 호출 시도를 엄격하게 스킵/차단함으로써 연산의 고속화와 소켓 자원의 극대화된 안정성을 동시에 확보함.
 
 ---
 
@@ -40,7 +43,7 @@ run_backtest_pipeline(config, snapshot, prepared_data) -> WalkForwardResult
                        ▼
 ┌─────────────────────────────────────────────────────────────┐
 │ [Layer B: Walk-Forward & Optimization]                     │
-│ - Inner AWF(K=8, IS=24M), Atomic 6M block 평가             │
+│ - Inner AWF(K=5, IS=24M), Atomic 6M block 평가             │
 │ - Score 계산, Hard Gate 판정, DSR 통제                      │
 └──────────────────────┬──────────────────────────────────────┘
                        ▼
@@ -118,6 +121,15 @@ max(label_horizon, meta_label_horizon, stateful_fit_leakage, execution_delay)
 
 * 모든 stateful 모듈은 `purge_bars` 등록이 필수이며, 미등록은 실행 거부한다.
 
+### 3.5 오프라인 캐시 및 네트워크 격리 계약 (Offline-Only Backtesting)
+
+* **원칙**: 백테스팅 기동 중(특히 Optuna 병렬 탐색 시)의 모든 데이터 로드(`data_loader.py`의 `collect_and_save` 및 `collect_1m_ohlcv`)는 오직 디스크 캐시(Parquet)만을 100% 사용하여 처리한다.
+* **네트워크 차단**: `fetch_network=False`를 강제 적용하여 캐시 누락 시 실시간 API 호출 시도를 엄격하게 스킵하고 즉각 캐시 데이터만 슬라이싱하여 반환한다.
+* **이유**: 병렬 백테스팅 스레드들이 각각 CCXT 소켓을 생성해 발생시키던 WSL 네트워크 포트 고갈 현상을 방지하고, 네트워크 레이턴시를 0으로 만들어 백테스팅 연산 속도를 극대화하기 위함이다.
+* **선결 조건 및 수집 전략**:
+  - 백테스팅에 필요한 `1h`, `1d`, `4h`, `funding` 데이터는 백테스팅 기동 전인 **1.5단계(`run_historical_sync(sync_4h=True, sync_1m=False)`)에서 단 한 번에 일괄 선 수집(Pre-fetch)**합니다.
+  - **1m 데이터 Targeted Pre-fetch**: 시계열 크기가 매우 방대한 1m 데이터의 경우, 전체 후보군 수집 오버헤드를 막기 위해 1.5단계 수집 대상에서 완전히 생략합니다. 이후 **유니버스 7단계 필터링을 최종 통과한 백테스팅 대상 심볼군(`load_symbols`)에 대해서만 3단계 데이터 로드 직전에 콕 찝어 Targeted Pre-fetch를 실행**하여 영속화함으로써, 성능 향상과 대역폭 보전을 완벽하게 양립시킵니다.
+
 ---
 
 ## 4. Walk-Forward 평가 파이프라인
@@ -131,7 +143,7 @@ max(label_horizon, meta_label_horizon, stateful_fit_leakage, execution_delay)
 
 ### Stage 1: Fold 스케줄 생성 (WF Scheduler)
 
-* Inner AWF: `IS=24M, K=8, leg=3M`.
+* Inner AWF: `IS=24M, K=5, leg≈5M` (`FUTURES_AWF_K_LEGS=5`, opt_config.py 기준).
 * Outer Rolling OOS: `IS=24M, OOS=6M, step=3M` (관측 전용).
 * Atomic blocks: `6M non-overlap` (승격 통계 전용).
 
@@ -316,3 +328,21 @@ uv run python -m src.execution.opt_main_futures \
 * `src/domain/futures/portfolio/*`
 * `src/core/utils/binance_vision.py`
 * `src/domain/futures/data_loader.py`
+
+---
+
+## 10. 버그 수정 이력 (v3.2 → v3.3)
+
+### 10.1 `_build_funding_event_arrays_1m` IndexError (2026-05-22 수정)
+
+- **파일**: `src/domain/futures/optimization/opt_data_utils.py:256`
+- **증상**: `np.searchsorted` 결과 `pos == n`(배열 끝 초과)일 때 `exec_ms[pos]` 직접 인덱싱 → `IndexError: index N is out of bounds for axis 0 with size N`. 모든 심볼 로드 실패 → `data_not_ready`.
+- **원인**: NumPy `&` 연산은 short-circuit 없음. `(pos < n)` 조건이 True여야만 `exec_ms[pos]`가 안전하지만, 조건 평가 전에 우측 항목이 먼저 실행됨.
+- **수정**: `pos_safe = np.clip(pos, 0, n - 1)` 삽입 후 `exec_ms[pos_safe]`로 인덱싱. `pos < n` 조건과 AND로 out-of-bounds pos는 valid=False 처리.
+
+### 10.2 `RegimeConfig.enabled` 기본값 오류 (2026-05-22 수정)
+
+- **파일**: `src/domain/futures/strategy/config.py`
+- **증상**: `enabled=True`가 기본값인데 `src.domain.futures.strategy.regime` 모듈이 삭제된 상태 → `ModuleNotFoundError`. strategy mode 전체 진입 불가.
+- **원인**: Regime provider 모듈이 아키텍처 정리 과정에서 제거됐으나 Config 기본값이 갱신되지 않음.
+- **수정**: `enabled: bool = False`로 변경. 모듈 재구현 시 P2 승격 이후 활성화 예정.

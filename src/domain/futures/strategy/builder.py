@@ -253,4 +253,37 @@ def build_strategy_alpha(
     panel.attrs["strategy_name"] = cfg.name
     panel.attrs["active_sleeves"] = sleeve_names
 
+    # [ALPHA-BUILD] diagnostic log
+    _al_vals = alpha_long.ravel()
+    _as_vals = alpha_short.ravel()
+    _al_nz = float(np.count_nonzero(np.abs(_al_vals) > 1e-12) / max(_al_vals.size, 1))
+    _as_nz = float(np.count_nonzero(np.abs(_as_vals) > 1e-12) / max(_as_vals.size, 1))
+    _al_finite = _al_vals[np.isfinite(_al_vals)]
+    _al_p50 = float(np.nanpercentile(_al_finite, 50)) * 10000.0 if _al_finite.size > 0 else 0.0
+    _al_p95 = float(np.nanpercentile(_al_finite, 95)) * 10000.0 if _al_finite.size > 0 else 0.0
+    _ic_bl_finite = ic_blended_lagged[np.isfinite(ic_blended_lagged)]
+    _ic_lag_mean = float(np.nanmean(_ic_bl_finite)) if _ic_bl_finite.size > 0 else 0.0
+    _ic_neg_ratio = (
+        float(np.sum(_ic_bl_finite < 0.0) / max(_ic_bl_finite.size, 1))
+        if _ic_bl_finite.size > 0
+        else 0.0
+    )
+    n_symbols = len(valid_symbols)
+    n_bars_log = int(alpha_long.shape[0])
+    _logger.info(
+        "[ALPHA-BUILD] sleeves=%s syms=%d bars=%d"
+        " long_nz=%.3f short_nz=%.3f long_p50=%.1fbps long_p95=%.1fbps"
+        " ic_lag_mean=%.4f ic_neg_ratio=%.3f fallback=%s",
+        sleeve_names,
+        n_symbols,
+        n_bars_log,
+        _al_nz,
+        _as_nz,
+        _al_p50,
+        _al_p95,
+        _ic_lag_mean,
+        _ic_neg_ratio,
+        fallback_warning_triggered,
+    )
+
     return panel
