@@ -161,6 +161,38 @@ def merge_ml_output_into_data_maps(
         df["alpha_long"] = merged["alpha_long"].fillna(0.0).to_numpy(dtype=np.float64)
         df["alpha_short"] = merged["alpha_short"].fillna(0.0).to_numpy(dtype=np.float64)
 
+    # [ALPHA-MERGE] summary log
+    merged_symbols = sum(
+        1
+        for sym in symbols
+        if sym in data_maps
+        and tf in data_maps[sym]
+        and "alpha_long" in data_maps[sym][tf].columns
+    )
+    _long_nz_ratios: list[float] = []
+    _short_nz_ratios: list[float] = []
+    for sym in symbols:
+        if sym not in data_maps or tf not in data_maps[sym]:
+            continue
+        _df = data_maps[sym][tf]
+        if "alpha_long" in _df.columns:
+            _long_nz_ratios.append(float((_df["alpha_long"] != 0).mean()))
+        if "alpha_short" in _df.columns:
+            _short_nz_ratios.append(float((_df["alpha_short"] != 0).mean()))
+    _alpha_long_nz = float(np.mean(_long_nz_ratios)) if _long_nz_ratios else 0.0
+    _alpha_short_nz = float(np.mean(_short_nz_ratios)) if _short_nz_ratios else 0.0
+    _regime_broadcast = (
+        getattr(ml_out, "market_probs", None) is not None
+        and not getattr(ml_out, "market_probs", pd.DataFrame()).empty
+    )
+    _logger.info(
+        "[ALPHA-MERGE] merged_syms=%d alpha_long_nz=%.3f alpha_short_nz=%.3f regime_broadcast=%s",
+        merged_symbols,
+        _alpha_long_nz,
+        _alpha_short_nz,
+        _regime_broadcast,
+    )
+
     # Broadcast market_probs (Regime) to all symbols
     mp = getattr(ml_out, "market_probs", None)
     if mp is not None and not mp.empty:

@@ -369,79 +369,82 @@ def sync_single_symbol_data(
     symbol: str,
     start_date: date,
     end_date: date,
-    downloader: BinanceVisionDownloader,
+    downloader: BinanceVisionDownloader, # kept for signature compatibility
     onboard_date: date | None = None,
+    collector: Any = None,
+    sync_1d: bool = True,
+    sync_4h: bool = True,
+    sync_1m: bool = False,
 ) -> tuple[list[LedgerRow], int]:
     """개별 심볼을 동기화하고 ledger row를 생성한다."""
-    current = start_date.replace(day=1)
-    all_klines_1h = []
-    all_funding = []
+    if collector is None:
+        from src.domain.futures.backtest.data_loader import DataCollector
+        collector = DataCollector()
+    
+    # 1h 데이터 확보 (로컬 캐시 우선 사용)
+    collector.ensure_ohlcv_data(symbol, "1h", str(start_date), str(end_date))
+    
+    # [Component 4] 백테스팅 필수 데이터 일괄 선 수집 (Pre-fetch)
+    if sync_1d:
+        collector.ensure_ohlcv_data(symbol, "1d", str(start_date), str(end_date))
+    if sync_4h:
+        collector.ensure_ohlcv_data(symbol, "4h", str(start_date), str(end_date))
+    if sync_1m:
+        collector.ensure_1m_data(symbol, str(start_date), str(end_date))
 
-    while current <= end_date:
-        df_k = downloader.fetch_klines_archive_monthly(symbol, "1h", current.year, current.month)
-        if not df_k.empty:
-            all_klines_1h.append(df_k)
-        df_f = downloader.fetch_funding_rate_monthly(symbol, current.year, current.month)
-        if not df_f.empty:
-            all_funding.append(df_f)
-
-        if current.month == 12:
-            current = current.replace(year=current.year + 1, month=1)
-        else:
-            current = current.replace(month=current.month + 1)
-
-    if not all_klines_1h:
+    klines_1h = collector._load_cache(symbol, "1h")
+    if klines_1h.empty:
+        return [], 0
+    
+    # 요청 범위로 필터링
+    req_start = pd.to_datetime(start_date, utc=True)
+    req_end = pd.to_datetime(end_date, utc=True)
+    klines_1h = klines_1h[
+        (klines_1h["datetime"] >= req_start) & (klines_1h["datetime"] <= req_end)
+    ].copy()
+    if klines_1h.empty:
         return [], 0
 
-    klines_1h = pd.concat(all_klines_1h).copy()
-    # 컬럼 설정 및 타입 변환
-    col_names = [
-        'timestamp', 'open', 'high', 'low', 'close', 'volume',
-        'close_time', 'quote_vol', 'no_trades',
-        'taker_buy_base', 'taker_buy_quote', 'ignore',
-    ]
-    klines_1h.columns = col_names[:klines_1h.shape[1]]
-    for col in klines_1h.columns:
-        if col not in ('datetime', 'date'):
-            klines_1h[col] = pd.to_numeric(klines_1h[col], errors='coerce')
-    klines_1h['datetime'] = pd.to_datetime(klines_1h['timestamp'], unit='ms', utc=True)
-    klines_1h = klines_1h.sort_values('datetime')
-
     # 4h 리샘플링 (Ledger용)
-    klines_4h = klines_1h.set_index('datetime').resample('4h').agg({
+    agg_dict = {
         'timestamp': 'first',
         'open': 'first',
         'high': 'max',
         'low': 'min',
         'close': 'last',
         'volume': 'sum',
-        'quote_vol': 'sum',
-        'taker_buy_base': 'sum',
-        'taker_buy_quote': 'sum'
-    }).reset_index().dropna(subset=['timestamp'])
+    }
+    for col in ['quote_vol', 'taker_buy_base', 'taker_buy_quote']:
+        if col in klines_1h.columns:
+            agg_dict[col] = 'sum'
 
-    funding = pd.DataFrame()
-    if all_funding:
-        funding = pd.concat(all_funding).copy()
-        # Binance Vision Funding Rate columns: [timestamp, interval, fundingRate]
-        col_names_f = ['timestamp', 'interval_hours', 'funding_rate']
-        funding.columns = col_names_f[:funding.shape[1]]
-        for col in funding.columns:
-            funding[col] = pd.to_numeric(funding[col], errors='coerce')
-        funding['datetime'] = pd.to_datetime(funding['timestamp'], unit='ms', utc=True)
-        funding = funding.sort_values('datetime')
-
-    # 로컬 캐시 저장
-    safe_symbol = symbol.replace("/", "_")
-    _cols_1h = ['timestamp', 'open', 'high', 'low', 'close', 'volume',
-                'taker_buy_base', 'taker_buy_quote']
-    klines_1h[_cols_1h].to_parquet(
-        Path(FUTURES_DATA_DIR) / f"{safe_symbol}_1h.parquet", index=False
+    klines_4h = (
+        klines_1h.set_index("datetime")
+        .resample("4h")
+        .agg(agg_dict)
+        .reset_index()
+        .dropna(subset=["timestamp"])
     )
-    if not funding.empty:
-        funding.to_parquet(Path(FUTURES_DATA_DIR) / f"{safe_symbol}_funding.parquet", index=False)
 
-    # LedgerRow 생성
+    # Ensure required columns exist for ledger computation
+    for col in ['quote_vol', 'taker_buy_base', 'taker_buy_quote']:
+        if col not in klines_4h.columns:
+            klines_4h[col] = klines_4h['volume']
+
+
+    # 펀딩 데이터 확보
+    collector.ensure_funding_data(symbol, str(start_date), str(end_date))
+    funding = pd.DataFrame()
+    safe_symbol = symbol.replace("/", "_")
+    funding_path = Path(FUTURES_DATA_DIR) / f"{safe_symbol}_funding.parquet"
+    if funding_path.exists():
+        funding = pd.read_parquet(funding_path)
+        funding['datetime'] = pd.to_datetime(funding['timestamp'], unit='ms', utc=True)
+        funding = funding[
+            (funding["datetime"] >= req_start) & (funding["datetime"] <= req_end)
+        ].copy()
+
+    # LedgerRow 생성 (이하 기존 로직 동일)
     # vol_30d: 30일(4h*6*30=180바) 롤링 수익률 표준편차 연율화 (annualized)
     # funding_zscore: 30일 롤링 평균/std 기반 시계열 z-score
     bars_per_day = 6        # 4h 바 기준
@@ -553,11 +556,42 @@ def sync_single_symbol_data(
     return daily_rows, len(klines_4h)
 
 
+_worker_collector = None
+_worker_downloader = None
+
+
+def _init_worker() -> None:
+    """Initialize each worker process with singleton instances to reuse TCP sockets."""
+    global _worker_collector, _worker_downloader
+    from src.core.exchange.binance_vision import BinanceVisionDownloader
+    from src.domain.futures.backtest.data_loader import DataCollector
+    _worker_collector = DataCollector()
+    _worker_downloader = BinanceVisionDownloader()
+
+
 def _worker(
-    args: tuple[str, date, date, date | None],
+    args: tuple[str, date, date, date | None, bool, bool, bool],
 ) -> tuple[list[LedgerRow], int]:
-    symbol, start, end, onboard_date = args
-    return sync_single_symbol_data(symbol, start, end, BinanceVisionDownloader(), onboard_date)
+    symbol, start, end, onboard_date, sync_1d, sync_4h, sync_1m = args
+    global _worker_collector, _worker_downloader
+    from src.core.exchange.binance_vision import BinanceVisionDownloader
+    from src.domain.futures.backtest.data_loader import DataCollector
+
+    if _worker_collector is None:
+        _worker_collector = DataCollector()
+    if _worker_downloader is None:
+        _worker_downloader = BinanceVisionDownloader()
+    return sync_single_symbol_data(
+        symbol,
+        start,
+        end,
+        _worker_downloader,
+        onboard_date,
+        collector=_worker_collector,
+        sync_1d=sync_1d,
+        sync_4h=sync_4h,
+        sync_1m=sync_1m,
+    )
 
 
 def run_historical_sync(
@@ -566,6 +600,10 @@ def run_historical_sync(
     limit: int | None = None,
     force: bool = False,
     sync_mode: str = "full_history_master",
+    symbols: list[str] | None = None,
+    sync_1d: bool = True,
+    sync_4h: bool = True,
+    sync_1m: bool = False,
 ) -> None:
     """메인 동기화 오케스트레이터."""
     ledger_path = FUTURES_DATA_DIR / "universe_ledger.parquet"
@@ -579,7 +617,10 @@ def run_historical_sync(
             logger.warning(f"Ledger load failed: {e}")
 
     mode = str(sync_mode or "full_history_master").strip().lower()
-    if mode == "elite_fast":
+    if symbols is not None:
+        symbols = list(dict.fromkeys(symbols))  # 중복 제거
+        logger.info("Sync mode=%s targeted_symbols=%d", mode, len(symbols))
+    elif mode == "elite_fast":
         symbols = smart_filter_symbols(limit=limit)
     else:
         symbols = _list_usdt_futures_symbols()
@@ -618,19 +659,24 @@ def run_historical_sync(
             if not force and last < (global_max - timedelta(days=180)):
                 continue
             sym_start = last.replace(day=1) # 월 단위 아카이브이므로 해당 월 초부터 다시 수집
-        sync_tasks.append((symbol, sym_start, end_date, onboard_dates.get(symbol)))
+        sync_tasks.append(
+            (symbol, sym_start, end_date, onboard_dates.get(symbol), sync_1d, sync_4h, sync_1m)
+        )
 
     if not sync_tasks:
         logger.info("All symbols are already up-to-date.")
         return
 
     logger.info(f"Syncing {len(sync_tasks)} symbols (Parallel)...")
-    with multiprocessing.Pool(processes=min(multiprocessing.cpu_count(), 8)) as pool:
+    with multiprocessing.Pool(
+        processes=min(multiprocessing.cpu_count(), 8),
+        initializer=_init_worker,
+    ) as pool:
         results = pool.map(_worker, sync_tasks)
 
     all_new = []
     per_symbol_synced_days: dict[str, int] = {}
-    for (rows, _count), (symbol, _, _, _) in zip(results, sync_tasks, strict=False):
+    for (rows, _count), (symbol, _, _, _, _, _, _) in zip(results, sync_tasks, strict=False):
         per_symbol_synced_days[str(symbol)] = len(rows)
         if rows:
             df = pd.DataFrame([asdict(row) for row in rows])
