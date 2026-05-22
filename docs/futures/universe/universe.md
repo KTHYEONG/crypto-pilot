@@ -56,24 +56,19 @@ build_universe(as_of: date, tf: str, cfg: UniverseConfig) -> UniverseSnapshot
 
 | 파일명 | 주된 역할 및 책임 | 주요 외부 라이브러리 |
 |---|---|---|
-| `__init__.py` | 유니버스 패키지 공개 API (`build_universe`, `load_universe_snapshot` 등) | `pandas` |
+| `__init__.py` | 유니버스 패키지 공개 API 통합 노출 및 Export 관리 | `pandas` |
 | `config.py` | 각 Stage 임계값 중앙화 및 결정론적 `config_hash` 생성 | `dataclasses`, `hashlib`, `json` |
-| `contracts.py` | `LedgerRow`, `SymbolMeta`, `FilterReport`, `UniverseSnapshot` 데이터 스키마 정의 | `dataclasses`, `enum` |
-| `ledger.py` | `universe_ledger.parquet` 데이터 쿼리, 슬라이싱 및 상장/상폐일 복원 | `pandas`, `pyarrow` |
-| `exchange_meta.py` | 계약 메타(tick_size, step_size 등) 수집 및 상폐 상태 모니터링 | `ccxt`, `pandas` |
-| `structure.py` | **Stage 1**: 계약 형태, 마진 자산 및 거래소 활성화 상태 필터링 | `pandas`, `numpy` |
+| `models.py` | 기존 `contracts.py`, `ledger.py`, `structure.py` 통합. `LedgerRow`, `SymbolMeta`, `FilterReport`, `UniverseSnapshot` 데이터 스키마 정의 및 상장/상폐일 복원, 쿼리, `apply_structure_stage` 포함 | `dataclasses`, `enum`, `pandas` |
+| `filters.py` | 기존 `liquidity.py`, `cost_model.py`, `risk_events.py` 등의 필터 연산 함수 통합 (`apply_liquidity_stage`, `apply_cost_model_stage`, `apply_risk_events_stage` 제공) | `pandas`, `numpy` |
 | `data_quality.py` | **Stage 2**: 데이터 누락률, gap 크기, frozen bar 검사 및 연속성 평가 | `pandas`, `numpy` |
-| `liquidity.py` | **Stage 3**: ADV 중앙값, Amihud 지수 및 자본 규모별 체결 타당성 검사 | `pandas`, `numpy` |
-| `cost_model.py` | **Stage 4**: 슬리피지(Square-root impact), 수수료, Spread 비용 모델링 | `pandas`, `numpy` |
-| `risk_events.py` | **Stage 5**: 상장일령, 변동성 밴드, 펀딩비 이상치 및 수동 리스크 이벤트 제외 | `pandas`, `numpy` |
 | `selection.py` | **Stage 6**: 종합 점수화(Rank), 히스테리시스, 상관성 클러스터링 및 앵커 결합 | `pandas`, `numpy` |
+| `membership.py` | 유니버스 스냅샷 통계, Churn Control, Dwell time 등을 처리하는 로직 | `pandas`, `numpy` |
+| `storage.py` | Parquet/JSON 영속화, S3 XML 파싱, Smart Sync(병렬 수집) 오케스트레이션 및 동기화 수행 | `pandas`, `pyarrow`, `multiprocessing` |
 | `pipeline.py` | Stage 0~6 순차 실행, `FilterReport` 생성 및 스냅샷 오케스트레이션 | `pandas`, `datetime` |
-| `persistence.py` | Parquet/JSON 포맷 스냅샷 영속화 및 `data_manifest` 지문 저장 | `pandas`, `pyarrow` |
-| `sync_utils.py` | **Smart Sync**: 1h 데이터 병렬 수집, 상위 40% 필터링 및 Ledger 갱신 오케스트레이션 | `multiprocessing`, `pandas` |
 
 ---
 
-## 3. 데이터 계약 및 영속화 스키마 (`contracts.py`)
+## 3. 데이터 계약 및 영속화 스키마 (`models.py`)
 
 ### 3.1 LedgerRow (원시 데이터 패널 행)
 `universe_ledger.parquet`에 일단위 append-only 형식으로 기록되는 구조.
@@ -108,13 +103,13 @@ build_universe(as_of: date, tf: str, cfg: UniverseConfig) -> UniverseSnapshot
 ### Stage 0: 적격 모집단 (Eligibility)
 * **목적**: `as_of` 기준 상장 및 거래가 활성화되어 있는 모집단 추출.
 * **로직**: `knowledge_date <= as_of` 이고 `is_listed == True` 및 `is_trading == True`인 전 심볼 쿼리. (미래 상장 예정 자산 자동 제외)
-* **구현 모듈**: `ledger.py` ➡️ `load_ledger_slice()`
+* **구현 모듈**: `models.py` ➡️ `load_ledger_slice()`
 
 ---
 
 ### Stage 1: 자산 구조 필터 (Structure)
 * **목적**: 거래 불가 상태, 레버리지 상품 및 규격 외 계약 자산 원천 차단.
-* **구현 모듈**: `structure.py` ➡️ `apply_structure_stage()`
+* **구현 모듈**: `models.py` ➡️ `apply_structure_stage()`
 * **검증 규칙**:
   1. `contract_type == "PERPETUAL"` (기한부 선물 배제)
   2. `quote_asset == "USDT"` 또는 `margin_asset == "USDT"` (USDT 마진 계약만 허용)
@@ -132,7 +127,7 @@ build_universe(as_of: date, tf: str, cfg: UniverseConfig) -> UniverseSnapshot
 * **설정 파라미터 (`Stage2Config`)**:
   * `min_is_coverage = 0.80` (최소 데이터 충족률 80%)
   * `min_is_bars_4h = 1_296` (9개월 기준 4시간 봉 기준값: $9 \times 30 \times 6 \times 80\% = 1{,}296$. Stage 5의 `listing_age_days >= 90`이 단기 상장 종목을 별도로 걸러주므로, Stage 2는 롤링 지표 계산에 충분한 기간만 요구함. 백테스트 IS 윈도우 충분성은 optimizer fold에서 별도 검증.)
-    * **PIT 보장**: `n_is_bars` / `expected_is_bars`는 `sync_utils.py`에서 각 레저 행의 `date`까지 **누적된 4h 봉 수**로 산출된다. 전체 수집 길이를 모든 행에 상수로 기록하던 look-ahead 결함은 제거되었으며, 이로써 Stage 2 게이트가 `as_of` 시점별로 정상 동작한다.
+    * **PIT 보장**: `n_is_bars` / `expected_is_bars`는 `storage.py`에서 각 레저 행의 `date`까지 **누적된 4h 봉 수**로 산출된다. 전체 수집 길이를 모든 행에 상수로 기록하던 look-ahead 결함은 제거되었으며, 이로써 Stage 2 게이트가 `as_of` 시점별로 정상 동작한다.
   * `min_coverage_60d = 0.95` (최근 60일 연속성 점검: 단기 결측 감지)
   * `max_zero_volume_bars_60d = 1` (체결이 없는 동결 자산 차단)
   * `max_gap_bars = 200` (최대 허용 단일 데이터 Gap 크기; `max_gap_bars` 컬럼이 레저에 공급될 때 활성화)
@@ -150,7 +145,7 @@ build_universe(as_of: date, tf: str, cfg: UniverseConfig) -> UniverseSnapshot
 
 ### Stage 3: 유동성 & 체결성 필터 (Liquidity & Capacity)
 * **목적**: 슬리피지 통제 불가능 및 AUM 수용 한계 자산 배제.
-* **구현 모듈**: `liquidity.py` ➡️ `apply_liquidity_stage()`
+* **구현 모듈**: `filters.py` ➡️ `apply_liquidity_stage()`
 * **설정 파라미터 (`Stage3Config`)**:
   * `min_adv_usdt_median = 25_000_000.0` (30일 Median ADV 하한선 25M USDT. Spike 왜곡 방지용 Median 필수 사용)
   * `max_amihud_30d = 1.63e-9` (일별 $|ret| / (volume \times price)$ 기준 30일 Amihud Illiquidity 상한선. ADV ≥ 25M 통과 종목 실측 분포: p90≈4.6e-10, p95≈6.3e-10, p99≈1.1e-9, max≈5.2e-8. 임계값 = p99 × 1.5 ≈ 1.63e-9 → ADV 게이트 통과 종목 중 명백 비유동 상위 ~1%만 탈락. 구 임계값 6e-8은 실측 max(5.2e-8)보다도 높아 영구 inert였으므로 실측 분포 기반으로 재산정함.)
@@ -170,7 +165,7 @@ build_universe(as_of: date, tf: str, cfg: UniverseConfig) -> UniverseSnapshot
 
 ### Stage 4: 거래 비용 모델 필터 (Execution Cost)
 * **목적**: 마찰 비용이 기대 에지(Alpha)를 갉아먹는 자산 사전 제외. (펀딩 캐리는 에지 성분이므로 본 단계 비용에서 완전 격리 보존)
-* **구현 모듈**: `cost_model.py` ➡️ `apply_cost_model_stage()`
+* **구현 모듈**: `filters.py` ➡️ `apply_cost_model_stage()`
 * **비용 함수 및 수식**:
   $$\text{execution\_cost\_bps} = 2 \cdot \text{taker\_fee\_bps} + 2 \cdot \text{half\_spread\_bps} + \text{impact\_bps} + \text{tick\_cost\_bps}$$
   * `taker_fee_bps`: Binance 기본 요율 적용.
@@ -188,12 +183,12 @@ build_universe(as_of: date, tf: str, cfg: UniverseConfig) -> UniverseSnapshot
 
 ### Stage 5: 리스크 & 이상치 필터 (Risk Events)
 * **목적**: 펌프앤덤프, 극단적 유동성 고갈 및 인위적 시세 조작 자산 배제.
-* **구현 모듈**: `risk_events.py` ➡️ `apply_risk_events_stage()`
+* **구현 모듈**: `filters.py` ➡️ `apply_risk_events_stage()`
 * **검증 규칙**:
   1. **상장 연령 (Listing Age)**: 최소 90일 이상 경과 자산만 허용 (`listing_age_days >= 90`). (상장 빔 및 초기 락업 해제 충격 방지)
   2. **변동성 밴드 (Vol Band)**: 4h 바 기준 연율화 변동성 `vol_30d`가 `[0.05, 4.0]` 범위 내 존재할 것 (5%~400% 연율). 활동성 없는 고사 코인 및 극단적 meme/junk 코인 동시 배제.
   3. **펀딩비 이상치**: 8시간 원천 펀딩비의 **MAD 기반 robust z-score**(`funding_zscore`) 절대값이 2.5를 초과하거나, 1일 이내 급격한 부호 반전(`enable_funding_sign_flip`; 양쪽 펀딩비 모두 `|funding| > funding_sign_flip_min_abs`(0.001) 조건 충족 시에만 이상치 인정)이 일어나는 조작/스퀴즈성 자산 차단. (※ 단순 고펀딩 일관 유지 자산은 carry harvest 전략 활용을 위해 **정상 통과** 시킴)
-     * **MAD robust z 산출**: `funding_zscore`는 `sync_utils.py`에서 종목별 30일 롤링 윈도우로 PIT 산출된다. 표준편차 대신 MAD(중앙값 절대편차, breakdown point 50%, `scale='normal'`)를 사용해 fat-tail 극단치의 masking 효과를 차단하며, 펀딩비가 장기 안정 구간일 때 MAD 분모가 0에 수렴해 z가 발산하는 수치 불안정을 막기 위해 출력값을 `[-50, 50]`으로 클리핑한다.
+     * **MAD robust z 산출**: `funding_zscore`는 `storage.py`에서 종목별 30일 롤링 윈도우로 PIT 산출된다. 표준편차 대신 MAD(중앙값 절대편차, breakdown point 50%, `scale='normal'`)를 사용해 fat-tail 극단치의 masking 효과를 차단하며, 펀딩비가 장기 안정 구간일 때 MAD 분모가 0에 수렴해 z가 발산하는 수치 불안정을 막기 위해 출력값을 `[-50, 50]`으로 클리핑한다.
   4. **수동 리스크 오버라이드 (Manual Override)**:
      * `ManualEventRow` 수동 입력 이벤트 발생 시 배제.
      * **Fail-Closed 원칙**: `knowledge_date`가 누락된 수동 배제 요청은 PIT 정합성을 해치므로 해당 레코드 자체를 무시(배제하지 않음)하여 휴리스틱 오염 차단.
