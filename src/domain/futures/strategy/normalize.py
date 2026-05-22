@@ -18,6 +18,7 @@ def winsorized_cs_zscore(
 
     Returns:
         Standardized signals of shape [T, N] with values clipped to [-clip_z, clip_z].
+
     """
     if sig_2d.ndim != 2:
         raise ValueError("sig_2d must be 2D")
@@ -64,6 +65,7 @@ def to_return_units(
 
     Returns:
         Calibrated alpha forecast in simple return units of shape [T, N].
+
     """
     if z_2d.shape != sigma_fwd_2d.shape:
         raise ValueError("z_2d and sigma_fwd_2d must have the same shape")

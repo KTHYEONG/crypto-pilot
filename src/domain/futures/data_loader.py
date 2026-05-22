@@ -17,8 +17,8 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from config.settings import FUTURES_DATA_DIR
 from src.core.exchange.binance_client import BinanceClient
+from src.core.settings import FUTURES_DATA_DIR
 from src.core.utils.binance_vision import BinanceVisionDownloader
 from src.core.utils.utils import setup_logger
 

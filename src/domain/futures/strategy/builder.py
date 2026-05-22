@@ -43,6 +43,7 @@ def build_strategy_alpha(
 
     Returns:
         pd.DataFrame sorted by (datetime, symbol) with columns ["alpha_long", "alpha_short"].
+
     """
     _assert_no_legacy_imports()
 

@@ -21,13 +21,11 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 # 데이터 저장 경로
 DATA_DIR = BASE_DIR / "data"
-SPOT_DATA_DIR = DATA_DIR / "spot"
 RESULTS_DIR = BASE_DIR / "results"
 LOG_DIR = BASE_DIR / "logs"
 
 # 디렉토리 자동 생성
 DATA_DIR.mkdir(parents=True, exist_ok=True)
-SPOT_DATA_DIR.mkdir(parents=True, exist_ok=True)
 FUTURES_DATA_DIR = DATA_DIR / "futures"
 FUTURES_CACHE_DIR = DATA_DIR / "cache_futures"
 FUTURES_DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -41,10 +39,6 @@ TRADE_HISTORY_DB = DATA_DIR / "trade_history.db"
 # Binance 설정
 BINANCE_API_KEY = os.getenv("BINANCE_API_KEY", "")
 BINANCE_SECRET = os.getenv("BINANCE_SECRET", "")
-
-# Upbit 설정
-UPBIT_ACCESS_KEY = os.getenv("UPBIT_ACCESS_KEY", "")
-UPBIT_SECRET_KEY = os.getenv("UPBIT_SECRET_KEY", "")
 
 # 거래 수수료 및 슬리피지 설정 (바이낸스 선물 실제 수수료 반영)
 # Binance Futures Fee Structure (VIP 0 기준):
@@ -106,47 +100,10 @@ FUTURES_LIVE_SYMBOLS = [
     "SUI/USDT",
 ]
 
-# ============================================================
-# RealTrader Spot 설정 (Upbit)
-# ============================================================
-
-# 거래 DB 경로
-SPOT_STRATEGY_DB = DATA_DIR / "spot_strategy.db"
-SPOT_HEARTBEAT_FILE = LOG_DIR / "spot_trader_heartbeat.json"
-SPOT_STATE_FILE = DATA_DIR / "spot_trading_state.json"
-
-# --- Upbit KRW 기준 포지션 사이징 ---
-MIN_POSITION_VALUE_KRW = 10_000  # 최소 포지션 인식 금액 (10,000원)
-MIN_ORDER_VALUE_KRW = 5_000  # 최소 주문 금액 (5,000원)
-MAX_INVEST_CAP_KRW = 100_000_000  # 심볼당 최대 투자 금액 (1억원)
-MAX_TOTAL_BALANCE_KRW = 500_000_000  # 총 운영 자금 상한 (5억원)
-
-# --- Spot 타이밍 설정 ---
-SPOT_LOOP_INTERVAL_SECONDS = 10  # 메인 루프 간격 (10초)
-SPOT_SYMBOL_DELAY_SECONDS = 2  # 심볼 간 딜레이
-
-
 # --- 백테스트 초기 잔고 (Futures) ---
 FUTURES_INITIAL_BALANCE = 10000.0  # USDT, backtest/optimize/verify 공통
-
-# --- Spot backtest / shared-cash (KRW) ---
-SPOT_INITIAL_BALANCE = 10_000_000.0
-UPBIT_SPOT_TAKER_FEE_RATE = 0.0005
-SPOT_SLIPPAGE_RATE = SLIPPAGE_RATE
-
-# --- Spot Production Safety Settings ---
-SPOT_DRY_RUN = os.getenv("SPOT_DRY_RUN", "false").lower() == "true"
-SPOT_EXIT_RECOVERY_COOLDOWN_SEC = 5.0
-SPOT_EXIT_CONFIRM_RETRIES = 6
-SPOT_EXIT_CONFIRM_SLEEP_SEC = 0.5
-SPOT_CANDLE_SETTLEMENT_DELAY_MS = 2000
-SPOT_ENTRY_SIGNAL_RETRY_MAX = 2
 
 # --- 데이터 기간 설정 (Backtest & Optimization) ---
 # Futures 전용 설정
 FUTURES_BACKTEST_START_DATE = "2021-01-01"
 FUTURES_BACKTEST_END_DATE = "2026-02-17"
-
-# Spot 전용 데이터 기간 (최적화: start~cutoff, 검증: cutoff~end)
-SPOT_BACKTEST_START_DATE = "2021-01-01"
-SPOT_BACKTEST_END_DATE = "2026-02-17"
