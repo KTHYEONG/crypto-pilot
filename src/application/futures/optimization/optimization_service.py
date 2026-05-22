@@ -15,9 +15,9 @@ from src.domain.futures.optimization.optimizer import (
     precompute_ml_optimization_context,
     select_best_trial_by_holdout_log_ret,
 )
-from src.domain.futures.optimization.phase_runner import (
+from src.domain.futures.optimization.workflow import (
     PhaseBundle,
-    run_v43_phase_optimization_skeleton,
+    run_phased_optimization_skeleton,
 )
 
 _logger = logging.getLogger(__name__)
@@ -116,8 +116,8 @@ def execute_phase_skeleton(
     *,
     base_ctx: MLPhaseDContext,
 ) -> PhaseBundle:
-    """Run v43 phased optimization skeleton."""
-    return run_v43_phase_optimization_skeleton(
+    """Run phased optimization skeleton."""
+    return run_phased_optimization_skeleton(
         base_ctx=base_ctx,
         base_study_name=request.study_name,
         storage_url=request.storage_url,

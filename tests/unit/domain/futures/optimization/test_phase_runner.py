@@ -10,7 +10,7 @@ project_root = str(Path(__file__).resolve().parents[5])
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-from src.domain.futures.optimization.phase_runner import run_v43_phase_optimization_skeleton
+from src.domain.futures.optimization.workflow import run_phased_optimization_skeleton
 
 
 @dataclass
@@ -26,10 +26,10 @@ def test_phase_runner_study_naming_and_order(monkeypatch) -> None:
         return _DummyStudy(study_name=kwargs["study_name"])
 
     monkeypatch.setattr(
-        "src.domain.futures.optimization.phase_runner.run_optimization_loop", _fake_loop
+        "src.domain.futures.optimization.workflow.run_optimization_loop", _fake_loop
     )
 
-    bundle = run_v43_phase_optimization_skeleton(
+    bundle = run_phased_optimization_skeleton(
         base_ctx=SimpleNamespace(run_id="r1"),
         base_study_name="base_study",
         storage_url="sqlite:///tmp.db",
@@ -66,10 +66,10 @@ def test_phase_runner_uses_phase_specific_trial_budgets(monkeypatch) -> None:
         return _DummyStudy(study_name=kwargs["study_name"])
 
     monkeypatch.setattr(
-        "src.domain.futures.optimization.phase_runner.run_optimization_loop", _fake_loop
+        "src.domain.futures.optimization.workflow.run_optimization_loop", _fake_loop
     )
 
-    run_v43_phase_optimization_skeleton(
+    run_phased_optimization_skeleton(
         base_ctx=SimpleNamespace(run_id="r3"),
         base_study_name="base_study",
         storage_url="sqlite:///tmp.db",
@@ -97,11 +97,11 @@ def test_phase_b_receives_enqueue_seeds(monkeypatch) -> None:
         return _DummyStudy(study_name=kwargs["study_name"])
 
     monkeypatch.setattr(
-        "src.domain.futures.optimization.phase_runner.run_optimization_loop", _fake_loop
+        "src.domain.futures.optimization.workflow.run_optimization_loop", _fake_loop
     )
 
     seeds = [{"K_LONG": 2, "TARGET_ANN_VOL": 0.12}]
-    run_v43_phase_optimization_skeleton(
+    run_phased_optimization_skeleton(
         base_ctx=SimpleNamespace(run_id="r2"),
         base_study_name="joint",
         storage_url="sqlite:///tmp.db",
@@ -181,10 +181,10 @@ def test_phase_runner_propagates_frozen_and_shrunk_to_phase_b(monkeypatch) -> No
         return _DummyStudyWithTrials(sname, [])
 
     monkeypatch.setattr(
-        "src.domain.futures.optimization.phase_runner.run_optimization_loop", _fake_loop
+        "src.domain.futures.optimization.workflow.run_optimization_loop", _fake_loop
     )
     monkeypatch.setattr(
-        "src.domain.futures.optimization.phase_runner.build_phase_b_plan",
+        "src.domain.futures.optimization.workflow.build_phase_b_plan",
         lambda *_a, **_k: SimpleNamespace(
             fixed_params={"K_SHORT": 2},
             shrunk_ranges={"TARGET_ANN_VOL": (0.1, 0.2)},
@@ -193,7 +193,7 @@ def test_phase_runner_propagates_frozen_and_shrunk_to_phase_b(monkeypatch) -> No
         ),
     )
 
-    run_v43_phase_optimization_skeleton(
+    run_phased_optimization_skeleton(
         base_ctx=SimpleNamespace(run_id="r4"),
         base_study_name="joint",
         storage_url="sqlite:///tmp.db",
@@ -231,10 +231,10 @@ def test_phase_runner_inherits_base_phase_ranges_for_all_phases(monkeypatch) -> 
         return _DummyStudyWithTrials(kwargs["study_name"])
 
     monkeypatch.setattr(
-        "src.domain.futures.optimization.phase_runner.run_optimization_loop", _fake_loop
+        "src.domain.futures.optimization.workflow.run_optimization_loop", _fake_loop
     )
     monkeypatch.setattr(
-        "src.domain.futures.optimization.phase_runner.build_phase_b_plan",
+        "src.domain.futures.optimization.workflow.build_phase_b_plan",
         lambda *_a, **_k: SimpleNamespace(
             fixed_params={},
             shrunk_ranges={"TARGET_ANN_VOL": (0.1, 0.2)},
@@ -243,7 +243,7 @@ def test_phase_runner_inherits_base_phase_ranges_for_all_phases(monkeypatch) -> 
         ),
     )
 
-    run_v43_phase_optimization_skeleton(
+    run_phased_optimization_skeleton(
         base_ctx=SimpleNamespace(
             run_id="r5",
             strategy_mode=True,
