@@ -85,7 +85,8 @@ def _run(
             slip,
             rb,
             max_hold,
-            0.0,
+            0.0,   # short_borrow_daily
+            4.0,   # bar_hours (4h bar 기준; short_borrow_daily=0.0이므로 결과 무관)
             d["atr"],
             atr_mult,
             trail_mult,

@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Literal
 
+from src.core.settings import SLIPPAGE_BPS, TAKER_FEE_BPS
+
 
 @dataclass(slots=True, frozen=True)
 class MomentumConfig:
@@ -162,8 +164,9 @@ class StrategyMLConfig:
     bagging_fraction: float = 0.80
     lambda_l2: float = 5.0
     early_stopping_rounds: int = 75
-    fee_bps: float = 4.0
-    slippage_bps: float = 2.0
+    # per-side 비용: 레이블 생성 시 round-trip(x2)으로 환산됨 (labels.py 참조)
+    fee_bps: float = TAKER_FEE_BPS       # Taker 수수료 per side (canonical: core/settings.py)
+    slippage_bps: float = SLIPPAGE_BPS   # 슬리피지 per side (canonical: core/settings.py)
 
     def __post_init__(self) -> None:
         """Validate ML strategy parameters."""

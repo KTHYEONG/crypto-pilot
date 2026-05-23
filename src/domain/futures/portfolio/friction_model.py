@@ -7,6 +7,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from src.core.settings import TAKER_FEE_BPS
+
 _logger = logging.getLogger("FrictionModel")
 
 
@@ -15,8 +17,9 @@ class FrictionConfig:
     """Configuration for transaction friction modeling.
 
     Attributes:
-        taker_fee_bps: Taker fee in basis points (default 4.0 bps = 0.04%).
+        taker_fee_bps: Taker fee in basis points (canonical source: core/settings.TAKER_FEE_BPS).
         maker_share: Proportion of trades executed as maker (0.0 to 1.0).
+            실행 시뮬레이터는 양 leg 모두 Taker로 체결하므로 기본값 0.0 (Taker-only 현실 반영).
         maker_rebate_bps: Maker rebate/fee in basis points.
         latency_buffer_bps: Buffer for execution latency slippage.
         k_impact: Market impact scaling factor.
@@ -24,8 +27,8 @@ class FrictionConfig:
 
     """
 
-    taker_fee_bps: float = 4.0
-    maker_share: float = 0.5
+    taker_fee_bps: float = TAKER_FEE_BPS  # canonical source: core/settings.py (5.0bps = 0.05%)
+    maker_share: float = 0.0  # execution sim은 양 leg 모두 Taker → 0.0으로 보수적 precharge
     maker_rebate_bps: float = -2.0
     latency_buffer_bps: float = 0.5
     k_impact: float = 0.5
