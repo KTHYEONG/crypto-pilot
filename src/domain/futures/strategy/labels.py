@@ -46,7 +46,8 @@ def build_label_panel(aligned: AlignedMarketData, cfg: StrategyMLConfig) -> Labe
     )
     # Round-trip = 진입 fill + 청산 fill (execution sim은 양 leg 모두 Taker).
     # FILLS_PER_ROUND_TRIP=2 이므로: 2*(fee_bps + slippage_bps) = 14bps (기본값 5+2 per side).
-    cost = np.float64(FILLS_PER_ROUND_TRIP * (cfg.fee_bps + cfg.slippage_bps) / 10000.0)
+    # [ML-UPGRADE] Gross Alpha 학습을 위해 모델 단에서는 비용 차감을 0.0으로 설정합니다.
+    cost = np.float64(0.0)
 
     for t in range(t_len - horizon):
         entry = aligned.open_2d[t + 1]

@@ -9,6 +9,9 @@ from typing import Any
 OPT_FUTURES_CONFIG: dict[str, Any] = {
     # 3-phase coordinate ascent total ≈ 260 (Bonferroni / reporting baseline).
     "total_trials": 1500,
+    # High-speed JIT execution makes early pruning slower than full evaluation.
+    # Set to False to completely eliminate SQLite DB WAL locking contention.
+    "FUTURES_PRUNING_ENABLED": False,
     # Phase-D TPESampler startup; per-phase samplers in opt_main_futures override as needed.
     "tpe_n_startup_trials": 256,
     # Caps startup at this fraction of Phase-D n_trials (prevents 384/500 ~77% random when
@@ -103,6 +106,12 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     "FUTURES_DEPLOY_J_FLOOR": 0.0,
     "FUTURES_PRUNER_STARTUP_TRIALS": 40,
     "FUTURES_PRUNER_WARMUP_STEPS": 2,
+    "FUTURES_PRUNER_TYPE": "wilcoxon",  # "wilcoxon", "successive_halving", "median"
+    "FUTURES_PRUNER_WILCOXON_P": 0.10,
+    "FUTURES_OPTUNA_STORAGE_TYPE": "redis",  # "sqlite", "redis"
+    "FUTURES_REDIS_URL": "redis://127.0.0.1:6379/0",
+
+
     # HMM stable regime (fixed hyperparameters; not in Optuna search space)
     # v10.0.0: 4 internal states (BULL_TREND, BEAR_TREND, CHOP_HIGH, CHOP_LOW).
     "FUTURES_HMM_K_STATES": 4,
