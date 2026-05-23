@@ -149,13 +149,13 @@ def merge_ml_output_into_data_maps(
         df = data_maps[sym][tf]
         if "alpha_long" in df.columns or "alpha_short" in df.columns:
             _logger.warning("[%s] overwrite alpha columns for symbol=%s", log_tag, sym)
-        if df["datetime"].dtype != sym_rows["datetime"].dtype:
-            raise RuntimeError(
-                f"datetime dtype mismatch: {df['datetime'].dtype} != {sym_rows['datetime'].dtype}"
-            )
-        merged = df[["datetime"]].merge(
-            sym_rows[["datetime", "alpha_long", "alpha_short"]],
-            on="datetime",
+        left = df[["datetime"]].copy()
+        right = sym_rows[["datetime", "alpha_long", "alpha_short"]].copy()
+        left["_merge_datetime"] = pd.to_datetime(left["datetime"], utc=True).dt.tz_localize(None)
+        right["_merge_datetime"] = pd.to_datetime(right["datetime"], utc=True).dt.tz_localize(None)
+        merged = left.merge(
+            right[["_merge_datetime", "alpha_long", "alpha_short"]],
+            on="_merge_datetime",
             how="left",
         )
         df["alpha_long"] = merged["alpha_long"].fillna(0.0).to_numpy(dtype=np.float64)
