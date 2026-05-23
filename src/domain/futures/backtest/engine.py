@@ -126,6 +126,8 @@ class PortfolioBacktestEngine:
         slip_eff = float(self.slippage_rate) * max(buf, 1e-9)
         mx_hold = max_hold_bars_from_time_barrier(self.params)
         sborr = float(OPT_FUTURES_CONFIG.get("FUTURES_SHORT_BORROW_DAILY", 0.0))
+        # short borrow 시간 단위 환산을 위한 bar당 시간 (4h봉=4.0, 1h봉=1.0)
+        hpb_for_borrow = hours_per_bar_from_timeframe(str(self.params.get("TIMEFRAME", "4h")))
 
         tw_raw = d.get("target_weights")
         tw_arr: np.ndarray
@@ -274,6 +276,7 @@ class PortfolioBacktestEngine:
                 max(1, int(self.params.get("REBALANCE_BARS", 6))),
                 mx_hold,
                 sborr,
+                hpb_for_borrow,
                 d["atr"],
                 float(self.params.get("ATR_MULT", 3.0)),
                 float(self.params.get("TRAIL_MULT", 3.0)),

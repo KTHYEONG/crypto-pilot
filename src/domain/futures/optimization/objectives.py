@@ -96,14 +96,11 @@ def _build_strategy_compose_diag(
         )
     )
     ev_h = float(
-        params.get("EV_HURDLE_BPS", OPT_FUTURES_CONFIG.get("FUTURES_DEFAULT_EV_HURDLE_BPS", 5.0))
+        params.get("EV_HURDLE_BPS", OPT_FUTURES_CONFIG.get("FUTURES_DEFAULT_EV_HURDLE_BPS", 40.0))
     )
-    from src.core.settings import SLIPPAGE_RATE, TAKER_FEE_RATE
-    slip = float(SLIPPAGE_RATE) * float(params.get("SLIPPAGE_BPS_BUFFER_MULT", 1.0))
-    fee = float(TAKER_FEE_RATE)
-    fund_bar = float(OPT_FUTURES_CONFIG.get("FUTURES_COMPOSER_FUNDING_BAR_FRAC", 1e-5))
-    buf_mult = float(OPT_FUTURES_CONFIG.get("FUTURES_FRICTION_BUFFER_MULT", 1.5))
-    friction = buf_mult * (fee + slip + fund_bar)
+    from src.core.settings import round_trip_cost_bps
+    # Taker 진입 + Taker 청산 + 2x 슬리피지 = 14bps (execution_sim, labels 와 동일 기준)
+    friction = round_trip_cost_bps() / 10000.0
     friction_bps = friction * 10000.0
     threshold_bps = friction_bps + ev_h
 
@@ -242,7 +239,7 @@ def _base_engine_params(ml: dict[str, Any], tf: str) -> dict[str, Any]:
             ml.get("BETA_REGIME_CHOP", cfg.get("FUTURES_DEFAULT_BETA_REGIME_CHOP", 0.25))
         ),
         "EV_HURDLE_BPS": float(
-            ml.get("EV_HURDLE_BPS", cfg.get("FUTURES_DEFAULT_EV_HURDLE_BPS", 5.0))
+            ml.get("EV_HURDLE_BPS", cfg.get("FUTURES_DEFAULT_EV_HURDLE_BPS", 40.0))
         ),
         "SLIPPAGE_BPS_BUFFER_MULT": float(
             ml.get("SLIPPAGE_BPS_BUFFER_MULT", cfg.get("SLIPPAGE_BPS_BUFFER_MULT", 1.0))
@@ -587,6 +584,7 @@ def _run_portfolio_numba_block(
             reb_b,
             mx_hold,
             sborr,
+            hpb,
             aligned["atr"],
             atr_m,
             trail_m,

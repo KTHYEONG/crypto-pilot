@@ -140,7 +140,11 @@ def build_quality_report(
     ic_series = rolling_ic(score_2d, signed_ret_2d, method="spearman")
     ic_stats = ic_summary(ic_series)
     report: dict[str, float] = {
-        "feature_finite_ratio": float(np.mean(np.isfinite(feature_values))),
+        "feature_finite_ratio": (
+            float(np.mean(np.isfinite(feature_values[feature_valid_mask])))
+            if np.any(feature_valid_mask)
+            else 0.0
+        ),
         "label_valid_ratio": float(np.mean(label_eligible_mask)),
         "feature_valid_ratio": float(np.mean(feature_valid_mask)),
         "ranker_valid_ndcg_at_5": ndcg_proxy_at_k(score_2d, relevance_2d, k=5),

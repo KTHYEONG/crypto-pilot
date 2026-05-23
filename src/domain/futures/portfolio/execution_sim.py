@@ -82,6 +82,7 @@ def backtest_target_weights_numba(
     rebalance_bars: int,
     max_hold_bars: int,
     short_borrow_daily: float,
+    bar_hours: float,
     atr_2d: np.ndarray,
     atr_mult: float,
     trail_mult: float,
@@ -351,7 +352,8 @@ def backtest_target_weights_numba(
                 if np.isfinite(fund_fee):
                     fund_fee_stored[s] += fund_fee
             if short_borrow_daily > 0.0 and pos_side[s] == -1:
-                balance -= amount[s] * cur_p * (short_borrow_daily / 24.0)
+                # bar_hours로 스케일: 4h봉=4/24, 1h봉=1/24. 일별 borrow를 bar당 비용으로 환산.
+                balance -= amount[s] * cur_p * (short_borrow_daily * bar_hours / 24.0)
 
         current_equity = balance + used_margin_total + unrealized_total
         equity_curve[i] = current_equity
