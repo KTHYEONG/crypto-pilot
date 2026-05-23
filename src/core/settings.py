@@ -40,20 +40,43 @@ TRADE_HISTORY_DB = DATA_DIR / "trade_history.db"
 BINANCE_API_KEY = os.getenv("BINANCE_API_KEY", "")
 BINANCE_SECRET = os.getenv("BINANCE_SECRET", "")
 
-# 거래 수수료 및 슬리피지 설정 (바이낸스 선물 실제 수수료 반영)
-# Binance Futures Fee Structure (VIP 0 기준):
-# - Maker (지정가): 0.02%
-# - Taker (시장가): 0.05%
-MAKER_FEE_RATE = 0.0002
-TAKER_FEE_RATE = 0.0005
+# === Canonical transaction-cost model (single source of truth, per-side, Binance USDⓈ-M VIP0) ===
+# 아래 *_BPS 상수가 유일한 수정 지점입니다. Decimal rate는 여기서 파생되므로 직접 수정하지 마세요.
+MAKER_FEE_BPS: float = 2.0   # 0.0200% — Maker(지정가) 수수료 per side
+TAKER_FEE_BPS: float = 5.0   # 0.0500% — Taker(시장가) 수수료 per side
+SLIPPAGE_BPS: float = 2.0    # 시장가 주문 예상 슬리피지 per side
+FUNDING_FEE_BPS_PER_8H: float = 1.0  # 펀딩비 per 8h (Binance Default)
+FILLS_PER_ROUND_TRIP: int = 2  # 진입 1회 + 청산 1회
+
+# Decimal rates DERIVED from canonical bps. Edit the *_BPS constants above, not these.
+MAKER_FEE_RATE = MAKER_FEE_BPS / 10000.0
+TAKER_FEE_RATE = TAKER_FEE_BPS / 10000.0
 TRADING_FEE_RATE = TAKER_FEE_RATE  # 하위 호환성을 위해 유지 (기본값 Taker)
-SLIPPAGE_RATE = 0.0002  # 0.02% (시장가 주문 시 예상 슬리피지)
+SLIPPAGE_RATE = SLIPPAGE_BPS / 10000.0
 
 # 스마트 주문 설정
 SMART_ORDER_OFFSET = 0.0003  # 0.03% (공격적 지정가 오프셋 - Maker 수수료 절감 목적)
 
 # 선물 펀딩비 설정 (Perpetual Futures Funding Fee)
-FUNDING_FEE_RATE = 0.0001  # 0.01% (8시간 마다, Binance Default)
+FUNDING_FEE_RATE = FUNDING_FEE_BPS_PER_8H / 10000.0  # 0.01% (8시간 마다, Binance Default)
+
+
+def round_trip_cost_bps(*, taker_entry: bool = True, taker_exit: bool = True) -> float:
+    """Round-trip transaction cost in bps (entry fee + exit fee + 2x slippage).
+
+    실행 시뮬레이터는 양 leg을 모두 Taker로 체결하므로 기본값은 taker/taker입니다.
+
+    Args:
+        taker_entry: 진입을 Taker로 체결하면 True, Maker면 False.
+        taker_exit: 청산을 Taker로 체결하면 True, Maker면 False.
+
+    Returns:
+        Round-trip 총 비용(bps).
+
+    """
+    entry_fee = TAKER_FEE_BPS if taker_entry else MAKER_FEE_BPS
+    exit_fee = TAKER_FEE_BPS if taker_exit else MAKER_FEE_BPS
+    return entry_fee + exit_fee + FILLS_PER_ROUND_TRIP * SLIPPAGE_BPS
 
 # ============================================================
 # RealTrader Futures 설정

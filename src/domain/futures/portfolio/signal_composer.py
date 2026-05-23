@@ -65,15 +65,12 @@ def apply_linear_signal_composer_scores(
 
     n = len(df)
     beta_a = float(params.get("BETA_ALPHA", cfg.get("FUTURES_DEFAULT_BETA_ALPHA", 1.0)))
-    ev_h = float(params.get("EV_HURDLE_BPS", cfg.get("FUTURES_DEFAULT_EV_HURDLE_BPS", 5.0)))
+    ev_h = float(params.get("EV_HURDLE_BPS", cfg.get("FUTURES_DEFAULT_EV_HURDLE_BPS", 40.0)))
 
-    from src.core.settings import SLIPPAGE_RATE, TAKER_FEE_RATE
+    from src.core.settings import round_trip_cost_bps
 
-    slip = float(SLIPPAGE_RATE) * float(params.get("SLIPPAGE_BPS_BUFFER_MULT", 1.0))
-    fee = float(TAKER_FEE_RATE)
-    fund_bar = float(cfg.get("FUTURES_COMPOSER_FUNDING_BAR_FRAC", 1e-5))
-    buf_mult = float(cfg.get("FUTURES_FRICTION_BUFFER_MULT", 1.5))
-    friction = buf_mult * (fee + slip + fund_bar)
+    # Taker 진입 + Taker 청산 + 2x 슬리피지 = 14bps (execution_sim 과 동일 기준)
+    friction = round_trip_cost_bps() / 10000.0
 
     pbull = np.zeros(n, dtype=np.float64)
     if "hmm_prob_bull_calm" in df.columns and "hmm_prob_bull_vol_up" in df.columns:

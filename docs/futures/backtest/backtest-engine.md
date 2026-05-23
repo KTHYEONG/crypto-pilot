@@ -103,6 +103,40 @@
 
 현실적인 거래 환경 시뮬레이션을 위해 엔진은 다음과 같은 모델을 적용합니다.
 
+### 5.0 정준 비용 모델 (Canonical Cost Model) — Single Source of Truth
+
+> **수정 지점**: `src/core/settings.py` 의 `*_BPS` 상수만 변경합니다. 아래 파생값은 직접 수정하지 않습니다.
+
+| 상수 | 값 | 단위 |
+|---|---:|---|
+| `TAKER_FEE_BPS` | 5.0 | bps per side (Binance USDⓈ-M VIP0) |
+| `MAKER_FEE_BPS` | 2.0 | bps per side |
+| `SLIPPAGE_BPS` | 2.0 | bps per side (시장가 예상 슬리피지) |
+| `FILLS_PER_ROUND_TRIP` | 2 | 진입 1회 + 청산 1회 |
+| `FUNDING_FEE_BPS_PER_8H` | 1.0 | bps per 8h (Binance default) |
+
+**Round-trip 총 비용 (Taker/Taker)**:
+
+```
+round_trip_cost_bps() = TAKER_FEE + TAKER_FEE + 2 × SLIPPAGE
+                      = 5 + 5 + 2×2 = 14 bps
+```
+
+이 함수(`src/core/settings.py::round_trip_cost_bps()`)가 전 모듈의 **유일한 비용 기준**입니다.
+아래 모든 계층은 이 값에서 파생됩니다:
+
+| 계층 | 모듈 | 사용 방식 |
+|---|---|---|
+| Label 생성 | `strategy/labels.py` | `FILLS_PER_ROUND_TRIP × (fee_bps + slip_bps)` = 14 bps |
+| 체결 시뮬레이터 | `portfolio/execution_sim.py` | 진입/청산 각 side에 `taker_fee + slippage` 적용 → 합계 14 bps |
+| Signal Composer Gate | `portfolio/signal_composer.py` | `round_trip_cost_bps() / 10000` (threshold) |
+| Evaluator | `optimization/evaluator.py` | `round_trip_cost_bps() / 10000` (EV/Cost gate) |
+| Objectives Diag | `optimization/objectives.py` | `round_trip_cost_bps() / 10000` (friction_bps 계산) |
+
+**펀딩비는 Round-trip 비용에 포함하지 않습니다.** 펀딩은 보유 기간(holding period)에 비례하는 carry 비용으로, 체결 시 발생하는 1회성 거래 비용과 성격이 다릅니다. `execution_sim`에서 매 funding 이벤트마다 별도 누적됩니다.
+
+**EV_HURDLE_BPS**: Round-trip 비용에 추가로 요구하는 최소 expected edge (기본값 40 bps). 최적화 파라미터이며, fallback도 동일하게 40 bps를 사용합니다.
+
 ### 5.1 체결 마찰 비용 (Execution Cost)
 어떠한 거래든(진입, 청산, 스탑로스) 아래의 수식에 의해 비용이 발생합니다.
 * **진입 단가(Long)** = `Price * (1 + slippage_rate)`

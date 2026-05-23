@@ -162,7 +162,8 @@ def test_backtest_engine_passes_volume_2d_to_execution_sim(
     captured: dict[str, np.ndarray] = {}
 
     def _fake_exec(*args: object) -> tuple[np.ndarray, float, np.ndarray, np.ndarray]:
-        vol_arg = args[23]
+        # index 24: bar_hours 인자 추가로 volume_2d 위치가 23→24로 이동
+        vol_arg = args[24]
         captured["volume_2d"] = np.asarray(vol_arg, dtype=np.float64)
         close_2d = np.asarray(args[0], dtype=np.float64)
         return (
