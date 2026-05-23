@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import Any, Literal, cast
 
 ActiveMode = Literal["quick-backtest", "strategy", "strategy-smoke"]
-ActiveStrategyName = Literal["momentum_v0", "eh_st_v1"]
+ActiveStrategyName = Literal["momentum_v0", "eh_st_v1", "ml_lambdamart_v1"]
 SyncMode = Literal["full_history_master", "elite_fast"]
 
 _ACTIVE_MODES: frozenset[str] = frozenset({"quick-backtest", "strategy", "strategy-smoke"})
@@ -41,7 +41,7 @@ def parse_active_mode(mode: str) -> ActiveMode:
 def _parse_strategy_name(strategy: str | None) -> ActiveStrategyName | None:
     if strategy is None:
         return None
-    if strategy not in ("momentum_v0", "eh_st_v1"):
+    if strategy not in ("momentum_v0", "eh_st_v1", "ml_lambdamart_v1"):
         raise ValueError(f"unsupported strategy: {strategy}")
     return cast(ActiveStrategyName, strategy)
 
@@ -81,7 +81,7 @@ def build_run_config_from_args(args: Namespace | dict[str, Any]) -> FuturesRunCo
             raise ValueError(f"legacy flag is not allowed in active runner: {legacy_flag}")
 
     mode = parse_active_mode(str(raw.get("mode", "strategy")))
-    default_strategy: str | None = "momentum_v0" if mode == "strategy" else None
+    default_strategy: str | None = "ml_lambdamart_v1" if mode == "strategy" else None
     strategy = _parse_strategy_name(raw.get("strategy", default_strategy))
     sync_mode_raw = str(raw.get("sync_mode", "full_history_master"))
     if sync_mode_raw not in {"full_history_master", "elite_fast"}:

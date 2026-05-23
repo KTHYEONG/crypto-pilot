@@ -1,0 +1,243 @@
+from __future__ import annotations
+
+import logging
+from dataclasses import asdict
+from typing import Any
+
+import numpy as np
+import pandas as pd
+
+from src.domain.futures.strategy.cache import build_manifest_hash
+from src.domain.futures.strategy.calibrator import (
+    fit_quantile_calibrators,
+    predict_conservative_ev,
+)
+from src.domain.futures.strategy.common.alignment import align_data_maps
+from src.domain.futures.strategy.common.normalization import (
+    apply_robust_bounds,
+    fit_robust_bounds,
+)
+from src.domain.futures.strategy.common.validation import (
+    validate_feature_panel,
+    validate_label_panel,
+    validate_long_matrix,
+)
+from src.domain.futures.strategy.config import StrategyConfig
+from src.domain.futures.strategy.contracts import FeaturePanel
+from src.domain.futures.strategy.dataset import (
+    build_long_matrix,
+    make_walk_forward_folds,
+)
+from src.domain.futures.strategy.diagnostics import (
+    build_quality_report,
+    ml_alpha_metrics,
+    passes_quality_gate,
+)
+from src.domain.futures.strategy.features import build_feature_panel
+from src.domain.futures.strategy.inference import (
+    assemble_alpha_panel,
+    infer_fold_alpha,
+)
+from src.domain.futures.strategy.labels import build_label_panel
+from src.domain.futures.strategy.ranker import fit_ranker, predict_rank_score
+
+_logger = logging.getLogger(__name__)
+
+
+def build_ml_strategy_alpha(
+    data_maps: dict[str, dict[str, Any]],
+    symbols: list[str],
+    tf: str,
+    cfg: StrategyConfig,
+) -> pd.DataFrame:
+    """Build ML strategy alpha panel."""
+    ml_cfg = cfg.ml
+    aligned = align_data_maps(data_maps=data_maps, symbols=symbols, tf=tf)
+    if len(aligned.symbols) < ml_cfg.min_group_size:
+        raise ValueError(
+            f"strategy needs >= {ml_cfg.min_group_size} symbols, got {len(aligned.symbols)}"
+        )
+    features = build_feature_panel(aligned, ml_cfg)
+    labels = build_label_panel(aligned, ml_cfg)
+    validate_feature_panel(features)
+    validate_label_panel(labels, t=features.values.shape[0], n=features.values.shape[1])
+    folds = make_walk_forward_folds(features.datetimes, ml_cfg)
+    if not folds:
+        raise RuntimeError("no walk-forward folds can be built")
+    _logger.info(
+        "[ML-FEATURE] rows=%d symbols=%d features=%d",
+        features.values.shape[0],
+        features.values.shape[1],
+        features.values.shape[2],
+    )
+    _logger.info(
+        "[ML-LABEL] eligible=%.4f sample_weight_mean=%.4f",
+        float(np.mean(labels.eligible_mask)),
+        (
+            float(np.mean(labels.sample_weight[labels.eligible_mask]))
+            if np.any(labels.eligible_mask)
+            else 0.0
+        ),
+    )
+
+    ev_grid = np.zeros((features.values.shape[0], features.values.shape[1]), dtype=np.float32)
+    score_grid = np.full_like(ev_grid, np.nan, dtype=np.float32)
+    for fold in folds:
+        _logger.info(
+            "[ML-FOLD] id=%d train=[%d,%d) valid=[%d,%d) test=[%d,%d)",
+            fold.fold_id,
+            fold.train_start,
+            fold.train_end,
+            fold.valid_start,
+            fold.valid_end,
+            fold.test_start,
+            fold.test_end,
+        )
+        train_values = features.values[fold.train_start : fold.train_end].astype(
+            np.float64, copy=False
+        )
+        bounds = fit_robust_bounds(train_values, clip_quantile=0.995)
+        clipped_values = apply_robust_bounds(features.values.astype(np.float64, copy=False), bounds)
+        train_medians = np.nanmedian(train_values.reshape(-1, train_values.shape[2]), axis=0)
+        train_medians = np.where(np.isfinite(train_medians), train_medians, 0.0)
+        normalized = np.where(
+            np.isfinite(clipped_values),
+            clipped_values,
+            train_medians[np.newaxis, np.newaxis, :],
+        ).astype(np.float32, copy=False)
+        normalized_features = FeaturePanel(
+            datetimes=features.datetimes,
+            symbols=features.symbols,
+            values=normalized,
+            feature_names=features.feature_names,
+            valid_mask=features.valid_mask,
+            availability_masks=features.availability_masks,
+            metadata={**features.metadata, "train_imputer_applied": True},
+        )
+        train = build_long_matrix(
+            features=normalized_features,
+            labels=labels,
+            start=fold.train_start,
+            end=fold.train_end,
+            fold=fold,
+            split="train",
+            min_group_size=ml_cfg.min_group_size,
+        )
+        valid = build_long_matrix(
+            features=normalized_features,
+            labels=labels,
+            start=fold.valid_start,
+            end=fold.valid_end,
+            fold=fold,
+            split="valid",
+            min_group_size=ml_cfg.min_group_size,
+        )
+        test = build_long_matrix(
+            features=normalized_features,
+            labels=labels,
+            start=fold.test_start,
+            end=fold.test_end,
+            fold=fold,
+            split="test",
+            min_group_size=ml_cfg.min_group_size,
+        )
+        validate_long_matrix(train)
+        validate_long_matrix(valid)
+        validate_long_matrix(test)
+        ranker = fit_ranker(train=train, valid=valid, cfg=ml_cfg)
+        rank_train = predict_rank_score(ranker.model, train)
+        rank_valid = predict_rank_score(ranker.model, valid)
+        rank_test = predict_rank_score(ranker.model, test)
+        _logger.info(
+            "[ML-RANKER] fold=%d train_n=%d valid_n=%d test_n=%d train_mean=%.6f valid_mean=%.6f",
+            fold.fold_id,
+            int(train.X.shape[0]),
+            int(valid.X.shape[0]),
+            int(test.X.shape[0]),
+            float(np.mean(rank_train, dtype=np.float32)) if rank_train.size > 0 else 0.0,
+            float(np.mean(rank_valid, dtype=np.float32)) if rank_valid.size > 0 else 0.0,
+        )
+        calibrators = fit_quantile_calibrators(
+            train=train,
+            valid=valid,
+            rank_score_train=rank_train,
+            rank_score_valid=rank_valid,
+            cfg=ml_cfg,
+        )
+        ev_test = predict_conservative_ev(calibrators, test, rank_test, ml_cfg)
+        _logger.info(
+            "[ML-CALIB] fold=%d ev_mean=%.6e ev_p10=%.6e ev_p90=%.6e",
+            fold.fold_id,
+            float(np.mean(ev_test, dtype=np.float32)) if ev_test.size > 0 else 0.0,
+            float(np.percentile(ev_test, 10)) if ev_test.size > 0 else 0.0,
+            float(np.percentile(ev_test, 90)) if ev_test.size > 0 else 0.0,
+        )
+        # Center by group mean to enforce long/short symmetry.
+        offset = 0
+        for g in test.group:
+            g_int = int(g)
+            if g_int <= 0:
+                continue
+            sl = slice(offset, offset + g_int)
+            ev_test[sl] -= np.mean(ev_test[sl], dtype=np.float32)
+            offset += g_int
+        fold_alpha = infer_fold_alpha(
+            fold=fold,
+            test=test,
+            ev_test=ev_test,
+            t_size=features.values.shape[0],
+            n_size=features.values.shape[1],
+        )
+        ev_grid += fold_alpha.ev_grid
+        for row, (t_idx, s_idx) in enumerate(test.index_map):
+            score_grid[int(t_idx), int(s_idx)] = rank_test[row]
+        _logger.info(
+            "[ML-OOS] fold=%d test_rows=%d alpha_nonzero=%.4f",
+            fold.fold_id,
+            int(test.X.shape[0]),
+            float(np.count_nonzero(ev_test) / max(1, ev_test.size)),
+        )
+
+    panel = assemble_alpha_panel(
+        datetimes=features.datetimes,
+        symbols=features.symbols,
+        ev_grid=ev_grid,
+        clip_abs=float(ml_cfg.alpha_clip_bps / 10000.0),
+        eligible_mask=labels.eligible_mask,
+    )
+    panel.attrs["strategy_name"] = cfg.name
+    panel.attrs["feature_names"] = list(features.feature_names)
+    panel.attrs["fold_count"] = len(folds)
+    panel.attrs["config_hash"] = build_manifest_hash(asdict(cfg.ml))
+    quality_report = build_quality_report(
+        feature_values=features.values,
+        feature_valid_mask=features.valid_mask,
+        label_eligible_mask=labels.eligible_mask,
+        score_2d=score_grid,
+        signed_ret_2d=labels.signed_net_ret.astype(np.float64),
+        relevance_2d=labels.relevance.astype(np.float64),
+        alpha_long_2d=np.maximum(ev_grid, 0.0),
+        alpha_short_2d=np.maximum(-ev_grid, 0.0),
+    )
+    panel.attrs["quality_report"] = quality_report
+    if not passes_quality_gate(quality_report):
+        raise RuntimeError(f"strategy ml quality gate failed: {quality_report}")
+    if float(np.count_nonzero(panel["alpha_long"].to_numpy(dtype=np.float64))) <= 0.0:
+        raise RuntimeError("generated alpha_long is all zero")
+    if float(np.count_nonzero(panel["alpha_short"].to_numpy(dtype=np.float64))) <= 0.0:
+        raise RuntimeError("generated alpha_short is all zero")
+    metrics = ml_alpha_metrics(
+        panel["alpha_long"].to_numpy(dtype=np.float64).reshape(-1, 1),
+        panel["alpha_short"].to_numpy(dtype=np.float64).reshape(-1, 1),
+    )
+    _logger.info(
+        "[ML-ALPHA] rows=%d symbols=%d long_nz=%.4f short_nz=%.4f "
+        "long_p95=%.2fbps short_p95=%.2fbps",
+        len(panel),
+        len(features.symbols),
+        metrics["long_nz"],
+        metrics["short_nz"],
+        metrics["long_p95_bps"],
+        metrics["short_p95_bps"],
+    )
+    return panel
