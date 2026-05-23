@@ -3,6 +3,7 @@ from __future__ import annotations
 import numpy as np
 from numpy.typing import NDArray
 
+from src.core.settings import FILLS_PER_ROUND_TRIP
 from src.domain.futures.strategy.common.alignment import AlignedMarketData
 from src.domain.futures.strategy.config import StrategyMLConfig
 from src.domain.futures.strategy.contracts import LabelPanel
@@ -43,7 +44,9 @@ def build_label_panel(aligned: AlignedMarketData, cfg: StrategyMLConfig) -> Labe
         & ~aligned.entry_block_mask
         & ~aligned.kill_mask
     )
-    cost = np.float64((cfg.fee_bps + cfg.slippage_bps) / 10000.0)
+    # Round-trip = 진입 fill + 청산 fill (execution sim은 양 leg 모두 Taker).
+    # FILLS_PER_ROUND_TRIP=2 이므로: 2*(fee_bps + slippage_bps) = 14bps (기본값 5+2 per side).
+    cost = np.float64(FILLS_PER_ROUND_TRIP * (cfg.fee_bps + cfg.slippage_bps) / 10000.0)
 
     for t in range(t_len - horizon):
         entry = aligned.open_2d[t + 1]
