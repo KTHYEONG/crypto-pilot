@@ -3,7 +3,10 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from src.domain.futures.strategy.normalize import to_return_units, winsorized_cs_zscore
+from src.domain.futures.legacy.strategy_sleev.normalize import (
+    to_return_units,
+    winsorized_cs_zscore,
+)
 
 
 def test_winsorized_cs_zscore_basic() -> None:

@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from src.domain.futures.strategy.combine import blend_sleeves
+from src.domain.futures.legacy.strategy_sleev.combine import blend_sleeves
 
 
 def test_blend_sleeves_basic() -> None:
@@ -50,7 +50,7 @@ def test_blend_sleeves_non_identical_z() -> None:
 
     res = blend_sleeves(z_by_sleeve, ic_weights, min_symbols=5)
     # Since w1=1.0 and w2=0.0, result should be re-standardized z1.
-    from src.domain.futures.strategy.normalize import winsorized_cs_zscore
+    from src.domain.futures.legacy.strategy_sleev.normalize import winsorized_cs_zscore
 
     expected = winsorized_cs_zscore(z1, min_symbols=5)
     assert np.allclose(res, expected)

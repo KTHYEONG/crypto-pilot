@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Literal
 
 
 @dataclass(slots=True, frozen=True)
@@ -98,7 +99,10 @@ class RegimeConfig:
         if self.vol_window < 1:
             raise ValueError("vol_window must be >= 1")
         if not (0.0 < self.vol_high_pct < self.vol_crisis_pct < 1.0):
-            raise ValueError("volatility percentiles must satisfy 0 < vol_high_pct < vol_crisis_pct < 1.0")
+            raise ValueError(
+                "volatility percentiles must satisfy "
+                "0 < vol_high_pct < vol_crisis_pct < 1.0"
+            )
         if self.trend_ma_fast >= self.trend_ma_slow:
             raise ValueError("trend_ma_fast must be less than trend_ma_slow")
         if self.trend_ma_fast < 1:
@@ -122,4 +126,62 @@ class StrategyConfig:
     sleeves: SleeveConfig = field(default_factory=SleeveConfig)
     blend: BlendConfig = field(default_factory=BlendConfig)
     regime: RegimeConfig = field(default_factory=RegimeConfig)
+    ml: StrategyMLConfig = field(default_factory=lambda: StrategyMLConfig())
 
+    def __post_init__(self) -> None:
+        """Validate top-level strategy name."""
+        if self.name not in {"momentum_v0", "eh_st_v1", "ml_lambdamart_v1"}:
+            raise ValueError(f"unsupported strategy name: {self.name}")
+
+
+@dataclass(slots=True, frozen=True)
+class StrategyMLConfig:
+    """ML strategy configuration for LambdaMART + quantile calibrator."""
+
+    name: Literal["ml_lambdamart_v1"] = "ml_lambdamart_v1"
+    timeframe: str = "4h"
+    seed: int = 42
+    n_jobs: int = 4
+    min_group_size: int = 8
+    label_horizon_bars: int = 1
+    train_months: int = 24
+    valid_months: int = 3
+    test_months: int = 3
+    purge_bars: int = 1
+    embargo_bars: int = 1
+    max_features: int = 64
+    alpha_clip_bps: float = 75.0
+    lambda_tail: float = 0.25
+    ranker_n_estimators: int = 800
+    calibrator_n_estimators: int = 600
+    learning_rate: float = 0.03
+    num_leaves: int = 31
+    max_depth: int = 6
+    min_data_in_leaf: int = 200
+    feature_fraction: float = 0.80
+    bagging_fraction: float = 0.80
+    lambda_l2: float = 5.0
+    early_stopping_rounds: int = 75
+    fee_bps: float = 4.0
+    slippage_bps: float = 2.0
+
+    def __post_init__(self) -> None:
+        """Validate ML strategy parameters."""
+        if self.purge_bars < self.label_horizon_bars:
+            raise ValueError("purge_bars must be >= label_horizon_bars")
+        if self.embargo_bars < 1:
+            raise ValueError("embargo_bars must be >= 1")
+        if self.max_features > 64:
+            raise ValueError("max_features must be <= 64")
+        if self.alpha_clip_bps <= 0.0:
+            raise ValueError("alpha_clip_bps must be > 0")
+        if self.min_group_size < 2:
+            raise ValueError("min_group_size must be >= 2")
+        if not (0.0 < self.learning_rate <= 0.2):
+            raise ValueError("learning_rate must satisfy 0 < lr <= 0.2")
+        if self.num_leaves > 31:
+            raise ValueError("num_leaves must be <= 31")
+        if self.max_depth > 6:
+            raise ValueError("max_depth must be <= 6")
+        if self.min_data_in_leaf < 100:
+            raise ValueError("min_data_in_leaf must be >= 100")

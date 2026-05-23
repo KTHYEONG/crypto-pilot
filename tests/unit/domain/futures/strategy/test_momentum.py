@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import numpy as np
 
+from src.domain.futures.legacy.strategy_sleev.momentum import compute_xs_momentum_alpha
 from src.domain.futures.strategy.config import MomentumConfig
-from src.domain.futures.strategy.momentum import compute_xs_momentum_alpha
 
 
 def test_warmup_zero() -> None:
