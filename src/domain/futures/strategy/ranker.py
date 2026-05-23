@@ -55,21 +55,24 @@ def fit_ranker(
     y_train_cs = _cs_demean(train.y_ev, train.group)
     y_valid_cs = _cs_demean(valid.y_ev, valid.group) if valid.X.shape[0] > 0 else valid.y_ev
 
+    # [ML-UPGRADE] 학습 성능 극대화 및 과적합 차단을 위한 L1 규제 및 Colsample/Bagging 최적화 주입
     model = lgb.LGBMRegressor(
         objective="regression",
         metric="rmse",
         boosting_type="gbdt",
         n_estimators=cfg.ranker_n_estimators,
-        learning_rate=cfg.learning_rate,
+        learning_rate=0.02,
         num_leaves=cfg.num_leaves,
         max_depth=cfg.max_depth,
         min_data_in_leaf=cfg.min_data_in_leaf,
-        feature_fraction=cfg.feature_fraction,
-        bagging_fraction=cfg.bagging_fraction,
+        feature_fraction=0.70,
+        bagging_fraction=0.75,
         bagging_freq=1,
         lambda_l2=cfg.lambda_l2,
+        reg_alpha=1.5,
         random_state=cfg.seed,
         n_jobs=cfg.n_jobs,
+        verbose=-1,
     )
     x_train = _as_feature_frame(train.X, train.feature_names)
     if valid.X.shape[0] > 0:

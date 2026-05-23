@@ -58,9 +58,9 @@ def log_optuna_contract(
     """Persist and log Optuna phase contract."""
     normalized_workers = _normalize_phase_workers(phase_workers)
     phase_trials = {
-        "phase_a1": int(requested_trials_per_phase),
-        "phase_a2": int(requested_trials_per_phase),
-        "phase_b": int(requested_trials_per_phase),
+        "phase_a1": max(1, int(requested_trials_per_phase * 0.5)),
+        "phase_a2": max(1, int(requested_trials_per_phase * 0.2)),
+        "phase_b": max(1, int(requested_trials_per_phase * 0.3)),
     }
     sampler_by_phase = {
         "phase_a1": build_phase_a1_sampler(seed).__class__.__name__,
@@ -108,15 +108,26 @@ def log_optuna_contract(
     return payload
 
 
-def setup_optuna_storage(project_root: str | Path) -> tuple[str, optuna.storages.RDBStorage]:
-    """Set up high-performance Optuna storage with SQLite WAL mode."""
+def setup_optuna_storage(project_root: str | Path) -> tuple[str, optuna.storages.BaseStorage]:
+    """Set up high-performance Optuna storage with SQLite WAL mode or Redis."""
+    storage_type = str(OPT_FUTURES_CONFIG.get("FUTURES_OPTUNA_STORAGE_TYPE", "sqlite")).lower()
+    storage: optuna.storages.BaseStorage
+
+    if storage_type == "redis":
+        storage_url = str(OPT_FUTURES_CONFIG.get("FUTURES_REDIS_URL", "redis://127.0.0.1:6379/0"))
+        storage = optuna.storages.JournalStorage(
+            optuna.storages.JournalRedisStorage(storage_url)
+        )
+        return storage_url, storage
+
+    # Fallback to high-performance SQLite
     storage_path = Path(project_root) / "logs" / "optuna_futures.db"
     storage_url = f"sqlite:///{storage_path}"
 
     # 1. SQLAlchemy Engine with WAL mode & Connection Pooling
     engine = create_engine(
         storage_url,
-        connect_args={"check_same_thread": False, "timeout": 60},
+        connect_args={"check_same_thread": False, "timeout": 120},
         poolclass=QueuePool,
         pool_size=10,
         max_overflow=20,
@@ -126,17 +137,20 @@ def setup_optuna_storage(project_root: str | Path) -> tuple[str, optuna.storages
         conn.execute(text("PRAGMA journal_mode=WAL;"))
         conn.execute(text("PRAGMA synchronous=NORMAL;"))
         conn.execute(text("PRAGMA cache_size=-64000;"))  # 64MB Cache
+        conn.execute(text("PRAGMA temp_store=MEMORY;"))
+        conn.execute(text("PRAGMA busy_timeout=120000;"))
 
     storage = optuna.storages.RDBStorage(
         storage_url,
-        engine_kwargs={"connect_args": {"timeout": 60, "check_same_thread": False}}
+        engine_kwargs={"connect_args": {"timeout": 120, "check_same_thread": False}}
     )
     return storage_url, storage
 
 
+
 def get_or_create_study(
     study_name: str,
-    storage: optuna.storages.RDBStorage,
+    storage: optuna.storages.BaseStorage,
     sampler: optuna.samplers.BaseSampler,
     resume: bool = False,
     pruner: optuna.pruners.BasePruner | None = None,
@@ -331,9 +345,15 @@ def optimize_worker(s_name: str, s_url: str, chunk_size: int):
     objective_fn = _GLOBAL_OBJECTIVE_FN
 
     # Each process loads the study and runs its portion of trials
-    inner_storage = optuna.storages.RDBStorage(
-        s_url, engine_kwargs={"connect_args": {"timeout": 60, "check_same_thread": False}}
-    )
+    inner_storage: optuna.storages.BaseStorage
+    if s_url.startswith("redis://"):
+        inner_storage = optuna.storages.JournalStorage(
+            optuna.storages.JournalRedisStorage(s_url)
+        )
+    else:
+        inner_storage = optuna.storages.RDBStorage(
+            s_url, engine_kwargs={"connect_args": {"timeout": 60, "check_same_thread": False}}
+        )
     study = optuna.load_study(study_name=s_name, storage=inner_storage)
     trial_timeout_sec = int(OPT_FUTURES_CONFIG.get("FUTURES_OPT_TRIAL_TIMEOUT_SEC", 180))
 
@@ -710,7 +730,7 @@ def run_optimization_loop(
     base_ctx: MLPhaseDContext,
     study_name: str,
     storage_url: str,
-    storage: optuna.storages.RDBStorage,
+    storage: optuna.storages.BaseStorage,
     n_trials: int,
     seed: int,
     resume: bool = False,
@@ -798,9 +818,15 @@ def run_optimization_loop(
     stop_event = threading.Event()
 
     def progress_poller(s_name: str, s_url: str, target: int, r_id: str | None) -> None:
-        poller_storage = optuna.storages.RDBStorage(
-            s_url, engine_kwargs={"connect_args": {"timeout": 60, "check_same_thread": False}}
-        )
+        poller_storage: optuna.storages.BaseStorage
+        if s_url.startswith("redis://"):
+            poller_storage = optuna.storages.JournalStorage(
+                optuna.storages.JournalRedisStorage(s_url)
+            )
+        else:
+            poller_storage = optuna.storages.RDBStorage(
+                s_url, engine_kwargs={"connect_args": {"timeout": 60, "check_same_thread": False}}
+            )
         try:
             study = optuna.load_study(study_name=s_name, storage=poller_storage)
             with tqdm(total=target, desc=f"  {phase_label:<32}", unit="trial", leave=True) as pbar:

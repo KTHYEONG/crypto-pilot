@@ -423,7 +423,28 @@ def build_phase_b_sampler(seed: int) -> optuna.samplers.BaseSampler:
 
 
 def build_phase_a1_pruner() -> optuna.pruners.BasePruner:
-    return optuna.pruners.WilcoxonPruner(p_threshold=0.10)
+    pruner_type = str(OPT_FUTURES_CONFIG.get("FUTURES_PRUNER_TYPE", "wilcoxon")).lower()
+    startup = int(OPT_FUTURES_CONFIG.get("FUTURES_PRUNER_STARTUP_TRIALS", 40))
+    warmup = int(OPT_FUTURES_CONFIG.get("FUTURES_PRUNER_WARMUP_STEPS", 2))
+
+    if pruner_type == "successive_halving":
+        return optuna.pruners.SuccessiveHalvingPruner(
+            min_resource="auto",
+            reduction_factor=3,
+        )
+    elif pruner_type == "median":
+        return optuna.pruners.MedianPruner(
+            n_startup_trials=startup,
+            n_warmup_steps=warmup,
+        )
+    else:
+        # Default: WilcoxonPruner (robust statistical testing)
+        p_val = float(OPT_FUTURES_CONFIG.get("FUTURES_PRUNER_WILCOXON_P", 0.10))
+        return optuna.pruners.WilcoxonPruner(
+            p_threshold=p_val,
+        )
+
+
 
 # --- Phase Objectives ---
 
@@ -1195,7 +1216,7 @@ def run_phase_a1(
     base_ctx: MLPhaseDContext,
     base_study_name: str,
     storage_url: str,
-    storage: optuna.storages.RDBStorage,
+    storage: optuna.storages.BaseStorage,
     n_trials: int,
     seed: int,
     resume: bool,
@@ -1227,7 +1248,7 @@ def run_phase_a2(
     base_ctx: MLPhaseDContext,
     base_study_name: str,
     storage_url: str,
-    storage: optuna.storages.RDBStorage,
+    storage: optuna.storages.BaseStorage,
     n_trials: int,
     seed: int,
     resume: bool,
@@ -1264,7 +1285,7 @@ def run_phase_b(
     base_ctx: MLPhaseDContext,
     base_study_name: str,
     storage_url: str,
-    storage: optuna.storages.RDBStorage,
+    storage: optuna.storages.BaseStorage,
     n_trials: int,
     seed: int,
     resume: bool,
@@ -1305,7 +1326,7 @@ def run_phased_optimization_skeleton(
     base_ctx: MLPhaseDContext,
     base_study_name: str,
     storage_url: str,
-    storage: optuna.storages.RDBStorage,
+    storage: optuna.storages.BaseStorage,
     n_trials: int,
     seed: int,
     resume: bool,
@@ -1338,9 +1359,9 @@ def run_phased_optimization_skeleton(
         else OPT_FUTURES_CONFIG.get("FUTURES_PHASE_B_TRIALS", 300)
     )
     if n_trials > 0 and n_trials_a1 is None and n_trials_a2 is None and n_trials_b is None:
-        phase_a1_trials = int(n_trials)
-        phase_a2_trials = int(n_trials)
-        phase_b_trials = int(n_trials)
+        phase_a1_trials = max(40, int(n_trials * 0.50))
+        phase_a2_trials = max(30, int(n_trials * 0.20))
+        phase_b_trials = max(40, int(n_trials * 0.30))
 
     study_a1 = run_phase_a1(
         base_ctx=base_ctx,

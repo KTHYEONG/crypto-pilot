@@ -151,6 +151,16 @@ def build_feature_panel(aligned: AlignedMarketData, cfg: StrategyMLConfig) -> Fe
     cs_rank_volume_18 = cross_sectional_rank(volume_z_18, mask, cfg.min_group_size)
     cs_rank_dollar_vol = cross_sectional_rank(dollar_volume, mask, cfg.min_group_size)
 
+    # [ML-UPGRADE] 장기 추세 변별성 강화를 위한 횡단면 랭크 확장 및
+    # Volatility-adjusted CS-Sharpe 피처 도입
+    cs_rank_ret_12 = cross_sectional_rank(ret_12, mask, cfg.min_group_size)
+    cs_rank_ret_36 = cross_sectional_rank(ret_36, mask, cfg.min_group_size)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        sharpe_6 = np.nan_to_num(ret_6 / np.maximum(rv_6, 1e-8), nan=0.0)
+        sharpe_18 = np.nan_to_num(ret_18 / np.maximum(rv_18, 1e-8), nan=0.0)
+    cs_sharpe_6 = cross_sectional_rank(sharpe_6, mask, cfg.min_group_size)
+    cs_sharpe_18 = cross_sectional_rank(sharpe_18, mask, cfg.min_group_size)
+
     btc_idx = 0
     if "BTCUSDT" in aligned.symbols:
         btc_idx = aligned.symbols.index("BTCUSDT")
@@ -219,11 +229,15 @@ def build_feature_panel(aligned: AlignedMarketData, cfg: StrategyMLConfig) -> Fe
         ("adv_rank", adv_rank),
         ("execution_cost_rank", execution_cost_rank),
         ("cs_rank_ret_6", cs_rank_ret_6),
+        ("cs_rank_ret_12", cs_rank_ret_12),
         ("cs_rank_ret_18", cs_rank_ret_18),
+        ("cs_rank_ret_36", cs_rank_ret_36),
         ("cs_rank_rv_18", cs_rank_rv_18),
         ("cs_rank_funding_6", cs_rank_funding_6),
         ("cs_rank_volume_18", cs_rank_volume_18),
         ("cs_rank_dollar_volume", cs_rank_dollar_vol),
+        ("cs_sharpe_6", cs_sharpe_6),
+        ("cs_sharpe_18", cs_sharpe_18),
         ("btc_ret_6", btc_ret_6),
         ("btc_rv_18", btc_rv_18),
         ("market_median_ret_6", market_median_ret_6),
