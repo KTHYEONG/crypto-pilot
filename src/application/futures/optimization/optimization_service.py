@@ -39,7 +39,7 @@ class OptimizationRequest:
     run_id: str
     study_name: str
     storage_url: str
-    storage: optuna.storages.RDBStorage
+    storage: optuna.storages.BaseStorage
     total_trials: int
     ml_n_jobs: int
     seed: int = 42

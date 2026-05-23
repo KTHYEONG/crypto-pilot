@@ -46,7 +46,7 @@ def calc_ulcer_index_from_equity(equity_curve: np.ndarray) -> float:
 
 
 def cleanup_orphan_studies(
-    storage: optuna.storages.RDBStorage,
+    storage: optuna.storages.BaseStorage,
     base_study_name: str,
     suffix_prefix: str,
     keep_recent: int = 5,

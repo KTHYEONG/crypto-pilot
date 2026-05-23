@@ -107,10 +107,16 @@ def build_long_matrix(
             feat = features.values[t, col]
             if not np.all(np.isfinite(feat)):
                 continue
+            # [ML-UPGRADE] Double-Weighting System: 실측 리턴 규모(|y_ev|)를
+            # 가중치에 결합하여 노이즈 횡보 구간을 억제하고 강한 추세 구간 집중 학습
+            ev_val = np.float32(labels.signed_net_ret[t, col])
+            raw_w = np.float32(labels.sample_weight[t, col])
+            double_w = raw_w * (np.float32(1.0) + np.float32(2.0) * np.abs(ev_val))
+
             x_t.append(feat.astype(np.float32, copy=False))
             rank_t.append(np.int32(labels.relevance[t, col]))
-            ev_t.append(np.float32(labels.signed_net_ret[t, col]))
-            w_t.append(np.float32(labels.sample_weight[t, col]))
+            ev_t.append(ev_val)
+            w_t.append(double_w)
             i_t.append((t, int(col)))
             group_count += 1
         if group_count >= min_group_size:

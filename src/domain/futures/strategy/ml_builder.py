@@ -51,7 +51,14 @@ def build_ml_strategy_alpha(
     cfg: StrategyConfig,
 ) -> pd.DataFrame:
     """Build ML strategy alpha panel."""
-    ml_cfg = cfg.ml
+    # [ML-UPGRADE] LightGBM 트리가 충분히 쪼개질 수 있도록 런타임 규제를 완화하고 학습 능력을 제고합니다.
+    from dataclasses import replace
+    ml_cfg = replace(
+        cfg.ml,
+        lambda_l2=1.0,
+        min_data_in_leaf=30,
+        num_leaves=31,
+    )
     aligned = align_data_maps(data_maps=data_maps, symbols=symbols, tf=tf)
     if len(aligned.symbols) < ml_cfg.min_group_size:
         raise ValueError(
@@ -180,6 +187,13 @@ def build_ml_strategy_alpha(
                 continue
             sl = slice(offset, offset + g_int)
             ev_test[sl] -= np.mean(ev_test[sl], dtype=np.float32)
+            
+            # [ML-UPGRADE] Dynamic Cost Barrier Gate 적용
+            # 실질 round-trip 거래 비용 임계값을 넘지 못하는 애매한 시그널을 강제로 0 bps로 마스킹합니다.
+            from src.core.settings import FILLS_PER_ROUND_TRIP
+            barrier = np.float32(FILLS_PER_ROUND_TRIP * (ml_cfg.fee_bps + ml_cfg.slippage_bps) / 10000.0)
+            ev_test[sl] = np.where(np.abs(ev_test[sl]) >= barrier, ev_test[sl], np.float32(0.0))
+            
             offset += g_int
         fold_alpha = infer_fold_alpha(
             fold=fold,
