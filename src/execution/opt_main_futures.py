@@ -172,8 +172,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--strategy",
         type=str,
-        default="momentum_v0",
-        choices=["momentum_v0", "eh_st_v1"],
+        default="ml_lambdamart_v1",
+        choices=["momentum_v0", "eh_st_v1", "ml_lambdamart_v1"],
     )
     parser.add_argument("--skip-universe", action="store_true")
     parser.add_argument("--skip-data-sync", action="store_true")

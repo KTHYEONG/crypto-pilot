@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import numpy as np
 
-from src.domain.futures.strategy.sleeves.carry import CarrySleeve
-from src.domain.futures.strategy.sleeves.ts_momentum import TSMomentumSleeve
-from src.domain.futures.strategy.sleeves.xs_reversal import XSReversalSleeve
+from src.domain.futures.legacy.strategy_sleev.sleeves.carry import CarrySleeve
+from src.domain.futures.legacy.strategy_sleev.sleeves.ts_momentum import TSMomentumSleeve
+from src.domain.futures.legacy.strategy_sleev.sleeves.xs_reversal import XSReversalSleeve
 
 
 def test_xs_reversal_sleeve_basic() -> None:
@@ -34,9 +34,9 @@ def test_xs_reversal_sleeve_basic() -> None:
     # Valid from idx=6
     assert np.all(~np.isnan(sig[6:]))
 
-    # Asset 0: steadily goes up (10.0 -> 10.6 at idx=6). Reversal signal should be negative (bearish)
+    # Asset 0 steadily goes up. Reversal signal should be negative.
     assert sig[6, 0] < 0.0
-    # Asset 1: steadily goes down (20.0 -> 18.3 at idx=6). Reversal signal should be positive (bullish)
+    # Asset 1 steadily goes down. Reversal signal should be positive.
     assert sig[6, 1] > 0.0
 
 
@@ -76,7 +76,7 @@ def test_ts_momentum_sleeve_basic() -> None:
     assert np.all(np.isnan(sig[:3]))
     assert np.all(~np.isnan(sig[3:]))
 
-    # For t=3: return from close[0] to close[2] (10.0 -> 10.2 for asset 0 (momentum > 0), 10.0 -> 9.8 for asset 1 (momentum < 0))
+    # For t=3, asset 0 momentum is positive and asset 1 momentum is negative.
     assert sig[3, 0] > 0.0
     assert sig[3, 1] < 0.0
 
@@ -104,4 +104,3 @@ def test_carry_sleeve_basic() -> None:
 
     # Ensure NaN values simply carry forward previous state
     assert np.allclose(sig[3], sig[2])
-
