@@ -400,6 +400,10 @@ def _run_optimization_stage(
         data_stage.valid_symbols,
         OPT_FUTURES_CONFIG,
     )
+    import os
+    physical_cores = max(1, (os.cpu_count() or 4) // 2)
+    safe_workers_b = min(4, physical_cores)
+
     opt_req = OptimizationRequest(
         data_maps=data_stage.data_maps,
         symbols=data_stage.valid_symbols,
@@ -416,10 +420,10 @@ def _run_optimization_stage(
         seed=seed,
         resume=resume,
         strategy_mode=(run_config.strategy is not None),
-        n_trials_a1=int(run_config.trials),
-        n_trials_a2=int(run_config.trials),
-        n_trials_b=int(run_config.trials),
-        n_workers_b=1,
+        n_trials_a1=max(1, int(run_config.trials * 0.5)),
+        n_trials_a2=max(1, int(run_config.trials * 0.2)),
+        n_trials_b=max(1, int(run_config.trials * 0.3)),
+        n_workers_b=safe_workers_b,
         enqueue_seeds=None,
         target_seeds=[seed],
     )
@@ -429,7 +433,7 @@ def _run_optimization_stage(
         phase_workers={
             "phase_a1": max(1, ml_n_jobs),
             "phase_a2": max(1, ml_n_jobs),
-            "phase_b": 1,
+            "phase_b": safe_workers_b,
         },
         seed=seed,
         storage_url=storage_url,
@@ -437,6 +441,51 @@ def _run_optimization_stage(
     opt_res = run_optimization(opt_req)
     study_ml = opt_res.study_ml
     best_trial = opt_res.best_trial
+
+    # ------------------ PROFILE SUMMARY REPORT ------------------
+    try:
+        if study_ml is not None:
+            import numpy as np
+            import optuna
+            all_trials = study_ml.get_trials(deepcopy=False)
+            valid_trials = [t for t in all_trials if t.state in (optuna.trial.TrialState.COMPLETE, optuna.trial.TrialState.PRUNED)]
+            if valid_trials:
+                c_times = [float(t.user_attrs.get("prof_compose", 0.0)) for t in valid_trials if "prof_compose" in t.user_attrs]
+                p_times = [float(t.user_attrs.get("prof_prep", 0.0)) for t in valid_trials if "prof_prep" in t.user_attrs]
+                pa_times = [float(t.user_attrs.get("prof_prep_align", 0.0)) for t in valid_trials if "prof_prep_align" in t.user_attrs]
+                pc_times = [float(t.user_attrs.get("prof_prep_constraint", 0.0)) for t in valid_trials if "prof_prep_constraint" in t.user_attrs]
+                e_times = [float(t.user_attrs.get("prof_exec", 0.0)) for t in valid_trials if "prof_exec" in t.user_attrs]
+                m_times = [float(t.user_attrs.get("prof_metrics", 0.0)) for t in valid_trials if "prof_metrics" in t.user_attrs]
+                mp_times = [float(t.user_attrs.get("prof_metrics_pure", 0.0)) for t in valid_trials if "prof_metrics_pure" in t.user_attrs]
+                md_times = [float(t.user_attrs.get("prof_metrics_db_io", 0.0)) for t in valid_trials if "prof_metrics_db_io" in t.user_attrs]
+                
+                mean_c = float(np.mean(c_times)) if c_times else 0.0
+                mean_p = float(np.mean(p_times)) if p_times else 0.0
+                mean_pa = float(np.mean(pa_times)) if pa_times else 0.0
+                mean_pc = float(np.mean(pc_times)) if pc_times else 0.0
+                mean_e = float(np.mean(e_times)) if e_times else 0.0
+                mean_m = float(np.mean(m_times)) if m_times else 0.0
+                mean_mp = float(np.mean(mp_times)) if mp_times else 0.0
+                mean_md = float(np.mean(md_times)) if md_times else 0.0
+                total_mean = mean_c + mean_p + mean_e + mean_m
+                
+                if total_mean > 0:
+                    _logger.info("=" * 60)
+                    _logger.info(" [PROFILING SUMMARY] Strategy Backtest Performance Profiling (n_trials=%d)", len(valid_trials))
+                    _logger.info("  1. Signal Compose   : %6.2f ms (%5.1f%%)", mean_c * 1000.0, (mean_c / total_mean) * 100.0)
+                    _logger.info("  2. Backtest Prep    : %6.2f ms (%5.1f%%)", mean_p * 1000.0, (mean_p / total_mean) * 100.0)
+                    _logger.info("     - Data Align     : %6.2f ms (%5.1f%%)", mean_pa * 1000.0, (mean_pa / total_mean) * 100.0)
+                    _logger.info("     - Constraint Ck  : %6.2f ms (%5.1f%%)", mean_pc * 1000.0, (mean_pc / total_mean) * 100.0)
+                    _logger.info("  3. Numba Execution  : %6.2f ms (%5.1f%%)", mean_e * 1000.0, (mean_e / total_mean) * 100.0)
+                    _logger.info("  4. Metrics/Pruning  : %6.2f ms (%5.1f%%)", mean_m * 1000.0, (mean_m / total_mean) * 100.0)
+                    _logger.info("     - Pure Calc      : %6.2f ms (%5.1f%%)", mean_mp * 1000.0, (mean_mp / total_mean) * 100.0)
+                    _logger.info("     - SQLite WAL DB  : %6.2f ms (%5.1f%%)", mean_md * 1000.0, (mean_md / total_mean) * 100.0)
+                    _logger.info("  * Total Backtest/Tr : %6.2f ms", total_mean * 1000.0)
+                    _logger.info("=" * 60)
+    except Exception as e:
+        _logger.warning("Failed to calculate profile summary: %s", e)
+    # ------------------------------------------------------------
+
     if study_ml is None or best_trial is None:
         # quick-backtest has no active signal source by design, so every trial
         # prunes on zero trades; a clean prune-to-completion is a passing smoke.
