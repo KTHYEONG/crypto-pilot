@@ -58,3 +58,12 @@ def test_build_feature_panel_respects_eligibility_masks() -> None:
     panel = build_feature_panel(aligned, StrategyMLConfig(min_group_size=2))
     assert panel.valid_mask.shape == (4, 2)
     assert not panel.valid_mask[1, 1]
+
+
+def test_build_feature_panel_market_stats_use_finite_fallback_on_warmup_rows() -> None:
+    close = np.array([[100.0, 100.0], [101.0, 101.0], [102.0, 102.0], [103.0, 103.0]])
+    panel = build_feature_panel(_aligned(close), StrategyMLConfig(min_group_size=2))
+    median_idx = panel.feature_names.index("market_median_ret_6")
+    disp_idx = panel.feature_names.index("market_dispersion_6")
+    np.testing.assert_allclose(panel.values[:, :, median_idx], 0.0)
+    np.testing.assert_allclose(panel.values[:, :, disp_idx], 0.0)

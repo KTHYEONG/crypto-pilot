@@ -496,22 +496,22 @@ ENGINE_PARAM_SPACE_FUTURES: dict[str, dict[str, Any]] = {
 
 # Dynamic Universe Anchor Symbols
 FUTURES_ANCHOR_SYMBOLS: list[str] = [
-    "BTC/USDT",
-    "ETH/USDT",
+    "BTCUSDT",
+    "ETHUSDT",
 ]
 
 # Tier 2: Institutional Macro Index (Stable Universe for HMM)
 FUTURES_MACRO_INDEX_SYMBOLS: list[str] = [
-    "BTC/USDT",
-    "ETH/USDT",
-    "SOL/USDT",
-    "BNB/USDT",
-    "XRP/USDT",
-    "ADA/USDT",
-    "LINK/USDT",
-    "LTC/USDT",
-    "DOT/USDT",
-    "BCH/USDT",
+    "BTCUSDT",
+    "ETHUSDT",
+    "SOLUSDT",
+    "BNBUSDT",
+    "XRPUSDT",
+    "ADAUSDT",
+    "LINKUSDT",
+    "LTCUSDT",
+    "DOTUSDT",
+    "BCHUSDT",
 ]
 
 # This list will be overwritten by the dynamic screener

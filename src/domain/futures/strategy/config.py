@@ -130,7 +130,7 @@ class StrategyConfig:
 
     def __post_init__(self) -> None:
         """Validate top-level strategy name."""
-        if self.name not in {"momentum_v0", "eh_st_v1", "ml_lambdamart_v1"}:
+        if self.name not in {"momentum_v0", "eh_st_v1", "ml_lambdamart_v1", "xs_reversal"}:
             raise ValueError(f"unsupported strategy name: {self.name}")
 
 
@@ -143,11 +143,11 @@ class StrategyMLConfig:
     seed: int = 42
     n_jobs: int = 4
     min_group_size: int = 8
-    label_horizon_bars: int = 1
+    label_horizon_bars: int = 6
     train_months: int = 24
     valid_months: int = 3
     test_months: int = 3
-    purge_bars: int = 1
+    purge_bars: int = 6
     embargo_bars: int = 1
     max_features: int = 64
     alpha_clip_bps: float = 75.0
@@ -157,7 +157,7 @@ class StrategyMLConfig:
     learning_rate: float = 0.03
     num_leaves: int = 31
     max_depth: int = 6
-    min_data_in_leaf: int = 200
+    min_data_in_leaf: int = 50
     feature_fraction: float = 0.80
     bagging_fraction: float = 0.80
     lambda_l2: float = 5.0
@@ -183,5 +183,5 @@ class StrategyMLConfig:
             raise ValueError("num_leaves must be <= 31")
         if self.max_depth > 6:
             raise ValueError("max_depth must be <= 6")
-        if self.min_data_in_leaf < 100:
-            raise ValueError("min_data_in_leaf must be >= 100")
+        if self.min_data_in_leaf < 10:
+            raise ValueError("min_data_in_leaf must be >= 10")
