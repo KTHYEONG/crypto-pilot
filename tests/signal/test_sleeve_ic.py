@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import numpy as np
 
+from src.domain.futures.legacy.strategy_sleev.normalize import winsorized_cs_zscore
+from src.domain.futures.legacy.strategy_sleev.sleeves.xs_reversal import XSReversalSleeve
 from src.domain.futures.strategy.diagnostics import ic_summary, rolling_ic
-from src.domain.futures.strategy.normalize import winsorized_cs_zscore
-from src.domain.futures.strategy.sleeves.xs_reversal import XSReversalSleeve
 
 
 def test_sleeve_reversal_ic_and_lookahead() -> None:
-    """Tests the XSReversalSleeve on synthetic mean-reverting data to verify edge, no look-ahead leak, and turnover."""
+    """Tests XSReversalSleeve edge, look-ahead, and turnover on mean-reverting data."""
     # 1. Synthesize 300 steps and 10 assets with strong mean-reversion
     # Simple AR(1) process with negative phi: x_t = -0.5 * x_{t-1} + noise
     np.random.seed(42)
@@ -41,14 +41,19 @@ def test_sleeve_reversal_ic_and_lookahead() -> None:
 
     # Reversal signal should yield POSITIVE IC on mean-reverting data
     # (Since signal is negative of recent return, and return is about to reverse)
-    print(f"\n[REVERSAL IC SUMMARY] mean_ic={summary['mean_ic']:.4f}, t_stat={summary['t_stat']:.4f}")
-    assert summary["mean_ic"] > 0.02, f"Mean IC must pass gate (>0.02), got {summary['mean_ic']:.4f}"
+    print(
+        f"\n[REVERSAL IC SUMMARY] mean_ic={summary['mean_ic']:.4f}, t_stat={summary['t_stat']:.4f}"
+    )
+    assert summary["mean_ic"] > 0.02, (
+        f"Mean IC must pass gate (>0.02), got {summary['mean_ic']:.4f}"
+    )
     assert summary["t_stat"] > 2.0, f"T-stat must pass gate (>2.0), got {summary['t_stat']:.4f}"
 
     # 5. Look-ahead leak detection
-    # If look-ahead is absent, the correlation of sig[t] with fwd_ret[t] (which is close[t+1]/close[t] - 1)
-    # should be high due to mean-reversion, but correlation of sig[t] with hist_ret[t] (which is close[t]/close[t-1]-1)
-    # should NOT leak future information.
+    # If look-ahead is absent, the correlation of sig[t] with fwd_ret[t]
+    # (close[t+1]/close[t] - 1) should be high due to mean-reversion.
+    # The correlation of sig[t] with hist_ret[t] (close[t]/close[t-1] - 1)
+    # should not leak future information.
     # More formally, let's verify that future data changes (e.g. at t+2) do not impact sig[t].
     prices_mod = prices.copy()
     prices_mod[150:] += 10.0  # Shock the future
