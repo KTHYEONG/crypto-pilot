@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import numpy as np
 from _pytest.logging import LogCaptureFixture
 from _pytest.monkeypatch import MonkeyPatch
+from numpy.typing import NDArray
 
 from src.domain.futures.strategy.config import StrategyConfig, StrategyMLConfig
 from src.domain.futures.strategy.contracts import (
@@ -148,5 +149,132 @@ def test_build_ml_strategy_alpha_emits_orchestration_tags(
     assert "[ML-RANKER]" in caplog.text
     assert "[ML-CALIB]" in caplog.text
     assert "[ML-OOS]" in caplog.text
+    assert float(panel["alpha_long"].sum()) > 0.0
+    assert float(panel["alpha_short"].sum()) > 0.0
+
+
+def test_build_ml_strategy_alpha_filters_nonfinite_and_clips_test_outlier(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    datetimes = np.array(
+        [
+            np.datetime64("2024-01-01T00:00:00"),
+            np.datetime64("2024-01-01T04:00:00"),
+            np.datetime64("2024-01-01T08:00:00"),
+            np.datetime64("2024-01-01T12:00:00"),
+        ],
+        dtype="datetime64[ns]",
+    )
+    symbols = ("BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT")
+    feature_names = tuple(f"f{i}" for i in range(20))
+    values: NDArray[np.float32] = np.ones((4, 5, 20), dtype=np.float32)
+    values[2, 0, 0] = np.nan
+    values[3, 4, 1] = 1_000_000.0
+    fp = FeaturePanel(
+        datetimes=datetimes,
+        symbols=symbols,
+        values=values,
+        feature_names=feature_names,
+        valid_mask=np.ones((4, 5), dtype=bool),
+    )
+    lp = LabelPanel(
+        long_net_ret=np.zeros((4, 5), dtype=np.float32),
+        short_net_ret=np.zeros((4, 5), dtype=np.float32),
+        signed_net_ret=np.tile(
+            np.array([-2e-3, -1e-3, 0.0, 1e-3, 2e-3], dtype=np.float32),
+            (4, 1),
+        ),
+        relevance=np.tile(np.array([0, 1, 2, 3, 4], dtype=np.int32), (4, 1)),
+        sample_weight=np.ones((4, 5), dtype=np.float32),
+        eligible_mask=np.ones((4, 5), dtype=bool),
+    )
+    fold = FoldSpec(
+        fold_id=0,
+        train_start=0,
+        train_end=1,
+        valid_start=1,
+        valid_end=2,
+        test_start=2,
+        test_end=4,
+        purge_bars=1,
+        embargo_bars=1,
+    )
+    captured: dict[str, LongMatrixDataset] = {}
+
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.ml_builder.align_data_maps",
+        lambda data_maps, symbols, tf: SimpleNamespace(symbols=list(symbols)),
+    )
+    monkeypatch.setattr("src.domain.futures.strategy.ml_builder.build_feature_panel", lambda *_: fp)
+    monkeypatch.setattr("src.domain.futures.strategy.ml_builder.build_label_panel", lambda *_: lp)
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.ml_builder.make_walk_forward_folds",
+        lambda *_: [fold],
+    )
+
+    def _fit_ranker(
+        *,
+        train: LongMatrixDataset,
+        valid: LongMatrixDataset,
+        cfg: StrategyMLConfig,
+    ) -> SimpleNamespace:
+        del cfg
+        captured["train"] = train
+        captured["valid"] = valid
+        return SimpleNamespace(model=object())
+
+    def _predict_rank_score(_model: object, ds: LongMatrixDataset) -> NDArray[np.float32]:
+        captured[f"rank_input_{len(captured)}"] = ds
+        return np.asarray(np.linspace(-0.5, 0.5, ds.X.shape[0], dtype=np.float32))
+
+    def _fit_quantile_calibrators(
+        *,
+        train: LongMatrixDataset,
+        valid: LongMatrixDataset,
+        rank_score_train: np.ndarray,
+        rank_score_valid: np.ndarray,
+        cfg: StrategyMLConfig,
+    ) -> SimpleNamespace:
+        del rank_score_train, rank_score_valid, cfg
+        captured["calib_train"] = train
+        captured["calib_valid"] = valid
+        return SimpleNamespace()
+
+    def _predict_conservative_ev(
+        _models: object,
+        dataset: LongMatrixDataset,
+        _rank_score: NDArray[np.float32],
+        _cfg: StrategyMLConfig,
+    ) -> NDArray[np.float32]:
+        captured["test"] = dataset
+        return np.asarray(np.array([0.20, -0.10, 0.30, -0.40, 0.15] * 2, dtype=np.float32))
+
+    monkeypatch.setattr("src.domain.futures.strategy.ml_builder.fit_ranker", _fit_ranker)
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.ml_builder.predict_rank_score",
+        _predict_rank_score,
+    )
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.ml_builder.fit_quantile_calibrators",
+        _fit_quantile_calibrators,
+    )
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.ml_builder.predict_conservative_ev",
+        _predict_conservative_ev,
+    )
+
+    cfg = StrategyConfig(
+        name="ml_lambdamart_v1",
+        ml=StrategyMLConfig(min_group_size=2, train_months=1, valid_months=1, test_months=1),
+    )
+    panel = build_ml_strategy_alpha(data_maps={}, symbols=list(symbols), tf="4h", cfg=cfg)
+
+    for split in ("train", "valid", "test", "calib_train", "calib_valid"):
+        assert split in captured
+        assert np.all(np.isfinite(captured[split].X))
+    assert captured["test"].X.shape == (10, 20)
+    assert float(np.max(captured["test"].X)) == 1.0
+    assert float(np.min(captured["test"].X)) == 1.0
+    assert np.all(np.isfinite(panel[["alpha_long", "alpha_short"]].to_numpy()))
     assert float(panel["alpha_long"].sum()) > 0.0
     assert float(panel["alpha_short"].sum()) > 0.0
