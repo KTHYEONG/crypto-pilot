@@ -5,10 +5,10 @@ import pytest
 from src.application.futures.optimization.config import build_run_config_from_args
 
 
-def test_build_run_config_defaults_to_strategy_momentum_v0() -> None:
+def test_build_run_config_defaults_to_strategy_ml_lambdamart_v1() -> None:
     cfg = build_run_config_from_args({"tf": "4h", "trials": 1})
     assert cfg.mode == "strategy"
-    assert cfg.strategy == "momentum_v0"
+    assert cfg.strategy == "ml_lambdamart_v1"
 
 
 def test_build_run_config_accepts_quick_backtest_mode() -> None:
@@ -64,3 +64,16 @@ def test_build_run_config_rejects_strategy_in_quick_backtest() -> None:
                 "strategy": "momentum_v0",
             }
         )
+
+
+def test_build_run_config_accepts_ml_lambdamart_v1_strategy() -> None:
+    cfg = build_run_config_from_args(
+        {
+            "mode": "strategy",
+            "strategy": "ml_lambdamart_v1",
+            "tf": "4h",
+            "trials": 1,
+        }
+    )
+    assert cfg.mode == "strategy"
+    assert cfg.strategy == "ml_lambdamart_v1"

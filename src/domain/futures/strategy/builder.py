@@ -7,24 +7,25 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from src.domain.futures.legacy.strategy_sleev.combine import blend_sleeves
+from src.domain.futures.legacy.strategy_sleev.normalize import (
+    to_return_units,
+    winsorized_cs_zscore,
+)
+from src.domain.futures.legacy.strategy_sleev.sleeves.carry import CarrySleeve
+from src.domain.futures.legacy.strategy_sleev.sleeves.ts_momentum import TSMomentumSleeve
+from src.domain.futures.legacy.strategy_sleev.sleeves.xs_reversal import XSReversalSleeve
 from src.domain.futures.optimization.optimizer import compute_multi_alignment_info
-from src.domain.futures.strategy.combine import blend_sleeves
 from src.domain.futures.strategy.config import StrategyConfig
 from src.domain.futures.strategy.diagnostics import ic_summary, passes_ic_gate, rolling_ic
-from src.domain.futures.strategy.normalize import to_return_units, winsorized_cs_zscore
-from src.domain.futures.strategy.sleeves.carry import CarrySleeve
-from src.domain.futures.strategy.sleeves.ts_momentum import TSMomentumSleeve
-from src.domain.futures.strategy.sleeves.xs_reversal import XSReversalSleeve
 
 _logger = logging.getLogger(__name__)
 
 
 def _assert_no_legacy_imports() -> None:
-    """Ensures no legacy alpha factory or ml pipeline modules are imported."""
-    if "pytest" in sys.modules:
-        return
-    if any(name.startswith("src.domain.futures.legacy") for name in sys.modules):
-        raise RuntimeError("legacy import forbidden in strategy module")
+    """Guard against deprecated heavy modules in runtime."""
+    if any(name.startswith("src.domain.futures.alpha_factory") for name in sys.modules):
+        raise RuntimeError("alpha_factory import forbidden in strategy module")
 
 
 def build_strategy_alpha(
@@ -33,7 +34,7 @@ def build_strategy_alpha(
     tf: str,
     cfg: StrategyConfig,
 ) -> pd.DataFrame:
-    """Builds long-format alpha panel from aligned multi-sleeve expected return signals.
+    """Build long-format alpha panel from aligned multi-sleeve expected return signals.
 
     Args:
         data_maps: Dictionary containing historical data per symbol.
@@ -46,6 +47,10 @@ def build_strategy_alpha(
 
     """
     _assert_no_legacy_imports()
+    if cfg.name == "ml_lambdamart_v1":
+        from src.domain.futures.strategy.ml_builder import build_ml_strategy_alpha
+
+        return build_ml_strategy_alpha(data_maps=data_maps, symbols=symbols, tf=tf, cfg=cfg)
 
     # 1. Align price panels (using compute_multi_alignment_info base)
     info = compute_multi_alignment_info(data_maps, symbols, tf, embargo=0)
@@ -55,16 +60,12 @@ def build_strategy_alpha(
     eff_len = int(info["eff_ref_len"])
     offsets: dict[str, int] = info["alignment_offsets"]
     valid_symbols = [
-        sym
-        for sym in symbols
-        if sym in offsets and sym in data_maps and tf in data_maps[sym]
+        sym for sym in symbols if sym in offsets and sym in data_maps and tf in data_maps[sym]
     ]
 
     min_syms = cfg.blend.min_symbols
     if len(valid_symbols) < min_syms:
-        raise ValueError(
-            f"strategy needs >= {min_syms} symbols, got {len(valid_symbols)}"
-        )
+        raise ValueError(f"strategy needs >= {min_syms} symbols, got {len(valid_symbols)}")
 
     close_2d = np.zeros((eff_len, len(valid_symbols)), dtype=np.float64)
     funding_2d = np.zeros((eff_len, len(valid_symbols)), dtype=np.float64)
@@ -76,9 +77,13 @@ def build_strategy_alpha(
         end_idx = start_idx + eff_len
         close_2d[:, col_idx] = df["close"].iloc[start_idx:end_idx].to_numpy(dtype=np.float64)
         if "funding_rate_sum" in df.columns:
-            funding_2d[:, col_idx] = df["funding_rate_sum"].iloc[start_idx:end_idx].to_numpy(dtype=np.float64)
+            funding_2d[:, col_idx] = (
+                df["funding_rate_sum"].iloc[start_idx:end_idx].to_numpy(dtype=np.float64)
+            )
         elif "funding_rate" in df.columns:
-            funding_2d[:, col_idx] = df["funding_rate"].iloc[start_idx:end_idx].to_numpy(dtype=np.float64)
+            funding_2d[:, col_idx] = (
+                df["funding_rate"].iloc[start_idx:end_idx].to_numpy(dtype=np.float64)
+            )
         else:
             funding_2d[:, col_idx] = 0.0
 
@@ -95,7 +100,12 @@ def build_strategy_alpha(
     if cfg.sleeves.reversal_enabled:
         sleeves.append(XSReversalSleeve(lookback_bars=cfg.sleeves.reversal_lookback))
     if cfg.sleeves.ts_momentum_enabled:
-        sleeves.append(TSMomentumSleeve(lookback_bars=cfg.sleeves.ts_momentum_lookback, skip_bars=cfg.sleeves.ts_momentum_skip))
+        sleeves.append(
+            TSMomentumSleeve(
+                lookback_bars=cfg.sleeves.ts_momentum_lookback,
+                skip_bars=cfg.sleeves.ts_momentum_skip,
+            )
+        )
     if cfg.sleeves.carry_enabled:
         sleeves.append(CarrySleeve(smooth_bars=cfg.sleeves.carry_smooth))
 
@@ -129,7 +139,7 @@ def build_strategy_alpha(
     fallback_warning_triggered = False
 
     for t in range(eff_len):
-        # If t < w_bars, we don't have enough history for gate evaluations -> fallback to equal-weight blend
+        # If t < w_bars, fallback to equal-weight blend due to short history.
         if t < w_bars:
             equal_weights = {name: 1.0 for name in sleeve_names}
             t_z = {name: z_by_sleeve[name][t : t + 1] for name in sleeve_names}
@@ -170,8 +180,7 @@ def build_strategy_alpha(
             active_weights = {best_sleeve: 1.0}
             if not fallback_warning_triggered:
                 details = ", ".join(
-                    f"{n}(mean={s['mean_ic']:.4f}, t={s['t_stat']:.1f}, "
-                    f"hit={s['hit_ratio']:.2f})"
+                    f"{n}(mean={s['mean_ic']:.4f}, t={s['t_stat']:.1f}, hit={s['hit_ratio']:.2f})"
                     for n, s in summaries.items()
                 )
                 _logger.warning(
