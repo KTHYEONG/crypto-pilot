@@ -156,8 +156,16 @@ def build_feature_panel(aligned: AlignedMarketData, cfg: StrategyMLConfig) -> Fe
         btc_idx = aligned.symbols.index("BTCUSDT")
     btc_ret_6 = np.repeat(ret_6[:, [btc_idx]], close_2d.shape[1], axis=1)
     btc_rv_18 = np.repeat(rv_18[:, [btc_idx]], close_2d.shape[1], axis=1)
-    market_median_base = np.nanmedian(ret_6, axis=1, keepdims=True)
-    market_dispersion_base = np.nanstd(ret_6, axis=1, keepdims=True)
+    # Warmup rows can be all-NaN for ret_6; compute row-wise stats without warnings.
+    market_median_base = np.zeros((close_2d.shape[0], 1), dtype=np.float64)
+    market_dispersion_base = np.zeros((close_2d.shape[0], 1), dtype=np.float64)
+    finite_ret6 = np.isfinite(ret_6)
+    for t in range(close_2d.shape[0]):
+        row = ret_6[t, finite_ret6[t]]
+        if row.size == 0:
+            continue
+        market_median_base[t, 0] = float(np.median(row))
+        market_dispersion_base[t, 0] = float(np.std(row))
     positive_breadth_base = np.nanmean(ret_6 > 0.0, axis=1, keepdims=True)
     market_median_ret_6 = np.repeat(market_median_base, close_2d.shape[1], axis=1)
     market_dispersion_6 = np.repeat(market_dispersion_base, close_2d.shape[1], axis=1)

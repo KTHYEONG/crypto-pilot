@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import Any, Literal, cast
 
 ActiveMode = Literal["quick-backtest", "strategy", "strategy-smoke"]
-ActiveStrategyName = Literal["momentum_v0", "eh_st_v1", "ml_lambdamart_v1"]
+ActiveStrategyName = Literal["momentum_v0", "eh_st_v1", "ml_lambdamart_v1", "xs_reversal"]
 SyncMode = Literal["full_history_master", "elite_fast"]
 
 _ACTIVE_MODES: frozenset[str] = frozenset({"quick-backtest", "strategy", "strategy-smoke"})
@@ -41,7 +41,7 @@ def parse_active_mode(mode: str) -> ActiveMode:
 def _parse_strategy_name(strategy: str | None) -> ActiveStrategyName | None:
     if strategy is None:
         return None
-    if strategy not in ("momentum_v0", "eh_st_v1", "ml_lambdamart_v1"):
+    if strategy not in ("momentum_v0", "eh_st_v1", "ml_lambdamart_v1", "xs_reversal"):
         raise ValueError(f"unsupported strategy: {strategy}")
     return cast(ActiveStrategyName, strategy)
 
