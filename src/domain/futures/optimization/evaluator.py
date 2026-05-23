@@ -219,32 +219,42 @@ def calc_sortino_from_equity(equity_curve: np.ndarray, span_days: float) -> floa
     return float(cagr_decimal / annual_downside_dev)
 
 def calc_cvar5_loss_pct_from_equity(equity_curve: np.ndarray) -> float:
-    """Portfolio CVaR(5%) as positive loss %."""
+    """Portfolio CVaR(5%) as positive loss % - optimized with O(N) np.partition."""
     if equity_curve.size < 2:
         return 0.0
     eq = np.asarray(equity_curve, dtype=np.float64)
     r = np.diff(eq) / np.clip(eq[:-1], 1e-9, None)
     if r.size == 0:
         return 0.0
-    sorted_r = np.sort(r)
-    k = max(1, int(len(sorted_r) * 0.05))
-    worst = sorted_r[:k]
+    k = max(1, int(r.size * 0.05))
+    # 정렬 비용을 없애기 위해 O(N) 파티셔닝 적용
+    r_partitioned = np.partition(r, k)
+    worst = r_partitioned[:k]
     return float(-np.mean(worst) * 100.0)
 
 def calc_max_underwater_days_from_equity(equity_curve: np.ndarray, hours_per_bar: float) -> float:
-    """Longest stretch below running peak, converted to days."""
+    """Longest stretch below running peak, computed with highly optimized 0-loop NumPy logic."""
     if equity_curve.size < 2:
         return 0.0
     peak = np.maximum.accumulate(equity_curve)
-    underwater = equity_curve < peak
-    max_run = 0
-    cur = 0
-    for u in underwater:
-        if u:
-            cur += 1
-            max_run = max(max_run, cur)
-        else:
-            cur = 0
+    underwater = (equity_curve < peak).astype(np.int8)
+    
+    # 0(Peak를 갱신하거나 도달한 지점)의 인덱스 추출
+    zero_indices = np.where(underwater == 0)[0]
+    
+    if zero_indices.size == 0:
+        # 단 한 번도 peak를 갱신하지 못하고 계속 underwater 상태였던 경우
+        max_run = underwater.size
+    else:
+        # 양 끝단 처리를 위해 -1과 배열 끝 인덱스를 패딩 주입
+        padded_zeros = np.empty(zero_indices.size + 2, dtype=np.int64)
+        padded_zeros[0] = -1
+        padded_zeros[1:-1] = zero_indices
+        padded_zeros[-1] = underwater.size
+        
+        # 0 사이의 간격(연속된 1의 길이) 중 최댓값 산출 (np.diff - 1)
+        max_run = np.max(np.diff(padded_zeros) - 1)
+        
     return float(max_run * hours_per_bar / 24.0)
 
 def calc_ulcer_index_from_equity(equity_curve: np.ndarray) -> float:
