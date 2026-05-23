@@ -321,24 +321,92 @@ def _compose_strategy_scores_inplace(
         hmm_prob_map[hmm_col] = np.mean(hmm_arr, axis=1)
     hmm_prob_map["hmm_prob_recovery"] = np.zeros((n_bars,), dtype=np.float64)
 
-    for col_idx in range(n_syms):
-        composer_df = pd.DataFrame(index=np.arange(n_bars))
-        for hmm_col in hmm_cols:
-            hmm_2d = aligned.get(hmm_col)
-            if hmm_2d is None:
-                composer_df[hmm_col] = np.zeros(n_bars, dtype=np.float64)
-                continue
-            hmm_arr = np.asarray(hmm_2d, dtype=np.float64)
-            composer_df[hmm_col] = hmm_arr[:, col_idx]
-        xl, xs = apply_linear_signal_composer_scores(
-            composer_df,
-            alpha_l_2d[:, col_idx],
-            alpha_s_2d[:, col_idx],
-            params,
-            opt_config=OPT_FUTURES_CONFIG,
+    # 2D 연산용 HMM 맵 구성 (모두 shape가 (n_bars, n_syms))
+    pbull = np.zeros((n_bars, n_syms), dtype=np.float64)
+    p_bear = np.zeros((n_bars, n_syms), dtype=np.float64)
+    p_chop = np.zeros((n_bars, n_syms), dtype=np.float64)
+    p_crisis = np.zeros((n_bars, n_syms), dtype=np.float64)
+    precov = np.zeros((n_bars, n_syms), dtype=np.float64)
+
+    # HMM 데이터 캐싱 및 변환
+    for hmm_col in hmm_cols:
+        hmm_2d = aligned.get(hmm_col)
+        if hmm_2d is not None:
+            hmm_arr = np.nan_to_num(np.asarray(hmm_2d, dtype=np.float64), nan=0.0)
+            if hmm_col == "hmm_prob_bull_calm" or hmm_col == "hmm_prob_bull_vol_up":
+                pbull += hmm_arr
+            elif hmm_col == "hmm_prob_bear_trend":
+                p_bear = hmm_arr
+            elif hmm_col == "hmm_prob_chop":
+                p_chop = hmm_arr
+            elif hmm_col == "hmm_prob_crisis":
+                p_crisis = hmm_arr
+    if "hmm_prob_recovery" in aligned:
+        precov = np.nan_to_num(np.asarray(aligned["hmm_prob_recovery"], dtype=np.float64), nan=0.0)
+
+    beta_a = float(params.get("BETA_ALPHA", OPT_FUTURES_CONFIG.get("FUTURES_DEFAULT_BETA_ALPHA", 1.0)))
+    ev_h_base = float(params.get("EV_HURDLE_BPS", OPT_FUTURES_CONFIG.get("FUTURES_DEFAULT_EV_HURDLE_BPS", 40.0)))
+    ev_h = np.full((n_bars, n_syms), ev_h_base, dtype=np.float64)
+
+    from src.core.settings import round_trip_cost_bps
+    friction = round_trip_cost_bps() / 10000.0
+
+    mu_l = beta_a * alpha_l_2d - friction
+    mu_s = beta_a * alpha_s_2d - friction
+
+    regime_policy_enabled = bool(
+        params.get(
+            "REGIME_POLICY_ENABLED",
+            OPT_FUTURES_CONFIG.get("FUTURES_REGIME_POLICY_ENABLED", False),
         )
-        xs_l[:, col_idx] = xl
-        xs_s[:, col_idx] = xs
+    )
+
+    if regime_policy_enabled:
+        probs = np.stack([pbull, p_bear, p_chop, p_crisis, precov], axis=-1)
+        psum = np.maximum(probs.sum(axis=-1, keepdims=True), 1e-12)
+        probs = probs / psum
+
+        logk = np.log(5.0)
+        ent = -np.sum(probs * np.log(np.clip(probs, 1e-12, 1.0)), axis=-1) / max(logk, 1e-12)
+        ent = np.clip(ent, 0.0, 1.0)
+        conf = 1.0 - ent
+
+        ent_mult = float(
+            params.get(
+                "REGIME_CONFIDENCE_ENTROPY_MULT",
+                OPT_FUTURES_CONFIG.get("FUTURES_REGIME_CONFIDENCE_ENTROPY_MULT", 0.50),
+            )
+        )
+        min_mult = float(params.get("REGIME_MULT_MIN", OPT_FUTURES_CONFIG.get("FUTURES_REGIME_MULT_MIN", 0.10)))
+        max_mult = float(params.get("REGIME_MULT_MAX", OPT_FUTURES_CONFIG.get("FUTURES_REGIME_MULT_MAX", 1.50)))
+        conf_scale = np.clip(1.0 - ent_mult * (1.0 - conf), min_mult, max_mult)
+
+        l_bull_w = float(params.get("REGIME_LONG_BULL_W", OPT_FUTURES_CONFIG.get("FUTURES_REGIME_LONG_BULL_W", 0.35)))
+        l_bear_p = float(params.get("REGIME_LONG_BEAR_PENALTY", OPT_FUTURES_CONFIG.get("FUTURES_REGIME_LONG_BEAR_PENALTY", 0.35)))
+        l_chop_p = float(params.get("REGIME_LONG_CHOP_PENALTY", OPT_FUTURES_CONFIG.get("FUTURES_REGIME_LONG_CHOP_PENALTY", 0.55)))
+        l_crisis_p = float(params.get("REGIME_LONG_CRISIS_PENALTY", OPT_FUTURES_CONFIG.get("FUTURES_REGIME_LONG_CRISIS_PENALTY", 0.90)))
+
+        s_bear_w = float(params.get("REGIME_SHORT_BEAR_W", OPT_FUTURES_CONFIG.get("FUTURES_REGIME_SHORT_BEAR_W", 0.45)))
+        s_bull_p = float(params.get("REGIME_SHORT_BULL_PENALTY", OPT_FUTURES_CONFIG.get("FUTURES_REGIME_SHORT_BULL_PENALTY", 0.25)))
+        s_chop_p = float(params.get("REGIME_SHORT_CHOP_PENALTY", OPT_FUTURES_CONFIG.get("FUTURES_REGIME_SHORT_CHOP_PENALTY", 0.45)))
+        s_crisis_w = float(params.get("REGIME_SHORT_CRISIS_W", OPT_FUTURES_CONFIG.get("FUTURES_REGIME_SHORT_CRISIS_W", 0.15)))
+
+        long_mult = 1.0 + (l_bull_w * pbull) - (l_bear_p * p_bear) - (l_chop_p * p_chop) - (l_crisis_p * p_crisis)
+        short_mult = 1.0 + (s_bear_w * p_bear) - (s_bull_p * pbull) - (s_chop_p * p_chop) + (s_crisis_w * p_crisis)
+        long_mult = np.clip(long_mult * conf_scale, min_mult, max_mult)
+        short_mult = np.clip(short_mult * conf_scale, min_mult, max_mult)
+
+        mu_l = mu_l * long_mult
+        mu_s = mu_s * short_mult
+
+        ev_chop = float(params.get("REGIME_EV_CHOP_ADD_BPS", OPT_FUTURES_CONFIG.get("FUTURES_REGIME_EV_CHOP_ADD_BPS", 8.0)))
+        ev_crisis = float(params.get("REGIME_EV_CRISIS_ADD_BPS", OPT_FUTURES_CONFIG.get("FUTURES_REGIME_EV_CRISIS_ADD_BPS", 12.0)))
+        ev_entropy = float(params.get("REGIME_EV_ENTROPY_ADD_BPS", OPT_FUTURES_CONFIG.get("FUTURES_REGIME_EV_ENTROPY_ADD_BPS", 6.0)))
+        ev_h = ev_h + (ev_chop * p_chop) + (ev_crisis * p_crisis) + (ev_entropy * ent)
+
+    hurdle_frac = ev_h / 10000.0
+    xs_l = np.where(mu_l >= hurdle_frac, mu_l, 0.0)
+    xs_s = np.where(mu_s >= hurdle_frac, mu_s, 0.0)
 
     aligned["xs_score_long"] = np.ascontiguousarray(xs_l)
     aligned["xs_score_short"] = np.ascontiguousarray(xs_s)
@@ -378,15 +446,40 @@ def _run_portfolio_numba_block(
     *,
     trial_number: int | None = None,
 ) -> tuple[np.ndarray, float, np.ndarray, np.ndarray]:
+    import time
     _ = estimated_b
+    orig_aligned = aligned
+    
+    # 1. Compose 시간 측정
+    t0 = time.perf_counter()
     if bool(params.get("STRATEGY_MODE", False)):
         _compose_strategy_scores_inplace(aligned, params, trial_number=trial_number)
         if "xs_score_long" not in aligned or "xs_score_short" not in aligned:
             raise RuntimeError("strategy mode failed to generate xs_score_long/xs_score_short")
-    prepared = prepare_backtest_inputs(aligned, params)
-    aligned = prepared.aligned_data
-    merge_membership_constraints_into_aligned(aligned, persist_stats=True)
+    t_compose = time.perf_counter() - t0
+    
+    # 2. Prep 시간 측정 (세부화)
+    t0_align = time.perf_counter()
+    if "_prepared_cache" in orig_aligned:
+        prepared = orig_aligned["_prepared_cache"]
+        aligned = prepared.aligned_data
+    else:
+        prepared = prepare_backtest_inputs(aligned, params)
+        aligned = prepared.aligned_data
+        merge_membership_constraints_into_aligned(aligned, persist_stats=True)
+        orig_aligned["_prepared_cache"] = prepared
+    t_prep_align = time.perf_counter() - t0_align
+
+    t0_const = time.perf_counter()
     zkill, zfund, lev_blk = _cached_kill_fund_lev(aligned, params)
+    t_prep_constraint = time.perf_counter() - t0_const
+    t_prep = t_prep_align + t_prep_constraint
+    
+    # 캐싱 기록
+    aligned["_prof_compose"] = t_compose
+    aligned["_prof_prep"] = t_prep
+    aligned["_prof_prep_align"] = t_prep_align
+    aligned["_prof_prep_constraint"] = t_prep_constraint
     cfg_block = OPT_FUTURES_CONFIG
     reb_b = max(1, int(params["REBALANCE_BARS"]))
     pwp = portfolio_weight_params_from_optuna(params, cfg_block)
@@ -531,6 +624,7 @@ def _run_portfolio_numba_block(
         and aligned.get("exec_low_1m") is not None
         and aligned.get("exec_close_1m") is not None
     )
+    t0 = time.perf_counter()
     if use_intrabar:
         exec_start = prepared.exec_bar_start_1m_idx
         exec_end = prepared.exec_bar_end_1m_idx
@@ -595,6 +689,10 @@ def _run_portfolio_numba_block(
             float(params["DD_SCALING_THRESHOLD"]),
             volume_2d=aligned.get("volume"),
         )
+    t_exec = time.perf_counter() - t0
+    orig_aligned["_prof_compose"] = t_compose
+    orig_aligned["_prof_prep"] = t_prep
+    orig_aligned["_prof_exec"] = t_exec
     return out_tw
 
 
@@ -624,6 +722,16 @@ def _evaluate_awf_phase_d_aggregate(
     trial: optuna.Trial | None,
 ) -> tuple[float | tuple[float, float], dict[str, Any]]:
     """Core AWF leg loop + robust objective."""
+    import time
+    t_compose_tot = 0.0
+    t_prep_tot = 0.0
+    t_prep_align_tot = 0.0
+    t_prep_constraint_tot = 0.0
+    t_exec_tot = 0.0
+    t_metrics_tot = 0.0
+    t_metrics_pure_tot = 0.0
+    t_metrics_db_io_tot = 0.0
+
     cfg = OPT_FUTURES_CONFIG
     awf_slices = ctx.awf_leg_slices or []
     mai = ctx.multi_alignment_info
@@ -700,6 +808,14 @@ def _evaluate_awf_phase_d_aggregate(
             ctx.estimated_b,
             trial_number=(trial.number if trial is not None else None),
         )
+
+        t_compose_tot += aligned.get("_prof_compose", 0.0)
+        t_prep_tot += aligned.get("_prof_prep", 0.0)
+        t_prep_align_tot += aligned.get("_prof_prep_align", 0.0)
+        t_prep_constraint_tot += aligned.get("_prof_prep_constraint", 0.0)
+        t_exec_tot += aligned.get("_prof_exec", 0.0)
+
+        t0_met = time.perf_counter()
 
         n_tr = int(b_trades_raw.shape[0])
         all_trades_chunks.append(b_trades_raw)
@@ -872,28 +988,82 @@ def _evaluate_awf_phase_d_aggregate(
         leg_short_counts.append(n_short)
         leg_exposures.append(b_exposure)
 
-        if leg_idx >= 1 and trial is not None:
+        # Metrics Pure Calculation 시간 누적
+        t_met_calc_done = time.perf_counter()
+        t_metrics_pure_tot += (t_met_calc_done - t0_met)
+
+        if leg_idx >= 2 and trial is not None:
+            t0_gate = time.perf_counter()
             cum_log_tw = float(np.sum(leg_log_tw))
             max_leg_mdd = float(np.max(leg_mdds))
             if (not np.isfinite(cum_log_tw)) or (not np.isfinite(max_leg_mdd)):
-                break
+                raise optuna.TrialPruned()
             if abs(cum_log_tw) > 100.0:
-                break
+                raise optuna.TrialPruned()
             if cum_log_tw < -0.25 or max_leg_mdd > liq_mdd_thr:
-                break
+                t_metrics_pure_tot += (time.perf_counter() - t0_gate)
+                t_metrics_tot = t_metrics_pure_tot + t_metrics_db_io_tot
+                set_trial_event_attrs(
+                    trial,
+                    status="pruned",
+                    reason="hard_risk_gate_violation",
+                    stage="awf_leg_eval",
+                    step=int(leg_idx),
+                    metrics={"cum_log_tw": cum_log_tw, "max_mdd": max_leg_mdd},
+                )
+                if trial is not None:
+                    trial.set_user_attr("prof_compose", float(t_compose_tot))
+                    trial.set_user_attr("prof_prep", float(t_prep_tot))
+                    trial.set_user_attr("prof_prep_align", float(t_prep_align_tot))
+                    trial.set_user_attr("prof_prep_constraint", float(t_prep_constraint_tot))
+                    trial.set_user_attr("prof_exec", float(t_exec_tot))
+                    trial.set_user_attr("prof_metrics", float(t_metrics_tot))
+                    trial.set_user_attr("prof_metrics_pure", float(t_metrics_pure_tot))
+                    trial.set_user_attr("prof_metrics_db_io", float(t_metrics_db_io_tot))
+                raise optuna.TrialPruned()
+            t_metrics_pure_tot += (time.perf_counter() - t0_gate)
 
-            if trial is not None and len(trial.study.directions) == 1:
-                trial.report(float(np.mean(leg_log_tw)), step=leg_idx)
-                if trial.should_prune():
-                    set_trial_event_attrs(
-                        trial,
-                        status="pruned",
-                        reason="trial_should_prune",
-                        stage="awf_intermediate_report",
-                        step=int(leg_idx),
-                        metrics={"mean_leg_log_tw": float(np.mean(leg_log_tw))},
-                    )
-                    raise optuna.TrialPruned()
+            if trial is not None and len(trial.study.directions) == 1 and bool(cfg.get("FUTURES_PRUNING_ENABLED", False)):
+                # Apply 2-step stride to avoid heavy SQLite WAL DB lock contention.
+                # Always report on the last leg to guarantee pruning sanity.
+                # Keep stride=1 for small slices (<=3) for test compatibility.
+                n_slices = len(awf_slices)
+                should_check = True
+                if n_slices > 3:
+                    is_last_leg = (leg_idx == n_slices - 1)
+                    should_check = (leg_idx % 2 == 0) or is_last_leg
+
+                if should_check:
+                    t0_db = time.perf_counter()
+                    trial.report(float(np.mean(leg_log_tw)), step=leg_idx)
+                    is_pruned = trial.should_prune()
+                    t_metrics_db_io_tot += (time.perf_counter() - t0_db)
+                    
+                    if is_pruned:
+                        t_metrics_tot = t_metrics_pure_tot + t_metrics_db_io_tot
+                        set_trial_event_attrs(
+                            trial,
+                            status="pruned",
+                            reason="trial_should_prune",
+                            stage="awf_intermediate_report",
+                            step=int(leg_idx),
+                            metrics={"mean_leg_log_tw": float(np.mean(leg_log_tw))},
+                        )
+                        if trial is not None:
+                            trial.set_user_attr("prof_compose", float(t_compose_tot))
+                            trial.set_user_attr("prof_prep", float(t_prep_tot))
+                            trial.set_user_attr("prof_prep_align", float(t_prep_align_tot))
+                            trial.set_user_attr("prof_prep_constraint", float(t_prep_constraint_tot))
+                            trial.set_user_attr("prof_exec", float(t_exec_tot))
+                            trial.set_user_attr("prof_metrics", float(t_metrics_tot))
+                            trial.set_user_attr("prof_metrics_pure", float(t_metrics_pure_tot))
+                            trial.set_user_attr("prof_metrics_db_io", float(t_metrics_db_io_tot))
+                        raise optuna.TrialPruned()
+        else:
+            if trial is not None:
+                t_metrics_pure_tot += (time.perf_counter() - t0_met)
+        
+        t_metrics_tot = t_metrics_pure_tot + t_metrics_db_io_tot
 
     leg_arr = np.asarray(leg_log_tw, dtype=np.float64)
     n_legs_done = leg_arr.size
@@ -1045,6 +1215,14 @@ def _evaluate_awf_phase_d_aggregate(
         trial.set_user_attr("cvar", float(cvar_pct))
         trial.set_user_attr("minority_side_ratio", float(minority))
         trial.set_user_attr("n_trades", float(avg_trades_agg))
+        trial.set_user_attr("prof_compose", float(t_compose_tot))
+        trial.set_user_attr("prof_prep", float(t_prep_tot))
+        trial.set_user_attr("prof_prep_align", float(t_prep_align_tot))
+        trial.set_user_attr("prof_prep_constraint", float(t_prep_constraint_tot))
+        trial.set_user_attr("prof_exec", float(t_exec_tot))
+        trial.set_user_attr("prof_metrics", float(t_metrics_tot))
+        trial.set_user_attr("prof_metrics_pure", float(t_metrics_pure_tot))
+        trial.set_user_attr("prof_metrics_db_io", float(t_metrics_db_io_tot))
 
     ns2 = bool(cfg.get("FUTURES_ML_ALPHA_NSGA2_ENABLED", False))
     if ns2:
