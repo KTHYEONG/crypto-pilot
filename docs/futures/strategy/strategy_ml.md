@@ -202,11 +202,25 @@ logs/futures/models/strategy_ml/{run_id}/
   - `label_horizon_bars = 1`
   - `purge_bars >= label_horizon_bars`
   - `embargo_bars >= 1`
+* **비용 모델** (정준 기준: `src/core/settings.py`):
+
+```text
+round_trip_cost = FILLS_PER_ROUND_TRIP × (fee_bps + slippage_bps) / 10000
+               = 2 × (5 + 2) / 10000 = 0.0014  (14 bps)
+
+long_net_ret  = forward_return - round_trip_cost
+short_net_ret = -forward_return - round_trip_cost
+```
+
+Label이 차감하는 14 bps는 `execution_sim`이 실제로 부과하는 비용(진입 Taker + 청산 Taker + 양 side 슬리피지)과 정확히 일치합니다. 펀딩비는 보유 기간에 비례하므로 label 생성에서 별도 처리하지 않고 `execution_sim`이 누적합니다.
+
+* **Signal Composer Gate**: `signal_composer.py`의 friction threshold도 동일하게 `round_trip_cost_bps() / 10000 = 14 bps`를 사용합니다. 추가로 `EV_HURDLE_BPS`(기본값 40 bps)만큼의 최소 edge를 요구합니다. 즉, 신호가 발화되려면 `alpha > 54 bps` 조건이 충족되어야 합니다.
+
 * **계산 개념**:
 
 ```text
-long_net_ret  = forward_return - fee - slippage - expected_funding_cost
-short_net_ret = -forward_return - fee - slippage + expected_funding_receive
+long_net_ret  = forward_return - round_trip_cost
+short_net_ret = -forward_return - round_trip_cost
 signed_net_ret = long_net_ret
 ```
 
@@ -488,4 +502,4 @@ aware, calibrated alpha_panel
 ```
 
 이 계약을 지키면 `opt_main_futures.py`는 ML 전략을 기존 백테스트/최적화 경로에 동일하게 연결할 수 있다.
-��.
+��.

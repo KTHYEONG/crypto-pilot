@@ -22,6 +22,7 @@ from src.core.settings import (
     SLIPPAGE_RATE,
     SMART_ORDER_OFFSET,
     TAKER_FEE_RATE,
+    round_trip_cost_bps,
 )
 from src.domain.futures.backtest.engine import (
     PortfolioBacktestEngine as PortfolioBacktestEngineFast,
@@ -532,8 +533,8 @@ def run_oos_margin_shared_portfolio(
         minority_pct = float(min(lt, st) / max(lt + st, 1) * 100.0)
         avg_net_pnl = float(trades_df["pnl"].mean())
         avg_abs_pnl = float(trades_df["pnl"].abs().mean())
-        # Realistic: One entry (Maker 0.02%), one exit (Taker 0.05% + Slippage 0.02%)
-        rt_cost = MAKER_FEE_RATE + TAKER_FEE_RATE + SLIPPAGE_RATE
+        # Taker 진입 + Taker 청산 + 2x 슬리피지 (execution sim 현실과 일치)
+        rt_cost = round_trip_cost_bps() / 10000.0
         ev_ratio = avg_net_pnl / max(avg_abs_pnl * rt_cost, 1e-9)
 
         long_df = trades_df[trades_df["side"] == "LONG"]
