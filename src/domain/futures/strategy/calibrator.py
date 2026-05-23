@@ -46,20 +46,23 @@ def _fit_one(
     cfg: StrategyMLConfig,
     alpha: float,
 ) -> lgb.LGBMRegressor:
+    # [ML-UPGRADE] Calibrator의 일반화 성능 제고를 위해 L1 규제 및 Colsample/Bagging 최적화 주입
     model = lgb.LGBMRegressor(
         objective="quantile",
         alpha=alpha,
         n_estimators=cfg.calibrator_n_estimators,
-        learning_rate=cfg.learning_rate,
+        learning_rate=0.02,
         num_leaves=cfg.num_leaves,
         max_depth=min(cfg.max_depth, 5),
         min_data_in_leaf=cfg.min_data_in_leaf,
-        feature_fraction=min(cfg.feature_fraction + 0.05, 0.95),
-        bagging_fraction=min(cfg.bagging_fraction + 0.05, 0.95),
+        feature_fraction=0.70,
+        bagging_fraction=0.75,
         bagging_freq=1,
-        lambda_l2=max(cfg.lambda_l2, 5.0),
+        lambda_l2=max(cfg.lambda_l2, 1.0),
+        reg_alpha=1.5,
         random_state=cfg.seed,
         n_jobs=cfg.n_jobs,
+        verbose=-1,
     )
     if valid_x.shape[0] > 0:
         model.fit(
@@ -164,10 +167,16 @@ def compute_conservative_ev(
     q90f = np.asarray(q90, dtype=np.float32)
     downside = np.maximum(q50f - q10f, np.float32(0.0))
     upside = np.maximum(q90f - q50f, np.float32(0.0))
+    
+    # [ML-UPGRADE] 동적 불확실성(q90 - q10)을 산출하여 자산별 상대적 불확실성에 비례하는 패널티 부과
+    uncertainty = np.maximum(q90f - q10f, np.float32(1e-8))
+    med_unc = np.median(uncertainty) if uncertainty.size > 0 else np.float32(1e-4)
     lam = np.float32(cfg.lambda_tail)
+    lam_dynamic = lam * (uncertainty / np.maximum(med_unc, np.float32(1e-8)))
+    
     # Sign-symmetric: penalize the tail risk that works against each position
     is_long = q50f >= np.float32(0.0)
-    ev = np.where(is_long, q50f - lam * downside, q50f + lam * upside)
+    ev = np.where(is_long, q50f - lam_dynamic * downside, q50f + lam_dynamic * upside)
     ev = np.asarray(ev, dtype=np.float32)
     clip = np.float32(cfg.alpha_clip_bps / 10000.0)
     return np.clip(ev, -clip, clip).reshape(-1).copy()
