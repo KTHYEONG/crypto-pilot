@@ -422,7 +422,8 @@ def run_oos_margin_shared_portfolio(
     oos_end_idx: int | None = None,
     oos_start_idx: int | None = None,
 ) -> dict[str, Any]:
-    # Import locally to avoid circular dependencies if any
+    import gc
+
     from src.domain.futures.strategy_runtime.bridge import FuturesMLStrategy
 
     from .data_aligner import _segment_with_context, align_data_for_2d_engine
@@ -431,22 +432,49 @@ def run_oos_margin_shared_portfolio(
     full_signal_dfs: dict[str, pd.DataFrame] = {}
     seg_dfs: dict[str, pd.DataFrame] = {}
 
+    required_backtest_cols = {
+        "open", "high", "low", "close", "volume", "atr",
+        "entry_upper", "entry_lower", "trend_direction", "strength_filter",
+        "garch_kelly_f", "funding_rate_sum", "kill_signal", "membership_kill_signal",
+        "entry_block_mask", "slot_rank_score", "ml_calib_prob", "dyn_leverage",
+        "xs_score_long", "xs_score_short", "alpha_long", "alpha_short",
+        "hmm_prob_crisis", "hmm_hard_state", "hmm_modulator_long", "hmm_modulator_short",
+        "datetime"
+    }
+
     for sym in symbols:
         full_df = oos_data_maps[sym][tf]
         oos_start = int(oos_data_maps[sym][f"oos_start_idx_{tf}"])
         if oos_start_idx is not None:
             oos_start = int(oos_start_idx)
         
-        # In the refactored ML-focused structure, we might not use tiered signals anymore
-        # or it might be renamed. For now, we assume strategy.generate_signals or similar.
-        full_sig = strategy.generate_signals(full_df)
-        
         end_cap = int(oos_end_idx) if oos_end_idx is not None else len(full_df)
-        seg, _ = _segment_with_context(full_sig, oos_start, end_cap)
-        full_signal_dfs[sym] = full_sig
+        
+        # Warmup bars slicing optimization
+        warmup_margin = int(params.get("WARMUP_BARS", 120))
+        slice_start = max(0, oos_start - warmup_margin)
+        sliced_df = full_df.iloc[slice_start:end_cap].copy(deep=False)
+        
+        full_sig = strategy.generate_signals(sliced_df)
+        
+        # Drop heavy non-essential columns to free RAM immediately
+        cols_to_drop = [c for c in full_sig.columns if c not in required_backtest_cols]
+        if cols_to_drop:
+            full_sig.drop(columns=cols_to_drop, inplace=True, errors="ignore")
+        
+        adjusted_oos_start = oos_start - slice_start
+        adjusted_end_cap = end_cap - slice_start
+        seg, _ = _segment_with_context(full_sig, adjusted_oos_start, adjusted_end_cap)
+        
+        if return_signal_dfs:
+            full_signal_dfs[sym] = full_sig
         seg_dfs[sym] = seg
+        del sliced_df
 
     aligned_data, master_index = align_data_for_2d_engine(seg_dfs, symbols)
+    del seg_dfs
+    gc.collect()
+
     if not aligned_data:
         return {
             "cagr_pct": -100.0, "mdd_pct": 100.0, "profit_factor": 0.0,

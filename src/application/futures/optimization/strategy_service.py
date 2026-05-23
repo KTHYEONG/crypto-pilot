@@ -19,12 +19,23 @@ def pick_strategy_data_maps(
     valid_symbols: list[str],
     tf: str,
 ) -> dict[str, dict[str, Any]]:
-    """Prefer OOS maps when any symbol has non-empty OOS frame for target timeframe."""
-    for sym in valid_symbols:
-        sdf = oos_data_maps.get(sym, {}).get(tf)
-        if isinstance(sdf, pd.DataFrame) and not sdf.empty:
-            return oos_data_maps
-    return is_data_maps
+    """Return IS maps for ML training to prevent look-ahead leakage from OOS period.
+
+    Strips ``is_start_idx_{tf}`` so that alignment falls back to fetch_start (row 0),
+    giving the full warmup + IS window (~36 months) for walk-forward fold generation.
+    OOS data after ``oos_start`` is never included because IS maps only contain
+    rows up to ``oos_start``.
+    """
+    del oos_data_maps, valid_symbols
+    is_start_key = f"is_start_idx_{tf}"
+    result: dict[str, dict[str, Any]] = {}
+    for sym, sym_dict in is_data_maps.items():
+        if is_start_key in sym_dict:
+            cleaned: dict[str, Any] = {k: v for k, v in sym_dict.items() if k != is_start_key}
+            result[sym] = cleaned
+        else:
+            result[sym] = sym_dict
+    return result
 
 
 def assert_strategy_alpha_ready(
@@ -77,7 +88,7 @@ def run_active_strategy_output_bridge(
     """Run active strategy bridge for quick-backtest/strategy modes."""
     if run_config.mode == "quick-backtest":
         return MLPipelineOutput()
-    if run_config.mode != "strategy":
+    if run_config.mode not in {"strategy", "strategy-smoke"}:
         raise ValueError(f"unsupported mode for active strategy bridge: {run_config.mode}")
     if run_config.strategy is None:
         raise ValueError("strategy mode requires strategy")

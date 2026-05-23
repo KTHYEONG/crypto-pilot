@@ -173,7 +173,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--strategy",
         type=str,
         default="ml_lambdamart_v1",
-        choices=["momentum_v0", "eh_st_v1", "ml_lambdamart_v1"],
+        choices=["momentum_v0", "eh_st_v1", "ml_lambdamart_v1", "xs_reversal"],
     )
     parser.add_argument("--skip-universe", action="store_true")
     parser.add_argument("--skip-data-sync", action="store_true")
@@ -346,7 +346,9 @@ def _run_strategy_stage(
         fetch_start=window.fetch_start,
         end_date=window.end_date,
         opt_config=OPT_FUTURES_CONFIG,
-        preloaded_data_maps=strategy_maps if run_config.mode == "strategy" else None,
+        preloaded_data_maps=(
+            strategy_maps if run_config.mode in {"strategy", "strategy-smoke"} else None
+        ),
     )
     merge_ml_output_into_is_and_oos(
         ml_out,
@@ -355,7 +357,7 @@ def _run_strategy_stage(
         data_stage.valid_symbols,
         run_config.tf,
     )
-    if run_config.mode == "strategy":
+    if run_config.mode in {"strategy", "strategy-smoke"}:
         assert_strategy_alpha_ready(
             ml_out=ml_out,
             oos_data_maps=data_stage.oos_data_maps,

@@ -97,17 +97,20 @@ def build_strategy_alpha(
 
     # 2. Instantiate and compute active sleeves
     sleeves: list[Any] = []
-    if cfg.sleeves.reversal_enabled:
+    if cfg.name == "xs_reversal":
         sleeves.append(XSReversalSleeve(lookback_bars=cfg.sleeves.reversal_lookback))
-    if cfg.sleeves.ts_momentum_enabled:
-        sleeves.append(
-            TSMomentumSleeve(
-                lookback_bars=cfg.sleeves.ts_momentum_lookback,
-                skip_bars=cfg.sleeves.ts_momentum_skip,
+    else:
+        if cfg.sleeves.reversal_enabled:
+            sleeves.append(XSReversalSleeve(lookback_bars=cfg.sleeves.reversal_lookback))
+        if cfg.sleeves.ts_momentum_enabled:
+            sleeves.append(
+                TSMomentumSleeve(
+                    lookback_bars=cfg.sleeves.ts_momentum_lookback,
+                    skip_bars=cfg.sleeves.ts_momentum_skip,
+                )
             )
-        )
-    if cfg.sleeves.carry_enabled:
-        sleeves.append(CarrySleeve(smooth_bars=cfg.sleeves.carry_smooth))
+        if cfg.sleeves.carry_enabled:
+            sleeves.append(CarrySleeve(smooth_bars=cfg.sleeves.carry_smooth))
 
     if not sleeves:
         # Fallback to XS Reversal if no sleeve is enabled
