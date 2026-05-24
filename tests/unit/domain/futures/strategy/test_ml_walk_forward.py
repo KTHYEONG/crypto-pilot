@@ -18,6 +18,7 @@ def test_make_walk_forward_folds_are_chronological_and_purged() -> None:
         test_months=1,
         purge_bars=3,
         embargo_bars=2,
+        label_horizon_bars=2,
     )
     folds = make_walk_forward_folds(datetimes, cfg)
     assert folds
