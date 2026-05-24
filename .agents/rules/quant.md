@@ -1,74 +1,47 @@
 ---
-trigger: glob
----
-
 trigger:
-  - "src/**/signals/**/*.py"
-  - "src/**/sizing/**/*.py"
-  - "src/**/regimes/**/*.py"
-  - "src/**/opt_*_utils/**/*.py"
-  - "src/**/alpha_factory/**/*.py"
-  - "src/**/ml_pipeline/**/*.py"
-  - "src/**/optimization/**/*.py"
-  - "src/**/validation/**/*.py"
-  - "src/**/universe/**/*.py"
-  - "src/core/indicators/**/*.py"
-  - "src/execution/opt_main_*.py"
-  - "src/execution/trader_*.py"
-  - on_file_path_regex: "src/.*(engine|portfolio|metrics|data_collector|backtest|alpha|pipeline|optimizer|universe|loader).*"
   - on_label: ["quant"]
+  - on_file_path_regex: "src/.*(engine|portfolio|optimizer|alpha|pipeline|validation|sizing|signals).*"
+priority: 10
 ---
-# Quant & Financial Engineering Directives
-Priority: 1.Correctness > 2.No look-ahead > 3.Stability > 4.Reproducibility > 5.Trading Realism > 6.Efficiency
 
-## 1. Hard Stop (Fail-Fast)
-If critical parameters for 'Correctness' or 'Time-Series Safety' are missing: DO NOT generate code. Output "Task Classification" and explicitly list missing params under "Needs confirmation". Ask for clarification.
+# Quant & Financial Engineering: Deep Thinking Framework
 
-## 2. Core Constraints
-- Data: Validate shape, dtype, time order. Explicitly handle NaNs/missing. No silent dropping/filling.
-- Time-Series (No Leakage): Strict chronological order. Align features/labels/signals explicitly. Default backtest: Signal at `t` executes at `t+1`.
-- Math Stability: Block `/0`. Prevent uncontrolled NaN/Inf. Justify `epsilon`.
-- Realism: Parameterize commission, slippage, spread, funding fee, sizing.
-- Reproducibility: Fix seeds. Explicit params. No hidden global state.
+This document provides guidelines to augment existing workflows (AGENTS.md, Skills) when quantitative reasoning is required. Do not create independent templates; instead, project the following expertise into the `<plan>` and `<risk>` sections of the active skill.
 
-## 3. Performance & Code Quality
-- Vectorization: Prefer NumPy/Pandas/Polars.
-- Loops: Allowed for orchestration, asset/fold iteration, test cases, real-time events.
-- Numba: 
-  - NEVER pass DataFrames/Series to Numba. Use `.to_numpy()` explicitly.
-  - Use `@njit(cache=True)` only for recursive, path-dependent logic, or proven bottlenecks. 
-  - `fastmath=True` requires explicit justification.
-- Quality: Explicit type hints/signatures. Validate inputs. Separate calculation from execution.
+## 1. Autonomous Conceptual Reasoning
+Before writing code, autonomously reflect on how the task relates to the following financial engineering and statistical themes. These keywords are "seeds" to trigger your expertise—use all available high-level theory to defend your logic.
 
-## 4. Anti-Patterns (Do NOT use unless explicitly justified)
-- CPCV / Purged CV (unless overlapping labels)
-- Triple-Barrier (unless path-dependent labeling)
-- PCA / Cross-sectional normalization (unless large feature set / multi-asset)
-- Long math derivations or architecture-level answers for isolated tasks.
+- **Statistical Integrity:**
+  - *Non-stationarity:* How does data non-stationarity threaten signal validity or model stability? Is differencing, fractional differentiation, or an adaptive approach required?
+  - *Fat-tails & Extremes:* Are you ignoring the leptokurtic nature of returns? How have you ensured robustness so that outliers do not distort linear regressions or optimizations (e.g., ill-conditioned matrices)?
+  - *Regime Shifts:* How does the logic respond to changes in market environments (e.g., mean-reverting vs. trending regimes)?
 
-## 5. Context-Specific Checks (Apply only if relevant)
-- Backtest: Signal shifted? Costs applied on position change? Bounded exposure? Realized returns used?
-- ML: Train/test split keeps time order? Scalers fit ONLY on train data?
-- Crypto: 24/7 market, UTC, funding fees, missing candles, depeg risk, rate limits.
+- **Anti-Bias & Realism:**
+  - *Look-ahead Bias:* Can you logically prove there is no "micro-leakage" of future data in any time-series operation?
+  - *Trading Realism:* How do slippage, commissions, funding fees, and liquidity constraints bridge the "abstraction gap" between backtest and live execution?
 
-## 6. Output Modes & Templates
-Determine task scope and output STRICTLY using the matching template.
+## 2. Skill Augmentation Instructions
 
-[Mode: Micro] (Indicators, Utils, Snippets)
-Task: [Type]
-Assumptions: [Minimal]
-Code: [Implementation with complexity comments]
-Checks: [Edge cases & NaN handling]
+During implementation, ask yourself these questions and incorporate the answers into your `<plan>` or `<risk>`.
 
-[Mode: Standard] (Backtests, Signals, Features)
-Task: [Type]
-Mathematical Logic & Shape: [Specify core mathematical formulas and exact input data dimensions (e.g., 2D Array of N x M) before coding]
-Code: [High-Performance Implementation]
-Verification: [Explicit confirmation of signal shifting, no leakage, and NaN/Inf mitigation]
+### [Phase: spec / implement]
+- **Questions for <plan>:** 
+  - "What is the mathematical foundation of this algorithm (e.g., Mean-Variance Optimization, Information Coefficient calculation)?"
+  - "Does the data alignment and indexing policy guarantee time-series integrity (t vs t+1)?"
+- **Questions for <risk>:**
+  - "How does this logic collapse under extreme volatility or liquidity exhaustion where standard statistical assumptions fail?"
+  - "Are there risks of precision loss or overflow when using Numba or vectorized operations?"
 
-[Mode: Full] (ML, Portfolio, Execution)
-Task: [Type, Data, Objective]
-Data Alignment Plan: [Define chronological ordering and precise index alignment between features and labels (e.g., t vs t+1)]
-Method Choice: [Method, Stylized Facts awareness & Justification]
-Code: [Production-grade scalable logic]
-Verification: [Leakage, Stability, Friction, Performance benchmarks]
+### [Phase: verify]
+- **Verification Priority:**
+  1. **Leakage Check:** Is there perfect temporal isolation (Purging/Embargo) between training and validation data?
+  2. **Stability Check:** Does the output remain stable even when small noise is introduced to the input?
+  3. **Friction Check:** Is the expected return still significant after applying realistic transaction costs?
+
+## 3. Implementation Philosophy
+- **Mathematical Stability > Efficiency:** Do not ignore floating-point errors or matrix instability for the sake of speed.
+- **Reproducibility:** Explicitly manage all random seeds and hyperparameters.
+- **Vectorized Thinking:** Minimize loops and utilize linear algebra operations (NumPy/Polars). Explicitly comment on data shapes (e.g., `[N, M] -> [N, 1]`) for readability.
+
+**Note:** `quant.md` is not a rigid constraint on your intelligence, but a trigger to elicit your highest level of expertise. Propose relevant theories in linear algebra, probability, or ML optimization even if not explicitly mentioned here.
