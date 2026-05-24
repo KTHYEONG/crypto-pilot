@@ -89,7 +89,7 @@ _SIGNAL_DEFAULT_RANGES: dict[str, tuple[Any, Any, bool]] = {
     "K_LONG": (1, 8, False),
     "K_SHORT": (0, 5, False),
     "REBALANCE_BARS": (1, 24, False),
-    "EV_HURDLE_BPS": (5.0, 100.0, True),
+    "EV_HURDLE_BPS": (3.0, 20.0, True),
 }
 
 _RISK_DEFAULT_RANGES: dict[str, tuple[Any, Any, bool]] = {
@@ -754,7 +754,7 @@ _PARAM_BOUNDS: dict[str, tuple[float, float]] = {
     "K_LONG": (1.0, 8.0),
     "K_SHORT": (0.0, 5.0),
     "REBALANCE_BARS": (1.0, 24.0),
-    "EV_HURDLE_BPS": (5.0, 100.0),
+    "EV_HURDLE_BPS": (3.0, 20.0),
     "PORTFOLIO_KAPPA": (0.05, 0.50),
     "TARGET_ANN_VOL": (0.05, 0.40),
     "MAX_EXPOSURE": (0.50, 3.00),
