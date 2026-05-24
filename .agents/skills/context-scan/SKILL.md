@@ -11,6 +11,7 @@ Do not edit production code.
 Find only the context needed for the current task.
 
 ## Inspect
+- docs/ (architecture, domains, decisions)
 - relevant files
 - existing patterns
 - similar implementations
@@ -23,6 +24,7 @@ Find only the context needed for the current task.
 ## Output
 ```md
 ## Context Scan
+- Relevant Documentation:
 - Relevant Files:
 - Existing Patterns:
 - Test Locations:
