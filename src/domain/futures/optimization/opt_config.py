@@ -112,49 +112,10 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     "FUTURES_REDIS_URL": "redis://127.0.0.1:6379/0",
 
 
-    # HMM stable regime (fixed hyperparameters; not in Optuna search space)
-    # v10.0.0: 4 internal states (BULL_TREND, BEAR_TREND, CHOP_HIGH, CHOP_LOW).
-    "FUTURES_HMM_K_STATES": 4,
-    # HMM backend selector:
-    # - "jax_gaussian" (default): existing JAX Gaussian backend
-    # - "student_t": Student-t backend
-    # - "skewed_t": Skewed-t backend with Parallel Associative Scan
-    "FUTURES_HMM_BACKEND": "skewed_t",
-    # Stability guard: JAX HMM backend intermittently segfaulted (exit 139) on long-trial runs.
-    # v10.0.0: RESTORED for multivariate EM.
-    "FUTURES_HMM_JAX_BACKEND_ENABLED": True,
-    # Deployment floor: ≥0.45 (align HMM systemic prior with Phase D Kelly band).
-    "FUTURES_HMM_KELLY_SHRINKAGE": 0.45,
     # Immovable at 0.66: ANY reduction (even 0.62) collapses IS AWF because IS period has
     # only 2.9% CRISIS — borderline bars (0.62-0.66) are profitable IS trades.
     # OOS CRISIS mismatch (2.9%→15.9%) handled by auxiliary volatility gate (not threshold).
     "FUTURES_HMM_CRISIS_THRESHOLD": 0.66,
-    # CRISIS regime: hard zero-leverage kill-switch during crisis (0.0 = no position).
-    # OOS data shows CRISIS PF=0.34 — any nonzero position destroys OOS compounding.
-    "FUTURES_HMM_CRISIS_FLAT_LEV": 0.0,
-    # Step6: split kill-switch policy. If new columns are absent, code falls back to
-    # legacy hmm_prob_crisis behavior automatically.
-    "FUTURES_HMM_SPLIT_KILLSWITCH_ENABLED": True,
-    # pre_crisis: soft leverage damp (gross/leverage reduction only).
-    "FUTURES_HMM_PRE_CRISIS_DAMP_THRESHOLD": 0.55,
-    "FUTURES_HMM_PRE_CRISIS_DAMP_MIN_MULT": 0.50,
-    # realized_crisis: hard flat (or configured flat leverage).
-    "FUTURES_HMM_REALIZED_CRISIS_FLAT_THRESHOLD": 0.66,
-    # tail risk overlay: high risk bars -> strong leverage cut (or optional hard flat).
-    "FUTURES_HMM_TAIL_RISK_HIGH_THRESHOLD": 0.75,
-    "FUTURES_HMM_TAIL_RISK_HIGH_LEV_MULT": 0.25,
-    "FUTURES_HMM_TAIL_RISK_FORCE_FLAT": False,
-    # Threshold calibration mode for Step6 split kill-switch.
-    # fixed: use static thresholds below (backward compatible default)
-    # is_quantile: use quantiles estimated on leading IS slice
-    # rolling_quantile: use per-bar rolling quantile thresholds
-    "FUTURES_HMM_THRESHOLD_MODE": "is_quantile",
-    "FUTURES_HMM_THRESHOLD_IS_FRAC": 0.70,
-    "FUTURES_HMM_THRESHOLD_ROLLING_WINDOW": 336,
-    "FUTURES_HMM_THRESHOLD_ROLLING_MIN_PERIODS": 96,
-    "FUTURES_HMM_PRE_CRISIS_Q": 0.75,
-    "FUTURES_HMM_REALIZED_CRISIS_Q": 0.90,
-    "FUTURES_HMM_TAIL_RISK_Q": 0.85,
     # S2: Auxiliary volatility-based CRISIS gate.
     # DISABLED: vol gate fires during profitable high-vol IS periods (CRISIS G=+0.193% in IS),
     # collapsing IS CAGR from ~30% to 2.6%. IS-OOS mismatch requires a smarter approach
@@ -162,67 +123,6 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     "FUTURES_VOL_CRISIS_GATE_ENABLED": False,
     "FUTURES_VOL_CRISIS_WINDOW": 20,
     "FUTURES_VOL_CRISIS_MULT": 3.0,
-    # Asymmetric Friction Reduction (Phase 6): stronger sticky penalty for training stability.
-    # Raised with smoother posteriors (SPAN 8): compensates wigglier regimes vs span≈12 legacy.
-    "FUTURES_HMM_STICKY_PENALTY_WEIGHT": 1100.0,
-    # Min-duration (bars @ base TF) per state: [BULL_CALM, BULL_VOL_UP, BEAR, CHOP, CRISIS]
-    # P0: was [1000,500,...] (~6w calm lock); shortened so regime errors recover in ~1w.
-    # Note: sticky labels applied on 5-state output (RECOVERY merged into BULL_VOL_UP).
-    "FUTURES_HMM_OUTPUT_STICKY_MIN_DURATION": [48, 32, 28, 16, 20],
-    # Slightly stronger sticky transitions → stabler systemic HMM under leg refit (Path C).
-    "FUTURES_HMM_TRANSITION_PRIOR_ALPHA": 0.50,
-    # True per-bar TVTP controls (f2/vol_z driven).
-    "FUTURES_HMM_TVTP_ENABLED": True,
-    "FUTURES_HMM_TVTP_VOL_CENTER": 0.0,
-    "FUTURES_HMM_TVTP_VOL_SCALE": 1.0,
-    # diag_slope < 0: high vol lowers self-transition stickiness, increasing regime mobility.
-    "FUTURES_HMM_TVTP_DIAG_SLOPE": -0.12,
-    "FUTURES_HMM_TVTP_DIAG_BIAS": 0.0,
-    "FUTURES_HMM_TVTP_DIAG_CLIP": 0.22,
-    # Sticky prior multiplier = clip(1 + slope * avg_vol, min_mult, max_mult).
-    "FUTURES_HMM_TVTP_STICKY_PRIOR_VOL_SLOPE": -0.30,
-    "FUTURES_HMM_TVTP_STICKY_PRIOR_MIN_MULT": 1.01,
-    "FUTURES_HMM_TVTP_STICKY_PRIOR_MAX_MULT": 1.35,
-    # HMM Posterior Smoothing (EMA, DEMA, TEMA, HMA, KAMA, ALMA, JMA)
-    "FUTURES_HMM_SMOOTHING_METHOD": "EMA",
-    # Posterior smoothing: span=3 harmed HMM stability; 6–9 + higher STICKY_PENALTY (1100).
-    "FUTURES_HMM_SMOOTHING_SPAN": 12,
-    # Optional asymmetric EMA for crisis posterior (faster attack, slower decay).
-    "FUTURES_HMM_CRISIS_ATTACK_SPAN": 2,
-    "FUTURES_HMM_CRISIS_DECAY_SPAN": 9,
-    # Step5: Tail-event supervised overlay (1~8 bar forward tail risk).
-    "FUTURES_HMM_TAIL_OVERLAY_ENABLED": True,
-    "FUTURES_HMM_TAIL_OVERLAY_HORIZON": 8,
-    "FUTURES_HMM_TAIL_OVERLAY_LABEL_Q": 0.10,
-    "FUTURES_HMM_TAIL_OVERLAY_MIN_TRAIN": 240,
-    "FUTURES_HMM_TAIL_OVERLAY_MIN_POS": 20,
-    "FUTURES_HMM_TAIL_OVERLAY_USE_ISOTONIC": True,
-    "FUTURES_HMM_TAIL_OVERLAY_LR_C": 0.8,
-    "FUTURES_HMM_SUP_HORIZONS": [4, 8, 16],
-    "FUTURES_HMM_SUP_LABEL_Q10": 0.10,
-    "FUTURES_HMM_SUP_LABEL_Q05": 0.05,
-    "FUTURES_HMM_SUP_LABEL_Q03": 0.03,
-    "FUTURES_HMM_SUP_MIN_POS": 12,
-    "FUTURES_HMM_SUP_RANK_BLEND_W": 0.30,
-    "FUTURES_HMM_SUP_RANK_BLEND_POW": 1.20,
-    # Step2: hazard boost rebalance (posterior is untouched; boost hazard/policy path only).
-    "FUTURES_HMM_STEP2_SUPERVISED_TOP_Q": 0.85,
-    "FUTURES_HMM_STEP2_PRE_HAZARD_BOOST": 0.30,
-    "FUTURES_HMM_STEP2_REALIZED_HAZARD_BOOST": 0.45,
-    "FUTURES_HMM_STEP2_TAIL8_HAZARD_BOOST": 0.35,
-    "FUTURES_HMM_STEP2_TAIL8_SUP_RANK_POW": 1.15,
-    "FUTURES_HMM_STEP2_TAIL8_RANK_BLEND_W": 0.55,
-    "FUTURES_HMM_STEP2_TAIL8_SUP_BLEND_W": 0.08,
-    "FUTURES_HMM_STEP2_TAIL8_REALIZED_BLEND_W": 0.22,
-    "FUTURES_HMM_STEP2_TAIL8_PRE_BLEND_W": 0.15,
-    "FUTURES_HMM_STEP2_TAIL8_STRUCT_BLEND_W": 0.15,
-    "FUTURES_HMM_STEP2_SUP_CRASH_Q05": 0.95,
-    "FUTURES_HMM_STEP2_SUP_CRASH_Q03": 0.97,
-    "FUTURES_HMM_STEP2_TAIL8_CRASH05_BLEND_W": 0.10,
-    "FUTURES_HMM_STEP2_TAIL8_CRASH03_BLEND_W": 0.10,
-    "FUTURES_HMM_STEP2_TAIL8_SOFT_BLEND_W": 0.10,
-    "FUTURES_HMM_STEP2_TAIL8_HARD_BLEND_W": 0.10,
-    "FUTURES_HMM_STEP2_TAIL8_NEAR_FLAT_BLEND_W": 0.10,
     # Step2 policy redesign: tail8 is primarily a damping input, not hard-flat trigger.
     "FUTURES_POLICY_FLAT_TAIL8_THR": 0.96,
     "FUTURES_POLICY_FLAT_MIX_TAIL8_W": 0.15,
@@ -258,11 +158,6 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     "FUTURES_EXEC_TIER_SOFT_MAX_EXP": 0.80,
     "FUTURES_EXEC_TIER_HARD_MAX_EXP": 0.50,
     "FUTURES_EXEC_TIER_NEAR_FLAT_MAX_EXP": 0.25,
-    # P2: asymmetric modulator ceiling (no bull amplification in OOS bear regime)
-    "FUTURES_HMM_MOD_LONG_CEIL": 1.0,  # was 2.0
-    # P2: backward-looking 168h BTC return suppression (no look-ahead bias)
-    "FUTURES_HMM_BEAR_TREND_SUPPRESS_THR": -0.08,  # P2.1 revert: -0.05 over-suppressed
-    "FUTURES_HMM_BEAR_TREND_DAMP": 0.40,           # P2.1 revert: 0.25 over-suppressed
     # Session 39: recovery override abandoned (P10 -0.027, DSR collapse). Keep disabled.
     "CRISIS_RECOVERY_TREND_THR": 1e9,
     "CRISIS_RECOVERY_FLOOR": 0.30,
@@ -430,8 +325,6 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     # Worst AWF leg log-TW floor already enforced via FUTURES_AWF_P10_LOG_TW_MIN.
     # Improvement 1: Friction-Aware EV Hurdle
     "FUTURES_ML_EV_HURDLE_RATIO": 1.0,
-    # Improvement 2: Regime-Aware Dynamic Kelly Scaling
-    "FUTURES_HMM_DYNAMIC_KELLY_ENABLED": True,
     # Improvement 3: PLGD Leg Stability Weight
     "FUTURES_PLGD_AWF_LEG_STABILITY_WEIGHT": 0.8,
     # Improvement 4: Friction-Aware Virtual Cost (bps per trade)
