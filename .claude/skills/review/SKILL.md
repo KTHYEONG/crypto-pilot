@@ -14,6 +14,7 @@ Act as an independent reviewer.
 - request/spec match
 - over-implementation
 - unrelated refactors
+- docs sync (Strictly check if 'last_verified' date is updated to today, 'Invariants' are preserved, and new 'Edge Cases' or 'Specifications' are promoted as per rules/documentation.md)
 - meaningful tests
 - missing edge cases
 - unintended public API changes
@@ -36,13 +37,9 @@ Act as an independent reviewer.
 
 ## Output
 ```md
-## Review
-- Verdict:
-- Blocking Issues:
-- Non-blocking Issues:
-- Missing Tests/Checks:
-- Over-implementation:
-- Rule Violations:
-- Required Fixes:
-- Final Report Draft:
+### 🔍 Review Verdict: [APPROVE / REQUEST CHANGES]
+- **Blocking:** [None or List]
+- **Docs/Rules:** [Invariants/Verified Date status]
+- **Fixes Required:** [Fixes]
+- **Report:** [Final Summary]
 ```

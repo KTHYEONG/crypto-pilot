@@ -41,14 +41,9 @@ Commit tasks are not auto-triaged. Use commit rules only when explicitly request
 
 ## Output
 ```md
-## Triage
-- Type:
-- Risk:
-- Uncertainty:
-- Quant Context:
-- Strategy:
-- Path:
-- Need Spec:
-- Need Review:
-- Blocking Questions:
+### 🛡️ Triage: [Type]
+- **Risk/Uncertainty:** `[Risk]` / `[Uncertainty]` | **Quant:** `[Active/None]`
+- **Strategy:** `[Strategy]` ➔ `[Path]`
+- **Requirement:** Spec: `[Yes/No]`, Review: `[Yes/No]`
+- **Blocking:** [Questions or None]
 ```

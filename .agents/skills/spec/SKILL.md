@@ -22,19 +22,18 @@ Always include:
 - goal
 - non-goals
 - affected area
+- documentation impact (which docs/ files need update)
 - acceptance criteria
 - verification plan
 - open questions, if blocking
 
 ## Output
 ```md
-## Spec
-- Type:
-- Path:
-- Goal:
-- Non-goals:
-- Acceptance Criteria:
-- Verification Plan:
-- Ready for Implementation:
-- Blocking Questions:
+### 📝 Spec: [Type]
+- **Goal:** [Goal]
+- **Impact:** `[Area]` | **Docs:** `[Files to update]`
+- **Acceptance Criteria:**
+  - [ ] [Criterion 1]
+- **Verification Plan:** [Plan]
+- **Ready:** [Yes/No] | **Blocking:** [Questions]
 ```

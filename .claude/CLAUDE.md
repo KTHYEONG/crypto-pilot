@@ -70,26 +70,12 @@ This protocol applies only inside code-writing phases such as `implement`.
 - **Precedence**: When the commit rule is manually activated, it temporarily suspends the general verification loop and multi-step development workflow defined in this document.
 - **Scope**: The commit rule is limited to version-control tasks such as commit message creation, staging guidance, commit splitting, or commit review.
 
-## 10. Quant & Financial Engineering
+## 10. Quant & Financial Engineering (Automatic Augmentation)
 
-- **Automatic Reference Trigger**: If a quant keyword, quant label, matching path glob, or matching filename regex is detected, the AI Agent must automatically refer to `.agents/rules/quant.md`.
-- **Application Model**: Quant rules do not replace the skill workflow by default. Instead, they add domain-specific constraints, validation requirements, performance expectations, and output formatting on top of the active skill.
-- **Precedence**: If `quant.md` conflicts with general AGENTS.md rules or skill instructions, `quant.md` wins for quant-related implementation, validation, and reporting.
-    - **Path Glob Patterns**:
-        - `src/**/signals/**/*.py` (Signal Operations)
-        - `src/**/sizing/**/*.py` (Position Sizing)
-        - `src/**/regimes/**/*.py` (Market Regime Analysis)
-        - `src/**/opt_*_utils/**/*.py` (Optimization Utilities)
-        - `src/**/alpha_factory/**/*.py` (Futures Alpha Factory)
-        - `src/**/ml_pipeline/**/*.py` (Futures ML Pipeline)
-        - `src/**/optimization/**/*.py` (Optimization Modules)
-        - `src/**/validation/**/*.py` (Walk-forward Validation)
-        - `src/**/universe/**/*.py` (Universe Selection & Cost Model)
-        - `src/core/indicators/**/*.py` (Technical Indicators)
-        - `src/execution/opt_main_*.py` (Optimization Execution Engines)
-        - `src/execution/trader_*.py` (Live Trading & Execution Engines)
-    - **Filename Regex Pattern**: `src/.*(engine|portfolio|metrics|data_collector|backtest|alpha|pipeline|optimizer|universe|loader).*`
-- **Application Instruction**: When the trigger is activated, the agent prioritizes and inherits the quant-specific workflow, constraints, and formatting defined in **6. Output Modes & Templates (Micro/Standard/Full)**, Zero-Loop / JIT Compilation / Walk-forward Time-Series Validation principles defined in [quant.md](file:///.agents/rules/quant.md) over the general guidelines in this document (`AGENTS.md`).
+- **Automatic Activation Trigger**: Automatically activated when working on paths defined in `.agents/rules/quant.md` (e.g., signals, portfolio, backtest) or when the `quant` label is present.
+- **Application Model (Augmentation)**: Quant rules **DO NOT** replace the skill workflow. Instead, they **augment** the active skill by injecting domain-specific constraints into `<plan>`, `<risk>`, and `verify` phases.
+- **Precedence**: For any task involving mathematical modeling, time-series integrity, or financial logic, the instructions in `.agents/rules/quant.md` take absolute precedence over general guidelines.
+- **Core Mandate**: You MUST evaluate every change against "Anti-Bias (Look-ahead)", "Statistical Robustness", and "Trading Realism" as defined in the Quant framework.
 
 ## 11. Skill Orchestration Boundary
 
