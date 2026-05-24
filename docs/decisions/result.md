@@ -217,3 +217,35 @@ ML 알파의 OOS 거래 단절을 초래하던 3대 구조적 병목을 식별�
 - **수정 범위:** HMM 관련 코드 전체 제거 (24개 파일, -1,151 lines). 제거 대상: Crisis 가드, `mu` scaling, regime policy damping, `_decode_regime_probs()`, `hmm_prob_*` 컬럼 파이프라인, Optuna HMM 파라미터, SQLite fallback storage.
 - **행동 보존:** `regime_policy_enabled`는 기본값 `False`로 regime modulation block이 실제로는 실행되지 않았음. `btc_beta`는 `np.zeros`로 고정 (엔진에서 `regime_betas` 미전달로 런타임 동일).
 - **주의:** HMM 제거 후 Bull regime에서 억제되던 숏 신호가 통과될 수 있음 → OOS 숏사이드 거래수 및 PnL 모니터링 필요.
+
+---
+
+## 11. Virtual Refit Normalization Consistency Patch (2026-05-24)
+
+- `build_ml_strategy_alpha`의 virtual OOS fill fold에서 정규화 경로를 분리했다.
+- 변경 전: 마지막 regular fold에서 계산된 normalization state를 virtual fold가 재사용할 수 있는 구조.
+- 변경 후: virtual fold의 own train window에서 `fit_robust_bounds`/median imputer를 재피팅하고, 이를 virtual `train/valid/test`에 적용.
+- 기대 효과: fold 경계에서 normalization leakage 가능성 제거(기존 동작 대비 신호 계약은 동일, 정규화 일관성만 보정).
+
+---
+
+## 12. 300-Trial Rerun Result After Normalization Fix (2026-05-24)
+
+`src/execution/opt_main_futures.py --mode strategy --skip-data-sync --trials 300 --tf 4h --reference-date 2026-05-01 --strategy ml_lambdamart_v1` 재실행 결과. virtual refit 정규화 정합성 패치 이후에도 최종 OOS는 여전히 거래 0건으로 종료되었다.
+
+- **Result:** 유니버스 필터링 작동, 300-trial 완료. 최종 OOS `oos_zero_trades=1`, 최종 verdict `HOLD (GATE_FAIL)`.
+- **Key Metrics:**
+  - `discovered=38`, `valid=37`
+  - 초기 ML 진단: `ML-ALPHA-IC mean_ic=0.0211 t_stat=3.30 hit_ratio=0.522 n_obs=1630`
+  - 초기 전체 alpha: `alpha_p95=21.04bps`
+  - `ML-COST-WALL floor=24.0bps signal_clears_floor=False`
+  - `RUN-SUMMARY phase_a1 complete=37 pruned=113`
+  - `RUN-SUMMARY phase_a2 complete=60 pruned=0`
+  - `RUN-SUMMARY phase_b complete=90 pruned=0`
+  - `FINAL-FLAT-DIAG oos_zero_trades=1 wr_ok=False mdd_ok=True pf_ok=False ev_ok=False`
+- **Path Diagnostics:**
+  - `STRAT-PATH trial=1 leg=0 alpha_nz=0.4865 merge_nz=0.0680 xs_nz=0.4831 trades=84 long=0 short=84`
+  - `STRAT-PATH trial=1 leg=1 alpha_nz=0.4651 merge_nz=0.0599 xs_nz=0.4254 trades=84 long=5 short=79`
+  - `STRAT-PATH trial=3 leg=1 alpha_nz=0.4651 merge_nz=0.0171 xs_nz=0.3709 trades=28 long=1 short=27`
+- **Interpretation:** virtual fold normalization leakage는 제거됐지만, 그것만으로는 최종 OOS 거래 소거가 해결되지 않았다. 중간 AWF leg에서는 실제 거래가 발생하므로 ML 신호와 체결 경로는 살아 있고, 남은 병목은 final OOS selection/evaluation 경로와 ensemble 선택 정합성이다.
+- **Judgment:** 이번 패치는 구조적 정렬에는 성공했지만 성능 개선은 아직 제한적이다. 다음 우선순위는 ML 재학습보다 `final OOS zero-trade`의 경로 단절을 분해해서 `alpha 전달`, `ensemble 선택`, `membership`, `final gate` 중 어디서 소거되는지 확정하는 것이다.
