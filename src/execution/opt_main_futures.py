@@ -73,7 +73,7 @@ _logger = logging.getLogger("opt_main_futures")
 def _ensure_data_sync_for_window(run_config: FuturesRunConfig, window: QuarterlyWindow) -> None:
     """Check if ledger covers the required window and sync if needed."""
     if run_config.skip_data_sync:
-        _logger.info("Data sync skipped by config.")
+        _logger.info("[DATA_SYNC] action=skip reason=config_flag")
         return
 
     ledger_path = FUTURES_DATA_DIR / "universe_ledger.parquet"
@@ -81,7 +81,7 @@ def _ensure_data_sync_for_window(run_config: FuturesRunConfig, window: Quarterly
     last_ledger_date = date(2023, 1, 1)
 
     if not ledger_path.exists():
-        _logger.info("Universe ledger missing. Initializing first-time sync...")
+        _logger.info("[DATA_SYNC] status=missing action=init_sync")
         needs_sync = True
     else:
         try:
@@ -94,13 +94,13 @@ def _ensure_data_sync_for_window(run_config: FuturesRunConfig, window: Quarterly
                 # If the ledger doesn't cover up to the required OOS end date, we need more data
                 if last_ledger_date < window.end_date_value:
                     _logger.info(
-                        "Outdated ledger (last=%s < req=%s). Syncing...",
+                        "[DATA_SYNC] status=outdated last=%s required=%s action=sync",
                         last_ledger_date,
                         window.end_date_value,
                     )
                     needs_sync = True
         except Exception as e:
-            _logger.warning("Failed to verify ledger readiness (%s). Forcing sync for safety.", e)
+            _logger.warning("[DATA_SYNC] action=verify_readiness status=failed error=%s fallback=force_sync", type(e).__name__)
             needs_sync = True
 
     if needs_sync:
@@ -272,7 +272,7 @@ def _run_data_stage(
     # successfully passed the universe filtering stages.
     if require_exec_1m and not run_config.skip_data_sync:
         _logger.info(
-            "Targeted Pre-fetch: Syncing 1m data only for %d universe-filtered symbols.",
+            "[DATA_SYNC] action=prefetch_1m symbols_count=%d status=started",
             len(load_symbols),
         )
         ledger_path = FUTURES_DATA_DIR / "universe_ledger.parquet"
@@ -283,7 +283,7 @@ def _run_data_stage(
                 if not df_ledger.empty:
                     last_ledger_date = pd.to_datetime(df_ledger["date"]).max().date()
             except Exception as e:
-                _logger.warning("Failed to check ledger date in data stage (%s).", e)
+                _logger.warning("[DATA_SYNC] action=check_ledger_date status=failed error=%s", type(e).__name__)
 
         run_historical_sync(
             start_date=last_ledger_date,
@@ -447,14 +447,14 @@ def _run_optimization_stage(
     t_opt = time.perf_counter()
     opt_res = run_optimization(opt_req)
     opt_elapsed = time.perf_counter() - t_opt
-    _logger.info("[STAGE-TIME] step=run_optimization elapsed=%.2fs", opt_elapsed)
+    _logger.info("[STAGE_TIME] step=run_optimization elapsed_s=%.2f", opt_elapsed)
     precompute_profile = getattr(opt_res.base_ctx, "precompute_profile", None)
     if isinstance(precompute_profile, dict):
         _logger.info(
             (
-                "[RUN-PROF] step=ml_precompute total=%.2fs align=%.2fs "
-                "covariance=%.2fs awf_refit=%.2fs calibrator=%.2fs "
-                "prebuilt=%.2fs legs=%d"
+                "[RUN_PROF] step=ml_precompute total_s=%.2f align_s=%.2f "
+                "covariance_s=%.2f awf_refit_s=%.2f calibrator_s=%.2f "
+                "prebuilt_s=%.2f legs=%d"
             ),
             float(precompute_profile.get("total", 0.0)),
             float(precompute_profile.get("align", 0.0)),
@@ -588,7 +588,7 @@ def _run_optimization_stage(
                     )
                     _logger.info("  * Total Backtest/Tr : %6.2f ms", total_mean * 1000.0)
                     _logger.info(
-                        " [RUN-PROF] trial_elapsed_sum=%.2fs run_optimization=%.2fs "
+                        "[RUN_PROF] trial_elapsed_sum=%.2fs run_optimization=%.2fs "
                         "hidden_overhead=%.2fs",
                         trial_elapsed_sum,
                         opt_elapsed,
@@ -596,7 +596,7 @@ def _run_optimization_stage(
                     )
                     _logger.info("=" * 60)
     except Exception as e:
-        _logger.warning("Failed to calculate profile summary: %s", e)
+        _logger.warning("[RUN_PROF] action=calculate_summary status=failed error=%s", type(e).__name__)
     # ------------------------------------------------------------
 
     if study_ml is None or best_trial is None:
@@ -649,9 +649,9 @@ def _run_optimization_stage(
     t_final_eval = time.perf_counter()
     run_final_evaluation(final_req)
     final_eval_elapsed = time.perf_counter() - t_final_eval
-    _logger.info("[STAGE-TIME] step=final_evaluation elapsed=%.2fs", final_eval_elapsed)
+    _logger.info("[STAGE_TIME] step=final_evaluation elapsed_s=%.2f", final_eval_elapsed)
     _logger.info(
-        "[STAGE-TIME] step=optimization_stage_total elapsed=%.2fs",
+        "[STAGE_TIME] step=optimization_stage_total elapsed_s=%.2f",
         time.perf_counter() - stage_t0,
     )
     return RunnerResult(exit_code=0, reason="ok")
@@ -669,51 +669,51 @@ def run_pipeline(
     t_window = time.perf_counter()
     window = _resolve_quarterly_window(run_config.reference_date)
     _logger.info(
-        "[STAGE] step=window fetch=%s is=%s oos=%s end=%s",
+        "[STAGE_INIT] step=window fetch=%s is=%s oos=%s end=%s",
         window.fetch_start,
         window.is_start,
         window.oos_start,
         window.end_date,
     )
-    _logger.info("[STAGE-TIME] step=window elapsed=%.2fs", time.perf_counter() - t_window)
+    _logger.info("[STAGE_TIME] step=window elapsed_s=%.2f", time.perf_counter() - t_window)
     # Step 1.5) Ensure data is synchronized for the required window
     t_sync = time.perf_counter()
     _ensure_data_sync_for_window(run_config, window)
-    _logger.info("[STAGE-TIME] step=data_sync elapsed=%.2fs", time.perf_counter() - t_sync)
+    _logger.info("[STAGE_TIME] step=data_sync elapsed_s=%.2f", time.perf_counter() - t_sync)
     # Step 2) universe timeline/quality gate
     t_universe = time.perf_counter()
     discovered_symbols, timeline = _run_universe_stage(run_config, window)
     _logger.info(
-        "[STAGE] step=universe skip=%s discovered=%d timeline_windows=%d",
+        "[STAGE_INIT] step=universe skip=%s discovered=%d timeline_windows=%d",
         run_config.skip_universe,
         len(discovered_symbols),
         len(timeline),
     )
-    _logger.info("[STAGE-TIME] step=universe elapsed=%.2fs", time.perf_counter() - t_universe)
+    _logger.info("[STAGE_TIME] step=universe elapsed_s=%.2f", time.perf_counter() - t_universe)
     # Step 3) data loading + readiness
     t_data = time.perf_counter()
     data_stage = _run_data_stage(run_config, window, discovered_symbols, timeline)
     _logger.info(
-        "[STAGE] step=data valid=%d require_exec_1m=%s",
+        "[STAGE_INIT] step=data valid=%d require_exec_1m=%s",
         len(data_stage.valid_symbols),
         OPT_FUTURES_CONFIG.get("FUTURES_EXECUTION_MODE") == "intrabar_1m",
     )
-    _logger.info("[STAGE-TIME] step=data elapsed=%.2fs", time.perf_counter() - t_data)
+    _logger.info("[STAGE_TIME] step=data elapsed_s=%.2f", time.perf_counter() - t_data)
     # Step 4) strategy bridge + alpha contract
     t_strategy = time.perf_counter()
     _logger.info(
-        "[STAGE] step=strategy mode=%s strategy=%s strategy_mode=%s",
+        "[STAGE_INIT] step=strategy mode=%s strategy=%s strategy_mode=%s",
         run_config.mode,
         run_config.strategy,
         run_config.strategy is not None,
     )
     _run_strategy_stage(run_config, window, data_stage)
-    _logger.info("[STAGE-TIME] step=strategy elapsed=%.2fs", time.perf_counter() - t_strategy)
+    _logger.info("[STAGE_TIME] step=strategy elapsed_s=%.2f", time.perf_counter() - t_strategy)
     if run_config.mode == "strategy-smoke":
         return RunnerResult(exit_code=0, reason="strategy_smoke_done")
     # Step 5) optimization + final OOS evaluation
     _logger.info(
-        "[STAGE] step=optimize symbols=%d trials=%d",
+        "[STAGE_INIT] step=optimize symbols=%d trials=%d",
         len(data_stage.valid_symbols),
         int(run_config.trials),
     )
@@ -725,9 +725,9 @@ def run_pipeline(
         seed=seed,
         resume=resume,
     )
-    _logger.info("[STAGE-TIME] step=optimize elapsed=%.2fs", time.perf_counter() - t_opt_stage)
+    _logger.info("[STAGE_TIME] step=optimize elapsed_s=%.2f", time.perf_counter() - t_opt_stage)
     _logger.info(
-        "[STAGE-TIME] step=pipeline_total elapsed=%.2fs",
+        "[STAGE_TIME] step=pipeline_total elapsed_s=%.2f",
         time.perf_counter() - pipeline_t0,
     )
     return result
