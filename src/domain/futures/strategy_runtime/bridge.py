@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -39,21 +40,20 @@ def run_ml_pipeline_for_universe(
     preloaded_data_maps: dict[str, dict[str, Any]] | None = None,
     **kwargs: Any,
 ) -> MLPipelineOutput:
+    t0 = time.perf_counter()
     # Extract anchoring params BEFORE discarding kwargs
     _anchor_end_idx: int | None = kwargs.get("anchor_end_idx")
     _target_start: int | None = kwargs.get("target_start_idx")
     _target_end: int | None = kwargs.get("target_end_idx")
+    _precomputed_panels = kwargs.get("precomputed_panels")
     del fetch_start, end_date, opt_config, kwargs
     if strategy_cfg is None or preloaded_data_maps is None:
         return MLPipelineOutput()
     from src.domain.futures.strategy.builder import build_strategy_alpha
 
-    if (
-        _anchor_end_idx is not None
-        and _target_start is not None
-        and _target_end is not None
-    ):
+    if _anchor_end_idx is not None and _target_start is not None and _target_end is not None:
         from src.domain.futures.strategy.ml_builder import build_ml_strategy_alpha_anchored
+
         alpha_panel = build_ml_strategy_alpha_anchored(
             data_maps=preloaded_data_maps,
             symbols=symbols,
@@ -62,6 +62,7 @@ def run_ml_pipeline_for_universe(
             anchor_end_idx=int(_anchor_end_idx),
             target_start=int(_target_start),
             target_end=int(_target_end),
+            precomputed_panels=_precomputed_panels,
         )
     else:
         alpha_panel = build_strategy_alpha(
@@ -76,6 +77,7 @@ def run_ml_pipeline_for_universe(
         from src.domain.futures.strategy.regime.provider import compute_regime_posterior
 
         from src.domain.futures.optimization.optimizer import compute_multi_alignment_info
+
         info = compute_multi_alignment_info(preloaded_data_maps, symbols, tf, embargo=0)
         if info is not None:
             eff_len = int(info["eff_ref_len"])
@@ -84,9 +86,7 @@ def run_ml_pipeline_for_universe(
                 sym
                 for sym in symbols
                 if (
-                    sym in offsets
-                    and sym in preloaded_data_maps
-                    and tf in preloaded_data_maps[sym]
+                    sym in offsets and sym in preloaded_data_maps and tf in preloaded_data_maps[sym]
                 )
             ]
             if len(valid_symbols) >= strategy_cfg.blend.min_symbols:
@@ -110,7 +110,20 @@ def run_ml_pipeline_for_universe(
                     probs_dict["datetime"] = datetimes
                     market_probs = pd.DataFrame(probs_dict).set_index("datetime")
 
-    return MLPipelineOutput(alpha_panel=alpha_panel, market_probs=market_probs)
+    out = MLPipelineOutput(alpha_panel=alpha_panel, market_probs=market_probs)
+    anchored = bool(
+        _anchor_end_idx is not None and _target_start is not None and _target_end is not None
+    )
+    alpha_rows = len(alpha_panel)
+    _logger.info(
+        "[ML-PIPE-PROF] anchored=%s symbols=%d tf=%s elapsed=%.2fs alpha_rows=%d",
+        anchored,
+        len(symbols),
+        tf,
+        time.perf_counter() - t0,
+        alpha_rows,
+    )
+    return out
 
 
 def merge_ml_output_into_is_and_oos(
@@ -173,12 +186,10 @@ def merge_ml_output_into_data_maps(
             on="_merge_datetime",
             how="left",
         )
-        
+
         # === [DIAG-MERGE] ===
         raw_long_nz = int(np.count_nonzero(right["alpha_long"].fillna(0.0).to_numpy()))
-        raw_short_nz = int(np.count_nonzero(right["alpha_short"].fillna(0.0).to_numpy()))
         merged_long_nz = int(np.count_nonzero(merged["alpha_long"].fillna(0.0).to_numpy()))
-        merged_short_nz = int(np.count_nonzero(merged["alpha_short"].fillna(0.0).to_numpy()))
         if log_tag == "oos":
             l_sample = [str(x)[:19] for x in left["_merge_datetime"].iloc[:2]]
             r_sample = [str(x)[:19] for x in right["_merge_datetime"].iloc[:2]]
@@ -216,7 +227,6 @@ def merge_ml_output_into_data_maps(
         _alpha_long_nz,
         _alpha_short_nz,
     )
-
 
 
 class FuturesMLStrategy:

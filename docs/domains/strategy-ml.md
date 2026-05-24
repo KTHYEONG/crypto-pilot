@@ -184,6 +184,59 @@ ev[i]            = q50[i] * (1.0 - penalty_term[i])
 - virtual fold의 `train` 구간(`[v_train_start, v_train_end)`)에서 `fit_robust_bounds` 및 train median imputer를 다시 피팅한다.
 - 해당 virtual-train 기반 정규화를 virtual `train/valid/test` 전 경로에 동일 적용하여 fold 간 normalization leakage를 방지한다.
 
+### 5.11 Final Evaluation Ensemble Cache Contract (2026-05-24)
+- `run_final_oos_evaluation()`의 top-K ensemble 루프는 멤버별 `m_params` 시그니처(JSON sorted key)를 계산한다.
+- 동일 시그니처가 재등장하면 `build_strategy_alpha` + merge + OOS backtest를 재실행하지 않고 캐시된 멤버 포트(`equity_curve` 포함)를 재사용한다.
+- 캐시 적중 멤버도 결과 집계(멤버 수, 메타 allocator 입력)에 동일하게 포함되어 기존 public contract를 유지한다.
+- 성능 목표: 중복 멤버가 많을 때 최종 평가 복잡도를 `O(K * C_eval)`에서 `O(U * C_eval + (K-U) * O(1))`로 축소 (`U`: unique params).
+- 진단 로그:
+  - 멤버 단위: `[ENSEMBLE-PROF] member=... cache=hit`
+  - 요약: `[ENSEMBLE-PROF] summary ... cache_hits=... unique_engine_evals=...`
+
+### 5.12 Bottleneck Profiling Contract (2026-05-24)
+- `run_optimization` 병목 분해를 위해 run-level/leg-level 프로파일 로그를 표준화한다.
+- `precompute_ml_optimization_context()`는 아래 구간을 모두 로깅한다.
+  - `align`, `covariance`, `awf_refit_total`, `calibrator_total`, `prebuilt_total`, `total`
+- AWF anchored refit 경로는 leg별 총 시간과 구간 정보를 로깅한다.
+  - `[AWF-REFIT-PROF] leg=i/n total=... bars=... train_end=... test=[s,e)`
+- `build_ml_strategy_alpha_anchored()`는 내부 학습 파이프라인 시간을 분해한다.
+  - `feature_label`, `matrix`, `fit_predict`, `calibrator`, `total`
+- `run_ml_pipeline_for_universe()`는 anchored/non-anchored 호출 총 시간 로그를 남긴다.
+  - `[ML-PIPE-PROF] anchored=... symbols=... tf=... elapsed=... alpha_rows=...`
+- final ensemble은 기존 캐시 로그 외에 아래 분해를 추가한다.
+  - `unique_engine_evals`, `unique_alpha_builds`, `alpha_build_count`
+- `opt_main_futures` 프로파일 요약은 trial 내부 평균(ms)와 별도로 run-level hidden overhead를 출력한다.
+  - `trial_elapsed_sum`, `run_optimization`, `hidden_overhead`
+
+### 5.13 Performance Verification Snapshot (2026-05-24)
+- 실행 조건:
+  - `PYTHONPATH=. uv run python src/execution/opt_main_futures.py --mode strategy --skip-universe --skip-data-sync --symbols BTCUSDT --trials 5 --tf 4h --reference-date 2026-05-01 --strategy ml_lambdamart_v1 --seed 7`
+- 핵심 관측:
+  - `run_optimization=15.29s`, `trial_elapsed_sum=0.27s`, `hidden_overhead=15.02s`
+  - `ml_precompute total=9.93s` (`awf_refit=1.41s`)로 precompute 지연이 크게 감소
+  - final ensemble summary(단일 멤버 실행): `build_alpha=15.05s`, `total=15.67s`
+- 결론:
+  - AWF leg 반복의 `feature/label` 재생성 병목은 panel cache로 완화됨.
+  - 잔여 병목은 single-member 기준 final alpha build 경로가 지배적이며, 멤버 수 증가 시 ensemble cache 효과가 재확대된다.
+
+### 5.14 Anchored Panel Cache Contract (2026-05-24)
+- AWF leg refit는 `precompute_anchored_ml_panels()`로 causal `FeaturePanel/LabelPanel`을 1회 생성해 재사용한다.
+- 재사용 범위는 raw panel까지만 허용한다. 아래 train-derived 단계는 leg별로 계속 재계산한다.
+  - `fit_robust_bounds` / train median imputer / calibrator fitting
+- `build_ml_strategy_alpha_anchored(..., precomputed_panels=...)` 옵션은 backward-compatible이며, 미지정 시 기존 경로를 사용한다.
+- 진단 로그:
+  - `[ML-PANEL-CACHE] scope=awf_precompute hit=true build=... rows=... symbols=... features=...`
+  - anchored 내부 `[AWF-REFIT-PROF] feature_label=0.00s`로 cache 재사용 여부를 확인한다.
+
+### 5.15 Alpha Override Prebuilt Contract (2026-05-24)
+- AWF leg 경로는 `data_maps` clone/merge 대신 leg별 `alpha_overrides` aligned array를 구성해 prebuilt builder에 주입한다.
+- OOS Platt calibrator fitting도 동일한 `alpha_overrides`를 참조하여 alpha source 일관성을 유지한다.
+- 목표:
+  - pandas DataFrame clone/merge overhead 감소
+  - `O(L * S * T)` object copy 비용을 array 경로로 완화
+- 계약:
+  - override 미제공 시 기존 `data_maps` alpha column 경로를 fallback으로 유지한다.
+
 ---
 
 ## 6. Examples

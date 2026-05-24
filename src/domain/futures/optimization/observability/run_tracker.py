@@ -6,11 +6,14 @@ import logging
 import math
 import os
 import signal
+import socket
 import subprocess
+import time
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import optuna
 from optuna.samplers import TPESampler
@@ -26,14 +29,61 @@ from src.domain.futures.optimization.observability.trial_observability import (
     trial_elapsed_seconds,
 )
 from src.domain.futures.optimization.opt_config import OPT_FUTURES_CONFIG
-from src.domain.futures.optimization.workflow import (
-    build_phase_a1_pruner,
-    build_phase_a1_sampler,
-    build_phase_a2_sampler,
-    build_phase_b_sampler,
-)
 
 _logger: logging.Logger = logging.getLogger("run_tracker")
+
+
+def _resolve_redis_storage_url() -> str:
+    """Resolve Redis storage URL with explicit environment precedence.
+
+    Priority:
+    1) FUTURES_REDIS_URL
+    2) FUTURES_REDIS_HOST (+ PORT/DB/PASSWORD/TLS flags)
+    3) OPT_FUTURES_CONFIG["FUTURES_REDIS_URL"]
+    """
+    env_url = os.getenv("FUTURES_REDIS_URL")
+    if env_url:
+        return env_url
+    env_host = os.getenv("FUTURES_REDIS_HOST")
+    if env_host:
+        scheme = "rediss" if os.getenv("FUTURES_REDIS_TLS", "0") == "1" else "redis"
+        port = int(os.getenv("FUTURES_REDIS_PORT", "6379"))
+        db = int(os.getenv("FUTURES_REDIS_DB", "0"))
+        password = os.getenv("FUTURES_REDIS_PASSWORD", "").strip()
+        auth = f":{password}@" if password else ""
+        return f"{scheme}://{auth}{env_host}:{port}/{db}"
+    return str(OPT_FUTURES_CONFIG.get("FUTURES_REDIS_URL", "redis://127.0.0.1:6379/0"))
+
+
+def _preflight_redis_endpoint(storage_url: str) -> None:
+    """Fast connectivity preflight before Optuna JournalRedisStorage init."""
+    parsed = urlparse(storage_url)
+    if parsed.scheme not in {"redis", "rediss"}:
+        raise RuntimeError(
+            "FUTURES_REDIS_URL must use redis:// or rediss:// "
+            f"(got: {storage_url!r})"
+        )
+    host = parsed.hostname or "127.0.0.1"
+    port = int(parsed.port or 6379)
+    timeout_s = float(os.getenv("FUTURES_REDIS_CONNECT_TIMEOUT_SEC", "1.5"))
+    retries = int(os.getenv("FUTURES_REDIS_CONNECT_RETRIES", "2"))
+    retries = max(1, retries)
+
+    last_err: Exception | None = None
+    for attempt in range(1, retries + 1):
+        try:
+            with socket.create_connection((host, port), timeout=timeout_s):
+                return
+        except OSError as exc:
+            last_err = exc
+            if attempt < retries:
+                time.sleep(0.2)
+
+    raise RuntimeError(
+        "Redis preflight failed for Optuna storage. "
+        f"url={storage_url} endpoint={host}:{port} timeout={timeout_s}s retries={retries} "
+        f"cause={last_err!r}"
+    ) from last_err
 
 
 def _normalize_phase_workers(phase_workers: dict[str, int]) -> dict[str, int]:
@@ -54,6 +104,13 @@ def log_optuna_contract(
     storage_url: str,
 ) -> dict[str, Any]:
     """Persist and log Optuna phase contract."""
+    from src.domain.futures.optimization.workflow import (
+        build_phase_a1_pruner,
+        build_phase_a1_sampler,
+        build_phase_a2_sampler,
+        build_phase_b_sampler,
+    )
+
     normalized_workers = _normalize_phase_workers(phase_workers)
     phase_trials = {
         "phase_a1": max(1, int(requested_trials_per_phase * 0.5)),
@@ -108,7 +165,17 @@ def log_optuna_contract(
 
 def setup_optuna_storage(project_root: str | Path) -> tuple[str, optuna.storages.BaseStorage]:
     """Set up Optuna storage via Redis JournalStorage."""
-    storage_url = str(OPT_FUTURES_CONFIG.get("FUTURES_REDIS_URL", "redis://127.0.0.1:6379/0"))
+    del project_root
+    storage_url = _resolve_redis_storage_url()
+    parsed = urlparse(storage_url)
+    _logger.info(
+        "[OPTUNA-STORAGE] scheme=%s host=%s port=%s db=%s",
+        parsed.scheme or "redis",
+        parsed.hostname or "127.0.0.1",
+        parsed.port or 6379,
+        (parsed.path or "/0").lstrip("/"),
+    )
+    _preflight_redis_endpoint(storage_url)
     storage = optuna.storages.JournalStorage(
         optuna.storages.JournalRedisStorage(storage_url)
     )
@@ -311,8 +378,8 @@ def optimize_worker(s_name: str, s_url: str, chunk_size: int):
     try:
         # Lower CPU priority so that optimization does not lag host gaming or chrome activities
         os.nice(10)
-    except Exception:
-        pass
+    except Exception as exc:
+        _logger.debug("os.nice(10) skipped: %r", exc)
 
     global _GLOBAL_BASE_CTX
     if _GLOBAL_BASE_CTX is None:
