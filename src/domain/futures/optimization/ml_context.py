@@ -64,8 +64,6 @@ class MLPhaseDContext:
     coordinate_frozen_params: dict[str, Any] | None = None
     coordinate_shrunk_ranges: dict[str, tuple[Any, Any]] | None = None
     phase_ranges: dict[str, tuple[Any, Any]] | None = None
-    # When ``FUTURES_WF_HMM_LEG_REFIT`` is True, anchored-WF precompute reruns the full
-    # universe ML pipeline (cross-sectional alpha + systemic HMM + fusion) per leg anchor.
     ml_pipeline_fetch_start: str | None = None
     ml_pipeline_end: str | None = None
     ml_pipeline_is_start: str | None = None
@@ -481,18 +479,6 @@ def _base_engine_params(ml: dict[str, Any], tf: str) -> dict[str, Any]:
         "USE_COMPOUNDING": True,
         "LEVERAGE": int(lev),
         "BETA_ALPHA": float(ml.get("BETA_ALPHA", cfg.get("FUTURES_DEFAULT_BETA_ALPHA", 1.0))),
-        "BETA_REGIME_BULL": float(
-            ml.get("BETA_REGIME_BULL", cfg.get("FUTURES_DEFAULT_BETA_REGIME_BULL", 1.0))
-        ),
-        "BETA_REGIME_BEAR": float(
-            ml.get("BETA_REGIME_BEAR", cfg.get("FUTURES_DEFAULT_BETA_REGIME_BEAR", 0.25))
-        ),
-        "BETA_REGIME_CRISIS": float(
-            ml.get("BETA_REGIME_CRISIS", cfg.get("FUTURES_DEFAULT_BETA_REGIME_CRISIS", -0.5))
-        ),
-        "BETA_REGIME_CHOP": float(
-            ml.get("BETA_REGIME_CHOP", cfg.get("FUTURES_DEFAULT_BETA_REGIME_CHOP", 0.25))
-        ),
         "EV_HURDLE_BPS": float(
             ml.get("EV_HURDLE_BPS", cfg.get("FUTURES_DEFAULT_EV_HURDLE_BPS", 5.0))
         ),
@@ -565,14 +551,7 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
         first_awf_anchor = int(awf_legs[0][1]) if awf_legs else max(1, int(eff_len * is_pool))
 
         dates_ok = bool(ctx.ml_pipeline_fetch_start and ctx.ml_pipeline_end)
-        want_leg_refit = bool(OPT_FUTURES_CONFIG.get("FUTURES_WF_HMM_LEG_REFIT", False))
-        use_full_leg_ml = want_leg_refit and dates_ok and bool(awf_legs)
-        if want_leg_refit and not dates_ok:
-            _logger.warning(
-                "[ML_OPT] FUTURES_WF_HMM_LEG_REFIT=True but "
-                "ml_pipeline_fetch_start/ml_pipeline_end "
-                "not set on MLPhaseDContext; using one merged ML snapshot for every AWF leg."
-            )
+        use_full_leg_ml = dates_ok and bool(awf_legs)
 
         wrk = ctx.ml_pipeline_workers or max(1, min(8, len(ctx.symbols)))
 
@@ -639,7 +618,6 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
                         is_end_date=is_end_str,
                         is_start_date=ctx.ml_pipeline_is_start,
                         gp_only=False,
-                        hmm_only=False,
                         preloaded_data_maps=ctx.data_maps,
                         seed=ctx.seed,
                         strategy_cfg=ctx.strategy_cfg,

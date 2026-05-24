@@ -204,10 +204,16 @@ ML 알파의 OOS 거래 단절을 초래하던 3대 구조적 병목을 식별�
    Walk-forward folds 레이아웃의 test_end 이후 발생하는 최종 자투리 OOS 구간(552 bars)에 대해 신호가 모조리 `0.0`으로 소거되던 아키텍처적 공백을 파악. 최신 데이터를 최종 학습한 **가상 Refit Fold**를 동적으로 빌드하여 OOS 알파 신호를 100% 빈틈없이 생성.
 
 ### 10.2 Final 300-Trial Diagnostics & Interpretation
-- **Result:** 유니버스 필터링 완벽 작동, 300-trial 완료. AWF Leg 성능 폭발. 최종 OOS `oos_zero_trades=1` 유지 (HMM Bull-market short suppression의 정상 리스크 관리 의사결정).
+- **Result:** 유니버스 필터링 완벽 작동, 300-trial 완료. AWF Leg 성능 폭발. 최종 OOS `oos_zero_trades=1` 발생 — **추후 분석으로 이는 Legacy HMM 가드 버그임이 확인됨 (§10.3 참조)**.
 - **Key Metrics:**
   * `discovered=38`, `valid=37`
   * **[ML-COST-WALL]** $\alpha_{p95}$가 기존 $0.00\text{bps}$에서 무려 **$36.14\text{bps}$**로 상승하여 비용 벽(Cost Floor ~24bps)을 완벽하게 돌파! ✅
   * **[STRAT-PATH]** AWF Leg의 실거래 횟수(`trades`)가 기존 26회 내외에서 무려 **$93\text{회}$**로 폭증 및 비영 비중 비율(`merge_nz`) **$7.49\%$** 달성! ✅
   * **[MEMBERSHIP-MASK]** OOS 윈도우 유니버스 활성화 비율(`active_ratio`)이 $0.0\%$에서 **$64.09\%$**로 대폭 복구! ✅
-- **Conclusion:** 3대 구조적 병목이 완벽히 해결되었음을 AWF Leg의 거래수 폭증(93회)과 $\alpha_{p95}$ 상승(36.14bps)으로 입증함. 최종 OOS의 0-trade는 HMM이 Bull regime(100% 지속) 하에서 생성된 숏 신호(99% 비중)를 정교하게 리스크 차단 가이딩한 결과물로서, 금융 논리상 완벽히 건전하고 정상적인 의사결정임이 검증됨.
+- **Conclusion:** 3대 구조적 병목이 완벽히 해결되었음을 AWF Leg의 거래수 폭증(93회)과 $\alpha_{p95}$ 상승(36.14bps)으로 입증함. 단, 최종 OOS `oos_zero_trades=1`은 정상 리스크 관리가 아닌 Legacy HMM Crisis 가드(`crisis_override_thr → return np.zeros`)에 의한 버그성 거래 차단으로 후속 분석에서 판명됨.
+
+### 10.3 HMM Legacy Guard 버그 수정 (2026-05-24)
+- **버그 원인:** `portfolio_constructor.py`의 `p_crisis > crisis_override_thr` 조건이 포트폴리오 가중치를 `np.zeros`로 강제 초기화하여 모든 OOS 거래를 차단. HMM 모듈은 이미 legacy 분류 상태였으나 해당 가드 로직이 백테스트 엔진에 잔존.
+- **수정 범위:** HMM 관련 코드 전체 제거 (24개 파일, -1,151 lines). 제거 대상: Crisis 가드, `mu` scaling, regime policy damping, `_decode_regime_probs()`, `hmm_prob_*` 컬럼 파이프라인, Optuna HMM 파라미터, SQLite fallback storage.
+- **행동 보존:** `regime_policy_enabled`는 기본값 `False`로 regime modulation block이 실제로는 실행되지 않았음. `btc_beta`는 `np.zeros`로 고정 (엔진에서 `regime_betas` 미전달로 런타임 동일).
+- **주의:** HMM 제거 후 Bull regime에서 억제되던 숏 신호가 통과될 수 있음 → OOS 숏사이드 거래수 및 PnL 모니터링 필요.

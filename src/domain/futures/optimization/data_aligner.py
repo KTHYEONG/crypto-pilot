@@ -37,15 +37,6 @@ _FUTURES_2D_REQUIRED_COLS: tuple[str, ...] = (
     "xs_score_long",
     "xs_score_short",
     "composer_sigma_bar",
-    "hmm_prob_bull_calm",
-    "hmm_prob_bull_vol_up",
-    "hmm_prob_bear_trend",
-    "hmm_prob_chop",
-    "hmm_prob_crisis",
-    "hmm_hard_state",
-    "hmm_modulator_long",
-    "hmm_modulator_short",
-    "hmm_modulator_base_long",
     "btc_trend_vol_adj_24h",
 )
 
@@ -197,15 +188,6 @@ def _dataframe_to_symbol_arrays(sig_df: pd.DataFrame) -> dict[str, np.ndarray]:
         "xs_score_long": 0.0,
         "xs_score_short": 0.0,
         "composer_sigma_bar": 0.01,
-        "hmm_prob_bull_calm": 0.0,
-        "hmm_prob_bull_vol_up": 0.0,
-        "hmm_prob_bear_trend": 0.0,
-        "hmm_prob_chop": 0.0,
-        "hmm_prob_crisis": 0.0,
-        "hmm_hard_state": 0.0,
-        "hmm_modulator_long": 1.0,
-        "hmm_modulator_short": 1.0,
-        "hmm_modulator_base_long": 1.0,
         "btc_trend_vol_adj_24h": 0.0,
     }
     
@@ -452,10 +434,6 @@ def align_data_for_2d_engine(
         "xs_score_short",
         "alpha_long",
         "alpha_short",
-        "hmm_prob_crisis",
-        "hmm_hard_state",
-        "hmm_modulator_long",
-        "hmm_modulator_short",
     ]
     aligned_data: dict[str, np.ndarray] = {
         col: np.full((n_bars, n_syms), np.nan, dtype=np.float64) for col in target_cols
@@ -489,10 +467,6 @@ def align_data_for_2d_engine(
             "xs_score_short",
             "alpha_long",
             "alpha_short",
-            "hmm_prob_crisis",
-            "hmm_hard_state",
-            "hmm_modulator_long",
-            "hmm_modulator_short",
         ]:
             if col in merged.columns:
                 val = merged[col].fillna(0).values
