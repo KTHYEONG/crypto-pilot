@@ -176,9 +176,12 @@ def compute_conservative_ev(
         lam * np.float32(2.0),
     )
     
-    # Sign-symmetric: penalize the tail risk that works against each position
+    # Sign-symmetric: multiplicative penalty scales with q50 magnitude to avoid OOS contraction.
     is_long = q50f >= np.float32(0.0)
-    ev = np.where(is_long, q50f - lam_dynamic * downside, q50f + lam_dynamic * upside)
+    penalty_ratio = np.where(is_long, downside / uncertainty, upside / uncertainty)
+    # Clip dynamic penalty to [0.0, 0.99] to guarantee sign-preservation.
+    penalty_term = np.clip(lam_dynamic * penalty_ratio, np.float32(0.0), np.float32(0.99))
+    ev = q50f * (np.float32(1.0) - penalty_term)
     ev = np.asarray(ev, dtype=np.float32)
     clip = np.float32(cfg.alpha_clip_bps / 10000.0)
     clipped = np.clip(ev, -clip, clip)
