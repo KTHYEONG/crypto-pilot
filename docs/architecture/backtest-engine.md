@@ -77,6 +77,16 @@ last_verified: 2026-05-24
 - `sampler_by_phase`, `worker_by_phase`
 - `storage_url` (Redis or SQLite WAL)
 
+### 5.2.1 Redis Storage Resolution Contract (2026-05-24)
+- `setup_optuna_storage()`는 아래 우선순위로 Redis endpoint를 결정합니다.
+- `FUTURES_REDIS_URL`
+- `FUTURES_REDIS_HOST` + `FUTURES_REDIS_PORT` + `FUTURES_REDIS_DB` + `FUTURES_REDIS_PASSWORD` + `FUTURES_REDIS_TLS`
+- `OPT_FUTURES_CONFIG["FUTURES_REDIS_URL"]`
+- storage 생성 전에 TCP preflight를 수행합니다.
+- `FUTURES_REDIS_CONNECT_TIMEOUT_SEC` (기본 `1.5`)
+- `FUTURES_REDIS_CONNECT_RETRIES` (기본 `2`)
+- 시작 로그 `[OPTUNA-STORAGE] scheme=... host=... port=... db=...`로 실제 적용 endpoint를 출력합니다.
+
 ### 5.3 Walk-Forward Evaluation Pipeline (7 Stages)
 1. **Readiness:** 데이터 커버리지 및 필수 컬럼 존재성 검증.
 2. **WF Scheduler:** Inner AWF(IS=24M, K=5) 및 Outer Rolling(IS=24M, OOS=6M) 스케줄링.

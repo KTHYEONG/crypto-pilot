@@ -8,6 +8,7 @@ _project_root = Path(__file__).resolve().parent.parent.parent
 if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
 
+# ruff: noqa: E402
 import argparse
 import logging
 import time
@@ -107,12 +108,10 @@ def _ensure_data_sync_for_window(run_config: FuturesRunConfig, window: Quarterly
         target_symbols: list[str] | None = None
         if run_config.symbols:
             # Include targets, anchors, and macros for seamless readiness
-            target_symbols = list(set(
-                list(run_config.symbols)
-                + FUTURES_ANCHOR_SYMBOLS
-                + FUTURES_MACRO_INDEX_SYMBOLS
-            ))
-        
+            target_symbols = list(
+                set(list(run_config.symbols) + FUTURES_ANCHOR_SYMBOLS + FUTURES_MACRO_INDEX_SYMBOLS)
+            )
+
         # 1m data is massive and sync duration is long.
         # We explicitly set sync_1m=False here to skip 1m data fetch
         # for the entire candidate population.
@@ -285,7 +284,7 @@ def _run_data_stage(
                     last_ledger_date = pd.to_datetime(df_ledger["date"]).max().date()
             except Exception as e:
                 _logger.warning("Failed to check ledger date in data stage (%s).", e)
-        
+
         run_historical_sync(
             start_date=last_ledger_date,
             end_date=window.end_date_value,
@@ -403,6 +402,7 @@ def _run_optimization_stage(
         OPT_FUTURES_CONFIG,
     )
     import os
+
     physical_cores = max(1, (os.cpu_count() or 4) // 2)
     # Target 6 workers matching high-performance P-cores (e.g. i5-13600K)
     safe_workers_b = min(6, physical_cores)
@@ -424,9 +424,7 @@ def _run_optimization_stage(
         resume=resume,
         strategy_mode=(run_config.strategy is not None),
         strategy_cfg=(
-            StrategyConfig(name=run_config.strategy)
-            if run_config.strategy is not None
-            else None
+            StrategyConfig(name=run_config.strategy) if run_config.strategy is not None else None
         ),
         n_trials_a1=max(1, int(run_config.trials * 0.5)),
         n_trials_a2=max(1, int(run_config.trials * 0.2)),
@@ -450,6 +448,22 @@ def _run_optimization_stage(
     opt_res = run_optimization(opt_req)
     opt_elapsed = time.perf_counter() - t_opt
     _logger.info("[STAGE-TIME] step=run_optimization elapsed=%.2fs", opt_elapsed)
+    precompute_profile = getattr(opt_res.base_ctx, "precompute_profile", None)
+    if isinstance(precompute_profile, dict):
+        _logger.info(
+            (
+                "[RUN-PROF] step=ml_precompute total=%.2fs align=%.2fs "
+                "covariance=%.2fs awf_refit=%.2fs calibrator=%.2fs "
+                "prebuilt=%.2fs legs=%d"
+            ),
+            float(precompute_profile.get("total", 0.0)),
+            float(precompute_profile.get("align", 0.0)),
+            float(precompute_profile.get("covariance", 0.0)),
+            float(precompute_profile.get("awf_refit_total", 0.0)),
+            float(precompute_profile.get("calibrator_total", 0.0)),
+            float(precompute_profile.get("prebuilt_total", 0.0)),
+            int(precompute_profile.get("awf_legs", 0)),
+        )
     study_ml = opt_res.study_ml
     best_trial = opt_res.best_trial
 
@@ -458,18 +472,55 @@ def _run_optimization_stage(
         if study_ml is not None:
             import numpy as np
             import optuna
+
             all_trials = study_ml.get_trials(deepcopy=False)
-            valid_trials = [t for t in all_trials if t.state in (optuna.trial.TrialState.COMPLETE, optuna.trial.TrialState.PRUNED)]
+            valid_states = (
+                optuna.trial.TrialState.COMPLETE,
+                optuna.trial.TrialState.PRUNED,
+            )
+            valid_trials = [t for t in all_trials if t.state in valid_states]
             if valid_trials:
-                c_times = [float(t.user_attrs.get("prof_compose", 0.0)) for t in valid_trials if "prof_compose" in t.user_attrs]
-                p_times = [float(t.user_attrs.get("prof_prep", 0.0)) for t in valid_trials if "prof_prep" in t.user_attrs]
-                pa_times = [float(t.user_attrs.get("prof_prep_align", 0.0)) for t in valid_trials if "prof_prep_align" in t.user_attrs]
-                pc_times = [float(t.user_attrs.get("prof_prep_constraint", 0.0)) for t in valid_trials if "prof_prep_constraint" in t.user_attrs]
-                e_times = [float(t.user_attrs.get("prof_exec", 0.0)) for t in valid_trials if "prof_exec" in t.user_attrs]
-                m_times = [float(t.user_attrs.get("prof_metrics", 0.0)) for t in valid_trials if "prof_metrics" in t.user_attrs]
-                mp_times = [float(t.user_attrs.get("prof_metrics_pure", 0.0)) for t in valid_trials if "prof_metrics_pure" in t.user_attrs]
-                md_times = [float(t.user_attrs.get("prof_metrics_db_io", 0.0)) for t in valid_trials if "prof_metrics_db_io" in t.user_attrs]
-                
+                c_times = [
+                    float(t.user_attrs.get("prof_compose", 0.0))
+                    for t in valid_trials
+                    if "prof_compose" in t.user_attrs
+                ]
+                p_times = [
+                    float(t.user_attrs.get("prof_prep", 0.0))
+                    for t in valid_trials
+                    if "prof_prep" in t.user_attrs
+                ]
+                pa_times = [
+                    float(t.user_attrs.get("prof_prep_align", 0.0))
+                    for t in valid_trials
+                    if "prof_prep_align" in t.user_attrs
+                ]
+                pc_times = [
+                    float(t.user_attrs.get("prof_prep_constraint", 0.0))
+                    for t in valid_trials
+                    if "prof_prep_constraint" in t.user_attrs
+                ]
+                e_times = [
+                    float(t.user_attrs.get("prof_exec", 0.0))
+                    for t in valid_trials
+                    if "prof_exec" in t.user_attrs
+                ]
+                m_times = [
+                    float(t.user_attrs.get("prof_metrics", 0.0))
+                    for t in valid_trials
+                    if "prof_metrics" in t.user_attrs
+                ]
+                mp_times = [
+                    float(t.user_attrs.get("prof_metrics_pure", 0.0))
+                    for t in valid_trials
+                    if "prof_metrics_pure" in t.user_attrs
+                ]
+                md_times = [
+                    float(t.user_attrs.get("prof_metrics_db_io", 0.0))
+                    for t in valid_trials
+                    if "prof_metrics_db_io" in t.user_attrs
+                ]
+
                 mean_c = float(np.mean(c_times)) if c_times else 0.0
                 mean_p = float(np.mean(p_times)) if p_times else 0.0
                 mean_pa = float(np.mean(pa_times)) if pa_times else 0.0
@@ -479,19 +530,70 @@ def _run_optimization_stage(
                 mean_mp = float(np.mean(mp_times)) if mp_times else 0.0
                 mean_md = float(np.mean(md_times)) if md_times else 0.0
                 total_mean = mean_c + mean_p + mean_e + mean_m
-                
+                trial_elapsed_sum = 0.0
+                for trial in valid_trials:
+                    dt_start = getattr(trial, "datetime_start", None)
+                    dt_end = getattr(trial, "datetime_complete", None)
+                    if dt_start is None or dt_end is None:
+                        continue
+                    trial_elapsed_sum += max((dt_end - dt_start).total_seconds(), 0.0)
+                hidden_overhead = max(opt_elapsed - trial_elapsed_sum, 0.0)
+
                 if total_mean > 0:
                     _logger.info("=" * 60)
-                    _logger.info(" [PROFILING SUMMARY] Strategy Backtest Performance Profiling (n_trials=%d)", len(valid_trials))
-                    _logger.info("  1. Signal Compose   : %6.2f ms (%5.1f%%)", mean_c * 1000.0, (mean_c / total_mean) * 100.0)
-                    _logger.info("  2. Backtest Prep    : %6.2f ms (%5.1f%%)", mean_p * 1000.0, (mean_p / total_mean) * 100.0)
-                    _logger.info("     - Data Align     : %6.2f ms (%5.1f%%)", mean_pa * 1000.0, (mean_pa / total_mean) * 100.0)
-                    _logger.info("     - Constraint Ck  : %6.2f ms (%5.1f%%)", mean_pc * 1000.0, (mean_pc / total_mean) * 100.0)
-                    _logger.info("  3. Numba Execution  : %6.2f ms (%5.1f%%)", mean_e * 1000.0, (mean_e / total_mean) * 100.0)
-                    _logger.info("  4. Metrics/Pruning  : %6.2f ms (%5.1f%%)", mean_m * 1000.0, (mean_m / total_mean) * 100.0)
-                    _logger.info("     - Pure Calc      : %6.2f ms (%5.1f%%)", mean_mp * 1000.0, (mean_mp / total_mean) * 100.0)
-                    _logger.info("     - Redis DB I/O   : %6.2f ms (%5.1f%%)", mean_md * 1000.0, (mean_md / total_mean) * 100.0)
+                    _logger.info(
+                        " [PROFILING SUMMARY] Strategy Backtest Performance Profiling "
+                        "(n_trials=%d)",
+                        len(valid_trials),
+                    )
+                    _logger.info(
+                        "  1. Signal Compose   : %6.2f ms (%5.1f%%)",
+                        mean_c * 1000.0,
+                        (mean_c / total_mean) * 100.0,
+                    )
+                    _logger.info(
+                        "  2. Backtest Prep    : %6.2f ms (%5.1f%%)",
+                        mean_p * 1000.0,
+                        (mean_p / total_mean) * 100.0,
+                    )
+                    _logger.info(
+                        "     - Data Align     : %6.2f ms (%5.1f%%)",
+                        mean_pa * 1000.0,
+                        (mean_pa / total_mean) * 100.0,
+                    )
+                    _logger.info(
+                        "     - Constraint Ck  : %6.2f ms (%5.1f%%)",
+                        mean_pc * 1000.0,
+                        (mean_pc / total_mean) * 100.0,
+                    )
+                    _logger.info(
+                        "  3. Numba Execution  : %6.2f ms (%5.1f%%)",
+                        mean_e * 1000.0,
+                        (mean_e / total_mean) * 100.0,
+                    )
+                    _logger.info(
+                        "  4. Metrics/Pruning  : %6.2f ms (%5.1f%%)",
+                        mean_m * 1000.0,
+                        (mean_m / total_mean) * 100.0,
+                    )
+                    _logger.info(
+                        "     - Pure Calc      : %6.2f ms (%5.1f%%)",
+                        mean_mp * 1000.0,
+                        (mean_mp / total_mean) * 100.0,
+                    )
+                    _logger.info(
+                        "     - Redis DB I/O   : %6.2f ms (%5.1f%%)",
+                        mean_md * 1000.0,
+                        (mean_md / total_mean) * 100.0,
+                    )
                     _logger.info("  * Total Backtest/Tr : %6.2f ms", total_mean * 1000.0)
+                    _logger.info(
+                        " [RUN-PROF] trial_elapsed_sum=%.2fs run_optimization=%.2fs "
+                        "hidden_overhead=%.2fs",
+                        trial_elapsed_sum,
+                        opt_elapsed,
+                        hidden_overhead,
+                    )
                     _logger.info("=" * 60)
     except Exception as e:
         _logger.warning("Failed to calculate profile summary: %s", e)
@@ -511,12 +613,11 @@ def _run_optimization_stage(
     ensemble_results = []
     if study_ml is not None:
         completed_trials = [
-            t for t in study_ml.get_trials(deepcopy=False)
+            t
+            for t in study_ml.get_trials(deepcopy=False)
             if t.state == optuna.trial.TrialState.COMPLETE and t.value is not None
         ]
-        ensemble_results = [
-            {"trial": t, "params": t.params} for t in completed_trials
-        ]
+        ensemble_results = [{"trial": t, "params": t.params} for t in completed_trials]
 
     final_req = FinalEvaluationRequest(
         tf=run_config.tf,

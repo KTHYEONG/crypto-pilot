@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from dataclasses import dataclass
 from datetime import date
 from typing import TYPE_CHECKING, Any
@@ -37,6 +38,8 @@ if TYPE_CHECKING:
 _logger = logging.getLogger(__name__)
 _PRECOMPUTE_LOCK = threading.Lock()
 _MEMBERSHIP_STATS_PATH = LOG_DIR / "futures/optimization/membership_mask_stats.parquet"
+AlphaOverrides = dict[str, tuple[np.ndarray, np.ndarray]]
+
 
 @dataclass
 class MLPhaseDContext:
@@ -134,6 +137,47 @@ def merge_membership_constraints_into_aligned(
     aligned_data["_membership_stats_persisted"] = True
 
 
+def _build_alpha_overrides_from_panel(
+    panel: pd.DataFrame,
+    *,
+    data_maps: dict[str, dict[str, Any]],
+    symbols: list[str],
+    tf: str,
+    info: dict[str, Any],
+) -> AlphaOverrides:
+    """Build aligned alpha arrays (eff_ref_len) from panel output without mutating data_maps."""
+    out: AlphaOverrides = {}
+    if panel.empty:
+        return out
+    by_sym = panel.reset_index().groupby("symbol", sort=False)
+    eff_len = int(info["eff_ref_len"])
+    for sym in symbols:
+        if sym not in data_maps or tf not in data_maps[sym]:
+            continue
+        long_arr = np.zeros(eff_len, dtype=np.float64)
+        short_arr = np.zeros(eff_len, dtype=np.float64)
+        try:
+            sym_rows = by_sym.get_group(sym)
+        except KeyError:
+            out[sym] = (long_arr, short_arr)
+            continue
+        start_idx = int(info["alignment_offsets"][sym])
+        raw = data_maps[sym][tf].iloc[start_idx : start_idx + eff_len]
+        left = pd.DataFrame({"datetime": raw["datetime"]})
+        right = sym_rows[["datetime", "alpha_long", "alpha_short"]].copy()
+        left["_merge_datetime"] = pd.to_datetime(left["datetime"], utc=True).dt.tz_localize(None)
+        right["_merge_datetime"] = pd.to_datetime(right["datetime"], utc=True).dt.tz_localize(None)
+        merged = left.merge(
+            right[["_merge_datetime", "alpha_long", "alpha_short"]],
+            on="_merge_datetime",
+            how="left",
+        )
+        long_arr[:] = merged["alpha_long"].fillna(0.0).to_numpy(dtype=np.float64)
+        short_arr[:] = merged["alpha_short"].fillna(0.0).to_numpy(dtype=np.float64)
+        out[sym] = (long_arr, short_arr)
+    return out
+
+
 def _fit_oos_platt_calibrators_from_maps(
     data_maps: dict[str, dict[str, Any]],
     symbols: list[str],
@@ -143,6 +187,7 @@ def _fit_oos_platt_calibrators_from_maps(
     window_lo: int,
     window_hi_excl: int,
     oos_pool_start: int | None = None,
+    alpha_overrides: AlphaOverrides | None = None,
 ) -> tuple[SignalCalibrator | None, SignalCalibrator | None, float]:
     """Platt scaling fit **only** on OOS bars (aligned eff_ref_len indices)."""
     from src.domain.futures.optimization.common import SignalCalibrator
@@ -168,15 +213,28 @@ def _fit_oos_platt_calibrators_from_maps(
             i0, i1 = int(np.clip(a0, 0, eff_len)), int(np.clip(a1, 0, eff_len))
             if i1 <= i0:
                 continue
-            if "alpha_long" in raw.columns:
-                alpha_long = raw["alpha_long"].to_numpy(dtype=np.float64)[i0:i1]
+            over = alpha_overrides.get(sym) if alpha_overrides else None
+            if over is not None:
+                alpha_long = np.asarray(over[0], dtype=np.float64)[i0:i1]
+                alpha_short = np.asarray(over[1], dtype=np.float64)[i0:i1]
+            else:
+                alpha_long = (
+                    raw["alpha_long"].to_numpy(dtype=np.float64)[i0:i1]
+                    if "alpha_long" in raw.columns
+                    else None
+                )
+                alpha_short = (
+                    raw["alpha_short"].to_numpy(dtype=np.float64)[i0:i1]
+                    if "alpha_short" in raw.columns
+                    else None
+                )
+            if alpha_long is not None:
                 r_t = fwd_ret[i0:i1]
                 mask = ~np.isnan(alpha_long) & ~np.isnan(r_t)
                 if mask.any():
                     al.append(alpha_long[mask])
                     rl.append(r_t[mask])
-            if "alpha_short" in raw.columns:
-                alpha_short = raw["alpha_short"].to_numpy(dtype=np.float64)[i0:i1]
+            if alpha_short is not None:
                 r_ts = fwd_ret[i0:i1]
                 mask_s = ~np.isnan(alpha_short) & ~np.isnan(r_ts)
                 if mask_s.any():
@@ -188,9 +246,7 @@ def _fit_oos_platt_calibrators_from_maps(
     n_l = int(sum(a.size for a in all_alphas))
     n_s = int(sum(a.size for a in all_alphas_short))
 
-    if widen and oos_pool_start is not None and pool < lo and (
-        n_l < min_bars or n_s < min_bars
-    ):
+    if widen and oos_pool_start is not None and pool < lo and (n_l < min_bars or n_s < min_bars):
         _logger.info(
             "[SignalCalibrator] OOS Platt widening window start %d \u2192 %d (pool start)",
             lo,
@@ -222,9 +278,7 @@ def _fit_oos_platt_calibrators_from_maps(
         est_b = calib.mean_b
     if all_alphas_short and n_s >= min(30, min_bars):
         calib_s = SignalCalibrator()
-        calib_s.fit(
-            np.concatenate(all_alphas_short), np.concatenate(all_returns_short)
-        )
+        calib_s.fit(np.concatenate(all_alphas_short), np.concatenate(all_returns_short))
     return calib, calib_s, est_b
 
 
@@ -236,6 +290,7 @@ def _build_prebuilt_full_arrays(
     *,
     calibrator: SignalCalibrator | None,
     calibrator_short: SignalCalibrator | None,
+    alpha_overrides: AlphaOverrides | None = None,
 ) -> dict[str, dict[str, np.ndarray]]:
     """Build vector bundles for ``_build_aligned_2d_from_prebuilt``.
 
@@ -256,11 +311,13 @@ def _build_prebuilt_full_arrays(
         trimmed_sig["open"] = raw_full["open"].to_numpy(dtype=np.float64, copy=False)
         trimmed_sig["volume"] = (
             raw_full["volume"].to_numpy(dtype=np.float64, copy=False)
-            if "volume" in raw_full.columns else np.ones(len(raw_full))
+            if "volume" in raw_full.columns
+            else np.ones(len(raw_full))
         )
         _atr_col = (
             raw_full["atr"].to_numpy(dtype=np.float64, copy=False)
-            if "atr" in raw_full.columns else None
+            if "atr" in raw_full.columns
+            else None
         )
         if _atr_col is None or not np.any(_atr_col > 0):
             _atr_period_fb = int(OPT_FUTURES_CONFIG.get("FUTURES_ATR_PERIOD_FIXED", 30))
@@ -270,8 +327,11 @@ def _build_prebuilt_full_arrays(
                 raw_full["close"].to_numpy(dtype=np.float64),
                 _atr_period_fb,
             )
-        trimmed_sig["atr"] = np.where(np.isfinite(_atr_col) & (_atr_col > 0), _atr_col,
-                                       raw_full["close"].to_numpy(dtype=np.float64) * 0.01)
+        trimmed_sig["atr"] = np.where(
+            np.isfinite(_atr_col) & (_atr_col > 0),
+            _atr_col,
+            raw_full["close"].to_numpy(dtype=np.float64) * 0.01,
+        )
         trimmed_sig["garch_kelly_f"] = (
             raw_full["garch_kelly_f"].to_numpy(dtype=np.float64, copy=False)
             if "garch_kelly_f" in raw_full.columns
@@ -303,41 +363,48 @@ def _build_prebuilt_full_arrays(
                 copy=False,
             )
 
+        over = alpha_overrides.get(sym) if alpha_overrides else None
+        if over is not None:
+            alpha_long_full = np.asarray(over[0], dtype=np.float64)
+            alpha_short_full = np.asarray(over[1], dtype=np.float64)
+        else:
+            alpha_long_full = (
+                raw_full["alpha_long"].to_numpy(dtype=np.float64, copy=False)
+                if "alpha_long" in raw_full.columns
+                else None
+            )
+            alpha_short_full = (
+                raw_full["alpha_short"].to_numpy(dtype=np.float64, copy=False)
+                if "alpha_short" in raw_full.columns
+                else None
+            )
         # Prefer current strategy alpha path. Keep legacy fallback for non-strategy runs.
         gp_base = (
-            raw_full["alpha_long"].to_numpy(dtype=np.float64, copy=False)
-            if "alpha_long" in raw_full.columns
+            alpha_long_full
+            if alpha_long_full is not None
             else (
                 raw_full["alpha_long_00"].to_numpy(dtype=np.float64, copy=False)
                 if "alpha_long_00" in raw_full.columns
                 else np.zeros(len(raw_full), dtype=np.float64)
             )
         )
-        if "alpha_long" in raw_full.columns:
-            trimmed_sig["alpha_long"] = raw_full["alpha_long"].to_numpy(
-                dtype=np.float64, copy=False
-            )
-        if "alpha_short" in raw_full.columns:
-            trimmed_sig["alpha_short"] = raw_full["alpha_short"].to_numpy(
-                dtype=np.float64, copy=False
-            )
+        if alpha_long_full is not None:
+            trimmed_sig["alpha_long"] = alpha_long_full
+        if alpha_short_full is not None:
+            trimmed_sig["alpha_short"] = alpha_short_full
         if calibrator:
             p_base = calibrator.predict_prob(gp_base)
             trimmed_sig["ml_calib_prob"] = p_base
 
-            if "alpha_long" in raw_full.columns:
-                p_l = calibrator.predict_prob(
-                    raw_full["alpha_long"].to_numpy(dtype=np.float64, copy=False)
-                )
+            if alpha_long_full is not None:
+                p_l = calibrator.predict_prob(alpha_long_full)
                 trimmed_sig["ml_calib_prob_long"] = p_l
             else:
                 trimmed_sig["ml_calib_prob_long"] = trimmed_sig["ml_calib_prob"]
 
-            if "alpha_short" in raw_full.columns:
+            if alpha_short_full is not None:
                 calib_s = calibrator_short or calibrator
-                p_s = calib_s.predict_prob(
-                    raw_full["alpha_short"].to_numpy(dtype=np.float64, copy=False)
-                )
+                p_s = calib_s.predict_prob(alpha_short_full)
                 trimmed_sig["ml_calib_prob_short"] = p_s
             else:
                 trimmed_sig["ml_calib_prob_short"] = trimmed_sig["ml_calib_prob"]
@@ -501,6 +568,12 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
     from src.domain.futures.optimization.common import EMBARGO_BARS
 
     with _PRECOMPUTE_LOCK:
+        t_precompute_total = time.perf_counter()
+        t_align_total = 0.0
+        t_cov_total = 0.0
+        t_awf_refit_total = 0.0
+        t_calibrator_total = 0.0
+        t_prebuilt_total = 0.0
         if ctx.awf_leg_slices is not None:
             pass
 
@@ -525,7 +598,9 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
         FuturesMLStrategy(name="Precompute", params=params)
 
         emb = int(EMBARGO_BARS.get(ctx.tf, 12))
+        t_align = time.perf_counter()
         info = compute_multi_alignment_info(ctx.data_maps, ctx.symbols, ctx.tf, emb)
+        t_align_total += time.perf_counter() - t_align
         if info is None:
             pass
         ctx.multi_alignment_info = info
@@ -534,19 +609,21 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
         embargo = int(EMBARGO_BARS.get(ctx.tf, 12))
         k_legs = int(OPT_FUTURES_CONFIG.get("FUTURES_AWF_K_LEGS", 6))
         is_pool = float(OPT_FUTURES_CONFIG.get("FUTURES_AWF_IS_POOL_FRAC", 0.70))
-        awf_legs = build_anchored_wf_legs(
-            eff_len, k=k_legs, embargo=embargo, is_pool_frac=is_pool
-        )
+        awf_legs = build_anchored_wf_legs(eff_len, k=k_legs, embargo=embargo, is_pool_frac=is_pool)
 
         lookback = cov_lookback_bars(ctx.tf, OPT_FUTURES_CONFIG)
         close_2d_full = np.zeros((eff_len, len(ctx.symbols)), dtype=np.float64)
         for s_idx, sym in enumerate(ctx.symbols):
             if sym in ctx.data_maps and ctx.tf in ctx.data_maps[sym]:
                 start_idx = info["alignment_offsets"][sym]
-                close_2d_full[:, s_idx] = ctx.data_maps[sym][ctx.tf]["close"].iloc[
-                    start_idx : start_idx + eff_len
-                ].to_numpy(dtype=np.float64)
+                close_2d_full[:, s_idx] = (
+                    ctx.data_maps[sym][ctx.tf]["close"]
+                    .iloc[start_idx : start_idx + eff_len]
+                    .to_numpy(dtype=np.float64)
+                )
+        t_cov = time.perf_counter()
         sigma_3d_full = precompute_rolling_covariances(close_2d_full, lookback)
+        t_cov_total += time.perf_counter() - t_cov
 
         first_awf_anchor = int(awf_legs[0][1]) if awf_legs else max(1, int(eff_len * is_pool))
 
@@ -561,11 +638,8 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
         last_est_b = 1.05
 
         if use_full_leg_ml:
-            from src.domain.futures.strategy_runtime.bridge import (
-                copy_data_maps_tf_clone,
-                merge_ml_output_into_data_maps,
-                run_ml_pipeline_for_universe,
-            )
+            from src.domain.futures.strategy.ml_builder import precompute_anchored_ml_panels
+            from src.domain.futures.strategy_runtime.bridge import run_ml_pipeline_for_universe
 
             _logger.debug(
                 "[ML_OPT] AWF full ML leg refit - %dx universe pipeline "
@@ -579,156 +653,200 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
             if ref_sym is None:
                 use_full_leg_ml = False
             else:
-                sym_df_ref = ctx.data_maps[ref_sym][ctx.tf]
-                start_idx_ref = int(info["alignment_offsets"][ref_sym])
-                tmp_slices: list[dict[str, Any]] = []
-                failed = False
-                for leg_i, (_train_s, anchor, test_s, test_e) in enumerate(awf_legs):
-                    idx_row = start_idx_ref + int(anchor)
-                    if idx_row >= len(sym_df_ref):
-                        _logger.error(
-                            "[ML_OPT] AWF leg %d anchor idx %d out of range (len=%d).",
-                            leg_i,
-                            idx_row,
-                            len(sym_df_ref),
-                        )
-                        failed = True
-                        break
-                    cutoff_dt = pd.to_datetime(sym_df_ref["datetime"].iloc[idx_row], utc=True)
-                    is_end_str = cutoff_dt.isoformat()
-
-                    _logger.debug(
-                        "[ML_OPT] AWF leg %d/%d: is_end=%s train=[0,%d) test=[%d,%d)",
-                        leg_i + 1,
-                        len(awf_legs),
-                        is_end_str,
-                        int(anchor),
-                        int(test_s),
-                        int(test_e),
+                if ctx.strategy_cfg is None:
+                    _logger.warning(
+                        "[ML_OPT] strategy_cfg missing; disable per-leg ML refit cache path."
                     )
-
-                    ml_out = run_ml_pipeline_for_universe(
+                    use_full_leg_ml = False
+                if use_full_leg_ml:
+                    sym_df_ref = ctx.data_maps[ref_sym][ctx.tf]
+                    start_idx_ref = int(info["alignment_offsets"][ref_sym])
+                    t_panel_cache = time.perf_counter()
+                    precomputed_panels = precompute_anchored_ml_panels(
+                        ctx.data_maps,
                         list(ctx.symbols),
                         ctx.tf,
-                        ctx.ml_pipeline_fetch_start,
-                        ctx.ml_pipeline_end,
-                        dict(OPT_FUTURES_CONFIG),
-                        workers=wrk,
-                        n_jobs=wrk,
-                        is_end_date=is_end_str,
-                        is_start_date=ctx.ml_pipeline_is_start,
-                        gp_only=False,
-                        preloaded_data_maps=ctx.data_maps,
-                        seed=ctx.seed,
-                        strategy_cfg=ctx.strategy_cfg,
-                        anchor_end_idx=int(anchor),
-                        target_start_idx=int(test_s),
-                        target_end_idx=int(test_e),
+                        ctx.strategy_cfg,
                     )
-                    # alpha_panel 기준으로 empty check (meta_feature_frame은 bridge에서 미사용)
-                    _alpha_panel = getattr(ml_out, "alpha_panel", None)
-                    if _alpha_panel is None or _alpha_panel.empty:
-                        _logger.error(
-                            "[ML_OPT] AWF leg %d ML pipeline returned empty output.", leg_i
-                        )
-                        failed = True
-                        break
-
-                    leg_maps = copy_data_maps_tf_clone(ctx.data_maps, ctx.symbols, ctx.tf)
-                    merge_ml_output_into_data_maps(
-                        ml_out,
-                        leg_maps,
-                        ctx.symbols,
-                        ctx.tf,
-                        log_tag=f" leg{leg_i}_AWF",
+                    _logger.info(
+                        (
+                            "[ML-PANEL-CACHE] scope=awf_precompute hit=true "
+                            "build=%.2fs rows=%d symbols=%d features=%d"
+                        ),
+                        time.perf_counter() - t_panel_cache,
+                        int(precomputed_panels.features.values.shape[0]),
+                        int(precomputed_panels.features.values.shape[1]),
+                        int(precomputed_panels.features.values.shape[2]),
                     )
+                    tmp_slices: list[dict[str, Any]] = []
+                    failed = False
+                    for leg_i, (_train_s, anchor, test_s, test_e) in enumerate(awf_legs):
+                        leg_t0 = time.perf_counter()
+                        idx_row = start_idx_ref + int(anchor)
+                        if idx_row >= len(sym_df_ref):
+                            _logger.error(
+                                "[ML_OPT] AWF leg %d anchor idx %d out of range (len=%d).",
+                                leg_i,
+                                idx_row,
+                                len(sym_df_ref),
+                            )
+                            failed = True
+                            break
+                        cutoff_dt = pd.to_datetime(sym_df_ref["datetime"].iloc[idx_row], utc=True)
+                        is_end_str = cutoff_dt.isoformat()
 
-                    calib_leg, calib_s_leg, est_b_leg = _fit_oos_platt_calibrators_from_maps(
-                        leg_maps,
-                        ctx.symbols,
-                        ctx.tf,
-                        info,
-                        window_lo=int(anchor),
-                        window_hi_excl=int(test_s),
-                        oos_pool_start=first_awf_anchor,
-                    )
-                    last_calib, last_calib_short, last_est_b = calib_leg, calib_s_leg, est_b_leg
-
-                    # [ALPHA-ALIGN] per-leg alpha residual diagnostic (first 3 legs only)
-                    if leg_i < 3:
-                        _al_nz_list: list[float] = []
-                        _as_nz_list: list[float] = []
-                        # Slice-scoped nonzero ratio measured strictly within the leg's
-                        # backtest evaluation window [test_s, test_e). A near-zero value
-                        # here while the full-frame ratio is positive proves that the ML
-                        # alpha coverage does not overlap this leg (root cause of
-                        # zero_trades_first_leg pruning).
-                        _al_nz_slice_list: list[float] = []
-                        _as_nz_slice_list: list[float] = []
-                        _offsets_align = info["alignment_offsets"] if info else {}
-                        _bars_leg = int(test_e) - int(test_s)
-                        for _sym in ctx.symbols:
-                            if _sym not in leg_maps or ctx.tf not in leg_maps[_sym]:
-                                continue
-                            _ldf = leg_maps[_sym][ctx.tf]
-                            _off = int(_offsets_align.get(_sym, 0))
-                            _lo = _off + int(test_s)
-                            _hi = _off + int(test_e)
-                            if "alpha_long" in _ldf.columns:
-                                _al_nz_list.append(float((_ldf["alpha_long"] != 0).mean()))
-                                _al_slice = _ldf["alpha_long"].to_numpy()[_lo:_hi]
-                                if _al_slice.size > 0:
-                                    _al_nz_slice_list.append(float((_al_slice != 0).mean()))
-                            if "alpha_short" in _ldf.columns:
-                                _as_nz_list.append(float((_ldf["alpha_short"] != 0).mean()))
-                                _as_slice = _ldf["alpha_short"].to_numpy()[_lo:_hi]
-                                if _as_slice.size > 0:
-                                    _as_nz_slice_list.append(float((_as_slice != 0).mean()))
-                        _al_nz = float(np.mean(_al_nz_list)) if _al_nz_list else 0.0
-                        _as_nz = float(np.mean(_as_nz_list)) if _as_nz_list else 0.0
-                        _al_nz_slice = (
-                            float(np.mean(_al_nz_slice_list)) if _al_nz_slice_list else 0.0
-                        )
-                        _as_nz_slice = (
-                            float(np.mean(_as_nz_slice_list)) if _as_nz_slice_list else 0.0
-                        )
-                        _logger.info(
-                            "[ALPHA-ALIGN] leg=%d range=[%d,%d) bars=%d "
-                            "full_long_nz=%.3f full_short_nz=%.3f "
-                            "leg_long_nz=%.3f leg_short_nz=%.3f",
-                            leg_i,
+                        _logger.debug(
+                            "[ML_OPT] AWF leg %d/%d: is_end=%s train=[0,%d) test=[%d,%d)",
+                            leg_i + 1,
+                            len(awf_legs),
+                            is_end_str,
+                            int(anchor),
                             int(test_s),
                             int(test_e),
-                            _bars_leg,
-                            _al_nz,
-                            _as_nz,
-                            _al_nz_slice,
-                            _as_nz_slice,
                         )
 
-                    prebuilt_leg = _build_prebuilt_full_arrays(
-                        leg_maps,
-                        ctx.symbols,
-                        ctx.tf,
-                        info,
-                        calibrator=calib_leg,
-                        calibrator_short=calib_s_leg,
-                    )
-                    aligned_leg = _build_aligned_2d_from_prebuilt(
-                        prebuilt_leg, ctx.symbols, test_s, test_e,
-                        sigma_3d_full=sigma_3d_full
-                    )
-                    tmp_slices.append({"leg_range": (test_s, test_e), "data": aligned_leg})
+                        ml_out = run_ml_pipeline_for_universe(
+                            list(ctx.symbols),
+                            ctx.tf,
+                            ctx.ml_pipeline_fetch_start,
+                            ctx.ml_pipeline_end,
+                            dict(OPT_FUTURES_CONFIG),
+                            workers=wrk,
+                            n_jobs=wrk,
+                            is_end_date=is_end_str,
+                            is_start_date=ctx.ml_pipeline_is_start,
+                            gp_only=False,
+                            preloaded_data_maps=ctx.data_maps,
+                            seed=ctx.seed,
+                            strategy_cfg=ctx.strategy_cfg,
+                            anchor_end_idx=int(anchor),
+                            target_start_idx=int(test_s),
+                            target_end_idx=int(test_e),
+                            precomputed_panels=precomputed_panels,
+                        )
+                        # alpha_panel 기준으로 empty check (meta_feature_frame은 bridge에서 미사용)
+                        _alpha_panel = getattr(ml_out, "alpha_panel", None)
+                        if _alpha_panel is None or _alpha_panel.empty:
+                            _logger.error(
+                                "[ML_OPT] AWF leg %d ML pipeline returned empty output.", leg_i
+                            )
+                            failed = True
+                            break
 
-                if failed or len(tmp_slices) != len(awf_legs):
-                    _logger.debug(
-                        "[ML_OPT] Per-leg ML refit incomplete (%d/%d legs); "
-                        "falling back to single global ML merge for AWF.",
-                        len(tmp_slices),
-                        len(awf_legs),
-                    )
-                else:
-                    leg_refit_slices = tmp_slices
+                        alpha_overrides = _build_alpha_overrides_from_panel(
+                            _alpha_panel,
+                            data_maps=ctx.data_maps,
+                            symbols=ctx.symbols,
+                            tf=ctx.tf,
+                            info=info,
+                        )
+
+                        t_calib = time.perf_counter()
+                        calib_leg, calib_s_leg, est_b_leg = _fit_oos_platt_calibrators_from_maps(
+                            ctx.data_maps,
+                            ctx.symbols,
+                            ctx.tf,
+                            info,
+                            window_lo=int(anchor),
+                            window_hi_excl=int(test_s),
+                            oos_pool_start=first_awf_anchor,
+                            alpha_overrides=alpha_overrides,
+                        )
+                        last_calib, last_calib_short, last_est_b = (
+                            calib_leg,
+                            calib_s_leg,
+                            est_b_leg,
+                        )
+                        t_calibrator_total += time.perf_counter() - t_calib
+
+                        # [ALPHA-ALIGN] per-leg alpha residual diagnostic (first 3 legs only)
+                        if leg_i < 3:
+                            _al_nz_list: list[float] = []
+                            _as_nz_list: list[float] = []
+                            # Slice-scoped nonzero ratio measured strictly within the leg's
+                            # backtest evaluation window [test_s, test_e). A near-zero value
+                            # here while the full-frame ratio is positive proves that the ML
+                            # alpha coverage does not overlap this leg (root cause of
+                            # zero_trades_first_leg pruning).
+                            _al_nz_slice_list: list[float] = []
+                            _as_nz_slice_list: list[float] = []
+                            _bars_leg = int(test_e) - int(test_s)
+                            for _sym in ctx.symbols:
+                                over = alpha_overrides.get(_sym)
+                                if over is None:
+                                    continue
+                                _al_full = np.asarray(over[0], dtype=np.float64)
+                                _as_full = np.asarray(over[1], dtype=np.float64)
+                                _al_nz_list.append(float((_al_full != 0).mean()))
+                                _as_nz_list.append(float((_as_full != 0).mean()))
+                                _al_slice = _al_full[int(test_s) : int(test_e)]
+                                _as_slice = _as_full[int(test_s) : int(test_e)]
+                                if _al_slice.size > 0:
+                                    _al_nz_slice_list.append(float((_al_slice != 0).mean()))
+                                if _as_slice.size > 0:
+                                    _as_nz_slice_list.append(float((_as_slice != 0).mean()))
+                            _al_nz = float(np.mean(_al_nz_list)) if _al_nz_list else 0.0
+                            _as_nz = float(np.mean(_as_nz_list)) if _as_nz_list else 0.0
+                            _al_nz_slice = (
+                                float(np.mean(_al_nz_slice_list)) if _al_nz_slice_list else 0.0
+                            )
+                            _as_nz_slice = (
+                                float(np.mean(_as_nz_slice_list)) if _as_nz_slice_list else 0.0
+                            )
+                            _logger.info(
+                                "[ALPHA-ALIGN] leg=%d range=[%d,%d) bars=%d "
+                                "full_long_nz=%.3f full_short_nz=%.3f "
+                                "leg_long_nz=%.3f leg_short_nz=%.3f",
+                                leg_i,
+                                int(test_s),
+                                int(test_e),
+                                _bars_leg,
+                                _al_nz,
+                                _as_nz,
+                                _al_nz_slice,
+                                _as_nz_slice,
+                            )
+
+                        t_prebuilt = time.perf_counter()
+                        prebuilt_leg = _build_prebuilt_full_arrays(
+                            ctx.data_maps,
+                            ctx.symbols,
+                            ctx.tf,
+                            info,
+                            calibrator=calib_leg,
+                            calibrator_short=calib_s_leg,
+                            alpha_overrides=alpha_overrides,
+                        )
+                        aligned_leg = _build_aligned_2d_from_prebuilt(
+                            prebuilt_leg, ctx.symbols, test_s, test_e, sigma_3d_full=sigma_3d_full
+                        )
+                        tmp_slices.append({"leg_range": (test_s, test_e), "data": aligned_leg})
+                        t_prebuilt_total += time.perf_counter() - t_prebuilt
+                        leg_elapsed = time.perf_counter() - leg_t0
+                        t_awf_refit_total += leg_elapsed
+                        _logger.info(
+                            (
+                                "[AWF-REFIT-PROF] leg=%d/%d total=%.2fs bars=%d "
+                                "train_end=%d test=[%d,%d)"
+                            ),
+                            leg_i + 1,
+                            len(awf_legs),
+                            leg_elapsed,
+                            int(test_e) - int(test_s),
+                            int(anchor),
+                            int(test_s),
+                            int(test_e),
+                        )
+
+                    if failed or len(tmp_slices) != len(awf_legs):
+                        _logger.debug(
+                            "[ML_OPT] Per-leg ML refit incomplete (%d/%d legs); "
+                            "falling back to single global ML merge for AWF.",
+                            len(tmp_slices),
+                            len(awf_legs),
+                        )
+                    else:
+                        leg_refit_slices = tmp_slices
 
         if leg_refit_slices is not None:
             ctx.awf_leg_slices = leg_refit_slices
@@ -736,6 +854,7 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
             ctx.calibrator_short = last_calib_short
             ctx.estimated_b = last_est_b
 
+            t_prebuilt = time.perf_counter()
             prebuilt_full_is = _build_prebuilt_full_arrays(
                 ctx.data_maps,
                 ctx.symbols,
@@ -745,9 +864,9 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
                 calibrator_short=ctx.calibrator_short,
             )
             ctx.is_slice = _build_aligned_2d_from_prebuilt(
-                prebuilt_full_is, ctx.symbols, 0, eff_len,
-                sigma_3d_full=sigma_3d_full
+                prebuilt_full_is, ctx.symbols, 0, eff_len, sigma_3d_full=sigma_3d_full
             )
+            t_prebuilt_total += time.perf_counter() - t_prebuilt
         else:
             calib_min_bars = int(OPT_FUTURES_CONFIG.get("FUTURES_CALIB_PLATT_MIN_OOS_BARS", 80))
             calib_hi = max(0, first_awf_anchor - embargo)
@@ -760,6 +879,7 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
                     first_awf_anchor,
                     eff_len,
                 )
+                t_calib = time.perf_counter()
                 c0, c0s, eb0 = _fit_oos_platt_calibrators_from_maps(
                     ctx.data_maps,
                     ctx.symbols,
@@ -770,6 +890,7 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
                     oos_pool_start=first_awf_anchor,
                 )
             else:
+                t_calib = time.perf_counter()
                 c0, c0s, eb0 = _fit_oos_platt_calibrators_from_maps(
                     ctx.data_maps,
                     ctx.symbols,
@@ -779,10 +900,12 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
                     window_hi_excl=calib_hi,
                     oos_pool_start=None,
                 )
+            t_calibrator_total += time.perf_counter() - t_calib
             ctx.calibrator = c0
             ctx.calibrator_short = c0s
             ctx.estimated_b = eb0
 
+            t_prebuilt = time.perf_counter()
             prebuilt_full = _build_prebuilt_full_arrays(
                 ctx.data_maps,
                 ctx.symbols,
@@ -793,9 +916,9 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
             )
 
             ctx.is_slice = _build_aligned_2d_from_prebuilt(
-                prebuilt_full, ctx.symbols, 0, eff_len,
-                sigma_3d_full=sigma_3d_full
+                prebuilt_full, ctx.symbols, 0, eff_len, sigma_3d_full=sigma_3d_full
             )
+            t_prebuilt_total += time.perf_counter() - t_prebuilt
 
             ctx.awf_leg_slices = []
             for _leg_i, (_train_s, _train_e, test_s, test_e) in enumerate(awf_legs):
@@ -847,8 +970,7 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
                         _as_nz2_slice,
                     )
                 aligned = _build_aligned_2d_from_prebuilt(
-                    prebuilt_full, ctx.symbols, test_s, test_e,
-                    sigma_3d_full=sigma_3d_full
+                    prebuilt_full, ctx.symbols, test_s, test_e, sigma_3d_full=sigma_3d_full
                 )
                 ctx.awf_leg_slices.append({"leg_range": (test_s, test_e), "data": aligned})
 
@@ -864,13 +986,12 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
                     xl_arr = np.nanmean(xl_arr, axis=1)
                 if cl_arr.ndim == 2:
                     cl_arr = np.nanmean(cl_arr, axis=1)
-                fwd = np.log(
-                    np.clip(cl_arr[1:], 1e-12, None) / np.clip(cl_arr[:-1], 1e-12, None)
-                )
+                fwd = np.log(np.clip(cl_arr[1:], 1e-12, None) / np.clip(cl_arr[:-1], 1e-12, None))
                 sig = xl_arr[:-1]
                 mask = np.isfinite(sig) & np.isfinite(fwd)
                 if int(np.sum(mask)) > 30:
                     from scipy.stats import spearmanr as _spearmanr
+
                     _ic_raw, _ = _spearmanr(sig[mask], fwd[mask])
                     ctx.kelly_ic_upper = float(np.clip(abs(_ic_raw) * 10.0, 0.05, 0.5))
                     _logger.debug(
@@ -897,6 +1018,32 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
                 aligned0,
                 k_long=int(pre_ml["K_LONG"]),
             )
+        precompute_total = time.perf_counter() - t_precompute_total
+        precompute_profile = {
+            "total": float(precompute_total),
+            "align": float(t_align_total),
+            "covariance": float(t_cov_total),
+            "awf_refit_total": float(t_awf_refit_total),
+            "calibrator_total": float(t_calibrator_total),
+            "prebuilt_total": float(t_prebuilt_total),
+            "awf_legs": len(awf_legs),
+        }
+        ctx.precompute_profile = precompute_profile
+        _logger.info(
+            (
+                "[RUN-PROF] step=ml_precompute total=%.2fs align=%.2fs "
+                "covariance=%.2fs awf_refit=%.2fs calibrator=%.2fs "
+                "prebuilt=%.2fs legs=%d"
+            ),
+            precompute_profile["total"],
+            precompute_profile["align"],
+            precompute_profile["covariance"],
+            precompute_profile["awf_refit_total"],
+            precompute_profile["calibrator_total"],
+            precompute_profile["prebuilt_total"],
+            precompute_profile["awf_legs"],
+        )
+
 
 def _log_precompute_xs_dispersion(aligned0: dict[str, Any], *, k_long: int) -> None:
     """Lightweight precompute diagnostic (linear xs scores; no CS rank engine)."""
@@ -919,6 +1066,7 @@ def _log_precompute_xs_dispersion(aligned0: dict[str, Any], *, k_long: int) -> N
         q50,
         q99,
     )
+
 
 def rerun_precompute_for_ctx(ctx: MLPhaseDContext) -> None:
     """Force regeneration of anchored AWF caches (different seed/calibration path)."""
