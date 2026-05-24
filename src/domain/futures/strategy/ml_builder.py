@@ -249,8 +249,33 @@ def build_ml_strategy_alpha(
             purge_bars=ml_cfg.purge_bars,
             embargo_bars=ml_cfg.embargo_bars,
         )
+        v_train_values = features.values[v_train_start:v_train_end].astype(np.float64, copy=False)
+        v_bounds = fit_robust_bounds(v_train_values, clip_quantile=0.995)
+        v_clipped_values = apply_robust_bounds(
+            features.values.astype(np.float64, copy=False),
+            v_bounds,
+        )
+        v_train_medians = np.nanmedian(
+            v_train_values.reshape(-1, v_train_values.shape[2]),
+            axis=0,
+        )
+        v_train_medians = np.where(np.isfinite(v_train_medians), v_train_medians, 0.0)
+        v_normalized = np.where(
+            np.isfinite(v_clipped_values),
+            v_clipped_values,
+            v_train_medians[np.newaxis, np.newaxis, :],
+        ).astype(np.float32, copy=False)
+        v_normalized_features = FeaturePanel(
+            datetimes=features.datetimes,
+            symbols=features.symbols,
+            values=v_normalized,
+            feature_names=features.feature_names,
+            valid_mask=features.valid_mask,
+            availability_masks=features.availability_masks,
+            metadata={**features.metadata, "train_imputer_applied": True},
+        )
         v_train = build_long_matrix(
-            features=normalized_features,
+            features=v_normalized_features,
             labels=labels,
             start=v_train_start,
             end=v_train_end,
@@ -259,7 +284,7 @@ def build_ml_strategy_alpha(
             min_group_size=ml_cfg.min_group_size,
         )
         v_valid = build_long_matrix(
-            features=normalized_features,
+            features=v_normalized_features,
             labels=labels,
             start=v_valid_start,
             end=v_valid_end,
@@ -268,7 +293,7 @@ def build_ml_strategy_alpha(
             min_group_size=ml_cfg.min_group_size,
         )
         v_test = build_long_matrix(
-            features=normalized_features,
+            features=v_normalized_features,
             labels=labels,
             start=v_test_start,
             end=v_test_end,
