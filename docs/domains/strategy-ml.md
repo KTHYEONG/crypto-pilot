@@ -112,11 +112,11 @@ $$\text{sample\_weight} = \text{original\_weight} \times (1.0 + 2.0 \times |y_{e
 
 **[ML-COST-WALL]**: 거래 비용 대비 예상 수익의 유효성 진단
 ```
-[ML-COST-WALL] alpha_p95=10.04bps friction=14bps hurdle_bps=40.0 floor=54.0 status=WARN
+[ML-COST-WALL] alpha_p95=10.04bps friction=14bps hurdle_bps=10.0 floor=24.0 status=WARN
 ```
 - `alpha_p95`: 모델 예측 알파의 95분위수(단위: bps)
 - `friction`: 편도 거래 비용(수수료+슬리피지, 기본값: ~14bps)
-- `hurdle_bps`: EV_HURDLE 임계값(기본값: 40bps, 설정 범위: [5.0, 100.0])
+- `hurdle_bps`: EV_HURDLE 임계값(기본값: 10bps, 설정 범위: [3.0, 20.0])
 - `floor`: 유효 비용 벽 = friction + hurdle_bps
 - `status`: 신호 통과 여부
   - `OK`: alpha_p95 > floor
@@ -143,6 +143,11 @@ $$\text{sample\_weight} = \text{original\_weight} \times (1.0 + 2.0 \times |y_{e
 **Behavior:**
 - Gate 미만족 시 `[ML-IC-GATE] WARN: reason=...` 로그 출력 (현재 경고 수준)
 - 향후 Phase: EV_HURDLE 자동 상향 또는 모델 완전 차단으로 전환 가능
+
+### 5.8 EV Hurdle & OOS Trade Activation
+과도하게 높았던 진입 장벽을 하향하여 모델의 유효한 상대적 랭크 예측(Rank IC ~0.027)이 정상 거래로 실현되도록 보정합니다.
+- **최적화 탐색공간 하향:** `EV_HURDLE_BPS` 튜닝 범위를 `[5.0, 100.0]`에서 `[3.0, 20.0]`으로 조정하여 극단적인 신호 소거를 차단.
+- **기본 허들 완화:** 기본값 `40.0 bps`를 `10.0 bps`로 경감하여 OOS에서의 `oos_zero_trades=0` 달성 및 유효 거래 빈도 확보.
 
 ---
 

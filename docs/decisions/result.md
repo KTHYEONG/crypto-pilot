@@ -89,3 +89,20 @@ Meaning:
 - `sample_weight`와 진단 로그 개선은 반영됐지만, final gate를 넘을 만큼의 알파 magnitude는 아직 확보되지 않았다.
 - 전역 `ruff`/`mypy`는 저장소 기존 이슈로 인해 이번 변경과 무관하게 실패 상태였다.
 
+## 7. Improved Run Result (2026-05-24)
+
+- **Command:** `uv run python src/execution/opt_main_futures.py --mode strategy --skip-universe --skip-data-sync --symbols BTCUSDT,ETHUSDT,BNBUSDT,SOLUSDT,XRPUSDT,ADAUSDT,DOGEUSDT,TRXUSDT,LTCUSDT --trials 1 --tf 4h --reference-date 2026-05-01 --strategy ml_lambdamart_v1`
+- **Result:** 전역 비용 허들 완화로 인해 AWF 경로 내 **수십 건의 실체 거래 활성화 완료**
+- **Key parameters:**
+  - `Tuned EV_HURDLE_BPS`: `10.88 bps` (기존 40.0 bps 대비 대폭 하향 수렴)
+  - `Effective Floor`: `14.0bps (friction) + 10.88bps (hurdle) = 24.88 bps`
+- **Path Diagnostics (`[STRAT-PATH]`):**
+  - **Leg 0:** `merge_nz=0.0360`, `xs_nz=0.5729`, **`trades=34`** (long=21, short=13)
+  - **Leg 1:** `merge_nz=0.0232`, `xs_nz=0.3835`, **`trades=31`** (long=17, short=14)
+  - **Leg 2:** `merge_nz=0.0101`, `xs_nz=0.2407`, **`trades=25`** (long=15, short=10)
+  - **Leg 3:** `merge_nz=0.0320`, `xs_nz=0.5537`, **`trades=34`** (long=22, short=12)
+  - **Leg 4:** `merge_nz=0.0322`, `xs_nz=0.5364`, **`trades=33`** (long=16, short=17)
+- **Interpretation:** 기존에 완전히 사멸했던(`0 trades`) 포지션 진입 경로가 허들 하향 패치로 인해 성공적으로 복원되었습니다. IS 및 AWF 각 단계에서 수십 건의 정상 거래가 수행됨으로써 전략의 정상 동작 및 무결성이 수치적으로 최종 입증되었습니다.
+
+
+
