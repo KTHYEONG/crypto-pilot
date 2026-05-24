@@ -220,6 +220,94 @@ def build_ml_strategy_alpha(
             float(np.count_nonzero(ev_test) / max(1, ev_test.size)),
         )
 
+    # [ML-OOS-FILL] Check if there is an uncovered live/OOS window at the end of the timeline
+    last_test_end = folds[-1].test_end
+    total_bars = features.values.shape[0]
+    if last_test_end < total_bars:
+        _logger.info(
+            "[ML-OOS-FILL] Uncovered OOS/live window detected: [%d, %d)",
+            last_test_end, total_bars
+        )
+        # Construct virtual fold for the remaining live window
+        v_size = folds[-1].valid_end - folds[-1].valid_start
+        v_train_start = 0
+        v_train_end = last_test_end - v_size
+        v_valid_start = v_train_end
+        v_valid_end = last_test_end
+        v_test_start = last_test_end
+        v_test_end = total_bars
+
+        from src.domain.futures.strategy.contracts import FoldSpec
+        v_fold = FoldSpec(
+            fold_id=len(folds),
+            train_start=v_train_start,
+            train_end=v_train_end,
+            valid_start=v_valid_start,
+            valid_end=v_valid_end,
+            test_start=v_test_start,
+            test_end=v_test_end,
+            purge_bars=ml_cfg.purge_bars,
+            embargo_bars=ml_cfg.embargo_bars,
+        )
+        v_train = build_long_matrix(
+            features=normalized_features,
+            labels=labels,
+            start=v_train_start,
+            end=v_train_end,
+            fold=v_fold,
+            split="train",
+            min_group_size=ml_cfg.min_group_size,
+        )
+        v_valid = build_long_matrix(
+            features=normalized_features,
+            labels=labels,
+            start=v_valid_start,
+            end=v_valid_end,
+            fold=v_fold,
+            split="valid",
+            min_group_size=ml_cfg.min_group_size,
+        )
+        v_test = build_long_matrix(
+            features=normalized_features,
+            labels=labels,
+            start=v_test_start,
+            end=v_test_end,
+            fold=v_fold,
+            split="test",
+            min_group_size=ml_cfg.min_group_size,
+        )
+        if v_test.X.shape[0] > 0:
+            validate_long_matrix(v_train)
+            validate_long_matrix(v_valid)
+            validate_long_matrix(v_test)
+            v_ranker = fit_ranker(train=v_train, valid=v_valid, cfg=ml_cfg)
+            v_rank_train = predict_rank_score(v_ranker.model, v_train)
+            v_rank_valid = predict_rank_score(v_ranker.model, v_valid)
+            v_rank_test = predict_rank_score(v_ranker.model, v_test)
+            v_calibrators = fit_quantile_calibrators(
+                train=v_train,
+                valid=v_valid,
+                rank_score_train=v_rank_train,
+                rank_score_valid=v_rank_valid,
+                cfg=ml_cfg,
+            )
+            v_ev_test = predict_conservative_ev(v_calibrators, v_test, v_rank_test, ml_cfg)
+            v_fold_alpha = infer_fold_alpha(
+                fold=v_fold,
+                test=v_test,
+                ev_test=v_ev_test,
+                t_size=total_bars,
+                n_size=features.values.shape[1],
+            )
+            ev_grid += v_fold_alpha.ev_grid
+            for row, (t_idx, s_idx) in enumerate(v_test.index_map):
+                score_grid[int(t_idx), int(s_idx)] = v_rank_test[row]
+            _logger.info(
+                "[ML-OOS-FILL] Completed virtual refit fold. test_rows=%d alpha_nonzero=%.4f",
+                int(v_test.X.shape[0]),
+                float(np.count_nonzero(v_ev_test) / max(1, v_ev_test.size)),
+            )
+
     panel = assemble_alpha_panel(
         datetimes=features.datetimes,
         symbols=features.symbols,
