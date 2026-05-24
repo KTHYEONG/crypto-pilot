@@ -3,6 +3,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import numpy as np
+import pandas as pd
 from _pytest.logging import LogCaptureFixture
 from _pytest.monkeypatch import MonkeyPatch
 from numpy.typing import NDArray
@@ -371,3 +372,190 @@ def test_build_ml_strategy_alpha_anchored_does_not_center_ev_by_group(
     )
 
     np.testing.assert_allclose(captured["ev_test"], expected_ev, rtol=0.0, atol=0.0)
+
+
+def test_build_ml_strategy_alpha_virtual_refit_uses_own_train_normalization(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    datetimes = np.array(
+        [np.datetime64("2024-01-01T00:00:00") + np.timedelta64(4 * i, "h") for i in range(5)],
+        dtype="datetime64[ns]",
+    )
+    symbols = ("BTCUSDT", "ETHUSDT")
+    feature_names = ("f0",)
+    values = np.array(
+        [
+            [[1.0], [1.0]],
+            [[2.0], [2.0]],
+            [[3.0], [3.0]],
+            [[4.0], [4.0]],
+            [[5.0], [5.0]],
+        ],
+        dtype=np.float32,
+    )
+    fp = FeaturePanel(
+        datetimes=datetimes,
+        symbols=symbols,
+        values=values,
+        feature_names=feature_names,
+        valid_mask=np.ones((5, 2), dtype=bool),
+    )
+    lp = LabelPanel(
+        long_net_ret=np.zeros((5, 2), dtype=np.float32),
+        short_net_ret=np.zeros((5, 2), dtype=np.float32),
+        signed_net_ret=np.ones((5, 2), dtype=np.float32) * 1e-3,
+        relevance=np.full((5, 2), 2, dtype=np.int32),
+        sample_weight=np.ones((5, 2), dtype=np.float32),
+        eligible_mask=np.ones((5, 2), dtype=bool),
+    )
+    fold = FoldSpec(
+        fold_id=0,
+        train_start=0,
+        train_end=1,
+        valid_start=1,
+        valid_end=2,
+        test_start=2,
+        test_end=3,
+        purge_bars=1,
+        embargo_bars=1,
+    )
+    bound_markers: list[float] = []
+    captured_split_marker: dict[tuple[int, str], float] = {}
+
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.ml_builder.align_data_maps",
+        lambda data_maps, symbols, tf: SimpleNamespace(symbols=list(symbols)),
+    )
+    monkeypatch.setattr("src.domain.futures.strategy.ml_builder.build_feature_panel", lambda *_: fp)
+    monkeypatch.setattr("src.domain.futures.strategy.ml_builder.build_label_panel", lambda *_: lp)
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.ml_builder.make_walk_forward_folds",
+        lambda *_: [fold],
+    )
+
+    def _fit_robust_bounds(train_values: np.ndarray, clip_quantile: float) -> dict[str, float]:
+        del clip_quantile
+        marker = float(np.mean(train_values))
+        bound_markers.append(marker)
+        return {"marker": marker}
+
+    def _apply_robust_bounds(
+        all_values: np.ndarray,
+        bounds: dict[str, float],
+    ) -> NDArray[np.float64]:
+        filled: NDArray[np.float64] = np.asarray(
+            np.full_like(all_values, float(bounds["marker"]), dtype=np.float64),
+            dtype=np.float64,
+        )
+        return filled
+
+    def _build_long_matrix(
+        *,
+        features: FeaturePanel,
+        labels: LabelPanel,
+        start: int,
+        end: int,
+        fold: FoldSpec,
+        split: str,
+        min_group_size: int,
+    ) -> LongMatrixDataset:
+        del labels, min_group_size
+        captured_split_marker[(fold.fold_id, split)] = float(features.values[start, 0, 0])
+        rows = max(1, (end - start) * len(symbols))
+        index_map: list[list[int]] = []
+        for t in range(start, max(start + 1, end)):
+            index_map.extend([[t, s_idx] for s_idx in range(len(symbols))])
+        x: NDArray[np.float32] = np.ones((rows, 1), dtype=np.float32)
+        return _dataset(
+            x=x,
+            group=np.array([len(index_map)], dtype=np.int32),
+            index_map=np.asarray(index_map[:rows], dtype=np.int64),
+            feature_names=feature_names,
+        )
+
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.ml_builder.fit_robust_bounds",
+        _fit_robust_bounds,
+    )
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.ml_builder.apply_robust_bounds",
+        _apply_robust_bounds,
+    )
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.ml_builder.build_long_matrix",
+        _build_long_matrix,
+    )
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.ml_builder.fit_ranker",
+        lambda **_: SimpleNamespace(model=object()),
+    )
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.ml_builder.predict_rank_score",
+        lambda _model, ds: np.zeros(ds.X.shape[0], dtype=np.float32),
+    )
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.ml_builder.fit_quantile_calibrators",
+        lambda **_: SimpleNamespace(),
+    )
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.ml_builder.predict_conservative_ev",
+        lambda *_: np.ones(2, dtype=np.float32) * 1e-3,
+    )
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.ml_builder.infer_fold_alpha",
+        lambda **_: SimpleNamespace(ev_grid=np.ones((5, 2), dtype=np.float32) * 1e-3),
+    )
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.ml_builder.assemble_alpha_panel",
+        lambda **_: pd.DataFrame(
+            {
+                "alpha_long": np.ones(10, dtype=np.float32) * 1e-3,
+                "alpha_short": np.ones(10, dtype=np.float32) * 1e-3,
+            },
+            index=pd.MultiIndex.from_product([datetimes, symbols], names=["datetime", "symbol"]),
+        ),
+    )
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.ml_builder.build_quality_report",
+        lambda **_: {
+            "feature_finite_ratio": 1.0,
+            "label_valid_ratio": 1.0,
+            "ranker_valid_ndcg_at_5": 1.0,
+            "spearman_rank_ic": 0.1,
+            "ic_icir": 0.1,
+            "ic_t_stat": 2.5,
+            "ic_hit_ratio": 0.5,
+            "ic_n_obs": 1,
+            "alpha_p95_bps": 30.0,
+        },
+    )
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.ml_builder.passes_quality_gate",
+        lambda *_: True,
+    )
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.ml_builder.ml_alpha_metrics",
+        lambda *_: {
+            "long_nz": 1.0,
+            "short_nz": 1.0,
+            "long_p95_bps": 10.0,
+            "short_p95_bps": 10.0,
+        },
+    )
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.ml_builder.passes_ic_gate",
+        lambda *args, **kwargs: True,
+    )
+
+    cfg = StrategyConfig(
+        name="ml_lambdamart_v1",
+        ml=StrategyMLConfig(min_group_size=2, train_months=1, valid_months=1, test_months=1),
+    )
+    build_ml_strategy_alpha(data_maps={}, symbols=list(symbols), tf="4h", cfg=cfg)
+
+    assert len(bound_markers) == 2
+    assert bound_markers[0] == 1.0
+    assert bound_markers[1] == 1.5
+    assert captured_split_marker[(1, "train")] == 1.5
+    assert captured_split_marker[(1, "valid")] == 1.5
+    assert captured_split_marker[(1, "test")] == 1.5
