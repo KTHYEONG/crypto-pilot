@@ -503,6 +503,17 @@ def _run_optimization_stage(
     pbo_gate, dsr_gate, _ = resolve_adjusted_gates(OPT_FUTURES_CONFIG, int(run_config.trials))
     pbo_obs = awf_pos_frac_to_pseudo_pbo(0.5)
     dsr_obs = 0.0
+
+    ensemble_results = []
+    if study_ml is not None:
+        completed_trials = [
+            t for t in study_ml.get_trials(deepcopy=False)
+            if t.state == optuna.trial.TrialState.COMPLETE and t.value is not None
+        ]
+        ensemble_results = [
+            {"trial": t, "params": t.params} for t in completed_trials
+        ]
+
     final_req = FinalEvaluationRequest(
         tf=run_config.tf,
         project_root=project_root,
@@ -521,7 +532,7 @@ def _run_optimization_stage(
         stab_tmp_layer3_awf_fail=False,
         cv_max=0.30,
         phase_c_diagnostics=opt_res.phase_bundle.phase_c_diagnostics,
-        ensemble_results=[],
+        ensemble_results=ensemble_results,
         oos_data_maps=data_stage.oos_data_maps,
         data_maps=data_stage.data_maps,
         valid_symbols=data_stage.valid_symbols,
