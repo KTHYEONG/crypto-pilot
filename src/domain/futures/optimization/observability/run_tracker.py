@@ -15,8 +15,6 @@ from typing import Any
 import optuna
 from optuna.samplers import TPESampler
 from optuna.trial import TrialState
-from sqlalchemy import create_engine, text
-from sqlalchemy.pool import QueuePool
 
 from src.domain.futures.optimization.ml_context import MLPhaseDContext
 from src.domain.futures.optimization.objectives import objective_ml_phase_d
@@ -109,40 +107,10 @@ def log_optuna_contract(
 
 
 def setup_optuna_storage(project_root: str | Path) -> tuple[str, optuna.storages.BaseStorage]:
-    """Set up high-performance Optuna storage with SQLite WAL mode or Redis."""
-    storage_type = str(OPT_FUTURES_CONFIG.get("FUTURES_OPTUNA_STORAGE_TYPE", "sqlite")).lower()
-    storage: optuna.storages.BaseStorage
-
-    if storage_type == "redis":
-        storage_url = str(OPT_FUTURES_CONFIG.get("FUTURES_REDIS_URL", "redis://127.0.0.1:6379/0"))
-        storage = optuna.storages.JournalStorage(
-            optuna.storages.JournalRedisStorage(storage_url)
-        )
-        return storage_url, storage
-
-    # Fallback to high-performance SQLite
-    storage_path = Path(project_root) / "logs" / "optuna_futures.db"
-    storage_url = f"sqlite:///{storage_path}"
-
-    # 1. SQLAlchemy Engine with WAL mode & Connection Pooling
-    engine = create_engine(
-        storage_url,
-        connect_args={"check_same_thread": False, "timeout": 120},
-        poolclass=QueuePool,
-        pool_size=10,
-        max_overflow=20,
-    )
-
-    with engine.begin() as conn:
-        conn.execute(text("PRAGMA journal_mode=WAL;"))
-        conn.execute(text("PRAGMA synchronous=NORMAL;"))
-        conn.execute(text("PRAGMA cache_size=-64000;"))  # 64MB Cache
-        conn.execute(text("PRAGMA temp_store=MEMORY;"))
-        conn.execute(text("PRAGMA busy_timeout=120000;"))
-
-    storage = optuna.storages.RDBStorage(
-        storage_url,
-        engine_kwargs={"connect_args": {"timeout": 120, "check_same_thread": False}}
+    """Set up Optuna storage via Redis JournalStorage."""
+    storage_url = str(OPT_FUTURES_CONFIG.get("FUTURES_REDIS_URL", "redis://127.0.0.1:6379/0"))
+    storage = optuna.storages.JournalStorage(
+        optuna.storages.JournalRedisStorage(storage_url)
     )
     return storage_url, storage
 
@@ -591,7 +559,6 @@ def build_p7_ops_summary(
     ml_integrity_report: dict[str, Any] | None,
     alpha_filter_meta: dict[str, Any] | None,
     alpha_goal_meta: dict[str, Any] | None,
-    hmm_goal_meta: dict[str, Any] | None,
     alpha_cache_meta: dict[str, Any] | None,
     study_user_attrs: dict[str, Any] | None,
     selection_summary: dict[str, Any] | None,
@@ -600,7 +567,6 @@ def build_p7_ops_summary(
     integrity = dict(ml_integrity_report or {})
     alpha_filter = dict(alpha_filter_meta or {})
     alpha_goal = dict(alpha_goal_meta or {})
-    hmm_goal = dict(hmm_goal_meta or {})
     alpha_cache = dict(alpha_cache_meta or {})
     study_attrs = dict(study_user_attrs or {})
     selection = dict(selection_summary or {})
@@ -628,13 +594,12 @@ def build_p7_ops_summary(
     )
 
     reason_codes: list[str] = []
-    for section in (alpha_goal, hmm_goal):
-        codes = section.get("reason_codes", [])
-        if isinstance(codes, list):
-            for code in codes:
-                txt = str(code).strip()
-                if txt:
-                    reason_codes.append(txt)
+    codes = alpha_goal.get("reason_codes", [])
+    if isinstance(codes, list):
+        for code in codes:
+            txt = str(code).strip()
+            if txt:
+                reason_codes.append(txt)
     if no_candidate_reason:
         reason_codes.append(f"no_candidate:{no_candidate_reason}")
     if elite_zero_after_survival:
@@ -675,9 +640,6 @@ def build_p7_ops_summary(
             "n_components": int(n_components),
             "elite_zero_after_survival": bool(elite_zero_after_survival),
             "goal_verdict": str(alpha_goal.get("verdict", "unknown")),
-        },
-        "hmm": {
-            "goal_verdict": str(hmm_goal.get("verdict", "unknown")),
         },
         "optuna_observability": {
             "no_candidate_reason": no_candidate_reason,
