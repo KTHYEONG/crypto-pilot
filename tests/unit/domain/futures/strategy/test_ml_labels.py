@@ -74,3 +74,18 @@ def test_build_label_panel_enforces_eligibility_mask_on_outputs() -> None:
     panel = build_label_panel(aligned, StrategyMLConfig(min_group_size=2))
     assert not panel.eligible_mask[1, 0]
     assert panel.sample_weight[1, 0] == 0.0
+
+
+def test_build_label_panel_applies_ev_scaled_sample_weight() -> None:
+    aligned = _aligned_for_labels()
+    panel = build_label_panel(
+        aligned,
+        StrategyMLConfig(label_horizon_bars=1, fee_bps=0.0, slippage_bps=0.0, min_group_size=2),
+    )
+    liq_weight = np.clip(np.log1p(np.maximum(aligned.volume_2d, 0.0)), 0.25, 2.0).astype(np.float32)
+    expected = np.where(
+        panel.eligible_mask,
+        liq_weight * (1.0 + 2.0 * np.abs(panel.signed_net_ret)),
+        0.0,
+    ).astype(np.float32)
+    np.testing.assert_allclose(panel.sample_weight, expected, rtol=1e-6, atol=1e-8)
