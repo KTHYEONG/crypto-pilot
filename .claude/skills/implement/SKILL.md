@@ -21,6 +21,8 @@ Apply the smallest correct change.
 - Do not broaden scope.
 - Do not perform unrelated refactors.
 - Do not change public APIs unless required.
+- Always update relevant architecture and domain documents in docs/ alongside code changes.
+- **Promotion Lifecycle:** You MUST promote approved specs (ADR, PRD, etc.) into the '5. Detailed Specifications' section of the target architecture/domain document and update the 'last_verified' Frontmatter date.
 - Preserve behavior unless change is requested.
 - Hand off to `verify` after implementation.
 
@@ -32,19 +34,17 @@ Apply the smallest correct change.
 
 <perf>
 (Only if Scale is 'high')
-- Primary Bottleneck: CPU (Math) / Network I/O / Disk I/O / Memory?
-- Optimization Strategy & Tool Justification: (e.g., Vectorization, Async/Caching, Batching, Connection Pooling)
-- Complexity: Time (O), Space (O)
-- Trade-offs: What is sacrificed? (e.g., higher memory usage for caching, readability for Numba)
+- **Bottleneck:** CPU / IO / Memory | **Complexity:** T(O), S(O)
+- **Strategy:** [Tool/Method]
+- **Trade-offs:** [Sacrifices]
 </perf>
 
 <risk>
 - ...
 </risk>
 
-## Implementation
-- Strategy:
-- Changed Files:
-- Notes:
-- Verification Handoff:
+### 🏗️ Implementation: [Strategy]
+- **Changes:** `[Files]`
+- **Docs:** `[Updated/Verified]` | **Handoff:** `verify`
+- **Notes:** [Details]
 ```
