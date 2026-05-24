@@ -57,7 +57,8 @@ select = [
     "ASYNC" # flake8-async
 ]
 ignore = [
-    "D100", "D104", "D103", # Missing docstrings (AI efficiency)
+    "D100", "D101", "D102", "D103", "D104", "D105", "D106", "D107", # Missing docstrings (AI efficiency)
+    "D205", "D401", "D415", # Docstring formatting
     "S101",                 # Allow assert
 ]
 
