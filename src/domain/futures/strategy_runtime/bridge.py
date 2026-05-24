@@ -90,7 +90,10 @@ def run_ml_pipeline_for_universe(
                 )
             ]
             if len(valid_symbols) >= strategy_cfg.blend.min_symbols:
-                close_2d = np.zeros((eff_len, len(valid_symbols)), dtype=np.float64)
+                close_2d: np.ndarray = np.zeros(
+                    (eff_len, len(valid_symbols)),
+                    dtype=np.float64,
+                )
                 datetimes = None
                 for col_idx, sym in enumerate(valid_symbols):
                     df = preloaded_data_maps[sym][tf]
