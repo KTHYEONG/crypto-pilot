@@ -7,6 +7,8 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from src.core.settings import round_trip_cost_bps
+from src.domain.futures.optimization.opt_config import OPT_FUTURES_CONFIG
 from src.domain.futures.strategy.cache import build_manifest_hash
 from src.domain.futures.strategy.calibrator import (
     fit_quantile_calibrators,
@@ -41,7 +43,6 @@ from src.domain.futures.strategy.inference import (
 )
 from src.domain.futures.strategy.labels import build_label_panel
 from src.domain.futures.strategy.ranker import fit_ranker, predict_rank_score
-from src.core.settings import round_trip_cost_bps
 
 _logger = logging.getLogger(__name__)
 
@@ -202,15 +203,6 @@ def build_ml_strategy_alpha(
             float(np.percentile(ev_test, 10)) if ev_test.size > 0 else 0.0,
             float(np.percentile(ev_test, 90)) if ev_test.size > 0 else 0.0,
         )
-        # Center by group mean to enforce long/short symmetry.
-        offset = 0
-        for g in test.group:
-            g_int = int(g)
-            if g_int <= 0:
-                continue
-            sl = slice(offset, offset + g_int)
-            ev_test[sl] -= np.mean(ev_test[sl], dtype=np.float32)
-            offset += g_int
         fold_alpha = infer_fold_alpha(
             fold=fold,
             test=test,
@@ -290,7 +282,7 @@ def build_ml_strategy_alpha(
     )
     # Cost wall diagnosis: gross alpha vs effective cost floor
     _friction_bps = round_trip_cost_bps()
-    _hurdle_default_bps = 40.0  # EV_HURDLE_BPS default
+    _hurdle_default_bps = float(OPT_FUTURES_CONFIG.get("FUTURES_DEFAULT_EV_HURDLE_BPS", 10.0))
     _floor_bps = _friction_bps + _hurdle_default_bps
     _alpha_p95 = max(
         quality_report.get("alpha_p95_bps", 0.0),
@@ -490,15 +482,6 @@ def build_ml_strategy_alpha_anchored(
         float(np.percentile(ev_test, 10)) if ev_test.size > 0 else 0.0,
         float(np.percentile(ev_test, 90)) if ev_test.size > 0 else 0.0,
     )
-
-    offset = 0
-    for g in test.group:
-        g_int = int(g)
-        if g_int <= 0:
-            continue
-        sl = slice(offset, offset + g_int)
-        ev_test[sl] -= np.mean(ev_test[sl], dtype=np.float32)
-        offset += g_int
 
     fold_alpha = infer_fold_alpha(
         fold=fold,

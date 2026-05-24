@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 import optuna
-import pandas as pd
+from numpy.typing import NDArray
 
 from src.core.settings import (
     FUTURES_INITIAL_BALANCE,
@@ -21,7 +21,6 @@ from src.domain.futures.backtest.engine import (
 )
 from src.domain.futures.backtest.preparation import prepare_backtest_inputs
 from src.domain.futures.optimization.common import (
-    _diag_to_dict,
     _safe_float_or_none,
     _weight_stage_diag,
 )
@@ -44,7 +43,6 @@ from src.domain.futures.portfolio.portfolio_constructor import (
     portfolio_weight_params_from_optuna,
     precompute_rebalance_weights,
 )
-from src.domain.futures.portfolio.signal_composer import apply_linear_signal_composer_scores
 
 if TYPE_CHECKING:
     from src.domain.futures.optimization.ml_context import MLPhaseDContext
@@ -103,6 +101,19 @@ def _build_strategy_compose_diag(
     friction = round_trip_cost_bps() / 10000.0
     friction_bps = friction * 10000.0
     threshold_bps = friction_bps + ev_h
+    alpha_p95_bps = max(
+        _safe_pct(alpha_long, 95) * 10000.0,
+        _safe_pct(alpha_short, 95) * 10000.0,
+    )
+    _logger.info(
+        "[ML-COST-WALL] alpha_p95=%.2fbps friction=%.1fbps "
+        "hurdle_bps=%.1fbps floor=%.1fbps signal_clears_floor=%s",
+        alpha_p95_bps,
+        friction_bps,
+        ev_h,
+        threshold_bps,
+        str(alpha_p95_bps >= threshold_bps),
+    )
 
     pbull = hmm_probs["hmm_prob_bull_calm"] + hmm_probs["hmm_prob_bull_vol_up"]
     regime = (
@@ -170,8 +181,8 @@ def _funding_drag_ratio_from_trades(all_trades: np.ndarray) -> tuple[float, str]
     """Funding drag ratio using a conservative gross-PnL basis."""
     if all_trades.size == 0:
         return 0.0, "funding_fee_abs_over_gross_pnl_abs"
-    pnl = all_trades[:, 6].astype(np.float64, copy=False)
-    funding_fee = all_trades[:, 9].astype(np.float64, copy=False)
+    pnl: NDArray[np.float64] = all_trades[:, 6].astype(np.float64, copy=False)
+    funding_fee: NDArray[np.float64] = all_trades[:, 9].astype(np.float64, copy=False)
     gross_pnl_abs = float(np.sum(np.abs(pnl)))
     funding_abs = float(np.sum(np.abs(funding_fee)))
     ratio = float(funding_abs / max(gross_pnl_abs, 1e-9))
@@ -342,10 +353,20 @@ def _compose_strategy_scores_inplace(
             elif hmm_col == "hmm_prob_crisis":
                 p_crisis = hmm_arr
     if "hmm_prob_recovery" in aligned:
-        precov = np.nan_to_num(np.asarray(aligned["hmm_prob_recovery"], dtype=np.float64), nan=0.0)
+        precov = np.nan_to_num(
+            np.asarray(aligned["hmm_prob_recovery"], dtype=np.float64),
+            nan=0.0,
+        )
 
-    beta_a = float(params.get("BETA_ALPHA", OPT_FUTURES_CONFIG.get("FUTURES_DEFAULT_BETA_ALPHA", 1.0)))
-    ev_h_base = float(params.get("EV_HURDLE_BPS", OPT_FUTURES_CONFIG.get("FUTURES_DEFAULT_EV_HURDLE_BPS", 40.0)))
+    beta_a = float(
+        params.get("BETA_ALPHA", OPT_FUTURES_CONFIG.get("FUTURES_DEFAULT_BETA_ALPHA", 1.0))
+    )
+    ev_h_base = float(
+        params.get(
+            "EV_HURDLE_BPS",
+            OPT_FUTURES_CONFIG.get("FUTURES_DEFAULT_EV_HURDLE_BPS", 40.0),
+        )
+    )
     ev_h = np.full((n_bars, n_syms), ev_h_base, dtype=np.float64)
 
     from src.core.settings import round_trip_cost_bps
@@ -377,31 +398,102 @@ def _compose_strategy_scores_inplace(
                 OPT_FUTURES_CONFIG.get("FUTURES_REGIME_CONFIDENCE_ENTROPY_MULT", 0.50),
             )
         )
-        min_mult = float(params.get("REGIME_MULT_MIN", OPT_FUTURES_CONFIG.get("FUTURES_REGIME_MULT_MIN", 0.10)))
-        max_mult = float(params.get("REGIME_MULT_MAX", OPT_FUTURES_CONFIG.get("FUTURES_REGIME_MULT_MAX", 1.50)))
+        min_mult = float(
+            params.get("REGIME_MULT_MIN", OPT_FUTURES_CONFIG.get("FUTURES_REGIME_MULT_MIN", 0.10))
+        )
+        max_mult = float(
+            params.get("REGIME_MULT_MAX", OPT_FUTURES_CONFIG.get("FUTURES_REGIME_MULT_MAX", 1.50))
+        )
         conf_scale = np.clip(1.0 - ent_mult * (1.0 - conf), min_mult, max_mult)
 
-        l_bull_w = float(params.get("REGIME_LONG_BULL_W", OPT_FUTURES_CONFIG.get("FUTURES_REGIME_LONG_BULL_W", 0.35)))
-        l_bear_p = float(params.get("REGIME_LONG_BEAR_PENALTY", OPT_FUTURES_CONFIG.get("FUTURES_REGIME_LONG_BEAR_PENALTY", 0.35)))
-        l_chop_p = float(params.get("REGIME_LONG_CHOP_PENALTY", OPT_FUTURES_CONFIG.get("FUTURES_REGIME_LONG_CHOP_PENALTY", 0.55)))
-        l_crisis_p = float(params.get("REGIME_LONG_CRISIS_PENALTY", OPT_FUTURES_CONFIG.get("FUTURES_REGIME_LONG_CRISIS_PENALTY", 0.90)))
+        l_bull_w = float(
+            params.get(
+                "REGIME_LONG_BULL_W",
+                OPT_FUTURES_CONFIG.get("FUTURES_REGIME_LONG_BULL_W", 0.35),
+            )
+        )
+        l_bear_p = float(
+            params.get(
+                "REGIME_LONG_BEAR_PENALTY",
+                OPT_FUTURES_CONFIG.get("FUTURES_REGIME_LONG_BEAR_PENALTY", 0.35),
+            )
+        )
+        l_chop_p = float(
+            params.get(
+                "REGIME_LONG_CHOP_PENALTY",
+                OPT_FUTURES_CONFIG.get("FUTURES_REGIME_LONG_CHOP_PENALTY", 0.55),
+            )
+        )
+        l_crisis_p = float(
+            params.get(
+                "REGIME_LONG_CRISIS_PENALTY",
+                OPT_FUTURES_CONFIG.get("FUTURES_REGIME_LONG_CRISIS_PENALTY", 0.90),
+            )
+        )
 
-        s_bear_w = float(params.get("REGIME_SHORT_BEAR_W", OPT_FUTURES_CONFIG.get("FUTURES_REGIME_SHORT_BEAR_W", 0.45)))
-        s_bull_p = float(params.get("REGIME_SHORT_BULL_PENALTY", OPT_FUTURES_CONFIG.get("FUTURES_REGIME_SHORT_BULL_PENALTY", 0.25)))
-        s_chop_p = float(params.get("REGIME_SHORT_CHOP_PENALTY", OPT_FUTURES_CONFIG.get("FUTURES_REGIME_SHORT_CHOP_PENALTY", 0.45)))
-        s_crisis_w = float(params.get("REGIME_SHORT_CRISIS_W", OPT_FUTURES_CONFIG.get("FUTURES_REGIME_SHORT_CRISIS_W", 0.15)))
+        s_bear_w = float(
+            params.get(
+                "REGIME_SHORT_BEAR_W",
+                OPT_FUTURES_CONFIG.get("FUTURES_REGIME_SHORT_BEAR_W", 0.45),
+            )
+        )
+        s_bull_p = float(
+            params.get(
+                "REGIME_SHORT_BULL_PENALTY",
+                OPT_FUTURES_CONFIG.get("FUTURES_REGIME_SHORT_BULL_PENALTY", 0.25),
+            )
+        )
+        s_chop_p = float(
+            params.get(
+                "REGIME_SHORT_CHOP_PENALTY",
+                OPT_FUTURES_CONFIG.get("FUTURES_REGIME_SHORT_CHOP_PENALTY", 0.45),
+            )
+        )
+        s_crisis_w = float(
+            params.get(
+                "REGIME_SHORT_CRISIS_W",
+                OPT_FUTURES_CONFIG.get("FUTURES_REGIME_SHORT_CRISIS_W", 0.15),
+            )
+        )
 
-        long_mult = 1.0 + (l_bull_w * pbull) - (l_bear_p * p_bear) - (l_chop_p * p_chop) - (l_crisis_p * p_crisis)
-        short_mult = 1.0 + (s_bear_w * p_bear) - (s_bull_p * pbull) - (s_chop_p * p_chop) + (s_crisis_w * p_crisis)
+        long_mult = (
+            1.0
+            + (l_bull_w * pbull)
+            - (l_bear_p * p_bear)
+            - (l_chop_p * p_chop)
+            - (l_crisis_p * p_crisis)
+        )
+        short_mult = (
+            1.0
+            + (s_bear_w * p_bear)
+            - (s_bull_p * pbull)
+            - (s_chop_p * p_chop)
+            + (s_crisis_w * p_crisis)
+        )
         long_mult = np.clip(long_mult * conf_scale, min_mult, max_mult)
         short_mult = np.clip(short_mult * conf_scale, min_mult, max_mult)
 
         mu_l = mu_l * long_mult
         mu_s = mu_s * short_mult
 
-        ev_chop = float(params.get("REGIME_EV_CHOP_ADD_BPS", OPT_FUTURES_CONFIG.get("FUTURES_REGIME_EV_CHOP_ADD_BPS", 8.0)))
-        ev_crisis = float(params.get("REGIME_EV_CRISIS_ADD_BPS", OPT_FUTURES_CONFIG.get("FUTURES_REGIME_EV_CRISIS_ADD_BPS", 12.0)))
-        ev_entropy = float(params.get("REGIME_EV_ENTROPY_ADD_BPS", OPT_FUTURES_CONFIG.get("FUTURES_REGIME_EV_ENTROPY_ADD_BPS", 6.0)))
+        ev_chop = float(
+            params.get(
+                "REGIME_EV_CHOP_ADD_BPS",
+                OPT_FUTURES_CONFIG.get("FUTURES_REGIME_EV_CHOP_ADD_BPS", 8.0),
+            )
+        )
+        ev_crisis = float(
+            params.get(
+                "REGIME_EV_CRISIS_ADD_BPS",
+                OPT_FUTURES_CONFIG.get("FUTURES_REGIME_EV_CRISIS_ADD_BPS", 12.0),
+            )
+        )
+        ev_entropy = float(
+            params.get(
+                "REGIME_EV_ENTROPY_ADD_BPS",
+                OPT_FUTURES_CONFIG.get("FUTURES_REGIME_EV_ENTROPY_ADD_BPS", 6.0),
+            )
+        )
         ev_h = ev_h + (ev_chop * p_chop) + (ev_crisis * p_crisis) + (ev_entropy * ent)
 
     hurdle_frac = ev_h / 10000.0
@@ -499,9 +591,11 @@ def _run_portfolio_numba_block(
     ]
     _hmm_t3 = [aligned.get(c) for c in _hmm_cols_t3]
     if all(a is not None for a in _hmm_t3):
-        def _to_1d(a: Any) -> np.ndarray:
+        def _to_1d(a: Any) -> NDArray[np.float64]:
             arr = np.asarray(a, dtype=np.float64)
-            return arr[:, 0] if arr.ndim == 2 else arr
+            if arr.ndim == 2:
+                return cast(NDArray[np.float64], arr[:, 0])
+            return cast(NDArray[np.float64], arr)
         _p5 = np.stack([_to_1d(a) for a in _hmm_t3], axis=1)
         _log5 = np.log(5.0)
         _ent = -np.sum(_p5 * np.log(np.clip(_p5, 1e-12, 1.0)), axis=1)
@@ -639,10 +733,13 @@ def _run_portfolio_numba_block(
         and aligned.get("exec_close_1m") is not None
     )
     t0 = time.perf_counter()
+    out_tw: tuple[NDArray[np.float64], float, NDArray[np.float64], NDArray[np.float64]]
     if use_intrabar:
         exec_start = prepared.exec_bar_start_1m_idx
         exec_end = prepared.exec_bar_end_1m_idx
-        out_tw = backtest_target_weights_intrabar_numba(
+        out_tw = cast(
+            tuple[NDArray[np.float64], float, NDArray[np.float64], NDArray[np.float64]],
+            backtest_target_weights_intrabar_numba(
             aligned["close"],
             aligned["high"],
             aligned["low"],
@@ -674,9 +771,12 @@ def _run_portfolio_numba_block(
             funding_event_mask_1m=aligned.get("funding_event_mask_1m"),
             funding_rate_1m=aligned.get("funding_rate_event_1m"),
             volume_1m_2d=aligned.get("exec_volume_1m"),
+            ),
         )
     else:
-        out_tw = backtest_target_weights_numba(
+        out_tw = cast(
+            tuple[NDArray[np.float64], float, NDArray[np.float64], NDArray[np.float64]],
+            backtest_target_weights_numba(
             aligned["close"],
             aligned["high"],
             aligned["low"],
@@ -702,6 +802,7 @@ def _run_portfolio_numba_block(
             float(params["MAX_EXPOSURE_PER_COIN"]),
             float(params["DD_SCALING_THRESHOLD"]),
             volume_2d=aligned.get("volume"),
+            ),
         )
     t_exec = time.perf_counter() - t0
     orig_aligned["_prof_compose"] = t_compose
@@ -885,7 +986,6 @@ def _evaluate_awf_phase_d_aggregate(
         if not first_leg_done:
             first_leg_done = True
             if n_tr == 0:
-                diag_dict = _diag_to_dict(_b_diag)
                 if trial is not None:
                     set_trial_event_attrs(
                         trial,
@@ -956,7 +1056,7 @@ def _evaluate_awf_phase_d_aggregate(
             n_short = int(np.sum(b_trades_raw[:, 3] == -1.0))
 
         if n_tr > 0 and b_trades_raw.size > 0:
-            _pnl_arr = b_trades_raw[:, 6].astype(np.float64, copy=False)
+            _pnl_arr: NDArray[np.float64] = b_trades_raw[:, 6].astype(np.float64, copy=False)
             _dir_arr = b_trades_raw[:, 3]
             _l_pnl = _pnl_arr[_dir_arr == 1.0]
             _s_pnl = _pnl_arr[_dir_arr == -1.0]
@@ -1060,7 +1160,11 @@ def _evaluate_awf_phase_d_aggregate(
                 raise optuna.TrialPruned()
             t_metrics_pure_tot += (time.perf_counter() - t0_gate)
 
-            if trial is not None and len(trial.study.directions) == 1 and bool(cfg.get("FUTURES_PRUNING_ENABLED", False)):
+            if (
+                trial is not None
+                and len(trial.study.directions) == 1
+                and bool(cfg.get("FUTURES_PRUNING_ENABLED", False))
+            ):
                 # Apply 2-step stride to avoid heavy SQLite WAL DB lock contention.
                 # Always report on the last leg to guarantee pruning sanity.
                 # Keep stride=1 for small slices (<=3) for test compatibility.
@@ -1090,7 +1194,10 @@ def _evaluate_awf_phase_d_aggregate(
                             trial.set_user_attr("prof_compose", float(t_compose_tot))
                             trial.set_user_attr("prof_prep", float(t_prep_tot))
                             trial.set_user_attr("prof_prep_align", float(t_prep_align_tot))
-                            trial.set_user_attr("prof_prep_constraint", float(t_prep_constraint_tot))
+                            trial.set_user_attr(
+                                "prof_prep_constraint",
+                                float(t_prep_constraint_tot),
+                            )
                             trial.set_user_attr("prof_exec", float(t_exec_tot))
                             trial.set_user_attr("prof_metrics", float(t_metrics_tot))
                             trial.set_user_attr("prof_metrics_pure", float(t_metrics_pure_tot))
@@ -1111,31 +1218,14 @@ def _evaluate_awf_phase_d_aggregate(
 
     avg_trades_agg = float(np.mean(leg_trade_counts)) if leg_trade_counts else 0.0
     worst_mdd_legs = float(max(leg_mdds, default=100.0))
-    avg_exposure = float(np.mean(leg_exposures)) if leg_exposures else 0.0
     total_long = sum(leg_long_counts)
     total_short = sum(leg_short_counts)
     total_dir = total_long + total_short
     minority = float(min(total_long, total_short) / total_dir) if total_dir > 0 else 0.0
 
-    l_pf_agg, s_pf_agg = 1.0, 1.0
-    if all_trades.size > 0:
-        pnl_arr = all_trades[:, 6].astype(np.float64, copy=False)
-        dir_arr = all_trades[:, 3]
-        l_mask = dir_arr == 1.0
-        s_mask = dir_arr == -1.0
-        l_pnl = pnl_arr[l_mask]
-        l_win = float(np.sum(l_pnl[l_pnl > 0.0]))
-        l_loss = float(np.sum(np.abs(l_pnl[l_pnl < 0.0])))
-        l_pf_agg = l_win / max(l_loss, 1e-9) if l_loss > 0 else 1.0
-        s_pnl = pnl_arr[s_mask]
-        s_win = float(np.sum(s_pnl[s_pnl > 0.0]))
-        s_loss = float(np.sum(np.abs(s_pnl[s_pnl < 0.0])))
-        s_pf_agg = s_win / max(s_loss, 1e-9) if s_loss > 0 else 1.0
-
     k_legs_n = float(max(n_legs_done, 1))
     mu_log = float(np.mean(leg_arr)) if leg_arr.size > 0 else -10.0
     worst_leg = float(np.min(leg_arr)) if leg_arr.size > 0 else -10.0
-    med_leg = float(np.median(leg_arr)) if leg_arr.size > 0 else -10.0
     awf_pos_frac = float(np.sum(leg_arr > 0.0)) / k_legs_n
     dsr_awf = calc_gate1_dsr_from_path_log_tw(
         leg_arr,
@@ -1145,10 +1235,8 @@ def _evaluate_awf_phase_d_aggregate(
     )
 
     sig_awf_diag = float(np.std(leg_arr, ddof=1)) if leg_arr.size >= 2 else 0.0
-    leg_l_pf_mean = float(np.mean(leg_l_pf)) if leg_l_pf else l_pf_agg
-    leg_s_pf_mean = float(np.mean(leg_s_pf)) if leg_s_pf else s_pf_agg
     _awf_pf_agg, ev_cost_ratio = _pf_and_ev_cost_from_trades(all_trades)
-    funding_drag_ratio, funding_drag_basis = _funding_drag_ratio_from_trades(all_trades)
+    funding_drag_ratio, _funding_drag_basis = _funding_drag_ratio_from_trades(all_trades)
     mdd_duration_days = float(max(leg_mdd_duration_days, default=0.0))
     cvar_pct = float(max(leg_cvar_pct, default=0.0))
     turnover_cost_ratio = float(np.clip(1.0 / max(ev_cost_ratio, 1e-9), 0.0, 1e6))

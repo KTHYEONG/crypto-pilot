@@ -14,7 +14,10 @@ from src.domain.futures.strategy.contracts import (
     LabelPanel,
     LongMatrixDataset,
 )
-from src.domain.futures.strategy.ml_builder import build_ml_strategy_alpha
+from src.domain.futures.strategy.ml_builder import (
+    build_ml_strategy_alpha,
+    build_ml_strategy_alpha_anchored,
+)
 
 
 def _dataset(
@@ -151,6 +154,8 @@ def test_build_ml_strategy_alpha_emits_orchestration_tags(
     assert "[ML-OOS]" in caplog.text
     assert float(panel["alpha_long"].sum()) > 0.0
     assert float(panel["alpha_short"].sum()) > 0.0
+    assert np.isclose(float(panel.loc[(datetimes[2], "BTCUSDT"), "alpha_long"]), 0.0075)
+    assert np.isclose(float(panel.loc[(datetimes[2], "XRPUSDT"), "alpha_short"]), 0.0075)
 
 
 def test_build_ml_strategy_alpha_filters_nonfinite_and_clips_test_outlier(
@@ -278,3 +283,91 @@ def test_build_ml_strategy_alpha_filters_nonfinite_and_clips_test_outlier(
     assert np.all(np.isfinite(panel[["alpha_long", "alpha_short"]].to_numpy()))
     assert float(panel["alpha_long"].sum()) > 0.0
     assert float(panel["alpha_short"].sum()) > 0.0
+
+
+def test_build_ml_strategy_alpha_anchored_does_not_center_ev_by_group(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    datetimes = np.array(
+        [
+            np.datetime64("2024-01-01T00:00:00") + np.timedelta64(4 * i, "h")
+            for i in range(40)
+        ],
+        dtype="datetime64[ns]",
+    )
+    symbols = ("BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT")
+    feature_names = ("f0", "f1")
+    fp = FeaturePanel(
+        datetimes=datetimes,
+        symbols=symbols,
+        values=np.ones((40, 5, 2), dtype=np.float32),
+        feature_names=feature_names,
+        valid_mask=np.ones((40, 5), dtype=bool),
+    )
+    lp = LabelPanel(
+        long_net_ret=np.zeros((40, 5), dtype=np.float32),
+        short_net_ret=np.zeros((40, 5), dtype=np.float32),
+        signed_net_ret=np.zeros((40, 5), dtype=np.float32),
+        relevance=np.full((40, 5), 2, dtype=np.int32),
+        sample_weight=np.ones((40, 5), dtype=np.float32),
+        eligible_mask=np.ones((40, 5), dtype=bool),
+    )
+    captured: dict[str, np.ndarray] = {}
+
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.ml_builder.align_data_maps",
+        lambda data_maps, symbols, tf: SimpleNamespace(symbols=list(symbols)),
+    )
+    monkeypatch.setattr("src.domain.futures.strategy.ml_builder.build_feature_panel", lambda *_: fp)
+    monkeypatch.setattr("src.domain.futures.strategy.ml_builder.build_label_panel", lambda *_: lp)
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.ml_builder.fit_ranker",
+        lambda **_: SimpleNamespace(model=object()),
+    )
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.ml_builder.predict_rank_score",
+        lambda _model, ds: np.linspace(-0.5, 0.5, ds.X.shape[0], dtype=np.float32),
+    )
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.ml_builder.fit_quantile_calibrators",
+        lambda **_: SimpleNamespace(),
+    )
+
+    expected_ev = np.array([0.20, -0.10, 0.30, -0.40, 0.15], dtype=np.float32)
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.ml_builder.predict_conservative_ev",
+        lambda *_: expected_ev.copy(),
+    )
+
+    def _infer_fold_alpha(
+        *,
+        fold: FoldSpec,
+        test: LongMatrixDataset,
+        ev_test: np.ndarray,
+        t_size: int,
+        n_size: int,
+    ) -> SimpleNamespace:
+        del fold, test, t_size, n_size
+        captured["ev_test"] = ev_test.copy()
+        return SimpleNamespace(ev_grid=np.zeros((40, 5), dtype=np.float32))
+
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.ml_builder.infer_fold_alpha",
+        _infer_fold_alpha,
+    )
+
+    cfg = StrategyConfig(
+        name="ml_lambdamart_v1",
+        ml=StrategyMLConfig(min_group_size=2, train_months=1, valid_months=1, test_months=1),
+    )
+    build_ml_strategy_alpha_anchored(
+        data_maps={},
+        symbols=list(symbols),
+        tf="4h",
+        cfg=cfg,
+        anchor_end_idx=35,
+        target_start=35,
+        target_end=36,
+    )
+
+    np.testing.assert_allclose(captured["ev_test"], expected_ev, rtol=0.0, atol=0.0)

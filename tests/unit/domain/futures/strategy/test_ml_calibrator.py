@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import numpy as np
+from _pytest.monkeypatch import MonkeyPatch
+from numpy.typing import NDArray
 
 from src.domain.futures.strategy.calibrator import (
     compute_conservative_ev,
@@ -18,8 +20,8 @@ def _dataset(rows: int, groups: int, features: int = 5) -> LongMatrixDataset:
     x = rng.normal(size=(rows, features)).astype(np.float32)
     y_rank = np.tile(np.arange(group_size, dtype=np.int32), groups)
     y_ev = rng.normal(scale=1e-3, size=rows).astype(np.float32)
-    group = np.full((groups,), group_size, dtype=np.int32)
-    sample_weight = np.ones((rows,), dtype=np.float32)
+    group: NDArray[np.int32] = np.full((groups,), group_size, dtype=np.int32)
+    sample_weight: NDArray[np.float32] = np.ones((rows,), dtype=np.float32)
     index_map = np.column_stack(
         [np.arange(rows, dtype=np.int64), np.zeros((rows,), dtype=np.int64)]
     )
@@ -109,3 +111,29 @@ def test_predict_ev_quantiles_and_compute_conservative_ev() -> None:
     assert quantiles.q50.shape == (test.X.shape[0],)
     assert quantiles.q90.shape == (test.X.shape[0],)
     assert ev.shape == (test.X.shape[0],)
+
+
+def test_fit_quantile_calibrators_uses_raw_y_ev(monkeypatch: MonkeyPatch) -> None:
+    train = _dataset(rows=20, groups=4)
+    valid = _dataset(rows=8, groups=2)
+    cfg = StrategyMLConfig(calibrator_n_estimators=10, early_stopping_rounds=5, n_jobs=1)
+    seen: list[np.ndarray] = []
+
+    def _fake_fit_one(
+        train_x: np.ndarray,
+        train_y: np.ndarray,
+        valid_x: np.ndarray,
+        valid_y: np.ndarray,
+        cfg: StrategyMLConfig,
+        alpha: float,
+    ) -> object:
+        del train_x, valid_x, valid_y, cfg, alpha
+        seen.append(np.asarray(train_y, dtype=np.float32).copy())
+        return object()
+
+    monkeypatch.setattr("src.domain.futures.strategy.calibrator._fit_one", _fake_fit_one)
+
+    fit_quantile_calibrators(train=train, valid=valid, cfg=cfg)
+    assert len(seen) == 3
+    for y in seen:
+        np.testing.assert_allclose(y, train.y_ev, rtol=0.0, atol=0.0)
