@@ -155,8 +155,10 @@ def build_label_panel(aligned: AlignedMarketData, cfg: StrategyMLConfig) -> Labe
     )
 
     liq_weight = np.clip(np.log1p(np.maximum(aligned.volume_2d, 0.0)), 0.25, 2.0)
-    sample_weight = np.where(eligible & finite_long, liq_weight, 0.0).astype(np.float32)
-    sample_weight = np.clip(sample_weight, 0.0, 2.0)
+    valid_mask = eligible & finite_long
+    original_weight = np.where(valid_mask, liq_weight, 0.0).astype(np.float32)
+    y_ev_abs = np.where(valid_mask, np.abs(signed), 0.0).astype(np.float32)
+    sample_weight = (original_weight * (1.0 + 2.0 * y_ev_abs)).astype(np.float32)
     return LabelPanel(
         long_net_ret=long_net,
         short_net_ret=short_net,
