@@ -1,7 +1,8 @@
 ---
 trigger:
   - on_label: ["quant"]
-  - on_file_path_regex: "src/.*(engine|portfolio|optimizer|alpha|pipeline|validation|sizing|signals).*"
+  - on_file_path_regex: "src/.*(engine|portfolio|optimizer|alpha|pipeline|validation|sizing|signals|universe|loader|metrics).*"
+  - on_file_path_glob: ["src/**/signals/**/*.py", "src/**/optimization/**/*.py", "src/**/validation/**/*.py"]
 priority: 10
 ---
 
@@ -10,38 +11,36 @@ priority: 10
 This document provides guidelines to augment existing workflows (AGENTS.md, Skills) when quantitative reasoning is required. Do not create independent templates; instead, project the following expertise into the `<plan>` and `<risk>` sections of the active skill.
 
 ## 1. Autonomous Conceptual Reasoning
-Before writing code, autonomously reflect on how the task relates to the following financial engineering and statistical themes. These keywords are "seeds" to trigger your expertise—use all available high-level theory to defend your logic.
+Before writing code, reflect on financial engineering and statistical themes. Use high-level theory to defend your logic.
 
-- **Statistical Integrity:**
-  - *Non-stationarity:* How does data non-stationarity threaten signal validity or model stability? Is differencing, fractional differentiation, or an adaptive approach required?
-  - *Fat-tails & Extremes:* Are you ignoring the leptokurtic nature of returns? How have you ensured robustness so that outliers do not distort linear regressions or optimizations (e.g., ill-conditioned matrices)?
-  - *Regime Shifts:* How does the logic respond to changes in market environments (e.g., mean-reverting vs. trending regimes)?
-
-- **Anti-Bias & Realism:**
-  - *Look-ahead Bias:* Can you logically prove there is no "micro-leakage" of future data in any time-series operation?
-  - *Trading Realism:* How do slippage, commissions, funding fees, and liquidity constraints bridge the "abstraction gap" between backtest and live execution?
+- **Statistical Integrity:** Non-stationarity, Fat-tails, Regime Shifts, and robustness against outliers.
+- **Anti-Bias & Realism:** Look-ahead bias prevention, Trading Realism (slippage, fees, liquidity).
 
 ## 2. Skill Augmentation Instructions
 
-During implementation, ask yourself these questions and incorporate the answers into your `<plan>` or `<risk>`.
-
 ### [Phase: spec / implement]
 - **Questions for <plan>:** 
-  - "What is the mathematical foundation of this algorithm (e.g., Mean-Variance Optimization, Information Coefficient calculation)?"
-  - "Does the data alignment and indexing policy guarantee time-series integrity (t vs t+1)?"
+  - "What is the mathematical foundation of this algorithm (e.g., MVO, IC calculation)?"
+  - "Does the indexing policy guarantee time-series integrity (t vs t+1)?"
 - **Questions for <risk>:**
-  - "How does this logic collapse under extreme volatility or liquidity exhaustion where standard statistical assumptions fail?"
-  - "Are there risks of precision loss or overflow when using Numba or vectorized operations?"
+  - "How does this logic collapse under extreme volatility?"
+  - "Are there risks of precision loss in vectorized operations?"
 
 ### [Phase: verify]
-- **Verification Priority:**
-  1. **Leakage Check:** Is there perfect temporal isolation (Purging/Embargo) between training and validation data?
-  2. **Stability Check:** Does the output remain stable even when small noise is introduced to the input?
-  3. **Friction Check:** Is the expected return still significant after applying realistic transaction costs?
+1. **Leakage Check:** Perfect temporal isolation (Purging/Embargo).
+2. **Stability Check:** Robustness to input noise.
+3. **Friction Check:** Significance after realistic costs.
 
-## 3. Implementation Philosophy
-- **Mathematical Stability > Efficiency:** Do not ignore floating-point errors or matrix instability for the sake of speed.
-- **Reproducibility:** Explicitly manage all random seeds and hyperparameters.
-- **Vectorized Thinking:** Minimize loops and utilize linear algebra operations (NumPy/Polars). Explicitly comment on data shapes (e.g., `[N, M] -> [N, 1]`) for readability.
+## 3. High-Performance Computing (HPC) & JIT
+For core engines and optimizers, follow these efficiency principles:
+- **Zero-Loop Policy:** Avoid Python-level `for` loops in time-series operations. Use NumPy/Polars/Pandas vectorization.
+- **JIT Compilation (Numba):** Use `@njit` for performance-critical bottlenecks, but ensure the logic remains simple enough for the compiler.
+- **Memory Efficiency:** Pre-allocate arrays; avoid repetitive large-object copies.
+- **Vectorized Thinking:** Explicitly comment on data shapes (e.g., `[N, M] -> [N, 1]`).
 
-**Note:** `quant.md` is not a rigid constraint on your intelligence, but a trigger to elicit your highest level of expertise. Propose relevant theories in linear algebra, probability, or ML optimization even if not explicitly mentioned here.
+## 4. Financial Validation Standards
+- **Walk-forward Validation:** Ensure the backtest pipeline follows the sliding window approach without data leakage.
+- **9 Pillars of Integrity:** Refer to `docs/architecture/backtest-logic.md` for Conservation of Money and Exposure Cap rules.
+- **IC Calibration:** Use Spearman Rank IC for signal evaluation to mitigate outlier influence.
+
+**Note:** `quant.md` is a trigger to elicit your highest level of expertise. Propose relevant theories in linear algebra or ML optimization as needed.
