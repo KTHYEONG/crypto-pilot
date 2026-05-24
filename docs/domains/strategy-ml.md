@@ -77,16 +77,19 @@ $$\text{sample\_weight} = \text{original\_weight} \times (1.0 + 2.0 \times |y_{e
 
 **Conservative EV 수식 (`compute_conservative_ev`):**
 ```
-uncertainty[i]  = max(q90[i] - q10[i], ε)
-med_unc         = median(uncertainty)
-lam_dynamic[i]  = clip(lambda_tail * uncertainty[i] / med_unc, 0, lambda_tail * 2.0)
+uncertainty[i]   = max(q90[i] - q10[i], ε)
+med_unc          = median(uncertainty)
+lam_dynamic[i]   = clip(lambda_tail * uncertainty[i] / med_unc, 0, lambda_tail * 2.0)
 
-ev[i] = q50[i] - lam_dynamic[i] * max(q50[i] - q10[i], 0)   # long  (q50 ≥ 0)
-ev[i] = q50[i] + lam_dynamic[i] * max(q90[i] - q50[i], 0)   # short (q50 < 0)
+# Sign-symmetric Multiplicative Penalty (q50 magnitude proportional)
+penalty_ratio[i] = (q50[i] - q10[i]) / uncertainty[i] if q50[i] >= 0 else (q90[i] - q50[i]) / uncertainty[i]
+penalty_term[i]  = clip(lam_dynamic[i] * penalty_ratio[i], 0.0, 0.99)
+
+ev[i]            = q50[i] * (1.0 - penalty_term[i])
 ```
 - **`lambda_tail`:** 기본값 `0.10` (범위: 0.05–0.30). 꼬리 위험 페널티 강도.
 - **`lam_dynamic` 상한 캡 (`2 × lambda_tail`):** OOS regime shift로 인한 고변동성 구간에서 페널티 폭주를 방지.
-- **Sign-symmetric 설계:** long/short 각 방향의 꼬리 위험만 페널티로 부과하여 CS-demean 편향 방어.
+- **Sign-symmetric Multiplicative 설계:** 페널티가 $q_{50}$의 절대 크기에 비례하여 부과되므로 CS-demean 환경 하에서 $q_{50} \approx 0$으로 수축하더라도 페널티가 $ev$를 불필요하게 음수 영역으로 끌고 가는 부호 반전 현상이 원천 차단됩니다. 또한 `penalty_term`을 최대 `0.99`로 제한하여 신호 보존력을 최대화합니다.
 
 > **적용 변경 (2026-05-24):** EV 출력 경로의 fold-level group centering을 제거하여 absolute EV 크기 소거를 방지.
 
