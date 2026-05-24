@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import numpy as np
+import pandas as pd
 from numpy.typing import NDArray
 
-from src.core.settings import FILLS_PER_ROUND_TRIP
 from src.domain.futures.strategy.common.alignment import AlignedMarketData
 from src.domain.futures.strategy.config import StrategyMLConfig
 from src.domain.futures.strategy.contracts import LabelPanel
+
+_BETA_WINDOW: int = 120
+_BETA_MIN_PERIODS: int = 20
 
 
 def _build_relevance(
@@ -32,8 +35,62 @@ def _build_relevance(
     return np.asarray(rel, dtype=np.int32)
 
 
+def _compute_trailing_beta(
+    close_2d: NDArray[np.float64],
+) -> NDArray[np.float64]:
+    """Compute per-symbol rolling OLS beta against cross-sectional market return.
+
+    All computation uses only past bars — no look-ahead.
+    beta_2d defaults to 1.0 when insufficient history exists.
+
+    Args:
+        close_2d: Close price array of shape [T, N].
+
+    Returns:
+        beta_2d: Rolling beta array of shape [T, N].
+        Time complexity: O(T * N). Space complexity: O(T * N).
+
+    """
+    t_len, n_len = close_2d.shape
+    # 1-bar spot log returns: shape [T, N]
+    spot_ret: NDArray[np.float64] = np.full((t_len, n_len), np.nan, dtype=np.float64)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        ratio = close_2d[1:] / close_2d[:-1]
+        log_r = np.where((ratio > 0) & np.isfinite(ratio), np.log(ratio), np.nan)
+    spot_ret[1:] = log_r
+
+    # Equal-weighted cross-sectional market return per bar: shape [T]
+    with np.errstate(all="ignore"):
+        market_ret: NDArray[np.float64] = np.nanmean(spot_ret, axis=1)
+
+    # Rolling OLS beta per symbol (loop over N ~20-50 symbols, not T). Zero-Loop policy compliance.
+    mkt_series: pd.Series = pd.Series(market_ret)
+    beta_2d: NDArray[np.float64] = np.ones((t_len, n_len), dtype=np.float64)
+    for col in range(n_len):
+        sym_series = pd.Series(spot_ret[:, col])
+        cov = sym_series.rolling(_BETA_WINDOW, min_periods=_BETA_MIN_PERIODS).cov(mkt_series)
+        var = mkt_series.rolling(_BETA_WINDOW, min_periods=_BETA_MIN_PERIODS).var()
+        beta = (cov / var.clip(lower=1e-12)).fillna(1.0).clip(-5.0, 5.0)
+        beta_2d[:, col] = beta.to_numpy()
+
+    return beta_2d
+
+
 def build_label_panel(aligned: AlignedMarketData, cfg: StrategyMLConfig) -> LabelPanel:
-    """Build t+1 execution aligned label tensors."""
+    """Build t+1 execution aligned label tensors with beta-residualized returns.
+
+    Uses trailing rolling OLS beta (look-ahead free) to remove cross-sectional
+    market factor from gross log returns before training signal generation.
+    Cost deduction is deferred to the objectives layer (canonical B1 fix).
+
+    Args:
+        aligned: Aligned market data tensors.
+        cfg: Strategy ML configuration.
+
+    Returns:
+        LabelPanel with beta-residualized net returns and relevance scores.
+
+    """
     t_len, n_len = aligned.close_2d.shape
     horizon = cfg.label_horizon_bars
     long_net = np.full((t_len, n_len), np.nan, dtype=np.float32)
@@ -44,10 +101,28 @@ def build_label_panel(aligned: AlignedMarketData, cfg: StrategyMLConfig) -> Labe
         & ~aligned.entry_block_mask
         & ~aligned.kill_mask
     )
-    # Round-trip = 진입 fill + 청산 fill (execution sim은 양 leg 모두 Taker).
-    # FILLS_PER_ROUND_TRIP=2 이므로: 2*(fee_bps + slippage_bps) = 14bps (기본값 5+2 per side).
-    # [ML-UPGRADE] Gross Alpha 학습을 위해 모델 단에서는 비용 차감을 0.0으로 설정합니다.
+    # Gross alpha: cost deducted once at objectives layer (B1 canonical fix).
     cost = np.float64(0.0)
+
+    # --- Beta-residualization (B2) ---
+    # beta_2d[t, i]: trailing OLS beta at bar t — pure past data, no look-ahead.
+    beta_2d: NDArray[np.float64] = _compute_trailing_beta(aligned.close_2d)
+
+    # Market forward return for the same label horizon (equal-weighted, vectorized).
+    # Computed for bars t using [t+1 .. t+horizon] — identical indexing to gross_long.
+    market_fwd_ret: NDArray[np.float64] = np.full(t_len, np.nan, dtype=np.float64)
+    if t_len > horizon:
+        entry_mkt = aligned.open_2d[1 : t_len - horizon + 1]  # shape [T-h, N]
+        exit_mkt = aligned.close_2d[horizon:t_len]  # shape [T-h, N]
+        valid_mkt = (
+            (entry_mkt > 0.0)
+            & (exit_mkt > 0.0)
+            & np.isfinite(entry_mkt)
+            & np.isfinite(exit_mkt)
+        )
+        with np.errstate(divide="ignore", invalid="ignore"):
+            log_rets = np.where(valid_mkt, np.log(exit_mkt / entry_mkt), np.nan)
+        market_fwd_ret[: t_len - horizon] = np.nanmean(log_rets, axis=1)
 
     for t in range(t_len - horizon):
         entry = aligned.open_2d[t + 1]
@@ -60,8 +135,16 @@ def build_label_panel(aligned: AlignedMarketData, cfg: StrategyMLConfig) -> Labe
             gross_long = np.log(exit_ / entry)
             gross_short = np.log(entry / exit_)
         funding = aligned.funding_2d[t]
-        long_net[t, row_ok] = (gross_long[row_ok] - cost - funding[row_ok]).astype(np.float32)
-        short_net[t, row_ok] = (gross_short[row_ok] - cost + funding[row_ok]).astype(np.float32)
+        mkt_ret_t = float(market_fwd_ret[t]) if np.isfinite(market_fwd_ret[t]) else 0.0
+        beta_t: NDArray[np.float64] = beta_2d[t]  # shape [N]
+        # Residualize: remove estimated market beta component
+        residual_adj = beta_t * mkt_ret_t
+        long_net[t, row_ok] = (
+            gross_long[row_ok] - residual_adj[row_ok] - cost - funding[row_ok]
+        ).astype(np.float32)
+        short_net[t, row_ok] = (
+            gross_short[row_ok] + residual_adj[row_ok] - cost + funding[row_ok]
+        ).astype(np.float32)
 
     signed = long_net.copy()
     finite_long = np.isfinite(long_net)

@@ -5,10 +5,13 @@ Anchored walk-forward (AWF) legs, Kelly-CVaR scalar, disk+memory signal cache.
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import numpy as np
 import pandas as pd
+
+_logger = logging.getLogger(__name__)
 
 _FUTURES_2D_REQUIRED_COLS: tuple[str, ...] = (
     "open",
@@ -352,6 +355,55 @@ def _build_optional_exec_1m_payload(
             if val_arr.ndim != 1 or val_arr.shape[0] != sym_dt.shape[0]:
                 continue
             payload[col][row_idx, s_idx] = val_arr[in_range][src_mask]
+
+    # [ML-UPGRADE] 1M Price/Volume/Funding Imputation & Data Audit Guard
+    # High-speed JIT-equivalent NumPy imputation per symbol column
+    for col in _EXEC_1M_VALUE_COLS:
+        arr_2d = payload[col]
+        col_total_size = arr_2d.size
+        col_nan_count_pre = np.count_nonzero(np.isnan(arr_2d))
+        is_price_col = col in {
+            "exec_open_1m",
+            "exec_high_1m",
+            "exec_low_1m",
+            "exec_close_1m",
+        }
+
+        for s_idx in range(n_syms):
+            col_arr = arr_2d[:, s_idx]
+            nan_mask = np.isnan(col_arr)
+            if not np.any(nan_mask):
+                continue
+
+            if is_price_col:
+                # 1. Forward Fill: Propagate previous valid pricing
+                non_nan_indices = np.flatnonzero(~nan_mask)
+                if non_nan_indices.size > 0:
+                    idx = np.where(~nan_mask, np.arange(col_arr.size), 0)
+                    np.maximum.accumulate(idx, out=idx)
+                    col_arr[nan_mask] = col_arr[idx[nan_mask]]
+
+                    # 2. Backward Fill: Propagate earliest price to leading NaNs
+                    nan_mask_post = np.isnan(col_arr)
+                    if np.any(nan_mask_post):
+                        col_arr[nan_mask_post] = col_arr[non_nan_indices[0]]
+                else:
+                    # Fallback to 0.0 only if the entire series is empty
+                    col_arr[nan_mask] = 0.0
+            else:
+                # Flat fill volume and funding event rates to 0.0
+                col_arr[nan_mask] = 0.0
+
+        col_nan_count_post = np.count_nonzero(np.isnan(arr_2d))
+        nan_pct_pre = (col_nan_count_pre / max(1, col_total_size)) * 100.0
+        nan_pct_post = (col_nan_count_post / max(1, col_total_size)) * 100.0
+        _logger.info(
+            " 📊 [DATA INTEGRITY AUDIT: 1M EXECUTION] col=%s nan_pct=%.2f%% -> %.2f%%",
+            col,
+            nan_pct_pre,
+            nan_pct_post,
+        )
+
     return payload
 
 

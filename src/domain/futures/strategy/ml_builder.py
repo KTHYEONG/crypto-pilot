@@ -31,6 +31,7 @@ from src.domain.futures.strategy.dataset import (
 from src.domain.futures.strategy.diagnostics import (
     build_quality_report,
     ml_alpha_metrics,
+    passes_ic_gate,
     passes_quality_gate,
 )
 from src.domain.futures.strategy.features import build_feature_panel
@@ -40,6 +41,7 @@ from src.domain.futures.strategy.inference import (
 )
 from src.domain.futures.strategy.labels import build_label_panel
 from src.domain.futures.strategy.ranker import fit_ranker, predict_rank_score
+from src.core.settings import round_trip_cost_bps
 
 _logger = logging.getLogger(__name__)
 
@@ -208,16 +210,6 @@ def build_ml_strategy_alpha(
                 continue
             sl = slice(offset, offset + g_int)
             ev_test[sl] -= np.mean(ev_test[sl], dtype=np.float32)
-            
-            # [ML-UPGRADE] Dynamic Cost Barrier Gate 적용 (Soft Cost-Shrinkage)
-            # 실질 round-trip 거래 비용 임계값을 넘는 분만 매끄럽게 남김
-            from src.core.settings import FILLS_PER_ROUND_TRIP
-            fee_slippage = ml_cfg.fee_bps + ml_cfg.slippage_bps
-            barrier = np.float32(FILLS_PER_ROUND_TRIP * fee_slippage / 10000.0)
-            ev_test[sl] = np.sign(ev_test[sl]) * np.maximum(
-                np.abs(ev_test[sl]) - barrier, np.float32(0.0)
-            )
-            
             offset += g_int
         fold_alpha = infer_fold_alpha(
             fold=fold,
@@ -259,7 +251,16 @@ def build_ml_strategy_alpha(
     )
     panel.attrs["quality_report"] = quality_report
     if not passes_quality_gate(quality_report):
-        raise RuntimeError(f"strategy ml quality gate failed: {quality_report}")
+        failed_keys = {
+            k: v for k, v in quality_report.items()
+            if (k == "feature_finite_ratio" and v < 0.990)
+            or (k == "label_valid_ratio" and v <= 0.0)
+            or (k == "ranker_valid_ndcg_at_5" and v <= 0.0)
+            or (k == "spearman_rank_ic" and v < 0.0)
+        }
+        raise RuntimeError(
+            f"strategy ml quality gate failed: reasons={failed_keys} full={quality_report}"
+        )
     if float(np.count_nonzero(panel["alpha_long"].to_numpy(dtype=np.float64))) <= 0.0:
         raise RuntimeError("generated alpha_long is all zero")
     if float(np.count_nonzero(panel["alpha_short"].to_numpy(dtype=np.float64))) <= 0.0:
@@ -278,6 +279,46 @@ def build_ml_strategy_alpha(
         metrics["long_p95_bps"],
         metrics["short_p95_bps"],
     )
+    # IC quality summary
+    _logger.info(
+        "[ML-ALPHA-IC] mean_ic=%.4f icir=%.3f t_stat=%.2f hit_ratio=%.3f n_obs=%d",
+        quality_report.get("spearman_rank_ic", 0.0),
+        quality_report.get("ic_icir", 0.0),
+        quality_report.get("ic_t_stat", 0.0),
+        quality_report.get("ic_hit_ratio", 0.0),
+        int(quality_report.get("ic_n_obs", 0)),
+    )
+    # Cost wall diagnosis: gross alpha vs effective cost floor
+    _friction_bps = round_trip_cost_bps()
+    _hurdle_default_bps = 40.0  # EV_HURDLE_BPS default
+    _floor_bps = _friction_bps + _hurdle_default_bps
+    _alpha_p95 = max(
+        quality_report.get("alpha_p95_bps", 0.0),
+        0.0,
+    )
+    _logger.info(
+        "[ML-COST-WALL] alpha_p95=%.2fbps friction=%.1fbps hurdle_default=%.1fbps "
+        "floor=%.1fbps signal_clears_floor=%s",
+        _alpha_p95,
+        _friction_bps,
+        _hurdle_default_bps,
+        _floor_bps,
+        str(_alpha_p95 >= _floor_bps),
+    )
+    # B4: IC gate warning (enforced as warning; raise after B2 uplift confirmed)
+    if not passes_ic_gate(
+        quality_report,
+        min_mean_ic=0.02,
+        min_t_stat=2.0,
+        min_hit_ratio=0.45,
+    ):
+        _logger.warning(
+            "[ML-IC-GATE] IC gate not satisfied: mean_ic=%.4f t_stat=%.2f hit_ratio=%.3f — "
+            "proceeding with warning (gate enforced after B2 uplift confirmed)",
+            quality_report.get("spearman_rank_ic", 0.0),
+            quality_report.get("ic_t_stat", 0.0),
+            quality_report.get("ic_hit_ratio", 0.0),
+        )
     return panel
 
 
@@ -457,13 +498,6 @@ def build_ml_strategy_alpha_anchored(
             continue
         sl = slice(offset, offset + g_int)
         ev_test[sl] -= np.mean(ev_test[sl], dtype=np.float32)
-        # [ML-UPGRADE] Dynamic Cost Barrier Gate 적용 (Soft Cost-Shrinkage)
-        from src.core.settings import FILLS_PER_ROUND_TRIP
-        fee_slippage = ml_cfg.fee_bps + ml_cfg.slippage_bps
-        barrier = np.float32(FILLS_PER_ROUND_TRIP * fee_slippage / 10000.0)
-        ev_test[sl] = np.sign(ev_test[sl]) * np.maximum(
-            np.abs(ev_test[sl]) - barrier, np.float32(0.0)
-        )
         offset += g_int
 
     fold_alpha = infer_fold_alpha(

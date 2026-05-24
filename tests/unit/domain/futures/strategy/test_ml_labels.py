@@ -31,14 +31,27 @@ def _aligned_for_labels() -> AlignedMarketData:
 
 
 def test_build_label_panel_uses_t_plus_1_open_close_alignment() -> None:
+    """Verify B2 beta-residualized labels use t+1 execution alignment.
+
+    With only 4 bars, trailing beta defaults to 1.0 (insufficient history).
+    Expected values: gross_long - beta * market_fwd_ret (equal-weighted).
+    t=0: gross=log(121/110), mfr=mean(log(121/110), log(221/210)), beta=1.0
+    t=2: gross=log(143/130), mfr=mean(log(143/130), log(243/230)), beta=1.0
+    """
+    open_2d = np.array([[100.0, 200.0], [110.0, 210.0], [120.0, 220.0], [130.0, 230.0]])
+    close_2d = np.array([[101.0, 201.0], [121.0, 221.0], [132.0, 232.0], [143.0, 243.0]])
+    # market forward return at t=0: equal-weighted log return from open[1] to close[1]
+    mfr0 = float(np.nanmean(np.log(close_2d[1] / open_2d[1])))
+    mfr2 = float(np.nanmean(np.log(close_2d[3] / open_2d[3])))
+    expected_t0 = np.log(121.0 / 110.0) - 1.0 * mfr0  # beta=1.0 (insufficient history)
+    expected_t2 = np.log(143.0 / 130.0) - 1.0 * mfr2
+
     panel = build_label_panel(
         _aligned_for_labels(),
         StrategyMLConfig(label_horizon_bars=1, fee_bps=0.0, slippage_bps=0.0, min_group_size=2),
     )
-    expected_t0 = np.log(121.0 / 110.0)
-    expected_t2 = np.log(143.0 / 130.0)
-    np.testing.assert_allclose(panel.long_net_ret[0, 0], expected_t0)
-    np.testing.assert_allclose(panel.long_net_ret[2, 0], expected_t2)
+    np.testing.assert_allclose(panel.long_net_ret[0, 0], expected_t0, rtol=1e-5)
+    np.testing.assert_allclose(panel.long_net_ret[2, 0], expected_t2, rtol=1e-5)
     assert np.isnan(panel.long_net_ret[3, 0])
 
 
