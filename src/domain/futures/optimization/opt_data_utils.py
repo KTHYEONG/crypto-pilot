@@ -272,7 +272,6 @@ _FEATURE_GROUP_PATTERNS: dict[str, tuple[str, ...]] = {
     "lsr": ("lsr", "long_short", "top_trader", "global_lsr"),
     "taker_orderflow": ("taker", "buy_sell", "imbalance", "orderflow"),
     "macro": ("macro_", "btc_", "market_", "cs_dispersion"),
-    "hmm_derived": ("hmm_", "regime_", "tail_risk"),
 }
 
 
@@ -282,7 +281,6 @@ def _feature_group_coverage(df: pd.DataFrame) -> dict[str, dict[str, float]]:
         for g in _FEATURE_GROUP_PATTERNS:
             out[g] = {"col_count": 0.0, "non_null_coverage": 0.0, "non_zero_coverage": 0.0}
         return out
-    n_rows = max(len(df), 1)
     for group, pats in _FEATURE_GROUP_PATTERNS.items():
         cols = [c for c in df.columns if any(p in str(c).lower() for p in pats)]
         if not cols:
@@ -316,29 +314,8 @@ def _append_stage_integrity(
 
 
 def infer_regime_codes(df: pd.DataFrame) -> np.ndarray:
-    """Infer HMM regime codes from probability columns."""
-    n = len(df)
-
-    def _float_col(name: str) -> np.ndarray:
-        if name not in df.columns:
-            return np.zeros(n, dtype=np.float64)
-        # Force a writable array; some pandas-backed arrays can be read-only views.
-        return pd.to_numeric(df[name], errors="coerce").to_numpy(dtype=np.float64, copy=True)
-
-    bull = _float_col("hmm_prob_bull_calm")
-    bull += _float_col("hmm_prob_bull_vol_up")
-    bear = _float_col("hmm_prob_bear_trend")
-    chop = _float_col("hmm_prob_chop")
-    crisis = _float_col("hmm_prob_crisis")
-    probs = np.column_stack(
-        [
-            np.nan_to_num(bull, nan=0.0, posinf=0.0, neginf=0.0),
-            np.nan_to_num(bear, nan=0.0, posinf=0.0, neginf=0.0),
-            np.nan_to_num(chop, nan=0.0, posinf=0.0, neginf=0.0),
-            np.nan_to_num(crisis, nan=0.0, posinf=0.0, neginf=0.0),
-        ]
-    )
-    return np.argmax(probs, axis=1).astype(np.int64, copy=False)
+    """Return regime code array; always returns 0 (bull) since HMM removed."""
+    return np.zeros(len(df), dtype=np.int64)
 
 
 def compute_oos_regime_attribution(

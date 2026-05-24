@@ -196,7 +196,6 @@ def solve_constrained_weights(
         w_pre = w_raw * 0.0
 
     w_c = _project_l1_linf(w_pre, gross_cap=gross_cap, per_symbol_cap=per_symbol_cap)
-    # L/S balance 강제 제거: regime 신호(HMM)가 방향성을 결정하므로 단방향 포트폴리오 허용
 
     dd = float(max(0.0, current_dd))
     dd_scale = float(np.clip(1.0 - max(0.0, dd - 0.05) / 0.10, 0.3, 1.0))
@@ -234,30 +233,6 @@ def precompute_rolling_covariances(
 
 
 @numba.njit(cache=True)
-def _decode_regime_probs(hmm_probs: np.ndarray) -> tuple[float, float, float, float]:
-    """Decode HMM probabilities into semantic 4-bucket regime probs.
-
-    5-col format: [bull_calm, bull_vol_up, bear_trend, chop, crisis]
-    4-col legacy format: [bull, bear, chop, crisis]
-    """
-    p_bull = 0.0
-    p_bear = 0.0
-    p_chop = 0.0
-    p_crisis = 0.0
-    if hmm_probs.size >= 5:
-        p_bull = hmm_probs[0] + hmm_probs[1]
-        p_bear = hmm_probs[2]
-        p_chop = hmm_probs[3]
-        p_crisis = hmm_probs[4]
-    elif hmm_probs.size >= 4:
-        p_bull = hmm_probs[0]
-        p_bear = hmm_probs[1]
-        p_chop = hmm_probs[2]
-        p_crisis = hmm_probs[3]
-    return p_bull, p_bear, p_chop, p_crisis
-
-
-@numba.njit(cache=True)
 def _solve_constrained_weights_numba(
     mu: np.ndarray,
     sigma: np.ndarray,
@@ -269,83 +244,10 @@ def _solve_constrained_weights_numba(
     per_symbol_cap: float,
     current_dd: float,
     kelly_sigma_diag: np.ndarray | None = None,
-    hmm_probs: np.ndarray | None = None,
-    regime_betas: np.ndarray | None = None,
-    crisis_override_thr: float = 0.4,
-    regime_policy_enabled: int = 0,
-    chop_gross_damp: float = 0.50,
-    crisis_gross_damp: float = 0.80,
-    entropy_gross_damp: float = 0.35,
-    bear_gross_damp: float = 0.10,
-    gross_floor_mult: float = 0.15,
-    crisis_long_suppress_thr: float = 0.60,
-    crisis_long_suppress_mult: float = 0.10,
 ) -> np.ndarray:
     n = mu.size
-    
-    # [HMM Dynamic Modulation]
-    # regime_betas: [BULL, BEAR, CHOP, CRISIS]
     mu_mod = mu.copy()
-    if hmm_probs is not None and regime_betas is not None:
-        p_bull, p_bear, p_chop, p_crisis = _decode_regime_probs(hmm_probs)
-        if p_crisis > crisis_override_thr:
-            return np.zeros(n, dtype=np.float64)
-            
-        # Composite regime multiplier
-        mult = (
-            p_bull * regime_betas[0] +   # BULL
-            p_bear * regime_betas[1] +   # BEAR
-            p_chop * regime_betas[2] +   # CHOP
-            p_crisis * regime_betas[3]   # CRISIS
-        )
-        for i in range(n):
-            mu_mod[i] *= mult
-
     dyn_gross_cap = gross_cap
-    if regime_policy_enabled == 1 and hmm_probs is not None and hmm_probs.size >= 4:
-        p_bull, p_bear, p_chop, p_crisis = _decode_regime_probs(hmm_probs)
-        p_bull = min(max(p_bull, 0.0), 1.0)
-        p_bear = min(max(p_bear, 0.0), 1.0)
-        p_chop = min(max(p_chop, 0.0), 1.0)
-        p_crisis = min(max(p_crisis, 0.0), 1.0)
-        s = p_bull + p_bear + p_chop + p_crisis
-        if s > 1e-12:
-            p_bull /= s
-            p_bear /= s
-            p_chop /= s
-            p_crisis /= s
-        ent = 0.0
-        if p_bull > 1e-12:
-            ent -= p_bull * math.log(p_bull)
-        if p_bear > 1e-12:
-            ent -= p_bear * math.log(p_bear)
-        if p_chop > 1e-12:
-            ent -= p_chop * math.log(p_chop)
-        if p_crisis > 1e-12:
-            ent -= p_crisis * math.log(p_crisis)
-        ent_norm = ent / math.log(4.0)
-        if ent_norm < 0.0:
-            ent_norm = 0.0
-        elif ent_norm > 1.0:
-            ent_norm = 1.0
-        damp = (
-            1.0
-            - (chop_gross_damp * p_chop)
-            - (crisis_gross_damp * p_crisis)
-            - (entropy_gross_damp * ent_norm)
-            - (bear_gross_damp * p_bear)
-        )
-        if damp < gross_floor_mult:
-            damp = gross_floor_mult
-        elif damp > 1.0:
-            damp = 1.0
-        dyn_gross_cap = gross_cap * damp
-
-        if p_crisis >= crisis_long_suppress_thr and crisis_long_suppress_mult < 1.0:
-            lm = max(0.0, crisis_long_suppress_mult)
-            for i in range(n):
-                if mu_mod[i] > 0.0:
-                    mu_mod[i] *= lm
 
     if kelly_sigma_diag is not None:
         sig = kelly_sigma_diag
@@ -354,7 +256,7 @@ def _solve_constrained_weights_numba(
         for i in range(n):
             sig[i] = math.sqrt(max(sigma[i, i], 1e-12))
 
-    # _kelly_raw logic
+    # _kelly_raw logic  # [N] → scalar Kelly fraction per symbol
     w_raw = np.zeros(n, dtype=np.float64)
     f_max = abs(f_kelly_max)
     for i in range(n):
@@ -409,17 +311,6 @@ def _precompute_loop_numba(
     per_symbol_cap: float,
     current_dd: float,
     ks_diag_2d: np.ndarray | None = None,
-    hmm_probs_2d: np.ndarray | None = None,
-    regime_betas: np.ndarray | None = None,
-    crisis_override_thr: float = 0.4,
-    regime_policy_enabled: int = 0,
-    chop_gross_damp: float = 0.50,
-    crisis_gross_damp: float = 0.80,
-    entropy_gross_damp: float = 0.35,
-    bear_gross_damp: float = 0.10,
-    gross_floor_mult: float = 0.15,
-    crisis_long_suppress_thr: float = 0.60,
-    crisis_long_suppress_mult: float = 0.10,
 ) -> np.ndarray:
     out = np.zeros((n_bars, n_syms), dtype=np.float64)
     for i in range(1, n_bars):
@@ -429,7 +320,6 @@ def _precompute_loop_numba(
         mu = mu_2d[i - 1]
         sigma = sigma_3d[i]
         ks_diag = ks_diag_2d[i - 1] if ks_diag_2d is not None else None
-        hmm_probs = hmm_probs_2d[i - 1] if hmm_probs_2d is not None else None
 
         out[i, :] = _solve_constrained_weights_numba(
             mu,
@@ -442,17 +332,6 @@ def _precompute_loop_numba(
             per_symbol_cap,
             current_dd,
             kelly_sigma_diag=ks_diag,
-            hmm_probs=hmm_probs,
-            regime_betas=regime_betas,
-            crisis_override_thr=crisis_override_thr,
-            regime_policy_enabled=regime_policy_enabled,
-            chop_gross_damp=chop_gross_damp,
-            crisis_gross_damp=crisis_gross_damp,
-            entropy_gross_damp=entropy_gross_damp,
-            bear_gross_damp=bear_gross_damp,
-            gross_floor_mult=gross_floor_mult,
-            crisis_long_suppress_thr=crisis_long_suppress_thr,
-            crisis_long_suppress_mult=crisis_long_suppress_mult,
         )
     return out
 
@@ -474,17 +353,6 @@ def precompute_rebalance_weights(
     min_obs: int = 20,
     composer_sigma_2d: np.ndarray | None = None,
     sigma_3d: np.ndarray | None = None,
-    hmm_probs_2d: np.ndarray | None = None,
-    regime_betas: np.ndarray | None = None,
-    crisis_override_thr: float = 0.4,
-    regime_policy_enabled: bool = False,
-    chop_gross_damp: float = 0.50,
-    crisis_gross_damp: float = 0.80,
-    entropy_gross_damp: float = 0.35,
-    bear_gross_damp: float = 0.10,
-    gross_floor_mult: float = 0.15,
-    crisis_long_suppress_thr: float = 0.60,
-    crisis_long_suppress_mult: float = 0.10,
 ) -> np.ndarray:
     """Sparse target weights: precomputed or rolling LW covariance."""
     c = np.asarray(close_2d, dtype=np.float64)
@@ -518,17 +386,6 @@ def precompute_rebalance_weights(
             float(per_symbol_cap),
             float(current_dd),
             ks_diag_2d=ks_diag_2d,
-            hmm_probs_2d=hmm_probs_2d,
-            regime_betas=regime_betas,
-            crisis_override_thr=float(crisis_override_thr),
-            regime_policy_enabled=1 if regime_policy_enabled else 0,
-            chop_gross_damp=float(chop_gross_damp),
-            crisis_gross_damp=float(crisis_gross_damp),
-            entropy_gross_damp=float(entropy_gross_damp),
-            bear_gross_damp=float(bear_gross_damp),
-            gross_floor_mult=float(gross_floor_mult),
-            crisis_long_suppress_thr=float(crisis_long_suppress_thr),
-            crisis_long_suppress_mult=float(crisis_long_suppress_mult),
         )
     else:
         # Fallback to slower Python loop with rolling LW
@@ -561,17 +418,6 @@ def precompute_rebalance_weights(
                 float(per_symbol_cap),
                 float(current_dd),
                 kelly_sigma_diag=ks_diag,
-                hmm_probs=(hmm_probs_2d[i - 1] if hmm_probs_2d is not None else None),
-                regime_betas=regime_betas,
-                crisis_override_thr=float(crisis_override_thr),
-                regime_policy_enabled=1 if regime_policy_enabled else 0,
-                chop_gross_damp=float(chop_gross_damp),
-                crisis_gross_damp=float(crisis_gross_damp),
-                entropy_gross_damp=float(entropy_gross_damp),
-                bear_gross_damp=float(bear_gross_damp),
-                gross_floor_mult=float(gross_floor_mult),
-                crisis_long_suppress_thr=float(crisis_long_suppress_thr),
-                crisis_long_suppress_mult=float(crisis_long_suppress_mult),
             )
 
     # project_all_caps 및 quantize_weights 통합 후처리
@@ -603,13 +449,7 @@ def precompute_rebalance_weights(
 
         sigma_port = float(np.sqrt(max(0.0, w @ sigma @ w)))
 
-        if regime_betas is not None:
-            if regime_betas.ndim == 2:
-                btc_beta = regime_betas[i - 1]
-            else:
-                btc_beta = regime_betas
-        else:
-            btc_beta = np.zeros(n_syms)
+        btc_beta = np.zeros(n_syms)
 
         w_proj = project_all_caps(
             w=w,
@@ -661,54 +501,6 @@ def portfolio_weight_params_from_optuna(
         ),
         "per_symbol_cap": float(
             params.get("MAX_EXPOSURE_PER_COIN", pol.get("per_symbol_cap", 0.25))
-        ),
-        "regime_policy_enabled": bool(
-            params.get(
-                "PORTFOLIO_REGIME_DAMP_ENABLED",
-                opt_cfg.get("FUTURES_PORTFOLIO_REGIME_DAMP_ENABLED", False),
-            )
-        ),
-        "chop_gross_damp": float(
-            params.get(
-                "PORTFOLIO_CHOP_GROSS_DAMP",
-                opt_cfg.get("FUTURES_PORTFOLIO_CHOP_GROSS_DAMP", 0.50),
-            )
-        ),
-        "crisis_gross_damp": float(
-            params.get(
-                "PORTFOLIO_CRISIS_GROSS_DAMP",
-                opt_cfg.get("FUTURES_PORTFOLIO_CRISIS_GROSS_DAMP", 0.80),
-            )
-        ),
-        "entropy_gross_damp": float(
-            params.get(
-                "PORTFOLIO_ENTROPY_GROSS_DAMP",
-                opt_cfg.get("FUTURES_PORTFOLIO_ENTROPY_GROSS_DAMP", 0.35),
-            )
-        ),
-        "bear_gross_damp": float(
-            params.get(
-                "PORTFOLIO_BEAR_GROSS_DAMP",
-                opt_cfg.get("FUTURES_PORTFOLIO_BEAR_GROSS_DAMP", 0.10),
-            )
-        ),
-        "gross_floor_mult": float(
-            params.get(
-                "PORTFOLIO_GROSS_FLOOR_MULT",
-                opt_cfg.get("FUTURES_PORTFOLIO_GROSS_FLOOR_MULT", 0.15),
-            )
-        ),
-        "crisis_long_suppress_thr": float(
-            params.get(
-                "PORTFOLIO_CRISIS_LONG_SUPPRESS_THR",
-                opt_cfg.get("FUTURES_PORTFOLIO_CRISIS_LONG_SUPPRESS_THR", 0.60),
-            )
-        ),
-        "crisis_long_suppress_mult": float(
-            params.get(
-                "PORTFOLIO_CRISIS_LONG_SUPPRESS_MULT",
-                opt_cfg.get("FUTURES_PORTFOLIO_CRISIS_LONG_SUPPRESS_MULT", 0.10),
-            )
         ),
     }
 
