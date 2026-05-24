@@ -10,13 +10,6 @@ import pandas as pd
 if TYPE_CHECKING:
     from src.domain.futures.strategy.config import StrategyConfig
 
-HMM_SEMANTIC_PROB_COLUMNS: list[str] = [
-    "hmm_prob_bull_calm",
-    "hmm_prob_bull_vol_up",
-    "hmm_prob_bear_trend",
-    "hmm_prob_chop",
-    "hmm_prob_crisis",
-]
 _logger = logging.getLogger(__name__)
 
 
@@ -26,7 +19,6 @@ class MLPipelineOutput:
 
     alpha_panel: pd.DataFrame = field(default_factory=pd.DataFrame)
     market_probs: pd.DataFrame = field(default_factory=pd.DataFrame)
-    hmm_report: dict[str, Any] = field(default_factory=dict)
     integrity_report: dict[str, Any] = field(default_factory=dict)
     meta_feature_frame_by_symbol: dict[str, pd.DataFrame] = field(default_factory=dict)
 
@@ -201,38 +193,12 @@ def merge_ml_output_into_data_maps(
             _short_nz_ratios.append(float((_df["alpha_short"] != 0).mean()))
     _alpha_long_nz = float(np.mean(_long_nz_ratios)) if _long_nz_ratios else 0.0
     _alpha_short_nz = float(np.mean(_short_nz_ratios)) if _short_nz_ratios else 0.0
-    _regime_broadcast = (
-        getattr(ml_out, "market_probs", None) is not None
-        and not getattr(ml_out, "market_probs", pd.DataFrame()).empty
-    )
     _logger.info(
-        "[ALPHA-MERGE] merged_syms=%d alpha_long_nz=%.3f alpha_short_nz=%.3f regime_broadcast=%s",
+        "[ALPHA-MERGE] merged_syms=%d alpha_long_nz=%.3f alpha_short_nz=%.3f",
         merged_symbols,
         _alpha_long_nz,
         _alpha_short_nz,
-        _regime_broadcast,
     )
-
-    # Broadcast market_probs (Regime) to all symbols
-    mp = getattr(ml_out, "market_probs", None)
-    if mp is not None and not mp.empty:
-        prob_cols = [
-            "hmm_prob_bull_calm",
-            "hmm_prob_bull_vol_up",
-            "hmm_prob_bear_trend",
-            "hmm_prob_chop",
-            "hmm_prob_crisis",
-        ]
-        for sym in symbols:
-            if sym not in data_maps or tf not in data_maps[sym]:
-                continue
-            df = data_maps[sym][tf]
-            # Merge probabilities
-            merged_probs = df[["datetime"]].merge(mp.reset_index(), on="datetime", how="left")
-            for c in prob_cols:
-                # Fallback: bull_calm is 1.0, other states are 0.0 if not present
-                fill_val = 1.0 if c == "hmm_prob_bull_calm" else 0.0
-                df[c] = merged_probs[c].fillna(fill_val).to_numpy(dtype=np.float64)
 
 
 
