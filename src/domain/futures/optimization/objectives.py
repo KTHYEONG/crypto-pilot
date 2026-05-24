@@ -418,6 +418,15 @@ def _compose_strategy_scores_inplace(
         hmm_probs=hmm_prob_map,
         params=params,
     )
+    aligned["_strategy_signal_path_diag"] = {
+        "alpha_nz": float(
+            np.count_nonzero((np.abs(alpha_l_2d) > 1e-12) | (np.abs(alpha_s_2d) > 1e-12))
+            / max(alpha_l_2d.size, 1)
+        ),
+        "xs_nz": float(
+            np.count_nonzero((np.abs(xs_l) > 1e-12) | (np.abs(xs_s) > 1e-12)) / max(xs_l.size, 1)
+        ),
+    }
     if trial_number is not None and trial_number < 3:
         _diag: dict[str, float] = aligned["_strategy_compose_diag"]
         _beta_a = float(
@@ -587,6 +596,11 @@ def _run_portfolio_numba_block(
                     )
                 aligned["_membership_mask_logged"] = True
     aligned["target_weights"] = tw_blk
+    _path_diag = aligned.get("_strategy_signal_path_diag")
+    if isinstance(_path_diag, dict):
+        _path_diag["merge_nz"] = float(
+            np.count_nonzero(np.abs(tw_blk) > 1e-12) / max(tw_blk.size, 1)
+        )
     if bool(params.get("STRATEGY_MODE", False)):
         should_log_weight = (trial_number is not None and int(trial_number) < 5) or (
             trial_number is None
@@ -825,24 +839,47 @@ def _evaluate_awf_phase_d_aggregate(
         if _trial_num_leg is not None and _trial_num_leg < 5:
             _b_bars_leg = max(1, leg_range[1] - leg_range[0])
             _xs_l_leg = aligned.get("xs_score_long")
+            _xs_s_leg = aligned.get("xs_score_short")
             _tw_nz = 0.0
-            if _xs_l_leg is not None:
+            if _xs_l_leg is not None and _xs_s_leg is not None:
+                _xs_l_arr = np.asarray(_xs_l_leg, dtype=np.float64)
+                _xs_s_arr = np.asarray(_xs_s_leg, dtype=np.float64)
+                _tw_nz = float(
+                    np.count_nonzero(
+                        (np.abs(_xs_l_arr) > 1e-12) | (np.abs(_xs_s_arr) > 1e-12)
+                    )
+                    / max(_xs_l_arr.size, 1)
+                )
+            elif _xs_l_leg is not None:
                 _xs_arr = np.asarray(_xs_l_leg, dtype=np.float64)
                 _tw_nz = float(np.count_nonzero(np.abs(_xs_arr) > 1e-12) / max(_xs_arr.size, 1))
             _n_long_leg = int(np.sum(b_trades_raw[:, 3] == 1.0)) if n_tr > 0 else 0
             _n_short_leg = int(np.sum(b_trades_raw[:, 3] == -1.0)) if n_tr > 0 else 0
+            _path_diag_leg = aligned.get("_strategy_signal_path_diag")
+            _alpha_nz = (
+                float(_path_diag_leg.get("alpha_nz", 0.0))
+                if isinstance(_path_diag_leg, dict)
+                else 0.0
+            )
+            _merge_nz = (
+                float(_path_diag_leg.get("merge_nz", 0.0))
+                if isinstance(_path_diag_leg, dict)
+                else 0.0
+            )
             _logger.info(
-                "[LEG] trial=%d leg=%d range=(%d,%d) bars=%d"
-                " trades=%d long=%d short=%d tw_nz=%.4f",
+                "[STRAT-PATH] trial=%d leg=%d range=(%d,%d) bars=%d"
+                " alpha_nz=%.4f merge_nz=%.4f xs_nz=%.4f trades=%d long=%d short=%d",
                 _trial_num_leg,
                 leg_idx,
                 leg_range[0],
                 leg_range[1],
                 _b_bars_leg,
+                _alpha_nz,
+                _merge_nz,
+                _tw_nz,
                 n_tr,
                 _n_long_leg,
                 _n_short_leg,
-                _tw_nz,
             )
 
         if not first_leg_done:
