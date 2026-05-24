@@ -468,21 +468,6 @@ def run_final_oos_evaluation(
     gate_ok, _gf_codes = evaluate_research_gates(_gate_inp)
     gate_failures = list(_gf_codes)
     
-    # Custom Gates
-    if bool(OPT_FUTURES_CONFIG.get("FUTURES_STEP2_REGIME_DEPLOY_ENABLED", False)):
-        _chop_loss = float(champion_awf_diag.get("awf_chop_loss_share", 0.0))
-        _chop_trade = float(champion_awf_diag.get("awf_chop_trade_share", 0.0))
-        _flip_proxy = float(champion_awf_diag.get("awf_flip_rate_proxy", 0.0))
-        if _chop_loss > float(OPT_FUTURES_CONFIG.get("FUTURES_STEP2_CHOP_LOSS_SHARE_MAX", 0.60)):
-            gate_failures.append("STEP2_CHOP_HEAVY_LOSS")
-            gate_ok = False
-        if _chop_trade > float(OPT_FUTURES_CONFIG.get("FUTURES_STEP2_CHOP_TRADE_SHARE_MAX", 0.70)):
-            gate_failures.append("STEP2_CHOP_HEAVY_TRADE")
-            gate_ok = False
-        if _flip_proxy > float(OPT_FUTURES_CONFIG.get("FUTURES_STEP2_FLIP_RATE_PROXY_MAX", 0.75)):
-            gate_failures.append("STEP2_HIGH_FLIP_PROXY")
-            gate_ok = False
-
     if bool(OPT_FUTURES_CONFIG.get("FUTURES_STEP4_DEPLOYABILITY_ENABLED", False)):
         _step4_chop_trade_max = float(
             OPT_FUTURES_CONFIG.get("FUTURES_STEP4_CHOP_TRADE_SHARE_MAX", 0.70)
@@ -673,7 +658,6 @@ def run_final_oos_evaluation(
         gate_status=_verdict,
         pbo_obs=pbo_obs,
         dsr_obs=dsr_obs,
-        hmm_damp_tail=safe_float(best_trial.user_attrs.get("hmm_execution_damp_tail_capture"))
     )
     print_dual_audit_dashboard(new_m, champ_m, _verdict)
 

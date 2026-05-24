@@ -13,7 +13,6 @@ from src.domain.futures.optimization.workflow import (
     suggest_signal_params,
 )
 from src.domain.futures.portfolio.portfolio_optimizer import (
-    finalize_strategy_portfolio_params,
     load_portfolio_policy_config,
 )
 
@@ -195,10 +194,6 @@ def _baseline_ml_out_dict_for_coordinate(policy: Any) -> dict[str, Any]:
             OPT_FUTURES_CONFIG.get("FUTURES_CRISIS_LONG_MAG_SUPPRESS", 1.0)
         ),
         "BETA_ALPHA": float(fc.get("FUTURES_DEFAULT_BETA_ALPHA", 1.0)),
-        "BETA_REGIME_BULL": float(fc.get("FUTURES_DEFAULT_BETA_REGIME_BULL", 1.0)),
-        "BETA_REGIME_BEAR": float(fc.get("FUTURES_DEFAULT_BETA_REGIME_BEAR", 0.25)),
-        "BETA_REGIME_CRISIS": float(fc.get("FUTURES_DEFAULT_BETA_REGIME_CRISIS", 0.5)),
-        "BETA_REGIME_CHOP": float(fc.get("FUTURES_DEFAULT_BETA_REGIME_CHOP", 0.25)),
         "EV_HURDLE_BPS": float(fc.get("FUTURES_DEFAULT_EV_HURDLE_BPS", 5.0)),
         "SLIPPAGE_BPS_BUFFER_MULT": float(fc.get("SLIPPAGE_BPS_BUFFER_MULT", 1.0)),
         "TIME_BARRIER_H": float(fc.get("FUTURES_DEFAULT_TIME_BARRIER_H", 0.0)),
@@ -220,8 +215,6 @@ def _suggest_ml_joint_nsga2(trial: optuna.Trial, ctx: MLPhaseDContext) -> dict[s
     baseline = _baseline_ml_out_dict_for_coordinate(policy)
     baseline_core = {
         "BETA_ALPHA": float(baseline.get("BETA_ALPHA", 1.0)),
-        "BETA_REGIME_BEAR": float(baseline.get("BETA_REGIME_BEAR", 0.25)),
-        "BETA_REGIME_CHOP": float(baseline.get("BETA_REGIME_CHOP", 0.25)),
         "K_LONG": int(baseline.get("K_LONG", 2)),
         "K_SHORT": int(baseline.get("K_SHORT", 2)),
         "REBALANCE_BARS": int(baseline.get("REBALANCE_BARS", 6)),
