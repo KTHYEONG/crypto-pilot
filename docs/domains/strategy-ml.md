@@ -179,6 +179,11 @@ ev[i]            = q50[i] * (1.0 - penalty_term[i])
 - **Score Split:** `rank_score`는 상대 순위 품질(IC/NDCG), `ev_score`는 절대 실행 가능성(cost wall 통과) 검증에 사용.
 - **No Repeated Centering:** `ev_score`는 calibrator 출력 이후 추가 group-centering을 수행하지 않는다.
 
+### 5.10 Virtual OOS Refit Normalization Consistency
+- `build_ml_strategy_alpha`의 virtual OOS fill(refit) fold는 regular fold의 마지막 정규화 상태를 재사용하지 않는다.
+- virtual fold의 `train` 구간(`[v_train_start, v_train_end)`)에서 `fit_robust_bounds` 및 train median imputer를 다시 피팅한다.
+- 해당 virtual-train 기반 정규화를 virtual `train/valid/test` 전 경로에 동일 적용하여 fold 간 normalization leakage를 방지한다.
+
 ---
 
 ## 6. Examples
