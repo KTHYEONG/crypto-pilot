@@ -75,11 +75,28 @@ def passes_ic_gate(
     min_t_stat: float = 2.0,
     min_hit_ratio: float = 0.45,
 ) -> bool:
-    """Return True when IC gate thresholds are satisfied."""
+    """Return True when IC gate thresholds are satisfied.
+
+    Accepts both ic_summary() output (keys: mean_ic, t_stat, hit_ratio)
+    and build_quality_report() output (keys: spearman_rank_ic, ic_t_stat, ic_hit_ratio).
+
+    Args:
+        summary: IC statistics dict from ic_summary() or build_quality_report().
+        min_mean_ic: Minimum mean IC threshold.
+        min_t_stat: Minimum t-statistic threshold.
+        min_hit_ratio: Minimum hit ratio threshold.
+
+    Returns:
+        True when all thresholds are satisfied.
+
+    """
+    mean_ic = summary.get("mean_ic", summary.get("spearman_rank_ic", 0.0))
+    t_stat = summary.get("t_stat", summary.get("ic_t_stat", 0.0))
+    hit_ratio = summary.get("hit_ratio", summary.get("ic_hit_ratio", 0.0))
     return bool(
-        summary["mean_ic"] >= min_mean_ic
-        and summary["t_stat"] >= min_t_stat
-        and summary["hit_ratio"] >= min_hit_ratio
+        mean_ic >= min_mean_ic
+        and t_stat >= min_t_stat
+        and hit_ratio >= min_hit_ratio
     )
 
 
@@ -150,6 +167,10 @@ def build_quality_report(
         "ranker_valid_ndcg_at_5": ndcg_proxy_at_k(score_2d, relevance_2d, k=5),
         "spearman_rank_ic": ic_stats["mean_ic"],
         "fold_oos_ic": ic_stats["mean_ic"],
+        "ic_icir": ic_stats["icir"],
+        "ic_t_stat": ic_stats["t_stat"],
+        "ic_hit_ratio": ic_stats["hit_ratio"],
+        "ic_n_obs": ic_stats["n_obs"],
     }
     if q10_2d is not None and q50_2d is not None and q90_2d is not None:
         hit_mask = np.isfinite(q50_2d) & np.isfinite(signed_ret_2d)
