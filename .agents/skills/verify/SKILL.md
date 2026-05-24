@@ -31,26 +31,12 @@ Based on:
 ```md
 <verify>
 
-## Commands Run
-- ...
-
-## Passed
-- ...
-
-## Failed
-- ...
-
-## Skipped
-- item: reason
-
-## Result
-pass | fail | partial
-
-## Remaining Risks
-- ...
-
-## Next Step
-review | fix | broader verification | complete
+### ✅ Verification: [PASS / FAIL / PARTIAL]
+- **Commands:** `[Cmds Run]`
+- **Passed:** `[Items]`
+- **Failed/Skipped:** `[Items]`
+- **Risks:** [Remaining Risks]
+- **Next:** `[Next Step]`
 
 </verify>
 ```

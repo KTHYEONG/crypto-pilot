@@ -181,5 +181,5 @@ def passes_quality_gate(report: dict[str, float]) -> bool:
         report.get("feature_finite_ratio", 0.0) >= 0.990
         and report.get("label_valid_ratio", 0.0) > 0.0
         and report.get("ranker_valid_ndcg_at_5", 0.0) > 0.0
-        and report.get("spearman_rank_ic", -1.0) >= -0.05
+        and report.get("spearman_rank_ic", -1.0) >= 0.0
     )

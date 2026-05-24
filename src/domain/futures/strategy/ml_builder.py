@@ -209,12 +209,14 @@ def build_ml_strategy_alpha(
             sl = slice(offset, offset + g_int)
             ev_test[sl] -= np.mean(ev_test[sl], dtype=np.float32)
             
-            # [ML-UPGRADE] Dynamic Cost Barrier Gate 적용
-            # 실질 round-trip 거래 비용 임계값을 넘지 못하는 시그널 마스킹
+            # [ML-UPGRADE] Dynamic Cost Barrier Gate 적용 (Soft Cost-Shrinkage)
+            # 실질 round-trip 거래 비용 임계값을 넘는 분만 매끄럽게 남김
             from src.core.settings import FILLS_PER_ROUND_TRIP
             fee_slippage = ml_cfg.fee_bps + ml_cfg.slippage_bps
             barrier = np.float32(FILLS_PER_ROUND_TRIP * fee_slippage / 10000.0)
-            ev_test[sl] = np.where(np.abs(ev_test[sl]) >= barrier, ev_test[sl], np.float32(0.0))
+            ev_test[sl] = np.sign(ev_test[sl]) * np.maximum(
+                np.abs(ev_test[sl]) - barrier, np.float32(0.0)
+            )
             
             offset += g_int
         fold_alpha = infer_fold_alpha(
@@ -382,6 +384,22 @@ def build_ml_strategy_alpha_anchored(
         split="train",
         min_group_size=ml_cfg.min_group_size,
     )
+    # [ML-UPGRADE] Thin-Data Guard (Dynamic Regularization)
+    n_train_rows = int(train.X.shape[0])
+    if n_train_rows < 20_000:
+        ml_cfg = replace(
+            ml_cfg,
+            ranker_n_estimators=min(ml_cfg.ranker_n_estimators, 400),
+            num_leaves=min(ml_cfg.num_leaves, 15),
+            min_data_in_leaf=max(ml_cfg.min_data_in_leaf, 60),
+        )
+        _logger.info(
+            "[ML-ANCHORED] Thin-data guard active: rows=%d -> trees=%d, leaves=%d, min_leaf=%d",
+            n_train_rows,
+            ml_cfg.ranker_n_estimators,
+            ml_cfg.num_leaves,
+            ml_cfg.min_data_in_leaf,
+        )
     valid = build_long_matrix(
         features=normalized_features,
         labels=labels,
@@ -439,10 +457,13 @@ def build_ml_strategy_alpha_anchored(
             continue
         sl = slice(offset, offset + g_int)
         ev_test[sl] -= np.mean(ev_test[sl], dtype=np.float32)
+        # [ML-UPGRADE] Dynamic Cost Barrier Gate 적용 (Soft Cost-Shrinkage)
         from src.core.settings import FILLS_PER_ROUND_TRIP
         fee_slippage = ml_cfg.fee_bps + ml_cfg.slippage_bps
         barrier = np.float32(FILLS_PER_ROUND_TRIP * fee_slippage / 10000.0)
-        ev_test[sl] = np.where(np.abs(ev_test[sl]) >= barrier, ev_test[sl], np.float32(0.0))
+        ev_test[sl] = np.sign(ev_test[sl]) * np.maximum(
+            np.abs(ev_test[sl]) - barrier, np.float32(0.0)
+        )
         offset += g_int
 
     fold_alpha = infer_fold_alpha(
