@@ -3,7 +3,10 @@ from __future__ import annotations
 import argparse
 import logging
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from src.domain.futures.strategy.config import StrategyConfig
 
 import optuna
 from optuna.trial import FrozenTrial, TrialState
@@ -45,6 +48,8 @@ class OptimizationRequest:
     seed: int = 42
     resume: bool = False
     strategy_mode: bool = False
+    # strategy_cfg: strategy-smoke/strategy 모드에서 AWF leg refit에 사용
+    strategy_cfg: StrategyConfig | None = None
     n_workers_b: int = 1
     enqueue_seeds: list[dict[str, Any]] | None = None
     target_seeds: list[int] | None = None
@@ -109,6 +114,7 @@ def prepare_optimization_context(request: OptimizationRequest) -> MLPhaseDContex
         ml_pipeline_workers=request.ml_n_jobs,
         run_id=request.run_id,
         strategy_mode=request.strategy_mode,
+        strategy_cfg=request.strategy_cfg,
     )
     precompute_ml_optimization_context(base_ctx)
     return base_ctx

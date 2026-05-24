@@ -60,6 +60,7 @@ from src.domain.futures.optimization.validation import (
     awf_pos_frac_to_pseudo_pbo,
     resolve_adjusted_gates,
 )
+from src.domain.futures.strategy.config import StrategyConfig
 from src.domain.futures.strategy_runtime.bridge import merge_ml_output_into_is_and_oos
 from src.domain.futures.universe.membership import inject_membership_masks_into_maps
 from src.domain.futures.universe.storage import run_historical_sync
@@ -402,7 +403,8 @@ def _run_optimization_stage(
     )
     import os
     physical_cores = max(1, (os.cpu_count() or 4) // 2)
-    safe_workers_b = min(4, physical_cores)
+    # Target 6 workers matching high-performance P-cores (e.g. i5-13600K)
+    safe_workers_b = min(6, physical_cores)
 
     opt_req = OptimizationRequest(
         data_maps=data_stage.data_maps,
@@ -420,6 +422,11 @@ def _run_optimization_stage(
         seed=seed,
         resume=resume,
         strategy_mode=(run_config.strategy is not None),
+        strategy_cfg=(
+            StrategyConfig(name=run_config.strategy)
+            if run_config.strategy is not None
+            else None
+        ),
         n_trials_a1=max(1, int(run_config.trials * 0.5)),
         n_trials_a2=max(1, int(run_config.trials * 0.2)),
         n_trials_b=max(1, int(run_config.trials * 0.3)),

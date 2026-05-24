@@ -339,6 +339,13 @@ def resolve_futures_parallel_policy(symbol_count: int) -> int:
 
 def optimize_worker(s_name: str, s_url: str, chunk_size: int):
     """Worker function for parallel Optuna optimization using global context."""
+    import os
+    try:
+        # Lower CPU priority so that optimization does not lag host gaming or chrome activities
+        os.nice(10)
+    except Exception:
+        pass
+
     global _GLOBAL_BASE_CTX
     if _GLOBAL_BASE_CTX is None:
         raise RuntimeError("Worker started without _GLOBAL_BASE_CTX")
