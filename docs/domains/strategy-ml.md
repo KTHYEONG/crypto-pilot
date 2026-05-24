@@ -66,6 +66,9 @@ last_verified: 2026-05-24
 ### 5.2 Double-Weighting System
 무작위 노이즈 신호 배제를 위해 리턴 절대값($|y_{ev}|$)에 비례하여 샘플 가중치를 동적으로 부여합니다.
 $$\text{sample\_weight} = \text{original\_weight} \times (1.0 + 2.0 \times |y_{ev}|)$$
+- `original_weight`: 유동성 기반 가중치 (`clip(log1p(volume), 0.25, 2.0)`).
+- `y_ev`: `signed_net_ret` (gross alpha 라벨; 비용 차감 없음, B1 유지).
+- `eligible_mask=False` 구간은 `sample_weight=0.0`으로 유지.
 
 ### 5.3 Quantile EV Calibration
 - **Quantile Loss:** `q10`, `q50`, `q90` 분위수 예측기를 동시 학습.
@@ -95,7 +98,7 @@ $$\text{sample\_weight} = \text{original\_weight} \times (1.0 + 2.0 \times |y_{e
 **Benefit:** 시장 공통 인수를 제거하여 순수 특정 위험 알파만 모델에 노출, 신호 강도 향상
 
 ### 5.6 Track A - Diagnostic Logging
-`src/domain/futures/strategy/ml_builder.py` 함수 `build_ml_strategy_alpha()` 내에서 다음 구조화된 로그를 출력하여 신호 품질을 실시간 모니터링합니다.
+저노이즈 경로 추적을 위해 소수 trial에서만 compact 로그를 출력합니다.
 
 **[ML-ALPHA-IC]**: 크로스섹션 IC(Information Coefficient) 기반 신호 유효성 판정
 ```
@@ -119,6 +122,15 @@ $$\text{sample\_weight} = \text{original\_weight} \times (1.0 + 2.0 \times |y_{e
   - `OK`: alpha_p95 > floor
   - `WARN`: floor/2 < alpha_p95 ≤ floor (한계 신호, 주의 필요)
   - `FAIL`: alpha_p95 ≤ floor/2 (실패, 개선 필요)
+
+**[STRAT-PATH]**: 실행 가능한 신호 경로 연결 진단 (`objectives.py`, trial<5, leg 단위)
+```
+[STRAT-PATH] trial=1 leg=0 range=(0,720) bars=720 alpha_nz=0.8123 merge_nz=0.1450 xs_nz=0.2321 trades=84 long=43 short=41
+```
+- `alpha_nz`: alpha(`alpha_long/short`) 비영 비율
+- `merge_nz`: membership/entry-block 반영 후 `target_weights` 비영 비율
+- `xs_nz`: `xs_score_long/short` union 비영 비율
+- `trades/long/short`: 실제 백테스트 체결 결과 기반 카운트 (추정치 아님)
 
 ### 5.7 B4 - IC Quality Gate
 신호 품질 게이트: `src/domain/futures/strategy/diagnostics.py` 함수 `passes_ic_gate()` 및 `ml_builder.py` 적용점
