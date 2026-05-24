@@ -10,7 +10,6 @@ from numpy.typing import NDArray
 
 from src.domain.futures.strategy.config import StrategyMLConfig
 from src.domain.futures.strategy.contracts import LongMatrixDataset
-from src.domain.futures.strategy.ranker import _cs_demean
 
 
 @dataclass(slots=True, frozen=True)
@@ -83,7 +82,7 @@ def fit_quantile_calibrators(
     rank_score_train: np.ndarray | None = None,
     rank_score_valid: np.ndarray | None = None,
 ) -> CalibratorFitResult:
-    """Train q10/q50/q90 models on CS-demeaned y_ev to prevent market-beta saturation."""
+    """Train q10/q50/q90 models on absolute executable EV target."""
     if train.X.shape[0] == 0:
         raise RuntimeError("calibrator train dataset is empty")
     if rank_score_train is None:
@@ -94,10 +93,9 @@ def fit_quantile_calibrators(
         raise ValueError("rank_score_train length mismatch")
     if rank_score_valid.shape[0] != valid.X.shape[0]:
         raise ValueError("rank_score_valid length mismatch")
-    # CS-demean y_ev per timestep group so calibrator learns relative EV,
-    # not absolute market direction (raw y_ev saturates clip during bear phases).
-    y_train = _cs_demean(train.y_ev, train.group)
-    y_valid = _cs_demean(valid.y_ev, valid.group) if valid.X.shape[0] > 0 else valid.y_ev
+    # Keep raw y_ev for calibrator so EV magnitude remains executable against cost wall.
+    y_train = train.y_ev
+    y_valid = valid.y_ev
     x_train_np = np.column_stack([train.X, rank_score_train])
     x_train_names = (*train.feature_names, "rank_score")
     x_train = _as_feature_frame(x_train_np, x_train_names)
@@ -168,18 +166,23 @@ def compute_conservative_ev(
     downside = np.maximum(q50f - q10f, np.float32(0.0))
     upside = np.maximum(q90f - q50f, np.float32(0.0))
     
-    # [ML-UPGRADE] 동적 불확실성(q90 - q10)을 산출하여 자산별 상대적 불확실성에 비례하는 패널티 부과
+    # 자산별 상대적 불확실성 비례 페널티; OOS regime shift 시 폭주 방지를 위해 2x 상한 적용
     uncertainty = np.maximum(q90f - q10f, np.float32(1e-8))
     med_unc = np.median(uncertainty) if uncertainty.size > 0 else np.float32(1e-4)
     lam = np.float32(cfg.lambda_tail)
-    lam_dynamic = lam * (uncertainty / np.maximum(med_unc, np.float32(1e-8)))
+    lam_dynamic = np.clip(
+        lam * (uncertainty / np.maximum(med_unc, np.float32(1e-8))),
+        np.float32(0.0),
+        lam * np.float32(2.0),
+    )
     
     # Sign-symmetric: penalize the tail risk that works against each position
     is_long = q50f >= np.float32(0.0)
     ev = np.where(is_long, q50f - lam_dynamic * downside, q50f + lam_dynamic * upside)
     ev = np.asarray(ev, dtype=np.float32)
     clip = np.float32(cfg.alpha_clip_bps / 10000.0)
-    return np.clip(ev, -clip, clip).reshape(-1).copy()
+    clipped = np.clip(ev, -clip, clip)
+    return np.asarray(clipped, dtype=np.float32).reshape(-1).copy()
 
 
 def predict_conservative_ev(
