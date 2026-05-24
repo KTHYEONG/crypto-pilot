@@ -26,8 +26,8 @@ last_verified: 2026-05-24
 |---|---|
 | `ml_builder.py` | ML feature-label-train-infer 오케스트레이션 |
 | `features.py` | PIT-safe 피처 텐서(CS-Sharpe 등) 생성 |
-| `labels.py` | T+1 체결 기준 마찰 비용이 제외된 Gross Alpha 레이블 생성 |
-| `ranker.py` | CS-demeaned GBT Regressor 학습 및 스코어 추론 |
+| `labels.py` | T+1 체결 기준 fee/slippage 제외 + funding 반영 레이블 생성 |
+| `ranker.py` | CS-demeaned LightGBM Regressor 학습 및 상대 스코어 추론 |
 | `calibrator.py` | 분위수 기반 동적 불확실성 조정 및 EV 보정 |
 
 ---
@@ -72,7 +72,23 @@ $$\text{sample\_weight} = \text{original\_weight} \times (1.0 + 2.0 \times |y_{e
 
 ### 5.3 Quantile EV Calibration
 - **Quantile Loss:** `q10`, `q50`, `q90` 분위수 예측기를 동시 학습.
+- **Absolute EV Target:** calibrator는 `CS-demeaned` 타깃이 아닌 raw executable EV(`y_ev`)를 학습.
 - **Uncertainty Adjustment:** 예측 불확실성 폭($q_{90} - q_{10}$)에 따라 알파 강도를 조절하여 꼬리 위험 방어.
+
+**Conservative EV 수식 (`compute_conservative_ev`):**
+```
+uncertainty[i]  = max(q90[i] - q10[i], ε)
+med_unc         = median(uncertainty)
+lam_dynamic[i]  = clip(lambda_tail * uncertainty[i] / med_unc, 0, lambda_tail * 2.0)
+
+ev[i] = q50[i] - lam_dynamic[i] * max(q50[i] - q10[i], 0)   # long  (q50 ≥ 0)
+ev[i] = q50[i] + lam_dynamic[i] * max(q90[i] - q50[i], 0)   # short (q50 < 0)
+```
+- **`lambda_tail`:** 기본값 `0.10` (범위: 0.05–0.30). 꼬리 위험 페널티 강도.
+- **`lam_dynamic` 상한 캡 (`2 × lambda_tail`):** OOS regime shift로 인한 고변동성 구간에서 페널티 폭주를 방지.
+- **Sign-symmetric 설계:** long/short 각 방향의 꼬리 위험만 페널티로 부과하여 CS-demean 편향 방어.
+
+> **적용 변경 (2026-05-24):** EV 출력 경로의 fold-level group centering을 제거하여 absolute EV 크기 소거를 방지.
 
 ### 5.4 Output Contract (`alpha_panel`)
 - **Index:** `MultiIndex(datetime, symbol)`
@@ -80,7 +96,8 @@ $$\text{sample\_weight} = \text{original\_weight} \times (1.0 + 2.0 \times |y_{e
 - **Zero-filling:** 미매칭 구간은 반드시 `0.0`으로 치환하여 계좌 오염 방지.
 
 ### 5.5 B2 - Beta-Residualized Labels
-`src/domain/futures/strategy/labels.py`의 `build_label_panel()`은 수익률에서 시장 베타 성분을 제거하여 특정 종목 고유의 알파를 분리합니다.
+`src/domain/futures/strategy/labels.py`의 `build_label_panel()`은 수익률에서 시장 베타 성분을 제거하여 특정 종목 고유의 알파를 분리합니다.  
+라벨 계약은 **fee/slippage 제외 + funding 반영**입니다.
 
 **Core Algorithm:**
 - **_compute_trailing_beta():** 각 종목별로 120-bar 롤링 OLS 회귀를 통해 등가중 크로스섹션 시장 수익률에 대한 베타 추정
@@ -96,6 +113,10 @@ $$\text{sample\_weight} = \text{original\_weight} \times (1.0 + 2.0 \times |y_{e
   ```
   
 **Benefit:** 시장 공통 인수를 제거하여 순수 특정 위험 알파만 모델에 노출, 신호 강도 향상
+
+**Cost Contract:**
+- 라벨은 fee/slippage를 차감하지 않는다.
+- objective friction/hurdle 레이어에서 fee+slippage+EV_HURDLE를 한 번만 반영한다.
 
 ### 5.6 Track A - Diagnostic Logging
 저노이즈 경로 추적을 위해 소수 trial에서만 compact 로그를 출력합니다.
@@ -148,6 +169,12 @@ $$\text{sample\_weight} = \text{original\_weight} \times (1.0 + 2.0 \times |y_{e
 과도하게 높았던 진입 장벽을 하향하여 모델의 유효한 상대적 랭크 예측(Rank IC ~0.027)이 정상 거래로 실현되도록 보정합니다.
 - **최적화 탐색공간 하향:** `EV_HURDLE_BPS` 튜닝 범위를 `[5.0, 100.0]`에서 `[3.0, 20.0]`으로 조정하여 극단적인 신호 소거를 차단.
 - **기본 허들 완화:** 기본값 `40.0 bps`를 `10.0 bps`로 경감하여 OOS에서의 `oos_zero_trades=0` 달성 및 유효 거래 빈도 확보.
+
+### 5.9 Model Contract Alignment (Approved ADR)
+- **Compatibility Name:** 전략 식별자 `ml_lambdamart_v1`는 호환성 목적으로 유지.
+- **Implementation Reality:** 실제 학습기는 `CS-demeaned LightGBM regression` + quantile EV calibrator.
+- **Score Split:** `rank_score`는 상대 순위 품질(IC/NDCG), `ev_score`는 절대 실행 가능성(cost wall 통과) 검증에 사용.
+- **No Repeated Centering:** `ev_score`는 calibrator 출력 이후 추가 group-centering을 수행하지 않는다.
 
 ---
 

@@ -138,7 +138,7 @@ class StrategyConfig:
 
 @dataclass(slots=True, frozen=True)
 class StrategyMLConfig:
-    """ML strategy configuration for LambdaMART + quantile calibrator."""
+    """ML strategy configuration for compatibility name + quantile calibrator."""
 
     name: Literal["ml_lambdamart_v1"] = "ml_lambdamart_v1"
     timeframe: str = "4h"
@@ -153,7 +153,7 @@ class StrategyMLConfig:
     embargo_bars: int = 1
     max_features: int = 64
     alpha_clip_bps: float = 75.0
-    lambda_tail: float = 0.25
+    lambda_tail: float = 0.10
     ranker_n_estimators: int = 800
     calibrator_n_estimators: int = 600
     learning_rate: float = 0.03
