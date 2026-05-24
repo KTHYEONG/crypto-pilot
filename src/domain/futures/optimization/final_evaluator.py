@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import time
 from pathlib import Path
 from typing import Any
 
@@ -16,12 +17,7 @@ from src.core.settings import (
 from src.domain.futures.optimization.candidate_selector import (
     sanitize_metric_map,
 )
-from src.domain.futures.optimization.observability.dashboard import (
-    log_oos_regime_attribution,
-    print_dual_audit_dashboard,
-    print_mechanical_dashboard,
-    safe_float,
-)
+from src.domain.futures.optimization.common import EMBARGO_BARS
 from src.domain.futures.optimization.evaluator import (
     calc_mdd_duration,
     calc_mdd_from_equity,
@@ -31,13 +27,18 @@ from src.domain.futures.optimization.evaluator import (
     perform_online_capital_allocation,
     run_oos_margin_shared_portfolio,
 )
+from src.domain.futures.optimization.ml_context import MLPhaseDContext
+from src.domain.futures.optimization.observability.dashboard import (
+    log_oos_regime_attribution,
+    print_dual_audit_dashboard,
+    print_mechanical_dashboard,
+    safe_float,
+)
 from src.domain.futures.optimization.opt_config import OPT_FUTURES_CONFIG
 from src.domain.futures.optimization.opt_data_utils import (
     compute_oos_regime_attribution,
     compute_regime_drift,
 )
-from src.domain.futures.optimization.common import EMBARGO_BARS
-from src.domain.futures.optimization.ml_context import MLPhaseDContext
 from src.domain.futures.optimization.validation import resolve_adjusted_gates
 from src.domain.futures.portfolio.portfolio_optimizer import (
     finalize_strategy_portfolio_params,
@@ -177,6 +178,8 @@ def run_final_oos_evaluation(
     # REDUNDANT HEADER REMOVED (Step header is handled by the overall orchestration or the dashboard summary)
     
     policy_cfg = load_portfolio_policy_config(OPT_FUTURES_CONFIG)
+    params = dict(params)
+    params["STRATEGY_MODE"] = True
 
     _logger.debug("  [ENSEMBLE EVALUATION]")
     selected_ensemble_results = _build_top5_ensemble_results(ensemble_results)
@@ -190,26 +193,96 @@ def run_final_oos_evaluation(
             len(ensemble_results),
         )
 
+    from src.domain.futures.optimization.samplers import build_ml_phase_d_params
+    from src.domain.futures.strategy_runtime.bridge import copy_data_maps_tf_clone, merge_ml_output_into_data_maps, MLPipelineOutput
+    from src.domain.futures.strategy.builder import build_strategy_alpha
+    from src.domain.futures.strategy import StrategyConfig
+
     ensemble_curves = []
     ensemble_ports = []
+    ensemble_total_t0 = time.perf_counter()
+    total_build_alpha_sec = 0.0
+    total_merge_sec = 0.0
+    total_oos_eval_sec = 0.0
     for i, res in enumerate(selected_ensemble_results):
-        m_params = finalize_strategy_portfolio_params(res["params"], policy_cfg)
+        member_t0 = time.perf_counter()
+        m_params = build_ml_phase_d_params(dict(res["params"]), args.tf)
+        m_params["STRATEGY_MODE"] = True
+        m_params = finalize_strategy_portfolio_params(m_params, policy_cfg)
+        
+        # 1) Clone OOS maps to avoid cross-symbol / cross-member reference sharing
+        m_oos_maps = copy_data_maps_tf_clone(oos_data_maps, valid_symbols, args.tf)
+        
+        # 2) Dynamically reconstruct completed alpha panel containing Virtual Refit Fold
+        m_strat_cfg = StrategyConfig(
+            name=ml_ctx.strategy_cfg.name if (ml_ctx and getattr(ml_ctx, "strategy_cfg", None)) else "ml_lambdamart_v1",
+            ml=ml_ctx.strategy_cfg.ml if (ml_ctx and getattr(ml_ctx, "strategy_cfg", None)) else None
+        )
+        if m_strat_cfg.ml is not None:
+            # Update strategy configuration state with current member's tuned parameters
+            for k, v in res["params"].items():
+                if hasattr(m_strat_cfg.ml, k):
+                    setattr(m_strat_cfg.ml, k, v)
+        
+        # Build the completed alpha panel (including OOS Virtual Refit filling!)
+        t_build_alpha = time.perf_counter()
+        m_alpha_panel = build_strategy_alpha(
+            data_maps=oos_data_maps, # Pass full data maps containing complete history (IS + OOS)
+            symbols=valid_symbols,
+            tf=args.tf,
+            cfg=m_strat_cfg,
+        )
+        build_alpha_sec = time.perf_counter() - t_build_alpha
+        total_build_alpha_sec += build_alpha_sec
+        
+        # 3) Merge the newly completed alpha panel into the cloned OOS maps
+        t_merge = time.perf_counter()
+        m_ml_out = MLPipelineOutput(alpha_panel=m_alpha_panel)
+        merge_ml_output_into_data_maps(m_ml_out, m_oos_maps, valid_symbols, args.tf, log_tag=f"ensemble_m{i+1}")
+        merge_sec = time.perf_counter() - t_merge
+        total_merge_sec += merge_sec
+        
+        t_oos_eval = time.perf_counter()
         m_port = run_oos_margin_shared_portfolio(
             valid_symbols,
             args.tf,
             m_params,
-            oos_data_maps,
+            m_oos_maps,
             cache_root=FUTURES_CACHE_DIR,
             return_signal_dfs=(i == 0),
         )
+        oos_eval_sec = time.perf_counter() - t_oos_eval
+        total_oos_eval_sec += oos_eval_sec
         ensemble_ports.append(m_port)
         ensemble_curves.append(m_port["equity_curve"])
         m_cagr = m_port.get("cagr_pct", 0.0)
         m_mdd = m_port.get("mdd_pct", 0.0)
-        _logger.debug(
-            f"    Member {i+1}/{len(selected_ensemble_results)}: CAGR={m_cagr:7.2f}% | "
-            f"MDD={m_mdd:6.2f}% | Trial={res['trial'].number}"
+        m_trades = m_port.get("total_trades", m_port.get("trade_count", 0))
+        _logger.info(
+            f" [ENSEMBLE-MEMBER] Member {i+1}/{len(selected_ensemble_results)}: "
+            f"CAGR={m_cagr:7.2f}% | MDD={m_mdd:6.2f}% | Trades={m_trades} | Trial={res['trial'].number}"
         )
+        _logger.info(
+            " [ENSEMBLE-PROF] member=%d/%d build_alpha=%.2fs merge=%.2fs oos_eval=%.2fs total=%.2fs",
+            i + 1,
+            len(selected_ensemble_results),
+            build_alpha_sec,
+            merge_sec,
+            oos_eval_sec,
+            time.perf_counter() - member_t0,
+        )
+
+    ensemble_total_sec = time.perf_counter() - ensemble_total_t0
+    member_count = max(1, len(selected_ensemble_results))
+    _logger.info(
+        " [ENSEMBLE-PROF] summary members=%d total=%.2fs avg_member=%.2fs alpha_build_total=%.2fs merge_total=%.2fs oos_eval_total=%.2fs",
+        len(selected_ensemble_results),
+        ensemble_total_sec,
+        ensemble_total_sec / float(member_count),
+        total_build_alpha_sec,
+        total_merge_sec,
+        total_oos_eval_sec,
+    )
 
     # Online Capital Allocation (Meta-Strategy)
     meta_window = int(OPT_FUTURES_CONFIG.get("FUTURES_META_ALLOC_WINDOW", 24))

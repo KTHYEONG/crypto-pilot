@@ -505,7 +505,39 @@ def run_oos_margin_shared_portfolio(
         slippage_rate=SLIPPAGE_RATE,
         smart_offset=SMART_ORDER_OFFSET,
     )
+    
+    # === [DIAG-OOS-ENGINE] ===
+    _logger.info(" [DIAG-OOS-ENGINE-START] Params: %s", {k: v for k, v in params.items() if "HURDLE" in k or "BETA" in k or "MODE" in k or "LEVERAGE" in k})
+    if "alpha_long" in aligned_data:
+        al = np.asarray(aligned_data["alpha_long"])
+        ash = np.asarray(aligned_data["alpha_short"])
+        _logger.info(
+            " [DIAG-OOS-ENGINE-ALPHA] raw alpha_long shape=%s, nz: %.4f%%, max: %.6f | alpha_short shape=%s, nz: %.4f%%, max: %.6f",
+            al.shape, np.mean(al != 0.0) * 100.0, np.max(np.abs(al)) if al.size > 0 else 0.0,
+            ash.shape, np.mean(ash != 0.0) * 100.0, np.max(np.abs(ash)) if ash.size > 0 else 0.0
+        )
+    
     trades_df, equity_curve, final_balance, _bt_diag = engine.run()
+    
+    # === [DIAG-OOS-ENGINE-END] ===
+    if "xs_score_long" in aligned_data:
+        xsl = np.asarray(aligned_data["xs_score_long"])
+        xss = np.asarray(aligned_data["xs_score_short"])
+        _logger.info(
+            " [DIAG-OOS-ENGINE-XS] xs_score_long nz: %.4f%%, max: %.6f | xs_score_short nz: %.4f%%, max: %.6f",
+            np.mean(xsl != 0.0) * 100.0, np.max(xsl) if xsl.size > 0 else 0.0,
+            np.mean(xss != 0.0) * 100.0, np.max(xss) if xss.size > 0 else 0.0
+        )
+    if "target_weights" in aligned_data:
+        tw = np.asarray(aligned_data["target_weights"])
+        _logger.info(
+            " [DIAG-OOS-ENGINE-TW] target_weights shape=%s, nz: %.4f%%, max_exposure: %.6f",
+            tw.shape, np.mean(tw != 0.0) * 100.0, np.max(np.abs(tw)) if tw.size > 0 else 0.0
+        )
+    _logger.info(
+        " [DIAG-OOS-ENGINE-RESULT] Trades=%d, final_balance=%.2f",
+        len(trades_df), final_balance
+    )
 
     # Metrics calculation
     hours_per_bar = int(tf.replace("h", "")) if tf.endswith("h") else 4
