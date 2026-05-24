@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date
 from typing import Any
 
 import numpy as np
@@ -40,17 +40,27 @@ def build_membership_mask_bundle(
     dt_ser = pd.to_datetime(datetimes, utc=True, errors="coerce")
     n = len(dt_ser)
     sym_norm = canonical_symbol(symbol)
+    
+    # Normalize timeline keys to their respective quarter starts
+    norm_timeline: dict[date, frozenset[str]] = {}
+    for k, syms in timeline.items():
+        q_start = _quarter_start(k)
+        norm_timeline[q_start] = frozenset(canonical_symbol(s) for s in syms)
 
-    active = np.zeros(n, dtype=np.float64)
-    for q_start in sorted(timeline.keys()):
-        q_end = _quarter_start(q_start + timedelta(days=95))
-        q_symbols = {canonical_symbol(sym) for sym in timeline[q_start]}
-        if sym_norm not in q_symbols:
-            continue
-        mask = (
-            dt_ser >= pd.Timestamp(q_start, tz="UTC")
-        ) & (dt_ser < pd.Timestamp(q_end, tz="UTC"))
-        active[np.asarray(mask, dtype=bool)] = 1.0
+    active_quarters = {q for q, syms in norm_timeline.items() if sym_norm in syms}
+    q_list = np.asarray(list(active_quarters), dtype=object)
+    dti = pd.DatetimeIndex(dt_ser)
+    if dti.tz is not None:
+        dti = dti.tz_localize(None)
+    if dti.isna().any():
+        na_mask = dti.isna()
+        dti_filled = dti.fillna(pd.Timestamp("1970-01-01", tz="UTC"))
+        bar_q_starts = dti_filled.to_period("Q").start_time.date
+        active = np.isin(bar_q_starts, q_list).astype(np.float64)
+        active[na_mask] = 0.0
+    else:
+        bar_q_starts = dti.to_period("Q").start_time.date
+        active = np.isin(bar_q_starts, q_list).astype(np.float64)
 
     active_prev = np.concatenate(([0.0], active[:-1]))
     active_on = (active_prev <= 0.0) & (active > 0.0)
