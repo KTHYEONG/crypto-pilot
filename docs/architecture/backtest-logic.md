@@ -64,6 +64,7 @@ last_verified: 2026-05-24
 7. **Look-ahead 차단:** T 신호는 반드시 T+1 이후의 실행 윈도우에서만 작동.
 8. **NaN/Inf 격리:** 입력 데이터 오염 시 해당 심볼 진입 스킵 및 계좌 보호.
 9. **Determinism:** 동일 조건에서 소수점 오차 없는 완전 동일 결과 출력.
+10. **B1 Canonical Cost Model (Label-Objective Split):** `src/domain/futures/strategy/labels.py`의 `build_label_panel()`은 반드시 GROSS alpha(cost=0.0)를 출력해야 하며, 거래 비용 차감은 정확히 한 번 `src/execution/opt_main_futures.py`의 objectives 마찰층(friction + EV_HURDLE)에서만 발생해야 함. 이중 차감(double-deduction) 방지를 위해 필수 불변식.
 
 ### 5.2 Position Quantization Formula
 ```python
