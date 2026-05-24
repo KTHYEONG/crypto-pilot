@@ -31,6 +31,7 @@ from src.domain.futures.universe.membership import build_membership_mask_bundle
 
 if TYPE_CHECKING:
     from src.domain.futures.optimization.common import SignalCalibrator
+    from src.domain.futures.strategy.config import StrategyConfig
     from src.domain.futures.validation.gates import PurgeBarsRegistry
 
 _logger = logging.getLogger(__name__)
@@ -72,6 +73,8 @@ class MLPhaseDContext:
     # Per-execution identifier for run-level trial filtering in shared Optuna DB.
     run_id: str | None = None
     strategy_mode: bool = False
+    # AWF leg refit 시 ML pipeline에 전달할 전략 설정 (strategy/strategy-smoke 모드 전용)
+    strategy_cfg: StrategyConfig | None = None
     universe_timeline: dict[date, frozenset[str] | set[str]] | None = None
     warmup_bars_required: int = 0
     data_sufficiency_report: dict[str, Any] | None = None
@@ -639,8 +642,14 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
                         hmm_only=False,
                         preloaded_data_maps=ctx.data_maps,
                         seed=ctx.seed,
+                        strategy_cfg=ctx.strategy_cfg,
+                        anchor_end_idx=int(anchor),
+                        target_start_idx=int(test_s),
+                        target_end_idx=int(test_e),
                     )
-                    if not ml_out.meta_feature_frame_by_symbol:
+                    # alpha_panel 기준으로 empty check (meta_feature_frame은 bridge에서 미사용)
+                    _alpha_panel = getattr(ml_out, "alpha_panel", None)
+                    if _alpha_panel is None or _alpha_panel.empty:
                         _logger.error(
                             "[ML_OPT] AWF leg %d ML pipeline returned empty output.", leg_i
                         )
@@ -671,23 +680,52 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
                     if leg_i < 3:
                         _al_nz_list: list[float] = []
                         _as_nz_list: list[float] = []
+                        # Slice-scoped nonzero ratio measured strictly within the leg's
+                        # backtest evaluation window [test_s, test_e). A near-zero value
+                        # here while the full-frame ratio is positive proves that the ML
+                        # alpha coverage does not overlap this leg (root cause of
+                        # zero_trades_first_leg pruning).
+                        _al_nz_slice_list: list[float] = []
+                        _as_nz_slice_list: list[float] = []
+                        _offsets_align = info["alignment_offsets"] if info else {}
                         _bars_leg = int(test_e) - int(test_s)
                         for _sym in ctx.symbols:
                             if _sym not in leg_maps or ctx.tf not in leg_maps[_sym]:
                                 continue
                             _ldf = leg_maps[_sym][ctx.tf]
+                            _off = int(_offsets_align.get(_sym, 0))
+                            _lo = _off + int(test_s)
+                            _hi = _off + int(test_e)
                             if "alpha_long" in _ldf.columns:
                                 _al_nz_list.append(float((_ldf["alpha_long"] != 0).mean()))
+                                _al_slice = _ldf["alpha_long"].to_numpy()[_lo:_hi]
+                                if _al_slice.size > 0:
+                                    _al_nz_slice_list.append(float((_al_slice != 0).mean()))
                             if "alpha_short" in _ldf.columns:
                                 _as_nz_list.append(float((_ldf["alpha_short"] != 0).mean()))
+                                _as_slice = _ldf["alpha_short"].to_numpy()[_lo:_hi]
+                                if _as_slice.size > 0:
+                                    _as_nz_slice_list.append(float((_as_slice != 0).mean()))
                         _al_nz = float(np.mean(_al_nz_list)) if _al_nz_list else 0.0
                         _as_nz = float(np.mean(_as_nz_list)) if _as_nz_list else 0.0
+                        _al_nz_slice = (
+                            float(np.mean(_al_nz_slice_list)) if _al_nz_slice_list else 0.0
+                        )
+                        _as_nz_slice = (
+                            float(np.mean(_as_nz_slice_list)) if _as_nz_slice_list else 0.0
+                        )
                         _logger.info(
-                            "[ALPHA-ALIGN] leg=%d bars=%d alpha_long_nz=%.3f alpha_short_nz=%.3f",
+                            "[ALPHA-ALIGN] leg=%d range=[%d,%d) bars=%d "
+                            "full_long_nz=%.3f full_short_nz=%.3f "
+                            "leg_long_nz=%.3f leg_short_nz=%.3f",
                             leg_i,
+                            int(test_s),
+                            int(test_e),
                             _bars_leg,
                             _al_nz,
                             _as_nz,
+                            _al_nz_slice,
+                            _as_nz_slice,
                         )
 
                     prebuilt_leg = _build_prebuilt_full_arrays(
@@ -787,23 +825,48 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
                 if _leg_i < 3:
                     _al_nz2_list: list[float] = []
                     _as_nz2_list: list[float] = []
+                    # Slice-scoped nonzero ratio within the leg window [test_s, test_e).
+                    _al_nz2_slice_list: list[float] = []
+                    _as_nz2_slice_list: list[float] = []
+                    _offsets2 = info["alignment_offsets"] if info else {}
                     _bars_leg2 = int(test_e) - int(test_s)
                     for _sym2 in ctx.symbols:
                         if _sym2 not in ctx.data_maps or ctx.tf not in ctx.data_maps[_sym2]:
                             continue
                         _ldf2 = ctx.data_maps[_sym2][ctx.tf]
+                        _off2 = int(_offsets2.get(_sym2, 0))
+                        _lo2 = _off2 + int(test_s)
+                        _hi2 = _off2 + int(test_e)
                         if "alpha_long" in _ldf2.columns:
                             _al_nz2_list.append(float((_ldf2["alpha_long"] != 0).mean()))
+                            _al2_slice = _ldf2["alpha_long"].to_numpy()[_lo2:_hi2]
+                            if _al2_slice.size > 0:
+                                _al_nz2_slice_list.append(float((_al2_slice != 0).mean()))
                         if "alpha_short" in _ldf2.columns:
                             _as_nz2_list.append(float((_ldf2["alpha_short"] != 0).mean()))
+                            _as2_slice = _ldf2["alpha_short"].to_numpy()[_lo2:_hi2]
+                            if _as2_slice.size > 0:
+                                _as_nz2_slice_list.append(float((_as2_slice != 0).mean()))
                     _al_nz2 = float(np.mean(_al_nz2_list)) if _al_nz2_list else 0.0
                     _as_nz2 = float(np.mean(_as_nz2_list)) if _as_nz2_list else 0.0
+                    _al_nz2_slice = (
+                        float(np.mean(_al_nz2_slice_list)) if _al_nz2_slice_list else 0.0
+                    )
+                    _as_nz2_slice = (
+                        float(np.mean(_as_nz2_slice_list)) if _as_nz2_slice_list else 0.0
+                    )
                     _logger.info(
-                        "[ALPHA-ALIGN] leg=%d bars=%d alpha_long_nz=%.3f alpha_short_nz=%.3f",
+                        "[ALPHA-ALIGN] leg=%d range=[%d,%d) bars=%d "
+                        "full_long_nz=%.3f full_short_nz=%.3f "
+                        "leg_long_nz=%.3f leg_short_nz=%.3f",
                         _leg_i,
+                        int(test_s),
+                        int(test_e),
                         _bars_leg2,
                         _al_nz2,
                         _as_nz2,
+                        _al_nz2_slice,
+                        _as_nz2_slice,
                     )
                 aligned = _build_aligned_2d_from_prebuilt(
                     prebuilt_full, ctx.symbols, test_s, test_e,

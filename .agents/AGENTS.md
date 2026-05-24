@@ -35,12 +35,22 @@
 - **Logging:** **The use of `print()` is strictly prohibited.** Use the standard `logging` module and write traceable log messages.
 - **Docstrings:** Follow Google Style Docstrings.
 
-## 6. Workflow (Step-by-Step Execution)
-Follow this structure only for tasks involving code generation or structural changes. For simple Q&A, respond immediately.
-1. `<plan>`: (Max 3 lines) Design implementation, including impact on other layers (DB/Service, etc.).
-2. `<risk>`: (Max 2 lines) Identify potential edge cases and limitations.
-3. **Write Code:** Write optimized code after the above validation. (Include Time/Space Complexity comments).
-4. `<verify>`: Provide `uv run`-based verification results and fix logs for modified files.
+## 6. Local Code-Change Protocol
+
+This section defines the local response structure for tasks that directly create or modify code.
+It is not the global orchestration workflow.
+
+For code generation or structural code changes, use this compact structure:
+
+1. `<plan>`: Max 3 lines. State the implementation approach and affected layer.
+2. `<risk>`: Max 2 lines. State edge cases, compatibility risks, or limitations.
+3. **Write Code:** Apply the smallest necessary change.
+4. `<verify>`: Report `uv run`-based verification results for modified files.
+
+For simple Q&A, documentation-only answers, triage, context scanning, specification writing, and review-only tasks, do not force this structure.
+
+When a skill is explicitly invoked, the skill controls the phase-specific workflow.
+This protocol applies only inside code-writing phases such as `implement`.
 
 ## 7. File Structure & Architecture
 - **Separation of Concerns:** Strictly separate logic, data, and router layers.
@@ -53,12 +63,18 @@ Follow this structure only for tasks involving code generation or structural cha
 - **Unverified Refactoring:** Prohibit large-scale structural changes without test code or guaranteed behavior.
 - **Ignoring Return Values:** Prohibit neglecting return values or error handling.
 
-## 9. Rule Isolation & Priority (Conditional Exception)
-- **Override Trigger**: If the commit-specific rule file (`.agents/rules/commit.md`) is explicitly invoked or activated via labels (e.g., `commit`), the constraints and mandatory workflows defined in this document—including the Verification Loop and multi-step Workflow structure—are temporarily suspended.
-- **Precedence**: Commit task directives always take absolute precedence over these general guidelines to ensure efficiency and focus during the version control process.
+## 9. Rule Isolation & Priority: Commit Rule
 
-## 10. Quant & Financial Engineering (Conditional Reference)
-- **Reference Trigger**: If one or more of the following conditions are met, or if a `quant`-related label/keyword is explicitly invoked, the AI Agent MUST refer to and strictly follow the high-performance computing and financial engineering guidelines defined in [quant.md](file:///.agents/rules/quant.md).
+- **Manual Trigger Only**: The commit-specific rule file (`.agents/rules/commit.md`) is applied only when the user explicitly invokes a commit task or directly requests the commit rule.
+- **No Auto Activation**: Do not infer or auto-activate the commit rule from file changes, labels, branch names, or nearby context unless the user explicitly asks for a commit operation.
+- **Precedence**: When the commit rule is manually activated, it temporarily suspends the general verification loop and multi-step development workflow defined in this document.
+- **Scope**: The commit rule is limited to version-control tasks such as commit message creation, staging guidance, commit splitting, or commit review.
+
+## 10. Quant & Financial Engineering
+
+- **Automatic Reference Trigger**: If a quant keyword, quant label, matching path glob, or matching filename regex is detected, the AI Agent must automatically refer to `.agents/rules/quant.md`.
+- **Application Model**: Quant rules do not replace the skill workflow by default. Instead, they add domain-specific constraints, validation requirements, performance expectations, and output formatting on top of the active skill.
+- **Precedence**: If `quant.md` conflicts with general AGENTS.md rules or skill instructions, `quant.md` wins for quant-related implementation, validation, and reporting.
     - **Path Glob Patterns**:
         - `src/**/signals/**/*.py` (Signal Operations)
         - `src/**/sizing/**/*.py` (Position Sizing)
@@ -74,3 +90,26 @@ Follow this structure only for tasks involving code generation or structural cha
         - `src/execution/trader_*.py` (Live Trading & Execution Engines)
     - **Filename Regex Pattern**: `src/.*(engine|portfolio|metrics|data_collector|backtest|alpha|pipeline|optimizer|universe|loader).*`
 - **Application Instruction**: When the trigger is activated, the agent prioritizes and inherits the quant-specific workflow, constraints, and formatting defined in **6. Output Modes & Templates (Micro/Standard/Full)**, Zero-Loop / JIT Compilation / Walk-forward Time-Series Validation principles defined in [quant.md](file:///.agents/rules/quant.md) over the general guidelines in this document (`AGENTS.md`).
+
+## 11. Skill Orchestration Boundary
+
+Skills define phase-specific workflows only.
+
+Global directives in this document always apply unless a manually activated commit rule or automatically activated quant rule overrides them.
+
+Default non-trivial development workflow:
+
+1. `ai-triage`
+2. `context-scan`
+3. `spec` when needed
+4. `implement`
+5. `verify`
+6. `review`
+
+Commit tasks:
+- Do not route through the default skill workflow.
+- Use `.agents/rules/commit.md` only when explicitly requested by the user.
+
+Quant tasks:
+- Route through the default skill workflow unless `quant.md` requires otherwise.
+- Apply `.agents/rules/quant.md` automatically when its trigger conditions match.

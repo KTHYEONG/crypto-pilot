@@ -47,17 +47,37 @@ def run_ml_pipeline_for_universe(
     preloaded_data_maps: dict[str, dict[str, Any]] | None = None,
     **kwargs: Any,
 ) -> MLPipelineOutput:
+    # Extract anchoring params BEFORE discarding kwargs
+    _anchor_end_idx: int | None = kwargs.get("anchor_end_idx")
+    _target_start: int | None = kwargs.get("target_start_idx")
+    _target_end: int | None = kwargs.get("target_end_idx")
     del fetch_start, end_date, opt_config, kwargs
     if strategy_cfg is None or preloaded_data_maps is None:
         return MLPipelineOutput()
     from src.domain.futures.strategy.builder import build_strategy_alpha
 
-    alpha_panel = build_strategy_alpha(
-        data_maps=preloaded_data_maps,
-        symbols=symbols,
-        tf=tf,
-        cfg=strategy_cfg,
-    )
+    if (
+        _anchor_end_idx is not None
+        and _target_start is not None
+        and _target_end is not None
+    ):
+        from src.domain.futures.strategy.ml_builder import build_ml_strategy_alpha_anchored
+        alpha_panel = build_ml_strategy_alpha_anchored(
+            data_maps=preloaded_data_maps,
+            symbols=symbols,
+            tf=tf,
+            cfg=strategy_cfg,
+            anchor_end_idx=int(_anchor_end_idx),
+            target_start=int(_target_start),
+            target_end=int(_target_end),
+        )
+    else:
+        alpha_panel = build_strategy_alpha(
+            data_maps=preloaded_data_maps,
+            symbols=symbols,
+            tf=tf,
+            cfg=strategy_cfg,
+        )
 
     market_probs = pd.DataFrame()
     if strategy_cfg.regime.enabled:
