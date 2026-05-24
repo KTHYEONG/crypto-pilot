@@ -195,7 +195,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--force-universe-rebuild", action="store_true")
     parser.add_argument("--bypass-champion-guard", action="store_true")
     parser.add_argument("--alpha-only", action="store_true")
-    parser.add_argument("--hmm-only", action="store_true")
     return parser
 
 
@@ -486,7 +485,7 @@ def _run_optimization_stage(
                     _logger.info("  3. Numba Execution  : %6.2f ms (%5.1f%%)", mean_e * 1000.0, (mean_e / total_mean) * 100.0)
                     _logger.info("  4. Metrics/Pruning  : %6.2f ms (%5.1f%%)", mean_m * 1000.0, (mean_m / total_mean) * 100.0)
                     _logger.info("     - Pure Calc      : %6.2f ms (%5.1f%%)", mean_mp * 1000.0, (mean_mp / total_mean) * 100.0)
-                    _logger.info("     - SQLite WAL DB  : %6.2f ms (%5.1f%%)", mean_md * 1000.0, (mean_md / total_mean) * 100.0)
+                    _logger.info("     - Redis DB I/O   : %6.2f ms (%5.1f%%)", mean_md * 1000.0, (mean_md / total_mean) * 100.0)
                     _logger.info("  * Total Backtest/Tr : %6.2f ms", total_mean * 1000.0)
                     _logger.info("=" * 60)
     except Exception as e:

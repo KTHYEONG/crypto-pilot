@@ -108,14 +108,9 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     "FUTURES_PRUNER_WARMUP_STEPS": 2,
     "FUTURES_PRUNER_TYPE": "wilcoxon",  # "wilcoxon", "successive_halving", "median"
     "FUTURES_PRUNER_WILCOXON_P": 0.10,
-    "FUTURES_OPTUNA_STORAGE_TYPE": "redis",  # "sqlite", "redis"
     "FUTURES_REDIS_URL": "redis://127.0.0.1:6379/0",
 
 
-    # Immovable at 0.66: ANY reduction (even 0.62) collapses IS AWF because IS period has
-    # only 2.9% CRISIS — borderline bars (0.62-0.66) are profitable IS trades.
-    # OOS CRISIS mismatch (2.9%→15.9%) handled by auxiliary volatility gate (not threshold).
-    "FUTURES_HMM_CRISIS_THRESHOLD": 0.66,
     # S2: Auxiliary volatility-based CRISIS gate.
     # DISABLED: vol gate fires during profitable high-vol IS periods (CRISIS G=+0.193% in IS),
     # collapsing IS CAGR from ~30% to 2.6%. IS-OOS mismatch requires a smarter approach
@@ -191,38 +186,9 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     "FUTURES_SHORT_BORROW_DAILY": 0.0006,
     "SLIPPAGE_BPS_BUFFER_MULT": 1.0,
     "FUTURES_DEFAULT_BETA_ALPHA": 1.0,
-    "FUTURES_DEFAULT_BETA_REGIME_BULL": 1.0,
-    "FUTURES_DEFAULT_BETA_REGIME_BEAR": 0.15,
     # Stability fail → try runner-up phase-C trial once.
     "FUTURES_STABILITY_RUNNER_UP_RETRY": True,
-    "FUTURES_DEFAULT_BETA_REGIME_CRISIS": 0.3,
-    "FUTURES_DEFAULT_BETA_REGIME_RECOVERY": 0.0,
-    "FUTURES_DEFAULT_BETA_REGIME_CHOP": 0.25,
     "FUTURES_DEFAULT_EV_HURDLE_BPS": 10.0,
-    # Step1: posterior-aware regime policy (disabled by default for backward compatibility).
-    "FUTURES_REGIME_POLICY_ENABLED": False,
-    "FUTURES_REGIME_CONFIDENCE_ENTROPY_MULT": 0.50,
-    "FUTURES_REGIME_MULT_MIN": 0.10,
-    "FUTURES_REGIME_MULT_MAX": 1.50,
-    "FUTURES_REGIME_LONG_BULL_W": 0.35,
-    "FUTURES_REGIME_LONG_BEAR_PENALTY": 0.35,
-    "FUTURES_REGIME_LONG_CHOP_PENALTY": 0.55,
-    "FUTURES_REGIME_LONG_CRISIS_PENALTY": 0.90,
-    "FUTURES_REGIME_SHORT_BEAR_W": 0.45,
-    "FUTURES_REGIME_SHORT_BULL_PENALTY": 0.25,
-    "FUTURES_REGIME_SHORT_CHOP_PENALTY": 0.45,
-    "FUTURES_REGIME_SHORT_CRISIS_W": 0.15,
-    "FUTURES_REGIME_EV_CHOP_ADD_BPS": 8.0,
-    "FUTURES_REGIME_EV_CRISIS_ADD_BPS": 12.0,
-    "FUTURES_REGIME_EV_ENTROPY_ADD_BPS": 6.0,
-    "FUTURES_PORTFOLIO_REGIME_DAMP_ENABLED": False,
-    "FUTURES_PORTFOLIO_CHOP_GROSS_DAMP": 0.50,
-    "FUTURES_PORTFOLIO_CRISIS_GROSS_DAMP": 0.80,
-    "FUTURES_PORTFOLIO_ENTROPY_GROSS_DAMP": 0.35,
-    "FUTURES_PORTFOLIO_BEAR_GROSS_DAMP": 0.10,
-    "FUTURES_PORTFOLIO_GROSS_FLOOR_MULT": 0.15,
-    "FUTURES_PORTFOLIO_CRISIS_LONG_SUPPRESS_THR": 0.60,
-    "FUTURES_PORTFOLIO_CRISIS_LONG_SUPPRESS_MULT": 0.10,
     "FUTURES_DEFAULT_TIME_BARRIER_H": 24.0,
     "FUTURES_TMP_MD_CHAMPION_GATES_ENABLED": True,
     "FUTURES_TMP_LAYER1_MEDIAN_LOG_TW_MIN": 0.0,
@@ -262,10 +228,6 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     "FUTURES_ENSEMBLE_MAX_SIZE": 5,
     "FUTURES_META_ALLOC_WINDOW": 12,
     "FUTURES_META_ALLOC_ETA": 0.15,
-    # R-6: per WF OOS leg, retrain systemic HMM on data strictly before leg start (GP frozen).
-    # Per AWF leg, rerun full universe ML (alpha + systemic HMM + fusion) at the leg train
-    # cutoff before slicing that leg's test window. Disable for faster iteration (single merge).
-    "FUTURES_WF_HMM_LEG_REFIT": True,
     "FUTURES_WF_PHASE2_DRIFT_LOG": True,
     "FUTURES_WF_LEG_TW_MIN_ALL": 0.90,
     "FUTURES_WF_LEG_TW_MEAN_MIN": 1.00,
@@ -297,10 +259,6 @@ OPT_FUTURES_CONFIG: dict[str, Any] = {
     "FUTURES_ML_GATE1_DSR_MIN": 0.40,
     "FUTURES_AWF_POS_FRAC_MIN": 0.60,   # AWF 게이트: 최소 60% leg 수익 (≥3/5)
     "FUTURES_AWF_MU_LOG_MIN": 0.0,       # AWF 게이트: 평균 leg log-TW > 0
-    # Step2: regime-aware deployability pressure.
-    # Note: CHOP trade share is structurally ~0.68; threshold must exceed this to avoid
-    # penalizing all trials. Set 0.70 (tuned_v1 best-validated setting).
-    "FUTURES_STEP2_REGIME_DEPLOY_ENABLED": True,
     "FUTURES_STEP2_CHOP_LOSS_SHARE_MAX": 0.60,
     "FUTURES_STEP2_CHOP_TRADE_SHARE_MAX": 0.70,
     "FUTURES_STEP2_FLIP_RATE_PROXY_MAX": 0.75,

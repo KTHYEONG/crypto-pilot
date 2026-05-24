@@ -137,21 +137,6 @@ class PortfolioBacktestEngine:
             pw = portfolio_weight_params_from_optuna(self.params, OPT_FUTURES_CONFIG)
             hpb = hours_per_bar_from_timeframe(str(self.params.get("TIMEFRAME", "4h")))
             bars_py = (365.0 * 24.0) / max(hpb, 1e-9)
-            hmm_probs_2d = None
-            hmm_cols = [
-                "hmm_prob_bull_calm",
-                "hmm_prob_bull_vol_up",
-                "hmm_prob_bear_trend",
-                "hmm_prob_chop",
-                "hmm_prob_crisis",
-            ]
-            hmm_blocks = [d.get(c) for c in hmm_cols]
-            if all(b is not None for b in hmm_blocks):
-                hmm_arr_cols = []
-                for b in hmm_blocks:
-                    arr = np.asarray(b, dtype=np.float64)
-                    hmm_arr_cols.append(arr[:, 0] if arr.ndim == 2 else arr)
-                hmm_probs_2d = np.stack(hmm_arr_cols, axis=1)
             tw_arr = precompute_rebalance_weights(
                 c2d,
                 np.asarray(d.get("xs_score_long", np.zeros_like(c2d)), dtype=np.float64),
@@ -170,15 +155,6 @@ class PortfolioBacktestEngine:
                     if d.get("composer_sigma_bar") is not None
                     else None
                 ),
-                hmm_probs_2d=hmm_probs_2d,
-                regime_policy_enabled=bool(pw.get("regime_policy_enabled", False)),
-                chop_gross_damp=float(pw.get("chop_gross_damp", 0.50)),
-                crisis_gross_damp=float(pw.get("crisis_gross_damp", 0.80)),
-                entropy_gross_damp=float(pw.get("entropy_gross_damp", 0.35)),
-                bear_gross_damp=float(pw.get("bear_gross_damp", 0.10)),
-                gross_floor_mult=float(pw.get("gross_floor_mult", 0.15)),
-                crisis_long_suppress_thr=float(pw.get("crisis_long_suppress_thr", 0.60)),
-                crisis_long_suppress_mult=float(pw.get("crisis_long_suppress_mult", 0.10)),
             )
         entry_block = d.get("entry_block_mask")
         if entry_block is not None:

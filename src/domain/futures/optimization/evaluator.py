@@ -449,7 +449,6 @@ def run_oos_margin_shared_portfolio(
         "garch_kelly_f", "funding_rate_sum", "kill_signal", "membership_kill_signal",
         "entry_block_mask", "slot_rank_score", "ml_calib_prob", "dyn_leverage",
         "xs_score_long", "xs_score_short", "alpha_long", "alpha_short",
-        "hmm_prob_crisis", "hmm_hard_state", "hmm_modulator_long", "hmm_modulator_short",
         "datetime"
     }
 

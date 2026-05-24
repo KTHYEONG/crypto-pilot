@@ -233,26 +233,3 @@ class SignalCalibrator:
         return self.model.predict_proba(x_input)[:, 1]
 
 
-class DynamicKellySizer:
-    """Fractional Kelly sizing with HMM and Crisis modulation."""
-
-    @staticmethod
-    def calculate(
-        p: np.ndarray,
-        b: float,
-        hmm_crisis: np.ndarray,
-        hmm_mod: np.ndarray,
-        lam: float = 0.5,
-        crisis_gamma: float = 1.0,
-    ) -> np.ndarray:
-        """Compute optimal fractional Kelly size."""
-        # f* = p - (1-p)/b
-        b = max(b, 0.5)
-        f_star = p - (1.0 - p) / b
-        f_star = np.clip(f_star, 0.0, 1.0)
-
-        # HMM Crisis Scale
-        crisis_scale = (1.0 - hmm_crisis) ** crisis_gamma
-
-        # Final Size = Kelly * Scale (lam) * Modulator * Crisis
-        return f_star * lam * hmm_mod * crisis_scale

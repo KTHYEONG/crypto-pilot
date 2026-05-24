@@ -56,42 +56,11 @@ def _build_strategy_compose_diag(
     alpha_short: np.ndarray,
     xs_long: np.ndarray,
     xs_short: np.ndarray,
-    hmm_probs: dict[str, np.ndarray],
     params: dict[str, Any],
 ) -> dict[str, float]:
     n_bars = alpha_long.shape[0]
     beta_a = float(
         params.get("BETA_ALPHA", OPT_FUTURES_CONFIG.get("FUTURES_DEFAULT_BETA_ALPHA", 1.0))
-    )
-    b_bull = float(
-        params.get(
-            "BETA_REGIME_BULL",
-            OPT_FUTURES_CONFIG.get("FUTURES_DEFAULT_BETA_REGIME_BULL", 1.0),
-        )
-    )
-    b_bear = float(
-        params.get(
-            "BETA_REGIME_BEAR",
-            OPT_FUTURES_CONFIG.get("FUTURES_DEFAULT_BETA_REGIME_BEAR", 1.0),
-        )
-    )
-    b_crisis = float(
-        params.get(
-            "BETA_REGIME_CRISIS",
-            OPT_FUTURES_CONFIG.get("FUTURES_DEFAULT_BETA_REGIME_CRISIS", 1.0),
-        )
-    )
-    b_chop = float(
-        params.get(
-            "BETA_REGIME_CHOP",
-            OPT_FUTURES_CONFIG.get("FUTURES_DEFAULT_BETA_REGIME_CHOP", 0.25),
-        )
-    )
-    b_rec = float(
-        params.get(
-            "BETA_REGIME_RECOVERY",
-            OPT_FUTURES_CONFIG.get("FUTURES_DEFAULT_BETA_REGIME_RECOVERY", 0.0),
-        )
     )
     ev_h = float(
         params.get("EV_HURDLE_BPS", OPT_FUTURES_CONFIG.get("FUTURES_DEFAULT_EV_HURDLE_BPS", 40.0))
@@ -115,17 +84,8 @@ def _build_strategy_compose_diag(
         str(alpha_p95_bps >= threshold_bps),
     )
 
-    pbull = hmm_probs["hmm_prob_bull_calm"] + hmm_probs["hmm_prob_bull_vol_up"]
-    regime = (
-        b_bull * pbull
-        + b_bear * hmm_probs["hmm_prob_bear_trend"]
-        + b_chop * hmm_probs["hmm_prob_chop"]
-        + b_crisis * hmm_probs["hmm_prob_crisis"]
-        + b_rec * hmm_probs["hmm_prob_recovery"]
-    )
-    regime = np.broadcast_to(regime[:, None], alpha_long.shape)
-    mu_l_pre = (beta_a * alpha_long) + regime - friction
-    mu_s_pre = (beta_a * alpha_short) + regime - friction
+    mu_l_pre = beta_a * alpha_long - friction
+    mu_s_pre = beta_a * alpha_short - friction
 
     return {
         "bars": float(n_bars),
@@ -237,18 +197,6 @@ def _base_engine_params(ml: dict[str, Any], tf: str) -> dict[str, Any]:
         "USE_COMPOUNDING": True,
         "LEVERAGE": int(lev),
         "BETA_ALPHA": float(ml.get("BETA_ALPHA", cfg.get("FUTURES_DEFAULT_BETA_ALPHA", 1.0))),
-        "BETA_REGIME_BULL": float(
-            ml.get("BETA_REGIME_BULL", cfg.get("FUTURES_DEFAULT_BETA_REGIME_BULL", 1.0))
-        ),
-        "BETA_REGIME_BEAR": float(
-            ml.get("BETA_REGIME_BEAR", cfg.get("FUTURES_DEFAULT_BETA_REGIME_BEAR", 0.25))
-        ),
-        "BETA_REGIME_CRISIS": float(
-            ml.get("BETA_REGIME_CRISIS", cfg.get("FUTURES_DEFAULT_BETA_REGIME_CRISIS", -0.5))
-        ),
-        "BETA_REGIME_CHOP": float(
-            ml.get("BETA_REGIME_CHOP", cfg.get("FUTURES_DEFAULT_BETA_REGIME_CHOP", 0.25))
-        ),
         "EV_HURDLE_BPS": float(
             ml.get("EV_HURDLE_BPS", cfg.get("FUTURES_DEFAULT_EV_HURDLE_BPS", 40.0))
         ),
@@ -313,50 +261,6 @@ def _compose_strategy_scores_inplace(
     n_bars, n_syms = alpha_l_2d.shape
     xs_l = np.zeros((n_bars, n_syms), dtype=np.float64)
     xs_s = np.zeros((n_bars, n_syms), dtype=np.float64)
-    hmm_cols = (
-        "hmm_prob_bull_calm",
-        "hmm_prob_bull_vol_up",
-        "hmm_prob_bear_trend",
-        "hmm_prob_chop",
-        "hmm_prob_crisis",
-    )
-    hmm_prob_map: dict[str, np.ndarray] = {}
-    for hmm_col in hmm_cols:
-        hmm_2d = aligned.get(hmm_col)
-        if hmm_2d is None:
-            hmm_prob_map[hmm_col] = np.zeros((n_bars,), dtype=np.float64)
-            continue
-        hmm_arr = np.asarray(hmm_2d, dtype=np.float64)
-        if hmm_arr.ndim != 2 or hmm_arr.shape != alpha_l_2d.shape:
-            raise RuntimeError(f"strategy mode requires aligned {hmm_col} with alpha shape")
-        hmm_prob_map[hmm_col] = np.mean(hmm_arr, axis=1)
-    hmm_prob_map["hmm_prob_recovery"] = np.zeros((n_bars,), dtype=np.float64)
-
-    # 2D 연산용 HMM 맵 구성 (모두 shape가 (n_bars, n_syms))
-    pbull = np.zeros((n_bars, n_syms), dtype=np.float64)
-    p_bear = np.zeros((n_bars, n_syms), dtype=np.float64)
-    p_chop = np.zeros((n_bars, n_syms), dtype=np.float64)
-    p_crisis = np.zeros((n_bars, n_syms), dtype=np.float64)
-    precov = np.zeros((n_bars, n_syms), dtype=np.float64)
-
-    # HMM 데이터 캐싱 및 변환
-    for hmm_col in hmm_cols:
-        hmm_2d = aligned.get(hmm_col)
-        if hmm_2d is not None:
-            hmm_arr = np.nan_to_num(np.asarray(hmm_2d, dtype=np.float64), nan=0.0)
-            if hmm_col == "hmm_prob_bull_calm" or hmm_col == "hmm_prob_bull_vol_up":
-                pbull += hmm_arr
-            elif hmm_col == "hmm_prob_bear_trend":
-                p_bear = hmm_arr
-            elif hmm_col == "hmm_prob_chop":
-                p_chop = hmm_arr
-            elif hmm_col == "hmm_prob_crisis":
-                p_crisis = hmm_arr
-    if "hmm_prob_recovery" in aligned:
-        precov = np.nan_to_num(
-            np.asarray(aligned["hmm_prob_recovery"], dtype=np.float64),
-            nan=0.0,
-        )
 
     beta_a = float(
         params.get("BETA_ALPHA", OPT_FUTURES_CONFIG.get("FUTURES_DEFAULT_BETA_ALPHA", 1.0))
@@ -375,127 +279,6 @@ def _compose_strategy_scores_inplace(
     mu_l = beta_a * alpha_l_2d - friction
     mu_s = beta_a * alpha_s_2d - friction
 
-    regime_policy_enabled = bool(
-        params.get(
-            "REGIME_POLICY_ENABLED",
-            OPT_FUTURES_CONFIG.get("FUTURES_REGIME_POLICY_ENABLED", False),
-        )
-    )
-
-    if regime_policy_enabled:
-        probs = np.stack([pbull, p_bear, p_chop, p_crisis, precov], axis=-1)
-        psum = np.maximum(probs.sum(axis=-1, keepdims=True), 1e-12)
-        probs = probs / psum
-
-        logk = np.log(5.0)
-        ent = -np.sum(probs * np.log(np.clip(probs, 1e-12, 1.0)), axis=-1) / max(logk, 1e-12)
-        ent = np.clip(ent, 0.0, 1.0)
-        conf = 1.0 - ent
-
-        ent_mult = float(
-            params.get(
-                "REGIME_CONFIDENCE_ENTROPY_MULT",
-                OPT_FUTURES_CONFIG.get("FUTURES_REGIME_CONFIDENCE_ENTROPY_MULT", 0.50),
-            )
-        )
-        min_mult = float(
-            params.get("REGIME_MULT_MIN", OPT_FUTURES_CONFIG.get("FUTURES_REGIME_MULT_MIN", 0.10))
-        )
-        max_mult = float(
-            params.get("REGIME_MULT_MAX", OPT_FUTURES_CONFIG.get("FUTURES_REGIME_MULT_MAX", 1.50))
-        )
-        conf_scale = np.clip(1.0 - ent_mult * (1.0 - conf), min_mult, max_mult)
-
-        l_bull_w = float(
-            params.get(
-                "REGIME_LONG_BULL_W",
-                OPT_FUTURES_CONFIG.get("FUTURES_REGIME_LONG_BULL_W", 0.35),
-            )
-        )
-        l_bear_p = float(
-            params.get(
-                "REGIME_LONG_BEAR_PENALTY",
-                OPT_FUTURES_CONFIG.get("FUTURES_REGIME_LONG_BEAR_PENALTY", 0.35),
-            )
-        )
-        l_chop_p = float(
-            params.get(
-                "REGIME_LONG_CHOP_PENALTY",
-                OPT_FUTURES_CONFIG.get("FUTURES_REGIME_LONG_CHOP_PENALTY", 0.55),
-            )
-        )
-        l_crisis_p = float(
-            params.get(
-                "REGIME_LONG_CRISIS_PENALTY",
-                OPT_FUTURES_CONFIG.get("FUTURES_REGIME_LONG_CRISIS_PENALTY", 0.90),
-            )
-        )
-
-        s_bear_w = float(
-            params.get(
-                "REGIME_SHORT_BEAR_W",
-                OPT_FUTURES_CONFIG.get("FUTURES_REGIME_SHORT_BEAR_W", 0.45),
-            )
-        )
-        s_bull_p = float(
-            params.get(
-                "REGIME_SHORT_BULL_PENALTY",
-                OPT_FUTURES_CONFIG.get("FUTURES_REGIME_SHORT_BULL_PENALTY", 0.25),
-            )
-        )
-        s_chop_p = float(
-            params.get(
-                "REGIME_SHORT_CHOP_PENALTY",
-                OPT_FUTURES_CONFIG.get("FUTURES_REGIME_SHORT_CHOP_PENALTY", 0.45),
-            )
-        )
-        s_crisis_w = float(
-            params.get(
-                "REGIME_SHORT_CRISIS_W",
-                OPT_FUTURES_CONFIG.get("FUTURES_REGIME_SHORT_CRISIS_W", 0.15),
-            )
-        )
-
-        long_mult = (
-            1.0
-            + (l_bull_w * pbull)
-            - (l_bear_p * p_bear)
-            - (l_chop_p * p_chop)
-            - (l_crisis_p * p_crisis)
-        )
-        short_mult = (
-            1.0
-            + (s_bear_w * p_bear)
-            - (s_bull_p * pbull)
-            - (s_chop_p * p_chop)
-            + (s_crisis_w * p_crisis)
-        )
-        long_mult = np.clip(long_mult * conf_scale, min_mult, max_mult)
-        short_mult = np.clip(short_mult * conf_scale, min_mult, max_mult)
-
-        mu_l = mu_l * long_mult
-        mu_s = mu_s * short_mult
-
-        ev_chop = float(
-            params.get(
-                "REGIME_EV_CHOP_ADD_BPS",
-                OPT_FUTURES_CONFIG.get("FUTURES_REGIME_EV_CHOP_ADD_BPS", 8.0),
-            )
-        )
-        ev_crisis = float(
-            params.get(
-                "REGIME_EV_CRISIS_ADD_BPS",
-                OPT_FUTURES_CONFIG.get("FUTURES_REGIME_EV_CRISIS_ADD_BPS", 12.0),
-            )
-        )
-        ev_entropy = float(
-            params.get(
-                "REGIME_EV_ENTROPY_ADD_BPS",
-                OPT_FUTURES_CONFIG.get("FUTURES_REGIME_EV_ENTROPY_ADD_BPS", 6.0),
-            )
-        )
-        ev_h = ev_h + (ev_chop * p_chop) + (ev_crisis * p_crisis) + (ev_entropy * ent)
-
     hurdle_frac = ev_h / 10000.0
     xs_l = np.where(mu_l >= hurdle_frac, mu_l, 0.0)
     xs_s = np.where(mu_s >= hurdle_frac, mu_s, 0.0)
@@ -507,7 +290,6 @@ def _compose_strategy_scores_inplace(
         alpha_short=alpha_s_2d,
         xs_long=xs_l,
         xs_short=xs_s,
-        hmm_probs=hmm_prob_map,
         params=params,
     )
     aligned["_strategy_signal_path_diag"] = {
@@ -585,24 +367,6 @@ def _run_portfolio_numba_block(
     reb_b = max(1, int(params["REBALANCE_BARS"]))
     pwp = portfolio_weight_params_from_optuna(params, cfg_block)
 
-    _hmm_cols_t3 = [
-        "hmm_prob_bull_calm", "hmm_prob_bull_vol_up", "hmm_prob_bear_trend",
-        "hmm_prob_chop", "hmm_prob_crisis",
-    ]
-    _hmm_t3 = [aligned.get(c) for c in _hmm_cols_t3]
-    if all(a is not None for a in _hmm_t3):
-        def _to_1d(a: Any) -> NDArray[np.float64]:
-            arr = np.asarray(a, dtype=np.float64)
-            if arr.ndim == 2:
-                return cast(NDArray[np.float64], arr[:, 0])
-            return cast(NDArray[np.float64], arr)
-        _p5 = np.stack([_to_1d(a) for a in _hmm_t3], axis=1)
-        _log5 = np.log(5.0)
-        _ent = -np.sum(_p5 * np.log(np.clip(_p5, 1e-12, 1.0)), axis=1)
-        _h_norm = float(np.mean(_ent) / _log5)
-        _mean_crisis = float(np.mean(np.clip(_p5[:, 4], 0.0, 1.0)))
-        _kelly_disc = max(0.1, (1.0 - _h_norm) * (1.0 - _mean_crisis))
-        pwp["f_kelly_max"] = float(pwp["f_kelly_max"]) * _kelly_disc
     pwp["f_kelly_max"] = min(float(pwp["f_kelly_max"]), float(params.get("KELLY_IC_UPPER", 0.5)))
 
     hpb = hours_per_bar_from_timeframe(str(params.get("TIMEFRAME", "4h")))
@@ -615,21 +379,6 @@ def _run_portfolio_numba_block(
         aligned.get("xs_score_short", np.zeros_like(close_np)), dtype=np.float64
     )
     sigma_3d = aligned.get("sigma_3d")
-    hmm_probs_2d = None
-    _hmm_cols_pw = [
-        "hmm_prob_bull_calm",
-        "hmm_prob_bull_vol_up",
-        "hmm_prob_bear_trend",
-        "hmm_prob_chop",
-        "hmm_prob_crisis",
-    ]
-    _hmm_blocks_pw = [aligned.get(c) for c in _hmm_cols_pw]
-    if all(b is not None for b in _hmm_blocks_pw):
-        _cols_pw = []
-        for b in _hmm_blocks_pw:
-            arr = np.asarray(b, dtype=np.float64)
-            _cols_pw.append(arr[:, 0] if arr.ndim == 2 else arr)
-        hmm_probs_2d = np.stack(_cols_pw, axis=1)
     tw_blk = np.asarray(
         precompute_rebalance_weights(
             close_np,
@@ -650,15 +399,6 @@ def _run_portfolio_numba_block(
                 else None
             ),
             sigma_3d=sigma_3d,
-            hmm_probs_2d=hmm_probs_2d,
-            regime_policy_enabled=bool(pwp.get("regime_policy_enabled", False)),
-            chop_gross_damp=float(pwp.get("chop_gross_damp", 0.50)),
-            crisis_gross_damp=float(pwp.get("crisis_gross_damp", 0.80)),
-            entropy_gross_damp=float(pwp.get("entropy_gross_damp", 0.35)),
-            bear_gross_damp=float(pwp.get("bear_gross_damp", 0.10)),
-            gross_floor_mult=float(pwp.get("gross_floor_mult", 0.15)),
-            crisis_long_suppress_thr=float(pwp.get("crisis_long_suppress_thr", 0.60)),
-            crisis_long_suppress_mult=float(pwp.get("crisis_long_suppress_mult", 0.10)),
         ),
         dtype=np.float64,
     )
@@ -870,21 +610,6 @@ def _evaluate_awf_phase_d_aggregate(
         n_trials_eff = max(int(ctx.effective_total_trials), 1)
     gate_stat_ref = _awf_gate_stat_ref_bars(awf_slices)
 
-    if trial is not None and trial.number < 10 and awf_slices:
-        ad0 = awf_slices[0].get("data") or {}
-        xl = ad0.get("xs_score_long")
-        hy = ad0.get("hmm_prob_crisis")
-        if xl is not None and hy is not None and getattr(xl, "size", 0) > 0:
-            disp = float(np.nanstd(np.asarray(xl, dtype=np.float64)))
-            cclip = np.clip(np.asarray(hy, dtype=np.float64), 0.0, 1.0)
-            gamma = float(params.get("CRISIS_GAMMA", params.get("CRISIS_GATE_PROB", 1.0)))
-            soft_m = float(np.mean((1.0 - cclip) ** gamma))
-            thr = float(cfg.get("FUTURES_HMM_CRISIS_THRESHOLD", 0.6))
-            rej_r = float(np.mean(np.max(hy, axis=1) > thr))
-            trial.set_user_attr("xs_score_dispersion_mean", disp)
-            trial.set_user_attr("crisis_soft_weight_mean", soft_m)
-            trial.set_user_attr("crisis_gate_rejection_rate", rej_r)
-
     liq_mdd_thr = float(cfg.get("FUTURES_MAX_MDD", 25.0))
     n_syms_ctx = max(1, len(ctx.symbols))
 
@@ -1077,22 +802,7 @@ def _evaluate_awf_phase_d_aggregate(
         flip_proxy = 0.0
         if n_tr > 0 and b_trades_raw.size > 0:
             try:
-                _sym_idx = np.asarray(b_trades_raw[:, 0], dtype=np.int64)
-                _entry_idx = np.asarray(b_trades_raw[:, 1], dtype=np.int64)
                 _pnl = np.asarray(b_trades_raw[:, 6], dtype=np.float64)
-                _chop_2d = aligned.get("hmm_prob_chop")
-                if _chop_2d is not None:
-                    _chop_np = np.asarray(_chop_2d, dtype=np.float64)
-                    if _chop_np.ndim == 2 and _chop_np.size > 0:
-                        rb, cb = _chop_np.shape
-                        _r = np.clip(_entry_idx, 0, max(rb - 1, 0))
-                        _c = np.clip(_sym_idx, 0, max(cb - 1, 0))
-                        _p_chop = _chop_np[_r, _c]
-                        _is_chop = _p_chop >= 0.50
-                        chop_tr = int(np.sum(_is_chop))
-                        if np.any(_is_chop):
-                            _chop_pnl = _pnl[_is_chop]
-                            chop_loss = float(np.sum(np.clip(-_chop_pnl, 0.0, None)))
                 tot_loss = float(np.sum(np.clip(-_pnl, 0.0, None)))
                 if b_trades_raw.shape[0] >= 2:
                     _side = np.asarray(b_trades_raw[:, 3], dtype=np.float64)
@@ -1104,17 +814,7 @@ def _evaluate_awf_phase_d_aggregate(
         total_loss_notional.append(float(tot_loss))
         leg_flip_proxy.append(float(flip_proxy))
 
-        _hy_arr = aligned.get("hmm_prob_crisis") if aligned else None
-        if _hy_arr is not None:
-            try:
-                _hy_np = np.asarray(_hy_arr, dtype=np.float64)
-                if _hy_np.ndim > 1:
-                    _hy_np = _hy_np[:, 0]
-                leg_crisis_mean.append(float(np.nanmean(_hy_np)))
-            except Exception:
-                leg_crisis_mean.append(0.0)
-        else:
-            leg_crisis_mean.append(0.0)
+        leg_crisis_mean.append(0.0)
 
         leg_log_tw.append(log_ret)
         leg_mdds.append(mdd)
@@ -1256,21 +956,6 @@ def _evaluate_awf_phase_d_aggregate(
     loss_total = float(np.sum(total_loss_notional)) if total_loss_notional else 0.0
     loss_chop = float(np.sum(chop_loss_notional)) if chop_loss_notional else 0.0
     chop_loss_share = float(loss_chop / max(loss_total, 1e-9)) if loss_total > 0.0 else 0.0
-    flip_rate_proxy = float(np.mean(leg_flip_proxy)) if leg_flip_proxy else 0.0
-
-    step2_enabled = bool(cfg.get("FUTURES_STEP2_REGIME_DEPLOY_ENABLED", False))
-    if step2_enabled:
-        chop_loss_w = float(cfg.get("FUTURES_STEP2_OBJ_CHOP_LOSS_W", 0.25))
-        chop_trade_w = float(cfg.get("FUTURES_STEP2_OBJ_CHOP_TRADE_W", 0.15))
-        flip_w = float(cfg.get("FUTURES_STEP2_OBJ_FLIP_W", 0.10))
-        loss_thr = float(cfg.get("FUTURES_STEP2_CHOP_LOSS_SHARE_MAX", 0.60))
-        trade_thr = float(cfg.get("FUTURES_STEP2_CHOP_TRADE_SHARE_MAX", 0.70))
-        flip_thr = float(cfg.get("FUTURES_STEP2_FLIP_RATE_PROXY_MAX", 0.75))
-        excess_loss = max(0.0, chop_loss_share - loss_thr)
-        excess_trade = max(0.0, chop_trade_share - trade_thr)
-        excess_flip = max(0.0, flip_rate_proxy - flip_thr)
-        robust_val -= chop_loss_w * excess_loss + chop_trade_w * excess_trade + flip_w * excess_flip
-
     step4_enabled = bool(cfg.get("FUTURES_STEP4_DEPLOYABILITY_ENABLED", False))
     if step4_enabled:
         chop_trade_w4 = float(cfg.get("FUTURES_STEP4_OBJ_CHOP_TRADE_W", 0.10))

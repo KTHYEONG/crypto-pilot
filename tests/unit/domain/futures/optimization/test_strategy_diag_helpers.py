@@ -16,21 +16,11 @@ def test_build_strategy_compose_diag_has_expected_core_keys() -> None:
     alpha_s = np.full((8, 2), 0.01, dtype=np.float64)
     xs_l = np.full((8, 2), 0.02, dtype=np.float64)
     xs_s = np.full((8, 2), 0.02, dtype=np.float64)
-    z = np.zeros((8,), dtype=np.float64)
-    hmm = {
-        "hmm_prob_bull_calm": z,
-        "hmm_prob_bull_vol_up": z,
-        "hmm_prob_bear_trend": z,
-        "hmm_prob_chop": z,
-        "hmm_prob_crisis": z,
-        "hmm_prob_recovery": z,
-    }
     diag = _build_strategy_compose_diag(
         alpha_long=alpha_l,
         alpha_short=alpha_s,
         xs_long=xs_l,
         xs_short=xs_s,
-        hmm_probs=hmm,
         params={"BETA_ALPHA": 3.0, "EV_HURDLE_BPS": 2.0},
     )
     assert diag["alpha_long_nz_ratio"] > 0.0
