@@ -173,6 +173,20 @@ def merge_ml_output_into_data_maps(
             on="_merge_datetime",
             how="left",
         )
+        
+        # === [DIAG-MERGE] ===
+        raw_long_nz = int(np.count_nonzero(right["alpha_long"].fillna(0.0).to_numpy()))
+        raw_short_nz = int(np.count_nonzero(right["alpha_short"].fillna(0.0).to_numpy()))
+        merged_long_nz = int(np.count_nonzero(merged["alpha_long"].fillna(0.0).to_numpy()))
+        merged_short_nz = int(np.count_nonzero(merged["alpha_short"].fillna(0.0).to_numpy()))
+        if log_tag == "oos":
+            l_sample = [str(x)[:19] for x in left["_merge_datetime"].iloc[:2]]
+            r_sample = [str(x)[:19] for x in right["_merge_datetime"].iloc[:2]]
+            _logger.info(
+                f" [DIAG-SHORT] sym={sym} raw_L_nz={raw_long_nz} merged_L_nz={merged_long_nz} "
+                f"L_rows={len(left)} R_rows={len(right)} L_dt={l_sample} R_dt={r_sample}"
+            )
+
         df["alpha_long"] = merged["alpha_long"].fillna(0.0).to_numpy(dtype=np.float64)
         df["alpha_short"] = merged["alpha_short"].fillna(0.0).to_numpy(dtype=np.float64)
 

@@ -10,6 +10,7 @@ if str(_project_root) not in sys.path:
 
 import argparse
 import logging
+import time
 from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any
@@ -382,6 +383,7 @@ def _run_optimization_stage(
     seed: int,
     resume: bool,
 ) -> RunnerResult:
+    stage_t0 = time.perf_counter()
     project_root = str(BASE_DIR)
     ml_n_jobs = resolve_futures_parallel_policy(len(data_stage.valid_symbols))
     run_id = build_run_id(
@@ -444,7 +446,10 @@ def _run_optimization_stage(
         seed=seed,
         storage_url=storage_url,
     )
+    t_opt = time.perf_counter()
     opt_res = run_optimization(opt_req)
+    opt_elapsed = time.perf_counter() - t_opt
+    _logger.info("[STAGE-TIME] step=run_optimization elapsed=%.2fs", opt_elapsed)
     study_ml = opt_res.study_ml
     best_trial = opt_res.best_trial
 
@@ -540,7 +545,14 @@ def _run_optimization_stage(
         selection_summary={},
         run_summary_extras={"optuna_contract": contract_meta},
     )
+    t_final_eval = time.perf_counter()
     run_final_evaluation(final_req)
+    final_eval_elapsed = time.perf_counter() - t_final_eval
+    _logger.info("[STAGE-TIME] step=final_evaluation elapsed=%.2fs", final_eval_elapsed)
+    _logger.info(
+        "[STAGE-TIME] step=optimization_stage_total elapsed=%.2fs",
+        time.perf_counter() - stage_t0,
+    )
     return RunnerResult(exit_code=0, reason="ok")
 
 
@@ -551,7 +563,9 @@ def run_pipeline(
     resume: bool = False,
 ) -> RunnerResult:
     """Run active futures pipeline in explicit orchestration order."""
+    pipeline_t0 = time.perf_counter()
     # Step 1) parse run window
+    t_window = time.perf_counter()
     window = _resolve_quarterly_window(run_config.reference_date)
     _logger.info(
         "[STAGE] step=window fetch=%s is=%s oos=%s end=%s",
@@ -560,9 +574,13 @@ def run_pipeline(
         window.oos_start,
         window.end_date,
     )
+    _logger.info("[STAGE-TIME] step=window elapsed=%.2fs", time.perf_counter() - t_window)
     # Step 1.5) Ensure data is synchronized for the required window
+    t_sync = time.perf_counter()
     _ensure_data_sync_for_window(run_config, window)
+    _logger.info("[STAGE-TIME] step=data_sync elapsed=%.2fs", time.perf_counter() - t_sync)
     # Step 2) universe timeline/quality gate
+    t_universe = time.perf_counter()
     discovered_symbols, timeline = _run_universe_stage(run_config, window)
     _logger.info(
         "[STAGE] step=universe skip=%s discovered=%d timeline_windows=%d",
@@ -570,14 +588,18 @@ def run_pipeline(
         len(discovered_symbols),
         len(timeline),
     )
+    _logger.info("[STAGE-TIME] step=universe elapsed=%.2fs", time.perf_counter() - t_universe)
     # Step 3) data loading + readiness
+    t_data = time.perf_counter()
     data_stage = _run_data_stage(run_config, window, discovered_symbols, timeline)
     _logger.info(
         "[STAGE] step=data valid=%d require_exec_1m=%s",
         len(data_stage.valid_symbols),
         OPT_FUTURES_CONFIG.get("FUTURES_EXECUTION_MODE") == "intrabar_1m",
     )
+    _logger.info("[STAGE-TIME] step=data elapsed=%.2fs", time.perf_counter() - t_data)
     # Step 4) strategy bridge + alpha contract
+    t_strategy = time.perf_counter()
     _logger.info(
         "[STAGE] step=strategy mode=%s strategy=%s strategy_mode=%s",
         run_config.mode,
@@ -585,6 +607,7 @@ def run_pipeline(
         run_config.strategy is not None,
     )
     _run_strategy_stage(run_config, window, data_stage)
+    _logger.info("[STAGE-TIME] step=strategy elapsed=%.2fs", time.perf_counter() - t_strategy)
     if run_config.mode == "strategy-smoke":
         return RunnerResult(exit_code=0, reason="strategy_smoke_done")
     # Step 5) optimization + final OOS evaluation
@@ -593,13 +616,20 @@ def run_pipeline(
         len(data_stage.valid_symbols),
         int(run_config.trials),
     )
-    return _run_optimization_stage(
+    t_opt_stage = time.perf_counter()
+    result = _run_optimization_stage(
         run_config,
         window,
         data_stage,
         seed=seed,
         resume=resume,
     )
+    _logger.info("[STAGE-TIME] step=optimize elapsed=%.2fs", time.perf_counter() - t_opt_stage)
+    _logger.info(
+        "[STAGE-TIME] step=pipeline_total elapsed=%.2fs",
+        time.perf_counter() - pipeline_t0,
+    )
+    return result
 
 
 def run_from_cli(argv: list[str] | None = None) -> int:
