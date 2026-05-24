@@ -86,7 +86,10 @@ def _build_ensemble_evaluation_summary(
     meta_port: dict[str, Any],
 ) -> dict[str, Any]:
     members: list[dict[str, Any]] = []
-    for idx, (res, port) in enumerate(zip(selected_ensemble_results, ensemble_ports), start=1):
+    for idx, (res, port) in enumerate(
+        zip(selected_ensemble_results, ensemble_ports, strict=True),
+        start=1,
+    ):
         members.append(
             {
                 "rank": int(idx),
@@ -175,8 +178,6 @@ def run_final_oos_evaluation(
     phase_c_diagnostics: dict[str, Any] | None = None,
 ) -> None:
     """Execute Step 4: Final OOS evaluation, research gates, and persistence."""
-    # REDUNDANT HEADER REMOVED (Step header is handled by the overall orchestration or the dashboard summary)
-    
     policy_cfg = load_portfolio_policy_config(OPT_FUTURES_CONFIG)
     params = dict(params)
     params["STRATEGY_MODE"] = True
@@ -194,9 +195,13 @@ def run_final_oos_evaluation(
         )
 
     from src.domain.futures.optimization.samplers import build_ml_phase_d_params
-    from src.domain.futures.strategy_runtime.bridge import copy_data_maps_tf_clone, merge_ml_output_into_data_maps, MLPipelineOutput
-    from src.domain.futures.strategy.builder import build_strategy_alpha
     from src.domain.futures.strategy import StrategyConfig
+    from src.domain.futures.strategy.builder import build_strategy_alpha
+    from src.domain.futures.strategy_runtime.bridge import (
+        MLPipelineOutput,
+        copy_data_maps_tf_clone,
+        merge_ml_output_into_data_maps,
+    )
 
     ensemble_curves = []
     ensemble_ports = []
@@ -204,44 +209,119 @@ def run_final_oos_evaluation(
     total_build_alpha_sec = 0.0
     total_merge_sec = 0.0
     total_oos_eval_sec = 0.0
+    cache_hits = 0
+    member_eval_cache: dict[str, dict[str, Any]] = {}
+    alpha_build_signatures: set[str] = set()
+    alpha_build_count = 0
+
+    def _clone_member_port(port: dict[str, Any]) -> dict[str, Any]:
+        cloned = dict(port)
+        eq = cloned.get("equity_curve")
+        if isinstance(eq, np.ndarray):
+            cloned["equity_curve"] = eq.copy()
+        return cloned
+
     for i, res in enumerate(selected_ensemble_results):
         member_t0 = time.perf_counter()
         m_params = build_ml_phase_d_params(dict(res["params"]), args.tf)
         m_params["STRATEGY_MODE"] = True
         m_params = finalize_strategy_portfolio_params(m_params, policy_cfg)
-        
+        param_sig = json.dumps(
+            m_params,
+            sort_keys=True,
+            ensure_ascii=True,
+            default=str,
+            separators=(",", ":"),
+        )
+        cache_entry = member_eval_cache.get(param_sig)
+        alpha_sig = json.dumps(
+            {
+                "tf": str(args.tf),
+                "symbols": list(valid_symbols),
+                "strategy_params": dict(res.get("params", {})),
+            },
+            sort_keys=True,
+            ensure_ascii=True,
+            default=str,
+            separators=(",", ":"),
+        )
+
+        if cache_entry is not None:
+            cache_hits += 1
+            build_alpha_sec = 0.0
+            merge_sec = 0.0
+            oos_eval_sec = 0.0
+            m_port = _clone_member_port(cache_entry["port"])
+            ensemble_ports.append(m_port)
+            eq_curve = m_port.get("equity_curve")
+            if isinstance(eq_curve, np.ndarray):
+                ensemble_curves.append(eq_curve)
+            else:
+                ensemble_curves.append(np.asarray(eq_curve, dtype=np.float64))
+            m_cagr = m_port.get("cagr_pct", 0.0)
+            m_mdd = m_port.get("mdd_pct", 0.0)
+            m_trades = m_port.get("total_trades", m_port.get("trade_count", 0))
+            _logger.info(
+                f" [ENSEMBLE-MEMBER] Member {i + 1}/{len(selected_ensemble_results)}: "
+                f"CAGR={m_cagr:7.2f}% | MDD={m_mdd:6.2f}% | Trades={m_trades} | "
+                f"Trial={res['trial'].number}"
+            )
+            _logger.info(
+                " [ENSEMBLE-PROF] member=%d/%d cache=hit total=%.2fs",
+                i + 1,
+                len(selected_ensemble_results),
+                time.perf_counter() - member_t0,
+            )
+            continue
+
         # 1) Clone OOS maps to avoid cross-symbol / cross-member reference sharing
         m_oos_maps = copy_data_maps_tf_clone(oos_data_maps, valid_symbols, args.tf)
-        
+
         # 2) Dynamically reconstruct completed alpha panel containing Virtual Refit Fold
         m_strat_cfg = StrategyConfig(
-            name=ml_ctx.strategy_cfg.name if (ml_ctx and getattr(ml_ctx, "strategy_cfg", None)) else "ml_lambdamart_v1",
-            ml=ml_ctx.strategy_cfg.ml if (ml_ctx and getattr(ml_ctx, "strategy_cfg", None)) else None
+            name=(
+                ml_ctx.strategy_cfg.name
+                if (ml_ctx and getattr(ml_ctx, "strategy_cfg", None))
+                else "ml_lambdamart_v1"
+            ),
+            ml=(
+                ml_ctx.strategy_cfg.ml
+                if (ml_ctx and getattr(ml_ctx, "strategy_cfg", None))
+                else None
+            ),
         )
         if m_strat_cfg.ml is not None:
             # Update strategy configuration state with current member's tuned parameters
             for k, v in res["params"].items():
                 if hasattr(m_strat_cfg.ml, k):
                     setattr(m_strat_cfg.ml, k, v)
-        
+
         # Build the completed alpha panel (including OOS Virtual Refit filling!)
         t_build_alpha = time.perf_counter()
         m_alpha_panel = build_strategy_alpha(
-            data_maps=oos_data_maps, # Pass full data maps containing complete history (IS + OOS)
+            data_maps=oos_data_maps,  # Pass full data maps containing complete history (IS + OOS)
             symbols=valid_symbols,
             tf=args.tf,
             cfg=m_strat_cfg,
         )
         build_alpha_sec = time.perf_counter() - t_build_alpha
+        alpha_build_count += 1
+        alpha_build_signatures.add(alpha_sig)
         total_build_alpha_sec += build_alpha_sec
-        
+
         # 3) Merge the newly completed alpha panel into the cloned OOS maps
         t_merge = time.perf_counter()
         m_ml_out = MLPipelineOutput(alpha_panel=m_alpha_panel)
-        merge_ml_output_into_data_maps(m_ml_out, m_oos_maps, valid_symbols, args.tf, log_tag=f"ensemble_m{i+1}")
+        merge_ml_output_into_data_maps(
+            m_ml_out,
+            m_oos_maps,
+            valid_symbols,
+            args.tf,
+            log_tag=f"ensemble_m{i + 1}",
+        )
         merge_sec = time.perf_counter() - t_merge
         total_merge_sec += merge_sec
-        
+
         t_oos_eval = time.perf_counter()
         m_port = run_oos_margin_shared_portfolio(
             valid_symbols,
@@ -255,15 +335,18 @@ def run_final_oos_evaluation(
         total_oos_eval_sec += oos_eval_sec
         ensemble_ports.append(m_port)
         ensemble_curves.append(m_port["equity_curve"])
+        member_eval_cache[param_sig] = {"port": _clone_member_port(m_port)}
         m_cagr = m_port.get("cagr_pct", 0.0)
         m_mdd = m_port.get("mdd_pct", 0.0)
         m_trades = m_port.get("total_trades", m_port.get("trade_count", 0))
         _logger.info(
-            f" [ENSEMBLE-MEMBER] Member {i+1}/{len(selected_ensemble_results)}: "
-            f"CAGR={m_cagr:7.2f}% | MDD={m_mdd:6.2f}% | Trades={m_trades} | Trial={res['trial'].number}"
+            f" [ENSEMBLE-MEMBER] Member {i + 1}/{len(selected_ensemble_results)}: "
+            f"CAGR={m_cagr:7.2f}% | MDD={m_mdd:6.2f}% | "
+            f"Trades={m_trades} | Trial={res['trial'].number}"
         )
         _logger.info(
-            " [ENSEMBLE-PROF] member=%d/%d build_alpha=%.2fs merge=%.2fs oos_eval=%.2fs total=%.2fs",
+            " [ENSEMBLE-PROF] member=%d/%d build_alpha=%.2fs merge=%.2fs "
+            "oos_eval=%.2fs total=%.2fs",
             i + 1,
             len(selected_ensemble_results),
             build_alpha_sec,
@@ -275,13 +358,20 @@ def run_final_oos_evaluation(
     ensemble_total_sec = time.perf_counter() - ensemble_total_t0
     member_count = max(1, len(selected_ensemble_results))
     _logger.info(
-        " [ENSEMBLE-PROF] summary members=%d total=%.2fs avg_member=%.2fs alpha_build_total=%.2fs merge_total=%.2fs oos_eval_total=%.2fs",
+        " [ENSEMBLE-PROF] summary members=%d total=%.2fs avg_member=%.2fs "
+        "alpha_build_total=%.2fs merge_total=%.2fs oos_eval_total=%.2fs "
+        "cache_hits=%d unique_engine_evals=%d unique_alpha_builds=%d "
+        "alpha_build_count=%d",
         len(selected_ensemble_results),
         ensemble_total_sec,
         ensemble_total_sec / float(member_count),
         total_build_alpha_sec,
         total_merge_sec,
         total_oos_eval_sec,
+        cache_hits,
+        len(member_eval_cache),
+        len(alpha_build_signatures),
+        alpha_build_count,
     )
 
     # Online Capital Allocation (Meta-Strategy)
@@ -295,7 +385,7 @@ def run_final_oos_evaluation(
     final_weights = weight_history[-1]
     _logger.debug("  [META-ALLOCATION] EG Update Complete.")
     for i, w_val in enumerate(final_weights):
-        _logger.debug(f"    Member {i+1} Final Weight: {w_val:.4f}")
+        _logger.debug(f"    Member {i + 1} Final Weight: {w_val:.4f}")
 
     # Calculate Meta-Strategy Metrics
     meta_final_bal = meta_equity[-1]
@@ -317,7 +407,7 @@ def run_final_oos_evaluation(
     meta_port["cagr_pct"] = meta_cagr
     meta_port["mdd_pct"] = meta_mdd
     meta_port["terminal_wealth_ratio"] = meta_moic
-    
+
     oos_port = meta_port
 
     vcfg_block = OPT_FUTURES_CONFIG.get("FUTURES_VALIDATION_CONFIG", {})
@@ -345,18 +435,20 @@ def run_final_oos_evaluation(
             len(wf_result.tw_legs),
             wf_result.positive_leg_ratio,
             wf_result.worst_leg_tw,
-            wf_result.mean_tw_legs if hasattr(wf_result, 'mean_tw_legs') else wf_result.mean_leg_tw,
+            wf_result.mean_tw_legs if hasattr(wf_result, "mean_tw_legs") else wf_result.mean_leg_tw,
             wf_result.ergodicity_dev_pct,
         )
-        ai_telemetry_payloads.append({
-            "stage": "wf_ergodicity",
-            "erg_dev": float(wf_result.ergodicity_dev_pct),
-            "guideline": float(wf_cfg.ergodicity_guideline_pct),
-            "tw_legs": [float(t) for t in wf_result.tw_legs],
-            "positive_leg_ratio": float(wf_result.positive_leg_ratio),
-            "worst_leg_tw": float(wf_result.worst_leg_tw),
-            "leg_adaptation_logs": [dict(r) for r in wf_result.leg_adaptation_logs],
-        })
+        ai_telemetry_payloads.append(
+            {
+                "stage": "wf_ergodicity",
+                "erg_dev": float(wf_result.ergodicity_dev_pct),
+                "guideline": float(wf_cfg.ergodicity_guideline_pct),
+                "tw_legs": [float(t) for t in wf_result.tw_legs],
+                "positive_leg_ratio": float(wf_result.positive_leg_ratio),
+                "worst_leg_tw": float(wf_result.worst_leg_tw),
+                "leg_adaptation_logs": [dict(r) for r in wf_result.leg_adaptation_logs],
+            }
+        )
 
     # IS & Hold-out Evaluation
     is_data_maps: dict[str, dict[str, Any]] = {}
@@ -391,11 +483,11 @@ def run_final_oos_evaluation(
     def _augment_port_metrics(p: dict[str, Any], hrs_tf: int):
         eq = p.get("equity_curve", np.array([float(FUTURES_INITIAL_BALANCE)]))
         ann_f = (365 * 24) / hrs_tf
-        
+
         p["mdd_pct"] = calc_mdd_from_equity(eq)
         p["mdd_duration_days"] = (calc_mdd_duration(eq) * hrs_tf) / 24.0
         p["sortino"] = calc_sortino_ratio(eq, ann_f)
-        
+
         cagr = float(p.get("cagr_pct", 0.0))
         mdd = abs(p["mdd_pct"])
         p["calmar"] = (cagr / mdd) if mdd > 1e-6 else (cagr / 0.1)
@@ -425,14 +517,14 @@ def run_final_oos_evaluation(
         _btc_o0 = int(oos_data_maps[_btc_sym][f"oos_start_idx_{args.tf}"])
         _slices = [
             (
-                "OOS", 
-                _btc_tf_df["close"].iloc[_btc_o0:].to_numpy(dtype=np.float64), 
-                "_btc_benchmark_oos"
+                "OOS",
+                _btc_tf_df["close"].iloc[_btc_o0:].to_numpy(dtype=np.float64),
+                "_btc_benchmark_oos",
             ),
             (
-                "IS", 
-                _btc_tf_df["close"].iloc[:_btc_o0].to_numpy(dtype=np.float64), 
-                "_btc_benchmark_is"
+                "IS",
+                _btc_tf_df["close"].iloc[:_btc_o0].to_numpy(dtype=np.float64),
+                "_btc_benchmark_is",
             ),
         ]
         for _label, _arr_slice, _out_var in _slices:
@@ -457,8 +549,10 @@ def run_final_oos_evaluation(
 
     # S3: Regime distribution drift detection (IS vs OOS KL divergence)
     regime_drift_info = compute_regime_drift(
-        data_maps=data_maps, oos_data_maps=oos_data_maps,
-        symbols=valid_symbols, tf=args.tf,
+        data_maps=data_maps,
+        oos_data_maps=oos_data_maps,
+        symbols=valid_symbols,
+        tf=args.tf,
     )
     run_summary_extras["regime_drift"] = regime_drift_info
     if phase_c_diagnostics is not None:
@@ -478,8 +572,11 @@ def run_final_oos_evaluation(
     _btc_is_cap = float(OPT_FUTURES_CONFIG.get("FUTURES_IS_ALPHA_BTC_CAP_PCT", 999.0))
     if _btc_benchmark_is is not None and _btc_benchmark_is > _btc_is_cap:
         _logger.info("\n ⚖️ [BENCHMARK ADJUSTMENT]")
-        _logger.info("   > BTC Hurdle Capped: %.1f%% ➔ %.1f%% (FUTURES_IS_ALPHA_BTC_CAP_PCT 적용)",
-                     _btc_benchmark_is, _btc_is_cap)
+        _logger.info(
+            "   > BTC Hurdle Capped: %.1f%% ➔ %.1f%% (FUTURES_IS_ALPHA_BTC_CAP_PCT 적용)",
+            _btc_benchmark_is,
+            _btc_is_cap,
+        )
         _btc_benchmark_is = _btc_is_cap
     is_net_alpha_v = is_cagr_v - (_btc_benchmark_is if _btc_benchmark_is is not None else 0.0)
 
@@ -522,9 +619,7 @@ def run_final_oos_evaluation(
         is_survival_min_cagr=float(
             OPT_FUTURES_CONFIG.get("FUTURES_IS_SURVIVAL_MIN_CAGR_PCT", 15.0)
         ),
-        is_survival_min_sharpe=float(
-            OPT_FUTURES_CONFIG.get("FUTURES_IS_SURVIVAL_MIN_SHARPE", 1.5)
-        ),
+        is_survival_min_sharpe=float(OPT_FUTURES_CONFIG.get("FUTURES_IS_SURVIVAL_MIN_SHARPE", 1.5)),
         worst_leg_log_tw=float(worst_leg),
         awf_p10_log_tw_floor=float(p10_floor),
         oos_mdd_duration=float(oos_port.get("mdd_duration_days", 0.0)),
@@ -540,7 +635,7 @@ def run_final_oos_evaluation(
     )
     gate_ok, _gf_codes = evaluate_research_gates(_gate_inp)
     gate_failures = list(_gf_codes)
-    
+
     if bool(OPT_FUTURES_CONFIG.get("FUTURES_STEP4_DEPLOYABILITY_ENABLED", False)):
         _step4_chop_trade_max = float(
             OPT_FUTURES_CONFIG.get("FUTURES_STEP4_CHOP_TRADE_SHARE_MAX", 0.70)
@@ -570,7 +665,7 @@ def run_final_oos_evaluation(
     ):
         gate_failures.append("TMP_LAYER3_STABILITY_LAYER1")
         gate_ok = False
-    
+
     if (
         champ_stab_cv is not None
         and champ_stab_cv > cv_max
@@ -598,9 +693,20 @@ def run_final_oos_evaluation(
     logs_dir = Path(project_root) / "logs"
     champ_path = resolve_champion_record_path(logs_dir)
     champ_m = {
-        "pbo": 50.0, "p10": 0.0, "dsr": 0.0, "tw": 1.0, "cagr": 0.0, "mdd": 0.0,
-        "calmar": 0.0, "sortino": 0.0, "mdd_duration": 0.0,
-        "time_2x": 999.0, "cvar": 0.0, "net_alpha": 0.0, "avg_pnl": 0.0, "pf": 1.0,
+        "pbo": 50.0,
+        "p10": 0.0,
+        "dsr": 0.0,
+        "tw": 1.0,
+        "cagr": 0.0,
+        "mdd": 0.0,
+        "calmar": 0.0,
+        "sortino": 0.0,
+        "mdd_duration": 0.0,
+        "time_2x": 999.0,
+        "cvar": 0.0,
+        "net_alpha": 0.0,
+        "avg_pnl": 0.0,
+        "pf": 1.0,
         "oos_retention_expectancy_pct": 0.0,
     }
     if champ_path and champ_path.exists():
@@ -642,52 +748,54 @@ def run_final_oos_evaluation(
     else:
         t2x_n, nalpha_n = 999.0, 0.0
 
-    new_m = sanitize_metric_map({
-        "pbo": float(pbo_obs) * 100.0,
-        "p10": float(champion_awf_diag.get("worst_leg", 0.0)),
-        "dsr": float(champion_awf_diag.get("dsr_awf", 0.0)),
-        "tw": float(meta_port.get("terminal_wealth_ratio", 1.0)),
-        "cagr": float(meta_port.get("cagr_pct", 0.0)),
-        "mdd": float(meta_port.get("mdd_pct", 0.0)),
-        "calmar": float(meta_port.get("calmar", 0.0)),
-        "sortino": float(meta_port.get("sortino", 0.0)),
-        "mdd_duration": float(meta_port.get("mdd_duration_days", 0.0)),
-        "time_2x": float(t2x_n),
-        "cvar": float(meta_port.get("cvar_pct", 0.0)),
-        "net_alpha": float(nalpha_n * 100.0),
-        "avg_pnl": float(oos_port.get("avg_trade_pnl_pct", 0.0)),
-        "pf": float(meta_port.get("profit_factor", 1.0)),
-        "is_cagr": float(is_port.get("cagr_pct", 0.0)),
-        "ho_cagr": float(ho_port.get("cagr_pct", 0.0)),
-        "awf_pos_frac": float(champion_awf_diag.get("awf_pos_frac", 0.0)),
-        "mu_awf": float(champion_awf_diag.get("mu_log", 0.0)),
-        "sig_awf": float(champion_awf_diag.get("sig_awf_diag", 0.0)),
-        "plgd": float(champion_awf_diag.get("robust_val", 0.0)),
-        "erg_dev": float(_erg_dev_val),
-        "oos_long_pf": float(meta_port.get("long_pf", 1.0)),
-        "oos_short_pf": float(meta_port.get("short_pf", 1.0)),
-        # v4.3 primary retention is expectancy-based; CAGR retention kept as auxiliary.
-        "oos_retention_pct": float(oos_retention_expectancy),
-        "oos_retention_expectancy_pct": float(oos_retention_expectancy),
-        "oos_retention_cagr_pct_aux": float(oos_retention_cagr_aux),
-        "is_alpha": float(is_net_alpha_v),
-        "awf_chop_loss_share": float(champion_awf_diag.get("awf_chop_loss_share", 0.0)),
-        "awf_chop_trade_share": float(champion_awf_diag.get("awf_chop_trade_share", 0.0)),
-        "awf_flip_rate_proxy": float(champion_awf_diag.get("awf_flip_rate_proxy", 0.0)),
-        "awf_turnover_cost_ratio": float(champion_awf_diag.get("awf_turnover_cost_ratio", 0.0)),
-    })
+    new_m = sanitize_metric_map(
+        {
+            "pbo": float(pbo_obs) * 100.0,
+            "p10": float(champion_awf_diag.get("worst_leg", 0.0)),
+            "dsr": float(champion_awf_diag.get("dsr_awf", 0.0)),
+            "tw": float(meta_port.get("terminal_wealth_ratio", 1.0)),
+            "cagr": float(meta_port.get("cagr_pct", 0.0)),
+            "mdd": float(meta_port.get("mdd_pct", 0.0)),
+            "calmar": float(meta_port.get("calmar", 0.0)),
+            "sortino": float(meta_port.get("sortino", 0.0)),
+            "mdd_duration": float(meta_port.get("mdd_duration_days", 0.0)),
+            "time_2x": float(t2x_n),
+            "cvar": float(meta_port.get("cvar_pct", 0.0)),
+            "net_alpha": float(nalpha_n * 100.0),
+            "avg_pnl": float(oos_port.get("avg_trade_pnl_pct", 0.0)),
+            "pf": float(meta_port.get("profit_factor", 1.0)),
+            "is_cagr": float(is_port.get("cagr_pct", 0.0)),
+            "ho_cagr": float(ho_port.get("cagr_pct", 0.0)),
+            "awf_pos_frac": float(champion_awf_diag.get("awf_pos_frac", 0.0)),
+            "mu_awf": float(champion_awf_diag.get("mu_log", 0.0)),
+            "sig_awf": float(champion_awf_diag.get("sig_awf_diag", 0.0)),
+            "plgd": float(champion_awf_diag.get("robust_val", 0.0)),
+            "erg_dev": float(_erg_dev_val),
+            "oos_long_pf": float(meta_port.get("long_pf", 1.0)),
+            "oos_short_pf": float(meta_port.get("short_pf", 1.0)),
+            # v4.3 primary retention is expectancy-based; CAGR retention kept as auxiliary.
+            "oos_retention_pct": float(oos_retention_expectancy),
+            "oos_retention_expectancy_pct": float(oos_retention_expectancy),
+            "oos_retention_cagr_pct_aux": float(oos_retention_cagr_aux),
+            "is_alpha": float(is_net_alpha_v),
+            "awf_chop_loss_share": float(champion_awf_diag.get("awf_chop_loss_share", 0.0)),
+            "awf_chop_trade_share": float(champion_awf_diag.get("awf_chop_trade_share", 0.0)),
+            "awf_flip_rate_proxy": float(champion_awf_diag.get("awf_flip_rate_proxy", 0.0)),
+            "awf_turnover_cost_ratio": float(champion_awf_diag.get("awf_turnover_cost_ratio", 0.0)),
+        }
+    )
 
     params["ensemble_members"] = [res["params"] for res in selected_ensemble_results]
     params["meta_allocation"] = {
-        "window_size": meta_window, 
-        "eta": meta_eta, 
-        "final_weights": final_weights.tolist()
+        "window_size": meta_window,
+        "eta": meta_eta,
+        "final_weights": final_weights.tolist(),
     }
     params["is_ensemble"] = True
 
     gate_ok_before_champ = gate_ok
     pbo_champ_eff = float(resolve_adjusted_gates(OPT_FUTURES_CONFIG, n_ml_trials)[2])
-    
+
     cand_ev_cost_ratio = safe_float(best_trial.user_attrs.get("ev_cost_ratio"), 1e3, 1e6)
     champ_ev_cost_ratio = safe_float(champ_m.get("ev_cost_ratio", 1e3), 1e3, 1e6)
     swap_ok, swap_failures = _passes_champion_swap_4conditions(
@@ -703,25 +811,26 @@ def run_final_oos_evaluation(
 
     if gate_ok:
         cand_metrics = ChampionMetrics(
-            cagr=float(new_m.get("cagr", 0.0)), 
-            mdd=abs(float(new_m.get("mdd", 100.0))), 
-            net_alpha=float(new_m.get("net_alpha", 0.0)), 
-            sharpe=float(oos_sharpe_v), 
-            pbo=float(new_m.get("pbo", 1.0))
+            cagr=float(new_m.get("cagr", 0.0)),
+            mdd=abs(float(new_m.get("mdd", 100.0))),
+            net_alpha=float(new_m.get("net_alpha", 0.0)),
+            sharpe=float(oos_sharpe_v),
+            pbo=float(new_m.get("pbo", 1.0)),
         )
         allow, reason = run_champion_promotion_guard(
-            Path(project_root) / "logs", 
-            Path(project_root), 
-            cand_metrics, 
-            pbo_champ_eff, 
-            bool(args.bypass_champion_guard)
+            Path(project_root) / "logs",
+            Path(project_root),
+            cand_metrics,
+            pbo_champ_eff,
+            bool(args.bypass_champion_guard),
         )
         if not allow:
             gate_ok = False
             _logger.warning(" [CHAMPION GUARD] HOLD reason=%s", reason)
 
     _verdict = (
-        "PROMOTE ✅" if gate_ok 
+        "PROMOTE ✅"
+        if gate_ok
         else ("HOLD (CHAMPION_BLOCKED) 🛡️" if gate_ok_before_champ else "HOLD (GATE_FAIL) ⚠️")
     )
 
@@ -737,7 +846,7 @@ def run_final_oos_evaluation(
     # Persistence logic...
     res_dir = Path(project_root) / "results" / "futures"
     res_dir.mkdir(parents=True, exist_ok=True)
-    
+
     if gate_ok:
         prod_json = res_dir / f"best_futures_{args.tf}.json"
         with open(prod_json, "w") as f:

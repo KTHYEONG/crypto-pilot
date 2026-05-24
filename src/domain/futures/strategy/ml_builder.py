@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import asdict
+import time
+from dataclasses import asdict, dataclass
 from typing import Any
 
 import numpy as np
@@ -25,7 +26,7 @@ from src.domain.futures.strategy.common.validation import (
     validate_long_matrix,
 )
 from src.domain.futures.strategy.config import StrategyConfig
-from src.domain.futures.strategy.contracts import FeaturePanel
+from src.domain.futures.strategy.contracts import FeaturePanel, LabelPanel
 from src.domain.futures.strategy.dataset import (
     build_long_matrix,
     make_walk_forward_folds,
@@ -47,6 +48,42 @@ from src.domain.futures.strategy.ranker import fit_ranker, predict_rank_score
 _logger = logging.getLogger(__name__)
 
 
+@dataclass(slots=True, frozen=True)
+class AnchoredMLPrecomputedPanels:
+    """Reusable causal ML panels for anchored refit legs."""
+
+    features: FeaturePanel
+    labels: LabelPanel
+
+
+def precompute_anchored_ml_panels(
+    data_maps: dict[str, dict[str, Any]],
+    symbols: list[str],
+    tf: str,
+    cfg: StrategyConfig,
+) -> AnchoredMLPrecomputedPanels:
+    """Build feature/label panels once and reuse across anchored legs."""
+    from dataclasses import replace
+
+    ml_cfg = replace(
+        cfg.ml,
+        lambda_l2=1.0,
+        min_data_in_leaf=30,
+        num_leaves=31,
+    )
+    aligned = align_data_maps(data_maps=data_maps, symbols=symbols, tf=tf)
+    if len(aligned.symbols) < ml_cfg.min_group_size:
+        raise ValueError(
+            f"anchored strategy needs >= {ml_cfg.min_group_size} symbols, "
+            f"got {len(aligned.symbols)}"
+        )
+    features = build_feature_panel(aligned, ml_cfg)
+    labels = build_label_panel(aligned, ml_cfg)
+    validate_feature_panel(features)
+    validate_label_panel(labels, t=features.values.shape[0], n=features.values.shape[1])
+    return AnchoredMLPrecomputedPanels(features=features, labels=labels)
+
+
 def build_ml_strategy_alpha(
     data_maps: dict[str, dict[str, Any]],
     symbols: list[str],
@@ -57,6 +94,7 @@ def build_ml_strategy_alpha(
     # [ML-UPGRADE] LightGBM 트리가 충분히 쪼개질 수 있도록
     # 런타임 규제를 완화하고 학습 능력을 제고합니다.
     from dataclasses import replace
+
     ml_cfg = replace(
         cfg.ml,
         lambda_l2=1.0,
@@ -88,7 +126,9 @@ def build_ml_strategy_alpha(
                     "[ML-ADJUST] Dynamic train window adjustment: history covers %d months, "
                     "adjusting train_months from %d to %d (with 1-month safety margin) "
                     "to satisfy walk-forward layout.",
-                    total_months, ml_cfg.train_months, adjusted_train
+                    total_months,
+                    ml_cfg.train_months,
+                    adjusted_train,
                 )
                 ml_cfg = replace(ml_cfg, train_months=adjusted_train)
 
@@ -225,8 +265,7 @@ def build_ml_strategy_alpha(
     total_bars = features.values.shape[0]
     if last_test_end < total_bars:
         _logger.info(
-            "[ML-OOS-FILL] Uncovered OOS/live window detected: [%d, %d)",
-            last_test_end, total_bars
+            "[ML-OOS-FILL] Uncovered OOS/live window detected: [%d, %d)", last_test_end, total_bars
         )
         # Construct virtual fold for the remaining live window
         v_size = folds[-1].valid_end - folds[-1].valid_start
@@ -238,6 +277,7 @@ def build_ml_strategy_alpha(
         v_test_end = total_bars
 
         from src.domain.futures.strategy.contracts import FoldSpec
+
         v_fold = FoldSpec(
             fold_id=len(folds),
             train_start=v_train_start,
@@ -357,7 +397,8 @@ def build_ml_strategy_alpha(
     panel.attrs["quality_report"] = quality_report
     if not passes_quality_gate(quality_report):
         failed_keys = {
-            k: v for k, v in quality_report.items()
+            k: v
+            for k, v in quality_report.items()
             if (k == "feature_finite_ratio" and v < 0.990)
             or (k == "label_valid_ratio" and v <= 0.0)
             or (k == "ranker_valid_ndcg_at_5" and v <= 0.0)
@@ -435,6 +476,7 @@ def build_ml_strategy_alpha_anchored(
     anchor_end_idx: int,
     target_start: int,
     target_end: int,
+    precomputed_panels: AnchoredMLPrecomputedPanels | None = None,
 ) -> pd.DataFrame:
     """Single anchored-pass ML alpha.
 
@@ -444,22 +486,19 @@ def build_ml_strategy_alpha_anchored(
 
     from src.domain.futures.strategy.contracts import FoldSpec
 
+    t0_total = time.perf_counter()
     ml_cfg = replace(
         cfg.ml,
         lambda_l2=1.0,
         min_data_in_leaf=30,
         num_leaves=31,
     )
-    aligned = align_data_maps(data_maps=data_maps, symbols=symbols, tf=tf)
-    if len(aligned.symbols) < ml_cfg.min_group_size:
-        raise ValueError(
-            f"anchored strategy needs >= {ml_cfg.min_group_size} symbols, "
-            f"got {len(aligned.symbols)}"
-        )
-    features = build_feature_panel(aligned, ml_cfg)
-    labels = build_label_panel(aligned, ml_cfg)
-    validate_feature_panel(features)
-    validate_label_panel(labels, t=features.values.shape[0], n=features.values.shape[1])
+    t_feature_label = time.perf_counter()
+    if precomputed_panels is None:
+        precomputed_panels = precompute_anchored_ml_panels(data_maps, symbols, tf, cfg)
+    features = precomputed_panels.features
+    labels = precomputed_panels.labels
+    feature_label_elapsed = time.perf_counter() - t_feature_label
 
     t_size = features.values.shape[0]
     anchor_end = int(np.clip(anchor_end_idx, 0, t_size))
@@ -470,9 +509,7 @@ def build_ml_strategy_alpha_anchored(
             f"anchored refit: anchor_end={anchor_end} too small (< 32 bars); cannot train"
         )
     if tgt_end <= tgt_start:
-        raise RuntimeError(
-            f"anchored refit: empty target window [{tgt_start}, {tgt_end})"
-        )
+        raise RuntimeError(f"anchored refit: empty target window [{tgt_start}, {tgt_end})")
 
     idx = pd.to_datetime(features.datetimes[:anchor_end])
     if idx.size > 1:
@@ -498,7 +535,12 @@ def build_ml_strategy_alpha_anchored(
     )
     _logger.info(
         "[ML-ANCHORED] anchor_end=%d train=[0,%d) valid=[%d,%d) target=[%d,%d)",
-        anchor_end, train_end, valid_start, valid_end, tgt_start, tgt_end,
+        anchor_end,
+        train_end,
+        valid_start,
+        valid_end,
+        tgt_start,
+        tgt_end,
     )
 
     train_values = features.values[fold.train_start : fold.train_end].astype(np.float64, copy=False)
@@ -521,6 +563,7 @@ def build_ml_strategy_alpha_anchored(
         metadata={**features.metadata, "train_imputer_applied": True},
     )
 
+    t_matrix = time.perf_counter()
     train = build_long_matrix(
         features=normalized_features,
         labels=labels,
@@ -567,11 +610,14 @@ def build_ml_strategy_alpha_anchored(
     validate_long_matrix(train)
     validate_long_matrix(valid)
     validate_long_matrix(test)
+    matrix_elapsed = time.perf_counter() - t_matrix
 
+    t_fit_predict = time.perf_counter()
     ranker = fit_ranker(train=train, valid=valid, cfg=ml_cfg)
     rank_train = predict_rank_score(ranker.model, train)
     rank_valid = predict_rank_score(ranker.model, valid)
     rank_test = predict_rank_score(ranker.model, test)
+    fit_predict_elapsed = time.perf_counter() - t_fit_predict
     _logger.info(
         "[ML-ANCHORED-RANKER] train_n=%d valid_n=%d test_n=%d train_mean=%.6f valid_mean=%.6f",
         int(train.X.shape[0]),
@@ -581,6 +627,7 @@ def build_ml_strategy_alpha_anchored(
         float(np.mean(rank_valid, dtype=np.float32)) if rank_valid.size > 0 else 0.0,
     )
 
+    t_calib = time.perf_counter()
     calibrators = fit_quantile_calibrators(
         train=train,
         valid=valid,
@@ -589,6 +636,7 @@ def build_ml_strategy_alpha_anchored(
         cfg=ml_cfg,
     )
     ev_test = predict_conservative_ev(calibrators, test, rank_test, ml_cfg)
+    calib_elapsed = time.perf_counter() - t_calib
     _logger.info(
         "[ML-ANCHORED-CALIB] ev_mean=%.6e ev_p10=%.6e ev_p90=%.6e",
         float(np.mean(ev_test, dtype=np.float32)) if ev_test.size > 0 else 0.0,
@@ -618,6 +666,23 @@ def build_ml_strategy_alpha_anchored(
     from dataclasses import asdict
 
     from src.domain.futures.strategy.cache import build_manifest_hash
+
+    total_elapsed = time.perf_counter() - t0_total
+    _logger.info(
+        (
+            "[AWF-REFIT-PROF] total=%.2fs feature_label=%.2fs matrix=%.2fs "
+            "fit_predict=%.2fs calibrator=%.2fs train_rows=%d valid_rows=%d "
+            "test_rows=%d"
+        ),
+        total_elapsed,
+        feature_label_elapsed,
+        matrix_elapsed,
+        fit_predict_elapsed,
+        calib_elapsed,
+        int(train.X.shape[0]),
+        int(valid.X.shape[0]),
+        int(test.X.shape[0]),
+    )
     panel.attrs["strategy_name"] = cfg.name
     panel.attrs["feature_names"] = list(features.feature_names)
     panel.attrs["fold_count"] = 1
