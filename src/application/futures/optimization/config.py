@@ -10,7 +10,7 @@ SyncMode = Literal["full_history_master", "elite_fast"]
 
 _ACTIVE_MODES: frozenset[str] = frozenset({"quick-backtest", "strategy", "strategy-smoke"})
 _LEGACY_MODES: frozenset[str] = frozenset({"full"})
-_LEGACY_FLAGS: tuple[str, ...] = ("alpha_only", "hmm_only")
+_LEGACY_FLAGS: tuple[str, ...] = ("alpha_only",)
 
 
 @dataclass(slots=True, frozen=True)

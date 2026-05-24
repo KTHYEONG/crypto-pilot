@@ -55,8 +55,6 @@ def summarize(values: Iterable[float]) -> tuple[list[float], float, float]:
 
 SIGNAL_PARAM_KEYS: tuple[str, ...] = (
     "BETA_ALPHA",
-    "BETA_REGIME_BEAR",
-    "BETA_REGIME_CHOP",
     "K_LONG",
     "K_SHORT",
     "REBALANCE_BARS",
@@ -73,8 +71,6 @@ RISK_PARAM_KEYS: tuple[str, ...] = (
 CORE_PARAM_KEYS: tuple[str, ...] = SIGNAL_PARAM_KEYS + RISK_PARAM_KEYS
 
 FIXED_DEFAULTS: dict[str, Any] = {
-    "BETA_REGIME_BULL": 1.0,
-    "BETA_REGIME_CRISIS": 0.0,
     "SLIPPAGE_BPS_BUFFER_MULT": 1.5,
     "CRISIS_OVERRIDE_THRESHOLD": 0.70,
     "CRISIS_GAMMA": 0.20,
@@ -84,8 +80,6 @@ FIXED_DEFAULTS: dict[str, Any] = {
 
 _SIGNAL_DEFAULT_RANGES: dict[str, tuple[Any, Any, bool]] = {
     "BETA_ALPHA": (2.0, 6.0, False),
-    "BETA_REGIME_BEAR": (0.0, 1.5, False),
-    "BETA_REGIME_CHOP": (0.0, 1.0, False),
     "K_LONG": (1, 8, False),
     "K_SHORT": (0, 5, False),
     "REBALANCE_BARS": (1, 24, False),
@@ -749,8 +743,6 @@ _NON_FIXABLE_PARAMS = {
 
 _PARAM_BOUNDS: dict[str, tuple[float, float]] = {
     "BETA_ALPHA": (2.0, 6.0),
-    "BETA_REGIME_BEAR": (0.0, 1.5),
-    "BETA_REGIME_CHOP": (0.0, 1.0),
     "K_LONG": (1.0, 8.0),
     "K_SHORT": (0.0, 5.0),
     "REBALANCE_BARS": (1.0, 24.0),
@@ -1378,8 +1370,6 @@ def run_phased_optimization_skeleton(
         (best_a1_trial_for_a2.params if best_a1_trial_for_a2 is not None else {}),
         (
             "BETA_ALPHA",
-            "BETA_REGIME_BEAR",
-            "BETA_REGIME_CHOP",
             "K_LONG",
             "K_SHORT",
             "REBALANCE_BARS",
@@ -1409,8 +1399,6 @@ def run_phased_optimization_skeleton(
         (best_a1_trial.params if best_a1_trial is not None else {}),
         (
             "BETA_ALPHA",
-            "BETA_REGIME_BEAR",
-            "BETA_REGIME_CHOP",
             "K_LONG",
             "K_SHORT",
             "REBALANCE_BARS",

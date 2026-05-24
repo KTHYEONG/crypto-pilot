@@ -82,16 +82,7 @@ def _aggregate_aligned_data_1h_to_4h(
         "xs_score_short": "last",
         "target_weights": "last",
     }
-    hmm_cols = (
-        "hmm_prob_bull_calm",
-        "hmm_prob_bull_vol_up",
-        "hmm_prob_bear_trend",
-        "hmm_prob_chop",
-        "hmm_prob_crisis",
-        "composer_sigma_bar",
-    )
-    for col in hmm_cols:
-        mode_map[col] = "last"
+    mode_map["composer_sigma_bar"] = "last"
 
     for key, mode in mode_map.items():
         raw = out.get(key)
