@@ -249,3 +249,18 @@ ML 알파의 OOS 거래 단절을 초래하던 3대 구조적 병목을 식별�
   - `STRAT-PATH trial=3 leg=1 alpha_nz=0.4651 merge_nz=0.0171 xs_nz=0.3709 trades=28 long=1 short=27`
 - **Interpretation:** virtual fold normalization leakage는 제거됐지만, 그것만으로는 최종 OOS 거래 소거가 해결되지 않았다. 중간 AWF leg에서는 실제 거래가 발생하므로 ML 신호와 체결 경로는 살아 있고, 남은 병목은 final OOS selection/evaluation 경로와 ensemble 선택 정합성이다.
 - **Judgment:** 이번 패치는 구조적 정렬에는 성공했지만 성능 개선은 아직 제한적이다. 다음 우선순위는 ML 재학습보다 `final OOS zero-trade`의 경로 단절을 분해해서 `alpha 전달`, `ensemble 선택`, `membership`, `final gate` 중 어디서 소거되는지 확정하는 것이다.
+
+---
+
+## 13. Ensemble Runtime Parameter Alignment Fix (2026-05-24)
+
+최종 OOS 앙상블 멤버 시뮬레이션 단계에서 기저 런타임 환경변수가 누락되어 발생하던 `final OOS zero-trade` 경로 단절을 해결하는 패치 적용.
+
+- **원인 식별:**
+  - `final_evaluator.py`의 앙상블 평가 루프에서 각 멤버의 파라미터(`res["params"]`)를 가공할 때 `build_ml_phase_d_params`를 적용하지 않고 `finalize_strategy_portfolio_params`만 호출함.
+  - 이로 인해 `STRATEGY_MODE: True`를 비롯한 기저 런타임 파라미터(`_base_engine_params`)가 누락되어 백테스트 엔진 내부에서 `_compose_strategy_scores_inplace`가 기동하지 못해 target weight가 모두 `0`으로 소거됨.
+- **적용 패치:**
+  - 앙상블 루프 내부에서 `from src.domain.futures.optimization.samplers import build_ml_phase_d_params`를 로컬 임포트하고 각 멤버의 파라미터를 완성해 준 뒤 `finalize_strategy_portfolio_params`를 호출하여 제약사항을 적용함.
+- **기대 효과:**
+  - `STRATEGY_MODE`와 `BETA_ALPHA`, `EV_HURDLE_BPS` 등의 파라미터가 안전하게 전파됨에 따라 백테스트 엔진 내부에서 `xs_score`가 정상 빌드되고, 최종 OOS에서의 `oos_zero_trades=0` 전환 및 정상 거래 활성화가 완벽히 보장됨.
+
