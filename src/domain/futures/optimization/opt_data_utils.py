@@ -871,26 +871,10 @@ def compute_regime_drift(
     }
     status_text = status_map.get(drift_label, "🟢 OK")
 
-    _logger.info("\n 🔍 [STRATEGY DRIFT AUDIT]")
-    _logger.info(" ──────────────────────────────────────────────────────────────")
-    _logger.info(f"  Overall Status : {status_text} (Score: {kl_sym:.3f})")
-    _logger.info(" ──────────────────────────────────────────────────────────────")
-    _logger.info("  REGIME        IS-DIST      OOS-DIST     SHIFT-RATIO")
-    _logger.info(" ──────────────────────────────────────────────────────────────")
-    
-    for rname, v in regime_shift.items():
-        ratio_str = f"x{v['ratio']:.2f}x" if v['ratio'] < 100 else ">x100x"
-        _logger.info(
-            f"  {rname:<10}   {v['is_pct']:>6.1f}%  ➔  {v['oos_pct']:>6.1f}%    {ratio_str:>9}"
-        )
-        
-    _logger.info(" ──────────────────────────────────────────────────────────────")
-    if drift_label in ("MODERATE", "SEVERE"):
-        _logger.warning("  ⚠️  CRITICAL DRIFT: OOS environment differs significantly from IS.")
-        _logger.warning("  建议: Walk-forward refit or parameter re-tuning recommended.")
-    else:
-        _logger.info("  ✅ STABLE: OOS regime distribution matches IS training.")
-    _logger.info(" ──────────────────────────────────────────────────────────────")
+    _logger.info(
+        " [DRIFT_AUDIT] status=%s score=%.3f crisis_ratio=%.2f",
+        drift_label, kl_sym, is_oos_crisis_ratio
+    )
 
     return {
         "kl_is_to_oos": kl_is_to_oos,

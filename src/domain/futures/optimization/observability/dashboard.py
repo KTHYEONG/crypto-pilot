@@ -294,9 +294,20 @@ def print_mechanical_dashboard(
     _logger.info("\n" + DBL_SEP_85)
     _logger.info(" [STEP 4/4] Final Evaluation: [MECHANICAL 24/7 DASHBOARD]")
     _logger.info(DBL_SEP_85)
+
+    # Brief Summary of Core Metrics
+    trades = int(oos_port.get("total_trades", oos_port.get("trade_count", 0)))
+    win_rate = safe_float(oos_port.get("win_rate_pct", 0.0))
+    pf = safe_float(oos_port.get("profit_factor", 1.0))
+    avg_pnl = safe_float(oos_port.get("avg_trade_pnl_pct", 0.0))
+    
+    _logger.info(
+        "\n [OOS_SUMMARY] trades=%d win_rate=%.1f%% profit_factor=%.2f avg_pnl=%.4f%%",
+        trades, win_rate, pf, avg_pnl
+    )
     
     _logger.info("\n ────────────────────────────────────────────────────────────────────────────")
-    _logger.info(" [G-OPTUNA v4.0: COMPOUND ENGINE AUDIT]")
+    _logger.info(" [STRATEGY PERFORMANCE AUDIT]")
     _logger.info(" ────────────────────────────────────────────────────────────────────────────")
     _logger.info("  Metric                  Value      Target     Status    Meaning")
     _logger.info("  ──────────────────────────────────────────────────────────────────────────")
@@ -364,33 +375,18 @@ def log_ml_merge_feature_stats(oos_data_maps: Any, valid_symbols: Any, tf: Any) 
 
 
 def log_oos_regime_attribution(regime_attr: dict[str, Any]) -> None:
-    """Log compact OOS regime attribution table (Visual Audit)."""
+    """Log high-level signal metrics (Visual Audit)."""
     if not regime_attr:
-        _logger.info(" [OOS REGIME] attribution unavailable")
         return
 
-    metrics = regime_attr.get("regime_metrics", {})
-    _logger.info("\n 📊 [OOS REGIME PERFORMANCE ATTRIBUTION]")
-    _logger.info(" ────────────────────────────────────────────────────────────────────────────")
-    _logger.info("  REGIME     TIME%    TRADES    WIN%      PF     AVG-PNL")
-    _logger.info(" ────────────────────────────────────────────────────────────────────────────")
-    
-    for name in REGIME_NAMES:
-        m = metrics.get(name, {})
-        t_pct = safe_float(m.get("time_pct", 0.0))
-        trades = int(m.get("trade_count", 0) or 0)
-        win = safe_float(m.get("win_rate", 0.0))
-        pf = safe_float(m.get("profit_factor", 1.0))
-        pnl = safe_float(m.get("avg_pnl", 0.0))
-        
-        _logger.info(f"  {name:<9} {t_pct:>6.1f}% {trades:>8d} {win:>7.1f}% {pf:>7.2f} {pnl:>11.4f}")
-
-    _logger.info(" ────────────────────────────────────────────────────────────────────────────")
     coverage = safe_float(regime_attr.get("trade_regime_coverage_pct", 0.0))
     flip = safe_float(regime_attr.get("chop_flip_proxy", 0.0))
-    _logger.info(f"  > Signal Coverage: {coverage:.1f}% | Flip Proxy: {flip:.3f}")
-    _logger.info(f"  > Chop Sensitivity: Loss Share {regime_attr.get('chop_loss_share', 0.0):.3f} | Trade Share {regime_attr.get('chop_trade_share', 0.0):.3f}")
-    _logger.info(" ────────────────────────────────────────────────────────────────────────────")
+    _logger.info(
+        " [OOS_SIGNAL] coverage=%.1f%% flip_proxy=%.3f chop_loss_share=%.3f chop_trade_share=%.3f",
+        coverage, flip,
+        regime_attr.get('chop_loss_share', 0.0),
+        regime_attr.get('chop_trade_share', 0.0)
+    )
 
 
 def print_dual_audit_dashboard(new_m: dict[str, Any], champ_m: dict[str, Any], verdict: str) -> None:

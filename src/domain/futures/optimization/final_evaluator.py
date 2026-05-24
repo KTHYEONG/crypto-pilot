@@ -262,12 +262,16 @@ def run_final_oos_evaluation(
             m_mdd = m_port.get("mdd_pct", 0.0)
             m_trades = m_port.get("total_trades", m_port.get("trade_count", 0))
             _logger.info(
-                f" [ENSEMBLE-MEMBER] Member {i + 1}/{len(selected_ensemble_results)}: "
-                f"CAGR={m_cagr:7.2f}% | MDD={m_mdd:6.2f}% | Trades={m_trades} | "
-                f"Trial={res['trial'].number}"
+                "[ENSEMBLE_MEMBER] member=%d/%d cagr_pct=%.2f mdd_pct=%.2f trades=%d trial=%d status=cached",
+                i + 1,
+                len(selected_ensemble_results),
+                m_cagr,
+                m_mdd,
+                m_trades,
+                res['trial'].number
             )
             _logger.info(
-                " [ENSEMBLE-PROF] member=%d/%d cache=hit total=%.2fs",
+                "[ENSEMBLE_PROF] member=%d/%d status=cache_hit total_s=%.2f",
                 i + 1,
                 len(selected_ensemble_results),
                 time.perf_counter() - member_t0,
@@ -340,13 +344,16 @@ def run_final_oos_evaluation(
         m_mdd = m_port.get("mdd_pct", 0.0)
         m_trades = m_port.get("total_trades", m_port.get("trade_count", 0))
         _logger.info(
-            f" [ENSEMBLE-MEMBER] Member {i + 1}/{len(selected_ensemble_results)}: "
-            f"CAGR={m_cagr:7.2f}% | MDD={m_mdd:6.2f}% | "
-            f"Trades={m_trades} | Trial={res['trial'].number}"
+            "[ENSEMBLE_MEMBER] member=%d/%d cagr_pct=%.2f mdd_pct=%.2f trades=%d trial=%d status=fresh",
+            i + 1,
+            len(selected_ensemble_results),
+            m_cagr,
+            m_mdd,
+            m_trades,
+            res['trial'].number
         )
         _logger.info(
-            " [ENSEMBLE-PROF] member=%d/%d build_alpha=%.2fs merge=%.2fs "
-            "oos_eval=%.2fs total=%.2fs",
+            "[ENSEMBLE_PROF] member=%d/%d build_alpha_s=%.2f merge_s=%.2f oos_eval_s=%.2f total_s=%.2f",
             i + 1,
             len(selected_ensemble_results),
             build_alpha_sec,
@@ -358,10 +365,7 @@ def run_final_oos_evaluation(
     ensemble_total_sec = time.perf_counter() - ensemble_total_t0
     member_count = max(1, len(selected_ensemble_results))
     _logger.info(
-        " [ENSEMBLE-PROF] summary members=%d total=%.2fs avg_member=%.2fs "
-        "alpha_build_total=%.2fs merge_total=%.2fs oos_eval_total=%.2fs "
-        "cache_hits=%d unique_engine_evals=%d unique_alpha_builds=%d "
-        "alpha_build_count=%d",
+        "[ENSEMBLE_PROF_SUMMARY] members=%d total_s=%.2f avg_member_s=%.2f alpha_build_total_s=%.2f merge_total_s=%.2f oos_eval_total_s=%.2f cache_hits=%d unique_evals=%d",
         len(selected_ensemble_results),
         ensemble_total_sec,
         ensemble_total_sec / float(member_count),
@@ -370,8 +374,6 @@ def run_final_oos_evaluation(
         total_oos_eval_sec,
         cache_hits,
         len(member_eval_cache),
-        len(alpha_build_signatures),
-        alpha_build_count,
     )
 
     # Online Capital Allocation (Meta-Strategy)
