@@ -814,4 +814,4 @@ def build_mark_price_1m_array(
             _logger.warning("Error building mark price for %s: %s", symbol, e)
             out_df[symbol] = np.nan
 
-    return out_df.to_numpy(dtype=np.float64)
+    return np.asarray(out_df.to_numpy(dtype=np.float64), dtype=np.float64)

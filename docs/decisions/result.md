@@ -11,7 +11,7 @@ related_paths:
   - src/domain/futures/optimization/objectives.py
   - src/domain/futures/strategy/labels.py
   - src/domain/futures/strategy_runtime/bridge.py
-last_verified: 2026-05-25 (A/B test + root cause analysis complete)
+last_verified: 2026-05-25 (Step1~9 + 300-trial strategy run completed)
 ---
 
 # Result Baseline
@@ -221,3 +221,38 @@ for t in range(t_len - horizon):
 - Phase_b 퇴화: 모든 90개 trial이 동일 값 수렴 (전략 자체가 파라미터 민감도 상실)
 
 **결론:** calibrator 타깃 전환보다 **label_horizon_bars 확장**이 근본 해결책.
+
+---
+
+## 17. Step1~3 Execution Baseline (2026-05-25)
+
+- **Step1 완료:** `ml_builder` 출력/로그에 baseline harness 메타데이터 표준 스키마를 기록.
+  - `baseline_harness.mode`: `single_horizon` / `horizon_experiment`
+  - `selected_horizon`, `cost_floor_bps`, `candidate_count` 통일
+- **Step2 완료:** ranker/calibrator 하드코딩 학습 하이퍼파라미터 제거, `StrategyMLConfig` SSOT로 통합.
+- **Step3 완료:** horizon 실험 축(`horizon_candidates`) 추가 및 cost-wall aware 점수
+  `score_bps = alpha_p95_bps - (friction + hurdle)`로 최적 horizon 선택/기록.
+- **API 호환성:** 외부 호출 시그니처/반환 타입 변경 없음 (`build_ml_strategy_alpha` 유지).
+
+---
+
+## 18. Step4~6 Execution Update (2026-05-25)
+
+- **Step4 Label Contract v2:** `LabelPanel`에 명시적 target trace 필드(`rank_target`, `magnitude_target`, `cost_clearance_target`)와 target/cost metadata를 추가. 기존 필드는 유지하여 API 호환성 보존.
+- **Step5 Feature Registry:** feature 조립을 group registry 기반으로 전환하고 `feature_groups_enabled`로 그룹 단위 ablation 토글을 지원.
+- **Step6 Missing Data:** `valid_mask`의 all-finite 의존을 완화하고, fold train-only median imputer + missingness indicator를 추가해 PIT-safe 결측 대응 경로를 강화.
+
+---
+
+## 19. Step7~9 + 300-Trial Verification Update (2026-05-25)
+
+- **Step7 (Model Family):** `model_family`가 단일값에서 `lgbm_regression | lgbm_huber`로 확장되었고 ranker factory가 objective 분기를 수행한다.
+- **Step8 (Calibration v2):** `ev_mode=quantile | prob_x_magnitude` 경로가 유지/추가되어 EV 산출 방식을 실험 가능하게 분리했다.
+- **Step9 (Alpha Gate):** gate fail reason을 구조화했으며 기본 계약은 hard wall(`alpha_gate_cost_wall_tolerance_bps=0.0`)로 복원했다.
+
+- **300-trial 실행 결과 (strategy mode):**
+  - 파이프라인/최적화 실행은 완주 (`phase_a1 150`, `phase_a2 60`, `phase_b 90`).
+  - 최종 성능은 여전히 `HOLD (GATE_FAIL)`:
+    - OOS `CAGR=-16.09%`, `Sortino=-1.21`, `MDD=14.73%`
+    - `EV/Cost=1.92` (목표 미달), `PBO=50%` (과적합 위험 높음)
+  - 결론: 실행 안정성은 회복됐지만, 알파 품질/포트폴리오 수익성 개선은 추가 사이클이 필요.

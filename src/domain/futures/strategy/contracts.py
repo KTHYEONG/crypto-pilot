@@ -30,6 +30,9 @@ class LabelPanel:
     relevance: np.ndarray
     sample_weight: np.ndarray
     eligible_mask: np.ndarray
+    rank_target: np.ndarray | None = None
+    magnitude_target: np.ndarray | None = None
+    cost_clearance_target: np.ndarray | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
 

@@ -137,3 +137,53 @@ def test_fit_quantile_calibrators_uses_raw_y_ev(monkeypatch: MonkeyPatch) -> Non
     assert len(seen) == 3
     for y in seen:
         np.testing.assert_allclose(y, train.y_ev, rtol=0.0, atol=0.0)
+
+
+def test_calibrator_fit_uses_config_hyperparams(monkeypatch: MonkeyPatch) -> None:
+    train = _dataset(rows=20, groups=4)
+    valid = _dataset(rows=8, groups=2)
+    captured: dict[str, float] = {}
+
+    class _FakeRegressor:
+        def __init__(self, **kwargs: float) -> None:
+            captured.update(kwargs)
+
+        def fit(self, *args: object, **kwargs: object) -> _FakeRegressor:
+            del args, kwargs
+            return self
+
+        def predict(self, x: object) -> np.ndarray:
+            return np.zeros((len(x),), dtype=np.float64)
+
+    monkeypatch.setattr("src.domain.futures.strategy.calibrator.lgb.LGBMRegressor", _FakeRegressor)
+    cfg = StrategyMLConfig(
+        calibrator_learning_rate=0.019,
+        calibrator_feature_fraction=0.63,
+        calibrator_bagging_fraction=0.62,
+        calibrator_bagging_freq=4,
+        calibrator_lambda_l2=3.0,
+        calibrator_reg_alpha=0.8,
+        max_depth=6,
+        calibrator_max_depth_cap=4,
+    )
+    fit_quantile_calibrators(train=train, valid=valid, cfg=cfg)
+    assert captured["learning_rate"] == 0.019
+    assert captured["feature_fraction"] == 0.63
+    assert captured["bagging_fraction"] == 0.62
+    assert captured["bagging_freq"] == 4
+    assert captured["lambda_l2"] == 3.0
+    assert captured["reg_alpha"] == 0.8
+    assert captured["max_depth"] == 4
+
+
+def test_compute_conservative_ev_prob_x_magnitude_mode() -> None:
+    cfg = StrategyMLConfig(ev_mode="prob_x_magnitude", alpha_clip_bps=100.0)
+    q10 = np.array([-0.03, -0.02, -0.01], dtype=np.float32)
+    q50 = np.array([-0.01, 0.0, 0.02], dtype=np.float32)
+    q90 = np.array([0.01, 0.02, 0.03], dtype=np.float32)
+
+    ev = compute_conservative_ev(q10=q10, q50=q50, q90=q90, cfg=cfg)
+
+    assert ev.shape == (3,)
+    assert ev.dtype == np.float32
+    assert np.all(np.isfinite(ev))

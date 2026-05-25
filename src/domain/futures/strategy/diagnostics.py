@@ -225,6 +225,40 @@ def passes_directional_viability_gate(
     )
 
 
+def alpha_gate_diagnostics(
+    *,
+    alpha_p95_bps: float,
+    friction_bps: float,
+    hurdle_bps: float,
+    long_nz: float,
+    short_nz: float,
+    xs_long_preservation_ratio: float,
+    xs_short_preservation_ratio: float,
+    min_long_nz: float,
+    min_short_nz: float,
+    min_xs_preservation: float,
+    cost_wall_tolerance_bps: float = 0.0,
+) -> dict[str, object]:
+    """Evaluate alpha viability gate and expose fail reasons."""
+    floor_bps = float(friction_bps + hurdle_bps)
+    fail_reasons: list[str] = []
+    if alpha_p95_bps < (floor_bps - max(0.0, float(cost_wall_tolerance_bps))):
+        fail_reasons.append("alpha_p95_below_cost_wall")
+    if long_nz < min_long_nz:
+        fail_reasons.append("long_nz_below_threshold")
+    if short_nz < min_short_nz:
+        fail_reasons.append("short_nz_below_threshold")
+    if xs_long_preservation_ratio < min_xs_preservation:
+        fail_reasons.append("xs_long_preservation_below_threshold")
+    if xs_short_preservation_ratio < min_xs_preservation:
+        fail_reasons.append("xs_short_preservation_below_threshold")
+    return {
+        "alpha_gate_pass": len(fail_reasons) == 0,
+        "alpha_gate_fail_reasons": fail_reasons,
+        "alpha_gate_floor_bps": floor_bps,
+    }
+
+
 def gross_return_diagnostics(
     gross_long_2d: np.ndarray,
     resid_long_2d: np.ndarray,

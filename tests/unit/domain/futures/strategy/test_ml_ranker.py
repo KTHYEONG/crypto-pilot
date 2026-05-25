@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
+from _pytest.monkeypatch import MonkeyPatch
 
 from src.domain.futures.strategy.config import StrategyMLConfig
 from src.domain.futures.strategy.contracts import LongMatrixDataset
@@ -60,3 +61,61 @@ def test_predict_rank_score_empty_dataset_returns_empty() -> None:
     pred = predict_rank_score(fit.model, empty)
 
     assert pred.shape == (0,)
+
+
+def test_fit_ranker_uses_config_hyperparams(monkeypatch: MonkeyPatch) -> None:
+    train = _dataset(rows=40, groups=5)
+    valid = _dataset(rows=16, groups=2)
+    captured: dict[str, float] = {}
+
+    class _FakeRegressor:
+        def __init__(self, **kwargs: float) -> None:
+            captured.update(kwargs)
+
+        def fit(self, *args: object, **kwargs: object) -> _FakeRegressor:
+            del args, kwargs
+            return self
+
+        def predict(self, x: object) -> np.ndarray:
+            return np.zeros((len(x),), dtype=np.float64)
+
+    monkeypatch.setattr("src.domain.futures.strategy.ranker.lgb.LGBMRegressor", _FakeRegressor)
+    cfg = StrategyMLConfig(
+        ranker_learning_rate=0.017,
+        ranker_feature_fraction=0.66,
+        ranker_bagging_fraction=0.61,
+        ranker_bagging_freq=3,
+        ranker_lambda_l2=2.5,
+        ranker_reg_alpha=0.9,
+    )
+    fit_ranker(train=train, valid=valid, cfg=cfg)
+
+    assert captured["learning_rate"] == 0.017
+    assert captured["feature_fraction"] == 0.66
+    assert captured["bagging_fraction"] == 0.61
+    assert captured["bagging_freq"] == 3
+    assert captured["lambda_l2"] == 2.5
+    assert captured["reg_alpha"] == 0.9
+
+
+def test_fit_ranker_uses_huber_family(monkeypatch: MonkeyPatch) -> None:
+    train = _dataset(rows=40, groups=5)
+    valid = _dataset(rows=16, groups=2)
+    captured: dict[str, object] = {}
+
+    class _FakeRegressor:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+        def fit(self, *args: object, **kwargs: object) -> _FakeRegressor:
+            del args, kwargs
+            return self
+
+        def predict(self, x: object) -> np.ndarray:
+            return np.zeros((len(x),), dtype=np.float64)
+
+    monkeypatch.setattr("src.domain.futures.strategy.ranker.lgb.LGBMRegressor", _FakeRegressor)
+    cfg = StrategyMLConfig(model_family="lgbm_huber")
+    fit_ranker(train=train, valid=valid, cfg=cfg)
+
+    assert captured["objective"] == "huber"
