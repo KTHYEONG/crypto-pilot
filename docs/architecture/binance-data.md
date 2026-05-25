@@ -12,7 +12,7 @@ related_paths:
 change_triggers:
   - src/core/exchange/binance_*.py
   - src/core/utils/binance_vision.py
-last_verified: 2026-05-24
+last_verified: 2026-05-25
 ---
 
 # Binance Futures Data Architecture
@@ -104,3 +104,5 @@ class ManifestRow:
 ## 7. Testing Expectations
 - **Continuity Test:** 타임스탬프 간격의 일관성 및 누락 구간 보간 여부 확인.
 - **Integrity Test:** 다운로드된 파일의 SHA256이 Manifest와 일치하는지 확인.
+- **Deterministic Isolation:** 테스트는 실 Binance/FAPI/Vision 엔드포인트를 호출하지 않고, 네트워크 경계(`urllib/ccxt`)를 mock 하여 반복 가능하게 유지.
+- **Boundary-Only Mocking:** 내부 변환 로직/계산 로직은 실제 구현을 검증하고 외부 I/O 경계만 대체.
