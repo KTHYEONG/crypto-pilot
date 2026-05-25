@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import logging
-
 import numpy as np
 import pytest
 
@@ -141,7 +139,7 @@ def test_build_quality_report_and_gate_pass() -> None:
 
 
 def test_gross_return_diagnostics_returns_one_when_no_residualization() -> None:
-    """gross_return_diagnostics must return variance_retention_ratio=1.0 when inputs are identical."""
+    """gross_return_diagnostics must return variance_retention_ratio=1.0 for identical inputs."""
     # Arrange
     rng = np.random.default_rng(0)
     gross = rng.normal(scale=0.01, size=(10, 6)).astype(np.float32)
@@ -206,7 +204,7 @@ def test_gross_return_diagnostics_handles_all_nan_gracefully() -> None:
 
 
 def test_passes_signal_preservation_gate_returns_true_when_both_ratios_meet_threshold() -> None:
-    """passes_signal_preservation_gate returns True when both preservation ratios exceed thresholds."""
+    """passes_signal_preservation_gate returns True when both ratios exceed thresholds."""
     # Arrange
     summary = {
         "xs_long_preservation_ratio": 0.75,
@@ -225,7 +223,7 @@ def test_passes_signal_preservation_gate_returns_true_when_both_ratios_meet_thre
 
 
 def test_passes_signal_preservation_gate_returns_false_when_long_ratio_below_threshold() -> None:
-    """passes_signal_preservation_gate returns False when long preservation ratio is below threshold."""
+    """passes_signal_preservation_gate returns False when long ratio is below threshold."""
     # Arrange
     summary = {
         "xs_long_preservation_ratio": 0.50,
@@ -244,7 +242,7 @@ def test_passes_signal_preservation_gate_returns_false_when_long_ratio_below_thr
 
 
 def test_passes_signal_preservation_gate_returns_false_when_short_ratio_below_threshold() -> None:
-    """passes_signal_preservation_gate returns False when short preservation ratio is below threshold."""
+    """passes_signal_preservation_gate returns False when short ratio is below threshold."""
     # Arrange
     summary = {
         "xs_long_preservation_ratio": 0.80,
