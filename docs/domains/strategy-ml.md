@@ -13,7 +13,7 @@ change_triggers:
   - src/domain/futures/strategy/ranker.py
   - src/domain/futures/optimization/objectives.py
   - src/domain/futures/strategy/diagnostics.py
-last_verified: 2026-05-25
+last_verified: 2026-05-25 (Step1~9 implemented; model_family split, calibration v2, alpha gate diagnostics)
 ---
 
 # Binance Futures ML Strategy
@@ -258,6 +258,21 @@ ev[i]            = q50[i] * (1.0 - penalty_term[i])
   - `[AWF-REFIT-PROF] leg=i/n total=... bars=... train_end=... test=[s,e)`
 - `build_ml_strategy_alpha_anchored()`는 내부 학습 파이프라인 시간을 분해한다.
   - `feature_label`, `matrix`, `fit_predict`, `calibrator`, `total`
+
+### 5.14 Step4 - Label Contract v2 (2026-05-25)
+- `LabelPanel`은 기존 public field를 유지하면서 `rank_target`, `magnitude_target`, `cost_clearance_target`를 선택 필드로 추가한다.
+- `rank_target`는 `signed_net_ret`, `magnitude_target`는 `exec_net_ret`를 가리키며, `metadata`에 target key/mode/cost-floor를 기록한다.
+- B1/B2 불변식은 유지된다: fee/slippage는 label에서 차감하지 않고, beta-residualized + CS-demean 계약은 기존과 동일.
+
+### 5.15 Step5 - Feature Registry & Group Ablation (2026-05-25)
+- `features.py`는 단일 리스트 조립에서 group registry 조립 구조로 전환되었다.
+- 지원 그룹: `trend`, `reversal`, `volatility`, `carry`, `liquidity`, `market_context`, `microstructure`, `missingness`.
+- `StrategyMLConfig.feature_groups_enabled`로 그룹 단위 실험/ablation을 제어한다(기본값: 전체 활성화).
+
+### 5.16 Step6 - Missing Data Handling (2026-05-25)
+- `FeaturePanel.valid_mask`는 `all-finite` 강제 대신 거래 eligibility 기반으로 유지하고, 결측은 train-only 경로에서 처리한다.
+- 정규화는 fold별 `fit_robust_bounds(train)` 이후 `fit_missing_value_imputer(train)`를 적용한다.
+- missingness indicator 피처(`*_missing_ind`)를 PIT-safe하게 제공하며, imputer fit은 train split에만 수행되어 leakage를 방지한다.
 - `run_ml_pipeline_for_universe()`는 anchored/non-anchored 호출 총 시간 로그를 남긴다.
   - `[ML-PIPE-PROF] anchored=... symbols=... tf=... elapsed=... alpha_rows=...`
 - final ensemble은 기존 캐시 로그 외에 아래 분해를 추가한다.
@@ -301,6 +316,35 @@ ev[i]            = q50[i] * (1.0 - penalty_term[i])
 - **B1 불변 계약:** 라벨 레이어(labels.py)는 fee/slippage를 차감하지 않는다. 비용 차감은 objectives 레이어에서만 1회 수행. `"funding_net"` 옵션은 이 계약을 위반하므로 삭제됨.
 - Ranker 타깃(`signed_net_ret` = CS-demeaned beta-residualized)은 `calibrator_target` 무관하게 불변.
 - 관련 진단: `[RAW-SIGNAL-DIAG]` (§5.6) — 잔차화로 인한 분산 손실 정량화.
+
+### 5.18 Step1~3 Implementation Contract (2026-05-25)
+- **Step1 / Baseline Harness Metadata Standardization**
+  - `build_ml_strategy_alpha` 출력 `panel.attrs`에 `baseline_harness` 표준 메타데이터를 기록한다.
+  - 공통 필드: `version`, `mode`, `selected_horizon`, `cost_floor_bps`, `candidate_count`.
+  - horizon 실험 모드에서는 `horizon_experiment`(candidate별 `alpha_p95_bps`, `score_bps`, `clears_cost_wall`)를 추가 기록한다.
+- **Step2 / Config SSOT**
+  - `ranker.py`, `calibrator.py`의 학습 하이퍼파라미터 하드코딩을 제거하고 `StrategyMLConfig` 필드를 단일 진실원(SSOT)으로 사용한다.
+  - 기본값은 기존 동작과의 호환성을 위해 이전 하드코딩 값(예: lr 0.02, feature_fraction 0.70, bagging_fraction 0.75)을 반영한다.
+- **Step3 / Horizon Experiment Axis**
+  - `StrategyMLConfig`에 `horizon_experiment_enabled`, `horizon_candidates`를 추가한다.
+  - 활성화 시 candidate horizon별로 alpha를 생성하고 `alpha_p95_bps - (friction + hurdle)` 점수(실행 가능성, cost-wall aware)로 최고 horizon을 선택한다.
+
+### 5.19 Step7 - Model Family Split (2026-05-25)
+- `StrategyMLConfig.model_family`는 `lgbm_regression`(baseline)과 `lgbm_huber`를 지원한다.
+- `ranker.py::_build_ranker_model()`는 family별 LightGBM objective를 분기해 생성한다.
+- 기본값은 `lgbm_regression`으로 유지되어 backward compatibility를 보장한다.
+
+### 5.20 Step8 - Calibration v2 EV Mode (2026-05-25)
+- `StrategyMLConfig.ev_mode`는 `quantile`과 `prob_x_magnitude`를 지원한다.
+- `quantile`: 기존 sign-symmetric tail penalty 경로.
+- `prob_x_magnitude`: directional probability(`q10/q50/q90`)와 magnitude(`|q50|`)를 결합한 EV 경로.
+
+### 5.21 Step9 - Alpha Gate Diagnostics & Contract (2026-05-25)
+- `diagnostics.py::alpha_gate_diagnostics()`는 아래 조건의 fail reason을 구조적으로 반환한다.
+- 조건: `alpha_p95_bps` vs `friction + hurdle`, `long_nz`, `short_nz`, `xs preservation`.
+- 기본 계약은 hard wall 유지: `alpha_gate_cost_wall_tolerance_bps=0.0`.
+- tolerance는 실험/디버그용 override이며 기본 동작을 완화하지 않는다.
+  - 외부 API(`build_ml_strategy_alpha` 시그니처/반환 타입)는 변경하지 않는다.
 
 ---
 

@@ -45,20 +45,19 @@ def _fit_one(
     cfg: StrategyMLConfig,
     alpha: float,
 ) -> lgb.LGBMRegressor:
-    # [ML-UPGRADE] Calibrator의 일반화 성능 제고를 위해 L1 규제 및 Colsample/Bagging 최적화 주입
     model = lgb.LGBMRegressor(
         objective="quantile",
         alpha=alpha,
         n_estimators=cfg.calibrator_n_estimators,
-        learning_rate=0.02,
+        learning_rate=cfg.calibrator_learning_rate,
         num_leaves=cfg.num_leaves,
-        max_depth=min(cfg.max_depth, 5),
+        max_depth=min(cfg.max_depth, cfg.calibrator_max_depth_cap),
         min_data_in_leaf=cfg.min_data_in_leaf,
-        feature_fraction=0.70,
-        bagging_fraction=0.75,
-        bagging_freq=1,
-        lambda_l2=max(cfg.lambda_l2, 1.0),
-        reg_alpha=1.5,
+        feature_fraction=cfg.calibrator_feature_fraction,
+        bagging_fraction=cfg.calibrator_bagging_fraction,
+        bagging_freq=cfg.calibrator_bagging_freq,
+        lambda_l2=cfg.calibrator_lambda_l2,
+        reg_alpha=cfg.calibrator_reg_alpha,
         random_state=cfg.seed,
         n_jobs=cfg.n_jobs,
         verbose=-1,
@@ -163,25 +162,26 @@ def compute_conservative_ev(
     q10f = np.asarray(q10, dtype=np.float32)
     q50f = np.asarray(q50, dtype=np.float32)
     q90f = np.asarray(q90, dtype=np.float32)
-    downside = np.maximum(q50f - q10f, np.float32(0.0))
-    upside = np.maximum(q90f - q50f, np.float32(0.0))
-    
-    # 자산별 상대적 불확실성 비례 페널티; OOS regime shift 시 폭주 방지를 위해 2x 상한 적용
     uncertainty = np.maximum(q90f - q10f, np.float32(1e-8))
-    med_unc = np.median(uncertainty) if uncertainty.size > 0 else np.float32(1e-4)
-    lam = np.float32(cfg.lambda_tail)
-    lam_dynamic = np.clip(
-        lam * (uncertainty / np.maximum(med_unc, np.float32(1e-8))),
-        np.float32(0.0),
-        lam * np.float32(2.0),
-    )
-    
-    # Sign-symmetric: multiplicative penalty scales with q50 magnitude to avoid OOS contraction.
-    is_long = q50f >= np.float32(0.0)
-    penalty_ratio = np.where(is_long, downside / uncertainty, upside / uncertainty)
-    # Clip dynamic penalty to [0.0, 0.99] to guarantee sign-preservation.
-    penalty_term = np.clip(lam_dynamic * penalty_ratio, np.float32(0.0), np.float32(0.99))
-    ev = q50f * (np.float32(1.0) - penalty_term)
+    if cfg.ev_mode == "prob_x_magnitude":
+        magnitude = np.maximum(np.abs(q50f), np.float32(0.0))
+        prob_up = np.clip((q50f - q10f) / uncertainty, np.float32(0.0), np.float32(1.0))
+        directional_prob = (np.float32(2.0) * prob_up) - np.float32(1.0)
+        ev = directional_prob * magnitude
+    else:
+        downside = np.maximum(q50f - q10f, np.float32(0.0))
+        upside = np.maximum(q90f - q50f, np.float32(0.0))
+        med_unc = np.median(uncertainty) if uncertainty.size > 0 else np.float32(1e-4)
+        lam = np.float32(cfg.lambda_tail)
+        lam_dynamic = np.clip(
+            lam * (uncertainty / np.maximum(med_unc, np.float32(1e-8))),
+            np.float32(0.0),
+            lam * np.float32(2.0),
+        )
+        is_long = q50f >= np.float32(0.0)
+        penalty_ratio = np.where(is_long, downside / uncertainty, upside / uncertainty)
+        penalty_term = np.clip(lam_dynamic * penalty_ratio, np.float32(0.0), np.float32(0.99))
+        ev = q50f * (np.float32(1.0) - penalty_term)
     ev = np.asarray(ev, dtype=np.float32)
     clip = np.float32(cfg.alpha_clip_bps / 10000.0)
     clipped = np.clip(ev, -clip, clip)

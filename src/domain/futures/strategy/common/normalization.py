@@ -58,6 +58,13 @@ class RobustBounds:
     upper: NDArray[np.float64]
 
 
+@dataclass(slots=True, frozen=True)
+class MissingValueImputer:
+    """Per-feature train-only imputation values."""
+
+    feature_medians: NDArray[np.float64]
+
+
 def fit_robust_bounds(train_values: NDArray[np.float64], clip_quantile: float) -> RobustBounds:
     """Fit per-feature lower/upper quantiles on train-only tensor [T, N, F]."""
     if train_values.ndim != 3:
@@ -69,6 +76,31 @@ def fit_robust_bounds(train_values: NDArray[np.float64], clip_quantile: float) -
     lower = np.nanquantile(flat, lower_q, axis=0).astype(np.float64)
     upper = np.nanquantile(flat, clip_quantile, axis=0).astype(np.float64)
     return RobustBounds(lower=lower, upper=upper)
+
+
+def fit_missing_value_imputer(train_values: NDArray[np.float64]) -> MissingValueImputer:
+    """Fit per-feature median imputer on train-only tensor [T, N, F]."""
+    if train_values.ndim != 3:
+        raise ValueError("train_values must be [T, N, F]")
+    medians = np.nanmedian(train_values.reshape(-1, train_values.shape[2]), axis=0)
+    medians = np.where(np.isfinite(medians), medians, 0.0).astype(np.float64)
+    return MissingValueImputer(feature_medians=medians)
+
+
+def apply_missing_value_imputer(
+    values: NDArray[np.float64],
+    imputer: MissingValueImputer,
+) -> NDArray[np.float64]:
+    """Apply train-only missing-value imputation to tensor [T, N, F]."""
+    if values.ndim != 3:
+        raise ValueError("values must be [T, N, F]")
+    if imputer.feature_medians.shape[0] != values.shape[2]:
+        raise ValueError("imputer feature dimension mismatch")
+    return np.where(
+        np.isfinite(values),
+        values,
+        imputer.feature_medians[np.newaxis, np.newaxis, :],
+    ).astype(np.float64, copy=False)
 
 
 def apply_robust_bounds(values: NDArray[np.float64], bounds: RobustBounds) -> NDArray[np.float64]:

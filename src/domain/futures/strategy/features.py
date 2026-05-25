@@ -200,66 +200,98 @@ def build_feature_panel(aligned: AlignedMarketData, cfg: StrategyMLConfig) -> Fe
         1e-12,
     )
 
-    feats = [
+    base_groups: dict[str, list[tuple[str, NDArray[np.float64]]]] = {
+        "trend": [
         ("ret_1", ret_1),
         ("ret_3", ret_3),
         ("ret_6", ret_6),
         ("ret_12", ret_12),
         ("ret_18", ret_18),
         ("ret_36", ret_36),
+        ("mom_12_skip_1", mom_12_skip_1),
+        ("mom_36_skip_3", mom_36_skip_3),
+        ("cs_rank_ret_6", cs_rank_ret_6),
+        ("cs_rank_ret_12", cs_rank_ret_12),
+        ("cs_rank_ret_18", cs_rank_ret_18),
+        ("cs_rank_ret_36", cs_rank_ret_36),
+        ("cs_sharpe_6", cs_sharpe_6),
+        ("cs_sharpe_18", cs_sharpe_18),
+        ],
+        "reversal": [
         ("rev_3", rev_3),
         ("rev_6", rev_6),
         ("rev_12", rev_12),
-        ("mom_12_skip_1", mom_12_skip_1),
-        ("mom_36_skip_3", mom_36_skip_3),
+        ("xs_reversal_prior_6", xs_reversal_prior_6),
+        ],
+        "volatility": [
         ("rv_6", rv_6),
         ("rv_18", rv_18),
         ("rv_36", rv_36),
         ("downside_rv_18", downside_rv_18),
         ("atr_pct_14", atr_pct_14),
         ("vol_of_vol_36", vol_of_vol_36),
+        ("cs_rank_rv_18", cs_rank_rv_18),
+        ],
+        "carry": [
         ("funding_1", funding_1),
         ("funding_mean_3", funding_mean_3),
         ("funding_mean_6", funding_mean_6),
         ("funding_mean_18", funding_mean_18),
         ("funding_z_30d", funding_z_30d),
         ("funding_sign_persistence_6", funding_sign_persistence_6),
+        ("cs_rank_funding_6", cs_rank_funding_6),
+        ("carry_prior_6", carry_prior_6),
+        ("basis_1", basis_1),
+        ("basis_mean_6", basis_mean_6),
+        ],
+        "liquidity": [
         ("volume_z_18", volume_z_18),
         ("dollar_volume_rank", dollar_volume_rank),
         ("adv_rank", adv_rank),
         ("execution_cost_rank", execution_cost_rank),
-        ("cs_rank_ret_6", cs_rank_ret_6),
-        ("cs_rank_ret_12", cs_rank_ret_12),
-        ("cs_rank_ret_18", cs_rank_ret_18),
-        ("cs_rank_ret_36", cs_rank_ret_36),
-        ("cs_rank_rv_18", cs_rank_rv_18),
-        ("cs_rank_funding_6", cs_rank_funding_6),
         ("cs_rank_volume_18", cs_rank_volume_18),
         ("cs_rank_dollar_volume", cs_rank_dollar_vol),
-        ("cs_sharpe_6", cs_sharpe_6),
-        ("cs_sharpe_18", cs_sharpe_18),
+        ("oi_ret_1", oi_ret_1),
+        ("oi_z_18", oi_z_18),
+        ],
+        "market_context": [
         ("btc_ret_6", btc_ret_6),
         ("btc_rv_18", btc_rv_18),
         ("market_median_ret_6", market_median_ret_6),
         ("market_dispersion_6", market_dispersion_6),
         ("positive_breadth_6", positive_breadth_6),
-        ("xs_reversal_prior_6", xs_reversal_prior_6),
-        ("carry_prior_6", carry_prior_6),
-        ("basis_1", basis_1),
-        ("basis_mean_6", basis_mean_6),
-        ("oi_ret_1", oi_ret_1),
-        ("oi_z_18", oi_z_18),
+        ],
+        "microstructure": [
         ("micro_hl_spread_1", micro_hl_spread_1),
         ("micro_close_to_hl_1", micro_close_to_hl_1),
-    ]
+        ],
+        "missingness": [],
+    }
+    if cfg.add_missingness_indicators:
+        base_groups["missingness"].extend(
+            [
+                ("funding_missing_ind", (~np.isfinite(aligned.funding_2d)).astype(np.float64)),
+                ("basis_missing_ind", (~np.isfinite(basis_2d)).astype(np.float64)),
+                ("oi_missing_ind", (~np.isfinite(oi_2d)).astype(np.float64)),
+                ("adv_missing_ind", (~np.isfinite(adv_usdt_2d)).astype(np.float64)),
+                (
+                    "execution_cost_missing_ind",
+                    (~np.isfinite(execution_cost_bps_2d)).astype(np.float64),
+                ),
+            ]
+        )
+    feats: list[tuple[str, NDArray[np.float64]]] = []
+    for group_name in cfg.feature_groups_enabled:
+        feats.extend(base_groups[group_name])
     names = tuple(name for name, _ in feats)
     values = np.stack([arr for _, arr in feats], axis=2).astype(np.float32, copy=False)
     availability_masks: dict[str, np.ndarray] = {
         name: np.isfinite(arr) for name, arr in feats
     }
-    valid_mask = mask & np.all(np.isfinite(values), axis=2)
+    valid_mask = mask.copy()
     metadata: dict[str, Any] = {
         "feature_count": len(names),
+        "enabled_feature_groups": list(cfg.feature_groups_enabled),
         "funding_missing_ratio": float(np.mean(~np.isfinite(aligned.funding_2d))),
         "basis_missing_ratio": 1.0 if basis_missing else float(np.mean(~np.isfinite(basis_2d))),
         "oi_missing_ratio": 1.0 if oi_missing else float(np.mean(~np.isfinite(oi_2d))),
