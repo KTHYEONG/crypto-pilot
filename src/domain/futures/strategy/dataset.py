@@ -108,9 +108,15 @@ def build_long_matrix(
             if not np.all(np.isfinite(feat)):
                 continue
             # sample_weight from labels (liquidity * (1+2|y_ev|), computed in labels.py).
-            # exec_net_ret: pre-CS-demean beta-residualized return — absolute EV for calibrator.
+            # magnitude_target preferred for explicit label contract tracing (Step4);
+            # fallback to exec_net_ret for backward compatibility.
             # signed_net_ret (CS-demeaned) is consumed only by ranker via _cs_demean in ranker.py.
-            ev_val = np.float32(labels.exec_net_ret[t, col])
+            ev_source = (
+                labels.magnitude_target
+                if labels.magnitude_target is not None
+                else labels.exec_net_ret
+            )
+            ev_val = np.float32(ev_source[t, col])
             w = np.float32(labels.sample_weight[t, col])
 
             x_t.append(feat.astype(np.float32, copy=False))

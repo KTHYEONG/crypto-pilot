@@ -225,6 +225,7 @@ def _suggest_ml_joint_nsga2(trial: optuna.Trial, ctx: MLPhaseDContext) -> dict[s
         "MAX_EXPOSURE_PER_COIN": float(baseline.get("MAX_EXPOSURE_PER_COIN", 0.25)),
     }
 
+    base: dict[str, Any]
     if phase in {"phase_a1", "a1"}:
         phase_suggested = suggest_signal_params(trial, ranges=phase_ranges, fixed=frozen)
         base = dict(baseline_core)
@@ -236,7 +237,7 @@ def _suggest_ml_joint_nsga2(trial: optuna.Trial, ctx: MLPhaseDContext) -> dict[s
         base.update(frozen)
         base.update(phase_suggested)
     else:
-        base = suggest_joint_params(trial, ranges=phase_ranges, fixed=frozen)
+        base = dict(suggest_joint_params(trial, ranges=phase_ranges, fixed=frozen))
 
     base.update(FIXED_DEFAULTS)
     kappa = float(base["PORTFOLIO_KAPPA"])

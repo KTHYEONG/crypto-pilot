@@ -76,7 +76,7 @@ def _kelly_raw(
 ) -> np.ndarray:
     var = np.maximum(sigma_diag**2, eps)
     f = mu / var
-    return np.clip(f, -abs(f_kelly_max), abs(f_kelly_max))
+    return np.asarray(np.clip(f, -abs(f_kelly_max), abs(f_kelly_max)), dtype=np.float64)
 
 
 def _kelly_scaled(
@@ -112,10 +112,10 @@ def _apply_ls_balance(w: np.ndarray, *, lo: float = 0.5, hi: float = 2.0) -> np.
             out = np.where(out < 0, out * scale_s, out)
         else:
             break
-    return out
+    return np.asarray(out, dtype=np.float64)
 
 
-@numba.njit(cache=True)
+@numba.njit(cache=True)  # type: ignore[untyped-decorator]
 def _project_l1_linf_numba(
     w_pre: np.ndarray, gross_cap: float, per_symbol_cap: float
 ) -> np.ndarray:
@@ -155,7 +155,10 @@ def _project_l1_linf(
     w_pre: np.ndarray, *, gross_cap: float, per_symbol_cap: float
 ) -> np.ndarray:
     """Fast L1 gross + per-symbol caps via iterative scaling and clipping."""
-    return _project_l1_linf_numba(w_pre, float(gross_cap), float(per_symbol_cap))
+    return np.asarray(
+        _project_l1_linf_numba(w_pre, float(gross_cap), float(per_symbol_cap)),
+        dtype=np.float64,
+    )
 
 
 def solve_constrained_weights(
@@ -232,7 +235,7 @@ def precompute_rolling_covariances(
     return out
 
 
-@numba.njit(cache=True)
+@numba.njit(cache=True)  # type: ignore[untyped-decorator]
 def _solve_constrained_weights_numba(
     mu: np.ndarray,
     sigma: np.ndarray,
@@ -293,10 +296,10 @@ def _solve_constrained_weights_numba(
     for i in range(n):
         w_c[i] *= dd_scale
 
-    return w_c
+    return np.asarray(w_c, dtype=np.float64)
 
 
-@numba.njit(cache=True)
+@numba.njit(cache=True)  # type: ignore[untyped-decorator]
 def _precompute_loop_numba(
     n_bars: int,
     n_syms: int,
@@ -372,7 +375,8 @@ def precompute_rebalance_weights(
             ks_diag_2d = np.asarray(composer_sigma_2d, dtype=np.float64)
             ks_diag_2d = np.maximum(ks_diag_2d, 1e-12)
 
-        out = _precompute_loop_numba(
+        out = np.asarray(
+            _precompute_loop_numba(
             n_bars,
             n_syms,
             rb,
@@ -386,6 +390,8 @@ def precompute_rebalance_weights(
             float(per_symbol_cap),
             float(current_dd),
             ks_diag_2d=ks_diag_2d,
+            ),
+            dtype=np.float64,
         )
     else:
         # Fallback to slower Python loop with rolling LW
@@ -407,7 +413,8 @@ def precompute_rebalance_weights(
                 ks_diag = np.asarray(composer_sigma_2d[i - 1, :], dtype=np.float64).ravel()
                 ks_diag = np.maximum(ks_diag, 1e-12)
 
-            out[i, :] = _solve_constrained_weights_numba(
+            out[i, :] = np.asarray(
+                _solve_constrained_weights_numba(
                 mu_2d[i - 1],
                 sigma,
                 float(kappa),
@@ -418,6 +425,8 @@ def precompute_rebalance_weights(
                 float(per_symbol_cap),
                 float(current_dd),
                 kelly_sigma_diag=ks_diag,
+                ),
+                dtype=np.float64,
             )
 
     # project_all_caps 및 quantize_weights 통합 후처리
@@ -447,7 +456,7 @@ def precompute_rebalance_weights(
                 rr = np.nan_to_num(rr, nan=0.0, posinf=0.0, neginf=0.0)
                 sigma = rolling_ledoit_wolf_cov(rr, min_obs=min_obs)
 
-        sigma_port = float(np.sqrt(max(0.0, w @ sigma @ w)))
+        sigma_port = float(np.sqrt(max(0.0, float(w @ sigma @ w))))
 
         btc_beta = np.zeros(n_syms)
 
@@ -469,9 +478,9 @@ def precompute_rebalance_weights(
             step_sizes=step_sizes,
             min_notional=20.0,
         )
-        out[i, :] = w_quant
+        out[i, :] = np.asarray(w_quant, dtype=np.float64)
 
-    return out
+    return np.asarray(out, dtype=np.float64)
 
 
 def portfolio_weight_params_from_optuna(

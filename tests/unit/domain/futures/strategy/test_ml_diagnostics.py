@@ -5,6 +5,7 @@ import pytest
 
 from src.domain.futures.strategy.config import StrategyMLConfig
 from src.domain.futures.strategy.diagnostics import (
+    alpha_gate_diagnostics,
     build_quality_report,
     gross_return_diagnostics,
     ndcg_proxy_at_k,
@@ -258,3 +259,22 @@ def test_passes_signal_preservation_gate_returns_false_when_short_ratio_below_th
 
     # Assert
     assert result is False
+
+
+def test_alpha_gate_diagnostics_exposes_fail_reasons() -> None:
+    result = alpha_gate_diagnostics(
+        alpha_p95_bps=5.0,
+        friction_bps=12.0,
+        hurdle_bps=10.0,
+        long_nz=0.1,
+        short_nz=0.2,
+        xs_long_preservation_ratio=0.3,
+        xs_short_preservation_ratio=0.4,
+        min_long_nz=0.5,
+        min_short_nz=0.5,
+        min_xs_preservation=0.8,
+    )
+    assert result["alpha_gate_pass"] is False
+    reasons = result["alpha_gate_fail_reasons"]
+    assert isinstance(reasons, list)
+    assert len(reasons) >= 1

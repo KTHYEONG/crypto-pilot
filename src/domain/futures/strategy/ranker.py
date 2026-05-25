@@ -55,25 +55,7 @@ def fit_ranker(
     y_train_cs = _cs_demean(train.y_ev, train.group)
     y_valid_cs = _cs_demean(valid.y_ev, valid.group) if valid.X.shape[0] > 0 else valid.y_ev
 
-    # [ML-UPGRADE] 학습 성능 극대화 및 과적합 차단을 위한 L1 규제 및 Colsample/Bagging 최적화 주입
-    model = lgb.LGBMRegressor(
-        objective="regression",
-        metric="rmse",
-        boosting_type="gbdt",
-        n_estimators=cfg.ranker_n_estimators,
-        learning_rate=0.02,
-        num_leaves=cfg.num_leaves,
-        max_depth=cfg.max_depth,
-        min_data_in_leaf=cfg.min_data_in_leaf,
-        feature_fraction=0.70,
-        bagging_fraction=0.75,
-        bagging_freq=1,
-        lambda_l2=cfg.lambda_l2,
-        reg_alpha=1.5,
-        random_state=cfg.seed,
-        n_jobs=cfg.n_jobs,
-        verbose=-1,
-    )
+    model = _build_ranker_model(cfg)
     x_train = _as_feature_frame(train.X, train.feature_names)
     if valid.X.shape[0] > 0:
         x_valid = _as_feature_frame(valid.X, valid.feature_names)
@@ -87,6 +69,49 @@ def fit_ranker(
     else:
         model.fit(x_train, y_train_cs, sample_weight=train.sample_weight)
     return RankerFitResult(model=model)
+
+
+def _build_ranker_model(cfg: StrategyMLConfig) -> lgb.LGBMRegressor:
+    """Build ranker model by configured model family."""
+    if cfg.model_family == "lgbm_regression":
+        return lgb.LGBMRegressor(
+            objective="regression",
+            metric="rmse",
+            boosting_type="gbdt",
+            n_estimators=cfg.ranker_n_estimators,
+            learning_rate=cfg.ranker_learning_rate,
+            num_leaves=cfg.num_leaves,
+            max_depth=cfg.max_depth,
+            min_data_in_leaf=cfg.min_data_in_leaf,
+            feature_fraction=cfg.ranker_feature_fraction,
+            bagging_fraction=cfg.ranker_bagging_fraction,
+            bagging_freq=cfg.ranker_bagging_freq,
+            lambda_l2=cfg.ranker_lambda_l2,
+            reg_alpha=cfg.ranker_reg_alpha,
+            random_state=cfg.seed,
+            n_jobs=cfg.n_jobs,
+            verbose=-1,
+        )
+    if cfg.model_family == "lgbm_huber":
+        return lgb.LGBMRegressor(
+            objective="huber",
+            metric="huber",
+            boosting_type="gbdt",
+            n_estimators=cfg.ranker_n_estimators,
+            learning_rate=cfg.ranker_learning_rate,
+            num_leaves=cfg.num_leaves,
+            max_depth=cfg.max_depth,
+            min_data_in_leaf=cfg.min_data_in_leaf,
+            feature_fraction=cfg.ranker_feature_fraction,
+            bagging_fraction=cfg.ranker_bagging_fraction,
+            bagging_freq=cfg.ranker_bagging_freq,
+            lambda_l2=cfg.ranker_lambda_l2,
+            reg_alpha=cfg.ranker_reg_alpha,
+            random_state=cfg.seed,
+            n_jobs=cfg.n_jobs,
+            verbose=-1,
+        )
+    raise ValueError(f"unsupported model_family: {cfg.model_family}")
 
 
 def predict_rank_score(
