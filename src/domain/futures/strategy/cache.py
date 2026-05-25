@@ -31,7 +31,7 @@ def write_manifest(path: Path, payload: dict[str, Any]) -> Path:
 
 def read_manifest(path: Path) -> dict[str, Any]:
     """Read manifest JSON payload."""
-    return json.loads(path.read_text(encoding="utf-8"))
+    return dict(json.loads(path.read_text(encoding="utf-8")))
 
 
 def strategy_ml_cache_paths(base_dir: Path, run_id: str) -> dict[str, Path]:
@@ -73,7 +73,8 @@ def make_cache_key_payload(
 def write_feature_or_label_npz(path: Path, **arrays: np.ndarray) -> Path:
     """Write feature/label artifact as compressed NPZ."""
     ensure_cache_dir(path.parent)
-    np.savez_compressed(path, **arrays)
+    payload = {k: np.asarray(v) for k, v in arrays.items()}
+    np.savez_compressed(path, **payload)  # type: ignore[arg-type]
     return path
 
 

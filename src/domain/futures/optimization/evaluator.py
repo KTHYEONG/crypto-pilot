@@ -92,15 +92,17 @@ def calculate_spearman_ic(signal_scores: np.ndarray, target_returns: np.ndarray)
 
 def calculate_residual_score(candidate_scores: np.ndarray, base_scores: np.ndarray) -> np.ndarray:
     """Candidate 시그널에서 Base 시그널의 잔차 점수 계산."""
+    candidate_scores = np.asarray(candidate_scores, dtype=np.float64)
+    base_scores = np.asarray(base_scores, dtype=np.float64)
     mask = ~np.isnan(candidate_scores) & ~np.isnan(base_scores)
     if np.sum(mask) < 50:
-        return candidate_scores
-        
+        return np.asarray(candidate_scores, dtype=np.float64)
+
     x = base_scores[mask]
     y = candidate_scores[mask]
     beta = np.cov(x, y)[0, 1] / (np.var(x) + 1e-9)
-    residual = candidate_scores - beta * base_scores
-    return residual
+    residual = candidate_scores - float(beta) * base_scores
+    return np.asarray(residual, dtype=np.float64)
 
 def calculate_conditional_ic(
     signal_scores: np.ndarray, 
@@ -192,11 +194,11 @@ def calc_sortino_ratio(
         # If no downside, Sortino is technically infinite; cap at 10.0 for stability
         return 10.0 if np.mean(excess_returns) > 0 else 0.0
         
-    downside_std = np.std(downside_returns) * np.sqrt(ann_factor)
+    downside_std = float(np.std(downside_returns)) * math.sqrt(float(ann_factor))
     if downside_std < 1e-9:
         return 10.0 if np.mean(excess_returns) > 0 else 0.0
-        
-    return float(np.mean(excess_returns) * ann_factor) / downside_std
+
+    return float(float(np.mean(excess_returns)) * float(ann_factor) / downside_std)
 
 def calc_sortino_from_equity(equity_curve: np.ndarray, span_days: float) -> float:
     """Compute annualized Sortino ratio from equity curve."""
@@ -652,18 +654,18 @@ def perform_online_capital_allocation(
     meta_equity[0] = initial_balance
     
     # Member returns (bar-by-bar)
-    member_returns = []
+    member_returns: list[np.ndarray] = []
     for curve in ensemble_curves:
         # Avoid division by zero
         safe_curve = np.clip(curve, 1e-9, None)
         rets = np.zeros(n_bars)
         rets[1:] = (safe_curve[1:] - safe_curve[:-1]) / safe_curve[:-1]
         member_returns.append(rets)
-    member_returns = np.array(member_returns) # (N, T)
+    member_returns_arr = np.asarray(member_returns, dtype=np.float64)  # (N, T)
     
     for t in range(1, n_bars):
         # Apply current weights to calculate meta-return for this bar
-        meta_ret = np.dot(weights, member_returns[:, t])
+        meta_ret = float(np.dot(weights, member_returns_arr[:, t]))
         meta_equity[t] = meta_equity[t-1] * (1.0 + meta_ret)
         weight_history[t] = weights
         
@@ -672,7 +674,7 @@ def perform_online_capital_allocation(
             # Calculate cumulative relative returns over the previous window
             # R_{i, window} = (Curve[t] / Curve[t - window_size]) - 1
             # Or use sum of log returns for stability, but standard EG uses simple returns
-            window_returns = []
+            window_returns: list[float] = []
             for i in range(n_members):
                 c = ensemble_curves[i]
                 start_val = max(c[t - window_size], 1e-9)
@@ -680,11 +682,11 @@ def perform_online_capital_allocation(
                 win_ret = (end_val - start_val) / start_val
                 window_returns.append(win_ret)
             
-            window_returns = np.array(window_returns)
+            window_returns_arr = np.asarray(window_returns, dtype=np.float64)
             
             # EG update rule: w_{i, t+1} = w_{i, t} * exp(eta * R_{i, window})
             # Normalize to sum to 1
-            new_weights = weights * np.exp(eta * window_returns)
+            new_weights = weights * np.exp(eta * window_returns_arr)
             # Clip for numerical stability if needed
             new_weights = np.clip(new_weights, 1e-10, 1e10)
             weights = new_weights / np.sum(new_weights)

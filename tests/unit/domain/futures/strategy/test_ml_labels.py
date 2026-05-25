@@ -244,6 +244,18 @@ def test_build_label_panel_applies_ev_scaled_sample_weight() -> None:
     np.testing.assert_allclose(panel.sample_weight, expected, rtol=1e-6, atol=1e-8)
 
 
+def test_build_label_panel_exposes_explicit_target_contract_metadata() -> None:
+    panel = build_label_panel(
+        _aligned_for_labels(),
+        StrategyMLConfig(label_horizon_bars=1, fee_bps=0.0, slippage_bps=0.0, min_group_size=2),
+    )
+    assert panel.rank_target is not None
+    assert panel.magnitude_target is not None
+    assert panel.cost_clearance_target is not None
+    assert panel.metadata["rank_target_key"] == "signed_net_ret"
+    assert panel.metadata["magnitude_target_key"] == "exec_net_ret"
+
+
 # ---------------------------------------------------------------------------
 # calibrator_target toggle tests
 # ---------------------------------------------------------------------------
@@ -367,5 +379,4 @@ def test_strategy_ml_config_rejects_invalid_calibrator_target() -> None:
     # Arrange / Act / Assert
     with pytest.raises(ValueError, match="calibrator_target"):
         StrategyMLConfig(calibrator_target="invalid")  # type: ignore[arg-type]
-
 

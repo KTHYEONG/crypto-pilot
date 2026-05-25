@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from typing import Any
 
 import numpy as np
@@ -17,7 +17,9 @@ from src.domain.futures.strategy.calibrator import (
 )
 from src.domain.futures.strategy.common.alignment import align_data_maps
 from src.domain.futures.strategy.common.normalization import (
+    apply_missing_value_imputer,
     apply_robust_bounds,
+    fit_missing_value_imputer,
     fit_robust_bounds,
 )
 from src.domain.futures.strategy.common.validation import (
@@ -25,13 +27,14 @@ from src.domain.futures.strategy.common.validation import (
     validate_label_panel,
     validate_long_matrix,
 )
-from src.domain.futures.strategy.config import StrategyConfig
+from src.domain.futures.strategy.config import StrategyConfig, StrategyMLConfig
 from src.domain.futures.strategy.contracts import FeaturePanel, LabelPanel
 from src.domain.futures.strategy.dataset import (
     build_long_matrix,
     make_walk_forward_folds,
 )
 from src.domain.futures.strategy.diagnostics import (
+    alpha_gate_diagnostics,
     build_quality_report,
     ml_alpha_metrics,
     passes_ic_gate,
@@ -46,6 +49,20 @@ from src.domain.futures.strategy.labels import build_label_panel
 from src.domain.futures.strategy.ranker import fit_ranker, predict_rank_score
 
 _logger = logging.getLogger(__name__)
+
+
+def _resolve_horizon_candidates(ml_cfg: StrategyMLConfig) -> tuple[int, ...]:
+    """Resolve executable horizon candidates while preserving default behavior."""
+    if not ml_cfg.horizon_experiment_enabled:
+        return (int(ml_cfg.label_horizon_bars),)
+    seen: set[int] = set()
+    out: list[int] = []
+    for h in ml_cfg.horizon_candidates:
+        h_int = int(h)
+        if h_int >= 1 and h_int not in seen:
+            seen.add(h_int)
+            out.append(h_int)
+    return tuple(out) if out else (int(ml_cfg.label_horizon_bars),)
 
 
 @dataclass(slots=True, frozen=True)
@@ -67,7 +84,8 @@ def precompute_anchored_ml_panels(
 
     ml_cfg = replace(
         cfg.ml,
-        lambda_l2=1.0,
+        ranker_lambda_l2=1.0,
+        calibrator_lambda_l2=1.0,
         min_data_in_leaf=30,
         num_leaves=31,
     )
@@ -91,13 +109,79 @@ def build_ml_strategy_alpha(
     cfg: StrategyConfig,
 ) -> pd.DataFrame:
     """Build ML strategy alpha panel."""
-    # [ML-UPGRADE] LightGBM 트리가 충분히 쪼개질 수 있도록
-    # 런타임 규제를 완화하고 학습 능력을 제고합니다.
-    from dataclasses import replace
+    if cfg.ml.horizon_experiment_enabled:
+        candidates = _resolve_horizon_candidates(cfg.ml)
+        friction_bps = round_trip_cost_bps()
+        hurdle_bps = float(OPT_FUTURES_CONFIG.get("FUTURES_DEFAULT_EV_HURDLE_BPS", 10.0))
+        floor_bps = friction_bps + hurdle_bps
+        _logger.info(
+            "[ML-HARNESS] mode=horizon_experiment candidates=%s floor_bps=%.2f",
+            list(candidates),
+            floor_bps,
+        )
+        best_score = float("-inf")
+        best_panel: pd.DataFrame | None = None
+        best_horizon = int(cfg.ml.label_horizon_bars)
+        records: list[dict[str, Any]] = []
+        for horizon in candidates:
+            horizon_cfg = replace(
+                cfg.ml,
+                horizon_experiment_enabled=False,
+                label_horizon_bars=int(horizon),
+                purge_bars=max(int(cfg.ml.purge_bars), int(horizon)),
+            )
+            candidate_cfg = replace(cfg, ml=horizon_cfg)
+            panel = build_ml_strategy_alpha(
+                data_maps=data_maps,
+                symbols=symbols,
+                tf=tf,
+                cfg=candidate_cfg,
+            )
+            report = panel.attrs.get("quality_report", {})
+            alpha_p95_bps = float(report.get("alpha_p95_bps", 0.0))
+            score_bps = alpha_p95_bps - floor_bps
+            record = {
+                "horizon": int(horizon),
+                "alpha_p95_bps": alpha_p95_bps,
+                "score_bps": score_bps,
+                "clears_cost_wall": bool(alpha_p95_bps >= floor_bps),
+            }
+            records.append(record)
+            _logger.info(
+                "[ML-HORIZON] horizon=%d alpha_p95=%.2fbps floor=%.2fbps score=%.2fbps pass=%s",
+                int(horizon),
+                alpha_p95_bps,
+                floor_bps,
+                score_bps,
+                str(alpha_p95_bps >= floor_bps),
+            )
+            if score_bps > best_score:
+                best_score = score_bps
+                best_panel = panel
+                best_horizon = int(horizon)
+        if best_panel is None:
+            raise RuntimeError("horizon experiment failed to produce any candidate panel")
+        best_panel.attrs["horizon_experiment"] = records
+        best_panel.attrs["selected_horizon"] = best_horizon
+        best_panel.attrs["selected_horizon_score_bps"] = best_score
+        best_panel.attrs["selected_horizon_floor_bps"] = floor_bps
+        best_panel.attrs["baseline_harness"] = {
+            "version": "v1",
+            "mode": "horizon_experiment",
+            "selected_horizon": best_horizon,
+            "selected_horizon_score_bps": best_score,
+            "cost_floor_bps": floor_bps,
+            "candidate_count": len(records),
+        }
+        _logger.info(
+            "[ML-HARNESS] mode=horizon_experiment selected_horizon=%d selected_score=%.2fbps",
+            best_horizon,
+            best_score,
+        )
+        return best_panel
 
     ml_cfg = replace(
         cfg.ml,
-        lambda_l2=1.0,
         min_data_in_leaf=30,
         num_leaves=31,
     )
@@ -169,13 +253,10 @@ def build_ml_strategy_alpha(
         )
         bounds = fit_robust_bounds(train_values, clip_quantile=0.995)
         clipped_values = apply_robust_bounds(features.values.astype(np.float64, copy=False), bounds)
-        train_medians = np.nanmedian(train_values.reshape(-1, train_values.shape[2]), axis=0)
-        train_medians = np.where(np.isfinite(train_medians), train_medians, 0.0)
-        normalized = np.where(
-            np.isfinite(clipped_values),
-            clipped_values,
-            train_medians[np.newaxis, np.newaxis, :],
-        ).astype(np.float32, copy=False)
+        imputer = fit_missing_value_imputer(train_values)
+        normalized = apply_missing_value_imputer(clipped_values, imputer).astype(
+            np.float32, copy=False
+        )
         normalized_features = FeaturePanel(
             datetimes=features.datetimes,
             symbols=features.symbols,
@@ -183,7 +264,11 @@ def build_ml_strategy_alpha(
             feature_names=features.feature_names,
             valid_mask=features.valid_mask,
             availability_masks=features.availability_masks,
-            metadata={**features.metadata, "train_imputer_applied": True},
+            metadata={
+                **features.metadata,
+                "train_imputer_applied": True,
+                "missing_imputer": "train_median",
+            },
         )
         train = build_long_matrix(
             features=normalized_features,
@@ -295,16 +380,10 @@ def build_ml_strategy_alpha(
             features.values.astype(np.float64, copy=False),
             v_bounds,
         )
-        v_train_medians = np.nanmedian(
-            v_train_values.reshape(-1, v_train_values.shape[2]),
-            axis=0,
+        v_imputer = fit_missing_value_imputer(v_train_values)
+        v_normalized = apply_missing_value_imputer(v_clipped_values, v_imputer).astype(
+            np.float32, copy=False
         )
-        v_train_medians = np.where(np.isfinite(v_train_medians), v_train_medians, 0.0)
-        v_normalized = np.where(
-            np.isfinite(v_clipped_values),
-            v_clipped_values,
-            v_train_medians[np.newaxis, np.newaxis, :],
-        ).astype(np.float32, copy=False)
         v_normalized_features = FeaturePanel(
             datetimes=features.datetimes,
             symbols=features.symbols,
@@ -312,7 +391,11 @@ def build_ml_strategy_alpha(
             feature_names=features.feature_names,
             valid_mask=features.valid_mask,
             availability_masks=features.availability_masks,
-            metadata={**features.metadata, "train_imputer_applied": True},
+            metadata={
+                **features.metadata,
+                "train_imputer_applied": True,
+                "missing_imputer": "train_median",
+            },
         )
         v_train = build_long_matrix(
             features=v_normalized_features,
@@ -384,7 +467,18 @@ def build_ml_strategy_alpha(
     panel.attrs["feature_names"] = list(features.feature_names)
     panel.attrs["fold_count"] = len(folds)
     panel.attrs["config_hash"] = build_manifest_hash(asdict(cfg.ml))
-    quality_report = build_quality_report(
+    panel.attrs["selected_horizon"] = int(ml_cfg.label_horizon_bars)
+    panel.attrs["baseline_harness"] = {
+        "version": "v1",
+        "mode": "single_horizon",
+        "selected_horizon": int(ml_cfg.label_horizon_bars),
+        "cost_floor_bps": float(
+            round_trip_cost_bps()
+            + float(OPT_FUTURES_CONFIG.get("FUTURES_DEFAULT_EV_HURDLE_BPS", 10.0))
+        ),
+        "candidate_count": 1,
+    }
+    quality_report: dict[str, Any] = build_quality_report(
         feature_values=features.values,
         feature_valid_mask=features.valid_mask,
         label_eligible_mask=labels.eligible_mask,
@@ -394,7 +488,47 @@ def build_ml_strategy_alpha(
         alpha_long_2d=np.maximum(ev_grid, 0.0),
         alpha_short_2d=np.maximum(-ev_grid, 0.0),
     )
+    clip_lim = float(ml_cfg.alpha_clip_bps / 10000.0)
+    raw_long = np.maximum(np.clip(ev_grid, -clip_lim, clip_lim), 0.0)
+    raw_short = np.maximum(-np.clip(ev_grid, -clip_lim, clip_lim), 0.0)
+    panel_long = panel["alpha_long"].to_numpy(dtype=np.float64).reshape(raw_long.shape)
+    panel_short = panel["alpha_short"].to_numpy(dtype=np.float64).reshape(raw_short.shape)
+    raw_long_nz = float(np.mean(np.abs(raw_long) > 1e-12)) if raw_long.size > 0 else 0.0
+    raw_short_nz = float(np.mean(np.abs(raw_short) > 1e-12)) if raw_short.size > 0 else 0.0
+    panel_long_nz = float(np.mean(np.abs(panel_long) > 1e-12)) if panel_long.size > 0 else 0.0
+    panel_short_nz = float(np.mean(np.abs(panel_short) > 1e-12)) if panel_short.size > 0 else 0.0
+    xs_long_preservation = panel_long_nz / max(raw_long_nz, 1e-12) if raw_long_nz > 0.0 else 0.0
+    xs_short_preservation = panel_short_nz / max(raw_short_nz, 1e-12) if raw_short_nz > 0.0 else 0.0
+    quality_report["xs_long_preservation_ratio"] = xs_long_preservation
+    quality_report["xs_short_preservation_ratio"] = xs_short_preservation
+    _friction_bps = round_trip_cost_bps()
+    _hurdle_default_bps = float(OPT_FUTURES_CONFIG.get("FUTURES_DEFAULT_EV_HURDLE_BPS", 10.0))
+    alpha_diag = alpha_gate_diagnostics(
+        alpha_p95_bps=float(quality_report.get("alpha_p95_bps", 0.0)),
+        friction_bps=float(_friction_bps),
+        hurdle_bps=float(_hurdle_default_bps),
+        long_nz=float(quality_report.get("alpha_long_non_zero_ratio", 0.0)),
+        short_nz=float(quality_report.get("alpha_short_non_zero_ratio", 0.0)),
+        xs_long_preservation_ratio=xs_long_preservation,
+        xs_short_preservation_ratio=xs_short_preservation,
+        min_long_nz=ml_cfg.alpha_gate_min_long_nz,
+        min_short_nz=ml_cfg.alpha_gate_min_short_nz,
+        min_xs_preservation=ml_cfg.alpha_gate_min_xs_preservation,
+        cost_wall_tolerance_bps=ml_cfg.alpha_gate_cost_wall_tolerance_bps,
+    )
+    quality_report.update(alpha_diag)
     panel.attrs["quality_report"] = quality_report
+    if not bool(quality_report.get("alpha_gate_pass", False)):
+        raise RuntimeError(
+            "strategy ml alpha gate failed: "
+            f"reasons={quality_report.get('alpha_gate_fail_reasons', [])} "
+            f"alpha_p95_bps={quality_report.get('alpha_p95_bps', 0.0):.2f} "
+            f"floor_bps={quality_report.get('alpha_gate_floor_bps', 0.0):.2f} "
+            f"long_nz={quality_report.get('alpha_long_non_zero_ratio', 0.0):.4f} "
+            f"short_nz={quality_report.get('alpha_short_non_zero_ratio', 0.0):.4f} "
+            f"xs_long_preservation={quality_report.get('xs_long_preservation_ratio', 0.0):.4f} "
+            f"xs_short_preservation={quality_report.get('xs_short_preservation_ratio', 0.0):.4f}"
+        )
     if not passes_quality_gate(quality_report):
         failed_keys = {
             k: v
@@ -435,8 +569,6 @@ def build_ml_strategy_alpha(
         int(quality_report.get("ic_n_obs", 0)),
     )
     # Cost wall diagnosis: gross alpha vs effective cost floor
-    _friction_bps = round_trip_cost_bps()
-    _hurdle_default_bps = float(OPT_FUTURES_CONFIG.get("FUTURES_DEFAULT_EV_HURDLE_BPS", 10.0))
     _floor_bps = _friction_bps + _hurdle_default_bps
     _alpha_p95 = max(
         quality_report.get("alpha_p95_bps", 0.0),
@@ -497,7 +629,8 @@ def build_ml_strategy_alpha_anchored(
     t0_total = time.perf_counter()
     ml_cfg = replace(
         cfg.ml,
-        lambda_l2=1.0,
+        ranker_lambda_l2=1.0,
+        calibrator_lambda_l2=1.0,
         min_data_in_leaf=30,
         num_leaves=31,
     )
@@ -554,13 +687,8 @@ def build_ml_strategy_alpha_anchored(
     train_values = features.values[fold.train_start : fold.train_end].astype(np.float64, copy=False)
     bounds = fit_robust_bounds(train_values, clip_quantile=0.995)
     clipped_values = apply_robust_bounds(features.values.astype(np.float64, copy=False), bounds)
-    train_medians = np.nanmedian(train_values.reshape(-1, train_values.shape[2]), axis=0)
-    train_medians = np.where(np.isfinite(train_medians), train_medians, 0.0)
-    normalized = np.where(
-        np.isfinite(clipped_values),
-        clipped_values,
-        train_medians[np.newaxis, np.newaxis, :],
-    ).astype(np.float32, copy=False)
+    imputer = fit_missing_value_imputer(train_values)
+    normalized = apply_missing_value_imputer(clipped_values, imputer).astype(np.float32, copy=False)
     normalized_features = FeaturePanel(
         datetimes=features.datetimes,
         symbols=features.symbols,
@@ -568,7 +696,11 @@ def build_ml_strategy_alpha_anchored(
         feature_names=features.feature_names,
         valid_mask=features.valid_mask,
         availability_masks=features.availability_masks,
-        metadata={**features.metadata, "train_imputer_applied": True},
+        metadata={
+            **features.metadata,
+            "train_imputer_applied": True,
+            "missing_imputer": "train_median",
+        },
     )
 
     t_matrix = time.perf_counter()
