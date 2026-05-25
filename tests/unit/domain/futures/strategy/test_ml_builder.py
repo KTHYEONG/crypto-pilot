@@ -290,10 +290,7 @@ def test_build_ml_strategy_alpha_anchored_does_not_center_ev_by_group(
     monkeypatch: MonkeyPatch,
 ) -> None:
     datetimes = np.array(
-        [
-            np.datetime64("2024-01-01T00:00:00") + np.timedelta64(4 * i, "h")
-            for i in range(40)
-        ],
+        [np.datetime64("2024-01-01T00:00:00") + np.timedelta64(4 * i, "h") for i in range(40)],
         dtype="datetime64[ns]",
     )
     symbols = ("BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT")

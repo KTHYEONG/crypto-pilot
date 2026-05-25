@@ -29,7 +29,7 @@ def _run_single_trade_scenario(
     n_syms = 1
 
     # 결정 바 데이터 (1m → 결정 바 집계)
-    price_dec = price_path[:: n_1m // n_decisions][: n_decisions]
+    price_dec = price_path[:: n_1m // n_decisions][:n_decisions]
     if len(price_dec) < n_decisions:
         price_dec = np.concatenate(
             [price_dec, np.full(n_decisions - len(price_dec), price_dec[-1])]
@@ -111,11 +111,13 @@ class TestConservationIdentity:
     def test_scenario_a_long_profitable_exit(self) -> None:
         """시나리오 A: 단일 심볼 Long 진입 → 수익 청산."""
         # 가격 상승 경로
-        price_path = np.concatenate([
-            np.full(40, 100.0),
-            np.linspace(100.0, 115.0, 40),
-        ])
-        trades, final_bal, equity = _run_single_trade_scenario(
+        price_path = np.concatenate(
+            [
+                np.full(40, 100.0),
+                np.linspace(100.0, 115.0, 40),
+            ]
+        )
+        _trades, final_bal, equity = _run_single_trade_scenario(
             price_path=price_path,
             mark_path=None,
             target_weight_val=0.3,
@@ -129,11 +131,13 @@ class TestConservationIdentity:
 
     def test_scenario_b_short_loss_exit(self) -> None:
         """시나리오 B: 단일 심볼 Short 진입 → 손실 청산 (가격 상승)."""
-        price_path = np.concatenate([
-            np.full(40, 100.0),
-            np.linspace(100.0, 110.0, 40),
-        ])
-        trades, final_bal, equity = _run_single_trade_scenario(
+        price_path = np.concatenate(
+            [
+                np.full(40, 100.0),
+                np.linspace(100.0, 110.0, 40),
+            ]
+        )
+        _trades, final_bal, equity = _run_single_trade_scenario(
             price_path=price_path,
             mark_path=None,
             target_weight_val=-0.3,
@@ -145,11 +149,13 @@ class TestConservationIdentity:
     def test_scenario_c_stop_loss_gap_down(self) -> None:
         """시나리오 C: stop-loss gap-down 강제 체결."""
         # 갭 다운 발생
-        price_path = np.concatenate([
-            np.full(40, 100.0),
-            np.array([85.0] * 40),  # 갭 다운
-        ])
-        trades, final_bal, equity = _run_single_trade_scenario(
+        price_path = np.concatenate(
+            [
+                np.full(40, 100.0),
+                np.array([85.0] * 40),  # 갭 다운
+            ]
+        )
+        _trades, final_bal, equity = _run_single_trade_scenario(
             price_path=price_path,
             mark_path=None,
             target_weight_val=0.2,
@@ -168,7 +174,7 @@ class TestConservationIdentity:
         mark_path = np.full(80, 100.0, dtype=np.float64)
         mark_path[60:] = liq_approx - 2.0  # 청산 트리거
 
-        trades, final_bal, equity = _run_single_trade_scenario(
+        _trades, final_bal, equity = _run_single_trade_scenario(
             price_path=price_path,
             mark_path=mark_path,
             target_weight_val=0.3,
@@ -192,7 +198,7 @@ class TestConservationIdentity:
                 funding_mask[k, 0] = 1.0
                 funding_rates[k, 0] = 0.0001
 
-        trades, final_bal, equity = _run_single_trade_scenario(
+        _trades, final_bal, equity = _run_single_trade_scenario(
             price_path=price_path,
             mark_path=None,
             target_weight_val=0.3,
@@ -204,7 +210,7 @@ class TestConservationIdentity:
         assert np.isfinite(final_bal)
         assert not np.any(np.isnan(equity))
         # 펀딩 비용으로 인해 final_bal ≤ 펀딩 없는 경우보다 작거나 같음 (Long position)
-        trades_no_fund, final_no_fund, _ = _run_single_trade_scenario(
+        _trades_no_fund, final_no_fund, _ = _run_single_trade_scenario(
             price_path=price_path,
             mark_path=None,
             target_weight_val=0.3,

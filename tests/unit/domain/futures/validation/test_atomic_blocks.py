@@ -43,7 +43,7 @@ class TestBuildAtomicBlocks:
             end_k = blocks[k][1]
             start_next = blocks[k + 1][0]
             assert end_k <= start_next, (
-                f"Block {k}의 끝({end_k})이 Block {k+1}의 시작({start_next})보다 커서는 안 됨"
+                f"Block {k}의 끝({end_k})이 Block {k + 1}의 시작({start_next})보다 커서는 안 됨"
             )
 
     def test_blocks_start_after_is_end(self) -> None:
@@ -125,9 +125,7 @@ class TestBuildAtomicBlocks:
         config = AtomicBlockConfig()
         if len(blocks) < config.required_min_blocks:
             # equity_curves를 블록 수만큼 생성
-            equity_curves = [
-                np.array([1.0, 1.02, 1.01, 1.03, 1.02]) for _ in range(len(blocks))
-            ]
+            equity_curves = [np.array([1.0, 1.02, 1.01, 1.03, 1.02]) for _ in range(len(blocks))]
             result = evaluate_atomic_blocks(equity_curves, config=config)
             assert not result.passed, "블록 수 부족 시 passed=False여야 함"
 
@@ -184,9 +182,7 @@ class TestEvaluateAtomicBlocks:
     def test_result_contains_block_log_tws(self) -> None:
         """AtomicBlockResult.block_log_tws에 각 블록 log TW가 포함됨."""
         n_blocks = 5
-        equity_curves = [
-            np.array([1.0, 1.05]) for _ in range(n_blocks)
-        ]
+        equity_curves = [np.array([1.0, 1.05]) for _ in range(n_blocks)]
         config = AtomicBlockConfig(required_min_blocks=2)
         result = evaluate_atomic_blocks(equity_curves, config=config)
         assert len(result.block_log_tws) == n_blocks
