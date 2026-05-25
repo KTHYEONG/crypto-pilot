@@ -11,7 +11,7 @@ related_paths:
   - src/domain/futures/optimization/objectives.py
   - src/domain/futures/strategy/labels.py
   - src/domain/futures/strategy_runtime/bridge.py
-last_verified: 2026-05-25
+last_verified: 2026-05-25 (A/B test + root cause analysis complete)
 ---
 
 # Result Baseline
@@ -154,3 +154,70 @@ for t in range(t_len - horizon):
 - **Option A:** Portfolio 레이어의 `xs_score` long 억제 원인 분석.
 - **Option B:** HMM 제거 이후의 Crisis 구간 방어책(동적 레버리지 제어 등) 마련.
 - **Option C:** Feature Engineering을 통한 신호 강도 추가 강화.
+
+---
+
+## 16. B1 Double-Deduction Bug Fix & calibrator_target Toggle (2026-05-25)
+
+### 16.1 Issue
+- `funding_net` calibrator target이 B1 불변 계약 위반: labels.py에서 round_trip_cost 차감 → objectives.py에서 再차감 (이중 비용)
+- 제거된 옵션: `calibrator_target="funding_net"`
+- 유지 옵션: `calibrator_target="beta_residualized"` (default), `calibrator_target="gross"`
+
+### 16.2 300-Trial A/B Test Results (seed=42, ml_lambdamart_v1)
+
+#### beta_residualized (기존 기본값)
+| 지표 | 값 | 판정 |
+|------|-----|------|
+| **var_retention** | 0.951 | ✅ B2 신호 손실 미미 |
+| mean_ic (OOS) | 0.0215 | ✅ IC 게이트 통과 |
+| t_stat (OOS) | 4.17 | ✅ 통계적 유의 |
+| **long_nz (OOS)** | 0.28% | 🔴 거의 0 |
+| **long_p95** | 0.00 bps | 🔴 롱 알파 없음 |
+| short_p95 (OOS) | 21.47 bps | — |
+| **CAGR** | **-28.67%** | 🔴 FAIL |
+| MDD | 19.56% | ✅ PASS |
+| Sortino | -2.12 | 🔴 FAIL |
+| **EV/Cost** | **-9.91** | 🔴 FAIL |
+| **최종 판정** | **HOLD (GATE_FAIL)** | |
+
+#### gross (대안 타깃)
+| 지표 | 값 | 판정 |
+|------|-----|------|
+| var_retention | 0.943 | ✅ 미미한 차이 |
+| mean_ic (OOS) | **0.0278** | ✅ IC 개선 |
+| t_stat (OOS) | **5.32** | ✅ 더 유의 |
+| **long_nz (OOS)** | **6.05%** | ✅ 22× 개선 |
+| long_p95 (OOS) | **2.94 bps** | 미약 개선 |
+| short_p95 (OOS) | 6.85 bps | 73% 하락 |
+| **CAGR** | **-34.92%** | 🔴 더 나쁨 |
+| MDD | **22.72%** | 🔴 한도 초과 |
+| Sortino | -2.87 | 🔴 더 나쁨 |
+| **EV/Cost** | **-36.85** | 🔴 훨씬 나쁨 |
+| Phase A1 prune | 83.3% | gross 탐색 어려움 |
+| **최종 판정** | **HOLD (GATE_FAIL)** | |
+
+### 16.3 근본 원인 진단
+
+**가설 검증:**
+- ❌ "B2가 분산을 죽인다" → 기각 (var_retention=0.951, 5% 손실)
+- ✅ "calibrator 타깃이 부호 문제를 유발한다" → 부분 확인 (gross fold 1/3에서 양수 EV)
+- ❌ "gross 타깃이 OOS 성과를 개선한다" → 기각 (CAGR 악화)
+
+**실제 근본 문제 (두 모드 공통):**
+
+1. **Alpha 절대 크기 부족**: long_p95 0~3bps << 24bps cost floor
+2. **Label Horizon 부적절**: 6bars(24h) 기간의 gross return이 14bps friction을 상회하지 못함
+3. **구조적 시장 미스매치**: OOS 기간(2025.10~2026.03) crypto 강세장에서 XS 전략의 숏 편향이 구조적 불리
+
+### 16.4 권고 조치
+
+**즉시 실행 가능:**
+- `calibrator_target="beta_residualized"` 유지 (기본값)
+- Label horizon 확장 테스트: 6 → 12 → 24 bars (현재 6bars는 비용 상환 불충분)
+
+**미연결 이슈:**
+- Calibrator가 CS-demean 라벨을 학습 → 상위 포지션도 EV ≤ 0 예측 → long 게이팅 100% 차단
+- Phase_b 퇴화: 모든 90개 trial이 동일 값 수렴 (전략 자체가 파라미터 민감도 상실)
+
+**결론:** calibrator 타깃 전환보다 **label_horizon_bars 확장**이 근본 해결책.
