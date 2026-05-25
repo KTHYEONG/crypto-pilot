@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import logging
+import warnings
+
 import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
@@ -7,6 +10,9 @@ from numpy.typing import NDArray
 from src.domain.futures.strategy.common.alignment import AlignedMarketData
 from src.domain.futures.strategy.config import StrategyMLConfig
 from src.domain.futures.strategy.contracts import LabelPanel
+from src.domain.futures.strategy.diagnostics import gross_return_diagnostics
+
+_logger = logging.getLogger(__name__)
 
 _BETA_WINDOW: int = 120
 _BETA_MIN_PERIODS: int = 20
@@ -60,7 +66,8 @@ def _compute_trailing_beta(
     spot_ret[1:] = log_r
 
     # Equal-weighted cross-sectional market return per bar: shape [T]
-    with np.errstate(all="ignore"):
+    with np.errstate(all="ignore"), warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
         market_ret: NDArray[np.float64] = np.nanmean(spot_ret, axis=1)
 
     # Rolling OLS beta per symbol (loop over N ~20-50 symbols, not T). Zero-Loop policy compliance.
@@ -95,6 +102,9 @@ def build_label_panel(aligned: AlignedMarketData, cfg: StrategyMLConfig) -> Labe
     horizon = cfg.label_horizon_bars
     long_net = np.full((t_len, n_len), np.nan, dtype=np.float32)
     short_net = np.full((t_len, n_len), np.nan, dtype=np.float32)
+    # Pre-allocated capture of raw gross log returns (before beta-residualization).
+    # Shape: [T, N]. Used for RAW-SIGNAL-DIAG and "gross" calibrator_target branch.
+    gross_long_2d: NDArray[np.float32] = np.full((t_len, n_len), np.nan, dtype=np.float32)
     eligible = (
         aligned.active_mask
         & aligned.warm_mask
@@ -135,6 +145,8 @@ def build_label_panel(aligned: AlignedMarketData, cfg: StrategyMLConfig) -> Labe
             gross_long = np.log(exit_ / entry)
             gross_short = np.log(entry / exit_)
         funding = aligned.funding_2d[t]
+        # Capture raw gross log return before any residualization (diagnostic + gross calibrator).
+        gross_long_2d[t, row_ok] = gross_long[row_ok].astype(np.float32)
         mkt_ret_t = float(market_fwd_ret[t]) if np.isfinite(market_fwd_ret[t]) else 0.0
         beta_t: NDArray[np.float64] = beta_2d[t]  # shape [N]
         # Residualize: remove estimated market beta component
@@ -146,11 +158,44 @@ def build_label_panel(aligned: AlignedMarketData, cfg: StrategyMLConfig) -> Labe
             gross_short[row_ok] + residual_adj[row_ok] - cost + funding[row_ok]
         ).astype(np.float32)
 
-    # Snapshot pre-CS-demean beta-residualized return for calibrator (absolute EV).
-    # CS-demean collapses cross-sectional mean to 0, losing absolute level needed by calibrator.
-    # exec_net_ret preserves the pre-demean signal so calibrator can target real execution EV.
-    # Shape: [T, N], NaN where not computed. Time complexity: O(T*N) copy.
-    exec_net_ret: NDArray[np.float32] = long_net.copy()
+    # --- RAW-SIGNAL-DIAG: quantify variance shrinkage from beta-residualization ---
+    # Compute before CS-demean so resid_long_2d = long_net (post-resid, pre-demean).
+    # Only emitted when enough timesteps exist to be informative (n_timesteps >= 5).
+    _diag = gross_return_diagnostics(
+        gross_long_2d,
+        long_net,
+        eligible,
+        min_symbols=5,
+    )
+    if _diag["n_timesteps"] >= 5:
+        _logger.info(
+            "[RAW-SIGNAL-DIAG] raw_cs_std=%.4f resid_cs_std=%.4f var_retention=%.3f"
+            " n_ts=%d raw_nz=%.3f resid_nz=%.3f",
+            _diag["raw_cs_std_mean"],
+            _diag["resid_cs_std_mean"],
+            _diag["variance_retention_ratio"],
+            int(_diag["n_timesteps"]),
+            _diag["raw_nonzero_ratio"],
+            _diag["resid_nonzero_ratio"],
+        )
+
+    # Snapshot calibrator target: configurable via cfg.calibrator_target.
+    # "beta_residualized" (default): pre-CS-demean beta-residualized return (original behavior).
+    # "gross": raw log return minus funding only — no beta removal (A/B test for magnitude loss).
+    # Shape: [T, N], NaN where not computed. Time complexity: O(T*N).
+    if cfg.calibrator_target == "gross":
+        # Gross target: gross_long minus funding only, masked to eligible rows.
+        exec_net_ret: NDArray[np.float32] = (gross_long_2d - aligned.funding_2d).astype(
+            np.float32
+        )
+        exec_net_ret = np.where(
+            eligible & np.isfinite(gross_long_2d),
+            exec_net_ret,
+            np.float32(np.nan),
+        ).astype(np.float32)
+    else:
+        # Default: beta-residualized, pre-CS-demean snapshot (original B2 behavior).
+        exec_net_ret = long_net.copy()
 
     # CS-demean: per-timestep subtract cross-sectional mean from long_net and short_net labels.
     # OLS beta residualization does not guarantee E_i[long_net[t,i]] = 0 when beta != 1
@@ -162,7 +207,8 @@ def build_label_panel(aligned: AlignedMarketData, cfg: StrategyMLConfig) -> Labe
     _cs_mask: NDArray[np.bool_] = np.isfinite(long_net[:_n_t]) & eligible[:_n_t]  # [T-h, N]
     _cs_count: NDArray[np.intp] = _cs_mask.sum(axis=1)  # [T-h]
     _masked_long: NDArray[np.float32] = np.where(_cs_mask, long_net[:_n_t], np.float32(np.nan))
-    with np.errstate(all="ignore"):
+    with np.errstate(all="ignore"), warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
         _row_mean: NDArray[np.float32] = np.nanmean(_masked_long, axis=1, keepdims=True).astype(
             np.float32
         )  # [T-h, 1]

@@ -21,6 +21,7 @@ Create only the amount of specification needed.
 Always include:
 - goal
 - non-goals
+- **proposed solution / technical design** (Detailed approach and reasoning)
 - affected area
 - documentation impact (which docs/ files need update)
 - acceptance criteria
@@ -31,7 +32,13 @@ Always include:
 ```md
 ### 📝 Spec: [Type]
 - **Goal:** [Goal]
+- **Proposed Solution:** [High-level technical design and approach]
 - **Impact:** `[Area]` | **Docs:** `[Files to update]`
+- **Acceptance Criteria:**
+  - [ ] [Criterion 1]
+- **Verification Plan:** [Plan]
+- **Ready:** [Yes/No] | **Blocking:** [Questions]
+```les to update]`
 - **Acceptance Criteria:**
   - [ ] [Criterion 1]
 - **Verification Plan:** [Plan]

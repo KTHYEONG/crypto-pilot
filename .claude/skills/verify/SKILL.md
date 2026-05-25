@@ -35,6 +35,12 @@ Based on:
 - **Commands:** `[Cmds Run]`
 - **Passed:** `[Items]`
 - **Failed/Skipped:** `[Items]`
+- **Next:** `[Next Step]`
+
+</verify>
+```]`
+- **Passed:** `[Items]`
+- **Failed/Skipped:** `[Items]`
 - **Risks:** [Remaining Risks]
 - **Next:** `[Next Step]`
 
