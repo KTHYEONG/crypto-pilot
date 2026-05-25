@@ -12,6 +12,10 @@ from src.domain.futures.optimization.common import (
     _weight_stage_diag,
 )
 from src.domain.futures.optimization.objectives import _build_strategy_compose_diag
+from src.domain.futures.strategy.diagnostics import (
+    passes_directional_viability_gate,
+    passes_signal_preservation_gate,
+)
 
 
 def test_build_strategy_compose_diag_has_expected_core_keys() -> None:
@@ -31,6 +35,37 @@ def test_build_strategy_compose_diag_has_expected_core_keys() -> None:
     assert diag["effective_threshold_bps"] > diag["ev_hurdle_bps"]
     assert "mu_pre_hurdle_p95_long" in diag
     assert "mu_pre_hurdle_p95_short" in diag
+    assert "xs_long_preservation_ratio" in diag
+    assert "xs_short_preservation_ratio" in diag
+    assert diag["xs_long_preservation_ratio"] > 0.0
+    assert diag["xs_short_preservation_ratio"] > 0.0
+
+
+def test_passes_directional_viability_gate_accepts_quality_report_keys() -> None:
+    report = {
+        "alpha_long_non_zero_ratio": 0.08,
+        "alpha_short_non_zero_ratio": 0.15,
+    }
+    assert (
+        passes_directional_viability_gate(
+            report,
+            min_long_non_zero_ratio=0.05,
+            min_short_non_zero_ratio=0.10,
+        )
+        is True
+    )
+
+
+def test_passes_signal_preservation_gate_uses_preservation_ratios() -> None:
+    report = {"xs_long_preservation_ratio": 0.02, "xs_short_preservation_ratio": 0.25}
+    assert (
+        passes_signal_preservation_gate(
+            report,
+            min_long_preservation_ratio=0.01,
+            min_short_preservation_ratio=0.20,
+        )
+        is True
+    )
 
 
 def test_weight_stage_diag_exposes_cap_hit_proxy() -> None:

@@ -14,7 +14,7 @@ def rolling_ic(
     if sig_2d.shape != fwd_ret_2d.shape:
         raise ValueError("sig_2d and fwd_ret_2d must have the same shape")
     t_len, _n_syms = sig_2d.shape
-    ic = np.full(t_len, np.nan, dtype=np.float64)
+    ic_values: list[float] = [float("nan")] * t_len
     for t in range(t_len):
         row_sig = sig_2d[t]
         row_ret = fwd_ret_2d[t]
@@ -24,7 +24,7 @@ def rolling_ic(
         s_vals = row_sig[m]
         r_vals = row_ret[m]
         if np.all(s_vals == s_vals[0]) or np.all(r_vals == r_vals[0]):
-            ic[t] = 0.0
+            ic_values[t] = 0.0
             continue
         if method == "spearman":
             stat = float(scipy.stats.spearmanr(s_vals, r_vals).statistic)
@@ -32,8 +32,8 @@ def rolling_ic(
             stat = float(scipy.stats.pearsonr(s_vals, r_vals).statistic)
         else:
             raise ValueError(f"Unknown method: {method}")
-        ic[t] = stat if np.isfinite(stat) else 0.0
-    return ic
+        ic_values[t] = stat if np.isfinite(stat) else 0.0
+    return np.array(ic_values, dtype=np.float64)  # type: ignore[no-any-return]
 
 
 def ic_summary(ic_series: np.ndarray) -> dict[str, float]:
@@ -131,8 +131,8 @@ def ndcg_proxy_at_k(score_2d: np.ndarray, rel_2d: np.ndarray, *, k: int = 5) -> 
         r = rel_2d[t, m]
         ord_pred = np.argsort(-s)[:k]
         ord_best = np.argsort(-r)[:k]
-        dcg = np.sum((np.power(2.0, r[ord_pred]) - 1.0) / log_denom)
-        idcg = np.sum((np.power(2.0, r[ord_best]) - 1.0) / log_denom)
+        dcg: float = float(np.sum((np.power(2.0, r[ord_pred]) - 1.0) / log_denom))
+        idcg: float = float(np.sum((np.power(2.0, r[ord_best]) - 1.0) / log_denom))
         if idcg > 1e-12:
             vals.append(float(dcg / idcg))
     return float(np.mean(vals)) if vals else 0.0
@@ -203,4 +203,34 @@ def passes_quality_gate(report: dict[str, float]) -> bool:
         and report.get("label_valid_ratio", 0.0) > 0.0
         and report.get("ranker_valid_ndcg_at_5", 0.0) > 0.0
         and report.get("spearman_rank_ic", -1.0) >= 0.0
+    )
+
+
+def passes_directional_viability_gate(
+    summary: dict[str, float],
+    *,
+    min_long_non_zero_ratio: float = 0.0,
+    min_short_non_zero_ratio: float = 0.0,
+) -> bool:
+    """Check directional viability from alpha non-zero ratios only."""
+    long_ratio = summary.get("alpha_long_non_zero_ratio", 0.0)
+    short_ratio = summary.get("alpha_short_non_zero_ratio", 0.0)
+    return bool(
+        long_ratio >= min_long_non_zero_ratio
+        and short_ratio >= min_short_non_zero_ratio
+    )
+
+
+def passes_signal_preservation_gate(
+    summary: dict[str, float],
+    *,
+    min_long_preservation_ratio: float = 0.0,
+    min_short_preservation_ratio: float = 0.0,
+) -> bool:
+    """Check alpha->xs composition preservation from preservation-ratio metrics."""
+    long_ratio = summary.get("xs_long_preservation_ratio", 0.0)
+    short_ratio = summary.get("xs_short_preservation_ratio", 0.0)
+    return bool(
+        long_ratio >= min_long_preservation_ratio
+        and short_ratio >= min_short_preservation_ratio
     )
