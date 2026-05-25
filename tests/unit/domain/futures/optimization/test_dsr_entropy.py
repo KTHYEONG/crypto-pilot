@@ -20,9 +20,7 @@ class TestDsrEntropy:
 
         n_eff = calc_n_trials_eff_entropy(identical, weights)
 
-        assert n_eff < 2.0, (
-            f"동일한 basin에서 유효 독립 검정은 최소여야 함: n_eff={n_eff}"
-        )
+        assert n_eff < 2.0, f"동일한 basin에서 유효 독립 검정은 최소여야 함: n_eff={n_eff}"
 
     def test_independent_signatures_n_eff_large(self) -> None:
         """완전 독립 signature → n_trials_eff ≈ n_trials."""
@@ -32,9 +30,7 @@ class TestDsrEntropy:
 
         n_eff = calc_n_trials_eff_entropy(indep, weights)
 
-        assert n_eff > 5.0, (
-            f"독립 signature에서 n_eff가 충분히 커야 함: n_eff={n_eff}"
-        )
+        assert n_eff > 5.0, f"독립 signature에서 n_eff가 충분히 커야 함: n_eff={n_eff}"
 
     def test_pruned_weight_reduces_n_eff(self) -> None:
         """Pruned trial weight < 1 적용 시 n_eff 감소."""

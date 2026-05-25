@@ -5,11 +5,48 @@
 
 from __future__ import annotations
 
+from typing import NotRequired, TypedDict
+
 import numpy as np
 
 from src.domain.futures.portfolio.execution_sim import (
     backtest_target_weights_intrabar,
 )
+
+
+class _FundingScenario(TypedDict):
+    decision_close_2d: np.ndarray
+    decision_high_2d: np.ndarray
+    decision_low_2d: np.ndarray
+    decision_open_2d: np.ndarray
+    target_weights: np.ndarray
+    lev_2d: np.ndarray
+    atr_2d: np.ndarray
+    kill_signal_2d: np.ndarray
+    path_open_2d: np.ndarray
+    path_high_2d: np.ndarray
+    path_low_2d: np.ndarray
+    path_close_2d: np.ndarray
+    decision_start_1m_idx: np.ndarray
+    decision_end_1m_idx: np.ndarray
+    initial_balance: float
+    maker_fee: float
+    taker_fee: float
+    slippage_rate: float
+    rebalance_bars: int
+    max_hold_bars: int
+    short_borrow_daily: float
+    atr_mult: float
+    trail_mult: float
+    use_simple_atr_stop: int
+    max_concurrent: int
+    max_exposure: float
+    max_exp_per_coin: float
+    dd_scaling_threshold: float
+    funding_event_mask_1m: NotRequired[np.ndarray]
+    funding_rate_1m: NotRequired[np.ndarray]
+    volume_1m_2d: NotRequired[np.ndarray]
+    mark_price_1m: NotRequired[np.ndarray]
 
 
 def _build_funding_scenario(
@@ -19,7 +56,7 @@ def _build_funding_scenario(
     lev: float = 5.0,
     funding_rate: float = 0.0001,
     funding_bar_idx: int = 8,
-) -> dict:
+) -> _FundingScenario:
     """펀딩 이벤트 시나리오 입력 생성."""
     n_1m = n_decisions * 4
 
@@ -103,7 +140,7 @@ class TestFundingTiming:
             price=price,
             funding_rate=0.0,
         )
-        _, final_no_fund, equity_no_fund, _ = backtest_target_weights_intrabar(
+        _, final_no_fund, _equity_no_fund, _ = backtest_target_weights_intrabar(
             **inputs_no_fund,
         )
 
@@ -115,7 +152,7 @@ class TestFundingTiming:
             funding_rate=funding_rate,
             funding_bar_idx=5,
         )
-        _, final_with_fund, equity_with_fund, _ = backtest_target_weights_intrabar(
+        _, final_with_fund, _equity_with_fund, _ = backtest_target_weights_intrabar(
             **inputs_with_fund,
         )
 
@@ -126,33 +163,27 @@ class TestFundingTiming:
 
     def test_funding_not_applied_when_no_position_at_bar_start(self) -> None:
         """이벤트 바에서 포지션이 없으면 펀딩이 적용되지 않는다."""
-        price = 100.0
         funding_rate = 0.001  # 큰 펀딩율
 
         # 포지션 진입 없는 시나리오 (모든 weight=0)
         n_decisions, n_syms = 10, 2
-        n_1m = n_decisions * 4
-
         inputs = _build_funding_scenario(
             n_decisions=n_decisions,
             n_syms=n_syms,
-            price=price,
+            price=100.0,
             funding_rate=funding_rate,
             funding_bar_idx=5,
         )
         # 모든 target_weight를 0으로 설정 (포지션 없음)
         inputs["target_weights"] = np.zeros((n_decisions, n_syms), dtype=np.float64)
 
-        _, final_bal, equity, _ = backtest_target_weights_intrabar(**inputs)
+        _, final_bal, _equity, _ = backtest_target_weights_intrabar(**inputs)
 
         # 포지션 없으면 펀딩 비용 없음 → equity ≈ initial_balance (수수료만 차감)
-        assert abs(final_bal - 10_000.0) < 1.0, (
-            f"포지션 없을 때 펀딩이 적용되면 안 됨: {final_bal}"
-        )
+        assert abs(final_bal - 10_000.0) < 1.0, f"포지션 없을 때 펀딩이 적용되면 안 됨: {final_bal}"
 
     def test_long_funding_reduces_pnl_short_funding_increases_pnl(self) -> None:
         """양의 funding_rate 환경: Long PnL 감소, Short PnL 증가."""
-        price = 100.0
         funding_rate = 0.001  # 큰 값으로 효과 확인
 
         # 펀딩 없는 기준

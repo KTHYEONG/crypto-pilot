@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import cast
+
 import optuna
 from optuna.distributions import FloatDistribution
 
@@ -109,7 +111,7 @@ def test_optimizer_phase_b_applies_fixed_and_shrunk_ranges() -> None:
     _suggest_ml_joint_nsga2(trial, ctx)
     study.tell(trial, 0.0)
     assert "K_LONG" not in trial.params
-    dist = trial.distributions["TARGET_ANN_VOL"]
+    dist = cast(FloatDistribution, trial.distributions["TARGET_ANN_VOL"])
     assert isinstance(dist, FloatDistribution)
     assert abs(float(dist.low) - 0.12) < 1e-12
     assert abs(float(dist.high) - 0.16) < 1e-12
@@ -131,9 +133,9 @@ def test_optimizer_strategy_mode_applies_strategy_phase_ranges() -> None:
     _suggest_ml_joint_nsga2(trial, ctx)
     study.tell(trial, 0.0)
 
-    beta_dist = trial.distributions["BETA_ALPHA"]
-    ev_dist = trial.distributions["EV_HURDLE_BPS"]
-    reb_dist = trial.distributions["REBALANCE_BARS"]
+    beta_dist = cast(FloatDistribution, trial.distributions["BETA_ALPHA"])
+    ev_dist = cast(FloatDistribution, trial.distributions["EV_HURDLE_BPS"])
+    reb_dist = cast(FloatDistribution, trial.distributions["REBALANCE_BARS"])
     assert isinstance(beta_dist, FloatDistribution)
     assert isinstance(ev_dist, FloatDistribution)
     assert float(beta_dist.low) == 4.0
