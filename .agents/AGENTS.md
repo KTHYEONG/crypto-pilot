@@ -47,7 +47,7 @@ For code generation or structural code changes, use this compact structure:
 3. **Write Code:** Apply the smallest necessary change.
 4. `<verify>`: Report `uv run`-based verification results for modified files.
 
-For simple Q&A, documentation-only answers, triage, context scanning, specification writing, and review-only tasks, do not force this structure.
+For simple Q&A, documentation-only answers, triage and scanning, specification writing, and review-only tasks, do not force this structure.
 
 When a skill is explicitly invoked, the skill controls the phase-specific workflow.
 This protocol applies only inside code-writing phases such as `implement`.
@@ -85,12 +85,11 @@ Global directives in this document always apply unless a manually activated comm
 
 Default non-trivial development workflow:
 
-1. `ai-triage`
-2. `context-scan`
-3. `spec` when needed
-4. `implement`
-5. `verify`
-6. `review`
+1. `triage-scan`
+2. `spec` when needed
+3. `implement`
+4. `verify`
+5. `review`
 
 Commit tasks:
 - Do not route through the default skill workflow.
