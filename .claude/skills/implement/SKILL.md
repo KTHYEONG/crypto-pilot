@@ -28,15 +28,18 @@ Apply the smallest correct change.
 
 ## Output
 ```md
-<plan>
-- ...
-</plan>
-
 <perf>
 (Only if Scale is 'high')
 - **Bottleneck:** CPU / IO / Memory | **Complexity:** T(O), S(O)
 - **Strategy:** [Tool/Method]
 - **Trade-offs:** [Sacrifices]
+</perf>
+
+### 🏗️ Implementation: [Strategy]
+- **Changes:** `[Files]`
+- **Docs:** `[Updated/Verified]` | **Handoff:** `verify`
+- **Notes:** [Details]
+```* [Sacrifices]
 </perf>
 
 <risk>

@@ -11,24 +11,12 @@ Do not edit files unless explicitly asked.
 Act as an independent reviewer.
 
 ## Check
-- request/spec match
-- over-implementation
-- unrelated refactors
-- docs sync (Strictly check if 'last_verified' date is updated to today, 'Invariants' are preserved, and new 'Edge Cases' or 'Specifications' are promoted as per rules/documentation.md)
-- meaningful tests
-- missing edge cases
-- unintended public API changes
-- error handling
-- security/permission concerns
-- dependency justification
-- verification sufficiency
-- quant requirements, if active
-- **Performance & Scalability:** 
-  - Is the chosen optimization strategy appropriate for the identified bottleneck (CPU vs I/O vs Memory)?
-  - Are Network/DB calls optimized (e.g., batched, cached, or pooled) to prevent excessive latency and rate-limit hits?
-  - Did the implementation choose an overly complex mathematical optimization when a robust built-in method was safer?
-  - Are there hidden O(N^2) loops, blocking I/O in async contexts, or memory leaks in long-running logic?
-  - Does the complexity align with the declared `Scale`?
+Focus strictly on these 3 core audits:
+1. **Spec Acceptance:** Are all `Acceptance Criteria` defined in the `spec` completely fulfilled?
+2. **Mechanical Pass:** Did the `verify` step run successfully with zero critical errors?
+3. **No Regressions:** Are there any unintended changes to public APIs, unrelated refactors, or missing documentation updates (check 'last_verified' dates)?
+
+*(Do not perform line-by-line syntax checks or redundant testing here. Focus on the logical contract).*
 
 ## Verdict
 - approve
