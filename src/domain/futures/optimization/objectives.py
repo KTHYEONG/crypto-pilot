@@ -104,6 +104,14 @@ def _build_strategy_compose_diag(
         "mu_pre_hurdle_p95_short": _safe_pct(mu_s_pre, 95),
         "xs_long_nz_ratio": _nonzero_ratio(xs_long),
         "xs_short_nz_ratio": _nonzero_ratio(xs_short),
+        "xs_long_preservation_ratio": _safe_preservation_ratio(
+            _nonzero_ratio(xs_long),
+            _nonzero_ratio(alpha_long),
+        ),
+        "xs_short_preservation_ratio": _safe_preservation_ratio(
+            _nonzero_ratio(xs_short),
+            _nonzero_ratio(alpha_short),
+        ),
         "mu_long_mean": float(np.mean(mu_l_pre)) if mu_l_pre.size > 0 else 0.0,
         "mu_short_mean": float(np.mean(mu_s_pre)) if mu_s_pre.size > 0 else 0.0,
         "threshold_bps": threshold_bps,
@@ -119,6 +127,12 @@ def _nonzero_ratio(arr: np.ndarray, eps: float = 1e-12) -> float:
     if arr.size == 0:
         return 0.0
     return float(np.count_nonzero(np.abs(arr) > eps) / arr.size)
+
+
+def _safe_preservation_ratio(numerator: float, denominator: float) -> float:
+    if denominator <= 0.0:
+        return 0.0
+    return float(numerator / denominator)
 
 def _pf_and_ev_cost_from_trades(all_trades: np.ndarray) -> tuple[float, float]:
     """PF = gross_win / |gross_loss|; EV/cost = |sum(pnl)| / sum(entry_fee + funding_fee)."""
@@ -300,6 +314,12 @@ def _compose_strategy_scores_inplace(
         "xs_nz": float(
             np.count_nonzero((np.abs(xs_l) > 1e-12) | (np.abs(xs_s) > 1e-12)) / max(xs_l.size, 1)
         ),
+        "xs_long_preservation_ratio": float(
+            aligned["_strategy_compose_diag"].get("xs_long_preservation_ratio", 0.0)
+        ),
+        "xs_short_preservation_ratio": float(
+            aligned["_strategy_compose_diag"].get("xs_short_preservation_ratio", 0.0)
+        ),
     }
     if trial_number is not None and trial_number < 3:
         _diag: dict[str, float] = aligned["_strategy_compose_diag"]
@@ -309,7 +329,7 @@ def _compose_strategy_scores_inplace(
         _logger.info(
             "[COMPOSE-DIAG] trial=%d beta_alpha=%.2f friction=%.1fbps hurdle=%.1fbps"
             " thr=%.1fbps alpha_l_p95=%.1fbps alpha_s_p95=%.1fbps"
-            " xs_long_nz=%.4f xs_short_nz=%.4f",
+            " xs_long_nz=%.4f xs_short_nz=%.4f preserve_l=%.4f preserve_s=%.4f",
             trial_number,
             _beta_a,
             _diag.get("friction_bps", 0.0),
@@ -319,6 +339,8 @@ def _compose_strategy_scores_inplace(
             _diag.get("alpha_short_p95", 0.0) * 10000.0,
             _diag.get("xs_long_nz_ratio", 0.0),
             _diag.get("xs_short_nz_ratio", 0.0),
+            _diag.get("xs_long_preservation_ratio", 0.0),
+            _diag.get("xs_short_preservation_ratio", 0.0),
         )
 
 
@@ -345,10 +367,10 @@ def _run_portfolio_numba_block(
     t0_align = time.perf_counter()
     if "_prepared_cache" in orig_aligned:
         prepared = orig_aligned["_prepared_cache"]
-        aligned = prepared.aligned_data
+        aligned = cast(dict[str, Any], prepared.aligned_data)
     else:
         prepared = prepare_backtest_inputs(aligned, params)
-        aligned = prepared.aligned_data
+        aligned = cast(dict[str, Any], prepared.aligned_data)
         merge_membership_constraints_into_aligned(aligned, persist_stats=True)
         orig_aligned["_prepared_cache"] = prepared
     t_prep_align = time.perf_counter() - t0_align
@@ -692,9 +714,20 @@ def _evaluate_awf_phase_d_aggregate(
                 if isinstance(_path_diag_leg, dict)
                 else 0.0
             )
+            _preserve_l = (
+                float(_path_diag_leg.get("xs_long_preservation_ratio", 0.0))
+                if isinstance(_path_diag_leg, dict)
+                else 0.0
+            )
+            _preserve_s = (
+                float(_path_diag_leg.get("xs_short_preservation_ratio", 0.0))
+                if isinstance(_path_diag_leg, dict)
+                else 0.0
+            )
             _logger.info(
                 "[STRAT-PATH] trial=%d leg=%d range=(%d,%d) bars=%d"
-                " alpha_nz=%.4f merge_nz=%.4f xs_nz=%.4f trades=%d long=%d short=%d",
+                " alpha_nz=%.4f merge_nz=%.4f xs_nz=%.4f preserve_l=%.4f preserve_s=%.4f"
+                " trades=%d long=%d short=%d",
                 _trial_num_leg,
                 leg_idx,
                 leg_range[0],
@@ -703,6 +736,8 @@ def _evaluate_awf_phase_d_aggregate(
                 _alpha_nz,
                 _merge_nz,
                 _tw_nz,
+                _preserve_l,
+                _preserve_s,
                 n_tr,
                 _n_long_leg,
                 _n_short_leg,

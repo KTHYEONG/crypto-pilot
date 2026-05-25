@@ -370,3 +370,12 @@ for t in range(t_len - horizon):
 
 Track 1/2/3 구현으로 **IC 지표는 건전화(mean_ic 0.03, t_stat 5.6)**, **cost wall 통과 가능성 확보**되었으나, OOS 수익화는 portfolio/regime/signal 레이어의 구조적 문제로 인해 미완성 상태.
 
+### 15.5 Implementation Note (2026-05-25): Directional Preservation Diagnostics
+- `src/domain/futures/optimization/objectives.py`
+  - `alpha -> xs_score` 방향성 보존 비율을 추가했다.
+  - `xs_long_preservation_ratio = xs_long_nz_ratio / alpha_long_nz_ratio`
+  - `xs_short_preservation_ratio = xs_short_nz_ratio / alpha_short_nz_ratio`
+  - 위 값은 `_strategy_compose_diag`, `_strategy_signal_path_diag`, `[COMPOSE-DIAG]`, `[STRAT-PATH]`에 포함된다.
+- `src/domain/futures/strategy/diagnostics.py`
+  - `passes_directional_viability_gate(summary, min_long_non_zero_ratio, min_short_non_zero_ratio)` helper를 추가했다.
+  - 기본 threshold를 `0.0`으로 두어 기존 파이프라인 동작과 API 호환성을 유지한다(warn/monitoring-only 경로).
