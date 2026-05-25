@@ -233,23 +233,85 @@ def build_label_panel(aligned: AlignedMarketData, cfg: StrategyMLConfig) -> Labe
         eligible=eligible & finite_long,
         min_group_size=cfg.min_group_size,
     )
+    rel_long = _build_relevance(
+        signed_ret=long_net,
+        eligible=eligible & finite_long,
+        min_group_size=cfg.min_group_size,
+    )
+    rel_short = _build_relevance(
+        signed_ret=short_net,
+        eligible=eligible & finite_long,
+        min_group_size=cfg.min_group_size,
+    )
 
     liq_weight = np.clip(np.log1p(np.maximum(aligned.volume_2d, 0.0)), 0.25, 2.0)
     valid_mask = eligible & finite_long
     original_weight = np.where(valid_mask, liq_weight, 0.0).astype(np.float32)
     y_ev_abs = np.where(valid_mask, np.abs(signed), 0.0).astype(np.float32)
     sample_weight = (original_weight * (1.0 + 2.0 * y_ev_abs)).astype(np.float32)
+    # Dynamic cost: execution_cost_bps_2d (per-symbol) preferred; fallback to global round-trip.
+    # cost_clearance_target gates on actual label return vs dynamic_cost only (no hurdle here).
+    # hurdle is applied at EV inference time in ml_builder.py: ev_bps - (dynamic_cost + hurdle) > 0.
+    _rt_cost = float(round_trip_cost_bps())
+    execution_cost_missing = (
+        aligned.execution_cost_bps_2d is None
+        or not np.any(np.isfinite(aligned.execution_cost_bps_2d))
+    )
+    if execution_cost_missing:
+        dynamic_cost_2d: NDArray[np.float32] = np.full(
+            (t_len, n_len), np.float32(_rt_cost), dtype=np.float32
+        )
+        _logger.debug(
+            "[LABEL-GATE] execution_cost_bps missing — fallback to global round_trip_cost=%.1f",
+            _rt_cost,
+        )
+    else:
+        dynamic_cost_2d = np.asarray(aligned.execution_cost_bps_2d, dtype=np.float32)
+        _logger.debug(
+            "[LABEL-GATE] Using per-symbol execution_cost_bps (mean=%.1fbps)",
+            float(np.nanmean(dynamic_cost_2d)),
+        )
+
     cost_clearance_target = np.where(
         valid_mask,
-        (np.abs(exec_net_ret) * 1e4) - np.float32(round_trip_cost_bps()),
+        (np.abs(exec_net_ret) * 1e4) - dynamic_cost_2d,
+        np.float32(0.0),
+    ).astype(np.float32)
+    magnitude_target_long = np.where(
+        valid_mask,
+        np.maximum(exec_net_ret, 0.0),
+        0.0,
+    ).astype(np.float32)
+    magnitude_target_short = np.where(
+        valid_mask,
+        np.maximum(-exec_net_ret, 0.0),
+        0.0,
+    ).astype(np.float32)
+    cost_clearance_target_long = np.where(
+        valid_mask,
+        (magnitude_target_long * 1e4) - dynamic_cost_2d,
+        np.float32(0.0),
+    ).astype(np.float32)
+    cost_clearance_target_short = np.where(
+        valid_mask,
+        (magnitude_target_short * 1e4) - dynamic_cost_2d,
         np.float32(0.0),
     ).astype(np.float32)
     metadata = {
         "rank_target_key": "signed_net_ret",
+        "rank_target_long_key": "long_net_ret",
+        "rank_target_short_key": "short_net_ret",
         "magnitude_target_key": "exec_net_ret",
+        "magnitude_target_long_key": "max(exec_net_ret,0)",
+        "magnitude_target_short_key": "max(-exec_net_ret,0)",
         "cost_clearance_target_key": "cost_clearance_target",
+        "cost_clearance_target_long_key": "cost_clearance_target_long",
+        "cost_clearance_target_short_key": "cost_clearance_target_short",
         "calibrator_target_mode": cfg.calibrator_target,
-        "round_trip_cost_bps": float(round_trip_cost_bps()),
+        "round_trip_cost_bps": _rt_cost,
+        "execution_cost_bps_source": (
+            "per_symbol" if not execution_cost_missing else "fallback_global"
+        ),
         "label_horizon_bars": int(cfg.label_horizon_bars),
     }
     return LabelPanel(
@@ -263,5 +325,14 @@ def build_label_panel(aligned: AlignedMarketData, cfg: StrategyMLConfig) -> Labe
         rank_target=signed,
         magnitude_target=exec_net_ret,
         cost_clearance_target=cost_clearance_target,
+        rank_target_long=long_net,
+        rank_target_short=short_net,
+        magnitude_target_long=magnitude_target_long,
+        magnitude_target_short=magnitude_target_short,
+        cost_clearance_target_long=cost_clearance_target_long,
+        cost_clearance_target_short=cost_clearance_target_short,
+        relevance_long=rel_long,
+        relevance_short=rel_short,
+        dynamic_cost_bps_2d=dynamic_cost_2d,
         metadata=metadata,
     )
