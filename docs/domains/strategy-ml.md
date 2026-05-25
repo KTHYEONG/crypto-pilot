@@ -7,9 +7,12 @@ priority: high
 ai_read_policy: when_related
 related_paths:
   - src/domain/futures/strategy/
+  - src/domain/futures/optimization/objectives.py
 change_triggers:
   - src/domain/futures/strategy/ml_builder.py
   - src/domain/futures/strategy/ranker.py
+  - src/domain/futures/optimization/objectives.py
+  - src/domain/futures/strategy/diagnostics.py
 last_verified: 2026-05-25
 ---
 
@@ -189,24 +192,34 @@ ev[i]            = q50[i] * (1.0 - penalty_term[i])
 - `ic_gate_warn_only=False`: Gate 미만족 시 `RuntimeError` 발생하여 파이프라인 차단
 - 동전던지기 모델(IC=0) 통과 방지: `passes_quality_gate`의 `spearman_rank_ic >= 0.0` 조건에 추가하여 이중 게이팅
 
-### 5.8 EV Hurdle & OOS Trade Activation
+### 5.8 Directional Signal-Preservation Diagnostics & Viability Gate (2026-05-25)
+- 전략 합성 경로(`src/domain/futures/optimization/objectives.py`)에서 `alpha -> xs_score` 방향성 보존 비율을 산출한다.
+  - `xs_long_preservation_ratio = xs_long_nz_ratio / alpha_long_nz_ratio`
+  - `xs_short_preservation_ratio = xs_short_nz_ratio / alpha_short_nz_ratio`
+- 위 비율은 `_strategy_compose_diag` 및 `_strategy_signal_path_diag`에 함께 기록되며, `[COMPOSE-DIAG]`, `[STRAT-PATH]` 로그에 노출된다.
+- directional viability helper(`src/domain/futures/strategy/diagnostics.py::passes_directional_viability_gate`)는 `alpha_long_non_zero_ratio`/`alpha_short_non_zero_ratio`만 평가한다.
+  - 기본 threshold `0.0/0.0`로 backward-compatible 동작을 유지한다.
+- signal-preservation helper(`src/domain/futures/strategy/diagnostics.py::passes_signal_preservation_gate`)는 `xs_long_preservation_ratio`/`xs_short_preservation_ratio`만 평가한다.
+- ML builder hard gate 결선은 이번 스코프에서 미적용이며, 현재는 diagnostics/warn 기반 모니터링 계약으로 운영한다(추후 toggle 결선 예정).
+
+### 5.9 EV Hurdle & OOS Trade Activation
 과도하게 높았던 진입 장벽을 하향하여 모델의 유효한 상대적 랭크 예측(Rank IC ~0.027)이 정상 거래로 실현되도록 보정합니다.
 - **최적화 탐색공간 하향:** `EV_HURDLE_BPS` 튜닝 범위를 `[5.0, 100.0]`에서 `[3.0, 20.0]`으로 조정하여 극단적인 신호 소거를 차단.
 - **기본 허들 완화:** 기본값 `40.0 bps`를 `10.0 bps`로 경감하여 OOS에서의 `oos_zero_trades=0` 달성 및 유효 거래 빈도 확보.
 
-### 5.9 Model Contract Alignment (Approved ADR)
+### 5.10 Model Contract Alignment (Approved ADR)
 - **Compatibility Name:** 전략 식별자 `ml_lambdamart_v1`는 호환성 목적으로 유지.
 - **Implementation Reality:** 실제 학습기는 `CS-demeaned LightGBM regression` + quantile EV calibrator.
 - **Score Split:** `rank_score`는 상대 순위 품질(IC/NDCG), `ev_score`는 절대 실행 가능성(cost wall 통과) 검증에 사용.
 - **No Repeated Centering:** `ev_score`는 calibrator 출력 이후 추가 group-centering을 수행하지 않는다.
 - **CS-Demean Source:** centering은 `build_label_panel()` (라벨 빌드 시점)에서 1회만 적용한다. calibrator fit/predict 경로에서 재적용 금지.
 
-### 5.10 Virtual OOS Refit Normalization Consistency
+### 5.11 Virtual OOS Refit Normalization Consistency
 - `build_ml_strategy_alpha`의 virtual OOS fill(refit) fold는 regular fold의 마지막 정규화 상태를 재사용하지 않는다.
 - virtual fold의 `train` 구간(`[v_train_start, v_train_end)`)에서 `fit_robust_bounds` 및 train median imputer를 다시 피팅한다.
 - 해당 virtual-train 기반 정규화를 virtual `train/valid/test` 전 경로에 동일 적용하여 fold 간 normalization leakage를 방지한다.
 
-### 5.11 Final Evaluation Ensemble Cache Contract (2026-05-24)
+### 5.12 Final Evaluation Ensemble Cache Contract (2026-05-24)
 - `run_final_oos_evaluation()`의 top-K ensemble 루프는 멤버별 `m_params` 시그니처(JSON sorted key)를 계산한다.
 - 동일 시그니처가 재등장하면 `build_strategy_alpha` + merge + OOS backtest를 재실행하지 않고 캐시된 멤버 포트(`equity_curve` 포함)를 재사용한다.
 - 캐시 적중 멤버도 결과 집계(멤버 수, 메타 allocator 입력)에 동일하게 포함되어 기존 public contract를 유지한다.
@@ -215,7 +228,7 @@ ev[i]            = q50[i] * (1.0 - penalty_term[i])
   - 멤버 단위: `[ENSEMBLE-PROF] member=... cache=hit`
   - 요약: `[ENSEMBLE-PROF] summary ... cache_hits=... unique_engine_evals=...`
 
-### 5.12 Bottleneck Profiling Contract (2026-05-24)
+### 5.13 Bottleneck Profiling Contract (2026-05-24)
 - `run_optimization` 병목 분해를 위해 run-level/leg-level 프로파일 로그를 표준화한다.
 - `precompute_ml_optimization_context()`는 아래 구간을 모두 로깅한다.
   - `align`, `covariance`, `awf_refit_total`, `calibrator_total`, `prebuilt_total`, `total`
@@ -230,7 +243,7 @@ ev[i]            = q50[i] * (1.0 - penalty_term[i])
 - `opt_main_futures` 프로파일 요약은 trial 내부 평균(ms)와 별도로 run-level hidden overhead를 출력한다.
   - `trial_elapsed_sum`, `run_optimization`, `hidden_overhead`
 
-### 5.13 Performance Verification Snapshot (2026-05-24)
+### 5.14 Performance Verification Snapshot (2026-05-24)
 - 실행 조건:
   - `PYTHONPATH=. uv run python src/execution/opt_main_futures.py --mode strategy --skip-universe --skip-data-sync --symbols BTCUSDT --trials 5 --tf 4h --reference-date 2026-05-01 --strategy ml_lambdamart_v1 --seed 7`
 - 핵심 관측:
@@ -241,7 +254,7 @@ ev[i]            = q50[i] * (1.0 - penalty_term[i])
   - AWF leg 반복의 `feature/label` 재생성 병목은 panel cache로 완화됨.
   - 잔여 병목은 single-member 기준 final alpha build 경로가 지배적이며, 멤버 수 증가 시 ensemble cache 효과가 재확대된다.
 
-### 5.14 Anchored Panel Cache Contract (2026-05-24)
+### 5.15 Anchored Panel Cache Contract (2026-05-24)
 - AWF leg refit는 `precompute_anchored_ml_panels()`로 causal `FeaturePanel/LabelPanel`을 1회 생성해 재사용한다.
 - 재사용 범위는 raw panel까지만 허용한다. 아래 train-derived 단계는 leg별로 계속 재계산한다.
   - `fit_robust_bounds` / train median imputer / calibrator fitting
@@ -250,7 +263,7 @@ ev[i]            = q50[i] * (1.0 - penalty_term[i])
   - `[ML-PANEL-CACHE] scope=awf_precompute hit=true build=... rows=... symbols=... features=...`
   - anchored 내부 `[AWF-REFIT-PROF] feature_label=0.00s`로 cache 재사용 여부를 확인한다.
 
-### 5.15 Alpha Override Prebuilt Contract (2026-05-24)
+### 5.16 Alpha Override Prebuilt Contract (2026-05-24)
 - AWF leg 경로는 `data_maps` clone/merge 대신 leg별 `alpha_overrides` aligned array를 구성해 prebuilt builder에 주입한다.
 - OOS Platt calibrator fitting도 동일한 `alpha_overrides`를 참조하여 alpha source 일관성을 유지한다.
 - 목표:
