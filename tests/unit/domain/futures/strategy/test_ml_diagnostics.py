@@ -8,9 +8,11 @@ import pytest
 from src.domain.futures.strategy.config import StrategyMLConfig
 from src.domain.futures.strategy.diagnostics import (
     build_quality_report,
+    gross_return_diagnostics,
     ndcg_proxy_at_k,
     passes_ic_gate,
     passes_quality_gate,
+    passes_signal_preservation_gate,
 )
 
 
@@ -131,3 +133,130 @@ def test_build_quality_report_and_gate_pass() -> None:
     assert report["ranker_valid_ndcg_at_5"] > 0.0
     assert "ev_cost_ratio_proxy" in report
     assert passes_quality_gate(report) is True
+
+
+# ---------------------------------------------------------------------------
+# gross_return_diagnostics tests
+# ---------------------------------------------------------------------------
+
+
+def test_gross_return_diagnostics_returns_one_when_no_residualization() -> None:
+    """gross_return_diagnostics must return variance_retention_ratio=1.0 when inputs are identical."""
+    # Arrange
+    rng = np.random.default_rng(0)
+    gross = rng.normal(scale=0.01, size=(10, 6)).astype(np.float32)
+    eligible = np.ones((10, 6), dtype=bool)
+
+    # Act — pass same array for both gross and resid
+    result = gross_return_diagnostics(gross, gross, eligible, min_symbols=5)
+
+    # Assert
+    assert result["variance_retention_ratio"] == pytest.approx(1.0, rel=1e-6)
+    assert result["n_timesteps"] == pytest.approx(10.0)
+
+
+def test_gross_return_diagnostics_returns_less_than_one_after_shrinkage() -> None:
+    """gross_return_diagnostics must reflect variance shrinkage when resid is scaled down."""
+    # Arrange
+    rng = np.random.default_rng(1)
+    gross = rng.normal(scale=0.02, size=(10, 6)).astype(np.float32)
+    resid = (gross * 0.5).astype(np.float32)
+    eligible = np.ones((10, 6), dtype=bool)
+
+    # Act
+    result = gross_return_diagnostics(gross, resid, eligible, min_symbols=5)
+
+    # Assert — std scales linearly, so ratio should be ~0.5
+    assert result["variance_retention_ratio"] == pytest.approx(0.5, rel=1e-4)
+
+
+def test_gross_return_diagnostics_skips_rows_below_min_symbols() -> None:
+    """gross_return_diagnostics must skip rows when fewer than min_symbols valid symbols exist."""
+    # Arrange — only 3 symbols, min_symbols=5 → no eligible rows
+    rng = np.random.default_rng(2)
+    gross = rng.normal(scale=0.01, size=(8, 3)).astype(np.float32)
+    resid = gross * 0.8
+    eligible = np.ones((8, 3), dtype=bool)
+
+    # Act
+    result = gross_return_diagnostics(gross, resid, eligible, min_symbols=5)
+
+    # Assert — all metrics zero, no eligible timesteps
+    assert result["n_timesteps"] == 0.0
+    assert result["raw_cs_std_mean"] == 0.0
+    assert result["resid_cs_std_mean"] == 0.0
+    assert result["variance_retention_ratio"] == 0.0
+    assert result["raw_nonzero_ratio"] == 0.0
+    assert result["resid_nonzero_ratio"] == 0.0
+
+
+def test_gross_return_diagnostics_handles_all_nan_gracefully() -> None:
+    """gross_return_diagnostics must not raise and must return all-zero dict on full NaN input."""
+    # Arrange
+    gross = np.full((6, 6), np.nan, dtype=np.float32)
+    resid = np.full((6, 6), np.nan, dtype=np.float32)
+    eligible = np.ones((6, 6), dtype=bool)
+
+    # Act — must not raise
+    result = gross_return_diagnostics(gross, resid, eligible, min_symbols=5)
+
+    # Assert
+    assert result["n_timesteps"] == 0.0
+    assert result["variance_retention_ratio"] == 0.0
+
+
+def test_passes_signal_preservation_gate_returns_true_when_both_ratios_meet_threshold() -> None:
+    """passes_signal_preservation_gate returns True when both preservation ratios exceed thresholds."""
+    # Arrange
+    summary = {
+        "xs_long_preservation_ratio": 0.75,
+        "xs_short_preservation_ratio": 0.80,
+    }
+
+    # Act
+    result = passes_signal_preservation_gate(
+        summary,
+        min_long_preservation_ratio=0.70,
+        min_short_preservation_ratio=0.70,
+    )
+
+    # Assert
+    assert result is True
+
+
+def test_passes_signal_preservation_gate_returns_false_when_long_ratio_below_threshold() -> None:
+    """passes_signal_preservation_gate returns False when long preservation ratio is below threshold."""
+    # Arrange
+    summary = {
+        "xs_long_preservation_ratio": 0.50,
+        "xs_short_preservation_ratio": 0.80,
+    }
+
+    # Act
+    result = passes_signal_preservation_gate(
+        summary,
+        min_long_preservation_ratio=0.70,
+        min_short_preservation_ratio=0.60,
+    )
+
+    # Assert
+    assert result is False
+
+
+def test_passes_signal_preservation_gate_returns_false_when_short_ratio_below_threshold() -> None:
+    """passes_signal_preservation_gate returns False when short preservation ratio is below threshold."""
+    # Arrange
+    summary = {
+        "xs_long_preservation_ratio": 0.80,
+        "xs_short_preservation_ratio": 0.50,
+    }
+
+    # Act
+    result = passes_signal_preservation_gate(
+        summary,
+        min_long_preservation_ratio=0.70,
+        min_short_preservation_ratio=0.70,
+    )
+
+    # Assert
+    assert result is False

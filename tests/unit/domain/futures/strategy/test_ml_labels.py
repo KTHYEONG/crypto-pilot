@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from src.domain.futures.strategy.common.alignment import AlignedMarketData
 from src.domain.futures.strategy.config import StrategyMLConfig
@@ -241,3 +242,128 @@ def test_build_label_panel_applies_ev_scaled_sample_weight() -> None:
         0.0,
     ).astype(np.float32)
     np.testing.assert_allclose(panel.sample_weight, expected, rtol=1e-6, atol=1e-8)
+
+
+# ---------------------------------------------------------------------------
+# calibrator_target toggle tests
+# ---------------------------------------------------------------------------
+
+
+def _aligned_multi_symbol(n_symbols: int = 8, t_len: int = 20) -> AlignedMarketData:
+    """Build multi-symbol AlignedMarketData with realistic cross-sectional dispersion."""
+    rng = np.random.default_rng(42)
+    dt = np.array(
+        [np.datetime64("2026-01-01") + np.timedelta64(4 * i, "h") for i in range(t_len)],
+        dtype="datetime64[ns]",
+    )
+    # Prices spread across different levels with independent noise per symbol
+    base_prices = np.linspace(100.0, 800.0, n_symbols)
+    open_2d = np.outer(np.ones(t_len), base_prices) * (
+        1.0 + rng.normal(scale=0.005, size=(t_len, n_symbols))
+    )
+    close_2d = open_2d * (1.0 + rng.normal(scale=0.01, size=(t_len, n_symbols)))
+    # Ensure positive prices
+    open_2d = np.abs(open_2d) + 0.01
+    close_2d = np.abs(close_2d) + 0.01
+    # Asymmetric funding across symbols to create non-trivial residualization
+    funding_row = rng.uniform(-0.001, 0.001, size=n_symbols)
+    funding_2d = np.tile(funding_row, (t_len, 1))
+
+    return AlignedMarketData(
+        datetimes=dt,
+        symbols=tuple(f"SYM{i}USDT" for i in range(n_symbols)),
+        open_2d=open_2d,
+        high_2d=close_2d + 0.5,
+        low_2d=close_2d - 0.5,
+        close_2d=close_2d,
+        volume_2d=np.full((t_len, n_symbols), 5000.0, dtype=np.float64),
+        funding_2d=funding_2d,
+        active_mask=np.ones((t_len, n_symbols), dtype=bool),
+        warm_mask=np.ones((t_len, n_symbols), dtype=bool),
+        entry_block_mask=np.zeros((t_len, n_symbols), dtype=bool),
+        kill_mask=np.zeros((t_len, n_symbols), dtype=bool),
+    )
+
+
+def test_build_label_panel_gross_target_differs_from_beta_residualized() -> None:
+    """calibrator_target='gross' must produce exec_net_ret with larger variance than 'beta_residualized'.
+
+    The gross target retains the market-beta component, so its cross-sectional
+    dispersion should be >= the beta-residualized target which removes that component.
+    """
+    # Arrange
+    aligned = _aligned_multi_symbol(n_symbols=8, t_len=20)
+    cfg_resid = StrategyMLConfig(
+        label_horizon_bars=1,
+        fee_bps=0.0,
+        slippage_bps=0.0,
+        min_group_size=2,
+        calibrator_target="beta_residualized",
+    )
+    cfg_gross = StrategyMLConfig(
+        label_horizon_bars=1,
+        fee_bps=0.0,
+        slippage_bps=0.0,
+        min_group_size=2,
+        calibrator_target="gross",
+    )
+
+    # Act
+    panel_resid = build_label_panel(aligned, cfg_resid)
+    panel_gross = build_label_panel(aligned, cfg_gross)
+
+    # Assert — exec_net_ret arrays must differ
+    valid_resid = np.isfinite(panel_resid.exec_net_ret) & panel_resid.eligible_mask
+    valid_gross = np.isfinite(panel_gross.exec_net_ret) & panel_gross.eligible_mask
+    assert np.any(valid_resid), "no valid cells in beta_residualized exec_net_ret"
+    assert np.any(valid_gross), "no valid cells in gross exec_net_ret"
+    # The two targets must not be identical
+    common_mask = valid_resid & valid_gross
+    assert np.any(common_mask), "no common valid cells to compare"
+    assert not np.allclose(
+        panel_resid.exec_net_ret[common_mask],
+        panel_gross.exec_net_ret[common_mask],
+        atol=1e-7,
+    ), "gross and beta_residualized exec_net_ret must differ"
+    # Gross target variance >= residualized (market component retained)
+    var_gross = float(np.nanvar(panel_gross.exec_net_ret[common_mask]))
+    var_resid = float(np.nanvar(panel_resid.exec_net_ret[common_mask]))
+    assert var_gross >= var_resid, (
+        f"gross var ({var_gross:.6f}) should be >= resid var ({var_resid:.6f})"
+    )
+
+
+def test_build_label_panel_gross_target_default_unchanged() -> None:
+    """Default calibrator_target='beta_residualized' produces same exec_net_ret as original behavior."""
+    # Arrange — default config (no explicit calibrator_target)
+    aligned = _aligned_multi_symbol(n_symbols=6, t_len=15)
+    cfg_default = StrategyMLConfig(
+        label_horizon_bars=1,
+        fee_bps=0.0,
+        slippage_bps=0.0,
+        min_group_size=2,
+    )
+    cfg_explicit = StrategyMLConfig(
+        label_horizon_bars=1,
+        fee_bps=0.0,
+        slippage_bps=0.0,
+        min_group_size=2,
+        calibrator_target="beta_residualized",
+    )
+
+    # Act
+    panel_default = build_label_panel(aligned, cfg_default)
+    panel_explicit = build_label_panel(aligned, cfg_explicit)
+
+    # Assert — both produce identical exec_net_ret (regression test)
+    np.testing.assert_array_equal(
+        panel_default.exec_net_ret,
+        panel_explicit.exec_net_ret,
+    )
+
+
+def test_strategy_ml_config_rejects_invalid_calibrator_target() -> None:
+    """StrategyMLConfig must raise ValueError when calibrator_target is not a valid literal."""
+    # Arrange / Act / Assert
+    with pytest.raises(ValueError, match="calibrator_target"):
+        StrategyMLConfig(calibrator_target="invalid")  # type: ignore[arg-type]
