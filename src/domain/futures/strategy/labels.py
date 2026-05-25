@@ -146,6 +146,33 @@ def build_label_panel(aligned: AlignedMarketData, cfg: StrategyMLConfig) -> Labe
             gross_short[row_ok] + residual_adj[row_ok] - cost + funding[row_ok]
         ).astype(np.float32)
 
+    # Snapshot pre-CS-demean beta-residualized return for calibrator (absolute EV).
+    # CS-demean collapses cross-sectional mean to 0, losing absolute level needed by calibrator.
+    # exec_net_ret preserves the pre-demean signal so calibrator can target real execution EV.
+    # Shape: [T, N], NaN where not computed. Time complexity: O(T*N) copy.
+    exec_net_ret: NDArray[np.float32] = long_net.copy()
+
+    # CS-demean: per-timestep subtract cross-sectional mean from long_net and short_net labels.
+    # OLS beta residualization does not guarantee E_i[long_net[t,i]] = 0 when beta != 1
+    # or when eligible is a proper subset of all symbols (e.g., differential funding rates).
+    # Vectorized: [T-h, N] masked nanmean → subtract per-row to zero-center CS distribution.
+    # short_net adds the same mean (≈ -long_net before demean -> 0 after demean),
+    # preserving the long/short anti-symmetry contract.
+    _n_t: int = t_len - horizon
+    _cs_mask: NDArray[np.bool_] = np.isfinite(long_net[:_n_t]) & eligible[:_n_t]  # [T-h, N]
+    _cs_count: NDArray[np.intp] = _cs_mask.sum(axis=1)  # [T-h]
+    _masked_long: NDArray[np.float32] = np.where(_cs_mask, long_net[:_n_t], np.float32(np.nan))
+    with np.errstate(all="ignore"):
+        _row_mean: NDArray[np.float32] = np.nanmean(_masked_long, axis=1, keepdims=True).astype(
+            np.float32
+        )  # [T-h, 1]
+    # Skip rows with < 2 valid symbols (effective mean = 0 → no-op).
+    _effective_mean: NDArray[np.float32] = np.where(
+        (_cs_count >= 2)[:, np.newaxis], _row_mean, np.float32(0.0)
+    )
+    long_net[:_n_t] = np.where(_cs_mask, long_net[:_n_t] - _effective_mean, long_net[:_n_t])
+    short_net[:_n_t] = np.where(_cs_mask, short_net[:_n_t] + _effective_mean, short_net[:_n_t])
+
     signed = long_net.copy()
     finite_long = np.isfinite(long_net)
     rel = _build_relevance(
@@ -163,6 +190,7 @@ def build_label_panel(aligned: AlignedMarketData, cfg: StrategyMLConfig) -> Labe
         long_net_ret=long_net,
         short_net_ret=short_net,
         signed_net_ret=signed,
+        exec_net_ret=exec_net_ret,
         relevance=rel,
         sample_weight=sample_weight,
         eligible_mask=eligible & finite_long,
