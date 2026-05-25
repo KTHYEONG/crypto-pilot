@@ -72,6 +72,14 @@ def test_passes_ic_gate_logic() -> None:
     }
 
     assert passes_ic_gate(summary_pass, min_mean_ic=0.02, min_t_stat=2.0, min_hit_ratio=0.5) is True
-    assert passes_ic_gate(summary_fail_ic, min_mean_ic=0.02, min_t_stat=2.0, min_hit_ratio=0.5) is False
-    assert passes_ic_gate(summary_fail_t, min_mean_ic=0.02, min_t_stat=2.0, min_hit_ratio=0.5) is False
-    assert passes_ic_gate(summary_fail_hit, min_mean_ic=0.02, min_t_stat=2.0, min_hit_ratio=0.5) is False
+    assert (
+        passes_ic_gate(summary_fail_ic, min_mean_ic=0.02, min_t_stat=2.0, min_hit_ratio=0.5)
+        is False
+    )
+    assert (
+        passes_ic_gate(summary_fail_t, min_mean_ic=0.02, min_t_stat=2.0, min_hit_ratio=0.5) is False
+    )
+    assert (
+        passes_ic_gate(summary_fail_hit, min_mean_ic=0.02, min_t_stat=2.0, min_hit_ratio=0.5)
+        is False
+    )

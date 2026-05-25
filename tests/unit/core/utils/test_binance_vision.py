@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from http.client import HTTPMessage
+from typing import Literal
 from urllib.error import HTTPError
 
 import pytest
@@ -15,7 +16,7 @@ class _FakeResponse:
     def __enter__(self) -> _FakeResponse:
         return self
 
-    def __exit__(self, exc_type: object, exc: object, tb: object) -> bool:
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> Literal[False]:
         _ = (exc_type, exc, tb)
         return False
 

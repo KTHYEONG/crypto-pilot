@@ -53,7 +53,8 @@ def test_dual_decay_coarse_negative_skips_percent() -> None:
     """Test that percent-based decay is skipped when coarse CAGR <= 0."""
     cfg = DualDecayConfig()
 
-    # coarse <= 0, percent_decay should be None, abs_decay = (-0.04 - -0.05)*10000 = +100 bps -> PASS
+    # coarse <= 0, percent_decay should be None.
+    # abs_decay = (-0.04 - -0.05) * 10000 = +100 bps -> PASS
     res = evaluate_dual_decay(intrabar_cagr=-0.04, coarse_cagr=-0.05, cfg=cfg)
     assert res.passed is True
     assert res.percent_decay is None

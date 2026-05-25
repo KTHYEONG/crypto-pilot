@@ -1,4 +1,5 @@
 """pytest root conftest — project root를 sys.path에 추가."""
+
 from __future__ import annotations
 
 import sys

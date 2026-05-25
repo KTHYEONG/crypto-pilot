@@ -70,6 +70,7 @@ ignore = [
 [tool.mypy]
 # AI에게 엄격한 Type Hinting 강제
 strict = true
+explicit_package_bases = true
 warn_unused_configs = true
 disallow_untyped_defs = true
 check_untyped_defs = true
@@ -81,7 +82,8 @@ exclude = [
     "logs", 
     "results", 
     ".pytest_cache", 
-    ".git"
+    ".git",
+    "^tests/.*/conftest\\.py$"
 ]
 
 [tool.pyright]

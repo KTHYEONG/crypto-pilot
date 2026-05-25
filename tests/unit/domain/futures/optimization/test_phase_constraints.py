@@ -3,9 +3,10 @@ from __future__ import annotations
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
+import optuna
+import pytest
 from optuna.trial import TrialState
 
 project_root = str(Path(__file__).resolve().parents[5])
@@ -13,6 +14,7 @@ if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
 from src.domain.futures.optimization.candidate_selector import select_and_rank_candidates
+from src.domain.futures.optimization.optimizer import MLPhaseDContext
 from src.domain.futures.optimization.workflow import (
     phase_a1_constraints,
     phase_a2_constraints,
@@ -34,8 +36,12 @@ class _FakeStudy:
     study_name: str
     trials: list[_FakeTrial]
 
-    def get_trials(self, deepcopy: bool = False):
+    def get_trials(self, deepcopy: bool = False) -> list[_FakeTrial]:
         return list(self.trials)
+
+
+def _as_frozen_trial(trial: _FakeTrial) -> optuna.trial.FrozenTrial:
+    return cast(optuna.trial.FrozenTrial, trial)
 
 
 def test_phase_constraints_missing_metrics_are_violations() -> None:
@@ -46,9 +52,10 @@ def test_phase_constraints_missing_metrics_are_violations() -> None:
         user_attrs={},
         params={},
     )
-    assert all(v > 0 for v in phase_a1_constraints(t))
-    assert all(v > 0 for v in phase_a2_constraints(t))
-    assert all(v > 0 for v in phase_b_constraints(t))
+    frozen = _as_frozen_trial(t)
+    assert all(v > 0 for v in phase_a1_constraints(frozen))
+    assert all(v > 0 for v in phase_a2_constraints(frozen))
+    assert all(v > 0 for v in phase_b_constraints(frozen))
 
 
 def test_phase_constraints_thresholds_and_proxy_flags() -> None:
@@ -63,7 +70,7 @@ def test_phase_constraints_thresholds_and_proxy_flags() -> None:
             "active_month_ratio": 0.60,
             "turnover_cost_ratio": 0.10,
             "sortino": 2.0,  # proxy source for sortino_lcb
-            "calmar": 1.7,   # proxy source for calmar_lcb
+            "calmar": 1.7,  # proxy source for calmar_lcb
             "awf_worst_mdd_pct": 18.0,  # proxy source for mdd_ucb
             "ev_cost": 3.5,  # proxy source for ev_cost_ratio
             "funding_drag": 0.10,  # proxy source for funding_drag_ratio
@@ -74,9 +81,10 @@ def test_phase_constraints_thresholds_and_proxy_flags() -> None:
         },
         params={},
     )
-    assert all(v <= 0 for v in phase_a1_constraints(t))
-    assert all(v <= 0 for v in phase_a2_constraints(t))
-    assert all(v <= 0 for v in phase_b_constraints(t))
+    frozen = _as_frozen_trial(t)
+    assert all(v <= 0 for v in phase_a1_constraints(frozen))
+    assert all(v <= 0 for v in phase_a2_constraints(frozen))
+    assert all(v <= 0 for v in phase_b_constraints(frozen))
     assert t.user_attrs.get("sortino_lcb_proxy_used") == 1
     assert t.user_attrs.get("calmar_lcb_proxy_used") == 1
     assert t.user_attrs.get("mdd_ucb_proxy_used") == 1
@@ -109,9 +117,10 @@ def test_phase_constraints_direct_metrics_no_proxy_flags() -> None:
         },
         params={},
     )
-    assert all(v <= 0 for v in phase_a1_constraints(t))
-    assert all(v <= 0 for v in phase_a2_constraints(t))
-    assert all(v <= 0 for v in phase_b_constraints(t))
+    frozen = _as_frozen_trial(t)
+    assert all(v <= 0 for v in phase_a1_constraints(frozen))
+    assert all(v <= 0 for v in phase_a2_constraints(frozen))
+    assert all(v <= 0 for v in phase_b_constraints(frozen))
     assert "sortino_lcb_proxy_used" not in t.user_attrs
     assert "calmar_lcb_proxy_used" not in t.user_attrs
     assert "mdd_ucb_proxy_used" not in t.user_attrs
@@ -139,11 +148,13 @@ def test_phase_b_cvar_mdd_unit_alignment() -> None:
         },
         params={},
     )
-    vals = phase_b_constraints(t)
+    vals = phase_b_constraints(_as_frozen_trial(t))
     assert vals[7] <= 0  # cvar <= 1.3 * mdd after unit alignment
 
 
-def test_candidate_selector_filters_to_phase_b_only(monkeypatch) -> None:
+def test_candidate_selector_filters_to_phase_b_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(
         "src.domain.futures.optimization.candidate_selector.replay_robust_awf_for_trial_params",
         lambda _ctx, _params: (0.0, {"ok": True}),
@@ -173,7 +184,9 @@ def test_candidate_selector_filters_to_phase_b_only(monkeypatch) -> None:
     study = _FakeStudy(study_name="demo_phase_b", trials=[phase_a, phase_b])
 
     best, summary = select_and_rank_candidates(
-        study_ml=study, base_ctx=SimpleNamespace(), cfg={}
+        study_ml=cast(optuna.Study, study),
+        base_ctx=MLPhaseDContext(data_maps={}, symbols=[], tf="4h"),
+        cfg={},
     )
 
     assert best["trial"].number == 11

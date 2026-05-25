@@ -205,8 +205,7 @@ def test_quarterly_universe_selection_audit(tmp_path: Path) -> None:
         rejected_symbols = set(report.loc[~report["passed"].astype(bool), "symbol"].astype(str))
         assert ranked_out in rejected_symbols
         assert (
-            load_universe_snapshot(as_of=is_end, tf="4h", snapshot_root=snapshot_root)
-            is not None
+            load_universe_snapshot(as_of=is_end, tf="4h", snapshot_root=snapshot_root) is not None
         )
 
     assert observed == {

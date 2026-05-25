@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import numpy as np
 
 from src.domain.futures.validation.gates import (
@@ -12,7 +14,7 @@ from src.domain.futures.validation.gates import (
 )
 
 
-def _all_pass_inputs() -> dict:
+def _all_pass_inputs() -> dict[str, Any]:
     """모든 gate를 통과하는 기본 입력값."""
     return {
         "leg_log_tw": np.array([0.04, 0.06, 0.03, 0.05, 0.07, 0.04, 0.05, 0.06]),

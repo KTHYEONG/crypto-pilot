@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+
 import pandas as pd
 
 project_root = str(Path(__file__).resolve().parents[5])
@@ -36,5 +37,3 @@ def test_build_alpha_goal_eval_meta_reports_missing_reasons() -> None:
     assert meta["verdict"] == "warn"
     assert "missing_icir_oos" in meta["reason_codes"]
     assert "missing_gate_status" in meta["reason_codes"]
-
-
