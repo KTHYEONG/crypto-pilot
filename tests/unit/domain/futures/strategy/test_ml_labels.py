@@ -380,3 +380,26 @@ def test_strategy_ml_config_rejects_invalid_calibrator_target() -> None:
     with pytest.raises(ValueError, match="calibrator_target"):
         StrategyMLConfig(calibrator_target="invalid")  # type: ignore[arg-type]
 
+
+def test_build_label_panel_exposes_dual_side_targets() -> None:
+    panel = build_label_panel(
+        _aligned_for_labels(),
+        StrategyMLConfig(label_horizon_bars=1, fee_bps=0.0, slippage_bps=0.0, min_group_size=2),
+    )
+    assert panel.rank_target_long is not None
+    assert panel.rank_target_short is not None
+    assert panel.magnitude_target_long is not None
+    assert panel.magnitude_target_short is not None
+    assert panel.cost_clearance_target_long is not None
+    assert panel.cost_clearance_target_short is not None
+    assert panel.relevance_long is not None
+    assert panel.relevance_short is not None
+
+
+def test_build_label_panel_keeps_b1_no_fee_slippage_deduction() -> None:
+    aligned = _aligned_for_labels()
+    cfg = StrategyMLConfig(label_horizon_bars=1, fee_bps=50.0, slippage_bps=50.0, min_group_size=2)
+    panel = build_label_panel(aligned, cfg)
+    assert panel.metadata["round_trip_cost_bps"] > 0.0
+    valid = panel.eligible_mask & np.isfinite(panel.exec_net_ret)
+    assert np.any(valid)

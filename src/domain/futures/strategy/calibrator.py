@@ -159,29 +159,29 @@ def compute_conservative_ev(
         raise ValueError("quantile vectors must have identical shapes")
     if q10.shape[0] == 0:
         return np.zeros((0,), dtype=np.float32)
-    q10f = np.asarray(q10, dtype=np.float32)
-    q50f = np.asarray(q50, dtype=np.float32)
-    q90f = np.asarray(q90, dtype=np.float32)
-    uncertainty = np.maximum(q90f - q10f, np.float32(1e-8))
+    lower = np.asarray(q10, dtype=np.float32)
+    median = np.asarray(q50, dtype=np.float32)
+    upper = np.asarray(q90, dtype=np.float32)
+    uncertainty = np.maximum(upper - lower, np.float32(1e-8))
     if cfg.ev_mode == "prob_x_magnitude":
-        magnitude = np.maximum(np.abs(q50f), np.float32(0.0))
-        prob_up = np.clip((q50f - q10f) / uncertainty, np.float32(0.0), np.float32(1.0))
+        magnitude = np.maximum(np.abs(median), np.float32(0.0))
+        prob_up = np.clip((median - lower) / uncertainty, np.float32(0.0), np.float32(1.0))
         directional_prob = (np.float32(2.0) * prob_up) - np.float32(1.0)
         ev = directional_prob * magnitude
     else:
-        downside = np.maximum(q50f - q10f, np.float32(0.0))
-        upside = np.maximum(q90f - q50f, np.float32(0.0))
-        med_unc = np.median(uncertainty) if uncertainty.size > 0 else np.float32(1e-4)
+        downside = np.maximum(median - lower, np.float32(0.0))
+        upside = np.maximum(upper - median, np.float32(0.0))
+        median_uncertainty = np.median(uncertainty) if uncertainty.size > 0 else np.float32(1e-4)
         lam = np.float32(cfg.lambda_tail)
         lam_dynamic = np.clip(
-            lam * (uncertainty / np.maximum(med_unc, np.float32(1e-8))),
+            lam * (uncertainty / np.maximum(median_uncertainty, np.float32(1e-8))),
             np.float32(0.0),
             lam * np.float32(2.0),
         )
-        is_long = q50f >= np.float32(0.0)
+        is_long = median >= np.float32(0.0)
         penalty_ratio = np.where(is_long, downside / uncertainty, upside / uncertainty)
         penalty_term = np.clip(lam_dynamic * penalty_ratio, np.float32(0.0), np.float32(0.99))
-        ev = q50f * (np.float32(1.0) - penalty_term)
+        ev = median * (np.float32(1.0) - penalty_term)
     ev = np.asarray(ev, dtype=np.float32)
     clip = np.float32(cfg.alpha_clip_bps / 10000.0)
     clipped = np.clip(ev, -clip, clip)

@@ -109,6 +109,14 @@ def build_ml_strategy_alpha(
     cfg: StrategyConfig,
 ) -> pd.DataFrame:
     """Build ML strategy alpha panel."""
+    def _build_side_matrix(**kwargs: Any) -> Any:
+        try:
+            return build_long_matrix(**kwargs)
+        except TypeError:
+            kwargs.pop("relevance_override", None)
+            kwargs.pop("ev_target_override", None)
+            return build_long_matrix(**kwargs)
+
     if cfg.ml.horizon_experiment_enabled:
         candidates = _resolve_horizon_candidates(cfg.ml)
         friction_bps = round_trip_cost_bps()
@@ -138,7 +146,7 @@ def build_ml_strategy_alpha(
                 cfg=candidate_cfg,
             )
             report = panel.attrs.get("quality_report", {})
-            alpha_p95_bps = float(report.get("alpha_p95_bps", 0.0))
+            alpha_p95_bps = float(report.get("in_fold_valid_alpha_p95_bps", 0.0))
             score_bps = alpha_p95_bps - floor_bps
             record = {
                 "horizon": int(horizon),
@@ -235,8 +243,11 @@ def build_ml_strategy_alpha(
         ),
     )
 
-    ev_grid = np.zeros((features.values.shape[0], features.values.shape[1]), dtype=np.float32)
-    score_grid = np.full_like(ev_grid, np.nan, dtype=np.float32)
+    ev_long_grid = np.zeros((features.values.shape[0], features.values.shape[1]), dtype=np.float32)
+    ev_short_grid = np.zeros((features.values.shape[0], features.values.shape[1]), dtype=np.float32)
+    score_grid = np.full_like(ev_long_grid, np.nan, dtype=np.float32)
+    valid_ev_long_all: list[np.ndarray] = []
+    valid_ev_short_all: list[np.ndarray] = []
     for fold in folds:
         _logger.info(
             "[ML-FOLD] id=%d train=[%d,%d) valid=[%d,%d) test=[%d,%d)",
@@ -270,7 +281,34 @@ def build_ml_strategy_alpha(
                 "missing_imputer": "train_median",
             },
         )
-        train = build_long_matrix(
+        long_rel = (
+            labels.relevance_long if labels.relevance_long is not None else labels.relevance
+        )
+        short_rel = (
+            labels.relevance_short if labels.relevance_short is not None else labels.relevance
+        )
+        long_mag = (
+            labels.magnitude_target_long
+            if labels.magnitude_target_long is not None
+            else (
+                labels.magnitude_target
+                if labels.magnitude_target is not None
+                else labels.exec_net_ret
+            )
+        )
+        short_mag = (
+            labels.magnitude_target_short
+            if labels.magnitude_target_short is not None
+            else np.maximum(
+                -(
+                    labels.magnitude_target
+                    if labels.magnitude_target is not None
+                    else labels.exec_net_ret
+                ),
+                0.0,
+            )
+        )
+        train_long = _build_side_matrix(
             features=normalized_features,
             labels=labels,
             start=fold.train_start,
@@ -278,8 +316,10 @@ def build_ml_strategy_alpha(
             fold=fold,
             split="train",
             min_group_size=ml_cfg.min_group_size,
+            relevance_override=long_rel,
+            ev_target_override=long_mag,
         )
-        valid = build_long_matrix(
+        valid_long = _build_side_matrix(
             features=normalized_features,
             labels=labels,
             start=fold.valid_start,
@@ -287,8 +327,10 @@ def build_ml_strategy_alpha(
             fold=fold,
             split="valid",
             min_group_size=ml_cfg.min_group_size,
+            relevance_override=long_rel,
+            ev_target_override=long_mag,
         )
-        test = build_long_matrix(
+        test_long = _build_side_matrix(
             features=normalized_features,
             labels=labels,
             start=fold.test_start,
@@ -296,53 +338,129 @@ def build_ml_strategy_alpha(
             fold=fold,
             split="test",
             min_group_size=ml_cfg.min_group_size,
+            relevance_override=long_rel,
+            ev_target_override=long_mag,
         )
-        validate_long_matrix(train)
-        validate_long_matrix(valid)
-        validate_long_matrix(test)
-        ranker = fit_ranker(train=train, valid=valid, cfg=ml_cfg)
-        rank_train = predict_rank_score(ranker.model, train)
-        rank_valid = predict_rank_score(ranker.model, valid)
-        rank_test = predict_rank_score(ranker.model, test)
+        train_short = _build_side_matrix(
+            features=normalized_features,
+            labels=labels,
+            start=fold.train_start,
+            end=fold.train_end,
+            fold=fold,
+            split="train",
+            min_group_size=ml_cfg.min_group_size,
+            relevance_override=short_rel,
+            ev_target_override=short_mag,
+        )
+        valid_short = _build_side_matrix(
+            features=normalized_features,
+            labels=labels,
+            start=fold.valid_start,
+            end=fold.valid_end,
+            fold=fold,
+            split="valid",
+            min_group_size=ml_cfg.min_group_size,
+            relevance_override=short_rel,
+            ev_target_override=short_mag,
+        )
+        test_short = _build_side_matrix(
+            features=normalized_features,
+            labels=labels,
+            start=fold.test_start,
+            end=fold.test_end,
+            fold=fold,
+            split="test",
+            min_group_size=ml_cfg.min_group_size,
+            relevance_override=short_rel,
+            ev_target_override=short_mag,
+        )
+        validate_long_matrix(train_long)
+        validate_long_matrix(valid_long)
+        validate_long_matrix(test_long)
+        validate_long_matrix(train_short)
+        validate_long_matrix(valid_short)
+        validate_long_matrix(test_short)
+        fit_long = fit_ranker(train=train_long, valid=valid_long, cfg=ml_cfg)
+        fit_short = fit_ranker(train=train_short, valid=valid_short, cfg=ml_cfg)
+        score_train = predict_rank_score(fit_long.model, train_long)
+        score_valid = predict_rank_score(fit_long.model, valid_long)
+        score_test = predict_rank_score(fit_long.model, test_long)
+        score_test_short = predict_rank_score(fit_short.model, test_short)
         _logger.info(
             "[ML-RANKER] fold=%d train_n=%d valid_n=%d test_n=%d train_mean=%.6f valid_mean=%.6f",
             fold.fold_id,
-            int(train.X.shape[0]),
-            int(valid.X.shape[0]),
-            int(test.X.shape[0]),
-            float(np.mean(rank_train, dtype=np.float32)) if rank_train.size > 0 else 0.0,
-            float(np.mean(rank_valid, dtype=np.float32)) if rank_valid.size > 0 else 0.0,
+            int(train_long.X.shape[0]),
+            int(valid_long.X.shape[0]),
+            int(test_long.X.shape[0]),
+            float(np.mean(score_train, dtype=np.float32)) if score_train.size > 0 else 0.0,
+            float(np.mean(score_valid, dtype=np.float32)) if score_valid.size > 0 else 0.0,
         )
-        calibrators = fit_quantile_calibrators(
-            train=train,
-            valid=valid,
-            rank_score_train=rank_train,
-            rank_score_valid=rank_valid,
+        calibration_fit_long = fit_quantile_calibrators(
+            train=train_long,
+            valid=valid_long,
+            rank_score_train=score_train,
+            rank_score_valid=score_valid,
             cfg=ml_cfg,
         )
-        ev_test = predict_conservative_ev(calibrators, test, rank_test, ml_cfg)
+        calibration_fit_short = fit_quantile_calibrators(
+            train=train_short,
+            valid=valid_short,
+            rank_score_train=predict_rank_score(fit_short.model, train_short),
+            rank_score_valid=predict_rank_score(fit_short.model, valid_short),
+            cfg=ml_cfg,
+        )
+        ev_valid_long = predict_conservative_ev(
+            calibration_fit_long,
+            valid_long,
+            score_valid,
+            ml_cfg,
+        )
+        ev_valid_short = predict_conservative_ev(
+            calibration_fit_short,
+            valid_short,
+            predict_rank_score(fit_short.model, valid_short),
+            ml_cfg,
+        )
+        valid_ev_long_all.append(ev_valid_long)
+        valid_ev_short_all.append(ev_valid_short)
+        ev_test_long = predict_conservative_ev(calibration_fit_long, test_long, score_test, ml_cfg)
+        ev_test_short = predict_conservative_ev(
+            calibration_fit_short,
+            test_short,
+            score_test_short,
+            ml_cfg,
+        )
+        short_clear = (
+            labels.cost_clearance_target_short
+            if labels.cost_clearance_target_short is not None
+            else labels.cost_clearance_target
+        )
+        long_clear = (
+            labels.cost_clearance_target_long
+            if labels.cost_clearance_target_long is not None
+            else labels.cost_clearance_target
+        )
+        for row, (t_idx, s_idx) in enumerate(test_long.index_map):
+            if long_clear is None or long_clear[int(t_idx), int(s_idx)] > 0.0:
+                ev_long_grid[int(t_idx), int(s_idx)] = np.float32(max(ev_test_long[row], 0.0))
+            score_grid[int(t_idx), int(s_idx)] = score_test[row]
+        for row, (t_idx, s_idx) in enumerate(test_short.index_map):
+            if short_clear is None or short_clear[int(t_idx), int(s_idx)] > 0.0:
+                ev_short_grid[int(t_idx), int(s_idx)] = np.float32(max(ev_test_short[row], 0.0))
+            if np.isnan(score_grid[int(t_idx), int(s_idx)]):
+                score_grid[int(t_idx), int(s_idx)] = score_test_short[row]
         _logger.info(
             "[ML-CALIB] fold=%d ev_mean=%.6e ev_p10=%.6e ev_p90=%.6e",
             fold.fold_id,
-            float(np.mean(ev_test, dtype=np.float32)) if ev_test.size > 0 else 0.0,
-            float(np.percentile(ev_test, 10)) if ev_test.size > 0 else 0.0,
-            float(np.percentile(ev_test, 90)) if ev_test.size > 0 else 0.0,
+            float(np.mean(ev_test_long, dtype=np.float32)) if ev_test_long.size > 0 else 0.0,
+            float(np.percentile(ev_test_long, 10)) if ev_test_long.size > 0 else 0.0,
+            float(np.percentile(ev_test_long, 90)) if ev_test_long.size > 0 else 0.0,
         )
-        fold_alpha = infer_fold_alpha(
-            fold=fold,
-            test=test,
-            ev_test=ev_test,
-            t_size=features.values.shape[0],
-            n_size=features.values.shape[1],
-        )
-        ev_grid += fold_alpha.ev_grid
-        for row, (t_idx, s_idx) in enumerate(test.index_map):
-            score_grid[int(t_idx), int(s_idx)] = rank_test[row]
         _logger.info(
             "[ML-OOS] fold=%d test_rows=%d alpha_nonzero=%.4f",
             fold.fold_id,
-            int(test.X.shape[0]),
-            float(np.count_nonzero(ev_test) / max(1, ev_test.size)),
+            int(test_long.X.shape[0]),
+            float(np.count_nonzero(ev_test_long) / max(1, ev_test_long.size)),
         )
 
     # [ML-OOS-FILL] Check if there is an uncovered live/OOS window at the end of the timeline
@@ -352,7 +470,7 @@ def build_ml_strategy_alpha(
         _logger.info(
             "[ML-OOS-FILL] Uncovered OOS/live window detected: [%d, %d)", last_test_end, total_bars
         )
-        # Construct virtual fold for the remaining live window
+        # Construct virtual fold for the remaining live window — same contract as regular folds
         v_size = folds[-1].valid_end - folds[-1].valid_start
         v_train_start = 0
         v_train_end = last_test_end - v_size
@@ -397,7 +515,45 @@ def build_ml_strategy_alpha(
                 "missing_imputer": "train_median",
             },
         )
-        v_train = build_long_matrix(
+        # Dual-side label derivation — same pattern as regular fold loop
+        v_long_rel = (
+            labels.relevance_long if labels.relevance_long is not None else labels.relevance
+        )
+        v_short_rel = (
+            labels.relevance_short if labels.relevance_short is not None else labels.relevance
+        )
+        v_long_mag = (
+            labels.magnitude_target_long
+            if labels.magnitude_target_long is not None
+            else (
+                labels.magnitude_target
+                if labels.magnitude_target is not None
+                else labels.exec_net_ret
+            )
+        )
+        v_short_mag = (
+            labels.magnitude_target_short
+            if labels.magnitude_target_short is not None
+            else np.maximum(
+                -(
+                    labels.magnitude_target
+                    if labels.magnitude_target is not None
+                    else labels.exec_net_ret
+                ),
+                0.0,
+            )
+        )
+        v_long_clear = (
+            labels.cost_clearance_target_long
+            if labels.cost_clearance_target_long is not None
+            else labels.cost_clearance_target
+        )
+        v_short_clear = (
+            labels.cost_clearance_target_short
+            if labels.cost_clearance_target_short is not None
+            else labels.cost_clearance_target
+        )
+        v_train_long = _build_side_matrix(
             features=v_normalized_features,
             labels=labels,
             start=v_train_start,
@@ -405,8 +561,10 @@ def build_ml_strategy_alpha(
             fold=v_fold,
             split="train",
             min_group_size=ml_cfg.min_group_size,
+            relevance_override=v_long_rel,
+            ev_target_override=v_long_mag,
         )
-        v_valid = build_long_matrix(
+        v_valid_long = _build_side_matrix(
             features=v_normalized_features,
             labels=labels,
             start=v_valid_start,
@@ -414,8 +572,10 @@ def build_ml_strategy_alpha(
             fold=v_fold,
             split="valid",
             min_group_size=ml_cfg.min_group_size,
+            relevance_override=v_long_rel,
+            ev_target_override=v_long_mag,
         )
-        v_test = build_long_matrix(
+        v_test_long = _build_side_matrix(
             features=v_normalized_features,
             labels=labels,
             start=v_test_start,
@@ -423,39 +583,116 @@ def build_ml_strategy_alpha(
             fold=v_fold,
             split="test",
             min_group_size=ml_cfg.min_group_size,
+            relevance_override=v_long_rel,
+            ev_target_override=v_long_mag,
         )
-        if v_test.X.shape[0] > 0:
-            validate_long_matrix(v_train)
-            validate_long_matrix(v_valid)
-            validate_long_matrix(v_test)
-            v_ranker = fit_ranker(train=v_train, valid=v_valid, cfg=ml_cfg)
-            v_rank_train = predict_rank_score(v_ranker.model, v_train)
-            v_rank_valid = predict_rank_score(v_ranker.model, v_valid)
-            v_rank_test = predict_rank_score(v_ranker.model, v_test)
-            v_calibrators = fit_quantile_calibrators(
-                train=v_train,
-                valid=v_valid,
-                rank_score_train=v_rank_train,
-                rank_score_valid=v_rank_valid,
+        v_train_short = _build_side_matrix(
+            features=v_normalized_features,
+            labels=labels,
+            start=v_train_start,
+            end=v_train_end,
+            fold=v_fold,
+            split="train",
+            min_group_size=ml_cfg.min_group_size,
+            relevance_override=v_short_rel,
+            ev_target_override=v_short_mag,
+        )
+        v_valid_short = _build_side_matrix(
+            features=v_normalized_features,
+            labels=labels,
+            start=v_valid_start,
+            end=v_valid_end,
+            fold=v_fold,
+            split="valid",
+            min_group_size=ml_cfg.min_group_size,
+            relevance_override=v_short_rel,
+            ev_target_override=v_short_mag,
+        )
+        v_test_short = _build_side_matrix(
+            features=v_normalized_features,
+            labels=labels,
+            start=v_test_start,
+            end=v_test_end,
+            fold=v_fold,
+            split="test",
+            min_group_size=ml_cfg.min_group_size,
+            relevance_override=v_short_rel,
+            ev_target_override=v_short_mag,
+        )
+        if v_test_long.X.shape[0] > 0:
+            validate_long_matrix(v_train_long)
+            validate_long_matrix(v_valid_long)
+            validate_long_matrix(v_test_long)
+            validate_long_matrix(v_train_short)
+            validate_long_matrix(v_valid_short)
+            validate_long_matrix(v_test_short)
+            v_fit_long = fit_ranker(train=v_train_long, valid=v_valid_long, cfg=ml_cfg)
+            v_fit_short = fit_ranker(train=v_train_short, valid=v_valid_short, cfg=ml_cfg)
+            v_score_train_long = predict_rank_score(v_fit_long.model, v_train_long)
+            v_score_valid_long = predict_rank_score(v_fit_long.model, v_valid_long)
+            v_score_test_long = predict_rank_score(v_fit_long.model, v_test_long)
+            v_score_test_short = predict_rank_score(v_fit_short.model, v_test_short)
+            v_calibration_fit_long = fit_quantile_calibrators(
+                train=v_train_long,
+                valid=v_valid_long,
+                rank_score_train=v_score_train_long,
+                rank_score_valid=v_score_valid_long,
                 cfg=ml_cfg,
             )
-            v_ev_test = predict_conservative_ev(v_calibrators, v_test, v_rank_test, ml_cfg)
-            v_fold_alpha = infer_fold_alpha(
-                fold=v_fold,
-                test=v_test,
-                ev_test=v_ev_test,
-                t_size=total_bars,
-                n_size=features.values.shape[1],
+            v_calibration_fit_short = fit_quantile_calibrators(
+                train=v_train_short,
+                valid=v_valid_short,
+                rank_score_train=predict_rank_score(v_fit_short.model, v_train_short),
+                rank_score_valid=predict_rank_score(v_fit_short.model, v_valid_short),
+                cfg=ml_cfg,
             )
-            ev_grid += v_fold_alpha.ev_grid
-            for row, (t_idx, s_idx) in enumerate(v_test.index_map):
-                score_grid[int(t_idx), int(s_idx)] = v_rank_test[row]
+            v_ev_test_long = predict_conservative_ev(
+                v_calibration_fit_long, v_test_long, v_score_test_long, ml_cfg
+            )
+            v_ev_test_short = predict_conservative_ev(
+                v_calibration_fit_short, v_test_short, v_score_test_short, ml_cfg
+            )
+            # Write directly into side-specific grids — same gate pattern as regular folds
+            for row, (t_idx, s_idx) in enumerate(v_test_long.index_map):
+                if v_long_clear is None or v_long_clear[int(t_idx), int(s_idx)] > 0.0:
+                    ev_long_grid[int(t_idx), int(s_idx)] = np.float32(
+                        max(v_ev_test_long[row], 0.0)
+                    )
+                score_grid[int(t_idx), int(s_idx)] = v_score_test_long[row]
+            for row, (t_idx, s_idx) in enumerate(v_test_short.index_map):
+                if v_short_clear is None or v_short_clear[int(t_idx), int(s_idx)] > 0.0:
+                    ev_short_grid[int(t_idx), int(s_idx)] = np.float32(
+                        max(v_ev_test_short[row], 0.0)
+                    )
+                if np.isnan(score_grid[int(t_idx), int(s_idx)]):
+                    score_grid[int(t_idx), int(s_idx)] = v_score_test_short[row]
             _logger.info(
-                "[ML-OOS-FILL] Completed virtual refit fold. test_rows=%d alpha_nonzero=%.4f",
-                int(v_test.X.shape[0]),
-                float(np.count_nonzero(v_ev_test) / max(1, v_ev_test.size)),
+                "[ML-OOS-FILL] Completed dual-side virtual refit fold. "
+                "test_rows=%d long_nonzero=%.4f short_nonzero=%.4f",
+                int(v_test_long.X.shape[0]),
+                float(np.count_nonzero(v_ev_test_long) / max(1, v_ev_test_long.size)),
+                float(np.count_nonzero(v_ev_test_short) / max(1, v_ev_test_short.size)),
             )
 
+    # EV-level per-cell gate: gate_margin = ev_bps - (dynamic_cost_bps + hurdle_bps) > 0.
+    # Gated copies used for panel output; ungated originals retained for quality diagnostics
+    # so build_quality_report sees real alpha_p95_bps, not zeroed values.
+    _hurdle_bps = float(OPT_FUTURES_CONFIG.get("FUTURES_DEFAULT_EV_HURDLE_BPS", 10.0))
+    if labels.dynamic_cost_bps_2d is not None:
+        _dcost_2d = labels.dynamic_cost_bps_2d.astype(np.float32)
+    else:
+        _dcost_2d = np.full_like(ev_long_grid, np.float32(round_trip_cost_bps()))
+    _ev_gate_2d = (_dcost_2d + np.float32(_hurdle_bps)) / np.float32(1e4)
+    ev_long_gated = np.where(ev_long_grid > _ev_gate_2d, ev_long_grid, np.float32(0.0))
+    ev_short_gated = np.where(ev_short_grid > _ev_gate_2d, ev_short_grid, np.float32(0.0))
+    _logger.info(
+        "[ML-EV-GATE] hurdle=%.1fbps long_pass=%.4f short_pass=%.4f",
+        _hurdle_bps,
+        float(np.mean(ev_long_gated > 0.0)),
+        float(np.mean(ev_short_gated > 0.0)),
+    )
+
+    ev_grid = ev_long_gated - ev_short_gated
     panel = assemble_alpha_panel(
         datetimes=features.datetimes,
         symbols=features.symbols,
@@ -463,6 +700,8 @@ def build_ml_strategy_alpha(
         clip_abs=float(ml_cfg.alpha_clip_bps / 10000.0),
         eligible_mask=labels.eligible_mask,
     )
+    panel.loc[:, "alpha_long"] = ev_long_gated.reshape(-1)
+    panel.loc[:, "alpha_short"] = ev_short_gated.reshape(-1)
     panel.attrs["strategy_name"] = cfg.name
     panel.attrs["feature_names"] = list(features.feature_names)
     panel.attrs["fold_count"] = len(folds)
@@ -485,12 +724,32 @@ def build_ml_strategy_alpha(
         score_2d=score_grid,
         signed_ret_2d=labels.signed_net_ret.astype(np.float64),
         relevance_2d=labels.relevance.astype(np.float64),
-        alpha_long_2d=np.maximum(ev_grid, 0.0),
-        alpha_short_2d=np.maximum(-ev_grid, 0.0),
+        alpha_long_2d=ev_long_grid,    # ungated: preserves real alpha_p95_bps
+        alpha_short_2d=ev_short_grid,  # ungated
     )
+    valid_stack_long = (
+        np.concatenate(valid_ev_long_all)
+        if valid_ev_long_all
+        else np.zeros((0,), dtype=np.float32)
+    )
+    valid_stack_short = (
+        np.concatenate(valid_ev_short_all)
+        if valid_ev_short_all
+        else np.zeros((0,), dtype=np.float32)
+    )
+    valid_alpha = (
+        np.concatenate([valid_stack_long, valid_stack_short])
+        if (valid_stack_long.size + valid_stack_short.size) > 0
+        else np.zeros((0,), dtype=np.float32)
+    )
+    if "in_fold_valid_alpha_p95_bps" not in quality_report:
+        quality_report["in_fold_valid_alpha_p95_bps"] = (
+            float(np.percentile(np.abs(valid_alpha) * 1e4, 95)) if valid_alpha.size > 0 else 0.0
+        )
     clip_lim = float(ml_cfg.alpha_clip_bps / 10000.0)
-    raw_long = np.maximum(np.clip(ev_grid, -clip_lim, clip_lim), 0.0)
-    raw_short = np.maximum(-np.clip(ev_grid, -clip_lim, clip_lim), 0.0)
+    _ev_grid_ungated = ev_long_grid - ev_short_grid
+    raw_long = np.maximum(np.clip(_ev_grid_ungated, -clip_lim, clip_lim), 0.0)
+    raw_short = np.maximum(-np.clip(_ev_grid_ungated, -clip_lim, clip_lim), 0.0)
     panel_long = panel["alpha_long"].to_numpy(dtype=np.float64).reshape(raw_long.shape)
     panel_short = panel["alpha_short"].to_numpy(dtype=np.float64).reshape(raw_short.shape)
     raw_long_nz = float(np.mean(np.abs(raw_long) > 1e-12)) if raw_long.size > 0 else 0.0
@@ -753,29 +1012,29 @@ def build_ml_strategy_alpha_anchored(
     matrix_elapsed = time.perf_counter() - t_matrix
 
     t_fit_predict = time.perf_counter()
-    ranker = fit_ranker(train=train, valid=valid, cfg=ml_cfg)
-    rank_train = predict_rank_score(ranker.model, train)
-    rank_valid = predict_rank_score(ranker.model, valid)
-    rank_test = predict_rank_score(ranker.model, test)
+    fit_result = fit_ranker(train=train, valid=valid, cfg=ml_cfg)
+    score_train = predict_rank_score(fit_result.model, train)
+    score_valid = predict_rank_score(fit_result.model, valid)
+    score_test = predict_rank_score(fit_result.model, test)
     fit_predict_elapsed = time.perf_counter() - t_fit_predict
     _logger.info(
         "[ML-ANCHORED-RANKER] train_n=%d valid_n=%d test_n=%d train_mean=%.6f valid_mean=%.6f",
         int(train.X.shape[0]),
         int(valid.X.shape[0]),
         int(test.X.shape[0]),
-        float(np.mean(rank_train, dtype=np.float32)) if rank_train.size > 0 else 0.0,
-        float(np.mean(rank_valid, dtype=np.float32)) if rank_valid.size > 0 else 0.0,
+        float(np.mean(score_train, dtype=np.float32)) if score_train.size > 0 else 0.0,
+        float(np.mean(score_valid, dtype=np.float32)) if score_valid.size > 0 else 0.0,
     )
 
     t_calib = time.perf_counter()
-    calibrators = fit_quantile_calibrators(
+    calibration_fit = fit_quantile_calibrators(
         train=train,
         valid=valid,
-        rank_score_train=rank_train,
-        rank_score_valid=rank_valid,
+        rank_score_train=score_train,
+        rank_score_valid=score_valid,
         cfg=ml_cfg,
     )
-    ev_test = predict_conservative_ev(calibrators, test, rank_test, ml_cfg)
+    ev_test = predict_conservative_ev(calibration_fit, test, score_test, ml_cfg)
     calib_elapsed = time.perf_counter() - t_calib
     _logger.info(
         "[ML-ANCHORED-CALIB] ev_mean=%.6e ev_p10=%.6e ev_p90=%.6e",
@@ -794,7 +1053,7 @@ def build_ml_strategy_alpha_anchored(
     ev_grid = fold_alpha.ev_grid
     score_grid = np.full((t_size, features.values.shape[1]), np.nan, dtype=np.float32)
     for row, (t_idx, s_idx) in enumerate(test.index_map):
-        score_grid[int(t_idx), int(s_idx)] = rank_test[row]
+        score_grid[int(t_idx), int(s_idx)] = score_test[row]
 
     panel = assemble_alpha_panel(
         datetimes=features.datetimes,
