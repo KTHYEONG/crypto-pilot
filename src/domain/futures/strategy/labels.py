@@ -99,6 +99,12 @@ def build_label_panel(aligned: AlignedMarketData, cfg: StrategyMLConfig) -> Labe
 
     """
     t_len, n_len = aligned.close_2d.shape
+    if n_len == 1:
+        _logger.warning(
+            "[RAW-SIGNAL-DIAG] WARNING: single-symbol universe (n_len=1). "
+            "Beta-residualization collapses price signal to ~0 (market == symbol). "
+            "Cross-sectional IC is undefined. Use N>=5 for valid diagnostics."
+        )
     horizon = cfg.label_horizon_bars
     long_net = np.full((t_len, n_len), np.nan, dtype=np.float32)
     short_net = np.full((t_len, n_len), np.nan, dtype=np.float32)
@@ -184,7 +190,7 @@ def build_label_panel(aligned: AlignedMarketData, cfg: StrategyMLConfig) -> Labe
     # "gross": raw log return minus funding only — no beta removal (A/B test for magnitude loss).
     # Shape: [T, N], NaN where not computed. Time complexity: O(T*N).
     if cfg.calibrator_target == "gross":
-        # Gross target: gross_long minus funding only, masked to eligible rows.
+        # Gross: raw log return minus funding only (no beta removal, no fee).
         exec_net_ret: NDArray[np.float32] = (gross_long_2d - aligned.funding_2d).astype(
             np.float32
         )

@@ -286,7 +286,7 @@ def _aligned_multi_symbol(n_symbols: int = 8, t_len: int = 20) -> AlignedMarketD
 
 
 def test_build_label_panel_gross_target_differs_from_beta_residualized() -> None:
-    """calibrator_target='gross' must produce exec_net_ret with larger variance than 'beta_residualized'.
+    """calibrator_target='gross' must produce exec_net_ret with larger variance.
 
     The gross target retains the market-beta component, so its cross-sectional
     dispersion should be >= the beta-residualized target which removes that component.
@@ -334,7 +334,7 @@ def test_build_label_panel_gross_target_differs_from_beta_residualized() -> None
 
 
 def test_build_label_panel_gross_target_default_unchanged() -> None:
-    """Default calibrator_target='beta_residualized' produces same exec_net_ret as original behavior."""
+    """Default calibrator_target='beta_residualized' produces same exec_net_ret as original."""
     # Arrange — default config (no explicit calibrator_target)
     aligned = _aligned_multi_symbol(n_symbols=6, t_len=15)
     cfg_default = StrategyMLConfig(
@@ -367,3 +367,5 @@ def test_strategy_ml_config_rejects_invalid_calibrator_target() -> None:
     # Arrange / Act / Assert
     with pytest.raises(ValueError, match="calibrator_target"):
         StrategyMLConfig(calibrator_target="invalid")  # type: ignore[arg-type]
+
+
