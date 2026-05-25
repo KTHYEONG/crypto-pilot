@@ -31,7 +31,7 @@ def luna_crash_scenario() -> dict:
 
     mark_price는 last_price보다 높게 유지 (실제 LUNA 현상).
     """
-    n = 2880  # 48시간 × 60
+    n = 2880  # 48시간 x 60
     price = np.linspace(80.0, 0.01, n)
     mark = np.clip(price * 1.05, 0.01, None)  # mark > last
     return {"price_1m": price, "mark_1m": mark}

@@ -64,11 +64,11 @@ def test_backtest_engine_multi_symbol_mock() -> None:
         aligned_data=aligned_data,
         symbol_names=symbols,
         strategy_params=strategy_params,
-        initial_balance=10000.0
+        initial_balance=10000.0,
     )
-    
+
     trades_df, equity, final_bal, diag = engine.run()
-    
+
     assert isinstance(trades_df, pd.DataFrame)
     assert isinstance(equity, np.ndarray)
     assert isinstance(final_bal, float)
@@ -269,9 +269,7 @@ def test_intrabar_1m_window_mapping_basic_contract() -> None:
     np.testing.assert_array_equal(
         prepared.exec_bar_start_1m_idx, np.array([0, 3, 5], dtype=np.int64)
     )
-    np.testing.assert_array_equal(
-        prepared.exec_bar_end_1m_idx, np.array([2, 4, 6], dtype=np.int64)
-    )
+    np.testing.assert_array_equal(prepared.exec_bar_end_1m_idx, np.array([2, 4, 6], dtype=np.int64))
 
 
 def test_membership_constraints_are_applied_before_execution(
@@ -290,9 +288,7 @@ def test_membership_constraints_are_applied_before_execution(
         "membership_kill_signal": np.array(
             [[0.0], [1.0], [0.0], [0.0], [0.0], [0.0]], dtype=np.float64
         ),
-        "entry_block_mask": np.array(
-            [[1.0], [1.0], [0.0], [0.0], [0.0], [0.0]], dtype=np.float64
-        ),
+        "entry_block_mask": np.array([[1.0], [1.0], [0.0], [0.0], [0.0], [0.0]], dtype=np.float64),
         "target_weights": np.full((n_bars, 1), 0.4, dtype=np.float64),
         "symbol_names": np.asarray(["BTCUSDT"], dtype=object),
     }
@@ -365,14 +361,14 @@ def test_intrabar_1m_injection_keys_contract_ready_for_execution() -> None:
 @pytest.mark.skipif(not FUTURES_DATA_DIR.exists(), reason="Data directory not found")
 def test_backtest_engine_real_data_structure() -> None:
     """Tests the MultiSymbolEngine with real data structure (if available)."""
-    files = list(FUTURES_DATA_DIR.glob('*_1h.parquet'))
+    files = list(FUTURES_DATA_DIR.glob("*_1h.parquet"))
     if not files:
         pytest.skip("No parquet data files found for test")
-        
+
     df = pd.read_parquet(files[0]).iloc[-200:]
     n_bars = len(df)
     symbols = ["TEST/USDT"]
-    
+
     # Mock the required columns for the engine
     aligned_data = {
         "close": df["close"].to_numpy().reshape(-1, 1),
@@ -400,9 +396,9 @@ def test_backtest_engine_real_data_structure() -> None:
         aligned_data=aligned_data,
         symbol_names=symbols,
         strategy_params={"REBALANCE_BARS": 6},
-        initial_balance=1000.0
+        initial_balance=1000.0,
     )
-    
+
     trades_df, _equity, final_bal, _diag = engine.run()
     assert isinstance(trades_df, pd.DataFrame)
     assert final_bal > 0

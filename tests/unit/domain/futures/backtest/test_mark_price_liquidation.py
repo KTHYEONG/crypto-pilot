@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+from typing import NotRequired, TypedDict
+
 import numpy as np
 
 from src.domain.futures.portfolio.execution_sim import (
@@ -12,12 +14,46 @@ from src.domain.futures.portfolio.execution_sim import (
 )
 
 
+class _IntrabarScenario(TypedDict):
+    decision_close_2d: np.ndarray
+    decision_high_2d: np.ndarray
+    decision_low_2d: np.ndarray
+    decision_open_2d: np.ndarray
+    target_weights: np.ndarray
+    lev_2d: np.ndarray
+    atr_2d: np.ndarray
+    kill_signal_2d: np.ndarray
+    path_open_2d: np.ndarray
+    path_high_2d: np.ndarray
+    path_low_2d: np.ndarray
+    path_close_2d: np.ndarray
+    decision_start_1m_idx: np.ndarray
+    decision_end_1m_idx: np.ndarray
+    initial_balance: float
+    maker_fee: float
+    taker_fee: float
+    slippage_rate: float
+    rebalance_bars: int
+    max_hold_bars: int
+    short_borrow_daily: float
+    atr_mult: float
+    trail_mult: float
+    use_simple_atr_stop: int
+    max_concurrent: int
+    max_exposure: float
+    max_exp_per_coin: float
+    dd_scaling_threshold: float
+    funding_event_mask_1m: NotRequired[np.ndarray]
+    funding_rate_1m: NotRequired[np.ndarray]
+    volume_1m_2d: NotRequired[np.ndarray]
+
+
 def _build_minimal_intrabar_inputs(
     n_decisions: int,
     n_syms: int,
     price: float = 100.0,
     lev: float = 10.0,
-) -> dict:
+) -> _IntrabarScenario:
     """최소한의 intrabar 입력 배열을 생성하는 헬퍼."""
     n_1m = n_decisions * 4  # 결정바당 4개 1m 바
 
@@ -98,7 +134,7 @@ class TestMarkPriceLiquidation:
         mark_above_liq = np.full_like(inputs["path_low_2d"], price)
         mark_above_liq[:, 0] = liq_approx + 1.0  # ≈ 91.5
 
-        trades_with_mark, final_bal_mark, equity_mark, _ = backtest_target_weights_intrabar(
+        _trades_with_mark, _final_bal_mark, equity_mark, _ = backtest_target_weights_intrabar(
             **inputs,
             mark_price_1m=mark_above_liq,
         )
@@ -107,7 +143,7 @@ class TestMarkPriceLiquidation:
         assert equity_mark[-1] > 0.0, "mark_price 이상 시 청산이 발생하면 안 됨"
 
         # mark_price=None fallback (exec_low 기준) → 청산 발생 가능
-        trades_no_mark, final_bal_no_mark, equity_no_mark, _ = backtest_target_weights_intrabar(
+        _trades_no_mark, _final_bal_no_mark, equity_no_mark, _ = backtest_target_weights_intrabar(
             **inputs,
             mark_price_1m=None,
         )
@@ -136,7 +172,7 @@ class TestMarkPriceLiquidation:
         half = inputs["path_low_2d"].shape[0] // 2
         mark_below_liq[half:, 0] = liq_approx - 2.0
 
-        trades_with_mark, final_bal_mark, equity_mark, _ = backtest_target_weights_intrabar(
+        _trades_with_mark, final_bal_mark, _equity_mark, _ = backtest_target_weights_intrabar(
             **inputs,
             mark_price_1m=mark_below_liq,
         )
@@ -153,7 +189,7 @@ class TestMarkPriceLiquidation:
         price = 100.0
         inputs = _build_minimal_intrabar_inputs(n_decisions, n_syms, price=price)
 
-        trades, final_bal, equity, diag = backtest_target_weights_intrabar(
+        _trades, final_bal, equity, _diag = backtest_target_weights_intrabar(
             **inputs,
             mark_price_1m=None,
         )

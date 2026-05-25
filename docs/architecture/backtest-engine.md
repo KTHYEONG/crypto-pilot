@@ -11,7 +11,7 @@ related_paths:
 change_triggers:
   - src/domain/futures/backtest/**
   - src/domain/futures/portfolio/execution_sim.py
-last_verified: 2026-05-24
+last_verified: 2026-05-25
 ---
 
 # Binance Futures Backtest Engine
@@ -110,3 +110,5 @@ last_verified: 2026-05-24
 - **Unit test:** `execution_sim.py`의 Numba 루프 개별 로직(Liquidation, Stop-loss 등) 검증.
 - **Semantics Match:** 최적화 파라미터가 실제 백테스트와 오차 없이 동일한 Equity Curve를 생성하는지 확인.
 - **Deterministic Test:** 동일 시드/데이터에 대해 부동소수점 오차 없는 완전 동일 결과 출력 확인.
+- **Pipeline Safety:** `opt_main_futures.py`의 CLI/pipeline 분기(`strategy`, `strategy-smoke`, 오류 경로)는 오프라인 stub 기반으로 검증.
+- **No Live Network in Tests:** 백테스트/최적화 테스트 스위트는 실거래소 API 자격증명/네트워크에 의존하지 않음.

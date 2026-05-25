@@ -59,4 +59,3 @@ def test_membership_kill_and_entry_warm_masks() -> None:
     np.testing.assert_array_equal(bundle.kill_signal, np.array([0.0, 1.0, 0.0]))
     np.testing.assert_array_equal(bundle.universe_entry_warm_mask, np.array([0.0, 0.0, 0.0]))
     np.testing.assert_array_equal(bundle.entry_block_mask, np.array([1.0, 1.0, 1.0]))
-

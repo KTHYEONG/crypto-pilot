@@ -3,12 +3,16 @@ from __future__ import annotations
 import math
 import sys
 from pathlib import Path
-from types import SimpleNamespace
+from typing import Any, cast
+
+import optuna
+import pytest
 
 project_root = str(Path(__file__).resolve().parents[5])
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
+from src.domain.futures.optimization.optimizer import MLPhaseDContext
 from src.domain.futures.optimization.workflow import (
     lcb,
     objective_phase_a1_signal_lcb,
@@ -44,11 +48,13 @@ def test_lcb_ucb_basic() -> None:
     assert ucb(vals, k=1.0) > 2.0
 
 
-def test_phase_objectives_write_lcb_ucb_attrs(monkeypatch) -> None:
+def test_phase_objectives_write_lcb_ucb_attrs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     trial = _DummyTrial()
-    ctx = SimpleNamespace()
+    ctx = MLPhaseDContext(data_maps={}, symbols=[], tf="4h")
 
-    def _fake_base_objective(tr, _ctx):
+    def _fake_base_objective(tr: Any, _ctx: MLPhaseDContext) -> float:
         tr.set_user_attr("IS_DSR", 1.5)
         tr.set_user_attr("IS_MDD", 12.0)
         tr.set_user_attr("IS_RET_PCT", 24.0)
@@ -72,7 +78,8 @@ def test_phase_objectives_write_lcb_ucb_attrs(monkeypatch) -> None:
         _fake_base_objective,
     )
 
-    a1 = objective_phase_a1_signal_lcb(trial, ctx)
+    trial_obj = cast(optuna.Trial, trial)
+    a1 = objective_phase_a1_signal_lcb(trial_obj, ctx)
     assert isinstance(a1, float)
     assert "signal_score_lcb" in trial.user_attrs
     assert trial.user_attrs["phase"] == "phase_a1"
@@ -82,14 +89,14 @@ def test_phase_objectives_write_lcb_ucb_attrs(monkeypatch) -> None:
     assert a1 == expected_net_expectancy * expected_activity - expected_penalty
     assert len(trial.reported_steps) == 3
 
-    a2 = objective_phase_a2_sortino_mdd(trial, ctx)
+    a2 = objective_phase_a2_sortino_mdd(trial_obj, ctx)
     assert isinstance(a2, tuple) and len(a2) == 2
     assert "sortino_lcb" in trial.user_attrs
     assert "mdd_ucb" in trial.user_attrs
     assert a2[0] == lcb([0.20, 0.30, 0.10], k=1.0)
     assert a2[1] == ucb([10.0, 12.0, 11.0], k=1.0)
 
-    b = objective_phase_b_calmar_lcb(trial, ctx)
+    b = objective_phase_b_calmar_lcb(trial_obj, ctx)
     assert isinstance(b, float)
     assert "calmar_lcb" in trial.user_attrs
     assert "cagr_lcb" in trial.user_attrs
@@ -118,14 +125,12 @@ def test_phase_objectives_write_lcb_ucb_attrs(monkeypatch) -> None:
     assert trial.user_attrs["cvar"] == 9.5
 
 
-def test_phase_objective_pruning_path(monkeypatch) -> None:
-    import optuna
-
+def test_phase_objective_pruning_path(monkeypatch: pytest.MonkeyPatch) -> None:
     trial = _DummyTrial()
     trial.prune_at_step = 1
-    ctx = SimpleNamespace()
+    ctx = MLPhaseDContext(data_maps={}, symbols=[], tf="4h")
 
-    def _fake_base_objective(tr, _ctx):
+    def _fake_base_objective(tr: Any, _ctx: MLPhaseDContext) -> float:
         tr.set_user_attr("awf_leg_log_tw", [0.20, 0.10, -0.05])
         tr.set_user_attr("n_trades", 10.0)
         tr.set_user_attr("target_trades", 10.0)
@@ -138,7 +143,7 @@ def test_phase_objective_pruning_path(monkeypatch) -> None:
     )
 
     try:
-        objective_phase_a1_signal_lcb(trial, ctx)
+        objective_phase_a1_signal_lcb(cast(optuna.Trial, trial), ctx)
         raised = False
     except optuna.TrialPruned:
         raised = True

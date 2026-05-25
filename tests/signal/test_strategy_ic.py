@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import warnings
 from datetime import datetime, timedelta
+from typing import cast
 
 import numpy as np
 import pandas as pd
@@ -50,7 +51,7 @@ def _synth_maps(
 
 def _panel_to_2d(panel: pd.DataFrame, symbols: list[str], col: str) -> np.ndarray:
     wide = panel[col].unstack("symbol").reindex(columns=symbols)
-    return wide.to_numpy(dtype=np.float64)
+    return cast(np.ndarray, wide.to_numpy(dtype=np.float64))
 
 
 def test_alpha_nonzero_ratio() -> None:
@@ -114,9 +115,7 @@ def test_lookahead_ic_suspicious() -> None:
     fwd, back = [], []
     for t in range(7, a_l.shape[0] - 1):
         s_alpha = pd.Series(a_l[t], index=symbols)
-        fwd.append(
-            float(s_alpha.corr(pd.Series(returns[t + 1], index=symbols), method="spearman"))
-        )
+        fwd.append(float(s_alpha.corr(pd.Series(returns[t + 1], index=symbols), method="spearman")))
         back.append(
             float(s_alpha.corr(pd.Series(returns[t - 1], index=symbols), method="spearman"))
         )

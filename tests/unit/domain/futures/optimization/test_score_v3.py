@@ -68,22 +68,24 @@ class TestScoreV3:
             aum_impact_penalty=aum_impact,
         )
 
-        assert abs(actual - expected) < 1e-9, (
-            f"score 불일치: actual={actual}, expected={expected}"
-        )
+        assert abs(actual - expected) < 1e-9, f"score 불일치: actual={actual}, expected={expected}"
 
     def test_lambda_is_fixed_not_injectable(self) -> None:
         """λ 파라미터가 외부 주입 불가 (함수 시그니처에 없어야 함)."""
         sig = inspect.signature(compute_v3_score)
         forbidden_params = [
-            "lambda_down", "lambda_mdd", "lambda_cvar",
-            "lambda_turnover", "lambda_funding", "lambda_capacity",
-            "lambdas", "lam", "penalty_weights",
+            "lambda_down",
+            "lambda_mdd",
+            "lambda_cvar",
+            "lambda_turnover",
+            "lambda_funding",
+            "lambda_capacity",
+            "lambdas",
+            "lam",
+            "penalty_weights",
         ]
         for p in forbidden_params:
-            assert p not in sig.parameters, (
-                f"λ 파라미터 '{p}'가 외부 주입 가능해서는 안 됨"
-            )
+            assert p not in sig.parameters, f"λ 파라미터 '{p}'가 외부 주입 가능해서는 안 됨"
 
     def test_loss_strategy_lower_than_profit_strategy(self) -> None:
         """음의 score 전략 vs 양의 score 전략 순위."""

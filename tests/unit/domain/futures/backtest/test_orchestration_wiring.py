@@ -6,9 +6,9 @@
 테스트 3: project_all_caps 적용 — gross_cap 초과 weight 입력 → gross ≤ 3.0 확인
 테스트 4: evaluate_sequential_promotion_gate → PromotionGateResult 타입 반환 확인
 """
+
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -29,7 +29,7 @@ def _make_minimal_ctx(n_bars: int = 60) -> Any:
     xs = rng.standard_normal(n_bars)
 
     df_mock: Any = MagicMock()
-    df_mock.__len__ = lambda self: n_bars  # type: ignore[assignment]
+    df_mock.__len__ = lambda self: n_bars
     df_mock.empty = False
 
     # aligned dict — backtest_engine이 기대하는 키 구성
@@ -74,16 +74,15 @@ def _make_minimal_ctx(n_bars: int = 60) -> Any:
 def test_v3_score_key_set_in_trial_attrs() -> None:
     """IS_ROBUST_SCORE attr → compute_v3_score 호출 경로 검증."""
     from src.domain.futures.optimization.optimizer import (
-        MLPhaseDContext,
-        _evaluate_awf_phase_d_aggregate,
         _base_engine_params,
+        _evaluate_awf_phase_d_aggregate,
     )
 
     ctx = _make_minimal_ctx(n_bars=80)
     params = _base_engine_params({}, "1h")
 
     # trial=None 경로로 실행 (단위 테스트 — Optuna 스터디 불필요)
-    result, diag = _evaluate_awf_phase_d_aggregate(ctx, params, trial=None)
+    _result, diag = _evaluate_awf_phase_d_aggregate(ctx, params, trial=None)
 
     # robust_val 키가 diag에 존재해야 함
     assert "robust_val" in diag, "compute_v3_score 결과인 robust_val 키가 diag에 없음"
@@ -112,7 +111,13 @@ def test_purge_bars_registry_validate_passes_when_registered() -> None:
     )
 
     registry = PurgeBarsRegistry()
-    registry.register(ModulePurgeBarsMeta(module_name="LabelModule", purge_bars=24, reason="label_horizon"))
+    registry.register(
+        ModulePurgeBarsMeta(
+            module_name="LabelModule",
+            purge_bars=24,
+            reason="label_horizon",
+        )
+    )
     # should not raise
     registry.validate()
     assert registry.get_boundary_purge_bars() == 24
@@ -120,12 +125,12 @@ def test_purge_bars_registry_validate_passes_when_registered() -> None:
 
 def test_objective_propagates_registry_runtime_error() -> None:
     """ctx.registry 설정 후 objective_ml_phase_d 진입 → validate() RuntimeError 전파."""
+    import optuna
+
     from src.domain.futures.optimization.optimizer import (
-        MLPhaseDContext,
         objective_ml_phase_d,
     )
     from src.domain.futures.validation.gates import PurgeBarsRegistry
-    import optuna
 
     ctx = _make_minimal_ctx(n_bars=80)
     # 미등록 레지스트리를 주입
@@ -133,7 +138,7 @@ def test_objective_propagates_registry_runtime_error() -> None:
 
     study = optuna.create_study(direction="minimize")
 
-    def _objective(trial: optuna.Trial) -> float:  # type: ignore[return]
+    def _objective(trial: optuna.Trial) -> float:
         objective_ml_phase_d(trial, ctx)
         return 0.0
 
