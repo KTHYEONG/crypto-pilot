@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 
+from src.core.settings import round_trip_cost_bps
 from src.domain.futures.strategy.common.alignment import AlignedMarketData
 from src.domain.futures.strategy.config import StrategyMLConfig
 from src.domain.futures.strategy.contracts import LabelPanel
@@ -238,6 +239,19 @@ def build_label_panel(aligned: AlignedMarketData, cfg: StrategyMLConfig) -> Labe
     original_weight = np.where(valid_mask, liq_weight, 0.0).astype(np.float32)
     y_ev_abs = np.where(valid_mask, np.abs(signed), 0.0).astype(np.float32)
     sample_weight = (original_weight * (1.0 + 2.0 * y_ev_abs)).astype(np.float32)
+    cost_clearance_target = np.where(
+        valid_mask,
+        (np.abs(exec_net_ret) * 1e4) - np.float32(round_trip_cost_bps()),
+        np.float32(0.0),
+    ).astype(np.float32)
+    metadata = {
+        "rank_target_key": "signed_net_ret",
+        "magnitude_target_key": "exec_net_ret",
+        "cost_clearance_target_key": "cost_clearance_target",
+        "calibrator_target_mode": cfg.calibrator_target,
+        "round_trip_cost_bps": float(round_trip_cost_bps()),
+        "label_horizon_bars": int(cfg.label_horizon_bars),
+    }
     return LabelPanel(
         long_net_ret=long_net,
         short_net_ret=short_net,
@@ -246,4 +260,8 @@ def build_label_panel(aligned: AlignedMarketData, cfg: StrategyMLConfig) -> Labe
         relevance=rel,
         sample_weight=sample_weight,
         eligible_mask=eligible & finite_long,
+        rank_target=signed,
+        magnitude_target=exec_net_ret,
+        cost_clearance_target=cost_clearance_target,
+        metadata=metadata,
     )

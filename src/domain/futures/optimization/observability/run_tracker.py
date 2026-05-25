@@ -372,7 +372,7 @@ def resolve_futures_parallel_policy(symbol_count: int) -> int:
     return max(1, min(8, logical_cpus))
 
 
-def optimize_worker(s_name: str, s_url: str, chunk_size: int):
+def optimize_worker(s_name: str, s_url: str, chunk_size: int) -> None:
     """Worker function for parallel Optuna optimization using global context."""
     import os
     try:
@@ -399,11 +399,11 @@ def optimize_worker(s_name: str, s_url: str, chunk_size: int):
     study = optuna.load_study(study_name=s_name, storage=inner_storage)
     trial_timeout_sec = int(OPT_FUTURES_CONFIG.get("FUTURES_OPT_TRIAL_TIMEOUT_SEC", 180))
 
-    def _objective_with_timeout(tr: optuna.Trial):
+    def _objective_with_timeout(tr: optuna.Trial) -> Any:
         if trial_timeout_sec <= 0:
             return objective_fn(tr, _GLOBAL_BASE_CTX)
 
-        def _timeout_handler(_signum, _frame):
+        def _timeout_handler(_signum: int, _frame: Any) -> None:
             raise RuntimeError(f"trial_timeout>{trial_timeout_sec}s")
 
         prev = signal.getsignal(signal.SIGALRM)

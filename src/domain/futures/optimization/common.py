@@ -230,6 +230,6 @@ class SignalCalibrator:
             z = (alphas - 0.5) * 8.0
             return 1.0 / (1.0 + np.exp(-z))
         x_input = alphas.reshape(-1, 1)
-        return self.model.predict_proba(x_input)[:, 1]
-
+        proba = np.asarray(self.model.predict_proba(x_input), dtype=np.float64)
+        return np.asarray(proba[:, 1], dtype=np.float64)
 
