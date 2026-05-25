@@ -26,9 +26,9 @@ last_verified: [YYYY-MM-DD]
 - **Deprecated:** Must specify `status: deprecated` and `replaced_by: [path]` in the Frontmatter.
 
 ## 4. AI Skill Pipeline & Token Optimization
-Operational guidelines for the AI pipeline (`triage -> scan -> spec -> implement -> verify -> review`).
+Operational guidelines for the AI pipeline (`triage-scan -> spec -> implement -> verify -> review`).
 
-- **[context-scan] Selective Loading:**
+- **[triage-scan] Selective Loading:**
   - Index only documents matching `change_triggers`. For large documents, load only required headings (e.g., Business Rules) to optimize the context window.
 - **[implement] Mechanical Co-Modification:**
   - **Prohibitions:** Adding undocumented behavior or implementing based on assumed business logic.
