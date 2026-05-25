@@ -173,8 +173,8 @@ class StrategyMLConfig:
     ic_gate_min_hit_ratio: float = 0.45
     ic_gate_warn_only: bool = True  # True=경고만, False=RuntimeError
     # Calibrator target: which return series to use as y_ev for magnitude learning.
-    # "beta_residualized" = current behavior (exec_net_ret after beta-resid, pre-CS-demean).
-    # "gross" = raw log return minus funding only, no beta removal (A/B: resid kills magnitude?).
+    # "beta_residualized" = current default: exec_net_ret after beta-resid, pre-CS-demean
+    # "gross"             = raw log return minus funding only (no beta removal, no fee)
     calibrator_target: Literal["beta_residualized", "gross"] = "beta_residualized"
 
     def __post_init__(self) -> None:

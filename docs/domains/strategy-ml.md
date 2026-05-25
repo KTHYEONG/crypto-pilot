@@ -103,6 +103,18 @@ ev[i]            = q50[i] * (1.0 - penalty_term[i])
 
 > **적용 변경 (2026-05-24):** EV 출력 경로의 fold-level group centering을 제거하여 absolute EV 크기 소거를 방지.
 
+### 5.3.1 Calibrator Target Options (`calibrator_target`)
+
+`StrategyMLConfig.calibrator_target`은 calibrator의 학습 타깃 `y_ev`를 결정한다.
+
+| 옵션 | 설명 | 용도 |
+|------|------|------|
+| `"beta_residualized"` (default) | beta-잔차화 후, CS-demean 전 스냅샷 | 기존 B2 동작 유지 |
+| `"gross"` | 원시 로그수익률 - funding (beta 제거 없음, fee 없음) | B2 magnitude 손실 가설 A/B 검증 |
+
+**§5.3/§5.5 모순 해소 (2026-05-25):**  
+§5.5(B2) beta-잔차화는 시장 드리프트 성분을 제거하여 CS-IC를 개선하지만, 동시에 calibrator 타깃의 절대 크기를 수축시켜 cost wall 통과가 어려워질 수 있다. `calibrator_target` 토글을 통해 ranker(잔차화+CS-demean 유지)와 calibrator 타깃을 독립적으로 제어하여 이 상충을 A/B 측정으로 결정한다.
+
 ### 5.4 Output Contract (`alpha_panel`)
 - **Index:** `MultiIndex(datetime, symbol)`
 - **Columns:** `alpha_long` (Bps), `alpha_short` (Bps)
@@ -168,6 +180,16 @@ ev[i]            = q50[i] * (1.0 - penalty_term[i])
   - `OK`: alpha_p95 > floor
   - `WARN`: floor/2 < alpha_p95 ≤ floor (한계 신호, 주의 필요)
   - `FAIL`: alpha_p95 ≤ floor/2 (실패, 개선 필요)
+
+**[RAW-SIGNAL-DIAG]**: beta-잔차화가 cross-sectional 신호 분산에 미치는 영향 진단
+```
+[RAW-SIGNAL-DIAG] raw_cs_std=0.0123 resid_cs_std=0.0045 var_retention=0.366 n_ts=720 raw_nz=0.891 resid_nz=0.743
+```
+- `raw_cs_std`: 잔차화 전 gross return의 평균 횡단면 표준편차
+- `resid_cs_std`: 잔차화 후의 평균 횡단면 표준편차
+- `var_retention`: `resid_cs_std / raw_cs_std` — 1.0에 가까울수록 잔차화 손실 적음
+- `n_ts`: 유효 timestep 수 (유효 심볼 ≥5인 시점)
+- WARNING: `n_len=1`(단일 종목)이면 beta-잔차화가 가격 신호를 0으로 수축시키므로, 단일 종목 경로에서 IC/EV 숫자는 무의미함
 
 **[STRAT-PATH]**: 실행 가능한 신호 경로 연결 진단 (`objectives.py`, trial<5, leg 단위)
 ```
@@ -271,6 +293,14 @@ ev[i]            = q50[i] * (1.0 - penalty_term[i])
   - `O(L * S * T)` object copy 비용을 array 경로로 완화
 - 계약:
   - override 미제공 시 기존 `data_maps` alpha column 경로를 fallback으로 유지한다.
+
+### 5.17 Calibrator Target Configuration (2026-05-25)
+- `StrategyMLConfig.calibrator_target`으로 calibrator `y_ev` 타깃을 config-driven 제어.
+- 기본값 `"beta_residualized"` — B2 이전 동작과 완전 동일.
+- `"gross"` 옵션은 A/B 측정 전용. OOS 검증 완료 전 프로덕션 사용 금지.
+- **B1 불변 계약:** 라벨 레이어(labels.py)는 fee/slippage를 차감하지 않는다. 비용 차감은 objectives 레이어에서만 1회 수행. `"funding_net"` 옵션은 이 계약을 위반하므로 삭제됨.
+- Ranker 타깃(`signed_net_ret` = CS-demeaned beta-residualized)은 `calibrator_target` 무관하게 불변.
+- 관련 진단: `[RAW-SIGNAL-DIAG]` (§5.6) — 잔차화로 인한 분산 손실 정량화.
 
 ---
 
