@@ -157,12 +157,25 @@ class StrategyMLConfig:
     ranker_n_estimators: int = 800
     calibrator_n_estimators: int = 600
     learning_rate: float = 0.03
+    ranker_learning_rate: float = 0.02
+    calibrator_learning_rate: float = 0.02
     num_leaves: int = 31
     max_depth: int = 6
     min_data_in_leaf: int = 50
     feature_fraction: float = 0.80
     bagging_fraction: float = 0.80
+    ranker_feature_fraction: float = 0.70
+    calibrator_feature_fraction: float = 0.70
+    ranker_bagging_fraction: float = 0.75
+    calibrator_bagging_fraction: float = 0.75
+    ranker_bagging_freq: int = 1
+    calibrator_bagging_freq: int = 1
     lambda_l2: float = 5.0
+    ranker_lambda_l2: float = 5.0
+    calibrator_lambda_l2: float = 1.0
+    ranker_reg_alpha: float = 1.5
+    calibrator_reg_alpha: float = 1.5
+    calibrator_max_depth_cap: int = 5
     early_stopping_rounds: int = 75
     # per-side 비용: 레이블 생성 시 round-trip(x2)으로 환산됨 (labels.py 참조)
     fee_bps: float = TAKER_FEE_BPS       # Taker 수수료 per side (canonical: core/settings.py)
@@ -176,6 +189,38 @@ class StrategyMLConfig:
     # "beta_residualized" = current default: exec_net_ret after beta-resid, pre-CS-demean
     # "gross"             = raw log return minus funding only (no beta removal, no fee)
     calibrator_target: Literal["beta_residualized", "gross"] = "beta_residualized"
+    model_family: Literal["lgbm_regression", "lgbm_huber"] = "lgbm_regression"
+    ev_mode: Literal["quantile", "prob_x_magnitude"] = "quantile"
+    alpha_gate_min_long_nz: float = 0.0
+    alpha_gate_min_short_nz: float = 0.0
+    alpha_gate_min_xs_preservation: float = 0.0
+    # Numerical tolerance around cost wall comparison to avoid failing on tiny rounding noise.
+    alpha_gate_cost_wall_tolerance_bps: float = 0.0
+    feature_groups_enabled: tuple[
+        Literal[
+            "trend",
+            "reversal",
+            "volatility",
+            "carry",
+            "liquidity",
+            "market_context",
+            "microstructure",
+            "missingness",
+        ],
+        ...,
+    ] = (
+        "trend",
+        "reversal",
+        "volatility",
+        "carry",
+        "liquidity",
+        "market_context",
+        "microstructure",
+        "missingness",
+    )
+    add_missingness_indicators: bool = True
+    horizon_experiment_enabled: bool = False
+    horizon_candidates: tuple[int, ...] = ()
 
     def __post_init__(self) -> None:
         """Validate ML strategy parameters."""
@@ -191,14 +236,76 @@ class StrategyMLConfig:
             raise ValueError("min_group_size must be >= 2")
         if not (0.0 < self.learning_rate <= 0.2):
             raise ValueError("learning_rate must satisfy 0 < lr <= 0.2")
+        if not (0.0 < self.ranker_learning_rate <= 0.2):
+            raise ValueError("ranker_learning_rate must satisfy 0 < lr <= 0.2")
+        if not (0.0 < self.calibrator_learning_rate <= 0.2):
+            raise ValueError("calibrator_learning_rate must satisfy 0 < lr <= 0.2")
         if self.num_leaves > 31:
             raise ValueError("num_leaves must be <= 31")
         if self.max_depth > 6:
             raise ValueError("max_depth must be <= 6")
         if self.min_data_in_leaf < 10:
             raise ValueError("min_data_in_leaf must be >= 10")
+        if not (0.0 < self.feature_fraction <= 1.0):
+            raise ValueError("feature_fraction must satisfy 0 < feature_fraction <= 1")
+        if not (0.0 < self.bagging_fraction <= 1.0):
+            raise ValueError("bagging_fraction must satisfy 0 < bagging_fraction <= 1")
+        if not (0.0 < self.ranker_feature_fraction <= 1.0):
+            raise ValueError("ranker_feature_fraction must satisfy 0 < value <= 1")
+        if not (0.0 < self.calibrator_feature_fraction <= 1.0):
+            raise ValueError("calibrator_feature_fraction must satisfy 0 < value <= 1")
+        if not (0.0 < self.ranker_bagging_fraction <= 1.0):
+            raise ValueError("ranker_bagging_fraction must satisfy 0 < value <= 1")
+        if not (0.0 < self.calibrator_bagging_fraction <= 1.0):
+            raise ValueError("calibrator_bagging_fraction must satisfy 0 < value <= 1")
+        if self.ranker_bagging_freq < 0:
+            raise ValueError("ranker_bagging_freq must be >= 0")
+        if self.calibrator_bagging_freq < 0:
+            raise ValueError("calibrator_bagging_freq must be >= 0")
+        if self.ranker_lambda_l2 < 0.0:
+            raise ValueError("ranker_lambda_l2 must be >= 0")
+        if self.calibrator_lambda_l2 < 0.0:
+            raise ValueError("calibrator_lambda_l2 must be >= 0")
+        if self.ranker_reg_alpha < 0.0:
+            raise ValueError("ranker_reg_alpha must be >= 0")
+        if self.calibrator_reg_alpha < 0.0:
+            raise ValueError("calibrator_reg_alpha must be >= 0")
+        if self.calibrator_max_depth_cap < 1:
+            raise ValueError("calibrator_max_depth_cap must be >= 1")
         if self.calibrator_target not in {"beta_residualized", "gross"}:
             raise ValueError(
                 f"calibrator_target must be 'beta_residualized' or 'gross', "
                 f"got '{self.calibrator_target}'"
             )
+        if self.model_family not in {"lgbm_regression", "lgbm_huber"}:
+            raise ValueError("model_family must be 'lgbm_regression' or 'lgbm_huber'")
+        if self.ev_mode not in {"quantile", "prob_x_magnitude"}:
+            raise ValueError("ev_mode must be 'quantile' or 'prob_x_magnitude'")
+        if not (0.0 <= self.alpha_gate_min_long_nz <= 1.0):
+            raise ValueError("alpha_gate_min_long_nz must satisfy 0 <= value <= 1")
+        if not (0.0 <= self.alpha_gate_min_short_nz <= 1.0):
+            raise ValueError("alpha_gate_min_short_nz must satisfy 0 <= value <= 1")
+        if not (0.0 <= self.alpha_gate_min_xs_preservation <= 1.0):
+            raise ValueError("alpha_gate_min_xs_preservation must satisfy 0 <= value <= 1")
+        if self.alpha_gate_cost_wall_tolerance_bps < 0.0:
+            raise ValueError("alpha_gate_cost_wall_tolerance_bps must be >= 0")
+        if self.horizon_experiment_enabled:
+            if len(self.horizon_candidates) == 0:
+                raise ValueError(
+                    "horizon_candidates must be non-empty when horizon_experiment_enabled=True"
+                )
+            if any(h < 1 for h in self.horizon_candidates):
+                raise ValueError("horizon_candidates must contain positive integers")
+        allowed_groups = {
+            "trend",
+            "reversal",
+            "volatility",
+            "carry",
+            "liquidity",
+            "market_context",
+            "microstructure",
+            "missingness",
+        }
+        invalid_groups = [g for g in self.feature_groups_enabled if g not in allowed_groups]
+        if invalid_groups:
+            raise ValueError(f"unsupported feature group(s): {invalid_groups}")

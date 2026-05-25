@@ -79,6 +79,7 @@ class MLPhaseDContext:
     universe_timeline: dict[date, frozenset[str] | set[str]] | None = None
     warmup_bars_required: int = 0
     data_sufficiency_report: dict[str, Any] | None = None
+    precompute_profile: dict[str, float] | None = None
 
 
 def build_universe_membership_arrays(
@@ -218,16 +219,14 @@ def _fit_oos_platt_calibrators_from_maps(
                 alpha_long = np.asarray(over[0], dtype=np.float64)[i0:i1]
                 alpha_short = np.asarray(over[1], dtype=np.float64)[i0:i1]
             else:
-                alpha_long = (
-                    raw["alpha_long"].to_numpy(dtype=np.float64)[i0:i1]
-                    if "alpha_long" in raw.columns
-                    else None
-                )
-                alpha_short = (
-                    raw["alpha_short"].to_numpy(dtype=np.float64)[i0:i1]
-                    if "alpha_short" in raw.columns
-                    else None
-                )
+                alpha_long = None
+                if "alpha_long" in raw.columns:
+                    alpha_long_arr = np.asarray(raw["alpha_long"].to_numpy(dtype=np.float64), dtype=np.float64)
+                    alpha_long = alpha_long_arr[i0:i1]
+                alpha_short = None
+                if "alpha_short" in raw.columns:
+                    alpha_short_arr = np.asarray(raw["alpha_short"].to_numpy(dtype=np.float64), dtype=np.float64)
+                    alpha_short = alpha_short_arr[i0:i1]
             if alpha_long is not None:
                 r_t = fwd_ret[i0:i1]
                 mask = ~np.isnan(alpha_long) & ~np.isnan(r_t)
@@ -365,25 +364,31 @@ def _build_prebuilt_full_arrays(
 
         over = alpha_overrides.get(sym) if alpha_overrides else None
         if over is not None:
-            alpha_long_full = np.asarray(over[0], dtype=np.float64)
-            alpha_short_full = np.asarray(over[1], dtype=np.float64)
+            alpha_long_full: np.ndarray | None = np.asarray(over[0], dtype=np.float64)
+            alpha_short_full: np.ndarray | None = np.asarray(over[1], dtype=np.float64)
         else:
-            alpha_long_full = (
-                raw_full["alpha_long"].to_numpy(dtype=np.float64, copy=False)
-                if "alpha_long" in raw_full.columns
-                else None
-            )
-            alpha_short_full = (
-                raw_full["alpha_short"].to_numpy(dtype=np.float64, copy=False)
-                if "alpha_short" in raw_full.columns
-                else None
-            )
+            alpha_long_full = None
+            if "alpha_long" in raw_full.columns:
+                alpha_long_full = np.asarray(
+                    raw_full["alpha_long"].to_numpy(dtype=np.float64, copy=False),
+                    dtype=np.float64,
+                )
+            alpha_short_full = None
+            if "alpha_short" in raw_full.columns:
+                alpha_short_full = np.asarray(
+                    raw_full["alpha_short"].to_numpy(dtype=np.float64, copy=False),
+                    dtype=np.float64,
+                )
         # Prefer current strategy alpha path. Keep legacy fallback for non-strategy runs.
+        gp_base: np.ndarray
         gp_base = (
             alpha_long_full
             if alpha_long_full is not None
             else (
-                raw_full["alpha_long_00"].to_numpy(dtype=np.float64, copy=False)
+                np.asarray(
+                    raw_full["alpha_long_00"].to_numpy(dtype=np.float64, copy=False),
+                    dtype=np.float64,
+                )
                 if "alpha_long_00" in raw_full.columns
                 else np.zeros(len(raw_full), dtype=np.float64)
             )
@@ -602,10 +607,11 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
         info = compute_multi_alignment_info(ctx.data_maps, ctx.symbols, ctx.tf, emb)
         t_align_total += time.perf_counter() - t_align
         if info is None:
-            pass
-        ctx.multi_alignment_info = info
+            raise RuntimeError("multi alignment info unavailable")
+        alignment_info: dict[str, Any] = info
+        ctx.multi_alignment_info = alignment_info
 
-        eff_len = int(info["eff_ref_len"])
+        eff_len = int(alignment_info["eff_ref_len"])
         embargo = int(EMBARGO_BARS.get(ctx.tf, 12))
         k_legs = int(OPT_FUTURES_CONFIG.get("FUTURES_AWF_K_LEGS", 6))
         is_pool = float(OPT_FUTURES_CONFIG.get("FUTURES_AWF_IS_POOL_FRAC", 0.70))
@@ -615,7 +621,7 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
         close_2d_full = np.zeros((eff_len, len(ctx.symbols)), dtype=np.float64)
         for s_idx, sym in enumerate(ctx.symbols):
             if sym in ctx.data_maps and ctx.tf in ctx.data_maps[sym]:
-                start_idx = info["alignment_offsets"][sym]
+                start_idx = alignment_info["alignment_offsets"][sym]
                 close_2d_full[:, s_idx] = (
                     ctx.data_maps[sym][ctx.tf]["close"]
                     .iloc[start_idx : start_idx + eff_len]
@@ -653,20 +659,22 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
             if ref_sym is None:
                 use_full_leg_ml = False
             else:
-                if ctx.strategy_cfg is None:
+                strategy_cfg = ctx.strategy_cfg
+                if strategy_cfg is None:
                     _logger.warning(
                         "[ML_OPT] strategy_cfg missing; disable per-leg ML refit cache path."
                     )
                     use_full_leg_ml = False
                 if use_full_leg_ml:
+                    assert strategy_cfg is not None
                     sym_df_ref = ctx.data_maps[ref_sym][ctx.tf]
-                    start_idx_ref = int(info["alignment_offsets"][ref_sym])
+                    start_idx_ref = int(alignment_info["alignment_offsets"][ref_sym])
                     t_panel_cache = time.perf_counter()
                     precomputed_panels = precompute_anchored_ml_panels(
                         ctx.data_maps,
                         list(ctx.symbols),
                         ctx.tf,
-                        ctx.strategy_cfg,
+                        strategy_cfg,
                     )
                     _logger.info(
                         (
@@ -738,7 +746,7 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
                             data_maps=ctx.data_maps,
                             symbols=ctx.symbols,
                             tf=ctx.tf,
-                            info=info,
+                            info=alignment_info,
                         )
 
                         t_calib = time.perf_counter()
@@ -746,7 +754,7 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
                             ctx.data_maps,
                             ctx.symbols,
                             ctx.tf,
-                            info,
+                            alignment_info,
                             window_lo=int(anchor),
                             window_hi_excl=int(test_s),
                             oos_pool_start=first_awf_anchor,
@@ -812,7 +820,7 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
                             ctx.data_maps,
                             ctx.symbols,
                             ctx.tf,
-                            info,
+                            alignment_info,
                             calibrator=calib_leg,
                             calibrator_short=calib_s_leg,
                             alpha_overrides=alpha_overrides,
@@ -859,7 +867,7 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
                 ctx.data_maps,
                 ctx.symbols,
                 ctx.tf,
-                info,
+                alignment_info,
                 calibrator=ctx.calibrator,
                 calibrator_short=ctx.calibrator_short,
             )
@@ -884,7 +892,7 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
                     ctx.data_maps,
                     ctx.symbols,
                     ctx.tf,
-                    info,
+                    alignment_info,
                     window_lo=first_awf_anchor,
                     window_hi_excl=eff_len,
                     oos_pool_start=first_awf_anchor,
@@ -895,7 +903,7 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
                     ctx.data_maps,
                     ctx.symbols,
                     ctx.tf,
-                    info,
+                    alignment_info,
                     window_lo=0,
                     window_hi_excl=calib_hi,
                     oos_pool_start=None,
@@ -910,7 +918,7 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
                 ctx.data_maps,
                 ctx.symbols,
                 ctx.tf,
-                info,
+                alignment_info,
                 calibrator=ctx.calibrator,
                 calibrator_short=ctx.calibrator_short,
             )
@@ -1000,14 +1008,14 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
                         _ic_raw,
                     )
 
-        ctx.multi_alignment_info["awf_legs"] = awf_legs
+        alignment_info["awf_legs"] = awf_legs
 
         if ctx.awf_leg_slices:
             aligned0 = ctx.awf_leg_slices[0].get("data") or {}
             xl0 = aligned0.get("xs_score_long")
             if xl0 is not None and getattr(xl0, "size", 0) > 0:
                 xs_std = float(np.nanstd(np.asarray(xl0, dtype=np.float64)))
-                ctx.multi_alignment_info["xs_score_aligned_std"] = xs_std
+                alignment_info["xs_score_aligned_std"] = xs_std
                 if xs_std < 0.05:
                     _logger.debug(
                         "[ML_OPT] xs_score dispersion low (std=%.6f); check GP/CS merge path.",

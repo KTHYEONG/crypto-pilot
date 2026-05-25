@@ -9,7 +9,8 @@ import pandas as pd
 def compute_ema_numpy(close: np.ndarray, period: int) -> np.ndarray:
     if len(close) == 0:
         return np.array([], dtype=np.float64)
-    return pd.Series(close).ewm(span=max(2, period), adjust=False).mean().to_numpy(dtype=np.float64)
+    ema = pd.Series(close).ewm(span=max(2, period), adjust=False).mean().to_numpy(dtype=np.float64)
+    return np.asarray(ema, dtype=np.float64)
 
 
 def compute_atr_numpy(
@@ -24,7 +25,8 @@ def compute_atr_numpy(
         high[1:] - low[1:],
         np.maximum(np.abs(high[1:] - close[:-1]), np.abs(low[1:] - close[:-1])),
     )
-    return pd.Series(tr).ewm(span=p, adjust=False).mean().to_numpy(dtype=np.float64)
+    atr = pd.Series(tr).ewm(span=p, adjust=False).mean().to_numpy(dtype=np.float64)
+    return np.asarray(atr, dtype=np.float64)
 
 
 def compute_adx_numpy(
@@ -45,12 +47,21 @@ def compute_adx_numpy(
         high[1:] - low[1:],
         np.maximum(np.abs(high[1:] - close[:-1]), np.abs(low[1:] - close[:-1])),
     )
-    s_tr = pd.Series(tr).ewm(alpha=alpha, adjust=False).mean().to_numpy(dtype=np.float64)
-    s_pdm = pd.Series(plus_dm).ewm(alpha=alpha, adjust=False).mean().to_numpy(dtype=np.float64)
-    s_mdm = pd.Series(minus_dm).ewm(alpha=alpha, adjust=False).mean().to_numpy(dtype=np.float64)
+    s_tr = np.asarray(
+        pd.Series(tr).ewm(alpha=alpha, adjust=False).mean().to_numpy(dtype=np.float64),
+        dtype=np.float64,
+    )
+    s_pdm = np.asarray(
+        pd.Series(plus_dm).ewm(alpha=alpha, adjust=False).mean().to_numpy(dtype=np.float64),
+        dtype=np.float64,
+    )
+    s_mdm = np.asarray(
+        pd.Series(minus_dm).ewm(alpha=alpha, adjust=False).mean().to_numpy(dtype=np.float64),
+        dtype=np.float64,
+    )
     with np.errstate(divide="ignore", invalid="ignore"):
         pdi = np.where(s_tr > 1e-12, 100.0 * s_pdm / s_tr, 0.0)
         mdi = np.where(s_tr > 1e-12, 100.0 * s_mdm / s_tr, 0.0)
         dx = np.where((pdi + mdi) > 1e-12, 100.0 * np.abs(pdi - mdi) / (pdi + mdi), 0.0)
     adx = pd.Series(dx).ewm(alpha=alpha, adjust=False).mean().to_numpy(dtype=np.float64)
-    return np.clip(adx, 0.0, 100.0)
+    return np.asarray(np.clip(adx, 0.0, 100.0), dtype=np.float64)

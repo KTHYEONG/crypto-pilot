@@ -202,6 +202,10 @@ class PortfolioBacktestEngine:
             and d.get("exec_close_1m") is not None
         )
         if use_intrabar:
+            exec_bar_start_1m_idx = prepared.exec_bar_start_1m_idx
+            exec_bar_end_1m_idx = prepared.exec_bar_end_1m_idx
+            assert exec_bar_start_1m_idx is not None
+            assert exec_bar_end_1m_idx is not None
             trades_arr, final_bal, equity, diag = backtest_target_weights_intrabar_numba(
                 c2d,
                 d["high"],
@@ -215,8 +219,8 @@ class PortfolioBacktestEngine:
                 np.asarray(d["exec_high_1m"], dtype=np.float64),
                 np.asarray(d["exec_low_1m"], dtype=np.float64),
                 np.asarray(d["exec_close_1m"], dtype=np.float64),
-                prepared.exec_bar_start_1m_idx,
-                prepared.exec_bar_end_1m_idx,
+                exec_bar_start_1m_idx,
+                exec_bar_end_1m_idx,
                 self.initial_balance,
                 self.maker_fee,
                 self.taker_fee,
