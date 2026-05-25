@@ -5,6 +5,7 @@ from __future__ import annotations
 import tempfile
 from datetime import date
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -39,7 +40,9 @@ def test_fetch_premiumindex_bulk_mocked() -> None:
                 }
             )
 
-        with patch("src.domain.futures.backtest.data_loader.BinanceVisionDownloader") as mock_downloader_cls:
+        with patch(
+            "src.domain.futures.backtest.data_loader.BinanceVisionDownloader"
+        ) as mock_downloader_cls:
             mock_downloader = MagicMock()
             mock_downloader.fetch_premiumindex_daily.side_effect = get_mock_df
             mock_downloader_cls.return_value = mock_downloader
@@ -107,7 +110,9 @@ def test_fetch_premiumindex_bulk_cache_hit() -> None:
         df_1.to_parquet(date_dir / "2020-09-13.parquet", index=False)
         df_2.to_parquet(date_dir / "2020-09-14.parquet", index=False)
 
-        with patch("src.domain.futures.backtest.data_loader.BinanceVisionDownloader") as mock_downloader_cls:
+        with patch(
+            "src.domain.futures.backtest.data_loader.BinanceVisionDownloader"
+        ) as mock_downloader_cls:
             mock_downloader = MagicMock()
             mock_downloader_cls.return_value = mock_downloader
 
@@ -142,14 +147,16 @@ def test_build_mark_price_1m_array_shape_and_ffill() -> None:
             index=pd.to_datetime([1600000000000, 1600000180000], unit="ms", utc=True),
         )
 
-        def mock_bulk(symbol: str, **kwargs) -> pd.DataFrame:
+        def mock_bulk(symbol: str, **kwargs: object) -> pd.DataFrame:
             if "BTC" in symbol:
                 return df_btc
             if "ETH" in symbol:
                 return df_eth
             return pd.DataFrame()
 
-        with patch("src.domain.futures.backtest.data_loader.fetch_premiumindex_bulk", side_effect=mock_bulk):
+        with patch(
+            "src.domain.futures.backtest.data_loader.fetch_premiumindex_bulk", side_effect=mock_bulk
+        ):
             # Start: 1600000000000 (0ms)
             # End: 1600000360000 (6 minutes = 360000 ms)
             arr = build_mark_price_1m_array(
@@ -169,12 +176,16 @@ def test_build_mark_price_1m_array_shape_and_ffill() -> None:
             # 3m: 102.0
             # 4m: 102.0
             # 5m: 102.0
-            np.testing.assert_array_almost_equal(arr[:, 0], [100.0, 100.0, 100.0, 102.0, 102.0, 102.0])
+            np.testing.assert_array_almost_equal(
+                arr[:, 0], [100.0, 100.0, 100.0, 102.0, 102.0, 102.0]
+            )
 
             # ETH prices:
             # 0m-2m: 200.0
             # 3m-5m: 201.0
-            np.testing.assert_array_almost_equal(arr[:, 1], [200.0, 200.0, 200.0, 201.0, 201.0, 201.0])
+            np.testing.assert_array_almost_equal(
+                arr[:, 1], [200.0, 200.0, 200.0, 201.0, 201.0, 201.0]
+            )
 
             # SOL (not found) -> NaN column
             assert np.isnan(arr[:, 2]).all()

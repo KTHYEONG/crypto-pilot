@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from types import SimpleNamespace
+from typing import Any
 
 import optuna
+import pytest
 
 from src.domain.futures.optimization.candidate_selector import (
     select_phase_b_top_candidates,
@@ -12,6 +14,7 @@ from src.domain.futures.optimization.final_evaluator import (
     _build_ensemble_evaluation_summary,
     _passes_champion_swap_4conditions,
 )
+from src.domain.futures.optimization.optimizer import MLPhaseDContext
 from src.domain.futures.optimization.workflow import (
     evaluate_phase_c_robustness,
     run_phased_optimization_skeleton,
@@ -25,7 +28,7 @@ from src.domain.futures.validation.gates import (
 def test_phase_c_robustness_scaffold_schema() -> None:
     study = optuna.create_study(direction="minimize")
 
-    def _obj(trial):
+    def _obj(trial: optuna.trial.Trial) -> float:
         x = trial.suggest_float("x", 0.0, 1.0)
         return (x - 0.2) ** 2
 
@@ -54,11 +57,13 @@ class _DummyStudy:
     study_name: str
 
 
-def test_phase_runner_includes_phase_c_diagnostics(monkeypatch) -> None:
-    def _fake_loop(**kwargs):
+def test_phase_runner_includes_phase_c_diagnostics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _fake_loop(**kwargs: Any) -> _DummyStudy:
         return _DummyStudy(study_name=kwargs["study_name"])
 
-    def _fake_phase_c(*, study_b, target_seeds, top_k):
+    def _fake_phase_c(*, study_b: Any, target_seeds: list[int], top_k: int) -> dict[str, Any]:
         assert target_seeds == [101, 202]
         assert top_k == 5
         return {"phase": "phase_c", "robustness_score": 0.5, "stability_cv": 0.1}
@@ -72,10 +77,10 @@ def test_phase_runner_includes_phase_c_diagnostics(monkeypatch) -> None:
     )
 
     bundle = run_phased_optimization_skeleton(
-        base_ctx=SimpleNamespace(run_id="r-phase-c"),
+        base_ctx=MLPhaseDContext(data_maps={}, symbols=[], tf="4h", run_id="r-phase-c"),
         base_study_name="base_phase",
         storage_url="sqlite:///tmp.db",
-        storage=None,
+        storage=optuna.storages.InMemoryStorage(),
         n_trials=2,
         seed=42,
         resume=False,
@@ -116,7 +121,7 @@ def test_expectancy_retention_gate_blocks_when_below_floor() -> None:
             min_expectancy=0.10,
             is_expectancy=0.50,
             min_oos_retention_expectancy_pct=50.0,
-            oos_cagr_pct=100.0,   # Auxiliary only: should not bypass expectancy retention.
+            oos_cagr_pct=100.0,  # Auxiliary only: should not bypass expectancy retention.
             is_cagr_ref_pct=10.0,
         )
     )
@@ -163,7 +168,12 @@ def test_ensemble_summary_includes_meta_and_members() -> None:
         {"cagr_pct": 10.0, "mdd_pct": 5.0, "terminal_wealth_ratio": 1.1, "avg_trade_pnl_pct": 0.6},
         {"cagr_pct": 12.0, "mdd_pct": 6.0, "terminal_wealth_ratio": 1.2, "avg_trade_pnl_pct": 0.7},
     ]
-    meta = {"cagr_pct": 11.0, "mdd_pct": 4.5, "terminal_wealth_ratio": 1.15, "avg_trade_pnl_pct": 0.65}
+    meta = {
+        "cagr_pct": 11.0,
+        "mdd_pct": 4.5,
+        "terminal_wealth_ratio": 1.15,
+        "avg_trade_pnl_pct": 0.65,
+    }
     summary = _build_ensemble_evaluation_summary(
         selected_ensemble_results=members,
         ensemble_ports=ports,
@@ -175,10 +185,12 @@ def test_ensemble_summary_includes_meta_and_members() -> None:
     assert summary["ensemble_meta"]["cagr_pct"] == 11.0
 
 
-def test_phase_b_top_candidates_prioritize_calmar_and_constraints(monkeypatch) -> None:
+def test_phase_b_top_candidates_prioritize_calmar_and_constraints(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     study = optuna.create_study(direction="maximize", study_name="demo_phase_b")
 
-    def _obj(trial):
+    def _obj(trial: optuna.trial.Trial) -> float:
         trial.suggest_float("x", 0.0, 1.0)
         return float(trial.number)
 
@@ -225,7 +237,7 @@ def test_phase_b_top_candidates_prioritize_calmar_and_constraints(monkeypatch) -
     trials[3].set_user_attr("phase", "phase_a2")
     trials[3].set_user_attr("calmar_lcb", 2.5)
 
-    def _fake_replay(_ctx, _params):
+    def _fake_replay(_ctx: Any, _params: Any) -> tuple[float, dict[str, float]]:
         return 0.0, {"awf_pos_frac": 0.5}
 
     monkeypatch.setattr(
@@ -235,7 +247,7 @@ def test_phase_b_top_candidates_prioritize_calmar_and_constraints(monkeypatch) -
 
     top, summary = select_phase_b_top_candidates(
         study,
-        base_ctx=SimpleNamespace(),
+        base_ctx=MLPhaseDContext(data_maps={}, symbols=[], tf="4h"),
         cfg={},
         top_k=2,
     )
@@ -245,13 +257,17 @@ def test_phase_b_top_candidates_prioritize_calmar_and_constraints(monkeypatch) -
     assert len(top) == 2
     assert str(top[0]["trial"].user_attrs.get("phase", "")).lower() == "phase_b"
     assert str(top[1]["trial"].user_attrs.get("phase", "")).lower() == "phase_b"
-    assert float(top[0]["trial"].user_attrs["calmar_lcb"]) >= float(top[1]["trial"].user_attrs["calmar_lcb"])
+    assert float(top[0]["trial"].user_attrs["calmar_lcb"]) >= float(
+        top[1]["trial"].user_attrs["calmar_lcb"]
+    )
 
 
-def test_phase_b_strategy_mode_prefers_active_trials(monkeypatch) -> None:
+def test_phase_b_strategy_mode_prefers_active_trials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     study = optuna.create_study(direction="maximize")
 
-    def _obj(trial):
+    def _obj(trial: optuna.trial.Trial) -> float:
         trial.suggest_float("x", 0.0, 1.0)
         return float(10 - trial.number)
 
@@ -295,7 +311,7 @@ def test_phase_b_strategy_mode_prefers_active_trials(monkeypatch) -> None:
 
     top, summary = select_phase_b_top_candidates(
         study,
-        base_ctx=SimpleNamespace(strategy_mode=True),
+        base_ctx=MLPhaseDContext(data_maps={}, symbols=[], tf="4h", strategy_mode=True),
         cfg={},
         top_k=1,
     )

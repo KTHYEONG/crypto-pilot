@@ -17,7 +17,7 @@ from src.domain.futures.portfolio.portfolio_constructor import (
 
 
 class TestFractionalKelly:
-    """_kelly_scaled = _kelly_raw × 0.25 검증."""
+    """_kelly_scaled = _kelly_raw x 0.25 검증."""
 
     def test_scaled_equals_raw_times_fraction(self) -> None:
         """Full Kelly 대비 0.25x 검증."""
@@ -38,9 +38,7 @@ class TestFractionalKelly:
         sig = inspect.signature(_kelly_scaled)
         forbidden = ["fraction", "kelly_fraction", "f_fraction", "frac"]
         for p in forbidden:
-            assert p not in sig.parameters, (
-                f"파라미터 '{p}'가 외부 주입 가능해서는 안 됨"
-            )
+            assert p not in sig.parameters, f"파라미터 '{p}'가 외부 주입 가능해서는 안 됨"
 
     def test_scaled_output_shape_preserved(self) -> None:
         """출력 shape가 입력 shape와 동일."""

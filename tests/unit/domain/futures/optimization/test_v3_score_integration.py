@@ -19,7 +19,8 @@ def test_v3_score_vs_legacy_cpcv_score() -> None:
     funding_drag = 0.05
     aum_impact_penalty = 0.02
 
-    # Legacy score only penalizes downside semideviation with multiplier (typically lambda_down = 2.0)
+    # Legacy score only penalizes downside semideviation.
+    # Multiplier is typically lambda_down = 2.0.
     legacy = compute_awf_robust_objective_score(
         leg_log_tw=leg_log_tw,
         max_mdd_pct=worst_mdd * 100.0,  # Legacy takes MDD as percentage scale (0~100)
@@ -36,7 +37,7 @@ def test_v3_score_vs_legacy_cpcv_score() -> None:
         aum_impact_penalty=aum_impact_penalty,
     )
 
-    # Since v3 score includes multiple strict subtraction penalties, it should be significantly lower (more conservative)
+    # v3 score includes multiple subtraction penalties and should be lower.
     assert v3 < legacy
 
 

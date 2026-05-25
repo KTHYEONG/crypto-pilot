@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+from datetime import datetime
+
+import pytest
+
 from src.application.futures.optimization.config import build_run_config_from_args
 from src.execution import opt_main_futures
 
 
-def test_strategy_mode_pipeline_orchestration_order(monkeypatch) -> None:
+def test_strategy_mode_pipeline_orchestration_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     run_config = build_run_config_from_args(
         {
             "mode": "strategy",
@@ -21,10 +27,10 @@ def test_strategy_mode_pipeline_orchestration_order(monkeypatch) -> None:
         is_start="2025-04-01",
         oos_start="2026-01-01",
         end_date="2026-04-01",
-        fetch_start_date=opt_main_futures.datetime.strptime("2025-01-01", "%Y-%m-%d").date(),
-        is_start_date=opt_main_futures.datetime.strptime("2025-04-01", "%Y-%m-%d").date(),
-        oos_start_date=opt_main_futures.datetime.strptime("2026-01-01", "%Y-%m-%d").date(),
-        end_date_value=opt_main_futures.datetime.strptime("2026-04-01", "%Y-%m-%d").date(),
+        fetch_start_date=datetime.strptime("2025-01-01", "%Y-%m-%d").date(),
+        is_start_date=datetime.strptime("2025-04-01", "%Y-%m-%d").date(),
+        oos_start_date=datetime.strptime("2026-01-01", "%Y-%m-%d").date(),
+        end_date_value=datetime.strptime("2026-04-01", "%Y-%m-%d").date(),
     )
     data_stage = opt_main_futures.DataStageResult(
         data_maps={"BTCUSDT": {}},
@@ -96,7 +102,9 @@ def test_strategy_mode_pipeline_orchestration_order(monkeypatch) -> None:
     assert called == ["window", "universe", "data", "strategy", "optimization"]
 
 
-def test_strategy_smoke_skips_optimization_stage(monkeypatch) -> None:
+def test_strategy_smoke_skips_optimization_stage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     run_config = build_run_config_from_args(
         {
             "mode": "strategy-smoke",
@@ -112,10 +120,10 @@ def test_strategy_smoke_skips_optimization_stage(monkeypatch) -> None:
         is_start="2025-04-01",
         oos_start="2026-01-01",
         end_date="2026-04-01",
-        fetch_start_date=opt_main_futures.datetime.strptime("2025-01-01", "%Y-%m-%d").date(),
-        is_start_date=opt_main_futures.datetime.strptime("2025-04-01", "%Y-%m-%d").date(),
-        oos_start_date=opt_main_futures.datetime.strptime("2026-01-01", "%Y-%m-%d").date(),
-        end_date_value=opt_main_futures.datetime.strptime("2026-04-01", "%Y-%m-%d").date(),
+        fetch_start_date=datetime.strptime("2025-01-01", "%Y-%m-%d").date(),
+        is_start_date=datetime.strptime("2025-04-01", "%Y-%m-%d").date(),
+        oos_start_date=datetime.strptime("2026-01-01", "%Y-%m-%d").date(),
+        end_date_value=datetime.strptime("2026-04-01", "%Y-%m-%d").date(),
     )
     data_stage = opt_main_futures.DataStageResult(
         data_maps={"BTCUSDT": {}},
@@ -135,3 +143,39 @@ def test_strategy_smoke_skips_optimization_stage(monkeypatch) -> None:
     result = opt_main_futures.run_pipeline(run_config)
     assert result.exit_code == 0
     assert result.reason == "strategy_smoke_done"
+
+
+def test_run_from_cli_when_pipeline_returns_nonzero_propagates_exit_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Arrange
+    argv = ["--mode", "strategy-smoke", "--strategy", "momentum_v0", "--symbols", "BTCUSDT"]
+    monkeypatch.setattr(
+        opt_main_futures,
+        "run_pipeline",
+        lambda *_args, **_kwargs: opt_main_futures.RunnerResult(exit_code=7, reason="failed"),
+    )
+
+    # Act
+    exit_code = opt_main_futures.run_from_cli(argv)
+
+    # Assert
+    assert exit_code == 7
+
+
+def test_run_from_cli_when_pipeline_raises_runtime_error_returns_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Arrange
+    argv = ["--mode", "strategy-smoke", "--strategy", "momentum_v0", "--symbols", "BTCUSDT"]
+
+    def _raise_runtime_error(*_args: object, **_kwargs: object) -> opt_main_futures.RunnerResult:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(opt_main_futures, "run_pipeline", _raise_runtime_error)
+
+    # Act
+    exit_code = opt_main_futures.run_from_cli(argv)
+
+    # Assert
+    assert exit_code == 1

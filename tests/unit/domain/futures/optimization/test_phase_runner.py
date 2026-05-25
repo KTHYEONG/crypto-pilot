@@ -3,14 +3,17 @@ from __future__ import annotations
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
+
+import optuna
+import pytest
 
 project_root = str(Path(__file__).resolve().parents[5])
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-from src.domain.futures.optimization.workflow import run_phased_optimization_skeleton
+from src.domain.futures.optimization.optimizer import MLPhaseDContext
+from src.domain.futures.optimization.workflow import PhaseBPlan, run_phased_optimization_skeleton
 
 
 @dataclass
@@ -18,10 +21,16 @@ class _DummyStudy:
     study_name: str
 
 
-def test_phase_runner_study_naming_and_order(monkeypatch) -> None:
+def _base_ctx(run_id: str, **kwargs: Any) -> MLPhaseDContext:
+    return MLPhaseDContext(data_maps={}, symbols=[], tf="4h", run_id=run_id, **kwargs)
+
+
+def test_phase_runner_study_naming_and_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     calls: list[dict[str, Any]] = []
 
-    def _fake_loop(**kwargs):
+    def _fake_loop(**kwargs: Any) -> _DummyStudy:
         calls.append(kwargs)
         return _DummyStudy(study_name=kwargs["study_name"])
 
@@ -30,10 +39,10 @@ def test_phase_runner_study_naming_and_order(monkeypatch) -> None:
     )
 
     bundle = run_phased_optimization_skeleton(
-        base_ctx=SimpleNamespace(run_id="r1"),
+        base_ctx=_base_ctx("r1"),
         base_study_name="base_study",
         storage_url="sqlite:///tmp.db",
-        storage=None,
+        storage=optuna.storages.InMemoryStorage(),
         n_trials=3,
         seed=42,
         resume=True,
@@ -58,10 +67,12 @@ def test_phase_runner_study_naming_and_order(monkeypatch) -> None:
     assert calls[2]["base_ctx"].coordinate_phase == "phase_b"
 
 
-def test_phase_runner_uses_phase_specific_trial_budgets(monkeypatch) -> None:
+def test_phase_runner_uses_phase_specific_trial_budgets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     calls: list[dict[str, Any]] = []
 
-    def _fake_loop(**kwargs):
+    def _fake_loop(**kwargs: Any) -> _DummyStudy:
         calls.append(kwargs)
         return _DummyStudy(study_name=kwargs["study_name"])
 
@@ -70,10 +81,10 @@ def test_phase_runner_uses_phase_specific_trial_budgets(monkeypatch) -> None:
     )
 
     run_phased_optimization_skeleton(
-        base_ctx=SimpleNamespace(run_id="r3"),
+        base_ctx=_base_ctx("r3"),
         base_study_name="base_study",
         storage_url="sqlite:///tmp.db",
-        storage=None,
+        storage=optuna.storages.InMemoryStorage(),
         n_trials=999,
         n_trials_a1=150,
         n_trials_a2=100,
@@ -89,10 +100,10 @@ def test_phase_runner_uses_phase_specific_trial_budgets(monkeypatch) -> None:
     assert calls[2]["n_trials"] == 300
 
 
-def test_phase_b_receives_enqueue_seeds(monkeypatch) -> None:
+def test_phase_b_receives_enqueue_seeds(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[dict[str, Any]] = []
 
-    def _fake_loop(**kwargs):
+    def _fake_loop(**kwargs: Any) -> _DummyStudy:
         calls.append(kwargs)
         return _DummyStudy(study_name=kwargs["study_name"])
 
@@ -102,10 +113,10 @@ def test_phase_b_receives_enqueue_seeds(monkeypatch) -> None:
 
     seeds = [{"K_LONG": 2, "TARGET_ANN_VOL": 0.12}]
     run_phased_optimization_skeleton(
-        base_ctx=SimpleNamespace(run_id="r2"),
+        base_ctx=_base_ctx("r2"),
         base_study_name="joint",
         storage_url="sqlite:///tmp.db",
-        storage=None,
+        storage=optuna.storages.InMemoryStorage(),
         n_trials=2,
         seed=7,
         resume=False,
@@ -118,11 +129,19 @@ def test_phase_b_receives_enqueue_seeds(monkeypatch) -> None:
     assert phase_b_call["enqueue_params"] == seeds
 
 
-def test_phase_runner_propagates_frozen_and_shrunk_to_phase_b(monkeypatch) -> None:
+def test_phase_runner_propagates_frozen_and_shrunk_to_phase_b(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     calls: list[dict[str, Any]] = []
 
     class _DummyTrial:
-        def __init__(self, number: int, value: float, params: dict[str, Any], attrs: dict[str, Any] | None = None):
+        def __init__(
+            self,
+            number: int,
+            value: float,
+            params: dict[str, Any],
+            attrs: dict[str, Any] | None = None,
+        ) -> None:
             self.number = number
             self.value = value
             self.params = params
@@ -134,13 +153,13 @@ def test_phase_runner_propagates_frozen_and_shrunk_to_phase_b(monkeypatch) -> No
             super().__init__(study_name=study_name)
             self._trials = trials
 
-        def get_trials(self, deepcopy: bool = False):
+        def get_trials(self, deepcopy: bool = False) -> list[Any]:
             return self._trials
 
         def set_user_attr(self, _k: str, _v: Any) -> None:
             return None
 
-    def _fake_loop(**kwargs):
+    def _fake_loop(**kwargs: Any) -> _DummyStudyWithTrials:
         calls.append(kwargs)
         sname = kwargs["study_name"]
         if sname.endswith("_phase_a1"):
@@ -185,7 +204,7 @@ def test_phase_runner_propagates_frozen_and_shrunk_to_phase_b(monkeypatch) -> No
     )
     monkeypatch.setattr(
         "src.domain.futures.optimization.workflow.build_phase_b_plan",
-        lambda *_a, **_k: SimpleNamespace(
+        lambda *_a, **_k: PhaseBPlan(
             fixed_params={"K_SHORT": 2},
             shrunk_ranges={"TARGET_ANN_VOL": (0.1, 0.2)},
             seed_combos=[{"K_LONG": 3}],
@@ -194,10 +213,10 @@ def test_phase_runner_propagates_frozen_and_shrunk_to_phase_b(monkeypatch) -> No
     )
 
     run_phased_optimization_skeleton(
-        base_ctx=SimpleNamespace(run_id="r4"),
+        base_ctx=_base_ctx("r4"),
         base_study_name="joint",
         storage_url="sqlite:///tmp.db",
-        storage=None,
+        storage=optuna.storages.InMemoryStorage(),
         n_trials=2,
         seed=7,
         resume=False,
@@ -212,7 +231,9 @@ def test_phase_runner_propagates_frozen_and_shrunk_to_phase_b(monkeypatch) -> No
     assert ctx_b.phase_ranges["TARGET_ANN_VOL"] == (0.1, 0.2)
 
 
-def test_phase_runner_inherits_base_phase_ranges_for_all_phases(monkeypatch) -> None:
+def test_phase_runner_inherits_base_phase_ranges_for_all_phases(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     calls: list[dict[str, Any]] = []
 
     class _DummyStudyWithTrials(_DummyStudy):
@@ -220,13 +241,13 @@ def test_phase_runner_inherits_base_phase_ranges_for_all_phases(monkeypatch) -> 
             super().__init__(study_name=study_name)
             self._trials: list[Any] = []
 
-        def get_trials(self, deepcopy: bool = False):
+        def get_trials(self, deepcopy: bool = False) -> list[Any]:
             return self._trials
 
         def set_user_attr(self, _k: str, _v: Any) -> None:
             return None
 
-    def _fake_loop(**kwargs):
+    def _fake_loop(**kwargs: Any) -> _DummyStudyWithTrials:
         calls.append(kwargs)
         return _DummyStudyWithTrials(kwargs["study_name"])
 
@@ -235,7 +256,7 @@ def test_phase_runner_inherits_base_phase_ranges_for_all_phases(monkeypatch) -> 
     )
     monkeypatch.setattr(
         "src.domain.futures.optimization.workflow.build_phase_b_plan",
-        lambda *_a, **_k: SimpleNamespace(
+        lambda *_a, **_k: PhaseBPlan(
             fixed_params={},
             shrunk_ranges={"TARGET_ANN_VOL": (0.1, 0.2)},
             seed_combos=[],
@@ -244,8 +265,8 @@ def test_phase_runner_inherits_base_phase_ranges_for_all_phases(monkeypatch) -> 
     )
 
     run_phased_optimization_skeleton(
-        base_ctx=SimpleNamespace(
-            run_id="r5",
+        base_ctx=_base_ctx(
+            "r5",
             strategy_mode=True,
             phase_ranges={
                 "BETA_ALPHA": (4.0, 8.0),
@@ -255,7 +276,7 @@ def test_phase_runner_inherits_base_phase_ranges_for_all_phases(monkeypatch) -> 
         ),
         base_study_name="joint",
         storage_url="sqlite:///tmp.db",
-        storage=None,
+        storage=optuna.storages.InMemoryStorage(),
         n_trials=1,
         seed=7,
         resume=False,
