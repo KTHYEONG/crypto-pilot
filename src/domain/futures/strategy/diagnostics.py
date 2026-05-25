@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import logging
+
 import numpy as np
 import scipy.stats
+
+_logger = logging.getLogger(__name__)
 
 
 def rolling_ic(
@@ -33,7 +37,7 @@ def rolling_ic(
         else:
             raise ValueError(f"Unknown method: {method}")
         ic_values[t] = stat if np.isfinite(stat) else 0.0
-    return np.array(ic_values, dtype=np.float64)  # type: ignore[no-any-return]
+    return np.array(ic_values, dtype=np.float64)
 
 
 def ic_summary(ic_series: np.ndarray) -> dict[str, float]:
@@ -219,6 +223,93 @@ def passes_directional_viability_gate(
         long_ratio >= min_long_non_zero_ratio
         and short_ratio >= min_short_non_zero_ratio
     )
+
+
+def gross_return_diagnostics(
+    gross_long_2d: np.ndarray,
+    resid_long_2d: np.ndarray,
+    eligible_2d: np.ndarray,
+    *,
+    min_symbols: int = 5,
+) -> dict[str, float]:
+    """Compare cross-sectional variance: raw vs beta-residualized returns.
+
+    Computes variance retention ratio to quantify signal shrinkage from residualization.
+    All computation is vectorized over the eligible mask; rows with fewer than
+    ``min_symbols`` valid symbols are skipped.
+
+    Args:
+        gross_long_2d: Raw log returns before any transform, shape [T, N].
+        resid_long_2d: Returns after beta-residualization (pre-CS-demean), shape [T, N].
+        eligible_2d: Boolean eligibility mask, shape [T, N].
+        min_symbols: Minimum number of valid symbols required per timestep.
+
+    Returns:
+        Dict with keys:
+            raw_cs_std_mean: Mean cross-sectional std of gross_long_2d per timestep.
+            resid_cs_std_mean: Mean cross-sectional std of resid_long_2d per timestep.
+            variance_retention_ratio: resid_cs_std_mean / max(raw_cs_std_mean, 1e-12).
+            n_timesteps: Number of eligible timesteps with >= min_symbols valid symbols.
+            raw_nonzero_ratio: Fraction of eligible (t, i) where |gross_long| > 1e-8.
+            resid_nonzero_ratio: Fraction of eligible (t, i) where |resid_long| > 1e-8.
+
+    Time complexity: O(T * N). Space complexity: O(1) auxiliary beyond inputs.
+
+    """
+    # Shape: [T, N]
+    t_len, _n_len = gross_long_2d.shape
+
+    raw_cs_stds: list[float] = []
+    resid_cs_stds: list[float] = []
+    raw_nz_count: int = 0
+    resid_nz_count: int = 0
+    total_eligible: int = 0
+
+    for t in range(t_len):
+        row_mask = (
+            eligible_2d[t]
+            & np.isfinite(gross_long_2d[t])
+            & np.isfinite(resid_long_2d[t])
+        )
+        n_valid = int(row_mask.sum())
+        if n_valid < min_symbols:
+            continue
+
+        raw_vals = gross_long_2d[t, row_mask]
+        resid_vals = resid_long_2d[t, row_mask]
+
+        raw_cs_stds.append(float(np.std(raw_vals, ddof=0)))
+        resid_cs_stds.append(float(np.std(resid_vals, ddof=0)))
+
+        raw_nz_count += int(np.sum(np.abs(raw_vals) > 1e-8))
+        resid_nz_count += int(np.sum(np.abs(resid_vals) > 1e-8))
+        total_eligible += n_valid
+
+    n_ts = len(raw_cs_stds)
+    if n_ts == 0:
+        return {
+            "raw_cs_std_mean": 0.0,
+            "resid_cs_std_mean": 0.0,
+            "variance_retention_ratio": 0.0,
+            "n_timesteps": 0.0,
+            "raw_nonzero_ratio": 0.0,
+            "resid_nonzero_ratio": 0.0,
+        }
+
+    raw_cs_std_mean = float(np.mean(raw_cs_stds))
+    resid_cs_std_mean = float(np.mean(resid_cs_stds))
+    var_retention = resid_cs_std_mean / max(raw_cs_std_mean, 1e-12)
+    raw_nz_ratio = raw_nz_count / max(total_eligible, 1)
+    resid_nz_ratio = resid_nz_count / max(total_eligible, 1)
+
+    return {
+        "raw_cs_std_mean": raw_cs_std_mean,
+        "resid_cs_std_mean": resid_cs_std_mean,
+        "variance_retention_ratio": var_retention,
+        "n_timesteps": float(n_ts),
+        "raw_nonzero_ratio": raw_nz_ratio,
+        "resid_nonzero_ratio": resid_nz_ratio,
+    }
 
 
 def passes_signal_preservation_gate(
