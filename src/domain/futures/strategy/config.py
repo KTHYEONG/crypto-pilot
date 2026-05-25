@@ -167,6 +167,11 @@ class StrategyMLConfig:
     # per-side 비용: 레이블 생성 시 round-trip(x2)으로 환산됨 (labels.py 참조)
     fee_bps: float = TAKER_FEE_BPS       # Taker 수수료 per side (canonical: core/settings.py)
     slippage_bps: float = SLIPPAGE_BPS   # 슬리피지 per side (canonical: core/settings.py)
+    # IC gate 파라미터: 완화된 초기 임계값 — B2 uplift 확인 후 강화 예정
+    ic_gate_min_mean_ic: float = 0.01
+    ic_gate_min_t_stat: float = 1.5
+    ic_gate_min_hit_ratio: float = 0.45
+    ic_gate_warn_only: bool = True  # True=경고만, False=RuntimeError
 
     def __post_init__(self) -> None:
         """Validate ML strategy parameters."""

@@ -11,7 +11,7 @@ related_paths:
   - src/domain/futures/optimization/objectives.py
   - src/domain/futures/strategy/labels.py
   - src/domain/futures/strategy_runtime/bridge.py
-last_verified: 2026-05-24
+last_verified: 2026-05-25
 ---
 
 # Result Baseline
@@ -263,4 +263,110 @@ ML 알파의 OOS 거래 단절을 초래하던 3대 구조적 병목을 식별�
   - 앙상블 루프 내부에서 `from src.domain.futures.optimization.samplers import build_ml_phase_d_params`를 로컬 임포트하고 각 멤버의 파라미터를 완성해 준 뒤 `finalize_strategy_portfolio_params`를 호출하여 제약사항을 적용함.
 - **기대 효과:**
   - `STRATEGY_MODE`와 `BETA_ALPHA`, `EV_HURDLE_BPS` 등의 파라미터가 안전하게 전파됨에 따라 백테스트 엔진 내부에서 `xs_score`가 정상 빌드되고, 최종 OOS에서의 `oos_zero_trades=0` 전환 및 정상 거래 활성화가 완벽히 보장됨.
+
+---
+
+## 14. Per-Timestep CS-Demean of Label Panel (2026-05-25)
+
+**Root Cause:** OLS beta 잔차화(`long_net[t,i] = gross_long - beta*mkt_ret - funding`)는 beta != 1 이거나
+eligible 종목이 부분 집합일 때 시점별 크로스섹션 평균이 0임을 보장하지 못한다. IS 기간이 강세장이면
+calibrator 학습 타깃의 CS 평균이 양수로 편향되고, 이 경우 sign-symmetric multiplicative EV 페널티
+`ev = q50 * (1 - penalty)`가 음수로 전락하여 `alpha_long = max(ev, 0) ≈ 0`이 된다.
+결과: `long_nz ≈ 0.002` (사실상 long 신호 전무), PBO=50%, 앙상블 퇴화.
+
+**Fix (`labels.py:build_label_panel`):**
+```python
+# 메인 루프 직후, signed = long_net.copy() 이전
+for t in range(t_len - horizon):
+    mask_t = np.isfinite(long_net[t]) & eligible[t]
+    if np.count_nonzero(mask_t) < 2:
+        continue
+    long_net[t, mask_t] -= float(np.mean(long_net[t, mask_t]))
+```
+
+**Expected Effect:**
+- Calibrator가 순수 크로스섹션 상대 엣지를 학습 → `q50 ≈ 0` (중위 종목), 상위 종목 `q50 > 0`
+- `long_nz` 목표: ≥ 0.08 (현재 0.002에서 회복)
+- IS/OOS 양쪽에서 long/short 균형 복원
+
+**Test:** `test_build_label_panel_uses_t_plus_1_open_close_alignment` — beta=1.0 + all-eligible 케이스는 CS 평균이 수학적으로 0 (no-op)이므로 기존 assertions 그대로 통과.
+
+---
+
+## 15. Track 1/2/3 Implementation & 300-Trial Result (2026-05-25)
+
+### 15.1 Applied Fixes
+
+**Track 1 (Sample-Weight SSOT):**
+- `dataset.py:113-114`: `double_w = raw_w * (1+2|y_ev|)` 제거 → `w = raw_w` (labels의 1차 weight 직접 사용)
+- 이중 적용으로 인한 `(1+2|y|)²` 과가중 제거
+
+**Track 2 (Calibrator/Ranker 타깃 분리):**
+- `contracts.py`: `LabelPanel.exec_net_ret` 필드 추가 (pre-CS-demean)
+- `labels.py`: CS-demean 직전에 `exec_net_ret = long_net.copy()` 저장
+- `dataset.py`: `y_ev` 소스를 `signed_net_ret` → `exec_net_ret` 변경
+  - Calibrator는 절대 EV(`exec_net_ret`, mean≠0) 학습
+  - Ranker는 `_cs_demean(exec_net_ret)` 재적용으로 상대 신호 유지
+- No look-ahead 검증: trailing beta + t+1 정렬 동일, 두 타깃 동일 computation graph
+
+**Track 3 (IC Gate 결선):**
+- `config.py`: `ic_gate_min_mean_ic=0.01, min_t_stat=1.5, min_hit_ratio=0.45, warn_only=True` 추가
+- `ml_builder.py`: `passes_ic_gate()` 호출, config 기반 warn/raise 분기
+
+### 15.2 300-Trial Diagnostics (seed=42, ml_lambdamart_v1)
+
+- **Window:** IS 2023-10-01~2025-09-30 / OOS 2025-10-01~2026-03-31 (6mo)
+- **Universe:** discovered=38, valid=37
+
+**ML 알파 품질:**
+- `mean_ic=0.0288~0.0363` ✅ (목표 ≥0.02 충족)
+- `t_stat=5.56~5.61` ✅ (유의성 높음)
+- `hit_ratio=0.541~0.547` ✅
+- `long_nz=0.0025~0.0053` ❌ (목표 ≥0.08 미달 — **Track 2 적용 후에도 미해결**)
+- `short_nz=0.118~0.168` ✅
+- `alpha_p95_long=0.00bps` ❌
+- `alpha_p95_short=20~35bps` ✅
+
+**OOS 성능:**
+- `CAGR=-19.62%` (목표 ≥30%) ❌
+- `MDD=13.74%` (목표 ≤20%) ✅
+- `EV/Cost Ratio=2.12` (목표 ≥3.0) ❌
+- `PBO=50.0%` (목표 ≤15%) ❌
+- `Sortino=-1.62` (목표 ≥1.8) ❌
+- `Profit Factor=1.01` (break-even)
+- `Win Rate=50.1%`
+- `Trades=2,105`
+
+**최종 판정:** HOLD (GATE_FAIL) ⚠️
+
+### 15.3 구조적 진단 (Track 2 효과 검증)
+
+**Track 2 성공 지표:**
+- `alpha_p95=27~35bps` (개별 fold), `signal_clears_floor=True` — Cost wall 통과 (§14 전 대비 개선)
+- Calibrator가 절대 EV 보존 확인 (pre-demean exec_net_ret 사용)
+- No look-ahead 검증 통과
+
+**여전히 남은 문제 (근본원인):**
+
+1. **Long Alpha 전무 (Portfolio 레이어 필터링):**
+   - ML 생성: `alpha_long nz=2.5%` → Portfolio 합성: `xs_long_nz=0.10%` (99% 소거)
+   - Track 2는 calibrator 절대 EV 보존에만 영향 — portfolio xs_score 합성 로직과는 분리
+   - **다음 조사 대상:** `portfolio_constructor.py`의 long/short weight 비대칭 필터링
+
+2. **OOS Regime 극단 편향:**
+   - OOS (2026-01 ~ 2026-03): CRISIS 15.9%, BEAR 22.6%, BULL 0.2%
+   - IS 기간(bull market) 대비 regime shift 극심
+   - 이전 v10.1의 +10.5% OOS 성과는 CRISIS kill-switch 의존 → HMM 제거(2026-05-24) 후 방어 수단 부재
+
+3. **Short-Only + Bear Market 조합:**
+   - 전략이 short 편중(46% nz)이나 OOS는 여전히 손실 → short 포지션의 기대 수익 실현 부족
+   - 레버리지×거래비용 드래그 → profit_factor≈1.0
+
+### 15.4 다음 우선순위
+
+- **Option A (Portfolio Layer):** xs_score long 억제 원인 분석 → 포트폴리오 가중치 설계 개선
+- **Option B (Regime Defense):** HMM 제거 이후 CRISIS 구간 대체 방어책 (동적 leverage 하향, short bias 조정)
+- **Option C (Signal Strength):** IC 0.03 수준에서는 24bps cost wall 통과가 한계 → 신호 강화 필요 (특성 엔지니어링, feature selection)
+
+Track 1/2/3 구현으로 **IC 지표는 건전화(mean_ic 0.03, t_stat 5.6)**, **cost wall 통과 가능성 확보**되었으나, OOS 수익화는 portfolio/regime/signal 레이어의 구조적 문제로 인해 미완성 상태.
 

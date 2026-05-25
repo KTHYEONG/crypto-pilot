@@ -76,6 +76,158 @@ def test_build_label_panel_enforces_eligibility_mask_on_outputs() -> None:
     assert panel.sample_weight[1, 0] == 0.0
 
 
+def test_build_label_panel_cs_demean_zeros_cross_sectional_mean() -> None:
+    """CS-demean enforces per-timestep CS mean ≈ 0 when funding differs across symbols.
+
+    Asymmetric funding (sym1=0.05, sym0=0.0) creates a non-zero CS mean before demean.
+    Without demean: mean(long_net[t]) ≈ -funding[1]/2 = -0.025 ≠ 0.
+    After demean: mean(long_net[t, eligible]) must be ≈ 0 for every valid timestep.
+    """
+    dt = np.array(
+        [np.datetime64("2026-01-01") + np.timedelta64(4 * i, "h") for i in range(4)],
+        dtype="datetime64[ns]",
+    )
+    open_2d = np.array([[100.0, 200.0], [110.0, 210.0], [120.0, 220.0], [130.0, 230.0]])
+    close_2d = np.array([[101.0, 201.0], [121.0, 221.0], [132.0, 232.0], [143.0, 243.0]])
+    funding_2d = np.array([[0.0, 0.05], [0.0, 0.05], [0.0, 0.05], [0.0, 0.05]])
+
+    aligned = AlignedMarketData(
+        datetimes=dt,
+        symbols=("BTCUSDT", "ETHUSDT"),
+        open_2d=open_2d,
+        high_2d=close_2d + 1.0,
+        low_2d=close_2d - 1.0,
+        close_2d=close_2d,
+        volume_2d=np.full((4, 2), 1000.0, dtype=np.float64),
+        funding_2d=funding_2d,
+        active_mask=np.ones((4, 2), dtype=bool),
+        warm_mask=np.ones((4, 2), dtype=bool),
+        entry_block_mask=np.zeros((4, 2), dtype=bool),
+        kill_mask=np.zeros((4, 2), dtype=bool),
+    )
+
+    panel = build_label_panel(
+        aligned,
+        StrategyMLConfig(label_horizon_bars=1, fee_bps=0.0, slippage_bps=0.0, min_group_size=2),
+    )
+
+    valid_t_found = False
+    for t in range(panel.long_net_ret.shape[0]):
+        mask_t = np.isfinite(panel.long_net_ret[t]) & panel.eligible_mask[t]
+        if int(mask_t.sum()) < 2:
+            continue
+        valid_t_found = True
+        cs_mean = float(np.mean(panel.long_net_ret[t, mask_t]))
+        np.testing.assert_allclose(cs_mean, 0.0, atol=1e-6)
+    assert valid_t_found, "no valid timestep with >=2 eligible symbols found"
+
+
+def test_build_label_panel_exec_net_ret_is_pre_cs_demean() -> None:
+    """Track 2: exec_net_ret must preserve pre-CS-demean absolute values.
+
+    When funding is asymmetric across symbols, signed_net_ret (CS-demeaned) has
+    per-timestep mean ≈ 0. exec_net_ret must retain the non-zero pre-demean mean,
+    confirming it is captured before CS-demean is applied.
+    """
+    dt = np.array(
+        [np.datetime64("2026-01-01") + np.timedelta64(4 * i, "h") for i in range(4)],
+        dtype="datetime64[ns]",
+    )
+    open_2d = np.array([[100.0, 200.0], [110.0, 210.0], [120.0, 220.0], [130.0, 230.0]])
+    close_2d = np.array([[101.0, 201.0], [121.0, 221.0], [132.0, 232.0], [143.0, 243.0]])
+    # Asymmetric funding: sym1 gets 0.05 per bar, creating non-zero CS mean before demean
+    funding_2d = np.array([[0.0, 0.05], [0.0, 0.05], [0.0, 0.05], [0.0, 0.05]])
+
+    aligned = AlignedMarketData(
+        datetimes=dt,
+        symbols=("BTCUSDT", "ETHUSDT"),
+        open_2d=open_2d,
+        high_2d=close_2d + 1.0,
+        low_2d=close_2d - 1.0,
+        close_2d=close_2d,
+        volume_2d=np.full((4, 2), 1000.0, dtype=np.float64),
+        funding_2d=funding_2d,
+        active_mask=np.ones((4, 2), dtype=bool),
+        warm_mask=np.ones((4, 2), dtype=bool),
+        entry_block_mask=np.zeros((4, 2), dtype=bool),
+        kill_mask=np.zeros((4, 2), dtype=bool),
+    )
+
+    panel = build_label_panel(
+        aligned,
+        StrategyMLConfig(label_horizon_bars=1, fee_bps=0.0, slippage_bps=0.0, min_group_size=2),
+    )
+
+    # exec_net_ret: at least one valid timestep must have |CS-mean| > tolerance
+    # (pre-CS-demean, so asymmetric funding creates non-zero mean)
+    exec_non_zero_mean_found = False
+    for t in range(panel.exec_net_ret.shape[0]):
+        mask_t = np.isfinite(panel.exec_net_ret[t]) & panel.eligible_mask[t]
+        if int(mask_t.sum()) < 2:
+            continue
+        cs_mean_exec = float(np.mean(panel.exec_net_ret[t, mask_t]))
+        if abs(cs_mean_exec) > 1e-6:
+            exec_non_zero_mean_found = True
+            break
+    assert exec_non_zero_mean_found, (
+        "exec_net_ret should retain pre-CS-demean absolute values: "
+        "no timestep found with |CS-mean| > 1e-6"
+    )
+
+    # signed_net_ret: CS-mean must be ≈ 0 for every valid timestep (CS-demeaned)
+    for t in range(panel.signed_net_ret.shape[0]):
+        mask_t = np.isfinite(panel.signed_net_ret[t]) & panel.eligible_mask[t]
+        if int(mask_t.sum()) < 2:
+            continue
+        cs_mean_signed = float(np.mean(panel.signed_net_ret[t, mask_t]))
+        np.testing.assert_allclose(
+            cs_mean_signed,
+            0.0,
+            atol=1e-6,
+            err_msg=f"signed_net_ret CS-mean at t={t} should be ≈ 0 after CS-demean",
+        )
+
+
+def test_build_label_panel_exec_net_ret_differs_from_signed_net_ret() -> None:
+    """Track 2: exec_net_ret and signed_net_ret must differ when funding is asymmetric."""
+    dt = np.array(
+        [np.datetime64("2026-01-01") + np.timedelta64(4 * i, "h") for i in range(4)],
+        dtype="datetime64[ns]",
+    )
+    open_2d = np.array([[100.0, 200.0], [110.0, 210.0], [120.0, 220.0], [130.0, 230.0]])
+    close_2d = np.array([[101.0, 201.0], [121.0, 221.0], [132.0, 232.0], [143.0, 243.0]])
+    funding_2d = np.array([[0.0, 0.05], [0.0, 0.05], [0.0, 0.05], [0.0, 0.05]])
+
+    aligned = AlignedMarketData(
+        datetimes=dt,
+        symbols=("BTCUSDT", "ETHUSDT"),
+        open_2d=open_2d,
+        high_2d=close_2d + 1.0,
+        low_2d=close_2d - 1.0,
+        close_2d=close_2d,
+        volume_2d=np.full((4, 2), 1000.0, dtype=np.float64),
+        funding_2d=funding_2d,
+        active_mask=np.ones((4, 2), dtype=bool),
+        warm_mask=np.ones((4, 2), dtype=bool),
+        entry_block_mask=np.zeros((4, 2), dtype=bool),
+        kill_mask=np.zeros((4, 2), dtype=bool),
+    )
+
+    panel = build_label_panel(
+        aligned,
+        StrategyMLConfig(label_horizon_bars=1, fee_bps=0.0, slippage_bps=0.0, min_group_size=2),
+    )
+
+    # With asymmetric funding, CS-demean shifts values — exec_net_ret != signed_net_ret
+    valid_mask = np.isfinite(panel.exec_net_ret) & panel.eligible_mask
+    assert np.any(valid_mask), "no valid cells found"
+    assert not np.allclose(
+        panel.exec_net_ret[valid_mask],
+        panel.signed_net_ret[valid_mask],
+        atol=1e-7,
+    ), "exec_net_ret must differ from signed_net_ret when CS-demean has non-zero effect"
+
+
 def test_build_label_panel_applies_ev_scaled_sample_weight() -> None:
     aligned = _aligned_for_labels()
     panel = build_label_panel(
