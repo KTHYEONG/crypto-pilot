@@ -811,7 +811,7 @@ def _merge_importances(parts: list[dict[str, float]]) -> dict[str, float]:
 
 def _best_completed_by_value(study: optuna.Study, top_k: int) -> list[FrozenTrial]:
     trials = [t for t in _completed_trials(study) if t.value is not None]
-    trials.sort(key=lambda t: float(t.value), reverse=True)
+    trials.sort(key=lambda t: float(t.value if t.value is not None else -1e9), reverse=True)
     return trials[:top_k]
 
 
@@ -1458,4 +1458,3 @@ def run_phased_optimization_skeleton(
 
 # Break circularity by importing run_optimization_loop at the very end
 from src.domain.futures.optimization.observability.run_tracker import run_optimization_loop
-

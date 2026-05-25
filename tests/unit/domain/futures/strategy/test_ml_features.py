@@ -67,3 +67,29 @@ def test_build_feature_panel_market_stats_use_finite_fallback_on_warmup_rows() -
     disp_idx = panel.feature_names.index("market_dispersion_6")
     np.testing.assert_allclose(panel.values[:, :, median_idx], 0.0)
     np.testing.assert_allclose(panel.values[:, :, disp_idx], 0.0)
+
+
+def test_build_feature_panel_supports_group_ablation_toggle() -> None:
+    close = np.array([[100.0, 100.0], [101.0, 101.0], [102.0, 102.0], [103.0, 103.0]])
+    cfg = StrategyMLConfig(
+        min_group_size=2,
+        feature_groups_enabled=("trend", "missingness"),
+    )
+    panel = build_feature_panel(_aligned(close), cfg)
+    assert "ret_1" in panel.feature_names
+    assert "rv_6" not in panel.feature_names
+    assert "funding_missing_ind" in panel.feature_names
+
+
+def test_build_feature_panel_relaxes_all_finite_valid_mask() -> None:
+    close = np.array([[100.0, 100.0], [101.0, 101.0], [102.0, 102.0], [103.0, 103.0]])
+    aligned = _aligned(close)
+    aligned = replace(
+        aligned,
+        funding_2d=np.array(
+            [[0.0, 0.0], [np.nan, 0.0], [0.0, 0.0], [0.0, 0.0]],
+            dtype=np.float64,
+        ),
+    )
+    panel = build_feature_panel(aligned, StrategyMLConfig(min_group_size=2))
+    assert panel.valid_mask[1, 0]

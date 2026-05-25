@@ -563,3 +563,141 @@ def test_build_ml_strategy_alpha_virtual_refit_uses_own_train_normalization(
     assert captured_split_marker[(1, "train")] == 1.5
     assert captured_split_marker[(1, "valid")] == 1.5
     assert captured_split_marker[(1, "test")] == 1.5
+
+
+def test_build_ml_strategy_alpha_selects_best_horizon_and_records_metadata(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    datetimes = np.array(
+        [
+            np.datetime64("2024-01-01T00:00:00"),
+            np.datetime64("2024-01-01T04:00:00"),
+            np.datetime64("2024-01-01T08:00:00"),
+        ],
+        dtype="datetime64[ns]",
+    )
+    symbols = ("BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT")
+    feature_names = ("f0", "f1")
+    fp = FeaturePanel(
+        datetimes=datetimes,
+        symbols=symbols,
+        values=np.ones((3, 5, 2), dtype=np.float32),
+        feature_names=feature_names,
+        valid_mask=np.ones((3, 5), dtype=bool),
+    )
+    lp = LabelPanel(
+        long_net_ret=np.zeros((3, 5), dtype=np.float32),
+        short_net_ret=np.zeros((3, 5), dtype=np.float32),
+        signed_net_ret=np.zeros((3, 5), dtype=np.float32),
+        exec_net_ret=np.zeros((3, 5), dtype=np.float32),
+        relevance=np.full((3, 5), 2, dtype=np.int32),
+        sample_weight=np.ones((3, 5), dtype=np.float32),
+        eligible_mask=np.ones((3, 5), dtype=bool),
+    )
+    ds = _dataset(
+        x=np.ones((10, 2), dtype=np.float32),
+        group=np.array([5, 5], dtype=np.int32),
+        index_map=np.array([[2, i % 5] for i in range(10)], dtype=np.int64),
+        feature_names=feature_names,
+    )
+    fold = FoldSpec(
+        fold_id=0,
+        train_start=0,
+        train_end=1,
+        valid_start=1,
+        valid_end=2,
+        test_start=2,
+        test_end=3,
+        purge_bars=1,
+        embargo_bars=1,
+    )
+    state: dict[str, int] = {"horizon": 0}
+
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.ml_builder.align_data_maps",
+        lambda data_maps, symbols, tf: SimpleNamespace(symbols=list(symbols)),
+    )
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.ml_builder.build_feature_panel",
+        lambda *_: fp,
+    )
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.ml_builder.build_label_panel",
+        lambda aligned, ml_cfg: (
+            state.__setitem__("horizon", int(ml_cfg.label_horizon_bars)) or lp
+        ),
+    )
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.ml_builder.make_walk_forward_folds",
+        lambda *_: [fold],
+    )
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.ml_builder.build_long_matrix",
+        lambda **_: ds,
+    )
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.ml_builder.fit_ranker",
+        lambda **_: SimpleNamespace(model=object()),
+    )
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.ml_builder.predict_rank_score",
+        lambda _model, ds: np.zeros(ds.X.shape[0], dtype=np.float32),
+    )
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.ml_builder.fit_quantile_calibrators",
+        lambda **_: SimpleNamespace(),
+    )
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.ml_builder.predict_conservative_ev",
+        lambda *_: np.asarray(
+            [1e-3 if i % 2 == 0 else -1e-3 for i in range(ds.X.shape[0])],
+            dtype=np.float32,
+        ),
+    )
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.ml_builder.build_quality_report",
+        lambda **_: {
+            "feature_finite_ratio": 1.0,
+            "label_valid_ratio": 1.0,
+            "ranker_valid_ndcg_at_5": 1.0,
+            "spearman_rank_ic": 0.1,
+            "ic_icir": 0.1,
+            "ic_t_stat": 2.5,
+            "ic_hit_ratio": 0.5,
+            "ic_n_obs": 1,
+            "alpha_p95_bps": 40.0 if state["horizon"] == 12 else 28.0,
+        },
+    )
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.ml_builder.passes_quality_gate",
+        lambda *_: True,
+    )
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.ml_builder.ml_alpha_metrics",
+        lambda *_: {
+            "long_nz": 1.0,
+            "short_nz": 1.0,
+            "long_p95_bps": 10.0,
+            "short_p95_bps": 10.0,
+        },
+    )
+    monkeypatch.setattr(
+        "src.domain.futures.strategy.ml_builder.passes_ic_gate",
+        lambda *args, **kwargs: True,
+    )
+
+    cfg = StrategyConfig(
+        name="ml_lambdamart_v1",
+        ml=StrategyMLConfig(
+            min_group_size=2,
+            train_months=1,
+            valid_months=1,
+            test_months=1,
+            horizon_experiment_enabled=True,
+            horizon_candidates=(6, 12),
+        ),
+    )
+    panel = build_ml_strategy_alpha(data_maps={}, symbols=list(symbols), tf="4h", cfg=cfg)
+    assert panel.attrs["selected_horizon"] == 12
+    assert len(panel.attrs["horizon_experiment"]) == 2
+    assert panel.attrs["baseline_harness"]["mode"] == "horizon_experiment"
