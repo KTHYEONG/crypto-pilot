@@ -27,7 +27,7 @@
 - **Verification Loop:** 
     - **Trigger:** Execute when a `.py` file is created or modified.
     - **Action:** Run `uv run ruff check` and `uv run mypy`. (Limit the modify-verify loop to a maximum of 3 iterations).
-    - **Test Scope:** Use `uv run pytest -k "keyword"` with the `--tb=short` option.
+    - **Test Scope:** Use `uv run pytest` to run tests and measure coverage, strictly following the directives in [.agents/rules/testing.md](file:///.agents/rules/testing.md). Use `uv run pytest -k "keyword"` with the `--tb=short` option for fast feedback during iterations.
 
 ## 5. Tech Stack & Standards (Python 3.11)
 - **Version:** Based on Python 3.11+. Actively utilize modern syntax (TaskGroup, `|` operator, `Self`, etc.).
