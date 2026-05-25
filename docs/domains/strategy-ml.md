@@ -13,7 +13,7 @@ change_triggers:
   - src/domain/futures/strategy/ranker.py
   - src/domain/futures/optimization/objectives.py
   - src/domain/futures/strategy/diagnostics.py
-last_verified: 2026-05-25 (Step1~9 implemented; model_family split, calibration v2, alpha gate diagnostics)
+last_verified: 2026-05-25 (EV gate placement fix: gated copy for output, ungated for quality metrics)
 ---
 
 # Binance Futures ML Strategy
@@ -56,6 +56,10 @@ last_verified: 2026-05-25 (Step1~9 implemented; model_family split, calibration 
 ### Must Not Do
 - **Portfolio Control:** ML이 target weight, order, leverage를 직접 계산 금지.
 - **Look-Ahead Leakage:** 미래 시점 데이터를 참조하여 Scaler/Imputer 피팅 금지.
+
+### Internal Naming Convention
+- 내부 로컬 변수명은 모델/알고리즘 고유명(`lgbm`, `ranker`, `calibrator`)보다 역할 중심 일반명(`model`, `fit_result`, `train_data`, `valid_data`, `score`, `estimate`, `lower/median/upper`)을 우선 사용한다.
+- 공개 API(함수명, 클래스명, dataclass public field, strategy id, CLI arg)는 backward compatibility를 위해 기존 명칭을 유지한다.
 
 ---
 
@@ -345,6 +349,36 @@ ev[i]            = q50[i] * (1.0 - penalty_term[i])
 - 기본 계약은 hard wall 유지: `alpha_gate_cost_wall_tolerance_bps=0.0`.
 - tolerance는 실험/디버그용 override이며 기본 동작을 완화하지 않는다.
   - 외부 API(`build_ml_strategy_alpha` 시그니처/반환 타입)는 변경하지 않는다.
+
+### 5.22 Step10 - LambdaMART Rank Extraction Path (2026-05-25)
+- `StrategyMLConfig.ranking_mode`는 `group_ndcg`(default)와 `pointwise`를 지원한다.
+- `ranker.py::fit_ranker()`는 `ranking_mode=group_ndcg`에서 `train.y_rank` relevance label과 `train.group`을 사용해 `lightgbm.LGBMRanker`를 학습한다.
+- validation 데이터가 존재하면 `eval_set` + `eval_group`을 함께 전달하고, metric은 `ndcg`, `eval_at=(3, 5)` 계약을 적용한다.
+- `pointwise` 모드에서는 기존 `model_family`(`lgbm_regression`, `lgbm_huber`)가 그대로 동작하며 backward compatibility를 유지한다.
+- long/short는 별도 rank target + magnitude target + cost-clearance gate를 거쳐 `alpha_long/alpha_short`를 독립 구성한다.
+- horizon candidate 선택 점수는 `in_fold_valid_alpha_p95_bps`(train/valid only) 기반으로 계산하며 test/OOS는 사용하지 않는다.
+
+### 5.23 Dual-Side Virtual OOS Fill Contract (2026-05-25)
+- virtual OOS fill은 마지막 fold 이후 커버되지 않는 live 구간을 채우기 위한 실제 OOS extension이다.
+- long/short를 각각 독립 경로로 계산한다: `v_train_long/v_valid_long/v_test_long`, `v_train_short/v_valid_short/v_test_short`.
+- 각 side마다 동일한 절차를 수행한다: feature normalizer fit → rank model fit → quantile calibrator fit → EV inference.
+- 결과는 `ev_long_grid`, `ev_short_grid`에 **직접** 누적한다 (signed `ev_grid`를 경유하지 않는다).
+- gate 로직은 regular fold와 동일하게 `cost_clearance_target_long` / `cost_clearance_target_short`를 사용한다.
+- Invariant: virtual fill 완료 후 `alpha_long_nz > 0 AND alpha_short_nz > 0`이 동시에 보장되어야 한다.
+
+### 5.24 Dynamic Cost Gate Contract (2026-05-25)
+- gate 판정식: `gate_margin_bps = side_ev_bps - (dynamic_cost_bps + hurdle_bps)`, `gate_margin_bps > 0`이면 통과.
+- 비용 입력 우선순위: 1. `execution_cost_bps_2d` (per-symbol, per-timestep) 2. `round_trip_cost_bps()` (global fallback).
+- `hurdle_bps`는 `OPT_FUTURES_CONFIG["FUTURES_DEFAULT_EV_HURDLE_BPS"]` (default 10bps)에서 읽는다.
+- long/short는 독립적으로 gate를 적용한다 (`cost_clearance_target_long`, `cost_clearance_target_short` 별도 계산).
+- `LabelPanel.metadata["execution_cost_bps_source"]`로 per_symbol/fallback_global 구분 로깅한다.
+
+### 5.25 group_ndcg → pointwise Auto-Fallback Contract (2026-05-25)
+- `ranking_mode = "group_ndcg"`가 default이며, group cardinality 부족 시 자동 pointwise 전환한다.
+- fallback 조건: `len(train.group) < _MIN_GROUPS_FOR_NDCG` (현재 5).
+- fallback 시 `WARNING [RANKER] group_ndcg fallback to pointwise: n_groups=X < min=5` 로깅 후 `lgbm_regression` objective를 사용한다.
+- `model_family == "lgbm_lambdarank"` + `force_pointwise=True` 조합에서도 regression으로 안전하게 fallback한다.
+- HMM은 core alpha path의 필수 구성요소가 아니며, `RegimeConfig.enabled=False`(default)로 비활성화 상태를 유지한다.
 
 ---
 

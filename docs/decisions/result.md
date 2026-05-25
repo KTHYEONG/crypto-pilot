@@ -11,7 +11,7 @@ related_paths:
   - src/domain/futures/optimization/objectives.py
   - src/domain/futures/strategy/labels.py
   - src/domain/futures/strategy_runtime/bridge.py
-last_verified: 2026-05-25 (Step1~9 + 300-trial strategy run completed)
+last_verified: 2026-05-25 (Refactor: EV gate placement fix + signal quality diagnosis)
 ---
 
 # Result Baseline
@@ -256,3 +256,51 @@ for t in range(t_len - horizon):
     - OOS `CAGR=-16.09%`, `Sortino=-1.21`, `MDD=14.73%`
     - `EV/Cost=1.92` (목표 미달), `PBO=50%` (과적합 위험 높음)
   - 결론: 실행 안정성은 회복됐지만, 알파 품질/포트폴리오 수익성 개선은 추가 사이클이 필요.
+
+---
+
+## 20. Refactor 버그픽스 + 신호 품질 진단 (2026-05-25)
+
+### 20.1 구현 완료 항목 (Step10~12: docs/tmp.md → strategy-ml.md §5.23~5.25)
+
+| 항목 | 내용 | 상태 |
+|------|------|------|
+| §5.23 Dual-Side Virtual OOS Fill | 단일경로 → 독립 long/short 경로 재구현, ev_long_grid/ev_short_grid에 직접 기록 | ✅ |
+| §5.24 Dynamic Cost Gate | labels: `cost_clearance = magnitude_bps - dynamic_cost` (hurdle 제거); ml_builder: EV gate = `ev_bps > (dynamic_cost + hurdle)` | ✅ |
+| §5.25 group_ndcg → pointwise fallback | `n_groups < 5` 시 pointwise 자동 전환, `_build_ranker_model(force_pointwise=True)` | ✅ |
+
+### 20.2 EV Gate Placement 버그픽스
+
+**원인:** EV gate가 `ev_long_grid`를 in-place로 0으로 만든 후 `build_quality_report`에 zeroed 값을 전달 → `alpha_p95_bps=0.00` 오진단.
+
+**수정:** gated 사본(`ev_long_gated`, `ev_short_gated`)을 별도로 생성해 panel output에 사용하고, `build_quality_report`엔 ungated 원본(`ev_long_grid`, `ev_short_grid`)을 전달.
+
+```
+# 수정 전 (버그)
+ev_long_grid = np.where(ev_long_grid > gate, ev_long_grid, 0.0)  # in-place zeroing
+quality_report = build_quality_report(..., alpha_long_2d=ev_long_grid)  # 이미 0
+→ alpha_p95_bps=0.00
+
+# 수정 후 (정상)
+ev_long_gated = np.where(ev_long_grid > gate, ev_long_grid, 0.0)  # 사본
+quality_report = build_quality_report(..., alpha_long_2d=ev_long_grid)  # ungated
+→ alpha_p95_bps=13.75 (실제 신호 강도 복원)
+```
+
+### 20.3 300-Trial 실행 차단 요인: 신호 강도 부족
+
+**smoke test 결과 (1회 실행):**
+- `alpha_p95_bps=13.75 bps` (ungated, 실제 신호 강도)
+- `floor_bps=24.00 bps` (round_trip=14 + hurdle=10)
+- `long_pass=0.0000` — EV gate(22bps) 통과 신호 사실상 없음
+- `xs_long_preservation=0.0000` — long 신호 전량 소멸
+
+**근본 원인:** 캘리브레이터 EV 출력 범위(p90≈0.55bps, p95≈13.75bps)가 EV gate 임계값(24bps)을 하회. 300-trial 최적화 모드(`--mode strategy`)는 `build_ml_strategy_alpha`의 RuntimeError를 stage1에서 raise하므로 Optuna phase에 진입 불가.
+
+**참고:** `--mode full`(레거시 금지)을 통한 Optuna 최적화는 `build_ml_strategy_alpha_anchored`(alpha gate 없음)를 사용하므로 별도 경로 필요.
+
+### 20.4 권고 사항
+
+1. **hurdle 조정**: `FUTURES_DEFAULT_EV_HURDLE_BPS` 10→3 bps → floor=17 bps → 일부 trial 통과 가능
+2. **tolerance 추가**: `alpha_gate_cost_wall_tolerance_bps=8.0` → effective floor=16 bps
+3. **label horizon 확장**: 6→12 bars → gross return 증가로 EV 절대량 향상 (§16.4 참조)

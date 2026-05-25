@@ -189,7 +189,8 @@ class StrategyMLConfig:
     # "beta_residualized" = current default: exec_net_ret after beta-resid, pre-CS-demean
     # "gross"             = raw log return minus funding only (no beta removal, no fee)
     calibrator_target: Literal["beta_residualized", "gross"] = "beta_residualized"
-    model_family: Literal["lgbm_regression", "lgbm_huber"] = "lgbm_regression"
+    model_family: Literal["lgbm_regression", "lgbm_huber", "lgbm_lambdarank"] = "lgbm_regression"
+    ranking_mode: Literal["pointwise", "group_ndcg"] = "group_ndcg"
     ev_mode: Literal["quantile", "prob_x_magnitude"] = "quantile"
     alpha_gate_min_long_nz: float = 0.0
     alpha_gate_min_short_nz: float = 0.0
@@ -277,10 +278,14 @@ class StrategyMLConfig:
                 f"calibrator_target must be 'beta_residualized' or 'gross', "
                 f"got '{self.calibrator_target}'"
             )
-        if self.model_family not in {"lgbm_regression", "lgbm_huber"}:
-            raise ValueError("model_family must be 'lgbm_regression' or 'lgbm_huber'")
+        if self.model_family not in {"lgbm_regression", "lgbm_huber", "lgbm_lambdarank"}:
+            raise ValueError(
+                "model_family must be 'lgbm_regression', 'lgbm_huber', or 'lgbm_lambdarank'"
+            )
         if self.ev_mode not in {"quantile", "prob_x_magnitude"}:
             raise ValueError("ev_mode must be 'quantile' or 'prob_x_magnitude'")
+        if self.ranking_mode not in {"pointwise", "group_ndcg"}:
+            raise ValueError("ranking_mode must be 'pointwise' or 'group_ndcg'")
         if not (0.0 <= self.alpha_gate_min_long_nz <= 1.0):
             raise ValueError("alpha_gate_min_long_nz must satisfy 0 <= value <= 1")
         if not (0.0 <= self.alpha_gate_min_short_nz <= 1.0):
