@@ -42,18 +42,18 @@ def test_fit_quantile_calibrators_and_predict_ev_clip() -> None:
     test = _dataset(rows=36, groups=4)
     cfg = StrategyMLConfig(calibrator_n_estimators=20, early_stopping_rounds=10, n_jobs=1)
 
-    rank_train = np.linspace(-1.0, 1.0, train.X.shape[0], dtype=np.float32)
-    rank_valid = np.linspace(-0.8, 0.8, valid.X.shape[0], dtype=np.float32)
-    rank_test = np.linspace(-0.5, 0.5, test.X.shape[0], dtype=np.float32)
+    score_train = np.linspace(-1.0, 1.0, train.X.shape[0], dtype=np.float32)
+    score_valid = np.linspace(-0.8, 0.8, valid.X.shape[0], dtype=np.float32)
+    score_test = np.linspace(-0.5, 0.5, test.X.shape[0], dtype=np.float32)
 
-    models = fit_quantile_calibrators(
+    fit_result = fit_quantile_calibrators(
         train=train,
         valid=valid,
-        rank_score_train=rank_train,
-        rank_score_valid=rank_valid,
+        rank_score_train=score_train,
+        rank_score_valid=score_valid,
         cfg=cfg,
     )
-    ev = predict_conservative_ev(models=models, dataset=test, rank_score=rank_test, cfg=cfg)
+    ev = predict_conservative_ev(models=fit_result, dataset=test, rank_score=score_test, cfg=cfg)
 
     clip = cfg.alpha_clip_bps / 10000.0
     assert ev.shape == (test.X.shape[0],)
@@ -67,13 +67,13 @@ def test_predict_conservative_ev_empty_returns_empty() -> None:
     valid = _dataset(rows=45, groups=5)
     cfg = StrategyMLConfig(calibrator_n_estimators=10, early_stopping_rounds=5, n_jobs=1)
 
-    rank_train = np.zeros((train.X.shape[0],), dtype=np.float32)
-    rank_valid = np.zeros((valid.X.shape[0],), dtype=np.float32)
-    models = fit_quantile_calibrators(
+    score_train = np.zeros((train.X.shape[0],), dtype=np.float32)
+    score_valid = np.zeros((valid.X.shape[0],), dtype=np.float32)
+    fit_result = fit_quantile_calibrators(
         train=train,
         valid=valid,
-        rank_score_train=rank_train,
-        rank_score_valid=rank_valid,
+        rank_score_train=score_train,
+        rank_score_valid=score_valid,
         cfg=cfg,
     )
 
@@ -87,7 +87,7 @@ def test_predict_conservative_ev_empty_returns_empty() -> None:
         feature_names=train.feature_names,
     )
     pred = predict_conservative_ev(
-        models=models,
+        models=fit_result,
         dataset=empty,
         rank_score=np.zeros((0,), dtype=np.float32),
         cfg=cfg,
@@ -101,10 +101,10 @@ def test_predict_ev_quantiles_and_compute_conservative_ev() -> None:
     valid = _dataset(rows=45, groups=5)
     test = _dataset(rows=36, groups=4)
     cfg = StrategyMLConfig(calibrator_n_estimators=10, early_stopping_rounds=5, n_jobs=1)
-    models = fit_quantile_calibrators(train=train, valid=valid, cfg=cfg)
-    rank_test = np.linspace(-0.5, 0.5, test.X.shape[0], dtype=np.float32)
+    fit_result = fit_quantile_calibrators(train=train, valid=valid, cfg=cfg)
+    score_test = np.linspace(-0.5, 0.5, test.X.shape[0], dtype=np.float32)
 
-    quantiles = predict_ev_quantiles(models=models, dataset=test, rank_score=rank_test)
+    quantiles = predict_ev_quantiles(models=fit_result, dataset=test, rank_score=score_test)
     ev = compute_conservative_ev(quantiles.q10, quantiles.q50, quantiles.q90, cfg)
 
     assert quantiles.q10.shape == (test.X.shape[0],)

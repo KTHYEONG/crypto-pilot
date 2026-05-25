@@ -69,6 +69,9 @@ def build_long_matrix(
     *,
     fold: FoldSpec | None = None,
     split: Literal["train", "valid", "test"] | None = None,
+    rank_target_override: np.ndarray | None = None,
+    relevance_override: np.ndarray | None = None,
+    ev_target_override: np.ndarray | None = None,
 ) -> LongMatrixDataset:
     """Flatten [T, N, F] tensors to LightGBM-ready matrix."""
     if fold is not None or split is not None:
@@ -112,15 +115,24 @@ def build_long_matrix(
             # fallback to exec_net_ret for backward compatibility.
             # signed_net_ret (CS-demeaned) is consumed only by ranker via _cs_demean in ranker.py.
             ev_source = (
+                ev_target_override
+                if ev_target_override is not None
+                else (
                 labels.magnitude_target
                 if labels.magnitude_target is not None
                 else labels.exec_net_ret
+                )
             )
             ev_val = np.float32(ev_source[t, col])
             w = np.float32(labels.sample_weight[t, col])
+            rank_source = relevance_override if relevance_override is not None else labels.relevance
+            if rank_target_override is not None:
+                rank_val = np.float32(rank_target_override[t, col])
+                rank_t.append(np.int32(4 if rank_val > 0.0 else 0))
+            else:
+                rank_t.append(np.int32(rank_source[t, col]))
 
             x_t.append(feat.astype(np.float32, copy=False))
-            rank_t.append(np.int32(labels.relevance[t, col]))
             ev_t.append(ev_val)
             w_t.append(w)
             i_t.append((t, int(col)))
