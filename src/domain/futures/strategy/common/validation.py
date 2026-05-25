@@ -27,6 +27,7 @@ def validate_label_panel(panel: LabelPanel, t: int, n: int) -> None:
         ("long_net_ret", panel.long_net_ret),
         ("short_net_ret", panel.short_net_ret),
         ("signed_net_ret", panel.signed_net_ret),
+        ("exec_net_ret", panel.exec_net_ret),
         ("relevance", panel.relevance),
         ("sample_weight", panel.sample_weight),
         ("eligible_mask", panel.eligible_mask),

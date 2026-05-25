@@ -26,6 +26,7 @@ class LabelPanel:
     long_net_ret: np.ndarray
     short_net_ret: np.ndarray
     signed_net_ret: np.ndarray
+    exec_net_ret: np.ndarray  # pre-CS-demean beta-residualized return; for calibrator absolute EV
     relevance: np.ndarray
     sample_weight: np.ndarray
     eligible_mask: np.ndarray

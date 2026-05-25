@@ -451,20 +451,28 @@ def build_ml_strategy_alpha(
         _floor_bps,
         str(_alpha_p95 >= _floor_bps),
     )
-    # B4: IC gate warning (enforced as warning; raise after B2 uplift confirmed)
-    if not passes_ic_gate(
+    # B4: IC gate — config-driven 임계값으로 통계적 유의성 검사
+    _ic_pass = passes_ic_gate(
         quality_report,
-        min_mean_ic=0.02,
-        min_t_stat=2.0,
-        min_hit_ratio=0.45,
-    ):
-        _logger.warning(
-            "[ML-IC-GATE] IC gate not satisfied: mean_ic=%.4f t_stat=%.2f hit_ratio=%.3f — "
-            "proceeding with warning (gate enforced after B2 uplift confirmed)",
-            quality_report.get("spearman_rank_ic", 0.0),
-            quality_report.get("ic_t_stat", 0.0),
-            quality_report.get("ic_hit_ratio", 0.0),
-        )
+        min_mean_ic=ml_cfg.ic_gate_min_mean_ic,
+        min_t_stat=ml_cfg.ic_gate_min_t_stat,
+        min_hit_ratio=ml_cfg.ic_gate_min_hit_ratio,
+    )
+    if not _ic_pass:
+        if ml_cfg.ic_gate_warn_only:
+            _logger.warning(
+                "[ML-IC-GATE] IC gate WARN: mean_ic=%.4f t_stat=%.2f hit_ratio=%.3f",
+                quality_report.get("spearman_rank_ic", 0.0),
+                quality_report.get("ic_t_stat", 0.0),
+                quality_report.get("ic_hit_ratio", 0.0),
+            )
+        else:
+            raise RuntimeError(
+                f"[ML-IC-GATE] IC gate failed: mean_ic="
+                f"{quality_report.get('spearman_rank_ic', 0.0):.4f} "
+                f"t_stat={quality_report.get('ic_t_stat', 0.0):.2f} "
+                f"hit_ratio={quality_report.get('ic_hit_ratio', 0.0):.3f}"
+            )
     return panel
 
 
