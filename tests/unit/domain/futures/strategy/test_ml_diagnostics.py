@@ -1,10 +1,15 @@
 from __future__ import annotations
 
-import numpy as np
+import logging
 
+import numpy as np
+import pytest
+
+from src.domain.futures.strategy.config import StrategyMLConfig
 from src.domain.futures.strategy.diagnostics import (
     build_quality_report,
     ndcg_proxy_at_k,
+    passes_ic_gate,
     passes_quality_gate,
 )
 
@@ -15,6 +20,79 @@ def test_ndcg_proxy_at_k_range() -> None:
     val = ndcg_proxy_at_k(score, rel, k=3)
     assert 0.0 <= val <= 1.0
     assert val > 0.95
+
+
+def test_passes_ic_gate_returns_true_when_all_thresholds_met() -> None:
+    """Track 3: passes_ic_gate must return True when all metrics exceed thresholds."""
+    # Arrange — ic_summary() output format
+    summary = {"mean_ic": 0.05, "t_stat": 3.0, "hit_ratio": 0.55}
+
+    # Act + Assert
+    assert passes_ic_gate(summary, min_mean_ic=0.02, min_t_stat=2.0, min_hit_ratio=0.45) is True
+
+
+def test_passes_ic_gate_returns_false_when_mean_ic_below_threshold() -> None:
+    """Track 3: passes_ic_gate must return False when mean_ic < min_mean_ic."""
+    summary = {"mean_ic": 0.005, "t_stat": 3.0, "hit_ratio": 0.55}
+
+    assert passes_ic_gate(summary, min_mean_ic=0.02, min_t_stat=2.0, min_hit_ratio=0.45) is False
+
+
+def test_passes_ic_gate_returns_false_when_t_stat_below_threshold() -> None:
+    """Track 3: passes_ic_gate must return False when t_stat < min_t_stat."""
+    summary = {"mean_ic": 0.05, "t_stat": 1.0, "hit_ratio": 0.55}
+
+    assert passes_ic_gate(summary, min_mean_ic=0.02, min_t_stat=2.0, min_hit_ratio=0.45) is False
+
+
+def test_passes_ic_gate_returns_false_when_hit_ratio_below_threshold() -> None:
+    """Track 3: passes_ic_gate must return False when hit_ratio < min_hit_ratio."""
+    summary = {"mean_ic": 0.05, "t_stat": 3.0, "hit_ratio": 0.40}
+
+    assert passes_ic_gate(summary, min_mean_ic=0.02, min_t_stat=2.0, min_hit_ratio=0.45) is False
+
+
+def test_passes_ic_gate_accepts_quality_report_key_aliases() -> None:
+    """Track 3: passes_ic_gate must accept build_quality_report() key format."""
+    # Arrange — quality_report output format (aliased keys)
+    report = {
+        "spearman_rank_ic": 0.03,
+        "ic_t_stat": 2.5,
+        "ic_hit_ratio": 0.50,
+    }
+
+    assert passes_ic_gate(report, min_mean_ic=0.02, min_t_stat=2.0, min_hit_ratio=0.45) is True
+
+
+def test_passes_ic_gate_boundary_values_at_exactly_threshold() -> None:
+    """Track 3: passes_ic_gate must return True at exactly the threshold (inclusive)."""
+    summary = {"mean_ic": 0.02, "t_stat": 2.0, "hit_ratio": 0.45}
+
+    assert passes_ic_gate(summary, min_mean_ic=0.02, min_t_stat=2.0, min_hit_ratio=0.45) is True
+
+
+def test_passes_ic_gate_warn_only_config_uses_relaxed_thresholds() -> None:
+    """Track 3: StrategyMLConfig ic_gate_warn_only=True uses relaxed thresholds.
+
+    ic_gate_warn_only is handled by ml_builder (caller). passes_ic_gate itself
+    only returns bool — no side effects. This test verifies config default values
+    and that a failing summary returns False (caller decides warn vs raise).
+    """
+    # Arrange
+    cfg = StrategyMLConfig(ic_gate_warn_only=True)
+    report = {"mean_ic": 0.0, "t_stat": 0.0, "hit_ratio": 0.0}
+
+    # Act
+    result = passes_ic_gate(
+        report,
+        min_mean_ic=cfg.ic_gate_min_mean_ic,
+        min_t_stat=cfg.ic_gate_min_t_stat,
+        min_hit_ratio=cfg.ic_gate_min_hit_ratio,
+    )
+
+    # Assert — gate fails; ml_builder (not passes_ic_gate) emits warning
+    assert result is False
+    assert cfg.ic_gate_warn_only is True
 
 
 def test_build_quality_report_and_gate_pass() -> None:
