@@ -62,7 +62,7 @@ class TestQuantization:
         assert result[0] > 0.0, f"notional=200 → 통과 ({result[0]})"
 
     def test_aum_10k_btc_passes_min_notional(self) -> None:
-        """AUM 10k, price=50000 USDT, step_size=0.001, w=0.02
+        """AUM 10k, price=50000 USDT, step_size=0.001, w=0.02.
 
         qty = floor(0.02*10000/50000 / 0.001) * 0.001
             = floor(0.004 / 0.001) * 0.001 = 4 * 0.001 = 0.004

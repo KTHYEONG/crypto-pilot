@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import cast
 
 import numpy as np
 import pytest
@@ -68,34 +67,31 @@ def _run(
     dd_thr: float = 0.0,
 ) -> tuple[np.ndarray, float, np.ndarray, np.ndarray]:
     """backtest_target_weights_numba 호출 래퍼."""
-    return cast(
-        tuple[np.ndarray, float, np.ndarray, np.ndarray],
-        backtest_target_weights_numba(
-            d["close"],
-            d["high"],
-            d["low"],
-            d["open"],
-            d["funding"],
-            d["kill"],
-            weights,
-            init_bal,
-            d["lev"],
-            0.0002,  # maker_fee (unused)
-            taker_fee,
-            slip,
-            rb,
-            max_hold,
-            0.0,   # short_borrow_daily
-            4.0,   # bar_hours (4h bar 기준; short_borrow_daily=0.0이므로 결과 무관)
-            d["atr"],
-            atr_mult,
-            trail_mult,
-            use_simple_atr,
-            max_conc,
-            max_exp,
-            max_exp_coin,
-            dd_thr,
-        ),
+    return backtest_target_weights_numba(
+        d["close"],
+        d["high"],
+        d["low"],
+        d["open"],
+        d["funding"],
+        d["kill"],
+        weights,
+        init_bal,
+        d["lev"],
+        0.0002,  # maker_fee (unused)
+        taker_fee,
+        slip,
+        rb,
+        max_hold,
+        0.0,  # short_borrow_daily
+        4.0,  # bar_hours (4h bar 기준; short_borrow_daily=0.0이므로 결과 무관)
+        d["atr"],
+        atr_mult,
+        trail_mult,
+        use_simple_atr,
+        max_conc,
+        max_exp,
+        max_exp_coin,
+        dd_thr,
     )
 
 
@@ -127,9 +123,7 @@ class TestExposureCap:
         weights = np.zeros((n_bars, n_syms), dtype=np.float64)
         weights[1:, :] = 0.30  # bar 1부터 전체 0.30
 
-        trades, _, _, _ = _run(
-            d, weights, max_exp=0.80, max_conc=100, rb=1, init_bal=10_000.0
-        )
+        trades, _, _, _ = _run(d, weights, max_exp=0.80, max_conc=100, rb=1, init_bal=10_000.0)
 
         # bar 1(i=1) 진입 trades 필터
         bar1_trades = trades[trades[:, 1] == 1]
@@ -175,12 +169,10 @@ class TestExposureCap:
 
         # atr_mult=999 → stop_p 매우 낮아 stop 미발동
         trades_dd, _, _, _ = _run(
-            d, weights, dd_thr=0.15, atr_mult=999.0, rb=1,
-            max_exp=10.0, max_exp_coin=100.0
+            d, weights, dd_thr=0.15, atr_mult=999.0, rb=1, max_exp=10.0, max_exp_coin=100.0
         )
         trades_no_dd, _, _, _ = _run(
-            d, weights, dd_thr=0.0, atr_mult=999.0, rb=1,
-            max_exp=10.0, max_exp_coin=100.0
+            d, weights, dd_thr=0.0, atr_mult=999.0, rb=1, max_exp=10.0, max_exp_coin=100.0
         )
 
         # bar 10에서 진입한 trades 비교
@@ -228,8 +220,7 @@ class TestLiquidation:
         weights[4, 0] = 0.90  # 유지 설정 (stop 발동 방지용 atr_mult=999)
 
         trades, final_balance, equity_curve, _ = _run(
-            d, weights, rb=3, init_bal=1_000.0, atr_mult=999.0,
-            max_exp=10.0, max_exp_coin=100.0
+            d, weights, rb=3, init_bal=1_000.0, atr_mult=999.0, max_exp=10.0, max_exp_coin=100.0
         )
 
         assert final_balance >= 0.0
@@ -329,8 +320,14 @@ class TestFeesSlippage:
         # bar 2: weight=0 → 청산
 
         trades, final_balance, _, _ = _run(
-            d, weights, taker_fee=fee, slip=slip, rb=1,
-            max_exp=10.0, max_exp_coin=100.0, init_bal=10_000.0
+            d,
+            weights,
+            taker_fee=fee,
+            slip=slip,
+            rb=1,
+            max_exp=10.0,
+            max_exp_coin=100.0,
+            init_bal=10_000.0,
         )
 
         assert len(trades) >= 1
@@ -361,8 +358,14 @@ class TestFeesSlippage:
         weights[2, 0] = 0.30  # bar 2: 절반 축소 (재진입)
 
         trades, final_balance, _, _ = _run(
-            d, weights, taker_fee=0.0005, slip=0.0002, rb=1,
-            max_exp=10.0, max_exp_coin=100.0, init_bal=10_000.0
+            d,
+            weights,
+            taker_fee=0.0005,
+            slip=0.0002,
+            rb=1,
+            max_exp=10.0,
+            max_exp_coin=100.0,
+            init_bal=10_000.0,
         )
 
         # 수수료가 차감되어 final_balance < initial_balance
@@ -407,16 +410,22 @@ class TestPriceGaps:
         weights[5, 0] = 0.30
 
         trades, _, _, _ = _run(
-            d, weights, rb=3, slip=slip, atr_mult=atr_mult_val,
-            use_simple_atr=1, max_exp=10.0, max_exp_coin=100.0
+            d,
+            weights,
+            rb=3,
+            slip=slip,
+            atr_mult=atr_mult_val,
+            use_simple_atr=1,
+            max_exp=10.0,
+            max_exp_coin=100.0,
         )
 
         assert len(trades) >= 1
         t = trades[0]
         expected_fill = fill_p
         expected_exit = gap_open * (1.0 - slip)
-        assert t[4] == pytest.approx(expected_fill, abs=1e-3)   # entry_price
-        assert t[5] == pytest.approx(expected_exit, abs=1e-4)   # exit_price
+        assert t[4] == pytest.approx(expected_fill, abs=1e-3)  # entry_price
+        assert t[5] == pytest.approx(expected_exit, abs=1e-4)  # exit_price
 
     def test_gap_up_stop_short(self) -> None:
         """Short: 갭 상향으로 stop 발동, exit = open*(1+slip)."""
@@ -442,8 +451,14 @@ class TestPriceGaps:
         weights[5, 0] = -0.30
 
         trades, _, _, _ = _run(
-            d, weights, rb=3, slip=slip, atr_mult=atr_mult_val,
-            use_simple_atr=1, max_exp=10.0, max_exp_coin=100.0
+            d,
+            weights,
+            rb=3,
+            slip=slip,
+            atr_mult=atr_mult_val,
+            use_simple_atr=1,
+            max_exp=10.0,
+            max_exp_coin=100.0,
         )
 
         assert len(trades) >= 1
@@ -477,9 +492,15 @@ class TestFundingRate:
             weights[i, 0] = 0.30  # weight 일정 유지 → 포지션 유지 (need_exit=False)
 
         trades, final_balance, _, _ = _run(
-            d, weights, rb=1, taker_fee=fee, slip=slip,
-            max_exp=10.0, max_exp_coin=100.0, init_bal=10_000.0,
-            atr_mult=999.0  # stop 미발동
+            d,
+            weights,
+            rb=1,
+            taker_fee=fee,
+            slip=slip,
+            max_exp=10.0,
+            max_exp_coin=100.0,
+            init_bal=10_000.0,
+            atr_mult=999.0,  # stop 미발동
         )
 
         assert len(trades) >= 1
@@ -516,14 +537,26 @@ class TestFundingRate:
         d_neg = _make_data(n_bars, n_syms, price=price, atr=5.0, funding=-0.0001)
 
         trades_pos, final_pos, _, _ = _run(
-            d_pos, weights, rb=1, taker_fee=fee, slip=slip,
-            max_exp=10.0, max_exp_coin=100.0, init_bal=10_000.0,
-            atr_mult=999.0
+            d_pos,
+            weights,
+            rb=1,
+            taker_fee=fee,
+            slip=slip,
+            max_exp=10.0,
+            max_exp_coin=100.0,
+            init_bal=10_000.0,
+            atr_mult=999.0,
         )
         trades_neg, final_neg, _, _ = _run(
-            d_neg, weights, rb=1, taker_fee=fee, slip=slip,
-            max_exp=10.0, max_exp_coin=100.0, init_bal=10_000.0,
-            atr_mult=999.0
+            d_neg,
+            weights,
+            rb=1,
+            taker_fee=fee,
+            slip=slip,
+            max_exp=10.0,
+            max_exp_coin=100.0,
+            init_bal=10_000.0,
+            atr_mult=999.0,
         )
 
         assert len(trades_pos) >= 1
@@ -593,8 +626,14 @@ class TestFundingRate:
         # i=4 리밸런싱에서 weight=0으로 청산
 
         _, final_balance, _, _ = _run(
-            d, weights, rb=2, taker_fee=fee, slip=slip,
-            max_exp=10.0, max_exp_coin=100.0, init_bal=10_000.0
+            d,
+            weights,
+            rb=2,
+            taker_fee=fee,
+            slip=slip,
+            max_exp=10.0,
+            max_exp_coin=100.0,
+            init_bal=10_000.0,
         )
 
         fill_p = price * (1.0 + slip)
@@ -633,9 +672,7 @@ class TestLookaheadBias:
         weights[1, 0] = 0.30  # bar 1 신호
         # bars 2-4: weight=0 → 청산
 
-        trades, _, _, _ = _run(
-            d, weights, rb=1, slip=slip, max_exp=10.0, max_exp_coin=100.0
-        )
+        trades, _, _, _ = _run(d, weights, rb=1, slip=slip, max_exp=10.0, max_exp_coin=100.0)
 
         assert len(trades) >= 1
         # entry는 bar 1의 open=100.0에서 발생해야 함
@@ -650,12 +687,10 @@ class TestLookaheadBias:
         d = _make_data(n_bars, n_syms, price=100.0, atr=5.0)
 
         weights = np.zeros((n_bars, n_syms), dtype=np.float64)
-        weights[1, 0] = 0.0   # bar 1: 신호 없음
+        weights[1, 0] = 0.0  # bar 1: 신호 없음
         weights[2, 0] = 0.30  # bar 2: 신호 발생
 
-        trades, _, _, _ = _run(
-            d, weights, rb=1, max_exp=10.0, max_exp_coin=100.0
-        )
+        trades, _, _, _ = _run(d, weights, rb=1, max_exp=10.0, max_exp_coin=100.0)
 
         bar1_entries = trades[trades[:, 1] == 1]
         bar2_entries = trades[trades[:, 1] == 2]
@@ -683,7 +718,7 @@ class TestLookaheadBias:
         d["atr"][2, 0] = 999.0
 
         fill_p = price * (1.0 + slip)  # 100.02
-        stop_p_val = fill_p - 0.1      # 99.92
+        stop_p_val = fill_p - 0.1  # 99.92
 
         # bar 3: open = fill_p - 0.15 = 99.87 < stop_p → gap-down
         gap_open = fill_p - 0.15
@@ -700,8 +735,14 @@ class TestLookaheadBias:
         weights[5, 0] = 0.30
 
         trades, _, _, _ = _run(
-            d, weights, rb=2, slip=slip, atr_mult=atr_mult_val,
-            use_simple_atr=1, max_exp=10.0, max_exp_coin=100.0
+            d,
+            weights,
+            rb=2,
+            slip=slip,
+            atr_mult=atr_mult_val,
+            use_simple_atr=1,
+            max_exp=10.0,
+            max_exp_coin=100.0,
         )
 
         assert len(trades) >= 1
@@ -725,17 +766,17 @@ class TestConservationOfMoney:
         d = _make_data(n_bars, n_syms, price=100.0, atr=5.0, funding=0.0)
 
         weights = np.zeros((n_bars, n_syms), dtype=np.float64)
-        weights[3, 0] = 0.30   # long
+        weights[3, 0] = 0.30  # long
         weights[3, 1] = -0.20  # short
-        weights[6, :] = 0.0    # 청산
+        weights[6, :] = 0.0  # 청산
 
         trades, final_balance, _, _ = _run(
             d, weights, rb=3, max_exp=10.0, max_exp_coin=100.0, init_bal=10_000.0
         )
 
         if len(trades) > 0:
-            net_pnl_total = float(trades[:, 6].sum())      # net_pnl (exit_fee 포함)
-            entry_fees_total = float(trades[:, 8].sum())   # entry_fee 합계
+            net_pnl_total = float(trades[:, 6].sum())  # net_pnl (exit_fee 포함)
+            entry_fees_total = float(trades[:, 8].sum())  # entry_fee 합계
             # final = initial - sum(entry_fee) + sum(net_pnl)
             expected = 10_000.0 - entry_fees_total + net_pnl_total
             assert final_balance == pytest.approx(expected, abs=1e-4)
@@ -870,9 +911,7 @@ class TestNanIsolation:
         weights[1, 0] = 0.30
         weights[1, 1] = 0.20
 
-        _, final_balance, equity_curve, _ = _run(
-            d, weights, max_exp=10.0, max_exp_coin=100.0
-        )
+        _, final_balance, equity_curve, _ = _run(d, weights, max_exp=10.0, max_exp_coin=100.0)
 
         assert np.isfinite(final_balance)
         assert not np.any(np.isnan(equity_curve))
@@ -887,9 +926,7 @@ class TestNanIsolation:
         for i in range(1, n_bars):
             weights[i, 0] = 0.30
 
-        _, final_balance, equity_curve, _ = _run(
-            d, weights, rb=1, max_exp=10.0, max_exp_coin=100.0
-        )
+        _, final_balance, equity_curve, _ = _run(d, weights, rb=1, max_exp=10.0, max_exp_coin=100.0)
 
         assert np.isfinite(final_balance)
         assert not np.any(np.isnan(equity_curve))
@@ -1022,8 +1059,7 @@ class TestKillSignalMaxHold:
             weights[i, 0] = 0.30  # weight 유지 → 리밸런싱에서 need_exit=False
 
         trades, _, _, _ = _run(
-            d, weights, rb=1, slip=slip, atr_mult=999.0,
-            max_exp=10.0, max_exp_coin=100.0
+            d, weights, rb=1, slip=slip, atr_mult=999.0, max_exp=10.0, max_exp_coin=100.0
         )
 
         assert len(trades) >= 1
@@ -1048,8 +1084,14 @@ class TestKillSignalMaxHold:
             weights[i, 0] = 0.30  # weight 유지
 
         trades, _, _, _ = _run(
-            d, weights, rb=1, max_hold=3, slip=slip, atr_mult=999.0,
-            max_exp=10.0, max_exp_coin=100.0
+            d,
+            weights,
+            rb=1,
+            max_hold=3,
+            slip=slip,
+            atr_mult=999.0,
+            max_exp=10.0,
+            max_exp_coin=100.0,
         )
 
         assert len(trades) >= 1

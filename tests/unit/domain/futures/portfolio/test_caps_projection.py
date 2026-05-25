@@ -49,9 +49,7 @@ class TestCapsProjection:
             sigma_port=sigma_port,
             bars_per_year=bars_per_year,
         )
-        assert abs(float(np.sum(w_proj))) <= 0.30 + 1e-6, (
-            f"net cap 초과: {np.sum(w_proj):.4f}"
-        )
+        assert abs(float(np.sum(w_proj))) <= 0.30 + 1e-6, f"net cap 초과: {np.sum(w_proj):.4f}"
 
     def test_beta_cap_enforced(self) -> None:
         """beta_exposure = 1.0 > 0.50 → 투영 후 |beta_exp| ≤ 0.50."""
@@ -68,9 +66,7 @@ class TestCapsProjection:
             bars_per_year=bars_per_year,
         )
         beta_exp = float(np.abs(np.dot(w_proj, btc_beta)))
-        assert beta_exp <= 0.50 + 1e-6, (
-            f"beta cap 초과: {beta_exp:.4f}"
-        )
+        assert beta_exp <= 0.50 + 1e-6, f"beta cap 초과: {beta_exp:.4f}"
 
     def test_per_symbol_cap_enforced(self) -> None:
         """w[0] = 0.4 > 0.10 → 투영 후 max|w_i| ≤ 0.10."""

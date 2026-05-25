@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -7,7 +8,18 @@ import optuna
 from optuna.trial import TrialState
 
 from src.application.futures.optimization import optimization_service
+from src.domain.futures.optimization.optimizer import MLPhaseDContext
 from src.domain.futures.optimization.workflow import PhaseBundle
+
+
+@dataclass
+class _StudyStub:
+    study_name: str = ""
+    trials: list[Any] = field(default_factory=list)
+
+    def get_trials(self, deepcopy: bool = False) -> list[Any]:
+        _ = deepcopy
+        return list(self.trials)
 
 
 def _build_request() -> optimization_service.OptimizationRequest:
@@ -33,8 +45,8 @@ def _build_request() -> optimization_service.OptimizationRequest:
 
 def _build_phase_bundle(study_b: Any) -> PhaseBundle:
     return PhaseBundle(
-        study_a1=cast(optuna.Study, object()),
-        study_a2=cast(optuna.Study, object()),
+        study_a1=cast(optuna.Study, _StudyStub()),
+        study_a2=cast(optuna.Study, _StudyStub()),
         study_b=cast(optuna.Study, study_b),
         study_names={"phase_a1": "a1", "phase_a2": "a2", "phase_b": "b"},
     )
@@ -92,9 +104,18 @@ def test_execute_phase_skeleton_wires_budget_and_workers(monkeypatch: Any) -> No
 
 
 def test_extract_best_trial_filters_complete_then_selects(monkeypatch: Any) -> None:
-    selected = SimpleNamespace(state=TrialState.COMPLETE, value=2.0, user_attrs={}, params={})
-    complete_other = SimpleNamespace(state=TrialState.COMPLETE, value=1.0, user_attrs={}, params={})
-    failed = SimpleNamespace(state=TrialState.FAIL, value=None, user_attrs={}, params={})
+    selected: optuna.trial.FrozenTrial = cast(
+        optuna.trial.FrozenTrial,
+        SimpleNamespace(state=TrialState.COMPLETE, value=2.0, user_attrs={}, params={}),
+    )
+    complete_other: optuna.trial.FrozenTrial = cast(
+        optuna.trial.FrozenTrial,
+        SimpleNamespace(state=TrialState.COMPLETE, value=1.0, user_attrs={}, params={}),
+    )
+    failed: optuna.trial.FrozenTrial = cast(
+        optuna.trial.FrozenTrial,
+        SimpleNamespace(state=TrialState.FAIL, value=None, user_attrs={}, params={}),
+    )
     captured: dict[str, Any] = {}
 
     class _Study:
@@ -122,10 +143,13 @@ def test_extract_best_trial_filters_complete_then_selects(monkeypatch: Any) -> N
 
 def test_run_optimization_orchestrates_service_contract(monkeypatch: Any) -> None:
     request = _build_request()
-    ctx = optimization_service.MLPhaseDContext(data_maps={}, symbols=[], tf="4h")
-    study_b = SimpleNamespace()
+    ctx = MLPhaseDContext(data_maps={}, symbols=[], tf="4h")
+    study_b: optuna.Study = cast(optuna.Study, _StudyStub())
     bundle = _build_phase_bundle(study_b=study_b)
-    best_trial = SimpleNamespace(state=TrialState.COMPLETE, value=1.0, user_attrs={}, params={})
+    best_trial: optuna.trial.FrozenTrial = cast(
+        optuna.trial.FrozenTrial,
+        SimpleNamespace(state=TrialState.COMPLETE, value=1.0, user_attrs={}, params={}),
+    )
 
     monkeypatch.setattr(optimization_service, "prepare_optimization_context", lambda _: ctx)
     monkeypatch.setattr(
@@ -146,7 +170,10 @@ def test_run_optimization_orchestrates_service_contract(monkeypatch: Any) -> Non
 def test_run_final_evaluation_wraps_domain_call(monkeypatch: Any) -> None:
     captured: dict[str, Any] = {}
     params_called: dict[str, Any] = {}
-    best_trial = SimpleNamespace(params={"K_LONG": 2}, user_attrs={})
+    best_trial: optuna.trial.FrozenTrial = cast(
+        optuna.trial.FrozenTrial,
+        SimpleNamespace(params={"K_LONG": 2}, user_attrs={}),
+    )
 
     def _fake_build(params: dict[str, Any], tf: str) -> dict[str, Any]:
         params_called["params"] = params
@@ -164,7 +191,7 @@ def test_run_final_evaluation_wraps_domain_call(monkeypatch: Any) -> None:
         project_root="/home/kth/my_coin_traider",
         study_ml=cast(optuna.Study, object()),
         run_id="run-1",
-        ml_ctx=optimization_service.MLPhaseDContext(data_maps={}, symbols=[], tf="4h"),
+        ml_ctx=MLPhaseDContext(data_maps={}, symbols=[], tf="4h"),
         n_ml_trials=9,
         target_seeds=[11],
         selected_ops_profile="active",
@@ -172,7 +199,7 @@ def test_run_final_evaluation_wraps_domain_call(monkeypatch: Any) -> None:
         dsr_gate=0.2,
         pbo_obs=0.1,
         dsr_obs=0.1,
-        best_trial=cast(optuna.trial.FrozenTrial, best_trial),
+        best_trial=best_trial,
         champ_stab_cv=0.0,
         stab_tmp_layer3_awf_fail=False,
         cv_max=0.3,

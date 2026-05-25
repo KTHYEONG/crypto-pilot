@@ -34,4 +34,3 @@ def test_long_matrix_group_sum_validation_fails() -> None:
     )
     with pytest.raises(ValueError, match="sum\\(group\\)"):
         validate_long_matrix(ds)
-

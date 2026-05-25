@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from typing import cast
+
 import numpy as np
+import optuna
 from optuna.distributions import FloatDistribution
 from optuna.trial import TrialState, create_trial
 
@@ -55,4 +58,4 @@ def test_trial_diag_sampled_policy() -> None:
     )
     assert _trial_diag_sampled(None, n_trades=0) is True
     assert _trial_diag_sampled(None, n_trades=1) is False
-    assert _trial_diag_sampled(tr, n_trades=1) is True
+    assert _trial_diag_sampled(cast(optuna.Trial, tr), n_trades=1) is True

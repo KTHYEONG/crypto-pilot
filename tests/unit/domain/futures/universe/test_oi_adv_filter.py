@@ -4,14 +4,18 @@
 테스트 2: 2020-08 이전 구간 → OI 필터 비활성 (빈 DataFrame 허용)
 테스트 3: fetch_metrics_bulk shape 검증 (mock HTTP)
 """
+
 from __future__ import annotations
 
-from datetime import date
-from unittest.mock import MagicMock, patch
+from datetime import UTC, datetime
+from unittest.mock import patch
 
 import pandas as pd
-import pytest
 
+from src.core.exchange.binance_vision import (
+    BinanceVisionDownloader,
+    fetch_metrics_bulk,
+)
 
 # ---------------------------------------------------------------------------
 # 테스트 1: OI/ADV > 12 → 심볼 제외
@@ -68,12 +72,10 @@ def test_oi_adv_ratio_under_threshold_passes() -> None:
 
 def test_fetch_metrics_bulk_returns_empty_before_2020_09() -> None:
     """2020-09-01 이전 구간 → 데이터 없음 → 빈 DataFrame."""
-    from src.core.exchange.binance_vision import fetch_metrics_bulk
-
     result = fetch_metrics_bulk(
         symbol="BTCUSDT",
-        start_date=date(2020, 1, 1),
-        end_date=date(2020, 8, 31),  # 전부 이전 구간
+        start_date=datetime(2020, 1, 1, tzinfo=UTC),
+        end_date=datetime(2020, 8, 31, tzinfo=UTC),  # 전부 이전 구간
     )
     assert isinstance(result, pd.DataFrame), "반환 타입은 pd.DataFrame이어야 함"
     assert result.empty, "2020-09-01 이전은 빈 DataFrame을 반환해야 함"
@@ -81,8 +83,6 @@ def test_fetch_metrics_bulk_returns_empty_before_2020_09() -> None:
 
 def test_fetch_metrics_bulk_adjusts_start_to_metrics_start() -> None:
     """start_date < 2020-09-01이지만 end_date >= 2020-09-01 → 2020-09-01부터 수집 시도."""
-    from src.core.exchange.binance_vision import fetch_metrics_bulk, BinanceVisionDownloader
-
     # HTTP 요청 mock — 1행짜리 DataFrame 반환
     mock_df = pd.DataFrame(
         {
@@ -95,8 +95,8 @@ def test_fetch_metrics_bulk_adjusts_start_to_metrics_start() -> None:
     with patch.object(BinanceVisionDownloader, "fetch_metrics_daily", return_value=mock_df):
         result = fetch_metrics_bulk(
             symbol="BTCUSDT",
-            start_date=date(2020, 7, 1),   # 이전 구간
-            end_date=date(2020, 9, 2),      # 2020-09-01 포함 → 2일치만 요청
+            start_date=datetime(2020, 7, 1, tzinfo=UTC),  # 이전 구간
+            end_date=datetime(2020, 9, 2, tzinfo=UTC),  # 2020-09-01 포함 → 2일치만 요청
         )
 
     # 비어 있지 않아야 함 (최소 1일치 mock 데이터)
@@ -111,8 +111,6 @@ def test_fetch_metrics_bulk_adjusts_start_to_metrics_start() -> None:
 
 def test_fetch_metrics_bulk_shape_with_mock_http() -> None:
     """HTTP mock으로 5일치 metrics 요청 → DataFrame row 수 확인."""
-    from src.core.exchange.binance_vision import fetch_metrics_bulk, BinanceVisionDownloader
-
     n_mock_days = 3
     mock_row = pd.DataFrame(
         {
@@ -133,13 +131,11 @@ def test_fetch_metrics_bulk_shape_with_mock_http() -> None:
     with patch.object(BinanceVisionDownloader, "fetch_metrics_daily", _mock_daily):
         result = fetch_metrics_bulk(
             symbol="ETHUSDT",
-            start_date=date(2020, 9, 1),
-            end_date=date(2020, 9, 3),   # 3일
+            start_date=datetime(2020, 9, 1, tzinfo=UTC),
+            end_date=datetime(2020, 9, 3, tzinfo=UTC),  # 3일
         )
 
     assert isinstance(result, pd.DataFrame)
     assert call_count == n_mock_days, f"예상 call_count={n_mock_days}, actual={call_count}"
-    assert len(result) == n_mock_days, (
-        f"예상 row 수={n_mock_days}, actual={len(result)}"
-    )
+    assert len(result) == n_mock_days, f"예상 row 수={n_mock_days}, actual={len(result)}"
     assert "sum_open_interest_value" in result.columns
