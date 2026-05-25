@@ -144,3 +144,32 @@ def test_build_long_matrix_drops_partial_group_after_feature_filter() -> None:
     ds = build_long_matrix(fp2, lp, start=0, end=1, min_group_size=3)
     assert ds.X.shape[0] == 0
     assert ds.group.shape[0] == 0
+
+
+def test_build_long_matrix_supports_side_specific_targets() -> None:
+    fp, lp = _panels(t=8, n=3, f=2)
+    long_ev = np.full((8, 3), 3e-3, dtype=np.float32)
+    short_ev = np.full((8, 3), 7e-3, dtype=np.float32)
+    rel_short = np.full((8, 3), 4, dtype=np.int32)
+
+    ds_long = build_long_matrix(
+        fp,
+        lp,
+        start=0,
+        end=2,
+        min_group_size=1,
+        ev_target_override=long_ev,
+    )
+    ds_short = build_long_matrix(
+        fp,
+        lp,
+        start=0,
+        end=2,
+        min_group_size=1,
+        relevance_override=rel_short,
+        ev_target_override=short_ev,
+    )
+
+    assert np.allclose(ds_long.y_ev, 3e-3)
+    assert np.allclose(ds_short.y_ev, 7e-3)
+    assert np.all(ds_short.y_rank == 4)
