@@ -33,11 +33,17 @@ def test_ml_config_rejects_invalid_ev_mode() -> None:
 def test_ml_config_accepts_model_family_default() -> None:
     cfg = StrategyMLConfig()
     assert cfg.model_family == "lgbm_regression"
+    assert cfg.ranking_mode == "group_ndcg"
 
 
 def test_ml_config_accepts_model_family_huber() -> None:
-    cfg = StrategyMLConfig(model_family="lgbm_huber")
+    cfg = StrategyMLConfig(model_family="lgbm_huber", ranking_mode="pointwise")
     assert cfg.model_family == "lgbm_huber"
+
+
+def test_ml_config_rejects_invalid_ranking_mode() -> None:
+    with pytest.raises(ValueError, match="ranking_mode"):
+        StrategyMLConfig(ranking_mode="invalid")  # type: ignore[arg-type]
 
 
 def test_ml_config_rejects_negative_alpha_gate_tolerance() -> None:

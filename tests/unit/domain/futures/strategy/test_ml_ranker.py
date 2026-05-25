@@ -33,14 +33,19 @@ def _dataset(rows: int, groups: int, features: int = 6) -> LongMatrixDataset:
 def test_fit_ranker_and_predict_rank_score() -> None:
     train = _dataset(rows=160, groups=20)
     valid = _dataset(rows=40, groups=5)
-    cfg = StrategyMLConfig(ranker_n_estimators=20, early_stopping_rounds=10, n_jobs=1)
+    cfg = StrategyMLConfig(
+        ranker_n_estimators=20,
+        early_stopping_rounds=10,
+        n_jobs=1,
+        ranking_mode="pointwise",
+    )
 
-    fit = fit_ranker(train=train, valid=valid, cfg=cfg)
-    pred = predict_rank_score(fit.model, valid)
+    fit_result = fit_ranker(train=train, valid=valid, cfg=cfg)
+    score = predict_rank_score(fit_result.model, valid)
 
-    assert pred.shape == (valid.X.shape[0],)
-    assert pred.dtype == np.float32
-    assert np.all(np.isfinite(pred))
+    assert score.shape == (valid.X.shape[0],)
+    assert score.dtype == np.float32
+    assert np.all(np.isfinite(score))
 
 
 def test_predict_rank_score_empty_dataset_returns_empty() -> None:
@@ -55,12 +60,17 @@ def test_predict_rank_score_empty_dataset_returns_empty() -> None:
         index_map=np.zeros((0, 2), dtype=np.int64),
         feature_names=train.feature_names,
     )
-    cfg = StrategyMLConfig(ranker_n_estimators=5, early_stopping_rounds=3, n_jobs=1)
+    cfg = StrategyMLConfig(
+        ranker_n_estimators=5,
+        early_stopping_rounds=3,
+        n_jobs=1,
+        ranking_mode="pointwise",
+    )
 
-    fit = fit_ranker(train=train, valid=valid, cfg=cfg)
-    pred = predict_rank_score(fit.model, empty)
+    fit_result = fit_ranker(train=train, valid=valid, cfg=cfg)
+    score = predict_rank_score(fit_result.model, empty)
 
-    assert pred.shape == (0,)
+    assert score.shape == (0,)
 
 
 def test_fit_ranker_uses_config_hyperparams(monkeypatch: MonkeyPatch) -> None:
@@ -87,6 +97,7 @@ def test_fit_ranker_uses_config_hyperparams(monkeypatch: MonkeyPatch) -> None:
         ranker_bagging_freq=3,
         ranker_lambda_l2=2.5,
         ranker_reg_alpha=0.9,
+        ranking_mode="pointwise",
     )
     fit_ranker(train=train, valid=valid, cfg=cfg)
 
@@ -115,7 +126,42 @@ def test_fit_ranker_uses_huber_family(monkeypatch: MonkeyPatch) -> None:
             return np.zeros((len(x),), dtype=np.float64)
 
     monkeypatch.setattr("src.domain.futures.strategy.ranker.lgb.LGBMRegressor", _FakeRegressor)
-    cfg = StrategyMLConfig(model_family="lgbm_huber")
+    cfg = StrategyMLConfig(model_family="lgbm_huber", ranking_mode="pointwise")
     fit_ranker(train=train, valid=valid, cfg=cfg)
 
     assert captured["objective"] == "huber"
+
+
+def test_fit_ranker_uses_lambdarank_group_and_relevance(monkeypatch: MonkeyPatch) -> None:
+    train = _dataset(rows=40, groups=5)
+    valid = _dataset(rows=16, groups=2)
+    captured_ctor: dict[str, object] = {}
+    captured_fit: dict[str, object] = {}
+
+    class _FakeRanker:
+        def __init__(self, **kwargs: object) -> None:
+            captured_ctor.update(kwargs)
+
+        def fit(self, *args: object, **kwargs: object) -> _FakeRanker:
+            captured_fit["args"] = args
+            captured_fit["kwargs"] = kwargs
+            return self
+
+        def predict(self, x: object) -> np.ndarray:
+            return np.linspace(0.0, 1.0, len(x), dtype=np.float64)
+
+    monkeypatch.setattr("src.domain.futures.strategy.ranker.lgb.LGBMRanker", _FakeRanker)
+    cfg = StrategyMLConfig(model_family="lgbm_lambdarank", ranking_mode="group_ndcg")
+    fit_result = fit_ranker(train=train, valid=valid, cfg=cfg)
+    score = predict_rank_score(fit_result.model, valid)
+
+    assert captured_ctor["objective"] == "lambdarank"
+    assert captured_ctor["metric"] == "ndcg"
+    assert np.array_equal(captured_fit["args"][1], train.y_rank)
+    fit_kwargs = captured_fit["kwargs"]
+    assert np.array_equal(fit_kwargs["group"], train.group)
+    assert np.array_equal(fit_kwargs["eval_group"][0], valid.group)
+    assert np.array_equal(fit_kwargs["eval_set"][0][1], valid.y_rank)
+    assert score.shape == (valid.X.shape[0],)
+    assert score.dtype == np.float32
+    assert np.all(np.isfinite(score))
