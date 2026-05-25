@@ -10,7 +10,7 @@ related_paths:
 change_triggers:
   - src/domain/futures/strategy/ml_builder.py
   - src/domain/futures/strategy/ranker.py
-last_verified: 2026-05-24
+last_verified: 2026-05-25
 ---
 
 # Binance Futures ML Strategy
@@ -46,7 +46,8 @@ last_verified: 2026-05-24
 
 ### Must Follow
 - **Alpha Supplier Only:** pure expected return alpha(Bps)만 산출할 것.
-- **Double-Weighting:** 실측 리턴 절대값에 비례하여 sample_weight 가중.
+- **Single-Order Weighting:** `labels.py`에서 1회만 가중치 계산 (`liq * (1+2|y_ev|)`). `dataset.py`에서 재곱 금지.
+- **Calibrator/Ranker 타깃 분리:** calibrator는 `exec_net_ret`(pre-CS-demean), ranker는 `signed_net_ret`(CS-demeaned) 사용.
 - **Dynamic Cost Barrier:** 거래 비용보다 작은 노이즈성 시그널은 `0.0`으로 소거.
 
 ### Must Not Do
@@ -63,16 +64,22 @@ last_verified: 2026-05-24
 - **Carry/Liquidity:** Funding Z-score, Volume Z-score, ADV Rank.
 - **CS-Sharpe (High-Performance):** 개별 변동성 대비 기대수익률 강도를 크로스섹션 랭크화 한 `cs_sharpe_6` 및 `cs_sharpe_18`.
 
-### 5.2 Double-Weighting System
+### 5.2 Single-Order Weighting (labels.py 1회 계산, dataset.py 재곱 금지)
 무작위 노이즈 신호 배제를 위해 리턴 절대값($|y_{ev}|$)에 비례하여 샘플 가중치를 동적으로 부여합니다.
+가중치는 `labels.py` 내에서 1회만 계산되며, `dataset.py`에서 재곱하지 않습니다.
 $$\text{sample\_weight} = \text{original\_weight} \times (1.0 + 2.0 \times |y_{ev}|)$$
 - `original_weight`: 유동성 기반 가중치 (`clip(log1p(volume), 0.25, 2.0)`).
-- `y_ev`: `signed_net_ret` (gross alpha 라벨; 비용 차감 없음, B1 유지).
+- `y_ev`: `signed_net_ret` (CS-demeaned beta-residualized return; 비용 차감 없음, B1 유지).
 - `eligible_mask=False` 구간은 `sample_weight=0.0`으로 유지.
+- **단일 적용 원칙:** `dataset.py`의 `build_long_matrix()`는 `labels.sample_weight`를 그대로 사용. `(1+2|y_ev|)` 재곱 금지.
 
-### 5.3 Quantile EV Calibration
+### 5.3 Quantile EV Calibration — Calibrator/Ranker 타깃 분리
 - **Quantile Loss:** `q10`, `q50`, `q90` 분위수 예측기를 동시 학습.
-- **Absolute EV Target:** calibrator는 `CS-demeaned` 타깃이 아닌 raw executable EV(`y_ev`)를 학습.
+- **Calibrator Label Target (`exec_net_ret`):** calibrator는 `exec_net_ret`(CS-demean 적용 전 beta-잔차화 수익률)을 타깃으로 학습.
+  CS-demean은 크로스섹션 평균을 0으로 소거하므로 absolute EV가 제거되어 24bps cost wall 통과 불가.
+  `exec_net_ret`는 demean 직전 `long_net.copy()`로 생성되며 절대 EV를 보존한다.
+- **Ranker Label Target (`signed_net_ret`):** ranker는 CS-demeaned `signed_net_ret`(= `long_net` after demean)을 사용.
+  `ranker.py` 내부에서 `_cs_demean(train.y_ev, ...)` 재적용하므로 상대 순위 학습에 문제 없음.
 - **Uncertainty Adjustment:** 예측 불확실성 폭($q_{90} - q_{10}$)에 따라 알파 강도를 조절하여 꼬리 위험 방어.
 
 **Conservative EV 수식 (`compute_conservative_ev`):**
@@ -114,8 +121,20 @@ ev[i]            = q50[i] * (1.0 - penalty_term[i])
   long_net[t,i] = gross_long[t,i] - beta[t,i] * market_fwd_ret[t] - cost - funding[t,i]
   short_net[t,i] = gross_short[t,i] + beta[t,i] * market_fwd_ret[t] - cost + funding[t,i]
   ```
-  
-**Benefit:** 시장 공통 인수를 제거하여 순수 특정 위험 알파만 모델에 노출, 신호 강도 향상
+
+- **CS-Demean (post-residualization, 2026-05-25):**
+  ```
+  # Vectorized [T-h, N] operation applied after main loop, before signed = long_net.copy()
+  row_mean = nanmean(long_net[t_valid, eligible], axis=1, keepdims=True)  # [T-h, 1]
+  long_net[t, mask]  -= row_mean   # zero-center long labels
+  short_net[t, mask] += row_mean   # restore anti-symmetry: short_net ≈ -long_net_demeaned
+  ```
+  OLS beta != 1 이거나 eligible 종목이 부분 집합일 때 (예: 비대칭 funding rate) 잔차화만으로는
+  시점별 CS 평균이 0을 보장하지 못한다. `long_net`과 `short_net` 모두 demean하여
+  `short_net ≈ -long_net` anti-symmetry 계약을 보존한다.
+  행당 eligible 종목이 <2인 경우 row_mean=0으로 처리(no-op).
+
+**Benefit:** 시장 공통 인수 제거 + CS 평균 소거로 순수 크로스섹션 알파만 모델에 노출, bull/bear 시장 편향 제거
 
 **Cost Contract:**
 - 라벨은 fee/slippage를 차감하지 않는다.
@@ -156,17 +175,19 @@ ev[i]            = q50[i] * (1.0 - penalty_term[i])
 - `xs_nz`: `xs_score_long/short` union 비영 비율
 - `trades/long/short`: 실제 백테스트 체결 결과 기반 카운트 (추정치 아님)
 
-### 5.7 B4 - IC Quality Gate
-신호 품질 게이트: `src/domain/futures/strategy/diagnostics.py` 함수 `passes_ic_gate()` 및 `ml_builder.py` 적용점
+### 5.7 B4 - IC Quality Gate (config-driven, 결선 완료)
+신호 품질 게이트: `src/domain/futures/strategy/diagnostics.py` 함수 `passes_ic_gate()` 및 `ml_builder.py` 결선.
 
-**Gate Thresholds (현재: Warning-Only, 향후 Exception 전환 예정):**
-- `mean_ic ≥ 0.02` (절대 신호 강도)
-- `t_stat ≥ 2.0` (통계적 유의성, p<0.05 equiv.)
-- `hit_ratio ≥ 0.45` (신호 방향성 일관성)
+**Gate Thresholds (`StrategyMLConfig` 기본값, 완화된 초기값):**
+- `ic_gate_min_mean_ic = 0.01` (B2 uplift 확인 후 0.02로 강화 예정)
+- `ic_gate_min_t_stat = 1.5` (B2 uplift 확인 후 2.0으로 강화 예정)
+- `ic_gate_min_hit_ratio = 0.45`
+- `ic_gate_warn_only = True` (True=경고만, False=RuntimeError)
 
 **Behavior:**
-- Gate 미만족 시 `[ML-IC-GATE] WARN: reason=...` 로그 출력 (현재 경고 수준)
-- 향후 Phase: EV_HURDLE 자동 상향 또는 모델 완전 차단으로 전환 가능
+- `ic_gate_warn_only=True`: Gate 미만족 시 `[ML-IC-GATE] WARN: ...` 로그 출력, 진행 계속
+- `ic_gate_warn_only=False`: Gate 미만족 시 `RuntimeError` 발생하여 파이프라인 차단
+- 동전던지기 모델(IC=0) 통과 방지: `passes_quality_gate`의 `spearman_rank_ic >= 0.0` 조건에 추가하여 이중 게이팅
 
 ### 5.8 EV Hurdle & OOS Trade Activation
 과도하게 높았던 진입 장벽을 하향하여 모델의 유효한 상대적 랭크 예측(Rank IC ~0.027)이 정상 거래로 실현되도록 보정합니다.
@@ -178,6 +199,7 @@ ev[i]            = q50[i] * (1.0 - penalty_term[i])
 - **Implementation Reality:** 실제 학습기는 `CS-demeaned LightGBM regression` + quantile EV calibrator.
 - **Score Split:** `rank_score`는 상대 순위 품질(IC/NDCG), `ev_score`는 절대 실행 가능성(cost wall 통과) 검증에 사용.
 - **No Repeated Centering:** `ev_score`는 calibrator 출력 이후 추가 group-centering을 수행하지 않는다.
+- **CS-Demean Source:** centering은 `build_label_panel()` (라벨 빌드 시점)에서 1회만 적용한다. calibrator fit/predict 경로에서 재적용 금지.
 
 ### 5.10 Virtual OOS Refit Normalization Consistency
 - `build_ml_strategy_alpha`의 virtual OOS fill(refit) fold는 regular fold의 마지막 정규화 상태를 재사용하지 않는다.
