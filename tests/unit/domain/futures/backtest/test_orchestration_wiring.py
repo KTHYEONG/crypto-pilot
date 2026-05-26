@@ -223,3 +223,64 @@ def test_evaluate_sequential_promotion_gate_returns_result() -> None:
     )
     assert result.passed is True, f"gate_failures={result.gate_failures}"
     assert result.promoted_to_champion is True
+
+
+def test_strategy_compose_wiring_produces_target_weights_with_policy_contract() -> None:
+    from src.domain.futures.optimization.objectives import _compose_strategy_scores_inplace
+    from src.domain.futures.portfolio.portfolio_constructor import precompute_rebalance_weights
+    from src.domain.futures.portfolio.portfolio_optimizer import PortfolioPolicyInputs
+
+    n_bars, n_syms = 8, 2
+    close = np.column_stack(
+        [
+            np.linspace(100.0, 105.0, num=n_bars),
+            np.linspace(101.0, 106.0, num=n_bars),
+        ]
+    ).astype(np.float64)
+    alpha_long = np.full((n_bars, n_syms), 0.004, dtype=np.float64)
+    alpha_short = np.zeros((n_bars, n_syms), dtype=np.float64)
+    execution_cost_bps = np.full((n_bars, n_syms), 1.0, dtype=np.float64)
+    sigma_3d = np.repeat(np.eye(n_syms, dtype=np.float64)[None, :, :] * 2e-4, n_bars, axis=0)
+    beta_2d = np.ones((n_bars, n_syms), dtype=np.float64)
+
+    aligned: dict[str, Any] = {
+        "alpha_long": alpha_long,
+        "alpha_short": alpha_short,
+        "execution_cost_bps_2d": execution_cost_bps,
+    }
+    params: dict[str, Any] = {
+        "BETA_ALPHA": 1.0,
+        "EV_HURDLE_BPS": 5.0,
+    }
+    _compose_strategy_scores_inplace(aligned, params)
+
+    policy_inputs = PortfolioPolicyInputs(
+        mu_long_2d=np.asarray(aligned["mu_long_2d"], dtype=np.float64),
+        mu_short_2d=np.asarray(aligned["mu_short_2d"], dtype=np.float64),
+        risk_sigma_3d=sigma_3d,
+        risk_beta_2d=beta_2d,
+        cost_fraction_2d=np.asarray(aligned["mu_long_2d"], dtype=np.float64) * 0.0,
+        cost_bps_2d=execution_cost_bps,
+        cost_source=str(aligned["_strategy_cost_snapshot_meta"]["execution_cost_bps_source"]),
+    )
+
+    w = precompute_rebalance_weights(
+        close,
+        np.asarray(aligned["xs_score_long"], dtype=np.float64),
+        np.asarray(aligned["xs_score_short"], dtype=np.float64),
+        rebalance_bars=1,
+        lookback=5,
+        bars_per_year=365.0 * 24.0,
+        kappa=0.3,
+        f_kelly_max=1.0,
+        sigma_target_ann=0.2,
+        gross_cap=0.8,
+        per_symbol_cap=0.3,
+        sigma_3d=sigma_3d,
+        btc_beta_2d=beta_2d,
+        policy_inputs=policy_inputs,
+    )
+
+    assert w.shape == (n_bars, n_syms)
+    assert float(np.sum(np.abs(w[-1]))) > 0.0
+    assert "_strategy_cost_snapshot_meta" in aligned

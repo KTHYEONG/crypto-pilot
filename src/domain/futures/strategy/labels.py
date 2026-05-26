@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 
-from src.core.settings import round_trip_cost_bps
+from src.domain.futures.portfolio.friction_model import resolve_cost_snapshot
 from src.domain.futures.strategy.common.alignment import AlignedMarketData
 from src.domain.futures.strategy.config import StrategyMLConfig
 from src.domain.futures.strategy.contracts import LabelPanel
@@ -252,21 +252,17 @@ def build_label_panel(aligned: AlignedMarketData, cfg: StrategyMLConfig) -> Labe
     # Dynamic cost: execution_cost_bps_2d (per-symbol) preferred; fallback to global round-trip.
     # cost_clearance_target gates on actual label return vs dynamic_cost only (no hurdle here).
     # hurdle is applied at EV inference time in ml_builder.py: ev_bps - (dynamic_cost + hurdle) > 0.
-    _rt_cost = float(round_trip_cost_bps())
-    execution_cost_missing = (
-        aligned.execution_cost_bps_2d is None
-        or not np.any(np.isfinite(aligned.execution_cost_bps_2d))
+    cost_snapshot = resolve_cost_snapshot(
+        execution_cost_bps_2d=aligned.execution_cost_bps_2d,
+        shape=(t_len, n_len),
     )
-    if execution_cost_missing:
-        dynamic_cost_2d: NDArray[np.float32] = np.full(
-            (t_len, n_len), np.float32(_rt_cost), dtype=np.float32
-        )
+    dynamic_cost_2d = np.asarray(cost_snapshot.execution_cost_bps_2d, dtype=np.float32)
+    if cost_snapshot.execution_cost_bps_source == "fallback_global":
         _logger.debug(
             "[LABEL-GATE] execution_cost_bps missing — fallback to global round_trip_cost=%.1f",
-            _rt_cost,
+            cost_snapshot.round_trip_cost_bps_fallback,
         )
     else:
-        dynamic_cost_2d = np.asarray(aligned.execution_cost_bps_2d, dtype=np.float32)
         _logger.debug(
             "[LABEL-GATE] Using per-symbol execution_cost_bps (mean=%.1fbps)",
             float(np.nanmean(dynamic_cost_2d)),
@@ -308,10 +304,8 @@ def build_label_panel(aligned: AlignedMarketData, cfg: StrategyMLConfig) -> Labe
         "cost_clearance_target_long_key": "cost_clearance_target_long",
         "cost_clearance_target_short_key": "cost_clearance_target_short",
         "calibrator_target_mode": cfg.calibrator_target,
-        "round_trip_cost_bps": _rt_cost,
-        "execution_cost_bps_source": (
-            "per_symbol" if not execution_cost_missing else "fallback_global"
-        ),
+        "round_trip_cost_bps": cost_snapshot.round_trip_cost_bps_fallback,
+        "execution_cost_bps_source": cost_snapshot.execution_cost_bps_source,
         "label_horizon_bars": int(cfg.label_horizon_bars),
     }
     return LabelPanel(

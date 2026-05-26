@@ -31,6 +31,24 @@ def test_assemble_alpha_panel_raises_on_non_finite() -> None:
         assemble_alpha_panel(datetimes=dt, symbols=symbols, ev_grid=ev_grid, clip_abs=0.1)
 
 
+def test_assemble_alpha_panel_validates_v3_metadata_non_finite() -> None:
+    dt = np.array([np.datetime64("2024-01-01T00:00:00")], dtype="datetime64[ns]")
+    symbols = ("BTCUSDT",)
+    ev_grid = np.array([[0.01]], dtype=np.float32)
+
+    with pytest.raises(RuntimeError, match="v3 metadata contains non-finite values"):
+        assemble_alpha_panel(
+            datetimes=dt,
+            symbols=symbols,
+            ev_grid=ev_grid,
+            clip_abs=0.1,
+            forecast_metadata_v3={
+                "q10_long": np.array([0.0], dtype=np.float32),
+                "q50_long": np.array([np.nan], dtype=np.float32),
+            },
+        )
+
+
 def test_infer_fold_alpha_maps_rows_back_to_grid() -> None:
     fold = FoldSpec(
         fold_id=3,

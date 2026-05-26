@@ -7,10 +7,10 @@ from typing import Any
 import numpy as np
 import optuna
 
-from src.domain.futures.optimization.observability.dashboard import safe_float
-from src.domain.futures.optimization.opt_config import OPT_FUTURES_CONFIG
 from src.domain.futures.optimization.ml_context import MLPhaseDContext
 from src.domain.futures.optimization.objectives import replay_robust_awf_for_trial_params
+from src.domain.futures.optimization.observability.dashboard import safe_float
+from src.domain.futures.optimization.opt_config import OPT_FUTURES_CONFIG
 from src.domain.futures.optimization.workflow import phase_b_constraints
 
 _logger: logging.Logger = logging.getLogger("candidate_selector")
@@ -294,7 +294,8 @@ def replay_stability_candidate(
         clear_stability_runtime_cache(sctx)
         obj, diag = replay_robust_awf_for_trial_params(sctx, params)
         l1_fail = bool(tmp_md_layer1_failures_from_awf_diag(diag, dict(OPT_FUTURES_CONFIG)))
-        return float(obj), l1_fail
+        obj_value = obj[0] if isinstance(obj, tuple) else obj
+        return float(obj_value), l1_fail
     finally:
         release_stability_ctx(sctx)
 
@@ -350,20 +351,24 @@ def select_and_rank_candidates(
     _k_legs = int(cfg.get("FUTURES_AWF_K_LEGS", 6))
     _min_trades_total = _min_trades_per_leg * _k_legs
 
+    def _trial_score(trial: optuna.trial.FrozenTrial) -> float:
+        value = trial.value
+        return float(value) if value is not None else -1e18
+
     # activity floor 통과한 trial만 (hard_fail보다 높은 값)
-    viable = [t for t in completed if t.value > _j_hard_fail + 1e-6]
+    viable = [t for t in completed if _trial_score(t) > _j_hard_fail + 1e-6]
     if not viable:
         viable = completed  # fallback: best of bad
 
     # J 내림차순 정렬
-    viable.sort(key=lambda t: t.value, reverse=True)  # type: ignore[arg-type]
+    viable.sort(key=_trial_score, reverse=True)
 
     reject_reason_count: dict[str, int] = {}
     best_cand: dict[str, Any] = {}
 
     for trial in viable:
         ua = trial.user_attrs
-        j_val = float(trial.value)  # type: ignore[arg-type]
+        j_val = _trial_score(trial)
 
         # Gate 1: J ≥ DEPLOY_J_FLOOR
         if j_val < _deploy_j_floor:
@@ -407,8 +412,8 @@ def select_and_rank_candidates(
             "trial": trial,
             "params": dict(trial.params),
             "awf_diag": val_diag,
-            "j_score": float(trial.value),  # type: ignore[arg-type]
-            "deploy_score": float(trial.value),  # type: ignore[arg-type]
+            "j_score": j_val,
+            "deploy_score": j_val,
             "fail_open": True,
         }
         reject_reason_count["fail_open"] = 1
@@ -544,7 +549,8 @@ def check_stability_layer3(
             seed_ctxs.append(sctx)
             clear_stability_runtime_cache(sctx)
             obj, diag = replay_robust_awf_for_trial_params(sctx, champion_raw_params)
-            champ_objs.append(obj)
+            champ_obj = obj[0] if isinstance(obj, tuple) else obj
+            champ_objs.append(float(champ_obj))
             champ_l3_fail = champ_l3_fail or bool(tmp_md_layer1_failures_from_awf_diag(diag, cfg))
     finally:
         for sctx in seed_ctxs:
