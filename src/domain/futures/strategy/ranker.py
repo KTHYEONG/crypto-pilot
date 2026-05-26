@@ -140,7 +140,6 @@ def _build_ranker_model(
             bagging_freq=cfg.ranker_bagging_freq,
             lambda_l2=cfg.ranker_lambda_l2,
             reg_alpha=cfg.ranker_reg_alpha,
-            eval_at=(3, 5),
             random_state=cfg.seed,
             n_jobs=cfg.n_jobs,
             verbose=-1,
