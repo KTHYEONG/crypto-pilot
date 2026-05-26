@@ -5,45 +5,51 @@ description: Classify the task and inspect repository context in a single step b
 
 # triage-scan
 
-Do not edit files.
-**STRICT ROLE BOUNDARY:** Do NOT propose, design, or suggest technical solutions, code changes, or module improvements. Your ONLY job is classification, risk assessment, workflow routing, and fact-gathering. Defer all solution design to the `spec` phase.
+**STRICT OBSERVATION MODE ONLY.** Do not edit files. Do not design solutions.
 
-## Purpose
-Classify the task, determine the risk, and immediately scan the codebase to gather only the necessary factual context (files, docs, patterns).
+## 🚫 Forbidden Actions (HARD CONSTRAINTS)
+- **NO SOLUTIONS:** Proposing, designing, or suggesting technical solutions, code changes, or logic improvements is **STRICTLY PROHIBITED**.
+- **NO SNIPPETS:** Do not provide code examples or "how-to" snippets.
+- **NO REFACTORING ADVICE:** Do not suggest cleaner ways to write existing code. 
+- **NO SPECULATION:** Do not guess how a bug might be fixed. Defer all "How" and "Why" (solution-wise) to the `spec` phase.
 
-## Decide (Triage)
-- Task type: bug | feature | refactor | UI/style | config/build | docs | test-only | architecture | quant
-- Risk: low | medium | high
-- Uncertainty: low | medium | high
-- Scale: high (heavy data, network I/O, massive loops) | low
-- Quant context: active (if task involves math, stats, modeling, or backtesting) | none
-- Strategy: direct patch | regression-first | TDD | characterization-first | spike | docs-only
+## 🎯 Purpose
+Your ONLY job is **Discovery & Classification**. You are a scout mapping the terrain, not an engineer building a bridge. Gather facts to empower the next phase (`spec` or `implement`).
 
-## Routing
-- Low risk: `triage-scan → implement → verify`
-- Medium/High risk: `triage-scan → spec → implement → verify → review`
+## ⚖️ Decide (Triage)
+Classify based on the request:
+- **Task type:** bug | feature | refactor | UI/style | config/build | docs | test-only | architecture | quant
+- **Risk/Uncertainty:** low | medium | high
+- **Scale:** high (data/IO intensive) | low
+- **Quant context:** active | none
+- **Strategy:** direct patch | regression-first | TDD | characterization-first | spike | docs-only
 
-## Inspect (Scan)
-Gather facts based on the initial request. Do not guess solutions.
-- docs/ (architecture, domains, decisions)
-- relevant files
-- existing patterns
-- tests
-- public interfaces
+## 🔎 Inspect (Scan - Factual Gathering)
+Gather raw data. Do not interpret or improve.
+- **Relevant Docs:** Search `docs/` for architecture, domains, and decisions.
+- **Relevant Files:** Identify paths that *will* be touched or referenced.
+- **Existing Patterns:** Document "what exists now" (e.g., "Uses X library for Y").
+- **Test Locations:** Locate where new tests should go or where existing tests reside.
+- **Public Interfaces:** Note signatures/APIs that might be affected.
 
-## Output
+## 📋 Self-Correction Checklist (Before Output)
+1. Did I suggest a code change? (If yes, DELETE IT)
+2. Did I explain *how* to fix the problem? (If yes, DELETE IT)
+3. Is my output 100% focused on "What" and "Where"? (If no, REWRITE IT)
+
+## 📤 Output Format
 ```md
 ### 🛡️ Triage & Scan: [Type]
 - **Risk/Uncertainty:** `[Risk]` / `[Uncertainty]` | **Quant:** `[Active/None]`
 - **Strategy:** `[Strategy]` ➔ `[Path]`
 
-#### 🔎 Context Gathered
+#### 🔎 Context Gathered (Facts Only)
 - **Relevant Docs:** [Links]
 - **Relevant Files:** [Paths]
-- **Existing Patterns:** [Details]
+- **Existing Patterns:** [Observation of current state]
 - **Test Locations:** [Paths]
-- **Public Interfaces:** [Details]
+- **Public Interfaces:** [Current Signatures]
 
-- **Next Action:** [e.g., Pause for user to invoke `spec` with a High-Reasoning Model (Medium/High Risk), or proceed directly to `implement` (Low Risk)]
-- **Blocking:** [Questions or None]
+- **Next Action:** [Pause for user to invoke `spec` or proceed to `implement`]
+- **Blocking:** [Missing information or None]
 ```
