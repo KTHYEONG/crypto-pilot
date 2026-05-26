@@ -64,7 +64,7 @@ def apply_linear_signal_composer_scores(
         raise TypeError("apply_linear_signal_composer_scores expects a DataFrame")
 
     beta_a = float(params.get("BETA_ALPHA", cfg.get("FUTURES_DEFAULT_BETA_ALPHA", 1.0)))
-    ev_h = float(params.get("EV_HURDLE_BPS", cfg.get("FUTURES_DEFAULT_EV_HURDLE_BPS", 40.0)))
+    ev_h = float(params.get("EV_HURDLE_BPS", cfg.get("FUTURES_DEFAULT_EV_HURDLE_BPS", 10.0)))
 
     from src.core.settings import round_trip_cost_bps
 
