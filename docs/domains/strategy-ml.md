@@ -13,7 +13,7 @@ change_triggers:
   - src/domain/futures/strategy/ranker.py
   - src/domain/futures/optimization/objectives.py
   - src/domain/futures/strategy/diagnostics.py
-last_verified: 2026-05-25 (calibrator_target default changed to "gross": EV/cost wall same-space comparison)
+last_verified: 2026-05-26 (integrity fixes: embargo gate, OOS alpha region, exec mode SSOT, compose race, 1m leading-NaN bfill removed)
 ---
 
 # Binance Futures ML Strategy
@@ -379,6 +379,27 @@ ev[i]            = q50[i] * (1.0 - penalty_term[i])
 - fallback 시 `WARNING [RANKER] group_ndcg fallback to pointwise: n_groups=X < min=5` 로깅 후 `lgbm_regression` objective를 사용한다.
 - `model_family == "lgbm_lambdarank"` + `force_pointwise=True` 조합에서도 regression으로 안전하게 fallback한다.
 - HMM은 core alpha path의 필수 구성요소가 아니며, `RegimeConfig.enabled=False`(default)로 비활성화 상태를 유지한다.
+
+### 5.26 Walk-Forward 무결성 보증 (2026-05-26 확정)
+
+#### 5.26.1 Embargo Invariant
+- `embargo_bars >= label_horizon_bars` 를 `StrategyMLConfig.__post_init__`에서 강제 (`config.py:230-234`).
+- 기본값: `embargo_bars = 6`, `label_horizon_bars = 6` — valid→test 경계 라벨창 비침범.
+- Horizon experiment 시 `ml_builder.py`가 후보 horizon별로 `embargo_bars=max(embargo, horizon)` 자동 조정.
+
+#### 5.26.2 OOS Alpha Readiness 검사 구간
+- `assert_strategy_alpha_ready`는 `oos_start_idx_{tf}` 이후 슬라이스만 nonzero 검사 (`strategy_service.py:66-70`).
+- 이전 동작: 전체 df 기준 — IS 구간만 nonzero여도 통과 가능했던 결함 수정.
+
+#### 5.26.3 Execution Mode SSOT
+- `FUTURES_EXECUTION_MODE`의 단일 소스: `OPT_FUTURES_CONFIG` dict.
+- `_base_engine_params` 및 `ml_context` 모두 `ml.get(...) or OPT_FUTURES_CONFIG.get(..., "coarse")` 패턴으로 전파.
+- `intrabar_1m` 모드에서 1m 데이터 미로드 심볼 존재 시 `RuntimeError` 조기 중단 (`opt_main_futures._run_data_stage`).
+
+#### 5.26.4 1m 가격 결측 처리 원칙
+- **Forward fill 허용:** 거래 중 짧은 갭 → flat price 가정 (보수적, 정상).
+- **Backward fill 금지:** 심볼 상장 전 leading NaN에 첫 유효 가격 역방향 전파는 look-ahead에 해당 → NaN 유지.
+- **0.0 fallback 금지:** 전 구간 NaN 심볼은 0.0 대신 NaN 유지 → 엔진 NaN guard가 해당 bar 자동 skip.
 
 ---
 

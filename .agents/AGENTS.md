@@ -7,6 +7,9 @@
 
 ## 2. Global Constraints (Hallucination & Token Control)
 - **NO FLUFF:** Greetings and filler phrases (e.g., "Yes, I understand") are strictly prohibited. Output technical analysis or code immediately.
+- **ZERO REDUNDANCY:** Do not summarize or repeat information already present in tool outputs (terminal logs, grep results, etc.).
+- **BULLET-FIRST:** Use concise bullet points and technical keywords instead of full sentences. Avoid grammatical fluff.
+- **SKIP CONFIRMATION:** If a tool execution is successful, skip redundant success messages like "I have finished the task."
 - **FACT-BASED ONLY:** Do not create non-existent libraries or methods. Use only confirmed APIs based on official documentation.
 - **SELECTIVE OMISSION & TOOLING:**
     - **Existing Files:** When modifying existing files, you MUST use `replace_file_content` or `multi_replace_file_content` to edit only the necessary parts. `write_to_file` is reserved for creating new files only.

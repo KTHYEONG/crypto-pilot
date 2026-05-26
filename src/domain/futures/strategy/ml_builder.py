@@ -137,6 +137,7 @@ def build_ml_strategy_alpha(
                 horizon_experiment_enabled=False,
                 label_horizon_bars=int(horizon),
                 purge_bars=max(int(cfg.ml.purge_bars), int(horizon)),
+                embargo_bars=max(int(cfg.ml.embargo_bars), int(horizon)),
             )
             candidate_cfg = replace(cfg, ml=horizon_cfg)
             panel = build_ml_strategy_alpha(
