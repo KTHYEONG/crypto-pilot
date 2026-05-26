@@ -13,7 +13,7 @@ change_triggers:
   - src/domain/futures/strategy/ranker.py
   - src/domain/futures/optimization/objectives.py
   - src/domain/futures/strategy/diagnostics.py
-last_verified: 2026-05-25 (EV gate placement fix: gated copy for output, ungated for quality metrics)
+last_verified: 2026-05-25 (calibrator_target default changed to "gross": EV/cost wall same-space comparison)
 ---
 
 # Binance Futures ML Strategy
@@ -113,11 +113,11 @@ ev[i]            = q50[i] * (1.0 - penalty_term[i])
 
 | 옵션 | 설명 | 용도 |
 |------|------|------|
-| `"beta_residualized"` (default) | beta-잔차화 후, CS-demean 전 스냅샷 | 기존 B2 동작 유지 |
-| `"gross"` | 원시 로그수익률 - funding (beta 제거 없음, fee 없음) | B2 magnitude 손실 가설 A/B 검증 |
+| `"gross"` **(default)** | 원시 로그수익률 - funding (beta 제거 없음, fee 없음) | EV 크기를 gross 공간에서 학습 — cost wall(24bps)과 동일한 단위 비교 |
+| `"beta_residualized"` | beta-잔차화 후, CS-demean 전 스냅샷 | 레거시 B2 동작; A/B 비교 전용 |
 
-**§5.3/§5.5 모순 해소 (2026-05-25):**  
-§5.5(B2) beta-잔차화는 시장 드리프트 성분을 제거하여 CS-IC를 개선하지만, 동시에 calibrator 타깃의 절대 크기를 수축시켜 cost wall 통과가 어려워질 수 있다. `calibrator_target` 토글을 통해 ranker(잔차화+CS-demean 유지)와 calibrator 타깃을 독립적으로 제어하여 이 상충을 A/B 측정으로 결정한다.
+**§5.3/§5.5 모순 해소 (2026-05-25, 기본값 변경):**  
+§5.5(B2) beta-잔차화는 CS-IC를 개선하지만 calibrator 타깃의 절대 크기를 수축시켜 EV p95(~13bps)가 cost wall(24bps)을 통과하지 못하는 구조적 실패를 유발한다. 실행 레이어(`risk_controls.py:74-75`)는 방향성 gross 수익(`beta_a * alpha - friction`)을 사용하므로, calibrator도 같은 gross 공간에서 학습해야 의미론적으로 일치한다. **랭커는 여전히 잔차화+CS-demean relevance를 사용** — 기본값 변경이 랭킹 IC에 영향을 주지 않는다.
 
 ### 5.4 Output Contract (`alpha_panel`)
 - **Index:** `MultiIndex(datetime, symbol)`
@@ -313,10 +313,10 @@ ev[i]            = q50[i] * (1.0 - penalty_term[i])
 - 계약:
   - override 미제공 시 기존 `data_maps` alpha column 경로를 fallback으로 유지한다.
 
-### 5.17 Calibrator Target Configuration (2026-05-25)
+### 5.17 Calibrator Target Configuration (2026-05-25, 기본값 변경)
 - `StrategyMLConfig.calibrator_target`으로 calibrator `y_ev` 타깃을 config-driven 제어.
-- 기본값 `"beta_residualized"` — B2 이전 동작과 완전 동일.
-- `"gross"` 옵션은 A/B 측정 전용. OOS 검증 완료 전 프로덕션 사용 금지.
+- **기본값 `"gross"` (2026-05-25 변경)** — EV p95 vs cost wall 비교를 동일 단위(gross bps)로 수행하여 `alpha_p95_below_cost_wall` 게이트 실패 근본 원인 해소.
+- `"beta_residualized"` 옵션은 레거시 A/B 비교 전용. 프로덕션 기본 경로는 `"gross"`.
 - **B1 불변 계약:** 라벨 레이어(labels.py)는 fee/slippage를 차감하지 않는다. 비용 차감은 objectives 레이어에서만 1회 수행. `"funding_net"` 옵션은 이 계약을 위반하므로 삭제됨.
 - Ranker 타깃(`signed_net_ret` = CS-demeaned beta-residualized)은 `calibrator_target` 무관하게 불변.
 - 관련 진단: `[RAW-SIGNAL-DIAG]` (§5.6) — 잔차화로 인한 분산 손실 정량화.
