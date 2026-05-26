@@ -11,7 +11,7 @@ related_paths:
 change_triggers:
   - src/domain/futures/portfolio/execution_sim.py
   - src/domain/futures/portfolio/friction_model.py
-last_verified: 2026-05-24
+last_verified: 2026-05-26
 ---
 
 # Backtest Logic & Semantics
@@ -78,6 +78,11 @@ if qty * price < min_notional:
 - **진입/청산 단가:** `Price * (1 ± slippage_rate)`
 - **수수료(Taker):** `Notional * taker_fee_rate`
 - **Total Round-trip Cost:** `2 * (fee + slippage) + impact + tick_cost`
+
+### 5.4 Drawdown Scaling Source-of-Truth (2026-05-26)
+- **Path-Aware Only:** Drawdown 기반 weight scaling은 `execution_sim.py`의 path-dependent loop에서만 수행한다.
+- **Precompute Neutrality:** `portfolio_constructor.py`의 precompute 단계에서는 `current_dd` 기반 정적 scaling을 적용하지 않는다.
+- **Consistency Goal:** 최적화/백테스트 모두 동일한 intrabar equity path를 기준으로 DD scaling이 작동해야 한다.
 
 ---
 
