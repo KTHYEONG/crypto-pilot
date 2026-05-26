@@ -20,6 +20,7 @@ from src.domain.futures.optimization.data_aligner import (
 from src.domain.futures.optimization.opt_config import OPT_FUTURES_CONFIG
 from src.domain.futures.optimization.validation import build_anchored_wf_legs
 from src.domain.futures.portfolio.portfolio_constructor import (
+    RiskSnapshot,
     cov_lookback_bars,
     precompute_rolling_covariances,
 )
@@ -80,6 +81,53 @@ class MLPhaseDContext:
     warmup_bars_required: int = 0
     data_sufficiency_report: dict[str, Any] | None = None
     precompute_profile: dict[str, float] | None = None
+
+
+def _build_beta_2d_full(
+    data_maps: dict[str, dict[str, Any]],
+    symbols: list[str],
+    tf: str,
+    alignment_info: dict[str, Any],
+    eff_len: int,
+) -> np.ndarray | None:
+    """Build aligned beta matrix [T, N] when source beta column is present."""
+    out = np.zeros((eff_len, len(symbols)), dtype=np.float64)
+    has_any_beta = False
+    for s_idx, sym in enumerate(symbols):
+        if sym not in data_maps or tf not in data_maps[sym]:
+            continue
+        start_idx = int(alignment_info["alignment_offsets"][sym])
+        raw = data_maps[sym][tf].iloc[start_idx : start_idx + eff_len]
+        if "beta" not in raw.columns:
+            continue
+        beta_arr = raw["beta"].to_numpy(dtype=np.float64)
+        if beta_arr.shape[0] != eff_len:
+            continue
+        out[:, s_idx] = np.nan_to_num(beta_arr, nan=0.0, posinf=0.0, neginf=0.0)
+        has_any_beta = True
+    return out if has_any_beta else None
+
+
+def _attach_risk_snapshot_slice(
+    aligned: dict[str, Any] | None,
+    sigma_3d_full: np.ndarray,
+    beta_2d_full: np.ndarray | None,
+    slice_start: int,
+    slice_end: int,
+) -> None:
+    """Attach factor-lite risk snapshot payload to aligned slice."""
+    if aligned is None:
+        return
+    sigma_slice = np.asarray(sigma_3d_full[slice_start:slice_end], dtype=np.float64)
+    beta_slice = None
+    if beta_2d_full is not None:
+        beta_slice = np.asarray(beta_2d_full[slice_start:slice_end], dtype=np.float64)
+        aligned["btc_beta_2d"] = beta_slice
+    aligned["risk_snapshot"] = RiskSnapshot(
+        covariance_3d=sigma_slice,
+        beta_2d=beta_slice,
+        residual_var_2d=None,
+    )
 
 
 def build_universe_membership_arrays(
@@ -221,11 +269,17 @@ def _fit_oos_platt_calibrators_from_maps(
             else:
                 alpha_long = None
                 if "alpha_long" in raw.columns:
-                    alpha_long_arr = np.asarray(raw["alpha_long"].to_numpy(dtype=np.float64), dtype=np.float64)
+                    alpha_long_arr = np.asarray(
+                        raw["alpha_long"].to_numpy(dtype=np.float64),
+                        dtype=np.float64,
+                    )
                     alpha_long = alpha_long_arr[i0:i1]
                 alpha_short = None
                 if "alpha_short" in raw.columns:
-                    alpha_short_arr = np.asarray(raw["alpha_short"].to_numpy(dtype=np.float64), dtype=np.float64)
+                    alpha_short_arr = np.asarray(
+                        raw["alpha_short"].to_numpy(dtype=np.float64),
+                        dtype=np.float64,
+                    )
                     alpha_short = alpha_short_arr[i0:i1]
             if alpha_long is not None:
                 r_t = fwd_ret[i0:i1]
@@ -346,6 +400,11 @@ def _build_prebuilt_full_arrays(
             trimmed_sig["funding_rate_sum"] = raw_full["funding_rate_sum"].to_numpy(
                 dtype=np.float64, copy=False
             )
+        if "execution_cost_bps" in raw_full.columns:
+            trimmed_sig["execution_cost_bps"] = raw_full["execution_cost_bps"].to_numpy(
+                dtype=np.float64,
+                copy=False,
+            )
         if "kill_signal" in raw_full.columns:
             trimmed_sig["kill_signal"] = raw_full["kill_signal"].to_numpy(
                 dtype=np.float64,
@@ -446,6 +505,31 @@ def _build_prebuilt_full_arrays(
         prebuilt_full[sym] = _dataframe_to_symbol_arrays(trimmed_sig)
 
     return prebuilt_full
+
+
+def _attach_execution_cost_bps_2d(
+    *,
+    aligned: dict[str, Any] | None,
+    prebuilt_arrays: dict[str, dict[str, np.ndarray]],
+    symbols: list[str],
+    slice_start: int,
+    slice_end: int,
+) -> None:
+    """Attach optional execution cost tensor to aligned slice."""
+    if aligned is None:
+        return
+    cost_cols: list[np.ndarray] = []
+    for sym in symbols:
+        sym_arrs = prebuilt_arrays.get(sym)
+        if sym_arrs is None:
+            return
+        cost_arr = sym_arrs.get("execution_cost_bps")
+        if cost_arr is None or slice_end > int(cost_arr.shape[0]):
+            return
+        cost_cols.append(np.asarray(cost_arr[slice_start:slice_end], dtype=np.float64))
+    if not cost_cols:
+        return
+    aligned["execution_cost_bps_2d"] = np.ascontiguousarray(np.column_stack(cost_cols))
 
 
 def _inject_dyn_leverage_trimmed(trimmed_sig: pd.DataFrame, raw_full: pd.DataFrame) -> None:
@@ -633,6 +717,13 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
         t_cov = time.perf_counter()
         sigma_3d_full = precompute_rolling_covariances(close_2d_full, lookback)
         t_cov_total += time.perf_counter() - t_cov
+        beta_2d_full = _build_beta_2d_full(
+            ctx.data_maps,
+            ctx.symbols,
+            ctx.tf,
+            alignment_info,
+            eff_len,
+        )
 
         first_awf_anchor = int(awf_legs[0][1]) if awf_legs else max(1, int(eff_len * is_pool))
 
@@ -831,6 +922,20 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
                         aligned_leg = _build_aligned_2d_from_prebuilt(
                             prebuilt_leg, ctx.symbols, test_s, test_e, sigma_3d_full=sigma_3d_full
                         )
+                        _attach_risk_snapshot_slice(
+                            aligned_leg,
+                            sigma_3d_full,
+                            beta_2d_full,
+                            test_s,
+                            test_e,
+                        )
+                        _attach_execution_cost_bps_2d(
+                            aligned=aligned_leg,
+                            prebuilt_arrays=prebuilt_leg,
+                            symbols=ctx.symbols,
+                            slice_start=test_s,
+                            slice_end=test_e,
+                        )
                         tmp_slices.append({"leg_range": (test_s, test_e), "data": aligned_leg})
                         t_prebuilt_total += time.perf_counter() - t_prebuilt
                         leg_elapsed = time.perf_counter() - leg_t0
@@ -876,6 +981,20 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
             )
             ctx.is_slice = _build_aligned_2d_from_prebuilt(
                 prebuilt_full_is, ctx.symbols, 0, eff_len, sigma_3d_full=sigma_3d_full
+            )
+            _attach_risk_snapshot_slice(
+                ctx.is_slice,
+                sigma_3d_full,
+                beta_2d_full,
+                0,
+                eff_len,
+            )
+            _attach_execution_cost_bps_2d(
+                aligned=ctx.is_slice,
+                prebuilt_arrays=prebuilt_full_is,
+                symbols=ctx.symbols,
+                slice_start=0,
+                slice_end=eff_len,
             )
             t_prebuilt_total += time.perf_counter() - t_prebuilt
         else:
@@ -928,6 +1047,20 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
 
             ctx.is_slice = _build_aligned_2d_from_prebuilt(
                 prebuilt_full, ctx.symbols, 0, eff_len, sigma_3d_full=sigma_3d_full
+            )
+            _attach_risk_snapshot_slice(
+                ctx.is_slice,
+                sigma_3d_full,
+                beta_2d_full,
+                0,
+                eff_len,
+            )
+            _attach_execution_cost_bps_2d(
+                aligned=ctx.is_slice,
+                prebuilt_arrays=prebuilt_full,
+                symbols=ctx.symbols,
+                slice_start=0,
+                slice_end=eff_len,
             )
             t_prebuilt_total += time.perf_counter() - t_prebuilt
 
@@ -982,6 +1115,20 @@ def precompute_ml_optimization_context(ctx: MLPhaseDContext) -> None:
                     )
                 aligned = _build_aligned_2d_from_prebuilt(
                     prebuilt_full, ctx.symbols, test_s, test_e, sigma_3d_full=sigma_3d_full
+                )
+                _attach_risk_snapshot_slice(
+                    aligned,
+                    sigma_3d_full,
+                    beta_2d_full,
+                    test_s,
+                    test_e,
+                )
+                _attach_execution_cost_bps_2d(
+                    aligned=aligned,
+                    prebuilt_arrays=prebuilt_full,
+                    symbols=ctx.symbols,
+                    slice_start=test_s,
+                    slice_end=test_e,
                 )
                 ctx.awf_leg_slices.append({"leg_range": (test_s, test_e), "data": aligned})
 

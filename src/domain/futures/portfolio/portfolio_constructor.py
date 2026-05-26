@@ -13,6 +13,8 @@ import numba
 import numpy as np
 from sklearn.covariance import LedoitWolf
 
+from src.domain.futures.portfolio.portfolio_optimizer import PortfolioPolicyInputs
+
 
 def cov_lookback_bars(tf: str, opt_cfg: dict[str, Any]) -> int:
     """~30 calendar days in bars for the bar width of *tf*."""
@@ -23,9 +25,7 @@ def cov_lookback_bars(tf: str, opt_cfg: dict[str, Any]) -> int:
     return max(5, int(opt_cfg.get("FUTURES_PORTFOLIO_COV_LOOKBACK", 180)))
 
 
-def rolling_ledoit_wolf_cov(
-    returns_hist: np.ndarray, *, min_obs: int = 20
-) -> np.ndarray:
+def rolling_ledoit_wolf_cov(returns_hist: np.ndarray, *, min_obs: int = 20) -> np.ndarray:
     """returns_hist shape (T, N). PSD covariance of last row's distribution estimate."""
     r = np.asarray(returns_hist, dtype=np.float64)
     if r.ndim != 2:
@@ -151,9 +151,7 @@ def _project_l1_linf_numba(
     return out
 
 
-def _project_l1_linf(
-    w_pre: np.ndarray, *, gross_cap: float, per_symbol_cap: float
-) -> np.ndarray:
+def _project_l1_linf(w_pre: np.ndarray, *, gross_cap: float, per_symbol_cap: float) -> np.ndarray:
     """Fast L1 gross + per-symbol caps via iterative scaling and clipping."""
     return np.asarray(
         _project_l1_linf_numba(w_pre, float(gross_cap), float(per_symbol_cap)),
@@ -209,15 +207,15 @@ def precompute_rolling_covariances(
     close_2d: np.ndarray, lookback: int, min_obs: int = 20
 ) -> np.ndarray:
     """Precompute rolling Ledoit-Wolf covariance matrices for all bars.
-    
-    Called once during optimization precompute phase to eliminate 1M+ redundant 
+
+    Called once during optimization precompute phase to eliminate 1M+ redundant
     calls during trials.
     """
     c = np.asarray(close_2d, dtype=np.float64)
     n_bars, n_syms = c.shape
     out = np.zeros((n_bars, n_syms, n_syms), dtype=np.float64)
     lb = max(5, int(lookback))
-    
+
     # LW fit is relatively heavy, but we only do this once per bar for the entire optimization.
     for i in range(1, n_bars):
         start_i = max(0, i - lb)
@@ -227,11 +225,11 @@ def precompute_rolling_covariances(
             for j in range(n_syms):
                 out[i, j, j] = 1e-6
             continue
-            
+
         rr = np.diff(hist, axis=0) / np.maximum(hist[:-1, :], 1e-12)
         rr = np.nan_to_num(rr, nan=0.0, posinf=0.0, neginf=0.0)
         out[i] = rolling_ledoit_wolf_cov(rr, min_obs=min_obs)
-        
+
     return out
 
 
@@ -339,6 +337,22 @@ def _precompute_loop_numba(
     return out
 
 
+@dataclass(frozen=True)
+class RiskSnapshot:
+    """Factor-lite risk snapshot for rebalance projection.
+
+    Attributes:
+        covariance_3d: Per-bar covariance cube with shape [T, N, N].
+        beta_2d: Optional per-bar beta matrix with shape [T, N].
+        residual_var_2d: Optional per-bar residual variance matrix with shape [T, N].
+
+    """
+
+    covariance_3d: np.ndarray
+    beta_2d: np.ndarray | None = None
+    residual_var_2d: np.ndarray | None = None
+
+
 def precompute_rebalance_weights(
     close_2d: np.ndarray,
     xs_long: np.ndarray,
@@ -356,6 +370,9 @@ def precompute_rebalance_weights(
     min_obs: int = 20,
     composer_sigma_2d: np.ndarray | None = None,
     sigma_3d: np.ndarray | None = None,
+    risk_snapshot: RiskSnapshot | None = None,
+    btc_beta_2d: np.ndarray | None = None,
+    policy_inputs: PortfolioPolicyInputs | None = None,
 ) -> np.ndarray:
     """Sparse target weights: precomputed or rolling LW covariance."""
     c = np.asarray(close_2d, dtype=np.float64)
@@ -366,10 +383,28 @@ def precompute_rebalance_weights(
 
     # Prepare inputs for Numba loop
     mu_2d = xl - xs_
+    if policy_inputs is not None:
+        mu_long = policy_inputs.mu_long_2d
+        mu_short = policy_inputs.mu_short_2d
+        if mu_long is not None and mu_short is not None:
+            mu_long_2d = np.asarray(mu_long, dtype=np.float64)
+            mu_short_2d = np.asarray(mu_short, dtype=np.float64)
+            if mu_long_2d.shape == mu_2d.shape and mu_short_2d.shape == mu_2d.shape:
+                mu_2d = mu_long_2d - mu_short_2d
     mu_2d = np.nan_to_num(mu_2d, nan=0.0, posinf=0.0, neginf=0.0)
 
-    # If sigma_3d is provided, we can use the high-speed Numba loop
-    if sigma_3d is not None:
+    sigma_input = sigma_3d
+    if policy_inputs is not None and policy_inputs.risk_sigma_3d is not None:
+        sigma_input = np.asarray(policy_inputs.risk_sigma_3d, dtype=np.float64)
+    if policy_inputs is not None and btc_beta_2d is None and policy_inputs.risk_beta_2d is not None:
+        btc_beta_2d = np.asarray(policy_inputs.risk_beta_2d, dtype=np.float64)
+    if risk_snapshot is not None:
+        sigma_input = np.asarray(risk_snapshot.covariance_3d, dtype=np.float64)
+        if btc_beta_2d is None and risk_snapshot.beta_2d is not None:
+            btc_beta_2d = np.asarray(risk_snapshot.beta_2d, dtype=np.float64)
+
+    # If sigma_input is provided, we can use the high-speed Numba loop
+    if sigma_input is not None:
         ks_diag_2d = None
         if composer_sigma_2d is not None:
             ks_diag_2d = np.asarray(composer_sigma_2d, dtype=np.float64)
@@ -377,19 +412,19 @@ def precompute_rebalance_weights(
 
         out = np.asarray(
             _precompute_loop_numba(
-            n_bars,
-            n_syms,
-            rb,
-            mu_2d,
-            sigma_3d,
-            float(kappa),
-            float(f_kelly_max),
-            float(sigma_target_ann),
-            float(bars_per_year),
-            float(gross_cap),
-            float(per_symbol_cap),
-            float(current_dd),
-            ks_diag_2d=ks_diag_2d,
+                n_bars,
+                n_syms,
+                rb,
+                mu_2d,
+                sigma_input,
+                float(kappa),
+                float(f_kelly_max),
+                float(sigma_target_ann),
+                float(bars_per_year),
+                float(gross_cap),
+                float(per_symbol_cap),
+                float(current_dd),
+                ks_diag_2d=ks_diag_2d,
             ),
             dtype=np.float64,
         )
@@ -415,16 +450,16 @@ def precompute_rebalance_weights(
 
             out[i, :] = np.asarray(
                 _solve_constrained_weights_numba(
-                mu_2d[i - 1],
-                sigma,
-                float(kappa),
-                float(f_kelly_max),
-                float(sigma_target_ann),
-                float(bars_per_year),
-                float(gross_cap),
-                float(per_symbol_cap),
-                float(current_dd),
-                kelly_sigma_diag=ks_diag,
+                    mu_2d[i - 1],
+                    sigma,
+                    float(kappa),
+                    float(f_kelly_max),
+                    float(sigma_target_ann),
+                    float(bars_per_year),
+                    float(gross_cap),
+                    float(per_symbol_cap),
+                    float(current_dd),
+                    kelly_sigma_diag=ks_diag,
                 ),
                 dtype=np.float64,
             )
@@ -444,8 +479,8 @@ def precompute_rebalance_weights(
         if np.all(w == 0.0):
             continue
 
-        if sigma_3d is not None:
-            sigma = sigma_3d[i]
+        if sigma_input is not None:
+            sigma = sigma_input[i]
         else:
             start_i = max(0, i - lb)
             hist = c[start_i:i, :]
@@ -458,7 +493,10 @@ def precompute_rebalance_weights(
 
         sigma_port = float(np.sqrt(max(0.0, float(w @ sigma @ w))))
 
-        btc_beta = np.zeros(n_syms)
+        if btc_beta_2d is not None and i < int(np.asarray(btc_beta_2d).shape[0]):
+            btc_beta = np.asarray(btc_beta_2d[i], dtype=np.float64).ravel()
+        else:
+            btc_beta = np.zeros(n_syms, dtype=np.float64)
 
         w_proj = project_all_caps(
             w=w,
@@ -490,9 +528,7 @@ def portfolio_weight_params_from_optuna(
     tf = str(params.get("TIMEFRAME", "4h"))
     return {
         "lookback": cov_lookback_bars(tf, opt_cfg),
-        "kappa": float(
-            params.get("PORTFOLIO_KAPPA", opt_cfg.get("FUTURES_PORTFOLIO_KAPPA", 0.35))
-        ),
+        "kappa": float(params.get("PORTFOLIO_KAPPA", opt_cfg.get("FUTURES_PORTFOLIO_KAPPA", 0.35))),
         "f_kelly_max": float(
             params.get(
                 "PORTFOLIO_F_KELLY_MAX",
@@ -505,9 +541,7 @@ def portfolio_weight_params_from_optuna(
                 pol.get("target_ann_vol", 0.45),
             )
         ),
-        "gross_cap": float(
-            params.get("MAX_EXPOSURE", pol.get("gross_exposure_cap", 1.2))
-        ),
+        "gross_cap": float(params.get("MAX_EXPOSURE", pol.get("gross_exposure_cap", 1.2))),
         "per_symbol_cap": float(
             params.get("MAX_EXPOSURE_PER_COIN", pol.get("per_symbol_cap", 0.25))
         ),

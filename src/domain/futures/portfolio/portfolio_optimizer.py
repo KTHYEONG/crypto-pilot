@@ -1,9 +1,11 @@
-"""Portfolio policy clipping and single entry point into strategy sizing caps."""
+"""Portfolio policy clipping and explicit input contracts for strategy sizing."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any
+
+import numpy as np
 
 
 @dataclass(frozen=True)
@@ -18,6 +20,34 @@ class PortfolioPolicyConfig:
     min_long_pf: float
     min_short_pf: float
     min_is_net_alpha_pct: float
+
+
+@dataclass(frozen=True)
+class PortfolioPolicyInputs:
+    """Explicit portfolio policy input contract.
+
+    Attributes:
+        mu_long_2d: Expected long return tensor, shape [T, N], per-bar simple return.
+        mu_short_2d: Expected short return tensor, shape [T, N], per-bar simple return.
+        risk_sigma_3d: Optional covariance cube shape [T, N, N].
+        risk_beta_2d: Optional beta matrix shape [T, N].
+        risk_residual_var_2d: Optional residual variance matrix shape [T, N].
+        cost_fraction_2d: Optional execution cost tensor in fraction units, shape [T, N].
+        cost_bps_2d: Optional execution cost tensor in bps units, shape [T, N].
+        cost_source: Optional canonical cost source metadata.
+        capacity_notional_2d: Optional per-bar capacity tensor shape [T, N].
+
+    """
+
+    mu_long_2d: np.ndarray | None = None
+    mu_short_2d: np.ndarray | None = None
+    risk_sigma_3d: np.ndarray | None = None
+    risk_beta_2d: np.ndarray | None = None
+    risk_residual_var_2d: np.ndarray | None = None
+    cost_fraction_2d: np.ndarray | None = None
+    cost_bps_2d: np.ndarray | None = None
+    cost_source: str | None = None
+    capacity_notional_2d: np.ndarray | None = None
 
 
 def load_portfolio_policy_config(cfg: dict[str, Any]) -> PortfolioPolicyConfig:
@@ -36,19 +66,33 @@ def load_portfolio_policy_config(cfg: dict[str, Any]) -> PortfolioPolicyConfig:
     )
 
 
-def apply_policy_constraints(params: dict[str, Any], policy: PortfolioPolicyConfig) -> dict[str, Any]:
+def apply_policy_constraints(
+    params: dict[str, Any],
+    policy: PortfolioPolicyConfig,
+) -> dict[str, Any]:
     out = dict(params)
     out["K_LONG"] = int(max(1, min(int(out.get("K_LONG", policy.top_k_long)), policy.top_k_long)))
-    out["K_SHORT"] = int(max(1, min(int(out.get("K_SHORT", policy.top_k_short)), policy.top_k_short)))
+    out["K_SHORT"] = int(
+        max(1, min(int(out.get("K_SHORT", policy.top_k_short)), policy.top_k_short))
+    )
     out["REBALANCE_BARS"] = int(max(1, out.get("REBALANCE_BARS", policy.rebalance_bars)))
     out["MAX_EXPOSURE_PER_COIN"] = float(
-        min(max(float(out.get("MAX_EXPOSURE_PER_COIN", policy.per_symbol_cap)), 0.05), policy.per_symbol_cap)
+        min(
+            max(float(out.get("MAX_EXPOSURE_PER_COIN", policy.per_symbol_cap)), 0.05),
+            policy.per_symbol_cap,
+        )
     )
     out["MAX_EXPOSURE"] = float(
-        min(max(float(out.get("MAX_EXPOSURE", policy.gross_exposure_cap)), 0.20), policy.gross_exposure_cap)
+        min(
+            max(float(out.get("MAX_EXPOSURE", policy.gross_exposure_cap)), 0.20),
+            policy.gross_exposure_cap,
+        )
     )
     out["TARGET_ANN_VOL"] = float(
-        min(max(float(out.get("TARGET_ANN_VOL", policy.target_ann_vol)), 0.05), policy.target_ann_vol)
+        min(
+            max(float(out.get("TARGET_ANN_VOL", policy.target_ann_vol)), 0.05),
+            policy.target_ann_vol,
+        )
     )
     return out
 
@@ -59,8 +103,10 @@ def finalize_strategy_portfolio_params(
     *,
     futures_config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Single funnel: merge trial/deploy params with portfolio policy caps (replaces ad-hoc clipping)."""
-    pol = policy if policy is not None else load_portfolio_policy_config(
-        futures_config if futures_config is not None else {}
+    """Single funnel for applying policy caps to trial/deploy params."""
+    pol = (
+        policy
+        if policy is not None
+        else load_portfolio_policy_config(futures_config if futures_config is not None else {})
     )
     return apply_policy_constraints(dict(raw_params), pol)

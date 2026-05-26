@@ -39,10 +39,13 @@ from src.domain.futures.optimization.ml_context import (
 )
 from src.domain.futures.optimization.observability.trial_observability import set_trial_event_attrs
 from src.domain.futures.optimization.opt_config import OPT_FUTURES_CONFIG
+from src.domain.futures.portfolio.friction_model import CostSnapshot, resolve_cost_snapshot
 from src.domain.futures.portfolio.portfolio_constructor import (
+    RiskSnapshot,
     portfolio_weight_params_from_optuna,
     precompute_rebalance_weights,
 )
+from src.domain.futures.portfolio.portfolio_optimizer import PortfolioPolicyInputs
 
 if TYPE_CHECKING:
     from src.domain.futures.optimization.ml_context import MLPhaseDContext
@@ -57,6 +60,7 @@ def _build_strategy_compose_diag(
     xs_long: np.ndarray,
     xs_short: np.ndarray,
     params: dict[str, Any],
+    cost_snapshot: CostSnapshot,
 ) -> dict[str, float]:
     n_bars = alpha_long.shape[0]
     beta_a = float(
@@ -65,11 +69,9 @@ def _build_strategy_compose_diag(
     ev_h = float(
         params.get("EV_HURDLE_BPS", OPT_FUTURES_CONFIG.get("FUTURES_DEFAULT_EV_HURDLE_BPS", 40.0))
     )
-    from src.core.settings import round_trip_cost_bps
-    # Taker 진입 + Taker 청산 + 2x 슬리피지 = 14bps (execution_sim, labels 와 동일 기준)
-    friction = round_trip_cost_bps() / 10000.0
-    friction_bps = friction * 10000.0
-    threshold_bps = friction_bps + ev_h
+    friction_2d = np.asarray(cost_snapshot.execution_cost_fraction_2d, dtype=np.float64)
+    friction_bps_2d = np.asarray(cost_snapshot.execution_cost_bps_2d, dtype=np.float64)
+    threshold_bps = friction_bps_2d + ev_h
     alpha_p95_bps = max(
         _safe_pct(alpha_long, 95) * 10000.0,
         _safe_pct(alpha_short, 95) * 10000.0,
@@ -78,14 +80,14 @@ def _build_strategy_compose_diag(
         "[ML-COST-WALL] alpha_p95=%.2fbps friction=%.1fbps "
         "hurdle_bps=%.1fbps floor=%.1fbps signal_clears_floor=%s",
         alpha_p95_bps,
-        friction_bps,
+        float(np.nanmean(friction_bps_2d)),
         ev_h,
-        threshold_bps,
-        str(alpha_p95_bps >= threshold_bps),
+        float(np.nanmean(threshold_bps)),
+        str(alpha_p95_bps >= float(np.nanmean(threshold_bps))),
     )
 
-    mu_l_pre = beta_a * alpha_long - friction
-    mu_s_pre = beta_a * alpha_short - friction
+    mu_l_pre = beta_a * alpha_long - friction_2d
+    mu_s_pre = beta_a * alpha_short - friction_2d
 
     return {
         "bars": float(n_bars),
@@ -97,9 +99,12 @@ def _build_strategy_compose_diag(
         "alpha_short_p50": _safe_pct(alpha_short, 50),
         "alpha_short_p95": _safe_pct(alpha_short, 95),
         "alpha_short_p99": _safe_pct(alpha_short, 99),
-        "friction_bps": float(friction_bps),
+        "friction_bps": float(np.nanmean(friction_bps_2d)),
         "ev_hurdle_bps": float(ev_h),
-        "effective_threshold_bps": float(threshold_bps),
+        "effective_threshold_bps": float(np.nanmean(threshold_bps)),
+        "execution_cost_bps_source": (
+            1.0 if cost_snapshot.execution_cost_bps_source == "per_symbol" else 0.0
+        ),
         "mu_pre_hurdle_p95_long": _safe_pct(mu_l_pre, 95),
         "mu_pre_hurdle_p95_short": _safe_pct(mu_s_pre, 95),
         "xs_long_nz_ratio": _nonzero_ratio(xs_long),
@@ -114,7 +119,7 @@ def _build_strategy_compose_diag(
         ),
         "mu_long_mean": float(np.mean(mu_l_pre)) if mu_l_pre.size > 0 else 0.0,
         "mu_short_mean": float(np.mean(mu_s_pre)) if mu_s_pre.size > 0 else 0.0,
-        "threshold_bps": threshold_bps,
+        "threshold_bps": float(np.nanmean(threshold_bps)),
     }
 
 def _safe_pct(arr: np.ndarray, q: float) -> float:
@@ -290,11 +295,16 @@ def _compose_strategy_scores_inplace(
     )
     ev_h = np.full((n_bars, n_syms), ev_h_base, dtype=np.float64)
 
-    from src.core.settings import round_trip_cost_bps
-    friction = round_trip_cost_bps() / 10000.0
-
-    mu_l = beta_a * alpha_l_2d - friction
-    mu_s = beta_a * alpha_s_2d - friction
+    cost_snapshot = resolve_cost_snapshot(
+        execution_cost_bps_2d=cast(
+            NDArray[np.float64] | None,
+            aligned.get("execution_cost_bps_2d"),
+        ),
+        shape=(n_bars, n_syms),
+    )
+    friction_2d = np.asarray(cost_snapshot.execution_cost_fraction_2d, dtype=np.float64)
+    mu_l = beta_a * alpha_l_2d - friction_2d
+    mu_s = beta_a * alpha_s_2d - friction_2d
 
     hurdle_frac = ev_h / 10000.0
     xs_l = np.where(mu_l >= hurdle_frac, mu_l, 0.0)
@@ -302,13 +312,20 @@ def _compose_strategy_scores_inplace(
 
     aligned["xs_score_long"] = np.ascontiguousarray(xs_l)
     aligned["xs_score_short"] = np.ascontiguousarray(xs_s)
+    aligned["mu_long_2d"] = np.ascontiguousarray(mu_l)
+    aligned["mu_short_2d"] = np.ascontiguousarray(mu_s)
     aligned["_strategy_compose_diag"] = _build_strategy_compose_diag(
         alpha_long=alpha_l_2d,
         alpha_short=alpha_s_2d,
         xs_long=xs_l,
         xs_short=xs_s,
         params=params,
+        cost_snapshot=cost_snapshot,
     )
+    aligned["_strategy_cost_snapshot_meta"] = {
+        "execution_cost_bps_source": cost_snapshot.execution_cost_bps_source,
+        "round_trip_cost_bps": float(cost_snapshot.round_trip_cost_bps_fallback),
+    }
     aligned["_strategy_signal_path_diag"] = {
         "alpha_nz": float(
             np.count_nonzero((np.abs(alpha_l_2d) > 1e-12) | (np.abs(alpha_s_2d) > 1e-12))
@@ -407,6 +424,37 @@ def _run_portfolio_numba_block(
         aligned.get("xs_score_short", np.zeros_like(close_np)), dtype=np.float64
     )
     sigma_3d = aligned.get("sigma_3d")
+    beta_2d = aligned.get("btc_beta_2d")
+    residual_var_2d = aligned.get("residual_var_2d")
+    capacity_notional_2d = aligned.get("capacity_notional_2d")
+    policy_inputs = PortfolioPolicyInputs(
+        mu_long_2d=cast(np.ndarray | None, aligned.get("mu_long_2d")),
+        mu_short_2d=cast(np.ndarray | None, aligned.get("mu_short_2d")),
+        risk_sigma_3d=cast(np.ndarray | None, sigma_3d),
+        risk_beta_2d=cast(np.ndarray | None, beta_2d),
+        risk_residual_var_2d=cast(np.ndarray | None, residual_var_2d),
+        cost_fraction_2d=cast(
+            np.ndarray | None,
+            aligned.get("execution_cost_fraction_2d"),
+        ),
+        cost_bps_2d=cast(np.ndarray | None, aligned.get("execution_cost_bps_2d")),
+        cost_source=cast(
+            str | None,
+            (aligned.get("_strategy_cost_snapshot_meta") or {}).get("execution_cost_bps_source"),
+        ),
+        capacity_notional_2d=cast(np.ndarray | None, capacity_notional_2d),
+    )
+    risk_snapshot = None
+    if sigma_3d is not None:
+        risk_snapshot = RiskSnapshot(
+            covariance_3d=np.asarray(sigma_3d, dtype=np.float64),
+            beta_2d=np.asarray(beta_2d, dtype=np.float64) if beta_2d is not None else None,
+            residual_var_2d=(
+                np.asarray(residual_var_2d, dtype=np.float64)
+                if residual_var_2d is not None
+                else None
+            ),
+        )
     tw_blk = np.asarray(
         precompute_rebalance_weights(
             close_np,
@@ -427,6 +475,9 @@ def _run_portfolio_numba_block(
                 else None
             ),
             sigma_3d=sigma_3d,
+            risk_snapshot=risk_snapshot,
+            btc_beta_2d=np.asarray(beta_2d, dtype=np.float64) if beta_2d is not None else None,
+            policy_inputs=policy_inputs,
         ),
         dtype=np.float64,
     )
