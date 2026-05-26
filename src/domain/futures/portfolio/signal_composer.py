@@ -7,7 +7,10 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from src.domain.futures.optimization.opt_config import OPT_FUTURES_CONFIG
+from src.domain.futures.optimization.opt_config import (
+    OPT_FUTURES_CONFIG,
+    default_ev_hurdle_bps,
+)
 
 
 def hours_per_bar_tf(tf: str) -> float:
@@ -64,7 +67,7 @@ def apply_linear_signal_composer_scores(
         raise TypeError("apply_linear_signal_composer_scores expects a DataFrame")
 
     beta_a = float(params.get("BETA_ALPHA", cfg.get("FUTURES_DEFAULT_BETA_ALPHA", 1.0)))
-    ev_h = float(params.get("EV_HURDLE_BPS", cfg.get("FUTURES_DEFAULT_EV_HURDLE_BPS", 10.0)))
+    ev_h = float(params.get("EV_HURDLE_BPS", default_ev_hurdle_bps(cfg)))
 
     from src.core.settings import round_trip_cost_bps
 

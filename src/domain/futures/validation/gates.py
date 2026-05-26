@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass, field
 from typing import Any
-import logging
 
 import numpy as np
-# from src.domain.futures.optimization.optimizer import check_hard_gates_ml  <-- REMOVED THIS
+
+from src.domain.futures.optimization.opt_config import default_ev_hurdle_bps
 
 # --- Atomic Blocks (6M non-overlapping) ---
 
@@ -547,7 +548,7 @@ def check_hard_gates_ml(
 
     # V3.1 Mechanical Hurdle: Mean Return per Trade (Expectancy) >= 0.40%
     ev_pct = float(oos_result.get("mean_ret_pct", oos_result.get("expectancy", 0.0)))
-    ev_ok = ev_pct >= float(cfg.get("FUTURES_DEFAULT_EV_HURDLE_BPS", 40.0)) / 100.0
+    ev_ok = ev_pct >= float(default_ev_hurdle_bps(cfg)) / 100.0
     trades = float(
         oos_result.get(
             "trade_count",

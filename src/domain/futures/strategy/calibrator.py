@@ -40,8 +40,10 @@ def _as_feature_frame(x: np.ndarray, feature_names: tuple[str, ...]) -> pd.DataF
 def _fit_one(
     train_x: pd.DataFrame,
     train_y: np.ndarray,
+    train_weight: np.ndarray,
     valid_x: pd.DataFrame,
     valid_y: np.ndarray,
+    valid_weight: np.ndarray,
     cfg: StrategyMLConfig,
     alpha: float,
 ) -> lgb.LGBMRegressor:
@@ -66,11 +68,13 @@ def _fit_one(
         model.fit(
             train_x,
             train_y,
+            sample_weight=train_weight,
             eval_set=[(valid_x, valid_y)],
+            eval_sample_weight=[valid_weight],
             callbacks=[lgb.early_stopping(cfg.early_stopping_rounds, verbose=False)],
         )
     else:
-        model.fit(train_x, train_y)
+        model.fit(train_x, train_y, sample_weight=train_weight)
     return model
 
 
@@ -95,6 +99,12 @@ def fit_quantile_calibrators(
     # Keep raw y_ev for calibrator so EV magnitude remains executable against cost wall.
     y_train = train.y_ev
     y_valid = valid.y_ev
+    w_train = np.asarray(train.sample_weight, dtype=np.float32).reshape(-1)
+    w_valid = np.asarray(valid.sample_weight, dtype=np.float32).reshape(-1)
+    if w_train.shape[0] != y_train.shape[0]:
+        raise ValueError("train sample_weight length mismatch")
+    if w_valid.shape[0] != y_valid.shape[0]:
+        raise ValueError("valid sample_weight length mismatch")
     x_train_np = np.column_stack([train.X, rank_score_train])
     x_train_names = (*train.feature_names, "rank_score")
     x_train = _as_feature_frame(x_train_np, x_train_names)
@@ -109,9 +119,9 @@ def fit_quantile_calibrators(
             x_train_names,
         )
     )
-    q10 = _fit_one(x_train, y_train, x_valid, y_valid, cfg, 0.10)
-    q50 = _fit_one(x_train, y_train, x_valid, y_valid, cfg, 0.50)
-    q90 = _fit_one(x_train, y_train, x_valid, y_valid, cfg, 0.90)
+    q10 = _fit_one(x_train, y_train, w_train, x_valid, y_valid, w_valid, cfg, 0.10)
+    q50 = _fit_one(x_train, y_train, w_train, x_valid, y_valid, w_valid, cfg, 0.50)
+    q90 = _fit_one(x_train, y_train, w_train, x_valid, y_valid, w_valid, cfg, 0.90)
     return CalibratorFitResult(q10=q10, q50=q50, q90=q90)
 
 
