@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import numpy as np
+
 from src.domain.futures.portfolio.friction_model import (
     FrictionConfig,
     compute_coarse_precharge_bps,
     compute_impact_bps,
+    resolve_cost_snapshot,
 )
 
 
@@ -76,3 +79,22 @@ def test_maker_share_impact_on_fee() -> None:
     # Plus standard latency buffer (0.5) remains same on both
     assert abs((total_taker - cfg_taker.latency_buffer_bps) - 4.0) < 1e-9
     assert abs((total_maker - cfg_maker.latency_buffer_bps) - (-2.0)) < 1e-9
+
+
+def test_cost_snapshot_bps_fraction_conversion() -> None:
+    """CostSnapshot bps/fraction conversion should be exact."""
+    per_symbol = np.array([[10.0, 25.0]], dtype=np.float64)
+    snapshot = resolve_cost_snapshot(execution_cost_bps_2d=per_symbol, shape=(1, 2))
+    assert snapshot.execution_cost_bps_source == "per_symbol"
+    assert np.allclose(snapshot.execution_cost_fraction_2d, per_symbol / 10000.0)
+
+
+def test_cost_snapshot_fallback_source_and_shape() -> None:
+    """Missing per-symbol costs should fallback to global round-trip cost."""
+    snapshot = resolve_cost_snapshot(execution_cost_bps_2d=None, shape=(2, 3))
+    assert snapshot.execution_cost_bps_source == "fallback_global"
+    assert snapshot.execution_cost_bps_2d.shape == (2, 3)
+    assert np.allclose(
+        snapshot.execution_cost_fraction_2d,
+        snapshot.execution_cost_bps_2d / 10000.0,
+    )
