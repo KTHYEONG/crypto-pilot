@@ -5,51 +5,46 @@ description: Classify the task and inspect repository context in a single step b
 
 # triage-scan
 
-**STRICT OBSERVATION MODE ONLY.** Do not edit files. Do not design solutions.
+**ULTRA-LEAN SCOUT MODE ONLY.** Your mission is to map the terrain with the absolute minimum token expenditure. Do not read files in full. Do not design solutions.
 
-## 🚫 Forbidden Actions (HARD CONSTRAINTS)
-- **NO SOLUTIONS:** Proposing, designing, or suggesting technical solutions, code changes, or logic improvements is **STRICTLY PROHIBITED**.
-- **NO SNIPPETS:** Do not provide code examples or "how-to" snippets.
-- **NO REFACTORING ADVICE:** Do not suggest cleaner ways to write existing code. 
-- **NO SPECULATION:** Do not guess how a bug might be fixed. Defer all "How" and "Why" (solution-wise) to the `spec` phase.
+## 🎯 Purpose: Surgical Discovery
+You are a scout, not an analyst. Provide the `spec` phase with the exact "Where" so it can focus entirely on "How" and "Why".
 
-## 🎯 Purpose
-Your ONLY job is **Discovery & Classification**. You are a scout mapping the terrain, not an engineer building a bridge. Gather facts to empower the next phase (`spec` or `implement`).
+## 🛠️ Smart Scan Guidelines (Token Efficiency)
+1.  **🚫 No Stale Memory:** Ignore `MEMORY.md`. Other tools may have changed the code. Use live `ls`, `glob`, and `grep` as the only source of truth.
+2.  **🎯 Surgical Grep (Pinpoint):** When confirming logic, use `total_max_matches: 1` and `context: 0-2`. You only need to prove the logic *exists* there, not understand it yet.
+3.  **📂 Directory/Filename Indexing:** Map the architecture using **folder names** and **docs/ filenames**. Do NOT read the content of documents unless the directory structure is ambiguous.
+4.  **👃 Interface Sniffing:** If a file's purpose is unclear, read only the first 5-10 lines (imports/class definition) to "sniff" its dependencies and role.
+5.  **❌ No Read-All:** Never read a full file (>50 lines) in this phase. Defer deep reading to the `spec` phase.
 
 ## ⚖️ Decide (Triage)
 Classify based on the request:
-- **Task type:** bug | feature | refactor | UI/style | config/build | docs | test-only | architecture | quant
+- **Task type:** bug | feature | refactor | quant | docs | config
 - **Risk/Uncertainty:** low | medium | high
-- **Scale:** high (data/IO intensive) | low
-- **Quant context:** active | none
-- **Strategy:** direct patch | regression-first | TDD | characterization-first | spike | docs-only
+- **Strategy:** direct patch | TDD | spike | regression-first
 
-## 🔎 Inspect (Scan - Factual Gathering)
-Gather raw data. Do not interpret or improve.
-- **Relevant Docs:** Search `docs/` for architecture, domains, and decisions.
-- **Relevant Files:** Identify paths that *will* be touched or referenced.
-- **Existing Patterns:** Document "what exists now" (e.g., "Uses X library for Y").
-- **Test Locations:** Locate where new tests should go or where existing tests reside.
-- **Public Interfaces:** Note signatures/APIs that might be affected.
+## 🔎 Inspect (Ultra-Lean Scan)
+- **Live Code Evidence:** `[File Path]:[Line No]` where keywords were found (Surgical only).
+- **Architecture Map:** Identify which domain/layer this belongs to based on path/doc names.
+- **Dependency Sniff:** (Optional) Core imports that define the file's nature.
+- **Test Context:** Locate the relevant test directory/file.
 
-## 📋 Self-Correction Checklist (Before Output)
-1. Did I suggest a code change? (If yes, DELETE IT)
-2. Did I explain *how* to fix the problem? (If yes, DELETE IT)
-3. Is my output 100% focused on "What" and "Where"? (If no, REWRITE IT)
+## 📋 Self-Correction Checklist
+1. Did I read more than 20 lines of any file? (If yes, you're over-scanning)
+2. Did I suggest a fix or snippet? (If yes, DELETE IT)
+3. Is the location of the logic 100% verified with a live tool? (If no, run a quick grep)
 
 ## 📤 Output Format
 ```md
 ### 🛡️ Triage & Scan: [Type]
-- **Risk/Uncertainty:** `[Risk]` / `[Uncertainty]` | **Quant:** `[Active/None]`
-- **Strategy:** `[Strategy]` ➔ `[Path]`
+- **Strategy:** `[Strategy]` ➔ `[Primary Path]`
+- **Architecture:** `[Domain/Layer]` (Inferred from paths/docs)
 
-#### 🔎 Context Gathered (Facts Only)
-- **Relevant Docs:** [Links]
-- **Relevant Files:** [Paths]
-- **Existing Patterns:** [Observation of current state]
-- **Test Locations:** [Paths]
-- **Public Interfaces:** [Current Signatures]
+#### 📍 Surgical Map (Verified)
+- **Primary Logic:** `[Path]:[Line]` (Found via [Keyword])
+- **Dependencies:** [Key Imports - if sniffed]
+- **Tests:** [Path]
+- **Related Docs:** [Filenames only - content not read]
 
-- **Next Action:** [Pause for user to invoke `spec` or proceed to `implement`]
-- **Blocking:** [Missing information or None]
+- **Next Action:** [Handoff verified paths to `spec` for deep analysis and reasoning]
 ```
