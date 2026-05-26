@@ -304,3 +304,86 @@ quality_report = build_quality_report(..., alpha_long_2d=ev_long_grid)  # ungate
 1. **hurdle 조정**: `FUTURES_DEFAULT_EV_HURDLE_BPS` 10→3 bps → floor=17 bps → 일부 trial 통과 가능
 2. **tolerance 추가**: `alpha_gate_cost_wall_tolerance_bps=8.0` → effective floor=16 bps
 3. **label horizon 확장**: 6→12 bars → gross return 증가로 EV 절대량 향상 (§16.4 참조)
+
+---
+
+## 21. EV/비용벽 단위 불일치 수정 + Alpha Gate 메트릭 수정 (2026-05-25)
+
+### 21.1 근본 원인 진단
+
+기존 `calibrator_target="beta_residualized"` (기본값)은 EV와 비용벽이 **서로 다른 수익 공간**에서 비교되는 구조적 불일치였다.
+
+| 층 | 코드 위치 | 측정 공간 |
+|---|---|---|
+| EV 학습 타깃 | `labels.py:205` `magnitude_target_long = max(long_net, 0)` | beta-residualized 잔차 |
+| 비용벽 | `ml_builder.py:685` `(dynamic_cost + hurdle) / 1e4` = 24bps | gross 체결 비용 |
+
+- 실행 구조가 per-symbol directional(`risk_controls.py:74-75`: `mu_l = beta_a * alpha_long - friction`)임을 코드로 확인 → 포지션이 실제 포착하는 수익은 gross return. 잔차 EV로 gross 비용벽을 비교하는 것은 사과 대 오렌지.
+- 결과: `xs_long_preservation=0.0004`(롱 신호 99.96% 소멸), `alpha_p95_bps=13.36 < floor=24.00` → `alpha_p95_below_cost_wall` FAIL.
+
+### 21.2 적용 수정 (2개 파일, 2줄)
+
+**수정 1 — `config.py:191`: calibrator_target 기본값 전환**
+
+```python
+# 변경 전
+calibrator_target: Literal["beta_residualized", "gross"] = "beta_residualized"
+# 변경 후
+calibrator_target: Literal["beta_residualized", "gross"] = "gross"
+```
+
+효과: calibrator가 `gross_long - funding` magnitude를 학습 → EV가 gross 수익 공간으로 이동. 랭커는 여전히 `relevance_long/short`(beta-residualized CS-demean) 사용 → IC 비퇴행.
+
+**수정 2 — `ml_builder.py:766`: alpha gate 메트릭 수정 (희소 신호 설계 결함 해소)**
+
+```python
+# 변경 전 (full-grid p95 — 희소 신호에 구조적 부적합)
+alpha_p95_bps=float(quality_report.get("alpha_p95_bps", 0.0)),
+
+# 변경 후 (eligible 검증 셀 p95 — 제로 패딩 없음)
+alpha_p95_bps=float(
+    quality_report.get(
+        "in_fold_valid_alpha_p95_bps",
+        quality_report.get("alpha_p95_bps", 0.0),
+    )
+),
+```
+
+**설계 결함 상세:** `alpha_p95_bps`는 ev_long_grid 전체(88% 제로 + 12% 비제로)의 p95 → 비제로 분포의 **58th percentile** 수준에 해당. 비제로 셀이 많아질수록(신호 개선) 오히려 p95가 하락하는 역설이 발생. `in_fold_valid_alpha_p95_bps`(line 745-748, eligible 검증 셀만 포함)가 희소 신호에 올바른 메트릭.
+
+### 21.3 Smoke Test 결과 비교
+
+| 지표 | 수정 전 | Track1 후 | Track1+Gate 수정 후 |
+|---|---|---|---|
+| `calibrator_target` | beta_residualized | **gross** | gross |
+| `long_nz` | 0.021 | **0.119** ↑5.7× | 0.119 |
+| `xs_long_preservation` | 0.0004 | **0.224** ↑560× | 0.224 |
+| `alpha_p95_bps` (full-grid) | 13.36 | 10.28 (역설적 감소) | 10.28 |
+| `in_fold_valid_alpha_p95_bps` | — | — | **75.0bps** |
+| **Alpha gate** | ❌ `alpha_p95_below_cost_wall` | ❌ 동일 | ✅ **PASS** |
+| fold=0 active ev_p90 | — | 75.0bps | 75.0bps |
+| fold=1 active ev_p90 | — | 23.2bps | 23.2bps |
+
+### 21.4 Alpha Gate 이후 드러난 Quality Gate 실패
+
+Alpha gate 해소 후 `passes_quality_gate`의 `spearman_rank_ic >= 0.0` 조건이 차단:
+
+```
+runner_failed: reason=strategy ml quality gate failed
+  spearman_rank_ic: -0.0165  (기준: >= 0.0)
+  ic_t_stat: -1.81  ic_hit_ratio: 0.468
+```
+
+- IC = -0.017은 통계적으로 0에 가까운 노이즈(t=-1.81, 유의성 없음).
+- 기존에는 alpha gate에서 먼저 차단되어 quality gate에 도달하지 못했음. quality gate가 실질적 신호 부재를 정상적으로 감지하고 있음.
+- 이것은 코드 버그가 아닌 **모델 예측력 자체**의 문제.
+
+### 21.5 현 상태 및 다음 우선순위
+
+**해소된 항목:**
+- EV/비용벽 단위 불일치 (`calibrator_target` 분리) ✅
+- Alpha gate 메트릭 설계 결함 (`in_fold_valid_alpha_p95_bps` 전환) ✅
+- `xs_long_preservation` 0.04% → 22% 회복 ✅
+
+**잔여 이슈 (별도 scope):**
+- `spearman_rank_ic < 0`: 모델의 실질 예측력 부재. 다음 우선순위는 피처/레이블/horizon 개선.
