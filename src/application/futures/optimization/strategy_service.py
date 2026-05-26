@@ -63,8 +63,11 @@ def assert_strategy_alpha_ready(
         if "alpha_long" not in df.columns or "alpha_short" not in df.columns:
             raise RuntimeError(f"strategy merge missing alpha columns for symbol={sym}")
         merged_count += 1
-        long_non_zero += int(np.count_nonzero(df["alpha_long"].to_numpy(dtype=np.float64)))
-        short_non_zero += int(np.count_nonzero(df["alpha_short"].to_numpy(dtype=np.float64)))
+        oos_start_idx = int(oos_data_maps.get(sym, {}).get(f"oos_start_idx_{tf}", 0))
+        alpha_long_oos = df["alpha_long"].to_numpy(dtype=np.float64)[oos_start_idx:]
+        alpha_short_oos = df["alpha_short"].to_numpy(dtype=np.float64)[oos_start_idx:]
+        long_non_zero += int(np.count_nonzero(alpha_long_oos))
+        short_non_zero += int(np.count_nonzero(alpha_short_oos))
 
     if merged_count == 0:
         raise RuntimeError("strategy mode has no merged symbol frames for selected timeframe")

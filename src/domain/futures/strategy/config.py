@@ -150,7 +150,7 @@ class StrategyMLConfig:
     valid_months: int = 3
     test_months: int = 3
     purge_bars: int = 6
-    embargo_bars: int = 1
+    embargo_bars: int = 6
     max_features: int = 64
     alpha_clip_bps: float = 75.0
     lambda_tail: float = 0.10
@@ -227,6 +227,12 @@ class StrategyMLConfig:
         """Validate ML strategy parameters."""
         if self.purge_bars < self.label_horizon_bars:
             raise ValueError("purge_bars must be >= label_horizon_bars")
+        if self.embargo_bars < self.label_horizon_bars:
+            raise ValueError(
+                f"embargo_bars ({self.embargo_bars}) must be >= "
+                f"label_horizon_bars ({self.label_horizon_bars}) "
+                "to prevent valid->test label horizon leakage"
+            )
         if self.embargo_bars < 1:
             raise ValueError("embargo_bars must be >= 1")
         if self.max_features > 64:

@@ -11,11 +11,14 @@ if str(_project_root) not in sys.path:
 # ruff: noqa: E402
 import argparse
 import logging
+import os
 import time
 from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any
 
+import numpy as np
+import optuna
 import pandas as pd
 
 import src.domain.futures.optimization.opt_config
@@ -202,6 +205,8 @@ def _build_run_config(args: argparse.Namespace) -> FuturesRunConfig:
     payload = vars(args).copy()
     if args.quick_backtest:
         payload["mode"] = "quick-backtest"
+    if payload.get("mode") == "quick-backtest":
+        payload["strategy"] = None
     if payload.get("symbols"):
         payload["symbols"] = tuple(str(payload["symbols"]).split(","))
     return build_run_config_from_args(payload)
@@ -264,7 +269,13 @@ def _run_data_stage(
     )
     target_symbols = list(run_config.symbols or configured)
     load_symbols = list(set(target_symbols + FUTURES_ANCHOR_SYMBOLS + FUTURES_MACRO_INDEX_SYMBOLS))
-    require_exec_1m = OPT_FUTURES_CONFIG.get("FUTURES_EXECUTION_MODE") == "intrabar_1m"
+    exec_mode_cfg = str(OPT_FUTURES_CONFIG.get("FUTURES_EXECUTION_MODE", "coarse"))
+    require_exec_1m = exec_mode_cfg == "intrabar_1m"
+    _logger.info(
+        "[EXEC_MODE] configured=%s require_exec_1m=%s",
+        exec_mode_cfg,
+        require_exec_1m,
+    )
 
     # Targeted Pre-fetch for 1m data:
     # If 1m execution is required and data sync is not skipped,
@@ -304,6 +315,13 @@ def _run_data_stage(
         window.end_date,
         load_exec_1m=require_exec_1m,
     )
+    if require_exec_1m:
+        missing_1m = [s for s in valid_symbols if "exec_1m" not in (data_maps.get(s) or {})]
+        if missing_1m:
+            raise RuntimeError(
+                f"exec_mode=intrabar_1m but {len(missing_1m)} symbol(s) missing 1m data: "
+                f"{missing_1m[:5]}{'...' if len(missing_1m) > 5 else ''}"
+            )
     if timeline and valid_symbols:
         warmup_bars_required = int(OPT_FUTURES_CONFIG.get("FUTURES_UNIVERSE_WARMUP_BARS", 60))
         inject_membership_masks_into_maps(
@@ -401,8 +419,6 @@ def _run_optimization_stage(
         data_stage.valid_symbols,
         OPT_FUTURES_CONFIG,
     )
-    import os
-
     physical_cores = max(1, (os.cpu_count() or 4) // 2)
     # Target 6 workers matching high-performance P-cores (e.g. i5-13600K)
     safe_workers_b = min(6, physical_cores)
@@ -470,9 +486,6 @@ def _run_optimization_stage(
     # ------------------ PROFILE SUMMARY REPORT ------------------
     try:
         if study_ml is not None:
-            import numpy as np
-            import optuna
-
             all_trials = study_ml.get_trials(deepcopy=False)
             valid_states = (
                 optuna.trial.TrialState.COMPLETE,
