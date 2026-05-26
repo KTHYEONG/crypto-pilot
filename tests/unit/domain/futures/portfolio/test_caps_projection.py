@@ -9,6 +9,8 @@ import numpy as np
 
 from src.domain.futures.portfolio.portfolio_constructor import (
     PortfolioCaps,
+    RiskSnapshot,
+    precompute_rebalance_weights,
     project_all_caps,
 )
 
@@ -116,3 +118,75 @@ class TestCapsProjection:
             caps=caps,
         )
         assert float(np.sum(np.abs(w_proj))) <= caps.gross + 1e-6
+
+    def test_precompute_uses_non_zero_beta_vector_for_projection(self) -> None:
+        """Precompute 경로에서 non-zero beta 입력 시 beta cap 투영이 적용된다."""
+        n_bars, n_syms = 8, 2
+        close_2d = np.full((n_bars, n_syms), 100.0, dtype=np.float64)
+        xs_long = np.zeros((n_bars, n_syms), dtype=np.float64)
+        xs_short = np.zeros((n_bars, n_syms), dtype=np.float64)
+        xs_long[0, :] = 1.0  # rebalance bar(i=1)에서 양(+) 가중치 유도
+        sigma_3d = np.tile(np.eye(n_syms, dtype=np.float64)[None, :, :] * 1e-8, (n_bars, 1, 1))
+        beta_2d = np.ones((n_bars, n_syms), dtype=np.float64)
+
+        out = precompute_rebalance_weights(
+            close_2d,
+            xs_long,
+            xs_short,
+            rebalance_bars=1,
+            lookback=5,
+            bars_per_year=1.0,
+            kappa=0.0,
+            f_kelly_max=10.0,
+            sigma_target_ann=1.0,
+            gross_cap=3.0,
+            per_symbol_cap=2.0,
+            sigma_3d=sigma_3d,
+            risk_snapshot=RiskSnapshot(covariance_3d=sigma_3d, beta_2d=beta_2d),
+        )
+
+        beta_exp = float(np.dot(out[1], beta_2d[1]))
+        assert abs(beta_exp) <= 0.50 + 1e-6
+
+    def test_precompute_fallback_without_beta_keeps_legacy_behavior(self) -> None:
+        """Beta 미입력이면 zero-vector fallback으로 기존 동작을 유지한다."""
+        n_bars, n_syms = 8, 2
+        close_2d = np.full((n_bars, n_syms), 100.0, dtype=np.float64)
+        xs_long = np.zeros((n_bars, n_syms), dtype=np.float64)
+        xs_short = np.zeros((n_bars, n_syms), dtype=np.float64)
+        xs_long[0, :] = 1.0
+        sigma_3d = np.tile(np.eye(n_syms, dtype=np.float64)[None, :, :] * 1e-8, (n_bars, 1, 1))
+
+        out = precompute_rebalance_weights(
+            close_2d,
+            xs_long,
+            xs_short,
+            rebalance_bars=1,
+            lookback=5,
+            bars_per_year=1.0,
+            kappa=0.0,
+            f_kelly_max=10.0,
+            sigma_target_ann=1.0,
+            gross_cap=3.0,
+            per_symbol_cap=2.0,
+            sigma_3d=sigma_3d,
+        )
+        out_with_zero_beta = precompute_rebalance_weights(
+            close_2d,
+            xs_long,
+            xs_short,
+            rebalance_bars=1,
+            lookback=5,
+            bars_per_year=1.0,
+            kappa=0.0,
+            f_kelly_max=10.0,
+            sigma_target_ann=1.0,
+            gross_cap=3.0,
+            per_symbol_cap=2.0,
+            sigma_3d=sigma_3d,
+            risk_snapshot=RiskSnapshot(
+                covariance_3d=sigma_3d,
+                beta_2d=np.zeros((n_bars, n_syms), dtype=np.float64),
+            ),
+        )
+        np.testing.assert_allclose(out, out_with_zero_beta, atol=1e-12)

@@ -66,3 +66,27 @@ def test_strategy_mode_fail_fast_when_alpha_prerequisite_missing() -> None:
     }
     with pytest.raises(RuntimeError, match="requires aligned alpha_long/alpha_short"):
         _run_portfolio_numba_block({"STRATEGY_MODE": True}, aligned)
+
+
+def test_strategy_compose_uses_per_symbol_execution_cost_when_present() -> None:
+    alpha = np.full((6, 2), 0.03, dtype=np.float64)
+    aligned = _base_aligned(alpha_long=alpha, alpha_short=alpha)
+    aligned["execution_cost_bps_2d"] = np.array(
+        [[10.0, 40.0]] * 6,
+        dtype=np.float64,
+    )
+    _compose_strategy_scores_inplace(aligned, {"BETA_ALPHA": 1.0, "EV_HURDLE_BPS": 0.0})
+    xs_l = np.asarray(aligned["xs_score_long"], dtype=np.float64)
+    assert np.all(xs_l[:, 0] > xs_l[:, 1])
+    meta = aligned.get("_strategy_cost_snapshot_meta")
+    assert isinstance(meta, dict)
+    assert meta.get("execution_cost_bps_source") == "per_symbol"
+
+
+def test_strategy_compose_fallback_cost_source_metadata() -> None:
+    alpha = np.full((6, 2), 0.03, dtype=np.float64)
+    aligned = _base_aligned(alpha_long=alpha, alpha_short=alpha)
+    _compose_strategy_scores_inplace(aligned, {"BETA_ALPHA": 1.0, "EV_HURDLE_BPS": 0.0})
+    meta = aligned.get("_strategy_cost_snapshot_meta")
+    assert isinstance(meta, dict)
+    assert meta.get("execution_cost_bps_source") == "fallback_global"
