@@ -127,12 +127,12 @@ def merge_membership_constraints_into_aligned(
     """Apply effective membership kill/entry constraints into aligned 2D arrays."""
     stats = merge_effective_membership_constraints(aligned_data, clamp_target_weights=False)
     if not persist_stats:
-        pass
+        return
     rows = stats.get("rows", [])
     if not rows:
-        pass
+        return
     if bool(aligned_data.get("_membership_stats_persisted", False)):
-        pass
+        return
     _MEMBERSHIP_STATS_PATH.parent.mkdir(parents=True, exist_ok=True)
     pd.DataFrame(rows).to_parquet(_MEMBERSHIP_STATS_PATH, index=False)
     aligned_data["_membership_stats_persisted"] = True
@@ -563,7 +563,10 @@ def _base_engine_params(ml: dict[str, Any], tf: str) -> dict[str, Any]:
         "PORTFOLIO_KAPPA": float(
             ml.get("PORTFOLIO_KAPPA", cfg.get("FUTURES_PORTFOLIO_KAPPA", 0.35))
         ),
-        "FUTURES_EXECUTION_MODE": str(ml.get("FUTURES_EXECUTION_MODE", "coarse")),
+        "FUTURES_EXECUTION_MODE": str(
+            ml.get("FUTURES_EXECUTION_MODE")
+            or OPT_FUTURES_CONFIG.get("FUTURES_EXECUTION_MODE", "coarse")
+        ),
         "STRATEGY_MODE": bool(ml.get("STRATEGY_MODE", False)),
     }
 

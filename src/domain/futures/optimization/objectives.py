@@ -223,7 +223,10 @@ def _base_engine_params(ml: dict[str, Any], tf: str) -> dict[str, Any]:
         "PORTFOLIO_KAPPA": float(
             ml.get("PORTFOLIO_KAPPA", cfg.get("FUTURES_PORTFOLIO_KAPPA", 0.35))
         ),
-        "FUTURES_EXECUTION_MODE": str(ml.get("FUTURES_EXECUTION_MODE", "coarse")),
+        "FUTURES_EXECUTION_MODE": str(
+            ml.get("FUTURES_EXECUTION_MODE")
+            or OPT_FUTURES_CONFIG.get("FUTURES_EXECUTION_MODE", "coarse")
+        ),
         "STRATEGY_MODE": bool(ml.get("STRATEGY_MODE", False)),
     }
 
@@ -354,16 +357,8 @@ def _run_portfolio_numba_block(
     import time
     _ = estimated_b
     orig_aligned = aligned
-    
-    # 1. Compose 시간 측정
-    t0 = time.perf_counter()
-    if bool(params.get("STRATEGY_MODE", False)):
-        _compose_strategy_scores_inplace(aligned, params, trial_number=trial_number)
-        if "xs_score_long" not in aligned or "xs_score_short" not in aligned:
-            raise RuntimeError("strategy mode failed to generate xs_score_long/xs_score_short")
-    t_compose = time.perf_counter() - t0
-    
-    # 2. Prep 시간 측정 (세부화)
+
+    # 1. 먼저 캐시 확인 및 준비 (prepare 비용은 공유 캐시로 절감)
     t0_align = time.perf_counter()
     if "_prepared_cache" in orig_aligned:
         prepared = orig_aligned["_prepared_cache"]
@@ -375,11 +370,22 @@ def _run_portfolio_numba_block(
         orig_aligned["_prepared_cache"] = prepared
     t_prep_align = time.perf_counter() - t0_align
 
+    # 2. STRATEGY_MODE compose: trial별 xs_score 격리 (얕은 복사로 공유 aligned 보호)
+    # 캐시 교체 이후 compose해야 xs_score가 최종 aligned에 유지됨.
+    # race condition 방지: 공유 prepared.aligned_data를 직접 쓰지 않고 사본에 쓴다.
+    t0_compose = time.perf_counter()
+    if bool(params.get("STRATEGY_MODE", False)):
+        aligned = {**aligned}  # xs_score 쓰기 격리 (얕은 복사)
+        _compose_strategy_scores_inplace(aligned, params, trial_number=trial_number)
+        if "xs_score_long" not in aligned or "xs_score_short" not in aligned:
+            raise RuntimeError("strategy mode failed to generate xs_score_long/xs_score_short")
+    t_compose = time.perf_counter() - t0_compose
+
     t0_const = time.perf_counter()
     zkill, zfund, lev_blk = _cached_kill_fund_lev(aligned, params)
     t_prep_constraint = time.perf_counter() - t0_const
     t_prep = t_prep_align + t_prep_constraint
-    
+
     # 캐싱 기록
     aligned["_prof_compose"] = t_compose
     aligned["_prof_prep"] = t_prep
@@ -914,7 +920,7 @@ def _evaluate_awf_phase_d_aggregate(
                     trial.report(float(np.mean(leg_log_tw)), step=leg_idx)
                     is_pruned = trial.should_prune()
                     t_metrics_db_io_tot += (time.perf_counter() - t0_db)
-                    
+
                     if is_pruned:
                         t_metrics_tot = t_metrics_pure_tot + t_metrics_db_io_tot
                         set_trial_event_attrs(
@@ -941,7 +947,7 @@ def _evaluate_awf_phase_d_aggregate(
         else:
             if trial is not None:
                 t_metrics_pure_tot += (time.perf_counter() - t0_met)
-        
+
         t_metrics_tot = t_metrics_pure_tot + t_metrics_db_io_tot
 
     leg_arr = np.asarray(leg_log_tw, dtype=np.float64)
