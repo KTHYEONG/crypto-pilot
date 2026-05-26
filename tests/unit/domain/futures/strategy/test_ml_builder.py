@@ -357,9 +357,14 @@ def test_build_ml_strategy_alpha_anchored_preserves_short_side_opportunity(
     assert float(target["alpha_short"].sum()) > 0.0
 
 
-def test_build_ml_strategy_alpha_anchored_applies_side_specific_cost_clearance(
+def test_build_ml_strategy_alpha_anchored_test_alpha_independent_of_future_labels(
     monkeypatch: MonkeyPatch,
 ) -> None:
+    """Test 구간 alpha가 미래 실현수익 label과 무관함을 검증 (leakage 회귀 테스트).
+
+    cost_clearance_target_long/short 값을 0과 1로 뒤집어도 test 구간 alpha가
+    동일해야 한다 — realized label이 더 이상 게이팅에 쓰이지 않으므로.
+    """
     datetimes = np.array(
         [np.datetime64("2024-01-01T00:00:00") + np.timedelta64(4 * i, "h") for i in range(40)],
         dtype="datetime64[ns]",
@@ -373,16 +378,9 @@ def test_build_ml_strategy_alpha_anchored_applies_side_specific_cost_clearance(
         feature_names=feature_names,
         valid_mask=np.ones((40, 5), dtype=bool),
     )
-    long_clear_all_off = np.zeros((40, 5), dtype=np.float32)
-    short_clear_all_on = np.ones((40, 5), dtype=np.float32)
-    long_clear_all_on = np.ones((40, 5), dtype=np.float32)
-    short_clear_all_off = np.zeros((40, 5), dtype=np.float32)
-    label_panel_state: dict[str, LabelPanel] = {}
 
-    def _build_label_panel_case(
-        long_clear: np.ndarray,
-        short_clear: np.ndarray,
-    ) -> LabelPanel:
+    def _make_label_panel(cost_clear_val: float) -> LabelPanel:
+        clear = np.full((40, 5), cost_clear_val, dtype=np.float32)
         return LabelPanel(
             long_net_ret=np.zeros((40, 5), dtype=np.float32),
             short_net_ret=np.zeros((40, 5), dtype=np.float32),
@@ -393,19 +391,14 @@ def test_build_ml_strategy_alpha_anchored_applies_side_specific_cost_clearance(
             relevance_short=np.full((40, 5), 2, dtype=np.int32),
             magnitude_target_long=np.ones((40, 5), dtype=np.float32) * 0.01,
             magnitude_target_short=np.ones((40, 5), dtype=np.float32) * 0.02,
-            cost_clearance_target=np.ones((40, 5), dtype=np.float32),
-            cost_clearance_target_long=long_clear,
-            cost_clearance_target_short=short_clear,
+            cost_clearance_target=clear,
+            cost_clearance_target_long=clear,
+            cost_clearance_target_short=clear,
             sample_weight=np.ones((40, 5), dtype=np.float32),
             eligible_mask=np.ones((40, 5), dtype=bool),
         )
 
-    label_panel_state["value"] = _build_label_panel_case(
-        long_clear=long_clear_all_off,
-        short_clear=short_clear_all_on,
-    )
-    captured_ev_targets: list[np.ndarray] = []
-    predict_call_counter = {"count": 0}
+    label_state: dict[str, LabelPanel] = {"value": _make_label_panel(1.0)}
 
     monkeypatch.setattr(
         "src.domain.futures.strategy.ml_builder.align_data_maps",
@@ -414,10 +407,10 @@ def test_build_ml_strategy_alpha_anchored_applies_side_specific_cost_clearance(
     monkeypatch.setattr("src.domain.futures.strategy.ml_builder.build_feature_panel", lambda *_: fp)
     monkeypatch.setattr(
         "src.domain.futures.strategy.ml_builder.build_label_panel",
-        lambda *_: label_panel_state["value"],
+        lambda *_: label_state["value"],
     )
 
-    def _build_long_matrix_capture(
+    def _build_long_matrix_stub(
         *,
         features: FeaturePanel,
         labels: LabelPanel,
@@ -429,23 +422,19 @@ def test_build_ml_strategy_alpha_anchored_applies_side_specific_cost_clearance(
         relevance_override: np.ndarray | None = None,
         ev_target_override: np.ndarray | None = None,
     ) -> LongMatrixDataset:
-        del features, labels, fold, min_group_size, relevance_override
+        del features, labels, fold, min_group_size, relevance_override, ev_target_override
         rows = (end - start) * len(symbols)
-        index_map: list[list[int]] = []
-        for t in range(start, end):
-            index_map.extend([[t, s_idx] for s_idx in range(len(symbols))])
-        if split == "test" and ev_target_override is not None:
-            captured_ev_targets.append(ev_target_override.copy())
+        idx = [[t, s] for t in range(start, end) for s in range(len(symbols))]
         return _dataset(
             x=np.ones((rows, 2), dtype=np.float32),
             group=np.array([len(symbols)] * (end - start), dtype=np.int32),
-            index_map=np.asarray(index_map, dtype=np.int64),
+            index_map=np.asarray(idx, dtype=np.int64),
             feature_names=feature_names,
         )
 
     monkeypatch.setattr(
         "src.domain.futures.strategy.ml_builder.build_long_matrix",
-        _build_long_matrix_capture,
+        _build_long_matrix_stub,
     )
     monkeypatch.setattr(
         "src.domain.futures.strategy.ml_builder.fit_ranker",
@@ -453,34 +442,25 @@ def test_build_ml_strategy_alpha_anchored_applies_side_specific_cost_clearance(
     )
     monkeypatch.setattr(
         "src.domain.futures.strategy.ml_builder.predict_rank_score",
-        lambda _model, ds: np.linspace(-0.5, 0.5, ds.X.shape[0], dtype=np.float32),
+        lambda _m, ds: np.linspace(-0.5, 0.5, ds.X.shape[0], dtype=np.float32),
     )
     monkeypatch.setattr(
         "src.domain.futures.strategy.ml_builder.fit_quantile_calibrators",
         lambda **_: SimpleNamespace(),
     )
-
-    def _predict_conservative_ev_side(
-        _models: object,
-        dataset: LongMatrixDataset,
-        _rank_score: NDArray[np.float32],
-        _cfg: StrategyMLConfig,
-    ) -> NDArray[np.float32]:
-        side = predict_call_counter["count"] % 2
-        predict_call_counter["count"] += 1
-        base = 0.03 if side == 0 else 0.04
-        return np.ones(dataset.X.shape[0], dtype=np.float32) * np.float32(base)
-
     monkeypatch.setattr(
         "src.domain.futures.strategy.ml_builder.predict_conservative_ev",
-        _predict_conservative_ev_side,
+        lambda _m, ds, _s, _c: np.ones(ds.X.shape[0], dtype=np.float32) * np.float32(0.05),
     )
 
     cfg = StrategyConfig(
         name="ml_lambdamart_v1",
         ml=StrategyMLConfig(min_group_size=2, train_months=1, valid_months=1, test_months=1),
     )
-    panel_long_blocked = build_ml_strategy_alpha_anchored(
+
+    # Arrange: run with cost_clearance_target = all-ones (cost cleared)
+    label_state["value"] = _make_label_panel(1.0)
+    panel_cleared = build_ml_strategy_alpha_anchored(
         data_maps={},
         symbols=list(symbols),
         tf="4h",
@@ -490,12 +470,9 @@ def test_build_ml_strategy_alpha_anchored_applies_side_specific_cost_clearance(
         target_end=36,
     )
 
-    label_panel_state["value"] = _build_label_panel_case(
-        long_clear=long_clear_all_on,
-        short_clear=short_clear_all_off,
-    )
-    predict_call_counter["count"] = 0
-    panel_short_blocked = build_ml_strategy_alpha_anchored(
+    # Act: run with cost_clearance_target = all-zeros (cost NOT cleared)
+    label_state["value"] = _make_label_panel(0.0)
+    panel_blocked = build_ml_strategy_alpha_anchored(
         data_maps={},
         symbols=list(symbols),
         tf="4h",
@@ -505,17 +482,22 @@ def test_build_ml_strategy_alpha_anchored_applies_side_specific_cost_clearance(
         target_end=36,
     )
 
-    assert len(captured_ev_targets) >= 2
-    np.testing.assert_allclose(captured_ev_targets[0][35, 0], np.float32(0.01), atol=0.0, rtol=0.0)
-    np.testing.assert_allclose(captured_ev_targets[1][35, 0], np.float32(0.02), atol=0.0, rtol=0.0)
-
-    target_long_blocked = panel_long_blocked.loc[(datetimes[35], slice(None)), :]
-    target_short_blocked = panel_short_blocked.loc[(datetimes[35], slice(None)), :]
-
-    assert float(target_long_blocked["alpha_long"].sum()) == 0.0
-    assert float(target_long_blocked["alpha_short"].sum()) > 0.0
-    assert float(target_short_blocked["alpha_long"].sum()) > 0.0
-    assert float(target_short_blocked["alpha_short"].sum()) == 0.0
+    # Assert: test window alpha must be identical regardless of cost_clearance_target
+    target_ts = datetimes[35]
+    long_cleared = panel_cleared.loc[(target_ts, slice(None)), "alpha_long"].to_numpy()
+    long_blocked = panel_blocked.loc[(target_ts, slice(None)), "alpha_long"].to_numpy()
+    np.testing.assert_array_equal(
+        long_cleared,
+        long_blocked,
+        err_msg="alpha_long must not depend on cost_clearance_target (look-ahead leakage removed)",
+    )
+    short_cleared = panel_cleared.loc[(target_ts, slice(None)), "alpha_short"].to_numpy()
+    short_blocked = panel_blocked.loc[(target_ts, slice(None)), "alpha_short"].to_numpy()
+    np.testing.assert_array_equal(
+        short_cleared,
+        short_blocked,
+        err_msg="alpha_short must not depend on cost_clearance_target (look-ahead leakage removed)",
+    )
 
 
 def test_build_ml_strategy_alpha_virtual_refit_uses_own_train_normalization(

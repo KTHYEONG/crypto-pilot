@@ -91,23 +91,6 @@ def _resolve_side_targets(
     return long_rel, short_rel, long_mag, short_mag
 
 
-def _resolve_side_clearance(
-    labels: LabelPanel,
-) -> tuple[np.ndarray | None, np.ndarray | None]:
-    """Resolve side-specific cost-clearance targets."""
-    long_clear = (
-        labels.cost_clearance_target_long
-        if labels.cost_clearance_target_long is not None
-        else labels.cost_clearance_target
-    )
-    short_clear = (
-        labels.cost_clearance_target_short
-        if labels.cost_clearance_target_short is not None
-        else labels.cost_clearance_target
-    )
-    return long_clear, short_clear
-
-
 def _predict_quantiles_with_fallback(
     models: Any,
     dataset: LongMatrixDataset,
@@ -119,6 +102,111 @@ def _predict_quantiles_with_fallback(
         return predict_ev_quantiles(models, dataset, rank_score)
     fallback = np.asarray(ev_pred, dtype=np.float32).reshape(-1).copy()
     return EVQuantiles(q10=fallback, q50=fallback, q90=fallback)
+
+
+@dataclass(frozen=True)
+class _FoldPredictResult:
+    """공통 fold 학습·예측 결과 컨테이너 (WF·AWF·virtual 공유)."""
+
+    ev_test_long: np.ndarray
+    ev_test_short: np.ndarray
+    quant_test_long: EVQuantiles
+    quant_test_short: EVQuantiles
+    conf_test_long: np.ndarray
+    conf_test_short: np.ndarray
+    score_test_long: np.ndarray
+    score_test_short: np.ndarray
+    ev_valid_long: np.ndarray
+    ev_valid_short: np.ndarray
+
+
+def _fit_predict_fold_dual_side(
+    train_long: LongMatrixDataset,
+    valid_long: LongMatrixDataset,
+    test_long: LongMatrixDataset,
+    train_short: LongMatrixDataset,
+    valid_short: LongMatrixDataset,
+    test_short: LongMatrixDataset,
+    ml_cfg: StrategyMLConfig,
+) -> _FoldPredictResult:
+    """공통 fold 학습·예측 엔진 (WF·AWF·virtual 공유).
+
+    Args:
+        train_long: Long side training dataset.
+        valid_long: Long side validation dataset.
+        test_long: Long side test dataset.
+        train_short: Short side training dataset.
+        valid_short: Short side validation dataset.
+        test_short: Short side test dataset.
+        ml_cfg: ML strategy configuration.
+
+    Returns:
+        _FoldPredictResult with all EV/quantile/confidence/score arrays.
+
+    Note:
+        Time Complexity: O(N * T) where N=samples, T=trees.
+        Space Complexity: O(N) per output array.
+
+    """
+    fit_long = fit_ranker(train=train_long, valid=valid_long, cfg=ml_cfg)
+    fit_short = fit_ranker(train=train_short, valid=valid_short, cfg=ml_cfg)
+    score_train_long = predict_rank_score(fit_long.model, train_long)
+    score_valid_long = predict_rank_score(fit_long.model, valid_long)
+    score_test_long = predict_rank_score(fit_long.model, test_long)
+    score_test_short = predict_rank_score(fit_short.model, test_short)
+    calibration_fit_long = fit_quantile_calibrators(
+        train=train_long,
+        valid=valid_long,
+        rank_score_train=score_train_long,
+        rank_score_valid=score_valid_long,
+        cfg=ml_cfg,
+    )
+    calibration_fit_short = fit_quantile_calibrators(
+        train=train_short,
+        valid=valid_short,
+        rank_score_train=predict_rank_score(fit_short.model, train_short),
+        rank_score_valid=predict_rank_score(fit_short.model, valid_short),
+        cfg=ml_cfg,
+    )
+    ev_valid_long = predict_conservative_ev(
+        calibration_fit_long, valid_long, score_valid_long, ml_cfg
+    )
+    ev_valid_short = predict_conservative_ev(
+        calibration_fit_short,
+        valid_short,
+        predict_rank_score(fit_short.model, valid_short),
+        ml_cfg,
+    )
+    ev_test_long = predict_conservative_ev(
+        calibration_fit_long, test_long, score_test_long, ml_cfg
+    )
+    ev_test_short = predict_conservative_ev(
+        calibration_fit_short, test_short, score_test_short, ml_cfg
+    )
+    quant_test_long = _predict_quantiles_with_fallback(
+        calibration_fit_long, test_long, score_test_long, ev_test_long
+    )
+    quant_test_short = _predict_quantiles_with_fallback(
+        calibration_fit_short, test_short, score_test_short, ev_test_short
+    )
+    conf_test_long = compute_forecast_confidence(
+        quant_test_long.q10, quant_test_long.q50, quant_test_long.q90
+    )
+    conf_test_short = compute_forecast_confidence(
+        quant_test_short.q10, quant_test_short.q50, quant_test_short.q90
+    )
+    return _FoldPredictResult(
+        ev_test_long=ev_test_long,
+        ev_test_short=ev_test_short,
+        quant_test_long=quant_test_long,
+        quant_test_short=quant_test_short,
+        conf_test_long=conf_test_long,
+        conf_test_short=conf_test_short,
+        score_test_long=score_test_long,
+        score_test_short=score_test_short,
+        ev_valid_long=ev_valid_long,
+        ev_valid_short=ev_valid_short,
+    )
 
 
 def _resolve_horizon_candidates(ml_cfg: StrategyMLConfig) -> tuple[int, ...]:
@@ -425,94 +513,47 @@ def build_ml_strategy_alpha(
         validate_long_matrix(train_short)
         validate_long_matrix(valid_short)
         validate_long_matrix(test_short)
-        fit_long = fit_ranker(train=train_long, valid=valid_long, cfg=ml_cfg)
-        fit_short = fit_ranker(train=train_short, valid=valid_short, cfg=ml_cfg)
-        score_train = predict_rank_score(fit_long.model, train_long)
-        score_valid = predict_rank_score(fit_long.model, valid_long)
-        score_test = predict_rank_score(fit_long.model, test_long)
-        score_test_short = predict_rank_score(fit_short.model, test_short)
+        _fold_result = _fit_predict_fold_dual_side(
+            train_long=train_long,
+            valid_long=valid_long,
+            test_long=test_long,
+            train_short=train_short,
+            valid_short=valid_short,
+            test_short=test_short,
+            ml_cfg=ml_cfg,
+        )
+        ev_test_long = _fold_result.ev_test_long
+        ev_test_short = _fold_result.ev_test_short
+        quant_test_long = _fold_result.quant_test_long
+        quant_test_short = _fold_result.quant_test_short
+        conf_test_long = _fold_result.conf_test_long
+        conf_test_short = _fold_result.conf_test_short
+        score_test = _fold_result.score_test_long
+        score_test_short = _fold_result.score_test_short
+        ev_valid_long = _fold_result.ev_valid_long
+        ev_valid_short = _fold_result.ev_valid_short
         _logger.info(
-            "[ML-RANKER] fold=%d train_n=%d valid_n=%d test_n=%d train_mean=%.6f valid_mean=%.6f",
+            "[ML-RANKER] fold=%d train_n=%d valid_n=%d test_n=%d",
             fold.fold_id,
             int(train_long.X.shape[0]),
             int(valid_long.X.shape[0]),
             int(test_long.X.shape[0]),
-            float(np.mean(score_train, dtype=np.float32)) if score_train.size > 0 else 0.0,
-            float(np.mean(score_valid, dtype=np.float32)) if score_valid.size > 0 else 0.0,
-        )
-        calibration_fit_long = fit_quantile_calibrators(
-            train=train_long,
-            valid=valid_long,
-            rank_score_train=score_train,
-            rank_score_valid=score_valid,
-            cfg=ml_cfg,
-        )
-        calibration_fit_short = fit_quantile_calibrators(
-            train=train_short,
-            valid=valid_short,
-            rank_score_train=predict_rank_score(fit_short.model, train_short),
-            rank_score_valid=predict_rank_score(fit_short.model, valid_short),
-            cfg=ml_cfg,
-        )
-        ev_valid_long = predict_conservative_ev(
-            calibration_fit_long,
-            valid_long,
-            score_valid,
-            ml_cfg,
-        )
-        ev_valid_short = predict_conservative_ev(
-            calibration_fit_short,
-            valid_short,
-            predict_rank_score(fit_short.model, valid_short),
-            ml_cfg,
         )
         valid_ev_long_all.append(ev_valid_long)
         valid_ev_short_all.append(ev_valid_short)
-        ev_test_long = predict_conservative_ev(calibration_fit_long, test_long, score_test, ml_cfg)
-        ev_test_short = predict_conservative_ev(
-            calibration_fit_short,
-            test_short,
-            score_test_short,
-            ml_cfg,
-        )
-        quant_test_long = _predict_quantiles_with_fallback(
-            calibration_fit_long,
-            test_long,
-            score_test,
-            ev_test_long,
-        )
-        quant_test_short = _predict_quantiles_with_fallback(
-            calibration_fit_short,
-            test_short,
-            score_test_short,
-            ev_test_short,
-        )
-        conf_test_long = compute_forecast_confidence(
-            quant_test_long.q10,
-            quant_test_long.q50,
-            quant_test_long.q90,
-        )
-        conf_test_short = compute_forecast_confidence(
-            quant_test_short.q10,
-            quant_test_short.q50,
-            quant_test_short.q90,
-        )
-        long_clear, short_clear = _resolve_side_clearance(labels)
         for row, (t_idx, s_idx) in enumerate(test_long.index_map):
             q10_long_grid[int(t_idx), int(s_idx)] = quant_test_long.q10[row]
             q50_long_grid[int(t_idx), int(s_idx)] = quant_test_long.q50[row]
             q90_long_grid[int(t_idx), int(s_idx)] = quant_test_long.q90[row]
             confidence_long_grid[int(t_idx), int(s_idx)] = conf_test_long[row]
-            if long_clear is None or long_clear[int(t_idx), int(s_idx)] > 0.0:
-                ev_long_grid[int(t_idx), int(s_idx)] = np.float32(max(ev_test_long[row], 0.0))
+            ev_long_grid[int(t_idx), int(s_idx)] = np.float32(max(ev_test_long[row], 0.0))
             score_grid[int(t_idx), int(s_idx)] = score_test[row]
         for row, (t_idx, s_idx) in enumerate(test_short.index_map):
             q10_short_grid[int(t_idx), int(s_idx)] = quant_test_short.q10[row]
             q50_short_grid[int(t_idx), int(s_idx)] = quant_test_short.q50[row]
             q90_short_grid[int(t_idx), int(s_idx)] = quant_test_short.q90[row]
             confidence_short_grid[int(t_idx), int(s_idx)] = conf_test_short[row]
-            if short_clear is None or short_clear[int(t_idx), int(s_idx)] > 0.0:
-                ev_short_grid[int(t_idx), int(s_idx)] = np.float32(max(ev_test_short[row], 0.0))
+            ev_short_grid[int(t_idx), int(s_idx)] = np.float32(max(ev_test_short[row], 0.0))
             if np.isnan(score_grid[int(t_idx), int(s_idx)]):
                 score_grid[int(t_idx), int(s_idx)] = score_test_short[row]
         _logger.info(
@@ -547,16 +588,22 @@ def build_ml_strategy_alpha(
 
         from src.domain.futures.strategy.contracts import FoldSpec
 
+        _v_purge = getattr(ml_cfg, "purge_bars", 0)
+        _v_embargo = getattr(ml_cfg, "embargo_bars", 0)
+        _v_purged_valid_start = min(v_train_end + _v_purge, max(v_train_end, v_valid_end - 1))
+        _v_embargoed_test_start = min(
+            last_test_end + _v_embargo, max(last_test_end, v_test_end - 1)
+        )
         v_fold = FoldSpec(
             fold_id=len(folds),
             train_start=v_train_start,
             train_end=v_train_end,
-            valid_start=v_valid_start,
+            valid_start=_v_purged_valid_start,
             valid_end=v_valid_end,
-            test_start=v_test_start,
+            test_start=_v_embargoed_test_start,
             test_end=v_test_end,
-            purge_bars=ml_cfg.purge_bars,
-            embargo_bars=ml_cfg.embargo_bars,
+            purge_bars=_v_purge,
+            embargo_bars=_v_embargo,
         )
         v_train_values = features.values[v_train_start:v_train_end].astype(np.float64, copy=False)
         v_bounds = fit_robust_bounds(v_train_values, clip_quantile=0.995)
@@ -583,7 +630,6 @@ def build_ml_strategy_alpha(
         )
         # Dual-side label derivation — same pattern as regular fold loop
         v_long_rel, v_short_rel, v_long_mag, v_short_mag = _resolve_side_targets(labels)
-        v_long_clear, v_short_clear = _resolve_side_clearance(labels)
         v_train_long = _build_side_matrix(
             features=v_normalized_features,
             labels=labels,
@@ -657,74 +703,37 @@ def build_ml_strategy_alpha(
             validate_long_matrix(v_train_short)
             validate_long_matrix(v_valid_short)
             validate_long_matrix(v_test_short)
-            v_fit_long = fit_ranker(train=v_train_long, valid=v_valid_long, cfg=ml_cfg)
-            v_fit_short = fit_ranker(train=v_train_short, valid=v_valid_short, cfg=ml_cfg)
-            v_score_train_long = predict_rank_score(v_fit_long.model, v_train_long)
-            v_score_valid_long = predict_rank_score(v_fit_long.model, v_valid_long)
-            v_score_test_long = predict_rank_score(v_fit_long.model, v_test_long)
-            v_score_test_short = predict_rank_score(v_fit_short.model, v_test_short)
-            v_calibration_fit_long = fit_quantile_calibrators(
-                train=v_train_long,
-                valid=v_valid_long,
-                rank_score_train=v_score_train_long,
-                rank_score_valid=v_score_valid_long,
-                cfg=ml_cfg,
+            _v_result = _fit_predict_fold_dual_side(
+                train_long=v_train_long,
+                valid_long=v_valid_long,
+                test_long=v_test_long,
+                train_short=v_train_short,
+                valid_short=v_valid_short,
+                test_short=v_test_short,
+                ml_cfg=ml_cfg,
             )
-            v_calibration_fit_short = fit_quantile_calibrators(
-                train=v_train_short,
-                valid=v_valid_short,
-                rank_score_train=predict_rank_score(v_fit_short.model, v_train_short),
-                rank_score_valid=predict_rank_score(v_fit_short.model, v_valid_short),
-                cfg=ml_cfg,
-            )
-            v_ev_test_long = predict_conservative_ev(
-                v_calibration_fit_long, v_test_long, v_score_test_long, ml_cfg
-            )
-            v_ev_test_short = predict_conservative_ev(
-                v_calibration_fit_short, v_test_short, v_score_test_short, ml_cfg
-            )
-            v_quant_test_long = _predict_quantiles_with_fallback(
-                v_calibration_fit_long,
-                v_test_long,
-                v_score_test_long,
-                v_ev_test_long,
-            )
-            v_quant_test_short = _predict_quantiles_with_fallback(
-                v_calibration_fit_short,
-                v_test_short,
-                v_score_test_short,
-                v_ev_test_short,
-            )
-            v_conf_test_long = compute_forecast_confidence(
-                v_quant_test_long.q10,
-                v_quant_test_long.q50,
-                v_quant_test_long.q90,
-            )
-            v_conf_test_short = compute_forecast_confidence(
-                v_quant_test_short.q10,
-                v_quant_test_short.q50,
-                v_quant_test_short.q90,
-            )
-            # Write directly into side-specific grids — same gate pattern as regular folds
+            v_ev_test_long = _v_result.ev_test_long
+            v_ev_test_short = _v_result.ev_test_short
+            v_quant_test_long = _v_result.quant_test_long
+            v_quant_test_short = _v_result.quant_test_short
+            v_conf_test_long = _v_result.conf_test_long
+            v_conf_test_short = _v_result.conf_test_short
+            v_score_test_long = _v_result.score_test_long
+            v_score_test_short = _v_result.score_test_short
+            # Write directly into side-specific grids — ex-ante gate only (no look-ahead)
             for row, (t_idx, s_idx) in enumerate(v_test_long.index_map):
                 q10_long_grid[int(t_idx), int(s_idx)] = v_quant_test_long.q10[row]
                 q50_long_grid[int(t_idx), int(s_idx)] = v_quant_test_long.q50[row]
                 q90_long_grid[int(t_idx), int(s_idx)] = v_quant_test_long.q90[row]
                 confidence_long_grid[int(t_idx), int(s_idx)] = v_conf_test_long[row]
-                if v_long_clear is None or v_long_clear[int(t_idx), int(s_idx)] > 0.0:
-                    ev_long_grid[int(t_idx), int(s_idx)] = np.float32(
-                        max(v_ev_test_long[row], 0.0)
-                    )
+                ev_long_grid[int(t_idx), int(s_idx)] = np.float32(max(v_ev_test_long[row], 0.0))
                 score_grid[int(t_idx), int(s_idx)] = v_score_test_long[row]
             for row, (t_idx, s_idx) in enumerate(v_test_short.index_map):
                 q10_short_grid[int(t_idx), int(s_idx)] = v_quant_test_short.q10[row]
                 q50_short_grid[int(t_idx), int(s_idx)] = v_quant_test_short.q50[row]
                 q90_short_grid[int(t_idx), int(s_idx)] = v_quant_test_short.q90[row]
                 confidence_short_grid[int(t_idx), int(s_idx)] = v_conf_test_short[row]
-                if v_short_clear is None or v_short_clear[int(t_idx), int(s_idx)] > 0.0:
-                    ev_short_grid[int(t_idx), int(s_idx)] = np.float32(
-                        max(v_ev_test_short[row], 0.0)
-                    )
+                ev_short_grid[int(t_idx), int(s_idx)] = np.float32(max(v_ev_test_short[row], 0.0))
                 if np.isnan(score_grid[int(t_idx), int(s_idx)]):
                     score_grid[int(t_idx), int(s_idx)] = v_score_test_short[row]
             _logger.info(
@@ -735,25 +744,7 @@ def build_ml_strategy_alpha(
                 float(np.count_nonzero(v_ev_test_short) / max(1, v_ev_test_short.size)),
             )
 
-    # EV-level per-cell gate: gate_margin = ev_bps - (dynamic_cost_bps + hurdle_bps) > 0.
-    # Gated copies used for panel output; ungated originals retained for quality diagnostics
-    # so build_quality_report sees real alpha_p95_bps, not zeroed values.
-    _hurdle_bps = float(OPT_FUTURES_CONFIG.get("FUTURES_DEFAULT_EV_HURDLE_BPS", 10.0))
-    if labels.dynamic_cost_bps_2d is not None:
-        _dcost_2d = labels.dynamic_cost_bps_2d.astype(np.float32)
-    else:
-        _dcost_2d = np.full_like(ev_long_grid, np.float32(round_trip_cost_bps()))
-    _ev_gate_2d = (_dcost_2d + np.float32(_hurdle_bps)) / np.float32(1e4)
-    ev_long_gated = np.where(ev_long_grid > _ev_gate_2d, ev_long_grid, np.float32(0.0))
-    ev_short_gated = np.where(ev_short_grid > _ev_gate_2d, ev_short_grid, np.float32(0.0))
-    _logger.info(
-        "[ML-EV-GATE] hurdle=%.1fbps long_pass=%.4f short_pass=%.4f",
-        _hurdle_bps,
-        float(np.mean(ev_long_gated > 0.0)),
-        float(np.mean(ev_short_gated > 0.0)),
-    )
-
-    ev_grid = ev_long_gated - ev_short_gated
+    ev_grid = ev_long_grid - ev_short_grid
     forecast_metadata_v3 = {
         "q10_long": q10_long_grid.reshape(-1),
         "q50_long": q50_long_grid.reshape(-1),
@@ -772,8 +763,8 @@ def build_ml_strategy_alpha(
         eligible_mask=labels.eligible_mask,
         forecast_metadata_v3=forecast_metadata_v3,
     )
-    panel.loc[:, "alpha_long"] = ev_long_gated.reshape(-1)
-    panel.loc[:, "alpha_short"] = ev_short_gated.reshape(-1)
+    panel.loc[:, "alpha_long"] = ev_long_grid.reshape(-1)
+    panel.loc[:, "alpha_short"] = ev_short_grid.reshape(-1)
     panel.attrs["strategy_name"] = cfg.name
     panel.attrs["feature_names"] = list(features.feature_names)
     panel.attrs["fold_count"] = len(folds)
@@ -800,8 +791,8 @@ def build_ml_strategy_alpha(
         score_2d=score_grid,
         signed_ret_2d=labels.signed_net_ret.astype(np.float64),
         relevance_2d=labels.relevance.astype(np.float64),
-        alpha_long_2d=ev_long_grid,    # ungated: preserves real alpha_p95_bps
-        alpha_short_2d=ev_short_grid,  # ungated
+        alpha_long_2d=ev_long_grid,
+        alpha_short_2d=ev_short_grid,
     )
     valid_stack_long = (
         np.concatenate(valid_ev_long_all)
@@ -1003,13 +994,15 @@ def build_ml_strategy_alpha_anchored(
     valid_start = train_end
     valid_end = anchor_end
 
+    _purged_valid_start = min(valid_start + ml_cfg.purge_bars, max(valid_start, valid_end - 1))
+    _embargoed_test_start = min(tgt_start + ml_cfg.embargo_bars, max(tgt_start, tgt_end - 1))
     fold = FoldSpec(
         fold_id=0,
         train_start=0,
         train_end=train_end,
-        valid_start=valid_start,
+        valid_start=_purged_valid_start,
         valid_end=valid_end,
-        test_start=tgt_start,
+        test_start=_embargoed_test_start,
         test_end=tgt_end,
         purge_bars=ml_cfg.purge_bars,
         embargo_bars=ml_cfg.embargo_bars,
@@ -1045,7 +1038,6 @@ def build_ml_strategy_alpha_anchored(
 
     t_matrix = time.perf_counter()
     long_rel, short_rel, long_mag, short_mag = _resolve_side_targets(labels)
-    long_clear, short_clear = _resolve_side_clearance(labels)
 
     train_long = _build_side_matrix(
         features=normalized_features,
@@ -1138,67 +1130,31 @@ def build_ml_strategy_alpha_anchored(
     matrix_elapsed = time.perf_counter() - t_matrix
 
     t_fit_predict = time.perf_counter()
-    fit_result_long = fit_ranker(train=train_long, valid=valid_long, cfg=ml_cfg)
-    fit_result_short = fit_ranker(train=train_short, valid=valid_short, cfg=ml_cfg)
-    score_train_long = predict_rank_score(fit_result_long.model, train_long)
-    score_valid_long = predict_rank_score(fit_result_long.model, valid_long)
-    score_test_long = predict_rank_score(fit_result_long.model, test_long)
-    score_test_short = predict_rank_score(fit_result_short.model, test_short)
+    _awf_result = _fit_predict_fold_dual_side(
+        train_long=train_long,
+        valid_long=valid_long,
+        test_long=test_long,
+        train_short=train_short,
+        valid_short=valid_short,
+        test_short=test_short,
+        ml_cfg=ml_cfg,
+    )
+    ev_test_long = _awf_result.ev_test_long
+    ev_test_short = _awf_result.ev_test_short
+    quant_test_long = _awf_result.quant_test_long
+    quant_test_short = _awf_result.quant_test_short
+    conf_test_long = _awf_result.conf_test_long
+    conf_test_short = _awf_result.conf_test_short
+    score_test_long = _awf_result.score_test_long
+    score_test_short = _awf_result.score_test_short
     fit_predict_elapsed = time.perf_counter() - t_fit_predict
+    calib_elapsed = 0.0  # Absorbed into _fit_predict_fold_dual_side
     _logger.info(
-        "[ML-ANCHORED-RANKER] train_n=%d valid_n=%d test_n=%d train_mean=%.6f valid_mean=%.6f",
+        "[ML-ANCHORED-RANKER] train_n=%d valid_n=%d test_n=%d",
         int(train_long.X.shape[0]),
         int(valid_long.X.shape[0]),
         int(test_long.X.shape[0]),
-        float(np.mean(score_train_long, dtype=np.float32)) if score_train_long.size > 0 else 0.0,
-        float(np.mean(score_valid_long, dtype=np.float32)) if score_valid_long.size > 0 else 0.0,
     )
-
-    t_calib = time.perf_counter()
-    calibration_fit_long = fit_quantile_calibrators(
-        train=train_long,
-        valid=valid_long,
-        rank_score_train=score_train_long,
-        rank_score_valid=score_valid_long,
-        cfg=ml_cfg,
-    )
-    calibration_fit_short = fit_quantile_calibrators(
-        train=train_short,
-        valid=valid_short,
-        rank_score_train=predict_rank_score(fit_result_short.model, train_short),
-        rank_score_valid=predict_rank_score(fit_result_short.model, valid_short),
-        cfg=ml_cfg,
-    )
-    ev_test_long = predict_conservative_ev(calibration_fit_long, test_long, score_test_long, ml_cfg)
-    ev_test_short = predict_conservative_ev(
-        calibration_fit_short,
-        test_short,
-        score_test_short,
-        ml_cfg,
-    )
-    quant_test_long = _predict_quantiles_with_fallback(
-        calibration_fit_long,
-        test_long,
-        score_test_long,
-        ev_test_long,
-    )
-    quant_test_short = _predict_quantiles_with_fallback(
-        calibration_fit_short,
-        test_short,
-        score_test_short,
-        ev_test_short,
-    )
-    conf_test_long = compute_forecast_confidence(
-        quant_test_long.q10,
-        quant_test_long.q50,
-        quant_test_long.q90,
-    )
-    conf_test_short = compute_forecast_confidence(
-        quant_test_short.q10,
-        quant_test_short.q50,
-        quant_test_short.q90,
-    )
-    calib_elapsed = time.perf_counter() - t_calib
     _logger.info(
         "[ML-ANCHORED-CALIB] ev_mean=%.6e ev_p10=%.6e ev_p90=%.6e",
         float(np.mean(ev_test_long, dtype=np.float32)) if ev_test_long.size > 0 else 0.0,
@@ -1221,16 +1177,14 @@ def build_ml_strategy_alpha_anchored(
         q50_long_grid[int(t_idx), int(s_idx)] = quant_test_long.q50[row]
         q90_long_grid[int(t_idx), int(s_idx)] = quant_test_long.q90[row]
         confidence_long_grid[int(t_idx), int(s_idx)] = conf_test_long[row]
-        if long_clear is None or long_clear[int(t_idx), int(s_idx)] > 0.0:
-            ev_long_grid[int(t_idx), int(s_idx)] = np.float32(max(ev_test_long[row], 0.0))
+        ev_long_grid[int(t_idx), int(s_idx)] = np.float32(max(ev_test_long[row], 0.0))
         score_grid[int(t_idx), int(s_idx)] = score_test_long[row]
     for row, (t_idx, s_idx) in enumerate(test_short.index_map):
         q10_short_grid[int(t_idx), int(s_idx)] = quant_test_short.q10[row]
         q50_short_grid[int(t_idx), int(s_idx)] = quant_test_short.q50[row]
         q90_short_grid[int(t_idx), int(s_idx)] = quant_test_short.q90[row]
         confidence_short_grid[int(t_idx), int(s_idx)] = conf_test_short[row]
-        if short_clear is None or short_clear[int(t_idx), int(s_idx)] > 0.0:
-            ev_short_grid[int(t_idx), int(s_idx)] = np.float32(max(ev_test_short[row], 0.0))
+        ev_short_grid[int(t_idx), int(s_idx)] = np.float32(max(ev_test_short[row], 0.0))
         if np.isnan(score_grid[int(t_idx), int(s_idx)]):
             score_grid[int(t_idx), int(s_idx)] = score_test_short[row]
 
@@ -1255,6 +1209,110 @@ def build_ml_strategy_alpha_anchored(
     )
     panel.loc[:, "alpha_long"] = ev_long_grid.reshape(-1)
     panel.loc[:, "alpha_short"] = ev_short_grid.reshape(-1)
+
+    # AWF quality/IC gates — warn-only モード (Optuna 최적화 중단 방지)
+    # WF 경로와 동일하게 build_quality_report()로 실제 IC/NDCG/alpha_p95 계산
+    awf_quality_report: dict[str, Any] = build_quality_report(
+        feature_values=normalized_features.values,
+        feature_valid_mask=normalized_features.valid_mask,
+        label_eligible_mask=labels.eligible_mask,
+        score_2d=score_grid,
+        signed_ret_2d=labels.signed_net_ret.astype(np.float64),
+        relevance_2d=labels.relevance.astype(np.float64),
+        alpha_long_2d=ev_long_grid,
+        alpha_short_2d=ev_short_grid,
+    )
+    _awf_valid_stack = (
+        np.concatenate([_awf_result.ev_valid_long, _awf_result.ev_valid_short])
+        if (_awf_result.ev_valid_long.size + _awf_result.ev_valid_short.size) > 0
+        else np.zeros((0,), dtype=np.float32)
+    )
+    if "in_fold_valid_alpha_p95_bps" not in awf_quality_report:
+        awf_quality_report["in_fold_valid_alpha_p95_bps"] = (
+            float(np.percentile(np.abs(_awf_valid_stack) * 1e4, 95))
+            if _awf_valid_stack.size > 0
+            else 0.0
+        )
+    clip_lim_awf = float(ml_cfg.alpha_clip_bps / 10000.0)
+    _ev_ungated_awf = ev_long_grid - ev_short_grid
+    raw_long_awf = np.maximum(np.clip(_ev_ungated_awf, -clip_lim_awf, clip_lim_awf), 0.0)
+    raw_short_awf = np.maximum(-np.clip(_ev_ungated_awf, -clip_lim_awf, clip_lim_awf), 0.0)
+    panel_long_awf = panel["alpha_long"].to_numpy(dtype=np.float64).reshape(raw_long_awf.shape)
+    panel_short_awf = panel["alpha_short"].to_numpy(dtype=np.float64).reshape(raw_short_awf.shape)
+    raw_long_nz_awf = float(np.mean(np.abs(raw_long_awf) > 1e-12)) if raw_long_awf.size > 0 else 0.0
+    raw_short_nz_awf = (
+        float(np.mean(np.abs(raw_short_awf) > 1e-12)) if raw_short_awf.size > 0 else 0.0
+    )
+    panel_long_nz_awf = (
+        float(np.mean(np.abs(panel_long_awf) > 1e-12)) if panel_long_awf.size > 0 else 0.0
+    )
+    panel_short_nz_awf = (
+        float(np.mean(np.abs(panel_short_awf) > 1e-12)) if panel_short_awf.size > 0 else 0.0
+    )
+    xs_long_pres_awf = (
+        panel_long_nz_awf / max(raw_long_nz_awf, 1e-12) if raw_long_nz_awf > 0.0 else 0.0
+    )
+    xs_short_pres_awf = (
+        panel_short_nz_awf / max(raw_short_nz_awf, 1e-12) if raw_short_nz_awf > 0.0 else 0.0
+    )
+    awf_quality_report["xs_long_preservation_ratio"] = xs_long_pres_awf
+    awf_quality_report["xs_short_preservation_ratio"] = xs_short_pres_awf
+    _awf_friction_bps = round_trip_cost_bps()
+    _awf_hurdle_bps = float(OPT_FUTURES_CONFIG.get("FUTURES_DEFAULT_EV_HURDLE_BPS", 10.0))
+    alpha_diag_awf = alpha_gate_diagnostics(
+        alpha_p95_bps=float(awf_quality_report.get("alpha_p95_bps", 0.0)),
+        friction_bps=float(_awf_friction_bps),
+        hurdle_bps=float(_awf_hurdle_bps),
+        long_nz=panel_long_nz_awf,
+        short_nz=panel_short_nz_awf,
+        xs_long_preservation_ratio=xs_long_pres_awf,
+        xs_short_preservation_ratio=xs_short_pres_awf,
+        min_long_nz=ml_cfg.alpha_gate_min_long_nz,
+        min_short_nz=ml_cfg.alpha_gate_min_short_nz,
+        min_xs_preservation=ml_cfg.alpha_gate_min_xs_preservation,
+        cost_wall_tolerance_bps=ml_cfg.alpha_gate_cost_wall_tolerance_bps,
+    )
+    awf_quality_report.update(alpha_diag_awf)
+    if not bool(awf_quality_report.get("alpha_gate_pass", False)):
+        _logger.warning(
+            "[AWF-ALPHA-GATE] alpha gate WARN: reasons=%s "
+            "long_nz=%.4f short_nz=%.4f "
+            "xs_long_pres=%.4f xs_short_pres=%.4f",
+            awf_quality_report.get("alpha_gate_fail_reasons", []),
+            panel_long_nz_awf,
+            panel_short_nz_awf,
+            xs_long_pres_awf,
+            xs_short_pres_awf,
+        )
+    if not passes_quality_gate(awf_quality_report):
+        _failed_keys_awf = {
+            k: v
+            for k, v in awf_quality_report.items()
+            if (k == "feature_finite_ratio" and v < 0.990)
+            or (k == "label_valid_ratio" and v <= 0.0)
+            or (k == "ranker_valid_ndcg_at_5" and v <= 0.0)
+            or (k == "spearman_rank_ic" and v < 0.0)
+        }
+        _logger.warning(
+            "[AWF-QUALITY-GATE] quality gate WARN: reasons=%s",
+            _failed_keys_awf,
+        )
+    # IC gate: AWF는 항상 warn-only
+    _awf_ic_pass = passes_ic_gate(
+        awf_quality_report,
+        min_mean_ic=ml_cfg.ic_gate_min_mean_ic,
+        min_t_stat=ml_cfg.ic_gate_min_t_stat,
+        min_hit_ratio=ml_cfg.ic_gate_min_hit_ratio,
+    )
+    if not _awf_ic_pass:
+        _logger.warning(
+            "[AWF-IC-GATE] IC gate WARN: mean_ic=%.4f t_stat=%.2f hit_ratio=%.3f",
+            awf_quality_report.get("spearman_rank_ic", 0.0),
+            awf_quality_report.get("ic_t_stat", 0.0),
+            awf_quality_report.get("ic_hit_ratio", 0.0),
+        )
+    panel.attrs["quality_report"] = awf_quality_report
+
     from dataclasses import asdict
 
     from src.domain.futures.strategy.cache import build_manifest_hash
