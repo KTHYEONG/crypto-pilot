@@ -506,17 +506,7 @@ def precompute_rebalance_weights(
             caps=caps,
         )
 
-        # 백테스트 시뮬레이션용 quantize_weights 호출
-        # min_notional = 20.0, step_size_proxy = 0.001
-        step_sizes = np.full(n_syms, 0.001)
-        w_quant = quantize_weights(
-            w=w_proj,
-            equity=10000.0,  # 백테스트 프록시 equity
-            prices=c[i],
-            step_sizes=step_sizes,
-            min_notional=20.0,
-        )
-        out[i, :] = np.asarray(w_quant, dtype=np.float64)
+        out[i, :] = np.asarray(w_proj, dtype=np.float64)
 
     return np.asarray(out, dtype=np.float64)
 
