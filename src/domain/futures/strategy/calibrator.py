@@ -133,10 +133,14 @@ def predict_ev_quantiles(
     q10 = np.asarray(cast(NDArray[np.float64], models.q10.predict(x)), dtype=np.float32)
     q50 = np.asarray(cast(NDArray[np.float64], models.q50.predict(x)), dtype=np.float32)
     q90 = np.asarray(cast(NDArray[np.float64], models.q90.predict(x)), dtype=np.float32)
+    # Per-row monotonic sort: enforce q10 <= q50 <= q90 (quantile crossing fix)
+    # Shape: [N, 3] -> sorted along axis=1 -> [N, 3]
+    q_stack = np.stack([q10.reshape(-1), q50.reshape(-1), q90.reshape(-1)], axis=1)
+    q_sorted = np.sort(q_stack, axis=1)
     return EVQuantiles(
-        q10=q10.reshape(-1).copy(),
-        q50=q50.reshape(-1).copy(),
-        q90=q90.reshape(-1).copy(),
+        q10=q_sorted[:, 0].copy(),
+        q50=q_sorted[:, 1].copy(),
+        q90=q_sorted[:, 2].copy(),
     )
 
 
