@@ -38,7 +38,10 @@ from src.domain.futures.optimization.ml_context import (
     rerun_precompute_for_ctx,
 )
 from src.domain.futures.optimization.observability.trial_observability import set_trial_event_attrs
-from src.domain.futures.optimization.opt_config import OPT_FUTURES_CONFIG
+from src.domain.futures.optimization.opt_config import (
+    OPT_FUTURES_CONFIG,
+    default_ev_hurdle_bps,
+)
 from src.domain.futures.portfolio.friction_model import CostSnapshot, resolve_cost_snapshot
 from src.domain.futures.portfolio.portfolio_constructor import (
     RiskSnapshot,
@@ -67,7 +70,7 @@ def _build_strategy_compose_diag(
         params.get("BETA_ALPHA", OPT_FUTURES_CONFIG.get("FUTURES_DEFAULT_BETA_ALPHA", 1.0))
     )
     ev_h = float(
-        params.get("EV_HURDLE_BPS", OPT_FUTURES_CONFIG.get("FUTURES_DEFAULT_EV_HURDLE_BPS", 40.0))
+        params.get("EV_HURDLE_BPS", default_ev_hurdle_bps(OPT_FUTURES_CONFIG))
     )
     friction_2d = np.asarray(cost_snapshot.execution_cost_fraction_2d, dtype=np.float64)
     friction_bps_2d = np.asarray(cost_snapshot.execution_cost_bps_2d, dtype=np.float64)
@@ -217,7 +220,7 @@ def _base_engine_params(ml: dict[str, Any], tf: str) -> dict[str, Any]:
         "LEVERAGE": int(lev),
         "BETA_ALPHA": float(ml.get("BETA_ALPHA", cfg.get("FUTURES_DEFAULT_BETA_ALPHA", 1.0))),
         "EV_HURDLE_BPS": float(
-            ml.get("EV_HURDLE_BPS", cfg.get("FUTURES_DEFAULT_EV_HURDLE_BPS", 40.0))
+            ml.get("EV_HURDLE_BPS", default_ev_hurdle_bps(cfg))
         ),
         "SLIPPAGE_BPS_BUFFER_MULT": float(
             ml.get("SLIPPAGE_BPS_BUFFER_MULT", cfg.get("SLIPPAGE_BPS_BUFFER_MULT", 1.0))
@@ -290,7 +293,7 @@ def _compose_strategy_scores_inplace(
     ev_h_base = float(
         params.get(
             "EV_HURDLE_BPS",
-            OPT_FUTURES_CONFIG.get("FUTURES_DEFAULT_EV_HURDLE_BPS", 40.0),
+            default_ev_hurdle_bps(OPT_FUTURES_CONFIG),
         )
     )
     ev_h = np.full((n_bars, n_syms), ev_h_base, dtype=np.float64)

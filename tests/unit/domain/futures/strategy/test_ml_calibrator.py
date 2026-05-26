@@ -122,12 +122,14 @@ def test_fit_quantile_calibrators_uses_raw_y_ev(monkeypatch: MonkeyPatch) -> Non
     def _fake_fit_one(
         train_x: np.ndarray,
         train_y: np.ndarray,
+        train_weight: np.ndarray,
         valid_x: np.ndarray,
         valid_y: np.ndarray,
+        valid_weight: np.ndarray,
         cfg: StrategyMLConfig,
         alpha: float,
     ) -> object:
-        del train_x, valid_x, valid_y, cfg, alpha
+        del train_x, train_weight, valid_x, valid_y, valid_weight, cfg, alpha
         seen.append(np.asarray(train_y, dtype=np.float32).copy())
         return object()
 
@@ -174,6 +176,35 @@ def test_calibrator_fit_uses_config_hyperparams(monkeypatch: MonkeyPatch) -> Non
     assert captured["lambda_l2"] == 3.0
     assert captured["reg_alpha"] == 0.8
     assert captured["max_depth"] == 4
+
+
+def test_calibrator_fit_propagates_sample_weights(monkeypatch: MonkeyPatch) -> None:
+    train = _dataset(rows=20, groups=4)
+    valid = _dataset(rows=8, groups=2)
+    train.sample_weight[:] = np.linspace(1.0, 2.0, train.sample_weight.shape[0], dtype=np.float32)
+    valid.sample_weight[:] = np.linspace(2.0, 3.0, valid.sample_weight.shape[0], dtype=np.float32)
+    seen: dict[str, np.ndarray] = {}
+
+    class _FakeRegressor:
+        def __init__(self, **kwargs: float) -> None:
+            del kwargs
+
+        def fit(self, *args: object, **kwargs: object) -> _FakeRegressor:
+            del args
+            seen["train"] = np.asarray(kwargs.get("sample_weight"), dtype=np.float32).copy()
+            ev_sw = kwargs.get("eval_sample_weight")
+            assert isinstance(ev_sw, list)
+            seen["valid"] = np.asarray(ev_sw[0], dtype=np.float32).copy()
+            return self
+
+        def predict(self, x: object) -> np.ndarray:
+            return np.zeros((len(x),), dtype=np.float64)
+
+    monkeypatch.setattr("src.domain.futures.strategy.calibrator.lgb.LGBMRegressor", _FakeRegressor)
+    cfg = StrategyMLConfig(calibrator_n_estimators=10, early_stopping_rounds=5, n_jobs=1)
+    fit_quantile_calibrators(train=train, valid=valid, cfg=cfg)
+    np.testing.assert_allclose(seen["train"], train.sample_weight, rtol=0.0, atol=0.0)
+    np.testing.assert_allclose(seen["valid"], valid.sample_weight, rtol=0.0, atol=0.0)
 
 
 def test_compute_conservative_ev_prob_x_magnitude_mode() -> None:

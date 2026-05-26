@@ -36,7 +36,10 @@ from src.domain.futures.optimization.observability.dashboard import (
     print_mechanical_dashboard,
     safe_float,
 )
-from src.domain.futures.optimization.opt_config import OPT_FUTURES_CONFIG
+from src.domain.futures.optimization.opt_config import (
+    OPT_FUTURES_CONFIG,
+    default_ev_hurdle_bps,
+)
 from src.domain.futures.optimization.opt_data_utils import (
     compute_oos_regime_attribution,
     compute_regime_drift,
@@ -148,6 +151,20 @@ def _compute_expectancy_retention_pct(oos_expectancy: float, is_expectancy: floa
     if abs(float(is_expectancy)) <= 1e-9:
         return 0.0
     return float(oos_expectancy) / float(is_expectancy) * 100.0
+
+
+def _infer_split_cost_source(
+    split_maps: dict[str, dict[str, Any]],
+    symbols: list[str],
+    tf: str,
+) -> str:
+    for sym in symbols:
+        frame = split_maps.get(sym, {}).get(tf)
+        if frame is None:
+            continue
+        if "execution_cost_bps" in frame.columns:
+            return "per_symbol"
+    return "fallback_global"
 
 
 def _build_top5_ensemble_results(ensemble_results: list[Any]) -> list[Any]:
@@ -653,12 +670,92 @@ def run_final_oos_evaluation(
         ho_dm[f"oos_start_idx_{args.tf}"] = max(aligned_is_start, ho_start)
         ho_data_maps[sym] = ho_dm
 
-    is_port = run_oos_margin_shared_portfolio(
-        valid_symbols, args.tf, params, is_data_maps, cache_root=FUTURES_CACHE_DIR
+    base_strategy_cfg = ml_ctx.strategy_cfg if ml_ctx is not None else None
+    split_strategy_cfg = _rebuild_member_strategy_config(
+        base_strategy_cfg,
+        dict(best_trial.params),
     )
-    ho_port = run_oos_margin_shared_portfolio(
-        valid_symbols, args.tf, params, ho_data_maps, cache_root=FUTURES_CACHE_DIR
+
+    def _build_merge_eval_split(
+        *,
+        split_name: str,
+        split_maps: dict[str, dict[str, Any]],
+        split_params: dict[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        split_maps_clone = copy_data_maps_tf_clone(split_maps, valid_symbols, args.tf)
+        alpha_panel = build_strategy_alpha(
+            data_maps=split_maps,
+            symbols=valid_symbols,
+            tf=args.tf,
+            cfg=split_strategy_cfg,
+        )
+        merge_ml_output_into_data_maps(
+            MLPipelineOutput(alpha_panel=alpha_panel),
+            split_maps_clone,
+            valid_symbols,
+            args.tf,
+            log_tag=split_name,
+        )
+        artifact_meta = {
+            "strategy_name": str(alpha_panel.attrs.get("strategy_name", "")),
+            "config_hash": str(alpha_panel.attrs.get("config_hash", "")),
+            "selected_horizon": int(alpha_panel.attrs.get("selected_horizon", -1)),
+            "model_family": str(alpha_panel.attrs.get("model_family", "")),
+            "cost_source": _infer_split_cost_source(split_maps_clone, valid_symbols, args.tf),
+        }
+        port = run_oos_margin_shared_portfolio(
+            valid_symbols,
+            args.tf,
+            split_params,
+            split_maps_clone,
+            cache_root=FUTURES_CACHE_DIR,
+        )
+        return port, artifact_meta
+
+    is_port, is_meta = _build_merge_eval_split(
+        split_name="is",
+        split_maps=is_data_maps,
+        split_params=params,
     )
+    ho_port, ho_meta = _build_merge_eval_split(
+        split_name="ho",
+        split_maps=ho_data_maps,
+        split_params=params,
+    )
+    oos_alpha_panel = build_strategy_alpha(
+        data_maps=oos_data_maps,
+        symbols=valid_symbols,
+        tf=args.tf,
+        cfg=split_strategy_cfg,
+    )
+    oos_meta = {
+        "strategy_name": str(oos_alpha_panel.attrs.get("strategy_name", "")),
+        "config_hash": str(oos_alpha_panel.attrs.get("config_hash", "")),
+        "selected_horizon": int(oos_alpha_panel.attrs.get("selected_horizon", -1)),
+        "model_family": str(oos_alpha_panel.attrs.get("model_family", "")),
+        "cost_source": _infer_split_cost_source(oos_data_maps, valid_symbols, args.tf),
+    }
+    split_meta_ref = is_meta
+    split_meta_mismatch: list[str] = []
+    for split_name, split_meta in (("ho", ho_meta), ("oos", oos_meta)):
+        split_meta_mismatch.extend(
+            [
+                f"{split_name}:{key}"
+                for key in (
+                    "strategy_name",
+                    "config_hash",
+                    "selected_horizon",
+                    "model_family",
+                    "cost_source",
+                )
+                if split_meta.get(key) != split_meta_ref.get(key)
+            ]
+        )
+    if split_meta_mismatch:
+        raise RuntimeError(
+            "split artifact metadata mismatch: "
+            + ", ".join(split_meta_mismatch)
+        )
 
     def _augment_port_metrics(p: dict[str, Any], hrs_tf: int) -> None:
         eq = p.get("equity_curve", np.array([float(FUTURES_INITIAL_BALANCE)]))
@@ -814,7 +911,7 @@ def run_final_oos_evaluation(
         oos_mdd_duration=float(oos_port.get("mdd_duration_days", 0.0)),
         max_mdd_duration=180.0,
         oos_expectancy=float(oos_expectancy_v),
-        min_expectancy=float(OPT_FUTURES_CONFIG.get("FUTURES_DEFAULT_EV_HURDLE_BPS", 40.0)) / 100.0,
+        min_expectancy=float(default_ev_hurdle_bps(OPT_FUTURES_CONFIG)) / 100.0,
         is_expectancy=float(is_expectancy_v),
         min_oos_retention_expectancy_pct=float(
             OPT_FUTURES_CONFIG.get("FUTURES_OOS_RETENTION_EXPECTANCY_MIN_PCT", 50.0)
