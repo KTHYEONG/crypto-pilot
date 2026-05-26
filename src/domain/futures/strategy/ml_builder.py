@@ -9,7 +9,10 @@ import numpy as np
 import pandas as pd
 
 from src.core.settings import round_trip_cost_bps
-from src.domain.futures.optimization.opt_config import OPT_FUTURES_CONFIG
+from src.domain.futures.optimization.opt_config import (
+    OPT_FUTURES_CONFIG,
+    default_ev_hurdle_bps,
+)
 from src.domain.futures.strategy.cache import build_manifest_hash
 from src.domain.futures.strategy.calibrator import (
     EVQuantiles,
@@ -270,7 +273,7 @@ def build_ml_strategy_alpha(
     if cfg.ml.horizon_experiment_enabled:
         candidates = _resolve_horizon_candidates(cfg.ml)
         friction_bps = round_trip_cost_bps()
-        hurdle_bps = float(OPT_FUTURES_CONFIG.get("FUTURES_DEFAULT_EV_HURDLE_BPS", 10.0))
+        hurdle_bps = float(default_ev_hurdle_bps(OPT_FUTURES_CONFIG))
         floor_bps = friction_bps + hurdle_bps
         _logger.info(
             "[ML-HARNESS] mode=horizon_experiment candidates=%s floor_bps=%.2f",
@@ -776,7 +779,7 @@ def build_ml_strategy_alpha(
         "selected_horizon": int(ml_cfg.label_horizon_bars),
         "cost_floor_bps": float(
             round_trip_cost_bps()
-            + float(OPT_FUTURES_CONFIG.get("FUTURES_DEFAULT_EV_HURDLE_BPS", 10.0))
+            + float(default_ev_hurdle_bps(OPT_FUTURES_CONFIG))
         ),
         "candidate_count": 1,
     }
@@ -828,7 +831,7 @@ def build_ml_strategy_alpha(
     quality_report["xs_long_preservation_ratio"] = xs_long_preservation
     quality_report["xs_short_preservation_ratio"] = xs_short_preservation
     _friction_bps = round_trip_cost_bps()
-    _hurdle_default_bps = float(OPT_FUTURES_CONFIG.get("FUTURES_DEFAULT_EV_HURDLE_BPS", 10.0))
+    _hurdle_default_bps = float(default_ev_hurdle_bps(OPT_FUTURES_CONFIG))
     alpha_diag = alpha_gate_diagnostics(
         alpha_p95_bps=float(
             quality_report.get(
@@ -1258,7 +1261,7 @@ def build_ml_strategy_alpha_anchored(
     awf_quality_report["xs_long_preservation_ratio"] = xs_long_pres_awf
     awf_quality_report["xs_short_preservation_ratio"] = xs_short_pres_awf
     _awf_friction_bps = round_trip_cost_bps()
-    _awf_hurdle_bps = float(OPT_FUTURES_CONFIG.get("FUTURES_DEFAULT_EV_HURDLE_BPS", 10.0))
+    _awf_hurdle_bps = float(default_ev_hurdle_bps(OPT_FUTURES_CONFIG))
     alpha_diag_awf = alpha_gate_diagnostics(
         alpha_p95_bps=float(
             awf_quality_report.get(
