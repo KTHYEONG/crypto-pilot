@@ -4,8 +4,9 @@ import json
 import logging
 import math
 import time
+from dataclasses import fields, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, get_args, get_origin, get_type_hints
 
 import numpy as np
 import optuna
@@ -29,6 +30,7 @@ from src.domain.futures.optimization.evaluator import (
 )
 from src.domain.futures.optimization.ml_context import MLPhaseDContext
 from src.domain.futures.optimization.observability.dashboard import (
+    log_oos_alpha_attribution,
     log_oos_regime_attribution,
     print_dual_audit_dashboard,
     print_mechanical_dashboard,
@@ -60,6 +62,86 @@ from src.domain.futures.validation.walk_forward import (
 )
 
 _logger: logging.Logger = logging.getLogger("final_evaluator")
+
+
+def _validate_strategy_ml_member_param(field_name: str, value: Any, expected_type: Any) -> None:
+    """Validate strict type/literal for StrategyMLConfig member override values."""
+    origin = get_origin(expected_type)
+    if origin is Literal:
+        literal_values = get_args(expected_type)
+        if value not in literal_values:
+            raise ValueError(
+                f"invalid StrategyMLConfig override for '{field_name}': "
+                f"expected one of {literal_values}, got {value!r}"
+            )
+        return
+
+    if expected_type is bool:
+        if not isinstance(value, bool):
+            raise ValueError(
+                f"invalid StrategyMLConfig override for '{field_name}': "
+                f"expected bool, got {type(value).__name__}"
+            )
+        return
+
+    if expected_type is int:
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError(
+                f"invalid StrategyMLConfig override for '{field_name}': "
+                f"expected int, got {type(value).__name__}"
+            )
+        return
+
+    if expected_type is float:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(
+                f"invalid StrategyMLConfig override for '{field_name}': "
+                f"expected float, got {type(value).__name__}"
+            )
+        return
+
+    if expected_type is str:
+        if not isinstance(value, str):
+            raise ValueError(
+                f"invalid StrategyMLConfig override for '{field_name}': "
+                f"expected str, got {type(value).__name__}"
+            )
+        return
+
+
+def _rebuild_member_strategy_config(
+    strategy_cfg: Any,
+    member_params: dict[str, Any],
+) -> Any:
+    """Rebuild per-member strategy config without mutating frozen dataclasses."""
+    from src.domain.futures.strategy import StrategyConfig, StrategyMLConfig
+
+    base_cfg = strategy_cfg if isinstance(strategy_cfg, StrategyConfig) else None
+    base_ml_cfg = base_cfg.ml if base_cfg is not None else StrategyMLConfig()
+    ml_type_hints = get_type_hints(StrategyMLConfig)
+    ml_fields = {field.name: field for field in fields(StrategyMLConfig)}
+    ml_updates: dict[str, Any] = {}
+    unknown_keys: list[str] = []
+    for key, value in member_params.items():
+        field = ml_fields.get(key)
+        if field is None:
+            unknown_keys.append(key)
+            continue
+        expected_type = ml_type_hints.get(key, field.type)
+        _validate_strategy_ml_member_param(key, value, expected_type)
+        ml_updates[key] = value
+
+    if unknown_keys:
+        _logger.warning(
+            "Ignoring unknown StrategyMLConfig override key(s): %s",
+            sorted(unknown_keys),
+        )
+
+    member_ml_cfg = replace(base_ml_cfg, **ml_updates) if ml_updates else base_ml_cfg
+
+    if base_cfg is not None:
+        return replace(base_cfg, ml=member_ml_cfg)
+    return StrategyConfig(name="ml_lambdamart_v1", ml=member_ml_cfg)
 
 
 def _compute_expectancy_retention_pct(oos_expectancy: float, is_expectancy: float) -> float:
@@ -149,6 +231,113 @@ def _passes_champion_swap_4conditions(
     return len(failures) == 0, failures
 
 
+def _safe_strategy_returns_from_port(oos_port: dict[str, Any]) -> np.ndarray:
+    """Extract finite OOS strategy returns from equity curve."""
+    eq = np.asarray(oos_port.get("equity_curve", []), dtype=np.float64)
+    if eq.size <= 1:
+        return np.zeros(0, dtype=np.float64)
+    denom = np.maximum(eq[:-1], 1e-12)
+    ret = np.diff(eq) / denom
+    if ret.size == 0:
+        return np.zeros(0, dtype=np.float64)
+    return np.nan_to_num(ret, nan=0.0, posinf=0.0, neginf=0.0)
+
+
+def _build_oos_alpha_attribution_report(
+    oos_port: dict[str, Any],
+    oos_data_maps: dict[str, dict[str, Any]],
+    symbols: list[str],
+    tf: str,
+) -> dict[str, Any]:
+    """Build diagnostics-only OOS PnL attribution with finite fallbacks."""
+    strategy_ret = _safe_strategy_returns_from_port(oos_port)
+    n = int(strategy_ret.size)
+    if n == 0:
+        return {
+            "n_obs": 0,
+            "status": "fallback_empty",
+            "pnl_pct": {"total": 0.0, "market": 0.0, "factor_proxy": 0.0, "residual": 0.0},
+            "share_pct": {"market": 0.0, "factor_proxy": 0.0, "residual": 0.0},
+        }
+
+    market_stack: list[np.ndarray] = []
+    for sym in symbols:
+        df = oos_data_maps.get(sym, {}).get(tf)
+        close = getattr(df, "get", lambda _k, _d=None: None)("close")
+        if close is None:
+            continue
+        arr = np.asarray(close, dtype=np.float64)
+        if arr.size <= 1:
+            continue
+        sym_ret = np.diff(arr) / np.maximum(arr[:-1], 1e-12)
+        market_stack.append(np.nan_to_num(sym_ret, nan=0.0, posinf=0.0, neginf=0.0))
+
+    if market_stack:
+        min_len = min(len(x) for x in market_stack)
+        market_mat = np.vstack([x[-min_len:] for x in market_stack])
+        market_ret_full = np.nanmean(market_mat, axis=0)
+    else:
+        market_ret_full = np.zeros(n, dtype=np.float64)
+
+    if market_ret_full.size == 0:
+        market_ret_full = np.zeros(n, dtype=np.float64)
+    if market_ret_full.size < n:
+        pad = np.zeros(n - market_ret_full.size, dtype=np.float64)
+        market_ret = np.concatenate([pad, market_ret_full])
+    else:
+        market_ret = market_ret_full[-n:]
+    market_ret = np.nan_to_num(market_ret, nan=0.0, posinf=0.0, neginf=0.0)
+
+    # Simple factor proxies: momentum(3) and reversal(1-lag sign-flip).
+    mom = (market_ret + np.roll(market_ret, 1) + np.roll(market_ret, 2)) / 3.0
+    mom[:2] = 0.0
+    rev = -np.roll(market_ret, 1)
+    rev[0] = 0.0
+
+    x = np.column_stack([market_ret, mom, rev])
+    y = strategy_ret
+    valid = np.isfinite(y) & np.isfinite(x).all(axis=1)
+
+    beta = np.zeros(3, dtype=np.float64)
+    if int(np.count_nonzero(valid)) >= 5:
+        try:
+            beta, *_ = np.linalg.lstsq(x[valid], y[valid], rcond=None)
+            beta = np.nan_to_num(beta, nan=0.0, posinf=0.0, neginf=0.0)
+        except np.linalg.LinAlgError:
+            beta = np.zeros(3, dtype=np.float64)
+
+    market_component = beta[0] * market_ret
+    factor_component = beta[1] * mom + beta[2] * rev
+    residual_component = y - market_component - factor_component
+
+    total = float(np.nansum(y) * 100.0)
+    market_pnl = float(np.nansum(market_component) * 100.0)
+    factor_pnl = float(np.nansum(factor_component) * 100.0)
+    residual_pnl = float(np.nansum(residual_component) * 100.0)
+    denom = abs(total) if abs(total) > 1e-9 else 1.0
+    return {
+        "n_obs": n,
+        "status": "ok",
+        "factor_proxy": "momentum3_reversal1",
+        "beta": {
+            "market": float(beta[0]),
+            "momentum3": float(beta[1]),
+            "reversal1": float(beta[2]),
+        },
+        "pnl_pct": {
+            "total": safe_float(total),
+            "market": safe_float(market_pnl),
+            "factor_proxy": safe_float(factor_pnl),
+            "residual": safe_float(residual_pnl),
+        },
+        "share_pct": {
+            "market": safe_float(market_pnl / denom * 100.0),
+            "factor_proxy": safe_float(factor_pnl / denom * 100.0),
+            "residual": safe_float(residual_pnl / denom * 100.0),
+        },
+    }
+
+
 def run_final_oos_evaluation(
     ensemble_results: list[Any],
     oos_data_maps: dict[str, dict[str, Any]],
@@ -195,7 +384,6 @@ def run_final_oos_evaluation(
         )
 
     from src.domain.futures.optimization.samplers import build_ml_phase_d_params
-    from src.domain.futures.strategy import StrategyConfig
     from src.domain.futures.strategy.builder import build_strategy_alpha
     from src.domain.futures.strategy_runtime.bridge import (
         MLPipelineOutput,
@@ -262,13 +450,14 @@ def run_final_oos_evaluation(
             m_mdd = m_port.get("mdd_pct", 0.0)
             m_trades = m_port.get("total_trades", m_port.get("trade_count", 0))
             _logger.info(
-                "[ENSEMBLE_MEMBER] member=%d/%d cagr_pct=%.2f mdd_pct=%.2f trades=%d trial=%d status=cached",
+                "[ENSEMBLE_MEMBER] member=%d/%d cagr_pct=%.2f mdd_pct=%.2f "
+                "trades=%d trial=%d status=cached",
                 i + 1,
                 len(selected_ensemble_results),
                 m_cagr,
                 m_mdd,
                 m_trades,
-                res['trial'].number
+                res["trial"].number,
             )
             _logger.info(
                 "[ENSEMBLE_PROF] member=%d/%d status=cache_hit total_s=%.2f",
@@ -282,23 +471,8 @@ def run_final_oos_evaluation(
         m_oos_maps = copy_data_maps_tf_clone(oos_data_maps, valid_symbols, args.tf)
 
         # 2) Dynamically reconstruct completed alpha panel containing Virtual Refit Fold
-        m_strat_cfg = StrategyConfig(
-            name=(
-                ml_ctx.strategy_cfg.name
-                if (ml_ctx and getattr(ml_ctx, "strategy_cfg", None))
-                else "ml_lambdamart_v1"
-            ),
-            ml=(
-                ml_ctx.strategy_cfg.ml
-                if (ml_ctx and getattr(ml_ctx, "strategy_cfg", None))
-                else None
-            ),
-        )
-        if m_strat_cfg.ml is not None:
-            # Update strategy configuration state with current member's tuned parameters
-            for k, v in res["params"].items():
-                if hasattr(m_strat_cfg.ml, k):
-                    setattr(m_strat_cfg.ml, k, v)
+        strategy_cfg = ml_ctx.strategy_cfg if ml_ctx is not None else None
+        m_strat_cfg = _rebuild_member_strategy_config(strategy_cfg, dict(res.get("params", {})))
 
         # Build the completed alpha panel (including OOS Virtual Refit filling!)
         t_build_alpha = time.perf_counter()
@@ -344,16 +518,18 @@ def run_final_oos_evaluation(
         m_mdd = m_port.get("mdd_pct", 0.0)
         m_trades = m_port.get("total_trades", m_port.get("trade_count", 0))
         _logger.info(
-            "[ENSEMBLE_MEMBER] member=%d/%d cagr_pct=%.2f mdd_pct=%.2f trades=%d trial=%d status=fresh",
+            "[ENSEMBLE_MEMBER] member=%d/%d cagr_pct=%.2f mdd_pct=%.2f "
+            "trades=%d trial=%d status=fresh",
             i + 1,
             len(selected_ensemble_results),
             m_cagr,
             m_mdd,
             m_trades,
-            res['trial'].number
+            res["trial"].number,
         )
         _logger.info(
-            "[ENSEMBLE_PROF] member=%d/%d build_alpha_s=%.2f merge_s=%.2f oos_eval_s=%.2f total_s=%.2f",
+            "[ENSEMBLE_PROF] member=%d/%d build_alpha_s=%.2f merge_s=%.2f "
+            "oos_eval_s=%.2f total_s=%.2f",
             i + 1,
             len(selected_ensemble_results),
             build_alpha_sec,
@@ -365,7 +541,9 @@ def run_final_oos_evaluation(
     ensemble_total_sec = time.perf_counter() - ensemble_total_t0
     member_count = max(1, len(selected_ensemble_results))
     _logger.info(
-        "[ENSEMBLE_PROF_SUMMARY] members=%d total_s=%.2f avg_member_s=%.2f alpha_build_total_s=%.2f merge_total_s=%.2f oos_eval_total_s=%.2f cache_hits=%d unique_evals=%d",
+        "[ENSEMBLE_PROF_SUMMARY] members=%d total_s=%.2f avg_member_s=%.2f "
+        "alpha_build_total_s=%.2f merge_total_s=%.2f oos_eval_total_s=%.2f "
+        "cache_hits=%d unique_evals=%d",
         len(selected_ensemble_results),
         ensemble_total_sec,
         ensemble_total_sec / float(member_count),
@@ -482,7 +660,7 @@ def run_final_oos_evaluation(
         valid_symbols, args.tf, params, ho_data_maps, cache_root=FUTURES_CACHE_DIR
     )
 
-    def _augment_port_metrics(p: dict[str, Any], hrs_tf: int):
+    def _augment_port_metrics(p: dict[str, Any], hrs_tf: int) -> None:
         eq = p.get("equity_curve", np.array([float(FUTURES_INITIAL_BALANCE)]))
         ann_f = (365 * 24) / hrs_tf
 
@@ -548,6 +726,15 @@ def run_final_oos_evaluation(
     oos_port["regime_attribution"] = regime_attr
     run_summary_extras["oos_regime_attribution"] = regime_attr
     log_oos_regime_attribution(regime_attr)
+    alpha_attr = _build_oos_alpha_attribution_report(
+        oos_port=oos_port,
+        oos_data_maps=oos_data_maps,
+        symbols=valid_symbols,
+        tf=args.tf,
+    )
+    oos_port["alpha_attribution_diag"] = alpha_attr
+    run_summary_extras["oos_alpha_attribution_diag"] = alpha_attr
+    log_oos_alpha_attribution(alpha_attr)
 
     # S3: Regime distribution drift detection (IS vs OOS KL divergence)
     regime_drift_info = compute_regime_drift(
