@@ -6,10 +6,67 @@ import logging
 from dataclasses import dataclass
 
 import numpy as np
+from numpy.typing import NDArray
 
-from src.core.settings import TAKER_FEE_BPS
+from src.core.settings import TAKER_FEE_BPS, round_trip_cost_bps
 
 _logger = logging.getLogger("FrictionModel")
+
+_BPS_TO_FRACTION: float = 1.0 / 10000.0
+
+
+@dataclass(frozen=True)
+class CostSnapshot:
+    """Canonical cost snapshot used across label/objective compose paths.
+
+    Attributes:
+        execution_cost_bps_2d: Effective round-trip execution cost in bps.
+        execution_cost_fraction_2d: Same cost tensor in fraction units.
+        round_trip_cost_bps_fallback: Global fallback round-trip cost in bps.
+        execution_cost_bps_source: Cost source label (per_symbol or fallback_global).
+
+    """
+
+    execution_cost_bps_2d: NDArray[np.float64]
+    execution_cost_fraction_2d: NDArray[np.float64]
+    round_trip_cost_bps_fallback: float
+    execution_cost_bps_source: str
+
+
+def resolve_cost_snapshot(
+    *,
+    execution_cost_bps_2d: NDArray[np.float64] | None,
+    shape: tuple[int, int],
+) -> CostSnapshot:
+    """Build canonical cost snapshot with explicit source selection.
+
+    Args:
+        execution_cost_bps_2d: Optional per-symbol execution cost tensor in bps.
+        shape: Target (T, N) shape for the resolved tensor.
+
+    Returns:
+        CostSnapshot with bps and fraction views plus source metadata.
+
+    """
+    fallback_bps = float(round_trip_cost_bps())
+    use_fallback = (
+        execution_cost_bps_2d is None
+        or execution_cost_bps_2d.shape != shape
+        or not np.any(np.isfinite(execution_cost_bps_2d))
+    )
+    if use_fallback:
+        bps_2d = np.full(shape, fallback_bps, dtype=np.float64)
+        source = "fallback_global"
+    else:
+        bps_2d = np.asarray(execution_cost_bps_2d, dtype=np.float64)
+        source = "per_symbol"
+    frac_2d = bps_2d * _BPS_TO_FRACTION
+    return CostSnapshot(
+        execution_cost_bps_2d=bps_2d,
+        execution_cost_fraction_2d=frac_2d,
+        round_trip_cost_bps_fallback=fallback_bps,
+        execution_cost_bps_source=source,
+    )
 
 
 @dataclass(frozen=True)

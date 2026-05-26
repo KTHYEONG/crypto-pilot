@@ -5,6 +5,7 @@ import os
 import re
 from dataclasses import dataclass
 from decimal import ROUND_FLOOR, Decimal
+from typing import Any, Protocol, TypeAlias
 
 import numpy as np
 import optuna
@@ -204,7 +205,7 @@ _TF_TRADE_DENSITY: dict[str, float] = {
 }
 
 
-def _env_int(name, default):
+def _env_int(name: str, default: int) -> int:
     try:
         return int(os.getenv(name, default))
     except (TypeError, ValueError):
@@ -276,7 +277,7 @@ class ObjectiveConfig:
     asinh_clip: float = 4.5
 
 
-def _load_objective_config():
+def _load_objective_config() -> ObjectiveConfig:
     return ObjectiveConfig(
         base_score_multiplier=_env_float("OBJ_BASE_SCORE_MULT", 160.0),
         gate_floor=_env_float("OBJ_GATE_FLOOR", 0.10),
@@ -332,20 +333,51 @@ def _load_objective_config():
 OBJECTIVE_CFG = _load_objective_config()
 
 
-def suggest_params(trial, search_space):
+class _TrialSuggester(Protocol):
+    def suggest_categorical(self, name: str, choices: list[Any]) -> Any: ...
+
+    def suggest_int(
+        self,
+        name: str,
+        low: int,
+        high: int,
+        *,
+        log: bool = False,
+        step: int = 1,
+    ) -> int: ...
+
+    def suggest_float(
+        self,
+        name: str,
+        low: float,
+        high: float,
+        *,
+        log: bool = False,
+        step: float | None = None,
+    ) -> float: ...
+
+
+SearchSpec: TypeAlias = dict[str, Any]
+SearchSpace: TypeAlias = dict[str, SearchSpec]
+ParamMap: TypeAlias = dict[str, Any]
+
+
+def suggest_params(trial: _TrialSuggester, search_space: SearchSpace) -> ParamMap:
     """Generate trial parameters from search space with conditional dependency pruning.
     Only suggests parameters that are actually used by the selected strategy configuration.
 
     Efficiency Gain: 60~70% reduction in search space by skipping irrelevant parameters.
     """
-    params = {}
+    params: ParamMap = {}
 
-    def _sanitize_float_step_bounds(low, high, step):
+    def _sanitize_float_step_bounds(low: float, high: float, step: float) -> tuple[float, float]:
         """Sanitize float-step bounds to avoid Optuna range/step divisibility warnings."""
         d_step = Decimal(str(step))
         if d_step <= 0:
             return float(low), float(high)
-        places = max(0, -d_step.as_tuple().exponent)
+        exponent = d_step.as_tuple().exponent
+        exp_int = int(exponent) if isinstance(exponent, int) else 0
+        places = max(0, -exp_int)
         quant = Decimal(1).scaleb(-places)
         d_low = Decimal(str(low)).quantize(quant)
         d_high = Decimal(str(high)).quantize(quant)
@@ -357,7 +389,7 @@ def suggest_params(trial, search_space):
             safe_high = d_low
         return float(d_low), float(safe_high)
 
-    def _suggest_value(key, spec):
+    def _suggest_value(key: str, spec: SearchSpec) -> Any:
         typ = spec.get("type")
         use_log = bool(spec.get("log", False))
 
@@ -368,22 +400,24 @@ def suggest_params(trial, search_space):
                 low = max(1, spec["low"])
                 high = max(low, spec["high"])
                 return trial.suggest_int(key, low, high, log=True)
-            return trial.suggest_int(key, spec["low"], spec["high"], step=spec.get("step"))
+            step_raw = spec.get("step")
+            step = int(step_raw) if step_raw is not None else 1
+            return trial.suggest_int(key, int(spec["low"]), int(spec["high"]), step=step)
         if typ == "float":
             if use_log:
                 low = max(1e-10, spec["low"])
                 high = max(low, spec["high"])
                 return trial.suggest_float(key, low, high, log=True)
-            step = spec.get("step")
-            if step is None:
+            float_step = spec.get("step")
+            if float_step is None:
                 return trial.suggest_float(key, spec["low"], spec["high"])
-            low, high = _sanitize_float_step_bounds(spec["low"], spec["high"], step)
+            low, high = _sanitize_float_step_bounds(spec["low"], spec["high"], float(float_step))
             if high <= low:
                 return float(low)
-            return trial.suggest_float(key, low, high, step=step)
+            return trial.suggest_float(key, low, high, step=float(float_step))
         raise ValueError(f"Unsupported spec type: {typ} for {key}")
 
-    def _suggest_timeframe_bounded_holding(spec):
+    def _suggest_timeframe_bounded_holding(spec: SearchSpec) -> int:
         """Conditionally bound MAX_HOLDING_BARS by timeframe.
         This prevents structurally-low-frequency combinations from dominating spot search.
         """
@@ -409,7 +443,7 @@ def suggest_params(trial, search_space):
             return int(low)
         return int(max(low, min(high, int(sampled))))
 
-    def _set_inactive_default(key):
+    def _set_inactive_default(key: str) -> None:
         if key not in search_space:
             return
         spec = search_space[key]
@@ -723,38 +757,45 @@ def suggest_params(trial, search_space):
     return params
 
 
-def soft_sigmoid(x, L, k, x0):
-    """Soft-Sigmoid mapping to handle diminishing returns without hard caps.
-    L: Maximum value (Asymptote)
+def soft_sigmoid(
+    x: float | np.ndarray,
+    l_max: float,
+    k: float,
+    x0: float,
+) -> float | np.ndarray:
+    """Soft-sigmoid mapping to handle diminishing returns without hard caps.
+
+    l_max: Maximum value (asymptote)
     k: Steepness
-    x0: Midpoint (Center of the S-curve)
+    x0: Midpoint (center of the S-curve)
 
     Numerically stable implementation with overflow protection.
     """
     # Prevent overflow: clip exp argument to safe range [-500, 500]
     z = -k * (x - x0)
     z_safe = np.clip(z, -500, 500)
-    return L / (1 + np.exp(z_safe))
+    sigmoid_val = l_max / (1 + np.exp(z_safe))
+    if np.isscalar(sigmoid_val):
+        return float(np.asarray(sigmoid_val, dtype=np.float64).item())
+    return np.asarray(sigmoid_val, dtype=np.float64)
 
 
-def _smooth_gate(value, center, scale):
-    """Smooth gate in [0, 1] to avoid hard discontinuities in optimization landscape.
-    """
+def _smooth_gate(value: float, center: float, scale: float) -> float:
+    """Smooth gate in [0, 1] to avoid hard discontinuities in optimization landscape."""
     safe_scale = max(float(scale), 1e-9)
     z = (float(value) - float(center)) / safe_scale
     z = np.clip(z, -60.0, 60.0)
-    return 1.0 / (1.0 + np.exp(-z))
+    return float(1.0 / (1.0 + np.exp(-z)))
 
 
-def _asinh_score(value, scale, clip_abs):
-    """Anti-saturation transform: slower saturation than tanh, better rank resolution in tails.
-    """
+def _asinh_score(value: float, scale: float, clip_abs: float) -> float:
+    """Anti-saturation transform for tail-heavy score stabilization."""
     safe_scale = max(float(scale), 1e-9)
     transformed = np.arcsinh(float(value) / safe_scale)
     return float(np.clip(transformed, -abs(float(clip_abs)), abs(float(clip_abs))))
 
 
-def _blend_gates_with_floor(gates, weights, gate_floor):
+def _blend_gates_with_floor(gates: list[float], weights: list[float], gate_floor: float) -> float:
     """Conservative-bias mitigation:
     Instead of multiplicative collapse, use floor + weighted average.
     """
@@ -770,15 +811,16 @@ def _blend_gates_with_floor(gates, weights, gate_floor):
 
 
 def calculate_score(
-    ret,
-    mdd,
-    trades_df,
-    mode="UNIFIED",
-    market_type="spot",
-    timeframe=None,
-    min_trades_override=None,
-):
-    """Overfitting-resistant objective (continuous-form):
+    ret: float,
+    mdd: float,
+    trades_df: pd.DataFrame,
+    mode: str = "UNIFIED",
+    market_type: str = "spot",
+    timeframe: str | None = None,
+    min_trades_override: int | None = None,
+) -> float:
+    """Overfitting-resistant objective (continuous-form).
+
     score = C(activity, consistency, Kelly, side-coverage) * (Growth + Quality - Risk)
 
     Design goals:
@@ -790,7 +832,7 @@ def calculate_score(
     if trades_df.empty:
         return -10000.0
 
-    N = len(trades_df)
+    N = len(trades_df)  # noqa: N806
     if "pnl" not in trades_df.columns or "pnl_pct" not in trades_df.columns:
         return -10000.0
 
@@ -1041,8 +1083,7 @@ def calculate_score(
 
 
 def compute_segment_merge_index(hourly_df: pd.DataFrame, daily_df: pd.DataFrame) -> np.ndarray:
-    """Build merge index for a sliced segment so engine can use fast index mapping.
-    """
+    """Build merge index for a sliced segment to enable fast index mapping."""
     hourly_days = (
         pd.to_datetime(hourly_df["datetime"]).dt.normalize().values.astype("datetime64[ns]")
     )
@@ -1051,8 +1092,8 @@ def compute_segment_merge_index(hourly_df: pd.DataFrame, daily_df: pd.DataFrame)
         return np.zeros(len(hourly_days), dtype=np.int32)
 
     # [FIX] side="left" ensures we get the index of the daily bar strictly BEFORE current day.
-    # searchsorted(daily_days, hourly_days, side="left") returns first index i where daily_days[i] >= hourly_days.
+    # searchsorted(..., side="left") returns first index i where daily_days[i] >= hourly_days.
     # Subtracting 1 gives the index of the last daily_days[i] < hourly_days.
     pos = np.searchsorted(daily_days, hourly_days, side="left") - 1
     pos = np.clip(pos, 0, len(daily_days) - 1).astype(np.int32)
-    return pos
+    return np.asarray(pos, dtype=np.int32)

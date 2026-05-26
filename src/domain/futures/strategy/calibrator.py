@@ -202,3 +202,25 @@ def predict_conservative_ev(
         q90=quantiles.q90,
         cfg=cfg,
     )
+
+
+def compute_forecast_confidence(
+    q10: np.ndarray,
+    q50: np.ndarray,
+    q90: np.ndarray,
+) -> NDArray[np.float32]:
+    """Compute bounded confidence score from quantile spread.
+
+    Confidence grows as median magnitude dominates forecast uncertainty.
+    """
+    if q10.shape != q50.shape or q50.shape != q90.shape:
+        raise ValueError("quantile vectors must have identical shapes")
+    if q10.shape[0] == 0:
+        return np.zeros((0,), dtype=np.float32)
+    lower = np.asarray(q10, dtype=np.float32)
+    median = np.asarray(q50, dtype=np.float32)
+    upper = np.asarray(q90, dtype=np.float32)
+    spread = np.maximum(upper - lower, np.float32(1e-8))
+    confidence = np.abs(median) / spread
+    clipped = np.clip(confidence, np.float32(0.0), np.float32(1.0))
+    return np.asarray(clipped, dtype=np.float32)
