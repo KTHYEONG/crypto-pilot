@@ -62,6 +62,7 @@ This protocol applies only inside code-writing phases such as `implement`.
 - **Magic Numbers:** Always separate into constants.
 - **Unverified Refactoring:** Prohibit large-scale structural changes without test code or guaranteed behavior.
 - **Ignoring Return Values:** Prohibit neglecting return values or error handling.
+- **No Unsolicited Context:** Do not provide technical background or "just-in-case" explanations unless explicitly asked.
 
 ## 9. Rule Isolation & Priority: Commit Rule
 
@@ -93,6 +94,11 @@ Default non-trivial development workflow:
 
 Commit tasks:
 - Do not route through the default skill workflow.
+- Use `.agents/rules/commit.md` only when explicitly requested by the user.
+
+Quant tasks:
+- Route through the default skill workflow unless `quant.md` requires otherwise.
+- Apply `.agents/rules/quant.md` automatically when its trigger conditions match.w.
 - Use `.agents/rules/commit.md` only when explicitly requested by the user.
 
 Quant tasks:
